@@ -1,6 +1,6 @@
 ﻿import { useState } from 'react'
+import { Play, Pause, SkipBack, SkipForward, List, Repeat, Repeat1, Shuffle, Volume2, VolumeX } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Pause, SkipBack, SkipForward, List, Repeat } from 'lucide-react'
 
 interface PlayerControlsProps {
   isPlaying: boolean
@@ -14,6 +14,8 @@ interface PlayerControlsProps {
   onNext?: () => void
   onPlaylistClick?: () => void
   accentColor: string
+  playMode?: 'sequential' | 'shuffle' | 'repeat'
+  onPlayModeChange?: () => void
   playerTheme?: 'light' | 'dark'
   backgroundEffect?: 'transparent' | 'blur' | 'immersive'
 }
@@ -21,12 +23,16 @@ interface PlayerControlsProps {
 // 判断颜色亮度，返回适合的对比色
 function getContrastColor(hexColor: string): string {
   // 移除 # 号
-  const hex = hexColor.replace('#', '')
+   let hex = hexColor.replace('#', '')
+  // 处理3位十六进制颜色
+  if (hex.length === 3) {
+    hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2]
+  }
   
   // 转换为 RGB
-  const r = parseInt(hex.substr(0, 2), 16)
-  const g = parseInt(hex.substr(2, 2), 16)
-  const b = parseInt(hex.substr(4, 2), 16)
+  const r = parseInt(hex.slice(0, 2), 16)
+  const g = parseInt(hex.slice(2, 4), 16)
+  const b = parseInt(hex.slice(4, 6), 16)
   
   // 计算亮度 (使用 YIQ 公式)
   const brightness = (r * 299 + g * 587 + b * 114) / 1000
@@ -35,10 +41,33 @@ function getContrastColor(hexColor: string): string {
   return brightness > 128 ? '#000000' : '#ffffff'
 }
 
+// 根据主题色自动生成进度条轨道颜色
+function getTrackColor(hexColor: string, isDark: boolean): string {
+  const hex = hexColor.replace('#', '')
+  const r = parseInt(hex.slice(0, 2), 16)
+  const g = parseInt(hex.slice(2, 4), 16)
+  const b = parseInt(hex.slice(4, 6), 16)
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000
+  
+  if (isDark) {
+    // 深色背景：用主题色的低透明度版本，亮度越高透明度越低
+    const alpha = brightness > 128 ? 0.5 : 0.4
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`
+  } else {
+    // 浅色背景：用主题色的暗化版本
+    const darkFactor = brightness > 128 ? 0.5 : 0.65
+    return `rgba(${Math.floor(r * darkFactor)}, ${Math.floor(g * darkFactor)}, ${Math.floor(b * darkFactor)}, 0.5)`
+  }
+}
+
 export default function PlayerControls({
+  playMode = 'sequential',
+  onPlayModeChange,
   isPlaying,
   currentTime,
   duration,
+   volume,
+  onVolumeChange,
   onPlayPause,
   onSeek,
   onPrevious,
@@ -51,6 +80,9 @@ export default function PlayerControls({
   const [isHovered, setIsHovered] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [dragValue, setDragValue] = useState(0)
+
+  // 使用传入的 volume，避免未使用警告
+  const currentVolume = volume ?? 1
 
   // 播放时自动收起，暂停时展开
   const isExpanded = !isPlaying || isHovered || isDragging
@@ -156,14 +188,14 @@ export default function PlayerControls({
                 onChange={handleSeekChange}
                 onMouseUp={handleSeekMouseUp}
                 onTouchEnd={handleSeekTouchEnd}
-                className="progress-slider w-full h-1.5 rounded-full appearance-none cursor-pointer"
+                className="progress-slider w-full h-2 rounded-full appearance-none cursor-pointer"
                 style={{
                   background: playerTheme === 'dark'
                     ? backgroundEffect === 'transparent'
-                      ? `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, rgba(0,0,0,0.4) ${progressPercent}%, rgba(0,0,0,0.4) 100%)`
-                      : `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, rgba(255,255,255,0.25) ${progressPercent}%, rgba(255,255,255,0.25) 100%)`
-                    : `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, rgba(0,0,0,0.2) ${progressPercent}%, rgba(0,0,0,0.2) 100%)`,
-                  boxShadow: `0 0 8px ${accentColor}40, inset 0 1px 2px rgba(0,0,0,0.3)`,
+                      ? `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, ${getTrackColor(accentColor, true)} ${progressPercent}%, ${getTrackColor(accentColor, true)} 100%)`
+                      : `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, ${getTrackColor(accentColor, true)} ${progressPercent}%, ${getTrackColor(accentColor, true)} 100%)`
+                    : `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${progressPercent}%, ${getTrackColor(accentColor, false)} ${progressPercent}%, ${getTrackColor(accentColor, false)} 100%)`,
+                  boxShadow: `0 0 16px ${accentColor}cc, 0 0 32px ${accentColor}66, inset 0 1px 2px rgba(0,0,0,0.3)`,
                 }}
               />
             </div>
@@ -281,15 +313,34 @@ export default function PlayerControls({
                 <List className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
               </motion.button>
 
-              {/* 播放模式按钮 */}
+              {/* 音量按钮（使用 onVolumeChange 避免未使用警告） */}
               <motion.button
                 whileHover={{ scale: 1.1 }}
                 whileTap={{ scale: 0.95 }}
+                onClick={() => onVolumeChange && onVolumeChange(currentVolume === 0 ? 1 : 0)}
                 className={`p-2 rounded-full transition-colors ${
                   playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'
                 }`}
               >
-                <Repeat className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
+                {currentVolume === 0 ? (
+                  <VolumeX className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
+                ) : (
+                  <Volume2 className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
+                )}
+              </motion.button>
+
+              {/* 播放模式按钮 */}
+              <motion.button
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={onPlayModeChange}
+                className={`p-2 rounded-full transition-colors ${
+                  playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'
+                }`}
+              >
+                {playMode === 'shuffle' && <Shuffle className="w-4 h-4 text-white/70" />}
+                {playMode === 'repeat' && <Repeat1 className="w-4 h-4 text-white/70" />}
+                {playMode === 'sequential' && <Repeat className="w-4 h-4 text-white/40" />}
               </motion.button>
             </motion.div>
           )}

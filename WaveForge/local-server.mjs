@@ -601,6 +601,107 @@ app.get('/api/netease/song/detail', async (req, res) => {
   }
 })
 
+// 获取每日推荐歌曲（需要登录）
+app.get('/api/netease/recommend/songs', async (req, res) => {
+  try {
+    const { cookie } = req.query
+    
+    if (!cookie) {
+      return res.status(401).json({ code: 301, message: '需要登录' })
+    }
+
+    if (!NeteaseAPI || !NeteaseAPI.recommend_songs) {
+      return res.status(500).json({ error: 'API 未初始化' })
+    }
+
+    console.log('[网易云每日推荐] 正在获取每日推荐歌曲')
+    const result = await NeteaseAPI.recommend_songs({ cookie })
+    
+    console.log('[网易云每日推荐] 返回歌曲数:', result.body?.data?.dailySongs?.length || 0)
+    res.json(result.body)
+  } catch (error) {
+    console.error('[网易云每日推荐] 获取错误:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// 获取私人FM（需要登录）
+app.get('/api/netease/personal_fm', async (req, res) => {
+  try {
+    const { cookie } = req.query
+    
+    if (!cookie) {
+      return res.status(401).json({ code: 301, message: '需要登录' })
+    }
+
+    if (!NeteaseAPI || !NeteaseAPI.personal_fm) {
+      return res.status(500).json({ error: 'API 未初始化' })
+    }
+
+    console.log('[网易云私人雷达] 正在获取私人FM')
+    const result = await NeteaseAPI.personal_fm({ cookie })
+    
+    console.log('[网易云私人雷达] 返回歌曲数:', result.body?.data?.length || 0)
+    res.json(result.body)
+  } catch (error) {
+    console.error('[网易云私人雷达] 获取错误:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// 获取推荐歌单（需要登录）
+app.get('/api/netease/recommend/resource', async (req, res) => {
+  try {
+    const { cookie } = req.query
+    
+    if (!cookie) {
+      return res.status(401).json({ code: 301, message: '需要登录' })
+    }
+
+    if (!NeteaseAPI || !NeteaseAPI.recommend_resource) {
+      return res.status(500).json({ error: 'API 未初始化' })
+    }
+
+    console.log('[网易云推荐歌单] 正在获取推荐歌单')
+    const result = await NeteaseAPI.recommend_resource({ cookie })
+    
+    console.log('[网易云推荐歌单] 返回歌单数:', result.body?.recommend?.length || 0)
+    res.json(result.body)
+  } catch (error) {
+    console.error('[网易云推荐歌单] 获取错误:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// 获取智能歌单（雷达歌单，需要登录）
+app.get('/api/netease/playmode/intelligence/list', async (req, res) => {
+  try {
+    const { cookie, id, pid } = req.query
+    
+    if (!cookie) {
+      return res.status(401).json({ code: 301, message: '需要登录' })
+    }
+
+    if (!NeteaseAPI || !NeteaseAPI.playmode_intelligence_list) {
+      return res.status(500).json({ error: 'API 未初始化' })
+    }
+
+    console.log('[网易云雷达歌单] 正在获取雷达歌单, songId:', id)
+    const result = await NeteaseAPI.playmode_intelligence_list({ 
+      cookie,
+      id: id || '33894312',  // 默认歌曲ID
+      pid: pid || '24381616',  // 默认歌单ID
+      count: 30
+    })
+    
+    console.log('[网易云雷达歌单] 返回歌曲数:', result.body?.data?.length || 0)
+    res.json(result.body)
+  } catch (error) {
+    console.error('[网易云雷达歌单] 获取错误:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
 // QQ 音乐辅助函数
 function qqAlbumCover(albumMid, size = 300) {
   if (!albumMid) return ''
@@ -1392,6 +1493,96 @@ app.get('/api/qq/new/songs', async (req, res) => {
   }
 })
 
+// QQ音乐每日推荐（需要登录）
+app.get('/api/qq/recommend/daily', async (req, res) => {
+  try {
+    const { cookie } = req.query
+    
+    if (!cookie) {
+      return res.status(401).json({ result: 301, errMsg: '需要登录' })
+    }
+    
+    console.log('[QQ音乐每日推荐] 正在获取每日推荐...')
+    
+    // 设置Cookie
+    qqMusicApi.setCookie(cookie)
+    
+    const result = await qqMusicApi.api('recommend/daily')
+    
+    console.log('[QQ音乐每日推荐] API返回结果:', JSON.stringify(result, null, 2))
+    console.log('[QQ音乐每日推荐] result.result:', result?.result)
+    console.log('[QQ音乐每日推荐] result.data:', result?.data ? '存在' : '不存在')
+    console.log('[QQ音乐每日推荐] result.data字段:', result?.data ? Object.keys(result.data) : [])
+    
+    // recommend/daily 返回的是歌单详情，直接返回
+    if (result && result.result === 100 && result.data) {
+      console.log('[QQ音乐每日推荐] 成功获取数据，返回给前端')
+      res.json(result)
+    } else if (result && result.result === 301) {
+      // 未登录或Cookie失效
+      console.warn('[QQ音乐每日推荐] 未登录或Cookie已过期')
+      res.json({
+        result: 301,
+        errMsg: '未登录或Cookie已过期'
+      })
+    } else {
+      console.warn('[QQ音乐每日推荐] API返回数据为空或格式异常')
+      console.warn('[QQ音乐每日推荐] 完整返回:', result)
+      res.json({
+        result: 100,
+        data: {
+          song_list: [],
+          songlist: [],
+          list: []
+        }
+      })
+    }
+  } catch (error) {
+    console.error('[QQ音乐每日推荐] 获取错误:', error.message)
+    res.status(200).json({
+      result: 100,
+      data: {
+        song_list: [],
+        songlist: [],
+        list: []
+      }
+    })
+  }
+})
+
+// QQ音乐推荐歌单
+app.get('/api/qq/recommend/playlist', async (req, res) => {
+  try {
+    console.log('[QQ音乐推荐歌单] 正在获取推荐歌单...')
+    
+    const result = await qqMusicApi.api('recommend/playlist/u')
+    
+    console.log('[QQ音乐推荐歌单] API返回完整数据:', JSON.stringify(result, null, 2))
+    
+    // qq-music-api 直接返回 { result: 100, data: { list, count } }
+    if (result && result.result === 100 && result.data) {
+      console.log('[QQ音乐推荐歌单] 返回歌单数:', result.data.list?.length || 0)
+      res.json(result)
+    } else {
+      console.warn('[QQ音乐推荐歌单] API返回数据为空')
+      res.json({
+        result: 100,
+        data: {
+          list: []
+        }
+      })
+    }
+  } catch (error) {
+    console.error('[QQ音乐推荐歌单] 获取错误:', error.message)
+    res.status(200).json({
+      result: 100,
+      data: {
+        list: []
+      }
+    })
+  }
+})
+
 // QQ音乐登录相关 API
 app.post('/api/qq/user/setCookie', async (req, res) => {
   try {
@@ -1485,9 +1676,12 @@ app.get('/api/qq/user/collect', async (req, res) => {
     console.log('[QQ音乐收藏歌单] 正在获取用户ID:', id)
     
     // 使用 Mineradio 的方法：直接调用腾讯的收藏歌单 API
-    const axios = require('axios')
-    
+    // 关键：需要带上 Cookie！
     try {
+      // 从 qq-music-api 获取 Cookie
+      const qqCookie = qqMusicApi.getCookie?.() || ''
+      console.log('[QQ音乐收藏歌单] Cookie状态:', qqCookie ? `已设置(长度:${qqCookie.length})` : '未设置')
+      
       const response = await axios.get('https://c.y.qq.com/fav/fcgi-bin/fcg_get_profile_order_asset.fcg', {
         params: {
           ct: 20,
@@ -1498,7 +1692,9 @@ app.get('/api/qq/user/collect', async (req, res) => {
           ein: 80
         },
         headers: {
-          'Referer': 'https://y.qq.com/portal/profile.html'
+          'Referer': 'https://y.qq.com/portal/profile.html',
+          'Cookie': qqCookie,
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
         }
       })
       
@@ -1506,6 +1702,8 @@ app.get('/api/qq/user/collect', async (req, res) => {
       
       // 转换为统一格式
       const cdlist = response.data?.data?.cdlist || []
+      console.log('[QQ音乐收藏歌单] 收藏歌单数量:', cdlist.length)
+      
       const result = {
         result: 100,
         data: {

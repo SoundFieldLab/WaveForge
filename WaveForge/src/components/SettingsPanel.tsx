@@ -1,8 +1,9 @@
 ﻿import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight } from 'lucide-react'
+import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, Trash2 } from 'lucide-react'
 import LoginButton from './LoginButton'
 import HomeCustomizeModal from './HomeCustomizeModal'
+import CacheClearModal from './CacheClearModal'
 
 interface SettingsPanelProps {
   show: boolean
@@ -49,6 +50,12 @@ export default function SettingsPanel({
     const saved = localStorage.getItem('upNextEnabled')
     return saved !== null ? JSON.parse(saved) : true
   })
+  
+  const [upNextSeconds, setUpNextSeconds] = useState(() => {
+    const saved = localStorage.getItem('upNextSeconds')
+    return saved !== null ? parseInt(saved) : 10
+  })
+  
   const [translationEnabled, setTranslationEnabled] = useState(() => {
     const saved = localStorage.getItem('translationEnabled')
     return saved !== null ? JSON.parse(saved) : false
@@ -82,6 +89,9 @@ export default function SettingsPanel({
   // 首页自定义弹窗状态
   const [showHomeCustomize, setShowHomeCustomize] = useState(false)
   
+  // 缓存清理弹窗状态
+  const [showCacheClear, setShowCacheClear] = useState(false)
+  
   // 预设主题色
   const presetColors = [
     { name: '天空蓝', value: '#3B82F6' },
@@ -107,6 +117,13 @@ export default function SettingsPanel({
     setUpNextEnabled(enabled)
     localStorage.setItem('upNextEnabled', JSON.stringify(enabled))
     window.dispatchEvent(new Event('upNextEnabledChanged'))
+  }
+  
+  const handleUpNextSecondsChange = (seconds: number) => {
+    const newSeconds = Math.max(5, Math.min(30, seconds))
+    setUpNextSeconds(newSeconds)
+    localStorage.setItem('upNextSeconds', newSeconds.toString())
+    window.dispatchEvent(new CustomEvent('upNextSecondsChanged', { detail: newSeconds }))
   }
 
   // 保存翻译设置
@@ -135,6 +152,7 @@ export default function SettingsPanel({
         <>
           {/* 背景遮罩 */}
           <motion.div
+            key="settings-backdrop"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -144,6 +162,7 @@ export default function SettingsPanel({
 
           {/* 设置面板 */}
           <motion.div
+            key="settings-panel"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
@@ -275,7 +294,8 @@ export default function SettingsPanel({
                   <div>
                     <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>音乐平台账号</h3>
                     <p className={`${textSecondary} text-sm mb-6`}>
-                      登录后可以播放VIP歌曲、获取个人歌�?                    </p>
+                      登录后可以播放VIP歌曲、获取个人歌单
+                    </p>
                     
                     <div className="space-y-4">
                       {/* 网易云登�?*/}
@@ -368,37 +388,17 @@ export default function SettingsPanel({
                     </button>
                   </div>
                   
+                  {/* 即将播放提示 */}
                   <div>
-                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>歌词设置</h3>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>播放提示</h3>
                     
-                    {/* 逐字歌词开�?*/}
-                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-3`}>
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className={`${textPrimary} font-medium mb-1`}>逐字歌词</div>
-                          <div className={`${textSecondary} text-sm`}>
-                            显示歌词的逐字高亮效果（仅支持网易云音乐）
-                          </div>
-                        </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={wordByWordLyrics}
-                            onChange={(e) => handleWordByWordToggle(e.target.checked)}
-                            className="sr-only peer"
-                          />
-                          <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full ${playerTheme === 'dark' ? 'peer-checked:after:border-white after:bg-white' : 'peer-checked:after:border-black after:bg-black'} after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: wordByWordLyrics ? accentColor : '' }}></div>
-                        </label>
-                      </div>
-                    </div>
-
-                    {/* 即将播放提示开�?*/}
-                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-3`}>
-                      <div className="flex items-center justify-between">
+                    {/* 即将播放提示开关 */}
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
+                      <div className="flex items-center justify-between mb-4">
                         <div>
                           <div className={`${textPrimary} font-medium mb-1`}>即将播放提示</div>
                           <div className={`${textSecondary} text-sm`}>
-                            在歌曲结束前8秒显示下一首歌曲信息
+                            在歌曲结束前显示下一首歌曲信息
                           </div>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
@@ -411,69 +411,108 @@ export default function SettingsPanel({
                           <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full ${playerTheme === 'dark' ? 'peer-checked:after:border-white after:bg-white' : 'peer-checked:after:border-black after:bg-black'} after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: upNextEnabled ? accentColor : '' }}></div>
                         </label>
                       </div>
+                      
+                      {/* 秒数设置 */}
+                      {upNextEnabled && (
+                        <div className="pt-4 border-t" style={{ borderColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)' }}>
+                          <div className="flex items-center justify-between">
+                            <div className={`${textPrimary} text-sm font-medium`}>提前显示时间</div>
+                            <div className="flex items-center gap-3">
+                              <input
+                                type="range"
+                                min="5"
+                                max="30"
+                                value={upNextSeconds}
+                                onChange={(e) => handleUpNextSecondsChange(parseInt(e.target.value))}
+                                className="w-32 h-2 rounded-lg appearance-none cursor-pointer"
+                                style={{
+                                  background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${((upNextSeconds - 5) / 25) * 100}%, ${playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'} ${((upNextSeconds - 5) / 25) * 100}%, ${playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'} 100%)`
+                                }}
+                              />
+                              <span className={`${textPrimary} text-sm font-medium w-12 text-right`}>{upNextSeconds}秒</span>
+                            </div>
+                          </div>
+                          <div className={`${textTertiary} text-xs mt-2`}>
+                            在歌曲结束前 {upNextSeconds} 秒显示下一首歌曲信息
+                          </div>
+                        </div>
+                      )}
                     </div>
-
-                    {/* 歌词翻译位置 */}
+                  </div>
+                  
+                  {/* 歌词翻译位置 */}
+                  <div>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>歌词翻译</h3>
                     <div className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
                       <div className="mb-4">
-                        <div className={`${textPrimary} font-medium mb-1`}>歌词翻译位置</div>
+                        <div className={`${textPrimary} font-medium mb-1`}>翻译显示位置</div>
                         <div className={`${textSecondary} text-sm`}>
-                          选择翻译内容的显示位置（可在播放界面切换开关）
+                          选择歌词翻译在播放界面的显示位置
                         </div>
                       </div>
-
-                      {/* 翻译位置选项 */}
-                      <div className="space-y-2">
-                        {[
-                          { key: 'traditional', name: '传统', desc: '显示在当前歌词下方' },
-                          { key: 'bottom-right', name: '右下', desc: '显示在播放控制栏右侧' }
-                        ].map((position) => (
-                          <button
-                            key={position.key}
-                            onClick={() => handleTranslationPositionChange(position.key as 'traditional' | 'bottom-right')}
-                            className={`w-full flex items-center gap-3 p-3 rounded-lg transition-colors border-2 ${
-                              translationPosition === position.key
-                                ? playerTheme === 'dark'
-                                  ? 'bg-white/5 hover:bg-white/10'
-                                  : 'bg-black/5 hover:bg-black/10'
-                                : playerTheme === 'dark'
-                                ? 'bg-white/5 hover:bg-white/10 border-transparent'
-                                : 'bg-black/5 hover:bg-black/10 border-transparent'
-                            }`}
-                            style={{
-                              borderColor: translationPosition === position.key ? accentColor : 'transparent',
-                              backgroundColor: translationPosition === position.key 
-                                ? `${accentColor}20`
-                                : ''
-                            }}
-                          >
-                            <div 
-                              className={`w-5 h-5 rounded-full border-2 flex items-center justify-center`}
-                              style={{
-                                borderColor: translationPosition === position.key 
-                                  ? accentColor 
-                                  : playerTheme === 'dark' ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)',
-                                backgroundColor: translationPosition === position.key ? accentColor : 'transparent'
-                              }}
-                            >
-                              {translationPosition === position.key && (
-                                <div className="w-2 h-2 rounded-full bg-white"></div>
-                              )}
+                      
+                      <div className="grid grid-cols-2 gap-3">
+                        <button
+                          onClick={() => {
+                            setTranslationPosition('traditional')
+                            localStorage.setItem('translationPosition', 'traditional')
+                            window.dispatchEvent(new CustomEvent('translationPositionChanged', { detail: 'traditional' }))
+                          }}
+                          className={`p-4 rounded-xl transition-all border-2 ${
+                            translationPosition === 'traditional'
+                              ? 'border-2'
+                              : 'border-transparent'
+                          }`}
+                          style={{
+                            borderColor: translationPosition === 'traditional' ? accentColor : 'transparent',
+                            backgroundColor: translationPosition === 'traditional' 
+                              ? `${accentColor}20`
+                              : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                          }}
+                        >
+                          <div className="flex flex-col items-center gap-2">
+                            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}30` }}>
+                              <svg className="w-6 h-6" style={{ color: accentColor }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                              </svg>
                             </div>
-                            <div className="flex-1 text-left">
-                              <div className={`${textPrimary} text-sm font-medium`}>{position.name}</div>
-                              <div className={`${textTertiary} text-xs`}>{position.desc}</div>
+                            <div>
+                              <div className={`${textPrimary} text-sm font-medium`}>传统</div>
+                              <div className={`${textTertiary} text-xs mt-1`}>显示于歌词下方</div>
                             </div>
-                            {translationPosition === position.key && (
-                              <div 
-                                className={`px-2 py-1 rounded ${textPrimary} text-xs font-medium`}
-                                style={{ backgroundColor: `${accentColor}50` }}
-                              >
-                                当前
-                              </div>
-                            )}
-                          </button>
-                        ))}
+                          </div>
+                        </button>
+                        
+                        <button
+                          onClick={() => {
+                            setTranslationPosition('bottom-right')
+                            localStorage.setItem('translationPosition', 'bottom-right')
+                            window.dispatchEvent(new CustomEvent('translationPositionChanged', { detail: 'bottom-right' }))
+                          }}
+                          className={`p-4 rounded-xl transition-all border-2 ${
+                            translationPosition === 'bottom-right'
+                              ? 'border-2'
+                              : 'border-transparent'
+                          }`}
+                          style={{
+                            borderColor: translationPosition === 'bottom-right' ? accentColor : 'transparent',
+                            backgroundColor: translationPosition === 'bottom-right' 
+                              ? `${accentColor}20`
+                              : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
+                          }}
+                        >
+                          <div className="flex flex-col items-center gap-2">
+                            <div className="w-12 h-12 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}30` }}>
+                              <svg className="w-6 h-6" style={{ color: accentColor }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </div>
+                            <div>
+                              <div className={`${textPrimary} text-sm font-medium`}>现代</div>
+                              <div className={`${textTertiary} text-xs mt-1`}>右下角浮动显示</div>
+                            </div>
+                          </div>
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -657,6 +696,33 @@ export default function SettingsPanel({
                       </div>
                     )}
                   </div>
+                  
+                  {/* 缓存清理 */}
+                  <div className="mt-8">
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>缓存管理</h3>
+                    <button
+                      onClick={() => setShowCacheClear(true)}
+                      className={`w-full ${bgCard} rounded-xl p-4 border ${borderColor} hover:bg-white/10 transition-all text-left`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div 
+                            className="w-10 h-10 rounded-lg flex items-center justify-center"
+                            style={{ backgroundColor: `${accentColor}20` }}
+                          >
+                            <Trash2 className="w-5 h-5" style={{ color: accentColor }} />
+                          </div>
+                          <div>
+                            <div className={`${textPrimary} font-medium mb-1`}>缓存清理</div>
+                            <div className={`${textSecondary} text-sm`}>
+                              管理封面、歌单列表和错误日志缓存
+                            </div>
+                          </div>
+                        </div>
+                        <ChevronRight className={`w-5 h-5 ${textSecondary}`} />
+                      </div>
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -680,14 +746,27 @@ export default function SettingsPanel({
                   </div>
 
                   {/* 项目链接 */}
-                  <div className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
+                  <div className={`${bgCard} rounded-xl p-4 border ${borderColor} space-y-2`}>
                     <button
-                      onClick={() => window.open('https://github.com/yourusername/waveforge', '_blank')}
+                      onClick={() => window.open('https://github.com/YoshinoRinn/WaveForge', '_blank')}
                       className={`w-full flex items-center justify-between p-4 rounded-lg ${hoverBg} transition-colors`}
                     >
                       <div className="flex items-center gap-3">
                         <Github className={`w-5 h-5 ${textPrimary}`} />
-                        <span className={`${textPrimary} font-medium`}>查看项目</span>
+                        <span className={`${textPrimary} font-medium`}>GitHub 仓库</span>
+                      </div>
+                      <ExternalLink className={`w-4 h-4 ${textSecondary}`} />
+                    </button>
+                    
+                    <button
+                      onClick={() => window.open('https://gitee.com/kirito666233/wave-forge', '_blank')}
+                      className={`w-full flex items-center justify-between p-4 rounded-lg ${hoverBg} transition-colors`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <svg className={`w-5 h-5 ${textPrimary}`} viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 2.247a10 10 0 0 0-3.162 19.487c.5.088.687-.212.687-.475 0-.237-.012-1.025-.012-1.862-2.513.462-3.163-.613-3.363-1.175a3.636 3.636 0 0 0-1.025-1.413c-.35-.187-.85-.65-.013-.662a2.001 2.001 0 0 1 1.538 1.025 2.137 2.137 0 0 0 2.912.825 2.104 2.104 0 0 1 .638-1.338c-2.225-.25-4.55-1.112-4.55-4.937a3.892 3.892 0 0 1 1.025-2.688 3.594 3.594 0 0 1 .1-2.65s.837-.262 2.75 1.025a9.427 9.427 0 0 1 5 0c1.912-1.3 2.75-1.025 2.75-1.025a3.593 3.593 0 0 1 .1 2.65 3.869 3.869 0 0 1 1.025 2.688c0 3.837-2.338 4.687-4.562 4.937a2.368 2.368 0 0 1 .675 1.85c0 1.338-.012 2.413-.012 2.75 0 .263.187.575.687.475A10.005 10.005 0 0 0 12 2.247z"/>
+                        </svg>
+                        <span className={`${textPrimary} font-medium`}>Gitee 仓库</span>
                       </div>
                       <ExternalLink className={`w-4 h-4 ${textSecondary}`} />
                     </button>
@@ -713,23 +792,10 @@ export default function SettingsPanel({
                     </button>
                   </div>
 
-                  {/* 功能说明 */}
-                  <div className={`${bgCard} rounded-xl p-6 border ${borderColor}`}>
-                    <h3 className={`${textPrimary} font-semibold mb-3`}>主要功能</h3>
-                    <ul className={`${textSecondary} text-sm space-y-2`}>
-                      <li>• 支持网易云音乐、QQ音乐双平台</li>
-                      <li>• 高品质音频播放</li>
-                      <li>• 逐字歌词显示</li>
-                      <li>• 歌词翻译功能</li>
-                      <li>• 音频可视化效果</li>
-                      <li>• 个性化主题定制</li>
-                    </ul>
-                  </div>
-
                   {/* 版权信息 */}
                   <div className="text-center">
                     <p className={`${textTertiary} text-xs`}>
-                      © 2024 WaveForge. All rights reserved.
+                      © 2026 WaveForge. All rights reserved.
                     </p>
                   </div>
                 </div>
@@ -744,6 +810,13 @@ export default function SettingsPanel({
       <HomeCustomizeModal 
         show={showHomeCustomize}
         onClose={() => setShowHomeCustomize(false)}
+        playerTheme={playerTheme}
+      />
+      
+      {/* 缓存清理弹窗 */}
+      <CacheClearModal 
+        show={showCacheClear}
+        onClose={() => setShowCacheClear(false)}
         playerTheme={playerTheme}
       />
     </AnimatePresence>

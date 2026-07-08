@@ -317,7 +317,7 @@ export default function PlaylistDetailPanel({
                     <div className="space-y-1">
                       {songs.map((song, index) => (
                         <div
-                          key={`${song.id}-${index}`}
+                          key={`${song.id || song.mid || 'song'}-${index}`}
                           onClick={(e) => {
                             e.stopPropagation()
                             onSongSelect(song, songs)

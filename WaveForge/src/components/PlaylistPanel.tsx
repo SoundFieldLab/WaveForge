@@ -76,7 +76,7 @@ export default function PlaylistPanel({ show, onClose, playlist, currentIndex, o
                     const isCurrent = index === currentIndex
                     return (
                       <motion.div
-                        key={`${song.id}-${index}`}
+                        key={`${song.id || song.mid || 'song'}-${index}`}
                         initial={{ opacity: 0, x: 20 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: index * 0.02 }}

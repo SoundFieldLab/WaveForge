@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart } from 'lucide-react'
 import { Song } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
+import { cacheManager } from '../services/cacheManager'
 
 interface HomeViewProps {
   onSongSelect: (song: Song, playlist?: Song[]) => void
@@ -89,6 +90,7 @@ export default function HomeView({
   const [moduleSongs, setModuleSongs] = useState<Song[]>([])
   const [modulePlaylists, setModulePlaylists] = useState<any[]>([])
   const [moduleLoading, setModuleLoading] = useState(true)
+  const [forceReload, setForceReload] = useState(0)
   
   // 歌单详情面板状态
   const [showPlaylistDetail, setShowPlaylistDetail] = useState(false)
@@ -210,6 +212,23 @@ export default function HomeView({
     return () => window.removeEventListener('homeModulesChanged', handleModulesChange)
   }, [])
   
+  // 根据登录状态更新默认模块
+  useEffect(() => {
+    const saved = localStorage.getItem('homeModules_netease')
+    if (!saved) {
+      // 如果没有保存的配置，根据登录状态设置默认模块
+      if (neteaseLoggedIn) {
+        // 登录用户：显示每日推荐、私人雷达、推荐歌单
+        setNeteaseModules(['netease_daily_recommend', 'netease_radar', 'netease_playlists'])
+      } else {
+        // 未登录用户：显示三个榜单
+        setNeteaseModules(['netease_new_songs', 'netease_hot_songs', 'netease_rising_songs'])
+      }
+      setCurrentNeteaseIndex(0)
+      setForceReload(prev => prev + 1)  // 强制重新加载
+    }
+  }, [neteaseLoggedIn])
+  
   // 加载当前模块数据（根据平台）
   useEffect(() => {
     if (platform === 'netease' && neteaseModules.length > 0) {
@@ -217,9 +236,36 @@ export default function HomeView({
     } else if (platform === 'qq' && qqModules.length > 0) {
       loadModuleData(qqModules[currentQQIndex])
     }
-  }, [platform, neteaseModules, qqModules, currentNeteaseIndex, currentQQIndex])
+  }, [platform, neteaseModules, qqModules, currentNeteaseIndex, currentQQIndex, forceReload])
+  
+  // 当登录状态变化时，重新加载需要登录的模块
+  useEffect(() => {
+    if (neteaseLoggedIn && platform === 'netease' && neteaseModules.length > 0) {
+      const currentModule = neteaseModules[currentNeteaseIndex]
+      // 检查当前模块是否需要登录
+      const needsLoginModules = ['netease_daily_recommend', 'netease_radar', 'netease_playlists']
+      if (needsLoginModules.includes(currentModule)) {
+        console.log(`✅ 登录成功，重新加载模块: ${currentModule}`)
+        loadModuleData(currentModule)
+      }
+    }
+  }, [neteaseLoggedIn])
+  
+  // QQ音乐登录状态变化时重新加载
+  useEffect(() => {
+    if (qqLoggedIn && platform === 'qq' && qqModules.length > 0) {
+      const currentModule = qqModules[currentQQIndex]
+      // 检查当前模块是否需要登录
+      const needsLoginModules = ['qq_guess_you_like', 'qq_daily_30']
+      if (needsLoginModules.includes(currentModule)) {
+        console.log(`✅ QQ音乐登录成功，重新加载模块: ${currentModule}`)
+        loadModuleData(currentModule)
+      }
+    }
+  }, [qqLoggedIn])
 
   const loadModuleData = async (moduleId: HomeModuleType) => {
+    console.log(`🔄 loadModuleData 被调用，模块ID: ${moduleId}`)
     setModuleLoading(true)
     setModuleSongs([])
     setModulePlaylists([])
@@ -227,6 +273,7 @@ export default function HomeView({
     try {
       let url = ''
       let isPlaylistModule = false
+      let needsLogin = false
       
       // 根据模块类型确定API URL
       switch (moduleId) {
@@ -241,51 +288,147 @@ export default function HomeView({
           break
         case 'netease_daily_recommend':
           url = 'http://localhost:3001/api/netease/recommend/songs'
+          needsLogin = true
           break
         case 'netease_radar':
-          url = 'http://localhost:3001/api/netease/personal_fm'
+          // 私人雷达：从推荐歌单中找到雷达歌单
+          url = 'http://localhost:3001/api/netease/recommend/resource'
+          needsLogin = true
           break
         case 'netease_playlists':
-          url = 'http://localhost:3001/api/netease/personalized?limit=30'
+          url = 'http://localhost:3001/api/netease/recommend/resource'
           isPlaylistModule = true
+          needsLogin = true
           break
         case 'qq_guess_you_like':
-          url = 'http://localhost:3001/api/qq/recommend/songs'
+          // QQ音乐：猜你喜欢（使用每日推荐）
+          url = 'http://localhost:3001/api/qq/recommend/daily'
+          needsLogin = true
           break
         case 'qq_daily_30':
-          url = 'http://localhost:3001/api/qq/recommend/songs/daily'
+          // QQ音乐：每日30首（使用每日推荐）
+          url = 'http://localhost:3001/api/qq/recommend/daily'
+          needsLogin = true
           break
         case 'qq_playlists':
-          url = 'http://localhost:3001/api/qq/recommend/playlists'
+          // QQ音乐：推荐歌单
+          url = 'http://localhost:3001/api/qq/recommend/playlist'
           isPlaylistModule = true
           break
+      }
+      
+      // 如果需要登录但用户未登录，跳过加载
+      if (needsLogin) {
+        const isNeteaseModule = moduleId.startsWith('netease_')
+        const isQQModule = moduleId.startsWith('qq_')
+        
+        if (isNeteaseModule && !neteaseLoggedIn) {
+          console.log(`⚠️ 模块 ${moduleId} 需要登录`)
+          setModuleLoading(false)
+          return
+        }
+        
+        if (isQQModule && !qqLoggedIn) {
+          console.log(`⚠️ 模块 ${moduleId} 需要登录`)
+          setModuleLoading(false)
+          return
+        }
+      }
+      
+      // 添加 Cookie 参数（如果需要）
+      if (needsLogin) {
+        const isNeteaseModule = moduleId.startsWith('netease_')
+        const isQQModule = moduleId.startsWith('qq_')
+        
+        if (isNeteaseModule) {
+          const neteaseCookie = localStorage.getItem('netease_cookie')
+          if (neteaseCookie) {
+            url += `${url.includes('?') ? '&' : '?'}cookie=${encodeURIComponent(neteaseCookie)}`
+          }
+        }
+        
+        if (isQQModule) {
+          const qqCookie = localStorage.getItem('qq_cookie')
+          if (qqCookie) {
+            url += `${url.includes('?') ? '&' : '?'}cookie=${encodeURIComponent(qqCookie)}`
+          }
+        }
       }
       
       const res = await fetch(url)
       const data = await res.json()
       
       console.log(`📥 模块数据 (${moduleId}):`, data)
+      console.log(`🔍 数据结构检查:`)
+      console.log(`  - data.data:`, data.data ? '存在' : '不存在')
+      console.log(`  - data.data.dailySongs:`, data.data?.dailySongs ? `存在 (${data.data.dailySongs.length}首)` : '不存在')
+      console.log(`  - data.recommend:`, data.recommend ? `存在 (${data.recommend.length}个)` : '不存在')
+      
+      // 特殊处理：私人雷达需要从推荐歌单中找到雷达歌单
+      if (moduleId === 'netease_radar' && data.recommend) {
+        console.log('🎯 正在查找私人雷达歌单...')
+        const radarPlaylist = data.recommend.find((item: any) => 
+          item.name?.includes('雷达') || item.name?.includes('私人')
+        )
+        
+        if (radarPlaylist) {
+          console.log('✅ 找到私人雷达歌单:', radarPlaylist.name, 'ID:', radarPlaylist.id)
+          
+          // 获取该歌单的详情
+          const neteaseCookie = localStorage.getItem('netease_cookie')
+          const playlistRes = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${radarPlaylist.id}&cookie=${encodeURIComponent(neteaseCookie || '')}`)
+          const playlistData = await playlistRes.json()
+          
+          console.log('📥 私人雷达歌单详情:', playlistData)
+          
+          if (playlistData.playlist?.tracks) {
+            const songs: Song[] = playlistData.playlist.tracks.slice(0, 30).map((track: any) => ({
+              id: track.id,
+              name: track.name,
+              artists: track.ar || track.artists || [],
+              album: {
+                name: track.al?.name || track.album?.name || '',
+                picUrl: track.al?.picUrl || track.album?.picUrl || ''
+              },
+              duration: track.dt || track.duration || 0,
+              platform: 'netease' as const,
+              vip: track.fee === 1 || false,
+              fee: track.fee || 0
+            }))
+            
+            setModuleSongs(songs)
+            setModuleLoading(false)
+            return
+          }
+        } else {
+          console.warn('⚠️ 未找到私人雷达歌单')
+        }
+      }
       
       if (isPlaylistModule) {
         // 处理歌单数据
         let playlists: any[] = []
         
-        if (moduleId === 'netease_playlists' && data.result) {
-          playlists = data.result.map((item: any) => ({
+        if (moduleId === 'netease_playlists' && data.recommend) {
+          // 推荐歌单
+          playlists = data.recommend.map((item: any) => ({
             id: item.id,
             name: item.name,
             coverImgUrl: item.picUrl,
             trackCount: item.trackCount || item.playCount || 0,
             platform: 'netease'
           }))
-        } else if (moduleId === 'qq_playlists' && data.data?.list) {
-          playlists = data.data.list.map((item: any) => ({
-            id: item.dissid || item.id,
-            name: item.dissname || item.name,
-            coverImgUrl: item.imgurl || item.cover,
-            trackCount: item.song_cnt || 0,
+        } else if (moduleId === 'qq_playlists') {
+          // QQ音乐推荐歌单
+          const list = data.data?.list || []
+          playlists = list.map((item: any) => ({
+            id: item.content_id || item.dissid || item.tid || item.id,
+            name: item.title || item.dissname || item.name,
+            coverImgUrl: item.cover || item.cover_url_big || item.imgurl,
+            trackCount: item.song_cnt || item.listen_num || 0,
             platform: 'qq'
           }))
+          console.log('✅ QQ音乐歌单数量:', playlists.length)
         }
         
         setModulePlaylists(playlists)
@@ -308,6 +451,21 @@ export default function HomeView({
               platform: 'netease' as const,
               vip: item.vip || item.song?.vip || false,
               fee: item.fee || item.song?.fee || 0
+            }))
+          } else if (moduleId === 'netease_daily_recommend' && data.data?.dailySongs) {
+            // 每日推荐
+            songs = data.data.dailySongs.slice(0, 30).map((item: any) => ({
+              id: item.id,
+              name: item.name,
+              artists: item.ar || item.artists || [],
+              album: {
+                name: item.al?.name || item.album?.name || '',
+                picUrl: item.al?.picUrl || item.album?.picUrl || ''
+              },
+              duration: item.dt || item.duration || 0,
+              platform: 'netease' as const,
+              vip: item.fee === 1 || false,
+              fee: item.fee || 0
             }))
           } else if (data.data && Array.isArray(data.data)) {
             songs = data.data.slice(0, 30).map((item: any) => ({
@@ -337,7 +495,36 @@ export default function HomeView({
           }
         } else {
           // QQ音乐数据处理
-          if (data.data?.list && Array.isArray(data.data.list)) {
+          if (moduleId === 'qq_guess_you_like' || moduleId === 'qq_daily_30') {
+            // QQ音乐每日推荐 - recommend/daily 返回的是歌单详情
+            // 尝试多种可能的字段名：songlist, song_list, list
+            const songList = data.data?.songlist || data.data?.song_list || data.data?.list || []
+            
+            console.log(`[QQ音乐每日推荐] 数据字段检查:`)
+            console.log(`  - data.data.songlist: ${data.data?.songlist ? `存在 (${data.data.songlist.length})` : '不存在'}`)
+            console.log(`  - data.data.song_list: ${data.data?.song_list ? `存在 (${data.data.song_list.length})` : '不存在'}`)
+            console.log(`  - data.data.list: ${data.data?.list ? `存在 (${data.data.list.length})` : '不存在'}`)
+            console.log(`  - 最终使用的列表长度: ${songList.length}`)
+            
+            if (Array.isArray(songList) && songList.length > 0) {
+              songs = songList.slice(0, 30).map((song: any) => ({
+                id: song.songid || song.id,
+                mid: song.songmid || song.mid,
+                name: song.songname || song.name,
+                artists: song.singer || [],
+                album: {
+                  name: song.albumname || song.album?.name || '',
+                  picUrl: song.albumpic || `https://y.gtimg.cn/music/photo_new/T002R300x300M000${song.albummid}.jpg`
+                },
+                duration: (song.interval || 0) * 1000,
+                platform: 'qq' as const,
+                vip: song.pay?.payplay === 1 || false
+              }))
+              console.log(`✅ QQ音乐每日推荐歌曲数量: ${songs.length}`)
+            } else {
+              console.warn(`⚠️ QQ音乐每日推荐: 未找到有效的歌曲列表`)
+            }
+          } else if (data.data?.list && Array.isArray(data.data.list)) {
             songs = data.data.list.slice(0, 30).map((song: any) => ({
               id: song.songid || song.id,
               mid: song.songmid || song.mid,
@@ -524,11 +711,23 @@ export default function HomeView({
         }
         
         console.log('✅ 进入网易云分支，用户ID:', neteaseUserId)
+        
+        // 尝试从缓存加载
+        const cachedPlaylists = await cacheManager.getCachedPlaylist(neteaseUserId, 'netease')
+        if (cachedPlaylists) {
+          console.log('✅ 从缓存加载网易云歌单:', cachedPlaylists.length, '个')
+          setUserPlaylists(cachedPlaylists)
+          setPlaylistLoading(false)
+          // 继续后台更新
+        }
+        
         const res = await fetch(`http://localhost:3001/api/netease/user/playlist?uid=${neteaseUserId}`)
         const data = await res.json()
         if (data.playlist) {
           console.log('✅ 网易云歌单数量:', data.playlist.length)
           setUserPlaylists(data.playlist)
+          // 缓存歌单列表
+          await cacheManager.cachePlaylist(neteaseUserId, 'netease', data.playlist)
         }
       } else if (platform === 'qq') {
         // QQ音乐：必须登录且有用户ID
@@ -538,6 +737,16 @@ export default function HomeView({
         }
         
         console.log('✅ 进入QQ音乐分支，用户ID:', qqUserId)
+        
+        // 尝试从缓存加载
+        const cachedPlaylists = await cacheManager.getCachedPlaylist(qqUserId, 'qq')
+        if (cachedPlaylists) {
+          console.log('✅ 从缓存加载QQ音乐歌单:', cachedPlaylists.length, '个')
+          setUserPlaylists(cachedPlaylists)
+          setPlaylistLoading(false)
+          // 继续后台更新
+        }
+        
         // 获取QQ音乐用户歌单（自建 + 收藏）
         console.log('📤 正在获取QQ音乐歌单（自建+收藏），用户ID:', qqUserId)
         
@@ -681,6 +890,8 @@ export default function HomeView({
         if (uniquePlaylists.length > 0) {
           console.log(`✅ HomeView解析到 ${uniquePlaylists.length} 个QQ音乐歌单（自建: ${createdPlaylists.length}, 收藏: ${collectedPlaylists.length}）`)
           setUserPlaylists(uniquePlaylists)
+          // 缓存歌单列表
+          await cacheManager.cachePlaylist(qqUserId, 'qq', uniquePlaylists)
         } else {
           console.warn('⚠️ QQ音乐歌单数据为空')
           setUserPlaylists([])
@@ -847,20 +1058,22 @@ export default function HomeView({
       {/* 内容区 */}
       <div className="relative z-10 w-full h-full flex items-center justify-center px-2 md:px-4 py-4 md:py-6">
         <div className="w-full h-full flex flex-col md:flex-row gap-3 md:gap-4 overflow-hidden">
-        {/* 左栏：自定义模块 */}
-        <motion.div
-          initial={{ opacity: 0, x: -50 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="w-full md:w-80 lg:w-96 min-h-0 flex flex-col flex-shrink-0"
-          style={{
-            background: 'rgba(0, 0, 0, 0.3)',
-            backdropFilter: 'blur(40px) saturate(180%)',
-            WebkitBackdropFilter: 'blur(40px) saturate(180%)',
-            borderRadius: '24px',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37)'
-          }}
-        >
+        {/* 左栏：自定义模块 - 如果当前平台没有模块则隐藏 */}
+        {(platform === 'netease' ? neteaseModules : qqModules).length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, x: -50 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -50 }}
+            className="w-full md:w-80 lg:w-96 min-h-0 flex flex-col flex-shrink-0"
+            style={{
+              background: 'rgba(0, 0, 0, 0.3)',
+              backdropFilter: 'blur(40px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(40px) saturate(180%)',
+              borderRadius: '24px',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37)'
+            }}
+          >
           {/* 头部：模块切换 */}
           <div className="p-6 border-b border-white/10">
             <div className="flex items-center justify-between mb-4">
@@ -925,7 +1138,7 @@ export default function HomeView({
                     <div className="space-y-1">
                       {moduleSongs.map((song, index) => (
                         <motion.div
-                          key={`${song.id}-${index}`}
+                          key={`${song.id || song.mid || 'song'}-${index}`}
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: index * 0.01 }}
@@ -978,7 +1191,7 @@ export default function HomeView({
                     <div className="grid grid-cols-2 gap-3">
                       {modulePlaylists.map((playlist, index) => (
                         <motion.div
-                          key={playlist.id}
+                          key={`module-playlist-${playlist.id || index}`}
                           initial={{ opacity: 0, scale: 0.9 }}
                           animate={{ opacity: 1, scale: 1 }}
                           transition={{ delay: index * 0.05 }}
@@ -1006,11 +1219,16 @@ export default function HomeView({
             </div>
           </div>
         </motion.div>
+        )}
 
         {/* 中栏：用户歌单 */}
         <motion.div
           initial={{ opacity: 0, y: 50 }}
           animate={{ opacity: 1, y: 0 }}
+          layout
+          transition={{
+            layout: { type: "spring", stiffness: 300, damping: 30 }
+          }}
           className="flex-1 min-h-0 flex flex-col"
           style={{
             background: 'rgba(0, 0, 0, 0.3)',
@@ -1084,14 +1302,17 @@ export default function HomeView({
               </div>
             ) : (
               <div className="p-4 pb-6">
+                {/* 根据是否有推荐模块调整网格列数 */}
                 <div className="grid gap-4" style={{
-                gridTemplateColumns: 'repeat(auto-fill, minmax(min(240px, 100%), 1fr))',
+                gridTemplateColumns: (platform === 'netease' ? neteaseModules : qqModules).length === 0 
+                  ? 'repeat(auto-fill, minmax(min(280px, 100%), 1fr))' // 无推荐模块：更大的卡片
+                  : 'repeat(auto-fill, minmax(min(240px, 100%), 1fr))', // 有推荐模块：正常大小
                 maxWidth: '100%'
               }}>
                 <AnimatePresence mode="popLayout">
                 {userPlaylists.map((playlist: any, index: number) => (
                   <motion.div
-                    key={`${platform}-${playlist.id}`}
+                    key={`${platform}-${playlist.id || `playlist-${index}`}`}
                     layout
                     initial={{ opacity: 0, scale: 0.8, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -1117,8 +1338,8 @@ export default function HomeView({
                     <div 
                       className="rounded-lg overflow-hidden bg-white/10 relative"
                       style={{
-                        width: '80px',
-                        height: '80px',
+                        width: (platform === 'netease' ? neteaseModules : qqModules).length === 0 ? '100px' : '80px',
+                        height: (platform === 'netease' ? neteaseModules : qqModules).length === 0 ? '100px' : '80px',
                         gridRow: '1 / 3',
                         flexShrink: 0
                       }}

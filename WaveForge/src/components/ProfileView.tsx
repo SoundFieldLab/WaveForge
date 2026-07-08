@@ -1,6 +1,6 @@
 ﻿import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
-import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw } from 'lucide-react'
+import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut } from 'lucide-react'
 import { Song } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 
@@ -23,10 +23,25 @@ interface UserDetail {
   vipType?: number
   city?: string
   birthday?: number
-  followeds?: number
-  follows?: number
+  followeds?: number  // 粉丝数（网易云）
+  follows?: number    // 关注数（网易云）
   playlistCount?: number
   level?: number
+  // 网易云特有字段
+  eventCount?: number      // 动态数
+  newFollows?: number      // 新关注数
+  listenSongs?: number     // 累计听歌
+  createTime?: number      // 注册时间
+  gender?: number          // 性别：0-保密, 1-男, 2-女
+  province?: number        // 省份代码
+  backgroundUrl?: string   // 背景图
+  // QQ音乐特有字段
+  visitornum?: number     // 访客数
+  fansnum?: number        // 粉丝数
+  follownum?: number      // 关注总数
+  followusernum?: number  // 关注用户数
+  followsingernum?: number // 关注歌手数
+  listenLevel?: string    // 听歌等级图标
 }
 
 interface ProfileViewProps {
@@ -37,6 +52,7 @@ interface ProfileViewProps {
   onClose: () => void
   onSongSelect: (song: Song, playlist?: Song[]) => void
   handleSwitchPlatform: () => void  // 切换平台的回调
+  onLogout: (platform: 'netease' | 'qq') => void  // 退出登录回调
 }
 
 export default function ProfileView({ 
@@ -46,7 +62,8 @@ export default function ProfileView({
   cookie,
   onClose, 
   onSongSelect,
-  handleSwitchPlatform
+  handleSwitchPlatform,
+  onLogout
 }: ProfileViewProps) {
   const [currentPlatform, setCurrentPlatform] = useState<'netease' | 'qq'>(initialPlatform)
   const [activeTab, setActiveTab] = useState<'created' | 'subscribed' | 'detail'>('created')
@@ -57,6 +74,21 @@ export default function ProfileView({
 
   // 获取当前平台
   const platform = currentPlatform
+  
+  // 性别显示
+  const getGenderText = (gender?: number) => {
+    if (gender === 1) return '男'
+    if (gender === 2) return '女'
+    return '保密'
+  }
+  
+  // 格式化注册时间
+  const formatCreateTime = (timestamp?: number) => {
+    if (!timestamp) return ''
+    const date = new Date(timestamp)
+    const years = new Date().getFullYear() - date.getFullYear()
+    return `${date.getFullYear()}年${date.getMonth() + 1}月 (${years}年)`
+  }
 
   // 歌单详情面板状态
   const [showPlaylistDetail, setShowPlaylistDetail] = useState(false)
@@ -189,7 +221,15 @@ export default function ProfileView({
             followeds: detailData.profile.followeds,
             follows: detailData.profile.follows,
             playlistCount: detailData.profile.playlistCount,
-            level: detailData.level
+            level: detailData.level,
+            // 网易云特有数据
+            eventCount: detailData.profile.eventCount,
+            newFollows: detailData.profile.newFollows,
+            listenSongs: detailData.listenSongs,
+            createTime: detailData.profile.createTime,
+            gender: detailData.profile.gender,
+            province: detailData.profile.province,
+            backgroundUrl: detailData.profile.backgroundUrl
           })
         }
       } catch (error) {
@@ -217,7 +257,14 @@ export default function ProfileView({
             userId: userId,
             vipType: isVip ? 1 : 0,
             signature: '',
-            playlistCount: detailData.mydiss?.num || 0
+            playlistCount: detailData.mydiss?.num || 0,
+            // QQ音乐特有数据
+            visitornum: detailData.creator.nums?.visitornum,
+            fansnum: detailData.creator.nums?.fansnum,
+            follownum: detailData.creator.nums?.follownum,
+            followusernum: detailData.creator.nums?.followusernum,
+            followsingernum: detailData.creator.nums?.followsingernum,
+            listenLevel: detailData.creator.listeninfo?.iconurl
           })
           
           // 解析歌单数据
@@ -420,9 +467,9 @@ export default function ProfileView({
                 {/* 我创建的歌单 */}
                 {activeTab === 'created' && (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {createdPlaylists.map((playlist) => (
+                    {createdPlaylists.map((playlist, index) => (
                       <motion.div
-                        key={playlist.id}
+                        key={playlist.id || `created-${index}`}
                         whileHover={{ scale: 1.05 }}
                         onClick={() => handlePlaylistClick(playlist)}
                         className="bg-white/5 hover:bg-white/10 rounded-xl p-4 cursor-pointer transition-all"
@@ -446,9 +493,9 @@ export default function ProfileView({
                 {/* 收藏的歌单 */}
                 {activeTab === 'subscribed' && (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {subscribedPlaylists.map((playlist) => (
+                    {subscribedPlaylists.map((playlist, index) => (
                       <motion.div
-                        key={playlist.id}
+                        key={playlist.id || `subscribed-${index}`}
                         whileHover={{ scale: 1.05 }}
                         onClick={() => handlePlaylistClick(playlist)}
                         className="bg-white/5 hover:bg-white/10 rounded-xl p-4 cursor-pointer transition-all"
@@ -489,7 +536,7 @@ export default function ProfileView({
                       
                       {/* 昵称和VIP */}
                       <div className="flex items-center gap-2 mb-2">
-                        {userDetail.vipType && userDetail.vipType > 0 && (
+                        {userDetail.vipType !== undefined && userDetail.vipType > 0 && (
                           <Crown className="w-6 h-6 text-yellow-400" />
                         )}
                         <h3 className={`text-3xl font-bold ${userDetail.vipType && userDetail.vipType > 0 ? 'text-yellow-400' : 'text-white'}`}>
@@ -517,18 +564,60 @@ export default function ProfileView({
                             <div className="text-white font-medium">Lv.{userDetail.level}</div>
                           </div>
                         )}
+                        
+                        {/* QQ音乐：听歌等级 */}
+                        {userDetail.listenLevel && platform === 'qq' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">听歌等级</div>
+                            <img src={userDetail.listenLevel} alt="听歌等级" className="h-6" />
+                          </div>
+                        )}
 
-                        {userDetail.followeds !== undefined && (
+                        {/* 网易云：粉丝数 */}
+                        {userDetail.followeds !== undefined && platform === 'netease' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">粉丝</div>
                             <div className="text-white font-medium">{userDetail.followeds.toLocaleString()}</div>
                           </div>
                         )}
+                        
+                        {/* QQ音乐：粉丝数 */}
+                        {userDetail.fansnum !== undefined && platform === 'qq' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">粉丝</div>
+                            <div className="text-white font-medium">{userDetail.fansnum.toLocaleString()}</div>
+                          </div>
+                        )}
 
-                        {userDetail.follows !== undefined && (
+                        {/* 网易云：关注数 */}
+                        {userDetail.follows !== undefined && platform === 'netease' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">关注</div>
                             <div className="text-white font-medium">{userDetail.follows.toLocaleString()}</div>
+                          </div>
+                        )}
+                        
+                        {/* QQ音乐：关注用户数 */}
+                        {userDetail.followusernum !== undefined && platform === 'qq' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">关注用户</div>
+                            <div className="text-white font-medium">{userDetail.followusernum.toLocaleString()}</div>
+                          </div>
+                        )}
+                        
+                        {/* QQ音乐：关注歌手数 */}
+                        {userDetail.followsingernum !== undefined && platform === 'qq' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">关注歌手</div>
+                            <div className="text-white font-medium">{userDetail.followsingernum.toLocaleString()}</div>
+                          </div>
+                        )}
+                        
+                        {/* QQ音乐：访客数 */}
+                        {userDetail.visitornum !== undefined && platform === 'qq' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">访客</div>
+                            <div className="text-white font-medium">{userDetail.visitornum.toLocaleString()}</div>
                           </div>
                         )}
 
@@ -536,6 +625,41 @@ export default function ProfileView({
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">歌单数</div>
                             <div className="text-white font-medium">{userDetail.playlistCount}</div>
+                          </div>
+                        )}
+                        
+                        {/* 网易云：动态数 */}
+                        {userDetail.eventCount !== undefined && platform === 'netease' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">动态</div>
+                            <div className="text-white font-medium">{userDetail.eventCount.toLocaleString()}</div>
+                          </div>
+                        )}
+                        
+                        {/* 网易云：累计听歌 */}
+                        {userDetail.listenSongs !== undefined && platform === 'netease' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">累计听歌</div>
+                            <div className="text-white font-medium">{userDetail.listenSongs.toLocaleString()} 首</div>
+                          </div>
+                        )}
+                        
+                        {/* 网易云：性别 */}
+                        {userDetail.gender !== undefined && platform === 'netease' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1">性别</div>
+                            <div className="text-white font-medium">{getGenderText(userDetail.gender)}</div>
+                          </div>
+                        )}
+                        
+                        {/* 网易云：注册时间 */}
+                        {userDetail.createTime !== undefined && platform === 'netease' && (
+                          <div className="bg-white/5 rounded-lg p-4">
+                            <div className="text-white/50 text-sm mb-1 flex items-center gap-1">
+                              <Calendar className="w-3 h-3" />
+                              注册时间
+                            </div>
+                            <div className="text-white font-medium">{formatCreateTime(userDetail.createTime)}</div>
                           </div>
                         )}
 
@@ -560,6 +684,22 @@ export default function ProfileView({
                             </div>
                           </div>
                         )}
+                      </div>
+                      
+                      {/* 退出登录按钮 */}
+                      <div className="mt-8">
+                        <button
+                          onClick={() => {
+                            if (confirm(`确定要退出${platform === 'netease' ? '网易云音乐' : 'QQ音乐'}登录吗？`)) {
+                              onLogout(platform)
+                              onClose()
+                            }
+                          }}
+                          className="w-full py-3 px-4 rounded-xl bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 font-medium transition-all flex items-center justify-center gap-2"
+                        >
+                          <LogOut className="w-5 h-5" />
+                          退出登录
+                        </button>
                       </div>
                     </div>
                   </div>

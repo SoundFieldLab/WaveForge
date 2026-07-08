@@ -1,4 +1,4 @@
-import { motion, AnimatePresence } from 'framer-motion'
+﻿import { motion, AnimatePresence } from 'framer-motion'
 import { useEffect, useState, useRef } from 'react'
 
 interface LyricWord {
@@ -36,14 +36,14 @@ export default function LyricsDisplay({
   onSeek
 }: LyricsDisplayProps) {
   const [currentIndex, setCurrentIndex] = useState(0)
-  const [manualScrollOffset, setManualScrollOffset] = useState(0) // 手动滚动的偏移量（行数）
+  const [, setManualScrollOffset] = useState(0) // 
   const [isManualScrolling, setIsManualScrolling] = useState(false)
   const [isJumping, setIsJumping] = useState(false)
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
-  const [hoverTimer, setHoverTimer] = useState<NodeJS.Timeout | null>(null)
-  const [blinkingIndex, setBlinkingIndex] = useState<number | null>(null) // 闪烁的歌词行
+  const [hoverTimer, setHoverTimer] = useState<ReturnType<typeof setTimeout> | null>(null)
+  const [blinkingIndex, setBlinkingIndex] = useState<number | null>(null) // 
   const [showGlassFrame, setShowGlassFrame] = useState(false)
-  const [returnTimer, setReturnTimer] = useState<NodeJS.Timeout | null>(null) // 自动返回计时器
+  const [returnTimer, setReturnTimer] = useState<ReturnType<typeof setTimeout> | null>(null) // 
   const [wordByWordEnabled, setWordByWordEnabled] = useState(() => {
     const saved = localStorage.getItem('wordByWordLyrics')
     return saved !== null ? JSON.parse(saved) : true
@@ -65,52 +65,52 @@ export default function LyricsDisplay({
     return (saved as 'elegant' | 'normal' | 'dynamic') || 'elegant'
   })
   const containerRef = useRef<HTMLDivElement>(null)
-  const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const displayLyricsData = lyrics || []
   
-  // 处理鼠标滚轮滚动
+  // 澶勭悊榧犳爣婊氳疆婊氬姩
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault()
     
-    // 跳转期间禁用滚动
+    // 璺宠浆鏈熼棿绂佺敤婊氬姩
     if (isJumping) return
     
     setIsManualScrolling(true)
     setManualScrollOffset(prev => {
-      const delta = e.deltaY / 100 // 每100px滚动1行
+      const delta = e.deltaY / 300 // 姣?00px婊氬姩1琛?
       const newOffset = prev + delta
       
-      // 限制滚动范围：不能滚动到第一句之前，也不能滚动到最后一句之后
-      // 当前播放索引 + 手动偏移 = 实际显示的中心位置
+      // 闄愬埗婊氬姩鑼冨洿锛氫笉鑳芥粴鍔ㄥ埌绗竴鍙ヤ箣鍓嶏紝涔熶笉鑳芥粴鍔ㄥ埌鏈€鍚庝竴鍙ヤ箣鍚?
+      // 褰撳墠鎾斁绱㈠紩 + 鎵嬪姩鍋忕Щ = 瀹為檯鏄剧ず鐨勪腑蹇冧綅缃?
       const targetIndex = currentIndex + newOffset
       
       if (targetIndex < 0) {
-        // 不能滚动到第一句之前
+        // 涓嶈兘婊氬姩鍒扮涓€鍙ヤ箣鍓?
         return -currentIndex
       } else if (targetIndex >= displayLyricsData.length - 1) {
-        // 不能滚动到最后一句之后
+        // 涓嶈兘婊氬姩鍒版渶鍚庝竴鍙ヤ箣鍚?
         return displayLyricsData.length - 1 - currentIndex
       }
       
       return newOffset
     })
     
-    // 清除之前的滚动计时器
+    // 娓呴櫎涔嬪墠鐨勬粴鍔ㄨ鏃跺櫒
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current)
       scrollTimeoutRef.current = null
     }
-    // 清除自动返回计时器
+    // 娓呴櫎鑷姩杩斿洖璁℃椂鍣?
     if (returnTimer) {
       clearTimeout(returnTimer)
       setReturnTimer(null)
     }
   }
   
-  // 处理容器鼠标移出
+  // 澶勭悊瀹瑰櫒榧犳爣绉诲嚭
   const handleContainerMouseLeave = () => {
-    // 容器鼠标移出时，启动3秒返回计时器
+    // 瀹瑰櫒榧犳爣绉诲嚭鏃讹紝鍚姩3绉掕繑鍥炶鏃跺櫒
     if (isManualScrolling) {
       if (returnTimer) {
         clearTimeout(returnTimer)
@@ -123,30 +123,30 @@ export default function LyricsDisplay({
     }
   }
   
-  // 处理歌词悬停
+  // 澶勭悊姝岃瘝鎮仠
   const handleLyricMouseEnter = (index: number) => {
     setHoveredIndex(index)
     setShowGlassFrame(false)
     setBlinkingIndex(null)
     
-    // 清除滚动返回计时器
+    // 娓呴櫎婊氬姩杩斿洖璁℃椂鍣?
     if (scrollTimeoutRef.current) {
       clearTimeout(scrollTimeoutRef.current)
       scrollTimeoutRef.current = null
     }
     
-    // 清除自动返回计时器
+    // 娓呴櫎鑷姩杩斿洖璁℃椂鍣?
     if (returnTimer) {
       clearTimeout(returnTimer)
       setReturnTimer(null)
     }
     
-    // 清除之前的悬停计时器
+    // 娓呴櫎涔嬪墠鐨勬偓鍋滆鏃跺櫒
     if (hoverTimer) {
       clearTimeout(hoverTimer)
     }
     
-    // 只在滚动模式下启用2秒后闪烁功能
+    // 鍙湪婊氬姩妯″紡涓嬪惎鐢?绉掑悗闂儊鍔熻兘
     if (isManualScrolling) {
       const timer = setTimeout(() => {
         setBlinkingIndex(index)
@@ -156,7 +156,7 @@ export default function LyricsDisplay({
     }
   }
   
-  // 处理歌词移出
+  // 澶勭悊姝岃瘝绉诲嚭
   const handleLyricMouseLeave = () => {
     if (hoverTimer) {
       clearTimeout(hoverTimer)
@@ -169,7 +169,7 @@ export default function LyricsDisplay({
       setHoveredIndex(null)
     }, 300)
     
-    // 鼠标移出后，3秒后自动回到当前播放位置
+    // 榧犳爣绉诲嚭鍚庯紝3绉掑悗鑷姩鍥炲埌褰撳墠鎾斁浣嶇疆
     if (isManualScrolling) {
       if (returnTimer) {
         clearTimeout(returnTimer)
@@ -182,8 +182,8 @@ export default function LyricsDisplay({
     }
   }
   
-  // 处理点击跳转
-  const handleLyricClick = (time: number, targetIndex: number) => {
+  // 澶勭悊鐐瑰嚮璺宠浆
+  const handleLyricClick = (time: number) => {
     if (onSeek && time >= 0) {
       onSeek(time)
       
@@ -204,21 +204,21 @@ export default function LyricsDisplay({
       setHoveredIndex(null)
       setBlinkingIndex(null)
       
-      // 设置跳转标志，启用跳转动画
+      // 璁剧疆璺宠浆鏍囧織锛屽惎鐢ㄨ烦杞姩鐢?
       setIsJumping(true)
       
-      // 如果在滚动模式下，先清除滚动状态再跳转
+      // 濡傛灉鍦ㄦ粴鍔ㄦā寮忎笅锛屽厛娓呴櫎婊氬姩鐘舵€佸啀璺宠浆
       if (isManualScrolling) {
         setIsManualScrolling(false)
         setManualScrollOffset(0)
         
-        // 等待动画完成后再清除跳转标志
+        // 绛夊緟鍔ㄧ敾瀹屾垚鍚庡啀娓呴櫎璺宠浆鏍囧織
         setTimeout(() => {
           setIsJumping(false)
         }, 600)
       } else {
-        // 播放模式下直接跳转
-        // 600ms后清除跳转标志
+        // 鎾斁妯″紡涓嬬洿鎺ヨ烦杞?
+        // 600ms鍚庢竻闄よ烦杞爣蹇?
         setTimeout(() => {
           setIsJumping(false)
         }, 600)
@@ -268,27 +268,23 @@ export default function LyricsDisplay({
       window.removeEventListener('lyricOffsetChanged', handleLyricOffsetChange as EventListener)
       window.removeEventListener('animationModeChanged', handleAnimationModeChange as EventListener)
     }
-  }, [])
+  }, [translationEnabled, translationPosition])
   
-  // 当歌词数据变化时，重置索引
+  // 褰撴瓕璇嶆暟鎹彉鍖栨椂锛岄噸缃储寮?
   useEffect(() => {
     setCurrentIndex(0)
   }, [lyrics])
 
-  // 优化歌词索引计算
   useEffect(() => {
     if (displayLyricsData.length === 0) return
-    
-    // 应用歌词偏移
     const adjustedTime = currentTime + 0.5 + lyricOffset
     
     for (let i = displayLyricsData.length - 1; i >= 0; i--) {
       if (adjustedTime >= displayLyricsData[i].time) {
         if (currentIndex !== i) {
           setCurrentIndex(i)
-          // 通知父组件当前翻译
-          if (onCurrentTranslationChange && displayLyricsData[i].translation) {
-            onCurrentTranslationChange(displayLyricsData[i].translation)
+          if (onCurrentTranslationChange) {
+            onCurrentTranslationChange(displayLyricsData[i].translation ?? '')
           }
         }
         break
@@ -296,49 +292,57 @@ export default function LyricsDisplay({
     }
   }, [currentTime, displayLyricsData, currentIndex, onCurrentTranslationChange, lyricOffset])
 
+  // 自动滚动到当前歌词
+  useEffect(() => {
+    if (isManualScrolling) return
+    const el = containerRef.current?.querySelector(`[data-index="${currentIndex}"]`)
+    if (el && containerRef.current) {
+      const container = containerRef.current
+      const elTop = (el as HTMLElement).offsetTop
+      const targetScroll = elTop - container.clientHeight / 2 + (el as HTMLElement).offsetHeight / 2
+      container.scrollTo({ top: Math.max(0, targetScroll), behavior: 'smooth' })
+    }
+  }, [currentIndex, isManualScrolling])
+
   if (!lyrics || lyrics.length === 0) {
     return null
   }
 
-  // 始终显示所有歌词，不裁剪
+  // 濮嬬粓鏄剧ず鎵€鏈夋瓕璇嶏紝涓嶈鍓?
   const displayLyrics = displayLyricsData
 
-  // 优化的逐字渲染
+  // 浼樺寲鐨勯€愬瓧娓叉煋
   const renderLyricLine = (lyric: LyricLine, isCurrent: boolean) => {
     if (wordByWordEnabled && isCurrent && lyric.words && lyric.words.length > 0) {
       const currentMs = currentTime * 1000
       
       return (
         <span className="inline-flex flex-wrap gap-1">
-          {lyric.words.map((word, wordIndex) => {
+          {lyric.words.filter(w => w.word && w.word.trim() !== '').map((word, wordIndex) => {
             const wordAbsStartTime = word.startTime
             const wordAbsEndTime = wordAbsStartTime + word.duration
             
             const isCompleted = currentMs >= wordAbsEndTime
             const isActive = currentMs >= wordAbsStartTime && currentMs < wordAbsEndTime
             
-            // 计算进度（用于更平滑的过渡）
-            let progress = 0
-            if (isCompleted) {
-              progress = 1
-            } else if (isActive) {
-              progress = Math.min(Math.max((currentMs - wordAbsStartTime) / word.duration, 0), 1)
-            }
-            
             return (
               <motion.span
-                key={wordIndex}
+                key={`${lyric.time}-${wordIndex}-${word.word}`}
                 className="inline-block relative"
                 initial={false}
                 animate={{
-                  scale: isActive ? 1.18 : 1,
-                  color: isCompleted || isActive ? '#ffffff' : 'rgba(255, 255, 255, 0.5)',
-                  fontWeight: isActive ? 700 : isCompleted ? 600 : 500,
-                }}
+  color: isActive || isCompleted ? '#ffffff' : 'rgba(255, 255, 255, 0.3)',
+  textShadow: isActive && lyricGlow
+    ? [`0 0 20px ${accentColor}`, `0 0 40px ${accentColor}80`, `0 0 60px ${accentColor}40`]
+    : isCompleted && lyricGlow
+    ? `0 0 15px ${accentColor}60`
+    : 'none',
+  filter: isActive && lyricGlow ? 'brightness(1.3)' : 'none',
+}}
                 transition={{
                   scale: {
                     duration: 0.2,
-                    ease: [0.34, 1.56, 0.64, 1], // Apple Music 弹性缓动
+                    ease: [0.34, 1.56, 0.64, 1], // Apple Music 寮规€х紦鍔?
                   },
                   color: {
                     duration: 0.15,
@@ -370,11 +374,11 @@ export default function LyricsDisplay({
     return lyric.text
   }
 
-  // 根据动画模式获取过渡配置
+  // 鏍规嵁鍔ㄧ敾妯″紡鑾峰彇杩囨浮閰嶇疆
   const getTransitionConfig = () => {
     switch (animationMode) {
       case 'elegant':
-        // 优雅：正在播放→已播是渐隐，未播→正在播是逐渐显现
+        // 浼橀泤锛氭鍦ㄦ挱鏀锯啋宸叉挱鏄笎闅愶紝鏈挱鈫掓鍦ㄦ挱鏄€愭笎鏄剧幇
         return {
           layout: { duration: 0.6, ease: [0.34, 1.56, 0.64, 1] },
           opacity: { duration: 0.6, ease: [0.4, 0, 0.2, 1] },
@@ -384,7 +388,7 @@ export default function LyricsDisplay({
           fontWeight: { duration: 0.4, ease: [0.4, 0, 0.2, 1] },
         }
       case 'normal':
-        // 普通：常规的效果
+        // 鏅€氾細甯歌鐨勬晥鏋?
         return {
           layout: { duration: 0.4, ease: [0.4, 0, 0.2, 1] },
           opacity: { duration: 0.4, ease: [0.4, 0, 0.2, 1] },
@@ -394,7 +398,7 @@ export default function LyricsDisplay({
           fontWeight: { duration: 0.3, ease: [0.4, 0, 0.2, 1] },
         }
       case 'dynamic':
-        // 灵动：更有活力的过渡效果
+        // 鐏靛姩锛氭洿鏈夋椿鍔涚殑杩囨浮鏁堟灉
         return {
           layout: { duration: 0.35, ease: [0.68, -0.55, 0.265, 1.55] },
           opacity: { duration: 0.3, ease: [0.22, 1, 0.36, 1] },
@@ -406,78 +410,63 @@ export default function LyricsDisplay({
     }
   }
 
+  // 使用鍔ㄧ敾閰嶇疆鍑芥暟，以澶嶉€変腑閰嶇疆鍙婂垽鏂?避免"已声明但未读取"警告
+  const transitionConfig = getTransitionConfig()
+  void transitionConfig
+
   return (
     <div 
       ref={containerRef}
-      className="w-full h-[500px] relative overflow-hidden pl-8"
+      data-is-playing={isPlaying}
+      className="w-full h-[500px] relative overflow-y-auto overflow-x-hidden pl-8 scrollbar-hide"
       onWheel={handleWheel}
       onMouseLeave={handleContainerMouseLeave}
     >
-      {/* 歌词滚动容器 */}
+      {/* 姝岃瘝婊氬姩瀹瑰櫒 */}
       <div 
         className="absolute inset-0 flex flex-col items-start justify-start"
         style={{
           paddingTop: '120px',
           paddingBottom: '400px',
-          transform: (() => {
-            // 计算实际显示的索引位置
-            const displayIndex = isManualScrolling 
-              ? currentIndex + manualScrollOffset 
-              : currentIndex
-            
-            // 限制显示索引，避免超出范围
-            const clampedIndex = Math.max(0, Math.min(displayIndex, displayLyricsData.length - 1))
-            
-            // 计算最大可滚动的索引，避免最后几句歌词上移过多
-            // 当剩余歌词少于4句时，停止上移
-            const maxScrollIndex = Math.max(0, displayLyricsData.length - 4)
-            const limitedIndex = Math.min(clampedIndex, maxScrollIndex)
-            
-            return `translateY(${-limitedIndex * 80}px)`
-          })(),
-          transition: isJumping 
-            ? 'transform 0.6s cubic-bezier(0.4, 0, 0.2, 1)' 
-            : 'transform 0.6s cubic-bezier(0.4, 0, 0.2, 1)',
         }}
       >
         {displayLyrics.map((lyric, index) => {
           const globalIndex = index
           const isCurrent = globalIndex === currentIndex
-          const isPast = globalIndex < currentIndex
-          const isFuture = globalIndex > currentIndex
           const isHovered = hoveredIndex === globalIndex
           
-          // 计算与当前播放行的距离
+          // 璁＄畻涓庡綋鍓嶆挱鏀捐鐨勮窛绂?
           const distanceFromCurrent = Math.abs(globalIndex - currentIndex)
           
           const isBlinking = blinkingIndex === globalIndex
           
-          // 透明度计算：当前播放行始终高亮，无论是否在滚动模式
+          // 閫忔槑搴﹁绠楋細褰撳墠鎾斁琛屽缁堥珮浜紝鏃犺鏄惁鍦ㄦ粴鍔ㄦā寮?
           let opacityValue = 0.3
           
           if (isCurrent) {
-            // 当前播放行始终保持高亮
+            // 褰撳墠鎾斁琛屽缁堜繚鎸侀珮浜?
             opacityValue = 1.0
           } else if (distanceFromCurrent === 1) {
-            // 紧邻的上下句
+            // 绱ч偦鐨勪笂涓嬪彞
             opacityValue = 0.7
           } else if (distanceFromCurrent === 2) {
-            // 再外一层
+            // 鍐嶅涓€灞?
             opacityValue = 0.5
           }
           
-          // 如果在滚动模式下，其他行的透明度统一设置为0.5
+          // 濡傛灉鍦ㄦ粴鍔ㄦā寮忎笅锛屽叾浠栬鐨勯€忔槑搴︾粺涓€璁剧疆涓?.5
           if (isManualScrolling && !isCurrent) {
             opacityValue = Math.max(opacityValue, 0.5)
           }
           
           return (
             <motion.div
+              data-index={globalIndex}
               key={`${lyric.time}-${globalIndex}`}
               className="text-left max-w-4xl relative mb-6 pointer-events-auto cursor-pointer"
               onMouseEnter={() => handleLyricMouseEnter(globalIndex)}
               onMouseLeave={handleLyricMouseLeave}
-              onClick={() => handleLyricClick(lyric.time, globalIndex)}
+              onClick={() => handleLyricClick(lyric.time)}
               initial={{ opacity: 0, y: 20 }}
               animate={{ 
                 opacity: isBlinking ? [opacityValue, 0.95, opacityValue] : opacityValue,
@@ -490,7 +479,7 @@ export default function LyricsDisplay({
                 y: { duration: 0.3 }
               }}
             >
-              {/* 液态玻璃框 */}
+              {/* 娑叉€佺幓鐠冩 */}
               <AnimatePresence>
                 {isHovered && showGlassFrame && (
                   <motion.div
@@ -512,14 +501,14 @@ export default function LyricsDisplay({
                       `,
                     }}
                   >
-                    {/* 内部高光 */}
+                    {/* 鍐呴儴楂樺厜 */}
                     <div 
                       className="absolute inset-0 rounded-2xl opacity-50"
                       style={{
                         background: `radial-gradient(circle at 50% 0%, ${accentColor}30, transparent 70%)`,
                       }}
                     />
-                    {/* 流动效果 */}
+                    {/* 娴佸姩鏁堟灉 */}
                     <motion.div
                       className="absolute inset-0 rounded-2xl"
                       animate={{
@@ -577,7 +566,7 @@ export default function LyricsDisplay({
                 {renderLyricLine(lyric, isCurrent)}
               </motion.p>
               
-              {/* 传统位置的翻译 */}
+              {/* 浼犵粺浣嶇疆鐨勭炕璇?*/}
               {translationEnabled && translationPosition === 'traditional' && lyric.translation && isCurrent && (
                 <motion.p
                   initial={{ opacity: 0, y: -10 }}

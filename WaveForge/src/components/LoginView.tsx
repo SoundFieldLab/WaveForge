@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, RefreshCw, Copy, Check, ExternalLink } from 'lucide-react'
-import Toast from './Toast'
+import GlobalToast from './GlobalToast'
 
 interface LoginViewProps {
   platform: 'netease' | 'qq'
@@ -179,15 +179,6 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
 
   return (
     <>
-      {/* Toast通知 - 独立于LoginView之外 */}
-      <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100000] pointer-events-none">
-        <Toast 
-          show={showCopiedToast}
-          message="已复制指令"
-          type="success"
-        />
-      </div>
-
       <div className="fixed inset-0 w-full h-full overflow-hidden z-50">
         {/* 动态背景 */}
       <motion.div 
@@ -416,6 +407,14 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
           </div>
         </motion.div>
       </div>
+      
+      {/* 全局 Toast 通知 */}
+      <GlobalToast 
+        show={showCopiedToast}
+        message="已复制指令！请前往 y.qq.com 按 F12 打开控制台粘贴"
+        type="info"
+        onClose={() => setShowCopiedToast(false)}
+      />
     </div>
     </>
   )

@@ -71,6 +71,16 @@ html, body, #root {
   background: rgba(255, 255, 255, 0.3);
 }
 
+/* 隐藏滚动条 */
+.scrollbar-hide {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE and Edge */
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}
+
 /* 进度条样式 - 无滑块，只增强对比度 */
 .progress-slider::-webkit-slider-thumb {
   appearance: none;

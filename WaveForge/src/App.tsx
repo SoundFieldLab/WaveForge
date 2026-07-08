@@ -19,6 +19,7 @@ import { useColorThief } from './hooks/useColorThief'
 import { useAudioPlayer } from './hooks/useAudioPlayer'
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer'
 import { Song, getSongUrl, getLyrics, getProxiedImageUrl } from './services/musicApi'
+import { cacheManager } from './services/cacheManager'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Home } from 'lucide-react'
 
@@ -202,9 +203,39 @@ function App() {
     }
     
     window.addEventListener('translationSettingsChanged', handleTranslationChange)
+    window.addEventListener('translationPositionChanged', handleTranslationChange)
     
     return () => {
       window.removeEventListener('translationSettingsChanged', handleTranslationChange)
+      window.removeEventListener('translationPositionChanged', handleTranslationChange)
+    }
+  }, [])
+  
+  // 全局错误处理
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      console.error('全局错误:', event.error)
+      cacheManager.logError(event.error)
+    }
+    
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('未处理的Promise拒绝:', event.reason)
+      cacheManager.logError(event.reason)
+    }
+    
+    const handleBeforeUnload = () => {
+      // 关闭软件时清理缓存
+      cacheManager.clearOnClose()
+    }
+    
+    window.addEventListener('error', handleError)
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    
+    return () => {
+      window.removeEventListener('error', handleError)
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
     }
   }, [])
   
@@ -296,19 +327,6 @@ function App() {
       console.log('🖼️ 原始封面URL:', song.album?.picUrl)
       const proxiedCoverUrl = song.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
       console.log('🖼️ 代理后封面URL:', proxiedCoverUrl)
-
-      // 立即更新曲目信息和封面，避免延迟
-      const newTrack: Track = {
-        id: song.id,
-        title: song.name,
-        artist: song.artists.map(a => a.name).join(', '),
-        album: song.album.name,
-        coverUrl: proxiedCoverUrl,
-        duration: song.duration / 1000,
-      }
-      
-      setCurrentTrack(newTrack)
-      setCurrentTime(0)
       
       console.log('📡 开始并行请求播放URL和歌词...')
       
@@ -334,6 +352,22 @@ function App() {
         return
       }
       
+      console.log('✅ 歌词加载完成，共', songLyrics.length, '行')
+
+      // 立即更新曲目信息和封面，避免延迟
+      const newTrack: Track = {
+        id: song.id,
+        title: song.name,
+        artist: song.artists.map(a => a.name).join(', '),
+        album: song.album.name,
+        coverUrl: proxiedCoverUrl,
+        duration: song.duration / 1000,
+        url,
+      }
+      
+      setCurrentTrack(newTrack)
+      setCurrentTime(0)
+      
       // 平滑切换歌词 - 先淡出再淡入
       setIsTransitioning(true)
       setTimeout(() => {
@@ -342,11 +376,6 @@ function App() {
           setIsTransitioning(false)
         }, 50)
       }, 300)
-      
-      console.log('✅ 歌词加载完成，共', songLyrics.length, '行')
-
-      // 更新URL
-      setCurrentTrack(prev => ({ ...prev, url }))
       
       // 使用新的音频播放器
       await audioPlayer.loadAndPlay(url, volume)
@@ -802,9 +831,9 @@ function App() {
               />
 
               {(() => {
-            // 判断是否为纯音乐：检查前2句歌词是否包含"纯音乐"
-            const isPureMusic = lyrics && lyrics.length > 0 && 
-              lyrics.slice(0, 2).some(lyric => lyric.text.includes('纯音乐'))
+            // 判断是否为纯音乐：1. 检查前2句歌词是否包含"纯音乐" 2. 没有歌词（QQ音乐无歌词情况）
+            const isPureMusic = !lyrics || lyrics.length === 0 || 
+              (lyrics.length > 0 && lyrics.slice(0, 2).some(lyric => lyric.text.includes('纯音乐')))
             
             return isPureMusic ? (
               /* 纯音乐时居中显示 */
@@ -995,6 +1024,13 @@ function App() {
             onSongSelect={handleSongSelect}
             handleSwitchPlatform={() => {
               setProfileInitialPlatform(prev => prev === 'netease' ? 'qq' : 'netease')
+            }}
+            onLogout={(platform) => {
+              if (platform === 'netease') {
+                handleNeteaseLogout()
+              } else {
+                handleQQLogout()
+              }
             }}
           />
         )}
