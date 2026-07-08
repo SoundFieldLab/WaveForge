@@ -721,6 +721,9 @@ export default function ProfileView({
           onSongSelect(song, songs)
           setShowPlaylistDetail(false)
         }}
+        neteaseVip={platform === 'netease' ? vipType > 0 : false}
+        qqVip={platform === 'qq' ? vipType > 0 : false}
+        currentPlatform={platform}
       />
     </div>
   )

@@ -1474,6 +1474,9 @@ export default function HomeView({
         loading={loadingPlaylistSongs}
         onClose={() => setShowPlaylistDetail(false)}
         onSongSelect={onSongSelect}
+        neteaseVip={neteaseVip}
+        qqVip={qqVip}
+        currentPlatform={platform}
       />
     </div>
   )

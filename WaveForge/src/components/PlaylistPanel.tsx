@@ -1,5 +1,5 @@
 ﻿import { motion, AnimatePresence } from 'framer-motion'
-import { X, Play, Music } from 'lucide-react'
+import { X, Play, Music, Crown } from 'lucide-react'
 import { Song } from '../services/musicApi'
 
 interface PlaylistPanelProps {
@@ -8,9 +8,14 @@ interface PlaylistPanelProps {
   playlist: Song[]
   currentIndex: number
   onSongSelect: (index: number) => void
+  neteaseVip?: boolean
+  qqVip?: boolean
+  currentPlatform?: 'netease' | 'qq'
 }
 
-export default function PlaylistPanel({ show, onClose, playlist, currentIndex, onSongSelect }: PlaylistPanelProps) {
+export default function PlaylistPanel({ show, onClose, playlist, currentIndex, onSongSelect, neteaseVip = false, qqVip = false, currentPlatform = 'netease' }: PlaylistPanelProps) {
+  const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
+  
   return (
     <AnimatePresence>
       {show && (
@@ -135,11 +140,9 @@ export default function PlaylistPanel({ show, onClose, playlist, currentIndex, o
                           </div>
                         </div>
 
-                        {/* VIP标识 */}
-                        {song.fee === 1 && (
-                          <div className="px-2 py-0.5 border border-yellow-500 rounded text-yellow-500 text-xs">
-                            VIP
-                          </div>
+                        {/* VIP标识 - 只在非VIP用户看VIP歌曲时显示 */}
+                        {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
+                          <Crown className="w-4 h-4 text-yellow-400 flex-shrink-0" />
                         )}
                       </motion.div>
                     )

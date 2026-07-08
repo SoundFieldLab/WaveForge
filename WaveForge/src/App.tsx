@@ -48,6 +48,7 @@ function App() {
   const [volume, setVolume] = useState(1.0) // 默认100%音量
   const [showSearch, setShowSearch] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [playMode, setPlayMode] = useState<'sequential' | 'shuffle' | 'repeat'>('sequential')
   const [showPlaylist, setShowPlaylist] = useState(false)
   const [showLogin, setShowLogin] = useState(false)
   const [loginPlatform, setLoginPlatform] = useState<'netease' | 'qq'>('netease')
@@ -146,12 +147,19 @@ function App() {
     if (state.duration !== undefined) setDuration(state.duration)
     if (state.volume !== undefined) setVolume(state.volume)
     
-    // 歌曲播放结束，自动播放下一首
+    // 歌曲播放结束，根据播放模式处理
     if (state.ended && playlist.length > 0) {
-      console.log('歌曲结束，准备播放下一首')
-      handleNext()
+      console.log('歌曲结束，播放模式:', playMode)
+      if (playMode === 'repeat') {
+        // 单曲循环：重新播放当前歌曲
+        audioPlayer.seek(0)
+        audioPlayer.play()
+      } else {
+        // 顺序播放或随机播放：播放下一首
+        handleNext()
+      }
     }
-  }, [duration, upNextTime, upNextEnabled, showUpNext, playlist.length, currentIndex]))
+  }, [duration, upNextTime, upNextEnabled, showUpNext, playlist.length, currentIndex, playMode]))
   
   // 封面律动效果
   const [coverPulseEnabled, setCoverPulseEnabled] = useState(() => {
@@ -399,12 +407,25 @@ function App() {
   // 下一曲
   const handleNext = () => {
     if (playlist.length === 0) return
-    // 先重置时间和歌词
+    // 清空当前时间和歌词
     setCurrentTime(0)
     setLyrics([])
-    const newIndex = currentIndex < playlist.length - 1 ? currentIndex + 1 : 0
+    let newIndex
+    if (playMode === 'shuffle') {
+      newIndex = Math.floor(Math.random() * playlist.length)
+    } else {
+      newIndex = currentIndex < playlist.length - 1 ? currentIndex + 1 : 0
+    }
     setCurrentIndex(newIndex)
     loadAndPlaySong(playlist[newIndex])
+  }
+
+  const handlePlayModeChange = () => {
+    setPlayMode(prev => {
+      const modes: Array<'sequential' | 'shuffle' | 'repeat'> = ['sequential', 'shuffle', 'repeat']
+      const nextIndex = (modes.indexOf(prev) + 1) % modes.length
+      return modes[nextIndex]
+    })
   }
 
   const handlePlayPause = () => {
@@ -960,9 +981,11 @@ function App() {
             onPrevious={handlePrevious}
             onNext={handleNext}
             onPlaylistClick={() => setShowPlaylist(true)}
+            backgroundEffect={backgroundEffect}
+            playMode={playMode}
+            onPlayModeChange={handlePlayModeChange}
             accentColor={dominantColor || '#fff'}
             playerTheme={playerTheme}
-            backgroundEffect={backgroundEffect}
           />
         )}
 
@@ -992,6 +1015,9 @@ function App() {
           loadAndPlaySong(playlist[index])
           setShowPlaylist(false)
         }}
+        neteaseVip={neteaseVip}
+        qqVip={qqVip}
+        currentPlatform={currentSong?.platform === 'qq' ? 'qq' : 'netease'}
       />
 
       {/* 登录视图 */}

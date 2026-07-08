@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Music, Play, Clock } from 'lucide-react'
+import { ChevronDown, Music, Play, Clock, Crown } from 'lucide-react'
 import { Song } from '../services/musicApi'
 import { useState, useRef, useEffect } from 'react'
 
@@ -16,6 +16,9 @@ interface PlaylistDetailPanelProps {
   loading: boolean
   onClose: () => void
   onSongSelect: (song: Song, playlist: Song[]) => void
+  neteaseVip?: boolean
+  qqVip?: boolean
+  currentPlatform?: 'netease' | 'qq'
 }
 
 export default function PlaylistDetailPanel({
@@ -24,8 +27,12 @@ export default function PlaylistDetailPanel({
   songs,
   loading,
   onClose,
-  onSongSelect
+  onSongSelect,
+  neteaseVip = false,
+  qqVip = false,
+  currentPlatform = 'netease'
 }: PlaylistDetailPanelProps) {
+  const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
   const [heightVh, setHeightVh] = useState(80) // 从80vh开始，最大90vh
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   
@@ -346,8 +353,14 @@ export default function PlaylistDetailPanel({
 
                           {/* 歌曲信息 */}
                           <div className="flex-1 min-w-0">
-                            <div className="text-white text-sm font-medium truncate group-hover:text-pink-400 transition-colors">
-                              {song.name}
+                            <div className="flex items-center gap-1.5">
+                              <div className="text-white text-sm font-medium truncate group-hover:text-pink-400 transition-colors">
+                                {song.name}
+                              </div>
+                              {/* VIP标识 - 只在非VIP用户看VIP歌曲时显示 */}
+                              {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
+                                <Crown className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" />
+                              )}
                             </div>
                             <div className="text-white/50 text-xs truncate">
                               {song.artists?.map((a: any) => a.name).join(', ')}
