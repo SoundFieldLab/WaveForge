@@ -18,7 +18,7 @@ import Toast from './components/Toast'
 import { useColorThief } from './hooks/useColorThief'
 import { useAudioPlayer } from './hooks/useAudioPlayer'
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer'
-import { Song, getSongUrl, getLyrics, getProxiedImageUrl } from './services/musicApi'
+import { Song, getSongUrl, getLyrics, getProxiedImageUrl, LyricLine } from './services/musicApi'
 import { cacheManager } from './services/cacheManager'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Home } from 'lucide-react'
@@ -55,7 +55,7 @@ function App() {
   const [showProfile, setShowProfile] = useState(false)
   const [profileInitialPlatform, setProfileInitialPlatform] = useState<'netease' | 'qq'>('netease')
   const [showHome, setShowHome] = useState(true) // 是否显示首页
-  const [lyrics, setLyrics] = useState<{ time: number; text: string }[]>([])
+  const [lyrics, setLyrics] = useState<LyricLine[]>([])
   const [playlist, setPlaylist] = useState<Song[]>([])
   const [currentIndex, setCurrentIndex] = useState(-1)
   const [showUpNext, setShowUpNext] = useState(false)
