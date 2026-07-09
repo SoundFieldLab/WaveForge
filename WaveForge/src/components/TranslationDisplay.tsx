@@ -4,31 +4,46 @@ import { useEffect, useState } from 'react'
 interface TranslationDisplayProps {
   translation: string
   show: boolean
+  songId?: string | number // 添加歌曲ID作为key
 }
 
-export default function TranslationDisplay({ translation, show }: TranslationDisplayProps) {
+export default function TranslationDisplay({ translation, show, songId }: TranslationDisplayProps) {
   return (
-    <AnimatePresence>
+    <AnimatePresence mode="wait">
       {show && translation && (
         <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          exit={{ opacity: 0, x: 20 }}
+          key={`translation-${songId}`}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 10 }}
           transition={{ duration: 0.3, ease: [0.4, 0, 0.2, 1] }}
-          className="fixed bottom-8 right-8 z-30 max-w-md"
-          style={{ left: 'calc(50% + 340px)' }} // 在进度条药丸右侧
+          className="fixed bottom-8 z-30"
+          style={{ 
+            left: 'calc(50% + 360px)', // 调整位置，避免与进度条重叠
+            width: 'auto',
+            maxWidth: 'calc(50% - 400px)', // 确保不超出屏幕
+            minWidth: '280px' // 增加最小宽度
+          }}
         >
           <div
-            className="rounded-2xl border p-4 shadow-2xl"
+            className="rounded-full border px-6 py-3 shadow-2xl" // 改为 rounded-full 药丸形状
             style={{
-              background: 'rgba(0, 0, 0, 0.6)',
+              background: 'rgba(0, 0, 0, 0.7)',
               backdropFilter: 'blur(40px) saturate(180%)',
               WebkitBackdropFilter: 'blur(40px) saturate(180%)',
-              borderColor: 'rgba(255, 255, 255, 0.15)',
-              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
+              borderColor: 'rgba(255, 255, 255, 0.2)',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
             }}
           >
-            <div className="text-white/90 text-base leading-relaxed">
+            <div 
+              className="text-white/90 text-base leading-snug text-center"
+              style={{
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                writingMode: 'horizontal-tb'
+              }}
+            >
               {translation}
             </div>
           </div>

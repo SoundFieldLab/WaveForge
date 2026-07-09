@@ -188,7 +188,7 @@ export default function PlayerControls({
                 onChange={handleSeekChange}
                 onMouseUp={handleSeekMouseUp}
                 onTouchEnd={handleSeekTouchEnd}
-                className="progress-slider w-full h-2 rounded-full appearance-none cursor-pointer"
+                className="progress-slider w-full h-2.5 hover:h-3.5 rounded-full appearance-none cursor-pointer transition-all duration-200"
                 style={{
                   background: playerTheme === 'dark'
                     ? backgroundEffect === 'transparent'

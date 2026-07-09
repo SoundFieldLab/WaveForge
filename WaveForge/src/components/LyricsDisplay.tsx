@@ -35,7 +35,7 @@ export default function LyricsDisplay({
   onCurrentTranslationChange,
   onSeek
 }: LyricsDisplayProps) {
-  const [currentIndex, setCurrentIndex] = useState(0)
+  const [currentIndex, setCurrentIndex] = useState(-1)
   const [, setManualScrollOffset] = useState(0) // 
   const [isManualScrolling, setIsManualScrolling] = useState(false)
   const [isJumping, setIsJumping] = useState(false)
@@ -71,7 +71,8 @@ export default function LyricsDisplay({
   
   // 澶勭悊榧犳爣婊氳疆婊氬姩
   const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault()
+    // 娉細React 浜嬩欢涓殑 onWheel 鏄 passive 鐨勶紝鏃犳硶 preventDefault
+    // 浣嗘垜浠笉闇€瑕侀樆姝㈤粯璁よ涓猴紝鐩存帴澶勭悊婊氬姩閫昏緫
     
     // 璺宠浆鏈熼棿绂佺敤婊氬姩
     if (isJumping) return
@@ -279,12 +280,24 @@ export default function LyricsDisplay({
     if (displayLyricsData.length === 0) return
     const adjustedTime = currentTime + 0.5 + lyricOffset
     
+    // 如果还没到第一句歌词的时间，保持 -1
+    if (adjustedTime < displayLyricsData[0].time) {
+      if (currentIndex !== -1) {
+        setCurrentIndex(-1)
+        if (onCurrentTranslationChange) {
+          onCurrentTranslationChange('')
+        }
+      }
+      return
+    }
+    
     for (let i = displayLyricsData.length - 1; i >= 0; i--) {
       if (adjustedTime >= displayLyricsData[i].time) {
         if (currentIndex !== i) {
           setCurrentIndex(i)
           if (onCurrentTranslationChange) {
-            onCurrentTranslationChange(displayLyricsData[i].translation ?? '')
+            const translation = displayLyricsData[i].translation ?? ''
+            onCurrentTranslationChange(translation)
           }
         }
         break
@@ -312,22 +325,27 @@ export default function LyricsDisplay({
   const displayLyrics = displayLyricsData
 
   // 浼樺寲鐨勯€愬瓧娓叉煋
-  const renderLyricLine = (lyric: LyricLine, isCurrent: boolean) => {
+  const renderLyricLine = (lyric: LyricLine, isCurrent: boolean, lineIndex: number) => {
     if (wordByWordEnabled && isCurrent && lyric.words && lyric.words.length > 0) {
       const currentMs = currentTime * 1000
       
       return (
         <span className="inline-flex flex-wrap gap-1">
-          {lyric.words.filter(w => w.word && w.word.trim() !== '').map((word, wordIndex) => {
+          {lyric.words
+            .map((word, originalIndex) => ({ word, originalIndex }))
+            .filter(({ word }) => word.word && word.word.trim() !== '')
+            .map(({ word, originalIndex }) => {
             const wordAbsStartTime = word.startTime
             const wordAbsEndTime = wordAbsStartTime + word.duration
             
             const isCompleted = currentMs >= wordAbsEndTime
             const isActive = currentMs >= wordAbsStartTime && currentMs < wordAbsEndTime
             
+            const wordKey = `word-${lineIndex}-${originalIndex}`
+            
             return (
               <motion.span
-                key={`${lyric.time}-${wordIndex}-${word.word}`}
+                key={wordKey}
                 className="inline-block relative"
                 initial={false}
                 animate={{
@@ -459,10 +477,12 @@ export default function LyricsDisplay({
             opacityValue = Math.max(opacityValue, 0.5)
           }
           
+          const lyricKey = `lyric-${globalIndex}-${lyric.time ?? 'notime'}`
+          
           return (
             <motion.div
               data-index={globalIndex}
-              key={`${lyric.time}-${globalIndex}`}
+              key={lyricKey}
               className="text-left max-w-4xl relative mb-6 pointer-events-auto cursor-pointer"
               onMouseEnter={() => handleLyricMouseEnter(globalIndex)}
               onMouseLeave={handleLyricMouseLeave}
@@ -563,22 +583,25 @@ export default function LyricsDisplay({
                   WebkitTextStroke: isCurrent && lyricGlow ? '0.5px rgba(255, 255, 255, 0.1)' : 'none',
                 }}
               >
-                {renderLyricLine(lyric, isCurrent)}
+                {renderLyricLine(lyric, isCurrent, globalIndex)}
               </motion.p>
               
-              {/* 浼犵粺浣嶇疆鐨勭炕璇?*/}
+              {/* 浼犵粺浣嶇疆鐨勭炕璇?- 鍙樉绀哄綋鍓嶆挱鏀捐 */}
               {translationEnabled && translationPosition === 'traditional' && lyric.translation && isCurrent && (
                 <motion.p
                   initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 0.6, y: 0 }}
+                  animate={{ 
+                    opacity: 0.7, 
+                    y: 0 
+                  }}
                   exit={{ opacity: 0, y: -10 }}
                   transition={{ duration: 0.3 }}
-                  className="text-white/60 text-lg mt-3 font-light italic relative z-10"
+                  className="text-white/70 text-lg mt-3 font-light italic relative z-10"
                   style={{
                     textShadow: '0 2px 8px rgba(0,0,0,0.5)',
                     letterSpacing: '0.02em',
                     paddingLeft: '0.5rem',
-                    borderLeft: '3px solid rgba(255, 255, 255, 0.2)',
+                    borderLeft: '3px solid rgba(255, 255, 255, 0.3)',
                   }}
                 >
                   {lyric.translation}

@@ -469,7 +469,7 @@ export default function ProfileView({
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {createdPlaylists.map((playlist, index) => (
                       <motion.div
-                        key={playlist.id || `created-${index}`}
+                        key={`created-${playlist.id || index}`}
                         whileHover={{ scale: 1.05 }}
                         onClick={() => handlePlaylistClick(playlist)}
                         className="bg-white/5 hover:bg-white/10 rounded-xl p-4 cursor-pointer transition-all"
@@ -495,7 +495,7 @@ export default function ProfileView({
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {subscribedPlaylists.map((playlist, index) => (
                       <motion.div
-                        key={playlist.id || `subscribed-${index}`}
+                        key={`subscribed-${playlist.id || index}`}
                         whileHover={{ scale: 1.05 }}
                         onClick={() => handlePlaylistClick(playlist)}
                         className="bg-white/5 hover:bg-white/10 rounded-xl p-4 cursor-pointer transition-all"

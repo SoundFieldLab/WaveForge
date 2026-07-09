@@ -11,6 +11,7 @@ interface ToastProps {
   duration?: number
   onClose?: () => void
   style?: React.CSSProperties
+  accentColor?: string // 添加自定义主题色
 }
 
 // 确保样式只注入一次
@@ -70,8 +71,64 @@ export default function Toast({
   type = 'success',
   duration = 4000,
   onClose,
-  style
+  style,
+  accentColor
 }: ToastProps) {
+  
+  // 将十六进制颜色转换为RGB
+  const hexToRgb = (hex: string): { r: number; g: number; b: number } | null => {
+    const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex)
+    return result ? {
+      r: parseInt(result[1], 16),
+      g: parseInt(result[2], 16),
+      b: parseInt(result[3], 16)
+    } : null
+  }
+  
+  // 获取颜色配置
+  const getColorStyle = () => {
+    // 如果有自定义主题色，使用主题色
+    if (accentColor && type === 'info') {
+      const rgb = hexToRgb(accentColor)
+      if (rgb) {
+        return {
+          background: `linear-gradient(135deg, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.45) 0%, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)`,
+          blob: `radial-gradient(circle, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.5) 0%, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.3) 35%, transparent 65%)`,
+          pulse: `radial-gradient(ellipse 70% 90% at 65% 45%, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.45) 0%, transparent 55%)`
+        }
+      }
+    }
+    
+    // 默认颜色
+    if (type === 'success') {
+      return {
+        background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.45) 0%, rgba(22, 163, 74, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)',
+        blob: 'radial-gradient(circle, rgba(34, 197, 94, 0.5) 0%, rgba(74, 222, 128, 0.3) 35%, transparent 65%)',
+        pulse: 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(74, 222, 128, 0.45) 0%, transparent 55%)'
+      }
+    } else if (type === 'error') {
+      return {
+        background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0%, rgba(220, 38, 38, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)',
+        blob: 'radial-gradient(circle, rgba(239, 68, 68, 0.5) 0%, rgba(248, 113, 113, 0.3) 35%, transparent 65%)',
+        pulse: 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(248, 113, 113, 0.45) 0%, transparent 55%)'
+      }
+    } else if (type === 'warning') {
+      return {
+        background: 'linear-gradient(135deg, rgba(234, 179, 8, 0.45) 0%, rgba(202, 138, 4, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)',
+        blob: 'radial-gradient(circle, rgba(234, 179, 8, 0.5) 0%, rgba(250, 204, 21, 0.3) 35%, transparent 65%)',
+        pulse: 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(250, 204, 21, 0.45) 0%, transparent 55%)'
+      }
+    } else {
+      // info 默认使用红色
+      return {
+        background: 'linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0%, rgba(220, 38, 38, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)',
+        blob: 'radial-gradient(circle, rgba(239, 68, 68, 0.5) 0%, rgba(248, 113, 113, 0.3) 35%, transparent 65%)',
+        pulse: 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(248, 113, 113, 0.45) 0%, transparent 55%)'
+      }
+    }
+  }
+  
+  const colorStyle = getColorStyle()
   
   const getIcon = () => {
     switch (type) {
@@ -115,13 +172,7 @@ export default function Toast({
             flex items-center gap-3
           "
           style={{
-            background: type === 'success'
-              ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.45) 0%, rgba(22, 163, 74, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)'
-              : type === 'error'
-              ? 'linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0%, rgba(220, 38, 38, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)'
-              : type === 'warning'
-              ? 'linear-gradient(135deg, rgba(234, 179, 8, 0.45) 0%, rgba(202, 138, 4, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)'
-              : 'linear-gradient(135deg, rgba(239, 68, 68, 0.45) 0%, rgba(220, 38, 38, 0.35) 50%, rgba(255, 255, 255, 0.15) 100%)'  // info用网易云红色
+            background: colorStyle.background
           }}
           >
             {/* 液态颜色层1 - 主光晕，模糊融入玻璃 */}
@@ -134,13 +185,7 @@ export default function Toast({
                 top: '50%',
                 filter: 'blur(35px)',
                 opacity: 0.6,
-                background: type === 'success' 
-                  ? 'radial-gradient(circle, rgba(34, 197, 94, 0.5) 0%, rgba(74, 222, 128, 0.3) 35%, transparent 65%)'
-                  : type === 'error'
-                  ? 'radial-gradient(circle, rgba(239, 68, 68, 0.5) 0%, rgba(248, 113, 113, 0.3) 35%, transparent 65%)'
-                  : type === 'warning'
-                  ? 'radial-gradient(circle, rgba(234, 179, 8, 0.5) 0%, rgba(250, 204, 21, 0.3) 35%, transparent 65%)'
-                  : 'radial-gradient(circle, rgba(239, 68, 68, 0.5) 0%, rgba(248, 113, 113, 0.3) 35%, transparent 65%)',  // info用网易云红色
+                background: colorStyle.blob
               }}
             />
 
@@ -154,13 +199,7 @@ export default function Toast({
                 top: '50%',
                 filter: 'blur(28px)',
                 opacity: 0.4,
-                background: type === 'success' 
-                  ? 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(74, 222, 128, 0.45) 0%, transparent 55%)'
-                  : type === 'error'
-                  ? 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(248, 113, 113, 0.45) 0%, transparent 55%)'
-                  : type === 'warning'
-                  ? 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(250, 204, 21, 0.45) 0%, transparent 55%)'
-                  : 'radial-gradient(ellipse 70% 90% at 65% 45%, rgba(248, 113, 113, 0.45) 0%, transparent 55%)',  // info用网易云红色
+                background: colorStyle.pulse
               }}
             />
 

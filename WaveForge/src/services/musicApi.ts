@@ -348,8 +348,12 @@ export async function getSongUrl(id: number | string, platform: 'netease' | 'qq'
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
       return data.url || null
     } else {
-      const apiUrl = `${API_BASE}/netease/song/url?id=${id}`
-      console.log(`  请求URL: ${apiUrl}`)
+      // 网易云音乐
+      const cookie = localStorage.getItem('netease_cookie') || ''
+      console.log(`  Cookie: ${cookie ? '已提供 (长度:' + cookie.length + ')' : '未提供'}`)
+      
+      const apiUrl = `${API_BASE}/netease/song/url?id=${id}${cookie ? '&cookie=' + encodeURIComponent(cookie) : ''}`
+      console.log(`  请求URL: ${apiUrl.substring(0, 100)}...`)
       
       const response = await fetch(apiUrl)
       console.log(`  响应状态: ${response.status} ${response.statusText}`)
@@ -502,20 +506,32 @@ export async function getLyrics(id: number | string, platform: 'netease' | 'qq' 
       const response = await fetch(`${API_BASE}/netease/lyric?id=${id}`)
       const data = await response.json()
       
+      console.log('🎵 [getLyrics] 网易云歌词数据:')
+      console.log('  歌曲ID:', id)
+      console.log('  原文歌词:', data.lrc?.lyric ? `存在 (${data.lrc.lyric.length}字符)` : '不存在')
+      console.log('  翻译歌词:', data.tlyric?.lyric ? `存在 (${data.tlyric.lyric.length}字符)` : '不存在')
+      console.log('  逐字歌词:', data.yrc?.lyric ? `存在 (${data.yrc.lyric.length}字符)` : '不存在')
+      
       // 获取翻译歌词
       const translationText = data.tlyric?.lyric || ''
       const translations = parseLyric(translationText)
       
+      console.log('  解析后翻译行数:', translations.length)
+      
       // 如果有逐字歌词(yrc)，优先使用
       if (data.yrc?.lyric) {
         const lyrics = parseYrc(data.yrc.lyric)
-        return mergeLyricsWithTranslation(lyrics, translations)
+        const merged = mergeLyricsWithTranslation(lyrics, translations)
+        console.log('  最终歌词行数:', merged.length, '(使用逐字歌词)')
+        return merged
       }
       
       // 否则使用普通歌词
       const lyricText = data.lrc?.lyric || ''
       const lyrics = parseLyric(lyricText)
-      return mergeLyricsWithTranslation(lyrics, translations)
+      const merged = mergeLyricsWithTranslation(lyrics, translations)
+      console.log('  最终歌词行数:', merged.length, '(使用普通歌词)')
+      return merged
     }
   } catch (error) {
     console.error('获取歌词失败:', error)
@@ -527,11 +543,36 @@ export async function getLyrics(id: number | string, platform: 'netease' | 'qq' 
 function mergeLyricsWithTranslation(lyrics: LyricLine[], translations: LyricLine[]): LyricLine[] {
   if (translations.length === 0) return lyrics
   
-  return lyrics.map(lyric => {
-    const translation = translations.find(t => Math.abs(t.time - lyric.time) < 0.1)
+  // 使用贪婪算法：为每句歌词找最接近的翻译
+  const usedTranslations = new Set<number>()
+  
+  return lyrics.map((lyric) => {
+    let bestMatch: LyricLine | undefined
+    let minDiff = Infinity
+    
+    // 找到时间最接近且未使用的翻译
+    translations.forEach((t, index) => {
+      if (usedTranslations.has(index)) return
+      
+      const diff = Math.abs(t.time - lyric.time)
+      // 放宽阈值到 1 秒，因为逐字歌词的时间戳可能与翻译有较大偏差
+      if (diff < 1.0 && diff < minDiff) {
+        minDiff = diff
+        bestMatch = t
+      }
+    })
+    
+    // 标记已使用的翻译
+    if (bestMatch) {
+      const matchIndex = translations.indexOf(bestMatch)
+      if (matchIndex !== -1) {
+        usedTranslations.add(matchIndex)
+      }
+    }
+    
     return {
       ...lyric,
-      translation: translation?.text || ''
+      translation: bestMatch?.text || ''
     }
   })
 }

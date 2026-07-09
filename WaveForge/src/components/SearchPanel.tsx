@@ -546,7 +546,7 @@ export default function SearchPanel({ onSongSelect, onClose, playerTheme = 'dark
               <div className="space-y-2">
                 {displayedResults.map((song, index) => (
                 <motion.div
-                  key={song.id || song.mid || `search-song-${index}`}
+                  key={`search-result-${index}`}
                   whileHover={{ scale: 1.01 }}
                   onClick={() => {
                     onSongSelect(song, allResults)

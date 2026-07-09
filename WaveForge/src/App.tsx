@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
 import AlbumCoverPlayer from './components/AlbumCoverPlayer'
 import LyricsDisplay from './components/LyricsDisplay'
 import PlayerControls from './components/PlayerControls'
@@ -66,18 +66,20 @@ function App() {
   const upNextTime = 8 // 提前8秒显示下一首
   
   // Toast通知状态
-  // Toast消息管理（支持多个Toast堆叠）
+  // Toast消息队列，支持多个Toast堆叠
   const [toasts, setToasts] = useState<Array<{
     id: number
     message: string
     type: 'success' | 'error' | 'info'
+    accentColor?: string // 添加主题色支持
   }>>([])
   const toastIdRef = useRef(0)
+  const lastPlayModeChangeRef = useRef(0) // 添加防抖
   
   // 添加Toast的辅助函数
-  const addToast = (message: string, type: 'success' | 'error' | 'info') => {
+  const addToast = (message: string, type: 'success' | 'error' | 'info', accentColor?: string) => {
     const id = toastIdRef.current++
-    setToasts(prev => [...prev, { id, message, type }])
+    setToasts(prev => [...prev, { id, message, type, accentColor }])
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id))
     }, 4000)
@@ -94,8 +96,8 @@ function App() {
   })
   const [currentTranslation, setCurrentTranslation] = useState('')
   
-  // 检查当前歌曲是否有翻译
-  const hasTranslation = lyrics.some(lyric => lyric.translation)
+  // 纯音乐模式状态
+  const [isPureMusic, setIsPureMusic] = useState(false)
   
   // 主题色
   const [playerTheme, setPlayerTheme] = useState<'dark' | 'light'>(() => {
@@ -129,6 +131,24 @@ function App() {
   const [qqVip, setQQVip] = useState(false)
   const [_qqCookie, setQQCookie] = useState('')
   
+  // 检查当前歌曲是否有翻译（需要考虑VIP状态和试听限制）
+  const hasTranslation = (() => {
+    // 首先检查歌词中是否有翻译
+    const lyricsHasTranslation = lyrics.some(lyric => lyric.translation)
+    if (!lyricsHasTranslation || !currentSong) return false
+    
+    // 判断是否是VIP歌曲
+    const isVipSong = currentSong.fee === 1 || currentSong.fee === 4 || currentSong.vip
+    if (!isVipSong) return true // 非VIP歌曲，有翻译就显示
+    
+    // VIP歌曲需要检查用户是否是VIP
+    const platform = currentSong.platform || 'netease'
+    const userIsVip = platform === 'netease' ? neteaseVip : qqVip
+    
+    // VIP歌曲 + 非VIP用户 = 试听模式，不显示翻译按钮
+    return userIsVip
+  })()
+  
   // 使用新的音频播放器
   const audioPlayer = useAudioPlayer(useCallback((state) => {
     if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying)
@@ -136,7 +156,18 @@ function App() {
       setCurrentTime(state.currentTime)
       
       // 检查是否接近结束，显示"即将播放"提示
-      if (upNextEnabled && duration > 0 && duration - state.currentTime <= upNextTime && duration - state.currentTime > 0) {
+      // 单曲循环模式下不显示即将播放
+      const timeRemaining = duration - state.currentTime
+      
+      // 提前1秒关闭所有弹窗
+      if (playMode !== 'repeat' && upNextEnabled && duration > 0 && timeRemaining <= upNextTime + 1 && timeRemaining > upNextTime) {
+        // 在即将播放弹出前1秒，关闭所有弹窗
+        if (showSettings) setShowSettings(false)
+        if (showProfile) setShowProfile(false)
+        if (showSearch) setShowSearch(false)
+      }
+      
+      if (playMode !== 'repeat' && upNextEnabled && duration > 0 && timeRemaining <= upNextTime && timeRemaining > 0) {
         if (!showUpNext && playlist.length > 0 && currentIndex < playlist.length - 1) {
           setShowUpNext(true)
         }
@@ -314,6 +345,9 @@ function App() {
   // 加载并播放歌曲
   const loadAndPlaySong = async (song: Song) => {
     try {
+      // 清空当前翻译（切歌时）
+      setCurrentTranslation('')
+      
       const platform = song.platform || 'netease'
       const songId = platform === 'qq' ? (song.mid || song.id) : song.id
       
@@ -376,6 +410,11 @@ function App() {
       setCurrentTrack(newTrack)
       setCurrentTime(0)
       
+      // 判断是否为纯音乐
+      const checkIsPureMusic = !songLyrics || songLyrics.length === 0 || 
+        (songLyrics.length > 0 && songLyrics.slice(0, 2).some(lyric => lyric.text.includes('纯音乐')))
+      setIsPureMusic(checkIsPureMusic)
+      
       // 平滑切换歌词 - 先淡出再淡入
       setIsTransitioning(true)
       setTimeout(() => {
@@ -399,6 +438,7 @@ function App() {
     // 先重置时间和歌词，避免显示错误的歌词索引
     setCurrentTime(0)
     setLyrics([])
+    setIsPureMusic(false) // 重置纯音乐状态
     const newIndex = currentIndex > 0 ? currentIndex - 1 : playlist.length - 1
     setCurrentIndex(newIndex)
     loadAndPlaySong(playlist[newIndex])
@@ -410,6 +450,7 @@ function App() {
     // 清空当前时间和歌词
     setCurrentTime(0)
     setLyrics([])
+    setIsPureMusic(false) // 重置纯音乐状态
     let newIndex
     if (playMode === 'shuffle') {
       newIndex = Math.floor(Math.random() * playlist.length)
@@ -419,12 +460,46 @@ function App() {
     setCurrentIndex(newIndex)
     loadAndPlaySong(playlist[newIndex])
   }
+  
+  // 获取下一首歌曲（不播放，仅用于显示）
+  const nextSongToShow = useMemo((): Song | undefined => {
+    if (playlist.length === 0) return undefined
+    if (playMode === 'repeat') return undefined // 单曲循环不显示下一首
+    if (playMode === 'shuffle') {
+      // 随机模式：随机选一首（但不是当前这首）
+      const otherSongs = playlist.filter((_, index) => index !== currentIndex)
+      if (otherSongs.length === 0) return undefined
+      return otherSongs[Math.floor(Math.random() * otherSongs.length)]
+    }
+    // 列表循环：下一首
+    if (currentIndex < playlist.length - 1) {
+      return playlist[currentIndex + 1]
+    }
+    return playlist[0]
+  }, [playlist.length, playMode, currentIndex, showUpNext]) // 使用 playlist.length 而不是 playlist 引用
 
   const handlePlayModeChange = () => {
+    // 防抖：如果在 300ms 内重复调用，忽略
+    const now = Date.now()
+    if (now - lastPlayModeChangeRef.current < 300) {
+      return
+    }
+    lastPlayModeChangeRef.current = now
+    
     setPlayMode(prev => {
       const modes: Array<'sequential' | 'shuffle' | 'repeat'> = ['sequential', 'shuffle', 'repeat']
       const nextIndex = (modes.indexOf(prev) + 1) % modes.length
-      return modes[nextIndex]
+      const newMode = modes[nextIndex]
+      
+      // 显示切换提示，使用封面主题色
+      const modeNames = {
+        'sequential': '列表循环',
+        'shuffle': '随机播放',
+        'repeat': '单曲循环'
+      }
+      addToast(modeNames[newMode], 'info', dominantColor || '#ef4444')
+      
+      return newMode
     })
   }
 
@@ -614,6 +689,7 @@ function App() {
             show={true}
             message={toast.message}
             type={toast.type}
+            accentColor={toast.accentColor}
             style={{ 
               animationDelay: `${index * 50}ms` // 每个Toast延迟50ms出现，产生层叠效果
             }}
@@ -709,22 +785,25 @@ function App() {
         {(!currentSong || showHome) && (
           <>
             {/* 菜单按钮 - 右上角 */}
-            <div className="fixed top-6 right-6 z-50">
-              <ControlMenu
-                onSettingsClick={() => setShowSettings(true)}
-                onProfileClick={() => {
-                  // 默认使用已登录的平台，优先网易云
-                  setProfileInitialPlatform(neteaseLoggedIn ? 'netease' : 'qq')
-                  setShowProfile(true)
-                }}
-              />
-            </div>
+            {!showUpNext && (
+              <div className="fixed top-6 right-6 z-50">
+                <ControlMenu
+                  onSettingsClick={() => setShowSettings(true)}
+                  onProfileClick={() => {
+                    // 默认使用已登录的平台，优先网易云
+                    setProfileInitialPlatform(neteaseLoggedIn ? 'netease' : 'qq')
+                    setShowProfile(true)
+                  }}
+                />
+              </div>
+            )}
             
             {/* 搜索按钮 - 菜单按钮下方，垂直对齐 */}
-            <div className="fixed top-[100px] right-6 z-50">
-              <button
-                onClick={() => setShowSearch(true)}
-                className="relative w-[52px] h-[52px] flex items-center justify-center rounded-full shadow-2xl hover:scale-110 transition-all duration-300 overflow-hidden group"
+            {!showUpNext && (
+              <div className="fixed top-[100px] right-6 z-50">
+                <button
+                  onClick={() => setShowSearch(true)}
+                  className="relative w-[52px] h-[52px] flex items-center justify-center rounded-full shadow-2xl hover:scale-110 transition-all duration-300 overflow-hidden group"
                 style={{
                   background: 'linear-gradient(135deg, rgba(15,15,25,0.75) 0%, rgba(0,0,0,0.85) 100%)',
                   backdropFilter: 'blur(60px) saturate(180%)',
@@ -761,6 +840,7 @@ function App() {
                 </svg>
               </button>
             </div>
+            )}
           </>
         )}
 
@@ -801,11 +881,15 @@ function App() {
         />
         
         {/* 即将播放提示 */}
-        {playlist.length > 0 && currentIndex >= 0 && currentIndex < playlist.length - 1 && (
+        {playlist.length > 0 && playMode !== 'repeat' && (
           <UpNextNotification
             show={showUpNext}
-            nextSong={playlist[currentIndex + 1]}
+            nextSong={nextSongToShow}
             secondsRemaining={duration - currentTime}
+            onSkip={() => {
+              setShowUpNext(false) // 立即隐藏即将播放
+              handleNext()
+            }}
           />
         )}
 
@@ -852,14 +936,11 @@ function App() {
               />
 
               {(() => {
-            // 判断是否为纯音乐：1. 检查前2句歌词是否包含"纯音乐" 2. 没有歌词（QQ音乐无歌词情况）
-            const isPureMusic = !lyrics || lyrics.length === 0 || 
-              (lyrics.length > 0 && lyrics.slice(0, 2).some(lyric => lyric.text.includes('纯音乐')))
-            
+            // 使用状态中的纯音乐标志，而不是实时计算
             return isPureMusic ? (
               /* 纯音乐时居中显示 */
               <motion.div
-                key={`no-lyrics-${currentSong.id}`}
+                key={`no-lyrics-${currentSong.id || currentSong.mid || 'unknown'}`}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -892,7 +973,7 @@ function App() {
               ) : (
                 /* 有歌词时左右布局 */
                 <motion.div
-                  key={`with-lyrics-${currentSong.id}`}
+                  key={`with-lyrics-${currentSong.id || currentSong.mid || 'unknown'}`}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
@@ -901,7 +982,7 @@ function App() {
                 >
                   {/* 左侧：封面展示区 */}
                   <motion.div
-                    key={`cover-${currentSong.id}`}
+                    key={`cover-${currentSong.id || currentSong.mid || 'unknown'}`}
                     initial={{ opacity: 0, x: -30 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: -30 }}
@@ -923,7 +1004,7 @@ function App() {
 
                   {/* 右侧：歌词显示区 */}
                   <motion.div
-                    key={`lyrics-${currentSong.id}`}
+                    key={`lyrics-${currentSong.id || currentSong.mid || 'unknown'}`}
                     initial={{ opacity: 0, x: 30 }}
                     animate={{ opacity: 1, x: 0 }}
                     exit={{ opacity: 0, x: 30 }}
@@ -934,7 +1015,7 @@ function App() {
                     <div className="flex-1 flex items-center justify-center">
                       <AnimatePresence mode="wait">
                         <motion.div
-                          key={currentSong.id}
+                          key={currentSong.id || currentSong.mid || 'unknown'}
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: isTransitioning ? 0 : 1, y: 0 }}
                           exit={{ opacity: 0, y: -20 }}
@@ -959,6 +1040,7 @@ function App() {
                     <TranslationDisplay
                       translation={currentTranslation}
                       show={translationEnabled && translationPosition === 'bottom-right'}
+                      songId={currentSong?.id}
                     />
                   </motion.div>
                 </motion.div>

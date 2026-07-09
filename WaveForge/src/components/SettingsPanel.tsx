@@ -1,4 +1,4 @@
-﻿import { useState } from 'react'
+﻿import React, { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, Trash2 } from 'lucide-react'
 import LoginButton from './LoginButton'
@@ -149,19 +149,19 @@ export default function SettingsPanel({
   return (
     <AnimatePresence>
       {show && (
-        <>
+        <React.Fragment key="settings-modal">
           {/* 背景遮罩 */}
           <motion.div
             key="settings-backdrop"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={onClose}
-            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
-          />
+          onClick={onClose}
+          className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
+        />
 
-          {/* 设置面板 */}
-          <motion.div
+        {/* 设置面板 */}
+        <motion.div
             key="settings-panel"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
@@ -803,11 +803,12 @@ export default function SettingsPanel({
             </div>
             </div> {/* 关闭内容层 div from line 144 */}
           </motion.div>
-        </>
+        </React.Fragment>
       )}
       
       {/* 首页自定义弹窗 */}
       <HomeCustomizeModal 
+        key="home-customize-modal"
         show={showHomeCustomize}
         onClose={() => setShowHomeCustomize(false)}
         playerTheme={playerTheme}
@@ -815,6 +816,7 @@ export default function SettingsPanel({
       
       {/* 缓存清理弹窗 */}
       <CacheClearModal 
+        key="cache-clear-modal"
         show={showCacheClear}
         onClose={() => setShowCacheClear(false)}
         playerTheme={playerTheme}

@@ -1138,7 +1138,7 @@ export default function HomeView({
                     <div className="space-y-1">
                       {moduleSongs.map((song, index) => (
                         <motion.div
-                          key={`${song.id || song.mid || 'song'}-${index}`}
+                          key={`module-song-${index}`}
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
                           transition={{ delay: index * 0.01 }}
@@ -1312,7 +1312,7 @@ export default function HomeView({
                 <AnimatePresence mode="popLayout">
                 {userPlaylists.map((playlist: any, index: number) => (
                   <motion.div
-                    key={`${platform}-${playlist.id || `playlist-${index}`}`}
+                    key={`${platform || 'unknown'}-playlist-${playlist.id || index}`}
                     layout
                     initial={{ opacity: 0, scale: 0.8, y: 20 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}

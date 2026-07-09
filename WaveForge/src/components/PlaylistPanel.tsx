@@ -81,69 +81,100 @@ export default function PlaylistPanel({ show, onClose, playlist, currentIndex, o
                     const isCurrent = index === currentIndex
                     return (
                       <motion.div
-                        key={`${song.id || song.mid || 'song'}-${index}`}
+                        key={`queue-song-${index}`}
                         initial={{ opacity: 0, x: 20 }}
                         animate={{ opacity: 1, x: 0 }}
                         transition={{ delay: index * 0.02 }}
-                        whileHover={{ scale: 1.02 }}
+                        whileHover={{ scale: 1.02, y: -2 }}
+                        whileTap={{ scale: 0.98 }}
                         onClick={() => onSongSelect(index)}
-                        className={`group flex items-center gap-3 p-3 rounded-xl cursor-pointer transition-all ${
+                        className={`group relative flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all overflow-hidden ${
                           isCurrent
-                            ? 'bg-white/20 shadow-lg'
+                            ? 'bg-white/20 shadow-lg ring-2 ring-white/30'
                             : 'bg-white/5 hover:bg-white/10'
                         }`}
                         style={{
-                          backdropFilter: 'blur(10px)',
-                          WebkitBackdropFilter: 'blur(10px)',
+                          backdropFilter: 'blur(20px)',
+                          WebkitBackdropFilter: 'blur(20px)',
+                          minHeight: '80px'
                         }}
                       >
-                        {/* 序号或播放图标 */}
-                        <div className="w-8 flex items-center justify-center">
-                          {isCurrent ? (
-                            <motion.div
-                              animate={{ scale: [1, 1.2, 1] }}
-                              transition={{ repeat: Infinity, duration: 1.5 }}
-                            >
-                              <Play className="w-4 h-4 text-white fill-white" />
-                            </motion.div>
-                          ) : (
-                            <span className="text-white/40 text-sm font-medium">
-                              {index + 1}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* 封面 */}
-                        <div className="w-12 h-12 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
-                          {song.album?.picUrl ? (
-                            <img
-                              src={song.album.picUrl}
-                              alt={song.name}
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="w-full h-full flex items-center justify-center">
-                              <Music className="w-5 h-5 text-white/20" />
-                            </div>
-                          )}
-                        </div>
-
-                        {/* 歌曲信息 */}
-                        <div className="flex-1 min-w-0">
-                          <div className={`font-medium truncate ${
-                            isCurrent ? 'text-white' : 'text-white/80'
-                          }`}>
-                            {song.name}
-                          </div>
-                          <div className="text-white/50 text-sm truncate">
-                            {song.artists.map(a => a.name).join(', ')}
-                          </div>
-                        </div>
-
-                        {/* VIP标识 - 只在非VIP用户看VIP歌曲时显示 */}
-                        {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
-                          <Crown className="w-4 h-4 text-yellow-400 flex-shrink-0" />
+                        {/* 背景封面模糊效果 */}
+                        {song.album?.picUrl && (
+                          <div 
+                            className="absolute inset-0 opacity-20"
+                            style={{
+                              backgroundImage: `url(${song.album.picUrl})`,
+                              backgroundSize: 'cover',
+                              backgroundPosition: 'center',
+                              filter: 'blur(20px)',
+                              transform: 'scale(1.1)'
+                            }}
+                          />
                         )}
+                        
+                        {/* 渐变遮罩 */}
+                        <div 
+                          className="absolute inset-0"
+                          style={{
+                            background: isCurrent 
+                              ? 'linear-gradient(135deg, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0.05) 100%)'
+                              : 'linear-gradient(135deg, rgba(0,0,0,0.3) 0%, rgba(0,0,0,0.1) 100%)'
+                          }}
+                        />
+                        
+                        {/* 内容层 */}
+                        <div className="relative flex items-center gap-4 w-full z-10">
+                          {/* 序号或播放图标 */}
+                          <div className="w-10 flex items-center justify-center flex-shrink-0">
+                            {isCurrent ? (
+                              <motion.div
+                                animate={{ scale: [1, 1.2, 1] }}
+                                transition={{ repeat: Infinity, duration: 1.5 }}
+                              >
+                                <Play className="w-5 h-5 text-white fill-white drop-shadow-lg" />
+                              </motion.div>
+                            ) : (
+                              <span className="text-white/50 text-base font-semibold">
+                                {index + 1}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* 封面 - 加大 */}
+                          <div className="w-16 h-16 rounded-xl overflow-hidden bg-white/10 flex-shrink-0 shadow-lg ring-2 ring-white/20">
+                            {song.album?.picUrl ? (
+                              <img
+                                src={song.album.picUrl}
+                                alt={song.name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-white/10 to-white/5">
+                                <Music className="w-6 h-6 text-white/30" />
+                              </div>
+                            )}
+                          </div>
+
+                          {/* 歌曲信息 */}
+                          <div className="flex-1 min-w-0">
+                            <div className={`font-semibold truncate text-base ${
+                              isCurrent ? 'text-white drop-shadow-md' : 'text-white/90'
+                            }`}>
+                              {song.name}
+                            </div>
+                            <div className={`text-sm truncate mt-1 ${
+                              isCurrent ? 'text-white/70' : 'text-white/50'
+                            }`}>
+                              {song.artists.map(a => a.name).join(', ')}
+                            </div>
+                          </div>
+
+                          {/* VIP标识 - 只在非VIP用户看VIP歌曲时显示 */}
+                          {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
+                            <Crown className="w-5 h-5 text-yellow-400 flex-shrink-0 drop-shadow-lg" />
+                          )}
+                        </div>
                       </motion.div>
                     )
                   })}
