@@ -18,7 +18,7 @@ import { prepareLyricWords } from '../utils/lyricWordTiming'
 
 const DEFAULT_STATE: DesktopPlayerSnapshot = {
   song: null, lyric: null, playing: false, spectrum: [0, 0, 0, 0, 0], enabled: false,
-  form: 'card', accentColor: '#ec4899', playlist: [], currentIndex: -1, progress: 0,
+  form: 'card', accentColor: '#ec4899', playlist: [], currentIndex: -1, progress: 0, duration: 0,
   hasTranslation: false, hasRomaji: false, volume: 0.5, muted: false, page: 'home',
 }
 

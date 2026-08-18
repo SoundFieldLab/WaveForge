@@ -20,8 +20,8 @@ export type PlaybackSurface =
 export interface PlaybackOrigin {
   mode?: ViewMode
   surface: PlaybackSurface
-  platform?: 'netease' | 'qq' | 'apple'
-  searchMode?: 'netease' | 'qq' | 'apple' | 'fused'
+  platform?: import('../services/platforms').MusicPlatform
+  searchMode?: import('../services/platforms').MusicPlatform | 'fused'
   artistId?: string | number
   albumId?: string | number
   artistTab?: 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'similarArtists' | 'info'

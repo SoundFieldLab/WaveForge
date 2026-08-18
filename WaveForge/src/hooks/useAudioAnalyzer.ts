@@ -1,4 +1,7 @@
-﻿import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
+
+/** 对数频谱段数（45Hz~12kHz 按对数均分），供频谱可视化按频段取能。 */
+export const ANALYZER_SPECTRUM_BANDS = 24
 
 export interface AudioAnalyzerData {
   bass: number
@@ -8,6 +11,8 @@ export interface AudioAnalyzerData {
   beat: number
   accent: number
   flux: number
+  /** 24 段对数频谱（低→高，对数压缩到 0..1）。分析器未启用时为全零。 */
+  spectrum: Float32Array
 }
 
 export interface AudioAnalyzerStore {
@@ -17,6 +22,7 @@ export interface AudioAnalyzerStore {
 
 const EMPTY_ANALYSIS: AudioAnalyzerData = Object.freeze({
   bass: 0, mid: 0, high: 0, overall: 0, beat: 0, accent: 0, flux: 0,
+  spectrum: new Float32Array(ANALYZER_SPECTRUM_BANDS),
 })
 const clamp = (value: number) => Math.min(1, Math.max(0, value))
 const logCompress = (value: number, amount = 6) => Math.log1p(amount * clamp(value)) / Math.log1p(amount)
@@ -120,6 +126,24 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
         const rawHigh = measureBand(2600, 12000)
         const rawOverall = rawBass * 0.38 + rawMid * 0.42 + rawHigh * 0.2
         const nyquist = analyser.context.sampleRate / 2
+        // 24 段对数频谱（45Hz~12kHz）：供 3D 频谱河等按频段取能；
+        // 每段取均值+峰值混合后对数压缩，低频段窄（bin 少）、高频段宽，符合听感分布
+        const spectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+        const specLogRatio = Math.log(12000 / 45)
+        for (let k = 0; k < ANALYZER_SPECTRUM_BANDS; k += 1) {
+          const f0 = 45 * Math.exp((k / ANALYZER_SPECTRUM_BANDS) * specLogRatio)
+          const f1 = 45 * Math.exp(((k + 1) / ANALYZER_SPECTRUM_BANDS) * specLogRatio)
+          const start = Math.max(1, Math.floor(f0 / nyquist * data.length))
+          const end = Math.min(data.length, Math.max(start + 1, Math.ceil(f1 / nyquist * data.length)))
+          let sum = 0
+          let peak = 0
+          for (let idx = start; idx < end; idx += 1) {
+            const v = data[idx] / 255
+            sum += v
+            if (v > peak) peak = v
+          }
+          spectrum[k] = logCompress((sum / Math.max(1, end - start)) * 0.62 + peak * 0.38, 5)
+        }
         const fluxStart = Math.max(1, Math.floor(45 / nyquist * data.length))
         const fluxEnd = Math.min(data.length, Math.ceil(10000 / nyquist * data.length))
         let positiveFlux = 0
@@ -176,6 +200,7 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
           beat: beatPulse,
           accent: accentPulse,
           flux: logCompress(fluxOnset * 12, 4),
+          spectrum,
         })
       }
       // 仅在有订阅者且窗口可见时续帧（无消费者 = 无脉冲组件挂载，如桌面模式/首页）

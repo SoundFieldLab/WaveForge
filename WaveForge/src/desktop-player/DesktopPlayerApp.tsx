@@ -18,7 +18,7 @@ const DEFAULT_STATE: DesktopPlayerSnapshot = {
   accentColor: '#ec4899',
   playlist: [],
   currentIndex: -1,
-  progress: 0,
+  progress: 0, duration: 0,
   hasTranslation: false,
   hasRomaji: false,
   volume: 0.5,
