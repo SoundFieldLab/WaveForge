@@ -1,0 +1,64 @@
+name: Release
+
+# 打 tag（v0.2.0 等）自动：构建 Android APK → 发布到 Gitee + GitHub Release → 生成并推送 update.json
+# 仓库需配置 Secret：GITEE_TOKEN（Gitee 私人令牌，发布 Gitee Release 与推送 update.json 用）
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout（完整历史，供 update.json 推送到双源）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: npm install
+        run: npm ci
+
+      - name: 拉取 nodejs-mobile 运行时
+        run: npm run fetch:nodejs-mobile
+
+      - name: 组装安卓资产（前端 + 后端 bundle + 设备端依赖）
+        run: npm run build:android
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK / CMake / 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: 构建 APK（debug 签名，侧载用；正式签名后续接入 secrets）
+        run: cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: 添加 Gitee remote（update.json 推送目标）
+        run: git remote add gitee "https://gitee.com/kirito666233/wave-forge.git"
+
+      - name: 发布到 Gitee + GitHub，生成并推送 update.json
+        run: |
+          NOTES=$(git tag -l --format='%(subject)%0a%0a%(body)' "$GITHUB_REF_NAME" | sed 's/^ *//' | sed '/^$/d' | head -20)
+          node scripts/publish-release.mjs \
+            --apk android/app/build/outputs/apk/debug/app-debug.apk \
+            --notes "$NOTES"
+        env:
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}

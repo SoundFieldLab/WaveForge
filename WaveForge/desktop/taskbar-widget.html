@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+  html, body { background: transparent; overflow: hidden; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  #root {
+    position: relative;
+    width: 360px;
+    height: 68px;
+    background: linear-gradient(135deg, rgba(28, 30, 40, 0.92), rgba(16, 17, 24, 0.92));
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    backdrop-filter: blur(20px) saturate(160%);
+    -webkit-backdrop-filter: blur(20px) saturate(160%);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 10px;
+    color: #fff;
+  }
+  .cover {
+    width: 44px; height: 44px; border-radius: 10px; flex-shrink: 0;
+    background: rgba(255,255,255,0.08); object-fit: cover;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+  }
+  .cover img { width: 100%; height: 100%; border-radius: 10px; object-fit: cover; }
+  .info { flex: 1; min-width: 0; }
+  .title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: rgba(255,255,255,0.95); }
+  .artist { font-size: 11px; color: rgba(255,255,255,0.5); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .time { font-size: 10px; color: rgba(255,255,255,0.4); font-variant-numeric: tabular-nums; margin-top: 3px; display: flex; align-items: center; gap: 6px; }
+  .progress { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,0.14); position: relative; cursor: pointer; }
+  .progress .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: linear-gradient(90deg, #FB7299, #ff9db6); }
+  .controls { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  .btn {
+    width: 28px; height: 28px; border-radius: 50%; border: none; cursor: pointer;
+    background: transparent; color: rgba(255,255,255,0.75);
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s, color 0.15s, transform 0.1s;
+  }
+  .btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
+  .btn:active { transform: scale(0.92); }
+  .btn.play { width: 32px; height: 32px; background: linear-gradient(135deg, #FB7299, #f0437a); color: #fff; box-shadow: 0 2px 10px rgba(251,114,153,0.4); }
+  .btn.play:hover { background: linear-gradient(135deg, #fb85a4, #f25485); }
+  .btn.close { color: rgba(255,255,255,0.4); }
+  .btn.close:hover { background: rgba(255,80,80,0.2); color: #ff8a8a; }
+  .btn svg { width: 16px; height: 16px; }
+  .btn.play svg { width: 17px; height: 17px; }
+  .btn.vol svg { width: 15px; height: 15px; }
+  .placeholder { width: 20px; height: 20px; color: rgba(255,255,255,0.35); }
+  body.draggable #root { -webkit-app-region: drag; }
+  body.draggable .btn { -webkit-app-region: no-drag; }
+</style>
+</head>
+<body class="draggable">
+  <div id="root">
+    <div class="cover" id="cover">
+      <svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+    </div>
+    <div class="info">
+      <div class="title" id="title">未在播放</div>
+      <div class="artist" id="artist"></div>
+      <div class="time">
+        <span id="cur">0:00</span>
+        <div class="progress" id="progress"><div class="fill" id="fill"></div></div>
+        <span id="dur">0:00</span>
+      </div>
+    </div>
+    <div class="controls">
+      <button class="btn" id="prev" title="上一首" aria-label="上一首">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM20 6l-10 6 10 6z"/></svg>
+      </button>
+      <button class="btn play" id="play" title="播放/暂停" aria-label="播放/暂停">
+        <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+      </button>
+      <button class="btn" id="next" title="下一首" aria-label="下一首">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10 6-10 6z"/></svg>
+      </button>
+      <button class="btn vol" id="vol" title="静音" aria-label="音量">
+        <svg id="volOn" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zM16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+        <svg id="volOff" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M3 9v6h4l5 5V4L7 9H3zM16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM19 9l4 6M23 9l-4 6"/></svg>
+      </button>
+      <button class="btn close" id="close" title="隐藏" aria-label="隐藏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+  </div>
+<script src="./taskbar-widget-preload.cjs"></script>
+<script>
+  const $ = (id) => document.getElementById(id)
+  const state = { playing: false, title: '', artist: '', cover: '', cur: 0, dur: 0, muted: false }
+  const bridge = window.taskbarWidget
+
+  function fmt(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '0:00'
+    const m = Math.floor(sec / 60)
+    const s = Math.floor(sec % 60)
+    return m + ':' + String(s).padStart(2, '0')
+  }
+
+  function apply() {
+    $('title').textContent = state.title || '未在播放'
+    $('artist').textContent = state.artist || ''
+    const hasSong = Boolean(state.title)
+    const coverEl = $('cover')
+    coverEl.innerHTML = ''
+    if (hasSong && state.cover) {
+      const img = document.createElement('img')
+      img.src = state.cover
+      img.onerror = () => {
+        coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
+      }
+      coverEl.appendChild(img)
+    } else {
+      coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
+    }
+    $('playIcon').style.display = state.playing ? 'none' : 'block'
+    $('pauseIcon').style.display = state.playing ? 'block' : 'none'
+    $('volOn').style.display = state.muted ? 'none' : 'block'
+    $('volOff').style.display = state.muted ? 'block' : 'none'
+    $('cur').textContent = fmt(state.cur)
+    $('dur').textContent = fmt(state.dur)
+    const ratio = state.dur > 0 ? Math.min(1, Math.max(0, state.cur / state.dur)) : 0
+    $('fill').style.width = (ratio * 100) + '%'
+  }
+
+  bridge.onState((next) => {
+    Object.assign(state, next || {})
+    apply()
+  })
+
+  $('play').addEventListener('click', () => bridge.action('toggle'))
+  $('prev').addEventListener('click', () => bridge.action('prev'))
+  $('next').addEventListener('click', () => bridge.action('next'))
+  $('vol').addEventListener('click', () => bridge.action('toggleMute'))
+  $('close').addEventListener('click', () => bridge.action('close'))
+  $('progress').addEventListener('click', (e) => {
+    const rect = $('progress').getBoundingClientRect()
+    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    bridge.action('seek', ratio * (state.dur || 0))
+  })
+
+  apply()
+</script>
+</body>
+</html>

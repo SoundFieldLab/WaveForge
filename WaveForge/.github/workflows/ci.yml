@@ -1,0 +1,127 @@
+# CI 检查：每次 push 代码，GitHub 自动帮你跑「类型检查 + 单测 + 构建」。
+# 任何一步红了，提交旁边就会出现红叉；全绿说明 master 在（至少）Web 端和类型层面是能跑的。
+#
+# 触发时机：
+#   push（任何分支）       -> 快速检查（几秒钟 ~ 1 分钟，便宜）
+#   push master           -> 额外构建 Android TV APK（证明 TV 端没被合并搞炸）
+#   打 tag（v*）           -> 额外构建 Windows 安装包（出包自动化，release.yml 负责发布）
+#   手动触发（Actions 页面点 "Run workflow"）-> 随时可以强制跑所有构建
+#
+# 各平台构建命令都在 package.json 里（npm run build:electron / build:android），
+# CI 只是把这些命令挂到 GitHub 上自动执行，机器装好对应工具链（Android SDK 等）即可。
+
+name: CI 检查
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # ---------- 快速检查：类型 + 单测 + 前端构建 ----------
+  checks:
+    name: 快速检查（类型/单测/构建）
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 生成赞助商数据（prebuild 钩子，src/data 被 gitignore）
+        run: npm run prebuild
+
+      - name: 类型检查（tsc --noEmit）
+        run: npm run lint
+
+      - name: 运行单测（vitest）
+        run: npm run test
+
+      - name: 前端构建（vite build）
+        run: npm run build
+
+  # ---------- Android TV APK 构建（master push / 手动触发） ----------
+  android-build:
+    name: Android TV APK 构建
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 拉取 nodejs-mobile 运行时
+        run: npm run fetch:nodejs-mobile
+
+      - name: 组装安卓资产（前端 + 后端 bundle + 设备端依赖）
+        run: npm run build:android
+
+      - name: 安装 JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK / CMake / 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: 构建 APK
+        run: cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: 上传 APK（可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveforge-tv-debug.apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+
+  # ---------- Windows 安装包构建（打 tag / 手动触发） ----------
+  windows-build:
+    name: Windows 安装包构建
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 下载 Electron 运行时（npm ci 的 allow-scripts 会跳过其安装脚本）
+        run: node node_modules/electron/install.js
+
+      - name: 构建 Windows 安装包（electron-builder nsis）
+        run: npm run build:electron
+
+      - name: 上传安装包（可下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: waveforge-windows-installer
+          path: release/*.exe

@@ -7,3 +7,45 @@ release
 Thumbs.db
 *.local
 data/
+cache/
+venv/
+tmp/
+__pycache__/
+*.py[cod]
+
+# 嵌入式 Python 运行时（由 npm run bundle-python 生成，可重建）
+resources/python-embed/
+
+# 城市数据拆分产物（由 vite 插件 scripts/split-city-data.mjs 在 build/dev 前自动生成，可重建）
+src/generated/city-data/
+
+# Playwright 测试产物
+.playwright-mcp/
+
+# 会话/抓取临时文件（本地开发痕迹，不入库）
+.codex-*
+.browser-*
+.codex-perf/
+local-page.*
+.patch-test.txt
+probe*.wav
+logs/
+
+# TV 壁纸扫码上传（dev-tv-server.mjs 存项目根，运行时生成不入库）
+waveforge-wallpapers/
+
+# TV 端兑换授权记录（dev 时存项目根，运行时生成不入库）
+tv-license.json
+
+# 根目录文档：仅保留 4 个核心 md（AGENTS/README/HANDOVER/CONTEXT），其余本地文档不入库
+/*.md
+!/AGENTS.md
+!/README.md
+!/HANDOVER.md
+!/CONTEXT.md
+
+# v3 融合临时目录（用户待删，不入库）
+temp/
+
+# 调试截图
+wf-screen-check.png

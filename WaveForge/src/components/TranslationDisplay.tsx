@@ -10,7 +10,7 @@ interface TranslationDisplayProps {
 export default function TranslationDisplay({ translation, show, songId }: TranslationDisplayProps) {
   return (
     <AnimatePresence mode="wait">
-      {show && translation && (
+      {show && translation && translation.trim() !== '' && translation.trim() !== '//' && (
         <motion.div
           key={`translation-${songId}`}
           initial={{ opacity: 0, y: 10 }}

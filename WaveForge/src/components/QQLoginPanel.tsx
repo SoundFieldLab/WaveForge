@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Music, ExternalLink, Copy, Check } from 'lucide-react'
+import { X, Music, ExternalLink, Copy, Check, QrCode } from 'lucide-react'
+import { useTvBack } from '../tv/tvCore'
 
 interface QQLoginPanelProps {
   onClose: () => void
@@ -8,11 +9,49 @@ interface QQLoginPanelProps {
 }
 
 export default function QQLoginPanel({ onClose, onLoginSuccess }: QQLoginPanelProps) {
+  // TV 遥控器 BACK 关闭登录面板
+  useTvBack(() => {
+    onClose()
+    return true
+  })
   const [cookie, setCookie] = useState('')
   const [copied, setCopied] = useState(false)
   const [error, setError] = useState('')
+  const copiedTimerRef = useRef<number | null>(null)
+  const loginControllerRef = useRef<AbortController | null>(null)
+  const mountedRef = useRef(false)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current)
+      copiedTimerRef.current = null
+      loginControllerRef.current?.abort()
+      loginControllerRef.current = null
+    }
+  }, [])
+
+  // TV：原生应用内扫码登录，抓到 cookie 后自动完成登录
+  const nativeBridge = (window as any).WaveForgeNative
+  const canNativeLogin = Boolean(nativeBridge?.openQQLogin)
+
+  useEffect(() => {
+    const onCookieCaptured = (e: Event) => {
+      const detail = (e as CustomEvent<{ cookie?: string }>).detail
+      if (!detail?.cookie) return
+      if (mountedRef.current) onLoginSuccess(detail.cookie)
+    }
+    window.addEventListener('qqLoginCookieCaptured', onCookieCaptured)
+    return () => window.removeEventListener('qqLoginCookieCaptured', onCookieCaptured)
+  }, [onLoginSuccess])
 
   const handleOpenQQMusic = () => {
+    // TV：没有浏览器可调起，直接走应用内扫码登录
+    if (nativeBridge?.openQQLogin) {
+      nativeBridge.openQQLogin()
+      return
+    }
     window.open('https://y.qq.com', '_blank')
   }
 
@@ -26,45 +65,57 @@ document.cookie
     
     try {
       await navigator.clipboard.writeText(instructions)
+      if (!mountedRef.current) return
       setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
+      if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current)
+      copiedTimerRef.current = window.setTimeout(() => {
+        copiedTimerRef.current = null
+        if (mountedRef.current) setCopied(false)
+      }, 2000)
     } catch (err) {
       console.error('复制失败:', err)
     }
   }
 
   const handleLogin = async () => {
-    if (!cookie.trim()) {
-      setError('请输入Cookie')
+    const trimmedCookie = cookie.trim()
+    if (!trimmedCookie) {
+      setError('请输入 Cookie')
       return
     }
 
-    try {
-      // 验证Cookie格式（简单检查是否包含关键字段）
-      if (!cookie.includes('uin') && !cookie.includes('qm_keyst') && !cookie.includes('qqmusic_key')) {
-        setError('Cookie格式不正确，请确保包含完整的Cookie信息')
-        return
-      }
+    if (!trimmedCookie.includes('uin') && !trimmedCookie.includes('qm_keyst') && !trimmedCookie.includes('qqmusic_key')) {
+      setError('Cookie 格式不正确，请从 y.qq.com 登录后获取完整的 Cookie')
+      return
+    }
 
-      // 发送到后端验证
+    loginControllerRef.current?.abort()
+    const controller = new AbortController()
+    loginControllerRef.current = controller
+    try {
       const res = await fetch('http://localhost:3001/api/qq/user/setCookie', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ data: cookie }),
+        body: JSON.stringify({ data: trimmedCookie }),
+        signal: controller.signal,
       })
-
       const result = await res.json()
-      
+      if (!mountedRef.current || loginControllerRef.current !== controller) return
+
       if (result.result === 100) {
-        onLoginSuccess(cookie)
+        onLoginSuccess(trimmedCookie)
       } else {
-        setError('登录失败，请检查Cookie是否有效')
+        setError('Cookie 无效，请检查后重试')
       }
     } catch (err) {
-      console.error('登录错误:', err)
+      if (controller.signal.aborted) return
+      if (!mountedRef.current) return
+      console.error('QQ 登录失败:', err)
       setError('登录失败，请重试')
+    } finally {
+      if (loginControllerRef.current === controller) loginControllerRef.current = null
     }
   }
 
@@ -74,7 +125,8 @@ document.cookie
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-8"
+        className="fixed inset-0 z-50 flex items-center justify-center p-8"
+        data-tv-scope
         onClick={onClose}
       >
         <motion.div
@@ -115,13 +167,24 @@ document.cookie
               </div>
               <div className="flex-1">
                 <h3 className="text-white font-medium mb-2">打开QQ音乐官网并登录</h3>
-                <button
-                  onClick={handleOpenQQMusic}
-                  className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  打开 y.qq.com
-                </button>
+                {canNativeLogin ? (
+                  // TV：应用内扫码登录（无浏览器可调起）
+                  <button
+                    onClick={() => nativeBridge.openQQLogin()}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    手机扫码登录（电视）
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleOpenQQMusic}
+                    className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    打开 y.qq.com
+                  </button>
+                )}
               </div>
             </div>
 

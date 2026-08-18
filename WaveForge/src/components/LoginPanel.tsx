@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, Loader2 } from 'lucide-react'
+import { useTvBack } from '../tv/tvCore'
 
 interface LoginPanelProps {
   platform: 'netease' | 'qq'
@@ -9,98 +10,123 @@ interface LoginPanelProps {
 }
 
 export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginPanelProps) {
+  // TV 遥控器 BACK 关闭登录面板
+  useTvBack(() => {
+    onClose()
+    return true
+  })
   const [qrCode, setQrCode] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState<'pending' | 'scanned' | 'success' | 'expired'>('pending')
-  const [pollTimer, setPollTimer] = useState<number | null>(null)
+  // 🔧 修复内存泄漏：改用 ref 而非 state
+  const pollTimerRef = useRef<number | null>(null)
+  const requestControllerRef = useRef<AbortController | null>(null)
+  const pollControllerRef = useRef<AbortController | null>(null)
+  const generationRef = useRef(0)
+  const mountedRef = useRef(false)
 
-  const platformName = platform === 'netease' ? '网易云音乐' : 'QQ音乐'
+  const platformName = platform === 'netease' ? '?????' : 'QQ??'
   const platformColor = platform === 'netease' ? 'bg-red-600' : 'bg-green-600'
 
-  // 获取二维码
-  useEffect(() => {
-    if (platform === 'netease') {
-      fetchQRCode()
-    }
-    return () => {
-      if (pollTimer) clearInterval(pollTimer)
-    }
-  }, [])
-
-  const fetchQRCode = async () => {
-    setLoading(true)
-    setStatus('pending')
-    try {
-      // 1. 获取二维码key
-      const keyRes = await fetch('http://localhost:3001/api/netease/login/qr/key')
-      const keyData = await keyRes.json()
-      console.log('获取到key:', keyData)
-      
-      if (!keyData.data?.unikey) {
-        throw new Error('获取key失败')
-      }
-      
-      const key = keyData.data.unikey
-      
-      // 2. 创建二维码
-      const qrRes = await fetch(`http://localhost:3001/api/netease/login/qr/create?key=${key}`)
-      const qrData = await qrRes.json()
-      console.log('获取到二维码:', qrData)
-      
-      if (qrData.data?.qrimg) {
-        setQrCode(qrData.data.qrimg)
-        startPolling(key)
-        setLoading(false)
-      } else {
-        throw new Error('二维码数据格式错误')
-      }
-    } catch (error) {
-      console.error('获取二维码失败:', error)
-      setLoading(false)
-      setStatus('expired')
-    }
+  const clearPolling = () => {
+    if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
+    pollTimerRef.current = null
+    pollControllerRef.current?.abort()
+    pollControllerRef.current = null
   }
 
-  const startPolling = (key: string) => {
-    const timer = setInterval(async () => {
+  const isCurrent = (generation: number) => mountedRef.current && generationRef.current === generation
+
+  const startPolling = (key: string, generation: number) => {
+    clearPolling()
+
+    const poll = async () => {
+      if (!isCurrent(generation)) return
+      const controller = new AbortController()
+      pollControllerRef.current = controller
+      let finished = false
       try {
         const endpoint = platform === 'netease'
           ? `/api/netease/login/qr/check?key=${key}`
           : `/api/qq/login/qr/check?key=${key}`
-        
-        const res = await fetch(`http://localhost:3001${endpoint}`)
+        const res = await fetch(`http://localhost:3001${endpoint}`, { signal: controller.signal })
         const data = await res.json()
-        
+        if (!isCurrent(generation)) return
+
         if (platform === 'netease') {
-          // 800: 二维码过期
-          // 801: 等待扫码
-          // 802: 待确认
-          // 803: 授权登录成功
           if (data.code === 800) {
             setStatus('expired')
-            clearInterval(timer)
+            finished = true
           } else if (data.code === 802) {
             setStatus('scanned')
           } else if (data.code === 803) {
             setStatus('success')
-            clearInterval(timer)
-            onLoginSuccess(data.cookie)
+            finished = true
+            if (data.cookie) onLoginSuccess(data.cookie)
+            else console.error('login succeeded without cookie')
           }
-        } else {
-          // QQ音乐的状态码
-          if (data.code === 0) {
-            setStatus('success')
-            clearInterval(timer)
-            onLoginSuccess(data.cookie)
-          }
+        } else if (data.code === 0) {
+          setStatus('success')
+          finished = true
+          onLoginSuccess(data.cookie)
         }
       } catch (error) {
-        console.error('轮询登录状态失败:', error)
+        if (!controller.signal.aborted) console.error('login polling failed:', error)
+      } finally {
+        if (pollControllerRef.current === controller) pollControllerRef.current = null
+        if (!finished && isCurrent(generation)) {
+          pollTimerRef.current = window.setTimeout(() => void poll(), 2000)
+        }
       }
-    }, 2000) // 每2秒轮询一次
+    }
 
-    setPollTimer(timer as unknown as number)
+    pollTimerRef.current = window.setTimeout(() => void poll(), 2000)
   }
+
+  const fetchQRCode = async () => {
+    const generation = ++generationRef.current
+    clearPolling()
+    requestControllerRef.current?.abort()
+    const controller = new AbortController()
+    requestControllerRef.current = controller
+    setLoading(true)
+    setStatus('pending')
+    try {
+      const keyRes = await fetch('http://localhost:3001/api/netease/login/qr/key', { signal: controller.signal })
+      const keyData = await keyRes.json()
+      if (!keyData.data?.unikey) throw new Error('failed to get QR key')
+
+      const key = keyData.data.unikey
+      const qrRes = await fetch(`http://localhost:3001/api/netease/login/qr/create?key=${key}`, { signal: controller.signal })
+      const qrData = await qrRes.json()
+      if (!isCurrent(generation)) return
+
+      if (!qrData.data?.qrimg) throw new Error('invalid QR response')
+      setQrCode(qrData.data.qrimg)
+      setLoading(false)
+      startPolling(key, generation)
+    } catch (error) {
+      if (controller.signal.aborted || !isCurrent(generation)) return
+      console.error('failed to load login QR code:', error)
+      setLoading(false)
+      setStatus('expired')
+    } finally {
+      if (requestControllerRef.current === controller) requestControllerRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    mountedRef.current = true
+    if (platform === 'netease') void fetchQRCode()
+    else setLoading(false)
+    return () => {
+      mountedRef.current = false
+      generationRef.current += 1
+      clearPolling()
+      requestControllerRef.current?.abort()
+      requestControllerRef.current = null
+    }
+  }, [platform])
 
   const getStatusText = () => {
     switch (status) {
@@ -124,6 +150,7 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-8"
+        data-tv-scope
         onClick={onClose}
       >
         <motion.div

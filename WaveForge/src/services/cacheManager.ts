@@ -1,12 +1,19 @@
+import type { MusicPlatform } from './platforms'
 /**
  * 缓存管理服务
  * 用于管理歌单封面、歌单列表等数据的本地缓存
  */
 
+import { indexedDBCache } from './indexedDBCache'
+import { clearUserPlaylistsMemoryCache } from './playlistService'
+import { getCacheLimits } from '../tv/perfMode'
+
 interface CacheItem {
   data: any
   timestamp: number
   size: number // 字节
+  accessCount?: number // 访问次数
+  lastAccess?: number // 最后访问时间
 }
 
 interface CacheStats {
@@ -26,7 +33,11 @@ interface AutoClearSettings {
   targets: {
     covers: boolean
     playlists: boolean
+    lyrics: boolean
     errorLogs: boolean
+    audio: boolean
+    analysis: boolean
+    transitions: boolean
   }
 }
 
@@ -35,13 +46,23 @@ class CacheManager {
   private readonly CACHE_VERSION = '1.0'
   private readonly AUTO_CLEAR_SETTINGS_KEY = 'autoClearSettings'
   private readonly LAST_CLEAR_TIME_KEY = 'lastClearTime'
+  private readonly PENDING_CLOSE_CLEAR_KEY = 'pendingCloseCacheClear'
   
   constructor() {
     // 默认缓存目录
     this.cacheDir = localStorage.getItem('cacheDirectory') || this.getDefaultCacheDir()
     
-    // 检查是否需要自动清理
-    this.checkAutoClear()
+    void this.initializeCleanup().catch(error => console.error('自动缓存清理失败:', error))
+  }
+
+  private async initializeCleanup(): Promise<void> {
+    await indexedDBCache.cleanupExpired()
+    const settings = this.getAutoClearSettings()
+    if (localStorage.getItem(this.PENDING_CLOSE_CLEAR_KEY) === 'true') {
+      await this.autoCleanCache(settings.targets)
+      localStorage.removeItem(this.PENDING_CLOSE_CLEAR_KEY)
+    }
+    await this.checkAutoClear()
   }
   
   /**
@@ -70,7 +91,9 @@ class CacheManager {
   /**
    * 缓存歌单列表
    */
-  async cachePlaylist(userId: string, platform: 'netease' | 'qq', playlists: any[]) {
+  async cachePlaylist(userId: string, platform: MusicPlatform, playlists: any[]) {
+    userId = userId.trim()
+    if (!userId) throw new Error('缓存用户 ID 不能为空')
     const key = `playlist_${platform}_${userId}`
     const data = JSON.stringify(playlists)
     const size = new Blob([data]).size
@@ -88,7 +111,9 @@ class CacheManager {
   /**
    * 获取缓存的歌单列表
    */
-  async getCachedPlaylist(userId: string, platform: 'netease' | 'qq'): Promise<any[] | null> {
+  async getCachedPlaylist(userId: string, platform: MusicPlatform): Promise<any[] | null> {
+    userId = userId.trim()
+    if (!userId) return null
     const key = `playlist_${platform}_${userId}`
     const cached = localStorage.getItem(key)
     
@@ -97,15 +122,15 @@ class CacheManager {
     try {
       const cacheItem: CacheItem = JSON.parse(cached)
       
-      // 检查是否过期（7天）
+      // 检查是否过期（1小时 - 更短的过期时间以保证数据新鲜度）
       const age = Date.now() - cacheItem.timestamp
-      if (age > 7 * 24 * 60 * 60 * 1000) {
-        console.log('⚠️ 缓存已过期，删除')
+      if (age > 60 * 60 * 1000) {
+        console.log('⚠️ 歌单缓存已过期（超过1小时），删除')
         localStorage.removeItem(key)
         return null
       }
       
-      console.log(`✅ 从缓存加载歌单列表: ${platform} ${userId}`)
+      console.log(`✅ 从缓存加载歌单列表: ${platform} ${userId}（缓存${Math.round(age / 60000)}分钟前）`)
       return cacheItem.data
     } catch (error) {
       console.error('解析缓存失败:', error)
@@ -115,30 +140,59 @@ class CacheManager {
   
   /**
    * 缓存封面图片（使用 Base64）
+   * 使用 LRU 策略，支持大图片缓存
    */
   async cacheCover(url: string, imageData: string) {
+    url = url.trim()
+    if (!url) throw new Error('封面缓存 URL 不能为空')
     const key = `cover_${this.hashUrl(url)}`
     const size = new Blob([imageData]).size
+    
+    const limits = getCacheLimits()
+    const MAX_COVERS = limits.coverCount // 最多缓存的封面数（TV 按性能模式动态）
+    const MAX_SIZE = limits.coverBytes // 封面总大小上限
+    const MAX_SINGLE_IMAGE_SIZE = limits.singleImage // 单张图片最大
+    
+    // 如果单张图片超过 10MB，直接跳过缓存
+    if (size > MAX_SINGLE_IMAGE_SIZE) {
+      console.debug(`⏭️ 跳过缓存超大图片 (${this.formatSize(size)}): ${url.substring(0, 50)}...`)
+      return
+    }
+    
+    // 检查当前封面缓存数量和总大小
+    const coverCount = this.getCoverCount()
+    const currentSize = this.getTotalCoverSize()
+    
+    // 如果超过数量或大小限制，积极清理
+    if (coverCount >= MAX_COVERS || currentSize + size > MAX_SIZE) {
+      const cleanCount = Math.max(50, Math.floor(MAX_COVERS * 0.1)) // 至少清理 50 个或 10%
+      console.log(`📦 封面缓存已达限制 (${coverCount}/${MAX_COVERS}, ${this.formatSize(currentSize)}/${this.formatSize(MAX_SIZE)})，清理 ${cleanCount} 个封面...`)
+      this.cleanLRUCovers(cleanCount)
+    }
     
     const cacheItem: CacheItem = {
       data: imageData,
       timestamp: Date.now(),
-      size
+      size,
+      accessCount: 1,
+      lastAccess: Date.now()
     }
     
     try {
       localStorage.setItem(key, JSON.stringify(cacheItem))
-      console.log(`✅ 已缓存封面: ${url.substring(0, 50)}...`)
+      console.log(`✅ 已缓存封面 [${this.getCoverCount()}/${MAX_COVERS}]: ${url.substring(0, 50)}...`)
     } catch (error) {
-      // localStorage 满了，清理旧的封面
-      console.warn('⚠️ 缓存空间不足，清理旧封面')
-      this.cleanOldCovers(10)
+      // localStorage 满了，激进清理
+      console.warn('⚠️ 缓存空间不足，激进清理封面')
+      this.cleanLRUCovers(Math.max(100, Math.floor(coverCount * 0.2))) // 清理至少 100 个或 20%
       
-      // 重试
+      // 重试一次
       try {
         localStorage.setItem(key, JSON.stringify(cacheItem))
+        console.log(`✅ 已缓存封面（重试成功）: ${url.substring(0, 50)}...`)
       } catch (e) {
-        console.error('缓存封面失败:', e)
+        // 彻底失败，静默忽略（不影响用户体验，只是没有缓存）
+        console.debug('⏭️ 跳过缓存此封面，空间不足')
       }
     }
   }
@@ -147,6 +201,8 @@ class CacheManager {
    * 获取缓存的封面
    */
   async getCachedCover(url: string): Promise<string | null> {
+    url = url.trim()
+    if (!url) return null
     const key = `cover_${this.hashUrl(url)}`
     const cached = localStorage.getItem(key)
     
@@ -160,6 +216,15 @@ class CacheManager {
       if (age > 30 * 24 * 60 * 60 * 1000) {
         localStorage.removeItem(key)
         return null
+      }
+      
+      // 更新访问统计（LRU）
+      cacheItem.accessCount = (cacheItem.accessCount || 0) + 1
+      cacheItem.lastAccess = Date.now()
+      try {
+        localStorage.setItem(key, JSON.stringify(cacheItem))
+      } catch {
+        // 忽略更新失败
       }
       
       return cacheItem.data
@@ -177,8 +242,8 @@ class CacheManager {
     const logs = this.getErrorLogs()
     
     const errorLog = {
-      message: error.message || String(error),
-      stack: error.stack,
+      message: error?.message || String(error),
+      stack: error?.stack,
       timestamp: Date.now(),
       url: window.location.href
     }
@@ -242,6 +307,7 @@ class CacheManager {
         const cacheItem: CacheItem = JSON.parse(value)
         const size = cacheItem.size || new Blob([value]).size
         
+        let recognized = true
         if (key.startsWith('cover_')) {
           stats.coverCount++
           stats.coverSize += size
@@ -251,9 +317,9 @@ class CacheManager {
         } else if (key === 'error_logs') {
           stats.errorLogCount = cacheItem.data?.length || 0
           stats.errorLogSize += size
-        }
-        
-        stats.totalSize += size
+        } else recognized = false
+
+        if (recognized) stats.totalSize += size
       } catch {
         // 忽略非缓存项
       }
@@ -339,6 +405,84 @@ class CacheManager {
   }
   
   /**
+   * 使用 LRU 策略清理封面缓存
+   * 基于访问频率和最后访问时间
+   */
+  private cleanLRUCovers(count: number) {
+    const covers: Array<{ 
+      key: string
+      score: number // LRU 分数（越低越应该被清理）
+    }> = []
+    
+    const now = Date.now()
+    
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (!key || !key.startsWith('cover_')) continue
+      
+      const value = localStorage.getItem(key)
+      if (!value) continue
+      
+      try {
+        const cacheItem: CacheItem = JSON.parse(value)
+        const accessCount = cacheItem.accessCount || 1
+        const lastAccess = cacheItem.lastAccess || cacheItem.timestamp
+        const daysSinceAccess = (now - lastAccess) / (1000 * 60 * 60 * 24)
+        
+        // LRU 分数计算：访问次数越多分数越高，最后访问时间越近分数越高
+        // 分数 = 访问次数 / (距离最后访问的天数 + 1)
+        const score = accessCount / (daysSinceAccess + 1)
+        
+        covers.push({ key, score })
+      } catch {}
+    }
+    
+    // 按分数排序，删除分数最低的（最少使用的）
+    covers.sort((a, b) => a.score - b.score)
+    const toRemove = covers.slice(0, count)
+    
+    toRemove.forEach(item => {
+      localStorage.removeItem(item.key)
+    })
+    
+    console.log(`🗑️ 已清理 ${toRemove.length} 个最少使用的封面缓存`)
+  }
+  
+  /**
+   * 获取当前封面缓存数量
+   */
+  private getCoverCount(): number {
+    let count = 0
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key && key.startsWith('cover_')) {
+        count++
+      }
+    }
+    return count
+  }
+  
+  /**
+   * 获取当前封面缓存总大小
+   */
+  private getTotalCoverSize(): number {
+    let totalSize = 0
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key && key.startsWith('cover_')) {
+        const value = localStorage.getItem(key)
+        if (value) {
+          try {
+            const cacheItem: CacheItem = JSON.parse(value)
+            totalSize += cacheItem.size || 0
+          } catch {}
+        }
+      }
+    }
+    return totalSize
+  }
+  
+  /**
    * URL 哈希（简单实现）
    */
   private hashUrl(url: string): string {
@@ -364,38 +508,52 @@ class CacheManager {
    * 获取自动清理设置
    */
   getAutoClearSettings(): AutoClearSettings {
-    const saved = localStorage.getItem(this.AUTO_CLEAR_SETTINGS_KEY)
-    if (saved) {
-      try {
-        return JSON.parse(saved)
-      } catch {}
-    }
-    
-    // 默认设置
-    return {
+    const defaults: AutoClearSettings = {
       enabled: false,
       days: 14,
       clearOnClose: false,
-      targets: {
-        covers: true,
-        playlists: false,
-        errorLogs: true
-      }
+      targets: { covers: true, playlists: false, lyrics: false, errorLogs: true, audio: false, analysis: false, transitions: false }
     }
+    const saved = localStorage.getItem(this.AUTO_CLEAR_SETTINGS_KEY)
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved) as Partial<AutoClearSettings>
+        return {
+          enabled: parsed.enabled === true,
+          days: Math.max(1, Math.min(365, Number(parsed.days) || defaults.days)),
+          clearOnClose: parsed.clearOnClose === true,
+          targets: {
+            covers: parsed.targets?.covers !== false,
+            playlists: parsed.targets?.playlists === true,
+            lyrics: parsed.targets?.lyrics === true,
+            errorLogs: parsed.targets?.errorLogs !== false,
+            audio: parsed.targets?.audio === true,
+            analysis: parsed.targets?.analysis === true,
+            transitions: parsed.targets?.transitions === true,
+          },
+        }
+      } catch {}
+    }
+    return defaults
   }
   
   /**
    * 保存自动清理设置
    */
   setAutoClearSettings(settings: AutoClearSettings) {
-    localStorage.setItem(this.AUTO_CLEAR_SETTINGS_KEY, JSON.stringify(settings))
-    console.log('✅ 自动清理设置已保存:', settings)
+    const normalized: AutoClearSettings = {
+      ...settings,
+      days: Math.max(1, Math.min(365, Number(settings.days) || 14)),
+      targets: { ...settings.targets },
+    }
+    localStorage.setItem(this.AUTO_CLEAR_SETTINGS_KEY, JSON.stringify(normalized))
+    console.log('✅ 自动清理设置已保存:', normalized)
   }
   
   /**
    * 检查是否需要自动清理
    */
-  checkAutoClear() {
+  async checkAutoClear(): Promise<void> {
     const settings = this.getAutoClearSettings()
     
     if (!settings.enabled) {
@@ -411,34 +569,66 @@ class CacheManager {
       return
     }
     
-    const daysSinceLastClear = (now - parseInt(lastClearTime)) / (1000 * 60 * 60 * 24)
+    const parsedLastClearTime = Number(lastClearTime)
+    if (!Number.isFinite(parsedLastClearTime) || parsedLastClearTime > now) {
+      localStorage.setItem(this.LAST_CLEAR_TIME_KEY, String(now))
+      return
+    }
+    const daysSinceLastClear = (now - parsedLastClearTime) / (1000 * 60 * 60 * 24)
     
     // 检查是否到达清理时间
     if (daysSinceLastClear >= settings.days) {
       console.log(`🗑️ 自动清理: 已超过 ${settings.days} 天，开始清理缓存...`)
-      this.autoCleanCache(settings.targets)
-      localStorage.setItem(this.LAST_CLEAR_TIME_KEY, String(now))
+      await this.autoCleanCache(settings.targets)
+      localStorage.setItem(this.LAST_CLEAR_TIME_KEY, String(Date.now()))
     }
   }
   
   /**
    * 自动清理缓存
    */
-  private autoCleanCache(targets: AutoClearSettings['targets']) {
+  private async autoCleanCache(targets: AutoClearSettings['targets']): Promise<void> {
     let cleared = false
     
     if (targets.covers) {
       this.clearCovers()
+      await indexedDBCache.clearCovers()
       cleared = true
     }
     
     if (targets.playlists) {
       this.clearPlaylists()
+      clearUserPlaylistsMemoryCache()
+      await indexedDBCache.clearPlaylists()
+      cleared = true
+    }
+
+    if (targets.lyrics) {
+      window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
+      await indexedDBCache.clearLyrics()
       cleared = true
     }
     
     if (targets.errorLogs) {
       this.clearErrorLogs()
+      cleared = true
+    }
+
+    if (targets.audio && window.electron?.audioDownload) {
+      const result = await window.electron.audioDownload.clearCache()
+      if (!result.success) throw new Error('音频缓存清理失败')
+      cleared = true
+    }
+
+    if (targets.analysis && window.electron?.analysis) {
+      const result = await window.electron.analysis.clearCache()
+      if (!result.success) throw new Error(result.error || '分析缓存清理失败')
+      cleared = true
+    }
+
+    if (targets.transitions && window.electron?.render) {
+      const result = await window.electron.render.clearCache()
+      if (!result.success) throw new Error('过渡音频缓存清理失败')
       cleared = true
     }
     
@@ -450,15 +640,18 @@ class CacheManager {
   /**
    * 关闭软件时清理缓存
    */
-  clearOnClose() {
+  async clearOnClose(): Promise<void> {
     const settings = this.getAutoClearSettings()
     
     if (!settings.clearOnClose) {
       return
     }
     
-    console.log('🗑️ 关闭时清理缓存...')
-    this.autoCleanCache(settings.targets)
+    // beforeunload may interrupt asynchronous IndexedDB/IPC calls. This marker
+    // guarantees the cleanup finishes on the next startup if that happens.
+    localStorage.setItem(this.PENDING_CLOSE_CLEAR_KEY, 'true')
+    await this.autoCleanCache(settings.targets)
+    localStorage.removeItem(this.PENDING_CLOSE_CLEAR_KEY)
   }
   
   /**
@@ -466,7 +659,8 @@ class CacheManager {
    */
   getLastClearTime(): number | null {
     const saved = localStorage.getItem(this.LAST_CLEAR_TIME_KEY)
-    return saved ? parseInt(saved) : null
+    const parsed = saved ? Number(saved) : NaN
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
   }
   
   /**

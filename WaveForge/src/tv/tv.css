@@ -1,0 +1,113 @@
+/* TV 遥控器模式样式：html.tv-mode 由 src/platform.ts 在安卓端启动时添加，桌面不受影响。 */
+
+/* TV 布局视口固定（viewport width=2133 时布局高会超出屏幕产生页面滚动）：
+   禁止页面级滚动，内容在各自的内部滚动容器里滚动（TV 遥控器模式的正常形态） */
+html.tv-mode,
+html.tv-mode body {
+  height: 100%;
+  overflow: hidden;
+}
+
+/* TV 端滚动条按钮（上/下箭头）在旧 Chromium 渲染异常（两端重复双箭头）：
+   直接隐藏按钮，只保留滑块（遥控器用不到按钮，PC 端不受影响） */
+html.tv-mode ::-webkit-scrollbar-button {
+  display: none;
+}
+html.tv-mode * {
+  scrollbar-width: thin;
+}
+
+/* 无鼠标光标：电视上不显示指针 */
+html.tv-mode,
+html.tv-mode * {
+  cursor: none !important;
+}
+
+/* 原生焦点兜底环（JS 焦点环 #tv-focus-ring 之外的第二道保险） */
+html.tv-mode :focus-visible {
+  outline: 3px solid rgba(79, 195, 247, 0.9);
+  outline-offset: 2px;
+}
+
+/* 焦点环由 tvCore 统一绘制，避免与浏览器默认 outline 叠加 */
+html.tv-mode button:focus,
+html.tv-mode a:focus,
+html.tv-mode [data-tv-focus]:focus {
+  outline: none;
+}
+
+/* 焦点环空闲自动渐隐：tvCore 3 秒无按键操作后加 tv-ring-idle 类 */
+#tv-focus-ring.tv-ring-idle {
+  opacity: 0;
+}
+
+/* data-tv-focus 元素（键盘按键/明确标注项）聚焦时的明显选中效果：
+   键盘悬浮层在 JS 焦点环之上，环被挡住，改用元素自身 outline + 发光 */
+html.tv-mode [data-tv-focus].tv-focused {
+  outline: 3px solid #4fc3f7;
+  outline-offset: 2px;
+  transform: scale(1.06);
+  filter: brightness(1.3);
+  box-shadow: 0 0 16px rgba(79, 195, 247, 0.55);
+}
+
+/* TV 端隐藏桌面专属设置板块（桌面歌词/桌面播放器/窗口设置/显卡选择等） */
+html.tv-mode [data-tv-hide='desktop'] {
+  display: none !important;
+}
+
+/* 通用 hover→focus 模拟：
+   把"鼠标悬浮到列表项才显示的操作按钮"（Tailwind group-hover:opacity-100 等）
+   改为"该项内部获得焦点时显示"。 */
+html.tv-mode .group:focus-within [class*='group-hover:opacity-100'],
+html.tv-mode .group:focus-within [class*='group-hover:opacity-0'] {
+  opacity: 1 !important;
+}
+
+html.tv-mode .group:focus-within [class*='group-hover:scale-'] {
+  transform: none !important;
+}
+
+/* 常驻显示小组件上的工具按钮：容器获得焦点时不再隐藏子控件 */
+html.tv-mode [data-tv-focus]:focus-within [class*='opacity-0'] {
+  opacity: 1 !important;
+}
+
+/* TV 无桌面模式：隐藏模式切换里的"桌面"卡片（效能档隐藏；普通/增强显示）。
+   App.tsx 另有防御性护栏，效能档下 viewMode 永远不会是 desktop。 */
+html.tv-mode.wf-perf-efficiency button[aria-label='切换到桌面模式'] {
+  display: none !important;
+}
+
+/* ── TV 性能模式：效能/普通停掉昂贵的无限 CSS 动画（天气/光效等），保留基础过渡 ── */
+html.tv-mode.wf-perf-efficiency [class*='weather-'],
+html.tv-mode.wf-perf-normal [class*='weather-'] {
+  animation: none !important;
+}
+html.tv-mode.wf-perf-efficiency [class*='aurora'],
+html.tv-mode.wf-perf-normal [class*='aurora'] {
+  animation: none !important;
+}
+html.tv-mode.wf-perf-efficiency * {
+  animation-duration: 0.01s !important;
+  animation-iteration-count: 1 !important;
+}
+
+/* 桌面窗口按钮条（最小化/最大化/关闭）在 TV 上无意义，隐藏。
+   TitleBar 组件本身也会在 tv-mode 下返回 null，这里是双保险。 */
+html.tv-mode .tv-hide-desktop-chrome {
+  display: none !important;
+}
+
+/* 让可滚动面板在 TV 上滚动条更醒目（部分电视盒子会隐藏滚动条） */
+html.tv-mode ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+html.tv-mode ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+}
+html.tv-mode ::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.06);
+}

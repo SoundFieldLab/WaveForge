@@ -1,0 +1,108 @@
+/* ── OOBE 首次启动引导专属动画 ─────────────────────────── */
+
+/* 极光背景：缓慢位移（不做 hue-rotate/滤镜，避免大区域每帧重绘拖垮帧率） */
+@keyframes oobe-aurora {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50%      { transform: translate(-3%, 2.5%) scale(1.06); }
+}
+.oobe-aurora {
+  position: absolute;
+  inset: -15%;
+  animation: oobe-aurora 26s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* 液态光斑漂移：背景用径向渐变模拟柔光（不再用 blur 滤镜，省掉昂贵模糊计算） */
+@keyframes oobe-blob-drift {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(48px, -36px) scale(1.1); }
+  66%  { transform: translate(-30px, 24px) scale(0.94); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+.oobe-blob {
+  position: absolute;
+  border-radius: 9999px;
+  animation: oobe-blob-drift 18s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* 星点闪烁（深色星空 / 浅色细点） */
+@keyframes oobe-stars-twinkle {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+.oobe-stars {
+  animation: oobe-stars-twinkle 7s ease-in-out infinite;
+  pointer-events: none;
+}
+
+/* 上浮气泡（澜音水感） */
+@keyframes oobe-bubble-rise {
+  0%   { transform: translateY(0) translateX(0); opacity: 0; }
+  10%  { opacity: var(--bubble-opacity, 0.3); }
+  88%  { opacity: var(--bubble-opacity, 0.3); }
+  100% { transform: translateY(-108vh) translateX(18px); opacity: 0; }
+}
+.oobe-bubble {
+  position: absolute;
+  bottom: -36px;
+  border-radius: 9999px;
+  border: 1px solid;
+  animation-name: oobe-bubble-rise;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  pointer-events: none;
+}
+
+/* 底部水波线条（澜音风格）：首尾同高的周期波形，两份平铺 + 平移 -50% 即可无缝循环 */
+@keyframes oobe-wave-move {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.oobe-wave-line {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 200%;
+  height: 100%;
+  animation: oobe-wave-move 16s linear infinite;
+  pointer-events: none;
+}
+/* 容器级静态边缘渐隐（遮罩固定在容器上，不随波形移动，不会产生移动暗点） */
+.oobe-wave-wrap {
+  mask-image: linear-gradient(to right, transparent 0%, black 16%, black 84%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 16%, black 84%, transparent 100%);
+  pointer-events: none;
+}
+
+/* 免责声明列表滚动条：显示时细条，隐藏时完全不可见；滚动平滑 */
+.oobe-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  scroll-behavior: smooth;
+}
+.oobe-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.oobe-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 9999px;
+}
+.oobe-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+:root[data-wf-theme='light'] .oobe-scroll {
+  scrollbar-color: rgba(0, 0, 0, 0.24) transparent;
+}
+:root[data-wf-theme='light'] .oobe-scroll::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.24);
+}
+.oobe-scroll-hidden {
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+}
+.oobe-scroll-hidden::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}

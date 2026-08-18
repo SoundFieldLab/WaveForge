@@ -43,23 +43,6 @@ export default function ControlMenu({ onSettingsClick, onProfileClick }: Control
             background: 'linear-gradient(180deg, rgba(255,255,255,0.15) 0%, transparent 100%)',
           }}
         />
-        {/* 个人中心按钮 - 展开时显示 */}
-        <motion.button
-          initial={false}
-          animate={{
-            width: isExpanded ? 'auto' : 0,
-            opacity: isExpanded ? 1 : 0,
-            marginRight: isExpanded ? '0.25rem' : 0,
-          }}
-          transition={{ duration: 0.2, ease: 'easeOut' }}
-          onClick={onProfileClick}
-          className="relative z-10 p-2.5 hover:bg-white/5 rounded-full transition-colors overflow-hidden"
-          style={{ display: isExpanded ? 'block' : 'none' }}
-          title="个人中心"
-        >
-          <User className="w-4.5 h-4.5 text-white" />
-        </motion.button>
-
         {/* 设置按钮 - 展开时显示 */}
         <motion.button
           initial={false}
@@ -68,7 +51,11 @@ export default function ControlMenu({ onSettingsClick, onProfileClick }: Control
             opacity: isExpanded ? 1 : 0,
             marginRight: isExpanded ? '0.25rem' : 0,
           }}
-          transition={{ duration: 0.2, ease: 'easeOut', delay: 0.05 }}
+          transition={{ 
+            duration: 0.3, 
+            ease: isExpanded ? 'easeOut' : 'easeIn',
+            delay: isExpanded ? 0.05 : 0
+          }}
           onClick={onSettingsClick}
           className="relative z-10 p-2.5 hover:bg-white/5 rounded-full transition-colors overflow-hidden"
           style={{ display: isExpanded ? 'block' : 'none' }}

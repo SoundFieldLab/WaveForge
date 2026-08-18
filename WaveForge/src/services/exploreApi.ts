@@ -1,0 +1,747 @@
+import type { MusicPlatform } from './platforms'
+import { getPlatformCookie } from './platforms'
+import type { Song } from './musicApi'
+import { getQQMusicSkillHeaders } from './qqMusicSkills'
+import { fetchAppleExplorePayload } from './appleExploreService'
+import {
+  appleSongToSong,
+  getAppleCatalogPlaylistTracks,
+} from './appleCatalog'
+
+const API_BASES = ['http://localhost:3001/api']
+const EXPLORE_MEMORY_CACHE_TTL = 9 * 60 * 1000
+
+const exploreHomeMemoryCache = new Map<string, { payload: ExplorePayload; expiresAt: number }>()
+const exploreHomePending = new Map<string, Promise<ExplorePayload>>()
+
+export type ExplorePlatform = MusicPlatform
+
+function fingerprintExploreValue(value: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+function getExploreHomeCacheKey(platform: ExplorePlatform, appleCountry?: string): string {
+  // Apple 无 cookie，按商店区分缓存
+  if (platform === 'apple') {
+    const storefront = appleCountry || localStorage.getItem('appleStorefront') || 'cn'
+    return `apple:${storefront}`
+  }
+  const userIdKey = platform === 'qq' ? 'qq_user_id' : platform === 'netease' ? 'netease_user_id' : `${platform}_user_id`
+  const userId = localStorage.getItem(userIdKey) || ''
+  const cookie = getExploreCookie(platform)
+  const accountKey = userId ? `user:${userId}` : cookie ? `cookie:${fingerprintExploreValue(cookie)}` : 'guest'
+  return `${platform}:${accountKey}`
+}
+
+function awaitWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
+
+export interface ExplorePlaylist {
+  id: string
+  name: string
+  description?: string
+  coverUrl: string
+  playCount?: number
+  trackCount?: number
+  creator?: string
+  /** 歌单仅来自网易云/QQ（Apple 探索不产出歌单） */
+  platform: MusicPlatform
+  source?: 'personalized' | 'community' | 'qqmusic-skills' | string
+  /** 酷狗歌单列表内嵌的部分歌曲（hash + filename），详情接口不可用时兜底 */
+  embeddedSongs?: Array<{ hash: string; filename: string }>
+}
+
+export interface ExploreChartSong {
+  id?: number
+  name: string
+  artist: string
+  coverUrl?: string
+  rank?: number
+}
+
+export interface ExploreChart {
+  id: string
+  name: string
+  group: string
+  description?: string
+  coverUrl: string
+  playCount?: number
+  updateText?: string
+  platform: ExplorePlatform
+  source?: 'community' | 'qqmusic-skills' | string
+  songs: ExploreChartSong[]
+}
+
+export interface ExploreAlbum {
+  id: number
+  mid?: string
+  name: string
+  artist: string
+  coverUrl: string
+  publishTime?: number | string
+  platform: ExplorePlatform
+}
+
+export interface ExploreChannel {
+  id: string
+  name: string
+  group: string
+  description?: string
+  coverUrl: string
+  playCount?: number
+  platform: ExplorePlatform
+  song?: Song | null
+}
+
+export interface ExplorePayload {
+  code: number
+  platform: ExplorePlatform
+  officialEnhanced: boolean
+  personalized: boolean
+  dailySongs: Song[]
+  radioSongs: Song[]
+  newSongs: Song[]
+  playlists: ExplorePlaylist[]
+  charts: ExploreChart[]
+  albums: ExploreAlbum[]
+  channels: ExploreChannel[]
+  meta: {
+    source: string
+    recommendationSource?: 'qq-guess-you-like' | 'qqmusic-skills-radio' | 'qq-daily' | 'public' | string
+    updatedAt: number
+  }
+}
+
+export interface ExploreDetail {
+  playlist: {
+    id: string
+    name: string
+    coverImgUrl: string
+    trackCount: number
+    description?: string
+    platform: MusicPlatform
+  }
+  songs: Song[]
+}
+
+const ensureOk = async (response: Response) => {
+  const contentType = response.headers.get('content-type') || ''
+  if (!contentType.includes('application/json')) {
+    throw new Error(`探索服务返回了无效响应 (${response.status})`)
+  }
+  const data = await response.json()
+  if (!response.ok || (data.code && Number(data.code) >= 400)) {
+    throw new Error(data.error || data.message || `请求失败 (${response.status})`)
+  }
+  return data
+}
+
+const fetchExploreJson = async (
+  path: string,
+  params: Record<string, string | undefined>,
+  signal?: AbortSignal
+) => {
+  let lastError: unknown
+  for (const base of API_BASES) {
+    const url = new URL(`${base}${path}`)
+    Object.entries(params).forEach(([key, value]) => {
+      if (value) url.searchParams.set(key, value)
+    })
+    try {
+      const headers = path.includes('/qq') || params.platform === 'qq'
+        ? await getQQMusicSkillHeaders()
+        : undefined
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 20_000)
+      const abortFromCaller = () => controller.abort()
+      signal?.addEventListener('abort', abortFromCaller, { once: true })
+      try {
+        return await ensureOk(await fetch(url.toString(), { signal: controller.signal, headers, cache: 'no-store' }))
+      } finally {
+        window.clearTimeout(timeoutId)
+        signal?.removeEventListener('abort', abortFromCaller)
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error
+      lastError = error
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('探索服务暂时不可用')
+}
+
+const normalizeNeteaseSong = (input: any): Song | null => {
+  const track = input?.song || input || {}
+  const album = track.al || track.album || {}
+  const artists = track.ar || track.artists || []
+  const id = Number(track.id || 0)
+  if (!id || !track.name) return null
+
+  return {
+    id,
+    name: track.name,
+    artists: (artists.length ? artists : [{ name: '未知歌手' }]).map((artist: any) => ({
+      id: Number(artist.id) || undefined,
+      name: artist.name || '未知歌手'
+    })),
+    album: {
+      id: Number(album.id) || undefined,
+      name: album.name || '',
+      picUrl: album.picUrl || album.blurPicUrl || input?.picUrl || ''
+    },
+    duration: Number(track.dt || track.duration || 0),
+    platform: 'netease',
+    vip: Number(track.fee) === 1,
+    fee: Number(track.fee) || 0,
+    noCopyright: Number(track.privilege?.st) < 0
+  }
+}
+
+const normalizeQQSong = (input: any): Song | null => {
+  const track = input?.songInfo || input?.song || input || {}
+  const mid = String(track.mid || track.songmid || track.songMid || '').trim()
+  const id = Number(track.id || track.songid || track.songId || 0)
+  const album = track.album || track.albumInfo || {}
+  const albumMid = album.mid || album.pmid || album.albumMid || album.albumMID ||
+    track.albummid || track.albumMid || track.albumMID || track.album_mid || ''
+  const rawArtists = track.singer || track.singers || track.artists || []
+  const name = track.name || track.title || track.songname || track.songName || ''
+  if (!name || (!mid && !id)) return null
+
+  const coverUrl = track.cover || track.picUrl || track.picurl || track.albumpic || track.albumPic ||
+    track.albumCover || album.picUrl || album.picurl || album.cover || album.coverUrl || (
+    albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${String(albumMid).replace(/_\d+$/, '')}.jpg` : ''
+  )
+
+  return {
+    id,
+    mid: mid || undefined,
+    name,
+    artists: (rawArtists.length ? rawArtists : [{ name: track.singerName || '未知歌手' }]).map((artist: any) => ({
+      id: Number(artist.id || artist.singerid) || undefined,
+      mid: artist.mid || artist.singermid || artist.singerMid || undefined,
+      name: artist.name || artist.title || artist.singerName || '未知歌手'
+    })),
+    album: {
+      id: Number(album.id || track.albumid) || undefined,
+      mid: albumMid || undefined,
+      pmid: album.pmid || undefined,
+      name: album.name || album.title || track.albumname || '',
+      picUrl: coverUrl
+    },
+    duration: Number(track.interval || 0) * 1000 || Number(track.duration || 0),
+    platform: 'qq',
+    vip: Boolean(track.pay?.pay_play || track.pay?.paydownload || track.isonly === 1)
+  }
+}
+
+export function getExploreCookie(platform: ExplorePlatform): string {
+  return getPlatformCookie(platform)
+}
+
+async function syncQQExploreCookie(cookie: string, signal?: AbortSignal): Promise<void> {
+  if (!cookie) return
+  await fetch(`${API_BASES[0]}/qq/user/setCookie`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: cookie }),
+    signal,
+    cache: 'no-store'
+  }).catch(error => {
+    if ((error as Error).name === 'AbortError') throw error
+  })
+}
+
+export async function fetchExploreHome(
+  platform: ExplorePlatform,
+  signal?: AbortSignal,
+  options: { forceRefresh?: boolean; enhanced?: boolean; appleCountry?: string } = {}
+): Promise<ExplorePayload> {
+  const cacheKey = getExploreHomeCacheKey(platform, options.appleCountry)
+  if (!options.forceRefresh) {
+    const cached = exploreHomeMemoryCache.get(cacheKey)
+    if (cached && cached.expiresAt > Date.now()) return cached.payload
+    const pending = exploreHomePending.get(cacheKey)
+    if (pending) return awaitWithSignal(pending, signal)
+  }
+
+  const request = (async () => {
+  // Apple：客户端组装（RSS + amp-api），不走服务端 /explore/apple
+  if (platform === 'apple') {
+    const storefront = options.appleCountry || localStorage.getItem('appleStorefront') || 'cn'
+    const payload = await fetchAppleExplorePayload(storefront)
+    exploreHomeMemoryCache.set(cacheKey, {
+      payload,
+      expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL
+    })
+    return payload
+  }
+  // 酷狗：经 local-server 代理调用移动端公开接口（真实 TOP500/新歌榜/歌单）
+  if (platform === 'kugou') {
+    const { fetchKugouRankList, fetchKugouRankInfo, fetchKugouPlaylists, kugouTrackToSong } = await import('./kugouService')
+    const [ranksRes, playlistsRes] = await Promise.allSettled([
+      fetchKugouRankList(),
+      fetchKugouPlaylists(24),
+    ])
+    const ranks = ranksRes.status === 'fulfilled' ? ranksRes.value : []
+    const prefer = (names: string[]) => ranks.find(rank => names.some(name => rank.rankname.includes(name)))
+    const hotRank = prefer(['TOP500', '热歌', '最热']) || ranks[0]
+    const newRank = prefer(['新歌', '新声']) || ranks.find(rank => rank.rankid === '74534')
+    const risingRank = prefer(['飙升', '飙升榜']) || ranks.find(rank => rank.rankid === '6666')
+    const chartRanks = [hotRank, risingRank, newRank].filter((rank): rank is NonNullable<typeof rank> => Boolean(rank))
+    const chartTrackResults = await Promise.allSettled(
+      chartRanks.slice(0, 3).map(rank => fetchKugouRankInfo(rank.rankid, 30)),
+    )
+    const rankSongs = chartTrackResults.map((result, index) =>
+      result.status === 'fulfilled' ? result.value : chartTrackResults[index].status === 'fulfilled' ? [] : []
+    )
+    const hotTracks = rankSongs[0] || []
+    const toChart = (rank: { rankid: string; rankname: string }, tracks: Array<{ songName: string; singerName: string }>): ExploreChart => ({
+      id: `kg-${rank.rankid}`,
+      name: rank.rankname || '酷狗榜单',
+      group: '酷狗音乐',
+      description: `${rank.rankname || '酷狗榜单'} · 酷狗音乐实时更新`,
+      coverUrl: '',
+      updateText: '实时更新',
+      platform: 'kugou',
+      source: 'kugou-rank',
+      songs: tracks.slice(0, 30).map((track, index) => ({
+        name: track.songName,
+        artist: track.singerName,
+        rank: index + 1,
+      })),
+    })
+    const charts = chartRanks.map((rank, index) => toChart(rank, rankSongs[index] || [])).filter(chart => chart.songs.length > 0)
+    const playlists: ExplorePlaylist[] = (playlistsRes.status === 'fulfilled' ? playlistsRes.value : []).map(item => ({
+      id: item.specialid,
+      name: item.name,
+      coverUrl: item.coverUrl || '',
+      playCount: item.playcount,
+      trackCount: item.songcount,
+      platform: 'kugou',
+      source: 'kugou-plist',
+      embeddedSongs: item.songs,
+    }))
+    const payload: ExplorePayload = {
+      code: 0,
+      platform: 'kugou',
+      officialEnhanced: false,
+      personalized: false,
+      dailySongs: hotTracks.map(kugouTrackToSong),
+      radioSongs: [],
+      newSongs: (rankSongs[1]?.length ? rankSongs[1] : hotTracks).map(kugouTrackToSong),
+      playlists,
+      charts,
+      albums: [],
+      channels: [],
+      meta: { source: 'kugou-mobile-api', updatedAt: Date.now() },
+    }
+    exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
+    return payload
+  }
+  // Spotify：官方 Web API（需登录 token；未登录返回空 payload，区块自动隐藏）
+  if (platform === 'spotify') {
+    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists } = await import('./spotifyService')
+    const [releasesRes, playlistsRes] = await Promise.allSettled([
+      fetchSpotifyNewReleases(30),
+      fetchSpotifyFeaturedPlaylists(24),
+    ])
+    const releases = releasesRes.status === 'fulfilled' ? releasesRes.value : []
+    const albums: ExploreAlbum[] = releases.map(item => ({
+      id: Number(parseInt(item.id.slice(0, 12), 36)) || 0,
+      mid: item.id,
+      name: item.name,
+      artist: item.artists.map(artist => artist.name).join(' / '),
+      coverUrl: item.coverUrl || '',
+      platform: 'spotify',
+    }))
+    // 新发行接口返回专辑：以"专辑首唱"形式呈现新鲜内容
+    const newSongs: Song[] = releases.map(item => ({
+      id: Number(parseInt(item.id.slice(0, 12), 36)) || 0,
+      mid: item.id,
+      name: item.name,
+      artists: item.artists.map(artist => ({ name: artist.name })),
+      album: { name: item.name, picUrl: item.coverUrl || '' },
+      duration: 0,
+      platform: 'spotify',
+      fee: 0,
+      songType: 1,
+      fusedSources: [],
+    }))
+    const payload: ExplorePayload = {
+      code: 0,
+      platform: 'spotify',
+      officialEnhanced: false,
+      personalized: Boolean(localStorage.getItem('spotify_access_token')),
+      dailySongs: [],
+      radioSongs: [],
+      newSongs,
+      playlists: (playlistsRes.status === 'fulfilled' ? playlistsRes.value : []).map(item => ({
+        id: item.id,
+        name: item.name,
+        coverUrl: item.coverUrl || '',
+        platform: 'spotify',
+        source: 'spotify-featured',
+        creator: 'Spotify 编辑精选',
+      })),
+      charts: [],
+      albums,
+      channels: [],
+      meta: { source: 'spotify-web-api', updatedAt: Date.now() },
+    }
+    exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
+    return payload
+  }
+  // 汽水音乐：经主进程隐藏窗口抓取抖音搜索页音乐卡片（需登录抖音；失败时区块自动隐藏）
+  if (platform === 'soda') {
+    const { fetchSodaExplore } = await import('./sodaService')
+    const explore = await fetchSodaExplore()
+    const charts: ExploreChart[] = explore.charts.map((chart, index) => ({
+      id: chart.id,
+      name: chart.name,
+      group: chart.group,
+      description: `${chart.name} · 抖音音乐`,
+      coverUrl: '',
+      updateText: '实时更新',
+      platform: 'soda',
+      source: 'soda-douyin',
+      songs: chart.songs.map((song, songIndex) => ({
+        id: song.id,
+        name: song.name,
+        artist: song.artists?.[0]?.name || '',
+        coverUrl: song.album?.picUrl || '',
+        rank: songIndex + 1,
+      })),
+    }))
+    const payload: ExplorePayload = {
+      code: 0,
+      platform: 'soda',
+      officialEnhanced: false,
+      personalized: false,
+      dailySongs: explore.songs,
+      radioSongs: [],
+      newSongs: explore.songs.slice(0, 20),
+      playlists: explore.playlists.map(item => ({
+        id: item.id,
+        name: item.name,
+        coverUrl: item.coverUrl || '',
+        platform: 'soda',
+        source: 'soda-douyin',
+      })),
+      charts,
+      albums: [],
+      channels: [],
+      meta: { source: 'soda-douyin-scrape', updatedAt: Date.now() },
+    }
+    exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
+    return payload
+  }
+  // enhanced=false：关闭平台增强（不传 cookie，后端只返回公开榜单/热门，不请求个性化推荐）
+  const cookie = options.enhanced === false ? '' : getExploreCookie(platform)
+  if (platform === 'qq') {
+    await syncQQExploreCookie(cookie)
+  }
+  let data = await fetchExploreJson(`/explore/${platform}`, { cookie })
+  if (
+    platform === 'qq' &&
+    cookie &&
+    data?.personalized !== true &&
+    data?.meta?.recommendationSource === 'public'
+  ) {
+    await syncQQExploreCookie(cookie)
+    data = await fetchExploreJson(`/explore/${platform}`, { cookie, personalized: '1' })
+  }
+  const normalizedPayload = {
+    ...data,
+    dailySongs: Array.isArray(data.dailySongs) ? data.dailySongs : [],
+    radioSongs: Array.isArray(data.radioSongs) ? data.radioSongs : [],
+    newSongs: Array.isArray(data.newSongs) ? data.newSongs : [],
+    playlists: Array.isArray(data.playlists) ? data.playlists : [],
+    charts: Array.isArray(data.charts) ? data.charts : [],
+    albums: Array.isArray(data.albums) ? data.albums : [],
+    channels: Array.isArray(data.channels) ? data.channels : []
+  } as ExplorePayload
+  exploreHomeMemoryCache.set(cacheKey, {
+    payload: normalizedPayload,
+    expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL
+  })
+  return normalizedPayload
+  })()
+
+  if (!options.forceRefresh) {
+    exploreHomePending.set(cacheKey, request)
+    const cleanup = () => {
+      if (exploreHomePending.get(cacheKey) === request) exploreHomePending.delete(cacheKey)
+    }
+    void request.then(cleanup, cleanup)
+  }
+  return awaitWithSignal(request, signal)
+}
+
+export function prefetchExploreHome(platform: ExplorePlatform): Promise<ExplorePayload> {
+  return fetchExploreHome(platform)
+}
+
+export async function fetchQQGuessYouLikeBatch(
+  batch: number,
+  excludeSongKeys: string[] = [],
+  signal?: AbortSignal
+): Promise<Song[]> {
+  const cookie = getExploreCookie('qq')
+  if (cookie) await syncQQExploreCookie(cookie, signal)
+  const data = await fetchExploreJson('/explore/qq/radio/next', {
+    cookie,
+    batch: String(Math.max(1, Math.floor(batch))),
+    count: '30',
+    exclude: excludeSongKeys.slice(-300).join(',') || undefined
+  }, signal)
+  const songs = Array.isArray(data.songs) ? data.songs : []
+  return songs
+    .map((song: any) => normalizeQQSong(song))
+    .filter((song: Song | null): song is Song => Boolean(song))
+}
+
+export async function fetchExploreRecommendationBatch(
+  platform: ExplorePlatform,
+  batch: number,
+  excludeSongKeys: string[] = [],
+  signal?: AbortSignal
+): Promise<Song[]> {
+  // Apple/Spotify/酷狗/汽水音乐 无连续电台接口
+  if (platform === 'apple' || platform === 'spotify' || platform === 'kugou' || platform === 'soda') return []
+  const cookie = getExploreCookie(platform)
+  if (platform === 'qq') {
+    return fetchQQGuessYouLikeBatch(batch, excludeSongKeys, signal)
+  }
+
+  const data = await fetchExploreJson('/explore/netease/recommendations/next', {
+    cookie,
+    batch: String(Math.max(1, Math.floor(batch))),
+    count: '30',
+    exclude: excludeSongKeys.slice(-300).join(',') || undefined
+  }, signal)
+  const songs = Array.isArray(data.songs) ? data.songs : []
+  return songs
+    .map((song: any) => normalizeNeteaseSong(song))
+    .filter((song: Song | null): song is Song => Boolean(song))
+}
+
+export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: AbortSignal): Promise<ExploreDetail> {
+  // Apple 编辑/热门歌单：amp-api catalog 曲目（需 dev token；无 token 返回空歌单）
+  if (playlist.platform === 'apple') {
+    const storefront = localStorage.getItem('appleStorefront') || 'cn'
+    const tracks = await getAppleCatalogPlaylistTracks(playlist.id, storefront)
+    const songs = tracks.map(track => appleSongToSong(track, storefront))
+    return {
+      playlist: {
+        id: playlist.id,
+        name: playlist.name,
+        coverImgUrl: playlist.coverUrl,
+        trackCount: songs.length || playlist.trackCount || 0,
+        description: playlist.description || '',
+        platform: 'apple',
+      },
+      songs,
+    }
+  }
+  // Spotify 歌单：官方 Web API 曲目
+  if (playlist.platform === 'spotify') {
+    const { fetchSpotifyPlaylist, spotifyTrackToSong } = await import('./spotifyService')
+    const tracks = await fetchSpotifyPlaylist(playlist.id)
+    const songs = tracks.map(spotifyTrackToSong)
+    return {
+      playlist: {
+        id: playlist.id,
+        name: playlist.name,
+        coverImgUrl: playlist.coverUrl,
+        trackCount: songs.length || playlist.trackCount || 0,
+        description: playlist.description || '',
+        platform: 'spotify',
+      },
+      songs,
+    }
+  }
+  // 酷狗歌单：优先真实歌单详情接口，失败时用列表内嵌歌曲兜底
+  if (playlist.platform === 'kugou') {
+    const { fetchKugouPlaylistDetail, kugouTrackToSong } = await import('./kugouService')
+    let tracks = await fetchKugouPlaylistDetail(playlist.id).catch(() => [] as Awaited<ReturnType<typeof fetchKugouPlaylistDetail>>)
+    if (tracks.length === 0 && playlist.embeddedSongs?.length) {
+      const { parseKugouEmbeddedSongs } = await import('./kugouService')
+      tracks = parseKugouEmbeddedSongs(playlist.embeddedSongs)
+    }
+    const songs = tracks.map(kugouTrackToSong)
+    return {
+      playlist: {
+        id: playlist.id,
+        name: playlist.name,
+        coverImgUrl: playlist.coverUrl,
+        trackCount: songs.length || playlist.trackCount || 0,
+        description: playlist.description || '',
+        platform: 'kugou',
+      },
+      songs,
+    }
+  }
+  const cookie = getExploreCookie(playlist.platform)
+  const data = await fetchExploreJson(`/${playlist.platform}/playlist/detail`, {
+    id: playlist.id,
+    songNum: playlist.platform === 'qq' ? '10000' : undefined,
+    limit: playlist.platform === 'netease' ? '10000' : undefined,
+    source: playlist.source,
+    cookie
+  }, signal)
+  const rawSongs = playlist.platform === 'qq'
+    ? data.songlist || data.playlist?.tracks || []
+    : data.playlist?.tracks || data.songs || []
+  const songs = rawSongs
+    .map((song: any) => playlist.platform === 'qq' ? normalizeQQSong(song) : normalizeNeteaseSong(song))
+    .filter((song: Song | null): song is Song => Boolean(song))
+
+  return {
+    playlist: {
+      id: playlist.id,
+      name: data.playlist?.name || playlist.name,
+      coverImgUrl: data.playlist?.coverImgUrl || playlist.coverUrl,
+      trackCount: Number(data.playlist?.trackCount || songs.length || playlist.trackCount || 0),
+      description: data.playlist?.description || playlist.description || '',
+      platform: playlist.platform
+    },
+    songs
+  }
+}
+
+export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSignal): Promise<ExploreDetail> {
+  // Apple：榜单数据客户端已带（charts 携带歌曲列表），无需服务端
+  if (chart.platform === 'apple') {
+    const songs: Song[] = chart.songs.map(song => ({
+      id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      name: song.name,
+      artists: song.artist ? [{ name: song.artist }] : [],
+      album: { name: '', picUrl: song.coverUrl || '' },
+      duration: 0,
+      platform: 'apple',
+    }))
+    return {
+      playlist: {
+        id: chart.id,
+        name: chart.name,
+        coverImgUrl: chart.coverUrl,
+        trackCount: songs.length,
+        description: chart.description || '',
+        platform: 'apple',
+      },
+      songs,
+    }
+  }
+  // 酷狗榜单：客户端已带歌曲列表（搜索接口模拟），无需服务端
+  if (chart.platform === 'kugou') {
+    const songs: Song[] = chart.songs.map(song => ({
+      id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      name: song.name,
+      artists: song.artist ? [{ name: song.artist }] : [],
+      album: { name: '', picUrl: song.coverUrl || '' },
+      duration: 0,
+      platform: 'kugou',
+    }))
+    return {
+      playlist: {
+        id: chart.id,
+        name: chart.name,
+        coverImgUrl: chart.coverUrl,
+        trackCount: songs.length,
+        description: chart.description || '',
+        platform: 'kugou',
+      },
+      songs,
+    }
+  }
+  // 汽水榜单：客户端已带歌曲列表（抖音搜索抓取），无需服务端
+  if (chart.platform === 'soda') {
+    const songs: Song[] = chart.songs.map(song => ({
+      id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      name: song.name,
+      artists: song.artist ? [{ name: song.artist }] : [],
+      album: { name: '', picUrl: song.coverUrl || '' },
+      duration: 0,
+      platform: 'soda',
+    }))
+    return {
+      playlist: {
+        id: chart.id,
+        name: chart.name,
+        coverImgUrl: chart.coverUrl,
+        trackCount: songs.length,
+        description: chart.description || '',
+        platform: 'soda',
+      },
+      songs,
+    }
+  }
+  const cookie = getExploreCookie(chart.platform)
+  let lastResult: ExploreDetail | null = null
+  let lastError: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const result = await fetchExploreJson('/explore/chart', {
+        platform: chart.platform,
+        id: chart.id,
+        name: chart.name,
+        coverUrl: chart.coverUrl,
+        description: chart.description,
+        source: chart.source,
+        cookie
+      }, signal) as ExploreDetail
+      lastResult = result
+      if (Array.isArray(result.songs) && result.songs.length > 0) return result
+    } catch (error) {
+      if (signal?.aborted) throw error
+      lastError = error
+    }
+    if (attempt < 2) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = window.setTimeout(() => {
+          signal?.removeEventListener('abort', abort)
+          resolve()
+        }, 180 * (attempt + 1))
+        const abort = () => {
+          window.clearTimeout(timer)
+          reject(new DOMException('Aborted', 'AbortError'))
+        }
+        signal?.addEventListener('abort', abort, { once: true })
+        if (signal?.aborted) abort()
+      })
+    }
+  }
+  if (lastResult) return lastResult
+  throw lastError instanceof Error ? lastError : new Error(`${chart.name} 暂时没有返回歌曲，请稍后重试`)
+}
+
+export async function fetchExploreChannel(channel: ExploreChannel, signal?: AbortSignal): Promise<ExploreDetail> {
+  const cookie = getExploreCookie('qq')
+  const detail = await fetchExploreJson('/explore/radio', {
+    platform: channel.platform,
+    id: channel.id,
+    name: channel.name,
+    coverUrl: channel.coverUrl,
+    cookie: getExploreCookie(channel.platform) || cookie
+  }, signal)
+  if ((!Array.isArray(detail.songs) || detail.songs.length === 0) && channel.song) {
+    return {
+      ...detail,
+      playlist: { ...detail.playlist, trackCount: 1 },
+      songs: [channel.song]
+    }
+  }
+  return detail
+}

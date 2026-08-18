@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WaveForge 澜音工坊</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -moz-user-select: none;
+      -ms-user-select: none;
+    }
+    
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      background: linear-gradient(135deg, #0a0f14 0%, #1a1f2e 100%);
+      overflow: hidden;
+    }
+    
+    .splash-wrapper {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #0a0f14 0%, #1a1f2e 100%);
+      position: relative;
+      overflow: hidden;
+    }
+    
+    /* 动态渐变背景
+       注意：不使用 filter: blur —— 软件合成（GPU 加速禁用）下 blur 会强制软件栅格化
+       整层 200% 尺寸渐变，首帧渲染极慢，导致 splash 显示时内容还没画完（只剩深色底 ≈ 黑屏）。
+       这里用半透明渐变本身（opacity 0.15）+ 纯 transform 旋转，软件合成可快速渲染。 */
+    .gradient-bg {
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: linear-gradient(45deg, 
+        #FF6B6B 0%, 
+        #FFB347 15%, 
+        #FFE66D 30%, 
+        #4ECDC4 45%, 
+        #5B9FFF 60%, 
+        #A78BFA 75%, 
+        #EC4899 90%, 
+        #FF6B6B 100%);
+      opacity: 0.15;
+      animation: gradientShift 15s ease infinite;
+    }
+    
+    .splash-container {
+      text-align: center;
+      /* 基础可见性：容器默认不透明。入场动画只做位移，不依赖 opacity 淡入——
+         CSS 动画在窗口显示前不运行，若从 opacity:0 开始，首帧提交时内容透明，
+         窗口只剩深色背景，用户会看到黑屏。默认 opacity:1 保证任何时刻内容可见。 */
+      opacity: 1;
+      animation: splashEnter 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      z-index: 1;
+    }
+    
+    /* Logo图标 */
+    .logo-icon {
+      width: 120px;
+      height: 120px;
+      margin: 0 auto 24px;
+      border-radius: 28px;
+      overflow: hidden;
+      animation: logoFloat 3s ease-in-out infinite;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+    }
+    
+    .logo-icon img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      pointer-events: none;
+      -webkit-user-drag: none;
+      user-drag: none;
+    }
+    
+    /* Logo文字 */
+    .logo-text {
+      font-size: 48px;
+      font-weight: 700;
+      background: linear-gradient(135deg, 
+        #FF6B6B 0%, 
+        #FFB347 20%, 
+        #4ECDC4 40%, 
+        #5B9FFF 60%, 
+        #A78BFA 80%, 
+        #EC4899 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 48px;
+      letter-spacing: -1.5px;
+      animation: textShimmer 3s ease infinite;
+      background-size: 200% 100%;
+    }
+    
+    /* 音波容器 */
+    .wave-container {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 70px;
+    }
+    
+    .wave-bar {
+      width: 5px;
+      border-radius: 3px;
+      animation: wave 1.4s ease-in-out infinite;
+      box-shadow: 0 0 20px currentColor;
+    }
+    
+    .wave-bar:nth-child(1) { height: 25px; animation-delay: 0s; background: linear-gradient(180deg, #FF6B6B, #FF6B6B80); }
+    .wave-bar:nth-child(2) { height: 40px; animation-delay: 0.1s; background: linear-gradient(180deg, #FFB347, #FFB34780); }
+    .wave-bar:nth-child(3) { height: 55px; animation-delay: 0.2s; background: linear-gradient(180deg, #FFE66D, #FFE66D80); }
+    .wave-bar:nth-child(4) { height: 45px; animation-delay: 0.3s; background: linear-gradient(180deg, #4ECDC4, #4ECDC480); }
+    .wave-bar:nth-child(5) { height: 60px; animation-delay: 0.4s; background: linear-gradient(180deg, #5B9FFF, #5B9FFF80); }
+    .wave-bar:nth-child(6) { height: 35px; animation-delay: 0.5s; background: linear-gradient(180deg, #A78BFA, #A78BFA80); }
+    .wave-bar:nth-child(7) { height: 50px; animation-delay: 0.6s; background: linear-gradient(180deg, #EC4899, #EC489980); }
+    .wave-bar:nth-child(8) { height: 30px; animation-delay: 0.7s; background: linear-gradient(180deg, #FF6B6B, #FF6B6B80); }
+    .wave-bar:nth-child(9) { height: 45px; animation-delay: 0.8s; background: linear-gradient(180deg, #FFB347, #FFB34780); }
+    .wave-bar:nth-child(10) { height: 40px; animation-delay: 0.9s; background: linear-gradient(180deg, #4ECDC4, #4ECDC480); }
+    .wave-bar:nth-child(11) { height: 55px; animation-delay: 1s; background: linear-gradient(180deg, #5B9FFF, #5B9FFF80); }
+    .wave-bar:nth-child(12) { height: 35px; animation-delay: 1.1s; background: linear-gradient(180deg, #A78BFA, #A78BFA80); }
+    
+    @keyframes splashEnter {
+      from {
+        transform: translateY(30px) scale(0.95);
+      }
+      to {
+        transform: translateY(0) scale(1);
+      }
+    }
+    
+    @keyframes gradientShift {
+      0%, 100% {
+        transform: translate(0, 0) rotate(0deg);
+      }
+      33% {
+        transform: translate(5%, 10%) rotate(120deg);
+      }
+      66% {
+        transform: translate(-5%, -10%) rotate(240deg);
+      }
+    }
+    
+    @keyframes logoFloat {
+      0%, 100% {
+        transform: translateY(0px);
+      }
+      50% {
+        transform: translateY(-10px);
+      }
+    }
+    
+    @keyframes textShimmer {
+      0% {
+        background-position: 0% 50%;
+      }
+      50% {
+        background-position: 100% 50%;
+      }
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+    
+    @keyframes wave {
+      0%, 100% {
+        transform: scaleY(0.4);
+        opacity: 0.5;
+      }
+      50% {
+        transform: scaleY(1);
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="splash-wrapper">
+    <div class="gradient-bg"></div>
+    
+    <div class="splash-container">
+      <div class="logo-icon">
+        <img src="../logo.png" alt="WaveForge">
+      </div>
+      <div class="logo-text">WaveForge</div>
+      <div class="wave-container">
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+        <div class="wave-bar"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

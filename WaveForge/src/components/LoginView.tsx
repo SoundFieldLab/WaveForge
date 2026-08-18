@@ -1,154 +1,255 @@
-import { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, RefreshCw, Copy, Check, ExternalLink } from 'lucide-react'
+import type { MusicPlatform } from '../services/platforms'
 import GlobalToast from './GlobalToast'
 
+// 新平台登录面板（组件外声明，避免条件内 lazy 造成重挂载）
+const KugouLoginPanel = lazy(() => import('./KugouLoginPanel').then(m => ({ default: m.default })))
+const SpotifyLoginPanel = lazy(() => import('./SpotifyLoginPanel').then(m => ({ default: m.default })))
+const SodaLoginPanel = lazy(() => import('./SodaLoginPanel').then(m => ({ default: m.default })))
+
 interface LoginViewProps {
-  platform: 'netease' | 'qq'
+  platform: MusicPlatform
   onCancel: () => void
-  onLoginSuccess: (cookie: string) => void
+  onLoginSuccess: (cookie: string, username?: string) => void
 }
 
 export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginViewProps) {
   const [qrCode, setQrCode] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState<'pending' | 'scanned' | 'success' | 'expired'>('pending')
-  const [pollTimer, setPollTimer] = useState<number | null>(null)
-  const [qrKey, setQrKey] = useState<string>('')
+  // 🔧 修复内存泄漏：改用 ref 而非 state
+  const pollTimerRef = useRef<number | null>(null)
+  const requestControllerRef = useRef<AbortController | null>(null)
+  const pollControllerRef = useRef<AbortController | null>(null)
+  const websiteTimerRef = useRef<number | null>(null)
+  const toastTimerRef = useRef<number | null>(null)
+  const generationRef = useRef(0)
+  const mountedRef = useRef(false)
   
-  // QQ音乐Cookie登录
+  // QQ 登录相关状态
   const [qqCookie, setQQCookie] = useState('')
-  const [qqCopied, setQQCopied] = useState(false)
   const [qqError, setQQError] = useState('')
   const [showCopiedToast, setShowCopiedToast] = useState(false)
+  const [qqManualMode, setQQManualMode] = useState(false) // QQ 手动模式
+  // 应用内扫码登录（TV）回调的最新引用，供事件监听使用（在函数定义后赋值）
+  const handleQQLoginWithCookieRef = useRef<(cookie: string) => Promise<void>>(async () => {})
+
+  const clearPolling = () => {
+    if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
+    pollTimerRef.current = null
+    pollControllerRef.current?.abort()
+    pollControllerRef.current = null
+  }
+
+  const clearWebsiteTimers = () => {
+    if (websiteTimerRef.current !== null) window.clearTimeout(websiteTimerRef.current)
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
+    websiteTimerRef.current = null
+    toastTimerRef.current = null
+  }
+
+  const isCurrent = (generation: number) => mountedRef.current && generationRef.current === generation
+
+  const handleQQAutoLogin = async () => {
+    try {
+      setLoading(true)
+      setQQError('')
+      const electron = window.electron
+      const native = (window as any).WaveForgeNative
+      if (!electron?.openQQLoginWindow && !native?.openQQLogin) {
+        // 纯浏览器（含 ?tv=1 模拟）：跨域限制下无法自动抓取 qq.com 的 cookie——
+        // 打开 y.qq.com 让用户登录，然后走"手动登录"粘贴 Cookie 流程。
+        setQQError('')
+        setQQManualMode(true)
+        setLoading(false)
+        window.open('https://y.qq.com', '_blank')
+        return
+      }
+
+      if (electron?.openQQLoginWindow) {
+        // 桌面：Electron 登录窗口（登录成功自动抓取 cookie）
+        const result = await electron.openQQLoginWindow()
+        if (!mountedRef.current) return
+        if (result.success && result.cookie) {
+          await handleQQLoginWithCookie(result.cookie)
+        } else if (result.error) {
+          setQQError(result.error)
+          setLoading(false)
+        } else {
+          setQQError('未获取到登录信息')
+          setLoading(false)
+        }
+        return
+      }
+
+      // TV/安卓：应用内扫码登录——原生侧弹出 QQ 登录页（手机扫码），
+      // 抓到 cookie 后通过 qqLoginCookieCaptured 事件回传
+      setQQError('')
+      setQQManualMode(false)
+      native.openQQLogin()
+    } catch (err) {
+      if (!mountedRef.current) return
+      console.error('QQ 自动登录失败:', err)
+      setQQError('QQ 自动登录失败')
+      setLoading(false)
+    }
+  }
 
   const handleQQOpenWebsite = async () => {
     try {
-      // 复制 document.cookie 到剪贴板
       await navigator.clipboard.writeText('document.cookie')
-      
-      // 显示提示
+      if (!mountedRef.current) return
+      clearWebsiteTimers()
       setShowCopiedToast(true)
-      
-      // 等待3.5秒后跳转（让用户看到提示）
-      setTimeout(() => {
+      websiteTimerRef.current = window.setTimeout(() => {
+        websiteTimerRef.current = null
         window.open('https://y.qq.com', '_blank')
-        // 再等0.5秒后隐藏提示
-        setTimeout(() => setShowCopiedToast(false), 500)
+        toastTimerRef.current = window.setTimeout(() => {
+          toastTimerRef.current = null
+          if (mountedRef.current) setShowCopiedToast(false)
+        }, 500)
       }, 3500)
     } catch (err) {
-      console.error('复制失败:', err)
+      console.error('打开网页失败:', err)
+    }
+  }
+
+  const startPolling = (key: string, generation: number) => {
+    clearPolling()
+    const poll = async () => {
+      if (!isCurrent(generation)) return
+      const controller = new AbortController()
+      pollControllerRef.current = controller
+      let finished = false
+      try {
+        const res = await fetch(`http://localhost:3001/api/netease/login/qr/check?key=${key}`, { signal: controller.signal })
+        const data = await res.json()
+        if (!isCurrent(generation)) return
+
+        if (data.code === 800) {
+          setStatus('expired')
+          finished = true
+        } else if (data.code === 801) {
+          setStatus('pending')
+        } else if (data.code === 802) {
+          setStatus('scanned')
+        } else if (data.code === 803) {
+          setStatus('success')
+          finished = true
+          if (data.cookie) onLoginSuccess(data.cookie)
+          else console.error('login succeeded without cookie')
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) console.error('login polling failed:', error)
+      } finally {
+        if (pollControllerRef.current === controller) pollControllerRef.current = null
+        if (!finished && isCurrent(generation)) {
+          pollTimerRef.current = window.setTimeout(() => void poll(), 2000)
+        }
+      }
+    }
+    pollTimerRef.current = window.setTimeout(() => void poll(), 2000)
+  }
+
+  const generateQRCode = async () => {
+    const generation = ++generationRef.current
+    clearPolling()
+    requestControllerRef.current?.abort()
+    const controller = new AbortController()
+    requestControllerRef.current = controller
+    setLoading(true)
+    setStatus('pending')
+    try {
+      const keyRes = await fetch('http://localhost:3001/api/netease/login/qr/key', { signal: controller.signal })
+      const keyData = await keyRes.json()
+      if (!keyData.data?.unikey) throw new Error('failed to get QR key')
+
+      const key = keyData.data.unikey
+      const qrRes = await fetch(`http://localhost:3001/api/netease/login/qr/create?key=${key}&qrimg=true`, { signal: controller.signal })
+      const qrData = await qrRes.json()
+      if (!isCurrent(generation)) return
+      if (!qrData.data?.qrimg) throw new Error('failed to generate QR code')
+
+      setQrCode(qrData.data.qrimg)
+      setLoading(false)
+      startPolling(key, generation)
+    } catch (error) {
+      if (controller.signal.aborted || !isCurrent(generation)) return
+      console.error('网易云扫码失败:', error)
+      setLoading(false)
+      setStatus('expired')
+    } finally {
+      if (requestControllerRef.current === controller) requestControllerRef.current = null
     }
   }
 
   useEffect(() => {
-    if (platform === 'netease') {
-      generateQRCode()
-    } else {
-      setLoading(false)
-    }
+    mountedRef.current = true
+    if (platform === 'netease') void generateQRCode()
+    else setLoading(false)
     return () => {
-      if (pollTimer) {
-        clearInterval(pollTimer)
-      }
+      mountedRef.current = false
+      generationRef.current += 1
+      clearPolling()
+      clearWebsiteTimers()
+      requestControllerRef.current?.abort()
+      requestControllerRef.current = null
     }
   }, [platform])
 
-  const generateQRCode = async () => {
-    setLoading(true)
-    setStatus('pending')
-    
-    try {
-      // 获取二维码 key
-      const keyRes = await fetch('http://localhost:3001/api/netease/login/qr/key')
-      const keyData = await keyRes.json()
-      
-      if (!keyData.data || !keyData.data.unikey) {
-        throw new Error('获取二维码 key 失败')
-      }
-
-      const unikey = keyData.data.unikey
-      setQrKey(unikey)
-
-      // 生成二维码
-      const qrRes = await fetch(`http://localhost:3001/api/netease/login/qr/create?key=${unikey}&qrimg=true`)
-      const qrData = await qrRes.json()
-
-      if (qrData.data && qrData.data.qrimg) {
-        setQrCode(qrData.data.qrimg)
-        setLoading(false)
-        startPolling(unikey)
-      } else {
-        throw new Error('生成二维码失败')
-      }
-    } catch (error) {
-      console.error('二维码生成错误:', error)
+  // TV 应用内扫码登录：原生侧抓到 QQ cookie 后回传
+  useEffect(() => {
+    const onCookieCaptured = (e: Event) => {
+      const detail = (e as CustomEvent<{ cookie?: string }>).detail
+      if (!detail?.cookie) return
       setLoading(false)
+      void handleQQLoginWithCookieRef.current(detail.cookie)
     }
-  }
-
-  const startPolling = (key: string) => {
-    // 清除旧的轮询
-    if (pollTimer) {
-      clearInterval(pollTimer)
+    const onLoginClosed = () => {
+      setLoading(false)
+      setQQError('未获取到登录信息，请重试')
     }
-
-    // 开始轮询检查扫码状态
-    const timer = window.setInterval(async () => {
-      try {
-        const res = await fetch(`http://localhost:3001/api/netease/login/qr/check?key=${key}`)
-        const data = await res.json()
-
-        if (data.code === 800) {
-          // 二维码过期
-          setStatus('expired')
-          clearInterval(timer)
-        } else if (data.code === 801) {
-          // 等待扫码
-          setStatus('pending')
-        } else if (data.code === 802) {
-          // 已扫码，等待确认
-          setStatus('scanned')
-        } else if (data.code === 803) {
-          // 登录成功
-          setStatus('success')
-          clearInterval(timer)
-          
-          // 获取 cookie
-          if (data.cookie) {
-            onLoginSuccess(data.cookie)
-          }
-        }
-      } catch (error) {
-        console.error('检查扫码状态错误:', error)
-      }
-    }, 2000)
-
-    setPollTimer(timer)
-  }
+    window.addEventListener('qqLoginCookieCaptured', onCookieCaptured)
+    window.addEventListener('qqLoginClosed', onLoginClosed)
+    return () => {
+      window.removeEventListener('qqLoginCookieCaptured', onCookieCaptured)
+      window.removeEventListener('qqLoginClosed', onLoginClosed)
+    }
+  }, [])
 
   const handleRefresh = () => {
-    if (pollTimer) {
-      clearInterval(pollTimer)
-    }
-    generateQRCode()
+    void generateQRCode()
   }
 
-  const handleQQLogin = () => {
+  const handleQQLoginWithCookie = async (cookie: string) => {
     setQQError('')
     
-    if (!qqCookie.trim()) {
+    if (!cookie.trim()) {
       setQQError('请输入 Cookie')
+      setLoading(false)
       return
     }
 
-    // 验证 Cookie 格式
-    if (!qqCookie.includes('uin') || !qqCookie.includes('qm_keyst')) {
-      setQQError('Cookie 格式不正确，请确保包含 uin 和 qm_keyst')
+    // 验证 Cookie 格式 - 检查是否包含任何可能的用户标识字段
+    const hasUserIdentifier = cookie.includes('uin') || 
+                              cookie.includes('wxuin') || 
+                              cookie.includes('ts_uid') ||
+                              cookie.includes('psrf_qqopenid')
+    
+    if (!hasUserIdentifier) {
+      setQQError('Cookie 格式不正确，请确保从 y.qq.com 登录后获取完整的 Cookie')
+      setLoading(false)
       return
     }
 
-    onLoginSuccess(qqCookie.trim())
+    onLoginSuccess(cookie)
+  }
+  handleQQLoginWithCookieRef.current = handleQQLoginWithCookie
+
+  const handleQQLogin = () => {
+    handleQQLoginWithCookie(qqCookie.trim())
   }
 
   const getStatusText = () => {
@@ -177,9 +278,32 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     }
   }
 
+  // 新三平台（Spotify/酷狗/汽水）：复用各自登录面板（简化登录）
+  if (platform === 'kugou' || platform === 'spotify' || platform === 'soda') {
+    if (platform === 'kugou') {
+      return (
+        <Suspense fallback={null}>
+          <KugouLoginPanel onClose={onCancel} onLoginSuccess={(cookie: string) => onLoginSuccess(cookie)} />
+        </Suspense>
+      )
+    }
+    if (platform === 'spotify') {
+      return (
+        <Suspense fallback={null}>
+          <SpotifyLoginPanel onClose={onCancel} onLoginSuccess={(username?: string) => onLoginSuccess('spotify-logged', username)} />
+        </Suspense>
+      )
+    }
+    return (
+      <Suspense fallback={null}>
+        <SodaLoginPanel onClose={onCancel} onLoginSuccess={(token: string) => onLoginSuccess(token)} />
+      </Suspense>
+    )
+  }
+
   return (
     <>
-      <div className="fixed inset-0 w-full h-full overflow-hidden z-50">
+      <div className="fixed inset-0 w-full h-full overflow-hidden z-50" data-tv-scope>
         {/* 动态背景 */}
       <motion.div 
         className="absolute inset-0"
@@ -320,88 +444,155 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                 )}
               </>
             ) : (
-              // QQ音乐 Cookie 登录
-              <div className="space-y-4 w-full">
-                <div>
-                  <div className="bg-white/5 rounded-lg p-4 text-white/80 text-sm space-y-3">
-                    <p className="text-white/60 mb-3">由于QQ音乐API限制，需要手动获取Cookie进行登录</p>
-                    
-                    <div className="space-y-3">
+              // QQ音乐登录
+              <div className="space-y-6 w-full">
+                {loading ? (
+                  <div className="flex flex-col items-center justify-center py-8">
+                    <div className="w-16 h-16 border-4 border-green-500/30 border-t-green-500 rounded-full animate-spin mb-4"></div>
+                    <p className="text-white/60 text-sm">正在等待登录...</p>
+                  </div>
+                ) : !qqManualMode ? (
+                  // 自动登录模式
+                  <>
+                    <div className="text-center space-y-4">
+                      <Music className="w-16 h-16 text-green-500 mx-auto" />
                       <div>
-                        <div className="flex items-start gap-3">
-                          <span className="flex-shrink-0 w-6 h-6 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center text-xs font-bold">1</span>
-                          <div className="flex-1">
-                            <p className="font-medium text-white mb-1">打开QQ音乐官网并登录</p>
-                            <button
-                              onClick={handleQQOpenWebsite}
-                              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm transition-colors inline-flex items-center gap-2"
-                            >
-                              <ExternalLink className="w-4 h-4" />
-                              前往 y.qq.com
-                            </button>
-                          </div>
+                        <h3 className="text-xl font-medium text-white mb-2">QQ音乐登录</h3>
+                        <p className="text-white/60 text-sm">
+                          {(window as any).WaveForgeNative?.openQQLogin
+                            ? '请在电视屏幕上使用手机 QQ 扫码登录，登录成功后自动返回'
+                            : '弹出窗口后请选择立即登录，登录成功后本窗口将自动关闭'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {qqError && (
+                      <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+                        <p className="text-red-400 text-sm">{qqError}</p>
+                      </div>
+                    )}
+
+                    {/* 手动登录提示链接 */}
+                    <div className="text-center -mt-2">
+                      <button
+                        onClick={() => {
+                          setQQManualMode(true)
+                          setQQError('')
+                        }}
+                        className="text-white/50 hover:text-white/80 text-sm transition-colors"
+                      >
+                        遇到问题？可尝试<span className="underline">手动登录</span>
+                      </button>
+                    </div>
+
+                    <div className="flex gap-3 pt-2">
+                      <button
+                        onClick={handleQQAutoLogin}
+                        className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors inline-flex items-center justify-center gap-2"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                        {(window as any).WaveForgeNative?.openQQLogin ? '手机扫码登录' : '打开登录窗口'}
+                      </button>
+                      <button
+                        onClick={onCancel}
+                        className="flex-1 px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium transition-colors"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  // 手动登录模式
+                  <>
+                    <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 mb-2">
+                      <p className="text-yellow-200 text-sm">
+                        由于QQ音乐API限制，需要手动获取Cookie进行登录
+                      </p>
+                    </div>
+
+                    <div className="space-y-4">
+                      {/* 步骤1 */}
+                      <div className="flex items-start gap-4">
+                        <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold">
+                          1
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-white font-medium mb-2">打开QQ音乐官网并登录</h3>
+                          <button
+                            onClick={handleQQOpenWebsite}
+                            className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors"
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                            前往 y.qq.com
+                          </button>
                         </div>
                       </div>
-                      
-                      <div>
-                        <div className="flex items-start gap-3">
-                          <span className="flex-shrink-0 w-6 h-6 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center text-xs font-bold">2</span>
-                          <div className="flex-1">
-                            <p className="font-medium text-white mb-2">获取Cookie</p>
-                            <div className="text-white/70 text-sm space-y-1.5">
-                              <p>1. 按 <span className="text-green-400 font-semibold">F12</span> 打开开发者工具</p>
-                              <p>2. 切换到 <span className="text-green-400 font-semibold">Console</span> 标签</p>
-                              <p className="text-base">3. 输入以下代码并回车：</p>
-                              <div className="bg-black/40 rounded px-3 py-2 mt-1.5 font-mono text-base">
-                                <span className="text-green-400">document.cookie</span>
-                              </div>
-                              <p>4. 复制输出的内容（通常很长）</p>
+
+                      {/* 步骤2 */}
+                      <div className="flex items-start gap-4">
+                        <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold">
+                          2
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-white font-medium mb-2">获取Cookie</h3>
+                          <div className="bg-white/5 rounded-lg p-4 space-y-2 text-white/80 text-sm">
+                            <p>1. 按 <kbd className="px-2 py-1 bg-white/10 rounded">F12</kbd> 打开开发者工具</p>
+                            <p>2. 切换到 <strong>Console</strong> 标签</p>
+                            <p>3. 输入以下代码并回车：</p>
+                            <div className="bg-black/50 p-2 rounded font-mono text-green-400">
+                              document.cookie
                             </div>
+                            <p>4. 复制输出的内容（通常很长）</p>
                           </div>
                         </div>
                       </div>
-                      
-                      <div>
-                        <div className="flex items-start gap-3">
-                          <span className="flex-shrink-0 w-6 h-6 rounded-full bg-green-500/20 text-green-400 flex items-center justify-center text-xs font-bold">3</span>
-                          <div className="flex-1">
-                            <p className="font-medium text-white">粘贴Cookie</p>
-                          </div>
+
+                      {/* 步骤3 */}
+                      <div className="flex items-start gap-4">
+                        <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold">
+                          3
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="text-white font-medium mb-2">粘贴Cookie</h3>
+                          <textarea
+                            value={qqCookie}
+                            onChange={(e) => {
+                              setQQCookie(e.target.value)
+                              setQQError('')
+                            }}
+                            placeholder="粘贴从浏览器复制的 Cookie..."
+                            className="w-full h-32 bg-white/5 border border-white/10 rounded-lg p-3 text-white placeholder-white/40 focus:outline-none focus:border-green-500 resize-none"
+                          />
                         </div>
                       </div>
                     </div>
-                  </div>
-                </div>
 
-                <div>
-                  <label className="block text-white text-sm font-medium mb-2">
-                    粘贴 Cookie：
-                  </label>
-                  <textarea
-                    value={qqCookie}
-                    onChange={(e) => setQQCookie(e.target.value)}
-                    placeholder="粘贴从浏览器复制的 Cookie..."
-                    className="w-full h-32 bg-white/10 border border-white/20 rounded-lg px-4 py-3 text-white placeholder-white/40 focus:outline-none focus:border-green-500/50 transition-colors resize-none"
-                  />
-                  {qqError && (
-                    <p className="mt-2 text-red-400 text-sm">{qqError}</p>
-                  )}
-                </div>
+                    {qqError && (
+                      <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
+                        <p className="text-red-400 text-sm">{qqError}</p>
+                      </div>
+                    )}
 
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={onCancel}
-                    className="flex-1 px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium transition-colors"
-                  >
-                    取消
-                  </button>
-                  <button
-                    onClick={handleQQLogin}
-                    className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors"
-                  >
-                    登录
-                  </button>
-                </div>
+                    <div className="flex gap-3 pt-2">
+                      <button
+                        onClick={() => {
+                          setQQManualMode(false)
+                          setQQError('')
+                          setQQCookie('')
+                        }}
+                        className="flex-1 px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium transition-colors"
+                      >
+                        返回自动登录
+                      </button>
+                      <button
+                        onClick={handleQQLogin}
+                        className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors"
+                      >
+                        登录
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -419,3 +610,4 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     </>
   )
 }
+
