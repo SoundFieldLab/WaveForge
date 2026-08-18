@@ -26,9 +26,6 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
-      // opencc-js 主入口捆绑全部转换方向（cn↔tw/hk/twp/jp），桌面歌词只用 cn→tw。
-      // 定向到 cn2t 子路径可去掉 t2cn 等反向字典，缩减桌面歌词窗口 ~30KB（minified）且行为不变。
-      'opencc-js': 'opencc-js/cn2t',
     },
   },
   server: {
