@@ -49,3 +49,7 @@ temp/
 
 # 调试截图
 wf-screen-check.png
+
+# 大型构建产物（不纳入 git 版本管理）
+android/
+python-beat-service/
