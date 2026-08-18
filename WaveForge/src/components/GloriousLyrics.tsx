@@ -40,11 +40,12 @@ interface GloriousScene {
   enterY: number
 }
 
+// 场景宽度收窄到封面卡片左侧之外，避免当前歌词与右侧封面卡片重叠
 const SCENES: GloriousScene[] = [
-  { left: '11%', top: '37%', width: '74%', align: 'left', rotation: -2.2, enterX: -70, enterY: 28 },
-  { left: '18%', top: '31%', width: '72%', align: 'right', rotation: 1.8, enterX: 74, enterY: -18 },
-  { left: '12%', top: '43%', width: '78%', align: 'center', rotation: 0, enterX: 0, enterY: 48 },
-  { left: '20%', top: '35%', width: '67%', align: 'left', rotation: 2.8, enterX: -22, enterY: -54 },
+  { left: '11%', top: '37%', width: '54%', align: 'left', rotation: -2.2, enterX: -70, enterY: 28 },
+  { left: '16%', top: '31%', width: '52%', align: 'right', rotation: 1.8, enterX: 74, enterY: -18 },
+  { left: '12%', top: '43%', width: '58%', align: 'center', rotation: 0, enterX: 0, enterY: 48 },
+  { left: '16%', top: '35%', width: '50%', align: 'left', rotation: 2.8, enterX: -22, enterY: -54 },
 ]
 
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value))
@@ -141,8 +142,11 @@ export default function GloriousLyrics({
     () => Boolean(currentLine && buildTimedLyricGlyphs(currentLine).length > 0),
     [currentLine],
   )
-  const lineNumber = String(Math.max(1, activeIndex + 1)).padStart(2, '0')
-  const totalLines = String(Math.max(1, lyrics.filter(line => line.text?.trim()).length)).padStart(2, '0')
+  // 仅统计有文字的可见行，行号与总数保持一致（跳过空行/间奏占位行）
+  const visibleLyrics = useMemo(() => lyrics.filter(line => line.text?.trim()), [lyrics])
+  const visibleLineIndex = currentLine ? visibleLyrics.indexOf(currentLine) : -1
+  const lineNumber = String(Math.max(1, visibleLineIndex + 1)).padStart(2, '0')
+  const totalLines = String(Math.max(1, visibleLyrics.length)).padStart(2, '0')
 
   return (
     <div
@@ -181,25 +185,31 @@ export default function GloriousLyrics({
         </div>
       )}
 
-﻿      {coverUrl && (
+      {coverUrl && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -right-[3vw] top-[15vh] z-[2] aspect-square w-[min(36vw,540px)]"
-          style={{ transform: 'rotate(8deg)' }}
+          className="pointer-events-none absolute -right-[1vw] top-[10vh] z-[2] w-[min(22vw,300px)]"
+          style={{ transform: 'rotate(7deg)' }}
         >
-          <div className="absolute inset-[-5%] border border-white/10" style={{ transform: 'rotate(-3deg)', background: colorWithAlpha(palette.vivid, .08) }} />
+          {/* 竖版画廊装裱：深色衬底 + 金色细框 */}
           <div
-            className="absolute inset-0 overflow-hidden border border-white/25"
-            style={{ boxShadow: `0 42px 110px rgba(0,0,0,.62), 0 0 70px ${colorWithAlpha(palette.vivid, .24)}` }}
+            className="relative aspect-[3/4] overflow-hidden"
+            style={{
+              boxShadow: `0 0 0 6px rgba(8,9,14,.88), 0 0 0 8px ${colorWithAlpha(palette.highlight, .3)}, 0 42px 110px rgba(0,0,0,.62), 0 0 64px ${colorWithAlpha(palette.vivid, .2)}`,
+            }}
           >
             <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ filter: 'saturate(1.22) contrast(1.08) brightness(.82)' }} />
             <div className="absolute inset-0" style={{ background: 'linear-gradient(115deg, rgba(255,255,255,.18), transparent 28%, rgba(0,0,0,.08) 55%, rgba(0,0,0,.62))' }} />
-            <div className="absolute inset-x-0 bottom-0 border-t border-white/20 bg-black/35 px-6 py-4 backdrop-blur-md">
-              <div className="font-mono text-[9px] font-bold uppercase tracking-[.34em] text-white/65">featured cover / side a</div>
-              <div className="mt-2 truncate text-sm font-semibold text-white/90">{songTitle}</div>
+            <div className="absolute inset-x-0 bottom-0 border-t border-white/20 bg-black/40 px-4 py-3 backdrop-blur-md">
+              <div className="font-mono text-[8px] font-bold uppercase tracking-[.32em] text-white/65">featured cover / side a</div>
+              <div className="mt-1 truncate text-xs font-semibold text-white/90">{songTitle}</div>
             </div>
           </div>
-          <span className="absolute -bottom-8 left-8 h-px w-[72%]" style={{ background: `linear-gradient(90deg, ${palette.highlight}, transparent)` }} />
+          {/* 金色饰角 */}
+          <span className="absolute -left-3 -top-3 h-5 w-5" style={{ borderLeft: `2px solid ${palette.highlight}`, borderTop: `2px solid ${palette.highlight}`, boxShadow: `0 0 12px ${colorWithAlpha(palette.vivid, .5)}` }} />
+          <span className="absolute -right-3 -top-3 h-5 w-5" style={{ borderRight: `2px solid ${palette.highlight}`, borderTop: `2px solid ${palette.highlight}`, boxShadow: `0 0 12px ${colorWithAlpha(palette.vivid, .5)}` }} />
+          <span className="absolute -bottom-3 -left-3 h-5 w-5" style={{ borderLeft: `2px solid ${palette.highlight}`, borderBottom: `2px solid ${palette.highlight}`, boxShadow: `0 0 12px ${colorWithAlpha(palette.vivid, .5)}` }} />
+          <span className="absolute -bottom-3 -right-3 h-5 w-5" style={{ borderRight: `2px solid ${palette.highlight}`, borderBottom: `2px solid ${palette.highlight}`, boxShadow: `0 0 12px ${colorWithAlpha(palette.vivid, .5)}` }} />
         </div>
       )}
       <div
@@ -312,11 +322,14 @@ export default function GloriousLyrics({
             }}
             exit={{
               opacity: 0,
-              x: prefersReducedMotion ? 0 : -scene.enterX * 0.42,
-              y: prefersReducedMotion ? 0 : -28,
-              scale: prefersReducedMotion ? 1 : 1.06,
+              x: prefersReducedMotion ? 0 : -scene.enterX * 0.3,
+              y: prefersReducedMotion ? 0 : -16,
+              scale: prefersReducedMotion ? 1 : 1.02,
+              transition: prefersReducedMotion
+                ? { duration: 0.01 }
+                : { duration: 0.22, ease: [0.4, 0, 0.2, 1] },
             }}
-            transition={{ duration: prefersReducedMotion ? 0.01 : 0.58, ease: [0.16, 1, 0.3, 1] }}
+            transition={{ duration: prefersReducedMotion ? 0.01 : 0.38, ease: [0.16, 1, 0.3, 1] }}
             style={{
               left: scene.left,
               top: scene.top,
@@ -342,7 +355,7 @@ export default function GloriousLyrics({
               style={{
                 color: 'white',
                 cursor: onSeek ? 'pointer' : 'default',
-                fontSize: 'clamp(2.9rem, 7.4vw, 7.8rem)',
+                fontSize: 'clamp(2.6rem, 6.4vw, 6.8rem)',
                 maxWidth: '100%',
               }}
             >

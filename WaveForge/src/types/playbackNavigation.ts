@@ -1,5 +1,4 @@
 import type { Song } from '../services/musicApi'
-import type { MusicPlatform } from '../services/platforms'
 
 export type ViewMode = 'explore' | 'minimal' | 'desktop'
 
@@ -21,8 +20,8 @@ export type PlaybackSurface =
 export interface PlaybackOrigin {
   mode?: ViewMode
   surface: PlaybackSurface
-  platform?: MusicPlatform
-  searchMode?: MusicPlatform | 'fused'
+  platform?: 'netease' | 'qq' | 'apple'
+  searchMode?: 'netease' | 'qq' | 'apple' | 'fused'
   artistId?: string | number
   albumId?: string | number
   artistTab?: 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'similarArtists' | 'info'

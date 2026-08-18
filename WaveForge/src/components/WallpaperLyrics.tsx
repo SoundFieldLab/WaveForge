@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useReducedMotion } from 'framer-motion'
 import type { LyricLine } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
@@ -124,8 +124,8 @@ const buildWallpaperLayout = (lyrics: LyricLine[], viewport: ViewportSize, seed:
   const columnWidth = clamp(viewport.width * (columnCount === 2 ? 0.56 : columnCount === 3 ? 0.36 : 0.27), columnCount === 2 ? 250 : 290, 510)
   const columnGap = clamp(viewport.width * 0.075, 54, 128)
   const rowHeight = clamp(viewport.height * 0.28, 190, 255)
-  const horizontalMargin = Math.max(viewport.width * 0.78, 700)
-  const verticalMargin = Math.max(viewport.height * 0.72, 540)
+  const horizontalMargin = Math.max(viewport.width * 0.5, 460)
+  const verticalMargin = Math.max(viewport.height * 0.42, 320)
   const contentWidth = columnCount * columnWidth + (columnCount - 1) * columnGap
   const seedOffset = hashText(seed) % columnCount
 
@@ -347,21 +347,32 @@ export default function WallpaperLyrics({
       {coverUrl && <img src={coverUrl} alt="" draggable={false} className="pointer-events-none absolute inset-[-5%] h-[110%] w-[110%] object-cover" style={{ opacity: isDark ? 0.34 : 0.22, filter: 'blur(22px) saturate(1.28) contrast(1.08)', transform: 'translateZ(0) scale(1.03)', mixBlendMode: isDark ? 'screen' : 'multiply' }} />}
       <div className="absolute inset-0" style={{ backgroundColor: colorWithAlpha(wallpaperPalette.surface, isDark ? 0.82 : 0.88), backgroundImage: `radial-gradient(circle at 78% 18%, ${colorWithAlpha(wallpaperAccent, isDark ? 0.34 : 0.2)} 0%, transparent 50%), radial-gradient(circle at 18% 82%, ${colorWithAlpha(accentColor, isDark ? 0.2 : 0.14)} 0%, transparent 42%), linear-gradient(115deg, ${colorWithAlpha(wallpaperPalette.paper, isDark ? 0.78 : 0.84)} 0%, ${colorWithAlpha(wallpaperPalette.surface, isDark ? 0.72 : 0.82)} 100%)` }} />
       <div aria-hidden="true" className="pointer-events-none absolute inset-0 opacity-30" style={{ backgroundImage: isDark ? 'repeating-linear-gradient(104deg, rgba(255,255,255,.018) 0 1px, transparent 1px 5px)' : 'repeating-linear-gradient(104deg, rgba(74,64,48,.025) 0 1px, transparent 1px 5px)' }} />
-﻿      {coverUrl && (
+      {coverUrl && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute -right-[4vw] top-[13vh] z-[1] h-[min(66vh,620px)] w-[min(38vw,520px)] overflow-hidden border border-white/15 shadow-2xl"
-          style={{
-            transform: 'rotate(5.5deg)',
-            boxShadow: `0 36px 90px rgba(0,0,0,.48), 0 0 0 12px ${colorWithAlpha(wallpaperPalette.paper, 0.22)}, 0 0 54px ${colorWithAlpha(wallpaperAccent, 0.2)}`,
-            WebkitMaskImage: 'linear-gradient(110deg, transparent 0%, black 17%, black 84%, transparent 100%)',
-            maskImage: 'linear-gradient(110deg, transparent 0%, black 17%, black 84%, transparent 100%)',
-          }}
+          className="pointer-events-none absolute bottom-[10%] right-[1.5vw] z-[1] w-[min(30vw,340px)]"
+          style={{ transform: 'rotate(-4deg)' }}
         >
-          <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ opacity: isDark ? .72 : .58, filter: 'saturate(1.16) contrast(1.08)' }} />
-          <div className="absolute inset-0" style={{ background: `linear-gradient(145deg, ${colorWithAlpha(wallpaperPalette.paper, .12)}, transparent 42%, ${colorWithAlpha(wallpaperPalette.surface, .64)}), repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0 1px, transparent 1px 4px)` }} />
-          <div className="absolute bottom-5 left-6 right-6 border-t border-white/28 pt-3 font-mono text-[9px] font-bold uppercase tracking-[.34em]" style={{ color: primaryText }}>
-            album print / {String((activeBlock?.visualIndex ?? 0) + 1).padStart(3, '0')}
+          {/* 拍立得相纸：宽幅 + 厚纸边 + 手写风标注，与辉煌的金框竖版形成区分 */}
+          <div
+            className="relative overflow-hidden px-3 pb-4 pt-3"
+            style={{
+              backgroundColor: colorWithAlpha(wallpaperPalette.paper, isDark ? 0.9 : 0.97),
+              boxShadow: `0 30px 70px rgba(0,0,0,.42), 0 0 46px ${colorWithAlpha(wallpaperAccent, .16)}`,
+            }}
+          >
+            <div className="aspect-[4/3] overflow-hidden">
+              <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ opacity: isDark ? .9 : .85, filter: 'saturate(1.1) contrast(1.04)' }} />
+            </div>
+            <div className="mt-3 flex items-end justify-between gap-3 px-0.5">
+              <div className="min-w-0">
+                <div className="truncate text-xs font-semibold leading-tight" style={{ color: primaryText }}>{songTitle}</div>
+                <div className="mt-0.5 truncate text-[10px]" style={{ color: secondaryText }}>{songArtist}</div>
+              </div>
+              <span className="shrink-0 pb-0.5 font-mono text-[9px] font-bold uppercase tracking-[.26em]" style={{ color: wallpaperAccent }}>
+                print {String((activeBlock?.visualIndex ?? 0) + 1).padStart(3, '0')}
+              </span>
+            </div>
           </div>
         </div>
       )}

@@ -19,7 +19,6 @@ const DEFAULT_STATE: DesktopPlayerSnapshot = {
   playlist: [],
   currentIndex: -1,
   progress: 0,
-  duration: 0,
   hasTranslation: false,
   hasRomaji: false,
   volume: 0.5,

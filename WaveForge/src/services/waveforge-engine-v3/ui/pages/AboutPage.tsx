@@ -80,6 +80,15 @@ export default function AboutPage({ theme }: AboutPageProps) {
         >
           2026 © IceFire_Icer All Right Reserved
         </motion.span>
+        <motion.span
+          className="mt-2 text-[10px] tracking-wide"
+          style={{ color: `${theme.accentColor}aa` }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.8 }}
+        >
+          HyperSoundEngine 已授权 WaveForge 项目使用
+        </motion.span>
       </div>
     </div>
   )
