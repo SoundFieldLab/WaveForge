@@ -1,11 +1,12 @@
 /**
  * TV 局域网调试桥（跟随开发者模式，默认关闭）：
- *  - 开发者模式开启时：通知后端启动 :3002 调试服务，并连 ws://localhost:3002/ws
- *    接收电脑调试台（http://<设备IP>:3002）发出的控制命令 → 派发到应用执行；
+ *  - 开发者模式开启时：通知后端启动 :3008 调试服务，并连 ws://localhost:3008/ws
+ *    接收电脑调试台（http://<设备IP>:3008）发出的控制命令 → 派发到应用执行；
  *  - 前端 JS 错误（window.onerror/unhandledrejection）上报到后端调试服务，
  *    电脑端无需 adb 即可看到崩溃原因。
  */
 import { isDebugMode, getFrontendLogs } from './debugStore'
+import { isAndroid } from '../platform'
 
 let ws: WebSocket | null = null
 let lastReportedLogs = 0
@@ -24,8 +25,17 @@ function syncBackend(enabled: boolean): void {
 
 function connectWs(): void {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+  // 先确认 3008 是 TV 调试服务（未启动/被其它服务占用时不连 WS，避免反复重试刷屏）
+  fetch('http://localhost:3008/', { cache: 'no-store' })
+    .then((r) => {
+      if (r.ok) connectWsDirect()
+    })
+    .catch(() => { /* 调试服务未运行：不连接 */ })
+}
+
+function connectWsDirect(): void {
   try {
-    ws = new WebSocket('ws://localhost:3002/ws')
+    ws = new WebSocket('ws://localhost:3008/ws')
   } catch {
     return
   }
@@ -90,8 +100,11 @@ function reportFrontendError(payload: Record<string, unknown>): void {
 }
 
 /** 前端 console 日志批量上报到调试台（电脑端可见前端运行日志） */
+let debugReportFailures = 0
 function reportFrontendLogs(): void {
   if (!isDebugMode()) return
+  // 后端无调试接口（PC 端 local-server 未挂 tv 扩展）：连续失败后停止上报，避免 404 刷屏
+  if (debugReportFailures >= 10) return
   const logs = getFrontendLogs()
   if (logs.length <= lastReportedLogs) return
   const batch = logs.slice(lastReportedLogs)
@@ -101,13 +114,17 @@ function reportFrontendLogs(): void {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ logs: batch }),
-    }).catch(() => {})
+    })
+      .then((r) => { if (!r.ok) debugReportFailures++ })
+      .catch(() => { debugReportFailures++ })
   } catch {
-    // ignore
+    debugReportFailures++
   }
 }
 
 export function installDebugRemote(): void {
+  // TV 调试（:3008）仅在 Android/TV 端启用（PC 端 3002/3008 是其它服务，禁用避免 404/连接噪音）
+  if (!isAndroid()) return
   const sync = () => {
     const enabled = isDebugMode()
     syncBackend(enabled)

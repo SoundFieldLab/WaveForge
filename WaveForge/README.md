@@ -18,6 +18,7 @@ npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electro
 - **QQ 音乐 API Key 领取**：内置引导窗口直达 y.qq.com 领取 qmk API Key（独立隔离 session，每次打开清空登录态）
 - **无缝衔接播放**：三种模式 —— Smart AutoMix（智能节拍匹配+BPM 同步，需 Python）/ Beat Crossfade（节拍交叉淡化）/ Fixed Crossfade（固定时长，默认）
 - **歌词系统**：LRC 解析、逐字歌词（QQ）、实时滚动、点击跳转；逐字特效模式（清晰/柔和/Apple 逆向还原）
+- **空间音频（Spatial Audio）**：真实 MIT KEMAR HRTF 双耳渲染——一键空间化 / 头锁定环绕 / 世界漫游 / 舞台影院四模式，支持 SOFA 数据集导入（详见下方「空间音频」章节）
 - **可视化**：频谱柱 / 波形 / 环形 / 3D 可视化
 - **桌面模式**：桌面小组件、专注计时、生产力工具、自定义壁纸
 - **Wallpaper Engine 联动**：读取本地 WE 配置并同步音频可视化
@@ -100,6 +101,29 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 ## 音效引擎 v1 / v2 / v3
 
 调音室头部可切换音效引擎版本（默认 **v1 原版**；v2 为增强版：场景方案 / 可叠加效果 / 混响类型 / 压缩 / 夜间模式（动态压缩 + 高频衰减）/ 频响补偿 / 响度归一化；**v3 为纯 TS DSP 内核引擎**：`src/services/waveforge-engine-v3/`，14 级处理链（响度归一化→3D 环绕→M/S→EQ→齿音→压缩→夜间→卷积/算法混响→虚拟低音→等响度补偿→智能 EQ→限幅）、11 组合场景、10/20 段 EQ + 级联 Q 补偿、分享串（版本+校验+白名单防注入）、LUFS/频谱分析 + 听力测试、WAV 离线导出（与实时链逐样本一致）、AudioWorklet 渲染线程 + script 兜底）。v3 调音室为 **HSE（HyperSoundEngine）风格**（左侧 8 页导航：主页/音效场景/均衡器/空间音效/动态调音/分析/调音器/关于，深色琥珀金主题）；**低音增强含「低音下潜」**（-6..+12dB 真实低频能量提升，lowshelf 语义，谐波虚拟低音之上补足对比 v2 的低音下潜）；**分析页**为对数频率轴实时频谱（20Hz-20kHz、dBFS 归一化、10fps 刷新）+ LUFS/GR/特征 + 听力测试；**音量控制跟手**（80ms 平滑）且**独立于场景预设/组合**（应用场景不覆盖用户音量）。v3 响度归一化（实时 BS.1770）与频响补偿（等响度 auto 按系统音量）均在引擎内实现，不依赖 3003/3004 服务；与 v1/v2 完全独立（不做参数迁移），参数快照持久化于 localStorage。v2 频响补偿为**等响度动态补偿**：多段 Biquad 链，auto 按系统音量线性提升低频（0-12dB）/高频（0-6dB，shelf 结构防中频污染）+ 场景预设（flat/bass/vocal/warm/bright/night）+ 自定义频段，设计结果由独立服务 3004 `/compensation` 下发。v2 调音室支持：场景一键应用（自定义状态弹覆盖/保存确认）、恢复默认/清空均衡器按钮、3D 环绕开启展开子设置横条、效果卡片「使用/已启用」、切歌时右上角弹衔接方案提示（直接拼接/60ms 淡入淡出/albumGapless 交叉淡化）。切换为热切换（暂停音乐换链后恢复），音频图未就绪时退化为冷切换（下次启动生效），右上角弹 2s 提示。详见 `AGENTS.md` 与 `CONTEXT.md`。
+
+## 空间音频（Spatial Audio）
+
+空间音频是 v3 处理节点**之后**的兄弟 AudioWorklet 节点（`masterGain → [soundtouch?] → v3Node → [spatial?] → analyser`），只做双耳渲染、不碰引擎参数——HSE 核心（EngineV3）零改动，参数与 V3EngineParams 完全解耦（全局设置，不进场景快照、不被场景应用覆盖）。四种模式：
+
+- **A 一键空间化**：立体声展开为 ±30°（20..120° 可调）虚拟扬声器，干湿混合强度 / 房间模拟预设 / 房间混响可调
+- **B 头锁定环绕**：5.1 / 7.1.4 / 自定义布局预设 + 环形拖拽编辑器（上限 16 只扬声器）+ 逐扬声器声源路由（L / R / both），声场固定于头部朝向（耳机听感）
+- **C 世界漫游**：3D 视图 + WASD/QE 移动、鼠标拖拽转头（F 第一人称跟随、R 重置听者），支持多普勒、声源轨迹关键帧（按播放时钟线性插值）、遮挡/衍射（增益衰减 + 高频低通）
+- **D 舞台/影院**：4 场景预设（音乐舞台 / 电影院 / 钢琴独奏 / 自然场景）+ 座位选择（前/中/后，距离 ×0.8 / 1.0 / 1.35）+ 房间大小 / 氛围混响调节
+
+**核心能力**：
+
+- 真实 **MIT KEMAR HRTF** 网格（`hrtf-data/grid.bin` 内嵌，构建时 base64 内联）；可导入 **SOFA（AES69）数据集**换网格（NetCDF3 经典格式 + NetCDF4/HDF5 封装，h5wasm 懒加载），采样率不匹配自动整体重采样（多相 Kaiser-sinc），**跨重启自动恢复**（IndexedDB `waveforge-hrtf` 存网格本体 + localStorage 活动记录）
+- **球谐插值**（实球谐 L=3 最小二乘拟合）与最近邻网格查表双 HRTF 插值模式
+- **完整房间模拟**：镜像声源法早期反射（1-3 阶）+ FDN 晚期混响（8 条质数延迟线 + Hadamard 8×8 反馈矩阵），7 种预设（录音棚/音乐厅/舞台/教堂/户外/浴室/走廊）
+- **Ambisonics 环境上混**（FOA 环境场 → 4 方向扩散虚拟扬声器，叠加到各模式主渲染）
+- **多声道输入自动映射**（>2 声道输入 → 5.1/7.1 布局逐声道双耳渲染）与 **Multichannel 物理输出**（6/8 声道映射，2 声道设备退化为双耳）
+- **时域 / FFT 分区双卷积模式**（两种模式干湿对齐一致、脉冲位置 ±0 样本）
+- **64 对象性能基准**：WASM 后端本机实测 ≈1.7ms/块（≈3.1x 实时率），TS 参考后端 ≈5.4ms/块
+
+**参数持久化**：localStorage `waveforge:spatial-params`（独立于 v3 场景快照；400ms 防抖 + 深合并容错，坏数据回默认）；HRTF 活动数据集记录 `waveforge:hrtf-active-dataset`。
+
+**构建**：`npm run build:spatial-worklet`（cargo → wasm base64 内联 → esbuild 单文件 `public/spatial-worklet.js`），predev / prebuild 自动执行；缺失源逐级优雅降级（TS 参考后端兜底 / 合成 HRTF 网格兜底）。融合细节见 `src/services/waveforge-engine-v3/docs/FUSION_GUIDE.md` 第 6 章。
 
 ## 已知限制
 

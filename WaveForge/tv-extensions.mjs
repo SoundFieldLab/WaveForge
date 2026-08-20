@@ -15,10 +15,10 @@ import { WebSocketServer } from 'ws'
 import { dirname, join, sep } from 'path'
 import { verifyCode } from './desktop/device-license.cjs'
 
-// ── 局域网调试服务（:3002，仅开发者模式开启时运行） ──
-// 电脑浏览器访问 http://<设备IP>:3002 查看后端日志/崩溃记录/前端错误，并可直接控制 App。
-// 前端页面（localhost:3001）在开发者模式开启时连 ws://localhost:3002/ws 接收控制命令。
-const DEBUG_PORT = 3002
+// ── 局域网调试服务（:3008，仅开发者模式开启时运行） ──
+// 电脑浏览器访问 http://<设备IP>:3008 查看后端日志/崩溃记录/前端错误，并可直接控制 App。
+// 前端页面（localhost:3001）在开发者模式开启时连 ws://localhost:3008/ws 接收控制命令。
+const DEBUG_PORT = 3008
 let debugServer = null // { server, wss }
 let debugPageClients = new Set() // 前端页面 WS 客户端
 
@@ -125,7 +125,7 @@ function setDebugServerEnabled(enabled, { serverLogs, crashFile, distDir = null 
   }
 }
 
-// ── 局域网调试面板（开发者模式开启后，电脑浏览器访问 http://<设备IP>:3002） ──
+// ── 局域网调试面板（开发者模式开启后，电脑浏览器访问 http://<设备IP>:3008） ──
 const DEBUG_PANEL_HTML = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

@@ -6,7 +6,7 @@
  * 全部为只读展示用途（面板 pointer-events:none + data-tv-skip，遥控器/远程光标不可选中）。
  */
 import { useSyncExternalStore } from 'react'
-import { isTvModeActive } from '../platform'
+import { isTvModeActive, isAndroid } from '../platform'
 
 // ── 调试模式开关（localStorage developerMode + developerModeChanged 事件） ──
 let debugMode = readDebugMode()
@@ -149,23 +149,33 @@ export function useFrontendLogs(): LogLine[] {
 let backendLogs: LogLine[] = []
 const backendListeners = new Set<() => void>()
 let backendPollTimer: number | null = null
+let backendPollFailures = 0
 
 async function pollBackendLogs(): Promise<void> {
   try {
     const res = await fetch('http://localhost:3001/api/tv/logs', { cache: 'no-store' })
-    if (!res.ok) return
+    if (!res.ok) {
+      // 后端无此接口（PC 端 local-server 未挂 tv 扩展）：连续失败后停止轮询，避免 404 刷屏
+      backendPollFailures++
+      if (backendPollFailures >= 5) stopBackendLogPolling()
+      return
+    }
+    backendPollFailures = 0
     const data = (await res.json()) as { lines?: LogLine[] }
     if (Array.isArray(data.lines)) {
       backendLogs = data.lines
       backendListeners.forEach((fn) => fn())
     }
   } catch {
-    // 后端不可用（如浏览器 dev 环境无此接口）→ 静默
+    backendPollFailures++
+    if (backendPollFailures >= 5) stopBackendLogPolling()
   }
 }
 
 export function startBackendLogPolling(): void {
   if (backendPollTimer !== null) return
+  // 后端日志接口（/api/tv/logs）仅 android-server 提供：PC 端不轮询，避免 404 刷屏
+  if (!isAndroid()) return
   void pollBackendLogs()
   backendPollTimer = window.setInterval(pollBackendLogs, 1200)
 }

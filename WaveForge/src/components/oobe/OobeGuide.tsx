@@ -88,11 +88,20 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   })
   const listRef = useRef<HTMLDivElement>(null)
 
-  // 是否显示：forceOpen 优先；否则首次启动（enabled && 未完成）
+  // 是否显示：forceOpen 优先；否则首次启动（enabled && 未完成）。
+  // 完成判定 = localStorage 标记 **或** 程序目录 flag 文件（electronAPI.oobe.getFlag）
+  // ——双重保险：localStorage 被清/损坏时，flag 文件仍能识别已完成，跳过引导。
   const [completedLocal] = useState(() => {
     try { return localStorage.getItem(OOBE_FLAG) === '1' } catch { return true }
   })
-  const show = forceOpen || (enabled && !completedLocal)
+  const [fileFlagDone, setFileFlagDone] = useState(false)
+  useEffect(() => {
+    const bridge = (window as any).electronAPI
+    if (bridge?.oobe?.getFlag) {
+      void bridge.oobe.getFlag().then((done: boolean) => setFileFlagDone(!!done)).catch(() => setFileFlagDone(false))
+    }
+  }, [])
+  const show = forceOpen || (enabled && !completedLocal && !fileFlagDone)
 
   // 倒计时
   useEffect(() => {
@@ -209,6 +218,11 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
 
   const complete = () => {
     try { localStorage.setItem(OOBE_FLAG, '1') } catch { /* ignore */ }
+    // 写程序目录 flag 文件（electronAPI.oobe.setFlag）——双重保险持久化
+    const bridge = (window as any).electronAPI
+    if (bridge?.oobe?.setFlag) {
+      void bridge.oobe.setFlag().catch(() => { /* 写失败不影响（localStorage 已兜底） */ })
+    }
     setDone(true)
     onComplete?.()
   }

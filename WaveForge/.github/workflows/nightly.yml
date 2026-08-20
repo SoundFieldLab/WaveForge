@@ -1,0 +1,274 @@
+# 每日构建（Nightly）：每天北京时间 21:00 自动构建 Android TV + Windows 测试版。
+# - 不 bump 正式版本号，仅在工作区拼 "<基础版本>-nightly.<YYYYMMDD>" 用于产物命名，不推回仓库。
+# - 自动生成 changelog（自上次 nightly tag 以来的提交），打 nightly-YYYYMMDD tag 并发 GitHub 预发布。
+# - 不写/推 update.json、不发 Gitee —— 不影响正式版检查更新与正式发版流程。
+# 也可在 Actions 页面手动触发（force=true 可忽略「无新增提交」跳过逻辑强制构建）。
+
+name: Nightly Build 每日构建
+
+on:
+  schedule:
+    # UTC 13:00 = 北京时间 21:00
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '强制构建（忽略「无新增提交」跳过逻辑）'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # gh release create / 打 tag 需要
+
+jobs:
+  # ---------- 准备：日期 / nightly 版本 / changelog / 跳过判定 ----------
+  prepare:
+    name: 准备（日期/版本/Changelog）
+    runs-on: ubuntu-latest
+    outputs:
+      nightly_tag: ${{ steps.meta.outputs.nightly_tag }}
+      nightly_version: ${{ steps.meta.outputs.nightly_version }}
+      has_changes: ${{ steps.meta.outputs.has_changes }}
+    steps:
+      - name: 拉取代码（完整历史，供查找上一个 nightly tag 与生成 changelog）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 计算日期 / nightly 版本 / changelog
+        id: meta
+        env:
+          FORCE: ${{ github.event.inputs.force }}
+        run: |
+          # 北京时间日期作为构建标识
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          NIGHTLY_TAG="nightly-${DATE}"
+
+          # 读取基础版本（package.json），不改仓库，只在工作区拼出 nightly 版本
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          NIGHTLY_VERSION="${BASE_VERSION}-nightly.${DATE}"
+
+          # 查找上一个 nightly tag；没有则回退到上一个正式 tag（v*）；都没有取最近 50 条提交
+          LAST_NIGHTLY=$(git tag -l 'nightly-*' --sort=-creatordate | head -1)
+          if [ -n "$LAST_NIGHTLY" ]; then
+            RANGE="${LAST_NIGHTLY}..HEAD"
+          else
+            LAST_STABLE=$(git tag -l 'v*' --sort=-creatordate | head -1)
+            RANGE="${LAST_STABLE:+${LAST_STABLE}..HEAD}"
+          fi
+
+          # 无新增提交判定（仅当存在上一个 nightly tag 且非 force 时生效）
+          HAS_CHANGES="true"
+          if [ "$FORCE" != "true" ] && [ -n "$LAST_NIGHTLY" ]; then
+            if [ "$(git rev-parse "$LAST_NIGHTLY")" = "$(git rev-parse HEAD)" ]; then
+              HAS_CHANGES="false"
+            fi
+          fi
+
+          # 生成 changelog（排除 merge 提交，取 commit subject + 短哈希）
+          {
+            echo "# WaveForge Nightly ${DATE}"
+            echo ""
+            echo "**版本号：${NIGHTLY_VERSION}（基础 ${BASE_VERSION} + 构建日期，非正式发版，不自动升级版本号）**"
+            echo ""
+            if [ -n "$RANGE" ]; then
+              echo "## 代码变动（${RANGE}）"
+              echo ""
+              LOG=$(git log $RANGE --no-merges --pretty=format:"- %s (%h)" 2>/dev/null)
+              if [ -z "$LOG" ]; then echo "- 无新增提交"; else echo "$LOG"; fi
+            else
+              echo "## 代码变动（最近 50 条提交）"
+              echo ""
+              git log -50 --no-merges --pretty=format:"- %s (%h)"
+            fi
+            echo ""
+            echo ""
+            echo "---"
+            echo "⚠️ 自动构建的每日测试版本，可能不稳定。仅用于测试，不推送 update.json，不影响正式版检查更新。"
+          } > changelog.md
+
+          echo "nightly_tag=${NIGHTLY_TAG}" >> "$GITHUB_OUTPUT"
+          echo "nightly_version=${NIGHTLY_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "has_changes=${HAS_CHANGES}" >> "$GITHUB_OUTPUT"
+
+          echo "::group::Changelog 预览"
+          cat changelog.md
+          echo "::endgroup::"
+          echo "已计算：tag=${NIGHTLY_TAG} version=${NIGHTLY_VERSION} has_changes=${HAS_CHANGES}"
+
+      - name: 上传 changelog（供 release 作业读取）
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-meta
+          path: changelog.md
+
+  # ---------- Android TV APK 构建 ----------
+  build-android:
+    name: Android TV APK 构建
+    needs: prepare
+    if: needs.prepare.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 写入 nightly 版本号到 build.gradle.kts（仅工作区，不推回仓库）
+        env:
+          NIGHTLY_VERSION: ${{ needs.prepare.outputs.nightly_version }}
+        run: |
+          sed -i "s|val appVersionName = \".*\"|val appVersionName = \"${NIGHTLY_VERSION}\"|" android/app/build.gradle.kts
+          grep appVersionName android/app/build.gradle.kts
+
+      - name: 拉取 nodejs-mobile 运行时
+        run: npm run fetch:nodejs-mobile
+
+      - name: 组装安卓资产（前端 + 后端 bundle + 设备端依赖）
+        run: npm run build:android
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: 安装 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 NDK / CMake / 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: 构建 APK（debug 签名）
+        run: cd android && ./gradlew assembleDebug --no-daemon
+
+      - name: 重命名 APK（带 nightly 版本号）
+        env:
+          NIGHTLY_VERSION: ${{ needs.prepare.outputs.nightly_version }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "WaveForge-${NIGHTLY_VERSION}-tv-debug.apk"
+
+      - name: 上传 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-android-apk
+          path: WaveForge-*-tv-debug.apk
+
+  # ---------- Windows 安装包构建 ----------
+  build-windows:
+    name: Windows 安装包构建
+    needs: prepare
+    if: needs.prepare.outputs.has_changes == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 写入 nightly 版本号到 package.json + lock（仅工作区，不推回仓库）
+        env:
+          NIGHTLY_VERSION: ${{ needs.prepare.outputs.nightly_version }}
+        run: |
+          node -e "const fs=require('fs');for(const f of ['./package.json','./package-lock.json']){const j=JSON.parse(fs.readFileSync(f));j.version=process.env.NIGHTLY_VERSION;fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')}"
+          node -p "require('./package.json').version"
+
+      - name: 下载 Electron 运行时（npm ci 跳过了其 install 脚本）
+        run: node node_modules/electron/install.js
+
+      - name: 重建嵌入式 Python（让打包版自带 beat/loudness/compensation 服务）
+        # GitHub Actions 服务器在国外 → 直连官方 PyPI（不走清华镜像）；
+        # 镜像源经 PIP_INDEX_URL 显式控制，脚本不自行决定（见 bundle-python.mjs）
+        env:
+          PIP_INDEX_URL: https://pypi.org/simple
+        run: npm run bundle-python
+        timeout-minutes: 20
+
+      - name: 构建 Windows 安装包（electron-builder nsis）
+        run: npm run build:electron
+        timeout-minutes: 30
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-windows-installer
+          path: release/*.exe
+
+  # ---------- 发 tag + 发布 GitHub 预发布 ----------
+  release:
+    name: 发 tag + 发布 GitHub Pre-release
+    needs: [prepare, build-android, build-windows]
+    if: ${{ needs.prepare.outputs.has_changes == 'true' && needs.build-android.result == 'success' && needs.build-windows.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码（供 gh release 打 tag 到当前 master HEAD）
+        uses: actions/checkout@v4
+
+      - name: 下载 changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-meta
+
+      - name: 下载 Android APK
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-android-apk
+          path: artifacts
+
+      - name: 下载 Windows 安装包
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-windows-installer
+          path: artifacts
+
+      - name: 创建 tag + 发布 Pre-release（已存在则更新，支持手动重跑幂等）
+        env:
+          NIGHTLY_TAG: ${{ needs.prepare.outputs.nightly_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la artifacts
+          if gh release view "$NIGHTLY_TAG" >/dev/null 2>&1; then
+            echo "release 已存在，更新产物与 changelog"
+            gh release upload "$NIGHTLY_TAG" artifacts/* --clobber
+            gh release edit "$NIGHTLY_TAG" --notes-file changelog.md --prerelease
+          else
+            gh release create "$NIGHTLY_TAG" \
+              --title "WaveForge Nightly $(echo $NIGHTLY_TAG | sed 's/nightly-//')" \
+              --notes-file changelog.md \
+              --prerelease \
+              --target master \
+              artifacts/*
+          fi
+          echo "已发布 $NIGHTLY_TAG（预发布，不覆盖正式 latest）"
