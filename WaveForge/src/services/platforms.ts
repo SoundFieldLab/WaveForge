@@ -167,9 +167,9 @@ const SPOTIFY_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true,
   createPlaylist: true,
-  deletePlaylist: true,
+  deletePlaylist: false, // Spotify Web API 无删除歌单接口
   addTracksToPlaylist: true,
-  subscribePlaylist: false,
+  subscribePlaylist: true, // follow/unfollow
   likedSongs: true,
   likeSong: true,
   explore: true,
@@ -194,22 +194,22 @@ const SPOTIFY_CAPABILITIES: PlatformCapabilities = {
   albumDetail: true,
   similarSongs: false,
   radio: false,
-  playAsCarrier: true, // 已登录可用官方流（premium），未登录降级跨平台
+  playAsCarrier: false, // 官方流受 DRM 保护，始终由网易云/QQ 匹配播放
   audioQuality: false,
 }
 
 const KUGOU_CAPABILITIES: PlatformCapabilities = {
   login: true,
   profile: true,
-  userPlaylists: true,
-  createPlaylist: true,
-  deletePlaylist: true,
-  addTracksToPlaylist: true,
-  subscribePlaylist: true,
-  likedSongs: true,
-  likeSong: true,
+  userPlaylists: true, // H5 签名网关
+  createPlaylist: false, // 创建歌单网关未接入
+  deletePlaylist: false,
+  addTracksToPlaylist: true, // /v6/add_song
+  subscribePlaylist: false,
+  likedSongs: true, // "我喜欢"歌单
+  likeSong: true, // /v6/add_song
   explore: true,
-  exploreSections: ['discover', 'playlists', 'charts', 'newSongs', 'albums'],
+  exploreSections: ['discover', 'playlists', 'charts', 'newSongs'],
   search: true,
   searchSuggest: false,
   lyrics: true,
@@ -218,54 +218,54 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   charts: true,
   channels: false,
   newSongs: true,
-  albums: true,
-  mv: true,
-  signin: false, // 酷狗签到接口未实现
+  albums: false, // 酷狗专辑详情未实现
+  mv: false,
+  signin: false,
   social: false,
-  rank: false, // 酷狗听歌排行未实现
+  rank: false,
   cloudDisk: false,
-  recentPlayed: true,
-  artistDetail: true,
-  albumDetail: true,
+  recentPlayed: false,
+  artistDetail: false,
+  albumDetail: false,
   similarSongs: false,
-  radio: false, // 酷狗 FM 未实现
-  playAsCarrier: true,
-  audioQuality: true,
+  radio: false,
+  playAsCarrier: true, // H5 签名网关可原生播放（需登录）；未登录时由上层匹配播放
+  audioQuality: false,
 }
 
 const SODA_CAPABILITIES: PlatformCapabilities = {
   login: true,
   profile: true,
-  userPlaylists: true,
-  createPlaylist: true,
-  deletePlaylist: true,
-  addTracksToPlaylist: true,
-  subscribePlaylist: true,
-  likedSongs: true,
-  likeSong: true,
+  userPlaylists: false, // 抖音歌单接口未实现
+  createPlaylist: false,
+  deletePlaylist: false,
+  addTracksToPlaylist: false,
+  subscribePlaylist: false,
+  likedSongs: false,
+  likeSong: false,
   explore: true,
-  exploreSections: ['discover', 'playlists', 'charts', 'newSongs', 'albums'],
+  exploreSections: ['discover', 'charts', 'newSongs'],
   search: true,
   searchSuggest: false,
   lyrics: true,
   comments: false,
-  dailyRecommend: true,
+  dailyRecommend: false,
   charts: true,
   channels: false,
   newSongs: true,
-  albums: true,
+  albums: false,
   mv: false,
-  signin: false, // 汽水签到接口未实现
+  signin: false,
   social: false,
-  rank: false, // 汽水听歌排行未实现
+  rank: false,
   cloudDisk: false,
-  recentPlayed: true,
-  artistDetail: true,
-  albumDetail: true,
+  recentPlayed: false,
+  artistDetail: false,
+  albumDetail: false,
   similarSongs: false,
-  radio: false, // 汽水 FM 未实现
-  playAsCarrier: true,
-  audioQuality: true,
+  radio: false,
+  playAsCarrier: false, // 抖音直链需 a_bogus 签名，始终由网易云/QQ 匹配播放
+  audioQuality: false,
 }
 
 export const PLATFORM_CAPABILITIES: Record<MusicPlatform, PlatformCapabilities> = {

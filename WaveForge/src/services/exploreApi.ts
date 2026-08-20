@@ -65,6 +65,8 @@ export interface ExplorePlaylist {
 
 export interface ExploreChartSong {
   id?: number
+  /** 平台歌曲标识（酷狗 hash / 抖音 music_id 等），用于直接播放 */
+  mid?: string
   name: string
   artist: string
   coverUrl?: string
@@ -289,7 +291,7 @@ export async function fetchExploreHome(
   }
   // 酷狗：经 local-server 代理调用移动端公开接口（真实 TOP500/新歌榜/歌单）
   if (platform === 'kugou') {
-    const { fetchKugouRankList, fetchKugouRankInfo, fetchKugouPlaylists, kugouTrackToSong } = await import('./kugouService')
+    const { fetchKugouRankList, fetchKugouRankInfo, fetchKugouPlaylists, kugouTrackToSong, resolveKugouCover } = await import('./kugouService')
     const [ranksRes, playlistsRes] = await Promise.allSettled([
       fetchKugouRankList(),
       fetchKugouPlaylists(24),
@@ -299,26 +301,35 @@ export async function fetchExploreHome(
     const hotRank = prefer(['TOP500', '热歌', '最热']) || ranks[0]
     const newRank = prefer(['新歌', '新声']) || ranks.find(rank => rank.rankid === '74534')
     const risingRank = prefer(['飙升', '飙升榜']) || ranks.find(rank => rank.rankid === '6666')
-    const chartRanks = [hotRank, risingRank, newRank].filter((rank): rank is NonNullable<typeof rank> => Boolean(rank))
+    // 更多榜单（酷狗 web 榜单页同款分类）：国潮/ACG/DJ/怀旧/纯音乐等，去重后最多取 6 个
+    const extraNames = ['国潮', 'ACG', 'DJ', '80后', '90后', '00后', '民谣', '纯音乐', '粤语', '日韩', '网络热歌']
+    const extraRanks = ranks.filter(rank => extraNames.some(name => rank.rankname.includes(name)))
+    // 榜单顺序 [热歌, 新歌, 飙升, ...扩展]：新歌榜取真实新歌榜（rankSongs[1]）
+    const chartRanks = [hotRank, newRank, risingRank, ...extraRanks]
+      .filter((rank): rank is NonNullable<typeof rank> => Boolean(rank))
+      .filter((rank, index, arr) => arr.findIndex(r => r.rankid === rank.rankid) === index) // 去重
+      .slice(0, 6)
     const chartTrackResults = await Promise.allSettled(
-      chartRanks.slice(0, 3).map(rank => fetchKugouRankInfo(rank.rankid, 30)),
+      chartRanks.map(rank => fetchKugouRankInfo(rank.rankid, 30)),
     )
     const rankSongs = chartTrackResults.map((result, index) =>
       result.status === 'fulfilled' ? result.value : chartTrackResults[index].status === 'fulfilled' ? [] : []
     )
     const hotTracks = rankSongs[0] || []
-    const toChart = (rank: { rankid: string; rankname: string }, tracks: Array<{ songName: string; singerName: string }>): ExploreChart => ({
+    const toChart = (rank: { rankid: string; rankname: string; img?: string }, tracks: Array<{ hash: string; songName: string; singerName: string; coverUrl?: string }>): ExploreChart => ({
       id: `kg-${rank.rankid}`,
       name: rank.rankname || '酷狗榜单',
       group: '酷狗音乐',
       description: `${rank.rankname || '酷狗榜单'} · 酷狗音乐实时更新`,
-      coverUrl: '',
+      coverUrl: resolveKugouCover(rank.img || ''),
       updateText: '实时更新',
       platform: 'kugou',
       source: 'kugou-rank',
       songs: tracks.slice(0, 30).map((track, index) => ({
+        mid: track.hash,
         name: track.songName,
         artist: track.singerName,
+        coverUrl: track.coverUrl,
         rank: index + 1,
       })),
     })
@@ -352,10 +363,11 @@ export async function fetchExploreHome(
   }
   // Spotify：官方 Web API（需登录 token；未登录返回空 payload，区块自动隐藏）
   if (platform === 'spotify') {
-    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists } = await import('./spotifyService')
-    const [releasesRes, playlistsRes] = await Promise.allSettled([
+    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists, fetchSpotifyCharts, spotifyTrackToSong } = await import('./spotifyService')
+    const [releasesRes, playlistsRes, chartsRes] = await Promise.allSettled([
       fetchSpotifyNewReleases(30),
       fetchSpotifyFeaturedPlaylists(24),
+      fetchSpotifyCharts(),
     ])
     const releases = releasesRes.status === 'fulfilled' ? releasesRes.value : []
     const albums: ExploreAlbum[] = releases.map(item => ({
@@ -379,6 +391,24 @@ export async function fetchExploreHome(
       songType: 1,
       fusedSources: [],
     }))
+    // 榜单：官方 Top 榜歌单（Global Top 50 / Viral 50）
+    const charts: ExploreChart[] = (chartsRes.status === 'fulfilled' ? chartsRes.value : []).map(chart => ({
+      id: `sp-${chart.id}`,
+      name: chart.name,
+      group: 'Spotify',
+      description: `${chart.name} · Spotify 官方榜单`,
+      coverUrl: chart.coverUrl || '',
+      updateText: '每周更新',
+      platform: 'spotify' as const,
+      source: 'spotify-chart',
+      songs: chart.songs.slice(0, 30).map((track, index) => ({
+        mid: track.id,
+        name: track.name,
+        artist: track.artists.map(a => a.name).join(' / '),
+        coverUrl: track.album?.images?.[0]?.url,
+        rank: index + 1,
+      })),
+    })).filter(chart => chart.songs.length > 0)
     const payload: ExplorePayload = {
       code: 0,
       platform: 'spotify',
@@ -395,7 +425,7 @@ export async function fetchExploreHome(
         source: 'spotify-featured',
         creator: 'Spotify 编辑精选',
       })),
-      charts: [],
+      charts,
       albums,
       channels: [],
       meta: { source: 'spotify-web-api', updatedAt: Date.now() },
@@ -644,10 +674,11 @@ export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSigna
       songs,
     }
   }
-  // 酷狗榜单：客户端已带歌曲列表（搜索接口模拟），无需服务端
+  // 酷狗榜单：客户端已带歌曲列表（含 hash），无需服务端
   if (chart.platform === 'kugou') {
     const songs: Song[] = chart.songs.map(song => ({
       id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      mid: song.mid || (typeof song.id === 'number' ? '' : String(song.id || '')),
       name: song.name,
       artists: song.artist ? [{ name: song.artist }] : [],
       album: { name: '', picUrl: song.coverUrl || '' },
@@ -684,6 +715,29 @@ export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSigna
         trackCount: songs.length,
         description: chart.description || '',
         platform: 'soda',
+      },
+      songs,
+    }
+  }
+  // Spotify 榜单：客户端已带歌曲列表（官方 Top 榜歌单），无需服务端
+  if (chart.platform === 'spotify') {
+    const songs: Song[] = chart.songs.map(song => ({
+      id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      mid: song.mid || (typeof song.id === 'number' ? '' : String(song.id || '')),
+      name: song.name,
+      artists: song.artist ? [{ name: song.artist }] : [],
+      album: { name: '', picUrl: song.coverUrl || '' },
+      duration: 0,
+      platform: 'spotify',
+    }))
+    return {
+      playlist: {
+        id: chart.id,
+        name: chart.name,
+        coverImgUrl: chart.coverUrl,
+        trackCount: songs.length,
+        description: chart.description || '',
+        platform: 'spotify',
       },
       songs,
     }

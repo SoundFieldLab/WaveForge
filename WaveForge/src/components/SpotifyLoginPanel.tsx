@@ -44,7 +44,9 @@ export default function SpotifyLoginPanel({ onClose, onLoginSuccess }: SpotifyLo
     setLoading(true)
     setError('')
     try {
-      const result = await (window as any).electron.openSpotifyLogin()
+      const customId = clientId.trim()
+      if (customId) localStorage.setItem('spotify_client_id', customId)
+      const result = await (window as any).electron.openSpotifyLogin(customId || undefined)
       if (!mountedRef.current) return
       if (result?.success && result.username !== undefined) {
         onLoginSuccess(result.username)
@@ -63,6 +65,12 @@ export default function SpotifyLoginPanel({ onClose, onLoginSuccess }: SpotifyLo
   }
 
   const accent = '#1DB954'
+  // 自定义 Client ID（Spotify 共享 Client ID 可能被风控报 server_error；用户可在
+  // developer.spotify.com 免费注册自己的应用，Redirect URI 填 http://127.0.0.1:8000/login）
+  const [clientId, setClientId] = useState(() => {
+    try { return localStorage.getItem('spotify_client_id') || '' } catch { return '' }
+  })
+  const [showClientId, setShowClientId] = useState(false)
 
   return (
     <AnimatePresence>
@@ -97,6 +105,34 @@ export default function SpotifyLoginPanel({ onClose, onLoginSuccess }: SpotifyLo
           {/* 说明 */}
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 mb-6">
             <p className="text-yellow-200 text-sm">将打开 Spotify 官方授权页面，登录并同意授权后自动完成</p>
+          </div>
+
+          {/* 自定义 Client ID（共享 Client ID 被风控时使用） */}
+          <div className="mb-5">
+            <button
+              type="button"
+              onClick={() => setShowClientId(v => !v)}
+              className="text-xs text-white/50 hover:text-white/80 transition-colors"
+            >
+              {showClientId ? '▾ 收起' : '▸ 授权报错（server_error）？配置自己的 Spotify Client ID'}
+            </button>
+            {showClientId && (
+              <div className="mt-2 rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-2">
+                <p className="text-xs leading-relaxed text-white/55">
+                  共享的公开 Client ID 可能被 Spotify 风控导致授权返回 server_error。可前往
+                  <span className="text-white/80"> developer.spotify.com/dashboard </span>
+                  免费创建应用，把 Redirect URI 设为
+                  <code className="mx-1 rounded bg-white/10 px-1 py-0.5 text-white/80">http://127.0.0.1:8000/login</code>
+                  ，然后把应用的 Client ID 粘贴到下面：
+                </p>
+                <input
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value.trim())}
+                  placeholder="32 位十六进制 Client ID"
+                  className="w-full rounded-lg border border-white/15 bg-black/40 px-3 py-2 text-sm text-white outline-none focus:border-[#1DB954]"
+                />
+              </div>
+            )}
           </div>
 
           {/* 步骤 1：OAuth 授权 */}

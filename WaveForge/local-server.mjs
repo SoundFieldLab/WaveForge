@@ -11,6 +11,14 @@ import { Agent as HttpAgent } from 'http'
 import { Agent as HttpsAgent } from 'https'
 import compression from 'compression'
 import qqMusicApi from 'qq-music-api'
+import {
+  resolveKugouSongUrl,
+  fetchKugouUserPlaylists,
+  fetchKugouPlaylistTracks,
+  kugouLikeCheckHashes,
+  kugouAddSongToList,
+  fetchKugouLyric,
+} from './server/kugou-gateway.mjs'
 import { decodeAG1Response, encodeAG1Request, zzcSign } from '@jixun/qmweb-sign'
 import axios from 'axios'
 import { decryptQrc } from './server/qrc-decoder.mjs'
@@ -924,6 +932,11 @@ app.use(compression({
 
 // CORS 支持
 app.use((req, res, next) => {
+  // TV 遥控桥等 WebSocket 客户端误连本服务的 /ws：明确告知本服务不承载 WebSocket，
+  // 代替 404 噪音（WebSocket 由桌面端 remote-server 在 25566/25567 提供）
+  if (req.headers.upgrade?.toLowerCase?.() === 'websocket') {
+    return res.status(426).json({ error: 'WebSocket 不在此服务，请连接遥控器服务的 /ws' })
+  }
   const origin = req.headers.origin
   if (origin && !ALLOWED_RENDERER_ORIGINS.has(origin)) {
     return res.status(403).json({ error: 'Origin not allowed' })
@@ -5021,70 +5034,31 @@ app.get('/api/qq/suggest', async (req, res) => {
 /** 酷狗播放数据（wwwapi.kugou.com r=play/getdata，需 kg_token cookie） */
 app.get('/api/kugou/song/url', async (req, res) => {
   try {
-    const { hash, cookie } = req.query
+    const { hash, albumId, album_audio_id, cookie } = req.query
     if (!hash) return res.status(400).json({ error: '请提供歌曲 hash' })
-    const kgCookie = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
-    if (!kgCookie) return res.status(401).json({ error: '酷狗未登录，无法获取播放地址' })
-
-    const url = new URL('https://wwwapi.kugou.com/yy/index.php')
-    url.searchParams.set('r', 'play/getdata')
-    url.searchParams.set('hash', String(hash))
-    url.searchParams.set('dfid', '3H3Ubg0U12Ae3h3Y2D1vQ2XD')
-    url.searchParams.set('appid', '1014')
-    url.searchParams.set('mid', '0')
-    url.searchParams.set('platid', '4')
-
-    const resp = await fetch(url.toString(), {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        Referer: 'https://www.kugou.com/',
-        Cookie: kgCookie,
-      },
-      signal: AbortSignal.timeout(8000),
-    })
-    const text = await resp.text()
-    let json = null
-    try { json = JSON.parse(text) } catch { json = null }
-    const data = json?.data || null
-    if (!data || !data.play_url) {
-      return res.status(403).json({ error: `酷狗播放获取失败（${json?.err_code ?? resp.status}），请确认已登录` })
+    const result = await resolveKugouSongUrl({
+      hash,
+      albumId: String(albumId || ''),
+      albumAudioId: Number(album_audio_id || 0) || undefined,
+    }, cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : '')
+    if (result.playable && result.url) {
+      res.json({ url: result.url, level: result.level, source: result.source, songName: '', author: '' })
+    } else {
+      res.status(403).json({ error: result.message || '酷狗播放获取失败', reason: result.reason || 'url_unavailable' })
     }
-    res.json({ url: data.play_url, songName: data.song_name, author: data.author })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
 })
 
-/** 酷狗歌词（需 kg_token cookie） */
+/** 酷狗歌词（krcs.kugou.com，规范 LRC） */
 app.get('/api/kugou/lyric', async (req, res) => {
   try {
-    const { hash, cookie } = req.query
+    const { hash, album_audio_id, duration } = req.query
     if (!hash) return res.status(400).json({ error: '请提供歌曲 hash' })
-    const kgCookie = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
-    if (!kgCookie) return res.status(401).json({ error: '酷狗未登录' })
-
-    const url = new URL('https://wwwapi.kugou.com/yy/index.php')
-    url.searchParams.set('r', 'play/getdata')
-    url.searchParams.set('hash', String(hash))
-    url.searchParams.set('dfid', '3H3Ubg0U12Ae3h3Y2D1vQ2XD')
-    url.searchParams.set('appid', '1014')
-    url.searchParams.set('mid', '0')
-    url.searchParams.set('platid', '4')
-
-    const resp = await fetch(url.toString(), {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        Referer: 'https://www.kugou.com/',
-        Cookie: kgCookie,
-      },
-      signal: AbortSignal.timeout(8000),
-    })
-    const text = await resp.text()
-    let json = null
-    try { json = JSON.parse(text) } catch { json = null }
-    const data = json?.data || null
-    if (!data) return res.status(403).json({ error: `酷狗歌词获取失败（${json?.err_code ?? resp.status}）` })
-    res.json({ lyric: data.lyrics || '', translation: data.trans || '' })
+    const result = await fetchKugouLyric(String(hash), Number(album_audio_id || 0) || undefined, Number(duration) || 0)
+    if (!result.lyric) return res.status(404).json({ error: '未获取到歌词' })
+    res.json({ lyric: result.lyric, translation: result.trans || '' })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
@@ -5285,28 +5259,149 @@ app.get('/api/kugou/user/info', async (req, res) => {
   }
 })
 
-/** 酷狗用户歌单（www.kugou.com r=user/getplaylist，需登录 cookie） */
+/** 酷狗用户歌单（H5 签名网关 /v7/get_all_list，绕开 www 域 WAF；需 KuGoo 会话与 token） */
 app.get('/api/kugou/user/playlist', async (req, res) => {
   try {
     const cookie = req.query.cookie ? String(req.query.cookie).replace(/^['"]|['"]$/g, '') : ''
-    const url = new URL('https://www.kugou.com/yy/index.php')
-    url.searchParams.set('r', 'user/getplaylist')
-    url.searchParams.set('page', '1')
-    url.searchParams.set('pagesize', '100')
-    const resp = await fetch(url.toString(), {
-      headers: { 'User-Agent': KG_UA, Referer: 'https://www.kugou.com/', ...(cookie ? { Cookie: cookie } : {}) },
-      signal: AbortSignal.timeout(8000),
-    })
-    const json = await resp.json()
-    const lists = json?.data?.list || json?.data || []
-    const playlists = lists.map(item => ({
-      specialid: String(item.specialid || item.id || ''),
-      name: String(item.specialname || item.name || ''),
-      img: String(item.img || item.cover || ''),
-      songcount: Number(item.songcount || 0),
-      playcount: Number(item.playcount || 0),
-    })).filter(item => item.specialid && item.name)
+    if (!cookie) return res.status(401).json({ error: '酷狗未登录' })
+    const result = await fetchKugouUserPlaylists(cookie)
+    if (!result.success) return res.status(401).json({ error: result.message || result.error })
+    const playlists = (result.playlists || []).map(pl => ({
+      specialid: pl.id,
+      name: pl.name,
+      img: pl.coverUrl || '',
+      songcount: pl.songcount || 0,
+      playcount: pl.playcount || 0,
+      isMine: pl.isMine,
+    }))
     res.json(playlists)
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗用户歌单曲目（H5 签名网关 /v4/get_list_all_file） */
+app.get('/api/kugou/user/playlist/tracks', async (req, res) => {
+  try {
+    const { listid, page, pagesize, cookie } = req.query
+    const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
+    if (!cookieStr || !listid) return res.status(400).json({ error: '缺少参数' })
+    const result = await fetchKugouPlaylistTracks(String(listid), cookieStr, Number(pagesize) || 50, Number(page) || 1)
+    if (!result.success) return res.status(401).json({ error: result.error })
+    res.json({ songs: result.tracks, total: result.total })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗喜欢检查（批量 hash） */
+app.post('/api/kugou/like/check', async (req, res) => {
+  try {
+    const { hashes, cookie } = req.body || {}
+    const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
+    if (!cookieStr) return res.status(401).json({ error: '酷狗未登录' })
+    const result = await kugouLikeCheckHashes(Array.isArray(hashes) ? hashes : [], cookieStr)
+    if (result.error) return res.status(401).json({ error: result.error })
+    res.json({ liked: result.liked })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗喜欢/加歌（H5 签名网关 /v6/add_song；喜欢=加入默认"我喜欢"歌单） */
+app.post('/api/kugou/like', async (req, res) => {
+  try {
+    const { like, song, listId, cookie } = req.body || {}
+    const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
+    if (!cookieStr) return res.status(401).json({ error: '酷狗未登录' })
+    if (like) {
+      const result = await kugouAddSongToList(String(listId || ''), song || {}, cookieStr)
+      if (!result.success) return res.status(400).json({ error: result.error || '加歌失败' })
+      res.json({ result: 100, platform: 'kugou', listId: result.listId })
+    } else {
+      // 取消喜欢：酷狗无"移除"专用轻接口，走从歌单删除（需要 fileid）——先返回支持标记
+      res.json({ result: 100, platform: 'kugou', note: 'unlike-via-remove' })
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗歌单加歌（H5 签名网关 /v6/add_song） */
+app.post('/api/kugou/playlist/tracks', async (req, res) => {
+  try {
+    const { op, pid, song, cookie } = req.body || {}
+    const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
+    if (!cookieStr) return res.status(401).json({ error: '酷狗未登录' })
+    if (op === 'add') {
+      const result = await kugouAddSongToList(String(pid || ''), song || {}, cookieStr)
+      if (!result.success) return res.status(400).json({ error: result.error || '加歌失败' })
+      res.json({ result: 100, platform: 'kugou' })
+    } else {
+      res.status(400).json({ error: '酷狗暂不支持从歌单删除' })
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// ── 汽水音乐公开目录代理（火山引擎公开 API，无需登录/签名；替代抖音 DOM 抓取）──────────
+const QISHUI_PUBLIC_HEADERS = {
+  'Accept': 'application/json,text/plain,*/*',
+  'User-Agent': 'WaveForge/0.1 (Qishui public catalog bridge)',
+}
+const QISHUI_PUBLIC_SEARCH_URL = 'https://api-vehicle.volcengine.com/v2/search/type'
+const QISHUI_PUBLIC_CONTENTS_URL = 'https://api-vehicle.volcengine.com/v2/custom/contents'
+
+app.get('/api/qishui/search', async (req, res) => {
+  try {
+    const { keyword, limit = '30', offset = '0' } = req.query
+    if (!keyword) return res.status(400).json({ error: '缺少关键词' })
+    const requestLimit = Math.min(100, Math.max(Number(offset) + (Number(limit) * 3 || 0), 36))
+    const url = new URL(QISHUI_PUBLIC_SEARCH_URL)
+    url.searchParams.set('keyword', String(keyword))
+    url.searchParams.set('search_type', 'music')
+    url.searchParams.set('limit', String(requestLimit))
+    url.searchParams.set('real_offset', '0')
+    url.searchParams.set('search_source', 'qishui')
+    const resp = await fetch(url.toString(), { headers: QISHUI_PUBLIC_HEADERS, signal: AbortSignal.timeout(10000) })
+    const json = await resp.json()
+    const list = (json && json.data && Array.isArray(json.data.list)) ? json.data.list : []
+    const songs = list.map(item => ({
+      id: String(item.item_id || ''),
+      name: String(item.title || ''),
+      artist: String((item.author_info && item.author_info.name) || ''),
+      coverUrl: String(item.cover_url || ''),
+      durationMs: Number(item.duration_ms || item.duration || 0),
+      album: String((item.album_info && item.album_info.name) || ''),
+    })).filter(s => s.id && s.name)
+    res.json({ songs })
+  } catch (error) {
+    res.status(500).json({ error: error.message, songs: [] })
+  }
+})
+
+app.get('/api/qishui/detail', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ error: '缺少 item_id' })
+    const url = new URL(QISHUI_PUBLIC_CONTENTS_URL)
+    url.searchParams.set('sources', 'qishui')
+    url.searchParams.set('need_author', 'true')
+    url.searchParams.set('need_album', 'true')
+    url.searchParams.set('need_ugc', 'true')
+    url.searchParams.set('need_stat', 'true')
+    url.searchParams.set('item_ids', String(id))
+    const resp = await fetch(url.toString(), { headers: QISHUI_PUBLIC_HEADERS, signal: AbortSignal.timeout(10000) })
+    const json = await resp.json()
+    const item = json && json.data && Array.isArray(json.data.list) ? json.data.list[0] : null
+    if (!item) return res.status(404).json({ error: '未找到歌曲' })
+    const lyricInfo = item.lyric_info || item.lyric || {}
+    const lyric = String(
+      lyricInfo.lyric_text || lyricInfo.content || lyricInfo.lyric ||
+      (lyricInfo.lyric_entity && lyricInfo.lyric_entity.content) || '',
+    )
+    res.json({ song: item, lyric })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }

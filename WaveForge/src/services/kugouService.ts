@@ -53,12 +53,14 @@ export interface KugouUserInfo {
   avatar: string
 }
 
-/** 解析酷狗封面 URL：替换 CDN 的 {size} 占位并升级为 https */
-function resolveKugouCover(url: string): string {
+/** 解析酷狗封面 URL：CDN 的 {size} 占位替换为纯数字尺寸并升级为 https。
+ *  注意：imge.kugou.com/mcommon/{size}/... 的有效尺寸是纯数字（400/200/150 等），
+ *  不是 600x600——错误尺寸会返回 404 占位图导致封面全空。 */
+export function resolveKugouCover(url: string): string {
   if (!url) return ''
   return url
     .replace(/^http:\/\//i, 'https://')
-    .replace(/\{size\}/g, '600x600')
+    .replace(/\{size\}/g, '400')
 }
 
 /** 解析酷狗榜单/歌单歌曲的 filename「歌手 - 歌名」 */
@@ -148,7 +150,14 @@ export async function fetchKugouPlaylists(limit = 24): Promise<KugouPlaylist[]> 
     const resp = await fetch(`${KG_API}/playlist/list?pagesize=${limit}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const playlists = await resp.json()
-    return Array.isArray(playlists) ? playlists : []
+    return Array.isArray(playlists) ? playlists.map((item: any) => ({
+      specialid: String(item.specialid || ''),
+      name: String(item.name || ''),
+      coverUrl: resolveKugouCover(String(item.img || item.icon || '')),
+      playcount: Number(item.playcount) || undefined,
+      songcount: Number(item.songcount) || undefined,
+      songs: Array.isArray(item.songs) ? item.songs : undefined,
+    })).filter(item => item.specialid && item.name) : []
   } catch (e) {
     console.warn('[Kugou] 歌单列表获取失败:', e)
     return []
@@ -177,10 +186,20 @@ export async function fetchKugouPlaylistDetail(specialid: string, limit = 50): P
   }
 }
 
-/** 酷狗用户信息（需登录 cookie） */
+/** 酷狗用户信息（需登录 cookie）：优先走隐藏窗口桥（绕开服务端 WAF），失败回退代理 */
 export async function fetchKugouUserInfo(cookie?: string): Promise<KugouUserInfo | null> {
   const kgCookie = cookie || getPlatformCookie('kugou')
   if (!kgCookie) return null
+  // 桥接：真实 Chromium 页面内同源 fetch（www.kugou.com 对服务端 node fetch 有 TLS 指纹风控）
+  const bridge = (window as any).electron?.kugouScrape
+  if (bridge?.userInfo) {
+    try {
+      const result = await bridge.userInfo()
+      if (result?.success && result.info && (result.info.nickname || result.info.user_id)) {
+        return result.info
+      }
+    } catch { /* 桥失败回退代理 */ }
+  }
   try {
     const resp = await fetch(`${KG_API}/user/info?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
     if (!resp.ok) return null
@@ -193,27 +212,56 @@ export async function fetchKugouUserInfo(cookie?: string): Promise<KugouUserInfo
   }
 }
 
-/** 酷狗用户歌单（需登录 cookie） */
+/** 酷狗用户歌单（需登录 cookie）：优先走签名网关代理（服务端直连），失败回退隐藏窗口桥 */
 export async function fetchKugouUserPlaylists(cookie?: string): Promise<KugouPlaylist[]> {
   const kgCookie = cookie || getPlatformCookie('kugou')
   if (!kgCookie) return []
   try {
     const resp = await fetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
-    if (!resp.ok) return []
-    const playlists = await resp.json()
-    return Array.isArray(playlists) ? playlists : []
+    if (resp.ok) {
+      const playlists = await resp.json()
+      if (Array.isArray(playlists)) {
+        return playlists.map((p: any) => ({
+          specialid: String(p.specialid || ''),
+          name: String(p.name || ''),
+          coverUrl: resolveKugouCover(String(p.img || '')),
+          songcount: Number(p.songcount) || undefined,
+          playcount: Number(p.playcount) || undefined,
+          isMine: p.isMine,
+        })).filter(p => p.specialid && p.name)
+      }
+    }
   } catch (e) {
-    console.warn('[Kugou] 用户歌单获取失败:', e)
-    return []
+    console.warn('[Kugou] 用户歌单代理失败，尝试桥:', e)
   }
+  const bridge = (window as any).electron?.kugouScrape
+  if (bridge?.userPlaylists) {
+    try {
+      const result = await bridge.userPlaylists()
+      if (result?.success && Array.isArray(result.playlists)) {
+        return result.playlists.map((p: { specialid: string; name: string; img?: string; songcount?: number; playcount?: number }) => ({
+          specialid: p.specialid,
+          name: p.name,
+          coverUrl: resolveKugouCover(p.img || ''),
+          songcount: p.songcount,
+          playcount: p.playcount,
+        }))
+      }
+    } catch { /* 桥失败 */ }
+  }
+  return []
 }
 
-/** 酷狗播放 URL（需登录 cookie） */
-export async function getKugouSongUrl(hash: string): Promise<string | null> {
-  const cookie = getPlatformCookie('kugou')
-  if (!cookie) return null
+/** 酷狗播放 URL（四层策略：H5 签名网关 → Mobile 免费直链 → Web；付费歌曲返回 null 由上层匹配播放） */
+export async function getKugouSongUrl(hash: string, extra: { albumId?: string; albumAudioId?: number } = {}): Promise<string | null> {
+  if (!hash) return null
   try {
-    const resp = await fetch(`${KG_API}/song/url?hash=${encodeURIComponent(hash)}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+    const cookie = getPlatformCookie('kugou')
+    const query = new URLSearchParams({ hash })
+    if (extra.albumId) query.set('albumId', extra.albumId)
+    if (extra.albumAudioId) query.set('album_audio_id', String(extra.albumAudioId))
+    if (cookie) query.set('cookie', cookie)
+    const resp = await fetch(`${KG_API}/song/url?${query.toString()}`, { cache: 'no-store' })
     if (!resp.ok) return null
     const json = await resp.json()
     if (!json?.url) return null
@@ -224,12 +272,14 @@ export async function getKugouSongUrl(hash: string): Promise<string | null> {
   }
 }
 
-/** 酷狗歌词（需登录 cookie） */
-export async function getKugouLyrics(hash: string): Promise<LyricLine[]> {
-  const cookie = getPlatformCookie('kugou')
-  if (!cookie) return []
+/** 酷狗歌词（krcs.kugou.com，规范 LRC） */
+export async function getKugouLyrics(hash: string, extra: { albumAudioId?: number; duration?: number } = {}): Promise<LyricLine[]> {
+  if (!hash) return []
   try {
-    const resp = await fetch(`${KG_API}/lyric?hash=${encodeURIComponent(hash)}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+    const query = new URLSearchParams({ hash })
+    if (extra.albumAudioId) query.set('album_audio_id', String(extra.albumAudioId))
+    if (extra.duration) query.set('duration', String(extra.duration))
+    const resp = await fetch(`${KG_API}/lyric?${query.toString()}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     const lrc = json?.lyric || ''
@@ -252,6 +302,44 @@ export async function getKugouLyrics(hash: string): Promise<LyricLine[]> {
   } catch (e) {
     console.warn('[Kugou] 歌词获取失败:', e)
     return []
+  }
+}
+
+/** 酷狗喜欢歌曲（H5 签名网关；like=false 目前仅返回支持标记，真实移除待网关适配） */
+export async function likeKugouSong(song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }>; album?: { id?: string | number } }, like: boolean): Promise<boolean> {
+  const cookie = getPlatformCookie('kugou')
+  if (!cookie) return false
+  try {
+    const resp = await fetch(`${KG_API}/like`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ like, song: { hash: song.hash || song.mid, name: song.name, artists: song.artists }, cookie }),
+    })
+    if (!resp.ok) return false
+    const json = await resp.json()
+    return json?.result === 100
+  } catch (e) {
+    console.warn('[Kugou] 喜欢操作失败:', e)
+    return false
+  }
+}
+
+/** 酷狗歌单加歌（H5 签名网关） */
+export async function addKugouSongToPlaylist(listId: string, song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }> }): Promise<boolean> {
+  const cookie = getPlatformCookie('kugou')
+  if (!cookie) return false
+  try {
+    const resp = await fetch(`${KG_API}/playlist/tracks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'add', pid: listId, song: { hash: song.hash || song.mid, name: song.name, artists: song.artists }, cookie }),
+    })
+    if (!resp.ok) return false
+    const json = await resp.json()
+    return json?.result === 100
+  } catch (e) {
+    console.warn('[Kugou] 加歌失败:', e)
+    return false
   }
 }
 

@@ -743,19 +743,23 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
 }
 
 /**
- * 统一播放转换：Apple 曲目 → 网易云/QQ 同款可播放歌曲；非 Apple 曲目原样返回。
- * 所有 Apple 界面（搜索/歌单/探索/个人中心）点播放时都走这里，避免各处重复匹配。
+ * 统一播放转换：非网易云/QQ 平台的曲目 → 网易云/QQ 同款可播放歌曲。
+ * - apple：始终匹配（Apple 曲目无法直接播放）
+ * - spotify / soda：无自源音源，始终匹配
+ * - kugou：由调用方决定（已登录酷狗时可原生播放，不进来）
+ * - 网易云/QQ 曲目原样返回
+ * 所有界面（搜索/歌单/探索/个人中心）点播放时都走这里，避免各处重复匹配。
  */
 export async function resolvePlayableSong(song: Song): Promise<Song | null> {
   if (!song) return null
-  if (song.platform !== 'apple') return song
+  const platform = song.platform || 'netease'
+  if (platform === 'netease' || platform === 'qq') return song
   const artistName = (song.artists || []).map(artist => artist.name).filter(Boolean).join(' ')
-  const matched = await findPlayableAppleSong({
+  return findPlayableAppleSong({
     name: song.name,
     artistName: artistName || song.name,
     durationMs: song.duration || undefined,
   })
-  return matched
 }
 
 /** 目录搜索 → Song[]（SearchPanel 的 Apple 搜索用） */

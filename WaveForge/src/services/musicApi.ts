@@ -433,8 +433,20 @@ export async function searchSuggest(keywords: string, platform: MusicPlatform = 
 // 搜索歌手
 export async function searchArtists(keywords: string, platform: MusicPlatform = 'netease'): Promise<Artist[]> {
   try {
-    // Spotify/酷狗/汽水：暂不支持独立艺人搜索（Spotify 可后续扩展 /search?type=artist）
-    if (platform === 'spotify' || platform === 'kugou' || platform === 'soda') return []
+    // Spotify：官方 API 艺人搜索
+    if (platform === 'spotify') {
+      const { searchSpotifyArtists } = await import('./spotifyService')
+      const artists = await searchSpotifyArtists(keywords, 20)
+      return artists.map(a => ({
+        id: Number(parseInt(a.id.slice(0, 12), 36)) || 0,
+        mid: a.id,
+        name: a.name,
+        picUrl: a.coverUrl || '',
+        platform: 'spotify' as const,
+      }))
+    }
+    // 酷狗/汽水：暂不支持独立艺人搜索
+    if (platform === 'kugou' || platform === 'soda') return []
     const devMode = localStorage.getItem('developerMode') === 'true'
     if (platform === 'qq') {
       const url = `${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&type=singer&devMode=${devMode}`
@@ -495,8 +507,22 @@ export async function searchArtists(keywords: string, platform: MusicPlatform = 
 // 搜索专辑
 export async function searchAlbums(keywords: string, platform: MusicPlatform = 'netease'): Promise<Album[]> {
   try {
-    // Spotify/酷狗/汽水：暂不支持独立专辑搜索
-    if (platform === 'spotify' || platform === 'kugou' || platform === 'soda') return []
+    // Spotify：官方 API 专辑搜索
+    if (platform === 'spotify') {
+      const { searchSpotifyAlbums } = await import('./spotifyService')
+      const albums = await searchSpotifyAlbums(keywords, 20)
+      return albums.map(a => ({
+        id: Number(parseInt(a.id.slice(0, 12), 36)) || 0,
+        mid: a.id,
+        name: a.name,
+        artist: { name: a.artists.map(artist => artist.name).join(' / ') },
+        picUrl: a.coverUrl || '',
+        publishTime: a.releaseDate ? new Date(a.releaseDate).getTime() : 0,
+        platform: 'spotify' as const,
+      }))
+    }
+    // 酷狗/汽水：暂不支持独立专辑搜索
+    if (platform === 'kugou' || platform === 'soda') return []
     const devMode = localStorage.getItem('developerMode') === 'true'
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&type=album&devMode=${devMode}`)
@@ -574,10 +600,9 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         apiUrl = `${API_BASE}/qq/song/url?mid=${encodeURIComponent(String(id))}&quality=${encodeURIComponent(preference)}&vip=${isVip ? 'true' : 'false'}${cookie ? '&cookie=' + encodeURIComponent(cookie) : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'kugou') {
-        // 酷狗：已登录走酷狗播放接口（local-server 代理），未登录返回 null → 上层降级网易云/QQ
-        const cookie = localStorage.getItem('kugou_cookie') || ''
-        if (!cookie) return null
-        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${cookie ? '&cookie=' + encodeURIComponent(cookie) : ''}`
+        // 酷狗：签名网关四层策略（H5→Mobile→Web），付费歌曲返回 null → 上层降级网易云/QQ
+        const kgCookie = localStorage.getItem('kugou_cookie') || ''
+        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${kgCookie ? `&cookie=${encodeURIComponent(kgCookie)}` : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'spotify' || platform === 'soda') {
         // Spotify/汽水：未登录无自源音源，返回 null → 上层降级网易云/QQ
@@ -1430,18 +1455,20 @@ export async function getLyrics(
 async function getPlatformLyrics(id: number | string, platform: MusicPlatform): Promise<LyricLine[]> {
   try {
     if (platform === 'kugou') {
-      // 酷狗：已登录走酷狗歌词接口，未登录返回空（上层走 Lrclib/AMLL 兜底）
-      const kugouCookie = localStorage.getItem('kugou_cookie') || ''
-      if (!kugouCookie) return []
+      // 酷狗：krcs 歌词接口（无需登录；失败走 Lrclib/AMLL 兜底）
       const url = new URL(`${API_BASE}/kugou/lyric`)
       url.searchParams.set('hash', String(id))
-      url.searchParams.set('cookie', kugouCookie)
       const response = await fetch(url.toString(), { signal: AbortSignal.timeout(5000) })
       if (!response.ok) return []
       const data = await response.json()
       const lyricText = data.lyric || ''
       if (!lyricText) return []
       return parseLyric(lyricText)
+    }
+    if (platform === 'soda') {
+      // 汽水：火山公开目录详情歌词
+      const { getSodaLyrics } = await import('./sodaService')
+      return getSodaLyrics(String(id))
     }
     if (platform === 'qq') {
       const qqCookie = localStorage.getItem('qq_cookie') || ''
@@ -2621,6 +2648,13 @@ export async function subscribeArtist(
   options: { cookie?: string } = {}
 ): Promise<any> {
   try {
+    // Spotify：官方 API 关注/取关艺人（id 为 Spotify artist id）
+    if (platform === 'spotify') {
+      const { followSpotifyArtists } = await import('./spotifyService')
+      const ok = await followSpotifyArtists([id], subscribe)
+      if (!ok) throw new Error('Spotify 关注歌手失败（token 失效或网络异常）')
+      return { result: 200, platform: 'spotify' }
+    }
     const cookie = getPlatformCookie(platform, options.cookie)
     const body: Record<string, any> = { id, subscribe, t: subscribe ? '1' : '2', cookie }
     // QQ 的歌手关注使用 mid 字段而非 id
@@ -2645,6 +2679,12 @@ export async function subscribeArtist(
 /** 获取已关注歌手列表 */
 export async function getSubscribedArtists(platform: MusicPlatform = 'netease', options: { cookie?: string } = {}): Promise<any> {
   try {
+    // Spotify：官方 API 我关注的艺人
+    if (platform === 'spotify') {
+      const { fetchSpotifyFollowingArtists } = await import('./spotifyService')
+      const artists = await fetchSpotifyFollowingArtists(50)
+      return { artists }
+    }
     const cookie = getPlatformCookie(platform, options.cookie)
     const response = await fetch(`${API_BASE}/${platform}/artist/sublist?cookie=${encodeURIComponent(cookie)}`)
     const data = await response.json()

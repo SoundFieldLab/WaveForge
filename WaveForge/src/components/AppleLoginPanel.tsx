@@ -303,7 +303,7 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
               {hasNativeLogin && (
                 <p className="mb-2 rounded-lg bg-emerald-400/10 px-3 py-2 text-emerald-200/85">
                   <b>推荐（桌面端）：</b>点击「网页一键登录」，在弹出窗口登录 Apple 账号，
-                  应用会自动抓取账号令牌，并自动获取可用的开发者令牌。
+                  登录后自动完成授权并同步开发者令牌。
                 </p>
               )}
               <ol className="list-decimal space-y-1.5 pl-4">
@@ -312,7 +312,7 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
                   （从 Apple 网页提取，有效期约 70 天，到期自动刷新），无需任何开发者密钥。
                 </li>
                 <li>
-                  <b className="text-white/80">Media-User-Token</b>：桌面端用「网页一键登录」自动抓取；或在
+                  <b className="text-white/80">Media-User-Token</b>：桌面端用「网页一键登录」自动完成；或在
                   <span className="text-white/70">music.apple.com</span> 登录后，从浏览器开发者工具 →
                   网络 → 任意 amp-api 请求的请求头中复制
                   <code className="mx-1 rounded bg-white/10 px-1 py-0.5">media-user-token</code> 的值。
@@ -402,8 +402,8 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
                 {autoLoading ? '正在打开 Apple 登录窗口…' : '在弹出窗口登录 Apple ID'}
               </button>
               <p className="rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-xs leading-relaxed text-white/50">
-                将打开 Apple Music 官方登录窗口，登录 Apple 账号后应用会自动抓取账号令牌，
-                并从 Apple 网页获取可用的开发者令牌（无需开发者密钥）。完成后窗口自动关闭。
+                将打开 Apple Music 官方登录窗口，登录 Apple 账号后应用会自动完成授权，
+                并同步可用的开发者令牌（无需开发者密钥）。完成后窗口自动关闭。
               </p>
             </div>
           )}

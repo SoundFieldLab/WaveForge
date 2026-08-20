@@ -126,7 +126,7 @@ export default function KugouLoginPanel({ onClose, onLoginSuccess }: KugouLoginP
 
           {/* 说明 */}
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 mb-6">
-            <p className="text-yellow-200 text-sm">在弹出窗口完成酷狗登录，将自动获取 Cookie；也可以手动粘贴</p>
+            <p className="text-yellow-200 text-sm">在弹出窗口完成酷狗登录，登录后自动回到应用；也可以手动粘贴 Cookie</p>
           </div>
 
           {/* 步骤 1：弹窗扫码登录 */}
@@ -145,7 +145,7 @@ export default function KugouLoginPanel({ onClose, onLoginSuccess }: KugouLoginP
                     style={{ backgroundColor: accent }}
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-                    {loading ? '正在打开登录窗口…' : '在弹出窗口登录酷狗（自动抓取）'}
+                    {loading ? '正在打开登录窗口…' : '在弹出窗口登录酷狗'}
                   </button>
                 ) : (
                   <button

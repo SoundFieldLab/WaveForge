@@ -434,13 +434,20 @@ export async function getPlaylistDetail(
 ): Promise<any> {
   console.log(`🌐 从服务器获取歌单详情: ${playlistId}`)
   const devMode = localStorage.getItem('developerMode') === 'true'
-  // Spotify：官方 API 歌单详情（前端直连）
+  // Spotify：官方 API 歌单详情（前端直连，含歌单名/封面）
   if (platform === 'spotify') {
-    const { fetchSpotifyPlaylist, spotifyTrackToSong } = await import('./spotifyService')
-    const tracks = await fetchSpotifyPlaylist(playlistId)
+    const { fetchSpotifyPlaylistDetail, spotifyTrackToSong } = await import('./spotifyService')
+    const detail = await fetchSpotifyPlaylistDetail(playlistId)
+    if (!detail) return { playlist: { id: playlistId, name: 'Spotify 歌单' }, tracks: [], privileges: {} }
     return {
-      playlist: { id: playlistId, name: 'Spotify 歌单' },
-      tracks: tracks.map(t => spotifyTrackToSong(t)),
+      playlist: {
+        id: detail.playlist.id,
+        name: detail.playlist.name,
+        coverImgUrl: detail.playlist.coverUrl || '',
+        description: detail.playlist.description || '',
+        owner: detail.playlist.owner,
+      },
+      tracks: detail.songs.map(s => spotifyTrackToSong(s)),
       privileges: { 1: true, 0: true },
     }
   }
@@ -629,6 +636,24 @@ export async function likeSong(
 ): Promise<any> {
   console.log(`${like ? '❤️' : '💔'} ${like ? '喜欢' : '取消喜欢'}歌曲: ${songId}`)
 
+  // Spotify：官方 API 前端直连（songMid 为 Spotify track id）
+  if (platform === 'spotify') {
+    const { likeSpotifyTracks } = await import('./spotifyService')
+    const trackId = options.songMid || songId
+    const ok = await likeSpotifyTracks([trackId], like)
+    if (!ok) throw new Error('Spotify 喜欢操作失败（token 失效或网络异常）')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 200, platform: 'spotify' }
+  }
+  // 酷狗：H5 签名网关喜欢（hash 为歌曲标识）
+  if (platform === 'kugou') {
+    const { likeKugouSong } = await import('./kugouService')
+    const ok = await likeKugouSong({ hash: options.songMid || songId, name: '', artists: [] }, like)
+    if (!ok) throw new Error('酷狗喜欢操作失败')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 100, platform: 'kugou' }
+  }
+
   const response = await fetch(`${API_BASE}/${platform}/like`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -668,7 +693,25 @@ export async function addSongToPlaylist(
   options: { songMid?: string; songType?: number; cookie?: string } = {}
 ): Promise<any> {
   console.log(`➕ 添加歌曲 ${songId} 到歌单 ${playlistId}`)
-  
+
+  // Spotify：官方 API 前端直连
+  if (platform === 'spotify') {
+    const { addTracksToSpotifyPlaylist } = await import('./spotifyService')
+    const trackId = options.songMid || songId
+    const ok = await addTracksToSpotifyPlaylist(playlistId, [trackId])
+    if (!ok) throw new Error('Spotify 添加歌曲失败（token 失效或网络异常）')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 200, platform: 'spotify' }
+  }
+  // 酷狗：H5 签名网关加歌
+  if (platform === 'kugou') {
+    const { addKugouSongToPlaylist } = await import('./kugouService')
+    const ok = await addKugouSongToPlaylist(playlistId, { hash: options.songMid || songId, name: '', artists: [] })
+    if (!ok) throw new Error('酷狗加歌失败')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 100, platform: 'kugou' }
+  }
+
   const url = platform === 'netease'
     ? `http://localhost:3001/api/netease/playlist/tracks`
     : `http://localhost:3001/api/qq/playlist/tracks`
@@ -711,7 +754,17 @@ export async function removeSongFromPlaylist(
   options: { songMid?: string; songType?: number; cookie?: string } = {}
 ): Promise<any> {
   console.log(`➖ 从歌单 ${playlistId} 删除歌曲 ${songId}`)
-  
+
+  // Spotify：官方 API 前端直连
+  if (platform === 'spotify') {
+    const { removeTracksFromSpotifyPlaylist } = await import('./spotifyService')
+    const trackId = options.songMid || songId
+    const ok = await removeTracksFromSpotifyPlaylist(playlistId, [trackId])
+    if (!ok) throw new Error('Spotify 删除歌曲失败（token 失效或网络异常）')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 200, platform: 'spotify' }
+  }
+
   const url = platform === 'netease'
     ? `http://localhost:3001/api/netease/playlist/tracks`
     : `http://localhost:3001/api/qq/playlist/tracks`
@@ -771,7 +824,16 @@ export async function createPlaylist(
   } = {}
 ): Promise<any> {
   console.log(`🎵 创建歌单: ${name}`)
-  
+
+  // Spotify：官方 API 前端直连
+  if (platform === 'spotify') {
+    const { createSpotifyPlaylist } = await import('./spotifyService')
+    const id = await createSpotifyPlaylist(name, options.type === 'NORMAL' ? '' : '', options.privacy === '1' ? false : true)
+    if (!id) throw new Error('Spotify 创建歌单失败（token 失效或网络异常）')
+    invalidateUserPlaylistsCache(platform, '')
+    return { id, result: 200, platform: 'spotify' }
+  }
+
   const cookie = getPlatformCookie(platform, options.cookie)
   const url = platform === 'qq'
     ? `${API_BASE}/qq/playlist/create`
@@ -893,6 +955,16 @@ export async function subscribePlaylist(
   } = {}
 ): Promise<any> {
   console.log(`收藏/取消收藏歌单: ${playlistId}`)
+
+  // Spotify：官方 API 前端直连（follow/unfollow）
+  if (platform === 'spotify') {
+    const { followSpotifyPlaylist } = await import('./spotifyService')
+    const ok = await followSpotifyPlaylist(playlistId, subscribe)
+    if (!ok) throw new Error('Spotify 收藏歌单失败（token 失效或网络异常）')
+    invalidateUserPlaylistsCache(platform, '')
+    return { result: 200, platform: 'spotify' }
+  }
+
   const cookie = getPlatformCookie(platform, options.cookie)
   const url = platform === 'qq'
     ? `${API_BASE}/qq/playlist/subscribe`
