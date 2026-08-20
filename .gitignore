@@ -1,0 +1,30 @@
+# 外层聚合仓库（D:\opencode）根目录：排除密钥/测试产物/第三方实验代码/本地工具痕迹
+# 代码本体在 WaveForge/ 子目录，其自己的 .gitignore 已覆盖 node_modules/dist 等
+
+# 密钥（即使内容像测试用也绝不入库）
+license-*.pem
+
+# 本地工具/会话痕迹
+.zcode/
+.codex-*
+.browser-*
+
+# 其他任务/会话的临时特性标记与测试产物
+feat_*.txt
+wf-*.py
+djtransgan-*.py
+wf-*.json
+wf-*.cjs
+tmp-*.wav
+probe*.wav
+
+# 第三方/实验/参考代码（确认需要入库前不提交）
+DJTransGAN/
+beat_this/
+echo-src/
+Lyrics.swift
+Specs.swift
+LyricsBlossom-re/
+LyricsBlossom-windows/
+逆向成果/
+automix相关论文/
