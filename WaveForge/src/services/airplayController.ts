@@ -140,9 +140,9 @@ class AirplayController {
     return readStored<boolean>(STORAGE_KEYS.syncVolume, false)
   }
 
-  /** 断开后应恢复的设备音量（连接前记录，默认 50） */
+  /** 断开后应恢复的设备音量（连接前记录，默认 30） */
   getRestoreVolume(): number {
-    const v = readStored<number>(STORAGE_KEYS.restoreVolume, 50)
+    const v = readStored<number>(STORAGE_KEYS.restoreVolume, 30)
     return Math.max(0, Math.min(100, v))
   }
 
@@ -183,11 +183,9 @@ class AirplayController {
     this.status = status
     this.listeners.forEach((listener) => listener(status))
     const connected = status.phase === 'connected' || status.phase === 'streaming'
-    // 提示音只在一次连接会话中响一次：会话结束（空闲/浏览/出错）时重置，
-    // 切歌/过渡期间的 connected↔streaming 抖动不会重复响
-    if (!connected) {
-      this.connectSoundPlayedInSession = false
-    } else if (!this.connectSoundPlayedInSession && this.getConnectSound()) {
+    // 提示音只在一次「用户主动连接」会话中响一次：connect() 会重置标记；
+    // 切歌/异常导致的自动重连（idle→connected）不重置，因此不响提示音。
+    if (connected && !this.connectSoundPlayedInSession && this.getConnectSound()) {
       this.connectSoundPlayedInSession = true
       this.playConnectSound()
     }
@@ -212,6 +210,8 @@ class AirplayController {
   async connect(deviceId: string, mode: 'auto' | 'raop' | 'airplay2' = 'auto'): Promise<{ success: boolean; error?: string }> {
     const bridge = (window as any).electron?.airplay
     if (!bridge) return { success: false, error: 'unsupported' }
+    // 用户主动连接：本次会话允许响一次连接提示音（切歌自动重连不重置，不响）
+    this.connectSoundPlayedInSession = false
     writeStored(STORAGE_KEYS.deviceId, deviceId)
     writeStored(STORAGE_KEYS.mode, mode)
     writeStored(STORAGE_KEYS.enabled, true)

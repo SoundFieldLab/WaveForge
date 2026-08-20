@@ -1,6 +1,6 @@
-import React, { memo, useState, useEffect, useRef } from 'react'
+import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Gift, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music } from 'lucide-react'
+import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Gift, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash } from 'lucide-react'
 import LoginButton from './LoginButton'
 import type { AppleUserInfo } from '../services/appleAuth'
 import {
@@ -31,7 +31,7 @@ import {
   savePlaybackShortcutSettings,
   type PlaybackShortcutSettings,
 } from '../services/playbackShortcutSettings'
-import type { DesktopLyricsColorMode, DesktopLyricsSettings } from '../electron'
+import type { DesktopLyricsColorMode, DesktopLyricsSettings, TaskbarWidgetSettings } from '../electron'
 import { parseStoredBoolean } from '../utils/storage'
 import {
   AUDIO_QUALITY_SETTINGS_EVENT,
@@ -52,6 +52,8 @@ import {
   clearBilibiliLoginExpiry,
   logoutBilibiliServer,
   resolveBiliPic,
+  getLocalMvMarks,
+  removeLocalMvMark,
 } from '../services/bilibiliApi'
 
 type UpdateCheckState = {
@@ -250,6 +252,8 @@ function SettingsPanel({
   const [showTvDeviceId, setShowTvDeviceId] = useState(false)
   const [tvRedeemState, setTvRedeemState] = useState<{ status: 'idle' | 'redeeming'; message: string | null }>({ status: 'idle', message: null })
   const [tvLicense, setTvLicense] = useState<{ deviceId: string; grants: Array<{ feature: string; label: string; expiresAt?: number }> }>({ deviceId: '', grants: [] })
+  const [showLocalMvMarks, setShowLocalMvMarks] = useState(false)
+  const [localMvMarks, setLocalMvMarks] = useState<ReturnType<typeof getLocalMvMarks>>([])
   const [playbackShortcutSettings, setPlaybackShortcutSettings] = useState(loadPlaybackShortcutSettings)
   
   // 第三方歌词源设置
@@ -402,6 +406,50 @@ function SettingsPanel({
     try {
       const result = await (window as any).electron.desktopPlayer.setForm(form)
       setDesktopPlayerForm(result?.form === 'bar' ? 'bar' : 'card')
+    } catch {
+      // 保留当前选择
+    }
+  }
+
+  // 任务栏迷你播控（贴任务栏带）设置
+  const [taskbarWidgetEnabledState, setTaskbarWidgetEnabledState] = useState(false)
+  const [taskbarWidgetSettings, setTaskbarWidgetSettings] = useState<TaskbarWidgetSettings>({
+    enabled: false,
+    position: 'right',
+    width: 340,
+    mode: 'normal',
+  })
+
+  useEffect(() => {
+    const api = window.electron?.taskbarWidget
+    if (!api) return
+    void api.getSettings().then((settings) => {
+      setTaskbarWidgetSettings(settings)
+      setTaskbarWidgetEnabledState(settings.enabled)
+    }).catch(() => undefined)
+  }, [])
+
+  const handleTaskbarWidgetToggle = async (enabled: boolean) => {
+    setTaskbarWidgetEnabledState(enabled)
+    setTaskbarWidgetSettings(previous => ({ ...previous, enabled }))
+    const api = window.electron?.taskbarWidget
+    if (!api) return
+    try {
+      const result = await api.setEnabled(enabled)
+      if (result?.success) setTaskbarWidgetEnabledState(Boolean(result.enabled))
+    } catch {
+      setTaskbarWidgetEnabledState(false)
+      setTaskbarWidgetSettings(previous => ({ ...previous, enabled: false }))
+    }
+  }
+
+  const handleTaskbarWidgetUpdate = async (partial: Partial<TaskbarWidgetSettings>) => {
+    setTaskbarWidgetSettings(previous => ({ ...previous, ...partial }))
+    const api = window.electron?.taskbarWidget
+    if (!api) return
+    try {
+      const result = await api.updateSettings(partial)
+      setTaskbarWidgetSettings(result)
     } catch {
       // 保留当前选择
     }
@@ -854,6 +902,22 @@ function SettingsPanel({
     const saved = localStorage.getItem('developerMode')
     return parseStoredBoolean(saved, isTvModeActive())
   })
+  // 过渡调试：开启后切歌/过渡时右上角弹窗显示引擎/策略/DJ 效果清单
+  const [transitionDebugEnabled, setTransitionDebugEnabled] = useState(() => {
+    try {
+      return localStorage.getItem('waveforge:transition-debug') === '1'
+    } catch {
+      return false
+    }
+  })
+  const handleTransitionDebugToggle = (enabled: boolean) => {
+    setTransitionDebugEnabled(enabled)
+    try {
+      localStorage.setItem('waveforge:transition-debug', enabled ? '1' : '0')
+    } catch {
+      // 忽略持久化失败（隐身模式等）
+    }
+  }
 
   // 全屏模式设置
   const [fullscreenMode, setFullscreenMode] = useState<'kiosk' | 'normal'>(() => {
@@ -1100,6 +1164,35 @@ function SettingsPanel({
     const saved = localStorage.getItem('autoMixMaxDuration')
     return saved ? parseFloat(saved) : 12
   })
+  const [autoMixEnhanced, setAutoMixEnhanced] = useState(() => {
+    const saved = localStorage.getItem('autoMixEnhanced')
+    return parseStoredBoolean(saved, false)
+  })
+  const [autoMixTransitionIntensity, setAutoMixTransitionIntensity] = useState<'subtle' | 'standard' | 'strong'>(() => {
+    const saved = localStorage.getItem('autoMixTransitionIntensity')
+    return saved === 'subtle' || saved === 'strong' ? saved : 'standard'
+  })
+  const [autoMixAiMix, setAutoMixAiMix] = useState(() => {
+    const saved = localStorage.getItem('autoMixAiMix')
+    return parseStoredBoolean(saved, false)
+  })
+  // AI 混音引擎可用性（null=检测中 / true=可用 / false=未安装）
+  const [aiMixAvailable, setAiMixAvailable] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (!autoMixEnabled || !autoMixEnhanced) return
+    let cancelled = false
+    const probe = async () => {
+      try {
+        const status = await window.electron?.render?.aiMixStatus?.()
+        if (!cancelled) setAiMixAvailable(status?.available === true)
+      } catch {
+        if (!cancelled) setAiMixAvailable(false)
+      }
+    }
+    setAiMixAvailable(null)
+    void probe()
+    return () => { cancelled = true }
+  }, [autoMixEnabled, autoMixEnhanced])
   
   const handleCrossfadeToggle = (enabled: boolean) => {
     // Crossfade 和 AutoMix、Gapless 互斥
@@ -1169,6 +1262,8 @@ function SettingsPanel({
     setAutoMixEnabled(enabled)
     localStorage.setItem('autoMixEnabled', JSON.stringify(enabled))
     window.dispatchEvent(new Event('autoMixSettingsChanged'))
+    // 探针：用户点击开关的瞬间写入后端日志（独立于 App 的事件链）
+    window.electron?.automixLog?.('settings-toggle', `autoMixEnabled=${enabled}`).catch(() => undefined)
   }
 
   const handleAutoMixBeatMatchingToggle = (enabled: boolean) => {
@@ -1195,6 +1290,24 @@ function SettingsPanel({
     setAutoMixMaxDuration(newDuration)
     localStorage.setItem('autoMixMaxDuration', newDuration.toString())
     window.dispatchEvent(new Event('autoMixSettingsChanged'))
+  }
+  const handleAutoMixEnhancedChange = (enabled: boolean) => {
+    setAutoMixEnhanced(enabled)
+    localStorage.setItem('autoMixEnhanced', JSON.stringify(enabled))
+    window.dispatchEvent(new Event('autoMixSettingsChanged'))
+    window.electron?.automixLog?.('settings-toggle', `autoMixEnhanced=${enabled}`).catch(() => undefined)
+  }
+  const handleAutoMixIntensityChange = (intensity: 'subtle' | 'standard' | 'strong') => {
+    setAutoMixTransitionIntensity(intensity)
+    localStorage.setItem('autoMixTransitionIntensity', intensity)
+    window.dispatchEvent(new Event('autoMixSettingsChanged'))
+    window.electron?.automixLog?.('settings-toggle', `autoMixTransitionIntensity=${intensity}`).catch(() => undefined)
+  }
+  const handleAutoMixAiMixToggle = (enabled: boolean) => {
+    setAutoMixAiMix(enabled)
+    localStorage.setItem('autoMixAiMix', JSON.stringify(enabled))
+    window.dispatchEvent(new Event('autoMixSettingsChanged'))
+    window.electron?.automixLog?.('settings-toggle', `autoMixAiMix=${enabled}`).catch(() => undefined)
   }
 
   // 深浅色主题：与播放页快捷设置共用同一存储与事件，App 监听后统一更新
@@ -2242,6 +2355,104 @@ function SettingsPanel({
                     </div>
                   </div>
 
+                  {/* 任务栏迷你播控（贴任务栏带） */}
+                  <div data-tv-hide="desktop">
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>任务栏迷你播控</h3>
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
+                      <div className="flex items-center justify-between gap-6">
+                        <div>
+                          <div className={`${textPrimary} font-medium mb-1`}>启用任务栏迷你播控</div>
+                          <div className={`${textSecondary} text-sm`}>
+                            在任务栏上显示迷你播控栏（封面 / 歌词 / 进度 / 控制），精确贴合任务栏高度，播放时显示当前歌词行
+                          </div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                          <input
+                            type="checkbox"
+                            checked={taskbarWidgetEnabledState}
+                            onChange={(e) => void handleTaskbarWidgetToggle(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} rounded-full peer peer-checked:after:translate-x-full after:bg-white after:shadow-[0_1px_3px_rgba(0,0,0,0.35)] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: taskbarWidgetEnabledState ? accentColor : '' }} />
+                        </label>
+                      </div>
+
+                      {taskbarWidgetEnabledState && (
+                        <div className="mt-4 pt-4 border-t space-y-5" style={{ borderColor: playerTheme === 'dark' ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.1)' }}>
+                          <div>
+                            <div className={`${textPrimary} text-sm font-medium mb-3`}>位置</div>
+                            <div className="grid grid-cols-2 gap-3">
+                              {([
+                                ['right', '右侧', '靠近系统托盘，不遮挡托盘区域'],
+                                ['center', '居中', '任务栏水平居中显示'],
+                              ] as const).map(([value, label, hint]) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  onClick={() => void handleTaskbarWidgetUpdate({ position: value })}
+                                  className="rounded-xl border px-3 py-2.5 text-xs transition-colors text-left"
+                                  style={{
+                                    color: taskbarWidgetSettings.position === value ? accentColor : playerTheme === 'dark' ? 'rgba(255,255,255,.45)' : 'rgba(0,0,0,.45)',
+                                    borderColor: taskbarWidgetSettings.position === value ? `${accentColor}99` : playerTheme === 'dark' ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.1)',
+                                    background: taskbarWidgetSettings.position === value ? `${accentColor}18` : 'transparent',
+                                  }}
+                                >
+                                  <div className="font-medium">{label}</div>
+                                  <div className={`${textTertiary} text-[10px] mt-0.5`}>{hint}</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className={`${textPrimary} text-sm font-medium mb-3`}>显示模式</div>
+                            <div className="grid grid-cols-2 gap-3">
+                              {([
+                                ['normal', '常规', '封面 + 歌词 + 进度 + 进度条'],
+                                ['pure', '纯享', '只显示当前播放的歌词'],
+                              ] as const).map(([value, label, hint]) => (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  onClick={() => void handleTaskbarWidgetUpdate({ mode: value })}
+                                  className="rounded-xl border px-3 py-2.5 text-xs transition-colors text-left"
+                                  style={{
+                                    color: (taskbarWidgetSettings.mode || 'normal') === value ? accentColor : playerTheme === 'dark' ? 'rgba(255,255,255,.45)' : 'rgba(0,0,0,.45)',
+                                    borderColor: (taskbarWidgetSettings.mode || 'normal') === value ? `${accentColor}99` : playerTheme === 'dark' ? 'rgba(255,255,255,.1)' : 'rgba(0,0,0,.1)',
+                                    background: (taskbarWidgetSettings.mode || 'normal') === value ? `${accentColor}18` : 'transparent',
+                                  }}
+                                >
+                                  <div className="font-medium">{label}</div>
+                                  <div className={`${textTertiary} text-[10px] mt-0.5`}>{hint}</div>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between mb-2">
+                              <span className={`${textPrimary} text-sm font-medium`}>宽度</span>
+                              <span className={`${textTertiary} text-xs tabular-nums`}>{taskbarWidgetSettings.width} px</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="260"
+                              max="420"
+                              step="10"
+                              value={taskbarWidgetSettings.width}
+                              onChange={(e) => void handleTaskbarWidgetUpdate({ width: Number(e.target.value) })}
+                              className="w-full"
+                              style={{ accentColor }}
+                            />
+                          </div>
+                          <p className={`${textTertiary} text-xs leading-5`}>
+                            仅 Windows 可用。迷你播控栏覆盖在任务栏带区域，悬停时变为可交互；移出后自动鼠标穿透，不遮挡任务栏其他按钮。
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
                   {/* 全屏窗口模式设置（TV 端常驻全屏，无需设置） */}
                   <div data-tv-hide="desktop">
                     <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>窗口设置</h3>
@@ -2650,6 +2861,99 @@ function SettingsPanel({
 
                       {autoMixEnabled && (
                         <div className="mt-4 pt-4 border-t border-white/10 space-y-4">
+                          {/* 过渡引擎：标准 AutoMix（v1）/ AutoMix 增强版（v2） */}
+                          <div>
+                            <div className={`${textPrimary} text-sm font-medium mb-2`}>过渡引擎</div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                onClick={() => handleAutoMixEnhancedChange(false)}
+                                className={`px-3 py-2 rounded-lg text-sm transition-all ${textPrimary} ${
+                                  !autoMixEnhanced ? 'border-current' : 'border-transparent'
+                                }`}
+                                style={{
+                                  borderColor: !autoMixEnhanced ? accentColor : 'transparent',
+                                  backgroundColor: !autoMixEnhanced
+                                    ? `${accentColor}20`
+                                    : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                                  color: !autoMixEnhanced ? accentColor : undefined,
+                                }}
+                              >
+                                标准 AutoMix
+                              </button>
+                              <button
+                                onClick={() => handleAutoMixEnhancedChange(true)}
+                                className={`px-3 py-2 rounded-lg text-sm transition-all ${textPrimary} ${
+                                  autoMixEnhanced ? 'border-current' : 'border-transparent'
+                                }`}
+                                style={{
+                                  borderColor: autoMixEnhanced ? accentColor : 'transparent',
+                                  backgroundColor: autoMixEnhanced
+                                    ? `${accentColor}20`
+                                    : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                                  color: autoMixEnhanced ? accentColor : undefined,
+                                }}
+                              >
+                                AutoMix 增强版
+                              </button>
+                            </div>
+                            <div className={`${textSecondary} text-xs mt-1`}>
+                              {autoMixEnhanced
+                                ? '调性匹配、乐句对齐、能量曲线与更丰富的过渡特效（鼓点/加速/混响虚化）'
+                                : '节拍对齐 + 基础 DJ 效果（当前方案，保持稳定）'}
+                            </div>
+                          </div>
+
+                          {autoMixEnhanced && (
+                            <>
+                              {/* v2 特效强度档位 */}
+                              <div>
+                                <div className={`${textPrimary} text-sm font-medium mb-2`}>特效强度</div>
+                                <div className="grid grid-cols-3 gap-2">
+                                  {(['subtle', 'standard', 'strong'] as const).map(level => (
+                                    <button
+                                      key={level}
+                                      onClick={() => handleAutoMixIntensityChange(level)}
+                                      className={`px-3 py-2 rounded-lg text-sm transition-all ${textPrimary}`}
+                                      style={{
+                                        borderColor: autoMixTransitionIntensity === level ? accentColor : 'transparent',
+                                        backgroundColor: autoMixTransitionIntensity === level
+                                          ? `${accentColor}20`
+                                          : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)',
+                                        color: autoMixTransitionIntensity === level ? accentColor : undefined,
+                                      }}
+                                    >
+                                      {level === 'subtle' ? '轻' : level === 'standard' ? '标准' : '强'}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+
+                              {/* v2 可选 AI 混音（GAN）：引擎可用才可开启；不可用时说明原因 */}
+                              <div className="flex items-center justify-between gap-4">
+                                <div>
+                                  <div className={`${textPrimary} text-sm font-medium mb-1`}>AI 混音（实验性 · 60s 长混音）</div>
+                                  <div className={`${textSecondary} text-xs`}>
+                                    {aiMixAvailable === true
+                                      ? '已检测到 DJTransGAN 引擎：AI 模型生成的 60 秒 DJ 长混音（模型固定时长，无法缩短）；想要短过渡可关闭它使用增强版 DSP'
+                                      : aiMixAvailable === false
+                                        ? 'AI 引擎未安装（需 torch + DJTransGAN 预训练模型，暂未随应用分发），当前使用内置 DSP 特效'
+                                        : '正在检测 AI 引擎…'}
+                                  </div>
+                                </div>
+                                <label className={`relative inline-flex flex-shrink-0 items-center ${aiMixAvailable === true ? 'cursor-pointer' : 'opacity-40 cursor-not-allowed'}`}>
+                                  <input
+                                    type="checkbox"
+                                    checked={autoMixAiMix}
+                                    disabled={aiMixAvailable !== true}
+                                    onChange={(event) => handleAutoMixAiMixToggle(event.target.checked)}
+                                    className="sr-only peer"
+                                  />
+                                  <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: autoMixAiMix ? accentColor : '' }}></div>
+                                </label>
+                              </div>
+                            </>
+                          )}
+
                           <div className="flex items-center justify-between gap-4">
                             <div>
                               <div className={`${textPrimary} text-sm font-medium mb-1`}>节拍匹配</div>
@@ -2682,41 +2986,49 @@ function SettingsPanel({
                             </label>
                           </div>
 
-                          <div>
-                            <div className="flex items-center justify-between mb-2">
-                              <div className={`${textPrimary} text-sm font-medium`}>过渡时长范围</div>
-                              <div className={`${textSecondary} text-xs tabular-nums`}>{autoMixMinDuration}–{autoMixMaxDuration} 秒</div>
+                          {/* 过渡时长范围：仅标准版（v1）可调；增强版（v2）由算法按 BPM 智能决定 */}
+                          {!autoMixEnhanced && (
+                            <div>
+                              <div className="flex items-center justify-between mb-2">
+                                <div className={`${textPrimary} text-sm font-medium`}>过渡时长范围</div>
+                                <div className={`${textSecondary} text-xs tabular-nums`}>{autoMixMinDuration}–{autoMixMaxDuration} 秒</div>
+                              </div>
+                              <div className="grid grid-cols-2 gap-4">
+                                <label className={`${textSecondary} text-xs`}>
+                                  最短
+                                  <input
+                                    type="range"
+                                    min="1"
+                                    max="19"
+                                    step="1"
+                                    value={autoMixMinDuration}
+                                    onChange={(event) => handleAutoMixMinDurationChange(Number(event.target.value))}
+                                    className="mt-2 w-full accent-current"
+                                    style={{ color: accentColor }}
+                                  />
+                                </label>
+                                <label className={`${textSecondary} text-xs`}>
+                                  最长
+                                  <input
+                                    type="range"
+                                    min="2"
+                                    max="20"
+                                    step="1"
+                                    value={autoMixMaxDuration}
+                                    onChange={(event) => handleAutoMixMaxDurationChange(Number(event.target.value))}
+                                    className="mt-2 w-full accent-current"
+                                    style={{ color: accentColor }}
+                                  />
+                                </label>
+                              </div>
+                              <div className={`${textSecondary} text-xs mt-2`}>实际时长会吸附到完整的 8 / 16 / 24 / 32 拍。</div>
                             </div>
-                            <div className="grid grid-cols-2 gap-4">
-                              <label className={`${textSecondary} text-xs`}>
-                                最短
-                                <input
-                                  type="range"
-                                  min="1"
-                                  max="19"
-                                  step="1"
-                                  value={autoMixMinDuration}
-                                  onChange={(event) => handleAutoMixMinDurationChange(Number(event.target.value))}
-                                  className="mt-2 w-full accent-current"
-                                  style={{ color: accentColor }}
-                                />
-                              </label>
-                              <label className={`${textSecondary} text-xs`}>
-                                最长
-                                <input
-                                  type="range"
-                                  min="2"
-                                  max="20"
-                                  step="1"
-                                  value={autoMixMaxDuration}
-                                  onChange={(event) => handleAutoMixMaxDurationChange(Number(event.target.value))}
-                                  className="mt-2 w-full accent-current"
-                                  style={{ color: accentColor }}
-                                />
-                              </label>
+                          )}
+                          {autoMixEnhanced && (
+                            <div className={`${textSecondary} text-xs`}>
+                              增强版过渡时长由算法根据两首歌曲的 BPM 与能量自动决定，无需手动调整。
                             </div>
-                            <div className={`${textSecondary} text-xs mt-2`}>实际时长会吸附到完整的 8 / 16 / 24 / 32 拍。</div>
-                          </div>
+                          )}
 
                           <div className={`${bgCard} rounded-lg p-3 border ${borderColor}`}>
                             <div className="flex items-start gap-2">
@@ -3107,6 +3419,19 @@ function SettingsPanel({
                               </label>
                             )
                           })}
+                          {/* 过渡调试：显示过渡用的引擎/策略/效果清单弹窗 */}
+                          <label className="flex items-center justify-between py-1.5 cursor-pointer">
+                            <span className={`text-xs ${textSecondary}`}>过渡调试（右上角显示过渡详情）</span>
+                            <span className="relative inline-flex items-center">
+                              <input
+                                type="checkbox"
+                                checked={transitionDebugEnabled}
+                                onChange={(e) => handleTransitionDebugToggle(e.target.checked)}
+                                className="sr-only peer"
+                              />
+                              <span className={`w-9 h-5 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all`} style={{ backgroundColor: transitionDebugEnabled ? accentColor : '' }}></span>
+                            </span>
+                          </label>
                         </div>
                       )}
                     </div>
@@ -3141,12 +3466,13 @@ function SettingsPanel({
                     </button>
                   </div>
 
-                  {/* 重新启用 OOBE（首次启动）引导动画 */}
+                  {/* 打开 OOBE（首次启动）引导 */}
                   <button
                     onClick={() => {
                       try { localStorage.removeItem('waveforge:oobe-shown') } catch { /* ignore */ }
+                      window.dispatchEvent(new CustomEvent('waveforge-trigger-oobe'))
                       window.dispatchEvent(new CustomEvent('showToast', {
-                        detail: { message: '您在重启软件后将进入 OOBE 引导', type: 'info' },
+                        detail: { message: '正在打开首次启动引导', type: 'info' },
                       }))
                     }}
                     className={`w-full ${bgCard} rounded-xl p-4 border ${borderColor} ${hoverBg} transition-all text-left`}
@@ -3157,8 +3483,31 @@ function SettingsPanel({
                           <Sparkles className="w-5 h-5" style={{ color: accentColor }} />
                         </div>
                         <div>
-                          <div className={`${textPrimary} font-medium mb-1`}>重新启用 OOBE（首次启动）引导动画</div>
-                          <div className={`${textSecondary} text-sm`}>清除完成标记，重启软件后将再次显示首次启动引导</div>
+                          <div className={`${textPrimary} font-medium mb-1`}>打开 OOBE（首次启动）引导</div>
+                          <div className={`${textSecondary} text-sm`}>手动打开主题选择 / 隐私条款 / 免责声明引导</div>
+                        </div>
+                      </div>
+                      <ChevronRight className={`w-5 h-5 ${textSecondary}`} />
+                    </div>
+                  </button>
+
+                  {/* 看歌本地标记库 */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLocalMvMarks(getLocalMvMarks())
+                      setShowLocalMvMarks(true)
+                    }}
+                    className={`w-full ${bgCard} rounded-xl p-4 border ${borderColor} ${hoverBg} transition-all text-left`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}20` }}>
+                          <FolderHeart className="w-5 h-5" style={{ color: accentColor }} />
+                        </div>
+                        <div>
+                          <div className={`${textPrimary} font-medium mb-1`}>看歌本地标记库</div>
+                          <div className={`${textSecondary} text-sm`}>查看/移除你手动标记的歌曲对应 MV（{getLocalMvMarks().length} 条）</div>
                         </div>
                       </div>
                       <ChevronRight className={`w-5 h-5 ${textSecondary}`} />
@@ -3479,6 +3828,68 @@ function SettingsPanel({
       {/* 哔哩哔哩「看歌」扫码登录弹窗 */}
       {showBiliProfile && (
         <BilibiliProfileModal onClose={() => setShowBiliProfile(false)} playerTheme={playerTheme} />
+      )}
+
+      {/* 看歌本地标记库弹窗 */}
+      {showLocalMvMarks && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[80] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 sm:p-10"
+          onClick={() => setShowLocalMvMarks(false)}
+        >
+          <motion.div
+            initial={{ scale: 0.96, y: 14 }}
+            animate={{ scale: 1, y: 0 }}
+            exit={{ scale: 0.96, y: 14 }}
+            onClick={(e) => e.stopPropagation()}
+            className={`w-full max-w-xl max-h-[80vh] rounded-2xl border overflow-hidden flex flex-col shadow-2xl ${playerTheme === 'dark' ? 'bg-[#0c0e1a]/[0.98] border-white/10' : 'bg-white/[0.98] border-black/10'}`}
+          >
+            <div className={`flex items-center justify-between px-5 py-4 border-b ${borderColor}`}>
+              <div>
+                <h3 className={`text-base font-bold ${textPrimary}`}>看歌本地标记库</h3>
+                <p className={`text-xs mt-0.5 ${textSecondary}`}>手动标记的歌曲对应的 MV（仅保存在本机，移除后恢复自动匹配）</p>
+              </div>
+              <button type="button" onClick={() => setShowLocalMvMarks(false)} className={`p-1.5 rounded-lg ${playerTheme === 'dark' ? 'hover:bg-white/10 text-white/60' : 'hover:bg-black/5 text-black/50'}`}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              {localMvMarks.length === 0 ? (
+                <p className={`text-center text-sm py-10 ${textTertiary}`}>还没有标记记录。在看歌搜索失败时手动选择一个视频播放，15 秒后会询问是否标记为该歌曲的 MV。</p>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {localMvMarks.map((m) => (
+                    <div key={m.songKey} className={`flex items-center gap-3 rounded-xl p-2.5 ${bgCard}`}>
+                      <div className="w-20 h-12 rounded-lg overflow-hidden bg-white/10 flex-shrink-0">
+                        {m.pic ? (
+                          <img src={resolveBiliPic(m.pic)} alt="" referrerPolicy="no-referrer" className="w-full h-full object-cover" loading="lazy" onError={(e) => { e.currentTarget.style.display = 'none' }} />
+                        ) : null}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className={`truncate text-sm font-medium ${textPrimary}`}>{m.songTitle} <span className={`text-xs font-normal ${textTertiary}`}>· {m.artist}</span></p>
+                        <p className={`truncate text-xs mt-0.5 ${textTertiary}`}>{m.videoTitle}</p>
+                        <p className={`text-[11px] mt-0.5 ${textTertiary}`}>标记于 {new Date(m.markedAt).toLocaleDateString()}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          removeLocalMvMark(m.songKey)
+                          setLocalMvMarks(getLocalMvMarks())
+                        }}
+                        className="p-2 rounded-lg text-red-400/80 hover:bg-red-500/15 hover:text-red-400 transition-colors flex-shrink-0"
+                        title="移除标记"
+                      >
+                        <Trash size={16} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
+        </motion.div>
       )}
 
       {showBiliLogin && (

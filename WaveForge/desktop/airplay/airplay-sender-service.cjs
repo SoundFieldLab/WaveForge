@@ -98,6 +98,7 @@ class AirplaySenderService extends EventEmitter {
     this._reconnectAttempted = false
     /** 连接提示音待重推标记（首个 setMetadata reset 后补推） */
     this._chimePending = false
+    this._chimePendingAt = 0
     /** 断开后应恢复的设备音量（连接前记录；异常退出后下次连接也会用记忆值修正） */
     this.restoreVolume = null
   }
@@ -490,9 +491,11 @@ class AirplaySenderService extends EventEmitter {
       // 直接置为 NORMAL（2）让真实数据立即出流，提示音排在当前时间点播放。
       const cb = this.sender.airtunes?.circularBuffer
       if (cb && typeof cb.status === 'number') cb.status = 2
-      // 连接瞬间的首个 setMetadata 会 reset() 清空发送端缓冲（丢弃上一首残留），
-      // 可能把刚推入的提示音一并清掉；标记待重推，由 setMetadata 复位后补推一次。
+      // 连接瞬间的首个 setMetadata 会 reset() 清空发送端缓冲，可能把刚推入的提示音
+      // 一并清掉；标记待重推，由 setMetadata 复位后补推一次。
+      // 补推只在 2s 窗口内有效：连接时未播放（首个 setMetadata 延后）也不残留到切歌。
       this._chimePending = true
+      this._chimePendingAt = Date.now()
     } catch { /* 忽略 */ }
   }
 
@@ -526,10 +529,13 @@ class AirplaySenderService extends EventEmitter {
     const trackKey = String(metadata.trackKey || metadata.title || '')
     if (trackKey && trackKey !== this.lastTrackKey) {
       try { this.sender.reset() } catch { /* 忽略 */ }
-      // 连接提示音在首个元数据 reset 时可能被清掉：补推一次，保证音箱能听到
+      // 连接提示音在首个元数据 reset 时可能被清掉：仅在 2s 窗口内补推一次
+      //（超过窗口说明不是连接瞬间的 reset，避免切歌时误响）
       if (this._chimePending) {
         this._chimePending = false
-        this.playConnectSound()
+        if (Date.now() - (this._chimePendingAt || 0) < 2000) {
+          this.playConnectSound()
+        }
       }
       this.lastTrackKey = trackKey
     }
