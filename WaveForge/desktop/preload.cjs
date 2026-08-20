@@ -4,6 +4,12 @@
 contextBridge.exposeInMainWorld('electronAPI', {
   // 打开外部链接
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+
+  // OOBE 完成 flag 文件（userData/.oobe-complete，独立于 localStorage 的双重保险）
+  oobe: {
+    getFlag: () => ipcRenderer.invoke('oobe:get-flag'),
+    setFlag: () => ipcRenderer.invoke('oobe:set-flag'),
+  },
 })
 
 contextBridge.exposeInMainWorld('electron', {
@@ -61,6 +67,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('wallpaper-changed', listener)
       return () => ipcRenderer.removeListener('wallpaper-changed', listener)
     },
+    // 按需启停壁纸监控：仅桌面模式 + 联动开启时启用（避免非桌面模式持续查询拖慢性能）
+    setWallpaperWatcherEnabled: (enabled) => ipcRenderer.invoke('set-wallpaper-watcher', Boolean(enabled)),
   },
   
   // 开发者模式
@@ -103,12 +111,24 @@ contextBridge.exposeInMainWorld('electron', {
     readAudioFile: (filePath) => ipcRenderer.invoke('render:readAudioFile', filePath),
     clearCache: () => ipcRenderer.invoke('render:clearCache'),
     getCacheStats: () => ipcRenderer.invoke('render:getCacheStats'),
+    // AI 混音（DJTransGAN）可选引擎：未安装时 transitionAiMix 抛错 / aiMixStatus.available=false
+    transitionAiMix: (plan, sourceAudioPath, targetAudioPath) =>
+      ipcRenderer.invoke('render:transitionAiMix', plan, sourceAudioPath, targetAudioPath),
+    aiMixStatus: () => ipcRenderer.invoke('render:aiMixStatus'),
+    // AI 学到的推子/EQ 自动化参数（v2 短过渡用）
+    aiMixAutomation: (plan, sourceAudioPath, targetAudioPath) =>
+      ipcRenderer.invoke('render:aiMixAutomation', plan, sourceAudioPath, targetAudioPath),
   },
+  
+  // AutoMix 渲染进程诊断日志：写入后端 automix-backend.log
+  automixLog: (scope, message) => ipcRenderer.invoke('automix-log:append', scope, message),
   
   // Audio download for rendering
   audioDownload: {
     prepare: (urlOrPath, trackKey) => 
       ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey),
+    getMediaUrl: (filePath) => ipcRenderer.invoke('audio-download:getMediaUrl', filePath),
+    saveWav: (trackKey, wavArrayBuffer) => ipcRenderer.invoke('audio-download:saveWav', trackKey, wavArrayBuffer),
     cleanupOldFiles: () => ipcRenderer.invoke('audio-download:cleanup'),
     getStats: () => ipcRenderer.invoke('audio-download:get-stats'),
     clearCache: () => ipcRenderer.invoke('audio-download:clear-cache'),
@@ -139,14 +159,25 @@ contextBridge.exposeInMainWorld('electron', {
   openQQLoginWindow: () => ipcRenderer.invoke('open-qq-login-window'),
   // 酷狗音乐登录（Electron 弹窗扫码，抓 kg_token/KuGoo）
   openKugouLoginWindow: () => ipcRenderer.invoke('open-kugou-login-window'),
+  clearKugouSession: () => ipcRenderer.invoke('kugou-clear-session'),
   // 读取当前会话的酷狗登录态（启动时自动恢复）
   getKugouSession: () => ipcRenderer.invoke('get-kugou-session'),
-  // Spotify OAuth 授权（Electron 弹窗）
-  openSpotifyLogin: () => ipcRenderer.invoke('open-spotify-login'),
+  // Spotify OAuth 授权（Electron 弹窗；clientId 可选，自定义 Client ID）
+  openSpotifyLogin: (clientId) => ipcRenderer.invoke('open-spotify-login', clientId),
   // 汽水音乐登录（Electron 弹窗扫码，抓 token）
   openSodaLogin: () => ipcRenderer.invoke('open-soda-login'),
   // 汽水音乐（抖音）数据桥：隐藏窗口导航抖音搜索页抓取音乐卡片
   sodaScrapeSearch: (keyword) => ipcRenderer.invoke('soda-scrape-search', keyword),
+  // 酷狗数据桥：隐藏窗口页面内同源 fetch 用户歌单/用户信息（绕开服务端 WAF）
+  kugouScrape: {
+    userPlaylists: () => ipcRenderer.invoke('kugou-scrape-user-playlists'),
+    userInfo: () => ipcRenderer.invoke('kugou-scrape-user-info'),
+  },
+  // OOBE 完成 flag 文件（userData/.oobe-complete，独立于 localStorage 的双重保险）
+  oobe: {
+    getFlag: () => ipcRenderer.invoke('oobe:get-flag'),
+    setFlag: () => ipcRenderer.invoke('oobe:set-flag'),
+  },
   // Spotify 授权完成后回调（主进程返回 token/用户名）
   onSpotifyAuthResult: (callback) => {
     const listener = (_event, result) => callback(result)
@@ -232,6 +263,39 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('remote:clients', listener)
       return () => ipcRenderer.removeListener('remote:clients', listener)
     },
+  },
+
+  // AirPlay 投送端：发现局域网 AirPlay 设备并推送本地播放的音频（默认关闭，由设置开关启用）
+  airplay: {
+    setEnabled: (enabled) => ipcRenderer.invoke('airplay:set-enabled', enabled),
+    listDevices: () => ipcRenderer.invoke('airplay:list-devices'),
+    getStatus: () => ipcRenderer.invoke('airplay:get-status'),
+    connect: (deviceId, mode = 'auto') => ipcRenderer.invoke('airplay:connect', deviceId, mode),
+    disconnect: () => ipcRenderer.invoke('airplay:disconnect'),
+    setVolume: (volume) => ipcRenderer.invoke('airplay:set-volume', volume),
+    setRestoreVolume: (volume) => ipcRenderer.invoke('airplay:set-restore-volume', volume),
+    setMetadata: (metadata) => ipcRenderer.invoke('airplay:set-metadata', metadata),
+    setProgress: (elapsed, duration) => ipcRenderer.invoke('airplay:set-progress', elapsed, duration),
+    playConnectSound: () => ipcRenderer.invoke('airplay:play-connect-sound'),
+    sendPcm: (chunk) => ipcRenderer.send('airplay:pcm', chunk),
+    setStreaming: (streaming) => ipcRenderer.send('airplay:set-streaming', streaming),
+    onStatus: (callback) => {
+      const listener = (_event, status) => callback(status)
+      ipcRenderer.on('airplay:status', listener)
+      return () => ipcRenderer.removeListener('airplay:status', listener)
+    },
+  },
+
+  // 音频输出设备：enumerateDevices 的权限授权已在 main 侧完成，这里仅暴露工具接口
+  audioOutput: {
+    isSupported: () => ipcRenderer.invoke('audio-output:is-supported'),
+  },
+
+  // 任务栏迷你播控（贴任务栏带）：开关/位置/宽度设置（个性化页控制）
+  taskbarWidget: {
+    setEnabled: (enabled) => ipcRenderer.invoke('taskbar-widget:set-enabled', enabled),
+    getSettings: () => ipcRenderer.invoke('taskbar-widget:get-settings'),
+    updateSettings: (partial) => ipcRenderer.invoke('taskbar-widget:update-settings', partial),
   },
 })
 

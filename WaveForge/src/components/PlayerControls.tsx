@@ -29,6 +29,10 @@ interface PlayerControlsProps {
   backgroundEffect?: 'transparent' | 'blur' | 'immersive'
   isTransitioning?: boolean
   isAutoMixTransition?: boolean
+  /** AutoMix 增强版（v2）：过渡指示显示「AutoMix 增强版」独立样式（缺省时与历史一致） */
+  enhancedAutoMix?: boolean
+  /** automix 介入（armed/准备/过渡中）即显示增强版字样（不等过渡动画窗口） */
+  enhancedAutoMixActive?: boolean
   transitionStartTime?: number | null
   immersiveTranslation?: string
   immersiveRoman?: string
@@ -184,6 +188,8 @@ export default function PlayerControls({
   backgroundEffect = 'blur',
   isTransitioning = false,
   isAutoMixTransition = false,
+  enhancedAutoMix = false,
+  enhancedAutoMixActive = false,
   transitionStartTime = null,
   immersiveTranslation = '',
   immersiveRoman = '',
@@ -202,6 +208,10 @@ export default function PlayerControls({
   const tvCompact = tvMode && !remoteCursorMode
   const [dragValue, setDragValue] = useState(0)
   const [showVolumeSlider, setShowVolumeSlider] = useState(false)
+  /** 音量条打开时间（3 秒宽限：打开后短暂移动不因离开大药丸而关闭） */
+  const volumeOpenedAtRef = useRef(0)
+  /** 音量滑条延迟关闭定时器：离开大药丸先给鼠标留出移到小药丸的时间，小药丸 hover 会取消 */
+  const volumeCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isProgressBarExpanded, setIsProgressBarExpanded] = useState(false)
   const [shortcutSettings, setShortcutSettings] = useState(loadPlaybackShortcutSettings)
   const [settingsAccentColor, setSettingsAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
@@ -403,7 +413,17 @@ export default function PlayerControls({
       return
     }
 
-    setShowVolumeSlider(prev => !prev)
+    setShowVolumeSlider(prev => {
+      const next = !prev
+      if (next) {
+        volumeOpenedAtRef.current = Date.now()
+        if (volumeCloseTimerRef.current !== null) {
+          window.clearTimeout(volumeCloseTimerRef.current)
+          volumeCloseTimerRef.current = null
+        }
+      }
+      return next
+    })
     lastClickTimeRef.current = now
   }
 
@@ -448,7 +468,6 @@ export default function PlayerControls({
 
   const handlePlayerMouseLeave = () => {
     setIsHovered(false)
-    setShowVolumeSlider(false)
     if (progressHideTimerRef.current) {
       clearTimeout(progressHideTimerRef.current)
       progressHideTimerRef.current = null
@@ -456,10 +475,22 @@ export default function PlayerControls({
     if (!isDragging) {
       setIsProgressBarExpanded(false)
     }
+    // 音量滑条：离开大药丸不立即关闭，给鼠标移到小药丸留出时间；小药丸 hover 会取消定时器
+    if (volumeCloseTimerRef.current !== null) {
+      window.clearTimeout(volumeCloseTimerRef.current)
+      volumeCloseTimerRef.current = null
+    }
+    volumeCloseTimerRef.current = setTimeout(() => {
+      volumeCloseTimerRef.current = null
+      setShowVolumeSlider(false)
+    }, 800)
   }
 
   const displayTime = isDragging ? dragValue : currentTime
-  const progressPercent = (displayTime / duration) * 100
+  // 过渡期间合成 currentTime 可能超过源曲时长（AI 长混音从源曲深处起步）：
+  // 显示时长自适应为 max(原时长, 当前时间)，进度条/总时长跟随，不再顶着曲尾不动。
+  const effectiveDuration = Math.max(duration, displayTime)
+  const progressPercent = (displayTime / effectiveDuration) * 100
   const iconColor = getContrastColor(accentColor)
   const isLightTheme = playerTheme === 'light'
   const progressAccentColor = isTransitioning && transitionToAccentColor
@@ -505,10 +536,19 @@ export default function PlayerControls({
     </AnimatePresence>
   )
   
-  // 检查是否即将过渡（剩余时间少于 5 秒）
-  const isNearTransition = isTransitioning || (duration - currentTime <= 5 && duration - currentTime > 0)
-  // AutoMix 智能混音过渡时显示 AutoMix，无缝衔接(Gapless)/交叉淡化仍显示 过渡
-  const transitionLabel = isAutoMixTransition ? 'AutoMix' : '过渡'
+  // 动画窗口：过渡动画（流光/发光）只在 currentTime 到达 transitionStartTime（=动画起点）
+  // 后开始。AI 长混音的音频过渡远早于动画点开始，不加门控会跟着 60s 混音全程亮。
+  // transitionStartTime 为 null（普通交叉淡化/gapless）时视为始终在窗口内（v1 行为不变）。
+  const inAnimationWindow = transitionStartTime === null || currentTime >= transitionStartTime
+  // 检查是否即将过渡：动画窗口内（automix 动画起点）或歌曲自然结束前 5 秒
+  const isNearTransition = (isTransitioning && inAnimationWindow) || (duration - currentTime <= 5 && duration - currentTime > 0)
+  // 过渡指示：动画窗口内 = AutoMix Enhanced（金色）；介入中（running 未到动画窗口）= AutoMix 正在介入（白色）
+  const inTransitionAnimation = isTransitioning && inAnimationWindow
+  const showTransitionBadge = inTransitionAnimation || enhancedAutoMixActive
+  const badgeIsEnhanced = inTransitionAnimation && enhancedAutoMix
+  const transitionLabel = inTransitionAnimation
+    ? (enhancedAutoMix ? 'AutoMix Enhanced' : isAutoMixTransition ? 'AutoMix' : '过渡')
+    : (enhancedAutoMixActive ? 'AutoMix 正在介入' : '')
   
   // 进度条发光强度
   const glowIntensity = isNearTransition ? 1.5 : 1
@@ -527,7 +567,7 @@ export default function PlayerControls({
           <input
             type="range"
             min="0"
-            max={duration}
+            max={effectiveDuration}
             value={displayTime}
             onMouseDown={() => setIsDragging(true)}
             onTouchStart={() => setIsDragging(true)}
@@ -544,7 +584,7 @@ export default function PlayerControls({
         <span className={`text-xs font-medium min-w-[38px] text-center leading-none ${
           playerTheme === 'dark' ? 'text-white/80' : 'text-black/70'
         }`}>
-          {formatTime(duration)}
+          {formatTime(effectiveDuration)}
         </span>
       </div>
     </div>
@@ -619,10 +659,11 @@ export default function PlayerControls({
             )}
           </AnimatePresence>
 
-          {/* 过渡提示 - 药丸上方，流光效果 */}
+          {/* 过渡提示 - 药丸上方，流光效果（仅在动画窗口内显示，避免 AI 长混音全程亮） */}
           <AnimatePresence>
-            {isTransitioning && (
+            {showTransitionBadge && (
               <motion.div
+                key={transitionLabel}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
@@ -633,9 +674,11 @@ export default function PlayerControls({
                 <span
                   className="text-xs font-medium"
                   style={{
-                    color: 'rgba(255,255,255,0.9)',
+                    color: badgeIsEnhanced ? 'rgba(255,215,0,0.98)' : 'rgba(255,255,255,0.9)',
                     letterSpacing: '0.1em',
-                    textShadow: '0 0 20px rgba(255,255,255,0.6), 0 2px 8px rgba(0,0,0,0.5)',
+                    textShadow: badgeIsEnhanced
+                      ? '0 0 20px rgba(255,200,0,0.85), 0 0 40px rgba(255,180,0,0.45), 0 2px 8px rgba(0,0,0,0.5)'
+                      : '0 0 20px rgba(255,255,255,0.6), 0 2px 8px rgba(0,0,0,0.5)',
                     animation: 'glow 2s ease-in-out infinite',
                   }}
                 >
@@ -740,6 +783,22 @@ export default function PlayerControls({
                               <motion.div initial={{ opacity: 0, y: 8, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 8, scale: 0.95 }} transition={{ duration: 0.15 }}
                                 className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 flex items-center gap-2 px-3 py-2 rounded-full backdrop-blur-3xl whitespace-nowrap"
                                 data-tv-arrows="volume"
+                                onMouseEnter={() => {
+                                  if (volumeCloseTimerRef.current !== null) {
+                                    window.clearTimeout(volumeCloseTimerRef.current)
+                                    volumeCloseTimerRef.current = null
+                                  }
+                                }}
+                                onMouseLeave={() => {
+                                  if (volumeCloseTimerRef.current !== null) {
+                                    window.clearTimeout(volumeCloseTimerRef.current)
+                                    volumeCloseTimerRef.current = null
+                                  }
+                                  volumeCloseTimerRef.current = setTimeout(() => {
+                                    volumeCloseTimerRef.current = null
+                                    setShowVolumeSlider(false)
+                                  }, 800)
+                                }}
                                 style={{
                                   background: playerTheme === 'dark'
                                     ? 'linear-gradient(135deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.4) 100%)'
@@ -931,9 +990,9 @@ export default function PlayerControls({
       {renderSeekFeedback()}
 
       <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center">
-        {/* 过渡提示 - 药丸上方，流光效果 */}
+        {/* 过渡提示 - 药丸上方，流光效果（仅在动画窗口内显示） */}
         <AnimatePresence>
-          {isTransitioning && (
+          {isTransitioning && inAnimationWindow && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}

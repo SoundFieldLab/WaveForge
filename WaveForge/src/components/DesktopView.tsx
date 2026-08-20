@@ -2,7 +2,7 @@ import { isTvModeActive } from '../platform'
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
 import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone } from 'lucide-react'
+import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
 import PlaylistCarousel3D from './PlaylistCarousel3D'
 import DesktopMiniPlayer from './DesktopMiniPlayer'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
@@ -106,6 +106,8 @@ interface DesktopViewProps {
   // 其他
   onExitDesktopMode: () => void
   onRemoteClick: () => void
+  /** 播放设备控制（音频输出设备 / AirPlay 投送）弹窗 */
+  onOpenDeviceControl: () => void
 }
 
 interface Playlist {
@@ -196,6 +198,7 @@ function DesktopView({
   onCopyInfo,
   onExitDesktopMode,
   onRemoteClick,
+  onOpenDeviceControl,
 }: DesktopViewProps) {
   // 当前平台（桌面模式独立）- 记住用户选择
   const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => {
@@ -1959,7 +1962,8 @@ function DesktopView({
               setThemePanelSettled(false)
               setShowThemePanel(false)
               setShowUpArrowHint(false)
-              // 来源桌面层先回到 y=0，避免切回简约后继承面板展开时的顶部空位。
+              // 立即显示过渡动画；面板收起/内容复位后再切换，避免来源内容以展开态残留成顶部占位
+              window.dispatchEvent(new CustomEvent('viewModeTransitionStart', { detail: mode }))
               window.setTimeout(() => {
                 localStorage.setItem('viewMode', mode)
                 window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))
@@ -2100,8 +2104,25 @@ function DesktopView({
               </div>
             )}
             
-            {/* 底部控制区域：按钮组 - 从左到右：遥控器、搜索、平台切换、设置、音量控制 */}
+            {/* 底部控制区域：按钮组 - 从左到右：播放设备、遥控器、搜索、平台切换、设置、音量控制 */}
             <div className="flex items-center justify-center gap-3 mt-2">
+              {/* 播放设备控制按钮 */}
+              <motion.button
+                whileHover={{ scale: 1.1 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={onOpenDeviceControl}
+                className="rounded-full flex items-center justify-center transition-all"
+                style={{
+                  width: '48px',
+                  height: '48px',
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  boxShadow: '0 8px 32px rgba(0, 0, 0, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.2)',
+                }}
+              >
+                <Speaker className="w-5 h-5 text-white" />
+              </motion.button>
+
               {/* 遥控器按钮 */}
               <motion.button
                 whileHover={{ scale: 1.1 }}
@@ -2302,6 +2323,18 @@ function DesktopView({
             onAddToPlaylist={onAddToPlaylist}
             onViewComments={onViewComments}
             onOpenArtist={onOpenArtist}
+            onOpenPlaylist={(playlist) => {
+              // 搜索歌单结果 → 桌面端歌单详情面板（QQ 用 mid 字符串 id，网易云用数字 id）
+              void handlePlaylistSelect({
+                id: playlist.platform === 'qq' ? String(playlist.id) : Number(playlist.id) || playlist.id,
+                mid: playlist.platform === 'qq' ? String(playlist.id) : undefined,
+                name: playlist.name,
+                coverImgUrl: playlist.coverImgUrl,
+                trackCount: playlist.trackCount,
+                creator: playlist.creator,
+                platform: playlist.platform,
+              } as Playlist)
+            }}
             onCopyInfo={onCopyInfo}
           />
         )}

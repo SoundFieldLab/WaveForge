@@ -121,6 +121,21 @@ export default memo(function QuickSettings({
     return saved ? parseFloat(saved) : 30
   })
 
+  // MV 视频背景的独立模糊度（与封面背景两套设置）；当前是否 MV 视频背景由 App 广播
+  const [mvBackgroundBlur, setMvBackgroundBlur] = useState(() => {
+    const saved = localStorage.getItem('mvBackgroundBlur')
+    const parsed = saved ? parseFloat(saved) : Number.NaN
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0
+  })
+  const [mvBackgroundActive, setMvBackgroundActive] = useState(false)
+  useEffect(() => {
+    const onActive = (e: Event) => setMvBackgroundActive((e as CustomEvent<boolean>).detail === true)
+    window.addEventListener('mvBackgroundActiveChanged', onActive as EventListener)
+    // 挂载时主动查询当前 MV 背景状态：本面板懒加载可能晚于 MV 激活，错过一次性广播
+    window.dispatchEvent(new Event('mvBackgroundActiveQuery'))
+    return () => window.removeEventListener('mvBackgroundActiveChanged', onActive as EventListener)
+  }, [])
+
   const [showImmersiveBar, setShowImmersiveBar] = useState(() => {
     const saved = localStorage.getItem('showImmersiveBar')
     return saved !== null ? JSON.parse(saved) : true
@@ -201,13 +216,25 @@ export default memo(function QuickSettings({
     window.dispatchEvent(new CustomEvent('backgroundEffectChanged', { detail: effect }))
   }
 
+  // 模糊滑块当前生效值/写回：MV 视频背景激活时操作 mvBackgroundBlur，封面背景时操作 backgroundBlur
+  const activeBackgroundBlur = mvBackgroundActive ? mvBackgroundBlur : backgroundBlur
+
   const handleBackgroundBlurChange = (value: number) => {
-    setBackgroundBlur(value)
-    window.dispatchEvent(new CustomEvent('backgroundBlurChanged', { detail: value }))
+    if (mvBackgroundActive) {
+      setMvBackgroundBlur(value)
+      window.dispatchEvent(new CustomEvent('mvBackgroundBlurChanged', { detail: value }))
+    } else {
+      setBackgroundBlur(value)
+      window.dispatchEvent(new CustomEvent('backgroundBlurChanged', { detail: value }))
+    }
   }
 
   const handleBackgroundBlurCommit = () => {
-    localStorage.setItem('backgroundBlur', backgroundBlur.toString())
+    if (mvBackgroundActive) {
+      localStorage.setItem('mvBackgroundBlur', mvBackgroundBlur.toString())
+    } else {
+      localStorage.setItem('backgroundBlur', backgroundBlur.toString())
+    }
   }
 
   const handleImmersiveBarToggle = () => {
@@ -581,22 +608,22 @@ export default memo(function QuickSettings({
                               模糊程度
                             </span>
                             <span className={`text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'}`}>
-                              {backgroundBlur}px
+                              {activeBackgroundBlur}px
                             </span>
                           </div>
                           <input
                             type="range"
                             min="0"
                             max="100"
-                            value={backgroundBlur}
+                            value={activeBackgroundBlur}
                             onChange={(e) => handleBackgroundBlurChange(parseFloat(e.target.value))}
                             onMouseUp={handleBackgroundBlurCommit}
                             onTouchEnd={handleBackgroundBlurCommit}
                             className="white-thumb w-full h-1 rounded-full appearance-none cursor-pointer"
                             style={{
-                              background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${backgroundBlur}%, ${
+                              background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${activeBackgroundBlur}%, ${
                                 playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'
-                              } ${backgroundBlur}%, ${
+                              } ${activeBackgroundBlur}%, ${
                                 playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'
                               } 100%)`,
                             }}
@@ -639,22 +666,22 @@ export default memo(function QuickSettings({
                                 模糊程度
                               </span>
                               <span className={`text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'}`}>
-                                {backgroundBlur}px
+                                {activeBackgroundBlur}px
                               </span>
                             </div>
                             <input
                               type="range"
                               min="0"
                               max="100"
-                              value={backgroundBlur}
+                              value={activeBackgroundBlur}
                               onChange={(e) => handleBackgroundBlurChange(parseFloat(e.target.value))}
                               onMouseUp={handleBackgroundBlurCommit}
                               onTouchEnd={handleBackgroundBlurCommit}
                               className="white-thumb w-full h-1 rounded-full appearance-none cursor-pointer"
                               style={{
-                                background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${backgroundBlur}%, ${
+                                background: `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${activeBackgroundBlur}%, ${
                                   playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'
-                                } ${backgroundBlur}%, ${
+                                } ${activeBackgroundBlur}%, ${
                                   playerTheme === 'dark' ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)'
                                 } 100%)`,
                               }}
@@ -666,45 +693,43 @@ export default memo(function QuickSettings({
                   </>
                 ) : (
                   <>
-                    {lyricDisplayMode === 'modern' && (
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <span className={`text-sm ${playerTheme === 'dark' ? 'text-white/80' : 'text-black/80'}`}>
-                            音频可视化
-                          </span>
-                          <p className={`mt-0.5 text-[11px] ${playerTheme === 'dark' ? 'text-white/45' : 'text-black/45'}`}>
-                            在左下角显示实时频谱条
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          aria-label="切换现代模式音频可视化"
-                          aria-pressed={modernAudioVisualizerEnabled}
-                          onClick={handleModernAudioVisualizerToggle}
-                          className="relative h-7 w-12 rounded-full transition-all duration-300"
-                          style={{
-                            backgroundColor: modernAudioVisualizerEnabled
-                              ? accentColor
-                              : playerTheme === 'dark'
-                              ? 'rgba(255,255,255,0.15)'
-                              : 'rgba(0,0,0,0.15)',
-                            boxShadow: modernAudioVisualizerEnabled
-                              ? `0 0 12px ${accentColor}40, inset 0 1px 1px rgba(255,255,255,0.2)`
-                              : 'inset 0 1px 2px rgba(0,0,0,0.1)',
-                          }}
-                        >
-                          <motion.div
-                            animate={{
-                              x: modernAudioVisualizerEnabled ? 22 : 2,
-                              scale: modernAudioVisualizerEnabled ? 1 : 0.9,
-                            }}
-                            transition={{ type: 'spring', stiffness: 500, damping: 30 }}
-                            className="absolute top-1 h-5 w-5 rounded-full bg-white"
-                            style={{ boxShadow: '0 2px 4px rgba(0,0,0,0.2), 0 0 2px rgba(0,0,0,0.1)' }}
-                          />
-                        </button>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <span className={`text-sm ${playerTheme === 'dark' ? 'text-white/80' : 'text-black/80'}`}>
+                          音频可视化
+                        </span>
+                        <p className={`mt-0.5 text-[11px] ${playerTheme === 'dark' ? 'text-white/45' : 'text-black/45'}`}>
+                          在左下角显示实时频谱条
+                        </p>
                       </div>
-                    )}
+                      <button
+                        type="button"
+                        aria-label="切换现代模式音频可视化"
+                        aria-pressed={modernAudioVisualizerEnabled}
+                        onClick={handleModernAudioVisualizerToggle}
+                        className="relative h-7 w-12 rounded-full transition-all duration-300"
+                        style={{
+                          backgroundColor: modernAudioVisualizerEnabled
+                            ? accentColor
+                            : playerTheme === 'dark'
+                            ? 'rgba(255,255,255,0.15)'
+                            : 'rgba(0,0,0,0.15)',
+                          boxShadow: modernAudioVisualizerEnabled
+                            ? `0 0 12px ${accentColor}40, inset 0 1px 1px rgba(255,255,255,0.2)`
+                            : 'inset 0 1px 2px rgba(0,0,0,0.1)',
+                        }}
+                      >
+                        <motion.div
+                          animate={{
+                            x: modernAudioVisualizerEnabled ? 22 : 2,
+                            scale: modernAudioVisualizerEnabled ? 1 : 0.9,
+                          }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                          className="absolute top-1 h-5 w-5 rounded-full bg-white"
+                          style={{ boxShadow: '0 2px 4px rgba(0,0,0,0.2), 0 0 2px rgba(0,0,0,0.1)' }}
+                        />
+                      </button>
+                    </div>
 
                     {lyricDisplayMode === 'immersive' && (
                       <div className="flex items-center justify-between">

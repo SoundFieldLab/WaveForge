@@ -178,17 +178,28 @@ export interface ElectronAPI {
   appleFetchAccount: (cookies: string) => Promise<{ ok: boolean; status: number; html?: string; error?: string }>
   /** 酷狗音乐登录（Electron 弹窗扫码，抓 kg_token） */
   openKugouLoginWindow: () => Promise<{ success: boolean; cookie?: string; error?: string }>
-  /** Spotify OAuth 授权（Electron 弹窗） */
-  openSpotifyLogin: () => Promise<{ success: boolean; username?: string; error?: string }>
+  /** 退出登录时清除共享 session 的 kugou.com Cookie（防止登录弹窗带出旧账号） */
+  clearKugouSession: () => Promise<{ success: boolean }>
+  /** Spotify OAuth 授权（Electron 弹窗；clientId 可选，自定义 Client ID） */
+  openSpotifyLogin: (clientId?: string) => Promise<{ success: boolean; username?: string; error?: string }>
   /** Spotify 授权完成回调 */
   onSpotifyAuthResult: (callback: (result: { success: boolean; accessToken?: string; refreshToken?: string; username?: string; avatar?: string; userId?: string; error?: string }) => void) => () => void
   /** 汽水音乐登录（Electron 弹窗扫码，抓 token） */
   openSodaLogin: () => Promise<{ success: boolean; token?: string; username?: string; error?: string }>
+  /** 汽水音乐（抖音）数据桥：隐藏窗口抓取抖音音乐卡片 */
+  sodaScrapeSearch: (keyword: string) => Promise<{ success: boolean; items?: Array<{ id: string; name: string; author?: string; cover?: string; text?: string }>; error?: string }>
+  /** 酷狗数据桥：隐藏窗口页面内同源 fetch 用户歌单/用户信息（绕开服务端 WAF） */
+  kugouScrape: {
+    userPlaylists: () => Promise<{ success: boolean; playlists?: Array<{ specialid: string; name: string; img?: string; songcount?: number; playcount?: number }>; error?: string }>
+    userInfo: () => Promise<{ success: boolean; info?: { nickname: string; user_id: string; avatar: string } | null; error?: string }>
+  }
   /** 渲染进程日志转发到主进程控制台（后台窗口可见） */
   log: (message: string) => void
   wallpaper: {
     getCurrentWallpaper: () => Promise<WallpaperResult>
     onWallpaperChange: (callback: (wallpaper: WallpaperPayload | string) => void) => () => void
+    /** 按需启停壁纸监控：仅桌面模式 + 壁纸联动开启时启用（避免非桌面模式持续查询拖慢性能） */
+    setWallpaperWatcherEnabled: (enabled: boolean) => Promise<{ success: boolean }>
   }
   developerMode: {
     set: (enabled: boolean) => Promise<{ success: boolean }>
@@ -221,9 +232,44 @@ export interface ElectronAPI {
     readAudioFile: (filePath: string) => Promise<ArrayBuffer>
     clearCache: () => Promise<{ success: boolean }>
     getCacheStats: () => Promise<{ count: number; size: number }>
+    /** AI 混音（DJTransGAN）：返回模型窗口的 transitionStart / targetResumeTime（长混音语义） */
+    transitionAiMix?: (plan: TransitionPlan, sourceAudioPath: string, targetAudioPath: string) => Promise<{
+      success: boolean
+      outputPath?: string
+      duration?: number
+      transitionStart?: number
+      targetResumeTime?: number
+      aiMixApplied?: boolean
+      rendererVersion?: string
+      /** 混音尾段 target 内容相对原曲的播放速度比（>1 快 / <1 慢），overlap handoff 用 */
+      mixSpeedRatio?: number
+      error?: string
+    }>
+    /** AI 混音引擎可用性探测 */
+    aiMixStatus?: () => Promise<{
+      available: boolean
+      hasTorch?: boolean
+      weightReady?: boolean
+      repoReady?: boolean
+      repoDir?: string | null
+      python?: string | null
+      reason?: string
+    }>
+    /** AI 学到的推子/EQ 自动化参数（v2 短过渡用；引擎不可用返回 success=false） */
+    aiMixAutomation?: (plan: TransitionPlan, sourceAudioPath: string, targetAudioPath: string) => Promise<{
+      success: boolean
+      params?: Array<{ band: number[][][]; fader: number[][][][] }>
+      error?: string
+    }>
   }
+  /** AutoMix 渲染进程诊断日志：写入后端 automix-backend.log（便于前后端合并定位） */
+  automixLog?: (scope: string, message: string) => Promise<boolean>
   audioDownload: {
     prepare: (urlOrPath: string, trackKey: string) => Promise<string>
+    /** 把已下载的音频文件映射为渲染进程可 fetch 的 waveforge-media:// URL（浏览器分析 m4a/aac 用） */
+    getMediaUrl?: (filePath: string) => Promise<string>
+    /** 保存渲染进程转码的 WAV（Chromium 解码 m4a/aac → 16bit PCM），返回路径；同 key 复用 */
+    saveWav?: (trackKey: string, wavArrayBuffer: ArrayBuffer) => Promise<string>
     cleanupOldFiles: () => Promise<{ success: boolean }>
     getStats: () => Promise<{ fileCount: number; totalSize: number; maxSize: number; cachePath: string }>
     clearCache: () => Promise<{ success: boolean }>
@@ -273,6 +319,73 @@ export interface ElectronAPI {
     onCursor: (callback: (command: RemoteCursorCommand) => void) => () => void
     onClientsChange: (callback: (status: RemoteStatus) => void) => () => void
   }
+  airplay: {
+    setEnabled: (enabled: boolean) => Promise<AirplayStatus>
+    listDevices: () => Promise<AirplayDeviceInfo[]>
+    getStatus: () => Promise<AirplayStatus>
+    connect: (deviceId: string, mode?: 'auto' | 'raop' | 'airplay2') => Promise<{ success: boolean; mode?: string; port?: number; error?: string }>
+    disconnect: () => Promise<{ success: boolean }>
+    setVolume: (volume: number) => Promise<{ success: boolean }>
+    /** 记录连接前/断开后应恢复的设备音量（0-100） */
+    setRestoreVolume: (volume: number) => Promise<{ success: boolean }>
+    setMetadata: (metadata: AirplayMetadata) => Promise<{ success: boolean }>
+    setProgress: (elapsed: number, duration: number) => Promise<{ success: boolean }>
+    /** 连接提示音在 AirPlay 设备上播放（主进程合成并推入发送管道） */
+    playConnectSound: () => Promise<{ success: boolean }>
+    sendPcm: (chunk: ArrayBuffer | Uint8Array) => void
+    setStreaming: (streaming: boolean) => void
+    onStatus: (callback: (status: AirplayStatus) => void) => () => void
+  }
+  audioOutput: {
+    isSupported: () => Promise<boolean>
+  }
+  taskbarWidget: {
+    setEnabled: (enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; reason?: string }>
+    getSettings: () => Promise<TaskbarWidgetSettings>
+    updateSettings: (partial: Partial<TaskbarWidgetSettings>) => Promise<TaskbarWidgetSettings>
+  }
+}
+
+export interface TaskbarWidgetSettings {
+  enabled: boolean
+  position: 'right' | 'center'
+  width: number
+  /** 常规（封面+歌词+进度）/ 纯享（只显示当前歌词） */
+  mode: 'normal' | 'pure'
+}
+
+export interface AirplayDeviceInfo {
+  id: string
+  host: string
+  addresses: string[]
+  name: string
+  hasRaop: boolean
+  hasAirplay2: boolean
+  raopPort: number | null
+  airplayPort: number | null
+  txt: Record<string, string>
+}
+
+export type AirplayPhase = 'idle' | 'browsing' | 'connecting' | 'connected' | 'streaming' | 'error'
+
+export interface AirplayStatus {
+  phase: AirplayPhase
+  message: string
+  devices: AirplayDeviceInfo[]
+  connectedDeviceId: string | null
+  connectedMode: string | null
+  streaming: boolean
+  volume: number
+}
+
+export interface AirplayMetadata {
+  trackKey?: string
+  title?: string
+  artist?: string
+  album?: string
+  coverUrl?: string
+  durationMs?: number
+  elapsedMs?: number
 }
 
 export interface DesktopPlayerSongInfo {

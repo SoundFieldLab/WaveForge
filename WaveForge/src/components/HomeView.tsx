@@ -1,9 +1,9 @@
 import { memo, useState, useEffect, useRef } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
-import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History } from 'lucide-react'
+import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
 import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, getSongUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
@@ -75,6 +75,8 @@ interface HomeViewProps {
   onProfileClick: (platform: MusicPlatform, initialTab?: 'created' | 'subscribed' | 'detail' | 'recent') => void
   onSearchClick: () => void
   onRemoteClick: () => void
+  /** 播放设备控制（音频输出设备 / AirPlay 投送）弹窗 */
+  onOpenDeviceControl: () => void
   onSettingsClick: () => void
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
@@ -249,6 +251,7 @@ function HomeView({
   onProfileClick,
   onSearchClick,
   onRemoteClick,
+  onOpenDeviceControl,
   onSettingsClick,
   onOpenArtist,
   onOpenAlbum,
@@ -264,11 +267,16 @@ function HomeView({
   authRevision = 0
 }: HomeViewProps) {
   const [leftChartType, setLeftChartType] = useState<ChartType>('new')
-  // 从 localStorage 恢复上次选择的平台
+  // 从 localStorage 恢复上次选择的平台（所有平台都参与恢复，避免播放页点 Home 键回退到第一个平台）
   const [platform, setPlatform] = useState<MusicPlatform>(() => {
     const saved = localStorage.getItem('selectedPlatform')
-    return (saved === 'qq' || saved === 'netease' || saved === 'apple') ? saved : 'netease'
+    const valid = saved === 'qq' || saved === 'netease' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda'
+    return valid ? saved : 'netease'
   })
+  // 平台变化（药丸点击/拖动/被隐藏回退）即持久化：播放页 HomeView 卸载重挂后仍回到当前平台
+  useEffect(() => {
+    try { localStorage.setItem('selectedPlatform', platform) } catch { /* 忽略 */ }
+  }, [platform])
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -288,6 +296,59 @@ function HomeView({
       localStorage.setItem('selectedPlatform', next)
     }
   }, [visiblePlatforms, platform])
+
+  // 平台药丸：指针驱动（参考 PlaylistCarousel3D），当前平台始终居中；拖动实时跟随、松手平滑归中
+  const PLATFORM_SLOT = 80
+  const platformIdx = Math.max(0, visiblePlatforms.indexOf(platform))
+  const platformStripX = useMotionValue((1 - platformIdx) * PLATFORM_SLOT)
+  const platformDragRef = useRef<{ startX: number; startIdx: number; dragging: boolean; moved: boolean; pressedKey: MusicPlatform | null }>({ startX: 0, startIdx: platformIdx, dragging: false, moved: false, pressedKey: null })
+  const platformStripRef = useRef<HTMLDivElement>(null)
+  const platformIdxRef = useRef(platformIdx)
+  platformIdxRef.current = platformIdx
+  const platformDraggingRef = useRef(false)
+
+  // 外部切换（点击药丸/设置里改平台）→ 平滑滚动到当前平台居中
+  useEffect(() => {
+    if (platformDraggingRef.current) return
+    animate(platformStripX, (1 - platformIdx) * PLATFORM_SLOT, { duration: 0.36, ease: [0.22, 1, 0.36, 1] })
+  }, [platform, visiblePlatforms, platformStripX, platformIdx])
+
+  const platformPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const pill = (e.target as HTMLElement).closest('button')
+    const pressedKey = pill?.getAttribute('data-platform') as MusicPlatform | null
+    e.currentTarget.setPointerCapture(e.pointerId)
+    platformStripX.stop()
+    platformDragRef.current = { startX: e.clientX, startIdx: platformIdxRef.current, dragging: true, moved: false, pressedKey }
+    platformDraggingRef.current = true
+  }
+  const platformPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = platformDragRef.current
+    if (!st.dragging) return
+    const rawDelta = e.clientX - st.startX
+    if (Math.abs(rawDelta) > 8) st.moved = true
+    // 连续浮点索引：起点索引固定为按下时的索引，floatIndex 完全由 rawDelta 决定，
+    // 拖动实时跟随、取整即切换平台。切勿改写 st.startIdx——跨槽后 rawDelta 仍相对
+    // 最初按下点，改写起点会导致索引每次跨槽额外偏移 +1（拖 1px 跳一槽，从第一个飞到最后一个）。
+    const floatIndex = Math.max(0, Math.min(visiblePlatforms.length - 1, st.startIdx - rawDelta / PLATFORM_SLOT))
+    const nextIdx = Math.round(floatIndex)
+    if (nextIdx !== st.startIdx && visiblePlatforms[nextIdx]) setPlatform(visiblePlatforms[nextIdx])
+    platformStripX.set((1 - floatIndex) * PLATFORM_SLOT)
+  }
+  const platformPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = platformDragRef.current
+    if (!st.dragging) return
+    const wasDrag = st.moved
+    const pressedKey = st.pressedKey
+    st.dragging = false
+    platformDraggingRef.current = false
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
+    platformStripX.stop()
+    animate(platformStripX, (1 - platformIdxRef.current) * PLATFORM_SLOT, { duration: 0.36, ease: [0.22, 1, 0.36, 1] })
+    // 未拖动：解析按下的药丸直接切换（pointer capture 会拦截原生 click）
+    if (!wasDrag && pressedKey && pressedKey !== platform) setPlatform(pressedKey)
+  }
+
   const [hideHomeAccountId, setHideHomeAccountId] = useState(() => localStorage.getItem('hideHomeAccountId') === 'true')
   const [recentPlaybackSummary, setRecentPlaybackSummary] = useState<{ covers: string[]; count: number }>({ covers: [], count: 0 })
   const [chartSongs, setChartSongs] = useState<Song[]>([])
@@ -1867,7 +1928,7 @@ function HomeView({
   const isLoggedIn = platform === 'netease' ? neteaseLoggedIn : platform === 'qq' ? qqLoggedIn : platform === 'apple' ? (appleLoggedIn || false) : platform === 'spotify' ? (spotifyLoggedIn || false) : platform === 'kugou' ? (kugouLoggedIn || false) : (sodaLoggedIn || false)
   const username = platform === 'netease' ? neteaseUsername : platform === 'qq' ? qqUsername : platform === 'apple' ? (appleUsername || '') : platform === 'spotify' ? (spotifyUsername || '') : platform === 'kugou' ? (kugouUsername || '') : (sodaUsername || '')
   const avatar = platform === 'netease' ? neteaseAvatar : platform === 'qq' ? qqAvatar : platform === 'apple' ? appleAvatar : platform === 'spotify' ? spotifyAvatar : platform === 'kugou' ? kugouAvatar : sodaAvatar
-  const userId = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : ''
+  const userId = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : platform === 'kugou' ? (kugouUserId || '') : platform === 'spotify' ? (spotifyUserId || '') : platform === 'soda' ? (sodaUserId || '') : ''
   const isVip = platform === 'netease' ? neteaseVip : platform === 'qq' ? qqVip : false
 
   // 平台登录入口：netease/qq 走原有点击回调，新平台走通用 onLoginClick（打开对应登录面板）
@@ -2208,9 +2269,12 @@ function HomeView({
               setThemePanelSettled(false)
               setShowThemePanel(false)
               setShowUpArrowHint(false)
-              // 立即切换（面板收起动画由 AnimatePresence 处理，无需延迟等待）
-              localStorage.setItem('viewMode', mode)
-              window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))
+              // 立即显示过渡动画；面板收起/内容复位后再切换，避免来源内容以展开态残留成顶部占位
+              window.dispatchEvent(new CustomEvent('viewModeTransitionStart', { detail: mode }))
+              window.setTimeout(() => {
+                localStorage.setItem('viewMode', mode)
+                window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))
+              }, MODE_SELECTION_CLOSE_MS)
             }}
           />
         )}
@@ -2743,20 +2807,16 @@ function HomeView({
                   border: `1px solid ${playerTheme === 'dark' ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.8)'}`,
                 }}
               />
-              {/* 可拖拽内容条：当前项 x = -(索引-1)*80 → 当前项落在视口中心（被液态玻璃覆盖） */}
+              {/* 可拖拽内容条（指针驱动，参考桌面模式 PlaylistCarousel3D）：当前位置 = (1-floatIndex)*80，
+                  拖动实时跟随指针、焦点随取整切换，松手平滑归中；当前平台始终居中（被液态玻璃覆盖） */}
               <motion.div
-                className="relative flex"
-                drag="x"
-                dragConstraints={{ left: -(visiblePlatforms.length - 1) * 80, right: 0 }}
-                dragElastic={0.1}
-                onDragEnd={(_, info) => {
-                  const idx = visiblePlatforms.indexOf(platform)
-                  const delta = Math.round(info.offset.x / 80)
-                  const nextIdx = Math.max(0, Math.min(visiblePlatforms.length - 1, idx - delta))
-                  if (nextIdx !== idx) setPlatform(visiblePlatforms[nextIdx])
-                }}
-                animate={{ x: -(visiblePlatforms.indexOf(platform) - 1) * 80 }}
-                transition={{ type: 'spring', stiffness: 340, damping: 36 }}
+                ref={platformStripRef}
+                className="relative flex touch-none select-none"
+                style={{ x: platformStripX, cursor: 'grab' }}
+                onPointerDown={platformPointerDown}
+                onPointerMove={platformPointerMove}
+                onPointerUp={platformPointerUp}
+                onPointerCancel={platformPointerUp}
               >
                 {visiblePlatforms.map(key => {
                   const dotColor = key === 'netease' ? 'bg-red-500' : key === 'qq' ? 'bg-green-500' : key === 'apple' ? 'bg-pink-500' : key === 'spotify' ? 'bg-[#1DB954]' : key === 'kugou' ? 'bg-orange-500' : 'bg-sky-500'
@@ -2765,6 +2825,8 @@ function HomeView({
                   return (
                     <motion.button
                       key={key}
+                      type="button"
+                      data-platform={key}
                       onClick={() => setPlatform(key)}
                       className={`flex-shrink-0 w-[80px] py-2 text-sm font-semibold relative z-10 flex items-center justify-center gap-1.5 transition-colors ${
                         active
@@ -2861,7 +2923,12 @@ function HomeView({
                 {/* 账号ID */}
                 {((userId && !hideHomeAccountId) || (platform === 'apple' && appleEmail && !hideHomeAccountId)) && (
                   <p className={`text-sm mb-6 ${playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'}`}>
-                    {platform === 'netease' ? '网易云ID' : platform === 'qq' ? 'QQ号' : 'AppleID'}: {platform === 'apple' ? appleEmail : userId}
+                    {platform === 'netease' ? '网易云ID'
+                      : platform === 'qq' ? 'QQ号'
+                      : platform === 'apple' ? 'AppleID'
+                      : platform === 'kugou' ? '酷狗ID'
+                      : platform === 'spotify' ? 'Spotify ID'
+                      : '抖音ID'}: {platform === 'apple' ? appleEmail : userId}
                   </p>
                 )}
 
@@ -2930,14 +2997,19 @@ function HomeView({
         songs={playlistSongs}
         loading={loadingPlaylistSongs}
         onClose={closePlaylistDetail}
-        onSongSelect={(song, songs) => onSongSelect(song, songs, {
-          surface: 'home-playlist',
-          playlist: selectedPlaylist,
-          songs,
-        })}
+        onSongSelect={(song, songs) => {
+          // 选歌后关闭歌单详情覆盖层，否则播放页出现后歌单界面还叠在上面
+          closePlaylistDetail()
+          onSongSelect(song, songs, {
+            surface: 'home-playlist',
+            playlist: selectedPlaylist,
+            songs,
+          })
+        }}
         neteaseVip={neteaseVip}
         qqVip={qqVip}
         currentPlatform={platform}
+        currentUserId={selectedPlaylist?.platform === 'qq' ? qqUserId : neteaseUserId}
         onOpenArtist={onOpenArtist}
         onOpenAlbum={onOpenAlbum}
         onPlayNext={onPlayNext}
@@ -3010,6 +3082,17 @@ function HomeView({
                 }}
               />
               <div className="relative z-10 flex items-center justify-center gap-6">
+                {/* 播放设备控制按钮 */}
+                <motion.button
+                  whileHover={{ scale: 1.1 }}
+                  whileTap={{ scale: 0.95 }}
+                  className="p-3 rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-600 hover:from-violet-600 hover:to-fuchsia-700 text-white transition-all shadow-lg"
+                  onClick={onOpenDeviceControl}
+                  title="播放设备控制"
+                >
+                  <Speaker className="w-5 h-5" />
+                </motion.button>
+
                 {/* 遥控器按钮 */}
                 <motion.button
                   whileHover={{ scale: 1.1 }}
