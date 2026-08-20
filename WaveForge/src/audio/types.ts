@@ -2,10 +2,85 @@
 
 export type TransitionStrategy =
   | 'smart-rendered'
+  | 'smart-rendered-v2'
   | 'beat-crossfade'
   | 'fixed-crossfade'
   | 'gapless'
   | 'none'
+
+/** AutoMix 增强版（v2）特效强度档位 */
+export type TransitionIntensity = 'subtle' | 'standard' | 'strong'
+
+/** 调性检测结果（Krumhansl-Schmuckler，Camelot 记法） */
+export interface KeyDetection {
+  /** 主音（0-11，C=0） */
+  tonic: number
+  mode: 'major' | 'minor'
+  /** 0-1 检测置信度 */
+  confidence: number
+  /** Camelot 编号（1-12） */
+  camelot: number
+}
+
+/** AutoMix 增强版（v2）过渡特效编排计划 */
+export interface V2Choreography {
+  /** 过渡风格标签（UI 展示用） */
+  style: 'energetic' | 'atmospheric' | 'clean'
+  intensity: TransitionIntensity
+  /** 特效开关 */
+  riser: boolean
+  noiseSweep: boolean
+  drumFill: boolean
+  tempoRampUp: boolean
+  reverbDip: boolean
+  echoOut: boolean
+  bassSwap: boolean
+  filterSweep: boolean
+  /** 鼓点填充占用的拍数（落在过渡尾部，导向目标 downbeat） */
+  drumFillBeats: number
+  /** 0-1 调性兼容度（同调=1，相邻/关系调次之） */
+  keyCompat: number
+  /** 目标开头相对源结尾的能量差（绝对值，0-1） */
+  energyDelta: number
+  /** riser 起始拍（相对过渡窗口；按 source 乐句锚定，缺省=beatCount-3） */
+  riserStartBeat?: number
+  /** 混响虚化起始拍（相对过渡窗口；缺省=beatCount*0.55） */
+  reverbStartBeat?: number
+  /** riser 终止频率 Hz（调性驱动；缺省 2400） */
+  riserEndFreq?: number
+}
+
+/** 过渡调试信息（调试弹窗展示用，从过渡计划摘要而来） */
+export interface TransitionDebugInfo {
+  /** 引擎：v1 / v2 / 兜底计划 */
+  engine: 'v1' | 'v2' | 'fallback'
+  strategy: TransitionStrategy
+  fallbackReason?: string
+  sourceTrackKey: string
+  targetTrackKey: string
+  beatCount: number
+  sourceBpm: number
+  targetBpm: number
+  confidence: number
+  rendererVersion: string
+  sourceStartTime: number
+  sourceEndTime: number
+  targetStartTime: number
+  targetEndTime: number
+  /** v2 风格标签 */
+  style?: V2Choreography['style']
+  /** 强度档位 */
+  intensity?: TransitionIntensity
+  /** 实际编排的 DJ 效果清单（中文名，展示用） */
+  effects?: string[]
+  /** 调性兼容度 0-1 */
+  keyCompat?: number
+  /** 响度补偿 dB */
+  gainOffsetDb?: number
+  /** 分析来源（调试用：librosa / beat_this / browser / metadata） */
+  sourceProvider?: string
+  targetProvider?: string
+}
 
 export type TransitionState =
   | 'idle'
@@ -101,12 +176,36 @@ export interface TransitionPlan {
   sourceBeatTimes?: number[]  // Beat positions in seconds for progressive stretching
   targetBeatTimes?: number[]  // Beat positions in seconds for progressive stretching
   djEffects?: DJEffectsPlan
+  /** AutoMix 增强版（v2）专用字段：v1 计划恒为 undefined，不参与 v1 的 plan.id 构造 */
+  v2?: {
+    key?: { source?: KeyDetection; target?: KeyDetection }
+    choreography?: V2Choreography
+    intensity?: TransitionIntensity
+    aiMix?: boolean
+    /** true = BPM 差过大（15~100），不做节拍对齐拉伸，只做特效过渡（riser/混响虚化/扫频等） */
+    withoutBeatGrid?: boolean
+    /** 部分同步（Apple 专利）：BPM 整数倍（140↔70 等）时快曲跳拍对齐慢曲网格的跳拍数（2/3/4） */
+    partialSyncN?: number
+    /** 谐波变调：过渡窗口内目标曲变调到源曲主音的半音数（±1~2，0=不变调） */
+    pitchShiftSemitones?: number
+    /** 目标窗口逐拍 vocalness（渲染期人声 ducking 用） */
+    targetVocalness?: number[]
+    /** DJTransGAN 学到的推子/EQ 自动化参数（v2 短过渡用；[prev_fo, next_fi]） */
+    automation?: Array<{ band: number[][][]; fader: number[][][][] }>
+  }
   gainCurve: { source: number[]; target: number[] }
+  /** 响度补偿（dB）：作用于 target 侧，正数=抬高目标，负数=压低目标（clamp ±3.5dB） */
+  gainOffsetDb?: number
   confidence: number
   strategy: TransitionStrategy
   fallbackReason?: string
   analysisVersion: string
   rendererVersion: string
+  /** AI 长混音专用：缓冲尾段渐出/目标 deck 提前渐入的重叠窗口（秒），掩蔽 handoff 速度台阶 */
+  overlapSeconds?: number
+  /** AI 长混音专用：混音尾段 target 内容相对原曲的播放速度比（<1 慢 / >1 快）。
+   *  handoff 时 deck 以此 playbackRate 起步，overlap 窗口内渐回 1.0（post-settle） */
+  mixSpeedRatio?: number
 }
 
 export interface RenderedTransition {
@@ -155,4 +254,6 @@ export interface PlaybackEngineState {
   transitionStartTime?: number | null // 当前音轨进入计划过渡的时间点（秒）
   transitionFromTrackKey?: string  // 前一曲的 trackKey
   transitionToTrackKey?: string    // 下一曲的 trackKey
+  transitionStyle?: 'energetic' | 'atmospheric' | 'clean' | undefined // v2 过渡风格标签（UI 提示用）
+  transitionDebug?: TransitionDebugInfo // 过渡调试信息（过渡调试弹窗用）
 }

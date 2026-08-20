@@ -13,6 +13,8 @@ export default defineConfig({
       // 音频引擎 v3（src/services/waveforge-engine-v3/，自 test/ 与 ui/ 原位迁入）
       'src/services/waveforge-engine-v3/test/**/*.test.ts',
       'src/services/waveforge-engine-v3/ui/**/*.test.tsx',
+      // 空间音频（v3 模块树内联 src/spatial/）
+      'src/services/waveforge-engine-v3/src/spatial/test/**/*.test.ts',
     ],
     setupFiles: ['test/setup.ts'],
   },

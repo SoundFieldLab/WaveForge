@@ -11,6 +11,7 @@ interface TransitionIndicatorProps {
 
 const strategyLabels: Record<TransitionStrategy, string> = {
   'smart-rendered': '智能 DJ 逐拍混音',
+  'smart-rendered-v2': '智能 DJ 逐拍混音 v2',
   'beat-crossfade': '节拍对齐淡化',
   'fixed-crossfade': '固定淡入淡出',
   gapless: '专辑无缝播放',

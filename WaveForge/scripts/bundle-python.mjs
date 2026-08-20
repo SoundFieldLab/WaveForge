@@ -147,9 +147,15 @@ async function installDependencies(pythonDir) {
     process.exit(1)
   }
   
-  // 使用清华镜像加速
-  console.log('⚙️  使用清华镜像源安装依赖...')
-  const cmd = `"${pythonExe}" -m pip install -r "${requirementsPath}" -i https://pypi.tuna.tsinghua.edu.cn/simple --no-warn-script-location`
+  // 镜像源由调用方控制（pip 原生 PIP_INDEX_URL 环境变量）：
+  //  - GitHub Actions 在 yml 里设 PIP_INDEX_URL=https://pypi.org/simple（官方直连）
+  //  - 本地（国内）用户设 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 加速
+  //  - 未设 → pip 默认官方 PyPI
+  // 脚本不自行决定镜像，只透传环境变量。
+  // --only-binary :all: 防止 numpy/scipy 在无预编译 wheel 时走源码构建
+  // （嵌入式 Python 无 meson/ninja 编译工具链，源码构建必然失败）
+  console.log(`⚙️  安装依赖...${process.env.PIP_INDEX_URL ? `（镜像：${process.env.PIP_INDEX_URL}）` : '（pip 默认官方 PyPI）'}`)
+  const cmd = `"${pythonExe}" -m pip install -r "${requirementsPath}" --only-binary :all: --no-warn-script-location`
   
   const { stdout, stderr } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024 })
   

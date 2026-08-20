@@ -29,3 +29,16 @@ export function debugLog(...args: unknown[]): void {
 export function isVerboseLogEnabled(): boolean {
   return verboseEnabled()
 }
+
+/**
+ * 过渡调试开关（localStorage 'waveforge:transition-debug' === '1'）。
+ * 控制切歌/过渡调试弹窗：显示本次过渡用的引擎、策略、DJ 效果清单等。
+ * 不做模块级缓存，设置面板改动后立即生效（仅过渡事件时读取，开销可忽略）。
+ */
+export function isTransitionDebugEnabled(): boolean {
+  try {
+    return localStorage.getItem('waveforge:transition-debug') === '1'
+  } catch {
+    return false
+  }
+}

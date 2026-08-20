@@ -9,12 +9,24 @@ interface UpNextNotificationProps {
   mode?: 'play' | 'transition'
   onSkip?: () => void // 添加点击跳转回调
   playerTheme?: 'light' | 'dark'
+  /** AutoMix 增强版（v2）：显示「增强过渡」文案与 v2 徽标（缺省时渲染与历史完全一致） */
+  enhanced?: boolean
+  /** v2 过渡风格标签（energetic=高能量 / atmospheric=氛围 / clean=干净） */
+  transitionStyle?: 'energetic' | 'atmospheric' | 'clean' | undefined
 }
 
-export default function UpNextNotification({ show, nextSong, secondsRemaining, mode = 'play', onSkip, playerTheme = 'dark' }: UpNextNotificationProps) {
+const TRANSITION_STYLE_LABEL: Record<string, { text: string; color: string }> = {
+  energetic: { text: '高能量', color: '#F59E0B' },
+  atmospheric: { text: '氛围', color: '#8B5CF6' },
+  clean: { text: '干净', color: '#10B981' },
+}
+
+export default function UpNextNotification({ show, nextSong, secondsRemaining, mode = 'play', onSkip, playerTheme = 'dark', enhanced = false, transitionStyle }: UpNextNotificationProps) {
   if (!nextSong) return null
 
   const isDark = playerTheme === 'dark'
+  const isEnhancedTransition = enhanced && mode === 'transition'
+  const styleTag = isEnhancedTransition && transitionStyle ? TRANSITION_STYLE_LABEL[transitionStyle] : undefined
 
   return (
     <AnimatePresence>
@@ -91,8 +103,20 @@ export default function UpNextNotification({ show, nextSong, secondsRemaining, m
 
               {/* 信息 */}
               <div className="flex-1 min-w-0">
-                <div className={`text-xs mb-1 font-medium ${isDark ? 'text-white/70' : 'text-black/55'}`}>
-                  {mode === 'transition' ? '即将进入过渡' : '即将播放'} · {Math.max(0, Math.ceil(secondsRemaining))}秒后
+                <div className="flex items-center gap-1.5 mb-1">
+                  <div className={`text-xs font-medium ${isDark ? 'text-white/70' : 'text-black/55'}`}>
+                    {isEnhancedTransition ? '增强过渡' : mode === 'transition' ? '即将进入过渡' : '即将播放'} · {Math.max(0, Math.ceil(secondsRemaining))}秒后
+                  </div>
+                  {isEnhancedTransition && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold" style={{ backgroundColor: '#3B82F6' + '30', color: '#60A5FA' }}>
+                      v2
+                    </span>
+                  )}
+                  {styleTag && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full font-medium" style={{ backgroundColor: styleTag.color + '2A', color: styleTag.color }}>
+                      {styleTag.text}
+                    </span>
+                  )}
                 </div>
                 <div className={`font-semibold truncate text-base ${isDark ? 'text-white drop-shadow-md' : 'text-black/90'}`}>
                   {nextSong.name}

@@ -3,6 +3,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { spawn, spawnSync } = require('child_process')
 const { AudioDownloadService } = require('./audio-download.cjs')
+const automixLog = require('./automix-log.cjs')
 
 const ANALYSIS_SCHEMA_VERSION = 2
 const ANALYSIS_RUNTIME_VERSION = 'waveforge-analysis-ipc-v3'
@@ -508,6 +509,7 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       || Math.abs(Number(cached.duration) - requestedDuration) < 2
     const signatureMatches = !input.sourceSignature || cached?.sourceSignature === input.sourceSignature
     if (cached && cached.schemaVersion === ANALYSIS_SCHEMA_VERSION && durationMatches && signatureMatches) {
+      automixLog.log('analysis:cache-hit', `trackKey=${trackKey} beats=${Array.isArray(cached.beats) ? cached.beats.length : 0} confidence=${cached.confidence}`)
       if (target && !target.isDestroyed()) {
         target.webContents.send('analysis:progress', {
           jobId,
@@ -568,8 +570,19 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
         duration: input.duration
       })
       if (!result || result.error || !Array.isArray(result.beats)) {
+        automixLog.log('analysis:fail', `trackKey=${trackKey} error=${result?.error || 'invalid result'}`)
         throw new Error(result?.error || 'Analysis worker returned an invalid result')
       }
+      automixLog.log('analysis:ok', [
+        `trackKey=${trackKey}`,
+        `provider=${result.provider}`,
+        `beats=${Array.isArray(result.beats) ? result.beats.length : 0}`,
+        `downbeats=${Array.isArray(result.downbeats) ? result.downbeats.length : 0}`,
+        `bpm=${result.estimatedBpm}`,
+        `confidence=${typeof result.confidence === 'number' ? Number(result.confidence).toFixed(3) : '?'}`,
+        `beatFeatures=${Array.isArray(result.beatFeatures) ? result.beatFeatures.length : 0}`,
+        `analysisVersion=${result.analysisVersion}`,
+      ].join(' '))
 
       const analysis = versioned({
         ...result,
