@@ -1,7 +1,7 @@
 /**
  * 版本代号（A 方案：水声主题，贴合"澜音=波澜的声音"）。
  * 内部版本号仍是 0.x.y（更新系统/versionCode 依赖），这里只美化对外展示：
- *   `0.1.3「涟漪 さざなみ」`
+ *   `0.1.4「涟漪 さざなみ」`
  * patch 版本沿用所属 minor 的代号（0.1.x → 涟漪）。
  *
  * 完整规划（0.1 → 1.0，水声由轻到重）：
@@ -38,7 +38,7 @@ export function getVersionCodename(version: string): VersionCodename | null {
   return CODENAMES[minor] || null
 }
 
-/** 对外展示：0.1.3「涟漪 さざなみ」 */
+/** 对外展示：0.1.4「涟漪 さざなみ」 */
 export function getVersionDisplay(version: string): string {
   const v = String(version).replace(/^v/i, '')
   const c = getVersionCodename(version)
