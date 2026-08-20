@@ -41,6 +41,11 @@ function isSupportedAnalysis(analysis: TrackAnalysis): boolean {
   return analysis.analysisVersion === ANALYSIS_VERSION || analysis.analysisVersion === PYTHON_ANALYSIS_VERSION
 }
 
+/** 分析结果是否带可用节拍网格（空网格 = 解码失败/元数据兜底，不能用于智能混音规划） */
+function hasUsableBeats(analysis: TrackAnalysis | null | undefined): boolean {
+  return Boolean(analysis && Array.isArray(analysis.beats) && analysis.beats.length >= 8 && Array.isArray(analysis.downbeats) && analysis.downbeats.length >= 2)
+}
+
 function abortReason(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason
   return new DOMException('Analysis was cancelled', 'AbortError')
@@ -482,6 +487,28 @@ class AutoMixAnalysisService {
     }
   }
 
+  /**
+   * 浏览器端整曲分析（Chromium decodeAudioData 原生支持 m4a/aac——Python/librosa
+   * 侧 libsndfile 打不开这些格式，是桌面端分析失败的主要原因）。
+   * 优先解码已下载的本地文件（waveforge-media://），失败再回退直接抓取原始 URL。
+   * 桌面端仅当 Python/Electron 分析产出空节拍网格时才走此路径；结果会正常缓存，
+   * 同一首歌只解码一次。
+   */
+  private async analyzeInBrowser(input: TrackAnalysisInput): Promise<TrackAnalysis> {
+    try {
+      const localPath = await window.electron?.audioDownload?.prepare?.(input.url, input.trackKey)
+      const mediaUrl = localPath ? await window.electron?.audioDownload?.getMediaUrl?.(localPath) : undefined
+      if (mediaUrl) {
+        debugLog('🎧 [AutoMix] 浏览器解码本地文件（可支持 m4a/aac）:', localPath)
+        return analyzeBuffer(input, await decodeUrl(mediaUrl, input.signal))
+      }
+    } catch (error) {
+      debugLog('⚠️ [AutoMix] 本地文件解码失败，尝试直接抓取 URL:', error)
+    }
+    debugLog('🎧 [AutoMix] 直接抓取原始 URL 解码')
+    return analyzeBuffer(input, await decodeUrl(input.url, input.signal))
+  }
+
   private async analyzeAndCache(input: TrackAnalysisInput, key: string): Promise<TrackAnalysis> {
     const persisted = await this.getCached(input.trackKey)
     const signatureMatches = !input.sourceSignature || persisted?.sourceSignature === input.sourceSignature
@@ -499,7 +526,7 @@ class AutoMixAnalysisService {
       // 优先尝试独立的 Python API 服务
       debugLog('🔍 [AutoMix] 尝试使用 Python Beat Service...')
       const pythonResult = await this.tryPythonBeatService(input)
-      if (pythonResult) {
+      if (pythonResult && hasUsableBeats(pythonResult)) {
         debugLog('✅ [AutoMix] Python Beat Service 分析成功')
         analysis = pythonResult
       } else {
@@ -513,20 +540,31 @@ class AutoMixAnalysisService {
             duration: input.duration,
             sourceSignature: input.sourceSignature,
           })
-          if (job?.result) {
+          if (job?.result && hasUsableBeats(job.result)) {
             analysis = job.result
           } else {
-            // Electron 已提供独立分析进程时，不在 Renderer 中再次下载并完整
-            // decodeAudioData 整首音频。失败时使用保守元数据计划，避免数百 MB
-            // PCM/ArrayBuffer 在播放和切歌热路径中堆积。
-            debugLog('⚠️ [AutoMix] Electron 分析未返回结果，使用元数据回退')
+            // Electron/Python 分析失败或产出空节拍网格（常见：m4a/aac 等
+            // libsndfile 不支持格式解码失败 → worker 返回 metadata-only）。
+            // 回退浏览器整曲解码分析——Chromium 原生支持 m4a/aac。
+            // 该分析结果会正常缓存，同一首歌只解码一次；正常歌曲不触发此路径。
+            debugLog('⚠️ [AutoMix] Electron 分析结果无效，回退浏览器本地检测')
+            try {
+              analysis = await this.analyzeInBrowser(input)
+            } catch (browserError) {
+              debugLog('⚠️ [AutoMix] 浏览器分析失败，使用元数据回退:', browserError)
+              isTransientFallback = true
+              analysis = metadataOnly(input, 'electron-unavailable')
+            }
+          }
+        } else if (window.electron?.analysis) {
+          debugLog('⚠️ [AutoMix] Electron 分析不可用，回退浏览器本地检测')
+          try {
+            analysis = await this.analyzeInBrowser(input)
+          } catch (browserError) {
+            debugLog('⚠️ [AutoMix] 浏览器分析失败，使用元数据回退:', browserError)
             isTransientFallback = true
             analysis = metadataOnly(input, 'electron-unavailable')
           }
-        } else if (window.electron?.analysis) {
-          debugLog('⚠️ [AutoMix] Electron 分析不可用，跳过 Renderer 整曲解码')
-          isTransientFallback = true
-          analysis = metadataOnly(input, 'electron-unavailable')
         } else if (isTvModeActive()) {
           // TV 弱机：没有独立分析进程，且浏览器整曲 decodeAudioData 在 WebView 里
           // 是数百 MB 级开销（每次 AutoMix 过渡都会触发）。直接元数据回退，
@@ -597,6 +635,18 @@ class AutoMixAnalysisService {
 
   clearMemoryCache() {
     memoryCache.clear()
+  }
+
+  /**
+   * 只读内存缓存中的节拍时间点（秒）：看歌视频漂移校正吸附到最近节拍用。
+   * 不触发任何分析/网络请求——仅当 automix 已分析过这首歌（beat_this/librosa）才有数据。
+   */
+  getCachedBeats(trackKey: string, url: string, duration?: number): number[] | null {
+    const analysis = memoryCache.get(cacheKey({ trackKey, url, duration }))
+    if (analysis && isSupportedAnalysis(analysis) && Array.isArray(analysis.beats) && analysis.beats.length > 0) {
+      return analysis.beats
+    }
+    return null
   }
 
   async clearCache() {
