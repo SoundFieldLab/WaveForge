@@ -4,6 +4,9 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- B 站图片 CDN（i*.hdslb.com）在 Referer=localhost 时返回 403（防盗链），
+         全局不发送 Referer 即可正常加载头像/封面/poster。不影响本地 API（CORS 看 Origin，与 Referer 无关）。 -->
+    <meta name="referrer" content="no-referrer" />
     <title>WaveForge 澜音工坊</title>
   </head>
   <body>

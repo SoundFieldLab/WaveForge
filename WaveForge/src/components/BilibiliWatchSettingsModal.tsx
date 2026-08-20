@@ -9,7 +9,10 @@ import { useTvBack } from '../tv/tvCore'
 import {
   getBilibiliWatchSettings,
   saveBilibiliWatchSettings,
+  getDanmakuSettings,
+  saveDanmakuSettings,
   type BilibiliWatchSettings,
+  type DanmakuSettings,
   type MatchPreference,
   type AutoPlayStrictness,
   type VideoEndBehavior,
@@ -80,6 +83,48 @@ function ToggleRow({ label, desc, checked, onChange, dark }: { label: string; de
   )
 }
 
+function SliderRow({
+  label,
+  value,
+  min,
+  max,
+  step,
+  suffix,
+  onChange,
+  dark,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  suffix?: string
+  onChange: (v: number) => void
+  dark: boolean
+}) {
+  const pct = ((value - min) / (max - min)) * 100
+  return (
+    <div>
+      <span className={`text-xs ${dark ? 'text-white/45' : 'text-black/45'}`}>{label}</span>
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="flex-1 h-1 rounded-full appearance-none cursor-pointer
+            [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
+            [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white"
+          style={{ background: `linear-gradient(to right, ${BILI_PINK} ${pct}%, rgba(255,255,255,0.2) ${pct}%)` }}
+        />
+        <span className={`text-xs w-9 text-right ${dark ? 'text-white/60' : 'text-black/55'}`}>{value}{suffix ?? ''}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dark' }: BilibiliWatchSettingsModalProps) {
   useTvBack(() => {
     onClose()
@@ -87,10 +132,16 @@ export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dar
   })
   const dark = playerTheme === 'dark'
   const [settings, setSettings] = useState<BilibiliWatchSettings>(() => getBilibiliWatchSettings())
+  const [danmakuSettings, setDanmakuSettings] = useState<DanmakuSettings>(() => getDanmakuSettings())
 
   const update = (patch: Partial<BilibiliWatchSettings>) => {
     const next = saveBilibiliWatchSettings(patch)
     setSettings(next)
+  }
+
+  const updateDanmaku = (patch: Partial<DanmakuSettings>) => {
+    const next = saveDanmakuSettings(patch)
+    setDanmakuSettings(next)
   }
 
   return (
@@ -252,6 +303,43 @@ export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dar
                   style={{ background: `linear-gradient(to right, ${BILI_PINK} ${((settings.subtitleSize - 14) / 14) * 100}%, rgba(255,255,255,0.2) ${((settings.subtitleSize - 14) / 14) * 100}%)` }}
                 />
                 <span className={`text-xs w-8 text-right ${dark ? 'text-white/60' : 'text-black/55'}`}>{settings.subtitleSize}px</span>
+              </div>
+            </section>
+
+            {/* 弹幕（参考 B 站网页版弹幕设置） */}
+            <section className="border-t pt-3 space-y-3" style={{ borderColor: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+              <h3 className={`text-xs font-semibold mb-1 ${dark ? 'text-white/55' : 'text-black/50'}`}>弹幕</h3>
+              <ToggleRow
+                dark={dark}
+                label="显示弹幕"
+                desc="在 MV 画面上叠加 B 站弹幕"
+                checked={danmakuSettings.enabled}
+                onChange={(v) => updateDanmaku({ enabled: v })}
+              />
+              <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+                <SliderRow dark={dark} label="不透明度" value={danmakuSettings.opacity} min={0} max={100} step={5} suffix="%" onChange={(v) => updateDanmaku({ opacity: v })} />
+                <SliderRow dark={dark} label="字号" value={danmakuSettings.fontSize} min={12} max={30} step={1} suffix="px" onChange={(v) => updateDanmaku({ fontSize: v })} />
+                <SliderRow dark={dark} label="显示区域" value={danmakuSettings.displayArea} min={10} max={100} step={5} suffix="%" onChange={(v) => updateDanmaku({ displayArea: v })} />
+                <SliderRow dark={dark} label="同屏弹幕数" value={danmakuSettings.maxOnScreen} min={10} max={100} step={5} onChange={(v) => updateDanmaku({ maxOnScreen: v })} />
+                <SliderRow dark={dark} label="弹幕速度" value={Math.round(danmakuSettings.speed * 100)} min={50} max={200} step={10} suffix="%" onChange={(v) => updateDanmaku({ speed: v / 100 })} />
+              </div>
+              <div className="space-y-1">
+                <ToggleRow dark={dark} label="滚动弹幕" desc="从右向左滚动" checked={danmakuSettings.showScroll} onChange={(v) => updateDanmaku({ showScroll: v })} />
+                <ToggleRow dark={dark} label="顶部弹幕" desc="固定在顶部" checked={danmakuSettings.showTop} onChange={(v) => updateDanmaku({ showTop: v })} />
+                <ToggleRow dark={dark} label="底部弹幕" desc="固定在底部" checked={danmakuSettings.showBottom} onChange={(v) => updateDanmaku({ showBottom: v })} />
+              </div>
+              <div>
+                <span className={`text-xs ${dark ? 'text-white/45' : 'text-black/45'}`}>屏蔽关键词（逗号/空格分隔）</span>
+                <input
+                  value={danmakuSettings.shieldKeywords}
+                  onChange={(e) => updateDanmaku({ shieldKeywords: e.target.value })}
+                  placeholder="例如：广告, 求关注"
+                  className={`mt-1 w-full rounded-xl px-3 py-2 text-sm outline-none border ${
+                    dark
+                      ? 'bg-white/[0.07] border-white/15 text-white placeholder-white/30 focus:border-white/40'
+                      : 'bg-black/[0.04] border-black/10 text-black placeholder-black/25 focus:border-black/30'
+                  }`}
+                />
               </div>
             </section>
 

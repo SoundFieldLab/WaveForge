@@ -16,6 +16,7 @@
 
 import crypto from 'node:crypto'
 import { Readable } from 'stream'
+import { inflateRawSync, gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib'
 
 const BILI_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
@@ -44,9 +45,12 @@ let wbiCache = { imgKey: '', subKey: '', fetchedAt: 0 }
 const streamCache = new Map()
 /** 字幕 JSON 缓存：subCacheKey -> { url, createdAt }（10min TTL） */
 const subtitleJsonCache = new Map()
+/** 弹幕缓存：cid -> { items, createdAt }（10min TTL） */
+const danmakuCache = new Map()
 
 const STREAM_CACHE_TTL = 10 * 60 * 1000
 const WBI_CACHE_TTL = 60 * 60 * 1000
+const DANMAKU_CACHE_TTL = 10 * 60 * 1000
 
 // ===== 基础工具 =====
 
@@ -245,6 +249,7 @@ export function registerBilibiliRoutes(app) {
           cid: page.cid || 0,
           title: data.title || '',
           duration: data.duration || 0,
+          play: data.stat?.view || 0,
           pic: data.pic || '',
           desc: data.desc || '',
           copyright: data.copyright || 0,
@@ -402,8 +407,11 @@ export function registerBilibiliRoutes(app) {
       const json = await fetchBiliJson(`${API_BASE}/x/player/wbi/v2`, { params: signed, cookie: req.query.cookie })
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '获取字幕失败' })
       const subtitles = (json.data?.subtitle?.subtitles || []).map((s) => {
-        const subCacheKey = `bili_sub_${bvid}_${cid}_${s.lan || 'xx'}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
-        subtitleJsonCache.set(subCacheKey, { url: s.subtitle_url, createdAt: Date.now() })
+        // 稳定 key（bvid+cid+lan）：服务端重启后 /subtitle 可据 key 反查重建，不再随机串+内存缓存一重启就 410
+        const subCacheKey = `bili_sub_${bvid}_${cid}_${s.lan || 'xx'}`
+        // B 站返回协议相对 URL（//aisubtitle.hdslb.com/...），Node fetch 需补 https: 否则解析失败
+        const subUrl = String(s.subtitle_url || '')
+        subtitleJsonCache.set(subCacheKey, { url: subUrl.startsWith('//') ? `https:${subUrl}` : subUrl, createdAt: Date.now() })
         pruneCache(subtitleJsonCache, STREAM_CACHE_TTL)
         return {
           lan: s.lan || '',
@@ -421,13 +429,481 @@ export function registerBilibiliRoutes(app) {
   // 字幕 JSON 代理（字幕文件在 hdslb 域，需 Referer）
   app.get('/api/bilibili/subtitle', async (req, res) => {
     const key = String(req.query.key || '')
-    const entry = key ? subtitleJsonCache.get(key) : undefined
+    let entry = key ? subtitleJsonCache.get(key) : undefined
+    // 缓存 miss（常见于服务端热重启）→ 从稳定 key 反查 bvid/cid/lan 重建字幕 URL，避免 410 静默失效
+    if (!entry && key) {
+      const match = key.match(/^bili_sub_([A-Za-z0-9]+)_(\d+)_(.+)$/)
+      if (match) {
+        try {
+          await ensureBuvid3()
+          const [, bvid, cid, lan] = match
+          const signed = await wbiSign({ bvid, cid: Number(cid) })
+          const meta = await fetchBiliJson(`${API_BASE}/x/player/wbi/v2`, { params: signed, cookie: req.query.cookie })
+          const s = (meta.data?.subtitle?.subtitles || []).find((x) => String(x.lan || '') === lan)
+          if (s) {
+            const subUrl = String(s.subtitle_url || '')
+            entry = { url: subUrl.startsWith('//') ? `https:${subUrl}` : subUrl, createdAt: Date.now() }
+            subtitleJsonCache.set(key, entry)
+          }
+        } catch {
+          // 重建失败走 410
+        }
+      }
+    }
     if (!entry) return res.status(410).json({ code: -1, error: '字幕缓存已过期，请重新获取' })
     try {
       const json = await fetchBiliJson(entry.url, { referer: BILI_REFERER })
-      res.json(json)
+      // B 站字幕文件格式为 { body: [{from,to,location,content}] }，前端按裸数组消费 → 提取 body
+      if (json && typeof json === 'object' && Array.isArray(json.body)) {
+        res.json(json.body)
+      } else if (Array.isArray(json)) {
+        res.json(json)
+      } else {
+        res.json([])
+      }
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '字幕拉取失败' })
+    }
+  })
+
+  // ===== 弹幕 protobuf（seg.so）解码 =====
+  // B 站已将弹幕迁移到 protobuf 端点 /x/v2/dm/web/seg.so（旧 XML list.so/comment.bilibili.com
+  // 对迁移视频返回空列表元信息 XML）。返回 DanmakuSeg { repeated DanmakuElem elems = 1; int64 next = 3; }
+  // DanmakuElem: 1=id(int64) 2=progress(int32,毫秒) 3=mode 4=fontsize 5=color(uint32)
+  //              6=midHash 7=content 8=ctime 9=weight 10=action 11=pool 12=idStr 13=attr
+  const decodeVarint = (buf, offset) => {
+    let result = 0n
+    let shift = 0n
+    let o = offset
+    while (o < buf.length) {
+      const byte = buf[o++]
+      result |= BigInt(byte & 0x7f) << shift
+      if ((byte & 0x80) === 0) return [result, o]
+      shift += 7n
+    }
+    throw new Error('弹幕 protobuf varint 越界')
+  }
+  const parseDanmakuElem = (buf) => {
+    const elem = {}
+    let o = 0
+    while (o < buf.length) {
+      const [tag, o2] = decodeVarint(buf, o)
+      o = o2
+      const field = Number(tag >> 3n)
+      const wire = Number(tag & 7n)
+      if (wire === 0) {
+        const [v, o3] = decodeVarint(buf, o)
+        o = o3
+        elem[field] = v
+      } else if (wire === 2) {
+        const [len, o3] = decodeVarint(buf, o)
+        o = o3
+        elem[field] = buf.slice(o, o + Number(len))
+        o += Number(len)
+      } else if (wire === 5) {
+        elem[field] = buf.readUInt32LE(o)
+        o += 4
+      } else {
+        o += 8
+      }
+    }
+    return elem
+  }
+  const parseDanmakuSeg = (buf) => {
+    const items = []
+    let next = null
+    let o = 0
+    while (o < buf.length) {
+      const [tag, o2] = decodeVarint(buf, o)
+      o = o2
+      const field = Number(tag >> 3n)
+      const wire = Number(tag & 7n)
+      if (wire === 2) {
+        const [len, o3] = decodeVarint(buf, o)
+        o = o3
+        const chunk = buf.slice(o, o + Number(len))
+        o += Number(len)
+        if (field === 1) {
+          const elem = parseDanmakuElem(chunk)
+          const text = elem[7] ? elem[7].toString('utf8') : ''
+          const mode = Number(elem[3] || 1n)
+          items.push({
+            time: Number(elem[2] || 0n) / 1000, // progress 毫秒 → 秒
+            mode,
+            fontSize: Number(elem[4] || 25n),
+            color: Number(elem[5] || 0xffffffn),
+            text,
+          })
+        }
+      } else if (wire === 0) {
+        const [v, o3] = decodeVarint(buf, o)
+        o = o3
+        if (field === 3) next = Number(v) // 下一段索引；<=0 表示已无更多段
+      } else {
+        o += wire === 5 ? 4 : 8
+      }
+    }
+    return { items, next }
+  }
+  const fetchDanmakuSegs = async (cid) => {
+    const all = []
+    let idx = 1
+    const seen = new Set()
+    for (let guard = 0; guard < 30; guard++) {
+      if (seen.has(idx)) break
+      seen.add(idx)
+      const url = `${API_BASE}/x/v2/dm/web/seg.so?type=1&oid=${cid}&segment_index=${idx}`
+      const resp = await fetchBili(url, { referer: BILI_REFERER })
+      if (!resp.ok) throw new Error(`seg.so HTTP ${resp.status}`)
+      const buf = Buffer.from(await resp.arrayBuffer())
+      if (buf.length < 2) break
+      const { items, next } = parseDanmakuSeg(buf)
+      all.push(...items)
+      if (next == null || next <= 0) break
+      idx = next
+    }
+    return all
+  }
+  // 旧 XML 弹幕（seg.so 无数据时的兜底；模式/颜色/字号齐全）
+  const parseDanmakuXml = (xml) => {
+    const items = []
+    const re = /<d p="([^"]+)">([^<]*)<\/d>/g
+    let m
+    while ((m = re.exec(xml))) {
+      const p = m[1].split(',')
+      items.push({
+        time: parseFloat(p[0]) || 0,
+        mode: parseInt(p[1], 10) || 1, // 1/6 滚动 4 底部 5 顶部 7 高级
+        fontSize: parseInt(p[2], 10) || 25,
+        color: parseInt(p[3], 10) || 0xffffff,
+        text: m[2]
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'"),
+      })
+    }
+    return items
+  }
+  const fetchDanmakuXml = async (url) => {
+    const resp = await fetchBili(url, { referer: BILI_REFERER })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const buf = Buffer.from(await resp.arrayBuffer())
+    // Node fetch 会按 Content-Encoding 自动解压 → 直接拿到的可能就是明文 XML；
+    // 若否则尝试 deflate-raw / gzip / deflate / brotli 逐种解压
+    const direct = buf.toString('utf8')
+    if (direct.includes('<d p=')) return direct
+    for (const fn of [() => inflateRawSync(buf), () => gunzipSync(buf), () => inflateSync(buf), () => brotliDecompressSync(buf)]) {
+      try {
+        const text = fn().toString('utf8')
+        if (text.includes('<d p=')) return text
+      } catch {
+        // 尝试下一种解压方式
+      }
+    }
+    throw new Error('弹幕数据解析失败')
+  }
+  app.get('/api/bilibili/danmaku', async (req, res) => {
+    const cid = Number(req.query.cid)
+    if (!cid) return res.status(400).json({ code: -1, error: 'cid 必填' })
+    const cached = danmakuCache.get(cid)
+    if (cached && Date.now() - cached.createdAt < DANMAKU_CACHE_TTL) {
+      return res.json({ code: 0, danmaku: cached.items })
+    }
+    try {
+      // 弹幕接口必须带 buvid3 cookie，否则极易触发风控（此前路由漏调 ensureBuvid3）
+      await ensureBuvid3()
+      let items = []
+      // 优先 protobuf seg.so（B 站现行弹幕源）；空/失败回退旧 XML
+      try {
+        items = await fetchDanmakuSegs(cid)
+      } catch (segError) {
+        console.warn(`[Bilibili] seg.so 弹幕失败，回退 XML:`, segError.message)
+      }
+      if (items.length === 0) {
+        let xml = null
+        let lastError = ''
+        for (const url of [
+          `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`,
+          `https://comment.bilibili.com/${cid}.xml`,
+        ]) {
+          try {
+            xml = await fetchDanmakuXml(url)
+            if (xml) break
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : String(error)
+          }
+        }
+        if (xml) items = parseDanmakuXml(xml)
+        else if (!lastError) lastError = 'seg.so 与 XML 均无数据'
+      }
+      if (items.length === 0) {
+        // 两路都无弹幕：返回空列表（视频确实无弹幕，或全部为高级弹幕命令）
+        danmakuCache.set(cid, { items: [], createdAt: Date.now() })
+        return res.json({ code: 0, danmaku: [] })
+      }
+      danmakuCache.set(cid, { items, createdAt: Date.now() })
+      pruneCache(danmakuCache, DANMAKU_CACHE_TTL)
+      res.json({ code: 0, danmaku: items })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '获取弹幕失败' })
+    }
+  })
+
+  // ===== B 站交互端点（发弹幕/评论/投币/点赞/收藏，均需登录 cookie + WBI + CSRF） =====
+
+  /** 取 cookie 中的 CSRF token（bili_jct） */
+  const csrfOf = (cookie) => {
+    const m = String(resolveBiliCookie(cookie) || '').match(/bili_jct=([^;]+)/)
+    return m ? m[1] : ''
+  }
+  /** POST form 到 B 站（WBI 签名 + CSRF），返回 JSON */
+  const postBiliForm = async (url, params, { cookie, csrf } = {}) => {
+    const signed = await wbiSign(params)
+    const effectiveCookie = resolveBiliCookie(cookie)
+    const token = csrf || csrfOf(effectiveCookie)
+    const body = new URLSearchParams({ ...signed, ...(token ? { csrf: token } : {}) })
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 12000)
+    try {
+      const raw = await fetch(url, {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': BILI_UA,
+          Referer: BILI_REFERER,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          ...(effectiveCookie ? { Cookie: buildCookieHeader(effectiveCookie) } : {}),
+        },
+        body,
+      })
+      const text = await raw.text()
+      try {
+        return JSON.parse(text)
+      } catch {
+        return { code: -1, message: text.slice(0, 200) }
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  // 发弹幕（同步 B 站）：type=1 视频弹幕，progress 为毫秒
+  app.post('/api/bilibili/danmaku', async (req, res) => {
+    const { cid, bvid, aid, msg, progress, color = 0xffffff, fontsize = 25, mode = 1 } = req.body || {}
+    if (!cid || !msg) return res.status(400).json({ code: -1, error: 'cid/msg 必填' })
+    const cookie = req.body.cookie || req.query.cookie
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/v2/dm/post`, {
+        type: 1,
+        oid: String(cid),
+        msg,
+        bvid: bvid || '',
+        aid: aid || '',
+        progress: String(Math.max(0, Math.round(Number(progress) || 0))),
+        color: String(color),
+        fontsize: String(fontsize),
+        mode: String(mode),
+        pool: '0',
+        plat: '1',
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '发送弹幕失败' })
+      res.json({ code: 0, data: json.data })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '发送弹幕失败' })
+    }
+  })
+
+  // 评论列表（type=1 视频；mode=3 按热度，pn 分页）
+  app.get('/api/bilibili/comments', async (req, res) => {
+    const aid = Number(req.query.aid)
+    const pn = Number(req.query.pn) || 1
+    if (!aid) return res.status(400).json({ code: -1, error: 'aid 必填' })
+    try {
+      const signed = await wbiSign({ type: 1, oid: String(aid), mode: 3, pn, ps: 20 })
+      const json = await fetchBiliJson(`${API_BASE}/x/v2/reply/main`, {
+        params: signed,
+        cookie: req.query.cookie,
+      })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '获取评论失败' })
+      const page = json.data?.page || {}
+      const replies = json.data?.replies || []
+      // 附带顶层评论数/游标，供分页
+      res.json({
+        code: 0,
+        replies,
+        page: { num: page.num, size: page.size, total: json.data?.top_replies ? undefined : page.total },
+        cursor: json.data?.cursor || null,
+      })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '获取评论失败' })
+    }
+  })
+
+  // 某条评论的回复（root 游标分页）
+  app.get('/api/bilibili/comment/replies', async (req, res) => {
+    const { aid, rpid } = req.query
+    const pn = Number(req.query.pn) || 1
+    if (!aid || !rpid) return res.status(400).json({ code: -1, error: 'aid/rpid 必填' })
+    try {
+      const signed = await wbiSign({ type: 1, oid: String(aid), root: String(rpid), ps: 20, pn })
+      const json = await fetchBiliJson(`${API_BASE}/x/v2/reply/reply`, {
+        params: signed,
+        cookie: req.query.cookie,
+      })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '获取回复失败' })
+      res.json({ code: 0, replies: json.data?.replies || [], page: json.data?.page || {} })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '获取回复失败' })
+    }
+  })
+
+  // 发评论 / 回复（root+parent 存在即为回复）
+  app.post('/api/bilibili/comment', async (req, res) => {
+    const { aid, message, root, parent } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid || !message) return res.status(400).json({ code: -1, error: 'aid/message 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/v2/reply/add`, {
+        type: '1',
+        oid: String(aid),
+        message,
+        ...(root ? { root: String(root) } : {}),
+        ...(parent ? { parent: String(parent) } : {}),
+        post_type: '1',
+        platform: '1',
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '发送评论失败' })
+      res.json({ code: 0, data: json.data })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '发送评论失败' })
+    }
+  })
+
+  // 删除评论（需登录且为本人）
+  app.post('/api/bilibili/comment/del', async (req, res) => {
+    const { aid, rpid } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid || !rpid) return res.status(400).json({ code: -1, error: 'aid/rpid 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/v2/reply/del`, {
+        oid: String(aid),
+        rpid: String(rpid),
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '删除评论失败' })
+      res.json({ code: 0 })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '删除评论失败' })
+    }
+  })
+
+  // 点赞/取消赞评论（action: 1 点赞，2 取消）
+  app.post('/api/bilibili/comment/like', async (req, res) => {
+    const { aid, rpid, action = 1 } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid || !rpid) return res.status(400).json({ code: -1, error: 'aid/rpid 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/v2/reply/action`, {
+        oid: String(aid),
+        rpid: String(rpid),
+        action: String(action),
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '评论点赞失败' })
+      res.json({ code: 0 })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '评论点赞失败' })
+    }
+  })
+
+  // 投币（multiply 1/2；select_like 1=同时点赞）
+  app.post('/api/bilibili/coin', async (req, res) => {
+    const { aid, multiply = 1, selectLike = 0 } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid) return res.status(400).json({ code: -1, error: 'aid 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/web-interface/coin/add`, {
+        aid: String(aid),
+        multiply: String(multiply),
+        select_like: String(selectLike),
+        cross_domain: '1',
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '投币失败' })
+      res.json({ code: 0, data: json.data })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '投币失败' })
+    }
+  })
+
+  // 视频点赞（like: 1 点赞，2 取消）
+  app.post('/api/bilibili/like', async (req, res) => {
+    const { aid, like = 1 } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid) return res.status(400).json({ code: -1, error: 'aid 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/web-interface/archive/like`, {
+        aid: String(aid),
+        like: String(like),
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '点赞失败' })
+      res.json({ code: 0 })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '点赞失败' })
+    }
+  })
+
+  // 收藏/取消收藏（type=2 视频；add_media_ids 添加，del_media_ids 取消）
+  app.post('/api/bilibili/fav', async (req, res) => {
+    const { aid, addMediaIds, delMediaIds } = req.body || {}
+    const cookie = req.body.cookie || req.query.cookie
+    if (!aid) return res.status(400).json({ code: -1, error: 'aid 必填' })
+    if (!csrfOf(cookie)) return res.status(401).json({ code: -401, error: '需要登录（B 站扫码登录）' })
+    try {
+      const json = await postBiliForm(`${API_BASE}/x/v3/fav/resource/deal`, {
+        rid: String(aid),
+        type: '2',
+        ...(addMediaIds ? { add_media_ids: String(addMediaIds) } : {}),
+        ...(delMediaIds ? { del_media_ids: String(delMediaIds) } : {}),
+      }, { cookie })
+      if (json.code !== 0) return res.status(502).json({ code: json.code, message: json.message || '收藏失败' })
+      res.json({ code: 0, data: json.data })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '收藏失败' })
+    }
+  })
+
+  // 交互状态汇总（未登录返回 0）：点赞态/投币数/今日剩余硬币/收藏态/收藏夹列表
+  app.get('/api/bilibili/interaction', async (req, res) => {
+    const aid = Number(req.query.aid)
+    if (!aid) return res.status(400).json({ code: -1, error: 'aid 必填' })
+    const cookie = req.query.cookie
+    const out = { isLike: 0, coin: 0, todayCoins: 0, favoured: 0, favFolders: [] }
+    try {
+      if (csrfOf(cookie)) {
+        // 收藏夹列表需要用户自己的 mid（DedeUserID），传 0 会返回空
+        const myMid = String(resolveBiliCookie(cookie) || '').match(/DedeUserID=(\d+)/)?.[1] || '0'
+        const [likeJson, coinsJson, todayJson, favedJson, favListJson] = await Promise.all([
+          fetchBiliJson(`${API_BASE}/x/web-interface/archive/has/like`, { params: { aid: String(aid) }, cookie }),
+          fetchBiliJson(`${API_BASE}/x/web-interface/archive/coins`, { params: { aid: String(aid) }, cookie }),
+          fetchBiliJson(`${API_BASE}/x/web-interface/coin/today`, { cookie }),
+          fetchBiliJson(`${API_BASE}/x/v2/fav/video/favoured`, { params: { aid: String(aid) }, cookie }),
+          fetchBiliJson(`${API_BASE}/x/v3/fav/folder/created/list-all`, { params: { up_mid: myMid, type: '2' }, cookie }),
+        ])
+        out.isLike = likeJson.data?.like === 1 ? 1 : 0
+        out.coin = Number(coinsJson.data?.multiply || 0)
+        out.todayCoins = Number(todayJson.data?.coins || 0)
+        out.favoured = favedJson.data?.favoured === 1 ? 1 : 0
+        out.favFolders = Array.isArray(favListJson.data?.list) ? favListJson.data.list.map((f) => ({ id: f.id, name: f.title || f.name })) : []
+      }
+      res.json({ code: 0, data: out })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '获取交互状态失败' })
     }
   })
 
@@ -534,6 +1010,44 @@ export function registerBilibiliRoutes(app) {
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '获取用户资料失败' })
       const card = json.data?.card || {}
       const vip = json.data?.vip || {}
+      // 顶栏背景：card 接口的 top_photo 时常为空（未设自定义皮肤的用户尤甚）。
+      // 1) x/space/wbi/acc/info 的 data.top_photo（B 站空间页渲染顶图的权威字段，需 WBI+登录态）
+      // 2) x/space/topphoto/mall（皮肤商城：未设自定义皮肤的用户返回默认活动横幅，需登录）
+      let topPhoto = json.data?.top_photo || ''
+      if (!topPhoto) {
+        try {
+          // acc/info 需 WBI + 登录 cookie 的 CSRF token（bili_jct）+ web_location，缺 token 即使带 cookie 也易风控
+          const rawCookie = String(req.query.cookie || '')
+          const jctMatch = rawCookie.match(/bili_jct=([^;]+)/)
+          const token = jctMatch ? jctMatch[1] : ''
+          const signed = await wbiSign({ mid, platform: 'web', web_location: '1550101', ...(token ? { token } : {}) })
+          const accJson = await fetchBiliJsonWithRiskRetry(`${API_BASE}/x/space/wbi/acc/info`, {
+            params: { ...signed, mid, platform: 'web', web_location: '1550101', ...(token ? { token } : {}) },
+            cookie: rawCookie,
+          })
+          topPhoto = accJson.data?.top_photo || ''
+        } catch {
+          // 忽略，走 mall 兜底
+        }
+      }
+      if (!topPhoto) {
+        try {
+          const mallJson = await fetchBiliJson(`${API_BASE}/x/space/topphoto/mall`, {
+            params: { mid, web_location: '333.1387' },
+            cookie: req.query.cookie,
+          })
+          const mallData = mallJson.data
+          if (mallData && mallJson.code === 0) {
+            const list = Array.isArray(mallData.list) ? mallData.list : Array.isArray(mallData) ? mallData : []
+            const current = mallData.current && typeof mallData.current === 'object' ? mallData.current : null
+            const used = list.find((s) => s && (s.is_use === true || s.is_use === 1 || s.current === true)) || list[0] || null
+            const skin = current || used
+            topPhoto = (skin?.pic || skin?.image || skin?.img || '') || ''
+          }
+        } catch {
+          // 拿不到顶栏图就留空，前端用渐变兜底
+        }
+      }
       res.json({
         code: 0,
         data: {
@@ -547,6 +1061,8 @@ export function registerBilibiliRoutes(app) {
           attention: card.attention || 0,
           likes: card.likes || 0,
           officialVerify: card.official_verify?.type ?? 0,
+          // 个人主页皮肤横幅（用户可自换，按用户当前设置；B 站给的是原始 URL，前端再拼尺寸后缀）
+          topPhoto,
         },
       })
     } catch (error) {
@@ -637,33 +1153,51 @@ export function registerBilibiliRoutes(app) {
     }
   })
 
-  // 观看历史（需登录）
+  // 观看历史（需登录）：B 站 cursor 接口不认 pn，用 max/view_at 游标分页
   app.get('/api/bilibili/history', async (req, res) => {
-    const pn = Math.max(1, Number(req.query.pn) || 1)
     const ps = Math.min(30, Math.max(1, Number(req.query.ps) || 15))
+    const max = Math.max(0, Number(req.query.max) || 0)
+    const viewAt = Math.max(0, Number(req.query.viewAt) || 0)
     await ensureBuvid3()
     try {
       const json = await fetchBiliJson(`${API_BASE}/x/web-interface/history/cursor`, {
-        params: { ps, pn },
+        params: { ps, business: 'archive', max, view_at: viewAt },
         cookie: req.query.cookie,
       })
       if (json.code !== 0) {
         return res.status(json.code === -101 ? 401 : 502).json({ code: json.code, error: json.message || '获取历史失败' })
       }
-      const list = (json.data?.list || []).map((h) => ({
-        bvid: h.bvid || '',
-        aid: h.aid || 0,
-        title: h.title || '',
-        pic: h.pic || '',
-        play: h.stat?.view || 0,
-        duration: h.duration || 0,
-        author: h.author_name || h.author?.name || '',
-        mid: h.author_mid || h.author?.mid || 0,
-        typename: h.type ? String(h.type) : '',
-        progress: h.progress || 0,
-        viewAt: h.view_at || 0,
-      }))
-      res.json({ code: 0, data: { list, cursor: json.data?.cursor || null } })
+      const list = (json.data?.list || [])
+        // 只保留普通视频（archive）：直播/番剧等混合类型没有 bvid，无法用视频播放器播
+        .filter((h) => !h.type || h.type === 'archive' || h.type === 'video')
+        .map((h) => {
+          const history = h.history || {}
+          // bvid 可能出现在顶层 / history 对象 / uri（bilibili://video/BVxxx）三处，逐个兜底
+          const uriBvid = String(h.uri || '').match(/bilibili\.com\/video\/(BV[0-9A-Za-z]+)/i)?.[1]
+            || String(h.uri || '').match(/\/video\/(BV[0-9A-Za-z]+)/i)?.[1]
+            || ''
+          return {
+            bvid: h.bvid || history.bvid || uriBvid || '',
+            aid: h.aid || history.oid || 0,
+            title: h.title || '',
+            // 历史项封面字段是 cover（不是 pic）
+            pic: h.pic || h.cover || '',
+            play: h.stat?.view ?? h.view_count ?? 0,
+            duration: h.duration || 0,
+            author: h.author_name || h.author?.name || history.author_name || '',
+            mid: h.author_mid || h.author?.mid || 0,
+            typename: h.type ? String(h.type) : '',
+            progress: h.progress || 0,
+            viewAt: h.view_at || 0,
+          }
+        })
+        // 没有 bvid 的项（残留异常数据）不返回，前端不会再点到"bvid 必填"
+        .filter((v) => v.bvid)
+      const cursor = json.data?.cursor || null
+      res.json({
+        code: 0,
+        data: { list, cursor, hasMore: cursor?.has_more === 1 },
+      })
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '获取历史失败' })
     }

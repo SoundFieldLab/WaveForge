@@ -40,6 +40,8 @@ const fakeCandidate = (score: number, strong: boolean): CandidateScore => {
     hasArtist: true,
     nearDuration: true,
     hdMarker: false,
+    uploaderMatchesArtist: strong,
+    ccSubtitle: false,
   }
   return {
     video: video({ title: '周杰伦 稻香 MV', duration: 223 }),
@@ -167,6 +169,151 @@ describe('scoreCandidate（候选打分）', () => {
     expect(strong.score).toBeGreaterThanOrEqual(230)
     expect(shouldAutoPlay(strong)).toBe(true)
   })
+
+  it('4K/120帧 标记任意偏好下基础加成', () => {
+    const hd4k = scoreCandidate(video({ title: '周杰伦《稻香》MV 4K', duration: 223, play: 100_000 }), ctx)
+    const hd120 = scoreCandidate(video({ title: '周杰伦《稻香》120帧', duration: 223, play: 100_000 }), ctx)
+    const plain = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx)
+    const base = scoreCandidate(video({ title: '周杰伦《稻香》', duration: 223, play: 100_000 }), ctx)
+    expect(hd4k.signals.hdMarker).toBe(true)
+    expect(hd120.signals.hdMarker).toBe(true)
+    // 同结构标题对比：4K 比普通 MV 高 28（+10 正向标记 +12 hdMarker +6 premium）
+    expect(hd4k.score - plain.score).toBe(28)
+    // 120帧 单独对比无 MV/无高清标记的标题：+12 hdMarker +6 premium
+    expect(hd120.score - base.score).toBe(18)
+  })
+
+  it('CC 字幕权重：人工中文字幕 > AI 字幕 > 无字幕', () => {
+    const base = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx)
+    const manual = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true })
+    const auto = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true })
+    expect(manual.score - base.score).toBe(25)
+    expect(auto.score - base.score).toBe(10)
+    expect(manual.signals.ccSubtitle).toBe(true)
+    expect(auto.signals.ccSubtitle).toBe(true)
+  })
+
+  it('官号：作者名=歌手（音乐人本人官号）加分', () => {
+    const exact = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦' }), ctx)
+    const contains = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦官方' }), ctx)
+    const normal = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '音乐私藏馆' }), ctx)
+    expect(exact.score - normal.score).toBe(25)
+    expect(contains.score - normal.score).toBe(15)
+    expect(exact.signals.uploaderMatchesArtist).toBe(true)
+    expect(contains.signals.uploaderMatchesArtist).toBe(true)
+    expect(normal.signals.uploaderMatchesArtist).toBe(false)
+  })
+
+  it('官号 + 个人认证：认证加成叠加', () => {
+    const artistOfficial = scoreCandidate(
+      video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦' }),
+      ctx,
+      { officialVerifyType: 1 },
+    )
+    const noVerify = scoreCandidate(
+      video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦' }),
+      ctx,
+      { officialVerifyType: 0 },
+    )
+    expect(artistOfficial.score - noVerify.score).toBe(25) // +15 个人认证 +10 官号认证叠加
+  })
+
+  it('跨书写系统官号：ZUTOMAYO 官方 MV 压过粉丝字幕版（标题/UP主用英文名与中文名）', () => {
+    const zutoCtx: MatchContext = { songTitle: 'メディアノーチェ', artists: ['ずっと真夜中でいいのに。'], songDuration: 240 }
+    const official = scoreCandidate(
+      video({ title: '【官方MV】ZUTOMAYO 永远是深夜有多好。《メディアノーチェ》MV正式上线！ (ZUTOMAYO - Medianoche)', duration: 240, play: 799_219, author: 'ZUTOMAYO_Channel' }),
+      zutoCtx,
+    )
+    const fanSub = scoreCandidate(
+      video({ title: '【ずっと真夜中でいいのに 新曲 | MV | 中日字幕】『メディアノーチェ (Media Noche)』【Hi-Res高音质】', duration: 240, play: 500_000, author: '私は最強uta' }),
+      zutoCtx,
+    )
+    expect(official.signals.hasArtist).toBe(true) // 别名 ZUTOMAYO 命中标题
+    expect(official.signals.uploaderMatchesArtist).toBe(true) // 官方频道命中别名
+    expect(official.score).toBeGreaterThan(fanSub.score) // 官方正片压过粉丝版
+    expect(shouldAutoPlay(official)).toBe(true)
+  })
+
+  it('主题曲/加长版 正片增强标记加分', () => {
+    const lisaCtx: MatchContext = { songTitle: '紅蓮華', artists: ['LiSA'], songDuration: 239 }
+    const themeSong = scoreCandidate(
+      video({ title: 'LiSA 紅蓮華 主题曲MV 加长版', duration: 239, play: 100_000 }),
+      lisaCtx,
+    )
+    const plain = scoreCandidate(video({ title: 'LiSA 紅蓮華 MV', duration: 239, play: 100_000 }), lisaCtx)
+    expect(themeSong.score - plain.score).toBe(24) // +12 主题曲 +12 加长版
+  })
+
+  it('OP/ED 标记按词边界加分（动漫主题曲）', () => {
+    const lisaCtx: MatchContext = { songTitle: '紅蓮華', artists: ['LiSA'], songDuration: 239 }
+    const op = scoreCandidate(video({ title: '【OP】LiSA 紅蓮華 鬼灭之刃', duration: 239, play: 100_000 }), lisaCtx)
+    const noOp = scoreCandidate(video({ title: 'LiSA 紅蓮華 鬼灭之刃', duration: 239, play: 100_000 }), lisaCtx)
+    expect(op.score - noOp.score).toBe(18) // OP/ED 权重已提升
+    // 小写/大小写混合/带集数都应命中；普通单词（operation/editor/open）不误伤
+    for (const t of ['LiSA 紅蓮華 op 鬼灭之刃', 'LiSA 紅蓮華 Ed 鬼灭之刃', 'LiSA 紅蓮華 OP1 鬼灭之刃', 'LiSA 紅蓮華 ED2 鬼灭之刃']) {
+      const hit = scoreCandidate(video({ title: t, duration: 239, play: 100_000 }), lisaCtx)
+      expect(hit.score - noOp.score).toBe(18)
+    }
+    for (const t of ['LiSA 紅蓮華 operation 鬼灭之刃', 'LiSA 紅蓮華 editor 鬼灭之刃', 'LiSA 紅蓮華 open 鬼灭之刃']) {
+      const miss = scoreCandidate(video({ title: t, duration: 239, play: 100_000 }), lisaCtx)
+      expect(miss.score - noOp.score).toBe(0)
+    }
+  })
+
+  it('OP/ED TV 版短时长（70~110s）降级，完整版优先', () => {
+    const lisaCtx: MatchContext = { songTitle: '紅蓮華', artists: ['LiSA'], songDuration: 239 }
+    // 同一首歌：TV 版 90s OP vs 完整版 239s OP —— 短版必须显著低于完整版
+    const tvSize = scoreCandidate(video({ title: '【OP】LiSA 紅蓮華 鬼灭之刃', duration: 90, play: 100_000 }), lisaCtx)
+    const full = scoreCandidate(video({ title: '【OP】LiSA 紅蓮華 完整版', duration: 239, play: 100_000 }), lisaCtx)
+    expect(tvSize.score).toBeLessThan(full.score)
+    // 边界外（69s / 111s）不触发 OP/ED 短版降级（但仍受时长偏离评分约束）
+    const justShort = scoreCandidate(video({ title: '【OP】LiSA 紅蓮華 鬼灭之刃', duration: 69, play: 100_000 }), lisaCtx)
+    const justLong = scoreCandidate(video({ title: '【OP】LiSA 紅蓮華 鬼灭之刃', duration: 111, play: 100_000 }), lisaCtx)
+    const base = scoreCandidate(video({ title: 'LiSA 紅蓮華 鬼灭之刃', duration: 69, play: 100_000 }), lisaCtx)
+    // 69s/111s 的 OP 视频相对无 OP 标记的 69s 视频仍保留 OP 加分（+18），未被短版降级扣掉
+    expect(justShort.score - base.score).toBe(18)
+    const base111 = scoreCandidate(video({ title: 'LiSA 紅蓮華 鬼灭之刃', duration: 111, play: 100_000 }), lisaCtx)
+    expect(justLong.score - base111.score).toBe(18)
+  })
+
+  it('单字歌名不过滤（恋/星野源，防歌名变体长度过滤回归）', () => {
+    const shortCtx: MatchContext = { songTitle: '恋', artists: ['星野源'], songDuration: 275 }
+    const scored = scoreCandidate(video({ title: '【官方】星野源 – 恋 (Official Video)', duration: 275, play: 1_000_000 }), shortCtx)
+    expect(scored.score).not.toBe(-Infinity)
+    expect(scored.signals.hasArtist).toBe(true)
+  })
+
+  it('舞蹈练习/翻跳/自用类压分（非官方 MV）', () => {
+    const ctx2: MatchContext = { songTitle: 'ステラ', artists: ['Leo/need'], songDuration: 200 }
+    const practice = scoreCandidate(video({ title: 'ステラ leo/need 五人练舞镜面自用', duration: 200, play: 100_000 }), ctx2)
+    const mv = scoreCandidate(video({ title: 'ステラ (Stella) Leo/need 2DMV', duration: 200, play: 100_000 }), ctx2)
+    expect(practice.score).toBeLessThan(mv.score)
+    expect(practice.score).toBeLessThan(200)
+  })
+
+  it('短歌名 + 官方标记 + 无歌手 → 张冠李戴重罚（王艺瑾-喜欢你 场景）', () => {
+    const ctx3: MatchContext = { songTitle: '喜欢你', artists: ['邓紫棋'], songDuration: 199 }
+    const wrongArtist = scoreCandidate(video({ title: '【官方MV】王艺瑾 - 喜欢你', duration: 200, play: 1_000_000, author: '太合音乐' }), ctx3)
+    const realArtist = scoreCandidate(video({ title: '【4K·高音质】《喜欢你》——邓紫棋', duration: 200, play: 100_000, author: '音乐里沉沦' }), ctx3)
+    expect(realArtist.signals.hasArtist).toBe(true)
+    expect(wrongArtist.signals.hasArtist).toBe(false)
+    expect(realArtist.score).toBeGreaterThan(wrongArtist.score) // 真歌手版本压过"别的歌手的官方MV"
+  })
+
+  it('教学/纯人声/红石音乐 负向标记压分', () => {
+    const ctx4: MatchContext = { songTitle: 'さかゆめ', artists: ['King Gnu'], songDuration: 225 }
+    const teaching = scoreCandidate(video({ title: '听歌学日语丨逆夢(さかゆめ) - King Gnu', duration: 225, play: 50_000 }), ctx4)
+    expect(teaching.score).toBeLessThan(200) // 教学类被 -35×2 压制，远低于正常 MV（~230+）
+  })
+
+  it('变速/降调/升调 非原版处理重罚（-45，高于翻唱 -30）', () => {
+    const ctx5: MatchContext = { songTitle: '夜に駆ける', artists: ['YOASOBI'], songDuration: 263 }
+    const sped = scoreCandidate(video({ title: '夜に駆ける - Nightcore 变速版', duration: 263, play: 100_000 }), ctx5)
+    const slowed = scoreCandidate(video({ title: '夜に駆ける slowed 降调 慢放', duration: 263, play: 100_000 }), ctx5)
+    const normal = scoreCandidate(video({ title: 'YOASOBI 夜に駆ける MV', duration: 263, play: 100_000 }), ctx5)
+    expect(normal.score - sped.score).toBeGreaterThanOrEqual(45)
+    expect(normal.score - slowed.score).toBeGreaterThanOrEqual(45)
+  })
 })
 
 describe('shouldAutoPlay（门槛随严格度）', () => {
@@ -184,6 +331,21 @@ describe('shouldAutoPlay（门槛随严格度）', () => {
     expect(shouldAutoPlay(fakeCandidate(190, false), 'relaxed')).toBe(true)
     expect(shouldAutoPlay(fakeCandidate(150, true), 'relaxed')).toBe(true)
     expect(shouldAutoPlay(fakeCandidate(120, false), 'relaxed')).toBe(false)
+  })
+  it('官号信号（作者=歌手）计入 strong：160 分 + 官号 → standard 自动', () => {
+    const withUploader: CandidateScore = {
+      video: video({ title: '周杰伦 稻香 MV', duration: 223, play: 1_000_000, author: '周杰伦' }),
+      score: 160,
+      signals: { officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: true, nearDuration: false, hdMarker: false, uploaderMatchesArtist: true, ccSubtitle: false },
+      rank: 0,
+      officialVerifyType: 0,
+      manualZhSubtitle: false,
+      autoSubtitle: false,
+      type: 'other',
+    }
+    expect(shouldAutoPlay(withUploader)).toBe(true)
+    const withoutUploader: CandidateScore = { ...withUploader, signals: { ...withUploader.signals, uploaderMatchesArtist: false } }
+    expect(shouldAutoPlay(withoutUploader)).toBe(false)
   })
 })
 
@@ -206,10 +368,10 @@ describe('偏好加权（preferenceAdjustment）', () => {
     expect(official.score).toBeGreaterThan(live.score)
   })
 
-  it('高清偏好：标题带 4K/1080P/高清 加分（含基础标记共 30 分）', () => {
+  it('高清偏好：标题带 4K/1080P/高清 加分（含基础标记共 48 分）', () => {
     const hd = scoreCandidate(video({ title: '周杰伦《稻香》MV 4K', duration: 223, play: 100_000 }), ctx, { preference: 'hd' })
     const normal = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { preference: 'hd' })
-    expect(hd.score - normal.score).toBe(30) // +10 基础高清标记 +20 hd 偏好加权
+    expect(hd.score - normal.score).toBe(48) // +10 正向标记(4k) +12 hdMarker +6 premium +20 hd 偏好加权
   })
 
   it('歌词字幕偏好：歌词版分数更高', () => {
@@ -220,14 +382,14 @@ describe('偏好加权（preferenceAdjustment）', () => {
 })
 
 describe('buildQueries（关键词构建）', () => {
-  it('auto 均衡：歌名+歌手 / 歌名+MV', () => {
-    expect(buildQueries(ctx)).toEqual(['稻香 周杰伦', '稻香 MV'])
+  it('auto 均衡：歌名+歌手 / 仅歌名 / 歌名+MV', () => {
+    expect(buildQueries(ctx)).toEqual(['稻香 周杰伦', '稻香', '稻香 MV'])
   })
   it('auto 官方偏好：追加官方词', () => {
-    expect(buildQueries(ctx, { matchPreference: 'official' })).toEqual(['稻香 周杰伦', '稻香 MV', '稻香 周杰伦 官方', '稻香 官方MV'])
+    expect(buildQueries(ctx, { matchPreference: 'official' })).toEqual(['稻香 周杰伦', '稻香', '稻香 MV', '稻香 周杰伦 官方', '稻香 官方MV'])
   })
   it('auto 现场偏好：追加现场词', () => {
-    expect(buildQueries(ctx, { matchPreference: 'live' })).toEqual(['稻香 周杰伦', '稻香 MV', '稻香 周杰伦 现场', '稻香 演唱会'])
+    expect(buildQueries(ctx, { matchPreference: 'live' })).toEqual(['稻香 周杰伦', '稻香', '稻香 MV', '稻香 周杰伦 现场', '稻香 演唱会'])
   })
   it('自定义模板：占位符替换', () => {
     expect(buildQueries(ctx, { keywordTemplate: 'custom', customKeywordTemplate: '{title} {artist} 官方 4K' })).toEqual(['稻香 周杰伦 官方 4K'])

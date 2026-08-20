@@ -18,6 +18,7 @@ import {
   getBilibiliSubtitleJson,
   bilibiliStreamUrl,
   pickBestSubtitle,
+  cleanSubtitleLines,
   formatBiliTime,
   qualityLabel,
   setBilibiliOverride,
@@ -45,12 +46,14 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
   })
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const controlsTimerRef = useRef<number | null>(null)
 
   const [settings, setSettings] = useState<BilibiliWatchSettings>(() => getBilibiliWatchSettings())
 
   const [videoUrl, setVideoUrl] = useState<string | null>(null)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [quality, setQuality] = useState(0)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -108,7 +111,9 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
         if (play.code !== 0 || !play.cacheKey) throw new Error(play.error || '获取播放地址失败')
         if (play.vipLimited && play.quality <= 32) throw new Error('该视频高画质仅限大会员')
         setQuality(play.quality)
-        setVideoUrl(bilibiliStreamUrl(play.cacheKey))
+        // DASH 音画分离：视频轨（无声）+ 音频轨（同步播放）
+        setVideoUrl(bilibiliStreamUrl(play.cacheKey, 'video'))
+        setAudioUrl(bilibiliStreamUrl(play.cacheKey, 'audio'))
 
         // 字幕
         const subPref = settings.subtitlePreference
@@ -118,8 +123,10 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
             const chosen = pickBestSubtitle(subInfo.subtitles, subPref)
             if (chosen) {
               const lines = await getBilibiliSubtitleJson(chosen.cacheKey, controller.signal).catch(() => [] as BilibiliSubtitleLine[])
-              if (Array.isArray(lines) && lines.length) {
-                setSubtitles(lines)
+              // 清洗 AI 字幕噪音行（如整段只有"音乐"的分类标签），全噪音则视为无字幕
+              const clean = cleanSubtitleLines(lines)
+              if (clean.length) {
+                setSubtitles(clean)
                 setSubtitleOn(chosen.aiType === 0)
               }
             }
@@ -141,15 +148,22 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
   const togglePlay = () => {
     const video = videoRef.current
     if (!video) return
-    if (video.paused) void video.play().catch(() => undefined)
-    else video.pause()
+    if (video.paused) {
+      void video.play().catch(() => undefined)
+      void audioRef.current?.play().catch(() => undefined)
+    } else {
+      video.pause()
+      audioRef.current?.pause()
+    }
   }
 
   const replayVideo = () => {
     const video = videoRef.current
     if (!video) return
     video.currentTime = 0
+    if (audioRef.current) audioRef.current.currentTime = 0
     void video.play().catch(() => undefined)
+    void audioRef.current?.play().catch(() => undefined)
     setShowReplay(false)
   }
 
@@ -160,26 +174,39 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
     window.setTimeout(() => setMvSetHint(''), 3500)
   }
 
-  // 视频事件
+  // 视频事件（依赖 videoUrl：视频元素挂载后重新绑定；同时同步 DASH 音频轨）
   useEffect(() => {
     const video = videoRef.current
     if (!video) return
+    const syncAudio = () => {
+      const audio = audioRef.current
+      if (!audio || !audioUrl) return
+      if (video.paused && !audio.paused) audio.pause()
+      else if (!video.paused && audio.paused) void audio.play().catch(() => undefined)
+    }
     const onPlay = () => {
       setIsPlaying(true)
       setShowReplay(false)
       setShowControls(true)
+      void audioRef.current?.play().catch(() => undefined)
       scheduleControlsHide()
     }
     const onPause = () => {
       setIsPlaying(false)
       setShowControls(true)
+      audioRef.current?.pause()
       clearControlsTimer()
     }
     const onTimeUpdate = () => {
       setCurrentTime(video.currentTime)
+      const audio = audioRef.current
+      if (audio && audioUrl && Math.abs(audio.currentTime - video.currentTime) > 1.5) {
+        audio.currentTime = video.currentTime
+      }
       // 续播：loadedmetadata 后跳一次进度
       if (!seekApplied && initialSeek && initialSeek > 5 && video.duration && video.currentTime < 1) {
         video.currentTime = Math.min(initialSeek, Math.max(0, video.duration - 5))
+        if (audio) audio.currentTime = video.currentTime
         setSeekApplied(true)
       }
       if (subtitles.length && subtitleOn) {
@@ -191,15 +218,24 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
         setCurrentSubtitle(line)
       }
     }
-    const onLoaded = () => setDuration(video.duration || 0)
+    const onLoaded = () => {
+      setDuration(video.duration || 0)
+      const audio = audioRef.current
+      if (audio && audioUrl) {
+        audio.currentTime = video.currentTime
+        if (!video.paused) void audio.play().catch(() => undefined)
+      }
+    }
     video.addEventListener('play', onPlay)
     video.addEventListener('pause', onPause)
     video.addEventListener('timeupdate', onTimeUpdate)
     video.addEventListener('loadedmetadata', onLoaded)
+    video.addEventListener('seeked', syncAudio)
     video.addEventListener('ended', () => {
       setIsPlaying(false)
       setShowReplay(true)
       setShowControls(true)
+      audioRef.current?.pause()
     })
     video.addEventListener('error', () => setLoadError('视频播放失败（可能已失效或网络异常）'))
     return () => {
@@ -207,15 +243,22 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
       video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
       video.removeEventListener('loadedmetadata', onLoaded)
+      video.removeEventListener('seeked', syncAudio)
     }
-  }, [subtitles, subtitleOn, initialSeek, seekApplied, scheduleControlsHide])
+  }, [videoUrl, audioUrl, subtitles, subtitleOn, initialSeek, seekApplied, scheduleControlsHide])
 
   useEffect(() => {
     const video = videoRef.current
-    if (!video) return
-    video.volume = volume
-    video.muted = isMuted
-  }, [videoUrl, volume, isMuted])
+    const audio = audioRef.current
+    if (video) {
+      video.muted = true // DASH 视频轨无声，静音只作用于音频轨
+      video.volume = 1
+    }
+    if (audio) {
+      audio.muted = isMuted
+      audio.volume = volume
+    }
+  }, [videoUrl, audioUrl, volume, isMuted])
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(Boolean(document.fullscreenElement))
@@ -261,6 +304,9 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-[95] bg-black/95 flex items-center justify-center"
       data-tv-scope
+      // 阻断冒泡：浮层内任何点击（X/进度条/视频本体）不得触发宿主（个人中心根容器）的 onClose，
+      // 否则关闭视频会直接把整个个人中心也关掉、落回设置页
+      onClick={(e) => e.stopPropagation()}
       onMouseMove={() => {
         setShowControls(true)
         scheduleControlsHide()
@@ -317,6 +363,8 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
             </div>
           ) : videoUrl ? (
             <>
+              {/* DASH 音频轨（音画分离，与视频同步） */}
+              <audio ref={audioRef} src={audioUrl || undefined} preload="auto" />
               <video
                 ref={videoRef}
                 src={videoUrl}
@@ -400,6 +448,7 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
                     if (!video) return
                     const t = parseFloat(e.target.value)
                     video.currentTime = t
+                    if (audioRef.current) audioRef.current.currentTime = t
                     setCurrentTime(t)
                   }}
                   className="flex-1 h-1 bg-white/20 rounded-full appearance-none cursor-pointer
@@ -415,7 +464,7 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
                 <button type="button" onClick={togglePlay} className="p-2 rounded-full text-white hover:bg-white/15 transition-colors">
                   {isPlaying ? <Pause size={26} /> : <Play size={26} />}
                 </button>
-                <button type="button" onClick={() => { const v = videoRef.current; if (!v) return; v.muted = !isMuted; setIsMuted(!isMuted) }} className="p-2 rounded-lg text-white hover:bg-white/15 transition-colors ml-1">
+                <button type="button" onClick={() => { const a = audioRef.current; if (!a) return; a.muted = !isMuted; setIsMuted(!isMuted) }} className="p-2 rounded-lg text-white hover:bg-white/15 transition-colors ml-1">
                   {isMuted ? <VolumeX size={20} /> : <Volume2 size={20} />}
                 </button>
                 <input
@@ -428,7 +477,8 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
                     const vol = parseFloat(e.target.value)
                     setVolume(vol)
                     setIsMuted(vol === 0)
-                    if (videoRef.current) videoRef.current.volume = vol
+                    if (audioRef.current) audioRef.current.volume = vol
+                    if (audioRef.current) audioRef.current.muted = vol === 0
                   }}
                   className="w-24 h-1 bg-white/20 rounded-full appearance-none cursor-pointer
                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5
