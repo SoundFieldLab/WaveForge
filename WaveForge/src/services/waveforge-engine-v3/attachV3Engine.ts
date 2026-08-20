@@ -8,7 +8,7 @@
  *    统计优先取 worklet 周期回传值；script 模式下两者同源；
  *  - 系统音量 → 等响度补偿（loudnessCompensation.volumePercent）；
  *  - 听力测试纯音播放（监听 UI 的 'v3HearingPlay' 事件，用音频图上下文合成正弦）；
- *  - 离线 WAV 导出（解码 PCM → EngineV3.process 分块 → 16-bit PCM WAV 下载）。
+ *  - 离线 MP3 导出（解码 PCM → EngineV3.process 分块 → Float32→Int16 → lamejs MP3 128kbps 下载）。
  *
  * 与 v1/v2 完全独立：不做参数迁移；切换只保证音频正常切到 v3 处理。
  */
@@ -23,6 +23,8 @@ import type { V3UiBridge, DeepPartial } from './ui'
 // masterGain 与 v3 处理节点之间（masterGain → SoundTouch → v3 → analyser）。
 import { SoundTouchNode } from '@soundtouchjs/audio-worklet'
 import processorUrl from '@soundtouchjs/audio-worklet/processor?url'
+// 离线 MP3 编码（纯 JS MP3 编码器，无原生依赖，浏览器/Electron 可用）
+import * as lamejs from 'lamejs'
 
 /** 参数持久化键（v3 独立命名空间） */
 const PARAMS_KEY = 'waveforge:v3-params'
@@ -315,46 +317,48 @@ export function setV3SystemVolume(volumePercent: number): void {
   wrappedBridge.setParams(next)
 }
 
-/** 16-bit PCM WAV 编码（与 v2 引擎导出同规格） */
-function encodeWav(channels: Float32Array[], sampleRate: number): Blob {
+/**
+ * MP3 编码（lamejs 1.2.1，立体声 / 128kbps）。
+ * Float32 PCM → Int16 PCM（[-1,1] 截断到 [-32768,32767]）→ Mp3Encoder 分块编码 → flush 冲刷尾部。
+ * lamejs 内部以 1152 样本为帧边界自适应补零，故输入块大小不限（这里取 1152 对齐以减少边界补零）。
+ */
+function encodeMp3(channels: Float32Array[], sampleRate: number): Blob {
   const numChannels = channels.length
+  const channelsForEnc = numChannels >= 2 ? 2 : 1
+  const encoder = new lamejs.Mp3Encoder(channelsForEnc, sampleRate, 128)
   const frames = channels[0].length
-  const bytesPerSample = 2
-  const dataBytes = frames * numChannels * bytesPerSample
-  const buffer = new ArrayBuffer(44 + dataBytes)
-  const view = new DataView(buffer)
-  const writeString = (offset: number, text: string) => {
-    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i))
-  }
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + dataBytes, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)            // PCM
-  view.setUint16(22, numChannels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true)
-  view.setUint16(32, numChannels * bytesPerSample, true)
-  view.setUint16(34, 16, true)
-  writeString(36, 'data')
-  view.setUint32(40, dataBytes, true)
-  let offset = 44
+  // 左/右声道 Int16 scratch（单声道复用左声道）
+  const left16 = new Int16Array(frames)
+  const right16 = channelsForEnc === 2 ? new Int16Array(frames) : left16
   for (let i = 0; i < frames; i += 1) {
-    for (let ch = 0; ch < numChannels; ch += 1) {
-      const s = Math.max(-1, Math.min(1, channels[ch][i]))
-      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
-      offset += 2
+    const sl = Math.max(-1, Math.min(1, channels[0][i]))
+    left16[i] = sl < 0 ? sl * 0x8000 : sl * 0x7fff
+    if (channelsForEnc === 2) {
+      const sr = Math.max(-1, Math.min(1, channels[1][i]))
+      right16[i] = sr < 0 ? sr * 0x8000 : sr * 0x7fff
     }
   }
-  return new Blob([buffer], { type: 'audio/wav' })
+  const BLOCK = 1152
+  const chunks: Int8Array[] = []
+  for (let i = 0; i < frames; i += BLOCK) {
+    const n = Math.min(BLOCK, frames - i)
+    const lBlk = left16.subarray(i, i + n)
+    const rBlk = channelsForEnc === 2 ? right16.subarray(i, i + n) : left16
+    const enc = channelsForEnc === 2
+      ? encoder.encodeBuffer(lBlk, rBlk)
+      : encoder.encodeBuffer(lBlk)
+    if (enc.length > 0) chunks.push(enc)
+  }
+  const tail = encoder.flush()
+  if (tail.length > 0) chunks.push(tail)
+  return new Blob(chunks as BlobPart[], { type: 'audio/mpeg' })
 }
 
 /**
  * 离线导出：解码源音频 → 独立 EngineV3 分块处理（与实时链同一内核，逐样本一致）
- * → 16-bit WAV 下载。尾部以 1s 静音冲刷卷积混响/限幅器 lookahead 余量。
+ * → Float32→Int16 → lamejs MP3 128kbps 下载。尾部以 1s 静音冲刷卷积混响/限幅器 lookahead 余量。
  */
-export async function exportV3Wav(sourceUrl: string, durationSeconds: number): Promise<void> {
+export async function exportV3Mp3(sourceUrl: string, durationSeconds: number): Promise<void> {
   const ctx = lastHandle?.audioContext
   if (!ctx) throw new Error('音频引擎尚未就绪')
   if (!currentParams) currentParams = restoreParams(ctx.sampleRate)
@@ -371,6 +375,8 @@ export async function exportV3Wav(sourceUrl: string, durationSeconds: number): P
   const engine = new EngineV3(fs, 2)
   engine.setParams(currentParams)
 
+  // 快照导出开始时的参数，处理期间参数变化不影响本次导出。
+  // 空间音频已内联进 EngineV3，engine.process 自动包含（无需独立后端包裹）。
   const srcL = decoded.getChannelData(0)
   const srcR = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : srcL
 
@@ -389,11 +395,29 @@ export async function exportV3Wav(sourceUrl: string, durationSeconds: number): P
     outChunksR.push(outR.slice())
   }
 
+  // 变速变调前置（与实时链 masterGain → SoundTouch → v3 → analyser 一致）：
+  // pitch 活跃时对源先做一次性 pitch（全长，Stretch 输出长度 ≈ 源×rate），
+  // 再把 pitched 的结果分块喂 engine；不活跃时直连源（回归原行为）。
+  // 注：Stretch 一次性处理整段源（含其自身相位声码器尾部），engine.process
+  // 仅作用于 pitched 数据；尾部 1s 静音冲刷仍喂 engine 以排空卷积
+  // 混响/限幅器 lookahead 余量（与实时链 SoundTouch 池尽后喂静音语义一致）。
+  let feedL: Float32Array = srcL
+  let feedR: Float32Array = srcR
+  let feedLen = totalFrames
+  if (pitchActive(currentParams)) {
+    const st = engine.getStretch()
+    st.setParams({ semitones: currentParams!.pitch.semitones, rate: currentParams!.pitch.rate })
+    const pitched = st.processStereo(srcL.subarray(0, totalFrames), srcR.subarray(0, totalFrames))
+    feedL = pitched.l
+    feedR = pitched.r
+    feedLen = feedL.length
+  }
+
   let pos = 0
-  while (pos < totalFrames) {
-    const n = Math.min(BLOCK, totalFrames - pos)
-    inL.set(srcL.subarray(pos, pos + n))
-    inR.set(srcR.subarray(pos, pos + n))
+  while (pos < feedLen) {
+    const n = Math.min(BLOCK, feedLen - pos)
+    inL.set(feedL.subarray(pos, pos + n))
+    inR.set(feedR.subarray(pos, pos + n))
     if (n < BLOCK) {
       inL.fill(0, n)
       inR.fill(0, n)
@@ -416,23 +440,15 @@ export async function exportV3Wav(sourceUrl: string, durationSeconds: number): P
     asR.set(outChunksR[i], i * BLOCK)
   }
 
-  // 变速变调（离线与实时同效果）：实时链由 SoundTouch 前置承担，导出走引擎自带
-  // Stretch（同一参数语义）对整段输出做一次性处理，保证导出与实时听感一致
-  let finalL = asL
-  let finalR = asR
-  if (pitchActive(currentParams)) {
-    const st = engine.getStretch()
-    st.setParams({ semitones: currentParams!.pitch.semitones, rate: currentParams!.pitch.rate })
-    const res = st.processStereo(asL, asR)
-    finalL = res.l
-    finalR = res.r
-  }
+  // pitch 已在 engine 处理前完成（见上方 feed 前置，与实时链顺序一致），此处直出
+  const finalL = asL
+  const finalR = asR
 
-  const wavBlob = encodeWav([finalL, finalR], fs)
-  const url = URL.createObjectURL(wavBlob)
+  const mp3Blob = encodeMp3([finalL, finalR], fs)
+  const url = URL.createObjectURL(mp3Blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `waveforge-v3-${Date.now()}.wav`
+  a.download = `waveforge-v3-${Date.now()}.mp3`
   document.body.appendChild(a)
   a.click()
   a.remove()

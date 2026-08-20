@@ -45,6 +45,8 @@ interface PlaylistDetailPanelProps {
   neteaseVip?: boolean
   qqVip?: boolean
   currentPlatform?: MusicPlatform
+  /** 当前登录用户 ID：用于判断歌单是否本人（自建歌单/我喜欢不显示收藏按钮） */
+  currentUserId?: string | number
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onPlayNext?: (song: Song) => void
@@ -83,7 +85,8 @@ function PlaylistDetailPanel({
   userPlaylists = [],
   currentSong = null,
   playerTheme = 'dark',
-  accentColor = '#ec4899'
+  accentColor = '#ec4899',
+  currentUserId,
 }: PlaylistDetailPanelProps) {
   // TV 遥控器 BACK：关闭歌单详情面板
   useTvBack(() => {
@@ -99,7 +102,9 @@ function PlaylistDetailPanel({
   const [collected, setCollected] = useState(Boolean(playlist?.isCollected))
   const [smartLoading, setSmartLoading] = useState(false)
 
-  // 网易云智能播放（playmode/intelligence）：按当前歌单/歌曲生成智能续播列表
+  // 网易云智能播放（playmode/intelligence）：按当前歌单/歌曲生成智能续播列表。
+  // 接口返回"分组"结构（每组 { id, songs: [曲目] }），必须展开各组 songs 再映射，
+  // 否则每组被当成单曲，name/ar/al/dt 全空 → 播放列表无封面无歌名、时长 0:00。
   const handleSmartPlay = async () => {
     if (!playlist || songs.length === 0 || smartLoading) return
     const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
@@ -111,14 +116,17 @@ function PlaylistDetailPanel({
       )
       const data = await res.json()
       const raw = Array.isArray(data?.data) ? data.data : []
-      const smartSongs: Song[] = raw.map((s: any) => ({
-        id: s.id,
-        name: s.name || '',
-        artists: Array.isArray(s.ar) ? s.ar.map((a: any) => ({ id: a.id, name: a.name })) : [],
-        album: s.al ? { name: s.al.name, picUrl: s.al.picUrl || '' } : { name: '', picUrl: '' },
-        duration: s.dt || 0,
-        platform: 'netease'
-      })).filter((s: Song) => s.id)
+      const smartSongs: Song[] = raw
+        .flatMap((g: any) => (Array.isArray(g?.songs) ? g.songs : []))
+        .map((s: any) => ({
+          id: s.id,
+          name: s.name || '',
+          artists: Array.isArray(s.ar) ? s.ar.map((a: any) => ({ id: a.id, name: a.name })) : [],
+          album: s.al ? { name: s.al.name, picUrl: s.al.picUrl || '' } : { name: '', picUrl: '' },
+          duration: s.dt || 0,
+          platform: 'netease'
+        }))
+        .filter((s: Song) => s.id)
       if (smartSongs.length > 0) onSongSelect(smartSongs[0], smartSongs)
     } catch {
       /* 智能播放失败静默 */
@@ -610,7 +618,10 @@ function PlaylistDetailPanel({
                           智能播放
                         </motion.button>
                       )}
-                      {getPlatformCapabilities(playlist.platform || currentPlatform).subscribePlaylist && (
+                      {/* 自建歌单/我喜欢/已收藏的歌单不显示收藏按钮（只有别人的歌单可收藏） */}
+                      {getPlatformCapabilities(playlist.platform || currentPlatform).subscribePlaylist &&
+                        !playlist.isLike &&
+                        !(currentUserId != null && playlist.userId != null && String(playlist.userId) === String(currentUserId)) && (
                       <motion.button
                         whileHover={{ scale: 1.05 }}
                         whileTap={{ scale: 0.95 }}
@@ -839,6 +850,7 @@ function PlaylistDetailPanel({
               cardHeight={DETAIL_CARD_HEIGHT}
               cardGapY={DETAIL_ROW_HEIGHT - DETAIL_CARD_HEIGHT}
               contentPaddingTop={16}
+              autoScroll
             />
             </div> {/* 结束包装容器 */}
           </motion.div>

@@ -92,8 +92,8 @@ button { font: inherit; }
 .direction-down .dp-panel { border-top: 1px solid rgba(255,255,255,.075); }
 .direction-up .dp-panel { border-bottom: 1px solid rgba(255,255,255,.075); }
 .dp-panel.up { transform-origin: center bottom; animation-name: dp-panel-up; }
-.dp-panel.down.closing { animation: dp-panel-close-down .22s cubic-bezier(.4,0,1,1) both; }
-.dp-panel.up.closing { animation: dp-panel-close-up .22s cubic-bezier(.4,0,1,1) both; }
+.dp-panel.down.closing { animation: dp-panel-close-down .24s cubic-bezier(.4,0,1,1) both; }
+.dp-panel.up.closing { animation: dp-panel-close-up .24s cubic-bezier(.4,0,1,1) both; }
 @keyframes dp-panel-down { from { opacity: 0; transform: translateY(-10px); clip-path: inset(0 0 100% 0); } to { opacity: 1; transform: none; clip-path: inset(0); } }
 @keyframes dp-panel-up { from { opacity: 0; transform: translateY(10px); clip-path: inset(100% 0 0 0); } to { opacity: 1; transform: none; clip-path: inset(0); } }
 @keyframes dp-panel-close-down { from { opacity: 1; transform: none; clip-path: inset(0); } to { opacity: 0; transform: translateY(-8px); clip-path: inset(0 0 100% 0); } }

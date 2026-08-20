@@ -37,7 +37,7 @@ waveforge-engine-v3/ui/
 ├── modalsDynamics.tsx      # 压缩 / 齿音 / 夜间 / 限幅 / IEQ / 变速变调 / 立体声宽度
 ├── modalsLoudness.tsx      # 音量自适应补偿（auto 曲线可视化）/ 响度归一化
 ├── eqCurveEditor.tsx       # SVG 对数频率轴曲线编辑器（拖拽控制点）
-├── sharePanel.tsx          # 分享串（v3 编解码）+ WAV 导出 + 引擎信息
+├── sharePanel.tsx          # 分享串（v3 编解码）+ MP3 导出 + 引擎信息
 └── index.ts                # 公共出口
 ```
 
@@ -72,7 +72,7 @@ const bridge = createV3UiBridge(host.engine, ctx.sampleRate) // host = EngineV3H
   anchorRect={anchorRect}
   engineVersion={audioEngineVersion}          // 'v1' | 'v2' | 'v3'
   onSwitchEngine={switchAudioEngine}
-  exportWav={exportV3Wav}                      // 可选：离线导出
+  exportMp3={exportV3Mp3}                      // 可选：离线导出
 />
 ```
 
@@ -85,7 +85,7 @@ const bridge = createV3UiBridge(host.engine, ctx.sampleRate) // host = EngineV3H
 |---|---|---|
 | **听力测试播放** | 监听 `v3HearingPlay` 自定义事件：`{ freqHz, levelDb }` | Web Audio 合成正弦（如 OscillatorNode），电平按 `10^(levelDb/20)` 换算幅度；播放时长约 0.6s 后停止，或由下一次事件/用户作答停止 |
 | **系统音量 → 补偿曲线** | 写 `loudnessCompensation.volumePercent`（0-100） | 监听系统音量（Electron：`navigator.mediaDevices` 不可用则用 Windows API / 播放器主音量），变化时 `bridge.setParams` 更新；无音量源时默认 80 |
-| **WAV 离线导出** | `exportWav` prop | 复用 FUSION_GUIDE 步骤 5：解码 → `EngineV3.process` 分块 → 写 WAV |
+| **MP3 离线导出** | `exportMp3` prop | 复用 FUSION_GUIDE 步骤 5：解码 → `EngineV3.process` 分块 → Float32→Int16 → lamejs MP3 128kbps |
 
 > 听力测试的"播放"不在 ui/ 内实现（纯 UI 不触碰 Web Audio），事件化解耦；未接线时流程 UI 仍可走完（不发声）。
 

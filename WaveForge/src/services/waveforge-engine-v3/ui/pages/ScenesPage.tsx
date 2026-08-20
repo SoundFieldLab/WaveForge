@@ -7,7 +7,7 @@ import { motion } from 'framer-motion'
 import { Sparkles, Save, RotateCcw, Trash2, Volume2, Gauge } from 'lucide-react'
 import { GlassCard, Toggle, RangeStyle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
-import type { V3UiBridge } from '../bridge'
+import { MAX_MY_SCENES, type V3UiBridge } from '../bridge'
 import type { V3ParamsController } from '../hooks'
 import {
   EFFECT_META, effectEnabled, patchEffectEnabled,
@@ -45,7 +45,7 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
       setSceneName('')
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已保存场景「${name}」`, type: 'info' } }))
     } else {
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '我的场景已达上限（8 个）', type: 'error' } }))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已达 ${MAX_MY_SCENES} 个上限，请先删除旧场景`, type: 'error' } }))
     }
   }
 

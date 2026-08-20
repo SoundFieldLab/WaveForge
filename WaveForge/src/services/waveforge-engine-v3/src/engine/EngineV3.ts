@@ -14,7 +14,7 @@
  *   输入 → 响度归一化增益 → 3D 环绕(轻量立体声旋转) → M/S(width + voiceBalance)
  *   → Pre-EQ(用户 EQ) → Deesser → Compressor → NightMode
  *   → 混响(卷积|算法|off 三路路由) → BassEnhancer → LoudnessComp
- *   → IEQ(Post) → [LUFS 采样点] → Limiter → 输出
+ *   → IEQ(Post) → [LUFS 采样点] → Limiter → 空间音频(第15级,纯TS,off旁路) → 输出
  *
  * 说明：
  *  - LUFS 采样点严格位于 Limiter 之前（API_SPEC 要求），测的是压限前的节目响度；
@@ -34,6 +34,7 @@ import type {
   CompressorSettings,
   ReverbSettings,
   IeqTargetCurve,
+  SpatialSettings,
 } from '../types'
 import { SIMPLE_EQ_FREQUENCIES, createDefaultParams } from '../types'
 import { EqChain } from '../dsp/EqChain'
@@ -57,6 +58,20 @@ import {
   spectralFlatness,
   spectralCrest,
 } from '../dsp/features'
+// —— 第 15 级：空间音频（纯 TS 内联；复用 src/spatial/* 纯模块，无浏览器依赖） ——
+import { TsConvolverBackend } from '../spatial/TsConvolverBackend'
+import { generateAnalyticHrtfGrid } from '../spatial/analyticHrtf'
+import { instantSpeakers } from '../spatial/types'
+import { headLockedSpeakers } from '../spatial/layouts'
+import { stageSpeakers, stageRoom } from '../spatial/scenes'
+import { computeRelativeDirection, computeTrajectoryPosition } from '../spatial/controller'
+import type {
+  VirtualSpeaker,
+  VirtualSpeakerCfg,
+  SpeakerRoute,
+  WorldSettings,
+  SpatialRenderConfig,
+} from '../spatial/types'
 
 /** 引擎内部 FFT 分析窗长（2 的幂，N/2+1 = 1025 个 bin） */
 const ANALYSIS_WINDOW = 2048
@@ -100,6 +115,152 @@ function cloneParams(p: V3EngineParams): V3EngineParams {
     ieq: { ...p.ieq },
     pitch: { ...p.pitch },
     hearing: { ...p.hearing },
+    spatial: p.spatial ? cloneSpatial(p.spatial) : undefined,
+  }
+}
+
+/** 深拷贝空间音频设置（数组/嵌套对象逐层复制；无 Float32Array，plain data） */
+function cloneSpatial(s: SpatialSettings): SpatialSettings {
+  return {
+    ...s,
+    instant: { ...s.instant },
+    headLocked: {
+      ...s.headLocked,
+      speakers: s.headLocked.speakers.map((sp) => ({ ...sp })),
+      routes: s.headLocked.routes.slice(),
+    },
+    world: {
+      ...s.world,
+      listener: { ...s.world.listener, position: { ...s.world.listener.position } },
+      sources: s.world.sources.map((src) => ({ ...src, position: { ...src.position } })),
+      trajectories: s.world.trajectories.map((t) => ({
+        sourceId: t.sourceId,
+        keyframes: t.keyframes.map((k) => ({ t: k.t, position: { ...k.position } })),
+      })),
+    },
+    stage: {
+      ...s.stage,
+      customSources: s.stage.customSources.map((src) => ({ ...src, position: { ...src.position } })),
+    },
+    ambience: { ...s.ambience },
+  }
+}
+
+// ==================== 第 15 级：空间音频配置推导（port 自 spatial/fusion.ts） ====================
+// fusion.ts 含浏览器/worklet 副作用（SpatialNode/localStorage/backendIndex），不可被纯 DSP
+// 内核 EngineV3 导入；以下为 fusion.spatialConfigFromParams / speakersFromParams 的纯函数移植，
+// 复用 layouts/scenes/controller 纯模块，行为与 fusion 逐支一致。
+// 差异（EngineV3 为立体声内核）：① 无 output 分支（无该字段）；② hrtfInterp 直接由 settings
+// 给出（无 perfMode 映射）；③ instant.multichannelAuto 退化为 instantSpeakers（输入恒 2 声道）；
+// ④ 不附加 ambience 扬声器（FOA 动态混合是处理器层能力，内联级不实现，ambience 字段保留待扩展）。
+
+/** 扬声器方位角 → 输入声道索引（az≤0→左源 0、az>0→右源 1） */
+function headLockedChannel(azimuthDeg: number): number {
+  return azimuthDeg <= 0 ? 0 : 1
+}
+
+/** 模式 B 单只扬声器按路由展开（'l'→0、'r'→1、'both'→两只半增益、undefined→就近） */
+function routeSpeaker(cfg: VirtualSpeakerCfg, route: SpeakerRoute | undefined): VirtualSpeaker[] {
+  const base = {
+    azimuthDeg: cfg.azimuthDeg,
+    elevationDeg: cfg.elevationDeg,
+    distance: cfg.distance,
+    gain: cfg.gain,
+    size: cfg.size,
+  }
+  if (route === 'both') {
+    return [
+      { ...base, channel: 0, gain: cfg.gain * 0.5 },
+      { ...base, channel: 1, gain: cfg.gain * 0.5 },
+    ]
+  }
+  const channel = route === 'r' ? 1 : route === 'l' ? 0 : headLockedChannel(cfg.azimuthDeg)
+  return [{ ...base, channel }]
+}
+
+/** 模式 C 声源轨迹查询（轨迹优先，无匹配→null 回退静态位置） */
+function trajectoryPosition(world: WorldSettings, sourceId: string): { x: number; y: number; z: number } | null {
+  const traj = world.trajectories.find((t) => t.sourceId === sourceId)
+  if (!traj) return null
+  return computeTrajectoryPosition(traj.keyframes, world.playhead)
+}
+
+/** SpatialSettings → 虚拟扬声器列表（port 自 fusion.speakersFromParams） */
+function speakersFromSettings(s: SpatialSettings): VirtualSpeaker[] {
+  if (s.mode === 'instant') {
+    // EngineV3 立体声内核（2 声道）：多声道自动映射无意义 → 常规立体声对
+    return instantSpeakers(s.instant)
+  }
+  if (s.mode === 'headLocked') {
+    const routes = s.headLocked.routes
+    return headLockedSpeakers(s.headLocked).flatMap((cfg, i) =>
+      routeSpeaker(cfg.muted ? { ...cfg, gain: 0 } : cfg, i < routes.length ? routes[i] : undefined),
+    )
+  }
+  if (s.mode === 'stage') {
+    const custom = s.stage.customSources.map((src) => {
+      const rel = computeRelativeDirection(
+        { position: { x: 0, y: 1.6, z: 0 }, yaw: 0, pitch: 0, roll: 0 },
+        src.position,
+      )
+      return {
+        channel: headLockedChannel(rel.azimuthDeg),
+        azimuthDeg: rel.azimuthDeg,
+        elevationDeg: rel.elevationDeg,
+        distance: rel.distance,
+        gain: src.gain,
+        size: src.size,
+      }
+    })
+    return [
+      ...stageSpeakers(s.stage).map((cfg) => ({
+        channel: headLockedChannel(cfg.azimuthDeg),
+        azimuthDeg: cfg.azimuthDeg,
+        elevationDeg: cfg.elevationDeg,
+        distance: cfg.distance,
+        gain: cfg.gain,
+        size: cfg.size,
+      })),
+      ...custom,
+    ]
+  }
+  if (s.mode === 'world') {
+    return s.world.sources.map((src) => {
+      const pos = trajectoryPosition(s.world, src.id) ?? src.position
+      const rel = computeRelativeDirection(s.world.listener, pos)
+      return {
+        channel: headLockedChannel(rel.azimuthDeg),
+        azimuthDeg: rel.azimuthDeg,
+        elevationDeg: rel.elevationDeg,
+        distance: rel.distance,
+        gain: src.gain,
+        size: src.size,
+      }
+    })
+  }
+  return []
+}
+
+/**
+ * SpatialSettings → 后端渲染配置（port 自 fusion.spatialConfigFromParams）。
+ * stage 模式 room/roomAmount 取场景预设（与 instant 全局房间解耦）；wet/dry amount
+ * 恒取 instant.amount（与 fusion 一致——空间化强度全局由 instant.amount 控制）。
+ * world 模式透传遮挡量 + 默认静止听者速度（多普勒 UI 驱动后续经 setParams 更新）。
+ */
+function spatialConfigFromSettings(s: SpatialSettings): SpatialRenderConfig {
+  const stageActive = s.mode === 'stage'
+  const speakers = speakersFromSettings(s)
+  return {
+    speakers,
+    room: stageActive ? stageRoom(s.stage) : s.instant.room,
+    roomAmount: stageActive ? s.stage.reverbAmount : s.instant.roomAmount,
+    amount: s.instant.amount,
+    distanceModel: 'inverse',
+    hrtfInterp: s.hrtfInterp,
+    convolution: s.convolution,
+    masterGain: s.masterGain,
+    occlusionAmount: s.mode === 'world' ? s.world.occlusion : undefined,
+    dopplerVelocity: s.mode === 'world' ? { x: 0, y: 0, z: 0 } : undefined,
   }
 }
 
@@ -164,6 +325,15 @@ export class EngineV3 {
   private _normGain = 1
   private _surroundPhase = 0
 
+  // —— 第 15 级：空间音频（纯 TS；TsConvolverBackend + 合成 HRTF 兜底网格） ——
+  private readonly _spatialBackend: TsConvolverBackend
+  private _spatialActive = false
+  /** spatial 配置变更签名（JSON）——仅当 settings 实际变化时才 setConfig，避免非空间参数
+   *  变更触发后端 resample/decorr 状态清零（fill(0)）造成咔哒声 */
+  private _spatialCfgKey = ''
+  private _spatialOutL = new Float32Array(0)
+  private _spatialOutR = new Float32Array(0)
+
   constructor(sampleRate: number, channelCount = 2) {
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
       throw new Error('invalid sample rate')
@@ -211,6 +381,11 @@ export class EngineV3 {
     this._hann = hannWindow(ANALYSIS_WINDOW)
     this._binFreqs = frequencyBins(ANALYSIS_WINDOW, sampleRate)
     this._featCache = { rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 }
+
+    // 第 15 级：空间音频后端（纯 TS TsConvolverBackend）+ 合成 HRTF 兜底网格
+    // （KEMAR 实测网格后续可运行时经 setParams→setConfig 重载；首启用合成网格保证可用）
+    this._spatialBackend = new TsConvolverBackend()
+    this._spatialBackend.loadHrtf(generateAnalyticHrtfGrid(sampleRate))
 
     // 初始快照：默认参数
     this._params = createDefaultParams(sampleRate)
@@ -278,6 +453,30 @@ export class EngineV3 {
     // —— 响度归一化 ——
     if (!p2.loudnessNormalization.enabled) {
       this._normGain = 1
+    }
+
+    // —— 第 15 级：空间音频配置同步（纯 TS；仅当 SpatialSettings 实际变化时 setConfig，
+    //    避免非空间参数变更触发后端状态清零）——mode='off' 或缺省 spatial 时旁路。
+    //    合成 HRTF 网格随采样率固定（ctor 装载），setConfig 复用；若需换 KEMAR 网格，
+    //    另设 _spatialBackend.loadHrtf + _spatialCfgKey='' 强制重下。
+    //    刚从 off→on（_spatialActive 之前为 false）时先 reset() 后端流式状态：
+    //    空间音频关闭期间后端不被调用，dryLine/卷积历史残留上次会话内容，若不清空，
+    //    重新启用瞬间会从 dryLine 吐出 ~512 样本旧音频（爆音/串音）。reset 后前 11ms
+    //    （512 样本）静音是 dryLine/湿路对齐的固有起播空白，可接受（非突降）。
+    const sp = p2.spatial
+    const active = !!sp && sp.mode !== 'off'
+    const wasActive = this._spatialActive
+    this._spatialActive = active
+    if (active && sp) {
+      const key = JSON.stringify(sp)
+      if (key !== this._spatialCfgKey) {
+        if (!wasActive) this._spatialBackend.reset()
+        this._spatialBackend.setConfig(spatialConfigFromSettings(sp))
+        this._spatialCfgKey = key
+      }
+    } else {
+      // off/缺省：失效签名（下次再启用时强制重下配置）
+      this._spatialCfgKey = ''
     }
   }
 
@@ -389,6 +588,23 @@ export class EngineV3 {
     // 14) Limiter（保护）
     if (this._params.limiter.enabled) this._limiter.processStereo(L, R)
 
+    // 15) 空间音频（纯 TS 第 15 级；mode='off' 时旁路逐位回归——不触碰 L/R）
+    //     后端内部已含房间模拟（roomSim）；环境声 Ambisonics 动态混合是处理器层能力，
+    //     内联级不实现（ambience 字段保留待扩展）。渲染结果就地写回 L/R。
+    if (this._spatialActive) {
+      if (this._spatialOutL.length < n) {
+        this._spatialOutL = new Float32Array(n)
+        this._spatialOutR = new Float32Array(n)
+      }
+      const oL = this._spatialOutL
+      const oR = this._spatialOutR
+      this._spatialBackend.processStereo(L, R, oL, oR)
+      for (let i = 0; i < n; i++) {
+        L[i] = oL[i]
+        R[i] = oR[i]
+      }
+    }
+
     // 写出
     const outL = outputs[0]
     if (outL) for (let i = 0; i < n; i++) outL[i] = L[i]
@@ -418,7 +634,7 @@ export class EngineV3 {
     return { spectrum, features }
   }
 
-  /** 引擎引入的延迟（样本数）= 限幅器前瞻 + 混响延迟。 */
+  /** 引擎引入的延迟（样本数）= 限幅器前瞻 + 混响延迟 + 空间音频分区延迟。 */
   getLatencySamples(): number {
     let lat = 0
     const p = this._params
@@ -429,6 +645,8 @@ export class EngineV3 {
         lat += Math.round((p.reverb.algorithmic.preDelayMs / 1000) * this._fs)
       }
     }
+    // 第 15 级：空间音频（mode!=='off' 时，TsConvolverBackend 有扬声器 → 1 分区长 512）
+    if (this._spatialActive) lat += this._spatialBackend.getLatencySamples()
     return lat
   }
 
@@ -454,6 +672,8 @@ export class EngineV3 {
     this._nightShelfR.reset()
     this._ieqChain.reset()
     this._stretch.reset()
+    // 第 15 级：空间音频后端流式状态清零（卷积历史/延迟线/房间 FDN；配置与 IR 保留）
+    this._spatialBackend.reset()
     this._normGain = 1
     this._surroundPhase = 0
     this._ringPos = 0

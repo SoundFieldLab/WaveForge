@@ -438,6 +438,9 @@ export default function ArtistDetailModal({
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null)
   const [selectedMV, setSelectedMV] = useState<{ id: number | string; name: string; platform?: 'netease' | 'qq'; index: number } | null>(null)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
+  // 选歌播放：退出动画零时长，弹窗当帧卸载。整屏 backdrop-filter 退出节点在播放页
+  // 同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
+  const [instantClose, setInstantClose] = useState(false)
   const [contextMenu, setContextMenu] = useState<{
     show: boolean
     x: number
@@ -571,15 +574,19 @@ export default function ArtistDetailModal({
     
     // 加载新艺人数据
     loadArtistData()
-    
-    // 每次打开艺人详情时，重置到精选（热门歌曲）标签页
-    setActiveTab('hotSongs')
+
+    // 恢复来源/记忆的标签页（initialTab，含 全部歌曲/MV/相似歌手/详情/专辑）；
+    // 无显式初始标签时默认 'hotSongs'，与"每次打开回精选"的原行为一致。
+    // 不能写死 'hotSongs'：否则从播放页返回（home 恢复）时所有标签都被重置回精选。
+    setActiveTab(initialTab)
   }, [artistId, platform])
 
   // 如果有初始专辑ID，加载专辑数据后自动打开该专辑
   useEffect(() => {
     if (initialAlbumId && albums.length > 0) {
-      const album = albums.find(a => (a.id || a.mid) === initialAlbumId)
+      // 与 handleAlbumOpen 的 onAlbumOpen(album.mid || album.id) 保持同一键序：
+      // 优先 mid（QQ 专辑 mid 为字符串 id），并 String 归一，避免 id/mid 数字字符串不一致匹配失败
+      const album = albums.find(a => String(a.mid || a.id) === String(initialAlbumId))
       if (album) {
         setSelectedAlbum(album)
         setActiveTab('albums') // 切换到专辑标签
@@ -875,6 +882,7 @@ export default function ArtistDetailModal({
   const handlePlayAll = () => {
     // 播放全部按钮始终播放热门歌曲
     if (hotSongs.length > 0 && onSongSelect) {
+      setInstantClose(true)
       onSongSelect(hotSongs[0], hotSongs)
       onClose()
     }
@@ -885,6 +893,7 @@ export default function ArtistDetailModal({
     if (onSongSelect) {
       // 区分来源：全部歌曲使用 allSongs 队列，热门歌曲使用 hotSongs 队列
       const sourceSongs = allSongs.includes(song) ? allSongs : hotSongs
+      setInstantClose(true)
       onSongSelect(song, sourceSongs)
       onClose()
     }
@@ -916,7 +925,7 @@ export default function ArtistDetailModal({
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
+        exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
         className="fixed inset-0 z-[70]"
         style={{ 
           pointerEvents: 'none',
@@ -929,7 +938,7 @@ export default function ArtistDetailModal({
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
+        exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
         className="fixed inset-0 z-[71] flex items-center justify-center p-8"
         onClick={() => {
           // 当子模态框（专辑详情或视频播放器）打开时，不响应背景点击
@@ -944,7 +953,7 @@ export default function ArtistDetailModal({
           data-tv-scope
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.9, opacity: 0 }}
+          exit={instantClose ? { scale: 0.9, opacity: 0, transition: { duration: 0 } } : { scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
           className="rounded-3xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden relative"
         >
@@ -1652,7 +1661,14 @@ export default function ArtistDetailModal({
             albumId={selectedAlbum.mid || selectedAlbum.id!}
             platform={platform}
             onClose={() => setSelectedAlbum(null)}
-            onSongSelect={onSongSelect}
+            onSongSelect={(song, songs) => {
+              // 从艺人弹窗内的专辑子视图选歌：播放的同时必须把艺人弹窗一并关闭，
+              // 否则播放页出现后艺人/专辑界面还叠在上面
+              setInstantClose(true)
+              onSongSelect?.(song, songs)
+              setSelectedAlbum(null)
+              onClose()
+            }}
             playerTheme={playerTheme}
             neteaseVip={neteaseVip}
             qqVip={qqVip}
@@ -1677,7 +1693,12 @@ export default function ArtistDetailModal({
           song={contextMenu.song}
           playerTheme={playerTheme}
           onClose={() => setContextMenu({ show: false, x: 0, y: 0, song: null, sourceSongs: [] })}
-          onPlayNow={(song) => onSongSelect?.(song, contextMenu.sourceSongs)}
+          onPlayNow={(song) => {
+            // 右键"播放"也必须关闭艺人弹窗，否则播放页出现后弹窗还叠在上面
+            setInstantClose(true)
+            onSongSelect?.(song, contextMenu.sourceSongs)
+            onClose()
+          }}
           onPlayNext={onPlayNext}
           onAddToFavorites={onAddToFavorites}
           onRemoveFromFavorites={onRemoveFromFavorites}

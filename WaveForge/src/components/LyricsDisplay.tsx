@@ -1889,14 +1889,18 @@ export default memo(function LyricsDisplay({
           maskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
         }}
       >
-      {/* 歌词滚动容器 */}
+      {/* 歌词滚动容器：过渡切歌时前一曲淡出快（0.18s）、后一曲淡入慢（0.5s），避免叠字难看 */}
       <AnimatePresence mode="wait">
         <motion.div
           key={trackId}
           initial={{ opacity: 0 }}
-          animate={{ opacity: isTransitioning ? 0 : 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.4, ease: 'easeInOut' }}
+          animate={{
+            opacity: isTransitioning ? 0 : 1,
+            transition: isTransitioning
+              ? { duration: 0.18, ease: 'easeIn' }
+              : { duration: 0.5, ease: 'easeOut' },
+          }}
+          exit={{ opacity: 0, transition: { duration: 0.18, ease: 'easeIn' } }}
           className={`absolute inset-0 flex min-w-0 flex-col justify-start px-8 ${scrollAlignment === 'center' ? 'items-center' : 'items-start'}`}
           style={{
             paddingTop: '0',

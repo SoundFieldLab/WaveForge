@@ -12,7 +12,7 @@ import {
   detachV3Engine,
   getV3Bridge,
   setV3SystemVolume,
-  exportV3Wav,
+  exportV3Mp3,
   isV3Attached,
 } from '../waveforge-engine-v3/attachV3Engine'
 import type { AudioEngineVersion } from '../audioEngineVersion'
@@ -64,10 +64,10 @@ export class V3Adapter implements IAudioEngineAdapter {
     // v3 响度归一化引擎内自治，no-op
   }
 
-  async exportWav(sourceUrl: string, durationSeconds: number): Promise<void> {
+  async exportMp3(sourceUrl: string, durationSeconds: number): Promise<void> {
     this.setExporting(true)
     try {
-      await exportV3Wav(sourceUrl, durationSeconds)
+      await exportV3Mp3(sourceUrl, durationSeconds)
     } finally {
       this.setExporting(false)
     }
@@ -75,12 +75,12 @@ export class V3Adapter implements IAudioEngineAdapter {
 
   renderStudio(props: RenderStudioProps): React.ReactNode {
     const { sourceUrl, sourceDuration, ...commonProps } = props
-    // v3 调音室需要 bridge + exportWav 闭包 + exporting 状态
-    // exportWav 闭包：包装 adapter.exportWav，错误时弹 toast
-    const exportWav = sourceUrl
+    // v3 调音室需要 bridge + exportMp3 闭包 + exporting 状态
+    // exportMp3 闭包：包装 adapter.exportMp3，错误时弹 toast
+    const exportMp3 = sourceUrl
       ? async () => {
           try {
-            await this.exportWav(sourceUrl, sourceDuration || 0)
+            await this.exportMp3(sourceUrl, sourceDuration || 0)
           } catch (err) {
             window.dispatchEvent(new CustomEvent('showToast', {
               detail: { message: `导出失败：${err instanceof Error ? err.message : String(err)}`, type: 'error' },
@@ -91,7 +91,7 @@ export class V3Adapter implements IAudioEngineAdapter {
     return (
       <LazyMixingStudioV3
         bridge={getV3Bridge()}
-        exportWav={exportWav}
+        exportMp3={exportMp3}
         exporting={this.exporting}
         {...commonProps}
       />

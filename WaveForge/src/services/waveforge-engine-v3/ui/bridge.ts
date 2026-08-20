@@ -21,8 +21,8 @@ import { HearingTest, type AudiogramPoint } from '../src/analysis/HearingTest'
 
 /** 我的场景存储键（v3 独立命名空间，与 v2 区分） */
 const MY_SCENES_KEY = 'waveforge:v3-my-scenes'
-/** 我的场景上限（与 v2 一致） */
-export const MAX_MY_SCENES = 8
+/** 我的场景上限（v3 独立命名空间，较 v2 的 8 提升至 20） */
+export const MAX_MY_SCENES = 20
 
 export interface V3HearingSession {
   /** 当前待测步骤；null=未开始或已完成 */

@@ -1,5 +1,5 @@
 /**
- * 调音器页 —— 分享串 / WAV 导出 / 引擎信息
+ * 调音器页 —— 分享串 / MP3 导出 / 引擎信息
  */
 
 import { useState } from 'react'
@@ -14,11 +14,11 @@ interface TunerPageProps {
   controller: V3ParamsController
   theme: HSETheme
   onOpenEffect: (key: string) => void
-  exportWav?: (() => Promise<void>) | null
+  exportMp3?: (() => Promise<void>) | null
   exporting?: boolean
 }
 
-export default function TunerPage({ bridge, controller, theme, exportWav, exporting }: TunerPageProps) {
+export default function TunerPage({ bridge, controller, theme, exportMp3, exporting }: TunerPageProps) {
   const { params, replace } = controller
   const [shareText, setShareText] = useState('')
   const [importText, setImportText] = useState('')
@@ -92,19 +92,19 @@ export default function TunerPage({ bridge, controller, theme, exportWav, export
         </div>
       </GlassCard>
 
-      {/* WAV 导出 */}
+      {/* MP3 导出 */}
       <GlassCard theme={theme}>
         <div className="flex items-center gap-2 mb-3">
           <FileAudio className="w-4 h-4" style={{ color: theme.accentColor }} />
           <span className={`${theme.textPrimary} text-sm font-medium`}>导出处理后的音乐</span>
         </div>
-        <div className={`${theme.textSecondary} text-xs mb-3`}>把当前参数离线渲染成 WAV 文件下载（个人处理用途，涉及版权曲目请勿分发）。</div>
-        {exportWav ? (
-          <button type="button" onClick={() => void exportWav()} disabled={exporting}
+        <div className={`${theme.textSecondary} text-xs mb-3`}>把当前参数离线渲染成 MP3 文件下载（个人处理用途，涉及版权曲目请勿分发）。</div>
+        {exportMp3 ? (
+          <button type="button" onClick={() => void exportMp3()} disabled={exporting}
             className="w-full py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-40 transition-all hover:brightness-110 active:scale-[0.98] flex items-center justify-center gap-2"
             style={{ backgroundColor: theme.accentColor }}>
             <FileAudio className="w-4 h-4" />
-            {exporting ? '导出中…' : '导出 WAV'}
+            {exporting ? '导出中…' : '导出 MP3'}
           </button>
         ) : (
           <div className={`${theme.textTertiary} text-xs`}>融合侧接入离线导出后显示此按钮。</div>

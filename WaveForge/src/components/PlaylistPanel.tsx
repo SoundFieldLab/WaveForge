@@ -1,6 +1,7 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from 'react'
+import { memo, useCallback, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Play, Music, Crown, Loader2, Sparkles } from 'lucide-react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { X, Play, Music, Loader2, Sparkles } from 'lucide-react'
 import { isTvModeActive } from '../platform'
 import { Song } from '../services/musicApi'
 import CachedImage from './CachedImage'
@@ -28,6 +29,104 @@ const PLAYLIST_ROW_GAP = 8
 const PLAYLIST_ROW_HEIGHT = PLAYLIST_CARD_HEIGHT + PLAYLIST_ROW_GAP
 const PLAYLIST_OVERSCAN = 5
 
+/** 记忆化行组件：歌曲列表大时避免每行随滚动/重渲染重复渲染 */
+const PlaylistRow = memo(function PlaylistRow({
+  song,
+  index,
+  isCurrent,
+  isDark,
+  isVip,
+  platform,
+  onSongSelect,
+}: {
+  song: Song
+  index: number
+  isCurrent: boolean
+  isDark: boolean
+  isVip: boolean
+  platform: string
+  onSongSelect: (index: number) => void
+}) {
+  return (
+    <motion.button
+      type="button"
+      whileHover={{ scale: 1.012, x: -2 }}
+      whileTap={{ scale: 0.99 }}
+      onClick={() => onSongSelect(index)}
+      className="absolute inset-x-0 flex w-full cursor-pointer items-center gap-4 overflow-hidden rounded-2xl px-4 text-left"
+      style={{
+        top: 0,
+        height: `${PLAYLIST_CARD_HEIGHT}px`,
+        background: isCurrent
+          ? isDark
+            ? 'linear-gradient(135deg, rgba(255,255,255,0.19), rgba(255,255,255,0.11))'
+            : 'linear-gradient(135deg, rgba(0,0,0,0.12), rgba(0,0,0,0.07))'
+          : isDark
+            ? 'linear-gradient(135deg, rgba(255,255,255,0.065), rgba(255,255,255,0.035))'
+            : 'linear-gradient(135deg, rgba(0,0,0,0.05), rgba(0,0,0,0.025))',
+        border: isCurrent
+          ? isDark ? '1px solid rgba(255,255,255,0.22)' : '1px solid rgba(0,0,0,0.18)'
+          : isDark ? '1px solid rgba(255,255,255,0.045)' : '1px solid rgba(0,0,0,0.04)',
+        boxShadow: isCurrent ? '0 10px 24px rgba(0,0,0,0.18)' : 'none',
+      }}
+    >
+      <div className="flex w-10 shrink-0 items-center justify-center">
+        {isCurrent ? (
+          <motion.div
+            animate={{ scale: [1, 1.14, 1] }}
+            transition={{ repeat: Infinity, duration: 1.6 }}
+          >
+            <Play className={`h-5 w-5 ${isDark ? 'fill-white text-white drop-shadow-lg' : 'fill-black text-black'}`} />
+          </motion.div>
+        ) : (
+          <span className={`text-base font-semibold ${isDark ? 'text-white/50' : 'text-black/45'}`}>{index + 1}</span>
+        )}
+      </div>
+
+      <div className={`h-16 w-16 shrink-0 overflow-hidden rounded-xl shadow-md ring-1 ${isDark ? 'bg-white/10 ring-white/15' : 'bg-black/5 ring-black/10'}`}>
+        {song.album?.picUrl ? (
+          <CachedImage
+            src={song.album.picUrl}
+            alt={song.name}
+            className="h-full w-full object-cover"
+            fallback={
+              <div className={`flex h-full w-full items-center justify-center ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
+                <Music className={`h-6 w-6 ${isDark ? 'text-white/30' : 'text-black/30'}`} />
+              </div>
+            }
+          />
+        ) : (
+          <div className={`flex h-full w-full items-center justify-center ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
+            <Music className={`h-6 w-6 ${isDark ? 'text-white/30' : 'text-black/30'}`} />
+          </div>
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className={`truncate text-base font-semibold ${isCurrent ? (isDark ? 'text-white' : 'text-black/90') : isDark ? 'text-white/90' : 'text-black/80'}`}>
+          {song.name}
+        </div>
+        <div className={`mt-1 truncate text-sm ${isCurrent ? (isDark ? 'text-white/70' : 'text-black/60') : isDark ? 'text-white/50' : 'text-black/50'}`}>
+          {Array.isArray(song.artists) ? song.artists.map(artist => artist.name).join(', ') : '未知艺人'}
+        </div>
+      </div>
+
+      {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
+        <CrownIcon isDark={isDark} />
+      )}
+    </motion.button>
+  )
+})
+
+function CrownIcon({ isDark }: { isDark: boolean }) {
+  // lucide Crown 图标
+  return (
+    <svg className="h-5 w-5 shrink-0 text-yellow-400 drop-shadow-lg" viewBox="0 0 24 24" fill="currentColor">
+      <path d="M5 16L3 5l5.5 5L12 4l3.5 6L21 5l-2 11H5zm14 4v2H5v-2h14z" />
+    </svg>
+  )
+}
+
 function PlaylistPanel({
   show,
   onClose,
@@ -45,69 +144,21 @@ function PlaylistPanel({
   const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
   const isDark = playerTheme === 'dark'
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const scrollFrameRef = useRef<number | null>(null)
-  const pendingViewportRef = useRef({ scrollTop: 0, height: 0 })
   // TV 遥控器 BACK 关闭面板
   useTvBack(() => {
     onClose()
     return true
   })
-  const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
 
-  const commitViewport = useCallback((scrollTop: number, height: number) => {
-    pendingViewportRef.current = { scrollTop, height }
-    if (scrollFrameRef.current !== null) return
+  const onSelect = useCallback((index: number) => onSongSelect(index), [onSongSelect])
 
-    scrollFrameRef.current = window.requestAnimationFrame(() => {
-      scrollFrameRef.current = null
-      setViewport(pendingViewportRef.current)
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!show) {
-      setViewport({ scrollTop: 0, height: 0 })
-      return
-    }
-
-    const container = scrollContainerRef.current
-    if (!container) return
-
-    commitViewport(container.scrollTop, container.clientHeight)
-    const resizeObserver = new ResizeObserver(() => {
-      commitViewport(container.scrollTop, container.clientHeight)
-    })
-    resizeObserver.observe(container)
-
-    return () => resizeObserver.disconnect()
-  }, [commitViewport, show])
-
-  useEffect(() => () => {
-    if (scrollFrameRef.current !== null) {
-      window.cancelAnimationFrame(scrollFrameRef.current)
-    }
-  }, [])
-
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
-    const container = event.currentTarget
-    commitViewport(container.scrollTop, container.clientHeight)
-  }
-
-  const fallbackViewportHeight = typeof window === 'undefined' ? 720 : Math.max(320, window.innerHeight - 100)
-  const viewportHeight = viewport.height || fallbackViewportHeight
-  const startIndex = Math.max(0, Math.floor(viewport.scrollTop / PLAYLIST_ROW_HEIGHT) - PLAYLIST_OVERSCAN)
-  const endIndex = Math.min(
-    playlist.length,
-    Math.ceil((viewport.scrollTop + viewportHeight) / PLAYLIST_ROW_HEIGHT) + PLAYLIST_OVERSCAN
-  )
-  const visibleRows = useMemo(
-    () => playlist.slice(startIndex, endIndex).map((song, offset) => ({
-      song,
-      index: startIndex + offset,
-    })),
-    [endIndex, playlist, startIndex]
-  )
-  const virtualHeight = Math.max(0, playlist.length * PLAYLIST_ROW_HEIGHT - PLAYLIST_ROW_GAP)
+  // @tanstack/react-virtual：固定行高 + overscan，滚动只渲染可见行
+  const rowVirtualizer = useVirtualizer({
+    count: playlist.length,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => PLAYLIST_ROW_HEIGHT,
+    overscan: PLAYLIST_OVERSCAN,
+  })
 
   return (
     <AnimatePresence>
@@ -182,7 +233,6 @@ function PlaylistPanel({
 
             <div
               ref={scrollContainerRef}
-              onScroll={handleScroll}
               className="h-[calc(100vh-100px)] overflow-y-auto p-4"
             >
               {playlist.length === 0 ? (
@@ -191,80 +241,28 @@ function PlaylistPanel({
                   <p>播放列表为空</p>
                 </div>
               ) : (
-                <div className="relative w-full" style={{ height: `${virtualHeight}px` }}>
-                  {visibleRows.map(({ song, index }) => {
-                    const isCurrent = index === currentIndex
-                    const rowKey = `${song.platform || currentPlatform}-${song.mid || song.id}-${index}`
-
+                <div className="relative w-full" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+                  {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                    const song = playlist[virtualRow.index]
                     return (
-                      <motion.button
-                        type="button"
-                        key={rowKey}
-                        whileHover={{ scale: 1.012, x: -2 }}
-                        whileTap={{ scale: 0.99 }}
-                        onClick={() => onSongSelect(index)}
-                        className="absolute inset-x-0 flex w-full cursor-pointer items-center gap-4 overflow-hidden rounded-2xl px-4 text-left"
+                      <div
+                        key={virtualRow.key}
+                        className="absolute inset-x-0"
                         style={{
-                          top: `${index * PLAYLIST_ROW_HEIGHT}px`,
-                          height: `${PLAYLIST_CARD_HEIGHT}px`,
-                          background: isCurrent
-                            ? isDark
-                              ? 'linear-gradient(135deg, rgba(255,255,255,0.19), rgba(255,255,255,0.11))'
-                              : 'linear-gradient(135deg, rgba(0,0,0,0.12), rgba(0,0,0,0.07))'
-                            : isDark
-                              ? 'linear-gradient(135deg, rgba(255,255,255,0.065), rgba(255,255,255,0.035))'
-                              : 'linear-gradient(135deg, rgba(0,0,0,0.05), rgba(0,0,0,0.025))',
-                          border: isCurrent
-                            ? isDark ? '1px solid rgba(255,255,255,0.22)' : '1px solid rgba(0,0,0,0.18)'
-                            : isDark ? '1px solid rgba(255,255,255,0.045)' : '1px solid rgba(0,0,0,0.04)',
-                          boxShadow: isCurrent ? '0 10px 24px rgba(0,0,0,0.18)' : 'none',
+                          transform: `translateY(${virtualRow.start}px)`,
+                          height: `${virtualRow.size}px`,
                         }}
                       >
-                        <div className="flex w-10 shrink-0 items-center justify-center">
-                          {isCurrent ? (
-                            <motion.div
-                              animate={{ scale: [1, 1.14, 1] }}
-                              transition={{ repeat: Infinity, duration: 1.6 }}
-                            >
-                              <Play className={`h-5 w-5 ${isDark ? 'fill-white text-white drop-shadow-lg' : 'fill-black text-black'}`} />
-                            </motion.div>
-                          ) : (
-                            <span className={`text-base font-semibold ${isDark ? 'text-white/50' : 'text-black/45'}`}>{index + 1}</span>
-                          )}
-                        </div>
-
-                        <div className={`h-16 w-16 shrink-0 overflow-hidden rounded-xl shadow-md ring-1 ${isDark ? 'bg-white/10 ring-white/15' : 'bg-black/5 ring-black/10'}`}>
-                          {song.album?.picUrl ? (
-                            <CachedImage
-                              src={song.album.picUrl}
-                              alt={song.name}
-                              className="h-full w-full object-cover"
-                              fallback={
-                                <div className={`flex h-full w-full items-center justify-center ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
-                                  <Music className={`h-6 w-6 ${isDark ? 'text-white/30' : 'text-black/30'}`} />
-                                </div>
-                              }
-                            />
-                          ) : (
-                            <div className={`flex h-full w-full items-center justify-center ${isDark ? 'bg-white/5' : 'bg-black/5'}`}>
-                              <Music className={`h-6 w-6 ${isDark ? 'text-white/30' : 'text-black/30'}`} />
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div className={`truncate text-base font-semibold ${isCurrent ? (isDark ? 'text-white' : 'text-black/90') : isDark ? 'text-white/90' : 'text-black/80'}`}>
-                            {song.name}
-                          </div>
-                          <div className={`mt-1 truncate text-sm ${isCurrent ? (isDark ? 'text-white/70' : 'text-black/60') : isDark ? 'text-white/50' : 'text-black/50'}`}>
-                            {Array.isArray(song.artists) ? song.artists.map(artist => artist.name).join(', ') : '未知艺人'}
-                          </div>
-                        </div>
-
-                        {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
-                          <Crown className="h-5 w-5 shrink-0 text-yellow-400 drop-shadow-lg" />
-                        )}
-                      </motion.button>
+                        <PlaylistRow
+                          song={song}
+                          index={virtualRow.index}
+                          isCurrent={virtualRow.index === currentIndex}
+                          isDark={isDark}
+                          isVip={isVip}
+                          platform={currentPlatform}
+                          onSongSelect={onSelect}
+                        />
+                      </div>
                     )
                   })}
                 </div>

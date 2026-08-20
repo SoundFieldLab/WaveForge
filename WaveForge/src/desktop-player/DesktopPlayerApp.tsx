@@ -447,9 +447,11 @@ export default function DesktopPlayerApp() {
   const suppressClickRef = useRef(false)
   const collapseTimerRef = useRef<number | null>(null)
   const closingTimerRef = useRef<number | null>(null)
-  const closingReportFrameRef = useRef<number | null>(null)
   const mountedRef = useRef(true)
   const collapsedHeightRef = useRef(0)
+  // 收起动画期间/手动调整大小后短暂屏蔽面板高度上报，避免窗口被旧尺寸拉回
+  const closingRef = useRef(false)
+  const manualResizeAtRef = useRef(0)
 
   useEffect(() => {
     const bridge = getBridge()
@@ -490,7 +492,12 @@ export default function DesktopPlayerApp() {
   useEffect(() => {
     const panel = panelRef.current
     if (!expanded || !panel) return
-    const report = () => getBridge()?.reportContentHeight(collapsedHeightRef.current + panel.scrollHeight)
+    const report = () => {
+      // 收起动画期间不干扰窗口收缩；手动调整后 400ms 内忽略（ResizeObserver 可能被布局波动触发）
+      if (closingRef.current) return
+      if (performance.now() - manualResizeAtRef.current < 400) return
+      getBridge()?.reportContentHeight(collapsedHeightRef.current + panel.scrollHeight)
+    }
     const frame = requestAnimationFrame(report)
     const observer = new ResizeObserver(report)
     observer.observe(panel)
@@ -506,6 +513,7 @@ export default function DesktopPlayerApp() {
     if (closing || next === expanded) return
     const bridge = getBridge()
     if (next) {
+      closingRef.current = false
       collapsedHeightRef.current = window.innerHeight
       const result = await bridge?.setExpanded(true).catch(() => undefined)
       if (!mountedRef.current) return
@@ -513,22 +521,23 @@ export default function DesktopPlayerApp() {
       setExpanded(true)
       return
     }
+    closingRef.current = true
     setClosing(true)
     await bridge?.setExpanded(false).catch(() => undefined)
     if (!mountedRef.current) return
+    // 立即上报收起高度：窗口收缩动画与面板关闭动画并行完成，
+    // 避免原先"面板先关 220ms、窗口再缩 240ms"的两段拼接（看起来像没有动画/很丑）。
+    if (collapsedHeightRef.current) {
+      bridge?.reportContentHeight(collapsedHeightRef.current)
+    }
     if (closingTimerRef.current !== null) window.clearTimeout(closingTimerRef.current)
     closingTimerRef.current = window.setTimeout(() => {
       closingTimerRef.current = null
       if (!mountedRef.current) return
+      closingRef.current = false
       setExpanded(false)
       setClosing(false)
-      if (collapsedHeightRef.current) {
-        closingReportFrameRef.current = requestAnimationFrame(() => {
-          closingReportFrameRef.current = null
-          bridge?.reportContentHeight(collapsedHeightRef.current)
-        })
-      }
-    }, 220)
+    }, 260)
   }
 
   const clearCollapseTimer = () => {
@@ -546,8 +555,6 @@ export default function DesktopPlayerApp() {
       clearCollapseTimer()
       if (closingTimerRef.current !== null) window.clearTimeout(closingTimerRef.current)
       closingTimerRef.current = null
-      if (closingReportFrameRef.current !== null) cancelAnimationFrame(closingReportFrameRef.current)
-      closingReportFrameRef.current = null
     }
   }, [])
 
@@ -612,6 +619,7 @@ export default function DesktopPlayerApp() {
       if (latest) bridge?.resizeTo({ x: latest.screenX, y: latest.screenY })
       bridge?.endResize()
       collapsedHeightRef.current = expanded ? collapsedHeightRef.current : window.innerHeight
+      manualResizeAtRef.current = performance.now()
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }

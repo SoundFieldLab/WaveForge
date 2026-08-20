@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 
 const TargetIcon = ({ className }: { className?: string }) => (
@@ -25,6 +25,8 @@ interface ScrollToCurrentSongProps {
   cardGapY?: number
   contentPaddingTop?: number
   visibilityMargin?: number
+  /** 面板打开且列表中出现当前播放歌曲时，自动滚动定位到该歌曲（智能播放/从歌单选歌后返回的场景） */
+  autoScroll?: boolean
 }
 
 const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
@@ -44,46 +46,12 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
   cardGapY = 20,
   contentPaddingTop = 32,
   visibilityMargin = 12,
+  autoScroll = false,
 }) => {
   const resolvedContainerRef = containerRef ?? scrollContainerRef
   const resolvedTheme = theme ?? playerTheme ?? 'dark'
   const resolvedSongIndex = currentSongIndex ?? (currentSongId == null ? -1 : 0)
   const [showButton, setShowButton] = useState(false)
-
-  useEffect(() => {
-    const container = resolvedContainerRef?.current
-    if (!container || resolvedSongIndex === -1) {
-      setShowButton(false)
-      return
-    }
-    const handleScroll = () => {
-      const rowHeight = cardHeight + cardGapY
-      const rowIndex = Math.floor(resolvedSongIndex / Math.max(1, cardsPerRow))
-      const targetTop = rowIndex * rowHeight + contentPaddingTop
-      const targetBottom = targetTop + cardHeight
-      const viewportTop = container.scrollTop + visibilityMargin
-      const viewportBottom = container.scrollTop + container.clientHeight - visibilityMargin
-      const currentSongIsVisible = targetTop >= viewportTop && targetBottom <= viewportBottom
-
-      setShowButton(
-        container.scrollHeight > container.clientHeight
-        && container.scrollTop > threshold
-        && !currentSongIsVisible
-      )
-    }
-    handleScroll()
-    container.addEventListener('scroll', handleScroll)
-    return () => container.removeEventListener('scroll', handleScroll)
-  }, [
-    cardGapY,
-    cardHeight,
-    cardsPerRow,
-    contentPaddingTop,
-    resolvedContainerRef,
-    resolvedSongIndex,
-    threshold,
-    visibilityMargin,
-  ])
 
   const scrollToCurrentSong = () => {
     const container = resolvedContainerRef?.current
@@ -94,6 +62,17 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
     const targetScrollTop = targetRowTop - container.clientHeight / 2 + cardHeight / 2
     container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' })
   }
+
+  // 自动定位：仅当索引从 -1（无）变为有效值（面板打开/歌曲就位）时触发一次，
+  // 等入场动画/布局稳定后再滚，避免 clientHeight 未就绪导致定位偏移
+  const prevSongIndexRef = useRef(-1)
+  useEffect(() => {
+    const prev = prevSongIndexRef.current
+    prevSongIndexRef.current = resolvedSongIndex
+    if (!autoScroll || resolvedSongIndex === -1 || prev !== -1) return
+    const timer = window.setTimeout(scrollToCurrentSong, 350)
+    return () => window.clearTimeout(timer)
+  }, [autoScroll, resolvedSongIndex])
 
   const bgColor = resolvedTheme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'
   const textColor = resolvedTheme === 'dark' ? 'text-white/80' : 'text-black/80'

@@ -62,7 +62,8 @@ import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigat
 
 type ViewMode = 'explore' | 'minimal' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
-const EXPLORE_CACHE_KEY = 'exploreHomeCache'
+// v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
+const EXPLORE_CACHE_KEY = 'exploreHomeCache-v2'
 const EXPLORE_SESSION_REFRESH_PREFIX = 'exploreHomeRefreshed:'
 
 /** 探索页平台元信息：名称 / 页签短名 / 主题色 / 主题色 RGB */
@@ -618,6 +619,21 @@ function ExploreView({
     }
   }, [])
 
+  // 关闭探索歌单详情覆盖层（选歌播放/点关闭共用，保证不残留叠在播放页上）
+  const closeExploreDetail = useCallback(() => {
+    detailRequestRef.current += 1
+    detailControllerRef.current?.abort()
+    detailControllerRef.current = null
+    setDetailOpen(false)
+    setDetailError('')
+    if (detailCleanupTimerRef.current !== null) window.clearTimeout(detailCleanupTimerRef.current)
+    detailCleanupTimerRef.current = window.setTimeout(() => {
+      setDetail(null)
+      setDetailLoading(false)
+      detailCleanupTimerRef.current = null
+    }, 450)
+  }, [])
+
   // 网易云私人 FM：个性化电台推荐播放
   const handlePlayFM = async () => {
     if (fmLoading) return
@@ -813,8 +829,27 @@ function ExploreView({
         })
       return () => { active = false }
     }
-    // Spotify/酷狗/汽水：暂无用户歌单接口，不发起请求
-    if (platform !== 'netease' && platform !== 'qq') {
+    // Spotify：官方 API 我的歌单（token 驱动）；酷狗：隐藏窗口桥抓用户歌单
+    if (platform === 'spotify' || platform === 'kugou') {
+      const loggedIn = platform === 'spotify' ? spotifyLoggedIn : kugouLoggedIn
+      if (!loggedIn) {
+        setUserPlaylists([])
+        return
+      }
+      let active = true
+      const shouldForceRefresh = authRevision !== playlistAuthRevisionRef.current
+      playlistAuthRevisionRef.current = authRevision
+      void getUserPlaylists(platform, '', platform === 'spotify' ? spotifyUsername : kugouUsername, { forceRefresh: shouldForceRefresh })
+        .then(playlists => {
+          if (active) setUserPlaylists(playlists || [])
+        })
+        .catch(() => {
+          if (active) setUserPlaylists([])
+        })
+      return () => { active = false }
+    }
+    // 汽水：暂无用户歌单接口，不发起请求
+    if (platform === 'soda') {
       setUserPlaylists([])
       return
     }
@@ -1271,7 +1306,9 @@ function ExploreView({
             onSelect={(mode) => {
               setModeTriggerHovered(false)
               setShowModePanel(false)
-              // 先完成面板收回和内容层复位，再启动跨模式根视图动画。
+              // 立即显示过渡动画（覆盖后续所有切换过程）；面板收起/内容复位后再真正切换，
+              // 避免来源内容以展开态（下移 210px）残留成目标模式顶部的占位空区。
+              window.dispatchEvent(new CustomEvent('viewModeTransitionStart', { detail: mode }))
               window.setTimeout(() => switchMode(mode), MODE_SELECTION_CLOSE_MS)
             }}
           />
@@ -1986,24 +2023,16 @@ function ExploreView({
         playlist={detail?.playlist || null}
         songs={detail?.songs || []}
         loading={detailLoading}
-        onClose={() => {
-          detailRequestRef.current += 1
-          detailControllerRef.current?.abort()
-          detailControllerRef.current = null
-          setDetailOpen(false)
-          setDetailError('')
-          if (detailCleanupTimerRef.current !== null) window.clearTimeout(detailCleanupTimerRef.current)
-          detailCleanupTimerRef.current = window.setTimeout(() => {
-            setDetail(null)
-            setDetailLoading(false)
-            detailCleanupTimerRef.current = null
-          }, 450)
+        onClose={closeExploreDetail}
+        onSongSelect={(song, songs) => {
+          // 选歌后关闭歌单详情覆盖层，否则播放页出现后歌单界面还叠在上面
+          closeExploreDetail()
+          onSongSelect(song, songs, {
+            surface: 'explore-detail',
+            detail: detail || undefined,
+            songs,
+          })
         }}
-        onSongSelect={(song, songs) => onSongSelect(song, songs, {
-          surface: 'explore-detail',
-          detail: detail || undefined,
-          songs,
-        })}
         neteaseVip={neteaseVip}
         qqVip={qqVip}
         currentPlatform={detail?.playlist.platform || platform}

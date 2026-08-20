@@ -1,8 +1,8 @@
 /**
- * WaveForge v3 调音室 UI —— 调音器页（分享串 / WAV 导出 / 引擎信息）
+ * WaveForge v3 调音室 UI —— 调音器页（分享串 / MP3 导出 / 引擎信息）
  *
  * v3 分享串：完整参数快照（版本 + FNV-1a 校验 + 白名单解码），比 v2 的 EQ JSON 更完整。
- * WAV 导出与引擎信息（latency/采样率）供融合侧接线。
+ * MP3 导出与引擎信息（latency/采样率）供融合侧接线。
  */
 
 import { useState } from 'react'
@@ -16,13 +16,13 @@ export interface SharePanelProps {
   controller: V3ParamsController
   bridge: V3UiBridge
   theme: V3Theme
-  /** 离线导出（融合侧实现：解码 → EngineV3.process → WAV） */
-  exportWav?: (() => Promise<void>) | null
+  /** 离线导出（融合侧实现：解码 → EngineV3.process → lamejs MP3） */
+  exportMp3?: (() => Promise<void>) | null
   /** 导出进行中状态由父级管理 */
   exporting?: boolean
 }
 
-export function SharePanel({ controller, bridge, theme, exportWav, exporting }: SharePanelProps) {
+export function SharePanel({ controller, bridge, theme, exportMp3, exporting }: SharePanelProps) {
   const { params, replace } = controller
   const [shareText, setShareText] = useState('')
   const [importText, setImportText] = useState('')
@@ -91,18 +91,18 @@ export function SharePanel({ controller, bridge, theme, exportWav, exporting }: 
         <InfoLine theme={theme}>分享串含校验码，被篡改/截断的串会被拒绝；卷积 IR 以名称引用，不随串传输。</InfoLine>
       </GlassCard>
 
-      {/* WAV 导出 */}
+      {/* MP3 导出 */}
       <GlassCard theme={theme}>
         <SectionTitle icon={<FileAudio className="w-4 h-4" style={{ color: theme.accentColor }} />} theme={theme}>
           导出处理后的音乐
         </SectionTitle>
-        <div className={`${theme.textSecondary} text-xs mb-3`}>把当前参数离线渲染成 WAV 文件下载（个人处理用途，涉及版权曲目请勿分发）；离线与实时共用同一内核，逐样本一致。</div>
-        {exportWav ? (
-          <button type="button" onClick={() => void exportWav()} disabled={exporting}
+        <div className={`${theme.textSecondary} text-xs mb-3`}>把当前参数离线渲染成 MP3 文件下载（个人处理用途，涉及版权曲目请勿分发）；离线与实时共用同一内核，逐样本一致。</div>
+        {exportMp3 ? (
+          <button type="button" onClick={() => void exportMp3()} disabled={exporting}
             className="w-full py-2.5 rounded-lg text-sm font-medium text-white disabled:opacity-40 transition-all hover:brightness-110 active:scale-[0.98] flex items-center justify-center gap-2"
             style={{ backgroundColor: theme.accentColor, boxShadow: `0 6px 18px ${theme.accentColor}44` }}>
             <FileAudio className="w-4 h-4" />
-            {exporting ? '导出中…' : '导出 WAV'}
+            {exporting ? '导出中…' : '导出 MP3'}
           </button>
         ) : (
           <div className={`${theme.textTertiary} text-xs`}>融合侧接入离线导出后显示此按钮（见 UI_GUIDE）。</div>

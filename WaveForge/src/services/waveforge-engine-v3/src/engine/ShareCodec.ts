@@ -17,7 +17,8 @@
  * 纯 TS、零运行时依赖：仅使用平台全局（TextEncoder/TextDecoder/Math.imul）。
  */
 
-import type { V3EngineParams, EqBand } from '../types'
+import type { V3EngineParams, EqBand, SpatialSettings } from '../types'
+import { createDefaultSpatialSettings } from '../types'
 
 /** 当前分享串格式版本；变更不兼容格式时递增 */
 export const SHARE_CODEC_VERSION = 1
@@ -142,6 +143,102 @@ function defaultEqProBands(): EqBand[] {
     gain: 0,
     q: 1.1,
   }))
+}
+
+// ---------------------------------------------------------------------------
+// 空间音频（第 15 级）分享串编解码：plain-data JSON 块整体往返
+// 子结构形状由 spatial/types 定义、由 EngineV3 移植的 spatialConfigFromSettings 消费，
+// share-code 层不做逐字段白名单（避免与 spatial/types 双份维护漂移）——编码端原样
+// 深拷贝为 plain object，解码端递归过滤只保留 boolean/有限 number/string/plain array/
+// plain object（防 prototype 污染 + 剔除函数/Symbol/循环引用等异常 payload）。
+// ---------------------------------------------------------------------------
+
+/** 编码：SpatialSettings → plain object 深拷贝（剔除 undefined 字段，保 JSON 可序列化） */
+function encodeSpatial(s: SpatialSettings): unknown {
+  return JSON.parse(JSON.stringify(s))
+}
+
+/** 递归深度上限（防恶意深度嵌套栈溢出） */
+const SPATIAL_MAX_DEPTH = 12
+/** 单对象键数上限（防超大 payload） */
+const SPATIAL_MAX_KEYS = 256
+
+/**
+ * 解码端深度清洗：仅保留 boolean/有限 number/string/plain array/plain object，
+ * 递归限深 SPATIAL_MAX_DEPTH、单对象键数限 SPATIAL_MAX_KEYS。任何非法/超限 → 返回 null
+ * （调用方回退 createDefaultSpatialSettings）。纯函数、无原型污染（不触发 setter、
+ * 不用 eval、不引用 __proto__/constructor 等危险键——全部丢弃）。
+ */
+function deepSanitizeSpatial(v: unknown, depth: number): unknown {
+  if (depth > SPATIAL_MAX_DEPTH) return null
+  if (v === null || v === undefined) return null
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'string') return v
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  if (Array.isArray(v)) {
+    if (v.length > SPATIAL_MAX_KEYS) return null
+    const out: unknown[] = []
+    for (const item of v) {
+      const cleaned = deepSanitizeSpatial(item, depth + 1)
+      if (cleaned === null) return null // 子项非法 → 整体拒绝（保守，防半残结构）
+      out.push(cleaned)
+    }
+    return out
+  }
+  if (typeof v === 'object') {
+    const obj = v as Record<string, unknown>
+    const keys = Object.keys(obj)
+    if (keys.length > SPATIAL_MAX_KEYS) return null
+    const out: Record<string, unknown> = {}
+    for (const k of keys) {
+      // 危险键一律丢弃（防原型污染）
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue
+      const cleaned = deepSanitizeSpatial(obj[k], depth + 1)
+      if (cleaned === null) return null
+      out[k] = cleaned
+    }
+    return out
+  }
+  return null
+}
+
+/**
+ * 解码 SpatialSettings：raw 为对象 → 深度清洗 → 期望形状校验（关键字段 mode 在白名单内，
+ * 子对象存在性）→ 强类型断言；非法/缺省 → createDefaultSpatialSettings()。
+ * 形状校验保持宽松（仅 mode 白名单 + 各子对象为对象），完整字段有效性由 EngineV3 消费时
+ * 的 spatialConfigFromSettings 兜底（布局/场景助手自带钳位）。
+ */
+function decodeSpatial(raw: unknown): SpatialSettings {
+  const cleaned = deepSanitizeSpatial(raw, 0)
+  if (!cleaned || typeof cleaned !== 'object' || Array.isArray(cleaned)) {
+    return createDefaultSpatialSettings()
+  }
+  const o = cleaned as Record<string, unknown>
+  const mode = oneOf(
+    o.mode,
+    ['off', 'instant', 'headLocked', 'world', 'stage'] as const,
+    'off',
+  )
+  // 关键子对象存在性校验：缺任一 → 默认（防半残结构进入引擎）
+  const sub = ['instant', 'headLocked', 'world', 'stage', 'ambience']
+  for (const k of sub) {
+    if (!isObj(o[k])) return createDefaultSpatialSettings()
+  }
+  // 以默认为骨架、清洗后的值覆盖（保证新增子字段有默认；旧分享串缺字段不崩）
+  const def = createDefaultSpatialSettings()
+  return {
+    mode,
+    masterGain: typeof o.masterGain === 'number' && Number.isFinite(o.masterGain)
+      ? o.masterGain
+      : def.masterGain,
+    instant: { ...def.instant, ...(o.instant as object) },
+    headLocked: { ...def.headLocked, ...(o.headLocked as object) },
+    world: { ...def.world, ...(o.world as object) },
+    stage: { ...def.stage, ...(o.stage as object) },
+    ambience: { ...def.ambience, ...(o.ambience as object) },
+    convolution: oneOf(o.convolution, ['partitioned', 'time'] as const, def.convolution),
+    hrtfInterp: oneOf(o.hrtfInterp, ['nearest', 'spherical'] as const, def.hrtfInterp),
+  }
 }
 
 /** 白名单重建：只读取已知字段，未知字段（含 __proto__ 等注入键）一律丢弃 */
@@ -310,6 +407,9 @@ function sanitizeParams(raw: unknown): V3EngineParams {
     hearing: {
       enabled: bool(hearingRaw.enabled, false),
     },
+    // 空间音频（第 15 级）：raw 缺 spatial 字段 → decodeSpatial 返回默认 off；
+    // 旧分享串（无 spatial）往返得默认 off，行为与 v3 历史一致
+    spatial: decodeSpatial(raw.spatial),
     stereoWidth: num(raw.stereoWidth, 0, 2, 1),
     sceneId: str(raw.sceneId, null, 64),
     customized: bool(raw.customized, false),
@@ -433,6 +533,10 @@ function toShareObject(p: V3EngineParams): unknown {
     hearing: {
       enabled: p.hearing.enabled,
     },
+    // 空间音频（第 15 级）：作为清洗后的 JSON 块整体序列化（子结构形状由 spatial/types 定义，
+    // 引擎内联后无需 share-code 级别的逐字段白名单——解码端 deepSanitizeSpatial
+    // 递归过滤为 plain data 防 prototype 污染/超大 payload；非法/缺省 → 默认 off）。
+    spatial: p.spatial ? encodeSpatial(p.spatial) : undefined,
     stereoWidth: p.stereoWidth,
     sceneId: p.sceneId,
     customized: p.customized,

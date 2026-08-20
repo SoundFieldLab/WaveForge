@@ -33,6 +33,8 @@ interface SearchPanelProps {
   onViewComments?: (song: Song) => void
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
+  /** 打开歌单详情（内部面板）。不传时回退为外部浏览器打开 */
+  onOpenPlaylist?: (playlist: { id: string; name: string; coverImgUrl: string; trackCount: number; creator: string; platform: MusicPlatform }) => void
   onCopyInfo?: (song: Song) => void
   onRestoreConsumed?: () => void
 }
@@ -75,6 +77,14 @@ const withSearchTimeout = <T,>(promise: Promise<T>, timeoutMs = 5_000): Promise<
   )
 })
 
+/** QQ 接口返回的歌单/专辑名含 HTML 实体（如 &#32; = 空格、&amp; = &），渲染前解码 */
+function decodeHtmlEntities(text: string): string {
+  if (!text || text.indexOf('&') === -1) return text
+  const el = document.createElement('textarea')
+  el.innerHTML = text
+  return el.value
+}
+
 /**
  * 向 LRU Map 写入并维护上限：set 时更新访问顺序（先删后插），
  * 超限时从队首淘汰最旧的 cacheKey。
@@ -106,6 +116,7 @@ export default function SearchPanel({
   onViewComments,
   onOpenArtist,
   onOpenAlbum,
+  onOpenPlaylist,
   onCopyInfo,
   onRestoreConsumed
 }: SearchPanelProps) {
@@ -284,6 +295,9 @@ export default function SearchPanel({
   const selectedAlbumPlatform: MusicPlatform = selectedAlbum?.platform === 'qq' ? 'qq' : 'netease'
   const [selectedArtistAlbumId, setSelectedArtistAlbumId] = useState<string | number | undefined>()
   const [selectedArtistTab, setSelectedArtistTab] = useState<PlaybackOrigin['artistTab']>('hotSongs')
+  // 选歌播放：退出动画零时长，覆盖层当帧卸载。整屏 backdrop-filter 的退出节点在
+  // 播放页同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
+  const [instantClose, setInstantClose] = useState(false)
 
   useEffect(() => {
     if (!restorePlaybackOrigin?.surface.startsWith('search')) return
@@ -640,10 +654,11 @@ export default function SearchPanel({
         const raw = platform === 'qq' ? (data?.playlists || []) : (data?.result?.playlists || [])
         setPlaylistResults(Array.isArray(raw) ? raw.map((p: any) => ({
           id: String(p.id || ''),
-          name: p.name || '',
+          // QQ 返回的 name 含 HTML 实体（&#32; 等），渲染前解码
+          name: decodeHtmlEntities(String(p.name || '')),
           coverImgUrl: p.coverImgUrl || p.picUrl || '',
           trackCount: Number(p.trackCount ?? p.trackNumber ?? 0),
-          creator: p.creator?.nickname || p.creator?.nick || p.creator || '',
+          creator: decodeHtmlEntities(String(p.creator?.nickname || p.creator?.nick || p.creator || '')),
           platform,
         })) : [])
         console.log('🔍 歌单搜索结果:', raw.length)
@@ -848,7 +863,7 @@ export default function SearchPanel({
       data-tv-scope
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
+      exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
       className="fixed inset-0 z-[60] flex items-center justify-center p-8"
       style={{
         backdropFilter: 'blur(2px)',
@@ -1262,21 +1277,15 @@ export default function SearchPanel({
           </div>
         </div>
 
-        {/* 搜索结果 */}
-        <div 
-          className="flex-1 px-6 pb-6 pt-2 overflow-hidden"
+        {/* 搜索结果：flex-1 + min-h-0 允许收缩到弹窗剩余高度，自身滚动（避免 h-full 解析成内容高度导致无滚动条） */}
+        <div
+          ref={scrollContainerRef}
+          className="flex-1 px-6 pb-6 pt-2 min-h-0 overflow-y-auto"
+          style={{
+            scrollbarWidth: 'thin',
+            scrollbarColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.3) transparent' : 'rgba(0,0,0,0.3) transparent'
+          }}
         >
-          <div
-            ref={scrollContainerRef}
-            className="h-full pr-2"
-            style={{
-              overflowY: 'auto',
-              minHeight: searched ? 'calc(85vh - 240px)' : '380px', // 缩短高度，往上收
-              maxHeight: 'calc(85vh - 240px)',
-              scrollbarWidth: 'thin',
-              scrollbarColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.3) transparent' : 'rgba(0,0,0,0.3) transparent'
-            }}
-          >
           {!loading && isFused && fusionUnavailablePlatforms.length > 0 && (
             <div className="mb-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-400/20 text-amber-200/80 text-sm">
               {fusionUnavailablePlatforms.map(item => item === 'netease' ? '网易云音乐' : 'QQ音乐').join('、')} 的部分结果暂时不可用，已展示成功返回的内容。
@@ -1350,8 +1359,14 @@ export default function SearchPanel({
                   whileHover={{ scale: 1.02 }}
                   onClick={() => {
                     if (playlist.id) {
-                      const w = (window as any).waveforge
-                      if (w?.openExternal) void w.openExternal(`https://y.qq.com/n/ryqq_v2/playlist/${playlist.id}`)
+                      if (onOpenPlaylist) {
+                        // 内部歌单详情面板打开（web/桌面都可用）
+                        onOpenPlaylist(playlist)
+                      } else {
+                        // 未接内部打开时回退为外部浏览器打开
+                        const w = (window as any).waveforge
+                        if (w?.openExternal) void w.openExternal(`https://y.qq.com/n/ryqq_v2/playlist/${playlist.id}`)
+                      }
                     }
                   }}
                   className={`${bgCard} rounded-xl p-4 cursor-pointer transition-all hover:shadow-lg border ${borderColor}`}
@@ -1442,6 +1457,7 @@ export default function SearchPanel({
                   onContextMenu={(event) => openSongContextMenu(event, song)}
                   onClick={() => {
                     const songPlatform: MusicPlatform = song.platform === 'qq' ? 'qq' : 'netease'
+                    setInstantClose(true)
                     onSongSelect(song, allResults, { surface: 'search', platform: songPlatform, searchMode: platform })
                     onClose()
                   }}
@@ -1563,8 +1579,6 @@ export default function SearchPanel({
               <p>搜索你喜欢的音乐</p>
             </div>
           )}
-          </div> {/* 关闭滚动容器 */}
-          
           {/* 滚动辅助按钮 */}
           {(isFused || searchType === 'song') && displayedResults.length > 0 && (
             <>
@@ -1583,7 +1597,6 @@ export default function SearchPanel({
         </div> {/* 关闭内容区 */}
       </motion.div>
     </motion.div>
-
     {/* 艺人详情模态框 */}
     {songContextMenu.song && (
       <SongContextMenu
@@ -1594,6 +1607,7 @@ export default function SearchPanel({
         onClose={() => setSongContextMenu(previous => ({ ...previous, show: false }))}
         onPlayNow={(song) => {
           const songPlatform: MusicPlatform = song.platform === 'qq' ? 'qq' : 'netease'
+          setInstantClose(true)
           onSongSelect(song, allResults, { surface: 'search', platform: songPlatform, searchMode: platform })
           onClose()
         }}
@@ -1630,14 +1644,22 @@ export default function SearchPanel({
             setSelectedArtistAlbumId(undefined)
             onRestoreConsumed?.()
           }}
-          onSongSelect={(song, songs) => onSongSelect(song, songs, {
-            surface: selectedArtistAlbumId ? 'search-artist-album' : 'search-artist',
-            platform: selectedArtistPlatform,
-            searchMode: platform,
-            artistId: selectedArtistPlatform === 'qq' ? selectedArtist.mid : selectedArtist.id,
-            albumId: selectedArtistAlbumId,
-            artistTab: selectedArtistTab,
-          })}
+          onSongSelect={(song, songs) => {
+            // 纵深防御：无论艺人弹窗内部回调是否触发，选歌播放时一律关闭艺人弹窗与整个搜索面板，
+            // 避免播放页出现后搜索/艺人/专辑界面还叠在上面
+            setInstantClose(true)
+            setSelectedArtist(null)
+            setSelectedArtistAlbumId(undefined)
+            onClose()
+            onSongSelect(song, songs, {
+              surface: selectedArtistAlbumId ? 'search-artist-album' : 'search-artist',
+              platform: selectedArtistPlatform,
+              searchMode: platform,
+              artistId: selectedArtistPlatform === 'qq' ? selectedArtist.mid : selectedArtist.id,
+              albumId: selectedArtistAlbumId,
+              artistTab: selectedArtistTab,
+            })
+          }}
           initialAlbumId={selectedArtistAlbumId}
           onAlbumOpen={setSelectedArtistAlbumId}
           initialTab={selectedArtistTab || 'hotSongs'}
@@ -1667,12 +1689,18 @@ export default function SearchPanel({
             setSelectedAlbum(null)
             onRestoreConsumed?.()
           }}
-          onSongSelect={(song, songs) => onSongSelect(song, songs, {
-            surface: 'search-album',
-            platform: selectedAlbumPlatform,
-            searchMode: platform,
-            albumId: selectedAlbumPlatform === 'qq' ? selectedAlbum.mid : selectedAlbum.id,
-          })}
+          onSongSelect={(song, songs) => {
+            // 纵深防御：选歌播放时关闭专辑弹窗与整个搜索面板，避免播放页出现后界面还叠在上面
+            setInstantClose(true)
+            setSelectedAlbum(null)
+            onClose()
+            onSongSelect(song, songs, {
+              surface: 'search-album',
+              platform: selectedAlbumPlatform,
+              searchMode: platform,
+              albumId: selectedAlbumPlatform === 'qq' ? selectedAlbum.mid : selectedAlbum.id,
+            })
+          }}
           playerTheme={playerTheme}
           neteaseVip={neteaseVip}
           qqVip={qqVip}

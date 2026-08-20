@@ -80,7 +80,7 @@ export class V2Adapter implements IAudioEngineAdapter {
     loudnessNormalizationService.reset(this.engine)
   }
 
-  async exportWav(sourceUrl: string, durationSeconds: number): Promise<void> {
+  async exportMp3(sourceUrl: string, durationSeconds: number): Promise<void> {
     return this.engine.exportToWav(sourceUrl, durationSeconds)
   }
 

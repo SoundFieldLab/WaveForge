@@ -59,7 +59,7 @@ export class V1Adapter implements IAudioEngineAdapter {
     // v1 无响度归一化能力，no-op
   }
 
-  async exportWav(sourceUrl: string, durationSeconds: number): Promise<void> {
+  async exportMp3(sourceUrl: string, durationSeconds: number): Promise<void> {
     return this.engine.exportToWav(sourceUrl, durationSeconds)
   }
 

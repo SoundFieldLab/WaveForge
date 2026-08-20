@@ -30,10 +30,10 @@ function clickNav(label: string) {
 describe('V3 调音室 UI 冒烟', () => {
   beforeEach(() => cleanup())
 
-  it('主面板渲染：标题 + 7 导航项 + 默认主页', () => {
+  it('主面板渲染：标题 + 8 导航项 + 默认主页', () => {
     makeUi()
     expect(screen.getByText('HyperSoundEngine')).toBeTruthy()
-    for (const label of ['主页', '音效场景', '均衡器', '空间音效', '动态调音', '分析', '调音器']) {
+    for (const label of ['主页', '音效场景', '均衡器', '空间音效', '空间音频', '动态调音', '分析', '调音器']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
     // 默认页：主页包含系统音效 + 音效模式快捷
@@ -46,6 +46,11 @@ describe('V3 调音室 UI 冒烟', () => {
   it('空间音效页：混响开关可切换启用态', () => {
     const { bridge } = makeUi()
     clickNav('空间音效')
+    // 空间音效页只剩混响/3D环绕/立体声宽度卡（空间音频已独立为「空间音频」选项卡）。
+    // 注意：导航栏始终展示「空间音频」标签，故不能以该文案判存在——改用空间音频页
+    // 独有的模式选择器文案「一键空间化」与 Power 按钮 title 作为页面内容标记。
+    expect(screen.queryByText('一键空间化')).toBeNull()
+    expect(screen.queryByTitle('开启空间音频')).toBeNull()
     // 混响卡片标题存在
     expect(screen.getAllByText('混响').length).toBeGreaterThan(0)
     // 默认未启用
@@ -57,6 +62,21 @@ describe('V3 调音室 UI 冒烟', () => {
     expect(reverbToggle).toBeTruthy()
     fireEvent.click(reverbToggle!)
     expect(bridge.getParams().reverb.enabled).toBe(true)
+  })
+
+  it('空间音频页：Power 按钮开启后切到 instant 模式', () => {
+    makeUi()
+    clickNav('空间音频')
+    // 空间音频页头部标题存在（与空间音效页区分）
+    expect(screen.getAllByText('空间音频').length).toBeGreaterThan(0)
+    // 空间音频页不应有混响卡（混响留在空间音效页）
+    expect(screen.queryByText('混响')).toBeNull()
+    // 默认模式 off → Power 按钮可开启 instant
+    const powerBtn = screen.getAllByRole('button').find((btn) => btn.title === '开启空间音频')
+    expect(powerBtn).toBeTruthy()
+    fireEvent.click(powerBtn!)
+    // 开启后切到 instant（一键空间化），模式选择器出现「一键空间化」激活
+    expect(screen.getAllByText('一键空间化').length).toBeGreaterThan(0)
   })
 
   it('动态调音页：压缩器阈值修改经桥写入引擎', () => {

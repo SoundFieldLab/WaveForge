@@ -1,5 +1,10 @@
 /**
- * 空间音效页 —— 混响 + 3D环绕 + 立体声宽度
+ * 空间音效页 —— 混响 + 3D 环绕 + 立体声宽度
+ *
+ * 仅承载 V3EngineParams 的「空间向」效果（reverb / surround3d / stereoWidth），
+ * 与「空间音频」(Spatial Audio，双耳渲染 4 档模式) 严格分离——后者已独立为
+ * SpatialAudioPage 顶级选项卡。视图模式（标准/专业）随空间音频一并迁出，
+ * 本页恢复为纯卡片流（与混响/3D环绕/立体声宽度效果一一对应）。
  */
 
 import { useRef } from 'react'
@@ -8,12 +13,16 @@ import { GlassCard, Toggle, Slider, RangeStyle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
 import type { V3UiBridge } from '../bridge'
 import type { V3ParamsController } from '../hooks'
+import type { PlaybackTimeStore } from '../../../../audio/playbackTimeStore'
 
 interface SpatialPageProps {
   bridge: V3UiBridge
   controller: V3ParamsController
   theme: HSETheme
   onOpenEffect: (key: string) => void
+  /** 播放时钟 store（可选）：保留以对齐 commonProps 形状，本页不直接使用
+   *  （随曲目播放仅空间音频世界漫游模式需要，已随 SpatialAudioPage 迁出） */
+  playbackTimeStore?: PlaybackTimeStore
 }
 
 const REVERB_TYPES = [

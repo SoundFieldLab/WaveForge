@@ -71,10 +71,19 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
 
   const isAnyEffectOn = anyEffectOn(params)
 
-  /** 系统音效总开关：直接恢复默认（原声监听，所有音效关闭）——与「重置」按钮同一语义 */
-  const handleMasterReset = () => {
-    replace(createDefaultParams(bridge.getSampleRate()))
-    window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已恢复默认（音效关闭，原声监听）', type: 'info' } }))
+  /** 系统音效总开关：开启/关闭两态 Toggle。
+   *  - 关闭态（!isAnyEffectOn）：点击 = 开启，默认应用 'enhanced'（增强模式）场景预设；
+   *  - 开启态（isAnyEffectOn）：点击 = 关闭，恢复默认（原声监听，所有音效关闭）。
+   *  bridge.applyScene 已内置保留 loudnessNormalization 状态（音量独立于场景预设）。 */
+  const handleMasterToggle = () => {
+    if (isAnyEffectOn) {
+      replace(createDefaultParams(bridge.getSampleRate()))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已关闭音效（原声监听）', type: 'info' } }))
+    } else {
+      bridge.applyScene('enhanced')
+      replace(bridge.getParams())
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已开启增强模式', type: 'info' } }))
+    }
   }
 
   /** 音量 0-100 → 引擎输出增益 dB（0%=-60dB 静音，100%=0dB 原声）；经响度归一化外部增益通道生效 */
@@ -106,12 +115,12 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
             <span className={`${theme.textPrimary} text-sm font-medium`}>系统音效</span>
             <button
               type="button"
-              onClick={handleMasterReset}
+              onClick={handleMasterToggle}
               className="p-2 rounded-full transition-colors"
-              style={{ background: isAnyEffectOn ? `${theme.accentColor}33` : 'rgba(255,255,255,0.06)' }}
-              title={isAnyEffectOn ? '关闭全部音效（恢复默认）' : '当前无音效（点击恢复默认）'}
+              style={{ background: isAnyEffectOn ? 'rgba(255,255,255,0.06)' : `${theme.accentColor}33` }}
+              title={isAnyEffectOn ? '关闭全部音效（恢复默认）' : '开启音效（增强模式）'}
             >
-              <Power className="w-4 h-4" style={{ color: isAnyEffectOn ? theme.accentColor : 'rgba(255,255,255,0.35)' }} />
+              <Power className="w-4 h-4" style={{ color: isAnyEffectOn ? 'rgba(255,255,255,0.35)' : theme.accentColor }} />
             </button>
           </div>
           <div className="relative rounded-xl overflow-hidden" style={{ height: 200 }}>

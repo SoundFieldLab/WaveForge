@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { AudioLines, Captions, Home, Languages } from 'lucide-react'
+import { AudioLines, Captions, Film, Home, Languages } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import QuickSettings from './QuickSettings'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -13,6 +13,9 @@ interface ImmersiveControlsProps {
   onRomanToggle: () => void
   romanEnabled: boolean
   hasRoman: boolean
+  /** 不传则不显示 MV 背景按钮（如全屏播放器） */
+  onMvBackgroundToggle?: () => void
+  mvBackgroundEnabled?: boolean
   playerTheme?: 'light' | 'dark'
   isPureMusic?: boolean // 新增：是否为纯音乐
 }
@@ -26,6 +29,8 @@ export default function ImmersiveControls({
   onRomanToggle,
   romanEnabled,
   hasRoman,
+  onMvBackgroundToggle,
+  mvBackgroundEnabled = false,
   playerTheme = 'dark',
   isPureMusic = false, // 默认非纯音乐
 }: ImmersiveControlsProps) {
@@ -76,9 +81,12 @@ export default function ImmersiveControls({
     setIsHovered(false)
   }
 
-  const featureButtonCount = (hasTranslation ? 1 : 0) + (hasRoman ? 1 : 0)
+  const showMvButton = typeof onMvBackgroundToggle === 'function'
+  const featureButtonCount = (hasTranslation ? 1 : 0) + (hasRoman ? 1 : 0) + (showMvButton ? 1 : 0) // MV 背景按钮常驻
   const rowRem = tvCompact ? 3.2 : 4 // 每个按钮行占位高度（rem），TV 紧凑更小
   const romanButtonTop = hasTranslation ? `${(tvCompact ? 6.4 : 8)}rem` : `${(tvCompact ? 3.2 : 4)}rem`
+  // MV 背景按钮：紧跟翻译/罗马音功能行的下一行
+  const mvButtonTop = `${(tvCompact ? 3.2 : 4) + (featureButtonCount - 1) * rowRem}rem`
   const quickSettingsTop = `${(tvCompact ? 3.2 : 4) + featureButtonCount * rowRem}rem`
   const mixingStudioTop = `${(tvCompact ? 6.4 : 8) + featureButtonCount * rowRem}rem`
   const btnPad = tvCompact ? 'p-2.5' : 'p-3' // 按钮内边距
@@ -218,6 +226,57 @@ export default function ImmersiveControls({
             }}
           />
         </motion.button>
+      )}
+
+      {/* MV 背景按钮 - 常驻（罗马音下方），仅在提供回调时显示 */}
+      {showMvButton && (
+      <motion.button
+        key="mv-background-button"
+        initial={{ x: 44, opacity: 0, scale: 0.96, filter: 'blur(6px)' }}
+        animate={{
+          x: isVisible ? 0 : 44,
+          opacity: isVisible ? 1 : 0,
+          scale: isVisible ? 1 : 0.96,
+          filter: isVisible ? 'blur(0px)' : 'blur(6px)',
+        }}
+        transition={featureButtonTransition}
+        whileHover={{ scale: 1.06, x: -3, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } }}
+        whileTap={{ scale: 0.96 }}
+        onClick={onMvBackgroundToggle}
+        aria-label="MV 背景"
+        className={`absolute right-6 ${btnPad} rounded-full backdrop-blur-md border transition-colors overflow-hidden`}
+        style={{
+          top: mvButtonTop,
+          backgroundColor: mvBackgroundEnabled
+            ? accentColor
+            : playerTheme === 'dark'
+              ? 'rgba(0,0,0,0.4)'
+              : 'rgba(255,255,255,0.5)',
+          borderColor: mvBackgroundEnabled
+            ? `${accentColor}66`
+            : playerTheme === 'dark'
+              ? 'rgba(255,255,255,0.2)'
+              : 'rgba(0,0,0,0.2)',
+          boxShadow: mvBackgroundEnabled
+            ? `0 0 20px ${accentColor}40, inset 0 1px 1px rgba(255,255,255,0.3)`
+            : '0 4px 12px rgba(0,0,0,0.15)',
+        }}
+      >
+        {mvBackgroundEnabled && (
+          <div
+            className="absolute inset-0 pointer-events-none"
+            style={{
+              background: 'radial-gradient(circle at 30% 30%, rgba(255,255,255,0.3) 0%, transparent 60%)',
+            }}
+          />
+        )}
+        <Film
+          className={`${iconCls} relative z-10`}
+          style={{
+            color: mvBackgroundEnabled ? '#fff' : playerTheme === 'dark' ? '#fff' : '#000'
+          }}
+        />
+      </motion.button>
       )}
 
       {/* 快速设置按钮 */}

@@ -61,7 +61,7 @@ export default function GenericMixingStudio({
   const handleExport = async () => {
     if (!sourceUrl) return
     try {
-      await bridge.exportWav(sourceUrl, sourceDuration || 0)
+      await bridge.exportMp3(sourceUrl, sourceDuration || 0)
     } catch (err) {
       window.dispatchEvent(new CustomEvent('showToast', {
         detail: { message: `导出失败：${err instanceof Error ? err.message : String(err)}`, type: 'error' },

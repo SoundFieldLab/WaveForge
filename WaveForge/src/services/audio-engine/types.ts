@@ -14,6 +14,7 @@
  */
 
 import type { AudioEngineVersion } from '../audioEngineVersion'
+import type { PlaybackTimeStore } from '../../audio/playbackTimeStore'
 
 // ==================== 引擎清单（每个引擎用独立文件声明自己） ====================
 
@@ -69,10 +70,12 @@ export interface MixingStudioCommonProps {
 
 /** renderStudio 接收的完整 props（公共 + 播放信息） */
 export interface RenderStudioProps extends MixingStudioCommonProps {
-  /** 当前播放音频 URL（导出用；v3 调音室不直接用，由 adapter 注入 exportWav 闭包） */
+  /** 当前播放音频 URL（导出用；v3 调音室不直接用，由 adapter 注入 exportMp3 闭包） */
   sourceUrl?: string
   /** 当前播放时长（秒，导出用） */
   sourceDuration?: number
+  /** 播放时钟 store（可选）：App 注入给自定义调音室（v3「随曲目播放」读 currentTime）；缺省 = 独立运行 */
+  playbackTimeStore?: PlaybackTimeStore
 }
 
 // ==================== 引擎能力描述 ====================
@@ -104,8 +107,8 @@ export interface IAudioEngineUiBridge {
   setParams(p: unknown): void
   /** 参数的结构化描述（若提供，通用 UI 渲染 EQ 滑块/音效开关；否则只显示 JSON） */
   getParamSchema(): ParamSchema | null
-  /** 离线导出 WAV */
-  exportWav(sourceUrl: string, durationSeconds: number): Promise<void>
+  /** 离线导出 MP3 */
+  exportMp3(sourceUrl: string, durationSeconds: number): Promise<void>
   /** 场景列表（可选） */
   getScenes?(): Array<{ id: string; name: string }>
   /** 应用场景（可选） */
@@ -166,8 +169,8 @@ export interface IAudioEngineAdapter {
 
   // —— 离线导出 ——
 
-  /** 离线导出 WAV（内部触发浏览器下载） */
-  exportWav(sourceUrl: string, durationSeconds: number): Promise<void>
+  /** 离线导出 MP3（内部触发浏览器下载） */
+  exportMp3(sourceUrl: string, durationSeconds: number): Promise<void>
 
   // —— 调音室渲染 ——
 

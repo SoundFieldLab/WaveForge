@@ -2,14 +2,14 @@
  * WaveForge v3 调音室 —— HyperSoundEngine 风格新 UI
  *
  * 布局：左侧导航 + 主内容区 + 底部状态栏
- * 8 个页面：主页 / 音效场景 / 均衡器 / 空间音效 / 动态调音 / 分析 / 调音器 / 关于
+ * 9 个页面：主页 / 音效场景 / 均衡器 / 空间音效 / 空间音频 / 动态调音 / 分析 / 调音器 / 关于
  */
 
 import { useState, useMemo, useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
 import {
   Home, Play, Sparkles, SlidersHorizontal, AudioLines, Activity,
-  BarChart3, Settings, Info, X, Save, RotateCcw,
+  BarChart3, Settings, Info, X, Save, RotateCcw, Headphones,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
@@ -19,10 +19,11 @@ import { HiResBadge, DtsXBadge, DolbyAtmosBadge } from './components/Badges'
 import { RangeStyle } from './components/Primitives'
 
 // 复用现有 v3 UI 的桥接与参数管理
-import type { V3UiBridge } from './bridge'
+import { MAX_MY_SCENES, type V3UiBridge } from './bridge'
 import { useV3Params } from './hooks'
 import type { V3ParamsController } from './hooks'
 import type { EngineStats } from '../src/types'
+import type { PlaybackTimeStore } from '../../../audio/playbackTimeStore'
 import { createDefaultParams } from '../src/types'
 
 // 效果配置弹窗（复用既有 modals，主题经 toLegacyTheme 适配）
@@ -36,6 +37,7 @@ import HomePage from './pages/HomePage'
 import ScenesPage from './pages/ScenesPage'
 import EqPage from './pages/EqPage'
 import SpatialPage from './pages/SpatialPage'
+import SpatialAudioPage from './pages/SpatialAudioPage'
 import DynamicsPage from './pages/DynamicsPage'
 import AnalysisPage from './pages/AnalysisPage'
 import TunerPage from './pages/TunerPage'
@@ -49,11 +51,16 @@ export interface V3MixingStudioProps {
   engineVersion?: string
   onSwitchEngine?: (version: string) => void
   availableEngines?: Array<{ id: string; displayName: string; description: string }>
-  exportWav?: (() => Promise<void>) | null
+  exportMp3?: (() => Promise<void>) | null
   exporting?: boolean
+  /** 播放时钟 store（可选）：经适配层由 App 注入，供空间音效「随曲目播放」使用；缺省 = 独立运行 */
+  playbackTimeStore?: PlaybackTimeStore
 }
 
-type PageKey = 'home' | 'scenes' | 'eq' | 'spatial' | 'dynamics' | 'analysis' | 'tuner' | 'about'
+type PageKey =
+  | 'home' | 'scenes' | 'eq'
+  | 'spatial' | 'spatial-audio'
+  | 'dynamics' | 'analysis' | 'tuner' | 'about'
 
 interface NavItem {
   key: PageKey
@@ -66,6 +73,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'scenes', label: '音效场景', icon: Sparkles },
   { key: 'eq', label: '均衡器', icon: SlidersHorizontal },
   { key: 'spatial', label: '空间音效', icon: AudioLines },
+  { key: 'spatial-audio', label: '空间音频', icon: Headphones },
   { key: 'dynamics', label: '动态调音', icon: Activity },
   { key: 'analysis', label: '分析', icon: BarChart3 },
   { key: 'tuner', label: '调音器', icon: Settings },
@@ -86,7 +94,7 @@ const PANEL_IN = `
 export default function V3MixingStudio({
   bridge, onClose, playerTheme, anchorRect,
   engineVersion = 'v3', onSwitchEngine, availableEngines,
-  exportWav = null, exporting = false,
+  exportMp3 = null, exporting = false, playbackTimeStore,
 }: V3MixingStudioProps) {
   const theme = useHSETheme()
   const controller = useV3Params(bridge)
@@ -123,11 +131,16 @@ export default function V3MixingStudio({
     if (bridge.saveMyScene(name)) {
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已保存场景「${name}」`, type: 'info' } }))
     } else {
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '我的场景已达上限（8 个）', type: 'error' } }))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已达 ${MAX_MY_SCENES} 个上限，请先删除旧场景`, type: 'error' } }))
     }
   }
 
-  const commonProps = { bridge, controller, theme, onOpenEffect: setEffectModal, onNavigate: (page: string) => setActivePage(page as PageKey) }
+  /** onNavigate：外部页（如主页快捷卡）跳转到指定页（空间音效现为顶级选项卡，直接切页） */
+  const handleNavigate = (page: string): void => {
+    setActivePage(page as PageKey)
+  }
+
+  const commonProps = { bridge, controller, theme, onOpenEffect: setEffectModal, onNavigate: handleNavigate, playbackTimeStore }
 
   const closeModal = () => setEffectModal(null)
   const legacyTheme = toLegacyTheme(theme)
@@ -196,7 +209,7 @@ export default function V3MixingStudio({
                     }}
                   >
                     <Icon className="w-4 h-4" style={{ color: active ? theme.accentColor : 'rgba(255,255,255,0.45)' }} />
-                    <span className={active ? 'font-medium' : ''}>{item.label}</span>
+                    <span className={`flex-1 ${active ? 'font-medium' : ''}`}>{item.label}</span>
                   </motion.button>
                 )
               })}
@@ -272,10 +285,15 @@ export default function V3MixingStudio({
                 {activePage === 'home' && <HomePage {...commonProps} />}
                 {activePage === 'scenes' && <ScenesPage {...commonProps} />}
                 {activePage === 'eq' && <EqPage {...commonProps} />}
+                {/* 空间音效：顶级独立选项卡，直接渲染 SpatialPage
+                    （混响 / 3D 环绕 / 立体声宽度——V3EngineParams 效果，非空间音频） */}
                 {activePage === 'spatial' && <SpatialPage {...commonProps} />}
+                {/* 空间音频：独立顶级选项卡（Power 按钮 + 模式选择器 + 四模式面板，
+                    与「空间音效」区分——双耳渲染 4 档模式 instant/headLocked/world/stage） */}
+                {activePage === 'spatial-audio' && <SpatialAudioPage {...commonProps} />}
                 {activePage === 'dynamics' && <DynamicsPage {...commonProps} />}
                 {activePage === 'analysis' && <AnalysisPage {...commonProps} />}
-                {activePage === 'tuner' && <TunerPage {...commonProps} exportWav={exportWav} exporting={exporting} />}
+                {activePage === 'tuner' && <TunerPage {...commonProps} exportMp3={exportMp3} exporting={exporting} />}
                 {activePage === 'about' && <AboutPage theme={theme} />}
               </motion.div>
             </main>

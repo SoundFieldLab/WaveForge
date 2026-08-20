@@ -1,4 +1,11 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react'
+import {
+  buildLogBandEdges,
+  applyAttackDecay,
+  spectrumDbMap,
+  SPECTRUM_MIN_FREQ,
+  SPECTRUM_MAX_FREQ,
+} from '../utils/spectrum'
 
 /** 对数频谱段数（45Hz~12kHz 按对数均分），供频谱可视化按频段取能。 */
 export const ANALYZER_SPECTRUM_BANDS = 24
@@ -93,6 +100,10 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
     let previousOverall = 0
     let fluxBaseline = 0
     const previousSpectrum = new Float32Array(data.length)
+    // 频谱平滑状态：attack/decay 逐频段（上升快、回落慢）
+    const smoothedSpectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+    // 对数频段边界（20Hz~12kHz），与采样率无关，可预先计算
+    const bandEdges = buildLogBandEdges(ANALYZER_SPECTRUM_BANDS, SPECTRUM_MIN_FREQ, SPECTRUM_MAX_FREQ)
 
     const measureBand = (minimumFrequency: number, maximumFrequency: number) => {
       const nyquist = analyser.context.sampleRate / 2
@@ -126,13 +137,13 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
         const rawHigh = measureBand(2600, 12000)
         const rawOverall = rawBass * 0.38 + rawMid * 0.42 + rawHigh * 0.2
         const nyquist = analyser.context.sampleRate / 2
-        // 24 段对数频谱（45Hz~12kHz）：供 3D 频谱河等按频段取能；
-        // 每段取均值+峰值混合后对数压缩，低频段窄（bin 少）、高频段宽，符合听感分布
+        // 24 段对数频谱（20Hz~12kHz）：供 3D 频谱河等按频段取能；
+        // 每段取均值+峰值混合后做 dB 映射（-72dB 地板 / -12dB 天花板），
+        // 再逐频段 attack/decay 平滑——低频下探到 20Hz、动态更细腻、回落更自然
         const spectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
-        const specLogRatio = Math.log(12000 / 45)
         for (let k = 0; k < ANALYZER_SPECTRUM_BANDS; k += 1) {
-          const f0 = 45 * Math.exp((k / ANALYZER_SPECTRUM_BANDS) * specLogRatio)
-          const f1 = 45 * Math.exp(((k + 1) / ANALYZER_SPECTRUM_BANDS) * specLogRatio)
+          const f0 = bandEdges[k]
+          const f1 = bandEdges[k + 1]
           const start = Math.max(1, Math.floor(f0 / nyquist * data.length))
           const end = Math.min(data.length, Math.max(start + 1, Math.ceil(f1 / nyquist * data.length)))
           let sum = 0
@@ -142,8 +153,10 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
             sum += v
             if (v > peak) peak = v
           }
-          spectrum[k] = logCompress((sum / Math.max(1, end - start)) * 0.62 + peak * 0.38, 5)
+          spectrum[k] = spectrumDbMap((sum / Math.max(1, end - start)) * 0.62 + peak * 0.38)
         }
+        const smoothed = applyAttackDecay(smoothedSpectrum, spectrum, 0.12, 0.34)
+        smoothedSpectrum.set(smoothed)
         const fluxStart = Math.max(1, Math.floor(45 / nyquist * data.length))
         const fluxEnd = Math.min(data.length, Math.ceil(10000 / nyquist * data.length))
         let positiveFlux = 0
@@ -200,7 +213,7 @@ export function useAudioAnalyzer(analyser: AnalyserNode | null, enabled = true):
           beat: beatPulse,
           accent: accentPulse,
           flux: logCompress(fluxOnset * 12, 4),
-          spectrum,
+          spectrum: smoothed,
         })
       }
       // 仅在有订阅者且窗口可见时续帧（无消费者 = 无脉冲组件挂载，如桌面模式/首页）

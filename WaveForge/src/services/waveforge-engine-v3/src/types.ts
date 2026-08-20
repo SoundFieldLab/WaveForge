@@ -9,6 +9,18 @@
  * 约定：所有参数为不可变快照语义；EngineV3.setParams 每次接收完整 V3EngineParams。
  */
 
+import type {
+  SpatialMode,
+  ConvolutionMode,
+  HrtfInterpMode,
+  InstantSpatialSettings,
+  HeadLockedSettings,
+  WorldSettings,
+  StageSettings,
+  AmbienceSettings,
+} from './spatial/types'
+import { createDefaultSpatialParams } from './spatial/types'
+
 /** 混响路由：卷积混响 / 算法混响 / 关闭 */
 export type ReverbMode = 'convolution' | 'algorithmic' | 'off'
 /** 均衡模式：简约 5 段 / 专业多段 */
@@ -213,6 +225,59 @@ export interface HearingSettings {
   enabled: boolean
 }
 
+/**
+ * 空间音频设置（EngineV3 第 15 级内联；纯 TS——由 src/spatial/TsConvolverBackend 实现）。
+ *
+ * 设计：原独立 worklet/WASM 空间音频节点重写为纯 TS，作为 EngineV3 处理链第 15 级
+ * （Limiter 之后、写输出之前）。参数并入 V3EngineParams，mode='off' 时旁路（逐位回归）。
+ *
+ * 本接口是 SpatialParams（src/spatial/types.ts）的精简版：去除 UI/全局字段
+ * （output/perfMode/sinkId/keymap/multichannelChannels），perfMode 由直接的 hrtfInterp 表达。
+ * 子结构（instant/headLocked/world/stage/ambience）复用 spatial/types 的同名接口，保证与
+ * 纯函数布局/场景/控制器助手（headLockedSpeakers/stageSpeakers/computeRelativeDirection 等）
+ * 形状兼容——EngineV3 移植 fusion.spatialConfigFromParams 时可直接复用这些助手。角度=度，距离=米。
+ */
+export interface SpatialSettings {
+  /** 空间模式：off=关闭（旁路）/ instant=一键空间化 / headLocked=头锁定环绕 / world=世界漫游 / stage=舞台影院 */
+  mode: SpatialMode
+  /** 双耳输出主增益 0.5..1（防削波预留） */
+  masterGain: number
+  /** 模式 A：一键空间化（立体声 → ±spreadDeg/2 两只虚拟扬声器） */
+  instant: InstantSpatialSettings
+  /** 模式 B：头锁定环绕（布局预设 + 自定义编辑器；声场固定于头部朝向） */
+  headLocked: HeadLockedSettings
+  /** 模式 C：世界漫游（听者 + 声源对象；移动/旋转由 controller 纯函数驱动） */
+  world: WorldSettings
+  /** 模式 D：舞台/影院（场景预设 + 座位/房间调节） */
+  stage: StageSettings
+  /** 环境声 Ambisonics 上混（FOA 动态混合是处理器层能力；内联级保留字段，暂不影响渲染） */
+  ambience: AmbienceSettings
+  /** 卷积模式：partitioned=FFT 分区（默认）/ time=时域直接卷积 */
+  convolution: ConvolutionMode
+  /** HRTF 插值：nearest=最近邻网格查表（默认）/ spherical=球谐插值（方位过渡更平滑） */
+  hrtfInterp: HrtfInterpMode
+}
+
+/**
+ * 生成默认空间音频设置（mode='off'——EngineV3 旁路，逐位回归）。
+ * 复用 spatial/types 的 createDefaultSpatialParams 单事实源，投影出 SpatialSettings
+ * （perfMode → hrtfInterp：quality→spherical，balanced/lowLatency→nearest）。
+ */
+export function createDefaultSpatialSettings(): SpatialSettings {
+  const p = createDefaultSpatialParams()
+  return {
+    mode: p.mode,
+    masterGain: p.masterGain,
+    instant: p.instant,
+    headLocked: p.headLocked,
+    world: p.world,
+    stage: p.stage,
+    ambience: p.ambience,
+    convolution: p.convolution,
+    hrtfInterp: p.perfMode === 'quality' ? 'spherical' : 'nearest',
+  }
+}
+
 /** 引擎统计输出 */
 export interface EngineStats {
   lufsIntegrated: number
@@ -269,6 +334,12 @@ export interface V3EngineParams {
   ieq: IeqSettings
   pitch: PitchSettings
   hearing: HearingSettings
+  /**
+   * 空间音频（第 15 级，纯 TS 内联到 EngineV3；mode='off' 或缺省时旁路逐位回归）。
+   * 可选字段：旧分享串/旧持久化快照经 ShareCodec.sanitizeParams 还原时不携带本字段，
+   * EngineV3 一律按 mode='off' 旁路处理（行为与 v3 历史一致）。
+   */
+  spatial?: SpatialSettings
   /** M/S 立体声宽度 0..2（1=原始） */
   stereoWidth: number
   /** 当前场景 id；null=自定义 */
@@ -307,6 +378,7 @@ export function createDefaultParams(sampleRate: number): V3EngineParams {
     ieq: { enabled: false, strength: 0.5, targetCurve: 'flat', timeConstantSec: 3 },
     pitch: { enabled: false, semitones: 0, rate: 1, voiceBalance: 0 },
     hearing: { enabled: false },
+    spatial: createDefaultSpatialSettings(),
     stereoWidth: 1,
     sceneId: null,
     customized: false,

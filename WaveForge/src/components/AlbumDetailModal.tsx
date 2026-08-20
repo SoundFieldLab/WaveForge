@@ -63,6 +63,9 @@ function AlbumDetailModal({
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<TabType>('songs')
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
+  // 选歌播放：退出动画零时长，弹窗当帧卸载。整屏 backdrop-filter 退出节点在播放页
+  // 同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
+  const [instantClose, setInstantClose] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({
     show: false,
     x: 0,
@@ -205,6 +208,7 @@ function AlbumDetailModal({
 
   const handlePlayAll = () => {
     if (songs.length > 0 && onSongSelect) {
+      setInstantClose(true)
       onSongSelect(songs[0], songs)
       onClose()
     }
@@ -216,7 +220,7 @@ function AlbumDetailModal({
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
+        exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
         className="fixed inset-0 z-[300]"
         style={{ 
           pointerEvents: 'none',
@@ -229,7 +233,7 @@ function AlbumDetailModal({
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
+        exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
         className="fixed inset-0 z-[301] flex items-center justify-center p-8"
         onClick={onClose}
       >
@@ -237,7 +241,7 @@ function AlbumDetailModal({
           data-tv-scope
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
-          exit={{ scale: 0.9, opacity: 0 }}
+          exit={instantClose ? { scale: 0.9, opacity: 0, transition: { duration: 0 } } : { scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
           className="rounded-3xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden relative"
         >
@@ -455,6 +459,7 @@ function AlbumDetailModal({
                       whileHover={{ scale: 1.005 }}
                       onClick={() => {
                         if (onSongSelect) {
+                          setInstantClose(true)
                           onSongSelect(song, songs)
                           onClose()
                         }
@@ -651,7 +656,12 @@ function AlbumDetailModal({
         song={contextMenu.song}
         playerTheme={playerTheme}
         onClose={() => setContextMenu({ show: false, x: 0, y: 0, song: null })}
-        onPlayNow={(song) => onSongSelect?.(song, songs)}
+        onPlayNow={(song) => {
+          // 右键"播放"也必须关闭专辑弹窗，否则播放页出现后弹窗还叠在上面
+          setInstantClose(true)
+          onSongSelect?.(song, songs)
+          onClose()
+        }}
         onPlayNext={onPlayNext}
         onAddToFavorites={onAddToFavorites}
         onRemoveFromFavorites={onRemoveFromFavorites}
