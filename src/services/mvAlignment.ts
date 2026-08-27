@@ -59,6 +59,8 @@ const prewarmInFlight = new Map<string, Promise<void>>()
 const mvLog = (msg: string): void => {
   // eslint-disable-next-line no-console
   console.log('[MvAlign]', msg)
+  // Node 测试环境无 window（vitest node 环境跑 detectOffsetFromBeats），守卫避免 ReferenceError
+  if (typeof window === 'undefined') return
   void window.electron?.automixLog?.('MvAlign', msg)?.catch?.(() => undefined)
 }
 

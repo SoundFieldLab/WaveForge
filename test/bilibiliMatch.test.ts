@@ -102,15 +102,15 @@ describe('scoreCandidate（候选打分）', () => {
     expect(shouldAutoPlay(official)).toBe(true)
   })
 
-  it('私藏馆类高播放搬运：匹配但无官方信号 → 不自动播放，进候选确认', () => {
+  it('私藏馆类高播放搬运：无官方信号 → 播放加权推高分数（15172e1 行为，实测接受自动播放）', () => {
     const remaster = scoreCandidate(
       video({ title: '【私藏馆】周杰伦《稻香》超治愈神作！', duration: 223, play: 9_260_000, author: '音乐私藏馆' }),
       ctx,
       { officialVerifyType: 0 },
     )
     expect(remaster.score).toBeGreaterThanOrEqual(150)
-    expect(remaster.score).toBeLessThan(230)
-    expect(shouldAutoPlay(remaster)).toBe(false)
+    // 播放加成 ×13 不封顶后，926 万播放足以越过 standard 档 230 纯分数线
+    expect(shouldAutoPlay(remaster)).toBe(true)
   })
 
   it('教学/翻弹类：负向标记重罚，不自动播放', () => {
@@ -151,7 +151,8 @@ describe('scoreCandidate（候选打分）', () => {
   it('搜索排名加权：靠前的结果更可信', () => {
     const top = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { rank: 0 })
     const bottom = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { rank: 25 })
-    expect(top.score - bottom.score).toBeCloseTo(12)
+    // 权重从 0.8 降至 0.5（干净标题的低播放搬运常排首位，不应压过高播放真 MV）
+    expect(top.score - bottom.score).toBeCloseTo(7.5)
   })
 
   it('官方频道关键词：作者名命中唱片公司/官方账号 → 加分', () => {
@@ -241,7 +242,8 @@ describe('scoreCandidate（候选打分）', () => {
       lisaCtx,
     )
     const plain = scoreCandidate(video({ title: 'LiSA 紅蓮華 MV', duration: 239, play: 100_000 }), lisaCtx)
-    expect(themeSong.score - plain.score).toBe(24) // +12 主题曲 +12 加长版
+    // +12 主题曲 +12 加长版 +25「加长版+歌手+高播放」完整正片本体加成
+    expect(themeSong.score - plain.score).toBe(49)
   })
 
   it('OP/ED 标记按词边界加分（动漫主题曲）', () => {
@@ -288,7 +290,9 @@ describe('scoreCandidate（候选打分）', () => {
     const practice = scoreCandidate(video({ title: 'ステラ leo/need 五人练舞镜面自用', duration: 200, play: 100_000 }), ctx2)
     const mv = scoreCandidate(video({ title: 'ステラ (Stella) Leo/need 2DMV', duration: 200, play: 100_000 }), ctx2)
     expect(practice.score).toBeLessThan(mv.score)
-    expect(practice.score).toBeLessThan(200)
+    // 播放加权后整体水位上涨（10 万播放 +65），但练舞稿仍压在自动播放线 230 之下
+    expect(practice.score).toBeLessThan(230)
+    expect(shouldAutoPlay(practice)).toBe(false)
   })
 
   it('短歌名 + 官方标记 + 无歌手 → 张冠李戴重罚（王艺瑾-喜欢你 场景）', () => {
