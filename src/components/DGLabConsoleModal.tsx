@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, Copy, Check, QrCode, Power, Zap, TriangleAlert, Trash2, FileUp, Download, ScrollText,
-  Plug, PlugZap, Wifi, ChevronDown, AudioWaveform, BookOpen, ChevronRight,
+  Plug, PlugZap, Wifi, ChevronDown, AudioWaveform, BookOpen, ChevronRight, Link2, RadioTower,
 } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
 import {
@@ -29,9 +29,10 @@ import {
   isDGLabWidgetVisible, setDGLabWidgetVisible, DGLAB_WIDGET_EVENT,
 } from '../services/pluginStore'
 import { parseCombinedTxt, parsePulseFile, resampleDesignerWave, importWaves } from '../plugins/clients/waveImport'
+import { OFFICIAL_BUILTIN_WAVES } from '../plugins/clients/officialWaves'
 import { showToast } from '../plugins/toggle'
 import type { WaveDef } from '../plugins/types'
-import DGLabVizCanvas from './DGLabVizCanvas'
+import DGLabVizCanvas, { type DGLabVizModeId } from './DGLabVizCanvas'
 import DGLabGuideModal from './DGLabGuideModal'
 import { HelpInfo } from './DGLabHelp'
 
@@ -43,6 +44,7 @@ const PANEL = 'rgba(255,255,255,0.045)'
 const BORDER = 'rgba(255,255,255,0.08)'
 
 const STYLE_OPTIONS: { value: FeelStyleId; label: string; desc: string }[] = [
+  { value: 'stock', label: '原厂', desc: '复刻官方实时' },
   { value: 'stereo', label: '立体声', desc: '左右声像' },
   { value: 'heartbeat', label: '心跳', desc: '咚-哒律动' },
   { value: 'breath', label: '呼吸', desc: '缓起伏交替' },
@@ -238,14 +240,22 @@ function IpSelect({ ips, selected, onSelect }: {
 
 /* ------------------------------ 脉冲波形选择（平铺卡片） ------------------------------ */
 
-function WavePicker({ waves, selected, onSelect }: {
+function WavePicker({ waves, officialWaves = [], selected, onSelect }: {
   waves: WaveDef[]
+  officialWaves?: WaveDef[]
   selected: string
   onSelect: (id: string) => void
 }) {
   const items: { id: string; label: string; tag: string; custom?: boolean }[] = [
-    ...[{ id: 'continuous', label: '连续' }, { id: 'breath', label: '呼吸' }, { id: 'tide', label: '潮汐' }, { id: 'beat', label: '节拍' }]
+    ...[
+      { id: 'continuous', label: '连续' },
+      { id: 'breath', label: '呼吸' },
+      { id: 'tide', label: '潮汐' },
+      { id: 'beat', label: '节拍' },
+      { id: 'dglab-sweep', label: '官方实时' },
+    ]
       .map(w => ({ id: w.id, label: w.label, tag: '内置波形' })),
+    ...officialWaves.map(w => ({ id: w.id, label: w.name, tag: '官方预设' })),
     ...waves.map(w => ({ id: w.id, label: w.name, tag: w.source === 'combined' ? '设计器' : '脉冲帧', custom: true })),
   ]
   return (
@@ -456,8 +466,11 @@ export default function DGLabConsoleModal() {
   const [logModalOpen, setLogModalOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
   const [connExpanded, setConnExpanded] = useState(false)
+  const [wavePanelOpen, setWavePanelOpen] = useState(false)
+  const [lockCaps, setLockCaps] = useState(false)
   const [widgetVisible, setWidgetVisible] = useState(() => isDGLabWidgetVisible())
   const [capWarnOpen, setCapWarnOpen] = useState(false)
+  const [vizMode, setVizMode] = useState<DGLabVizModeId>('envelope')
 
   useTvBack(() => {
     if (capWarnOpen) { setCapWarnOpen(false); return true }
@@ -502,7 +515,12 @@ export default function DGLabConsoleModal() {
   }
 
   const updateCaps = (channel: 'A' | 'B', value: number) => {
-    update({ caps: { ...settings.caps, [channel]: value } })
+    if (lockCaps) {
+      // 🔗 联动：调 A 时 B 一起设置同一上限
+      update({ caps: { A: value, B: value } })
+    } else {
+      update({ caps: { ...settings.caps, [channel]: value } })
+    }
   }
 
   // 二维码
@@ -525,15 +543,16 @@ export default function DGLabConsoleModal() {
     if (status.state === 'bound' && qrZoomOpen) setQrZoomOpen(false)
   }, [status.state, qrZoomOpen])
 
-  // 选中波形 → 解析为设备帧随设置下发（瞬时字段）
+  // 选中波形 → 解析为设备帧随设置下发（瞬时字段）；官方内置波形同样走帧下发
   useEffect(() => {
     const waveId = settings.waveId
-    const builtin = ['continuous', 'breath', 'tide', 'beat'].includes(waveId)
+    const builtin = ['continuous', 'breath', 'tide', 'beat', 'dglab-sweep'].includes(waveId)
     if (builtin) {
       client.sendWaveFrames(null)
       return
     }
-    const wave = waves.find(w => w.id === waveId)
+    const allWaves = [...OFFICIAL_BUILTIN_WAVES, ...waves]
+    const wave = allWaves.find(w => w.id === waveId)
     if (!wave) return
     const frames = wave.source === 'pulse' ? wave.frames : resampleDesignerWave(wave, settings.waveFreq)
     client.sendWaveFrames(frames ?? null)
@@ -556,7 +575,7 @@ export default function DGLabConsoleModal() {
     unavailable: { text: '服务不可用（请用桌面版）', color: '#ef4444' },
   }[status.state] ?? { text: status.state, color: '#94a3b8' }
 
-  const isBuiltinWave = ['continuous', 'breath', 'tide', 'beat'].includes(settings.waveId)
+  const isBuiltinWave = ['continuous', 'breath', 'tide', 'beat', 'dglab-sweep'].includes(settings.waveId)
   const stepPresetValue = settings.stepPreset === 'custom' ? settings.stepLimit : ({ strong: 30, medium: 12, weak: 5 }[settings.stepPreset] ?? 5)
 
   const copyAddress = async () => {
@@ -605,6 +624,23 @@ export default function DGLabConsoleModal() {
             </div>
             <div className="flex items-center gap-2">
               <button
+                type="button"
+                role="switch"
+                aria-checked={Boolean(settings.systemCapture)}
+                onClick={() => update({ systemCapture: !settings.systemCapture })}
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border transition-colors ${
+                  settings.systemCapture
+                    ? 'text-black border-transparent'
+                    : 'bg-white/[0.06] border-white/10 text-white/60 hover:bg-white/[0.12]'
+                }`}
+                style={settings.systemCapture ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
+                title="整机监听：监听系统扬声器（不限本软件）。桌面版直抓系统音频；浏览器需在共享框勾选系统音频。"
+              >
+                <RadioTower className="w-3.5 h-3.5" />
+                整机
+                <span className={`w-1.5 h-1.5 rounded-full ${settings.systemCapture ? 'bg-black/70' : 'bg-white/35'}`} />
+              </button>
+              <button
                 onClick={() => setLogModalOpen(true)}
                 className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-white/60 hover:bg-white/10 transition-colors"
                 title="调试日志"
@@ -629,33 +665,40 @@ export default function DGLabConsoleModal() {
             </div>
           </div>
 
-          {/* 主体三栏：波形主导 | 风格+映射 | 脉冲波形+波形库 */}
+          {/* 主体三栏：实时波形+脉冲（左）｜连接+风格（中）｜映射控制（右） */}
           <div className="flex-1 overflow-y-auto plugin-center-scroll">
-            <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr_0.95fr] gap-5 p-5">
-              {/* 左栏：实时波形（主导）+ 连接（已连接时折叠成状态条） */}
+            <div className="grid grid-cols-1 lg:grid-cols-[1.35fr_1fr_1.1fr] gap-5 p-5">
+              {/* 左栏：实时波形（主导）+ 脉冲波形（可选·折叠） */}
               <div className="space-y-4">
-                {/* 实时波形主导 */}
+                {/* 实时波形主导（加高 + 可视化模式：包络/频谱） */}
                 <section className="rounded-2xl p-4 border" style={{ background: PANEL, borderColor: BORDER }}>
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-sm font-bold text-white/85 flex items-center gap-2">
+                  <div className="flex items-center justify-between mb-3 gap-2">
+                    <h3 className="text-sm font-bold text-white/85 flex items-center gap-2 shrink-0">
                       <span className="w-3.5 h-3.5 rounded-full" style={{ background: GOLD, boxShadow: `0 0 10px ${GOLD}88` }} />
                       实时波形（A/B）
                     </h3>
-                    <button
-                      type="button"
-                      onClick={() => setDGLabWidgetVisible(!widgetVisible)}
-                      className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium border transition-colors ${
-                        widgetVisible ? 'text-black border-transparent' : 'bg-white/[0.06] border-white/10 text-white/55 hover:bg-white/[0.12]'
-                      }`}
-                      style={widgetVisible ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
-                      title="左上角常驻悬浮小组件"
-                    >
-                      <span className="w-1.5 h-1.5 rounded-full" style={{ background: widgetVisible ? '#000' : 'rgba(255,255,255,0.4)' }} />
-                      波形常驻
-                      <HelpInfo id="widget" />
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <Segmented
+                        options={[{ value: 'envelope', label: '包络' }, { value: 'spectrum', label: '频谱' }]}
+                        value={vizMode}
+                        onChange={(v) => setVizMode(v as DGLabVizModeId)}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setDGLabWidgetVisible(!widgetVisible)}
+                        className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium border transition-colors ${
+                          widgetVisible ? 'text-black border-transparent' : 'bg-white/[0.06] border-white/10 text-white/55 hover:bg-white/[0.12]'
+                        }`}
+                        style={widgetVisible ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
+                        title="左上角常驻悬浮小组件"
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: widgetVisible ? '#000' : 'rgba(255,255,255,0.4)' }} />
+                        波形常驻
+                        <HelpInfo id="widget" />
+                      </button>
+                    </div>
                   </div>
-                  <DGLabVizCanvas status={status} height={190} />
+                  <DGLabVizCanvas status={status} height={300} mode={vizMode} />
                   {status.deviceStrength && (
                     <p className="mt-2 text-[10px] text-white/40">
                       App 实际强度：A <b style={{ color: GOLD }}>{status.deviceStrength.A}</b> · B <b style={{ color: GOLD }}>{status.deviceStrength.B}</b>
@@ -664,7 +707,43 @@ export default function DGLabConsoleModal() {
                   )}
                 </section>
 
-                {/* 连接（已连接默认折叠为状态条，QR/网卡/端口/启停收入折叠区） */}
+                {/* 脉冲波形 & 波形库（官方 App 波形预设的形态 · 可选；主机制是「体感风格」实时映射） */}
+                <section className="rounded-2xl border" style={{ background: PANEL, borderColor: BORDER }}>
+                  <button
+                    type="button"
+                    onClick={() => setWavePanelOpen(v => !v)}
+                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-left hover:bg-white/[0.04] transition-colors rounded-2xl"
+                  >
+                    <Zap className="w-4 h-4" style={{ color: GOLD }} />
+                    <span className="text-sm font-medium text-white/75">脉冲波形 & 波形库</span>
+                    <span className="text-[10px] text-white/30">（官方 App 波形预设 · 节拍脉冲用）</span>
+                    <ChevronDown className={`w-4 h-4 ml-auto text-white/45 transition-transform ${wavePanelOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {wavePanelOpen && (
+                    <div className="px-4 pb-4 space-y-4">
+                      <div className="pt-1">
+                        <WavePicker waves={waves} officialWaves={OFFICIAL_BUILTIN_WAVES} selected={settings.waveId} onSelect={(id) => update({ waveId: id })} />
+                        {isBuiltinWave && (
+                          <div className="mt-3 border-t pt-3" style={{ borderColor: 'rgba(255,232,156,0.12)' }}>
+                            <p className="text-[10px] leading-relaxed text-white/35 mb-2">
+                              下面两个只是「内置基波」的目标值：频率 = 每拍敲击的基础频率（Hz），强度 = 目标强度。实际脉冲每拍只叠加一小段并逐帧衰减，且最终 <b className="text-amber-100/70">不会超过你的 A/B 强度上限</b>（调再高也按上限截断）。
+                            </p>
+                            <div className="grid grid-cols-2 gap-3">
+                              <SliderRow label="基础频率 Hz" value={settings.waveFreq} min={1} max={120} step={1} onChange={(v) => update({ waveFreq: v })} helpId="waveFreq" />
+                              <SliderRow label="目标强度" value={settings.waveStrength} min={20} max={200} step={1} onChange={(v) => update({ waveStrength: v })} helpId="waveStrength" />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <WaveLibrary waves={waves} onChanged={() => setWaves(getWaveLibrary())} />
+                    </div>
+                  )}
+                </section>
+              </div>
+
+              {/* 中栏：连接设置（顶部）+ 体感风格 */}
+              <div className="space-y-4">
+                {/* 连接设置（放到体感风格上面；已连接时折叠为状态条） */}
                 <section className="rounded-2xl border" style={{ background: PANEL, borderColor: BORDER }}>
                   {status.state === 'bound' && !connExpanded ? (
                     <button
@@ -762,10 +841,7 @@ export default function DGLabConsoleModal() {
                     </div>
                   )}
                 </section>
-              </div>
 
-              {/* 中栏：体感风格 + 映射控制 */}
-              <div className="space-y-4">
                 <section className="rounded-2xl p-4 border" style={{ background: PANEL, borderColor: BORDER }}>
                   <h3 className="text-sm font-bold text-white/85 flex items-center gap-2 mb-2.5">
                     <AudioWaveform className="w-4 h-4" style={{ color: GOLD }} />
@@ -791,6 +867,10 @@ export default function DGLabConsoleModal() {
                   </div>
                 </section>
 
+                </div>
+
+              {/* 右栏：映射控制（放到原本「脉冲波形卡片」那边，核心设置一屏可见、无需滚动） */}
+              <div className="space-y-4">
                 <section className="rounded-2xl p-4 border space-y-3.5" style={{ background: PANEL, borderColor: BORDER }}>
                   <h3 className="text-sm font-bold text-white/85">映射控制</h3>
                   <SliderRow label="灵敏度" value={settings.sensitivity} min={0.1} max={3} step={0.1} onChange={(v) => update({ sensitivity: v })} helpId="sensitivity" />
@@ -816,6 +896,64 @@ export default function DGLabConsoleModal() {
                     </div>
                   </div>
                   <ToggleRow label="自动适配轻响" desc="根据歌曲轻重自动分配强度" checked={settings.dynamicRange} onChange={(v) => update({ dynamicRange: v })} />
+
+                  {/* 实时映射（官方实时音频参数体系） */}
+                  <div className="border-t pt-3 space-y-3" style={{ borderColor: 'rgba(255,232,156,0.1)' }}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-white/80 flex items-center gap-1">实时映射（官方实时）<HelpInfo id="rtMode" /></span>
+                      <Segmented
+                        options={[{ value: 'auto', label: '自适应' }, { value: 'manual', label: '自定义' }]}
+                        value={settings.rtMode}
+                        onChange={(v) => update({ rtMode: v })}
+                      />
+                    </div>
+                    {/* 自适应也显示 范围/高/低适应系数；数据增益/迟滞仅自定义 */}
+                    {settings.rtMode === 'manual' && (
+                      <SliderRow label="数据增益" value={settings.rtGain} min={0.1} max={3} step={0.05} onChange={(v) => update({ rtGain: v })} helpId="rtGain" />
+                    )}
+                    <SliderRow label="范围" value={settings.rtRange} min={0.05} max={1.5} step={0.05} onChange={(v) => update({ rtRange: v })} helpId="rtRange" />
+                    <SliderRow label="高适应系数" value={settings.rtHigh} min={0.01} max={1} step={0.01} onChange={(v) => update({ rtHigh: v })} helpId="rtHigh" />
+                    <SliderRow label="低适应系数" value={settings.rtLow} min={0.01} max={1} step={0.01} onChange={(v) => update({ rtLow: v })} helpId="rtLow" />
+                    {settings.rtMode === 'manual' && (
+                      <SliderRow label="迟滞系数" value={settings.rtHys} min={0} max={0.3} step={0.01} onChange={(v) => update({ rtHys: v })} helpId="rtHys" />
+                    )}
+                    <div>
+                      <span className="text-xs text-white/45 flex items-center gap-1">观察频段 <HelpInfo id="rtBand" /></span>
+                      <div className="mt-1.5">
+                        <Segmented
+                          options={[{ value: 'all', label: '全部' }, { value: 'low', label: '低频' }, { value: 'mid', label: '中频' }, { value: 'high', label: '高频' }, { value: 'stereo', label: '左右' }]}
+                          value={settings.rtBand}
+                          onChange={(v) => update({ rtBand: v })}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <span className="text-xs text-white/45 flex items-center gap-1">频率映射 <HelpInfo id="rtFreqMap" /></span>
+                      <div className="mt-1.5">
+                        <Segmented
+                          options={[{ value: 'linear', label: '线性' }, { value: 'log', label: '对数' }, { value: 'deep', label: '深沉' }, { value: 'bright', label: '明亮' }]}
+                          value={settings.rtFreqMap}
+                          onChange={(v) => update({ rtFreqMap: v })}
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-white/45">强度上限（0-200，App 硬上限会自动钳位）</span>
+                    <button
+                      type="button"
+                      onClick={() => setLockCaps(v => !v)}
+                      title={lockCaps ? '联动已开启：调 A 时 B 同步设置' : '点击开启联动：调 A 时 B 同步设置'}
+                      className={`flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] border transition-colors ${
+                        lockCaps ? 'text-black border-transparent' : 'bg-white/[0.06] border-white/10 text-white/55 hover:bg-white/[0.12]'
+                      }`}
+                      style={lockCaps ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
+                    >
+                      <Link2 className="w-3.5 h-3.5" />
+                      {lockCaps ? '已联动' : '联动设置'}
+                    </button>
+                  </div>
                   <div className="grid grid-cols-2 gap-3">
                     <SliderRow label="A 上限" value={settings.caps.A} min={0} max={200} step={1} onChange={(v) => updateCaps('A', v)} helpId="capsA" />
                     <SliderRow label="B 上限" value={settings.caps.B} min={0} max={200} step={1} onChange={(v) => updateCaps('B', v)} helpId="capsB" />
@@ -825,29 +963,6 @@ export default function DGLabConsoleModal() {
                     生效上限：A ≤ {Math.min(settings.caps.A, status.softLimit?.A ?? 200)} · B ≤ {Math.min(settings.caps.B, status.softLimit?.B ?? 200)}
                     {status.softLimit && <span style={{ color: `${GOLD}AA` }}>（含 App 硬上限）</span>}
                   </div>
-                </section>
-              </div>
-
-              {/* 右栏：脉冲波形 + 波形库 */}
-              <div className="space-y-4">
-                <section className="rounded-2xl p-4 border space-y-3.5" style={{ background: PANEL, borderColor: BORDER }}>
-                  <h3 className="text-sm font-bold text-white/85 flex items-center gap-2">
-                    <Zap className="w-4 h-4" style={{ color: GOLD }} />
-                    脉冲波形
-                    <span className="text-[10px] font-normal text-white/35 ml-auto">点击直接选择</span>
-                  </h3>
-                  <WavePicker waves={waves} selected={settings.waveId} onSelect={(id) => update({ waveId: id })} />
-                  {isBuiltinWave && (
-                    <div className="grid grid-cols-2 gap-3 border-t pt-3" style={{ borderColor: 'rgba(255,232,156,0.12)' }}>
-                      <SliderRow label="波形频率 Hz" value={settings.waveFreq} min={1} max={120} step={1} onChange={(v) => update({ waveFreq: v })} />
-                      <SliderRow label="波形强度" value={settings.waveStrength} min={20} max={200} step={1} onChange={(v) => update({ waveStrength: v })} />
-                    </div>
-                  )}
-                </section>
-
-                <section className="rounded-2xl p-4 border" style={{ background: PANEL, borderColor: BORDER }}>
-                  <h3 className="text-sm font-bold text-white/85 mb-3">波形库（本机存储）</h3>
-                  <WaveLibrary waves={waves} onChanged={() => setWaves(getWaveLibrary())} />
                 </section>
               </div>
             </div>

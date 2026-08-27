@@ -14,7 +14,7 @@ const DGLAB_API = 'http://localhost:3001/api/dglab'
 const SETTINGS_KEY = 'wf_dglab_settings'
 const DEFAULT_PORT = 30082
 
-export type FeelStyleId = 'stereo' | 'heartbeat' | 'breath' | 'wave' | 'tap' | 'ride' | 'rumble'
+export type FeelStyleId = 'stereo' | 'heartbeat' | 'breath' | 'wave' | 'tap' | 'ride' | 'rumble' | 'stock'
 export type StepPreset = 'strong' | 'medium' | 'weak' | 'custom'
 export type RampPreset = 'fast' | 'medium' | 'slow'
 
@@ -37,8 +37,26 @@ export interface DGLabSettings {
   rampPreset: RampPreset
   /** 动态适配：根据歌曲轻响自动分配强度（AGC）。 */
   dynamicRange: boolean
+  /** 实时映射模式（对齐官方实时音频）：auto=自适应 / manual=自定义。 */
+  rtMode: 'auto' | 'manual'
+  /** 数据增益：输入信号放大倍数（官方同名参数）。 */
+  rtGain: number
+  /** 范围：映射窗口宽度（低端固定 0.03，高端 = 0.03 + 范围）。 */
+  rtRange: number
+  /** 高适应系数：信号强时增益自适应速度（官方同名）。 */
+  rtHigh: number
+  /** 低适应系数：信号弱时增益自适应速度（官方同名）。 */
+  rtLow: number
+  /** 迟滞系数：阈值附近的防抖带宽（官方同名）。 */
+  rtHys: number
+  /** 观察频段：驱动增益与实时波形的频段（全部/低频/中频/高频/左右）。 */
+  rtBand: 'all' | 'low' | 'mid' | 'high' | 'stereo'
+  /** 频率映射：能量→实时波形频率的映射曲线（线性/对数/深沉/明亮）。 */
+  rtFreqMap: 'linear' | 'log' | 'deep' | 'bright'
   /** 波形输出启禁（播放页按钮；仅暂停输出，不断开）。 */
   outputEnabled: boolean
+  /** 整机监听：直接捕获系统扬声器声音映射成波形（不局限于本软件播放）。 */
+  systemCapture: boolean
   caps: { A: number; B: number }
   driveMode: 'energy' | 'onset'
   pulseEnabled: boolean
@@ -59,7 +77,16 @@ export const DEFAULT_DGLAB_SETTINGS: DGLabSettings = {
   stepLimit: 5,
   rampPreset: 'slow',
   dynamicRange: true,
+  rtMode: 'auto',
+  rtGain: 1,
+  rtRange: 0.6,
+  rtHigh: 0.25,
+  rtLow: 0.08,
+  rtHys: 0.05,
+  rtBand: 'all',
+  rtFreqMap: 'linear',
   outputEnabled: true,
+  systemCapture: false,
   caps: { A: 60, B: 60 },
   driveMode: 'energy',
   pulseEnabled: true,
@@ -174,10 +201,15 @@ let playbackActive = true
 /** 全局左右声道分析器（实时波形/示波器用）。 */
 let globalLeftAnalyser: AnalyserNode | null = null
 let globalRightAnalyser: AnalyserNode | null = null
+/** 主图 L/R 分析器快照：整机监听切换分析源后，用于恢复主图连线。 */
+let mainLeftAnalyser: AnalyserNode | null = null
+let mainRightAnalyser: AnalyserNode | null = null
 
 export function setGlobalAudioAnalysers(left: AnalyserNode | null, right: AnalyserNode | null) {
   globalLeftAnalyser = left
   globalRightAnalyser = right
+  mainLeftAnalyser = left
+  mainRightAnalyser = right
 }
 
 export function getGlobalAudioAnalysers(): { left: AnalyserNode | null; right: AnalyserNode | null } {
@@ -549,8 +581,17 @@ function createClient() {
       stepLimit: settings.stepLimit,
       rampPreset: settings.rampPreset,
       dynamicRange: settings.dynamicRange,
+      rtMode: settings.rtMode,
+      rtGain: settings.rtGain,
+      rtRange: settings.rtRange,
+      rtHigh: settings.rtHigh,
+      rtLow: settings.rtLow,
+      rtHys: settings.rtHys,
+      rtBand: settings.rtBand,
+      rtFreqMap: settings.rtFreqMap,
       caps: settings.caps,
       driveMode: settings.driveMode,
+      systemCapture: Boolean(settings.systemCapture),
       pulseEnabled: settings.pulseEnabled,
       waveId: settings.waveId,
       waveFreq: settings.waveFreq,
@@ -573,6 +614,91 @@ function createClient() {
       return
     }
     ws.send(JSON.stringify({ t: 'audio', data }))
+  }
+
+  /* ------------------------------ 整机监听（系统扬声器 loopback） ------------------------------ */
+  // 捕获流由 useSystemAudioCapture 建立 L/R analyse 并接入：这里负责 30fps 采样特征，
+  // 并整体切换「分析源」——开启时停主图 store 订阅、全局波形跟随系统；关闭时恢复主图。
+  let systemLeft: AnalyserNode | null = null
+  let systemRight: AnalyserNode | null = null
+  let systemBufL: Uint8Array | null = null
+  let systemBufR: Uint8Array | null = null
+  let systemTimer: number | null = null
+  let prevSysOverall = 0
+
+  const sysCompress = (value: number, amount = 6) => Math.log1p(amount * Math.min(1, Math.max(0, value))) / Math.log1p(amount)
+
+  const stopSystemTimer = () => {
+    if (systemTimer !== null) {
+      window.clearInterval(systemTimer)
+      systemTimer = null
+    }
+  }
+
+  const startSystemTimer = () => {
+    if (systemTimer !== null) return
+    systemTimer = window.setInterval(() => {
+      if (!systemLeft || !systemRight || !active) return
+      if (!systemBufL || systemBufL.length !== systemLeft.frequencyBinCount) systemBufL = new Uint8Array(systemLeft.frequencyBinCount)
+      if (!systemBufR || systemBufR.length !== systemRight.frequencyBinCount) systemBufR = new Uint8Array(systemRight.frequencyBinCount)
+      const l = measureBandsFromAnalyser(systemLeft, systemBufL)
+      const r = measureBandsFromAnalyser(systemRight, systemBufR)
+      const overall = Math.max(l.overall, r.overall)
+      const flux = Math.max(0, overall - prevSysOverall)
+      prevSysOverall = overall
+      const ch = (b: { bass: number; mid: number; high: number; overall: number }): DGLabAudioFrame['left'] => ({
+        bass: sysCompress(b.bass * 1.14),
+        mid: sysCompress(b.mid * 1.08),
+        high: sysCompress(b.high * 1.12),
+        overall: sysCompress(b.overall * 1.1),
+      })
+      const frame: DGLabAudioFrame = {
+        kick: sysCompress(Math.max(l.bass, r.bass) * 1.14),
+        bass: sysCompress(Math.max(l.bass, r.bass) * 1.14),
+        mid: sysCompress(Math.max(l.mid, r.mid) * 1.08),
+        lead: sysCompress(Math.max(l.mid, r.mid) * 1.08 * 0.7),
+        hats: sysCompress(Math.max(l.high, r.high) * 0.8),
+        high: sysCompress(Math.max(l.high, r.high) * 1.12),
+        overall: sysCompress(overall * 1.1),
+        beat: 0,
+        accent: 0,
+        flux: sysCompress(flux * 12, 4),
+        left: ch(l),
+        right: ch(r),
+      }
+      pushAudio(frame)
+    }, 1000 / 30)
+  }
+
+  /** 整机监听：系统捕获流就绪时切为分析源；传 null 恢复主图（软件内播放）。 */
+  const setSystemCaptureAnalysers = (left: AnalyserNode | null, right: AnalyserNode | null) => {
+    if (left && right) {
+      systemLeft = left
+      systemRight = right
+      // 停主图特征流（否则两路争推）
+      if (unsubStore) {
+        unsubStore()
+        unsubStore = null
+      }
+      // 全局左/右分析器切到系统（不覆盖主图快照）
+      globalLeftAnalyser = left
+      globalRightAnalyser = right
+      // 若本软件当前处于暂停（播放归零态），通知中继续播——
+      // relay 端 systemCapture 已豁免暂停门控，恢复档淡入由 resume 兜底
+      if (ws && ws.readyState === WebSocket.OPEN && active) {
+        ws.send(JSON.stringify({ t: 'resume' }))
+      }
+      startSystemTimer()
+      console.log('[DG_LAB] 整机监听已接入（分析源：系统扬声器）')
+    } else {
+      systemLeft = null
+      systemRight = null
+      stopSystemTimer()
+      globalLeftAnalyser = mainLeftAnalyser
+      globalRightAnalyser = mainRightAnalyser
+      ensureStream()
+      console.log('[DG_LAB] 整机监听已关闭（分析源：恢复软件内播放）')
+    }
   }
 
   /** 播放暂停/续播：暂停立即归零、续播按恢复档缓慢升起（App 播放状态同步用）。 */
@@ -666,6 +792,7 @@ function createClient() {
     setPausedLocal,
     setOutputEnabled,
     setExternalMediaSource,
+    setSystemCaptureAnalysers,
     pushAudio,
     updateSettings: () => {
       saveDGLabSettings({})

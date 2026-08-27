@@ -150,6 +150,49 @@ export function parseCombinedTxt(text: string, fileName = '整合波形'): { wav
 
 const HEX_RE = /^[0-9a-fA-F]+$/
 
+/**
+ * 官方 DG-Lab pulse 脚本解析：
+ *   Dungeonlab+pulse:<meta>/<曲线1>+section+<曲线2>（/ 前为参数，曲线为 x-y 对，x:0-100%、y:0..1）
+ *   Dungeonlab+csv:<A曲线>/<A曲线2>+section+<B曲线>/<B曲线2>
+ * 把全部 x-y 包络点按 x 重采样成约 9 帧（每帧 100ms）。频率取 20Hz（可在控制台覆盖）。
+ */
+function parseOfficialPulseScript(text: string): WaveFrame[] | null {
+  const m = /^Dungeonlab\+([a-z]+):(.*)$/i.exec(text.trim())
+  if (!m) return null
+  const body = m[2]
+  const pts: { x: number; y: number }[] = []
+  // 提取所有 "x-y" 对（兼容小数 x）
+  const re = /(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)/g
+  let match: RegExpExecArray | null
+  while ((match = re.exec(body)) !== null) {
+    pts.push({ x: Number(match[1]), y: Number(match[2]) })
+  }
+  if (pts.length === 0) return null
+  pts.sort((a, b) => a.x - b.x)
+  const frames: WaveFrame[] = []
+  for (let i = 0; i < 9; i += 1) {
+    const t = (i / 8) * 100 // 0..100%
+    // 折线插值
+    let y = pts[pts.length - 1].y
+    for (let k = 0; k < pts.length - 1; k += 1) {
+      const a = pts[k]
+      const b = pts[k + 1]
+      if (t >= a.x && t <= b.x) {
+        const ratio = b.x === a.x ? 0 : (t - a.x) / (b.x - a.x)
+        y = a.y + (b.y - a.y) * ratio
+        break
+      }
+      if (k === pts.length - 2 && t > b.x) y = b.y
+    }
+    frames.push({ freq: 20, strength: clamp(Math.round(clampPulseY(y) * 200), 0, 200) })
+  }
+  return frames
+}
+
+function clampPulseY(v: number) {
+  return Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0))
+}
+
 /** 8 字节 hex 帧 → WaveFrame（频率=第 1 字节，强度=第 5 字节，帧内重复 4 次）。 */
 function parseByte8Frame(hex: string): WaveFrame | null {
   if (!HEX_RE.test(hex) || hex.length !== 16) return null
@@ -170,6 +213,15 @@ export function parsePulseFile(text: string, fileName = '单波形'): { waves: W
   const errors: string[] = []
   const frames: WaveFrame[] = []
   const baseName = fileName.replace(/\.pulse$/i, '').replace(/\.txt$/i, '') || '单波形'
+
+  // 0) 官方 DG-Lab「Dungeonlab+pulse:/+csv:」脚本：把包络曲线（x:0-100%、y:0..1）重采样为 8 字节帧（约 9 帧 ≈ 0.9s）
+  const official = parseOfficialPulseScript(text)
+  if (official) {
+    return {
+      waves: [{ id: `pulse-${shortId(baseName + frames.length)}`, name: baseName, source: 'pulse', frames: official, importedAt: Date.now() }],
+      errors,
+    }
+  }
 
   const pushFrame = (frame: WaveFrame | null) => {
     if (frame) frames.push(frame)

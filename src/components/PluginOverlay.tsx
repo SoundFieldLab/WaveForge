@@ -21,6 +21,7 @@ import PluginDetailModal from './PluginDetailModal'
 import PluginImportModal from './PluginImportModal'
 import DGLabConsoleModal from './DGLabConsoleModal'
 import DGLabWidget from './DGLabWidget'
+import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
 
 // 启用状态 → 生命周期桥接：监听 wf_plugins 变更，按需调用 onEnable/onDisable
 function useRuntimeBridge() {
@@ -85,6 +86,8 @@ export default function PluginOverlay() {
       <DGLabConsoleModal />
       {/* 常驻悬浮小组件（自管理显示条件：插件启用 + 常驻开关） */}
       <DGLabWidget />
+      {/* 整机监听全局桥（监听系统扬声器；失败自动回退 + 监听中浮标） */}
+      <DglabSystemCaptureBridge />
     </>
   )
 }

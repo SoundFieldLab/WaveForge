@@ -83,6 +83,10 @@ function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
 }
 
+function clamp01Local(v) {
+  return clamp(v, 0, 1)
+}
+
 /* ---------------------------------- 波形帧工具 ---------------------------------- */
 
 /** 官方 V3 波形帧：8 字节 = 4×频率 + 4×强度。 */
@@ -114,6 +118,15 @@ function generateBuiltinWave(id, { freq = 20, strength = 100 } = {}) {
     for (let i = 0; i < n; i += 1) {
       const t = i / (n - 1)
       frames.push({ freq: Math.round(10 + t * 50), strength: Math.round(20 + t * (strength - 20)) })
+    }
+  } else if (id === 'dglab-sweep') {
+    // 官方实时音频机制模板（1:1 对齐官方 assets/M2_simple.csv）：
+    // 触发后播放一段 freq 10→30Hz + 强度 0→100→20 的攻击-衰减扫掠段（≈0.9s）
+    // 官方 lookup：freq=10,10,10,20,20,20,30,30,30  strength=0,20,40,60,80,100,100,60,20
+    const m2 = [0, 20, 40, 60, 80, 100, 100, 60, 20]
+    for (let i = 0; i < m2.length; i += 1) {
+      const f = [10, 10, 10, 20, 20, 20, 30, 30, 30][i] ?? 10
+      frames.push({ freq: f, strength: Math.round((m2[i] / 100) * strength) })
     }
   } else {
     // beat：冲击 + 快速衰减
@@ -149,6 +162,15 @@ function createDGLabRelay() {
       rampPreset: 'slow',
       /** 动态适配：根据歌曲轻响自动分配强度（AGC）。 */
       dynamicRange: true,
+      /** 实时映射（对齐官方实时音频）：auto=自适应 / manual=自定义 */
+      rtMode: 'auto',
+      rtGain: 1, // 数据增益
+      rtRange: 0.6, // 范围（窗口宽度）
+      rtHigh: 0.25, // 高适应系数（信号强时自适应速度）
+      rtLow: 0.08, // 低适应系数（信号弱时回落速度）
+      rtHys: 0.05, // 迟滞系数（阈值附近防抖）
+      rtBand: 'all', // 观察频段：all/low/mid/high/stereo
+      rtFreqMap: 'linear', // 频率映射：linear/log/deep/bright
       caps: { A: 60, B: 60 }, // 0-200 用户上限
       driveMode: 'energy', // 'energy' | 'onset'
       pulseEnabled: true,
@@ -156,8 +178,9 @@ function createDGLabRelay() {
       waveFrames: null, // 导入波形帧（渲染端下发）
       waveFreq: 20,
       waveStrength: 100,
+      systemCapture: false, // 整机监听（系统扬声器 loopback）：豁免播放暂停门控
     },
-    engine: { running: false, lastAudioAt: 0, lastSendAt: 0, seenAudio: false },
+    engine: { running: false, lastAudioAt: 0, lastSendAt: 0, seenAudio: false, requested: false, warnedEngineIdle: false },
     listenRetries: 0,
     app: { v3: null, v4: new Map() }, // v3: 单 App ws；v4: Map(tid -> ws)
     ctrlClients: new Set(),
@@ -388,6 +411,8 @@ const sendV3Pulse = (channel, frames) => {
     prevBeat: 0, // 上一帧 beat（脉冲上升沿触发用）
     lastPulseAt: -1000, // 上一次脉冲时间（冷却）
     pulsePeriod: 0.5, // 节拍间隔（由 BPM 估计得出，用于节拍锁定连续触发）
+    liveWaveAt: 0, // LiveWave 实时波形流计时（每 100ms 一帧）
+    liveWaveSide: 'A', // A/B 交替
     tick: 0, // 帧计数（事件脉冲的时间轴）
     phase1: 0, // 呼吸/潮汐 LFO 相位（多相）
     phase2: 0,
@@ -402,10 +427,12 @@ const sendV3Pulse = (channel, frames) => {
     dutyOn: 0,
     dutyWindowStart: Date.now(),
     energyEnv: 0.2, // 持续振动层能量包络（句级，1:1 跟歌）
+    envPeak: 0.4, // 原厂自动量程的近期峰值基线
+    rtHeld: 0, // 迟滞死带的当前保持值
     loggedLR: false,
   }
 
-  /** 上限预算系数：连续层最多用上限的 62%（上限=天花板，不是长期巡航值），脉冲峰值才可达上限。 */
+  /** 上限预算系数（轻段巡航参照；最终按能量动态 45%~100%）。 */
   const CAP_BUDGET = 0.62
 
   /** 事件脉冲入队（用于心跳/敲击/重拳等节拍触发层）。 */
@@ -563,6 +590,16 @@ const sendV3Pulse = (channel, frames) => {
         }
       },
     },
+    stock: {
+      id: 'stock',
+      label: '原厂',
+      desc: '1:1 复刻官方实时机制：观察频段→自适应增益→频率映射→LiveWave',
+      render: (ctx) => {
+        // 直接以「观察能量（rt 增益后）」为强度，不做风格整形——官方实时引擎的原始行为
+        const e = clamp01Local(ctx.overall)
+        return { A: e, B: clamp01Local(e * 0.92) }
+      },
+    },
   }
 
   const getStyle = () => STYLES[state.settings.feelStyle] || STYLES.stereo
@@ -571,6 +608,21 @@ const sendV3Pulse = (channel, frames) => {
   const startRamp = () => {
     const duration = RAMP_PRESETS[state.settings.rampPreset] ?? RAMP_PRESETS[DEFAULT_RAMP_PRESET]
     engineState.ramp = { startedAt: Date.now(), duration }
+  }
+
+  /** 设备(重)连接后自动恢复引擎：渲染端仍希望运行时（requested），断链归零后可自动续跑并带恢复淡入。 */
+  const maybeAutoRunEngine = () => {
+    if (state.engine.requested && !state.engine.running && connected()) {
+      state.engine.running = true
+      state.engine.lastAudioAt = Date.now()
+      state.engine.warnedEngineIdle = false
+      engineState.A = { target: 0, current: 0 }
+      engineState.B = { target: 0, current: 0 }
+      startRamp()
+      startSilenceGuard()
+      log('设备已(重)连接，映射引擎按「恢复档」自动续跑')
+      broadcastStatus()
+    }
   }
 
   const mapAudio = (audio) => {
@@ -588,14 +640,46 @@ const sendV3Pulse = (channel, frames) => {
 
     engineState.tick += 1
 
-    // 动态适配（AGC）：轻歌放大、重歌收敛；增益下限 0.55 保证人声/旋律段落也有持续输出
-    if (s.dynamicRange !== false) {
-      engineState.agc += (overall - engineState.agc) * (overall > engineState.agc ? 0.02 : 0.18)
+    // ===== 观察频段 + 实时增益（对齐官方实时音频参数体系）=====
+    // 观察频段：驱动增益/实时波形的频段能量
+    const rtBand = s.rtBand || 'all'
+    let obsE = overall
+    if (rtBand === 'low') obsE = bass
+    else if (rtBand === 'mid') obsE = mid
+    else if (rtBand === 'high') obsE = high
+    else if (rtBand === 'stereo') obsE = Math.max(L.overall, R.overall)
+    const inV = clamp(obsE * (s.rtGain ?? 1), 0, 1.5)
+    let gainNorm
+    if (s.rtMode === 'auto') {
+      // 自适应：增益随输入能量持续自适应（高适应系数=信号强时的收敛速度，低适应系数=弱时的回落速度）
+      engineState.agc += (inV - engineState.agc) * (inV > engineState.agc ? (s.rtHigh ?? 0.25) : (s.rtLow ?? 0.08))
+      gainNorm = clamp((s.rtRange ?? 0.6) / Math.max(engineState.agc, 0.01), 0.3, 3)
     } else {
-      engineState.agc = 0.25
+      // 自定义：数据增益 → 范围窗口归一 → 迟滞死带（阈值附近防抖）
+      const lowE = 0.03
+      const highE = lowE + (s.rtRange ?? 0.6)
+      let x = clamp((inV - lowE) / Math.max(highE - lowE, 0.01), 0, 1)
+      const hs = s.rtHys ?? 0.05
+      if (Math.abs(x - engineState.rtHeld) > hs) engineState.rtHeld = x
+      else x = engineState.rtHeld
+      gainNorm = x
     }
-    const agcGain = clamp(0.32 / Math.max(engineState.agc, 0.06), 0.55, 2.4)
+    const agcGain = s.rtMode === 'auto' ? (s.feelStyle === 'stock' ? clamp(gainNorm, 0.3, 4.5) : gainNorm) : 0.2 + gainNorm * 1.2
     const norm = (v) => clamp((v ?? 0) * agcGain, 0, 1.2)
+
+    // 观察能量包络（驱动持续振动层与实时波形频率）
+    // 原厂自适应 = 自动量程：相对「近期峰值基线」（强段→1.0 贴近上限、安静回落快），其余风格沿用窗口归一
+    let envSrc
+    let envDecay
+    if (s.feelStyle === 'stock' && s.rtMode === 'auto') {
+      engineState.envPeak = Math.max(obsE, engineState.envPeak * 0.99)
+      envSrc = (s.rtGain ?? 1) * clamp(obsE / Math.max(engineState.envPeak, 0.05), 0, 1.2)
+      envDecay = 0.25
+    } else {
+      envSrc = norm(obsE)
+      envDecay = 0.1
+    }
+    engineState.energyEnv += (clamp01Local(envSrc) - engineState.energyEnv) * (clamp01Local(envSrc) > engineState.energyEnv ? 0.3 : envDecay)
 
     // 乐速估计（升降快慢随歌）：节拍间隔 + flux 速率加权；同时刷新节拍间隔供脉冲节拍锁定
     if (beat > 0.3) {
@@ -617,14 +701,16 @@ const sendV3Pulse = (channel, frames) => {
     const slowG = engineState.agc // 复用 AGC 基线作为慢包络参考
     const ctx = { bass: norm(bass), mid: norm(mid), high: norm(high), overall: norm(overall), beat, accent, flux, L, R, slowG, nowMs: now }
     let { A: rawA, B: rawB } = getStyle().render(ctx)
+    const isStock = (state.settings.feelStyle === 'stock')
 
-    // ===== 持续振动层（苹果式循环反馈）：所有风格持续有体感，强弱 1:1 跟随音乐能量包络 =====
-    // energyEnv：句级能量包络（快攻 0.3 / 缓释 0.1），轻声段保底有底振、大声段对比仍在
-    const normOverall = norm(overall)
-    engineState.energyEnv += (normOverall - engineState.energyEnv) * (normOverall > engineState.energyEnv ? 0.3 : 0.1)
-    const floor = 0.08 + 0.18 * engineState.energyEnv
-    rawA = clamp(rawA * 0.8 + floor, 0, 1)
-    rawB = clamp(rawB * 0.8 + floor, 0, 1)
+    // ===== 持续振动层（苹果式循环反馈）：非原厂风格持续有体感；原厂 1:1 直通不做整形 =====
+    if (!isStock) {
+      const floor = 0.10 + 0.22 * engineState.energyEnv
+      rawA = clamp(rawA * 0.78 + floor, 0, 1)
+      rawB = clamp(rawB * 0.78 + floor, 0, 1)
+    }
+    rawA = clamp01Local(rawA)
+    rawB = clamp01Local(rawB)
 
     // 真静音（≈无声音）才归零；轻柔乐句由持续层兜住
     if (overall < 0.008) {
@@ -632,15 +718,15 @@ const sendV3Pulse = (channel, frames) => {
       rawB = 0
     }
 
-    // 立体声左右声道可用性（诊断一次）
-    if (state.settings.feelStyle === 'stereo' && !engineState.loggedLR) {
+    // 立体声左右声道可用性（诊断一次；等音乐真正响起来（主信号有能量）再判定）
+    if (state.settings.feelStyle === 'stereo' && !engineState.loggedLR && overall > 0.05) {
       engineState.loggedLR = true
       const hasLR = (L.overall + L.bass + R.overall + R.bass) > 0.001
-      log(hasLR ? '立体声：左右声道数据可用（真实左右声像体感）' : '立体声：左右声道数据未接入，走频段退化（A=低频 B=中高频）')
+      log(hasLR ? '立体声：左右声道数据可用（真实左右声像体感）' : '立体声：左右声道未接入（可能音效合并了声道），走频段退化（A=低频 B=中高频）')
     }
 
-    // 灵敏度曲线 + 平滑（快歌跟手快；曲线 1.2 更温和，中低音量也有存在感）
-    const curve = (v) => Math.pow(clamp(v * s.sensitivity, 0, 1), 1.2)
+    // 灵敏度曲线 + 平滑（快歌跟手快；非原厂 1.2 更温和，原厂线性 1.0 直通）
+    const curve = (v) => Math.pow(clamp(v * s.sensitivity, 0, 1), isStock ? 1.0 : 1.2)
     const sp = engineState.speed
     const attack = (0.12 + s.smoothing * 0.2) / sp
     const decay = (0.25 + s.smoothing * 0.32) / sp
@@ -677,15 +763,28 @@ const sendV3Pulse = (channel, frames) => {
     let dutyTaper = 1
     if (duty > 0.7) dutyTaper = duty > 0.75 ? 0.1 : 1 - ((duty - 0.7) / 0.05) * 0.3
 
-    // 通道上限 + 上限预算（上限=天花板，连续层最高约占上限 62%，留头给脉冲冲上限）+ 通道比保持
+    // 通道上限（硬上限，用户设定就该可达）+ 上限预算动态化：
+    // 轻段巡航≈45% 上限，强段/大能量自动逼近 100% 上限（用户开 200 强段就能到 200）
     const aCap = Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
     const bCap = Math.min(s.caps.B ?? 60, state.softLimit?.B ?? 200)
     const rawAmp = engineState.A.current * rampGain * dutyTaper
     const rawBmp = engineState.B.current * rampGain * dutyTaper
-    // 预算按对等比缩放（在钳位前计算，避免被上限拉平后同乘预算把对比抹掉）
-    const budgetScale = Math.min(1, (aCap * CAP_BUDGET) / Math.max(rawAmp, 1), (bCap * CAP_BUDGET) / Math.max(rawBmp, 1))
-    const outA = clamp(rawAmp * budgetScale, 0, aCap)
-    const outB = clamp(rawBmp * budgetScale, 0, bCap)
+    const budgetCeilA = Math.max(0.3, 0.45 + 0.55 * engineState.energyEnv) * aCap
+    const budgetCeilB = Math.max(0.3, 0.45 + 0.55 * engineState.energyEnv) * bCap
+    let outA
+    let outB
+    if (isStock) {
+      // 原厂直通：强度 = 自适应相对能量 × 动态预算上限（强段贴近用户上限，无风格整形/曲线）；
+      // 恢复淡入 + 抗疲劳守卫与其余风格一致（恢复从 0 缓升）
+      outA = clamp(Math.round(budgetCeilA * clamp01Local(engineState.energyEnv) * rampGain * dutyTaper), 0, aCap)
+      outB = clamp(Math.round(budgetCeilB * clamp01Local(engineState.energyEnv * 0.92) * rampGain * dutyTaper), 0, bCap)
+      if (overall < 0.008) { outA = 0; outB = 0 }
+    } else {
+      // 预算按对等比缩放（钳位前计算，保住左右/风格对比）
+      const budgetScale = Math.min(1, budgetCeilA / Math.max(rawAmp, 1), budgetCeilB / Math.max(rawBmp, 1))
+      outA = clamp(rawAmp * budgetScale, 0, aCap)
+      outB = clamp(rawBmp * budgetScale, 0, bCap)
+    }
     return { A: Math.round(outA), B: Math.round(outB), beat, accent }
   }
 
@@ -693,7 +792,8 @@ const sendV3Pulse = (channel, frames) => {
     if (!state.engine.running || !connected() || !audio) return
     state.engine.lastAudioAt = Date.now()
     // 播放暂停 / 波形输出禁用：归零态保持（清理由 pause/output 消息负责）
-    if (engineState.paused || !engineState.outputOn) return
+    // 整机监听（systemCapture）时豁免「播放暂停」：监听的是系统扬声器，本软件是否在播歌不影响输出
+    if ((engineState.paused && !state.settings.systemCapture) || !engineState.outputOn) return
     const now = Date.now()
     if (now - state.engine.lastSendAt < 1000 / 30) return
     state.engine.lastSendAt = now
@@ -712,10 +812,19 @@ const sendV3Pulse = (channel, frames) => {
       engineState.lastPulseAt = now
       // 脉冲频率即时调制：风格 carrier 为基底，随高频能量与乐速上升（频率维度也 1:1 跟歌）
       const carrier = clamp((STYLE_CARRIER[state.settings.feelStyle] ?? 35) + (audio.high ?? 0) * 60 + engineState.speed * 8, 20, 150)
-      const frames = resolvePulseFrames(out.beat, carrier)
+      // 「原厂」风格：节拍触发段用官方 M2 扫掠模板（1:1 复刻官方实时打击段）
+      const pulseId = state.settings.feelStyle === 'stock' ? 'dglab-sweep' : null
+      const frames = resolvePulseFrames(out.beat, carrier, pulseId)
       if (frames.length) {
-        if (state.settings.version === 'v3') sendV3Pulse('A', frames)
-        else sendV4Pulse(V4_CHANNEL.A, frames)
+        // A 通道：主脉冲；B 通道：同拍回声（0.55 强度，让 B 也有波形与体感，不再只有强度）
+        const framesB = frames.map(f => ({ ...f, strength: Math.round(f.strength * 0.55) })).filter(f => f.strength > 1)
+        if (state.settings.version === 'v3') {
+          sendV3Pulse('A', frames)
+          if (framesB.length) sendV3Pulse('B', framesB)
+        } else {
+          sendV4Pulse(V4_CHANNEL.A, frames)
+          if (framesB.length) sendV4Pulse(V4_CHANNEL.B, framesB)
+        }
       }
     }
     if (state.settings.version === 'v3') {
@@ -725,6 +834,35 @@ const sendV3Pulse = (channel, frames) => {
       sendV4Strength(V4_CHANNEL.A, out.A)
       sendV4Strength(V4_CHANNEL.B, out.B)
     }
+
+    // LiveWave 实时波形流：每 100ms 追加一帧「实时 freq+强度」波形帧（A/B 交替），
+    // 让 App 端实时波形像官方实时音频模式一样**连续绘制、频率随音乐变化**（队列 500 帧≈50s，10帧/s 不掉队）。
+    if (now - engineState.liveWaveAt >= 100) {
+      engineState.liveWaveAt = now
+      const side = engineState.liveWaveSide
+      engineState.liveWaveSide = side === 'A' ? 'B' : 'A'
+      const freq = clamp((STYLE_CARRIER[state.settings.feelStyle] ?? 35) + (audio.high ?? 0) * 70 + (audio.bass ?? 0) * 40 + engineState.speed * 10, 20, 160)
+      // 官方实时频率映射：能量在观察窗口的位置 → 实时波形频率（线性/对数/深沉/明亮）
+      // 「原厂」风格用官方量程 10~30Hz（对齐官方 assets/M2_simple.csv 的 freq 阶梯 10→30）；
+      // 其余风格保留更宽的 25~150Hz（频率更丰富、有层次）
+      const rtFreq = (() => {
+        const x = clamp01Local(engineState.energyEnv)
+        const stock = state.settings.feelStyle === 'stock'
+        const lo = stock ? 10 : 25
+        const hi = stock ? 30 : 150
+        const map = state.settings.rtFreqMap || 'linear'
+        if (map === 'log') return lo * Math.pow(hi / lo, x)
+        if (map === 'deep') return lo + x * x * (hi - lo)
+        if (map === 'bright') return lo + (1 - Math.pow(1 - x, 2)) * (hi - lo)
+        return lo + x * (hi - lo)
+      })()
+      const useFreq = clamp(Math.round(state.settings.rtMode === 'auto' || state.settings.rtMode === 'manual' ? rtFreq : freq), 20, 160)
+      const strengthNow = side === 'A' ? out.A : out.B
+      const frame = { freq: useFreq, strength: Math.max(1, strengthNow) }
+      if (state.settings.version === 'v3') sendV3Pulse(side, [frame])
+      else sendV4Pulse(side === 'A' ? V4_CHANNEL.A : V4_CHANNEL.B, [frame])
+    }
+
     broadcastCtrl({ t: 'output', out })
   }
 
@@ -747,15 +885,13 @@ const sendV3Pulse = (channel, frames) => {
     log(`续播：按恢复档(${state.settings.rampPreset ?? DEFAULT_RAMP_PRESET})从 0 缓慢恢复`)
   }
 
-  /** 解析节拍脉冲帧：统一短促衰减包络（≤6 帧），强度按 beat 缩放并钳到通道上限（留出头冲上限）。 */
-  const resolvePulseFrames = (beat, carrierFreq = 20) => {
+  /** 解析节拍脉冲帧：统一短促衰减包络（≤6 帧），强度按 beat 缩放并钳到通道上限。 */
+  const resolvePulseFrames = (beat, carrierFreq = 20, overrideId = null) => {
     const s = state.settings
     let frames = s.waveFrames
     if (!frames || !frames.length) {
-      const id = s.waveId || 'beat'
-      // 连续型转短促衰减（防持续嗡嗡）；其余内置保留；导入波形用其帧
-      const useId = id === 'continuous' ? 'beat' : id
-      frames = generateBuiltinWave(useId, { freq: s.waveFreq ?? carrierFreq, strength: s.waveStrength })
+      const id = overrideId || (s.waveId === 'continuous' ? 'beat' : s.waveId) || 'beat'
+      frames = generateBuiltinWave(id, { freq: s.waveFreq ?? carrierFreq, strength: s.waveStrength })
     }
     const env = [1, 0.6, 0.38, 0.24, 0.15, 0.09]
     const cap = Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
@@ -800,15 +936,19 @@ const sendV3Pulse = (channel, frames) => {
             log('音频流已接入（首帧到达，映射引擎开始输出）')
           }
           runEngine(msg.data)
-        } else {
-          verboseLog('收到音频帧但引擎未启动（未发 start/已停止），忽略')
+        } else if (!state.engine.warnedEngineIdle) {
+          state.engine.warnedEngineIdle = true
+          log('收到音频帧但引擎未启动（未发 start/已停止），仅提示一次；设备连接后将按「恢复档」自动续跑')
         }
       } else if (msg.t === 'start') {
+        state.engine.requested = true
+        state.engine.warnedEngineIdle = false
         state.engine.running = true
         engineState.A = { target: 0, current: 0 }
         engineState.B = { target: 0, current: 0 }
         engineState.agc = 0.25
         engineState.energyEnv = 0.2
+        engineState.rtHeld = 0
         engineState.paused = false
         engineState.outputOn = true
         state.engine.lastAudioAt = Date.now()
@@ -818,6 +958,7 @@ const sendV3Pulse = (channel, frames) => {
         log('映射引擎已启动（启动淡入：按恢复档）')
         broadcastStatus()
       } else if (msg.t === 'stop') {
+        state.engine.requested = false
         safetyStop('映射引擎已停止')
       } else if (msg.t === 'pause') {
         if (state.engine.running) pauseOutput()
@@ -895,6 +1036,7 @@ const sendV3Pulse = (channel, frames) => {
     log(`V3 已发送 bind 200 → App（controller=${state.clientId} app=${appId}）`)
     broadcastStatus()
     startSilenceGuard()
+    maybeAutoRunEngine()
 
     ws.on('message', (raw) => {
       verboseLog(`V3 收到 App 帧: ${summarizeFrame(raw)}`)
@@ -966,11 +1108,14 @@ const sendV3Pulse = (channel, frames) => {
     state.app.v4.set(tid, ws)
     state.bound = true
     log(`V4 App 已连接（${remote}，tid=${tid}）`)
-    const st = buildStatus()
-    log(`  urlV4 = ${st.urlV4}`)
-    if (st.qrV4) log(`  V4 二维码内容 = ${st.qrV4}`)
+    // 官方 v4-server 时序：先 hello（告知 App 自身 clientId）→ controller_attached（告知控制端 ID）→ 再设备列表
+    const appClientId = uuid()
+    ws.send(JSON.stringify({ type: 'hello', clientId: appClientId }))
+    ws.send(JSON.stringify({ type: 'controller_attached', clientId: state.clientId }))
+    log(`V4 已发送 hello + controller_attached（app=${appClientId} controller=${state.clientId}）`)
     // 设备列表
     sendDevicesGet(ws)
+    maybeAutoRunEngine()
     ws.on('message', (raw) => {
       verboseLog(`V4 收到 App 帧: ${summarizeFrame(raw)}`)
       let msg
@@ -1199,6 +1344,7 @@ const sendV3Pulse = (channel, frames) => {
     stop: stopListener,
     getStatus: buildStatus,
     _internal: state, // 调试用
+    _engine: engineState, // 调试用（冒烟测试读取引擎内部状态）
   }
 }
 

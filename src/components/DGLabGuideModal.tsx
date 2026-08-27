@@ -85,14 +85,21 @@ export default function DGLabGuideModal({ open, onClose }: DGLabGuideModalProps)
               </section>
 
               <section>
-                <h4 className="text-xs font-bold text-amber-100/90 mb-2">③ 强度差与恢复</h4>
+                <h4 className="text-xs font-bold text-amber-100/90 mb-2">③ 整机监听</h4>
+                <p className="text-[11px] leading-relaxed text-white/55">
+                  <b className="text-amber-100">整机监听</b>开启后直接监听系统扬声器：电脑里任何声音（其他播放器、视频、游戏等，不限本软件）都会映射成波形。桌面版自动捕获系统音频（无需额外操作）；浏览器需在弹出的共享框选「整个屏幕」并勾选「共享系统音频」。开启后右下角出现金色脉搏徽标即表示监听生效；安全机制不变（上限/强度差/恢复档仍生效）。
+                </p>
+              </section>
+
+              <section>
+                <h4 className="text-xs font-bold text-amber-100/90 mb-2">④ 强度差与恢复</h4>
                 <p className="text-[11px] leading-relaxed text-white/55">
                   <b className="text-amber-100">强度差（体质档）</b>控制单次强度变化幅度：强=耐电跟手(30)，中=平衡(12)，弱=新手最柔(5，默认)，也可自定义。「恢复适应时间」控制暂停后续播/重新启用输出时的从 0 缓升时长（快/中/慢，默认慢最温和）。
                 </p>
               </section>
 
               <section>
-                <h4 className="text-xs font-bold text-amber-100/90 mb-2">④ 安全须知（务必阅读）</h4>
+                <h4 className="text-xs font-bold text-amber-100/90 mb-2">⑤ 安全须知（务必阅读）</h4>
                 <ul className="text-[11px] text-amber-100/80 space-y-1.5 leading-relaxed list-disc pl-4">
                   <li>未满 18 周岁禁止使用；请确认您有自主行为能力，使用后果自负；</li>
                   <li><b className="text-amber-200">严禁</b>将贴片或其他配件用于上半身任何地方（耻骨区之上）；</li>
@@ -102,7 +109,7 @@ export default function DGLabGuideModal({ open, onClose }: DGLabGuideModalProps)
               </section>
 
               <section>
-                <h4 className="text-xs font-bold text-amber-100/90 mb-2">⑤ 常见问题</h4>
+                <h4 className="text-xs font-bold text-amber-100/90 mb-2">⑥ 常见问题</h4>
                 <div className="text-[11px] text-white/55 space-y-1.5">
                   <p><b className="text-white/80">Q：扫码后一直连不上？</b> 检查手机与电脑同一 WiFi、中继已启动（控制台金色按钮）、换网卡试试；后端日志可看原因。</p>
                   <p><b className="text-white/80">Q：暂停了还有感觉？</b> 播放页右下「波形输出」按钮可一键停；暂停本身会立即归零。</p>
