@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Apple Music 探索数据服务（客户端组装，与 /explore/netease、/explore/qq 服务端聚合返回同构的 ExplorePayload）
  *
  * 数据源：

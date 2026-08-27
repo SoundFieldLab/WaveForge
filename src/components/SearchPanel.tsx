@@ -13,7 +13,8 @@ import ScrollToCurrentSong from './ScrollToCurrentSong'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import SongContextMenu from './SongContextMenu'
 import { getUserPlaylists } from '../services/playlistService'
-import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, getAppleLibraryPlaylists } from '../services/appleCatalog'
+import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestions, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
+import { getAppleCredentials } from '../services/appleAuth'
 import { parseStoredArray } from '../utils/storage'
 
 interface SearchPanelProps {
@@ -503,7 +504,12 @@ export default function SearchPanel({
               .slice(0, 8)
           : platform === 'qq'
             ? await buildQqQuickSuggestions(keyword.trim())
-            : await searchSuggest(keyword.trim(), platform)
+            : platform === 'apple'
+              // Apple：amp-api search/suggestions（web 播放器同款联想，需 Developer Token）
+              ? (await getAppleSearchSuggestions(keyword.trim(), localStorage.getItem('appleStorefront') || 'cn'))
+                  .slice(0, 8)
+                  .map(term => ({ keyword: term }))
+              : await searchSuggest(keyword.trim(), platform)
         if (!active) return
         console.log('📝 搜索建议结果:', result)
         setSuggestions(result)
@@ -607,9 +613,45 @@ export default function SearchPanel({
           artists: fused.artists, albums: fused.albums, unavailable, intent: fused.intent
         }, SEARCH_CACHE_MAX)
       } else if (platform === 'apple') {
-        // Apple Music 目录搜索（iTunes Search，免 token；storefront 决定地区）
+        // Apple Music 目录搜索：优先 amp-api（web 播放器同款，含歌单/电台），
+        // 无 Developer Token 时回退 iTunes Search（免 token，无歌单）
         const storefront = localStorage.getItem('appleStorefront') || 'cn'
-        if (searchType === 'song') {
+        const hasDevToken = Boolean(getAppleCredentials().developerToken)
+        if (hasDevToken) {
+          const searched = await searchAppleCatalogV1(finalKeyword, storefront, 25)
+          if (requestId !== searchRequestRef.current) return
+          const songs = searched.songs.map(song => appleSongToSong(song, storefront))
+          const artists = searched.artists.map(artist => ({
+            id: Number(artist.id) || 0,
+            name: artist.name,
+            picUrl: artist.artworkUrl || '',
+            platform: 'apple' as const,
+          }))
+          const albums = searched.albums.map(album => ({
+            id: Number(album.id) || 0,
+            name: album.name,
+            picUrl: album.artworkUrl || '',
+            artist: { name: album.artistName },
+            platform: 'apple' as const,
+          }))
+          const playlists = searched.playlists.map(playlist => ({
+            id: playlist.id,
+            name: playlist.name,
+            coverImgUrl: playlist.artworkUrl || '',
+            trackCount: playlist.trackCount ?? 0,
+            creator: playlist.curatorName || 'Apple Music 编辑',
+            platform: 'apple' as const,
+          }))
+          setAllResults(songs)
+          setDisplayedResults(songs.slice(0, 20))
+          setArtistResults(artists)
+          setAlbumResults(albums)
+          setPlaylistResults(playlists)
+          setLruCache(searchCacheRef.current, cacheKey, {
+            allResults: songs, artistResults: artists, albumResults: albums,
+            artists: [], albums: [], unavailable: [], intent: 'mixed' as const,
+          }, SEARCH_CACHE_MAX)
+        } else if (searchType === 'song') {
           const songs = await searchAppleSongsAsSongs(finalKeyword, storefront, 50)
           if (requestId !== searchRequestRef.current) return
           setAllResults(songs)
@@ -634,7 +676,7 @@ export default function SearchPanel({
             platform: 'apple',
           })))
         } else if (searchType === 'playlist') {
-          // Apple 无歌单搜索接口（编辑精选歌单走探索页）
+          // 未登录无 dev token：暂无 AMP 歌单搜索，与旧行为一致为空
           setPlaylistResults([])
         }
       } else if (searchType === 'song') {

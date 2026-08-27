@@ -239,6 +239,8 @@ export interface PreloadTrack {
   duration?: number
   albumId?: string
   albumCover?: string
+  /** Apple Music 原生 HLS 音源元数据（url 为 .m3u8 时由引擎用 hls.js 播放） */
+  appleHls?: import('../services/applePlayback').AppleNativeStream
 }
 
 export interface PlaybackEngineState {

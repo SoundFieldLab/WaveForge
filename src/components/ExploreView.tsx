@@ -1,3 +1,7 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -46,6 +50,7 @@ import {
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import MiniPlayer from './MiniPlayer'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
+import { AppleExplorePanel } from './AppleExplorePanel'
 import QQMusicJourney from './QQMusicJourney'
 import NeteaseMusicJourney from './NeteaseMusicJourney'
 import { getAppleLibraryPlaylists, APPLE_EXPLORE_COUNTRIES } from '../services/appleCatalog'
@@ -598,6 +603,8 @@ function ExploreView({
     continuous: boolean
   }>({ show: false, x: 0, y: 0, song: null, songs: [], continuous: false })
   const [shuffleOffset, setShuffleOffset] = useState(0)
+  // Apple Music 刷新信号（AM 无「换一批」，顶栏按钮改为刷新，信号传给 AppleExplorePanel 强制重载）
+  const [appleRefreshSignal, setAppleRefreshSignal] = useState(0)
   const [showModePanel, setShowModePanel] = useState(false)
   const [showMVExplore, setShowMVExplore] = useState(false)
   const [fmLoading, setFmLoading] = useState(false)
@@ -1392,25 +1399,6 @@ function ExploreView({
               ))}
             </div>
 
-            {platform === 'apple' && (
-              <div className="ml-1 flex items-center gap-0.5 rounded-2xl border border-white/[0.08] bg-black/20 p-1">
-                <Globe className="ml-1.5 h-3.5 w-3.5 shrink-0 text-white/35" />
-                {APPLE_EXPLORE_COUNTRIES.map(item => (
-                  <button
-                    key={item.code}
-                    type="button"
-                    onClick={() => changeAppleCountry(item.code)}
-                    className={`rounded-lg px-2 py-1 text-xs transition ${
-                      appleCountry === item.code ? 'font-medium text-[#081017]' : 'text-white/55 hover:bg-white/[0.06] hover:text-white'
-                    }`}
-                    style={appleCountry === item.code ? { background: accent } : undefined}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
             <div className="ml-auto flex items-center gap-2">
               {getPlatformCapabilities(platform).radio && (
                 <button
@@ -1514,15 +1502,28 @@ function ExploreView({
                   登录解锁个性化
                 </button>
               )}
-              <button
-                type="button"
-                onClick={handleShuffle}
-                disabled={loading}
-                className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
-              >
-                <RefreshCw key={shuffleOffset} className="h-4 w-4 animate-[spin_0.45s_ease-out_1]" />
-                换一批
-              </button>
+              {platform === 'apple' ? (
+                /* Apple Music 无「换一批」（内容非分页随机），此位置改为刷新（重载当前页签） */
+                <button
+                  type="button"
+                  onClick={() => setAppleRefreshSignal(v => v + 1)}
+                  disabled={loading}
+                  className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw key={appleRefreshSignal} className={`h-4 w-4 ${appleRefreshSignal > 0 ? 'animate-[spin_0.45s_ease-out_1]' : ''}`} />
+                  刷新
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleShuffle}
+                  disabled={loading}
+                  className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw key={shuffleOffset} className="h-4 w-4 animate-[spin_0.45s_ease-out_1]" />
+                  换一批
+                </button>
+              )}
             </div>
           </div>
 
@@ -1543,6 +1544,23 @@ function ExploreView({
           {/* 首页 Banner 轮播（网易云 / QQ） */}
           <ExploreBanner banners={banners} onBannerClick={handleBannerClick} />
 
+          {platform === 'apple' ? (
+            <AppleExplorePanel
+              appleLoggedIn={appleLoggedIn}
+              appleUsername={appleUsername}
+              appleAvatar={appleAvatar}
+              defaultStorefront={appleStorefront}
+              accentColor={accent}
+              accentRgb={accentRgb}
+              playerTheme={playerTheme}
+              onSongSelect={onSongSelect}
+              onLoginClick={() => onLoginClick('apple')}
+              onOpenAlbum={onOpenAlbum}
+              onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
+              refreshSignal={appleRefreshSignal}
+            />
+          ) : (
+          <>
           {loading && !payload ? (
             <ExploreSkeleton />
           ) : payload ? (
@@ -1672,15 +1690,13 @@ function ExploreView({
                       songs: payload.dailySongs.length ? payload.dailySongs : payload.newSongs,
                     },
                     {
-                      label: platform === 'qq' ? '猜你喜欢' : platform === 'apple' ? '今日热选' : platform === 'netease' ? '私人漫游' : '新鲜首发',
-                      title: platform === 'apple' ? '苹果全球热榜' : (platform === 'netease' || platform === 'qq') ? '一键进入无限电台' : '刚刚上线的新鲜声音',
-                      copy: platform === 'apple'
-                        ? `${payload.dailySongs.length} 首热门歌曲一次听完`
-                        : payload.radioSongs.length ? '越听越懂你的连续推荐' : '从相似口味自然延伸',
+                      label: platform === 'qq' ? '猜你喜欢' : platform === 'netease' ? '私人漫游' : '新鲜首发',
+                      title: (platform === 'netease' || platform === 'qq') ? '一键进入无限电台' : '刚刚上线的新鲜声音',
+                      copy: payload.radioSongs.length ? '越听越懂你的连续推荐' : '从相似口味自然延伸',
                       icon: Radio,
                       cover: payload.radioSongs[0]?.album.picUrl || payload.channels[0]?.coverUrl || payload.dailySongs[0]?.album.picUrl,
-                      songs: payload.radioSongs.length ? payload.radioSongs : (platform === 'apple' ? payload.dailySongs : (platform === 'netease' || platform === 'qq' ? payload.radioSongs : payload.newSongs)),
-                      continuous: platform !== 'apple',
+                      songs: payload.radioSongs.length ? payload.radioSongs : (platform === 'netease' || platform === 'qq' ? payload.radioSongs : payload.newSongs),
+                      continuous: true,
                     },
                     {
                       label: '新鲜发行',
@@ -1745,7 +1761,7 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('journey') && platform !== 'apple' && ((platform === 'qq' && qqLoggedIn) || (platform === 'netease' && neteaseLoggedIn && neteaseUserId)) && (
+              {sectionVisible('journey') && ((platform === 'qq' && qqLoggedIn) || (platform === 'netease' && neteaseLoggedIn && neteaseUserId)) && (
                 <section style={sectionStyle('journey')}>
                   {platform === 'qq' ? (
                     <QQMusicJourney
@@ -1999,6 +2015,8 @@ function ExploreView({
                 重新加载
               </button>
             </div>
+          )}
+          </>
           )}
         </main>
       </div>

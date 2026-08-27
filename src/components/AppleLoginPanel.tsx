@@ -1,3 +1,7 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { useEffect, useRef, useState } from 'react'
 import { CheckCircle2, ChevronDown, KeyRound, Link2, Loader2, LogOut, Music, ShieldCheck, X } from 'lucide-react'
 import { validateAppleLogin, clearAppleLogin, saveAppleLogin, getAppleAuthState, resolveAppleAccountName, resolveAppleAccountProfile, generateInitialsAvatar, type AppleUserInfo } from '../services/appleAuth'

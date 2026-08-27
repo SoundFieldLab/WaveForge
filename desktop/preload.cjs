@@ -273,6 +273,11 @@ contextBridge.exposeInMainWorld('electron', {
   // amp-api 代理：渲染进程浏览器直连会被 CORS 拦截，改由主进程请求
   appleApi: (path, developerToken, mediaUserToken, method, body) =>
     ipcRenderer.invoke('apple-api', { path, developerToken, mediaUserToken, method, body }),
+  // Apple Music 原生音源：webPlayback 取流（主进程 POST play.itunes.apple.com，无 CORS）
+  applePlayback: (songId, developerToken, mediaUserToken) =>
+    ipcRenderer.invoke('apple-playback', { songId, developerToken, mediaUserToken }),
+  // Apple HLS 清单获取（主进程 fetch 文本，白名单限制 Apple 域名）
+  appleFetchUrl: (url) => ipcRenderer.invoke('apple-fetch-url', { url }),
   // Apple 账号信息（buy.itunes 接口，需登录窗口抓取的 itunes cookie）
   appleAccountInfo: (cookies) => ipcRenderer.invoke('apple-account-info', cookies),
   // Apple 个人资料页（解析 og:image 头像）

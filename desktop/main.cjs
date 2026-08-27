@@ -97,6 +97,154 @@ if (!performanceSettings.hardwareAcceleration) {
   app.commandLine.appendSwitch('force_low_power_gpu')
 }
 
+// ── Widevine CDM 引导（Apple Music 原生音源：HLS 流走 EME 解密的钥匙）────────
+// 标准 Electron 不带 Widevine CDM。扫描系统已安装 Edge/Chrome 的 Widevine 组件，
+// app ready 前通过 --widevine-cdm-path/version 注入；找不到时渲染层自动回退
+// 网易云/QQ 载体匹配（AM 原生音源仅在有 Widevine 的环境可用，Cider 同款思路）。
+function findWidevineCdm() {
+  const candidates = []
+  const roots = [process.env['ProgramFiles(x86)'], process.env['ProgramFiles'], process.env.LOCALAPPDATA]
+  for (const base of roots) {
+    if (!base) continue
+    for (const appDir of ['Microsoft/Edge/Application', 'Google/Chrome/Application']) {
+      const versionsDir = path.join(base, appDir)
+      let entries = []
+      try { entries = fs.readdirSync(versionsDir) } catch { continue }
+      for (const version of entries) {
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(version)) continue
+        candidates.push({
+          version,
+          root: path.join(versionsDir, version, 'WidevineCdm'),
+          manifestPath: path.join(versionsDir, version, 'WidevineCdm', 'manifest.json'),
+          dllDir: path.join(versionsDir, version, 'WidevineCdm', '_platform_specific', 'win_x64'),
+        })
+      }
+    }
+  }
+  candidates.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }))
+  // 标准布局（Chrome/Edge 一致）：manifest.json 在 WidevineCdm 根，DLL 在
+  // _platform_specific/win_x64/。Electron 的 --widevine-cdm-path 必须指向含
+  // manifest.json 的根目录；--widevine-cdm-version 必须等于 manifest 里的
+  // CDM 版本（4.x），若错填浏览器版本号（151.x）EME 会直接 Unsupported keySystem。
+  for (const c of candidates) {
+    try {
+      if (!fs.existsSync(path.join(c.dllDir, 'widevinecdm.dll')) || !fs.existsSync(c.manifestPath)) continue
+      const manifest = JSON.parse(fs.readFileSync(c.manifestPath, 'utf8'))
+      const cdVersion = manifest && typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : ''
+      if (!cdVersion) continue
+      return { path: c.root, version: cdVersion }
+    } catch { /* 继续下一个候选 */ }
+  }
+  // 个别构建把 manifest.json 放在 win_x64 内：按"根目录含 manifest"重新找一遍
+  for (const c of candidates) {
+    try {
+      const innerManifest = path.join(c.dllDir, 'manifest.json')
+      if (!fs.existsSync(path.join(c.dllDir, 'widevinecdm.dll')) || !fs.existsSync(innerManifest)) continue
+      const manifest = JSON.parse(fs.readFileSync(innerManifest, 'utf8'))
+      const cdVersion = manifest && typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : ''
+      if (!cdVersion) continue
+      return { path: c.dllDir, version: cdVersion }
+    } catch { /* 继续下一个候选 */ }
+  }
+  return null
+}
+// ── Widevine 运行时判定 ────────────────────────────────────────────────────
+// castlabs ECS（Electron for Content Security，带 Widevine 的官方分叉）自带
+// 组件更新服务管理 CDM，无需借系统 Chrome/Edge 的组件；标准 Electron 才走
+// 下面基于 --widevine-cdm-* 开关的注入。判断依据：ECS 提供 components API。
+function isEcsBuild() {
+  try {
+    const { components } = require('electron')
+    return Boolean(components && typeof components.whenReady === 'function')
+  } catch {
+    return false
+  }
+}
+
+// ── ECS 完全离线播种（第一启动预置 Widevine CDM）────────────────────────────
+// ECS 的 CUS（组件更新服务）判定"已安装"的依据 = Local State 里 updateclientdata
+// 注册（appId=oimompecagnajdejgnnjijobebaeigek，pv=版本）+ userData/WidevineCdm/
+// <版本>/ 下的文件。实测（本机）：播种后在 Google 完全不可达的情况下 EME 仍
+// OK（更新检查失败不会移除本地组件）。因此：首次启动若发现未注册，就从系统
+// Chrome/Edge 复制 CDM 并写入注册 → 用户端零 Google 依赖；有网络的机器 CUS
+// 照常日后自动升级 CDM。
+const ECS_WIDEVINE_APP_ID = 'oimompecagnajdejgnnjijobebaeigek'
+function findExistingEcsCdmVersion(userDataDir) {
+  try {
+    const localState = JSON.parse(fs.readFileSync(path.join(userDataDir, 'Local State'), 'utf8'))
+    const entry = localState?.updateclientdata?.apps?.[ECS_WIDEVINE_APP_ID]
+    const pv = entry && typeof entry.pv === 'string' ? entry.pv : ''
+    if (!pv) return ''
+    const versionDir = path.join(userDataDir, 'WidevineCdm', pv)
+    return fs.existsSync(path.join(versionDir, 'manifest.json')) ? pv : ''
+  } catch {
+    return ''
+  }
+}
+function seedEcsOfflineCdm() {
+  try {
+    const userDataDir = app.getPath('userData')
+    if (findExistingEcsCdmVersion(userDataDir)) return // 已注册且文件在 → 无需播种
+    const source = findWidevineCdm() // 系统 Chrome/Edge 的 CDM（含 manifest 版本）
+    if (!source) {
+      console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
+      return
+    }
+    const version = source.version
+    const vdir = path.join(userDataDir, 'WidevineCdm', version)
+    fs.mkdirSync(path.join(vdir, '_platform_specific', 'win_x64'), { recursive: true })
+    const copyIfExists = (from, to) => {
+      if (fs.existsSync(from)) {
+        fs.mkdirSync(path.dirname(to), { recursive: true })
+        fs.copyFileSync(from, to)
+      }
+    }
+    copyIfExists(path.join(source.path, 'manifest.json'), path.join(vdir, 'manifest.json'))
+    copyIfExists(path.join(source.path, 'LICENSE'), path.join(vdir, 'LICENSE'))
+    copyIfExists(path.join(source.path, 'LICENSE.txt'), path.join(vdir, 'LICENSE'))
+    const spSrc = path.join(source.path, '_platform_specific', 'win_x64')
+    copyIfExists(path.join(spSrc, 'widevinecdm.dll'), path.join(vdir, '_platform_specific', 'win_x64', 'widevinecdm.dll'))
+    copyIfExists(path.join(spSrc, 'widevinecdm.dll.sig'), path.join(vdir, '_platform_specific', 'win_x64', 'widevinecdm.dll.sig'))
+    copyIfExists(path.join(source.path, '_metadata', 'verified_contents.json'), path.join(vdir, '_metadata', 'verified_contents.json'))
+    // Local State 注册（ECS CUS 识别"已安装"的依据）
+    const localStatePath = path.join(userDataDir, 'Local State')
+    let localState = {}
+    try { localState = JSON.parse(fs.readFileSync(localStatePath, 'utf8')) } catch { localState = {} }
+    if (!localState.updateclientdata) localState.updateclientdata = {}
+    if (!localState.updateclientdata.apps) localState.updateclientdata.apps = {}
+    localState.updateclientdata.apps[ECS_WIDEVINE_APP_ID] = {
+      cohort: '1:3cjr:',
+      cohortname: 'Auto',
+      fp: '',
+      installdate: 7178,
+      max_pv: '0.0.0.0',
+      pf: '49b89fa4-5266-481b-af73-868305d174b0',
+      pv: version,
+    }
+    fs.writeFileSync(localStatePath, JSON.stringify(localState), 'utf8')
+    logStartupTiming(`[Widevine] 完全离线播种完成：CDM ${version} -> ${vdir}`)
+  } catch (error) {
+    console.warn('[Widevine] 离线播种失败（不影响启动，CUS 将尝试联网安装）:', error?.message || error)
+  }
+}
+if (isEcsBuild()) {
+  console.log('[Widevine] 检测到 castlabs ECS 运行时：CDM 由组件服务管理，跳过自定义注入')
+  seedEcsOfflineCdm()
+} else {
+  try {
+    const widevine = findWidevineCdm()
+    if (widevine) {
+      app.commandLine.appendSwitch('widevine-cdm-path', widevine.path)
+      app.commandLine.appendSwitch('widevine-cdm-version', widevine.version)
+      logStartupTiming(`[Widevine] 注入 CDM ${widevine.version} @ ${widevine.path}`)
+    } else {
+      console.log('[Widevine] 未检测到 Edge/Chrome Widevine 组件（AM 原生音源将回退载体匹配）')
+    }
+  } catch (error) {
+    console.error('[Widevine] CDM 引导失败:', error?.message || error)
+  }
+}
+
 app.on('child-process-gone', (_event, details) => {
   const processType = String(details?.type || '').toLowerCase()
   if (processType === 'gpu' || processType === 'renderer') {
@@ -3954,6 +4102,77 @@ ipcMain.handle('apple-api', async (event, payload) => {
   }
 })
 
+// ── Apple Music 原生音源取流（Cider 同款：webPlayback 私有接口）──────────────
+// POST play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback，
+// body {"salableAdamId":"<catalogSongId>"}；响应 songList[0] 携带 songsId、
+// HLS 主清单（attributes.assetUrl / offers[].hlsUrl）与 EME keyURLs
+// （hls-key-cert-url / hls-key-server-url / widevine-cert-url）。
+// 浏览器直连该接口同样受 CORS 限制，统一走主进程（请求头与 SDK 完全一致）。
+const APPLE_MZPLAY_WEBPLAYBACK = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
+ipcMain.handle('apple-playback', async (_event, payload) => {
+  const { songId, developerToken, mediaUserToken } = payload || {}
+  if (!songId || !developerToken || !mediaUserToken) {
+    return { ok: false, status: 0, error: '缺少参数（songId/developerToken/mediaUserToken）' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const headers = {
+      Authorization: `Bearer ${developerToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Apple-Music-User-Token': String(mediaUserToken),
+      Origin: 'https://music.apple.com',
+      Referer: 'https://music.apple.com/',
+    }
+    const response = await fetch(APPLE_MZPLAY_WEBPLAYBACK, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ salableAdamId: String(songId) }),
+      signal: controller.signal,
+    })
+    const text = await response.text()
+    let data = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = text
+    }
+    return { ok: response.ok, status: response.status, data }
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+// ── Apple HLS 清单代理：渲染层解析主清单需先拿到文本（Electron 源下直连会被
+// CORS 拦），主进程 fetch 后回传。白名单限制在 Apple/苹果静态资源域。──────────
+ipcMain.handle('apple-fetch-url', async (_event, payload) => {
+  const { url } = payload || {}
+  if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return { ok: false, error: '非法 URL' }
+  let hostname = ''
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return { ok: false, error: '非法 URL' }
+  }
+  if (!/^(apple|itunes\.apple|music\.apple)\.com$/i.test(hostname) && !/(^|\.)(apple\.com|itunes\.apple\.com|mzstatic\.com)$/i.test(hostname)) {
+    return { ok: false, error: '域名不在白名单' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    const text = await response.text()
+    return { ok: response.ok, status: response.status, text }
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 // ── Apple 账号信息（buy.itunes 账号接口，Cider 同款：凭登录窗口抓取的 itunes cookie）──
 ipcMain.handle('apple-account-info', async (event, cookies) => {
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }
@@ -6587,7 +6806,7 @@ app.on('will-quit', async () => {
   try { localCompensationChild?.kill() } catch {}
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   logStartupTiming('Electron app ready')
   // 启动时应用上次「稍后」的待更新：拉起 updater 后立即退出，换完文件自动重启到新版本。
   // 返回 true 表示正在重启应用，跳过本窗口创建流程。
@@ -6621,6 +6840,43 @@ app.whenReady().then(() => {
     // enumerateDevices 需要设备级授权才能返回带标签的真实设备列表
     const type = details?.deviceType || ''
     return type === 'audiooutput' || type === 'audio' || type === 'video' || details?.mediaType === 'audio'
+  })
+
+  // ── Apple 音源 CORS 放行（Cider 式原生音源所需）────────────────────────────
+  // 渲染层 hls.js 直接请求 Apple 的 HLS 清单/分段/Widevine license，这些接口的
+  // CORS 头固定允许的是 music.apple.com 源，本地渲染进程源会被浏览器拦下。
+  // 这里对 Apple 域名响应统一重写 CORS 头为请求方源（并吞掉不友好的预检 4xx），
+  // 只影响跨域响应头，不触碰请求内容。
+  const APPLE_CORS_HOST_RE = /(^|\.)(apple\.com|itunes\.apple\.com|mzstatic\.com)$/i
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    try {
+      const hostname = new URL(details.url).hostname
+      if (!APPLE_CORS_HOST_RE.test(hostname)) return callback({})
+      const requestOrigin = details.headers?.origin || '*'
+      const originList = requestOrigin === '*' ? ['*'] : [requestOrigin]
+      // 头部统一成小写（避免同名不同大小写头并存 → 双份 CORS 头导致校验失败）
+      const headers = {}
+      for (const key of Object.keys(details.responseHeaders || {})) {
+        const lower = String(key).toLowerCase()
+        const value = details.responseHeaders[key]
+        if (lower === 'content-length' && details.method === 'OPTIONS') continue
+        headers[lower] = value
+      }
+      const set = (name, value) => { headers[String(name).toLowerCase()] = Array.isArray(value) ? value : [value] }
+      set('Access-Control-Allow-Origin', originList)
+      set('Access-Control-Allow-Credentials', ['true'])
+      set('Access-Control-Allow-Headers', ['Authorization, Content-Type, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal'])
+      set('Access-Control-Allow-Methods', ['GET, HEAD, POST, OPTIONS, PUT, DELETE, PATCH'])
+      // CORS 预检要求 2xx：Apple 部分接口对 OPTIONS 可能返回 4xx，统一改写成 204 放行
+      if (details.method === 'OPTIONS' && (details.statusCode < 200 || details.statusCode >= 300)) {
+        headers['content-length'] = ['0']
+        return callback({ cancel: false, statusCode: 204, responseHeaders: headers })
+      }
+      return callback({ responseHeaders: headers })
+    } catch (error) {
+      console.error('[AppleCORS] 响应头重写失败:', error?.message || error)
+      return callback({})
+    }
   })
 
   // 初始化配置管理器
@@ -6922,6 +7178,20 @@ app.whenReady().then(() => {
   desktopPlayerEnabled = desktopPlayerSaved.enabled
   desktopPlayerForm = desktopPlayerSaved.form
   desktopLyricsSettings = loadDesktopLyricsSettings()
+
+  // castlabs ECS：先等 Widevine CDM 组件就绪再开窗口（首次会联网安装，失败不阻断——
+  // AM 原生音源自动回退网易云/QQ 载体，其余功能不受影响）
+  try {
+    const { components } = require('electron')
+    if (components && typeof components.whenReady === 'function') {
+      await components.whenReady()
+      let statusText = ''
+      try { statusText = JSON.stringify(components.status ? components.status() : '') } catch { /* 忽略 */ }
+      logStartupTiming(`[ECS] components ready: ${statusText}`)
+    }
+  } catch (error) {
+    console.warn('[ECS] components 初始化失败（Widevine 可能未就绪，AM 原生将回退载体）:', error instanceof Error ? error.message : error)
+  }
 
   // 若上次退出时开启了桌面播放器，等主窗口起来后再显示小窗口，避免抢占启动焦点
   setTimeout(() => {

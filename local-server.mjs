@@ -10675,11 +10675,60 @@ app.get('/api/apple/rss', async (req, res) => {
   }
 })
 
+// ── Apple Music amp-api 通用代理（渲染进程直连 amp-api 被 CORS 拦截时的兜底通道）──
+// 与 Electron 主进程 apple-api IPC 同语义：透传 Authorization / Media-User-Token，
+// 支持 GET/POST/PATCH/DELETE，原样回传状态码与 JSON。仅监听 127.0.0.1，token 不出本机。
+const APPLE_AMP_API_BASE = 'https://amp-api.music.apple.com'
+async function proxyAppleAmpApi(req, res) {
+  const rawPath = String(req.query.path || '')
+  if (!rawPath.startsWith('/v1/')) {
+    return res.status(400).json({ error: 'path 必须以 /v1/ 开头' })
+  }
+  const url = `${APPLE_AMP_API_BASE}${rawPath}`
+  const headers = {
+    Accept: 'application/json',
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  }
+  const auth = req.headers['authorization']
+  if (auth) headers.Authorization = auth
+  const mut = req.headers['media-user-token']
+  if (mut) headers['Media-User-Token'] = mut
+  const method = (req.method || 'GET').toUpperCase()
+  if (req.body !== undefined && req.body !== null && Object.keys(req.body).length > 0) {
+    headers['Content-Type'] = 'application/json'
+  }
+  try {
+    const response = await axios({
+      method,
+      url,
+      timeout: 20000,
+      headers,
+      data: method === 'GET' ? undefined : (req.body || undefined),
+      responseType: 'text',
+      validateStatus: () => true,
+    })
+    res.status(response.status)
+    const text = String(response.data || '')
+    let data = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    res.json(data ?? { ok: true })
+  } catch (error) {
+    console.error('[Apple AMP 代理] 失败:', error.message || error)
+    res.status(502).json({ error: error.message || 'Apple AMP API 请求失败' })
+  }
+}
+app.get('/api/apple/amp', proxyAppleAmpApi)
+app.post('/api/apple/amp', proxyAppleAmpApi)
+app.patch('/api/apple/amp', proxyAppleAmpApi)
+app.delete('/api/apple/amp', proxyAppleAmpApi)
+
 // 健康检查
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    neteaseAPI: NeteaseAPI ? 'loaded' : 'not loaded' 
+  res.json({
+    status: 'ok',
+    neteaseAPI: NeteaseAPI ? 'loaded' : 'not loaded'
   })
 })
 

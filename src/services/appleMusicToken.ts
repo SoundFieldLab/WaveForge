@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Apple Music Developer Token 获取（免密钥，gamdl / Cider-fork 同款做法）
  *
  * Apple 网页播放器把可用的 MusicKit 开发者令牌（iss=AMPWebPlay，约 70 天有效）

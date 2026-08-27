@@ -1,11 +1,27 @@
 import { memo, useEffect, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
-import { X, Music, Disc3, Clock, BadgeCheck, Crown, Calendar, Video, CircleDollarSign, ListMusic, Mic2, ScrollText, BookOpen, RefreshCw, Play, Activity } from 'lucide-react'
+import { X, Music, Disc3, Clock, BadgeCheck, Crown, Calendar, Video, CircleDollarSign, ListMusic, Mic2, ScrollText, BookOpen, RefreshCw, Play, Activity, Loader2, ChevronRight, User } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getLyrics, getNeteaseSongWiki, getQQSongPlaylist, getProxiedImageUrl, getQQListenAlso, getQQLikeAlso, getNeteaseSimiSong, getNeteaseRelatedPlaylist, getNeteaseSongBlog } from '../services/musicApi'
+import { fetchAppleSongDetail, type AppleSongDetail } from '../services/appleWebService'
 import LyricModal from './LyricModal'
 import VideoPlayer from './VideoPlayer'
 import { useTvBack } from '../tv/tvCore'
+
+/** Apple audioTraits → 音质标签（web 歌曲页同款徽标） */
+const APPLE_TRAIT_LABELS: Array<{ trait: string; label: string }> = [
+  { trait: 'atmos', label: '杜比全景声' },
+  { trait: 'lossless', label: '无损' },
+  { trait: 'lossless-alac', label: '无损' },
+  { trait: 'spatial', label: '空间音频' },
+]
+
+const formatAppleReleaseDate = (value?: string): string => {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
+}
 
 interface SongDetailModalProps {
   song: Song
@@ -13,6 +29,8 @@ interface SongDetailModalProps {
   playerTheme: 'dark' | 'light'
   onPlayNow?: (song: Song) => void
   onOpenPlaylist?: (playlistId: string, platform: 'netease' | 'qq') => void
+  /** 打开专辑详情（Apple「更多作品」用） */
+  onOpenAlbum?: (albumId: string, platform: 'apple') => void
 }
 
 function formatDuration(ms: number): string {
@@ -38,7 +56,7 @@ const NETBASE_FEE_LABELS: Record<number, string> = {
   8: '免费（低音质）',
 }
 
-function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetailModalProps) {
+function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum }: SongDetailModalProps) {
   // TV 遥控器 BACK：关闭歌曲详情弹窗
   useTvBack(() => {
     onClose()
@@ -71,6 +89,9 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetai
   const [neteaseRelated, setNeteaseRelated] = useState<{ id: string; name: string; coverImgUrl: string; trackCount: number }[]>([])
   // 网易云「相关博客」2 条
   const [neteaseBlogs, setNeteaseBlogs] = useState<{ id: number | string; title: string; summary: string; author: string; time: number }[]>([])
+  // Apple Music 歌曲详情（web 歌曲页 1:1：歌词/出演艺人/词曲/更多作品）
+  const [appleDetail, setAppleDetail] = useState<AppleSongDetail | null>(null)
+  const [appleDetailLoading, setAppleDetailLoading] = useState(false)
 
   // 网易云推荐：喜欢这首歌的人也爱听 + 相关歌单
   useEffect(() => {
@@ -117,6 +138,24 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetai
     return () => { cancelled = true }
   }, [song.id, song.platform, song.album?.id])
 
+  // Apple Music 歌曲详情（web /song/… 同款：基础信息 + 歌词 + 出演艺人 + 词曲 + 更多作品）
+  useEffect(() => {
+    if (song.platform !== 'apple') return
+    const appleId = String(song.appleId || song.id || '')
+    if (!appleId || appleId === '0') return
+    let cancelled = false
+    setAppleDetailLoading(true)
+    setAppleDetail(null)
+    void fetchAppleSongDetail(appleId).then((detail) => {
+      if (cancelled || !detail) return
+      setAppleDetail(detail)
+      // 歌词同步到通用 lyrics 状态（「查看完整歌词」弹窗复用）
+      if (detail.lyrics.length > 0) setLyrics(detail.lyrics)
+    }).catch(() => { /* 详情失败仅展示已有字段 */ })
+      .finally(() => { if (!cancelled) setAppleDetailLoading(false) })
+    return () => { cancelled = true }
+  }, [song.id, song.appleId, song.platform])
+
   // QQ 推荐：听 [歌曲] 的也在听 + 喜欢 [歌曲] 的人也爱它们
   useEffect(() => {
     if (song.platform !== 'qq') return
@@ -147,18 +186,9 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetai
     let cancelled = false
     const fetchDetail = async () => {
       try {
-        // Apple：无网易云/QQ 详情接口；歌词走融合链路（Apple 官方/AMLL/Lrclib）
+        // Apple：详情（含歌词）走上方 fetchAppleSongDetail 专用链路（web 歌曲页 1:1）
         if (song.platform === 'apple') {
-          setLyricsLoading(true)
-          const lyricLines = await getLyrics(
-            String(song.id),
-            'apple',
-            song.name,
-            Array.isArray(song.artists) ? song.artists.map(a => a.name).join(', ') : '',
-            song.duration
-          )
-          if (!cancelled && Array.isArray(lyricLines)) setLyrics(lyricLines)
-          if (!cancelled) setLyricsLoading(false)
+          setLyricsLoading(false)
           return
         }
         if (song.platform === 'qq') {
@@ -337,6 +367,161 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetai
             </div>
           </div>
 
+          {song.platform === 'apple' ? (
+            /* ── Apple Music 歌曲详情（web 歌曲页 1:1：封面/标题/歌词/出演艺人/词曲/更多作品） ── */
+            <div className="flex-1 min-h-0 overflow-y-auto p-6 md:p-8">
+              {appleDetailLoading && !appleDetail ? (
+                <div className="flex items-center justify-center gap-2 py-20 text-sm text-white/45">
+                  <Loader2 className="h-4 w-4 animate-spin" /> 正在加载歌曲详情…
+                </div>
+              ) : (
+                <>
+                  {/* 封面 + 标题 + 播放 */}
+                  <div className="flex flex-col gap-6 md:flex-row md:items-center">
+                    <div className="h-44 w-44 shrink-0 overflow-hidden rounded-2xl shadow-2xl md:h-52 md:w-52" style={{ border: '1px solid rgba(255,255,255,0.12)' }}>
+                      {coverUrl ? (
+                        <img src={getProxiedImageUrl(coverUrl)} alt={song.name} className="h-full w-full object-cover" />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center" style={{ background: 'rgba(255,255,255,0.06)' }}>
+                          <Music className="h-12 w-12" style={{ color: accentColor }} />
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h1 className="break-words text-2xl font-bold leading-snug text-white md:text-3xl">{song.name || '未知歌曲'}</h1>
+                      <p className={`${textSecondary} mt-2 text-sm`}>
+                        {appleDetail?.album?.name || albumName}
+                        <span className="mx-1.5 text-white/30">·</span>
+                        {artists}
+                        {(appleDetail?.song.releaseDate || publishDate) && (
+                          <>
+                            <span className="mx-1.5 text-white/30">·</span>
+                            {appleDetail?.song.releaseDate ? formatAppleReleaseDate(appleDetail.song.releaseDate) : `发行 ${publishDate}`}
+                          </>
+                        )}
+                      </p>
+                      {/* 音质徽标（audioTraits：无损 / 杜比全景声 / 空间音频） */}
+                      {appleDetail?.song.audioTraits && appleDetail.song.audioTraits.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {APPLE_TRAIT_LABELS
+                            .filter(trait => appleDetail!.song.audioTraits!.includes(trait.trait))
+                            .map(trait => (
+                              <span key={trait.trait} className="rounded-md border border-white/15 bg-white/[0.08] px-2 py-0.5 text-[11px] font-medium text-white/80">
+                                {trait.label}
+                              </span>
+                            ))}
+                        </div>
+                      )}
+                      <div className="mt-5 flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onPlayNow?.(song)}
+                          className="flex items-center gap-2 rounded-full px-6 py-2.5 text-sm font-semibold text-white transition hover:brightness-110"
+                          style={{ background: accentColor }}
+                        >
+                          <Play className="h-4 w-4 fill-current" /> 播放
+                        </button>
+                        <span className={`${textTertiary} text-xs`}>{formatDuration(song.duration)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 歌词（前 3 行 + 查看完整歌词） */}
+                  {lyrics.length > 0 && (
+                    <div className="mt-10 border-t border-white/[0.08] pt-6">
+                      <h2 className="text-lg font-semibold text-white">歌词</h2>
+                      <div className="mt-4 space-y-3">
+                        {lyrics.slice(0, 3).map((line, i) => (
+                          <p key={i} className={`${textPrimary} text-base font-medium leading-relaxed`}>{line.text}</p>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowLyric(true)}
+                        className="mt-4 flex items-center gap-1 text-sm transition hover:brightness-125"
+                        style={{ color: accentColor }}
+                      >
+                        查看完整歌词 <ChevronRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 出演艺人 */}
+                  {appleDetail && appleDetail.artists.length > 0 && (
+                    <div className="mt-10 border-t border-white/[0.08] pt-6">
+                      <h2 className="text-lg font-semibold text-white">出演艺人</h2>
+                      <div className="mt-4 space-y-3">
+                        {appleDetail.artists.map(artist => (
+                          <div key={artist.id} className="flex items-center gap-3">
+                            {artist.artworkUrl ? (
+                              <img src={getProxiedImageUrl(artist.artworkUrl)} alt={artist.name} className="h-11 w-11 rounded-full object-cover" />
+                            ) : (
+                              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.08]">
+                                <User className="h-5 w-5 text-white/40" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className={`${textPrimary} truncate text-sm font-medium`}>{artist.name}</p>
+                              <p className={`${textTertiary} text-xs`}>表演者</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 作曲和作词 */}
+                  {appleDetail && appleDetail.songwriters.length > 0 && (
+                    <div className="mt-10 border-t border-white/[0.08] pt-6">
+                      <h2 className="text-lg font-semibold text-white">作曲和作词</h2>
+                      <div className="mt-4 space-y-3">
+                        {appleDetail.songwriters.map(writer => (
+                          <div key={writer} className="flex items-center gap-3">
+                            <div className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.08] text-sm font-semibold text-white/60">
+                              {writer.charAt(0).toUpperCase()}
+                            </div>
+                            <div className="min-w-0">
+                              <p className={`${textPrimary} truncate text-sm font-medium`}>{writer}</p>
+                              <p className={`${textTertiary} text-xs`}>词曲作者、编曲</p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 更多 {artist} 的作品（艺人专辑横滑） */}
+                  {appleDetail && appleDetail.artistAlbums.length > 0 && (
+                    <div className="mt-10 border-t border-white/[0.08] pt-6">
+                      <h2 className="text-lg font-semibold text-white">更多{appleDetail.artists[0]?.name || artists}的作品</h2>
+                      <div className="no-scrollbar -mx-2 mt-4 flex gap-4 overflow-x-auto px-2 pb-2">
+                        {appleDetail.artistAlbums.map(album => (
+                          <div
+                            key={album.id}
+                            className="group w-32 shrink-0 cursor-pointer md:w-36"
+                            onClick={() => { if (album.playId) onOpenAlbum?.(album.playId, 'apple') }}
+                          >
+                            <div className="aspect-square w-full overflow-hidden rounded-xl border border-white/[0.08]">
+                              {album.artworkUrl ? (
+                                <img src={getProxiedImageUrl(album.artworkUrl)} alt={album.name} loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-105" />
+                              ) : (
+                                <div className="flex h-full w-full items-center justify-center bg-white/[0.06]">
+                                  <Disc3 className="h-7 w-7 text-white/30" />
+                                </div>
+                              )}
+                            </div>
+                            <p className={`${textPrimary} mt-2 truncate text-xs font-medium`}>{album.name}</p>
+                            {album.releaseDate && <p className={`${textTertiary} mt-0.5 text-[11px]`}>{album.releaseDate.slice(0, 4)}</p>}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ) : (
+          <>
           {/* 头部横向：封面 + 歌曲信息 */}
           <div className="p-6 border-b flex-shrink-0" style={{ borderColor: 'rgba(255,255,255,0.08)' }}>
             <div className="flex gap-5 items-center">
@@ -690,6 +875,8 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist }: SongDetai
               )}
             </div>
           </div>
+          </>
+          )}
         </div>
       </motion.div>
 
