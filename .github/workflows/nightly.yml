@@ -1,7 +1,7 @@
-# 每日构建（Nightly）：每天北京时间 21:00 自动构建 Android TV + Windows 测试版。
+# 每日构建（Nightly）：每天北京时间凌晨 05:00 自动构建 Android TV + Windows 测试版。
 # - 不 bump 正式版本号，仅在工作区拼 "<基础版本>-nightly.<YYYYMMDD>" 用于产物命名，不推回仓库。
 # - 固定使用 nightly tag/release，每次发布前覆盖上一版，GitHub Release 始终只保留一个当前 nightly。
-# - 自动生成 changelog（自上次 nightly tag 以来的提交），发布 GitHub 预发布。
+# - 自动生成 changelog（自上一个 Pre-release/正式版 tag 以来的全部提交，忽略 nightly，按日期分节），发布 GitHub 预发布。
 # - 不写/推 update.json、不发 Gitee —— 不影响正式版检查更新与正式发版流程。
 # 也可在 Actions 页面手动触发（force=true 可忽略「无新增提交」跳过逻辑强制构建）。
 
@@ -9,8 +9,8 @@ name: Nightly Build 每日构建
 
 on:
   schedule:
-    # UTC 21:00 = 北京时间 05:00
-    - cron: '0 13 * * *'
+    # UTC 21:00 = 北京时间凌晨 05:00
+    - cron: '0 21 * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -37,7 +37,7 @@ jobs:
       nightly_version: ${{ steps.meta.outputs.nightly_version }}
       has_changes: ${{ steps.meta.outputs.has_changes }}
     steps:
-      - name: 拉取代码（完整历史，供查找上一个 nightly tag 与生成 changelog）
+      - name: 拉取代码（完整历史，供查找变更基线 tag 与生成 changelog）
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -60,8 +60,8 @@ jobs:
           BASE_VERSION=$(node -p "require('./package.json').version")
           NIGHTLY_VERSION="${BASE_VERSION}-nightly.${DATE}"
 
-          # changelog 只覆盖上一次 nightly 构建之后的提交；首次运行（无 nightly tag）时回退最近正式版 tag，两者皆无则回退最近 50 条提交
-          LAST_NIGHTLY=$(git tag -l 'nightly' --sort=-creatordate | head -1)
+          # changelog 基线取最近一个正式版/Pre-release tag（v*，天然匹配不到 nightly tag），始终覆盖其以来的全部提交；没有 v* tag 时回退最近 50 条提交。
+          # nightly tag 只用于下方「无新增提交」跳过判定，不参与 changelog。
           LAST_STABLE=$(git tag -l 'v*' --sort=-creatordate | head -1)
           if [ -n "$LAST_NIGHTLY" ]; then
             RANGE="${LAST_NIGHTLY}..HEAD"
@@ -70,6 +70,7 @@ jobs:
           fi
 
           # 无新增提交判定（仅当存在上一个 nightly tag 且非 force 时生效）
+          LAST_NIGHTLY=$(git tag -l 'nightly' --sort=-creatordate | head -1)
           HAS_CHANGES="true"
           if [ "$FORCE" != "true" ] && [ -n "$LAST_NIGHTLY" ]; then
             if [ "$(git rev-parse "$LAST_NIGHTLY")" = "$(git rev-parse HEAD)" ]; then
@@ -77,21 +78,30 @@ jobs:
             fi
           fi
 
-          # 生成 changelog（排除 merge 提交，取 commit subject + 短哈希）
+          # 按提交日期分节输出（新→旧）：### 2026-08-27 分节头 + "- 主题 (短哈希)" 列表项。
+          # --date=short 显示的是提交自身记录的时区（本仓库均为北京时间 +08:00），即北京日期。
+          group_by_date() {
+            awk -F'\t' '
+              $1 != cur { if (cur != "") print ""; print "### " $1; cur = $1 }
+              { msg = $0; sub(/^[^\t]*\t/, "", msg); print "- " msg }
+            '
+          }
+
+          # 生成 changelog：排除 merge 提交，取 commit subject + 短哈希
           {
             echo "# WaveForge Nightly ${DATE}"
             echo ""
             echo "**版本号：${NIGHTLY_VERSION}（基础 ${BASE_VERSION} + 构建日期，非正式发版，不自动升级版本号）**"
             echo ""
             if [ -n "$RANGE" ]; then
-              echo "## 代码变动（自上次 Nightly 构建 ${RANGE%%..*} 起）"
+              echo "## 代码变动（自上个 Pre-release ${LAST_STABLE} 起）"
               echo ""
-              LOG=$(git log $RANGE --no-merges --pretty=format:"- %s (%h)" 2>/dev/null)
-              if [ -z "$LOG" ]; then echo "- 无新增提交"; else echo "$LOG"; fi
+              RAW=$(git log $RANGE --no-merges --date=short --pretty=format:"%cd%x09%s (%h)" 2>/dev/null)
+              if [ -n "$RAW" ]; then printf '%s\n' "$RAW" | group_by_date; else echo "- 无新增提交"; fi
             else
               echo "## 代码变动（暂无 nightly / 正式版 tag，最近 50 条提交）"
               echo ""
-              git log -50 --no-merges --pretty=format:"- %s (%h)"
+              git log -50 --no-merges --date=short --pretty=format:"%cd%x09%s (%h)" | group_by_date
             fi
             echo ""
             echo ""
