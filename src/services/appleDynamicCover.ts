@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Apple Music 动态封面（Animated Artwork）渲染端服务。
  * 数据链路在本地服务端（server/apple-artwork-api.mjs）：web token 提取 →
  * amp-api storefront 搜索 → editorialVideo → HLS 变体选择。

@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 哔哩哔哩「看歌」后端模块（server/bilibili-api.mjs）
  *
  * 为 WaveForge 的 B 站 MV 自动播放模式提供：

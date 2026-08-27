@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 汽水逐字歌词归一化模块（端到端接通 /api/soda/lyric 的 words 字段）。
  *
  * 上游真相：汽水自己的 wire 格式是行内 token 文本（`[行起点,行长]<相对偏移,时长,0>词` /

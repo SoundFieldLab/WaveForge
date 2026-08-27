@@ -34,6 +34,7 @@ import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
 import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './services/appleAuth'
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
 import { resolvePlayableSong, addAppleSongToLibrary, removeAppleSongFromLibrary, addAppleTracksToPlaylist, getAppleLibraryPlaylists } from './services/appleCatalog'
+import { isAppleNativeStreamEnabled, isAppleEmeCapable, resolveAppleNativeStream, type AppleNativeStream } from './services/applePlayback'
 import AppleLoginPanel from './components/AppleLoginPanel'
 import { cacheManager } from './services/cacheManager'
 import { indexedDBCache } from './services/indexedDBCache'
@@ -102,6 +103,7 @@ const loadWallpaperLyrics = () => import('./components/WallpaperLyrics')
 const loadGloriousLyrics = () => import('./components/GloriousLyrics')
 const loadMultidimensionalLyrics = () => import('./components/MultidimensionalLyrics')
 const loadFoliaLyricsPage = () => import('./components/FoliaLyricsPage')
+const loadPvLyricsPage = () => import('./components/pvLyrics/PvLyricsPage')
 const loadModengPlayer = () => import('./components/ModengPlayerPage')
 const loadBilibiliMvPlayer = () => import('./components/BilibiliMvPlayer')
 const loadBilibiliMvBackground = () => import('./components/BilibiliMvBackground')
@@ -113,6 +115,7 @@ const LazyWallpaperLyrics: any = lazy(loadWallpaperLyrics)
 const LazyGloriousLyrics: any = lazy(loadGloriousLyrics)
 const LazyMultidimensionalLyrics = lazy(loadMultidimensionalLyrics)
 const LazyFoliaLyricsPage: any = lazy(loadFoliaLyricsPage)
+const LazyPvLyricsPage: any = lazy(loadPvLyricsPage)
 const LazyModengPlayer: any = lazy(loadModengPlayer)
 const LazyBilibiliMvPlayer: any = lazy(loadBilibiliMvPlayer)
 const LazyBilibiliMvBackground: any = lazy(loadBilibiliMvBackground)
@@ -268,14 +271,15 @@ const buildDesktopLyricsWithInterludes = (lyrics: LyricLine[]): DesktopLyricLine
 }
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
-type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia'
+type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia' | 'pv'
 
 const LYRIC_MODE_VISIBILITY_KEY = 'waveforge_visible_lyric_modes'
 const LYRIC_MODE_MODENG_MIGRATED_KEY = 'waveforge_modeng_mode_migrated'
 const LYRIC_MODE_VIDEO_MIGRATED_KEY = 'waveforge_video_mode_migrated'
+const LYRIC_MODE_PV_MIGRATED_KEY = 'waveforge_pv_mode_migrated'
 /** Folia 歌词样式（vendored Project Folia 可视化器）的持久化 key 与默认样式 */
 const FOLIA_STYLE_KEY = 'waveforge_folia_style'
-const ALL_LYRIC_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia']
+const ALL_LYRIC_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia', 'pv']
 const LYRIC_MODE_NAMES: Record<LyricDisplayMode, string> = {
   modern: '现代',
   immersive: '沉浸式',
@@ -285,6 +289,7 @@ const LYRIC_MODE_NAMES: Record<LyricDisplayMode, string> = {
   modeng: '摩登',
   video: '看歌',
   folia: 'Folia',
+  pv: 'PV',
 }
 
 function loadVisibleLyricModes(): LyricDisplayMode[] {
@@ -311,6 +316,13 @@ function loadVisibleLyricModes(): LyricDisplayMode[] {
             localStorage.setItem(LYRIC_MODE_VIDEO_MIGRATED_KEY, '1')
             localStorage.setItem(LYRIC_MODE_VISIBILITY_KEY, JSON.stringify(withVideo))
             return withVideo
+          }
+          // PV（pv-tool 移植歌词模式）为新增模式：同样一次性补回
+          if (!withModern.includes('pv') && !localStorage.getItem(LYRIC_MODE_PV_MIGRATED_KEY)) {
+            const withPv = [...withModern, 'pv' as LyricDisplayMode]
+            localStorage.setItem(LYRIC_MODE_PV_MIGRATED_KEY, '1')
+            localStorage.setItem(LYRIC_MODE_VISIBILITY_KEY, JSON.stringify(withPv))
+            return withPv
           }
           return withModern
         }
@@ -673,6 +685,7 @@ function App() {
         loadGloriousLyrics(),
         loadMultidimensionalLyrics(),
         loadFoliaLyricsPage(),
+        loadPvLyricsPage(),
       ])
     }, { timeout: 2000 })
     return () => window.cancelIdleCallback(idleId)
@@ -926,7 +939,7 @@ function App() {
   const [isPureMusic, setIsPureMusic] = useState(false)
   const [lyricDisplayMode, setLyricDisplayMode] = useState<LyricDisplayMode>(() => {
     const saved = localStorage.getItem('lyricDisplayMode')
-    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'multidimensional' || saved === 'modeng' || saved === 'video' || saved === 'folia' ? saved : 'modern'
+    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'multidimensional' || saved === 'modeng' || saved === 'video' || saved === 'folia' || saved === 'pv' ? saved : 'modern'
   })
   // 摩登模式状态 ref：resolveAppleCover 等回调读取最新值（AM 封面仅摩登使用）
   const lyricDisplayModeRef = useRef(lyricDisplayMode)
@@ -2686,8 +2699,10 @@ function App() {
         if (!engineEl.paused) engineEl.pause()
       }
       // 看歌模式视频接管时间线：中止任何在途的音频过渡并清掉过渡视觉状态，
-      // 否则 transitionToTrack/预载会残留到切回歌词模式后，把下一首的 MV 叠到 MV 背景上
-      audioPlayerRef.current?.cancelTransition?.('enter watch mode', true)
+      // 否则 transitionToTrack/预载会残留到切回歌词模式后，把下一首的 MV 叠到 MV 背景上。
+      // 挂起引擎自动过渡（setWatchHold）：看歌期间 automix 不得 prepare/启动→提交，
+      // 否则已武装的过渡会在看歌中自动 commit → 切回时已是下一首（用户实测 Shelter）
+      audioPlayerRef.current?.setWatchHold?.(true)
       clearTransitionResetTimer()
       setIsTransitioning(false)
       setTransitionProgress(0)
@@ -2753,6 +2768,18 @@ function App() {
     localStorage.setItem(FOLIA_STYLE_KEY, style)
     if (lyricDisplayModeRef.current !== 'folia') handleLyricDisplayModeChange('folia')
   }
+
+  // 外部（快捷设置 QuickSettings 等）发起的歌词模式切换 → 走统一切换逻辑；
+  // App 自身派发该事件时 lyricDisplayModeRef 已等于目标 mode，判等后直接忽略（防自触发递归）
+  useEffect(() => {
+    const handleExternalLyricMode = (event: Event) => {
+      const mode = (event as CustomEvent<LyricDisplayMode>).detail
+      if (!ALL_LYRIC_MODES.includes(mode) || lyricDisplayModeRef.current === mode) return
+      handleLyricDisplayModeChange(mode)
+    }
+    window.addEventListener('lyricDisplayModeChanged', handleExternalLyricMode)
+    return () => window.removeEventListener('lyricDisplayModeChanged', handleExternalLyricMode)
+  }, [])
 
   // 同步其他视图修改的歌词模式可见性设置
   useEffect(() => {
@@ -3012,8 +3039,10 @@ function App() {
                   ? loadFoliaLyricsPage()
                   : lyricDisplayMode === 'modeng'
                     ? loadModengPlayer()
-                    : lyricDisplayMode === 'video'
-                      ? loadBilibiliMvPlayer()
+: lyricDisplayMode === 'video'
+                    ? loadBilibiliMvPlayer()
+                    : lyricDisplayMode === 'pv'
+                      ? loadPvLyricsPage()
                       : Promise.resolve(),
     ])
     const inferredOrigin: PlaybackOrigin = origin
@@ -3762,11 +3791,29 @@ function App() {
       setIsPlaying(false)
       
       let normalizedSong = normalizeSongCover(song)
-      // 需要跨平台载体转换的平台：apple（始终）、spotify（无自源音源，始终）。
+      // Apple Music 原生音源（Cider 式：webPlayback + HLS + Widevine EME）：
+      // 已登录且未关闭开关、环境有 Widevine 时优先取流，命中则直接播 Apple 原版
+      // （彻底消除「货不对板」）；任何一步失败回退下方网易云/QQ 载体匹配。
+      let appleHlsStream: AppleNativeStream | null = null
+      if (normalizedSong.platform === 'apple' && isAppleNativeStreamEnabled()) {
+        const streamId = String(normalizedSong.appleId || normalizedSong.id || '')
+        const emeCapable = await isAppleEmeCapable()
+        if (streamId && streamId !== '0' && emeCapable) {
+          appleHlsStream = await resolveAppleNativeStream(streamId)
+          if (!appleHlsStream) {
+            // 取流失败：静默回退载体（诊断原因已由 resolveAppleNativeStream 输出到
+            // 控制台与主进程日志，不打扰 UI）
+            debugLog('🍎 [PlaySong] Apple 原生音源取流失败，回退网易云/QQ 载体')
+          }
+        } else if (!emeCapable) {
+          debugLog('🍎 [PlaySong] 当前环境无 Widevine CDM，Apple 原生音源不可用，回退载体匹配')
+        }
+      }
+      // 需要跨平台载体转换的平台：apple（原生取流失败时）/spotify（无自源音源，始终）。
       // kugou/soda 先试原生播放（汽水走逆向 Web API，免费/试听流可播），
       // 付费/失败时在 URL 为空分支再匹配网易云/QQ 同款。
-      const needsCarrier = normalizedSong.platform === 'apple'
-        || normalizedSong.platform === 'spotify'
+      const needsCarrier = !appleHlsStream && (normalizedSong.platform === 'apple'
+        || normalizedSong.platform === 'spotify')
       let audioSong: Song = normalizedSong
       if (needsCarrier) {
         const resolved = await resolvePlayableSong(normalizedSong)
@@ -3816,7 +3863,12 @@ function App() {
       let sodaUnavailableInfo: { requiredTier?: 'free' | 'vip' | 'svip'; vipLabel?: string; reason?: string } | null = null
 
       // 音频 URL 与歌词分别判断时效，歌词请求不再等播放器完成加载后才开始。
-      if (cached?.url && (now - (cached.urlTimestamp ?? cached.timestamp)) < 5 * 60 * 1000) {
+      if (appleHlsStream) {
+        // Apple 原生 HLS：清单签名有时效且不走 getSongUrl，不写 URL 缓存，
+        // 切歌/重播时重新取流（webPlayback 本身很快）
+        url = appleHlsStream.url
+        debugLog('🍎 [PlaySong] Apple 原生 HLS 音源就绪: ' + url.slice(0, 96))
+      } else if (cached?.url && (now - (cached.urlTimestamp ?? cached.timestamp)) < 5 * 60 * 1000) {
         url = cached.url
         debugLog('🎵 歌词: 缓存命中 (' + songLyrics.length + '行)')
       } else {
@@ -3926,6 +3978,7 @@ function App() {
           duration: normalizedSong.duration / 1000,
           albumId: getLocalAlbumIdentifier(normalizedSong, platform) || undefined,
           albumCover: normalizedSong.album?.picUrl || undefined,
+          appleHls: appleHlsStream || undefined,
         })
         // 看歌模式下引擎静默：视频接管音频，加载后立即暂停避免双重奏
         if (started && lyricDisplayModeRef.current === 'video') {
@@ -3935,6 +3988,17 @@ function App() {
         }
       } catch (firstPlaybackError) {
         if (!isLatestLoad()) return
+        // Apple 原生 HLS 播放失败（license/清单/网络等）：不跑 getSongUrl 重试
+        // （apple id 不是网易云/QQ id，重试必然空转），也不触发外层 alert，
+        // 给可感知提示即可，用户可重试或切下一首（切歌会重新走完整取流流程）
+        if (appleHlsStream) {
+          console.warn('[PlaySong] Apple 原生 HLS 播放失败:', firstPlaybackError)
+          // 静默处理：不外弹提示（用户偏好），仅转发主进程控制台便于排查
+          try {
+            ;(window as any).electron?.log?.(`[ApplePlayback] HLS 播放失败: ${firstPlaybackError instanceof Error ? firstPlaybackError.message : String(firstPlaybackError)}`)
+          } catch { /* 忽略 */ }
+          return
+        }
         // Signed playback URLs can expire or be rejected by the CDN before the
         // five-minute memory entry expires. Evict only this song and retry once.
         invalidateSongUrl(songId, platform)
@@ -3969,6 +4033,7 @@ function App() {
           duration: normalizedSong.duration / 1000,
           albumId: getLocalAlbumIdentifier(normalizedSong, platform) || undefined,
           albumCover: normalizedSong.album?.picUrl || undefined,
+          appleHls: appleHlsStream || undefined,
         })
         if (started && lyricDisplayModeRef.current === 'video') {
           const engineEl = audioPlayerRef.current?.getAudioElement?.()
@@ -4188,6 +4253,8 @@ function App() {
 
   useEffect(() => {
     if (lyricDisplayMode !== 'video') {
+      // 解除看歌挂起：引擎恢复对当前歌的正常过渡准备（automix 重新可用）
+      audioPlayerRef.current?.setWatchHold?.(false)
       // 切出看歌：恢复引擎音量 + 播放（引擎在进入看歌时已被淡出回调暂停）
       if (watchPausedEngineRef.current) {
         watchPausedEngineRef.current = false
@@ -5905,6 +5972,7 @@ function App() {
               playerTheme={playerTheme}
               onPlayNow={viewCallbacks.onSongSelect}
               onOpenPlaylist={(id, platform) => { void handleOpenPlaylistFromDetail(id, platform) }}
+              onOpenAlbum={(id, platform) => { handleOpenAlbum(id, platform) }}
             />
           </Suspense>
         )}
@@ -6682,6 +6750,7 @@ function App() {
                                       ['multidimensional', '多维', `linear-gradient(145deg, #05060c 0%, ${dominantColor || '#6657ff'} 48%, #0b1b2a 72%, #030409 100%)`],
                                       ['modeng', '摩登', `linear-gradient(120deg, #3a3a3c 0%, #232325 45%, #101012 100%)`],
                                       ['video', '看歌', `linear-gradient(120deg, #f8a5c2 0%, #fb7299 45%, #2d1b3d 100%)`],
+                                      ['pv', 'PV', `linear-gradient(135deg, #6d28d9 0%, #3b2f8f 42%, #0f172a 100%)`],
                                     ] as const)
                                       .filter(([mode]) => effectiveVisibleLyricModes.includes(mode))
                                       .map(([mode, label, background]) => (
@@ -7144,6 +7213,36 @@ function App() {
                     playMode={playMode}
                     onPlayModeChange={handlePlayModeChange}
                     duration={duration}
+                  />
+                </motion.div>
+              ) : lyricDisplayMode === 'pv' ? (
+                <motion.div
+                  key="pv-lyrics-player"
+                  initial={{ opacity: 0, scale: 1.02 }}
+                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.99 }}
+                  transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
+                  className="flex-1 w-full min-h-0 relative"
+                >
+                  <LazyPvLyricsPage
+                    lyrics={lyrics}
+                    currentIndex={currentLyricIndex}
+                    playbackTimeStore={audioPlayer.playbackTimeStore}
+                    timeOffset={lyricOffset - 0.2}
+                    isPlaying={isPlaying}
+                    playerTheme={playerTheme}
+                    accentColor={dominantColor || '#fff'}
+                    songTitle={currentSong.name}
+                    songArtist={currentSongArtistLabel}
+                    songAlbum={currentSong.album?.name}
+                    coverUrl={displayCoverUrl}
+                    trackId={currentSong.id || currentSong.mid}
+                    trackKey={currentSong ? getSongKey(currentSong) : ''}
+                    translationEnabled={translationEnabled}
+                    romanEnabled={romanEnabled}
+                    onSeek={audioPlayer.seek}
+                    mvBackgroundActive={mvBackgroundActive}
+                    dominantColor={dominantColor}
                   />
                 </motion.div>
               ) : (

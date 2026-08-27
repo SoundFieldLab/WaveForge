@@ -1,3 +1,5 @@
+# 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+# 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
 """
 Beat Analysis Service - 独立的节拍分析 API 服务
 使用 librosa 进行高质量的节拍和 BPM 检测

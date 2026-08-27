@@ -153,4 +153,8 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 
 ## 许可证
 
-MIT（第三方依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）
+MIT（第三方依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）。
+
+**私有模块**：无缝衔接（Smart Gapless）、智能混音（AutoMix）、看歌 / MV 背景（Bilibili）、
+桌面模式、探索模式等模块以 **WaveForge 私有模块许可**提供（非 MIT），适用范围与使用限制详见
+[PRIVATE-LICENSE.md](./PRIVATE-LICENSE.md)（受保护文件头部 / 目录 `LICENSE.private` 亦标注）。

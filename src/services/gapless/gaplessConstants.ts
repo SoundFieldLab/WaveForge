@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Gapless 无缝衔接 —— 常量与类型
  * 从 useAudioPlayer.ts 抽出的独立模块，供控制器与调用方共享。
  */

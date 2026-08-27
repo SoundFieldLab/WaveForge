@@ -541,6 +541,26 @@ export async function getPlaylistDetail(
       privileges: {},
     }
   }
+  // Apple Music：目录/编辑歌单曲目（amp-api catalog playlists/{id}/tracks，需 Developer Token）
+  if (platform === 'apple') {
+    const { getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, appleSongToSong } = await import('./appleCatalog')
+    const summary = await getAppleCatalogPlaylistSummary(playlistId).catch(() => null)
+    const tracks = await getAppleCatalogPlaylistTracks(playlistId).catch(() => [])
+    return {
+      playlist: {
+        id: playlistId,
+        name: summary?.name || `Apple Music 歌单（${tracks.length} 首）`,
+        coverImgUrl: summary?.artworkUrl || undefined,
+        description: summary?.description || undefined,
+        creator: summary?.curatorName || 'Apple Music 编辑',
+        trackCount: summary?.trackCount ?? tracks.length,
+        platform: 'apple',
+      },
+      // 目录曲目已是 catalog id：播放节点保持 platform=apple（统一链路：原生→载体回退）
+      tracks: tracks.map(song => appleSongToSong(song)),
+      privileges: {},
+    }
+  }
   const url = platform === 'netease'
     ? `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlistId)}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
     : `http://localhost:3001/api/qq/playlist/detail?id=${playlistId}&devMode=${devMode}&cookie=${encodeURIComponent(localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || '')}`

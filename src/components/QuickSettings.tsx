@@ -11,7 +11,7 @@ interface QuickSettingsProps {
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
 type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
-type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'video'
+type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'video' | 'pv'
 
 // 大体积设置面板（约 900 行 JSX）：props 均为原语（forceClose/playerTheme/isPureMusic），
 // memo 让 1Hz 播放重渲染（经 ImmersiveControls 传递）不再连带重渲染整个面板
@@ -62,7 +62,7 @@ export default memo(function QuickSettings({
       }
 
       const saved = localStorage.getItem('lyricDisplayMode')
-      setLyricDisplayMode(saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' ? saved : 'modern')
+      setLyricDisplayMode(saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' || saved === 'pv' ? saved : 'modern')
     }
 
     window.addEventListener('lyricDisplayModeChanged', handleLyricDisplayModeChange)
@@ -148,8 +148,10 @@ export default memo(function QuickSettings({
 
   const [lyricDisplayMode, setLyricDisplayMode] = useState<LyricDisplayMode>(() => {
     const saved = localStorage.getItem('lyricDisplayMode')
-    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' ? saved : 'modern'
+    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' || saved === 'pv' ? saved : 'modern'
   })
+
+  // PV 歌词模式切换入口（全自动编排，无设置面板）
 
   const [modernAudioVisualizerEnabled, setModernAudioVisualizerEnabled] = useState(() => {
     const saved = localStorage.getItem('modernAudioVisualizerEnabled')

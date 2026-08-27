@@ -298,6 +298,8 @@ function SettingsPanel({
 
   // ── Apple Music 设置 ──
   const [appleMusic, setAppleMusic] = useState<AppleMusicSettings>(() => getAppleMusicSettings())
+  // Apple 原生音源开关（Cider 式直连；默认开，localStorage 独立存储）
+  const [appleNativeStreamEnabled, setAppleNativeStreamEnabled] = useState(() => localStorage.getItem('appleNativeStream') !== 'false')
 
   // ── 哔哩哔哩「看歌」账号 ──
   const [biliLoggedIn, setBiliLoggedIn] = useState(() => isBilibiliLoggedIn())
@@ -3684,6 +3686,31 @@ function SettingsPanel({
                             className="sr-only peer"
                           />
                           <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: appleMusic.enabled ? accentColor : '' }}></div>
+                        </label>
+                      </div>
+                    </div>
+
+                    {/* Apple 原生音源（Cider 式直连 AM，需 Widevine；失败自动回退网易云/QQ） */}
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-4`}>
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <div className={`${textPrimary} font-medium mb-1`}>Apple 原生音源</div>
+                          <div className={`${textSecondary} text-sm`}>
+                            直连 Apple 播放 AM 原版曲目（消除换源偏差），需浏览器/系统 Widevine 支持，失败自动回退网易云/QQ
+                          </div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={appleNativeStreamEnabled}
+                            onChange={(e) => {
+                              const enabled = e.target.checked
+                              setAppleNativeStreamEnabled(enabled)
+                              localStorage.setItem('appleNativeStream', JSON.stringify(enabled))
+                            }}
+                            className="sr-only peer"
+                          />
+                          <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: appleNativeStreamEnabled ? accentColor : '' }}></div>
                         </label>
                       </div>
                     </div>
