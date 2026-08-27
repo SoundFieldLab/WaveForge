@@ -204,3 +204,19 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 # 回滚
 git log --oneline             # 查看历史；git reset --hard <sha> 回退
 ```
+
+## 8. PV 歌词模式（2026-08-27 新增，第 9 种歌词模式 · pv-tool 引擎 + 凝彩式逐字动画 · 全自动）
+
+`lyricDisplayMode: 'pv'`（模式面板显示名「PV」）。**pv-tool 引擎 + 凝彩式逐字动画内核**：保留 pv-tool 模板/特效/节拍体系（不引入 folia tempera），把凝彩的「逐字编排动画」机制做进歌词层，全自动无设置。
+
+**实现**
+- `src/components/pvLyrics/PvLyricsPage.tsx`：pv-tool 引擎桥接 + 60fps 编排执行（时钟 seek/暂停精确；ResizeObserver；MV 激活→引擎透明露出 BilibiliMvBackground，无 MV→封面取色铺底）
+- 段落编排 `pvDirector.ts`：行间隙中位数×2.5 切段 + sections 定性（intro/breath/passage/chorus/outro），段落级自动换模板（推荐池 + 段落族风格池，相邻不重复）；`engine.fadeToTemplate` 淡出→重载→淡入平滑切换，切换瞬间 glitch/shake 爆发（剪辑切镜）；能量→参数曲线（节拍响应/动画速度/后期滤镜）每帧平滑 + 镜头慢呼吸 + 间奏 bridge 演出
+- 凝彩式逐字动画 `effects/wfLyricOverlay.ts`：词级独立对象 + 7 种确定性入场（left/right/above/below/swing/stamp/fade，词内容 seed 派生）+ elastic 弹入（入场窗随句长伸缩）+ 已唱高亮/辉光 + 唱完字距外扩 release + 节拍加成；**无逐字时间戳的歌词用 Intl.Segmenter 分词 + 行时长按字重等分自动合成词级时间戳**（凝彩 buildLineGraphemeTimeline 思路），不再退化为整行静态——任何歌都有逐词动画
+- 引擎扩展：ctx 暴露 `words/lineStart/lineDuration`（真实时间驱动）；`onTemplateReload` 回调保证 overlay 在每次模板重载后自动重挂
+
+**演进记录**：v1 手动模板+设置 → v2 全自动推荐+设置移除 → v3 曾直接以 tempera 为内核（用户明确否：要求保留 pv-tool 引擎改造成凝彩式逐字，非替换）→ v4（现状）pv-tool 引擎 + 凝彩式逐字合成。tempera 内核版本已回退；`src/vendor/pv` 全程保留。
+
+**隔离边界**：只新增 pvLyrics/ 目录 + App.tsx 模式接入；未改动任何既有歌词页组件与 `Apple*` 分支。
+
+**验证**：非 Apple 分支 lint 0 错；`test/pvLyrics.test.ts` 20 用例全过（桥接/推荐/编排）；`npm run build` 通过。全量 lint 存量错误来自并行 AI 的 Apple 分支在途代码，与本模式无关。
