@@ -525,6 +525,19 @@ class QishuiAuthRuntime {
     this.assetToken = crypto.randomBytes(18).toString('hex');
     this.destroying = false;
   }
+
+  // 仅销毁隐藏验证窗与运行时引用（应用退出专用）：不做任何存储清理——clear() 带
+  // 登出语义（清分区 Cookie/localStorage），退出时误用会伤登录态。destroy() 绕过
+  // close 事件的 preventDefault→hide 拦截，确保隐藏窗不阻断 window-all-closed/app.quit
+  // （此窗无 parent，主窗关闭后会单独存活并阻止进程退出）。
+  destroyForQuit() {
+    this.destroying = true;
+    try {
+      if (this.window && !this.window.isDestroyed()) this.window.destroy();
+    } catch (_) {}
+    this.window = null;
+    this.destroying = false;
+  }
 }
 
 async function initSignEngine() {
@@ -556,11 +569,17 @@ async function clear() {
   runtime = null;
 }
 
+// 应用退出专用：只销毁隐藏验证窗（runtime 未初始化时为空操作），不做存储清理
+function destroyForQuit() {
+  try { if (runtime) runtime.destroyForQuit(); } catch (_) {}
+}
+
 module.exports = {
   configure,
   initSignEngine,
   getQrCode,
   checkQrConnect,
   clear,
+  destroyForQuit,
   constants: { API_BASE, AID, APP_VERSION, AUTH_PARTITION },
 };
