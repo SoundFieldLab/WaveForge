@@ -20,10 +20,14 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
   const bgCard = playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'
   const borderColor = playerTheme === 'dark' ? 'border-white/10' : 'border-black/10'
   
-  // TV 遥控器 BACK 关闭弹窗
+  // TV 遥控器 BACK 关闭弹窗（必须带 show 守卫：本组件经 SettingsPanel 常驻挂载，
+  // 无守卫会在隐藏时也消费 BACK 键，导致全场景 BACK 失效、无注册弹窗关不掉）
   useTvBack(() => {
-    onClose()
-    return true
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
   })
   const [accentColor, setAccentColor] = useState(() => {
     const saved = localStorage.getItem('accentColor')

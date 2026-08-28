@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useTvBack } from '../tv/tvCore'
 import { X, Cpu, MemoryStick, HardDrive, MonitorSmartphone, Gauge } from 'lucide-react'
 import { getPerfMode, setPerfMode, type PerfMode } from '../tv/perfMode'
 
@@ -69,6 +70,15 @@ export default function DeviceInfoModal({ show, onClose, playerTheme = 'dark' }:
   const bgCard = isDark ? 'bg-white/5' : 'bg-black/5'
   const borderColor = isDark ? 'border-white/10' : 'border-black/10'
   const accent = localStorage.getItem('accentColor') || '#3B82F6'
+
+  // TV 遥控器 BACK 关闭弹窗（带 show 守卫：本组件经 SettingsPanel 常驻挂载，无守卫会吞掉全场景 BACK 键）
+  useTvBack(() => {
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
+  })
 
   const [info, setInfo] = useState<DeviceInfo | null>(null)
   const [perfMode, setPerfModeState] = useState<PerfMode>(getPerfMode())

@@ -91,6 +91,9 @@ export default function PlaybackRadialMenu({
       event.preventDefault()
       clearLongPressTimer()
       setContextMenu(previous => ({ ...previous, show: false }))
+      // 先复位上一轮手势残留（径向盘/方向）：mouseup 若未在文档内发生（如按住拖出窗外），
+      // resetGesture 不会执行，这里重开手势前先清掉，避免径向盘滞留
+      resetGesture()
       trackingRef.current = true
       radialVisibleRef.current = false
       originRef.current = { x: event.clientX, y: event.clientY }

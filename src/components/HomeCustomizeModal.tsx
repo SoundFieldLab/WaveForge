@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Image as ImageIcon, ChevronRight, Blend, Grid3x3 } from 'lucide-react'
 import WallpaperCustomizeModal from './WallpaperCustomizeModal'
@@ -21,10 +21,14 @@ export default function HomeCustomizeModal({ show, onClose, playerTheme = 'dark'
   const bgCard = playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'
   const borderColor = playerTheme === 'dark' ? 'border-white/10' : 'border-black/10'
   
-  // TV 遥控器 BACK 关闭弹窗
+  // TV 遥控器 BACK 关闭弹窗（必须带 show 守卫：本组件经 SettingsPanel 常驻挂载，
+  // 无守卫会在隐藏时也消费 BACK 键，导致全场景 BACK 失效、无注册弹窗关不掉）
   useTvBack(() => {
-    onClose()
-    return true
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
   })
   const [accentColor, setAccentColor] = useState(() => {
     const saved = localStorage.getItem('accentColor')
@@ -48,12 +52,22 @@ export default function HomeCustomizeModal({ show, onClose, playerTheme = 'dark'
   }, [])
   
   // 当主面板关闭后，如果需要显示模糊度面板，则延迟显示
+  // timer 存 ref：100ms 内重新打开主面板时先取消，避免模糊度条意外弹出
+  const blurModalTimerRef = useRef<number | null>(null)
   useEffect(() => {
     if (!show && shouldShowBlurModal) {
-      setTimeout(() => {
+      if (blurModalTimerRef.current !== null) window.clearTimeout(blurModalTimerRef.current)
+      blurModalTimerRef.current = window.setTimeout(() => {
+        blurModalTimerRef.current = null
         setShowBlurModal(true)
         setShouldShowBlurModal(false)
       }, 100)
+    }
+    return () => {
+      if (blurModalTimerRef.current !== null) {
+        window.clearTimeout(blurModalTimerRef.current)
+        blurModalTimerRef.current = null
+      }
     }
   }, [show, shouldShowBlurModal])
   

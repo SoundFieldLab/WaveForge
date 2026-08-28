@@ -63,6 +63,9 @@ export default function CreatePlaylistModal({
   }
 
   const handleClose = () => {
+    // 提交 loading 期间禁止关闭（与 Delete 系弹窗一致）：关了弹窗请求仍会继续，
+    // 用户以为已取消而歌单最终仍被创建
+    if (loading) return
     setName('')
     setDescription('')
     setPrivacy('public')

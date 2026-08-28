@@ -2,6 +2,15 @@
 @source './';
 @source '../*.html';
 
+/* Folia 视觉器设置面板的基础文字变量：vendored 自原 Folia 项目时其全局 CSS 未随迁，
+   但 15 个设置面板/弹窗仍在消费 var(--text-primary)/var(--text-secondary)（含 portal 到
+   body 的 TemperaImageLayerDialog）。缺失时 color 退化为继承色/边框退化为 currentColor，
+   颜色语义错乱。按 Folia 深色玻璃面板设计意图定义为近白文字。 */
+:root {
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+}
+
 /* 深浅色切换过渡动画 - 0.3s 平滑过渡
    注意：不要给 box-shadow / backdrop-filter 加全局过渡——模糊与阴影在过渡期间每帧重新栅格化，
    是高刷下交互掉帧的主要来源；个别需要平滑过渡的组件自行声明。 */

@@ -178,7 +178,7 @@ const buildSustainGlowProfiles = (words: LyricWord[], lineText: string) => {
 
   if (metrics.length === 0) return new Map<number, SustainGlowProfile>()
 
-  // 閮ㄥ垎鏅€?LRC/TTML 浼氭妸鏁磋鍖呰鎴愪竴涓甫琛屾椂闀跨殑浼?word銆備弗鏍兼帓闄よ繖绉嶆暟鎹紝
+  // 部分歌词源（LRC/TTML）会把整行包装成一个带时长的伪 word。严格排除这种数据，
   // Avoid classifying every character as a sustain when timing data is sparse.
   if (metrics.length === 1) {
     const normalizedWord = stripSustainMarkup(words[metrics[0].index].word).replace(/\s+/gu, '')
@@ -1316,7 +1316,7 @@ export default memo(function LyricsDisplay({
           
           const wordText = removeRubyAnnotations(originalWordText) // 移除注音括号，只保留汉字
           const parsedParts = parseRubyText(originalWordText) // 解析注音结构
-          const hasRuby = parsedParts.some(part => part.ruby) // 妫€鏌ユ槸鍚︽湁娉ㄩ煶
+          const hasRuby = parsedParts.some(part => part.ruby) // 检查是否有注音
           const isSpace = wordText.trim() === ''
 
           if (isSpace) {
@@ -2178,7 +2178,7 @@ export default memo(function LyricsDisplay({
                 filter: { duration: 0.45, ease: [0.22, 1, 0.36, 1] },
               }}
             >
-              {/* 娑叉€佺幓鐠冩 */}
+              {/* 液态玻璃框 */}
               <AnimatePresence>
                 {isHovered && showGlassFrame && (
                   <motion.div
@@ -2200,14 +2200,14 @@ export default memo(function LyricsDisplay({
                       `,
                     }}
                   >
-                    {/* 鍐呴儴楂樺厜 */}
-                    <div 
+                    {/* 内部高光 */}
+                    <div
                       className="absolute inset-0 rounded-2xl opacity-50"
                       style={{
                         background: `radial-gradient(circle at 50% 0%, ${accentColor}30, transparent 70%)`,
                       }}
                     />
-                    {/* 娴佸姩鏁堟灉 */}
+                    {/* 流动效果 */}
                     <motion.div
                       className="absolute inset-0 rounded-2xl"
                       animate={{
@@ -2362,7 +2362,7 @@ export default memo(function LyricsDisplay({
                       )
                     }
                     
-                    // 鍚﹀垯鏄剧ず绾枃鏈綏椹煶
+                    // 否则显示纯文本罗马音
                     return lyric.roman
                   })()}
                 </motion.p>

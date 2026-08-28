@@ -119,6 +119,17 @@ const LazyPvLyricsPage: any = lazy(loadPvLyricsPage)
 const LazyModengPlayer: any = lazy(loadModengPlayer)
 const LazyBilibiliMvPlayer: any = lazy(loadBilibiliMvPlayer)
 const LazyBilibiliMvBackground: any = lazy(loadBilibiliMvBackground)
+// 歌词模式 → chunk 预载器：切换前先加载目标 chunk，避免 lazy 首次挂载 suspend 到
+// app 级 Suspense(fallback=null) 导致整个播放页闪空（modern 为默认模式，无独立 chunk）
+const LYRIC_MODE_LOADERS: Partial<Record<string, () => Promise<unknown>>> = {
+  wallpaper: loadWallpaperLyrics,
+  glorious: loadGloriousLyrics,
+  multidimensional: loadMultidimensionalLyrics,
+  folia: loadFoliaLyricsPage,
+  modeng: loadModengPlayer,
+  video: loadBilibiliMvPlayer,
+  pv: loadPvLyricsPage,
+}
 const loadRemoteControlModal = () => import('./components/RemoteControlModal')
 const LazyRemoteControlModal = lazy(loadRemoteControlModal)
 const loadPlaybackDeviceModal = () => import('./components/PlaybackDeviceModal')
@@ -893,19 +904,28 @@ function App() {
   const lastPlayModeChangeRef = useRef(0) // 添加防抖
   const playModeToastIdRef = useRef<number | null>(null)
   const playModeToastTimerRef = useRef<number | null>(null)
+  const lyricArrowHintTimerRef = useRef<number | null>(null)
+  // 歌词模式切换序号：chunk 预载把 setState 推迟了，快速连点时迟到请求不得覆盖最新目标
+  const lyricModeSwitchSeqRef = useRef(0)
   const suppressUpNextUntilRef = useRef(0)
   
-  // 添加Toast的辅助函数
+  // 添加Toast的辅助函数（timer 收进 Set，卸载时统一清理，防 HMR/重挂载后对已卸载组件 setState）
+  const toastTimersRef = useRef<Set<number>>(new Set())
   const addToast = (message: string, type: 'success' | 'error' | 'info', accentColor?: string, duration = 4000) => {
     const id = toastIdRef.current++
     setToasts(prev => [...prev, { id, message, type, accentColor }])
-    setTimeout(() => {
+    const timer = window.setTimeout(() => {
+      toastTimersRef.current.delete(timer)
       setToasts(prev => prev.filter(t => t.id !== id))
     }, duration)
+    toastTimersRef.current.add(timer)
   }
 
   useEffect(() => () => {
     if (playModeToastTimerRef.current !== null) window.clearTimeout(playModeToastTimerRef.current)
+    if (lyricArrowHintTimerRef.current !== null) window.clearTimeout(lyricArrowHintTimerRef.current)
+    toastTimersRef.current.forEach(t => window.clearTimeout(t))
+    toastTimersRef.current.clear()
   }, [])
   
   // 歌词翻译设置
@@ -2362,13 +2382,17 @@ function App() {
   }, [])
 
   useEffect(() => {
+    // 'showToast' 与 'app-toast' 双事件名：ExploreView/ProfileView 等处用的是 app-toast，
+    // 历史上无人监听导致 7 处提示静默丢失，这里统一接收
     const handleShowToast = (e: CustomEvent) => {
       const { message, type, duration } = e.detail
       addToast(message, type as 'success' | 'error' | 'info', localStorage.getItem('accentColor') || '#3B82F6', duration)
     }
     window.addEventListener('showToast', handleShowToast as EventListener)
+    window.addEventListener('app-toast', handleShowToast as EventListener)
     return () => {
       window.removeEventListener('showToast', handleShowToast as EventListener)
+      window.removeEventListener('app-toast', handleShowToast as EventListener)
     }
   }, [])
 
@@ -2581,8 +2605,13 @@ function App() {
         })
       }).catch(error => {
         console.error('[ViewMode] Failed to load target mode:', mode, error)
-        // 懒加载失败时仍切换模式，Suspense 会展示 fallback 并在下次渲染重试加载
-        if (revision === viewModeChangeRevisionRef.current) applyMode(mode)
+        // 懒加载失败时不能切模式：React.lazy 的 rejection 会被永久缓存，"下次渲染重试"不成立，
+        // 贸然 applyMode 会让渲染树 suspend 且无边界兜底，直接白屏。保持原模式并提示。
+        if (revision === viewModeChangeRevisionRef.current) {
+          // 立即标记 ready，让过渡动画按最短时长正常收起，否则会一直转圈到 12s 兜底
+          setModeTransition(prev => (prev && prev.to === mode ? { ...prev, ready: true } : prev))
+          addToast('模式加载失败，请重试', 'error')
+        }
       })
     }
     
@@ -2682,6 +2711,7 @@ function App() {
     setShowLyricModePanel(false)
     setShowLyricModeCustomize(false)
     setShowLyricModeArrowHint(false)
+    const switchSeq = ++lyricModeSwitchSeqRef.current
 
     // 切到看歌：记录音频位置 + 停引擎（视频接管音频输出）
     if (mode === 'video') {
@@ -2712,10 +2742,15 @@ function App() {
       setTransitionFromAccentColor(null)
       setTransitionToAccentColor(null)
       watchResumeHeldAtEndRef.current = false
-      window.requestAnimationFrame(() => {
-        setLyricDisplayMode(mode)
-        localStorage.setItem('lyricDisplayMode', mode)
-        window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
+      // 先加载看歌 chunk 再切：lazy 首挂载 suspend 会落在 app 级 Suspense(fallback=null)
+      // 导致整个播放页闪空（chunk 失败不阻断，退化为原有 Suspense 行为）
+      void loadBilibiliMvPlayer().catch(() => { /* chunk 失败不阻断 */ }).then(() => {
+        window.requestAnimationFrame(() => {
+          if (switchSeq !== lyricModeSwitchSeqRef.current) return
+          setLyricDisplayMode(mode)
+          localStorage.setItem('lyricDisplayMode', mode)
+          window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
+        })
       })
       return
     }
@@ -2747,7 +2782,11 @@ function App() {
             engineEl.currentTime = Math.max(0, Math.min(resumeTime, dur > 0 ? dur - 0.2 : resumeTime))
           }
         }
+        // 先加载目标歌词模式 chunk 再切（防 app 级 Suspense 整页闪空）
+        const exitLoader = LYRIC_MODE_LOADERS[mode]
+        try { if (exitLoader) await exitLoader() } catch { /* chunk 失败不阻断 */ }
         window.requestAnimationFrame(() => {
+          if (switchSeq !== lyricModeSwitchSeqRef.current) return
           setLyricDisplayMode(mode)
           localStorage.setItem('lyricDisplayMode', mode)
           window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
@@ -2756,11 +2795,23 @@ function App() {
       return
     }
 
-    window.requestAnimationFrame(() => {
-      setLyricDisplayMode(mode)
-      localStorage.setItem('lyricDisplayMode', mode)
-      window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
-    })
+    // 先加载目标歌词模式 chunk 再切：lazy 首挂载会 suspend 到 app 级 Suspense(fallback=null)，
+    // 整个播放页（含控制条/歌词）会闪空。加载失败不阻塞切换，退化为原有 Suspense 行为
+    const modeLoader = LYRIC_MODE_LOADERS[mode]
+    const applyLyricMode = () => {
+      window.requestAnimationFrame(() => {
+        // 迟到的旧切换请求直接丢弃（快速连点时只有最新一次生效）
+        if (switchSeq !== lyricModeSwitchSeqRef.current) return
+        setLyricDisplayMode(mode)
+        localStorage.setItem('lyricDisplayMode', mode)
+        window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
+      })
+    }
+    if (modeLoader) {
+      void modeLoader().catch(() => { /* chunk 失败不阻断 */ }).then(applyLyricMode)
+      return
+    }
+    applyLyricMode()
   }
 
   /** 选择 Folia 歌词样式（第二页样式卡）：保存样式；未在 Folia 页时同时切入 */
@@ -2996,6 +3047,7 @@ function App() {
       setDetailPlaylist({ playlist: data?.playlist || { id: playlistId, platform, name: '歌单' }, songs })
     } catch {
       setDetailPlaylist(null)
+      addToast('歌单加载失败，请稍后重试', 'error')
     } finally {
       setDetailPlaylistLoading(false)
     }
@@ -3023,6 +3075,9 @@ function App() {
     setSelectedArtistId(null)
     setSelectedArtistAlbumId(undefined)
     setSelectedAlbumId(null)
+    // 选歌是"离开详情弹窗"的动作：清空艺人/专辑导航栈，防止之后 closeAlbumDetail
+    // 把早已关闭的上一级弹窗重新弹出（脏栈复活）
+    navigationStack.current = []
     // Keep the source view painted while the first-use playback chunks are prepared. Without
     // this, the app-level Suspense boundary can reveal the fixed black base on the first song.
     const playbackSurfaceReady = Promise.allSettled([
@@ -3030,6 +3085,7 @@ function App() {
       loadImmersiveControls(),
       loadTranslationDisplay(),
       loadModernAudioVisualizer(),
+      loadBilibiliMvBackground(),
         lyricDisplayMode === 'wallpaper'
           ? loadWallpaperLyrics()
           : lyricDisplayMode === 'glorious'
@@ -3096,6 +3152,8 @@ function App() {
 
   // 打开艺人详情
   const handleOpenArtist = (artistId: string, platform: MusicPlatform) => {
+    // 歌单详情面板(z-95)高于艺人弹窗(z-70)：从面板内"查看歌手"时先关面板，避免新弹窗被盖住
+    setDetailPlaylist(null)
     // 先关闭弹窗（不触发导航栈弹出）
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
@@ -3119,6 +3177,8 @@ function App() {
 
   // 打开专辑详情
   const handleOpenAlbum = (albumId: string, platform: MusicPlatform) => {
+    // 歌单详情面板(z-95)低于专辑弹窗(z-300)可见，但为统一"离开面板"语义，同样先关闭
+    setDetailPlaylist(null)
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
     const prevArtist = hadArtist ? { type: 'artist' as const, id: selectedArtistId, platform: selectedArtistPlatform, tab: selectedArtistTab } : null
@@ -4755,6 +4815,11 @@ function App() {
     const handler = (e: Event) => {
       const song = (e as CustomEvent).detail
       if (song) {
+        // 先彻底关闭底层全屏弹窗：歌曲详情(z-85)低于专辑详情(z-300)/歌单详情面板(z-95)，
+        // 叠开会被盖住成为"隐形弹窗"（同 handleViewComments 的"彻底关闭"语义）
+        dismissAlbumDetail()
+        dismissArtistDetail()
+        setDetailPlaylist(null)
         setSongDetailSong(song)
         setShowSongDetail(true)
       }
@@ -4768,6 +4833,10 @@ function App() {
     const handler = (e: Event) => {
       const song = (e as CustomEvent).detail
       if (song) {
+        // 同上：相似歌曲面板(z-85)会被专辑/歌单详情盖住，先彻底关闭底层弹窗
+        dismissAlbumDetail()
+        dismissArtistDetail()
+        setDetailPlaylist(null)
         setSimilarSongsSource(song)
         setShowSimilarSongs(true)
       }
@@ -5060,7 +5129,7 @@ function App() {
 
   const handleQQLogin = async (cookie: string, showToastMessage = true) => {
     try {
-      // 1. 鍏堣閸忓牐顔曠純鐡筼okie閸掔増婀囬崝鈥虫珤
+      // 1. 先写入 QQ cookie 到后端服务器
       const setCookieRes = await fetch('http://localhost:3001/api/qq/user/setCookie', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -5752,6 +5821,12 @@ function App() {
     onOpenDeviceControl: () => setShowDeviceControl(true),
     onSettingsClick: () => setShowSettings(true),
     onProfileClick: (platform, initialTab = 'created') => {
+      // ProfileView 只支持网易云/QQ/Apple：酷狗/Spotify/汽水登录用户按钮可见但渲染条件
+      // 短路（点了没反应），改为明确提示
+      if (!['netease', 'qq', 'apple'].includes(platform)) {
+        addToast('该平台暂不支持查看个人主页', 'info')
+        return
+      }
       setProfileInitialPlatform(platform)
       setProfileInitialTab(initialTab)
       setShowProfile(true)
@@ -5951,6 +6026,7 @@ function App() {
         {showRemote && (
           <Suspense fallback={null}>
             <LazyRemoteControlModal
+              key="remote-control"
               onClose={() => setShowRemote(false)}
               playerTheme={playerTheme}
             />
@@ -5959,6 +6035,7 @@ function App() {
         {showDeviceControl && (
           <Suspense fallback={null}>
             <LazyPlaybackDeviceModal
+              key="playback-device"
               show
               onClose={() => setShowDeviceControl(false)}
               playerTheme={playerTheme}
@@ -5968,17 +6045,24 @@ function App() {
         {showSongDetail && songDetailSong && (
           <Suspense fallback={null}>
             <LazySongDetailModal
+              key={getSongKey(songDetailSong)}
               song={songDetailSong}
               onClose={closeSongDetail}
               playerTheme={playerTheme}
               onPlayNow={viewCallbacks.onSongSelect}
               onOpenPlaylist={(id, platform) => { void handleOpenPlaylistFromDetail(id, platform) }}
-              onOpenAlbum={(id, platform) => { handleOpenAlbum(id, platform) }}
+              onOpenAlbum={(id, platform) => {
+                // 从歌曲详情跳专辑前先关歌曲详情：否则专辑关闭时导航栈弹出的旧艺人弹窗
+                // (z-70) 会被残留的歌曲详情(z-85)盖住成为隐形弹窗
+                closeSongDetail()
+                handleOpenAlbum(id, platform)
+              }}
             />
           </Suspense>
         )}
         {showSimilarSongs && similarSongsSource && (
           <SimilarSongsPanel
+            key={getSongKey(similarSongsSource)}
             song={similarSongsSource}
             onClose={closeSimilarSongs}
             onPlayNow={viewCallbacks.onSongSelect}
@@ -5987,38 +6071,41 @@ function App() {
           />
         )}
         {detailPlaylist && (
-          <LazyPlaylistDetailPanel
-            show
-            overlayZ={95}
-            playerTheme={playerTheme}
-            playlist={detailPlaylist.playlist}
-            songs={detailPlaylist.songs}
-            loading={detailPlaylistLoading}
-            onClose={() => setDetailPlaylist(null)}
-            onSongSelect={(song, songs) => {
-              // 选歌后关闭歌单详情面板（避免盖在播放页上），并记录歌单来源，
-              // home 返回时经 HomeView 恢复同一歌单并自动定位当前歌曲
-              setDetailPlaylist(null)
-              void handleSongSelect(song, songs, {
-                surface: 'home-playlist',
-                playlist: detailPlaylist.playlist,
-                songs,
-              })
-            }}
-            currentPlatform={detailPlaylist.playlist.platform || 'netease'}
-            currentUserId={detailPlaylist.playlist.platform === 'qq' ? qqUserId : neteaseUserId}
-            neteaseVip={neteaseVip}
-            qqVip={qqVip}
-            onOpenArtist={handleOpenArtist}
-            onOpenAlbum={handleOpenAlbum}
-            onPlayNext={handlePlayNext}
-            onAddToFavorites={handleAddToFavorites}
-            onRemoveFromFavorites={handleRemoveFromFavorites}
-            onAddToPlaylist={handleAddToPlaylist}
-            onViewComments={handleViewComments}
-            onCopyInfo={handleCopyInfo}
-            userPlaylists={playbackContextPlaylists}
-          />
+          <Suspense fallback={null}>
+            <LazyPlaylistDetailPanel
+              key={detailPlaylist.playlist.id || 'playlist-detail'}
+              show
+              overlayZ={95}
+              playerTheme={playerTheme}
+              playlist={detailPlaylist.playlist}
+              songs={detailPlaylist.songs}
+              loading={detailPlaylistLoading}
+              onClose={() => setDetailPlaylist(null)}
+              onSongSelect={(song, songs) => {
+                // 选歌后关闭歌单详情面板（避免盖在播放页上），并记录歌单来源，
+                // home 返回时经 HomeView 恢复同一歌单并自动定位当前歌曲
+                setDetailPlaylist(null)
+                void handleSongSelect(song, songs, {
+                  surface: 'home-playlist',
+                  playlist: detailPlaylist.playlist,
+                  songs,
+                })
+              }}
+              currentPlatform={detailPlaylist.playlist.platform || 'netease'}
+              currentUserId={detailPlaylist.playlist.platform === 'qq' ? qqUserId : neteaseUserId}
+              neteaseVip={neteaseVip}
+              qqVip={qqVip}
+              onOpenArtist={handleOpenArtist}
+              onOpenAlbum={handleOpenAlbum}
+              onPlayNext={handlePlayNext}
+              onAddToFavorites={handleAddToFavorites}
+              onRemoveFromFavorites={handleRemoveFromFavorites}
+              onAddToPlaylist={handleAddToPlaylist}
+              onViewComments={handleViewComments}
+              onCopyInfo={handleCopyInfo}
+              userPlaylists={playbackContextPlaylists}
+            />
+          </Suspense>
         )}
       </AnimatePresence>
 
@@ -6061,6 +6148,62 @@ function App() {
       
       {/* 全局更新提示（任何视图模式可见；分客户端显示） */}
       <UpdatePrompt playerTheme={playerTheme} />
+
+      {/* 更新中心 + Toast 通知：必须在模式分支之外渲染——四个模式容器是 zIndex:2 的永久层叠
+          上下文，更新中心弹窗(z-300)困在里面会被任何根级浮层盖住，且 explore/desktop/traditional
+          三模式下整个不渲染（toast/更新提示静默丢失）。portal 挂 body 保证在所有弹窗（含插件控制台）之上 */}
+      <UpdateManager />
+      {createPortal(
+        <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100000] flex flex-col gap-3 pointer-events-none">
+          {toasts.map((toast, index) => (
+            <Toast
+              key={toast.id}
+              show={true}
+              message={toast.message}
+              type={toast.type}
+              accentColor={toast.accentColor}
+              style={{
+                animationDelay: `${index * 50}ms` // 每个Toast延迟50ms出现，产生层叠效果
+              }}
+            />
+          ))}
+        </div>,
+        document.body,
+      )}
+
+      {/* 引擎切换右上角小弹窗（2s 后淡出）。同样移出模式分支：fixed 定位困在 zIndex:2
+          上下文里会被根级浮层盖住，且非 minimal 模式下不渲染 */}
+      <AnimatePresence>
+        {engineSwitchToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -16, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.97 }}
+            transition={{ duration: 0.25 }}
+            className="fixed top-16 right-6 z-[9998] pointer-events-none"
+          >
+            <div
+              className="px-4 py-2.5 rounded-2xl text-sm font-medium shadow-2xl"
+              style={{
+                background: 'rgba(10, 12, 20, 0.55)',
+                backdropFilter: 'blur(20px) saturate(180%)',
+                WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                border: '1px solid rgba(255,255,255,0.15)',
+                color: '#fff',
+              }}
+            >
+              {engineSwitchToast}
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* #10 Gapless 方案弹窗（切歌完成时提示本次衔接方案，2.5s 后淡出） */}
+      <GaplessModeToast message={gaplessModeToast} playerTheme={playerTheme} />
+
+      {/* 过渡调试弹窗（受「过渡调试」开关控制；top-28 与 Gapless 弹窗错位，二者可能同时出现） */}
+      <TransitionDebugToast info={transitionDebugToast} playerTheme={playerTheme} />
+
 
       {/* 模式切换过渡动画：顶层常驻（不在任何模式容器内），切到任何模式都能覆盖显示 */}
       <ModeTransitionOverlay mode={modeTransition?.to ?? null} theme={playerTheme} />
@@ -6275,26 +6418,6 @@ function App() {
             className="absolute inset-0 h-screen w-full flex items-center justify-center overflow-hidden"
             style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
           >
-      {/* 更新中心：详情/下载进度/就绪/确认重启/更新日志弹窗 + 启动自动检测提示 */}
-      <UpdateManager />
-      {/* Toast通知 - 支持显示多个Toast堆叠；挂到 body 保证在所有弹窗（含插件控制台）之上 */}
-      {createPortal(
-        <div className="fixed top-8 left-1/2 -translate-x-1/2 z-[100000] flex flex-col gap-3 pointer-events-none">
-          {toasts.map((toast, index) => (
-            <Toast
-              key={toast.id}
-              show={true}
-              message={toast.message}
-              type={toast.type}
-              accentColor={toast.accentColor}
-              style={{
-                animationDelay: `${index * 50}ms` // 每个Toast延迟50ms出现，产生层叠效果
-              }}
-            />
-          ))}
-        </div>,
-        document.body,
-      )}
 
       {/* 默认背景 - 始终存在 */}
       <div 
@@ -6347,7 +6470,7 @@ function App() {
             }}
           />
         )}
-            {/* 娓愬彉閬濞撴劕褰夐柆顔惧兊 */}
+            {/* 渐变遮罩层 */}
             <div 
               className="absolute inset-0 bg-gradient-to-b transition-all duration-500"
               style={{
@@ -6387,7 +6510,7 @@ function App() {
             )}
       </div>
 
-      {/* 鍐呭閸愬懎顔愮仦?*/}
+      {/* 主内容容器层 */}
       <div className="relative z-10 w-full h-full flex flex-col">
 
         {/* 搜索面板 */}
@@ -6449,38 +6572,6 @@ function App() {
           )}
         </AnimatePresence>
 
-        {/* 引擎切换右上角小弹窗（2s 后淡出） */}
-        <AnimatePresence>
-          {engineSwitchToast && (
-            <motion.div
-              initial={{ opacity: 0, y: -16, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -10, scale: 0.97 }}
-              transition={{ duration: 0.25 }}
-              className="fixed top-16 right-6 z-[9998] pointer-events-none"
-            >
-              <div
-                className="px-4 py-2.5 rounded-2xl text-sm font-medium shadow-2xl"
-                style={{
-                  background: 'rgba(10, 12, 20, 0.55)',
-                  backdropFilter: 'blur(20px) saturate(180%)',
-                  WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-                  border: '1px solid rgba(255,255,255,0.15)',
-                  color: '#fff',
-                }}
-              >
-                {engineSwitchToast}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* #10 Gapless 方案底部弹窗（切歌完成时提示本次衔接方案，2.5s 后淡出） */}
-        <GaplessModeToast message={gaplessModeToast} playerTheme={playerTheme} />
-        
-        {/* 过渡调试弹窗（受「过渡调试」开关控制；位于 UpNext「即将播放」提示下方，不重叠） */}
-        <TransitionDebugToast info={transitionDebugToast} playerTheme={playerTheme} />
-        
         {/* 主内容区 */}
         <div className="relative flex-1 flex items-center justify-center overflow-hidden">
           {/* 看歌模式：视频播放器常驻挂载（回主页/探索也继续播，迷你播放器/桌面小窗按视频进度控制它；
@@ -6717,7 +6808,9 @@ function App() {
                   <AnimatePresence
                     onExitComplete={() => {
                       setShowLyricModeArrowHint(true)
-                      window.setTimeout(() => setShowLyricModeArrowHint(false), 1800)
+                      // timer 收进 ref：快速反复开关面板时先清旧的，避免累积多个定时器
+                      if (lyricArrowHintTimerRef.current !== null) window.clearTimeout(lyricArrowHintTimerRef.current)
+                      lyricArrowHintTimerRef.current = window.setTimeout(() => setShowLyricModeArrowHint(false), 1800)
                     }}
                   >
                     {showLyricModePanel && (
@@ -7311,7 +7404,7 @@ function App() {
                     </div>
                   </div>
 
-                  {/* 閸欏厖鏅堕敍姘摃鐠囧秵妯夌粈鍝勫隘 */}
+                  {/* 右侧：歌词显示区 */}
                   <div className="flex-1 flex flex-col justify-between h-full min-h-0 py-8">
                     {/* 歌词显示 */}
                     <div className="flex-1 min-h-0 flex items-center justify-center">
@@ -7337,7 +7430,7 @@ function App() {
                       </div>
                     </div>
 
-                    {/* 閸欏厖绗呯憴鎺旂倳鐠囨垶妯夌粈?*/}
+                    {/* 歌词翻译 */}
                     <LazyTranslationDisplay
                       translation={currentTranslation}
                       show={translationEnabled && translationPosition === 'bottom-right'}

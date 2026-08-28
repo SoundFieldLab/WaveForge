@@ -41,10 +41,14 @@ export default function PlaylistContextMenu({
   canEdit = true
 }: PlaylistContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
-  // TV 遥控器 BACK 关闭菜单
+  // TV 遥控器 BACK 关闭菜单（必须带 show 守卫：本组件常驻挂载于 HomeView 等宿主，
+  // 无守卫会在隐藏时也消费 BACK 键，导致全场景 BACK 失效）
   useTvBack(() => {
-    onClose()
-    return true
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
   })
   const [adjustedPosition, setAdjustedPosition] = useState({ x, y })
   // 汽水歌单收藏操作进行中标记（防重复点击）
@@ -53,22 +57,25 @@ export default function PlaylistContextMenu({
   // 计算菜单位置，确保不超出屏幕
   useEffect(() => {
     if (show && menuRef.current) {
-      const menuRect = menuRef.current.getBoundingClientRect()
+      // offsetWidth/offsetHeight 不受入场 scale 动画影响（getBoundingClientRect 会测到
+      // 0.95 缩放值，导致贴屏幕右/下边缘时夹紧不足、菜单溢出约 5% 宽高）
+      const menuWidth = menuRef.current.offsetWidth
+      const menuHeight = menuRef.current.offsetHeight
       const windowWidth = window.innerWidth
       const windowHeight = window.innerHeight
-      
+
       let newX = x
       let newY = y
-      
-      if (x + menuRect.width > windowWidth) {
-        newX = windowWidth - menuRect.width - 10
+
+      if (x + menuWidth > windowWidth) {
+        newX = windowWidth - menuWidth - 10
       }
-      if (y + menuRect.height > windowHeight) {
-        newY = windowHeight - menuRect.height - 10
+      if (y + menuHeight > windowHeight) {
+        newY = windowHeight - menuHeight - 10
       }
       if (newX < 10) newX = 10
       if (newY < 10) newY = 10
-      
+
       setAdjustedPosition({ x: newX, y: newY })
     }
   }, [show, x, y])
