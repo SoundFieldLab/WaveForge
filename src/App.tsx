@@ -527,6 +527,7 @@ const SODA_UNAVAILABLE_REASON_TEXT: Record<string, string> = {
   membership_unknown: '会员状态验证中',
   login_required: '汽水未登录',
   missing_id: '歌曲信息异常',
+  session_rejected: '汽水登录已失效，请重新扫码',
 }
 
 /**
