@@ -1081,7 +1081,7 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
     map.on('move zoom resize', updatePopupPosition)
     const container = map.getContainer()
     L.DomEvent.disableScrollPropagation(container)
-    window.setTimeout(() => {
+    const invalidateSizeTimer = window.setTimeout(() => {
       map.invalidateSize()
       syncFieldLayers(hourOffsetRef.current, true)
     }, 80)
@@ -1089,6 +1089,7 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
     return () => {
       placeLookupControllerRef.current?.abort()
       placeLookupControllerRef.current = null
+      window.clearTimeout(invalidateSizeTimer)
       window.cancelAnimationFrame(popupFrameRef.current)
       popupFrameRef.current = 0
       clearFieldLayers()

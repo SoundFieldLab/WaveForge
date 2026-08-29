@@ -30,12 +30,18 @@ import {
   getAppleLibrarySongs,
   getAppleLibraryAlbums,
   getAppleLibraryArtists,
+  getAppleLibraryPlaylists,
+  getAppleLibraryMusicVideos,
+  getAppleLibraryAlbumTracks,
+  getAppleLibraryArtistAlbums,
+  getApplePlaylistTracks,
   appleLibraryTrackToSong,
   appleSongToSong,
   type AppleCatalogSong,
   type AppleLibraryAlbum,
 } from './appleCatalog'
 import { toHighResArtwork } from './appleMusic'
+import type { AppleNativeStream, AppleRadioPlayParams } from './applePlayback'
 import { parseTTML } from '../utils/ttmlParser'
 import type { Song } from './musicApi'
 
@@ -49,7 +55,7 @@ function forwardToMainLog(message: string): void {
 
 // ─────────────────────────── 类型 ───────────────────────────
 
-export type AppleWebItemType = 'songs' | 'playlists' | 'albums' | 'stations' | 'artists' | 'music-videos' | 'uploaded-videos'
+export type AppleWebItemType = 'songs' | 'playlists' | 'albums' | 'stations' | 'artists' | 'music-videos' | 'uploaded-videos' | 'posts' | 'rooms'
 
 export interface AppleWebItem {
   id: string
@@ -89,6 +95,10 @@ export interface AppleWebItem {
   isLive?: boolean
   airTime?: { start?: string; end?: string }
   contentRating?: string
+  /** stations：playParams（直播取流 /v1/play/assets 的查询参数） */
+  playParams?: AppleRadioPlayParams
+  /** stations：resource 自带的 offers[0].hlsUrl（部分电台免 play/assets 直接可播） */
+  offersHlsUrl?: string
   // ── 歌曲字段（详情页用） ──
   audioTraits?: string[]
   composerName?: string
@@ -161,20 +171,42 @@ function catalogIdOf(resource: any): string {
   return catalog ? String(catalog) : String(resource?.id ?? '')
 }
 
+/**
+ * Apple 接口的标题/名称字段有时是字符串，有时是 { stringForDisplay: '…' } 之类的
+ * 对象（不同接口/资源形态不一）。统一归一化为字符串，避免把对象渲染成 React 子元素
+ * 触发 error #31（Objects are not valid as a React child）。
+ */
+function displayString(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    const inner = obj.stringForDisplay ?? obj.title ?? obj.name ?? obj.label
+    return typeof inner === 'string' ? inner : ''
+  }
+  return ''
+}
+
 /** 可作为卡片/行展示的内容类型（editorial contents 白名单） */
-const CONTENT_TYPES: string[] = ['songs', 'albums', 'playlists', 'stations', 'artists', 'music-videos', 'uploaded-videos']
+const CONTENT_TYPES: string[] = ['songs', 'albums', 'playlists', 'stations', 'artists', 'music-videos', 'uploaded-videos', 'posts', 'rooms']
 
 function itemize(resource: any, type: AppleWebItemType, preferredId?: string): AppleWebItem | null {
   const attributes = resource?.attributes || {}
-  const name = attributes.name || ''
+  const name = displayString(attributes.name) || displayString(attributes.title)
   if (!name && !resource?.id) return null
   const playParams = attributes.playParams || {}
   const motion = extractMotionArtwork(resource)
+  const playParamsFields: AppleRadioPlayParams = {}
+  if (playParams.id !== undefined) playParamsFields.id = String(playParams.id)
+  if (playParams.kind !== undefined) playParamsFields.kind = String(playParams.kind)
+  if (playParams.format !== undefined) playParamsFields.format = String(playParams.format)
+  if (playParams.stationHash !== undefined) playParamsFields.stationHash = String(playParams.stationHash)
+  if (typeof playParams.hasDrm === 'boolean') playParamsFields.hasDrm = playParams.hasDrm
+  if (playParams.mediaType !== undefined) playParamsFields.mediaType = String(playParams.mediaType)
   return {
     id: String(resource.id || ''),
     playId: preferredId || catalogIdOf(resource),
     type,
-    name: name || (attributes.title || ''),
+    name: name || displayString(attributes.title),
     subtitle: type === 'songs' || type === 'albums' ? attributes.artistName
       : type === 'playlists' ? attributes.curatorName
         : attributes.radioShowName || attributes.editorialNotes?.short,
@@ -194,6 +226,10 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string): A
     isLive: attributes.isLive,
     airTime: attributes.airTime ? { start: attributes.airTime.start, end: attributes.airTime.end } : undefined,
     contentRating: attributes.contentRating,
+    playParams: Object.keys(playParamsFields).length > 0 ? playParamsFields : undefined,
+    offersHlsUrl: Array.isArray(attributes.offers) && typeof attributes.offers[0]?.hlsUrl === 'string'
+      ? attributes.offers[0].hlsUrl
+      : undefined,
     audioTraits: Array.isArray(attributes.audioTraits) ? attributes.audioTraits : undefined,
     composerName: attributes.composerName,
     genreNames: Array.isArray(attributes.genreNames) ? attributes.genreNames : undefined,
@@ -334,7 +370,7 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
         sections.push({
           id: `banner-${element.id || sections.length}`,
           kind: 'banner',
-          title: attributes.designBadge || item?.name || '',
+          title: displayString(attributes.designBadge) || item?.name || '',
           tag: attributes.designTag || undefined,
           bannerUrl,
           items: item ? [item] : [],
@@ -354,7 +390,7 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
         sections.push({
           id: `grid-${element.id || sections.length}`,
           kind: 'grid',
-          title: attributes.name || attributes.title || '精选',
+          title: displayString(attributes.name) || displayString(attributes.title) || '精选',
           items: items.slice(0, 50),
         })
       }
@@ -379,7 +415,7 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
         sections.push({
           id: `shows-${element.id || sections.length}`,
           kind: 'show-cards',
-          title: attributes.name || attributes.title || '节目',
+          title: displayString(attributes.name) || displayString(attributes.title) || '节目',
           items: shows,
         })
       }
@@ -495,7 +531,7 @@ async function fetchHomeListenNow(): Promise<{ sections: AppleWebSection[]; hero
   }
 
   groups.forEach((group: any, index: number) => {
-    const title = group?.attributes?.stringForDisplay || group?.attributes?.title || (index === 0 ? '专属推荐' : '为你推荐')
+    const title = displayString(group?.attributes?.stringForDisplay) || displayString(group?.attributes?.title) || (index === 0 ? '专属推荐' : '为你推荐')
     const items = collectGroupItems(group)
     if (items.length === 0) return
     if (!hero && (items[0].artworkUrl || items[0].motionArtworkUrl || items[0].heroArtworkUrl)) hero = items[0]
@@ -726,7 +762,7 @@ export async function fetchAppleSearchLanding(storefront?: string): Promise<Appl
     const contents: any[] = group?.relationships?.contents?.data || []
     contents.forEach((content: any) => {
       const attributes = content?.attributes || {}
-      const name = attributes.name || ''
+      const name = displayString(attributes.name)
       if (!name || !content?.id) return
       const hero = attributes.editorialArtwork?.subscriptionHero?.url
         ? toHighResArtwork(attributes.editorialArtwork.subscriptionHero.url, 1600)
@@ -933,11 +969,13 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
   if (!loggedIn) {
     return { sections: [], hero: null, personalized: false, sourceLabel: '登录后可查看资料库' }
   }
-  const [recentlyAdded, songs, albums, artists, listenNow] = await Promise.allSettled([
+  const [recentlyAdded, songs, albums, artists, playlists, videos, listenNow] = await Promise.allSettled([
     fetchHomeRecentlyAdded(),
     getAppleLibrarySongs(100),
     getAppleLibraryAlbums(80),
     getAppleLibraryArtists(60),
+    fetchAppleLibraryPlaylistsSection(),
+    fetchAppleLibraryVideosSection(),
     fetchHomeListenNow(),
   ])
   const sections: AppleWebSection[] = []
@@ -951,6 +989,7 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
       })),
     })
   }
+  if (playlists.status === 'fulfilled' && playlists.value) sections.push(playlists.value)
   if (albums.status === 'fulfilled' && albums.value.length > 0) {
     sections.push({
       id: 'library-albums', kind: 'row', title: '专辑', subtitle: `资料库共 ${albums.value.length} 张`,
@@ -961,6 +1000,7 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
       })),
     })
   }
+  if (videos.status === 'fulfilled' && videos.value) sections.push(videos.value)
   if (songs.status === 'fulfilled' && songs.value.length > 0) {
     sections.push({
       id: 'library-songs', kind: 'row', title: '歌曲', subtitle: `资料库共 ${songs.value.length} 首`,
@@ -985,14 +1025,12 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
 
 /** 库专辑曲目 → 可播放 Song（catalogId 优先，走统一播放链路） */
 export async function fetchLibraryAlbumTracksForPlay(albumId: string): Promise<Song[]> {
-  const { getAppleLibraryAlbumTracks } = await import('./appleCatalog')
   const tracks = await getAppleLibraryAlbumTracks(albumId)
   return tracks.map(track => appleLibraryTrackToSong(track))
 }
 
 /** 库艺人在资料库内的专辑（艺人抽屉用） */
 export async function fetchLibraryArtistAlbumsForDrawer(artistId: string): Promise<AppleLibraryAlbum[]> {
-  const { getAppleLibraryArtistAlbums } = await import('./appleCatalog')
   return getAppleLibraryArtistAlbums(artistId)
 }
 
@@ -1010,6 +1048,26 @@ export function appleWebItemToSong(item: AppleWebItem, storefront?: string): Son
     },
     storefront || getStorefront(),
   )
+}
+
+/**
+ * 电台 → 可播放 Song（携带已取好的直播流）。
+ * 播放链路：loadAndPlaySong 检测到 appleRadio 后直接用其流（/v1/play/assets HLS），
+ * 不再走 webPlayback 或网易云/QQ 载体匹配（电台没有"同款歌曲"可回退）。
+ */
+export function appleStationToSong(station: AppleWebItem, stream: AppleNativeStream, _storefront?: string): Song {
+  const stationId = station.playId || station.id
+  return {
+    id: 0,
+    appleId: stationId,
+    name: station.name || 'Apple Music 电台',
+    artists: [{ name: station.showName || 'Apple Music 电台' }],
+    album: { name: '', picUrl: station.artworkUrl || '' },
+    duration: 0,
+    platform: 'apple',
+    vip: false,
+    appleRadio: { stream, stationId, isLive: Boolean(station.isLive) },
+  }
 }
 
 /** 歌单曲目 → 可播放 Song（目录歌单，catalog id 直接可播） */
@@ -1070,4 +1128,184 @@ export async function addAppleStationToLibrary(stationId: string): Promise<boole
     timeoutMs: 10000,
   })
   return result.ok
+}
+
+// ─────────────────────────── 资料库写操作（歌曲/专辑/视频） ───────────────────────────
+
+/** 通用「加入资料库」（POST /v1/me/library；web 歌曲行「添加到资料库」同款） */
+async function addAppleToLibrary(type: 'songs' | 'albums' | 'music-videos' | 'playlists' | 'stations', id: string): Promise<boolean> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken || !credentials.mediaUserToken) return false
+  const result = await appleApiRequest('/v1/me/library', {
+    method: 'POST',
+    developerToken: credentials.developerToken,
+    mediaUserToken: credentials.mediaUserToken,
+    body: { data: [{ id, type }] },
+    timeoutMs: 10000,
+  })
+  return result.ok
+}
+
+/** 单曲加入资料库 */
+export function addAppleSongToLibrary(songId: string): Promise<boolean> {
+  return addAppleToLibrary('songs', songId)
+}
+
+/** 专辑加入资料库 */
+export function addAppleAlbumToLibrary(albumId: string): Promise<boolean> {
+  return addAppleToLibrary('albums', albumId)
+}
+
+/** 音乐视频加入资料库 */
+export function addAppleMusicVideoToLibrary(videoId: string): Promise<boolean> {
+  return addAppleToLibrary('music-videos', videoId)
+}
+
+// ─────────────────────────── 资料库分区（播放列表 / 音乐视频） ───────────────────────────
+
+/** 资料库「播放列表」分区（web 侧栏 播放列表/所有播放列表 同款） */
+export async function fetchAppleLibraryPlaylistsSection(): Promise<AppleWebSection | null> {
+  const playlists = await getAppleLibraryPlaylists(100).catch(() => [])
+  if (playlists.length === 0) return null
+  return {
+    id: 'library-playlists',
+    kind: 'grid',
+    title: '播放列表',
+    subtitle: '你的资料库歌单',
+    items: playlists.map(playlist => ({
+      id: playlist.id,
+      playId: playlist.id,
+      type: 'playlists',
+      isLibrary: true,
+      name: playlist.name,
+      subtitle: playlist.curatorName || '我创建的歌单',
+      description: playlist.description,
+      artworkUrl: playlist.artworkUrl,
+      curatorName: playlist.curatorName,
+      trackCount: playlist.trackCount,
+    })),
+  }
+}
+
+/** 资料库「音乐视频」分区（web 侧栏 音乐视频 同款） */
+export async function fetchAppleLibraryVideosSection(): Promise<AppleWebSection | null> {
+  const videos = await getAppleLibraryMusicVideos(60).catch(() => [])
+  if (videos.length === 0) return null
+  return {
+    id: 'library-videos',
+    kind: 'grid',
+    title: '音乐视频',
+    subtitle: '资料库中的视频',
+    items: videos.map(video => ({
+      id: video.id,
+      playId: video.catalogId || video.id,
+      type: 'music-videos',
+      isLibrary: true,
+      name: video.name,
+      subtitle: video.artistName,
+      artworkUrl: video.artworkUrl,
+      artistName: video.artistName,
+      durationMs: video.durationMs,
+    })),
+  }
+}
+
+/** 库内歌单曲目 → 可播放 Song（catalog 关联 id 优先，走统一播放链路） */
+export async function fetchLibraryPlaylistTracksForPlay(playlistId: string): Promise<Song[]> {
+  const tracks = await getApplePlaylistTracks(playlistId, 300)
+  return tracks.map(track => appleLibraryTrackToSong(track))
+}
+
+// ─────────────────────────── 排行榜页（web /new/top-charts 同款） ───────────────────────────
+
+/** 排行榜页（歌曲/专辑/视频榜 + 每周热门100 + 城市榜） */
+export async function fetchAppleChartsPage(storefront?: string): Promise<AppleWebPage> {
+  const sf = storefront || getStorefront()
+  const charts = await fetchAppleTopCharts(sf)
+  if (charts.length === 0) {
+    return { sections: [], hero: null, personalized: false, sourceLabel: '排行榜暂无数据' }
+  }
+  return { sections: charts, hero: null, personalized: false, sourceLabel: 'apple-api charts' }
+}
+
+// ─────────────────────────── 探索更多 room 页（web /room/{id} 同款） ───────────────────────────
+
+/**
+ * 编辑 room 页（web「探索更多」按风格浏览/年代之声/心情与活动/来自全球 同款）：
+ * 用 groupings ids 参数取单个 room 的编辑树，复用 browse/radio 的 editorial 解析。
+ */
+export async function fetchAppleRoomPage(roomId: string, storefront?: string): Promise<AppleWebPage> {
+  const sf = storefront || getStorefront()
+  if (!roomId) return { sections: [], hero: null, personalized: false, sourceLabel: 'room 参数缺失' }
+  const baseQuery = `/v1/editorial/${encodeURIComponent(sf)}/groupings`
+    + '?platform=web&tabs=subscriber'
+    + '&omit[resource:artists]=autos&relate[songs]=albums'
+    + '&include[albums]=artists&include[songs]=artists&include[music-videos]=artists'
+    + '&include[stations]=events,radio-show&extend[station-events]=editorialVideo'
+    + '&fields[artists]=name,url,artwork,editorialArtwork,genreNames,plainEditorialNotes'
+    + '&fields[albums]=artistName,artistUrl,artwork,contentRating,editorialArtwork,plainEditorialNotes,name,playParams,releaseDate,url,trackCount'
+    + '&extend=editorialArtwork,artistUrl,plainEditorialNotes'
+  // 参数变体依次尝试：ids[groupings] → ids[] → ids={id}（web 前端 bundle 各版本用键不一）
+  let data: any = null
+  for (const param of [`ids[groupings]=${encodeURIComponent(roomId)}`, `ids=${encodeURIComponent(roomId)}`, `ids[]=${encodeURIComponent(roomId)}`]) {
+    const attempt = await gemsRequest(`${baseQuery}&${param}`)
+    if (Array.isArray(attempt?.data) && attempt.data.length > 0) {
+      data = attempt
+      break
+    }
+  }
+  if (!data) return { sections: [], hero: null, personalized: false, sourceLabel: 'room 取流失败' }
+  const grouping = Array.isArray(data.data) ? data.data[0] : null
+  const tab = pickTab(grouping)
+  const sections = parseEditorialSections(tab?.relationships?.children?.data || [])
+  const name = displayString(grouping?.attributes?.name) || displayString(grouping?.attributes?.title) || '探索'
+  return {
+    sections,
+    hero: null,
+    personalized: false,
+    sourceLabel: `apple-api room(${name})`,
+  }
+}
+
+// ─────────────────────────── Posts（web /post/{id} 同款） ───────────────────────────
+
+export interface ApplePostDetail {
+  id: string
+  name: string
+  artistName?: string
+  artworkUrl?: string
+  body?: string
+  /** 帖子附带的可播内容（歌曲/专辑/音乐视频/歌单） */
+  media?: AppleWebItem[]
+}
+
+/**
+ * 帖子详情（艺人分享）：GET /v1/catalog/{sf}/posts/{id}?include=…
+ * 接口字段为尽力解析（web 前端 bundle 未完全逆向），失败时上层用卡片信息兜底。
+ */
+export async function fetchApplePostDetail(postId: string, storefront?: string): Promise<ApplePostDetail | null> {
+  if (!postId) return null
+  const sf = storefront || getStorefront()
+  const data = await gemsRequest(
+    `/v1/catalog/${encodeURIComponent(sf)}/posts/${encodeURIComponent(postId)}`
+    + '?include=artists,songs,albums,music-videos,playlists&extend=plainEditorialNotes',
+  )
+  const resource = Array.isArray(data?.data) ? data.data[0] : null
+  if (!resource?.attributes?.name) return null
+  const attributes = resource.attributes || {}
+  const media: AppleWebItem[] = []
+  ;['songs', 'albums', 'music-videos', 'playlists'].forEach(type => {
+    ;(resource.relationships?.[type]?.data || []).forEach((content: any) => {
+      const item = itemize(content, type as AppleWebItemType)
+      if (item) media.push(item)
+    })
+  })
+  return {
+    id: String(resource.id),
+    name: attributes.name,
+    artistName: attributes.artistName || attributes.curatorName,
+    artworkUrl: art(attributes),
+    body: attributes.body || attributes.plainEditorialNotes?.standard || attributes.description?.standard,
+    media,
+  }
 }

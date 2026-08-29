@@ -22,9 +22,13 @@ export interface KugouTrack {
   hash: string
   songName: string
   singerName: string
+  /** 歌手 id（歌手详情/相似歌曲跳转用；榜单/搜索/专辑接口提供） */
+  singerId?: string
   albumName?: string
   duration?: number
   albumId?: string
+  /** 专辑内音频 id（播放直链/歌词匹配用） */
+  albumAudioId?: number
   coverUrl?: string
   /** 320k/flac 音质文件 hash（用于播放 URL） */
   playHash?: string
@@ -100,6 +104,7 @@ export async function searchKugouSongs(keyword: string, limit = 30): Promise<Kug
         duration: item.Duration ? Number(item.Duration) : undefined,
         albumId: item.AlbumID ? String(item.AlbumID) : undefined,
         playHash: item.FileHash ? String(item.FileHash) : undefined,
+        singerId: String((item.Singers && item.Singers[0] && item.Singers[0].id) || item.SingerId || '') || undefined,
         coverUrl: resolveKugouCover(item.Image || item.AlbumImage || ''),
       },
     )).filter((t: KugouTrack | null): t is KugouTrack => Boolean(t && t.songName))
@@ -135,6 +140,7 @@ export async function fetchKugouRankInfo(rankid = '8888', limit = 30): Promise<K
       {
         duration: Number(item.duration) || undefined,
         albumId: item.album_id || undefined,
+        singerId: String((item.authors && item.authors[0] && item.authors[0].author_id) || '') || undefined,
         coverUrl: resolveKugouCover(item.album_img || ''),
       },
     )).filter((t: KugouTrack | null): t is KugouTrack => Boolean(t && t.songName))
@@ -177,6 +183,7 @@ export async function fetchKugouPlaylistDetail(specialid: string, limit = 50): P
       {
         duration: Number(item.duration) || undefined,
         albumId: item.album_id || undefined,
+        singerId: String(item.singerid || item.singer_id || '') || undefined,
         coverUrl: resolveKugouCover(item.album_img || ''),
       },
     )).filter((t: KugouTrack | null): t is KugouTrack => Boolean(t && t.songName))
@@ -250,6 +257,221 @@ export async function fetchKugouUserPlaylists(cookie?: string): Promise<KugouPla
     } catch { /* 桥失败 */ }
   }
   return []
+}
+
+/** 酷狗用户歌单曲目（H5 签名网关 /v4/get_list_all_file，需登录 cookie）。
+ *  用户自建歌单/「我喜欢」的 id 是网关 listid，不是 m.kugou.com 公开歌单 specialid，
+ *  公开歌单详情接口（playlist/detail）对这类 id 拿不到曲目，必须走此接口。
+ *  分页合并全量曲目（单页 50 条，20 页封顶，防异常数据死循环）。 */
+export async function fetchKugouUserPlaylistTracks(listid: string, page = 1, pagesize = 50): Promise<KugouTrack[]> {
+  const kgCookie = getPlatformCookie('kugou')
+  if (!kgCookie || !listid) return []
+  const out: KugouTrack[] = []
+  const seen = new Set<string>()
+  try {
+    for (let p = Math.max(1, page); p <= 20; p += 1) {
+      const query = new URLSearchParams({ listid, page: String(p), pagesize: String(pagesize), cookie: kgCookie })
+      const resp = await fetch(`${KG_API}/user/playlist/tracks?${query.toString()}`, { cache: 'no-store' })
+      if (!resp.ok) break
+      const json = await resp.json()
+      if (!Array.isArray(json.songs)) break
+      let added = 0
+      for (const item of json.songs) {
+        const hash = String(item.hash || item.fileHash || '')
+        if (!hash || seen.has(hash)) continue
+        seen.add(hash)
+        // 服务端网关返回 songName/singerName（已拆分），兼容 filename 形态
+        const songName = String(item.songName || item.songname || '')
+        const singerName = String(item.singerName || item.singername || '')
+        const filename = songName && singerName ? `${singerName} - ${songName}` : (String(item.filename || '') || songName)
+        const track = trackFromHash(hash, filename, {
+          duration: Number(item.duration || 0) || undefined,
+          albumId: String(item.albumId || item.album_id || ''),
+          albumAudioId: Number(item.albumAudioId || item.album_audio_id || 0) || undefined,
+          coverUrl: resolveKugouCover(String(item.coverUrl || item.album_img || '')),
+        })
+        if (track) {
+          out.push(track)
+          added += 1
+        }
+      }
+      if (added < pagesize) break
+    }
+  } catch (e) {
+    console.warn('[Kugou] 用户歌单曲目获取失败:', e)
+  }
+  return out
+}
+
+export interface KugouAlbum {
+  albumid: string
+  albumname: string
+  singername: string
+  singerid?: string
+  imgurl?: string
+  publishtime?: string
+  songcount?: number
+  intro?: string
+}
+
+export interface KugouAlbumDetail {
+  album: KugouAlbum
+  songs: KugouTrack[]
+}
+
+/** 酷狗专辑 → WaveForge Album（专辑详情/歌手专辑列表用） */
+export function kugouAlbumToAlbum(album: KugouAlbum) {
+  const publishTs = Number(new Date(String(album.publishtime || '').replace(' ', 'T')).getTime())
+  return {
+    id: Number(parseInt(String(album.albumid).slice(0, 12), 10)) || 0,
+    mid: album.albumid,
+    name: album.albumname,
+    artist: { name: album.singername, id: album.singerid ? Number(album.singerid) || undefined : undefined },
+    picUrl: album.imgurl || '',
+    publishTime: Number.isFinite(publishTs) ? publishTs : undefined,
+    description: album.intro || '',
+    size: album.songcount,
+    platform: 'kugou' as const,
+  }
+}
+
+export interface KugouSinger {
+  singerid: string
+  singername: string
+  imgurl?: string
+  intro?: string
+  songcount?: number
+  mvcount?: number
+  alias?: string
+}
+
+/** 酷狗新专辑列表（mobilecdn /api/v3/album/list，公开目录接口） */
+export async function fetchKugouAlbumList(page = 1, pagesize = 24): Promise<KugouAlbum[]> {
+  try {
+    const resp = await fetch(`${KG_API}/album/list?page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    if (!resp.ok) return []
+    const json = await resp.json()
+    if (!Array.isArray(json.albums)) return []
+    return json.albums.map((item: any) => ({
+      albumid: String(item.albumid || ''),
+      albumname: String(item.albumname || ''),
+      singername: String(item.singername || ''),
+      singerid: String(item.singerid || '') || undefined,
+      imgurl: item.imgurl ? resolveKugouCover(String(item.imgurl)) : undefined,
+      publishtime: String(item.publishtime || '') || undefined,
+      songcount: Number(item.songcount || 0) || undefined,
+    })).filter((a: { albumid?: string; albumname?: string }) => Boolean(a.albumid && a.albumname))
+  } catch (e) {
+    console.warn('[Kugou] 专辑列表获取失败:', e)
+    return []
+  }
+}
+
+/** 酷狗专辑详情（album/info + album/song） */
+export async function fetchKugouAlbumDetail(albumid: string): Promise<KugouAlbumDetail | null> {
+  try {
+    const resp = await fetch(`${KG_API}/album/detail?albumid=${encodeURIComponent(albumid)}`, { cache: 'no-store' })
+    if (!resp.ok) return null
+    const json = await resp.json()
+    const album = json?.album
+    if (!album || !Array.isArray(json.songs)) return null
+    return {
+      album: {
+        albumid: String(album.albumid || albumid),
+        albumname: String(album.albumname || ''),
+        singername: String(album.singername || ''),
+        singerid: String(album.singerid || '') || undefined,
+        imgurl: album.imgurl ? resolveKugouCover(String(album.imgurl)) : undefined,
+        publishtime: String(album.publishtime || '') || undefined,
+        songcount: Number(album.songcount || json.songs.length) || undefined,
+        intro: String(album.intro || '') || undefined,
+      },
+      songs: json.songs.map((item: any) => trackFromHash(
+        String(item.hash || ''),
+        String(item.filename || ''),
+        {
+          albumId: String(item.album_id || albumid || '') || undefined,
+          albumName: album.albumname ? String(album.albumname) : undefined,
+          duration: Number(item.duration || 0) || undefined,
+          albumAudioId: Number(item.album_audio_id || item.audio_id || 0) || undefined,
+          singerId: String(item.singerid || album.singerid || '') || undefined,
+          coverUrl: resolveKugouCover(String(item.album_img || album.imgurl || '')),
+        },
+      )).filter((t: KugouTrack | null): t is KugouTrack => Boolean(t && t.songName)),
+    }
+  } catch (e) {
+    console.warn('[Kugou] 专辑详情获取失败:', e)
+    return null
+  }
+}
+
+/** 酷狗歌手详情（mobilecdn /api/v3/singer/info） */
+export async function fetchKugouSingerDetail(singerid: string): Promise<KugouSinger | null> {
+  try {
+    const resp = await fetch(`${KG_API}/singer/detail?singerid=${encodeURIComponent(singerid)}`, { cache: 'no-store' })
+    if (!resp.ok) return null
+    const s = (await resp.json())?.singer
+    if (!s || !s.singername) return null
+    return {
+      singerid: String(s.singerid || singerid),
+      singername: String(s.singername || ''),
+      imgurl: s.imgurl ? resolveKugouCover(String(s.imgurl)) : undefined,
+      intro: String(s.intro || '') || undefined,
+      songcount: Number(s.songcount || 0) || undefined,
+      mvcount: Number(s.mvcount || 0) || undefined,
+      alias: String(s.alias || '') || undefined,
+    }
+  } catch (e) {
+    console.warn('[Kugou] 歌手详情获取失败:', e)
+    return null
+  }
+}
+
+/** 酷狗歌手热门歌曲（singer/song；封面由服务端经歌手专辑映射补全） */
+export async function fetchKugouSingerSongs(singerid: string, page = 1, pagesize = 50): Promise<KugouTrack[]> {
+  try {
+    const resp = await fetch(`${KG_API}/singer/song?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    if (!resp.ok) return []
+    const json = await resp.json()
+    if (!Array.isArray(json.songs)) return []
+    return json.songs.map((item: any) => trackFromHash(
+      String(item.hash || ''),
+      String(item.filename || ''),
+      {
+        albumId: String(item.album_id || '') || undefined,
+        duration: Number(item.duration || 0) || undefined,
+        albumAudioId: Number(item.album_audio_id || item.audio_id || 0) || undefined,
+        singerId: String(item.singerid || singerid || '') || undefined,
+        coverUrl: resolveKugouCover(String(item.album_img || '')),
+      },
+    )).filter((t: KugouTrack | null): t is KugouTrack => Boolean(t && t.songName))
+  } catch (e) {
+    console.warn('[Kugou] 歌手歌曲获取失败:', e)
+    return []
+  }
+}
+
+/** 酷狗歌手专辑列表（singer/album） */
+export async function fetchKugouSingerAlbums(singerid: string, page = 1, pagesize = 100): Promise<KugouAlbum[]> {
+  try {
+    const resp = await fetch(`${KG_API}/singer/album?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    if (!resp.ok) return []
+    const json = await resp.json()
+    if (!Array.isArray(json.albums)) return []
+    return json.albums.map((item: any) => ({
+      albumid: String(item.albumid || ''),
+      albumname: String(item.albumname || ''),
+      singername: String(item.singername || ''),
+      singerid: String(item.singerid || singerid || '') || undefined,
+      imgurl: item.imgurl ? resolveKugouCover(String(item.imgurl)) : undefined,
+      publishtime: String(item.publishtime || '') || undefined,
+      songcount: Number(item.songcount || 0) || undefined,
+      intro: String(item.intro || '') || undefined,
+    })).filter((a: { albumid?: string; albumname?: string }) => Boolean(a.albumid && a.albumname))
+  } catch (e) {
+    console.warn('[Kugou] 歌手专辑获取失败:', e)
+    return []
+  }
 }
 
 /** 酷狗播放 URL（四层策略：H5 签名网关 → Mobile 免费直链 → Web；付费歌曲返回 null 由上层匹配播放） */
@@ -356,13 +578,16 @@ export function isKugouLoggedIn(): boolean {
 /** 酷狗歌曲 → WaveForge Song（id 用 hash 前 12 位转数字，避免 32 位 hex 溢出；mid 保留完整 hash） */
 export function kugouTrackToSong(track: KugouTrack): Song {
   const hashStr = track.hash || ''
+  const artistId = track.singerId ? Number(parseInt(String(track.singerId).slice(0, 12), 10)) || undefined : undefined
   return {
     id: Number(parseInt(hashStr.slice(0, 12), 16)) || 0,
     mid: hashStr,
     name: track.songName,
-    artists: [{ name: track.singerName }],
+    artists: [{ name: track.singerName, id: artistId }],
     album: {
-      id: track.albumId ? Number(parseInt(track.albumId.slice(0, 12), 16)) : undefined,
+      // albumid 为十进制数字串，按 10 进制转数字（hash 才是 16 进制）
+      id: track.albumId ? Number(parseInt(String(track.albumId).slice(0, 12), 10)) || undefined : undefined,
+      mid: track.albumId || undefined,
       name: track.albumName || '',
       picUrl: track.coverUrl || '',
     },

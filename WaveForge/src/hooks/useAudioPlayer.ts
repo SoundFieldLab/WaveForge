@@ -241,6 +241,8 @@ export function useAudioPlayer(
   const currentLoadRevisionRef = useRef(0)
   const currentMetadataRef = useRef<DeckMetadata | null>(null)
   const nextMetadataRef = useRef<DeckMetadata | null>(null)
+  /** 当前曲是否为直播流（Apple 电台）：时长按 Infinity 处理，UI 显示直播态 */
+  const isLiveRef = useRef(false)
   const audioContextRef = useRef<AudioContext | null>(null)
   const gainNodesRef = useRef<[GainNode | null, GainNode | null]>([null, null])
   const masterGainRef = useRef<GainNode | null>(null)
@@ -272,6 +274,11 @@ export function useAudioPlayer(
       })
     }
     onStateChangeRef.current(state)
+  }, [])
+
+  /** 直播流（HLS Infinity）等异常时长收敛为 0（UI 依赖有限值显示/拖动） */
+  const finiteDuration = useCallback((value: number | undefined): number => {
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
   }, [])
 
   const setTransitionState = useCallback((state: TransitionState, extra: Partial<AudioPlayerState> = {}) => {
@@ -1610,7 +1617,7 @@ export function useAudioPlayer(
       // 量化播放时间到 ~250ms，避免高频 timeupdate 触发多个大组件重渲染；
       // 进度条/歌词内部已有各自的平滑插值，视觉无变化。
       const quantizedTime = Math.round(active.currentTime * 4) / 4
-      emit({ currentTime: quantizedTime, duration: active.duration || 0, buffered })
+      emit({ currentTime: quantizedTime, duration: finiteDuration(active.duration), buffered, live: isLiveRef.current })
     }
 
     const handlePlay = (event: Event) => {
@@ -1626,12 +1633,12 @@ export function useAudioPlayer(
         emit({
           isPlaying: false,
           currentTime: active?.currentTime || 0,
-          duration: active?.duration || 0,
+          duration: finiteDuration(active?.duration),
         })
       }
     }
     const handleMetadata = (event: Event) => {
-      if (event.currentTarget === getActiveAudio()) emit({ duration: getActiveAudio()?.duration || 0 })
+      if (event.currentTarget === getActiveAudio()) emit({ duration: finiteDuration(getActiveAudio()?.duration), live: isLiveRef.current })
     }
     const handleEnded = (event: Event) => {
       debugLog('🏁 [Event] handleEnded 被触发')
@@ -1759,7 +1766,7 @@ export function useAudioPlayer(
       gainNodesRef.current = [null, null]
       masterGainRef.current = null
     }
-  }, [commitTransition, emit, getActiveAudio, getStandbyAudio, setTransitionState, startTransition])
+  }, [commitTransition, emit, getActiveAudio, getStandbyAudio, setTransitionState, startTransition, finiteDuration])
 
   useEffect(() => {
     if (gaplessIntegrationRef.current) {
@@ -1963,6 +1970,9 @@ export function useAudioPlayer(
       }
       const appleHls = (track as { appleHls?: import('../services/applePlayback').AppleNativeStream } | undefined)?.appleHls
       const hlsMode = Boolean(appleHls) && isHlsUrl(url)
+      // 直播流（Apple 电台）：HLS 时长为 Infinity（liveDurationInfinity），
+      // 记录到 ref 供 timeupdate/metadata 输出 live 状态与 0 时长（UI 显示直播态）
+      isLiveRef.current = Boolean(appleHls?.live)
       active.playbackRate = 1 // post-settle 残留防护：新歌一律原速
       currentMetadataRef.current = { url, ...track }
       setAudioElement(active)
@@ -2015,7 +2025,7 @@ export function useAudioPlayer(
       if (loadRevision !== currentLoadRevisionRef.current) return false
       isLoadingRef.current = false
       debugLog('✅ [LoadAndPlay] 播放成功')
-      setTransitionState('playing', { isPlaying: true, duration: active.duration || track?.duration || 0, ended: false })
+      setTransitionState('playing', { isPlaying: true, duration: finiteDuration(active.duration) || track?.duration || 0, ended: false, live: isLiveRef.current })
       
       // Prepare auto mix for next track if available（同专辑优先首尾拼接，跳过 AutoMix 分析）
       if (nextMetadataRef.current?.url && autoMixRef.current.enabled && !isAlbumPlayback()) {
@@ -2041,7 +2051,7 @@ export function useAudioPlayer(
       setTransitionState('failed', { isPlaying: false, fallbackReason: err ? err.message : 'playback failed' })
       throw error
     }
-  }, [cancelScheduledTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, setDeckGain, setTransitionState, prepareAutoMix])
+  }, [cancelScheduledTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, setDeckGain, setTransitionState, prepareAutoMix, finiteDuration])
 
   const togglePlay = useCallback(async () => {
     const active = getActiveAudio()
@@ -2116,13 +2126,13 @@ export function useAudioPlayer(
     if (plan && active.currentTime >= plan.sourceStartTime) {
       transitionPlanRef.current = null
     }
-    emit({ currentTime: active.currentTime, duration: active.duration || 0 })
+    emit({ currentTime: active.currentTime, duration: finiteDuration(active.duration), live: isLiveRef.current })
     if (nextMetadataRef.current?.url && autoMixRef.current.enabled) {
       void prepareAutoMix()
     } else if (wasPlaying && active.paused) {
       void active.play().catch(() => undefined)
     }
-  }, [cancelScheduledTransition, emit, getActiveAudio, prepareAutoMix])
+  }, [cancelScheduledTransition, emit, getActiveAudio, prepareAutoMix, finiteDuration])
 
   const setVolume = useCallback((volume: number) => {
     const clamped = Math.max(0, Math.min(1, volume))

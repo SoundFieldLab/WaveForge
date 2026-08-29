@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Clock3, Heart, MoreHorizontal, Play, Share2 } from 'lucide-react'
+import { Clock3, Headphones, Heart, Play, Share2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getProxiedImageUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
@@ -17,10 +17,14 @@ type Playlist = {
   trackCount?: number
   description?: string
   desc?: string
-  creator?: { nickname?: string; avatarUrl?: string }
+  creator?: { userId?: number | string; nickname?: string; avatarUrl?: string }
   tags?: string[]
   platform?: MusicPlatform
   isCollected?: boolean
+  isLike?: boolean
+  /** 歌单被播放次数（QQ listennum / 网易云 playCount） */
+  playCount?: number
+  createTime?: number
 } | null
 
 interface TraditionalPlaylistDetailProps {
@@ -41,6 +45,18 @@ interface TraditionalPlaylistDetailProps {
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
   userPlaylists?: any[]
+  /** 当前登录用户名/头像：自建/我喜欢歌单无 creator 时展示 */
+  ownUserName?: string
+  ownUserAvatar?: string
+  ownUserId?: string
+  /** 点击创建者 → 打开其个人中心 */
+  onOpenUserProfile?: (platform: MusicPlatform, userId: string, nickname?: string, avatarUrl?: string) => void
+}
+
+const formatPlayCount = (value: number) => {
+  if (value >= 100000000) return `${(value / 100000000).toFixed(1)}亿`
+  if (value >= 10000) return `${(value / 10000).toFixed(1)}万`
+  return String(value)
 }
 
 const formatDuration = (milliseconds = 0) => {
@@ -53,7 +69,7 @@ const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl
 function TraditionalPlaylistDetail({
   playlist, songs, loading, currentSong, playerTheme, accentColor, onClose, onSongSelect,
   onOpenArtist, onOpenAlbum, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist,
-  onViewComments, onCopyInfo, userPlaylists = [],
+  onViewComments, onCopyInfo, userPlaylists = [], ownUserName, ownUserAvatar, ownUserId, onOpenUserProfile,
 }: TraditionalPlaylistDetailProps) {
   const [menu, setMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const [collected, setCollected] = useState(Boolean(playlist?.isCollected))
@@ -65,6 +81,12 @@ function TraditionalPlaylistDetail({
   const canSubscribePlaylist = getPlatformCapabilities(platform).subscribePlaylist || platform === 'soda'
   const totalDuration = useMemo(() => songs.reduce((sum, song) => sum + (song.duration || 0), 0), [songs])
   const coverUrl = playlist?.coverImgUrl || playlist?.coverUrl || coverOf(songs[0])
+  // 创建者：收藏歌单显示真实创建者；自建/我喜欢无 creator 时回退当前登录用户
+  const creatorName = playlist?.creator?.nickname || ownUserName || ''
+  const creatorId = playlist?.creator?.userId !== undefined && playlist?.creator?.userId !== null && String(playlist?.creator?.userId) !== ''
+    ? String(playlist.creator.userId)
+    : (playlist?.isCollected ? '' : (ownUserId || ''))
+  const createdDate = playlist?.createTime ? (() => { const d = new Date(playlist.createTime); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` })() : ''
 
   // ── 大列表虚拟化：几千首歌单只渲染可见行，避免一次性渲染全部行 + 全部封面请求打穿代理 ──
   const DETAIL_ROW_HEIGHT = 62
@@ -130,27 +152,84 @@ function TraditionalPlaylistDetail({
   }
 
   return <div className="flex h-full min-h-0 flex-col">
-    <header className={`flex h-16 shrink-0 items-center gap-3 border-b px-5 ${dark ? 'border-white/10' : 'border-slate-200'}`}><div className="min-w-0"><div className="text-sm font-medium">歌单详情</div><div className={`truncate text-xs ${muted}`}>{playlist?.creator?.nickname || '来自音乐馆'}</div></div></header>
     <main ref={listScrollRef} onScroll={handleListScroll} className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
-      {loading ? <div className="flex h-72 items-center justify-center"><div className={`text-sm ${muted}`}>正在加载歌单...</div></div> : <><section className="grid gap-6 md:grid-cols-[220px_minmax(0,1fr)]"><img src={coverUrl} alt="" loading="lazy" className="aspect-square w-full max-w-[220px] rounded-xl object-cover shadow-2xl" /><div className="min-w-0 self-center"><div className={`mb-2 text-xs ${muted}`}>精选歌单</div><h1 className="text-2xl font-semibold">{playlist?.name || '歌单'}</h1><p className={`mt-3 max-w-2xl text-sm leading-6 ${muted}`}>{playlist?.description || playlist?.desc || '把喜欢的声音收集在这里，按下播放即可从第一首开始。'}</p><div className={`mt-4 flex flex-wrap gap-2 text-xs ${muted}`}><span>{playlist?.creator?.nickname || 'WaveForge 用户'}</span><span>·</span><span>{songs.length || playlist?.trackCount || 0} 首歌曲</span><span>·</span><span>{Math.floor(totalDuration / 60000)} 分钟</span></div><div className="mt-5 flex flex-wrap gap-2"><button type="button" disabled={songs.length === 0} onClick={() => songs[0] && onSongSelect(songs[0], songs)} className="flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium text-white disabled:opacity-45" style={{ background: accentColor }}><Play className="h-4 w-4 fill-current" />播放全部</button>{canSubscribePlaylist && <button type="button" onClick={() => void toggleCollection()} className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm ${dark ? 'border-white/15 hover:bg-white/10' : 'border-slate-200 hover:bg-slate-100'}`}><Heart className={`h-4 w-4 ${collected ? 'fill-current' : ''}`} style={{ color: collected ? accentColor : undefined }} />{collected ? '已收藏' : '收藏'}</button>}{platform !== 'soda' && <button type="button" onClick={share} className={`flex items-center gap-2 rounded-full border px-4 py-2.5 text-sm ${dark ? 'border-white/15 hover:bg-white/10' : 'border-slate-200 hover:bg-slate-100'}`}><Share2 className="h-4 w-4" />分享</button>}</div></div></section>
-        <section className="mt-9"><div className="mb-3 flex items-center justify-between"><div><h2 className="text-lg font-semibold">歌曲</h2><p className={`mt-1 text-xs ${muted}`}>{songs.length} 首 · {Math.floor(totalDuration / 60000)} 分钟</p></div></div><div className={`overflow-hidden rounded-xl border ${dark ? 'border-white/10' : 'border-slate-200'}`}><div className={`grid grid-cols-[42px_minmax(0,1fr)_minmax(110px,.7fr)_58px_36px] items-center gap-3 border-b px-4 py-3 text-xs ${muted} ${dark ? 'border-white/10 bg-white/[.035]' : 'border-slate-100 bg-slate-50'}`}><span>#</span><span>歌曲</span><span className="hidden sm:block">专辑</span><span><Clock3 className="h-3.5 w-3.5" /></span><span /></div>
-          {songs.length === 0 ? <div className={`p-12 text-center text-sm ${muted}`}>{platform === 'soda' && !isSodaLoggedIn() ? '登录汽水音乐后查看歌单歌曲' : '这个歌单还没有可播放的歌曲'}</div> : (
-            <div className="relative" style={{ height: virtualListHeight }}>
-              {visibleSongs.map(({ song, index }) => {
-                const active = currentSong ? songKey(song) === songKey(currentSong) : false
-                return (
-                  <div key={`${songKey(song)}:${index}`} className={`absolute left-0 right-0 grid grid-cols-[42px_minmax(0,1fr)_minmax(110px,.7fr)_58px_36px] items-center gap-3 border-b px-4 py-2.5 text-left transition ${dark ? 'border-white/5' : 'border-slate-100'} ${active ? (dark ? 'bg-white/10' : 'bg-pink-50') : dark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`} style={{ top: index * DETAIL_ROW_HEIGHT, height: DETAIL_ROW_HEIGHT }}>
-                    <button type="button" onClick={() => onSongSelect(song, songs)} className="flex h-7 w-7 items-center justify-center text-xs" style={{ color: active ? accentColor : undefined }}>{active ? <Play className="h-3.5 w-3.5 fill-current" /> : index + 1}</button>
-                    <button type="button" onClick={() => onSongSelect(song, songs)} className="flex min-w-0 items-center gap-3 text-left"><img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" /><span className="min-w-0"><span className="block truncate text-sm">{song.name}</span><span className={`block truncate text-xs ${muted}`}>{song.artists?.map(artist => artist.name).join(' / ')}</span></span></button>
-                    <button type="button" onClick={() => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button>
-                    <span className={`text-xs ${muted}`}>{formatDuration(song.duration)}</span>
-                    <button type="button" onClick={event => setMenu({ show: true, x: event.clientX, y: event.clientY, song })} aria-label="歌曲更多操作" className="rounded p-1 hover:bg-black/10"><MoreHorizontal className="h-4 w-4" /></button>
-                  </div>
-                )
-              })}
+      {loading ? <div className="flex h-72 items-center justify-center"><div className={`text-sm ${muted}`}>正在加载歌单...</div></div> : (
+        <>
+          {/* 头部：封面 + 信息（QQ 音乐版式） */}
+          <section className="flex flex-col gap-6 sm:flex-row">
+            <div className="relative shrink-0">
+              <img src={coverUrl} alt="" loading="lazy" className="h-44 w-44 rounded-2xl object-cover shadow-2xl" />
+              {/* 耳机角标 = 歌单被播放次数；「我喜欢」不显示（QQ/网易云的我喜欢均无该数据） */}
+              {!playlist?.isLike && (playlist?.playCount || 0) > 0 && (
+                <span className="absolute bottom-2 left-2 flex items-center gap-1 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white backdrop-blur"><Headphones className="h-3 w-3" />{formatPlayCount(playlist?.playCount || 0)}</span>
+              )}
             </div>
-          )}
-        </div></section></>}
+            <div className="min-w-0 flex-1">
+              <h1 className="text-3xl font-bold leading-tight">{playlist?.name || '歌单'}</h1>
+              <div className={`mt-3 flex flex-wrap items-center gap-2 text-sm ${muted}`}>
+                {(playlist?.creator?.avatarUrl || ownUserAvatar) ? <img src={playlist?.creator?.avatarUrl || ownUserAvatar} alt="" className="h-5 w-5 rounded-full object-cover" /> : null}
+                {creatorId && onOpenUserProfile ? (
+                  <button type="button" onClick={() => onOpenUserProfile(platform, creatorId, creatorName, playlist?.creator?.avatarUrl || ownUserAvatar)} className="transition hover:underline" style={{ color: accentColor }}>{creatorName}</button>
+                ) : (
+                  <span>{creatorName}</span>
+                )}
+                {createdDate && <span className={`text-xs ${muted}`}>{createdDate} 创建</span>}
+                {(playlist?.tags || []).slice(0, 4).map(tag => <span key={String(tag)}>#{tag}</span>)}
+              </div>
+              <p className={`mt-2 max-w-3xl text-xs leading-5 ${muted}`}>{playlist?.description || playlist?.desc || `${songs.length || playlist?.trackCount || 0} 首歌曲 · ${Math.floor(totalDuration / 60000)} 分钟`}</p>
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                <button type="button" disabled={songs.length === 0} onClick={() => songs[0] && onSongSelect(songs[0], songs)} className="flex items-center gap-2 rounded-full px-6 py-2.5 text-sm font-medium text-white disabled:opacity-45" style={{ background: accentColor }}><Play className="h-4 w-4 fill-current" />播放</button>
+                {canSubscribePlaylist && <button type="button" onClick={() => void toggleCollection()} className={`flex items-center gap-2 rounded-full border px-5 py-2.5 text-sm transition ${dark ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white/70 hover:bg-slate-100'}`}><Heart className={`h-4 w-4 ${collected ? 'fill-current' : ''}`} style={{ color: collected ? accentColor : undefined }} />{collected ? '已收藏' : '收藏'}</button>}
+                {platform !== 'soda' && <button type="button" onClick={share} className={`flex items-center gap-2 rounded-full border px-5 py-2.5 text-sm transition ${dark ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white/70 hover:bg-slate-100'}`}><Share2 className="h-4 w-4" />分享</button>}
+              </div>
+            </div>
+          </section>
+
+          {/* 歌曲列表：歌名/歌手 | 收藏 | 专辑 | 时长；整行右键打开菜单，无 ⋯ 按钮 */}
+          <section className="mt-8">
+            <div className="mb-3">
+              <div className="inline-block border-b-2 pb-2 text-base font-semibold" style={{ borderColor: accentColor, color: accentColor }}>歌曲 {songs.length || playlist?.trackCount || 0}</div>
+            </div>
+            <div className={`grid grid-cols-[minmax(0,1fr)_44px_minmax(110px,.7fr)_58px] items-center gap-3 px-4 pb-2 text-xs ${muted}`}><span>歌名 / 歌手</span><span /><span className="hidden sm:block">专辑</span><span className="flex justify-end"><Clock3 className="h-3.5 w-3.5" /></span></div>
+            {songs.length === 0 ? <div className={`rounded-xl border p-12 text-center text-sm ${muted} ${dark ? 'border-white/10' : 'border-slate-200'}`}>{platform === 'soda' && !isSodaLoggedIn() ? '登录汽水音乐后查看歌单歌曲' : '这个歌单还没有可播放的歌曲'}</div> : (
+              <div className="relative" style={{ height: virtualListHeight }}>
+                {visibleSongs.map(({ song, index }) => {
+                  const active = currentSong ? songKey(song) === songKey(currentSong) : false
+                  return (
+                    <div
+                      key={`${songKey(song)}:${index}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => onSongSelect(song, songs)}
+                      onKeyDown={event => { if (event.key === 'Enter') onSongSelect(song, songs) }}
+                      onContextMenu={event => { event.preventDefault(); setMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
+                      className={`group absolute left-0 right-0 grid cursor-pointer grid-cols-[minmax(0,1fr)_44px_minmax(110px,.7fr)_58px] items-center gap-3 px-4 transition ${active ? (dark ? 'bg-white/10' : 'bg-pink-50') : dark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
+                      style={{ top: index * DETAIL_ROW_HEIGHT, height: DETAIL_ROW_HEIGHT }}
+                    >
+                      <span className="flex min-w-0 items-center gap-3">
+                        <span className="relative shrink-0">
+                          <img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" />
+                          <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
+                        </span>
+                        <span className="min-w-0">
+                          <span className="flex items-center gap-1.5 text-sm" style={{ color: active ? accentColor : undefined }}>
+                            <span className="truncate">{song.name}</span>
+                            {song.vip ? <span className="shrink-0 rounded border px-1 text-[9px] leading-4" style={{ borderColor: accentColor, color: accentColor }}>VIP</span> : null}
+                          </span>
+                          <span className={`block truncate text-xs ${muted}`}>{song.artists?.map(artist => artist.name).join(' / ')}</span>
+                        </span>
+                      </span>
+                      <button type="button" onClick={event => { event.stopPropagation(); onAddToFavorites?.(song) }} aria-label="收藏歌曲" className={`flex justify-center transition hover:scale-110 ${muted}`}><Heart className="h-4 w-4" /></button>
+                      <button type="button" onClick={event => { event.stopPropagation(); song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform) }} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button>
+                      <span className={`text-right text-xs tabular-nums ${muted}`}>{formatDuration(song.duration)}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+        </>
+      )}
     </main>
     <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, songs)} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={onViewComments} onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)} onViewArtist={song => song.artists?.[0]?.id && onOpenArtist?.(String(song.artists[0].id), song.platform || platform)} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={platform} playerTheme={playerTheme} />
   </div>

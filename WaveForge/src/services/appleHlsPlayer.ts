@@ -37,11 +37,12 @@ export function detachAppleHls(element: HTMLMediaElement | null): void {
 
 /**
  * 把 hls.js 挂到媒体元素并加载 Apple 的 HLS 流。
+ * 同时支持 audio 与 video 元素（音乐视频/直播视频走同一管线）。
  * resolve：首个分片缓冲就绪（canplay/loadeddata/MANIFEST_PARSED 之一）；
  * reject：致命错误（清单/分段/EME license 失败）或超时。
  * 注意：本函数接管 src，调用方之后不要再对同一元素赋值 src 或调 load()。
  */
-export async function attachAppleHls(element: HTMLAudioElement, stream: AppleNativeStream): Promise<void> {
+export async function attachAppleHls(element: HTMLMediaElement, stream: AppleNativeStream): Promise<void> {
   const { default: HlsConstructor } = await import('hls.js')
   detachAppleHls(element)
   if (!HlsConstructor.isSupported()) {

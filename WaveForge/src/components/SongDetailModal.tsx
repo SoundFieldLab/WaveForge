@@ -130,7 +130,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
         id: b.blogId ?? b.id ?? 0,
         title: b.title || b.name || '',
         summary: b.summary || b.desc || b.content?.slice?.(0, 100) || '',
-        author: b.nickname || b.creator?.nickname || b.userId ? '' : '',
+        author: b.nickname || b.creator?.nickname || (b.userId ? String(b.userId) : ''),
         time: b.createTime || b.publishTime || b.time || 0,
       }))
       if (!cancelled) setNeteaseBlogs(blogs)

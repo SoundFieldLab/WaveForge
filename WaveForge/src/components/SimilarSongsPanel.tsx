@@ -68,6 +68,32 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
         void fetchSimilarSoda()
         return
       }
+      // 酷狗：无相似歌曲接口，用「同歌手热门 + TOP500 榜单」组合做相关探索
+      if (song.platform === 'kugou') {
+        const fetchSimilarKugou = async () => {
+          try {
+            const kugou = await import('../services/kugouService')
+            const singerId = String(song.artists?.[0]?.id || '')
+            const [singerSongs, rankSongs] = await Promise.all([
+              singerId ? kugou.fetchKugouSingerSongs(singerId, 1, 30) : Promise.resolve([] as any[]),
+              kugou.fetchKugouRankInfo('8888', 30).catch(() => [] as any[]),
+            ])
+            const seen = new Set([String(song.mid || song.id)])
+            const merged: Song[] = []
+            for (const candidate of [...singerSongs.map(kugou.kugouTrackToSong), ...rankSongs.map(kugou.kugouTrackToSong)]) {
+              const key = String(candidate.mid || candidate.id)
+              if (!key || seen.has(key)) continue
+              seen.add(key)
+              merged.push(candidate)
+              if (merged.length >= 30) break
+            }
+            if (!cancelled && merged.length) setSongs(merged)
+          } catch { /* ignore */ }
+          if (!cancelled) setLoading(false)
+        }
+        void fetchSimilarKugou()
+        return
+      }
       try {
         const id = song.platform === 'qq' ? String(song.id || song.mid) : String(song.id)
         const data = await getSimilarSongs(id, (song.platform || 'netease') as 'netease' | 'qq')

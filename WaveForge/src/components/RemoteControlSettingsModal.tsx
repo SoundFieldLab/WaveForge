@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { X, MonitorSmartphone, Moon, Sun } from 'lucide-react'
 import { isTvModeActive } from '../platform'
+import { useTvBack } from '../tv/tvCore'
 
 interface RemoteControlSettingsModalProps {
   show: boolean
@@ -21,6 +22,16 @@ const TOP_RIGHT_ACTIONS = [
 
 export default function RemoteControlSettingsModal({ show, onClose, playerTheme = 'dark' }: RemoteControlSettingsModalProps) {
   const dark = playerTheme === 'dark'
+
+  // TV 遥控器 BACK 关闭弹窗（带 show 守卫：本组件经 SettingsPanel 常驻挂载，无守卫会吞掉全场景 BACK 键）
+  useTvBack(() => {
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
+  })
+
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => localStorage.getItem('remoteTheme') === 'light' ? 'light' : 'dark')
   const [topRightAction, setTopRightAction] = useState<string>(() => {

@@ -84,6 +84,9 @@ export default function EditPlaylistModal({
   }
 
   const handleClose = () => {
+    // 提交 loading 期间禁止关闭（与 Delete 系弹窗一致）：关了弹窗请求仍会继续，
+    // 用户以为已取消而歌单最终仍被修改
+    if (loading) return
     onClose()
   }
 

@@ -386,6 +386,7 @@ let wallpaperWatcher = null
 /** AirPlay 投送端控制器句柄（whenReady 内初始化，模块作用域供冒烟自检引用） */
 let airplayControllerHandle = null
 let qqLoginWindow = null
+let qqLoginWindowOpening = false
 let qqSkillKeyWindow = null
 let analysisRuntime = null
 let mediaKeysEnabled = readMediaKeysEnabled()
@@ -662,6 +663,15 @@ function createDesktopPlayerWindow() {
   guardAgainstExternalNavigation(desktopPlayerWindow.webContents)
   desktopPlayerWindow.on('closed', () => {
     desktopPlayerWindow = null
+    // Alt+F4 等系统路径关闭：同步开关状态（UI 内关闭路径已做），否则渲染端开关残留
+    // "开启"，频谱/状态推送持续打向已销毁窗口
+    if (desktopPlayerEnabled) {
+      desktopPlayerEnabled = false
+      saveDesktopPlayerSettings()
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('desktop-player:enabled-changed', false)
+      }
+    }
   })
   return desktopPlayerWindow
 }
@@ -826,6 +836,14 @@ function createDesktopLyricsWindow() {
     desktopLyricsWindow = null
     desktopLyricsPanelRestoreBounds = null
     desktopLyricsMousePassthrough = false
+    // Alt+F4 等系统路径关闭：同步开关状态（UI 内关闭路径已做），否则渲染端开关残留"开启"
+    if (desktopLyricsSettings.enabled) {
+      desktopLyricsSettings = { ...desktopLyricsSettings, enabled: false }
+      saveDesktopLyricsSettings()
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('desktop-lyrics:enabled-changed', false)
+      }
+    }
   })
   return desktopLyricsWindow
 }
@@ -2856,11 +2874,14 @@ ipcMain.handle('set-wallpaper-watcher', (_event, enabled) => {
 
 async function createQQLoginWindow() {
   return new Promise((resolve) => {
-    if (qqLoginWindow) {
-      qqLoginWindow.focus()
+    if (qqLoginWindow || qqLoginWindowOpening) {
+      if (qqLoginWindow && !qqLoginWindow.isDestroyed()) qqLoginWindow.focus()
       resolve({ success: false, error: 'QQ 音乐登录窗口已打开' })
       return
     }
+    // 先同步占坑再清 Cookie：清理链路有 await，两次快速点击会在 await 间隙双双通过
+    // 上面的检查并各开一个窗口，共享变量被后者覆盖（关闭时置 null 与实际窗口错位）
+    qqLoginWindowOpening = true
 
     let settled = false
     const finish = (result) => {
@@ -2907,6 +2928,8 @@ async function createQQLoginWindow() {
         session: mainWindow.webContents.session, // 共享 session 以保留 Cookie
       },
     })
+    // 窗口已创建，解除同步占坑（此后由 qqLoginWindow 本身承担防重入）
+    qqLoginWindowOpening = false
 
     // 导航守卫：登录页本身就是 y.qq.com（QQ 音乐官方域），登录流程还可能跳到
     // ptlogin2/graph 等 QQ 域做认证。只放行 qq.com 域（含子域），其余一律拦截并
@@ -3076,6 +3099,7 @@ async function createQQLoginWindow() {
       console.error('[QQ Login] failed to initialize login window:', error)
       if (qqLoginWindow && !qqLoginWindow.isDestroyed()) qqLoginWindow.destroy()
       qqLoginWindow = null
+      qqLoginWindowOpening = false
       finish({ success: false, error: error?.message || 'QQ login window initialization failed' })
     })
   })
@@ -3365,6 +3389,9 @@ async function createSpotifyLoginWindow(clientId) {
       if (settled) return
       settled = true
       try { if (spotifyCallbackServer) { spotifyCallbackServer.close(); spotifyCallbackServer = null } } catch {}
+      // 成功/失败收尾都关窗：modal 挂在主窗上，不关会一直挡住主窗（对齐 QQ/酷狗/Apple 行为）。
+      // closed 处理器有 settled 防重，不会把这次主动 close 误报成"用户取消授权"
+      try { if (spotifyLoginWindow && !spotifyLoginWindow.isDestroyed()) spotifyLoginWindow.close() } catch {}
       resolve(result)
     }
     const http = require('http')
@@ -3478,6 +3505,23 @@ async function createSpotifyLoginWindow(clientId) {
         })
         // Spotify 对 Electron UA 会在授权页报错（页面显示 something wrong），伪装为普通 Chrome
         spotifyLoginWindow.webContents.setUserAgent(REAL_CHROME_UA)
+        // 导航守卫 + window.open 拦截：与 QQ/酷狗/Apple 登录窗对齐。该窗共享主 session，
+        // 无守卫时页面可把共享 Cookie 的窗口导航到任意域，window.open 会产生无引用、
+        // 不受控的原生窗口（"弹出的窗口无法关闭"的一类来源）。注意：Spotify 登录页的
+        // Google/Facebook 等第三方登录按钮会被拦截（外开系统浏览器），邮箱登录不受影响
+        spotifyLoginWindow.webContents.on('will-navigate', (event, url) => {
+          if (/^https:\/\/([a-z0-9-]+\.)*(spotify\.com|scdn\.co)\//i.test(String(url || ''))) return
+          event.preventDefault()
+          if (/^https?:\/\//i.test(String(url || ''))) {
+            shell.openExternal(String(url)).catch(() => {})
+          }
+        })
+        spotifyLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
+          if (/^https?:\/\//i.test(String(url || ''))) {
+            shell.openExternal(String(url)).catch(() => {})
+          }
+          return { action: 'deny' }
+        })
         spotifyLoginWindow.loadURL(authUrl)
       // 注入关闭按钮
       spotifyLoginWindow.webContents.on('did-finish-load', () => {
@@ -3741,12 +3785,9 @@ ipcMain.handle('open-soda-login', async () => {
 // 会直接按分区名清存储，覆盖「应用重启后 runtime 为空」的场景。
 ipcMain.handle('soda-clear-login', async () => {
   try {
-    if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) {
-      try { sodaLoginWindow.destroy() } catch {}
-      sodaLoginWindow = null
-    }
-    const auth = require('./qishui-auth-v6.cjs')
-    await auth.clear()
+    // 顺序关键：先清凭据文件会话字段，再销毁扫码窗——qrWindow 的 closed 处理器会
+    // readCfg() 判断会话是否有效，若先 destroy 会把"刚要被清掉的旧 cookie"误判为登录成功，
+    // 挂起的 open-soda-login 以 success+旧 cookie resolve，渲染层把已清除的登录态落盘
     const configFile = path.join(app.getPath('userData'), 'soda-qr-login.json')
     try {
       const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'))
@@ -3756,6 +3797,12 @@ ipcMain.handle('soda-clear-login', async () => {
         fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2), 'utf8')
       }
     } catch { /* 文件不存在/损坏：无残留凭据可清，忽略 */ }
+    if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) {
+      try { sodaLoginWindow.destroy() } catch {}
+      sodaLoginWindow = null
+    }
+    const auth = require('./qishui-auth-v6.cjs')
+    await auth.clear()
     console.log('🧹 [汽水音乐] 已清除登录分区与凭据文件会话字段（退出登录）')
     return { success: true }
   } catch (err) {
@@ -3858,6 +3905,8 @@ function ensureDouyinBridge() {
   // 隐藏数据桥同样伪装为普通 Chrome（抖音风控对 Electron UA 的抓取接口会限流）
   douyinBridgeWindow.webContents.setUserAgent(REAL_CHROME_UA)
   douyinBridgeWindow.setMenuBarVisibility(false)
+  // 拦截 window.open：抖音站点弹窗会产生无引用、无守卫的游离原生窗口，桥窗不需要弹窗
+  douyinBridgeWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   douyinBridgeWindow.webContents.on('destroyed', () => {
     douyinBridgeReady = false
     douyinBridgeWindow = null
@@ -3969,6 +4018,8 @@ function ensureKugouBridge() {
   })
   kugouBridgeWindow.webContents.setUserAgent(REAL_CHROME_UA)
   kugouBridgeWindow.setMenuBarVisibility(false)
+  // 拦截 window.open：页面弹窗会产生无引用、无守卫的游离原生窗口，桥窗不需要弹窗
+  kugouBridgeWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   kugouBridgeWindow.webContents.on('destroyed', () => {
     kugouBridgeReady = false
     kugouBridgeWindow = null
@@ -4168,6 +4219,55 @@ ipcMain.handle('apple-fetch-url', async (_event, payload) => {
     return { ok: response.ok, status: response.status, text }
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+// ── Apple Music 电台直播取流（Cider/MusicKit v3 同款）──────────────────────
+// GET api.music.apple.com/v1/play/assets?<playParams>&keyFormat=web，响应
+// results.assets[0] 携带 HLS 主清单 url 与 EME keyURLs（keyServerUrl /
+// widevineKeyCertificateUrl / fairPlayKeyCertificateUrl）。api 宿主不可用时
+// 回退 amp-api（gamdl 常量亦指向 amp-api；两宿主响应结构一致）。
+const APPLE_PLAY_ASSETS_HOSTS = ['https://api.music.apple.com', 'https://amp-api.music.apple.com']
+ipcMain.handle('apple-play-assets', async (_event, payload) => {
+  const { query, developerToken, mediaUserToken } = payload || {}
+  if (typeof query !== 'string' || !query || !developerToken || !mediaUserToken) {
+    return { ok: false, status: 0, error: '缺少参数（query/developerToken/mediaUserToken）' }
+  }
+  // 校验查询串只含 URL 安全字符（防参数注入/拼接）
+  if (!/^[A-Za-z0-9_=&%[\].,-]+$/.test(query)) {
+    return { ok: false, status: 0, error: '非法查询参数' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  const headers = {
+    Authorization: `Bearer ${developerToken}`,
+    Accept: 'application/json',
+    'X-Apple-Music-User-Token': String(mediaUserToken),
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+  }
+  try {
+    for (const host of APPLE_PLAY_ASSETS_HOSTS) {
+      try {
+        const response = await fetch(`${host}/v1/play/assets?${query}`, { headers, signal: controller.signal })
+        const text = await response.text()
+        let data = null
+        try {
+          data = text ? JSON.parse(text) : null
+        } catch {
+          data = text
+        }
+        if (response.ok && Array.isArray(data?.results?.assets) && data.results.assets.length > 0) {
+          return { ok: true, status: response.status, data }
+        }
+        if (response.ok && Array.isArray(data?.errors) && data.errors.length > 0) {
+          return { ok: false, status: response.status, data, error: data.errors[0]?.title || '取流被拒' }
+        }
+      } catch { /* 换宿主重试 */ }
+    }
+    return { ok: false, status: 0, error: 'play/assets 取流失败（两个宿主均无有效响应）' }
   } finally {
     clearTimeout(timer)
   }
@@ -5786,6 +5886,12 @@ const QMK_COPY_GUIDE_JS = `
 
 
 async function createQQSkillKeyWindow() {
+  // 防重入检查必须先于 session 清空：窗口开着时再次点领取，若先清空会把正在使用的
+  // 独立分区 storage 全清掉，正在登录的页面当场掉登录态（对齐 apple/soda 的先检查后清理）
+  if (qqSkillKeyWindow && !qqSkillKeyWindow.isDestroyed()) {
+    qqSkillKeyWindow.focus()
+    return Promise.resolve({ success: false, error: 'QQ 音乐官方增强领取窗口已打开' })
+  }
   // Wipe the dedicated qmk session before opening so the login is always fresh.
   const qmkSession = session.fromPartition(QMK_SESSION_PARTITION)
   // Allow clipboard write so the official copy button can put the key on the clipboard.
@@ -5807,12 +5913,6 @@ async function createQQSkillKeyWindow() {
   }
 
   return new Promise((resolve) => {
-    if (qqSkillKeyWindow && !qqSkillKeyWindow.isDestroyed()) {
-      qqSkillKeyWindow.focus()
-      resolve({ success: false, error: 'QQ 音乐官方增强领取窗口已打开' })
-      return
-    }
-
     let settled = false
     const finish = (result) => {
       if (settled) return
@@ -6243,6 +6343,19 @@ const scheduleWindowStateSave = () => {
   }, 400)
 }
 
+// 关闭全部从属窗口（主窗真关闭时清场用）：登录窗走 close()，各自 closed 处理器会把
+// 挂起的登录 Promise 以"用户取消"收尾（不卡"登录中"）；任务栏 widget 与两个数据桥是
+// 隐藏工具窗，直接 destroy。
+function closeAllDependentWindows() {
+  const closable = [qqLoginWindow, kugouLoginWindow, spotifyLoginWindow, appleLoginWindow, sodaLoginWindow, qqSkillKeyWindow, desktopPlayerWindow, desktopLyricsWindow]
+  for (const w of closable) {
+    try { if (w && !w.isDestroyed()) w.close() } catch { /* 忽略 */ }
+  }
+  try { if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed()) taskbarWidgetWindow.destroy() } catch { /* 忽略 */ }
+  try { if (douyinBridgeWindow && !douyinBridgeWindow.isDestroyed()) douyinBridgeWindow.destroy() } catch { /* 忽略 */ }
+  try { if (kugouBridgeWindow && !kugouBridgeWindow.isDestroyed()) kugouBridgeWindow.destroy() } catch { /* 忽略 */ }
+}
+
 // 主窗口事件接线：启动创建（createWindow）与融合穿透重建（recreateMainWindow）共用。
 // 重建后必须重新挂接，否则窗口会失去状态推送（标题栏图标）/窗口记忆/F12 快捷键。
 function wireMainWindowEvents(win) {
@@ -6266,6 +6379,11 @@ function wireMainWindowEvents(win) {
       clearInterval(wallpaperWatcher)
       wallpaperWatcher = null
     }
+    // 融合穿透重建：旧窗销毁也触发本事件，此场景绝不能清场（新主窗马上接管）
+    if (win.__wfRecreating) return
+    // 主窗真被关闭：同步关闭全部从属窗。它们无 parent（部分 skipTaskbar）不会随主窗
+    // 级联销毁，否则 window-all-closed 永不触发，进程无窗残留、用户找不到任何入口
+    closeAllDependentWindows()
   })
 
   // 最大化/还原/全屏事件：自记扩大态 + 向渲染端推送状态（标题栏按钮图标依赖）
@@ -6342,6 +6460,8 @@ async function recreateMainWindow(transparent) {
 
   const oldWindow = mainWindow
   mainWindow = null
+  // 标记重建销毁：closed 处理器据此跳过从属窗清场（否则会关掉桌面歌词/桌面播放器等）
+  oldWindow.__wfRecreating = true
   if (!oldWindow.isDestroyed()) oldWindow.destroy()
 
   const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
@@ -7251,6 +7371,9 @@ app.on('before-quit', () => {
     clearInterval(wallpaperWatcher)
     wallpaperWatcher = null
   }
+  // 销毁汽水签名引擎的隐藏验证窗（show:false、close 被 preventDefault→hide、无 parent）：
+  // 不销毁会阻断 window-all-closed 与 app.quit()，进程残留且任务栏无入口可关
+  try { require('./qishui-auth-v6.cjs').destroyForQuit() } catch { /* 未初始化无窗口可清 */ }
   // 停止遥控器局域网服务
   if (remoteServer) {
     remoteServer.stop()

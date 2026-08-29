@@ -547,7 +547,14 @@ function ExploreView({
 }: ExploreViewProps) {
   const [platform, setPlatform] = useState<ExplorePlatform>(() => {
     const saved = localStorage.getItem('explorePlatform')
-    return saved === 'qq' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda' ? saved : 'netease'
+    if (saved === 'qq' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda') return saved
+    // 探索页从未显式选过平台：继承其他视图（首页/传统/桌面）上次使用的平台，
+    // 避免每次进入探索页都默认回到网易云
+    for (const key of ['selectedPlatform', 'traditionalPlatform', 'desktopModePlatform']) {
+      const inherited = localStorage.getItem(key)
+      if (inherited === 'qq' || inherited === 'apple' || inherited === 'spotify' || inherited === 'kugou' || inherited === 'soda') return inherited
+    }
+    return 'netease'
   })
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<ExplorePlatform[]>(() => getVisiblePlatforms())
@@ -1556,6 +1563,7 @@ function ExploreView({
               onSongSelect={onSongSelect}
               onLoginClick={() => onLoginClick('apple')}
               onOpenAlbum={onOpenAlbum}
+              onOpenArtistPanel={onOpenArtist}
               onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
               refreshSignal={appleRefreshSignal}
             />
@@ -1943,6 +1951,35 @@ function ExploreView({
               </section>
               )}
 
+              {sectionVisible('albums') && (
+              <section style={sectionStyle('albums')}>
+                <SectionHeading
+                  icon={<Disc3 className="h-5 w-5" />}
+                  title="新碟上架"
+                  subtitle={showSectionDescriptions ? '最新专辑与单曲，听见正在发生的音乐' : undefined}
+                />
+                <div className={`grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 ${compactCards ? 'xl:grid-cols-8' : 'xl:grid-cols-6'}`}>
+                  {payload.albums.slice(0, expandedHome ? 12 : 8).map((album, index) => (
+                    <motion.div
+                      key={`${album.platform}-${album.mid || album.id}-${index}`}
+                      whileHover={{ y: -5 }}
+                      className="group min-w-0 cursor-pointer"
+                      onClick={() => onOpenAlbum?.(String(album.mid || album.id), album.platform)}
+                    >
+                      <div className="relative aspect-square overflow-hidden rounded-[22px] border border-white/[0.08] shadow-xl shadow-black/10" style={{ backgroundColor: exploreCardBg }}>
+                        <Cover src={album.coverUrl} alt={album.name} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
+                      </div>
+                      <h3 className="mt-3 line-clamp-1 text-sm font-medium leading-snug text-white/86">{album.name}</h3>
+                      <p className="mt-1 line-clamp-1 text-xs text-white/40">{album.artist}</p>
+                      <p className="mt-0.5 text-[10px] text-white/24">
+                        {typeof album.publishTime === 'string' ? album.publishTime.slice(0, 10) : ''}
+                      </p>
+                    </motion.div>
+                  ))}
+                </div>
+              </section>
+              )}
+
               {sectionVisible('channels') && (
               <section style={sectionStyle('channels')}>
                 <SectionHeading
@@ -2128,16 +2165,41 @@ function ExploreView({
           onAddToPlaylist={onAddToPlaylist}
           onViewComments={onViewComments}
           onViewAlbum={song => {
+            const menuPlatform = song.platform || platform
+            // Apple 歌曲的 Song 不携带专辑 id（appleSongToSong 只带名字/封面）：
+            // 先拉歌曲详情拿专辑 id 再打开（否则静默无动作）
+            if (menuPlatform === 'apple') {
+              const appleId = String(song.appleId || song.id || '')
+              if (!appleId || appleId === '0') return
+              void import('../services/appleWebService')
+                .then(m => m.fetchAppleSongDetail(appleId))
+                .then(detail => {
+                  if (detail?.album?.id) onOpenAlbum?.(detail.album.id, 'apple')
+                })
+                .catch(() => undefined)
+              return
+            }
             const identifier = song.platform === 'qq'
               ? song.album?.mid || song.album?.pmid || song.album?.id
               : song.album?.id
-            const menuPlatform = song.platform || platform
             if (identifier) onOpenAlbum?.(String(identifier), menuPlatform)
           }}
           onViewArtist={song => {
+            const menuPlatform = song.platform || platform
+            if (menuPlatform === 'apple') {
+              const appleId = String(song.appleId || song.id || '')
+              if (!appleId || appleId === '0') return
+              void import('../services/appleWebService')
+                .then(m => m.fetchAppleSongDetail(appleId))
+                .then(detail => {
+                  const artistId = detail?.artists?.[0]?.playId || detail?.artists?.[0]?.id
+                  if (artistId) onOpenArtist?.(artistId, 'apple')
+                })
+                .catch(() => undefined)
+              return
+            }
             const artist = song.artists[0]
             const identifier = song.platform === 'qq' ? artist?.mid || artist?.id : artist?.id
-            const menuPlatform = song.platform || platform
             if (identifier) onOpenArtist?.(String(identifier), menuPlatform)
           }}
           onCopyInfo={onCopyInfo}

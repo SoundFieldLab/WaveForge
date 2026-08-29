@@ -167,6 +167,17 @@ async function requestJson(targetUrl, opts, body) {
   try {
     return JSON.parse(text)
   } catch (cause) {
+    // 活体探测实锤（2026-08-26）：track_v2 等上游对无效会话返回 HTTP 200 +
+    // application/json + 空 body，正是「无效 JSON」判定的直接来源。
+    // 识别空体为独立错误（空体=上游拒绝会话的形态，重试/换参同样无效），
+    // 供 song/url 侧归因出准确 reason，与「有 body 但解析失败」区分开。
+    if (text.trim() === '') {
+      const err = new Error('汽水音乐接口返回了空响应（会话可能已失效）')
+      err.code = 'SODA_EMPTY_BODY'
+      err.body = ''
+      err.emptyBody = true
+      throw err
+    }
     const err = new Error('汽水音乐接口返回了无效 JSON')
     err.cause = cause
     err.body = text
@@ -2714,7 +2725,10 @@ async function handleSodaSongUrl(opts, cookieText) {
   try {
     payload = await fetchSodaPcTrackV2(id, cookie)
   } catch (err) {
-    return sodaUnavailableResult('source_unavailable', '汽水音乐未返回播放元数据：' + ((err && err.message) || String(err)), Object.assign({
+    // 空体（上游对失效会话的 200+空 body 形态）单列 reason，前端提示「会话失效」
+    // 而非笼统「音源暂时无法解析」；负缓存已按 message/code 摘要缓存，无需在此去重。
+    const reason = (err && err.code === 'SODA_EMPTY_BODY') ? 'session_rejected' : 'source_unavailable'
+    return sodaUnavailableResult(reason, '汽水音乐未返回播放元数据：' + ((err && err.message) || String(err)), Object.assign({
       requiredTier: 'free',
       requestedQuality,
     }, sodaFlattenMembershipView(unknownMembershipView), { membership: unknownMembershipView }))

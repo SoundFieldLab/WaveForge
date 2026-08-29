@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 临时图标：深底 + 白色声波曲线。后续可替换为正式品牌资源。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#0a0f14"
+        android:pathData="M0,0h48v48h-48z" />
+    <path
+        android:strokeColor="#4fc3f7"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M8,28 L13,28 L16,20 L20,34 L24,14 L28,32 L32,22 L35,28 L40,28" />
+</vector>

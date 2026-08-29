@@ -2753,18 +2753,36 @@ app.get('/api/netease/playlist/detail', async (req, res) => {
 
         console.log(`[歌单详情API] 尝试获取完整歌单 (${i + 1}/3)，歌单ID: ${id}, 限制: ${songLimit}`)
         const songs = await fetchNeteasePlaylistTracks(id, cookie, Math.min(songLimit, 10000))
-        
+
         // 检查结果是否有效
         if (Array.isArray(songs)) {
+          // 元数据（播放次数/创建者/标签）：best-effort 补一次 playlist_detail，失败不影响歌曲列表
+          let meta = null
+          try {
+            meta = (await NeteaseAPI.playlist_detail({ id }))?.body?.playlist || null
+          } catch (metaError) {
+            console.warn('[歌单详情API] 元数据获取失败（不影响歌曲）:', metaError?.message)
+          }
           // 构造与原 API 相同的返回格式
           const response = {
             playlist: {
               id: id,
               tracks: songs,
-              trackCount: songs.length
+              trackCount: Number(meta?.trackCount || songs.length),
+              name: meta?.name || '',
+              coverImgUrl: meta?.coverImgUrl || '',
+              description: normalizePlaylistDescription(meta?.description || ''),
+              playCount: Number(meta?.playCount || 0),
+              tags: Array.isArray(meta?.tags) ? meta.tags : [],
+              createTime: Number(meta?.createTime || 0) || undefined,
+              creator: meta?.creator ? {
+                userId: meta.creator.userId,
+                nickname: meta.creator.nickname || '',
+                avatarUrl: meta.creator.avatarUrl || ''
+              } : undefined
             }
           }
-          
+
           return res.json(response)
         }
       } catch (error) {
@@ -5222,7 +5240,7 @@ app.get('/api/kugou/rank/info', async (req, res) => {
       filename: String(song.filename || ''),
       album_id: String(song.album_id || song.albumId || ''),
       album_audio_id: String(song.album_audio_id || ''),
-      album_img: String(song.album_img || ''),
+      album_img: String(song.album_sizable_cover || song.album_img || song.img || ''),
       duration: Number(song.duration || 0),
       rank: Number(song.rank || 0),
     }))
@@ -5249,7 +5267,7 @@ app.get('/api/kugou/playlist/list', async (req, res) => {
     const playlists = info.map(item => ({
       specialid: String(item.specialid || ''),
       name: String(item.specialname || item.name || ''),
-      img: String(item.img || item.icon || ''),
+      img: String(item.imgurl || item.img || item.icon || ''),
       playcount: Number(item.playcount || 0),
       songcount: Number(item.songcount || 0),
       songs: Array.isArray(item.songs) ? item.songs.map(s => ({
@@ -5322,6 +5340,162 @@ app.get('/api/kugou/playlist/detail', async (req, res) => {
     }
     if (songs.length === 0) return res.status(404).json({ error: '歌单不存在或已失效' })
     res.json({ specialname: name, img, songs })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// ── 酷狗公开目录接口代理（mobilecdn.kugou.com/api/v3，无需登录/签名）────────
+// 老 m.kugou.com/app/i/* 接口已下线（No Action Found），歌手/专辑/目录数据走该网关。
+
+const KG_MOBILECDN_BASE = 'http://mobilecdn.kugou.com/api/v3'
+const KG_MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148'
+
+async function kugouMobileApi(path, params = {}) {
+  const url = new URL(`${KG_MOBILECDN_BASE}${path}`)
+  Object.entries({ plat: 0, version: 9108, ...params }).forEach(([k, v]) => url.searchParams.set(k, String(v)))
+  const resp = await fetch(url.toString(), {
+    headers: { 'User-Agent': KG_MOBILE_UA, Referer: 'http://m.kugou.com/' },
+    signal: AbortSignal.timeout(12000),
+  })
+  if (!resp.ok) throw new Error(`酷狗目录接口 HTTP ${resp.status}`)
+  const json = await resp.json()
+  if (!json || Number(json.errcode) !== 0) throw new Error('酷狗目录接口返回错误')
+  return json
+}
+
+function kugouMobileCover(url) {
+  return String(url || '').replace(/^http:\/\//i, 'https://').replace(/\{size\}/g, '400')
+}
+
+/** 酷狗新专辑列表（mobilecdn /api/v3/album/list） */
+app.get('/api/kugou/album/list', async (req, res) => {
+  try {
+    const { page = '1', pagesize = '24' } = req.query
+    const json = await kugouMobileApi('/album/list', { page, pagesize })
+    const albums = (json?.data?.info || []).map(item => ({
+      albumid: String(item.albumid || ''),
+      albumname: String(item.albumname || ''),
+      singername: String(item.singername || ''),
+      singerid: String(item.singerid || ''),
+      imgurl: kugouMobileCover(item.imgurl || ''),
+      publishtime: String(item.publishtime || ''),
+      songcount: Number(item.songcount || 0),
+    })).filter(a => a.albumid && a.albumname)
+    res.json({ albums })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗专辑详情（album/info + album/song，封面取自专辑信息） */
+app.get('/api/kugou/album/detail', async (req, res) => {
+  try {
+    const { albumid } = req.query
+    if (!albumid) return res.status(400).json({ error: '请提供专辑 ID' })
+    const [infoJson, songsJson] = await Promise.all([
+      kugouMobileApi('/album/info', { albumid }),
+      kugouMobileApi('/album/song', { albumid, page: 1, pagesize: 200 }),
+    ])
+    const info = infoJson?.data || {}
+    const cover = kugouMobileCover(info.imgurl || '')
+    const singerid = String(info.singerid || '')
+    const songs = (songsJson?.data?.info || []).map(song => ({
+      hash: String(song.hash || '').toUpperCase(),
+      filename: String(song.filename || ''),
+      album_id: String(song.album_id || albumid || ''),
+      album_audio_id: Number(song.album_audio_id || song.audio_id || 0),
+      duration: Number(song.duration || 0),
+      singerid,
+      album_img: cover,
+    })).filter(s => s.hash && s.filename)
+    res.json({
+      album: {
+        albumid: String(info.albumid || albumid),
+        albumname: String(info.albumname || ''),
+        singername: String(info.singername || ''),
+        singerid,
+        imgurl: cover,
+        publishtime: String(info.publishtime || ''),
+        intro: String(info.intro || ''),
+        songcount: Number(info.songcount || songs.length),
+      },
+      songs,
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗歌手详情（mobilecdn /api/v3/singer/info） */
+app.get('/api/kugou/singer/detail', async (req, res) => {
+  try {
+    const { singerid } = req.query
+    if (!singerid) return res.status(400).json({ error: '请提供歌手 ID' })
+    const json = await kugouMobileApi('/singer/info', { singerid })
+    const d = json?.data || {}
+    res.json({
+      singer: {
+        singerid: String(d.singerid || singerid),
+        singername: String(d.singername || ''),
+        imgurl: kugouMobileCover(d.imgurl || ''),
+        intro: String(d.intro || d.mix_intro || ''),
+        songcount: Number(d.songcount || 0),
+        mvcount: Number(d.mvcount || 0),
+        alias: String(d.alias || ''),
+      },
+    })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗歌手热门歌曲（singer/song；封面经歌手专辑 albumid→imgurl 映射补全） */
+app.get('/api/kugou/singer/song', async (req, res) => {
+  try {
+    const { singerid, page = '1', pagesize = '50' } = req.query
+    if (!singerid) return res.status(400).json({ error: '请提供歌手 ID' })
+    const songsJson = await kugouMobileApi('/singer/song', { singerid, page, pagesize })
+    // 歌手歌曲响应不含封面，用歌手专辑列表建立 albumid → 封面映射
+    let coverMap = new Map()
+    try {
+      const albumsJson = await kugouMobileApi('/singer/album', { singerid, page: 1, pagesize: 100 })
+      for (const item of albumsJson?.data?.info || []) {
+        if (item.albumid) coverMap.set(String(item.albumid), kugouMobileCover(item.imgurl || ''))
+      }
+    } catch { /* 专辑映射失败则歌曲无封面 */ }
+    const songs = (songsJson?.data?.info || []).map(song => ({
+      hash: String(song.hash || '').toUpperCase(),
+      filename: String(song.filename || ''),
+      album_id: String(song.album_id || ''),
+      album_audio_id: Number(song.album_audio_id || song.audio_id || 0),
+      duration: Number(song.duration || 0),
+      singerid: String(singerid),
+      album_img: coverMap.get(String(song.album_id || '')) || '',
+    })).filter(s => s.hash && s.filename)
+    res.json({ songs, total: Number(songsJson?.data?.total || songs.length) })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+/** 酷狗歌手专辑列表（singer/album） */
+app.get('/api/kugou/singer/album', async (req, res) => {
+  try {
+    const { singerid, page = '1', pagesize = '100' } = req.query
+    if (!singerid) return res.status(400).json({ error: '请提供歌手 ID' })
+    const json = await kugouMobileApi('/singer/album', { singerid, page, pagesize })
+    const albums = (json?.data?.info || []).map(item => ({
+      albumid: String(item.albumid || ''),
+      albumname: String(item.albumname || ''),
+      singername: String(item.singername || ''),
+      singerid: String(item.singerid || singerid),
+      imgurl: kugouMobileCover(item.imgurl || ''),
+      publishtime: String(item.publishtime || ''),
+      songcount: Number(item.songcount || 0),
+      intro: String(item.intro || ''),
+    })).filter(a => a.albumid && a.albumname)
+    res.json({ albums })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
@@ -7236,6 +7410,8 @@ app.get('/api/explore/qq', async (req, res) => {
       source: 'community',
       songs: (chart.song || []).slice(0, 3).map(song => ({
         id: Number(song.songId || 0),
+        // 播放必须用 mid（QQ song/url 接口不接受纯数字 id），此前漏传导致榜单歌曲点播失败
+        mid: String(song.songMid || song.songmid || song.mid || ''),
         name: song.title || song.songName || '未知歌曲',
         artist: song.singerName || '未知歌手',
         coverUrl: normalizeQQImageUrl(song.cover) || (song.albumMid ? qqAlbumCover(song.albumMid, 500) : '')
@@ -7257,6 +7433,7 @@ app.get('/api/explore/qq', async (req, res) => {
         source: 'qqmusic-skills',
         songs: (chart.songList || []).slice(0, 3).map(song => ({
           id: Number(song.songId || 0),
+          mid: String(song.songMid || song.songmid || song.mid || ''),
           name: song.songName || '未知歌曲',
           artist: song.singerName || '未知歌手',
           // 官方榜单 songList 不带封面，优先从 community 同名榜单的歌曲补封面
@@ -8682,9 +8859,24 @@ app.get('/api/netease/comment/music', async (req, res) => {
         }
         
         const result = await NeteaseAPI.comment_new(params)
-        
+
         if (result && result.body) {
-          return res.json(result.body)
+          const body = result.body
+          // 新版 comment_new 不再返回 hotComments；首页补一次 v1 精彩评论，
+          // 与网易云客户端「精彩评论」置顶区对齐（失败不影响主列表）
+          try {
+            const hasHot = Array.isArray(body?.data?.hotComments) && body.data.hotComments.length > 0
+            if (!hasHot && pageNo === 1 && resourceType === 0 && NeteaseAPI.comment_music) {
+              const legacy = await NeteaseAPI.comment_music({ id, cookie, limit: 20, offset: 0 })
+              const hot = legacy?.body?.hotComments || []
+              if (Array.isArray(hot) && hot.length > 0) {
+                body.data = { ...(body.data || {}), hotComments: hot }
+              }
+            }
+          } catch (hotError) {
+            console.warn('[网易云评论] 精彩评论补充失败（不影响主列表）:', hotError?.message)
+          }
+          return res.json(body)
         }
       } catch (error) {
         lastError = error
@@ -8789,13 +8981,15 @@ app.get('/api/qq/comment', async (req, res) => {
     }
 
     // 最新评论也附带拉取热评，合并展示（类似QQ音乐客户端）
-    let hotComments = []
+    let attachedHotComments = []
     if (!wantsHot && pageNum === 0) {
       try {
         const hotResult = await qqMusicApi.api('comment', {
           id: topId, pageNo: 1, pageSize: 10, type: 1, biztype: Number(biztype)
         })
-        hotComments = hotResult?.hotComment?.commentlist || []
+        attachedHotComments = hotResult?.hotComment?.commentlist || []
+        // 部分歌曲没有官方精选集合：用热度排序首页充当精彩评论（与热评模式同款兜底）
+        if (attachedHotComments.length === 0) attachedHotComments = (hotResult?.comment?.commentlist || []).slice(0, 10)
       } catch { /* 热评拉取失败不影响最新评论 */ }
     }
 
@@ -8820,14 +9014,14 @@ app.get('/api/qq/comment', async (req, res) => {
         totalCount = result.comment?.commenttotal || 0
       }
       
-      // 判断是否还有更多评论
+      // 判断是否还有更多评论（热评模式同样按总数分页，与客户端一致）
       const isHot = wantsHot
-      const hasMore = !isHot && (pageNum + 1) * pageSize < totalCount
+      const hasMore = (pageNum + 1) * pageSize < totalCount
       
       res.json({
         result: 0,
         data: {
-          hotComments: wantsHot ? hotComments : hotComments, // 精选热评
+          hotComments: wantsHot ? hotComments : attachedHotComments, // 精选热评（最新模式下为附带的首屏热评）
           comments: comments, // 全部评论（热评模式下是全部评论，最新模式下是分页评论）
           total: totalCount,
           hasMore: hasMore,

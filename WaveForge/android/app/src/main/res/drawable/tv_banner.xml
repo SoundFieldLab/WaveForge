@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV 桌面 banner（320x180 建议尺寸）：深底 + 白色声波曲线。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#0a0f14"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:strokeColor="#4fc3f7"
+        android:strokeWidth="8"
+        android:strokeLineCap="round"
+        android:pathData="M60,100 L85,100 L100,72 L125,140 L150,40 L175,130 L195,82 L215,100 L240,100" />
+    <path
+        android:fillColor="#e8f6ff"
+        android:pathData="M30,150 h120 v16 h-120 z" />
+</vector>

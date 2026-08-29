@@ -475,6 +475,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const isLoadingMoreRef = useRef(false)
   const loadingRef = useRef(false)
   const loadCommentsRef = useRef<(reset?: boolean) => Promise<void>>(async () => {})
+  // 竞态防护：热/最新切换或快速换资源时递增序号，晚到的旧请求落地前校验、过期直接丢弃
+  const commentsRequestSeqRef = useRef(0)
   // rAF 合并滚动续页检查：滚动事件高频触发，这里只在下一帧执行一次判定
   const scrollCheckFrameRef = useRef<number | null>(null)
   const handleScroll = useCallback(() => {
@@ -625,6 +627,9 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
 
   const loadComments = async (reset = false) => {
     if (!resourceId) return
+    const requestSeq = ++commentsRequestSeqRef.current
+    // 本次请求是否仍是最新一次：快速切换排序/资源时旧响应晚到会覆盖新视图
+    const isStaleRequest = () => requestSeq !== commentsRequestSeqRef.current
     // Apple 无公开评论接口：不请求平台评论
     if (resourcePlatform === 'apple') {
       setLoading(false)
@@ -655,6 +660,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       if (!isPlaylistResource && platform === 'soda') {
         const requestCursor = reset ? undefined : sodaCursorRef.current
         const page = await fetchSodaComments(String(songId), requestCursor, limit)
+        if (isStaleRequest()) return
         // 记录下一页游标（先于状态写入保存，避免并发续页时被覆盖）
         sodaCursorRef.current = page.cursor ?? undefined
         const sodaComments = mapSodaComments(page.comments)
@@ -706,7 +712,9 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       }
 
       const data = await response.json()
-      
+      // 晚到的旧请求直接丢弃（视图可能已切到另一种排序/另一个资源）
+      if (isStaleRequest()) return
+
       let comments: Comment[] = []
       
       if (platform === 'netease') {
@@ -850,6 +858,9 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
         }
       }
       
+      // 网易云楼中楼预览还有批量 await：状态落地前再校验一次
+      if (isStaleRequest()) return
+
       if (comments.length === 0 && reset) {
         setHasMoreComments(false)
         setAllComments([])
@@ -873,12 +884,15 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       
     } catch (err) {
       console.error('加载评论失败:', err)
-      setError('加载评论失败，请重试')
+      if (!isStaleRequest()) setError('加载评论失败，请重试')
     } finally {
-      if (reset) {
-        setLoading(false)
-      } else {
-        setIsLoadingMore(false)
+      // 过期请求不动 loading：否则旧请求的 finally 会提前关掉新请求的加载态
+      if (!isStaleRequest()) {
+        if (reset) {
+          setLoading(false)
+        } else {
+          setIsLoadingMore(false)
+        }
       }
     }
   }

@@ -42,7 +42,7 @@ export default function TransitionDebugToast({ info, playerTheme = 'dark' }: Tra
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: -10, scale: 0.97 }}
           transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-          className="fixed top-16 right-6 z-[9997] pointer-events-none"
+          className="fixed top-28 right-6 z-[9997] pointer-events-none"
         >
           <div
             className="px-4 py-3 rounded-2xl shadow-2xl max-w-[380px]"

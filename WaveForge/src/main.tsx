@@ -14,6 +14,7 @@ import DebugPanels from './tv/DebugPanels'
 import { installMediaKeyBridge } from './tv/mediaKeyBridge'
 import { installRemoteBridge } from './tv/remoteBridge'
 import TvKeyboard from './tv/TvKeyboard'
+import ErrorBoundary from './components/ErrorBoundary'
 
 // 平台初始化：标记 html[data-platform]/tv-mode（供 CSS 焦点适配），
 // 并给非 Electron 环境（Android WebView / 纯浏览器）注入 window.electron 最小桩。
@@ -99,8 +100,10 @@ startMemoryWatchdog()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
-    <TvKeyboard />
-    <DebugPanels />
+    <ErrorBoundary>
+      <App />
+      <TvKeyboard />
+      <DebugPanels />
+    </ErrorBoundary>
   </StrictMode>,
 )

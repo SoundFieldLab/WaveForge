@@ -137,6 +137,13 @@ export interface ExploreDetail {
     coverImgUrl: string
     trackCount: number
     description?: string
+    /** 歌单被播放次数（QQ listennum / 网易云 playCount） */
+    playCount?: number
+    /** 创建者（后端归一化对象） */
+    creator?: { userId?: number | string; nickname?: string; avatarUrl?: string }
+    tags?: string[]
+    isLike?: boolean
+    createTime?: number
     platform: MusicPlatform
   }
   songs: Song[]
@@ -348,6 +355,18 @@ export async function fetchExploreHome(
       source: 'kugou-plist',
       embeddedSongs: item.songs,
     }))
+    // 新专辑（mobilecdn 公开目录接口）：探索页「新碟」区块与专辑详情入口
+    const { fetchKugouAlbumList } = await import('./kugouService')
+    const albumsRes = await fetchKugouAlbumList(1, 24).catch(() => [] as Awaited<ReturnType<typeof fetchKugouAlbumList>>)
+    const albums: ExploreAlbum[] = albumsRes.map(item => ({
+      id: Number(parseInt(String(item.albumid).slice(0, 12), 10)) || 0,
+      mid: item.albumid,
+      name: item.albumname,
+      artist: item.singername,
+      coverUrl: item.imgurl || '',
+      publishTime: item.publishtime || '',
+      platform: 'kugou' as const,
+    }))
     const payload: ExplorePayload = {
       code: 0,
       platform: 'kugou',
@@ -358,7 +377,7 @@ export async function fetchExploreHome(
       newSongs: (rankSongs[1]?.length ? rankSongs[1] : hotTracks).map(kugouTrackToSong),
       playlists,
       charts,
-      albums: [],
+      albums,
       channels: [],
       meta: { source: 'kugou-mobile-api', updatedAt: Date.now() },
     }
@@ -686,10 +705,14 @@ export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: A
       songs,
     }
   }
-  // 酷狗歌单：优先真实歌单详情接口，失败时用列表内嵌歌曲兜底
+  // 酷狗歌单：优先真实歌单详情接口；用户自建歌单（id 为网关 listid）公开详情拿不到，
+  // 回退 H5 签名网关用户歌单曲目接口；最后用列表内嵌歌曲兜底
   if (playlist.platform === 'kugou') {
-    const { fetchKugouPlaylistDetail, kugouTrackToSong } = await import('./kugouService')
+    const { fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, kugouTrackToSong } = await import('./kugouService')
     let tracks = await fetchKugouPlaylistDetail(playlist.id).catch(() => [] as Awaited<ReturnType<typeof fetchKugouPlaylistDetail>>)
+    if (tracks.length === 0) {
+      tracks = await fetchKugouUserPlaylistTracks(playlist.id)
+    }
     if (tracks.length === 0 && playlist.embeddedSongs?.length) {
       const { parseKugouEmbeddedSongs } = await import('./kugouService')
       tracks = parseKugouEmbeddedSongs(playlist.embeddedSongs)
@@ -767,6 +790,12 @@ export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: A
       coverImgUrl: data.playlist?.coverImgUrl || playlist.coverUrl,
       trackCount: Number(data.playlist?.trackCount || songs.length || playlist.trackCount || 0),
       description: data.playlist?.description || playlist.description || '',
+      // 元数据透传：播放次数/创建者/标签（后端歌单详情已归一化；用于传统模式歌单页角标与创建者展示）
+      playCount: Number(data.playlist?.playCount || playlist.playCount || 0),
+      creator: data.playlist?.creator || undefined,
+      tags: Array.isArray(data.playlist?.tags) ? data.playlist.tags : [],
+      isLike: Boolean((playlist as any).isLike),
+      createTime: Number(data.playlist?.createTime || 0) || undefined,
       platform: playlist.platform
     },
     songs

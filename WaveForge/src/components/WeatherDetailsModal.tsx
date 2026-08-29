@@ -1,5 +1,6 @@
 ﻿import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useTvBack } from '../tv/tvCore'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   AlertTriangle,
@@ -67,6 +68,15 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
     if (open) setActiveTab(initialTab)
     else setWeatherMapOpen(false)
   }, [initialTab, open])
+
+  // TV 遥控器 BACK：先收地图子层，再关弹窗（与 ESC 语义一致；带 open 守卫，
+  // 本组件经 DesktopWidgetZone 常驻挂载，无守卫会吞掉全场景 BACK 键）
+  useTvBack(() => {
+    if (!open) return false
+    if (weatherMapOpen) setWeatherMapOpen(false)
+    else onClose()
+    return true
+  })
 
   useEffect(() => {
     if (!open) return

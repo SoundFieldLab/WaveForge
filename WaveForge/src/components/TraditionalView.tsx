@@ -2,20 +2,23 @@
 // - 所有内容（搜索/音乐库/歌单/歌手/专辑/评论/个人中心）都在中间栏直接展示，不用弹窗；
 // - 平台切换为可拖拽药丸（与简约模式一致）；模式切换走全局顶部下拉条；
 // - 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部，可滚动）。
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
-  ChevronLeft, ChevronRight, Heart, Home, Library, ListMusic, LogIn, Music2,
-  Pause, Play, Plus, Search, Settings, SkipBack, SkipForward, SlidersHorizontal,
-  Sparkles, Volume2, X, Waves, Check,
+  Captions, ChevronLeft, ChevronRight, Disc3, Heart, History, Home, Library, ListMusic, LogIn, Music2,
+  Pause, Play, Plus, Repeat, Repeat1, Search, Settings, Shuffle, SkipBack, SkipForward, SlidersHorizontal,
+  Sparkles, Volume2, Waves, Check,
 } from 'lucide-react'
+import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import type { Song, LyricLine } from '../services/musicApi'
-import { getProxiedImageUrl } from '../services/musicApi'
+import { getProxiedImageUrl, getUserFollows, getUserFolloweds, getQQFollows, getQQFans, getQQUserProfile, subscribeQQUser, subscribeNeteaseUser } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getVisiblePlatforms, getPlatformCapabilities, platformLabel } from '../services/platforms'
+import { getVisiblePlatforms, getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
 import { fetchExploreHome, fetchExplorePlaylist, type ExplorePayload, type ExplorePlaylist } from '../services/exploreApi'
 import { createPlaylist, getUserPlaylists, invalidateUserPlaylistsCache, subscribePlaylist } from '../services/playlistService'
-import { registerDesktopSpectrumConsumer } from '../services/desktopSpectrum'
+import { getAppleRecentPlayed, appleLibraryTrackToSong } from '../services/appleCatalog'
+import { fetchSpotifyLiked, spotifyTrackToSong } from '../services/spotifyService'
+import { useAudioAnalyzer, useAudioAnalyzerSnapshot, type AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS } from './ModeSelectionPanel'
@@ -27,7 +30,6 @@ import TraditionalArtistDetail from './TraditionalArtistDetail'
 import TraditionalAlbumDetail from './TraditionalAlbumDetail'
 import SongContextMenu from './SongContextMenu'
 import PlaylistContextMenu from './PlaylistContextMenu'
-import LyricsDisplay from './LyricsDisplay'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler, ViewMode } from '../types/playbackNavigation'
 
@@ -62,6 +64,8 @@ interface TraditionalViewProps {
   duration: number
   /** 当前播放歌曲的主题色（跟随歌曲变化，未播放时回退平台色） */
   dominantColor?: string
+  /** 播放引擎的频谱分析节点：右栏「正在播放」频谱直接采样（与播放页波形同源） */
+  analyserNode?: AnalyserNode | null
   lyrics: LyricLine[]
   volume: number
   playerTheme: 'light' | 'dark'
@@ -97,6 +101,14 @@ interface TraditionalViewProps {
   onPrevious: () => void
   onSeek: (time: number) => void
   onVolumeChange: (volume: number) => void
+  /** 当前歌曲是否已喜欢 + 切换（右栏心形按钮） */
+  liked?: boolean
+  onToggleFavorite?: () => void
+  /** 播放模式（顺序/随机/单曲循环） */
+  playMode?: 'sequential' | 'shuffle' | 'repeat'
+  onPlayModeChange?: () => void
+  /** 打开调音室（音效引擎 UI） */
+  onOpenMixingStudio?: () => void
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onPlayNext?: (song: Song) => void
@@ -119,7 +131,8 @@ const formatTime = (value: number) => {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
 
-// 进度条行包装：内部订阅播放时间（4Hz），传统视图本体不再因 currentTime 每秒重渲染
+// 进度条行包装：内部订阅播放时间（4Hz），传统视图本体不再因 currentTime 每秒重渲染。
+// 纯进度条（无圆点滑块）：点击/拖动轨道任意位置 seek。
 const TraditionalProgressRow = memo(function TraditionalProgressRow({
   playbackTimeStore,
   duration,
@@ -138,10 +151,35 @@ const TraditionalProgressRow = memo(function TraditionalProgressRow({
     playbackTimeStore.getSnapshot,
     playbackTimeStore.getSnapshot,
   ).currentTime
+  const barRef = useRef<HTMLDivElement>(null)
+  const draggingRef = useRef(false)
   const t = Math.min(duration || 1, currentTime)
+  const pct = duration > 0 ? Math.min(100, (t / duration) * 100) : 0
+  const seekFromPointer = (clientX: number) => {
+    const rect = barRef.current?.getBoundingClientRect()
+    if (!rect || rect.width <= 0 || !duration) return
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    onSeek(ratio * duration)
+  }
   return (
     <div className="mt-3">
-      <input aria-label="播放进度" type="range" min={0} max={duration || 1} value={t} onChange={(event) => onSeek(Number(event.target.value))} className="w-full" style={{ accentColor: songTheme }} />
+      <div
+        ref={barRef}
+        role="slider"
+        aria-label="播放进度"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(duration || 0)}
+        aria-valuenow={Math.round(t)}
+        className="group relative h-4 w-full cursor-pointer touch-none select-none"
+        onPointerDown={event => { draggingRef.current = true; event.currentTarget.setPointerCapture(event.pointerId); seekFromPointer(event.clientX) }}
+        onPointerMove={event => { if (draggingRef.current) seekFromPointer(event.clientX) }}
+        onPointerUp={event => { draggingRef.current = false; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }}
+        onPointerCancel={event => { draggingRef.current = false; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId) }}
+      >
+        <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 overflow-hidden rounded-full transition-all group-hover:h-1.5" style={{ background: 'rgba(128,128,128,.28)' }}>
+          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: songTheme }} />
+        </div>
+      </div>
       <div className={`mt-1 flex justify-between text-[10px] ${mutedText}`}>
         <span>{formatTime(currentTime)}</span>
         <span>{formatTime(duration)}</span>
@@ -150,17 +188,131 @@ const TraditionalProgressRow = memo(function TraditionalProgressRow({
   )
 })
 
-// 内嵌歌词包装：内部订阅播放时间（4Hz），与 App 播放页 LiveLyricsDisplay 同款
-const TraditionalLiveLyrics = memo(function TraditionalLiveLyrics({
+// 频谱叶子组件：直接订阅音频分析器 store（与播放页波形同源，30fps），
+// 传统视图本体不因此重渲染。取 24 段对数频谱插值出 18 根柱渲染。
+const TraditionalSpectrum = memo(function TraditionalSpectrum({
+  analyzerStore,
+  isPlaying,
+  songTheme,
+}: {
+  analyzerStore: AudioAnalyzerStore
+  isPlaying: boolean
+  songTheme: string
+}) {
+  const { spectrum } = useAudioAnalyzerSnapshot(analyzerStore)
+  const BARS = 18
+  return (
+    <div className="relative mt-4 flex h-12 items-end justify-center gap-[3px] overflow-hidden rounded-xl" style={{ background: `${songTheme}12` }}>
+      {/* 底部辉光 */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6" style={{ background: `linear-gradient(to top, ${songTheme}30, transparent)` }} />
+      {Array.from({ length: BARS }, (_, index) => {
+        const pos = spectrum.length > 1 ? (index / (BARS - 1)) * (spectrum.length - 1) : 0
+        const left = Math.floor(pos)
+        const right = Math.min(spectrum.length - 1, left + 1)
+        const value = (spectrum[left] || 0) * (1 - (pos - left)) + (spectrum[right] || 0) * (pos - left)
+        const h = Math.max(8, Math.min(100, value * 100))
+        return (
+          <span
+            key={index}
+            className="relative z-10 w-[6px] rounded-full"
+            style={{
+              height: `${h}%`,
+              background: `linear-gradient(to top, ${songTheme}55, ${songTheme})`,
+              boxShadow: isPlaying ? `0 0 8px ${songTheme}66` : 'none',
+              opacity: isPlaying ? .95 : .35,
+              transition: 'height 90ms ease-out, opacity 200ms',
+            }}
+          />
+        )
+      })}
+    </div>
+  )
+})
+
+// 传统模式右栏专用竖排同步歌词：不复用播放页 LyricsDisplay，播放页歌词不受影响。
+// 竖写（writing-mode: vertical-rl）+ 字号随容器高度自适应，保证整行完整显示不裁切；
+// 排版：当前行居中大字、下一行在左侧淡色小字，行距/字距按竖排阅读节奏设定。
+const TraditionalVerticalLyrics = memo(function TraditionalVerticalLyrics({
   playbackTimeStore,
-  ...props
-}: { playbackTimeStore: PlaybackTimeStore } & Omit<ComponentProps<typeof LyricsDisplay>, 'currentTime'>) {
+  lyrics,
+  accentColor,
+  mutedText,
+}: {
+  playbackTimeStore: PlaybackTimeStore
+  lyrics: LyricLine[]
+  accentColor: string
+  mutedText: string
+}) {
   const currentTime = useSyncExternalStore(
     playbackTimeStore.subscribe,
     playbackTimeStore.getSnapshot,
     playbackTimeStore.getSnapshot,
   ).currentTime
-  return <LyricsDisplay {...props} currentTime={currentTime} />
+  const boxRef = useRef<HTMLDivElement>(null)
+  const [boxHeight, setBoxHeight] = useState(0)
+  useEffect(() => {
+    const el = boxRef.current
+    if (!el) return
+    const observer = new ResizeObserver(entries => {
+      for (const entry of entries) setBoxHeight(entry.contentRect.height)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+
+  // 定位当前行：最后一个 time <= currentTime 的行
+  let currentIndex = -1
+  for (let i = 0; i < lyrics.length; i += 1) {
+    const line = lyrics[i]
+    if (typeof line?.time === 'number' && line.time <= currentTime) currentIndex = i
+    else if (typeof line?.time === 'number' && line.time > currentTime) break
+  }
+  const currentLine = currentIndex >= 0 ? lyrics[currentIndex] : null
+  const nextLine = currentIndex >= 0 && currentIndex + 1 < lyrics.length ? lyrics[currentIndex + 1] : null
+  const currentText = currentLine?.text?.trim() || ''
+  const nextText = nextLine?.text?.trim() || ''
+
+  // 字号自适应：竖排一行高度 ≈ 字数 × 字号 × (1 + 字距)，反推字号并钳制在合理区间
+  const charCount = Math.max(1, Array.from(currentText).length)
+  const fitSize = boxHeight > 0 ? Math.floor((boxHeight * 0.86) / (charCount * 1.18)) : 20
+  const fontSize = Math.max(14, Math.min(34, fitSize))
+
+  return (
+    <div ref={boxRef} className="flex min-h-0 w-full flex-1 items-center justify-center gap-5 overflow-hidden px-2">
+      {!currentText ? (
+        <p className={`text-xs ${mutedText}`}>暂无同步歌词</p>
+      ) : (
+        <>
+          {/* 当前行：竖写大字，主题色强调 */}
+          <motion.p
+            key={`cur:${currentIndex}`}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: .35, ease: 'easeOut' }}
+            className="max-h-full font-medium"
+            style={{
+              writingMode: 'vertical-rl',
+              fontSize,
+              letterSpacing: '0.18em',
+              color: accentColor,
+              textShadow: `0 0 18px ${accentColor}55`,
+            }}
+          >
+            {currentText}
+          </motion.p>
+          {/* 下一行：竖写小字淡色，形成竖排阅读节奏 */}
+          {nextText && (
+            <p
+              className={`max-h-full ${mutedText}`}
+              style={{ writingMode: 'vertical-rl', fontSize: Math.max(11, Math.round(fontSize * 0.55)), letterSpacing: '0.14em', opacity: .55 }}
+            >
+              {nextText}
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
 })
 
 // 传统模式中间栏页面：一切内容都在中间栏展示，不复用全局弹窗
@@ -168,19 +320,23 @@ type TraditionalPage =
   | { name: 'home' }
   | { name: 'search' }
   | { name: 'library' }
-  | { name: 'profile' }
+  | { name: 'recent' }
+  | { name: 'settings' }
+  | { name: 'profile'; userId?: string; nickname?: string; avatarUrl?: string }
   | { name: 'playlist'; playlist: any; songs: Song[] }
   | { name: 'comments'; song: Song }
   | { name: 'artist'; id: string; platform: MusicPlatform }
   | { name: 'album'; id: string; platform: MusicPlatform }
 
 function TraditionalView({
-  onSongSelect, currentSong, queue, isPlaying, playbackTimeStore, duration, lyrics, volume, playerTheme, dominantColor,
+  onSongSelect, currentSong, queue, isPlaying, playbackTimeStore, duration, lyrics, volume, playerTheme, dominantColor, analyserNode,
   neteaseLoggedIn, neteaseUsername, neteaseAvatar, neteaseUserId,
   qqLoggedIn, qqUsername, qqAvatar, qqUserId,
   appleLoggedIn, appleUsername, appleAvatar, spotifyUsername, spotifyAvatar,
   kugouUsername, kugouAvatar, sodaUsername, sodaAvatar, authRevision = 0,
   onLoginClick, onSettingsClick, onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
+  liked = false, onToggleFavorite, playMode = 'sequential', onPlayModeChange, onOpenMixingStudio,
+  neteaseVip = false, qqVip = false,
   onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onCopyInfo,
 }: TraditionalViewProps) {
   const [platform, setPlatform] = useState<MusicPlatform>(() => (localStorage.getItem('traditionalPlatform') as MusicPlatform) || 'netease')
@@ -189,7 +345,6 @@ function TraditionalView({
   const [loading, setLoading] = useState(true)
   const [playlistLoading, setPlaylistLoading] = useState(false)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
-  const [showSettings, setShowSettings] = useState(false)
   const [preferences, setPreferences] = useState<TraditionalPreferences>(readPreferences)
   const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const [playlistMenu, setPlaylistMenu] = useState<{ show: boolean; x: number; y: number; playlist: any | null }>({ show: false, x: 0, y: 0, playlist: null })
@@ -219,11 +374,23 @@ function TraditionalView({
     if (e.key === 'ArrowLeft') { e.preventDefault(); cyclePlatform(-1) }
     else if (e.key === 'ArrowRight') { e.preventDefault(); cyclePlatform(1) }
   }
-  const [spectrum, setSpectrum] = useState<number[]>(Array(18).fill(0))
+  // 右栏频谱：直接采样播放引擎 analyser（与播放页波形同源），不再走桌面频谱事件总线
+  const analyzerStore = useAudioAnalyzer(analyserNode ?? null, !tvMode && preferences.showWaveform)
   // 右栏：播放列表 / 同步歌词 共用一张卡片，点击切换；未播放时无歌词，只显示播放列表
   const [rightTab, setRightTab] = useState<'playlist' | 'lyrics'>('playlist')
   // 音量弹层（代替常驻滑条）
   const [volumeOpen, setVolumeOpen] = useState(false)
+  // 音质弹窗
+  const [showQuality, setShowQuality] = useState(false)
+  // 桌面歌词开关（与主进程广播同步，网易云「词」按钮同语义）
+  const [desktopLyricsOn, setDesktopLyricsOn] = useState(false)
+  useEffect(() => {
+    let active = true
+    window.electron?.desktopLyrics?.getSettings?.().then(settings => { if (active) setDesktopLyricsOn(Boolean(settings?.enabled)) }).catch(() => undefined)
+    const sync = (event: Event) => setDesktopLyricsOn(Boolean((event as CustomEvent<boolean>).detail))
+    window.addEventListener('desktopLyricsEnabledChanged', sync)
+    return () => { active = false; window.removeEventListener('desktopLyricsEnabledChanged', sync) }
+  }, [])
   const [history, setHistory] = useState<TraditionalPage[]>([{ name: 'home' }])
   const [historyIndex, setHistoryIndex] = useState(0)
   const historyIndexRef = useRef(0)
@@ -291,12 +458,6 @@ function TraditionalView({
     return () => { cancelled = true }
   }, [platform, neteaseUserId, qqUserId, username, authRevision])
 
-  useEffect(() => {
-    const close = () => setShowSettings(false)
-    window.addEventListener('viewModeChanged', close)
-    return () => window.removeEventListener('viewModeChanged', close)
-  }, [])
-
   // 未播放（无歌词）时自动切回播放列表 tab
   useEffect(() => {
     if (!currentSong && rightTab === 'lyrics') setRightTab('playlist')
@@ -305,37 +466,6 @@ function TraditionalView({
   const savePreferences = useCallback((patch: Partial<TraditionalPreferences>) => {
     setPreferences(prev => { const next = { ...prev, ...patch }; localStorage.setItem(PREF_KEY, JSON.stringify(next)); window.dispatchEvent(new CustomEvent('traditionalPreferencesChanged', { detail: next })); return next })
   }, [])
-
-  // 真实频谱：注册为桌面频谱消费者，接收 App 主进程算好的 48 段频谱，取 18 段渲染
-  useEffect(() => {
-    // 桌面频谱消费者仅桌面有意义：TV（Android）无 Electron 频谱源，注册只会让 10Hz 空转
-    if (tvMode) return
-    const unregister = registerDesktopSpectrumConsumer()
-    let frame: number | null = null
-    let pending: number[] | null = null
-    const update = (event: Event) => {
-      pending = (event as CustomEvent<number[]>).detail
-      if (frame !== null || document.visibilityState !== 'visible') return
-      frame = window.requestAnimationFrame(() => {
-        frame = null
-        if (!pending?.length) return
-        const source = pending
-        const target = Array.from({ length: 18 }, (_, index) => {
-          const pos = (index / 17) * (source.length - 1)
-          const left = Math.floor(pos)
-          const right = Math.min(source.length - 1, left + 1)
-          return (source[left] || 0) * (1 - (pos - left)) + (source[right] || 0) * (pos - left)
-        })
-        setSpectrum(target)
-      })
-    }
-    window.addEventListener('desktopSpectrumChanged', update)
-    return () => {
-      unregister()
-      window.removeEventListener('desktopSpectrumChanged', update)
-      if (frame !== null) window.cancelAnimationFrame(frame)
-    }
-  }, [tvMode])
 
   const openPlaylist = useCallback(async (playlist: ExplorePlaylist | any) => {
     setPlaylistLoading(true)
@@ -478,13 +608,9 @@ function TraditionalView({
       {preferences.backgroundDim && <div className="pointer-events-none absolute inset-0 bg-black/25" />}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/15" />
 
-      <header className="relative z-30 flex h-16 items-center gap-3 border-b px-4 backdrop-blur-xl" style={{ borderColor: isDark ? 'rgba(255,255,255,.08)' : 'rgba(15,23,42,.1)' }}>
-        {/* 左上角：Logo + 软件名 */}
-        <div className="flex shrink-0 items-center gap-2">
-          <img src={new URL('../../logo.png', import.meta.url).href} alt="WaveForge" className="h-8 w-8 rounded-xl object-cover" />
-          <span className="hidden text-sm font-semibold sm:inline">WaveForge</span>
-        </div>
-        {/* 平台药丸（名字右边，拖拽切换） */}
+      {/* 顶栏加高（h-20）+ 内容下沉：隐藏 Windows 标题栏的拖拽区占顶部 32px，控件整体下移避免「一半在标题栏上」 */}
+      <header className="relative z-30 flex h-20 items-end gap-3 border-b px-4 pb-2.5 backdrop-blur-xl" style={{ borderColor: isDark ? 'rgba(255,255,255,.08)' : 'rgba(15,23,42,.1)' }}>
+        {/* 平台药丸（左上角，拖拽切换） */}
         <div className="relative h-9 w-[240px] shrink-0 overflow-hidden rounded-2xl border" style={{ borderColor: isDark ? 'rgba(255,255,255,.12)' : 'rgba(15,23,42,.12)' }}
           {...(pillTvAdjust
             ? {
@@ -518,12 +644,11 @@ function TraditionalView({
           <button type="button" onClick={goBack} disabled={historyIndex <= 0} aria-label="后退" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronLeft className="h-4 w-4" /></button>
           <button type="button" onClick={goForward} disabled={historyIndex >= history.length - 1} aria-label="前进" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronRight className="h-4 w-4" /></button>
         </div>
-        <div className="flex flex-1 items-center justify-center">
-          <button type="button" onClick={() => navigate({ name: 'search' })} className={`flex h-9 w-full max-w-[220px] items-center justify-center gap-2 rounded-2xl border px-3 text-sm transition hover:bg-white/10 ${muted} ${surface}`}><Search className="h-4 w-4" />搜索</button>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <button type="button" onClick={() => setShowSettings(true)} className="rounded-xl p-2 opacity-70 transition hover:bg-white/10" aria-label="传统模式设置"><Settings className="h-4 w-4" /></button>
-          <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} className="flex max-w-[130px] items-center gap-2 rounded-2xl border px-2.5 py-1.5 transition hover:bg-white/10" style={{ borderColor: isDark ? 'rgba(255,255,255,.1)' : 'rgba(15,23,42,.1)' }}>{avatar ? <img src={avatar} alt="" className="h-7 w-7 rounded-full object-cover" /> : loggedIn ? <div className="flex h-7 w-7 items-center justify-center rounded-full" style={{ background: accent }}><Music2 className="h-4 w-4 text-white" /></div> : <LogIn className="h-4 w-4" />}<span className="truncate text-xs">{loggedIn ? username || '我的账户' : '登录'}</span></button>
+        <div className="min-w-0 flex-1" />
+        {/* 右上角：Logo + 软件名（品牌标识，非交互；个人中心入口在右栏资料卡，避免与右上角隐藏窗口按钮抢点击） */}
+        <div className="flex shrink-0 items-center gap-2">
+          <img src={new URL('../../logo.png', import.meta.url).href} alt="WaveForge" className="h-9 w-9 rounded-xl object-cover" />
+          <span className="hidden text-base font-semibold sm:inline">WaveForge</span>
         </div>
       </header>
 
@@ -556,13 +681,16 @@ function TraditionalView({
         </AnimatePresence>
       </div>
 
-      <div className="relative z-10 grid h-[calc(100%_-_4rem)] min-h-0" style={{ gridTemplateColumns: preferences.sidebarWidth === 'wide' ? '220px minmax(0,1fr) 320px' : '176px minmax(0,1fr) 300px' }}>
+      <div className="relative z-10 grid h-[calc(100%_-_5rem)] min-h-0" style={{ gridTemplateColumns: preferences.sidebarWidth === 'wide' ? '220px minmax(0,1fr) 320px' : '176px minmax(0,1fr) 300px' }}>
         {/* 左栏：导航 + 我的歌单 / 收藏歌单 */}
         <aside className={`flex min-h-0 flex-col border-r px-3 py-5 ${isDark ? 'border-white/10' : 'border-black/10'}`}>
           <nav className="space-y-1">
             <button type="button" onClick={() => navigate({ name: 'home' })} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm" style={{ background: currentPage.name === 'home' ? `${accent}2e` : undefined, color: currentPage.name === 'home' ? accent : undefined }}><Home className="h-4 w-4" />发现</button>
             <button type="button" onClick={openLibrary} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'library' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'library' ? { color: accent } : undefined}><Library className="h-4 w-4" />音乐库</button>
             <button type="button" onClick={openLikedSongs} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${muted} hover:bg-white/10`}><Heart className="h-4 w-4" />我喜欢</button>
+            <button type="button" onClick={() => navigate({ name: 'recent' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'recent' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'recent' ? { color: accent } : undefined}><History className="h-4 w-4" />最近播放</button>
+            <button type="button" onClick={() => navigate({ name: 'search' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'search' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'search' ? { color: accent } : undefined}><Search className="h-4 w-4" />搜索</button>
+            <button type="button" onClick={() => navigate({ name: 'settings' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'settings' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'settings' ? { color: accent } : undefined}><Settings className="h-4 w-4" />设置</button>
           </nav>
           <div className="mt-7 flex items-center gap-2 px-1">
             <button type="button" onClick={() => setPlaylistTab('mine')} className={`rounded-full px-2.5 py-1 text-xs transition ${playlistTab === 'mine' ? 'font-medium' : muted}`} style={playlistTab === 'mine' ? { color: accent } : undefined}>我的歌单</button>
@@ -599,12 +727,16 @@ function TraditionalView({
         <main ref={mainRef} className="min-h-0 overflow-y-auto px-5 py-6 lg:px-8">
           {currentPage.name === 'search' ? (
             <TraditionalSearch platform={platform} accent={accent} isDark={isDark} currentSong={currentSong} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
+          ) : currentPage.name === 'recent' ? (
+            <TraditionalRecent platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
+          ) : currentPage.name === 'settings' ? (
+            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onGlobalSettings={onSettingsClick} />
           ) : currentPage.name === 'library' ? (
             <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
           ) : currentPage.name === 'profile' ? (
-            <ProfilePage platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} userPlaylists={userPlaylists} onBack={goBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onLoginClick={() => onLoginClick(platform)} />
+            <TraditionalProfile platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} selfUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} targetUserId={currentPage.userId} targetNickname={currentPage.nickname} targetAvatar={currentPage.avatarUrl} userPlaylists={userPlaylists} onBack={goBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onOpenUserProfile={(userId, nickname, avatarUrl) => navigate({ name: 'profile', userId, nickname, avatarUrl })} onOpenArtist={openArtistDetail} onLoginClick={() => onLoginClick(platform)} />
           ) : currentPage.name === 'playlist' ? (
-            <TraditionalPlaylistDetail playlist={currentPage.playlist} songs={currentPage.songs} loading={playlistLoading} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={goBack} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
+            <TraditionalPlaylistDetail playlist={currentPage.playlist} songs={currentPage.songs} loading={playlistLoading} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={goBack} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} ownUserName={loggedIn ? username : ''} ownUserAvatar={avatar} ownUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} onOpenUserProfile={(targetPlatform, userId, nickname, avatarUrl) => { if (targetPlatform === platform) navigate({ name: 'profile', userId, nickname, avatarUrl }) }} />
           ) : currentPage.name === 'comments' ? (
             <TraditionalComments song={currentPage.song} accent={accent} isDark={isDark} onClose={goBack} />
           ) : currentPage.name === 'artist' ? (
@@ -616,7 +748,6 @@ function TraditionalView({
               platform={platform} accent={accent} isDark={isDark} muted={muted} surface={surface}
               loading={loading} loggedIn={loggedIn} username={username} payload={payload}
               recommendationSongs={recommendationSongs} heroSongs={heroSongs} preferences={preferences}
-              onOpenSettings={() => setShowSettings(true)}
               onSongSelect={(song, songs, origin) => onSongSelect(song, songs, origin)}
               onSongMenu={setSongMenu} onPlaylistMenu={setPlaylistMenu} onOpenPlaylist={openPlaylist}
             />
@@ -634,31 +765,21 @@ function TraditionalView({
 
           <div className="shrink-0 px-4 pt-4">
             <section className={`rounded-2xl border p-4 ${surface}`}>
-              <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">正在播放</h2><Heart className="h-4 w-4" style={{ color: songTheme }} /></div>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-sm font-semibold">正在播放</h2>
+                <button type="button" onClick={onToggleFavorite} disabled={!onToggleFavorite} aria-label={liked ? '取消喜欢' : '喜欢'} className="rounded-full p-1 transition hover:scale-110 disabled:opacity-40">
+                  <Heart className={`h-4 w-4 ${liked ? 'fill-current' : ''}`} style={{ color: liked ? '#ef4444' : songTheme }} />
+                </button>
+              </div>
               {currentSong ? (
                 <>
-                  <div className="flex gap-3"><img src={coverOf(currentSong)} alt="" className="h-16 w-16 rounded-xl object-cover shadow-lg" /><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium">{currentSong.name}</div><div className={`mt-1 truncate text-xs ${muted}`}>{currentSong.artists?.map(a => a.name).join(' / ')}</div><div className={`mt-1 truncate text-[10px] ${muted}`}>{currentSong.album?.name || '未知专辑'}</div></div></div>
+                  {/* 点击歌曲信息进入播放页（传统模式选歌原地播放，播放页入口在此） */}
+                  <button type="button" onClick={() => switchMode('minimal')} title="进入播放页" className="flex w-full gap-3 rounded-xl text-left transition hover:bg-white/5">
+                    <img src={coverOf(currentSong)} alt="" className="h-16 w-16 rounded-xl object-cover shadow-lg" />
+                    <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{currentSong.name}</span><span className={`mt-1 block truncate text-xs ${muted}`}>{currentSong.artists?.map(a => a.name).join(' / ')}</span><span className={`mt-1 block truncate text-[10px] ${muted}`}>{currentSong.album?.name || '未知专辑'}</span></span>
+                  </button>
                   {preferences.showWaveform && (
-                    <div className="relative mt-4 flex h-12 items-end justify-center gap-[3px] overflow-hidden rounded-xl" style={{ background: `${songTheme}12` }}>
-                      {/* 底部辉光 */}
-                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6" style={{ background: `linear-gradient(to top, ${songTheme}30, transparent)` }} />
-                      {spectrum.map((value, index) => {
-                        const h = Math.max(10, Math.min(100, value * 100))
-                        return (
-                          <span
-                            key={index}
-                            className="relative z-10 w-[6px] rounded-full"
-                            style={{
-                              height: `${h}%`,
-                              background: `linear-gradient(to top, ${songTheme}55, ${songTheme})`,
-                              boxShadow: isPlaying ? `0 0 8px ${songTheme}66` : 'none',
-                              opacity: isPlaying ? .95 : .35,
-                              transition: 'height 90ms ease-out, opacity 200ms',
-                            }}
-                          />
-                        )
-                      })}
-                    </div>
+                    <TraditionalSpectrum analyzerStore={analyzerStore} isPlaying={isPlaying} songTheme={songTheme} />
                   )}
                   <TraditionalProgressRow playbackTimeStore={playbackTimeStore} duration={duration} onSeek={onSeek} songTheme={songTheme} mutedText={muted} />
                   <div className="mt-3 flex items-center justify-center gap-5">
@@ -679,6 +800,15 @@ function TraditionalView({
                       </AnimatePresence>
                     </div>
                   </div>
+                  {/* 播控工具行：播放模式 / 音效 / 音质 / 桌面歌词（对齐网易云底栏右侧能力） */}
+                  <div className={`mt-2 flex items-center justify-center gap-1 ${muted}`}>
+                    <button type="button" onClick={onPlayModeChange} title={playMode === 'shuffle' ? '随机播放' : playMode === 'repeat' ? '单曲循环' : '顺序播放'} aria-label="播放模式" className="rounded-xl p-2 transition hover:bg-white/10">
+                      {playMode === 'shuffle' ? <Shuffle className="h-4 w-4" style={{ color: songTheme }} /> : playMode === 'repeat' ? <Repeat1 className="h-4 w-4" style={{ color: songTheme }} /> : <Repeat className="h-4 w-4" />}
+                    </button>
+                    {onOpenMixingStudio && <button type="button" onClick={onOpenMixingStudio} title="音效 / 调音室" aria-label="音效" className="rounded-xl p-2 transition hover:bg-white/10"><SlidersHorizontal className="h-4 w-4" /></button>}
+                    <button type="button" onClick={() => setShowQuality(true)} title="播放音质" aria-label="播放音质" className="rounded-xl p-2 transition hover:bg-white/10"><Disc3 className="h-4 w-4" /></button>
+                    <button type="button" onClick={() => window.electron?.desktopLyrics?.setEnabled?.(!desktopLyricsOn)} title="桌面歌词" aria-label="桌面歌词" className="rounded-xl p-2 transition hover:bg-white/10" style={desktopLyricsOn ? { color: songTheme } : undefined}><Captions className="h-4 w-4" /></button>
+                  </div>
                 </>
               ) : <div className="py-7 text-center"><Music2 className="mx-auto h-8 w-8 opacity-30" /><p className={`mt-2 text-xs ${muted}`}>选择一首歌曲开始播放</p><button type="button" onClick={() => navigate({ name: 'search' })} className="mt-3 rounded-full px-3 py-1.5 text-xs text-white" style={{ background: accent }}>去搜索</button></div>}
             </section>
@@ -692,10 +822,7 @@ function TraditionalView({
                 {currentSong && <button type="button" onClick={() => setRightTab('lyrics')} className="flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2 py-1 text-xs transition" style={rightTab === 'lyrics' ? { background: `${songTheme}26`, color: songTheme } : undefined}><Waves className="h-3.5 w-3.5" />同步歌词</button>}
               </div>
               {rightTab === 'lyrics' && currentSong ? (
-                <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden px-2">
-                  {/* 与共享播放页一致的单行模式：避免 scroll 模式手动滚动/自动回位的抽风 */}
-                  <TraditionalLiveLyrics playbackTimeStore={playbackTimeStore} isPlaying={isPlaying} accentColor={songTheme} lyrics={lyrics} displayMode="single" translationEnabled={false} romanEnabled={false} layoutContext="player" lyricSizeOverride={1.15} wordByWordEnabledOverride playerTheme={playerTheme} onSeek={onSeek} />
-                </div>
+                <TraditionalVerticalLyrics playbackTimeStore={playbackTimeStore} lyrics={lyrics} accentColor={songTheme} mutedText={muted} />
               ) : (
                 <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
                   {queuedSongs.map((song, index) => { const active = currentSong && songKey(song) === songKey(currentSong); return <button type="button" key={`${songKey(song)}:${index}`} onClick={() => onSongSelect(song, queuedSongs, { mode: 'traditional', surface: 'mode-root', platform: song.platform || platform })} className={`flex w-full items-center gap-2 rounded-xl px-1.5 py-1.5 text-left transition ${active ? 'bg-white/10' : 'hover:bg-white/8'}`}><span className={`w-4 text-center text-[10px] ${muted}`}>{active && isPlaying ? <Waves className="h-3.5 w-3.5" style={{ color: songTheme }} /> : index + 1}</span><img src={coverOf(song)} alt="" loading="lazy" className="h-8 w-8 rounded-lg object-cover" /><span className="min-w-0 flex-1"><span className="block truncate text-xs">{song.name}</span><span className={`block truncate text-[10px] ${muted}`}>{song.artists?.map(a => a.name).join(' / ')}</span></span></button> })}
@@ -707,7 +834,6 @@ function TraditionalView({
         </aside>
       </div>
 
-      <AnimatePresence>{showSettings && <TraditionalSettings preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onGlobalSettings={() => { setShowSettings(false); onSettingsClick() }} onClose={() => setShowSettings(false)} />}</AnimatePresence>
       <SongContextMenu show={songMenu.show} x={songMenu.x} y={songMenu.y} song={songMenu.song} onClose={() => setSongMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, recommendationSongs, { mode: 'traditional', surface: 'mode-root', platform: song.platform || platform })} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onViewAlbum={song => song.album?.id && openAlbumDetail(String(song.album.id), song.platform || platform)} onViewArtist={song => song.artists?.[0]?.id && openArtistDetail(String(song.artists[0].id), song.platform || platform)} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={songMenu.song?.platform || platform} playerTheme={playerTheme} />
       <PlaylistContextMenu show={playlistMenu.show} x={playlistMenu.x} y={playlistMenu.y} playlist={playlistMenu.playlist} onClose={() => setPlaylistMenu({ show: false, x: 0, y: 0, playlist: null })} onEdit={() => undefined} onDelete={() => undefined} onSubscribe={handleSubscribePlaylist} onShare={playlist => {
         const targetPlatform = (playlist?.platform || platform) as MusicPlatform
@@ -715,20 +841,21 @@ function TraditionalView({
         void navigator.clipboard?.writeText(url)
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单链接已复制', type: 'success' } }))
       }} isOwner={false} isSubscribed={playlistSubscribed || Boolean(playlistMenu.playlist?.isCollected || playlistMenu.playlist?.subscribed)} isSpecialPlaylist={Boolean(playlistMenu.playlist?.isLike)} canEdit={false} />
+      <AudioQualitySettingsModal show={showQuality} onClose={() => setShowQuality(false)} playerTheme={playerTheme} neteaseVip={neteaseVip} qqVip={qqVip} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
       <style>{`@keyframes traditionalWave { from { transform: scaleY(.45); opacity: .45; } to { transform: scaleY(1.05); opacity: 1; } }`}</style>
     </div>
   )
 }
 
 // 首页内容：发现（排行榜 + 新歌 + 推荐歌单）
-function HomeContent({ platform, accent, muted, surface, loggedIn, username, payload, heroSongs, onOpenSettings, onSongSelect, onSongMenu, onPlaylistMenu, onOpenPlaylist }: {
-  platform: MusicPlatform; accent: string; isDark: boolean; muted: string; surface: string; loading: boolean; loggedIn: boolean; username: string; payload: ExplorePayload | null; recommendationSongs: Song[]; heroSongs: Song[]; preferences: TraditionalPreferences; onOpenSettings: () => void; onSongSelect: SongSelectHandler; onSongMenu: (menu: { show: boolean; x: number; y: number; song: Song | null }) => void; onPlaylistMenu: (menu: { show: boolean; x: number; y: number; playlist: any | null }) => void; onOpenPlaylist: (playlist: any) => void;
+function HomeContent({ platform, accent, muted, surface, loggedIn, username, payload, heroSongs, onSongSelect, onSongMenu, onPlaylistMenu, onOpenPlaylist }: {
+  platform: MusicPlatform; accent: string; isDark: boolean; muted: string; surface: string; loading: boolean; loggedIn: boolean; username: string; payload: ExplorePayload | null; recommendationSongs: Song[]; heroSongs: Song[]; preferences: TraditionalPreferences; onSongSelect: SongSelectHandler; onSongMenu: (menu: { show: boolean; x: number; y: number; song: Song | null }) => void; onPlaylistMenu: (menu: { show: boolean; x: number; y: number; playlist: any | null }) => void; onOpenPlaylist: (playlist: any) => void;
 }) {
   // 发现页 = 探索向内容：排行榜 + 新歌 + 推荐歌单（个性化推荐在音乐库）
   const charts = (payload?.charts || []).slice(0, 4)
   const newSongs = (payload?.newSongs || []).slice(0, 8)
   const chartSongToSong = (chart: any, s: any): Song => ({ id: s.id || 0, mid: s.mid, name: s.name || '', artists: [{ name: s.artist || '' }], album: { name: '', picUrl: s.coverUrl || chart.coverUrl || '' }, duration: 0, platform: chart.platform || platform })
-  return <><div className="mb-6 flex items-end justify-between"><div><p className={`text-xs uppercase tracking-[.2em] ${muted}`}>{platformLabel(platform)}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">{username ? `欢迎回来，${username}` : '在音乐里，遇见更好的自己'}</h1><p className={`mt-2 text-sm ${muted}`}>{loggedIn ? '探索新歌与排行榜，个性推荐在音乐库' : '登录后解锁个性化推荐，游客也可以直接开始播放'}</p></div><button type="button" onClick={onOpenSettings} className={`rounded-xl border p-2 ${surface}`} aria-label="打开传统模式设置"><SlidersHorizontal className="h-4 w-4" /></button></div>
+  return <><div className="mb-6"><p className={`text-xs uppercase tracking-[.2em] ${muted}`}>{platformLabel(platform)}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">{username ? `欢迎回来，${username}` : '在音乐里，遇见更好的自己'}</h1><p className={`mt-2 text-sm ${muted}`}>{loggedIn ? '探索新歌与排行榜，个性推荐在音乐库' : '登录后解锁个性化推荐，游客也可以直接开始播放'}</p></div>
   <section className="relative mb-8 grid min-h-[190px] grid-cols-[minmax(0,1fr)_180px] overflow-hidden rounded-3xl border p-6" style={{ borderColor: `${accent}55`, background: `linear-gradient(125deg, ${accent}28, rgba(255,255,255,.05))` }}><div className="relative z-10 flex flex-col justify-between"><div><span className="rounded-full border px-2.5 py-1 text-[10px]" style={{ borderColor: `${accent}66`, color: accent }}>TRADITIONAL MODE</span><h2 className="mt-4 max-w-lg text-2xl font-semibold">发现好音乐，从排行榜开始</h2><p className={`mt-2 max-w-md text-sm ${muted}`}>新歌速递、热门榜单、精选歌单——探索永远不缺新意。</p></div><button type="button" onClick={() => heroSongs[0] && onSongSelect(heroSongs[0], heroSongs, { mode: 'traditional', surface: 'mode-root', platform })} className="mt-4 flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-white" style={{ background: accent }}><Play className="h-4 w-4" />播放推荐</button></div><div className="relative flex items-center justify-center"><div className="absolute h-36 w-36 rounded-full blur-3xl" style={{ background: accent, opacity: .3 }} />{heroSongs[0] ? <img src={coverOf(heroSongs[0])} alt="" className="relative h-32 w-32 rotate-3 rounded-2xl object-cover shadow-2xl" /> : <Sparkles className="relative h-16 w-16 opacity-50" />}</div></section>
 
   {charts.length > 0 && <section className="mb-8"><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">排行榜</h2><span className={`text-xs ${muted}`}>热门榜单实时更新</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -759,41 +886,241 @@ function HomeContent({ platform, accent, muted, surface, loggedIn, username, pay
   <section><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">推荐歌单</h2><span className={`text-xs ${muted}`}>右键歌单可收藏或分享</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">{(payload?.playlists || []).slice(0, 8).map(playlist => <button type="button" key={`${playlist.platform}:${playlist.id}`} onClick={() => onOpenPlaylist(playlist)} onContextMenu={event => { event.preventDefault(); onPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}><img src={playlist.coverUrl} alt="" loading="lazy" className="aspect-square w-full rounded-xl object-cover" /><div className="mt-2 truncate text-sm">{playlist.name}</div><div className={`text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '精选歌单'}</div></button>)}</div></section>
   </>}
 
-// 个人中心页：账号信息 + 我的歌单（在中间栏展示，不使用全局弹层）
-function ProfilePage({ platform, accent, isDark, loggedIn, username, avatar, userPlaylists, onOpenPlaylist, onOpenLiked, onLoginClick }: {
-  platform: MusicPlatform; accent: string; isDark: boolean; loggedIn: boolean; username: string; avatar?: string; userPlaylists: any[]; onBack: () => void; onOpenPlaylist: (playlist: any) => void; onOpenLiked: () => void; onLoginClick: () => void;
+type TraditionalProfileSocialItem = {
+  id: string
+  name: string
+  avatarUrl: string
+  desc?: string
+  isFollow: boolean
+  kind: 'user' | 'artist'
+  artistMid?: string
+}
+
+// 个人中心页：对齐 QQ 音乐/网易云个人中心（大头像 + 徽章 + 简介 + 粉丝/关注 + 我喜欢/创建的歌单），
+// 支持查看他人（歌单创建者点击进来）；粉丝/关注页带 歌手/用户 分类与关注操作。
+function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avatar, selfUserId, targetUserId, targetNickname, targetAvatar, userPlaylists, onOpenPlaylist, onOpenLiked, onOpenUserProfile, onOpenArtist, onLoginClick }: {
+  platform: MusicPlatform; accent: string; isDark: boolean; loggedIn: boolean; username: string; avatar?: string; selfUserId: string; targetUserId?: string; targetNickname?: string; targetAvatar?: string; userPlaylists: any[]; onBack: () => void; onOpenPlaylist: (playlist: any) => void; onOpenLiked: () => void; onOpenUserProfile: (userId: string, nickname?: string, avatarUrl?: string) => void; onOpenArtist?: (artistId: string, platform: MusicPlatform) => void; onLoginClick: () => void;
 }) {
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
-  const playlists = userPlaylists.filter(item => !item.isLike)
+  const isSelf = !targetUserId || targetUserId === selfUserId
+  const uid = targetUserId || selfUserId
+  const [detail, setDetail] = useState<{ nickname: string; avatarUrl: string; signature?: string; follows?: number; fans?: number; vip?: boolean } | null>(null)
+  const [tab, setTab] = useState<'liked' | 'created'>('liked')
+  const [social, setSocial] = useState<{ kind: 'follows' | 'fans' } | null>(null)
+  const [qqSocialTab, setQqSocialTab] = useState<'artist' | 'user'>('artist')
+  const [socialItems, setSocialItems] = useState<TraditionalProfileSocialItem[]>([])
+  const [socialLoading, setSocialLoading] = useState(false)
+  const [otherPlaylists, setOtherPlaylists] = useState<any[] | null>(null)
+
+  // 用户详情：昵称/头像/简介/粉丝/关注/徽章
+  useEffect(() => {
+    let cancelled = false
+    const fallback = { nickname: isSelf ? username : (targetNickname || ''), avatarUrl: (isSelf ? avatar : targetAvatar) || '', signature: '' }
+    if (!uid) { setDetail(fallback); return }
+    if (platform === 'netease') {
+      fetch(`http://localhost:3001/api/netease/user/detail?uid=${encodeURIComponent(uid)}`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return
+          const p = data?.profile || {}
+          setDetail({ nickname: p.nickname || fallback.nickname, avatarUrl: p.avatarUrl || fallback.avatarUrl, signature: p.signature || '', follows: Number(p.follows || 0), fans: Number(p.followeds || 0), vip: Number(p.vipType || 0) > 0 })
+        })
+        .catch(() => { if (!cancelled) setDetail(fallback) })
+    } else if (platform === 'qq') {
+      const cookie = getPlatformCookie('qq')
+      fetch(`http://localhost:3001/api/qq/user/detail?id=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return
+          const c = data?.creator || {}
+          setDetail({ nickname: c.nick || fallback.nickname, avatarUrl: c.avatar || fallback.avatarUrl, signature: c.desc || '', follows: Number(c.nums?.followsingernum ?? 0), fans: Number(c.nums?.fansnum || 0), vip: Boolean(c.vip) })
+        })
+        .catch(() => { if (!cancelled) setDetail(fallback) })
+    } else {
+      setDetail(fallback)
+    }
+    return () => { cancelled = true }
+  }, [platform, uid, isSelf, username, avatar, targetNickname, targetAvatar])
+
+  // 他人的创建歌单
+  useEffect(() => {
+    if (isSelf || !uid) { setOtherPlaylists(null); return }
+    let cancelled = false
+    if (platform === 'netease') {
+      const cookie = getPlatformCookie('netease')
+      fetch(`http://localhost:3001/api/netease/user/playlist?uid=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return
+          const list = Array.isArray(data?.playlist) ? data.playlist : []
+          setOtherPlaylists(list.map((p: any) => ({ id: p.id || p.playlistId, name: p.name || '歌单', coverImgUrl: p.coverImgUrl || '', trackCount: Number(p.trackCount || 0), platform, isLike: p.specialType === 5 || /我喜欢的音乐/.test(p.name || '') })))
+        })
+        .catch(() => { if (!cancelled) setOtherPlaylists([]) })
+    } else if (platform === 'qq') {
+      const cookie = getPlatformCookie('qq')
+      fetch(`http://localhost:3001/api/qq/user/playlist?id=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(data => {
+          if (cancelled) return
+          const list = data?.list || data?.data?.list || data?.mydiss?.list || data?.data?.mydiss?.list || []
+          setOtherPlaylists((Array.isArray(list) ? list : []).map((p: any) => ({ id: p.tid || p.dissid || p.disstid, name: p.diss_name || p.title || p.dissname || '歌单', coverImgUrl: p.diss_cover || p.picurl || p.logo || '', trackCount: Number(p.song_cnt || p.songnum || 0), platform, isLike: Number(p.dirid) === 201 || Number(p.tid) === 0 })))
+        })
+        .catch(() => { if (!cancelled) setOtherPlaylists([]) })
+    } else {
+      setOtherPlaylists([])
+    }
+    return () => { cancelled = true }
+  }, [platform, uid, isSelf])
+
+  // 粉丝 / 关注 列表
+  useEffect(() => {
+    if (!social) { setSocialItems([]); return }
+    let cancelled = false
+    setSocialLoading(true)
+    const cookie = getPlatformCookie(platform)
+    if (platform === 'netease') {
+      const task = social.kind === 'follows' ? getUserFollows(uid, { cookie }) : getUserFolloweds(uid, { cookie })
+      task.then(data => {
+        if (cancelled) return
+        const raw = social.kind === 'follows' ? data?.follow : data?.followeds
+        setSocialItems((Array.isArray(raw) ? raw : []).map((u: any) => ({ id: String(u.userId || u.id || ''), name: u.nickname || '未知用户', avatarUrl: u.avatarUrl || '', desc: u.signature || '', isFollow: social.kind === 'follows' ? true : Boolean(u.mutual), kind: 'user' as const })))
+        setSocialLoading(false)
+      }).catch(() => { if (!cancelled) { setSocialItems([]); setSocialLoading(false) } })
+    } else if (platform === 'qq') {
+      const task = isSelf
+        ? (social.kind === 'follows' ? getQQFollows({ cookie }) : getQQFans({ cookie }))
+        : getQQUserProfile(uid)
+      task.then(data => {
+        if (cancelled) return
+        const list = isSelf ? (data?.data?.list || []) : ((social.kind === 'follows' ? data?.data?.follows : data?.data?.fans) || [])
+        setSocialItems((Array.isArray(list) ? list : []).map((u: any) => {
+          const mid = String(u.MID || u.mid || '')
+          return { id: String(u.EncUin || u.encUin || mid || ''), name: u.Name || u.name || '未知用户', avatarUrl: u.AvatarUrl || u.avatarUrl || '', desc: u.Desc || u.desc || '', isFollow: Boolean(u.IsFollow || u.isFollow), kind: (mid ? 'artist' : 'user') as 'artist' | 'user', artistMid: mid || undefined }
+        }))
+        setSocialLoading(false)
+      }).catch(() => { if (!cancelled) { setSocialItems([]); setSocialLoading(false) } })
+    } else {
+      setSocialItems([])
+      setSocialLoading(false)
+    }
+    return () => { cancelled = true }
+  }, [social, platform, uid, isSelf])
+
+  const toggleFollow = async (item: TraditionalProfileSocialItem) => {
+    if (item.kind === 'artist') {
+      if (item.artistMid) onOpenArtist?.(item.artistMid, platform)
+      return
+    }
+    try {
+      if (platform === 'netease') await subscribeNeteaseUser(item.id, !item.isFollow)
+      else await subscribeQQUser(item.id, !item.isFollow)
+      setSocialItems(prev => prev.map(p => (p.id === item.id ? { ...p, isFollow: !item.isFollow } : p)))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: item.isFollow ? '已取消关注' : '关注成功', type: 'success' } }))
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '关注操作失败', type: 'error' } }))
+    }
+  }
+
+  const ownCreated = userPlaylists.filter(item => !item.isLike && !item.isCollected)
+  const otherCreated = (otherPlaylists || []).filter(item => !item.isLike)
+  const createdPlaylists = isSelf ? ownCreated : otherCreated
+  const likedPlaylist = (isSelf ? userPlaylists : (otherPlaylists || [])).find(item => item.isLike)
+  const shownSocialItems = platform === 'qq' ? socialItems.filter(item => item.kind === qqSocialTab) : socialItems
+  const artistCount = socialItems.filter(item => item.kind === 'artist').length
+  const userCount = socialItems.filter(item => item.kind === 'user').length
+
+  // ── 粉丝 / 关注 页 ──
+  if (social) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="mb-5 flex items-center gap-4">
+          <button type="button" onClick={() => setSocial(null)} className={`rounded-xl p-2 transition hover:bg-white/10 ${muted}`} aria-label="返回个人中心"><ChevronLeft className="h-5 w-5" /></button>
+          <h1 className="text-2xl font-bold">{detail?.nickname || username}的{social.kind === 'follows' ? '关注' : '粉丝'}</h1>
+        </div>
+        {platform === 'qq' && (
+          <div className="mb-5 flex gap-6 text-sm">
+            <button type="button" onClick={() => setQqSocialTab('artist')} className={`pb-2 ${qqSocialTab === 'artist' ? 'font-semibold' : muted}`} style={qqSocialTab === 'artist' ? { color: accent, borderBottom: `2px solid ${accent}` } : undefined}>歌手 {artistCount}</button>
+            <button type="button" onClick={() => setQqSocialTab('user')} className={`pb-2 ${qqSocialTab === 'user' ? 'font-semibold' : muted}`} style={qqSocialTab === 'user' ? { color: accent, borderBottom: `2px solid ${accent}` } : undefined}>用户 {userCount}</button>
+          </div>
+        )}
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {socialLoading ? (
+            <div className={`py-16 text-center text-sm ${muted}`}>正在加载…</div>
+          ) : shownSocialItems.length === 0 ? (
+            <div className={`py-16 text-center text-sm ${muted}`}>暂无{social.kind === 'follows' ? '关注' : '粉丝'}</div>
+          ) : (
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+              {shownSocialItems.map(item => (
+                <div key={`${item.kind}:${item.id}`} className={`flex flex-col items-center gap-3 rounded-2xl border p-5 ${surface}`}>
+                  <button type="button" onClick={() => item.kind === 'user' ? onOpenUserProfile(item.id, item.name, item.avatarUrl) : item.artistMid && onOpenArtist?.(item.artistMid, platform)} className="transition hover:opacity-85">
+                    <img src={item.avatarUrl} alt="" className="h-24 w-24 rounded-full object-cover" />
+                  </button>
+                  <button type="button" onClick={() => item.kind === 'user' ? onOpenUserProfile(item.id, item.name, item.avatarUrl) : item.artistMid && onOpenArtist?.(item.artistMid, platform)} className="w-full truncate text-center text-sm font-medium">{item.name}</button>
+                  <button type="button" onClick={() => void toggleFollow(item)} className={`w-full rounded-full px-4 py-1.5 text-xs transition ${item.isFollow ? (isDark ? 'bg-white/10 text-white/60' : 'bg-black/5 text-slate-500') : 'text-white'}`} style={item.isFollow ? undefined : { background: accent }}>{item.isFollow ? '已关注' : '关注'}</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  // ── 个人中心主页 ──
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="mb-5 flex items-center gap-3">
-        <div><h1 className="text-xl font-semibold">个人中心</h1><p className={`text-xs ${muted}`}>{platformLabel(platform)}</p></div>
-      </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {!loggedIn ? (
+        {!loggedIn && isSelf ? (
           <div className={`flex h-56 flex-col items-center justify-center gap-3 rounded-3xl border ${surface}`}>
             <div className="flex h-14 w-14 items-center justify-center rounded-full" style={{ background: `${accent}22` }}><Music2 className="h-6 w-6" style={{ color: accent }} /></div>
-            <p className={`text-sm ${muted}`}>登录 {platformLabel(platform)} 后同步收藏与歌单</p>
+            <p className={`text-sm ${muted}`}>登录 {platformLabel(platform)} 后查看个人中心</p>
             <button type="button" onClick={onLoginClick} className="flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium text-white" style={{ background: accent }}><LogIn className="h-4 w-4" />立即登录</button>
           </div>
         ) : (
           <>
-            <div className={`flex items-center gap-4 rounded-3xl border p-6 ${surface}`}>
-              {avatar ? <img src={avatar} alt="" className="h-20 w-20 rounded-full object-cover" /> : <div className="flex h-20 w-20 items-center justify-center rounded-full text-2xl text-white" style={{ background: accent }}>{username.slice(0, 1)}</div>}
-              <div className="min-w-0 flex-1"><h2 className="truncate text-2xl font-semibold">{username}</h2><p className={`mt-1 text-sm ${muted}`}>{platformLabel(platform)} 账号</p><button type="button" onClick={onOpenLiked} className="mt-3 flex items-center gap-1.5 rounded-full px-4 py-1.5 text-xs text-white" style={{ background: accent }}><Heart className="h-3.5 w-3.5 fill-current" />我喜欢的音乐</button></div>
+            <div className="flex items-center gap-6">
+              {detail?.avatarUrl ? <img src={detail.avatarUrl} alt="" className="h-28 w-28 shrink-0 rounded-full object-cover shadow-xl" /> : <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full text-3xl text-white" style={{ background: accent }}>{(detail?.nickname || username || '?').slice(0, 1)}</div>}
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="truncate text-3xl font-bold">{detail?.nickname || username}</h1>
+                  {detail?.vip && <span className="rounded-full px-2 py-0.5 text-[10px] font-medium text-white" style={{ background: accent }}>VIP</span>}
+                </div>
+                {detail?.signature ? <p className={`mt-2 truncate text-sm ${muted}`}>{detail.signature}</p> : null}
+                <div className="mt-3 flex gap-8 text-sm">
+                  <button type="button" onClick={() => setSocial({ kind: 'fans' })} className={`transition hover:underline ${muted}`}>粉丝：<span className="font-semibold" style={{ color: accent }}>{detail?.fans ?? '-'}</span></button>
+                  <button type="button" onClick={() => setSocial({ kind: 'follows' })} className={`transition hover:underline ${muted}`}>关注：<span className="font-semibold" style={{ color: accent }}>{detail?.follows ?? '-'}</span></button>
+                </div>
+              </div>
             </div>
-            <h3 className="mb-3 mt-7 text-lg font-semibold">我的歌单</h3>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-              {playlists.map((playlist, index) => (
-                <button key={`${playlist.platform || platform}:${playlist.id || playlist.dirId}:${index}`} type="button" onClick={() => onOpenPlaylist(playlist)} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}>
-                  <img src={playlist.coverImgUrl || playlist.coverUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
-                  <div className="mt-2 truncate text-sm">{playlist.name}</div>
-                  <div className={`truncate text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '歌单'}</div>
-                </button>
-              ))}
-              {playlists.length === 0 && <div className={`col-span-full flex h-40 items-center justify-center rounded-3xl border ${surface}`}><p className={`text-sm ${muted}`}>还没有歌单</p></div>}
+
+            <div className="mt-8 flex gap-8 text-sm">
+              <button type="button" onClick={() => setTab('liked')} className={`pb-2 ${tab === 'liked' ? 'font-semibold' : muted}`} style={tab === 'liked' ? { color: accent, borderBottom: `2px solid ${accent}` } : undefined}>我喜欢</button>
+              <button type="button" onClick={() => setTab('created')} className={`pb-2 ${tab === 'created' ? 'font-semibold' : muted}`} style={tab === 'created' ? { color: accent, borderBottom: `2px solid ${accent}` } : undefined}>创建的歌单 {createdPlaylists.length}</button>
+            </div>
+
+            <div className="mt-6 pb-6">
+              {tab === 'liked' ? (
+                likedPlaylist ? (
+                  <button type="button" onClick={() => isSelf ? onOpenLiked() : onOpenPlaylist(likedPlaylist)} className={`flex w-full max-w-md items-center gap-4 rounded-2xl border p-4 text-left transition hover:-translate-y-0.5 ${surface}`}>
+                    <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl" style={{ background: `${accent}33` }}><Heart className="h-8 w-8 fill-current" style={{ color: accent }} /></div>
+                    <span className="min-w-0"><span className="block truncate text-base font-semibold">{likedPlaylist.name || '我喜欢的音乐'}</span><span className={`mt-1 block text-xs ${muted}`}>{likedPlaylist.trackCount ? `${likedPlaylist.trackCount} 首` : '点击查看'}</span></span>
+                  </button>
+                ) : (
+                  <div className={`flex h-40 items-center justify-center rounded-2xl border ${surface}`}><p className={`text-sm ${muted}`}>{isSelf ? '还没有喜欢的歌曲' : '暂无公开的我喜欢'}</p></div>
+                )
+              ) : (
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+                  {createdPlaylists.map((playlist, index) => (
+                    <button key={`${playlist.platform || platform}:${playlist.id || playlist.dirId}:${index}`} type="button" onClick={() => onOpenPlaylist(playlist)} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}>
+                      <img src={playlist.coverImgUrl || playlist.coverUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                      <div className="mt-2 truncate text-sm">{playlist.name}</div>
+                      <div className={`truncate text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '歌单'}</div>
+                    </button>
+                  ))}
+                  {createdPlaylists.length === 0 && <div className={`col-span-full flex h-40 items-center justify-center rounded-2xl border ${surface}`}><p className={`text-sm ${muted}`}>还没有创建歌单</p></div>}
+                </div>
+              )}
             </div>
           </>
         )}
@@ -803,18 +1130,245 @@ function ProfilePage({ platform, accent, isDark, loggedIn, username, avatar, use
 }
 
 
-function TraditionalSettings({ preferences, playerTheme, onChange, onGlobalSettings, onClose }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onGlobalSettings: () => void; onClose: () => void }) {
+// 汽水曲目（后端 mapSodaMedia 产出）→ WaveForge Song（与 ProfileView 同口径）
+const sodaMediaToSong = (raw: any): Song | undefined => {
+  const mid = String(raw?.id ?? '')
+  if (!mid) return undefined
+  const tier = raw?.requiredTier
+  const vip = Boolean(raw?.vip || tier === 'vip' || tier === 'svip')
+  const rawArtists = Array.isArray(raw?.artists) ? raw.artists : []
+  const artistNames = rawArtists.length
+    ? rawArtists.map((item: any) => (typeof item === 'string' ? item : String(item?.name || ''))).filter(Boolean)
+    : raw?.artist ? [String(raw.artist)] : []
+  return {
+    id: Number(mid.slice(0, 15)) || 0,
+    mid,
+    name: String(raw?.name || '未知歌曲'),
+    artists: artistNames.map((name: string) => ({ name })),
+    album: { name: String(raw?.album || ''), picUrl: String(raw?.coverUrl || '') },
+    duration: Number(raw?.durationMs || 0),
+    platform: 'soda',
+    vip,
+    fee: vip ? 1 : 0,
+  }
+}
+
+// 网易云最近播放行 → Song（与 ProfileView normalizeRecentSong 同口径）
+const neteaseRecentRowToSong = (row: any): Song | null => {
+  const source = row?.resource || row?.data || row?.song || row
+  const id = Number(source?.id ?? source?.songId ?? source?.song?.id ?? row?.resourceId)
+  if (!Number.isFinite(id) || id <= 0) return null
+  const songSource = source?.song || source?.data || row?.song || row?.data || source
+  const artists = songSource?.ar || songSource?.artists || songSource?.singer || []
+  const album = songSource?.al || songSource?.album || {}
+  return {
+    id,
+    name: songSource?.name || songSource?.songName || '未知歌曲',
+    artists: Array.isArray(artists) ? artists.map((artist: any) => ({ id: artist.id, name: artist.name || artist.n || '未知歌手', mid: artist.mid })) : [],
+    album: { id: album.id, name: album.name || '未知专辑', picUrl: String(album.picUrl || album.picurl || album.blurPicUrl || album.coverUrl || songSource?.coverUrl || '') },
+    duration: Number(songSource?.dt || songSource?.duration || 0),
+    platform: 'netease',
+  }
+}
+
+const getRecentRows = (payload: any): any[] => {
+  const candidates = [payload?.data?.list, payload?.data?.records, payload?.data?.songs, payload?.data, payload?.list, payload?.records, payload?.songs]
+  return candidates.find(Array.isArray) || []
+}
+
+// 最近播放页：中间栏展示各平台最近播放记录（与简约/桌面模式同源接口）
+function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, authRevision, onSongSelect, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onViewComments, onOpenArtist, onOpenAlbum, onCopyInfo, onLoginClick, userPlaylists }: {
+  platform: MusicPlatform; accent: string; isDark: boolean; loggedIn: boolean; currentSong: Song | null; authRevision?: number; onBack: () => void; onSongSelect: (song: Song, songs: Song[], origin: PlaybackOrigin) => void; onPlayNext?: (song: Song) => void; onAddToFavorites?: (song: Song) => void; onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>; onAddToPlaylist?: (song: Song, playlistId: string) => void; onViewComments?: (song: Song) => void; onOpenArtist?: (artistId: string, platform: MusicPlatform) => void; onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void; onCopyInfo?: (song: Song) => void; onLoginClick: () => void; userPlaylists?: any[];
+}) {
+  const [loading, setLoading] = useState(true)
+  const [songs, setSongs] = useState<Song[]>([])
+  const [error, setError] = useState('')
+  const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
+  const requestIdRef = useRef(0)
+  const muted = isDark ? 'text-white/50' : 'text-slate-500'
+  const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
+
+  useEffect(() => {
+    const requestId = ++requestIdRef.current
+    setLoading(true)
+    setError('')
+    setSongs([])
+    const cookie = getPlatformCookie(platform)
+    const finish = (list: Song[], message = '') => {
+      if (requestId !== requestIdRef.current) return
+      setSongs(list)
+      setError(message)
+      setLoading(false)
+    }
+    if (platform === 'apple') {
+      getAppleRecentPlayed(100)
+        .then(tracks => finish(tracks.map((track, index) => appleLibraryTrackToSong({ ...track, id: track.id || `recent-${index}` })).filter((s): s is Song => Boolean(s))))
+        .catch(() => finish([], '最近播放加载失败，请重试'))
+      return
+    }
+    if (platform === 'spotify') {
+      // Spotify 无官方最近播放接口：展示喜欢的歌曲（与简约模式同口径）
+      fetchSpotifyLiked(50)
+        .then(tracks => finish(tracks.map(track => spotifyTrackToSong(track))))
+        .catch(() => finish([], '最近播放加载失败，请重试'))
+      return
+    }
+    if (platform === 'kugou') {
+      finish([])
+      return
+    }
+    const endpoint = platform === 'qq'
+      ? `http://localhost:3001/api/qq/record/recent/song?limit=100${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
+      : platform === 'soda'
+        ? `http://localhost:3001/api/soda/recent?limit=50${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
+        : `http://localhost:3001/api/netease/record/recent/song?limit=100${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
+    fetch(endpoint, { cache: 'no-store' })
+      .then(response => response.json().catch(() => null).then(payload => ({ response, payload })))
+      .then(({ response, payload }) => {
+        if (!response.ok || payload?.error) throw new Error(payload?.error || '最近播放加载失败')
+        if (platform === 'qq') {
+          const rows = Array.isArray(payload?.records) ? payload.records : (Array.isArray(payload?.songlist) ? payload.songlist.map((song: any) => ({ song })) : [])
+          finish(rows.map((row: any, index: number) => {
+            const song = row?.song || row
+            if (!song?.name) return null
+            const artists = Array.isArray(song?.artists) ? song.artists : (Array.isArray(song?.singer) ? song.singer : [])
+            return {
+              id: Number(song?.id ?? index) || index,
+              mid: String(song?.mid || ''),
+              name: song.name,
+              artists: artists.map((artist: any) => ({ id: artist?.id, name: artist?.name || '', mid: artist?.mid })),
+              album: { name: song?.album?.name || '', picUrl: String(song?.album?.picUrl || song?.albumpic || song?.picUrl || '') },
+              duration: Number(song?.duration || song?.interval || 0) * (song?.interval ? 1000 : 1),
+              platform: 'qq' as const,
+            } as Song
+          }).filter((s: unknown): s is Song => Boolean(s)))
+        } else if (platform === 'soda') {
+          const rows: any[] = Array.isArray(payload?.songs) ? payload.songs : []
+          finish(rows.map(sodaMediaToSong).filter((s): s is Song => Boolean(s)))
+        } else {
+          finish(getRecentRows(payload).map(neteaseRecentRowToSong).filter((s): s is Song => Boolean(s)))
+        }
+      })
+      .catch((err: unknown) => finish([], err instanceof Error ? err.message : '最近播放加载失败，请重试'))
+  }, [platform, authRevision])
+
+  const activeSong = (song: Song) => currentSong && songKey(song) === songKey(currentSong)
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="mb-5 flex items-end justify-between">
+        <div>
+          <h1 className="text-xl font-semibold">最近播放</h1>
+          <p className={`mt-1 text-xs ${muted}`}>{platformLabel(platform)} · {songs.length > 0 ? `${songs.length} 首` : '按播放时间倒序'}</p>
+        </div>
+        {songs.length > 0 && (
+          <button type="button" onClick={() => songs[0] && onSongSelect(songs[0], songs, { mode: 'traditional', surface: 'traditional-recent', platform })} className="flex items-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-white" style={{ background: accent }}><Play className="h-3.5 w-3.5" />播放全部</button>
+        )}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {loading ? (
+          <div className="space-y-2">{Array.from({ length: 8 }, (_, index) => <div key={index} className="h-14 animate-pulse rounded-2xl bg-white/10" />)}</div>
+        ) : !loggedIn ? (
+          <div className={`flex h-56 flex-col items-center justify-center gap-3 rounded-3xl border ${surface}`}>
+            <History className="h-8 w-8 opacity-30" />
+            <p className={`text-sm ${muted}`}>登录 {platformLabel(platform)} 后同步最近播放记录</p>
+            <button type="button" onClick={onLoginClick} className="flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium text-white" style={{ background: accent }}><LogIn className="h-4 w-4" />立即登录</button>
+          </div>
+        ) : songs.length === 0 ? (
+          <div className={`flex h-56 flex-col items-center justify-center gap-3 rounded-3xl border ${surface}`}>
+            <History className="h-8 w-8 opacity-30" />
+            <p className={`text-sm ${muted}`}>{error || (platform === 'kugou' ? '该平台暂不支持最近播放' : '暂无最近播放记录')}</p>
+          </div>
+        ) : (
+          <div className={`overflow-hidden rounded-2xl border ${surface}`}>
+            {songs.map((song, index) => {
+              const active = activeSong(song)
+              return (
+                <div
+                  key={`${songKey(song)}:${index}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform })}
+                  onContextMenu={event => { event.preventDefault(); setSongMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
+                  onKeyDown={event => { if (event.key === 'Enter') onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform }) }}
+                  className={`group grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_minmax(100px,.6fr)_56px] items-center gap-3 border-b px-4 py-2.5 transition last:border-b-0 ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
+                >
+                  <span className="flex justify-center text-xs" style={{ color: active ? accent : undefined }}>
+                    {active ? <Music2 className="h-3.5 w-3.5" style={{ color: accent }} /> : <span className={muted}>{index + 1}</span>}
+                  </span>
+                  <span className="flex min-w-0 items-center gap-3">
+                    <span className="relative shrink-0">
+                      <img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" />
+                      <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
+                    </span>
+                    <span className="min-w-0">
+                      <span className={`block truncate text-sm ${active ? 'font-medium' : ''}`}>{song.name}</span>
+                      <span className={`block truncate text-xs ${muted}`}>{song.artists?.map(artist => artist.name).join(' / ')}</span>
+                    </span>
+                  </span>
+                  <span className={`hidden truncate text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</span>
+                  <span className={`text-right text-xs tabular-nums ${muted}`}>{formatTime(song.duration / 1000)}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+      <SongContextMenu
+        show={songMenu.show} x={songMenu.x} y={songMenu.y} song={songMenu.song}
+        onClose={() => setSongMenu({ show: false, x: 0, y: 0, song: null })}
+        onPlayNow={song => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform })}
+        onPlayNext={onPlayNext}
+        onAddToFavorites={onAddToFavorites}
+        onRemoveFromFavorites={onRemoveFromFavorites}
+        onAddToPlaylist={onAddToPlaylist}
+        onViewComments={onViewComments}
+        onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)}
+        onViewArtist={song => song.artists?.[0]?.id && onOpenArtist?.(String(song.artists[0].id), song.platform || platform)}
+        onCopyInfo={onCopyInfo}
+        userPlaylists={userPlaylists || []}
+        platform={songMenu.song?.platform || platform}
+        playerTheme={isDark ? 'dark' : 'light'}
+      />
+    </div>
+  )
+}
+
+// 设置页：在中间栏直接展示（不再用右侧抽屉），与主流平台「设置即一页」的交互一致
+function TraditionalSettingsPage({ preferences, playerTheme, onChange, onGlobalSettings }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onGlobalSettings: () => void }) {
   const dark = playerTheme === 'dark'
-  return <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[180] bg-black/35 backdrop-blur-sm"><motion.aside initial={{ x: '100%' }} animate={{ x: 0 }} exit={{ x: '100%' }} transition={{ type: 'spring', damping: 28, stiffness: 260 }} className={`absolute bottom-3 right-3 top-3 w-[min(420px,calc(100%_-_24px))] overflow-y-auto rounded-3xl border p-6 shadow-2xl ${dark ? 'border-white/10 bg-[#101522]/95 text-white' : 'border-black/10 bg-white/95 text-slate-900'}`}><div className="flex items-center justify-between"><div><div className="flex items-center gap-2 text-lg font-semibold"><Settings className="h-5 w-5" />传统模式设置</div><p className="mt-1 text-xs opacity-55">只影响传统模式的布局与氛围</p></div><button type="button" onClick={onClose} aria-label="关闭设置"><X className="h-5 w-5 opacity-60" /></button></div><div className="mt-6 space-y-5">
-    <SettingChoice label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} dark={dark} />
-    <SettingChoice label="背景氛围" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} dark={dark} />
-    <SliderSetting label={`背景模糊 ${preferences.backgroundBlur > 0 ? preferences.backgroundBlur + 'px' : ''}`} value={preferences.backgroundBlur} min={0} max={28} step={1} onChange={value => onChange({ backgroundBlur: value })} dark={dark} />
-    <Toggle label="背景暗化" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} dark={dark} />
-    <SettingChoice label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} dark={dark} />
-    <Toggle label="显示推荐内容" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} dark={dark} />
-    <Toggle label="显示播放频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} dark={dark} />
-    <button type="button" onClick={onGlobalSettings} className="flex w-full items-center justify-between rounded-2xl border border-pink-400/30 bg-pink-500/10 px-4 py-3 text-left text-sm"><span><span className="block font-medium">全局设置</span><span className="mt-1 block text-xs opacity-55">账号 / 个性化 / 高级 / 关于，与简约模式实时同步</span></span><ChevronRight className="h-4 w-4" /></button>
-  </div></motion.aside></motion.div>
+  const card = dark ? 'border-white/10 bg-white/[0.055]' : 'border-black/10 bg-white/75'
+  return (
+    <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col">
+      <div className="mb-5">
+        <h1 className="flex items-center gap-2 text-xl font-semibold"><Settings className="h-5 w-5" />设置</h1>
+        <p className={`mt-1 text-xs ${dark ? 'text-white/50' : 'text-slate-500'}`}>只影响传统模式的布局与氛围</p>
+      </div>
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-6">
+        <section className={`rounded-2xl border p-5 ${card}`}>
+          <h2 className="mb-4 text-sm font-semibold">布局</h2>
+          <div className="space-y-5">
+            <SettingChoice label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} dark={dark} />
+            <SettingChoice label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} dark={dark} />
+            <Toggle label="显示推荐内容" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} dark={dark} />
+            <Toggle label="显示播放频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} dark={dark} />
+          </div>
+        </section>
+        <section className={`rounded-2xl border p-5 ${card}`}>
+          <h2 className="mb-4 text-sm font-semibold">背景氛围</h2>
+          <div className="space-y-5">
+            <SettingChoice label="背景" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} dark={dark} />
+            <SliderSetting label={`背景模糊 ${preferences.backgroundBlur > 0 ? preferences.backgroundBlur + 'px' : ''}`} value={preferences.backgroundBlur} min={0} max={28} step={1} onChange={value => onChange({ backgroundBlur: value })} dark={dark} />
+            <Toggle label="背景暗化" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} dark={dark} />
+          </div>
+        </section>
+        <button type="button" onClick={onGlobalSettings} className="flex w-full items-center justify-between rounded-2xl border border-pink-400/30 bg-pink-500/10 px-4 py-3 text-left text-sm">
+          <span><span className="block font-medium">全局设置</span><span className="mt-1 block text-xs opacity-55">账号 / 个性化 / 高级 / 关于，与简约模式实时同步</span></span>
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  )
 }
 
 function SliderSetting({ label, value, min, max, step, onChange, dark }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; dark: boolean }) {

@@ -2,7 +2,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { motion } from 'framer-motion'
 import { Play, Clock } from 'lucide-react'
-import { Song, resolveSongAlbumIdentifier } from '../services/musicApi'
+import { Song, resolveSongAlbumIdentifier, isSameSong } from '../services/musicApi'
 import { debugLog } from '../utils/debugLog'
 import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
@@ -184,10 +184,7 @@ export default function PlaylistGrid3D({
   const isVip = platform === 'netease' ? neteaseVip : qqVip
   
   // 判断歌曲是否为当前播放的歌曲
-  const isSongCurrent = (song: Song) => {
-    if (!currentSong) return false
-    return currentSong.id === song.id && currentSong.platform === song.platform
-  }
+  const isSongCurrent = (song: Song) => isSameSong(currentSong, song)
   
   // 计算当前播放歌曲在列表中的索引
   const currentSongIndex = songs.findIndex(song => isSongCurrent(song))

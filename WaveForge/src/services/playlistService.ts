@@ -5,7 +5,7 @@ import { platformLabel } from './platforms'
  */
 
 import { indexedDBCache } from './indexedDBCache'
-import { getAppleLibrarySongs } from './appleCatalog'
+import { getAppleLibrarySongs, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, appleSongToSong } from './appleCatalog'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
 
 export interface PlaylistOptions {
@@ -493,10 +493,15 @@ export async function getPlaylistDetail(
       privileges: { 1: true, 0: true },
     }
   }
-  // 酷狗：本地代理歌单详情（尽力而为，失败返回空）
+  // 酷狗：本地代理歌单详情（尽力而为，失败返回空）。
+  // 用户自建歌单/「我喜欢」的 id 是网关 listid，m.kugou.com 公开详情拿不到曲目——
+  // 公开详情为空时回退 H5 签名网关的用户歌单曲目接口（需登录 cookie）。
   if (platform === 'kugou') {
-    const { fetchKugouPlaylistDetail, kugouTrackToSong } = await import('./kugouService')
-    const tracks = await fetchKugouPlaylistDetail(playlistId)
+    const { fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, kugouTrackToSong } = await import('./kugouService')
+    let tracks = await fetchKugouPlaylistDetail(playlistId)
+    if (tracks.length === 0) {
+      tracks = await fetchKugouUserPlaylistTracks(playlistId)
+    }
     return {
       playlist: { id: playlistId, name: '酷狗歌单' },
       tracks: tracks.map(t => kugouTrackToSong(t)),
@@ -543,7 +548,6 @@ export async function getPlaylistDetail(
   }
   // Apple Music：目录/编辑歌单曲目（amp-api catalog playlists/{id}/tracks，需 Developer Token）
   if (platform === 'apple') {
-    const { getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, appleSongToSong } = await import('./appleCatalog')
     const summary = await getAppleCatalogPlaylistSummary(playlistId).catch(() => null)
     const tracks = await getAppleCatalogPlaylistTracks(playlistId).catch(() => [])
     return {

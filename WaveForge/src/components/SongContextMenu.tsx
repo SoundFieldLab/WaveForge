@@ -4,6 +4,7 @@ import { Song, getProxiedImageUrl } from '../services/musicApi'
 import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
 import { useEffect, useLayoutEffect, useState, useRef } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 import {
   applyFavoriteMutation,
@@ -211,33 +212,36 @@ export default function SongContextMenu({
   // 计算菜单位置，确保不超出屏幕
   useEffect(() => {
     if (show && menuRef.current) {
-      const menuRect = menuRef.current.getBoundingClientRect()
+      // offsetWidth/offsetHeight 不受入场 scale 动画影响（getBoundingClientRect 会测到
+      // 0.95 缩放值，导致贴屏幕右/下边缘时夹紧不足、菜单溢出约 5% 宽高）
+      const menuWidth = menuRef.current.offsetWidth
+      const menuHeight = menuRef.current.offsetHeight
       const windowWidth = window.innerWidth
       const windowHeight = window.innerHeight
-      
+
       let newX = x
       let newY = y
-      
+
       // 检查右边界
-      if (x + menuRect.width > windowWidth) {
-        newX = windowWidth - menuRect.width - 10
+      if (x + menuWidth > windowWidth) {
+        newX = windowWidth - menuWidth - 10
       }
-      
+
       // 检查底部边界
-      if (y + menuRect.height > windowHeight) {
-        newY = windowHeight - menuRect.height - 10
+      if (y + menuHeight > windowHeight) {
+        newY = windowHeight - menuHeight - 10
       }
-      
+
       // 检查左边界
       if (newX < 10) {
         newX = 10
       }
-      
+
       // 检查顶部边界
       if (newY < 10) {
         newY = 10
       }
-      
+
       setAdjustedPosition({ x: newX, y: newY })
     }
   }, [show, x, y])
@@ -300,11 +304,30 @@ export default function SongContextMenu({
           onClose()
         }
       }
-      
+
       document.addEventListener('mousedown', handleClickOutside)
       return () => document.removeEventListener('mousedown', handleClickOutside)
     }
   }, [show, onClose])
+
+  // ESC 关闭菜单（与 PlaylistContextMenu 对齐）
+  useEffect(() => {
+    if (!show) return
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [show, onClose])
+
+  // TV 遥控器 BACK 关闭菜单（带 show 守卫：部分宿主常驻挂载本组件，无守卫会吞掉全场景 BACK 键）
+  useTvBack(() => {
+    if (show) {
+      onClose()
+      return true
+    }
+    return false
+  })
 
   // 菜单在未选中歌曲时仍会随页面渲染；此时保持空渲染，不能读取歌曲字段。
   if (!song) return null
@@ -482,6 +505,19 @@ export default function SongContextMenu({
         onClose()
       },
       danger: true
+    }] : []),
+    // Apple Music：单曲加入资料库（web 歌曲行「添加到资料库」同款；动态引入避免全平台包体膨胀）
+    ...(resolvedPlatform === 'apple' && song?.appleId ? [{
+      label: '添加到资料库',
+      icon: ListMusic,
+      onClick: () => {
+        void import('../services/appleWebService').then(({ addAppleSongToLibrary }) =>
+          addAppleSongToLibrary(String(song.appleId || song.id)).then(ok => {
+            showMenuToast(ok ? '已添加到 Apple Music 资料库' : '添加到资料库失败，请检查登录状态', ok ? 'success' : 'error')
+          }),
+        )
+        onClose()
+      }
     }] : []),
     ...(onAddToPlaylist ? [{
       label: '添加到',

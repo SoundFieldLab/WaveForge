@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Music, Play, Clock, Crown, Heart, Info, Radio } from 'lucide-react'
-import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier } from '../services/musicApi'
+import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, isSameSong } from '../services/musicApi'
 import { getPlatformCapabilities } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
@@ -191,16 +191,13 @@ function PlaylistDetailPanel({
     song: null
   })
   
-  // 判断歌曲是否为当前播放的歌曲
-  const isSongCurrent = (song: Song) => {
-    if (!currentSong) return false
-    return currentSong.id === song.id && currentSong.platform === song.platform
-  }
+  // 判断歌曲是否为当前播放的歌曲（Apple：id 可能为 0，用 isSameSong 按 appleId 判定）
+  const isSongCurrent = (song: Song) => isSameSong(currentSong, song)
   
   // 计算当前播放歌曲在列表中的索引
   const currentSongIndex = useMemo(() => {
     if (!currentSong) return -1
-    return songs.findIndex(song => song.id === currentSong.id && song.platform === currentSong.platform)
+    return songs.findIndex(song => isSameSong(song, currentSong))
   }, [currentSong, songs])
   const totalDurationMinutes = useMemo(
     () => Math.floor(songs.reduce((total, song) => total + song.duration, 0) / 60000),
@@ -586,7 +583,7 @@ function PlaylistDetailPanel({
                       {playlist.name}
                     </h2>
                     <div className={`flex items-center gap-3 text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/55'}`}>
-                      <span>{songs.length < Number(playlist.trackCount || 0) ? `已加载 ${songs.length} / ${playlist.trackCount} 首` : `${playlist.trackCount} 首歌曲`}</span>
+                      <span>{songs.length < Number(playlist.trackCount || 0) ? `已加载 ${songs.length} / ${playlist.trackCount} 首` : `${playlist.trackCount || songs.length} 首歌曲`}</span>
                       {songs.length > 0 && (
                         <span className="flex items-center gap-1">
                           <Clock className="w-3.5 h-3.5" />
