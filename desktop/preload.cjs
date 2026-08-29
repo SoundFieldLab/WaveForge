@@ -276,6 +276,9 @@ contextBridge.exposeInMainWorld('electron', {
   // Apple Music 原生音源：webPlayback 取流（主进程 POST play.itunes.apple.com，无 CORS）
   applePlayback: (songId, developerToken, mediaUserToken) =>
     ipcRenderer.invoke('apple-playback', { songId, developerToken, mediaUserToken }),
+  // Apple Music 电台直播取流（主进程 GET api.music.apple.com/v1/play/assets，无 CORS）
+  applePlayAssets: (query, developerToken, mediaUserToken) =>
+    ipcRenderer.invoke('apple-play-assets', { query, developerToken, mediaUserToken }),
   // Apple HLS 清单获取（主进程 fetch 文本，白名单限制 Apple 域名）
   appleFetchUrl: (url) => ipcRenderer.invoke('apple-fetch-url', { url }),
   // Apple 账号信息（buy.itunes 接口，需登录窗口抓取的 itunes cookie）

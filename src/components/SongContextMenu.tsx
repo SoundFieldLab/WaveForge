@@ -506,6 +506,19 @@ export default function SongContextMenu({
       },
       danger: true
     }] : []),
+    // Apple Music：单曲加入资料库（web 歌曲行「添加到资料库」同款；动态引入避免全平台包体膨胀）
+    ...(resolvedPlatform === 'apple' && song?.appleId ? [{
+      label: '添加到资料库',
+      icon: ListMusic,
+      onClick: () => {
+        void import('../services/appleWebService').then(({ addAppleSongToLibrary }) =>
+          addAppleSongToLibrary(String(song.appleId || song.id)).then(ok => {
+            showMenuToast(ok ? '已添加到 Apple Music 资料库' : '添加到资料库失败，请检查登录状态', ok ? 'success' : 'error')
+          }),
+        )
+        onClose()
+      }
+    }] : []),
     ...(onAddToPlaylist ? [{
       label: '添加到',
       icon: null, // 不显示图标

@@ -39,6 +39,8 @@ export interface AppleNativeStream {
   licenseAdamId?: string
   /** 触发的曲目 id（诊断用） */
   songId: string
+  /** 直播流（电台/直播视频）：时长按 Infinity 处理，不做进度/切歌 */
+  live?: boolean
 }
 
 /** 原生音源总开关（localStorage，默认开） */
@@ -267,6 +269,115 @@ export async function resolveAppleNativeStream(songId: string): Promise<AppleNat
   }
 }
 
+// ─────────────────────────── 电台直播取流（/v1/play/assets） ───────────────────────────
+
+/** 电台 resource 的 playParams（来自 /v1/catalog/{sf}/stations/{id}） */
+export interface AppleRadioPlayParams {
+  id?: string
+  kind?: string
+  format?: string
+  stationHash?: string
+  hasDrm?: boolean
+  mediaType?: string
+}
+
+const APPLE_PLAY_ASSETS_URL = 'https://api.music.apple.com/v1/play/assets'
+
+/** 主进程代理取流（Electron）；纯浏览器退化直连（大概率 CORS 失败 → null） */
+async function fetchPlayAssets(
+  query: string,
+  developerToken: string,
+  mediaUserToken: string,
+): Promise<any | null> {
+  const bridge = (window as any).electron?.applePlayAssets
+  if (typeof bridge === 'function') {
+    try {
+      const result = await bridge(query, developerToken, mediaUserToken)
+      if (!result?.ok) {
+        setNativeFailReason(`play/assets HTTP ${result?.status || '?'}${result?.error ? '（' + result.error + '）' : ''}`)
+        return null
+      }
+      return result.data
+    } catch (error) {
+      setNativeFailReason(`主进程 play/assets 调用失败：${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+  }
+  try {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 15000)
+    const response = await fetch(`${APPLE_PLAY_ASSETS_URL}?${query}`, {
+      headers: {
+        Authorization: `Bearer ${developerToken}`,
+        Accept: 'application/json',
+        'X-Apple-Music-User-Token': mediaUserToken,
+        Origin: 'https://music.apple.com',
+        Referer: 'https://music.apple.com/',
+      },
+      signal: controller.signal,
+    })
+    window.clearTimeout(timeout)
+    if (!response.ok) {
+      setNativeFailReason(`浏览器直连 play/assets HTTP ${response.status}（建议检查主进程 IPC）`)
+      return null
+    }
+    return await response.json().catch(() => null)
+  } catch (error) {
+    setNativeFailReason(`浏览器直连 play/assets 被拦截（CORS/网络）：${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
+}
+
+/**
+ * 电台直播取流（Cider/MusicKit v3 同款）：
+ * GET /v1/play/assets?<playParams>&keyFormat=web → results.assets[0] 携带
+ * HLS 主清单 url 与 EME keyURLs（keyServerUrl / widevineKeyCertificateUrl）。
+ * 返回的流交给既有 hls.js 管线（live 标记 → liveDurationInfinity）。
+ */
+export async function resolveAppleRadioStream(
+  stationId: string,
+  playParams?: AppleRadioPlayParams,
+): Promise<AppleNativeStream | null> {
+  if (!stationId) return null
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken || !credentials.mediaUserToken) {
+    setNativeFailReason('AM 凭据缺失（developerToken/mediaUserToken 未配置）')
+    return null
+  }
+
+  const params: Record<string, string> = { keyFormat: 'web' }
+  if (playParams?.id) params.id = String(playParams.id)
+  else params.id = stationId
+  if (playParams?.kind) params.kind = String(playParams.kind)
+  else params.kind = 'radioStation'
+  if (playParams?.format) params.format = String(playParams.format)
+  if (playParams?.stationHash) params.stationHash = String(playParams.stationHash)
+  if (playParams?.hasDrm !== undefined) params.hasDrm = String(playParams.hasDrm)
+  if (playParams?.mediaType) params.mediaType = String(playParams.mediaType)
+  const query = new URLSearchParams(params).toString()
+
+  const data = await fetchPlayAssets(query, credentials.developerToken, credentials.mediaUserToken)
+  const asset = Array.isArray(data?.results?.assets) ? data.results.assets[0] : null
+  const masterUrl = typeof asset?.url === 'string' ? asset.url : ''
+  if (!masterUrl) {
+    setNativeFailReason('play/assets 未返回可用 HLS 主清单（订阅态异常 / 地区限制 / 电台不可用）')
+    return null
+  }
+  const resolved = masterUrl.startsWith('manifest://') ? masterUrl.replace(/^manifest:\/\//, 'https://') : masterUrl
+  lastNativeFailReason = ''
+  const licenseAdamId = playParams?.id ? String(playParams.id) : stationId
+  forwardToMainLog(`[ApplePlayback] 电台直播 HLS 就绪: ${resolved.slice(0, 96)} keys=${asset?.keyServerUrl ? 'yes' : 'NO'} adam-id=${licenseAdamId.slice(0, 40)}`)
+  return {
+    url: resolved,
+    masterUrl: resolved,
+    hlsKeyServerUrl: typeof asset?.keyServerUrl === 'string' && asset.keyServerUrl ? String(asset.keyServerUrl) : undefined,
+    widevineCertUrl: typeof asset?.widevineKeyCertificateUrl === 'string' && asset.widevineKeyCertificateUrl ? String(asset.widevineKeyCertificateUrl) : undefined,
+    licenseAdamId,
+    songId: stationId,
+    live: true,
+  }
+}
+
 // ─────────────────────────── EME 能力检测 ───────────────────────────
 
 let emeCapabilityPromise: Promise<boolean> | null = null
@@ -355,6 +466,9 @@ export function createAppleHlsConfig(
       audioEncryptionScheme: 'cenc',
       videoEncryptionScheme: 'cenc',
     },
+    // 直播流（电台）：时长置 Infinity 而非滑动窗口（避免进度条在窗口内来回走），
+    // 音轨不追赶直播边缘（maxLiveSyncPlaybackRate=1，防止变速追尾）
+    ...(stream.live ? { liveDurationInfinity: true, maxLiveSyncPlaybackRate: 1 } : {}),
     licenseXhrSetup: (_hls: unknown, xhr: XMLHttpRequest, _url: string, keyContext: any, licenseChallenge: Uint8Array) => {
       xhr.open('POST', stream.hlsKeyServerUrl || _url, true)
       xhr.setRequestHeader('Content-Type', 'application/json')

@@ -2,13 +2,15 @@ import { useState, useEffect, useRef, useCallback, memo, type CSSProperties, typ
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, Heart, UserPlus, UserCheck } from 'lucide-react'
 import { List, type ListImperativeAPI, type RowComponentProps } from 'react-window'
-import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed } from '../services/musicApi'
+import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed, isSameSong } from '../services/musicApi'
 import { fetchSodaArtistSongs } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
-import { getAppleArtistDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
+import { getAppleArtistDetail, getAppleCatalogArtist, getAppleCatalogArtistAlbums, getAppleCatalogArtistMusicVideos, getAppleCatalogRelatedArtists, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
 import AlbumDetailModal from './AlbumDetailModal'
 import VideoPlayer from './VideoPlayer'
+import AppleVideoModal from './AppleVideoModal'
+import type { AppleWebItem } from '../services/appleWebService'
 import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
 import { useTvBack } from '../tv/tvCore'
@@ -167,7 +169,7 @@ const ArtistSongRow = memo(function ArtistSongRow({
 // 前 N 行渲染歌曲，最后一行渲染「加载更多/已加载全部」提示（rowCount 多计一行）。
 // 与组件内 isCurrentSong 同逻辑（无闭包依赖，供模块级虚拟行使用）
 const songIsCurrent = (song: Song, currentSong: Song | null | undefined) =>
-  Boolean(currentSong && currentSong.id === song.id && currentSong.platform === song.platform)
+  isSameSong(currentSong, song)
 
 // 全部歌曲虚拟化行数据（不含 index/style，由 react-window 注入）
 type AllSongsRowData = {
@@ -449,6 +451,8 @@ export default function ArtistDetailModal({
   const [activeTab, setActiveTab] = useState<TabType>(platform === 'soda' ? 'hotSongs' : initialTab)
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null)
   const [selectedMV, setSelectedMV] = useState<{ id: number | string; name: string; platform?: 'netease' | 'qq'; index: number } | null>(null)
+  /** Apple 音乐视频：站内播放弹窗（webPlayback + HLS） */
+  const [appleMvItem, setAppleMvItem] = useState<AppleWebItem | null>(null)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   // 选歌播放：退出动画零时长，弹窗当帧卸载。整屏 backdrop-filter 退出节点在播放页
   // 同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
@@ -535,10 +539,7 @@ export default function ArtistDetailModal({
   }, [artist, platform])
 
   // 判断是否是当前播放的歌曲
-  const isCurrentSong = (song: Song) => {
-    if (!currentSong) return false
-    return currentSong.id === song.id && currentSong.platform === song.platform
-  }
+  const isCurrentSong = (song: Song) => isSameSong(currentSong, song)
 
   // 查找当前播放歌曲在热门歌曲列表中的索引
   const currentHotSongIndex = hotSongs.findIndex(song => isCurrentSong(song))
@@ -641,20 +642,30 @@ export default function ArtistDetailModal({
     setLoading(true)
     setHotSongsError(null) // 清除之前的错误
     try {
-      // Apple：iTunes Lookup 返回艺人信息 + 热门歌曲（免 token）
+      // Apple：iTunes Lookup 返回艺人信息 + 热门歌曲（免 token）；
+      // 目录接口补 简介/高清封面，相关艺人尽力而为
       if (platform === 'apple') {
         const storefront = localStorage.getItem('appleStorefront') || 'cn'
-        const detail = await getAppleArtistDetail(String(artistId), storefront)
-        if (detail) {
+        const [detail, catalog, related] = await Promise.allSettled([
+          getAppleArtistDetail(String(artistId), storefront),
+          getAppleCatalogArtist(String(artistId), storefront),
+          getAppleCatalogRelatedArtists(String(artistId), storefront),
+        ])
+        if (detail.status === 'fulfilled' && detail.value) {
+          const d = detail.value
           setArtist({
-            id: Number(detail.artist.id) || 0,
-            name: detail.artist.name,
-            picUrl: detail.artist.artworkUrl || '',
+            id: Number(d.artist.id) || 0,
+            name: d.artist.name,
+            picUrl: (catalog.status === 'fulfilled' && catalog.value?.artworkUrl) || d.artist.artworkUrl || '',
+            description: catalog.status === 'fulfilled' ? catalog.value?.bio : undefined,
             platform: 'apple',
           })
-          setHotSongs(detail.topSongs.map(song => appleSongToSong(song, storefront)))
+          setHotSongs(d.topSongs.map(song => appleSongToSong(song, storefront)))
         } else {
           setHotSongsError('未找到该 Apple 艺人')
+        }
+        if (related.status === 'fulfilled') {
+          setSimilarArtists(related.value.map(ra => ({ id: ra.id, name: ra.name, picUrl: ra.artworkUrl })))
         }
         setLoading(false)
         return
@@ -697,7 +708,7 @@ export default function ArtistDetailModal({
   // 打开歌手详情时按当前账号是否已关注初始化按钮状态（QQ 传 mid，网易云传数字 id）；
   // 汽水无关注查询接口，跳过（按钮本身也不渲染）
   useEffect(() => {
-    if (!artist || platform === 'apple' || platform === 'soda') return
+    if (!artist || platform === 'apple' || platform === 'soda' || platform === 'kugou') return
     let cancelled = false
     const id = platform === 'qq' ? String(artist.mid || artist.id) : String(artist.id)
     setFollowing(false)
@@ -817,7 +828,24 @@ export default function ArtistDetailModal({
     setLoadingAlbums(true)
     try {
       console.log('📀 [ArtistDetailModal] 加载专辑:', artistId, platform)
-      
+
+      // Apple：目录艺人专辑（amp-api catalog artists/{id}/albums）
+      if (platform === 'apple') {
+        const storefront = localStorage.getItem('appleStorefront') || 'cn'
+        const albumsData = await getAppleCatalogArtistAlbums(String(artistId), storefront, 200)
+        setAlbums(albumsData.map(album => ({
+          id: Number(album.id) || 0,
+          name: album.name,
+          picUrl: album.artworkUrl || '',
+          artist: { name: album.artistName },
+          publishTime: album.releaseDate ? Date.parse(album.releaseDate) : undefined,
+          size: album.trackCount,
+          platform: 'apple' as const,
+        })))
+        setLoadingAlbums(false)
+        return
+      }
+
       // 分页加载所有专辑
       let allAlbums: Album[] = []
       let page = 0
@@ -859,7 +887,24 @@ export default function ArtistDetailModal({
     setLoadingMVs(true)
     try {
       console.log('🎬 [ArtistDetailModal] 加载MV:', artistId, platform)
-      
+
+      // Apple：目录艺人音乐视频（amp-api catalog artists/{id}/music-videos）
+      if (platform === 'apple') {
+        const storefront = localStorage.getItem('appleStorefront') || 'cn'
+        const videos = await getAppleCatalogArtistMusicVideos(String(artistId), storefront, 100)
+        setMvs(videos.map(video => ({
+          id: video.id,
+          name: video.name,
+          imgurl16v9: video.artworkUrl || '',
+          imgurl: video.artworkUrl || '',
+          duration: video.durationMs,
+          artist: video.artistName,
+          platform: 'apple' as const,
+        })))
+        setLoadingMVs(false)
+        return
+      }
+
       // 分页加载所有MV
       let allMVs: any[] = []
       let page = 0
@@ -947,8 +992,20 @@ export default function ArtistDetailModal({
   }, [onAlbumOpen])
 
   const handleMvOpen = useCallback((mv: any, index: number) => {
+    // Apple 音乐视频：站内播放弹窗（webPlayback + HLS + Widevine）
+    if (platform === 'apple') {
+      setAppleMvItem({
+        id: String(mv.id || ''),
+        playId: String(mv.id || ''),
+        type: 'music-videos',
+        name: mv.name || '',
+        artistName: mv.artist || '',
+        artworkUrl: mv.imgurl16v9 || mv.imgurl || '',
+      })
+      return
+    }
     setSelectedMV({ id: mv.id, name: mv.name, platform: mv.platform, index })
-  }, [])
+  }, [platform])
 
   // 使用艺人头像作为背景
   const backgroundImage = artist?.picUrl || ''
@@ -1128,7 +1185,7 @@ export default function ArtistDetailModal({
                         播放全部
                       </button>
                       {/* 汽水无关注/订阅歌手接口，不渲染「关注」按钮 */}
-                      {platform !== 'apple' && platform !== 'soda' && (
+                      {platform !== 'apple' && platform !== 'soda' && platform !== 'kugou' && (
                       <button
                         onClick={handleFollow}
                         disabled={followingLoading}
@@ -1209,7 +1266,7 @@ export default function ArtistDetailModal({
               )}
             </button>
             {/* 汽水无艺人专辑列表接口，不显示「专辑」标签 */}
-            {platform !== 'apple' && platform !== 'soda' && (
+            {platform !== 'soda' && (
             <button
               onClick={() => setActiveTab('albums')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1230,7 +1287,7 @@ export default function ArtistDetailModal({
             </button>
             )}
             {/* 汽水无 MV 数据源，不显示「视频」标签 */}
-            {platform !== 'apple' && platform !== 'soda' && (
+            {platform !== 'soda' && platform !== 'kugou' && (
             <button
               onClick={() => setActiveTab('videos')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1273,7 +1330,7 @@ export default function ArtistDetailModal({
             )}
 
             {/* 相似歌手 — 仅在获取到相似歌手后显示 */}
-            {similarArtists.length > 0 && platform !== 'apple' && (
+            {similarArtists.length > 0 && (
               <button
                 onClick={() => setActiveTab('similarArtists')}
                 className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1802,6 +1859,12 @@ export default function ArtistDetailModal({
             onClose={() => setSelectedMV(null)}
             mvList={mvs.map(mv => ({ id: mv.id, name: mv.name, platform: mv.platform }))}
             currentIndex={selectedMV.index}
+          />
+        )}
+        {appleMvItem && (
+          <AppleVideoModal
+            item={appleMvItem}
+            onClose={() => setAppleMvItem(null)}
           />
         )}
       </AnimatePresence>

@@ -277,8 +277,10 @@ export default function SearchPanel({
     if (!song1 || !song2) return false
     // 优先使用 id 或 mid 比较
     if (song1.platform && song2.platform && song1.platform !== song2.platform) return false
-    if (song1.mid && song2.mid) return song1.mid === song2.mid
-    if (song1.id && song2.id) return song1.id === song2.id
+    // Apple：id 可能为 0（库内曲目 l. 前缀非数字），用 appleId 判定
+    const id1 = song1.mid || song1.appleId || (song1.id ? String(song1.id) : '')
+    const id2 = song2.mid || song2.appleId || (song2.id ? String(song2.id) : '')
+    if (id1 && id2) return id1 === id2
     // 否则使用名称和艺人比较
     return song1.name === song2.name && 
            song1.artists?.[0]?.name === song2.artists?.[0]?.name
@@ -1639,7 +1641,7 @@ export default function SearchPanel({
               />
               <ScrollToCurrentSong
                 scrollContainerRef={scrollContainerRef}
-                currentSongIndex={currentSong ? displayedResults.findIndex(song => song.id === currentSong.id && song.mid === currentSong.mid) : -1}
+                currentSongIndex={currentSong ? displayedResults.findIndex(song => isSameSong(song, currentSong)) : -1}
                 theme={playerTheme}
               />
             </>

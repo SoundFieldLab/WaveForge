@@ -14,6 +14,8 @@ interface PlayerControlsProps {
   isPlaying: boolean
   currentTime: number
   duration: number
+  /** 直播流（Apple 电台等）：显示 LIVE 指示、禁拖动进度 */
+  live?: boolean
   volume?: number
   onPlayPause: () => void
   onSeek: (time: number) => void
@@ -175,6 +177,7 @@ export default function PlayerControls({
   isPlaying,
   currentTime,
   duration,
+  live = false,
   volume,
   onVolumeChange,
   onPlayPause,
@@ -501,7 +504,9 @@ export default function PlayerControls({
   // 过渡期间合成 currentTime 可能超过源曲时长（AI 长混音从源曲深处起步）：
   // 显示时长自适应为 max(原时长, 当前时间)，进度条/总时长跟随，不再顶着曲尾不动。
   const effectiveDuration = Math.max(duration, displayTime)
-  const progressPercent = (displayTime / effectiveDuration) * 100
+  // 直播流（Apple 电台）：时长恒为 0，进度条不走、总时长显示 LIVE 徽标
+  const isLiveStream = Boolean(live)
+  const progressPercent = isLiveStream ? 0 : (displayTime / effectiveDuration) * 100
   const iconColor = getContrastColor(accentColor)
   const isLightTheme = playerTheme === 'light'
   const progressAccentColor = isTransitioning && transitionToAccentColor
@@ -580,12 +585,13 @@ export default function PlayerControls({
             min="0"
             max={effectiveDuration}
             value={displayTime}
+            disabled={isLiveStream}
             onMouseDown={() => setIsDragging(true)}
             onTouchStart={() => setIsDragging(true)}
             onChange={handleSeekChange}
             onMouseUp={handleSeekMouseUp}
             onTouchEnd={handleSeekTouchEnd}
-            className="progress-slider w-full h-1.5 hover:h-2.5 rounded-full appearance-none cursor-pointer transition-all duration-200"
+            className={`progress-slider w-full h-1.5 hover:h-2.5 rounded-full appearance-none cursor-pointer transition-all duration-200 ${isLiveStream ? 'opacity-60' : ''}`}
             style={{
               background: `linear-gradient(to right, ${progressFillColor} 0%, ${progressFillColor} ${progressPercent}%, ${progressTrackColor} ${progressPercent}%, ${progressTrackColor} 100%)`,
             }}
@@ -595,7 +601,14 @@ export default function PlayerControls({
         <span className={`text-xs font-medium min-w-[38px] text-center leading-none ${
           playerTheme === 'dark' ? 'text-white/80' : 'text-black/70'
         }`}>
-          {formatTime(effectiveDuration)}
+          {isLiveStream ? (
+            <span className="inline-flex items-center gap-1 font-semibold" style={{ color: progressFillColor }}>
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+              直播
+            </span>
+          ) : (
+            formatTime(effectiveDuration)
+          )}
         </span>
       </div>
     </div>

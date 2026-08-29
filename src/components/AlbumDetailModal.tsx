@@ -1,7 +1,7 @@
 import { memo, useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Info, Loader, Heart } from 'lucide-react'
-import { getAlbumDetail, getAlbumSongs, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed } from '../services/musicApi'
+import { getAlbumDetail, getAlbumSongs, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong } from '../services/musicApi'
 import { fetchSodaAlbumTracks, collectSodaAlbum } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleAlbumDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
@@ -160,10 +160,7 @@ function AlbumDetailModal({
   const readableAccentColor = getReadableAccentColor(accentColor, '#dbeafe')
 
   // 判断是否是当前播放的歌曲
-  const isCurrentSong = (song: Song) => {
-    if (!currentSong) return false
-    return currentSong.id === song.id && currentSong.platform === song.platform
-  }
+  const isCurrentSong = (song: Song) => isSameSong(currentSong, song)
 
   // 查找当前播放歌曲在列表中的索引
   const currentSongIndex = songs.findIndex(song => isCurrentSong(song))

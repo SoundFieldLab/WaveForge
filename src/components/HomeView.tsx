@@ -4,13 +4,13 @@ import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
 import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
-import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, getSongUrl } from '../services/musicApi'
+import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
 import { getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, streamNeteasePlaylistTracks } from '../services/playlistService'
-import { getAppleLibraryPlaylists, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, APPLE_LIBRARY_ID, isAppleLovedPlaylistName } from '../services/appleCatalog'
+import { getAppleLibraryPlaylists, enrichApplePlaylistTrackCounts, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, APPLE_LIBRARY_ID, isAppleLovedPlaylistName } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
 import { imageCache } from '../utils/imageCache'
 import { wallpaperManager, WallpaperFile } from '../services/wallpaperManager'
@@ -1028,6 +1028,26 @@ function HomeView({
         return
       }
 
+      // 酷狗：经 playlistService 统一详情（公开详情失败回退用户歌单曲目接口）。
+      // 此前缺失该分支时，酷狗歌单（含「我喜欢」）点击后不发起任何请求，详情面板永远为空列表。
+      if (playlistPlatform === 'kugou') {
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'kugou')
+        if (!isCurrentRequest()) return
+        const detailed = {
+          ...playlist,
+          ...data?.playlist,
+          name: data?.playlist?.name || playlist.name,
+          coverImgUrl: data?.playlist?.coverImgUrl || playlist.coverImgUrl,
+          trackCount: data?.playlist?.trackCount || playlist.trackCount,
+          platform: 'kugou',
+          isLike: playlist.isLike,
+          isCollected: playlist.isCollected,
+        }
+        setSelectedPlaylist(detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        return
+      }
+
       if (playlistPlatform === 'netease') {
         await streamNeteasePlaylistTracks(playlist.id, {
           signal: abortController.signal,
@@ -1340,7 +1360,7 @@ function HomeView({
         if (!ok) throw new Error('从 Apple 歌单移除歌曲失败，请检查登录状态')
         playlistPlaybackCacheRef.current.delete(getPlaylistPlaybackCacheKey(selectedPlaylist))
         setPlaylistSongs(previous => previous.filter(item => !(
-          item.id === song.id && item.platform === song.platform
+          isSameSong(item, song)
         )))
         setSelectedPlaylist((previous: any) => previous ? {
           ...previous,
@@ -1378,7 +1398,7 @@ function HomeView({
       if (selectedPlaylist && selectedMutationId === playlistId) {
         playlistPlaybackCacheRef.current.delete(getPlaylistPlaybackCacheKey(selectedPlaylist))
         setPlaylistSongs(previous => previous.filter(item => !(
-          item.id === song.id && item.platform === song.platform
+          isSameSong(item, song)
         )))
         setSelectedPlaylist((previous: any) => previous ? {
           ...previous,
@@ -1399,7 +1419,7 @@ function HomeView({
     if (!removed) return
 
     setPlaylistSongs(previous => previous.filter(item => !(
-      item.id === song.id && item.platform === song.platform
+      isSameSong(item, song)
     )))
     setSelectedPlaylist((previous: any) => previous ? {
       ...previous,
@@ -1413,11 +1433,13 @@ function HomeView({
     const loadId = ++playlistLoadIdRef.current
     setPlaylistLoading(true)
     try {
-      // Apple：资料库歌单（amp-api）
+      // Apple：资料库歌单（amp-api）；列表接口对喜爱歌曲/收藏类歌单不返回 trackCount，
+      // 补拉一次曲目数，避免卡片显示「首歌曲」（空）或详情「undefined 首歌曲」
       if (platform === 'apple') {
         const playlists = await getAppleLibraryPlaylists(100)
+        const enriched = await enrichApplePlaylistTrackCounts(playlists)
         if (loadId !== playlistLoadIdRef.current) return
-        setUserPlaylists(playlists)
+        setUserPlaylists(enriched)
         if (showFeedback) showPlaylistToast('歌单列表已刷新', 'success')
         return
       }
@@ -1891,8 +1913,12 @@ function HomeView({
           getAppleLibrarySongs(100),
         ])
         if (loadId !== playlistLoadIdRef.current) return
-        // 资料库歌单：Apple 的「喜爱歌曲（Loved）」自动歌单 → isLike（爱心），重命名 + 首曲封面
-        const playlists = (playlistsRes.status === 'fulfilled' ? playlistsRes.value : []).map(playlist => ({
+        // 资料库歌单：列表接口对喜爱歌曲/收藏类不返回 trackCount → 补拉曲目数；
+        // Apple 的「喜爱歌曲（Loved）」自动歌单 → isLike（爱心），重命名 + 首曲封面
+        const rawPlaylists = playlistsRes.status === 'fulfilled' ? playlistsRes.value : []
+        const enrichedPlaylists = await enrichApplePlaylistTrackCounts(rawPlaylists)
+        if (loadId !== playlistLoadIdRef.current) return
+        const playlists = enrichedPlaylists.map(playlist => ({
           ...playlist,
           coverImgUrl: playlist.artworkUrl || '',
           isLike: isAppleLovedPlaylistName(playlist.name || ''),
@@ -2659,7 +2685,7 @@ function HomeView({
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className={`text-sm font-medium line-clamp-2 ${playerTheme === 'dark' ? 'text-white' : 'text-black/85'}`}>{playlist.name}</div>
-                            <div className={`text-xs mt-0.5 ${playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'}`}>{playlist.trackCount} 首歌曲</div>
+                            <div className={`text-xs mt-0.5 ${playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'}`}>{playlist.trackCount || 0} 首歌曲</div>
                           </div>
                           <button
                             onClick={(e) => handlePlayPlaylist(playlist, e)}
@@ -2847,7 +2873,7 @@ function HomeView({
 
                     {/* 歌曲数量 */}
                     <div className={`relative z-10 text-xs self-end pr-12 ${playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'}`}>
-                      {playlist.trackCount} 首歌曲
+                      {playlist.trackCount || 0} 首歌曲
                     </div>
 
                     {(

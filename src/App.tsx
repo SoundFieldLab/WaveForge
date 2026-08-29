@@ -422,7 +422,9 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
 })
 
 function getSongKey(song: Song): string {
-  return `${song.platform || 'netease'}-${song.mid || song.id}`
+  // Apple：id 可能为 0（库内曲目 l. 前缀非数字），必须用 appleId 保证每首歌唯一——
+  // 否则所有 AM 歌曲都是 apple-0，预载/URL 缓存/AutoMix 全部串歌（播放货不对板）
+  return `${song.platform || 'netease'}-${song.mid || song.appleId || song.id}`
 }
 
 // 纯音乐判定（现代歌词模式：纯音乐时封面居中显示）。
@@ -634,6 +636,8 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0)
   const currentTimeCommitRef = useRef({ wallTime: 0, playbackTime: 0 })
   const [duration, setDuration] = useState(0)
+  /** 当前曲目是否为直播流（Apple 电台等；直播时播放器显示 LIVE 指示、禁拖动） */
+  const [isLive, setIsLive] = useState(false)
   const [volume, setVolume] = useState(1.0) // 默认音量100%
   const [showSearch, setShowSearch] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
@@ -1362,7 +1366,7 @@ function App() {
 
     const platform = song.platform || 'netease'
     // 汽水的 item_id 是超长数字串，Number 化会截断失配，必须用原始 mid
-    const songId = (platform === 'qq' || platform === 'soda') ? (song.mid || song.id) : song.id
+    const songId = (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (song.mid || song.id) : song.id
     const lyricsCacheGeneration = lyricsCacheGenerationRef.current
     let lyricsLoadedFromPersistentCache = false
     // 歌词缓存版本：评分/数据源/解析逻辑变更时递增，使旧缓存（旧解析选中的劣质/残缺源）失效。
@@ -1929,6 +1933,7 @@ function App() {
         }
       }
     if (state.duration !== undefined) setDuration(state.duration)
+    if (state.live !== undefined) setIsLive(state.live)
     if (state.volume !== undefined) setVolume(state.volume)
     if (state.transitioning !== undefined) setIsTransitioning(state.transitioning)
     if (state.transitionState !== undefined) setTransitionState(state.transitionState)
@@ -3136,8 +3141,10 @@ function App() {
     setPlaylist(nextPlaylist)
     setCurrentIndex(selectedIndex)
 
-    setEnteredFromMode(inferredOrigin.mode || viewMode)
-    if (viewMode !== 'minimal') {
+    const originMode = inferredOrigin.mode || viewMode
+    setEnteredFromMode(originMode)
+    // 传统模式：选歌原地播放，不跳播放页（播放页入口在右栏「正在播放」）；其余模式保持原有跳转
+    if (viewMode !== 'minimal' && originMode !== 'traditional') {
       setViewMode('minimal')
       localStorage.setItem('viewMode', 'minimal')
     }
@@ -3474,7 +3481,7 @@ function App() {
         ? resolvePlayableSong(song).then(resolved => resolved
             ? { songId: resolved.platform === 'qq' ? resolved.mid || resolved.id : resolved.id, platform: resolved.platform || 'netease' }
             : null)
-        : Promise.resolve({ songId: (platform === 'qq' || platform === 'soda') ? (song.mid || song.id) : song.id, platform })
+        : Promise.resolve({ songId: (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (song.mid || song.id) : song.id, platform })
       
       // 检查缓存是否已存在且未过期（5分钟内有效）
       const cached = preloadCacheRef.current.get(cacheKey)
@@ -3657,7 +3664,7 @@ function App() {
         cached?.url
         && Date.now() - (cached.urlTimestamp ?? cached.timestamp) < 5 * 60 * 1000
       )
-      const songId = (resolvedPlatform === 'qq' || resolvedPlatform === 'soda') ? (playable.mid || playable.id) : playable.id
+      const songId = (resolvedPlatform === 'qq' || resolvedPlatform === 'soda' || resolvedPlatform === 'kugou') ? (playable.mid || playable.id) : playable.id
       const audioUrlGeneration = audioUrlCacheGenerationRef.current
       const url = cachedUrlIsFresh ? cached!.url : await getSongUrl(songId, resolvedPlatform)
       if (!url || url === 'SONG_UNAVAILABLE') return null
@@ -3856,7 +3863,13 @@ function App() {
       // 已登录且未关闭开关、环境有 Widevine 时优先取流，命中则直接播 Apple 原版
       // （彻底消除「货不对板」）；任何一步失败回退下方网易云/QQ 载体匹配。
       let appleHlsStream: AppleNativeStream | null = null
-      if (normalizedSong.platform === 'apple' && isAppleNativeStreamEnabled()) {
+      // Apple Music 电台直播：流已由探索页经 /v1/play/assets 取好（含 playParams），
+      // 直接进 HLS 管线；不经 webPlayback，也不做网易云/QQ 载体匹配（电台没有同款歌曲）
+      const radioStream = (normalizedSong as { appleRadio?: { stream: AppleNativeStream } | null }).appleRadio?.stream
+      if (radioStream) {
+        appleHlsStream = radioStream
+        debugLog('📻 [PlaySong] Apple 电台直播流就绪: ' + radioStream.url.slice(0, 96))
+      } else if (normalizedSong.platform === 'apple' && isAppleNativeStreamEnabled()) {
         const streamId = String(normalizedSong.appleId || normalizedSong.id || '')
         const emeCapable = await isAppleEmeCapable()
         if (streamId && streamId !== '0' && emeCapable) {
@@ -3898,7 +3911,7 @@ function App() {
       setCurrentTranslation('')
       
       const platform = audioSong.platform || 'netease'
-      const songId = (platform === 'qq' || platform === 'soda') ? (audioSong.mid || audioSong.id) : audioSong.id
+      const songId = (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (audioSong.mid || audioSong.id) : audioSong.id
       debugLog(`  歌手: ${normalizedSong.artists.map(a => a.name).join(', ')}`)
       if (platform === 'qq') {
         const cookie = localStorage.getItem('qq_cookie')
@@ -4054,6 +4067,10 @@ function App() {
         // 给可感知提示即可，用户可重试或切下一首（切歌会重新走完整取流流程）
         if (appleHlsStream) {
           console.warn('[PlaySong] Apple 原生 HLS 播放失败:', firstPlaybackError)
+          // 电台直播：给出可感知提示（歌曲路径保持静默回退，用户偏好）
+          if ((normalizedSong as { appleRadio?: unknown }).appleRadio) {
+            addToast('电台直播播放失败（网络或授权问题），请重试', 'error')
+          }
           // 静默处理：不外弹提示（用户偏好），仅转发主进程控制台便于排查
           try {
             ;(window as any).electron?.log?.(`[ApplePlayback] HLS 播放失败: ${firstPlaybackError instanceof Error ? firstPlaybackError.message : String(firstPlaybackError)}`)
@@ -5281,9 +5298,20 @@ function App() {
     if (!bridge?.onKugouAuthResult) return
     const unsub = bridge.onKugouAuthResult((result: any) => {
       if (!result?.success || !result.cookie) return
-      if (result.username) localStorage.setItem('kugou_username', result.username)
-      if (result.userId) localStorage.setItem('kugou_user_id', result.userId)
-      if (result.avatar) localStorage.setItem('kugou_avatar', result.avatar)
+      // 同时写 localStorage 与 React state：只落盘会导致登录后
+      // 简约模式（读 state）头像/昵称空白，重启后（读 localStorage）才出现
+      if (result.username) {
+        setKugouUsername(result.username)
+        localStorage.setItem('kugou_username', result.username)
+      }
+      if (result.userId) {
+        setKugouUserId(String(result.userId))
+        localStorage.setItem('kugou_user_id', String(result.userId))
+      }
+      if (result.avatar) {
+        setKugouAvatar(result.avatar)
+        localStorage.setItem('kugou_avatar', result.avatar)
+      }
     })
     return () => { try { unsub?.() } catch { /* 忽略 */ } }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5361,8 +5389,14 @@ function App() {
         setKugouUsername(session.username)
         localStorage.setItem('kugou_username', session.username)
       }
-      if (session.userId) localStorage.setItem('kugou_user_id', session.userId)
-      if (session.avatar) localStorage.setItem('kugou_avatar', session.avatar)
+      if (session.userId) {
+        setKugouUserId(String(session.userId))
+        localStorage.setItem('kugou_user_id', String(session.userId))
+      }
+      if (session.avatar) {
+        setKugouAvatar(session.avatar)
+        localStorage.setItem('kugou_avatar', session.avatar)
+      }
       if (!kugouLoggedIn) {
         setKugouLoggedIn(true)
         setAuthRevision(previous => previous + 1)
@@ -5439,8 +5473,14 @@ function App() {
             if (info?.nickname) {
               setKugouUsername(info.nickname)
               localStorage.setItem('kugou_username', info.nickname)
-              if (info.user_id) localStorage.setItem('kugou_user_id', String(info.user_id))
-              if (info.avatar) localStorage.setItem('kugou_avatar', info.avatar)
+              if (info.user_id) {
+                setKugouUserId(String(info.user_id))
+                localStorage.setItem('kugou_user_id', String(info.user_id))
+              }
+              if (info.avatar) {
+                setKugouAvatar(info.avatar)
+                localStorage.setItem('kugou_avatar', info.avatar)
+              }
             }
           }).catch(() => { /* 忽略 */ })
         )
@@ -5775,6 +5815,9 @@ function App() {
     onProfileClick: (platform: MusicPlatform, initialTab?: 'created' | 'subscribed' | 'detail' | 'recent') => void
     onOpenPlayer: () => void
     onExitDesktopMode: () => void
+    onToggleFavorite: () => void
+    onPlayModeChange: () => void
+    onOpenMixingStudio: () => void
   }
   const viewCallbacksRef = useRef<ViewCallbacks>(null as unknown as ViewCallbacks)
   viewCallbacksRef.current = {
@@ -5849,6 +5892,12 @@ function App() {
       setShowHome(false)
       setEnteredFromMode('desktop')
     },
+    onToggleFavorite: () => {
+      const current = playlistRef.current[currentIndexRef.current]
+      if (current) void handlePlaybackToggleFavorite(current, currentSongLiked)
+    },
+    onPlayModeChange: () => handlePlayModeChange(),
+    onOpenMixingStudio: () => setShowMixingStudio(true),
   }
   const viewCallbacks = useMemo<ViewCallbacks>(() => {
     const latest = viewCallbacksRef
@@ -5889,6 +5938,9 @@ function App() {
       onProfileClick: (platform, initialTab) => latest.current.onProfileClick(platform, initialTab),
       onOpenPlayer: () => latest.current.onOpenPlayer(),
       onExitDesktopMode: () => latest.current.onExitDesktopMode(),
+      onToggleFavorite: () => latest.current.onToggleFavorite(),
+      onPlayModeChange: () => latest.current.onPlayModeChange(),
+      onOpenMixingStudio: () => latest.current.onOpenMixingStudio(),
     }
   }, [])
 
@@ -6361,6 +6413,7 @@ function App() {
               isPlaying={isPlaying}
               playbackTimeStore={audioPlayer.playbackTimeStore}
               dominantColor={dominantColor}
+              analyserNode={audioPlayer.analyserNode}
               duration={duration}
               lyrics={lyrics}
               volume={volume}
@@ -6392,6 +6445,11 @@ function App() {
               onProfileClick={handleViewProfileClick}
               onSearchClick={viewCallbacks.onSearchClick}
               onSettingsClick={viewCallbacks.onSettingsClick}
+              liked={currentSongLiked}
+              onToggleFavorite={viewCallbacks.onToggleFavorite}
+              playMode={playMode}
+              onPlayModeChange={viewCallbacks.onPlayModeChange}
+              onOpenMixingStudio={viewCallbacks.onOpenMixingStudio}
               onPlayPause={viewCallbacks.onPlayPause}
               onNext={viewCallbacks.onNext}
               onPrevious={viewCallbacks.onPrevious}
@@ -7463,6 +7521,7 @@ function App() {
                       playbackTimeStore={audioPlayer.playbackTimeStore}
               isPlaying={isPlaying}
               duration={duration}
+              live={isLive}
               volume={volume}
               onPlayPause={handlePlayPause}
               onSeek={handleSeek}

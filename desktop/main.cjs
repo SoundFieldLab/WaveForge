@@ -4224,6 +4224,55 @@ ipcMain.handle('apple-fetch-url', async (_event, payload) => {
   }
 })
 
+// ── Apple Music 电台直播取流（Cider/MusicKit v3 同款）──────────────────────
+// GET api.music.apple.com/v1/play/assets?<playParams>&keyFormat=web，响应
+// results.assets[0] 携带 HLS 主清单 url 与 EME keyURLs（keyServerUrl /
+// widevineKeyCertificateUrl / fairPlayKeyCertificateUrl）。api 宿主不可用时
+// 回退 amp-api（gamdl 常量亦指向 amp-api；两宿主响应结构一致）。
+const APPLE_PLAY_ASSETS_HOSTS = ['https://api.music.apple.com', 'https://amp-api.music.apple.com']
+ipcMain.handle('apple-play-assets', async (_event, payload) => {
+  const { query, developerToken, mediaUserToken } = payload || {}
+  if (typeof query !== 'string' || !query || !developerToken || !mediaUserToken) {
+    return { ok: false, status: 0, error: '缺少参数（query/developerToken/mediaUserToken）' }
+  }
+  // 校验查询串只含 URL 安全字符（防参数注入/拼接）
+  if (!/^[A-Za-z0-9_=&%[\].,-]+$/.test(query)) {
+    return { ok: false, status: 0, error: '非法查询参数' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  const headers = {
+    Authorization: `Bearer ${developerToken}`,
+    Accept: 'application/json',
+    'X-Apple-Music-User-Token': String(mediaUserToken),
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+  }
+  try {
+    for (const host of APPLE_PLAY_ASSETS_HOSTS) {
+      try {
+        const response = await fetch(`${host}/v1/play/assets?${query}`, { headers, signal: controller.signal })
+        const text = await response.text()
+        let data = null
+        try {
+          data = text ? JSON.parse(text) : null
+        } catch {
+          data = text
+        }
+        if (response.ok && Array.isArray(data?.results?.assets) && data.results.assets.length > 0) {
+          return { ok: true, status: response.status, data }
+        }
+        if (response.ok && Array.isArray(data?.errors) && data.errors.length > 0) {
+          return { ok: false, status: response.status, data, error: data.errors[0]?.title || '取流被拒' }
+        }
+      } catch { /* 换宿主重试 */ }
+    }
+    return { ok: false, status: 0, error: 'play/assets 取流失败（两个宿主均无有效响应）' }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 // ── Apple 账号信息（buy.itunes 账号接口，Cider 同款：凭登录窗口抓取的 itunes cookie）──
 ipcMain.handle('apple-account-info', async (event, cookies) => {
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }

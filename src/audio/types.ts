@@ -247,6 +247,8 @@ export interface PlaybackEngineState {
   isPlaying?: boolean
   currentTime?: number
   duration?: number
+  /** 直播流（Apple 电台等）：时长置 0，UI 显示直播指示、禁拖动 */
+  live?: boolean
   volume?: number
   buffered?: number
   ended?: boolean

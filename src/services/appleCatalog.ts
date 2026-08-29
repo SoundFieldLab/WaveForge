@@ -33,6 +33,8 @@ export interface AppleCatalogAlbum {
   artworkUrl?: string
   releaseDate?: string
   genres?: string[]
+  /** 目录专辑曲目数（部分接口返回） */
+  trackCount?: number
 }
 
 export const APPLE_EXPLORE_COUNTRIES = [
@@ -278,12 +280,13 @@ export async function getAppleLibraryPlaylists(limit = 100): Promise<AppleLibrar
 
 /** 用户歌单的曲目 */
 export async function getApplePlaylistTracks(playlistId: string, limit = 300): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}`)
+  const data = await appleMeFetch(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
   const items: any[] = Array.isArray(data?.data) ? data.data : []
   return items
     .filter(item => item?.id && item?.attributes)
     .map(item => ({
       id: String(item.id),
+      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
       name: item.attributes.name || '',
       artistName: item.attributes.artistName || '',
       albumName: item.attributes.albumName || undefined,
@@ -291,6 +294,53 @@ export async function getApplePlaylistTracks(playlistId: string, limit = 300): P
       durationMs: item.attributes.durationInMillis,
     }))
     .filter(track => track.name)
+}
+
+/**
+ * 资料库歌单列表接口对部分歌单（喜爱歌曲 / 收藏类）不返回 trackCount：
+ * 对缺失数量的歌单并行拉一次曲目列表补全（limit=100 以内曲目数即真实数量）。
+ * 并发上限 16 个防刷接口；补齐结果仅在本次返回生效，不落缓存。
+ */
+export async function enrichApplePlaylistTrackCounts(playlists: AppleLibraryPlaylist[]): Promise<AppleLibraryPlaylist[]> {
+  const missing = playlists.filter(playlist => !playlist.trackCount).slice(0, 16)
+  if (missing.length === 0) return playlists
+  const results = await Promise.allSettled(
+    missing.map(playlist => getApplePlaylistTracks(String(playlist.id), 100).then(tracks => tracks.length)),
+  )
+  const countById = new Map<string, number>()
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled' && result.value > 0) countById.set(String(missing[index].id), result.value)
+  })
+  if (countById.size === 0) return playlists
+  return playlists.map(playlist => {
+    const count = countById.get(String(playlist.id))
+    return count !== undefined ? { ...playlist, trackCount: count } : playlist
+  })
+}
+
+/** 用户资料库音乐视频（「资料库 → 音乐视频」分区） */
+export interface AppleLibraryMusicVideo {
+  id: string
+  catalogId?: string
+  name: string
+  artistName: string
+  artworkUrl?: string
+  durationMs?: number
+}
+
+export async function getAppleLibraryMusicVideos(limit = 100): Promise<AppleLibraryMusicVideo[]> {
+  const data = await appleMeFetch(`/v1/me/library/music-videos?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
+  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  return items
+    .filter(item => item?.id && item?.attributes?.name)
+    .map((item: any): AppleLibraryMusicVideo => ({
+      id: String(item.id),
+      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
+      name: item.attributes.name || '',
+      artistName: item.attributes.artistName || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      durationMs: item.attributes.durationInMillis,
+    }))
 }
 
 /** 用户资料库全部歌曲（「我的音乐」） */
@@ -693,6 +743,121 @@ export async function getAppleArtistDetail(artistId: string, country = 'cn'): Pr
     console.warn('[AppleCatalog] 艺人详情失败:', error)
     return null
   }
+}
+
+// ─────────────────────────── 目录艺人扩展（艺人页 专辑/视频/简介/相关艺人） ───────────────────────────
+
+/** 目录艺人详情（amp-api catalog；含编辑简介/流派/高清封面） */
+export interface AppleCatalogArtistDetail {
+  id: string
+  name: string
+  artworkUrl?: string
+  genreNames?: string[]
+  bio?: string
+  url?: string
+}
+
+export async function getAppleCatalogArtist(artistId: string, storefront = 'cn'): Promise<AppleCatalogArtistDetail | null> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return null
+  const result = await appleApiRequest(
+    `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}`
+    + '?fields[artists]=name,url,artwork,genreNames,plainEditorialNotes,editorialNotes',
+    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+  )
+  const resource = result.ok && Array.isArray(result.data?.data) ? result.data.data[0] : null
+  const attrs = resource?.attributes || {}
+  if (!attrs.name) return null
+  const bio = typeof attrs.plainEditorialNotes?.standard === 'string'
+    ? attrs.plainEditorialNotes.standard
+    : typeof attrs.editorialNotes?.standard === 'string' ? attrs.editorialNotes.standard : ''
+  return {
+    id: String(resource.id),
+    name: attrs.name,
+    artworkUrl: attrs.artwork?.url ? toHighResArtwork(attrs.artwork.url, 600) : undefined,
+    genreNames: Array.isArray(attrs.genreNames) ? attrs.genreNames : undefined,
+    bio: bio || undefined,
+    url: attrs.url,
+  }
+}
+
+/** 目录艺人专辑（web 艺人页「专辑/单曲」同款） */
+export async function getAppleCatalogArtistAlbums(artistId: string, storefront = 'cn', limit = 200): Promise<AppleCatalogAlbum[]> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return []
+  const result = await appleApiRequest(
+    `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}/albums?limit=${Math.min(200, Math.max(1, limit))}&include=artists`,
+    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+  )
+  const items = result.ok && Array.isArray(result.data?.data) ? result.data.data : []
+  return items
+    .filter((item: any) => item?.attributes?.name)
+    .map((item: any): AppleCatalogAlbum => ({
+      id: String(item.id),
+      name: item.attributes.name,
+      artistName: item.attributes.artistName || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      releaseDate: item.attributes.releaseDate,
+      genres: Array.isArray(item.attributes.genreNames) ? item.attributes.genreNames : undefined,
+      trackCount: item.attributes.trackCount,
+    }))
+}
+
+/** 目录艺人音乐视频（web 艺人页「视频」同款） */
+export interface AppleCatalogMusicVideo {
+  id: string
+  name: string
+  artistName: string
+  artworkUrl?: string
+  durationMs?: number
+}
+
+export async function getAppleCatalogArtistMusicVideos(artistId: string, storefront = 'cn', limit = 100): Promise<AppleCatalogMusicVideo[]> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return []
+  const result = await appleApiRequest(
+    `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}/music-videos?limit=${Math.min(100, Math.max(1, limit))}&include=artists`,
+    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+  )
+  const items = result.ok && Array.isArray(result.data?.data) ? result.data.data : []
+  return items
+    .filter((item: any) => item?.attributes?.name)
+    .map((item: any): AppleCatalogMusicVideo => ({
+      id: String(item.id),
+      name: item.attributes.name,
+      artistName: item.attributes.artistName || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      durationMs: item.attributes.durationInMillis,
+    }))
+}
+
+/** 相关艺人（尽力而为：catalog include=related-artists 有数据才返回，否则空数组） */
+export async function getAppleCatalogRelatedArtists(artistId: string, storefront = 'cn'): Promise<AppleCatalogArtist[]> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return []
+  const result = await appleApiRequest(
+    `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}?include=related-artists&fields[artists]=name,url,artwork`,
+    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+  )
+  if (!result.ok || !Array.isArray(result.data?.data)) return []
+  const refs: any[] = result.data.data[0]?.relationships?.['related-artists']?.data || []
+  if (refs.length === 0) return []
+  const included = Array.isArray(result.data.included) ? result.data.included : []
+  const byKey = new Map<string, any>()
+  included.forEach((inc: any) => { if (inc?.id) byKey.set(`${inc.type}:${inc.id}`, inc) })
+  const artists: AppleCatalogArtist[] = []
+  refs.forEach((ref: any) => {
+    const res = byKey.get(`${ref.type}:${ref.id}`) || ref
+    const attrs = res?.attributes || {}
+    if (!attrs.name) return
+    artists.push({
+      id: String(res.id || ref.id),
+      name: attrs.name,
+      artworkUrl: attrs.artwork?.url ? toHighResArtwork(attrs.artwork.url, 300) : undefined,
+      url: attrs.url,
+    })
+  })
+  return artists
 }
 
 // ─────────────────────────── 资料库写操作（需登录：Media-User-Token） ───────────────────────────

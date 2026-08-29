@@ -161,7 +161,7 @@
     "@types/three": "^0.184.1",
     "adm-zip": "^0.6.0",
     "autoprefixer": "^10.4.21",
-    "electron": "https://github.com/castlabs/electron-releases#v42.8.0+wvcus",
+    "electron": "github:castlabs/electron-releases#v42.8.0+wvcus",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.12",
     "jsdom": "^29.1.1",

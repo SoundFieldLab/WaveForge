@@ -2,7 +2,7 @@ import { getQQUserDisplayName } from '../utils/qqUser'
 import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Cloud } from 'lucide-react'
-import { Song, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages, getNeteaseCloudSongs } from '../services/musicApi'
+import { Song, isSameSong, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages, getNeteaseCloudSongs } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import CachedImage from './CachedImage'
 import PlaylistContextMenu from './PlaylistContextMenu'
@@ -24,7 +24,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
 import { getAppleAuthState } from '../services/appleAuth'
 import { getPlatformRemainingDays } from '../services/loginExpiry'
-import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, APPLE_LIBRARY_ID, isAppleLovedPlaylistName } from '../services/appleCatalog'
+import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, APPLE_LIBRARY_ID, isAppleLovedPlaylistName, enrichApplePlaylistTrackCounts } from '../services/appleCatalog'
 import { fetchSpotifyMyPlaylists, fetchSpotifyLiked, fetchSpotifyPlaylist, spotifyTrackToSong } from '../services/spotifyService'
 import { detectQQMusicVip } from '../utils/musicEntitlements'
 
@@ -262,7 +262,7 @@ const PlaylistGridCard = memo(function PlaylistGridCard({
         )}
       </div>
       <div className="text-white text-sm font-medium truncate mb-1">{playlist.name}</div>
-      <div className="text-white/50 text-xs">{playlist.trackCount} 首歌曲</div>
+      <div className="text-white/50 text-xs">{playlist.trackCount || 0} 首歌曲</div>
       {showCreator && playlist.creator && (
         <div className="text-white/40 text-xs mt-1">by {playlist.creator.nickname}</div>
       )}
@@ -959,7 +959,7 @@ function ProfileView({
         throw new Error(result?.error || result?.message || '从歌单移除歌曲失败')
       }
       setPlaylistSongs(previous => previous.filter(item => !(
-        item.id === song.id && item.platform === song.platform
+        isSameSong(item, song)
       )))
       const updateTrackCount = (playlist: Playlist | null) => playlist ? {
         ...playlist,
@@ -983,7 +983,7 @@ function ProfileView({
     if (!removed) return
 
     setPlaylistSongs(previous => previous.filter(item => !(
-      item.id === song.id && item.platform === song.platform
+      isSameSong(item, song)
     )))
     const updateTrackCount = (playlist: Playlist | null) => playlist ? {
       ...playlist,
@@ -1055,6 +1055,17 @@ function ProfileView({
       if (platform === 'soda') {
         const data = await getPlaylistDetail(String(playlist.id || ''), 'soda')
         const detailed = { ...playlist, ...data?.playlist, platform: 'soda', isCollected: playlist.isCollected }
+        setSelectedPlaylist(detailed)
+        setManagementPlaylist(detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        return
+      }
+
+      // 酷狗：经 playlistService 统一详情（公开详情失败回退用户歌单曲目接口；
+      // 用户自建歌单/「我喜欢」的 id 是网关 listid，公开 m.kugou.com 详情拿不到曲目）
+      if (platform === 'kugou') {
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'kugou')
+        const detailed = { ...playlist, ...data?.playlist, platform: 'kugou', isCollected: playlist.isCollected }
         setSelectedPlaylist(detailed)
         setManagementPlaylist(detailed)
         setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
@@ -1663,8 +1674,10 @@ function ProfileView({
         getAppleLibrarySongs(500),
       ])
       if (playlistsRes.status === 'fulfilled') {
+        // 列表接口对喜爱歌曲/收藏类歌单不返回 trackCount → 补拉曲目数（否则卡片显示空）
+        const enriched = await enrichApplePlaylistTrackCounts(playlistsRes.value)
         // 喜爱歌曲：重命名为「用户名 的喜爱歌曲」+ 用首曲封面（Apple 系统歌单封面不可靠）
-        const mappedPlaylists = playlistsRes.value.map(playlist => ({
+        const mappedPlaylists = enriched.map(playlist => ({
           id: String(playlist.id),
           name: playlist.name || '未命名歌单',
           trackCount: Number(playlist.trackCount || 0),
