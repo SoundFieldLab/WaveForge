@@ -1,7 +1,7 @@
 // 传统模式独立搜索：不复用全局搜索弹层，在传统三栏布局的主区域内完成
 // 「输入 → 歌曲/歌手/专辑/歌单 分栏结果 → 播放/右键操作」的完整流程。
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { Clock3, Loader2, Music2, Play, Search, SearchX } from 'lucide-react'
+import { Clock3, History, Loader2, Music2, Play, Search, SearchX, Trash2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getProxiedImageUrl, searchAlbums, searchArtists, searchPlaylists, searchSongs } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
@@ -65,15 +65,32 @@ function TraditionalSearch({
   const [albums, setAlbums] = useState<any[]>([])
   const [playlists, setPlaylists] = useState<any[]>([])
   const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
+  const [history, setHistory] = useState<string[]>(() => {
+    try { return Array.isArray(JSON.parse(localStorage.getItem(`waveforge:traditional-search-history:${platform}`) || '[]')) ? JSON.parse(localStorage.getItem(`waveforge:traditional-search-history:${platform}`) || '[]') : [] } catch { return [] }
+  })
   const inputRef = useRef<HTMLInputElement>(null)
   const requestIdRef = useRef(0)
 
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
 
+  // 搜索历史：去重 + 上限 12，按平台分存（与简约模式 SearchPanel 同语义）
+  const pushHistory = useCallback((kw: string) => {
+    setHistory(prev => {
+      const next = [kw, ...prev.filter(item => item !== kw)].slice(0, 12)
+      localStorage.setItem(`waveforge:traditional-search-history:${platform}`, JSON.stringify(next))
+      return next
+    })
+  }, [platform])
+  const clearHistory = useCallback(() => {
+    setHistory([])
+    localStorage.removeItem(`waveforge:traditional-search-history:${platform}`)
+  }, [platform])
+
   const runSearch = useCallback(async (query: string, targetTab: SearchTab) => {
     const trimmed = query.trim()
     if (!trimmed) return
+    pushHistory(trimmed)
     const requestId = ++requestIdRef.current
     setLoading(true)
     setSearched(true)
@@ -109,7 +126,7 @@ function TraditionalSearch({
     } finally {
       if (requestId === requestIdRef.current) setLoading(false)
     }
-  }, [platform])
+  }, [platform, pushHistory])
 
   // 防抖：输入停顿 320ms 后自动搜歌曲（其他分栏在切到时再搜）
   useEffect(() => {
@@ -161,12 +178,26 @@ function TraditionalSearch({
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         {!searched ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3">
-            <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ background: `${accent}22` }}>
-              <Search className="h-7 w-7" style={{ color: accent }} />
+          history.length > 0 ? (
+            <div>
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="flex items-center gap-2 text-sm font-semibold"><History className="h-4 w-4" style={{ color: accent }} />搜索历史</h2>
+                <button type="button" onClick={clearHistory} className={`flex items-center gap-1 text-xs transition hover:opacity-70 ${muted}`}><Trash2 className="h-3.5 w-3.5" />清空</button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {history.map(item => (
+                  <button key={item} type="button" onClick={() => setKeyword(item)} className={`rounded-full border px-3 py-1.5 text-xs transition hover:bg-white/10 ${muted} ${surface}`}>{item}</button>
+                ))}
+              </div>
             </div>
-            <p className={`text-sm ${muted}`}>输入关键词，按下回车或稍等片刻自动搜索</p>
-          </div>
+          ) : (
+            <div className="flex h-full flex-col items-center justify-center gap-3">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full" style={{ background: `${accent}22` }}>
+                <Search className="h-7 w-7" style={{ color: accent }} />
+              </div>
+              <p className={`text-sm ${muted}`}>输入关键词，按下回车或稍等片刻自动搜索</p>
+            </div>
+          )
         ) : loading ? (
           <div className="space-y-2">
             {Array.from({ length: 8 }, (_, index) => <div key={index} className="h-14 animate-pulse rounded-2xl bg-white/10" />)}

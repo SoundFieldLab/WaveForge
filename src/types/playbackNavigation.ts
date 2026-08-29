@@ -18,6 +18,7 @@ export type PlaybackSurface =
   | 'desktop-playlist'
   | 'traditional-playlist'
   | 'traditional-search'
+  | 'traditional-recent'
   | 'traditional-library'
   | 'traditional-album'
   | 'traditional-artist'

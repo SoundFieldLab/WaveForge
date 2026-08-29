@@ -47,7 +47,8 @@ function normalizeNetease(raw: any): CommentItem | null {
       avatarUrl: String(raw.user?.avatarUrl || raw.avatarurl || ''),
       userId: String(raw.user?.userId ?? ''),
     },
-    time: Number(raw.time || 0) * 1000,
+    // 网易云 time 为毫秒（v1/v2 一致）；兼容个别秒级返回
+    time: Number(raw.time || 0) >= 1e12 ? Number(raw.time) : Number(raw.time || 0) * 1000,
     likedCount: Number(raw.likedCount || 0),
     replyCount: Number(raw.showFloorComment?.replyCount || raw.replyCount || 0),
   }
@@ -68,7 +69,7 @@ function normalizeQQ(raw: any): CommentItem | null {
       userId: String(isReplyEnvelope ? raw.encrypt_rootcommentuin || raw.rootcommentuin || '' : raw.encrypt_uin || raw.uin || ''),
     },
     time: Number(raw.time || 0) * 1000,
-    likedCount: Number(raw.likeNum || raw.like || 0),
+    likedCount: Number(raw.praisenum || raw.likeNum || raw.like || 0),
     replyCount: Number(raw.middlecommentcontent?.length || 0),
   }
 }
