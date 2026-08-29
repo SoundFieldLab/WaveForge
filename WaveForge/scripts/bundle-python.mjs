@@ -115,9 +115,13 @@ async function installPip(pythonDir) {
   
   const getPipPath = path.join(pythonDir, 'get-pip.py')
   const pythonExe = path.join(pythonDir, 'python.exe')
-  
-  // 下载 get-pip.py
-  await downloadFile(GET_PIP_URL, getPipPath)
+
+  // 网络不稳时允许预放置 get-pip.py（与上方 Python zip 同样的跳过逻辑）
+  if (!fs.existsSync(getPipPath)) {
+    await downloadFile(GET_PIP_URL, getPipPath)
+  } else {
+    console.log('⏭️  get-pip.py 已存在，跳过下载')
+  }
   
   // 运行 get-pip.py
   console.log('⚙️  运行 pip 安装程序...')

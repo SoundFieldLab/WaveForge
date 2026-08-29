@@ -1,6 +1,11 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
+import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
 import {
   AlertCircle,
@@ -26,6 +31,7 @@ import {
   Waves,
   X,
 } from 'lucide-react'
+import PluginShortcuts from './PluginShortcuts'
 import type { Song } from '../services/musicApi'
 import { getNeteaseBanner, getQQBanner, neteaseRecommendDislike, neteaseFmTrash } from '../services/musicApi'
 import {
@@ -41,8 +47,10 @@ import {
   type ExplorePlatform,
   type ExplorePlaylist,
 } from '../services/exploreApi'
+import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import MiniPlayer from './MiniPlayer'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
+import { AppleExplorePanel } from './AppleExplorePanel'
 import QQMusicJourney from './QQMusicJourney'
 import NeteaseMusicJourney from './NeteaseMusicJourney'
 import { getAppleLibraryPlaylists, APPLE_EXPLORE_COUNTRIES } from '../services/appleCatalog'
@@ -60,7 +68,7 @@ import MVExploreModal from './MVExploreModal'
 import { getUserPlaylists } from '../services/playlistService'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 
-type ViewMode = 'explore' | 'minimal' | 'desktop'
+type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
 const EXPLORE_CACHE_KEY = 'exploreHomeCache-v2'
@@ -87,7 +95,8 @@ interface ExploreViewProps {
   restorePlaybackOrigin?: (PlaybackOrigin & { revision: number }) | null
   currentSong?: Song | null
   isPlaying: boolean
-  currentTime: number
+  /** 播放时间不再经 App 每秒下传（会击穿 memo 整树重渲染）：改由内部叶子组件订阅 */
+  playbackTimeStore: PlaybackTimeStore
   duration: number
   volume: number
   currentLyric?: string
@@ -225,6 +234,10 @@ function CoverWallBackground({
   blurPx: number
   accentRgb: string
 }) {
+  const tvMode = useTvMode()
+  // TV 上封面墙漂移 = 全屏 backdrop-filter 每帧对移动封面重模糊（弱 GPU 帧率杀手）；
+  // 非增强档停掉漂移、保留静态封面墙；桌面/增强档行为不变。
+  const driftAnimated = animated && (!tvMode || isPerfModeEnhanced())
   const urls = useMemo(() => {
     const unique = Array.from(new Set(covers.filter(Boolean)))
     // 扩充到足够铺满背景的封面数
@@ -248,7 +261,7 @@ function CoverWallBackground({
       <div
         className="absolute inset-[-20%]"
         style={{
-          animation: animated ? 'coverWallDrift 90s linear infinite' : undefined,
+          animation: driftAnimated ? 'coverWallDrift 90s linear infinite' : undefined,
           display: 'grid',
           gridTemplateColumns: 'repeat(7, 1fr)',
           gridAutoRows: 'minmax(0, 1fr)',
@@ -465,12 +478,25 @@ const writeExploreCache = (platform: ExplorePlatform, payload: ExplorePayload) =
   localStorage.setItem(EXPLORE_CACHE_KEY, JSON.stringify(next))
 }
 
+// 迷你播放器包装：内部订阅播放时间（4Hz），ExploreView 本体不再因 currentTime prop 每秒重渲染
+const LiveExploreMiniPlayer = memo(function LiveExploreMiniPlayer({
+  playbackTimeStore,
+  ...props
+}: { playbackTimeStore: PlaybackTimeStore } & Omit<ComponentProps<typeof MiniPlayer>, 'currentTime'>) {
+  const currentTime = useSyncExternalStore(
+    playbackTimeStore.subscribe,
+    playbackTimeStore.getSnapshot,
+    playbackTimeStore.getSnapshot,
+  ).currentTime
+  return <MiniPlayer {...props} currentTime={currentTime} />
+})
+
 function ExploreView({
   onSongSelect,
   restorePlaybackOrigin,
   currentSong = null,
   isPlaying,
-  currentTime,
+  playbackTimeStore,
   duration,
   volume,
   currentLyric = '',
@@ -577,6 +603,8 @@ function ExploreView({
     continuous: boolean
   }>({ show: false, x: 0, y: 0, song: null, songs: [], continuous: false })
   const [shuffleOffset, setShuffleOffset] = useState(0)
+  // Apple Music 刷新信号（AM 无「换一批」，顶栏按钮改为刷新，信号传给 AppleExplorePanel 强制重载）
+  const [appleRefreshSignal, setAppleRefreshSignal] = useState(0)
   const [showModePanel, setShowModePanel] = useState(false)
   const [showMVExplore, setShowMVExplore] = useState(false)
   const [fmLoading, setFmLoading] = useState(false)
@@ -700,6 +728,8 @@ function ExploreView({
   const tvMode = useTvMode()
   const remoteCursorMode = useRemoteCursorMode()
   const topBarActive = (tvMode && !remoteCursorMode) || modeTriggerHovered
+  // 常驻小元素（模式下拉 chevron）的无限浮动：TV 非增强档静态化（JS 动画，tv.css 杀不掉）
+  const tvChevronFloat = !tvMode || isPerfModeEnhanced()
 
   useEffect(() => {
     const closeForModeSwitch = () => {
@@ -848,10 +878,19 @@ function ExploreView({
         })
       return () => { active = false }
     }
-    // 汽水：暂无用户歌单接口，不发起请求
+    // 汽水：侧栏直接拉取真实用户歌单（含"我喜欢"虚拟歌单；未登录自然返回空数组）
     if (platform === 'soda') {
-      setUserPlaylists([])
-      return
+      let active = true
+      const shouldForceRefresh = authRevision !== playlistAuthRevisionRef.current
+      playlistAuthRevisionRef.current = authRevision
+      void getUserPlaylists('soda', '', sodaUsername, { forceRefresh: shouldForceRefresh })
+        .then(playlists => {
+          if (active) setUserPlaylists(playlists || [])
+        })
+        .catch(() => {
+          if (active) setUserPlaylists([])
+        })
+      return () => { active = false }
     }
     const isLoggedIn = platform === 'qq' ? qqLoggedIn : neteaseLoggedIn
     const userId = platform === 'qq' ? qqUserId || '' : neteaseUserId || ''
@@ -1280,8 +1319,8 @@ function ExploreView({
               whileTap={{ scale: 0.98 }}
             >
               <motion.svg
-                animate={{ y: [0, 2, 0] }}
-                transition={{ duration: 1, repeat: Infinity }}
+                animate={tvChevronFloat ? { y: [0, 2, 0] } : { y: 0 }}
+                transition={tvChevronFloat ? { duration: 1, repeat: Infinity } : { duration: 0 }}
                 className="h-6 w-6"
                 fill="none"
                 stroke="currentColor"
@@ -1360,25 +1399,6 @@ function ExploreView({
               ))}
             </div>
 
-            {platform === 'apple' && (
-              <div className="ml-1 flex items-center gap-0.5 rounded-2xl border border-white/[0.08] bg-black/20 p-1">
-                <Globe className="ml-1.5 h-3.5 w-3.5 shrink-0 text-white/35" />
-                {APPLE_EXPLORE_COUNTRIES.map(item => (
-                  <button
-                    key={item.code}
-                    type="button"
-                    onClick={() => changeAppleCountry(item.code)}
-                    className={`rounded-lg px-2 py-1 text-xs transition ${
-                      appleCountry === item.code ? 'font-medium text-[#081017]' : 'text-white/55 hover:bg-white/[0.06] hover:text-white'
-                    }`}
-                    style={appleCountry === item.code ? { background: accent } : undefined}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-
             <div className="ml-auto flex items-center gap-2">
               {getPlatformCapabilities(platform).radio && (
                 <button
@@ -1427,6 +1447,8 @@ function ExploreView({
               >
                 <Settings className="h-[18px] w-[18px]" />
               </button>
+              {/* 插件系统入口 */}
+              <PluginShortcuts variant="explore" />
               <button
                 type="button"
                 onClick={() => {
@@ -1480,15 +1502,28 @@ function ExploreView({
                   登录解锁个性化
                 </button>
               )}
-              <button
-                type="button"
-                onClick={handleShuffle}
-                disabled={loading}
-                className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
-              >
-                <RefreshCw key={shuffleOffset} className="h-4 w-4 animate-[spin_0.45s_ease-out_1]" />
-                换一批
-              </button>
+              {platform === 'apple' ? (
+                /* Apple Music 无「换一批」（内容非分页随机），此位置改为刷新（重载当前页签） */
+                <button
+                  type="button"
+                  onClick={() => setAppleRefreshSignal(v => v + 1)}
+                  disabled={loading}
+                  className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw key={appleRefreshSignal} className={`h-4 w-4 ${appleRefreshSignal > 0 ? 'animate-[spin_0.45s_ease-out_1]' : ''}`} />
+                  刷新
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleShuffle}
+                  disabled={loading}
+                  className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.055] px-4 text-sm text-white/60 transition hover:bg-white/[0.1] hover:text-white disabled:cursor-wait disabled:opacity-50"
+                >
+                  <RefreshCw key={shuffleOffset} className="h-4 w-4 animate-[spin_0.45s_ease-out_1]" />
+                  换一批
+                </button>
+              )}
             </div>
           </div>
 
@@ -1509,6 +1544,23 @@ function ExploreView({
           {/* 首页 Banner 轮播（网易云 / QQ） */}
           <ExploreBanner banners={banners} onBannerClick={handleBannerClick} />
 
+          {platform === 'apple' ? (
+            <AppleExplorePanel
+              appleLoggedIn={appleLoggedIn}
+              appleUsername={appleUsername}
+              appleAvatar={appleAvatar}
+              defaultStorefront={appleStorefront}
+              accentColor={accent}
+              accentRgb={accentRgb}
+              playerTheme={playerTheme}
+              onSongSelect={onSongSelect}
+              onLoginClick={() => onLoginClick('apple')}
+              onOpenAlbum={onOpenAlbum}
+              onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
+              refreshSignal={appleRefreshSignal}
+            />
+          ) : (
+          <>
           {loading && !payload ? (
             <ExploreSkeleton />
           ) : payload ? (
@@ -1622,23 +1674,29 @@ function ExploreView({
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
                   {[
                     {
-                      label: payload.dailySongs.length ? '每日推荐' : '今日热选',
-                      title: payload.dailySongs.length ? '只属于你的每日歌单' : '今天大家都在听',
-                      copy: payload.dailySongs.length ? '根据近期口味持续更新' : '无需登录，也能发现好音乐',
+                      // 汽水登录态下后端返回个性化日推（payload.personalized），
+                      // 标题体现「汽水·每日推荐」；未登录为公开热歌回退，文案如实标注
+                      label: payload.dailySongs.length
+                        ? (platform === 'soda' && payload.personalized ? '汽水·每日推荐' : '每日推荐')
+                        : '今日热选',
+                      title: payload.dailySongs.length
+                        ? (platform === 'soda' && !payload.personalized ? '汽水实时热门歌曲' : '只属于你的每日歌单')
+                        : '今天大家都在听',
+                      copy: payload.dailySongs.length
+                        ? (platform === 'soda' && !payload.personalized ? '登录汽水音乐后升级为个性化日推' : '根据近期口味持续更新')
+                        : '无需登录，也能发现好音乐',
                       icon: Sparkles,
                       cover: payload.dailySongs[1]?.album.picUrl || payload.newSongs[0]?.album.picUrl,
                       songs: payload.dailySongs.length ? payload.dailySongs : payload.newSongs,
                     },
                     {
-                      label: platform === 'qq' ? '猜你喜欢' : platform === 'apple' ? '今日热选' : platform === 'netease' ? '私人漫游' : '新鲜首发',
-                      title: platform === 'apple' ? '苹果全球热榜' : (platform === 'netease' || platform === 'qq') ? '一键进入无限电台' : '刚刚上线的新鲜声音',
-                      copy: platform === 'apple'
-                        ? `${payload.dailySongs.length} 首热门歌曲一次听完`
-                        : payload.radioSongs.length ? '越听越懂你的连续推荐' : '从相似口味自然延伸',
+                      label: platform === 'qq' ? '猜你喜欢' : platform === 'netease' ? '私人漫游' : '新鲜首发',
+                      title: (platform === 'netease' || platform === 'qq') ? '一键进入无限电台' : '刚刚上线的新鲜声音',
+                      copy: payload.radioSongs.length ? '越听越懂你的连续推荐' : '从相似口味自然延伸',
                       icon: Radio,
                       cover: payload.radioSongs[0]?.album.picUrl || payload.channels[0]?.coverUrl || payload.dailySongs[0]?.album.picUrl,
-                      songs: payload.radioSongs.length ? payload.radioSongs : (platform === 'apple' ? payload.dailySongs : (platform === 'netease' || platform === 'qq' ? payload.radioSongs : payload.newSongs)),
-                      continuous: platform !== 'apple',
+                      songs: payload.radioSongs.length ? payload.radioSongs : (platform === 'netease' || platform === 'qq' ? payload.radioSongs : payload.newSongs),
+                      continuous: true,
                     },
                     {
                       label: '新鲜发行',
@@ -1703,7 +1761,7 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('journey') && platform !== 'apple' && ((platform === 'qq' && qqLoggedIn) || (platform === 'netease' && neteaseLoggedIn && neteaseUserId)) && (
+              {sectionVisible('journey') && ((platform === 'qq' && qqLoggedIn) || (platform === 'netease' && neteaseLoggedIn && neteaseUserId)) && (
                 <section style={sectionStyle('journey')}>
                   {platform === 'qq' ? (
                     <QQMusicJourney
@@ -1958,6 +2016,8 @@ function ExploreView({
               </button>
             </div>
           )}
+          </>
+          )}
         </main>
       </div>
 
@@ -2097,11 +2157,11 @@ function ExploreView({
         )}
       </AnimatePresence>
 
-      <MiniPlayer
+      <LiveExploreMiniPlayer
+        playbackTimeStore={playbackTimeStore}
         show={Boolean(currentSong) && !detailOpen}
         coverUrl={currentSong?.album.picUrl || ''}
         isPlaying={isPlaying}
-        currentTime={currentTime}
         duration={duration}
         volume={volume}
         title={currentSong?.name || ''}

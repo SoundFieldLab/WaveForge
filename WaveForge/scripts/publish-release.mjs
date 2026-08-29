@@ -8,6 +8,9 @@
  *   node scripts/publish-release.mjs --apk path/to/app-arm64.apk --notes "更新内容" [--dry-run]
  *   # 版本默认从 android/app/build.gradle.kts 的 appVersionName 读取
  *   # 可选 --exe path/to/Setup.exe（Windows 安装包，写入 win-x64 条目）
+ *   # 可选 --hot path/to/waveforge-hot-<version>.zip（Windows 热更新包，写入 win-x64-hot 条目；
+ *   #   仅改动代码时发布它，客户端即可「下载→替换→自动重启」免安装向导更新；改动涉及
+ *   #   electron 框架/exe 的大版本请只发 --exe，客户端会自动回落完整安装包）
  *
  * 环境变量：
  *   GITEE_TOKEN=xxx   # 发布到 Gitee Release 必需（https://gitee.com/profile/personal_access_tokens）
@@ -34,7 +37,11 @@ const GH_DOWNLOAD_PROXIES = ['https://ghproxy.net/', 'https://mirror.ghproxy.com
 
 /** 把某产物的下载地址写入 manifest：GitHub 地址附加 ghproxy 加速 + 直连，Gitee 直连 */
 function pushArtifactUrls(manifest, name, url) {
-  const artifact = name.includes('.apk') ? manifest.artifacts['android-arm64'] : manifest.artifacts['win-x64']
+  const artifact = name.includes('.apk')
+    ? manifest.artifacts['android-arm64']
+    : name.includes('hot')
+      ? manifest.artifacts['win-x64-hot']
+      : manifest.artifacts['win-x64']
   if (!artifact) return
   if (url.includes('github.com')) {
     for (const p of GH_DOWNLOAD_PROXIES) artifact.urls.push(p + url)
@@ -237,7 +244,11 @@ async function main() {
     if (!existsSync(args.exe)) throw new Error(`安装包不存在: ${args.exe}`)
     files['WaveForge-' + version + '-Setup.exe'] = args.exe
   }
-  if (Object.keys(files).length === 0) throw new Error('请提供 --apk 和/或 --exe')
+  if (args.hot) {
+    if (!existsSync(args.hot)) throw new Error(`热更新包不存在: ${args.hot}`)
+    files['waveforge-hot-' + version + '.zip'] = args.hot
+  }
+  if (Object.keys(files).length === 0) throw new Error('请提供 --apk / --exe / --hot')
 
   console.log(`发布 v${version}（versionCode ${versionCodeOf(version)}）…`)
 
@@ -259,6 +270,12 @@ async function main() {
     manifest.artifacts['win-x64'] = {
       urls: [],
       sha256: sha256(args.exe),
+    }
+  }
+  if (args.hot) {
+    manifest.artifacts['win-x64-hot'] = {
+      urls: [],
+      sha256: sha256(args.hot),
     }
   }
 

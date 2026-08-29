@@ -92,3 +92,42 @@ export function initPlatformUI(): void {
     root.classList.remove('tv-mode')
   }
 }
+
+// ── TV DPI 缩放 ──
+// 用户可选的 UI 缩放档位（百分比）：60/80/100/125/150/175，默认 100（当前基线）。
+// 通过 CSS zoom 作用于 <html>，localStorage 持久化，启动时应用。
+export const TV_SCALE_OPTIONS = [60, 80, 100, 125, 150, 175] as const
+export const TV_SCALE_KEY = 'waveforge:tv-scale'
+
+export function getTvScale(): number {
+  try {
+    const v = Number(localStorage.getItem(TV_SCALE_KEY) || '100')
+    return (TV_SCALE_OPTIONS as readonly number[]).includes(v) ? v : 100
+  } catch {
+    return 100
+  }
+}
+
+export function setTvScale(scale: number): void {
+  try {
+    localStorage.setItem(TV_SCALE_KEY, String(scale))
+  } catch {
+    // ignore
+  }
+  applyTvScale(scale)
+}
+
+// ── TV DPI 缩放（viewport 真适配）──
+// UI 布局基准宽 2133（build-android-assets.mjs 静态写入 index.html）。
+// 缩放通过动态改写 viewport width 实现：width = 2133 * 100 / scale，
+// 整个界面按新布局宽重排，而不是简单放大像素（避免缩小后四周黑边）。
+export const TV_BASELINE_VIEWPORT = 2133
+
+export function applyTvScale(scale?: number): void {
+  const v = scale ?? getTvScale()
+  if (typeof document === 'undefined') return
+  const viewport = Math.round(TV_BASELINE_VIEWPORT * 100 / v)
+  const meta = document.querySelector('meta[name="viewport"]')
+  if (meta) meta.setAttribute('content', `width=${viewport}`)
+  document.documentElement.style.setProperty('--tv-scale', String(v / 100))
+}

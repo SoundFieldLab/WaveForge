@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+# 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
 """
 Transition Renderer Worker - Pedalboard-based time stretching and mixing
 Reads audio from files, applies time-stretching and mixing, outputs to file
@@ -227,6 +229,23 @@ def progressive_beat_stretch(
             stretched = librosa.util.fix_length(stretched, size=target_samples)
             channels.append(stretched.astype(np.float32, copy=False))
         stretched_beats.append(np.stack(channels, axis=0))
+
+    # 接缝点击修复（v2 quality_stretch 路径）：每拍独立拉伸（HPSS 相位声码器 + WSOLA）后
+    # 相位不连续，硬拼接在接缝处产生巨大点击与高频噪（实测 99.9% 差分跳变 ≈ 纯 PV 的 700 倍，
+    # 正是 v2 增强版"过渡满屏噪音/奇怪声音"的根因）。在**内部接缝**做 ~8ms 淡出/淡入缝合：
+    # 首段头、末段尾保持原样（不影响过渡起始与 handoff 满音量），总长不变、网格保持。
+    # v1（quality_stretch=False，纯 PV）逐字节不变，不受影响。
+    if quality_stretch and len(stretched_beats) > 1:
+        seam = min(int(0.008 * sample_rate), min(beat.shape[1] for beat in stretched_beats) // 4)
+        if seam > 0:
+            fade_in = np.linspace(0.0, 1.0, seam).astype(np.float32)
+            fade_out = np.linspace(1.0, 0.0, seam).astype(np.float32)
+            beat_count = len(stretched_beats)
+            for index, beat in enumerate(stretched_beats):
+                if index < beat_count - 1:
+                    beat[:, -seam:] *= fade_out[None, :]
+                if index > 0:
+                    beat[:, :seam] *= fade_in[None, :]
 
     result = np.concatenate(stretched_beats, axis=1)
     expected_samples = sum(max(1, int(round(value * sample_rate))) for value in output_beat_durations)
@@ -1143,11 +1162,18 @@ def render_transition_v2(params: dict) -> dict:
 
             source_stretched = progressive_beat_stretch(
                 source_audio, output_sample_rate, source_beat_times_relative, output_beat_durations, 'source',
-                rate_bounds=(0.8, 1.2), quality_stretch=True,
+                rate_bounds=(0.8, 1.2),
+                # quality_stretch=False：v2 曾用 HPSS 分离 + 相位声码器 + WSOLA（"高质量"拉伸），
+                # 但 _wsola_stretch 在稀疏打击乐信号上相关性搜索找错段位，overlap-add 归一化
+                # out/acc 在 acc 极小时爆炸，产生 25~2200× 的爆音尖峰（实测最大样本跳变 2209，
+                # 信号峰值仅 1.0）——正是增强版"过渡满屏噪音"的根因。回退普通 PV（librosa
+                # time_stretch），实测最大跳变 0.12、无尖峰，过渡干净。
+                quality_stretch=False,
             )
             target_stretched = progressive_beat_stretch(
                 target_audio, output_sample_rate, target_beat_times_relative, output_beat_durations, 'target',
-                rate_bounds=(0.8, 1.2), quality_stretch=True,
+                rate_bounds=(0.8, 1.2),
+                quality_stretch=False,
             )
             if source_stretched.shape[1] != target_stretched.shape[1]:
                 raise RuntimeError("Tracks did not land on the same output beat grid")

@@ -25,6 +25,8 @@ interface MultidimensionalLyricsProps {
   pulseStore?: AudioPulseStore
   /** 音频频段分析（波形河/节拍环）。 */
   analyzerStore?: AudioAnalyzerStore
+  /** MV 背景激活时：外层与 Canvas 透明化，让下层 MV 视频可见，3D 内置背景退场。 */
+  mvBackgroundActive?: boolean
 }
 
 export default function MultidimensionalLyrics({
@@ -45,6 +47,7 @@ export default function MultidimensionalLyrics({
   onSeek,
   pulseStore,
   analyzerStore,
+  mvBackgroundActive = false,
 }: MultidimensionalLyricsProps) {
   const lines = useMemo(() => convertLyricsToFoliaLines(lyrics), [lyrics])
   const trackKey = `${trackId ?? songTitle}:${songArtist}`
@@ -54,7 +57,8 @@ export default function MultidimensionalLyrics({
 
   return (
     <div
-      className="relative h-full min-h-[440px] w-full overflow-hidden bg-[#05060c] text-white"
+      // MV 背景激活时外层透明，让下层 MV 视频可见；否则保持原深色底
+      className={`relative h-full min-h-[440px] w-full overflow-hidden text-white ${mvBackgroundActive ? 'bg-transparent' : 'bg-[#05060c]'}`}
       style={{ opacity: isTransitioning ? 0 : 1, transition: 'opacity 320ms ease' }}
     >
       <FoliaDioramaLyrics
@@ -71,21 +75,19 @@ export default function MultidimensionalLyrics({
         pulseStore={pulseStore}
         analyzerStore={analyzerStore}
         coverUrl={coverUrl}
+        mvBackgroundActive={mvBackgroundActive}
       />
 
-      {/* 电影暗角：聚焦画面中心、压住四角，替代原先平铺直叙的满屏 3D */}
+      {/* 电影暗角：聚焦画面中心、压住四角，替代原先平铺直叙的满屏 3D
+          MV 背景激活时弱化暗角（0.52→0.18），让 MV 视频更多可见，仅保留极轻边缘压暗维持画面聚焦感 */}
       <div
         className="pointer-events-none absolute inset-0 z-[5]"
-        style={{ background: 'radial-gradient(ellipse 92% 82% at 50% 44%, transparent 54%, rgba(3,4,9,0.52) 100%)' }}
+        style={{ background: `radial-gradient(ellipse 92% 82% at 50% 44%, transparent 54%, rgba(3,4,9,${mvBackgroundActive ? 0.18 : 0.52}) 100%)` }}
       />
 
-      {/* 头部信息：克制的编辑式排版（移除水印式品牌角标与霓虹菱形） */}
+      {/* 头部信息：克制的编辑式排版（移除水印式品牌角标与霓虹菱形；无模式说明标签） */}
       <div className="pointer-events-none absolute left-9 top-9 z-20 sm:left-12 sm:top-11">
-        <div className="flex items-center gap-3 text-[10px] font-medium uppercase tracking-[0.42em] text-white/35">
-          <span className="h-px w-9 bg-white/25" />
-          多维 · Diorama
-        </div>
-        <h1 className="mt-3.5 max-w-[48vw] truncate text-2xl font-semibold tracking-[0.02em] text-white/90 sm:text-[27px]">{songTitle}</h1>
+        <h1 className="max-w-[48vw] truncate text-2xl font-semibold tracking-[0.02em] text-white/90 sm:text-[27px]">{songTitle}</h1>
         <p className="mt-2 max-w-[48vw] truncate text-[12.5px] tracking-[0.05em] text-white/45 sm:text-[13px]">
           {songArtist}{songAlbum ? ` · ${songAlbum}` : ''}
         </p>

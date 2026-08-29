@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('taskbarWidget', {
     ipcRenderer.on('taskbar-widget:settings', listener)
     return () => ipcRenderer.removeListener('taskbar-widget:settings', listener)
   },
+  // 悬停状态（主进程光标轮询驱动）：进入取消收拢、离开触发收拢
+  onHover: (callback) => {
+    const listener = (_event, hovering) => callback(hovering === true)
+    ipcRenderer.on('taskbar-widget:hover', listener)
+    return () => ipcRenderer.removeListener('taskbar-widget:hover', listener)
+  },
   getSettings: () => ipcRenderer.invoke('taskbar-widget:get-settings'),
   action: (action, payload) => {
     ipcRenderer.send('taskbar-widget:action', action, payload)

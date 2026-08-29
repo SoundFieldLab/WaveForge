@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 哔哩哔哩「看歌」播放表面（第 7 种歌词显示模式）
  *
  * 状态机：login → searching/loading → playing / confirm / none / error
@@ -15,9 +19,10 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Play, Pause, Volume2, VolumeX, ChevronLeft, ChevronRight,
   Search, X, Subtitles, CaptionsOff, ArrowLeft, RefreshCw, Eye, Clock, ListVideo, Music,
-  Settings as SettingsIcon, ThumbsDown, RotateCcw, Home, ListMusic, Info, AudioLines, MessageCircle, MessageCircleOff, PlayCircle, Shuffle,
+  Settings as SettingsIcon, ThumbsDown, RotateCcw, Home, ListMusic, Info, MessageCircle, MessageCircleOff, PlayCircle, Shuffle,
 } from 'lucide-react'
 import { useTvMode, useTvBack } from '../tv/tvCore'
+import { useAutoHideCursor } from '../hooks/useAutoHideCursor'
 
 /** B 站小电视图标（简化版 logo：圆角机身 + 顶部双鳍天线 + 屏幕） */
 function BiliTvIcon({ size = 15 }: { size?: number }) {
@@ -82,10 +87,10 @@ import BilibiliProfileModal from './BilibiliProfileModal'
 import BilibiliInteractPanel from './BilibiliInteractPanel'
 import DanmakuLayer from './DanmakuLayer'
 import { useColorThief } from '../hooks/useColorThief'
-import { getEngineAdapter, getAvailableEngineIds, type IAudioEngineAdapter, type AudioGraphHandle } from '../services/audio-engine'
-import { getAudioEngineVersion } from '../services/audioEngineVersion'
 import { loadPlaybackShortcutSettings } from '../services/playbackShortcutSettings'
+import type { LyricLine } from '../services/musicApi'
 import { autoMixAnalysisService } from '../services/autoMixAnalysisService'
+import { ensureMvAlignment, getMvAlignment, MIN_ALIGNMENT_CONFIDENCE } from '../services/mvAlignment'
 
 export interface BilibiliMvPlayerHandle {
   /** 返回 true 表示已接管播放/暂停（视频模式活动） */
@@ -117,11 +122,9 @@ interface BilibiliMvPlayerProps {
   /** 搜索是否失败（App 据此显示兼容音频控件与右上角按钮组） */
   onSearchFailedChange?: (failed: boolean) => void
   /** 视频播放状态上报（播放/暂停/进度/时长/音量；迷你播放器与桌面小窗按视频进度显示） */
-  onVideoStateChange?: (state: { playing: boolean; time: number; duration: number; volume: number }) => void
+  onVideoStateChange?: (state: { playing: boolean; time: number; duration: number; volume: number; alignmentOffset?: number; alignmentVerified?: boolean }) => void
   /** 返回播放主页 */
   onHomeClick?: () => void
-  /** 打开调音室（音效） */
-  onOpenMixingStudio?: (anchorRect: { x: number; y: number; width: number; height: number }) => void
   /** 打开播放列表 */
   onOpenPlaylist?: () => void
   /** 点赞切换 */
@@ -137,8 +140,14 @@ interface BilibiliMvPlayerProps {
   initialBvid?: string
   /** MV 背景已获取的播放接口 cacheKey：复用后跳过重新请求播放地址（音频/视频流同源生成） */
   initialCacheKey?: string
+  /** 复用流的候选类型（live/cover/歌词…）：进入看歌秒开用的伪候选沿用，保证对齐路径一致 */
+  initialType?: string
   /** 音频引擎当前位置读取器（秒）：视频加载完成后 seek 到引擎实时位置，消除加载期位置变陈旧导致的进度差 */
   getEnginePosition?: () => number
+  /** 歌曲音频 URL（节拍/包络对齐需要；来自 App 引擎） */
+  songUrl?: string
+  /** 当前歌曲本地歌词（现场版前奏补偿等需要首句歌词时间） */
+  lyrics?: LyricLine[]
   /** 播放器是否为当前可见表面（回主页/被覆盖时禁用全局快捷键，避免误触发） */
   surfaceVisible?: boolean
 }
@@ -189,7 +198,6 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     onSearchFailedChange,
     onVideoStateChange,
     onHomeClick,
-    onOpenMixingStudio,
     onOpenPlaylist,
     onToggleFavorite,
     liked = false,
@@ -199,7 +207,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     initialCid,
     initialBvid,
     initialCacheKey,
+    initialType,
     getEnginePosition,
+    songUrl,
+    lyrics: lyricsProp,
     surfaceVisible = true,
   },
   ref,
@@ -211,18 +222,54 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const watchAccent = dominantColor || BILI_PINK
 
   const videoRef = useRef<HTMLVideoElement>(null)
+  const ambientCanvasRef = useRef<HTMLCanvasElement>(null)
+  // 氛围模式（Infuse 风格）：采样视频边缘颜色填充黑边，柔和/鲜艳/极致三档
+  const [ambientMode, setAmbientMode] = useState<'off' | 'soft' | 'vivid' | 'extreme'>(() => {
+    const saved = localStorage.getItem('bilibiliAmbientMode')
+    return saved === 'soft' || saved === 'vivid' || saved === 'extreme' ? saved : 'off'
+  })
   const audioRef = useRef<HTMLAudioElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  /** 视频音效引擎：DASH 音频轨经统一音效 adapter（v1/v2/HSE 同 App 引擎）效果链输出 */
-  const videoEffectsRef = useRef<{ ctx: AudioContext; adapter: IAudioEngineAdapter } | null>(null)
+  // 看歌模式：鼠标本体无操作 8s 自动渐隐，一动立即显示（不影响控件显隐逻辑）
+  const cursorHideRef = useAutoHideCursor(8000)
+  /**
+   * 视频实际宽高比（videoWidth/videoHeight，loadedmetadata/resize 时更新）。
+   * 氛围模式用：把视频元素精确贴合成 object-contain 的显示矩形（居中），
+   * 四周不盖住氛围画布——Chromium 的 <video> 黑边是媒体合成器强制画的，
+   * CSS 背景透明无效，必须让元素本身不覆盖四周。
+   */
+  const [videoAspect, setVideoAspect] = useState<number | null>(null)
+  const [containerSize, setContainerSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const update = () => {
+      const rect = el.getBoundingClientRect()
+      setContainerSize({ w: rect.width, h: rect.height })
+    }
+    update()
+    const ro = new ResizeObserver(update)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const updateVideoAspect = () => {
+    const v = videoRef.current
+    if (v && v.videoWidth > 0 && v.videoHeight > 0) setVideoAspect(v.videoWidth / v.videoHeight)
+  }
+  // object-contain 显示矩形（居中，保持比例，四周留白给氛围光）
+  const videoContainRect = useMemo(() => {
+    if (!videoAspect || !containerSize.w || !containerSize.h) return null
+    const scale = Math.min(containerSize.w / videoAspect, containerSize.h)
+    return { width: videoAspect * scale, height: scale }
+  }, [videoAspect, containerSize])
   /** 续播目标位置（音频秒数；加载新视频后 seek 一次即清除） */
   const initialSeekSecondsRef = useRef<number | null>(initialSeekSeconds ?? null)
   /** 引擎实时位置读取器：App 传的内联函数每次渲染都是新引用，经 ref 读取避免事件绑定 effect 反复重建 */
   const getEnginePositionRef = useRef(getEnginePosition)
   getEnginePositionRef.current = getEnginePosition
   /** MV 背景复用的视频流（bvid/cid/URL 匹配才复用，避免重新缓冲卡顿） */
-  const initialVideoRef = useRef<{ bvid: string; cid: number; videoUrl: string; cacheKey?: string } | null>(
-    initialVideoUrl && initialCid && initialBvid ? { bvid: initialBvid, cid: initialCid, videoUrl: initialVideoUrl, cacheKey: initialCacheKey } : null,
+  const initialVideoRef = useRef<{ bvid: string; cid: number; videoUrl: string; cacheKey?: string; type?: string } | null>(
+    initialVideoUrl && initialCid && initialBvid ? { bvid: initialBvid, cid: initialCid, videoUrl: initialVideoUrl, cacheKey: initialCacheKey, type: initialType } : null,
   )
   /** 无损切换画质：换流后视频/音频轨各自跳回原进度的目标（两者都消费完才清空） */
   const switchSeekRef = useRef<{ target: number; videoDone: boolean; audioDone: boolean } | null>(null)
@@ -333,6 +380,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const [volume, setVolume] = useState(() => (
     Number.isFinite(volumeProp) && (volumeProp as number) >= 0 && (volumeProp as number) <= 1 ? (volumeProp as number) : 0.7
   ))
+  // 淡入/上报用最新音量（效果闭包可能捕获旧值：事件绑定 effect 不依赖 volume）
+  const volumeRef = useRef(volume)
+  volumeRef.current = volume
   // 全局音量（单一数据源）变化 → 同步本机音量（其它播放模式调整音量后看歌跟随）
   useEffect(() => {
     if (!Number.isFinite(volumeProp) || (volumeProp as number) < 0 || (volumeProp as number) > 1) return
@@ -375,6 +425,31 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   const songKey = songKeyOf({ songTitle, artists: songArtists, songDuration, platform, id: songId })
 
+  // ===== MV 对齐（节拍/包络/现场版前奏补偿）=====
+  // 当前视频的对齐偏移（秒）：算完后把视频+音频 seek 到 引擎位置+偏移，
+  // 跳过 MV 的剧情前摇/现场版前奏，让歌词画面与音源歌词同步。
+  const alignmentOffsetRef = useRef(0)
+  /** 已确认对齐（置信度 ≥ 门槛）：真值用于外部（迷你/桌面歌词）判断"视频与歌曲同源、
+   *  可按 视频位−偏移 推歌曲位"；未确认（自由播放/货不对板）时外部应回退显示歌名-艺人 */
+  const alignmentVerifiedRef = useRef(false)
+  /** 用户是否主动暂停（仅 handleTogglePlay 置位）：自愈必须尊重的暂停意图——
+   *  区分"用户暂停"（不恢复）与"系统节流冻结"（恢复）。新视频加载时复位。 */
+  const userPausedRef = useRef(false)
+  const applyAlignmentOffset = useCallback(() => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    const offset = alignmentOffsetRef.current
+    if (!video || !audio || offset === 0 || !Number.isFinite(video.duration)) return
+    const enginePos = getEnginePositionRef.current ? Number(getEnginePositionRef.current()) || 0 : 0
+    const target = enginePos + offset
+    const clamped = Math.min(target, Math.max(0, (video.duration || target) - 8))
+    if (clamped > 0 && Math.abs(video.currentTime - clamped) > 0.5) {
+      video.currentTime = clamped
+      if (audio) audio.currentTime = clamped
+      void window.electron?.automixLog?.('MvAlign', `[播放器] 对齐seek 引擎=${enginePos.toFixed(1)}s +${offset.toFixed(1)}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
+    }
+  }, [])
+
   // ===== 工具 =====
 
   const clearControlsTimer = () => {
@@ -394,11 +469,11 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         setShowVolumeSlider(false)
         setShowQualityMenu(false)
       }
-    }, 2000)
+    }, 3000)
   }, [tvMode])
 
   /** 底部 / 左上角鼠标区域联动：只有悬停在底部栏位置才显示底部栏（连带左上信息）；
-   *  只有悬停在左上角歌名处才单独显示左上信息；其余位置不弹控件，离开 2 秒后隐藏 */
+   *  只有悬停在左上角歌名处才单独显示左上信息；其余位置不弹控件，离开 3 秒后隐藏 */
   const handleContainerMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -507,20 +582,70 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
             setAcceptQuality(Array.isArray(playInfo.acceptQuality) ? playInfo.acceptQuality : [])
           }
           setVideoUrl(reuseVideoUrl || bilibiliStreamUrl(cacheKey, 'video'))
-          setAudioUrl(bilibiliStreamUrl(cacheKey, 'audio'))
           setStatus('playing')
           reportVideoActive(true)
+          // 音频优先用本地缓存（mv-align 分析/预载已下载同一 DASH 音轨）：
+          // 命中即秒开，避免流式加载慢导致"进看歌开头无声"（日志实测 loadedmetadata
+          // 可延迟 ~10s）。未命中照旧走流式 URL（不先整文件下载再播放）。
+          const audioStreamUrl = bilibiliStreamUrl(cacheKey, 'audio')
+          const mvAlignKey = `mv-align-video:${songKey}:${candidate.video.bvid}`
+          const localAudio = await window.electron?.audioDownload?.peekCached?.(mvAlignKey) || null
+          if (controller.signal.aborted) return
+          if (localAudio) {
+            const localMedia = await window.electron?.audioDownload?.getMediaUrl?.(localAudio) || null
+            setAudioUrl(localMedia || audioStreamUrl)
+          } else {
+            setAudioUrl(audioStreamUrl)
+          }
 
-          // 弹幕（非阻塞，失败不影响播放）；风控/瞬时失败重试一次
+          // MV 对齐：算偏移（节拍/包络，或现场版前奏补偿），算完把视频+音频 seek 到
+          // 引擎位置+偏移——跳过剧情前摇/现场前奏，让歌词画面与音源歌词同步。
+          alignmentOffsetRef.current = 0
+          alignmentVerifiedRef.current = false
+          userPausedRef.current = false // 新视频：复位用户暂停标记，恢复自动播放
+          const cachedAlign = getMvAlignment(songKey, candidate.video.bvid)
+          if (cachedAlign && cachedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
+            alignmentOffsetRef.current = cachedAlign.offsetSeconds
+            alignmentVerifiedRef.current = true
+            applyAlignmentOffset()
+          } else {
+            void ensureMvAlignment({
+              songKey,
+              songTitle,
+              songArtists,
+              songDuration,
+              songUrl: songUrl || '',
+              lyrics: lyricsProp,
+              bvid: candidate.video.bvid,
+              cid,
+              videoUrl: audioStreamUrl,
+              cacheKey,
+              candidateType: candidate.type,
+              signal: controller.signal,
+            }).then((align) => {
+              if (controller.signal.aborted) return
+              if (align && align.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
+                alignmentOffsetRef.current = align.offsetSeconds
+                alignmentVerifiedRef.current = true
+                applyAlignmentOffset()
+                void window.electron?.automixLog?.('MvAlign', `[播放器] 对齐应用 offset=${align.offsetSeconds}s conf=${align.confidence.toFixed(2)} method=${align.method}`)?.catch?.(() => undefined)
+              }
+            }).catch(() => undefined)
+          }
+
+          // 弹幕（非阻塞，失败不影响播放）；风控/瞬时网络失败递增重试最多 3 次
           setDanmakuItems([])
           const loadDanmaku = async (attempt = 0) => {
             if (controller.signal.aborted) return
+            const retry = () => {
+              if (attempt < 3) window.setTimeout(() => void loadDanmaku(attempt + 1), 1500 * (attempt + 1))
+            }
             try {
               const dm = await getBilibiliDanmaku(cid, controller.signal)
               if (dm.code === 0) setDanmakuItems((dm.danmaku || []).slice().sort((a, b) => a.time - b.time))
-              else if (attempt === 0) window.setTimeout(() => void loadDanmaku(1), 1500)
+              else retry()
             } catch {
-              if (attempt === 0) window.setTimeout(() => void loadDanmaku(1), 1500)
+              retry()
             }
           }
           void loadDanmaku()
@@ -577,12 +702,14 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   )
 
   const searchSong = useCallback(
-    async (forced = false) => {
+    async (forced = false, opts?: { preserveInFlight?: boolean }) => {
       if (!loginReady) return
       const controller = new AbortController()
-      searchControllerRef.current?.abort()
+      // 复用流秒开路径：视频已在播，弹幕/字幕正用上一个 controller 拉取——
+      // **保留在途**（不 abort），否则会把刚开播视频的弹幕/字幕请求杀掉；
+      // 且**不切状态**——切到 'searching' 会把正在播放的视频界面顶成转圈（用户实测）
+      if (!opts?.preserveInFlight) searchControllerRef.current?.abort()
       searchControllerRef.current = controller
-      setStatus('searching')
       setErrorText('')
       setCandidates([])
       setManualResults([])
@@ -590,16 +717,38 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       setPickerTypeFilter('all')
       failedBvidsRef.current = new Set()
       fallbackChainRef.current = []
-      reportVideoActive(false)
+      if (!opts?.preserveInFlight) {
+        setStatus('searching')
+        reportVideoActive(false)
+      }
 
       const ctx: MatchContext = { songTitle, artists: songArtists, songDuration, platform, id: songId }
       try {
         const result = await findBestBilibiliMv(ctx, { signal: controller.signal, settings: settingsRef.current })
         if (controller.signal.aborted) return
+        void window.electron?.automixLog?.('MvAlign', `[播放器] 匹配完成 status=${result.status} best=${result.best ? `${result.best.video.bvid} ${result.best.video.title.slice(0, 30)} dur=${result.best.video.duration}s score=${Math.round(result.best.score)} type=${result.best.type}` : 'none'} 候选=${result.candidates.length}`)?.catch?.(() => undefined)
         fallbackChainRef.current = result.fallbackChain || []
         setCandidates(result.candidates || [])
+        // 秒开路径（preserveInFlight）：视频已在播——只补全元数据/换更优 bvid，不动状态
+        if (opts?.preserveInFlight) {
+          if (result.status === 'auto' && result.best) {
+            const playingBvid = activeVideoRef.current?.video.bvid
+            if (playingBvid && playingBvid === result.best.video.bvid && Boolean(videoUrlRef.current)) {
+              setActiveVideo(result.best)
+            } else if (result.best) {
+              void loadVideo(result.best, Math.max(0, (result.fallbackChain || []).indexOf(result.best)))
+            }
+          }
+          return
+        }
         if (result.status === 'auto' && result.best) {
-          void loadVideo(result.best, Math.max(0, (result.fallbackChain || []).indexOf(result.best)))
+          // 复用流已在播放：只补全元数据，不重复拉流/重缓冲
+          const playingBvid = activeVideoRef.current?.video.bvid
+          if (playingBvid && playingBvid === result.best.video.bvid && Boolean(videoUrlRef.current)) {
+            setActiveVideo(result.best)
+          } else {
+            void loadVideo(result.best, Math.max(0, (result.fallbackChain || []).indexOf(result.best)))
+          }
         } else if (result.status === 'confirm') {
           setStatus('confirm')
         } else if (result.status === 'none') {
@@ -622,6 +771,22 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     if (!loginReady) {
       setStatus('login')
       reportVideoActive(false)
+      return
+    }
+    // 进入看歌时 MV 背景已缓冲同一视频流（initialVideoRef）：**立即**用它开播——
+    // 不再等 findBestBilibiliMv 网络往返（用户实测"切到看歌还要 ~1s 加载"就是这步）。
+    // 完整匹配（元数据/候选/弹幕字幕增强）在后台补跑，匹配出的 bvid 与当前流不同才换。
+    const initial = initialVideoRef.current
+    if (initial) {
+      const pseudo: CandidateScore = {
+        video: { bvid: initial.bvid, title: songTitle, duration: songDuration, play: 0, author: songArtists.join(', '), pic: '' },
+        score: 0,
+        signals: { officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: false, nearDuration: false, hdMarker: false, uploaderMatchesArtist: false, ccSubtitle: false },
+        rank: 0, officialVerifyType: -1, manualZhSubtitle: false, autoSubtitle: false,
+        type: (initial.type as CandidateScore['type']) || 'other',
+      }
+      void loadVideo(pseudo, 0)
+      void searchSong(true, { preserveInFlight: true }) // 后台补全（loadVideo 已消费 initialVideoRef，匹配到更优 bvid 才换）
       return
     }
     void searchSong(true)
@@ -689,6 +854,121 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status])
 
+  // 氛围模式渲染：缩略画布采样视频帧 → 宽模糊泛光（Infuse 风格，不抢戏）
+  useEffect(() => {
+    if (ambientMode === 'off') return
+    const canvas = ambientCanvasRef.current
+    const video = videoRef.current
+    if (!canvas || !video) return
+    let raf = 0
+    let lastDraw = 0
+    let drawCount = 0
+    let drawFails = 0
+    let lastDiag = 0
+    const ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false })
+    if (!ctx) return
+    // 黑边检测：B站不少视频把上下/左右黑边**烤进画面**（16:9 容器里嵌 4:3/竖版内容），
+    // 整帧采样 = 采到大片黑条 → 模糊后泛光几乎不可见（用户实测 Wrong Love 无泛光但
+    // draw 正常增长）。做法：采样帧 → 离屏画布 → 读像素找内容包围盒（亮度 > 阈值），
+    // 用「最大范围跟踪 + 慢衰减」锁定（黑边固定、场景亮度变化不误缩），只把内容区画上。
+    const offscreen = document.createElement('canvas')
+    const offCtx = offscreen.getContext('2d', { willReadFrequently: true, alpha: false })
+    if (!offCtx) return // 离屏上下文不可得（极罕见）：放弃氛围
+    let extMinX = 0, extMinY = 0, extMaxX = 1, extMaxY = 1
+    const draw = () => {
+      raf = requestAnimationFrame(draw)
+      // 兜底捕获视频宽高比：loadedmetadata 事件偶发不可靠，绘制循环里持续检查
+      if (videoAspect === null && video.videoWidth > 0 && video.videoHeight > 0) {
+        setVideoAspect(video.videoWidth / video.videoHeight)
+      }
+      const now = performance.now()
+      // 诊断：每 3s **无条件**打印一次（健康/不健康都打）——此前只在 readyState<2 时打，
+      // 健康时段静默，无法判断"全程没解出帧"还是"解出了但画面本身是黑边内容"
+      if (now - lastDiag > 3000) {
+        lastDiag = now
+        console.log(`[Ambient] mode=${ambientMode} canvas=${canvas.width > 0 ? canvas.width + 'x' + canvas.height : '空'} video=${video.readyState}/${video.videoWidth}x${video.videoHeight} paused=${video.paused} draw=${drawCount} fail=${drawFails} aspect=${videoAspect ?? '-'} box=${Math.round(extMinX * 100)}-${Math.round(extMaxX * 100)}/${Math.round(extMinY * 100)}-${Math.round(extMaxY * 100)}`)
+      }
+      if (video.readyState < 2) return
+      // 100ms 轻节流（≈12fps）：模糊光晕下观感连续（之前 pixelated+300~600ms 才跳格），
+      // 高刷屏不再每帧满负荷跑 getImageData/扫描/模糊（用户要求省性能，光晕是慢变量）
+      if (now - lastDraw < 100) return
+      lastDraw = now
+      // 降采样 1/12：模糊半径掩盖细节，省 GPU/内存（用户要求只算周围一圈，顺便更省）
+      const scaleFactor = 12
+      const dw = Math.max(1, Math.floor(canvas.clientWidth / scaleFactor))
+      const dh = Math.max(1, Math.floor(canvas.clientHeight / scaleFactor))
+      if (canvas.width !== dw || canvas.height !== dh) { canvas.width = dw; canvas.height = dh }
+      try {
+        if (offscreen.width !== dw || offscreen.height !== dh) { offscreen.width = dw; offscreen.height = dh }
+        offCtx.drawImage(video, 0, 0, dw, dh)
+        const img = offCtx.getImageData(0, 0, dw, dh)
+        // 内容包围盒扫描（亮度阈值；黑边 <20，正常内容远超）
+        const TH = 20
+        let minX = dw, minY = dh, maxX = -1, maxY = -1
+        for (let y = 0; y < dh; y++) {
+          const row = y * dw * 4
+          for (let x = 0; x < dw; x++) {
+            const i = row + x * 4
+            if (img.data[i] * 0.299 + img.data[i + 1] * 0.587 + img.data[i + 2] * 0.114 > TH) {
+              if (x < minX) minX = x
+              if (x > maxX) maxX = x
+              if (y < minY) minY = y
+              if (y > maxY) maxY = y
+            }
+          }
+        }
+        if (maxX >= 0) {
+          // 最大范围跟踪 + 慢衰减（黑边区域永远无亮像素，内容亮度变化不缩小范围）
+          const nx = minX / dw, ny = minY / dh
+          const nx2 = (maxX + 1) / dw, ny2 = (maxY + 1) / dh
+          extMinX = extMinX * 0.97 + Math.min(extMinX, nx) * 0.03
+          extMinY = extMinY * 0.97 + Math.min(extMinY, ny) * 0.03
+          extMaxX = extMaxX * 0.97 + Math.max(extMaxX, nx2) * 0.03
+          extMaxY = extMaxY * 0.97 + Math.max(extMaxY, ny2) * 0.03
+        }
+        const sx = Math.round(extMinX * dw)
+        const sy = Math.round(extMinY * dh)
+        const sw = Math.max(1, Math.round((extMaxX - extMinX) * dw))
+        const sh = Math.max(1, Math.round((extMaxY - extMinY) * dh))
+        // 内容区拉伸铺满画布（氛围是大面积模糊，比例失真无感）
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(offscreen, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height)
+        // 挖洞：destination-out 把**视频显示矩形内部**挖掉，泛光只留视频一圈。
+        // 关键：挖洞**内缩**（缓冲坐标 4px ≈ 屏幕 ~48px）——全屏视频(16:9 填满视口)时
+        // 若挖到矩形完全消失，光晕无可见空间；内缩后光晕**微微漫过视频边缘**，
+        // Infuse 式边带在任意画面比例下都可见（柔和羽化不糊画面）。
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.filter = 'blur(2px)' // 轻柔内缘（缓冲坐标，≈ 屏幕 24px）
+        ctx.fillStyle = '#000'
+        const cw = containerSize.w || canvas.clientWidth
+        const ch = containerSize.h || canvas.clientHeight
+        const bufScale = canvas.width / Math.max(1, cw)
+        let rx = 0, ry = 0, rw = canvas.width, rh = canvas.height
+        if (videoContainRect && cw > 0 && ch > 0) {
+          rw = videoContainRect.width * bufScale
+          rh = videoContainRect.height * bufScale
+          rx = (canvas.width - rw) / 2
+          ry = (canvas.height - rh) / 2
+        }
+        const inset = 4 // 内缩量（缓冲坐标）：光晕漫过视频边缘的宽度 ≈ 屏幕 48px
+        rx = Math.max(0, rx + inset)
+        ry = Math.max(0, ry + inset)
+        rw = Math.max(1, rw - inset * 2)
+        rh = Math.max(1, rh - inset * 2)
+        ctx.fillRect(Math.round(rx), Math.round(ry), Math.round(rw), Math.round(rh))
+        ctx.restore()
+        drawCount += 1
+      } catch {
+        // 读像素被禁（跨域/CORS 未就绪）：退回整帧采样，氛围不失效
+        drawFails += 1
+        try { ctx.drawImage(video, 0, 0, dw, dh); drawCount += 1 } catch { /* 忽略 */ }
+      }
+    }
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [ambientMode, videoUrl, videoAspect])
+
   // 卸载清理
   useEffect(() => {
     return () => {
@@ -697,13 +977,6 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       if (volumeTimerRef.current !== null) window.clearTimeout(volumeTimerRef.current)
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
       reportVideoActive(false)
-      // 销毁视频音效引擎（MediaElementAudioSourceNode 永久路由，仅随会话结束释放）
-      const session = videoEffectsRef.current
-      if (session) {
-        videoEffectsRef.current = null
-        try { session.adapter.dispose() } catch { /* 忽略 */ }
-        try { void session.ctx.close() } catch { /* 忽略 */ }
-      }
     }
   }, [reportVideoActive])
 
@@ -857,6 +1130,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         // 忽略
       }
     }
+    // 静音/恢复同步全局音量（其它播放模式跟随，保证音量跨模式共用）
+    reportVideoState()
   }
 
   // 音量滑条（内联在底部控件栏内）：点击展开；鼠标离开音量区域约 1.5 秒后自动收回
@@ -1004,34 +1279,74 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   // ===== 视频元素事件 =====
 
+  // 确保视频在 URL 就绪后开始播放（autoPlay 在组件重挂载/快速切换时可能不触发）
+  useEffect(() => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!video || !videoUrl) return
+    if (video.paused && video.readyState >= 1 && !userPausedRef.current) {
+      void video.play().catch(() => undefined)
+      if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
+    }
+  }, [videoUrl])
+
+  // 视频播放自愈（背景层同款思路）：音画分离下**音频在播但视频被节流停住**时
+  //（Occlusion/未聚焦窗口时 Chromium 会停靠视频解码 → readyState 掉到 0~1、无帧可解码 →
+  // 氛围 drawImage 永远黑帧 → 泛光消失；用户实测"开 F12 就好/关了就坏"就是焦点节流）。
+  // 判别用**音频状态**：用户主动暂停会同时停音频（不误恢复），纯视频冻结则恢复播放。
+  useEffect(() => {
+    if (!videoUrl) return
+    const timer = window.setInterval(() => {
+      const video = videoRef.current
+      const audio = audioRef.current
+      if (!video || !videoUrlRef.current) return
+      if (video.paused && !video.seeking && video.readyState >= 1 && (!audio || !audio.paused)) {
+        if (userPausedRef.current) return // 用户主动暂停：不自动恢复
+        video.muted = true // 双声防护：视频轨恒静音（DASH 音频轨是唯一音源）
+        void video.play().catch((e) => {
+          console.warn('[看歌] 视频自愈 play 被拒:', e?.name || String(e), e?.message || '')
+        })
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [videoUrl])
+
   const handleTogglePlay = useCallback((): boolean => {
     const video = videoRef.current
     const audio = audioRef.current
+    console.log('[看歌] togglePlay 被调用 paused=', video?.paused ?? '无video', 'videoUrl=', !!videoUrl, 'readyState=', video?.readyState, 'userPaused=', userPausedRef.current)
     if (!video || !videoUrl) return false
-    // 播放手势：恢复音效 AudioContext（自动播放策略兜底）
-    const effects = videoEffectsRef.current
-    if (effects?.ctx.state === 'suspended') void effects.ctx.resume().catch(() => undefined)
     if (video.paused) {
+      userPausedRef.current = false
       void video.play().catch(() => undefined)
       void audio?.play().catch(() => undefined)
     } else {
+      // 用户明确暂停：自愈必须尊重——音频自愈(1496 会拉起暂停的音频) + 视频自愈
+      //（判据"音频在播"）链式把暂停 1~2s 内撤销 → 暂停键"没反应"（媒体键暂停同样受害）
+      userPausedRef.current = true
       video.pause()
       audio?.pause()
     }
+    console.log('[看歌] togglePlay 执行后 paused=', video?.paused, 'userPaused=', userPausedRef.current)
     return true
   }, [videoUrl])
 
-  /** 上报当前视频播放状态（迷你播放器/桌面小窗按视频进度显示） */
+  /** 上报当前视频播放状态（迷你播放器/桌面小窗按视频进度显示）。
+   *  音量必须上报"用户设定音量"（isMuted ? 0 : volume）而非元素实时音量 audio.volume：
+   *  进入看歌会先 0 淡入、切出看歌会淡出到 0，若上报这些瞬态值，App 会把全局音量
+   *  写回为 0/中途值 → 下次切进看歌默认静音（用户实测的"看歌音量不共用"根因）。 */
   const reportVideoState = useCallback(() => {
     const video = videoRef.current
-    const audio = audioRef.current
     onVideoStateChange?.({
       playing: Boolean(video && !video.paused && !video.ended),
       time: video?.currentTime || 0,
       duration: (video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration) || 0,
-      volume: audio ? audio.volume : volume,
+      volume: isMuted ? 0 : volume,
+      // 对齐信息：外部（迷你/桌面歌词）据此把视频位换算成歌曲位继续显示歌词
+      alignmentOffset: alignmentOffsetRef.current,
+      alignmentVerified: alignmentVerifiedRef.current,
     })
-  }, [onVideoStateChange, videoDuration, volume])
+  }, [onVideoStateChange, videoDuration, volume, isMuted])
 
   /** 跳转视频进度（秒）——迷你播放器/桌面播放器控制视频用 */
   const handleSeekTo = useCallback((seconds: number) => {
@@ -1059,6 +1374,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       setVolume: handleSetVolume,
       /** 当前播放精确位置（秒）：优先取 DASH 音频轨（用户实际听到的时钟），视频轨 drift 校正前可能与音频差一点 */
       getCurrentTime: () => audioRef.current?.currentTime ?? videoRef.current?.currentTime ?? 0,
+      /** 当前应用的对齐偏移（秒）：MV 位置 = 歌曲位置 + 偏移。切回歌词模式时引擎
+       *  必须续播在「视频位 − 偏移」的歌曲位上，否则大偏移歌（如 Die For You +19.89s）
+       *  会把歌曲/歌词整体往前推 1~2 句 */
+      getAlignmentOffset: () => alignmentOffsetRef.current,
       /** 音频轨淡出（切回歌词模式时用，返回 Promise 完成时音量已为 0） */
       fadeOutAudio: () => fadeAudioVolume(audioRef.current?.volume ?? 0, 0, 200),
     }),
@@ -1144,6 +1463,87 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     reportVideoState()
   }, [onNext, reportVideoActive, replayVideo, reportVideoState])
 
+  // ===== 音频轨健康自检/自愈 =====
+  // "进入看歌第一段无声、切下一首才有声"的兜底修复与诊断。DASH 音频轨可能因：
+  // 复用 cacheKey 过期/瞬时失败（加载失败）、autoplay 未触发（暂停）、淡入竞态
+  // （音量卡 0）、音效 AudioContext suspended 而无声。异常时自动恢复，并写
+  // automix 日志（automix-backend.log 的 [renderer:看歌-audio]），便于定位。
+  const recoverAudioStream = useCallback(async () => {
+    const current = activeVideo
+    if (!current) return
+    try {
+      let cid = current.cid || 0
+      if (!cid) {
+        const view = await getBilibiliView(current.video.bvid)
+        if (view.code !== 0) return
+        if (Array.isArray(view.data.pages) && view.data.pages.length > 1) {
+          const chosen = view.data.pages[pickBestPage(view.data.pages, { songTitle, artists: songArtists })]
+          if (chosen?.cid) cid = chosen.cid
+        }
+        if (!cid) cid = view.data.cid
+      }
+      if (!cid) return
+      const qn = settingsRef.current.targetQuality === 'auto' ? 127 : settingsRef.current.targetQuality
+      const playInfo = await getBilibiliPlayUrl(current.video.bvid, cid, qn)
+      if (playInfo.code !== 0 || !playInfo.cacheKey) return
+      // 只换音频轨（视频流正常时保持，避免整段重缓冲）；记录进度让音频轨跳回
+      const v = videoRef.current
+      switchSeekRef.current = { target: v?.currentTime ?? 0, videoDone: true, audioDone: false }
+      setAudioUrl(bilibiliStreamUrl(playInfo.cacheKey, 'audio'))
+    } catch (error) {
+      console.warn('[看歌] 音频轨恢复失败:', error)
+    }
+  }, [activeVideo, songTitle, songArtists])
+
+  const checkAndHealAudio = useCallback(async (reason: string) => {
+    const audio = audioRef.current
+    if (!audio) return
+    const log = (msg: string) => {
+      console.warn(`[看歌] 音频自检(${reason}) ${msg}`)
+      void window.electron?.automixLog?.('看歌-audio', msg)?.catch?.(() => undefined)
+    }
+    const err = audio.error
+    if (err || !audio.currentSrc || audio.networkState === 3) {
+      log(`音频流失败 error=${err?.code ?? ''} networkState=${audio.networkState} src=${(audio.currentSrc || '').slice(0, 70)} → 重新拉取播放地址`)
+      await recoverAudioStream()
+      return
+    }
+    if (audio.paused && audio.readyState >= 1) {
+      if (userPausedRef.current) {
+        log(`音频暂停（用户主动暂停，自愈跳过）`)
+        return
+      }
+      log(`音频暂停 readyState=${audio.readyState} → play()`)
+      void audio.play().catch(() => undefined)
+      return
+    }
+    if (audio.muted) {
+      log(`音频被静音 muted=true`)
+      return
+    }
+    if (audio.volume <= 0.01 && audio.readyState >= 1) {
+      log(`音量卡 0 volume=${audio.volume.toFixed(3)} → 补淡入`)
+      fadeInOnLoadRef.current = false
+      void fadeAudioVolume(0, volumeRef.current, 250)
+      return
+    }
+    log(`正常 paused=${audio.paused} readyState=${audio.readyState} volume=${audio.volume.toFixed(2)} muted=${audio.muted} t=${audio.currentTime.toFixed(1)}`)
+  }, [recoverAudioStream])
+
+  // 音频健康检查：进入看歌/换源后 2.5s 执行一次（诊断 + 自愈）。
+  // 用 ref 按 videoUrl 守卫：App 每 ~1s 重渲染会传新 onVideoStateChange → 事件绑定
+  // effect 反复重跑；若定时器依赖它会被反复重置永不触发。这里只在 videoUrl 变化时重排。
+  const checkAndHealAudioRef = useRef(checkAndHealAudio)
+  checkAndHealAudioRef.current = checkAndHealAudio
+  const audioCheckedForRef = useRef('')
+  useEffect(() => {
+    if (!videoUrl || !audioUrl || status !== 'playing') return
+    if (audioCheckedForRef.current === videoUrl) return
+    audioCheckedForRef.current = videoUrl
+    const timer = window.setTimeout(() => { void checkAndHealAudioRef.current('startup') }, 2500)
+    return () => window.clearTimeout(timer)
+  }, [videoUrl, audioUrl, status])
+
   // 视频事件绑定
   useEffect(() => {
     const video = videoRef.current
@@ -1154,9 +1554,6 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       setShowReplay(false)
       setShowControls(true)
       setShowTopInfo(true)
-      // 播放中恢复音效 AudioContext（防止 suspended 导致静音）
-      const effects = videoEffectsRef.current
-      if (effects?.ctx.state === 'suspended') void effects.ctx.resume().catch(() => undefined)
       // 同步音频轨（DASH 音画分离）
       if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
       reportVideoState()
@@ -1198,7 +1595,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         s.videoDone = true
         const clamped = Math.min(s.target, Math.max(0, (video.duration || 0) - 8))
         if (clamped > 0) video.currentTime = clamped
-        void video.play().catch(() => undefined)
+        if (!userPausedRef.current) void video.play().catch(() => undefined)
         if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
         if (s.audioDone) switchSeekRef.current = null
       }
@@ -1208,8 +1605,15 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       const seekTarget = initialSeekSecondsRef.current
       if (seekTarget != null && seekTarget > 0 && Number.isFinite(video.duration)) {
         const livePos = getEnginePositionRef.current ? Number(getEnginePositionRef.current()) || 0 : 0
-        const target = Math.max(seekTarget, livePos > 0 ? livePos : seekTarget)
+        const base = Math.max(seekTarget, livePos > 0 ? livePos : seekTarget)
+        // 缓存对齐偏移直接并入首次 seek：避免"先 seek 引擎位置、对齐算完再跳一次"的
+        // 双跳——双跳会造成重唱/跳下一句的可见偏移（引擎在看歌时已暂停，位置是冻结值，
+        // 首次 seek 到位后 applyAlignmentOffset 的差值 <0.5s 不会再跳）
+        const cachedAlign = activeVideo ? getMvAlignment(songKey, activeVideo.video.bvid) : null
+        const offset = cachedAlign && cachedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? cachedAlign.offsetSeconds : 0
+        const target = base + offset
         const clamped = Math.min(target, Math.max(0, (video.duration || 0) - 8))
+        void window.electron?.automixLog?.('MvAlign', `[播放器] 初始seek 引擎=${livePos.toFixed(1)}s +缓存偏移${offset.toFixed(2)}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
         if (clamped > 0) {
           video.currentTime = clamped
           if (audio) audio.currentTime = clamped
@@ -1223,11 +1627,12 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     video.addEventListener('timeupdate', onTimeUpdate)
     video.addEventListener('loadedmetadata', onLoadedMetadata)
     video.addEventListener('ended', handleVideoEnded)
-    video.addEventListener('error', () => {
+    const onVideoError = () => {
       setPlayError('视频播放失败（可能已失效或网络异常）')
       setStatus('error')
       reportVideoActive(false)
-    })
+    }
+    video.addEventListener('error', onVideoError)
     const onAudioEnded = () => {
       // 音频先结束：跟随视频状态（视频 ended 触发 handleVideoEnded）
       if (video.ended) return
@@ -1255,6 +1660,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       // 新视频音频轨淡入（进入看歌时配合引擎淡出无缝拼接）
       if (fadeInOnLoadRef.current && audio) {
         fadeInOnLoadRef.current = false
+        void window.electron?.automixLog?.('看歌-audio', `loadedmetadata 淡入触发 target=${volume}`)?.catch?.(() => undefined)
         audio.volume = 0
         void audio.play().catch(() => undefined)
         void fadeAudioVolume(0, volume, 250)
@@ -1262,12 +1668,31 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     }
     audio?.addEventListener('ended', onAudioEnded)
     audio?.addEventListener('loadedmetadata', onAudioLoaded)
+    // 竞态兜底：新视频的 loadedmetadata 可能在本 effect 挂监听前已触发（复用缓冲/
+    // 首帧加载极快，React 被动 effect 在绘制后才跑）→ 淡入永不执行，音频停在音量 0，
+    // 即"进入看歌第一段无声、切下一首才有声"（音量 UI 显示的是用户设定值，看不出 0）。
+    // 挂载时若音频已就绪立即淡入，否则 1.5s 后复查；loadedmetadata 正常到达时
+    // onAudioLoaded 已消费 fadeInOnLoadRef，这里不会重复淡入。
+    const maybeFadeInAudio = () => {
+      const a = audioRef.current
+      if (!fadeInOnLoadRef.current || !a || !a.currentSrc) return
+      const loaded = (Number.isFinite(a.duration) && a.duration > 0) || a.readyState >= 1
+      if (!loaded) return
+      fadeInOnLoadRef.current = false
+      a.volume = 0
+      void a.play().catch(() => undefined)
+      void fadeAudioVolume(0, volumeRef.current, 250)
+    }
+    maybeFadeInAudio()
+    const audioStartupTimer = window.setTimeout(maybeFadeInAudio, 1500)
     return () => {
+      window.clearTimeout(audioStartupTimer)
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
       video.removeEventListener('loadedmetadata', onLoadedMetadata)
       video.removeEventListener('ended', handleVideoEnded)
+      video.removeEventListener('error', onVideoError)
       audio?.removeEventListener('ended', onAudioEnded)
       audio?.removeEventListener('loadedmetadata', onAudioLoaded)
     }
@@ -1326,68 +1751,25 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     if (!video) return
     video.muted = true // DASH 视频轨无声音
     if (audio) {
-      audio.volume = fadeInOnLoadRef.current ? 0 : volume
+      if (fadeInOnLoadRef.current) {
+        // 事件驱动诊断（不受重渲染影响）：进入淡入等待态时记录一次
+        void window.electron?.automixLog?.('看歌-audio', `置音量 0 等待淡入 fadeInOnLoadRef=true`)?.catch?.(() => undefined)
+        audio.volume = 0
+      } else {
+        audio.volume = volume
+      }
       audio.muted = isMuted
     }
   }, [videoUrl, audioUrl, volume, isMuted])
 
-  // 视频音效：DASH 音频轨接入调音室同款效果链（读同一份设置，实时同步）
-  // 仅当设置了任一音效/均衡器时才建立 Web Audio 路由——默认无音效时音频轨直出，
-  // 避免 AudioContext（自动播放策略下 suspended）把音频静音。
+  // 看歌音效路由已移除（2026-08-25 决策）：DASH 音频轨直接输出，不经 AudioContext 效果链。
+  // 历史问题：createMediaElementSource 会把元素输出永久路由进 ctx，且 attach 是 v3 异步
+  //（worklet 注册）或可能失败，期间 masterGain 悬空 → 元素在播（音量/进度全正常）却无声
+  //（用户实测"看歌无声"）。看歌以画面为主、音效收益低，直出保证声音可靠；
+  // 歌词页音乐不受影响，仍走调音室效果链。
   useEffect(() => {
     if (!audioUrl) return
-    const audio = audioRef.current
-    if (!audio) return
-    // 读取当前效果设置，判断是否有启用中的音效
-    let hasEnabledEffect = false
-    try {
-      const raw = localStorage.getItem('waveforge:audio-effects-settings')
-      if (raw) {
-        const parsed = JSON.parse(raw)
-        const fx = parsed?.effects || {}
-        hasEnabledEffect = Boolean(
-          fx?.hall?.enabled || fx?.surround3d?.enabled || fx?.bassBoost?.enabled ||
-          fx?.vocalBoost?.enabled || fx?.accompanimentBoost?.enabled || fx?.compressor?.enabled ||
-          fx?.nightMode?.enabled || fx?.loudnessCompensation?.enabled || parsed?.eq?.enabled ||
-          parsed?.normalizationEnabled,
-        )
-      }
-    } catch { /* 忽略 */ }
-    if (!hasEnabledEffect) return // 无音效：音频轨直出（不创建 MediaElementAudioSourceNode，避免永久路由导致静音）
-    // 与 App 同款：按配置的引擎版本（v1/v2/HSE）走统一 adapter
-    let session = videoEffectsRef.current
-    if (!session) {
-      try {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
-        const ctx: AudioContext = new AudioCtx()
-        const masterGain = ctx.createGain()
-        const analyser = ctx.createAnalyser()
-        analyser.fftSize = 256
-        analyser.connect(ctx.destination)
-        ctx.createMediaElementSource(audio).connect(masterGain)
-        const adapter = getEngineAdapter(getAudioEngineVersion(getAvailableEngineIds()))
-        const handle: AudioGraphHandle = { audioContext: ctx, masterGain, analyser }
-        void adapter.attach(handle).catch(() => { /* 通路不可用：保持直连 */ })
-        // 自动播放策略下 AudioContext 默认 suspended：立即请求恢复，播放手势再兜底
-        if (ctx.state === 'suspended') void ctx.resume().catch(() => undefined)
-        session = { ctx, adapter }
-        videoEffectsRef.current = session
-      } catch (error) {
-        console.warn('[看歌] 视频音效引擎初始化失败:', error)
-        return
-      }
-    }
-    // 实时同步设置：v2 引擎暴露 updateSettings；v1/v3 在下次 attach（切歌）时读取最新存储生效
-    const onEffectsChanged = (e: Event) => {
-      const detail = (e as CustomEvent).detail
-      const current = videoEffectsRef.current
-      if (!detail || !current) return
-      const engine = (current.adapter as unknown as { engine?: { updateSettings?: (s: unknown) => void } }).engine
-      if (typeof engine?.updateSettings === 'function') engine.updateSettings(detail)
-      if (current.ctx.state === 'suspended') void current.ctx.resume().catch(() => undefined)
-    }
-    window.addEventListener('waveforge:audio-effects-changed', onEffectsChanged as EventListener)
-    return () => window.removeEventListener('waveforge:audio-effects-changed', onEffectsChanged as EventListener)
+    void window.electron?.automixLog?.('看歌-audio', '音效路由已移除：音频直出（无 AudioContext）')?.catch?.(() => undefined)
   }, [audioUrl])
 
   // 全屏状态监听
@@ -1450,6 +1832,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     const list = acceptQuality.length ? acceptQuality : quality > 0 ? [quality] : []
     return Array.from(new Set(list)).sort((a, b) => b - a)
   }, [acceptQuality, quality])
+  /** 仅杜比视界等特殊编码时无可选画质，显示提示而非空菜单 */
+  const qualityIsLocked = acceptQuality.length === 0 && quality > 0
 
   // ===== 候选列表（登录门/确认态/更换视频共用，带类型徽章） =====
   const renderCandidateList = (list: CandidateScore[], emptyText: string) => (
@@ -1582,11 +1966,28 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   // ===== 主渲染 =====
   return (
     <div
-      ref={containerRef}
+      ref={(el) => { containerRef.current = el; cursorHideRef(el) }}
       className="relative w-full h-full overflow-hidden"
       data-tv-scope
       onMouseMove={handleContainerMouseMove}
       onMouseLeave={scheduleControlsHide}
+      // 手势解锁：autoplay 被策略拒绝时，任意一次点击即授予用户激活 → 视频正式开播
+      //（点击本身不影响看歌交互——看歌模式点击不暂停）
+      // 关键：**排除来自按钮/进度条等控件的冒泡**——点暂停键会先被按钮暂停（paused=true），
+      // 事件再冒泡到容器，若此处看到 paused 就"解锁播放"+重置 userPausedRef，
+      // 等于把刚按下的暂停 100ms 内撤销（用户实测"暂停键没反应"）。
+      onClick={(e) => {
+        const t = e.target as HTMLElement | null
+        if (t && t.closest('button, input, select, [role="button"]')) return
+        const video = videoRef.current
+        const audio = audioRef.current
+        // 手势解锁=用户播放意图：重置暂停标记再拉起
+        if (video && video.paused && video.readyState >= 1) {
+          userPausedRef.current = false
+          void video.play().catch(() => undefined)
+        }
+        if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
+      }}
     >
       {/* 模糊封面背景 */}
       {coverUrl && (
@@ -1654,9 +2055,30 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       ) : status === 'playing' && videoUrl ? (
         <>
           {/* DASH 音频轨（音画分离，与视频同步；autoPlay 兜底换流后自动续播） */}
-          <audio ref={audioRef} src={audioUrl || undefined} preload="auto" autoPlay />
+          <audio
+            ref={audioRef}
+            src={audioUrl || undefined}
+            preload="auto"
+            autoPlay
+            onError={() => { void checkAndHealAudio('onError') }}
+          />
 
           {/* 全屏视频（看歌模式：点击不暂停，避免误触中断观看） */}
+          {/* 氛围模式画布：模糊延展视频边缘（Infuse 风格）。
+              注意：画布在**视频之上**（z-15）——视频 16:9 填满 16:9 视口时，画布在视频
+              下面会被完全盖住、泛光不可见（用户实测"没泛光但 draw 正常增长"即此）；提到
+              视频之上以覆盖式氛围呈现，透明度相应调低避免糊画面。 */}
+          {ambientMode !== 'off' && (
+            <canvas
+              ref={ambientCanvasRef}
+              className="absolute inset-0 w-full h-full z-[15] pointer-events-none"
+              style={{
+                filter: `blur(${ambientMode === 'soft' ? 90 : ambientMode === 'vivid' ? 60 : 40}px) saturate(${ambientMode === 'soft' ? 0.8 : ambientMode === 'vivid' ? 1.0 : 1.3})`,
+                opacity: ambientMode === 'soft' ? 0.12 : ambientMode === 'vivid' ? 0.18 : 0.26,
+                transform: 'scale(1.1)',
+              }}
+            />
+          )}
           <video
             ref={videoRef}
             src={videoUrl}
@@ -1664,7 +2086,40 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
             autoPlay
             playsInline
             muted
-            className="absolute inset-0 w-full h-full object-contain z-10"
+            // 本地代理对 media 同样回 ACAO 头：anonymous 让画布读像素（氛围黑边检测）不被污染
+            crossOrigin="anonymous"
+            // preload=auto 兜底：autoplay 被策略拒绝（NotAllowedError → 只有元数据、无帧可画，
+            // 氛围 drawImage 黑帧；开 DevTools 策略放宽才恢复）时仍预取数据 → readyState 2+，
+            // 氛围至少能画首帧；用户任意点击/手势后 play() 即解锁正式播放
+            preload="auto"
+            onCanPlay={() => {
+              const video = videoRef.current
+              const audio = audioRef.current
+              // 双声防护：DASH 音画分离下视频轨必须永远静音——Chromium 自动播放启发式
+              // 或某次交互可能解除 muted，导致 视频自带音轨 + DASH 音频轨 双重奏
+              if (video) video.muted = true
+              // 缓冲推进时 Chromium 会**再次触发 canplay**——若已在播/用户暂停则不得拉起
+              //（否则媒体键暂停后 1~2s 被无声续播，且 userPausedRef 不被重置 → 状态错乱）
+              if (video && video.paused && !userPausedRef.current && video.readyState >= 2) void video.play().catch(() => undefined)
+              if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
+            }}
+            onLoadedMetadata={updateVideoAspect}
+            onLoadedData={updateVideoAspect}
+            onResize={updateVideoAspect}
+            // 按视频实际宽高比精确贴合成显示矩形（居中），四周露出氛围光：
+            // Chromium 的 <video> 黑边是媒体合成器强制绘制，CSS 背景透明无效
+            className={videoContainRect ? 'absolute z-10' : 'absolute inset-0 w-full h-full object-contain z-10'}
+            style={videoContainRect
+              ? {
+                  width: videoContainRect.width,
+                  height: videoContainRect.height,
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  left: '50%',
+                  top: '50%',
+                  transform: 'translate(-50%, -50%)',
+                }
+              : undefined}
           />
 
           {/* 弹幕层（canvas，覆盖视频之上、字幕/控件之下）；时钟用音频时间（音画分离时视频可能未实际播放） */}
@@ -1826,7 +2281,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
                             transition={{ duration: 0.15 }}
                             className="absolute bottom-full right-0 mb-2 w-40 rounded-xl bg-black/85 backdrop-blur-xl border border-white/15 p-1.5 shadow-2xl z-40"
                           >
-                            {qualityOptions.map((qn) => (
+                            {qualityIsLocked ? (
+                              <div className="px-2.5 py-1.5 text-xs text-white/40">当前视频仅支持杜比视界</div>
+                            ) : qualityOptions.map((qn) => (
                               <button
                                 key={qn}
                                 type="button"
@@ -1901,14 +2358,6 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
                     className="h-8 w-8 rounded-full bg-white/10 backdrop-blur-md border border-white/15 flex items-center justify-center text-white/75 hover:bg-white/20 hover:text-white transition-colors"
                   >
                     <ListMusic size={15} />
-                  </button>
-                  <button
-                    type="button"
-                    title="调音室（音效）"
-                    onClick={(e) => onOpenMixingStudio?.(e.currentTarget.getBoundingClientRect())}
-                    className="h-8 w-8 rounded-full bg-white/10 backdrop-blur-md border border-white/15 flex items-center justify-center text-white/75 hover:bg-white/20 hover:text-white transition-colors"
-                  >
-                    <AudioLines size={15} />
                   </button>
                   <button
                     type="button"
@@ -2211,7 +2660,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
       {/* 看歌设置弹窗 */}
       {showSettings && (
-        <BilibiliWatchSettingsModal onClose={() => setShowSettings(false)} playerTheme={playerTheme} />
+        <BilibiliWatchSettingsModal onClose={() => setShowSettings(false)} playerTheme={playerTheme} ambientMode={ambientMode} onAmbientModeChange={(mode) => { setAmbientMode(mode); localStorage.setItem('bilibiliAmbientMode', mode) }} />
       )}
 
       {/* B 站个人主页 */}

@@ -4,7 +4,7 @@ import './index.css'
 import './tv/tv.css'
 import App from './App'
 import { startMemoryWatchdog } from './utils/memoryWatchdog'
-import { initPlatformUI, setTvModeForced } from './platform'
+import { initPlatformUI, setTvModeForced, applyTvScale } from './platform'
 import { installElectronShim } from './electronShim'
 import { startTv } from './tv/tvCore'
 import { initPerfMode } from './tv/perfMode'
@@ -55,6 +55,9 @@ console.error = (...args: unknown[]) => {
 // TV 遥控器交互层（仅 html.tv-mode 生效）：空间导航/焦点环/软键盘。
 // 组件挂载后再调用一次（见 TvKeyboard），确保 React 首帧渲染完就有候选可聚焦。
 startTv()
+
+// TV DPI 缩放：启动时按 localStorage 档位应用（CSS zoom）
+applyTvScale()
 
 // TV 性能模式：按内存自动选默认档，打上 wf-perf-* 类
 initPerfMode()

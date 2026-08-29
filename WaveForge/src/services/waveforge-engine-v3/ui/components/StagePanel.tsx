@@ -168,6 +168,18 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
     onChange({ customSources: params.customSources.map((s, i) => (i === idx ? { ...s, gain } : s)) })
   }
 
+  /** 单个声源位置（米；X 左右 / Y 高度 / Z 前后——方位由融合层相对默认听者计算）。
+   *  坐标钳制 ±12m（XY）/ 0.2..12m（Z 高度下限防入地） */
+  const setSourcePos = (idx: number, axis: 'x' | 'y' | 'z', v: number): void => {
+    onChange({
+      customSources: params.customSources.map((s, i) => {
+        if (i !== idx) return s
+        const clamped = axis === 'y' ? Math.min(12, Math.max(0.2, v)) : Math.min(12, Math.max(-12, v))
+        return { ...s, position: { ...s.position, [axis]: Math.round(clamped * 10) / 10 } }
+      }),
+    })
+  }
+
   /** 删除单个声源（整段替换 customSources） */
   const removeSource = (idx: number): void => {
     onChange({ customSources: params.customSources.filter((_, i) => i !== idx) })
@@ -220,10 +232,6 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
               <div className="flex items-center justify-between gap-2">
                 <span className={`${theme.textPrimary} text-xs font-medium`}>声源 {i + 1}</span>
                 <div className="flex items-center gap-2">
-                  {/* 坐标（米，X/Y/Z；方位由融合层相对默认听者计算，见 fusion stage 分支） */}
-                  <span className={`hse-mono ${theme.textTertiary} text-[10px]`}>
-                    X {src.position.x.toFixed(1)} / Y {src.position.y.toFixed(1)} / Z {src.position.z.toFixed(1)}
-                  </span>
                   <button
                     type="button"
                     aria-label={`删除声源 ${i + 1}`}
@@ -247,6 +255,23 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
                 display={src.gain.toFixed(2)}
                 theme={theme}
               />
+              {/* 声源位置（米，可调——原实现坐标写死 (0,1.6,4) 只读展示）：X 左右 /
+                  Y 高度 / Z 前后，相对默认座位（原点听者 1.6m 高） */}
+              <div className="grid grid-cols-3 gap-1.5">
+                {(['x', 'y', 'z'] as const).map((axis) => (
+                  <Slider
+                    key={axis}
+                    label={axis === 'x' ? '左右 X' : axis === 'y' ? '高度 Y' : '前后 Z'}
+                    value={axis === 'y' ? Math.max(0.2, src.position.y) : src.position[axis]}
+                    min={axis === 'y' ? 0.2 : -12}
+                    max={12}
+                    step={0.1}
+                    onChange={(v) => setSourcePos(i, axis, v)}
+                    display={`${(axis === 'y' ? Math.max(0.2, src.position.y) : src.position[axis]).toFixed(1)}m`}
+                    theme={theme}
+                  />
+                ))}
+              </div>
             </div>
           ))}
         </div>

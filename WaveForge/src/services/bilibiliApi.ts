@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 哔哩哔哩「看歌」前端服务层
  *
  * - B 站登录态（localStorage cookie）与用户信息
@@ -806,18 +810,23 @@ const NEGATIVE_MARKERS = [
   '笛子', '古筝', '二胡', '萨克斯', '伴奏', 'remix', '鬼畜', '修复', '卡拉ok', 'k歌',
   '鼓谱', '架子鼓', '弹唱', '跟练', '扒谱', '练唱', '音游', '手元', '谱面', '全连', 'gameplay',
   '学日语', '学唱歌', '听歌学', '纯人声', '红石音乐',
+  'guitar', 'piano', 'fingerstyle', 'drum', 'violin', 'cello', 'bass', '贝斯', 'flute', 'sax', 'saxophone',
+  'instrumental', 'karaoke', 'playthrough', 'trumpet', 'trombone', 'harmonica', 'bassboost',
+  '两三键', 'sky studio', '新手进阶', '教你', '学唱', '零基础', '一学就会', '入门教程', '简谱教程',
 ]
 /** 合集/盘点类标题：包含多首歌，通常不是单曲正片 */
 const COMPILATION_MARKERS = ['合集', '串烧', '盘点', '榜单', '精选歌', '歌单', '经典歌曲', '怀旧金曲', 'top50', 'top10', '100首', '50首']
 const POSITIVE_EXTRA_MARKERS = ['歌词', '字幕', '4k', '1080p', '正式版', '预告', '中字', '高清', '超清']
 /** 正片增强标记：动漫/剧集主题曲 MV、加长版、完整版更可能是完整正片（用户反馈红莲华场景） */
 const POSITIVE_SONG_MARKERS = ['主题曲', '主題曲', '主题歌', '主題歌', 'テーマソング', '加长版', '加長版', '完整版']
-const LIVE_MARKERS = ['live', '现场', '演唱会', 'livehouse', '音乐节', 'live版']
+const LIVE_MARKERS = ['live', '现场', '演唱会', 'livehouse', '音乐节', 'live版', 'the first take', 'first take', '一発撮り', 'ファーストテイク']
 /** 乐器/曲谱类标题（演奏向，多为翻弹/教学，非正片） */
 const INSTRUMENT_MARKERS = [
   '钢琴', '吉他', '指弹', '演奏', '笛子', '古筝', '二胡', '萨克斯', '伴奏', '鼓谱', '架子鼓', '扒谱',
   '琴谱', '乐谱', '简谱', '口琴', '尤克里里', 'ukulele', '小提琴', '大提琴', '长笛', '琵琶', '古琴', '箫', '笛',
   '吉他谱', '钢琴谱', '铃铛', '竖琴', '扬琴', '手风琴',
+  'guitar', 'piano', 'fingerstyle', 'drum', 'violin', 'cello', 'bass', '贝斯', 'flute', 'sax', 'saxophone',
+  'instrumental', 'karaoke', 'playthrough', 'trumpet', 'trombone', 'harmonica',
 ]
 
 /**
@@ -919,6 +928,10 @@ export function expandArtistNames(raw: string): string[] {
   // 完整串保留为第一个元素（有的歌手名本身含 "/" 如组合名，不能拆没），
   // 同时按常见分隔拆分多人合唱（xx/xx/xx/xx → 几个歌手一起唱）
   result.push(full)
+  // 完整串也生成去括号变体：B 站搜索把 "(K)NoW_NAME" 这类带括号的查询当分组语法，
+  // 直接 0 结果（实测 rainy tone (K)NoW_NAME → 0，rainy tone NoW_NAME → 20 条含正主）
+  const fullNoParen = full.replace(/[（(][^（）()]*[）)]/g, '').trim()
+  if (fullNoParen && fullNoParen !== full && !result.includes(fullNoParen)) result.push(fullNoParen)
   const segments = full.split(/\s+(?:feat(?:uring)?|ft)\.?\s+|\s*&\s*|,|，|、|;|；|\||\//gi)
   for (const seg of segments) {
     const trimmed = seg.trim()
@@ -1034,7 +1047,7 @@ export function scoreCandidate(
     }
   }
   if (artistNormList.some((a) => titleNorm.includes(a)) || aliasNormList.some((a) => titleNorm.includes(a))) {
-    score += 20
+    score += 15
     signals.hasArtist = true
   }
 
@@ -1057,12 +1070,122 @@ export function scoreCandidate(
   if (dashForm !== titleNorm && artistNormList.some((a) => titleNorm.startsWith(a))) score += 15
 
   // 歌名不含歌手（无歌手证据）：可能是同名的其它歌曲（货不对板防御，任何歌名长度都适用——
-  // 否则同名不同歌手的官方 MV 会靠官方/播放加成胜出，如 SawanoHiroyuki 与 NMIXX 的 Roller Coaster）
-  if (!signals.hasArtist) score -= 35
+  // 否则同名不同歌手的官方 MV 会靠官方/播放加成胜出，如 SawanoHiroyuki 与 NMIXX 的 Roller Coaster）。
+  // 惩罚按播放量软化：低播放同名视频才是"同名不同歌"的高风险区；高播放（≥1万）且歌名
+  // 精确命中的视频通常就是正主（用户实测：13.2 万播放的官方向 MV 应胜过 2 千播放的纯音频
+  // 搬运，尽管标题没写歌手）。live/翻唱/语言不一致等仍由各自扣分兜底。
+  if (!signals.hasArtist) score -= (video.play || 0) >= 10000 ? 0 : 35
   // 短歌名易撞车：额外重罚
   if (songTitleNorm.length <= 4 && !signals.hasArtist) score -= 15
   // 未命中歌手 + 却带官方/MV 标记 → 极可能是"别的歌手的官方MV"（张冠李戴，如王艺瑾-喜欢你），再重罚
   if (!signals.hasArtist && (signals.officialMarker || signals.mvMarker)) score -= 40
+  // 无歌手命中 + live 标记 → "别人的演唱会现场"（如日语曲匹配到张国荣热情演唱会），同级别重罚
+  if (!signals.hasArtist && LIVE_MARKERS.some((m) => titleNorm.includes(m))) score -= 30
+  // 「他人《歌名》」形态：书名号前的文本通常是演唱者（如「张国荣Leslie《春夏秋冬》」）。
+  // 去掉【..】与画质/规格标签后仍有实质文本、且不含本曲歌手/别名 → 明确演唱者不符。
+  // 书名号会被 normalizeText 剥掉，须在原始标题上检测。
+  // 例外：知名作曲家（泽野弘之/久石让/坂本龙一/菅野よう子等）署名不算"他人"——
+  // 这些作曲家合作曲极多，B 站标题带他们名字反而是"这首歌是他的作品"的正向信号
+  // （如 Do As Infinity 的《Alive》歌手列表没泽野弘之，但他确是作曲，B 站用户也认）。
+  const COMPOSER_AFFINITY = ['泽野弘之', 'sawano', '久石让', 'hisashi', '坂本龙一', 'ryuichi', '菅野よう子', 'yoko kanno', '梶浦由記', 'yuki kajiura', '鹭巢诗郎', 'shiro sagisu', '泽野']
+  if (!signals.hasArtist) {
+    const rawTitle = String(video.title || '')
+    const bracketMatches = rawTitle.match(/《[^《》]{1,60}》/g) || []
+    for (const bracket of bracketMatches) {
+      const inner = normalizeText(bracket.slice(1, -1)).replace(/\s+/g, '')
+      if (!songTitleVariants.some((t) => t.replace(/\s+/g, '') === inner)) continue
+      const prefix = normalizeText(rawTitle.slice(0, rawTitle.indexOf(bracket)))
+        .replace(/【[^】]*】/g, '')
+        .replace(/4k\d*fps?|1080p|hi-?res|khz|\d+bit|mad|hdr|高清|超清|修复|重制|字幕|中字/g, '')
+        .replace(/\s+/g, '')
+      if (prefix.length >= 2
+        && !artistNormList.some((a) => prefix.includes(a))
+        && !aliasNormList.some((a) => prefix.includes(a))) {
+        const composerHit = COMPOSER_AFFINITY.some((c) => prefix.includes(normalizeText(c)))
+        if (!composerHit) score -= 45
+        else score += 5 // 作曲家署名：轻加，鼓励这类"虽无歌手但确是本曲作品"的视频
+      }
+      break
+    }
+  }
+  // 「歌名+额外词」在书名号/方括号内、且无本曲歌手 → 同名不同歌风险。
+  // 区分两类：(1) 歌名后紧跟**别的歌的歌名扩展**（如 BIGBANG《春夏秋冬(Still Life)》——
+  // (Still Life) 是 BIGBANG 那首歌的专属后缀，不是本曲）；(2) 歌名后紧跟别的媒体的标题
+  // （如《春夏秋冬代行者 春之舞》——是动画不是歌）。已知媒体/乐器限定词（字幕/现场/4K/
+  // 吉他/cover/完整版等）不算——那是同一首歌的不同形态。不罚已命中本曲歌手的候选。
+  if (!signals.hasArtist) {
+    const rawTitle = String(video.title || '')
+    const qualifierRe = /字幕|中字|歌词|现场|live|演唱会|版|ver|mv|pv|音乐|完整|加长|高清|超清|4k|1080p|120帧|官方|伴奏|纯音乐|纯享|instrumental|钢琴|吉他|guitar|piano|指弹|演奏|cover|翻唱|弹唱|ktv|卡啦|试听|修复|重制|remaster|hi-?res|无损|杜比|环绕|8d|remix|混音|剪辑|合集|纯音乐|女声|男声|歌词排版|字幕组|中英/i
+    const innerMatches = rawTitle.match(/[《【]([^》】]{1,60})[》】]/g) || []
+    for (const bracket of innerMatches) {
+      const innerNorm = normalizeText(bracket.replace(/[《》【】]/g, ''))
+      const variant = songTitleVariants.find((t) => innerNorm.startsWith(t))
+      if (!variant) continue
+      const remainder = innerNorm.slice(variant.length)
+      if (remainder.length >= 2 && !qualifierRe.test(remainder)) {
+        score -= 25
+      }
+      break
+    }
+  }
+  // 「歌名 - 其他歌手」直接形态（如「春夏秋冬 - 张国荣」——演唱者不是本曲歌手）。
+  // 无书名号/方括号时上面的「他人《歌名》」检测不到；这里按"标题前半是歌名、后半是
+  // 另一个人名"判罚。后半命中本曲歌手/别名或媒体限定词（MV/歌词/字幕/现场/版等）不罚。
+  // 含书名号/方括号的标题走上面的括号检测，不重复判罚。
+  if (!signals.hasArtist) {
+    const songRe = songTitleVariants.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).sort((a, b) => b.length - a.length).join('|')
+    // 先剥离前置规格/限定标记（【4K】【HI-RES】…）与括号注释，露出「歌名 - 人名」主干
+    const cleaned = String(video.title || '')
+      .replace(/【[^】]*】/g, ' ')
+      .replace(/（[^）]*）/g, ' ')
+      .replace(/\([^)]*\)/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const dashForm = cleaned.match(new RegExp(`^(${songRe})\\s*[-–—:：·]\\s*([^-\\s《》【】\\[\\]（）()]{2,24})$`, 'i'))
+    if (dashForm) {
+      const trailing = normalizeText(dashForm[2])
+      const isArtist = artistNormList.some((a) => trailing.includes(a) || a.includes(trailing))
+        || aliasNormList.some((a) => trailing.includes(a))
+      const isQualifier = /字幕|歌词|mv|pv|版|ver|现场|live|演唱会|完整|加长|4k|1080p|高清|伴奏|纯音乐|纯享|instrumental|翻唱|cover|歌词排版|中字|试听|remaster|hi-?res|无损|混音|合唱|钢琴|吉他|小提琴/i.test(trailing)
+      if (!isArtist && !isQualifier) score -= 30
+    }
+  }
+  // 「…歌名）-后缀」形态：括号后紧跟连字符+名字（如「harunaziakufuyu(春夏秋冬）-Riko/nico」）
+  // 是"歌名-上传者/翻唱者"的命名习惯（自译/翻唱/搬运），后缀不是本曲歌手 → 货不对板风险。
+  // 标准「歌手 - 歌名」形态（带空格连字符）不受影响；后缀命中歌名/歌手/别名也不罚。
+  if (!signals.hasArtist) {
+    const appendMatch = String(video.title || '').match(/[）)]\s*-\s*([^\-[\]【】()（）]{1,24})/i)
+    if (appendMatch) {
+      const suffixNorm = normalizeText(appendMatch[1])
+      const isSongSuffix = songTitleVariants.some((t) => t === suffixNorm || t.includes(suffixNorm) || suffixNorm.includes(t))
+      if (suffixNorm.length >= 2 && !isSongSuffix && !artistNormList.includes(suffixNorm) && !aliasNormList.includes(suffixNorm)) {
+        score -= 15
+      }
+    }
+  }
+  // 语言一致性辅助信号：歌手/歌名含假名（日文曲）而候选标题与作者完全无假名且未命中歌手
+  // → 大概率是中文同名曲（正确的候选也可能无假名，如 romaji 写法，故仅作辅助降权）
+  const KANA_RE = /[\u3040-\u309F\u30A0-\u30FF]/
+  if (!signals.hasArtist
+    && KANA_RE.test(artistNormList.join('') + songTitleNorm)
+    && !KANA_RE.test(titleNorm + authorNorm)) {
+    score -= 15
+  }
+  // 「【人名】歌名」前缀：日系标题常以【】标注演唱者/翻唱者（如【黒音さや】rainy tone——
+  // 黒音さや是翻唱者，不是本曲歌手 NIKIIE/(K)NoW_NAME）。【】内是媒体/规格限定词
+  // （4K/字幕/官方/MAD/卡拉OK 等）不算；命中本曲歌手/别名不算。未命中歌手时降权，
+  // 避免"无翻唱字样"的翻唱视频压过原唱。
+  if (!signals.hasArtist) {
+    const rawTitle = String(video.title || '')
+    const lead = rawTitle.match(/^【([^】]{1,24})】/)
+    if (lead) {
+      const leadNorm = normalizeText(lead[1])
+      const isArtist = artistNormList.some((a) => leadNorm.includes(a) || a.includes(leadNorm))
+        || aliasNormList.some((a) => leadNorm.includes(a))
+      const isQualifier = /4k|1080p|高清|超清|字幕|中字|歌词|mv|pv|官方|现场|live|演唱会|完整|加长|伴奏|纯音乐|纯享|instrumental|钢琴|吉他|guitar|piano|指弹|演奏|翻唱|cover|カバー|卡拉ok|ktv|ニコカラ|nico|投屏|mad|手书|剪辑|修复|重制|hi-?res|无损|试听|合集|中文|日语|日文|双语|中英|中日|竖屏|横屏|收藏|自用|搬运/i.test(leadNorm)
+      if (leadNorm.length >= 2 && !isArtist && !isQualifier) score -= 30
+    }
+  }
 
   // 分区
   if (video.typename === '音乐') score += 15
@@ -1076,6 +1199,15 @@ export function scoreCandidate(
   for (const m of POSITIVE_EXTRA_MARKERS) if (titleNorm.includes(m)) score += 10
   // 正片增强：主题曲/加长版/完整版 → 完整正片信号（独立加权，避免和正向标记叠加混淆）
   for (const m of POSITIVE_SONG_MARKERS) if (titleNorm.includes(m)) score += 12
+  // 完整版/加长版 + 歌手命中 + 播放 ≥1万 + 非现场/非翻唱 → 完整正片本体，强优先。
+  // （用户实测：58.2万播放的《紅蓮華》加长版应胜过 97.8万播放的 4K 重制/其它版本——
+  // 加长版就是官方 MV 本体，播放量到量级后应稳压"更花哨但非本体"的版本。）
+  if (signals.hasArtist && (video.play || 0) >= 10000
+    && /完整版|加长版|加長版|完整フル|フルバージョン/.test(titleNorm)
+    && !LIVE_MARKERS.some((m) => titleNorm.includes(m))
+    && !/翻唱|cover|カバー/.test(titleNorm)) {
+    score += 25
+  }
   // OP/ED（动漫片头/片尾主题曲）：与歌曲主题直接相关，权重提升。
   // normalizeText 会把「【OP】LiSA」黏成 "oplisa" 破坏词边界，所以用原始标题做边界匹配；
   // 允许带集数（OP1/ED2），防误伤 "operation"/"editor"/"open" 等单词。
@@ -1116,11 +1248,18 @@ export function scoreCandidate(
   // 听歌要的是完整版 → 降级，让同曲的完整版/MV 排到前面
   if (isOpEdTitle && compareDuration >= 70 && compareDuration <= 110) score -= 25
 
-  // 播放量（对数加权，热门更可能是正片）
-  if (video.play > 0) score += Math.min(30, Math.log10(video.play) * 6)
+  // 播放量（对数加权，热门更可能是正片/高质量 MV）：MV 背景要的是"好看"，高播放视频
+  // 通常是有画面的真 MV（低播放常是纯音频搬运）。权重×13 让数量级差异决定性——
+  // 13.2 万播放的官方向 MV 应胜过 2 千播放的纯音频搬运（后者只是标题写了歌手）。
+  // 未命中歌手时**不衰减**：高播放本身就是正确性的强证据（"同名不同歌"风险由上方
+  // 按播放量软化的无歌手惩罚 + live/翻唱/语言一致性扣分兜底）。
+  if (video.play > 0) {
+    score += Math.min(75, Math.log10(video.play) * 13)
+  }
 
-  // 搜索排名（B 站相关度顺序是强信号，靠前的轻微加权）
-  score += Math.max(0, 15 - rank) * 0.8
+  // 搜索排名（B 站相关度顺序偏"标题精确命中"而非"MV 质量"，权重从 0.8 降至 0.5——
+  // 干净标题的低播放搬运常排首位，不应压过高播放真 MV）
+  score += Math.max(0, 15 - rank) * 0.5
 
   // 官方频道关键词（作者名命中，authorNorm 已在歌手匹配段计算）
   if (OFFICIAL_CHANNEL_KEYWORDS.some((k) => authorNorm.includes(k))) score += 25
@@ -1315,11 +1454,30 @@ export function addBilibiliBlacklist(songKey: string, bvid: string): string[] {
 
 // ===== 全流程：查找并匹配当前歌曲的 B 站视频 =====
 
-const TOP_CONFIRM_COUNT = 8
+const TOP_CONFIRM_COUNT = 12
 const REVIEW_TOP_N = 8
 
 /** 复审 view/字幕的全局 bvid 缓存（跨歌曲复用，1h TTL；LRU 上限防无界增长） */
 const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number }>()
+
+/**
+ * 清除 MV 匹配缓存：24h 内存匹配结果 + 复审缓存 + 手动标记/黑名单（localStorage）。
+ * 匹配结果异常（评分规则更新 / 候选变化 / 用户想换一个视频）时使用；清除后重搜生效。
+ */
+export function clearAllMvMatchCache(): void {
+  matchCache.clear()
+  reviewCache.clear()
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i)
+      if (k && (k.startsWith('bilibili_override_') || k.startsWith('bilibili_blacklist_'))) keys.push(k)
+    }
+    for (const k of keys) localStorage.removeItem(k)
+  } catch {
+    /* 忽略 */
+  }
+}
 const REVIEW_CACHE_TTL = 60 * 60 * 1000
 const REVIEW_CACHE_MAX = 400
 
@@ -1394,13 +1552,15 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   return queries
 }
 
-/** 近重复标题去重（规范化后相同者只留播放量最高的） */
-export function dedupeCandidates<T extends { video: BilibiliVideo }>(list: T[]): T[] {
+/** 近重复标题去重：保留综合评分更高者（评分含时长贴近/歌手/播放量）。
+ *  纯按播放量去重会把"时长精确匹配的正片"丢掉——如「NIKIIE-春夏秋冬」(306s=歌曲时长)
+ *  与「【nikiie】春夏秋冬」(209s) 规范化后同名，保留高播放版会让时长贴近的加分消失。 */
+export function dedupeCandidates<T extends { video: BilibiliVideo; score?: number }>(list: T[]): T[] {
   const seen = new Map<string, T>()
   for (const c of list) {
     const norm = normalizeText(c.video.title)
     const prev = seen.get(norm)
-    if (!prev || (c.video.play || 0) > (prev.video.play || 0)) seen.set(norm, c)
+    if (!prev || (c.score ?? -Infinity) > (prev.score ?? -Infinity)) seen.set(norm, c)
   }
   return Array.from(seen.values())
 }
@@ -1524,14 +1684,18 @@ export async function findBestBilibiliMv(
 ): Promise<BilibiliMatchResult> {
   const settings = { ...DEFAULT_WATCH_SETTINGS, ...(opts?.settings || getBilibiliWatchSettings()) }
   // 缓存键必须包含设置指纹：偏好/门槛/模板/强制最高分不同 → 匹配结果（排序与门槛判定）不同
+  // 手动选择记忆（override）也入指纹：用户换了记忆视频后不能继续命中旧缓存（旧 best 会盖过新选择）
+  const songKey = songKeyOf(song)
+  const overrideBvid = settings.useRememberedOverride ? (getBilibiliOverride(songKey) || '') : ''
   const settingsFingerprint = [
     settings.matchPreference,
     settings.autoPlayStrictness,
     settings.keywordTemplate,
     settings.customKeywordTemplate,
     settings.forceAutoPlayHighest ? 'force' : 'gate',
+    overrideBvid,
   ].join('|')
-  const cacheKey = `${songKeyOf(song)}::${settingsFingerprint}`
+  const cacheKey = `${songKey}::${settingsFingerprint}`
   const cached = matchCache.get(cacheKey)
   if (cached && Date.now() - cached.at < MATCH_CACHE_TTL) return cached.result
   const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal)
@@ -1551,7 +1715,9 @@ async function findBestBilibiliMvUncached(
   const empty = (error?: string): BilibiliMatchResult => ({ status: 'error', candidates: [], fallbackChain: [], error })
   const blacklist = new Set(getBilibiliBlacklist(songKey))
 
-  // 0. 用户手动选择记忆 → 直接播（可关闭）
+  // 0. 用户手动选择记忆：优先播放该视频，但不短路——完整搜索照常跑，
+  //    候选列表保留全部结果（否则列表只剩记忆视频一个，用户无法换回其他 MV）。
+  let rememberedOverride: CandidateScore | null = null
   if (settings.useRememberedOverride) {
     const overrideBvid = getBilibiliOverride(songKey)
     if (overrideBvid) {
@@ -1567,10 +1733,7 @@ async function findBestBilibiliMvUncached(
             pic: view.data.pic,
           }
           const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal)
-          const best = scored[0]
-          if (best) {
-            return { status: 'auto', best, candidates: [best], fallbackChain: [best] }
-          }
+          rememberedOverride = scored[0] || null
         }
       } catch {
         // 覆盖视频失效 → 清除记忆走正常搜索
@@ -1578,6 +1741,9 @@ async function findBestBilibiliMvUncached(
       }
     }
   }
+  /** 记忆视频直接播放（搜索失败/无候选时也要能放记忆的视频） */
+  const rememberedOnly = (): BilibiliMatchResult | null =>
+    rememberedOverride ? { status: 'auto', best: rememberedOverride, candidates: [rememberedOverride], fallbackChain: [rememberedOverride] } : null
 
   // 1. 偏好感知多查询搜索（前两页提升召回）
   const queries = buildQueries(song, settings)
@@ -1601,7 +1767,7 @@ async function findBestBilibiliMvUncached(
     }
     if (videos.length >= 60) break
   }
-  if (!videos.length) return empty('搜索失败，请稍后重试')
+  if (!videos.length) return rememberedOnly() || empty('搜索失败，请稍后重试')
 
   // 2. 初筛打分（硬淘汰无关 + 黑名单剔除 + 排名信号）
   let candidates = videos
@@ -1610,16 +1776,25 @@ async function findBestBilibiliMvUncached(
   // 近重复标题去重（保留播放量最高）
   candidates = dedupeCandidates(candidates).sort((a, b) => b.score - a.score)
 
-  if (!candidates.length) return { status: 'none', candidates: [], fallbackChain: [] }
+  if (!candidates.length) return rememberedOnly() || { status: 'none', candidates: [], fallbackChain: [] }
 
   // 3. TOP-5 复审（作者认证 + 字幕，全局 bvid 缓存）
   candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal)
 
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
-  const fallbackChain = candidates
-  const best = fallbackChain[0]
+  let fallbackChain = candidates
+  let best = fallbackChain[0]
+  if (rememberedOverride) {
+    // 记忆视频前置为 best（用户显式选择，无条件播放），但完整候选链保留——
+    // 记忆视频失效时可沿链回退，用户也能在列表里换回其他 MV
+    fallbackChain = [rememberedOverride, ...fallbackChain.filter((c) => c.video.bvid !== rememberedOverride.video.bvid)]
+    best = rememberedOverride
+  }
   const topCandidates = fallbackChain.slice(0, TOP_CONFIRM_COUNT)
-  if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
+  if (rememberedOverride || !best) {
+    if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
+    return { status: 'auto', best, candidates: topCandidates, fallbackChain }
+  }
   if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) {
     return { status: 'auto', best, candidates: topCandidates, fallbackChain }
   }

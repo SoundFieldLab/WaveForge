@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+# 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
 """
 AI 混音（DJTransGAN）渲染 Worker —— 独立于 render_worker.py。
 
@@ -26,6 +28,74 @@ if REPO_DIR not in sys.path:
 import numpy as np  # noqa: E402
 
 SR = 44100
+
+
+def _plan_beats(plan, key):
+    """App 分析好的节拍注入（替代仓库内 madmom 节拍检测——madmom 无 wheel 且
+    不支持 Py3.13，无法自动安装）。plan 携带 source/target 的 bpm 与拍点，
+    4/4 主拍网格下每 4 拍取一个 downbeat 近似（真实歌曲以 4/4 为主）。"""
+    prefix = 'source' if key == 'prev' else 'target'
+    beats = plan.get(f'{prefix}BeatTimes') or []
+    bpm = float(plan.get(f'{prefix}Bpm') or 120.0)
+    downbeats = beats[::4] if beats else []
+    return {'bpm': bpm, 'downbeats': downbeats}
+
+
+def _preprocess(prev_audio, next_audio, prev_cue, next_cue, plan_beats):
+    """DJTransGAN preprocess 的 WaveForge 适配版。
+
+    仓库原版 preprocess(prev, next, prev_cue, next_cue) 用 madmom/librosa 自行估
+    节拍（签名 4 参、返回 3 值），与 WaveForge 期望的"注入 App 节拍 + 返回 2 值"
+    不符。这里用 plan_beats（App 分析注入的 BPM/拍点）替代内部估拍，流程与仓库
+    原版一致；缺注入数据时回退仓库自身估拍（librosa 兜底），保证 AI 混音可用。
+    """
+    import torch
+    from djtransgan.config import settings
+    from djtransgan.utils import normalize
+    from djtransgan.dataset import select_audio_region
+    from djtransgan.process import sync_bpm, sync_cue, select_cue_points, correct_cue, estimate_beat
+
+    def _beats(key, audio):
+        info = (plan_beats or {}).get(key) or {}
+        bpm = float(info.get('bpm') or 0.0)
+        downbeat = np.asarray(info.get('downbeats') or [], dtype=float)
+        if bpm <= 0 or downbeat.size < 2:
+            # 缺节拍注入（旧 plan/上游路径）时回退仓库自身估拍
+            try:
+                _, bpm, _, downbeat = estimate_beat(audio)
+                bpm = float(bpm or 0.0)
+                downbeat = np.asarray(downbeat, dtype=float)
+            except Exception as e:
+                raise RuntimeError(f'beat data unavailable for AI mix: {e}')
+        return bpm, downbeat
+
+    prev_bpm, prev_downbeat = _beats('prev', prev_audio)
+    next_bpm, next_downbeat = _beats('next', next_audio)
+
+    next_audio, ratio = sync_bpm(next_audio, prev_bpm, next_bpm)
+    next_downbeat = next_downbeat / ratio
+    next_cue = correct_cue(next_downbeat, next_cue / ratio)
+    prev_cue = correct_cue(prev_downbeat, prev_cue)
+
+    prev_cues, next_cues = select_cue_points(prev_cue, next_cue, prev_downbeat, next_downbeat)
+    next_audio, next_cues = sync_cue(prev_audio, next_audio, prev_cues, next_cues)
+
+    next_audio = normalize(next_audio)
+    prev_audio = normalize(prev_audio)
+
+    prev_audio_for_g, prev_cues_for_g, (prev_cues_ori, prev_timestamps) = select_audio_region(
+        prev_audio, prev_cues, settings.N_TIME, True, 0)
+    next_audio_for_g, next_cues_for_g, (next_cues_ori, next_timestamps) = select_audio_region(
+        next_audio, next_cues, settings.N_TIME, True, 1)
+
+    pair_audio = [prev_audio, next_audio]
+    timestamps = [prev_timestamps, next_timestamps]
+    pair_audio_for_g = [
+        prev_audio_for_g.unsqueeze(0).to(torch.float32),
+        next_audio_for_g.unsqueeze(0).to(torch.float32),
+    ]
+    cue_for_g = prev_cues_for_g.unsqueeze(0).to(torch.float32)
+    return (pair_audio, timestamps), (pair_audio_for_g, cue_for_g)
 
 # ── v2 编排特效层（与 render_worker.py 同实现的独立副本，只依赖 numpy/scipy）──
 # AI worker 运行在带 torch 的 venv（无 pedalboard），无法 import render_worker；
@@ -226,7 +296,6 @@ def extract_automation(plan, source_path, target_path):
     可在**任意长度**上重建——这是把 AI 学到的过渡曲线复用到 v2 短过渡（8~32 拍）
     的关键：不依赖固定 60s 窗口，不渲染音频（跳过 mixer/ISTFT，快）。
     """
-    from djtransgan.process import preprocess
 
     generator, torch = load_generator()
 
@@ -238,7 +307,10 @@ def extract_automation(plan, source_path, target_path):
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
-        (pair_audio, timestamps), (pair_audio_for_g, cue_for_g), _ratio = preprocess(prev_audio, next_audio, prev_cue, next_cue)
+        # WaveForge 适配：节拍用 App 分析注入（_preprocess 内部替代估拍）
+        plan_beats = {'prev': _plan_beats(plan, 'prev'), 'next': _plan_beats(plan, 'next')}
+        (pair_audio, timestamps), (pair_audio_for_g, cue_for_g) = _preprocess(prev_audio, next_audio, prev_cue, next_cue, plan_beats)
+        pair_audio_for_g = [t.float() for t in pair_audio_for_g]  # preprocess 部分输出 float64，模型需要 float32
         with torch.no_grad():
             in_vecs, _in_mags = generator.encode(pair_audio_for_g)
             render_params = [generator.unzipper(processor(*in_vecs)) for processor in generator.post_processors]
@@ -254,7 +326,6 @@ def extract_automation(plan, source_path, target_path):
 
 def render_ai_transition(plan, source_path, target_path, output_path):
     """跑 DJTransGAN 长混音，返回 {success, outputPath, transitionStart, targetResumeTime, duration, ...}。"""
-    from djtransgan.process import preprocess
 
     generator, torch = load_generator()
 
@@ -270,9 +341,12 @@ def render_ai_transition(plan, source_path, target_path, output_path):
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
-        # 模型窗口起点/终点（源曲/目标曲内的绝对时间，由 preprocess 的 timestamps 给出：
+        # 模型窗口起点/终点（源曲/目标曲内的绝对时间，由 _preprocess 的 timestamps 给出：
         # timestamps[i] = [start_sample, end_sample]；next 侧为"拉伸后"时间轴）
-        (pair_audio, timestamps), (pair_audio_for_g, cue_for_g), stretch_ratio = preprocess(prev_audio, next_audio, prev_cue, next_cue)
+        plan_beats = {'prev': _plan_beats(plan, 'prev'), 'next': _plan_beats(plan, 'next')}
+        (pair_audio, timestamps), (pair_audio_for_g, cue_for_g) = _preprocess(prev_audio, next_audio, prev_cue, next_cue, plan_beats)
+        pair_audio_for_g = [t.float() for t in pair_audio_for_g]  # preprocess 部分输出 float64，模型需要 float32
+        stretch_ratio = float(plan.get('sourceBpm') or 120.0) / max(1.0, float(plan.get('targetBpm') or 120.0))
         transition_start = timestamps[0][0] / SR      # 源曲内（未拉伸轴）：混音窗口起始
         # 目标曲恢复点：timestamps[1][1] 在"拉伸后"时间轴，必须乘回拉伸比
         # （ratio = prev_bpm/next_bpm，next 被 sync_bpm 拉伸）才是原始时间轴位置，

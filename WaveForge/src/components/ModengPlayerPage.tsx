@@ -16,6 +16,8 @@ import {
 } from 'lucide-react'
 import type { LyricLine } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
+import { isTvModeActive } from '../platform'
+import AnimatedArtworkCover from './AnimatedArtworkCover'
 import { hasTrueWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
 import AppleCoverFx from './AppleCoverFx'
@@ -43,6 +45,9 @@ interface ModengPlayerPageProps {
   coverUrl?: string
   /** Apple Music 命中的高清封面（优先显示 + 启用律动粒子动效） */
   appleCoverUrl?: string
+  /** Apple Music 动态封面（图层叠加式，无/失败回退静态封面） */
+  animatedCoverUrl?: string | null
+  animatedCoverPoster?: string | null
   trackId?: string | number
   translationEnabled?: boolean
   romanEnabled?: boolean
@@ -104,6 +109,8 @@ export default function ModengPlayerPage({
   songArtist,
   coverUrl,
   appleCoverUrl,
+  animatedCoverUrl,
+  animatedCoverPoster,
   isTransitioning,
   onSeek,
   onPlayPause,
@@ -117,6 +124,9 @@ export default function ModengPlayerPage({
 }: ModengPlayerPageProps) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState({ width: 1312, height: 951 })
+  // 拖拽期间挂在 window 的 pointer 监听器：组件卸载时也要移除，避免外溢
+  const dragCleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => { dragCleanupRef.current?.() }, [])
 
   useEffect(() => {
     const node = rootRef.current
@@ -190,6 +200,7 @@ export default function ModengPlayerPage({
   }
 
   // ---- 时间驱动：rAF 推进逐词混色 / 进度条 / 时间标签 ----
+  // 高刷屏限 120fps：混色进度按时间计算，跳帧不影响正确性
   const wordColorRefs = useRef(new Map<string, HTMLSpanElement>())
   const progressFillRef = useRef<HTMLDivElement | null>(null)
   const elapsedRef = useRef<HTMLSpanElement | null>(null)
@@ -202,6 +213,7 @@ export default function ModengPlayerPage({
     let anchorTime = 0
     let anchorWall = performance.now()
     let playing = false
+    let lastPaint = 0
 
     const paint = (now: number) => {
       const t = now + timeOffset
@@ -231,9 +243,18 @@ export default function ModengPlayerPage({
     }
 
     const tick = (wall: number) => {
+      // 限 120fps（1000/120ms）：跳过的帧沿用原有停帧条件，避免隐藏后空转。
+      // TV 弱 CPU 上限降到 30fps（词色/进度条更新人眼无感，保留全部动画）。
+      const frameCapMs = isTvModeActive() ? 1000 / 30 : 1000 / 120
+      if (lastPaint && wall - lastPaint < frameCapMs) {
+        raf = playing && document.visibilityState === 'visible' ? requestAnimationFrame(tick) : 0
+        return
+      }
+      lastPaint = wall
       const extrapolated = playing ? (wall - anchorWall) / 1000 : 0
       paint(anchorTime + extrapolated)
-      raf = playing ? requestAnimationFrame(tick) : 0
+      // 窗口隐藏时停帧（Electron backgroundThrottling 关闭，隐藏后 rAF 仍全速执行 60fps 样式写）
+      raf = playing && document.visibilityState === 'visible' ? requestAnimationFrame(tick) : 0
     }
 
     const sync = () => {
@@ -243,13 +264,18 @@ export default function ModengPlayerPage({
       playing = snapshot.isPlaying
       if (snapshot.duration > 0) durationRef.current = snapshot.duration
       paint(anchorTime)
-      if (playing && !raf) raf = requestAnimationFrame(tick)
+      if (playing && !raf && document.visibilityState === 'visible') raf = requestAnimationFrame(tick)
     }
 
     sync()
     const unsubscribe = playbackTimeStore.subscribe(sync)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && playing && !raf) raf = requestAnimationFrame(tick)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       unsubscribe()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       if (raf) cancelAnimationFrame(raf)
       raf = 0
     }
@@ -264,7 +290,9 @@ export default function ModengPlayerPage({
     const up = () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
+      if (dragCleanupRef.current === up) dragCleanupRef.current = null
     }
+    dragCleanupRef.current = up
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
@@ -414,6 +442,14 @@ export default function ModengPlayerPage({
                 <Music style={{ width: 190 * s, height: 190 * s, color: c.placeholderIcon }} strokeWidth={1.4} />
               </div>
             )}
+            {/* Apple Music 动态封面图层：盖在静态封面之上，无/失败回退下层静态图 */}
+            <AnimatedArtworkCover
+              videoUrl={animatedCoverUrl ?? null}
+              posterUrl={animatedCoverPoster ?? null}
+              staticCoverUrl={appleCoverUrl || coverUrl}
+              active
+              className="absolute inset-0 h-full w-full"
+            />
             <AppleCoverFx
               enabled={Boolean(appleCoverUrl)}
               isPlaying={isPlaying}

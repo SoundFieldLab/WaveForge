@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, Heart, UserPlus, UserCheck } from 'lucide-react'
 import { List, type ListImperativeAPI, type RowComponentProps } from 'react-window'
 import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed } from '../services/musicApi'
+import { fetchSodaArtistSongs } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleArtistDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
@@ -22,6 +23,16 @@ const formatDuration = (ms: number) => {
   const mins = Math.floor(seconds / 60)
   const secs = seconds % 60
   return `${mins}:${secs.toString().padStart(2, '0')}`
+}
+
+// 汽水平台约定：外部把「歌手名」当作 artistId 字符串传入（汽水无独立艺人 ID 体系）。
+// 名字可能经 URL 编码传递；解码失败（非法 % 序列）时回退原文，避免弹窗崩溃
+const decodeSodaName = (raw: string): string => {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
 }
 
 interface ArtistSongRowProps {
@@ -434,7 +445,8 @@ export default function ArtistDetailModal({
   const [loadingMVs, setLoadingMVs] = useState(false)
   const [allSongsError, setAllSongsError] = useState<string | null>(null) // 全部歌曲加载错误
   const [hotSongsError, setHotSongsError] = useState<string | null>(null) // 热门歌曲加载错误
-  const [activeTab, setActiveTab] = useState<TabType>(initialTab)
+  // 汽水仅「精选」标签有数据源，初始标签收敛到精选
+  const [activeTab, setActiveTab] = useState<TabType>(platform === 'soda' ? 'hotSongs' : initialTab)
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null)
   const [selectedMV, setSelectedMV] = useState<{ id: number | string; name: string; platform?: 'netease' | 'qq'; index: number } | null>(null)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
@@ -475,7 +487,8 @@ export default function ArtistDetailModal({
   const textTertiary = playerTheme === 'dark' ? 'text-white/40' : 'text-black/40'
   const bgCard = playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'
   const borderColor = playerTheme === 'dark' ? 'border-white/10' : 'border-black/10'
-  const isVip = platform === 'netease' ? neteaseVip : qqVip
+  // 汽水暂无本地会员态：按非会员处理，Song.vip 为真的曲目始终显示 VIP 徽标
+  const isVip = platform === 'netease' ? neteaseVip : platform === 'qq' ? qqVip : false
   const readableAccentColor = getReadableAccentColor(accentColor, '#dbeafe')
 
   // 格式化粉丝数显示
@@ -507,7 +520,7 @@ export default function ArtistDetailModal({
   useEffect(() => {
     let cancelled = false
     const fetch = async () => {
-      if (!artist || platform === 'apple') return
+      if (!artist || platform === 'apple' || platform === 'soda') return
       try {
         const id = platform === 'qq' ? String(artist.mid || artist.id) : String(artist.id)
         const data = await getSimilarArtists(id, platform)
@@ -547,6 +560,16 @@ export default function ArtistDetailModal({
         .catch(() => setUserPlaylists([]))
       return
     }
+    // Spotify / 汽水：歌单列表由平台自身登录态驱动（Spotify token / 汽水 soda_token cookie），
+    // 不依赖本地 userId；未登录或接口失败时 fetchUserPlaylists 返回空数组，
+    // 右键「添加到」自然保持为空。汽水已登录时 platforms.addTracksToPlaylist=true，
+    // 真实自建歌单可经 addSodaSongToPlaylist 加歌。
+    if (platform === 'spotify' || platform === 'soda') {
+      void getUserPlaylists(platform, '')
+        .then(list => setUserPlaylists(Array.isArray(list) ? list : []))
+        .catch(() => setUserPlaylists([]))
+      return
+    }
     const userId = platform === 'qq'
       ? localStorage.getItem('qq_user_id') || ''
       : localStorage.getItem('netease_user_id') || ''
@@ -578,7 +601,7 @@ export default function ArtistDetailModal({
     // 恢复来源/记忆的标签页（initialTab，含 全部歌曲/MV/相似歌手/详情/专辑）；
     // 无显式初始标签时默认 'hotSongs'，与"每次打开回精选"的原行为一致。
     // 不能写死 'hotSongs'：否则从播放页返回（home 恢复）时所有标签都被重置回精选。
-    setActiveTab(initialTab)
+    setActiveTab(platform === 'soda' ? 'hotSongs' : initialTab)
   }, [artistId, platform])
 
   // 如果有初始专辑ID，加载专辑数据后自动打开该专辑
@@ -636,6 +659,16 @@ export default function ArtistDetailModal({
         setLoading(false)
         return
       }
+      // 汽水音乐：逆向无艺人详情接口，不做额外请求——外部把「歌手名」当 artistId 传入，
+      // 直接以名字构造头部信息；热门歌曲走 fetchSodaArtistSongs（上限 50，
+      // 服务内部降级不抛错，失败/无结果返回空数组 → 复用「暂无热门歌曲」空态文案）
+      if (platform === 'soda') {
+        const name = decodeSodaName(String(artistId))
+        setArtist({ id: 0, name, picUrl: '', platform: 'soda' })
+        const songs = await fetchSodaArtistSongs(name, 50)
+        setHotSongs(songs)
+        return
+      }
       const [artistData, songsData] = await Promise.all([
         getArtistDetail(artistId, platform),
         getArtistTopSongs(artistId, platform)
@@ -661,9 +694,10 @@ export default function ArtistDetailModal({
     }
   }
 
-  // 打开歌手详情时按当前账号是否已关注初始化按钮状态（QQ 传 mid，网易云传数字 id）
+  // 打开歌手详情时按当前账号是否已关注初始化按钮状态（QQ 传 mid，网易云传数字 id）；
+  // 汽水无关注查询接口，跳过（按钮本身也不渲染）
   useEffect(() => {
-    if (!artist || platform === 'apple') return
+    if (!artist || platform === 'apple' || platform === 'soda') return
     let cancelled = false
     const id = platform === 'qq' ? String(artist.mid || artist.id) : String(artist.id)
     setFollowing(false)
@@ -1038,6 +1072,13 @@ export default function ArtistDetailModal({
                         </div>
                       }
                     />
+                  ) : platform === 'soda' ? (
+                    // 汽水无艺人头像数据：歌手名首字符占位块（半透明渐变底，贴现有深色主题）
+                    <div className={`w-full h-full flex items-center justify-center bg-gradient-to-br ${playerTheme === 'dark' ? 'from-white/15 to-white/5' : 'from-black/10 to-black/5'}`}>
+                      <span className={`text-4xl font-bold select-none ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/50'}`}>
+                        {[...(artist.name || '?').trim()][0] || '?'}
+                      </span>
+                    </div>
                   ) : (
                     <div className="w-full h-full flex items-center justify-center">
                       <Music className={`w-10 h-10 ${textPrimary}/20`} />
@@ -1086,7 +1127,8 @@ export default function ArtistDetailModal({
                         <Play className="w-4 h-4" fill="currentColor" />
                         播放全部
                       </button>
-                      {platform !== 'apple' && (
+                      {/* 汽水无关注/订阅歌手接口，不渲染「关注」按钮 */}
+                      {platform !== 'apple' && platform !== 'soda' && (
                       <button
                         onClick={handleFollow}
                         disabled={followingLoading}
@@ -1166,7 +1208,8 @@ export default function ArtistDetailModal({
                 />
               )}
             </button>
-            {platform !== 'apple' && (
+            {/* 汽水无艺人专辑列表接口，不显示「专辑」标签 */}
+            {platform !== 'apple' && platform !== 'soda' && (
             <button
               onClick={() => setActiveTab('albums')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1186,7 +1229,8 @@ export default function ArtistDetailModal({
               )}
             </button>
             )}
-            {platform !== 'apple' && (
+            {/* 汽水无 MV 数据源，不显示「视频」标签 */}
+            {platform !== 'apple' && platform !== 'soda' && (
             <button
               onClick={() => setActiveTab('videos')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1206,7 +1250,8 @@ export default function ArtistDetailModal({
               )}
             </button>
             )}
-            {platform !== 'apple' && (
+            {/* 汽水仅能按名检索热门歌曲（无全量分页接口），不显示「全部歌曲」标签 */}
+            {platform !== 'apple' && platform !== 'soda' && (
             <button
               onClick={() => setActiveTab('allSongs')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1408,7 +1453,7 @@ export default function ArtistDetailModal({
                   </div>
                 ) : albums.length > 0 ? (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {albums.map((album) => (
+                    {albums.slice(0, 100).map((album) => (
                       <ArtistAlbumCard
                         key={`album-${album.platform}-${album.mid || album.id}`}
                         album={album}
@@ -1436,7 +1481,7 @@ export default function ArtistDetailModal({
                   </div>
                 ) : mvs.length > 0 ? (
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    {mvs.map((mv, index) => (
+                    {mvs.slice(0, 100).map((mv, index) => (
                       <ArtistMvCard
                         key={`mv-${mv.platform}-${mv.id}-${index}`}
                         mv={mv}
@@ -1705,6 +1750,19 @@ export default function ArtistDetailModal({
           onAddToPlaylist={onAddToPlaylist}
           onViewComments={onViewComments}
           onViewAlbum={async (song) => {
+            // 汽水约定：专辑名即专辑标识（无独立 ID 体系），由歌曲信息直接构造专辑弹窗
+            if (platform === 'soda') {
+              if (!song.album?.name) return
+              setSelectedAlbum({
+                id: 0,
+                mid: song.album.name,
+                name: song.album.name,
+                picUrl: song.album.picUrl || '',
+                artist: { name: song.artists?.[0]?.name || '未知艺人' },
+                platform,
+              })
+              return
+            }
             const albumId = await resolveSongAlbumIdentifier(song, platform)
             if (!albumId) return
             setSelectedAlbum({
@@ -1722,7 +1780,10 @@ export default function ArtistDetailModal({
           }}
           onViewArtist={onOpenArtist ? (song) => {
             const targetArtist = song.artists?.[0]
-            const targetId = platform === 'qq' ? (targetArtist?.mid || targetArtist?.id) : targetArtist?.id
+            // 汽水约定：歌手名即歌手标识（无独立 ID 体系）
+            const targetId = platform === 'soda'
+              ? targetArtist?.name
+              : platform === 'qq' ? (targetArtist?.mid || targetArtist?.id) : targetArtist?.id
             if (targetId) onOpenArtist(String(targetId), platform)
           } : undefined}
           onCopyInfo={onCopyInfo}

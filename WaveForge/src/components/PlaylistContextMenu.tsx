@@ -2,6 +2,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Edit3, Trash2, Star, StarOff, Share2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTvBack } from '../tv/tvCore'
+import { collectSodaPlaylist } from '../services/sodaService'
+
+/** 与 SongContextMenu.showMenuToast 一致的全局 toast 通道 */
+const showMenuToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type } }))
+}
 
 interface PlaylistContextMenuProps {
   show: boolean
@@ -41,6 +47,8 @@ export default function PlaylistContextMenu({
     return true
   })
   const [adjustedPosition, setAdjustedPosition] = useState({ x, y })
+  // 汽水歌单收藏操作进行中标记（防重复点击）
+  const [collectBusy, setCollectBusy] = useState(false)
 
   // 计算菜单位置，确保不超出屏幕
   useEffect(() => {
@@ -89,6 +97,26 @@ export default function PlaylistContextMenu({
 
   if (!show || !playlist) return null
 
+  // 汽水歌单：收藏/取消收藏直接走 sodaService（App 层订阅流程不覆盖汽水），
+  // 已收藏状态由调用方传入的 playlist.isCollected 决定
+  const isSodaPlaylist = String(playlist.platform || '') === 'soda'
+  const isSodaCollected = Boolean(playlist.isCollected)
+  const handleSodaCollect = () => {
+    if (collectBusy) return
+    const collected = !isSodaCollected
+    setCollectBusy(true)
+    void collectSodaPlaylist(String(playlist.id ?? ''), collected)
+      .then(ok => {
+        setCollectBusy(false)
+        if (ok) {
+          showMenuToast(collected ? '已收藏歌单' : '已取消收藏歌单', 'success')
+          onClose()
+        } else {
+          showMenuToast(collected ? '收藏歌单失败，请重试' : '取消收藏失败，请重试', 'error')
+        }
+      })
+  }
+
   const menuItems = [
     // 只有歌单主人才能编辑和删除
     ...(isOwner && !isSpecialPlaylist && canEdit ? [
@@ -107,11 +135,19 @@ export default function PlaylistContextMenu({
       }
     ] : []),
     // 只有非本人歌单可以收藏或取消收藏
-    ...(!isOwner ? [{
+    ...(!isOwner ? (isSodaPlaylist ? [
+      // 汽水歌单：收藏动作走 sodaService，不经过 App 的订阅回调
+      {
+        label: collectBusy ? '处理中...' : (isSodaCollected ? '取消收藏歌单' : '收藏歌单'),
+        icon: isSodaCollected ? StarOff : Star,
+        onClick: handleSodaCollect,
+        disabled: collectBusy
+      }
+    ] : [{
       label: isSubscribed ? '取消收藏' : '收藏歌单',
       icon: isSubscribed ? StarOff : Star,
       onClick: () => { onSubscribe(playlist, !isSubscribed); onClose() }
-    }] : []),
+    }]) : []),
     { separator: true },
     {
       label: '分享歌单',
@@ -150,11 +186,12 @@ export default function PlaylistContextMenu({
               <button
                 key={index}
                 onClick={'onClick' in item ? item.onClick : undefined}
+                disabled={'disabled' in item && Boolean(item.disabled)}
                 className={`w-full px-4 py-2.5 flex items-center gap-3 text-sm transition-colors ${
                   'danger' in item && item.danger
                     ? 'text-red-400 hover:bg-red-500/20'
                     : 'text-white/90 hover:bg-white/10'
-                }`}
+                } ${'disabled' in item && item.disabled ? 'opacity-50 cursor-wait' : ''}`}
               >
                 {Icon && <Icon className="w-4 h-4" />}
                 <span>{'label' in item ? item.label : ''}</span>

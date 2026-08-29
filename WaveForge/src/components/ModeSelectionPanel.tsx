@@ -14,11 +14,27 @@ export const MODE_SELECTION_CLOSE_MS = 380
 
 // 模式可见性自定义：控制模式选择下拉菜单里显示哪些模式卡片。
 const MODE_VISIBILITY_KEY = 'waveforge_visible_modes'
-const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'desktop']
+// 已见模式记录：识别"保存的可见列表早于新模式上线"的情况——
+// 否则旧列表（如 8/22 传统模式上线前保存的）会让新增模式永远不可见
+const MODE_KNOWN_KEY = 'waveforge_known_modes'
+const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'traditional', 'desktop']
 const MODE_NAMES: Record<ModeSelectionMode, string> = {
   explore: '探索',
   minimal: '简约',
+  traditional: '传统',
   desktop: '桌面',
+}
+
+function parseKnownModes(value: string | null): ModeSelectionMode[] {
+  if (!value) return []
+  try {
+    const list = JSON.parse(value)
+    if (!Array.isArray(list)) return []
+    return list.filter((mode: unknown): mode is ModeSelectionMode =>
+      ALL_MODES.includes(mode as ModeSelectionMode))
+  } catch {
+    return []
+  }
 }
 
 function loadVisibleModes(): ModeSelectionMode[] {
@@ -29,9 +45,25 @@ function loadVisibleModes(): ModeSelectionMode[] {
       if (Array.isArray(parsed)) {
         const valid = parsed.filter((mode: unknown): mode is ModeSelectionMode =>
           ALL_MODES.includes(mode as ModeSelectionMode))
+        // known 为空 = 列表来自旧版本（从未记录过已见模式）→ 一次性补全所有模式；
+        // known 存在但出现新模式 = 版本更新新增 → 新模式自动显示；
+        // 用户在自定义里主动隐藏过的模式（已记录在 known 中）保持隐藏不受影响
+        const known = parseKnownModes(localStorage.getItem(MODE_KNOWN_KEY))
+        const newcomers = ALL_MODES.filter(mode => !known.includes(mode))
+        let result = valid
+        if (known.length === 0 || newcomers.length > 0) {
+          result = [...valid, ...newcomers.filter(mode => !valid.includes(mode))]
+          try {
+            localStorage.setItem(MODE_KNOWN_KEY, JSON.stringify(ALL_MODES))
+          } catch (error) {
+            console.warn('保存已见模式记录失败:', error)
+          }
+        }
         // 简约模式始终显示，历史设置里即使缺失也要补回
-        const withMinimal = valid.includes('minimal') ? valid : ['minimal' as ModeSelectionMode, ...valid]
-        if (withMinimal.length > 0) return withMinimal
+        const withMinimal = result.includes('minimal') ? result : ['minimal' as ModeSelectionMode, ...result]
+        // 传统模式同理：始终显示（8/22 新增，部分旧设置可能遗漏）
+        const withTraditional = withMinimal.includes('traditional') ? withMinimal : [...withMinimal, 'traditional' as ModeSelectionMode]
+        if (withTraditional.length > 0) return withTraditional
       }
     }
   } catch (error) {
@@ -128,11 +160,15 @@ export default function ModeSelectionPanel({
       ? 'radial-gradient(circle at 50% -32%, rgba(168,85,247,0.16), transparent 58%), linear-gradient(135deg, #f6f3f9, #efeef3)'
       : currentMode === 'explore'
         ? `radial-gradient(circle at 50% -32%, rgba(${exploreAccentRgb},0.14), transparent 58%), linear-gradient(135deg, #f0f6f3, #eef1f4)`
+      : currentMode === 'traditional'
+        ? 'radial-gradient(circle at 50% -32%, rgba(236,72,153,0.14), transparent 58%), linear-gradient(135deg, #f8f2f2, #eef2f7)'
         : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.14), transparent 58%), linear-gradient(135deg, #f0f4f9, #eef0f4)'
     : currentMode === 'minimal'
       ? 'radial-gradient(circle at 50% -32%, rgba(168,85,247,0.34), transparent 58%), linear-gradient(135deg, rgb(20,13,34), rgb(6,7,14))'
       : currentMode === 'explore'
         ? `radial-gradient(circle at 50% -32%, rgba(${exploreAccentRgb},0.34), transparent 58%), linear-gradient(135deg, rgb(7,24,27), rgb(5,8,15))`
+      : currentMode === 'traditional'
+        ? 'radial-gradient(circle at 50% -32%, rgba(236,72,153,0.34), transparent 58%), linear-gradient(135deg, rgb(37,21,34), rgb(7,10,18))'
         : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.34), transparent 58%), linear-gradient(135deg, rgb(9,22,42), rgb(5,7,14))'
 
   return createPortal(

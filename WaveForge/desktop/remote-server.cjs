@@ -211,7 +211,8 @@ function createRemoteServer(options) {
       options.sendCursor && options.sendCursor(msg.cmd, msg)
       // 广播给所有客户端：TV 端 WebView 内的 SPA（remoteBridge → waveforge:remote-cursor）
       // 靠这条广播接收光标命令；桌面端手机页会忽略这条回声，行为不变。
-      broadcast({ type: 'cursor', cmd: msg.cmd, x: msg.x, y: msg.y, kind: msg.kind, buttons: msg.buttons })
+      // 注意 dx/dy（相对位移）必须原样带上：RemoteCursor 的 move 只认 dx/dy，丢了指针就不动。
+      broadcast({ type: 'cursor', cmd: msg.cmd, x: msg.x, y: msg.y, dx: msg.dx, dy: msg.dy, kind: msg.kind, buttons: msg.buttons })
     }
   }
 

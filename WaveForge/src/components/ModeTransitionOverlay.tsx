@@ -10,9 +10,9 @@
 
 import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Compass, House, Monitor } from 'lucide-react'
+import { Compass, House, Monitor, PanelsTopLeft } from 'lucide-react'
 
-export type TransitionMode = 'explore' | 'minimal' | 'desktop'
+export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 
 interface ModeTransitionOverlayProps {
   mode: TransitionMode | null
@@ -22,6 +22,7 @@ interface ModeTransitionOverlayProps {
 const MODE_META: Record<TransitionMode, { label: string; hint: string }> = {
   explore: { label: '探索', hint: '正在驶向星辰大海' },
   minimal: { label: '简约', hint: '正在整理你的音乐' },
+  traditional: { label: '传统', hint: '正在铺开你的音乐馆' },
   desktop: { label: '桌面', hint: '正在铺开工作台' },
 }
 
@@ -140,6 +141,7 @@ export default function ModeTransitionOverlay({ mode, theme = 'dark' }: ModeTran
               >
                 {mode === 'explore' && <Compass size={52} strokeWidth={1.6} style={{ color: accent }} />}
                 {mode === 'minimal' && <House size={52} strokeWidth={1.6} style={{ color: accent }} />}
+                {mode === 'traditional' && <PanelsTopLeft size={52} strokeWidth={1.6} style={{ color: accent }} />}
                 {mode === 'desktop' && <Monitor size={52} strokeWidth={1.6} style={{ color: accent }} />}
               </motion.div>
             </div>

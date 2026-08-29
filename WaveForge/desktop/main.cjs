@@ -42,19 +42,25 @@ function logStartupTiming(message) {
 
 const performanceSettingsPath = path.join(app.getPath('userData'), 'performance-settings.json')
 const shortcutSettingsPath = path.join(app.getPath('userData'), 'shortcut-settings.json')
+// 全局高刷：渲染帧率可选档位范围（跟随所在显示器刷新率，最高 360Hz）
+const HIGH_REFRESH_MIN_HZ = 30
+const HIGH_REFRESH_MAX_HZ = 360
 
 function readPerformanceSettings() {
-  const defaults = { hardwareAcceleration: true, gpuPreference: 'auto', pendingGpuChange: null }
+  const defaults = { hardwareAcceleration: true, gpuPreference: 'auto', pendingGpuChange: null, highRefreshRate: false, highRefreshHz: null }
   try {
     const parsed = JSON.parse(fs.readFileSync(performanceSettingsPath, 'utf8'))
     const gpuPreference = ['auto', 'discrete', 'integrated'].includes(parsed?.gpuPreference)
       ? parsed.gpuPreference
       : defaults.gpuPreference
     const pending = parsed?.pendingGpuChange
+    const savedHz = Number(parsed?.highRefreshHz)
     return {
       hardwareAcceleration: parsed?.hardwareAcceleration !== false,
       gpuPreference,
       pendingGpuChange: (pending && (pending.type === 'preference' || pending.type === 'acceleration')) ? pending : null,
+      highRefreshRate: parsed?.highRefreshRate === true,
+      highRefreshHz: Number.isInteger(savedHz) && savedHz >= 30 && savedHz <= HIGH_REFRESH_MAX_HZ ? savedHz : null,
     }
   } catch {
     return { ...defaults }
@@ -62,13 +68,22 @@ function readPerformanceSettings() {
 }
 
 function writePerformanceSettings(settings) {
-  const temporaryPath = `${performanceSettingsPath}.tmp`
-  fs.mkdirSync(path.dirname(performanceSettingsPath), { recursive: true })
-  fs.writeFileSync(temporaryPath, JSON.stringify(settings), 'utf8')
-  fs.renameSync(temporaryPath, performanceSettingsPath)
+  try {
+    const temporaryPath = `${performanceSettingsPath}.tmp`
+    fs.mkdirSync(path.dirname(performanceSettingsPath), { recursive: true })
+    fs.writeFileSync(temporaryPath, JSON.stringify(settings), 'utf8')
+    fs.renameSync(temporaryPath, performanceSettingsPath)
+  } catch (error) {
+    console.error('[性能设置] 保存失败:', error?.message || error)
+  }
 }
 
 const performanceSettings = readPerformanceSettings()
+// 全局高刷：用户手动选了具体档位时，启动即用 --force-frame-rate 强制 Chromium 帧率
+// （比运行时 setFrameRate 更可靠；「跟随显示器最高」档在 app ready 后按显示器实时应用）
+if (performanceSettings.highRefreshRate === true && performanceSettings.highRefreshHz) {
+  try { app.commandLine.appendSwitch('force-frame-rate', String(performanceSettings.highRefreshHz)) } catch { /* 忽略 */ }
+}
 // 软件合成标记：GPU 合成器禁用时置 true（app ready 后由 getGPUFeatureStatus 判定）。
 // createWindow 据此动态调整 splash 最短可见时间（软件合成下内容层提交慢）。
 let gpuCompositingDisabled = false
@@ -80,6 +95,154 @@ if (!performanceSettings.hardwareAcceleration) {
 } else if (performanceSettings.gpuPreference === 'integrated') {
   // 强制使用核显/集成显卡（低功耗 GPU）
   app.commandLine.appendSwitch('force_low_power_gpu')
+}
+
+// ── Widevine CDM 引导（Apple Music 原生音源：HLS 流走 EME 解密的钥匙）────────
+// 标准 Electron 不带 Widevine CDM。扫描系统已安装 Edge/Chrome 的 Widevine 组件，
+// app ready 前通过 --widevine-cdm-path/version 注入；找不到时渲染层自动回退
+// 网易云/QQ 载体匹配（AM 原生音源仅在有 Widevine 的环境可用，Cider 同款思路）。
+function findWidevineCdm() {
+  const candidates = []
+  const roots = [process.env['ProgramFiles(x86)'], process.env['ProgramFiles'], process.env.LOCALAPPDATA]
+  for (const base of roots) {
+    if (!base) continue
+    for (const appDir of ['Microsoft/Edge/Application', 'Google/Chrome/Application']) {
+      const versionsDir = path.join(base, appDir)
+      let entries = []
+      try { entries = fs.readdirSync(versionsDir) } catch { continue }
+      for (const version of entries) {
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(version)) continue
+        candidates.push({
+          version,
+          root: path.join(versionsDir, version, 'WidevineCdm'),
+          manifestPath: path.join(versionsDir, version, 'WidevineCdm', 'manifest.json'),
+          dllDir: path.join(versionsDir, version, 'WidevineCdm', '_platform_specific', 'win_x64'),
+        })
+      }
+    }
+  }
+  candidates.sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }))
+  // 标准布局（Chrome/Edge 一致）：manifest.json 在 WidevineCdm 根，DLL 在
+  // _platform_specific/win_x64/。Electron 的 --widevine-cdm-path 必须指向含
+  // manifest.json 的根目录；--widevine-cdm-version 必须等于 manifest 里的
+  // CDM 版本（4.x），若错填浏览器版本号（151.x）EME 会直接 Unsupported keySystem。
+  for (const c of candidates) {
+    try {
+      if (!fs.existsSync(path.join(c.dllDir, 'widevinecdm.dll')) || !fs.existsSync(c.manifestPath)) continue
+      const manifest = JSON.parse(fs.readFileSync(c.manifestPath, 'utf8'))
+      const cdVersion = manifest && typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : ''
+      if (!cdVersion) continue
+      return { path: c.root, version: cdVersion }
+    } catch { /* 继续下一个候选 */ }
+  }
+  // 个别构建把 manifest.json 放在 win_x64 内：按"根目录含 manifest"重新找一遍
+  for (const c of candidates) {
+    try {
+      const innerManifest = path.join(c.dllDir, 'manifest.json')
+      if (!fs.existsSync(path.join(c.dllDir, 'widevinecdm.dll')) || !fs.existsSync(innerManifest)) continue
+      const manifest = JSON.parse(fs.readFileSync(innerManifest, 'utf8'))
+      const cdVersion = manifest && typeof manifest.version === 'string' && manifest.version.trim() ? manifest.version.trim() : ''
+      if (!cdVersion) continue
+      return { path: c.dllDir, version: cdVersion }
+    } catch { /* 继续下一个候选 */ }
+  }
+  return null
+}
+// ── Widevine 运行时判定 ────────────────────────────────────────────────────
+// castlabs ECS（Electron for Content Security，带 Widevine 的官方分叉）自带
+// 组件更新服务管理 CDM，无需借系统 Chrome/Edge 的组件；标准 Electron 才走
+// 下面基于 --widevine-cdm-* 开关的注入。判断依据：ECS 提供 components API。
+function isEcsBuild() {
+  try {
+    const { components } = require('electron')
+    return Boolean(components && typeof components.whenReady === 'function')
+  } catch {
+    return false
+  }
+}
+
+// ── ECS 完全离线播种（第一启动预置 Widevine CDM）────────────────────────────
+// ECS 的 CUS（组件更新服务）判定"已安装"的依据 = Local State 里 updateclientdata
+// 注册（appId=oimompecagnajdejgnnjijobebaeigek，pv=版本）+ userData/WidevineCdm/
+// <版本>/ 下的文件。实测（本机）：播种后在 Google 完全不可达的情况下 EME 仍
+// OK（更新检查失败不会移除本地组件）。因此：首次启动若发现未注册，就从系统
+// Chrome/Edge 复制 CDM 并写入注册 → 用户端零 Google 依赖；有网络的机器 CUS
+// 照常日后自动升级 CDM。
+const ECS_WIDEVINE_APP_ID = 'oimompecagnajdejgnnjijobebaeigek'
+function findExistingEcsCdmVersion(userDataDir) {
+  try {
+    const localState = JSON.parse(fs.readFileSync(path.join(userDataDir, 'Local State'), 'utf8'))
+    const entry = localState?.updateclientdata?.apps?.[ECS_WIDEVINE_APP_ID]
+    const pv = entry && typeof entry.pv === 'string' ? entry.pv : ''
+    if (!pv) return ''
+    const versionDir = path.join(userDataDir, 'WidevineCdm', pv)
+    return fs.existsSync(path.join(versionDir, 'manifest.json')) ? pv : ''
+  } catch {
+    return ''
+  }
+}
+function seedEcsOfflineCdm() {
+  try {
+    const userDataDir = app.getPath('userData')
+    if (findExistingEcsCdmVersion(userDataDir)) return // 已注册且文件在 → 无需播种
+    const source = findWidevineCdm() // 系统 Chrome/Edge 的 CDM（含 manifest 版本）
+    if (!source) {
+      console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
+      return
+    }
+    const version = source.version
+    const vdir = path.join(userDataDir, 'WidevineCdm', version)
+    fs.mkdirSync(path.join(vdir, '_platform_specific', 'win_x64'), { recursive: true })
+    const copyIfExists = (from, to) => {
+      if (fs.existsSync(from)) {
+        fs.mkdirSync(path.dirname(to), { recursive: true })
+        fs.copyFileSync(from, to)
+      }
+    }
+    copyIfExists(path.join(source.path, 'manifest.json'), path.join(vdir, 'manifest.json'))
+    copyIfExists(path.join(source.path, 'LICENSE'), path.join(vdir, 'LICENSE'))
+    copyIfExists(path.join(source.path, 'LICENSE.txt'), path.join(vdir, 'LICENSE'))
+    const spSrc = path.join(source.path, '_platform_specific', 'win_x64')
+    copyIfExists(path.join(spSrc, 'widevinecdm.dll'), path.join(vdir, '_platform_specific', 'win_x64', 'widevinecdm.dll'))
+    copyIfExists(path.join(spSrc, 'widevinecdm.dll.sig'), path.join(vdir, '_platform_specific', 'win_x64', 'widevinecdm.dll.sig'))
+    copyIfExists(path.join(source.path, '_metadata', 'verified_contents.json'), path.join(vdir, '_metadata', 'verified_contents.json'))
+    // Local State 注册（ECS CUS 识别"已安装"的依据）
+    const localStatePath = path.join(userDataDir, 'Local State')
+    let localState = {}
+    try { localState = JSON.parse(fs.readFileSync(localStatePath, 'utf8')) } catch { localState = {} }
+    if (!localState.updateclientdata) localState.updateclientdata = {}
+    if (!localState.updateclientdata.apps) localState.updateclientdata.apps = {}
+    localState.updateclientdata.apps[ECS_WIDEVINE_APP_ID] = {
+      cohort: '1:3cjr:',
+      cohortname: 'Auto',
+      fp: '',
+      installdate: 7178,
+      max_pv: '0.0.0.0',
+      pf: '49b89fa4-5266-481b-af73-868305d174b0',
+      pv: version,
+    }
+    fs.writeFileSync(localStatePath, JSON.stringify(localState), 'utf8')
+    logStartupTiming(`[Widevine] 完全离线播种完成：CDM ${version} -> ${vdir}`)
+  } catch (error) {
+    console.warn('[Widevine] 离线播种失败（不影响启动，CUS 将尝试联网安装）:', error?.message || error)
+  }
+}
+if (isEcsBuild()) {
+  console.log('[Widevine] 检测到 castlabs ECS 运行时：CDM 由组件服务管理，跳过自定义注入')
+  seedEcsOfflineCdm()
+} else {
+  try {
+    const widevine = findWidevineCdm()
+    if (widevine) {
+      app.commandLine.appendSwitch('widevine-cdm-path', widevine.path)
+      app.commandLine.appendSwitch('widevine-cdm-version', widevine.version)
+      logStartupTiming(`[Widevine] 注入 CDM ${widevine.version} @ ${widevine.path}`)
+    } else {
+      console.log('[Widevine] 未检测到 Edge/Chrome Widevine 组件（AM 原生音源将回退载体匹配）')
+    }
+  } catch (error) {
+    console.error('[Widevine] CDM 引导失败:', error?.message || error)
+  }
 }
 
 app.on('child-process-gone', (_event, details) => {
@@ -135,10 +298,14 @@ function readMediaKeysEnabled() {
 }
 
 function writeMediaKeysEnabled(enabled) {
-  const temporaryPath = `${shortcutSettingsPath}.tmp`
-  fs.mkdirSync(path.dirname(shortcutSettingsPath), { recursive: true })
-  fs.writeFileSync(temporaryPath, JSON.stringify({ mediaKeysEnabled: enabled === true }), 'utf8')
-  fs.renameSync(temporaryPath, shortcutSettingsPath)
+  try {
+    const temporaryPath = `${shortcutSettingsPath}.tmp`
+    fs.mkdirSync(path.dirname(shortcutSettingsPath), { recursive: true })
+    fs.writeFileSync(temporaryPath, JSON.stringify({ mediaKeysEnabled: enabled === true }), 'utf8')
+    fs.renameSync(temporaryPath, shortcutSettingsPath)
+  } catch (error) {
+    console.error('[快捷键设置] 保存失败:', error?.message || error)
+  }
 }
 
 function readDesktopWidgetDisks() {
@@ -761,8 +928,8 @@ ipcMain.on('desktop-lyrics:drag-to', (_event, point) => {
   const start = desktopLyricsDragSession
   desktopLyricsWindow.setBounds(clampDesktopLyricsBounds({
     ...start.bounds,
-    x: start.bounds.x + (Number(point?.x) - start.x),
-    y: start.bounds.y + (Number(point?.y) - start.y),
+    x: start.bounds.x + ((Number(point?.x) || 0) - start.x),
+    y: start.bounds.y + ((Number(point?.y) || 0) - start.y),
   }))
 })
 
@@ -786,8 +953,8 @@ ipcMain.on('desktop-lyrics:resize-start', (_event, point) => {
 ipcMain.on('desktop-lyrics:resize-to', (_event, point) => {
   if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || !desktopLyricsResizeSession) return
   const start = desktopLyricsResizeSession
-  const dx = Number(point?.x) - start.x
-  const dy = Number(point?.y) - start.y
+  const dx = (Number(point?.x) || 0) - start.x
+  const dy = (Number(point?.y) || 0) - start.y
   const fromLeft = start.edge.includes('w')
   const fromRight = start.edge.includes('e')
   const fromTop = start.edge.includes('n')
@@ -1018,8 +1185,8 @@ ipcMain.on('desktop-player:resize-to', (_event, point) => {
   if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || !desktopPlayerResizeSession) return
   const start = desktopPlayerResizeSession
   const workArea = getDesktopPlayerWorkArea(start.bounds)
-  const dx = Number(point?.x) - start.x
-  const dy = Number(point?.y) - start.y
+  const dx = (Number(point?.x) || 0) - start.x
+  const dy = (Number(point?.y) || 0) - start.y
   const fromLeft = start.edge.endsWith('w')
   const fromTop = start.edge.startsWith('n')
   const width = Math.min(720, Math.max(300, Math.round(start.bounds.width + (fromLeft ? -dx : dx))))
@@ -1278,12 +1445,16 @@ function updateTaskbar() {
 // 与 Echo 的「迷你底栏」对齐：窗口高度精确等于任务栏带高度，贴任务栏右侧（或居中），
 // 播放时显示封面/歌词行/进度并提供控制；默认鼠标穿透，悬停进入交互态不挡任务栏。
 // 设置（userData/taskbar-widget-settings.json）由「设置-个性化」控制开关/位置/宽度/模式。
-const TASKBAR_WIDGET_DEFAULTS = { enabled: false, position: 'right', width: 340, mode: 'normal' }
+const TASKBAR_WIDGET_DEFAULTS = { enabled: false, position: 'right', width: 340, mode: 'normal', darken: false, darkenLevel: 0.5, hideControls: false }
 let taskbarWidgetSettings = { ...TASKBAR_WIDGET_DEFAULTS }
 let taskbarWidgetWindow = null
 let taskbarWidgetClosedByUser = false
 let taskbarWidgetInteractive = false
+let taskbarWidgetExpanded = false
 let taskbarDisplayMetricsBound = false
+// 设置文件重载节流：updateTaskbarWidget 随播放进度每秒触发，避免每次同步读盘
+let taskbarWidgetSettingsLastLoad = 0
+const TASKBAR_WIDGET_SETTINGS_RELOAD_MS = 5000
 
 function getTaskbarWidgetSettingsPath() {
   return path.join(app.getPath('userData'), 'taskbar-widget-settings.json')
@@ -1295,6 +1466,9 @@ function sanitizeTaskbarWidgetSettings(input = {}, base = TASKBAR_WIDGET_DEFAULT
     position: input.position === 'right' || input.position === 'center' ? input.position : (base.position === 'center' ? 'center' : 'right'),
     width: Math.round(Math.min(420, Math.max(260, Number(input.width) || base.width))),
     mode: input.mode === 'pure' || input.mode === 'normal' ? input.mode : (base.mode === 'pure' ? 'pure' : 'normal'),
+    darken: input.darken === undefined ? base.darken === true : input.darken === true,
+    darkenLevel: Math.min(0.95, Math.max(0.05, Number(input.darkenLevel) || base.darkenLevel)),
+    hideControls: input.hideControls === undefined ? base.hideControls === true : input.hideControls === true,
   }
 }
 
@@ -1330,6 +1504,57 @@ function broadcastTaskbarWidgetSettings() {
   }
 }
 
+// 系统托盘（通知区域）左缘测量：Windows 下查询 TrayNotifyWnd 的物理像素矩形。
+// 右侧定位需要「紧贴托盘外侧」，固定留白在托盘宽度变化时会叠进托盘，故按真实托盘位置计算。
+let taskbarTrayCache = null // { left, right } 物理像素
+let taskbarTrayCacheAt = 0
+let taskbarTrayRequest = null
+const TASKBAR_TRAY_CACHE_MS = 30000
+// 托盘不可测时靠右贴齐：留 12px 边距
+const TASKBAR_TRAY_FALLBACK_RATIO = 0.04
+
+function fetchTaskbarTrayRectPhysical() {
+  if (taskbarTrayRequest) return taskbarTrayRequest
+  const script = [
+    `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class T{[DllImport("user32.dll")]public static extern IntPtr FindWindow(string c,string t);[DllImport("user32.dll")]public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string cn,string tn);[DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out R r);public struct R{public int L,T,Rt,B;}}'`,
+    `$t=[T]::FindWindow('Shell_TrayWnd',$null)`,
+    `$n=[T]::FindWindowEx($t,[IntPtr]::Zero,'TrayNotifyWnd',$null)`,
+    `if($n -eq [IntPtr]::Zero){'none'}else{$r=New-Object T+R;[T]::GetWindowRect($n,[ref]$r)|Out-Null;"$($r.L),$($r.Rt)"}`,
+  ].join(';')
+  taskbarTrayRequest = new Promise(resolve => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 3000 }, (error, stdout) => {
+      taskbarTrayRequest = null
+      if (error) return resolve(null)
+      const lines = String(stdout || '').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+      const match = (lines[lines.length - 1] || '').match(/^(-?\d+),(-?\d+)$/)
+      if (!match) return resolve(null)
+      const rect = { left: Number(match[1]), right: Number(match[2]) }
+      taskbarTrayCache = rect
+      taskbarTrayCacheAt = Date.now()
+      resolve(rect)
+    })
+  })
+  return taskbarTrayRequest
+}
+
+function getTaskbarTrayLeftDip() {
+  if (taskbarTrayCache && Date.now() - taskbarTrayCacheAt < TASKBAR_TRAY_CACHE_MS) {
+    const { screen } = require('electron')
+    const scale = screen.getPrimaryDisplay().scaleFactor || 1
+    return Math.round(taskbarTrayCache.left / scale)
+  }
+  return null
+}
+
+/** 托盘缓存失效时后台刷新，完成后重新贴边（托盘图标增减导致宽度变化也能跟上） */
+function refreshTaskbarTray() {
+  if (getTaskbarTrayLeftDip() !== null) return Promise.resolve(taskbarTrayCache)
+  return fetchTaskbarTrayRectPhysical().then(rect => {
+    if (rect) dockTaskbarWidgetWindow()
+    return rect
+  })
+}
+
 function getTaskbarWidgetPosition() {
   const { screen } = require('electron')
   const display = screen.getPrimaryDisplay()
@@ -1343,7 +1568,15 @@ function getTaskbarWidgetPosition() {
   const taskbarRight = Math.round((bounds.x + bounds.width) - (workArea.x + workArea.width))
   const horizontalX = taskbarWidgetSettings.position === 'center'
     ? Math.round(bounds.x + (bounds.width - width) / 2)
-    : Math.round(bounds.x + bounds.width - width - 160) // 右侧：留足系统托盘区域（托盘宽度随用户后台数量变化）
+    : (() => {
+        // 右侧：紧贴系统托盘左侧外部（间隙 8px），避免叠进托盘/时钟区域
+        const trayLeft = getTaskbarTrayLeftDip()
+        if (trayLeft !== null && trayLeft - width - 8 >= bounds.x) {
+          return Math.round(trayLeft - width - 8)
+        }
+        // 托盘尚未测出：保守预留 30% 屏宽，绝不叠进托盘
+        return Math.round(bounds.x + bounds.width - width - Math.round(bounds.width * TASKBAR_TRAY_FALLBACK_RATIO))
+      })()
 
   if (taskbarBottom > 0) {
     // 底部任务栏（Windows 11 默认）
@@ -1369,7 +1602,12 @@ function dockTaskbarWidgetWindow() {
   if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed()) return
   const pos = getTaskbarWidgetPosition()
   try {
-    taskbarWidgetWindow.setBounds(pos)
+    // 展开状态保留：重新贴边时按当前展开/收起状态应用对应高度
+    if (taskbarWidgetExpanded) {
+      taskbarWidgetWindow.setBounds({ x: pos.x, y: pos.y - TASKBAR_WIDGET_POPUP_HEIGHT, width: pos.width, height: pos.height + TASKBAR_WIDGET_POPUP_HEIGHT })
+    } else {
+      taskbarWidgetWindow.setBounds(pos)
+    }
   } catch { /* 忽略 */ }
 }
 
@@ -1377,18 +1615,17 @@ function createTaskbarWidgetWindow() {
   if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed()) return taskbarWidgetWindow
   loadTaskbarWidgetSettings()
   const pos = getTaskbarWidgetPosition()
+  // 窗口参数与可正常点击的桌面播放器保持一致（不设 type:'toolbar'/focusable:false/movable:false）：
+  // 这三个参数组合在 Win11 透明置顶窗口上会导致系统命中测试跳过该窗口，点击永远落不进来。
   taskbarWidgetWindow = new BrowserWindow({
     ...pos,
-    type: 'toolbar',
     frame: false,
     transparent: true,
     resizable: false,
-    movable: false,
     minimizable: false,
     maximizable: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    focusable: false,
     show: false,
     backgroundColor: '#00000000',
     hasShadow: false,
@@ -1401,7 +1638,10 @@ function createTaskbarWidgetWindow() {
   })
   taskbarWidgetWindow.setAlwaysOnTop(true, 'screen-saver')
   taskbarWidgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
-  // 默认鼠标穿透（forward:true 让鼠标事件仍能进入网页触发 mouseenter/mouseleave）
+  // 默认鼠标穿透。注意：不能靠 forward:true 转发 mouseenter 来切换交互态——
+  // 在 Win11 + 透明置顶组合下，setIgnoreMouseEvents 每次切换都会让系统重新命中
+  // 测试并触发 mouseenter/mouseleave 振荡，交互态永远不稳定，点击无法落窗。
+  // 改为主进程光标轮询（startTaskbarWidgetPolling）检测悬停。
   try {
     taskbarWidgetWindow.setIgnoreMouseEvents(true, { forward: true })
   } catch { /* 忽略 */ }
@@ -1409,7 +1649,12 @@ function createTaskbarWidgetWindow() {
   taskbarWidgetWindow.on('closed', () => {
     taskbarWidgetWindow = null
     taskbarWidgetInteractive = false
+    taskbarWidgetExpanded = false
+    stopTaskbarWidgetPolling()
   })
+  startTaskbarWidgetPolling()
+  // 托盘位置后台测量：首次显示用保守预留，测出真实托盘后立即贴齐
+  refreshTaskbarTray()
   return taskbarWidgetWindow
 }
 
@@ -1419,7 +1664,9 @@ function bindTaskbarDisplayMetrics() {
   taskbarDisplayMetricsBound = true
   const { screen } = require('electron')
   screen.on('display-metrics-changed', () => {
+    taskbarTrayCache = null // 显示器变化后托盘位置作废，后台重测
     dockTaskbarWidgetWindow()
+    refreshTaskbarTray()
   })
 }
 
@@ -1435,13 +1682,24 @@ function bindTaskbarThemeSync() {
 }
 
 /** 把当前播放状态推送到 widget（并控制显隐） */
+// 仅进度变化时 1s 节流：避免渲染端每秒多次 timeupdate（约 4 次/s）把整份状态
+// （含逐词歌词 words）序列化推送，widget 内部按 lastCur + rAF 插值，1s 更新足够平滑。
+let taskbarWidgetLastSendAt = 0
+let taskbarWidgetLastSendKey = ''
+const TASKBAR_WIDGET_SEND_THROTTLE_MS = 1000
+
 function updateTaskbarWidget() {
   if (process.platform !== 'win32') return
-  loadTaskbarWidgetSettings()
+  // 设置仅在开关/更新设置时写入，这里节流重载（避免播放进度每秒触发同步读盘）
+  if (Date.now() - taskbarWidgetSettingsLastLoad > TASKBAR_WIDGET_SETTINGS_RELOAD_MS) {
+    loadTaskbarWidgetSettings()
+    taskbarWidgetSettingsLastLoad = Date.now()
+  }
   bindTaskbarDisplayMetrics()
   bindTaskbarThemeSync()
   const hasSong = Boolean(desktopPlayerState.song?.name)
-  if (!taskbarWidgetSettings.enabled || !hasSong || taskbarWidgetClosedByUser) {
+  // 开启时始终显示（冷启动无歌时显示品牌名），关闭/用户手动关闭才隐藏
+  if (!taskbarWidgetSettings.enabled || taskbarWidgetClosedByUser) {
     if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed() && taskbarWidgetWindow.isVisible()) {
       taskbarWidgetWindow.hide()
     }
@@ -1452,6 +1710,14 @@ function updateTaskbarWidget() {
   const song = desktopPlayerState.song || {}
   const lyric = desktopPlayerState.lyric || null
   const { nativeTheme } = require('electron')
+  // 内容键：歌曲/播放态/歌词行/静音/主题变化必须立即推送，仅进度变化时允许节流
+  const contentKey = `${song.name}|${desktopPlayerState.playing === true}|${lyric?.line || ''}|${desktopPlayerState.muted === true}|${nativeTheme.shouldUseDarkColors}`
+  const now = Date.now()
+  if (contentKey === taskbarWidgetLastSendKey && now - taskbarWidgetLastSendAt < TASKBAR_WIDGET_SEND_THROTTLE_MS) {
+    return
+  }
+  taskbarWidgetLastSendKey = contentKey
+  taskbarWidgetLastSendAt = now
   const payload = {
     title: song.name || '',
     artist: Array.isArray(song.artists) ? song.artists.join(' / ') : (song.artists || ''),
@@ -1504,6 +1770,62 @@ function setTaskbarWidgetVisible(visible) {
   return { success: true }
 }
 
+// 光标轮询：任务栏 widget 悬停检测。页面 mouseenter/mouseleave 转发在
+// 透明置顶窗口上会因 setIgnoreMouseEvents 切换而振荡，改由主进程每 120ms
+// 判断光标是否落在窗口内，据此稳定切换交互态（见 createTaskbarWidgetWindow 注释）。
+let taskbarWidgetPollTimer = null
+
+function taskbarWidgetCursorInside() {
+  if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed() || !taskbarWidgetWindow.isVisible()) return false
+  const { screen } = require('electron')
+  const pt = screen.getCursorScreenPoint()
+  const b = taskbarWidgetWindow.getBounds()
+  return pt.x >= b.x && pt.x < b.x + b.width && pt.y >= b.y && pt.y < b.y + b.height
+}
+
+function updateTaskbarWidgetInteractive() {
+  if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed()) return
+  // 窗口隐藏时无需轮询/发 hover IPC：直接停（创建窗口后、窗口销毁前由 show/hide 触发重测）
+  if (!taskbarWidgetWindow.isVisible()) {
+    if (taskbarWidgetInteractive) {
+      taskbarWidgetInteractive = false
+      try { taskbarWidgetWindow.setIgnoreMouseEvents(true, { forward: true }) } catch { /* 忽略 */ }
+    }
+    return
+  }
+  const inside = taskbarWidgetCursorInside()
+  if (inside !== taskbarWidgetInteractive) {
+    taskbarWidgetInteractive = inside
+    if (inside) {
+      try {
+        taskbarWidgetWindow.moveTop() // 进入交互态时确保窗口在该位置最顶，点击不被其他窗口截走
+      } catch { /* 忽略 */ }
+    }
+    try {
+      taskbarWidgetWindow.setIgnoreMouseEvents(!inside, { forward: true })
+    } catch { /* 忽略 */ }
+  }
+  if (taskbarWidgetWindow.isDestroyed()) return
+  // 通知页面悬停状态：进入取消收拢定时器，离开触发收拢（原 mouseleave 行为）
+  taskbarWidgetWindow.webContents.send('taskbar-widget:hover', inside === true)
+  // 托盘缓存过期时后台重测并贴齐（托盘图标增减改变宽度也能跟上）
+  if (inside && taskbarTrayCache && Date.now() - taskbarTrayCacheAt > TASKBAR_TRAY_CACHE_MS) {
+    refreshTaskbarTray()
+  }
+}
+
+function startTaskbarWidgetPolling() {
+  if (taskbarWidgetPollTimer) return
+  taskbarWidgetPollTimer = setInterval(updateTaskbarWidgetInteractive, 120)
+}
+
+function stopTaskbarWidgetPolling() {
+  if (taskbarWidgetPollTimer) {
+    clearInterval(taskbarWidgetPollTimer)
+    taskbarWidgetPollTimer = null
+  }
+}
+
 ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
   if (action === 'close') {
     taskbarWidgetClosedByUser = true
@@ -1528,9 +1850,10 @@ ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
 const TASKBAR_WIDGET_POPUP_HEIGHT = 218
 ipcMain.on('taskbar-widget:set-expanded', (_event, expanded) => {
   if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed()) return
+  taskbarWidgetExpanded = expanded === true
   try {
     const pos = getTaskbarWidgetPosition()
-    if (expanded) {
+    if (taskbarWidgetExpanded) {
       taskbarWidgetWindow.setBounds({ x: pos.x, y: pos.y - TASKBAR_WIDGET_POPUP_HEIGHT, width: pos.width, height: pos.height + TASKBAR_WIDGET_POPUP_HEIGHT })
     } else {
       taskbarWidgetWindow.setBounds({ x: pos.x, y: pos.y, width: pos.width, height: pos.height })
@@ -1539,12 +1862,9 @@ ipcMain.on('taskbar-widget:set-expanded', (_event, expanded) => {
 })
 
 ipcMain.on('taskbar-widget:set-interactive', (_event, interactive) => {
-  taskbarWidgetInteractive = interactive === true
-  if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed()) {
-    try {
-      taskbarWidgetWindow.setIgnoreMouseEvents(!taskbarWidgetInteractive, { forward: true })
-    } catch { /* 忽略 */ }
-  }
+  // 已废弃：交互态改由主进程光标轮询（updateTaskbarWidgetInteractive）维护，
+  // 页面驱动的 setInteractive 在透明置顶窗口上会造成 mouseenter/mouseleave 振荡。
+  // 保留空处理器仅为兼容旧 preload 调用，不再改变窗口鼠标穿透状态。
 })
 
 ipcMain.handle('taskbar-widget:set-visible', (_event, visible) => setTaskbarWidgetVisible(Boolean(visible)))
@@ -1825,7 +2145,9 @@ function createWindow() {
     splashFrameDone = true
     tryShowSplash()
   }, 3000)
-  // 创建主窗口
+  // 创建主窗口：默认原生不透明窗口（Windows 11 系统圆角/阴影/对齐吸附）。
+  // 桌面融合穿透需要透明窗口，而 transparent 仅创建时生效——开启/关闭融合时
+  // 由 recreateMainWindow 销毁重建切换透明属性，普通模式始终用原生窗口。
   const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -1833,7 +2155,7 @@ function createWindow() {
     minWidth: 1200,
     minHeight: 800,
     frame: false,
-    backgroundColor: '#0a0f14',
+    backgroundColor: '#000000',
     transparent: false,
     titleBarStyle: 'hidden',
     title: 'WaveForge 澜音工坊',
@@ -1864,12 +2186,18 @@ function createWindow() {
       if (savedWindowState.state === 'maximized') {
         // 窗口尚未显示时 maximize 可能不生效，等 show 后再设置
         mainWindow.once('show', () => {
-          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isKiosk()) mainWindow.maximize()
+          if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isKiosk()) {
+            mainWindow.maximize()
+            mainWindowExpanded = true
+          }
         })
       } else if (savedWindowState.state === 'kiosk') {
         // 全屏覆盖任务栏（kiosk）：同样等窗口显示后再进入
         mainWindow.once('show', () => {
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setKiosk(true)
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.setKiosk(true)
+            mainWindowExpanded = true
+          }
         })
       }
     } catch (error) {
@@ -2022,82 +2350,8 @@ function createWindow() {
     mainFirstFrameReady = true
     showMainWindowWhenReady()
   })
-  // 阻止 window.open 创建新的 Electron 窗口
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    // 使用系统默认浏览器打开外部链接
-    if (url.startsWith('http://') || url.startsWith('https://')) {
-      shell.openExternal(url)
-      return { action: 'deny' }
-    }
-    return { action: 'deny' }
-  })
-
-  // 窗口关闭（含退出）前做最终状态保存——will-quit 时窗口可能已销毁拿不到 bounds
-  mainWindow.on('close', () => {
-    persistMainWindowState()
-  })
-
-  mainWindow.on('closed', () => {
-    mainWindow = null
-    if (wallpaperWatcher) {
-      clearInterval(wallpaperWatcher)
-      wallpaperWatcher = null
-    }
-  })
-
-  // 监听窗口最大化/取消最大化事件
-  mainWindow.on('maximize', () => {
-    safeSendToWindow(mainWindow, 'window-maximized', true)
-  })
-
-  mainWindow.on('unmaximize', () => {
-    safeSendToWindow(mainWindow, 'window-maximized', false)
-  })
-
-  // 监听进入/退出 Kiosk 模式
-  mainWindow.on('enter-full-screen', () => {
-    safeSendToWindow(mainWindow, 'window-fullscreen-change', true)
-  })
-
-  mainWindow.on('leave-full-screen', () => {
-    safeSendToWindow(mainWindow, 'window-fullscreen-change', false)
-  })
-
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      safeSendToWindow(mainWindow, 'window-maximized', mainWindow.isMaximized())
-      safeSendToWindow(mainWindow, 'window-fullscreen-change', mainWindow.isKiosk() || mainWindow.isFullScreen())
-    }
-  })
-
-  // ── 窗口状态记忆：大小/位置/状态变化后防抖保存（关闭时会做最终保存） ──
-  let windowStateSaveTimer = null
-  const scheduleWindowStateSave = () => {
-    if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer)
-    windowStateSaveTimer = setTimeout(() => {
-      windowStateSaveTimer = null
-      persistMainWindowState()
-    }, 400)
-  }
-  mainWindow.on('resize', scheduleWindowStateSave)
-  mainWindow.on('move', scheduleWindowStateSave)
-  mainWindow.on('maximize', scheduleWindowStateSave)
-  mainWindow.on('unmaximize', scheduleWindowStateSave)
-  mainWindow.on('enter-full-screen', scheduleWindowStateSave)
-  mainWindow.on('leave-full-screen', scheduleWindowStateSave)
-
-  // F12 快捷键：开发者模式下打开开发者工具
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (input.key === 'F12' && input.type === 'keyDown') {
-      if (developerMode) {
-        if (mainWindow.webContents.isDevToolsOpened()) {
-          mainWindow.webContents.closeDevTools()
-        } else {
-          mainWindow.webContents.openDevTools()
-        }
-      }
-    }
-  })
+  // 事件接线（状态推送/窗口记忆/F12 等）——与融合穿透重建（recreateMainWindow）共用
+  wireMainWindowEvents(mainWindow)
 }
 
 // ========== 壁纸功能 ==========
@@ -2391,11 +2645,31 @@ function getWindowsWallpaper() {
             const wallpaper = await buildWallpaperPayload(wallpaperPath)
             const wallpaperEngine = await getWallpaperEngineSource()
             if (wallpaperEngine) wallpaper.wallpaperEngine = wallpaperEngine
+            // 多屏壁纸：Windows 把每块屏的独立壁纸转码为 Themes 目录的 TranscodedWallpaper 系列文件，
+            // 一并采集进 payload 供 watcher 判断「任一屏幕壁纸变化」。
+            try {
+              const themesDir = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Themes')
+              if (fs.existsSync(themesDir)) {
+                const transcoded = fs.readdirSync(themesDir)
+                  .filter(file => /^TranscodedWallpaper(_\d+)?$/.test(file))
+                  .map(file => {
+                    const filePath = path.join(themesDir, file)
+                    let stat = null
+                    try { stat = fs.statSync(filePath) } catch { return null }
+                    return stat ? { file, path: filePath, mtimeMs: stat.mtimeMs, size: stat.size } : null
+                  })
+                  .filter(Boolean)
+                if (transcoded.length > 0) wallpaper.wallpapers = transcoded
+              }
+            } catch (scanError) {
+              logWallpaper('⚠️ [Wallpaper] 扫描多屏壁纸失败:', scanError?.message || scanError)
+            }
             logWallpaper('🔗 [Wallpaper] 转换后的URL:', wallpaper.fileUrl)
             logWallpaper('📊 [Wallpaper] 壁纸数据:', {
               mimeType: wallpaper.mimeType,
               size: wallpaper.size,
               mtimeMs: wallpaper.mtimeMs,
+              wallpapers: wallpaper.wallpapers?.length,
             })
             logWallpaper('✓ [Wallpaper] 壁纸获取成功')
             resolve(wallpaper)
@@ -2537,13 +2811,17 @@ function startWallpaperWatcher() {
       const currentSignature = isLiveEngineWallpaper
         ? engineSignature
         : `${wallpaper.path}:${wallpaper.mtimeMs}:${wallpaper.size}:${engineSignature}`
+      // 多屏：任一屏幕的独立壁纸（TranscodedWallpaper 系列）变化也视为壁纸变化
+      const multiScreenSignature = Array.isArray(wallpaper.wallpapers)
+        ? wallpaper.wallpapers.map(w => `${w.file}:${w.mtimeMs}:${w.size}`).join('|')
+        : ''
       
-      // 如果壁纸路径发生变化，通知渲染进程
-      if (currentSignature !== lastWallpaperSignature) {
+      // 如果壁纸路径/任一屏幕壁纸发生变化，通知渲染进程
+      if (`${currentSignature}|${multiScreenSignature}` !== lastWallpaperSignature) {
         logWallpaper('🎨 [Watcher] 检测到壁纸变化！')
         logWallpaper('   旧壁纸:', lastWallpaperSignature)
-        logWallpaper('   新壁纸:', currentSignature)
-        lastWallpaperSignature = currentSignature
+        logWallpaper('   新壁纸:', `${currentSignature}|${multiScreenSignature}`)
+        lastWallpaperSignature = `${currentSignature}|${multiScreenSignature}`
         if (mainWindow && !mainWindow.isDestroyed()) {
           logWallpaper('📡 [Watcher] 发送壁纸变化事件到渲染进程')
           safeSendToWindow(mainWindow, 'wallpaper-changed', wallpaper)
@@ -3240,11 +3518,37 @@ ipcMain.handle('open-spotify-login', async (_event, clientId) => {
   }
 })
 
-// ── 汽水音乐登录（Electron 弹窗扫码，抓 token）──────────────────────────
+// ── 汽水音乐登录：汽水自有 Passport 二维码流程（移植自 Mineradio qishui-auth-v6，GPL-3.0-only）──
+// 生成二维码 → 轮询 check_qrconnect → 确认后捕获 .qishui.com 会话 Cookie + 用户资料。
+// 旧方案（sso.douyin.com 抖音 SSO）抓到的是 .douyin.com Cookie，luna Web API 一律 403，已废弃。
 let sodaLoginWindow = null
+
+function sodaLoginPageHtml(qrDataUrl) {
+  return '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>汽水音乐扫码登录</title>' +
+    '<style>' +
+    'body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#111318;font-family:"Microsoft YaHei",system-ui,sans-serif;color:#fff}' +
+    '.card{width:340px;text-align:center;padding:32px 28px;border-radius:20px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)}' +
+    'h2{margin:0 0 6px;font-size:20px}' +
+    '.sub{margin:0 0 18px;font-size:12px;color:rgba(255,255,255,.45)}' +
+    '.qrbox{position:relative;width:280px;height:280px;margin:0 auto 18px;background:#fff;border-radius:14px;padding:10px;box-sizing:border-box}' +
+    'img{width:100%;height:100%;display:block}' +
+    '#status{font-size:14px;color:rgba(255,255,255,.75);min-height:20px;margin:0 0 14px}' +
+    '.tip{font-size:11px;color:rgba(255,255,255,.3);line-height:1.7}' +
+    '</style></head><body><div class="card">' +
+    '<h2>汽水音乐扫码登录</h2><p class="sub">WaveForge · 澜音工坊</p>' +
+    '<div class="qrbox"><img id="waveforge-qr" src="' + qrDataUrl + '" alt="二维码"></div>' +
+    '<p id="status">请打开「汽水音乐」App 扫描二维码</p>' +
+    '<p class="tip">扫码登录即代表同意汽水音乐用户协议<br>本窗口由 WaveForge 本地渲染，凭据仅保存在本机</p>' +
+    '</div>' +
+    '<script>(function(){var b=document.createElement("div");b.innerHTML="✕";b.style.cssText="position:fixed;top:12px;right:14px;width:30px;height:30px;line-height:30px;text-align:center;background:rgba(255,255,255,.1);border-radius:50%;cursor:pointer;z-index:2147483647;color:#fff;font-size:14px";b.addEventListener("click",function(){window.close()});document.body.appendChild(b)})();' +
+    'window.__wfSetStatus=function(s){var e=document.getElementById("status");if(e)e.textContent=s};' +
+    'window.__wfSetQr=function(src){var e=document.getElementById("waveforge-qr");if(e)e.src=src};' +
+    '</script></body></html>'
+}
+
 async function createSodaLoginWindow() {
   return new Promise((resolve) => {
-    if (sodaLoginWindow) {
+    if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) {
       sodaLoginWindow.focus()
       resolve({ success: false, error: '汽水音乐登录窗口已打开' })
       return
@@ -3253,160 +3557,169 @@ async function createSodaLoginWindow() {
     const finish = (result) => {
       if (settled) return
       settled = true
+      if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) sodaLoginWindow.close()
       resolve(result)
     }
     void (async () => {
       try {
-        const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
-        sodaLoginWindow = new BrowserWindow({
-          width: 1000,
-          height: 700,
+        const auth = require('./qishui-auth-v6.cjs')
+        // 凭据/设备指纹持久化到 userData（deviceId 稳定可降低风控概率；cookie 登录后写入）
+        const configFile = path.join(app.getPath('userData'), 'soda-qr-login.json')
+        const readCfg = () => { try { return JSON.parse(fs.readFileSync(configFile, 'utf8')) } catch { return {} } }
+        const writeCfg = (patch) => {
+          try { fs.writeFileSync(configFile, JSON.stringify({ ...readCfg(), ...(patch || {}) }, null, 2), 'utf8') } catch {}
+        }
+        auth.configure({
+          getConfig: () => ({
+            deviceId: '', installId: '', verifyPortraitId: '',
+            computerName: os.hostname() || 'Windows-PC', cookie: '', msToken: '',
+            ...readCfg(),
+          }),
+          updateConfig: (patch) => writeCfg(patch),
+        })
+        // 每次打开登录窗都重置凭据文件中的会话字段（保留 deviceId/msToken 设备指纹）：
+        // 1) 防止历史/测试残留会话被成功判定误读为"秒登录"；2) 换账号从干净会话开始
+        writeCfg({ cookie: '' })
+
+        let qrWindow = new BrowserWindow({
+          width: 420,
+          height: 600,
           parent: mainWindow,
           modal: true,
           frame: false,
+          resizable: false,
           backgroundColor: '#111318',
           title: 'WaveForge 澜音工坊 - 汽水音乐登录',
-          icon: fs.existsSync(iconPath) ? iconPath : undefined,
+          icon: path.join(__dirname, '..', 'build', 'icon.ico'),
           webPreferences: {
             nodeIntegration: false,
             contextIsolation: true,
-            session: mainWindow.webContents.session,
           },
         })
-        // 抖音风控对 Electron UA 直接拦截（验证码「系统繁忙」/扫码「访问太频繁」）：
-        // 伪装为普通 Chrome，并从干净会话开始登录。
-        const sodaSession = sodaLoginWindow.webContents.session
-        sodaLoginWindow.webContents.setUserAgent(REAL_CHROME_UA)
-        // 每次打开清空 .douyin.com 域 Cookie（含上次登录留下的会话与风控标记）：
-        // 从干净会话开始，便于登录其他账号；localStorage 的 soda_token 在成功前保持不变。
-        try {
-          const existing = await sodaSession.cookies.get({ domain: '.douyin.com' })
-          if (existing.length) {
-            await Promise.all(existing.map(c => removeSessionCookie(sodaSession, c)))
-            console.log('🧹 [汽水音乐] 已清理抖音域 Cookie，从干净会话开始登录')
-          }
-        } catch { /* 清理失败不阻塞登录 */ }
-        // 导航守卫：只放行抖音系域（登录/认证跳转），外链交系统浏览器
-        const isSodaDomain = (url) => {
-          try {
-            const hostname = new URL(String(url || '')).hostname.toLowerCase()
-            return hostname === 'douyin.com' || hostname.endsWith('.douyin.com')
-              || hostname === 'tiktok.com' || hostname.endsWith('.tiktok.com')
-              || hostname.endsWith('.byteimg.com') || hostname.endsWith('.ibytedapm.com')
-              || hostname.endsWith('.snssdk.com') || hostname.endsWith('.zijieapi.com')
-          } catch { return false }
+        qrWindow.setMenuBarVisibility(false)
+        sodaLoginWindow = qrWindow
+
+        const setStatus = (text) => {
+          try { if (qrWindow && !qrWindow.isDestroyed()) void qrWindow.webContents.executeJavaScript('window.__wfSetStatus && window.__wfSetStatus(' + JSON.stringify(text) + ')') } catch {}
         }
-        sodaLoginWindow.webContents.on('will-navigate', (event, url) => {
-          if (!isSodaDomain(url)) {
-            event.preventDefault()
-            if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
+
+        // 生成并刷新二维码（过期自动重取，最多 4 次）
+        let qrToken = ''
+        let expiredCount = 0
+        const buildQr = async () => {
+          const qr = await auth.getQrCode()
+          const data = qr.data || {}
+          qrToken = String(data.token || '')
+          if (!qrToken || !data.qrcode) throw new Error('二维码生成数据不完整')
+          if (qrWindow && !qrWindow.isDestroyed()) {
+            await qrWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(sodaLoginPageHtml(String(data.qrcode))))
           }
-        })
-        sodaLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
-          if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
-          return { action: 'deny' }
-        })
-        // 加载抖音登录页（sso.douyin.com 展示抖音扫码二维码；汽水音乐使用抖音账号体系）
-        // 注意：sodamusic.com 域名已停用（仅剩占位页），不能作为登录入口。
-        sodaLoginWindow.loadURL('https://sso.douyin.com/?service=https%3A%2F%2Fwww.douyin.com%2F&type=login')
-        // 注入关闭按钮
-        sodaLoginWindow.webContents.on('did-finish-load', () => {
-          sodaLoginWindow.webContents.executeJavaScript(`
-            (function() {
-              if (document.getElementById('waveforge-close-btn')) return;
-              const b = document.createElement('div');
-              b.id = 'waveforge-close-btn';
-              b.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-              b.style.cssText = 'position:fixed;top:12px;right:12px;width:32px;height:32px;background:rgba(0,0,0,0.55);border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2147483647;color:#fff;';
-              b.addEventListener('click', () => window.close());
-              document.body.appendChild(b);
-            })();
-          `).catch(() => {})
-        })
-        // 每 2 秒检查登录态（抖音扫码成功后 .douyin.com 域出现 sessionid 等会话 Cookie）
-        const checkInterval = setInterval(async () => {
-          if (!sodaLoginWindow || sodaLoginWindow.isDestroyed()) {
-            clearInterval(checkInterval)
-            return
-          }
+        }
+
+        await buildQr()
+
+        // 轮询扫码状态；check_qrconnect 可能因二次验证(MFA)长时间阻塞——用 inFlight 防止调用堆积。
+        // 成功判定以「凭据文件里的 .qishui 会话 Cookie」为准：无论返回包形状如何、
+        // 甚至轮询中途抛错（MFA 完成后偶发响应异常），只要会话已落盘即视为登录成功。
+        let pollTimer = null
+        let inFlight = false
+        let consecutiveErrors = 0
+        const hasRealSession = (cfg) => {
+          // 不用正则避免转义歧义：按分号拆 Cookie，看是否存在任一会话键
+          const names = String((cfg && cfg.cookie) || '').split(';').map(part => part.trim().split('=')[0].toLowerCase())
+          return names.includes('sessionid') || names.includes('sessionid_ss') || names.includes('sid_guard') || names.includes('sid_tt')
+        }
+        // 登录闭环立即完成，不做任何网络等待：昵称/头像/ID 由渲染层自愈逻辑
+        // （handleSodaLogin 缺字段时经 /api/soda/status 补齐）异步获取。
+        // 此前在这里同步等资料接口，接口一旦迟滞会把整个登录流程卡死在窗口不关。
+        const completeLogin = (cookie) => {
+          if (settled) return
+          if (pollTimer) clearInterval(pollTimer)
+          console.log('[SodaLogin] 会话已建立，完成登录闭环')
+          // 注意：settled 由 finish 内部置位；这里若提前置位会让 finish 的防重护栏短路
+          finish({ success: true, cookie, username: '', avatar: '', userId: '' })
+        }
+        pollTimer = setInterval(async () => {
+          if (!qrWindow || qrWindow.isDestroyed() || settled) { clearInterval(pollTimer); return }
+          if (inFlight) { console.log('[SodaLogin][tick] 跳过：上一次检查仍在进行'); return }
+          inFlight = true
           try {
-            const cookies = await sodaLoginWindow.webContents.session.cookies.get({ domain: '.douyin.com' })
-            const session = cookies.find(c => c.name === 'sessionid' || c.name === 'sessionid_ss' || c.name === 'sid_guard')
-            if (session && session.value) {
-              // 捕获完整抖音会话 Cookie（供后续抖音系接口使用）
-              const cookieString = cookies
-                .filter(c => /sessionid|sid_guard|uid_tt|passport|ttwid|odin_tt/i.test(c.name) && c.value)
-                .map(c => `${c.name}=${c.value}`)
-                .join('; ')
-              console.log('✓ [汽水音乐] 登录成功，捕获抖音会话')
-              clearInterval(checkInterval)
-              // 抓取昵称/头像/ID（登录后跳转 www.douyin.com 从页面/接口提取）
-              let username = ''
-              let avatar = ''
-              let userId = ''
-              try {
-                await sodaLoginWindow.loadURL('https://www.douyin.com/').catch(() => {})
-                await new Promise(r => setTimeout(r, 4500))
-                const userInfo = await sodaLoginWindow.webContents.executeJavaScript(`(async () => {
-                  const tryFetch = async (url) => {
-                    try {
-                      const r = await fetch(url, { credentials: 'include' });
-                      if (!r.ok) return null;
-                      const t = await r.text();
-                      try { return JSON.parse(t); } catch { return t; }
-                    } catch { return null; }
-                  };
-                  // 1. 抖音 passport 用户信息接口（带会话 Cookie；兼容 acc.data 与 acc.data.data 双层结构）
-                  const acc = await tryFetch('https://passport.douyin.com/web/account/info/v2/');
-                  const user = (acc && acc.data && acc.data.data && typeof acc.data.data === 'object') ? acc.data.data : (acc && acc.data) || {};
-                  if (user && (user.nickname || user.name)) {
-                    return JSON.stringify({
-                      name: user.nickname || user.name || '',
-                      avatar: user.avatar_url || user.avatar || '',
-                      id: String(user.uid || user.user_id || user.id || '')
-                    });
-                  }
-                  // 2. 页面 DOM：头像/昵称（选择器覆盖新旧版抖音首页）
-                  const avEl = document.querySelector('img[src*="douyinpic.com/aweme-avatar"], img[data-e2e="nav-avatar"], [data-e2e="nav-avatar"] img, img[data-e2e="user-avatar"], [data-e2e="user-avatar"] img');
-                  const nameEl = document.querySelector('[data-e2e="user-info-name"], .user-nickname, [class*="nickname"], [data-e2e="user-name"]');
-                  // 3. 头像/昵称 img alt 兜底（新版首页头像 img 的 alt 常为昵称）
-                  const altName = avEl ? (avEl.getAttribute('alt') || '').trim() : '';
-                  return JSON.stringify({
-                    name: nameEl ? (nameEl.textContent || '').trim() : (altName || ''),
-                    avatar: avEl ? (avEl.src || '') : '',
-                    id: ''
-                  });
-                })()`)
-                const parsed = JSON.parse(userInfo || '{}')
-                username = parsed.name || ''
-                avatar = parsed.avatar || ''
-                userId = parsed.id || ''
-                console.log(`✓ [汽水音乐] 用户: name=${username} id=${userId || '(未取到)'}`)
-              } catch (e) {
-                console.error('❌ [汽水音乐] 获取用户信息失败:', e)
-              }
-              finish({ success: true, cookie: cookieString, username, avatar, userId })
-              sodaLoginWindow.close()
+            // 先看凭据文件：MFA/二次验证流程可能在任意时刻把会话写进来
+            const cfgSnapshot = readCfg()
+            console.log('[SodaLogin][tick] cookie字段=', String(cfgSnapshot.cookie || '').slice(0, 60))
+            if (hasRealSession(cfgSnapshot)) { console.log('[SodaLogin][tick] 检测到有效会话 → 完成登录'); completeLogin(String(cfgSnapshot.cookie || '')); return }
+            const envelope = await auth.checkQrConnect(qrToken)
+            consecutiveErrors = 0
+            const d = envelope.data || {}
+            const errorCode = Number(d.error_code)
+            // 返回包确认 → 再核对一次落盘 Cookie（persistSessionCookies 在 check 内部已完成）
+            const cfgAfter = readCfg()
+            if ((errorCode === 0 && (String(d.status) === '3' || d.session_cookie)) || hasRealSession(cfgAfter)) {
+              completeLogin(String(cfgAfter.cookie || ''))
+              return
             }
+            if (errorCode === 2) {
+              // 二维码已过期：自动刷新
+              expiredCount += 1
+              if (expiredCount > 4) {
+                clearInterval(pollTimer)
+                finish({ success: false, error: '二维码已多次过期，请重新打开登录' })
+                return
+              }
+              setStatus('二维码已过期，正在刷新…')
+              await buildQr()
+              setStatus('请使用「汽水音乐」App 扫描新二维码')
+              return
+            }
+            if (errorCode === 7) {
+              clearInterval(pollTimer)
+              finish({ success: false, error: '请求过于频繁，请一分钟后再试' })
+              return
+            }
+            if (String(d.status) === '2') setStatus('已扫码 ✓ 请在手机上确认登录')
           } catch (err) {
-            console.error('❌ [汽水音乐] 检查登录状态失败:', err)
+            console.error('[SodaLogin][tick] check异常:', err && err.message)
+            // 异常路径同样先查落盘 Cookie：MFA 通过后的收尾请求偶发失败不影响会话有效性
+            const cfgErr = readCfg()
+            if (hasRealSession(cfgErr)) { completeLogin(String(cfgErr.cookie || '')); return }
+            if (err && err.code === 'QISHUI_MFA_CANCELLED') {
+              clearInterval(pollTimer)
+              finish({ success: false, error: err.message || '安全验证已取消' })
+              return
+            }
+            consecutiveErrors += 1
+            if (consecutiveErrors >= 8) {
+              clearInterval(pollTimer)
+              finish({ success: false, error: (err && err.message) || '登录状态检查连续失败' })
+            } else {
+              setStatus(consecutiveErrors >= 2 ? '安全验证处理中/网络波动，正在重试… (' + consecutiveErrors + '/8)' : '正在检查扫码状态…')
+            }
+          } finally {
+            inFlight = false
           }
         }, 2000)
-        sodaLoginWindow.on('closed', () => {
-          clearInterval(checkInterval)
+
+        qrWindow.on('closed', () => {
+          if (pollTimer) clearInterval(pollTimer)
           sodaLoginWindow = null
+          // 手动关闭窗口 ≠ 一定失败：若扫码+验证码已完成、会话已落盘，按登录成功收尾
+          const cfgOnClose = readCfg()
+          if (hasRealSession(cfgOnClose)) {
+            console.log('[SodaLogin] 窗口关闭时会话有效，按成功收尾')
+            finish({ success: true, cookie: String(cfgOnClose.cookie || ''), username: '', avatar: '', userId: '' })
+            return
+          }
           finish({ success: false, error: '用户取消登录' })
         })
       } catch (error) {
         console.error('[汽水音乐] 初始化登录窗口失败:', error)
         if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) sodaLoginWindow.destroy()
         sodaLoginWindow = null
-        finish({ success: false, error: error?.message || '汽水音乐登录窗口初始化失败' })
+        finish({ success: false, error: (error && error.message) || '汽水音乐登录初始化失败' })
       }
     })()
   })
 }
-
 ipcMain.handle('open-soda-login', async () => {
   try {
     const result = await createSodaLoginWindow()
@@ -3418,6 +3731,84 @@ ipcMain.handle('open-soda-login', async () => {
   } catch (err) {
     console.error('❌[汽水音乐] 打开登录窗口失败:', err)
     return { success: false, error: err.message }
+  }
+})
+
+// 汽水退出登录清理：关登录窗 → 清 persist:mineradio-qishui-auth-v6 分区的 .qishui.com
+// Cookie/localStorage（复用 qishui-auth-v6 的 clear）→ 清凭据文件 soda-qr-login.json 的会话字段。
+// 凭据文件保留 deviceId/installId 等设备指纹（稳定可降低风控概率），只清 cookie/msToken，
+// 与打开登录窗前的重置逻辑（writeCfg({ cookie: '' })）对齐。运行时未初始化时 clear()
+// 会直接按分区名清存储，覆盖「应用重启后 runtime 为空」的场景。
+ipcMain.handle('soda-clear-login', async () => {
+  try {
+    if (sodaLoginWindow && !sodaLoginWindow.isDestroyed()) {
+      try { sodaLoginWindow.destroy() } catch {}
+      sodaLoginWindow = null
+    }
+    const auth = require('./qishui-auth-v6.cjs')
+    await auth.clear()
+    const configFile = path.join(app.getPath('userData'), 'soda-qr-login.json')
+    try {
+      const cfg = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+      if (cfg && typeof cfg === 'object') {
+        delete cfg.cookie
+        delete cfg.msToken
+        fs.writeFileSync(configFile, JSON.stringify(cfg, null, 2), 'utf8')
+      }
+    } catch { /* 文件不存在/损坏：无残留凭据可清，忽略 */ }
+    console.log('🧹 [汽水音乐] 已清除登录分区与凭据文件会话字段（退出登录）')
+    return { success: true }
+  } catch (err) {
+    console.error('❌[汽水音乐] 清除登录态失败:', err)
+    return { success: false, error: (err && err.message) || String(err) }
+  }
+})
+
+// HSE 开发者模式：把调音室导出的「发布种子」写回仓库源文件 builtinSceneSeed.ts。
+// 仅开发模式可用（打包版没有 src 源码树，app.isPackaged 直接拒绝），
+// 内容必须带种子赋值语句标记且限长，防止变成任意文件写入通道。
+ipcMain.handle('hse-write-scene-seed', async (_e, content) => {
+  try {
+    if (app.isPackaged) return { ok: false, error: '仅开发模式可写回仓库' }
+    if (typeof content !== 'string' || !content.includes('export const BUILTIN_SCENE_SEED') || content.length > 2 * 1024 * 1024) {
+      return { ok: false, error: '内容不符合种子文件格式' }
+    }
+    const target = path.join(app.getAppPath(), 'src', 'services', 'waveforge-engine-v3', 'src', 'engine', 'builtinSceneSeed.ts')
+    if (!fs.existsSync(target)) return { ok: false, error: '仓库中不存在 builtinSceneSeed.ts（仅开发环境可用）' }
+    const tmp = target + '.tmp'
+    fs.writeFileSync(tmp, content, 'utf8')
+    fs.renameSync(tmp, target)
+    console.log('✍️ [HSE] 发布种子已写回:', target)
+    return { ok: true, path: target }
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || String(err) }
+  }
+})
+
+// HSE 离线导出落盘：把调音室渲染好的 MP3 直写到用户桌面。
+// 文件名由渲染层给（<歌曲名>-Modified.mp3），这里再做一次非法字符兜底清洗与
+// 重名自动 (2) 序号，绝不覆盖用户已存在的文件。300MB 上限防误传巨型数据。
+ipcMain.handle('hse-save-rendered-audio', (_e, data, fileName) => {
+  try {
+    const buf = Buffer.from(data)
+    if (!buf.length) return { ok: false, error: '导出内容为空' }
+    if (buf.length > 300 * 1024 * 1024) return { ok: false, error: '导出内容超过 300MB，疑似异常' }
+    const safeName = String(fileName || '').replace(/[\\/:*?"<>|]/g, '_').trim()
+      .replace(/^\.{1,2}$/, '_') || 'WaveForge-HSE-Modified.mp3'
+    const dir = app.getPath('desktop')
+    const ext = path.extname(safeName) || '.mp3'
+    const stem = safeName.slice(0, safeName.length - ext.length)
+    let target = path.join(dir, safeName)
+    let n = 2
+    while (fs.existsSync(target)) {
+      target = path.join(dir, `${stem} (${n})${ext}`)
+      n += 1
+    }
+    fs.writeFileSync(target, buf)
+    console.log('🎵 [HSE] 渲染音频已保存:', target, `(${(buf.length / 1024 / 1024).toFixed(1)}MB)`)
+    return { ok: true, path: target }
+  } catch (err) {
+    return { ok: false, error: (err && err.message) || String(err) }
   }
 })
 
@@ -3541,6 +3932,9 @@ async function scrapeDouyinMusic(keyword) {
 }
 
 ipcMain.handle('soda-scrape-search', async (_event, keyword) => {
+  if (typeof keyword !== 'string' || keyword.trim().length === 0) {
+    return { success: false, error: '搜索关键词无效', items: [] }
+  }
   try {
     const items = await scrapeDouyinMusic(keyword)
     return { success: true, items }
@@ -3668,8 +4062,14 @@ ipcMain.handle('kugou-scrape-user-info', async () => {
 ipcMain.handle('apple-api', async (event, payload) => {
   const { path, method = 'GET', developerToken, mediaUserToken, body } = payload || {}
   if (!path || !developerToken) return { ok: false, status: 0, error: '缺少请求参数' }
+  // 校验输入类型：path 必须是字符串且以 / 开头（防协议/内网跳转拼接），method 白名单
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) {
+    return { ok: false, status: 0, error: '非法路径' }
+  }
+  const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
+  const safeMethod = ALLOWED_METHODS.has(String(method).toUpperCase()) ? String(method).toUpperCase() : 'GET'
   // 路径归一化：appleAuth 传 /me/...（无 /v1），appleCatalog 传 /v1/...，统一补成带 /v1 的完整路径
-  const apiPath = String(path).startsWith('/v1') ? String(path) : `/v1${String(path)}`
+  const apiPath = path.startsWith('/v1') ? path : `/v1${path}`
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
@@ -3682,7 +4082,7 @@ ipcMain.handle('apple-api', async (event, payload) => {
     if (mediaUserToken) headers['Media-User-Token'] = mediaUserToken
     if (body !== undefined && body !== null) headers['Content-Type'] = 'application/json'
     const response = await fetch(`https://amp-api.music.apple.com${apiPath}`, {
-      method,
+      method: safeMethod,
       headers,
       body: body !== undefined && body !== null ? body : undefined,
       signal: controller.signal,
@@ -3695,6 +4095,77 @@ ipcMain.handle('apple-api', async (event, payload) => {
       data = text
     }
     return { ok: response.ok, status: response.status, data }
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+// ── Apple Music 原生音源取流（Cider 同款：webPlayback 私有接口）──────────────
+// POST play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback，
+// body {"salableAdamId":"<catalogSongId>"}；响应 songList[0] 携带 songsId、
+// HLS 主清单（attributes.assetUrl / offers[].hlsUrl）与 EME keyURLs
+// （hls-key-cert-url / hls-key-server-url / widevine-cert-url）。
+// 浏览器直连该接口同样受 CORS 限制，统一走主进程（请求头与 SDK 完全一致）。
+const APPLE_MZPLAY_WEBPLAYBACK = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
+ipcMain.handle('apple-playback', async (_event, payload) => {
+  const { songId, developerToken, mediaUserToken } = payload || {}
+  if (!songId || !developerToken || !mediaUserToken) {
+    return { ok: false, status: 0, error: '缺少参数（songId/developerToken/mediaUserToken）' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const headers = {
+      Authorization: `Bearer ${developerToken}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'X-Apple-Music-User-Token': String(mediaUserToken),
+      Origin: 'https://music.apple.com',
+      Referer: 'https://music.apple.com/',
+    }
+    const response = await fetch(APPLE_MZPLAY_WEBPLAYBACK, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ salableAdamId: String(songId) }),
+      signal: controller.signal,
+    })
+    const text = await response.text()
+    let data = null
+    try {
+      data = text ? JSON.parse(text) : null
+    } catch {
+      data = text
+    }
+    return { ok: response.ok, status: response.status, data }
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+// ── Apple HLS 清单代理：渲染层解析主清单需先拿到文本（Electron 源下直连会被
+// CORS 拦），主进程 fetch 后回传。白名单限制在 Apple/苹果静态资源域。──────────
+ipcMain.handle('apple-fetch-url', async (_event, payload) => {
+  const { url } = payload || {}
+  if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return { ok: false, error: '非法 URL' }
+  let hostname = ''
+  try {
+    hostname = new URL(url).hostname
+  } catch {
+    return { ok: false, error: '非法 URL' }
+  }
+  if (!/^(apple|itunes\.apple|music\.apple)\.com$/i.test(hostname) && !/(^|\.)(apple\.com|itunes\.apple\.com|mzstatic\.com)$/i.test(hostname)) {
+    return { ok: false, error: '域名不在白名单' }
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 20000)
+  try {
+    const response = await fetch(url, { signal: controller.signal })
+    const text = await response.text()
+    return { ok: response.ok, status: response.status, text }
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
   } finally {
@@ -3738,10 +4209,12 @@ ipcMain.handle('apple-account-info', async (event, cookies) => {
 
 // ── Apple 个人资料页（解析 og:image 头像，需主进程避免 CORS）──
 ipcMain.handle('apple-fetch-profile', async (event, profileUrl) => {
+  // 仅允许 https 的公开网页，防止传入 file:// 等本地路径被代理读取
+  const safeUrl = typeof profileUrl === 'string' && /^https:\/\/[^/]/.test(profileUrl) ? profileUrl : 'https://music.apple.com/profile'
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
-    const response = await fetch(String(profileUrl || 'https://music.apple.com/profile'), {
+    const response = await fetch(safeUrl, {
       headers: { 'User-Agent': APPLE_SAFARI_UA, Accept: 'text/html' },
       redirect: 'follow',
       signal: controller.signal,
@@ -5639,6 +6112,98 @@ ipcMain.handle('revert-gpu-change', () => {
   }
 })
 
+// ── 全局高刷：让所有窗口的渲染帧率跟随所在显示器的刷新率（默认软件渲染下 Chromium 锁 60Hz）──
+
+/** 窗口所在显示器的刷新率（Hz），夹在 [30, 360]，取不到时回退 60 */
+function getWindowDisplayFrequency(win) {
+  try {
+    const { screen } = require('electron')
+    if (!win || win.isDestroyed()) return 60
+    const display = screen.getDisplayMatching(win.getBounds())
+    const hz = Math.round(Number(display.displayFrequency) || 0)
+    if (hz <= 0) return 60
+    return Math.min(HIGH_REFRESH_MAX_HZ, Math.max(HIGH_REFRESH_MIN_HZ, hz))
+  } catch {
+    return 60
+  }
+}
+
+/** 把当前高刷设置应用到全部窗口的 webContents（渲染帧率跟随所在显示器） */
+function applyHighRefreshRate() {
+  const enabled = performanceSettings.highRefreshRate === true
+  const displayHz = getWindowDisplayFrequency(mainWindow)
+  // 开启：默认跟随所在显示器最高刷新率；用户手动选档时取其与显示器最高中的较小值
+  const targetHz = enabled
+    ? (performanceSettings.highRefreshHz ? Math.min(performanceSettings.highRefreshHz, displayHz) : displayHz)
+    : HIGH_REFRESH_MIN_HZ
+  const targets = [mainWindow, desktopPlayerWindow, desktopLyricsWindow, taskbarWidgetWindow]
+  for (const win of targets) {
+    try {
+      if (win && !win.isDestroyed() && win.webContents) win.webContents.setFrameRate(targetHz)
+    } catch { /* 忽略 */ }
+  }
+  return { enabled, hz: targetHz, displayFrequency: displayHz }
+}
+
+/** 显示器/主窗口移动后重新贴合所在显示器刷新率（只绑定一次，避免重复监听） */
+let highRefreshBound = false
+function rebindHighRefreshRate() {
+  const { screen } = require('electron')
+  if (performanceSettings.highRefreshRate === true) {
+    if (highRefreshBound) return
+    highRefreshBound = true
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.on('move', applyHighRefreshRate)
+        mainWindow.on('resize', applyHighRefreshRate)
+      } catch { /* 忽略 */ }
+    }
+    screen.on('display-metrics-changed', applyHighRefreshRate)
+  } else {
+    highRefreshBound = false
+  }
+}
+
+ipcMain.handle('display:get-info', () => {
+  try {
+    const { screen } = require('electron')
+    const mainWinDisplay = (mainWindow && !mainWindow.isDestroyed())
+      ? screen.getDisplayMatching(mainWindow.getBounds())
+      : screen.getPrimaryDisplay()
+    return {
+      highRefreshEnabled: performanceSettings.highRefreshRate === true,
+      highRefreshHz: performanceSettings.highRefreshHz,
+      currentHz: getWindowDisplayFrequency(mainWindow),
+      primary: screen.getPrimaryDisplay().displayFrequency,
+      mainWindowDisplayId: mainWinDisplay.id,
+      displays: screen.getAllDisplays().map(display => ({
+        id: display.id,
+        isPrimary: display.id === screen.getPrimaryDisplay().id,
+        isMainWindow: display.id === mainWinDisplay.id,
+        bounds: display.bounds,
+        workArea: display.workArea,
+        frequency: Math.round(Number(display.displayFrequency) || 0),
+        scaleFactor: display.scaleFactor,
+        label: `${display.bounds.width}×${display.bounds.height}${Math.round(Number(display.displayFrequency) || 0) ? ` @${Math.round(Number(display.displayFrequency) || 0)}Hz` : ''}`,
+      })),
+    }
+  } catch (error) {
+    return { error: error?.message || String(error) }
+  }
+})
+
+ipcMain.handle('display:set-high-refresh', (_event, enabled, hz) => {
+  performanceSettings.highRefreshRate = enabled === true
+  const savedHz = Number(hz)
+  performanceSettings.highRefreshHz = Number.isInteger(savedHz) && savedHz >= HIGH_REFRESH_MIN_HZ && savedHz <= HIGH_REFRESH_MAX_HZ
+    ? savedHz
+    : null
+  writePerformanceSettings(performanceSettings)
+  applyHighRefreshRate()
+  rebindHighRefreshRate()
+  return { success: true, enabled: performanceSettings.highRefreshRate, hz: getWindowDisplayFrequency(mainWindow) }
+})
+
 // 保存主窗口当前状态（窗口化/最大化/全屏覆盖任务栏 + 位置大小 + 所在显示器）
 function persistMainWindowState() {
   try {
@@ -5658,54 +6223,262 @@ ipcMain.handle('window-minimize', () => {
   }
 })
 
-ipcMain.handle('window-maximize', async () => {
-  if (mainWindow) {
-    // 检查当前是否已经是某种全屏状态
-    const isInFullscreen = mainWindow.isKiosk() || mainWindow.isFullScreen()
-    
-    if (isInFullscreen || mainWindow.isMaximized()) {
-      // 如果是全屏或最大化状态，则还原窗口
-      if (mainWindow.isKiosk()) {
-        mainWindow.setKiosk(false)
-      }
-      if (mainWindow.isFullScreen()) {
-        mainWindow.setFullScreen(false)
-      }
-      if (mainWindow.isMaximized()) {
-        mainWindow.unmaximize()
-      }
-    } else {
-      // 如果是正常窗口，则根据用户设置进入全屏或最大化
-      try {
-        // 从渲染进程读取全屏模式设置
-        const fullscreenMode = await mainWindow.webContents.executeJavaScript(`
-          (() => {
-            try {
-              return localStorage.getItem('fullscreenMode') || 'kiosk';
-            } catch {
-              return 'kiosk';
-            }
-          })()
-        `)
-        
-        console.log('[窗口最大化] 读取到的全屏模式设置:', fullscreenMode)
-        
-        if (fullscreenMode === 'kiosk') {
-          // 全屏模式 - 覆盖任务栏?
-          console.log('[窗口最大化] 进入全屏模式（覆盖任务栏）')
-          mainWindow.setKiosk(true)
+// 窗口"扩大态"自记状态：kiosk 全屏 / 原生全屏 / 最大化 任一成立即 true。
+// Windows 上 setKiosk 进入全屏后，isKiosk()/isFullScreen()/isMaximized() 返回值可能
+// 全部为 false（kiosk 走独立全屏路径且不触发 maximize 事件），导致最大化按钮的第二次
+// 按压被误判为"非全屏"而重新进入全屏——看起来"按了没反应"。自记状态让进入/还原切换始终自洽。
+let mainWindowExpanded = false
+// 进入扩大态前的正常窗口边界：kiosk 退出后 Electron 在 Windows 上可能不恢复原位置/尺寸
+//（停留在左上角或全屏尺寸），还原时显式 setBounds 恢复。
+let mainWindowNormalBounds = null
+
+// 窗口状态记忆：大小/位置/状态变化后防抖保存（关闭时会做最终保存）。
+// 提升到模块级：主窗口重建（透明↔不透明切换）后事件接线继续共用。
+let windowStateSaveTimer = null
+const scheduleWindowStateSave = () => {
+  if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer)
+  windowStateSaveTimer = setTimeout(() => {
+    windowStateSaveTimer = null
+    persistMainWindowState()
+  }, 400)
+}
+
+// 主窗口事件接线：启动创建（createWindow）与融合穿透重建（recreateMainWindow）共用。
+// 重建后必须重新挂接，否则窗口会失去状态推送（标题栏图标）/窗口记忆/F12 快捷键。
+function wireMainWindowEvents(win) {
+  // 阻止 window.open 创建新的 Electron 窗口（外部链接交给系统浏览器）
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url)
+      return { action: 'deny' }
+    }
+    return { action: 'deny' }
+  })
+
+  // 窗口关闭（含退出）前做最终状态保存——will-quit 时窗口可能已销毁拿不到 bounds
+  win.on('close', () => {
+    persistMainWindowState()
+  })
+
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null
+    if (wallpaperWatcher) {
+      clearInterval(wallpaperWatcher)
+      wallpaperWatcher = null
+    }
+  })
+
+  // 最大化/还原/全屏事件：自记扩大态 + 向渲染端推送状态（标题栏按钮图标依赖）
+  win.on('maximize', () => {
+    mainWindowExpanded = true
+    // 记录最大化前的正常边界（getNormalBounds 在最大化后仍返回还原态的位置/尺寸），
+    // 覆盖 Win+Up / 拖到顶部等原生最大化路径——否则还原时没有边界可恢复
+    if (!mainWindowNormalBounds) mainWindowNormalBounds = win.getNormalBounds()
+    safeSendToWindow(win, 'window-maximized', true)
+    safeSendToWindow(win, 'window-fullscreen-change', true)
+  })
+  win.on('unmaximize', () => {
+    // 可能仍处于 kiosk/原生全屏（例如全屏内部状态变化），自记态仅在确认非全屏后清除
+    mainWindowExpanded = win.isKiosk() || win.isFullScreen()
+    safeSendToWindow(win, 'window-maximized', false)
+    safeSendToWindow(win, 'window-fullscreen-change', mainWindowExpanded)
+  })
+  win.on('enter-full-screen', () => {
+    mainWindowExpanded = true
+    if (!mainWindowNormalBounds) mainWindowNormalBounds = win.getNormalBounds()
+    safeSendToWindow(win, 'window-fullscreen-change', true)
+  })
+  win.on('leave-full-screen', () => {
+    mainWindowExpanded = win.isKiosk() || win.isMaximized()
+    safeSendToWindow(win, 'window-fullscreen-change', false)
+  })
+
+  // 加载完成后向渲染端推送当前窗口状态
+  win.webContents.on('did-finish-load', () => {
+    if (mainWindow === win && !win.isDestroyed()) {
+      safeSendToWindow(win, 'window-maximized', win.isMaximized())
+      safeSendToWindow(win, 'window-fullscreen-change', win.isKiosk() || win.isFullScreen())
+    }
+  })
+
+  // 窗口状态记忆：大小/位置/状态变化后防抖保存
+  win.on('resize', scheduleWindowStateSave)
+  win.on('move', scheduleWindowStateSave)
+  win.on('maximize', scheduleWindowStateSave)
+  win.on('unmaximize', scheduleWindowStateSave)
+  win.on('enter-full-screen', scheduleWindowStateSave)
+  win.on('leave-full-screen', scheduleWindowStateSave)
+
+  // F12 快捷键：开发者模式下打开开发者工具
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      if (developerMode) {
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools()
         } else {
-          // 全屏无边框模式 - 保留任务栏
-          console.log('[窗口最大化] 进入全屏无边框模式（保留任务栏）')
-          mainWindow.maximize()
+          win.webContents.openDevTools()
         }
-      } catch (error) {
-        console.error('[窗口最大化] 读取设置失败，使用默认全屏模式', error)
-        mainWindow.setKiosk(true)
       }
     }
-    persistMainWindowState() // kiosk 切换可能不触发 fullscreen 事件，立即记忆
+  })
+}
+
+// 重建主窗口：transparent 仅在创建时生效（透明窗口用于桌面融合穿透，普通模式用原生
+// 不透明窗口+系统圆角/阴影），切换两者只能销毁重建。重建保留窗口边界与置顶状态，
+// 融合特有的状态（kiosk 记忆/沉底/鼠标穿透）由调用方在重建后应用。
+async function recreateMainWindow(transparent) {
+  if (!mainWindow || mainWindow.isDestroyed()) return null
+  const wasAlwaysOnTop = mainWindow.isAlwaysOnTop()
+  // 先退出扩大态（kiosk/全屏/最大化），避免销毁时把全屏边界写进窗口状态记忆；
+  // 退出后再取边界，否则 getBounds 会拿到 kiosk 的全屏尺寸
+  try {
+    if (mainWindow.isKiosk()) mainWindow.setKiosk(false)
+    if (mainWindow.isFullScreen()) mainWindow.setFullScreen(false)
+    if (mainWindow.isMaximized()) mainWindow.unmaximize()
+  } catch { /* 忽略 */ }
+  const savedBounds = mainWindow.getBounds()
+  mainWindowExpanded = false
+  mainWindowNormalBounds = null
+
+  const oldWindow = mainWindow
+  mainWindow = null
+  if (!oldWindow.isDestroyed()) oldWindow.destroy()
+
+  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
+  const win = new BrowserWindow({
+    width: savedBounds.width,
+    height: savedBounds.height,
+    x: savedBounds.x,
+    y: savedBounds.y,
+    minWidth: 1200,
+    minHeight: 800,
+    frame: false,
+    backgroundColor: transparent ? '#00000000' : '#000000',
+    transparent,
+    titleBarStyle: 'hidden',
+    title: 'WaveForge 澜音工坊',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    // 不透明窗口用 Windows 11 原生圆角；透明窗口原生圆角无效，由渲染端 #root 自绘
+    roundedCorners: !transparent,
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, 'preload.cjs'),
+      paintWhenInitiallyHidden: true, // 软件合成下隐藏时也持续绘制，避免显示时首帧空白
+    },
+  })
+  mainWindow = win
+  if (wasAlwaysOnTop) win.setAlwaysOnTop(true)
+  guardAgainstExternalNavigation(win)
+  wireMainWindowEvents(win)
+
+  if (isDev) {
+    win.loadURL(devServerUrl)
+    if (process.env.WAVEFORGE_OPEN_DEVTOOLS === '1') win.webContents.openDevTools()
+  } else {
+    win.loadFile(path.join(__dirname, '../dist/index.html'))
   }
+
+  win.once('ready-to-show', () => {
+    if (mainWindow === win && !win.isDestroyed()) {
+      win.show()
+      win.focus()
+    }
+  })
+  return win
+}
+
+// 应用融合穿透窗口状态：退出 kiosk/置顶并沉底（真实窗口浮在上层），开启鼠标穿透。
+const applyFusionWindowState = (win) => {
+  if (!win || win.isDestroyed()) return
+  try {
+    if (win.isKiosk()) win.setKiosk(false)
+    if (win.isFullScreen()) win.setFullScreen(false)
+    win.setAlwaysOnTop(false)
+    win.moveBottom()
+    win.setIgnoreMouseEvents(true, { forward: true })
+  } catch (error) {
+    console.error('[桌面融合穿透] 应用融合窗口状态失败:', error?.message || error)
+  }
+}
+
+// 恢复原生窗口状态（关闭融合后）：重新置顶；开启前是 kiosk 全屏则还原。
+const restoreNativeWindowState = (win) => {
+  if (!win || win.isDestroyed()) return
+  try {
+    win.setAlwaysOnTop(true)
+    win.moveTop()
+    if (desktopFusionSavedKiosk) win.setKiosk(true)
+    win.setIgnoreMouseEvents(false)
+  } catch (error) {
+    console.error('[桌面融合穿透] 恢复原生窗口状态失败:', error?.message || error)
+  }
+}
+
+// 还原分支需要"无条件退出全部扩大形态"：isKiosk()/isFullScreen() 在 kiosk 时序下可能
+// 返回 false，导致按状态判断的恢复被跳过（窗口一直停留在全屏，看起来"缩小没反应"）。
+// 对非对应状态的 setKiosk(false)/setFullScreen(false)/unmaximize() 调用是无害 no-op。
+const restoreMainWindowFromExpanded = () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.setKiosk(false)
+    mainWindow.setFullScreen(false)
+    if (mainWindow.isMaximized()) mainWindow.unmaximize()
+    // 显式恢复进入前边界；未记录时（如启动即 kiosk）交给原生还原（unmaximize/
+    // setKiosk(false)），不强行居中覆盖用户自定义位置/尺寸
+    if (mainWindowNormalBounds) {
+      mainWindow.setBounds(mainWindowNormalBounds)
+      mainWindowNormalBounds = null
+    }
+  } catch (error) {
+    console.error('[窗口最大化] 还原失败:', error?.message || error)
+  }
+}
+
+ipcMain.handle('window-maximize', async () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindowExpanded) {
+    // 扩大态 → 还原窗口
+    console.log('[窗口最大化] 还原窗口（当前为扩大态）')
+    restoreMainWindowFromExpanded()
+    mainWindowExpanded = false
+  } else {
+    // 正常窗口 → 按用户设置进入全屏或最大化
+    try {
+      // 记录进入前边界，供还原时显式恢复（kiosk 退出后 Electron 可能不恢复原位置/尺寸）
+      mainWindowNormalBounds = mainWindow.getBounds()
+      // 从渲染进程读取全屏模式设置
+      const fullscreenMode = await mainWindow.webContents.executeJavaScript(`
+        (() => {
+          try {
+            return localStorage.getItem('fullscreenMode') || 'kiosk';
+          } catch {
+            return 'kiosk';
+          }
+        })()
+      `)
+      console.log('[窗口最大化] 读取到的全屏模式设置:', fullscreenMode)
+      if (fullscreenMode === 'kiosk') {
+        console.log('[窗口最大化] 进入全屏模式（覆盖任务栏）')
+        mainWindow.setKiosk(true)
+      } else {
+        console.log('[窗口最大化] 进入全屏无边框模式（保留任务栏）')
+        mainWindow.maximize()
+      }
+    } catch (error) {
+      console.error('[窗口最大化] 读取设置失败，使用默认全屏模式', error)
+      mainWindow.setKiosk(true)
+    }
+    mainWindowExpanded = true
+  }
+  // 切换完成后向渲染端推送真实状态，供标题栏按钮图标刷新
+  // （kiosk 路径不触发 maximize/unmaximize 事件，必须在此显式同步）
+  try {
+    safeSendToWindow(mainWindow, 'window-maximized', mainWindow.isMaximized())
+    safeSendToWindow(mainWindow, 'window-fullscreen-change', mainWindowExpanded)
+    persistMainWindowState()
+  } catch { /* 忽略 */ }
 })
 
 ipcMain.handle('window-close', () => {
@@ -5719,13 +6492,66 @@ ipcMain.handle('window-is-maximized', () => {
   return mainWindow ? mainWindow.isMaximized() : false
 })
 
-// IPC 处理：全屏控制?
+// 桌面融合穿透：把桌面模式「融合」进真实桌面。
+// 开启后：退出 kiosk、取消置顶并把窗口沉底（真实窗口浮在上层），
+// 由渲染端按光标是否悬停在组件上（mousemove + elementFromPoint）实时切换鼠标穿透，
+// 空区域点击穿透到真实桌面（可点文件夹/任务栏）。
+// 注意：穿透需要透明窗口，而 transparent 只在窗口创建时生效——普通模式用原生不透明
+// 窗口（系统圆角/阴影/对齐吸附），开启/关闭融合时销毁重建主窗口切换透明属性。
+let desktopFusionEnabled = false
+let desktopFusionSavedKiosk = false
+
+ipcMain.handle('desktop-fusion:get-state', () => ({ enabled: desktopFusionEnabled }))
+
+// 设置融合状态并重建窗口（透明↔不透明）。供渲染端关闭融合、以及应用启动时
+// 从 localStorage 恢复融合态（此时主进程 desktopFusionEnabled 为 false）调用。
+ipcMain.handle('desktop-fusion:set-enabled', async (_event, enabled) => {
+  if (!mainWindow || mainWindow.isDestroyed()) return { success: false, canceled: false }
+  const next = enabled === true
+  if (next === desktopFusionEnabled) return { success: true, enabled: desktopFusionEnabled, recreated: false }
+  desktopFusionEnabled = next
+  try {
+    if (next) {
+      // 开启：记录 kiosk 记忆，重建为透明窗口（启动恢复路径，无需确认）
+      desktopFusionSavedKiosk = mainWindow.isKiosk()
+      const win = await recreateMainWindow(true)
+      if (!win) { desktopFusionEnabled = false; return { success: false, canceled: false } }
+      applyFusionWindowState(win)
+    } else {
+      // 关闭：重建回原生不透明窗口并恢复置顶/kiosk
+      const win = await recreateMainWindow(false)
+      if (!win) { desktopFusionEnabled = true; return { success: false, canceled: false } }
+      restoreNativeWindowState(win)
+    }
+  } catch (error) {
+    console.error('[桌面融合穿透] 切换失败:', error?.message || error)
+  }
+  return { success: true, enabled: desktopFusionEnabled, recreated: true }
+})
+
+// 开启穿透需重建窗口（会中断当前播放/重载界面），确认框由渲染端应用内弹窗完成
+//（FusionEnableConfirmModal，与删除歌单弹窗同款样式），确认后经 set-enabled 重建。
+// 此路径同样承担"应用启动时从 localStorage 恢复融合态"（此时主进程 desktopFusionEnabled
+// 为 false，渲染端启动同步调用 set-enabled(true) 触发重建为透明窗口）。
+
+// 渲染端报告「光标是否悬停在组件上」→ 切换鼠标穿透
+ipcMain.on('desktop-fusion:set-interactive', (_event, interactive) => {
+  if (!desktopFusionEnabled || !mainWindow || mainWindow.isDestroyed()) return
+  try {
+    mainWindow.setIgnoreMouseEvents(!(interactive === true), { forward: true })
+  } catch { /* 忽略 */ }
+})
+
+
+// IPC 处理：全屏控制
 ipcMain.handle('window-set-fullscreen', (event, fullscreen, kiosk = false) => {
   console.log('[全屏控制] fullscreen=', fullscreen, ', kiosk=', kiosk)
   console.log('[全屏控制] 当前状态: isKiosk=', mainWindow?.isKiosk(), ', isFullScreen=', mainWindow?.isFullScreen(), ', isMaximized=', mainWindow?.isMaximized())
   
   if (mainWindow) {
     if (fullscreen) {
+      // 记录进入前边界（kiosk 退出后 Electron 可能不恢复原位置/尺寸）
+      if (!mainWindowExpanded) mainWindowNormalBounds = mainWindow.getBounds()
       if (kiosk) {
         // 全屏模式（kiosk=true）- 覆盖任务栏
         console.log('[全屏控制] 启用全屏模式（覆盖任务栏）')
@@ -5751,35 +6577,29 @@ ipcMain.handle('window-set-fullscreen', (event, fullscreen, kiosk = false) => {
         // 使用最大化来保留任务栏
         mainWindow.maximize()
       }
+      mainWindowExpanded = true
     } else {
-      // 退出所有全屏模式
+      // 退出所有全屏模式（不依赖 isKiosk()/isFullScreen() 可能不可靠的查询，无条件恢复）
       console.log('[全屏控制] 退出全屏')
-      if (mainWindow.isKiosk()) {
-        console.log('[全屏控制] 退出 Kiosk 模式')
-        mainWindow.setKiosk(false)
-      }
-      if (mainWindow.isFullScreen()) {
-        console.log('[全屏控制] 退出原生全屏')
-        mainWindow.setFullScreen(false)
-      }
-      if (mainWindow.isMaximized()) {
-        console.log('[全屏控制] 取消最大化')
-        mainWindow.unmaximize()
-      }
+      restoreMainWindowFromExpanded()
+      mainWindowExpanded = false
     }
     
     console.log(`[全屏控制] 执行后状态: isKiosk=${mainWindow.isKiosk()}, isFullScreen=${mainWindow.isFullScreen()}, isMaximized=${mainWindow.isMaximized()}`)
+    // 向渲染端同步扩大态（kiosk 路径可能不触发 fullscreen 事件），刷新标题栏图标
+    safeSendToWindow(mainWindow, 'window-fullscreen-change', mainWindowExpanded)
     persistMainWindowState() // 全屏/最大化切换后立即记忆
   }
 })
 
 // IPC 处理：获取全屏状态?
 ipcMain.handle('window-is-fullscreen', () => {
-  if (!mainWindow) return { fullscreen: false, kiosk: false, maximized: false }
+  if (!mainWindow) return { fullscreen: false, kiosk: false, maximized: false, expanded: false }
   return {
     fullscreen: mainWindow.isFullScreen(),
     kiosk: mainWindow.isKiosk(),
-    maximized: mainWindow.isMaximized()
+    maximized: mainWindow.isMaximized(),
+    expanded: mainWindowExpanded
   }
 })
 
@@ -5805,12 +6625,37 @@ let localPythonChild = null
 let localLoudnessChild = null
 let localCompensationChild = null
 
-function startLocalBackend() {
+async function startLocalBackend() {
   if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
   if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
 
   // 1) Express API（3001）
   try {
+
+// ── 孤儿后端清扫：上次异常退出残留的子进程会占住 3001-3004，导致新实例误连旧后端 ──
+const BACKEND_PORTS = [3001, 3002, 3003, 3004]
+async function sweepBackendOrphans(reason) {
+  for (const port of BACKEND_PORTS) {
+    try {
+      const ps = [
+        '$c = Get-NetTCPConnection -LocalPort ' + port + ' -State Listen -ErrorAction SilentlyContinue',
+        'foreach ($x in $c) {',
+        '  $pp = Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue',
+        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*")) { Write-Output $x.OwningProcess }',
+        '}',
+      ].join('; ')
+      const out = await execFileAsync('powershell', ['-NoProfile', '-Command', ps], { timeout: 12000 })
+      const pids = String(out.stdout || '').split(/[^0-9]+/).map(v => parseInt(v, 10)).filter(v => v > 0)
+      for (const pid of pids) {
+        try {
+          await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 8000 })
+          console.log('[LocalAPI] 清扫残留子进程 pid=' + pid + ' (port=' + port + ', reason=' + reason + ')')
+        } catch { /* 已退出则忽略 */ }
+      }
+    } catch { /* 清扫失败不阻塞启动 */ }
+  }
+}
+  await sweepBackendOrphans('startup')
     const serverEntry = path.join(process.resourcesPath, 'app.asar', 'local-server.mjs')
     localApiChild = utilityProcess.fork(serverEntry, [], {
       env: {
@@ -5952,16 +6797,25 @@ function startLocalBackend() {
 }
 
 // 应用退出时一并结束本地子进程
-app.on('will-quit', () => {
+app.on('will-quit', async () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
   try { localApiChild?.kill() } catch {}
+  await sweepBackendOrphans('quit')
   try { localPythonChild?.kill() } catch {}
   try { localLoudnessChild?.kill() } catch {}
   try { localCompensationChild?.kill() } catch {}
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   logStartupTiming('Electron app ready')
+  // 启动时应用上次「稍后」的待更新：拉起 updater 后立即退出，换完文件自动重启到新版本。
+  // 返回 true 表示正在重启应用，跳过本窗口创建流程。
+  try {
+    const { applyPendingAtStartup } = require('./update-manager.cjs')
+    if (applyPendingAtStartup()) return
+  } catch (error) {
+    console.error('⚠️ [更新] 启动应用待更新失败:', error instanceof Error ? error.message : error)
+  }
   // GPU 状态诊断：区分"splash 未渲染出来"（GPU 合成器异常）与"未加载出来"（资源失败）。
   // 每次启动写入日志，便于排查 splash 黑/白屏问题。
   try {
@@ -5986,6 +6840,43 @@ app.whenReady().then(() => {
     // enumerateDevices 需要设备级授权才能返回带标签的真实设备列表
     const type = details?.deviceType || ''
     return type === 'audiooutput' || type === 'audio' || type === 'video' || details?.mediaType === 'audio'
+  })
+
+  // ── Apple 音源 CORS 放行（Cider 式原生音源所需）────────────────────────────
+  // 渲染层 hls.js 直接请求 Apple 的 HLS 清单/分段/Widevine license，这些接口的
+  // CORS 头固定允许的是 music.apple.com 源，本地渲染进程源会被浏览器拦下。
+  // 这里对 Apple 域名响应统一重写 CORS 头为请求方源（并吞掉不友好的预检 4xx），
+  // 只影响跨域响应头，不触碰请求内容。
+  const APPLE_CORS_HOST_RE = /(^|\.)(apple\.com|itunes\.apple\.com|mzstatic\.com)$/i
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    try {
+      const hostname = new URL(details.url).hostname
+      if (!APPLE_CORS_HOST_RE.test(hostname)) return callback({})
+      const requestOrigin = details.headers?.origin || '*'
+      const originList = requestOrigin === '*' ? ['*'] : [requestOrigin]
+      // 头部统一成小写（避免同名不同大小写头并存 → 双份 CORS 头导致校验失败）
+      const headers = {}
+      for (const key of Object.keys(details.responseHeaders || {})) {
+        const lower = String(key).toLowerCase()
+        const value = details.responseHeaders[key]
+        if (lower === 'content-length' && details.method === 'OPTIONS') continue
+        headers[lower] = value
+      }
+      const set = (name, value) => { headers[String(name).toLowerCase()] = Array.isArray(value) ? value : [value] }
+      set('Access-Control-Allow-Origin', originList)
+      set('Access-Control-Allow-Credentials', ['true'])
+      set('Access-Control-Allow-Headers', ['Authorization, Content-Type, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal'])
+      set('Access-Control-Allow-Methods', ['GET, HEAD, POST, OPTIONS, PUT, DELETE, PATCH'])
+      // CORS 预检要求 2xx：Apple 部分接口对 OPTIONS 可能返回 4xx，统一改写成 204 放行
+      if (details.method === 'OPTIONS' && (details.statusCode < 200 || details.statusCode >= 300)) {
+        headers['content-length'] = ['0']
+        return callback({ cancel: false, statusCode: 204, responseHeaders: headers })
+      }
+      return callback({ responseHeaders: headers })
+    } catch (error) {
+      console.error('[AppleCORS] 响应头重写失败:', error?.message || error)
+      return callback({})
+    }
   })
 
   // 初始化配置管理器
@@ -6040,6 +6931,20 @@ app.whenReady().then(() => {
   setupRenderIPC(ipcMain, configManager.getCachePath(), toMediaUrl)
   // AI 混音（DJTransGAN）运行时：可选引擎，未安装时 render:transitionAiMix 抛错、前端回退 DSP
   setupAiMixIPC(ipcMain, configManager.getCachePath())
+  // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理：设置面板「下载模型」用
+  try {
+    const { setupAiModelIPC } = require('./ai-model-manager.cjs')
+    setupAiModelIPC(ipcMain, (scope, message) => automixLog.log(scope, message))
+  } catch (error) {
+    console.error('⚠️ [AI Model] 模型下载管理器初始化失败:', error instanceof Error ? error.message : error)
+  }
+  // 代理自动配置：模型下载/应用更新走用户本地代理（设置 → 高级 → 代理自动配置）
+  try {
+    const { setupProxyIPC } = require('./proxy-manager.cjs')
+    setupProxyIPC(ipcMain, (scope, message) => automixLog.log(scope, message))
+  } catch (error) {
+    console.error('⚠️ [Proxy] 代理管理器初始化失败:', error instanceof Error ? error.message : error)
+  }
 
   // AirPlay 投送端：mDNS 设备发现 + RAOP/AirPlay2 会话管理（纯 JS，无原生依赖）
   try {
@@ -6050,7 +6955,7 @@ app.whenReady().then(() => {
   }
   ipcMain.handle('audio-output:is-supported', () => process.platform === 'win32' || process.platform === 'darwin')
 
-  app.on('will-quit', () => {
+  app.on('will-quit', async () => {
     if (airplayControllerHandle) {
       try { airplayControllerHandle.dispose() } catch { /* 忽略 */ }
       airplayControllerHandle = null
@@ -6066,6 +6971,15 @@ app.whenReady().then(() => {
     const ext = String(result || '').split('.').pop()?.toLowerCase() || '?'
     automixLog.log('download', `trackKey=${trackKey} url=${String(urlOrPath).slice(0, 120)} -> ${result} (ext=${ext})`)
     return result
+  })
+
+  // 只读缓存命中检查（不触发下载）：看歌等场景优先用本地已缓存音轨（mv-align 已下载
+  // 同一 DASH 音频），命中即秒开；未命中返回 null，调用方照旧走流式 URL。
+  ipcMain.handle('audio-download:peekCached', (_event, trackKey) => {
+    if (!analysisRuntime || !analysisRuntime.audioDownload) {
+      return null
+    }
+    return analysisRuntime.audioDownload.peekCached(trackKey)
   })
 
   // 把已下载的音频文件映射为渲染进程可 fetch 的 waveforge-media:// URL
@@ -6138,53 +7052,14 @@ app.whenReady().then(() => {
     return { success: false }
   })
 
-  // 应用更新：多源下载安装包 → sha256 校验 → 打开安装向导
-  ipcMain.handle('update:download-and-install', async (_event, urls, expectedSha) => {
-    const downloadDir = path.join(app.getPath('userData'), 'update')
-    fs.mkdirSync(downloadDir, { recursive: true })
-    for (const url of Array.isArray(urls) ? urls : [urls]) {
-      const destPath = path.join(downloadDir, `WaveForge-Setup-${Date.now()}.exe`)
-      try {
-        let digest = ''
-        await new Promise((resolve, reject) => {
-          const request = net.request(String(url))
-          request.setRedirectMode('follow')
-          const hash = crypto.createHash('sha256')
-          const writeStream = fs.createWriteStream(destPath)
-          let settled = false
-          const fail = (err) => { if (!settled) { settled = true; reject(err) } }
-          request.on('response', (response) => {
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-              fail(new Error(`HTTP ${response.statusCode}`))
-              return
-            }
-            response.on('data', (chunk) => {
-              hash.update(chunk)
-              writeStream.write(chunk)
-            })
-            response.on('end', () => {
-              writeStream.end()
-              digest = hash.digest('hex')
-              if (!settled) { settled = true; resolve() }
-            })
-            response.on('error', fail)
-          })
-          request.on('error', fail)
-          request.end()
-        })
-        if (expectedSha && digest.toLowerCase() !== String(expectedSha).toLowerCase()) {
-          throw new Error('安装包校验失败（sha256 不匹配）')
-        }
-        const opened = await shell.openPath(destPath)
-        if (opened) throw new Error(`无法打开安装向导：${opened}`)
-        return { success: true, path: destPath }
-      } catch (err) {
-        console.error('❌ [更新] 下载失败:', url, err?.message || err)
-        try { fs.unlinkSync(destPath) } catch { /* ignore */ }
-      }
-    }
-    return { success: false, error: '所有下载源均失败' }
-  })
+  // 应用更新管理：后台静默下载 + 退出即应用 + 更新日志/版本历史。
+  // 处理器集中在 update-manager.cjs（下载进度经 update:download-status 事件广播）。
+  try {
+    const { setupUpdateIPC } = require('./update-manager.cjs')
+    setupUpdateIPC(ipcMain)
+  } catch (error) {
+    console.error('⚠️ [更新] 更新管理器初始化失败:', error instanceof Error ? error.message : error)
+  }
   
   // 配置管理 IPC 处理器
   ipcMain.handle('config:get-cache-path', () => {
@@ -6304,6 +7179,20 @@ app.whenReady().then(() => {
   desktopPlayerForm = desktopPlayerSaved.form
   desktopLyricsSettings = loadDesktopLyricsSettings()
 
+  // castlabs ECS：先等 Widevine CDM 组件就绪再开窗口（首次会联网安装，失败不阻断——
+  // AM 原生音源自动回退网易云/QQ 载体，其余功能不受影响）
+  try {
+    const { components } = require('electron')
+    if (components && typeof components.whenReady === 'function') {
+      await components.whenReady()
+      let statusText = ''
+      try { statusText = JSON.stringify(components.status ? components.status() : '') } catch { /* 忽略 */ }
+      logStartupTiming(`[ECS] components ready: ${statusText}`)
+    }
+  } catch (error) {
+    console.warn('[ECS] components 初始化失败（Widevine 可能未就绪，AM 原生将回退载体）:', error instanceof Error ? error.message : error)
+  }
+
   // 若上次退出时开启了桌面播放器，等主窗口起来后再显示小窗口，避免抢占启动焦点
   setTimeout(() => {
     if (desktopPlayerEnabled) createDesktopPlayerWindow()
@@ -6313,6 +7202,9 @@ app.whenReady().then(() => {
   createWindow()
   setGlobalMediaKeysEnabled(mediaKeysEnabled)
   updateTaskbar() // Windows 任务栏缩略图按钮与进度条初始化（渲染进程就绪后推送状态会再刷新）
+  // 全局高刷：若设置已开启，启动即应用（跟随所在显示器刷新率，最高 300Hz）
+  applyHighRefreshRate()
+  rebindHighRefreshRate()
   
   // 移除默认菜单栏
   if (mainWindow) {

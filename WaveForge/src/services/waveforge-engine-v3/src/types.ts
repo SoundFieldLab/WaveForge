@@ -13,6 +13,7 @@ import type {
   SpatialMode,
   ConvolutionMode,
   HrtfInterpMode,
+  DistanceModel,
   InstantSpatialSettings,
   HeadLockedSettings,
   WorldSettings,
@@ -256,6 +257,12 @@ export interface SpatialSettings {
   convolution: ConvolutionMode
   /** HRTF 插值：nearest=最近邻网格查表（默认）/ spherical=球谐插值（方位过渡更平滑） */
   hrtfInterp: HrtfInterpMode
+  /** 距离衰减模型（全部模式的全局渲染参数；规格书属性面板「衰减模型」） */
+  distanceModel: DistanceModel
+  /** 距离衰减参考距离（米，默认 1；ref 内不衰减） */
+  refDistance: number
+  /** 距离衰减最大距离（米，默认 50；linear 模型在此衰减到 0） */
+  maxDistance: number
 }
 
 /**
@@ -275,6 +282,9 @@ export function createDefaultSpatialSettings(): SpatialSettings {
     ambience: p.ambience,
     convolution: p.convolution,
     hrtfInterp: p.perfMode === 'quality' ? 'spherical' : 'nearest',
+    distanceModel: 'inverse',
+    refDistance: 1,
+    maxDistance: 50,
   }
 }
 

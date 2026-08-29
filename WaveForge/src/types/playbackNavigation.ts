@@ -1,6 +1,6 @@
 import type { Song } from '../services/musicApi'
 
-export type ViewMode = 'explore' | 'minimal' | 'desktop'
+export type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 
 export type PlaybackSurface =
   | 'mode-root'
@@ -16,6 +16,11 @@ export type PlaybackSurface =
   | 'explore-detail'
   | 'explore-fm'
   | 'desktop-playlist'
+  | 'traditional-playlist'
+  | 'traditional-search'
+  | 'traditional-library'
+  | 'traditional-album'
+  | 'traditional-artist'
 
 export interface PlaybackOrigin {
   mode?: ViewMode

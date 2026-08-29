@@ -35,6 +35,8 @@ interface ActiveDanmaku {
 const SCROLL_CROSS_SECONDS = 9 // 滚动弹幕横穿画布基准秒数（速度 1 时）
 const FIXED_DURATION_MS = 4000 // 顶部/底部弹幕停留时长
 const LANE_GAP = 6
+// 高刷屏限 120fps：整层文本每帧重绘开销大，弹幕文字 120fps 与 240fps 肉眼无差异
+const FRAME_MIN_INTERVAL_MS = 1000 / 120
 
 export default function DanmakuLayer({ items, settings, isPlaying, videoRef, getTime }: DanmakuLayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -78,6 +80,7 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
     let raf = 0
     let spawnIndex = 0
     let lastTime = -1
+    let lastFrame = -1
 
     const tick = (now: number) => {
       const video = videoRef.current
@@ -86,6 +89,12 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
         raf = requestAnimationFrame(tick)
         return
       }
+      // 限 120fps：弹幕推进由音频时钟 dt 驱动，跳过的帧不影响位置正确性
+      if (lastFrame >= 0 && now - lastFrame < FRAME_MIN_INTERVAL_MS) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
+      lastFrame = now
       const w = cssWidth()
       const h = cssHeight()
       const fs = fontSizeAt()
@@ -199,12 +208,24 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
       active.push(...nowAlive)
       ctx.globalAlpha = 1
 
+      // 时间未推进（暂停）且无可见/待播弹幕时停帧；窗口隐藏时也停（Electron backgroundThrottling 关闭）
+      const paused = effDt <= 0
+      const hasVisible = active.length > 0 || spawnIndex < filtered.length
+      if ((paused && !hasVisible) || document.visibilityState === 'hidden') {
+        raf = 0
+        return
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && raf === 0) raf = requestAnimationFrame(tick)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
 
     return () => {
       cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       ro.disconnect()
     }
     // 依赖 items 引用：loadVideo 每次成功会替换新列表

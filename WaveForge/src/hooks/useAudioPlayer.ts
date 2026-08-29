@@ -1,6 +1,7 @@
 ﻿import { debugLog } from '../utils/debugLog'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { autoMixAnalysisService } from '../services/autoMixAnalysisService'
+import { isHlsUrl, attachAppleHls, detachAppleHls, getActiveHls } from '../services/appleHlsPlayer'
 import { planTransition, planTransitionV2 } from '../audio/transitionPlanner'
 import { TransitionRenderer } from '../audio/TransitionRenderer'
 import { createPlaybackTimeStore } from '../audio/playbackTimeStore'
@@ -52,6 +53,9 @@ export interface AudioGraphHandle {
   /** 最终输出增益节点（analyser 之后、destination 之前）：AirPlay 投送时置 0 静音本机，
    *  不影响 masterGain（采集点在其后，采集到完整声音投送给音箱） */
   outputGain?: GainNode
+  /** DG-LAB 立体声采集（analyser 输出之后、音效后信号）：左/右声道分析器（仅采集，不接 destination） */
+  leftAnalyserNode?: AnalyserNode
+  rightAnalyserNode?: AnalyserNode
 }
 
 interface DeckMetadata extends PreloadTrack {
@@ -206,6 +210,9 @@ export function useAudioPlayer(
   const onAudioGraphReadyRef = useRef(onAudioGraphReady)
   const volumeRef = useRef(DEFAULT_VOLUME)
   const transitionStateRef = useRef<TransitionState>('idle')
+  /** 看歌挂起（App 进出看歌时置位）：挂起期间引擎不准备/不启动任何自动过渡，
+   *  保证看歌期间歌曲不会因 automix 自动推进（切回仍是原歌），退出看歌时解除 */
+  const watchHoldRef = useRef(false)
   const transitionPlanRef = useRef<TransitionPlan | null>(null)
   // 过渡缓冲播放中标记：源曲 deck 静音保持播放（驱动 UI 时间线）时会先于缓冲 ended，
   // handleEnded 据此忽略提前的源曲 ended，交由缓冲 ended → handoff 接管。
@@ -239,6 +246,10 @@ export function useAudioPlayer(
   const masterGainRef = useRef<GainNode | null>(null)
   const analyserNodeRef = useRef<AnalyserNode | null>(null)
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null)
+  const leftAnalyserNodeRef = useRef<AnalyserNode | null>(null)
+  const rightAnalyserNodeRef = useRef<AnalyserNode | null>(null)
+  const [leftAnalyserNode, setLeftAnalyserNode] = useState<AnalyserNode | null>(null)
+  const [rightAnalyserNode, setRightAnalyserNode] = useState<AnalyserNode | null>(null)
   const transitionRendererRef = useRef<TransitionRenderer | null>(null)
   const gaplessIntegrationRef = useRef<GaplessIntegration | null>(null)
   // Gapless 首选无缝拼接控制器（独立模块，逻辑见 src/services/gapless/）
@@ -272,6 +283,16 @@ export function useAudioPlayer(
   const getStandbyAudio = useCallback(() => activePrimaryRef.current ? secondaryRef.current : primaryRef.current, [])
   const getActiveGain = useCallback(() => gainNodesRef.current[activePrimaryRef.current ? 0 : 1], [])
   const getStandbyGain = useCallback(() => gainNodesRef.current[activePrimaryRef.current ? 1 : 0], [])
+
+  // 专辑播放判定（三方案分流依据）：当前曲与下一曲属于同一专辑
+  // （albumId 都存在且相等）→ 专辑场景；否则为非专辑（普通列表）场景。
+  // 同专辑时即使 AutoMix 启用也优先走首尾拼接无缝方案（预热 20s + ended 拼接），
+  // AutoMix 智能过渡只接管非专辑场景。
+  const isAlbumPlayback = useCallback(() => {
+    const currentMeta = currentMetadataRef.current
+    const nextMeta = nextMetadataRef.current
+    return Boolean(currentMeta?.albumId && nextMeta?.albumId && currentMeta.albumId === nextMeta.albumId)
+  }, [])
 
   const setDeckGain = useCallback((gain: GainNode | null, audio: HTMLAudioElement | null, value: number) => {
     const next = Math.max(0, Math.min(1, value))
@@ -309,6 +330,25 @@ export function useAudioPlayer(
       context.createMediaElementSource(first).connect(firstGain).connect(master)
       context.createMediaElementSource(second).connect(secondGain).connect(master)
       master.connect(analyser).connect(outputGain).connect(context.destination)
+      // DG-LAB 立体声采集：ChannelSplitter 从 **master** 直接取左右声道。
+      // master 必然参与渲染（避免分析器挂「悬空尾」不被处理导致恒 0）。
+      // 体感强度仍来自 analyser（效果链后）；左右声像采用源声道（EQ/压缩类效果不影响声像）。
+      const splitter = context.createChannelSplitter(2)
+      const leftAnalyser = context.createAnalyser()
+      const rightAnalyser = context.createAnalyser()
+      leftAnalyser.fftSize = 1024
+      leftAnalyser.smoothingTimeConstant = 0.72
+      rightAnalyser.fftSize = 1024
+      rightAnalyser.smoothingTimeConstant = 0.72
+      const silentL = context.createGain()
+      const silentR = context.createGain()
+      silentL.gain.value = 0
+      silentR.gain.value = 0
+      master.connect(splitter)
+      splitter.connect(leftAnalyser, 0)
+      splitter.connect(rightAnalyser, 1)
+      leftAnalyser.connect(silentL).connect(context.destination)
+      rightAnalyser.connect(silentR).connect(context.destination)
       master.gain.value = volumeRef.current
       firstGain.gain.value = activePrimaryRef.current ? 1 : 0
       secondGain.gain.value = activePrimaryRef.current ? 0 : 1
@@ -319,6 +359,10 @@ export function useAudioPlayer(
       masterGainRef.current = master
       analyserNodeRef.current = analyser
       setAnalyserNode(analyser)
+      leftAnalyserNodeRef.current = leftAnalyser
+      rightAnalyserNodeRef.current = rightAnalyser
+      setLeftAnalyserNode(leftAnalyser)
+      setRightAnalyserNode(rightAnalyser)
       // 应用用户选择的音频输出设备（AudioContext.setSinkId，整体切换输出）
       void import('../services/audioOutput').then(({ applyStoredOutputDevice, registerActiveAudioContext }) => {
         registerActiveAudioContext(context)
@@ -332,7 +376,7 @@ export function useAudioPlayer(
       }
       
       // 通知外部音效引擎：音频图已就绪（在 masterGain 与 analyser 之间插入效果链）
-      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain })
+      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain, leftAnalyserNode: leftAnalyser, rightAnalyserNode: rightAnalyser })
       
       if (context.state === 'suspended') await context.resume().catch(() => undefined)
     } catch (error) {
@@ -342,7 +386,11 @@ export function useAudioPlayer(
       gainNodesRef.current = [null, null]
       masterGainRef.current = null
       analyserNodeRef.current = null
+      leftAnalyserNodeRef.current = null
+      rightAnalyserNodeRef.current = null
       setAnalyserNode(null)
+      setLeftAnalyserNode(null)
+      setRightAnalyserNode(null)
     }
   }, [])
 
@@ -512,6 +560,16 @@ export function useAudioPlayer(
     
     if (transitionStateRef.current === 'running-transition' || transitionStartingRef.current) {
       debugLog('⚠️ [Transition] 已经在进行过渡中，跳过')
+      return
+    }
+    if (watchHoldRef.current) {
+      // 看歌挂起：即使已武装的定时器漏网，过渡启动也被拦下（提交=切歌，看歌期间禁止）
+      debugLog('⏸ [Transition] 看歌挂起：忽略 startTransition')
+      return
+    }
+    // Apple 原生 HLS：过渡（crossfade/gapless/automix）一律不执行，自然 ended 后切下一首
+    if (getActiveHls(getActiveAudio())) {
+      debugLog('⏸ [Transition] 当前曲目为 Apple 原生 HLS：跳过过渡，切歌时直连加载')
       return
     }
     
@@ -1074,6 +1132,20 @@ export function useAudioPlayer(
   }, [commitTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, runFallbackGainAnimation, setDeckGain, setTransitionState])
 
   const prepareAutoMix = useCallback(async () => {
+    // 看歌挂起（见 setWatchHold）：看歌期间引擎时间线静止，任何自动过渡的“准备→提交”
+    // 都不允许发生——否则已武装的过渡会在看歌期间照常 commit → 切回时已经是下一首
+    //（用户实测：Shelter 进看歌约 1.8s 后自动切到下一曲）
+    if (watchHoldRef.current) {
+      debugLog('⏸ [AutoMix] 看歌挂起：跳过 prepareAutoMix')
+      return
+    }
+    // Apple 原生 HLS 曲目（当前 deck 由 hls.js 接管）：v1 不做任何自动混音——
+    // HLS 时长/分片时序与 DSP 混音窗口不兼容，强混会导致过渡过早/节奏错乱。
+    // 该曲目播完后自然 ended → 上层直接切下一首。
+    if (getActiveHls(getActiveAudio())) {
+      debugLog('⏸ [AutoMix] 当前曲目为 Apple 原生 HLS：跳过自动混音（v1 不支持 HLS 混音）')
+      return
+    }
     const current = currentMetadataRef.current
     const next = nextMetadataRef.current
     
@@ -1336,6 +1408,12 @@ export function useAudioPlayer(
   }, [getActiveAudio, setTransitionState])
 
   const prepareGaplessTransition = useCallback(async () => {
+    // 同 AutoMix：Apple 原生 HLS 曲目不参与无缝衔接（HLS 时序由 hls.js 托管，
+    // 与专辑拼接/Cuefield 预测不兼容）
+    if (getActiveHls(getActiveAudio())) {
+      debugLog('⏸ [Gapless] 当前曲目为 Apple 原生 HLS：跳过无缝衔接准备')
+      return
+    }
     const current = currentMetadataRef.current
     const next = nextMetadataRef.current
     
@@ -1472,7 +1550,7 @@ export function useAudioPlayer(
       getStandbyAudio,
       getStandbyGain,
       setDeckGain,
-      isGaplessEnabled: () => gaplessRef.current.enabled,
+      isGaplessEnabled: () => gaplessRef.current.enabled || (autoMixRef.current.enabled && isAlbumPlayback()),
       isTransitionRunning: () => transitionStateRef.current === 'running-transition',
       hasActiveTransition: () => Boolean(gaplessIntegrationRef.current?.hasActiveTransition()),
       getRevision: () => transitionExecutionRevisionRef.current,
@@ -1490,13 +1568,11 @@ export function useAudioPlayer(
       const remaining = (active.duration || 0) - active.currentTime
       const standby = getStandbyAudio()
       const plan = transitionPlanRef.current
-      // 专辑播放检测（三方案分流依据）：当前曲与下一曲属于同一专辑
-      // （albumId 都存在且相等）→ 专辑场景；否则为非专辑（普通列表）场景。
-      const currentMeta = currentMetadataRef.current
-      const nextMeta = nextMetadataRef.current
-      const albumPlayback = Boolean(currentMeta?.albumId && nextMeta?.albumId && currentMeta.albumId === nextMeta.albumId)
+      // 专辑播放检测（三方案分流依据）——同专辑时即使 AutoMix 启用也优先走首尾拼接，
+      // AutoMix 过渡（timeupdate 触发与预分析）只接管非专辑场景。
+      const albumPlayback = isAlbumPlayback()
       if (standby?.src && transitionStateRef.current !== 'running-transition') {
-        if (autoMixRef.current.enabled && plan && (transitionStateRef.current === 'armed' || transitionStateRef.current === 'playing')) {
+        if (autoMixRef.current.enabled && !albumPlayback && plan && (transitionStateRef.current === 'armed' || transitionStateRef.current === 'playing')) {
           if (active.currentTime >= plan.sourceStartTime) {
             debugLog('🎬 [AutoMix] 到达过渡点！')
             debugLog('   当前时间:', active.currentTime.toFixed(2), 's')
@@ -1508,7 +1584,7 @@ export function useAudioPlayer(
         } else if (crossfadeRef.current.enabled && remaining <= Math.max(0.25, crossfadeRef.current.duration)) {
           debugLog('🎬 [Crossfade] 到达交叉淡化点，剩余时间:', remaining.toFixed(2), 's')
           void startTransition('fixed-crossfade')
-        } else if (gaplessRef.current.enabled && Number.isFinite(remaining)) {
+        } else if ((gaplessRef.current.enabled || (autoMixRef.current.enabled && albumPlayback)) && Number.isFinite(remaining)) {
           // Gapless 三方案分流已抽离到 src/services/gapless/seamlessJoinController.ts：
           //   remaining ∈ (1, 20] 且专辑 → 预热缓存前 10s（保证首选拼接就绪）
           //   remaining ∈ (0, 1]     → scheduleBoundary（首选直接拼接 / 备选 60ms 淡入淡出）
@@ -1564,6 +1640,14 @@ export function useAudioPlayer(
       
       if (isLoadingRef.current || event.currentTarget !== getActiveAudio()) return
 
+      // Apple 原生 HLS：不参与无缝拼接/过渡提交，end 后直接置 idle 交上层切歌
+      // （HLS 曲目没有可用的待机载体拼接，跳过可避免接到错误/过早的下一首）
+      if (getActiveHls(getActiveAudio())) {
+        debugLog('🏁 [Event] 当前曲目为 Apple 原生 HLS：置空过渡态，交上层切歌')
+        setTransitionState('idle', { isPlaying: false, ended: true, seamlessTransition: false, transitioning: false })
+        return
+      }
+
       // 过渡缓冲播放期间（AI 长混音等），源曲 deck 保持播放以驱动 UI 时间线，
       // 会先于缓冲自然播完触发 ended——此时不能提前提交（缓冲仍是权威音频源），
       // 由缓冲 ended → handoff 精确接管。
@@ -1594,7 +1678,7 @@ export function useAudioPlayer(
         debugLog('✅ [Event] 过渡正在进行中，提交过渡')
         const strategy = transitionPlanRef.current?.strategy || (crossfadeRef.current.enabled ? 'fixed-crossfade' : 'gapless')
         commitTransition(strategy, standby.currentTime, transitionExecutionRevisionRef.current)
-      } else if (standby?.src && gaplessRef.current.enabled) {
+      } else if (standby?.src && (gaplessRef.current.enabled || (autoMixRef.current.enabled && isAlbumPlayback()))) {
         debugLog('⏭️ [Event] 待机音频就绪且无缝衔接已启用')
         if (gaplessIntegrationRef.current) {
           // 使用 Cuefield/Album Gapless 执行过渡
@@ -1631,6 +1715,9 @@ export function useAudioPlayer(
 
     return () => {
       preparationAbortRef.current?.abort()
+      // 卸载时销毁可能挂载的 Apple HLS 实例，释放 MSE 与 EME 会话
+      detachAppleHls(primary)
+      detachAppleHls(secondary)
       if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current)
       if (visualSwitchTimerRef.current !== null) window.clearTimeout(visualSwitchTimerRef.current)
       preloadReadyCleanupRef.current?.()
@@ -1667,6 +1754,8 @@ export function useAudioPlayer(
       void audioContextRef.current?.close()
       audioContextRef.current = null
       analyserNodeRef.current = null
+      leftAnalyserNodeRef.current = null
+      rightAnalyserNodeRef.current = null
       gainNodesRef.current = [null, null]
       masterGainRef.current = null
     }
@@ -1683,6 +1772,12 @@ export function useAudioPlayer(
 
   useEffect(() => {
     if (!nextMetadataRef.current?.url) return
+    // Apple 原生 HLS 曲目：任何设置变更都不允许武装过渡（见 ready/prepareAutoMix
+    // 的同类守卫），保持 idle 由上层自然切歌
+    if (getActiveHls(getActiveAudio())) {
+      setTransitionState('idle', { isPlaying: false, ended: false, seamlessTransition: false, transitioning: false })
+      return
+    }
     cancelScheduledTransition('transition settings changed')
     if (autoMixSettings.enabled) {
       void prepareAutoMix()
@@ -1722,6 +1817,12 @@ export function useAudioPlayer(
     const standby = getStandbyAudio()
     if (!standby || !track.url) {
       debugLog('❌ [Preload] 缺少待机音频元素或 URL')
+      return
+    }
+    // Apple Music 原生 HLS 音源无法在待机 deck 预加载（hls.js 只在 loadAndPlay
+    // 的主 deck 上接管）；跳过预载，切歌时直接装载（保证不产生无谓的媒体错误）
+    if (isHlsUrl(track.url)) {
+      debugLog('🛑 [Preload] HLS 音源跳过待机预载（切歌时直连）')
       return
     }
     const existingNext = nextMetadataRef.current
@@ -1770,9 +1871,20 @@ export function useAudioPlayer(
       if (preloadReadyCleanupRef.current === cleanupReady) preloadReadyCleanupRef.current = null
       if (!isCurrentPreload()) return
       debugLog('🎵 [Preload] 预加载歌曲就绪')
-      if (autoMixRef.current.enabled) {
+      // Apple 原生 HLS 曲目（当前 deck 由 hls.js 接管）：不武装任何过渡。
+      // 待机预载的是网易云/QQ 载体版，仅用于切歌时可能的回退；当前歌自然
+      // ended 后由上层直接加载下一首（届时自行决策原生/载体）。
+      if (getActiveHls(getActiveAudio())) {
+        debugLog('⏸ [Preload] 当前曲目为 Apple 原生 HLS：不武装过渡')
+        setTransitionState('idle', { isPlaying: false, ended: false, seamlessTransition: false, transitioning: false })
+        return
+      }
+      if (autoMixRef.current.enabled && !isAlbumPlayback()) {
         debugLog('🎵 [Preload] autoMix 已启用，调用 prepareAutoMix()')
         void prepareAutoMix()
+      } else if (autoMixRef.current.enabled && isAlbumPlayback()) {
+        debugLog('🎵 [Preload] 同专辑 + AutoMix：跳过智能过渡分析，走首尾拼接无缝方案')
+        setTransitionState('armed', { transitionStrategy: 'gapless' })
       }
       else if (gaplessRef.current.enabled && gaplessIntegrationRef.current) {
         debugLog('🎵 [Preload] 准备无缝衔接，调用 GaplessIntegration')
@@ -1841,6 +1953,7 @@ export function useAudioPlayer(
       active.currentTime = 0
       // 先显式卸载旧资源。仅覆盖 src 会让 Chromium 的旧媒体管线等待 GC，
       // 快速切歌时会形成明显的阶梯式内存增长。
+      detachAppleHls(active) // 若上一首是 Apple HLS，先销毁其 MSE 管线
       active.removeAttribute('src')
       active.load()
       // 重置 GaplessIntegration，停止所有预加载的音频
@@ -1848,8 +1961,8 @@ export function useAudioPlayer(
         debugLog('🧹 [LoadAndPlay] 重置 GaplessIntegration')
         gaplessIntegrationRef.current.reset()
       }
-      active.src = url
-      active.preload = 'auto'
+      const appleHls = (track as { appleHls?: import('../services/applePlayback').AppleNativeStream } | undefined)?.appleHls
+      const hlsMode = Boolean(appleHls) && isHlsUrl(url)
       active.playbackRate = 1 // post-settle 残留防护：新歌一律原速
       currentMetadataRef.current = { url, ...track }
       setAudioElement(active)
@@ -1859,34 +1972,43 @@ export function useAudioPlayer(
       }
       setDeckGain(getActiveGain(), active, 1)
       setDeckGain(getStandbyGain(), standby, 0)
-      debugLog('⏳ [LoadAndPlay] 加载音频文件...')
-      await new Promise<void>((resolve, reject) => {
-        let settled = false
-        let timeoutId = 0
-        const cleanup = () => {
-          active.removeEventListener('canplay', canPlay)
-          active.removeEventListener('error', failed)
-          if (timeoutId) window.clearTimeout(timeoutId)
-          if (currentLoadWaitCancelRef.current === cancelled) currentLoadWaitCancelRef.current = null
-        }
-        const settle = (callback: () => void) => {
-          if (settled) return
-          settled = true
-          cleanup()
-          callback()
-        }
-        const canPlay = () => settle(resolve)
-        const failed = () => settle(() => reject(active.error || new Error('media load failed')))
-        const cancelled = () => settle(resolve)
-        currentLoadWaitCancelRef.current = cancelled
-        active.addEventListener('canplay', canPlay, { once: true })
-        active.addEventListener('error', failed, { once: true })
-        timeoutId = window.setTimeout(
-          () => settle(() => reject(new Error('media load timed out'))),
-          CURRENT_MEDIA_LOAD_TIMEOUT_MS,
-        )
-        active.load()
-      })
+      if (hlsMode) {
+        // Apple Music 原生 HLS（Widevine EME）：hls.js 接管 src 与缓冲，
+        // attachAppleHls 自行等待首个分片就绪（含 license 协商），随后照常 play()
+        debugLog('📡 [LoadAndPlay] Apple HLS 原生音源，由 hls.js 接管')
+        await attachAppleHls(active, appleHls!)
+      } else {
+        debugLog('⏳ [LoadAndPlay] 加载音频文件...')
+        active.src = url
+        active.preload = 'auto'
+        await new Promise<void>((resolve, reject) => {
+          let settled = false
+          let timeoutId = 0
+          const cleanup = () => {
+            active.removeEventListener('canplay', canPlay)
+            active.removeEventListener('error', failed)
+            if (timeoutId) window.clearTimeout(timeoutId)
+            if (currentLoadWaitCancelRef.current === cancelled) currentLoadWaitCancelRef.current = null
+          }
+          const settle = (callback: () => void) => {
+            if (settled) return
+            settled = true
+            cleanup()
+            callback()
+          }
+          const canPlay = () => settle(resolve)
+          const failed = () => settle(() => reject(active.error || new Error('media load failed')))
+          const cancelled = () => settle(resolve)
+          currentLoadWaitCancelRef.current = cancelled
+          active.addEventListener('canplay', canPlay, { once: true })
+          active.addEventListener('error', failed, { once: true })
+          timeoutId = window.setTimeout(
+            () => settle(() => reject(new Error('media load timed out'))),
+            CURRENT_MEDIA_LOAD_TIMEOUT_MS,
+          )
+          active.load()
+        })
+      }
       if (loadRevision !== currentLoadRevisionRef.current) return false
       debugLog('▶️ [LoadAndPlay] 开始播放...')
       await active.play()
@@ -1895,8 +2017,8 @@ export function useAudioPlayer(
       debugLog('✅ [LoadAndPlay] 播放成功')
       setTransitionState('playing', { isPlaying: true, duration: active.duration || track?.duration || 0, ended: false })
       
-      // Prepare auto mix for next track if available
-      if (nextMetadataRef.current?.url && autoMixRef.current.enabled) {
+      // Prepare auto mix for next track if available（同专辑优先首尾拼接，跳过 AutoMix 分析）
+      if (nextMetadataRef.current?.url && autoMixRef.current.enabled && !isAlbumPlayback()) {
         debugLog('🎵 [LoadAndPlay] 检测到下一首歌曲且 autoMix 已启用，调用 prepareAutoMix()')
         void prepareAutoMix()
       } else {
@@ -1985,7 +2107,9 @@ export function useAudioPlayer(
     if (!active) return
     const wasPlaying = !active.paused
     cancelScheduledTransition('seek changed transition timing')
-    active.currentTime = Math.max(0, Math.min(time, active.duration || 0))
+    // 元数据未加载（duration 未知）时直接定位，不做 0 上限裁剪，避免拖动归零
+    const duration = Number.isFinite(active.duration) && active.duration > 0 ? active.duration : Infinity
+    active.currentTime = Math.max(0, Math.min(time, duration))
     // seek 越过已计划的过渡点后，旧计划已不可用（播放过期过渡会卡住/错位）：
     // 清空计划，让 prepareAutoMix 从当前位置重新规划（v1 行为：立刻可从当前进度 automix）。
     const plan = transitionPlanRef.current
@@ -2062,7 +2186,14 @@ export function useAudioPlayer(
           const cleanup = () => {
             target.removeEventListener('canplay', ready)
             target.removeEventListener('error', failed)
+            if (timeoutId !== null) window.clearTimeout(timeoutId)
           }
+          // 无缝接管时 CDN 卡住/加载被新播放打断可能永远不触发 canplay → 超时放弃并回退普通加载
+          let timeoutId: number | null = window.setTimeout(() => {
+            timeoutId = null
+            cleanup()
+            reject(new Error('adopt external audio timed out'))
+          }, 12000)
           target.addEventListener('canplay', ready, { once: true })
           target.addEventListener('error', failed, { once: true })
         })
@@ -2170,10 +2301,19 @@ export function useAudioPlayer(
     setVolume,
     preloadNext,
     cancelTransition: cancelScheduledTransition,
+    /** 看歌挂起开关：true=引擎进入"看歌时间线"——取消在途过渡且期间禁止 prepare/启动
+     *  自动过渡（看歌中歌曲不被 automix 推进）；false=恢复正常（引擎可重新为当前歌准备） */
+    setWatchHold: (hold: boolean) => {
+      if (hold === watchHoldRef.current) return
+      watchHoldRef.current = hold
+      if (hold) cancelScheduledTransition('enter watch mode (hold)')
+    },
     getAudioElement: getActiveAudio,
     audioElement,
     playbackTimeStore,
     analyserNode,
+    leftAnalyserNode,
+    rightAnalyserNode,
     nextAudioElement: getStandbyAudio(),
     setPlayAtCallback,
     resetGaplessIntegration,

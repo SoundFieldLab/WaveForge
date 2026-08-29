@@ -102,15 +102,15 @@ describe('scoreCandidate（候选打分）', () => {
     expect(shouldAutoPlay(official)).toBe(true)
   })
 
-  it('私藏馆类高播放搬运：匹配但无官方信号 → 不自动播放，进候选确认', () => {
+  it('私藏馆类高播放搬运：无官方信号 → 播放加权推高分数（15172e1 行为，实测接受自动播放）', () => {
     const remaster = scoreCandidate(
       video({ title: '【私藏馆】周杰伦《稻香》超治愈神作！', duration: 223, play: 9_260_000, author: '音乐私藏馆' }),
       ctx,
       { officialVerifyType: 0 },
     )
     expect(remaster.score).toBeGreaterThanOrEqual(150)
-    expect(remaster.score).toBeLessThan(230)
-    expect(shouldAutoPlay(remaster)).toBe(false)
+    // 播放加成 ×13 不封顶后，926 万播放足以越过 standard 档 230 纯分数线
+    expect(shouldAutoPlay(remaster)).toBe(true)
   })
 
   it('教学/翻弹类：负向标记重罚，不自动播放', () => {
@@ -151,7 +151,8 @@ describe('scoreCandidate（候选打分）', () => {
   it('搜索排名加权：靠前的结果更可信', () => {
     const top = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { rank: 0 })
     const bottom = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { rank: 25 })
-    expect(top.score - bottom.score).toBeCloseTo(12)
+    // 权重从 0.8 降至 0.5（干净标题的低播放搬运常排首位，不应压过高播放真 MV）
+    expect(top.score - bottom.score).toBeCloseTo(7.5)
   })
 
   it('官方频道关键词：作者名命中唱片公司/官方账号 → 加分', () => {
@@ -241,7 +242,8 @@ describe('scoreCandidate（候选打分）', () => {
       lisaCtx,
     )
     const plain = scoreCandidate(video({ title: 'LiSA 紅蓮華 MV', duration: 239, play: 100_000 }), lisaCtx)
-    expect(themeSong.score - plain.score).toBe(24) // +12 主题曲 +12 加长版
+    // +12 主题曲 +12 加长版 +25「加长版+歌手+高播放」完整正片本体加成
+    expect(themeSong.score - plain.score).toBe(49)
   })
 
   it('OP/ED 标记按词边界加分（动漫主题曲）', () => {
@@ -288,7 +290,9 @@ describe('scoreCandidate（候选打分）', () => {
     const practice = scoreCandidate(video({ title: 'ステラ leo/need 五人练舞镜面自用', duration: 200, play: 100_000 }), ctx2)
     const mv = scoreCandidate(video({ title: 'ステラ (Stella) Leo/need 2DMV', duration: 200, play: 100_000 }), ctx2)
     expect(practice.score).toBeLessThan(mv.score)
-    expect(practice.score).toBeLessThan(200)
+    // 播放加权后整体水位上涨（10 万播放 +65），但练舞稿仍压在自动播放线 230 之下
+    expect(practice.score).toBeLessThan(230)
+    expect(shouldAutoPlay(practice)).toBe(false)
   })
 
   it('短歌名 + 官方标记 + 无歌手 → 张冠李戴重罚（王艺瑾-喜欢你 场景）', () => {
@@ -458,5 +462,80 @@ describe('songKeyOf（歌曲缓存键）', () => {
   it('无平台 id 用标题+歌手规范化键', () => {
     const key = songKeyOf({ songTitle: '稻香', artists: ['周杰伦'], songDuration: 223 })
     expect(key).toBe('t:稻香:周杰伦')
+  })
+})
+
+describe('货不对板识别（同名不同歌手，如日语曲撞中文同名曲）', () => {
+  // 真实案例：NIKIE(ニキー) 的日语曲「春夏秋冬 (Seasons)」曾被匹配到
+  // 张国荣的高播放现场版（37.9万播放），而正确的是 sumika 的 MAD 版（2.4万播放）
+  const jCtx: MatchContext = {
+    songTitle: '春夏秋冬 (Seasons)',
+    artists: ['NIKIE (ニキー)'],
+    songDuration: 280,
+    platform: 'netease',
+    id: 999,
+  }
+
+  it('「他人《歌名》」+ 现场标记的高播放视频应排到正确候选之下', () => {
+    const leslieLive = scoreCandidate(
+      video({
+        title: '【4K60FPS】张国荣Leslie《春夏秋冬》2000年热情演出现场',
+        author: '荣迷俱乐部',
+        duration: 285,
+        play: 379000,
+      }),
+      jCtx,
+      { rank: 0 },
+    )
+    const sumikaEd = scoreCandidate(
+      video({
+        title: '【4KMAD|HIRES96kHz/24Bit】春夏秋冬-sumika我想吃掉你的胰脏ED',
+        author: 'MAD制作者',
+        duration: 285,
+        play: 24000,
+      }),
+      jCtx,
+      { rank: 1 },
+    )
+    expect(leslieLive.score).toBeLessThan(sumikaEd.score)
+  })
+
+  it('书名号前缀是他人名时显著降分（同条件下与无前缀标题对比）', () => {
+    const withPrefix = scoreCandidate(
+      video({ title: '张国荣《春夏秋冬》', author: 'up主', duration: 280, play: 379000 }),
+      jCtx,
+      {},
+    )
+    const noPrefix = scoreCandidate(
+      video({ title: '春夏秋冬', author: 'up主', duration: 280, play: 24000 }),
+      jCtx,
+      {},
+    )
+    expect(withPrefix.score).toBeLessThan(noPrefix.score)
+  })
+
+  it('书名号前缀含本曲歌手时不罚（周杰伦《稻香》对周杰伦歌曲）', () => {
+    const s = scoreCandidate(
+      video({ title: '【官方】周杰伦《稻香》MV', author: '杰威尔音乐', duration: 223, play: 1000000 }),
+      ctx,
+      {},
+    )
+    expect(s.signals.hasArtist).toBe(true)
+    // 无歌手惩罚链不应触发：分数应明显高于无歌手命中基线（100-35-15+正分）
+    expect(s.score).toBeGreaterThan(120)
+  })
+
+  it('无歌手命中的现场版比同条件普通标题分低（别人的 live）', () => {
+    const live = scoreCandidate(
+      video({ title: '春夏秋冬 现场版', author: 'up主', duration: 280, play: 300000 }),
+      jCtx,
+      {},
+    )
+    const normal = scoreCandidate(
+      video({ title: '春夏秋冬', author: 'up主', duration: 280, play: 300000 }),
+      jCtx,
+      {},
+    )
+    expect(live.score).toBeLessThan(normal.score)
   })
 })

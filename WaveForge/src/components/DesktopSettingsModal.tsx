@@ -1,3 +1,7 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Image, Monitor, Upload, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CheckCircle2, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered } from 'lucide-react'

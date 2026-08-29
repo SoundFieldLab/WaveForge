@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { spawn, execFile } from 'child_process'
 import { build, createServer, preview } from 'vite'
 import electron from 'electron'
 import { fileURLToPath } from 'url'
@@ -97,6 +97,79 @@ async function waitForPort(port, timeoutMs = 10000) {
     await new Promise(resolve => setTimeout(resolve, 250))
   }
 
+  return false
+}
+
+// ---- 端口占用识别与残留进程清理 ----------------------------------------
+// 端口被占用不等于服务可用：之前有残留的 vite dev server（他人/其他会话 `npm run dev`
+// 留下、或本启动器崩溃后的孤儿）抢占 3001，导致 local API server 起不来，
+// 渲染端所有 /api/* 请求打到 Vite 上返回 HTML → 登录/扫码/账号信息全部失败。
+// 这里先 HTTP 验证端口上是否真是 API 服务，再决定是否需要清理。
+const ps = (args, opts = {}) => new Promise(resolve => {
+  execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ...args], { windowsHide: true, timeout: 6000, ...opts }, (error, stdout) => {
+    if (error) return resolve(null)
+    resolve(String(stdout || '').trim())
+  })
+})
+
+/** 端口上是否真的是 local API server：请求其本地 JSON 端点，校验响应为 JSON */
+async function isLocalApiServerHealthy() {
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 1500)
+    const res = await fetch('http://127.0.0.1:3001/api/qq/cookie/status', { signal: controller.signal })
+    clearTimeout(timer)
+    if (!res.ok) return false
+    const contentType = res.headers.get('content-type') || ''
+    if (!contentType.includes('application/json')) return false
+    const body = await res.json()
+    return body && typeof body === 'object'
+  } catch {
+    return false
+  }
+}
+
+/** 监听指定端口的 PID（仅 State=Listen 的进程） */
+async function getPidOnPort(port) {
+  const out = await ps([`Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -First 1`])
+  const pid = Number((out || '').trim())
+  return Number.isInteger(pid) && pid > 0 ? pid : null
+}
+
+/** 进程命令行是否为「本项目残留的 dev 进程」（vite dev server / local-server / python 服务） */
+function isWaveForgeDevLeftover(commandLine) {
+  if (!commandLine) return false
+  // 统一为正斜杠比较，避免 Windows 命令行的反斜杠/正斜杠混用误判
+  const normalized = commandLine.replace(/[\\/]+/g, '/')
+  const root = projectRoot.replace(/[\\/]+/g, '/')
+  if (!normalized.includes(root)) return false
+  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py/.test(normalized)
+}
+
+async function killProcess(pid) {
+  await ps([`Stop-Process -Id ${pid} -Force -ErrorAction SilentlyContinue`])
+}
+
+/**
+ * 若端口被非 API 服务的残留 dev 进程占用，精确清理后返回 true；
+ * 占用者不是本项目残留进程（可能是其他应用）则返回 false 并提示。
+ */
+async function freePortIfHijacked(port, serviceName) {
+  const pid = await getPidOnPort(port)
+  if (!pid) return true // 端口已空闲，无需处理
+
+  const cmdline = await ps([`(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`])
+  if (isWaveForgeDevLeftover(cmdline)) {
+    console.warn(`[dev] 端口 ${port} 被残留的 WaveForge dev 进程(PID ${pid})占用，正在清理…`)
+    await killProcess(pid)
+    // 等端口真正释放
+    for (let i = 0; i < 20; i++) {
+      if (!(await isPortOpen(port))) return true
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+    return true
+  }
+  console.error(`[dev] 端口 ${port} 被其他进程(PID ${pid})占用，无法启动 ${serviceName}。请手动关闭占用该端口的程序后重试。`)
   return false
 }
 
@@ -214,10 +287,15 @@ async function startDev() {
 
   const startAPI = async () => {
     if (await isPortOpen(3001)) {
-      console.log('Local API server already running on http://localhost:3001')
-      return null
+      if (await isLocalApiServerHealthy()) {
+        console.log('Local API server already running on http://localhost:3001')
+        return null
+      }
+      // 端口被占但响应不是 API 服务（典型：残留 vite dev server 返回 HTML）→ 清理后重启
+      console.warn('Port 3001 is occupied but does not respond as the local API server; trying to reclaim it…')
+      await freePortIfHijacked(3001, 'Local API Server')
     }
-    
+
     console.log('Starting Local API Server...')
     const apiProc = spawn(
       process.execPath,
@@ -245,6 +323,11 @@ async function startDev() {
 
   const startRendererServer = async () => {
     const useLiveRenderer = process.env.WAVEFORGE_LIVE_UI === '1'
+
+    // 3000 是渲染服务专用端口：被残留的 vite dev server 占用会因 strictPort 直接失败
+    if (await isPortOpen(3000)) {
+      await freePortIfHijacked(3000, 'renderer server')
+    }
 
     if (useLiveRenderer) {
       logStartup('Creating live Vite renderer server')

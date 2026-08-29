@@ -219,8 +219,9 @@ function axisImages(coord: number, dim: number, order: number): Array<[number, n
 /** 完整房间模拟（§4.5）：早期反射 + FDN。由后端 setConfig 时创建/重建（fresh 状态）。 */
 export class RoomSim {
   private readonly fs: number
-  /** 房间混合量（config.roomAmount；≤0 或 off 时旁路） */
-  private readonly roomAmount: number
+  /** 房间混合量（config.roomAmount；≤0 或 off 时旁路）——可变：签名不变复用实例时经
+   *  setAmount 热更新（避免重建截断 FDN 混响尾），构造后由后端按配置维护 */
+  private roomAmount: number
   private readonly active: boolean
   private readonly speakerCount: number
   private readonly states: SpeakerRoomState[] = []
@@ -302,6 +303,15 @@ export class RoomSim {
       })
     }
     this.fdn = new FdnState(fs, params.rt60)
+  }
+
+  /**
+   * 热更新房间混合量（0..1 钳位）：房间签名（预设+扬声器几何+阶数）不变时由后端
+   * 复用实例调用——重建会瞬间截断 FDN 混响尾与早期反射历史（可听突变）。
+   * active 判定（构造时）不随 amount 热更新：off↔on 切换由后端重建实例表达。
+   */
+  setAmount(v: number): void {
+    this.roomAmount = Math.min(1, Math.max(0, v))
   }
 
   /** 每块开始时零化早期总线（须早于任何 early() 调用；热路径零分配） */

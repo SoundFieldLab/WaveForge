@@ -42,6 +42,32 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
     const fetchSimilar = async () => {
       // Apple 无相似歌曲接口（入口已按能力表隐藏，此处兜底）
       if (song.platform === 'apple') return
+      // 汽水：无相似歌曲接口，用「同歌手热门 + 每日推荐」组合做相关探索
+      if (song.platform === 'soda') {
+        const fetchSimilarSoda = async () => {
+          try {
+            const soda = await import('../services/sodaService')
+            const artistName = song.artists?.[0]?.name || ''
+            const [artistSongs, daily] = await Promise.all([
+              artistName ? soda.fetchSodaArtistSongs(artistName, 20) : Promise.resolve([] as Song[]),
+              soda.fetchSodaDaily().catch(() => ({ songs: [] as Song[], personalized: false })),
+            ])
+            const seen = new Set([String(song.mid || song.id)])
+            const merged: Song[] = []
+            for (const candidate of [...artistSongs, ...daily.songs]) {
+              const key = String(candidate.mid || candidate.id)
+              if (!key || seen.has(key)) continue
+              seen.add(key)
+              merged.push(candidate)
+              if (merged.length >= 30) break
+            }
+            if (!cancelled && merged.length) setSongs(merged)
+          } catch { /* ignore */ }
+          if (!cancelled) setLoading(false)
+        }
+        void fetchSimilarSoda()
+        return
+      }
       try {
         const id = song.platform === 'qq' ? String(song.id || song.mid) : String(song.id)
         const data = await getSimilarSongs(id, (song.platform || 'netease') as 'netease' | 'qq')

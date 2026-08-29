@@ -11,7 +11,7 @@ interface QuickSettingsProps {
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
 type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
-type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'video'
+type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'video' | 'pv'
 
 // 大体积设置面板（约 900 行 JSX）：props 均为原语（forceClose/playerTheme/isPureMusic），
 // memo 让 1Hz 播放重渲染（经 ImmersiveControls 传递）不再连带重渲染整个面板
@@ -62,7 +62,7 @@ export default memo(function QuickSettings({
       }
 
       const saved = localStorage.getItem('lyricDisplayMode')
-      setLyricDisplayMode(saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' ? saved : 'modern')
+      setLyricDisplayMode(saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' || saved === 'pv' ? saved : 'modern')
     }
 
     window.addEventListener('lyricDisplayModeChanged', handleLyricDisplayModeChange)
@@ -93,6 +93,11 @@ export default memo(function QuickSettings({
   const [lyricGlow, setLyricGlow] = useState(() => {
     const saved = localStorage.getItem('lyricGlow')
     return saved !== null ? JSON.parse(saved) : true
+  })
+
+  const [lyricScrollTransition, setLyricScrollTransition] = useState<'classic' | 'amodern'>(() => {
+    const saved = localStorage.getItem('lyricScrollTransitionStyle')
+    return saved === 'amodern' ? 'amodern' : 'classic'
   })
 
   const [coverPulseEnabled, setCoverPulseEnabled] = useState(() => {
@@ -143,8 +148,10 @@ export default memo(function QuickSettings({
 
   const [lyricDisplayMode, setLyricDisplayMode] = useState<LyricDisplayMode>(() => {
     const saved = localStorage.getItem('lyricDisplayMode')
-    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' ? saved : 'modern'
+    return saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'video' || saved === 'pv' ? saved : 'modern'
   })
+
+  // PV 歌词模式切换入口（全自动编排，无设置面板）
 
   const [modernAudioVisualizerEnabled, setModernAudioVisualizerEnabled] = useState(() => {
     const saved = localStorage.getItem('modernAudioVisualizerEnabled')
@@ -189,6 +196,12 @@ export default memo(function QuickSettings({
     setLyricGlow(newValue)
     localStorage.setItem('lyricGlow', JSON.stringify(newValue))
     window.dispatchEvent(new Event('lyricGlowChanged'))
+  }
+
+  const handleLyricScrollTransitionChange = (style: 'classic' | 'amodern') => {
+    setLyricScrollTransition(style)
+    localStorage.setItem('lyricScrollTransitionStyle', style)
+    window.dispatchEvent(new CustomEvent('lyricScrollTransitionStyleChanged', { detail: style }))
   }
 
   const handleCoverPulseToggle = () => {
@@ -893,6 +906,54 @@ export default memo(function QuickSettings({
                             </div>
                           </div>
                         )}
+
+                        <div className="flex flex-col gap-2">
+                          <span className={`text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'}`}>
+                            歌词切换动画
+                          </span>
+                          <div className="grid grid-cols-2 gap-2">
+                            {([
+                              ['classic', '传统', '当前效果'],
+                              ['amodern', '崭新', 'Apple 风弹簧'],
+                            ] as const).map(([style, label, hint]) => (
+                              <button
+                                key={style}
+                                onClick={() => handleLyricScrollTransitionChange(style)}
+                                className="flex min-h-[48px] flex-col items-center justify-center rounded-lg px-1.5 py-1.5 text-xs font-medium leading-tight transition-all"
+                                style={{
+                                  backgroundColor:
+                                    lyricScrollTransition === style
+                                      ? accentColor
+                                      : playerTheme === 'dark'
+                                      ? 'rgba(255,255,255,0.1)'
+                                      : 'rgba(0,0,0,0.1)',
+                                  color:
+                                    lyricScrollTransition === style
+                                      ? '#fff'
+                                      : playerTheme === 'dark'
+                                      ? 'rgba(255,255,255,0.65)'
+                                      : 'rgba(0,0,0,0.65)',
+                                  boxShadow:
+                                    lyricScrollTransition === style ? `0 0 8px ${accentColor}30` : 'none',
+                                }}
+                              >
+                                <span>{label}</span>
+                                <span
+                                  className="mt-0.5 text-[10px] font-normal"
+                                  style={{
+                                    color: lyricScrollTransition === style
+                                      ? 'rgba(255,255,255,0.78)'
+                                      : playerTheme === 'dark'
+                                      ? 'rgba(255,255,255,0.42)'
+                                      : 'rgba(0,0,0,0.42)',
+                                  }}
+                                >
+                                  {hint}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
 
                         <div className="flex items-center justify-between">
                           <span className={`text-sm ${playerTheme === 'dark' ? 'text-white/80' : 'text-black/80'}`}>

@@ -83,14 +83,13 @@ export default function DebugPanels() {
   const interactive = !isTvModeActive() || useRemoteCursorMode()
 
   useEffect(() => {
-    if (debug) {
-      startPerfMeasurement()
-      startBackendLogPolling()
-    } else {
-      stopPerfMeasurement()
-      stopBackendLogPolling()
-    }
-  }, [debug])
+    // 面板可见时才跑测量/轮询：开发者模式默认开（供 3008 调试台热更新/遥控），
+    // 但性能测量每秒全文档 querySelectorAll('*') + 后端日志轮询不能在 TV 上常驻空转。
+    if (debug && showPerf) startPerfMeasurement()
+    else stopPerfMeasurement()
+    if (debug && showBackend) startBackendLogPolling()
+    else stopBackendLogPolling()
+  }, [debug, showPerf, showBackend])
 
   // 设备温度（从原生桥定期读取，性能面板详细模式展示）
   const [deviceTemp, setDeviceTemp] = useState<number | null>(null)

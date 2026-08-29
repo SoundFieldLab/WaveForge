@@ -1,3 +1,7 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { useEffect, useRef } from 'react'
 
 interface AppleCoverFxProps {
@@ -25,6 +29,8 @@ interface Particle {
 
 /** 节拍周期（与律动背景脉冲一致的 1.2s 时间驱动节拍） */
 const BEAT_PERIOD = 1.2
+// 高刷屏限 120fps：粒子每帧重绘开销大，120fps 与 240fps 肉眼无差异
+const FRAME_MIN_INTERVAL_MS = 1000 / 120
 
 const roundedRectPath = (ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) => {
   const radius = Math.max(0, Math.min(r, w / 2, h / 2))
@@ -96,6 +102,11 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
     }
 
     const tick = (now: number) => {
+      // 限 120fps：dt 由实际执行的帧间隔计算，跳帧不影响粒子运动
+      if (now - last < FRAME_MIN_INTERVAL_MS) {
+        raf = requestAnimationFrame(tick)
+        return
+      }
       const dt = Math.min(0.05, (now - last) / 1000)
       last = now
       const currentSize = sizeRef.current
@@ -137,14 +148,27 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
       ctx.globalAlpha = 1
       ctx.restore()
 
-      raf = requestAnimationFrame(tick)
+      // 窗口隐藏、或无粒子且未播放时停帧，避免 60fps 空转（Electron backgroundThrottling 关闭）
+      if (document.visibilityState !== 'hidden' && (playingRef.current || particles.length > 0)) {
+        raf = requestAnimationFrame(tick)
+      } else {
+        raf = 0
+      }
     }
 
     raf = requestAnimationFrame(tick)
     const observer = new ResizeObserver(resize)
     observer.observe(canvas)
+    const onVisibilityChange = () => {
+      // 窗口恢复可见时若已停帧则重启
+      if (document.visibilityState === 'visible' && raf === 0) {
+        raf = requestAnimationFrame(tick)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       observer.disconnect()
     }
   }, [])

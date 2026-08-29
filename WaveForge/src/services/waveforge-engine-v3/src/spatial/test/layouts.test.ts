@@ -11,13 +11,17 @@ import { createDefaultSpatialParams } from '../types'
 import type { HeadLockedSettings, VirtualSpeakerCfg } from '../types'
 
 describe('layouts：布局预设表', () => {
-  it('预设表含 stereo/51/714 三项，名称与 id 对应', () => {
-    expect(LAYOUT_PRESETS).toHaveLength(3)
-    expect(LAYOUT_PRESETS.map((p) => p.id)).toEqual(['stereo', '51', '714'])
-    expect(LAYOUT_PRESETS.map((p) => p.name)).toEqual(['立体声', '5.1', '7.1.4'])
+  it('预设表含 stereo/51/514/71/714 五项，名称与 id 对应', () => {
+    expect(LAYOUT_PRESETS).toHaveLength(5)
+    expect(LAYOUT_PRESETS.map((p) => p.id)).toEqual(['stereo', '51', '514', '71', '714'])
+    expect(LAYOUT_PRESETS.map((p) => p.name)).toEqual(['立体声', '5.1', '5.1.4', '7.1', '7.1.4'])
     for (const p of LAYOUT_PRESETS) {
       expect(p.speakers.length).toBeGreaterThan(0)
     }
+    // 5.1.4 = 5 地面 + 4 顶置（9 只）；7.1 = 7 地面（无顶/底）；7.1.4 = 13 只
+    expect(LAYOUT_PRESETS.find((p) => p.id === '514')!.speakers).toHaveLength(9)
+    expect(LAYOUT_PRESETS.find((p) => p.id === '71')!.speakers).toHaveLength(7)
+    expect(LAYOUT_PRESETS.find((p) => p.id === '714')!.speakers).toHaveLength(13)
   })
 
   it('stereo：L(-30)/R(+30) 两只', () => {

@@ -25,6 +25,7 @@ export function WaveformVisualizer({ theme, active }: { theme: HSETheme; active:
     let raf = 0
     let width = 0
     let height = 0
+    let lastFrame = 0
     const dpr = Math.min(2, window.devicePixelRatio || 1)
 
     const resize = () => {
@@ -39,6 +40,13 @@ export function WaveformVisualizer({ theme, active }: { theme: HSETheme; active:
     window.addEventListener('resize', resize)
 
     const draw = () => {
+      // 限 60fps：相位按帧固定步进（按 60fps 调参），高刷屏全速跑会让波形加速流动且白耗 GPU
+      const now = performance.now()
+      if (lastFrame && now - lastFrame < 1000 / 60) {
+        raf = requestAnimationFrame(draw)
+        return
+      }
+      lastFrame = now
       ctx.clearRect(0, 0, width, height)
       const cx = width / 2
       const cy = height / 2

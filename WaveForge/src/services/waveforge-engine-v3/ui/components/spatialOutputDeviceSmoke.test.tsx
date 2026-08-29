@@ -56,7 +56,7 @@ const theme: HSETheme = {
 }
 
 describe('空间音频：输出设备选择 UI 冒烟', () => {
-  it('布局：状态栏「输出」只读展示（系统默认 / 已选设备）', () => {
+  it('布局：状态栏「输出」只读展示（双耳渲染 / 已选设备）', () => {
     const common = {
       theme,
       onPatch: () => undefined,
@@ -67,7 +67,8 @@ describe('空间音频：输出设备选择 UI 冒烟', () => {
     const { rerender } = render(
       <SpatialStudioLayout mode="instant" spatial={createDefaultSpatialParams()} {...common} />,
     )
-    expect(screen.getByText('系统默认')).toBeTruthy()
+    // 空间管线固定双耳渲染（HRTF → 立体声写出）；sinkId 快照存在 → 已选设备
+    expect(screen.getByText('双耳渲染')).toBeTruthy()
     rerender(
       <SpatialStudioLayout mode="instant" spatial={{ ...createDefaultSpatialParams(), sinkId: 'dev-a' }} {...common} />,
     )

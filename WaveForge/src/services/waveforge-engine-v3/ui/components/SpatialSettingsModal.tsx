@@ -27,13 +27,13 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Settings2, Upload, X } from 'lucide-react'
 import type { HSETheme } from '../hse-theme'
-import type { DeepPartial, OutputMode, SpatialParams } from '../../src/spatial/types'
+import type { DeepPartial, SpatialParams } from '../../src/spatial/types'
 // 空间音频已内联 EngineV3（纯 TS DSP），独立 fusion worklet 层已移除：
 //  - SOFA 数据集导入（sofa.ts）与内置数据集切换（gridSource + fusion setBuiltinDataset）
 //    依赖已删模块，本波标注「开发中」禁用，后续 wave 改走 EngineV3 内联合成 HRTF；
 //  - 输出设备枚举/切换（fusion listOutputDevices/setOutputDevice）同样依赖已删模块，
 //    标注「开发中」禁用，后续 wave 接主播放器 AudioContext.setSinkId。
-import { Segmented } from './Primitives'
+import { Segmented, Slider } from './Primitives'
 import { DEFAULT_KEYMAP } from './worldControl'
 import type { KeyMap } from './worldControl'
 
@@ -41,10 +41,23 @@ interface SpatialSettingsModalProps {
   open: boolean
   onClose: () => void
   theme: HSETheme
-  /** 空间参数快照（输出模式读取 spatial.output，已落地字段） */
-  spatial: SpatialParams
-  /** 深合并写入（输出模式切换 → onPatch({ output: v })） */
-  onPatch: (p: DeepPartial<SpatialParams>) => void
+  /** 空间参数快照（实际传入引擎 SpatialSettings——含 hrtfInterp/convolution/
+   *  distanceModel/refDistance/maxDistance，keymap 为 UI 附加字段随快照持久化；
+   *  旧独立命名空间的 output/perfMode/sinkId 字段引擎侧不存在，对应控件已改为
+   *  hrtfInterp 真接线 / 静态展示） */
+  spatial: SpatialParams & {
+    hrtfInterp?: 'nearest' | 'spherical'
+    distanceModel?: 'inverse' | 'linear' | 'exponential'
+    refDistance?: number
+    maxDistance?: number
+  }
+  /** 深合并写入（HRTF 插值/距离衰减切换直接进入引擎配置） */
+  onPatch: (p: DeepPartial<SpatialParams & {
+    hrtfInterp?: 'nearest' | 'spherical'
+    distanceModel?: 'inverse' | 'linear' | 'exponential'
+    refDistance?: number
+    maxDistance?: number
+  }>) => void
 }
 
 /** 弹窗动画 keyframes（独立命名，不与既有 v3-modal-* 冲突） */
@@ -82,12 +95,6 @@ function InfoRow({ label, value, theme, valueClassName }: { label: string; value
   )
 }
 
-/** 输出模式选项（多声道单独渲染为禁用按钮，见下方手写三键组） */
-const OUTPUT_MODES: { value: OutputMode; label: string }[] = [
-  { value: 'binaural', label: '双耳 Binaural' },
-  { value: 'stereo', label: '立体声下混' },
-]
-
 /** 键位编辑器：KeyMap 8 个可配置动作（与 worldControl.DEFAULT_KEYMAP 一一对应，§5.6） */
 type KeyMapAction = keyof KeyMap
 
@@ -108,12 +115,18 @@ function displayKey(k: string): string {
   return k.length === 1 ? k.toUpperCase() : k
 }
 
-/** 性能模式选项（已落地：quality→HRTF 球谐插值 / balanced·lowLatency→最近邻，
- *  fusion 映射 + 随快照持久化；旧快照缺省按 balanced 处理） */
-const PERF_MODES: { value: SpatialParams['perfMode']; label: string }[] = [
-  { value: 'quality', label: '高质量' },
-  { value: 'balanced', label: '平衡' },
-  { value: 'lowLatency', label: '低延迟' },
+/** HRTF 插值选项（引擎真字段 hrtfInterp 直接接线：旧 perfMode 三档中 balanced 与
+ *  lowLatency 在 DSP 均为最近邻，收敛为两档表达真实差异） */
+const HRTF_INTERP_OPTIONS: { value: 'nearest' | 'spherical'; label: string }[] = [
+  { value: 'nearest', label: '平衡（最近邻）' },
+  { value: 'spherical', label: '高质量（球谐插值）' },
+]
+
+/** 距离衰减模型选项（引擎真字段 distanceModel） */
+const DISTANCE_MODELS: { value: 'inverse' | 'linear' | 'exponential'; label: string }[] = [
+  { value: 'inverse', label: '反距离' },
+  { value: 'linear', label: '线性' },
+  { value: 'exponential', label: '指数' },
 ]
 
 export default function SpatialSettingsModal({ open, onClose, theme, spatial, onPatch }: SpatialSettingsModalProps) {
@@ -178,9 +191,6 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
 
   if (!open) return null
 
-  /** 当前输出模式（已落地字段；持久化旧快照缺省时回退双耳，防御性兜底） */
-  const output: OutputMode = spatial.output ?? 'binaural'
-
   /**
    * 与其它动作撞键的冲突动作列表（小写比较，与 worldControl 键比较约定一致；
    * 重复键位允许——仅行内小字提示，不阻止保存）。
@@ -238,36 +248,12 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
             </button>
           </div>
 
-          {/* 输出模式（Segmented 三键组：多声道开发中禁用）→ onPatch({ output: v }) */}
+          {/* 输出模式：空间级内联 EngineV3（第 15 级，双耳渲染后立体声写出）——
+              渲染管线固定为双耳输出；旧「立体声下混/多声道」按钮写的 output 字段
+              引擎侧不存在（点击无效果），改为如实静态展示 */}
           <SectionTitle theme={theme} first>输出模式</SectionTitle>
-          <div className="flex gap-1.5 mb-2">
-            {OUTPUT_MODES.map((m) => {
-              const active = output === m.value
-              return (
-                <button
-                  key={m.value}
-                  type="button"
-                  onClick={() => onPatch({ output: m.value })}
-                  className={`flex-1 py-1.5 rounded-lg text-[11px] transition-all ${active ? 'text-white font-medium' : theme.textSecondary}`}
-                  style={active
-                    ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-                    : { backgroundColor: 'rgba(255,255,255,0.06)' }}
-                >
-                  {m.label}
-                </button>
-              )
-            })}
-            {/* 多声道（开发中禁用：多声道输入路由后续 wave） */}
-            <button
-              type="button"
-              disabled
-              className={`flex-1 py-1.5 rounded-lg text-[11px] cursor-not-allowed opacity-50 ${theme.textTertiary}`}
-              style={{ backgroundColor: 'rgba(255,255,255,0.06)' }}
-            >
-              多声道<DevBadge theme={theme} />
-            </button>
-          </div>
-          <p className={`${theme.textMuted} text-[10px] mb-2`}>立体声下混把双耳信号折叠为普通立体声输出（外放场景）。</p>
+          <InfoRow label="当前输出" value="双耳 Binaural" theme={theme} />
+          <p className={`${theme.textMuted} text-[10px] mb-2`}>空间音频经 HRTF 双耳渲染后以立体声写出；立体声下混与多声道输出待后续版本接入。</p>
 
           {/* 输出设备：空间音频已内联 EngineV3，原 fusion 层 enumerateDevices/setSinkId 已移除；
               标注「开发中」，后续 wave 接主播放器 AudioContext.setSinkId */}
@@ -382,17 +368,41 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
           <InfoRow label="HRIR 长度" value="256 样本" theme={theme} />
           <InfoRow label="最大对象数" value="64" theme={theme} />
 
-          {/* 性能模式（已落地：quality→球谐插值 / balanced·lowLatency→最近邻，
-              fusion 映射 + 随快照持久化，见 fusion.spatialConfigFromParams） */}
-          <SectionTitle theme={theme}>性能模式</SectionTitle>
+          {/* 距离衰减（规格书属性面板「衰减模型/参考距离/最大距离」——全局渲染参数，
+              引擎真字段直接接线：三模型 + ref 内不衰减 + linear 到 max 衰减为 0） */}
+          <SectionTitle theme={theme}>距离衰减</SectionTitle>
           <Segmented
-            options={PERF_MODES}
-            value={spatial.perfMode}
-            onChange={(v) => onPatch({ perfMode: v })}
+            options={DISTANCE_MODELS}
+            value={spatial.distanceModel ?? 'inverse'}
+            onChange={(v) => onPatch({ distanceModel: v })}
             theme={theme}
             small
           />
-          <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>高质量档启用 HRTF 球谐插值（方位过渡更平滑）；平衡/低延迟档为最近邻插值（更快）。</p>
+          <div className="mt-2 mb-1">
+            <Slider
+              label="参考距离（内不衰减）" value={spatial.refDistance ?? 1} min={0.5} max={3} step={0.1}
+              onChange={(v) => onPatch({ refDistance: v })}
+              display={`${(spatial.refDistance ?? 1).toFixed(1)}m`} theme={theme}
+            />
+            <Slider
+              label="最大距离（linear 衰减到 0）" value={spatial.maxDistance ?? 50} min={5} max={100} step={1}
+              onChange={(v) => onPatch({ maxDistance: v })}
+              display={`${Math.round(spatial.maxDistance ?? 50)}m`} theme={theme}
+            />
+          </div>
+          <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>反距离=自然远衰（1/d）；线性=到最大距离衰减为 0；指数=更陡的 1/(d/ref)。参考距离内均不衰减。</p>
+
+          {/* HRTF 插值（引擎真字段 hrtfInterp 直接接线——旧 perfMode 控件写的字段
+              引擎侧不存在，点击无任何效果；现直接读写 hrtfInterp，切换即时生效） */}
+          <SectionTitle theme={theme}>HRTF 插值（性能模式）</SectionTitle>
+          <Segmented
+            options={HRTF_INTERP_OPTIONS}
+            value={spatial.hrtfInterp ?? 'nearest'}
+            onChange={(v) => onPatch({ hrtfInterp: v })}
+            theme={theme}
+            small
+          />
+          <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>高质量档启用 HRTF 球谐插值（方位过渡更平滑）；平衡档为最近邻插值（更快）。</p>
 
           {/* 快捷键（§5.6 键位编辑器）：8 个动作逐行显示当前键位 + 捕获按钮，
               捕获态按下新键写回 spatial.keymap（partial 覆盖） */}

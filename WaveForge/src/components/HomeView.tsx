@@ -9,7 +9,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
-import { getCachedUserPlaylists, getUserPlaylists, streamNeteasePlaylistTracks } from '../services/playlistService'
+import { getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, streamNeteasePlaylistTracks } from '../services/playlistService'
 import { getAppleLibraryPlaylists, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, APPLE_LIBRARY_ID, isAppleLovedPlaylistName } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
 import { imageCache } from '../utils/imageCache'
@@ -21,6 +21,7 @@ import PlaylistContextMenu from './PlaylistContextMenu'
 import CreatePlaylistModal from './CreatePlaylistModal'
 import EditPlaylistModal from './EditPlaylistModal'
 import DeletePlaylistModal from './DeletePlaylistModal'
+import PluginShortcuts from './PluginShortcuts'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import { fetchExploreChart, fetchExploreHome, fetchExplorePlaylist } from '../services/exploreApi'
 import {
@@ -191,17 +192,28 @@ const requiresFullQQRecommendationBatch = (moduleId: HomeModuleType) => (
   moduleId === 'qq_guess_you_like' || moduleId === 'qq_daily_30'
 )
 
+/** 平台登录身份（模块会话缓存归属键的数据源） */
+interface HomeModuleIdentity {
+  loggedIn?: boolean
+  userId?: string
+}
+
+/**
+ * 首页模块会话缓存的归属键：按模块自身平台显式查表解析登录态与用户 ID。
+ * 根因修复：此前除 netease 外的一切模块（含汽水/Spotify/酷狗/Apple）都窜到 QQ 分支，
+ * 导致 QQ 登录/登出误使这些平台的缓存翻新、而其自身登录变化反而不影响 key。
+ */
 const getHomeModuleSessionKey = (
   moduleId: HomeModuleType,
-  neteaseLoggedIn: boolean,
-  neteaseUserId?: string,
-  qqLoggedIn?: boolean,
-  qqUserId?: string
+  identities: Partial<Record<MusicPlatform, HomeModuleIdentity>>
 ) => {
-  const isNetease = moduleId.startsWith('netease_')
-  const loggedIn = isNetease ? neteaseLoggedIn : Boolean(qqLoggedIn)
-  const userId = isNetease ? neteaseUserId : qqUserId
-  const devMode = !isNetease && localStorage.getItem('developerMode') === 'true'
+  const modulePlatform = HOME_MODULE_BY_ID[moduleId]?.platform ?? 'netease'
+  const identity = identities[modulePlatform]
+  const loggedIn = Boolean(identity?.loggedIn)
+  const userId = identity?.userId || ''
+  // developerMode 只影响 QQ 官方增强接口的返回内容（dev 直连），仅需 QQ 键区分；
+  // 其余平台接口不受该开关影响，避免无关翻新
+  const devMode = modulePlatform === 'qq' && localStorage.getItem('developerMode') === 'true'
 
   // Never retain login cookies inside long-lived Map keys.
   return `${moduleId}:${loggedIn ? userId || 'signed-in' : 'guest'}:${devMode ? 'dev' : 'prod'}`
@@ -412,7 +424,15 @@ function HomeView({
   })
   const [currentSpotifyIndex] = useState(0)
   const [currentKugouIndex] = useState(0)
-  const [currentSodaIndex] = useState(0)
+  // 单模块平台的占位 setter：Tab 映射统一引用，平台未来加模块时无需再改
+  const setCurrentSpotifyIndex = (v: number) => { void v }
+  const setCurrentKugouIndex = (v: number) => { void v }
+  const [currentSodaIndex, setCurrentSodaIndex] = useState(() => {
+    const saved = localStorage.getItem('homeModuleIndex_soda')
+    const savedIndex = saved ? parseInt(saved, 10) : 0
+    const modules = sanitizeHomeModules(localStorage.getItem('homeModules_soda'), 'soda')
+    return savedIndex < modules.length ? savedIndex : 0
+  })
   
   // 恢复上次选择的卡片索引（会话级别，重启后重置为0）
   const [currentNeteaseIndex, setCurrentNeteaseIndex] = useState(() => {
@@ -449,14 +469,18 @@ function HomeView({
             : sodaModules[currentSodaIndex]
   // 当前平台生效的首页模块（简约模式主卡循环）
   const activeModules = platform === 'netease' ? neteaseModules : platform === 'qq' ? qqModules : platform === 'apple' ? appleModules : platform === 'spotify' ? spotifyModules : platform === 'kugou' ? kugouModules : sodaModules
+  // 各平台登录身份：模块会话缓存按 HOME_MODULE_BY_ID[moduleId].platform 取对应平台身份，
+  // Apple 模块为 storefront 级内容（无账号维度），固定匿名归属
+  const homeModuleIdentities: Partial<Record<MusicPlatform, HomeModuleIdentity>> = {
+    netease: { loggedIn: neteaseLoggedIn, userId: neteaseUserId },
+    qq: { loggedIn: qqLoggedIn, userId: qqUserId },
+    apple: { loggedIn: false },
+    spotify: { loggedIn: spotifyLoggedIn, userId: spotifyUserId },
+    kugou: { loggedIn: kugouLoggedIn, userId: kugouUserId },
+    soda: { loggedIn: sodaLoggedIn, userId: sodaUserId },
+  }
   const initialModuleSnapshot = initialModuleId
-    ? getHomeModuleSessionSnapshot(getHomeModuleSessionKey(
-        initialModuleId,
-        neteaseLoggedIn,
-        neteaseUserId,
-        qqLoggedIn,
-        qqUserId
-      ))
+    ? getHomeModuleSessionSnapshot(getHomeModuleSessionKey(initialModuleId, homeModuleIdentities))
     : undefined
   const [moduleSongs, setModuleSongs] = useState<Song[]>(() => initialModuleSnapshot?.songs || [])
   const [modulePlaylists, setModulePlaylists] = useState<any[]>(() => initialModuleSnapshot?.playlists || [])
@@ -494,7 +518,23 @@ function HomeView({
   // 手机遥控器连上（光标模式）时恢复真实 hover，与 PC 一致。
   const tvMode = useTvMode()
   const remoteCursorMode = useRemoteCursorMode()
+  // TV 遥控器（无鼠标）：药丸变成单个可聚焦单元，左右键循环切换平台；PC/光标模式仍走拖拽
+  const pillTvAdjust = tvMode && !remoteCursorMode
+  const platformLabel = { netease: '网易云', qq: 'QQ音乐', apple: 'Apple', spotify: 'Spotify', kugou: '酷狗', soda: '汽水' } as Record<MusicPlatform, string>
+  const cyclePlatform = (dir: 1 | -1) => {
+    setPlatform(prev => {
+      const idx = Math.max(0, visiblePlatforms.indexOf(prev))
+      const next = (idx + dir + visiblePlatforms.length) % visiblePlatforms.length
+      return visiblePlatforms[next] ?? prev
+    })
+  }
+  const platformKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); cyclePlatform(-1) }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); cyclePlatform(1) }
+  }
   const perfMode = usePerfMode()
+  // 常驻小元素（模式下拉 chevron/上箭头提示）的无限浮动：TV 非增强档静态化（JS 动画，tv.css 杀不掉）
+  const tvChevronFloat = !isTvModeActive() || perfMode === 'enhanced'
   // 昂贵的动态背景（渐变 + 光晕）：性能模式仅约束 TV（效能/普通降为静态省 CPU/内存）；
   // PC 上始终全开（PC 的 perfMode 默认 normal，但不受 TV 性能档约束）。
   const showHeavyVisuals = !isTvModeActive() || perfMode === 'enhanced'
@@ -606,6 +646,10 @@ function HomeView({
   useEffect(() => {
     localStorage.setItem('homeModuleIndex_qq', currentQQIndex.toString())
   }, [currentQQIndex])
+
+  useEffect(() => {
+    localStorage.setItem('homeModuleIndex_soda', currentSodaIndex.toString())
+  }, [currentSodaIndex])
 
   useEffect(() => {
     if (moduleLoading) {
@@ -764,6 +808,20 @@ function HomeView({
         const firstSong = songs[0]
         if (firstSong) {
           void getSongUrl(firstSong.platform === 'qq' ? (firstSong.mid || firstSong.id) : firstSong.id, firstSong.platform || 'netease').catch(() => null)
+        }
+        return songs
+      }
+
+      // 汽水：统一详情（分页全量），此前会误入 QQ 分支导致悬停播放/预取失败
+      if (playlistPlatform === 'soda') {
+        const sodaData = await getPlaylistDetail(String(playlist.id || ''), 'soda')
+        const songs = Array.isArray(sodaData?.tracks) ? sodaData.tracks : []
+        if (songs.length > 0) {
+          setPlaylistPlaybackCache(cacheKey, songs)
+        }
+        const firstSong = songs[0]
+        if (firstSong) {
+          void getSongUrl(firstSong.mid || firstSong.id, 'soda').catch(() => null)
         }
         return songs
       }
@@ -947,6 +1005,26 @@ function HomeView({
         const songs = tracks.map(track => appleSongToSong(track, storefront))
         setSelectedPlaylist({ ...playlist, platform: 'apple', trackCount: songs.length })
         setPlaylistSongs(songs)
+        return
+      }
+
+      // 汽水：经 playlistService 统一详情（分页合并全量曲目，支持 qishui-liked 等虚拟歌单 id）。
+      // 此前缺失该分支时，汽水歌单点击后不发起任何请求，详情面板永远为空列表。
+      if (playlistPlatform === 'soda') {
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'soda')
+        if (!isCurrentRequest()) return
+        const detailed = {
+          ...playlist,
+          ...data?.playlist,
+          name: data?.playlist?.name || playlist.name,
+          coverImgUrl: data?.playlist?.coverImgUrl || playlist.coverImgUrl,
+          trackCount: data?.playlist?.trackCount || playlist.trackCount,
+          platform: 'soda',
+          isLike: playlist.isLike,
+          isCollected: playlist.isCollected,
+        }
+        setSelectedPlaylist(detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
         return
       }
 
@@ -1237,6 +1315,20 @@ function HomeView({
     showPlaylistToast('歌单链接已复制', 'success')
   }
 
+  // 按平台显式解析「歌单归属用户 id」：汽水等新平台不复用网易/QQ 身份（否则 owner 校验会
+  // 被别的平台 userId 误命中/静默 no-op），无对应身份的平台返回空串，绝不兜底窜台。
+  // 汽水以 localStorage['soda_user_id'] 为归属键（sodaUserId prop 为 App 会话快照，兜底一致）。
+  const getPlaylistOwnerUserId = (plat: MusicPlatform): string => {
+    switch (plat) {
+      case 'netease': return neteaseUserId || ''
+      case 'qq': return qqUserId || ''
+      case 'spotify': return spotifyUserId || ''
+      case 'kugou': return kugouUserId || ''
+      case 'soda': return sodaUserId || (() => { try { return localStorage.getItem('soda_user_id') || '' } catch { return '' } })()
+      default: return ''
+    }
+  }
+
   // Remove a song from a playlist
   const handleRemoveFromPlaylist = async (song: Song, playlistId: string) => {
     // Apple：从资料库歌单移除曲目（amp-api）
@@ -1262,7 +1354,8 @@ function HomeView({
       }
       return
     }
-    const userId = platform === 'qq' ? qqUserId : neteaseUserId
+    // 归属校验按当前平台显式取自有 userId（此前 else 窜到 neteaseUserId，汽水/spotify/kugou 必然静默 no-op）
+    const userId = getPlaylistOwnerUserId(platform)
     if (
       !selectedPlaylist ||
       selectedPlaylist.isLike ||
@@ -1328,12 +1421,14 @@ function HomeView({
         if (showFeedback) showPlaylistToast('歌单列表已刷新', 'success')
         return
       }
-      const currentUserId = platform === 'netease' ? neteaseUserId : qqUserId
+      // 归属身份按平台显式解析（此前 else 落到 qqUserId：QQ 未登录时汽水歌单刷新被静默短路，
+      // QQ 登录时又会把汽水缓存键错挂在 QQ 身份上）
+      const currentUserId = getPlaylistOwnerUserId(platform)
       if (!currentUserId) return
       const playlists = await getUserPlaylists(
         platform,
         currentUserId,
-        platform === 'netease' ? neteaseUsername : qqUsername,
+        platform === 'netease' ? neteaseUsername : platform === 'qq' ? qqUsername : platform === 'soda' ? (sodaUsername || '') : '',
         { forceRefresh: true }
       )
       if (loadId !== playlistLoadIdRef.current) return
@@ -1699,13 +1794,7 @@ function HomeView({
     signal?: AbortSignal,
     forceRefresh = false
   ) => {
-    const sessionKey = getHomeModuleSessionKey(
-      moduleId,
-      neteaseLoggedIn,
-      neteaseUserId,
-      qqLoggedIn,
-      qqUserId
-    )
+    const sessionKey = getHomeModuleSessionKey(moduleId, homeModuleIdentities)
     const sessionSnapshot = getHomeModuleSessionSnapshot(sessionKey)
 
     const canReuseSnapshot = sessionSnapshot && (
@@ -1951,9 +2040,34 @@ function HomeView({
     const controller = new AbortController()
     const loadSummary = async () => {
       try {
-        // 新三平台（Spotify/酷狗/汽水）无最近播放汇总，置空展示
-        if (platform === 'spotify' || platform === 'kugou' || platform === 'soda') {
+        // 新三平台中 Spotify/酷狗无最近播放汇总，置空展示；汽水走本地只读聚合路由填充
+        if (platform === 'spotify' || platform === 'kugou') {
           setRecentPlaybackSummary({ covers: [], count: 0 })
+          return
+        }
+        // 汽水：/api/soda/recent 复用后端账号库聚合缓存（recently-played-media），
+        // 返回 mapSodaMedia 映射歌曲（id/name/artist/album/coverUrl/durationMs...），不新造字段
+        if (platform === 'soda') {
+          const sdCookie = localStorage.getItem('soda_token') || ''
+          if (!sdCookie) {
+            setRecentPlaybackSummary({ covers: [], count: 0 })
+            return
+          }
+          const query = new URLSearchParams({ limit: '50', cookie: sdCookie })
+          const response = await fetch(`http://localhost:3001/api/soda/recent?${query.toString()}`, {
+            cache: 'no-store',
+            signal: controller.signal,
+          })
+          const payload = await response.json().catch(() => null)
+          if (!response.ok || payload?.error) throw new Error(payload?.error || 'recent playback unavailable')
+          if (!payload?.loggedIn) {
+            setRecentPlaybackSummary({ covers: [], count: 0 })
+            return
+          }
+          const rows = Array.isArray(payload?.songs) ? payload.songs : []
+          // 汇总位仅取封面四宫格 + 条数，song 字段无需完整 Song 结构
+          const covers = rows.map((row: any) => String(row?.coverUrl || '')).filter(Boolean).slice(0, 4)
+          setRecentPlaybackSummary({ covers, count: rows.length })
           return
         }
         // Apple：最近播放走 amp-api（需登录 token）
@@ -2239,11 +2353,11 @@ function HomeView({
             >
               <motion.div
                 animate={{ 
-                  y: [0, 2, 0],
+                  y: tvChevronFloat ? [0, 2, 0] : 0,
                   opacity: showUpArrowHint ? [1, 0.5, 1] : 1
                 }}
                 transition={{ 
-                  y: { duration: 1, repeat: Infinity },
+                  y: tvChevronFloat ? { duration: 1, repeat: Infinity } : { duration: 0 },
                   opacity: showUpArrowHint ? { duration: 0.5, repeat: Infinity } : { duration: 0 }
                 }}
               >
@@ -2325,8 +2439,8 @@ function HomeView({
               {activeModules.map((moduleId, index) => {
                 const moduleInfo = HOME_MODULE_BY_ID[moduleId]
                 
-                const currentIndex = platform === 'netease' ? currentNeteaseIndex : currentQQIndex
-                const setCurrentIndex = platform === 'netease' ? setCurrentNeteaseIndex : setCurrentQQIndex
+                const currentIndex = platform === 'netease' ? currentNeteaseIndex : platform === 'qq' ? currentQQIndex : platform === 'apple' ? currentAppleIndex : platform === 'spotify' ? currentSpotifyIndex : platform === 'kugou' ? currentKugouIndex : currentSodaIndex
+                const setCurrentIndex = platform === 'netease' ? setCurrentNeteaseIndex : platform === 'qq' ? setCurrentQQIndex : platform === 'apple' ? setCurrentAppleIndex : platform === 'spotify' ? setCurrentSpotifyIndex : platform === 'kugou' ? setCurrentKugouIndex : setCurrentSodaIndex
                 
                 return (
                   <button
@@ -2647,7 +2761,7 @@ function HomeView({
                 maxWidth: '100%'
               }}>
                 <AnimatePresence mode="popLayout">
-                {userPlaylists.map((playlist: any, index: number) => (
+                {userPlaylists.slice(0, 100).map((playlist: any, index: number) => (
                   <motion.div
                     key={`${platform || 'unknown'}-playlist-${playlist.id || index}`}
                     className="home-playlist-card relative group overflow-hidden rounded-xl cursor-pointer"
@@ -2789,6 +2903,15 @@ function HomeView({
                 background: playerTheme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)',
                 border: `1px solid ${playerTheme === 'dark' ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.1)'}`,
               }}
+              {...(pillTvAdjust
+                ? {
+                    'data-tv-focus': '',
+                    tabIndex: 0,
+                    'data-tv-arrows': 'horizontal',
+                    'aria-label': `平台切换，当前 ${platformLabel[platform]}，左右键切换`,
+                    onKeyDown: platformKeyDown,
+                  }
+                : {})}
             >
               {/* 液态玻璃高亮：固定视口中央（第二个槽位），平台滑过时被覆盖；backdrop-blur 液态质感 */}
               <motion.div
@@ -2817,6 +2940,7 @@ function HomeView({
                 onPointerMove={platformPointerMove}
                 onPointerUp={platformPointerUp}
                 onPointerCancel={platformPointerUp}
+                {...(pillTvAdjust ? { 'data-tv-skip': '' } : {})}
               >
                 {visiblePlatforms.map(key => {
                   const dotColor = key === 'netease' ? 'bg-red-500' : key === 'qq' ? 'bg-green-500' : key === 'apple' ? 'bg-pink-500' : key === 'spotify' ? 'bg-[#1DB954]' : key === 'kugou' ? 'bg-orange-500' : 'bg-sky-500'
@@ -2845,10 +2969,11 @@ function HomeView({
                 })}
               </motion.div>
             </div>
-            <div className={`mt-2 text-center text-[10px] tracking-wide transition-opacity duration-1000 ${switcherHintVisible ? 'opacity-100' : 'opacity-0'} ${playerTheme === 'dark' ? 'text-white/25' : 'text-black/25'}`}>左右拖动切换平台</div>
+            <div className={`mt-2 text-center text-[10px] tracking-wide transition-opacity duration-1000 ${switcherHintVisible ? 'opacity-100' : 'opacity-0'} ${playerTheme === 'dark' ? 'text-white/25' : 'text-black/25'}`}>{pillTvAdjust ? '左右键切换平台' : '左右拖动切换平台'}</div>
           </div>
 
-          {isLoggedIn && (platform === 'netease' || platform === 'qq' || platform === 'apple') && (
+          {/* 已播歌曲汇总卡：网易/QQ/Apple 原生记录 + 汽水（/api/soda/recent 聚合），酷狗/Spotify 无数据不展示 */}
+          {isLoggedIn && (platform === 'netease' || platform === 'qq' || platform === 'apple' || platform === 'soda') && (
             <div className="px-6 pt-5">
               <motion.button
                 type="button"
@@ -3064,9 +3189,9 @@ function HomeView({
             // Expanded toolbar actions
             <motion.div
               key="pill"
-              initial={{ opacity: 0, y: 20, width: '24rem' }}
-              animate={{ opacity: 1, y: 0, width: '24rem' }}
-              exit={{ opacity: 0, y: 20, width: '24rem' }}
+              initial={{ opacity: 0, y: 20, width: '30rem' }}
+              animate={{ opacity: 1, y: 0, width: '30rem' }}
+              exit={{ opacity: 0, y: 20, width: '30rem' }}
               transition={{ type: "spring", stiffness: 300, damping: 25 }}
               className="home-bottom-pill relative overflow-hidden px-8 py-4 rounded-full"
               style={{
@@ -3125,6 +3250,9 @@ function HomeView({
                 >
                   <Settings className="w-5 h-5" />
                 </motion.button>
+
+                {/* 插件系统入口（含已启用插件快捷按钮） */}
+                <PluginShortcuts variant="home" />
               </div>
             </motion.div>
           )}
@@ -3174,7 +3302,9 @@ function HomeView({
         onViewArtist={(song) => {
           const songPlatform = song.platform || platform
           const artist = song.artists?.[0]
-          const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+          // 汽水无艺人 ID，约定传歌手名
+          const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
+            : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
           if (onOpenArtist && artistId) onOpenArtist(String(artistId), songPlatform)
           setContextMenuVisible(false)
         }}

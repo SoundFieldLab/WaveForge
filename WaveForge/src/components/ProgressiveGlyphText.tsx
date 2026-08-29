@@ -71,8 +71,12 @@ export default function ProgressiveGlyphText({
     let anchorTime = 0
     let anchorWallTime = performance.now()
     let playing = false
+    let lastFrame = -1
+    // 高刷屏限 60fps + 逐字脏检查：避免 240Hz 下每帧对整行所有字形重复写样式/drop-shadow
+    const lastProgress = new Float64Array(glyphs.length)
+    const lastGlow = new Uint8Array(glyphs.length)
     // 行末时间（最后一个非空白字形的结束时间）。整行唱完后填充不再变化，
-    // 停掉 60fps 外推循环避免空转；下一行激活时 glyphs 变化会重跑本 effect 并重启循环。
+    // 停掉外推循环避免空转；下一行激活时 glyphs 变化会重跑本 effect 并重启循环。
     const lineEndTime = glyphs.reduce(
       (maxEnd, glyph) => (!glyph.isWhitespace ? Math.max(maxEnd, glyph.endTime) : maxEnd),
       0
@@ -84,20 +88,32 @@ export default function ProgressiveGlyphText({
         if (!element || glyph.isWhitespace) return
         const duration = Math.max(0.001, glyph.endTime - glyph.startTime)
         const progress = clamp((currentTime - glyph.startTime) / duration)
+        // 进度基本未变的帧：跳过该字全部样式写（宽度取 0.05% 步进，低于人眼分辨率）
+        if (Math.abs(progress - lastProgress[index]) <= 0.0005) return
+        lastProgress[index] = progress
         element.style.width = `${(progress * 100).toFixed(2)}%`
         element.style.opacity = progress <= 0.001 ? '0' : '1'
-        element.style.filter = progress > 0.002 && progress < 0.998
-          ? `drop-shadow(0 0 8px ${glowColor})`
-          : 'none'
+        const glowOn = progress > 0.002 && progress < 0.998
+        if (glowOn !== Boolean(lastGlow[index])) {
+          lastGlow[index] = glowOn ? 1 : 0
+          element.style.filter = glowOn ? `drop-shadow(0 0 8px ${glowColor})` : 'none'
+        }
       })
     }
 
     const tick = (now: number) => {
+      // 限 60fps：跳过的帧沿用原有停帧条件
+      if (lastFrame >= 0 && now - lastFrame < 1000 / 60) {
+        animationFrame = playing && document.visibilityState === 'visible' ? requestAnimationFrame(tick) : null
+        return
+      }
+      lastFrame = now
       const extrapolated = playing ? Math.min(0.5, (now - anchorWallTime) / 1000) : 0
       const currentTime = anchorTime + extrapolated + timeOffset
       updateFill(currentTime)
-      // 整行已唱完则停帧（外推值已无可见变化），等下一次播放时间发布再经 syncClock 重启。
-      animationFrame = playing && currentTime < lineEndTime ? requestAnimationFrame(tick) : null
+      // 整行已唱完则停帧（外推值已无可见变化），等下一次播放时间发布再经 syncClock 重启；
+      // 窗口隐藏时也停（Electron backgroundThrottling 关闭，隐藏后 rAF 仍全速执行样式写）
+      animationFrame = playing && document.visibilityState === 'visible' && currentTime < lineEndTime ? requestAnimationFrame(tick) : null
     }
 
     const syncClock = () => {
@@ -106,7 +122,7 @@ export default function ProgressiveGlyphText({
       anchorWallTime = performance.now()
       playing = snapshot.isPlaying
       updateFill(anchorTime + timeOffset)
-      if (playing && animationFrame === null && anchorTime + timeOffset < lineEndTime) {
+      if (playing && animationFrame === null && anchorTime + timeOffset < lineEndTime && document.visibilityState === 'visible') {
         animationFrame = requestAnimationFrame(tick)
       }
     }
@@ -114,8 +130,15 @@ export default function ProgressiveGlyphText({
     fillRefs.current.length = glyphs.length
     syncClock()
     const unsubscribe = playbackTimeStore.subscribe(syncClock)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && playing && animationFrame === null) {
+        animationFrame = requestAnimationFrame(tick)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     return () => {
       unsubscribe()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       if (animationFrame !== null) cancelAnimationFrame(animationFrame)
     }
   }, [glowColor, glyphs, playbackTimeStore, timeOffset])

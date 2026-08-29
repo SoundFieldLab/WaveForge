@@ -39,6 +39,20 @@ contextBridge.exposeInMainWorld('electron', {
     revertGpuChange: () => ipcRenderer.invoke('revert-gpu-change'),
   },
 
+  // 全局高刷：查询显示器信息与刷新率，设置全局渲染帧率（hz=null 表示跟随显示器最高）
+  display: {
+    getInfo: () => ipcRenderer.invoke('display:get-info'),
+    setHighRefresh: (enabled, hz) => ipcRenderer.invoke('display:set-high-refresh', enabled, hz),
+  },
+
+  // 桌面融合穿透：桌面模式空区域鼠标穿透到真实桌面，组件区保持可交互
+  desktopFusion: {
+    getState: () => ipcRenderer.invoke('desktop-fusion:get-state'),
+    setEnabled: (enabled) => ipcRenderer.invoke('desktop-fusion:set-enabled', enabled),
+    // 开启穿透的确认框在渲染端（FusionEnableConfirmModal），确认后仍走 set-enabled 重建
+    setInteractive: (interactive) => ipcRenderer.send('desktop-fusion:set-interactive', interactive),
+  },
+
   mediaKeys: {
     setEnabled: (enabled) => ipcRenderer.invoke('media-keys:set-enabled', enabled),
     onControl: (callback) => {
@@ -119,6 +133,42 @@ contextBridge.exposeInMainWorld('electron', {
     aiMixAutomation: (plan, sourceAudioPath, targetAudioPath) =>
       ipcRenderer.invoke('render:aiMixAutomation', plan, sourceAudioPath, targetAudioPath),
   },
+
+  // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理
+  aiModel: {
+    getStatus: () => ipcRenderer.invoke('ai-model:get-status'),
+    download: () => ipcRenderer.invoke('ai-model:download'),
+    pause: () => ipcRenderer.invoke('ai-model:pause'),
+    cancel: () => ipcRenderer.invoke('ai-model:cancel'),
+    delete: () => ipcRenderer.invoke('ai-model:delete'),
+    onProgress: (callback) => {
+      const listener = (_event, progress) => callback(progress)
+      ipcRenderer.on('ai-model:progress', listener)
+      return () => ipcRenderer.removeListener('ai-model:progress', listener)
+    },
+  },
+
+  // 代理自动配置：模型下载/应用更新走本地代理
+  proxyManager: {
+    scan: () => ipcRenderer.invoke('proxy-manager:scan'),
+    enable: (port) => ipcRenderer.invoke('proxy-manager:enable', port),
+    disable: () => ipcRenderer.invoke('proxy-manager:disable'),
+    getState: () => ipcRenderer.invoke('proxy-manager:get-state'),
+    setEnabled: (v) => ipcRenderer.invoke('proxy-manager:set-enabled', v),
+    consumeNotice: () => ipcRenderer.invoke('proxy-manager:consume-notice'),
+    getLatency: () => ipcRenderer.invoke('proxy-manager:get-latency'),
+    probe: () => ipcRenderer.invoke('proxy-manager:probe'),
+    onLatency: (callback) => {
+      const listener = (_event, latency) => callback(latency)
+      ipcRenderer.on('proxy-manager:latency', listener)
+      return () => ipcRenderer.removeListener('proxy-manager:latency', listener)
+    },
+    onNotice: (callback) => {
+      const listener = (_event, notice) => callback(notice)
+      ipcRenderer.on('proxy-manager:notice', listener)
+      return () => ipcRenderer.removeListener('proxy-manager:notice', listener)
+    },
+  },
   
   // AutoMix 渲染进程诊断日志：写入后端 automix-backend.log
   automixLog: (scope, message) => ipcRenderer.invoke('automix-log:append', scope, message),
@@ -127,6 +177,8 @@ contextBridge.exposeInMainWorld('electron', {
   audioDownload: {
     prepare: (urlOrPath, trackKey) => 
       ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey),
+    peekCached: (trackKey) =>
+      ipcRenderer.invoke('audio-download:peekCached', trackKey),
     getMediaUrl: (filePath) => ipcRenderer.invoke('audio-download:getMediaUrl', filePath),
     saveWav: (trackKey, wavArrayBuffer) => ipcRenderer.invoke('audio-download:saveWav', trackKey, wavArrayBuffer),
     cleanupOldFiles: () => ipcRenderer.invoke('audio-download:cleanup'),
@@ -134,10 +186,21 @@ contextBridge.exposeInMainWorld('electron', {
     clearCache: () => ipcRenderer.invoke('audio-download:clear-cache'),
   },
 
-  // 应用更新：多源下载安装包 → sha256 校验 → 打开安装向导
+  // 应用更新：后台静默下载 + 退出即应用 + 更新日志/版本历史
   update: {
     downloadAndInstall: (urls, sha256) =>
       ipcRenderer.invoke('update:download-and-install', urls, sha256),
+    downloadBackground: (payload) =>
+      ipcRenderer.invoke('update:download-background', payload),
+    applyPending: () => ipcRenderer.invoke('update:apply-pending'),
+    restartForUpdate: () => ipcRenderer.invoke('update:restart-for-update'),
+    getPending: () => ipcRenderer.invoke('update:get-pending'),
+    consumeLastApplied: () => ipcRenderer.invoke('update:consume-last-applied'),
+    onDownloadStatus: (callback) => {
+      const listener = (_event, status) => callback(status)
+      ipcRenderer.on('update:download-status', listener)
+      return () => ipcRenderer.removeListener('update:download-status', listener)
+    },
   },
   
   // 配置管理
@@ -166,6 +229,12 @@ contextBridge.exposeInMainWorld('electron', {
   openSpotifyLogin: (clientId) => ipcRenderer.invoke('open-spotify-login', clientId),
   // 汽水音乐登录（Electron 弹窗扫码，抓 token）
   openSodaLogin: () => ipcRenderer.invoke('open-soda-login'),
+  // 汽水音乐登出清理（清 auth 分区 .qishui.com Cookie/本地存储 + 凭据文件会话字段）
+  clearSodaLogin: () => ipcRenderer.invoke('soda-clear-login'),
+  // HSE 开发者模式：把场景微调的「发布种子」写回仓库源文件（仅开发模式生效）
+  writeHseSceneSeed: (content) => ipcRenderer.invoke('hse-write-scene-seed', content),
+  // HSE 离线导出：渲染完成的 MP3 直写用户桌面（<歌曲名>-Modified.mp3）
+  saveHseRenderedAudio: (data, fileName) => ipcRenderer.invoke('hse-save-rendered-audio', data, fileName),
   // 汽水音乐（抖音）数据桥：隐藏窗口导航抖音搜索页抓取音乐卡片
   sodaScrapeSearch: (keyword) => ipcRenderer.invoke('soda-scrape-search', keyword),
   // 酷狗数据桥：隐藏窗口页面内同源 fetch 用户歌单/用户信息（绕开服务端 WAF）
@@ -204,6 +273,11 @@ contextBridge.exposeInMainWorld('electron', {
   // amp-api 代理：渲染进程浏览器直连会被 CORS 拦截，改由主进程请求
   appleApi: (path, developerToken, mediaUserToken, method, body) =>
     ipcRenderer.invoke('apple-api', { path, developerToken, mediaUserToken, method, body }),
+  // Apple Music 原生音源：webPlayback 取流（主进程 POST play.itunes.apple.com，无 CORS）
+  applePlayback: (songId, developerToken, mediaUserToken) =>
+    ipcRenderer.invoke('apple-playback', { songId, developerToken, mediaUserToken }),
+  // Apple HLS 清单获取（主进程 fetch 文本，白名单限制 Apple 域名）
+  appleFetchUrl: (url) => ipcRenderer.invoke('apple-fetch-url', { url }),
   // Apple 账号信息（buy.itunes 接口，需登录窗口抓取的 itunes cookie）
   appleAccountInfo: (cookies) => ipcRenderer.invoke('apple-account-info', cookies),
   // Apple 个人资料页（解析 og:image 头像）

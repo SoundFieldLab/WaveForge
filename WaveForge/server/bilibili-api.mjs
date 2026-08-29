@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 哔哩哔哩「看歌」后端模块（server/bilibili-api.mjs）
  *
  * 为 WaveForge 的 B 站 MV 自动播放模式提供：
@@ -594,10 +598,13 @@ export function registerBilibiliRoutes(app) {
     // 若否则尝试 deflate-raw / gzip / deflate / brotli 逐种解压
     const direct = buf.toString('utf8')
     if (direct.includes('<d p=')) return direct
+    // 合法但无弹幕的明文 XML（<i> 根节点存在、没有任何 <d> 节点）：返回空串表示"已确认无弹幕"
+    if (direct.includes('<i') || direct.trimStart().startsWith('<?xml')) return ''
     for (const fn of [() => inflateRawSync(buf), () => gunzipSync(buf), () => inflateSync(buf), () => brotliDecompressSync(buf)]) {
       try {
         const text = fn().toString('utf8')
         if (text.includes('<d p=')) return text
+        if (text.includes('<i')) return ''
       } catch {
         // 尝试下一种解压方式
       }
@@ -615,37 +622,49 @@ export function registerBilibiliRoutes(app) {
       // 弹幕接口必须带 buvid3 cookie，否则极易触发风控（此前路由漏调 ensureBuvid3）
       await ensureBuvid3()
       let items = []
+      let lastError = ''
+      // fetchedOk：任一数据源成功响应过（含"已确认该视频无弹幕"）。
+      // 全部数据源都传输失败时绝不能把空结果缓存/当成功返回——否则瞬时网络抖动
+      // 会让该视频弹幕被空缓存"毒化"10 分钟，渲染端收到 code:0 也永远不会重试。
+      let fetchedOk = false
       // 优先 protobuf seg.so（B 站现行弹幕源）；空/失败回退旧 XML
       try {
         items = await fetchDanmakuSegs(cid)
+        fetchedOk = true
       } catch (segError) {
-        console.warn(`[Bilibili] seg.so 弹幕失败，回退 XML:`, segError.message)
+        lastError = `seg.so: ${segError instanceof Error ? segError.message : String(segError)}`
+        console.warn(`[Bilibili] seg.so 弹幕失败，回退 XML:`, lastError)
       }
       if (items.length === 0) {
-        let xml = null
-        let lastError = ''
+        // seg.so 为空（无弹幕/历史老视频数据不全）也走 XML 兜底二次确认
         for (const url of [
           `https://api.bilibili.com/x/v1/dm/list.so?oid=${cid}`,
           `https://comment.bilibili.com/${cid}.xml`,
         ]) {
           try {
-            xml = await fetchDanmakuXml(url)
-            if (xml) break
+            const xml = await fetchDanmakuXml(url)
+            fetchedOk = true
+            if (xml) {
+              items = parseDanmakuXml(xml)
+              break
+            }
           } catch (error) {
-            lastError = error instanceof Error ? error.message : String(error)
+            lastError = lastError || `${url.includes('list.so') ? 'list.so' : 'comment.xml'}: ${error instanceof Error ? error.message : String(error)}`
           }
         }
-        if (xml) items = parseDanmakuXml(xml)
-        else if (!lastError) lastError = 'seg.so 与 XML 均无数据'
       }
-      if (items.length === 0) {
-        // 两路都无弹幕：返回空列表（视频确实无弹幕，或全部为高级弹幕命令）
+      if (items.length > 0) {
+        danmakuCache.set(cid, { items, createdAt: Date.now() })
+        pruneCache(danmakuCache, DANMAKU_CACHE_TTL)
+        return res.json({ code: 0, danmaku: items })
+      }
+      if (fetchedOk) {
+        // 数据源确认无弹幕：返回空列表并缓存（视频确实无弹幕，或全部为高级弹幕命令）
         danmakuCache.set(cid, { items: [], createdAt: Date.now() })
         return res.json({ code: 0, danmaku: [] })
       }
-      danmakuCache.set(cid, { items, createdAt: Date.now() })
-      pruneCache(danmakuCache, DANMAKU_CACHE_TTL)
-      res.json({ code: 0, danmaku: items })
+      // 全部数据源传输失败：不缓存，返回非 0 让渲染端稍后重试
+      res.status(502).json({ code: -1, error: lastError || '弹幕接口暂不可用' })
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '获取弹幕失败' })
     }

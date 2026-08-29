@@ -23,6 +23,7 @@ npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electro
 - **桌面模式**：桌面小组件、专注计时、生产力工具、自定义壁纸
 - **Wallpaper Engine 联动**：读取本地 WE 配置并同步音频可视化
 - **缓存系统**：IndexedDB（封面双缓冲、歌单缓存、免闪切换）
+- **插件系统**：App Store 式插件中心（横向圆角弹窗）、卡片/详情/导入/卸载、开关状态持久记忆、使用须知门控；内置 **DG_LAB 郊狼联动插件**（音乐波形→A/B 通道电流，V3/V4 双协议，波形导入与实时可视化）——第三方插件开发见 [docs/plugin-development.md](./docs/plugin-development.md)
 - **社交/个人中心**：QQ/网易云关注与粉丝、查看他人主页、QQ MV 浏览、私人 FM、智能播放
 
 ## 技术架构
@@ -98,13 +99,13 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 | 3003 | Python 响度测量服务 | Flask（响度归一化 `/lufs`，ITU-R BS.1770） |
 | 3004 | Python 频响补偿设计服务 | Flask（`/compensation`，ISO 226 简化等响度模型/预设/自定义 → 多段 Biquad 参数） |
 
-## 音效引擎 v1 / v2 / v3
+## 音效引擎 v1 / v2 / HSE
 
-调音室头部可切换音效引擎版本（默认 **v1 原版**；v2 为增强版：场景方案 / 可叠加效果 / 混响类型 / 压缩 / 夜间模式（动态压缩 + 高频衰减）/ 频响补偿 / 响度归一化；**v3 为纯 TS DSP 内核引擎**：`src/services/waveforge-engine-v3/`，14 级处理链（响度归一化→3D 环绕→M/S→EQ→齿音→压缩→夜间→卷积/算法混响→虚拟低音→等响度补偿→智能 EQ→限幅）、11 组合场景、10/20 段 EQ + 级联 Q 补偿、分享串（版本+校验+白名单防注入）、LUFS/频谱分析 + 听力测试、WAV 离线导出（与实时链逐样本一致）、AudioWorklet 渲染线程 + script 兜底）。v3 调音室为 **HSE（HyperSoundEngine）风格**（左侧 8 页导航：主页/音效场景/均衡器/空间音效/动态调音/分析/调音器/关于，深色琥珀金主题）；**低音增强含「低音下潜」**（-6..+12dB 真实低频能量提升，lowshelf 语义，谐波虚拟低音之上补足对比 v2 的低音下潜）；**分析页**为对数频率轴实时频谱（20Hz-20kHz、dBFS 归一化、10fps 刷新）+ LUFS/GR/特征 + 听力测试；**音量控制跟手**（80ms 平滑）且**独立于场景预设/组合**（应用场景不覆盖用户音量）。v3 响度归一化（实时 BS.1770）与频响补偿（等响度 auto 按系统音量）均在引擎内实现，不依赖 3003/3004 服务；与 v1/v2 完全独立（不做参数迁移），参数快照持久化于 localStorage。v2 频响补偿为**等响度动态补偿**：多段 Biquad 链，auto 按系统音量线性提升低频（0-12dB）/高频（0-6dB，shelf 结构防中频污染）+ 场景预设（flat/bass/vocal/warm/bright/night）+ 自定义频段，设计结果由独立服务 3004 `/compensation` 下发。v2 调音室支持：场景一键应用（自定义状态弹覆盖/保存确认）、恢复默认/清空均衡器按钮、3D 环绕开启展开子设置横条、效果卡片「使用/已启用」、切歌时右上角弹衔接方案提示（直接拼接/60ms 淡入淡出/albumGapless 交叉淡化）。切换为热切换（暂停音乐换链后恢复），音频图未就绪时退化为冷切换（下次启动生效），右上角弹 2s 提示。详见 `AGENTS.md` 与 `CONTEXT.md`。
+调音室头部可切换音效引擎版本（默认 **v1 原版**；v2 为增强版：场景方案 / 可叠加效果 / 混响类型 / 压缩 / 夜间模式（动态压缩 + 高频衰减）/ 频响补偿 / 响度归一化；**v3 为纯 TS DSP 内核引擎**：`src/services/waveforge-engine-v3/`，14 级处理链（响度归一化→3D 环绕→M/S→EQ→齿音→压缩→夜间→卷积/算法混响→虚拟低音→等响度补偿→智能 EQ→限幅）、11 组合场景、10/20 段 EQ + 级联 Q 补偿、分享串（版本+校验+白名单防注入）、LUFS/频谱分析 + 听力测试、WAV 离线导出（与实时链逐样本一致）、AudioWorklet 渲染线程 + script 兜底）。**HSE（HyperSoundEngine）**（左侧 8 页导航：主页/音效场景/均衡器/空间音效/动态调音/分析/调音器/关于，深色琥珀金主题）；**低音增强含「低音下潜」**（-6..+12dB 真实低频能量提升，lowshelf 语义，谐波虚拟低音之上补足对比 v2 的低音下潜）；**分析页**为对数频率轴实时频谱（20Hz-20kHz、dBFS 归一化、10fps 刷新）+ LUFS/GR/特征 + 听力测试；**音量控制跟手**（80ms 平滑）且**独立于场景预设/组合**（应用场景不覆盖用户音量）。HSE响度归一化（实时 BS.1770）与频响补偿（等响度 auto 按系统音量）均在引擎内实现，不依赖 3003/3004 服务；与 v1/v2 完全独立（不做参数迁移），参数快照持久化于 localStorage。v2 频响补偿为**等响度动态补偿**：多段 Biquad 链，auto 按系统音量线性提升低频（0-12dB）/高频（0-6dB，shelf 结构防中频污染）+ 场景预设（flat/bass/vocal/warm/bright/night）+ 自定义频段，设计结果由独立服务 3004 `/compensation` 下发。v2 调音室支持：场景一键应用（自定义状态弹覆盖/保存确认）、恢复默认/清空均衡器按钮、3D 环绕开启展开子设置横条、效果卡片「使用/已启用」、切歌时右上角弹衔接方案提示（直接拼接/60ms 淡入淡出/albumGapless 交叉淡化）。切换为热切换（暂停音乐换链后恢复），音频图未就绪时退化为冷切换（下次启动生效），右上角弹 2s 提示。详见 `AGENTS.md` 与 `CONTEXT.md`。
 
 ## 空间音频（Spatial Audio）
 
-空间音频是 v3 处理节点**之后**的兄弟 AudioWorklet 节点（`masterGain → [soundtouch?] → v3Node → [spatial?] → analyser`），只做双耳渲染、不碰引擎参数——HSE 核心（EngineV3）零改动，参数与 V3EngineParams 完全解耦（全局设置，不进场景快照、不被场景应用覆盖）。四种模式：
+空间音频是 HSE 处理节点**之后**的兄弟 AudioWorklet 节点（`masterGain → [soundtouch?] → v3Node → [spatial?] → analyser`），只做双耳渲染、不碰引擎参数——HSE 核心（EngineV3）零改动，参数与 V3EngineParams 完全解耦（全局设置，不进场景快照、不被场景应用覆盖）。四种模式：
 
 - **A 一键空间化**：立体声展开为 ±30°（20..120° 可调）虚拟扬声器，干湿混合强度 / 房间模拟预设 / 房间混响可调
 - **B 头锁定环绕**：5.1 / 7.1.4 / 自定义布局预设 + 环形拖拽编辑器（上限 16 只扬声器）+ 逐扬声器声源路由（L / R / both），声场固定于头部朝向（耳机听感）
@@ -121,7 +122,7 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 - **时域 / FFT 分区双卷积模式**（两种模式干湿对齐一致、脉冲位置 ±0 样本）
 - **64 对象性能基准**：WASM 后端本机实测 ≈1.7ms/块（≈3.1x 实时率），TS 参考后端 ≈5.4ms/块
 
-**参数持久化**：localStorage `waveforge:spatial-params`（独立于 v3 场景快照；400ms 防抖 + 深合并容错，坏数据回默认）；HRTF 活动数据集记录 `waveforge:hrtf-active-dataset`。
+**参数持久化**：localStorage `waveforge:spatial-params`（独立于 HSE 场景快照；400ms 防抖 + 深合并容错，坏数据回默认）；HRTF 活动数据集记录 `waveforge:hrtf-active-dataset`。
 
 **构建**：`npm run build:spatial-worklet`（cargo → wasm base64 内联 → esbuild 单文件 `public/spatial-worklet.js`），predev / prebuild 自动执行；缺失源逐级优雅降级（TS 参考后端兜底 / 合成 HRTF 网格兜底）。融合细节见 `src/services/waveforge-engine-v3/docs/FUSION_GUIDE.md` 第 6 章。
 
@@ -141,16 +142,19 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 - [HANDOVER.md](./HANDOVER.md) — 交接文档：状态、已知问题、未决事项
 - [CONTEXT.md](./CONTEXT.md) — 音效域词汇表（音效/场景方案/自定义状态/频响补偿等术语定义）
 - [docs/adr/](./docs/adr/) — 架构决策记录（叠加效果模型/频响补偿互斥/导出链共享构建）
-- [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) — 故障排除
 - [CACHE_SYSTEM.md](./CACHE_SYSTEM.md) — 缓存系统设计
 - [LICENSE_SYSTEM.md](./LICENSE_SYSTEM.md) — 设备授权机制
 - [AFDIAN_SPONSORS.md](./AFDIAN_SPONSORS.md) — 爱发电赞助名单同步说明
 - [CODEX_RECENT_PLAYBACK_CHECKPOINT.md](./CODEX_RECENT_PLAYBACK_CHECKPOINT.md) — 最近播放功能检查点
 - [WALLPAPER_GUIDE.md](./WALLPAPER_GUIDE.md) / [DESKTOP_MODE.md](./DESKTOP_MODE.md) — 壁纸与桌面模式
-- [PROJECT_HISTORY.md](./PROJECT_HISTORY.md) — 历史开发记录与 Phase 2 规划
+- [docs/plugin-development.md](./docs/plugin-development.md) — 插件开发文档（公开，供开发者与 AI 编写 WaveForge 插件，上传 GitHub 时随仓库发布）
 - [PYTHON_EMBEDDING_GUIDE.md](./PYTHON_EMBEDDING_GUIDE.md) — 嵌入式 Python 构建
 - [docs/歌词对比-LyricsBlossom.md](./docs/歌词对比-LyricsBlossom.md) — Apple Music 歌词逆向对比（Apple 逐字模式）
 
 ## 许可证
 
-MIT（第三方依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）
+MIT（第三方依赖见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)）。
+
+**私有模块**：无缝衔接（Smart Gapless）、智能混音（AutoMix）、看歌 / MV 背景（Bilibili）、
+桌面模式、探索模式等模块以 **WaveForge 私有模块许可**提供（非 MIT），适用范围与使用限制详见
+[PRIVATE-LICENSE.md](./PRIVATE-LICENSE.md)（受保护文件头部 / 目录 `LICENSE.private` 亦标注）。

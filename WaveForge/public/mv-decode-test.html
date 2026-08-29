@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="referrer" content="no-referrer" />
+<title>WaveForge 音频解码测试</title>
+<style>
+  body { font-family: ui-monospace, monospace; background: #111; color: #ddd; padding: 20px; }
+  input { width: 70%; padding: 8px; background: #222; color: #eee; border: 1px solid #444; border-radius: 6px; }
+  button { padding: 8px 16px; background: #4a6cf7; color: #fff; border: none; border-radius: 6px; cursor: pointer; }
+  pre { white-space: pre-wrap; word-break: break-all; background: #000; padding: 12px; border-radius: 8px; max-height: 300px; overflow: auto; }
+  .ok { color: #7dd87d } .err { color: #f77 }
+</style>
+</head>
+<body>
+<h3>音频解码 → mono 降采样 → frameRms + onset → base64</h3>
+<p>URL: <input id="url" size="90" placeholder="粘贴音频 URL（B 站 DASH m4s / mp3 / flac / m4a）" />
+<button id="go">解码</button></p>
+<p>结果会写入 <code>window.__decodeResult</code>（JSON），并在下方展示摘要。</p>
+<pre id="out">就绪。</pre>
+<script>
+  const out = document.getElementById('out')
+  const setOut = (cls, text) => { out.className = cls; out.textContent = String(text).slice(0, 4000) }
+  const btn = document.getElementById('go')
+  btn.onclick = () => void run()
+  async function run() {
+    const url = document.getElementById('url').value.trim()
+    if (!url) { setOut('err', '请输入 URL'); return }
+    setOut('', 'fetch…')
+    window.__decodeResult = null
+    try {
+      const resp = await fetch(url)
+      if (!resp.ok) throw new Error('fetch ' + resp.status)
+      const buf = await resp.arrayBuffer()
+      setOut('', '解码 (' + (buf.byteLength / 1024).toFixed(0) + ' KB)…')
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      const ctx = new Ctx()
+      let decoded
+      try { decoded = await ctx.decodeAudioData(buf) } finally { void ctx.close() }
+      const ch = decoded.getChannelData(0)
+      const sampleRate = decoded.sampleRate
+      // 降采样到单声道（默认 12kHz；?rate=22050 可复现 app 的检测路径）
+      // 与 app 的 toMonoDownsampled 一致：盒式滤波平均（简单抽取会改变 RMS 统计，
+      // 导致 detectMusicStart 阈值行为不同）
+      const params = new URLSearchParams(location.search)
+      const target = parseInt(params.get('rate') || '12000', 10) || 12000
+      const outLength = Math.max(1, Math.floor(decoded.duration * target))
+      const mono = new Float32Array(outLength)
+      const ratio = sampleRate / target
+      for (let i = 0; i < outLength; i++) {
+        const start = Math.floor(i * ratio)
+        const end = Math.min(ch.length, Math.ceil((i + 1) * ratio))
+        let sum = 0
+        for (let j = start; j < end; j++) sum += ch[j]
+        mono[i] = sum / Math.max(1, end - start)
+      }
+      const sr = target
+      const hop = Math.max(256, Math.round(sr * 0.02))
+      const frameSize = Math.max(hop * 2, 1024)
+      const frameRate = sr / hop
+      const rmsArr = []
+      const onsetArr = []
+      let previous = 0
+      for (let start = 0; start + frameSize <= mono.length; start += hop) {
+        let sum = 0
+        for (let k = start; k < start + frameSize; k++) sum += mono[k] * mono[k]
+        const r = Math.sqrt(sum / frameSize)
+        const last3 = rmsArr.length >= 3 ? rmsArr[rmsArr.length - 3] : r
+        const o = Math.max(0, r - previous) + Math.max(0, r - last3) * 0.35
+        rmsArr.push(r)
+        onsetArr.push(o)
+        previous = r
+      }
+      const toB64 = (arr) => {
+        const b = new Uint8Array(arr.length * 4)
+        new Float32Array(b.buffer).set(arr)
+        let bin = ''
+        const CHUNK = 0x8000
+        for (let i = 0; i < b.length; i += CHUNK) bin += String.fromCharCode.apply(null, b.subarray(i, i + CHUNK))
+        return btoa(bin)
+      }
+      const result = {
+        url: url.slice(0, 120),
+        duration: mono.length / sr,
+        frameRate,
+        frameCount: rmsArr.length,
+        rmsB64: toB64(Float32Array.from(rmsArr)),
+        onsetB64: toB64(Float32Array.from(onsetArr)),
+      }
+      window.__decodeResult = JSON.stringify(result)
+      setOut('ok', 'OK: duration=' + result.duration.toFixed(2) + 's frames=' + result.frameCount +
+        ' fr=' + frameRate.toFixed(1) + ' jsonLen=' + result.rmsB64.length)
+      console.log('decode result set, jsonLen=', result.rmsB64.length)
+    } catch (e) {
+      setOut('err', '失败: ' + (e && e.message ? e.message : e))
+    }
+  }
+  // 支持 URL 参数自动解码
+  const params = new URLSearchParams(location.search)
+  const auto = params.get('url')
+  if (auto) { document.getElementById('url').value = auto; void run() }
+</script>
+</body>
+</html>

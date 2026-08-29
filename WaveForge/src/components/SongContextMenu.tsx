@@ -12,6 +12,8 @@ import {
   loadFavoriteIdentifiers,
   peekSongFavoriteStatus,
 } from '../services/favoriteStatusService'
+import { addSodaSongToPlaylist, checkSodaLiked, isSodaLoggedIn, setSodaTrackLiked } from '../services/sodaService'
+import { addKugouSongToPlaylist, likeKugouSong } from '../services/kugouService'
 
 interface SongContextMenuProps {
   show: boolean
@@ -149,11 +151,27 @@ export default function SongContextMenu({
 
   useEffect(() => {
     if (!show || !song) return
+    // 红心状态唯一真相源：favoriteStatusService 归属键缓存（netease/qq/soda 统一，
+    // 汽水归属键为 soda_user_id，喜欢列表由 playlistService.getLikedSongs 走 qishui-liked 分页拉全量）
     const cachedStatus = peekSongFavoriteStatus(song, resolvedPlatform, favoriteUserId)
     setFavoriteStatus(cachedStatus ?? (hideFavoriteAction ? true : null))
     if (!favoriteUserId || cachedStatus !== null) return
 
     let cancelled = false
+    // 临时兜底（仅汽水）：identifiers 首次加载需分页拉全量（最多 20 页 × 50 条），可能耗时数秒；
+    // 仅在「缓存未加载完成」这段等待期用单曲 checkSodaLiked 先行给出近似显示（乐观体验）。
+    // 通用路径 resolve 后一律以缓存结果为准——peek 守卫保证兜底响应晚到时不会覆盖权威值。
+    const sodaTrackId = resolvedPlatform === 'soda' ? String(song.mid || song.id) : ''
+    if (sodaTrackId && isSodaLoggedIn()) {
+      void checkSodaLiked([sodaTrackId])
+        .then(likedMap => {
+          if (!cancelled && peekSongFavoriteStatus(song, resolvedPlatform, favoriteUserId) === null) {
+            setFavoriteStatus(Boolean(likedMap[sodaTrackId]))
+          }
+        })
+        .catch(() => { /* 兜底失败保持加载态，等待通用路径 */ })
+    }
+
     void loadFavoriteIdentifiers(resolvedPlatform, favoriteUserId)
       .then(() => {
         if (!cancelled) setFavoriteStatus(peekSongFavoriteStatus(song, resolvedPlatform, favoriteUserId) === true)
@@ -311,7 +329,9 @@ export default function SongContextMenu({
   }
 
   const currentUserId = platform === 'apple' ? '' : (localStorage.getItem(getUserStorageKey(platform)) || '')
-  // 第三方平台（spotify/kugou/soda）操作拦截：未登录提示先登录；已登录 spotify 走官方收藏/加歌单接口
+  // 第三方平台（spotify/kugou/soda）操作拦截：未登录提示先登录；
+  // 已登录 spotify 走官方收藏/加歌接口，soda 走 sodaService（喜欢/加歌），
+  // kugou 走 H5 网关（喜欢/加歌为真实能力；「取消喜欢」上游无移除端点，在按钮层隐藏）
   const handleThirdPartyAction = (action: 'like' | 'unlike' | 'playlist', playlistId?: string): boolean => {
     const p = resolvedPlatform
     if (!isThirdPartyPlatform(p)) return false
@@ -326,12 +346,69 @@ export default function SongContextMenu({
         })
       } else if (action === 'like') {
         void spotifySaveTrack(song).then(ok => {
+          if (ok) {
+            // 与其他平台一致：成功后同步通用收藏缓存并乐观更新本菜单显示
+            setFavoriteStatus(true)
+            applyFavoriteMutation({ platform: 'spotify', type: 'like', songId: song.id, songMid: song.mid })
+          }
           showMenuToast(ok ? '已收藏到 Spotify 音乐库' : '收藏失败，请检查登录状态', ok ? 'success' : 'error')
         })
       } else {
         void spotifyRemoveTrack(song).then(ok => {
+          if (ok) {
+            setFavoriteStatus(false)
+            applyFavoriteMutation({ platform: 'spotify', type: 'unlike', songId: song.id, songMid: song.mid })
+          }
           showMenuToast(ok ? '已从 Spotify 音乐库取消收藏' : '取消收藏失败，请检查登录状态', ok ? 'success' : 'error')
         })
+      }
+      return true
+    }
+    if (p === 'soda') {
+      // 汽水：trackId 一律取 String(mid || id)；成功后同步通用收藏缓存并乐观更新本菜单显示
+      const sodaTrackId = String(song.mid || song.id)
+      if (action === 'playlist' && playlistId) {
+        void addSodaSongToPlaylist(playlistId, song).then(ok => {
+          showMenuToast(ok ? '已添加到汽水歌单' : '添加到汽水歌单失败', ok ? 'success' : 'error')
+        })
+      } else if (action === 'like') {
+        void setSodaTrackLiked(sodaTrackId, true, song).then(ok => {
+          if (ok) {
+            setFavoriteStatus(true)
+            applyFavoriteMutation({ platform: 'soda', type: 'like', songId: song.id, songMid: song.mid })
+          }
+          showMenuToast(ok ? '已加入汽水喜欢' : '喜欢失败，请检查登录状态', ok ? 'success' : 'error')
+        })
+      } else {
+        void setSodaTrackLiked(sodaTrackId, false, song).then(ok => {
+          if (ok) {
+            setFavoriteStatus(false)
+            applyFavoriteMutation({ platform: 'soda', type: 'unlike', songId: song.id, songMid: song.mid })
+          }
+          showMenuToast(ok ? '已从汽水喜欢中移除' : '取消喜欢失败，请检查登录状态', ok ? 'success' : 'error')
+        })
+      }
+      return true
+    }
+    if (p === 'kugou') {
+      // 酷狗：喜欢=H5 网关加入默认「我喜欢」歌单（真实写入），加歌=/v6/add_song（真实）。
+      // 取消喜欢上游无移除端点（服务端对 like=false 只回执不落库），入口已在按钮层隐藏，
+      // 这里兜底给出准确提示而不是假装成功。
+      const kugouHash = String(song.mid || '')
+      if (action === 'playlist' && playlistId) {
+        void addKugouSongToPlaylist(playlistId, { hash: kugouHash }).then(ok => {
+          showMenuToast(ok ? '已添加到酷狗歌单' : '添加到酷狗歌单失败', ok ? 'success' : 'error')
+        })
+      } else if (action === 'like') {
+        void likeKugouSong({ hash: kugouHash }, true).then(ok => {
+          if (ok) {
+            setFavoriteStatus(true)
+            applyFavoriteMutation({ platform: 'kugou', type: 'like', songId: song.id, songMid: song.mid })
+          }
+          showMenuToast(ok ? '已加入酷狗喜欢' : '喜欢失败，请检查登录状态', ok ? 'success' : 'error')
+        })
+      } else {
+        showMenuToast('酷狗音乐暂不支持取消喜欢：上游未提供移除歌曲的接口', 'info')
       }
       return true
     }
@@ -340,15 +417,24 @@ export default function SongContextMenu({
   }
   const ownedPlaylists = userPlaylists.filter((playlist) => {
     if (playlist.isCollected || playlist.isLike) return false
-    if (playlist.platform && playlist.platform !== platform) return false
+    // 显式标注平台的歌单：平台需与菜单平台或当前歌曲平台一致
+    // （汽水歌曲右键时 platform prop 可能仍是浏览页平台，需按 resolvedPlatform 放行汽水歌单）
+    const declaredPlatform = playlist.platform as MusicPlatform | undefined
+    if (declaredPlatform && declaredPlatform !== platform && declaredPlatform !== resolvedPlatform) return false
     const mutationId = String(playlist.dirId || playlist.id)
     if (currentPlaylistId && mutationId === String(currentPlaylistId)) return false
+    // 归属校验按歌单自身平台取对应 userId；未标注平台的歌单沿用菜单平台，行为不变
+    const ownerPlatform = declaredPlatform || platform
     // Apple 资料库歌单无 userId 概念，直接放行
-    if (platform === 'apple') return true
+    if (ownerPlatform === 'apple') return true
     const playlistUserId = playlist.userId == null ? '' : String(playlist.userId)
+    const ownerUserId = ownerPlatform === platform
+      ? currentUserId
+      : (localStorage.getItem(getUserStorageKey(ownerPlatform)) || '')
     // 歌单列表本身来自当前登录用户；旧会话没有落盘 userId 时也应能显示自建歌单。
-    return !playlistUserId || !currentUserId || playlistUserId === currentUserId
+    return !playlistUserId || !ownerUserId || playlistUserId === ownerUserId
   })
+  // 红心显示统一由 favoriteStatus 通用缓存驱动（含汽水）；identifiers 在途时显示加载占位
   const favoriteActionIsRemove = favoriteStatus ?? hideFavoriteAction
   const favoriteStatusLoading = favoriteStatus === null && Boolean(favoriteUserId)
 
@@ -385,7 +471,9 @@ export default function SongContextMenu({
         onClose()
       }
     }] : []),
-    ...(!favoriteStatusLoading && favoriteActionIsRemove && onRemoveFromFavorites ? [{
+    // 酷狗「取消喜欢」上游无移除端点（/api/kugou/like like=false 只回执不生效）——诚实隐藏该入口，
+    // 其余平台照常展示；「我喜欢」新增仍走真实网关不受影响
+    ...(!favoriteStatusLoading && favoriteActionIsRemove && onRemoveFromFavorites && resolvedPlatform !== 'kugou' ? [{
       label: '从喜欢歌单中移除',
       icon: HeartOff,
       onClick: () => {

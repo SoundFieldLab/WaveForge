@@ -12,6 +12,9 @@ venv/
 tmp/
 __pycache__/
 *.py[cod]
+.zcode
+HANDOVER-AI-COLLAB.md
+HANDOVER_DEV.md
 
 # 嵌入式 Python 运行时（由 npm run bundle-python 生成，可重建）
 resources/python-embed/
@@ -23,6 +26,7 @@ src/generated/city-data/
 .playwright-mcp/
 
 # 会话/抓取临时文件（本地开发痕迹，不入库）
+.zcode*
 .codex-*
 .browser-*
 .codex-perf/

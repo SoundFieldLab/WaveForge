@@ -396,7 +396,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   </div>
                   <button
                     onClick={async () => {
-                      const result = await window.electron?.config.selectCachePath();
+                      const result = await window.electron?.config?.selectCachePath();
                       if (result) {
                         // 显示成功提示
                         const toast = document.createElement('div');

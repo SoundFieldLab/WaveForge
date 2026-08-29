@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Apple Music 目录服务（探索页数据源）
  *
  * - 热门歌曲 / 热门专辑：Apple RSS Feed Generator（most-played，按国家/地区）
@@ -256,7 +260,8 @@ const appleMeFetch = async (path: string): Promise<any | null> => {
 
 /** 当前登录用户的歌单列表 */
 export async function getAppleLibraryPlaylists(limit = 100): Promise<AppleLibraryPlaylist[]> {
-  const data = await appleMeFetch(`/v1/me/library/playlists?limit=${Math.min(100, Math.max(1, limit))}&include=tracks`)
+  // web 播放器同款（列表层不带 include=tracks；platform=web 为 me 接口的当前门槛参数）
+  const data = await appleMeFetch(`/v1/me/library/playlists?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
   const items: any[] = Array.isArray(data?.data) ? data.data : []
   return items
     .filter(item => item?.id && item?.attributes)
@@ -273,7 +278,7 @@ export async function getAppleLibraryPlaylists(limit = 100): Promise<AppleLibrar
 
 /** 用户歌单的曲目 */
 export async function getApplePlaylistTracks(playlistId: string, limit = 300): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${Math.min(100, Math.max(1, limit))}`)
+  const data = await appleMeFetch(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}`)
   const items: any[] = Array.isArray(data?.data) ? data.data : []
   return items
     .filter(item => item?.id && item?.attributes)
@@ -290,7 +295,7 @@ export async function getApplePlaylistTracks(playlistId: string, limit = 300): P
 
 /** 用户资料库全部歌曲（「我的音乐」） */
 export async function getAppleLibrarySongs(limit = 200): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/songs?limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
+  const data = await appleMeFetch(`/v1/me/library/songs?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
   const items: any[] = Array.isArray(data?.data) ? data.data : []
   return items
     .filter(item => item?.id && item?.attributes)
@@ -304,6 +309,89 @@ export async function getAppleLibrarySongs(limit = 200): Promise<AppleLibraryTra
       durationMs: item.attributes.durationInMillis,
     }))
     .filter(track => track.name)
+}
+
+/** 资料库专辑（web「资料库」页 albums 分区同款接口） */
+export interface AppleLibraryAlbum {
+  id: string
+  name: string
+  artistName: string
+  artworkUrl?: string
+  releaseDate?: string
+  trackCount?: number
+}
+
+/** 资料库艺人 */
+export interface AppleLibraryArtist {
+  id: string
+  name: string
+  artworkUrl?: string
+  genreName?: string
+}
+
+async function fetchLibraryCollection(path: string): Promise<any[]> {
+  const data = await appleMeFetch(path)
+  return Array.isArray(data?.data) ? data.data : []
+}
+
+/** 用户资料库全部专辑 */
+export async function getAppleLibraryAlbums(limit = 200): Promise<AppleLibraryAlbum[]> {
+  const items = await fetchLibraryCollection(`/v1/me/library/albums?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  return items
+    .filter(item => item?.id && item?.attributes?.name)
+    .map((item: any) => ({
+      id: String(item.id),
+      name: item.attributes.name || '',
+      artistName: item.attributes.artistName || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      releaseDate: item.attributes.releaseDate,
+      trackCount: item.attributes.trackCount ?? item.relationships?.tracks?.data?.length,
+    }))
+}
+
+/** 用户资料库全部艺人 */
+export async function getAppleLibraryArtists(limit = 200): Promise<AppleLibraryArtist[]> {
+  const items = await fetchLibraryCollection(`/v1/me/library/artists?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  return items
+    .filter(item => item?.id && item?.attributes?.name)
+    .map((item: any) => ({
+      id: String(item.id),
+      name: item.attributes.name || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      genreName: Array.isArray(item.attributes.genreNames) ? item.attributes.genreNames[0] : undefined,
+    }))
+}
+
+/** 单张库专辑曲目（include=catalog 带回目录 id 供播放） */
+export async function getAppleLibraryAlbumTracks(albumId: string, limit = 300): Promise<AppleLibraryTrack[]> {
+  const data = await appleMeFetch(`/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
+  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  return items
+    .filter(item => item?.id && item?.attributes?.name)
+    .map((item: any): AppleLibraryTrack => ({
+      id: String(item.id),
+      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
+      name: item.attributes.name || '',
+      artistName: item.attributes.artistName || '',
+      albumName: item.attributes.albumName || undefined,
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      durationMs: item.attributes.durationInMillis,
+    }))
+}
+
+/** 某库艺人在资料库内的专辑 */
+export async function getAppleLibraryArtistAlbums(artistId: string, limit = 100): Promise<AppleLibraryAlbum[]> {
+  const items = await fetchLibraryCollection(`/v1/me/library/artists/${encodeURIComponent(artistId)}/albums?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  return items
+    .filter(item => item?.id && item?.attributes?.name)
+    .map((item: any): AppleLibraryAlbum => ({
+      id: String(item.id),
+      name: item.attributes.name || '',
+      artistName: item.attributes.artistName || '',
+      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      releaseDate: item.attributes.releaseDate,
+      trackCount: item.attributes.trackCount ?? item.relationships?.tracks?.data?.length,
+    }))
 }
 
 // ─────────────────────────── 目录搜索（艺人 / 专辑） ───────────────────────────
@@ -672,7 +760,7 @@ export async function removeAppleSongFromLibrary(songId: string): Promise<boolea
 
 /** 最近播放（需登录） */
 export async function getAppleRecentPlayed(limit = 50): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/recent/played/tracks?limit=${Math.min(25, Math.max(1, limit))}`)
+  const data = await appleMeFetch(`/v1/me/recent/played/tracks?platform=web&limit=${Math.min(25, Math.max(1, limit))}`)
   const items: any[] = Array.isArray(data?.data) ? data.data : []
   return items
     .filter(item => item?.id && item?.attributes)
@@ -729,7 +817,9 @@ export function appleSongToSong(song: AppleCatalogSong, storefront = 'cn'): Song
 export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
   return {
     id: Number(track.id) || 0,
-    appleId: String(track.id || ''),
+    // 原生音源（webPlayback）需要目录歌曲 id（salableAdamId）；资料库 id 仅在
+    // 无 catalogId（用户自传云曲目）时兜底，此时取流大概率失败 → 回退载体匹配
+    appleId: track.catalogId || String(track.id || ''),
     name: track.name || '',
     artists: track.artistName ? [{ name: track.artistName }] : [],
     album: {
@@ -745,8 +835,8 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
 /**
  * 统一播放转换：非网易云/QQ 平台的曲目 → 网易云/QQ 同款可播放歌曲。
  * - apple：始终匹配（Apple 曲目无法直接播放）
- * - spotify / soda：无自源音源，始终匹配
- * - kugou：由调用方决定（已登录酷狗时可原生播放，不进来）
+ * - spotify：无自源音源，始终匹配
+ * - kugou / soda：由调用方决定（原生音源可播时不进来；汽水走逆向 Web API，免费/试听流可播）
  * - 网易云/QQ 曲目原样返回
  * 所有界面（搜索/歌单/探索/个人中心）点播放时都走这里，避免各处重复匹配。
  */
@@ -766,6 +856,118 @@ export async function resolvePlayableSong(song: Song): Promise<Song | null> {
 export async function searchAppleSongsAsSongs(keywords: string, country = 'cn', limit = 25): Promise<Song[]> {
   const tracks = await searchAppleCatalog(keywords, '', limit)
   return tracks.map(track => appleSongToSong(track, country))
+}
+
+// ─────────────────────────── amp-api 目录搜索（web 播放器同款） ───────────────────────────
+
+export interface AppleSearchV1Result {
+  songs: AppleCatalogSong[]
+  albums: AppleCatalogAlbum[]
+  artists: AppleCatalogArtist[]
+  playlists: AppleCatalogPlaylist[]
+}
+
+/**
+ * amp-api 目录搜索（music.apple.com 搜索框同款接口）：
+ * GET /v1/catalog/{storefront}/search?term=...&types=songs,albums,artists,playlists,stations
+ * 需 Developer Token；未配置 token 时返回空（调用方回退 iTunes Search）。
+ */
+export async function searchAppleCatalogV1(
+  keywords: string,
+  storefront = 'cn',
+  limit = 25,
+): Promise<AppleSearchV1Result> {
+  const empty: AppleSearchV1Result = { songs: [], albums: [], artists: [], playlists: [] }
+  if (!keywords.trim()) return empty
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return empty
+  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search?term=${encodeURIComponent(keywords.trim())}`
+    + `&types=songs,albums,artists,playlists,stations&limit=${Math.min(50, Math.max(1, limit))}&include[songs]=artists&include[albums]=artists&include[playlists]=tracks`
+  const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 15000 })
+  if (!result.ok) return empty
+  const results = result.data?.results || {}
+  const mapSongs = (data?: any[]): AppleCatalogSong[] => Array.isArray(data) ? data.map((song: any) => ({
+    id: String(song?.id ?? ''),
+    name: song?.attributes?.name || '',
+    artistName: song?.attributes?.artistName || '',
+    albumName: song?.attributes?.albumName || undefined,
+    artworkUrl: toHighResArtwork(song?.attributes?.artwork?.url || ''),
+    durationMs: song?.attributes?.durationInMillis || song?.attributes?.durationMillis || undefined,
+  })).filter(song => song.name && song.id) : []
+  const mapAlbums = (data?: any[]): AppleCatalogAlbum[] => Array.isArray(data) ? data.map((album: any) => ({
+    id: String(album?.id ?? ''),
+    name: album?.attributes?.name || '',
+    artistName: album?.attributes?.artistName || '',
+    artworkUrl: toHighResArtwork(album?.attributes?.artwork?.url || ''),
+    releaseDate: album?.attributes?.releaseDate,
+    genres: Array.isArray(album?.attributes?.genreNames) ? album.attributes.genreNames : undefined,
+  })).filter(album => album.name && album.id) : []
+  const mapArtists = (data?: any[]): AppleCatalogArtist[] => Array.isArray(data) ? data.map((artist: any) => ({
+    id: String(artist?.id ?? ''),
+    name: artist?.attributes?.name || '',
+    artworkUrl: toHighResArtwork(
+      artist?.attributes?.artwork?.url || artist?.attributes?.url || '',
+    ),
+    genreName: Array.isArray(artist?.attributes?.genreNames) ? artist.attributes.genreNames[0] : undefined,
+  })).filter(artist => artist.name && artist.id) : []
+  const mapPlaylists = (data?: any[]): AppleCatalogPlaylist[] => Array.isArray(data) ? data.map((playlist: any) => ({
+    id: String(playlist?.id ?? ''),
+    name: playlist?.attributes?.name || '',
+    description: playlist?.attributes?.description?.short || playlist?.attributes?.description?.standard,
+    artworkUrl: toHighResArtwork(playlist?.attributes?.artwork?.url || ''),
+    trackCount: playlist?.attributes?.trackCount ?? playlist?.attributes?.playlistTrackCount,
+    curatorName: playlist?.attributes?.curatorName || 'Apple Music 编辑',
+  })).filter(playlist => playlist.name && playlist.id) : []
+  return {
+    songs: mapSongs(results?.songs?.data),
+    albums: mapAlbums(results?.albums?.data),
+    artists: mapArtists(results?.artists?.data),
+    playlists: mapPlaylists(results?.playlists?.data),
+  }
+}
+
+/**
+ * amp-api 搜索建议（web 播放器输入联想同款）：
+ * GET /v1/catalog/{storefront}/search/suggestions?term=...&types=...
+ * 返回建议词列表；未配置 token 时返回空。
+ */
+export async function getAppleSearchSuggestions(keywords: string, storefront = 'cn'): Promise<string[]> {
+  if (!keywords.trim()) return []
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return []
+  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search/suggestions?term=${encodeURIComponent(keywords.trim())}&types=songs,albums,artists,playlists,stations`
+  const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 8000 })
+  if (!result.ok) return []
+  const item: any = Array.isArray(result.data?.data) ? result.data.data[0] : null
+  const terms: unknown = item?.attributes?.terms
+  if (Array.isArray(terms)) {
+    return terms.filter((term): term is string => typeof term === 'string' && term.trim().length > 0) as string[]
+  }
+  return []
+}
+
+/** 目录歌单摘要（打开搜索到的 AM 歌单时展示头部） */
+export async function getAppleCatalogPlaylistSummary(
+  playlistId: string,
+  storefront = 'cn',
+): Promise<AppleCatalogPlaylist | null> {
+  if (!playlistId) return null
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return null
+  const result = await appleApiRequest(`/v1/catalog/${encodeURIComponent(storefront)}/playlists/${encodeURIComponent(playlistId)}`, {
+    developerToken: credentials.developerToken,
+    timeoutMs: 10000,
+  })
+  const playlist: any = result?.ok ? result.data?.data?.[0] : null
+  if (!playlist?.attributes?.name) return null
+  return {
+    id: String(playlist.id),
+    name: playlist.attributes.name,
+    description: playlist.attributes.description?.short || playlist.attributes.description?.standard,
+    artworkUrl: toHighResArtwork(playlist.attributes.artwork?.url || ''),
+    trackCount: playlist.attributes.trackCount ?? playlist.attributes.playlistTrackCount,
+    curatorName: playlist.attributes.curatorName || 'Apple Music 编辑',
+  }
 }
 
 export { STOREFRONT_COUNTRY_MAP }

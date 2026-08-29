@@ -147,6 +147,8 @@ export interface Song {
 export function getLocalAlbumIdentifier(song: Song, platform: MusicPlatform): string | null {
   const raw = song as any
   const album = raw.album || raw.al || {}
+  // 汽水：无专辑 ID 体系，约定用「专辑名」作标识（艺人/专辑弹窗按名查询）
+  if (platform === 'soda') return album.name ? String(album.name) : null
   const id = platform === 'qq'
     ? (album.mid || raw.albummid || album.pmid || album.id || raw.albumid)
     : (album.id || raw.albumid || raw.al?.id)
@@ -156,6 +158,8 @@ export function getLocalAlbumIdentifier(song: Song, platform: MusicPlatform): st
 export async function resolveSongAlbumIdentifier(song: Song, platform: MusicPlatform): Promise<string | null> {
   // Apple 歌曲的 album 无网易云/QQ 专辑 id，不向平台接口查询
   if (platform === 'apple') return null
+  // 汽水：直接返回专辑名标识，不向网易云/QQ 查询详情
+  if (platform === 'soda') return getLocalAlbumIdentifier(song, 'soda')
   const localId = getLocalAlbumIdentifier(song, platform)
   if (localId) return localId
 
@@ -299,9 +303,11 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
       const tracks = await searchSpotifySongs(keywords, limit)
       return { songs: tracks.map(spotifyTrackToSong), songCount: tracks.length }
     }
-    // 汽水音乐：接口需签名，暂返回空（融合搜索会跳过；单独搜索显示空结果提示）
+    // 汽水音乐：走逆向 Web API 搜索（后端 /api/soda/search，签名在服务端完成）
     if (platform === 'soda') {
-      return { songs: [], songCount: 0 }
+      const { searchSodaSongs } = await import('./sodaService')
+      const songs = await searchSodaSongs(keywords, limit)
+      return { songs, songCount: songs.length }
     }
     const endpoint = platform === 'qq' ? '/qq/search' : '/netease/search'
     const response = await fetch(`${API_BASE}${endpoint}?keywords=${encodeURIComponent(keywords)}&limit=${limit}&devMode=${devMode}`)
@@ -366,6 +372,8 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
 // 搜索建议
 export async function searchSuggest(keywords: string, platform: MusicPlatform = 'netease'): Promise<SearchSuggestion[]> {
   try {
+    // 汽水：逆向接口无搜索建议端点，返回空（避免误用网易云建议造成串台）
+    if (platform === 'soda') return []
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/suggest?keywords=${encodeURIComponent(keywords)}`)
       const data = await response.json()
@@ -527,12 +535,7 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&type=album&devMode=${devMode}`)
       const data = await response.json()
-      if (devMode) {
-        if (data.albums && data.albums.length > 0) {
-        }
-      }
-      
-      const albums = (data.albums || []).map((item: any, index: number) => {
+      const albums = (data.albums || []).map((item: any) => {
         const album = {
           id: item.albumID,
           mid: item.albumMID,
@@ -542,17 +545,10 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
           publishTime: item.pub_time,
           platform: 'qq' as const
         }
-        
-        if (devMode && index === 0) {
-        }
-        
         return album
       })
-      if (devMode && albums.length > 0) {
-      }
       return albums
     }
-    
     const response = await fetch(`${API_BASE}/netease/search?keywords=${encodeURIComponent(keywords)}&type=10&devMode=${devMode}`)
     const data = await response.json()
     const albums = (data.result?.albums || []).map((item: any) => ({
@@ -604,8 +600,19 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         const kgCookie = localStorage.getItem('kugou_cookie') || ''
         apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${kgCookie ? `&cookie=${encodeURIComponent(kgCookie)}` : ''}`
         readUrl = data => data.url || null
-      } else if (platform === 'spotify' || platform === 'soda') {
-        // Spotify/汽水：未登录无自源音源，返回 null → 上层降级网易云/QQ
+      } else if (platform === 'soda') {
+        // 汽水音乐：逆向 Web API 音源（VIP/SVIP 分层过滤在服务端完成；
+        // 未登录或无可用流时 url 为空 → 返回 null 走上层网易云/QQ 降级匹配）
+        const { preference } = getAudioQualityRequest('soda')
+        apiUrl = `${API_BASE}/soda/song/url?id=${encodeURIComponent(String(id))}&quality=${encodeURIComponent(preference)}${
+          (() => {
+            const sdCookie = localStorage.getItem('soda_token') || ''
+            return sdCookie ? '&cookie=' + encodeURIComponent(sdCookie) : ''
+          })()
+        }`
+        readUrl = data => data.url || null
+      } else if (platform === 'spotify') {
+        // Spotify：未登录无自源音源，返回 null → 上层降级网易云/QQ
         return null
       } else {
         const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
@@ -657,6 +664,42 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
     }
   }
 }
+
+/**
+ * 汽水播放地址详情（结构化不可播原因）：
+ * 与 getSongUrl 汽水分支同口径（音质偏好 + soda_token cookie 一致），替代裸调直取 URL，
+ * 不可播时带回顶层 requiredTier/vipLabel/reason（/api/soda/song/url playable:false 时的结构化原因），
+ * 供上层换源提示文案使用；请求失败统一降级为 { url: null }，不向调用方抛错。
+ */
+export async function getSodaPlaybackInfo(id: number | string): Promise<{
+  url: string | null
+  requiredTier?: 'free' | 'vip' | 'svip'
+  vipLabel?: string
+  reason?: string
+}> {
+  if (!String(id).trim()) return { url: null }
+  const { preference } = getAudioQualityRequest('soda')
+  const query = new URLSearchParams({ id: String(id), quality: preference })
+  const sdCookie = localStorage.getItem('soda_token') || ''
+  if (sdCookie) query.set('cookie', sdCookie)
+  try {
+    const response = await fetchSongUrlResponse(`${API_BASE}/soda/song/url?${query.toString()}`)
+    // 401 = 登录态缺失（sodaRequireLogin）：按后端约定的 login_required 原因口径回传；其余失败不带 reason
+    if (!response.ok) {
+      return { url: null, reason: response.status === 401 ? 'login_required' : undefined }
+    }
+    const data: any = await response.json().catch(() => ({}))
+    return {
+      url: data?.url ? String(data.url) : null,
+      requiredTier: data?.requiredTier,
+      vipLabel: data?.vipLabel ? String(data.vipLabel) : undefined,
+      reason: data?.reason ? String(data.reason) : undefined,
+    }
+  } catch {
+    return { url: null }
+  }
+}
+
 // Song details
 export async function getSongDetail(id: number): Promise<Song | null> {
   try {
@@ -1124,7 +1167,7 @@ export async function getLyrics(
     const useAdaptive = adaptiveLyrics !== null ? JSON.parse(adaptiveLyrics) : true
     // 如果禁用第三方或禁用自适应，直接使用当前平台
     if (!useThirdParty || !useAdaptive || primarySource === 'Platform') {
-      return await getPlatformLyrics(id, platform)
+      return await getPlatformLyrics(id, platform, songName, artistName)
     }
     
     // 官方歌词源必须与歌曲所属平台一致，禁止拿一个平台的歌曲 ID 请求另一个平台。
@@ -1149,12 +1192,13 @@ export async function getLyrics(
     const platformSourceName = platform === 'qq' ? 'QQ音乐' : isApplePlatform ? 'Apple Music' : platform === 'spotify' ? 'Spotify' : platform === 'kugou' ? '酷狗' : platform === 'soda' ? '汽水' : '网易云'
     
     // 平台互斥：QQ音乐歌曲不请求网易云API，网易云歌曲不请求QQ音乐API。
-    // Apple 曲目不请求网易云/QQ 平台源；Spotify/汽水无官方歌词接口（酷狗登录时除外）。
+    // Apple 曲目不请求网易云/QQ 平台源；Spotify 无官方歌词接口（酷狗登录时除外；
+    // 汽水已接入逆向歌词管线，走 getPlatformLyrics 内部含网易云同名匹配兜底）。
     const platformSourcePromise = isApplePlatform
       ? Promise.resolve([])
-      : (platform === 'spotify' || platform === 'soda')
+      : platform === 'spotify'
         ? Promise.resolve([])
-        : getPlatformLyrics(id, platform)
+        : getPlatformLyrics(id, platform, songName, artistName)
     const amllSourcePromise = isApplePlatform
       ? Promise.resolve([])
       : getAMLLTTMLLyrics(id, platform)
@@ -1343,7 +1387,15 @@ export async function getLyrics(
         return score
       }
 
-      const baseResult = [...successfulResults].sort((a, b) => sourceScore(b) - sourceScore(a))[0]
+      // 骨架源选择策略（用户策略）：
+      // - **QQ 音乐**：QQ 官方歌词权威（逐字+翻译+罗马音一次请求全拿），其缺失部分第三方
+      //   通常也没有（实测 QQ 的 qrc/trans 覆盖极高）——**强制以 QQ 官方为骨架**，
+      //   第三方源只做翻译/罗马音空缺的兜底拼接，绝不让第三方逐字源顶掉 QQ 骨架。
+      // - **网易云**：官方逐字（yrc）覆盖少，保持评分制——第三方逐字源（WW+100）可竞争
+      //   骨架，官方+第三方并行拼接（网易云本身就是拼接生态）。
+      const baseResult = platformSourceName === 'QQ音乐'
+        ? [...successfulResults].sort((a, b) => (a.source === 'QQ音乐' ? -1 : 0) - (b.source === 'QQ音乐' ? -1 : 0))[0]
+        : [...successfulResults].sort((a, b) => sourceScore(b) - sourceScore(a))[0]
       currentLyrics = baseResult.lyrics
       hasWordByWord = baseResult.hasWW
       hasTranslation = baseResult.hasTrans
@@ -1452,7 +1504,7 @@ export async function getLyrics(
 }
 
 // 获取平台原生歌词（内部函数）
-async function getPlatformLyrics(id: number | string, platform: MusicPlatform): Promise<LyricLine[]> {
+async function getPlatformLyrics(id: number | string, platform: MusicPlatform, songName?: string, artistName?: string): Promise<LyricLine[]> {
   try {
     if (platform === 'kugou') {
       // 酷狗：krcs 歌词接口（无需登录；失败走 Lrclib/AMLL 兜底）
@@ -1466,14 +1518,41 @@ async function getPlatformLyrics(id: number | string, platform: MusicPlatform): 
       return parseLyric(lyricText)
     }
     if (platform === 'soda') {
-      // 汽水：火山公开目录详情歌词
+      // 汽水：逆向歌词管线（SEO → track_v2 → 公开目录）；getSodaLyrics 已随原文对齐挂载汽水自带翻译（tlyric）
       const { getSodaLyrics } = await import('./sodaService')
-      return getSodaLyrics(String(id))
+      const lines = await getSodaLyrics(String(id))
+      if (lines.length) return lines
+      // 汽水曲库缺词（纯音乐/翻唱常见）→ 网易云同名匹配兜底，保证"自动拉歌词"体验；
+      // 命中时参考网易云主路径把 tlyric 翻译一并合并，避免兜底歌词丢翻译。
+      const keyword = [songName, artistName].filter(Boolean).join(' ').trim()
+      if (keyword) {
+        try {
+          const res = await searchSongs(keyword, 5, 'netease')
+          const target = res.songs && res.songs[0]
+          if (target && target.id) {
+            const resp = await fetch(`${API_BASE}/netease/lyric?id=${encodeURIComponent(String(target.id))}`, { signal: AbortSignal.timeout(8000) })
+            if (resp.ok) {
+              const data = await resp.json().catch(() => null)
+              const lrc = String(data?.lrc?.lyric || data?.lyric || '')
+              if (lrc.includes('[')) {
+                const lyrics = parseLyric(lrc)
+                const translations = parseLyric(String(data?.tlyric?.lyric || ''))
+                return mergeLyricsWithTranslationAndRoman(lyrics, translations)
+              }
+            }
+          }
+        } catch { /* 匹配失败静默 */ }
+      }
+      return []
     }
     if (platform === 'qq') {
       const qqCookie = localStorage.getItem('qq_cookie') || ''
       const url = new URL(`${API_BASE}/qq/lyric`)
+      // 同一参数既可能是 songmid（字符串/数字）也可能是 songID（纯数字）：两种都传，
+      // 后端 musicu 按有效字段取——只传 mid 时，songID 型 id 会被当成 songMID 查询 → 空歌词
+      //（实测 rainy tone qq:233811640 只传 mid 返回空，带 songID 才有完整 LRC）
       url.searchParams.set('mid', String(id))
+      url.searchParams.set('id', String(id))
       if (qqCookie) {
         url.searchParams.set('cookie', qqCookie)
       }
@@ -1955,9 +2034,6 @@ export async function getArtistTopSongs(id: number | string, platform: MusicPlat
       const response = await fetch(`${API_BASE}/qq/artist/songs?mid=${id}`)
       const data = await response.json()
       console.log('📊 [getArtistTopSongs] QQ音乐返回数据keys:', Object.keys(data))
-      if (data.songs && data.songs.length > 0) {
-        const firstSong = data.songs[0]
-      }
       
       const songs = (data.songs || []).slice(0, 50).map((item: any) => {
         const song = {

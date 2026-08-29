@@ -1,4 +1,8 @@
-﻿const fs = require('fs')
+﻿/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { spawn, spawnSync } = require('child_process')
@@ -589,7 +593,14 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
         trackKey,
         sourceSignature: input.sourceSignature,
       })
-      atomicWriteJson(cachedFile, analysis)
+      // 空节拍结果（metadata-only 等解码失败降级）不落盘：持久化会让渲染端缓存命中
+      // 直接返回 beats=0，把 m4a/aac 等格式的浏览器解码回退（唯一能解的路）永远挡掉，
+      // 表现为"MV 背景永远对不上 / 歌曲永远无节拍"。空结果只返回给本次调用方。
+      const hasUsableBeats = Array.isArray(result.beats) && result.beats.length >= 8 &&
+        Array.isArray(result.downbeats) && result.downbeats.length >= 2
+      if (hasUsableBeats) {
+        atomicWriteJson(cachedFile, analysis)
+      }
       jobs.set(jobId, { ...jobs.get(jobId), status: 'completed', result: analysis })
       if (target && !target.isDestroyed()) {
         target.webContents.send('analysis:progress', {

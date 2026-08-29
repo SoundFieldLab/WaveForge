@@ -348,7 +348,6 @@ function PlaylistDetailPanel({
     let loadedCount = 0
     let revealTimer: number | null = null
     const totalImages = imagesToLoad.length
-    const images: HTMLImageElement[] = []
 
     const handleImageLoad = () => {
       if (cancelled) return
@@ -362,6 +361,8 @@ function PlaylistDetailPanel({
       }
     }
 
+    const pendingUrls: string[] = []
+    const images: HTMLImageElement[] = []
     imagesToLoad.forEach(url => {
       const proxyUrl = getProxiedImageUrl(url)
       if (imageCache.get(proxyUrl)) {
@@ -369,15 +370,28 @@ function PlaylistDetailPanel({
         return
       }
       const image = new Image()
+      pendingUrls.push(proxyUrl)
       images.push(image)
-      image.onload = () => {
-        if (cancelled) return
-        imageCache.set(proxyUrl, proxyUrl)
-        handleImageLoad()
-      }
-      image.onerror = handleImageLoad
-      image.src = proxyUrl
     })
+    // 并发窗口：最多 CONCURRENCY 张在途，完成一张启动下一张，避免一次性 20 个封面请求打穿代理
+    const CONCURRENCY = 4
+    let startedCount = 0
+    const maybeStartNext = () => {
+      while (startedCount - loadedCount < CONCURRENCY && startedCount < images.length) {
+        const index = startedCount
+        startedCount += 1
+        const image = images[index]
+        image.onload = () => {
+          if (cancelled) return
+          imageCache.set(pendingUrls[index], pendingUrls[index])
+          handleImageLoad()
+          maybeStartNext()
+        }
+        image.onerror = () => { handleImageLoad(); maybeStartNext() }
+        if (!cancelled) image.src = pendingUrls[index]
+      }
+    }
+    maybeStartNext()
 
     const timeout = window.setTimeout(() => {
       if (!cancelled) {

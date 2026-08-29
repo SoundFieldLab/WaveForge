@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, Suspense, lazy } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, RefreshCw, Copy, Check, ExternalLink } from 'lucide-react'
 import type { MusicPlatform } from '../services/platforms'
+import { isTvModeActive } from '../platform'
+import { isPerfModeEnhanced } from '../tv/perfMode'
 import GlobalToast from './GlobalToast'
 
 // 新平台登录面板（组件外声明，避免条件内 lazy 造成重挂载）
@@ -23,6 +25,8 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
   const pollTimerRef = useRef<number | null>(null)
   const requestControllerRef = useRef<AbortController | null>(null)
   const pollControllerRef = useRef<AbortController | null>(null)
+  // TV 弱 GPU：装饰性光晕（40vw 大圆 filter:blur(80px) + 12s 无限动画）非增强档静态化
+  const glowAnimated = !isTvModeActive() || isPerfModeEnhanced()
   const websiteTimerRef = useRef<number | null>(null)
   const toastTimerRef = useRef<number | null>(null)
   const generationRef = useRef(0)
@@ -296,7 +300,7 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     }
     return (
       <Suspense fallback={null}>
-        <SodaLoginPanel onClose={onCancel} onLoginSuccess={(token: string) => onLoginSuccess(token)} />
+        <SodaLoginPanel onClose={onCancel} onLoginSuccess={(token: string, username?: string) => onLoginSuccess(token, username)} />
       </Suspense>
     )
   }
@@ -326,20 +330,12 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         className="absolute w-[40vw] h-[40vw] max-w-[500px] max-h-[500px] rounded-full"
         style={{
           background: 'radial-gradient(circle, rgba(255, 105, 180, 0.5) 0%, transparent 70%)',
-          filter: 'blur(80px)',
+          filter: glowAnimated ? 'blur(80px)' : 'blur(20px)',
           top: '20%',
           left: '15%',
         }}
-        animate={{
-          scale: [1, 1.3, 1],
-          x: [0, 60, 0],
-          y: [0, 40, 0],
-        }}
-        transition={{
-          duration: 12,
-          repeat: Infinity,
-          ease: "easeInOut"
-        }}
+        animate={glowAnimated ? { scale: [1, 1.3, 1], x: [0, 60, 0], y: [0, 40, 0] } : { scale: 1, x: 0, y: 0 }}
+        transition={glowAnimated ? { duration: 12, repeat: Infinity, ease: 'easeInOut' } : { duration: 0 }}
       />
       
       {/* 遮罩 */}

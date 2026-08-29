@@ -1,5 +1,6 @@
 ﻿import { motion, AnimatePresence } from 'framer-motion'
 import CachedImage from './CachedImage'
+import AnimatedArtworkCover from './AnimatedArtworkCover'
 import { memo, useState, useEffect, useRef } from 'react'
 import { EMPTY_AUDIO_PULSE_STORE, type AudioPulseStore } from '../hooks/useAudioPulse'
 
@@ -18,6 +19,9 @@ interface AlbumCoverPlayerProps {
   transitionFromTrack?: Track | null
   transitionToTrack?: Track | null
   pulseStore?: AudioPulseStore
+  /** Apple Music 动态封面（图层叠加式：有则盖在静态封面之上，无/失败回退静态） */
+  animatedCoverUrl?: string | null
+  animatedCoverPoster?: string | null
 }
 
 // memo 包装：transitionProgress 变化时仍会重渲染（过渡动画依赖），
@@ -33,6 +37,8 @@ function AlbumCoverPlayer({
   transitionFromTrack = null,
   transitionToTrack = null,
   pulseStore = EMPTY_AUDIO_PULSE_STORE,
+  animatedCoverUrl = null,
+  animatedCoverPoster = null,
 }: AlbumCoverPlayerProps) {
   const pulseSurfaceRef = useRef<HTMLDivElement | null>(null)
 
@@ -43,8 +49,14 @@ function AlbumCoverPlayer({
       if (!surface) return
       const restlessPulse = pulseStore.getSnapshot().restless
       const nextPulseActive = restlessPulse > 0
+      // transform 走合成器、廉价可每帧写；filter(brightness/saturate) 会触发整块封面重绘，
+      // 仅在节拍爆发（restless>0）时写入，平时清空避免每帧 repaint
       surface.style.transform = `translate3d(0, 0, 0) scale(${1 + restlessPulse * 0.022})`
-      surface.style.filter = `brightness(${1 + restlessPulse * 0.045}) saturate(${1 + restlessPulse * 0.055})`
+      if (nextPulseActive) {
+        surface.style.filter = `brightness(${1 + restlessPulse * 0.045}) saturate(${1 + restlessPulse * 0.055})`
+      } else if (surface.style.filter) {
+        surface.style.filter = ''
+      }
       if (nextPulseActive !== pulseActive) {
         pulseActive = nextPulseActive
         surface.style.transition = nextPulseActive
@@ -161,6 +173,15 @@ function AlbumCoverPlayer({
                   className="h-full w-full object-cover"
                 />
               }
+            />
+            {/* Apple Music 动态封面图层：盖在静态封面之上；无/加载失败/开关关闭时
+                不渲染，下层平台静态封面直接露出（永不替换显示封面） */}
+            <AnimatedArtworkCover
+              videoUrl={animatedCoverUrl}
+              posterUrl={animatedCoverPoster}
+              staticCoverUrl={validCoverUrl}
+              active
+              className="absolute inset-0 h-full w-full"
             />
           </motion.div>
         )}

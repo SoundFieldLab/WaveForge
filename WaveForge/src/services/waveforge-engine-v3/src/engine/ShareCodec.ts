@@ -238,6 +238,9 @@ function decodeSpatial(raw: unknown): SpatialSettings {
     ambience: { ...def.ambience, ...(o.ambience as object) },
     convolution: oneOf(o.convolution, ['partitioned', 'time'] as const, def.convolution),
     hrtfInterp: oneOf(o.hrtfInterp, ['nearest', 'spherical'] as const, def.hrtfInterp),
+    distanceModel: oneOf(o.distanceModel, ['inverse', 'linear', 'exponential'] as const, def.distanceModel),
+    refDistance: num(o.refDistance, 0.1, 100, def.refDistance),
+    maxDistance: num(o.maxDistance, 1, 200, def.maxDistance),
   }
 }
 

@@ -548,9 +548,11 @@ export default function PlaylistGrid3D({
             closeContextMenu()
           } : undefined}
           onViewArtist={onOpenArtist ? (song) => {
-            const songPlatform = (song.platform || platform) as 'netease' | 'qq'
+            const songPlatform = (song.platform || platform) as MusicPlatform
             const artist = song.artists?.[0]
-            const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+            // 汽水无艺人 ID，约定传歌手名
+            const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
+              : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
             if (artistId) onOpenArtist(String(artistId), songPlatform)
             closeContextMenu()
           } : undefined}

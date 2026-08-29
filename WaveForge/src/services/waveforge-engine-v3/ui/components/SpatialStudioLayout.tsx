@@ -82,6 +82,8 @@ interface SpatialStudioLayoutProps {
   onSelectWorld: (id: string | null) => void
   /** 中央模式视图（页面复用既有模式面板组件后传入，本组件不重复实现） */
   children?: ReactNode
+  /** 状态栏实数据（页面经 bridge.getStats() 轮询 + rAF 帧率测量注入；缺省显示「—」） */
+  status?: { latencyMs: number | null; fps: number | null }
 }
 
 /** 模式名映射（状态栏/左面板展示） */
@@ -132,6 +134,7 @@ export default function SpatialStudioLayout({
   selectedWorldId,
   onSelectWorld,
   children,
+  status,
 }: SpatialStudioLayoutProps) {
   /* ── 状态栏：空间音频已内联 EngineV3（纯 TS DSP，无独立 worklet），
    *    延迟/后端/CPU 统计不再可用（原 fusion 层 worklet 回传已移除），
@@ -325,7 +328,11 @@ export default function SpatialStudioLayout({
         </div>
       </GlassCard>
 
-      {/* 状态栏（底部整行）：延迟 / 后端 / 采样率 / HRTF / 当前模式 */}
+      {/* 状态栏（底部整行）：延迟 / 后端 / 帧率 / 对象 / HRTF / 输出 / 模式。
+          延迟与帧率为实数据（页面经 bridge.getStats() 500ms 轮询 + rAF 帧率测量，
+          status prop 注入；缺省回退「—」）。HRTF 如实显示当前引擎数据源
+          （analyticHrtf 合成网格——原「MIT KEMAR」为不实标签）。采样率列移除
+          （引擎采样率随 AudioContext，状态栏拿不到可靠来源，假数据不如不显示）。 */}
       <div
         className="flex items-center justify-between gap-3 px-4 py-2 rounded-2xl hse-mono text-[11px]"
         style={{
@@ -338,38 +345,34 @@ export default function SpatialStudioLayout({
       >
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>延迟</span>
-          <span className={theme.textSecondary}>—</span>
+          <span className={theme.textSecondary}>
+            {status?.latencyMs !== undefined && status?.latencyMs !== null ? `${status.latencyMs}ms` : '—'}
+          </span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>后端</span>
           <span className={theme.textSecondary}>TS</span>
         </div>
-        {/* CPU 估算（空间音频已内联 EngineV3，无独立 worklet 统计，静态显示「—」） */}
+        {/* 帧率（rAF 测量）：CPU 占用的直观代理（空间音频内联 EngineV3，无独立统计） */}
         <div className="flex items-center gap-1.5">
-          <span className={theme.textMuted}>CPU</span>
-          <span className={theme.textSecondary}>—</span>
+          <span className={theme.textMuted}>帧率</span>
+          <span className={theme.textSecondary}>
+            {status?.fps ? `${status.fps}fps` : '—'}
+          </span>
         </div>
         {/* 活跃对象（规划书 §5.6「活跃对象: [8/64]」）：当前配置的虚拟扬声器数 / 展示上限 */}
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>对象</span>
           <span className={theme.textSecondary}>{activeObjects}/{ACTIVE_OBJECTS_CAPACITY}</span>
         </div>
-        {/* 采样率静态显示（48kHz 约定）：AudioContext 实际采样率不可靠，本波不读取 */}
-        <div className="flex items-center gap-1.5">
-          <span className={theme.textMuted}>采样率</span>
-          <span className={theme.textSecondary}>48kHz</span>
-        </div>
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>HRTF</span>
-          <span className={theme.textSecondary}>MIT KEMAR</span>
+          <span className={theme.textSecondary}>合成（解析式）</span>
         </div>
-        {/* 输出设备（只读展示，不做完整联动——完整切换在设置弹窗「输出设备」下拉：
-            enumerateDevices 枚举 + setSinkId，sinkId 随空间参数快照持久化；
-            §5.6 顶部工具栏静态占位位于 SpatialPage（并行分区，未改），此处状态栏
-            仅按快照显示当前目标：sinkId 存在 → 已选设备，缺省 → 系统默认） */}
+        {/* 输出设备（只读展示：sinkId 快照存在 → 已选设备，缺省 → 系统默认） */}
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>输出</span>
-          <span className={theme.textSecondary}>{spatial.sinkId ? '已选设备' : '系统默认'}</span>
+          <span className={theme.textSecondary}>{spatial.sinkId ? '已选设备' : '双耳渲染'}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>模式</span>

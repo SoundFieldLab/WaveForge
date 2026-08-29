@@ -14,7 +14,7 @@ interface LoginButtonProps {
   platform: MusicPlatform
   isLoggedIn: boolean
   username?: string
-  onLogin: (cookie: string, username?: string) => void
+  onLogin: (cookie: string, username?: string, extra?: { avatar?: string; userId?: string }) => void
   onLogout: () => void
   /** Apple 登录成功/退出的回调（user 为 null 表示面板内退出） */
   onAppleLogin?: (user: AppleUserInfo | null) => void
@@ -119,8 +119,8 @@ export default function LoginButton({ platform, isLoggedIn, username, onLogin, o
       {showLoginPanel && platform === 'soda' && (
         <SodaLoginPanel
           onClose={() => setShowLoginPanel(false)}
-          onLoginSuccess={(token) => {
-            onLogin(token)
+          onLoginSuccess={(token, username, extra) => {
+            onLogin(token, username, extra)
             setShowLoginPanel(false)
           }}
         />

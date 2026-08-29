@@ -255,6 +255,11 @@ function SourceMarker({
             y: source.position.y + TMP_POS.y,
             z: source.position.z + TMP_POS.z,
           })
+          // 提交后必须清零包裹矩阵：DragControls(autoTransform) 的累计位移残留在
+          // matrix 里（matrixAutoUpdate=false 且从不清零）——提交后内层 group 已
+          // 移到新位置，若包裹矩阵不清零，渲染位置 = 残留位移 + 新位置 = 旧位置
+          // +2×位移（声球松手后朝拖拽方向再跳出一倍距离，且下次拖拽起点被污染）
+          g.matrix.identity()
         }
         // 始终清除拖拽态（即便 g 缺失也不卡住 OrbitControls 禁用），恢复相机旋转
         onDragStateChange?.(false)
@@ -326,19 +331,32 @@ function DistanceLine({
 }
 
 /** 第一人称跟随：follow=true 时每帧把 OrbitControls 目标 lerp 到听者位置 */
-function FollowRig({ follow, target }: { follow: boolean; target: THREE.Vector3 }) {
+function FollowRig({ follow, target, snapCamera }: { follow: boolean; target: THREE.Vector3; snapCamera?: boolean }) {
   const controls = useThree((s) => s.controls) as unknown as
     | { target: THREE.Vector3; update: () => void }
     | null
+  const camera = useThree((s) => s.camera)
   const tmp = useRef(new THREE.Vector3())
+  const tmp2 = useRef(new THREE.Vector3())
   useFrame(() => {
     if (!follow || !controls) return
     tmp.current.copy(target)
     controls.target.lerp(tmp.current, 0.12)
+    // 第一人称（snapCamera）：相机同步贴到听者耳位后上方——原实现只移目标点，
+    // 相机可仍停在 40m 外（maxDistance=40），屏幕投影/边缘箭头/距离读数全部基于
+    // 远离头部的视点，「第一人称」名不副实。普通跟随（F 键）保持相机位置自由。
+    if (snapCamera) {
+      tmp2.current.copy(tmp.current).add(FIRST_PERSON_CAM_OFFSET)
+      camera.position.lerp(tmp2.current, 0.12)
+    }
     controls.update()
   })
   return null
 }
+
+/** 第一人称相机偏移（听者耳位后上方一点——贴头但不穿听者圆柱模型，保留
+ *  OrbitControls 环视/推拉可用性；真 FPS 锁定相机后续按需再加） */
+const FIRST_PERSON_CAM_OFFSET = new THREE.Vector3(0.6, 0.5, 1.8)
 
 /**
  * 视角预设应用器：切到非 persp 模式时把相机摆到预设位（OrbitControls 目标回
@@ -633,9 +651,12 @@ function MinimapOverlay({
   selectedId: string | null
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  // 最新 props 走 ref，raf 循环只启动一次
+  // 最新 props 走 ref + 脏标记（数据/主题变化才重绘一次——原实现 60fps 常驻重绘，
+  // 世界视图挂载即空烧；渲染循环只挂一次，由脏标记驱动）
   const propsRef = useRef({ sources, listener, theme, selectedId })
   propsRef.current = { sources, listener, theme, selectedId }
+  const dirtyRef = useRef(true)
+  dirtyRef.current = true
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -654,11 +675,19 @@ function MinimapOverlay({
       canvas.width = Math.round(width * dpr)
       canvas.height = Math.round(height * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      dirtyRef.current = true
     }
     resize()
     window.addEventListener('resize', resize)
 
     const draw = () => {
+      // 脏标记驱动：数据/主题/尺寸未变时跳过绘制（rAF 空转一次函数调用的成本，
+      // 远低于 60fps 全量重绘；数据变化在下帧生效 ≤16ms 延迟不可感）
+      if (!dirtyRef.current) {
+        raf = requestAnimationFrame(draw)
+        return
+      }
+      dirtyRef.current = false
       const { sources: srcs, listener: lst, theme: th, selectedId: selId } = propsRef.current
       ctx.clearRect(0, 0, width, height)
       const pad = 12
@@ -915,7 +944,7 @@ export function SpatialWorldView({
         />
         {/* 拖拽声源期间禁用 OrbitControls（O3 P2：DragControls 与相机旋转争抢指针） */}
         <OrbitControlsGate dragging={dragging} />
-        <FollowRig follow={followActive} target={targetVec} />
+        <FollowRig follow={followActive} target={targetVec} snapCamera={viewMode === 'first'} />
         <ViewPresetRig viewMode={viewMode} />
         {/* 视角重置（token 触发相机回默认位 + target 归零；俯瞰全局走 'top' 预设） */}
         <ResetRig token={resetToken} />

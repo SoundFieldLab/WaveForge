@@ -23,8 +23,47 @@ import type { V3UiBridge, DeepPartial } from './ui'
 // masterGain 与 v3 处理节点之间（masterGain → SoundTouch → v3 → analyser）。
 import { SoundTouchNode } from '@soundtouchjs/audio-worklet'
 import processorUrl from '@soundtouchjs/audio-worklet/processor?url'
-// 离线 MP3 编码（纯 JS MP3 编码器，无原生依赖，浏览器/Electron 可用）
-import * as lamejs from 'lamejs'
+
+/**
+ * lamejs 1.2.1 打包器兼容补丁 —— 此前「导出 MP3」必炸的根因。
+ * 该包假设以 UMD 全家桶（单 <script>）加载：Lame.js/BitStream.js 内部裸引用
+ * `MPEGMode`/`Lame` 等标识符当作全局变量，但被 Vite 按模块打包后这些名字不在
+ * 各自模块作用域里，构造 Mp3Encoder 时抛 ReferenceError。
+ * 处理：首次编码前把包内三个真实类深导入并挂到 globalThis，再取主入口的
+ * Mp3Encoder。惰性执行一次，避免拖慢启动。
+ */
+type LameMp3EncoderCtor = new (
+  channels: 1 | 2,
+  sampleRate: number,
+  kbps: number,
+) => {
+  encodeBuffer(left: Int16Array, right?: Int16Array): Int8Array
+  flush(): Int8Array
+}
+
+let lameEncoderCtor: LameMp3EncoderCtor | null = null
+
+/** 惰性初始化并返回打包器兼容补丁后的 Mp3Encoder 构造器（导出仅供单测冒烟） */
+export async function ensureLameEncoder(): Promise<LameMp3EncoderCtor> {
+  if (lameEncoderCtor) return lameEncoderCtor
+  const g = globalThis as unknown as Record<string, unknown>
+  const [{ default: MPEGMode }, { default: Lame }, { default: BitStream }] = await Promise.all([
+    import('lamejs/src/js/MPEGMode.js'),
+    import('lamejs/src/js/Lame.js'),
+    import('lamejs/src/js/BitStream.js'),
+  ])
+  if (g.MPEGMode === undefined) g.MPEGMode = MPEGMode
+  if (g.Lame === undefined) g.Lame = Lame
+  if (g.BitStream === undefined) g.BitStream = BitStream
+  const main = (await import('lamejs')) as unknown as {
+    Mp3Encoder?: LameMp3EncoderCtor
+    default?: { Mp3Encoder?: LameMp3EncoderCtor }
+  }
+  const ctor = main.Mp3Encoder ?? main.default?.Mp3Encoder
+  if (!ctor) throw new Error('lamejs 加载异常：未找到 Mp3Encoder')
+  lameEncoderCtor = ctor
+  return ctor
+}
 
 /** 参数持久化键（v3 独立命名空间） */
 const PARAMS_KEY = 'waveforge:v3-params'
@@ -254,9 +293,16 @@ function ensureBridge(fs: number): V3UiBridge {
   if (!host) host = new EngineV3Host({ mode: 'auto', workletUrl: './v3-worklet.js' })
   if (wrappedBridge === null || bridgedEngine !== host.engine) {
     const raw = createV3UiBridge(host.engine, fs)
+    // setParams 值相等短路：拖拽/滑块高频路径每次 patch 的真实代价是 3 次整参数
+    // JSON 深拷贝 + 双 setParams（15 级链全量重配）+ worklet postMessage + 全页重渲染；
+    // 值未变化时（球形拖拽静止帧、React 双调用等）一次 stringify 对比即可全跳过
+    let lastParamsKey = ''
     wrappedBridge = {
       ...raw,
       setParams: (p: V3EngineParams) => {
+        const key = JSON.stringify(p)
+        if (key === lastParamsKey) return
+        lastParamsKey = key
         raw.setParams(p)          // 桥内部快照 + 主线程引擎
         host!.setParams(p)        // worklet 处理器同步下发（script 模式下与上一行同源）
         currentParams = p
@@ -322,10 +368,10 @@ export function setV3SystemVolume(volumePercent: number): void {
  * Float32 PCM → Int16 PCM（[-1,1] 截断到 [-32768,32767]）→ Mp3Encoder 分块编码 → flush 冲刷尾部。
  * lamejs 内部以 1152 样本为帧边界自适应补零，故输入块大小不限（这里取 1152 对齐以减少边界补零）。
  */
-function encodeMp3(channels: Float32Array[], sampleRate: number): Blob {
-  const numChannels = channels.length
-  const channelsForEnc = numChannels >= 2 ? 2 : 1
-  const encoder = new lamejs.Mp3Encoder(channelsForEnc, sampleRate, 128)
+async function encodeMp3(channels: Float32Array[], sampleRate: number): Promise<Blob> {
+  const Mp3Encoder = await ensureLameEncoder()
+  const channelsForEnc = channels.length >= 2 ? 2 : 1
+  const encoder = new Mp3Encoder(channelsForEnc, sampleRate, 128)
   const frames = channels[0].length
   // 左/右声道 Int16 scratch（单声道复用左声道）
   const left16 = new Int16Array(frames)
@@ -354,11 +400,23 @@ function encodeMp3(channels: Float32Array[], sampleRate: number): Blob {
   return new Blob(chunks as BlobPart[], { type: 'audio/mpeg' })
 }
 
+export interface V3ExportOptions {
+  /** 导出文件名基名（默认 WaveForge-HSE）；保存时自动追加 -Modified 后缀 */
+  fileName?: string
+}
+
+/** 文件名非法字符清洗（Windows 保留字符集） */
+function sanitizeFileName(name: string): string {
+  return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim() || 'WaveForge-HSE'
+}
+
 /**
  * 离线导出：解码源音频 → 独立 EngineV3 分块处理（与实时链同一内核，逐样本一致）
- * → Float32→Int16 → lamejs MP3 128kbps 下载。尾部以 1s 静音冲刷卷积混响/限幅器 lookahead 余量。
+ * → Float32→Int16 → lamejs MP3 128kbps。尾部以 1s 静音冲刷卷积混响/限幅器 lookahead 余量。
+ * 保存：Electron 下经 IPC 直写桌面（<歌曲名>-Modified.mp3，重名自动 (2) 序号）；
+ * 非 Electron（网页/TV）退化为浏览器下载。
  */
-export async function exportV3Mp3(sourceUrl: string, durationSeconds: number): Promise<void> {
+export async function exportV3Mp3(sourceUrl: string, durationSeconds: number, options?: V3ExportOptions): Promise<void> {
   const ctx = lastHandle?.audioContext
   if (!ctx) throw new Error('音频引擎尚未就绪')
   if (!currentParams) currentParams = restoreParams(ctx.sampleRate)
@@ -444,11 +502,31 @@ export async function exportV3Mp3(sourceUrl: string, durationSeconds: number): P
   const finalL = asL
   const finalR = asR
 
-  const mp3Blob = encodeMp3([finalL, finalR], fs)
+  const mp3Blob = await encodeMp3([finalL, finalR], fs)
+
+  const fileName = `${sanitizeFileName(options?.fileName || '')}-Modified.mp3`
+  // Electron：直写用户桌面；网页端退化为浏览器下载
+  const host = window as unknown as {
+    electron?: {
+      saveHseRenderedAudio?: (
+        data: Uint8Array,
+        fileName: string,
+      ) => Promise<{ ok: boolean; path?: string; error?: string }>
+    }
+  }
+  if (host.electron?.saveHseRenderedAudio) {
+    const bytes = new Uint8Array(await mp3Blob.arrayBuffer())
+    const res = await host.electron.saveHseRenderedAudio(bytes, fileName)
+    if (!res.ok) throw new Error(res.error || '保存到桌面失败')
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: `已导出到桌面：${fileName}`, type: 'info' },
+    }))
+    return
+  }
   const url = URL.createObjectURL(mp3Blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `waveforge-v3-${Date.now()}.mp3`
+  a.download = fileName
   document.body.appendChild(a)
   a.click()
   a.remove()

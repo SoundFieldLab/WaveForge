@@ -1,8 +1,13 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { isTvModeActive } from '../platform'
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
 import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
+import PluginShortcuts from './PluginShortcuts'
 import PlaylistCarousel3D from './PlaylistCarousel3D'
 import DesktopMiniPlayer from './DesktopMiniPlayer'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
@@ -15,7 +20,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms } from '../services/platforms'
 import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, appleSongToSong, removeAppleTracksFromPlaylist } from '../services/appleCatalog'
 import { desktopWallpaperManager, DesktopLiveWallpaperSource, toWallpaperUrl } from '../services/desktopWallpaperManager'
-import { getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks } from '../services/playlistService'
+import { getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks } from '../services/playlistService'
 import { useColorThief } from '../hooks/useColorThief'
 import {
   DESKTOP_CUSTOMIZATION_EVENT,
@@ -59,6 +64,9 @@ interface DesktopViewProps {
   onVolumeChange: (volume: number) => void
   onRemoveQueueItem: (index: number) => void
   onMoveQueueItem: (from: number, to: number) => void
+  /** 桌面融合穿透：空区域鼠标穿透到真实桌面，组件区保持可交互 */
+  desktopFusionEnabled?: boolean
+  onDesktopFusionChange?: (enabled: boolean) => void
   
   // 登录状态
   authRevision?: number
@@ -162,6 +170,8 @@ function DesktopView({
   onVolumeChange,
   onRemoveQueueItem,
   onMoveQueueItem,
+  desktopFusionEnabled = false,
+  onDesktopFusionChange,
   authRevision = 0,
   neteaseLoggedIn,
   neteaseUserId,
@@ -245,6 +255,7 @@ function DesktopView({
     window.addEventListener('viewModeChanged', closeForModeSwitch)
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
+
   const [showSettings, setShowSettings] = useState(false)
   const [settingsModuleMounted, setSettingsModuleMounted] = useState(false)
   const [showSearch, setShowSearch] = useState(false)
@@ -1509,6 +1520,13 @@ function DesktopView({
         console.log(`✅ [DesktopView] 设置了 ${songs.length} 首歌曲到 playlistSongs`)
         setPlaylistSongs(songs)
         }
+      } else if (currentPlatform === 'soda') {
+        // 汽水：经 playlistService 统一详情（分页合并全量曲目，支持 qishui-liked 等虚拟歌单 id）
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'soda')
+        if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
+        const detailed = { ...playlist, ...data?.playlist, isCollected: playlist.isCollected }
+        setSelectedPlaylist(previous => previous ? { ...previous, ...detailed } : detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
       }
     } catch (error) {
       if ((error as Error).name !== 'AbortError') console.error('加载歌单详情失败:', error)
@@ -1654,6 +1672,50 @@ function DesktopView({
     || showPlaylistDetail
     || focusTimer.timer.status === 'ringing'
 
+  // 桌面融合穿透：光标悬停在组件上时窗口可交互，空区域点击穿透到真实桌面。
+  // 利用 setIgnoreMouseEvents(true,{forward:true}) 的 mousemove 转发，由页面实时判定交互区。
+  // 可交互区域用 data-desktop-interactive / .desktop-widget-card / .desktop-lyrics-fusion 标记，
+  // 其余（透明背景、卡片间隙、容器骨架）一律穿透，让真实桌面图标/任务栏可点。
+  // 弹层/面板打开时整窗强制交互——弹层覆盖全屏，此时任何点击都属于应用本身。
+  useEffect(() => {
+    if (!desktopFusionEnabled) return
+    let lastSend = 0
+    const INTERACTIVE_SELECTOR = '.desktop-widget-card, .desktop-lyrics-fusion, [data-desktop-interactive]'
+    // 判定光标下的元素是否属于"可交互 UI"：
+    // 1) 命中标记（组件卡片/歌词/歌单栏/迷你播放器/标题栏等）
+    // 2) 命中任意 position:fixed 的元素——全屏弹层（设备控制/遥控器/歌曲详情/登录提示/
+    //    更新提示等）与标题栏都是 fixed。DesktopView 之外的 App 级弹层不在
+    //    desktopOverlayOpen 状态里，必须靠这里通用覆盖：弹层打开时所有点击都属于应用，
+    //    融合穿透只在透明空区域生效。
+    const isInteractiveElement = (target: Element | null): boolean => {
+      if (!target || !target.closest) return false
+      if (target.closest(INTERACTIVE_SELECTOR)) return true
+      let node: Element | null = target
+      while (node && node !== document.body) {
+        if (node.nodeType === 1 && window.getComputedStyle(node).position === 'fixed') return true
+        node = node.parentElement
+      }
+      return false
+    }
+    const onMouseMove = (event: MouseEvent) => {
+      const now = Date.now()
+      if (now - lastSend < 40) return // 节流 IPC
+      lastSend = now
+      if (desktopOverlayOpen) {
+        window.electron?.desktopFusion?.setInteractive(true)
+        return
+      }
+      const target = document.elementFromPoint(event.clientX, event.clientY) as Element | null
+      window.electron?.desktopFusion?.setInteractive(isInteractiveElement(target))
+    }
+    window.electron?.desktopFusion?.setInteractive(desktopOverlayOpen) // 初始态：弹层开则整窗交互，否则穿透等 mousemove
+    document.addEventListener('mousemove', onMouseMove)
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      window.electron?.desktopFusion?.setInteractive(false)
+    }
+  }, [desktopFusionEnabled, desktopOverlayOpen])
+
   const widgetHandlersRef = useRef({
     onVolumeChange,
     onPlayPause,
@@ -1715,8 +1777,8 @@ function DesktopView({
         onClose={() => setShowToast(false)}
       />
       
-      {/* 背景层 */}
-      <div className="absolute inset-0 z-0" style={{ 
+      {/* 背景层（桌面融合穿透开启时隐藏，让真实桌面壁纸透出） */}
+      {!desktopFusionEnabled && <div className="absolute inset-0 z-0" style={{ 
         opacity: 1, 
         transform: 'translate3d(0, 0, 0)',
         backfaceVisibility: 'hidden',
@@ -1822,9 +1884,9 @@ function DesktopView({
             }}
           />
         )}
-      </div>
+      </div>}
 
-      {backgroundDim > 0 && (
+      {backgroundDim > 0 && !desktopFusionEnabled && (
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 z-[1] bg-black"
@@ -1866,7 +1928,7 @@ function DesktopView({
             animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
             exit={{ opacity: 0, scale: 0.985, filter: 'blur(12px)' }}
             transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-            className={`absolute z-20 flex items-center justify-center overflow-hidden ${isTvUi ? 'bottom-72' : 'bottom-16'}`}
+            className={`desktop-lyrics-fusion absolute z-20 flex items-center justify-center overflow-hidden ${isTvUi ? 'bottom-72' : 'bottom-16'}`}
             style={{
               top: 'clamp(178px, 19vh, 224px)',
               left: '6vw',
@@ -1917,6 +1979,7 @@ function DesktopView({
       {/* 顶部主题切换触发区域 - 面板关闭时的下箭头 */}
       <div 
         className="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-8 z-50"
+        data-desktop-interactive
         onMouseEnter={() => setIsTopHovered(true)}
         onMouseLeave={() => setIsTopHovered(false)}
       >
@@ -1985,6 +2048,7 @@ function DesktopView({
             exit={{ y: 44, opacity: 0 }}
             transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
             className="absolute bottom-0 left-0 right-0 z-40"
+            data-desktop-interactive
             onMouseEnter={handleCarouselMouseEnter}
             onMouseLeave={handleCarouselMouseLeave}
             style={{ 
@@ -2198,6 +2262,25 @@ function DesktopView({
                 )}
               </motion.button>
 
+              {/* 桌面融合穿透开关 */}
+              <motion.button
+                whileHover={{ scale: 1.08 }}
+                whileTap={{ scale: 0.94 }}
+                onClick={() => onDesktopFusionChange?.(!desktopFusionEnabled)}
+                title={desktopFusionEnabled ? '桌面融合穿透：已开启（空区域可操作真实桌面，点击关闭）' : '桌面融合穿透：关闭（点击开启，空区域穿透到真实桌面）'}
+                className="flex h-9 w-9 items-center justify-center rounded-full transition-all"
+                style={{
+                  background: desktopFusionEnabled ? 'rgba(236, 72, 153, 0.25)' : 'rgba(255, 255, 255, 0.1)',
+                  border: `1px solid ${desktopFusionEnabled ? 'rgba(236, 72, 153, 0.6)' : 'rgba(255, 255, 255, 0.2)'}`,
+                  color: desktopFusionEnabled ? '#f9a8d4' : 'rgba(255,255,255,0.7)',
+                }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M3 9h18M9 21V9M6 6h.01M10 6h.01" />
+                </svg>
+              </motion.button>
+
               {/* 设置按钮 */}
               <motion.button
                 whileHover={{ scale: 1.1 }}
@@ -2268,6 +2351,9 @@ function DesktopView({
               >
                 <Captions className="w-5 h-5 text-white" />
               </motion.button>
+
+              {/* 插件系统入口 */}
+              <PluginShortcuts variant="desktop" />
             </div>
           </motion.div>
         )}
@@ -2281,6 +2367,7 @@ function DesktopView({
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: 20, opacity: 0 }}
             className="absolute bottom-0 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3"
+            data-desktop-interactive
             style={{
               paddingTop: '40px',
               paddingBottom: '8px'

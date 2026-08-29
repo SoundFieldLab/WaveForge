@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Apple Music 数据服务（歌词 / 封面 / 对唱）
  *
  * 数据链路（依据 LyricsBlossom 逆向成果）：
@@ -77,12 +81,24 @@ const normalizeTitle = (value: string) =>
     .toLowerCase()
     .replace(/[\s·•\-–—()（）[\]【】「」『』〈〉《》"'`、，。！？!?,.&/\\|]+/g, '')
 
-/** artworkUrl100 → 高清（正则 \d+x\d+bb 替换，与逆向文档一致）；兼容 amp-api 的 {w}x{h}bb 占位符 */
+/**
+ * artworkUrl100 → 高清（正则 \d+x\d+bb 替换，与逆向文档一致）。
+ *
+ * amp-api / editorial 的封面 URL 有多种尺寸占位格式，必须全部归一化，否则
+ * 带占位符的 URL 直接 404（探索页封面裂图的根因）：
+ * - source/{w}x{h}bb.jpg                    标准占位
+ * - xxx.png/{w}x{h}SC.DN01.jpg?l=zh-Hans    本地化编辑图
+ * - xxx.png/{w}x{h}sr.jpg                   电台方图
+ * - xxx.png/{w}x{h}cc.jpg                   裁切图
+ * - xxx.png/{w}x{h}SC.FPSL02.{f}?l=zh-Hans  带文件扩展名占位 {f}
+ */
 export function toHighResArtwork(url: string, size = 600): string {
   if (!url) return url
   return url
     .replace(/\d+x\d+bb/g, `${size}x${size}bb`)
-    .replace(/\{w\}x\{h\}bb/g, `${size}x${size}bb`)
+    .replace(/\{w\}/g, String(size))
+    .replace(/\{h\}/g, String(size))
+    .replace(/\{f\}/g, 'jpg')
 }
 
 /** 设置 storefront → iTunes country 参数（大写 ISO） */

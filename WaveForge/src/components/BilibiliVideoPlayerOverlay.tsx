@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * B 站视频全屏播放器浮层（个人主页/收藏/历史点播用）
  *
  * bvid → view(cid) → playurl → 流代理 全链路复用；带 CC 字幕（官方字幕即歌词）、
@@ -226,24 +230,28 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
         if (!video.paused) void audio.play().catch(() => undefined)
       }
     }
+    const onEnded = () => {
+      setIsPlaying(false)
+      setShowReplay(true)
+      setShowControls(true)
+      audioRef.current?.pause()
+    }
+    const onError = () => setLoadError('视频播放失败（可能已失效或网络异常）')
     video.addEventListener('play', onPlay)
     video.addEventListener('pause', onPause)
     video.addEventListener('timeupdate', onTimeUpdate)
     video.addEventListener('loadedmetadata', onLoaded)
     video.addEventListener('seeked', syncAudio)
-    video.addEventListener('ended', () => {
-      setIsPlaying(false)
-      setShowReplay(true)
-      setShowControls(true)
-      audioRef.current?.pause()
-    })
-    video.addEventListener('error', () => setLoadError('视频播放失败（可能已失效或网络异常）'))
+    video.addEventListener('ended', onEnded)
+    video.addEventListener('error', onError)
     return () => {
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
       video.removeEventListener('loadedmetadata', onLoaded)
       video.removeEventListener('seeked', syncAudio)
+      video.removeEventListener('ended', onEnded)
+      video.removeEventListener('error', onError)
     }
   }, [videoUrl, audioUrl, subtitles, subtitleOn, initialSeek, seekApplied, scheduleControlsHide])
 

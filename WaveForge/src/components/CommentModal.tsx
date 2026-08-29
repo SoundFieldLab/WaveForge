@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Song } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getProxiedImageUrl } from '../services/musicApi'
+import { createSodaComment, fetchSodaComments, isSodaLoggedIn, type SodaComment } from '../services/sodaService'
 import { ThumbsUp, MessageCircle, Trash2, Send, ChevronDown, Edit3 } from 'lucide-react'
 import ScrollToTop from './ScrollToTop'
 import DeleteCommentModal from './DeleteCommentModal'
@@ -37,7 +38,7 @@ interface Reply {
     avatarUrl: string
     userId?: string
   }
-  time: number
+  time: number | string
   beRepliedUser?: string
 }
 
@@ -49,7 +50,7 @@ interface Comment {
     avatarUrl: string
     userId?: string
   }
-  time: number
+  time: number | string
   likedCount: number
   replyCount: number
   replies?: Reply[]
@@ -107,7 +108,7 @@ function mapQQComments(rawComments: any[]): Comment[] {
         ...mappedReplies.filter(reply => !knownReplyIds.has(reply.replyId))
       ]
       existing.replyCount = existing.replies.length
-      existing.time = Math.max(existing.time, Number(raw.time || 0) * 1000)
+      existing.time = Math.max(Number(existing.time), Number(raw.time || 0) * 1000)
       return
     }
 
@@ -145,7 +146,8 @@ function isQQCommentMutationSuccessful(result: any): boolean {
     .some(value => value === 0 || value === 100 || value === 200)
 }
 
-function formatTime(timestamp: number) {
+/** 毫秒时间戳 → 相对时间文案（刚刚/N分钟前/N小时前/...） */
+function formatRelativeTime(timestamp: number) {
   if (!timestamp || isNaN(timestamp)) return '未知时间'
 
   const date = new Date(timestamp)
@@ -167,6 +169,55 @@ function formatTime(timestamp: number) {
   if (days < 30) return `${days}天前`
   if (months < 12) return `${months}个月前`
   return `${years}年前`
+}
+
+/**
+ * 评论时间展示：兼容毫秒时间戳与「3天前」这类现成文本。
+ * 汽水评论的 time 字段两者皆有可能（见 sodaService SodaComment 注释）。
+ */
+function formatTime(timestamp: number | string) {
+  if (typeof timestamp === 'string') {
+    const text = timestamp.trim()
+    if (!text) return '未知时间'
+    // 纯数字字符串视为毫秒时间戳，其余原样展示
+    if (/^\d+$/.test(text)) return formatRelativeTime(Number(text))
+    return text
+  }
+  return formatRelativeTime(timestamp)
+}
+
+/** 排序用毫秒值：非数字文本（如「3天前」）按 0 处理，维持服务端顺序 */
+function commentTimeValue(time: number | string): number {
+  return typeof time === 'number' ? time : Number(time) || 0
+}
+
+/** 汽水评论 → 组件内部展示结构（含楼中楼回复预览；点赞/回复仅静态展示） */
+function mapSodaComments(rawComments: SodaComment[]): Comment[] {
+  return rawComments
+    .map(raw => {
+      const replies = (Array.isArray(raw.replies) ? raw.replies : []).map(reply => ({
+        replyId: String(reply.id || ''),
+        content: String(reply.content || ''),
+        user: {
+          nickname: String(reply.user?.name || '匿名用户'),
+          avatarUrl: String(reply.user?.avatarUrl || '')
+        },
+        time: reply.time
+      }))
+      return {
+        commentId: String(raw.id || ''),
+        content: String(raw.content || ''),
+        user: {
+          nickname: String(raw.user?.name || '匿名用户'),
+          avatarUrl: String(raw.user?.avatarUrl || '')
+        },
+        time: raw.time,
+        likedCount: Number(raw.likes || 0),
+        replyCount: replies.length,
+        replies
+      }
+    })
+    .filter(item => item.commentId && item.content)
 }
 
 // 挂载动画只作用于首屏 N 条评论，避免每条评论都重复创建 framer-motion 入场动画
@@ -202,6 +253,7 @@ const CommentItem = memo(function CommentItem({
         <img
           src={comment.user.avatarUrl ? `http://localhost:3001/api/proxy-image?url=${encodeURIComponent(comment.user.avatarUrl)}` : ''}
           alt={comment.user.nickname}
+          loading="lazy"
           className="w-10 h-10 rounded-full object-cover flex-shrink-0"
           onError={(e) => {
             const target = e.target as HTMLImageElement;
@@ -403,7 +455,10 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const isPlaylistResource = resourceType === 'playlist'
   const resourcePlatform = isPlaylistResource ? (playlist?.platform || 'netease') : (song?.platform || 'netease')
   // QQ 评论接口的 topid 使用数字 songid，不是歌曲 MID。
-  const resourceId = isPlaylistResource ? playlist?.id : song?.id
+  // 汽水的 Song.id 是截断数值，真实曲目 id 保存在 mid —— 评论资源 id 对汽水改用 mid。
+  const resourceId = isPlaylistResource
+    ? playlist?.id
+    : (resourcePlatform === 'soda' ? String(song?.mid || song?.id || '') : song?.id)
   const commentType = isPlaylistResource ? 2 : 0
   const qqCommentBizType = isPlaylistResource ? 3 : 1
   const resourceCoverUrl = isPlaylistResource ? (playlist?.coverImgUrl || '') : (song?.album?.picUrl || '')
@@ -468,6 +523,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const [hasMoreComments, setHasMoreComments] = useState(true)
   const [isLoadingMore, setIsLoadingMore] = useState(false)
   const [cursor, setCursor] = useState<string>('-1') // 网易云时间排序首屏使用 -1，后续使用服务端 cursor
+  // 汽水评论游标：soda 接口为游标分页（与上方页码分页不同），组件内部自行维护
+  const sodaCursorRef = useRef<string | undefined>(undefined)
   
   // 获取登录状态和cookie
   const [isLoggedIn, setIsLoggedIn] = useState(false)
@@ -515,6 +572,11 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
             console.error('获取QQ用户信息失败:', error)
           }
         }
+      } else if (resourcePlatform === 'soda') {
+        // 汽水：登录态按本地 cookie 特征粗判；评论列表未登录也可浏览
+        setUserCookie('')
+        setIsLoggedIn(isSodaLoggedIn())
+        setCurrentUserId('')
       }
     }
     
@@ -535,11 +597,17 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
     avatarUrl: 'http://localhost:3001/api/proxy-image?url=' + encodeURIComponent('https://p1.music.126.net/VnZiScyynLG7atLIZ2YPkw==/18686200114669622.jpg')
   }
 
+  // 汽水未登录：输入框置灰并提示登录，评论列表仍可浏览
+  const sodaInputLocked = resourcePlatform === 'soda' && !isLoggedIn
+  // 汽水评论接口暂不提供点赞/回复/删除能力，行内操作按钮退化为静态展示
+  const sodaRowsStatic = resourcePlatform === 'soda'
+
   useEffect(() => {
     if (isOpen && resourceId) {
       setCurrentPage(0)
       setHasMoreComments(true)
       setCursor('-1') // 重置cursor
+      sodaCursorRef.current = undefined // 重置汽水评论游标
       setShowCommentInput(false) // 关闭评论输入框
       setNewComment('') // 清空评论内容
       setReplyingTo(null) // 清空回复状态
@@ -581,6 +649,37 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       const pageToLoad = reset ? 0 : currentPage + 1
       const limit = 20
       const offset = pageToLoad * limit
+      
+      // ── 汽水音乐：游标分页，数据经 sodaService 获取（不走下方页码分页请求）──
+      // 仅歌曲资源生效：汽水无歌单评论接口，歌单资源不进入此分支
+      if (!isPlaylistResource && platform === 'soda') {
+        const requestCursor = reset ? undefined : sodaCursorRef.current
+        const page = await fetchSodaComments(String(songId), requestCursor, limit)
+        // 记录下一页游标（先于状态写入保存，避免并发续页时被覆盖）
+        sodaCursorRef.current = page.cursor ?? undefined
+        const sodaComments = mapSodaComments(page.comments)
+        // 汽水无独立热评接口，清空防止上一资源残留
+        setHotComments([])
+        if (sodaComments.length === 0 && reset) {
+          setAllComments([])
+          setHasMoreComments(false)
+          return
+        }
+        if (reset) {
+          setAllComments(sodaComments)
+          window.requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }))
+        } else {
+          setAllComments(prev => {
+            const merged = new Map(prev.map(comment => [comment.commentId, comment]))
+            sodaComments.forEach(comment => merged.set(comment.commentId, comment))
+            return Array.from(merged.values())
+          })
+        }
+        // 「加载更多」按钮显隐由 hasMore 控制
+        setHasMoreComments(page.hasMore)
+        setCurrentPage(pageToLoad)
+        return
+      }
       
       // 网易云音乐: sortType 99=推荐排序, 2=热度排序, 3=时间排序
       const sortType = viewMode === 'hot' ? 2 : 3
@@ -664,8 +763,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
           // 对于有回复的评论，自动加载前2条回复作为预览
           const commentsWithReplies = comments.filter(c => c.replyCount > 0)
           if (commentsWithReplies.length > 0) {
-            // 并行加载所有有回复的评论的楼中楼数据
-            const replyPromises = commentsWithReplies.map(async (comment) => {
+            // 加载楼中楼预览：分批并发（每批 6 个），避免热评多的歌曲一次性打出几十个请求
+            const floorOf = async (comment: any) => {
               try {
                 const floorResponse = await fetch(
                   `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(songId))}&parentCommentId=${comment.commentId}&limit=2&type=${commentType}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
@@ -692,9 +791,13 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
                 console.error(`[加载回复预览] 评论${comment.commentId}失败:`, error)
               }
               return null
-            })
-            
-            const replyResults = await Promise.all(replyPromises)
+            }
+            const replyResults: any[] = []
+            const BATCH = 6
+            for (let start = 0; start < commentsWithReplies.length; start += BATCH) {
+              const batch = commentsWithReplies.slice(start, start + BATCH)
+              replyResults.push(...await Promise.all(batch.map(floorOf)))
+            }
             
             // 更新评论的回复数据
             replyResults.forEach(result => {
@@ -721,7 +824,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
             
             // 如果是最新评论，按时间降序排序
             if (viewMode === 'latest') {
-              comments.sort((a, b) => b.time - a.time)
+              comments.sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time))
             }
             
             console.log('[QQ音乐评论] 处理后的评论:', comments)
@@ -755,14 +858,14 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       
       // 更新评论列表
       if (reset) {
-        setAllComments(viewMode === 'latest' ? [...comments].sort((a, b) => b.time - a.time) : comments)
+        setAllComments(viewMode === 'latest' ? [...comments].sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time)) : comments)
         window.requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }))
       } else {
         setAllComments(prev => {
           const merged = new Map(prev.map(comment => [comment.commentId, comment]))
           comments.forEach(comment => merged.set(comment.commentId, comment))
           const next = Array.from(merged.values())
-          return viewMode === 'latest' ? next.sort((a, b) => b.time - a.time) : next
+          return viewMode === 'latest' ? next.sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time)) : next
         })
       }
       
@@ -985,6 +1088,43 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
     try {
       const platform = resourcePlatform
       
+      if (platform === 'soda') {
+        // 汽水发表评论：成功后乐观插入首条，再静默刷新第一页与服务端对齐
+        if (isPlaylistResource) {
+          setActionError('汽水歌单暂不支持发表评价')
+          return
+        }
+        if (!isLoggedIn) {
+          setActionError('登录汽水音乐后参与评论')
+          return
+        }
+        const ok = await createSodaComment(String(resourceId), newComment)
+        if (!ok) {
+          setActionError('评论发布失败，请检查登录状态后重试')
+          return
+        }
+        const optimistic: Comment = {
+          commentId: `soda-local-${Date.now()}`,
+          content: newComment.trim(),
+          user: { nickname: '我', avatarUrl: '' },
+          time: Date.now(),
+          likedCount: 0,
+          replyCount: 0,
+          replies: []
+        }
+        setNewComment('')
+        setShowCommentInput(false)
+        setReplyingTo(null)
+        setActionError(null)
+        setActionSuccess('评论发表成功')
+        setAllComments(prev => [optimistic, ...prev])
+        window.requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }))
+        window.setTimeout(() => setActionSuccess(null), 3500)
+        sodaCursorRef.current = undefined
+        window.setTimeout(() => { void loadComments(true) }, 800)
+        return
+      }
+      
       if (platform === 'netease') {
         // 调用网易云API发布评论
         const response = await fetch('http://localhost:3001/api/netease/comment/add', {
@@ -1189,8 +1329,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
               </div>
               
               <div className="flex items-center space-x-2">
-                {/* 发表评论按钮 - 仅登录后显示 */}
-                {isLoggedIn && (
+                {/* 发表评论按钮 - 登录后显示；汽水未登录也展示入口（输入框置灰提示登录） */}
+                {(isLoggedIn || resourcePlatform === 'soda') && (
                   <button
                     onClick={() => {
                       setShowCommentInput(!showCommentInput)
@@ -1305,8 +1445,11 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
                     ref={inputRef}
                     value={newComment}
                     onChange={(e) => setNewComment(e.target.value)}
-                    placeholder={replyingTo ? `回复 @${replyingTo.username}` : (isPlaylistResource ? '发表歌单评价...' : '发表评论...')}
-                    className="flex-1 bg-white/10 border border-white/20 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-transparent resize-none"
+                    placeholder={replyingTo
+                      ? `回复 @${replyingTo.username}`
+                      : (sodaInputLocked ? '登录汽水音乐后参与评论' : (isPlaylistResource ? '发表歌单评价...' : '发表评论...'))}
+                    disabled={sodaInputLocked}
+                    className="flex-1 bg-white/10 border border-white/20 rounded-lg px-4 py-2 text-sm text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-transparent resize-none disabled:opacity-50 disabled:cursor-not-allowed"
                     rows={2}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
@@ -1327,7 +1470,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
                         handleSubmitComment()
                       }
                     }}
-                    disabled={!newComment.trim() || isSubmitting}
+                    disabled={sodaInputLocked || !newComment.trim() || isSubmitting}
                     className="px-4 py-2 bg-gradient-to-r from-pink-500 to-orange-500 hover:from-pink-600 hover:to-orange-600 disabled:from-gray-600 disabled:to-gray-600 text-white rounded-lg transition-all flex items-center space-x-1 disabled:cursor-not-allowed"
                   >
                     <Send className="w-4 h-4" />
@@ -1374,7 +1517,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
                 rowProps={{
                   rows: commentRows,
                   expandedReplies,
-                  isLoggedIn,
+                  // 汽水评论无点赞/回复接口，行内按钮按未登录方式静态展示
+                  isLoggedIn: isLoggedIn && !sodaRowsStatic,
                   currentUserId,
                   isPlaylistResource,
                   onLike: (target) => void handleLike(target.commentId),

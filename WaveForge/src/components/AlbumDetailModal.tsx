@@ -2,6 +2,7 @@ import { memo, useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Info, Loader, Heart } from 'lucide-react'
 import { getAlbumDetail, getAlbumSongs, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed } from '../services/musicApi'
+import { fetchSodaAlbumTracks, collectSodaAlbum } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleAlbumDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
@@ -33,6 +34,21 @@ interface AlbumDetailModalProps {
 }
 
 type TabType = 'songs' | 'info'
+
+// 汽水平台约定：外部把「专辑名」当作 albumId 字符串传入（汽水无独立专辑 ID 体系）。
+// 名字可能经 URL 编码传递；解码失败（非法 % 序列）时回退原文，避免弹窗崩溃
+const decodeSodaName = (raw: string): string => {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
+// 封面地址：汽水封面为字节 CDN 直链（p3-p3-xx.byteimg.com 类域名），
+// 不拼网易云专用的 param= 宽高参数，直接用原始链接交给 <img>/CachedImage 渲染
+const coverImageUrl = (platform: MusicPlatform, url: string | undefined | null): string =>
+  platform === 'soda' ? String(url || '') : getProxiedImageUrl(String(url || ''))
 
 function AlbumDetailModal({
   albumId,
@@ -79,6 +95,14 @@ function AlbumDetailModal({
     if (subscribing || !album) return
     setSubscribing(true)
     try {
+      // 汽水：上游无逐专辑收藏读接口，初始态走 /api/soda/album/collect/check 用账号库缓存判归
+      // （未命中证据不足时默认未收藏）；collectSodaAlbum 成功后仅本地翻转按钮状态。
+      // 标识优先用接口解析出的真实专辑 id（album.mid），否则回退外部传入的「专辑名」原串
+      if (platform === 'soda') {
+        const ok = await collectSodaAlbum(String(album.mid || albumId), !subscribed)
+        if (ok) setSubscribed(!subscribed)
+        return
+      }
       const data = await subscribeAlbum(String(album.id), !subscribed, platform)
       if (data) {
         setSubscribed(!subscribed)
@@ -90,12 +114,31 @@ function AlbumDetailModal({
     }
   }
 
-  // 打开专辑详情时按当前账号是否已收藏初始化按钮状态（QQ 传 mid，网易云传数字 id）
+  // 打开专辑详情时按当前账号是否已收藏初始化按钮状态（QQ 传 mid，网易云传数字 id）；
+  // 汽水：上游无逐专辑收藏读接口——走本地只读路由 /api/soda/album/collect/check，
+  // 从后端账号库聚合缓存（fetchSodaWebLibrary，90s TTL/每 cookie 指纹）判归，
+  // 未登录/未命中证据不足时保持默认未收藏；收藏成功后的本地翻转行为不变
   useEffect(() => {
     if (!album || platform === 'apple') return
     let cancelled = false
-    const id = platform === 'qq' ? String(album.mid || album.id) : String(album.id)
+    // 汽水标识优先用真实专辑 id（album.mid），否则回退外部传入的「专辑名」原串
+    const id = platform === 'soda'
+      ? String(album.mid || albumId)
+      : platform === 'qq' ? String(album.mid || album.id) : String(album.id)
     setSubscribed(false)
+    if (platform === 'soda') {
+      void (async () => {
+        try {
+          const query = new URLSearchParams({ id })
+          const sdCookie = localStorage.getItem('soda_token') || ''
+          if (sdCookie) query.set('cookie', sdCookie)
+          const response = await fetch(`http://localhost:3001/api/soda/album/collect/check?${query.toString()}`, { cache: 'no-store' })
+          const payload = await response.json().catch(() => null)
+          if (!cancelled && response.ok && payload?.loggedIn && payload?.collected) setSubscribed(true)
+        } catch { /* 静默：保持默认未收藏 */ }
+      })()
+      return () => { cancelled = true }
+    }
     void isAlbumSubscribed(id, platform).then((subscribedNow) => {
       if (!cancelled) setSubscribed(subscribedNow)
     })
@@ -112,7 +155,8 @@ function AlbumDetailModal({
   const textTertiary = 'text-white/40'
   const bgCard = 'bg-white/5'
   const borderColor = 'border-white/10'
-  const isVip = platform === 'netease' ? neteaseVip : qqVip
+  // 汽水暂无本地会员态：按非会员处理，Song.vip 为真的曲目始终显示 VIP 徽标
+  const isVip = platform === 'netease' ? neteaseVip : platform === 'qq' ? qqVip : false
   const readableAccentColor = getReadableAccentColor(accentColor, '#dbeafe')
 
   // 判断是否是当前播放的歌曲
@@ -129,6 +173,11 @@ function AlbumDetailModal({
   }, [albumId, platform])
 
   useEffect(() => {
+    // 汽水：歌单写接口未接入（userPlaylists=false），右键菜单歌单列表保持为空
+    if (platform === 'soda') {
+      setUserPlaylists([])
+      return
+    }
     // Apple：右键菜单歌单用资料库歌单（amp-api）
     if (platform === 'apple') {
       void getAppleLibraryPlaylists(100)
@@ -172,6 +221,24 @@ function AlbumDetailModal({
         } else {
           setError('未找到该 Apple 专辑')
         }
+        return
+      }
+      // 汽水音乐：纯数字串按专辑 id 查询、否则按专辑名查询（约定见 sodaService）。
+      // 头部封面用接口返回的 coverUrl，缺失时兜底首曲封面；
+      // 服务内部降级不抛错，失败/无曲目时返回空 tracks → 走列表空态文案
+      if (platform === 'soda') {
+        const key = decodeSodaName(String(albumId))
+        const data = await fetchSodaAlbumTracks(key)
+        setAlbum({
+          id: Number((data.album.id || '').slice(0, 15)) || 0,
+          mid: data.album.id || key,
+          name: data.album.name || key,
+          picUrl: data.album.coverUrl || data.tracks[0]?.album?.picUrl || '',
+          artist: { name: data.tracks[0]?.artists?.[0]?.name || '' },
+          size: data.tracks.length,
+          platform: 'soda',
+        })
+        setSongs(data.tracks)
         return
       }
       const [albumData, songsData] = await Promise.all([
@@ -252,7 +319,7 @@ function AlbumDetailModal({
               <div
                 className="absolute inset-0 bg-cover bg-center"
                 style={{
-                  backgroundImage: `url(${getProxiedImageUrl(album.picUrl)})`,
+                  backgroundImage: `url(${coverImageUrl(platform, album.picUrl)})`,
                   filter: 'blur(40px) brightness(0.6)',
                 }}
               />
@@ -307,7 +374,7 @@ function AlbumDetailModal({
                 <div className="w-28 h-28 rounded-lg overflow-hidden bg-white/5 flex-shrink-0 shadow-xl">
                   {album.picUrl ? (
                     <CachedImage 
-                      src={getProxiedImageUrl(album.picUrl)}
+                      src={coverImageUrl(platform, album.picUrl)}
                       alt={album.name}
                       className="w-full h-full object-cover"
                       fallback={
@@ -495,7 +562,7 @@ function AlbumDetailModal({
                       <div className={`w-10 h-10 rounded-lg overflow-hidden ${bgCard} flex-shrink-0`}>
                         {song.album?.picUrl ? (
                           <CachedImage 
-                            src={getProxiedImageUrl(song.album.picUrl)} 
+                            src={coverImageUrl(platform, song.album.picUrl)} 
                             alt={song.name} 
                             className="w-full h-full object-cover"
                             fallback={
@@ -562,6 +629,14 @@ function AlbumDetailModal({
                     </motion.div>
                     )
                   })}
+
+                  {/* 空态：汽水服务降级时静默返回空列表，与其它平台空态文案保持一致 */}
+                  {songs.length === 0 && !loading && !error && (
+                    <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
+                      <Music className="w-16 h-16 mb-4 opacity-20" />
+                      <p>暂无歌曲</p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -669,8 +744,11 @@ function AlbumDetailModal({
         onViewComments={onViewComments}
         onViewArtist={onOpenArtist ? (song) => {
           const artist = song.artists?.[0]
-          const artistId = platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
-          if (artistId) onOpenArtist(String(artistId), platform)
+          // 汽水约定：歌手名即歌手标识（无独立 ID 体系）
+          const targetId = platform === 'soda'
+            ? artist?.name
+            : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+          if (targetId) onOpenArtist(String(targetId), platform)
         } : undefined}
         onCopyInfo={onCopyInfo}
         userPlaylists={userPlaylists}

@@ -2,9 +2,10 @@ import express from 'express'
 import { fileURLToPath } from 'url'
 import { dirname, join, extname, resolve, sep } from 'path'
 import { readdir, stat, readFile } from 'fs/promises'
-import { existsSync, createReadStream } from 'fs'
+import { existsSync, createReadStream, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { Readable } from 'stream'
 import dns from 'node:dns'
+import os from 'node:os'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { Agent as HttpAgent } from 'http'
@@ -26,6 +27,13 @@ import { getCommentMutationMessage, isCommentMutationSuccessful } from './server
 import { registerHazardRoutes } from './server/hazard-api.mjs'
 import { registerLocationRoutes } from './server/location-api.mjs'
 import { registerBilibiliRoutes } from './server/bilibili-api.mjs'
+// 汽水音乐（/api/soda/*）：登录态由前端每次请求的 cookie 参数传入，后端绝不持久化
+import { registerSodaRoutes } from './server/qishui-api.mjs'
+// 汽水加密音频解密代理（/api/soda/audio）：CENC 流服务端解密为可播 FLAC/m4a
+import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
+import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
+import dglabRelayModule from './server/dglab-relay.cjs'
+const { createDGLabRelay } = dglabRelayModule
 
 const execFileAsync = promisify(execFile)
 
@@ -94,6 +102,41 @@ function setQQMusicCookie(cookie) {
   // 传入已解析对象也能保留值中可能出现的等号。
   qqMusicApi.setCookie(parsedCookie)
   return true
+}
+
+// QQ Cookie 落盘：登录后持久化，服务重启（冷启动）后恢复全局登录态。
+// 不恢复的话，每次启动 local-server 全局 cookie 都是空的：user/songlist 这类
+// 公开接口仍能返回自建歌单，但「我喜欢」的兜底（user/detail → mymusic）需要登录，
+// 会静默失败，导致启动时歌单列表缺「我喜欢」，手动刷新后才出现。
+const QQ_COOKIE_PERSIST_FILENAME = 'qq-cookie.txt'
+
+function getQQCookiePersistPath() {
+  const baseDir = process.env.WAVEFORGE_USERDATA || join(os.homedir(), '.waveforge')
+  return join(baseDir, QQ_COOKIE_PERSIST_FILENAME)
+}
+
+function persistQQMusicCookie(cookie) {
+  try {
+    const target = getQQCookiePersistPath()
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, String(cookie || '').trim(), 'utf8')
+  } catch (error) {
+    console.warn('[QQCookie] 持久化失败（不影响本次登录）:', error?.message || error)
+  }
+}
+
+function restoreQQMusicCookie() {
+  try {
+    const target = getQQCookiePersistPath()
+    if (!existsSync(target)) return
+    const saved = readFileSync(target, 'utf8').trim()
+    if (!saved) return
+    if (setQQMusicCookie(saved)) {
+      console.log(`[QQCookie] 已从本地恢复登录态（${saved.length} 字符）`)
+    }
+  } catch (error) {
+    console.warn('[QQCookie] 启动恢复失败:', error?.message || error)
+  }
 }
 
 // 解析“本次请求有效 Cookie”：请求自带 cookie 时仅本次使用，绝不回写全局。
@@ -957,6 +1000,14 @@ app.use(express.urlencoded({ extended: true, limit: '12mb' }))
 registerHazardRoutes(app)
 registerLocationRoutes(app)
 registerBilibiliRoutes(app)
+registerSodaRoutes(app)
+registerSodaAudioProxy(app)
+registerAppleArtworkRoutes(app)
+
+// DG_LAB 郊狼插件中继（默认 30082 端口，127.0.0.1 监听；「允许局域网连接」时绑 0.0.0.0 供手机扫码）
+const dglabRelay = createDGLabRelay()
+dglabRelay.registerHttp(app)
+dglabRelay.start()
 
 const fetchLocationProvider = async (url, normalize) => {
   const controller = new AbortController()
@@ -1073,6 +1124,7 @@ app.post('/api/qq/cookie', (req, res) => {
       return res.status(400).json({ error: 'Cookie不能为空' })
     }
     setQQMusicCookie(cookie)
+    persistQQMusicCookie(cookie)
     res.json({ success: true, message: 'Cookie已设置' })
   } catch (error) {
     console.error('[QQ音乐Cookie] 错误:', error)
@@ -1292,6 +1344,12 @@ async function isBlockedFetchUrl(rawUrl) {
 }
 
 // 图片代理（解决防盗链和CORS）
+// 封面内存缓存：同一 URL 不重复请求上游。大歌单滚动浏览/反复进入歌单时，
+// 避免几千个封面请求反复打穿代理与上游 CDN。
+const coverCache = new Map()
+const COVER_CACHE_MAX = 800
+const COVER_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+
 app.get('/api/cover', async (req, res) => {
   try {
     const { url, devMode } = req.query
@@ -1312,6 +1370,18 @@ app.get('/api/cover', async (req, res) => {
     }
 
     if (isDev) console.log('Fetching cover:', url)
+
+    // 缓存命中：直接回缓存字节（带 Cache-Control 供浏览器二次命中）
+    const cached = typeof url === 'string' ? coverCache.get(url) : null
+    if (cached && Date.now() - cached.at < COVER_CACHE_TTL_MS) {
+      res.set({
+        'Content-Type': cached.type,
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'max-age=3600',
+      })
+      res.send(cached.buffer)
+      return
+    }
 
     // 重试机制：最多尝试3次
     let response
@@ -1382,8 +1452,23 @@ app.get('/api/cover', async (req, res) => {
       return
     }
 
-    // 流式转发（保留 Content-Length 预检 + 实际字节数兜底，不整读进内存）
-    streamProxyImage(response, res, 'Cover', 'Cover too large')
+    // 读取字节并写入缓存（≤10MB 才缓存），再返回给浏览器
+    const contentType = response.headers.get('content-type') || 'image/jpeg'
+    const arrayBuffer = await response.arrayBuffer()
+    const buf = Buffer.from(arrayBuffer)
+    if (typeof url === 'string' && buf.length <= 10 * 1024 * 1024) {
+      if (coverCache.size >= COVER_CACHE_MAX) {
+        const oldestKey = coverCache.keys().next().value
+        coverCache.delete(oldestKey)
+      }
+      coverCache.set(url, { buffer: buf, type: contentType, at: Date.now() })
+    }
+    res.set({
+      'Content-Type': contentType,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'max-age=3600',
+    })
+    res.send(buf)
   } catch (error) {
     console.error('封面代理错误:', error)
     res.status(500).set('Access-Control-Allow-Origin', '*').send('Failed to load cover')
@@ -2243,7 +2328,7 @@ app.get('/api/netease/login/qr/key', async (req, res) => {
 app.get('/api/netease/login/qr/create', async (req, res) => {
   try {
     const { key } = req.query
-    if (!key) {
+    if (typeof key !== 'string' || !key) {
       return res.status(400).json({ error: '请提供key' })
     }
     if (!NeteaseAPI || !NeteaseAPI.login_qr_create) {
@@ -2274,7 +2359,7 @@ app.get('/api/netease/login/qr/create', async (req, res) => {
 app.get('/api/netease/login/qr/check', async (req, res) => {
   try {
     const { key } = req.query
-    if (!key) {
+    if (typeof key !== 'string' || !key) {
       return res.status(400).json({ error: '请提供key' })
     }
     if (!NeteaseAPI || !NeteaseAPI.login_qr_check) {
@@ -2291,8 +2376,9 @@ app.get('/api/netease/login/qr/check', async (req, res) => {
     }
   } catch (error) {
     console.error('检查登录状态错误:', error)
-    // 返回一个默认的等待扫码状态，避免中断轮询
-    res.json({ code: 801, message: '等待扫码' })
+    // 返回「已过期」而非「等待扫码」：网络失败/参数错误时不能让前端无限轮询假装在等待，
+    // 前端会显示「二维码已过期,请点击刷新」让用户手动重试
+    res.json({ code: 800, message: '检查登录状态失败，请刷新二维码' })
   }
 })
 
@@ -2302,8 +2388,12 @@ app.get('/api/netease/login/status', async (req, res) => {
     if (!NeteaseAPI || !NeteaseAPI.login_status) {
       return res.status(500).json({ error: 'API 未初始化' })
     }
-    const result = await NeteaseAPI.login_status({ cookie })
-    res.json(result.body)
+    const result = await NeteaseAPI.login_status({ cookie: typeof cookie === 'string' ? cookie : '' })
+    if (result && result.body) {
+      res.json(result.body)
+    } else {
+      res.status(502).json({ error: '登录状态查询失败' })
+    }
   } catch (error) {
     console.error('获取登录状态错误:', error)
     res.status(500).json({ error: error.message })
@@ -5641,20 +5731,43 @@ app.get('/api/qq/lyric', async (req, res) => {
     try {
       const param = { lrc: 1, qrc: 1, qrc_t: 0, trans: 1, trans_t: 0, roma: 1, roma_t: 0, crypt: 1, ct: 19, cv: 2111, type: 0 }
       if (songMid) param.songMID = songMid
-      if (id) param.songID = parseInt(id)
-      
-      const json = await qqMusicRequest({
-        comm: { ct: 24, cv: 0 },
-        lyric: {
-          module: 'music.musichallSong.PlayLyricInfo',
-          method: 'GetPlayLyricInfo',
-          param,
+      // id 只有**整体是纯数字**才是 songID。QQ 的 songmid 是字母开头的字符串
+      //（如 "003Vz5hK1iS1ZY"），parseInt 会吃掉前导数字变成 3——把垃圾 songID=3 发给
+      // musicu 会返回别歌/空数据（方法1 的 lrc/trans/roma/qrc 全乱），只剩方法2 兜回
+      // 普通 LRC → 今天批量出现"没逐字/没翻译/没罗马音"的回归
+      const idStr = String(id ?? '').trim()
+      const idIsNumeric = /^\d+$/.test(idStr)
+      if (idIsNumeric) param.songID = Number(idStr)
+
+      const callMusicu = async (p) => {
+        const j = await qqMusicRequest({
+          comm: { ct: 24, cv: 0 },
+          lyric: { module: 'music.musichallSong.PlayLyricInfo', method: 'GetPlayLyricInfo', param: p },
+        })
+        return j?.lyric?.data || null
+      }
+
+      let data = await callMusicu(param)
+      // 自适应：主请求没取到任何歌词内容（歌曲 id 可能是 songID 纯数字，也可能是 songmid
+      // 字符串；形态混用/猜错会取空）→ 用**另一形态**重试一次，确保 lrc/qrc/trans/roma
+      // 都能拿到（实测 Done for Me 只传 songMID 全空、带 songID 才有完整逐字+翻译）
+      if (data && (data.lyric || data.qrc || data.trans)) {
+        /* 主请求已取到内容 */
+      } else if (songMid) {
+        const retryParam = { ...param }
+        if (idIsNumeric) {
+          // 数字 id：主请求（songMID+可能带 songID）取空 → 只按 songID 形态重试（去掉可能干扰的 songMID）
+          retryParam.songID = Number(idStr)
+          delete retryParam.songMID
         }
-      })
-      
-      const data = json?.lyric?.data
+        const retried = await callMusicu(retryParam)
+        if (retried && (retried.lyric || retried.qrc || retried.trans)) {
+          data = retried
+          console.log(`[QQ音乐歌词] 自适应重试成功（id=${idStr} 形态：${idIsNumeric ? 'songMID→songID' : 'songID→songMID'}）`)
+        }
+      }
       console.log(`[QQ音乐歌词] musicu返回字段:`, Object.keys(data || {}))
-      
+
       // 添加详细的原始数据日志
       if (data?.lyric && typeof data.lyric === 'string') {
         console.log(`[QQ音乐歌词] lyric长度: ${data.lyric.length}, 前50字符: ${data.lyric.substring(0, 50)}`)
@@ -7615,6 +7728,7 @@ app.post('/api/qq/user/setCookie', async (req, res) => {
 
     // 同时更新本地状态与 qq-music-api，确保 MV、评论和歌单共用登录态。
     setQQMusicCookie(data)
+    persistQQMusicCookie(data)
     const cookieObj = parseQQCookie(data)
 
     // 提取uin（用户ID）- 尝试多个可能的字段
@@ -7796,6 +7910,7 @@ app.get('/api/qq/playlist/detail', async (req, res) => {
 app.delete('/api/qq/cookie', (_req, res) => {
   qqMusicCookie = ''
   qqMusicApi.setCookie({})
+  persistQQMusicCookie('')
   res.json({ success: true })
 })
 
@@ -10560,11 +10675,60 @@ app.get('/api/apple/rss', async (req, res) => {
   }
 })
 
+// ── Apple Music amp-api 通用代理（渲染进程直连 amp-api 被 CORS 拦截时的兜底通道）──
+// 与 Electron 主进程 apple-api IPC 同语义：透传 Authorization / Media-User-Token，
+// 支持 GET/POST/PATCH/DELETE，原样回传状态码与 JSON。仅监听 127.0.0.1，token 不出本机。
+const APPLE_AMP_API_BASE = 'https://amp-api.music.apple.com'
+async function proxyAppleAmpApi(req, res) {
+  const rawPath = String(req.query.path || '')
+  if (!rawPath.startsWith('/v1/')) {
+    return res.status(400).json({ error: 'path 必须以 /v1/ 开头' })
+  }
+  const url = `${APPLE_AMP_API_BASE}${rawPath}`
+  const headers = {
+    Accept: 'application/json',
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  }
+  const auth = req.headers['authorization']
+  if (auth) headers.Authorization = auth
+  const mut = req.headers['media-user-token']
+  if (mut) headers['Media-User-Token'] = mut
+  const method = (req.method || 'GET').toUpperCase()
+  if (req.body !== undefined && req.body !== null && Object.keys(req.body).length > 0) {
+    headers['Content-Type'] = 'application/json'
+  }
+  try {
+    const response = await axios({
+      method,
+      url,
+      timeout: 20000,
+      headers,
+      data: method === 'GET' ? undefined : (req.body || undefined),
+      responseType: 'text',
+      validateStatus: () => true,
+    })
+    res.status(response.status)
+    const text = String(response.data || '')
+    let data = null
+    try { data = text ? JSON.parse(text) : null } catch { data = text }
+    res.json(data ?? { ok: true })
+  } catch (error) {
+    console.error('[Apple AMP 代理] 失败:', error.message || error)
+    res.status(502).json({ error: error.message || 'Apple AMP API 请求失败' })
+  }
+}
+app.get('/api/apple/amp', proxyAppleAmpApi)
+app.post('/api/apple/amp', proxyAppleAmpApi)
+app.patch('/api/apple/amp', proxyAppleAmpApi)
+app.delete('/api/apple/amp', proxyAppleAmpApi)
+
 // 健康检查
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    neteaseAPI: NeteaseAPI ? 'loaded' : 'not loaded' 
+  res.json({
+    status: 'ok',
+    neteaseAPI: NeteaseAPI ? 'loaded' : 'not loaded'
   })
 })
 
@@ -10577,6 +10741,9 @@ app.use((err, req, res, next) => {
   console.error('[错误中间件]', req.method, req.originalUrl, err?.stack || err)
   res.status(500).json({ error: err?.message || '服务器内部错误' })
 })
+
+// 冷启动恢复上次登录的 QQ cookie，保证「我喜欢」等需登录的读取接口直接可用。
+restoreQQMusicCookie()
 
 const server = app.listen(PORT, '127.0.0.1', () => {
 })

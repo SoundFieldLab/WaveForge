@@ -18,14 +18,20 @@ import type { HeadLockedSettings, RoomPreset } from '../../src/spatial/types'
 export const HEAD_LOCKED_LAYOUTS: { value: HeadLockedSettings['layout']; label: string }[] = [
   { value: 'stereo', label: '立体声' },
   { value: '51', label: '5.1' },
+  { value: '514', label: '5.1.4' },
+  { value: '71', label: '7.1' },
   { value: '714', label: '7.1.4' },
   { value: 'custom', label: '自定义' },
 ]
 
-/** 模式 A 房间模拟选项（RoomPreset 子集：关闭/录音棚/音乐厅/舞台） */
+/** 模式 A 房间模拟选项（RoomPreset 全量 8 档——DSP 预设表 roomSim.ts 全部可达） */
 export const SPATIAL_ROOM_OPTIONS: { value: RoomPreset; label: string }[] = [
   { value: 'off', label: '关闭' },
   { value: 'studio', label: '录音棚' },
   { value: 'hall', label: '音乐厅' },
   { value: 'stage', label: '舞台' },
+  { value: 'church', label: '教堂' },
+  { value: 'outdoor', label: '户外' },
+  { value: 'bathroom', label: '浴室' },
+  { value: 'corridor', label: '走廊' },
 ]

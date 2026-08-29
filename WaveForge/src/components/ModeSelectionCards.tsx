@@ -1,6 +1,6 @@
 ﻿import { motion } from 'framer-motion'
 
-export type ModeSelectionMode = 'explore' | 'minimal' | 'desktop'
+export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 
 interface ModeSelectionCardsProps {
   currentMode: ModeSelectionMode
@@ -17,6 +17,7 @@ const MODE_OPTIONS: ReadonlyArray<{
 }> = [
   { mode: 'explore', label: '探索', description: '推荐 · 榜单 · 新鲜发行' },
   { mode: 'minimal', label: '简约', description: '三栏布局 · 沉浸聆听' },
+  { mode: 'traditional', label: '传统', description: '经典布局 · 推荐与歌词' },
   { mode: 'desktop', label: '桌面', description: '沉浸歌词 · 桌面组件' },
 ]
 
@@ -125,7 +126,22 @@ function DesktopMiniature() {
 function ModeMiniature({ mode, exploreAccentRgb }: { mode: ModeSelectionMode; exploreAccentRgb: string }) {
   if (mode === 'explore') return <ExploreMiniature accentRgb={exploreAccentRgb} />
   if (mode === 'minimal') return <MinimalMiniature />
+  if (mode === 'traditional') return <TraditionalMiniature />
   return <DesktopMiniature />
+}
+
+function TraditionalMiniature() {
+  return (
+    <span aria-hidden="true" className="pointer-events-none absolute inset-0 overflow-hidden bg-[linear-gradient(145deg,#2a2030,#101521)]">
+      <span className="absolute inset-y-0 left-0 w-[27%] border-r border-white/10 bg-white/[0.05]" />
+      <span className="absolute left-2 top-3 h-2 w-9 rounded-full bg-pink-300/60" />
+      <span className="absolute left-2 top-8 flex flex-col gap-2"><i className="h-1.5 w-12 rounded bg-white/35" /><i className="h-1.5 w-10 rounded bg-white/20" /><i className="h-1.5 w-11 rounded bg-white/20" /></span>
+      <span className="absolute left-[31%] right-2 top-3 h-3 rounded-full bg-white/10" />
+      <span className="absolute left-[31%] right-[25%] top-9 h-12 rounded-lg bg-gradient-to-br from-amber-200/30 via-rose-300/20 to-blue-300/20" />
+      <span className="absolute left-[31%] right-[25%] bottom-4 grid grid-cols-4 gap-1"><i className="aspect-square rounded bg-white/15" /><i className="aspect-square rounded bg-pink-200/25" /><i className="aspect-square rounded bg-blue-200/20" /><i className="aspect-square rounded bg-white/10" /></span>
+      <span className="absolute right-2 top-9 bottom-3 w-[19%] rounded-lg border border-white/10 bg-black/20" />
+    </span>
+  )
 }
 
 export default function ModeSelectionCards({

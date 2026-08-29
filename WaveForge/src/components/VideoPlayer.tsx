@@ -99,6 +99,7 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
 
   // 获取MV播放地址
   useEffect(() => {
+    let cancelled = false
     const fetchMVUrl = async () => {
       setIsLoading(true)
       setShowReplayButton(false)
@@ -108,13 +109,14 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
         
         // 获取MV详情
         const detail = await getMVDetail(mvId, platform)
-        if (detail) {
+        if (detail && !cancelled) {
           setMvDetail(detail)
           console.log('✅ MV详情加载成功:', detail)
         }
         
         // 获取播放地址
         const info = await getMVPlaybackInfo(mvId, 1080, platform)
+        if (cancelled) return
         if (info.url) {
           setVideoUrl(info.url)
           setPlayError(null)
@@ -125,13 +127,14 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
           console.error('❌ 无法获取MV播放地址:', info.error || '')
         }
       } catch (error) {
-        console.error('加载MV失败:', error)
+        if (!cancelled) console.error('加载MV失败:', error)
       } finally {
-        setIsLoading(false)
+        if (!cancelled) setIsLoading(false)
       }
     }
 
     fetchMVUrl()
+    return () => { cancelled = true }
   }, [mvId, mvName, platform])
 
   // 播放/暂停

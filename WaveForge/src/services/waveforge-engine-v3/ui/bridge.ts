@@ -15,7 +15,14 @@
 import type { EngineAnalysis, EngineStats, ScenePreset, V3EngineParams } from '../src/types'
 import { createDefaultParams } from '../src/types'
 import { EngineV3 } from '../src/engine/EngineV3'
-import { SCENE_PRESETS, getSceneById } from '../src/engine/ScenePresets'
+import {
+  mergeBuiltinScenes,
+  saveBuiltinSceneOverride,
+  resetBuiltinSceneOverride,
+  exportSceneLibraryJson,
+  importSceneLibraryJson,
+  exportPublishSeedTs,
+} from './sceneStore'
 import { encodeShareCode, decodeShareCode } from '../src/engine/ShareCodec'
 import { HearingTest, type AudiogramPoint } from '../src/analysis/HearingTest'
 
@@ -43,11 +50,21 @@ export interface V3UiBridge {
   getAnalysis(): EngineAnalysis
   getLatencySamples(): number
   getSampleRate(): number
-  /** 内置 11 场景 + 我的场景 */
-  getScenes(): ScenePreset[]
+  /** 内置 11 场景（含开发者微调覆盖，被改过的带 overridden 标记）+ 我的场景 */
+  getScenes(): (ScenePreset & { overridden?: boolean })[]
   applyScene(id: string): void
   saveMyScene(name: string): boolean
   deleteMyScene(id: string): void
+  /** 开发者模式：把完整参数快照存为某内置场景的微调覆盖（localStorage 持久化） */
+  updateBuiltinScene(id: string, p: V3EngineParams): boolean
+  /** 开发者模式：还原内置场景为代码默认值（删除覆盖层） */
+  resetBuiltinScene(id: string): void
+  /** 导出场景库 JSON（内置覆盖 + 我的场景），备份/迁移用 */
+  exportSceneLibrary(): string
+  /** 导入场景库 JSON；非法输入抛 Error，返回写入数量 */
+  importSceneLibrary(json: string): { overrides: number; myScenes: number }
+  /** 导出「发布种子」TS 源码文本：替换 builtinSceneSeed.ts 后 commit/push 即全员生效 */
+  exportPublishSeed(): string
   /** 导出分享串（完整参数快照，含版本+校验） */
   encodeShare(p: V3EngineParams): string
   /** 解析分享串；非法输入抛 Error */
@@ -112,9 +129,9 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
     getAnalysis: () => engine.getAnalysis(),
     getLatencySamples: () => engine.getLatencySamples(),
     getSampleRate: () => sampleRate,
-    getScenes: () => [...SCENE_PRESETS, ...loadMyScenes()],
+    getScenes: () => [...mergeBuiltinScenes(), ...loadMyScenes()],
     applyScene: (id: string) => {
-      const scene = getSceneById(id) ?? loadMyScenes().find((s) => s.id === id)
+      const scene = mergeBuiltinScenes().find((s) => s.id === id) ?? loadMyScenes().find((s) => s.id === id)
       if (!scene) return
       // 音量控制是实时控制，独立于场景预设/组合：应用场景时保留当前响度归一化
       // 状态（外部增益/归一化模式），场景快照不得重置用户音量
@@ -141,6 +158,13 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
     deleteMyScene: (id: string) => {
       saveMyScenes(loadMyScenes().filter((s) => s.id !== id))
     },
+    updateBuiltinScene: (id: string, p: V3EngineParams): boolean => saveBuiltinSceneOverride(id, p),
+    resetBuiltinScene: (id: string) => {
+      resetBuiltinSceneOverride(id)
+    },
+    exportSceneLibrary: () => exportSceneLibraryJson(loadMyScenes()),
+    importSceneLibrary: (json: string) => importSceneLibraryJson(json, (list) => saveMyScenes(list)),
+    exportPublishSeed: () => exportPublishSeedTs(),
     encodeShare: (p: V3EngineParams) => encodeShareCode(p),
     decodeShare: (code: string) => decodeShareCode(code),
     beginHearing: () => hearing.begin(),

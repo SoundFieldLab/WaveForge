@@ -16,6 +16,8 @@ export interface AudioPulseStore {
 }
 
 const EMPTY_PULSE: AudioPulseSnapshot = Object.freeze({ scale: 0, brightness: 0, saturation: 0, restless: 0 })
+// 高刷屏限 120fps：包络按 dt 积分，跳帧不改变结果；脉动 120fps 与 240fps 肉眼无差异
+const FRAME_MIN_INTERVAL_MS = 1000 / 120
 export const EMPTY_AUDIO_PULSE_STORE: AudioPulseStore = Object.freeze({
   getSnapshot: () => EMPTY_PULSE,
   subscribe: () => () => undefined,
@@ -114,6 +116,11 @@ export function useAudioPulseStore(
     const update = (now: number) => {
       frame = 0
       if (disposed) return
+      // 限 120fps：不更新 previousTime，被跳过的间隔并入下一帧的 delta
+      if (now - previousTime < FRAME_MIN_INTERVAL_MS) {
+        frame = requestAnimationFrame(update)
+        return
+      }
       const delta = Math.min(50, Math.max(1, now - previousTime))
       previousTime = now
       const analysis = analyzer.getSnapshot()

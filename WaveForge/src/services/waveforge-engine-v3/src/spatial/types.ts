@@ -75,7 +75,7 @@ export type SpeakerRoute = 'l' | 'r' | 'both'
 
 /** 模式 B：头锁定环绕（布局预设 + 自定义编辑器；声场固定于头部朝向） */
 export interface HeadLockedSettings {
-  layout: 'stereo' | '51' | '714' | 'custom'
+  layout: 'stereo' | '51' | '514' | '71' | '714' | 'custom'
   /** 自定义布局扬声器列表（layout==='custom' 时生效） */
   speakers: VirtualSpeakerCfg[]
   /** 顶部仰角层开关（7.1.4 布局的 4 个顶置扬声器） */
@@ -243,6 +243,10 @@ export interface SpatialRenderConfig {
   /** 干湿混合（空间化强度） */
   amount: number
   distanceModel: DistanceModel
+  /** 距离衰减参考距离（米，缺省 1）：模型内不衰减，之外开始衰减 */
+  refDistance?: number
+  /** 距离衰减最大距离（米，缺省 50，linear 模型到 0；钳位 ≥ refDistance+0.1） */
+  maxDistance?: number
   hrtfInterp: HrtfInterpMode
   convolution: ConvolutionMode
   masterGain: number

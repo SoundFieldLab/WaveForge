@@ -129,6 +129,10 @@ export function WorldPanel({
   callbacksRef.current = { onMove, onRotate, onReset, onToggleFirstPerson, onTogglePlayback, onSelectSource }
   const lastRef = useRef(0)
   const rafRef = useRef(0)
+  // WASD 增量累积（20Hz 合并提交，见 frame 内注释）+ 上次提交时刻
+  const accMoveRef = useRef({ x: 0, y: 0, z: 0 })
+  const accYawRef = useRef(0)
+  const lastPatchRef = useRef(0)
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -179,8 +183,9 @@ export function WorldPanel({
       keysRef.current.delete(e.key.toLowerCase())
     }
     const onBlur = () => {
-      // 失焦/切窗口：清空按键集，防止"粘键"持续移动
+      // 失焦/切窗口：清空按键集，防止"粘键"持续移动；残余累积立即补交终值
       keysRef.current.clear()
+      flushPending()
     }
 
     const frame = (now: number) => {
@@ -191,10 +196,37 @@ export function WorldPanel({
       const km = { ...DEFAULT_KEYMAP, ...keymapRef.current }
       // 映射键位随 km 传入（移动四键/升降可重绑定，未配置动作回默认键）
       const move = computeMoveDelta(keysRef.current, yawRef.current, speedRef.current, dt, km)
-      if (move.x !== 0 || move.y !== 0 || move.z !== 0) callbacksRef.current.onMove(move)
       const yawDelta = computeYawDelta(keysRef.current, dt, km)
-      if (yawDelta !== 0) callbacksRef.current.onRotate(yawDelta)
+      // 增量累积 + 20Hz 合并提交：听者位姿 patch 走完整管线（整参数深拷贝 + 双
+      // setParams + worklet postMessage + 全页重渲染），按住 W 走路逐帧提交 =
+      // 60fps 风暴。位移/转角在 50ms 窗口内线性累积，一次提交语义不变（世界
+      // 位置积分）；窗口期满或有输入才 flush，静止时零 patch
+      accMoveRef.current.x += move.x
+      accMoveRef.current.y += move.y
+      accMoveRef.current.z += move.z
+      accYawRef.current += yawDelta
+      const hasPending = accMoveRef.current.x !== 0 || accMoveRef.current.y !== 0 || accMoveRef.current.z !== 0 || accYawRef.current !== 0
+      if (hasPending && now - lastPatchRef.current >= 50) {
+        callbacksRef.current.onMove(accMoveRef.current)
+        if (accYawRef.current !== 0) callbacksRef.current.onRotate(accYawRef.current)
+        accMoveRef.current = { x: 0, y: 0, z: 0 }
+        accYawRef.current = 0
+        lastPatchRef.current = now
+      }
       rafRef.current = requestAnimationFrame(frame)
+    }
+
+    /** 补交残余累积（blur/卸载路径：清键后残余增量不会再被帧循环 flush） */
+    const flushPending = () => {
+      const m = accMoveRef.current
+      if (m.x !== 0 || m.y !== 0 || m.z !== 0) {
+        callbacksRef.current.onMove({ ...m })
+        m.x = 0; m.y = 0; m.z = 0
+      }
+      if (accYawRef.current !== 0) {
+        callbacksRef.current.onRotate(accYawRef.current)
+        accYawRef.current = 0
+      }
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -207,6 +239,7 @@ export function WorldPanel({
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('blur', onBlur)
       keysRef.current.clear()
+      flushPending()
     }
   }, [])
 

@@ -118,8 +118,8 @@ describe('TsConvolverBackend：0° 单扬声器（delta 网格，inverse d=1.5m�
       expect(Math.abs(outL[i])).toBeLessThan(1e-9)
       expect(Math.abs(outR[i])).toBeLessThan(1e-9)
     }
-    // 稳态区（512 延迟 + 滤波暂态余量）：左耳 = 左声道信号延迟 512 后缩放
-    const SKIP = PART + 128
+    // 稳态区（512 放行重建 + 128 滤波暂态 + 256 首装淡入余量）：左耳 = 左声道信号延迟 512 后缩放
+    const SKIP = PART + 128 + 256
     expect(maxAbsDiff(outL.subarray(SKIP), inL.subarray(SKIP - PART).map((v) => v * gain))).toBeLessThan(0.01)
     // 右耳听到的是同一只扬声器（channel=0 路由左声道）
     expect(maxAbsDiff(outR.subarray(SKIP), inL.subarray(SKIP - PART).map((v) => v * gain))).toBeLessThan(0.01)
@@ -810,13 +810,15 @@ describe('TsConvolverBackend：多声道输入 processMulti（②）', () => {
     const outR = new Float32Array(N)
     b.processMulti(inputs, outL, outR)
     // 期望输出 = channel 3 扬声器（delta 网格：卷积延迟 512）的空气吸收脉冲响应：
-    //   y[i] = g·(1−a)·a^(i−712)，i ≥ 712；g = distGain(1.5m, inverse) = 2/3，
-    //   a = exp(−2π·fc/fs)，fc = 4000/(1+d) = 4000/2.5 = 1600 Hz；其余样本
-    //   （含前 512 延迟空白）为 0
+    //   y[i] = fade(i)·g·(1−a)·a^(i−712)，i ≥ 712；g = distGain(1.5m, inverse) = 2/3，
+    //   a = exp(−2π·fc/fs)，fc = 4000/(1+d) = 4000/2.5 = 1600 Hz；
+    //   fade(i) = 首次装载淡入（放行恢复 512 起 256 样本线性到 1，爆音修复）；
+    //   其余样本（含前 512 延迟空白）为 0
     const g = 2 / 3
     const a = Math.exp((-2 * Math.PI * 1600) / FS)
+    const fade = (i: number): number => (i < 512 ? 0 : Math.min(1, (i - 511) / 256))
     for (let i = 0; i < N; i++) {
-      const expected = i < 712 ? 0 : g * (1 - a) * Math.pow(a, i - 712)
+      const expected = i < 712 ? 0 : fade(i) * g * (1 - a) * Math.pow(a, i - 712)
       expect(Math.abs(outL[i] - expected)).toBeLessThan(1e-6)
       expect(Math.abs(outR[i] - expected)).toBeLessThan(1e-6)
     }
@@ -831,7 +833,7 @@ describe('TsConvolverBackend：多声道输入 processMulti（②）', () => {
     const out2 = [new Float32Array(N), new Float32Array(N)]
     b2.processMulti(inputs2, out2[0], out2[1])
     for (let i = 0; i < N; i++) {
-      const expected = i < 712 ? 0 : g * (1 - a) * Math.pow(a, i - 712)
+      const expected = i < 712 ? 0 : fade(i) * g * (1 - a) * Math.pow(a, i - 712)
       expect(Math.abs(out2[0][i] - expected)).toBeLessThan(1e-6)
       expect(Math.abs(out2[1][i] - expected)).toBeLessThan(1e-6)
     }
@@ -882,12 +884,16 @@ describe('TsConvolverBackend：多声道输入 processMulti（②）', () => {
     const outL = new Float32Array(N)
     const outR = new Float32Array(N)
     b.processMulti(inputs, outL, outR)
-    // channel 0（FL）、4（SL）、5（SR）均路由到输入 0 → 三只同响叠加（各 ×2/3；
-    // fc = 4000/(1+1.5) = 1600 Hz）
-    const g = 3 * (2 / 3)
+    // channel 0（FL）、4（SL）、5（SR）均路由到输入 0 → 三只同源相干求和。湿总线
+    // 能量归一化（爆音修复）：组内 1/√(Σ g²) 缩放——三只各 2/3 → 组和
+    // 3·(2/3)·(1/√(3·(2/3)²)) = √3（能量守恒，替代旧的无归一化和 2.0 超幅）；
+    // 输出另乘首次装载淡入 fade(i)（放行恢复 512 起 256 样本线性到 1）；
+    // fc = 4000/(1+1.5) = 1600 Hz
+    const g = Math.sqrt(3)
     const a = Math.exp((-2 * Math.PI * 1600) / FS)
+    const fade = (i: number): number => (i < 512 ? 0 : Math.min(1, (i - 511) / 256))
     for (let i = 0; i < N; i++) {
-      const expected = i < 712 ? 0 : g * (1 - a) * Math.pow(a, i - 712)
+      const expected = i < 712 ? 0 : fade(i) * g * (1 - a) * Math.pow(a, i - 712)
       expect(Math.abs(outL[i] - expected)).toBeLessThan(1e-6)
       expect(Math.abs(outR[i] - expected)).toBeLessThan(1e-6)
     }

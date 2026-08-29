@@ -17,7 +17,7 @@ import type { HeadLockedSettings, VirtualSpeakerCfg } from './types'
 /** 布局预设表项（speakers 含仰角层；714 顶置/底部层由 headLockedSpeakers 按
  *  heightLayer/bottomLayer 过滤） */
 export interface LayoutPreset {
-  id: 'stereo' | '51' | '714'
+  id: 'stereo' | '51' | '514' | '71' | '714'
   name: string
   speakers: VirtualSpeakerCfg[]
 }
@@ -77,6 +77,25 @@ export const LAYOUT_PRESETS: LayoutPreset[] = [
     ],
   },
   {
+    id: '514',
+    name: '5.1.4',
+    // 9 只：5 地面（同 5.1 表）+ 4 顶置；heightLayer 关闭后过滤顶置 = 5.1
+    speakers: [
+      { azimuthDeg: 0, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }, // C
+      { azimuthDeg: -30, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }, // FL
+      { azimuthDeg: 30, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }, // FR
+      { azimuthDeg: -110, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }, // SL
+      { azimuthDeg: 110, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }, // SR
+      ...TOP_714,
+    ],
+  },
+  {
+    id: '71',
+    name: '7.1',
+    // 7 地面（与 714 地面层同表：C/FL/FR/SL/SR/RL/RR），无顶置/底部层
+    speakers: [...GROUND_714],
+  },
+  {
     id: '714',
     name: '7.1.4',
     // 13 只：7 地面 + 4 顶置 + 2 底部仰角层（顺序即声道表：地面 0-6、顶置 7-10、底部 11-12）
@@ -90,7 +109,7 @@ function presetById(id: LayoutPreset['id']): LayoutPreset {
 }
 
 /**
- * 取布局预设扬声器列表（副本）。714 返回含顶置层与底部仰角层的完整 13 只——
+ * 取布局预设扬声器列表（副本）。714/514 返回含顶置层（714 另含底部仰角层）——
  * heightLayer/bottomLayer 过滤由 headLockedSpeakers 负责；本函数供 UI 切换布局时
  * 同步 headLocked.speakers（自定义布局的编辑起点 = 当前预设）。
  */
@@ -100,8 +119,9 @@ export function createLayoutSpeakers(layout: LayoutPreset['id']): VirtualSpeaker
 
 /**
  * HeadLockedSettings → 实际参与渲染的扬声器列表：
- *  - 预设布局 → 预设表副本（714 时按 heightLayer/bottomLayer 过滤顶置/底部层：
- *    默认全开 13 只，仅关顶置 9 只，仅关底部 11 只，全关剩 7 地面）；
+ *  - 预设布局 → 预设表副本（714/514 按 heightLayer 过滤顶置层、714 另按
+ *    bottomLayer 过滤底部层：714 默认全开 13 只，仅关顶置 9 只，仅关底部 11 只，
+ *    全关剩 7 地面；514 关顶置 = 5.1）；
  *  - custom → p.speakers 原样返回（空列表回退 5.1 预设，保证后端恒有扬声器）。
  */
 export function headLockedSpeakers(p: HeadLockedSettings): VirtualSpeakerCfg[] {
@@ -109,8 +129,10 @@ export function headLockedSpeakers(p: HeadLockedSettings): VirtualSpeakerCfg[] {
     const preset = presetById(p.layout)
     // 先按引用过滤（TOP_714/BOTTOM_714 与预设表共享实例），再拷贝
     let src = preset.speakers
-    if (p.layout === '714') {
+    if (p.layout === '714' || p.layout === '514') {
       if (!p.heightLayer) src = src.filter((s) => !TOP_714.includes(s))
+    }
+    if (p.layout === '714') {
       // 显式 === false 判断：旧持久化快照缺 bottomLayer 字段（undefined）视为开启
       // （默认 true），避免老数据静默丢失底部层
       if (p.bottomLayer === false) src = src.filter((s) => !BOTTOM_714.includes(s))

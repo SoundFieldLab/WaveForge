@@ -31,7 +31,9 @@ export default memo(function TitleBar() {
     const checkFullscreen = async () => {
       if (window.electron?.system?.isFullscreen) {
         const status = await window.electron.system.isFullscreen()
-        setIsFullscreen(status.fullscreen || status.kiosk || status.maximized)
+        // expanded 为主进程自记的"扩大态"（kiosk/原生全屏/最大化），
+        // Windows kiosk 路径下 fullscreen/kiosk/maximized 查询可能全为 false，必须优先取 expanded
+        setIsFullscreen(Boolean(status.expanded) || status.fullscreen || status.kiosk || status.maximized)
         setIsKiosk(status.kiosk)
       }
     }
@@ -54,24 +56,19 @@ export default memo(function TitleBar() {
   }
 
   const handleMaximize = async () => {
-    // 如果是全屏状态（kiosk 或 fullscreen），退出全屏并还原窗口
-    if (isFullscreen) {
-      if (window.electron?.system?.setFullscreen) {
-        await window.electron.system.setFullscreen(false, false)
-        setIsFullscreen(false)
-        setIsKiosk(false)
-      }
-      return
+    // 最大化按钮 = 进入/还原的切换：主进程持有自记"扩大态"（kiosk 全屏/原生全屏/最大化），
+    // 渲染端只转发点击并刷新图标，不依赖本地可能不同步的 isFullscreen 状态
+    // （Windows kiosk 路径不触发 maximize 事件，本地状态会过期导致"按了没反应"）
+    if (!window.electron?.system?.maximize) return
+    await window.electron.system.maximize()
+    if (window.electron?.system?.isMaximized) {
+      const maximized = await window.electron.system.isMaximized()
+      setIsMaximized(maximized)
     }
-    
-    // 普通最大化/取消最大化切换
-    if (window.electron?.system?.maximize) {
-      await window.electron.system.maximize()
-      // 更新状态
-      if (window.electron?.system?.isMaximized) {
-        const maximized = await window.electron.system.isMaximized()
-        setIsMaximized(maximized)
-      }
+    if (window.electron?.system?.isFullscreen) {
+      const status = await window.electron.system.isFullscreen()
+      setIsFullscreen(Boolean(status.expanded) || status.fullscreen || status.kiosk || status.maximized)
+      setIsKiosk(Boolean(status.kiosk))
     }
   }
 
@@ -106,6 +103,7 @@ export default memo(function TitleBar() {
       {/* 左侧标题栏区域 - 用于拖拽窗口 */}
       <div 
         className="fixed top-0 left-0 h-8 z-[9999]"
+        data-desktop-interactive
         style={{ 
           WebkitAppRegion: 'drag',
           borderRadius: '12px 0 0 0',
@@ -119,6 +117,7 @@ export default memo(function TitleBar() {
       {/* 右侧标题栏区域 - 用于拖拽窗口和显示控制按钮 */}
       <div 
         className="fixed top-0 right-0 h-8 z-[9999] flex items-center justify-end"
+        data-desktop-interactive
         style={{ 
           WebkitAppRegion: 'drag',
           borderRadius: '0 12px 0 0',

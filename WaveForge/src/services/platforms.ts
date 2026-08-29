@@ -236,35 +236,35 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
 const SODA_CAPABILITIES: PlatformCapabilities = {
   login: true,
   profile: true,
-  userPlaylists: false, // 抖音歌单接口未实现
-  createPlaylist: false,
+  userPlaylists: true, // 逆向 Web API：用户歌单获取（含虚拟歌单）
+  createPlaylist: false, // 逆向接口未提供创建歌单
   deletePlaylist: false,
-  addTracksToPlaylist: false,
-  subscribePlaylist: false,
-  likedSongs: false,
-  likeSong: false,
+  addTracksToPlaylist: true, // me/playlist/media/append 加歌
+  subscribePlaylist: true, // collection 收藏/取消收藏歌单
+  likedSongs: true, // "我喜欢"虚拟歌单 qishui-liked
+  likeSong: true, // collection/media 喜欢写入
   explore: true,
-  exploreSections: ['discover', 'charts', 'newSongs'],
+  exploreSections: ['discover', 'playlists', 'charts', 'newSongs'],
   search: true,
   searchSuggest: false,
   lyrics: true,
-  comments: false,
-  dailyRecommend: false,
+  comments: true, // luna/pc/comments 读取与发表
+  dailyRecommend: true, // 登录 feed 日推；未登录回退公开热歌
   charts: true,
   channels: false,
   newSongs: true,
-  albums: false,
+  albums: true, // 按专辑名聚合的尽力而为实现
   mv: false,
   signin: false,
   social: false,
   rank: false,
   cloudDisk: false,
-  recentPlayed: false,
-  artistDetail: false,
-  albumDetail: false,
-  similarSongs: false,
+  recentPlayed: false, // 仅上报播放，暂无听歌排行展示
+  artistDetail: true, // 按歌手名检索热门歌曲（无独立艺人 ID）
+  albumDetail: true,
+  similarSongs: true, // 同歌手热门 + 日推组合的相关探索
   radio: false,
-  playAsCarrier: false, // 抖音直链需 a_bogus 签名，始终由网易云/QQ 匹配播放
+  playAsCarrier: true, // 逆向 Web API 音源（免费/试听流可播）；失败时上层降级网易云/QQ
   audioQuality: false,
 }
 

@@ -64,23 +64,23 @@ export class V3Adapter implements IAudioEngineAdapter {
     // v3 响度归一化引擎内自治，no-op
   }
 
-  async exportMp3(sourceUrl: string, durationSeconds: number): Promise<void> {
+  async exportMp3(sourceUrl: string, durationSeconds: number, options?: { fileName?: string }): Promise<void> {
     this.setExporting(true)
     try {
-      await exportV3Mp3(sourceUrl, durationSeconds)
+      await exportV3Mp3(sourceUrl, durationSeconds, options)
     } finally {
       this.setExporting(false)
     }
   }
 
   renderStudio(props: RenderStudioProps): React.ReactNode {
-    const { sourceUrl, sourceDuration, ...commonProps } = props
+    const { sourceUrl, sourceDuration, exportFileName, ...commonProps } = props
     // v3 调音室需要 bridge + exportMp3 闭包 + exporting 状态
     // exportMp3 闭包：包装 adapter.exportMp3，错误时弹 toast
     const exportMp3 = sourceUrl
       ? async () => {
           try {
-            await this.exportMp3(sourceUrl, sourceDuration || 0)
+            await this.exportMp3(sourceUrl, sourceDuration || 0, { fileName: exportFileName })
           } catch (err) {
             window.dispatchEvent(new CustomEvent('showToast', {
               detail: { message: `导出失败：${err instanceof Error ? err.message : String(err)}`, type: 'error' },

@@ -116,6 +116,9 @@ export default function ModernAudioVisualizer({
 
     const draw = (now: number) => {
       if (disposed) return
+      // 窗口隐藏时停帧：Electron backgroundThrottling 关闭后 rAF 在后台仍全速执行，
+      // 避免隐藏播放时 30fps canvas 空转（与 useAudioAnalyzer 的可见性门控一致）
+      if (document.visibilityState === 'hidden') return
       if (now - lastSample < 1000 / 30) {
         animationFrame = requestAnimationFrame(draw)
         return
@@ -265,13 +268,21 @@ export default function ModernAudioVisualizer({
       context.fillRect(0, Math.floor(height / 2), width, 1)
       context.globalAlpha = 1
       const hasVisibleMotion = playingRef.current || maximumLevel > 0
-      if (hasVisibleMotion) animationFrame = requestAnimationFrame(draw)
+      if (hasVisibleMotion && document.visibilityState === 'visible') animationFrame = requestAnimationFrame(draw)
     }
 
+    const onVisibilityChange = () => {
+      // 窗口恢复可见时若此前已停帧，则重启循环
+      if (document.visibilityState === 'visible' && !disposed && animationFrame === 0) {
+        animationFrame = requestAnimationFrame(draw)
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
     animationFrame = requestAnimationFrame(draw)
     return () => {
       disposed = true
       cancelAnimationFrame(animationFrame)
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       resizeObserver.disconnect()
     }
   }, [analyser, accentColor, paletteKey, isPlaying])

@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
-import { Play, Pause, SkipBack, SkipForward, List, Repeat, Repeat1, Shuffle, Volume2, VolumeX } from 'lucide-react'
+import { Play, Pause, SkipBack, SkipForward, List, Repeat, Repeat1, Shuffle, Volume2, VolumeX, AudioWaveform } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useDGLabStatus, getDGLabClient, loadDGLabSettings, DGLAB_SETTINGS_EVENT } from '../plugins/clients/DGLabClient'
+import { isPluginEnabled } from '../services/pluginStore'
 import {
   loadPlaybackShortcutSettings,
   PLAYBACK_SHORTCUT_SETTINGS_EVENT,
@@ -208,6 +210,15 @@ export default function PlayerControls({
   const tvCompact = tvMode && !remoteCursorMode
   const [dragValue, setDragValue] = useState(0)
   const [showVolumeSlider, setShowVolumeSlider] = useState(false)
+  // DG-LAB 波形输出启禁（仅连接后显示，最右侧按钮）
+  const dglabStatus = useDGLabStatus()
+  const [dglabOutputOn, setDglabOutputOn] = useState(() => loadDGLabSettings().outputEnabled)
+  useEffect(() => {
+    const handler = () => setDglabOutputOn(loadDGLabSettings().outputEnabled)
+    window.addEventListener(DGLAB_SETTINGS_EVENT, handler)
+    return () => window.removeEventListener(DGLAB_SETTINGS_EVENT, handler)
+  }, [])
+  const dglabConnected = isPluginEnabled('dglab') && dglabStatus.state === 'bound'
   /** 音量条打开时间（3 秒宽限：打开后短暂移动不因离开大药丸而关闭） */
   const volumeOpenedAtRef = useRef(0)
   /** 音量滑条延迟关闭定时器：离开大药丸先给鼠标留出移到小药丸的时间，小药丸 hover 会取消 */
@@ -831,6 +842,18 @@ export default function PlayerControls({
                           {playMode === 'repeat' && <Repeat1 className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />}
                           {playMode === 'sequential' && <Repeat className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/40' : 'text-black/35'}`} />}
                         </motion.button>
+                        {dglabConnected && (
+                          <motion.button
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.95 }}
+                            onClick={() => { const next = !dglabOutputOn; setDglabOutputOn(next); getDGLabClient().setOutputEnabled(next) }}
+                            className={`relative p-2 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
+                            title={dglabOutputOn ? '暂停波形输出（不断开连接）' : '恢复波形输出'}
+                          >
+                            <AudioWaveform className={`w-4 h-4 ${dglabOutputOn ? 'text-amber-300' : 'text-white/25'}`} />
+                            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{ background: dglabOutputOn ? '#FFE89C' : '#64748b' }} />
+                          </motion.button>
+                        )}
                       </motion.div>
                     )}
                   </AnimatePresence>
@@ -1223,6 +1246,18 @@ export default function PlayerControls({
                   {playMode === 'repeat' && <Repeat1 className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />}
                   {playMode === 'sequential' && <Repeat className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/40' : 'text-black/35'}`} />}
                 </motion.button>
+                {dglabConnected && (
+                  <motion.button
+                    whileHover={{ scale: 1.1 }}
+                    whileTap={{ scale: 0.95 }}
+                    onClick={() => { const next = !dglabOutputOn; setDglabOutputOn(next); getDGLabClient().setOutputEnabled(next) }}
+                    className={`relative p-2 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
+                    title={dglabOutputOn ? '暂停波形输出（不断开连接）' : '恢复波形输出'}
+                  >
+                    <AudioWaveform className={`w-4 h-4 ${dglabOutputOn ? 'text-amber-300' : 'text-white/25'}`} />
+                    <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full" style={{ background: dglabOutputOn ? '#FFE89C' : '#64748b' }} />
+                  </motion.button>
+                )}
               </motion.div>
             )}
           </AnimatePresence>

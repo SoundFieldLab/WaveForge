@@ -13,7 +13,8 @@ import ScrollToCurrentSong from './ScrollToCurrentSong'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import SongContextMenu from './SongContextMenu'
 import { getUserPlaylists } from '../services/playlistService'
-import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, getAppleLibraryPlaylists } from '../services/appleCatalog'
+import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestions, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
+import { getAppleCredentials } from '../services/appleAuth'
 import { parseStoredArray } from '../utils/storage'
 
 interface SearchPanelProps {
@@ -216,14 +217,23 @@ export default function SearchPanel({
         .catch(error => console.warn('Failed to load Apple search context playlists:', error))
       return
     }
-    const userId = songPlatform === 'qq'
-      ? localStorage.getItem('qq_user_id') || ''
-      : localStorage.getItem('netease_user_id') || ''
-    if (!userId) return
-    const username = songPlatform === 'qq'
-      ? localStorage.getItem('qq_username') || ''
-      : localStorage.getItem('netease_username') || ''
-    void getUserPlaylists(songPlatform, userId, username)
+    // 右键菜单歌单列表按歌曲自身平台解析归属键，禁止跨平台兜底：
+    // - spotify（token）/ 汽水（cookie）：数据源不依赖 userId，空值也照常拉取；
+    // - kugou：需 kugou_user_id（getUserPlaylists 对非 spotify/soda 平台按 userId 门禁）；
+    // - qq/netease：各自 user_id + username。
+    const playlistUserId = (() => {
+      switch (songPlatform) {
+        case 'qq': return localStorage.getItem('qq_user_id') || ''
+        case 'kugou': return localStorage.getItem('kugou_user_id') || ''
+        case 'spotify':
+        case 'soda':
+          return ''
+        default: return localStorage.getItem('netease_user_id') || ''
+      }
+    })()
+    if (songPlatform !== 'spotify' && songPlatform !== 'soda' && !playlistUserId) return
+    const username = songPlatform === 'qq' ? (localStorage.getItem('qq_username') || '') : ''
+    void getUserPlaylists(songPlatform, playlistUserId, username)
       .then(setContextUserPlaylists)
       .catch(error => console.warn('Failed to load search context playlists:', error))
   }
@@ -494,7 +504,12 @@ export default function SearchPanel({
               .slice(0, 8)
           : platform === 'qq'
             ? await buildQqQuickSuggestions(keyword.trim())
-            : await searchSuggest(keyword.trim(), platform)
+            : platform === 'apple'
+              // Apple：amp-api search/suggestions（web 播放器同款联想，需 Developer Token）
+              ? (await getAppleSearchSuggestions(keyword.trim(), localStorage.getItem('appleStorefront') || 'cn'))
+                  .slice(0, 8)
+                  .map(term => ({ keyword: term }))
+              : await searchSuggest(keyword.trim(), platform)
         if (!active) return
         console.log('📝 搜索建议结果:', result)
         setSuggestions(result)
@@ -550,8 +565,8 @@ export default function SearchPanel({
     
     try {
       if (platform === 'fused') {
-        // 融合搜索覆盖全部可搜索平台（soda 接口暂不可用，跳过避免无效请求）
-        const platforms: MusicPlatform[] = ['netease', 'qq', 'apple', 'spotify', 'kugou']
+        // 融合搜索覆盖全部可搜索平台（汽水已接入逆向 Web API 搜索）
+        const platforms: MusicPlatform[] = ['netease', 'qq', 'apple', 'spotify', 'kugou', 'soda']
         const requests = platforms.flatMap(sourcePlatform => ([
           { sourcePlatform, kind: 'songs' as const, promise: withSearchTimeout(searchSongs(finalKeyword, 100, sourcePlatform)) },
           { sourcePlatform, kind: 'artists' as const, promise: withSearchTimeout(searchArtists(finalKeyword, sourcePlatform)) },
@@ -583,7 +598,7 @@ export default function SearchPanel({
             apple: { loggedIn: false, vip: false },
             spotify: { loggedIn: false, vip: false },
             kugou: { loggedIn: false, vip: false },
-            soda: { loggedIn: false, vip: false },
+            soda: { loggedIn: Boolean(localStorage.getItem('soda_token')), vip: false },
           },
         })
         setFusionUnavailablePlatforms(unavailable)
@@ -598,9 +613,45 @@ export default function SearchPanel({
           artists: fused.artists, albums: fused.albums, unavailable, intent: fused.intent
         }, SEARCH_CACHE_MAX)
       } else if (platform === 'apple') {
-        // Apple Music 目录搜索（iTunes Search，免 token；storefront 决定地区）
+        // Apple Music 目录搜索：优先 amp-api（web 播放器同款，含歌单/电台），
+        // 无 Developer Token 时回退 iTunes Search（免 token，无歌单）
         const storefront = localStorage.getItem('appleStorefront') || 'cn'
-        if (searchType === 'song') {
+        const hasDevToken = Boolean(getAppleCredentials().developerToken)
+        if (hasDevToken) {
+          const searched = await searchAppleCatalogV1(finalKeyword, storefront, 25)
+          if (requestId !== searchRequestRef.current) return
+          const songs = searched.songs.map(song => appleSongToSong(song, storefront))
+          const artists = searched.artists.map(artist => ({
+            id: Number(artist.id) || 0,
+            name: artist.name,
+            picUrl: artist.artworkUrl || '',
+            platform: 'apple' as const,
+          }))
+          const albums = searched.albums.map(album => ({
+            id: Number(album.id) || 0,
+            name: album.name,
+            picUrl: album.artworkUrl || '',
+            artist: { name: album.artistName },
+            platform: 'apple' as const,
+          }))
+          const playlists = searched.playlists.map(playlist => ({
+            id: playlist.id,
+            name: playlist.name,
+            coverImgUrl: playlist.artworkUrl || '',
+            trackCount: playlist.trackCount ?? 0,
+            creator: playlist.curatorName || 'Apple Music 编辑',
+            platform: 'apple' as const,
+          }))
+          setAllResults(songs)
+          setDisplayedResults(songs.slice(0, 20))
+          setArtistResults(artists)
+          setAlbumResults(albums)
+          setPlaylistResults(playlists)
+          setLruCache(searchCacheRef.current, cacheKey, {
+            allResults: songs, artistResults: artists, albumResults: albums,
+            artists: [], albums: [], unavailable: [], intent: 'mixed' as const,
+          }, SEARCH_CACHE_MAX)
+        } else if (searchType === 'song') {
           const songs = await searchAppleSongsAsSongs(finalKeyword, storefront, 50)
           if (requestId !== searchRequestRef.current) return
           setAllResults(songs)
@@ -625,7 +676,7 @@ export default function SearchPanel({
             platform: 'apple',
           })))
         } else if (searchType === 'playlist') {
-          // Apple 无歌单搜索接口（编辑精选歌单走探索页）
+          // 未登录无 dev token：暂无 AMP 歌单搜索，与旧行为一致为空
           setPlaylistResults([])
         }
       } else if (searchType === 'song') {
@@ -1625,7 +1676,9 @@ export default function SearchPanel({
         onViewArtist={(song) => {
           const songPlatform = song.platform || 'netease'
           const artist = song.artists?.[0]
-          const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+          // 汽水无艺人 ID，约定传歌手名
+        const artistId = songPlatform === 'soda' ? (artist?.name || artist?.mid || artist?.id)
+          : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
           if (artistId) onOpenArtist?.(String(artistId), songPlatform)
         }}
         onCopyInfo={onCopyInfo}

@@ -88,6 +88,55 @@ html.tv-mode.wf-perf-efficiency [class*='aurora'],
 html.tv-mode.wf-perf-normal [class*='aurora'] {
   animation: none !important;
 }
+/* 地震震中圈（类名不含 weather-/aurora 前缀，原黑名单漏掉） */
+html.tv-mode.wf-perf-efficiency .earthquake-pulse-ring,
+html.tv-mode.wf-perf-normal .earthquake-pulse-ring {
+  animation: none !important;
+}
+/* OOBE 首启引导全屏动效（blob/stars/wave；aurora 已由原规则覆盖） */
+html.tv-mode.wf-perf-efficiency [class*='oobe-'],
+html.tv-mode.wf-perf-normal [class*='oobe-'] {
+  animation: none !important;
+}
+/* 模式切换 overlay：TV 非增强档停掉全屏极光/粒子/旋转环（弱 GPU 上这正发生在挂载新模式
+   最重的时刻），只保留中央小徽章的 dot 跳动 */
+html.tv-mode.wf-perf-efficiency .wm-aurora,
+html.tv-mode.wf-perf-efficiency .wm-aurora-2,
+html.tv-mode.wf-perf-efficiency .wm-particle,
+html.tv-mode.wf-perf-efficiency .wm-halo,
+html.tv-mode.wf-perf-efficiency .wm-spin-ring,
+html.tv-mode.wf-perf-efficiency .wm-orbit,
+html.tv-mode.wf-perf-normal .wm-aurora,
+html.tv-mode.wf-perf-normal .wm-aurora-2,
+html.tv-mode.wf-perf-normal .wm-particle,
+html.tv-mode.wf-perf-normal .wm-halo,
+html.tv-mode.wf-perf-normal .wm-spin-ring,
+html.tv-mode.wf-perf-normal .wm-orbit {
+  animation: none !important;
+}
+
+/* TV 弱 GPU：backdrop-filter 高斯模糊统一钳制到 blur(6px)（保留液态玻璃观感）。
+   Android WebView 的 backdrop-filter 是最大合成开销，2133px 大布局下成本成倍放大，
+   且背景内容移动时每帧重模糊；桌面不受影响。
+   覆盖内联 style、Tailwind backdrop-blur-* 类、以及类级玻璃面板（profile 60px 等）。 */
+html.tv-mode [style*='backdrop-filter'],
+html.tv-mode [class*='backdrop-blur'],
+html.tv-mode .profile-glass-panel-surface {
+  -webkit-backdrop-filter: blur(6px) saturate(150%) !important;
+  backdrop-filter: blur(6px) saturate(150%) !important;
+}
+/* 显式只要 blur(2px) 的遮罩层（如搜索面板背景）：不被上面钳制抬高，恢复原廉价的 2px */
+html.tv-mode [style*='blur(2px)'] {
+  -webkit-backdrop-filter: blur(2px) !important;
+  backdrop-filter: blur(2px) !important;
+}
+
+/* 设置页滑块 thumb：TV 上去掉 transition:all（hover 放大 0.2s 过渡逐帧重栅格化模糊 thumb） */
+html.tv-mode .range-slider-glass::-webkit-slider-thumb,
+html.tv-mode .range-slider-glass::-moz-range-thumb {
+  transition: none !important;
+}
+
 html.tv-mode.wf-perf-efficiency * {
   animation-duration: 0.01s !important;
   animation-iteration-count: 1 !important;

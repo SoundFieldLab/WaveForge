@@ -2,17 +2,21 @@
  * 音效场景页 —— 场景预设 + 效果卡片
  */
 
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ChangeEvent } from 'react'
 import { motion } from 'framer-motion'
-import { Sparkles, Save, RotateCcw, Trash2, Volume2, Gauge } from 'lucide-react'
+import { Sparkles, Save, RotateCcw, Trash2, Volume2, Gauge, PencilRuler, FileDown, FileUp, FileCode2 } from 'lucide-react'
 import { GlassCard, Toggle, RangeStyle } from '../components/Primitives'
+import DevSceneEditor from '../components/DevSceneEditor'
 import type { HSETheme } from '../hse-theme'
 import { MAX_MY_SCENES, type V3UiBridge } from '../bridge'
+import { isDevMode, HSE_DEV_MODE_EVENT } from '../sceneStore'
 import type { V3ParamsController } from '../hooks'
 import {
   EFFECT_META, effectEnabled, patchEffectEnabled,
 } from '../effectsPanel'
 import type { EffectUiKey } from '../effectsPanel'
+import type { ScenePreset } from '../../src/types'
 import { createDefaultParams } from '../../src/types'
 
 interface ScenesPageProps {
@@ -29,6 +33,16 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
   const { params, patch, replace } = controller
   const [sceneName, setSceneName] = useState('')
   const [scenes, setScenes] = useState(() => bridge.getScenes())
+  // 开发者模式：内置场景微调编辑（场景数据由引擎 sceneStore 持久化）
+  const [devMode, setDevMode] = useState(isDevMode)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const importFileRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    const sync = () => setDevMode(isDevMode())
+    window.addEventListener(HSE_DEV_MODE_EVENT, sync)
+    return () => window.removeEventListener(HSE_DEV_MODE_EVENT, sync)
+  }, [])
 
   const refreshScenes = () => setScenes(bridge.getScenes())
 
@@ -36,6 +50,11 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
     bridge.applyScene(id)
     replace(bridge.getParams())
     refreshScenes()
+  }
+
+  const openSceneEditor = (scene: ScenePreset) => {
+    handleApplyScene(scene.id) // 先应用，保证试听上下文一致
+    setEditingId(scene.id)
   }
 
   const handleSaveScene = () => {
@@ -52,6 +71,65 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
   const handleDeleteScene = (id: string) => {
     bridge.deleteMyScene(id)
     refreshScenes()
+  }
+
+  // —— 开发者模式工具（场景库备份 / 导入）——
+  const notify = (message: string, type: 'info' | 'error' = 'info') =>
+    window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type } }))
+
+  const handleExportLibrary = () => {
+    try {
+      const json = bridge.exportSceneLibrary()
+      const blob = new Blob([json], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `hse-scene-library-${new Date().toISOString().slice(0, 10)}.json`
+      a.click()
+      URL.revokeObjectURL(url)
+      notify('场景库已导出（内置微调 + 我的场景）')
+    } catch {
+      notify('导出失败', 'error')
+    }
+  }
+
+  // 「写回仓库」路径：优先经 Electron 直接写回仓库源文件（开发模式）；失败则退化为手动下载替换
+  const handleExportPublishSeed = async () => {
+    try {
+      const ts = bridge.exportPublishSeed()
+      const host = window as unknown as {
+        electron?: { writeHseSceneSeed?: (content: string) => Promise<{ ok: boolean; path?: string; error?: string }> }
+      }
+      const res = await host.electron?.writeHseSceneSeed?.(ts)?.catch(() => null)
+      if (res?.ok) {
+        notify(`已自动写回 ${res.path ?? 'builtinSceneSeed.ts'} —— 重启 dev 使其编译生效，之后 commit/push 即全员同步`)
+        return
+      }
+      const blob = new Blob([ts], { type: 'text/x-typescript' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'builtinSceneSeed.ts'
+      a.click()
+      URL.revokeObjectURL(url)
+      notify(res?.error ? `自动写回失败（${res.error}），已改为下载 —— 请手动替换 src/services/waveforge-engine-v3/src/engine/builtinSceneSeed.ts 并提交` : '当前环境不支持直接写盘，已改为下载 —— 请手动替换 src/services/waveforge-engine-v3/src/engine/builtinSceneSeed.ts 并提交', 'info')
+    } catch {
+      notify('导出发布种子失败', 'error')
+    }
+  }
+
+  const handleImportFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    try {
+      const text = await file.text()
+      const counts = bridge.importSceneLibrary(text)
+      refreshScenes()
+      notify(`已导入：内置微调 ${counts.overrides} 个、我的场景 ${counts.myScenes} 个`)
+    } catch (err) {
+      notify(`导入失败：${err instanceof Error ? err.message : String(err)}`, 'error')
+    }
   }
 
   const handleResetAll = () => {
@@ -153,6 +231,48 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
           <span className="text-xs" style={{ color: theme.accentColor }}>当前：{activeSceneName}{params.customized ? '（已调整）' : ''}</span>
         </div>
 
+        {/* 开发者模式工具条 */}
+        {devMode && (
+          <div className="flex flex-wrap items-center gap-2 mb-3 px-2.5 py-1.5 rounded-lg" style={{ background: `${theme.accentColor}14`, border: `1px solid ${theme.accentColor}33` }}>
+            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded" style={{ color: theme.accentColor, border: `1px solid ${theme.accentColor}55` }}>开发者模式</span>
+            <button
+              type="button"
+              onClick={() => {
+                const sel = scenes.find((s) => s.id === params.sceneId)
+                if (sel?.builtin) openSceneEditor(sel)
+                else notify('请先在左侧选择一个内置场景')
+              }}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/80 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
+            >
+              <PencilRuler className="w-3 h-3" /> 编辑当前场景
+            </button>
+            <div className="flex-1" />
+            <button
+              type="button"
+              onClick={handleExportLibrary}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+            >
+              <FileDown className="w-3 h-3" /> 导出场景库
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleExportPublishSeed() }}
+              title="把微调自动写回仓库默认值（dev 模式），随版本分发给所有用户"
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+            >
+              <FileCode2 className="w-3 h-3" /> 写回发布种子
+            </button>
+            <button
+              type="button"
+              onClick={() => importFileRef.current?.click()}
+              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+            >
+              <FileUp className="w-3 h-3" /> 导入场景库
+            </button>
+            <input ref={importFileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => { void handleImportFile(e) }} />
+          </div>
+        )}
+
         <div className="flex gap-3">
           {/* 左：场景列表（纵向，替代横向滚动条） */}
           <div className="w-[168px] shrink-0 flex flex-col gap-1.5 max-h-[220px] overflow-y-auto pr-1" style={{ scrollbarWidth: 'thin' }}>
@@ -180,6 +300,23 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
                     >
                       <Trash2 className="w-3 h-3 text-white/50" />
                     </button>
+                  )}
+                  {scene.builtin && devMode && (
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); openSceneEditor(scene) }}
+                      title="微调此场景（开发者）"
+                      className="absolute -top-1.5 -right-1.5 p-1 rounded-full bg-black/70 shadow-md"
+                    >
+                      <PencilRuler className="w-3 h-3" style={{ color: theme.accentColor }} />
+                    </button>
+                  )}
+                  {scene.builtin && scene.overridden && (
+                    <span
+                      className="absolute bottom-1 right-1 w-1.5 h-1.5 rounded-full"
+                      style={{ backgroundColor: theme.accentColor, boxShadow: `0 0 6px ${theme.accentColor}` }}
+                      title="此场景含本地微调，恢复出厂见编辑器"
+                    />
                   )}
                 </button>
               )
@@ -242,6 +379,22 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
         <Volume2 className="w-4 h-4" style={{ color: theme.accentColor }} /> 响度相关
       </div>
       {ROW_KEYS.map(renderRowCard)}
+
+      {/* 开发者模式：内置场景微调编辑器 */}
+      {editingId && (() => {
+        const editingScene = scenes.find((s) => s.id === editingId && s.builtin)
+        return editingScene ? (
+          <DevSceneEditor
+            key={editingScene.id}
+            scene={editingScene}
+            theme={theme}
+            bridge={bridge}
+            controller={controller}
+            onClose={() => setEditingId(null)}
+            onSaved={refreshScenes}
+          />
+        ) : null
+      })()}
     </div>
   )
 }

@@ -1391,6 +1391,11 @@ export class AudioEffectsEngine {
         this.surroundAnimationFrame = 0
         return
       }
+      // 限 60fps：环绕旋转缓慢且 setTargetAtTime 带 30ms 平滑，高刷屏无需逐帧驱动
+      if (now - this.surroundLastTime < 1000 / 60) {
+        this.surroundAnimationFrame = requestAnimationFrame(tick)
+        return
+      }
       const dt = Math.min(0.1, (now - this.surroundLastTime) / 1000)
       this.surroundLastTime = now
       const speed = this.settings.effects.surround3d.speed

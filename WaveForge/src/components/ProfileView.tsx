@@ -13,6 +13,7 @@ import DeletePlaylistModal from './DeletePlaylistModal'
 import {
   createPlaylist,
   deletePlaylist,
+  getPlaylistDetail,
   getUserPlaylists,
   removeSongFromPlaylist,
   subscribePlaylist,
@@ -135,6 +136,36 @@ interface RecentPlaybackItem {
   song?: Song
   playlist?: Playlist
   albumId?: string
+}
+
+/**
+ * 汽水曲目（后端 mapSodaMedia 产出）→ WaveForge Song。
+ * 与 sodaService.mapSodaSongToSong 同口径：platform 固定 'soda'，mid 保留原始 id 字符串，
+ * Song.id 用 Number(mid.slice(0,15))||0 截断生成（汽水 id 超出 JS 安全整数精度）；
+ * 本组件直接消费 /api/soda/recent 的原始 JSON，避免为此改动 service 层公共映射。
+ */
+const sodaMediaToSong = (raw: any): Song | undefined => {
+  const mid = String(raw?.id ?? '')
+  if (!mid) return undefined
+  const tier = raw?.requiredTier
+  const vip = Boolean(raw?.vip || tier === 'vip' || tier === 'svip')
+  const rawArtists = Array.isArray(raw?.artists) ? raw.artists : []
+  const artistNames = rawArtists.length
+    ? rawArtists.map((item: any) => (typeof item === 'string' ? item : String(item?.name || ''))).filter(Boolean)
+    : raw?.artist ? [String(raw.artist)] : []
+  return {
+    id: Number(mid.slice(0, 15)) || 0,
+    mid,
+    name: String(raw?.name || '未知歌曲'),
+    artists: artistNames.map((name: string) => ({ name })),
+    album: { name: String(raw?.album || ''), picUrl: String(raw?.coverUrl || '') },
+    duration: Number(raw?.durationMs || 0),
+    platform: 'soda',
+    vip,
+    fee: vip ? 1 : 0,
+    songType: 1,
+    fusedSources: [],
+  }
 }
 
 // ===== 列表行组件（模块级 memo）=====
@@ -334,7 +365,7 @@ const SocialUserCard = memo(function SocialUserCard({
     >
       <div className="flex items-center gap-3">
         <div className="w-12 h-12 rounded-full overflow-hidden shrink-0 bg-white/10">
-          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.nickname} className="w-full h-full object-cover" /> : <User className="w-6 h-6 m-auto mt-3 text-white/30" />}
+          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.nickname} loading="lazy" className="w-full h-full object-cover" /> : <User className="w-6 h-6 m-auto mt-3 text-white/30" />}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-white text-sm font-medium truncate">{user.nickname}</p>
@@ -392,7 +423,7 @@ const QqSocialUserCard = memo(function QqSocialUserCard({
     >
       <div className="flex items-center gap-3">
         <div className="w-12 h-12 rounded-full overflow-hidden shrink-0 bg-white/10">
-          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} className="w-full h-full object-cover" /> : <Users className="w-6 h-6 m-auto mt-3 text-white/30" />}
+          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} loading="lazy" className="w-full h-full object-cover" /> : <Users className="w-6 h-6 m-auto mt-3 text-white/30" />}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-white text-sm font-medium truncate">{user.name}</p>
@@ -645,15 +676,20 @@ function ProfileView({
     setLoading(true)
     try {
       const playlists = await getUserPlaylists(platform, userId, undefined, { forceRefresh: true })
+      // 汽水：与 fetchUserData 分栏规则一致——收藏的进收藏栏，自建（非我喜欢）进创建栏
       const created = playlists.filter((playlist: Playlist) => (
         platform === 'qq'
           ? !playlist.isCollected
-          : playlist.userId?.toString() === userId.toString()
+          : platform === 'soda'
+            ? !playlist.isCollected && !playlist.isLike
+            : playlist.userId?.toString() === userId.toString()
       ))
       const subscribed = playlists.filter((playlist: Playlist) => (
         platform === 'qq'
           ? Boolean(playlist.isCollected)
-          : playlist.userId?.toString() !== userId.toString()
+          : platform === 'soda'
+            ? Boolean(playlist.isCollected)
+            : playlist.userId?.toString() !== userId.toString()
       ))
       setCreatedPlaylists(created)
       setSubscribedPlaylists(subscribed)
@@ -1014,6 +1050,16 @@ function ProfileView({
         setPlaylistSongs(tracks.map(track => spotifyTrackToSong(track)))
         return
       }
+
+      // 汽水：经 playlistService 统一详情（分页合并全量曲目，支持虚拟歌单 id）
+      if (platform === 'soda') {
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'soda')
+        const detailed = { ...playlist, ...data?.playlist, platform: 'soda', isCollected: playlist.isCollected }
+        setSelectedPlaylist(detailed)
+        setManagementPlaylist(detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        return
+      }
       
       if (platform === 'netease') {
         response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}&cookie=${encodeURIComponent(cookie)}`)
@@ -1227,8 +1273,36 @@ function ProfileView({
         })))
         return
       }
-      // 酷狗/汽水：暂无最近播放接口，返回空（不报错）
-      if (currentPlatform === 'kugou' || currentPlatform === 'soda') {
+      // 汽水：只读聚合路由（后端复用账号库缓存的 recently-played-media，cookie 请求级透传）；
+      // 返回 mapSodaMedia 映射歌曲列表，未登录返回 loggedIn:false 空列表，不报错
+      if (currentPlatform === 'soda') {
+        const sdCookie = getPlatformCookie('soda')
+        if (!sdCookie) {
+          setRecentItems([])
+          return
+        }
+        const query = new URLSearchParams({ limit: '50', cookie: sdCookie })
+        const response = await fetch(`http://localhost:3001/api/soda/recent?${query.toString()}`, {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        const payload = await response.json().catch(() => null)
+        if (recentRequestRef.current.revision !== revision) return
+        if (!response.ok || payload?.error) throw new Error(payload?.error || '最近播放加载失败')
+        const rows: any[] = Array.isArray(payload?.songs) ? payload.songs : []
+        setRecentItems(rows.map((raw, index) => ({
+          id: String(raw?.id ?? index),
+          type: 'song' as const,
+          name: String(raw?.name || '未知歌曲'),
+          subtitle: String(raw?.artist || ''),
+          coverUrl: String(raw?.coverUrl || ''),
+          playTime: 0,
+          song: sodaMediaToSong(raw),
+        })))
+        return
+      }
+      // 酷狗：暂无最近播放接口，返回空（不报错）
+      if (currentPlatform === 'kugou') {
         setRecentItems([])
         return
       }
@@ -1824,7 +1898,7 @@ function ProfileView({
       setCreatedPlaylists(playlists)
       setSubscribedPlaylists([])
     } else if (platform === 'soda') {
-      // 汽水：本地登录态资料（登录时已落盘）；歌单暂不支持读取，返回空
+      // 汽水：本地登录态资料（登录时已落盘）；歌单经 /api/soda/user/playlists 读取
       const username = localStorage.getItem('soda_username') || ''
       const avatar = localStorage.getItem('soda_avatar') || ''
       const sodaUid = localStorage.getItem('soda_user_id') || ''
@@ -1833,10 +1907,48 @@ function ProfileView({
         avatarUrl: avatar || '',
         userId: sodaUid,
       })
-      setCreatedPlaylists([])
-      setSubscribedPlaylists([])
+      // 未登录保持空列表，不发请求
+      const createdPlaylists: Playlist[] = []
+      const subscribedPlaylists: Playlist[] = []
+      try {
+        // 字段映射参考上方酷狗分支；「汽水我的喜欢」虚拟歌单（isLikedLike）不进两个分栏，
+        // 喜欢歌曲由全局红心/我喜欢入口承担
+        const { fetchSodaUserPlaylists, isSodaLoggedIn } = await import('../services/sodaService')
+        if (!isSodaLoggedIn()) {
+          setCreatedPlaylists([])
+          setSubscribedPlaylists([])
+        } else {
+          const list = await fetchSodaUserPlaylists()
+          for (const item of list) {
+            if (item.collected) {
+              subscribedPlaylists.push({
+                id: item.id,
+                name: item.name || '未命名歌单',
+                coverImgUrl: item.coverUrl || '',
+                trackCount: item.trackCount || 0,
+                platform: 'soda',
+                isCollected: true,
+              })
+            } else if (!item.isLikedLike) {
+              createdPlaylists.push({
+                id: item.id,
+                name: item.name || '未命名歌单',
+                coverImgUrl: item.coverUrl || '',
+                trackCount: item.trackCount || 0,
+                platform: 'soda',
+              })
+            }
+          }
+          setCreatedPlaylists(createdPlaylists)
+          setSubscribedPlaylists(subscribedPlaylists)
+        }
+      } catch (error) {
+        console.error('获取汽水用户歌单失败:', error)
+        setCreatedPlaylists([])
+        setSubscribedPlaylists([])
+      }
     }
-    
+
     setLoading(false)
   }
 
@@ -2198,7 +2310,7 @@ function ProfileView({
                 )}
                 {activeTab === 'created' && !(viewTarget && platform === 'qq') && (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {createdPlaylists.map((playlist, index) => (
+                    {createdPlaylists.slice(0, 100).map((playlist, index) => (
                       <PlaylistGridCard
                         key={`created-${playlist.id || index}`}
                         playlist={playlist}
@@ -2221,7 +2333,7 @@ function ProfileView({
                 )}
                 {activeTab === 'subscribed' && !(viewTarget && platform === 'qq') && (
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {subscribedPlaylists.map((playlist, index) => (
+                    {subscribedPlaylists.slice(0, 100).map((playlist, index) => (
                       <PlaylistGridCard
                         key={`subscribed-${playlist.id || index}`}
                         playlist={playlist}
@@ -2461,7 +2573,7 @@ function ProfileView({
                         : collectedAlbums.length === 0 ? <div className="py-10 text-center text-white/45 text-sm">暂无收藏专辑</div>
                         : (
                           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                            {collectedAlbums.map((album, index) => {
+                            {collectedAlbums.slice(0, 200).map((album, index) => {
                               const albumId = album.id || album.albumid || album.albumId
                               const albumName = album.name || album.albumname || '未知专辑'
                               const cover = album.picUrl || album.pic || ''
@@ -2470,7 +2582,7 @@ function ProfileView({
                                 <div key={`${albumId || index}-${index}`} className="rounded-xl p-2.5 transition-all cursor-pointer" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
                                   onClick={() => { if (albumId && onOpenAlbum) onOpenAlbum(String(albumId), platform) }} title="点击打开专辑">
                                   <div className="relative w-full aspect-square rounded-lg overflow-hidden mb-2" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                    {cover ? <img src={cover} alt={albumName} className="w-full h-full object-cover" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
+                                    {cover ? <img src={cover} alt={albumName} loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
                                   </div>
                                   <p className="text-white/90 text-xs font-medium truncate">{albumName}</p>
                                   <p className="text-white/40 text-[11px] truncate mt-0.5">{singerName}</p>
@@ -2488,7 +2600,7 @@ function ProfileView({
                       {collectedArtists.length === 0 ? <div className="py-10 text-center text-white/45 text-sm">暂无关注歌手</div>
                         : (
                           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                            {collectedArtists.map((artist, index) => {
+                            {collectedArtists.slice(0, 200).map((artist, index) => {
                               const artistId = artist.id || artist.singerid || artist.mid
                               const artistName = artist.name || artist.singername || '未知歌手'
                               const cover = artist.picUrl || artist.pic || artist.singerpic || ''
@@ -2496,7 +2608,7 @@ function ProfileView({
                                 <div key={`${artistId || index}-${index}`} className="rounded-xl p-4 transition-all cursor-pointer flex items-center gap-3" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
                                   onClick={() => { if (artistId && onOpenArtist) onOpenArtist(String(artistId), platform) }} title="点击打开歌手">
                                   <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
-                                    {cover ? <img src={cover} alt={artistName} className="w-full h-full object-cover" /> : <Music className="w-6 h-6 m-auto mt-3 text-white/30" />}
+                                    {cover ? <img src={cover} alt={artistName} loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-6 h-6 m-auto mt-3 text-white/30" />}
                                   </div>
                                   <p className="text-white/90 text-xs font-medium truncate">{artistName}</p>
                                 </div>
@@ -2514,7 +2626,7 @@ function ProfileView({
                         {collectedMvs.length === 0 ? <div className="py-10 text-center text-white/45 text-sm">暂无收藏 MV</div>
                           : (
                             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                              {collectedMvs.map((mv, index) => {
+                              {collectedMvs.slice(0, 200).map((mv, index) => {
                                 const mvName = mv.name || mv.title || '未知 MV'
                                 const cover = mv.cover || mv.picUrl || mv.imgurl16v9 || ''
                                 return (
@@ -2542,7 +2654,7 @@ function ProfileView({
                                       <X className="w-3.5 h-3.5" />
                                     </button>
                                     <div className="relative w-full aspect-video rounded-lg overflow-hidden mb-2" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                      {cover ? <img src={cover} alt={mvName} className="w-full h-full object-cover" /> : <Film className="w-8 h-8 m-auto text-white/20" />}
+                                      {cover ? <img src={cover} alt={mvName} loading="lazy" className="w-full h-full object-cover" /> : <Film className="w-8 h-8 m-auto text-white/20" />}
                                     </div>
                                     <p className="text-white/90 text-xs font-medium truncate">{mvName}</p>
                                     <p className="text-white/40 text-[11px] truncate mt-0.5">{mv.artistName || mv.artist?.name || ''}</p>
@@ -2615,7 +2727,7 @@ function ProfileView({
                               >
                                 <span className="w-5 text-center text-xs text-white/40">{index + 1}</span>
                                 <div className="w-9 h-9 rounded-md overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                  {cover ? <img src={cover} alt="" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
+                                  {cover ? <img src={cover} alt="" loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <p className="text-white text-sm truncate">{songName}</p>

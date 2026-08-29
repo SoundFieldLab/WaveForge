@@ -252,7 +252,8 @@ export function SpatialModeVisual({ spreadDeg, amount, active, theme, transition
         ctx.textAlign = 'center'
         ctx.textBaseline = 'middle'
         ctx.fillText('空间音频已关闭', cx, cy - radius - 14)
-        raf = requestAnimationFrame(draw)
+        // 静态占位：画一次即停帧；active 重新开启时本 effect 会因依赖 active 重跑并重启循环
+        raf = 0
         return
       }
 
@@ -391,8 +392,9 @@ export function SpatialModeVisual({ spreadDeg, amount, active, theme, transition
       cancelAnimationFrame(raf)
       window.removeEventListener('resize', resize)
     }
-    // 依赖仅主题：数据参数经 ref 读取（拖滑块时不重建 raf，见上方 ref 注释）
-  }, [theme.accentFrom, theme.accentTo])
+    // 依赖主题 + active：spread/amount 等数据参数经 ref 读取（拖滑块时不重建 raf）；
+    // active 需入依赖——关闭态停帧后，重新开启靠 effect 重跑来重启绘制循环
+  }, [theme.accentFrom, theme.accentTo, active])
 
   /* ── 拖拽交互（onSpreadChange 提供时启用；缺省不接线，向后兼容）──
    *  几何/命中/角度换算与 draw 内同一约定：画布上方为听者前方，方位角从前方

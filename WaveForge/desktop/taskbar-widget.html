@@ -7,199 +7,97 @@
   html, body { background: transparent; overflow: hidden; }
   body { font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
 
-  /* 窗口 = 任务栏高度 + 上方可展开的按钮面板区；播控条固定在底部 */
   #root {
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
-    height: calc(100vh - var(--popup-h, 0px));
-    display: flex;
-    align-items: center;
-    padding: 0 6px;
-    gap: 6px;
-    color: #fff;
-    font-size: var(--fs, 13px);
-    transition: opacity 0.12s;
-    /* 深色模糊遮罩：文字在任何壁纸上都可读（不设成过深，避免盖住封面/壁纸细节） */
-    background: var(--scrim, rgba(12, 14, 20, 0.52));
-    backdrop-filter: blur(10px) saturate(140%);
+    position: absolute; left: 0; right: 0; bottom: 0; top: 0;
+    display: flex; align-items: center; padding: 0 8px; gap: 8px;
+    color: #fff; font-size: var(--fs, 13px);
+    background: var(--scrim, transparent);
+    transition: opacity 0.15s;
   }
-  body.light #root { background: rgba(255,255,255,0.68); color: #1a1a1a; }
-  body.idle #root { opacity: 0.55; }
+  body.light #root { color: #1a1a1a; }
+  body.idle #root { opacity: 0.5; }
 
   .cover {
-    width: calc(100vh - var(--popup-h, 0px) - 10px);
-    height: calc(100vh - var(--popup-h, 0px) - 10px);
-    min-width: 22px;
-    max-width: 46px;
-    max-height: 46px;
-    border-radius: 7px;
-    flex-shrink: 0;
-    background: rgba(127,127,127,0.18);
-    object-fit: cover;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    overflow: hidden;
+    width: 40px; height: 40px; min-width: 40px; border-radius: 10px; flex-shrink: 0;
+    background: rgba(127,127,127,0.18); overflow: hidden;
   }
-  .cover img { width: 100%; height: 100%; border-radius: 7px; object-fit: cover; }
+  .cover img { width: 100%; height: 100%; border-radius: 10px; object-fit: cover; }
   .cover .placeholder { width: 55%; height: 55%; color: inherit; opacity: 0.55; }
 
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
-  /* 当前歌词：常规模式比原来稍大，纯享模式更大 */
+  /* 歌词滚动：长歌词用 marquee 动画而非省略号 */
+  .lyric-wrap { overflow: hidden; white-space: nowrap; position: relative; }
+  .lyric-wrap .lyric-inner { display: inline-block; white-space: nowrap; }
+  .lyric-wrap.marquee .lyric-inner { animation: lyric-scroll 12s linear infinite; }
+  @keyframes lyric-scroll {
+    0% { transform: translateX(0); }
+    20% { transform: translateX(0); }
+    100% { transform: translateX(calc(-100% + 100%)); }
+  }
   .line-primary {
-    font-size: calc(var(--fs, 13px) * 1.22);
-    font-weight: 700;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: inherit;
-    line-height: 1.3;
+    font-size: calc(var(--fs, 13px) * 1.22); font-weight: 700;
+    color: inherit; line-height: 1.3;
   }
   body.pure .line-primary { font-size: calc(var(--fs, 13px) * 1.5); text-align: center; }
   .line-secondary {
-    font-size: calc(var(--fs, 13px) * 0.82);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: inherit;
-    opacity: 0.55;
-    line-height: 1.25;
+    font-size: calc(var(--fs, 13px) * 0.82); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: inherit; opacity: 0.55; line-height: 1.25;
   }
   body.pure .line-secondary { display: none; }
+  body.pure .cover { display: none; }
 
-  /* 逐字「柔和」填充：按词独立推进，未唱半透明、唱完主题色；羽化边缘由 JS 内联 mask 控制 */
+  /* 逐字 karaoke */
   .kw { position: relative; display: inline-block; }
   .kw-base { display: inline-block; }
-  .kw-fill {
-    position: absolute; left: 0; top: 50%;
-    transform: translateY(-50%);
-    overflow: hidden;
-    white-space: nowrap;
-    pointer-events: none;
-  }
+  .kw-fill { position: absolute; left: 0; top: 50%; transform: translateY(-50%); overflow: hidden; white-space: nowrap; pointer-events: none; }
   .kw-space { display: inline-block; }
 
-  .progress {
-    position: absolute;
-    left: 4px; right: 4px; bottom: 2px;
-    height: 2px;
-    border-radius: 1px;
-    background: rgba(127,127,127,0.25);
-    cursor: pointer;
-  }
-  .progress .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 1px; }
+  .progress { position: absolute; left: 4px; right: 4px; bottom: 2px; height: 2px; border-radius: 1px; background: rgba(127,127,127,0.25); }
+  .progress .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 1px; background: linear-gradient(90deg, var(--accent, #FB7299), var(--accent, #FB7299) 88%); }
 
-  /* 向上弹出的按钮面板 */
-  #popup {
-    position: absolute;
-    left: 0; right: 0; bottom: 100%;
-    height: var(--popup-h, 0px);
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 6px 10px;
-    opacity: 0;
-    pointer-events: none;
-    transform: translateY(8px);
-    transition: opacity 0.16s, transform 0.16s;
+  /* 播控按钮（在歌词右侧） */
+  .controls { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+  body.pure .controls { display: none; }
+  body.hide-ctl .controls { display: none; }
+  .ctl {
+    width: 30px; height: 30px; min-width: 30px; border: none; border-radius: 50%; cursor: pointer;
+    background: transparent; color: inherit; display: flex; align-items: center; justify-content: center;
+    opacity: 0.85; transition: background 0.12s, opacity 0.12s, transform 0.08s;
   }
-  #popup.open { opacity: 1; pointer-events: auto; transform: translateY(0); }
-  #popup .panel {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 7px 10px;
-    border-radius: 14px;
-    background: var(--scrim, rgba(12, 14, 20, 0.72));
-    backdrop-filter: blur(16px) saturate(150%);
-    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
-  }
-  body.light #popup .panel { background: rgba(255,255,255,0.88); }
-  .btn {
-    width: calc(var(--fs, 13px) * 2.2);
-    height: calc(var(--fs, 13px) * 2.2);
-    min-width: 20px; min-height: 20px;
-    border: none; border-radius: 50%; cursor: pointer;
-    background: transparent;
-    color: inherit;
-    display: flex; align-items: center; justify-content: center;
-    opacity: 0.85;
-    transition: background 0.12s, opacity 0.12s, transform 0.08s;
-  }
-  .btn:hover { background: rgba(127,127,127,0.22); opacity: 1; }
-  .btn:active { transform: scale(0.9); }
-  .btn.play {
-    width: calc(var(--fs, 13px) * 2.6);
-    height: calc(var(--fs, 13px) * 2.6);
-    background: var(--accent, #FB7299);
-    color: #fff;
-    box-shadow: 0 1px 8px color-mix(in srgb, var(--accent, #FB7299) 45%, transparent);
-    opacity: 1;
-  }
-  .btn.close:hover { background: rgba(255,80,80,0.25); color: #ff8a8a; }
-  .btn svg { width: 60%; height: 60%; }
-
-  .expand-hint {
-    flex-shrink: 0;
-    width: calc(var(--fs, 13px) * 1.4);
-    height: calc(var(--fs, 13px) * 1.4);
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    color: inherit; opacity: 0.6;
-    cursor: pointer;
-    transition: transform 0.15s, opacity 0.12s;
-  }
-  .expand-hint:hover { opacity: 1; transform: scale(1.1); }
-  .expand-hint svg { width: 70%; height: 70%; }
+  .ctl:hover { background: rgba(127,127,127,0.22); opacity: 1; }
+  .ctl:active { transform: scale(0.9); }
+  .ctl.play { width: 34px; height: 34px; min-width: 34px; background: var(--accent); color: #fff; box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 45%, transparent); opacity: 1; }
+  .ctl svg { width: 55%; height: 55%; }
 </style>
 </head>
 <body>
-  <div id="popup">
-    <div class="panel" id="popupPanel">
-      <button class="btn" id="prev" title="上一首" aria-label="上一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM20 6l-10 6 10 6z"/></svg></button>
-      <button class="btn play" id="play" title="播放/暂停" aria-label="播放/暂停">
-        <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
-      </button>
-      <button class="btn" id="next" title="下一首" aria-label="下一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10 6-10 6z"/></svg></button>
-      <button class="btn" id="vol" title="静音" aria-label="音量">
-        <svg id="volOn" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zM16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
-        <svg id="volOff" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M3 9v6h4l5 5V4L7 9H3zM16.5 12a4.5 4.5 0 0 0-2.5-4v8a4.5 4.5 0 0 0 2.5-4zM19 9l4 6M23 9l-4 6"/></svg>
-      </button>
-      <button class="btn close" id="close" title="隐藏" aria-label="隐藏"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-    </div>
+<div id="root">
+  <div class="cover" id="cover">
+    <svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
   </div>
-  <div id="root">
-    <div class="cover" id="cover">
-      <svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
-    </div>
-    <div class="main">
-      <div class="line-primary" id="linePrimary">未在播放</div>
-      <div class="line-secondary" id="lineSecondary"></div>
-    </div>
-    <div class="expand-hint" id="expandHint" title="展开控制">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
-    </div>
-    <div class="progress" id="progress"><div class="fill" id="fill"></div></div>
+  <div class="main">
+    <div class="lyric-wrap" id="lyricWrap"><span class="lyric-inner line-primary" id="linePrimary">未在播放</span></div>
+    <div class="line-secondary" id="lineSecondary"></div>
   </div>
-<script src="./taskbar-widget-preload.cjs"></script>
+  <div class="controls" id="controls">
+    <button class="ctl" id="prev" title="上一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zM20 6l-10 6 10 6z"/></svg></button>
+    <button class="ctl play" id="play" title="播放/暂停">
+      <svg id="playIcon" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      <svg id="pauseIcon" viewBox="0 0 24 24" fill="currentColor" style="display:none"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+    </button>
+    <button class="ctl" id="next" title="下一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6h2v12h-2zM4 6l10 6-10 6z"/></svg></button>
+  </div>
+  <div class="progress" id="progress"><div class="fill" id="fill"></div></div>
+</div>
+
 <script>
   const $ = (id) => document.getElementById(id)
   const bridge = window.taskbarWidget
-  const state = { playing: false, title: '', artist: '', cover: '', cur: 0, dur: 0, muted: false, lyric: null, theme: 'dark', accent: '' }
+  const state = { playing: false, title: '', artist: '', cover: '', cur: 0, dur: 0, muted: false, lyric: null, theme: 'dark', accent: '#FB7299' }
   let mode = 'normal'
-  let expanded = false
-  let collapseTimer = null
-  let lastInteractive = false
 
-  // 弹出面板高度（与主进程 TASKBAR_WIDGET_POPUP_HEIGHT 保持一致）
-  const TASKBAR_POPUP_H = 218
-
-  // ── 逐字时序归一化（与播放页 src/utils/lyricWordTiming.ts 同源，修复 QQ 绝对时间/越界时序/丢括号/丢空格）──
-  const FALLBACK_FIRST_WORD_DURATION_MS = 140
-  const clamp01 = (v) => Math.max(0, Math.min(1, v))
-
-  // QQ YRC 常把括号独立成词但行文本里有完整括号 → 补齐行首/行尾缺失的括号（播放页同款）
+  // ── 逐字时序归一化 ──
+  const FALLBACK_FIRST_WORD_DURATION_MS = 140; const clamp01 = (v) => Math.max(0, Math.min(1, v))
   const reconcileBoundaryParentheses = (lineText, sourceTokens) => {
     if (!lineText || sourceTokens.length === 0) return sourceTokens.slice()
     let tokens = sourceTokens.map(t => ({ ...t }))
@@ -208,53 +106,37 @@
     const completeLeading = Array.from(leading(lineText))
     const timedLeading = Array.from(leading(tokens.map(t => t.word).join('')))
     const missingLeading = completeLeading.slice(0, Math.max(0, completeLeading.length - timedLeading.length))
-    if (missingLeading.length > 0) {
-      tokens = [...missingLeading.map(word => ({ word, startTime: 0, duration: 0 })), ...tokens]
-    }
+    if (missingLeading.length > 0) tokens = [...missingLeading.map(word => ({ word, startTime: 0, duration: 0 })), ...tokens]
     const completeTrailing = Array.from(trailing(lineText))
     const timedTrailing = Array.from(trailing(tokens.map(t => t.word).join('')))
     const missingTrailingCount = Math.max(0, completeTrailing.length - timedTrailing.length)
     if (missingTrailingCount > 0) {
       const lastToken = tokens[tokens.length - 1]
-      const boundaryStart = Math.max(0, lastToken.startTime + Math.max(0, lastToken.duration))
-      const missingTrailing = completeTrailing.slice(completeTrailing.length - missingTrailingCount)
-      tokens.push(...missingTrailing.map(word => ({ word, startTime: boundaryStart, duration: 0 })))
+      tokens.push(...completeTrailing.slice(completeTrailing.length - missingTrailingCount).map(word => ({ word, startTime: Math.max(0, lastToken.startTime + Math.max(0, lastToken.duration)), duration: 0 })))
     }
     return tokens
   }
-
-  // QQ 的 startTime 可能是歌曲绝对毫秒（非相对行首）→ 转换为相对行首
   const normalizeAbsoluteStarts = (words, lineTimeSeconds) => {
     const lineStartMs = Math.max(0, lineTimeSeconds * 1000)
-    const visibleStarts = words
-      .filter(w => w.word && w.word.trim() && Number.isFinite(w.startTime))
-      .map(w => w.startTime)
+    const visibleStarts = words.filter(w => w.word && w.word.trim() && Number.isFinite(w.startTime)).map(w => w.startTime)
     if (visibleStarts.length === 0 || lineStartMs < 1000) return words
     const firstStart = visibleStarts[0]
-    const looksAbsolute = firstStart > 1000 && Math.abs(firstStart - lineStartMs) < 15000
-    if (!looksAbsolute) return words
-    return words.map(w => ({ ...w, startTime: Math.max(0, w.startTime - lineStartMs) }))
+    return (firstStart > 1000 && Math.abs(firstStart - lineStartMs) < 15000) ? words.map(w => ({ ...w, startTime: Math.max(0, w.startTime - lineStartMs) })) : words
   }
-
-  // 按行文本补齐被 QQ 丢掉的词间空格（空格词 duration=0，不参与填充）
   const restoreLyricWordSpacing = (words, lineText) => {
     const expandedWords = words.flatMap(word => {
       if (/^\s+$/u.test(word.word)) return [{ ...word, duration: 0 }]
-      const leadingWhitespace = word.word.match(/^\s+/u)?.[0] || ''
-      const trailingWhitespace = word.word.match(/\s+$/u)?.[0] || ''
-      const contentStart = leadingWhitespace.length
-      const contentEnd = word.word.length - trailingWhitespace.length
-      const content = word.word.slice(contentStart, Math.max(contentStart, contentEnd))
+      const leading = word.word.match(/^\s+/u)?.[0] || '', trailing = word.word.match(/\s+$/u)?.[0] || ''
+      const content = word.word.slice(leading.length, Math.max(leading.length, word.word.length - trailing.length))
       const result = []
-      if (leadingWhitespace) result.push({ word: leadingWhitespace, startTime: word.startTime, duration: 0 })
+      if (leading) result.push({ word: leading, startTime: word.startTime, duration: 0 })
       if (content) result.push({ ...word, word: content })
-      if (trailingWhitespace) result.push({ word: trailingWhitespace, startTime: word.startTime + Math.max(0, word.duration), duration: 0 })
+      if (trailing) result.push({ word: trailing, startTime: word.startTime + Math.max(0, word.duration), duration: 0 })
       return result.length > 0 ? result : [word]
     })
     const normalizedLineText = lineText.trim().replace(/\s+/gu, ' ')
     const visibleIndices = expandedWords.map((w, i) => w.word.trim() ? i : -1).filter(i => i >= 0)
-    const insertSpaceAfter = new Set()
-    let lineCursor = 0
+    const insertSpaceAfter = new Set(); let lineCursor = 0
     visibleIndices.forEach((wordIndex, visibleIndex) => {
       const token = expandedWords[wordIndex].word.trim()
       const tokenIndex = normalizedLineText.indexOf(token, lineCursor)
@@ -264,17 +146,10 @@
       lineCursor = tokenEnd + separator.length
       const nextVisibleIndex = visibleIndices[visibleIndex + 1]
       if (!separator || nextVisibleIndex === undefined) return
-      const alreadyHasWhitespace = expandedWords
-        .slice(wordIndex + 1, nextVisibleIndex)
-        .some(nextWord => /^\s+$/u.test(nextWord.word))
-      if (!alreadyHasWhitespace) insertSpaceAfter.add(wordIndex)
+      if (!expandedWords.slice(wordIndex + 1, nextVisibleIndex).some(nextWord => /^\s+$/u.test(nextWord.word))) insertSpaceAfter.add(wordIndex)
     })
-    return expandedWords.flatMap((word, index) => insertSpaceAfter.has(index)
-      ? [word, { word: ' ', startTime: word.startTime + Math.max(0, word.duration), duration: 0 }]
-      : [word])
+    return expandedWords.flatMap((word, index) => insertSpaceAfter.has(index) ? [word, { word: ' ', startTime: word.startTime + Math.max(0, word.duration), duration: 0 }] : [word])
   }
-
-  // 顺序时序归一化：保证 startTime 严格递增、非法/越界 duration 回退 140ms
   const normalizeSequentialWordTiming = (words) => {
     if (words.length === 0) return words
     const visibleIndices = words.map((w, i) => w.word && w.word.trim() ? i : -1).filter(i => i >= 0)
@@ -283,321 +158,116 @@
     visibleIndices.forEach((wordIndex, visibleIndex) => {
       const rawStart = Number.isFinite(words[wordIndex].startTime) ? Math.max(0, words[wordIndex].startTime) : 0
       if (visibleIndex === 0) { starts.push(rawStart); return }
-      const previousStart = starts[visibleIndex - 1]
-      const previousWord = words[visibleIndices[visibleIndex - 1]]
+      const previousStart = starts[visibleIndex - 1], previousWord = words[visibleIndices[visibleIndex - 1]]
       const hasUsablePreviousDuration = Number.isFinite(previousWord.duration) && previousWord.duration > 8
-      const minimumGap = rawStart <= previousStart || !hasUsablePreviousDuration
-        ? FALLBACK_FIRST_WORD_DURATION_MS
-        : 1
-      starts.push(rawStart >= previousStart + minimumGap ? rawStart : previousStart + minimumGap)
+      starts.push(rawStart >= previousStart + (rawStart <= previousStart || !hasUsablePreviousDuration ? FALLBACK_FIRST_WORD_DURATION_MS : 1) ? rawStart : previousStart + (rawStart <= previousStart || !hasUsablePreviousDuration ? FALLBACK_FIRST_WORD_DURATION_MS : 1))
     })
     const normalized = words.map(w => ({ ...w }))
     visibleIndices.forEach((wordIndex, visibleIndex) => {
-      const startTime = starts[visibleIndex]
-      const nextStart = starts[visibleIndex + 1]
-      const rawDuration = Number.isFinite(words[wordIndex].duration) && words[wordIndex].duration > 8
-        ? words[wordIndex].duration
-        : FALLBACK_FIRST_WORD_DURATION_MS
-      const duration = nextStart !== undefined
-        ? Math.max(1, Math.min(rawDuration, nextStart - startTime))
-        : Math.max(1, rawDuration)
-      normalized[wordIndex] = { ...words[wordIndex], startTime, duration }
+      const startTime = starts[visibleIndex], nextStart = starts[visibleIndex + 1]
+      const rawDuration = Number.isFinite(words[wordIndex].duration) && words[wordIndex].duration > 8 ? words[wordIndex].duration : FALLBACK_FIRST_WORD_DURATION_MS
+      normalized[wordIndex] = { ...words[wordIndex], startTime, duration: nextStart !== undefined ? Math.max(1, Math.min(rawDuration, nextStart - startTime)) : Math.max(1, rawDuration) }
     })
     let previousEnd = 0
-    normalized.forEach((word, index) => {
-      if (word.word && word.word.trim()) previousEnd = word.startTime + word.duration
-      else normalized[index] = { ...word, startTime: previousEnd, duration: 0 }
-    })
+    normalized.forEach((word, index) => { if (word.word && word.word.trim()) previousEnd = word.startTime + word.duration; else normalized[index] = { ...word, startTime: previousEnd, duration: 0 } })
     return normalized
   }
 
-  // 依据窗口高度自适应布局。字号始终按「任务栏条高」计算（bandHeight 在收起状态捕获），
-  // 展开/收起时字号不跳变，避免文字大小抖动。
-  let bandHeight = 0
-  function layout(targetH) {
-    const h = targetH || window.innerHeight || 40
-    // 收起状态的窗口高度即条高（首次调用 / 收起后的 resize 事件都会刷新）
-    if (!expanded && !targetH) bandHeight = h
-    const band = bandHeight || Math.max(1, h - (expanded ? TASKBAR_POPUP_H : 0))
-    const popupH = expanded ? Math.min(TASKBAR_POPUP_H, Math.max(0, h - band)) : 0
-    document.documentElement.style.setProperty('--popup-h', popupH + 'px')
-    const fs = Math.max(11, Math.min(16, band * 0.3))
-    document.documentElement.style.setProperty('--fs', fs + 'px')
-  }
-
-  function fmt(sec) {
-    if (!Number.isFinite(sec) || sec < 0) return '0:00'
-    const m = Math.floor(sec / 60)
-    const s = Math.floor(sec % 60)
-    return m + ':' + String(s).padStart(2, '0')
-  }
-
-  function setTheme(theme) {
-    document.body.classList.toggle('light', theme === 'light')
-    document.body.classList.toggle('dark', theme !== 'light')
-  }
-
-  function applyMode() {
-    document.body.classList.toggle('pure', mode === 'pure')
-    // 纯享模式隐藏封面与展开提示
-    $('cover').style.display = mode === 'pure' ? 'none' : ''
-    $('expandHint').style.display = mode === 'pure' ? 'none' : ''
-    // 主题色：播放按钮 + 进度条 + karaoke 填充色
-    const accent = state.accent || '#FB7299'
-    document.documentElement.style.setProperty('--accent', accent)
-    const fill = $('fill')
-    fill.style.background = `linear-gradient(90deg, ${accent}, ${accent}88)`
-  }
-
-  // ── 逐字「柔和」填充 ──
-  const KARAOKE_DELAY_MS = 200 // 与播放页一致：高亮延迟 200ms，更贴合演唱
-  const KARAOKE_FILL_EXTENSION = 42
-  let karaokeWords = null // 当前行归一化后的词列表 {word, startTime, duration}
-  let karaokeLineStartMs = 0
-  let karaokeWordEls = []  // [{ el, baseEl, fillEl, startTime, duration, isSpace }]
-  let karaokeLineKey = ''
-  let lastCur = 0
-  let lastCurAt = 0
-  let karaokeRaf = 0
-
-  // 「柔和」填充的羽化 mask（播放页 getFillOverlayStyle 同款）：填充边缘后延展 +42% 并羽化到透明
+  const KARAOKE_DELAY_MS = 200, KARAOKE_FILL_EXTENSION = 42
+  let karaokeWords = null, karaokeLineStartMs = 0, karaokeWordEls = [], karaokeLineKey = '', lastCur = 0, lastCurAt = 0, karaokeRaf = 0
   const softFillStyle = (fillWidth) => {
     const extendedWidth = Math.min(100, fillWidth + KARAOKE_FILL_EXTENSION)
     const fillEdge = extendedWidth > 0 ? fillWidth / extendedWidth * 100 : 0
-    const featherStart = Math.max(0, fillEdge - 18)
-    const featherShoulder = Math.max(featherStart, fillEdge - 6)
-    const featherTail = fillEdge + (100 - fillEdge) * 0.54
+    const featherStart = Math.max(0, fillEdge - 18), featherShoulder = Math.max(featherStart, fillEdge - 6), featherTail = fillEdge + (100 - fillEdge) * 0.54
     const fillMask = `linear-gradient(90deg, black 0%, black ${featherStart}%, rgba(0,0,0,0.94) ${featherShoulder}%, rgba(0,0,0,0.76) ${fillEdge}%, rgba(0,0,0,0.28) ${featherTail}%, transparent 100%)`
-    return {
-      width: `${extendedWidth}%`,
-      WebkitMaskImage: fillMask,
-      maskImage: fillMask,
-    }
+    return { width: `${extendedWidth}%`, WebkitMaskImage: fillMask, maskImage: fillMask }
   }
-
-  // 歌词行变化时重建逐词 DOM；保持不变则复用
   function rebuildKaraoke(lyric) {
     const line = lyric.line || ''
-    const words = Array.isArray(lyric.words)
-      ? lyric.words
-        .filter(w => w && Number.isFinite(w.startTime) && Number.isFinite(w.duration))
-        .map(w => ({ word: String(w.word ?? ''), startTime: w.startTime, duration: w.duration }))
-      : []
+    const words = Array.isArray(lyric.words) ? lyric.words.filter(w => w && Number.isFinite(w.startTime) && Number.isFinite(w.duration)).map(w => ({ word: String(w.word ?? ''), startTime: w.startTime, duration: w.duration })) : []
     const key = line + '|' + words.length + '|' + (words[0] ? words[0].startTime : '')
-    if (key === karaokeLineKey) return
-    karaokeLineKey = key
-
+    if (key === karaokeLineKey) return; karaokeLineKey = key
     const primary = $('linePrimary')
-    if (words.length === 0) {
-      // 无逐词时序 → 退回纯文本（不逐字）
-      primary.className = 'line-primary'
-      primary.textContent = line
-      karaokeWords = null
-      karaokeWordEls = []
-      return
-    }
-    const fixedWords = reconcileBoundaryParentheses(line, words)
-    const relativeWords = normalizeAbsoluteStarts(fixedWords, Number(lyric.lineStart) || 0)
+    if (words.length === 0) { primary.textContent = line; karaokeWords = null; karaokeWordEls = []; return }
+    const fixedWords = reconcileBoundaryParentheses(line, words), relativeWords = normalizeAbsoluteStarts(fixedWords, Number(lyric.lineStart) || 0)
     const spacedWords = restoreLyricWordSpacing(relativeWords, line)
-    karaokeWords = normalizeSequentialWordTiming(spacedWords)
-    karaokeLineStartMs = (Number(lyric.lineStart) || 0) * 1000
-
-    primary.className = 'line-primary karaoke'
-    primary.textContent = ''
-    karaokeWordEls = karaokeWords.map((word, index) => {
+    karaokeWords = normalizeSequentialWordTiming(spacedWords); karaokeLineStartMs = (Number(lyric.lineStart) || 0) * 1000
+    primary.textContent = ''; karaokeWordEls = []
+    for (const word of karaokeWords) {
       const isSpace = !word.word || word.word.trim() === ''
-      if (isSpace) {
-        const spaceEl = document.createElement('span')
-        spaceEl.className = 'kw-space'
-        spaceEl.textContent = word.word || ' '
-        spaceEl.style.width = `${Math.max(1, Array.from(word.word || ' ').length) * 0.24}em`
-        primary.appendChild(spaceEl)
-        return { el: spaceEl, isSpace: true, startTime: 0, duration: 0 }
-      }
-      const el = document.createElement('span')
-      el.className = 'kw'
-      const baseEl = document.createElement('span')
-      baseEl.className = 'kw-base'
-      baseEl.textContent = word.word
-      const fillEl = document.createElement('span')
-      fillEl.className = 'kw-fill'
-      fillEl.textContent = word.word
-      el.appendChild(baseEl)
-      el.appendChild(fillEl)
-      primary.appendChild(el)
-      return { el, baseEl, fillEl, isSpace: false, startTime: word.startTime, duration: Math.max(1, word.duration) }
-    })
+      if (isSpace) { const el = document.createElement('span'); el.className = 'kw-space'; el.textContent = word.word || ' '; el.style.width = `${Math.max(1, Array.from(word.word || ' ').length) * 0.24}em`; primary.appendChild(el); karaokeWordEls.push({ el, isSpace: true, startTime: 0, duration: 0 }); continue }
+      const el = document.createElement('span'); el.className = 'kw'; const baseEl = document.createElement('span'); baseEl.className = 'kw-base'; baseEl.textContent = word.word
+      const fillEl = document.createElement('span'); fillEl.className = 'kw-fill'; fillEl.textContent = word.word
+      el.appendChild(baseEl); el.appendChild(fillEl); primary.appendChild(el)
+      karaokeWordEls.push({ el, baseEl, fillEl, isSpace: false, startTime: word.startTime, duration: Math.max(1, word.duration) })
+    }
   }
-
-  // 每帧更新填充（rAF 平滑：两次状态更新之间按真实时间线性推进）
   function renderKaraokeFill(curSec) {
     if (!karaokeWords || karaokeWordEls.length === 0) return
     const currentMs = Math.max(0, curSec * 1000 - karaokeLineStartMs - KARAOKE_DELAY_MS)
-    const dark = !document.body.classList.contains('light')
-    const dim = dark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.45)'
-    const accent = state.accent || '#FB7299'
-    for (const item of karaokeWordEls) {
-      if (item.isSpace) continue
-      const fillProgress = clamp01((currentMs - item.startTime) / item.duration)
-      const fillWidth = fillProgress * 100
-      const fullyFilled = currentMs >= item.startTime + item.duration
-      // 未唱：半透明底色；唱完：底色透明，填充层常驻完整主题色
-      item.baseEl.style.color = fullyFilled ? 'transparent' : dim
-      item.fillEl.style.color = accent
-      if (fullyFilled) {
-        item.fillEl.style.width = '100%'
-        item.fillEl.style.WebkitMaskImage = 'none'
-        item.fillEl.style.maskImage = 'none'
-      } else if (fillWidth > 0) {
-        const style = softFillStyle(fillWidth)
-        item.fillEl.style.width = style.width
-        item.fillEl.style.WebkitMaskImage = style.WebkitMaskImage
-        item.fillEl.style.maskImage = style.maskImage
-      } else {
-        item.fillEl.style.width = '0%'
-        item.fillEl.style.WebkitMaskImage = 'none'
-        item.fillEl.style.maskImage = 'none'
-      }
+    const dark = !document.body.classList.contains('light'), dim = dark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.45)', accent = state.accent || '#FB7299'
+    for (const item of karaokeWordEls) { if (item.isSpace) continue
+      const fillProgress = clamp01((currentMs - item.startTime) / item.duration), fillWidth = fillProgress * 100, fullyFilled = currentMs >= item.startTime + item.duration
+      item.baseEl.style.color = fullyFilled ? 'transparent' : dim; item.fillEl.style.color = accent
+      if (fullyFilled) { item.fillEl.style.width = '100%'; item.fillEl.style.WebkitMaskImage = 'none'; item.fillEl.style.maskImage = 'none' }
+      else if (fillWidth > 0) { const style = softFillStyle(fillWidth); item.fillEl.style.width = style.width; item.fillEl.style.WebkitMaskImage = style.WebkitMaskImage; item.fillEl.style.maskImage = style.maskImage }
+      else { item.fillEl.style.width = '0%'; item.fillEl.style.WebkitMaskImage = 'none'; item.fillEl.style.maskImage = 'none' }
     }
   }
+  function startKaraokeRaf() { if (karaokeRaf) return; const step = () => { if (!state.playing || !karaokeWords || karaokeWords.length === 0 || document.hidden) { karaokeRaf = 0; return } karaokeRaf = requestAnimationFrame(step); const cur = state.playing && lastCurAt ? lastCur + Math.max(0, (performance.now() - lastCurAt) / 1000) : lastCur; renderKaraokeFill(cur) }; karaokeRaf = requestAnimationFrame(step) }
 
-  function startKaraokeRaf() {
-    if (karaokeRaf) return
-    const step = () => {
-      karaokeRaf = requestAnimationFrame(step)
-      const cur = state.playing && lastCurAt
-        ? lastCur + Math.max(0, (performance.now() - lastCurAt) / 1000)
-        : lastCur
-      renderKaraokeFill(cur)
-    }
-    karaokeRaf = requestAnimationFrame(step)
-  }
+  function layout(targetH) { const h = targetH || window.innerHeight || 40; const fs = Math.max(11, Math.min(16, h * 0.3)); document.documentElement.style.setProperty('--fs', fs + 'px') }
+  function fmt(sec) { if (!Number.isFinite(sec) || sec < 0) return '0:00'; const m = Math.floor(sec / 60); const s = Math.floor(sec % 60); return m + ':' + String(s).padStart(2, '0') }
 
   function apply() {
-    const hasSong = Boolean(state.title)
-    document.body.classList.toggle('idle', !hasSong)
-
-    // 封面
-    const coverEl = $('cover')
-    coverEl.innerHTML = ''
-    if (hasSong && state.cover) {
-      const img = document.createElement('img')
-      img.src = state.cover
-      img.onerror = () => {
-        coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
-      }
-      coverEl.appendChild(img)
+    const hasSong = Boolean(state.title); document.body.classList.toggle('idle', !hasSong)
+    const coverEl = $('cover'); coverEl.innerHTML = ''
+    if (hasSong) {
+      coverEl.innerHTML = ''
+      if (state.cover) { const img = document.createElement('img'); img.src = state.cover; img.onerror = () => { coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>' }; coverEl.appendChild(img) }
+      else coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
     } else {
       coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
+      const primary = $('linePrimary'); primary.textContent = ''; const span = document.createElement('span')
+      span.textContent = 'WaveForge 音澜工坊'; span.style.background = 'linear-gradient(90deg, #FB7299, #7c6cff, #49d6e8, #FB7299)'; span.style.backgroundClip = 'text'; span.style.webkitBackgroundClip = 'text'; span.style.webkitTextFillColor = 'transparent'; span.style.backgroundSize = '300% 100%'; span.style.animation = 'brand-shimmer 3s linear infinite'; primary.appendChild(span)
+      if (!document.getElementById('brand-keyframes')) { const s = document.createElement('style'); s.id = 'brand-keyframes'; s.textContent = '@keyframes brand-shimmer { 0% { background-position: 0% 50% } 100% { background-position: 300% 50% } }'; document.head.appendChild(s) }
+      $('lineSecondary').textContent = ''; $('fill').style.width = '0%'; return
     }
-
-    // 主行：当前歌词（逐字「柔和」填充）；无逐词时序显示歌名
-    const lyric = state.lyric
-    const primary = $('linePrimary')
-    const secondary = $('lineSecondary')
-    if (hasSong && lyric && lyric.line) {
-      rebuildKaraoke(lyric)
-      if (karaokeWords) {
-        // 逐字模式：不需要"下一句"
-        secondary.textContent = ''
-      } else {
-        primary.className = 'line-primary'
-        primary.textContent = lyric.line
-        secondary.textContent = ''
-      }
-    } else {
-      primary.className = 'line-primary'
-      primary.textContent = state.title || '未在播放'
-      primary.style.background = ''
-      secondary.textContent = state.artist || ''
-    }
-
-    // 播放/暂停与静音图标
-    $('playIcon').style.display = state.playing ? 'none' : 'block'
-    $('pauseIcon').style.display = state.playing ? 'block' : 'none'
-    $('volOn').style.display = state.muted ? 'none' : 'block'
-    $('volOff').style.display = state.muted ? 'block' : 'none'
-
-    // 进度条
-    const ratio = state.dur > 0 ? Math.min(1, Math.max(0, state.cur / state.dur)) : 0
-    $('fill').style.width = (ratio * 100) + '%'
-
-    // 逐字平滑时钟：记录最新位置与到达时刻，供 rAF 插值
-    lastCur = Number(state.cur) || 0
-    lastCurAt = performance.now()
-    if (karaokeWords) startKaraokeRaf()
-
-    applyMode()
+    const lyric = state.lyric, primary = $('linePrimary'), secondary = $('lineSecondary')
+    if (hasSong && lyric && lyric.line) { rebuildKaraoke(lyric); if (karaokeWords) { secondary.textContent = '' } else { primary.textContent = lyric.line; secondary.textContent = '' } }
+    else { primary.textContent = state.title || '未在播放'; secondary.textContent = state.artist || '' }
+    // 歌词滚动：非逐字模式且文本超长时启用 marquee
+    const wrap = $('lyricWrap'); wrap.classList.remove('marquee')
+    if (!karaokeWords && primary.textContent.length > 25) { wrap.classList.add('marquee'); primary.style.width = 'auto' }
+    else { primary.style.width = '' }
+    $('playIcon').style.display = state.playing ? 'none' : 'block'; $('pauseIcon').style.display = state.playing ? 'block' : 'none'
+    const ratio = state.dur > 0 ? Math.min(1, Math.max(0, state.cur / state.dur)) : 0; $('fill').style.width = (ratio * 100) + '%'
+    document.documentElement.style.setProperty('--accent', state.accent || '#FB7299')
+    $('fill').style.background = `linear-gradient(90deg, ${state.accent || '#FB7299'}, ${state.accent || '#FB7299'}88)`
+    lastCur = Number(state.cur) || 0; lastCurAt = performance.now(); if (karaokeWords) startKaraokeRaf()
   }
 
-  function collapseSoon() {
-    if (collapseTimer) window.clearTimeout(collapseTimer)
-    collapseTimer = window.setTimeout(() => {
-      collapseTimer = null
-      if (!expanded) return
-      setExpanded(false)
-    }, 2000)
+  bridge.onState((next) => { Object.assign(state, next || {}); apply() })
+  function applySettings(settings) {
+    if (!settings) return; if (typeof settings.mode === 'string') mode = settings.mode
+    const darken = settings.darken === true, darkenVal = Number(settings.darkenLevel) || 0.5
+    document.documentElement.style.setProperty('--scrim', darken ? `rgba(12, 14, 20, ${darkenVal})` : 'transparent')
+    document.body.classList.toggle('pure', mode === 'pure')
+    document.body.classList.toggle('hide-ctl', settings.hideControls === true)
+    layout(); apply()
   }
+  bridge.onSettings((settings) => { applySettings(settings) })
+  void bridge.getSettings().then((settings) => { applySettings(settings) }).catch(() => layout())
 
-  function setExpanded(on) {
-    if (expanded === on) return
-    expanded = on
-    $('popup').classList.toggle('open', on)
-    bridge.setExpanded(on)
-    // 立即按目标窗口高度重算布局：弹层从首帧就是完整高度，不等窗口 resize 事件（避免"点了没控件"）
-    layout(on ? window.innerHeight + TASKBAR_POPUP_H : window.innerHeight)
-    if (on && collapseTimer) { window.clearTimeout(collapseTimer); collapseTimer = null }
-    if (on) collapseSoon()
-  }
+  // 事件：仅播控按钮可点击，其余区域鼠标穿透（保留任务栏原本功能）
+  const barAction = (action) => (e) => { e.stopPropagation(); bridge.action(action) }
+  $('play').addEventListener('click', barAction('toggle'))
+  $('prev').addEventListener('click', barAction('prev'))
+  $('next').addEventListener('click', barAction('next'))
+  $('progress').addEventListener('click', (e) => { e.stopPropagation(); const rect = $('progress').getBoundingClientRect(); bridge.action('seek', Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) * (state.dur || 0)) })
 
-  bridge.onState((next) => {
-    Object.assign(state, next || {})
-    if (state.accent) setTheme(state.theme || 'dark')
-    apply()
-  })
-
-  bridge.onSettings((settings) => {
-    if (settings && typeof settings.mode === 'string') mode = settings.mode
-    layout()
-    apply()
-  })
-  void bridge.getSettings().then((settings) => {
-    if (settings && typeof settings.mode === 'string') mode = settings.mode
-    layout()
-    apply()
-  }).catch(() => layout())
-
-  $('play').addEventListener('click', () => bridge.action('toggle'))
-  $('prev').addEventListener('click', () => bridge.action('prev'))
-  $('next').addEventListener('click', () => bridge.action('next'))
-  $('vol').addEventListener('click', () => bridge.action('toggleMute'))
-  $('close').addEventListener('click', () => { setExpanded(false); bridge.action('close') })
-  $('progress').addEventListener('click', (e) => {
-    const rect = $('progress').getBoundingClientRect()
-    const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
-    bridge.action('seek', ratio * (state.dur || 0))
-  })
-  // 点击播控条（或展开提示）→ 弹出按钮面板。
-  // 注意：点中歌词文字时 event.target 可能是文本节点，没有 .closest —— 先判 Element 避免抛错导致不展开
-  $('expandHint').addEventListener('click', (e) => { e.stopPropagation(); setExpanded(!expanded) })
-  $('root').addEventListener('click', (e) => {
-    if (e.target instanceof Element && e.target.closest('.expand-hint')) return
-    setExpanded(true)
-  })
-
-  // 悬停进入 -> 交互态；移出窗口 -> 2 秒后收回面板并切回鼠标穿透
-  document.addEventListener('mouseenter', () => {
-    if (collapseTimer) { window.clearTimeout(collapseTimer); collapseTimer = null }
-    if (!lastInteractive) { lastInteractive = true; bridge.setInteractive(true) }
-  })
-  document.addEventListener('mouseleave', () => {
-    if (expanded) collapseSoon()
-    if (lastInteractive) { lastInteractive = false; bridge.setInteractive(false) }
-  })
   window.addEventListener('resize', () => layout())
-
-  layout()
-  apply()
+  layout(); apply()
 </script>
 </body>
 </html>

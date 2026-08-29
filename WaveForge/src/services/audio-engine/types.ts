@@ -74,6 +74,8 @@ export interface RenderStudioProps extends MixingStudioCommonProps {
   sourceUrl?: string
   /** 当前播放时长（秒，导出用） */
   sourceDuration?: number
+  /** 导出文件基名（当前歌曲名；保存时自动追加 -Modified 后缀） */
+  exportFileName?: string
   /** 播放时钟 store（可选）：App 注入给自定义调音室（v3「随曲目播放」读 currentTime）；缺省 = 独立运行 */
   playbackTimeStore?: PlaybackTimeStore
 }

@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * Gapless 切换的 60ms 等功率淡入淡出
  * 从 useAudioPlayer.ts 的 startTransition gapless 分支抽出：
  * standby 先 0 增益启动，切换瞬间对双 deck 做极短等功率交叉（消除数字硬切爆音），

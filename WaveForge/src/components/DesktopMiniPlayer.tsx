@@ -1,3 +1,7 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
 import { motion } from 'framer-motion'
 import { Play, Pause, SkipForward, SkipBack } from 'lucide-react'
 import { Song } from '../services/musicApi'
@@ -43,6 +47,7 @@ function DesktopMiniPlayer({
       exit={{ y: -100, opacity: 0 }}
       transition={{ type: 'spring', damping: 25, stiffness: 200 }}
       className={`fixed top-6 left-1/2 max-w-[44vw] -translate-x-1/2 cursor-pointer ${underOverlay ? 'pointer-events-none z-10' : 'z-50'}`}
+      data-desktop-interactive
       style={{
         width: 'clamp(400px, 42vw, 600px)',
       }}

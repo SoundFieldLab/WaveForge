@@ -2,14 +2,26 @@
  * 关于页 —— HyperSoundEngine 品牌信息（Logo 动画 + 微光背景 + 三行信息）
  */
 
+import { useEffect, useState } from 'react'
 import { motion } from 'framer-motion'
+import { Terminal } from 'lucide-react'
+import { Toggle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
+import { isDevMode, setDevMode, HSE_DEV_MODE_EVENT } from '../sceneStore'
 
 interface AboutPageProps {
   theme: HSETheme
 }
 
 export default function AboutPage({ theme }: AboutPageProps) {
+  const [dev, setDev] = useState(isDevMode)
+
+  useEffect(() => {
+    const sync = () => setDev(isDevMode())
+    window.addEventListener(HSE_DEV_MODE_EVENT, sync)
+    return () => window.removeEventListener(HSE_DEV_MODE_EVENT, sync)
+  }, [])
+
   return (
     <div className="relative flex min-h-[56vh] flex-col items-center justify-center text-center overflow-hidden">
       {/* 微光背景：双层径向辉光 + 缓慢呼吸 */}
@@ -89,6 +101,22 @@ export default function AboutPage({ theme }: AboutPageProps) {
         >
           HyperSoundEngine 已授权 WaveForge 项目使用
         </motion.span>
+
+        {/* 开发者模式开关：开启后「音效场景」页可直接微调内置场景并持久化 */}
+        <motion.div
+          className="mt-8 flex items-center gap-3 rounded-xl px-4 py-2.5"
+          style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${theme.cardBorder}` }}
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 1 }}
+        >
+          <Terminal className="w-3.5 h-3.5" style={{ color: dev ? theme.accentColor : theme.textTertiary }} />
+          <div className="text-left">
+            <div className={`${theme.textPrimary} text-xs font-medium`}>开发者模式</div>
+            <div className={`${theme.textTertiary} text-[10px]`}>开启后可在「音效场景」页编辑内置场景参数并保存</div>
+          </div>
+          <Toggle checked={dev} onChange={(v) => { setDevMode(v); setDev(v) }} theme={theme} />
+        </motion.div>
       </div>
     </div>
   )

@@ -4,6 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { X, Play, Music, Loader2, Sparkles } from 'lucide-react'
 import { isTvModeActive } from '../platform'
 import { Song } from '../services/musicApi'
+import { isSodaLoggedIn } from '../services/sodaService'
 import CachedImage from './CachedImage'
 import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
@@ -238,7 +239,8 @@ function PlaylistPanel({
               {playlist.length === 0 ? (
                 <div className={`flex h-full flex-col items-center justify-center ${isDark ? 'text-white/40' : 'text-black/40'}`}>
                   <Music className="mb-4 h-16 w-16" />
-                  <p>播放列表为空</p>
+                  {/* 汽水平台未登录时给出可行动的提示，避免「空歌单」被误认为数据异常 */}
+                  <p>{currentPlatform === 'soda' && !isSodaLoggedIn() ? '登录汽水音乐后查看歌单歌曲' : '播放列表为空'}</p>
                 </div>
               ) : (
                 <div className="relative w-full" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>

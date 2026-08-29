@@ -1,4 +1,8 @@
 /**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
  * 「看歌」设置弹窗：匹配偏好 / 自动播放门槛 / 视频结束行为 / 画质 / 字幕 / 关键词模板
  */
 
@@ -23,6 +27,8 @@ import {
 interface BilibiliWatchSettingsModalProps {
   onClose: () => void
   playerTheme?: 'light' | 'dark'
+  ambientMode?: 'off' | 'soft' | 'vivid' | 'extreme'
+  onAmbientModeChange?: (mode: 'off' | 'soft' | 'vivid' | 'extreme') => void
 }
 
 const BILI_PINK = '#FB7299'
@@ -125,7 +131,7 @@ function SliderRow({
   )
 }
 
-export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dark' }: BilibiliWatchSettingsModalProps) {
+export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dark', ambientMode = 'off', onAmbientModeChange }: BilibiliWatchSettingsModalProps) {
   useTvBack(() => {
     onClose()
     return true
@@ -174,6 +180,21 @@ export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dar
           </div>
 
           <div className="space-y-5">
+            {/* 氛围模式（Infuse 风格）：黑边泛光 */}
+            <section>
+              <h3 className={`text-xs font-semibold mb-2 ${dark ? 'text-white/55' : 'text-black/50'}`}>氛围模式（黑边泛光）</h3>
+              <Segmented
+                options={[
+                  { value: 'off' as const, label: '关闭' },
+                  { value: 'soft' as const, label: '柔和', hint: '轻微泛光，几乎不干扰' },
+                  { value: 'vivid' as const, label: '鲜艳', hint: '中等强度，偏重黑色' },
+                  { value: 'extreme' as const, label: '极致', hint: '泛光明显，如临其境' },
+                ]}
+                value={ambientMode}
+                onChange={(v) => onAmbientModeChange?.(v)}
+                dark={dark}
+              />
+            </section>
             {/* 匹配偏好 */}
             <section>
               <h3 className={`text-xs font-semibold mb-2 ${dark ? 'text-white/55' : 'text-black/50'}`}>匹配偏好（优先给你找哪类视频）</h3>

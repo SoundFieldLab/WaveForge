@@ -35,10 +35,17 @@ export function isSpotifyLoggedIn(): boolean {
   return Boolean(getSpotifyToken())
 }
 
-/** 用 refresh token 换新 access token（access token 约 1 小时过期） */
-async function refreshSpotifyToken(): Promise<boolean> {
+/**
+ * 用 refresh token 换新 access token（access token 约 1 小时过期）。
+ * 返回：
+ * - 'ok'：刷新成功
+ * - 'rejected'：OAuth 端点明确拒绝（HTTP 400/401，如 invalid_grant）——refresh token
+ *   已撤销/失效，会话确定死亡（不是网络抖动）
+ * - 'failed'：网络错误或其他 5xx——瞬时问题，不应判定会话失效
+ */
+async function refreshSpotifyToken(): Promise<'ok' | 'rejected' | 'failed'> {
   const refreshToken = getSpotifyRefreshToken()
-  if (!refreshToken) return false
+  if (!refreshToken) return 'failed'
   try {
     const resp = await fetch(TOKEN_URL, {
       method: 'POST',
@@ -49,17 +56,36 @@ async function refreshSpotifyToken(): Promise<boolean> {
         client_id: getSpotifyClientId(),
       }),
     })
-    if (!resp.ok) return false
+    if (resp.status === 400 || resp.status === 401) {
+      // 明确的 OAuth 拒绝：refresh token 失效/被撤销，重新登录前无解
+      return 'rejected'
+    }
+    if (!resp.ok) return 'failed'
     const data = await resp.json()
-    if (!data.access_token) return false
+    if (!data.access_token) return 'failed'
     localStorage.setItem('spotify_access_token', data.access_token)
     // Spotify 刷新可能返回新 refresh token，也更新
     if (data.refresh_token) localStorage.setItem('spotify_refresh_token', data.refresh_token)
-    return true
+    return 'ok'
   } catch (e) {
     console.warn('[Spotify] token 刷新失败:', e)
-    return false
+    return 'failed'
   }
+}
+
+/**
+ * Spotify 会话被服务端确认失效（refresh token 撤销/过期）：
+ * 清除本地凭据并广播事件，让 App 层同步登录态并提示重新登录。
+ * 只在 OAuth 端点明确拒绝时调用，网络抖动不会走到这里。
+ */
+function clearSpotifySession(): void {
+  localStorage.removeItem('spotify_access_token')
+  localStorage.removeItem('spotify_refresh_token')
+  localStorage.removeItem('spotify_username')
+  localStorage.removeItem('spotify_avatar')
+  localStorage.removeItem('spotify_user_id')
+  window.dispatchEvent(new CustomEvent('spotify-session-expired'))
+  window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify' } }))
 }
 
 export async function spotifyFetch(path: string, init?: RequestInit): Promise<any | null> {
@@ -72,7 +98,13 @@ export async function spotifyFetch(path: string, init?: RequestInit): Promise<an
     // 401：access token 过期，尝试刷新后重试一次
     if (resp.status === 401) {
       const refreshed = await refreshSpotifyToken()
-      if (refreshed) {
+      if (refreshed === 'rejected') {
+        // refresh token 被明确拒绝：会话已死，静默失败会让界面永远空转，
+        // 直接清登录态提示重新登录
+        clearSpotifySession()
+        return null
+      }
+      if (refreshed === 'ok') {
         const retryHeaders = new Headers(init?.headers)
         retryHeaders.set('Authorization', `Bearer ${getSpotifyToken()}`)
         const retry = await fetch(`${API}${path}`, { ...init, headers: retryHeaders })

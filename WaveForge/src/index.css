@@ -2,9 +2,11 @@
 @source './';
 @source '../*.html';
 
-/* 深浅色切换过渡动画 - 0.3s 平滑过渡 */
+/* 深浅色切换过渡动画 - 0.3s 平滑过渡
+   注意：不要给 box-shadow / backdrop-filter 加全局过渡——模糊与阴影在过渡期间每帧重新栅格化，
+   是高刷下交互掉帧的主要来源；个别需要平滑过渡的组件自行声明。 */
 html, body, html * {
-  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease, backdrop-filter 0.3s ease;
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
 }
 /* 修复日语注音（Ruby Text）显示位置 */
 ruby {
@@ -23,6 +25,14 @@ ruby rt {
 html, body, #root {
   height: 100%;
   overflow: hidden;
+}
+
+/* 窗口圆角：主窗口为透明窗口（桌面融合需要穿透），Windows 不会为透明窗口做原生
+   DWM 圆角，改由 #root 按 12px 圆角裁剪模拟（#root 是应用全部内容的挂载容器，
+   overflow:hidden 会裁剪包含 fixed 在内的一切后代；body 自身的 border-radius 因
+   overflow 传播到视口而不裁剪内容，不起作用）。 */
+#root {
+  border-radius: 12px;
 }
 
 /* 窗口圆角 - 仅用于 Electron */
@@ -938,7 +948,9 @@ input, textarea, [contenteditable="true"] {
 
 .desktop-widget-scroller {
   background: transparent !important;
-  contain: layout style;
+  /* 只保留样式隔离。contain:layout 会把本列变成 position:fixed 后代的包含块，
+     导致时间中心/进度/便签等弹窗被约束在卡片列内（挤压显示），天气弹窗因 portal 不受影响 */
+  contain: style;
 }
 
 /* 播放页连续 7 秒无鼠标移动时隐藏指针；覆盖内部按钮的 cursor 样式。 */
@@ -1288,3 +1300,33 @@ input, textarea, [contenteditable="true"] {
 :root[data-wf-theme='light'] .explore-view-root .hover\:bg-white\/\[0\.1\]:hover { background-color: rgba(0, 0, 0, 0.13); }
 :root[data-wf-theme='light'] .explore-view-root .hover\:bg-white\/20:hover { background-color: rgba(0, 0, 0, 0.18); }
 :root[data-wf-theme='light'] .explore-view-root .hover\:text-white:hover { color: rgba(0, 0, 0, 0.9); }
+
+/* ================= 插件系统 ================= */
+@keyframes dglabPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.plugin-center-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.plugin-center-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+.plugin-center-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); }
+.plugin-center-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 调试日志等需要可复制文本的容器（覆盖全局 user-select: none） */
+.plugin-log-select,
+.plugin-log-select * {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+/* 数字输入隐藏上下箭头（DG_LAB 端口手输，避免误点） */
+input[type='number'].no-spinner::-webkit-outer-spin-button,
+input[type='number'].no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'].no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}

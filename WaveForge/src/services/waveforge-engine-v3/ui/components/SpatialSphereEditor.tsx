@@ -133,10 +133,22 @@ function ListenerHead({ theme }: { theme: HSETheme }) {
   )
 }
 
+/** 背面判定/首帧锁根共用的临时向量（模块级复用，避免每帧分配） */
+const TMP_A = new THREE.Vector3()
+const TMP_B = new THREE.Vector3()
+
 /** 扬声器发光点：位置 = azElToPosition(方位角, 仰角) 球面投影；
  *  颜色 az<0 电光青 accentFrom / az>0 深邃紫 accentTo（与 2D 环形同语义）；
- *  选中放大 + 外圈光环 + Html 标签（序号/距离）；仰角≠0 略大（顶/底层辨识）；
- *  距离近大远小（滚轮调距有视觉反馈）；非 editable 灰调只读。 */
+ *  选中放大 + 外圈光环 + Html 标签（序号/距离，hover 也显示）；仰角≠0 略大
+ *  （顶/底层辨识）；距离近大远小（滚轮调距有视觉反馈）；非 editable 灰调只读。
+ *
+ *  可用性修复（多扬声器布局实测反馈）：
+ *  - 拾取代理球：额外一个 2.2× 半径的不可见球体参与射线拾取（three Raycaster
+ *    不剔除 invisible）——340px 视口里发光点视直径仅 ~12-14px，7.1.4 的 13 点
+ *    （顶置层挤在球顶）几乎点不中；
+ *  - 背面暗化：每帧按「球面位置·相机方向」点积判断正/背面，背面 marker 发光
+ *    强度与不透明度降低——线框球透明，背面点可见可点但与正面无任何视觉区分；
+ *  - hover 即时读数：悬停显示 序号·方位角·距离（原先仅选中显示）。 */
 function SpeakerMarker({
   speaker,
   index,
@@ -144,8 +156,8 @@ function SpeakerMarker({
   selected,
   editable,
   onPointerDown,
-  onWheel,
   onDoubleClick,
+  onHover,
 }: {
   speaker: VirtualSpeakerCfg
   index: number
@@ -153,8 +165,9 @@ function SpeakerMarker({
   selected: boolean
   editable: boolean
   onPointerDown: (index: number, e: ThreeEvent<PointerEvent>) => void
-  onWheel: (index: number, e: ThreeEvent<WheelEvent>) => void
   onDoubleClick: (index: number, e: ThreeEvent<MouseEvent>) => void
+  /** hover 上报（主组件 ref 记录，供滚轮处理区分「点上调距 / 空白缩放」） */
+  onHover: (index: number | null) => void
 }) {
   const pos = useMemo(
     () => azElToPosition(speaker.azimuthDeg, speaker.elevationDeg),
@@ -162,6 +175,19 @@ function SpeakerMarker({
   )
   const [hovered, setHovered] = useState(false)
   useCursor(hovered, 'pointer', 'default')
+  const matRef = useRef<THREE.MeshStandardMaterial>(null)
+  // 背面暗化：球面位置与「相机→marker」方向点积 <0 = 相机看到的是背面
+  useFrame(({ camera }) => {
+    const m = matRef.current
+    if (!m) return
+    TMP_A.set(pos.x, pos.y, pos.z)
+    TMP_B.copy(camera.position).sub(TMP_A).normalize()
+    const back = TMP_A.normalize().dot(TMP_B) < 0
+    const base = selected ? 2.6 : editable ? 1.4 : 0.6
+    m.emissiveIntensity = back ? base * 0.32 : base
+    m.transparent = back
+    m.opacity = back ? 0.5 : 1
+  })
   // 半径合成：基础 0.085 × 仰角≠0 1.35 × 距离近大远小（0.5m≈满、10m≈75%）× 选中 1.35
   const distNorm = (Math.min(MAX_DISTANCE, Math.max(MIN_DISTANCE, speaker.distance)) - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE)
   const radius =
@@ -172,20 +198,30 @@ function SpeakerMarker({
   return (
     <group position={[pos.x, pos.y, pos.z]}>
       <mesh
-        onPointerOver={(e) => { e.stopPropagation(); setHovered(true) }}
-        onPointerOut={() => setHovered(false)}
+        onPointerOver={(e) => { e.stopPropagation(); setHovered(true); onHover(index) }}
+        onPointerOut={() => { setHovered(false); onHover(null) }}
         onPointerDown={(e) => { if (editable) onPointerDown(index, e) }}
-        onWheel={(e) => { if (editable) onWheel(index, e) }}
         onDoubleClick={(e) => { if (editable) onDoubleClick(index, e) }}
       >
         <sphereGeometry args={[radius, 20, 20]} />
         <meshStandardMaterial
+          ref={matRef}
           color="#0a0a12"
           emissive={color}
           emissiveIntensity={selected ? 2.6 : editable ? 1.4 : 0.6}
           roughness={0.35}
           metalness={0.1}
         />
+      </mesh>
+      {/* 拾取代理球（不可见但参与 raycast）：2.2× 半径放大命中区 */}
+      <mesh
+        visible={false}
+        onPointerOver={(e) => { e.stopPropagation(); setHovered(true); onHover(index) }}
+        onPointerOut={() => { setHovered(false); onHover(null) }}
+        onPointerDown={(e) => { if (editable) onPointerDown(index, e) }}
+        onDoubleClick={(e) => { if (editable) onDoubleClick(index, e) }}
+      >
+        <sphereGeometry args={[radius * 2.2, 8, 8]} />
       </mesh>
       {/* 选中光环（外圈发光壳） */}
       {selected && editable && (
@@ -194,8 +230,8 @@ function SpeakerMarker({
           <meshBasicMaterial color={color} transparent opacity={0.22} />
         </mesh>
       )}
-      {/* 选中标签：序号 + 距离（Html 叠加，不挡 3D 交互） */}
-      {selected && editable && (
+      {/* 标签（选中常显 / hover 即时读数；Html 叠加，不挡 3D 交互） */}
+      {editable && (selected || hovered) && (
         <Html position={[0, radius + 0.24, 0]} center zIndexRange={[10, 0]} style={{ pointerEvents: 'none', userSelect: 'none' }}>
           <div
             className="px-2 py-0.5 rounded-md text-[10px] whitespace-nowrap hse-mono"
@@ -206,7 +242,7 @@ function SpeakerMarker({
               fontFamily: '"PingFang SC", "Microsoft YaHei", sans-serif',
             }}
           >
-            #{index + 1} · {speaker.distance.toFixed(1)}m
+            #{index + 1} · {Math.round(speaker.azimuthDeg)}° / {Math.round(speaker.elevationDeg)}° · {speaker.distance.toFixed(1)}m
           </div>
         </Html>
       )}
@@ -216,23 +252,42 @@ function SpeakerMarker({
 
 /**
  * 拖拽更新器：拖拽期间每帧把当前指针射线与单位球（球心原点、半径 1）求交，
- * 反解方位角/仰角实时 patch（帧级节流，规划书「事件本身是帧级，可接受」）；
+ * 反解方位角/仰角实时 patch（取整值未变不发 patch，见 DragUpdater 内短路）；
  * 拖拽期间禁用 OrbitControls（避免旋转抢指针），结束恢复。
- * 射线-球面求交：t² + 2(ro·rd)t + (|ro|² − 1) = 0，取最近正交点
- * （相机位于球内时近根为负，回退远根）。
+ * 射线-球面求交：t² + 2(ro·rd)t + (|ro|² − 1) = 0，两根 = 前/后半球交点。
+ *
+ * 拖拽根锁定：首帧取「离该扬声器当前位置更近的交点根」并锁定整次拖拽——
+ * 原实现恒取近根，从背面抓到的点会在首帧被静默搬到屏幕同一位置的前半球
+ * （前后大角度翻转、且永远无法把扬声器拖到相机背侧，必须先转相机）。
+ * 锁远根后背面点拖拽保持背面（配合背面暗化提示当前正反面）。
  */
 function DragUpdater({
   dragIndex,
+  speakers,
   onChange,
 }: {
   dragIndex: number | null
+  speakers: VirtualSpeakerCfg[]
   onChange: (index: number, patch: Partial<VirtualSpeakerCfg>) => void
 }) {
   const { camera, raycaster, pointer } = useThree()
   const controls = useThree((s) => s.controls) as unknown as { enabled: boolean } | null
   const hit = useRef(new THREE.Vector3())
+  /** 本次拖拽锁定的求交根（0=近根 1=远根；null = 首帧未锁） */
+  const rootLock = useRef<0 | 1 | null>(null)
+  // 上次提交的取整值（patch 风暴止血：指针按住不动时 useFrame 仍以渲染帧率空转，
+  // 每帧 onChange 都会走完整 patch 管线——值未变化时直接短路）
+  const lastAz = useRef(NaN)
+  const lastEl = useRef(NaN)
+  const speakersRef = useRef(speakers)
+  speakersRef.current = speakers
   useEffect(() => {
     if (controls) controls.enabled = dragIndex === null
+    if (dragIndex !== null) {
+      rootLock.current = null
+      lastAz.current = NaN
+      lastEl.current = NaN
+    }
   }, [controls, dragIndex])
   useFrame(() => {
     if (dragIndex === null) return
@@ -244,16 +299,76 @@ function DragUpdater({
     if (disc < 0) return
     const t1 = -b - Math.sqrt(disc)
     const t2 = -b + Math.sqrt(disc)
-    const t = t1 > 0 ? t1 : t2
+    let t: number
+    if (rootLock.current === null) {
+      // 首帧：取离 marker 当前位置更近的根（背面点锁远根，拖拽保持背面）
+      const spk = speakersRef.current[dragIndex]
+      const p = spk ? azElToPosition(spk.azimuthDeg, spk.elevationDeg) : null
+      if (p && t1 > 0 && t2 > 0) {
+        TMP_A.copy(rd).multiplyScalar(t1).add(ro)
+        TMP_B.copy(rd).multiplyScalar(t2).add(ro)
+        rootLock.current = TMP_A.distanceToSquared(p) <= TMP_B.distanceToSquared(p) ? 0 : 1
+        t = rootLock.current === 0 ? t1 : t2
+      } else {
+        rootLock.current = 0
+        t = t1 > 0 ? t1 : t2
+      }
+    } else if (rootLock.current === 0) {
+      t = t1 > 0 ? t1 : t2
+    } else {
+      t = t2 // 远根恒正（相机在球外时 t1·t2 = |ro|²−1 > 0）
+    }
     if (t <= 0) return
     hit.current.copy(rd).multiplyScalar(t).add(ro)
     const { azDeg, elDeg } = positionToAzEl(hit.current.x, hit.current.y, hit.current.z)
-    // 取整到 0.1°（避免浮点长尾污染持久化参数）
-    onChange(dragIndex, {
-      azimuthDeg: Math.round(azDeg * 10) / 10,
-      elevationDeg: Math.round(elDeg * 10) / 10,
-    })
+    // 取整到 0.1°（避免浮点长尾污染持久化参数）；与上次相同则不发 patch
+    const azR = Math.round(azDeg * 10) / 10
+    const elR = Math.round(elDeg * 10) / 10
+    if (azR === lastAz.current && elR === lastEl.current) return
+    lastAz.current = azR
+    lastEl.current = elR
+    onChange(dragIndex, { azimuthDeg: azR, elevationDeg: elR })
   })
+  return null
+}
+
+/**
+ * 滚轮处理器（Canvas 内，原生 wheel 捕获监听——捕获阶段先于 OrbitControls 的
+ * 冒泡监听与浏览器页面滚动）：指针悬停在扬声器上 → 调该扬声器距离（±0.5m/格，
+ * 钳制 0.5..10m）；空白处 → 相机推拉（沿视线 dolly，1.6..8 单位钳制）。
+ * 原实现空白处滚轮完全无响应（既不缩放也无提示）且调距无即时读数——现全区域
+ * 有效，读数由 hover 标签（SpeakerMarker）即时显示。
+ */
+function WheelHandler({
+  hoverIndexRef,
+  speakersRef,
+  onChangeRef,
+}: {
+  hoverIndexRef: React.RefObject<number | null>
+  speakersRef: React.RefObject<VirtualSpeakerCfg[]>
+  onChangeRef: React.RefObject<(index: number, patch: Partial<VirtualSpeakerCfg>) => void>
+}) {
+  const { camera, gl } = useThree()
+  useEffect(() => {
+    const canvas = gl.domElement
+    const onWheel = (e: WheelEvent): void => {
+      e.preventDefault()
+      e.stopPropagation()
+      const idx = hoverIndexRef.current
+      const spk = idx !== null ? speakersRef.current[idx] : undefined
+      if (idx !== null && spk) {
+        const delta = e.deltaY > 0 ? -DISTANCE_STEP : DISTANCE_STEP
+        onChangeRef.current(idx, { distance: adjustDistance(spk.distance, delta) })
+      } else {
+        // 相机推拉：OrbitControls target 在原点，沿 position 方向缩放距离
+        const dist = camera.position.length() * (e.deltaY > 0 ? 1.12 : 0.89)
+        const clamped = Math.min(8, Math.max(1.6, dist))
+        camera.position.multiplyScalar(clamped / camera.position.length())
+      }
+    }
+    canvas.addEventListener('wheel', onWheel, { capture: true, passive: false })
+    return () => canvas.removeEventListener('wheel', onWheel, { capture: true } as EventListenerOptions)
+  }, [camera, gl, hoverIndexRef, speakersRef, onChangeRef])
   return null
 }
 
@@ -312,10 +427,14 @@ function NumericPopup({ index, speaker, theme, onConfirm, onCancel }: {
     const elV = Number.parseFloat(el)
     const distV = Number.parseFloat(dist)
     if (Number.isNaN(azV) || Number.isNaN(elV) || Number.isNaN(distV)) return
+    // 手输值归一化（HTML min/max 只是 spinner 约束，不拦手输）：方位角 wrap 到
+    // [-180,180)、仰角钳 ±90、距离钳 0.5..10——否则越界值原样写入持久化参数，
+    // 距离越界直接影响 DSP 距离增益
+    const azW = ((azV + 540) % 360) - 180
     onConfirm(index, {
-      azimuthDeg: azV,
-      elevationDeg: elV,
-      distance: distV,
+      azimuthDeg: Math.round(azW * 10) / 10,
+      elevationDeg: Math.round(Math.min(90, Math.max(-90, elV)) * 10) / 10,
+      distance: Math.round(Math.min(10, Math.max(0.5, distV)) * 10) / 10,
     })
   }
 
@@ -392,6 +511,14 @@ export function SpatialSphereEditor({
   const [dragIndex, setDragIndex] = useState<number | null>(null)
   /** 精确输入浮层（双击打开；null = 关闭） */
   const [popup, setPopup] = useState<{ index: number } | null>(null)
+  /** 当前 hover 的扬声器索引（ref 不触发重渲染；滚轮处理区分「点上调距/空白缩放」） */
+  const hoverIndexRef = useRef<number | null>(null)
+  /** speakers/onChange 的 ref 视图（WheelHandler 原生监听内读最新值，不重挂监听） */
+  const speakersRef = useRef(speakers)
+  speakersRef.current = speakers
+  const onChangeRef = useRef(onChangeSpeaker ?? NOOP)
+  onChangeRef.current = onChangeSpeaker ?? NOOP
+  const onHover = useRef((index: number | null): void => { hoverIndexRef.current = index }).current
 
   // 只读（预设布局）时清理选中与浮层
   useEffect(() => {
@@ -420,19 +547,17 @@ export function SpatialSphereEditor({
     }
   }
 
-  /** 结束拖拽：指针释放/取消（wrapper 冒泡监听，覆盖捕获后的任意释放位置） */
+  /** 结束拖拽：指针释放/取消/捕获丢失/窗口失焦（多路径兜底——若 dragIndex 不
+   *  复位，DragUpdater 持续生效会导致鼠标回到画布上扬声器跟着飞 + OrbitControls
+   *  永久禁用，必须再点一次扬声器才能解锁） */
   const endDrag = (): void => setDragIndex(null)
 
-  /** 点上滚轮：±DISTANCE_STEP 调整距离（deltaY<0 上滚推远 +0.5、deltaY>0 下滚
-   *  拉近 −0.5，钳制 0.5..10m；OrbitControls 已关缩放，滚轮语义完整让位） */
-  const handleWheel = (index: number, e: ThreeEvent<WheelEvent>): void => {
-    e.stopPropagation()
-    if (!onChangeSpeaker) return
-    const s = speakers[index]
-    if (!s) return
-    const delta = e.deltaY > 0 ? -DISTANCE_STEP : DISTANCE_STEP
-    onChangeSpeaker(index, { distance: adjustDistance(s.distance, delta) })
-  }
+  // 窗口失焦（Alt+Tab/切窗口）兜底结束拖拽（pointerup 不保证触发）
+  useEffect(() => {
+    const onBlur = (): void => endDrag()
+    window.addEventListener('blur', onBlur)
+    return () => window.removeEventListener('blur', onBlur)
+  }, [])
 
   /** 双击：选中 + 弹出精确输入浮层 */
   const handleDoubleClick = (index: number, e: ThreeEvent<MouseEvent>): void => {
@@ -466,6 +591,7 @@ export function SpatialSphereEditor({
         }}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
       >
         <Canvas
           camera={{ position: [3.4, 2.2, 3.4], fov: 45, near: 0.1, far: 50 }}
@@ -496,13 +622,16 @@ export function SpatialSphereEditor({
               selected={editable && selected === i}
               editable={editable}
               onPointerDown={handlePointerDown}
-              onWheel={handleWheel}
               onDoubleClick={handleDoubleClick}
+              onHover={onHover}
             />
           ))}
 
-          {/* 拖拽更新器（射线-球面反解 az/el；非 editable 恒空跑） */}
-          <DragUpdater dragIndex={editable ? dragIndex : null} onChange={onChangeSpeaker ?? NOOP} />
+          {/* 拖拽更新器（射线-球面反解 az/el，首帧锁交点根；非 editable 恒空跑） */}
+          <DragUpdater dragIndex={editable ? dragIndex : null} speakers={speakers} onChange={onChangeSpeaker ?? NOOP} />
+
+          {/* 滚轮全区域响应（点上调距 / 空白相机推拉；原生捕获监听） */}
+          <WheelHandler hoverIndexRef={hoverIndexRef} speakersRef={speakersRef} onChangeRef={onChangeRef} />
 
           {/* 视角：左键拖拽旋转 = 环绕查看（仅相机，不改扬声器参数）；关缩放——
               滚轮在扬声器点上语义让位给距离调整（避免双重响应） */}

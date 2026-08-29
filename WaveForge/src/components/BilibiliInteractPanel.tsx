@@ -127,10 +127,14 @@ export default function BilibiliInteractPanel({
   const myMidRef = useRef<number | null>(null)
   const sortRef = useRef<SortMode>('hot')
   sortRef.current = sort
+  const toastTimerRef = useRef<number | null>(null)
+
+  useEffect(() => () => { if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current) }, [])
 
   const showToast = useCallback((msg: string) => {
     setToast(msg)
-    window.setTimeout(() => setToast(''), 2200)
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = window.setTimeout(() => { toastTimerRef.current = null; setToast('') }, 2200)
   }, [])
 
   const myMid = useCallback((): number | null => {

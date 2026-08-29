@@ -364,6 +364,14 @@ export function SpatialRingEditor({
     }
   }
 
+  // pointermove rAF 合帧：原生 pointermove 在高刷鼠标下 125Hz-1000Hz，逐事件
+  // 直写 onChangeSpeaker 会以同频率走完整 patch 管线（整参数 JSON 深拷贝 + 双
+  // setParams + worklet postMessage + 全页重渲染）。记最新事件，帧回调里提交一次；
+  // 方位角取整后与上次相同则完全跳过（静止悬停零 patch）
+  const pendingMoveRef = useRef<{ idx: number; az: number } | null>(null)
+  const rafRef = useRef(0)
+  const lastAzRef = useRef(NaN)
+
   const handlePointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const idx = draggingRef.current
     if (idx === null || !editable) return
@@ -371,19 +379,33 @@ export function SpatialRingEditor({
     const g = canvasGeometry()
     // 前方朝上约定下：az = atan2(Δx, −Δy)
     const az = Math.round((Math.atan2(p.x - g.cx, g.cy - p.y) * 180) / Math.PI)
-    onChangeSpeaker(idx, { azimuthDeg: az })
+    pendingMoveRef.current = { idx, az }
+    if (rafRef.current === 0) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = 0
+        const pending = pendingMoveRef.current
+        pendingMoveRef.current = null
+        if (!pending) return
+        if (pending.az === lastAzRef.current) return
+        lastAzRef.current = pending.az
+        onChangeSpeaker(pending.idx, { azimuthDeg: pending.az })
+      })
+    }
   }
 
   const handlePointerEnd = () => {
     draggingRef.current = null
+    lastAzRef.current = NaN
   }
 
   const handleDoubleClick = (e: ReactMouseEvent<HTMLCanvasElement>) => {
     if (!editable) return
+    // 双击仅选中（非破坏性）：球形视图双击 = 精确数值输入，若环形双击 = 删除，
+    // 同一份数据的两个视图双击语义相反，肌肉记忆跨视图必误删——删除只走
+    // 右键菜单/删除按钮
     const p = eventPos(e)
     const idx = hitTest(p.x, p.y)
-    if (idx === null || speakers.length <= 1) return
-    onDeleteSpeaker(idx)
+    if (idx !== null) setSelected(idx)
   }
 
   /** 右键：命中扬声器 → 选中并弹出菜单（preventDefault 屏蔽浏览器默认菜单）；
@@ -519,6 +541,14 @@ export function SpatialRingEditor({
             label="增益" value={sel.gain} min={0} max={2} step={0.05}
             onChange={(v) => onChangeSpeaker(selected, { gain: v })}
             display={`${sel.gain.toFixed(2)}x`} theme={theme}
+          />
+          {/* 声源大小（点声源/扩散）：DSP 完整实现（方位模糊 az±size·30° HRIR 对
+              混合 + 右耳去相关 size·6 样本，TsConvolverBackend）——0=点声源，
+              越大声像越宽越弥散 */}
+          <Slider
+            label="声源大小（扩散度）" value={sel.size} min={0} max={1} step={0.05}
+            onChange={(v) => onChangeSpeaker(selected, { size: v })}
+            display={sel.size <= 0.001 ? '点声源' : `${Math.round(sel.size * 100)}%`} theme={theme}
           />
           {/* 输入路由（声源路由完整版）：routes + onChangeRoute 均传入时才渲染；
               缺失项显示方位角就近默认（az≤0→左源、az>0→右源），与 fusion 缺省语义一致 */}

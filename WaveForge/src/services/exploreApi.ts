@@ -13,6 +13,10 @@ const EXPLORE_MEMORY_CACHE_TTL = 9 * 60 * 1000
 
 const exploreHomeMemoryCache = new Map<string, { payload: ExplorePayload; expiresAt: number }>()
 const exploreHomePending = new Map<string, Promise<ExplorePayload>>()
+// 任一平台登录态变化（含汽水扫码成功）→ 失效探索页内存缓存，个性化数据立即可见
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => { exploreHomeMemoryCache.clear() })
+}
 
 export type ExplorePlatform = MusicPlatform
 
@@ -433,47 +437,127 @@ export async function fetchExploreHome(
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
     return payload
   }
-  // 汽水音乐：经主进程隐藏窗口抓取抖音搜索页音乐卡片（需登录抖音；失败时区块自动隐藏）
+  // 汽水音乐：真实个性化数据流——并行拉取每日推荐（/api/soda/daily）、官方榜单组
+  // （/api/soda/charts）与（登录时）用户歌单卡（/api/soda/user/playlists）；
+  // 三者全空（后端未就绪/全挂）时回退旧 fetchSodaExplore 关键词聚合路径，保证区块不空白。
   if (platform === 'soda') {
-    const { fetchSodaExplore } = await import('./sodaService')
-    const explore = await fetchSodaExplore()
-    const charts: ExploreChart[] = explore.charts.map((chart, index) => ({
+    const { fetchSodaDaily, fetchSodaCharts, fetchSodaUserPlaylists, fetchSodaExplore, isSodaLoggedIn } =
+      await import('./sodaService')
+    // 登录态粗判仅决定是否请求用户歌单卡；daily 的 personalized 由后端按会话判定
+    const loggedIn = isSodaLoggedIn()
+    const [dailyRes, chartsRes, playlistsRes] = await Promise.allSettled([
+      fetchSodaDaily(),
+      fetchSodaCharts(),
+      loggedIn ? fetchSodaUserPlaylists() : Promise.resolve([] as Awaited<ReturnType<typeof fetchSodaUserPlaylists>>),
+    ])
+    const daily = dailyRes.status === 'fulfilled'
+      ? dailyRes.value
+      : { songs: [] as Song[], personalized: false }
+    const chartGroups = chartsRes.status === 'fulfilled' ? chartsRes.value : []
+    const userPlaylistCards = playlistsRes.status === 'fulfilled' ? playlistsRes.value : []
+
+    // 榜单全量透传：封面取组内首曲封面；歌曲带名次与 mid（榜单详情可直接走汽水音源）
+    // 命名保留后端原样——「热歌」「新歌」等字样供首页模块正则匹配（HomeView 不做改动）
+    const charts: ExploreChart[] = chartGroups.map((chart): ExploreChart => ({
       id: chart.id,
       name: chart.name,
       group: chart.group,
-      description: `${chart.name} · 抖音音乐`,
-      coverUrl: '',
+      description: chart.description || `${chart.name} · 汽水音乐官方榜`,
+      coverUrl: chart.songs[0]?.album?.picUrl || '',
       updateText: '实时更新',
       platform: 'soda',
-      source: 'soda-douyin',
-      songs: chart.songs.map((song, songIndex) => ({
+      source: 'soda-reverse-api',
+      songs: chart.songs.slice(0, 30).map((song, songIndex) => ({
         id: song.id,
+        mid: song.mid,
         name: song.name,
         artist: song.artists?.[0]?.name || '',
         coverUrl: song.album?.picUrl || '',
         rank: songIndex + 1,
       })),
+    })).filter(chart => chart.songs.length > 0)
+
+    // 新歌区：优先取名称含「新歌/新曲」的榜单组歌曲；否则回退第一组前 20 首
+    const newSongGroup = chartGroups.find(group => /新歌|新曲/.test(group.name))
+    const newSongs: Song[] = (newSongGroup ? newSongGroup.songs : chartGroups[0]?.songs || []).slice(0, 20)
+
+    // 推荐歌单卡：仅登录时取用户歌单前 8 个（coverUrl 有则透传）；未登录保持空数组
+    const playlists: ExplorePlaylist[] = userPlaylistCards.slice(0, 8).map(item => ({
+      id: item.id,
+      name: item.name,
+      coverUrl: item.coverUrl || '',
+      trackCount: item.trackCount,
+      creator: '汽水音乐',
+      platform: 'soda',
+      source: 'soda-user-playlist',
     }))
-    const payload: ExplorePayload = {
+
+    // 统一装配：保持 ExplorePayload 形状与缓存写入逻辑不变
+    const assembleSodaPayload = (
+      source: string,
+      data: Pick<ExplorePayload, 'personalized' | 'dailySongs' | 'newSongs' | 'playlists' | 'charts'>
+    ): ExplorePayload => ({
       code: 0,
       platform: 'soda',
       officialEnhanced: false,
-      personalized: false,
-      dailySongs: explore.songs,
+      personalized: data.personalized,
+      dailySongs: data.dailySongs,
       radioSongs: [],
-      newSongs: explore.songs.slice(0, 20),
-      playlists: explore.playlists.map(item => ({
-        id: item.id,
-        name: item.name,
-        coverUrl: item.coverUrl || '',
-        platform: 'soda',
-        source: 'soda-douyin',
-      })),
-      charts,
+      newSongs: data.newSongs,
+      playlists: data.playlists,
+      charts: data.charts,
       albums: [],
       channels: [],
-      meta: { source: 'soda-douyin-scrape', updatedAt: Date.now() },
+      meta: { source, updatedAt: Date.now() },
+    })
+
+    // 失败降级：细粒度接口全部为空 → 回退旧关键词聚合路径（内部自带公开目录/DOM 抓取兜底）
+    if (!daily.songs.length && !charts.length && !playlists.length) {
+      const explore = await fetchSodaExplore()
+      const fallbackCharts: ExploreChart[] = explore.charts.map((chart): ExploreChart => ({
+        id: chart.id,
+        name: chart.name,
+        group: chart.group,
+        description: `${chart.name} · 汽水音乐`,
+        coverUrl: chart.songs[0]?.album?.picUrl || '',
+        updateText: '实时更新',
+        platform: 'soda',
+        source: 'soda-web-api-fallback',
+        songs: chart.songs.map((song, songIndex) => ({
+          id: song.id,
+          mid: song.mid,
+          name: song.name,
+          artist: song.artists?.[0]?.name || '',
+          coverUrl: song.album?.picUrl || '',
+          rank: songIndex + 1,
+        })),
+      })).filter(chart => chart.songs.length > 0)
+      const payload = assembleSodaPayload('soda-web-api-fallback', {
+        personalized: false,
+        dailySongs: explore.songs,
+        newSongs: explore.songs.slice(0, 20),
+        playlists: explore.playlists.slice(0, 8).map(item => ({
+          id: item.id,
+          name: item.name,
+          coverUrl: item.coverUrl || '',
+          creator: '汽水音乐',
+          platform: 'soda',
+          source: 'soda-web-api-fallback',
+        })),
+        charts: fallbackCharts,
+      })
+      exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
+      return payload
     }
+
+    const payload = assembleSodaPayload('soda-web-api', {
+      // 登录且日推确有个性化数据时为 true，探索页据此展示「汽水·每日推荐」语义
+      personalized: Boolean(daily.personalized && daily.songs.length > 0),
+      dailySongs: daily.songs,
+      newSongs,
+      playlists,
+      charts,
+    })
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
     return payload
   }
@@ -623,6 +707,44 @@ export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: A
       songs,
     }
   }
+  // 汽水歌单：逆向 Web API 歌单曲目页（支持 qishui-feed 等虚拟歌单 id），失败返回空壳由上层提示。
+  // 后端单页上限 50 条，这里与 playlistService.getPlaylistDetail 同款分页合并全量曲目：
+  // hasMore/trackCount 终止 + mid 去重兜底 + 20 页封顶，避免超过 50 首的歌单只显示第一页。
+  if (playlist.platform === 'soda') {
+    const { fetchSodaPlaylistTracks } = await import('./sodaService')
+    const sodaSongs: Song[] = []
+    const seenMids = new Set<string>()
+    let name = ''
+    let coverUrl = ''
+    let trackCount = 0
+    let offset = 0
+    for (let page = 0; page < 20; page += 1) {
+      const detail = await fetchSodaPlaylistTracks(playlist.id, offset)
+      if (!name && detail.name) name = detail.name
+      if (!coverUrl && detail.coverUrl) coverUrl = detail.coverUrl
+      if (detail.trackCount > trackCount) trackCount = detail.trackCount
+      if (!Array.isArray(detail.tracks) || detail.tracks.length === 0) break
+      for (const song of detail.tracks) {
+        const key = String(song.mid || song.id || '')
+        if (key && seenMids.has(key)) continue
+        if (key) seenMids.add(key)
+        sodaSongs.push(song)
+      }
+      offset += detail.tracks.length
+      if (!detail.hasMore || offset >= trackCount) break
+    }
+    return {
+      playlist: {
+        id: playlist.id,
+        name: name || playlist.name,
+        coverImgUrl: coverUrl || playlist.coverUrl,
+        trackCount: Number(trackCount || sodaSongs.length || playlist.trackCount || 0),
+        description: playlist.description || '',
+        platform: 'soda',
+      },
+      songs: sodaSongs,
+    }
+  }
   const cookie = getExploreCookie(playlist.platform)
   const data = await fetchExploreJson(`/${playlist.platform}/playlist/detail`, {
     id: playlist.id,
@@ -697,10 +819,11 @@ export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSigna
       songs,
     }
   }
-  // 汽水榜单：客户端已带歌曲列表（抖音搜索抓取），无需服务端
+  // 汽水榜单：客户端已带歌曲列表（逆向 Web API 官方榜），无需服务端
   if (chart.platform === 'soda') {
     const songs: Song[] = chart.songs.map(song => ({
       id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      mid: song.mid || (typeof song.id === 'number' ? '' : String(song.id || '')),
       name: song.name,
       artists: song.artist ? [{ name: song.artist }] : [],
       album: { name: '', picUrl: song.coverUrl || '' },

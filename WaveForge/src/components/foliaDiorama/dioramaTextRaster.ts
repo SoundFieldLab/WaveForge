@@ -19,8 +19,11 @@ import * as THREE from 'three';
 // EXACTLY, by construction - centring/misalignment is impossible (this is what fixes the interlude
 // dot ● glow sitting high: the glow IS the blurred dot).
 
-export const DIORAMA_RASTER_FONT_PX = 128;
-const DEFAULT_FONT_WEIGHT = 700;
+/** 栅格 em 尺寸：128→192，字形更细腻（高分屏/长行缩放后不发虚）。
+ * 注意：DioramaScene / FoliaDioramaLyrics 里所有 /128 的世界尺寸换算都已改用本常量。 */
+export const DIORAMA_RASTER_FONT_PX = 192;
+// 字重 900（黑体最重档）：用户要求"厚"——700 细了，CJK 在 900 下笔画实、3D 切片观感厚实
+const DEFAULT_FONT_WEIGHT = 900;
 // Vertical band around the middle baseline (covers ascenders/descenders across fonts).
 const LINE_BAND_EM = 1.4;
 // Padding for the glow spread (must contain the widest shadow blur below plus ink overshoot).
@@ -103,8 +106,48 @@ export interface DioramaUnitRaster {
     advancePx: number;
 }
 
+// ─── 栅格化结果 LRU 缓存 ──────────────────────────────────────────────────────────────────
+// 每次活动行切换都会重栅格所有 unit（base + glow 两张纹理），邻居行滚入视野时也会重栅格整行
+// 文本——同一文本反复栅格化是热路径上的纯浪费。按 (fontSpec, text) 缓存共享 CanvasTexture：
+//   - 命中：直接返回已有纹理，零栅格零上传；
+//   - 未命中：栅格 + 上传 + 入缓存；
+//   - LRU 满载驱逐：dispose 旧纹理（驱赶的安全前提：行从活动→邻居后改用整行纹理，
+//     不再引用 unit 纹理，故驱逐时无挂载材质仍在引用该纹理）。
+const RASTER_CACHE_MAX = 1024;
+const unitRasterCache = new Map<string, DioramaUnitRaster>();
+const lineRasterCache = new Map<string, DioramaLineRaster>();
+
+const evictOldest = <T extends DioramaUnitRaster | DioramaLineRaster>(cache: Map<string, T>): void => {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) return;
+    const entry = cache.get(oldest);
+    cache.delete(oldest);
+    if (!entry) return;
+    if ('baseTexture' in entry) {
+        entry.baseTexture.dispose();
+        entry.glowTexture.dispose();
+    } else {
+        entry.texture.dispose();
+    }
+};
+
 /** Rasterise one lyric unit (base + glow layers share one canvas geometry). */
 export const rasterDioramaUnit = (text: string, fontSpec: string): DioramaUnitRaster => {
+    const key = `${fontSpec}\u0000${text}`;
+    const cached = unitRasterCache.get(key);
+    if (cached) {
+        // LRU 刷新：删后重插，把命中项挪到最末（Map 按插入序遍历，最旧在最前）
+        unitRasterCache.delete(key);
+        unitRasterCache.set(key, cached);
+        return cached;
+    }
+    const raster = rasterDioramaUnitUncached(text, fontSpec);
+    if (unitRasterCache.size >= RASTER_CACHE_MAX) evictOldest(unitRasterCache);
+    unitRasterCache.set(key, raster);
+    return raster;
+};
+
+const rasterDioramaUnitUncached = (text: string, fontSpec: string): DioramaUnitRaster => {
     const em = DIORAMA_RASTER_FONT_PX;
     const pad = Math.ceil(em * GLOW_PAD_EM);
     const advancePx = Math.max(1, Math.ceil(measureDioramaText(text, fontSpec)));
@@ -126,16 +169,12 @@ export const rasterDioramaUnit = (text: string, fontSpec: string): DioramaUnitRa
     };
 
     const baseTexture = draw((ctx) => {
-        // 无描边（用户要求）：深空背景足够暗，字形靠 bevel 底层与表面渐变保持立体可读
-        // 立体感（bevel 底层）：右下微偏移的暗色字形，让表面像浮起一层厚度
-        ctx.fillStyle = 'rgba(10,13,22,0.6)';
-        ctx.fillText(text, drawX + em * 0.022, drawY + em * 0.026);
-        // 表面：上亮下暗的纵向渐变（顶部受光），替代纯白平涂——
-        // 与 DioramaScene 的深度切片层配合，字形读作有受光面的实体而非贴纸
+        // 无阴影（用户要求）：不再画右下偏移的暗色影子——立体感交给场景的 Z 轴厚度切片
+        // （back/side 暗色副本）与表面渐变承担；字形保持干净，只有受光面
         const surface = ctx.createLinearGradient(0, canvasHeightPx * 0.3, 0, canvasHeightPx * 0.72);
         surface.addColorStop(0, '#ffffff');
-        surface.addColorStop(0.55, '#eef0f7');
-        surface.addColorStop(1, '#c3c8d8');
+        surface.addColorStop(0.5, '#f3f5fa');
+        surface.addColorStop(1, '#c4cbe0');
         ctx.fillStyle = surface;
         ctx.fillText(text, drawX, drawY);
     });
@@ -157,6 +196,20 @@ export interface DioramaLineRaster {
 
 /** Rasterise a whole (neighbour) line as one plain white texture - no glow, small pad. */
 export const rasterDioramaLine = (text: string, fontStack: string, fontWeight = DEFAULT_FONT_WEIGHT): DioramaLineRaster => {
+    const key = `l\u0000${fontWeight}\u0000${fontStack}\u0000${text}`;
+    const cached = lineRasterCache.get(key);
+    if (cached) {
+        lineRasterCache.delete(key);
+        lineRasterCache.set(key, cached);
+        return cached;
+    }
+    const raster = rasterDioramaLineUncached(text, fontStack, fontWeight);
+    if (lineRasterCache.size >= RASTER_CACHE_MAX) evictOldest(lineRasterCache);
+    lineRasterCache.set(key, raster);
+    return raster;
+};
+
+const rasterDioramaLineUncached = (text: string, fontStack: string, fontWeight = DEFAULT_FONT_WEIGHT): DioramaLineRaster => {
     let fontPx = DIORAMA_RASTER_FONT_PX;
     let fontSpec = buildDioramaFontSpec(fontStack, fontWeight);
     let advancePx = Math.max(1, Math.ceil(measureDioramaText(text, fontSpec)));
@@ -177,13 +230,11 @@ export const rasterDioramaLine = (text: string, fontStack: string, fontWeight = 
     ctx.font = fontSpec;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    // 与活动行同一套 bevel 语言（无描边）：暗底偏移 + 上亮下暗渐变表面
-    ctx.fillStyle = 'rgba(10,13,22,0.55)';
-    ctx.fillText(text, pad + fontPx * 0.02, canvasHeightPx / 2 + fontPx * 0.024);
+    // 与活动行同一套表面语言（无阴影无描边）：顶部受光三档渐变，立体由场景切片承担
     const surface = ctx.createLinearGradient(0, canvasHeightPx * 0.3, 0, canvasHeightPx * 0.72);
     surface.addColorStop(0, '#ffffff');
-    surface.addColorStop(0.55, '#eef0f7');
-    surface.addColorStop(1, '#c3c8d8');
+    surface.addColorStop(0.5, '#f3f5fa');
+    surface.addColorStop(1, '#c4cbe0');
     ctx.fillStyle = surface;
     ctx.fillText(text, pad, canvasHeightPx / 2);
 

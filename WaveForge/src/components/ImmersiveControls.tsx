@@ -84,6 +84,8 @@ export default function ImmersiveControls({
   const showMvButton = typeof onMvBackgroundToggle === 'function'
   const featureButtonCount = (hasTranslation ? 1 : 0) + (hasRoman ? 1 : 0) + (showMvButton ? 1 : 0) // MV 背景按钮常驻
   const rowRem = tvCompact ? 3.2 : 4 // 每个按钮行占位高度（rem），TV 紧凑更小
+  // 各按钮顶位置都按同一行高网格计算（不能混用 Tailwind top-16=4rem：TV 紧凑档会错位/重叠）
+  const translationButtonTop = `${(tvCompact ? 3.2 : 4)}rem`
   const romanButtonTop = hasTranslation ? `${(tvCompact ? 6.4 : 8)}rem` : `${(tvCompact ? 3.2 : 4)}rem`
   // MV 背景按钮：紧跟翻译/罗马音功能行的下一行
   const mvButtonTop = `${(tvCompact ? 3.2 : 4) + (featureButtonCount - 1) * rowRem}rem`
@@ -143,8 +145,9 @@ export default function ImmersiveControls({
           whileHover={{ scale: 1.06, x: -3, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } }}
           whileTap={{ scale: 0.96 }}
           onClick={onTranslationToggle}
-          className={`absolute top-16 right-6 ${btnPad} rounded-full backdrop-blur-md border transition-colors overflow-hidden`}
+          className={`absolute right-6 ${btnPad} rounded-full backdrop-blur-md border transition-colors overflow-hidden`}
           style={{
+            top: translationButtonTop,
             backgroundColor: translationEnabled
               ? accentColor
               : playerTheme === 'dark' 

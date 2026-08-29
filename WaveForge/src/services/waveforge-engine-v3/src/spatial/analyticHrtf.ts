@@ -88,15 +88,6 @@ function onePoleLowpassInPlace(x: Float32Array, fc: number, fs: number): void {
   }
 }
 
-function maxAbs(x: Float32Array): number {
-  let m = 0
-  for (let i = 0; i < x.length; i++) {
-    const v = Math.abs(x[i])
-    if (v > m) m = v
-  }
-  return m
-}
-
 /**
  * 生成合成 HRTF 网格（纯函数、确定性：同参数两次调用结果逐位相同）。
  * 传入采样率仅用于 ITD 样本数换算与滤波器系数；hrirLength 恒为 256。
@@ -133,9 +124,13 @@ export function generateAnalyticHrtfGrid(sampleRate: number): HrtfGrid {
 
       const nearH = buildHrir(center, fc, sampleRate)
       const farH = buildHrir(farDelay, fc, sampleRate)
-      // 两耳共用近耳峰值归一因子（幅度差保留 ILD 语义）
-      const peakNear = maxAbs(nearH)
-      const norm = peakNear > 1e-12 ? 1 / peakNear : 1
+      // 两耳共用宽带增益归一因子（幅度差保留 ILD 语义）：近耳 DC 增益（Σh）归一到 1.0
+      // ——低频（波长>>头）时单扬声器空间化输出幅度 ≈ 输入，与直通电平一致。
+      // 原峰值归一（peak=1）会留下约 1.7 倍 DC 增益，多扬声器布局相干求和时
+      // 输出超满幅 +8~17dB（5.1/7.1.4 爆音根源之一）。
+      let sumNear = 0
+      for (let i = 0; i < HRIR_LENGTH; i++) sumNear += nearH[i]
+      const norm = Math.abs(sumNear) > 1e-12 ? 1 / sumNear : 1
       for (let i = 0; i < HRIR_LENGTH; i++) {
         nearH[i] *= norm
         farH[i] *= norm

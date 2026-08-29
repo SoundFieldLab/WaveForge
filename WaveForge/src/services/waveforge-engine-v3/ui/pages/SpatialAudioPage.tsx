@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Radio, Headphones, Clapperboard, Play, Volume2, Settings, Power } from 'lucide-react'
+import { Radio, Headphones, Clapperboard, Volume2, Settings, Power } from 'lucide-react'
 import { GlassCard, Toggle, Slider, Segmented, RangeStyle } from '../components/Primitives'
 import { SpatialModeVisual } from '../components/SpatialModeVisual'
 import { SpatialRingEditor } from '../components/SpatialRingEditor'
@@ -71,7 +71,7 @@ const HEAD_LOCKED_EDITOR_VIEWS: { value: 'ring' | 'sphere'; label: string }[] = 
   { value: 'sphere', label: '3D 球形' },
 ]
 
-export default function SpatialAudioPage({ controller, theme, playbackTimeStore }: SpatialAudioPageProps) {
+export default function SpatialAudioPage({ bridge, controller, theme, playbackTimeStore }: SpatialAudioPageProps) {
   /* ── 空间音频（V3EngineParams.spatial，EngineV3 第 15 级内联） ── */
   const { params, patch } = controller
   const spatial: SpatialSettings = params.spatial ?? createDefaultSpatialSettings()
@@ -131,6 +131,42 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
   const [selectedWorldId, setSelectedWorldId] = useState<string | null>(null)
   const [firstPerson, setFirstPerson] = useState(false)
 
+  /* ── 状态栏实数据（专业视图）：引擎延迟（getStats().engineLatencySamples）500ms
+     轮询 + rAF 帧率测量（CPU 占用的直观代理——无独立 worklet 统计） ── */
+  const [statusInfo, setStatusInfo] = useState<{ latencyMs: number | null; fps: number | null }>({ latencyMs: null, fps: null })
+  useEffect(() => {
+    if (!proActive) return
+    let disposed = false
+    let frames = 0
+    let fpsWindowStart = performance.now()
+    let fps = 0
+    const tickFrame = (): void => {
+      frames++
+      const now = performance.now()
+      if (now - fpsWindowStart >= 1000) {
+        fps = Math.round((frames * 1000) / (now - fpsWindowStart))
+        frames = 0
+        fpsWindowStart = now
+      }
+      if (!disposed) rafId = requestAnimationFrame(tickFrame)
+    }
+    let rafId = requestAnimationFrame(tickFrame)
+    const statsTimer = window.setInterval(() => {
+      const stats = bridge.getStats()
+      const lat = stats?.engineLatencySamples
+      const fs = 48000 // EngineV3 构造采样率（AudioContext 标准采样率；仅用于样本→毫秒换算）
+      setStatusInfo({
+        latencyMs: Number.isFinite(lat) && lat > 0 ? Math.round((lat / fs) * 1000) : 0,
+        fps,
+      })
+    }, 500)
+    return () => {
+      disposed = true
+      cancelAnimationFrame(rafId)
+      window.clearInterval(statsTimer)
+    }
+  }, [proActive, bridge])
+
   /** 位移增量（世界系米）→ 引擎听者位置（controller.moveListener 不可变更新） */
   const handleWorldMove = (d: { x: number; y: number; z: number }): void => {
     patchSpatial({ world: { listener: moveListener(spatial.world.listener, d) } })
@@ -165,27 +201,34 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
     patchSpatial({ headLocked: patchObj })
   }
 
-  /** 模式 B：修改第 index 只自定义扬声器（局部字段） */
+  /** 模式 B：扬声器列表编辑统一入口——预设布局下任何 speakers 修改都切到
+   *  "自定义"承接（headLockedSpeakers 在预设分支忽略 speakers 字段，不转
+   *  custom 改动不生效；预设定义不变，随时可重新选回） */
+  const patchSpeakers = (next: VirtualSpeakerCfg[]): void => {
+    patchSpatial(spatial.headLocked.layout === 'custom'
+      ? { headLocked: { speakers: next } }
+      : { headLocked: { layout: 'custom', speakers: next } })
+  }
+
   const handleChangeSpeaker = (index: number, patchCfg: Partial<VirtualSpeakerCfg>): void => {
-    const next = spatial.headLocked.speakers.map((s, i) => (i === index ? { ...s, ...patchCfg } : s))
-    patchSpatial({ headLocked: { speakers: next } })
+    patchSpeakers(spatial.headLocked.speakers.map((s, i) => (i === index ? { ...s, ...patchCfg } : s)))
   }
 
   /** 模式 B：删除第 index 只自定义扬声器（编辑器保证至少保留 1 只） */
   const handleDeleteSpeaker = (index: number): void => {
-    const next = spatial.headLocked.speakers.filter((_, i) => i !== index)
-    patchSpatial({ headLocked: { speakers: next } })
+    patchSpeakers(spatial.headLocked.speakers.filter((_, i) => i !== index))
   }
 
-  /** 模式 B：添加自定义扬声器（上限 16 只） */
+  /** 模式 B：添加自定义扬声器（上限 16 只；新增点避开已有方位角——固定 0° 与
+   *  预设 C 声道重合会导致拾取二义/极难选中） */
   const handleAddSpeaker = (): void => {
     const cur = spatial.headLocked.speakers
     if (cur.length >= 16) return
-    patchSpatial({
-      headLocked: {
-        speakers: [...cur, { azimuthDeg: 0, elevationDeg: 0, distance: 2, gain: 1, size: 0 }],
-      },
-    })
+    const used = new Set(cur.map((s) => Math.round(s.azimuthDeg / 15) * 15))
+    let az = 15
+    while (used.has(az) && az < 360) az += 15
+    if (az >= 360) az = 15
+    patchSpeakers([...cur, { azimuthDeg: az, elevationDeg: 0, distance: 2, gain: 1, size: 0 }])
   }
 
   /** 模式 B：修改第 index 只扬声器的输入路由（数组整段替换；缺失项按方位角默认补齐
@@ -203,10 +246,9 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
    *  muted 布尔显式写回（muted:false 保留键位，与 VirtualSpeakerCfg.muted 缺省
    *  语义一致）；Solo 的「其它全 muted」归一化由编辑器逐只调用本函数完成。 */
   const handleToggleMuted = (index: number): void => {
-    const next = spatial.headLocked.speakers.map((s, i) =>
+    patchSpeakers(spatial.headLocked.speakers.map((s, i) =>
       i === index ? { ...s, muted: !(s.muted === true) } : s,
-    )
-    patchSpatial({ headLocked: { speakers: next } })
+    ))
   }
 
   /** 模式 B：Solo 第 index 只扬声器（右键菜单「Solo」）——基于当前 params
@@ -217,11 +259,9 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
    *  多扬声器时仅末只生效。本回调绕过闭包陈旧，从当前快照一次性提交目标态，
    *  编辑器 handleSolo 优先走本路径（缺省回退逐只翻转，向后兼容）。 */
   const handleSoloSpeaker = (index: number): void => {
-    const cur = spatial
-    const next = cur.headLocked.speakers.map((s, i) =>
+    patchSpeakers(spatial.headLocked.speakers.map((s, i) =>
       i === index ? { ...s, muted: false } : { ...s, muted: true },
-    )
-    patchSpatial({ headLocked: { speakers: next } })
+    ))
   }
 
   /** 模式 B：复制第 index 只自定义扬声器并追加到列表尾部（右键菜单「复制」；
@@ -231,11 +271,7 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
     const cur = spatial.headLocked.speakers
     if (cur.length >= 16) return
     if (index < 0 || index >= cur.length) return
-    patchSpatial({
-      headLocked: {
-        speakers: [...cur, { ...cur[index] }],
-      },
-    })
+    patchSpeakers([...cur, { ...cur[index] }])
   }
 
   /* ════════════════ 模式面板渲染器（标准/专业视图共用，不重写编辑交互） ════════════════ */
@@ -323,7 +359,7 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
    *  （2D 环形默认 / 3D 球形新增，视图 Segmented 切换）；布局预设见各自视图挂载 */
   const headLockedCore = (): ReactNode => (
     <>
-      {spatial.headLocked.layout === '714' && (
+      {(spatial.headLocked.layout === '714' || spatial.headLocked.layout === '514') && (
         <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 mb-2">
           <div className="flex items-center gap-2">
             <span className={`${theme.textSecondary} text-xs`}>顶部仰角层（4 顶置扬声器）</span>
@@ -333,14 +369,16 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
               theme={theme}
             />
           </div>
-          <div className="flex items-center gap-2">
-            <span className={`${theme.textSecondary} text-xs`}>底部仰角层（2 底部扬声器）</span>
-            <Toggle
-              checked={spatial.headLocked.bottomLayer}
-              onChange={(v) => patchSpatial({ headLocked: { bottomLayer: v } })}
-              theme={theme}
-            />
-          </div>
+          {spatial.headLocked.layout === '714' && (
+            <div className="flex items-center gap-2">
+              <span className={`${theme.textSecondary} text-xs`}>底部仰角层（2 底部扬声器）</span>
+              <Toggle
+                checked={spatial.headLocked.bottomLayer}
+                onChange={(v) => patchSpatial({ headLocked: { bottomLayer: v } })}
+                theme={theme}
+              />
+            </div>
+          )}
         </div>
       )}
       {/* 编辑器视图切换（模式 B 区块）：2D 环形（默认，现状）/ 3D 球形（规划书
@@ -357,7 +395,7 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
       {headLockedEditorView === 'sphere' ? (
         <SpatialSphereEditor
           speakers={spatial.headLocked.speakers}
-          editable={spatial.headLocked.layout === 'custom'}
+          editable={true} // 预设布局直接可编辑（编辑动作自动转自定义承接）
           onChangeSpeaker={handleChangeSpeaker}
           onDeleteSpeaker={handleDeleteSpeaker}
           onAddSpeaker={handleAddSpeaker}
@@ -366,7 +404,7 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
       ) : (
         <SpatialRingEditor
           speakers={spatial.headLocked.speakers}
-          editable={spatial.headLocked.layout === 'custom'}
+          editable={true} // 预设布局直接可编辑（编辑动作自动转自定义承接）
           onChangeSpeaker={handleChangeSpeaker}
           onDeleteSpeaker={handleDeleteSpeaker}
           onAddSpeaker={handleAddSpeaker}
@@ -494,23 +532,11 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
           </div>
         </div>
 
-        {/* 专业视图：顶部工具栏（播放控制 + 模式选择器复用 + 输出设备 + 设置弹窗入口） */}
+        {/* 专业视图：顶部工具栏（模式选择器复用 + 输出设备 + 设置弹窗入口）。
+            原播放/暂停按钮为空操作占位（播放由主播放器驱动，空间页拿不到播放
+            控制），已移除——假按钮比没有按钮更误导 */}
         {proActive ? (
           <div className="flex items-center gap-2 mb-3">
-            {/* 播放/暂停切换（播放由主播放器驱动，空间层已内联 EngineV3 不再独立控制 AudioContext；
-                此按钮保留为占位，后续 wave 接主播放器 play/pause） */}
-            <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                title="播放/暂停（空格）"
-                aria-label="播放/暂停"
-                onClick={() => { /* 播放由主播放器驱动，空间层不再独立控制 */ }}
-                className="w-8 h-8 rounded-full flex items-center justify-center transition-all hover:brightness-110"
-                style={{ background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }}
-              >
-                <Play className="w-3.5 h-3.5 text-white" />
-              </button>
-            </div>
             {/* 模式选择器（复用标准视图同款） */}
             <div className="flex-1 min-w-0">{modeSelector()}</div>
             {/* 输出设备（状态展示；枚举/切换在设置弹窗「输出设备」区） */}
@@ -553,6 +579,7 @@ export default function SpatialAudioPage({ controller, theme, playbackTimeStore 
             onHeadLockedLayout={handleHeadLockedLayout}
             selectedWorldId={selectedWorldId}
             onSelectWorld={setSelectedWorldId}
+            status={statusInfo}
           >
             {instantActive && instantCore()}
             {headLockedActive && headLockedCore()}
