@@ -1527,6 +1527,14 @@ function DesktopView({
         const detailed = { ...playlist, ...data?.playlist, isCollected: playlist.isCollected }
         setSelectedPlaylist(previous => previous ? { ...previous, ...detailed } : detailed)
         setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+      } else if (currentPlatform === 'kugou') {
+        // 酷狗：经 playlistService 统一详情（公开详情失败回退用户歌单曲目接口；
+        // 用户自建歌单/「我喜欢」的 id 是网关 listid，公开 m.kugou.com 详情拿不到曲目）
+        const data = await getPlaylistDetail(String(playlist.id || ''), 'kugou')
+        if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
+        const detailed = { ...playlist, ...data?.playlist, isCollected: playlist.isCollected }
+        setSelectedPlaylist(previous => previous ? { ...previous, ...detailed } : detailed)
+        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
       }
     } catch (error) {
       if ((error as Error).name !== 'AbortError') console.error('加载歌单详情失败:', error)
@@ -2569,7 +2577,7 @@ function DesktopView({
                     <p className="text-white/60 text-sm">
                       {playlistSongs.length < Number(selectedPlaylist.trackCount || 0)
                         ? `已加载 ${playlistSongs.length} / ${selectedPlaylist.trackCount} 首`
-                        : `${selectedPlaylist.trackCount} 首歌曲`}
+                        : `${selectedPlaylist.trackCount || playlistSongs.length} 首歌曲`}
                     </p>
                   </div>
                   

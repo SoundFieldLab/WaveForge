@@ -209,7 +209,7 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   likedSongs: true, // "我喜欢"歌单
   likeSong: true, // /v6/add_song
   explore: true,
-  exploreSections: ['discover', 'playlists', 'charts', 'newSongs'],
+  exploreSections: ['discover', 'playlists', 'charts', 'newSongs', 'albums'],
   search: true,
   searchSuggest: false,
   lyrics: true,
@@ -218,16 +218,16 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   charts: true,
   channels: false,
   newSongs: true,
-  albums: false, // 酷狗专辑详情未实现
+  albums: true, // mobilecdn /api/v3/album/list + album/info + album/song
   mv: false,
   signin: false,
   social: false,
   rank: false,
   cloudDisk: false,
   recentPlayed: false,
-  artistDetail: false,
-  albumDetail: false,
-  similarSongs: false,
+  artistDetail: true, // mobilecdn /api/v3/singer/info + singer/song
+  albumDetail: true,
+  similarSongs: true, // 同歌手热门歌曲（singer/song）+ 榜单相关探索
   radio: false,
   playAsCarrier: true, // H5 签名网关可原生播放（需登录）；未登录时由上层匹配播放
   audioQuality: false,
