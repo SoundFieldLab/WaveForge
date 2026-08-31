@@ -54,7 +54,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Settings, Sparkles, Image as ImageIcon } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
-import type { PlaybackTimeStore } from './audio/playbackTimeStore'
+import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
 import type { PlaybackOrigin, ViewMode } from './types/playbackNavigation'
 import { preloadOnIdle } from './utils/lazyPreload'
 const loadHomeView = () => import('./components/HomeView')
@@ -240,6 +240,25 @@ const LiveMiniPlayer = memo(function LiveMiniPlayer({
   ).currentTime
 
   return <MiniPlayer {...props} currentTime={externalCurrentTime ?? storeTime} />
+})
+
+type LiveUpNextNotificationProps = Omit<ComponentProps<typeof LazyUpNextNotification>, 'secondsRemaining'> & {
+  playbackTimeStore: PlaybackTimeStore
+  eventTime: number
+}
+
+const LiveUpNextNotification = memo(function LiveUpNextNotification({
+  playbackTimeStore,
+  eventTime,
+  ...props
+}: LiveUpNextNotificationProps) {
+  const currentTime = useSyncExternalStore(
+    playbackTimeStore.subscribe,
+    playbackTimeStore.getSnapshot,
+    playbackTimeStore.getSnapshot,
+  ).currentTime
+
+  return <LazyUpNextNotification {...props} secondsRemaining={eventTime - currentTime} />
 })
 
 type DesktopLyricLine = LyricLine & {
@@ -642,8 +661,15 @@ function App() {
   })
   
   const [isPlaying, setIsPlaying] = useState(false)
+  // App only commits playback time when a discrete presentation boundary changes.
+  // Progress bars and other continuous consumers subscribe to playbackTimeStore locally.
   const [currentTime, setCurrentTime] = useState(0)
-  const currentTimeCommitRef = useRef({ wallTime: 0, playbackTime: 0 })
+  const currentTimeRef = useRef(0)
+  const currentTimeCommitGateRef = useRef(createPlaybackTimeCommitGate())
+  const commitCurrentTime = useCallback((value: number) => {
+    currentTimeRef.current = value
+    setCurrentTime(value)
+  }, [])
   const [duration, setDuration] = useState(0)
   /** 当前曲目是否由 WebView2 播放面播放（外部播放源模式；驱动频谱/分析器走 bridge 数据源） */
   const [externalPlaybackActive, setExternalPlaybackActive] = useState(false)
@@ -1361,6 +1387,12 @@ function App() {
     return lyrics.find(hasVisibleContent) || null
   }, [currentLyricIndex, currentLyricLine, lyrics])
   const desktopLyrics = useMemo(() => buildDesktopLyricsWithInterludes(lyrics), [lyrics])
+  const playbackLyricsRef = useRef(lyrics)
+  const playbackDesktopLyricsRef = useRef(desktopLyrics)
+  const playbackLyricOffsetRef = useRef(lyricOffset)
+  playbackLyricsRef.current = lyrics
+  playbackDesktopLyricsRef.current = desktopLyrics
+  playbackLyricOffsetRef.current = lyricOffset
   const desktopLyricLine = useMemo(() => {
     // 看歌未确认对齐（货不对板/自由播放）→ 桌面/任务栏歌词显示「歌名-艺人」兜底
     if (watchLyricUnverified) {
@@ -1940,33 +1972,54 @@ function App() {
     useCallback((state) => {
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying)
       if (state.currentTime !== undefined) {
-        const now = performance.now()
-        const lastCommit = currentTimeCommitRef.current
-        const playbackDelta = Math.abs(state.currentTime - lastCommit.playbackTime)
+        currentTimeRef.current = state.currentTime
+
+        const findTimelineIndex = (lines: LyricLine[], offset: number) => {
+          for (let index = lines.length - 1; index >= 0; index -= 1) {
+            if (lines[index].time <= state.currentTime! + offset) return index
+          }
+          return -1
+        }
+        const lyricIndex = findTimelineIndex(playbackLyricsRef.current, 0.5 + playbackLyricOffsetRef.current)
+        let desktopLyricIndex = findTimelineIndex(playbackDesktopLyricsRef.current, 0.28 + playbackLyricOffsetRef.current)
+        const activeDesktopLyric = playbackDesktopLyricsRef.current[desktopLyricIndex]
+        if (
+          activeDesktopLyric?.isGeneratedInterlude
+          && activeDesktopLyric.interludeEndTime !== undefined
+          && state.currentTime + playbackLyricOffsetRef.current >= activeDesktopLyric.interludeEndTime
+        ) {
+          desktopLyricIndex = Math.min(desktopLyricIndex + 1, playbackDesktopLyricsRef.current.length - 1)
+        }
+
         // 倒计时基准：gapless/autoMix 启用时以 transitionStartTime（=动画起点）为准，
         // 否则以歌曲结束时间为准。
         const useTransitionCountdown = effectiveAutoMixEnabled || effectiveGaplessEnabled
         const eventTime = useTransitionCountdown ? (transitionStartTime ?? duration) : duration
-        // 动画窗口前 12s 内提高 currentTime 提交频率（≤100ms），让"即将进入过渡"倒计时流畅
-        const nearEvent = state.currentTime >= (eventTime ?? 0) - 12 && state.currentTime <= (eventTime ?? 0) + 2
-        const shouldCommitToReact = state.isPlaying === false
-          || state.currentTime === 0
-          || state.currentTime + 0.5 < lastCommit.playbackTime
-          || playbackDelta >= (nearEvent ? 0.1 : 1)
-          // 常态节流：PC 1s / TV 2s（进度条走 Live wrapper 4Hz 不受影响；过渡倒计时窗口保持 100ms）
-          || now - lastCommit.wallTime >= (nearEvent ? 100 : (isTvModeActive() ? 2000 : 900))
+        const timeRemaining = (eventTime ?? duration) - state.currentTime
+        const inAnimationWindowNow = transitionStartTime === null || state.currentTime >= transitionStartTime
+        const effectiveDuration = duration > 0
+          ? duration
+          : Math.max(0, Number(currentSong?.duration) / 1000)
+        const reportThreshold = effectiveDuration > 0
+          ? Math.min(30, Math.max(10, effectiveDuration * 0.1), Math.max(1, effectiveDuration - 1))
+          : 30
+        const presentationKey = [
+          lyricIndex,
+          desktopLyricIndex,
+          inAnimationWindowNow ? 1 : 0,
+          state.currentTime >= reportThreshold ? Math.floor(state.currentTime / 15) : -1,
+        ].join(':')
 
-        if (shouldCommitToReact) {
-          currentTimeCommitRef.current = { wallTime: now, playbackTime: state.currentTime }
+        if (currentTimeCommitGateRef.current({
+          currentTime: state.currentTime,
+          isPlaying: state.isPlaying,
+          presentationKey,
+        })) {
           setCurrentTime(state.currentTime)
         }
 
-        const timeRemaining = (eventTime ?? duration) - state.currentTime
-
-        // 动画窗口：currentTime 是否已到达过渡动画起点（transitionStartTime）。
         // AI 长混音音频过渡远早于动画点开始（transitioning 全程 true）——只有真正
         // 进入动画窗口后才隐藏"即将播放/即将进入过渡"卡片（卡片负责动画前的倒计时）。
-        const inAnimationWindowNow = transitionStartTime === null || state.currentTime >= transitionStartTime
         if ((state.transitioning && inAnimationWindowNow) || state.transitionState === 'preparing-next') {
           if (showUpNext) setShowUpNext(false)
         } else if (Date.now() < suppressUpNextUntilRef.current) {
@@ -2436,7 +2489,7 @@ function App() {
         // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面（与 loadAndPlaySong 一致）
         setAppleCoverUrl(null)
         resolveAppleCover(normalizedSong)
-        setCurrentTime(audioPlayer.getAudioElement()?.currentTime || 0)
+        commitCurrentTime(audioPlayer.getAudioElement()?.currentTime || 0)
         const cachedLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || []
         setLyrics(cachedLyrics)
         setIsPureMusic(detectPureMusic(cachedLyrics))
@@ -3963,7 +4016,7 @@ function App() {
     // 漏清会导致 appleCoverUrl 残留旧歌封面，自动切歌后 displayCoverUrl 恒为旧图）
     setAppleCoverUrl(null)
     resolveAppleCover(normalizedSong)
-    setCurrentTime(commit.targetTime)
+    commitCurrentTime(commit.targetTime)
     setDuration(normalizedSong.duration / 1000)
     setCurrentTranslation('')
 
@@ -4108,7 +4161,7 @@ function App() {
       }
       const coverUrl = normalizedSong.album?.picUrl || ''
       setCurrentTrack(createTrackFromSong(normalizedSong))
-      setCurrentTime(0)
+      commitCurrentTime(0)
       // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面
       setAppleCoverUrl(null)
       resolveAppleCover(normalizedSong)
@@ -4407,7 +4460,7 @@ function App() {
     }
     
     // 如果是第一首歌，循环到最后一首
-    setCurrentTime(0)
+    commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态?
     currentIndexRef.current = newIndex
@@ -4448,7 +4501,7 @@ function App() {
     }
     
     // 清空当前时间和歌词
-    setCurrentTime(0)
+    commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态
     currentIndexRef.current = newIndex
@@ -4969,11 +5022,14 @@ function App() {
     album: currentTrack.album || '',
     coverUrl: currentTrack.coverUrl || '',
     durationMs: Math.max(0, (Number(currentTrack.duration) || 0) * 1000),
-    elapsedMs: Math.max(0, Number(currentTime) || 0) * 1000,
+    elapsedMs: 0,
     isPlaying: Boolean(isPlaying),
   }
   useEffect(() => {
-    airplayController.attachProbe(() => airplayProbeRef.current)
+    airplayController.attachProbe(() => ({
+      ...airplayProbeRef.current,
+      elapsedMs: Math.max(0, currentTimeRef.current) * 1000,
+    }))
     return () => airplayController.detachProbe()
   }, [])
 
@@ -6630,7 +6686,7 @@ function App() {
               restorePlaybackOrigin={restorePlaybackOrigin}
               currentSong={currentSong}
               isPlaying={isPlaying}
-              currentTime={currentTime}
+              playbackTimeStore={audioPlayer.playbackTimeStore}
               desktopFusionEnabled={desktopFusionEnabled}
               onDesktopFusionChange={handleDesktopFusionChange}
               duration={duration}
@@ -7944,13 +8000,14 @@ function App() {
           只有在“在播放页外显示播放提示”开启时才显示，且三个模式位置一致。 */}
       {playlist.length > 0 && playMode !== 'repeat' && showUpNext && canShowUpNextOnCurrentSurface && foliaPresentation.useLegacyUpNext && (
         <Suspense fallback={null}>
-          <LazyUpNextNotification
+          <LiveUpNextNotification
+            playbackTimeStore={audioPlayer.playbackTimeStore}
+            eventTime={(effectiveAutoMixEnabled || effectiveGaplessEnabled)
+              ? (transitionStartTime ?? duration)
+              : duration}
             show={true}
             playerTheme={playerTheme}
             nextSong={nextSongToShow}
-            secondsRemaining={(effectiveAutoMixEnabled || effectiveGaplessEnabled)
-              ? (transitionStartTime ?? duration) - currentTime
-              : duration - currentTime}
             mode={effectiveAutoMixEnabled || effectiveGaplessEnabled ? 'transition' : 'play'}
             enhanced={effectiveAutoMixEnabled && autoMixEnhanced}
             transitionStyle={transitionStyle}

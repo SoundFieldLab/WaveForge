@@ -5,7 +5,7 @@
 import { isTvModeActive } from '../platform'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
-import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
 import PluginShortcuts from './PluginShortcuts'
@@ -32,6 +32,7 @@ import { useDesktopFocusTimer } from '../hooks/useDesktopFocusTimer'
 import { getReadableDesktopAccentColor } from '../utils/desktopAccentColor'
 import { parseStoredArray, parseStoredBoolean } from '../utils/storage'
 import { preloadOnIdle } from '../utils/lazyPreload'
+import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import { addDesktopListeningSeconds, recordDesktopSongStart } from '../services/desktopMusicActivity'
 import type { DesktopMusicWidgetContext } from './DesktopExtraWidgets'
@@ -58,6 +59,7 @@ interface DesktopViewProps {
   onNext: () => void
   onPrevious: () => void
   currentTime?: number
+  playbackTimeStore?: PlaybackTimeStore
   duration?: number
   lyrics?: LyricLine[]
   playbackQueue: Song[]
@@ -163,7 +165,8 @@ function DesktopView({
   onPlayPause,
   onNext,
   onPrevious,
-  currentTime = 0,
+  currentTime: currentTimeProp = 0,
+  playbackTimeStore,
   duration = 0,
   lyrics = [],
   playbackQueue,
@@ -212,6 +215,17 @@ function DesktopView({
   onRemoteClick,
   onOpenDeviceControl,
 }: DesktopViewProps) {
+  const fallbackPlaybackSnapshot = useMemo(() => ({
+    currentTime: currentTimeProp,
+    duration,
+    isPlaying,
+  }), [currentTimeProp, duration, isPlaying])
+  const currentTime = useSyncExternalStore(
+    playbackTimeStore?.subscribe ?? (() => () => undefined),
+    playbackTimeStore?.getSnapshot ?? (() => fallbackPlaybackSnapshot),
+    playbackTimeStore?.getSnapshot ?? (() => fallbackPlaybackSnapshot),
+  ).currentTime
+
   // 当前平台（四视图共享）——支持全部六个平台，并在启动时按可见平台归一化
   const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'desktopModePlatform'))
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
