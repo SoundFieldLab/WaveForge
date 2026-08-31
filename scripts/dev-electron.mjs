@@ -143,7 +143,7 @@ function isWaveForgeDevLeftover(commandLine) {
   const normalized = commandLine.replace(/[\\/]+/g, '/')
   const root = projectRoot.replace(/[\\/]+/g, '/')
   if (!normalized.includes(root)) return false
-  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py/.test(normalized)
+  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py|apple_bridge\.py/.test(normalized)
 }
 
 async function killProcess(pid) {

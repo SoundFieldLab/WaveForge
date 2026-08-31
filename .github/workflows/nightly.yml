@@ -217,9 +217,16 @@ jobs:
         run: npm run bundle-python
         timeout-minutes: 20
 
-      - name: 构建 Windows 安装包（electron-builder nsis）
+      - name: 安装 castLabs EVS（Widevine 生产 VMP 签名）
+        run: py -3 -m pip install castlabs-evs==1.3.2
+
+      - name: 构建 Windows 安装包（生产 VMP 必需）
+        env:
+          EVS_ACCOUNT_NAME: ${{ secrets.EVS_ACCOUNT_NAME }}
+          EVS_PASSWD: ${{ secrets.EVS_PASSWD }}
+          EVS_NO_ASK: "1"
         run: npm run build:electron
-        timeout-minutes: 30
+        timeout-minutes: 40
 
       - name: 上传安装包
         uses: actions/upload-artifact@v4

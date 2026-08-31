@@ -14,8 +14,8 @@
     "build": "vite build",
     "gen:installer-art": "node scripts/generate-installer-art.mjs",
     "preview:setup": "node scripts/generate-installer-art.mjs && node scripts/preview-setup.mjs",
-    "build:electron": "npm run build && node scripts/generate-installer-art.mjs && electron-builder --win nsis --publish never",
-    "build:electron:dir": "npm run build && electron-builder --win dir --publish never",
+    "build:electron": "npm run build:electron:dir && node scripts/generate-installer-art.mjs && electron-builder --prepackaged release/win-unpacked --win nsis --publish never",
+    "build:electron:dir": "node scripts/assert-release-not-running.cjs && npm run build && electron-builder --win dir --publish never && npm run vmp:sign:release && npm run vmp:verify:release",
     "bundle-python": "node scripts/bundle-python.mjs",
     "build:full": "npm run bundle-python && npm run build:electron",
     "start": "electron .",
@@ -37,7 +37,12 @@
     "version:dry": "node scripts/bump-version.mjs --dry-run",
     "build:v3-worklet": "node scripts/build-v3-worklet.mjs",
     "predev": "node scripts/build-v3-worklet.mjs",
-    "predev:electron": "node scripts/build-v3-worklet.mjs"
+    "predev:electron": "node scripts/build-v3-worklet.mjs && node scripts/ensure-dev-vmp.cjs",
+    "build:electron:dir:unsigned": "node scripts/assert-release-not-running.cjs && npm run build && electron-builder --win dir --publish never",
+    "vmp:sign:dev": "node scripts/evs-vmp.cjs sign-pkg node_modules/electron/dist",
+    "vmp:verify:dev": "node scripts/evs-vmp.cjs verify-pkg node_modules/electron/dist",
+    "vmp:sign:release": "node scripts/evs-vmp.cjs sign-pkg release/win-unpacked",
+    "vmp:verify:release": "node scripts/evs-vmp.cjs verify-pkg release/win-unpacked"
   },
   "build": {
     "appId": "com.waveforge.desktop",
@@ -50,10 +55,13 @@
       "desktop/**/*",
       "dist/**/*",
       "server/**/*",
+      "shared/**/*",
       "python-beat-service/**/*",
+      "python-apple-bridge/**/*",
       "!python-beat-service/packages/**/*",
       "local-server.mjs",
       "requirements.txt",
+      "THIRD_PARTY_NOTICES.md",
       "install-python-deps.bat",
       "package.json",
       "logo.png",
@@ -73,7 +81,8 @@
       "resources/python-embed/**/*",
       "desktop/workers/**/*.py",
       "server/**/*.py",
-      "python-beat-service/**/*.py"
+      "python-beat-service/**/*.py",
+      "python-apple-bridge/**/*.py"
     ],
     "win": {
       "icon": "build/icon.ico",
@@ -147,7 +156,8 @@
     "twgl.js": "^7.0.0",
     "vite": "^6.2.3",
     "wanakana": "^5.3.1",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "adm-zip": "^0.6.0"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",
@@ -159,7 +169,6 @@
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
     "@types/three": "^0.184.1",
-    "adm-zip": "^0.6.0",
     "autoprefixer": "^10.4.21",
     "electron": "github:castlabs/electron-releases#v42.8.0+wvcus",
     "electron-builder": "^26.15.3",

@@ -65,10 +65,11 @@ npm run dev             # 仅 Vite（3000）
 npm run dev:api         # 仅 API（3001）
 npm run lint            # TypeScript 类型检查（tsc --noEmit）
 npm run test            # vitest 单测（41 文件 477 用例，含 v3 引擎 324）
-npm run build           # 生产构建 -> dist/
-npm run build:electron  # 打包 NSIS 安装版 -> release/（发布用）
+npm run build           # 仅构建前端 -> dist/（日常开发，不生成 EXE）
+npm run build:electron  # 发布：目录构建 → EVS production VMP → NSIS（需 EVS secrets）
 npm run build:full      # 完整发布：bundle-python + build:electron
-npm run build:electron:dir  # 构建 + 未打包目录（本地调试用，不发布）
+npm run build:electron:dir  # 发布目录包：构建 + EVS production VMP（需 EVS secrets）
+npm run build:electron:dir:unsigned  # 仅本地诊断，不能发布/不能用于 Apple 原生验收
 npm run build:android   # 生成 Android TV 前端资产
 npm run fetch:nodejs-mobile  # 拉取 Android 运行时
 npm run publish:release # 一键发布脚本
@@ -79,15 +80,19 @@ npm run sync:sponsors   # 刷新爱发电赞助名单（构建前会自动以可
 test-python-service.bat # 检测节拍服务（3002）
 ```
 
+`npm run dev:electron` 启动前会快速验证开发 ECS 的 production streaming VMP；签名仍有效时不会重签。只有首次配置、重装或升级 Electron 后才会请求一次 EVS 签名，前端热更新与普通 `npm run build` 不生成 EXE、也不触发签名。
+
 ## 发布（GitHub Releases）
 
 **只发 NSIS 安装版**（`release/WaveForge-<version>-Setup.exe`），**不发便携版**（`release/win-unpacked/` 仅本地调试）。安装版为每用户安装、**不携带任何用户数据/配置**——首次运行在该机 `%APPDATA%\WaveForge 澜音工坊\` 自动生成全新配置并适配当前用户。
 
 ```bash
-npm run build:electron          # 构建安装版
+npm run build:electron          # 构建安装版（强制 EVS production VMP）
 git tag v<version> && git push origin v<version>
 gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<version>" --notes "..."
 ```
+
+Windows 发布机/CI 必须配置 `EVS_ACCOUNT_NAME`、`EVS_PASSWD` 并安装 `castlabs-evs`。签名发生在构建机，最终用户安装后**不需要 EVS、签名工具或任何手动签名步骤**；用户只需在应用内登录具有有效订阅的 Apple Music 账号。
 
 ## 端口一览
 
