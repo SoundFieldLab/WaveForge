@@ -459,7 +459,7 @@ function EarthquakePanel({ weather, hazards, loading, error, onRefresh }: Omit<W
         <div><h3 className="text-2xl font-semibold">地震监测</h3><p className="mt-1 text-sm text-white/48">点击事件查看震源参数和地图位置</p></div>
         <button type="button" onClick={onRefresh} disabled={loading} className="flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white/70 hover:bg-white/14 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />刷新</button>
       </div>
-      <div className="rounded-[24px] border border-amber-300/18 bg-amber-950/15 px-5 py-4 text-sm leading-6 text-amber-100/72"><RadioTower className="mr-2 inline h-4 w-4" />本板块使用中国地震台网中心公开地震目录生成位置提醒，不等同于面向终端设备的到秒地震预警。发生明显震感时请立即避险并遵循当地官方信息。</div>
+      <div className="rounded-[24px] border border-amber-300/18 bg-amber-950/15 px-5 py-4 text-sm leading-6 text-amber-100/72"><RadioTower className="mr-2 inline h-4 w-4" />本板块使用{hazards?.earthquakes?.source || '中国地震台网中心公开地震目录'}生成位置提醒，不等同于面向终端设备的到秒地震预警。发生明显震感时请立即避险并遵循当地官方信息。</div>
       {loading && !hazards ? <div className="flex min-h-[360px] items-center justify-center text-white/55"><RefreshCw className="mr-2 h-5 w-5 animate-spin" />正在获取地震目录…</div>
         : error && events.length === 0 ? <div className="rounded-[26px] border border-rose-300/20 bg-rose-950/20 p-6 text-rose-100/75">{error}</div>
           : <>
@@ -492,7 +492,7 @@ function EarthquakePanel({ weather, hazards, loading, error, onRefresh }: Omit<W
               </div>
             })}</div>
           </>}
-      <div className="border-t border-white/10 pt-4 text-xs leading-5 text-white/38">数据来源：中国地震台网中心公开地震目录；底图数据来自 Esri / OpenStreetMap。震级、位置与时间可能随后续正式测定更新。</div>
+      <div className="border-t border-white/10 pt-4 text-xs leading-5 text-white/38">数据来源：{hazards?.earthquakes?.source || '中国地震台网中心公开地震目录'}；底图数据来自 Esri / OpenStreetMap。震级、位置与时间可能随后续正式测定更新。</div>
     </div>
   )
 }
