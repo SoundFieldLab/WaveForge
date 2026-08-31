@@ -32,6 +32,7 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 // 汽水加密音频解密代理（/api/soda/audio）：CENC 流服务端解密为可播 FLAC/m4a
 import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
+import { ByteLruCache, readResponseWithLimit } from './server/byte-lru-cache.mjs'
 import dglabRelayModule from './server/dglab-relay.cjs'
 const { createDGLabRelay } = dglabRelayModule
 
@@ -1346,9 +1347,10 @@ async function isBlockedFetchUrl(rawUrl) {
 // 图片代理（解决防盗链和CORS）
 // 封面内存缓存：同一 URL 不重复请求上游。大歌单滚动浏览/反复进入歌单时，
 // 避免几千个封面请求反复打穿代理与上游 CDN。
-const coverCache = new Map()
-const COVER_CACHE_MAX = 800
+const COVER_CACHE_MAX_BYTES = 128 * 1024 * 1024
+const COVER_CACHE_ITEM_MAX_BYTES = 10 * 1024 * 1024
 const COVER_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const coverCache = new ByteLruCache({ maxBytes: COVER_CACHE_MAX_BYTES, maxEntries: 800, ttlMs: COVER_CACHE_TTL_MS })
 
 app.get('/api/cover', async (req, res) => {
   try {
@@ -1373,7 +1375,7 @@ app.get('/api/cover', async (req, res) => {
 
     // 缓存命中：直接回缓存字节（带 Cache-Control 供浏览器二次命中）
     const cached = typeof url === 'string' ? coverCache.get(url) : null
-    if (cached && Date.now() - cached.at < COVER_CACHE_TTL_MS) {
+    if (cached) {
       res.set({
         'Content-Type': cached.type,
         'Access-Control-Allow-Origin': '*',
@@ -1454,14 +1456,12 @@ app.get('/api/cover', async (req, res) => {
 
     // 读取字节并写入缓存（≤10MB 才缓存），再返回给浏览器
     const contentType = response.headers.get('content-type') || 'image/jpeg'
-    const arrayBuffer = await response.arrayBuffer()
-    const buf = Buffer.from(arrayBuffer)
-    if (typeof url === 'string' && buf.length <= 10 * 1024 * 1024) {
-      if (coverCache.size >= COVER_CACHE_MAX) {
-        const oldestKey = coverCache.keys().next().value
-        coverCache.delete(oldestKey)
-      }
-      coverCache.set(url, { buffer: buf, type: contentType, at: Date.now() })
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      throw new Error('Cover response is not an image')
+    }
+    const buf = await readResponseWithLimit(response, COVER_CACHE_ITEM_MAX_BYTES)
+    if (typeof url === 'string') {
+      coverCache.set(url, { buffer: buf, type: contentType }, buf.length)
     }
     res.set({
       'Content-Type': contentType,
