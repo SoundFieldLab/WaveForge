@@ -1,4 +1,4 @@
-import { motion, AnimatePresence, useSpring } from 'framer-motion'
+import { motion, AnimatePresence, useReducedMotion, useSpring } from 'framer-motion'
 import { EMPTY_AUDIO_PULSE_STORE, type AudioPulseStore } from '../hooks/useAudioPulse'
 import { memo, useEffect, useLayoutEffect, useMemo, useState, useRef, useSyncExternalStore, type ReactNode } from 'react'
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
@@ -40,6 +40,34 @@ interface LyricLine {
 }
 
 type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
+type AppleLyricLinePhase = 'played' | 'current' | 'upcoming'
+
+interface AppleLyricLineMotion {
+  opacity: number
+  scale: number
+  y: number
+  blur: number
+}
+
+export const getAppleLyricLineMotion = (
+  phase: AppleLyricLinePhase,
+  distance: number,
+  isManualScrolling = false,
+): AppleLyricLineMotion => {
+  if (isManualScrolling) {
+    return { opacity: phase === 'current' ? 1 : 0.72, scale: 1, y: 0, blur: 0 }
+  }
+  if (phase === 'current') return { opacity: 1, scale: 1, y: 0, blur: 0 }
+  if (phase === 'played') {
+    return distance === 1
+      ? { opacity: 0.46, scale: 0.965, y: -2, blur: 1.4 }
+      : { opacity: 0.3, scale: 0.955, y: 0, blur: 2.6 }
+  }
+  return distance === 1
+    ? { opacity: 0.66, scale: 0.98, y: 3, blur: 0.9 }
+    : { opacity: 0.38, scale: 0.97, y: 0, blur: 2.2 }
+}
+
 type ImmersiveLyricEffect = 'soft-focus' | 'float' | 'breathe' | 'cinematic' | 'minimal'
 type BackgroundEffect = 'transparent' | 'blur' | 'immersive'
 
@@ -559,6 +587,10 @@ export default memo(function LyricsDisplay({
   const effectiveLyricGlow = lyricGlowOverride ?? lyricGlow
   const sustainGlowColor = useMemo(() => resolveReadableSustainColor(accentColor), [accentColor])
   const effectiveAnimationMode = animationModeOverride ?? animationMode
+  const prefersReducedMotion = Boolean(useReducedMotion())
+  const isAppleLineMode = displayMode === 'scroll'
+    && effectiveWordByWordEnabled
+    && effectiveWordByWordEffectMode === 'apple'
   const isDesktopLayout = layoutContext === 'desktop'
   const containerRef = useRef<HTMLDivElement>(null)
   // 崭新模式：弹簧 transform 滚动引擎（零布局跳动，Apple Music 风）
@@ -875,6 +907,7 @@ export default memo(function LyricsDisplay({
       isManualScrollingRef.current = false
       setIsManualScrolling(false)
       setManualScrollOffset(0)
+      setModernManualY(0)
       scheduleScrollLineToCenter(index, 'smooth')
 
       jumpAnimationTimerRef.current = setTimeout(() => {
@@ -974,6 +1007,22 @@ export default memo(function LyricsDisplay({
 
     currentIndexRef.current = nextIndex
     setCurrentIndex(nextIndex)
+    if (trackChanged) {
+      if (modernReturnTimerRef.current !== null) {
+        window.clearTimeout(modernReturnTimerRef.current)
+        modernReturnTimerRef.current = null
+      }
+      if (jumpAnimationTimerRef.current !== null) {
+        window.clearTimeout(jumpAnimationTimerRef.current)
+        jumpAnimationTimerRef.current = null
+      }
+      isManualScrollingRef.current = false
+      setIsManualScrolling(false)
+      setManualScrollOffset(0)
+      setModernManualY(0)
+      setIsJumping(false)
+      setJumpTargetIndex(null)
+    }
     onCurrentTranslationChange?.(nextIndex >= 0 ? (displayLyricsData[nextIndex].translation ?? '') : '')
     // Old lyric lines are unmounted on song change, but their DOM nodes stay
     // referenced in this record forever. Clear it so refs don't accumulate
@@ -991,6 +1040,9 @@ export default memo(function LyricsDisplay({
       }
       if (jumpAnimationTimerRef.current) {
         clearTimeout(jumpAnimationTimerRef.current)
+      }
+      if (modernReturnTimerRef.current !== null) {
+        window.clearTimeout(modernReturnTimerRef.current)
       }
     }
   }, [])
@@ -1096,7 +1148,8 @@ export default memo(function LyricsDisplay({
       if (focalY <= 0) return  // 容器尚未完成布局，待 ResizeObserver 触发真实尺寸
       const relTop = el.offsetTop
       const target = focalY - (relTop + el.offsetHeight / 2) - modernManualY
-      springY.set(target)
+      if (prefersReducedMotion) springY.jump(target)
+      else springY.set(target)
     }
     // 初始测量：容器有尺寸时直接算，否则等 ResizeObserver 异步触发
     measure()
@@ -1104,7 +1157,7 @@ export default memo(function LyricsDisplay({
     observer.observe(container)
     if (springWrapRef.current) observer.observe(springWrapRef.current)
     return () => observer.disconnect()
-  }, [isModernScroll, currentIndex, modernManualY, effectiveLyricSize, displayLyricsData, isManualScrolling, springY])
+  }, [isModernScroll, currentIndex, modernManualY, effectiveLyricSize, displayLyricsData, isManualScrolling, prefersReducedMotion, springY])
 
   if (!lyrics || lyrics.length === 0) {
     return null
@@ -2126,18 +2179,31 @@ export default memo(function LyricsDisplay({
             ? Math.max(0, 1.05 - lineTiming.upcomingProgress * 1.05)
             : 0
           const immersiveDistanceBlur = 0
-          // Apple 模式（逆向 LyricsBlossom）：非当前行**常驻**模糊（当前行清晰），
-          // 手动滚动时**暂时取消**模糊（看清内容），滚动结束弹簧过渡恢复。
-          const isAppleLineMode = effectiveWordByWordEffectMode === 'apple'
-          const lineFilter = isModernScroll
-            ? (isManualScrolling ? 'none' : `blur(${isCurrent ? 0 : distanceFromCurrent >= 3 ? 3.4 : distanceFromCurrent >= 2 ? 2.2 : 1.1}px)`)
-            : isAppleLineMode
-              ? `blur(${isManualScrolling ? 0 : (isCurrent ? 0 : 2.2)}px)`
+          const appleLinePhase: AppleLyricLinePhase = isCurrent
+            ? 'current'
+            : globalIndex < currentIndex ? 'played' : 'upcoming'
+          const appleLineMotion = getAppleLyricLineMotion(
+            appleLinePhase,
+            distanceFromCurrent,
+            isManualScrolling,
+          )
+          const lineFilter = isAppleLineMode
+            ? `blur(${appleLineMotion.blur}px)`
+            : isModernScroll
+              ? (isManualScrolling ? 'none' : `blur(${isCurrent ? 0 : distanceFromCurrent >= 3 ? 3.4 : distanceFromCurrent >= 2 ? 2.2 : 1.1}px)`)
               : `blur(${Math.max(timingBlur, immersiveDistanceBlur)}px)`
           const lineFontSize = isModernScroll || isAppleLineMode
             ? `${effectiveLyricSize}rem`
             : isCurrent ? `${effectiveLyricSize}rem` : `${effectiveLyricSize * 0.63}rem`
           const lineFontWeight = isModernScroll ? 600 : (isAppleLineMode ? 500 : (isCurrent ? 700 : 400))
+          const lineOpacity = isAppleLineMode ? appleLineMotion.opacity : opacityValue
+          const lineY = isAppleLineMode ? appleLineMotion.y : skiaY
+          const lineScale = isAppleLineMode
+            ? appleLineMotion.scale
+            : isModernScroll ? (isCurrent ? 1 : distanceFromCurrent >= 2 ? 0.74 : 0.80) : undefined
+          const appleTransformTransition = prefersReducedMotion || isManualScrolling || isInactiveGeneratedInterlude
+            ? { duration: 0 }
+            : { type: 'spring' as const, stiffness: 320, damping: 30, mass: 0.8 }
           
           return (
             <motion.div
@@ -2152,30 +2218,32 @@ export default memo(function LyricsDisplay({
               onMouseEnter={() => handleLyricMouseEnter(globalIndex)}
               onMouseLeave={handleLyricMouseLeave}
               onClick={() => handleLyricClick(lyric.interludeStartTime ?? lyric.time, globalIndex)}
-              initial={{ opacity: 0, y: 18, filter: 'blur(8px)' }}
-              animate={{ 
-                opacity: isBlinking ? [opacityValue, 0.95, opacityValue] : opacityValue,
-                y: skiaY,
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 18, filter: 'blur(8px)' }}
+              animate={{
+                opacity: isBlinking ? [lineOpacity, 0.95, lineOpacity] : lineOpacity,
+                y: lineY,
                 filter: lineFilter,
-                ...(isModernScroll ? { scale: isCurrent ? 1 : distanceFromCurrent >= 2 ? 0.74 : 0.80 } : {}),
+                ...(lineScale === undefined ? {} : { scale: lineScale }),
               }}
               style={{
                 transformOrigin: scrollAlignment === 'center' ? 'center center' : 'left center',
-                // 崭新模式：缩放由帧动画 animate 驱动（弹簧过渡，零布局跳动）；
-                // Apple 模式不缩放（已播/正在播/未播一样大）；传统模式 current 微脉动
-                scale: isModernScroll ? undefined : (isAppleLineMode ? 1 : (isCurrent ? 'var(--restless-lyric-scale, 1.008)' : 1)),
-                transition: isModernScroll ? undefined : 'scale 140ms cubic-bezier(0.22, 1, 0.36, 1)',
+                scale: lineScale === undefined ? (isCurrent ? 'var(--restless-lyric-scale, 1.008)' : 1) : undefined,
+                transition: lineScale === undefined ? 'scale 140ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined,
                 zIndex: isCurrent ? 2 : lineTiming.upcomingProgress > 0 ? 1 : 0,
               }}
-              transition={{ 
-                opacity: isBlinking 
+              transition={{
+                opacity: isBlinking
                   ? { duration: 2.0, repeat: Infinity, ease: [0.4, 0, 0.6, 1] }
-                  : transitionConfig.opacity,
-                y: { duration: 0.04, ease: 'linear' },
-                scale: isModernScroll ? { type: 'spring', stiffness: 240, damping: 24, mass: 0.9 } : { duration: 0 },
-                // filter 不能用 spring（framer-motion 的 spring 只支持数值属性），
-                // 用 tween 过渡让滚动时虚化取消/恢复有动画。
-                filter: { duration: 0.45, ease: [0.22, 1, 0.36, 1] },
+                  : prefersReducedMotion ? { duration: 0 } : isAppleLineMode
+                    ? { duration: 0.22, ease: [0.22, 1, 0.36, 1] }
+                    : transitionConfig.opacity,
+                y: isAppleLineMode ? appleTransformTransition : { duration: prefersReducedMotion ? 0 : 0.04, ease: 'linear' },
+                scale: isAppleLineMode
+                  ? appleTransformTransition
+                  : isModernScroll && !prefersReducedMotion
+                    ? { type: 'spring', stiffness: 240, damping: 24, mass: 0.9 }
+                    : { duration: 0 },
+                filter: { duration: prefersReducedMotion ? 0 : isAppleLineMode ? 0.3 : 0.45, ease: [0.22, 1, 0.36, 1] },
               }}
             >
               {/* 液态玻璃框 */}
