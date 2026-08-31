@@ -362,6 +362,13 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
                       <button type="button" onClick={() => update({ ...draft, weatherLocationMode: 'auto' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherLocationMode === 'auto' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherLocationMode === 'auto' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>自动定位<div className="mt-1 text-[10px] text-white/35">依据当前网络位置</div></button>
                       <button type="button" onClick={() => update({ ...draft, weatherLocationMode: 'manual' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherLocationMode === 'manual' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherLocationMode === 'manual' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>搜索地区<div className="mt-1 text-[10px] text-white/35">输入城市或区县自动匹配</div></button>
                     </div>
+                    <div className="mt-4">
+                      <div className="mb-2 text-[11px] text-white/40">天气卡片样式</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => update({ ...draft, weatherCardMode: 'full' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherCardMode !== 'simple' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherCardMode !== 'simple' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>完整模式<div className="mt-1 text-[10px] text-white/35">动态天空场景 · 当前样式</div></button>
+                        <button type="button" onClick={() => update({ ...draft, weatherCardMode: 'simple' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherCardMode === 'simple' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherCardMode === 'simple' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>简约模式<div className="mt-1 text-[10px] text-white/35">苹果小组件风格 · 大温度与逐小时</div></button>
+                      </div>
+                    </div>
                     {draft.weatherLocationMode === 'auto' && <div className="mt-3 flex items-start gap-2 rounded-2xl border border-cyan-200/12 bg-cyan-300/[0.06] p-3 text-[11px] leading-5 text-white/55"><LocateFixed className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan-300" /><span>当前自动定位：{autoLocationLabel}</span></div>}
                     {draft.weatherLocationMode === 'manual' && (
                       <div className="mt-3">

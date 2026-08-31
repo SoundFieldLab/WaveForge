@@ -5,6 +5,7 @@ export type DesktopWidgetType =
   | 'spectrum' | 'quickLauncher' | 'systemStatus' | 'volumeControl'
 export type DesktopWidgetSide = 'left' | 'right'
 export type DesktopWeatherLocationMode = 'auto' | 'manual'
+export type DesktopWeatherCardMode = 'full' | 'simple'
 export type DesktopLyricStyle = 'traditional' | 'modern'
 
 export interface DesktopCustomizationSettings {
@@ -16,6 +17,8 @@ export interface DesktopCustomizationSettings {
   backgroundDim: number
   backgroundBlur: number
   weatherLocationMode: DesktopWeatherLocationMode
+  /** 天气卡片样式：完整（动态场景）| 简约（苹果小组件风） */
+  weatherCardMode: DesktopWeatherCardMode
   weatherCountryCode: string
   weatherCountry: string
   weatherProvinceCode: string
@@ -73,6 +76,7 @@ const DEFAULT_SETTINGS: DesktopCustomizationSettings = {
   backgroundDim: 0,
   backgroundBlur: 0,
   weatherLocationMode: 'auto',
+  weatherCardMode: 'full',
   weatherCountryCode: 'CN',
   weatherCountry: '中国',
   weatherProvinceCode: '',
@@ -146,6 +150,7 @@ export const loadDesktopCustomization = (): DesktopCustomizationSettings => {
       backgroundDim: normalizeNumber(parsed.backgroundDim, legacyBackgroundDim, 0, 70),
       backgroundBlur: normalizeNumber(parsed.backgroundBlur, legacyBackgroundBlur, 0, 20),
       weatherLocationMode: parsed.weatherLocationMode === 'manual' ? 'manual' : 'auto',
+      weatherCardMode: parsed.weatherCardMode === 'simple' ? 'simple' : 'full',
       weatherCountryCode: typeof parsed.weatherCountryCode === 'string' ? parsed.weatherCountryCode : 'CN',
       weatherCountry: typeof parsed.weatherCountry === 'string' ? parsed.weatherCountry : '中国',
       weatherProvinceCode: typeof parsed.weatherProvinceCode === 'string' ? parsed.weatherProvinceCode : '',
