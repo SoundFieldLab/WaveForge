@@ -66,6 +66,22 @@ describe('compensationService.design 缓存与降级行为', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 
+  it('Electron 中先 ensure 补偿服务再发请求，ensure 失败时不 fetch', async () => {
+    const ensure = vi.fn().mockResolvedValue(false)
+    const fetchMock = vi.fn()
+    vi.stubGlobal('window', {
+      electron: { localPython: { ensure } },
+      setTimeout: (handler: () => void, ms: number) => setTimeout(handler, ms),
+      clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const svc = new CompensationService()
+    expect(await svc.design('preset', 'bass', null)).toBeNull()
+    expect(ensure).toHaveBeenCalledWith('compensation')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('服务成功时缓存设计：相同请求再次调用不再发起 fetch', async () => {
     const fetchMock = vi.fn().mockResolvedValue(okResponse(VALID_SEGMENTS, { label: '预设曲线', preset: 'bass' }))
     vi.stubGlobal('fetch', fetchMock)

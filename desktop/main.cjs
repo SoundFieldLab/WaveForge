@@ -1855,7 +1855,7 @@ function setTaskbarWidgetVisible(visible) {
 // 光标轮询：任务栏 widget 悬停检测。页面 mouseenter/mouseleave 转发在
 // 透明置顶窗口上会因 setIgnoreMouseEvents 切换而振荡，改由主进程每 120ms
 // 判断光标是否落在窗口内，据此稳定切换交互态（见 createTaskbarWidgetWindow 注释）。
-let taskbarWidgetPollTimer = null
+const { createTaskbarWidgetPolling } = require('./taskbar-widget-polling.cjs')
 
 function taskbarWidgetCursorInside() {
   if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed() || !taskbarWidgetWindow.isVisible()) return false
@@ -6932,18 +6932,165 @@ ipcMain.handle('get-system-location', async () => {
 })
 
 /**
- * 启动本地后端服务（仅打包版需要；开发模式由 scripts/dev-electron.mjs 负责）。
- * 1) Express API（local-server.mjs，端口 3001）——通过 utilityProcess.fork 启动，
- *    传入开发模式 API 进程会用到的同款缓存路径参数（app.getPath('userData')/cache）。
- * 2) Python 节拍服务（beat_analyzer.py，端口 3002）——优先使用嵌入式 python，
- *    启动失败仅告警（应用会自动降级到 Fixed Crossfade）。
- * 3) Python 响度测量服务（loudness_server.py，端口 3003）——响度归一化按曲目调用。
- * 4) Python 频响补偿设计服务（compensation_server.py，端口 3004）——等响度/预设/自定义 → 多段 Biquad。
- */
+ * 启动生产版常驻本地后端。Express API（local-server.mjs，端口 3001）通过
+ * utilityProcess.fork 启动；Python 3002/3003/3004 服务由 renderer 请求前按需启动。 */
 let localApiChild = null
-let localPythonChild = null
-let localLoudnessChild = null
-let localCompensationChild = null
+
+const PYTHON_SERVICE_IDLE_MS = Math.max(30_000, Number(process.env.WAVEFORGE_PYTHON_IDLE_MS) || 5 * 60_000)
+const PYTHON_SERVICE_START_TIMEOUT_MS = 20_000
+const pythonServices = new Map([
+  ['beat', { port: 3002, script: 'beat_analyzer.py', label: 'BeatService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+  ['loudness', { port: 3003, script: 'loudness_server.py', label: 'LoudnessService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+  ['compensation', { port: 3004, script: 'compensation_server.py', label: 'CompensationService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+])
+let pythonServicesQuitting = false
+
+function clearPythonIdleTimer(service) {
+  if (service.idleTimer) clearTimeout(service.idleTimer)
+  service.idleTimer = null
+}
+
+function stopPythonService(service, reason) {
+  clearPythonIdleTimer(service)
+  const child = service.child
+  service.child = null
+  if (!child) return
+  try { child.kill() } catch {}
+  if (process.platform === 'win32' && child.pid) {
+    try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }) } catch {}
+  }
+  console.log(`[${service.label}] stopped (${reason})`)
+}
+
+function schedulePythonServiceIdleStop(service) {
+  clearPythonIdleTimer(service)
+  if (pythonServicesQuitting || !service.child || service.activeRequests.size > 0) return
+  service.idleTimer = setTimeout(() => {
+    service.idleTimer = null
+    if (service.activeRequests.size === 0) stopPythonService(service, 'idle')
+  }, PYTHON_SERVICE_IDLE_MS)
+  service.idleTimer.unref?.()
+}
+
+async function probePythonService(service) {
+  try {
+    const response = await net.fetch(`http://127.0.0.1:${service.port}/health`, {
+      headers: { 'X-WaveForge-Local-Token': LOCAL_SERVICE_TOKEN },
+      signal: AbortSignal.timeout(1500),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+async function waitForPythonService(service, child) {
+  const deadline = Date.now() + PYTHON_SERVICE_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (service.child !== child) throw new Error(`${service.label} exited before becoming ready`)
+    if (await probePythonService(service)) return
+    await new Promise(resolve => setTimeout(resolve, 150))
+  }
+  throw new Error(`${service.label} startup timed out`)
+}
+
+async function ensurePythonService(name) {
+  const service = pythonServices.get(name)
+  if (!service) throw new Error(`Unknown local Python service: ${name}`)
+  clearPythonIdleTimer(service)
+  if (await probePythonService(service)) {
+    schedulePythonServiceIdleStop(service)
+    return true
+  }
+  if (service.child && service.activeRequests.size > 0) return true
+  if (service.child) stopPythonService(service, 'unresponsive')
+  if (!app.isPackaged) return false
+  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1' || pythonServicesQuitting) return false
+  if (service.starting) return service.starting
+
+  const starting = (async () => {
+    const pythonExe = path.join(process.resourcesPath, 'python-embed', 'python.exe')
+    const scriptPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', service.script)
+    if (!fs.existsSync(pythonExe)) throw new Error('Embedded Python was not found')
+    if (!fs.existsSync(scriptPath)) throw new Error(`${service.script} was not found`)
+    const child = spawn(pythonExe, [scriptPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: {
+        ...process.env,
+        WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
+        WAVEFORGE_CACHE_PATH: configManager.getCachePath(),
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUNBUFFERED: '1',
+      },
+    })
+    service.child = child
+    child.stdout?.on('data', chunk => { const text = String(chunk).trim(); if (text) console.log(`[${service.label}]`, text) })
+    child.stderr?.on('data', chunk => { const text = String(chunk).trim(); if (text) console.error(`[${service.label}:err]`, text) })
+    child.on('error', error => {
+      console.error(`[${service.label}] failed to spawn:`, error?.message || error)
+      if (service.child === child) service.child = null
+    })
+    child.on('exit', code => {
+      if (service.child !== child) return
+      service.child = null
+      clearPythonIdleTimer(service)
+      console.warn(`[${service.label}] exited with code`, code)
+    })
+    console.log(`[${service.label}] starting ${service.script} on port ${service.port}`)
+    try {
+      await waitForPythonService(service, child)
+      schedulePythonServiceIdleStop(service)
+      return true
+    } catch (error) {
+      if (service.child === child) stopPythonService(service, 'startup failed')
+      throw error
+    }
+  })()
+  service.starting = starting
+  try {
+    return await starting
+  } finally {
+    if (service.starting === starting) service.starting = null
+  }
+}
+
+function stopAllPythonServices(reason) {
+  pythonServicesQuitting = true
+  for (const service of pythonServices.values()) stopPythonService(service, reason)
+}
+
+ipcMain.handle('local-python:ensure', async (event, name) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return false
+  try {
+    return await ensurePythonService(name)
+  } catch (error) {
+    console.error(`[LocalPython] failed to ensure ${String(name)}:`, error?.message || error)
+    return false
+  }
+})
+
+function pythonServiceForUrl(url) {
+  let port
+  try { port = Number(new URL(url).port) } catch { return null }
+  for (const service of pythonServices.values()) {
+    if (service.port === port) return service
+  }
+  return null
+}
+
+function beginPythonServiceRequest(details) {
+  const service = pythonServiceForUrl(details.url)
+  if (!service || new URL(details.url).pathname === '/health') return
+  clearPythonIdleTimer(service)
+  service.activeRequests.add(details.id)
+}
+
+function finishPythonServiceRequest(details) {
+  const service = pythonServiceForUrl(details.url)
+  if (!service || !service.activeRequests.delete(details.id)) return
+  schedulePythonServiceIdleStop(service)
+}
 
 // ── 孤儿后端清扫：上次异常退出残留的子进程会占住后端端口，导致新实例误连旧后端 ──
 // 必须在模块级声明：will-quit 与 AppleBridge 的 python 校验都在模块作用域调用，
@@ -7007,119 +7154,7 @@ async function startLocalBackend() {
     console.error('[LocalAPI] failed to start:', error)
   }
 
-  // 嵌入式 Python 可执行文件路径（节拍与响度服务共用）。
-  // 必须声明在函数作用域：若放在节拍服务 try 块内，响度服务的 spawn 拿不到它，
-  // 会抛 ReferenceError 导致响度服务在打包版从未启动。
-  const pythonExe = path.join(process.resourcesPath, 'python-embed', 'python.exe')
-
-  // 2) Python 节拍服务（3002）——仅当嵌入式 python 与脚本都存在时启动。
-  // 缺少文件只跳过节拍服务（不再 return 整个函数，避免连带跳过响度服务）。
-  try {
-    const beatAnalyzer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'beat_analyzer.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[BeatService] 未找到嵌入式 Python，跳过节拍服务（将使用 Fixed Crossfade 降级）')
-    } else if (!fs.existsSync(beatAnalyzer)) {
-      console.warn('[BeatService] 未找到 beat_analyzer.py，跳过节拍服务')
-    } else {
-      localPythonChild = spawn(pythonExe, [beatAnalyzer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localPythonChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[BeatService]', text)
-      })
-      localPythonChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[BeatService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localPythonChild.on('error', (error) => {
-        console.error('[BeatService] failed to spawn:', error?.message || error)
-        localPythonChild = null
-      })
-      localPythonChild.on('exit', (code) => {
-        console.warn('[BeatService] exited with code', code)
-        localPythonChild = null
-      })
-      console.log('[BeatService] starting beat_analyzer.py on port 3002')
-    }
-  } catch (error) {
-    console.error('[BeatService] failed to start:', error)
-  }
-
-  // 3) Python 响度测量服务（3003）——独立于节拍服务，响度归一化按曲目调用
-  try {
-    const loudnessServer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'loudness_server.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[LoudnessService] 未找到嵌入式 Python，跳过响度服务（响度归一化不可用）')
-    } else if (!fs.existsSync(loudnessServer)) {
-      console.warn('[LoudnessService] 未找到 loudness_server.py，跳过响度服务（响度归一化不可用）')
-    } else {
-      localLoudnessChild = spawn(pythonExe, [loudnessServer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localLoudnessChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[LoudnessService]', text)
-      })
-      localLoudnessChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[LoudnessService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localLoudnessChild.on('error', (error) => {
-        console.error('[LoudnessService] failed to spawn:', error?.message || error)
-        localLoudnessChild = null
-      })
-      localLoudnessChild.on('exit', (code) => {
-        console.warn('[LoudnessService] exited with code', code)
-        localLoudnessChild = null
-      })
-      console.log('[LoudnessService] starting loudness_server.py on port 3003')
-    }
-  } catch (error) {
-    console.error('[LoudnessService] failed to start:', error)
-  }
-
-  // 4) Python 频响补偿设计服务（3004）——独立于节拍/响度服务，等响度/预设/自定义 → 多段 Biquad 参数
-  try {
-    const compensationServer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'compensation_server.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[CompensationService] 未找到嵌入式 Python，跳过频响补偿服务（频响补偿不可用）')
-    } else if (!fs.existsSync(compensationServer)) {
-      console.warn('[CompensationService] 未找到 compensation_server.py，跳过频响补偿服务（频响补偿不可用）')
-    } else {
-      localCompensationChild = spawn(pythonExe, [compensationServer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localCompensationChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[CompensationService]', text)
-      })
-      localCompensationChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[CompensationService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localCompensationChild.on('error', (error) => {
-        console.error('[CompensationService] failed to spawn:', error?.message || error)
-        localCompensationChild = null
-      })
-      localCompensationChild.on('exit', (code) => {
-        console.warn('[CompensationService] exited with code', code)
-        localCompensationChild = null
-      })
-      console.log('[CompensationService] starting compensation_server.py on port 3004')
-    }
-  } catch (error) {
-    console.error('[CompensationService] failed to start:', error)
-  }
+  // Python 3002/3003/3004 services are started by local-python:ensure on demand.
 }
 
 // ── Apple 播放面（WebView2 bridge）子进程管理 ──
@@ -7271,10 +7306,8 @@ async function doStartAppleBridge() {
 app.on('will-quit', async () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
   try { localApiChild?.kill() } catch {}
+  stopAllPythonServices('app quit')
   await sweepBackendOrphans('quit')
-  try { localPythonChild?.kill() } catch {}
-  try { localLoudnessChild?.kill() } catch {}
-  try { localCompensationChild?.kill() } catch {}
   try { appleBridgeChild?.kill() } catch {}
   if (stemRuntime) {
     try { stemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
@@ -7326,10 +7359,14 @@ app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['http://localhost:3001/*', 'http://127.0.0.1:3001/*', 'http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] },
     (details, callback) => {
+      beginPythonServiceRequest(details)
       details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
       callback({ requestHeaders: details.requestHeaders })
     },
   )
+  const pythonServiceRequestFilter = { urls: ['http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] }
+  session.defaultSession.webRequest.onCompleted(pythonServiceRequestFilter, finishPythonServiceRequest)
+  session.defaultSession.webRequest.onErrorOccurred(pythonServiceRequestFilter, finishPythonServiceRequest)
 
   // ── Apple 音源 CORS 放行（Cider 式原生音源所需）────────────────────────────
   // 渲染层 hls.js 直接请求 Apple 的 HLS 清单/分段/Widevine license，这些接口的
@@ -7390,9 +7427,8 @@ app.whenReady().then(async () => {
     }
   })
   
-  // 启动本地后端 API 服务（端口 3001）与 Python 节拍服务（端口 3002）。
-  // 开发模式下由 scripts/dev-electron.mjs 启动；打包版必须由主进程自行启动，
-  // 否则渲染进程请求 localhost:3001 全部失败，应用只剩空壳 UI。
+  // 启动生产版常驻本地 API（3001）。Python 3002/3003/3004 由 renderer 请求前 ensure；
+  // 开发模式继续由 scripts/dev-electron.mjs 预启动全部服务。
   startLocalBackend()
   
   // 传入缓存路径给 analysis runtime。

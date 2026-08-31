@@ -100,6 +100,11 @@ contextBridge.exposeInMainWorld('electron', {
     reset: () => ipcRenderer.invoke('device-license:reset'),
   },
   
+  // Production Python helpers are started lazily; development may already run them.
+  localPython: {
+    ensure: (service) => ipcRenderer.invoke('local-python:ensure', service),
+  },
+
   // AutoMix 本地分析与缓存
   analysis: {
     startTrackAnalysis: (input) => ipcRenderer.invoke('analysis:start-track', input),

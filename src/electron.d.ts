@@ -263,6 +263,9 @@ export interface SignalRgbBridgeAPI {
 }
 
 export interface ElectronAPI {
+  localPython?: {
+    ensure: (service: 'beat' | 'loudness' | 'compensation') => Promise<boolean>
+  }
   analysis: AnalysisAPI
   chroma?: ChromaBridgeAPI
   signalrgb?: SignalRgbBridgeAPI

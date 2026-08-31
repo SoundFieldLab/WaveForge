@@ -837,24 +837,31 @@ class AutoMixAnalysisService {
   }
 
   private async probePythonService(): Promise<boolean> {
-    const controller = new AbortController()
-    const timeoutId = window.setTimeout(() => controller.abort(), PYTHON_HEALTH_TIMEOUT_MS)
     try {
-      const response = await fetch(`${PYTHON_BEAT_SERVICE_URL}/health`, {
-        signal: controller.signal
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        this.pythonServiceAvailable = data.status === 'ok'
-        if (this.pythonServiceAvailable) debugLog('✅ [AutoMix] Python Beat Service 可用:', data.version)
-      } else {
+      if (window.electron?.localPython && !await window.electron.localPython.ensure('beat')) {
         this.pythonServiceAvailable = false
+        return false
+      }
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), PYTHON_HEALTH_TIMEOUT_MS)
+      try {
+        const response = await fetch(`${PYTHON_BEAT_SERVICE_URL}/health`, {
+          signal: controller.signal
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          this.pythonServiceAvailable = data.status === 'ok'
+          if (this.pythonServiceAvailable) debugLog('✅ [AutoMix] Python Beat Service 可用:', data.version)
+        } else {
+          this.pythonServiceAvailable = false
+        }
+      } finally {
+        window.clearTimeout(timeoutId)
       }
     } catch {
       this.pythonServiceAvailable = false
     } finally {
-      window.clearTimeout(timeoutId)
       this.pythonServiceCheckedAt = Date.now()
     }
 
