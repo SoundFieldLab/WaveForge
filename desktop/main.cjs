@@ -1724,18 +1724,17 @@ function createTaskbarWidgetWindow() {
   // 默认鼠标穿透。注意：不能靠 forward:true 转发 mouseenter 来切换交互态——
   // 在 Win11 + 透明置顶组合下，setIgnoreMouseEvents 每次切换都会让系统重新命中
   // 测试并触发 mouseenter/mouseleave 振荡，交互态永远不稳定，点击无法落窗。
-  // 改为主进程光标轮询（startTaskbarWidgetPolling）检测悬停。
+  // 改为主进程光标轮询检测悬停；轮询由窗口 show/hide/closed 生命周期控制。
   try {
     taskbarWidgetWindow.setIgnoreMouseEvents(true, { forward: true })
   } catch { /* 忽略 */ }
   taskbarWidgetWindow.loadFile(path.join(__dirname, 'taskbar-widget.html'))
+  taskbarWidgetPolling.bindWindow(taskbarWidgetWindow)
   taskbarWidgetWindow.on('closed', () => {
     taskbarWidgetWindow = null
     taskbarWidgetInteractive = false
     taskbarWidgetExpanded = false
-    stopTaskbarWidgetPolling()
   })
-  startTaskbarWidgetPolling()
   // 托盘位置后台测量：首次显示用保守预留，测出真实托盘后立即贴齐
   refreshTaskbarTray()
   return taskbarWidgetWindow
@@ -1897,17 +1896,7 @@ function updateTaskbarWidgetInteractive() {
   }
 }
 
-function startTaskbarWidgetPolling() {
-  if (taskbarWidgetPollTimer) return
-  taskbarWidgetPollTimer = setInterval(updateTaskbarWidgetInteractive, 120)
-}
-
-function stopTaskbarWidgetPolling() {
-  if (taskbarWidgetPollTimer) {
-    clearInterval(taskbarWidgetPollTimer)
-    taskbarWidgetPollTimer = null
-  }
-}
+const taskbarWidgetPolling = createTaskbarWidgetPolling({ poll: updateTaskbarWidgetInteractive })
 
 ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
   if (action === 'close') {
