@@ -974,10 +974,11 @@ export default function SearchPanel({
           />
         </div>
 
-        {/* Content area */}
-        <div className="relative z-10 flex flex-col h-full">
+        {/* Content area：flex-1 + min-h-0 —— 弹窗是 max-h（高度不定），h-full 会解析成内容自然高度
+            导致超出被裁且无滚动条；弹性填充才能让下方结果区的 overflow-y-auto 正确滚动 */}
+        <div className="relative z-10 flex flex-col flex-1 min-h-0">
         {/* 头部 */}
-        <div className={`p-6 border-b ${borderColor}`}>
+        <div className={`p-6 border-b ${borderColor} flex-shrink-0`}>
           <div className="flex items-center justify-between mb-4">
             <h2 className={`text-2xl font-bold ${textPrimary}`}>搜索音乐</h2>
             <button
@@ -1157,7 +1158,7 @@ export default function SearchPanel({
           </div>
 
           {/* 搜索框 */}
-          <div className="flex gap-3 relative">
+          <div className="flex gap-3 relative flex-shrink-0">
             <div className="flex-1 relative">
               <Search className={`absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 ${textPrimary}/40`} />
               <input

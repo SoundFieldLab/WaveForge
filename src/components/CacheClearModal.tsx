@@ -340,7 +340,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]"
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[600]"
           />
           
           {/* 弹窗 */}
@@ -349,7 +349,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed right-0 top-0 h-full w-full max-w-lg z-[70] shadow-2xl overflow-hidden"
+            className="fixed right-0 top-0 h-full w-full max-w-lg z-[610] shadow-2xl overflow-hidden"
             data-tv-scope
             style={{
               background: playerTheme === 'dark' 

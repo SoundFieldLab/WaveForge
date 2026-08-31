@@ -178,10 +178,10 @@ export default function AudioQualitySettingsModal({
     <AnimatePresence>
       {show && (
         <>
-          <motion.div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[80]" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />
+          <motion.div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[600]" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={onClose} />
           <motion.div
             data-tv-scope
-            className="fixed right-0 top-0 h-full w-full max-w-lg z-[90] shadow-2xl overflow-hidden flex flex-col"
+            className="fixed right-0 top-0 h-full w-full max-w-lg z-[610] shadow-2xl overflow-hidden flex flex-col"
             initial={{ x: '100%', opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
