@@ -7389,14 +7389,33 @@ app.whenReady().then(async () => {
   // 放行后，天气组件才能优先使用 Windows/Chromium 的设备定位，再回退到公网 IP。
   // media 权限：放行后渲染进程才能用 navigator.mediaDevices.enumerateDevices()
   // 列出真实的音频输出设备（设置-高级「音频输出设备」）。
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => permission === 'geolocation' || permission === 'media')
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === 'geolocation' || permission === 'media')
+  const isTrustedPermissionRequester = (webContents) => {
+    if (!mainWindow || webContents !== mainWindow.webContents || webContents.isDestroyed()) return false
+    const url = webContents.getURL?.() || ''
+    return createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(url)
+  }
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => (
+    isTrustedPermissionRequester(webContents) && (permission === 'geolocation' || permission === 'media')
+  ))
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const frameTrusted = !details?.requestingUrl || createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(details.requestingUrl)
+    callback(isTrustedPermissionRequester(webContents) && frameTrusted && (permission === 'geolocation' || permission === 'media'))
   })
   session.defaultSession.setDevicePermissionHandler((details) => {
-    // enumerateDevices 需要设备级授权才能返回带标签的真实设备列表
+    const requestOrigin = details?.origin || details?.embeddingOrigin || ''
+    const originTrusted = createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(requestOrigin)
+    if (!originTrusted) return false
     const type = details?.deviceType || ''
-    return type === 'audiooutput' || type === 'audio' || type === 'video' || details?.mediaType === 'audio'
+    return type === 'audiooutput' || type === 'audio' || details?.mediaType === 'audio'
   })
 
   // Electron 本地服务请求认证：token 只存在于主进程和受控子进程环境，renderer 无法读取。
