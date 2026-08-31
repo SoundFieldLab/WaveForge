@@ -1,4 +1,6 @@
-﻿export type PlaybackMode = 'sequential' | 'shuffle' | 'repeat'
+﻿import type { StemChoreography } from './stemTransitionPlanner'
+
+export type PlaybackMode = 'sequential' | 'shuffle' | 'repeat'
 
 export type TransitionStrategy =
   | 'smart-rendered'
@@ -151,6 +153,9 @@ export interface TrackAnalysis {
   integratedLufs?: number
   introSilence: number
   outroSilence: number
+  /** 源文件音频格式（Python 分析提供真实文件格式；浏览器回退提供解码前容器格式）。
+   *  过渡格式预检（多声道→固定交叉）与后续无缝裁剪消费 */
+  audioFormat?: { sampleRate: number; channels: number }
   /** 逐帧 RMS 包络（浏览器回退分析计算；MV 对齐包络互相关用） */
   rmsEnvelope?: number[]
   /** 包络互相关峰值（≥0.6 表示 MV 与歌曲同录音；网格置信度失效时可兜底用包络偏移） */
@@ -194,9 +199,25 @@ export interface TransitionPlan {
     partialSyncN?: number
     /** 谐波变调：过渡窗口内目标曲变调到源曲主音的半音数（±1~2，0=不变调） */
     pitchShiftSemitones?: number
-    /** 目标窗口逐拍 vocalness（渲染期人声 ducking 用） */
+    /** 目标窗口逐拍 vocalness（无 stem 时的渲染期人声 ducking fallback） */
     targetVocalness?: number[]
-    /** DJTransGAN 学到的推子/EQ 自动化参数（v2 短过渡用；[prev_fo, next_fi]） */
+    /** HTDemucs 需要分离的 v2-only 窗口；模型缺失/失败时保持现有 full-mix DSP */
+    stemRequirement?: {
+      source: { role: 'tail'; startTime: number; duration: number }
+      target: { role: 'head'; startTime: number; duration: number }
+      model: 'htdemucs'
+      modelVersion: string
+    }
+    /** HTDemucs 实际证据精炼后的四轨交接计划；仅 stem 渲染路径消费 */
+    stemChoreography?: StemChoreography
+    /** Stem artifact 指纹（v2 缓存键用；不会进入 v1 plan） */
+    stemFingerprint?: string
+    /** 当前 v2 渲染请求使用的临时四轨 artifact；只含 renderer 所需路径/窗口信息 */
+    stemArtifacts?: {
+      source: { cacheKey: string; startSeconds: number; duration: number; files: Record<'drums' | 'bass' | 'vocals' | 'other', string> }
+      target: { cacheKey: string; startSeconds: number; duration: number; files: Record<'drums' | 'bass' | 'vocals' | 'other', string> }
+    }
+    /** DJTransGAN 学到的推子/EQ 自动化参数（严格受 aiMix 可选开关控制） */
     automation?: Array<{ band: number[][][]; fader: number[][][][] }>
   }
   gainCurve: { source: number[]; target: number[] }
@@ -261,6 +282,8 @@ export interface PlaybackEngineState {
   visualSwitchCommit?: TransitionCommit
   transitionProgress?: number  // 过渡进度 0-1
   transitionDuration?: number  // 过渡总时长（秒）
+  /** 渲染过渡缓冲内当前可听到的目标歌曲绝对时间（MV 目标槽同步用） */
+  transitionTargetTime?: number
   transitionStartTime?: number | null // 当前音轨进入计划过渡的时间点（秒）
   transitionFromTrackKey?: string  // 前一曲的 trackKey
   transitionToTrackKey?: string    // 下一曲的 trackKey

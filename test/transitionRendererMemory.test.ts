@@ -252,3 +252,111 @@ describe('TransitionRenderer playTransition（事件驱动 handoff + 迟到保�
     expect(latestSource.connect).not.toHaveBeenCalledWith(gain)
   })
 })
+
+describe('TransitionRenderer DJTransGAN 可选性', () => {
+  it('v2 aiMix=false 时 automation 与 60s 长混音均为零调用', async () => {
+    const context = makeFakeContext() as unknown as AudioContext & { decodeAudioData: ReturnType<typeof vi.fn> }
+    context.decodeAudioData = vi.fn().mockResolvedValue(makeFakeAudioBuffer(44100))
+    const transition = vi.fn().mockResolvedValue({
+      success: true,
+      outputPath: 'D:/tmp/v2.wav',
+      stretchApplied: true,
+      djEffectsApplied: true,
+    })
+    const aiMixAutomation = vi.fn()
+    const transitionAiMix = vi.fn()
+    const previousWindow = (globalThis as { window?: unknown }).window
+    ;(globalThis as { window?: unknown }).window = {
+      electron: {
+        audioDownload: {
+          prepare: vi.fn(async (_url: string, trackKey: string) => `D:/tmp/${trackKey}.wav`),
+        },
+        render: {
+          transition,
+          aiMixAutomation,
+          transitionAiMix,
+          getAudioUrl: vi.fn().mockResolvedValue('waveforge-media://v2.wav'),
+          readAudioFile: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+        },
+      },
+      setTimeout,
+    }
+    const fetchStub = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    } as Response)
+
+    try {
+      const renderer = new TransitionRenderer(context)
+      const plan = { ...makePlan('optional-ai-off', 0), v2: { aiMix: false } }
+      await renderer.preRender({ sourceUrl: 'https://source', targetUrl: 'https://target', plan })
+      expect(transition).toHaveBeenCalledTimes(1)
+      expect(aiMixAutomation).not.toHaveBeenCalled()
+      expect(transitionAiMix).not.toHaveBeenCalled()
+      renderer.dispose()
+    } finally {
+      fetchStub.mockRestore()
+      ;(globalThis as { window?: unknown }).window = previousWindow
+    }
+  })
+
+  it('v2 aiMix=false 且 stems 可用时把精炼计划发送到 DSP renderer', async () => {
+    const context = makeFakeContext() as unknown as AudioContext & { decodeAudioData: ReturnType<typeof vi.fn> }
+    context.decodeAudioData = vi.fn().mockResolvedValue(makeFakeAudioBuffer(44100))
+    const transition = vi.fn().mockResolvedValue({ success: true, outputPath: 'D:/tmp/stem.wav', stretchApplied: true, djEffectsApplied: true })
+    const points = (start: number, quiet = false) => Array.from({ length: 21 }, (_, i) => ({
+      time: start + i * 0.5,
+      db: quiet && i < 2 ? -70 : -12,
+      activity: quiet && i < 2 ? 0 : 0.8,
+    }))
+    const artifact = (side: 'source' | 'target') => {
+      const start = side === 'source' ? 0 : 0
+      return {
+        version: 1, engine: 'test', cacheKey: `${side}-key`, cached: false, requestId: side,
+        startSeconds: start, duration: 10, sampleRate: 44100, channels: 2, frames: 441000,
+        files: { drums: `${side}-d.wav`, bass: `${side}-b.wav`, vocals: `${side}-v.wav`, other: `${side}-o.wav` },
+        evidence: { drums: points(start), bass: points(start), vocals: points(start, side === 'target'), other: points(start) },
+        manifestPath: `${side}.json`,
+      }
+    }
+    const previousWindow = (globalThis as { window?: unknown }).window
+    ;(globalThis as { window?: unknown }).window = {
+      electron: {
+        audioDownload: { prepare: vi.fn(async (_url: string, trackKey: string) => `D:/tmp/${trackKey}.wav`) },
+        stems: {
+          status: vi.fn().mockResolvedValue({ available: true }),
+          separate: vi.fn(async (request: { mode: string }) => artifact(request.mode === 'tail' ? 'source' : 'target')),
+          cancel: vi.fn(),
+        },
+        render: {
+          transition,
+          aiMixAutomation: vi.fn(), transitionAiMix: vi.fn(),
+          getAudioUrl: vi.fn().mockResolvedValue('waveforge-media://stem.wav'),
+          readAudioFile: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+        },
+      }, setTimeout,
+    }
+    const fetchStub = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, arrayBuffer: async () => new ArrayBuffer(8) } as Response)
+    try {
+      const renderer = new TransitionRenderer(context)
+      const base = makePlan('stem-route', 0)
+      const plan: TransitionPlan = {
+        ...base,
+        sourceBeatTimes: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10],
+        targetBeatTimes: [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10],
+        v2: { aiMix: false, stemRequirement: { source: { role: 'tail', startTime: 0, duration: 10 }, target: { role: 'head', startTime: 0, duration: 10 }, model: 'htdemucs', modelVersion: 'test' } },
+      }
+      await renderer.preRender({ sourceUrl: 'https://source', targetUrl: 'https://target', plan })
+      expect(transition).toHaveBeenCalledTimes(1)
+      const sentPlan = transition.mock.calls[0][0] as TransitionPlan
+      expect(sentPlan.v2?.stemChoreography).toBeDefined()
+      expect(sentPlan.v2?.stemArtifacts?.source.cacheKey).toBe('source-key')
+      expect(sentPlan.v2?.aiMix).toBe(false)
+      renderer.dispose()
+    } finally {
+      fetchStub.mockRestore()
+      ;(globalThis as { window?: unknown }).window = previousWindow
+    }
+  })
+
+})

@@ -16,6 +16,7 @@ from pedalboard import Pedalboard, Compressor
 from pedalboard.io import AudioFile
 import logging
 import os
+import uuid
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -25,6 +26,22 @@ try:
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
+
+
+def write_wav_atomic(output_path: str, audio: np.ndarray, sample_rate: int, channels: int) -> int:
+    if not np.all(np.isfinite(audio)):
+        raise ValueError("Refusing to write non-finite transition audio")
+    temp_path = f"{output_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp.wav"
+    try:
+        with AudioFile(temp_path, 'w', sample_rate, num_channels=channels) as f:
+            f.write(audio)
+        if os.path.getsize(temp_path) <= 44:
+            raise ValueError("Rendered transition WAV is empty")
+        os.replace(temp_path, output_path)
+        return os.path.getsize(output_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def ensure_stereo(audio: np.ndarray) -> np.ndarray:
@@ -1043,6 +1060,106 @@ def spectral_seam_mix(source: np.ndarray, target: np.ndarray, sample_rate: int) 
         return source + target
 
 
+def _piecewise_gain(points: list, samples: int, sample_rate: int) -> np.ndarray:
+    """Render deterministic linear gain keyframes from the stem choreography."""
+    if samples <= 0:
+        return np.zeros(0, dtype=np.float32)
+    valid = sorted(
+        (float(point.get('time', 0)), float(point.get('gain', 0)))
+        for point in (points or [])
+        if np.isfinite(point.get('time', 0)) and np.isfinite(point.get('gain', 0))
+    )
+    if not valid:
+        return np.ones(samples, dtype=np.float32)
+    positions = np.asarray([max(0, min(samples - 1, round(t * sample_rate))) for t, _ in valid], dtype=np.float64)
+    gains = np.asarray([max(0, min(1, gain)) for _, gain in valid], dtype=np.float64)
+    # Collapse duplicate positions so np.interp always receives an increasing axis.
+    unique_positions, unique_indices = np.unique(positions, return_index=True)
+    unique_gains = gains[unique_indices]
+    return np.interp(np.arange(samples), unique_positions, unique_gains,
+                     left=unique_gains[0], right=unique_gains[-1]).astype(np.float32)
+
+
+def _load_stem_window(artifact: dict, stem: str, plan_start: float, plan_end: float, output_rate: int) -> np.ndarray:
+    stem_path = artifact.get('files', {}).get(stem)
+    if not stem_path or not os.path.isfile(stem_path):
+        raise FileNotFoundError(f"missing {stem} artifact")
+    artifact_start = float(artifact.get('startSeconds', 0) or 0)
+    with AudioFile(stem_path) as reader:
+        rate = reader.samplerate
+        start = max(0, int(round((plan_start - artifact_start) * rate)))
+        frames = max(1, int(round((plan_end - plan_start) * rate)))
+        reader.seek(start)
+        audio = ensure_stereo(reader.read(frames))
+    if rate != output_rate:
+        if LIBROSA_AVAILABLE:
+            audio = librosa.resample(audio, orig_sr=rate, target_sr=output_rate)
+        else:
+            audio = signal.resample(audio, int(round(audio.shape[1] * output_rate / rate)), axis=1)
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _render_stem_mix(plan: dict, output_rate: int, output_length: int,
+                     output_beat_durations: list, without_grid: bool) -> np.ndarray | None:
+    v2 = plan.get('v2') or {}
+    artifacts = v2.get('stemArtifacts') or {}
+    choreography = v2.get('stemChoreography') or {}
+    if not artifacts.get('source') or not artifacts.get('target') or not choreography:
+        return None
+    source_beats = [t - plan['sourceStartTime'] for t in plan.get('sourceBeatTimes', [])]
+    target_beats = [t - plan['targetStartTime'] for t in plan.get('targetBeatTimes', [])]
+    channels = 2
+    output = np.zeros((channels, output_length), dtype=np.float32)
+    pitch_shift = float(v2.get('pitchShiftSemitones', 0) or 0)
+    for stem in ('vocals', 'drums', 'bass', 'other'):
+        source = _load_stem_window(artifacts['source'], stem, plan['sourceStartTime'], plan['sourceEndTime'], output_rate)
+        target = _load_stem_window(artifacts['target'], stem, plan['targetStartTime'], plan['targetEndTime'], output_rate)
+        # Preserve drum transients: harmonic pitch correction never touches the drum stem.
+        if stem != 'drums' and abs(pitch_shift) > 0.01 and LIBROSA_AVAILABLE:
+            target = librosa.effects.pitch_shift(target, sr=output_rate, n_steps=pitch_shift).astype(np.float32)
+        if without_grid:
+            source_rendered = np.pad(source, ((0, 0), (0, max(0, output_length - source.shape[1]))))[:, :output_length]
+            target_rendered = np.pad(target, ((0, 0), (0, max(0, output_length - target.shape[1]))))[:, :output_length]
+        else:
+            source_rendered = progressive_beat_stretch(
+                source, output_rate, source_beats, output_beat_durations, f'source-{stem}',
+                rate_bounds=(0.8, 1.2), quality_stretch=False,
+            )
+            target_rendered = progressive_beat_stretch(
+                target, output_rate, target_beats, output_beat_durations, f'target-{stem}',
+                rate_bounds=(0.8, 1.2), quality_stretch=False,
+            )
+            source_rendered = source_rendered[:, :output_length]
+            target_rendered = target_rendered[:, :output_length]
+        # Preserve WaveForge's complementary v2 processing inside the stem path:
+        # - drums keep transient shape and pitch;
+        # - harmonic stems can receive pitch correction and filter motion;
+        # - source vocals/other retain the reverb-dip phrase exit.
+        effects = plan.get('djEffects') or {}
+        v2_choreography = v2.get('choreography') or {}
+        if stem != 'drums' and effects.get('filterSweep', True):
+            source_rendered, target_rendered = apply_filter_sweep(
+                source_rendered, target_rendered, output_rate, output_beat_durations,
+                float(np.clip(effects.get('intensity', 0.55), 0.0, 1.0)),
+            )
+        if stem in ('vocals', 'other') and v2_choreography.get('reverbDip', False):
+            source_rendered = apply_reverb_dip(
+                source_rendered, output_rate, output_beat_durations,
+                float(INTENSITY_FACTOR.get(v2_choreography.get('intensity', 'standard'), 0.75)),
+                start_beat=v2_choreography.get('reverbStartBeat'),
+            )
+        stem_plan = choreography.get(stem) or {}
+        source_gain = _piecewise_gain(stem_plan.get('source') or [], output_length, output_rate)
+        target_gain = _piecewise_gain(stem_plan.get('target') or [], output_length, output_rate)
+        output += source_rendered * source_gain[None, :] + target_rendered * target_gain[None, :]
+    gain_offset_db = float(plan.get('gainOffsetDb', 0) or 0)
+    if abs(gain_offset_db) > 0.001:
+        # Choreography already mixes both sides; apply only a conservative final compensation.
+        output *= min(1.25, max(0.8, 10.0 ** (gain_offset_db / 40.0)))
+    logger.info("🎚️ [v2] HTDemucs stem choreography applied: %s", choreography.get('style', 'unknown'))
+    return output
+
+
 def render_transition_v2(params: dict) -> dict:
     """AutoMix 增强版（v2）渲染：v1 的逐拍共拍网格拉伸 + choreography 特效编排。
 
@@ -1240,19 +1357,21 @@ def render_transition_v2(params: dict) -> dict:
             duck_envelope = beat_automation(target_with_gain.shape[1], output_sample_rate, output_beat_durations, points)
             target_with_gain = target_with_gain * duck_envelope[None, :]
 
-        # 6) 混合
+        # 6) 混合：有 HTDemucs artifacts 时用四轨 choreography；否则保持现有 full-mix DSP。
         channels = max(source_with_gain.shape[0], target_with_gain.shape[0])
-        output = np.zeros((channels, output_length), dtype=np.float32)
+        stem_output = _render_stem_mix(plan, output_sample_rate, output_length, output_beat_durations, without_grid)
+        stem_mix_applied = stem_output is not None
+        output = np.zeros((channels, output_length), dtype=np.float32) if stem_output is None else stem_output
         # 回声可闻度 boost（v2 专用；v1 的 create_echo_out 产物不受影响）
         fx_echo_boost = 2.0
-        if without_grid and len(automation) != 2:
+        if stem_output is None and without_grid and len(automation) != 2:
             # 图割频谱 crossfade（大 BPM 差无节拍对齐路径）：逐频段选切换时刻，
             # 避免宽带等功率叠加的相位抵消/浑浊；失败自动回退逐点相加。
             output = spectral_seam_mix(source_with_gain, target_with_gain, output_sample_rate)
             for ch in range(min(channels, output.shape[0])):
                 if ch < echo_return.shape[0]:
                     output[ch] += echo_return[ch] * fx_echo_boost
-        else:
+        elif stem_output is None:
             for ch in range(channels):
                 if ch < source_with_gain.shape[0]:
                     output[ch] += source_with_gain[ch]
@@ -1260,6 +1379,10 @@ def render_transition_v2(params: dict) -> dict:
                     output[ch] += echo_return[ch] * fx_echo_boost
                 if ch < target_with_gain.shape[0]:
                     output[ch] += target_with_gain[ch]
+        else:
+            # Stem choreography owns the source/target mix; the existing echo/riser/noise layers remain complementary.
+            for ch in range(min(channels, echo_return.shape[0])):
+                output[ch] += echo_return[ch] * fx_echo_boost
 
         reference_rms = max(
             float(np.sqrt(np.mean(source_stretched * source_stretched))),
@@ -1296,11 +1419,9 @@ def render_transition_v2(params: dict) -> dict:
             logger.info(f"Applying soft limiting (peak: {max_amplitude:.2f})")
             output = np.tanh(output * 0.95) * 0.95
 
-        with AudioFile(output_path, 'w', output_sample_rate, num_channels=channels) as f:
-            f.write(output)
+        file_size = write_wav_atomic(output_path, output, output_sample_rate, channels)
 
         duration = output_length / output_sample_rate
-        file_size = os.path.getsize(output_path)
         logger.info(f"🎉 [v2] Render complete: {channels} channels, {duration:.2f}s, {file_size / 1024:.1f} KB")
 
         return {
@@ -1315,6 +1436,7 @@ def render_transition_v2(params: dict) -> dict:
             'targetResumeTime': resume_time,
             'rendererVersion': plan.get('rendererVersion', 'unknown'),
             'v2ChoreographyApplied': True,
+            'stemMixApplied': stem_mix_applied,
         }
     except Exception as e:
         logger.error(f"[v2] Render failed: {e}", exc_info=True)
