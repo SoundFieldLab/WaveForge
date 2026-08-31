@@ -316,6 +316,10 @@ contextBridge.exposeInMainWorld('electron', {
     setEnabled: (enabled) => ipcRenderer.invoke('desktop-lyrics:set-enabled', enabled),
     getSettings: () => ipcRenderer.invoke('desktop-lyrics:get-settings'),
     updateSettings: (partial) => ipcRenderer.invoke('desktop-lyrics:update-settings', partial),
+  // Apple 播放面 bridge（WebView2 原生源）：主进程拉起 apple_bridge.py（幂等）
+  spawnAppleBridge: () => ipcRenderer.invoke('apple-bridge:spawn'),
+  // Apple 播放面 bridge：渲染端节能联动（离开 Apple 平台 5 分钟）主动关闭
+  stopAppleBridge: () => ipcRenderer.invoke('apple-bridge:stop'),
     onEnabledChanged: (callback) => {
       const listener = (_event, enabled) => callback(enabled)
       ipcRenderer.on('desktop-lyrics:enabled-changed', listener)

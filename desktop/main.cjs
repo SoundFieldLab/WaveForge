@@ -6916,6 +6916,153 @@ async function sweepBackendOrphans(reason) {
   }
 }
 
+const appleBridgeExecFileAsync = require('util').promisify(execFile)
+// ── Apple 播放面（WebView2 bridge）子进程管理 ──
+// apple_bridge.py 用 pywebview + WebView2 承载 music.apple.com，作为 Electron Browser CDM
+// 原生 CENC 失败时的兼容兜底；渲染进程经带会话认证的 127.0.0.1 HTTP 接口控制播放。
+let appleBridgeChild = null
+let appleBridgeSessionToken = ''
+const appleBridgePythonOkCache = new Map()
+const APPLE_BRIDGE_PORT = 18790
+// spawn 互斥：预热定时器与渲染端平台联动可能同一瞬间并发触发，双双通过 ping 检查会双开
+// （Windows 允许端口重复绑定，两个 bridge 同时监听 18790，请求只进其中一个）
+let appleBridgeSpawning = false
+
+/** 探测 python 是否装有 pywebview（结果按 exe 路径缓存；Windows Store 占位符会自然失败） */
+async function pythonHasPywebview(pythonExe) {
+  if (appleBridgePythonOkCache.has(pythonExe)) return appleBridgePythonOkCache.get(pythonExe)
+  let ok = false
+  try {
+    await appleBridgeExecFileAsync(pythonExe, ['-c', 'import webview'], { timeout: 20000 })
+    ok = true
+  } catch { ok = false }
+  appleBridgePythonOkCache.set(pythonExe, ok)
+  return ok
+}
+
+/** 找可用的 Python：环境变量 → 嵌入式 → 常见系统安装位置 → PATH */
+async function findAppleBridgePython() {
+  const candidates = []
+  if (process.env.WAVEFORGE_APPLE_BRIDGE_PYTHON) candidates.push(process.env.WAVEFORGE_APPLE_BRIDGE_PYTHON)
+  candidates.push(app.isPackaged
+    ? path.join(process.resourcesPath, 'python-embed', 'python.exe')
+    // dev 模式下 getAppPath() 是 desktop/，用 __dirname 回项目根
+    : path.join(__dirname, '..', 'resources', 'python-embed', 'python.exe'))
+  const localAppData = process.env.LOCALAPPDATA || ''
+  try {
+    for (const dir of fs.readdirSync(path.join(localAppData, 'Programs', 'Python'))) {
+      candidates.push(path.join(localAppData, 'Programs', 'Python', dir, 'python.exe'))
+    }
+  } catch { /* 目录不存在 */ }
+  for (const root of ['C:\\', 'D:\\']) {
+    try {
+      for (const dir of fs.readdirSync(root)) {
+        if (/^python/i.test(dir)) candidates.push(path.join(root, dir, 'python.exe'))
+      }
+    } catch { /* 盘符不存在 */ }
+  }
+  candidates.push('python', 'python3') // PATH 兜底（import 校验排除占位符/无 pywebview 的）
+  for (const exe of candidates) {
+    if (!exe) continue
+    if (exe !== 'python' && exe !== 'python3' && !fs.existsSync(exe)) continue
+    if (await pythonHasPywebview(exe)) return exe
+  }
+  return null
+}
+
+async function pingAppleBridge(token = appleBridgeSessionToken) {
+  if (!token) return false
+  try {
+    const res = await fetch(`http://127.0.0.1:${APPLE_BRIDGE_PORT}/ping`, {
+      headers: { 'X-WaveForge-Bridge-Token': token },
+      signal: AbortSignal.timeout(1500),
+    })
+    if (res.ok) {
+      const d = await res.json()
+      return Boolean(d && d.ok)
+    }
+  } catch { /* 未运行 */ }
+  return false
+}
+
+/** 启动 Apple 播放面 bridge（幂等：已在跑返回当前会话；并发触发合并为一次 spawn） */
+async function startAppleBridge() {
+  if (await pingAppleBridge()) return { ok: true, token: appleBridgeSessionToken }
+  if (appleBridgeChild && !appleBridgeChild.killed) return { ok: true, token: appleBridgeSessionToken }
+  if (appleBridgeSpawning) {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      if (!appleBridgeSpawning) break
+    }
+    const ok = (await pingAppleBridge()) || Boolean(appleBridgeChild && !appleBridgeChild.killed)
+    return ok ? { ok: true, token: appleBridgeSessionToken } : { ok: false }
+  }
+  appleBridgeSpawning = true
+  try {
+    const ok = await doStartAppleBridge()
+    return ok ? { ok: true, token: appleBridgeSessionToken } : { ok: false }
+  } finally {
+    appleBridgeSpawning = false
+  }
+}
+
+async function doStartAppleBridge() {
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'python-apple-bridge', 'apple_bridge.py')
+    // dev 模式下 getAppPath() 是 main.cjs 所在目录（desktop/），必须用 __dirname 回项目根
+    : path.join(__dirname, '..', 'python-apple-bridge', 'apple_bridge.py')
+  if (!fs.existsSync(scriptPath)) {
+    console.warn('[AppleBridge] 未找到 apple_bridge.py，跳过启动')
+    return false
+  }
+  const pythonExe = await findAppleBridgePython()
+  if (!pythonExe) {
+    console.warn('[AppleBridge] 未找到装有 pywebview 的 Python，Apple 原生源不可用（走载体兜底）')
+    return false
+  }
+  // WebView2 用户数据目录：持久化 music.apple.com 登录态（登录一次长期有效）
+  const profileDir = path.join(app.getPath('userData'), 'apple-bridge-profile')
+  try { fs.mkdirSync(profileDir, { recursive: true }) } catch { /* 忽略 */ }
+  appleBridgeSessionToken = crypto.randomBytes(32).toString('base64url')
+  const childEnv = {}
+  for (const key of ['PATH', 'Path', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PYTHONHOME', 'PYTHONPATH']) {
+    if (process.env[key]) childEnv[key] = process.env[key]
+  }
+  childEnv.PYTHONIOENCODING = 'utf-8'
+  childEnv.PYTHONUNBUFFERED = '1'
+  const child = spawn(pythonExe, [scriptPath, String(APPLE_BRIDGE_PORT), '--profile', profileDir, '--token', appleBridgeSessionToken], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    env: childEnv,
+  })
+  appleBridgeChild = child
+  child.stdout?.on('data', (chunk) => {
+    const text = String(chunk).trim()
+    if (text) console.log('[AppleBridge]', text)
+  })
+  child.stderr?.on('data', (chunk) => {
+    const text = String(chunk).trim()
+    if (text) console.error('[AppleBridge:err]', text)
+  })
+  child.on('error', (error) => {
+    console.error('[AppleBridge] failed to spawn:', error?.message || error)
+    if (appleBridgeChild === child) {
+      appleBridgeChild = null
+      appleBridgeSessionToken = ''
+    }
+  })
+  child.on('exit', (code) => {
+    console.warn('[AppleBridge] exited with code', code)
+    if (appleBridgeChild === child) {
+      appleBridgeChild = null
+      appleBridgeSessionToken = ''
+    }
+  })
+  console.log('[AppleBridge] starting apple_bridge.py on port', APPLE_BRIDGE_PORT)
+  return true
+}
+
+
 // 应用退出时一并结束本地子进程
 app.on('will-quit', async () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
@@ -6924,6 +7071,7 @@ app.on('will-quit', async () => {
   try { localPythonChild?.kill() } catch {}
   try { localLoudnessChild?.kill() } catch {}
   try { localCompensationChild?.kill() } catch {}
+  try { appleBridgeChild?.kill() } catch {}
 })
 
 app.whenReady().then(async () => {
@@ -7074,6 +7222,32 @@ app.whenReady().then(async () => {
     console.error('🎵 [AirPlay] 启动失败:', error instanceof Error ? error.message : error)
   }
   ipcMain.handle('audio-output:is-supported', () => process.platform === 'win32' || process.platform === 'darwin')
+
+  // Apple 播放面 bridge：渲染端点 Apple 歌曲时经此自动拉起（appleWebViewBridge.ensureBridgeRunning）
+  ipcMain.handle('apple-bridge:spawn', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false }
+    try {
+      return await startAppleBridge()
+    } catch (error) {
+      console.error('[AppleBridge] spawn failed:', error?.message || error)
+      return false
+    }
+  })
+
+  // Apple 播放面 bridge：渲染端节能联动主动关闭（离开 Apple 平台 5 分钟）
+  ipcMain.handle('apple-bridge:stop', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false
+    try {
+      if (appleBridgeChild && !appleBridgeChild.killed) {
+        appleBridgeChild.kill()
+        console.log('[AppleBridge] bridge stopped by renderer (平台节能)')
+      }
+      return true
+    } catch (error) {
+      console.error('[AppleBridge] stop failed:', error?.message || error)
+      return false
+    }
+  })
 
   app.on('will-quit', async () => {
     if (airplayControllerHandle) {

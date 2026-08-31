@@ -347,6 +347,10 @@ export interface ElectronAPI {
     consumeNotice: () => Promise<'startup-unavailable' | 'startup-unusable' | null>
     getLatency: () => Promise<{
       status: 'testing' | 'done'
+  /** Apple 播放面 bridge（WebView2 原生源）：主进程拉起 apple_bridge.py（幂等） */
+  spawnAppleBridge?: () => Promise<{ ok: boolean; token?: string }>
+  /** Apple 播放面 bridge：渲染端节能联动主动关闭（离开 Apple 平台 5 分钟） */
+  stopAppleBridge?: () => Promise<boolean>
       result: {
         baidu: HostLatencyResult
         github: HostLatencyResult

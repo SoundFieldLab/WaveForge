@@ -3,7 +3,8 @@
 架构：WaveForge (Electron) → HTTP → 本服务 → evaluate_js → music.apple.com MusicKit JS
 音频在 WebView2 内经 MF Widevine 解密播放（Apple 接受 Edge 运行时的 CDM 证书）。
 
-启动：python apple_bridge.py [端口] [--profile <dir>] [--show]
+启动：python apple_bridge.py [端口] --token <随机会话令牌> [--profile <dir>] [--show]
+  --token    主进程生成的会话令牌；所有 HTTP 请求必须携带
   --profile  WebView2 用户数据目录（持久化登录态；不传则用 %LOCALAPPDATA% 默认目录）
   --show     窗口可见启动（默认隐藏；登录引导由 WaveForge 设置页手动打开）
 
@@ -28,14 +29,25 @@ from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 18790
 PROFILE_DIR = ''
+SESSION_TOKEN = ''
 START_VISIBLE = False
-for arg in sys.argv[1:]:
+args = sys.argv[1:]
+index = 0
+while index < len(args):
+    arg = args[index]
     if arg.isdigit():
         PORT = int(arg)
     elif arg == '--show':
         START_VISIBLE = True
-    elif arg == '--profile' and sys.argv.index(arg) + 1 < len(sys.argv):
-        PROFILE_DIR = sys.argv[sys.argv.index(arg) + 1]
+    elif arg in ('--profile', '--token') and index + 1 < len(args):
+        index += 1
+        if arg == '--profile':
+            PROFILE_DIR = args[index]
+        else:
+            SESSION_TOKEN = args[index]
+    index += 1
+if not SESSION_TOKEN:
+    raise SystemExit('missing required --token')
 if not PROFILE_DIR:
     PROFILE_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'WaveForge', 'apple-bridge-profile')
 
@@ -287,10 +299,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # 静默日志
 
-    def _origin_allowed(self):
+    def _request_allowed(self):
         origin = self.headers.get('Origin')
-        # curl/主进程健康检查可能没有 Origin；TCP 已绑定 127.0.0.1，因此允许无 Origin。
-        return not origin or origin in ALLOWED_ORIGINS
+        if origin and origin not in ALLOWED_ORIGINS:
+            return False
+        return self.headers.get('X-WaveForge-Bridge-Token', '') == SESSION_TOKEN
 
     def _json(self, data, status=200):
         try:
@@ -300,7 +313,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if origin in ALLOWED_ORIGINS:
                 self.send_header('Access-Control-Allow-Origin', origin)
                 self.send_header('Vary', 'Origin')
-            self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+            self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Bridge-Token')
             self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
             self.end_headers()
             self.wfile.write(json.dumps(data).encode('utf-8'))
@@ -311,14 +324,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 pass
 
     def do_OPTIONS(self):
-        if not self._origin_allowed():
+        origin = self.headers.get('Origin')
+        if origin and origin not in ALLOWED_ORIGINS:
             self._json({'error': 'origin not allowed'}, 403)
             return
         self._json({})
 
     def do_GET(self):
-        if not self._origin_allowed():
-            self._json({'error': 'origin not allowed'}, 403)
+        if not self._request_allowed():
+            self._json({'error': 'unauthorized'}, 403)
             return
         if self.path == '/state':
             self._json({key: app_state.get(key) for key in PUBLIC_STATE_KEYS})
@@ -331,8 +345,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._json({'error': 'not found'}, 404)
 
     def do_POST(self):
-        if not self._origin_allowed():
-            self._json({'error': 'origin not allowed'}, 403)
+        if not self._request_allowed():
+            self._json({'error': 'unauthorized'}, 403)
             return
         content_len = int(self.headers.get('Content-Length', 0))
         body = {}
@@ -390,8 +404,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             app_state['error'] = detail
             if ok:
                 app_state.update({'ended': False, 'position': 0.0})
-            print(f'[Bridge] play {song_id} → {"ok" if ok else "fail: " + detail}')
-            self._json({'ok': ok, 'error': '' if ok else detail})
+            print(f'[Bridge] play {song_id} → {"ok" if ok else "failed"}')
+            self._json({'ok': ok, 'error': '' if ok else 'playback failed'})
 
         elif self.path == '/pause':
             js_eval('MusicKit.getInstance().pause()')
