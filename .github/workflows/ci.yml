@@ -44,6 +44,9 @@ jobs:
       - name: 运行单测（vitest）
         run: npm run test
 
+      - name: 运行 RGB 集成测试
+        run: npm run test:chroma && npm run test:signalrgb
+
       - name: 前端构建（vite build）
         run: npm run build
 

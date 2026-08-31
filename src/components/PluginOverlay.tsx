@@ -7,6 +7,8 @@
 
 import { useEffect } from 'react'
 import '../plugins/DGLabPlugin'
+import '../plugins/ChromaPlugin'
+import '../plugins/SignalRgbPlugin'
 import { getAllPluginManifests, getPluginRuntime, buildPluginContext } from '../plugins/registry'
 import { getGlobalAudioAnalyzerStore } from '../plugins/clients/DGLabClient'
 import {
@@ -14,12 +16,15 @@ import {
   usePluginHostState,
   isPluginEnabled,
   PLUGIN_STATE_EVENT,
+  closePluginConsole,
 } from '../services/pluginStore'
 import PluginNoticeModal from './PluginNoticeModal'
 import PluginCenterModal from './PluginCenterModal'
 import PluginDetailModal from './PluginDetailModal'
 import PluginImportModal from './PluginImportModal'
 import DGLabConsoleModal from './DGLabConsoleModal'
+import ChromaConsoleModal from './ChromaConsoleModal'
+import SignalRgbConsoleModal from './SignalRgbConsoleModal'
 import DGLabWidget from './DGLabWidget'
 import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
 
@@ -103,6 +108,11 @@ export default function PluginOverlay() {
       <PluginDetailModal />
       <PluginImportModal />
       <DGLabConsoleModal />
+      <ChromaConsoleModal />
+      <SignalRgbConsoleModal
+        open={host.activeConsolePluginId === 'signalrgb'}
+        onClose={() => closePluginConsole('signalrgb')}
+      />
       {/* 常驻悬浮小组件（自管理显示条件：插件启用 + 常驻开关） */}
       <DGLabWidget />
       {/* 整机监听全局桥（监听系统扬声器；失败自动回退 + 监听中浮标） */}

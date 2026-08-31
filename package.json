@@ -42,7 +42,9 @@
     "vmp:sign:dev": "node scripts/evs-vmp.cjs sign-pkg node_modules/electron/dist",
     "vmp:verify:dev": "node scripts/evs-vmp.cjs verify-pkg node_modules/electron/dist",
     "vmp:sign:release": "node scripts/evs-vmp.cjs sign-pkg release/win-unpacked",
-    "vmp:verify:release": "node scripts/evs-vmp.cjs verify-pkg release/win-unpacked"
+    "vmp:verify:release": "node scripts/evs-vmp.cjs verify-pkg release/win-unpacked",
+    "test:chroma": "node scripts/test-chroma.cjs && node scripts/test-razer-device-discovery.cjs",
+    "test:signalrgb": "node scripts/test-signalrgb.cjs && node scripts/test-signalrgb-effect.cjs"
   },
   "build": {
     "appId": "com.waveforge.desktop",
