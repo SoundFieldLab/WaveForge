@@ -7634,7 +7634,7 @@ app.whenReady().then(async () => {
   // 处理器集中在 update-manager.cjs（下载进度经 update:download-status 事件广播）。
   try {
     const { setupUpdateIPC } = require('./update-manager.cjs')
-    setupUpdateIPC(ipcMain)
+    setupUpdateIPC(ipcMain, () => mainWindow)
   } catch (error) {
     console.error('⚠️ [更新] 更新管理器初始化失败:', error instanceof Error ? error.message : error)
   }
