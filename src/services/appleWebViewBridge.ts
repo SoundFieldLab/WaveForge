@@ -4,8 +4,8 @@
  * 架构：
  *   WaveForge (Electron) → HTTP → apple_bridge.py (pywebview) → WebView2 → music.apple.com
  *
- * Apple 歌曲通过 WebView2 播放面（MF Widevine）完整播放，
- * WaveForge 通过 HTTP 控制播放并读取进度（歌词/UI 同步）。
+ * Apple 歌曲在 Electron 原生 CENC 失败时可通过 WebView2 兼容窗口播放，
+ * WaveForge 通过带会话认证的 HTTP 控制播放并读取进度（歌词/UI 同步）。
  *
  * bridge 进程生命周期：首次 Apple 歌曲时自动启动（由主进程 spawn），退出时跟随主进程关闭。
  */
@@ -34,7 +34,9 @@ export interface AppleSpectrum {
   enabled: boolean
 }
 
-let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollTimer: number | null = null
+let pollController: AbortController | null = null
+let polling = false
 let pollFailures = 0
 let cachedState: ApplePlaybackState = {
   ready: false, authorized: false, playing: false,
@@ -58,7 +60,6 @@ export async function checkBridgeRunning(): Promise<boolean> {
     if (res.ok) {
       const d = await res.json()
       if (d.ok) {
-        startPolling()
         // 立即拉一次状态：保证 ensureBridgeRunning 返回后 authorized/position 等字段已就绪，
         // 否则调用方马上读 getState() 会拿到过期缓存（authorized 误判 false → 走载体）
         try {
@@ -115,12 +116,16 @@ export async function ensureBridgeRunning(): Promise<boolean> {
   return false
 }
 
-/** 开始状态轮询 */
+/** 开始单飞状态轮询：上一请求完成后再安排下一次，避免慢响应堆叠。 */
 function startPolling() {
-  if (pollTimer) return
-  pollTimer = setInterval(async () => {
+  if (polling) return
+  polling = true
+  const poll = async () => {
+    if (!polling) return
+    pollController = new AbortController()
+    const timeout = window.setTimeout(() => pollController?.abort(), 3000)
     try {
-      const res = await bridgeFetch(`/state`, { signal: AbortSignal.timeout(3000) })
+      const res = await bridgeFetch('/state', { signal: pollController.signal })
       if (res.ok) {
         const s: ApplePlaybackState = await res.json()
         const prev = cachedState
@@ -134,13 +139,28 @@ function startPolling() {
         ) {
           stateListeners.forEach(fn => { try { fn(s) } catch { /* 忽略 */ } })
         }
-        return
+      } else {
+        markPollFailure()
       }
-      markPollFailure()
     } catch {
-      markPollFailure()
+      if (polling) markPollFailure()
+    } finally {
+      window.clearTimeout(timeout)
+      pollController = null
+      if (polling) pollTimer = window.setTimeout(poll, POLL_INTERVAL)
     }
-  }, POLL_INTERVAL)
+  }
+  void poll()
+}
+
+function stopPolling() {
+  polling = false
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+  pollController?.abort()
+  pollController = null
 }
 
 /** 连续轮询失败：bridge 可能被手关/崩溃 → 标记不可用并通知订阅者 */
@@ -165,7 +185,11 @@ export function isBridgeReady(): boolean {
 /** 注册状态监听器 */
 export function onStateChange(fn: (s: ApplePlaybackState) => void): () => void {
   stateListeners.push(fn)
-  return () => { stateListeners = stateListeners.filter(f => f !== fn) }
+  startPolling()
+  return () => {
+    stateListeners = stateListeners.filter(f => f !== fn)
+    if (stateListeners.length === 0) stopPolling()
+  }
 }
 
 /** 播放指定歌曲（失败返回 false，触发上层静默回退） */
@@ -251,7 +275,8 @@ export async function fetchBridgeSpectrum(): Promise<AppleSpectrum | null> {
 
 /** 停止播放并断开轮询（不再使用 bridge 时调用） */
 export async function bridgeStop() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+  stopPolling()
   await bridgeStopPlayback()
   cachedState.ready = false
+  sessionToken = ''
 }

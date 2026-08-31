@@ -37,7 +37,7 @@ import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
 import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './services/appleAuth'
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
 import { resolvePlayableSong, addAppleSongToLibrary, removeAppleSongFromLibrary, addAppleTracksToPlaylist, getAppleLibraryPlaylists, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
-import { ensureBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
+import { ensureBridgeRunning, checkBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
 import { isAppleNativeStreamEnabled, isAppleEmeCapable, resolveAppleNativeStream, type AppleNativeStream } from './services/applePlayback'
 import AppleLoginPanel from './components/AppleLoginPanel'
 import { cacheManager } from './services/cacheManager'
@@ -2271,18 +2271,21 @@ function App() {
   // 供桌面频谱 tick 与主可视化分析器共同消费
   const externalSpectrumRef = useRef<number[]>(Array(64).fill(0))
   useEffect(() => {
-    if (!externalPlaybackActive) return
+    if (!externalPlaybackActive || !analyzerEnabledNow) return
     let disposed = false
     let timer: number | null = null
     const loop = async () => {
       if (disposed) return
-      const s = await fetchBridgeSpectrum()
-      if (!disposed && s && s.bins.length > 0) externalSpectrumRef.current = s.bins
+      const spectrum = await fetchBridgeSpectrum()
+      if (!disposed && spectrum && spectrum.bins.length > 0) externalSpectrumRef.current = spectrum.bins
       if (!disposed) timer = window.setTimeout(loop, 120)
     }
-    loop()
-    return () => { disposed = true; if (timer !== null) window.clearTimeout(timer) }
-  }, [externalPlaybackActive])
+    void loop()
+    return () => {
+      disposed = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [externalPlaybackActive, analyzerEnabledNow])
   const externalAnalyzerSource = useMemo(() => ({
     active: externalPlaybackActive && analyzerEnabledNow,
     getBins: () => (externalPlaybackActive ? Uint8Array.from(externalSpectrumRef.current) : null),
@@ -4016,15 +4019,18 @@ function App() {
       let useWebView2 = false
       const tryWebView2Fallback = async (): Promise<boolean> => {
         if (normalizedSong.platform !== 'apple' || !normalizedSong.appleId) return false
-        if (!(await ensureBridgeRunning())) {
-          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: bridge 不可用')
+        if (!isLatestLoad() || !(await ensureBridgeRunning()) || !isLatestLoad()) {
+          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: bridge 不可用或请求已过期')
           return false
         }
         let authorized = getBridgeState().authorized
-        for (let i = 0; i < 40 && !authorized; i++) {
+        for (let i = 0; i < 40 && !authorized && isLatestLoad(); i++) {
           await new Promise(r => setTimeout(r, 300))
+          if (!isLatestLoad()) return false
+          await checkBridgeRunning()
           authorized = getBridgeState().authorized
         }
+        if (!isLatestLoad()) return false
         if (!authorized) {
           ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: 播放面未授权（等待超时）')
           if (!appleBridgeAuthHintShownRef.current) {
@@ -4062,6 +4068,11 @@ function App() {
           console.warn(`🍎 [PlaySong] Apple 歌曲缺少有效曲目 id：《${normalizedSong.name}》`)
           useWebView2 = await tryWebView2Fallback()
         }
+      }
+      if (appleHlsStream && !useWebView2) {
+        // 已命中 Electron 原生 CENC；兼容 bridge 不再参与本曲播放，立即释放其进程与轮询。
+        void bridgeStop().catch(() => undefined)
+        void window.electron?.stopAppleBridge?.()
       }
       // 需要跨平台载体转换的平台：apple（原生取流失败时）/spotify（无自源音源，始终）。
       // kugou/soda 先试原生播放（汽水走逆向 Web API，免费/试听流可播），
