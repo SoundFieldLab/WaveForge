@@ -111,39 +111,141 @@ export interface DioramaUnitRaster {
 // 文本——同一文本反复栅格化是热路径上的纯浪费。按 (fontSpec, text) 缓存共享 CanvasTexture：
 //   - 命中：直接返回已有纹理，零栅格零上传；
 //   - 未命中：栅格 + 上传 + 入缓存；
-//   - LRU 满载驱逐：dispose 旧纹理（驱赶的安全前提：行从活动→邻居后改用整行纹理，
-//     不再引用 unit 纹理，故驱逐时无挂载材质仍在引用该纹理）。
-const RASTER_CACHE_MAX = 1024;
-const unitRasterCache = new Map<string, DioramaUnitRaster>();
-const lineRasterCache = new Map<string, DioramaLineRaster>();
+//   - unit / line 共用一个 GPU 字节预算，避免两个按条数缓存叠加后常驻数千张纹理；
+//   - LRU 满载驱逐时立即 dispose 纹理。
+// CanvasTexture 关闭了 mipmap，按上传后的 RGBA8（宽 × 高 × 4）估算显存。浏览器和驱动
+// 可能另有对齐开销，因此这是稳定、偏保守的预算单位，而非精确的驱动显存统计。
+export const DIORAMA_RASTER_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+export const DIORAMA_RASTER_CACHE_IDLE_BYTES = 8 * 1024 * 1024;
 
-const evictOldest = <T extends DioramaUnitRaster | DioramaLineRaster>(cache: Map<string, T>): void => {
-    const oldest = cache.keys().next().value;
-    if (oldest === undefined) return;
-    const entry = cache.get(oldest);
-    cache.delete(oldest);
-    if (!entry) return;
-    if ('baseTexture' in entry) {
-        entry.baseTexture.dispose();
-        entry.glowTexture.dispose();
+type RasterValue = DioramaUnitRaster | DioramaLineRaster;
+
+interface RasterCacheEntry<T extends RasterValue = RasterValue> {
+    value: T;
+    byteSize: number;
+    fontKey: string;
+}
+
+const disposeRaster = (raster: RasterValue): void => {
+    if ('baseTexture' in raster) {
+        raster.baseTexture.dispose();
+        raster.glowTexture.dispose();
     } else {
-        entry.texture.dispose();
+        raster.texture.dispose();
     }
 };
 
+export class DioramaRasterLruCache {
+    private readonly entries = new Map<string, RasterCacheEntry>();
+    private _bytes = 0;
+
+    constructor(private maxBytes: number) {}
+
+    get size(): number { return this.entries.size; }
+    get bytes(): number { return this._bytes; }
+    get budgetBytes(): number { return this.maxBytes; }
+
+    get<T extends RasterValue>(key: string): T | undefined {
+        const entry = this.entries.get(key);
+        if (!entry) return undefined;
+        this.entries.delete(key);
+        this.entries.set(key, entry);
+        return entry.value as T;
+    }
+
+    set<T extends RasterValue>(key: string, value: T, byteSize: number, fontKey: string): boolean {
+        const normalizedBytes = Math.max(0, Math.ceil(byteSize));
+        const previous = this.entries.get(key);
+        if (previous) {
+            this.entries.delete(key);
+            this._bytes -= previous.byteSize;
+            if (previous.value !== value) disposeRaster(previous.value);
+        }
+        if (normalizedBytes > this.maxBytes) {
+            disposeRaster(value);
+            return false;
+        }
+        this.entries.set(key, { value, byteSize: normalizedBytes, fontKey });
+        this._bytes += normalizedBytes;
+        this.trimTo(this.maxBytes);
+        return true;
+    }
+
+    trimTo(maxBytes: number): void {
+        const target = Math.max(0, Math.floor(maxBytes));
+        while (this._bytes > target) {
+            const oldestKey = this.entries.keys().next().value as string | undefined;
+            if (oldestKey === undefined) break;
+            this.delete(oldestKey);
+        }
+    }
+
+    retainFont(fontKey: string): void {
+        for (const [key, entry] of this.entries) {
+            if (entry.fontKey !== fontKey) this.delete(key);
+        }
+    }
+
+    clear(): void {
+        for (const key of Array.from(this.entries.keys())) this.delete(key);
+    }
+
+    setBudget(maxBytes: number): void {
+        this.maxBytes = Math.max(0, Math.floor(maxBytes));
+        this.trimTo(this.maxBytes);
+    }
+
+    private delete(key: string): void {
+        const entry = this.entries.get(key);
+        if (!entry) return;
+        this.entries.delete(key);
+        this._bytes -= entry.byteSize;
+        disposeRaster(entry.value);
+    }
+}
+
+const rasterCache = new DioramaRasterLruCache(DIORAMA_RASTER_CACHE_MAX_BYTES);
+
+const estimateTextureBytes = (width: number, height: number, textureCount: number): number =>
+    Math.max(1, width) * Math.max(1, height) * 4 * textureCount;
+
+const fontStackFromSpec = (fontSpec: string): string => {
+    const separator = fontSpec.indexOf('px ');
+    return separator >= 0 ? fontSpec.slice(separator + 3) : fontSpec;
+};
+
+/** Keep only rasters made with the current font and restore the active-mode budget. */
+export const retainDioramaRasterFont = (fontKey: string): void => {
+    rasterCache.setBudget(DIORAMA_RASTER_CACHE_MAX_BYTES);
+    rasterCache.retainFont(fontKey);
+};
+
+/** Release all cached GPU textures, for explicit memory-pressure handling. */
+export const clearDioramaRasterCache = (): void => rasterCache.clear();
+
+/** Reduce an inactive Folia mode to a small optional hot set. Pass 0 for a full clear. */
+export const shrinkDioramaRasterCache = (maxBytes = DIORAMA_RASTER_CACHE_IDLE_BYTES): void => {
+    rasterCache.setBudget(maxBytes);
+};
+
+export const getDioramaRasterCacheStats = (): Readonly<{ entries: number; bytes: number; budgetBytes: number }> => ({
+    entries: rasterCache.size,
+    bytes: rasterCache.bytes,
+    budgetBytes: rasterCache.budgetBytes,
+});
+
 /** Rasterise one lyric unit (base + glow layers share one canvas geometry). */
 export const rasterDioramaUnit = (text: string, fontSpec: string): DioramaUnitRaster => {
-    const key = `${fontSpec}\u0000${text}`;
-    const cached = unitRasterCache.get(key);
-    if (cached) {
-        // LRU 刷新：删后重插，把命中项挪到最末（Map 按插入序遍历，最旧在最前）
-        unitRasterCache.delete(key);
-        unitRasterCache.set(key, cached);
-        return cached;
-    }
+    const key = `u\u0000${fontSpec}\u0000${text}`;
+    const cached = rasterCache.get<DioramaUnitRaster>(key);
+    if (cached) return cached;
     const raster = rasterDioramaUnitUncached(text, fontSpec);
-    if (unitRasterCache.size >= RASTER_CACHE_MAX) evictOldest(unitRasterCache);
-    unitRasterCache.set(key, raster);
+    rasterCache.set(
+        key,
+        raster,
+        estimateTextureBytes(raster.canvasWidthPx, raster.canvasHeightPx, 2),
+        fontStackFromSpec(fontSpec),
+    );
     return raster;
 };
 
@@ -197,15 +299,10 @@ export interface DioramaLineRaster {
 /** Rasterise a whole (neighbour) line as one plain white texture - no glow, small pad. */
 export const rasterDioramaLine = (text: string, fontStack: string, fontWeight = DEFAULT_FONT_WEIGHT): DioramaLineRaster => {
     const key = `l\u0000${fontWeight}\u0000${fontStack}\u0000${text}`;
-    const cached = lineRasterCache.get(key);
-    if (cached) {
-        lineRasterCache.delete(key);
-        lineRasterCache.set(key, cached);
-        return cached;
-    }
+    const cached = rasterCache.get<DioramaLineRaster>(key);
+    if (cached) return cached;
     const raster = rasterDioramaLineUncached(text, fontStack, fontWeight);
-    if (lineRasterCache.size >= RASTER_CACHE_MAX) evictOldest(lineRasterCache);
-    lineRasterCache.set(key, raster);
+    rasterCache.set(key, raster, estimateTextureBytes(raster.canvasWidthPx, raster.canvasHeightPx, 1), fontStack);
     return raster;
 };
 
