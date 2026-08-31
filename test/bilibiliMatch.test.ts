@@ -9,6 +9,9 @@ import {
   classifyCandidateType,
   buildQueries,
   dedupeCandidates,
+  compareSubtitleWithLyrics,
+  flattenLyricLinesForMatch,
+  rescoreResultWithLyrics,
   getBilibiliBlacklist,
   addBilibiliBlacklist,
   getBilibiliWatchSettings,
@@ -184,14 +187,24 @@ describe('scoreCandidate（候选打分）', () => {
     expect(hd120.score - base.score).toBe(18)
   })
 
-  it('CC 字幕权重：人工中文字幕 > AI 字幕 > 无字幕', () => {
+  it('CC 字幕权重分档：验证 match 足额 > unverified 缩水 > mismatch 反罚', () => {
     const base = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx)
     const manual = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true })
     const auto = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true })
-    expect(manual.score - base.score).toBe(25)
-    expect(auto.score - base.score).toBe(10)
+    // 缺省（未验证/无法验证）缩水档：人工 +8 / AI +3——CC 只证明"有字幕"，不证明"是这首歌"
+    expect(manual.score - base.score).toBe(8)
+    expect(auto.score - base.score).toBe(3)
     expect(manual.signals.ccSubtitle).toBe(true)
-    expect(auto.signals.ccSubtitle).toBe(true)
+    // 比对 match：人工 +25 / AI +10（足额）
+    const manualOk = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true, ccVerification: 'match' })
+    const autoOk = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true, ccVerification: 'match' })
+    expect(manualOk.score - base.score).toBe(25)
+    expect(autoOk.score - base.score).toBe(10)
+    // 比对 mismatch（字幕内容与歌词无关，如直播切片）：加分变惩罚
+    const manualBad = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true, ccVerification: 'mismatch' })
+    const autoBad = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true, ccVerification: 'mismatch' })
+    expect(manualBad.score - base.score).toBe(-20)
+    expect(autoBad.score - base.score).toBe(-8)
   })
 
   it('官号：作者名=歌手（音乐人本人官号）加分', () => {
@@ -537,5 +550,218 @@ describe('货不对板识别（同名不同歌手，如日语曲撞中文同名�
       {},
     )
     expect(live.score).toBeLessThan(normal.score)
+  })
+})
+
+/** 稻香歌词（CC 比对用例共用：歌词字幕/Live 前段说话/直播切片闲聊等场景的基准歌词） */
+const daoXiangLyrics = [
+  '对这个世界如果你有太多的抱怨',
+  '跌倒了就不敢继续往前走',
+  '为什么人要这么的脆弱堕落',
+  '请你打开电视看看',
+  '多少人为生命在努力勇敢的走下去',
+  '我们是不是该知足',
+  '珍惜一切 就算没有拥有',
+  '还记得你说家是唯一的城堡',
+  '随着稻香河流继续奔跑',
+  '微微笑 小时候的梦我知道',
+  '不要哭让萤火虫带着你逃跑',
+  '乡间的歌谣永远的依靠',
+  '回家吧 回到最初的美好',
+].join('\n')
+
+describe('compareSubtitleWithLyrics（CC 字幕 ↔ 歌词内容比对）', () => {
+  // 真实背景：Starboy (Explicit) 曾匹配到「一滴泪」直播切片——其人工 CC 字幕 +25 分把它推上最佳（245）。
+  // 比对器让"字幕内容是否真是这首歌"决定 CC 分档：match 足额 / unverified 缩水 / mismatch 反罚。
+  const line = (from: number, content: string) => ({ from, content })
+  const starboyLyrics = [
+    "I'm trying to put you in the worst mood, ah",
+    'P1 cleaner than your church shoes, ah',
+    "Million' done, we make it move, ah",
+    'You lookin at the truth, ah',
+    'Look what you done did to the boy',
+  ].join('\n')
+
+  it('歌词字幕视频：字幕行即歌词 → match', () => {
+    const subs = [
+      '对这个世界如果你有太多的抱怨',
+      '跌倒了就不敢继续往前走',
+      '还记得你说家是唯一的城堡',
+      '随着稻香河流继续奔跑',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('翻译措辞因人而异（分段微调/少字）不伤判定（bigram 模糊命中）', () => {
+    const subs = [
+      '这个世界 如果你有太多的抱怨',
+      '跌倒了 就不敢继续往前走',
+      '还记得你说 家是唯一的城堡',
+      '我们是不是该知足',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('Live 前段说话、后面正片：闲聊行占少数采样 → 仍判 match', () => {
+    const subs = [
+      line(0, '大家好欢迎来到今天的直播间'),
+      line(10, '今天给大家唱一首稻香'),
+      line(20, '对这个世界如果你有太多的抱怨'),
+      line(35, '跌倒了就不敢继续往前走'),
+      line(50, '还记得你说家是唯一的城堡'),
+      line(65, '随着稻香河流继续奔跑'),
+      line(80, '回家吧 回到最初的美好'),
+    ]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('直播切片闲聊字幕（可比对却全不命中）→ mismatch 反罚', () => {
+    const subs = [
+      '谢谢哥送的火箭么么哒呀',
+      '不要骂我了宝宝们委屈',
+      '加我粉丝团看更多精彩直播',
+      '宝宝美瞳是什么牌子的',
+      '想要同款的私信我上链接',
+    ].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('mismatch')
+  })
+
+  it('英文歌 + 闲聊中文翻译字幕（歌词侧无翻译可比）→ unverified 不误罚', () => {
+    const subs = [
+      '不要骂我了宝宝们委屈',
+      '加我粉丝团看更多精彩直播',
+      '想要同款的私信我上链接',
+    ].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, starboyLyrics).verdict).toBe('unverified')
+  })
+
+  it('英文歌 + 英文 CC 歌词字幕 → match', () => {
+    const subs = [
+      "I'm trying to put you in the worst mood",
+      'P1 cleaner than your church shoes',
+      'You lookin at the truth',
+      'Look what you done did to the boy',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, starboyLyrics).verdict).toBe('match')
+  })
+
+  it('中英双语 CC（原文+译文分段）→ 译文侧与歌词比对命中', () => {
+    const subs = [
+      'The world has too many complaints\n对这个世界如果你有太多的抱怨',
+      'Fall down and dare not go on\n跌倒了就不敢继续往前走',
+      'Home is the only castle\n还记得你说家是唯一的城堡',
+      'Run along the fragrance river\n随着稻香河流继续奔跑',
+      'Back to the initial beauty\n回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    const r = compareSubtitleWithLyrics(subs, daoXiangLyrics)
+    expect(r.verdict).toBe('match')
+    expect(r.comparable).toBe(5) // 拉丁段与纯中文歌词不可比，只计译文段
+  })
+
+  it('AI 字幕全是「♪音乐♪」噪音行 → unverified（不奖不罚）', () => {
+    const subs = [line(0, '♪ 音乐 ♪'), line(10, '音乐'), line(20, '♪音乐♪')]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('unverified')
+  })
+
+  it('歌词过短/纯 credits（纯音乐空壳）→ unverified', () => {
+    const subs = ['随便什么话内容足够长'].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, '作词：某某\n作曲：某某').verdict).toBe('unverified')
+  })
+
+  it('歌词带 credits 头不伤判定（剔除作词/作曲行）', () => {
+    const subs = [
+      '对这个世界如果你有太多的抱怨',
+      '跌倒了就不敢继续往前走',
+      '还记得你说家是唯一的城堡',
+      '随着稻香河流继续奔跑',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, `作词：周杰伦\n作曲：周杰伦\n${daoXiangLyrics}`).verdict).toBe('match')
+  })
+
+  it('可比样本太少（1~2 段）不敢判 mismatch → unverified', () => {
+    const subs = [line(0, '完全无关的一句话呀'), line(10, '再说一句无关的话吧')]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('unverified')
+  })
+})
+
+describe('flattenLyricLinesForMatch（歌词压平：正文+翻译都进比对云）', () => {
+  it('text 与 translation 都保留，空行剔除', () => {
+    expect(flattenLyricLinesForMatch([
+      { text: '稻香', translation: 'Dao Xiang' },
+      { text: '' },
+      { text: '回家吧', translation: '' },
+    ])).toBe('稻香\nDao Xiang\n回家吧')
+  })
+  it('空/非法输入返回空串', () => {
+    expect(flattenLyricLinesForMatch(undefined)).toBe('')
+    expect(flattenLyricLinesForMatch([])).toBe('')
+  })
+})
+
+describe('CC 验证接线（shouldAutoPlay strong 收紧 + 缓存命中零网络升级）', () => {
+  const manualCcCandidate = (ccVerification?: 'match' | 'mismatch' | 'unverified'): CandidateScore => ({
+    video: video({ title: '周杰伦 稻香 MV', duration: 223, play: 50_000 }),
+    score: 160,
+    signals: {
+      officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: true,
+      nearDuration: false, hdMarker: false, uploaderMatchesArtist: false, ccSubtitle: true,
+    },
+    rank: 0,
+    officialVerifyType: 0,
+    manualZhSubtitle: true,
+    autoSubtitle: false,
+    ...(ccVerification ? { ccVerification } : {}),
+    type: 'other',
+  })
+
+  it('未验证的人工 CC 不再单独撑起自动播放；验证 match 才算 strong', () => {
+    expect(shouldAutoPlay(manualCcCandidate(), 'standard')).toBe(false)
+    expect(shouldAutoPlay(manualCcCandidate('unverified'), 'standard')).toBe(false)
+    expect(shouldAutoPlay(manualCcCandidate('match'), 'standard')).toBe(true)
+    expect(shouldAutoPlay(manualCcCandidate('mismatch'), 'standard')).toBe(false)
+  })
+
+  it('缓存命中后拿到歌词：零网络重扫升级（mismatch 把无关视频拉下最佳）', () => {
+    const sbCtx: MatchContext = { songTitle: '稻香', artists: ['周杰伦'], songDuration: 223 }
+    // 「一滴泪」型：标题完美 + 人工 CC，无歌词时按 unverified 缩水档仍险胜低播放正片
+    const junk = scoreCandidate(
+      video({ bvid: 'BVjunk', title: '周杰伦 稻香（直播切片）', duration: 223, play: 27_700, author: '捷王中王' }),
+      sbCtx,
+      { rank: 0, manualZhSubtitle: true, ccVerification: 'unverified' },
+    )
+    const real = scoreCandidate(
+      video({ bvid: 'BVreal', title: '周杰伦《稻香》', duration: 223, play: 6_000, author: '路人' }),
+      sbCtx,
+      { rank: 0 },
+    )
+    expect(junk.score).toBeGreaterThan(real.score) // 无歌词时的排序（CC 缩水档仍让它领先）
+    const result = {
+      status: 'auto' as const,
+      best: junk,
+      candidates: [junk, real],
+      fallbackChain: [junk, real],
+      ccUnverifiedWithoutLyrics: true,
+    }
+    const settings = { matchPreference: 'balanced' as const, autoPlayStrictness: 'standard' as const, forceAutoPlayHighest: true }
+    const chatSubs = ['谢谢哥送的火箭么么哒呀', '不要骂我了宝宝们委屈', '加我粉丝团看更多精彩直播', '宝宝美瞳是什么牌子的', '想要同款的私信我上链接']
+      .map((c, i) => ({ from: i * 10, text: c }))
+    const upgraded = rescoreResultWithLyrics(
+      result,
+      sbCtx,
+      settings,
+      daoXiangLyrics,
+      '',
+      (bvid) => (bvid === 'BVjunk' ? { manualZh: true, subLines: chatSubs } : undefined),
+    )
+    expect(upgraded).not.toBe(result)
+    const junkAfter = upgraded.fallbackChain.find((c) => c.video.bvid === 'BVjunk')
+    expect(junkAfter?.ccVerification).toBe('mismatch')
+    expect(upgraded.best?.video.bvid).toBe('BVreal')
+    expect(upgraded.candidates[0].video.bvid).toBe('BVreal')
+    // 拿到歌词重扫后不再缺歌词标记
+    expect(upgraded.ccUnverifiedWithoutLyrics).toBeFalsy()
   })
 })

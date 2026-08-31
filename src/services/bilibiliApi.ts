@@ -162,10 +162,20 @@ export interface CandidateScore {
   officialVerifyType: number
   manualZhSubtitle: boolean
   autoSubtitle: boolean
+  /** CC 字幕与歌词的比对结论（复审/重扫阶段填充；undefined 视同 unverified） */
+  ccVerification?: CCVerification
   /** 复审拿到的 cid（供播放地址使用，0 = 未复审） */
   cid?: number
+  /** 复审用的评分时长（多 P 视频为选中分 P 时长；重扫需还原同一评分口径） */
+  effectiveDuration?: number
   type: CandidateType
 }
+
+/** CC 字幕内容与歌词的比对结论：
+ * - match     字幕内容与歌词相符（抽样过半命中）→ CC 加分足额
+ * - mismatch  字幕可比对但与歌词明显不符（直播切片/无关解说）→ CC 加分变惩罚
+ * - unverified 无法验证（歌词缺失/纯音乐/语言体系不通/有效行太少）→ CC 加分大幅缩水 */
+export type CCVerification = 'match' | 'mismatch' | 'unverified'
 
 export type BilibiliMatchStatus = 'auto' | 'confirm' | 'none' | 'error'
 
@@ -178,6 +188,8 @@ export interface BilibiliMatchResult {
   /** 全部排序候选（自动回退链：首选失败时依次尝试，跳过失效/受限/黑名单） */
   fallbackChain: CandidateScore[]
   error?: string
+  /** 匹配时有候选拿到 CC 但当时没有歌词可比（结果偏保守）；调用方拿到歌词后可重扫升级 */
+  ccUnverifiedWithoutLyrics?: boolean
 }
 
 // ===== 看歌设置 =====
@@ -973,6 +985,148 @@ export function classifyCandidateType(title: string): CandidateType {
   return 'other'
 }
 
+// ===== CC 字幕 ↔ 歌词内容比对 =====
+// 背景（用户实测 Starboy →「一滴泪」直播切片）：人工 CC 字幕 +25 会把"标题完美但内容无关"
+// 的视频推上最佳（245 分）。CC 字幕必须验证内容是否真是这首歌，才能决定给足额加分、缩水还是惩罚。
+
+/** 歌词/字幕里的制作人员信息行（非演唱正文，比对前剔除，防止歌词前奏 credits 拉低命中）。
+ *  CJK credits 需带分隔符（"作词："），避免误伤以"作词人"开头的真实歌词行 */
+const LYRIC_CREDIT_RE = /^(作词|作詞|作曲|编曲|編曲|填詞|填词|监制|監製|制作|製作|演唱|演奏|混音|母带|母帶|和声|和聲|录音|錄音|配唱|词曲)[:：\s]|^(作词|作詞|作曲|编曲|編曲|填詞|填词|词曲)$|^(lyrics?|music|composed?|written?|produced?|performed?|arranged?|mixed?|mastered?)\s*(by|:)\s*/i
+
+/** CJK（汉字+假名）判定：字幕/歌词的书写体系分 side 用 */
+const CJK_RE = /[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf]/
+
+export interface SubtitleVerifyResult {
+  verdict: CCVerification
+  /** 实际参与判定的采样段数 */
+  sampled: number
+  /** 其中与歌词命中（bigram 包含率达标）的段数 */
+  matched: number
+  /** 与歌词书写体系可比对的有效字幕段数（0 = 语言不通/无有效内容） */
+  comparable: number
+}
+
+/** 字符 bigram 集合（规范化后的文本按 2-gram 切，容忍翻译措辞差异的模糊比对基础） */
+function bigramSetOf(norm: string): Set<string> {
+  const set = new Set<string>()
+  for (let i = 0; i < norm.length - 1; i += 1) set.add(norm.slice(i, i + 2))
+  return set
+}
+
+/** 段落被歌词云包含的程度：|seg ∩ lyrics| / |seg|（0~1，越高越像同一段词） */
+function containmentOf(segNorm: string, lyricBigrams: Set<string>): number {
+  const segBigrams = bigramSetOf(segNorm)
+  if (!segBigrams.size) return 0
+  let hit = 0
+  for (const bg of segBigrams) if (lyricBigrams.has(bg)) hit += 1
+  return hit / segBigrams.size
+}
+
+/** 单段是否有效可比：规范化后 ≥6 字（过滤"哈哈"/"谢谢"类无信息量短行） */
+function isVerifiableSegment(norm: string): boolean {
+  return norm.length >= 6
+}
+
+/** 判断规范化段与歌词云是否可比对（至少共享一种书写体系） */
+function isComparableSegment(segNorm: string, lyricHasCJK: boolean, lyricHasLatin: boolean): boolean {
+  const segCJK = CJK_RE.test(segNorm)
+  const segLatin = /[a-z]/.test(segNorm)
+  return (segCJK && lyricHasCJK) || (segLatin && lyricHasLatin)
+}
+
+/**
+ * CC 字幕内容 ↔ 歌词比对（纯函数，可单测）。
+ *
+ * 设计要点（对应真实误伤场景）：
+ * - **前段说话、后面正片**（Live 前奏问候/混剪片头）：按时间轴等距抽样、天然跳过片头，
+ *   且"命中过半"才判 match——片头几行闲聊不影响整体判定；
+ * - **双语/翻译字幕**：一行多段（B 站 CC 常见 `原文\n译文`）拆开逐段比对，与歌词任一
+ *   书写体系（CJK/拉丁）相同即参与判定——中文翻译字幕对英文歌词不可字面比对，
+ *   故调用方应把平台歌词的翻译文本一并传入（flattenLyricLinesForMatch 已含 translation）；
+ * - **翻译措辞因人而异**：bigram 包含率（非全等）做模糊命中，改写少量字仍命中；
+ * - **人工填充的无关字幕**（直播切片的聊天/导流）：可比对却几乎不命中 → mismatch 惩罚；
+ * - **AI 字幕整段"♪音乐♪"**：清洗后无有效行 → unverified（不奖不罚）。
+ */
+export function compareSubtitleWithLyrics(
+  /** 字幕行：兼容原始 BilibiliSubtitleLine（content）与复审缓存的规范化段（text） */
+  subLines: Array<{ from?: number; content?: string; text?: string }> | undefined | null,
+  lyricsText: string | undefined | null,
+): SubtitleVerifyResult {
+  const unverified = (sampled = 0, comparable = 0): SubtitleVerifyResult => ({ verdict: 'unverified', sampled, matched: 0, comparable })
+
+  // 1. 歌词云：剔 credits 行 → 规范化 → bigram 集合。过短（纯音乐/空壳歌词）无法验证。
+  const lyricBody = String(lyricsText || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s && !LYRIC_CREDIT_RE.test(s))
+  const lyricNorm = normalizeText(lyricBody.join(''))
+  if (lyricNorm.length < 40) return unverified()
+  const lyricBigrams = bigramSetOf(lyricNorm)
+  const lyricHasCJK = CJK_RE.test(lyricNorm)
+  const lyricHasLatin = /[a-z]/.test(lyricNorm)
+
+  // 2. 字幕段：清洗噪音行（♪音乐♪ 等）→ 拆双语段 → 规范化 → 过滤短行/credits → 去重
+  const segs: Array<{ from: number; norm: string }> = []
+  const seenSeg = new Set<string>()
+  for (const line of subLines || []) {
+    for (const raw of String(line?.content ?? (line?.text || '')).split(/\n/)) {
+      const trimmed = raw.trim()
+      if (!trimmed || LYRIC_CREDIT_RE.test(trimmed)) continue
+      const norm = normalizeText(trimmed)
+      if (!isVerifiableSegment(norm) || seenSeg.has(norm)) continue
+      seenSeg.add(norm)
+      segs.push({ from: Number(line?.from) || 0, norm })
+    }
+  }
+
+  // 3. 只留与歌词可比对（共享书写体系）的段：中文翻译字幕 vs 英文原文歌词 → 不可比 → unverified
+  const comparableSegs = segs.filter((s) => isComparableSegment(s.norm, lyricHasCJK, lyricHasLatin))
+  if (!comparableSegs.length) return unverified(0, 0)
+
+  // 4. 时间轴抽样：跳过首行（常为片头/标题问候），等距最多取 8 段——
+  //    Live 前段说话/混剪片头只占少数采样，正片歌词段占多数即可判 match
+  const sorted = [...comparableSegs].sort((a, b) => a.from - b.from)
+  const pool = sorted.length > 4 ? sorted.slice(1) : sorted
+  const SAMPLE_MAX = 8
+  const samples: Array<{ from: number; norm: string }> = []
+  if (pool.length <= SAMPLE_MAX) {
+    samples.push(...pool)
+  } else {
+    for (let i = 0; i < SAMPLE_MAX; i += 1) {
+      const seg = pool[Math.min(pool.length - 1, Math.round(((i + 0.5) * pool.length) / SAMPLE_MAX))]
+      if (seg && !samples.includes(seg)) samples.push(seg)
+    }
+  }
+  if (!samples.length) return unverified(0, comparableSegs.length)
+
+  // 5. 判定：命中（包含率 ≥0.6）过半 → match；可比样本 ≥3 且全不命中 → mismatch；中间态 → unverified
+  const CONTAIN_THRESHOLD = 0.6
+  let matched = 0
+  for (const s of samples) {
+    if (containmentOf(s.norm, lyricBigrams) >= CONTAIN_THRESHOLD) matched += 1
+  }
+  const ratio = matched / samples.length
+  if (ratio >= 0.5) return { verdict: 'match', sampled: samples.length, matched, comparable: comparableSegs.length }
+  if (matched === 0 && samples.length >= 3) return { verdict: 'mismatch', sampled: samples.length, matched, comparable: comparableSegs.length }
+  return unverified(samples.length, comparableSegs.length)
+}
+
+/**
+ * 把平台歌词行（LyricLine 结构鸭子类型：text + translation）压平成比对用文本。
+ * 正文与翻译都进歌词云：英文歌 + 中文 CC 字幕时，字幕可与中文翻译歌词比对。
+ */
+export function flattenLyricLinesForMatch(lines: Array<{ text?: string; translation?: string }> | undefined | null): string {
+  if (!Array.isArray(lines)) return ''
+  const parts: string[] = []
+  for (const l of lines) {
+    const text = String(l?.text || '').trim()
+    const translation = String(l?.translation || '').trim()
+    if (text) parts.push(text)
+    if (translation && translation !== text) parts.push(translation)
+  }
+  return parts.join('\n')
+}
+
 export function scoreCandidate(
   video: BilibiliVideo,
   ctx: MatchContext,
@@ -984,6 +1138,8 @@ export function scoreCandidate(
     preference?: MatchPreference
     /** 多 P 视频的选中分 P 时长（用于时长贴近评分） */
     effectiveDuration?: number
+    /** CC 字幕与歌词的比对结论（缺省视为 unverified 缩水档） */
+    ccVerification?: CCVerification
   },
 ): CandidateScore {
   const songTitleRaw = cleanSongTitle(ctx.songTitle)
@@ -1274,9 +1430,12 @@ export function scoreCandidate(
   else if (officialVerifyType === 1) score += 15
   // 官号 + 个人认证：作者=歌手且通过个人认证 → 音乐人本人官方账号，额外加成
   if (signals.uploaderMatchesArtist && officialVerifyType === 1) score += 10
-  // CC 字幕（B 站字幕）权重：人工中文字幕最高，AI 字幕次之
-  if (manualZhSubtitle) score += 25
-  else if (autoSubtitle) score += 10
+  // CC 字幕权重（分档）：内容与歌词比对后 match 足额 / unverified 缩水 / mismatch 反罚。
+  // 背景（Starboy →「一滴泪」直播切片）：人工 CC +25 无差别加分曾把无关视频推上最佳（245 分）——
+  // CC 只证明"有字幕"，不证明"是这首歌"，必须验证内容后才值得高分。
+  const ccVerdict: CCVerification = extra?.ccVerification ?? 'unverified'
+  if (manualZhSubtitle) score += ccVerdict === 'match' ? 25 : ccVerdict === 'mismatch' ? -20 : 8
+  else if (autoSubtitle) score += ccVerdict === 'match' ? 10 : ccVerdict === 'mismatch' ? -8 : 3
 
   // 偏好加权
   const preference = extra?.preference ?? 'balanced'
@@ -1313,10 +1472,11 @@ export function preferenceAdjustment(type: CandidateType, preference: MatchPrefe
  * 额外：类型为官方且歌手+歌名+时长贴近（明显正片）时降低自动播放门槛。
  */
 export function shouldAutoPlay(candidate: CandidateScore, strictness: AutoPlayStrictness = 'standard'): boolean {
+  // 人工 CC 字幕只有内容验证过与歌词相符才算"强信号"（未验证的 CC 不再单独撑起自动播放）
   const strong =
     candidate.signals.officialMarker ||
     candidate.officialVerifyType >= 1 ||
-    candidate.manualZhSubtitle ||
+    (candidate.manualZhSubtitle && candidate.ccVerification === 'match') ||
     candidate.signals.uploaderMatchesArtist
   // 歌手+歌名+MV/官方 且时长贴近 → 高置信正片
   const obviousOfficial = candidate.type === 'official' && candidate.signals.hasArtist && candidate.signals.nearDuration
@@ -1457,8 +1617,10 @@ export function addBilibiliBlacklist(songKey: string, bvid: string): string[] {
 const TOP_CONFIRM_COUNT = 12
 const REVIEW_TOP_N = 8
 
+/** 复审缓存的字幕条目：清洗后的分段（原始内容，供歌词比对），有 CC 才抓取 */
+interface ReviewSubtitleSegment { from: number; text: string }
 /** 复审 view/字幕的全局 bvid 缓存（跨歌曲复用，1h TTL；LRU 上限防无界增长） */
-const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number }>()
+const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number; subLines?: ReviewSubtitleSegment[] }>()
 
 /**
  * 清除 MV 匹配缓存：24h 内存匹配结果 + 复审缓存 + 手动标记/黑名单（localStorage）。
@@ -1604,12 +1766,15 @@ function applyPreferenceToReview(review: { manualZh: boolean; autoZh: boolean },
   return { manualZhSubtitle: review.manualZh, autoSubtitle: review.autoZh }
 }
 
-/** 复审候选（view 拿 cid/作者认证 + 字幕），带全局 bvid 缓存 */
+/** 复审候选（view 拿 cid/作者认证 + 字幕 + CC 内容歌词比对），带全局 bvid 缓存。
+ *  lyricsText：平台歌词（含翻译，flattenLyricLinesForMatch 产物）；为空时 CC 一律按 unverified 缩水档，
+ *  绝不为验证歌词额外等待网络——验证是"顺路"增强，不能拖慢匹配。 */
 async function reviewCandidates(
   candidates: CandidateScore[],
   ctx: MatchContext,
   preference: MatchPreference,
   signal?: AbortSignal,
+  lyricsText?: string,
 ): Promise<CandidateScore[]> {
   const top = candidates.slice(0, REVIEW_TOP_N)
   const reviewed = await Promise.all(
@@ -1624,6 +1789,7 @@ async function reviewCandidates(
           let effectiveDuration = 0
           let manualZh = false
           let autoZh = false
+          let subLines: ReviewSubtitleSegment[] | undefined
           if (view.code === 0) {
             officialVerifyType = view.data.owner.officialVerifyType
             // 多 P（选集）视频：选择最匹配歌曲的分 P —— 该 P 的 cid 直接用于播放，
@@ -1643,16 +1809,27 @@ async function reviewCandidates(
                 () => ({ code: -1, subtitles: [] as BilibiliSubtitleInfo[] }),
               )
               if (subInfo.code === 0 && subInfo.subtitles.length) {
+                let chosenSub: BilibiliSubtitleInfo | null = null
                 for (const s of subInfo.subtitles) {
                   if (/zh|中文/i.test(`${s.lan}${s.lanDoc}`)) {
                     if (s.aiType === 0) manualZh = true
                     else autoZh = true
+                    // 比对用字幕内容：优先人工字幕，其次 AI 字幕（只取一条，不额外多打请求）
+                    if (!chosenSub || s.aiType === 0) chosenSub = s
                   }
+                }
+                // CC 内容抓取：仅限有 CC 的候选（多数视频 0 次），且与复审并行不串行；
+                // 内容进 1h 全局缓存——预加载时抓过，切歌命中 24h 匹配缓存后重扫零网络
+                if ((manualZh || autoZh) && chosenSub) {
+                  const json = await getBilibiliSubtitleJson(chosenSub.cacheKey, signal).catch(() => [])
+                  subLines = (cleanSubtitleLines(json) || [])
+                    .flatMap((l) => String(l?.content || '').split('\n').map((part) => ({ from: Number(l?.from) || 0, text: part.trim() })))
+                    .filter((s) => s.text)
                 }
               }
             }
           }
-          cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration }
+          cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration, subLines }
           reviewCache.set(bvid, cached)
           pruneReviewCache()
         } catch {
@@ -1662,6 +1839,11 @@ async function reviewCandidates(
         }
       }
       const { manualZhSubtitle, autoSubtitle } = applyPreferenceToReview(cached, preference)
+      // CC 内容 ↔ 歌词比对：有 CC 且有歌词才可比；无歌词时按 unverified 缩水档（不惩罚）
+      let ccVerification: CCVerification = 'unverified'
+      if ((cached.manualZh || cached.autoZh) && lyricsText) {
+        ccVerification = compareSubtitleWithLyrics(cached.subLines, lyricsText).verdict
+      }
       const rescored = scoreCandidate(candidate.video, ctx, {
         rank: candidate.rank,
         officialVerifyType: cached.officialVerifyType,
@@ -1669,8 +1851,9 @@ async function reviewCandidates(
         autoSubtitle,
         preference,
         effectiveDuration: cached.effectiveDuration,
+        ccVerification,
       })
-      return { ...rescored, cid: cached.cid }
+      return { ...rescored, cid: cached.cid, effectiveDuration: cached.effectiveDuration, ccVerification }
     }),
   )
   const reviewedSet = new Set(reviewed.map((c) => c.video.bvid))
@@ -1678,9 +1861,61 @@ async function reviewCandidates(
   return [...reviewed, ...rest].sort((a, b) => b.score - a.score)
 }
 
+/** 缓存命中但匹配时无歌词可比的候选：拿到歌词后用复审缓存的字幕内容纯本地重扫（零网络、微秒级）。
+ *  记忆视频仍无条件置顶；门槛按设置重算（重扫后过线则 confirm 升为 auto）。
+ *  reviewLookup 供测试注入复审缓存桩（生产默认 reviewCache）。 */
+export function rescoreResultWithLyrics(
+  result: BilibiliMatchResult,
+  song: MatchContext,
+  settings: Pick<BilibiliWatchSettings, 'matchPreference' | 'autoPlayStrictness' | 'forceAutoPlayHighest'>,
+  lyricsText: string,
+  overrideBvid: string,
+  reviewLookup: (bvid: string) => { manualZh?: boolean; autoZh?: boolean; subLines?: Array<{ from?: number; text?: string }>; cid?: number } | undefined = (bvid) => reviewCache.get(bvid),
+): BilibiliMatchResult {
+  if (!result.ccUnverifiedWithoutLyrics || !result.fallbackChain.length) return result
+  const preference = settings.matchPreference
+  const rescored = result.fallbackChain.map((c) => {
+    const rc = reviewLookup(c.video.bvid)
+    let ccVerification: CCVerification = 'unverified'
+    if (rc && (rc.manualZh || rc.autoZh)) ccVerification = compareSubtitleWithLyrics(rc?.subLines, lyricsText).verdict
+    const s = scoreCandidate(c.video, song, {
+      rank: c.rank,
+      officialVerifyType: c.officialVerifyType,
+      manualZhSubtitle: c.manualZhSubtitle,
+      autoSubtitle: c.autoSubtitle,
+      preference,
+      effectiveDuration: c.effectiveDuration,
+      ccVerification,
+    })
+    return { ...s, cid: c.cid ?? rc?.cid ?? 0, effectiveDuration: c.effectiveDuration, ccVerification }
+  }).sort((a, b) => b.score - a.score)
+  let chain = rescored
+  let best = rescored[0]
+  if (overrideBvid) {
+    const remembered = rescored.find((c) => c.video.bvid === overrideBvid)
+    if (remembered) {
+      chain = [remembered, ...rescored.filter((c) => c.video.bvid !== overrideBvid)]
+      best = remembered
+    }
+  }
+  let status: BilibiliMatchStatus
+  if (!best) status = 'none'
+  else if (overrideBvid) status = 'auto'
+  else if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) status = 'auto'
+  else status = 'confirm'
+  const ccUnverifiedWithoutLyrics = rescored.some((c) => (c.manualZhSubtitle || c.autoSubtitle) && c.ccVerification === 'unverified') && !lyricsText
+  return { status, best, candidates: chain.slice(0, TOP_CONFIRM_COUNT), fallbackChain: chain, ccUnverifiedWithoutLyrics: ccUnverifiedWithoutLyrics || undefined }
+}
+
 export async function findBestBilibiliMv(
   song: MatchContext,
-  opts?: { signal?: AbortSignal; settings?: Partial<BilibiliWatchSettings> },
+  opts?: {
+    signal?: AbortSignal
+    settings?: Partial<BilibiliWatchSettings>
+    /** 同步取当前歌歌词（含翻译，flattenLyricLinesForMatch 产物）。仅用于 CC 字幕内容验证：
+     *  匹配时已加载就传入（验证 +25/-20 分档），没加载就返回空（unverified 缩水档）——绝不为此等待网络。 */
+    lyricsProvider?: () => string | null | undefined
+  },
 ): Promise<BilibiliMatchResult> {
   const settings = { ...DEFAULT_WATCH_SETTINGS, ...(opts?.settings || getBilibiliWatchSettings()) }
   // 缓存键必须包含设置指纹：偏好/门槛/模板/强制最高分不同 → 匹配结果（排序与门槛判定）不同
@@ -1697,8 +1932,17 @@ export async function findBestBilibiliMv(
   ].join('|')
   const cacheKey = `${songKey}::${settingsFingerprint}`
   const cached = matchCache.get(cacheKey)
-  if (cached && Date.now() - cached.at < MATCH_CACHE_TTL) return cached.result
-  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal)
+  if (cached && Date.now() - cached.at < MATCH_CACHE_TTL) {
+    // 命中缓存但当时无歌词可比：现在有歌词了 → 用缓存的字幕内容零网络重扫升级（CC 验证分档生效）
+    const lyricsText = String(opts?.lyricsProvider?.() || '').trim()
+    if (lyricsText && cached.result.ccUnverifiedWithoutLyrics) {
+      const upgraded = rescoreResultWithLyrics(cached.result, song, settings, lyricsText, overrideBvid)
+      if (upgraded !== cached.result) matchCache.set(cacheKey, { at: cached.at, result: upgraded })
+      return upgraded
+    }
+    return cached.result
+  }
+  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider)
   matchCache.set(cacheKey, { at: Date.now(), result })
   pruneMatchCache()
   return result
@@ -1709,11 +1953,21 @@ async function findBestBilibiliMvUncached(
   cacheKey: string,
   settings: BilibiliWatchSettings,
   signal?: AbortSignal,
+  lyricsProvider?: () => string | null | undefined,
 ): Promise<BilibiliMatchResult> {
   // override/黑名单按歌曲存储键读写（与缓存键分离：不含设置指纹）
   const songKey = songKeyOf(song)
   const empty = (error?: string): BilibiliMatchResult => ({ status: 'error', candidates: [], fallbackChain: [], error })
   const blacklist = new Set(getBilibiliBlacklist(songKey))
+  // 歌词同步取一次（调用方已加载就用；没有就整轮按 unverified 缩水档，不等待网络）
+  const lyricsText = String(lyricsProvider?.() || '').trim()
+  /** 匹配轮次收尾：无歌词时有候选拿着 CC 缩水分 → 标记，供拿到歌词后零网络重扫升级 */
+  const finish = (result: BilibiliMatchResult): BilibiliMatchResult => {
+    if (!lyricsText && result.fallbackChain.some((c) => (c.manualZhSubtitle || c.autoSubtitle) && c.ccVerification === 'unverified')) {
+      result.ccUnverifiedWithoutLyrics = true
+    }
+    return result
+  }
 
   // 0. 用户手动选择记忆：优先播放该视频，但不短路——完整搜索照常跑，
   //    候选列表保留全部结果（否则列表只剩记忆视频一个，用户无法换回其他 MV）。
@@ -1732,7 +1986,7 @@ async function findBestBilibiliMvUncached(
             author: view.data.owner.name,
             pic: view.data.pic,
           }
-          const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal)
+          const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal, lyricsText)
           rememberedOverride = scored[0] || null
         }
       } catch {
@@ -1743,7 +1997,7 @@ async function findBestBilibiliMvUncached(
   }
   /** 记忆视频直接播放（搜索失败/无候选时也要能放记忆的视频） */
   const rememberedOnly = (): BilibiliMatchResult | null =>
-    rememberedOverride ? { status: 'auto', best: rememberedOverride, candidates: [rememberedOverride], fallbackChain: [rememberedOverride] } : null
+    rememberedOverride ? finish({ status: 'auto', best: rememberedOverride, candidates: [rememberedOverride], fallbackChain: [rememberedOverride] }) : null
 
   // 1. 偏好感知多查询搜索（前两页提升召回）
   const queries = buildQueries(song, settings)
@@ -1778,8 +2032,8 @@ async function findBestBilibiliMvUncached(
 
   if (!candidates.length) return rememberedOnly() || { status: 'none', candidates: [], fallbackChain: [] }
 
-  // 3. TOP-5 复审（作者认证 + 字幕，全局 bvid 缓存）
-  candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal)
+  // 3. TOP-5 复审（作者认证 + 字幕 + CC 内容歌词比对，全局 bvid 缓存）
+  candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal, lyricsText)
 
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
   let fallbackChain = candidates
@@ -1793,10 +2047,10 @@ async function findBestBilibiliMvUncached(
   const topCandidates = fallbackChain.slice(0, TOP_CONFIRM_COUNT)
   if (rememberedOverride || !best) {
     if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
-    return { status: 'auto', best, candidates: topCandidates, fallbackChain }
+    return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }
   if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) {
-    return { status: 'auto', best, candidates: topCandidates, fallbackChain }
+    return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }
-  return { status: 'confirm', candidates: topCandidates, fallbackChain }
+  return finish({ status: 'confirm', candidates: topCandidates, fallbackChain })
 }
