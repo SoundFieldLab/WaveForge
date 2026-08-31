@@ -25,8 +25,10 @@ vi.mock('../src/services/albumGapless', () => {
     options: unknown
     constructor(options: unknown) { this.options = options }
     initAudioContext = vi.fn()
-    setEnabled = vi.fn()
+    setEnabled = vi.fn().mockReturnValue(true)
     setDirectJoinPreferred = vi.fn()
+    schedulePreload = vi.fn().mockResolvedValue(true)
+    getSongAlbumKey = vi.fn((song: { albumId?: string; albumCover?: string }) => song.albumId ? `${song.albumId}:${song.albumCover || ''}` : '')
     clearPreload = vi.fn()
     snapshot = () => ({ handoff: false, preload: { mixPending: false, mixStarted: false } })
   }
@@ -137,6 +139,33 @@ describe('SeamlessJoinController（专辑首选拼接）', () => {
     expect(deps.setTransitionState).toHaveBeenCalled()
   })
 
+  it('ended 拼接等待 play 期间 reset：旧 continuation 不提交', async () => {
+    let resolvePlay: (() => void) | null = null
+    const deps = makeDeps()
+    const controller = createSeamlessJoinController(deps)
+    const active = makeFakeAudio()
+    const standby = makeFakeAudio({
+      play: vi.fn().mockImplementation(function (this: HTMLAudioElement) {
+        return new Promise<void>(resolve => {
+          resolvePlay = () => {
+            this.paused = false
+            resolve()
+          }
+        })
+      }),
+    })
+    deps.getActiveAudio = () => active
+    deps.getStandbyAudio = () => standby
+    controller.scheduleBoundary({ active, remaining: 0.8, albumPlayback: true })
+    expect(controller.onEnded(standby)).toBe(true)
+    controller.reset()
+    resolvePlay?.()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(deps.commitTransition).not.toHaveBeenCalled()
+    expect(deps.setTransitionState).not.toHaveBeenCalledWith('running-transition', expect.anything())
+  })
+
   it('ended 时 standby 无缓冲：返回 false 让调用方走备选', async () => {
     const deps = makeDeps()
     const controller = createSeamlessJoinController(deps)
@@ -201,10 +230,10 @@ describe('GaplessIntegration（同专辑判定与方案分流）', () => {
       playAt: async () => true,
       prepareAudioUrl: async (song) => song.url,
     })
-    return { integration, albumGapless: (integration as unknown as { albumGapless: { setDirectJoinPreferred: ReturnType<typeof vi.fn>; setEnabled: ReturnType<typeof vi.fn> } }).albumGapless }
+    return { integration, albumGapless: (integration as unknown as { albumGapless: { setDirectJoinPreferred: ReturnType<typeof vi.fn>; setEnabled: ReturnType<typeof vi.fn>; schedulePreload: ReturnType<typeof vi.fn> } }).albumGapless }
   }
 
-  it('同专辑 + 开启专辑融合 → 首选直接拼接（交叉淡化让路）', async () => {
+  it('同专辑 + 开启专辑融合 → 调度尾部检测与 Equal Power 预载', async () => {
     const { integration, albumGapless } = makeIntegration()
     const result = await integration.prepareTransition({
       token: 1,
@@ -213,9 +242,10 @@ describe('GaplessIntegration（同专辑判定与方案分流）', () => {
       currentSong: { key: 'a', url: 'u1', albumId: 'alb-1' },
       nextSong: { key: 'b', url: 'u2', albumId: 'alb-1' },
     })
-    expect(result).toEqual({ success: false, mode: 'disabled' })
-    expect(albumGapless.setDirectJoinPreferred).toHaveBeenCalledWith(true)
-    expect(albumGapless.setEnabled).toHaveBeenCalledWith(false)
+    expect(result).toEqual({ success: true, mode: 'album-gapless' })
+    expect(albumGapless.setDirectJoinPreferred).toHaveBeenCalledWith(false)
+    expect(albumGapless.setEnabled).toHaveBeenCalledWith(true, null, 'alb-1:')
+    expect(albumGapless.schedulePreload).toHaveBeenCalledWith(1, 1, expect.objectContaining({ key: 'b', url: 'u2' }))
   })
 
   it('跨专辑 → 普通无缝边界（直接拼接不武装）', async () => {
