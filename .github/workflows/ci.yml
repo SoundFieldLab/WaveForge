@@ -44,8 +44,8 @@ jobs:
       - name: 运行单测（vitest）
         run: npm run test
 
-      - name: 运行 RGB 与 stem Node 集成测试
-        run: npm run test:chroma && npm run test:signalrgb && npm run test:stems:node
+      - name: 运行 RGB、桌面安全与 stem Node 集成测试
+        run: npm run test:chroma && npm run test:signalrgb && npm run test:desktop && npm run test:stems:node
 
       - name: 前端构建（vite build）
         run: npm run build
