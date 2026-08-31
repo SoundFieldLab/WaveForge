@@ -33,6 +33,7 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
 import { ByteLruCache, readResponseWithLimit } from './server/byte-lru-cache.mjs'
+import { isAuthorizedLocalRequest } from './server/local-service-auth.mjs'
 import dglabRelayModule from './server/dglab-relay.cjs'
 const { createDGLabRelay } = dglabRelayModule
 
@@ -68,6 +69,7 @@ axios.defaults.httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 })
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3001
+const LOCAL_SERVICE_TOKEN = String(process.env.WAVEFORGE_LOCAL_TOKEN || '')
 const ALLOWED_RENDERER_ORIGINS = new Set([
   'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -991,9 +993,16 @@ app.use((req, res, next) => {
   }
   // QQ Music Skills 的用户密钥只通过本机请求头传递，避免出现在 URL、历史记录和日志中。
   // Apple license 代理：兼容规范 Media-User-Token 与历史 X-Apple-Music-User-Token。
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal')
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Local-Token, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal')
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
+  if (!isAuthorizedLocalRequest({
+    configuredToken: LOCAL_SERVICE_TOKEN,
+    suppliedToken: req.headers['x-waveforge-local-token'],
+    path: req.path,
+  })) {
+    return res.status(403).json({ error: 'Unauthorized local service request' })
+  }
   next()
 })
 

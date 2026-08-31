@@ -15,6 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from local_service_auth import is_authorized_local_request
 import librosa
 import numpy as np
 import soundfile as sf
@@ -26,7 +27,14 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"])
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"], allow_headers=["Content-Type", "X-WaveForge-Local-Token"])
+
+
+@app.before_request
+def require_local_service_token():
+    if not is_authorized_local_request(request.path, request.headers.get('X-WaveForge-Local-Token', '')):
+        return jsonify({'error': 'unauthorized'}), 403
+    return None
 
 
 def default_cache_root() -> Path:

@@ -11,6 +11,7 @@ const tests = [
   'test/test_htdemucs_runner.py',
   'test/test_stem_render.py',
   'test/test_track_stem_runner.py',
+  'test/test_local_service_auth.py',
 ]
 
 for (const testFile of tests) {

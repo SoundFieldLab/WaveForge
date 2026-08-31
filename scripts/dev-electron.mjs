@@ -4,6 +4,7 @@ import electron from 'electron'
 import { fileURLToPath } from 'url'
 import { dirname, resolve } from 'path'
 import net from 'net'
+import { randomBytes } from 'crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -22,6 +23,8 @@ const logStartup = message => {
 const projectRoot = resolve(__dirname, '..')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
+const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).toString('base64url')
+const localServiceEnv = { ...process.env, WAVEFORGE_LOCAL_TOKEN: localServiceToken }
 
 function getNewestMtime(targetPath) {
   if (!existsSync(targetPath)) return 0
@@ -195,7 +198,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -227,7 +230,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -262,7 +265,7 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
           PYTHONIOENCODING: 'utf-8',
           PYTHONUNBUFFERED: '1'
         }
@@ -304,7 +307,7 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
           FORCE_COLOR: '1'
         }
       }
@@ -386,7 +389,7 @@ async function startDev() {
     {
       stdio: 'inherit',
       env: {
-        ...process.env,
+        ...localServiceEnv,
         WAVEFORGE_DEV_SERVER_URL: devServerUrl,
         WAVEFORGE_STARTUP_LOG: startupLogFile,
         PYTHONIOENCODING: 'utf-8',

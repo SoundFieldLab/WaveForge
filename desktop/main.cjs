@@ -27,6 +27,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
+const LOCAL_SERVICE_TOKEN = process.env.WAVEFORGE_LOCAL_TOKEN || crypto.randomBytes(32).toString('base64url')
 const {
   loadWindowState,
   saveWindowState,
@@ -6996,6 +6997,7 @@ async function startLocalBackend() {
       env: {
         ...process.env,
         WAVEFORGE_USERDATA: app.getPath('userData'),
+        WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
       },
       stdio: 'pipe',
     })
@@ -7033,7 +7035,7 @@ async function startLocalBackend() {
       localPythonChild = spawn(pythonExe, [beatAnalyzer], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       })
       localPythonChild.stdout?.on('data', (chunk) => {
         const text = String(chunk).trim()
@@ -7069,7 +7071,7 @@ async function startLocalBackend() {
       localLoudnessChild = spawn(pythonExe, [loudnessServer], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       })
       localLoudnessChild.stdout?.on('data', (chunk) => {
         const text = String(chunk).trim()
@@ -7105,7 +7107,7 @@ async function startLocalBackend() {
       localCompensationChild = spawn(pythonExe, [compensationServer], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...process.env, WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN, WAVEFORGE_CACHE_PATH: configManager.getCachePath(), PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       })
       localCompensationChild.stdout?.on('data', (chunk) => {
         const text = String(chunk).trim()
@@ -7330,6 +7332,15 @@ app.whenReady().then(async () => {
     const type = details?.deviceType || ''
     return type === 'audiooutput' || type === 'audio' || type === 'video' || details?.mediaType === 'audio'
   })
+
+  // Electron 本地服务请求认证：token 只存在于主进程和受控子进程环境，renderer 无法读取。
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://localhost:3001/*', 'http://127.0.0.1:3001/*', 'http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] },
+    (details, callback) => {
+      details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
+      callback({ requestHeaders: details.requestHeaders })
+    },
+  )
 
   // ── Apple 音源 CORS 放行（Cider 式原生音源所需）────────────────────────────
   // 渲染层 hls.js 直接请求 Apple 的 HLS 清单/分段/Widevine license，这些接口的
