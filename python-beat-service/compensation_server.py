@@ -38,7 +38,7 @@ CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", 
 
 @app.before_request
 def require_local_service_token():
-    if not is_authorized_local_request(request.path, request.headers.get('X-WaveForge-Local-Token', '')):
+    if not is_authorized_local_request(request.headers.get('X-WaveForge-Local-Token', '')):
         return jsonify({'error': 'unauthorized'}), 403
     return None
 

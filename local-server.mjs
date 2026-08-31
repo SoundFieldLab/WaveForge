@@ -999,7 +999,6 @@ app.use((req, res, next) => {
   if (!isAuthorizedLocalRequest({
     configuredToken: LOCAL_SERVICE_TOKEN,
     suppliedToken: req.headers['x-waveforge-local-token'],
-    path: req.path,
   })) {
     return res.status(403).json({ error: 'Unauthorized local service request' })
   }

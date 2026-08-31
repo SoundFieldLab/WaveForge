@@ -28,17 +28,18 @@ def load_auth(token):
 class LocalServiceAuthTests(unittest.TestCase):
     def test_standalone_development_without_token_remains_compatible(self):
         auth = load_auth(None)
-        self.assertTrue(auth.is_authorized_local_request('/analyze', ''))
+        self.assertTrue(auth.is_authorized_local_request(''))
 
-    def test_health_is_public_in_token_mode(self):
+    def test_health_requires_exact_token_in_token_mode(self):
         auth = load_auth('secret')
-        self.assertTrue(auth.is_authorized_local_request('/health', ''))
+        self.assertFalse(auth.is_authorized_local_request(''))
+        self.assertTrue(auth.is_authorized_local_request('secret'))
 
     def test_business_routes_require_exact_token(self):
         auth = load_auth('secret')
-        self.assertFalse(auth.is_authorized_local_request('/analyze', ''))
-        self.assertFalse(auth.is_authorized_local_request('/analyze', 'wrong'))
-        self.assertTrue(auth.is_authorized_local_request('/analyze', 'secret'))
+        self.assertFalse(auth.is_authorized_local_request(''))
+        self.assertFalse(auth.is_authorized_local_request('wrong'))
+        self.assertTrue(auth.is_authorized_local_request('secret'))
 
 
 if __name__ == '__main__':

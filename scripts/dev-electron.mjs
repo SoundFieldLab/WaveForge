@@ -120,7 +120,10 @@ async function isLocalApiServerHealthy() {
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 1500)
-    const res = await fetch('http://127.0.0.1:3001/api/qq/cookie/status', { signal: controller.signal })
+    const res = await fetch('http://127.0.0.1:3001/health', {
+      headers: { 'X-WaveForge-Local-Token': localServiceToken },
+      signal: controller.signal,
+    })
     clearTimeout(timer)
     if (!res.ok) return false
     const contentType = res.headers.get('content-type') || ''
