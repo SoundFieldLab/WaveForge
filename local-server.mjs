@@ -984,8 +984,16 @@ app.use((req, res, next) => {
     return res.status(426).json({ error: 'WebSocket 不在此服务，请连接遥控器服务的 /ws' })
   }
   const origin = req.headers.origin
+  const suppliedLocalToken = req.headers['x-waveforge-local-token']
+  const tokenAuthorized = isAuthorizedLocalRequest({
+    configuredToken: LOCAL_SERVICE_TOKEN,
+    suppliedToken: suppliedLocalToken,
+  })
   if (origin && !ALLOWED_RENDERER_ORIGINS.has(origin)) {
     return res.status(403).json({ error: 'Origin not allowed' })
+  }
+  if ((origin === 'null' || origin === 'file://') && !tokenAuthorized) {
+    return res.status(403).json({ error: 'Origin requires local service authentication' })
   }
   if (origin) {
     res.header('Access-Control-Allow-Origin', origin)
@@ -996,10 +1004,7 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Local-Token, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal')
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
-  if (!isAuthorizedLocalRequest({
-    configuredToken: LOCAL_SERVICE_TOKEN,
-    suppliedToken: req.headers['x-waveforge-local-token'],
-  })) {
+  if (!tokenAuthorized) {
     return res.status(403).json({ error: 'Unauthorized local service request' })
   }
   next()

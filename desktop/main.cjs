@@ -7403,8 +7403,10 @@ app.whenReady().then(async () => {
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['http://localhost:3001/*', 'http://127.0.0.1:3001/*', 'http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] },
     (details, callback) => {
-      beginPythonServiceRequest(details)
-      details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
+      if (mainWindow && details.webContentsId === mainWindow.webContents.id) {
+        beginPythonServiceRequest(details)
+        details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
+      }
       callback({ requestHeaders: details.requestHeaders })
     },
   )

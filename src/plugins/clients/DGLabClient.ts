@@ -371,11 +371,13 @@ function createClient() {
     listeners.forEach(l => l())
   }
 
+  let controlToken = ''
   const fetchStatus = async () => {
     const seq = ++fetchSeq
     try {
       const res = await fetch(`${DGLAB_API}/status`, { signal: AbortSignal.timeout(2500) })
       const json = await res.json()
+      if (typeof json.controlToken === 'string') controlToken = json.controlToken
       if (seq !== fetchSeq) return json
       set({
         available: true,
@@ -411,7 +413,8 @@ function createClient() {
   const connect = () => {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
     const settings = loadDGLabSettings()
-    const url = `ws://127.0.0.1:${settings.port}/dglab/ctrl`
+    if (!controlToken) return
+    const url = `ws://127.0.0.1:${settings.port}/dglab/ctrl?token=${encodeURIComponent(controlToken)}`
     try {
       const socket = new WebSocket(url)
       ws = socket

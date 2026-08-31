@@ -184,6 +184,7 @@ function createDGLabRelay() {
     listenRetries: 0,
     app: { v3: null, v4: new Map() }, // v3: 单 App ws；v4: Map(tid -> ws)
     ctrlClients: new Set(),
+    controlToken: crypto.randomBytes(32).toString('base64url'),
     clientId: uuid(),
     v3AppId: null,
     devices: [], // V4 slot snapshot
@@ -913,6 +914,15 @@ const sendV3Pulse = (channel, frames) => {
       log(`拒绝非本机控制连接：${remote}`)
       return
     }
+    let suppliedToken = ''
+    try { suppliedToken = new URL(req?.url || '/', 'http://localhost').searchParams.get('token') || '' } catch { /* invalid URL */ }
+    const expected = Buffer.from(state.controlToken)
+    const supplied = Buffer.from(suppliedToken)
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      try { ws.close(4003, 'invalid control token') } catch { /* ignore */ }
+      log('拒绝未认证的本机控制连接')
+      return
+    }
     state.ctrlClients.add(ws)
     pushLogsTo(ws)
     broadcastStatus()
@@ -1316,7 +1326,7 @@ const sendV3Pulse = (channel, frames) => {
   const registerHttp = (app) => {
     app.get('/api/dglab/status', (req, res) => {
       const status = buildStatus()
-      res.json({ ok: true, ...status })
+      res.json({ ok: true, ...status, controlToken: state.controlToken })
     })
     app.post('/api/dglab/control', (req, res) => {
       const { action, settings } = req.body || {}

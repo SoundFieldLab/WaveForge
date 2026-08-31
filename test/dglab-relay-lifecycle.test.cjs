@@ -24,14 +24,42 @@ const reservePort = () => new Promise((resolve, reject) => {
   })
 })
 
-test('DG-LAB relay stays stopped until enabled and rejects a mismatched V3 target', async () => {
+test('DG-LAB relay stays stopped until enabled and rejects unauthenticated control clients', async t => {
   const relay = createDGLabRelay()
   const port = await reservePort()
   relay._internal.settings.port = port
+  t.after(() => relay.stop())
 
   assert.equal(relay.getStatus().running, false)
   assert.equal(relay._internal.server, null)
 
+  relay.start()
+  await waitFor(() => relay.getStatus().running)
+
+  const unauthenticated = await new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/dglab/ctrl`)
+    socket.once('close', (code, reason) => resolve({ code, reason: reason.toString() }))
+    socket.once('error', reject)
+  })
+  assert.deepEqual(unauthenticated, { code: 4003, reason: 'invalid control token' })
+
+  const authenticated = new WebSocket(`ws://127.0.0.1:${port}/dglab/ctrl?token=${encodeURIComponent(relay._internal.controlToken)}`)
+  await new Promise((resolve, reject) => {
+    authenticated.once('open', resolve)
+    authenticated.once('error', reject)
+  })
+  authenticated.close()
+
+  relay.stop()
+  await waitFor(() => !relay.getStatus().running)
+  assert.equal(relay._internal.server, null)
+})
+
+test('DG-LAB relay rejects a mismatched V3 target', async t => {
+  const relay = createDGLabRelay()
+  const port = await reservePort()
+  relay._internal.settings.port = port
+  t.after(() => relay.stop())
   relay.start()
   await waitFor(() => relay.getStatus().running)
 
@@ -42,8 +70,4 @@ test('DG-LAB relay stays stopped until enabled and rejects a mismatched V3 targe
   })
   assert.deepEqual(close, { code: 4003, reason: 'targetId mismatch' })
   assert.equal(relay._internal.app.v3, null)
-
-  relay.stop()
-  await waitFor(() => !relay.getStatus().running)
-  assert.equal(relay._internal.server, null)
 })
