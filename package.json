@@ -188,9 +188,7 @@
           "uglify-js": "^2.8.29"
         }
       },
-      "useragent": {
-        "tmp": "^0.2.7"
-      }
+      "useragent": "npm:useragent-ng@2.4.5"
     }
   }
 }
