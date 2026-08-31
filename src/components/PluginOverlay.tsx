@@ -27,6 +27,15 @@ import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
 function useRuntimeBridge() {
   useEffect(() => {
     const previous = new Map<string, boolean>()
+    const generations = new Map<string, number>()
+    const queues = new Map<string, Promise<void>>()
+    const enqueue = (pluginId: string, task: () => void | Promise<void>) => {
+      const previousTask = queues.get(pluginId) ?? Promise.resolve()
+      const nextTask = previousTask.catch(() => undefined).then(task).catch(error => {
+        console.error(`[插件:${pluginId}] 生命周期执行失败:`, error)
+      })
+      queues.set(pluginId, nextTask)
+    }
     const sync = () => {
       for (const manifest of getAllPluginManifests()) {
         const enabled = isPluginEnabled(manifest.id)
@@ -35,34 +44,44 @@ function useRuntimeBridge() {
         previous.set(manifest.id, enabled)
         const runtime = getPluginRuntime(manifest.id)
         if (!runtime) continue
-        if (enabled) {
-          void runtime.onEnable?.(buildPluginContext({
-            audio: {
-              subscribe: (listener) => {
-                const store = getGlobalAudioAnalyzerStore()
-                if (!store) return () => undefined
-                return store.subscribe(() => listener(store.getSnapshot()))
-              },
+        const generation = (generations.get(manifest.id) ?? 0) + 1
+        generations.set(manifest.id, generation)
+        const context = buildPluginContext({
+          audio: {
+            subscribe: (listener) => {
+              const store = getGlobalAudioAnalyzerStore()
+              if (!store) return () => undefined
+              return store.subscribe(() => listener(store.getSnapshot()))
             },
-            storage: {
-              get: (key) => localStorage.getItem(key),
-              set: (key, value) => localStorage.setItem(key, value),
-            },
-            toast: (message, type) => {
-              window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: type ?? 'info' } }))
-            },
-            log: (...args) => console.log('[插件]', ...args),
-          }))
-        } else {
-          void runtime.onDisable?.()
-        }
+          },
+          storage: {
+            get: (key) => localStorage.getItem(key),
+            set: (key, value) => localStorage.setItem(key, value),
+          },
+          toast: (message, type) => {
+            window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: type ?? 'info' } }))
+          },
+          log: (...args) => console.log('[插件]', ...args),
+        })
+        enqueue(manifest.id, async () => {
+          if (generations.get(manifest.id) !== generation) return
+          if (enabled) await runtime.onEnable?.(context)
+          else await runtime.onDisable?.()
+        })
       }
     }
     sync()
     window.addEventListener(PLUGIN_STATE_EVENT, sync)
     return () => {
       window.removeEventListener(PLUGIN_STATE_EVENT, sync)
-      // 卸载时复位缓存
+      for (const manifest of getAllPluginManifests()) {
+        if (!previous.get(manifest.id)) continue
+        const runtime = getPluginRuntime(manifest.id)
+        if (!runtime?.onDisable) continue
+        const generation = (generations.get(manifest.id) ?? 0) + 1
+        generations.set(manifest.id, generation)
+        enqueue(manifest.id, () => runtime.onDisable?.())
+      }
       previous.clear()
     }
   }, [])

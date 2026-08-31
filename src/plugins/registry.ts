@@ -37,6 +37,10 @@ export function getPluginRuntime(id: string): PluginRuntime | undefined {
   return undefined
 }
 
+export function hasEnabledAudioPlugin(isEnabled: (id: string) => boolean): boolean {
+  return getAllPluginManifests().some(plugin => plugin.needsAudio === true && isEnabled(plugin.id))
+}
+
 export function isBuiltinPlugin(id: string): boolean {
   return builtinPlugins.has(id)
 }
