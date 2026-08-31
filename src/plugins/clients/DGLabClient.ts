@@ -502,9 +502,10 @@ function createClient() {
     set({ connected: false, out: null, state: snapshot.running ? 'idle' : snapshot.state })
   }
 
-  /** 订阅全局音频分析 store：插件激活且有 store 时，30fps 特征流推给中继。 */
+  /** 订阅全局音频分析 store：仅在插件激活、输出开启且使用应用内音源时推送 30fps 特征流。 */
   const ensureStream = () => {
-    if (!active) {
+    const settings = loadDGLabSettings()
+    if (!active || !settings.outputEnabled || settings.systemCapture) {
       if (unsubStore) {
         unsubStore()
         unsubStore = null
@@ -710,6 +711,7 @@ function createClient() {
   /** 波形输出启禁（播放页按钮）：仅暂停输出，不断开、不关插件。 */
   const setOutputEnabled = (on: boolean) => {
     saveDGLabSettings({ outputEnabled: on })
+    ensureStream()
     if (ws && ws.readyState === WebSocket.OPEN && active) {
       ws.send(JSON.stringify({ t: 'output', on }))
     }

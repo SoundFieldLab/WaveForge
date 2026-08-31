@@ -326,11 +326,29 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
     requestControllerRef.current?.abort()
     setWeather(staleCache)
     setError('')
-    // 后台预取若已生成新鲜缓存则直接复用；缓存过期时才重新定位并请求。
-    void refreshWeather(false)
-    const timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
+    let timer: number | null = null
+    const stopTimer = () => {
+      if (timer !== null) window.clearInterval(timer)
+      timer = null
+    }
+    const startTimer = () => {
+      stopTimer()
+      if (document.visibilityState !== 'visible') return
+      void refreshWeather(false)
+      timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') startTimer()
+      else {
+        stopTimer()
+        requestControllerRef.current?.abort()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    startTimer()
     return () => {
-      window.clearInterval(timer)
+      stopTimer()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       requestControllerRef.current?.abort()
     }
   }, [refreshWeather, weatherIdentity])

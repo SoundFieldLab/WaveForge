@@ -220,7 +220,7 @@ function createClient() {
   const applyBackgroundLease = () => {
     backgroundRelease?.();
     backgroundRelease = null;
-    if (active && snapshot.settings.runInBackground && globalAnalyzerStore) {
+    if (active && snapshot.settings.outputEnabled && snapshot.settings.eventEnhancement && snapshot.settings.runInBackground && globalAnalyzerStore) {
       backgroundRelease = globalAnalyzerStore.retainBackground();
     }
   };
@@ -229,7 +229,7 @@ function createClient() {
     analyzerUnsubscribe?.();
     analyzerUnsubscribe = null;
     latestAudio = globalAnalyzerStore?.getSnapshot() ?? null;
-    if (active && globalAnalyzerStore) {
+    if (active && snapshot.settings.outputEnabled && snapshot.settings.eventEnhancement && globalAnalyzerStore) {
       analyzerUnsubscribe = globalAnalyzerStore.subscribe(processAudio);
     }
     applyBackgroundLease();
@@ -241,7 +241,7 @@ function createClient() {
       (event as CustomEvent<SignalRgbSettings>).detail,
     );
     set({ settings });
-    applyBackgroundLease();
+    ensureAnalyzerSubscription();
     if (!active) return;
     if (previous.outputEnabled && !settings.outputEnabled) {
       void sendEvent("stop", true);

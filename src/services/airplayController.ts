@@ -45,7 +45,7 @@ function writeStored(key: string, value: unknown): void {
   } catch { /* 忽略 */ }
 }
 
-class AirplayController {
+export class AirplayController {
   private status: AirplayStatus | null = null
   private readonly listeners = new Set<StatusListener>()
   private initialized = false
@@ -91,8 +91,6 @@ class AirplayController {
     if (this.getEnabled()) {
       void bridge.setEnabled(true)
     }
-    // 同步循环：切歌元数据 / 进度 / 播放暂停与采集联动
-    this.syncTimer = window.setInterval(() => this.syncTick(), SYNC_INTERVAL_MS)
   }
 
   dispose(): void {
@@ -179,8 +177,19 @@ class AirplayController {
     } catch { /* 忽略 */ }
   }
 
+  private updateSyncTimer(): void {
+    const shouldRun = this.isConnected() && this.probe !== null
+    if (shouldRun && this.syncTimer === null) {
+      this.syncTimer = window.setInterval(() => this.syncTick(), SYNC_INTERVAL_MS)
+    } else if (!shouldRun && this.syncTimer !== null) {
+      window.clearInterval(this.syncTimer)
+      this.syncTimer = null
+    }
+  }
+
   private handleStatus(status: AirplayStatus): void {
     this.status = status
+    this.updateSyncTimer()
     this.listeners.forEach((listener) => listener(status))
     const connected = status.phase === 'connected' || status.phase === 'streaming'
     // 提示音只在一次「用户主动连接」会话中响一次：connect() 会重置标记；
@@ -285,11 +294,13 @@ class AirplayController {
   attachProbe(probe: () => AirplayPlaybackProbe): void {
     this.probe = probe
     this.lastTrackKey = ''
+    this.updateSyncTimer()
     this.syncTick(true)
   }
 
   detachProbe(): void {
     this.probe = null
+    this.updateSyncTimer()
   }
 
   // ---------- 内部 ----------

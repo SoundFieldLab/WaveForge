@@ -4960,18 +4960,22 @@ function App() {
     void import('./services/audioOutput').then(({ initAudioOutputDevices }) => initAudioOutputDevices())
   }, [])
 
+  const airplayProbeRef = useRef({
+    title: '', artist: '', album: '', coverUrl: '', durationMs: 0, elapsedMs: 0, isPlaying: false,
+  })
+  airplayProbeRef.current = {
+    title: currentTrack.title || '',
+    artist: currentTrack.artist || '',
+    album: currentTrack.album || '',
+    coverUrl: currentTrack.coverUrl || '',
+    durationMs: Math.max(0, (Number(currentTrack.duration) || 0) * 1000),
+    elapsedMs: Math.max(0, Number(currentTime) || 0) * 1000,
+    isPlaying: Boolean(isPlaying),
+  }
   useEffect(() => {
-    airplayController.attachProbe(() => ({
-      title: currentTrack.title || '',
-      artist: currentTrack.artist || '',
-      album: currentTrack.album || '',
-      coverUrl: currentTrack.coverUrl || '',
-      durationMs: Math.max(0, (Number(currentTrack.duration) || 0) * 1000),
-      elapsedMs: Math.max(0, Number(currentTime) || 0) * 1000,
-      isPlaying: Boolean(isPlaying),
-    }))
+    airplayController.attachProbe(() => airplayProbeRef.current)
     return () => airplayController.detachProbe()
-  }, [currentTrack, isPlaying, currentTime])
+  }, [])
 
   // AirPlay 音量条变化（跟随软件音量开启时）→ 同步软件音量条显示
   useEffect(() => {
