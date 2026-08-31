@@ -2,7 +2,6 @@ import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import path from 'path'
-import fs from 'fs'
 import { splitCityData } from './scripts/split-city-data.mjs'
 
 // 在 build/dev 启动前把 country-state-city 的城市数据按国家/地区拆分为独立 JSON 文件，
@@ -39,11 +38,12 @@ export default defineConfig({
     // 阈值设为 2000 让构建输出不再误报（>2MB 仍会告警，便于发现新的体积回归）。
     chunkSizeWarningLimit: 2000,
     rollupOptions: {
-      // 多入口：主应用 + 独立桌面播放器窗口
-      input: fs
-        .readdirSync(__dirname)
-        .filter((file) => file.endsWith('.html'))
-        .map((file) => path.resolve(__dirname, file)),
+      // 生产入口显式白名单；开发诊断/预览 HTML 不进入发布产物。
+      input: [
+        path.resolve(__dirname, 'index.html'),
+        path.resolve(__dirname, 'desktop-player.html'),
+        path.resolve(__dirname, 'desktop-lyrics.html'),
+      ],
       output: {
         // 将稳定的大体量第三方依赖拆为独立 vendor chunk：
         // 1) 提升浏览器并行加载（虽然桌面版用 file:// 串行加载，但 chunk 尺寸更小、更利于缓存命中与懒加载）。

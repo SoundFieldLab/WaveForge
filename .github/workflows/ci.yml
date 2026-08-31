@@ -44,8 +44,8 @@ jobs:
       - name: 运行单测（vitest）
         run: npm run test
 
-      - name: 运行 RGB 集成测试
-        run: npm run test:chroma && npm run test:signalrgb
+      - name: 运行 RGB 与 stem Node 集成测试
+        run: npm run test:chroma && npm run test:signalrgb && npm run test:stems:node
 
       - name: 前端构建（vite build）
         run: npm run build
@@ -125,6 +125,9 @@ jobs:
           PIP_INDEX_URL: https://pypi.org/simple
         run: npm run bundle-python
         timeout-minutes: 20
+
+      - name: 运行 stem Python 集成测试
+        run: npm run test:stems:python
 
       - name: 安装 castLabs EVS（Apple Music 生产 VMP）
         run: py -3 -m pip install castlabs-evs==1.3.2
