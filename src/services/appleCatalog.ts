@@ -578,7 +578,8 @@ export interface AppleChartGroup {
   group: string
   description?: string
   coverUrl: string
-  songs: Array<{ name: string; artist: string; coverUrl?: string }>
+  /** songs 仅热门歌曲榜携带 id（RSS 目录曲目 id，原生取流必需）；专辑/歌单榜为条目名 */
+  songs: Array<{ id?: string; name: string; artist: string; coverUrl?: string }>
 }
 
 /** 探索页排行榜数据：热门歌曲 / 热门专辑 / 精选歌单三榜（免 token） */
@@ -600,7 +601,14 @@ export async function getAppleChartGroups(country = 'cn'): Promise<AppleChartGro
       group: 'Apple Music 全球热度',
       description: '各地区最受欢迎的歌曲',
       coverUrl: toHighResArtwork(songItems[0]?.artworkUrl100 || ''),
-      songs: songItems.map((item: any) => ({ name: item.name ?? '', artist: item.artistName ?? '', coverUrl: toHighResArtwork(item.artworkUrl100 || '') })),
+      // id 必须保留：原生取流（webPlayback salableAdamId）与缓存键都依赖目录曲目 id；
+      // 此前丢弃 id 导致队列退化为 apple-0/1/2 排名键，原生取流被静默跳过 → 全部回退 QQ/网易云
+      songs: songItems.map((item: any) => ({
+        id: String(item?.id ?? '') || undefined,
+        name: item.name ?? '',
+        artist: item.artistName ?? '',
+        coverUrl: toHighResArtwork(item.artworkUrl100 || ''),
+      })),
     })
   }
   if (albumItems.length > 0) {
@@ -995,6 +1003,22 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
     platform: 'apple',
     vip: false,
   }
+}
+
+/** 资料库曲目 id 前缀（i./l./p. 等），区别于纯数字目录曲目 id */
+export const APPLE_LIBRARY_ID_PATTERN = /^(i|l|p|ra)\./
+
+/**
+ * 资料库曲目 id（i.xxx）→ 目录曲目 id（webPlayback 的 salableAdamId 必须是目录 id）。
+ * 资料库条目通过 include=catalog 关联目录曲目；用户自传云盘曲目无目录关联 → 返回 null
+ * （上层保持库 id，取流会失败并回退载体匹配，这是预期行为）。
+ */
+export async function resolveAppleLibraryCatalogId(libraryId: string): Promise<string | null> {
+  if (!libraryId || !APPLE_LIBRARY_ID_PATTERN.test(libraryId)) return null
+  const data = await appleMeFetch(`/v1/me/library/songs/${encodeURIComponent(libraryId)}?include=catalog&platform=web`)
+  const item = Array.isArray(data?.data) ? data.data[0] : null
+  const catalogId = item?.relationships?.catalog?.data?.[0]?.id
+  return catalogId && String(catalogId).trim() ? String(catalogId) : null
 }
 
 /**

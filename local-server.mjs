@@ -989,8 +989,9 @@ app.use((req, res, next) => {
     res.header('Vary', 'Origin')
   }
   // QQ Music Skills 的用户密钥只通过本机请求头传递，避免出现在 URL、历史记录和日志中。
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-QQMusic-Skill-Key')
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE')
+  // Apple license 代理：兼容规范 Media-User-Token 与历史 X-Apple-Music-User-Token。
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal')
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
   next()
 })
@@ -10917,6 +10918,60 @@ app.get('/api/apple/amp', proxyAppleAmpApi)
 app.post('/api/apple/amp', proxyAppleAmpApi)
 app.patch('/api/apple/amp', proxyAppleAmpApi)
 app.delete('/api/apple/amp', proxyAppleAmpApi)
+
+// ── Apple Music Widevine license 代理（acquireWebPlaybackLicense）───────────
+// 渲染进程直连时 Origin 是本机页面（127.0.0.1:3000），Apple license 服务会做来源
+// 校验并返回 200 + 错误 JSON（无 license 字段）。统一走本地代理，请求头与
+// webPlayback 同款（Origin/Referer = music.apple.com）。
+const APPLE_LICENSE_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense'
+// Apple 网页会话 Cookie（登录时由 main 进程落盘）：license 接口校验网页会话，
+// 仅凭 media-user-token 会被拒（-1002 session ended）
+function readAppleWebCookieHeader() {
+  try {
+    const base = process.env.WAVEFORGE_USERDATA
+      || join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'Electron')
+    const data = JSON.parse(readFileSync(join(base, 'apple-web-cookies.json'), 'utf8'))
+    return typeof data?.cookie === 'string' && data.cookie ? data.cookie : ''
+  } catch {
+    return ''
+  }
+}
+app.post('/api/apple/license', async (req, res) => {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+    'X-Apple-Renewal': 'true',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  }
+  const auth = req.headers['authorization']
+  if (auth) headers.Authorization = auth
+  // 兼容渲染端历史头名，并统一转发 Apple 私有 license 接口需要的 Media-User-Token。
+  // 此前只读 media-user-token，导致 X-Apple-Music-User-Token 在代理边界丢失。
+  const mut = req.headers['media-user-token'] || req.headers['x-apple-music-user-token']
+  if (mut) headers['Media-User-Token'] = String(mut)
+  const cookieHeader = readAppleWebCookieHeader()
+  if (cookieHeader) headers.Cookie = cookieHeader
+  try {
+    const response = await axios({
+      method: 'POST',
+      url: APPLE_LICENSE_URL,
+      timeout: 20000,
+      headers,
+      data: req.body || undefined,
+      responseType: 'text',
+      validateStatus: () => true,
+    })
+    const text = String(response.data || '')
+    console.log(`[Apple License 代理] HTTP ${response.status} len=${text.length}${text.length < 200 ? ' body=' + text : ''}${cookieHeader ? ' cookie=yes' : ' cookie=NO'}`)
+    res.status(response.status)
+    res.type('application/json').send(text)
+  } catch (error) {
+    console.error('[Apple License 代理] 失败:', error.message || error)
+    res.status(502).json({ error: error.message || 'Apple license 请求失败' })
+  }
+})
 
 // 健康检查
 app.get('/health', (req, res) => {

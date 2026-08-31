@@ -66,8 +66,7 @@ export async function attachAppleHls(element: HTMLMediaElement, stream: AppleNat
     }, 35_000)
     const cleanup = () => {
       window.clearTimeout(timeout)
-      hls.off(HlsConstructor.Events.MANIFEST_PARSED, onReady)
-      hls.off(HlsConstructor.Events.LEVEL_LOADED, onReady)
+      hls.off(HlsConstructor.Events.FRAG_BUFFERED, onFragmentBuffered)
       hls.off(HlsConstructor.Events.ERROR, onError)
       element.removeEventListener('canplay', onReady)
       element.removeEventListener('loadeddata', onReady)
@@ -79,6 +78,9 @@ export async function attachAppleHls(element: HTMLMediaElement, stream: AppleNat
       resolve()
     }
     const onReady = () => settleResolve()
+    // 只有首个加密分片真正进入 MSE 缓冲后才宣告成功；MANIFEST_PARSED/LEVEL_LOADED
+    // 仅说明清单可读，此时 EME license 可能尚未取得，过早 resolve 会让 UI 假播放 0:00。
+    const onFragmentBuffered = () => settleResolve()
     const onError = (_event: string, data: { fatal?: boolean; details?: string; type?: string }) => {
       // EME license / 密钥失败不会标 fatal，主动识别以尽快失败（而非等 35s 超时）
       const detail = String(data?.details || '')
@@ -98,8 +100,7 @@ export async function attachAppleHls(element: HTMLMediaElement, stream: AppleNat
         reject(new Error(`Apple HLS 加载失败（${detail || type || '未知错误'}）`))
       }
     }
-    hls.on(HlsConstructor.Events.MANIFEST_PARSED, onReady)
-    hls.on(HlsConstructor.Events.LEVEL_LOADED, onReady)
+    hls.on(HlsConstructor.Events.FRAG_BUFFERED, onFragmentBuffered)
     hls.on(HlsConstructor.Events.ERROR, onError)
     element.addEventListener('canplay', onReady, { once: true })
     element.addEventListener('loadeddata', onReady, { once: true })

@@ -793,7 +793,7 @@ function HomeView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         if (songs.length > 0) {
           setPlaylistPlaybackCache(cacheKey, songs)
         }
@@ -1006,7 +1006,7 @@ function HomeView({
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
         if (!isCurrentRequest()) return
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setSelectedPlaylist({ ...playlist, platform: 'apple', trackCount: songs.length })
         setPlaylistSongs(songs)
         return

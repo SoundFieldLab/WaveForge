@@ -72,7 +72,9 @@ import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigat
 type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
-const EXPLORE_CACHE_KEY = 'exploreHomeCache-v2'
+// v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
+// 是无 appleId 的旧结构（id=榜单排名），按天缓存会让坏数据在当天内一直生效。
+const EXPLORE_CACHE_KEY = 'exploreHomeCache-v3'
 const EXPLORE_SESSION_REFRESH_PREFIX = 'exploreHomeRefreshed:'
 
 /** 探索页平台元信息：名称 / 页签短名 / 主题色 / 主题色 RGB */

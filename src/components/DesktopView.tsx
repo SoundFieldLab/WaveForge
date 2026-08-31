@@ -1484,7 +1484,7 @@ function DesktopView({
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
         if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setPlaylistSongs(songs)
       } else if (currentPlatform === 'netease') {
         await streamNeteasePlaylistTracks(playlist.id, {
