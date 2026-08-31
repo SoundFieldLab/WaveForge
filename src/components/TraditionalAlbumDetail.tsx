@@ -77,7 +77,13 @@ function TraditionalAlbumDetail({
               {loading ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载专辑...</div> : (
                 <>
                   <section className="grid gap-6 md:grid-cols-[200px_minmax(0,1fr)]">
-                    <img src={album?.picUrl ? getProxiedImageUrl(album.picUrl) : ''} alt="" className="aspect-square w-full max-w-[200px] rounded-xl object-cover shadow-2xl" />
+                    {album?.picUrl ? (
+                      <img src={getProxiedImageUrl(album.picUrl)} alt="" className="aspect-square w-full max-w-[200px] rounded-xl object-cover shadow-2xl" />
+                    ) : (
+                      <div className="flex aspect-square w-full max-w-[200px] items-center justify-center rounded-xl shadow-2xl" style={{ background: `${accent}22` }}>
+                        <Disc3 className="h-16 w-16" style={{ color: accent }} />
+                      </div>
+                    )}
                     <div className="min-w-0 self-center">
                       <div className={`mb-2 flex items-center gap-2 text-xs ${muted}`}><Disc3 className="h-4 w-4" style={{ color: accent }} />专辑</div>
                       <h1 className="text-2xl font-semibold">{album?.name || '专辑'}</h1>

@@ -18,7 +18,7 @@ npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electro
 - **QQ 音乐 API Key 领取**：内置引导窗口直达 y.qq.com 领取 qmk API Key（独立隔离 session，每次打开清空登录态）
 - **无缝衔接播放**：三种模式 —— Smart AutoMix（智能节拍匹配+BPM 同步，需 Python）/ Beat Crossfade（节拍交叉淡化）/ Fixed Crossfade（固定时长，默认）
 - **歌词系统**：LRC 解析、逐字歌词（QQ）、实时滚动、点击跳转；逐字特效模式（清晰/柔和/Apple 逆向还原）
-- **空间音频（Spatial Audio）**：真实 MIT KEMAR HRTF 双耳渲染——一键空间化 / 头锁定环绕 / 世界漫游 / 舞台影院四模式，支持 SOFA 数据集导入（详见下方「空间音频」章节）
+- **空间音频（Spatial Audio）**：EngineV3 合成解析 HRTF 双耳渲染——一键空间化 / 头锁定环绕 / 世界漫游 / 舞台影院四模式（详见下方「空间音频」章节）
 - **可视化**：频谱柱 / 波形 / 环形 / 3D 可视化
 - **桌面模式**：桌面小组件、专注计时、生产力工具、自定义壁纸
 - **Wallpaper Engine 联动**：读取本地 WE 配置并同步音频可视化
@@ -119,7 +119,7 @@ Windows 发布机/CI 必须配置 `EVS_ACCOUNT_NAME`、`EVS_PASSWD` 并安装 `c
 
 **核心能力**：
 
-- 真实 **MIT KEMAR HRTF** 网格（`hrtf-data/grid.bin` 内嵌，构建时 base64 内联）；可导入 **SOFA（AES69）数据集**换网格（NetCDF3 经典格式 + NetCDF4/HDF5 封装，h5wasm 懒加载），采样率不匹配自动整体重采样（多相 Kaiser-sinc），**跨重启自动恢复**（IndexedDB `waveforge-hrtf` 存网格本体 + localStorage 活动记录）
+- **合成解析 HRTF** 双耳渲染：当前使用 EngineV3 内置解析模型，无需外部数据文件；外部 SOFA 数据集导入尚未实现
 - **球谐插值**（实球谐 L=3 最小二乘拟合）与最近邻网格查表双 HRTF 插值模式
 - **完整房间模拟**：镜像声源法早期反射（1-3 阶）+ FDN 晚期混响（8 条质数延迟线 + Hadamard 8×8 反馈矩阵），7 种预设（录音棚/音乐厅/舞台/教堂/户外/浴室/走廊）
 - **Ambisonics 环境上混**（FOA 环境场 → 4 方向扩散虚拟扬声器，叠加到各模式主渲染）
