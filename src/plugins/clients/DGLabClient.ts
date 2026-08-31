@@ -787,6 +787,7 @@ function createClient() {
       active = false
       disconnect()
       ensureStream()
+      void control('stop')
     },
     isActive: () => active,
     ensureStream,

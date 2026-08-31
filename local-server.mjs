@@ -1005,10 +1005,9 @@ registerSodaRoutes(app)
 registerSodaAudioProxy(app)
 registerAppleArtworkRoutes(app)
 
-// DG_LAB 郊狼插件中继（默认 30082 端口，127.0.0.1 监听；「允许局域网连接」时绑 0.0.0.0 供手机扫码）
+// DG_LAB 郊狼插件中继：仅注册控制路由；插件显式启用后才启动 30082 监听。
 const dglabRelay = createDGLabRelay()
 dglabRelay.registerHttp(app)
-dglabRelay.start()
 
 const fetchLocationProvider = async (url, normalize) => {
   const controller = new AbortController()
