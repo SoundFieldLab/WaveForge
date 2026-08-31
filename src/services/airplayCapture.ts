@@ -8,34 +8,29 @@ const WORKLET_SOURCE = `
 class WaveforgeAirplayCapture extends AudioWorkletProcessor {
   constructor() {
     super()
-    this._pending = new Float32Array(0)
+    this._block = new Float32Array(4096)
+    this._writeOffset = 0
   }
   process(inputs) {
     const input = inputs[0]
     if (!input || input.length === 0 || !input[0] || input[0].length === 0) return true
     const channels = Math.min(2, input.length)
     const frames = input[0].length
-    const interleaved = new Float32Array(frames * channels)
-    for (let c = 0; c < channels; c += 1) {
-      const src = input[c]
-      for (let i = 0; i < frames; i += 1) interleaved[i * channels + c] = src[i]
-    }
-    // 满 4096 帧（≈93ms@44.1k）发一块，控制 IPC 频率
-    this._pending = concat(this._pending, interleaved)
-    const BLOCK = 4096
-    while (this._pending.length >= BLOCK) {
-      const chunk = this._pending.slice(0, BLOCK)
-      this._pending = this._pending.slice(BLOCK)
-      this.port.postMessage(chunk.buffer, [chunk.buffer])
+    // 固定块内直接交错写入，避免每个 128 帧渲染量子分配并拼接 TypedArray。
+    for (let i = 0; i < frames; i += 1) {
+      for (let c = 0; c < channels; c += 1) {
+        this._block[this._writeOffset] = input[c][i]
+        this._writeOffset += 1
+        if (this._writeOffset === this._block.length) {
+          const chunk = this._block
+          this._block = new Float32Array(4096)
+          this._writeOffset = 0
+          this.port.postMessage(chunk.buffer, [chunk.buffer])
+        }
+      }
     }
     return true
   }
-}
-function concat(a, b) {
-  const out = new Float32Array(a.length + b.length)
-  out.set(a, 0)
-  out.set(b, a.length)
-  return out
 }
 registerProcessor('${WORKLET_NAME}', WaveforgeAirplayCapture)
 `
