@@ -274,13 +274,40 @@ interface PointForecastBundle {
 const pointForecastCache = new Map<string, PointForecastBundle>()
 const pointRequestCache = new Map<string, Promise<PointForecastBundle>>()
 const POINT_CACHE_AGE = 10 * 60 * 1000
+const POINT_CACHE_CAPACITY = 64
 
 const pointKey = (latitude: number, longitude: number) => `${latitude.toFixed(2)}:${longitude.toFixed(2)}`
 
+const getCachedForecastBundle = (key: string, now: number) => {
+  const cached = pointForecastCache.get(key)
+  if (!cached) return undefined
+  if (now - cached.fetchedAt >= POINT_CACHE_AGE) {
+    pointForecastCache.delete(key)
+    return undefined
+  }
+  pointForecastCache.delete(key)
+  pointForecastCache.set(key, cached)
+  return cached
+}
+
+const cacheForecastBundle = (key: string, bundle: PointForecastBundle) => {
+  const now = Date.now()
+  for (const [cachedKey, cached] of pointForecastCache) {
+    if (now - cached.fetchedAt >= POINT_CACHE_AGE) pointForecastCache.delete(cachedKey)
+  }
+  pointForecastCache.delete(key)
+  pointForecastCache.set(key, bundle)
+  while (pointForecastCache.size > POINT_CACHE_CAPACITY) {
+    const oldestKey = pointForecastCache.keys().next().value
+    if (oldestKey === undefined) break
+    pointForecastCache.delete(oldestKey)
+  }
+}
+
 const getForecastBundle = async (latitude: number, longitude: number, signal?: AbortSignal) => {
   const key = pointKey(latitude, longitude)
-  const cached = pointForecastCache.get(key)
-  if (cached && Date.now() - cached.fetchedAt < POINT_CACHE_AGE) return cached
+  const cached = getCachedForecastBundle(key, Date.now())
+  if (cached) return cached
   const pending = pointRequestCache.get(key)
   if (pending) return pending
 
@@ -301,7 +328,7 @@ const getForecastBundle = async (latitude: number, longitude: number, signal?: A
       return { data: await response.json() as ForecastPayload, fetchedAt: Date.now() }
     })
     .then(bundle => {
-      pointForecastCache.set(key, bundle)
+      cacheForecastBundle(key, bundle)
       return bundle
     })
     .finally(() => pointRequestCache.delete(key))

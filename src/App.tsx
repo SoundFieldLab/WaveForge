@@ -56,6 +56,7 @@ import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQ
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
 import type { PlaybackTimeStore } from './audio/playbackTimeStore'
 import type { PlaybackOrigin, ViewMode } from './types/playbackNavigation'
+import { preloadOnIdle } from './utils/lazyPreload'
 const loadHomeView = () => import('./components/HomeView')
 const loadExploreView = () => import('./components/ExploreView')
 const loadDesktopView = () => import('./components/DesktopView')
@@ -689,32 +690,29 @@ function App() {
   // 调音室弹窗锚点：记录打开按钮的位置，弹窗从按钮侧弹出/关闭时收缩回按钮
   const mixingStudioAnchorRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
   useEffect(() => {
-    const idleId = window.requestIdleCallback(() => {
-      void Promise.allSettled([
-        loadSettingsPanel(),
-        loadHomeView(),
-        loadExploreView(),
-        loadDesktopView(),
-        loadSearchPanel(),
-        loadProfileView(),
-        loadPlaylistPanel(),
-        loadLoginView(),
-        loadArtistDetailModal(),
-        loadAlbumDetailModal(),
-        loadCommentModal(),
-        loadUpNextNotification(),
-        loadPlaybackRadialMenu(),
-        loadImmersiveControls(),
-        loadTranslationDisplay(),
-        loadModernAudioVisualizer(),
-        loadWallpaperLyrics(),
-        loadGloriousLyrics(),
-        loadMultidimensionalLyrics(),
-        loadFoliaLyricsPage(),
-        loadPvLyricsPage(),
-      ])
-    }, { timeout: 2000 })
-    return () => window.cancelIdleCallback(idleId)
+    const currentViewLoader = viewMode === 'explore'
+      ? loadExploreView
+      : viewMode === 'desktop'
+        ? loadDesktopView
+        : viewMode === 'traditional'
+          ? loadTraditionalView
+          : loadHomeView
+    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView]
+      .filter(loader => loader !== currentViewLoader)
+
+    return preloadOnIdle([
+      currentViewLoader,
+      loadSearchPanel,
+      loadUpNextNotification,
+      loadSettingsPanel,
+      loadPlaylistPanel,
+      loadLoginView,
+      loadProfileView,
+      loadArtistDetailModal,
+      loadAlbumDetailModal,
+      loadCommentModal,
+      ...alternateViewLoaders,
+    ], 2000)
   }, [])
   const [playMode, setPlayMode] = useState<'sequential' | 'shuffle' | 'repeat'>('sequential')
   const [showPlaylist, setShowPlaylist] = useState(false)

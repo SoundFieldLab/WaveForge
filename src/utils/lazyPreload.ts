@@ -10,23 +10,38 @@
 export function preloadOnIdle(loaders: Array<() => Promise<unknown>>, timeoutMs = 4000): () => void {
   if (typeof window === 'undefined') return () => undefined
   let cancelled = false
-  const run = () => {
-    if (cancelled) return
-    for (const load of loaders) {
-      void load().catch(() => undefined)
+  let index = 0
+  let handle: number | null = null
+  const idleWindow = window as typeof window & {
+    requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number
+    cancelIdleCallback?: (handle: number) => void
+  }
+
+  const scheduleNext = () => {
+    if (cancelled || index >= loaders.length) return
+    if (typeof idleWindow.requestIdleCallback === 'function') {
+      handle = idleWindow.requestIdleCallback(runNext, { timeout: timeoutMs })
+    } else {
+      handle = window.setTimeout(runNext, 2000)
     }
   }
-  const ric = (window as any).requestIdleCallback as ((cb: () => void, opts?: { timeout?: number }) => number) | undefined
-  const cic = (window as any).cancelIdleCallback as ((handle: number) => void) | undefined
-  let handle: number
-  if (typeof ric === 'function') {
-    handle = ric(run, { timeout: timeoutMs })
-  } else {
-    handle = window.setTimeout(run, 2000) as unknown as number
+
+  const runNext = () => {
+    handle = null
+    if (cancelled) return
+    const load = loaders[index++]
+    void load().catch(() => undefined).finally(scheduleNext)
   }
+
+  scheduleNext()
   return () => {
     cancelled = true
-    if (typeof ric === 'function' && typeof cic === 'function') cic(handle)
-    else window.clearTimeout(handle)
+    if (handle === null) return
+    if (typeof idleWindow.requestIdleCallback === 'function' && typeof idleWindow.cancelIdleCallback === 'function') {
+      idleWindow.cancelIdleCallback(handle)
+    } else {
+      window.clearTimeout(handle)
+    }
+    handle = null
   }
 }
