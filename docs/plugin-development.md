@@ -141,14 +141,15 @@ interface PluginContext {
 
 ## 7. 安全边界与限制
 
-导入插件在**受限沙箱**中执行：
+导入插件的运行时代码当前与 WaveForge renderer **同权限执行，不是安全沙箱**：
 
-- 无 DOM / `window` / `document` 访问；
-- 无 `require` / `import`（不提供模块加载器）；
-- 仅可访问 `ctx` 白名单 API（见第 3 节）；
-- 建议：不要请求远程资源；状态用 `ctx.storage` 持久化。
+- 不提供 CommonJS `require`，但代码仍可访问 `window`、`document`、`fetch` 和页面存储；
+- 仅安装来源可信、可审计的插件文件；安装界面会明确标记含运行时代码的插件；
+- 插件停用或卸载时，宿主会调用同一 lifecycle 的 `onDisable`，并强制释放通过 `ctx.audio.subscribe` 建立的订阅；
+- 单个 manifest 的运行时代码上限为 256 KB，避免超大输入阻塞 renderer；
+- 插件状态应优先使用 `ctx.storage`，网络和敏感数据访问应在插件说明中明确披露。
 
-请让用户明确知晓插件行为，避免误用。
+未来若要运行不受信代码，必须迁移到独立进程或具备真实隔离边界的执行环境。
 
 ## 8. 完整示例
 

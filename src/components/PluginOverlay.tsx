@@ -34,6 +34,14 @@ function useRuntimeBridge() {
     const previous = new Map<string, boolean>()
     const generations = new Map<string, number>()
     const queues = new Map<string, Promise<void>>()
+    const subscriptions = new Map<string, Set<() => void>>()
+    const releaseSubscriptions = (pluginId: string) => {
+      const releases = subscriptions.get(pluginId)
+      subscriptions.delete(pluginId)
+      for (const release of releases ?? []) {
+        try { release() } catch { /* 插件退订失败不阻塞其余清理 */ }
+      }
+    }
     const enqueue = (pluginId: string, task: () => void | Promise<void>) => {
       const previousTask = queues.get(pluginId) ?? Promise.resolve()
       const nextTask = previousTask.catch(() => undefined).then(task).catch(error => {
@@ -56,7 +64,18 @@ function useRuntimeBridge() {
             subscribe: (listener) => {
               const store = getGlobalAudioAnalyzerStore()
               if (!store) return () => undefined
-              return store.subscribe(() => listener(store.getSnapshot()))
+              const release = store.subscribe(() => listener(store.getSnapshot()))
+              const releases = subscriptions.get(manifest.id) ?? new Set<() => void>()
+              subscriptions.set(manifest.id, releases)
+              let released = false
+              const trackedRelease = () => {
+                if (released) return
+                released = true
+                releases.delete(trackedRelease)
+                release()
+              }
+              releases.add(trackedRelease)
+              return trackedRelease
             },
           },
           storage: {
@@ -70,8 +89,13 @@ function useRuntimeBridge() {
         })
         enqueue(manifest.id, async () => {
           if (generations.get(manifest.id) !== generation) return
-          if (enabled) await runtime.onEnable?.(context)
-          else await runtime.onDisable?.()
+          if (enabled) {
+            releaseSubscriptions(manifest.id)
+            await runtime.onEnable?.(context)
+          } else {
+            await runtime.onDisable?.()
+            releaseSubscriptions(manifest.id)
+          }
         })
       }
     }
@@ -85,7 +109,9 @@ function useRuntimeBridge() {
         if (!runtime?.onDisable) continue
         const generation = (generations.get(manifest.id) ?? 0) + 1
         generations.set(manifest.id, generation)
-        enqueue(manifest.id, () => runtime.onDisable?.())
+        enqueue(manifest.id, async () => {
+          try { await runtime.onDisable?.() } finally { releaseSubscriptions(manifest.id) }
+        })
       }
       previous.clear()
     }
