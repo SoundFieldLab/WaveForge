@@ -117,7 +117,16 @@ export default function RemoteControlModal({ onClose, playerTheme }: RemoteContr
       if (st && (st.clientCount || 0) > prevClientCountRef.current) setShowConnect(false)
       prevClientCountRef.current = st ? st.clientCount || 0 : 0
     })
-    return () => { offClients?.() }
+    // 配对 token 有有效期；弹窗持续打开时通过现有状态渠道刷新二维码。
+    const timer = window.setInterval(() => {
+      void bridge.getStatus().then((st) => {
+        if (st) setStatus(prev => ({ ...prev, ...st }))
+      }).catch(() => {})
+    }, 30_000)
+    return () => {
+      offClients?.()
+      window.clearInterval(timer)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 

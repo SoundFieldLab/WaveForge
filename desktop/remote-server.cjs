@@ -1,7 +1,6 @@
 // ── WaveForge 遥控器：局域网 Web 服务（手机浏览器遥控 UI + 虚拟鼠标桥接）──
 // 在主进程内运行，绑 0.0.0.0:25566（局域网可达），token 配对防局域网内任意设备乱控。
-// 支持多设备（最多 5 台）：启动时一次性生成 5 个 token 槽位，每台设备占一个槽；
-// 关闭弹窗不会停止服务、不会重新生成 token（持续到软件退出或手动断开）。
+// 支持多设备（最多 5 台）：桌面 UI 提供短期、一次性的配对 token，配对后改用 HttpOnly 会话。
 // 鼠标控制为独占：同一时刻只有一台设备能控制虚拟鼠标，其余设备控制被提示「正在控制鼠标中」，
 // 但播放/返回/Home/音量等其它操作不受限制。
 'use strict'
@@ -15,6 +14,12 @@ const { WebSocketServer } = require('ws')
 
 const DEFAULT_PORT = 25566
 const MAX_CLIENTS = 5
+const PAIRING_TOKEN_TTL_MS = 5 * 60 * 1000
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000
+const MAX_MESSAGE_BYTES = 64 * 1024
+const CONNECTION_RATE_WINDOW_MS = 10 * 1000
+const CONNECTION_RATE_LIMIT = 10
+const SESSION_COOKIE_PREFIX = 'waveforge_remote_session_'
 // 鼠标独占：最后一次鼠标操作后，独占权保留这么久（超过即释放，别的设备可接管）
 const MOUSE_OWNERSHIP_MS = 1500
 
@@ -59,11 +64,18 @@ function createRemoteServer(options) {
   let wss = null
   let running = false
   let port = DEFAULT_PORT
-  let tokens = []
+  let pairingToken = null
   let clientSeq = 0
-  const clients = [] // { id, ws, slot, token, name, ip, connectedAt }
+  const clients = [] // { id, ws, sessionId, name, ip, connectedAt }
+  const sessions = new Map() // sessionId => { expiresAt, activeClientId, ephemeral }
+  const connectionAttempts = new Map() // ip => recent attempt timestamps
   let mouseOwnerId = null
   let mouseOwnerActiveUntil = 0
+  const now = typeof options.now === 'function' ? options.now : Date.now
+  const pairingTokenTtlMs = options.pairingTokenTtlMs || PAIRING_TOKEN_TTL_MS
+  const sessionTtlMs = options.sessionTtlMs || SESSION_TTL_MS
+  const connectionRateWindowMs = options.connectionRateWindowMs || CONNECTION_RATE_WINDOW_MS
+  const connectionRateLimit = options.connectionRateLimit || CONNECTION_RATE_LIMIT
 
   const htmlTemplate = (() => {
     const file = path.join(__dirname, 'remote-ui.html')
@@ -89,17 +101,68 @@ function createRemoteServer(options) {
     return htmlTemplate.replace('__REMOTE_CONFIG__', JSON.stringify(buildConfig()))
   }
 
-  function generateTokens() {
-    tokens = []
-    for (let i = 0; i < MAX_CLIENTS; i += 1) tokens.push(crypto.randomBytes(18).toString('hex'))
+  function randomToken() {
+    return crypto.randomBytes(24).toString('hex')
   }
 
-  // 返回下一个未被占用的 token（槽位），没有则返回 ''
-  function nextToken() {
-    for (const t of tokens) {
-      if (!clients.some(c => c.token === t)) return t
+  function pruneSessions() {
+    const currentTime = now()
+    for (const [sessionId, session] of sessions) {
+      if (session.expiresAt <= currentTime && !session.activeClientId) sessions.delete(sessionId)
     }
-    return ''
+  }
+
+  function nextToken() {
+    pruneSessions()
+    if (clients.length >= MAX_CLIENTS) return ''
+    if (!pairingToken || pairingToken.expiresAt <= now()) {
+      pairingToken = { value: randomToken(), expiresAt: now() + pairingTokenTtlMs }
+    }
+    return pairingToken.value
+  }
+
+  function consumePairingToken(candidate, ephemeral = false) {
+    if (!pairingToken || pairingToken.expiresAt <= now() || candidate !== pairingToken.value) return null
+    pairingToken = null
+    pruneSessions()
+    if (clients.length >= MAX_CLIENTS) return null
+    const sessionId = randomToken()
+    sessions.set(sessionId, { expiresAt: now() + sessionTtlMs, activeClientId: null, ephemeral })
+    return sessionId
+  }
+
+  function parseCookies(header) {
+    const result = {}
+    for (const part of String(header || '').split(';')) {
+      const separator = part.indexOf('=')
+      if (separator < 0) continue
+      const key = part.slice(0, separator).trim()
+      const value = part.slice(separator + 1).trim()
+      if (key) result[key] = value
+    }
+    return result
+  }
+
+  function sessionCookieName() {
+    return `${SESSION_COOKIE_PREFIX}${port}`
+  }
+
+  function getSession(sessionId) {
+    if (!sessionId) return null
+    const session = sessions.get(sessionId)
+    if (!session || session.expiresAt <= now()) {
+      if (session && !session.activeClientId) sessions.delete(sessionId)
+      return null
+    }
+    return session
+  }
+
+  function isConnectionRateLimited(ip) {
+    const cutoff = now() - connectionRateWindowMs
+    const attempts = (connectionAttempts.get(ip) || []).filter(timestamp => timestamp > cutoff)
+    attempts.push(now())
+    connectionAttempts.set(ip, attempts)
+    return attempts.length > connectionRateLimit
   }
 
   function clientList() {
@@ -113,7 +176,7 @@ function createRemoteServer(options) {
     return {
       running,
       port,
-      token: nextToken(),
+      token: running ? nextToken() : '',
       clientCount: phoneCount,
       maxClients: MAX_CLIENTS,
       clients: clientList(),
@@ -219,20 +282,34 @@ function createRemoteServer(options) {
   function start(requestedPort) {
     if (running) return Promise.resolve(status())
     return new Promise((resolve, reject) => {
-      // 启动即生成 5 个 token 槽位；已运行则保留原 token（关闭弹窗不会重新生成）
-      if (!tokens.length) generateTokens()
-      port = requestedPort || DEFAULT_PORT
+      port = requestedPort == null ? DEFAULT_PORT : requestedPort
 
       server = http.createServer((req, res) => {
         const url = new URL(req.url, 'http://localhost')
         if (url.pathname === '/' || url.pathname === '/index.html') {
           const t = url.searchParams.get('t') || ''
-          if (!tokens.includes(t)) {
+          const cookies = parseCookies(req.headers.cookie)
+          if (t) {
+            const sessionId = consumePairingToken(t)
+            if (!sessionId) {
+              res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
+              res.end('403 Forbidden')
+              return
+            }
+            res.writeHead(303, {
+              Location: '/',
+              'Cache-Control': 'no-store',
+              'Set-Cookie': `${sessionCookieName()}=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}`,
+            })
+            res.end()
+            return
+          }
+          if (!getSession(cookies[sessionCookieName()])) {
             res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' })
             res.end('403 Forbidden')
             return
           }
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
           res.end(renderHtml())
           return
         }
@@ -241,14 +318,12 @@ function createRemoteServer(options) {
           res.end(JSON.stringify({ ok: true }))
           return
         }
-        // 设备发现：手机端扫描多个端口列出局域网内的 WaveForge 设备。
-        // 返回 name/port/token（与二维码同等的配对信息，仅限可信局域网使用）。
+        // 匿名设备发现只返回服务信息。配对 token 仅通过桌面 UI 的状态渠道提供。
         if (url.pathname === '/discover') {
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({
             name: options.getComputerName ? options.getComputerName() : 'WaveForge',
             port,
-            token: nextToken() || (tokens[0] || ''),
           }))
           return
         }
@@ -260,7 +335,7 @@ function createRemoteServer(options) {
         res.end('404 Not Found')
       })
 
-      wss = new WebSocketServer({ server, path: '/ws' })
+      wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE_BYTES })
       // ws 会把底层 http server 的 error（如端口被占 EADDRINUSE）转发到自身；
       // 不监听会导致 EventEmitter 抛 uncaughtException，这里静默吞掉（listen 失败由下方 reject 处理）
       wss.on('error', () => {})
@@ -268,38 +343,44 @@ function createRemoteServer(options) {
       wss.on('connection', (ws, req) => {
         let url
         try { url = new URL(req.url, 'http://localhost') } catch { url = null }
-        const t = url ? url.searchParams.get('t') || '' : ''
-        if (!tokens.includes(t)) {
+        const ip = normalizeIp(ws._socket && ws._socket.remoteAddress)
+        if (isConnectionRateLimited(ip)) {
+          ws.close(4008, 'Rate limit exceeded')
+          return
+        }
+        const cookies = parseCookies(req.headers.cookie)
+        let sessionId = cookies[sessionCookieName()] || ''
+        let session = getSession(sessionId)
+        if (!session && url) {
+          sessionId = consumePairingToken(url.searchParams.get('t') || '', true) || ''
+          session = getSession(sessionId)
+        }
+        if (!session) {
           ws.close(4001, 'Unauthorized')
+          return
+        }
+        if (session.activeClientId) {
+          ws.close(4002, 'Session already in use')
           return
         }
         // role=spa：TV 端 SPA 自连（remoteBridge），不计入手机客户端数
         const role = url ? url.searchParams.get('role') || '' : ''
 
-        // 同一 token 槽位重连（如页面刷新）：顶掉旧连接
-        const existing = clients.find(c => c.token === t)
-        if (existing) {
-          try { existing.ws.close(4002, 'Replaced') } catch { /* ignore */ }
-          const idx = clients.indexOf(existing)
-          if (idx >= 0) clients.splice(idx, 1)
-          releaseMouseIfOwner(existing.id)
-        }
         if (clients.length >= MAX_CLIENTS) {
           ws.close(4003, 'Max clients reached')
           return
         }
 
-        const slot = tokens.indexOf(t)
         const client = {
           id: ++clientSeq,
           ws,
-          slot,
-          token: t,
+          sessionId,
           role,
-          name: `设备 ${slot + 1}`,
-          ip: normalizeIp(ws._socket && ws._socket.remoteAddress),
+          name: `设备 ${clients.length + 1}`,
+          ip,
           connectedAt: Date.now(),
         }
+        session.activeClientId = client.id
         clients.push(client)
         notifyClients()
 
@@ -316,6 +397,11 @@ function createRemoteServer(options) {
         ws.on('close', () => {
           const idx = clients.indexOf(client)
           if (idx >= 0) clients.splice(idx, 1)
+          const currentSession = sessions.get(client.sessionId)
+          if (currentSession && currentSession.activeClientId === client.id) {
+            currentSession.activeClientId = null
+            if (currentSession.ephemeral) sessions.delete(client.sessionId)
+          }
           releaseMouseIfOwner(client.id)
           notifyClients()
         })
@@ -329,6 +415,8 @@ function createRemoteServer(options) {
       })
 
       server.listen(port, '0.0.0.0', () => {
+        const address = server.address()
+        if (address && typeof address === 'object') port = address.port
         running = true
         console.log(`[Remote] 遥控器服务已启动: http://0.0.0.0:${port}（${MAX_CLIENTS} 槽位）`)
         resolve(status())
@@ -341,6 +429,9 @@ function createRemoteServer(options) {
     running = false
     for (const c of clients) { try { c.ws.close() } catch { /* ignore */ } }
     clients.length = 0
+    pairingToken = null
+    sessions.clear()
+    connectionAttempts.clear()
     mouseOwnerId = null
     mouseOwnerActiveUntil = 0
     if (wss) { try { wss.close() } catch { /* ignore */ } ; wss = null }
@@ -362,4 +453,12 @@ function createRemoteServer(options) {
   return { start, stop, status, broadcastState, pushConfig }
 }
 
-module.exports = { createRemoteServer, getLanIPv4Addresses, DEFAULT_PORT, MAX_CLIENTS }
+module.exports = {
+  createRemoteServer,
+  getLanIPv4Addresses,
+  DEFAULT_PORT,
+  MAX_CLIENTS,
+  PAIRING_TOKEN_TTL_MS,
+  MAX_MESSAGE_BYTES,
+  CONNECTION_RATE_LIMIT,
+}
