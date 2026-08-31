@@ -21,6 +21,17 @@ import type { VisualizerBackgroundConfig } from '../vendor/folia/components/visu
 
 ensureFoliaI18n()
 
+export function scaleAnalyzerSnapshotForFolia(snapshot: { overall: number; bass: number; mid: number; high: number }) {
+  return {
+    overall: snapshot.overall * 255,
+    bass: snapshot.bass * 255,
+    lowMid: (snapshot.bass + snapshot.mid) * 127.5,
+    mid: snapshot.mid * 255,
+    vocal: (snapshot.mid * 0.4 + snapshot.high * 0.6) * 255,
+    treble: snapshot.high * 255,
+  }
+}
+
 export interface FoliaLyricsPageProps {
   lyrics: LyricLine[]
   currentIndex: number
@@ -149,6 +160,10 @@ export function FoliaLyricsPage({
   const vocalBand = useMotionValue(0)
   const trebleBand = useMotionValue(0)
   const spectrumBand = useMotionValue<Uint8Array>(new Uint8Array(0))
+  // 双缓冲复用：每次仍交替不同引用以触发 MotionValue 订阅，但不再每个 analyzer tick
+  // 分配新 Uint8Array，保持频谱精度/刷新率与所有 Folia 效果不变。
+  const spectrumBuffersRef = useRef<[Uint8Array, Uint8Array]>([new Uint8Array(0), new Uint8Array(0)])
+  const spectrumBufferIndexRef = useRef(0)
   const audioBands = useMemo(() => ({
     bass: bassBand,
     lowMid: lowMidBand,
@@ -161,14 +176,24 @@ export function FoliaLyricsPage({
     if (!analyzerStore) return
     const update = () => {
       const snapshot = analyzerStore.getSnapshot()
-      audioPower.set(snapshot.overall)
-      bassBand.set(snapshot.bass)
-      lowMidBand.set((snapshot.bass + snapshot.mid) / 2)
-      midBand.set(snapshot.mid)
-      vocalBand.set(snapshot.mid * 0.4 + snapshot.high * 0.6)
-      trebleBand.set(snapshot.high)
-      const bins = new Uint8Array(snapshot.spectrum.length)
-      for (let i = 0; i < snapshot.spectrum.length; i++) bins[i] = Math.round(snapshot.spectrum[i] * 255)
+      const scaled = scaleAnalyzerSnapshotForFolia(snapshot)
+      audioPower.set(scaled.overall)
+      bassBand.set(scaled.bass)
+      lowMidBand.set(scaled.lowMid)
+      midBand.set(scaled.mid)
+      vocalBand.set(scaled.vocal)
+      trebleBand.set(scaled.treble)
+      const spectrum = snapshot.spectrum
+      let buffers = spectrumBuffersRef.current
+      if (buffers[0].length !== spectrum.length) {
+        buffers = [new Uint8Array(spectrum.length), new Uint8Array(spectrum.length)]
+        spectrumBuffersRef.current = buffers
+        spectrumBufferIndexRef.current = 0
+      }
+      const nextIndex = spectrumBufferIndexRef.current ^ 1
+      const bins = buffers[nextIndex]
+      spectrumBufferIndexRef.current = nextIndex
+      for (let i = 0; i < spectrum.length; i++) bins[i] = Math.round(spectrum[i] * 255)
       spectrumBand.set(bins)
     }
     update()

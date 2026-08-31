@@ -827,6 +827,8 @@ const EMPTY_ANALYSIS: AudioAnalyzerData = Object.freeze({
 const EMPTY_ANALYZER_STORE: AudioAnalyzerStore = {
     getSnapshot: () => EMPTY_ANALYSIS,
     subscribe: () => () => undefined,
+    retainBackground: () => () => undefined,
+    hasBackgroundConsumers: () => false,
 };
 
 export default function DioramaScene({
