@@ -1,5 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+// @ts-ignore: allow side-effect CSS import without module declaration
+import './assets/fonts/fonts.css'
 import './index.css'
 import './tv/tv.css'
 import App from './App'

@@ -1,7 +1,12 @@
+/** @vitest-environment jsdom */
 // 传统模式冒烟测试（v2）：中间栏展示所有内容、搜索/音乐库/歌单/评论/歌手/专辑、顶部模式下拉、真实频谱。
 // 纯 DOM + 文本断言（不依赖截图）。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+
+if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = () => undefined
+}
 
 const cannedHomePayload = {
   dailySongs: [

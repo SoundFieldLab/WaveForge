@@ -31,6 +31,7 @@ import {
 import { useDesktopFocusTimer } from '../hooks/useDesktopFocusTimer'
 import { getReadableDesktopAccentColor } from '../utils/desktopAccentColor'
 import { parseStoredArray, parseStoredBoolean } from '../utils/storage'
+import { preloadOnIdle } from '../utils/lazyPreload'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import { addDesktopListeningSeconds, recordDesktopSongStart } from '../services/desktopMusicActivity'
 import type { DesktopMusicWidgetContext } from './DesktopExtraWidgets'
@@ -275,6 +276,12 @@ function DesktopView({
     window.addEventListener('viewModeChanged', closeForModeSwitch)
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
+
+  // 空闲时预热设置弹窗与全局设置镜像的懒加载 chunk，消除首次点击的卡顿
+  useEffect(() => preloadOnIdle([
+    () => import('./DesktopSettingsModal'),
+    () => import('./MirroredGlobalSettings'),
+  ]), [])
 
   const [showSettings, setShowSettings] = useState(false)
   const [settingsModuleMounted, setSettingsModuleMounted] = useState(false)
@@ -2472,6 +2479,10 @@ function DesktopView({
         wallpaperRotation={wallpaperRotation}
         onWallpaperRotationChange={updateWallpaperRotation}
         onWallpaperSyncToggle={handleWallpaperSyncToggle}
+        neteaseLoggedIn={neteaseLoggedIn}
+        qqLoggedIn={qqLoggedIn}
+        neteaseVip={neteaseVip}
+        qqVip={qqVip}
         onOpenCustomizer={() => {
           closePlaylistCarousel()
           setShowDesktopCustomizer(true)

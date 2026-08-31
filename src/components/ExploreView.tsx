@@ -2,7 +2,7 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -68,6 +68,13 @@ import SongContextMenu from './SongContextMenu'
 import MVExploreModal from './MVExploreModal'
 import { getUserPlaylists } from '../services/playlistService'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
+import type { MirrorActionId } from '../services/globalSettingsRegistry'
+import { preloadOnIdle } from '../utils/lazyPreload'
+
+// 全局设置镜像里的共享弹窗（按需加载）
+const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
 type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
@@ -748,6 +755,14 @@ function ExploreView({
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 全局设置镜像里打开的共享弹窗（音质 / 缓存清理 / 遥控器个性化）
+  const [globalModal, setGlobalModal] = useState<MirrorActionId | null>(null)
+  // 空闲时预热共享弹窗 chunk，消除首次点击的卡顿
+  useEffect(() => preloadOnIdle([
+    () => import('./AudioQualitySettingsModal'),
+    () => import('./CacheClearModal'),
+    () => import('./RemoteControlSettingsModal'),
+  ]), [])
   const [moreSection, setMoreSection] = useState<ExploreSectionId | null>(null)
   const [preferences, setPreferences] = useState<ExplorePreferences>(() => {
     try {
@@ -2106,7 +2121,21 @@ function ExploreView({
         onClose={() => setSettingsOpen(false)}
         onPlatformChange={setPlatform}
         onChange={setPreferences}
+        onOpenGlobalModal={setGlobalModal}
       />
+
+      {/* 全局设置镜像的共享弹窗（与简约 / 传统模式同一组件） */}
+      <Suspense fallback={null}>
+        {globalModal === 'audio-quality' && (
+          <LazyAudioQualityModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} neteaseVip={Boolean(neteaseVip)} qqVip={Boolean(qqVip)} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
+        )}
+        {globalModal === 'cache-clear' && (
+          <LazyCacheClearModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+        {globalModal === 'remote-settings' && (
+          <LazyRemoteSettingsModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+      </Suspense>
 
       {detailLoading && !detailOpen && (
         <div className="pointer-events-none fixed bottom-7 left-1/2 z-[200] flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/[0.1] bg-black/65 px-4 py-2 text-xs text-white/68 shadow-xl backdrop-blur-xl">

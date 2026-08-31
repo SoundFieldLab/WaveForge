@@ -516,6 +516,8 @@ function getDesktopPlayerSettingsPath() {
   return path.join(app.getPath('userData'), 'desktop-player-settings.json')
 }
 
+  // 歌词字体族名；空字符串 = 默认字体栈。可选本机字体，因此只做字符串校验不做白名单
+  fontFamily: '',
 function loadDesktopPlayerSettings() {
   try {
     const parsed = JSON.parse(fs.readFileSync(getDesktopPlayerSettingsPath(), 'utf8'))
@@ -750,6 +752,10 @@ function setDesktopLyricsMousePassthrough(passthrough) {
   const next = desktopLyricsSettings.locked === true && passthrough === true
   desktopLyricsMousePassthrough = next
   if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
+    // 字体族名：允许任意本机字体名，仅截断长度防止异常数据；空串 = 默认字体栈
+    fontFamily: input.fontFamily === undefined
+      ? (base.fontFamily || '')
+      : String(input.fontFamily).trim().slice(0, 128),
     try {
       if (next) desktopLyricsWindow.setIgnoreMouseEvents(true, { forward: true })
       else desktopLyricsWindow.setIgnoreMouseEvents(false)

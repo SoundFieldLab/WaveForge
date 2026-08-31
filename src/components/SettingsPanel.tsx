@@ -1,3 +1,23 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// ⚠️ 设置镜像机制声明（后续维护者 / AI 协作必读）⚠️
+//
+// 本组件是【简约模式设置】= 整软件的"总设置"。WaveForge 共 4 个界面模式
+// （简约 / 传统 / 探索 / 桌面，后续可能更多），其中【全局功能性设置】通过
+//   services/globalSettingsRegistry.ts（设置注册表，同键同事件双向同步）
+//   components/MirroredGlobalSettings.tsx（按各模式设计语言渲染的镜像 UI）
+// 自动镜像到传统 / 探索 / 桌面三个模式的设置界面。
+//
+// 因此在本面板新增设置项时，先判断它属于哪一类：
+// 1. 全局功能设置（播放 / 歌词 / 性能 / 桌面集成 / 网络等，对所有模式生效）：
+//    ✅ 除了写本面板的简约 UI，【必须】同步在 services/globalSettingsRegistry.ts
+//      登记一条（read/write 与本面板读写同一存储键、派发同一事件），
+//      其他模式的设置页就会自动出现该功能，无需逐模式手写 UI；
+//    ✅ 如需自定义控件（如字体选择器 FontPicker），在 MirroredGlobalSettings.tsx
+//      里为注册表的 control.kind 增加对应渲染分支（classic / panel 两种风格）。
+//    ❌ 只写本面板不登记 = 其他模式的用户永远看不到这个功能开关。
+// 2. 简约模式专属的自定义 / 外观设置（只影响简约模式自身，如"自定义首页显示内容"）：
+//    不需要登记，写在这里即可。
+// ═══════════════════════════════════════════════════════════════════════════
 import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Gift, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle } from 'lucide-react'
@@ -18,6 +38,7 @@ import HomeCustomizeModal from './HomeCustomizeModal'
 import DeviceInfoModal from './DeviceInfoModal'
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import RemoteControlSettingsModal from './RemoteControlSettingsModal'
+import FontPicker from './FontPicker'
 import RemoteControlGuideModal from './RemoteControlGuideModal'
 import CacheClearModal from './CacheClearModal'
 import LegalAgreement from './legal/LegalAgreement'
@@ -418,6 +439,7 @@ function SettingsPanel({
     setDesktopPlayerEnabled(enabled)
     if (!hasBridge) return
     try {
+    fontFamily: '',
       const result = await (window as any).electron.desktopPlayer.setEnabled(enabled)
       setDesktopPlayerEnabled(Boolean(result?.enabled ?? enabled))
     } catch {
@@ -2729,6 +2751,23 @@ function SettingsPanel({
                                 </div>
                               </div>
                             </button>
+
+                          {/* 歌词字体：内置霞鹜文楷 / 得意黑（OFL 开源可商用）+ 推荐系统字体 + 本机字体 */}
+                          <div className="mt-4">
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="min-w-0">
+                                <div className={`${textPrimary} text-sm font-medium`}>字体</div>
+                                <div className={`${textTertiary} text-xs mt-0.5`}>内置霞鹜文楷 / 得意黑，也可选择本机字体</div>
+                              </div>
+                              <FontPicker
+                                value={desktopLyricsSettings.fontFamily}
+                                onChange={(family) => updateDesktopLyrics({ fontFamily: family })}
+                                dark={playerTheme === 'dark'}
+                                accent={accentColor}
+                                buttonWidth={200}
+                              />
+                            </div>
+                          </div>
 
                             <button
                               onClick={() => handleDesktopPlayerFormChange('bar')}

@@ -1,0 +1,24 @@
+/*
+ * 内置字体（全局共享：桌面歌词窗口 + 主窗口设置界面都会 import）
+ * 两款字体均为 SIL Open Font License 1.1 —— 免费商用、允许随软件分发，
+ * 许可文本见同目录 OFL-LXGWWenKai.txt / OFL-SmileySans.txt。
+ * 注意：必须保持为未修改的原始字体文件（OFL 保留名条款只对"修改版"生效）。
+ */
+
+/* 霞鹜文楷（LXGW WenKai）— 基于 Klee One 的开源楷体，衍生自 FONTWORKS */
+@font-face {
+  font-family: 'LXGW WenKai';
+  src: url('./LXGWWenKai-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 得意黑（Smiley Sans）— atelierAnchor 出品的斜体黑体 */
+@font-face {
+  font-family: 'Smiley Sans';
+  src: url('./SmileySans-Oblique.ttf.woff2') format('woff2');
+  font-weight: 400;
+  font-style: oblique 0deg;
+  font-display: swap;
+}
