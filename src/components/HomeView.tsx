@@ -1,4 +1,5 @@
 import { memo, useState, useEffect, useRef } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
@@ -279,16 +280,19 @@ function HomeView({
   authRevision = 0
 }: HomeViewProps) {
   const [leftChartType, setLeftChartType] = useState<ChartType>('new')
-  // 从 localStorage 恢复上次选择的平台（所有平台都参与恢复，避免播放页点 Home 键回退到第一个平台）
-  const [platform, setPlatform] = useState<MusicPlatform>(() => {
-    const saved = localStorage.getItem('selectedPlatform')
-    const valid = saved === 'qq' || saved === 'netease' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda'
-    return valid ? saved : 'netease'
-  })
-  // 平台变化（药丸点击/拖动/被隐藏回退）即持久化：播放页 HomeView 卸载重挂后仍回到当前平台
+  const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'selectedPlatform'))
+  // 平台变化（药丸点击/拖动/被隐藏回退）即持久化；其他挂载视图通过事件同步
   useEffect(() => {
-    try { localStorage.setItem('selectedPlatform', platform) } catch { /* 忽略 */ }
+    syncPlatformAcrossViews(platform)
   }, [platform])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -305,7 +309,7 @@ function HomeView({
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
       setPlatform(next)
-      localStorage.setItem('selectedPlatform', next)
+      syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
 
@@ -1526,11 +1530,6 @@ function HomeView({
       timers.forEach(timer => window.clearTimeout(timer))
     }
   }, [userPlaylists, platform])
-  
-  // 保存平台选择到 localStorage
-  useEffect(() => {
-    localStorage.setItem('selectedPlatform', platform)
-  }, [platform])
   
   // Watch for home module configuration changes
   useEffect(() => {

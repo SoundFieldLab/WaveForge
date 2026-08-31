@@ -3,6 +3,7 @@
 // - 平台切换为可拖拽药丸（与简约模式一致）；模式切换走全局顶部下拉条；
 // - 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部，可滚动）。
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
   Captions, ChevronLeft, ChevronRight, Disc3, Heart, History, Home, Library, ListMusic, LogIn, Music2,
@@ -339,7 +340,7 @@ function TraditionalView({
   neteaseVip = false, qqVip = false,
   onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onCopyInfo,
 }: TraditionalViewProps) {
-  const [platform, setPlatform] = useState<MusicPlatform>(() => (localStorage.getItem('traditionalPlatform') as MusicPlatform) || 'netease')
+  const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'traditionalPlatform'))
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
   const [payload, setPayload] = useState<ExplorePayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -437,6 +438,15 @@ function TraditionalView({
   }, [])
 
   useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+
+  useEffect(() => {
     if (!visiblePlatforms.includes(platform)) setPlatform(visiblePlatforms[0] || 'netease')
   }, [platform, visiblePlatforms])
 
@@ -445,7 +455,7 @@ function TraditionalView({
     setLoading(true)
     setPayload(null)
     void fetchExploreHome(platform).then(next => { if (!cancelled) setPayload(next) }).catch(() => { if (!cancelled) setPayload(null) }).finally(() => { if (!cancelled) setLoading(false) })
-    localStorage.setItem('traditionalPlatform', platform)
+    syncPlatformAcrossViews(platform)
     return () => { cancelled = true }
   }, [platform, authRevision])
 

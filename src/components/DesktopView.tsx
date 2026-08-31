@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { isTvModeActive } from '../platform'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
 import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
@@ -17,7 +18,7 @@ import DesktopWidgetZone from './DesktopWidgetZone'
 import DesktopFocusAlarmOverlay from './DesktopFocusAlarmOverlay'
 import { Song, LyricLine } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getVisiblePlatforms } from '../services/platforms'
+import { getVisiblePlatforms, PLATFORM_ORDER_EVENT, PLATFORM_VISIBILITY_EVENT } from '../services/platforms'
 import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, appleSongToSong, removeAppleTracksFromPlaylist } from '../services/appleCatalog'
 import { desktopWallpaperManager, DesktopLiveWallpaperSource, toWallpaperUrl } from '../services/desktopWallpaperManager'
 import { getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks } from '../services/playlistService'
@@ -210,14 +211,33 @@ function DesktopView({
   onRemoteClick,
   onOpenDeviceControl,
 }: DesktopViewProps) {
-  // 当前平台（桌面模式独立）- 记住用户选择
-  const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => {
-    const saved = localStorage.getItem('desktopModePlatform')
-    if (saved === 'qq' || saved === 'apple') {
-      return getVisiblePlatforms().includes(saved) ? saved : 'netease'
+  // 当前平台（四视图共享）——支持全部六个平台，并在启动时按可见平台归一化
+  const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'desktopModePlatform'))
+  const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
+  useEffect(() => {
+    const syncVisible = () => setVisiblePlatforms(getVisiblePlatforms())
+    window.addEventListener(PLATFORM_VISIBILITY_EVENT, syncVisible)
+    window.addEventListener(PLATFORM_ORDER_EVENT, syncVisible)
+    return () => {
+      window.removeEventListener(PLATFORM_VISIBILITY_EVENT, syncVisible)
+      window.removeEventListener(PLATFORM_ORDER_EVENT, syncVisible)
     }
-    return 'netease'
-  })
+  }, [])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setCurrentPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+  useEffect(() => {
+    if (!visiblePlatforms.includes(currentPlatform)) {
+      const next = visiblePlatforms[0] || 'netease'
+      setCurrentPlatform(next)
+      syncPlatformAcrossViews(next)
+    }
+  }, [currentPlatform, visiblePlatforms])
 
   // TV 遥控器模式（html.tv-mode 激活）：桌面模式下的歌单栏/小白条交互需要适配遥控器
   const tvMode = useTvMode()
@@ -1309,7 +1329,7 @@ function DesktopView({
     const order = getVisiblePlatforms()
     const next = order[(order.indexOf(currentPlatform) + 1) % order.length]
     setCurrentPlatform(next)
-    localStorage.setItem('desktopModePlatform', next)
+    syncPlatformAcrossViews(next)
   }
 
   const closePlaylistDetail = useCallback(() => {

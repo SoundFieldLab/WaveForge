@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
@@ -545,17 +546,7 @@ function ExploreView({
   onViewComments,
   onCopyInfo,
 }: ExploreViewProps) {
-  const [platform, setPlatform] = useState<ExplorePlatform>(() => {
-    const saved = localStorage.getItem('explorePlatform')
-    if (saved === 'qq' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda') return saved
-    // 探索页从未显式选过平台：继承其他视图（首页/传统/桌面）上次使用的平台，
-    // 避免每次进入探索页都默认回到网易云
-    for (const key of ['selectedPlatform', 'traditionalPlatform', 'desktopModePlatform']) {
-      const inherited = localStorage.getItem(key)
-      if (inherited === 'qq' || inherited === 'apple' || inherited === 'spotify' || inherited === 'kugou' || inherited === 'soda') return inherited
-    }
-    return 'netease'
-  })
+  const [platform, setPlatform] = useState<ExplorePlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'explorePlatform'))
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<ExplorePlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -568,11 +559,19 @@ function ExploreView({
     }
   }, [])
   useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<ExplorePlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+  useEffect(() => {
     // 当前平台被隐藏时切换到第一个可见平台
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
       setPlatform(next)
-      localStorage.setItem('explorePlatform', next)
+      syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
   const [dataByPlatform, setDataByPlatform] = useState<Partial<Record<ExplorePlatform, ExplorePayload>>>(() => readExploreCache())
@@ -817,7 +816,7 @@ function ExploreView({
   }, [platform, qqLoggedIn, neteaseLoggedIn, authRevision, platformPreferences.enhancedApi, appleCountry])
 
   useEffect(() => {
-    localStorage.setItem('explorePlatform', platform)
+    syncPlatformAcrossViews(platform)
     const sessionKey = `${EXPLORE_SESSION_REFRESH_PREFIX}${platform}`
     const requiresPersonalizedPayload = platform === 'qq' && qqLoggedIn
     const inMemoryPayload = dataByPlatform[platform]
