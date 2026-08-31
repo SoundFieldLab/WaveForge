@@ -699,7 +699,7 @@ async function deleteModel() {
   return { ok: true }
 }
 
-function setupAiModelIPC(ipcMain, automixLogFn) {
+function setupAiModelIPC(ipcMain, automixLogFn, guardHandler = (_capability, handler) => handler) {
   if (automixLogFn) setAutomixLogger(automixLogFn)
   cleanupLegacyLocation()
   // Existing/manual installs are not trusted by name or size alone. Verify once asynchronously
@@ -710,14 +710,14 @@ function setupAiModelIPC(ipcMain, automixLogFn) {
       broadcastProgress()
     }).catch(() => undefined)
   }
-  ipcMain.handle('ai-model:get-status', async () => {
+  ipcMain.handle('ai-model:get-status', guardHandler('models', async () => {
     if (!weightsReady() && fs.existsSync(getWeightsPath())) await verifyWeights().catch(() => false)
     return getStatus()
-  })
-  ipcMain.handle('ai-model:download', () => startDownload())
-  ipcMain.handle('ai-model:pause', () => pauseDownload())
-  ipcMain.handle('ai-model:cancel', () => cancelDownload())
-  ipcMain.handle('ai-model:delete', () => deleteModel())
+  }))
+  ipcMain.handle('ai-model:download', guardHandler('models', () => startDownload()))
+  ipcMain.handle('ai-model:pause', guardHandler('models', () => pauseDownload()))
+  ipcMain.handle('ai-model:cancel', guardHandler('models', () => cancelDownload()))
+  ipcMain.handle('ai-model:delete', guardHandler('models', () => deleteModel()))
 }
 
 /** 清理旧位置（userData/ai-mix-engine）残留：模型位置改到应用安装目录后，C 盘用户目录里的旧副本作废 */

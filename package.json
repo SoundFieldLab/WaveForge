@@ -33,7 +33,7 @@
     "test": "vitest run",
     "test:chroma": "node scripts/test-chroma.cjs && node scripts/test-razer-device-discovery.cjs",
     "test:signalrgb": "node scripts/test-signalrgb.cjs && node scripts/test-signalrgb-effect.cjs",
-    "test:stems:node": "node test/ai-model-manager.test.cjs && node test/stem-model-manager.test.cjs && node test/stem-runtime.test.cjs && node test/track-stem-runtime.test.cjs",
+    "test:stems:node": "node test/audio-download-security.test.cjs && node test/ai-model-manager.test.cjs && node test/stem-model-manager.test.cjs && node test/stem-runtime.test.cjs && node test/track-stem-runtime.test.cjs",
     "test:stems:python": "node scripts/run-stem-python-tests.cjs",
     "lint": "tsc --noEmit",
     "sync:sponsors": "node scripts/sync-afdian-sponsors.mjs",

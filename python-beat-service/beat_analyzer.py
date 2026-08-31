@@ -15,7 +15,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from local_service_auth import is_authorized_local_request
+from local_service_auth import is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
 import soundfile as sf
@@ -451,6 +451,8 @@ def analyze():
         # 校验 audioPath 必须是字符串（而非数字/布尔等被 str() 强转的值）
         if not isinstance(data.get('audioPath'), str):
             return jsonify({'error': 'audioPath must be a string'}), 400
+        if not is_allowed_audio_path(audio_path):
+            return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
         
         # 检查缓存
         cache_key = get_cache_key(track_key, duration)

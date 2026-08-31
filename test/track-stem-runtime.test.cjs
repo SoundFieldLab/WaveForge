@@ -21,7 +21,7 @@ function fixture(t) {
 
 class FakeRuntime extends TrackStemRuntime {
   constructor(options) {
-    super(options)
+    super({ ...options, isInputAllowed: options.isInputAllowed || (() => true) })
     this.started = []
     this.blockFirst = null
   }

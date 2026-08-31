@@ -2,10 +2,11 @@ import { spawn, execFile } from 'child_process'
 import { build, createServer, preview } from 'vite'
 import electron from 'electron'
 import { fileURLToPath } from 'url'
-import { dirname, resolve } from 'path'
+import { dirname, isAbsolute, resolve } from 'path'
+import { homedir } from 'os'
 import net from 'net'
 import { randomBytes } from 'crypto'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -24,7 +25,20 @@ const projectRoot = resolve(__dirname, '..')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
 const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).toString('base64url')
-const localServiceEnv = { ...process.env, WAVEFORGE_LOCAL_TOKEN: localServiceToken }
+const userDataRoot = process.platform === 'win32'
+  ? resolve(process.env.APPDATA || resolve(homedir(), 'AppData/Roaming'), 'WaveForge 澜音工坊')
+  : resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), '.config'), 'WaveForge 澜音工坊')
+let pythonCacheRoot = resolve(userDataRoot, 'cache')
+try {
+  const configured = JSON.parse(readFileSync(resolve(userDataRoot, 'config.json'), 'utf8'))?.cachePath
+  if (typeof configured === 'string' && isAbsolute(configured.trim())) pythonCacheRoot = resolve(configured.trim())
+} catch { /* Missing or invalid config uses the Electron default cache path. */ }
+mkdirSync(pythonCacheRoot, { recursive: true })
+const localServiceEnv = {
+  ...process.env,
+  WAVEFORGE_LOCAL_TOKEN: localServiceToken,
+  WAVEFORGE_CACHE_PATH: pythonCacheRoot,
+}
 
 function getNewestMtime(targetPath) {
   if (!existsSync(targetPath)) return 0

@@ -27,6 +27,7 @@ const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
 const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
+const { createDocumentUrlMatcher, createTrustedIpcGuard } = require('./trusted-ipc.cjs')
 const LOCAL_SERVICE_TOKEN = process.env.WAVEFORGE_LOCAL_TOKEN || crypto.randomBytes(32).toString('base64url')
 const {
   loadWindowState,
@@ -445,7 +446,6 @@ let qqLoginWindow = null
 let qqLoginWindowOpening = false
 let qqSkillKeyWindow = null
 let analysisRuntime = null
-const authorizedStemInputPaths = new Set()
 let stemRuntime = null
 let trackStemRuntime = null
 let mediaKeysEnabled = readMediaKeysEnabled()
@@ -1531,6 +1531,50 @@ function updateTaskbar() {
 const TASKBAR_WIDGET_DEFAULTS = { enabled: false, position: 'right', width: 340, mode: 'normal', darken: false, darkenLevel: 0.5, hideControls: false }
 let taskbarWidgetSettings = { ...TASKBAR_WIDGET_DEFAULTS }
 let taskbarWidgetWindow = null
+
+// IPC 权限同时绑定窗口身份、顶层 frame 和当前文档 URL。辅助窗口只保留各自
+// 播控能力；凭据、路径、启动器、模型、下载与更新操作仅主应用文档可调用。
+const trustedIpc = createTrustedIpcGuard({
+  roles: {
+    main: {
+      getWindow: () => mainWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        devServerUrl,
+        pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+      ]),
+    },
+    desktopPlayer: {
+      getWindow: () => desktopPlayerWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        `${devServerUrl}/desktop-player.html`,
+        pathToFileURL(path.join(__dirname, '../dist/desktop-player.html')).href,
+      ]),
+    },
+    desktopLyrics: {
+      getWindow: () => desktopLyricsWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        `${devServerUrl}/desktop-lyrics.html`,
+        pathToFileURL(path.join(__dirname, '../dist/desktop-lyrics.html')).href,
+      ]),
+    },
+    taskbarWidget: {
+      getWindow: () => taskbarWidgetWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        pathToFileURL(path.join(__dirname, 'taskbar-widget.html')).href,
+      ]),
+    },
+  },
+  capabilities: {
+    privileged: ['main'],
+    models: ['main'],
+    update: ['main'],
+    desktopPlayer: ['main', 'desktopPlayer', 'desktopLyrics'],
+    desktopLyrics: ['main', 'desktopLyrics'],
+    taskbarWidget: ['main', 'taskbarWidget'],
+  },
+})
+const guardTrustedIpc = trustedIpc.handle
+
 let taskbarWidgetClosedByUser = false
 let taskbarWidgetInteractive = false
 let taskbarWidgetExpanded = false
@@ -2776,7 +2820,7 @@ ipcMain.handle('get-current-wallpaper', async () => {
 })
 
 // IPC 处理：打开外部链接
-ipcMain.handle('open-external', async (event, url) => {
+ipcMain.handle('open-external', guardTrustedIpc('privileged', async (event, url) => {
   logWallpaper('📞 [IPC] 收到打开外部链接请求:', url)
   try {
     const parsed = new URL(String(url || ''))
@@ -2790,7 +2834,7 @@ ipcMain.handle('open-external', async (event, url) => {
     console.error('❌ [IPC] 打开外部链接失败:', error.message)
     return { success: false, error: error.message }
   }
-})
+}))
 
 ipcMain.handle('desktop-widgets:get-system-status', async () => {
   const current = readCpuTimes()
@@ -2812,20 +2856,20 @@ ipcMain.handle('desktop-widgets:get-system-status', async () => {
   }
 })
 
-ipcMain.handle('desktop-widgets:pick-launcher-target', async (_event, kind) => {
+ipcMain.handle('desktop-widgets:pick-launcher-target', guardTrustedIpc('privileged', async (_event, kind) => {
   const result = await dialog.showOpenDialog({
     title: kind === 'folder' ? '选择文件夹' : '选择应用或文件',
     properties: kind === 'folder' ? ['openDirectory'] : ['openFile'],
   })
   return result.canceled ? null : result.filePaths[0] || null
-})
+}))
 
 // 启动器组件合法的可执行/快捷方式类型；扩展名不在白名单内的一律拒绝打开。
 const ALLOWED_LAUNCHER_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.lnk', '.url', '.msi', '.appref-ms',
 ])
 
-ipcMain.handle('desktop-widgets:open-launcher-target', async (_event, target, kind) => {
+ipcMain.handle('desktop-widgets:open-launcher-target', guardTrustedIpc('privileged', async (_event, target, kind) => {
   const value = String(target || '').trim()
   if (!value) return { success: false, error: '目标为空' }
   if (kind === 'url') {
@@ -2844,7 +2888,7 @@ ipcMain.handle('desktop-widgets:open-launcher-target', async (_event, target, ki
   }
   const error = await shell.openPath(resolved)
   return error ? { success: false, error } : { success: true }
-})
+}))
 
 // 启动壁纸监听（每10秒检查一次）
 let lastWallpaperSignature = null
@@ -7458,7 +7502,7 @@ app.whenReady().then(async () => {
     const stemModels = require('./stem-model-manager.cjs')
     const { setupStemIPC } = require('./stem-runtime.cjs')
     const { setupTrackStemIPC } = require('./track-stem-runtime.cjs')
-    stemModels.setupStemModelIPC(ipcMain)
+    stemModels.setupStemModelIPC(ipcMain, guardTrustedIpc)
     stemRuntime = setupStemIPC(ipcMain, {
       modelPath: stemModels.getModelPath(),
       pythonPath: stemModels.getRuntimePath(),
@@ -7467,6 +7511,7 @@ app.whenReady().then(async () => {
       modelsPath: stemModels.getModelRoot(),
       cachePath: path.join(configManager.getCachePath(), 'stem-renders'),
       ffmpegPath: process.env.WAVEFORGE_FFMPEG_PATH,
+      isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
     })
     trackStemRuntime = setupTrackStemIPC(ipcMain, {
       modelPath: stemModels.getModelPath(),
@@ -7479,7 +7524,7 @@ app.whenReady().then(async () => {
       decoderPythonPath: app.isPackaged
         ? path.join(process.resourcesPath, 'python-embed', 'python.exe')
         : path.join(__dirname, '..', 'resources', 'python-embed', 'python.exe'),
-      isInputAllowed: inputPath => authorizedStemInputPaths.has(path.resolve(inputPath)),
+      isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
     })
   } catch (error) {
     console.error('⚠️ [Stem Model] HTDemucs 模型/运行时初始化失败:', error instanceof Error ? error.message : error)
@@ -7489,7 +7534,7 @@ app.whenReady().then(async () => {
   // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理：设置面板「下载模型」用
   try {
     const { setupAiModelIPC } = require('./ai-model-manager.cjs')
-    setupAiModelIPC(ipcMain, (scope, message) => automixLog.log(scope, message))
+    setupAiModelIPC(ipcMain, (scope, message) => automixLog.log(scope, message), guardTrustedIpc)
   } catch (error) {
     console.error('⚠️ [AI Model] 模型下载管理器初始化失败:', error instanceof Error ? error.message : error)
   }
@@ -7563,54 +7608,61 @@ app.whenReady().then(async () => {
     }
   })
   
+  ipcMain.handle('audio-download:selectLocalFile', guardTrustedIpc('privileged', async () => {
+    if (!analysisRuntime?.audioDownload) throw new Error('Audio download service not initialized')
+    const result = await dialog.showOpenDialog({
+      title: '选择本地音频文件',
+      properties: ['openFile'],
+      filters: [{ name: '音频文件', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac', 'opus', 'webm'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return analysisRuntime.audioDownload.authorizeLocalFile(result.filePaths[0])
+  }))
+
   // Setup audio download IPC handlers
-  ipcMain.handle('audio-download:prepare', async (_event, urlOrPath, trackKey) => {
+  ipcMain.handle('audio-download:prepare', guardTrustedIpc('privileged', async (_event, urlOrPath, trackKey) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       throw new Error('Audio download service not initialized')
     }
     const result = await analysisRuntime.audioDownload.prepareAudioFile(urlOrPath, trackKey)
-    authorizedStemInputPaths.add(path.resolve(result))
-    // Keep the authorization set bounded; cached paths are re-authorized on each prepare call.
-    if (authorizedStemInputPaths.size > 256) authorizedStemInputPaths.delete(authorizedStemInputPaths.values().next().value)
     const ext = String(result || '').split('.').pop()?.toLowerCase() || '?'
     automixLog.log('download', `trackKey=${trackKey} url=${String(urlOrPath).slice(0, 120)} -> ${result} (ext=${ext})`)
     return result
-  })
+  }))
+
 
   // 只读缓存命中检查（不触发下载）：看歌等场景优先用本地已缓存音轨（mv-align 已下载
   // 同一 DASH 音频），命中即秒开；未命中返回 null，调用方照旧走流式 URL。
-  ipcMain.handle('audio-download:peekCached', (_event, trackKey) => {
+  ipcMain.handle('audio-download:peekCached', guardTrustedIpc('privileged', (_event, trackKey) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       return null
     }
     return analysisRuntime.audioDownload.peekCached(trackKey)
-  })
+  }))
+
 
   // 把已下载的音频文件映射为渲染进程可 fetch 的 waveforge-media:// URL
   // （浏览器端 decodeAudioData 原生支持 m4a/aac——Python/librosa 侧 libsndfile 打不开）。
   // 仅允许下载缓存目录内的文件，与 render:getAudioUrl 同款路径校验。
-  ipcMain.handle('audio-download:getMediaUrl', (_event, filePath) => {
+  ipcMain.handle('audio-download:getMediaUrl', guardTrustedIpc('privileged', (_event, filePath) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload || !analysisRuntime.audioDownload.tempRoot) {
       throw new Error('Audio download service not initialized')
     }
     if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Media file path is required')
-    const resolved = path.resolve(filePath)
-    const relative = path.relative(path.resolve(analysisRuntime.audioDownload.tempRoot), resolved)
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (!analysisRuntime.audioDownload.isInsideTempRoot(filePath)) {
       throw new Error('Media file path is outside the audio download cache')
     }
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-      throw new Error('Media file does not exist')
-    }
+    const resolved = fs.realpathSync.native(filePath)
     const url = toMediaUrl(resolved)
     automixLog.log('media-url', resolved)
     return url
-  })
+  }))
+
 
   // 保存渲染进程转码后的 WAV（Chromium decodeAudioData → 16bit PCM），供 Python
   // 渲染/AI worker 读取（libsndfile 只认 wav/flac/ogg/mp3，m4a/aac/opus 必须转码）。
   // 已存在同 key 的 WAV 直接复用，同一首歌只转码一次。
-  ipcMain.handle('audio-download:saveWav', (_event, trackKey, wavArrayBuffer) => {
+  ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', (_event, trackKey, wavArrayBuffer) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload || !analysisRuntime.audioDownload.tempRoot) {
       throw new Error('Audio download service not initialized')
     }
@@ -7626,71 +7678,84 @@ app.whenReady().then(async () => {
     const contentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
     const safeName = `${trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100)}-${contentHash}.wav`
     const target = path.join(analysisRuntime.audioDownload.tempRoot, safeName)
-    if (fs.existsSync(target) && fs.statSync(target).isFile()) {
-      automixLog.log('saveWav', `trackKey=${trackKey} 复用已有 ${target}`)
-      return target
+    if (fs.existsSync(target)) {
+      if (!analysisRuntime.audioDownload.isInsideTempRoot(target)) {
+        throw new Error('WAV cache target escapes the audio download cache')
+      }
+      const existing = fs.realpathSync.native(target)
+      automixLog.log('saveWav', `trackKey=${trackKey} 复用已有 ${existing}`)
+      return existing
     }
     const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
     try {
-      fs.writeFileSync(temp, buf)
+      fs.writeFileSync(temp, buf, { flag: 'wx' })
       fs.renameSync(temp, target)
+      if (!analysisRuntime.audioDownload.isInsideTempRoot(target)) {
+        fs.rmSync(target, { force: true })
+        throw new Error('WAV cache target escapes the audio download cache')
+      }
     } finally {
       try { fs.rmSync(temp, { force: true }) } catch {}
     }
     automixLog.log('saveWav', `trackKey=${trackKey} 写入 ${buf.length} bytes -> ${target}`)
     return target
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:cleanup', () => {
-    authorizedStemInputPaths.clear()
+  ipcMain.handle('audio-download:cleanup', guardTrustedIpc('privileged', () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
+      analysisRuntime.audioDownload.clearLocalAuthorizations()
       analysisRuntime.audioDownload.cleanupOldFiles()
     }
     return { success: true }
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:get-stats', () => {
+  ipcMain.handle('audio-download:get-stats', guardTrustedIpc('privileged', () => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       return { fileCount: 0, totalSize: 0, maxSize: 2 * 1024 * 1024 * 1024, cachePath: '' }
     }
     const stats = analysisRuntime.audioDownload.getCacheStats()
     const cachePath = path.join(configManager.getCachePath(), 'temp')
     return { ...stats, cachePath }
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:clear-cache', () => {
-    authorizedStemInputPaths.clear()
+  ipcMain.handle('audio-download:clear-cache', guardTrustedIpc('privileged', () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
+      analysisRuntime.audioDownload.clearLocalAuthorizations()
       analysisRuntime.audioDownload.cleanupAll()
       return { success: true }
     }
     return { success: false }
-  })
+  }))
+
 
   // 应用更新管理：后台静默下载 + 退出即应用 + 更新日志/版本历史。
   // 处理器集中在 update-manager.cjs（下载进度经 update:download-status 事件广播）。
   try {
     const { setupUpdateIPC } = require('./update-manager.cjs')
-    setupUpdateIPC(ipcMain, () => mainWindow)
+    setupUpdateIPC(ipcMain, () => mainWindow, event => trustedIpc.isTrusted(event, 'update'))
   } catch (error) {
     console.error('⚠️ [更新] 更新管理器初始化失败:', error instanceof Error ? error.message : error)
   }
   
   // 配置管理 IPC 处理器
-  ipcMain.handle('config:get-cache-path', () => {
+  ipcMain.handle('config:get-cache-path', guardTrustedIpc('privileged', () => {
     return configManager.getCachePath()
-  })
+  }))
+
 
   // QQ 音乐官方 Skills Key 使用系统安全存储（Windows 上为 DPAPI）加密后再落盘。
   // 不写入项目配置、环境文件或日志。
-  ipcMain.handle('credentials:get-qqmusic-skill-key', () => ({
+  ipcMain.handle('credentials:get-qqmusic-skill-key', guardTrustedIpc('privileged', () => ({
     success: true,
     configured: Boolean(readQQMusicSkillKey()),
     key: readQQMusicSkillKey(),
     secure: safeStorage.isEncryptionAvailable()
-  }))
+  })))
 
-  ipcMain.handle('credentials:set-qqmusic-skill-key', (_event, value) => {
+  ipcMain.handle('credentials:set-qqmusic-skill-key', guardTrustedIpc('privileged', (_event, value) => {
     const key = String(value || '').trim()
     if (!/^qmk-[A-Za-z0-9._-]+$/.test(key)) {
       return { success: false, error: 'API Key 格式应为 qmk-…' }
@@ -7706,9 +7771,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message || '保存 API Key 失败' }
     }
-  })
+  }))
 
-  ipcMain.handle('credentials:delete-qqmusic-skill-key', () => {
+
+  ipcMain.handle('credentials:delete-qqmusic-skill-key', guardTrustedIpc('privileged', () => {
     try {
       const credentials = readSecureCredentials()
       delete credentials[QQMUSIC_SKILL_CREDENTIAL]
@@ -7717,9 +7783,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message || '删除 API Key 失败' }
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:set-cache-path', (event, newPath) => {
+  ipcMain.handle('config:set-cache-path', guardTrustedIpc('privileged', (event, newPath) => {
     try {
       // 验证路径是否有效
       if (typeof newPath !== 'string' || !newPath.trim() || !path.isAbsolute(newPath.trim())) {
@@ -7738,9 +7805,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message }
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:select-cache-path', async () => {
+  ipcMain.handle('config:select-cache-path', guardTrustedIpc('privileged', async () => {
     try {
       const result = await dialog.showOpenDialog({
         properties: ['openDirectory', 'createDirectory'],
@@ -7766,9 +7834,10 @@ app.whenReady().then(async () => {
       console.error('Failed to select cache path:', error)
       return null
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:reset-cache-path', () => {
+  ipcMain.handle('config:reset-cache-path', guardTrustedIpc('privileged', () => {
     try {
       const defaultCachePath = configManager.getDefaultCachePath()
       
@@ -7784,7 +7853,8 @@ app.whenReady().then(async () => {
       console.error('Failed to reset cache path:', error)
       throw error
     }
-  })
+  }))
+
   
   registerMediaProtocol()
 

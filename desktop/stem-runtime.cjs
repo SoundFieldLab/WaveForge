@@ -14,7 +14,8 @@ const STEM_NAMES = ['drums', 'bass', 'vocals', 'other']
 function existingFile(candidate) {
   if (!candidate || typeof candidate !== 'string') return null
   try {
-    return fs.statSync(candidate).isFile() ? path.resolve(candidate) : null
+    const resolved = fs.realpathSync.native(candidate)
+    return fs.statSync(resolved).isFile() ? resolved : null
   } catch {
     return null
   }
@@ -203,6 +204,9 @@ class StemRuntime {
   _validateRequest(request) {
     const inputPath = existingFile(request.inputPath || request.audioPath)
     if (!inputPath) throw new Error('Stem input audio does not exist')
+    if (typeof this.options.isInputAllowed !== 'function' || !this.options.isInputAllowed(inputPath)) {
+      throw new Error('Stem input audio is not authorized')
+    }
     const mode = String(request.mode || request.position || 'head').toLowerCase()
     if (mode !== 'head' && mode !== 'tail') throw new Error("Stem mode must be 'head' or 'tail'")
     const duration = Number(request.duration ?? request.durationSeconds ?? 30)

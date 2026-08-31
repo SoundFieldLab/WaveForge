@@ -10,15 +10,42 @@ const http = require('http')
 const crypto = require('crypto')
 const { fileURLToPath } = require('url')
 
+function realFilePath(candidate) {
+  if (!candidate || typeof candidate !== 'string') return null
+  try {
+    const resolved = fs.realpathSync.native(candidate)
+    return fs.statSync(resolved).isFile() ? resolved : null
+  } catch {
+    return null
+  }
+}
+
+function realDirectoryPath(candidate) {
+  try {
+    const resolved = fs.realpathSync.native(candidate)
+    return fs.statSync(resolved).isDirectory() ? resolved : null
+  } catch {
+    return null
+  }
+}
+
+function isPathInside(root, target) {
+  const relative = path.relative(root, target)
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+}
+
 class AudioDownloadService {
   constructor(tempRoot) {
-    this.tempRoot = tempRoot
+    this.tempRoot = path.resolve(tempRoot)
     this.activeDownloads = new Map()
     this.activeRequests = new Set()
     this.cacheIndex = new Map() // trackKey -> {filePath, size, timestamp, lastAccess}
     this.maxCacheSize = 2 * 1024 * 1024 * 1024 // 2GB
-    this.cacheIndexFile = path.join(tempRoot, 'cache-index.json')
+    this.cacheIndexFile = path.join(this.tempRoot, 'cache-index.json')
     this.ensureTempDir()
+    this.realTempRoot = realDirectoryPath(this.tempRoot)
+    if (!this.realTempRoot) throw new Error('Unable to initialize audio cache directory')
+    this.authorizedLocalFiles = new Set()
     this.loadCacheIndex()
   }
 
@@ -61,8 +88,29 @@ class AudioDownloadService {
   }
 
   isInsideTempRoot(target) {
-    const relative = path.relative(path.resolve(this.tempRoot), path.resolve(target))
-    return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative)
+    const realTarget = realFilePath(target)
+    return Boolean(realTarget && isPathInside(this.realTempRoot, realTarget))
+  }
+
+  authorizeLocalFile(candidate) {
+    const realPath = realFilePath(candidate)
+    if (!realPath) throw new Error('Selected audio file does not exist')
+    this.authorizedLocalFiles.add(realPath)
+    if (this.authorizedLocalFiles.size > 256) {
+      this.authorizedLocalFiles.delete(this.authorizedLocalFiles.values().next().value)
+    }
+    return realPath
+  }
+
+  isInputAllowed(candidate) {
+    const realPath = realFilePath(candidate)
+    return Boolean(realPath && (
+      isPathInside(this.realTempRoot, realPath) || this.authorizedLocalFiles.has(realPath)
+    ))
+  }
+
+  clearLocalAuthorizations() {
+    this.authorizedLocalFiles.clear()
   }
 
   /**
@@ -157,7 +205,7 @@ class AudioDownloadService {
   peekCached(trackKey) {
     if (typeof trackKey !== 'string' || !trackKey.trim()) return null
     const cached = this.cacheIndex.get(trackKey.trim())
-    if (cached && fs.existsSync(cached.filePath)) return cached.filePath
+    if (cached && this.isInsideTempRoot(cached.filePath)) return realFilePath(cached.filePath)
     return null
   }
 
@@ -177,7 +225,7 @@ class AudioDownloadService {
 
     // Check if already in cache
     const cached = this.cacheIndex.get(trackKey)
-    if (cached && fs.existsSync(cached.filePath)) {
+    if (cached && this.isInsideTempRoot(cached.filePath)) {
       // 历史误命名（内容与扩展名不符，如 B 站 DASH 的 AAC/MP4 被存成 .mp3）
       // 会让 Python/librosa 永远解不开这个"假 mp3"。发现即作废重下，
       // 新文件按响应内容纠正扩展名。
@@ -217,7 +265,7 @@ class AudioDownloadService {
 
       // 兼容旧缓存：文件名与 URL 扩展名一致且内容与扩展名相符时直接复用。
       // 内容与扩展名不符的旧文件（如 MP4 音频被存成 .mp3）会被重新下载并纠正扩展名。
-      if (fs.existsSync(legacyCacheFile) && this._extensionMatchesContent(legacyCacheFile)) {
+      if (this.isInsideTempRoot(legacyCacheFile) && this._extensionMatchesContent(legacyCacheFile)) {
         console.log('[AudioCache] Using cached file:', legacyCacheFile)
 
         // Add to cache index if not already there
@@ -281,7 +329,14 @@ class AudioDownloadService {
         const targetFile = path.join(this.tempRoot, `${hash}.${ext}`)
         cacheFile = targetFile
 
-        writeStream = fs.createWriteStream(targetFile)
+        if (fs.existsSync(targetFile)) {
+          if (!this.isInsideTempRoot(targetFile)) {
+            fail(new Error('Audio cache target escapes the cache directory'))
+            return
+          }
+          fs.rmSync(targetFile, { force: true })
+        }
+        writeStream = fs.createWriteStream(targetFile, { flags: 'wx' })
         writeStream.on('finish', () => {
           if (settled) return
           if (downloadedSize === 0) {
@@ -501,7 +556,7 @@ class AudioDownloadService {
     // Handle file:// protocol
     if (urlOrPath.startsWith('file://')) {
       try {
-        return fileURLToPath(urlOrPath)
+        return realFilePath(fileURLToPath(urlOrPath))
       } catch {
         return null
       }
@@ -509,19 +564,14 @@ class AudioDownloadService {
 
     // Handle waveforge-media:// protocol
     if (urlOrPath.startsWith('waveforge-media://')) {
-      return decodeURIComponent(urlOrPath.replace('waveforge-media://', ''))
-    }
-
-    // Check if it's already a local path
-    if (fs.existsSync(urlOrPath)) {
       try {
-        return fs.statSync(urlOrPath).isFile() ? path.resolve(urlOrPath) : null
+        return realFilePath(decodeURIComponent(urlOrPath.replace('waveforge-media://', '')))
       } catch {
         return null
       }
     }
 
-    return null
+    return realFilePath(urlOrPath)
   }
 
   /**
@@ -538,7 +588,7 @@ class AudioDownloadService {
     }
     urlOrPath = urlOrPath.trim()
     const localPath = this.getLocalPath(urlOrPath)
-    if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).isFile()) {
+    if (localPath && this.isInputAllowed(localPath)) {
       console.log('Using local file:', localPath)
       return localPath
     }
@@ -548,8 +598,9 @@ class AudioDownloadService {
       return await this.downloadForAnalysis(urlOrPath, trackKey)
     }
 
+    if (localPath) throw new Error('Local audio file is not authorized')
     throw new Error('Invalid audio path or URL')
   }
 }
 
-module.exports = { AudioDownloadService }
+module.exports = { AudioDownloadService, realFilePath, isPathInside }

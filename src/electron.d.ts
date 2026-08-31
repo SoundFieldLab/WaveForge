@@ -577,6 +577,8 @@ export interface ElectronAPI {
   /** AutoMix 渲染进程诊断日志：写入后端 automix-backend.log（便于前后端合并定位） */
   automixLog?: (scope: string, message: string) => Promise<boolean>
   audioDownload: {
+    /** 通过系统文件选择器授权一个本地音频文件；取消时返回 null */
+    selectLocalFile?: () => Promise<string | null>
     prepare: (urlOrPath: string, trackKey: string) => Promise<string>
     /** 只读缓存命中检查：已缓存返回本地路径，未缓存返回 null（不触发下载） */
     peekCached?: (trackKey: string) => Promise<string | null>

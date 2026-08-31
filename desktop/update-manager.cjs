@@ -301,11 +301,11 @@ function consumeLastApplied() {
   return info
 }
 
-function setupUpdateIPC(ipcMain, getMainWindow = () => null) {
-  const trusted = (event) => {
+function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = null) {
+  const trusted = isTrustedEvent || ((event) => {
     const mainWindow = getMainWindow()
     return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame)
-  }
+  })
   const rejectUntrusted = () => ({ success: false, error: '不允许的更新请求来源' })
   // 后台下载：立即返回，进度/结果经事件广播（下载期间应用完全可用）
   ipcMain.handle('update:download-background', async (event, payload) => {

@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from local_service_auth import is_authorized_local_request
+from local_service_auth import is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
 from scipy import signal as scipy_signal
@@ -234,6 +234,8 @@ def measure_lufs():
         return jsonify({'error': 'Missing trackKey or audioPath'}), 400
     if not isinstance(data.get('audioPath'), str):
         return jsonify({'error': 'audioPath must be a string'}), 400
+    if not is_allowed_audio_path(audio_path):
+        return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
     if not os.path.exists(audio_path):
         return jsonify({'error': f'File not found: {audio_path}'}), 404
 

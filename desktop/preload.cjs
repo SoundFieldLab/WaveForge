@@ -209,6 +209,7 @@ contextBridge.exposeInMainWorld('electron', {
   
   // Audio download for rendering
   audioDownload: {
+    selectLocalFile: () => ipcRenderer.invoke('audio-download:selectLocalFile'),
     prepare: (urlOrPath, trackKey) => 
       ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey),
     peekCached: (trackKey) =>

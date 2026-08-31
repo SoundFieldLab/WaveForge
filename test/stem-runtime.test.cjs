@@ -26,6 +26,10 @@ function makeFixture(t, runnerSource) {
   return { root, modelPath, pythonPath, runnerPath, inputPath }
 }
 
+function runtimeOptions(fixture, extra = {}) {
+  return { ...fixture, isInputAllowed: () => true, ...extra }
+}
+
 const SUCCESS_RUNNER = String.raw`
 const fs = require('fs'); const path = require('path');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
@@ -59,7 +63,7 @@ test('missing model returns null', async t => {
 
 test('separates once and returns a validated cache hit', async t => {
   const fixture = makeFixture(t, SUCCESS_RUNNER)
-  const runtime = new StemRuntime({ ...fixture, cachePath: path.join(fixture.root, 'cache'), appInfo: {} })
+  const runtime = new StemRuntime(runtimeOptions(fixture, { cachePath: path.join(fixture.root, 'cache'), appInfo: {} }))
   const first = await runtime.separate({ inputPath: fixture.inputPath, mode: 'tail', duration: 2, requestId: 'first' })
   assert.equal(first.cached, false)
   assert.equal(first.requestId, 'first')
@@ -89,7 +93,7 @@ setTimeout(() => {
   const fixture = makeFixture(t, runner)
   const secondInput = path.join(fixture.root, 'second.wav')
   fs.writeFileSync(secondInput, 'audio2')
-  const runtime = new StemRuntime({ ...fixture, cachePath: path.join(fixture.root, 'cache'), appInfo: {} })
+  const runtime = new StemRuntime(runtimeOptions(fixture, { cachePath: path.join(fixture.root, 'cache'), appInfo: {} }))
   const first = runtime.separate({ inputPath: fixture.inputPath, duration: 1, requestId: 'active' })
   const second = runtime.separate({ inputPath: secondInput, duration: 1, requestId: 'queued' })
   assert.equal(runtime.cancel('queued'), true)
@@ -101,7 +105,7 @@ setTimeout(() => {
 
 test('active job can be cancelled', async t => {
   const fixture = makeFixture(t, 'setTimeout(() => {}, 10000)')
-  const runtime = new StemRuntime({ ...fixture, cachePath: path.join(fixture.root, 'cache'), timeoutMs: 5000, appInfo: {} })
+  const runtime = new StemRuntime(runtimeOptions(fixture, { cachePath: path.join(fixture.root, 'cache'), timeoutMs: 5000, appInfo: {} }))
   const pending = runtime.separate({ inputPath: fixture.inputPath, duration: 1, requestId: 'cancel-me' })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(runtime.cancel('cancel-me'), true)
@@ -109,10 +113,17 @@ test('active job can be cancelled', async t => {
   runtime.shutdown()
 })
 
+test('ordinary stem rejects input without shared authorization', async t => {
+  const fixture = makeFixture(t, SUCCESS_RUNNER)
+  const runtime = new StemRuntime({ ...fixture, cachePath: path.join(fixture.root, 'cache'), appInfo: {} })
+  await assert.rejects(runtime.separate({ inputPath: fixture.inputPath, duration: 1 }), /not authorized/)
+  runtime.shutdown()
+})
+
 test('cache cleanup removes expired entries', t => {
   const fixture = makeFixture(t, SUCCESS_RUNNER)
   const cachePath = path.join(fixture.root, 'cache')
-  const runtime = new StemRuntime({ ...fixture, cachePath, cacheMaxBytes: 1000, cacheTtlMs: 100, appInfo: {} })
+  const runtime = new StemRuntime(runtimeOptions(fixture, { cachePath, cacheMaxBytes: 1000, cacheTtlMs: 100, appInfo: {} }))
   const expired = path.join(cachePath, 'expired')
   fs.mkdirSync(expired)
   fs.writeFileSync(path.join(expired, 'data'), 'old')
@@ -126,7 +137,7 @@ test('cache cleanup removes expired entries', t => {
 test('cache cleanup enforces capacity oldest first', t => {
   const fixture = makeFixture(t, SUCCESS_RUNNER)
   const cachePath = path.join(fixture.root, 'cache')
-  const runtime = new StemRuntime({ ...fixture, cachePath, cacheMaxBytes: 15, cacheTtlMs: 100000, appInfo: {} })
+  const runtime = new StemRuntime(runtimeOptions(fixture, { cachePath, cacheMaxBytes: 15, cacheTtlMs: 100000, appInfo: {} }))
   for (const [name, age] of [['old', 2000], ['new', 1000]]) {
     const directory = path.join(cachePath, name)
     fs.mkdirSync(directory)

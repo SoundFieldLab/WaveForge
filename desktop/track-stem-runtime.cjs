@@ -7,6 +7,7 @@ const fsp = require('fs/promises')
 const os = require('os')
 const path = require('path')
 const { resolvePaths: resolveStemPaths } = require('./stem-runtime.cjs')
+const { realFilePath, isPathInside } = require('./audio-download.cjs')
 
 const RUNNER_VERSION = 'track-stem-runner-v2'
 const SAMPLE_RATE = 44_100
@@ -20,7 +21,10 @@ const STEM_NAMES = ['drums', 'bass', 'vocals', 'other']
 
 function existingFile(candidate) {
   if (!candidate || typeof candidate !== 'string') return null
-  try { return fs.statSync(candidate).isFile() ? path.resolve(candidate) : null } catch { return null }
+  try {
+    const resolved = fs.realpathSync.native(candidate)
+    return fs.statSync(resolved).isFile() ? resolved : null
+  } catch { return null }
 }
 
 function directorySize(directory) {
@@ -203,9 +207,9 @@ class TrackStemRuntime {
   }
 
   async readChunk(filePath) {
-    const resolved = path.resolve(String(filePath || ''))
-    const root = this.cacheDir + path.sep
-    if (!resolved.startsWith(root) || path.extname(resolved).toLowerCase() !== '.wav') {
+    const resolved = realFilePath(filePath)
+    const cacheRoot = fs.realpathSync.native(this.cacheDir)
+    if (!resolved || !isPathInside(cacheRoot, resolved) || path.extname(resolved).toLowerCase() !== '.wav') {
       throw new Error('Track stem chunk path is outside the cache')
     }
     const stat = fs.statSync(resolved)
@@ -235,7 +239,7 @@ class TrackStemRuntime {
   _normalizeRequest(request) {
     const inputPath = existingFile(request.inputPath || request.audioPath)
     if (!inputPath) throw new Error('Track stem input audio does not exist')
-    if (typeof this.options.isInputAllowed === 'function' && !this.options.isInputAllowed(inputPath)) {
+    if (typeof this.options.isInputAllowed !== 'function' || !this.options.isInputAllowed(inputPath)) {
       throw new Error('Track stem input audio is not authorized')
     }
     const trackId = String(request.trackId || inputPath)

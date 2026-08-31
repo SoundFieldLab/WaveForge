@@ -335,7 +335,7 @@ async function removeAll() {
   try { await fsp.rm(getModelRoot(), { recursive: true, force: true }); state.status = 'idle'; broadcast(); return { ok: true } }
   catch (error) { return { ok: false, error: error?.message || String(error) } }
 }
-function setupStemModelIPC(ipcMain) {
+function setupStemModelIPC(ipcMain, guardHandler = (_capability, handler) => handler) {
   removeHandlers(ipcMain)
   // Upgrade files copied/imported before marker support: verify content once, then future startup
   // uses the marker-bound size/hash/mtime identity without hashing 104MB on the main thread.
@@ -343,11 +343,11 @@ function setupStemModelIPC(ipcMain) {
   if (model && !installedAsset(model) && fs.existsSync(getModelPath())) {
     void establishInstalledIdentity(model).then(() => broadcast()).catch(() => undefined)
   }
-  ipcMain.handle('stem-model:get-status', () => snapshot())
-  ipcMain.handle('stem-model:download', () => runDownload())
-  ipcMain.handle('stem-model:pause', () => pause())
-  ipcMain.handle('stem-model:cancel', () => cancel())
-  ipcMain.handle('stem-model:delete', () => removeAll())
+  ipcMain.handle('stem-model:get-status', guardHandler('models', () => snapshot()))
+  ipcMain.handle('stem-model:download', guardHandler('models', () => runDownload()))
+  ipcMain.handle('stem-model:pause', guardHandler('models', () => pause()))
+  ipcMain.handle('stem-model:cancel', guardHandler('models', () => cancel()))
+  ipcMain.handle('stem-model:delete', guardHandler('models', () => removeAll()))
 }
 
 module.exports = {

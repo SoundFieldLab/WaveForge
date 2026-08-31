@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -26,6 +27,36 @@ def load_auth(token):
 
 
 class LocalServiceAuthTests(unittest.TestCase):
+    def test_audio_path_must_resolve_inside_configured_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / 'cache'
+            outside = root / 'outside'
+            cache.mkdir()
+            outside.mkdir()
+            cached_audio = cache / 'cached.wav'
+            outside_audio = outside / 'system.wav'
+            cached_audio.write_bytes(b'audio')
+            outside_audio.write_bytes(b'secret')
+            previous = os.environ.get('WAVEFORGE_CACHE_PATH')
+            os.environ['WAVEFORGE_CACHE_PATH'] = str(cache)
+            try:
+                auth = load_auth(None)
+                self.assertTrue(auth.is_allowed_audio_path(str(cached_audio)))
+                self.assertFalse(auth.is_allowed_audio_path(str(outside_audio)))
+                link = cache / 'escape'
+                try:
+                    link.symlink_to(outside, target_is_directory=True)
+                except OSError:
+                    link = None
+                if link is not None:
+                    self.assertFalse(auth.is_allowed_audio_path(str(link / outside_audio.name)))
+            finally:
+                if previous is None:
+                    os.environ.pop('WAVEFORGE_CACHE_PATH', None)
+                else:
+                    os.environ['WAVEFORGE_CACHE_PATH'] = previous
+
     def test_standalone_development_without_token_remains_compatible(self):
         auth = load_auth(None)
         self.assertTrue(auth.is_authorized_local_request(''))
