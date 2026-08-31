@@ -84,6 +84,7 @@ export const PvLyricsPage = memo(function PvLyricsPage({
   // 播放状态实时镜像（React prop 一定准确；不依赖 store 订阅，暂停后 store 停止发布）
   const playingRef = useRef(isPlaying)
   playingRef.current = isPlaying
+  const animationControlRef = useRef<{ start: () => void; stop: () => void } | null>(null)
   const [ready, setReady] = useState(false)
   const [analysis, setAnalysis] = useState<TrackAnalysis | null>(null)
 
@@ -246,6 +247,9 @@ export const PvLyricsPage = memo(function PvLyricsPage({
       engine.hueShift = params.hueShift
     }
     const tick = (now: number) => {
+      raf = 0
+      if (!playingRef.current || document.visibilityState !== 'visible') return
+
       const dt = lastFrame ? Math.min(0.2, (now - lastFrame) / 1000) : 1 / 60
       if (now - lastFrame >= FRAME_MIN_INTERVAL_MS) {
         lastFrame = now
@@ -302,11 +306,40 @@ export const PvLyricsPage = memo(function PvLyricsPage({
           }
         }
       }
+      if (playingRef.current && document.visibilityState === 'visible') {
+        raf = requestAnimationFrame(tick)
+      }
+    }
+    const stop = () => {
+      if (raf !== 0) cancelAnimationFrame(raf)
+      raf = 0
+      playing = false
+      lastFrame = 0
+      engineRef.current?.pause()
+    }
+    const start = () => {
+      if (raf !== 0 || !playingRef.current || document.visibilityState !== 'visible') return
       raf = requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') start()
+      else stop()
+    }
+
+    animationControlRef.current = { start, stop }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    start()
+    return () => {
+      stop()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
+      if (animationControlRef.current?.start === start) animationControlRef.current = null
+    }
   }, [playbackTimeStore, timeOffset])
+
+  useEffect(() => {
+    if (isPlaying) animationControlRef.current?.start()
+    else animationControlRef.current?.stop()
+  }, [isPlaying])
 
   return (
     <div className="relative w-full h-full min-h-[280px] overflow-hidden">
