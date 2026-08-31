@@ -26,6 +26,7 @@ const { app, BrowserWindow, ipcMain, protocol, shell, session, safeStorage, dial
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
+const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
 const {
   loadWindowState,
   saveWindowState,
@@ -4339,6 +4340,7 @@ ipcMain.handle('apple-play-assets', async (_event, payload) => {
 
 // ── Apple 账号信息（buy.itunes 账号接口，Cider 同款：凭登录窗口抓取的 itunes cookie）──
 ipcMain.handle('apple-account-info', async (event, cookies) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
@@ -4373,17 +4375,16 @@ ipcMain.handle('apple-account-info', async (event, cookies) => {
 
 // ── Apple 个人资料页（解析 og:image 头像，需主进程避免 CORS）──
 ipcMain.handle('apple-fetch-profile', async (event, profileUrl) => {
-  // 仅允许 https 的公开网页，防止传入 file:// 等本地路径被代理读取
-  const safeUrl = typeof profileUrl === 'string' && /^https:\/\/[^/]/.test(profileUrl) ? profileUrl : 'https://music.apple.com/profile'
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
+  const safeUrl = typeof profileUrl === 'string' ? profileUrl : 'https://music.apple.com/profile'
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
-    const response = await fetch(safeUrl, {
+    const response = await fetchAllowedApplePage(fetch, safeUrl, {
       headers: { 'User-Agent': APPLE_SAFARI_UA, Accept: 'text/html' },
-      redirect: 'follow',
       signal: controller.signal,
     })
-    const text = await response.text()
+    const text = await readTextWithLimit(response)
     return { ok: response.ok, status: response.status, html: text }
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
@@ -4394,6 +4395,7 @@ ipcMain.handle('apple-fetch-profile', async (event, profileUrl) => {
 
 // ── Apple 账号页面（Apple ID / Apple Account，带全量会话 cookie 解析名字与头像）──
 ipcMain.handle('apple-fetch-account', async (event, cookies) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
@@ -4405,16 +4407,15 @@ ipcMain.handle('apple-fetch-account', async (event, cookies) => {
     ]
     for (const url of urls) {
       try {
-        const response = await fetch(url, {
+        const response = await fetchAllowedApplePage(fetch, url, {
           headers: {
             'User-Agent': APPLE_SAFARI_UA,
             Cookie: String(cookies),
             Accept: 'text/html,application/json',
           },
-          redirect: 'follow',
           signal: controller.signal,
         })
-        const text = await response.text()
+        const text = await readTextWithLimit(response)
         console.log(`[Apple账号] 资料页 ${url} HTTP ${response.status}，长度 ${text.length}`)
         // 登录后页面：200 且有一定内容即返回（SPA 壳可能偏小，放宽判定）
         if (response.ok && text.length > 500) {
