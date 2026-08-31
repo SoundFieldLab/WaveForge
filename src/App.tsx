@@ -13,6 +13,9 @@ import FusionEnableConfirmModal from './components/FusionEnableConfirmModal'
 import UpdateManager from './components/UpdateManager'
 import UpdatePrompt from './components/UpdatePrompt'
 import CrossfadeBackground from './components/CrossfadeBackground'
+import { FoliaTransitionOverlay } from './components/folia/FoliaTransitionOverlay'
+import { FoliaUpNextCard } from './components/folia/FoliaUpNextCard'
+import { resolveFoliaPresentation } from './components/folia/foliaPresentation'
 
 import MiniPlayer from './components/MiniPlayer'
 import Toast from './components/Toast'
@@ -33,7 +36,8 @@ import { isPlatformVisible, platformLabel } from './services/platforms'
 import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
 import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './services/appleAuth'
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
-import { resolvePlayableSong, addAppleSongToLibrary, removeAppleSongFromLibrary, addAppleTracksToPlaylist, getAppleLibraryPlaylists } from './services/appleCatalog'
+import { resolvePlayableSong, addAppleSongToLibrary, removeAppleSongFromLibrary, addAppleTracksToPlaylist, getAppleLibraryPlaylists, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
+import { ensureBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
 import { isAppleNativeStreamEnabled, isAppleEmeCapable, resolveAppleNativeStream, type AppleNativeStream } from './services/applePlayback'
 import AppleLoginPanel from './components/AppleLoginPanel'
 import { cacheManager } from './services/cacheManager'
@@ -114,7 +118,7 @@ const LazyTranslationDisplay = lazy(loadTranslationDisplay)
 const LazyWallpaperLyrics: any = lazy(loadWallpaperLyrics)
 const LazyGloriousLyrics: any = lazy(loadGloriousLyrics)
 const LazyMultidimensionalLyrics = lazy(loadMultidimensionalLyrics)
-const LazyFoliaLyricsPage: any = lazy(loadFoliaLyricsPage)
+const LazyFoliaLyricsPage = lazy(loadFoliaLyricsPage)
 const LazyPvLyricsPage: any = lazy(loadPvLyricsPage)
 const LazyModengPlayer: any = lazy(loadModengPlayer)
 const LazyBilibiliMvPlayer: any = lazy(loadBilibiliMvPlayer)
@@ -141,7 +145,10 @@ import PlatformLoginNotice from './components/PlatformLoginNotice'
 import SimilarSongsPanel from './components/SimilarSongsPanel'
 import PluginOverlay from './components/PluginOverlay'
 import { setGlobalAudioAnalyzerStore, setGlobalPlaybackActive, setGlobalAudioAnalysers } from './plugins/clients/DGLabClient'
+import { setChromaAudioAnalyzerStore, setChromaPlaybackActive } from './plugins/clients/ChromaClient'
+import { setSignalRgbAudioAnalyzerStore, setSignalRgbPlaybackActive } from './plugins/clients/SignalRgbClient'
 import { isPluginEnabled, PLUGIN_STATE_EVENT } from './services/pluginStore'
+import { hasEnabledAudioPlugin } from './plugins/registry'
 import { detectQQMusicVip } from './utils/musicEntitlements'
 import { getQQUserDisplayName } from './utils/qqUser'
 import {
@@ -389,6 +396,12 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
     : backgroundEffect === 'blur'
       ? 'blur(40px)'
       : `blur(${backgroundBlur}px) saturate(1.3)`
+  const crossfadeImageStyle = useMemo(() => ({
+    filter: staticFilter,
+    transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
+    transition: 'transform 0.055s linear, opacity 0.5s',
+    willChange: 'transform' as const,
+  }), [baseScale, staticFilter])
 
   return (
     <div
@@ -398,12 +411,7 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
     >
       <CrossfadeBackground
         {...crossfadeProps}
-        imageStyle={{
-          filter: staticFilter,
-          transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
-          transition: 'transform 0.055s linear, opacity 0.5s',
-          willChange: 'transform',
-        }}
+        imageStyle={crossfadeImageStyle}
       />
       <div
         ref={pulseHighlightRef}
@@ -636,6 +644,8 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0)
   const currentTimeCommitRef = useRef({ wallTime: 0, playbackTime: 0 })
   const [duration, setDuration] = useState(0)
+  /** 当前曲目是否由 WebView2 播放面播放（外部播放源模式；驱动频谱/分析器走 bridge 数据源） */
+  const [externalPlaybackActive, setExternalPlaybackActive] = useState(false)
   /** 当前曲目是否为直播流（Apple 电台等；直播时播放器显示 LIVE 指示、禁拖动） */
   const [isLive, setIsLive] = useState(false)
   const [volume, setVolume] = useState(1.0) // 默认音量100%
@@ -1105,6 +1115,20 @@ function App() {
     const saved = localStorage.getItem('autoMixAiMix')
     return parseStoredBoolean(saved, false)
   })
+  // DJTransGAN 是严格可选扩展：计划器只接收“用户开启且引擎完整可用”的有效值，
+  // 避免删除模型后旧 localStorage=true 仍让时间线误走 60 秒 AI 路径。
+  const [autoMixAiAvailable, setAutoMixAiAvailable] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    if (!autoMixAiMix) {
+      setAutoMixAiAvailable(false)
+      return () => { cancelled = true }
+    }
+    void window.electron?.render?.aiMixStatus?.()
+      .then(status => { if (!cancelled) setAutoMixAiAvailable(status?.available === true) })
+      .catch(() => { if (!cancelled) setAutoMixAiAvailable(false) })
+    return () => { cancelled = true }
+  }, [autoMixAiMix])
 
   // 看歌模式禁用交叉过渡/无缝衔接/自动混音（视频切歌做这些太割裂），只影响生效值不污染用户设置
   const watchModeActive = lyricDisplayMode === 'video'
@@ -1126,6 +1150,7 @@ function App() {
   const [transitionProgress, setTransitionProgress] = useState(0) // 过渡进度 0-1
   // 过渡缓冲时长（秒）：叠加动画窗口（最后 4 秒）按此映射 progress
   const [transitionDuration, setTransitionDuration] = useState(0)
+  const transitionTargetTimeRef = useRef(Number.NaN)
   const [transitionStartTime, setTransitionStartTime] = useState<number | null>(null)
   const [transitionFromTrack, setTransitionFromTrack] = useState<{
     trackKey: string
@@ -1160,6 +1185,30 @@ function App() {
   
   // 当前播放进度
   const currentSong = currentIndex >= 0 && currentIndex < playlist.length ? playlist[currentIndex] : null
+
+  // Apple 播放面仅在 Electron CENC 失败时按需启动；正常 Apple 歌曲走本地 L3 音频图，
+  // 不因当前平台/队列是 Apple 就常驻拉起 WebView2。
+  const appleBridgeStopTimerRef = useRef<number | null>(null)
+  // 「播放面未授权」一次性会话提示标记（避免每次点歌都弹 toast）
+  const appleBridgeAuthHintShownRef = useRef(false)
+  useEffect(() => {
+    const platform = currentSong?.platform
+    if (platform !== 'apple' && platform) {
+      if (appleBridgeStopTimerRef.current) {
+        window.clearTimeout(appleBridgeStopTimerRef.current)
+        appleBridgeStopTimerRef.current = null
+      }
+      // 切到其他平台时立即释放兼容播放面；它不参与正常原生 CENC 播放
+      void bridgeStop().catch(() => undefined)
+      void window.electron?.stopAppleBridge?.()
+    }
+    return () => {
+      if (appleBridgeStopTimerRef.current !== null) {
+        window.clearTimeout(appleBridgeStopTimerRef.current)
+        appleBridgeStopTimerRef.current = null
+      }
+    }
+  }, [currentSong?.platform])
 
   // 当前背景是否为 MV 视频（供 QuickSettings 的模糊滑块切换两套值：MV 激活时调 MV 模糊，封面时调封面模糊）
   const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback
@@ -1274,7 +1323,7 @@ function App() {
   // 已确认对齐（视频与歌曲同源）时按「视频位 − 对齐偏移」推出歌曲位，歌词随 MV 继续滚动；
   // 未确认（自由播放/货不对板）时歌词位置不可信 → 显示层回退「歌名-艺人」。
   const lyricTimelineTime = lyricDisplayMode === 'video' && watchVideoActive && watchVideoState.alignmentVerified
-    ? watchVideoState.time - Math.max(0, watchVideoState.alignmentOffset)
+    ? watchVideoState.time - watchVideoState.alignmentOffset
     : currentTime
   const watchLyricUnverified = lyricDisplayMode === 'video' && watchVideoActive && !watchVideoState.alignmentVerified
   const currentMiniLyric = useMemo(() => {
@@ -1940,6 +1989,7 @@ function App() {
     if (state.transitionStrategy !== undefined) setTransitionStrategy(state.transitionStrategy)
     if (state.transitionStyle !== undefined) setTransitionStyle(state.transitionStyle)
     if (state.transitionDuration !== undefined) setTransitionDuration(state.transitionDuration)
+    if (state.transitionTargetTime !== undefined) transitionTargetTimeRef.current = state.transitionTargetTime
     if (state.transitionDebug !== undefined) setTransitionDebug(state.transitionDebug)
     if ('transitionStartTime' in state) setTransitionStartTime(state.transitionStartTime ?? null)
     if (state.fallbackReason !== undefined || state.transitionState === 'armed' || state.transitionState === 'preparing-next') {
@@ -2114,11 +2164,24 @@ function App() {
       maxDuration: autoMixMaxDuration,
       enhanced: autoMixEnhanced,
       intensity: autoMixTransitionIntensity,
-      aiMix: autoMixAiMix,
+      aiMix: autoMixAiMix && autoMixAiAvailable,
     },
     handleAudioGraphReady
   )
   audioPlayerCacheControlRef.current = audioPlayer
+  const playerStemControl = useMemo(() => ({
+    ...audioPlayer.trackStems.state,
+    onEnable: () => audioPlayer.trackStems.enable(),
+    onVocalChange: audioPlayer.trackStems.setVocalLevel,
+    onStemChange: (stem: import('./audio/trackStemMixer').TrackStemName, gain: number) => audioPlayer.trackStems.setStemGains({ [stem]: gain }),
+    onReturnOriginal: audioPlayer.trackStems.returnToOriginal,
+  }), [
+    audioPlayer.trackStems.state,
+    audioPlayer.trackStems.enable,
+    audioPlayer.trackStems.setVocalLevel,
+    audioPlayer.trackStems.setStemGains,
+    audioPlayer.trackStems.returnToOriginal,
+  ])
   // 保持最新 audioPlayer 引用的 ref，供 useCallback 处理器读取，避免处理器身份随渲染变化
   const audioPlayerRef = useRef(audioPlayer)
   audioPlayerRef.current = audioPlayer
@@ -2193,27 +2256,83 @@ function App() {
     return saved === 'dynamic' || saved === 'restless' ? saved : 'soft'
   })
   
-  // DG_LAB 插件启用时保持音频分析流（即使封面律动关闭）
-  const [pluginDglabActive, setPluginDglabActive] = useState(() => isPluginEnabled('dglab'))
+  // 需要频谱的插件启用时保持音频分析流（即使封面律动关闭）
+  const [pluginAudioActive, setPluginAudioActive] = useState(() => hasEnabledAudioPlugin(isPluginEnabled))
   useEffect(() => {
-    const handler = () => setPluginDglabActive(isPluginEnabled('dglab'))
+    const handler = () => setPluginAudioActive(hasEnabledAudioPlugin(isPluginEnabled))
     window.addEventListener(PLUGIN_STATE_EVENT, handler)
     return () => window.removeEventListener(PLUGIN_STATE_EVENT, handler)
   }, [])
 
   // 播放器状态监听
   const pulseActive = coverPulseEnabled && isPlaying
+  const analyzerEnabledNow = audioAnalyzerEnabled && (pulseActive || pluginAudioActive) && !isPerfModeEfficiency()
+  // WebView2 播放面频谱：外部源模式下轮询 bridge /spectrum（WASAPI loopback），
+  // 供桌面频谱 tick 与主可视化分析器共同消费
+  const externalSpectrumRef = useRef<number[]>(Array(64).fill(0))
+  useEffect(() => {
+    if (!externalPlaybackActive) return
+    let disposed = false
+    let timer: number | null = null
+    const loop = async () => {
+      if (disposed) return
+      const s = await fetchBridgeSpectrum()
+      if (!disposed && s && s.bins.length > 0) externalSpectrumRef.current = s.bins
+      if (!disposed) timer = window.setTimeout(loop, 120)
+    }
+    loop()
+    return () => { disposed = true; if (timer !== null) window.clearTimeout(timer) }
+  }, [externalPlaybackActive])
+  const externalAnalyzerSource = useMemo(() => ({
+    active: externalPlaybackActive && analyzerEnabledNow,
+    getBins: () => (externalPlaybackActive ? Uint8Array.from(externalSpectrumRef.current) : null),
+  }), [externalPlaybackActive, analyzerEnabledNow])
+  // WebView2 播放面：B 站 MV 背景读 audio.currentTime 对齐画面（约 7 处同步循环），
+  // 外部源模式下本地元素无媒体——用代理视图把 currentTime/duration/paused 重定向到 bridge，
+  // 其余属性读转发到底层元素（视频本身静音，无双重出声）
+  const externalAudioViewRef = useRef<HTMLAudioElement | null>(null)
+  const externalAudioProxyRef = useRef<any>(null)
+  if (!externalAudioProxyRef.current) {
+    // 原生方法（addEventListener 等）必须绑定底层元素再返回——否则 this 丢失会抛
+    // "Illegal invocation" 直接崩掉渲染树；按「属性+元素」缓存绑定，元素切换时重绑
+    const boundCache = new Map<string | symbol, { el: any; bound: any }>()
+    externalAudioProxyRef.current = new Proxy({} as HTMLAudioElement, {
+      get(_target, prop) {
+        if (prop === 'currentTime') return getBridgeState().position || 0
+        if (prop === 'duration') return getBridgeState().duration || 0
+        if (prop === 'paused') return !getBridgeState().playing
+        const el = externalAudioViewRef.current
+        const value = el ? (el as any)[prop] : undefined
+        if (typeof value === 'function') {
+          const cached = boundCache.get(prop)
+          if (cached && cached.el === el) return cached.bound
+          const bound = value.bind(el)
+          boundCache.set(prop, { el, bound })
+          return bound
+        }
+        return value
+      },
+      set(_target, prop, value) {
+        const el = externalAudioViewRef.current
+        if (el) { (el as any)[prop] = value }
+        return true
+      },
+    })
+  }
   const audioAnalyzer = useAudioAnalyzer(
     audioPlayer.analyserNode,
-    audioAnalyzerEnabled && (pulseActive || pluginDglabActive) && !isPerfModeEfficiency(), // 效能档关闭音频可视化省资源；DG-LAB 插件启用时保持分析流
+    analyzerEnabledNow, // 效能档关闭音频可视化省资源；DG-LAB 插件启用时保持分析流
     audioPlayer.leftAnalyserNode, // DG-LAB 立体声：左声道（音效后最终听感信号）
     audioPlayer.rightAnalyserNode, // DG-LAB 立体声：右声道
+    externalAnalyzerSource,
   )
   const audioPulseStore = useAudioPulseStore(audioAnalyzer, pulseActive, coverPulseMode)
 
-  // 插件系统（DG_LAB 等）需要访问实时音频分析流
+  // 插件系统（DG_LAB、Razer Chroma 等）需要访问实时音频分析流
   useEffect(() => {
     setGlobalAudioAnalyzerStore(audioAnalyzer)
+    setChromaAudioAnalyzerStore(audioAnalyzer)
+    setSignalRgbAudioAnalyzerStore(audioAnalyzer)
   }, [audioAnalyzer])
 
   // DG-LAB 实时波形（左右声道时域采样）用分析器
@@ -2221,9 +2340,11 @@ function App() {
     setGlobalAudioAnalysers(audioPlayer.leftAnalyserNode, audioPlayer.rightAnalyserNode)
   }, [audioPlayer.leftAnalyserNode, audioPlayer.rightAnalyserNode])
 
-  // 播放状态同步给 DG_LAB：暂停/停止时停止推送真实频谱（防暂停后仍持续输出）
+  // 播放状态同步给插件：暂停时进入各自的空闲或安全输出。
   useEffect(() => {
     setGlobalPlaybackActive(isPlaying)
+    setChromaPlaybackActive(isPlaying)
+    setSignalRgbPlaybackActive(isPlaying)
   }, [isPlaying])
   
   // 监听封面律动设置变化
@@ -2356,7 +2477,15 @@ function App() {
       setAutoMixTransitionIntensity(
         intensity === 'subtle' || intensity === 'strong' ? intensity : 'standard',
       )
-      setAutoMixAiMix(parseStoredBoolean(aiMix, false))
+      const aiRequested = parseStoredBoolean(aiMix, false)
+      setAutoMixAiMix(aiRequested)
+      if (!aiRequested) {
+        setAutoMixAiAvailable(false)
+      } else {
+        void window.electron?.render?.aiMixStatus?.()
+          .then(status => setAutoMixAiAvailable(status?.available === true))
+          .catch(() => setAutoMixAiAvailable(false))
+      }
 
       // 设置状态写入后端日志：无论操作到哪一步，都能看到开关的真实状态
       window.electron?.automixLog?.('settings', JSON.stringify({
@@ -2898,6 +3027,18 @@ function App() {
     return Math.max(0, Math.min(1, (transitionProgress - start) / (span / dur)))
   })()
   const isVisualTransitioning = (isTransitioning && inAnimationWindow) || Boolean(transitionToTrack && overlayProgress > 0 && inAnimationWindow)
+  const getMvPlaybackTimeSeconds = useCallback(() => {
+    const renderedTransitionActive = transitionState === 'running-transition'
+      && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+    return renderedTransitionActive
+      ? audioPlayer.playbackTimeStore.getSnapshot().currentTime
+      : Number.NaN
+  }, [audioPlayer.playbackTimeStore, transitionState, transitionStrategy])
+  const getMvTransitionTargetTimeSeconds = useCallback(() => {
+    const renderedTransitionActive = transitionState === 'running-transition'
+      && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+    return renderedTransitionActive ? transitionTargetTimeRef.current : Number.NaN
+  }, [transitionState, transitionStrategy])
   // 看歌模式下视频为唯一时间线：automix/无缝/交叉过渡全部失效
   const effectiveTransitionStrategy = lyricDisplayMode === 'video' ? 'none' : transitionStrategy
   // AutoMix 过渡时，播放页过渡指示显示 AutoMix 以与无缝衔接(Gapless)区分
@@ -3474,7 +3615,14 @@ function App() {
 
       // 歌词不再等待音频 URL，立即开始并复用进行中的请求。
       void ensureSongLyrics(song, cacheKey)
-      
+
+      // WebView2 播放面在跑：Apple 曲目将走播放面原生播放，无需解析载体 URL
+      // （解析出的载体 URL 在 loadAndPlaySong 中被禁用，预载纯属浪费请求）
+      if (platform === 'apple' && isBridgeReady()) {
+        debugLog(`🍎 [Preload] ${song.name}: bridge 运行中，跳过 Apple 曲目载体预载`)
+        return
+      }
+
       // Apple：队列条目为 Apple 曲目，音频 URL 必须取自解析后的载体歌曲（网易云/QQ）。
       // 解析仅用于取 URL，缓存键仍是 Apple 歌曲本身，loadAndPlaySong 命中缓存即用有效 URL。
       const audioSource = platform === 'apple'
@@ -3857,36 +4005,68 @@ function App() {
         currentAudio.currentTime = 0
       }
       setIsPlaying(false)
-      
+      // 上一首若是 WebView2 播放面播放，先退出外部源模式（内部会停掉播放面声音）
+      audioPlayer.disableExternalPlayback()
+      setExternalPlaybackActive(false)
+
       let normalizedSong = normalizeSongCover(song)
-      // Apple Music 原生音源（Cider 式：webPlayback + HLS + Widevine EME）：
-      // 已登录且未关闭开关、环境有 Widevine 时优先取流，命中则直接播 Apple 原版
-      // （彻底消除「货不对板」）；任何一步失败回退下方网易云/QQ 载体匹配。
+      // Apple Music 播放路由（官方支持方向）：
+      // ① ECS Browser CDM (L3) + CENC/HLS 原生播放；② WebView2 兼容兜底；③ 网易云/QQ 载体。
+      // castLabs 已确认 Windows MF CDM 是已废弃实验路径，默认 Browser CDM L3 才是生产方向。
+      let useWebView2 = false
+      const tryWebView2Fallback = async (): Promise<boolean> => {
+        if (normalizedSong.platform !== 'apple' || !normalizedSong.appleId) return false
+        if (!(await ensureBridgeRunning())) {
+          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: bridge 不可用')
+          return false
+        }
+        let authorized = getBridgeState().authorized
+        for (let i = 0; i < 40 && !authorized; i++) {
+          await new Promise(r => setTimeout(r, 300))
+          authorized = getBridgeState().authorized
+        }
+        if (!authorized) {
+          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: 播放面未授权（等待超时）')
+          if (!appleBridgeAuthHintShownRef.current) {
+            appleBridgeAuthHintShownRef.current = true
+            addToast('Apple 兼容播放需一次授权：设置 → Apple Music 播放面 → 打开窗口登录', 'info')
+          }
+          return false
+        }
+        const ok = await bridgePlay(String(normalizedSong.appleId))
+        ;(window as any).electron?.log?.(`[PlaySong] WebView2 fallback bridgePlay(${normalizedSong.appleId}) → ${ok}`)
+        return ok
+      }
+
+      // Apple Music 原生音源：webPlayback + CENC HLS + ECS Browser CDM (L3)。
       let appleHlsStream: AppleNativeStream | null = null
-      // Apple Music 电台直播：流已由探索页经 /v1/play/assets 取好（含 playParams），
-      // 直接进 HLS 管线；不经 webPlayback，也不做网易云/QQ 载体匹配（电台没有同款歌曲）
+      // Apple Music 电台直播：流已由探索页经 /v1/play/assets 取好（含 playParams），直接进 HLS 管线。
       const radioStream = (normalizedSong as { appleRadio?: { stream: AppleNativeStream } | null }).appleRadio?.stream
       if (radioStream) {
         appleHlsStream = radioStream
         debugLog('📻 [PlaySong] Apple 电台直播流就绪: ' + radioStream.url.slice(0, 96))
       } else if (normalizedSong.platform === 'apple' && isAppleNativeStreamEnabled()) {
-        const streamId = String(normalizedSong.appleId || normalizedSong.id || '')
+        let streamId = String(normalizedSong.appleId || normalizedSong.id || '')
+        if (streamId && APPLE_LIBRARY_ID_PATTERN.test(streamId)) {
+          const catalogId = await resolveAppleLibraryCatalogId(streamId).catch(() => null)
+          if (catalogId) streamId = catalogId
+        }
         const emeCapable = await isAppleEmeCapable()
         if (streamId && streamId !== '0' && emeCapable) {
           appleHlsStream = await resolveAppleNativeStream(streamId)
-          if (!appleHlsStream) {
-            // 取流失败：静默回退载体（诊断原因已由 resolveAppleNativeStream 输出到
-            // 控制台与主进程日志，不打扰 UI）
-            debugLog('🍎 [PlaySong] Apple 原生音源取流失败，回退网易云/QQ 载体')
-          }
+          if (!appleHlsStream) useWebView2 = await tryWebView2Fallback()
         } else if (!emeCapable) {
-          debugLog('🍎 [PlaySong] 当前环境无 Widevine CDM，Apple 原生音源不可用，回退载体匹配')
+          debugLog('🍎 [PlaySong] ECS Browser CDM 不可用，尝试 WebView2 兼容播放')
+          useWebView2 = await tryWebView2Fallback()
+        } else if (!streamId || streamId === '0') {
+          console.warn(`🍎 [PlaySong] Apple 歌曲缺少有效曲目 id：《${normalizedSong.name}》`)
+          useWebView2 = await tryWebView2Fallback()
         }
       }
       // 需要跨平台载体转换的平台：apple（原生取流失败时）/spotify（无自源音源，始终）。
       // kugou/soda 先试原生播放（汽水走逆向 Web API，免费/试听流可播），
       // 付费/失败时在 URL 为空分支再匹配网易云/QQ 同款。
-      const needsCarrier = !appleHlsStream && (normalizedSong.platform === 'apple'
+      const needsCarrier = !appleHlsStream && !useWebView2 && (normalizedSong.platform === 'apple'
         || normalizedSong.platform === 'spotify')
       let audioSong: Song = normalizedSong
       if (needsCarrier) {
@@ -3937,7 +4117,10 @@ function App() {
       let sodaUnavailableInfo: { requiredTier?: 'free' | 'vip' | 'svip'; vipLabel?: string; reason?: string } | null = null
 
       // 音频 URL 与歌词分别判断时效，歌词请求不再等播放器完成加载后才开始。
-      if (appleHlsStream) {
+      if (useWebView2) {
+        // WebView2 播放面模式：音源在 WebView2 内解密播放，无需本地 URL；
+        // 预载缓存里的载体 URL 不可用（会造成播放面 + 本地 deck 双重出声）
+      } else if (appleHlsStream) {
         // Apple 原生 HLS：清单签名有时效且不走 getSongUrl，不写 URL 缓存，
         // 切歌/重播时重新取流（webPlayback 本身很快）
         url = appleHlsStream.url
@@ -3978,7 +4161,7 @@ function App() {
       
       
       // 检测歌曲下架
-      if (url === 'SONG_UNAVAILABLE') {
+      if (!useWebView2 && url === 'SONG_UNAVAILABLE') {
         console.error('获取歌曲URL失败，重试3次')
         addToast('获取歌曲信息失败，请稍后重试', 'error')
         // 捕获本次加载的 revision：3 秒后重试前校验用户是否已手动切歌，避免迟到跳歌
@@ -3998,7 +4181,7 @@ function App() {
           .catch(() => undefined)
       }
       
-      if (!url) {
+      if (!url && !useWebView2) {
         // 酷狗/汽水：原生播放失败（付费/版权/未登录）→ 尝试网易云/QQ 同款匹配播放
         if (normalizedSong.platform === 'kugou' || normalizedSong.platform === 'soda') {
           // 汽水源不可播：先弹一次性可感知提示（标注「汽水·」前缀，避免用户误以为播的是网易云版本），
@@ -4033,7 +4216,7 @@ function App() {
       }
       
       // 处理封面图片URL，支持网易云音乐的URL参数
-      setCurrentTrack(createTrackFromSong(normalizedSong, url))
+      setCurrentTrack(createTrackFromSong(normalizedSong, url ?? undefined))
       
       // 如果是当前播放的歌曲，确保歌词已加载且不为空
       songLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || songLyrics
@@ -4045,8 +4228,19 @@ function App() {
       setIsPureMusic(detectPureMusic(songLyrics))
       
       let started = false
-      try {
-        started = await audioPlayer.loadAndPlay(url, volume, {
+      if (useWebView2) {
+        // === WebView2 播放面模式 ===
+        // 音频在 WebView2 兼容播放窗口中解密播放，本地 deck 保持空载；
+        // 播放器进入外部源模式：bridge 状态经 emit 管线驱动全部 UI（进度/歌词/播控），
+        // 播完经 ended 语义走上层切歌/单曲循环，播控命令在 hook 内分流到 bridge。
+        started = true
+        // Song.duration 单位为毫秒（与 loadAndPlay 的 duration 传参一致，需 /1000 转秒）
+        audioPlayer.enableExternalPlayback({ duration: Number(normalizedSong.duration) / 1000 || 0 })
+        setExternalPlaybackActive(true)
+      } else {
+        try {
+        // 此分支 !useWebView2：上方 url 为空分支已 return，url 必为有效载体/HLS 地址
+        started = await audioPlayer.loadAndPlay(url!, volume, {
           trackKey: cacheKey,
           index: songIndex,
           duration: normalizedSong.duration / 1000,
@@ -4067,14 +4261,50 @@ function App() {
         // 给可感知提示即可，用户可重试或切下一首（切歌会重新走完整取流流程）
         if (appleHlsStream) {
           console.warn('[PlaySong] Apple 原生 HLS 播放失败:', firstPlaybackError)
-          // 电台直播：给出可感知提示（歌曲路径保持静默回退，用户偏好）
+          // 电台直播：给出可感知提示（无同款歌曲可回退）
           if ((normalizedSong as { appleRadio?: unknown }).appleRadio) {
             addToast('电台直播播放失败（网络或授权问题），请重试', 'error')
+            return
           }
           // 静默处理：不外弹提示（用户偏好），仅转发主进程控制台便于排查
           try {
             ;(window as any).electron?.log?.(`[ApplePlayback] HLS 播放失败: ${firstPlaybackError instanceof Error ? firstPlaybackError.message : String(firstPlaybackError)}`)
           } catch { /* 忽略 */ }
+          // Electron L3/CENC 失败后优先切到 WebView2 兼容播放；只有 bridge 也失败才加载体。
+          useWebView2 = await tryWebView2Fallback()
+          if (useWebView2 && isLatestLoad()) {
+            appleHlsStream = null
+            started = true
+            audioPlayer.enableExternalPlayback({ duration: Number(normalizedSong.duration) / 1000 || 0 })
+            setExternalPlaybackActive(true)
+            setCurrentTrack(createTrackFromSong(normalizedSong))
+            return
+          }
+
+          // WebView2 也不可用时回退网易云/QQ 载体（避免把用户晾在 0:00）。
+          const resolved = await resolvePlayableSong(normalizedSong)
+          if (resolved && isLatestLoad()) {
+            const carrierId = resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
+            const carrierUrl = await getSongUrl(carrierId, resolved.platform || 'netease')
+            if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE' && isLatestLoad()) {
+              normalizedSong = resolved
+              url = carrierUrl
+              setCurrentTrack(createTrackFromSong(normalizedSong, url))
+              songLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || songLyrics
+              started = await audioPlayer.loadAndPlay(url, volume, {
+                trackKey: cacheKey,
+                index: songIndex,
+                duration: normalizedSong.duration / 1000,
+                albumId: getLocalAlbumIdentifier(normalizedSong, resolved.platform || 'netease') || undefined,
+                albumCover: normalizedSong.album?.picUrl || undefined,
+              })
+              if (started && lyricDisplayModeRef.current === 'video') {
+                const engineEl = audioPlayerRef.current?.getAudioElement?.()
+                if (engineEl) { engineEl.volume = 0; engineEl.pause() }
+                watchPausedEngineRef.current = true
+              }
+            }
+          }
           return
         }
         // Signed playback URLs can expire or be rejected by the CDN before the
@@ -4118,11 +4348,13 @@ function App() {
           if (engineEl) { engineEl.volume = 0; engineEl.pause() }
           watchPausedEngineRef.current = true
         }
-      }
+      } // ← closes catch
+      } // ← closes else
       if (!started || !isLatestLoad()) return
       
       // 响度归一化：按曲目测量 LUFS 并施加增益（adapter 内部按 capabilities 判断，v1/v3 no-op）
-      engineAdapterRef.current.applyLoudnessNormalization(cacheKey, url)
+      // WebView2 播放面模式无本地音频链路，跳过
+      if (!useWebView2) engineAdapterRef.current.applyLoudnessNormalization(cacheKey, url!)
       
       // 请求可能已经由下一首预载启动；这里仅保持引用，避免重复调用。
       void lyricsPromise
@@ -4221,6 +4453,16 @@ function App() {
     if (deterministicNextIndex === undefined) return undefined
     return playlist[deterministicNextIndex]
   }, [playlist, deterministicNextIndex])
+  const foliaPresentation = resolveFoliaPresentation({
+    isPlaybackPage,
+    lyricMode: lyricDisplayMode,
+    upNextEnabled,
+    hasNext: Boolean(nextSongToShow),
+    playMode,
+    showUpNext,
+    autoMixRunning: isAutoMixTransition && transitionState === 'running-transition',
+    transitionDuration,
+  })
 
   const handlePlayModeChange = () => {
     const now = Date.now()
@@ -4387,7 +4629,10 @@ function App() {
         return
       }
       const audio = audioPlayer.getAudioElement()
-      const currentlyPlaying = isPlayingRef.current && !(audio?.paused ?? true)
+      // WebView2 播放面：本地元素恒为暂停态，"正在播"以 bridge 状态为准
+      const currentlyPlaying = audioPlayer.isExternalPlaybackActive?.()
+        ? getBridgeState().playing
+        : isPlayingRef.current && !(audio?.paused ?? true)
       if (action === 'play' && !currentlyPlaying) audioPlayer.togglePlay()
       else if (action === 'pause' && currentlyPlaying) audioPlayer.togglePlay()
       else if (action === 'toggle') audioPlayer.togglePlay()
@@ -4493,17 +4738,23 @@ function App() {
       if (ALL_LYRIC_MODES.includes(mode)) handleLyricDisplayModeChange(mode)
     } else if (action === 'stop') {
       // 停止：暂停并回到开头（主流遥控器停止键）
-      const audio = audioPlayer.getAudioElement()
       audioPlayerRef.current.seek(0)
-      if (isPlayingRef.current && !(audio?.paused ?? true)) audioPlayer.togglePlay()
+      if (audioPlayer.isExternalPlaybackActive?.()) {
+        if (getBridgeState().playing) audioPlayer.togglePlay()
+      } else {
+        const audio = audioPlayer.getAudioElement()
+        if (isPlayingRef.current && !(audio?.paused ?? true)) audioPlayer.togglePlay()
+      }
     } else if (action === 'rewind') {
-      const audio = audioPlayer.getAudioElement()
-      const t = audio?.currentTime || 0
+      // WebView2 播放面：时间源来自 bridge（本地元素无媒体）
+      const t = audioPlayer.isExternalPlaybackActive?.()
+        ? (getBridgeState().position || 0)
+        : (audioPlayer.getAudioElement()?.currentTime || 0)
       audioPlayerRef.current.seek(Math.max(0, t - 10))
     } else if (action === 'fast-forward') {
-      const audio = audioPlayer.getAudioElement()
-      const t = audio?.currentTime || 0
-      const d = audio?.duration || 0
+      const external = audioPlayer.isExternalPlaybackActive?.()
+      const t = external ? (getBridgeState().position || 0) : (audioPlayer.getAudioElement()?.currentTime || 0)
+      const d = external ? (getBridgeState().duration || 0) : (audioPlayer.getAudioElement()?.duration || 0)
       audioPlayerRef.current.seek(Math.min(d || t + 10, t + 10))
     } else if (action === 'open-search') {
       setShowSearch(true)
@@ -4901,17 +5152,26 @@ function App() {
 
       const audio = audioPlayer.getAudioElement()
       const analyser = desktopAnalyserRef.current
-      const audioActive = Boolean(analyser && isPlayingRef.current && !(audio?.paused ?? true))
+      // WebView2 播放面：WASAPI loopback 频谱来自 bridge（64 对数 bin），本地 analyser 无音频流
+      const externalPlaying = Boolean(audioPlayer.isExternalPlaybackActive?.() && getBridgeState().playing)
+      const audioActive = Boolean(externalPlaying || (analyser && isPlayingRef.current && !(audio?.paused ?? true)))
       if (!audioActive && desktopSpectrumIdleRef.current && !overlayActive) return
 
       let spectrum: number[]
-      if (audioActive && analyser) {
-        const bins = analyser.frequencyBinCount
+      if (audioActive && (analyser || externalPlaying)) {
+        const bins = externalPlaying
+          ? externalSpectrumRef.current.length
+          : (analyser?.frequencyBinCount ?? 64)
         if (!desktopSpectrumBufferRef.current || desktopSpectrumBufferRef.current.length !== bins) {
           desktopSpectrumBufferRef.current = new Uint8Array(bins)
         }
         const data = desktopSpectrumBufferRef.current
-        analyser.getByteFrequencyData(data)
+        if (externalPlaying) {
+          const extBins = externalSpectrumRef.current
+          for (let index = 0; index < bins; index += 1) data[index] = extBins[index] ?? 0
+        } else {
+          analyser!.getByteFrequencyData(data)
+        }
         const bandCount = 48
         let bands = spectrumBandsRef.current
         if (!bands || bands.bins !== bins) {
@@ -4958,7 +5218,9 @@ function App() {
         // 变化去重：进度 ≥0.5s 或频谱明显变化才推送（10Hz tick 只在有变化时扇出 IPC/遥控 TCP）
         const progressNow = watchTimelineActiveRef.current
           ? (watchVideoStateRef.current?.time || 0)
-          : (Number(audio?.currentTime) || 0) + lyricOffsetRef.current - 0.2
+          : (audioPlayer.isExternalPlaybackActive?.()
+              ? (getBridgeState().position || 0)
+              : (Number(audio?.currentTime) || 0)) + lyricOffsetRef.current - 0.2
         const progressChanged = Math.abs(progressNow - desktopSpectrumLastPushProgressRef.current) >= 0.5
         const spectrumChanged = compactSpectrum.some((value, index) => Math.abs(value - desktopSpectrumLastPushSpectrumRef.current[index]) > 0.03)
         if (progressChanged || spectrumChanged) {
@@ -4976,7 +5238,9 @@ function App() {
             window.electron?.desktopPlayer?.pushState({
               spectrum: compactSpectrum,
               progress: progressNow,
-              duration: Number(audio?.duration) || 0,
+              duration: audioPlayer.isExternalPlaybackActive?.()
+                ? (getBridgeState().duration || 0)
+                : (Number(audio?.duration) || 0),
             })
           }
         }
@@ -5020,6 +5284,16 @@ function App() {
         // 看歌模式：任务栏进度按视频
         const v = watchVideoStateRef.current
         if (v.duration > 0) window.electron?.desktopPlayer?.pushState({ progress: v.time, duration: v.duration })
+        return
+      }
+      // WebView2 播放面：时间源来自 bridge（本地 audio 元素无媒体）
+      if (audioPlayer.isExternalPlaybackActive?.()) {
+        const s = getBridgeState()
+        if (!s.playing) return
+        window.electron?.desktopPlayer?.pushState({
+          progress: (s.position || 0) + lyricOffsetRef.current - 0.2,
+          duration: s.duration || 0,
+        })
         return
       }
       const audio = audioPlayer.getAudioElement()
@@ -6507,7 +6781,17 @@ function App() {
             platform={currentSong.platform}
             songId={currentSong.id || currentSong.mid}
             isPlaying={isPlaying}
-            getAudioElement={() => audioPlayerRef.current.getAudioElement()}
+            getAudioElement={() => {
+              const el = audioPlayerRef.current.getAudioElement()
+              // WebView2 播放面：MV 背景同步时间源走 bridge（代理视图）
+              if (audioPlayerRef.current.isExternalPlaybackActive?.()) {
+                externalAudioViewRef.current = el
+                return externalAudioProxyRef.current
+              }
+              return el
+            }}
+            getPlaybackTimeSeconds={getMvPlaybackTimeSeconds}
+            getTransitionTargetTimeSeconds={getMvTransitionTargetTimeSeconds}
             playerTheme={playerTheme}
             upcomingSongs={watchUpcomingSongs}
             enabled={mvBackgroundEnabled && !mvBackgroundFallback}
@@ -7291,7 +7575,7 @@ function App() {
                     songArtist={currentSongArtistLabel}
                     songAlbum={currentSong.album?.name}
                     coverUrl={displayCoverUrl}
-                    trackId={currentSong.id || currentSong.mid}
+                    trackId={currentSong.id ?? currentSong.mid ?? getSongKey(currentSong) ?? ''}
                     translationEnabled={translationEnabled}
                     romanEnabled={romanEnabled}
                     onSeek={audioPlayer.seek}
@@ -7514,6 +7798,39 @@ function App() {
             )}
           </AnimatePresence>
 
+          {/* Folia 专属过渡展示层：独立于 FoliaLyricsPage，30fps progress 不触发歌词树重渲染。 */}
+          {foliaPresentation.active && currentSong && (
+            <>
+              <FoliaUpNextCard
+                visible={foliaPresentation.cardVisible}
+                isTransitioning={foliaPresentation.transitionBorderVisible}
+                progress={transitionProgress}
+                current={{ title: currentSong.name, artist: currentSongArtistLabel, coverUrl: displayCoverUrl }}
+                next={nextSongToShow ? {
+                  title: nextSongToShow.name,
+                  artist: nextSongToShow.artists.map(artist => artist.name).join(', '),
+                  coverUrl: nextSongToShow.album?.picUrl,
+                } : undefined}
+                onActivate={() => {
+                  suppressUpNextUntilRef.current = Date.now() + 3000
+                  setShowUpNext(false)
+                  handleNext()
+                }}
+                theme={playerTheme}
+                accentColor={dominantColor || '#fff'}
+              />
+              <FoliaTransitionOverlay
+                visible={foliaPresentation.overlayVisible}
+                suppressed={foliaPresentation.transitionBorderVisible}
+                progress={transitionProgress}
+                duration={transitionDuration}
+                bpm={transitionDebug?.sourceBpm}
+                accentColor={dominantColor || '#fff'}
+                theme={playerTheme}
+              />
+            </>
+          )}
+
           {/* 全局播放器 - 固定在底部（摩登模式自带控制条；看歌正常播放时隐藏，搜索失败时显示兼容音频控件） */}
           {currentSong && !showHome && lyricDisplayMode !== 'modeng' && (lyricDisplayMode !== 'video' || watchSearchFailed) && (
             <MaybePortal active={lyricDisplayMode === 'video'}>
@@ -7548,6 +7865,7 @@ function App() {
               immersiveRoman={immersiveLyricLine?.roman || ''}
               showImmersiveTranslation={lyricDisplayMode === 'immersive' && translationEnabled && Boolean(immersiveLyricLine?.translation?.trim())}
               showImmersiveRoman={lyricDisplayMode === 'immersive' && romanEnabled && Boolean(immersiveLyricLine?.roman?.trim())}
+              stemControl={playerStemControl}
             />
             </MaybePortal>
           )}
@@ -7611,7 +7929,7 @@ function App() {
 
       {/* 播放提示是全局覆盖层：播放页始终允许显示；探索、简约首页和桌面模式
           只有在“在播放页外显示播放提示”开启时才显示，且三个模式位置一致。 */}
-      {playlist.length > 0 && playMode !== 'repeat' && showUpNext && canShowUpNextOnCurrentSurface && (
+      {playlist.length > 0 && playMode !== 'repeat' && showUpNext && canShowUpNextOnCurrentSurface && foliaPresentation.useLegacyUpNext && (
         <Suspense fallback={null}>
           <LazyUpNextNotification
             show={true}

@@ -627,8 +627,15 @@ class CacheManager {
     }
 
     if (targets.transitions && window.electron?.render) {
-      const result = await window.electron.render.clearCache()
-      if (!result.success) throw new Error('过渡音频缓存清理失败')
+      window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
+      const [renderResult, stemResult, trackStemResult] = await Promise.all([
+        window.electron.render.clearCache(),
+        window.electron.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+      ])
+      if (!renderResult.success || !stemResult.success || !trackStemResult.success) {
+        throw new Error('过渡或分轨缓存清理失败')
+      }
       cleared = true
     }
     

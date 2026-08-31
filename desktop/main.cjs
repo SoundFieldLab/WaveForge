@@ -79,6 +79,9 @@ function writePerformanceSettings(settings) {
 }
 
 const performanceSettings = readPerformanceSettings()
+// Media Foundation Widevine CDM 实验已移除：castLabs 官方确认该 Windows L1 路径仅为历史实验，
+// 已在近期 Chromium/ECS 中废弃且不支持 VMP。Apple 原生 CENC 应使用 ECS 默认 Browser CDM (L3)，
+// 并单独验证生产 EVS/VMP 签名；不要再注入 ExternalClearKeyForTesting/media_foundation_cdm_path。
 // 全局高刷：用户手动选了具体档位时，启动即用 --force-frame-rate 强制 Chromium 帧率
 // （比运行时 setFrameRate 更可靠；「跟随显示器最高」档在 app ready 后按显示器实时应用）
 if (performanceSettings.highRefreshRate === true && performanceSettings.highRefreshHz) {
@@ -181,15 +184,39 @@ function findExistingEcsCdmVersion(userDataDir) {
     return ''
   }
 }
+
+/** 点分版本号比较：a > b 返回 true */
+function versionNewerEcs(a, b) {
+  const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0)
+  const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d) return d > 0
+  }
+  return false
+}
 function seedEcsOfflineCdm() {
   try {
     const userDataDir = app.getPath('userData')
-    if (findExistingEcsCdmVersion(userDataDir)) return // 已注册且文件在 → 无需播种
+    const existing = findExistingEcsCdmVersion(userDataDir)
     const source = findWidevineCdm() // 系统 Chrome/Edge 的 CDM（含 manifest 版本）
     if (!source) {
-      console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
+      if (!existing) console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
       return
     }
+    // CDM 补丁级过期会被 Apple license 服务器拒绝（-1021/42605 WIDEVINE_CDM_EXPIRED）。
+    // 系统 Chrome/Edge 出了更新 CDM 时要升级播种目录并刷新 Local State 注册，
+    // 不能因「已注册」就永远停在旧版本上。
+    const versionNewer = (a, b) => {
+      const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0)
+      const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0)
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0)
+        if (d) return d > 0
+      }
+      return false
+    }
+    if (existing && !versionNewer(source.version, existing)) return // 已是最新 → 无需播种
     const version = source.version
     const vdir = path.join(userDataDir, 'WidevineCdm', version)
     fs.mkdirSync(path.join(vdir, '_platform_specific', 'win_x64'), { recursive: true })
@@ -222,14 +249,37 @@ function seedEcsOfflineCdm() {
       pv: version,
     }
     fs.writeFileSync(localStatePath, JSON.stringify(localState), 'utf8')
-    logStartupTiming(`[Widevine] 完全离线播种完成：CDM ${version} -> ${vdir}`)
+    logStartupTiming(`[Widevine] 离线播种${existing ? `升级（${existing} → ${version}）` : '完成'}：CDM ${version} -> ${vdir}`)
   } catch (error) {
     console.warn('[Widevine] 离线播种失败（不影响启动，CUS 将尝试联网安装）:', error?.message || error)
   }
 }
 if (isEcsBuild()) {
   console.log('[Widevine] 检测到 castlabs ECS 运行时：CDM 由组件服务管理，跳过自定义注入')
-  seedEcsOfflineCdm()
+  // 优先让 castlabs CUS 联网下载**官方预配置 CDM**（其设备证书被 Apple license 服务接受；
+  // 我们播种的 Chrome/Edge 经典 L3 CDM 会被 Apple 以 -1021 拒绝）。仅当网络不可达、
+  // CUS 拿不到组件时，才落盘播种系统 Chrome/Edge 的 CDM 兜底（保证 EME 可用、
+  // Apple 原生音源虽不可用但结构完整，其余 DRM 场景不受影响）。
+  app.whenReady().then(async () => {
+    try {
+      const { components } = require('electron')
+      await components.whenReady()
+      // CUS 下载窗口：castlabs 组件包约 20MB+，慢网络需要时间
+      await new Promise(resolve => setTimeout(resolve, 15000))
+      const list = (typeof components.getComponents === 'function' ? components.getComponents() : {}) || {}
+      const cdm = list[ECS_WIDEVINE_APP_ID]
+      const cusVersion = cdm && typeof cdm.version === 'string' ? cdm.version : ''
+      const seeded = findExistingEcsCdmVersion(app.getPath('userData'))
+      if (cusVersion && (!seeded || versionNewerEcs(cusVersion, seeded))) {
+        console.log(`[Widevine] CUS 已提供 castlabs 官方 CDM ${cusVersion}，使用正版组件（不播种）`)
+        return
+      }
+      if (seeded) return // 播种版仍是在用的最新可用版本
+    } catch (error) {
+      console.warn('[Widevine] CUS 状态检查失败:', error?.message || error)
+    }
+    seedEcsOfflineCdm()
+  }).catch(() => seedEcsOfflineCdm())
 } else {
   try {
     const widevine = findWidevineCdm()
@@ -272,6 +322,8 @@ const { ConfigManager } = require('./config-manager.cjs')
 const deviceLicense = require('./device-license.cjs')
 const { createRemoteServer, getLanIPv4Addresses } = require('./remote-server.cjs')
 const { setupAirplayIpc } = require('./airplay/airplay-ipc.cjs')
+const { setupChromaIpc } = require('./chroma-ipc.cjs')
+const { setupSignalRgbIpc } = require('./signalrgb-ipc.cjs')
 logStartupTiming('Main-process modules loaded')
 
 let desktopWidgetCpuSample = null
@@ -385,10 +437,15 @@ let mainWindow = null
 let wallpaperWatcher = null
 /** AirPlay 投送端控制器句柄（whenReady 内初始化，模块作用域供冒烟自检引用） */
 let airplayControllerHandle = null
+let chromaControllerHandle = null
+let signalRgbControllerHandle = null
 let qqLoginWindow = null
 let qqLoginWindowOpening = false
 let qqSkillKeyWindow = null
 let analysisRuntime = null
+const authorizedStemInputPaths = new Set()
+let stemRuntime = null
+let trackStemRuntime = null
 let mediaKeysEnabled = readMediaKeysEnabled()
 
 const mediaKeyAccelerators = {
@@ -459,6 +516,8 @@ let desktopLyricsMousePassthrough = false
 const DESKTOP_LYRICS_DEFAULTS = Object.freeze({
   enabled: false,
   fontSize: 58,
+  // 歌词字体族名；空字符串 = 默认字体栈。可选本机字体，因此只做字符串校验不做白名单
+  fontFamily: '',
   colorMode: 'auto',
   orientation: 'horizontal',
   doubleLine: false,
@@ -516,8 +575,6 @@ function getDesktopPlayerSettingsPath() {
   return path.join(app.getPath('userData'), 'desktop-player-settings.json')
 }
 
-  // 歌词字体族名；空字符串 = 默认字体栈。可选本机字体，因此只做字符串校验不做白名单
-  fontFamily: '',
 function loadDesktopPlayerSettings() {
   try {
     const parsed = JSON.parse(fs.readFileSync(getDesktopPlayerSettingsPath(), 'utf8'))
@@ -695,6 +752,10 @@ function sanitizeDesktopLyricsSettings(input = {}, base = DESKTOP_LYRICS_DEFAULT
     fontSize: input.fontSize === undefined
       ? base.fontSize
       : Math.round(Math.min(120, Math.max(26, Number(input.fontSize) || DESKTOP_LYRICS_DEFAULTS.fontSize))),
+    // 字体族名：允许任意本机字体名，仅截断长度防止异常数据；空串 = 默认字体栈
+    fontFamily: input.fontFamily === undefined
+      ? (base.fontFamily || '')
+      : String(input.fontFamily).trim().slice(0, 128),
     colorMode: input.colorMode === undefined
       ? base.colorMode
       : (DESKTOP_LYRICS_COLORS.has(input.colorMode) ? input.colorMode : 'auto'),
@@ -752,10 +813,6 @@ function setDesktopLyricsMousePassthrough(passthrough) {
   const next = desktopLyricsSettings.locked === true && passthrough === true
   desktopLyricsMousePassthrough = next
   if (desktopLyricsWindow && !desktopLyricsWindow.isDestroyed()) {
-    // 字体族名：允许任意本机字体名，仅截断长度防止异常数据；空串 = 默认字体栈
-    fontFamily: input.fontFamily === undefined
-      ? (base.fontFamily || '')
-      : String(input.fontFamily).trim().slice(0, 128),
     try {
       if (next) desktopLyricsWindow.setIgnoreMouseEvents(true, { forward: true })
       else desktopLyricsWindow.setIgnoreMouseEvents(false)
@@ -2191,6 +2248,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs'),
       paintWhenInitiallyHidden: true,  // 软件合成下隐藏时也持续绘制，避免显示时首帧空白
+      backgroundThrottling: false, // Chroma 后台联动；各可视化仍由订阅者/可见性自行门控
     },
   })
 
@@ -4646,10 +4704,15 @@ async function extractAppleAccountProfile(win, appleSession) {
   try {
     console.log('[Apple登录] 访问 Apple 账户个人信息页…')
     await win.loadURL('https://account.apple.com/account/manage/section/information')
+    // 数据采集期顶部药丸提示（非阻塞；页面导航会清 DOM，导航后注入）
+    showApplePill(win, '正在获取用户信息…')
     // 等页面加载完成（SPA 渲染；若需登录，用户完成登录后自动进入。最多等 10 分钟）
-    const deadline = Date.now() + 10 * 60 * 1000
+    // 头像/昵称抓取总预算 1 分钟（Apple 部分地区节点返回慢，但也不宜久等）；
+    // 若触发 needLogin（用户在窗口内手动登录 Apple 账户），从提示起再给 5 分钟人工等待
+    let deadline = Date.now() + 60 * 1000
     let info = null
     let loginPrompted = false
+    let avatarOnlyStreak = 0
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1200))
       if (!win || win.isDestroyed()) return null
@@ -4673,18 +4736,24 @@ async function extractAppleAccountProfile(win, appleSession) {
               break;
             }
           }
-          // 出生日期 / 国家或地区 / 语言（个人信息页各按钮标题，同时抓左侧图标）
+          // 出生日期 / 国家或地区 / 语言（个人信息页各按钮标题，同时抓左侧图标；
+          // 标签中英双语——account.apple.com 跟随账户语言设置，英文界面也能抓到）
           var btns = document.querySelectorAll('button, [role="button"]');
           for (var b = 0; b < btns.length; b++) {
             var bt = clean(btns[b].textContent);
-            var bm = bt.match(/^(姓名|出生日期|国家或地区|语言)\\s*(.*)$/);
+            var bm = bt.match(/^(姓名|Name|出生日期|Birthday|国家或地区|Country or Region|Country\\/Region|语言|Language)\\s*(.*)$/);
             if (bm) {
+              var key = bm[1];
+              var isName = key === '姓名' || key === 'Name';
+              var isBirth = key === '出生日期' || key === 'Birthday';
+              var isCountry = key === '国家或地区' || key === 'Country or Region' || key === 'Country/Region';
+              var isLang = key === '语言' || key === 'Language';
               var val = bm[2];
               var icon = wfAppleIcon(btns[b]);
-              if (bm[1] === '姓名' && val && !result.name) result.name = val;
-              else if (bm[1] === '出生日期' && val) { result.birthday = val; if (icon) result.icons.birthday = icon; }
-              else if (bm[1] === '国家或地区' && val) { result.country = val; if (icon) result.icons.country = icon; }
-              else if (bm[1] === '语言' && val) { result.language = val; if (icon) result.icons.language = icon; }
+              if (isName && val && !result.name) result.name = val;
+              else if (isBirth && val) { result.birthday = val; if (icon) result.icons.birthday = icon; }
+              else if (isCountry && val) { result.country = val; if (icon) result.icons.country = icon; }
+              else if (isLang && val) { result.language = val; if (icon) result.icons.language = icon; }
             }
           }
           // 邮箱
@@ -4694,12 +4763,22 @@ async function extractAppleAccountProfile(win, appleSession) {
         })()
       `).catch(() => null)
       if (info && typeof info === 'object' && String(info.name || '').trim() && String(info.avatar || '').trim()) break
+      // 空转保护：特殊布局/语言下昵称可能始终抓不到——头像连续 3 轮稳定即收手
+      //（返回仅头像的结果，昵称走账单姓名兜底），避免干等满 10 分钟超时
+      if (info && typeof info === 'object' && String(info.avatar || '').trim() && String(info.name || '').trim() === '') {
+        avatarOnlyStreak += 1
+        if (avatarOnlyStreak >= 3) break
+      } else {
+        avatarOnlyStreak = 0
+      }
       if (info && typeof info === 'object' && info.needLogin) {
         // 未登录：移除处理中遮罩（让登录表单可见），提示用户在当前窗口完成 Apple 账户登录
         // （Apple 会识别 AM 会话预填邮箱），然后继续轮询等待登录成功。
         win.webContents.executeJavaScript('(function(){var e=document.getElementById("waveforge-apple-processing");if(e&&e.parentNode)e.parentNode.removeChild(e);var c=document.getElementById("waveforge-apple-consent");if(c&&c.parentNode)c.parentNode.removeChild(c);})()').catch(() => {})
         if (!loginPrompted) {
           loginPrompted = true
+          // 人工登录不受 1 分钟预算限制：从提示起重置 5 分钟窗口
+          deadline = Math.max(deadline, Date.now() + 5 * 60 * 1000)
           console.log('[Apple登录] account.apple.com 未登录，等待用户在当前窗口完成登录…')
           win.webContents.executeJavaScript(`
             (function () {
@@ -4716,9 +4795,8 @@ async function extractAppleAccountProfile(win, appleSession) {
       }
     }
     if (!info || typeof info !== 'object') return null
-    // 登录成功：移除登录提示条，显示"正在获取用户信息…"（抓取/写入期间不回到原始页面）
+    // 登录成功：移除登录提示条（数据已就绪，顶部药丸继续显示到安全页抓取结束）
     win.webContents.executeJavaScript('(function(){var e=document.getElementById("waveforge-account-login-hint");if(e&&e.parentNode)e.parentNode.removeChild(e);})()').catch(() => {})
-    showAppleOverlay(win, '正在获取用户信息…')
     const name = String(info.name || '').trim()
     const email = String(info.email || '').trim()
     const avatar = String(info.avatar || '').trim()
@@ -4790,6 +4868,7 @@ async function extractAppleDevices(win) {
 async function extractAppleSecurity(win) {
   try {
     await win.loadURL('https://account.apple.com/account/manage/section/security')
+    showApplePill(win, '正在获取账户安全信息…')
     const deadline = Date.now() + 12000
     let info = null
     while (Date.now() < deadline) {
@@ -4871,6 +4950,41 @@ function showAppleOverlay(win, text) {
       document.body.appendChild(el);
     })()
   `).catch(() => {})
+}
+
+// ── 药丸提示（登录窗口顶部的非阻塞进度胶囊，数据采集各阶段复用） ──
+// 同一元素复用：重复调用只更新文案（跨页面导航后 DOM 重建，需在导航后重新注入）
+function showApplePill(win, text) {
+  if (!win || win.isDestroyed()) return
+  win.webContents.executeJavaScript(`
+    (function () {
+      var text = ${JSON.stringify(text || '正在获取用户信息…')};
+      var el = document.getElementById('waveforge-apple-pill');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'waveforge-apple-pill';
+        el.style.cssText = 'position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(10,10,12,0.86);border:1px solid rgba(255,255,255,0.14);border-radius:999px;padding:9px 18px;display:flex;align-items:center;gap:9px;color:#fff;font:600 12.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 8px 28px rgba(0,0,0,0.45);backdrop-filter:blur(8px);';
+        el.innerHTML =
+          '<span style="width:13px;height:13px;border-radius:50%;border:2px solid rgba(255,255,255,0.22);border-top-color:#fa2d48;display:inline-block;animation:wf-consent-spin 0.9s linear infinite;"></span>' +
+          '<span id="waveforge-apple-pill-text" style="opacity:0.85;">' + text + '</span>';
+        if (!document.getElementById('wf-consent-spin-style')) {
+          var st = document.createElement('style');
+          st.id = 'wf-consent-spin-style';
+          st.textContent = '@keyframes wf-consent-spin{to{transform:rotate(360deg)}}';
+          (document.head || document.documentElement).appendChild(st);
+        }
+        document.body.appendChild(el);
+      } else {
+        var t = document.getElementById('waveforge-apple-pill-text');
+        if (t) t.textContent = text;
+      }
+    })()
+  `).catch(() => {})
+}
+
+function hideApplePill(win) {
+  if (!win || win.isDestroyed()) return
+  win.webContents.executeJavaScript(`(function(){var e=document.getElementById('waveforge-apple-pill');if(e&&e.parentNode)e.parentNode.removeChild(e);})()`).catch(() => {})
 }
 
 // ── Apple 账户信息展示确认弹窗（登录窗口内，用户同意才继续抓取 account.apple.com）────
@@ -4973,6 +5087,7 @@ async function createAppleLoginWindow() {
     }
 
     // 独立分区会话：登录窗口与主应用隔离，Cookie 互不污染
+    // （castlabs 42 无会话级 WebAuthn 开关，通行密钥弹窗在窗口创建处的 dom-ready 拦截）
     const appleSession = session.fromPartition(APPLE_LOGIN_PARTITION)
 
     void (async () => {
@@ -5014,6 +5129,77 @@ async function createAppleLoginWindow() {
           },
         })
         appleLoginWindow.webContents.setUserAgent(APPLE_SAFARI_UA)
+
+        // 页面级拦截 WebAuthn（通行密钥）：castlabs 42 无会话级开关，且 Apple 登录页会自动
+        // 触发系统通行密钥选择器——Win11 下"Windows 安全中心"弹窗每次都跟着弹。
+        // 关键：Apple 的登录表单在**跨域 iframe**里（appleid/itunes 域），只补主 frame 拦不到；
+        // 这里对 framesInSubtree 的全部 frame 注入 stub（credentials.get/create 立即 NotAllowedError
+        // + 关掉平台认证器探测，让页面连通行密钥选项都不渲染），并在窗体生命周期前 90 秒内
+        // 定时补种（动态创建的 iframe 等不到事件）
+        const WEB_AUTHN_BLOCK_STUB = `
+          (function () {
+            try {
+              var c = navigator.credentials;
+              if (!c || !c.__wfWebAuthnBlocked) {
+                var reject = function () { return Promise.reject(new DOMException('WebAuthn disabled', 'NotAllowedError')); };
+                Object.defineProperty(navigator, 'credentials', {
+                  value: { __wfWebAuthnBlocked: true, get: reject, create: reject },
+                  configurable: true,
+                });
+              }
+              if (window.PublicKeyCredential) {
+                try {
+                  window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function () { return Promise.resolve(false); };
+                  window.PublicKeyCredential.isConditionalMediationAvailable = function () { return Promise.resolve(false); };
+                } catch (e) { /* 忽略 */ }
+              }
+              // 拆条件填充触发器：邮箱输入框的 autocomplete="webauthn" 一聚焦就会发起
+              // 通行密钥自动填充（Win11 弹系统选择器）——剥掉该标记
+              var strip = function (root) {
+                try {
+                  var list = (root || document).querySelectorAll('input[autocomplete*="webauthn" i]');
+                  for (var i = 0; i < list.length; i++) {
+                    var a = list[i].getAttribute('autocomplete') || '';
+                    var next = a.replace(/webauthn/gi, '').replace(/\\s+/g, ' ').trim();
+                    list[i].setAttribute('autocomplete', next || 'off');
+                  }
+                } catch (e) { /* 忽略 */ }
+              };
+              strip(document);
+              if (!window.__wfWebauthnObserver) {
+                window.__wfWebauthnObserver = true;
+                try {
+                  new MutationObserver(function () { strip(document); })
+                    .observe(document.documentElement || document, { childList: true, subtree: true, attributes: true, attributeFilter: ['autocomplete'] });
+                } catch (e) { /* 忽略 */ }
+              }
+            } catch (e) { /* 忽略 */ }
+          })()
+        `
+        const blockAppleWebAuthnAllFrames = () => {
+          if (!appleLoginWindow || appleLoginWindow.isDestroyed()) return
+          let frames = []
+          try { frames = appleLoginWindow.webContents.mainFrame.framesInSubtree() } catch { return }
+          for (const frame of frames) {
+            try { frame.executeJavaScript(WEB_AUTHN_BLOCK_STUB).catch(() => {}) } catch { /* frame 已销毁 */ }
+          }
+        }
+        appleLoginWindow.webContents.on('dom-ready', blockAppleWebAuthnAllFrames)
+        appleLoginWindow.webContents.on('did-frame-finish-load', blockAppleWebAuthnAllFrames)
+        console.log('[AppleLogin] WebAuthn 通行密钥拦截已启用（全 frame + autocomplete 剥离 + 10 分钟补种）')
+        const webAuthnPatchTimer = setInterval(() => {
+          if (!appleLoginWindow || appleLoginWindow.isDestroyed()) { clearInterval(webAuthnPatchTimer); return }
+          blockAppleWebAuthnAllFrames()
+        }, 700)
+        setTimeout(() => clearInterval(webAuthnPatchTimer), 600_000)
+        // CDP 预注入：document-start 时机、先于任何页面脚本、自动覆盖所有 frame（含未来创建的）
+        // —— 消灭「页面脚本先于 dom-ready 补丁捕获原始 credentials 引用」的时序竞争
+        try {
+          appleLoginWindow.webContents.debugger.attach('1.3')
+          appleLoginWindow.webContents.debugger
+            .sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: WEB_AUTHN_BLOCK_STUB, runImmediately: true })
+            .catch(() => { /* 失败仍有 dom-ready/定时注入兜底 */ })
+        } catch { /* debugger 被占用时忽略 */ }
 
         // 导航守卫：Apple 登录/授权只在 apple.com 域 + iCloud（提取资料用）；外链交给系统浏览器
         appleLoginWindow.webContents.on('will-navigate', (event, url) => {
@@ -5218,6 +5404,19 @@ async function createAppleLoginWindow() {
                 const allCookies = cookies
                   .map(cookie => `${cookie.name}=${cookie.value}`)
                   .join('; ')
+                // 持久化全量网页会话 Cookie：Apple license（acquireWebPlaybackLicense）会校验
+                // 网页会话，仅凭 media-user-token 会被拒（-1002 session ended）。登录分区是
+                // 内存态（应用重启即空），登录时落盘，license 代理（local-server）读取附带。
+                try {
+                  fs.writeFileSync(
+                    path.join(app.getPath('userData'), 'apple-web-cookies.json'),
+                    JSON.stringify({ cookie: allCookies, savedAt: Date.now() }),
+                    'utf8',
+                  )
+                  console.log(`[Apple登录] 网页会话 Cookie 已持久化（license 代理用，${allCookies.length} chars）`)
+                } catch (e) {
+                  console.warn('[Apple登录] Cookie 持久化失败:', e?.message || e)
+                }
                 // 从登录窗口渲染出的界面提取账号名/头像（web 播放器侧边栏一定显示，最后的数据源）。
                 // 轮询等待侧边栏渲染完成（media-token 出现时界面可能还没画完）。
                 const extractSidebarUser = () => appleLoginWindow.webContents.executeJavaScript(`
@@ -5330,6 +5529,8 @@ async function createAppleLoginWindow() {
                     const sfMatch = currentUrl.match(/\/([a-z]{2})\//)
                     const storefront = (sfMatch && sfMatch[1]) || appleLoginWindow.__wfAppleStorefront || 'cn'
                     await appleLoginWindow.loadURL(`https://music.apple.com/${storefront}/account/settings?l=zh-Hans-CN`)
+                    // 账单抓取药丸提示（导航完成后注入，避免被页面加载清掉）
+                    showApplePill(appleLoginWindow, '正在获取账单信息…')
                     // 等 iframe（CommerceKit 账户设置）加载
                     await new Promise(resolve => setTimeout(resolve, 4500))
                     const accountInfo = await appleLoginWindow.webContents.executeJavaScript(`
@@ -5416,15 +5617,15 @@ async function createAppleLoginWindow() {
                   }
                 }
 
+                // 账单摘要抓完，撤掉药丸提示再询问
+                hideApplePill(appleLoginWindow)
+
                 // ── 账户信息展示确认弹窗（登录窗口内）──
                 // 用户同意 → 继续抓取 account.apple.com（昵称/头像/个人信息/设备）；
                 // 用户拒绝 → 仅使用账单 Apple ID + 账单真实姓名 + monogram 头像。
-                if (!domEmail && !domBillingName) {
-                  // 账单信息都没抓到（异常情况），默认按拒绝处理，不弹窗打扰
-                  appleConsent = 'reject'
-                } else {
-                  appleConsent = await askAppleAccountConsent(appleLoginWindow, domBillingName || '')
-                }
+                // 注意：只要 AM 登录成功就询问——不再因摘要提取为空而静默跳过
+                //（Apple 页面语言/区域不同会让中文标签抓取落空，此前会被误判成"用户拒绝"）
+                appleConsent = await askAppleAccountConsent(appleLoginWindow, domBillingName || '')
 
                 // 用户同意后：抓取 account.apple.com 完整账户资料（SSO 会话直接生效，无需二次登录）
                 if (appleConsent === 'accept') {
@@ -5453,6 +5654,8 @@ async function createAppleLoginWindow() {
                       appleIcons = { ...appleIcons, ...accountSecurity.icons }
                     }
                   }
+                  // 账户资料抓取完毕，撤掉顶部药丸提示
+                  hideApplePill(appleLoginWindow)
                 } else {
                   console.log('[Apple登录] 用户拒绝，使用账单姓名 + monogram 头像')
                   // 拒绝时不抓取 Apple 账户资料；头像由渲染端用账单真实姓名生成 monogram
@@ -6751,15 +6954,13 @@ let localPythonChild = null
 let localLoudnessChild = null
 let localCompensationChild = null
 
-async function startLocalBackend() {
-  if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
-  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
-
-  // 1) Express API（3001）
-  try {
-
-// ── 孤儿后端清扫：上次异常退出残留的子进程会占住 3001-3004，导致新实例误连旧后端 ──
-const BACKEND_PORTS = [3001, 3002, 3003, 3004]
+// ── 孤儿后端清扫：上次异常退出残留的子进程会占住后端端口，导致新实例误连旧后端 ──
+// 必须在模块级声明：will-quit 与 AppleBridge 的 python 校验都在模块作用域调用，
+// 放进 startLocalBackend 的 try 块内会因作用域不可见抛 ReferenceError（静默失效）。
+// 18790 = Apple 播放面 bridge（apple_bridge.py）控制端口
+const { promisify } = require('util')
+const execFileAsync = promisify(execFile)
+const BACKEND_PORTS = [3001, 3002, 3003, 3004, 18790]
 async function sweepBackendOrphans(reason) {
   for (const port of BACKEND_PORTS) {
     try {
@@ -6767,7 +6968,7 @@ async function sweepBackendOrphans(reason) {
         '$c = Get-NetTCPConnection -LocalPort ' + port + ' -State Listen -ErrorAction SilentlyContinue',
         'foreach ($x in $c) {',
         '  $pp = Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue',
-        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*")) { Write-Output $x.OwningProcess }',
+        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*" -or $pp.ProcessName -like "python*")) { Write-Output $x.OwningProcess }',
         '}',
       ].join('; ')
       const out = await execFileAsync('powershell', ['-NoProfile', '-Command', ps], { timeout: 12000 })
@@ -6781,7 +6982,14 @@ async function sweepBackendOrphans(reason) {
     } catch { /* 清扫失败不阻塞启动 */ }
   }
 }
-  await sweepBackendOrphans('startup')
+
+async function startLocalBackend() {
+  if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
+  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
+
+  // 1) Express API（3001）
+  try {
+    await sweepBackendOrphans('startup')
     const serverEntry = path.join(process.resourcesPath, 'app.asar', 'local-server.mjs')
     localApiChild = utilityProcess.fork(serverEntry, [], {
       env: {
@@ -6922,7 +7130,6 @@ async function sweepBackendOrphans(reason) {
   }
 }
 
-const appleBridgeExecFileAsync = require('util').promisify(execFile)
 // ── Apple 播放面（WebView2 bridge）子进程管理 ──
 // apple_bridge.py 用 pywebview + WebView2 承载 music.apple.com，作为 Electron Browser CDM
 // 原生 CENC 失败时的兼容兜底；渲染进程经带会话认证的 127.0.0.1 HTTP 接口控制播放。
@@ -6939,7 +7146,7 @@ async function pythonHasPywebview(pythonExe) {
   if (appleBridgePythonOkCache.has(pythonExe)) return appleBridgePythonOkCache.get(pythonExe)
   let ok = false
   try {
-    await appleBridgeExecFileAsync(pythonExe, ['-c', 'import webview'], { timeout: 20000 })
+    await execFileAsync(pythonExe, ['-c', 'import webview'], { timeout: 20000 })
     ok = true
   } catch { ok = false }
   appleBridgePythonOkCache.set(pythonExe, ok)
@@ -7068,7 +7275,6 @@ async function doStartAppleBridge() {
   return true
 }
 
-
 // 应用退出时一并结束本地子进程
 app.on('will-quit', async () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
@@ -7078,6 +7284,14 @@ app.on('will-quit', async () => {
   try { localLoudnessChild?.kill() } catch {}
   try { localCompensationChild?.kill() } catch {}
   try { appleBridgeChild?.kill() } catch {}
+  if (stemRuntime) {
+    try { stemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
+    stemRuntime = null
+  }
+  if (trackStemRuntime) {
+    try { trackStemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
+    trackStemRuntime = null
+  }
 })
 
 app.whenReady().then(async () => {
@@ -7203,7 +7417,37 @@ app.whenReady().then(async () => {
   })
 
   setupRenderIPC(ipcMain, configManager.getCachePath(), toMediaUrl)
-  // AI 混音（DJTransGAN）运行时：可选引擎，未安装时 render:transitionAiMix 抛错、前端回退 DSP
+  try {
+    const stemModels = require('./stem-model-manager.cjs')
+    const { setupStemIPC } = require('./stem-runtime.cjs')
+    const { setupTrackStemIPC } = require('./track-stem-runtime.cjs')
+    stemModels.setupStemModelIPC(ipcMain)
+    stemRuntime = setupStemIPC(ipcMain, {
+      modelPath: stemModels.getModelPath(),
+      pythonPath: stemModels.getRuntimePath(),
+      isModelTrusted: stemModels.isModelTrusted,
+      isRuntimeTrusted: stemModels.isRuntimeTrusted,
+      modelsPath: stemModels.getModelRoot(),
+      cachePath: path.join(configManager.getCachePath(), 'stem-renders'),
+      ffmpegPath: process.env.WAVEFORGE_FFMPEG_PATH,
+    })
+    trackStemRuntime = setupTrackStemIPC(ipcMain, {
+      modelPath: stemModels.getModelPath(),
+      pythonPath: stemModels.getRuntimePath(),
+      isModelTrusted: stemModels.isModelTrusted,
+      isRuntimeTrusted: stemModels.isRuntimeTrusted,
+      modelsPath: stemModels.getModelRoot(),
+      cachePath: path.join(configManager.getCachePath(), 'track-stems'),
+      ffmpegPath: process.env.WAVEFORGE_FFMPEG_PATH,
+      decoderPythonPath: app.isPackaged
+        ? path.join(process.resourcesPath, 'python-embed', 'python.exe')
+        : path.join(__dirname, '..', 'resources', 'python-embed', 'python.exe'),
+      isInputAllowed: inputPath => authorizedStemInputPaths.has(path.resolve(inputPath)),
+    })
+  } catch (error) {
+    console.error('⚠️ [Stem Model] HTDemucs 模型/运行时初始化失败:', error instanceof Error ? error.message : error)
+  }
+  // AI 混音（DJTransGAN）运行时：严格可选；关闭时 renderer 不调用任何 Torch IPC
   setupAiMixIPC(ipcMain, configManager.getCachePath())
   // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理：设置面板「下载模型」用
   try {
@@ -7226,6 +7470,18 @@ app.whenReady().then(async () => {
     console.log('🎵 [AirPlay] 投送端已启动（mDNS 设备发现中）')
   } catch (error) {
     console.error('🎵 [AirPlay] 启动失败:', error instanceof Error ? error.message : error)
+  }
+  // Razer Chroma：本地 REST 会话、设备探测与高频灯效帧。
+  try {
+    chromaControllerHandle = setupChromaIpc({ ipcMain, getMainWindow: () => mainWindow })
+  } catch (error) {
+    console.error('[Chroma] 初始化失败:', error instanceof Error ? error.message : error)
+  }
+  // SignalRGB：Effect 安装、Local API 与 Canvas Event 桥。
+  try {
+    signalRgbControllerHandle = setupSignalRgbIpc({ ipcMain, getMainWindow: () => mainWindow, shell })
+  } catch (error) {
+    console.error('[SignalRGB] 初始化失败:', error instanceof Error ? error.message : error)
   }
   ipcMain.handle('audio-output:is-supported', () => process.platform === 'win32' || process.platform === 'darwin')
 
@@ -7260,6 +7516,14 @@ app.whenReady().then(async () => {
       try { airplayControllerHandle.dispose() } catch { /* 忽略 */ }
       airplayControllerHandle = null
     }
+    if (chromaControllerHandle) {
+      try { await chromaControllerHandle.dispose() } catch { /* 忽略 */ }
+      chromaControllerHandle = null
+    }
+    if (signalRgbControllerHandle) {
+      try { signalRgbControllerHandle.dispose() } catch { /* 忽略 */ }
+      signalRgbControllerHandle = null
+    }
   })
   
   // Setup audio download IPC handlers
@@ -7268,6 +7532,9 @@ app.whenReady().then(async () => {
       throw new Error('Audio download service not initialized')
     }
     const result = await analysisRuntime.audioDownload.prepareAudioFile(urlOrPath, trackKey)
+    authorizedStemInputPaths.add(path.resolve(result))
+    // Keep the authorization set bounded; cached paths are re-authorized on each prepare call.
+    if (authorizedStemInputPaths.size > 256) authorizedStemInputPaths.delete(authorizedStemInputPaths.values().next().value)
     const ext = String(result || '').split('.').pop()?.toLowerCase() || '?'
     automixLog.log('download', `trackKey=${trackKey} url=${String(urlOrPath).slice(0, 120)} -> ${result} (ext=${ext})`)
     return result
@@ -7314,21 +7581,31 @@ app.whenReady().then(async () => {
       throw new Error('A non-empty track key is required')
     }
     const buf = Buffer.from(wavArrayBuffer || new ArrayBuffer(0))
-    if (!buf.length || buf.length > 512 * 1024 * 1024) {
-      throw new Error('Invalid WAV payload size')
+    if (buf.length < 44 || buf.length > 512 * 1024 * 1024
+      || buf.toString('ascii', 0, 4) !== 'RIFF'
+      || buf.toString('ascii', 8, 12) !== 'WAVE') {
+      throw new Error('Invalid WAV payload')
     }
-    const safeName = trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) + '.wav'
+    const contentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
+    const safeName = `${trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100)}-${contentHash}.wav`
     const target = path.join(analysisRuntime.audioDownload.tempRoot, safeName)
     if (fs.existsSync(target) && fs.statSync(target).isFile()) {
       automixLog.log('saveWav', `trackKey=${trackKey} 复用已有 ${target}`)
       return target
     }
-    fs.writeFileSync(target, buf)
+    const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      fs.writeFileSync(temp, buf)
+      fs.renameSync(temp, target)
+    } finally {
+      try { fs.rmSync(temp, { force: true }) } catch {}
+    }
     automixLog.log('saveWav', `trackKey=${trackKey} 写入 ${buf.length} bytes -> ${target}`)
     return target
   })
   
   ipcMain.handle('audio-download:cleanup', () => {
+    authorizedStemInputPaths.clear()
     if (analysisRuntime && analysisRuntime.audioDownload) {
       analysisRuntime.audioDownload.cleanupOldFiles()
     }
@@ -7345,6 +7622,7 @@ app.whenReady().then(async () => {
   })
   
   ipcMain.handle('audio-download:clear-cache', () => {
+    authorizedStemInputPaths.clear()
     if (analysisRuntime && analysisRuntime.audioDownload) {
       analysisRuntime.audioDownload.cleanupAll()
       return { success: true }
@@ -7502,6 +7780,9 @@ app.whenReady().then(async () => {
   createWindow()
   setGlobalMediaKeysEnabled(mediaKeysEnabled)
   updateTaskbar() // Windows 任务栏缩略图按钮与进度条初始化（渲染进程就绪后推送状态会再刷新）
+
+  // WebView2 播放面不在启动阶段预热：正常 Apple CENC 播放不需要它；
+  // 仅当 Electron L3/CENC 失败时由渲染端按需经 apple-bridge:spawn 拉起。
   // 全局高刷：若设置已开启，启动即应用（跟随所在显示器刷新率，最高 300Hz）
   applyHighRefreshRate()
   rebindHighRefreshRate()

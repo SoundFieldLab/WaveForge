@@ -9,6 +9,7 @@ import {
   type PlaybackShortcutSettings,
 } from '../services/playbackShortcutSettings'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
+import StemMixerPopover, { type TrackStemControlModel } from './StemMixerPopover'
 
 interface PlayerControlsProps {
   isPlaying: boolean
@@ -42,6 +43,7 @@ interface PlayerControlsProps {
   immersiveRoman?: string
   showImmersiveTranslation?: boolean
   showImmersiveRoman?: boolean
+  stemControl?: TrackStemControlModel
 }
 
 function getContrastColor(hexColor: string | null | undefined): string {
@@ -200,6 +202,7 @@ export default function PlayerControls({
   immersiveRoman = '',
   showImmersiveTranslation = false,
   showImmersiveRoman = false,
+  stemControl,
 }: PlayerControlsProps) {
   const [isHovered, setIsHovered] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
@@ -797,6 +800,9 @@ export default function PlayerControls({
                           className={`${tvCompact ? 'p-1.5' : 'p-2'} rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}>
                           <List className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
                         </motion.button>
+                        {stemControl && (
+                          <StemMixerPopover control={stemControl} accentColor={accentColor} theme={playerTheme} />
+                        )}
                         <div className="relative flex items-center">
                           <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={handleVolumeButtonClick}
                             className={`p-2 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}>
@@ -1176,6 +1182,10 @@ export default function PlayerControls({
                 >
                   <List className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`} />
                 </motion.button>
+
+                {stemControl && (
+                  <StemMixerPopover control={stemControl} accentColor={accentColor} theme={playerTheme} />
+                )}
 
                 {/* 音量控制区域 */}
                 <div className="relative flex items-center">
