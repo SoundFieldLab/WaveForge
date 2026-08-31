@@ -8542,9 +8542,8 @@ function getWallpaperEnginePaths(customPath = null) {
 // WallpaperEngine 壁纸扫描 API
 app.get('/api/wallpaper-engine/scan', async (req, res) => {
   try {
-    // 获取所有可能的路径
-    const customPath = req.query.path
-    const possiblePaths = await getWallpaperEnginePaths(customPath)
+    // 仅扫描系统/Steam 已知安装位置。HTTP 查询参数不能授予任意本地目录读取能力。
+    const possiblePaths = await getWallpaperEnginePaths()
     possiblePaths.forEach((p, i) => console.log(`   ${i + 1}. ${p}`))
 
     // 找到所有存在的目录
