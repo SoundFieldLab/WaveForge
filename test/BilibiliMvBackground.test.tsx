@@ -173,6 +173,49 @@ describe('BilibiliMvBackground regressions', () => {
     expect(targetVideo.currentTime).toBe(18)
   })
 
+  it('releases both media slots and aborts in-flight work when disabled', async () => {
+    const audio = new Audio()
+    let searchSignal: AbortSignal | undefined
+    vi.mocked(bili.findBestBilibiliMv).mockImplementation((_ctx: any, options: any) => {
+      searchSignal = options?.signal
+      return new Promise(() => undefined) as any
+    })
+    const onPlayStateChange = vi.fn()
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} isPlaying onPlayStateChange={onPlayStateChange} />)
+
+    await waitFor(() => expect(searchSignal).toBeDefined())
+    const videos = [...view.container.querySelectorAll('video')]
+    videos[0].setAttribute('src', 'http://stream/a')
+    videos[1].setAttribute('src', 'http://stream/b')
+    const pauseSpy = vi.mocked(HTMLMediaElement.prototype.pause)
+    const loadSpy = vi.mocked(HTMLMediaElement.prototype.load)
+    pauseSpy.mockClear()
+    loadSpy.mockClear()
+
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} enabled={false} onPlayStateChange={onPlayStateChange} />)
+
+    await waitFor(() => expect(searchSignal?.aborted).toBe(true))
+    expect(pauseSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(loadSpy.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(videos.every((video) => !video.hasAttribute('src'))).toBe(true)
+    expect(onPlayStateChange).toHaveBeenLastCalledWith(null)
+  })
+
+  it('keeps buffered media while hidden is only a temporary cover', async () => {
+    const audio = new Audio()
+    vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('current-bvid'))
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} />)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache/video'))
+    const video = view.container.querySelector('video')!
+    const loadSpy = vi.mocked(HTMLMediaElement.prototype.load)
+    loadSpy.mockClear()
+
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} hidden />)
+
+    expect(video.getAttribute('src')).toBe('http://stream/cache/video')
+    expect(loadSpy).not.toHaveBeenCalled()
+  })
+
   it('uses the authoritative playback clock for periodic sync', async () => {
     vi.useFakeTimers()
     vi.spyOn(performance, 'now').mockReturnValue(20_000)

@@ -199,6 +199,12 @@ function clampMediaTime(time: number, duration: number, endPadding = 0): number 
   return Math.max(0, Math.min(safeTime, maxTime))
 }
 
+export function syncWatchVideoOnSurfaceRestore(video: HTMLVideoElement, audio: HTMLAudioElement | null): boolean {
+  if (!audio || !Number.isFinite(audio.currentTime) || !Number.isFinite(video.duration) || video.duration <= 0) return false
+  video.currentTime = clampMediaTime(audio.currentTime, video.duration, 0.5)
+  return true
+}
+
 const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProps>(function BilibiliMvPlayer(
   {
     songTitle,
@@ -469,6 +475,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   /** 用户是否主动暂停（仅 handleTogglePlay 置位）：自愈必须尊重的暂停意图——
    *  区分"用户暂停"（不恢复）与"系统节流冻结"（恢复）。新视频加载时复位。 */
   const userPausedRef = useRef(false)
+  /** surfaceVisible=false 时只暂停视频解码，DASH 音频继续作为播放源；避免 pause 事件连带停音频。 */
+  const surfacePausedVideoRef = useRef(false)
+  const surfaceVisibleRef = useRef(surfaceVisible)
+  surfaceVisibleRef.current = surfaceVisible
   const applyAlignmentOffset = useCallback(() => {
     const video = videoRef.current
     const audio = audioRef.current
@@ -905,7 +915,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   // 氛围模式渲染：缩略画布采样视频帧 → 宽模糊泛光（Infuse 风格，不抢戏）
   useEffect(() => {
-    if (ambientMode === 'off') return
+    if (!surfaceVisible || ambientMode === 'off') return
     const canvas = ambientCanvasRef.current
     const video = videoRef.current
     if (!canvas || !video) return
@@ -1016,7 +1026,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
-  }, [ambientMode, videoUrl, videoAspect])
+  }, [ambientMode, videoUrl, videoAspect, surfaceVisible])
 
   // 卸载清理
   useEffect(() => {
@@ -1330,6 +1340,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   // 确保视频在 URL 就绪后开始播放（autoPlay 在组件重挂载/快速切换时可能不触发）
   useEffect(() => {
+    if (!surfaceVisible) return
     const video = videoRef.current
     const audio = audioRef.current
     if (!video || !videoUrl) return
@@ -1337,14 +1348,35 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       void video.play().catch(() => undefined)
       if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
     }
-  }, [videoUrl])
+  }, [videoUrl, surfaceVisible])
+
+  // 被主页等表面覆盖时保留 DASH 音频播放，但暂停视频解码；恢复时先做一次音画同步，
+  // 再由可见态的自愈/漂移 effect 各自建立唯一一套 timer。
+  useEffect(() => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!video || !videoUrl) return
+    if (!surfaceVisible) {
+      if (!video.paused) {
+        surfacePausedVideoRef.current = true
+        video.pause()
+      }
+      return
+    }
+    syncWatchVideoOnSurfaceRestore(video, audio)
+    surfacePausedVideoRef.current = false
+    if (!userPausedRef.current && video.paused && video.readyState >= 1 && (!audio || !audio.paused)) {
+      video.muted = true
+      void video.play().catch(() => undefined)
+    }
+  }, [surfaceVisible, videoUrl])
 
   // 视频播放自愈（背景层同款思路）：音画分离下**音频在播但视频被节流停住**时
   //（Occlusion/未聚焦窗口时 Chromium 会停靠视频解码 → readyState 掉到 0~1、无帧可解码 →
   // 氛围 drawImage 永远黑帧 → 泛光消失；用户实测"开 F12 就好/关了就坏"就是焦点节流）。
   // 判别用**音频状态**：用户主动暂停会同时停音频（不误恢复），纯视频冻结则恢复播放。
   useEffect(() => {
-    if (!videoUrl) return
+    if (!surfaceVisible || !videoUrl) return
     const timer = window.setInterval(() => {
       const video = videoRef.current
       const audio = audioRef.current
@@ -1358,7 +1390,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [videoUrl])
+  }, [videoUrl, surfaceVisible])
 
   const handleTogglePlay = useCallback((): boolean => {
     const video = videoRef.current
@@ -1586,12 +1618,19 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   checkAndHealAudioRef.current = checkAndHealAudio
   const audioCheckedForRef = useRef('')
   useEffect(() => {
-    if (!videoUrl || !audioUrl || status !== 'playing') return
+    if (!surfaceVisible || !videoUrl || !audioUrl || status !== 'playing') return
     if (audioCheckedForRef.current === videoUrl) return
     audioCheckedForRef.current = videoUrl
-    const timer = window.setTimeout(() => { void checkAndHealAudioRef.current('startup') }, 2500)
-    return () => window.clearTimeout(timer)
-  }, [videoUrl, audioUrl, status])
+    let checked = false
+    const timer = window.setTimeout(() => {
+      checked = true
+      void checkAndHealAudioRef.current('startup')
+    }, 2500)
+    return () => {
+      window.clearTimeout(timer)
+      if (!checked && audioCheckedForRef.current === videoUrl) audioCheckedForRef.current = ''
+    }
+  }, [videoUrl, audioUrl, status, surfaceVisible])
 
   // 视频事件绑定
   useEffect(() => {
@@ -1609,6 +1648,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       scheduleControlsHide()
     }
     const onPause = () => {
+      if (surfacePausedVideoRef.current && !surfaceVisibleRef.current) return
       setIsPlaying(false)
       setShowControls(true)
       setShowTopInfo(true)
@@ -1740,9 +1780,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       void fadeAudioVolume(0, volumeRef.current, 250)
     }
     maybeFadeInAudio()
-    const audioStartupTimer = window.setTimeout(maybeFadeInAudio, 1500)
+    const audioStartupTimer = surfaceVisible ? window.setTimeout(maybeFadeInAudio, 1500) : null
     return () => {
-      window.clearTimeout(audioStartupTimer)
+      if (audioStartupTimer !== null) window.clearTimeout(audioStartupTimer)
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
@@ -1753,7 +1793,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       audio?.removeEventListener('loadedmetadata', onAudioLoaded)
     }
     // videoUrl 必须入依赖：换源/回退/切歌后视频元素可能重建，需重新绑定事件（否则新元素无 play 处理器 → 音频轨不会启动）
-  }, [subtitles, subtitleOn, videoUrl, handleVideoEnded, reportVideoActive, reportVideoState, scheduleControlsHide])
+  }, [subtitles, subtitleOn, videoUrl, handleVideoEnded, reportVideoActive, reportVideoState, scheduleControlsHide, surfaceVisible])
 
   // 漂移校正：DASH 音画分离的两条流因 fMP4 分段对齐会渐进失步（视频与音频越走越远）。
   // 每 4s 检查一次：偏差 >0.45s 时把视频拉回音频位置（音频是用户听到的时钟，视频跟随）。
@@ -1761,7 +1801,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   // 跳变更具音乐性；无节拍数据时立即按音频位置校正。
   const watchTrackKey = `${platform || 'netease'}-${songId ?? ''}`
   useEffect(() => {
-    if (!videoUrl || !audioUrl || !isPlaying) return
+    if (!surfaceVisible || !videoUrl || !audioUrl || !isPlaying) return
     let beatTimer: number | null = null
     const interval = window.setInterval(() => {
       const video = videoRef.current
@@ -1798,7 +1838,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       if (beatTimer !== null) window.clearTimeout(beatTimer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoUrl, audioUrl, isPlaying, watchTrackKey, songDuration])
+  }, [videoUrl, audioUrl, isPlaying, watchTrackKey, songDuration, surfaceVisible])
 
   // 音量/静音应用到新视频（新视频就绪后会淡入，先置 0 避免瞬间满音量）
   useEffect(() => {
