@@ -15,8 +15,10 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from local_service_auth import is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
+import soundfile as sf
 
 # 设置 UTF-8 编码
 if sys.platform == 'win32':
@@ -25,7 +27,14 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"])
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"], allow_headers=["Content-Type", "X-WaveForge-Local-Token"])
+
+
+@app.before_request
+def require_local_service_token():
+    if not is_authorized_local_request(request.headers.get('X-WaveForge-Local-Token', '')):
+        return jsonify({'error': 'unauthorized'}), 403
+    return None
 
 
 def default_cache_root() -> Path:
@@ -44,7 +53,7 @@ CACHE_ROOT = default_cache_root()
 CACHE_DIR = CACHE_ROOT / "beat_analysis"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-ANALYSIS_VERSION = "librosa-dsp-v2"
+ANALYSIS_VERSION = "librosa-dsp-v3"
 CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 CACHE_MAX_SIZE_BYTES = 512 * 1024 * 1024
 
@@ -200,6 +209,30 @@ def _detect_sections(beat_features, duration):
     return sections
 
 
+def _detect_silence_bounds(y: np.ndarray, sr: int, frame_duration: float = 0.05) -> tuple:
+    """固定绝对阈值（-45dBFS）的首尾静音边界（秒）。
+
+    语义与浏览器回退分析保持一致：逐帧 RMS 对比绝对幅度阈值，不随曲目响度
+    自适应（相对峰值/中位数的自适应阈值会把安静乐段误判成静音，导致裁剪点
+    漂移）。帧长 50ms，边界取最后一帧有声位置的帧边界。
+    """
+    amplitude_threshold = 10.0 ** (-45.0 / 20.0)  # ≈0.00562 线性幅度
+    frame_len = max(1, int(sr * frame_duration))
+    n_frames = len(y) // frame_len
+    if n_frames <= 0:
+        return 0.0, 0.0
+    frames = np.abs(y[: n_frames * frame_len].reshape(n_frames, frame_len))
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    loud = np.nonzero(rms > amplitude_threshold)[0]
+    if len(loud) == 0:
+        return 0.0, 0.0
+    first = int(loud[0])
+    last = int(loud[-1])
+    intro = first * frame_duration
+    outro = max(0.0, (n_frames - (last + 1)) * frame_duration)
+    return float(intro), float(outro)
+
+
 def analyze_audio_file(file_path: str, track_key: str) -> dict:
     """Analyze beat timing and beat-synchronous transition features with Librosa."""
     print(f"📊 开始分析音频: {track_key}")
@@ -280,13 +313,16 @@ def analyze_audio_file(file_path: str, track_key: str) -> dict:
         })
 
     sections = _detect_sections(beat_features, duration)
-    non_silent = librosa.effects.split(y, top_db=40)
-    if len(non_silent):
-        intro_silence = float(non_silent[0][0] / sr)
-        outro_silence = float(max(0, len(y) - non_silent[-1][1]) / sr)
-    else:
-        intro_silence = 0.0
-        outro_silence = 0.0
+    intro_silence, outro_silence = _detect_silence_bounds(y, sr)
+
+    # 源文件真实格式（采样率/声道数），过渡格式预检与无缝裁剪消费；
+    # soundfile 读不到的容器（个别封装）降级为不提供该字段。
+    audio_format = None
+    try:
+        info = sf.info(file_path)
+        audio_format = {'sampleRate': int(info.samplerate), 'channels': int(info.channels)}
+    except Exception as exc:
+        print(f"   ⚠️ 无法读取源文件格式（跳过 audioFormat）: {exc}")
 
     timestamp = int(os.path.getmtime(file_path) * 1000) if os.path.exists(file_path) else 0
     result = {
@@ -305,6 +341,7 @@ def analyze_audio_file(file_path: str, track_key: str) -> dict:
         'beatFeatures': beat_features,
         'introSilence': intro_silence,
         'outroSilence': outro_silence,
+        'audioFormat': audio_format,
         'analysisVersion': ANALYSIS_VERSION,
         'createdAt': timestamp,
         'lastAccessAt': timestamp,
@@ -414,6 +451,8 @@ def analyze():
         # 校验 audioPath 必须是字符串（而非数字/布尔等被 str() 强转的值）
         if not isinstance(data.get('audioPath'), str):
             return jsonify({'error': 'audioPath must be a string'}), 400
+        if not is_allowed_audio_path(audio_path):
+            return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
         
         # 检查缓存
         cache_key = get_cache_key(track_key, duration)

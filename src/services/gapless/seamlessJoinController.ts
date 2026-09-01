@@ -72,6 +72,7 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
   let warmupDone = false     // 预热已完成
   let prerollPollTimer: number | null = null   // 预启动窗口监测 timer
   let warmupPollTimer: number | null = null    // 预热缓冲进度轮询 timer
+  let generation = 0
 
   const clearPrerollPoll = () => {
     if (prerollPollTimer !== null) {
@@ -262,6 +263,10 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
       && deps.isGaplessEnabled()
       && !deps.isTransitionRunning()
     ) {
+      const joinGeneration = ++generation
+      const scheduledStandbySrc = standby.currentSrc || standby.src
+      const scheduledSource = deps.getActiveAudio()
+      const scheduledRevision = deps.getRevision()
       // 防御：即使 AlbumGapless 意外激活（外部 preload deck 正在混音），首选拼接
       // 仍然优先——先 reset 停掉外部 deck（含其混音/主增益恢复），再接管 managed
       // standby deck 从头播放。专辑场景已由 gaplessIntegration 改为不激活
@@ -280,6 +285,13 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
           standby.currentTime = 0
           await waitForSeek(standby)
           if (standby.paused) return  // 拼接前被并发操作暂停，放弃
+          if (joinGeneration !== generation
+            || deps.getRevision() !== scheduledRevision
+            || deps.getActiveAudio() !== scheduledSource
+            || deps.getStandbyAudio() !== standby
+            || (standby.currentSrc || standby.src) !== scheduledStandbySrc
+            || !deps.isGaplessEnabled()
+            || deps.isTransitionRunning()) return
           // 复用 commitTransition：先置 running-transition 通过状态校验，
           // 由它完成增益切换/翻转/transitionCommit（React 18 自动批处理，
           // 两次状态更新合并为一次渲染，无过渡动画闪烁）。
@@ -310,6 +322,7 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
   }
 
   const reset = () => {
+    generation += 1
     armed = false
     prerolled = false
     warmupInFlight = false

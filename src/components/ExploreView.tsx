@@ -2,7 +2,8 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
@@ -67,11 +68,20 @@ import SongContextMenu from './SongContextMenu'
 import MVExploreModal from './MVExploreModal'
 import { getUserPlaylists } from '../services/playlistService'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
+import type { MirrorActionId } from '../services/globalSettingsRegistry'
+import { preloadOnIdle } from '../utils/lazyPreload'
+
+// 全局设置镜像里的共享弹窗（按需加载）
+const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
 type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
-const EXPLORE_CACHE_KEY = 'exploreHomeCache-v2'
+// v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
+// 是无 appleId 的旧结构（id=榜单排名），按天缓存会让坏数据在当天内一直生效。
+const EXPLORE_CACHE_KEY = 'exploreHomeCache-v3'
 const EXPLORE_SESSION_REFRESH_PREFIX = 'exploreHomeRefreshed:'
 
 /** 探索页平台元信息：名称 / 页签短名 / 主题色 / 主题色 RGB */
@@ -545,17 +555,7 @@ function ExploreView({
   onViewComments,
   onCopyInfo,
 }: ExploreViewProps) {
-  const [platform, setPlatform] = useState<ExplorePlatform>(() => {
-    const saved = localStorage.getItem('explorePlatform')
-    if (saved === 'qq' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda') return saved
-    // 探索页从未显式选过平台：继承其他视图（首页/传统/桌面）上次使用的平台，
-    // 避免每次进入探索页都默认回到网易云
-    for (const key of ['selectedPlatform', 'traditionalPlatform', 'desktopModePlatform']) {
-      const inherited = localStorage.getItem(key)
-      if (inherited === 'qq' || inherited === 'apple' || inherited === 'spotify' || inherited === 'kugou' || inherited === 'soda') return inherited
-    }
-    return 'netease'
-  })
+  const [platform, setPlatform] = useState<ExplorePlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'explorePlatform'))
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<ExplorePlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -568,11 +568,19 @@ function ExploreView({
     }
   }, [])
   useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<ExplorePlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+  useEffect(() => {
     // 当前平台被隐藏时切换到第一个可见平台
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
       setPlatform(next)
-      localStorage.setItem('explorePlatform', next)
+      syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
   const [dataByPlatform, setDataByPlatform] = useState<Partial<Record<ExplorePlatform, ExplorePayload>>>(() => readExploreCache())
@@ -747,6 +755,14 @@ function ExploreView({
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 全局设置镜像里打开的共享弹窗（音质 / 缓存清理 / 遥控器个性化）
+  const [globalModal, setGlobalModal] = useState<MirrorActionId | null>(null)
+  // 空闲时预热共享弹窗 chunk，消除首次点击的卡顿
+  useEffect(() => preloadOnIdle([
+    () => import('./AudioQualitySettingsModal'),
+    () => import('./CacheClearModal'),
+    () => import('./RemoteControlSettingsModal'),
+  ]), [])
   const [moreSection, setMoreSection] = useState<ExploreSectionId | null>(null)
   const [preferences, setPreferences] = useState<ExplorePreferences>(() => {
     try {
@@ -817,7 +833,7 @@ function ExploreView({
   }, [platform, qqLoggedIn, neteaseLoggedIn, authRevision, platformPreferences.enhancedApi, appleCountry])
 
   useEffect(() => {
-    localStorage.setItem('explorePlatform', platform)
+    syncPlatformAcrossViews(platform)
     const sessionKey = `${EXPLORE_SESSION_REFRESH_PREFIX}${platform}`
     const requiresPersonalizedPayload = platform === 'qq' && qqLoggedIn
     const inMemoryPayload = dataByPlatform[platform]
@@ -2105,7 +2121,21 @@ function ExploreView({
         onClose={() => setSettingsOpen(false)}
         onPlatformChange={setPlatform}
         onChange={setPreferences}
+        onOpenGlobalModal={setGlobalModal}
       />
+
+      {/* 全局设置镜像的共享弹窗（与简约 / 传统模式同一组件） */}
+      <Suspense fallback={null}>
+        {globalModal === 'audio-quality' && (
+          <LazyAudioQualityModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} neteaseVip={Boolean(neteaseVip)} qqVip={Boolean(qqVip)} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
+        )}
+        {globalModal === 'cache-clear' && (
+          <LazyCacheClearModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+        {globalModal === 'remote-settings' && (
+          <LazyRemoteSettingsModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+      </Suspense>
 
       {detailLoading && !detailOpen && (
         <div className="pointer-events-none fixed bottom-7 left-1/2 z-[200] flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/[0.1] bg-black/65 px-4 py-2 text-xs text-white/68 shadow-xl backdrop-blur-xl">

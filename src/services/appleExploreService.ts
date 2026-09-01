@@ -95,6 +95,7 @@ async function fetchGenreCharts(storefront: string, developerToken: string): Pro
       source: 'apple-genre',
       songs: songs.map((song: any, index: number) => ({
         id: Number(song.id) || index,
+        appleId: String(song.id || '') || undefined,
         name: song?.attributes?.name || '',
         artist: song?.attributes?.artistName || '',
         coverUrl: artworkUrl(song?.attributes?.artwork),
@@ -262,6 +263,7 @@ export async function fetchAppleExplorePayload(country = 'cn'): Promise<ExploreP
           songs: group.songs
             .map((song, rank) => ({
               id: rank,
+              appleId: song.id || undefined,
               name: song.name,
               artist: song.artist,
               coverUrl: song.coverUrl ? toHighResArtwork(song.coverUrl) : undefined,

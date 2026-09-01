@@ -1,4 +1,5 @@
 import type { MusicPlatform } from './platforms'
+import { isMusicPlatform } from './platformSync'
 import type { ViewMode } from '../types/playbackNavigation'
 import { loadDesktopCustomization } from './desktopCustomization'
 import { prefetchExploreHome } from './exploreApi'
@@ -108,9 +109,13 @@ const createWeatherJob = (): PrefetchJob | null => {
 }
 
 async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promise<void> {
-  const minimalPlatform = localStorage.getItem('selectedPlatform') === 'qq' ? 'qq' : 'netease'
-  const explorePlatform = localStorage.getItem('explorePlatform') === 'qq' ? 'qq' : 'netease'
-  const desktopPlatform = localStorage.getItem('desktopModePlatform') === 'qq' ? 'qq' : 'netease'
+  const readCorePlatform = (key: string): 'netease' | 'qq' | null => {
+    const value = localStorage.getItem(key)
+    return isMusicPlatform(value) && (value === 'netease' || value === 'qq') ? value : null
+  }
+  const minimalPlatform = readCorePlatform('selectedPlatform')
+  const explorePlatform = readCorePlatform('explorePlatform')
+  const desktopPlatform = readCorePlatform('desktopModePlatform')
   const neteasePlaylist = createPlaylistJob('netease', context.neteaseLoggedIn)
   const qqPlaylist = createPlaylistJob('qq', context.qqLoggedIn)
   const weather = createWeatherJob()
@@ -138,26 +143,24 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
     let secondaryJobs: PrefetchJob[] = []
 
     if (context.viewMode === 'desktop') {
-      priorityJobs = [
-        desktopPlatform === 'qq' ? qqPlaylist : neteasePlaylist,
-        desktopPlatform === 'qq' ? neteasePlaylist : qqPlaylist,
-        weather
-      ].filter((job): job is PrefetchJob => Boolean(job))
-      secondaryJobs = [neteaseExplore, qqExplore]
+      const activePlaylist = desktopPlatform === 'qq' ? qqPlaylist : desktopPlatform === 'netease' ? neteasePlaylist : null
+      const alternatePlaylist = desktopPlatform === 'qq' ? neteasePlaylist : desktopPlatform === 'netease' ? qqPlaylist : null
+      priorityJobs = [activePlaylist, alternatePlaylist, weather].filter((job): job is PrefetchJob => Boolean(job))
+      secondaryJobs = desktopPlatform ? [neteaseExplore, qqExplore] : []
     } else if (context.viewMode === 'explore') {
-      priorityJobs = [explorePlatform === 'qq' ? qqExplore : neteaseExplore]
+      const activeExplore = explorePlatform === 'qq' ? qqExplore : explorePlatform === 'netease' ? neteaseExplore : null
+      priorityJobs = [activeExplore].filter((job): job is PrefetchJob => Boolean(job))
       secondaryJobs = [
-        explorePlatform === 'qq' ? neteaseExplore : qqExplore,
-        neteasePlaylist,
-        qqPlaylist,
+        explorePlatform === 'qq' ? neteaseExplore : explorePlatform === 'netease' ? qqExplore : null,
+        explorePlatform ? neteasePlaylist : null,
+        explorePlatform ? qqPlaylist : null,
         weather
       ].filter((job): job is PrefetchJob => Boolean(job))
     } else {
-      priorityJobs = [
-        minimalPlatform === 'qq' ? qqExplore : neteaseExplore,
-        minimalPlatform === 'qq' ? qqPlaylist : neteasePlaylist
-      ].filter((job): job is PrefetchJob => Boolean(job))
-      // Only prefetch the active platform in minimal mode; load the other platform on demand.
+      const activeExplore = minimalPlatform === 'qq' ? qqExplore : minimalPlatform === 'netease' ? neteaseExplore : null
+      const activePlaylist = minimalPlatform === 'qq' ? qqPlaylist : minimalPlatform === 'netease' ? neteasePlaylist : null
+      priorityJobs = [activeExplore, activePlaylist].filter((job): job is PrefetchJob => Boolean(job))
+      // 非网易云/QQ平台不误拉其他平台数据，仅保留天气预取。
       secondaryJobs = [weather].filter((job): job is PrefetchJob => Boolean(job))
     }
 

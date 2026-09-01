@@ -14,6 +14,8 @@ import {
   X,
 } from 'lucide-react'
 import type { ExplorePlatform } from '../services/exploreApi'
+import { MirroredGlobalSettings, makeSkin } from './MirroredGlobalSettings'
+import type { MirrorActionId } from '../services/globalSettingsRegistry'
 
 export type ExploreSectionId = 'discover' | 'journey' | 'playlists' | 'charts' | 'newSongs' | 'albums' | 'channels'
 export type ExploreDensity = 'comfortable' | 'compact'
@@ -168,6 +170,8 @@ interface ExploreSettingsPanelProps {
   onClose: () => void
   onPlatformChange: (platform: ExplorePlatform) => void
   onChange: (preferences: ExplorePreferences) => void
+  /** 打开全局设置里的共享弹窗（音质 / 缓存清理 / 遥控器个性化），由 ExploreView 挂载 */
+  onOpenGlobalModal?: (actionId: MirrorActionId) => void
 }
 
 export default function ExploreSettingsPanel({
@@ -179,6 +183,7 @@ export default function ExploreSettingsPanel({
   onClose,
   onPlatformChange,
   onChange,
+  onOpenGlobalModal,
 }: ExploreSettingsPanelProps) {
   const isDark = playerTheme === 'dark'
   // 主题配色：面板与卡片在浅色模式下换成浅色底 + 深色文字
@@ -464,6 +469,27 @@ export default function ExploreSettingsPanel({
                   accent={accent}
                   isDark={isDark}
                   onChange={value => updateCurrent({ enhancedApi: value })}
+                />
+              </section>
+
+              {/* 全局设置（镜像）：读写在 services/globalSettingsRegistry，与简约模式设置同键同事件。
+                  在探索页改动即时同步到简约 / 传统 / 桌面模式，反之亦然。 */}
+              <section className="mb-7">
+                <h3 className={`text-sm font-semibold ${textPrimary}`}>全局设置</h3>
+                <p className={`mb-3 mt-1 text-xs ${textMuted}`}>
+                  整软件通用的播放 / 歌词 / 性能等开关，与简约模式设置实时同步，对所有模式生效。
+                </p>
+                <MirroredGlobalSettings
+                  variant="panel"
+                  onOpenModal={onOpenGlobalModal}
+                  skin={makeSkin({
+                    dark: isDark,
+                    accent,
+                    radius: 16,
+                    cardBg: isDark ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.04)',
+                    cardBorder: isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)',
+                    controlBg: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)',
+                  })}
                 />
               </section>
 

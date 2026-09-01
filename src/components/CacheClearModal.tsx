@@ -131,6 +131,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     const audioStats = await window.electron?.audioDownload?.getStats().catch(() => null) || null
     const analysisStats = await window.electron?.analysis?.getCacheStats().catch(() => null) || null
     const transitionStats = await window.electron?.render?.getCacheStats().catch(() => null) || null
+    const trackStemStats = await window.electron?.trackStems?.getCacheStats?.().catch(() => null) || null
     if (audioStats) setAudioCacheDir(audioStats.cachePath)
 
     const coverCount = localStats.coverCount + indexedStats.coverCount
@@ -149,10 +150,10 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       audioSize: audioStats?.totalSize || 0,
       analysisCount: analysisStats?.fileCount || 0,
       analysisSize: analysisStats?.totalSize || 0,
-      transitionCount: transitionStats?.count || 0,
-      transitionSize: transitionStats?.size || 0,
+      transitionCount: (transitionStats?.count || 0) + (trackStemStats?.count || 0),
+      transitionSize: (transitionStats?.size || 0) + (trackStemStats?.size || 0),
       totalSize: coverSize + localStats.playlistSize + indexedStats.playlistSize + indexedStats.lyricsSize + localStats.errorLogSize
-        + (audioStats?.totalSize || 0) + (analysisStats?.totalSize || 0) + (transitionStats?.size || 0),
+        + (audioStats?.totalSize || 0) + (analysisStats?.totalSize || 0) + (transitionStats?.size || 0) + (trackStemStats?.size || 0),
     })
   }
 
@@ -229,10 +230,15 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
   const handleClearTransitionCache = async () => {
     if (!window.electron?.render) return
     try {
-      const result = await window.electron.render.clearCache()
-      if (!result.success) throw new Error('过渡音频缓存清理失败')
+      window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
+      const [renderResult, stemResult, trackStemResult] = await Promise.all([
+        window.electron.render.clearCache(),
+        window.electron.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+      ])
+      if (!renderResult.success || !stemResult.success || !trackStemResult.success) throw new Error('过渡音频缓存清理失败')
       await refreshStats()
-      showToastMessage('过渡音频缓存清理成功')
+      showToastMessage('过渡音频与分轨缓存清理成功')
     } catch (err) {
       console.error('Failed to clear transition cache:', err)
       showToastMessage('过渡音频缓存清理失败')
@@ -254,6 +260,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     } else {
       // 第二次点击，执行清理
       let failed = false
+      window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
       cacheManager.clearAll()
       clearUserPlaylistsMemoryCache()
       window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
@@ -290,6 +297,24 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
         } catch (err) {
           failed = true
           console.error('Failed to clear transition cache:', err)
+        }
+      }
+      if (window.electron?.stems) {
+        try {
+          const result = await window.electron.stems.clearCache()
+          if (!result.success) throw new Error('过渡分轨缓存清理失败')
+        } catch (err) {
+          failed = true
+          console.error('Failed to clear transition stem cache:', err)
+        }
+      }
+      if (window.electron?.trackStems) {
+        try {
+          const result = await window.electron.trackStems.clearCache()
+          if (!result.success) throw new Error('歌曲分轨缓存清理失败')
+        } catch (err) {
+          failed = true
+          console.error('Failed to clear track stem cache:', err)
         }
       }
       
@@ -340,7 +365,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]"
+            className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[600]"
           />
           
           {/* 弹窗 */}
@@ -349,7 +374,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
             animate={{ x: 0, opacity: 1 }}
             exit={{ x: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 25, stiffness: 300 }}
-            className="fixed right-0 top-0 h-full w-full max-w-lg z-[70] shadow-2xl overflow-hidden"
+            className="fixed right-0 top-0 h-full w-full max-w-lg z-[610] shadow-2xl overflow-hidden"
             data-tv-scope
             style={{
               background: playerTheme === 'dark' 
@@ -586,11 +611,11 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
               {window.electron?.render && (
                 <div className={`p-4 rounded-xl mb-6 ${bgCard} border ${borderColor} relative`}>
                   <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3"><div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}20` }}><HardDrive className="w-5 h-5" style={{ color: accentColor }} /></div><div><div className={`${textPrimary} text-sm font-medium`}>过渡音频缓存</div><div className={`${textTertiary} text-xs`}>{cacheStats.transitionCount} 个文件</div></div></div>
+                    <div className="flex items-center gap-3"><div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}20` }}><HardDrive className="w-5 h-5" style={{ color: accentColor }} /></div><div><div className={`${textPrimary} text-sm font-medium`}>过渡与歌曲分轨缓存</div><div className={`${textTertiary} text-xs`}>{cacheStats.transitionCount} 个文件</div></div></div>
                     <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.transitionSize)}</div>
                   </div>
                   <div className={`${textSecondary} text-xs mb-2`}>限制为 512MB，超过 24 小时未使用会自动清理</div>
-                  <button onClick={() => void handleClearTransitionCache()} disabled={cacheStats.transitionCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理过渡音频缓存"><Trash2 className="w-4 h-4" /></button>
+                  <button onClick={() => void handleClearTransitionCache()} disabled={cacheStats.transitionCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理过渡与歌曲分轨缓存"><Trash2 className="w-4 h-4" /></button>
                 </div>
               )}
 

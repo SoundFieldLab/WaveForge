@@ -2,9 +2,9 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Image, Monitor, Upload, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CheckCircle2, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered } from 'lucide-react'
+import { X, Image, Monitor, Upload, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CheckCircle2, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered, Settings2 } from 'lucide-react'
 import { desktopWallpaperManager, DesktopWallpaperFile, DesktopWallpaperMode, DesktopWallpaperPlayMode, RandomImageSource, DesktopWallpaperSwitchMode } from '../services/desktopWallpaperManager'
 import {
   DESKTOP_CUSTOMIZATION_EVENT,
@@ -19,6 +19,13 @@ import type {
   WallpaperEngineWallpaper,
 } from '../services/wallpaperEngineRotation'
 import type { LocationOption } from '../services/locationHierarchy'
+import { MirroredGlobalSettings, makeSkin } from './MirroredGlobalSettings'
+import type { MirrorActionId } from '../services/globalSettingsRegistry'
+
+// 全局设置镜像里的共享弹窗（按需加载，与简约 / 传统 / 探索模式同一组件）
+const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
 interface DesktopSettingsModalProps {
   show: boolean
@@ -34,13 +41,18 @@ interface DesktopSettingsModalProps {
   onWallpaperRotationChange: (settings: WallpaperEngineRotationSettings) => void
   onWallpaperSyncToggle: (enabled: boolean) => void
   onOpenCustomizer: () => void
+  /** 音质设置弹窗需要的平台登录态（全局设置镜像） */
+  neteaseLoggedIn?: boolean
+  qqLoggedIn?: boolean
+  neteaseVip?: boolean
+  qqVip?: boolean
 }
 
-type SubmenuType = null | 'customize' | 'wallpaper' | 'wallpaper-engine'
+type SubmenuType = null | 'customize' | 'wallpaper' | 'wallpaper-engine' | 'global'
 type LocationHierarchyModule = typeof import('../services/locationHierarchy')
 
-export default function DesktopSettingsModal({ 
-  show, 
+export default function DesktopSettingsModal({
+  show,
   onClose,
   weWallpapers,
   weLoading,
@@ -53,9 +65,46 @@ export default function DesktopSettingsModal({
   onWallpaperRotationChange,
   onWallpaperSyncToggle,
   onOpenCustomizer,
+  neteaseLoggedIn = false,
+  qqLoggedIn = false,
+  neteaseVip = false,
+  qqVip = false,
 }: DesktopSettingsModalProps) {
   // 二级菜单状态
   const [activeSubmenu, setActiveSubmenu] = useState<SubmenuType>(null)
+  // 全局设置镜像里打开的共享弹窗（音质 / 缓存清理 / 遥控器个性化）
+  const [globalModal, setGlobalModal] = useState<MirrorActionId | null>(null)
+  // 二级菜单滚动记忆：进子菜单回到顶部，返回主菜单恢复离开时的位置
+  const contentScrollRef = useRef<HTMLDivElement>(null)
+  const mainMenuScrollTopRef = useRef(0)
+
+  const enterSubmenu = (submenu: Exclude<SubmenuType, null>) => {
+    const el = contentScrollRef.current
+    if (el) mainMenuScrollTopRef.current = el.scrollTop
+    setActiveSubmenu(submenu)
+  }
+
+  // 层级切换后的滚动应用：进子菜单 → 顶；返回主菜单 → 恢复。
+  // 等 0.2s 退场动画结束后再滚动，避免退场中的旧内容跳位。
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const el = contentScrollRef.current
+      if (!el) return
+      el.scrollTop = activeSubmenu === null ? mainMenuScrollTopRef.current : 0
+    }, 230)
+    return () => window.clearTimeout(timer)
+  }, [activeSubmenu])
+
+  // 关闭弹窗时回到主菜单（下次打开从主菜单顶部开始）
+  useEffect(() => {
+    if (!show) {
+      setActiveSubmenu(null)
+      return
+    }
+    // 重新打开：从主菜单顶部开始
+    const el = contentScrollRef.current
+    if (el) el.scrollTop = 0
+  }, [show])
   const [desktopCustomization, setDesktopCustomization] = useState<DesktopCustomizationSettings>(() => loadDesktopCustomization())
   const [locationHierarchy, setLocationHierarchy] = useState<LocationHierarchyModule | null>(null)
   
@@ -559,6 +608,7 @@ export default function DesktopSettingsModal({
                       {activeSubmenu === 'customize' && '自定义桌面'}
                       {activeSubmenu === 'wallpaper' && '自定义壁纸'}
                       {activeSubmenu === 'wallpaper-engine' && 'WallpaperEngine'}
+                      {activeSubmenu === 'global' && '全局设置'}
                     </h2>
                   </>
                 ) : (
@@ -573,7 +623,7 @@ export default function DesktopSettingsModal({
               </div>
 
               {/* 内容区域 */}
-              <div className="p-6 space-y-6 max-h-[60vh] overflow-y-auto custom-scrollbar">
+              <div ref={contentScrollRef} className="p-6 space-y-6 max-h-[60vh] overflow-y-auto custom-scrollbar">
                 <AnimatePresence mode="wait" initial={false}>
                   {!activeSubmenu ? (
                     // 一级菜单
@@ -608,7 +658,7 @@ export default function DesktopSettingsModal({
 
                       {/* 自定义壁纸卡片 */}
                       <button
-                        onClick={() => setActiveSubmenu('wallpaper')}
+                        onClick={() => enterSubmenu('wallpaper')}
                         className="w-full bg-white/5 hover:bg-white/10 rounded-xl p-4 border border-white/10 transition-all text-left"
                       >
                         <div className="flex items-center justify-between">
@@ -681,7 +731,7 @@ export default function DesktopSettingsModal({
 
                       {/* WallpaperEngine 卡片 */}
                       <button
-                        onClick={() => setActiveSubmenu('wallpaper-engine')}
+                        onClick={() => enterSubmenu('wallpaper-engine')}
                         className="w-full bg-white/5 hover:bg-white/10 rounded-xl p-4 border border-white/10 transition-all text-left"
                         disabled={wallpaperSyncEnabled}
                       >
@@ -819,6 +869,25 @@ export default function DesktopSettingsModal({
                           </div>
                         </div>
                       </div>
+
+                      {/* 全局设置入口（镜像简约模式的总设置，见 globalSettingsRegistry） */}
+                      <button
+                        onClick={() => enterSubmenu('global')}
+                        className="w-full bg-white/5 hover:bg-white/10 rounded-xl p-4 border border-white/10 transition-all text-left"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                              <Settings2 className="w-5 h-5 text-violet-300" />
+                            </div>
+                            <div>
+                              <h3 className="text-lg font-semibold text-white">全局设置</h3>
+                              <p className="text-white/60 text-sm">播放 / 歌词 / 快捷键 / 性能等整软件开关，与简约模式实时同步</p>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-5 h-5 text-white/40" />
+                        </div>
+                      </button>
                     </motion.div>
                   ) : activeSubmenu === 'customize' ? (
                     <motion.div
@@ -1770,9 +1839,52 @@ export default function DesktopSettingsModal({
                         </div>
                       )}
                     </motion.div>
+                  ) : activeSubmenu === 'global' ? (
+                    // 全局设置二级菜单：镜像注册表（services/globalSettingsRegistry），
+                    // 与简约 / 传统 / 探索模式同键同事件，任意一端修改全软件同步。
+                    <motion.div
+                      key="global-settings-submenu"
+                      initial={{ opacity: 0, x: 20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: -20 }}
+                      transition={{ duration: 0.2 }}
+                      className="space-y-4"
+                    >
+                      <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+                        <p className="text-sm leading-6 text-white/60">
+                          这里是整软件通用的设置（播放 / 歌词 / 快捷键 / 桌面集成 / 性能 / 网络等），
+                          与简约模式设置实时双向同步，对所有模式生效。
+                        </p>
+                      </div>
+                      <MirroredGlobalSettings
+                        variant="panel"
+                        onOpenModal={setGlobalModal}
+                        skin={makeSkin({
+                          dark: true,
+                          accent: '#a78bfa',
+                          radius: 12,
+                          cardBg: 'rgba(255,255,255,0.05)',
+                          cardBorder: 'rgba(255,255,255,0.1)',
+                          controlBg: 'rgba(255,255,255,0.06)',
+                        })}
+                      />
+                    </motion.div>
                   ) : null}
                 </AnimatePresence>
               </div>
+
+              {/* 全局设置里的共享弹窗（与简约 / 传统 / 探索模式同一组件） */}
+              <Suspense fallback={null}>
+                {globalModal === 'audio-quality' && (
+                  <LazyAudioQualityModal show onClose={() => setGlobalModal(null)} playerTheme="dark" neteaseVip={neteaseVip} qqVip={qqVip} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
+                )}
+                {globalModal === 'cache-clear' && (
+                  <LazyCacheClearModal show onClose={() => setGlobalModal(null)} playerTheme="dark" />
+                )}
+                {globalModal === 'remote-settings' && (
+                  <LazyRemoteSettingsModal show onClose={() => setGlobalModal(null)} playerTheme="dark" />
+                )}
+              </Suspense>
 
               {/* 底部 */}
               <div className="p-6 border-t border-white/10">

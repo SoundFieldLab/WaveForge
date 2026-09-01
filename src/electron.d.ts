@@ -1,5 +1,60 @@
 ﻿import type { TrackAnalysis, TransitionPlan, RenderedTransition } from './audio/types'
 
+export interface StemEvidenceSample {
+  time: number
+  db: number
+  activity: number
+}
+
+export interface StemArtifact {
+  version: number
+  engine: string
+  cacheKey: string
+  cached: boolean
+  requestId: string
+  startSeconds: number
+  duration: number
+  sampleRate: number
+  channels: number
+  frames: number
+  files: Record<'drums' | 'bass' | 'vocals' | 'other', string>
+  evidence: Record<'drums' | 'bass' | 'vocals' | 'other', StemEvidenceSample[]>
+  manifestPath: string
+}
+
+export interface TrackStemChunk {
+  id: string
+  startSeconds: number
+  duration: number
+  frames: number
+  files: Record<'drums' | 'bass' | 'vocals' | 'other', string>
+}
+
+export interface TrackStemManifest {
+  version: number
+  cacheKey: string
+  inputPath: string
+  sampleRate: number
+  channels: number
+  chunkSeconds: number
+  chunks: TrackStemChunk[]
+  manifestPath: string
+  cached?: boolean
+  requestId?: string
+}
+
+export interface StemModelProgress {
+  status: 'idle' | 'downloading' | 'paused' | 'done' | 'error'
+  asset: 'htdemucs' | 'runtime' | null
+  received: number
+  total: number
+  percent: number
+  speed: number
+  eta: number | null
+  host: string | null
+  error: string | null
+}
+
 // Electron API 类型声明
 export interface WallpaperPayload {
   path: string
@@ -126,8 +181,94 @@ export interface HostLatencyResult {
   maxLatency: number
 }
 
+export type ChromaDeviceType = 'keyboard' | 'mouse' | 'mousepad' | 'headset' | 'keypad' | 'chromalink'
+
+export interface ChromaDeviceStatus {
+  available: boolean
+  enabled: boolean
+  effectCreated: boolean
+  failures: number
+  zones: number
+}
+
+export interface RazerHardwareDevice {
+  id: string
+  name: string
+  type: ChromaDeviceType | 'unknown'
+  present: boolean
+  vid: string | null
+  pid: string | null
+  source: string
+}
+
+export interface ChromaStatus {
+  active: boolean
+  platformSupported: boolean
+  synapseFound: boolean
+  registered: boolean
+  sdkVersion: string | null
+  sessionId: string | null
+  lastHeartbeatAt: number | null
+  devices: Record<ChromaDeviceType, ChromaDeviceStatus>
+  hardwareDevices: RazerHardwareDevice[]
+  deviceDiscoveryError: string | null
+  lastDeviceScanAt: number | null
+  lastError: string | null
+  logs: Array<{ at: string; level: string; message: string }>
+}
+
+export interface ChromaBridgeAPI {
+  activate: () => Promise<ChromaStatus>
+  deactivate: () => Promise<ChromaStatus>
+  getStatus: () => Promise<ChromaStatus>
+  refreshDevices: () => Promise<ChromaStatus>
+  scanHardware: () => Promise<ChromaStatus>
+  setDeviceEnabled: (device: ChromaDeviceType, enabled: boolean) => Promise<ChromaStatus>
+  pushFrame: (frame: { device?: ChromaDeviceType; colors?: Uint32Array | number[]; release?: boolean }) => void
+  onStatus: (callback: (status: ChromaStatus) => void) => () => void
+}
+
+export interface SignalRgbStatus {
+  platformSupported: boolean
+  installed: boolean
+  running: boolean
+  localApiAvailable: boolean
+  proAvailable: boolean | null
+  canvasEventAvailable: boolean
+  effectInstalled: boolean
+  effectPath: string | null
+  effectVersion: string | null
+  hash: string | null
+  effectHash: string | null
+  conflict: boolean
+  restartRequired: boolean
+  currentEffect: unknown
+  layout: unknown
+  layouts: unknown[]
+  lastEvent: unknown
+  errors: Array<{ at: string; message: string }>
+  logs: Array<{ at: string; level: string; message: string }>
+}
+
+export interface SignalRgbBridgeAPI {
+  getStatus: () => Promise<SignalRgbStatus>
+  refresh: () => Promise<SignalRgbStatus>
+  installEffect: () => Promise<SignalRgbStatus>
+  uninstallEffect: () => Promise<SignalRgbStatus>
+  applyEffect: () => Promise<SignalRgbStatus>
+  restoreEffect: () => Promise<SignalRgbStatus>
+  sendEvent: (value: string, options?: { getFallback?: boolean }) => Promise<{ sent?: boolean; method?: string; throttled?: boolean; deduplicated?: boolean }>
+  open: () => Promise<{ opened: boolean; path: string | null; error: string | null }>
+  onStatus: (callback: (status: SignalRgbStatus) => void) => () => void
+}
+
 export interface ElectronAPI {
+  localPython?: {
+    ensure: (service: 'beat' | 'loudness' | 'compensation') => Promise<boolean>
+  }
   analysis: AnalysisAPI
+  chroma?: ChromaBridgeAPI
+  signalrgb?: SignalRgbBridgeAPI
   system: {
     minimize: () => Promise<any> | void
     maximize: () => Promise<any> | void
@@ -209,6 +350,10 @@ export interface ElectronAPI {
   appleLogin: () => Promise<{ success: boolean; mediaUserToken?: string; developerToken?: string; name?: string; email?: string; realName?: string; avatar?: string; billingAddress?: string; country?: string; paymentType?: string; accountBalance?: string; birthday?: string; language?: string; twoFactor?: string; trustedDevices?: string; passwordUpdated?: string; notificationEmail?: string; signInWithApple?: string; devices?: Array<{ name: string; model: string; icon?: string }>; icons?: Record<string, string>; error?: string }>
   /** 从 Apple 网页前端资源获取可用的 Developer Token（免密钥，约 70 天有效） */
   appleFetchDevToken: () => Promise<{ success: boolean; token?: string; expiresAt?: number; error?: string }>
+  /** Apple 播放面 bridge（WebView2 原生源）：主进程拉起 apple_bridge.py（幂等） */
+  spawnAppleBridge?: () => Promise<{ ok: boolean; token?: string }>
+  /** Apple 播放面 bridge：渲染端节能联动主动关闭（离开 Apple 平台 5 分钟） */
+  stopAppleBridge?: () => Promise<boolean>
   /** amp-api 代理（渲染进程直连会被 CORS 拦截，改由主进程请求） */
   appleApi: (path: string, developerToken: string, mediaUserToken: string, method?: string, body?: string | null) =>
     Promise<{ ok: boolean; status: number; data: unknown; error?: string }>
@@ -271,6 +416,7 @@ export interface ElectronAPI {
       cached?: boolean
       stretchApplied?: boolean
       djEffectsApplied?: boolean
+      stemMixApplied?: boolean
       targetResumeTime?: number
       rendererVersion?: string
       error?: string
@@ -310,7 +456,64 @@ export interface ElectronAPI {
       error?: string
     }>
   }
-  /** AI 混音模型（DJTransGAN 仓库 + 预训练权重 + 运行环境）下载/删除管理 */
+  /** HTDemucs stem-aware AutoMix Enhanced（可选；缺模型时 status.available=false / separate=null） */
+  stems?: {
+    status: () => Promise<{ available: boolean; modelPath?: string | null; pythonPath?: string | null; reason?: string | null }>
+    separate: (request: {
+      inputPath: string
+      mode: 'head' | 'tail'
+      duration: number
+      startTime?: number
+      requestId?: string
+    }) => Promise<StemArtifact | null>
+    cancel: (requestId: string) => Promise<boolean>
+    clearCache: () => Promise<{ success: boolean; cleared: number }>
+  }
+  stemModel?: {
+    getStatus: () => Promise<{
+      installed: boolean
+      modelReady: boolean
+      runtimeReady: boolean
+      supported: boolean
+      modelPath: string
+      runtimePath: string
+      root: string
+      version: number
+      download: StemModelProgress
+    }>
+    download: () => Promise<{ ok: boolean; paused?: boolean; error?: string }>
+    pause: () => Promise<{ ok: boolean }>
+    cancel: () => Promise<{ ok: boolean }>
+    delete: () => Promise<{ ok: boolean; error?: string }>
+    onProgress: (callback: (progress: StemModelProgress) => void) => () => void
+  }
+  trackStems?: {
+    status: () => Promise<{ available: boolean; reason?: string | null; workerReady?: boolean; cacheMaxBytes?: number }>
+    materialize: (request: {
+      inputPath: string
+      trackId: string
+      generationToken: string
+      requestId?: string
+      chunkSeconds?: 5 | 10
+      windows: Array<{ start: number; duration: number }>
+      priority?: number
+    }) => Promise<TrackStemManifest | null>
+    ensureWindow: (request: {
+      inputPath: string
+      trackId: string
+      generationToken: string
+      requestId?: string
+      chunkSeconds?: 5 | 10
+      start: number
+      duration: number
+      priority?: number
+    }) => Promise<TrackStemManifest | null>
+    cancel: (selector: string | { requestId?: string; trackId?: string; generationToken?: string }) => Promise<boolean>
+    readChunk: (filePath: string) => Promise<ArrayBuffer>
+    getCacheStats: () => Promise<{ count: number; size: number; maxBytes: number; cachePath: string }>
+    clearCache: () => Promise<{ success: boolean; cleared: number }>
+  }
+  /** AI 混音模型（DJTransGAN 仓库 + 预训练权重 + 运行环境）下载/删除管理（严格可选） */
   aiModel?: {
     getStatus: () => Promise<{
       installed: boolean
@@ -374,6 +577,8 @@ export interface ElectronAPI {
   /** AutoMix 渲染进程诊断日志：写入后端 automix-backend.log（便于前后端合并定位） */
   automixLog?: (scope: string, message: string) => Promise<boolean>
   audioDownload: {
+    /** 通过系统文件选择器授权一个本地音频文件；取消时返回 null */
+    selectLocalFile?: () => Promise<string | null>
     prepare: (urlOrPath: string, trackKey: string) => Promise<string>
     /** 只读缓存命中检查：已缓存返回本地路径，未缓存返回 null（不触发下载） */
     peekCached?: (trackKey: string) => Promise<string | null>
@@ -541,6 +746,8 @@ export type DesktopLyricsOrientation = 'horizontal' | 'vertical'
 export interface DesktopLyricsSettings {
   enabled: boolean
   fontSize: number
+  /** 歌词字体：单个字体族名；空字符串 = 默认字体栈（微软雅黑 / 苹方 / 系统） */
+  fontFamily: string
   colorMode: DesktopLyricsColorMode
   orientation: DesktopLyricsOrientation
   doubleLine: boolean
@@ -674,9 +881,3 @@ declare global {
 }
 
 export {}
-
-
-
-
-
-

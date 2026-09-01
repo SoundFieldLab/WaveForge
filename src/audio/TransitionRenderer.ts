@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { debugLog } from '../utils/debugLog'
+import { refineTransitionWithStems } from '../services/autoMixStemService'
 import type { TransitionPlan } from './types'
 
 interface RenderProgress {
@@ -175,10 +176,11 @@ export class TransitionRenderer {
    * 写回下载缓存（同 trackKey 复用，只转一次）。失败时原样返回，让 worker 尝试
    * （会失败并走既有降级链，且控制台可见原因）。
    */
-  private async ensureRenderableAudio(filePath: string, trackKey: string): Promise<string> {
+  private async ensureRenderableAudio(filePath: string, trackKey: string, forceWav = false): Promise<string> {
     const match = /\.([a-z0-9]+)$/i.exec(filePath)
     const ext = match ? match[1].toLowerCase() : ''
-    if (ext === 'wav' || ext === 'flac' || ext === 'ogg' || ext === 'mp3') return filePath
+    if (!forceWav && (ext === 'wav' || ext === 'flac' || ext === 'ogg' || ext === 'mp3')) return filePath
+    if (forceWav && ext === 'wav') return filePath
     try {
       const mediaUrl = await window.electron?.audioDownload?.getMediaUrl?.(filePath)
       if (!mediaUrl) return filePath
@@ -233,52 +235,97 @@ export class TransitionRenderer {
     // 否则 Python 渲染/AI worker 每次都会失败并降级成纯交叉淡化（真机「全交叉」主因之一）。
     const sourceRenderPath = await this.ensureRenderableAudio(sourceAudioPath, plan.sourceTrackKey)
     const targetRenderPath = await this.ensureRenderableAudio(targetAudioPath, plan.targetTrackKey)
-    
-    onProgress?.({ stage: 'stretching', progress: 0.3 })
 
-    // Step 2: Call Python backend to render with time-stretching
+    // Step 2: choose one heavyweight backend. DJTransGAN long mix and HTDemucs separation are
+    // mutually exclusive so enabling the optional legacy AI does not run two models serially.
     const renderBridge = window.electron?.render
     if (!renderBridge?.transition) {
       throw new Error('智能过渡需要桌面渲染桥，当前环境不可用')
     }
-    debugLog('[TransitionRenderer] Calling Python render worker...')
+    const djEnabled = plan.strategy === 'smart-rendered-v2' && plan.v2?.aiMix === true
+    const djStatus = djEnabled && typeof renderBridge.aiMixStatus === 'function'
+      ? await renderBridge.aiMixStatus().catch(() => null)
+      : null
+    const djAvailable = djEnabled && djStatus?.available === true
+    const transitionAiMix = renderBridge.transitionAiMix
+    const useAiMix = djAvailable
+      && plan.sourceEndTime >= 40
+      && typeof transitionAiMix === 'function'
 
-    // AI 学到的推子/EQ 自动化：v2 计划且引擎可用时提取（仅提取参数，~1s），
-    // 注入 DSP 渲染（学习式推子+EQ 自动化替代规则式等功率曲线）。
-    // AI 长混音路径（useAiMix）本身即模型产物，无需额外注入。
-    if (plan.strategy === 'smart-rendered-v2' && typeof renderBridge.aiMixAutomation === 'function') {
+    // AutoMix Enhanced 优先做 HTDemucs 二阶段精炼：有模型时按真实 vocals/drums/bass/other
+    // 规划分轨交接；无模型、超时或失败时保持原 plan，继续走现有 full-mix v2 DSP。
+    let renderPlan: TransitionPlan = {
+      ...plan,
+      ...(plan.v2 ? { v2: { ...plan.v2 } } : {}),
+    }
+    const prepareStemPlan = async (): Promise<boolean> => {
+      if (renderPlan.v2?.stemArtifacts || plan.strategy !== 'smart-rendered-v2') return Boolean(renderPlan.v2?.stemArtifacts)
+      const stemStatus = await window.electron?.stems?.status?.().catch(() => null)
+      if (!stemStatus?.available) return false
+      const sourceStemPath = await this.ensureRenderableAudio(sourceAudioPath, `${plan.sourceTrackKey}-stem`, true)
+      const targetStemPath = await this.ensureRenderableAudio(targetAudioPath, `${plan.targetTrackKey}-stem`, true)
+      const stemResult = await refineTransitionWithStems({
+        plan: { ...plan, ...(plan.v2 ? { v2: { ...plan.v2, aiMix: false } } : {}) },
+        sourceAudioPath: sourceStemPath,
+        targetAudioPath: targetStemPath,
+        requestPrefix: `stem:${plan.id}`,
+        isStale,
+      })
+      if (!stemResult) return false
+      renderPlan = stemResult.plan
+      debugLog(`[TransitionRenderer] HTDemucs stem refinement ready: ${renderPlan.v2?.stemChoreography?.style}`)
+      return true
+    }
+    if (plan.strategy === 'smart-rendered-v2' && !djAvailable) {
+      if (!await prepareStemPlan()) debugLog('[TransitionRenderer] HTDemucs unavailable; using existing v2 full-mix DSP')
+    }
+
+    onProgress?.({ stage: 'stretching', progress: 0.3 })
+
+    // Step 3: render the selected backend.
+    debugLog('[TransitionRenderer] Calling transition render worker...')
+
+    // DJTransGAN automation is used only when the user explicitly enabled the optional engine and
+    // the fixed 60s long-mix path is ineligible. The common long-mix path does not redundantly run
+    // automation first.
+    let djAutomationApplied = false
+    if (djAvailable && !useAiMix && typeof renderBridge.aiMixAutomation === 'function') {
       try {
         // 引擎缺失/半装（有 torch 无权重、worker 启动卡住）时 automation 可能长时间挂起，
         // 阻塞整个过渡渲染（内部超时 180s）。加 8s 竞速超时：拿不到就回退规则曲线，
         // 不让可疑引擎拖垮 DSP 过渡（无模型时增强版出现"过渡噪音/割裂"的防御性修复）。
         const automation = await Promise.race([
-          renderBridge.aiMixAutomation(plan, sourceRenderPath, targetRenderPath),
+          renderBridge.aiMixAutomation(renderPlan, sourceRenderPath, targetRenderPath),
           new Promise<null>((resolve) => {
             window.setTimeout(() => resolve(null), 8000)
           }),
         ])
         if (isStale?.()) throw new Error('Transition render superseded')
         if (automation?.success && Array.isArray(automation.params) && automation.params.length === 2) {
-          plan.v2 = { ...plan.v2, automation: automation.params }
+          renderPlan.v2 = { ...renderPlan.v2, automation: automation.params }
+          djAutomationApplied = true
           debugLog('[TransitionRenderer] AI 学习式推子/EQ 自动化已注入 v2 DSP 渲染')
         }
       } catch (error) {
         debugLog('[TransitionRenderer] AI 自动化提取失败（回退规则曲线）:', error)
       }
     }
+    if (djAvailable && !useAiMix && !djAutomationApplied) {
+      debugLog('[TransitionRenderer] DJ automation unavailable; trying HTDemucs stem refinement')
+      await prepareStemPlan()
+    }
 
-    // AI 混音（DJTransGAN）路径：v2 计划 + 开启 aiMix + 引擎桥存在 + 源曲尾部足够长；
-    // 引擎不可用/抛错时自动回退 DSP 渲染（render_v2），不中断过渡。
-    const transitionAiMix = renderBridge.transitionAiMix
-    const useAiMix = plan.strategy === 'smart-rendered-v2'
-      && plan.v2?.aiMix === true
-      && plan.sourceEndTime >= 40
-      && typeof transitionAiMix === 'function'
+    // AI 混音（DJTransGAN）路径：v2 计划 + 开启 aiMix + 引擎完整可用 + 源曲尾部足够长；
+    // 引擎不可用/抛错时自动回退 stem-aware/v2 DSP，不中断过渡。
+    if (!useAiMix && renderPlan.v2?.aiMix) {
+      renderPlan = { ...renderPlan, v2: { ...renderPlan.v2, aiMix: false } }
+    }
     let result: {
       success: boolean
       outputPath?: string
       stretchApplied?: boolean
       djEffectsApplied?: boolean
+      stemMixApplied?: boolean
       targetResumeTime?: number
       transitionStart?: number
       error?: string
@@ -286,16 +333,31 @@ export class TransitionRenderer {
     // overlap 窗口（秒）：>0 时缓冲尾段渐出，目标 deck 提前 overlap 秒淡入/提前缓冲，
     // 消除 handoff 时 seek 到 resume 的网络缓冲等待（流媒体）造成的界面切换断开。
     let aiOverlapSeconds = 0
+    // Stem IPC / worker may reject instead of returning success=false. Collapse both shapes into the
+    // same fallback: retry once with the original full-mix v2 plan, never degrade straight to crossfade.
+    const renderDsp = async () => {
+      try {
+        return await renderBridge.transition(renderPlan, sourceRenderPath, targetRenderPath)
+      } catch (error) {
+        if (!renderPlan.v2?.stemArtifacts) throw error
+        debugLog('[TransitionRenderer] Stem DSP IPC failed; retrying original v2 full-mix DSP:', error)
+        renderPlan = { ...plan, ...(plan.v2 ? { v2: { ...plan.v2, aiMix: false } } : {}) }
+        return renderBridge.transition(renderPlan, sourceRenderPath, targetRenderPath)
+      }
+    }
     // AI 长混音尾段速度比（prev/next BPM）：>0 时 handoff 用 deck.playbackRate 起步于此值
     // 并在 overlap 窗口内渐回 1.0（post-settle），消除「混音尾=source BPM → deck 原速」台阶。
     // DSP 路径（尾段=target 原速）恒为 0，不做变速。
     let aiMixSpeedRatio = 0
     if (useAiMix) {
       try {
-        const aiResult = await transitionAiMix(plan, sourceRenderPath, targetRenderPath)
+        const aiResult = await transitionAiMix(renderPlan, sourceRenderPath, targetRenderPath)
         if (!aiResult || !aiResult.success || !aiResult.outputPath) {
-          debugLog('[TransitionRenderer] AI 混音不可用，回退 DSP 渲染:', aiResult?.error)
-          result = await renderBridge.transition(plan, sourceRenderPath, targetRenderPath)
+          debugLog('[TransitionRenderer] AI 混音不可用，尝试 HTDemucs / v2 DSP:', aiResult?.error)
+          renderPlan = { ...plan, ...(plan.v2 ? { v2: { ...plan.v2, aiMix: false } } : {}) }
+          await prepareStemPlan()
+          result = await renderDsp()
+          renderPlan = { ...renderPlan, v2: { ...renderPlan.v2, aiMix: false } }
           // AI 回退 DSP 后仍是 v2 智能过渡，按 DSP 短窗口给 overlap 兜底
           aiOverlapSeconds = 1.5
         } else {
@@ -313,17 +375,29 @@ export class TransitionRenderer {
           aiOverlapSeconds = 15
         }
       } catch (error) {
-        debugLog('[TransitionRenderer] AI 混音异常，回退 DSP 渲染:', error)
-        result = await renderBridge.transition(plan, sourceRenderPath, targetRenderPath)
+        debugLog('[TransitionRenderer] AI 混音异常，尝试 HTDemucs / v2 DSP:', error)
+        renderPlan = { ...plan, ...(plan.v2 ? { v2: { ...plan.v2, aiMix: false } } : {}) }
+        await prepareStemPlan()
+        result = await renderDsp()
+        renderPlan = { ...renderPlan, v2: { ...renderPlan.v2, aiMix: false } }
         aiOverlapSeconds = 1.5
       }
     } else {
-      result = await renderBridge.transition(plan, sourceRenderPath, targetRenderPath)
+      result = await renderDsp()
       // DSP 智能过渡（v2）：末拍已回正、无速度台阶；overlap 的意义是
       // deck 提前启动缓冲 resume 区域 + 缓冲尾渐出，消除 handoff seek 的等待间隙。
       if (plan.strategy === 'smart-rendered-v2' && result?.success && result.stretchApplied) {
         aiOverlapSeconds = 1.5
       }
+    }
+    // Stem-aware 后端是增强项而不是单点故障：artifacts/读取/渲染任一失败，
+    // 同一次准备立即重跑原 v2 full-mix DSP，不把用户降到标准交叉。
+    if ((!result?.success || !result.outputPath || result.stretchApplied !== true)
+      && renderPlan.v2?.stemArtifacts) {
+      debugLog('[TransitionRenderer] Stem render failed; retrying original v2 full-mix DSP:', result?.error)
+      result = await renderBridge.transition(plan, sourceRenderPath, targetRenderPath)
+      renderPlan = { ...plan, ...(plan.v2 ? { v2: { ...plan.v2, aiMix: false } } : {}) }
+      aiOverlapSeconds = result?.success && result.stretchApplied ? 1.5 : 0
     }
     if (isStale?.()) throw new Error('Transition render superseded')
 
@@ -339,15 +413,15 @@ export class TransitionRenderer {
     // AI 混音路径还会替换过渡起点（模型固定 ~60s 窗口，从 transitionStart 开始）。
     const renderedPlan = (typeof result.targetResumeTime === 'number' && Number.isFinite(result.targetResumeTime))
       ? {
-        ...plan,
+        ...renderPlan,
         sourceStartTime: typeof result.transitionStart === 'number' && Number.isFinite(result.transitionStart)
           ? result.transitionStart
-          : plan.sourceStartTime,
+          : renderPlan.sourceStartTime,
         targetEndTime: result.targetResumeTime,
         ...(aiOverlapSeconds > 0 ? { overlapSeconds: aiOverlapSeconds } : {}),
         ...(aiMixSpeedRatio > 0 ? { mixSpeedRatio: aiMixSpeedRatio } : {}),
       }
-      : plan
+      : renderPlan
 
     onProgress?.({ stage: 'finalizing', progress: 0.9 })
 

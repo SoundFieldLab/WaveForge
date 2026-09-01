@@ -28,6 +28,51 @@ const LAST_APPLIED_JSON = () => path.join(UPDATE_DIR(), 'last-applied.json')
 const RELAUNCH_FLAG = () => path.join(UPDATE_DIR(), 'relaunch-request.json')
 const STAGING_DIR = () => path.join(UPDATE_DIR(), 'hot-staging')
 const APPLIER_DST = () => path.join(UPDATE_DIR(), 'apply-update.cjs')
+const SHA256_RE = /^[a-f0-9]{64}$/i
+const UPDATE_HOSTS = new Set([
+  'github.com',
+  'objects.githubusercontent.com',
+  'raw.githubusercontent.com',
+  'release-assets.githubusercontent.com',
+  'github-releases.githubusercontent.com',
+  'gitee.com',
+  'giteeusercontent.com',
+  'ghproxy.net',
+  'mirror.ghproxy.com',
+])
+
+function isAllowedUpdateUrl(value) {
+  try {
+    const url = new URL(String(value))
+    return url.protocol === 'https:' && UPDATE_HOSTS.has(url.hostname.toLowerCase())
+  } catch {
+    return false
+  }
+}
+
+function validateUpdateRequest(urls, expectedSha) {
+  const list = Array.isArray(urls) ? urls.map(String).filter(Boolean) : [String(urls || '')].filter(Boolean)
+  if (!list.length || list.some(url => !isAllowedUpdateUrl(url))) throw new Error('更新地址不在允许的发布源中')
+  if (!SHA256_RE.test(String(expectedSha || ''))) throw new Error('更新包缺少有效的 SHA-256 校验值')
+  return list
+}
+
+function assertSafeZipEntries(zip, destination) {
+  const root = path.resolve(destination)
+  const entries = zip.getEntries()
+  if (entries.length > 10_000) throw new Error('更新包文件数量异常')
+  let totalSize = 0
+  for (const entry of entries) {
+    const name = String(entry.entryName || '').replace(/\\/g, '/')
+    if (!name || name.includes('\0') || path.posix.isAbsolute(name) || name.split('/').includes('..')) {
+      throw new Error('更新包包含不安全路径')
+    }
+    const target = path.resolve(root, ...name.split('/'))
+    if (target !== root && !target.startsWith(`${root}${path.sep}`)) throw new Error('更新包路径越界')
+    totalSize += Number(entry.header?.size || 0)
+    if (totalSize > 512 * 1024 * 1024) throw new Error('更新包解压体积超过限制')
+  }
+}
 
 /** 当前待应用更新（内存缓存，启动时从 pending-update.json 读入） */
 let pending = null
@@ -56,7 +101,12 @@ function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch 
 
 /** 多源下载（代理会话 + sha256 校验 + 背压写盘），onProgress({received,total}) 可选 */
 function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onProgress = null) {
-  const list = Array.isArray(urls) ? urls : [urls]
+  let list
+  try {
+    list = validateUpdateRequest(urls, expectedSha)
+  } catch (error) {
+    return Promise.resolve({ success: false, error: error.message })
+  }
   let lastError = ''
   const attempt = async (index) => {
     if (index >= list.length) {
@@ -73,50 +123,64 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
         if (getState().enabled) proxySession = await getProxySession()
       } catch { /* 代理未配置则直连 */ }
       await new Promise((resolveReq, rejectReq) => {
-        const request = proxySession ? net.request({ url, session: proxySession }) : net.request(url)
         const hash = crypto.createHash('sha256')
         const writeStream = fs.createWriteStream(destPath)
         let settled = false
         let finished = false
         let lastEmit = 0
         const fail = (err) => {
-          // 磁盘写失败 / HTTP 失败时关闭写流，避免句柄泄漏与无监听 stream error 崩溃主进程
           if (!finished) { finished = true; writeStream.destroy() }
           if (!settled) { settled = true; rejectReq(err) }
         }
         writeStream.on('error', fail)
-        request.on('response', (response) => {
-          if (response.statusCode < 200 || response.statusCode >= 300) {
-            fail(new Error(`HTTP ${response.statusCode}`))
-            return
-          }
-          const total = Number(response.headers['content-length'] || 0)
-          let received = 0
-          response.on('data', (chunk) => {
-            hash.update(chunk)
-            received += chunk.length
-            if (!writeStream.write(chunk)) {
-              response.pause()
-              writeStream.once('drain', () => response.resume())
+        const requestUrl = (currentUrl, redirects = 0) => {
+          if (!isAllowedUpdateUrl(currentUrl)) return fail(new Error('更新重定向目标不在允许的发布源中'))
+          if (redirects > 5) return fail(new Error('更新下载重定向次数过多'))
+          const request = proxySession
+            ? net.request({ url: currentUrl, session: proxySession, redirect: 'manual' })
+            : net.request({ url: currentUrl, redirect: 'manual' })
+          request.on('response', (response) => {
+            if (response.statusCode >= 300 && response.statusCode < 400) {
+              const location = response.headers.location
+              response.resume()
+              if (!location) return fail(new Error(`HTTP ${response.statusCode} 缺少重定向地址`))
+              let nextUrl
+              try { nextUrl = new URL(Array.isArray(location) ? location[0] : location, currentUrl).href } catch { return fail(new Error('更新重定向地址无效')) }
+              requestUrl(nextUrl, redirects + 1)
+              return
             }
-            // 进度回调限频（约每 300ms 一次，避免 IPC 风暴）
-            const now = Date.now()
-            if (onProgress && now - lastEmit >= 300) {
-              lastEmit = now
-              onProgress({ received, total })
+            if (response.statusCode < 200 || response.statusCode >= 300) {
+              fail(new Error(`HTTP ${response.statusCode}`))
+              return
             }
-          })
-          response.on('end', () => {
-            writeStream.end(() => {
-              finished = true
-              digest = hash.digest('hex')
-              if (!settled) { settled = true; resolveReq() }
+            const total = Number(response.headers['content-length'] || 0)
+            let received = 0
+            response.on('data', (chunk) => {
+              hash.update(chunk)
+              received += chunk.length
+              if (!writeStream.write(chunk)) {
+                response.pause()
+                writeStream.once('drain', () => response.resume())
+              }
+              const now = Date.now()
+              if (onProgress && now - lastEmit >= 300) {
+                lastEmit = now
+                onProgress({ received, total })
+              }
             })
+            response.on('end', () => {
+              writeStream.end(() => {
+                finished = true
+                digest = hash.digest('hex')
+                if (!settled) { settled = true; resolveReq() }
+              })
+            })
+            response.on('error', fail)
           })
-          response.on('error', fail)
-        })
-        request.on('error', fail)
-        request.end()
+          request.on('error', fail)
+          request.end()
+        }
+        requestUrl(url)
       })
       if (expectedSha && digest.toLowerCase() !== String(expectedSha).toLowerCase()) {
         throw new Error(`${label}校验失败（sha256 不匹配）`)
@@ -151,7 +215,9 @@ async function startBackgroundDownload(version, notes, urls, expectedSha) {
     // 校验通过：整体替换 staging
     rmrf(STAGING_DIR())
     fs.mkdirSync(STAGING_DIR(), { recursive: true })
-    new (require('adm-zip'))(zipPath).extractAllTo(STAGING_DIR(), true)
+    const zip = new (require('adm-zip'))(zipPath)
+    assertSafeZipEntries(zip, STAGING_DIR())
+    zip.extractAllTo(STAGING_DIR(), true)
     if (!fs.existsSync(path.join(STAGING_DIR(), 'app.asar'))) {
       return { success: false, error: '更新包缺少 app.asar' }
     }
@@ -235,23 +301,34 @@ function consumeLastApplied() {
   return info
 }
 
-function setupUpdateIPC(ipcMain) {
+function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = null) {
+  const trusted = isTrustedEvent || ((event) => {
+    const mainWindow = getMainWindow()
+    return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame)
+  })
+  const rejectUntrusted = () => ({ success: false, error: '不允许的更新请求来源' })
   // 后台下载：立即返回，进度/结果经事件广播（下载期间应用完全可用）
-  ipcMain.handle('update:download-background', async (_e, payload) => {
+  ipcMain.handle('update:download-background', async (event, payload) => {
+    if (!trusted(event)) return rejectUntrusted()
     const { version, notes, urls, sha256 } = payload || {}
     if (!Array.isArray(urls) || !urls.length) return { success: false, error: '缺少下载地址' }
     return startBackgroundDownload(String(version || ''), String(notes || ''), urls, String(sha256 || ''))
   })
   // 就绪后：拉起 updater（不退出；由 restart-for-update 决定何时退出重启）
-  ipcMain.handle('update:apply-pending', () => ({ success: spawnUpdater() }))
-  // 立即重启：写标志 + 退出，updater 换完文件自动重启
-  ipcMain.handle('update:restart-for-update', () => { restartForUpdate(); return { success: true } })
+  ipcMain.handle('update:apply-pending', (event) => trusted(event) ? { success: spawnUpdater() } : rejectUntrusted())
+  // 立即重启：写重启标志 + 退出，updater 换完文件自动重启
+  ipcMain.handle('update:restart-for-update', (event) => {
+    if (!trusted(event)) return rejectUntrusted()
+    restartForUpdate()
+    return { success: true }
+  })
   // 查询待应用更新（设置区常驻提示用）
-  ipcMain.handle('update:get-pending', () => getPending())
+  ipcMain.handle('update:get-pending', (event) => trusted(event) ? getPending() : null)
   // 更新后首次启动的「更新日志」（读取即清除）
-  ipcMain.handle('update:consume-last-applied', () => consumeLastApplied())
+  ipcMain.handle('update:consume-last-applied', (event) => trusted(event) ? consumeLastApplied() : null)
   // 完整安装包兜底（改动大、无热更新产物时）
-  ipcMain.handle('update:download-and-install', async (_e, urls, expectedSha) => {
+  ipcMain.handle('update:download-and-install', async (event, urls, expectedSha) => {
+    if (!trusted(event)) return rejectUntrusted()
     const downloadDir = UPDATE_DIR()
     try { fs.mkdirSync(downloadDir, { recursive: true }) } catch (e) { return { success: false, error: `无法创建下载目录：${e?.message || e}` } }
     const destPath = path.join(downloadDir, `WaveForge-Setup-${Date.now()}.exe`)
@@ -268,4 +345,11 @@ function setupUpdateIPC(ipcMain) {
   })
 }
 
-module.exports = { setupUpdateIPC, applyPendingAtStartup, downloadToFile }
+module.exports = {
+  setupUpdateIPC,
+  applyPendingAtStartup,
+  downloadToFile,
+  isAllowedUpdateUrl,
+  validateUpdateRequest,
+  assertSafeZipEntries,
+}

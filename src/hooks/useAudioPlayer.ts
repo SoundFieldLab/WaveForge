@@ -1,9 +1,20 @@
 ﻿import { debugLog } from '../utils/debugLog'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  onStateChange as onBridgeStateChange,
+  getState as getBridgeState,
+  bridgePause,
+  bridgeResume,
+  bridgeSeek,
+  bridgeVolume,
+  bridgeFade,
+  bridgeStopPlayback,
+} from '../services/appleWebViewBridge'
 import { autoMixAnalysisService } from '../services/autoMixAnalysisService'
 import { isHlsUrl, attachAppleHls, detachAppleHls, getActiveHls } from '../services/appleHlsPlayer'
 import { planTransition, planTransitionV2 } from '../audio/transitionPlanner'
 import { TransitionRenderer } from '../audio/TransitionRenderer'
+import { TrackStemMixer, TRACK_STEMS, UNITY_RECONSTRUCTION_GAINS, type TrackStemGains, type TrackStemName } from '../audio/trackStemMixer'
 import { createPlaybackTimeStore } from '../audio/playbackTimeStore'
 import { GaplessIntegration } from '../services/gaplessIntegration'
 import { createSeamlessJoinController, type SeamlessJoinController } from '../services/gapless/seamlessJoinController'
@@ -22,6 +33,16 @@ import type {
 } from '../audio/types'
 
 export type AudioPlayerState = PlaybackEngineState
+
+export interface TrackStemControlState {
+  status: 'unavailable' | 'idle' | 'separating' | 'partial' | 'ready' | 'failed'
+  gains: TrackStemGains
+  availableStems: TrackStemName[]
+  progress: number
+  active: boolean
+  locked: boolean
+  reason?: string
+}
 
 export interface CrossfadeSettings {
   enabled: boolean
@@ -71,6 +92,12 @@ const PRELOAD_MEDIA_LOAD_TIMEOUT_MS = 15_000
 // 过渡动画提前量：动画（倒计时/流光/渐变）最多提前这么久进入，
 // 与音频过渡起点（可能是 AI 长混音的 ~60s 前）解耦。
 const ANIMATION_LEAD_SECONDS = 10
+// REPREPARE（借鉴 QQ 音乐 FromInfo PREPARE_NEXT→REPREPARE_NEXT 441/442、469/470）：
+// 分析/渲染失败属瞬时性（python worker 冷启动、网络抖动），只降级不重试会让整曲
+// 周期停留在 fallback。失败后延时单次重试；冷却期防抖；最多 2 次尝试。
+const AUTO_MIX_REPREPARE_DELAY_MS = 20_000
+const AUTO_MIX_REPREPARE_COOLDOWN_MS = 15_000
+const AUTO_MIX_MAX_PREPARE_ATTEMPTS = 2
 
 function asPreloadTrack(input: string | PreloadTrack): PreloadTrack {
   return typeof input === 'string' ? { url: input } : input
@@ -83,6 +110,41 @@ function equalPowerCurve(fadeIn: boolean): Float32Array {
     curve[i] = fadeIn ? Math.sin(progress * Math.PI / 2) : Math.cos(progress * Math.PI / 2)
   }
   return curve
+}
+
+/** ③ 格式/一致性预检（借鉴 QQ 音乐 addPlayer 前的格式 gate：声道不符直接放弃混音）。
+ *  返回拦截原因；null = 放行。"明知会失败的组合"不进智能渲染，提前安静降级固定交叉。 */
+export function describeTransitionCompatibilityIssue(
+  source: TrackAnalysis,
+  target: TrackAnalysis,
+  current: DeckMetadata | null,
+  next: DeckMetadata | null,
+): string | null {
+  const metadataIssue = (analysis: TrackAnalysis, label: string): string | null =>
+    analysis.provider === 'metadata-only' || analysis.provider === 'tv-metadata-only' || analysis.provider === 'electron-unavailable'
+      ? `${label}分析为元数据降级（provider=${analysis.provider}），无节拍网格可用`
+      : null
+  const providerIssue = metadataIssue(source, '当前曲') ?? metadataIssue(target, '下一曲')
+  if (providerIssue) return providerIssue
+
+  // 分析时长与流时长不一致（旧缓存/换源）：渲染窗口可能越过真实音频末尾，
+  // AudioFile 读越界 → 渲染中途失败 → 只能在窗口起点后才发现
+  const durationIssue = (analysis: TrackAnalysis, stream: number, label: string): string | null => {
+    if (!Number.isFinite(stream) || stream <= 0) return null
+    if (!Number.isFinite(analysis.duration)) return null
+    if (Math.abs(analysis.duration - stream) <= 1.5) return null
+    return `${label}分析时长与流时长不一致（analysis=${analysis.duration.toFixed(1)}s vs stream=${stream.toFixed(1)}s），疑似过期缓存或换源`
+  }
+  const streamIssue = durationIssue(source, Number(current?.duration) || 0, '当前曲')
+    ?? durationIssue(target, Number(next?.duration) || 0, '下一曲')
+  if (streamIssue) return streamIssue
+
+  // 多声道（>2ch）：渲染管线（ensure_stereo 只上混单声道）按立体声数学处理，不做盲混
+  const sourceChannels = source.audioFormat?.channels
+  const targetChannels = target.audioFormat?.channels
+  if (sourceChannels && sourceChannels > 2) return `当前曲为多声道音频（${sourceChannels}ch），智能混音仅支持立体声`
+  if (targetChannels && targetChannels > 2) return `下一曲为多声道音频（${targetChannels}ch），智能混音仅支持立体声`
+  return null
 }
 
 /** 渲染端 automix 事件写入后端日志文件（automix-backend.log），便于前后端合并定位。 */
@@ -107,6 +169,12 @@ function buildTransitionDebug(
       if (plan.djEffects.filterSweep) effects.push('滤波扫频')
       if (plan.djEffects.echoOut) effects.push('回声淡出')
       if (plan.djEffects.sweepFx) effects.push('噪声扫频')
+    }
+    if (plan.v2?.stemChoreography) {
+      const stem = plan.v2.stemChoreography
+      effects.push(`分轨交接（${stem.style}）`)
+      effects.push(`鼓组@${stem.drumSwap.time.toFixed(1)}s`)
+      effects.push(`贝斯@${stem.bassSwap.time.toFixed(1)}s`)
     }
     if (plan.v2?.choreography) {
       const choreography = plan.v2.choreography
@@ -229,6 +297,11 @@ export function useAudioPlayer(
   const retiredDeckCleanupTimerRef = useRef<number | null>(null)
   const preparationAbortRef = useRef<AbortController | null>(null)
   const autoMixPreparationKeyRef = useRef<string | null>(null)
+  // REPREPARE 状态：组合级"已就绪"集合 + 失败尝试记录 + 定时重试句柄
+  const autoMixPreparedOkRef = useRef<Set<string>>(new Set())
+  const autoMixPreparationAttemptsRef = useRef<Map<string, { attempts: number; lastAt: number }>>(new Map())
+  const autoMixPrepareRetryTimerRef = useRef<number | null>(null)
+  const prepareAutoMixRef = useRef<() => void>(() => {})
   const preparationRevisionRef = useRef(0)
   const transitionExecutionRevisionRef = useRef(0)
   const visualSwitchTimerRef = useRef<number | null>(null)
@@ -253,11 +326,36 @@ export function useAudioPlayer(
   const [leftAnalyserNode, setLeftAnalyserNode] = useState<AnalyserNode | null>(null)
   const [rightAnalyserNode, setRightAnalyserNode] = useState<AnalyserNode | null>(null)
   const transitionRendererRef = useRef<TransitionRenderer | null>(null)
+  const trackStemMixerRef = useRef<TrackStemMixer | null>(null)
+  const trackStemGenerationRef = useRef(0)
+  const trackStemInputPathRef = useRef<string | null>(null)
+  const trackStemManifestRef = useRef<import('../electron').TrackStemManifest | null>(null)
+  const trackStemPumpTimerRef = useRef<number | null>(null)
+  const trackStemResumePendingRef = useRef<Promise<boolean> | null>(null)
+  const [trackStemControl, setTrackStemControl] = useState<TrackStemControlState>({
+    status: 'idle', gains: { ...UNITY_RECONSTRUCTION_GAINS }, availableStems: [...TRACK_STEMS], progress: 0, active: false, locked: false,
+  })
+  const trackStemControlRef = useRef(trackStemControl)
+  trackStemControlRef.current = trackStemControl
+  const trackStemDesiredRef = useRef(false)
   const gaplessIntegrationRef = useRef<GaplessIntegration | null>(null)
   // Gapless 首选无缝拼接控制器（独立模块，逻辑见 src/services/gapless/）
   const seamlessJoinControllerRef = useRef<SeamlessJoinController | null>(null)
   const playAtCallbackRef = useRef<((index: number, options: any) => Promise<boolean>) | null>(null)
   const [playbackTimeStore] = useState(createPlaybackTimeStore)
+
+  // ── 外部播放源模式（WebView2 播放面）──
+  // 音频在 WebView2 兼容播放窗口中解密播放，本地 deck 无 src；
+  // 状态经 bridge 轮询 → emit 管线分发，控制命令转发 bridge（见 togglePlay/seek/setVolume 分流）。
+  const externalActiveRef = useRef(false)
+  const externalUnsubscribeRef = useRef<(() => void) | null>(null)
+  const externalEndedFiredRef = useRef(false)
+  const externalDurationRef = useRef(0)
+  /** 基础交叉淡化：淡出斜坡在途标记（seek 出窗口/暂停时复位并恢复音量） */
+  const externalFadeActiveRef = useRef(false)
+  /** 上一首带淡出尾自然结束 → 下一首（Apple 或本地 deck）做淡入头（基础交叉的"入"半边） */
+  const externalEndedWithFadeRef = useRef(false)
+  useEffect(() => () => { try { externalUnsubscribeRef.current?.() } catch { /* 卸载清理 */ } }, [])
 
   useEffect(() => { onStateChangeRef.current = onStateChange }, [onStateChange])
   useEffect(() => { crossfadeRef.current = crossfadeSettings }, [crossfadeSettings])
@@ -283,6 +381,18 @@ export function useAudioPlayer(
 
   const setTransitionState = useCallback((state: TransitionState, extra: Partial<AudioPlayerState> = {}) => {
     transitionStateRef.current = state
+    if (state === 'running-transition') {
+      trackStemDesiredRef.current = false
+      trackStemGenerationRef.current += 1
+      if (trackStemPumpTimerRef.current !== null) window.clearInterval(trackStemPumpTimerRef.current)
+      trackStemPumpTimerRef.current = null
+      const trackId = currentMetadataRef.current?.trackKey
+      if (trackId) void window.electron?.trackStems?.cancel?.({ trackId })
+      trackStemMixerRef.current?.returnToOriginal()
+      setTrackStemControl(current => ({ ...current, active: false, locked: true, reason: 'AutoMix 过渡期间已冻结分轨增益' }))
+    } else if (state === 'playing' || state === 'cancelled' || state === 'failed') {
+      setTrackStemControl(current => ({ ...current, locked: false, reason: current.status === 'unavailable' ? current.reason : undefined }))
+    }
     emit({ transitionState: state, ...extra })
   }, [emit])
 
@@ -401,12 +511,242 @@ export function useAudioPlayer(
     }
   }, [])
 
+  const resetTrackStemMixer = useCallback((status: TrackStemControlState['status'] = 'idle', reason?: string) => {
+    if (trackStemPumpTimerRef.current !== null) window.clearInterval(trackStemPumpTimerRef.current)
+    trackStemPumpTimerRef.current = null
+    trackStemResumePendingRef.current = null
+    const currentTrackId = currentMetadataRef.current?.trackKey
+    if (currentTrackId) void window.electron?.trackStems?.cancel?.({ trackId: currentTrackId })
+    const retiringMixer = trackStemMixerRef.current
+    retiringMixer?.returnToOriginal()
+    if (retiringMixer) window.setTimeout(() => retiringMixer.dispose(), 90)
+    trackStemMixerRef.current = null
+    trackStemInputPathRef.current = null
+    trackStemManifestRef.current = null
+    trackStemGenerationRef.current += 1
+    trackStemDesiredRef.current = false
+    setTrackStemControl({
+      status,
+      gains: { ...UNITY_RECONSTRUCTION_GAINS },
+      availableStems: [],
+      progress: 0,
+      active: false,
+      locked: false,
+      ...(reason ? { reason } : {}),
+    })
+  }, [])
+
+  const ensureTrackStemInput = useCallback(async (metadata: DeckMetadata): Promise<string> => {
+    const bridge = window.electron?.audioDownload
+    if (!bridge?.prepare) throw new Error('音频缓存服务不可用')
+    // 整曲 runtime 对 WAV 随机读取；MP3/FLAC 等由打包的 Python/Pedalboard 辅助进程
+    // 只解码目标20秒窗口，不在渲染进程展开整首 PCM。
+    return bridge.prepare(metadata.url, metadata.trackKey || metadata.url)
+  }, [])
+
+  const enableTrackStems = useCallback(async () => {
+    const metadata = currentMetadataRef.current
+    const audio = getActiveAudio()
+    if (!metadata?.url || !metadata.trackKey || !audio || !Number.isFinite(audio.duration) || audio.duration <= 0) {
+      trackStemDesiredRef.current = false
+      setTrackStemControl(current => ({ ...current, status: 'unavailable', active: false, reason: '当前音源不支持分轨' }))
+      return false
+    }
+    if (externalActiveRef.current || getActiveHls(audio) || isLiveRef.current) {
+      trackStemDesiredRef.current = false
+      setTrackStemControl(current => ({ ...current, status: 'unavailable', active: false, reason: 'DRM、HLS 或直播音源暂不支持分轨' }))
+      return false
+    }
+    if (transitionStateRef.current === 'running-transition') {
+      setTrackStemControl(current => ({ ...current, locked: true, reason: 'AutoMix 过渡期间暂不可调整' }))
+      return false
+    }
+    if (trackStemMixerRef.current && trackStemControlRef.current.status !== 'failed') {
+      const resumed = await trackStemMixerRef.current.play(audio.currentTime).catch(() => false)
+      if (resumed) {
+        trackStemDesiredRef.current = true
+        setTrackStemControl(current => ({ ...current, active: true, reason: undefined }))
+        return true
+      }
+    }
+    await ensureAudioGraph()
+    const context = audioContextRef.current
+    const master = masterGainRef.current
+    const originalGain = getActiveGain()
+    const bridge = window.electron?.trackStems
+    const runtimeStatus = await bridge?.status?.().catch(() => null)
+    if (!context || !master || !originalGain || !bridge?.ensureWindow || !runtimeStatus?.available) {
+      trackStemDesiredRef.current = false
+      setTrackStemControl(current => ({ ...current, status: 'unavailable', active: false, reason: '请先在设置中安装 HTDemucs 分轨模型' }))
+      return false
+    }
+
+    const generation = ++trackStemGenerationRef.current
+    trackStemDesiredRef.current = true
+    setTrackStemControl(current => ({ ...current, status: 'separating', progress: 0, active: false, locked: false, reason: undefined }))
+    try {
+      const inputPath = await ensureTrackStemInput(metadata)
+      if (generation !== trackStemGenerationRef.current) return false
+      trackStemInputPathRef.current = inputPath
+      const manifestPromises = new Map<number, Promise<import('../electron').TrackStemManifest | null>>()
+      const detected = new Set<TrackStemName>()
+      const provider = async ({ track, stem, chunkIndex, startTime, signal }: import('../audio/trackStemMixer').StemChunkRequest) => {
+        if (signal.aborted || generation !== trackStemGenerationRef.current) return null
+        const coreStart = Math.floor(startTime / 20) * 20
+        const coreIndex = Math.floor(coreStart / 20)
+        let pending = manifestPromises.get(coreIndex)
+        if (!pending) {
+          pending = bridge.ensureWindow({
+            inputPath,
+            trackId: track.id,
+            generationToken: String(generation),
+            requestId: `${track.id}:${generation}:core-${coreIndex}`,
+            chunkSeconds: 5,
+            start: coreStart,
+            duration: Math.min(20, Math.max(0.05, track.duration - coreStart)),
+            priority: 1_000_000,
+          }).catch(error => {
+            manifestPromises.delete(coreIndex)
+            throw error
+          })
+          manifestPromises.set(coreIndex, pending)
+        }
+        const manifest = await pending
+        if (!manifest || signal.aborted || generation !== trackStemGenerationRef.current) return null
+        trackStemManifestRef.current = manifest
+        const chunk = manifest.chunks.find(item => Math.abs(item.startSeconds - startTime) < 0.02)
+        const file = chunk?.files?.[stem]
+        if (!file) return null
+        const buffer = await bridge.readChunk(file)
+        const decoded = await context.decodeAudioData(buffer.slice(0))
+        if (signal.aborted || generation !== trackStemGenerationRef.current) return null
+        let energy = 0
+        for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+          const data = decoded.getChannelData(channel)
+          for (let index = 0; index < data.length; index += Math.max(1, Math.floor(data.length / 2048))) energy += data[index] * data[index]
+        }
+        if (energy > 1e-5) {
+          detected.add(stem)
+          setTrackStemControl(current => ({ ...current, availableStems: TRACK_STEMS.filter(name => detected.has(name)) }))
+        }
+        return decoded
+      }
+      trackStemMixerRef.current?.dispose()
+      const mixer = new TrackStemMixer({
+        context, provider, master, originalGain,
+        positionProvider: () => getActiveAudio()?.currentTime ?? 0,
+        onBufferUnderrun: () => {
+          trackStemMixerRef.current?.returnToOriginal()
+          setDeckGain(getActiveGain(), getActiveAudio(), 1)
+          setTrackStemControl(current => ({ ...current, active: false, status: 'partial', reason: '前方分轨尚未准备好，已临时恢复原声' }))
+        },
+        chunkDuration: 5, prepareDuration: 20, maxBufferedChunks: 32,
+      })
+      trackStemMixerRef.current = mixer
+      mixer.loadTrack({ id: metadata.trackKey, duration: audio.duration, chunkDuration: 5 })
+      const resumeMixerAtLivePosition = () => {
+        if (trackStemResumePendingRef.current) return trackStemResumePendingRef.current
+        const pending = mixer.play(audio.currentTime)
+        trackStemResumePendingRef.current = pending
+        void pending.finally(() => {
+          if (trackStemResumePendingRef.current === pending) trackStemResumePendingRef.current = null
+        }).catch(() => undefined)
+        return pending
+      }
+      const played = audio.paused
+        ? (await mixer.prepareWindow(audio.currentTime, 20), true)
+        : await resumeMixerAtLivePosition()
+      if (!played || generation !== trackStemGenerationRef.current) throw new Error('当前位置分轨尚未准备完成')
+      setTrackStemControl(current => ({ ...current, status: 'partial', progress: Math.min(1, (audio.currentTime + 20) / audio.duration), active: true, gains: mixer.getSnapshot().gains }))
+
+      trackStemPumpTimerRef.current = window.setInterval(() => {
+        const liveAudio = getActiveAudio()
+        const liveMixer = trackStemMixerRef.current
+        if (!liveAudio || !liveMixer || generation !== trackStemGenerationRef.current || liveAudio.paused) return
+        const drift = Math.abs(liveMixer.getSnapshot().position - liveAudio.currentTime)
+        if (drift > 0.12) {
+          liveMixer.returnToOriginal()
+          liveMixer.seek(liveAudio.currentTime)
+          setDeckGain(getActiveGain(), liveAudio, 1)
+          void resumeMixerAtLivePosition().then(ready => {
+            if (ready && generation === trackStemGenerationRef.current) {
+              setTrackStemControl(current => ({ ...current, active: true }))
+            }
+          }).catch(() => undefined)
+          return
+        }
+        void liveMixer.prepareWindow(liveAudio.currentTime, 20).then(async () => {
+          if (generation !== trackStemGenerationRef.current) return
+          if (trackStemDesiredRef.current && !trackStemControlRef.current.active) {
+            const ready = await resumeMixerAtLivePosition()
+            if (ready && generation === trackStemGenerationRef.current) {
+              setTrackStemControl(current => ({ ...current, active: true, reason: undefined }))
+            }
+          }
+          setTrackStemControl(current => ({ ...current, progress: Math.min(1, (liveAudio.currentTime + 20) / Math.max(1, liveAudio.duration)) }))
+        }).catch(() => undefined)
+      }, 3000)
+
+      void bridge.materialize({
+        inputPath,
+        trackId: metadata.trackKey,
+        generationToken: String(generation),
+        requestId: `${metadata.trackKey}:${generation}:background`,
+        chunkSeconds: 5,
+        windows: [
+          { start: Math.floor(audio.currentTime / 20) * 20, duration: Math.max(0.05, audio.duration - Math.floor(audio.currentTime / 20) * 20) },
+          ...(audio.currentTime > 0.05 ? [{ start: 0, duration: Math.floor(audio.currentTime / 20) * 20 }] : []),
+        ],
+        priority: -100,
+      }).then(manifest => {
+        if (!manifest || generation !== trackStemGenerationRef.current) return
+        trackStemManifestRef.current = manifest
+        setTrackStemControl(current => ({ ...current, status: 'ready', progress: 1 }))
+      }).catch(() => undefined)
+      return true
+    } catch (error) {
+      if (generation !== trackStemGenerationRef.current) return false
+      trackStemDesiredRef.current = false
+      trackStemMixerRef.current?.returnToOriginal()
+      trackStemMixerRef.current?.dispose()
+      trackStemMixerRef.current = null
+      setTrackStemControl(current => ({ ...current, status: 'failed', active: false, reason: error instanceof Error ? error.message : '分轨失败' }))
+      return false
+    }
+  }, [ensureAudioGraph, ensureTrackStemInput, getActiveAudio, getActiveGain])
+
+  const setTrackStemGains = useCallback((gains: Partial<TrackStemGains>) => {
+    const mixer = trackStemMixerRef.current
+    if (!mixer || transitionStateRef.current === 'running-transition') return
+    const next = mixer.setStemGains(gains)
+    setTrackStemControl(current => ({ ...current, gains: next }))
+  }, [])
+
+  const setTrackVocalLevel = useCallback((gain: number) => {
+    setTrackStemGains({ vocals: gain })
+  }, [setTrackStemGains])
+
+  const returnTrackStemsToOriginal = useCallback(() => {
+    resetTrackStemMixer('idle')
+  }, [resetTrackStemMixer])
+
+  useEffect(() => {
+    const handleStemCacheClearing = () => resetTrackStemMixer('idle')
+    window.addEventListener('waveforge:track-stem-cache-clearing', handleStemCacheClearing)
+    return () => window.removeEventListener('waveforge:track-stem-cache-clearing', handleStemCacheClearing)
+  }, [resetTrackStemMixer])
+
   const cancelScheduledTransition = useCallback((reason = 'playback intent changed', preserveNext = true, announceCancellation = true) => {
     preparationRevisionRef.current += 1
     transitionExecutionRevisionRef.current += 1
+    transitionStartingRef.current = false
     preparationAbortRef.current?.abort()
     preparationAbortRef.current = null
     autoMixPreparationKeyRef.current = null
+    if (autoMixPrepareRetryTimerRef.current !== null) {
+      window.clearTimeout(autoMixPrepareRetryTimerRef.current)
+      autoMixPrepareRetryTimerRef.current = null
+    }
     if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current)
     transitionTimerRef.current = null
     if (transitionDeckStartTimerRef.current !== null) window.clearTimeout(transitionDeckStartTimerRef.current)
@@ -485,6 +825,7 @@ export function useAudioPlayer(
     }
 
     debugLog('🔄 [Transition] 切换音频轨道...')
+    resetTrackStemMixer('idle')
     if (transitionTimerRef.current !== null) window.clearTimeout(transitionTimerRef.current)
     transitionTimerRef.current = null
     if (transitionDeckStartTimerRef.current !== null) window.clearTimeout(transitionDeckStartTimerRef.current)
@@ -557,7 +898,7 @@ export function useAudioPlayer(
       transitionStrategy: strategy,
       transitionStartTime: null,
     })
-  }, [getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, setDeckGain, setTransitionState])
+  }, [getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, resetTrackStemMixer, setDeckGain, setTransitionState])
 
   const startTransition = useCallback(async (strategy: TransitionStrategy, plan?: TransitionPlan) => {
     debugLog('🚀 [Transition] startTransition 被调用')
@@ -612,16 +953,23 @@ export function useAudioPlayer(
     debugLog('   目标开始时间:', targetTime.toFixed(2), 's')
 
     const executionRevision = ++transitionExecutionRevisionRef.current
+    const targetSourceAtStart = target.currentSrc || target.src
     transitionStartingRef.current = true
+    const isExecutionCurrent = () => executionRevision === transitionExecutionRevisionRef.current
+      && getActiveAudio() === source
+      && getStandbyAudio() === target
+      && nextMetadataRef.current?.trackKey === targetMetadata.trackKey
     try {
       debugLog('🎨 [Transition] 确保音频图已初始化...')
       await ensureAudioGraph()
+      if (!isExecutionCurrent()) return
       
       // Check if we have a smart-rendered transition ready
       if ((strategy === 'smart-rendered' || strategy === 'smart-rendered-v2') && plan && transitionRendererRef.current) {
         debugLog('🎨 [Transition] 检查智能渲染的过渡音频...')
-        const rendered = await transitionRendererRef.current.getRendered(plan.id)
-        if (rendered) {
+          const rendered = await transitionRendererRef.current.getRendered(plan.id)
+          if (!isExecutionCurrent()) return
+          if (rendered) {
           debugLog('✅ [Transition] 找到预渲染的过渡音频，开始播放')
           
           // Get the transition duration from the rendered buffer
@@ -670,6 +1018,9 @@ export function useAudioPlayer(
               (plan?.sourceStartTime || 0) + playbackOffset + progress * transitionAudioDuration,
               syntheticCap,
             )
+
+            const targetSpan = Math.max(0, (plan?.targetEndTime || 0) - (plan?.targetStartTime || 0))
+            const transitionTargetTime = (plan?.targetStartTime || 0) + progress * targetSpan
             
             // When progress reaches 90%, send visualSwitchCommit to update UI early
             // This prevents visual glitch when commitTransition is called
@@ -677,8 +1028,7 @@ export function useAudioPlayer(
               visualSwitchSent = true
               // 目标曲视觉进度 = 其在缓冲内的实时位置（90% 处 ≈ 目标曲窗口的 90%），
               // 缓冲结束（100%）自然落到 targetEndTime，与真实恢复点一致，避免 0→100% 跳变。
-              const targetSpan = Math.max(0, (plan?.targetEndTime || 0) - (plan?.targetStartTime || 0))
-              const visualTargetTime = (plan?.targetStartTime || 0) + 0.9 * targetSpan
+              const visualTargetTime = transitionTargetTime
               const visualCommit: TransitionCommit = {
                 sourceTrackKey: currentMetadataRef.current?.trackKey || '',
                 targetTrackKey: targetMetadata.trackKey || '',
@@ -693,6 +1043,7 @@ export function useAudioPlayer(
               emit({
                 transitionProgress: progress,
                 transitionDuration: transitionAudioDuration,
+                transitionTargetTime,
                 visualSwitchCommit: visualCommit,
                 currentTime: syntheticTime,
               })
@@ -705,6 +1056,7 @@ export function useAudioPlayer(
                 emit({
                   transitionProgress: progress,
                   transitionDuration: transitionAudioDuration,
+                  transitionTargetTime,
                   currentTime: syntheticTime,
                 })
                 transitionProgressEmitTimeRef.current = now
@@ -937,6 +1289,13 @@ export function useAudioPlayer(
       setDeckGain(getStandbyGain(), target, 0)
       debugLog('▶️ [Transition] 开始播放下一首歌曲...')
       await target.play()
+      if (!isExecutionCurrent()) {
+        const targetStillOwnedByOldRequest = getStandbyAudio() === target
+          && (target.currentSrc || target.src) === targetSourceAtStart
+          && nextMetadataRef.current?.trackKey === targetMetadata.trackKey
+        if (targetStillOwnedByOldRequest && !target.paused) target.pause()
+        return
+      }
       debugLog('✅ [Transition] 下一首歌曲开始播放')
       
       // 开始过渡进度追踪
@@ -1124,6 +1483,7 @@ export function useAudioPlayer(
         runFallbackGainAnimation(source, target, audioDuration, () => commitTransition(strategy, targetTime + audioDuration, executionRevision))
       }
     } catch (error) {
+      if (!isExecutionCurrent()) return
       console.error('❌ [Transition] 过渡失败:', error)
       target.pause()
       setDeckGain(getStandbyGain(), target, 0)
@@ -1134,7 +1494,9 @@ export function useAudioPlayer(
         fallbackReason: error instanceof Error ? error.message : 'next deck failed to start',
       })
     } finally {
-      transitionStartingRef.current = false
+      if (executionRevision === transitionExecutionRevisionRef.current) {
+        transitionStartingRef.current = false
+      }
     }
   }, [commitTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, runFallbackGainAnimation, setDeckGain, setTransitionState])
 
@@ -1203,7 +1565,19 @@ export function useAudioPlayer(
       settings.aiMix === true,
     ].join(':')
     if (autoMixPreparationKeyRef.current === preparationKey) {
-      debugLog('⏭️ [AutoMix] 相同歌曲组合已在准备或已就绪，跳过重复分析')
+      debugLog('⏭️ [AutoMix] 相同歌曲组合正在准备，跳过重复分析')
+      return
+    }
+    if (autoMixPreparedOkRef.current.has(preparationKey) && transitionPlanRef.current) {
+      debugLog('⏭️ [AutoMix] 相同歌曲组合已准备且计划仍有效，跳过重复分析')
+      return
+    }
+    // REPREPARE 节流：失败后冷却期内不重复尝试（worker 冷启动窗口）；同一组合最多重试 1 次
+    const previousAttempts = autoMixPreparationAttemptsRef.current.get(preparationKey)
+    if (previousAttempts
+      && (previousAttempts.attempts >= AUTO_MIX_MAX_PREPARE_ATTEMPTS
+        || Date.now() - previousAttempts.lastAt < AUTO_MIX_REPREPARE_COOLDOWN_MS)) {
+      debugLog(`⏭️ [AutoMix] 组合此前已失败 ${previousAttempts.attempts} 次，冷却/上限期内不重试`)
       return
     }
     autoMixPreparationKeyRef.current = preparationKey
@@ -1213,6 +1587,52 @@ export function useAudioPlayer(
     preparationAbortRef.current?.abort()
     const controller = new AbortController()
     preparationAbortRef.current = controller
+    // REPREPARE 记录器：失败尝试入账 + 定时重试（revision 过期即静默放弃）
+    const recordFailureAndScheduleRetry = (reason: string) => {
+      const attempts = (autoMixPreparationAttemptsRef.current.get(preparationKey)?.attempts ?? 0) + 1
+      autoMixPreparationAttemptsRef.current.set(preparationKey, { attempts, lastAt: Date.now() })
+      autoMixPreparedOkRef.current.delete(preparationKey)
+      autoMixPreparationKeyRef.current = null
+      logAutomixBackend('prepareAutoMix:reprepare', `attempts=${attempts} reason=${reason}`)
+      if (attempts < AUTO_MIX_MAX_PREPARE_ATTEMPTS && autoMixPrepareRetryTimerRef.current === null) {
+        const revisionAtFailure = revision
+        autoMixPrepareRetryTimerRef.current = window.setTimeout(() => {
+          autoMixPrepareRetryTimerRef.current = null
+          if (revisionAtFailure !== preparationRevisionRef.current) return
+          debugLog('🔁 [AutoMix] REPREPARE：定时重试准备过渡')
+          prepareAutoMixRef.current()
+        }, AUTO_MIX_REPREPARE_DELAY_MS)
+      }
+    }
+    // 统一的 fallback 计划构造（格式预检拦截与准备失败共用；4 秒固定交叉安全网）
+    const buildFallbackCrossfadePlan = (reason: string): TransitionPlan => {
+      const active = getActiveAudio()
+      const fallbackDuration = 4 // 固定 4 秒作为 fallback
+      // trackKey 已由函数入口 guard 收窄（!current?.url || !current.trackKey 即 return）
+      const sourceTrackKey = current.trackKey!
+      const targetTrackKey = next.trackKey!
+      return {
+        id: `${sourceTrackKey}->${targetTrackKey}:fallback`,
+        sourceTrackKey,
+        targetTrackKey,
+        sourceStartTime: Math.max(0, (active?.duration || current.duration || 0) - fallbackDuration),
+        sourceEndTime: active?.duration || current.duration || 0,
+        targetStartTime: 0,
+        targetEndTime: fallbackDuration,
+        beatCount: 0,
+        sourceBpm: 120,
+        targetBpm: 120,
+        tempoRamp: [],
+        sourceDownbeatIndex: 0,
+        targetDownbeatIndex: 0,
+        gainCurve: { source: [], target: [] },
+        confidence: 0,
+        strategy: 'fixed-crossfade',
+        fallbackReason: reason,
+        analysisVersion: 'unavailable',
+        rendererVersion: 'browser-crossfade-v1',
+      }
+    }
     setTransitionState('preparing-next', { transitioning: false, fallbackReason: undefined, transitionStartTime: null })
     try {
       debugLog('🎵 [AutoMix] 开始分析歌曲节拍和 BPM...')
@@ -1236,6 +1656,26 @@ export function useAudioPlayer(
       
       current.analysis = sourceAnalysis
       next.analysis = targetAnalysis
+
+      // ③ 格式/一致性预检：provider/时长/声道 sanity——拦截即提前武装固定交叉（确定性，不重试）
+      const compatibilityIssue = describeTransitionCompatibilityIssue(sourceAnalysis, targetAnalysis, current, next)
+      if (compatibilityIssue) {
+        transitionPlanRef.current = buildFallbackCrossfadePlan(compatibilityIssue)
+        const blockedPlan = transitionPlanRef.current
+        console.warn(`⛔ [AutoMix] 格式预检拦截，降级固定交叉：${compatibilityIssue}`)
+        logAutomixBackend('prepareAutoMix:compat-block', compatibilityIssue)
+        const blockedAnimationStart = Math.max(blockedPlan.sourceStartTime, blockedPlan.sourceEndTime - ANIMATION_LEAD_SECONDS)
+        setTransitionState('armed', {
+          transitionStrategy: 'fixed-crossfade',
+          fallbackReason: blockedPlan.fallbackReason,
+          transitionStartTime: blockedAnimationStart,
+          transitionDebug: buildTransitionDebug(blockedPlan, 'fallback'),
+        })
+        autoMixPreparedOkRef.current.add(preparationKey)
+        autoMixPreparationAttemptsRef.current.delete(preparationKey)
+        return
+      }
+
       const isEnhanced = autoMixRef.current.enhanced === true
       const plan = isEnhanced
         ? planTransitionV2(sourceAnalysis, targetAnalysis, {
@@ -1275,6 +1715,7 @@ export function useAudioPlayer(
       }
       
       // Try smart rendering if confidence is high and renderer available
+      let retryableFailure: string | null = null
       if ((plan.strategy === 'smart-rendered' || plan.strategy === 'smart-rendered-v2') && plan.confidence >= 0.5 && transitionRendererRef.current) {
         debugLog('🎨 [AutoMix] 尝试智能渲染（置信度 >= 0.5）...')
         try {
@@ -1300,6 +1741,9 @@ export function useAudioPlayer(
           logAutomixBackend('prepareAutoMix:render-fail', renderReason)
           plan.strategy = 'fixed-crossfade'
           plan.fallbackReason = `Smart rendering failed: ${renderReason}`
+          // 渲染失败属瞬时性（python worker 未就绪等）：先武装 fallback 保证有过渡，
+          // 同时进入 REPREPARE 重试，成功后本次组合升级回智能过渡
+          retryableFailure = renderReason
         }
       } else if ((plan.strategy === 'smart-rendered' || plan.strategy === 'smart-rendered-v2') && plan.confidence < 0.5) {
         debugLog('⚠️ [AutoMix] 置信度不足（< 0.5），回退到节拍交叉淡化')
@@ -1334,6 +1778,10 @@ export function useAudioPlayer(
       if (transitionRendererRef.current) {
         const renderedPlan = transitionRendererRef.current.getRenderedPlan(plan.id)
         if (renderedPlan) {
+          if (plan.v2 && renderedPlan.v2) {
+            plan.v2 = { ...plan.v2, ...renderedPlan.v2 }
+            plan.rendererVersion = renderedPlan.rendererVersion
+          }
           // overlap 窗口（缓冲尾渐出 + deck 提前启动）由渲染结果携带，
           // 必须回填到计划，playTransition 时才会启用（AI 与 DSP 智能过渡都适用）。
           if (typeof renderedPlan.overlapSeconds === 'number' && renderedPlan.overlapSeconds > 0) {
@@ -1374,33 +1822,21 @@ export function useAudioPlayer(
         transitionToTrackKey: next.trackKey,
         transitionDebug: buildTransitionDebug(plan, isEnhanced ? 'v2' : 'v1', sourceAnalysis, targetAnalysis),
       })
+      if (retryableFailure) {
+        recordFailureAndScheduleRetry(retryableFailure)
+      } else {
+        // 成功或确定性降级（置信度/剩余时间/格式预检）：本组合不再重试
+        autoMixPreparedOkRef.current.add(preparationKey)
+        autoMixPreparationAttemptsRef.current.delete(preparationKey)
+      }
       debugLog('✅ [AutoMix] 过渡已准备就绪（armed），等待播放到过渡点...')
     } catch (error) {
       if (controller.signal.aborted || revision !== preparationRevisionRef.current) return
       console.error('❌ [AutoMix] 准备过渡失败:', error)
-      const active = getActiveAudio()
-      const fallbackDuration = 4 // 固定 4 秒作为 fallback
-      transitionPlanRef.current = {
-        id: `${current.trackKey}->${next.trackKey}:fallback`,
-        sourceTrackKey: current.trackKey,
-        targetTrackKey: next.trackKey,
-        sourceStartTime: Math.max(0, (active?.duration || current.duration || 0) - fallbackDuration),
-        sourceEndTime: active?.duration || current.duration || 0,
-        targetStartTime: 0,
-        targetEndTime: fallbackDuration,
-        beatCount: 0,
-        sourceBpm: 120,
-        targetBpm: 120,
-        tempoRamp: [],
-        sourceDownbeatIndex: 0,
-        targetDownbeatIndex: 0,
-        gainCurve: { source: [], target: [] },
-        confidence: 0,
-        strategy: 'fixed-crossfade',
-        fallbackReason: error instanceof Error ? error.message : 'analysis failed',
-        analysisVersion: 'unavailable',
-        rendererVersion: 'browser-crossfade-v1',
-      }
+      // REPREPARE：分析/准备失败入账并定时重试一次；fallback plan 照常武装（安全网）
+      const failureReason = error instanceof Error ? error.message : 'analysis failed'
+      recordFailureAndScheduleRetry(failureReason)
+      transitionPlanRef.current = buildFallbackCrossfadePlan(failureReason)
       debugLog('🔄 [AutoMix] 使用回退方案: fixed-crossfade')
       logAutomixBackend('prepareAutoMix:fallback', transitionPlanRef.current.fallbackReason ?? 'analysis failed')
       const fallbackPlan = transitionPlanRef.current
@@ -1413,6 +1849,8 @@ export function useAudioPlayer(
       })
     }
   }, [getActiveAudio, setTransitionState])
+  // REPREPARE 定时器通过 ref 调用最新渲染的 prepareAutoMix（避免 useCallback 自引用）
+  prepareAutoMixRef.current = prepareAutoMix
 
   const prepareGaplessTransition = useCallback(async () => {
     // 同 AutoMix：Apple 原生 HLS 曲目不参与无缝衔接（HLS 时序由 hls.js 托管，
@@ -1542,12 +1980,22 @@ export function useAudioPlayer(
         }
         return false
       },
-      prepareAudioUrl: async (song) => song.url,
+      prepareAudioUrl: async (song) => {
+        try {
+          const prepared = await window.electron?.audioDownload?.prepare?.(song.url, song.key)
+          if (!prepared) return song.url
+          return await window.electron?.audioDownload?.getMediaUrl?.(prepared) || song.url
+        } catch {
+          return song.url
+        }
+      },
       onStateChange: state => {
         const { transitionState, ...extra } = state
         if (transitionState) setTransitionState(transitionState, extra)
         else emit(extra)
       },
+      // 专辑融合确定性裁剪：复用 AutoMix 分析缓存的首尾静音边界（无缓存时 albumGapless 维持探测路径）
+      getTrackAnalysis: key => autoMixAnalysisService.peekSilenceBounds(key),
     })
 
     // 首选预热/边界调度/ended 拼接逻辑已抽离到 src/services/gapless/seamlessJoinController.ts
@@ -1621,7 +2069,22 @@ export function useAudioPlayer(
     }
 
     const handlePlay = (event: Event) => {
-      if (event.currentTarget === getActiveAudio()) emit({ isPlaying: true, ended: false })
+      if (event.currentTarget !== getActiveAudio()) return
+      if (trackStemDesiredRef.current && trackStemMixerRef.current && !trackStemMixerRef.current.getSnapshot().playing && !trackStemResumePendingRef.current) {
+        const active = getActiveAudio()
+        if (active) {
+          const pending = trackStemMixerRef.current.play(active.currentTime)
+          trackStemResumePendingRef.current = pending
+          void pending.catch(() => {
+            trackStemMixerRef.current?.returnToOriginal()
+            setDeckGain(getActiveGain(), active, 1)
+            setTrackStemControl(current => ({ ...current, active: false, status: 'failed', reason: '恢复分轨播放失败' }))
+          }).finally(() => {
+            if (trackStemResumePendingRef.current === pending) trackStemResumePendingRef.current = null
+          })
+        }
+      }
+      emit({ isPlaying: true, ended: false })
     }
     const handlePause = (event: Event) => {
       if (
@@ -1630,12 +2093,31 @@ export function useAudioPlayer(
         && transitionStateRef.current !== 'running-transition'
       ) {
         const active = getActiveAudio()
+        if (trackStemControlRef.current.active && trackStemMixerRef.current) {
+          trackStemMixerRef.current.pause()
+          setDeckGain(getActiveGain(), active, 1)
+        }
         emit({
           isPlaying: false,
           currentTime: active?.currentTime || 0,
           duration: finiteDuration(active?.duration),
         })
       }
+    }
+    const handleTransportInterruption = (event: Event) => {
+      if (event.currentTarget !== getActiveAudio() || !trackStemDesiredRef.current || !trackStemMixerRef.current) return
+      const active = getActiveAudio()
+      trackStemMixerRef.current.pause()
+      setDeckGain(getActiveGain(), active, 1)
+      setTrackStemControl(current => ({ ...current, active: false, status: 'partial', reason: '音频缓冲中，已临时恢复原声' }))
+    }
+    const handleRateChange = (event: Event) => {
+      const active = getActiveAudio()
+      if (event.currentTarget !== active || !active || Math.abs(active.playbackRate - 1) < 0.001 || !trackStemMixerRef.current) return
+      trackStemDesiredRef.current = false
+      trackStemMixerRef.current.returnToOriginal()
+      setDeckGain(getActiveGain(), active, 1)
+      setTrackStemControl(current => ({ ...current, active: false, status: 'unavailable', reason: '变速播放期间暂不支持分轨调节' }))
     }
     const handleMetadata = (event: Event) => {
       if (event.currentTarget === getActiveAudio()) emit({ duration: finiteDuration(getActiveAudio()?.duration), live: isLiveRef.current })
@@ -1646,6 +2128,7 @@ export function useAudioPlayer(
       debugLog('   事件目标是活动音频?', event.currentTarget === getActiveAudio())
       
       if (isLoadingRef.current || event.currentTarget !== getActiveAudio()) return
+      resetTrackStemMixer('idle')
 
       // Apple 原生 HLS：不参与无缝拼接/过渡提交，end 后直接置 idle 交上层切歌
       // （HLS 曲目没有可用的待机载体拼接，跳过可避免接到错误/过早的下一首）
@@ -1714,7 +2197,12 @@ export function useAudioPlayer(
     for (const audio of [primary, secondary]) {
       audio.addEventListener('timeupdate', handleTimeUpdate)
       audio.addEventListener('play', handlePlay)
+      audio.addEventListener('playing', handlePlay)
       audio.addEventListener('pause', handlePause)
+      audio.addEventListener('waiting', handleTransportInterruption)
+      audio.addEventListener('stalled', handleTransportInterruption)
+      audio.addEventListener('seeking', handleTransportInterruption)
+      audio.addEventListener('ratechange', handleRateChange)
       audio.addEventListener('loadedmetadata', handleMetadata)
       audio.addEventListener('ended', handleEnded)
       audio.addEventListener('error', handleError)
@@ -1745,12 +2233,21 @@ export function useAudioPlayer(
       retiredDeckCleanupTimerRef.current = null
       transitionRendererRef.current?.dispose()
       transitionRendererRef.current = null
+      if (trackStemPumpTimerRef.current !== null) window.clearInterval(trackStemPumpTimerRef.current)
+      trackStemPumpTimerRef.current = null
+      trackStemMixerRef.current?.dispose()
+      trackStemMixerRef.current = null
       gaplessIntegrationRef.current?.dispose()
       gaplessIntegrationRef.current = null
       for (const audio of [primary, secondary]) {
         audio.removeEventListener('timeupdate', handleTimeUpdate)
         audio.removeEventListener('play', handlePlay)
+        audio.removeEventListener('playing', handlePlay)
         audio.removeEventListener('pause', handlePause)
+        audio.removeEventListener('waiting', handleTransportInterruption)
+        audio.removeEventListener('stalled', handleTransportInterruption)
+        audio.removeEventListener('seeking', handleTransportInterruption)
+        audio.removeEventListener('ratechange', handleRateChange)
         audio.removeEventListener('loadedmetadata', handleMetadata)
         audio.removeEventListener('ended', handleEnded)
         audio.removeEventListener('error', handleError)
@@ -1766,7 +2263,7 @@ export function useAudioPlayer(
       gainNodesRef.current = [null, null]
       masterGainRef.current = null
     }
-  }, [commitTransition, emit, getActiveAudio, getStandbyAudio, setTransitionState, startTransition, finiteDuration])
+  }, [commitTransition, emit, getActiveAudio, getActiveGain, getStandbyAudio, resetTrackStemMixer, setDeckGain, setTransitionState, startTransition, finiteDuration])
 
   useEffect(() => {
     if (gaplessIntegrationRef.current) {
@@ -1940,6 +2437,7 @@ export function useAudioPlayer(
     const loadRevision = ++currentLoadRevisionRef.current
     currentLoadWaitCancelRef.current?.()
     currentLoadWaitCancelRef.current = null
+    resetTrackStemMixer('idle')
     
     const active = getActiveAudio()
     const standby = getStandbyAudio()
@@ -2026,6 +2524,23 @@ export function useAudioPlayer(
       isLoadingRef.current = false
       debugLog('✅ [LoadAndPlay] 播放成功')
       setTransitionState('playing', { isPlaying: true, duration: finiteDuration(active.duration) || track?.duration || 0, ended: false, live: isLiveRef.current })
+      // 基础交叉"入"半边（Apple 淡出尾的自然衔接）：上一首 Apple 歌曲带淡出尾结束、
+      // 下一首走本地 deck 时，deck 增益从 0 线性渐起到目标音量（EME 下无重叠交叉，顺序淡入淡出）
+      if (externalEndedWithFadeRef.current) {
+        externalEndedWithFadeRef.current = false
+        const fadeDur = externalFadeDuration()
+        const context = audioContextRef.current
+        const gain = getActiveGain()
+        if (fadeDur > 0 && context && gain) {
+          const t0 = context.currentTime
+          try {
+            gain.gain.cancelScheduledValues(t0)
+            gain.gain.setValueAtTime(0.0001, t0)
+            gain.gain.linearRampToValueAtTime(Math.max(0.0001, volumeRef.current), t0 + fadeDur)
+            debugLog(`🎚️ [LoadAndPlay] 淡入头 ${fadeDur}s（衔接上一首 Apple 淡出尾）`)
+          } catch { /* 增益自动化失败则按原音量起播 */ }
+        }
+      }
       
       // Prepare auto mix for next track if available（同专辑优先首尾拼接，跳过 AutoMix 分析）
       if (nextMetadataRef.current?.url && autoMixRef.current.enabled && !isAlbumPlayback()) {
@@ -2051,9 +2566,107 @@ export function useAudioPlayer(
       setTransitionState('failed', { isPlaying: false, fallbackReason: err ? err.message : 'playback failed' })
       throw error
     }
-  }, [cancelScheduledTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, setDeckGain, setTransitionState, prepareAutoMix, finiteDuration])
+  }, [cancelScheduledTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, resetTrackStemMixer, setDeckGain, setTransitionState, prepareAutoMix, finiteDuration])
+
+  // ── 外部播放源开关（由 App.loadAndPlaySong 在 WebView2 播放成功/切歌时调用）──
+  /** 基础交叉淡化时长（外部源专用）：固定淡入淡出/无缝衔接/AutoMix 任一启用即生效，
+   *  统一走 MusicKit 音量斜坡（EME 限制下无法采样级拼接，音量交叉是唯一可行路径）；
+   *  三模式全关 → 0（按设置硬切）。固定淡入淡出档用其时长，其余用 6s 缺省。 */
+  const externalFadeDuration = useCallback(() => {
+    if (!crossfadeRef.current.enabled && !gaplessRef.current.enabled && !autoMixRef.current.enabled) return 0
+    const d = crossfadeRef.current.enabled ? Number(crossfadeRef.current.duration) || 0 : 6
+    return Math.min(12, Math.max(2, d))
+  }, [])
+
+  const enableExternalPlayback = useCallback(({ duration }: { duration?: number } = {}) => {
+    externalDurationRef.current = duration && duration > 0 ? duration : 0
+    externalEndedFiredRef.current = false
+    externalFadeActiveRef.current = false
+    if (externalActiveRef.current) return
+    resetTrackStemMixer('unavailable', 'DRM、HLS 或直播音源暂不支持分轨')
+    externalActiveRef.current = true
+    // 本地 deck 若有声先停掉（外部源模式下 deck 无 src，这里只是保险）
+    try {
+      cancelScheduledTransition('switch to external playback source')
+      const active = getActiveAudio()
+      if (active && !active.paused) active.pause()
+    } catch { /* 忽略 */ }
+    // 淡入头：上一首 Apple 歌曲带淡出尾自然结束 → 本首从 0 渐起
+    const fadeIn = externalEndedWithFadeRef.current ? externalFadeDuration() : 0
+    externalEndedWithFadeRef.current = false
+    if (fadeIn > 0) {
+      void bridgeVolume(0)
+      void bridgeFade(volumeRef.current, fadeIn * 1000)
+    } else {
+      // 音量推给播放面（MusicKit 音量独立于本地增益链）
+      void bridgeVolume(volumeRef.current)
+    }
+    // 乐观首发，随后由 bridge 轮询回填（200ms 轮询 + 播放面 0.3s 采样）
+    emit({ currentTime: 0, duration: finiteDuration(externalDurationRef.current), isPlaying: true })
+    externalUnsubscribeRef.current = onBridgeStateChange((s) => {
+      if (!externalActiveRef.current || !s.ready) return
+      const duration = s.duration > 0 ? s.duration : externalDurationRef.current
+      emit({
+        currentTime: s.position,
+        duration: finiteDuration(duration),
+        // 缓冲/seek 等瞬态（loading=1 seeking=6 waiting=8）按「播放中」呈现，
+        // 避免 UI 播放按钮在起播/拖动后 1 秒闪回暂停态
+        isPlaying: s.playing || [1, 6, 8].includes(Number(s.status)),
+      })
+      if (s.playing) externalEndedFiredRef.current = false
+      // 基础交叉"出"半边：进入结尾淡出窗口 → MusicKit 音量线性降到 0
+      const fadeDur = externalFadeDuration()
+      const inTail = fadeDur > 0 && s.duration > fadeDur + 1 && s.position >= s.duration - fadeDur
+      if (inTail && !externalFadeActiveRef.current) {
+        externalFadeActiveRef.current = true
+        const remaining = Math.max(0.5, s.duration - s.position)
+        void bridgeFade(0, remaining * 1000)
+      } else if (!inTail && externalFadeActiveRef.current) {
+        // seek 回退离开淡出窗口：恢复音量（重新进窗口会再次触发）
+        externalFadeActiveRef.current = false
+        void bridgeVolume(volumeRef.current)
+      }
+      // 歌曲结束：与 Apple HLS ended 语义一致（置 idle 交上层切歌/单曲循环）
+      if (!externalEndedFiredRef.current && s.duration > 0 && (s.ended || s.position >= s.duration - 0.5)) {
+        externalEndedFiredRef.current = true
+        // 带淡出尾自然结束 → 记录标记，下一首（Apple 播放面或本地 deck）做淡入头
+        externalEndedWithFadeRef.current = externalFadeActiveRef.current
+        setTransitionState('idle', { isPlaying: false, ended: true, transitioning: false, seamlessTransition: false })
+      }
+    })
+  }, [cancelScheduledTransition, emit, externalFadeDuration, finiteDuration, getActiveAudio, resetTrackStemMixer, setTransitionState])
+
+  const disableExternalPlayback = useCallback(() => {
+    if (!externalActiveRef.current) return
+    externalActiveRef.current = false
+    try { externalUnsubscribeRef.current?.() } catch { /* 忽略 */ }
+    externalUnsubscribeRef.current = null
+    externalEndedFiredRef.current = false
+    externalFadeActiveRef.current = false
+    // 注意：externalEndedWithFadeRef 不清——供 loadAndPlay/enable 做淡入头
+    // 停掉播放面声音（best-effort；切到非 Apple 歌时避免 WebView2 继续出声）
+    void bridgeStopPlayback()
+  }, [])
 
   const togglePlay = useCallback(async () => {
+    // 外部播放源（WebView2 播放面）：控制转发 bridge，本地无媒体
+    if (externalActiveRef.current) {
+      if (getBridgeState().playing) {
+        emit({ isPlaying: false })
+        // 暂停时若在淡出尾：取消斜坡并恢复音量，恢复播放后按剩余时间重新淡出
+        if (externalFadeActiveRef.current) {
+          externalFadeActiveRef.current = false
+          void bridgeVolume(volumeRef.current)
+        }
+        await bridgePause()
+      } else {
+        emit({ isPlaying: true })
+        externalEndedFiredRef.current = false
+        externalFadeActiveRef.current = false // 恢复播放后由轮询按剩余时间重新触发淡出
+        await bridgeResume()
+      }
+      return
+    }
     const active = getActiveAudio()
     if (!active?.src) return
     try {
@@ -2081,6 +2694,10 @@ export function useAudioPlayer(
           })
         }
       } else {
+        if (trackStemControlRef.current.active && trackStemMixerRef.current) {
+          trackStemMixerRef.current.pause()
+          setDeckGain(getActiveGain(), active, 1)
+        }
         cancelScheduledTransition('paused during transition')
         active.pause()
         // 同时暂停 standby 音频
@@ -2110,9 +2727,23 @@ export function useAudioPlayer(
     } catch (error) {
       console.error('[PlaybackEngine] play/pause failed', error)
     }
-  }, [cancelScheduledTransition, emit, ensureAudioGraph, getActiveAudio, prepareAutoMix, prepareGaplessTransition, setTransitionState])
+  }, [cancelScheduledTransition, emit, ensureAudioGraph, getActiveAudio, getActiveGain, prepareAutoMix, prepareGaplessTransition, setDeckGain, setTransitionState])
 
   const seek = useCallback((time: number) => {
+    // 外部播放源：转发 bridge，本地无媒体可定位
+    if (externalActiveRef.current) {
+      const bridgeDuration = getBridgeState().duration || externalDurationRef.current
+      const pos = bridgeDuration > 0 ? Math.max(0, Math.min(time, bridgeDuration)) : Math.max(0, time)
+      externalEndedFiredRef.current = false
+      // seek 撞销在途淡出斜坡并恢复音量（seek 进尾部由轮询按剩余时间重新淡出）
+      if (externalFadeActiveRef.current) {
+        externalFadeActiveRef.current = false
+        void bridgeVolume(volumeRef.current)
+      }
+      emit({ currentTime: pos, duration: finiteDuration(bridgeDuration) })
+      void bridgeSeek(pos)
+      return
+    }
     const active = getActiveAudio()
     if (!active) return
     const wasPlaying = !active.paused
@@ -2120,6 +2751,21 @@ export function useAudioPlayer(
     // 元数据未加载（duration 未知）时直接定位，不做 0 上限裁剪，避免拖动归零
     const duration = Number.isFinite(active.duration) && active.duration > 0 ? active.duration : Infinity
     active.currentTime = Math.max(0, Math.min(time, duration))
+    if (trackStemControlRef.current.active && trackStemMixerRef.current) {
+      const mixer = trackStemMixerRef.current
+      mixer.returnToOriginal()
+      mixer.seek(active.currentTime)
+      setDeckGain(getActiveGain(), active, 1)
+      setTrackStemControl(current => ({ ...current, status: 'separating', active: false, progress: Math.min(1, (active.currentTime + 20) / Math.max(1, active.duration)) }))
+      if (wasPlaying) {
+        void mixer.play(active.currentTime).then(ready => {
+          if (ready) setTrackStemControl(current => ({ ...current, status: 'partial', active: true }))
+        }).catch(error => {
+          mixer.returnToOriginal()
+          setTrackStemControl(current => ({ ...current, status: 'failed', active: false, reason: error instanceof Error ? error.message : '定位处分轨失败' }))
+        })
+      }
+    }
     // seek 越过已计划的过渡点后，旧计划已不可用（播放过期过渡会卡住/错位）：
     // 清空计划，让 prepareAutoMix 从当前位置重新规划（v1 行为：立刻可从当前进度 automix）。
     const plan = transitionPlanRef.current
@@ -2132,11 +2778,27 @@ export function useAudioPlayer(
     } else if (wasPlaying && active.paused) {
       void active.play().catch(() => undefined)
     }
-  }, [cancelScheduledTransition, emit, getActiveAudio, prepareAutoMix, finiteDuration])
+  }, [cancelScheduledTransition, emit, getActiveAudio, getActiveGain, prepareAutoMix, setDeckGain, finiteDuration])
 
   const setVolume = useCallback((volume: number) => {
     const clamped = Math.max(0, Math.min(1, volume))
     volumeRef.current = clamped
+    // 外部播放源：音量作用于 WebView2 播放面
+    if (externalActiveRef.current) {
+      void bridgeVolume(clamped)
+      emit({ volume: clamped })
+      // 淡出尾中拖音量会撞销在途斜坡：按剩余时间以新音量为起点重新淡出
+      if (externalFadeActiveRef.current) {
+        const s = getBridgeState()
+        const fadeDur = externalFadeDuration()
+        if (fadeDur > 0 && s.duration > fadeDur + 1 && s.position >= s.duration - fadeDur) {
+          void bridgeFade(0, Math.max(0.5, s.duration - s.position) * 1000)
+        } else {
+          externalFadeActiveRef.current = false
+        }
+      }
+      return
+    }
     const context = audioContextRef.current
     const master = masterGainRef.current
     if (context && master) master.gain.setValueAtTime(clamped, context.currentTime)
@@ -2309,6 +2971,10 @@ export function useAudioPlayer(
     togglePlay,
     seek,
     setVolume,
+    /** WebView2 播放面外部播放源：enable/disable 由 App.loadAndPlaySong 调用 */
+    enableExternalPlayback,
+    disableExternalPlayback,
+    isExternalPlaybackActive: () => externalActiveRef.current,
     preloadNext,
     cancelTransition: cancelScheduledTransition,
     /** 看歌挂起开关：true=引擎进入"看歌时间线"——取消在途过渡且期间禁止 prepare/启动
@@ -2328,5 +2994,12 @@ export function useAudioPlayer(
     setPlayAtCallback,
     resetGaplessIntegration,
     adoptExternalAudio,
+    trackStems: {
+      state: trackStemControl,
+      enable: enableTrackStems,
+      setVocalLevel: setTrackVocalLevel,
+      setStemGains: setTrackStemGains,
+      returnToOriginal: returnTrackStemsToOriginal,
+    },
   }
 }

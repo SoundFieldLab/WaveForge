@@ -225,6 +225,8 @@ export interface PluginHostState {
   detailPluginId: string | null
   importOpen: boolean
   dglabConsoleOpen: boolean
+  chromaConsoleOpen: boolean
+  activeConsolePluginId: string | null
   notice: PluginNoticeState | null
 }
 
@@ -233,6 +235,8 @@ const EMPTY_HOST: PluginHostState = {
   detailPluginId: null,
   importOpen: false,
   dglabConsoleOpen: false,
+  chromaConsoleOpen: false,
+  activeConsolePluginId: null,
   notice: null,
 }
 
@@ -288,12 +292,29 @@ export function closePluginImport() {
   hostStore.set({ importOpen: false })
 }
 
+export function openPluginConsole(pluginId: string) {
+  hostStore.set({ activeConsolePluginId: pluginId })
+}
+
+export function closePluginConsole(pluginId?: string) {
+  const active = hostStore.getSnapshot().activeConsolePluginId
+  if (!pluginId || active === pluginId) hostStore.set({ activeConsolePluginId: null })
+}
+
 export function openDGLabConsole() {
   hostStore.set({ dglabConsoleOpen: true })
 }
 
 export function closeDGLabConsole() {
   hostStore.set({ dglabConsoleOpen: false })
+}
+
+export function openChromaConsole() {
+  hostStore.set({ chromaConsoleOpen: true })
+}
+
+export function closeChromaConsole() {
+  hostStore.set({ chromaConsoleOpen: false })
 }
 
 /** 弹出使用须知；resolve(true) = 用户确认。 */

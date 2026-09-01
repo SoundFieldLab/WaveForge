@@ -888,7 +888,7 @@ function ProfileView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         if (songs.length > 0) handleSongSelection(songs[0], songs)
         else showPlaylistToast('歌单中暂无可播放歌曲', 'info')
         return
@@ -1032,7 +1032,7 @@ function ProfileView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setSelectedPlaylist({ ...playlist, platform: 'apple' })
         setManagementPlaylist({ ...playlist, platform: 'apple' })
         setPlaylistSongs(songs)

@@ -62,6 +62,7 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
   accentRef.current = accentColor
 
   useEffect(() => {
+    if (!enabled) return
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
@@ -102,6 +103,10 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
     }
 
     const tick = (now: number) => {
+      if (!enabledRef.current) {
+        raf = 0
+        return
+      }
       // 限 120fps：dt 由实际执行的帧间隔计算，跳帧不影响粒子运动
       if (now - last < FRAME_MIN_INTERVAL_MS) {
         raf = requestAnimationFrame(tick)
@@ -149,7 +154,7 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
       ctx.restore()
 
       // 窗口隐藏、或无粒子且未播放时停帧，避免 60fps 空转（Electron backgroundThrottling 关闭）
-      if (document.visibilityState !== 'hidden' && (playingRef.current || particles.length > 0)) {
+      if (enabledRef.current && document.visibilityState !== 'hidden' && (playingRef.current || particles.length > 0)) {
         raf = requestAnimationFrame(tick)
       } else {
         raf = 0
@@ -161,7 +166,7 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
     observer.observe(canvas)
     const onVisibilityChange = () => {
       // 窗口恢复可见时若已停帧则重启
-      if (document.visibilityState === 'visible' && raf === 0) {
+      if (enabledRef.current && document.visibilityState === 'visible' && raf === 0) {
         raf = requestAnimationFrame(tick)
       }
     }
@@ -171,7 +176,7 @@ export default function AppleCoverFx({ enabled, isPlaying, size, radius, accentC
       document.removeEventListener('visibilitychange', onVisibilityChange)
       observer.disconnect()
     }
-  }, [])
+  }, [enabled])
 
   if (!enabled) return null
   return (

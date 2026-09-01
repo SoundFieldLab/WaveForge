@@ -196,6 +196,22 @@ button { border: 0; color: inherit; }
 .dl-range-row span, .dl-setting-title { display: flex; align-items: center; gap: 7px; color: rgba(255,255,255,.75); }
 .dl-range-row b { font-size: 11px; color: rgba(255,255,255,.48); }
 .dl-range-row input { grid-column: 1 / -1; width: 100%; accent-color: var(--lyric-color); }
+.dl-font-row { grid-template-columns: 1fr; }
+.dl-font-select {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin-top: 2px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.08);
+  color: rgba(255,255,255,.85);
+  font-size: 12px;
+  cursor: pointer;
+  outline: none;
+}
+.dl-font-select:focus { border-color: var(--lyric-color); }
+.dl-font-select option { background: #14161f; color: rgba(255,255,255,.85); }
 .dl-setting-title { margin: 13px 0 8px; font-size: 12px; }
 .dl-colors { display: flex; gap: 7px; margin-bottom: 10px; }
 .dl-colors button { width: 29px; height: 29px; padding: 4px; border-radius: 50%; background: transparent; cursor: pointer; }

@@ -18,7 +18,7 @@ npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electro
 - **QQ 音乐 API Key 领取**：内置引导窗口直达 y.qq.com 领取 qmk API Key（独立隔离 session，每次打开清空登录态）
 - **无缝衔接播放**：三种模式 —— Smart AutoMix（智能节拍匹配+BPM 同步，需 Python）/ Beat Crossfade（节拍交叉淡化）/ Fixed Crossfade（固定时长，默认）
 - **歌词系统**：LRC 解析、逐字歌词（QQ）、实时滚动、点击跳转；逐字特效模式（清晰/柔和/Apple 逆向还原）
-- **空间音频（Spatial Audio）**：真实 MIT KEMAR HRTF 双耳渲染——一键空间化 / 头锁定环绕 / 世界漫游 / 舞台影院四模式，支持 SOFA 数据集导入（详见下方「空间音频」章节）
+- **空间音频（Spatial Audio）**：EngineV3 合成解析 HRTF 双耳渲染——一键空间化 / 头锁定环绕 / 世界漫游 / 舞台影院四模式（详见下方「空间音频」章节）
 - **可视化**：频谱柱 / 波形 / 环形 / 3D 可视化
 - **桌面模式**：桌面小组件、专注计时、生产力工具、自定义壁纸
 - **Wallpaper Engine 联动**：读取本地 WE 配置并同步音频可视化
@@ -65,10 +65,11 @@ npm run dev             # 仅 Vite（3000）
 npm run dev:api         # 仅 API（3001）
 npm run lint            # TypeScript 类型检查（tsc --noEmit）
 npm run test            # vitest 单测（41 文件 477 用例，含 v3 引擎 324）
-npm run build           # 生产构建 -> dist/
-npm run build:electron  # 打包 NSIS 安装版 -> release/（发布用）
+npm run build           # 仅构建前端 -> dist/（日常开发，不生成 EXE）
+npm run build:electron  # 发布：目录构建 → EVS production VMP → NSIS（需 EVS secrets）
 npm run build:full      # 完整发布：bundle-python + build:electron
-npm run build:electron:dir  # 构建 + 未打包目录（本地调试用，不发布）
+npm run build:electron:dir  # 发布目录包：构建 + EVS production VMP（需 EVS secrets）
+npm run build:electron:dir:unsigned  # 仅本地诊断，不能发布/不能用于 Apple 原生验收
 npm run build:android   # 生成 Android TV 前端资产
 npm run fetch:nodejs-mobile  # 拉取 Android 运行时
 npm run publish:release # 一键发布脚本
@@ -79,15 +80,19 @@ npm run sync:sponsors   # 刷新爱发电赞助名单（构建前会自动以可
 test-python-service.bat # 检测节拍服务（3002）
 ```
 
+`npm run dev:electron` 启动前会快速验证开发 ECS 的 production streaming VMP；签名仍有效时不会重签。只有首次配置、重装或升级 Electron 后才会请求一次 EVS 签名，前端热更新与普通 `npm run build` 不生成 EXE、也不触发签名。
+
 ## 发布（GitHub Releases）
 
 **只发 NSIS 安装版**（`release/WaveForge-<version>-Setup.exe`），**不发便携版**（`release/win-unpacked/` 仅本地调试）。安装版为每用户安装、**不携带任何用户数据/配置**——首次运行在该机 `%APPDATA%\WaveForge 澜音工坊\` 自动生成全新配置并适配当前用户。
 
 ```bash
-npm run build:electron          # 构建安装版
+npm run build:electron          # 构建安装版（强制 EVS production VMP）
 git tag v<version> && git push origin v<version>
 gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<version>" --notes "..."
 ```
+
+Windows 发布机/CI 必须配置 `EVS_ACCOUNT_NAME`、`EVS_PASSWD` 并安装 `castlabs-evs`。签名发生在构建机，最终用户安装后**不需要 EVS、签名工具或任何手动签名步骤**；用户只需在应用内登录具有有效订阅的 Apple Music 账号。
 
 ## 端口一览
 
@@ -114,7 +119,7 @@ gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<ve
 
 **核心能力**：
 
-- 真实 **MIT KEMAR HRTF** 网格（`hrtf-data/grid.bin` 内嵌，构建时 base64 内联）；可导入 **SOFA（AES69）数据集**换网格（NetCDF3 经典格式 + NetCDF4/HDF5 封装，h5wasm 懒加载），采样率不匹配自动整体重采样（多相 Kaiser-sinc），**跨重启自动恢复**（IndexedDB `waveforge-hrtf` 存网格本体 + localStorage 活动记录）
+- **合成解析 HRTF** 双耳渲染：当前使用 EngineV3 内置解析模型，无需外部数据文件；外部 SOFA 数据集导入尚未实现
 - **球谐插值**（实球谐 L=3 最小二乘拟合）与最近邻网格查表双 HRTF 插值模式
 - **完整房间模拟**：镜像声源法早期反射（1-3 阶）+ FDN 晚期混响（8 条质数延迟线 + Hadamard 8×8 反馈矩阵），7 种预设（录音棚/音乐厅/舞台/教堂/户外/浴室/走廊）
 - **Ambisonics 环境上混**（FOA 环境场 → 4 方向扩散虚拟扬声器，叠加到各模式主渲染）

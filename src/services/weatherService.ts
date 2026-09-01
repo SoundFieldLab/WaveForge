@@ -36,6 +36,19 @@ export interface WeatherAlert {
   message: string
 }
 
+export interface WeatherAirQuality {
+  /** 欧洲 AQI（0-100+，越高越差） */
+  aqi: number
+  pm25: number
+  pm10: number
+  /** 逐小时 AQI（用于趋势图） */
+  hourlyAqi: Array<{ time: string; aqi: number }>
+}
+
+export const getAqiLabel = (aqi: number) => aqi < 20 ? '优' : aqi < 40 ? '良' : aqi < 60 ? '中等' : aqi < 80 ? '较差' : aqi <= 100 ? '很差' : '严重污染'
+export const getCloudCoverLabel = (value: number) => value < 10 ? '晴朗无云' : value < 35 ? '少云' : value < 70 ? '多云' : '阴天'
+export const getDewPointLabel = (value: number) => value < 10 ? '空气干燥' : value < 16 ? '体感舒适' : value < 21 ? '略感潮湿' : '潮湿闷热'
+
 export interface WeatherCurrent {
   time: string
   temperature: number
@@ -49,6 +62,7 @@ export interface WeatherCurrent {
   pressure: number
   visibility: number
   precipitation: number
+  cloudCover: number
 }
 
 export interface WeatherHour {
@@ -63,6 +77,10 @@ export interface WeatherHour {
   windGusts: number
   visibility: number
   uvIndex: number
+  humidity: number
+  pressure: number
+  dewPoint: number
+  cloudCover: number
 }
 
 export interface WeatherDay {
@@ -88,6 +106,7 @@ export interface WeatherSnapshot {
   hourly: WeatherHour[]
   daily: WeatherDay[]
   alerts: WeatherAlert[]
+  airQuality: WeatherAirQuality | null
   updatedAt: number
 }
 
@@ -784,11 +803,12 @@ export async function fetchWeatherSnapshot(
 
   const currentFields = [
     'temperature_2m', 'apparent_temperature', 'relative_humidity_2m', 'weather_code', 'is_day',
-    'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'surface_pressure', 'visibility', 'precipitation',
+    'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'surface_pressure', 'visibility', 'precipitation', 'cloud_cover',
   ].join(',')
   const hourlyFields = [
     'temperature_2m', 'apparent_temperature', 'precipitation_probability', 'precipitation', 'snowfall',
-    'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'visibility', 'uv_index',
+    'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'visibility', 'uv_index', 'relative_humidity_2m', 'surface_pressure',
+    'dew_point_2m', 'cloud_cover',
   ].join(',')
   const dailyFields = [
     'weather_code', 'temperature_2m_max', 'temperature_2m_min', 'apparent_temperature_max',
@@ -809,6 +829,34 @@ export async function fetchWeatherSnapshot(
   const data = await response.json()
   if (data.error) throw new Error(data.reason || '天气预报返回错误')
 
+  // 空气质量（独立免费端点，失败不影响主数据）
+  let airQuality: WeatherAirQuality | null = null
+  try {
+    const aqUrl = new URL('https://air-quality-api.open-meteo.com/v1/air-quality')
+    aqUrl.searchParams.set('latitude', String(location.latitude))
+    aqUrl.searchParams.set('longitude', String(location.longitude))
+    aqUrl.searchParams.set('current', 'european_aqi,pm2_5,pm10')
+    aqUrl.searchParams.set('hourly', 'european_aqi')
+    aqUrl.searchParams.set('timezone', 'auto')
+    aqUrl.searchParams.set('forecast_days', '2')
+    const aqResponse = await fetch(aqUrl.toString(), { signal })
+    if (aqResponse.ok) {
+      const aqData = await aqResponse.json()
+      const aqi = toNumber(aqData.current?.european_aqi)
+      if (aqi > 0) {
+        airQuality = {
+          aqi,
+          pm25: toNumber(aqData.current?.pm2_5),
+          pm10: toNumber(aqData.current?.pm10),
+          hourlyAqi: (aqData.hourly?.time || []).slice(0, 25).map((time: string, index: number) => ({
+            time,
+            aqi: toNumber(aqData.hourly?.european_aqi?.[index]),
+          })),
+        }
+      }
+    }
+  } catch { /* 空气质量为可选数据 */ }
+
   const current: WeatherCurrent = {
     time: data.current?.time || '',
     temperature: toNumber(data.current?.temperature_2m),
@@ -822,6 +870,7 @@ export async function fetchWeatherSnapshot(
     pressure: toNumber(data.current?.surface_pressure),
     visibility: toNumber(data.current?.visibility),
     precipitation: toNumber(data.current?.precipitation),
+    cloudCover: toNumber(data.current?.cloud_cover),
   }
 
   const hourly: WeatherHour[] = (data.hourly?.time || []).map((time: string, index: number) => ({
@@ -836,6 +885,10 @@ export async function fetchWeatherSnapshot(
     windGusts: toNumber(data.hourly.wind_gusts_10m?.[index]),
     visibility: toNumber(data.hourly.visibility?.[index]),
     uvIndex: toNumber(data.hourly.uv_index?.[index]),
+    humidity: toNumber(data.hourly.relative_humidity_2m?.[index]),
+    pressure: toNumber(data.hourly.surface_pressure?.[index]),
+    dewPoint: toNumber(data.hourly.dew_point_2m?.[index]),
+    cloudCover: toNumber(data.hourly.cloud_cover?.[index]),
   }))
 
   const daily: WeatherDay[] = (data.daily?.time || []).map((date: string, index: number) => ({
@@ -863,6 +916,7 @@ export async function fetchWeatherSnapshot(
     hourly: upcomingHourly,
     daily,
     alerts: makeAlerts(current, upcomingHourly, daily),
+    airQuality,
     updatedAt: Date.now(),
   }
 

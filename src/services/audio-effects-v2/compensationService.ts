@@ -141,9 +141,11 @@ export class CompensationService {
 
     const seq = ++this.requestSeq
     const task = (async () => {
-      const controller = new AbortController()
-      const timeoutId = window.setTimeout(() => controller.abort(new DOMException('compensation design timed out', 'TimeoutError')), DESIGN_TIMEOUT_MS)
+      let timeoutId: number | undefined
       try {
+        if (window.electron?.localPython && !await window.electron.localPython.ensure('compensation')) return null
+        const controller = new AbortController()
+        timeoutId = window.setTimeout(() => controller.abort(new DOMException('compensation design timed out', 'TimeoutError')), DESIGN_TIMEOUT_MS)
         const body: Record<string, unknown> = { mode }
         if (mode === 'auto') body.volume = volume ?? 100
         if (mode === 'preset') body.preset = preset
@@ -175,7 +177,7 @@ export class CompensationService {
         this.pythonUnavailableUntil = Date.now() + PYTHON_UNAVAILABLE_RETRY_MS
         return null
       } finally {
-        window.clearTimeout(timeoutId)
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId)
         this.inflight.delete(key)
       }
     })()

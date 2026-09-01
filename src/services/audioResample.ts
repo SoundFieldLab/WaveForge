@@ -4,6 +4,8 @@
 
 /** 每侧 sinc 抽头数（共 2*TAPS 个抽头）。32 阶对音乐足够。 */
 const TAPS = 16
+const TAP_COUNT = TAPS * 2
+const FALLBACK_PHASES = 2048
 
 function sinc(value: number): number {
   if (Math.abs(value) < 1e-9) return 1
@@ -17,6 +19,31 @@ function blackman(value: number): number {
   return 0.42 - 0.5 * Math.cos(2 * Math.PI * x) + 0.08 * Math.cos(4 * Math.PI * x)
 }
 
+function greatestCommonDivisor(a: number, b: number): number {
+  while (b !== 0) [a, b] = [b, a % b]
+  return a
+}
+
+function exactPhaseCount(inputRate: number, outputRate: number): number | null {
+  if (Number.isInteger(inputRate) && Number.isInteger(outputRate) && inputRate > 0 && outputRate > 0) {
+    const phases = outputRate / greatestCommonDivisor(inputRate, outputRate)
+    if (phases <= 65536) return phases
+  }
+  return null
+}
+
+function buildCoefficientTable(phaseCount: number, ratio: number, exactPhases: boolean): Float64Array {
+  const table = new Float64Array(phaseCount * TAP_COUNT)
+  for (let phase = 0; phase < phaseCount; phase += 1) {
+    const fraction = exactPhases ? (phase * ratio) % 1 : phase / phaseCount
+    for (let k = -TAPS + 1; k <= TAPS; k += 1) {
+      const x = fraction - k
+      table[phase * TAP_COUNT + k + TAPS - 1] = sinc(x) * blackman(x)
+    }
+  }
+  return table
+}
+
 /**
  * 流式窗函数 sinc 重采样器。
  * 输入输出均为交错（interleaved）Float32Array，支持任意通道数。
@@ -24,9 +51,13 @@ function blackman(value: number): number {
  */
 export class AudioResampler {
   private readonly ratio: number
-  /** 每通道上一次调用尾部保留的样本（含左右各 TAPS 的上下文，仅用于插值窗口，不参与输出位置累计） */
-  private tails: Float32Array[] = []
-  /** 累计真实输入样本数（不含重复计数的 tail） */
+  private readonly phaseCount: number
+  private readonly exactPhases: boolean
+  private readonly coefficients: Float64Array
+  /** 以全局输入帧位置寻址的交错环形缓冲；按最大输入块扩容后重复使用。 */
+  private ring = new Float32Array(0)
+  private ringFrames = 0
+  /** 累计真实输入样本数 */
   private totalInput = 0
   /** 下一块输出的起始输出帧位置（上一块的 safe 上界） */
   private outPosition = 0
@@ -37,6 +68,10 @@ export class AudioResampler {
     private readonly channels = 2,
   ) {
     this.ratio = inputRate / outputRate
+    const exactPhases = exactPhaseCount(inputRate, outputRate)
+    this.exactPhases = exactPhases !== null
+    this.phaseCount = exactPhases ?? FALLBACK_PHASES
+    this.coefficients = buildCoefficientTable(this.phaseCount, this.ratio, this.exactPhases)
   }
 
   get needsResample(): boolean {
@@ -44,7 +79,6 @@ export class AudioResampler {
   }
 
   reset(): void {
-    this.tails = []
     this.totalInput = 0
     this.outPosition = 0
   }
@@ -58,51 +92,63 @@ export class AudioResampler {
       throw new Error('输入长度必须是通道数的整数倍（交错 PCM）')
     }
 
-    // 组装每通道插值窗口（历史尾部 + 新样本）。tail 仅提供插值上下文，
-    // 输出位置严格按「真实输入流」累计推进（tail 不参与），并留右侧 TAPS+2 帧余量
-    // 保证插值窗口右侧 tap 不越界；每块少出的尾部帧在下一块补齐。
-    const tailLen = this.tails.length === ch ? this.tails[0].length : 0
-    const total = tailLen + frameCount
-    const channelsData: Float32Array[] = []
-    for (let c = 0; c < ch; c += 1) {
-      const buf = new Float32Array(total)
-      if (tailLen > 0) buf.set(this.tails[c], 0)
-      for (let i = 0; i < frameCount; i += 1) buf[tailLen + i] = input[i * ch + c]
-      channelsData.push(buf)
+    const blockStartInput = this.totalInput
+    this.ensureRingCapacity(frameCount + TAP_COUNT + 4)
+    for (let i = 0; i < frameCount; i += 1) {
+      const ringOffset = ((blockStartInput + i) % this.ringFrames) * ch
+      const inputOffset = i * ch
+      for (let c = 0; c < ch; c += 1) this.ring[ringOffset + c] = input[inputOffset + c]
     }
 
     this.totalInput += frameCount
+    // 留右侧 TAPS+2 帧余量；每块少出的尾部帧在下一块补齐。
     const nextOut = Math.floor(Math.max(0, this.totalInput - (TAPS + 2)) / this.ratio)
     const outFrames = Math.max(0, nextOut - this.outPosition)
     const out = new Float32Array(outFrames * ch)
-
-    // 本块窗口覆盖的全局输入区间：[blockStartInput - tailLen, blockStartInput + frameCount]，
-    // 窗口坐标 = 全局输入位置 - (blockStartInput - tailLen)
-    const blockStartInput = this.totalInput - frameCount
-    const windowBase = blockStartInput - tailLen
+    // 与旧实现相同，只允许读取上一块末尾保留的 32 帧历史。
+    const oldestInput = Math.max(0, blockStartInput - TAP_COUNT)
 
     for (let o = 0; o < outFrames; o += 1) {
-      // 全局输入位置（float）→ 映射到本块窗口坐标
-      const windowPos = (this.outPosition + o) * this.ratio - windowBase
-      const center = Math.floor(windowPos)
+      const outputPosition = this.outPosition + o
+      const inputPosition = outputPosition * this.ratio
+      const center = Math.floor(inputPosition)
+      const coefficientOffset = this.phaseForOutput(outputPosition, inputPosition - center) * TAP_COUNT
       for (let c = 0; c < ch; c += 1) {
-        const buf = channelsData[c]
         let sum = 0
         for (let k = -TAPS + 1; k <= TAPS; k += 1) {
           const idx = center + k
-          if (idx < 0 || idx >= total) continue
-          const x = windowPos - idx
-          sum += buf[idx] * sinc(x) * blackman(x)
+          if (idx < oldestInput || idx >= this.totalInput) continue
+          sum += this.ring[(idx % this.ringFrames) * ch + c]
+            * this.coefficients[coefficientOffset + k + TAPS - 1]
         }
         out[o * ch + c] = sum
       }
     }
 
     this.outPosition = nextOut
-    // 保留尾部上下文（覆盖输入末尾前后的 TAPS 样本，供下一块插值）
-    const keep = Math.min(total, TAPS * 2)
-    this.tails = channelsData.map((buf) => buf.subarray(total - keep).slice())
     return out
+  }
+
+  private phaseForOutput(outputPosition: number, fraction: number): number {
+    if (!this.exactPhases) {
+      return Math.min(this.phaseCount - 1, Math.round(fraction * (this.phaseCount - 1)))
+    }
+    return outputPosition % this.phaseCount
+  }
+
+  private ensureRingCapacity(requiredFrames: number): void {
+    if (this.ringFrames >= requiredFrames) return
+    let nextFrames = 64
+    while (nextFrames < requiredFrames) nextFrames *= 2
+    const next = new Float32Array(nextFrames * this.channels)
+    const keepFrom = Math.max(0, this.totalInput - TAP_COUNT)
+    for (let frame = keepFrom; frame < this.totalInput; frame += 1) {
+      const oldOffset = this.ringFrames > 0 ? (frame % this.ringFrames) * this.channels : 0
+      const nextOffset = (frame % nextFrames) * this.channels
+      for (let c = 0; c < this.channels; c += 1) next[nextOffset + c] = this.ring[oldOffset + c]
+    }
+    this.ring = next
+    this.ringFrames = nextFrames
   }
 }
 

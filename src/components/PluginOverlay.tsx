@@ -7,6 +7,8 @@
 
 import { useEffect } from 'react'
 import '../plugins/DGLabPlugin'
+import '../plugins/ChromaPlugin'
+import '../plugins/SignalRgbPlugin'
 import { getAllPluginManifests, getPluginRuntime, buildPluginContext } from '../plugins/registry'
 import { getGlobalAudioAnalyzerStore } from '../plugins/clients/DGLabClient'
 import {
@@ -14,12 +16,15 @@ import {
   usePluginHostState,
   isPluginEnabled,
   PLUGIN_STATE_EVENT,
+  closePluginConsole,
 } from '../services/pluginStore'
 import PluginNoticeModal from './PluginNoticeModal'
 import PluginCenterModal from './PluginCenterModal'
 import PluginDetailModal from './PluginDetailModal'
 import PluginImportModal from './PluginImportModal'
 import DGLabConsoleModal from './DGLabConsoleModal'
+import ChromaConsoleModal from './ChromaConsoleModal'
+import SignalRgbConsoleModal from './SignalRgbConsoleModal'
 import DGLabWidget from './DGLabWidget'
 import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
 
@@ -27,6 +32,23 @@ import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
 function useRuntimeBridge() {
   useEffect(() => {
     const previous = new Map<string, boolean>()
+    const generations = new Map<string, number>()
+    const queues = new Map<string, Promise<void>>()
+    const subscriptions = new Map<string, Set<() => void>>()
+    const releaseSubscriptions = (pluginId: string) => {
+      const releases = subscriptions.get(pluginId)
+      subscriptions.delete(pluginId)
+      for (const release of releases ?? []) {
+        try { release() } catch { /* 插件退订失败不阻塞其余清理 */ }
+      }
+    }
+    const enqueue = (pluginId: string, task: () => void | Promise<void>) => {
+      const previousTask = queues.get(pluginId) ?? Promise.resolve()
+      const nextTask = previousTask.catch(() => undefined).then(task).catch(error => {
+        console.error(`[插件:${pluginId}] 生命周期执行失败:`, error)
+      })
+      queues.set(pluginId, nextTask)
+    }
     const sync = () => {
       for (const manifest of getAllPluginManifests()) {
         const enabled = isPluginEnabled(manifest.id)
@@ -35,34 +57,62 @@ function useRuntimeBridge() {
         previous.set(manifest.id, enabled)
         const runtime = getPluginRuntime(manifest.id)
         if (!runtime) continue
-        if (enabled) {
-          void runtime.onEnable?.(buildPluginContext({
-            audio: {
-              subscribe: (listener) => {
-                const store = getGlobalAudioAnalyzerStore()
-                if (!store) return () => undefined
-                return store.subscribe(() => listener(store.getSnapshot()))
-              },
+        const generation = (generations.get(manifest.id) ?? 0) + 1
+        generations.set(manifest.id, generation)
+        const context = buildPluginContext({
+          audio: {
+            subscribe: (listener) => {
+              const store = getGlobalAudioAnalyzerStore()
+              if (!store) return () => undefined
+              const release = store.subscribe(() => listener(store.getSnapshot()))
+              const releases = subscriptions.get(manifest.id) ?? new Set<() => void>()
+              subscriptions.set(manifest.id, releases)
+              let released = false
+              const trackedRelease = () => {
+                if (released) return
+                released = true
+                releases.delete(trackedRelease)
+                release()
+              }
+              releases.add(trackedRelease)
+              return trackedRelease
             },
-            storage: {
-              get: (key) => localStorage.getItem(key),
-              set: (key, value) => localStorage.setItem(key, value),
-            },
-            toast: (message, type) => {
-              window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: type ?? 'info' } }))
-            },
-            log: (...args) => console.log('[插件]', ...args),
-          }))
-        } else {
-          void runtime.onDisable?.()
-        }
+          },
+          storage: {
+            get: (key) => localStorage.getItem(key),
+            set: (key, value) => localStorage.setItem(key, value),
+          },
+          toast: (message, type) => {
+            window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: type ?? 'info' } }))
+          },
+          log: (...args) => console.log('[插件]', ...args),
+        })
+        enqueue(manifest.id, async () => {
+          if (generations.get(manifest.id) !== generation) return
+          if (enabled) {
+            releaseSubscriptions(manifest.id)
+            await runtime.onEnable?.(context)
+          } else {
+            await runtime.onDisable?.()
+            releaseSubscriptions(manifest.id)
+          }
+        })
       }
     }
     sync()
     window.addEventListener(PLUGIN_STATE_EVENT, sync)
     return () => {
       window.removeEventListener(PLUGIN_STATE_EVENT, sync)
-      // 卸载时复位缓存
+      for (const manifest of getAllPluginManifests()) {
+        if (!previous.get(manifest.id)) continue
+        const runtime = getPluginRuntime(manifest.id)
+        if (!runtime?.onDisable) continue
+        const generation = (generations.get(manifest.id) ?? 0) + 1
+        generations.set(manifest.id, generation)
+        enqueue(manifest.id, async () => {
+          try { await runtime.onDisable?.() } finally { releaseSubscriptions(manifest.id) }
+        })
+      }
       previous.clear()
     }
   }, [])
@@ -84,6 +134,11 @@ export default function PluginOverlay() {
       <PluginDetailModal />
       <PluginImportModal />
       <DGLabConsoleModal />
+      <ChromaConsoleModal />
+      <SignalRgbConsoleModal
+        open={host.activeConsolePluginId === 'signalrgb'}
+        onClose={() => closePluginConsole('signalrgb')}
+      />
       {/* 常驻悬浮小组件（自管理显示条件：插件启用 + 常驻开关） */}
       <DGLabWidget />
       {/* 整机监听全局桥（监听系统扬声器；失败自动回退 + 监听中浮标） */}

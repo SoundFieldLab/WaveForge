@@ -55,6 +55,7 @@ import {
   bilibiliStreamUrl,
   pickBestSubtitle,
   pickBestPage,
+  flattenLyricLinesForMatch,
   songKeyOf,
   setBilibiliOverride,
   clearBilibiliOverride,
@@ -180,6 +181,30 @@ function platformDisplay(platform?: string): string {
   return platform || ''
 }
 
+/** 对齐约定：MV 时间 = 歌曲时间 + 有符号偏移。 */
+export function songTimeToMvTime(songTime: number, alignmentOffset: number): number {
+  return songTime + alignmentOffset
+}
+
+/** 对齐约定的逆变换：歌曲时间 = MV 时间 - 有符号偏移。 */
+export function mvTimeToSongTime(mvTime: number, alignmentOffset: number): number {
+  return mvTime - alignmentOffset
+}
+
+function clampMediaTime(time: number, duration: number, endPadding = 0): number {
+  const safeTime = Number.isFinite(time) ? time : 0
+  const maxTime = Number.isFinite(duration) && duration > 0
+    ? Math.max(0, duration - endPadding)
+    : Math.max(0, safeTime)
+  return Math.max(0, Math.min(safeTime, maxTime))
+}
+
+export function syncWatchVideoOnSurfaceRestore(video: HTMLVideoElement, audio: HTMLAudioElement | null): boolean {
+  if (!audio || !Number.isFinite(audio.currentTime) || !Number.isFinite(video.duration) || video.duration <= 0) return false
+  video.currentTime = clampMediaTime(audio.currentTime, video.duration, 0.5)
+  return true
+}
+
 const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProps>(function BilibiliMvPlayer(
   {
     songTitle,
@@ -230,6 +255,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   })
   const audioRef = useRef<HTMLAudioElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  // CC 字幕验证用歌词（App 传入，异步加载完成后引用更新；provider 经 ref 读最新值，闭包不过期）
+  const lyricsPropRef = useRef(lyricsProp)
+  lyricsPropRef.current = lyricsProp
   // 看歌模式：鼠标本体无操作 8s 自动渐隐，一动立即显示（不影响控件显隐逻辑）
   const cursorHideRef = useAutoHideCursor(8000)
   /**
@@ -424,6 +452,18 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const toastTimerRef = useRef<number | null>(null)
 
   const songKey = songKeyOf({ songTitle, artists: songArtists, songDuration, platform, id: songId })
+  const songContextRef = useRef({ songKey, songTitle, songArtists, songDuration, platform, songId, songUrl, lyrics: lyricsProp })
+  songContextRef.current = { songKey, songTitle, songArtists, songDuration, platform, songId, songUrl, lyrics: lyricsProp }
+
+  // 组件跨歌曲常驻；每首歌都要重新接收进入看歌时的歌曲时间和预加载流。
+  useEffect(() => {
+    initialSeekSecondsRef.current = initialSeekSeconds ?? null
+    initialVideoRef.current = initialVideoUrl && initialCid && initialBvid
+      ? { bvid: initialBvid, cid: initialCid, videoUrl: initialVideoUrl, cacheKey: initialCacheKey, type: initialType }
+      : null
+    // songKey 是歌曲身份，避免同一首歌的普通重渲染重复消费 seek/预加载流。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [songKey])
 
   // ===== MV 对齐（节拍/包络/现场版前奏补偿）=====
   // 当前视频的对齐偏移（秒）：算完后把视频+音频 seek 到 引擎位置+偏移，
@@ -435,18 +475,23 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   /** 用户是否主动暂停（仅 handleTogglePlay 置位）：自愈必须尊重的暂停意图——
    *  区分"用户暂停"（不恢复）与"系统节流冻结"（恢复）。新视频加载时复位。 */
   const userPausedRef = useRef(false)
+  /** surfaceVisible=false 时只暂停视频解码，DASH 音频继续作为播放源；避免 pause 事件连带停音频。 */
+  const surfacePausedVideoRef = useRef(false)
+  const surfaceVisibleRef = useRef(surfaceVisible)
+  surfaceVisibleRef.current = surfaceVisible
   const applyAlignmentOffset = useCallback(() => {
     const video = videoRef.current
     const audio = audioRef.current
     const offset = alignmentOffsetRef.current
     if (!video || !audio || offset === 0 || !Number.isFinite(video.duration)) return
     const enginePos = getEnginePositionRef.current ? Number(getEnginePositionRef.current()) || 0 : 0
-    const target = enginePos + offset
-    const clamped = Math.min(target, Math.max(0, (video.duration || target) - 8))
+    const target = songTimeToMvTime(enginePos, offset)
+    const clamped = clampMediaTime(target, video.duration, 8)
     if (clamped > 0 && Math.abs(video.currentTime - clamped) > 0.5) {
       video.currentTime = clamped
       if (audio) audio.currentTime = clamped
-      void window.electron?.automixLog?.('MvAlign', `[播放器] 对齐seek 引擎=${enginePos.toFixed(1)}s +${offset.toFixed(1)}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
+      const signedOffset = `${offset >= 0 ? '+' : ''}${offset.toFixed(1)}`
+      void window.electron?.automixLog?.('MvAlign', `[播放器] 对齐seek 引擎=${enginePos.toFixed(1)}s ${signedOffset}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
     }
   }, [])
 
@@ -516,7 +561,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   const loadVideo = useCallback(
     (candidate: CandidateScore, chainIndex: number) => {
+      const song = songContextRef.current
       const controller = new AbortController()
+      const isStaleLoad = () => controller.signal.aborted || songContextRef.current.songKey !== song.songKey
       searchControllerRef.current?.abort()
       searchControllerRef.current = controller
       setStatus('loading')
@@ -528,6 +575,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       setActiveVideo(candidate)
       setVideoUrl(null)
       setAudioUrl(null)
+      // 新歌/新视频加载期间不要继续向外暴露上一首歌的对齐结果。
+      alignmentOffsetRef.current = 0
+      alignmentVerifiedRef.current = false
       // 新视频就绪后音频轨淡入（配合引擎淡出做无缝拼接）
       fadeInOnLoadRef.current = true
       // 切到新视频：取消 15 秒标记询问
@@ -552,10 +602,11 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
           }
           if (!cid) {
             const view = await getBilibiliView(candidate.video.bvid, controller.signal)
+            if (isStaleLoad()) return
             if (view.code !== 0) throw new Error(view.code === -404 ? '视频已失效或删除' : '获取视频信息失败')
             // 多 P（选集）视频：挑选最匹配歌曲的分 P（on vocal/歌名命中优先）
             if (Array.isArray(view.data.pages) && view.data.pages.length > 1) {
-              const bestIndex = pickBestPage(view.data.pages, { songTitle, artists: songArtists })
+              const bestIndex = pickBestPage(view.data.pages, { songTitle: song.songTitle, artists: song.songArtists })
               const chosen = view.data.pages[bestIndex]
               if (chosen?.cid) {
                 cid = chosen.cid
@@ -574,6 +625,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
           } else {
             const qn = settingsRef.current.targetQuality === 'auto' ? 127 : settingsRef.current.targetQuality
             const playInfo = await getBilibiliPlayUrl(candidate.video.bvid, cid, qn, controller.signal)
+            if (isStaleLoad()) return
             if (playInfo.code === -404) throw new Error('视频已失效或删除')
             if (playInfo.code !== 0 || !playInfo.cacheKey) throw new Error(playInfo.error || '获取播放地址失败')
             cacheKey = playInfo.cacheKey
@@ -588,11 +640,12 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
           // 命中即秒开，避免流式加载慢导致"进看歌开头无声"（日志实测 loadedmetadata
           // 可延迟 ~10s）。未命中照旧走流式 URL（不先整文件下载再播放）。
           const audioStreamUrl = bilibiliStreamUrl(cacheKey, 'audio')
-          const mvAlignKey = `mv-align-video:${songKey}:${candidate.video.bvid}`
+          const mvAlignKey = `mv-align-video:${song.songKey}:${candidate.video.bvid}`
           const localAudio = await window.electron?.audioDownload?.peekCached?.(mvAlignKey) || null
-          if (controller.signal.aborted) return
+          if (isStaleLoad()) return
           if (localAudio) {
             const localMedia = await window.electron?.audioDownload?.getMediaUrl?.(localAudio) || null
+            if (isStaleLoad()) return
             setAudioUrl(localMedia || audioStreamUrl)
           } else {
             setAudioUrl(audioStreamUrl)
@@ -600,22 +653,20 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
           // MV 对齐：算偏移（节拍/包络，或现场版前奏补偿），算完把视频+音频 seek 到
           // 引擎位置+偏移——跳过剧情前摇/现场前奏，让歌词画面与音源歌词同步。
-          alignmentOffsetRef.current = 0
-          alignmentVerifiedRef.current = false
           userPausedRef.current = false // 新视频：复位用户暂停标记，恢复自动播放
-          const cachedAlign = getMvAlignment(songKey, candidate.video.bvid)
+          const cachedAlign = getMvAlignment(song.songKey, candidate.video.bvid)
           if (cachedAlign && cachedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
             alignmentOffsetRef.current = cachedAlign.offsetSeconds
             alignmentVerifiedRef.current = true
             applyAlignmentOffset()
           } else {
             void ensureMvAlignment({
-              songKey,
-              songTitle,
-              songArtists,
-              songDuration,
-              songUrl: songUrl || '',
-              lyrics: lyricsProp,
+              songKey: song.songKey,
+              songTitle: song.songTitle,
+              songArtists: song.songArtists,
+              songDuration: song.songDuration,
+              songUrl: song.songUrl || '',
+              lyrics: song.lyrics,
               bvid: candidate.video.bvid,
               cid,
               videoUrl: audioStreamUrl,
@@ -623,7 +674,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
               candidateType: candidate.type,
               signal: controller.signal,
             }).then((align) => {
-              if (controller.signal.aborted) return
+              if (isStaleLoad()) return
               if (align && align.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
                 alignmentOffsetRef.current = align.offsetSeconds
                 alignmentVerifiedRef.current = true
@@ -636,12 +687,13 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
           // 弹幕（非阻塞，失败不影响播放）；风控/瞬时网络失败递增重试最多 3 次
           setDanmakuItems([])
           const loadDanmaku = async (attempt = 0) => {
-            if (controller.signal.aborted) return
+            if (isStaleLoad()) return
             const retry = () => {
               if (attempt < 3) window.setTimeout(() => void loadDanmaku(attempt + 1), 1500 * (attempt + 1))
             }
             try {
               const dm = await getBilibiliDanmaku(cid, controller.signal)
+              if (isStaleLoad()) return
               if (dm.code === 0) setDanmakuItems((dm.danmaku || []).slice().sort((a, b) => a.time - b.time))
               else retry()
             } catch {
@@ -656,10 +708,12 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
             void (async () => {
               try {
                 const subInfo = await getBilibiliSubtitles(candidate.video.bvid, cid, controller.signal)
+                if (isStaleLoad()) return
                 if (subInfo.code === 0 && subInfo.subtitles.length) {
                   const chosen = pickBestSubtitle(subInfo.subtitles, subPref)
                   if (chosen) {
                     const lines = await getBilibiliSubtitleJson(chosen.cacheKey, controller.signal)
+                    if (isStaleLoad()) return
                     // 清洗 AI 字幕噪音行（如整段只有"音乐"的分类标签），全噪音则视为无字幕
                     const clean = cleanSubtitleLines(lines)
                     if (clean.length) {
@@ -676,10 +730,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
             })()
           }
         } catch (error) {
-          if (controller.signal.aborted) return
+          if (isStaleLoad()) return
           // 手动记住的视频若已无法播放（失效/受限），清除记忆避免每次切到这首歌都卡死
-          if (getBilibiliOverride(songKey) === candidate.video.bvid) {
-            clearBilibiliOverride(songKey)
+          if (getBilibiliOverride(song.songKey) === candidate.video.bvid) {
+            clearBilibiliOverride(song.songKey)
           }
           // 自动回退：确凿失败（失效/受限）时尝试下一候选
           const message = error instanceof Error ? error.message : '视频加载失败'
@@ -724,9 +778,14 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
       const ctx: MatchContext = { songTitle, artists: songArtists, songDuration, platform, id: songId }
       try {
-        const result = await findBestBilibiliMv(ctx, { signal: controller.signal, settings: settingsRef.current })
+        const result = await findBestBilibiliMv(ctx, {
+          signal: controller.signal,
+          settings: settingsRef.current,
+          // CC 字幕验证：同步取已加载歌词（含翻译），没加载就不等——CC 按 unverified 缩水档，命中缓存后零网络升级
+          lyricsProvider: () => flattenLyricLinesForMatch(lyricsPropRef.current),
+        })
         if (controller.signal.aborted) return
-        void window.electron?.automixLog?.('MvAlign', `[播放器] 匹配完成 status=${result.status} best=${result.best ? `${result.best.video.bvid} ${result.best.video.title.slice(0, 30)} dur=${result.best.video.duration}s score=${Math.round(result.best.score)} type=${result.best.type}` : 'none'} 候选=${result.candidates.length}`)?.catch?.(() => undefined)
+        void window.electron?.automixLog?.('MvAlign', `[播放器] 匹配完成 status=${result.status} best=${result.best ? `${result.best.video.bvid} ${result.best.video.title.slice(0, 30)} dur=${result.best.video.duration}s score=${Math.round(result.best.score)} type=${result.best.type} cc=${result.best.ccVerification ?? '-'}` : 'none'} 候选=${result.candidates.length}`)?.catch?.(() => undefined)
         fallbackChainRef.current = result.fallbackChain || []
         setCandidates(result.candidates || [])
         // 秒开路径（preserveInFlight）：视频已在播——只补全元数据/换更优 bvid，不动状态
@@ -856,7 +915,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   // 氛围模式渲染：缩略画布采样视频帧 → 宽模糊泛光（Infuse 风格，不抢戏）
   useEffect(() => {
-    if (ambientMode === 'off') return
+    if (!surfaceVisible || ambientMode === 'off') return
     const canvas = ambientCanvasRef.current
     const video = videoRef.current
     if (!canvas || !video) return
@@ -967,7 +1026,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     }
     raf = requestAnimationFrame(draw)
     return () => cancelAnimationFrame(raf)
-  }, [ambientMode, videoUrl, videoAspect])
+  }, [ambientMode, videoUrl, videoAspect, surfaceVisible])
 
   // 卸载清理
   useEffect(() => {
@@ -1281,6 +1340,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
 
   // 确保视频在 URL 就绪后开始播放（autoPlay 在组件重挂载/快速切换时可能不触发）
   useEffect(() => {
+    if (!surfaceVisible) return
     const video = videoRef.current
     const audio = audioRef.current
     if (!video || !videoUrl) return
@@ -1288,14 +1348,35 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       void video.play().catch(() => undefined)
       if (audio && audio.paused && audio.currentSrc) void audio.play().catch(() => undefined)
     }
-  }, [videoUrl])
+  }, [videoUrl, surfaceVisible])
+
+  // 被主页等表面覆盖时保留 DASH 音频播放，但暂停视频解码；恢复时先做一次音画同步，
+  // 再由可见态的自愈/漂移 effect 各自建立唯一一套 timer。
+  useEffect(() => {
+    const video = videoRef.current
+    const audio = audioRef.current
+    if (!video || !videoUrl) return
+    if (!surfaceVisible) {
+      if (!video.paused) {
+        surfacePausedVideoRef.current = true
+        video.pause()
+      }
+      return
+    }
+    syncWatchVideoOnSurfaceRestore(video, audio)
+    surfacePausedVideoRef.current = false
+    if (!userPausedRef.current && video.paused && video.readyState >= 1 && (!audio || !audio.paused)) {
+      video.muted = true
+      void video.play().catch(() => undefined)
+    }
+  }, [surfaceVisible, videoUrl])
 
   // 视频播放自愈（背景层同款思路）：音画分离下**音频在播但视频被节流停住**时
   //（Occlusion/未聚焦窗口时 Chromium 会停靠视频解码 → readyState 掉到 0~1、无帧可解码 →
   // 氛围 drawImage 永远黑帧 → 泛光消失；用户实测"开 F12 就好/关了就坏"就是焦点节流）。
   // 判别用**音频状态**：用户主动暂停会同时停音频（不误恢复），纯视频冻结则恢复播放。
   useEffect(() => {
-    if (!videoUrl) return
+    if (!surfaceVisible || !videoUrl) return
     const timer = window.setInterval(() => {
       const video = videoRef.current
       const audio = audioRef.current
@@ -1309,7 +1390,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [videoUrl])
+  }, [videoUrl, surfaceVisible])
 
   const handleTogglePlay = useCallback((): boolean => {
     const video = videoRef.current
@@ -1537,12 +1618,19 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   checkAndHealAudioRef.current = checkAndHealAudio
   const audioCheckedForRef = useRef('')
   useEffect(() => {
-    if (!videoUrl || !audioUrl || status !== 'playing') return
+    if (!surfaceVisible || !videoUrl || !audioUrl || status !== 'playing') return
     if (audioCheckedForRef.current === videoUrl) return
     audioCheckedForRef.current = videoUrl
-    const timer = window.setTimeout(() => { void checkAndHealAudioRef.current('startup') }, 2500)
-    return () => window.clearTimeout(timer)
-  }, [videoUrl, audioUrl, status])
+    let checked = false
+    const timer = window.setTimeout(() => {
+      checked = true
+      void checkAndHealAudioRef.current('startup')
+    }, 2500)
+    return () => {
+      window.clearTimeout(timer)
+      if (!checked && audioCheckedForRef.current === videoUrl) audioCheckedForRef.current = ''
+    }
+  }, [videoUrl, audioUrl, status, surfaceVisible])
 
   // 视频事件绑定
   useEffect(() => {
@@ -1560,6 +1648,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       scheduleControlsHide()
     }
     const onPause = () => {
+      if (surfacePausedVideoRef.current && !surfaceVisibleRef.current) return
       setIsPlaying(false)
       setShowControls(true)
       setShowTopInfo(true)
@@ -1609,11 +1698,13 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         // 缓存对齐偏移直接并入首次 seek：避免"先 seek 引擎位置、对齐算完再跳一次"的
         // 双跳——双跳会造成重唱/跳下一句的可见偏移（引擎在看歌时已暂停，位置是冻结值，
         // 首次 seek 到位后 applyAlignmentOffset 的差值 <0.5s 不会再跳）
-        const cachedAlign = activeVideo ? getMvAlignment(songKey, activeVideo.video.bvid) : null
+        const active = activeVideoRef.current
+        const cachedAlign = active ? getMvAlignment(songContextRef.current.songKey, active.video.bvid) : null
         const offset = cachedAlign && cachedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? cachedAlign.offsetSeconds : 0
-        const target = base + offset
-        const clamped = Math.min(target, Math.max(0, (video.duration || 0) - 8))
-        void window.electron?.automixLog?.('MvAlign', `[播放器] 初始seek 引擎=${livePos.toFixed(1)}s +缓存偏移${offset.toFixed(2)}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
+        const target = songTimeToMvTime(base, offset)
+        const clamped = clampMediaTime(target, video.duration, 8)
+        const signedOffset = `${offset >= 0 ? '+' : ''}${offset.toFixed(2)}`
+        void window.electron?.automixLog?.('MvAlign', `[播放器] 初始seek 引擎=${livePos.toFixed(1)}s 缓存偏移${signedOffset}s → video=${clamped.toFixed(1)}s`)?.catch?.(() => undefined)
         if (clamped > 0) {
           video.currentTime = clamped
           if (audio) audio.currentTime = clamped
@@ -1651,10 +1742,15 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         }
         if (s.videoDone) switchSeekRef.current = null
       }
-      // 音频轨就绪后同步续播位置（视频可能更早触发 loadedmetadata）
+      // 音频轨就绪后同步续播位置（视频可能更早触发 loadedmetadata）。音频和视频共用
+      // MV 时间轴，因此这里也必须应用同一有符号偏移，不能先跳到未对齐的歌曲时间。
       const seekTarget = initialSeekSecondsRef.current
       if (seekTarget != null && seekTarget > 0 && audio && Number.isFinite(audio.duration)) {
-        const clamped = Math.min(seekTarget, Math.max(0, (audio.duration || 0) - 8))
+        const active = activeVideoRef.current
+        const cachedAlign = active ? getMvAlignment(songContextRef.current.songKey, active.video.bvid) : null
+        const offset = cachedAlign && cachedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? cachedAlign.offsetSeconds : 0
+        const target = songTimeToMvTime(seekTarget, offset)
+        const clamped = clampMediaTime(target, audio.duration, 8)
         if (clamped > 0) audio.currentTime = clamped
       }
       // 新视频音频轨淡入（进入看歌时配合引擎淡出无缝拼接）
@@ -1684,9 +1780,9 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       void fadeAudioVolume(0, volumeRef.current, 250)
     }
     maybeFadeInAudio()
-    const audioStartupTimer = window.setTimeout(maybeFadeInAudio, 1500)
+    const audioStartupTimer = surfaceVisible ? window.setTimeout(maybeFadeInAudio, 1500) : null
     return () => {
-      window.clearTimeout(audioStartupTimer)
+      if (audioStartupTimer !== null) window.clearTimeout(audioStartupTimer)
       video.removeEventListener('play', onPlay)
       video.removeEventListener('pause', onPause)
       video.removeEventListener('timeupdate', onTimeUpdate)
@@ -1697,7 +1793,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       audio?.removeEventListener('loadedmetadata', onAudioLoaded)
     }
     // videoUrl 必须入依赖：换源/回退/切歌后视频元素可能重建，需重新绑定事件（否则新元素无 play 处理器 → 音频轨不会启动）
-  }, [subtitles, subtitleOn, videoUrl, handleVideoEnded, reportVideoActive, reportVideoState, scheduleControlsHide])
+  }, [subtitles, subtitleOn, videoUrl, handleVideoEnded, reportVideoActive, reportVideoState, scheduleControlsHide, surfaceVisible])
 
   // 漂移校正：DASH 音画分离的两条流因 fMP4 分段对齐会渐进失步（视频与音频越走越远）。
   // 每 4s 检查一次：偏差 >0.45s 时把视频拉回音频位置（音频是用户听到的时钟，视频跟随）。
@@ -1705,7 +1801,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   // 跳变更具音乐性；无节拍数据时立即按音频位置校正。
   const watchTrackKey = `${platform || 'netease'}-${songId ?? ''}`
   useEffect(() => {
-    if (!videoUrl || !audioUrl || !isPlaying) return
+    if (!surfaceVisible || !videoUrl || !audioUrl || !isPlaying) return
     let beatTimer: number | null = null
     const interval = window.setInterval(() => {
       const video = videoRef.current
@@ -1742,7 +1838,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       if (beatTimer !== null) window.clearTimeout(beatTimer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoUrl, audioUrl, isPlaying, watchTrackKey, songDuration])
+  }, [videoUrl, audioUrl, isPlaying, watchTrackKey, songDuration, surfaceVisible])
 
   // 音量/静音应用到新视频（新视频就绪后会淡入，先置 0 避免瞬间满音量）
   useEffect(() => {

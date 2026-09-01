@@ -3,8 +3,9 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { isTvModeActive } from '../platform'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
-import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback } from 'react'
+import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
 import PluginShortcuts from './PluginShortcuts'
@@ -17,7 +18,7 @@ import DesktopWidgetZone from './DesktopWidgetZone'
 import DesktopFocusAlarmOverlay from './DesktopFocusAlarmOverlay'
 import { Song, LyricLine } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getVisiblePlatforms } from '../services/platforms'
+import { getVisiblePlatforms, PLATFORM_ORDER_EVENT, PLATFORM_VISIBILITY_EVENT } from '../services/platforms'
 import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, appleSongToSong, removeAppleTracksFromPlaylist } from '../services/appleCatalog'
 import { desktopWallpaperManager, DesktopLiveWallpaperSource, toWallpaperUrl } from '../services/desktopWallpaperManager'
 import { getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks } from '../services/playlistService'
@@ -30,6 +31,8 @@ import {
 import { useDesktopFocusTimer } from '../hooks/useDesktopFocusTimer'
 import { getReadableDesktopAccentColor } from '../utils/desktopAccentColor'
 import { parseStoredArray, parseStoredBoolean } from '../utils/storage'
+import { preloadOnIdle } from '../utils/lazyPreload'
+import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import { addDesktopListeningSeconds, recordDesktopSongStart } from '../services/desktopMusicActivity'
 import type { DesktopMusicWidgetContext } from './DesktopExtraWidgets'
@@ -56,6 +59,7 @@ interface DesktopViewProps {
   onNext: () => void
   onPrevious: () => void
   currentTime?: number
+  playbackTimeStore?: PlaybackTimeStore
   duration?: number
   lyrics?: LyricLine[]
   playbackQueue: Song[]
@@ -161,7 +165,8 @@ function DesktopView({
   onPlayPause,
   onNext,
   onPrevious,
-  currentTime = 0,
+  currentTime: currentTimeProp = 0,
+  playbackTimeStore,
   duration = 0,
   lyrics = [],
   playbackQueue,
@@ -210,14 +215,44 @@ function DesktopView({
   onRemoteClick,
   onOpenDeviceControl,
 }: DesktopViewProps) {
-  // 当前平台（桌面模式独立）- 记住用户选择
-  const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => {
-    const saved = localStorage.getItem('desktopModePlatform')
-    if (saved === 'qq' || saved === 'apple') {
-      return getVisiblePlatforms().includes(saved) ? saved : 'netease'
+  const fallbackPlaybackSnapshot = useMemo(() => ({
+    currentTime: currentTimeProp,
+    duration,
+    isPlaying,
+  }), [currentTimeProp, duration, isPlaying])
+  const currentTime = useSyncExternalStore(
+    playbackTimeStore?.subscribe ?? (() => () => undefined),
+    playbackTimeStore?.getSnapshot ?? (() => fallbackPlaybackSnapshot),
+    playbackTimeStore?.getSnapshot ?? (() => fallbackPlaybackSnapshot),
+  ).currentTime
+
+  // 当前平台（四视图共享）——支持全部六个平台，并在启动时按可见平台归一化
+  const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'desktopModePlatform'))
+  const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
+  useEffect(() => {
+    const syncVisible = () => setVisiblePlatforms(getVisiblePlatforms())
+    window.addEventListener(PLATFORM_VISIBILITY_EVENT, syncVisible)
+    window.addEventListener(PLATFORM_ORDER_EVENT, syncVisible)
+    return () => {
+      window.removeEventListener(PLATFORM_VISIBILITY_EVENT, syncVisible)
+      window.removeEventListener(PLATFORM_ORDER_EVENT, syncVisible)
     }
-    return 'netease'
-  })
+  }, [])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setCurrentPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+  useEffect(() => {
+    if (!visiblePlatforms.includes(currentPlatform)) {
+      const next = visiblePlatforms[0] || 'netease'
+      setCurrentPlatform(next)
+      syncPlatformAcrossViews(next)
+    }
+  }, [currentPlatform, visiblePlatforms])
 
   // TV 遥控器模式（html.tv-mode 激活）：桌面模式下的歌单栏/小白条交互需要适配遥控器
   const tvMode = useTvMode()
@@ -255,6 +290,12 @@ function DesktopView({
     window.addEventListener('viewModeChanged', closeForModeSwitch)
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
+
+  // 空闲时预热设置弹窗与全局设置镜像的懒加载 chunk，消除首次点击的卡顿
+  useEffect(() => preloadOnIdle([
+    () => import('./DesktopSettingsModal'),
+    () => import('./MirroredGlobalSettings'),
+  ]), [])
 
   const [showSettings, setShowSettings] = useState(false)
   const [settingsModuleMounted, setSettingsModuleMounted] = useState(false)
@@ -1309,7 +1350,7 @@ function DesktopView({
     const order = getVisiblePlatforms()
     const next = order[(order.indexOf(currentPlatform) + 1) % order.length]
     setCurrentPlatform(next)
-    localStorage.setItem('desktopModePlatform', next)
+    syncPlatformAcrossViews(next)
   }
 
   const closePlaylistDetail = useCallback(() => {
@@ -1464,7 +1505,7 @@ function DesktopView({
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
         if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setPlaylistSongs(songs)
       } else if (currentPlatform === 'netease') {
         await streamNeteasePlaylistTracks(playlist.id, {
@@ -2452,6 +2493,10 @@ function DesktopView({
         wallpaperRotation={wallpaperRotation}
         onWallpaperRotationChange={updateWallpaperRotation}
         onWallpaperSyncToggle={handleWallpaperSyncToggle}
+        neteaseLoggedIn={neteaseLoggedIn}
+        qqLoggedIn={qqLoggedIn}
+        neteaseVip={neteaseVip}
+        qqVip={qqVip}
         onOpenCustomizer={() => {
           closePlaylistCarousel()
           setShowDesktopCustomizer(true)

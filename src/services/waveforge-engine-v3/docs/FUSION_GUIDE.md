@@ -277,7 +277,7 @@ masterGain → [soundtouch?] → v3Node → [spatial?] → analyser
 | `src/spatial/controller.ts` | 模式 C 纯函数：听者→声源相对方向（`computeRelativeDirection`）、移动/旋转（`moveListener`/`rotateListener`）、轨迹插值（`computeTrajectoryPosition`） |
 | `src/spatial/layouts.ts` | 模式 B 布局预设**单事实源**（stereo/51/714 表 + `createLayoutSpeakers`/`headLockedSpeakers` 解析） |
 | `src/spatial/scenes.ts` | 模式 D 场景预设**单事实源**（stage/cinema/piano/nature 表 + `stageSpeakers`/`stageRoom`，座位/房间缩放） |
-| `src/spatial/sofa.ts` | SOFA（AES69）HRTF 解析器：NetCDF3 经典格式同步 + NetCDF4/HDF5 封装异步（h5wasm 懒加载） |
+| `src/spatial/analyticHrtf.ts` | 当前 HRTF 数据源：合成解析网格（简化球头模型，Woodworth ITD + 球头阴影 ILD，全确定性） |
 | `src/spatial/hrtfStore.ts` | HRTF 数据集 IndexedDB 持久化（db `waveforge-hrtf` / store `datasets`，手写 Promise 封装） |
 | `src/spatial/persistence.ts` | 参数持久化（`waveforge:spatial-params`，400ms 防抖 + 深合并容错，存储可注入） |
 | `src/spatial/analyticHrtf.ts` | 合成 HRTF 网格兜底（简化球头模型：Woodworth ITD + 球头阴影 ILD，全确定性） |
@@ -421,9 +421,7 @@ HRTF_ACTIVE_DATASET_KEY: string                             // 'waveforge:hrtf-a
   在 `backendIndex.generated.ts` 的 `createWorkletBackend` 工厂加候选（注意该文件是生成产物——改生成脚本
   `build-spatial-worklet.mjs` 第③步而非手改文件）；遵守热路径约束（稳态零分配、不阻塞、每块一次、outL/outR 完整写入）；
   数值实现与 TS 参考对拍（1e-5 容差 + 直通路径逐位回归门控）。
-- **加新数据集**：`sofa.ts` 扩展解析格式（当前 NetCDF3 同步 / NetCDF4-HDF5 异步 h5wasm）→ 用户导入 →
-  `setHrtfDataset`（校验 → 采样率重采样 → IDB 持久化 → 活动记录 → `postGrid` 热更新）→ 重启经 `restoreHrtfDataset` 自动恢复；
-  网格必须是 `HrtfGrid` 布局（`[elIdx·azCount + azIdx]` 行主序）；内置网格换数据 = 替换 `hrtf-data/grid.bin` 后重跑
-  `npm run build:spatial-worklet`。
+- **加新数据集**：当前版本只使用 `analyticHrtf.ts` 的合成解析 HRTF。若后续引入外部数据集，需先实现并测试解析、采样率转换、持久化、格式/体积校验和 `postGrid` 热更新，再开放 UI；不要只增加无效入口。
+  网格必须遵守 `HrtfGrid` 布局（`[elIdx·azCount + azIdx]` 行主序）。
 - **约束提醒**：`fusion.ts` 仅主线程（渲染进程）使用——**worklet 处理器绝不 import 本模块**；
   localStorage / IndexedDB 键名勿改（跨版本兼容）；改 `ROOM_PRESETS`/布局表等单事实源时，TS 与 Rust 两侧必须同步（注释已标注）。

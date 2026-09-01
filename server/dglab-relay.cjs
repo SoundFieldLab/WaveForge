@@ -184,6 +184,7 @@ function createDGLabRelay() {
     listenRetries: 0,
     app: { v3: null, v4: new Map() }, // v3: 单 App ws；v4: Map(tid -> ws)
     ctrlClients: new Set(),
+    controlToken: crypto.randomBytes(32).toString('base64url'),
     clientId: uuid(),
     v3AppId: null,
     devices: [], // V4 slot snapshot
@@ -907,6 +908,21 @@ const sendV3Pulse = (channel, frames) => {
 
   const handleCtrlConnection = (ws, req) => {
     const remote = req?.socket?.remoteAddress || '?'
+    const normalizedRemote = String(remote).replace(/^::ffff:/, '')
+    if (normalizedRemote !== '127.0.0.1' && normalizedRemote !== '::1') {
+      try { ws.close(4003, 'control channel is local only') } catch { /* ignore */ }
+      log(`拒绝非本机控制连接：${remote}`)
+      return
+    }
+    let suppliedToken = ''
+    try { suppliedToken = new URL(req?.url || '/', 'http://localhost').searchParams.get('token') || '' } catch { /* invalid URL */ }
+    const expected = Buffer.from(state.controlToken)
+    const supplied = Buffer.from(suppliedToken)
+    if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+      try { ws.close(4003, 'invalid control token') } catch { /* ignore */ }
+      log('拒绝未认证的本机控制连接')
+      return
+    }
     state.ctrlClients.add(ws)
     pushLogsTo(ws)
     broadcastStatus()
@@ -1009,9 +1025,9 @@ const sendV3Pulse = (channel, frames) => {
     const hasTarget = Boolean(targetId) && !legacyDglabPath
 
     if (hasTarget && targetId !== state.clientId) {
-      // 本实现是「单控制端」（控制端即 WaveForge 自身）：App 缓存的旧二维码 targetId 与当前不一致时
-      // 不再拒绝——任何 V3 App 连接都视为我们的被控端（官方多控制端场景才需要严格校验）
-      log(`V3 连接 targetId=${targetId.slice(0, 12)}… 与当前控制端(${state.clientId.slice(0, 12)}…)不一致（App 缓存了旧二维码地址），按本机唯一控制端接受并配对`)
+      log(`拒绝 V3 连接：targetId=${targetId.slice(0, 12)}… 与当前控制端不匹配`)
+      try { ws.close(4003, 'targetId mismatch') } catch { /* ignore */ }
+      return
     }
 
     if (state.app.v3 && !state.app.v3.isClosed) {
@@ -1310,7 +1326,7 @@ const sendV3Pulse = (channel, frames) => {
   const registerHttp = (app) => {
     app.get('/api/dglab/status', (req, res) => {
       const status = buildStatus()
-      res.json({ ok: true, ...status })
+      res.json({ ok: true, ...status, controlToken: state.controlToken })
     })
     app.post('/api/dglab/control', (req, res) => {
       const { action, settings } = req.body || {}

@@ -43,6 +43,7 @@ const manifest: PluginManifest = {
     '· 连接后控制台自动检查 App 硬上限，超出会自动下调并提示。',
   ],
   source: 'builtin',
+  needsAudio: true,
 }
 
 const runtime: PluginRuntime = {

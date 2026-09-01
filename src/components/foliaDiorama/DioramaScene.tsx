@@ -35,6 +35,8 @@ import {
     measureDioramaText,
     rasterDioramaLine,
     rasterDioramaUnit,
+    retainDioramaRasterFont,
+    shrinkDioramaRasterCache,
 } from './dioramaTextRaster';
 import { makeAuraTexture, makeStarSpriteTexture } from './dioramaTextures';
 import { SpectrumFlanks, BeatRings } from './dioramaSpectrum';
@@ -827,6 +829,8 @@ const EMPTY_ANALYSIS: AudioAnalyzerData = Object.freeze({
 const EMPTY_ANALYZER_STORE: AudioAnalyzerStore = {
     getSnapshot: () => EMPTY_ANALYSIS,
     subscribe: () => () => undefined,
+    retainBackground: () => () => undefined,
+    hasBackgroundConsumers: () => false,
 };
 
 export default function DioramaScene({
@@ -848,6 +852,11 @@ export default function DioramaScene({
     const camera = useThree(state => state.camera);
     const aspect = useThree(state => state.viewport.aspect);
     const verticalFovDeg = camera instanceof THREE.PerspectiveCamera ? camera.fov : 60;
+    // 字体变化时只保留新字体的纹理；场景卸载后降到小热集预算，避免跨模式常驻整首歌词。
+    useEffect(() => {
+        retainDioramaRasterFont(fontStack);
+        return () => shrinkDioramaRasterCache();
+    }, [fontStack]);
     // 封面主色 → 背景调色板（天空/辉光/雾色/星云/地面雾全部同色系）
     const bgPalette = useMemo(() => buildBackgroundPalette(accentColor), [accentColor]);
 

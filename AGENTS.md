@@ -56,6 +56,16 @@ npm run version:dry     # 预览将要执行的操作（不落地）
 2. `package.json` `build.files` 必须包含 **`logo.png` 与 `build/**/*`**——`desktop/splash.html` 引用 `../logo.png`，主窗口/登录窗口 icon 用 `../build/icon.ico`，漏打包则启动 logo 丢失。
 3. `package.json` `build.electronDist` 保持 `node_modules/electron/dist`——本机网络无法下载 electron zip，electron-builder 离线构建全靠这个本地副本。
 
+## ⚠️ 设置镜像机制（往设置里加功能前必读）
+
+WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探索 explore / 桌面 desktop，后续可能更多）。**简约模式的设置（`src/components/SettingsPanel.tsx`）是整软件的"总设置"**，其中的全局功能性设置通过设置注册表自动镜像到其他模式：
+
+- `src/services/globalSettingsRegistry.ts` — 声明式设置注册表。每条 `read/write` 与 SettingsPanel **同 localStorage 键、同自定义事件**，任意一端改动全软件同步；`components/MirroredGlobalSettings.tsx` 按各模式自己的设计语言渲染这张表（classic=传统模式 QQ 式布局 / panel=探索抽屉+桌面弹窗卡片式）。
+- **在简约模式设置里新增功能开关时（播放/歌词/性能/桌面集成/网络等全局生效的设置）**：除了写 SettingsPanel 的简约 UI，**必须同步在 globalSettingsRegistry.ts 登记一条**，否则传统/探索/桌面模式的用户永远看不到该功能。自定义控件（如字体选择器 `components/FontPicker.tsx`）在 MirroredGlobalSettings.tsx 为新的 `control.kind` 加渲染分支。
+- **简约模式专属的自定义/外观设置**（只影响简约模式自身，如"自定义首页显示内容"）不需要登记。
+- 桌面集成类设置用 `available: hasXxxBridge` 门控（Web/TV 无 Electron 桥时自动隐藏对应条目与标签页）。
+- 桌面歌词是**独立透明窗口**（`desktop-lyrics.html` 入口 + `desktop/main.cjs` IPC 持久化），设置经 `window.electron.desktopLyrics.updateSettings` 下发，**纯 Web 页面测不了**（无桥接），需 `npm run dev:electron` 实测。
+
 ## Layout & boundaries
 
 - `src/` — React frontend. `components/` (App.tsx lazy-loads nearly everything), `services/` (API clients, cache, gapless/AutoMix logic), `audio/` (playback engine: `PlaybackQueue.ts`, `transitionPlanner.ts`, `TransitionRenderer.ts`, `playbackTimeStore.ts`), `hooks/`, `api/`, `utils/`.

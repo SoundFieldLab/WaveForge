@@ -2,7 +2,8 @@
 // - 所有内容（搜索/音乐库/歌单/歌手/专辑/评论/个人中心）都在中间栏直接展示，不用弹窗；
 // - 平台切换为可拖拽药丸（与简约模式一致）；模式切换走全局顶部下拉条；
 // - 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部，可滚动）。
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
   Captions, ChevronLeft, ChevronRight, Disc3, Heart, History, Home, Library, ListMusic, LogIn, Music2,
@@ -13,7 +14,7 @@ import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import type { Song, LyricLine } from '../services/musicApi'
 import { getProxiedImageUrl, getUserFollows, getUserFolloweds, getQQFollows, getQQFans, getQQUserProfile, subscribeQQUser, subscribeNeteaseUser } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getVisiblePlatforms, getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
+import { getVisiblePlatforms, getPlatformCapabilities, getPlatformCookie, platformLabel, PLATFORM_ORDER_EVENT, PLATFORM_VISIBILITY_EVENT } from '../services/platforms'
 import { fetchExploreHome, fetchExplorePlaylist, type ExplorePayload, type ExplorePlaylist } from '../services/exploreApi'
 import { createPlaylist, getUserPlaylists, invalidateUserPlaylistsCache, subscribePlaylist } from '../services/playlistService'
 import { getAppleRecentPlayed, appleLibraryTrackToSong } from '../services/appleCatalog'
@@ -30,8 +31,21 @@ import TraditionalArtistDetail from './TraditionalArtistDetail'
 import TraditionalAlbumDetail from './TraditionalAlbumDetail'
 import SongContextMenu from './SongContextMenu'
 import PlaylistContextMenu from './PlaylistContextMenu'
+import { MirroredGlobalSettings, PlatformOrderEditor, makeSkin } from './MirroredGlobalSettings'
+import { GLOBAL_SETTINGS_GROUPS, isEntryVisible, useGlobalSettings, type GlobalSettingsGroupId, type MirrorActionId } from '../services/globalSettingsRegistry'
+import { preloadOnIdle } from '../utils/lazyPreload'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler, ViewMode } from '../types/playbackNavigation'
+
+// 设置页用的共享弹窗（按需加载，只有用户在设置里点开时才拉取代码）
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
+
+// 组件挂载后：空闲时预热设置页弹窗 chunk，消除首次点击的卡顿
+const warmSettingsChunks = () => preloadOnIdle([
+  () => import('./CacheClearModal'),
+  () => import('./RemoteControlSettingsModal'),
+])
 
 type TraditionalPreferences = {
   density: 'comfortable' | 'compact'
@@ -334,13 +348,34 @@ function TraditionalView({
   qqLoggedIn, qqUsername, qqAvatar, qqUserId,
   appleLoggedIn, appleUsername, appleAvatar, spotifyUsername, spotifyAvatar,
   kugouUsername, kugouAvatar, sodaUsername, sodaAvatar, authRevision = 0,
-  onLoginClick, onSettingsClick, onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
+  onLoginClick, onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
   liked = false, onToggleFavorite, playMode = 'sequential', onPlayModeChange, onOpenMixingStudio,
   neteaseVip = false, qqVip = false,
   onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onCopyInfo,
 }: TraditionalViewProps) {
-  const [platform, setPlatform] = useState<MusicPlatform>(() => (localStorage.getItem('traditionalPlatform') as MusicPlatform) || 'netease')
+  const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'traditionalPlatform'))
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
+  // 平台顺序 / 显隐是全软件共享的（简约模式账号页、各模式设置里都能改）：订阅事件保持顶部药丸实时同步
+  useEffect(() => {
+    const sync = () => setVisiblePlatforms(getVisiblePlatforms())
+    window.addEventListener(PLATFORM_ORDER_EVENT, sync)
+    window.addEventListener(PLATFORM_VISIBILITY_EVENT, sync)
+    return () => {
+      window.removeEventListener(PLATFORM_ORDER_EVENT, sync)
+      window.removeEventListener(PLATFORM_VISIBILITY_EVENT, sync)
+    }
+  }, [])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+
+  // 空闲时预热设置弹窗 chunk
+  useEffect(() => warmSettingsChunks(), [])
   const [payload, setPayload] = useState<ExplorePayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [playlistLoading, setPlaylistLoading] = useState(false)
@@ -430,13 +465,6 @@ function TraditionalView({
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
 
   useEffect(() => {
-    const syncPlatforms = () => setVisiblePlatforms(getVisiblePlatforms())
-    window.addEventListener('waveforge-platform-visibility-changed', syncPlatforms)
-    window.addEventListener('waveforge-platform-order-changed', syncPlatforms)
-    return () => { window.removeEventListener('waveforge-platform-visibility-changed', syncPlatforms); window.removeEventListener('waveforge-platform-order-changed', syncPlatforms) }
-  }, [])
-
-  useEffect(() => {
     if (!visiblePlatforms.includes(platform)) setPlatform(visiblePlatforms[0] || 'netease')
   }, [platform, visiblePlatforms])
 
@@ -445,7 +473,7 @@ function TraditionalView({
     setLoading(true)
     setPayload(null)
     void fetchExploreHome(platform).then(next => { if (!cancelled) setPayload(next) }).catch(() => { if (!cancelled) setPayload(null) }).finally(() => { if (!cancelled) setLoading(false) })
-    localStorage.setItem('traditionalPlatform', platform)
+    syncPlatformAcrossViews(platform)
     return () => { cancelled = true }
   }, [platform, authRevision])
 
@@ -730,7 +758,7 @@ function TraditionalView({
           ) : currentPage.name === 'recent' ? (
             <TraditionalRecent platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
           ) : currentPage.name === 'settings' ? (
-            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onGlobalSettings={onSettingsClick} />
+            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />
           ) : currentPage.name === 'library' ? (
             <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
           ) : currentPage.name === 'profile' ? (
@@ -1334,48 +1362,205 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
   )
 }
 
-// 设置页：在中间栏直接展示（不再用右侧抽屉），与主流平台「设置即一页」的交互一致
-function TraditionalSettingsPage({ preferences, playerTheme, onChange, onGlobalSettings }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onGlobalSettings: () => void }) {
+// ─────────────────────────── 设置页 ───────────────────────────
+// QQ 音乐式顶部标签 + 全宽内容，分两类：
+// 1. 镜像全局设置（常规/播放/歌词/快捷键/桌面集成/性能/网络/高级/关于）：
+//    来自 services/globalSettingsRegistry，与简约模式设置同键同事件，任意一端改动实时互通；
+// 2. 「传统自定义」：仅影响传统模式自身的布局 / 背景氛围 / 平台排序显隐。
+// 「全局设置」独立入口已移除 —— 全局设置现在就是本页的主体。
+
+type TraditionalSettingsTabId = GlobalSettingsGroupId | 'traditional'
+
+const SETTINGS_TABS: Array<{ id: TraditionalSettingsTabId; label: string }> = [
+  { id: 'general', label: '常规' },
+  { id: 'playback', label: '播放' },
+  { id: 'lyrics', label: '歌词' },
+  { id: 'shortcuts', label: '快捷键' },
+  { id: 'desktop', label: '桌面集成' },
+  { id: 'performance', label: '性能' },
+  { id: 'network', label: '网络' },
+  { id: 'advanced', label: '高级' },
+  { id: 'about', label: '关于' },
+  { id: 'traditional', label: '传统自定义' },
+]
+
+function TraditionalSettingsPage({ preferences, playerTheme, onChange, onOpenQuality }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onOpenQuality: () => void }) {
   const dark = playerTheme === 'dark'
-  const card = dark ? 'border-white/10 bg-white/[0.055]' : 'border-black/10 bg-white/75'
+  const { getValue } = useGlobalSettings()
+  const accent = String(getValue('accentColor') || '#3B82F6')
+  const skin = useMemo(() => makeSkin({ dark, accent }), [dark, accent])
+  const [activeTab, setActiveTab] = useState<TraditionalSettingsTabId>('general')
+  const [showCacheClear, setShowCacheClear] = useState(false)
+  const [showRemoteSettings, setShowRemoteSettings] = useState(false)
+
+  // 当前环境下没有可见条目的分组，对应标签隐藏（如 Web / TV 下的「桌面集成」「网络」）
+  const visibleTabs = useMemo(() => SETTINGS_TABS.filter(tab => {
+    if (tab.id === 'traditional') return true
+    const group = GLOBAL_SETTINGS_GROUPS.find(item => item.id === tab.id)
+    return Boolean(group && group.entries.some(isEntryVisible))
+  }), [])
+
+  useEffect(() => {
+    if (!visibleTabs.some(tab => tab.id === activeTab)) setActiveTab(visibleTabs[0]?.id ?? 'general')
+  }, [visibleTabs, activeTab])
+
+  const handleOpenModal = useCallback((actionId: MirrorActionId) => {
+    if (actionId === 'audio-quality') onOpenQuality()
+    else if (actionId === 'cache-clear') setShowCacheClear(true)
+    else if (actionId === 'remote-settings') setShowRemoteSettings(true)
+  }, [onOpenQuality])
+
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col">
-      <div className="mb-5">
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <div className="mb-2">
         <h1 className="flex items-center gap-2 text-xl font-semibold"><Settings className="h-5 w-5" />设置</h1>
-        <p className={`mt-1 text-xs ${dark ? 'text-white/50' : 'text-slate-500'}`}>只影响传统模式的布局与氛围</p>
+        <p className={`mt-1 text-xs ${dark ? 'text-white/50' : 'text-slate-500'}`}>全局设置与简约模式实时同步、对所有模式生效 · 「传统自定义」仅调整传统模式</p>
       </div>
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-6">
-        <section className={`rounded-2xl border p-5 ${card}`}>
-          <h2 className="mb-4 text-sm font-semibold">布局</h2>
-          <div className="space-y-5">
-            <SettingChoice label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} dark={dark} />
-            <SettingChoice label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} dark={dark} />
-            <Toggle label="显示推荐内容" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} dark={dark} />
-            <Toggle label="显示播放频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} dark={dark} />
-          </div>
-        </section>
-        <section className={`rounded-2xl border p-5 ${card}`}>
-          <h2 className="mb-4 text-sm font-semibold">背景氛围</h2>
-          <div className="space-y-5">
-            <SettingChoice label="背景" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} dark={dark} />
-            <SliderSetting label={`背景模糊 ${preferences.backgroundBlur > 0 ? preferences.backgroundBlur + 'px' : ''}`} value={preferences.backgroundBlur} min={0} max={28} step={1} onChange={value => onChange({ backgroundBlur: value })} dark={dark} />
-            <Toggle label="背景暗化" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} dark={dark} />
-          </div>
-        </section>
-        <button type="button" onClick={onGlobalSettings} className="flex w-full items-center justify-between rounded-2xl border border-pink-400/30 bg-pink-500/10 px-4 py-3 text-left text-sm">
-          <span><span className="block font-medium">全局设置</span><span className="mt-1 block text-xs opacity-55">账号 / 个性化 / 高级 / 关于，与简约模式实时同步</span></span>
-          <ChevronRight className="h-4 w-4" />
-        </button>
+
+      {/* 顶部标签栏 */}
+      <div className={`-mx-1 flex gap-0.5 overflow-x-auto border-b px-1 ${dark ? 'border-white/10' : 'border-black/10'}`} style={{ scrollbarWidth: 'none' }}>
+        {visibleTabs.map(tab => {
+          const active = tab.id === activeTab
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className="relative flex-shrink-0 px-3.5 py-2.5 text-[13px] transition-colors"
+              style={{ color: active ? accent : dark ? 'rgba(255,255,255,.55)' : 'rgba(15,23,42,.55)', fontWeight: active ? 600 : 400 }}
+            >
+              {tab.label}
+              {active && (
+                <motion.span
+                  layoutId="traditional-settings-tab-underline"
+                  className="absolute inset-x-3 bottom-0 h-[2.5px] rounded-full"
+                  style={{ background: accent }}
+                  transition={{ type: 'spring', stiffness: 520, damping: 42 }}
+                />
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* 内容区：全宽滚动 */}
+      <div className="min-h-0 flex-1 overflow-y-auto pb-10 pr-1 pt-4">
+        {activeTab === 'traditional' ? (
+          <TraditionalCustomTab preferences={preferences} skin={skin} onChange={onChange} />
+        ) : (
+          <MirroredGlobalSettings key={activeTab} skin={skin} variant="classic" groupId={activeTab} onOpenModal={handleOpenModal} />
+        )}
+      </div>
+
+      {/* 设置内打开的共享弹窗（音质弹窗由父级挂载） */}
+      <Suspense fallback={null}>
+        {showCacheClear && <LazyCacheClearModal show onClose={() => setShowCacheClear(false)} playerTheme={playerTheme} />}
+        {showRemoteSettings && <LazyRemoteSettingsModal show onClose={() => setShowRemoteSettings(false)} playerTheme={playerTheme} />}
+      </Suspense>
+    </div>
+  )
+}
+
+// 「传统自定义」标签：传统模式私有的布局 / 氛围 / 平台排序
+function TraditionalCustomTab({ preferences, skin, onChange }: { preferences: TraditionalPreferences; skin: ReturnType<typeof makeSkin>; onChange: (patch: Partial<TraditionalPreferences>) => void }) {
+  return (
+    <div>
+      <CustomSection title="布局" description="传统模式自身的排版密度" skin={skin}>
+        <CustomChoice skin={skin} label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} />
+        <CustomChoice skin={skin} label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} />
+        <CustomCheck skin={skin} label="显示推荐内容" description="发现页展示推荐歌单与榜单" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} />
+        <CustomCheck skin={skin} label="显示播放频谱" description="右栏「正在播放」展示实时频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} />
+      </CustomSection>
+      <CustomSection title="背景氛围" description="传统模式自身的背景效果" skin={skin}>
+        <CustomChoice skin={skin} label="背景" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} />
+        <CustomSlider skin={skin} label="背景模糊" value={preferences.backgroundBlur} min={0} max={28} step={1} unit="px" onChange={value => onChange({ backgroundBlur: value })} />
+        <CustomCheck skin={skin} label="背景暗化" description="叠加暗色遮罩，突出前景内容" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} />
+      </CustomSection>
+      <CustomSection title="平台排序与显隐" description="与简约 / 探索 / 桌面模式共用同一份平台顺序，拖拽即时同步" skin={skin}>
+        <PlatformOrderEditor skin={skin} />
+      </CustomSection>
+    </div>
+  )
+}
+
+// 传统自定义的小节外壳（与镜像设置的 classic 分组同一版式）
+function CustomSection({ title, description, skin, children }: { title: string; description?: string; skin: ReturnType<typeof makeSkin>; children: React.ReactNode }) {
+  return (
+    <section className="mb-2">
+      <h3 className="text-[15px] font-semibold" style={{ color: skin.text }}>{title}</h3>
+      {description && <p className="mt-0.5 text-[11px]" style={{ color: skin.muted }}>{description}</p>}
+      <div className="mt-3 grid gap-x-4 gap-y-0.5 border-t pt-3" style={{ borderColor: skin.cardBorder, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
+        {children}
+      </div>
+    </section>
+  )
+}
+
+function CustomCheck({ label, description, value, onChange, skin }: { label: string; description?: string; value: boolean; onChange: (value: boolean) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <button type="button" onClick={() => onChange(!value)} className="flex items-start gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-white/[0.04]">
+      <span
+        className="mt-0.5 flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border-2 transition-all"
+        style={{ borderColor: value ? skin.accent : skin.dark ? 'rgba(255,255,255,0.28)' : 'rgba(15,23,42,0.3)', background: value ? skin.accent : 'transparent' }}
+      >
+        {value && <Check className="h-3 w-3 text-white" strokeWidth={3.5} />}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[13px] leading-5" style={{ color: skin.text }}>{label}</span>
+        {description && <span className="mt-0.5 block text-[11px] leading-4" style={{ color: skin.muted }}>{description}</span>}
+      </span>
+    </button>
+  )
+}
+
+function CustomChoice({ label, value, options, onChange, skin }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <div className="px-2.5 py-2">
+      <div className="text-[13px] leading-5" style={{ color: skin.text }}>{label}</div>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        {options.map(([key, labelText]) => {
+          const active = value === key
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onChange(key)}
+              className="rounded-full border px-3.5 py-1.5 text-xs transition-all"
+              style={{
+                borderColor: active ? skin.accent : skin.cardBorder,
+                background: active ? `${skin.accent}1f` : 'transparent',
+                color: active ? skin.accent : skin.sub,
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {labelText}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function SliderSetting({ label, value, min, max, step, onChange, dark }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; dark: boolean }) {
-  return <div><div className="mb-2 flex items-center justify-between text-sm font-medium"><span>{label}</span></div><input type="range" min={min} max={max} step={step} value={value} onChange={event => onChange(Number(event.target.value))} className="w-full" style={{ accentColor: dark ? '#ec4899' : '#db2777' }} /></div>
+function CustomSlider({ label, value, min, max, step, unit, onChange, skin }: { label: string; value: number; min: number; max: number; step: number; unit?: string; onChange: (value: number) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <div className="px-2.5 py-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] leading-5" style={{ color: skin.text }}>{label}</span>
+        <span className="text-xs tabular-nums" style={{ color: skin.sub }}>{value > 0 ? `${value}${unit || ''}` : '关'}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={event => onChange(Number(event.target.value))}
+        className="mt-2 w-full cursor-pointer"
+        style={{ accentColor: skin.accent, background: skin.controlBg }}
+      />
+    </div>
+  )
 }
-
-function SettingChoice({ label, value, options, onChange, dark }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void; dark: boolean }) { return <div><div className="mb-2 text-sm font-medium">{label}</div><div className="grid grid-cols-3 gap-2">{options.map(([key, labelText]) => <button type="button" key={key} onClick={() => onChange(key)} className={`rounded-xl border px-2 py-2 text-xs ${value === key ? 'border-pink-400 bg-pink-500 text-white' : dark ? 'border-white/10 bg-white/5 opacity-70' : 'border-black/10 bg-black/5 opacity-70'}`}>{labelText}</button>)}</div></div> }
-function Toggle({ label, value, onChange, dark }: { label: string; value: boolean; onChange: (value: boolean) => void; dark: boolean }) { return <button type="button" onClick={() => onChange(!value)} className={`flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm ${dark ? 'border-white/10 bg-white/5' : 'border-black/10 bg-black/5'}`}><span>{label}</span><span className={`relative h-6 w-11 rounded-full ${value ? 'bg-pink-500' : dark ? 'bg-white/15' : 'bg-black/15'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${value ? 'left-[22px]' : 'left-0.5'}`} /></span></button> }
 
 export default memo(TraditionalView)

@@ -2,9 +2,11 @@ import { spawn, execFile } from 'child_process'
 import { build, createServer, preview } from 'vite'
 import electron from 'electron'
 import { fileURLToPath } from 'url'
-import { dirname, resolve } from 'path'
+import { dirname, isAbsolute, resolve } from 'path'
+import { homedir } from 'os'
 import net from 'net'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { randomBytes } from 'crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -22,6 +24,21 @@ const logStartup = message => {
 const projectRoot = resolve(__dirname, '..')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
+const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).toString('base64url')
+const userDataRoot = process.platform === 'win32'
+  ? resolve(process.env.APPDATA || resolve(homedir(), 'AppData/Roaming'), 'WaveForge 澜音工坊')
+  : resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), '.config'), 'WaveForge 澜音工坊')
+let pythonCacheRoot = resolve(userDataRoot, 'cache')
+try {
+  const configured = JSON.parse(readFileSync(resolve(userDataRoot, 'config.json'), 'utf8'))?.cachePath
+  if (typeof configured === 'string' && isAbsolute(configured.trim())) pythonCacheRoot = resolve(configured.trim())
+} catch { /* Missing or invalid config uses the Electron default cache path. */ }
+mkdirSync(pythonCacheRoot, { recursive: true })
+const localServiceEnv = {
+  ...process.env,
+  WAVEFORGE_LOCAL_TOKEN: localServiceToken,
+  WAVEFORGE_CACHE_PATH: pythonCacheRoot,
+}
 
 function getNewestMtime(targetPath) {
   if (!existsSync(targetPath)) return 0
@@ -117,7 +134,10 @@ async function isLocalApiServerHealthy() {
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 1500)
-    const res = await fetch('http://127.0.0.1:3001/api/qq/cookie/status', { signal: controller.signal })
+    const res = await fetch('http://127.0.0.1:3001/health', {
+      headers: { 'X-WaveForge-Local-Token': localServiceToken },
+      signal: controller.signal,
+    })
     clearTimeout(timer)
     if (!res.ok) return false
     const contentType = res.headers.get('content-type') || ''
@@ -143,7 +163,7 @@ function isWaveForgeDevLeftover(commandLine) {
   const normalized = commandLine.replace(/[\\/]+/g, '/')
   const root = projectRoot.replace(/[\\/]+/g, '/')
   if (!normalized.includes(root)) return false
-  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py/.test(normalized)
+  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py|apple_bridge\.py/.test(normalized)
 }
 
 async function killProcess(pid) {
@@ -195,7 +215,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -227,7 +247,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -262,7 +282,7 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
           PYTHONIOENCODING: 'utf-8',
           PYTHONUNBUFFERED: '1'
         }
@@ -304,7 +324,7 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
           FORCE_COLOR: '1'
         }
       }
@@ -386,7 +406,7 @@ async function startDev() {
     {
       stdio: 'inherit',
       env: {
-        ...process.env,
+        ...localServiceEnv,
         WAVEFORGE_DEV_SERVER_URL: devServerUrl,
         WAVEFORGE_STARTUP_LOG: startupLogFile,
         PYTHONIOENCODING: 'utf-8',

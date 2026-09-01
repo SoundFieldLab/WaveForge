@@ -140,7 +140,13 @@ function TraditionalArtistDetail({
                     <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                       {albums.map((album, index) => (
                         <button key={`${album.id}:${index}`} type="button" onClick={() => album.id && onOpenAlbum?.(String(album.id), album.platform || platform)} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${isDark ? 'border-white/10 bg-white/[.04]' : 'border-slate-200 bg-white'}`}>
-                          <img src={album.picUrl ? getProxiedImageUrl(album.picUrl) : ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                          {album.picUrl ? (
+                            <img src={getProxiedImageUrl(album.picUrl)} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                          ) : (
+                            <div className="flex aspect-square w-full items-center justify-center rounded-xl" style={{ background: `${accent}22` }}>
+                              <Disc3 className="h-10 w-10" style={{ color: accent }} />
+                            </div>
+                          )}
                           <div className="mt-2 flex items-center gap-1.5 truncate text-sm"><Disc3 className="h-3.5 w-3.5 shrink-0 opacity-50" /><span className="truncate">{album.name}</span></div>
                           <div className={`text-xs ${muted}`}>{album.publishTime ? new Date(album.publishTime).getFullYear() : '专辑'}{album.size ? ` · ${album.size} 首` : ''}</div>
                         </button>
