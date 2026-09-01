@@ -3670,15 +3670,14 @@ function App() {
       // 歌词不再等待音频 URL，立即开始并复用进行中的请求。
       void ensureSongLyrics(song, cacheKey)
 
-      // WebView2 播放面在跑：Apple 曲目将走播放面原生播放，无需解析载体 URL
-      // （解析出的载体 URL 在 loadAndPlaySong 中被禁用，预载纯属浪费请求）
-      if (platform === 'apple' && isBridgeReady()) {
-        debugLog(`🍎 [Preload] ${song.name}: bridge 运行中，跳过 Apple 曲目载体预载`)
+      // Apple 曲目优先走 Electron CENC 或 WebView2 播放面，无需提前解析 QQ/网易云载体。
+      // 两条 Apple 播放链都失败时，loadAndPlaySong 会按需解析载体，不在队列预载阶段发请求。
+      if (platform === 'apple' && (isAppleNativeStreamEnabled() || isBridgeReady())) {
+        debugLog(`🍎 [Preload] ${song.name}: Apple 原生播放已启用，跳过载体预载`)
         return
       }
 
-      // Apple：队列条目为 Apple 曲目，音频 URL 必须取自解析后的载体歌曲（网易云/QQ）。
-      // 解析仅用于取 URL，缓存键仍是 Apple 歌曲本身，loadAndPlaySong 命中缓存即用有效 URL。
+      // Apple 原生播放被明确关闭且 bridge 未运行时，预载备用载体 URL。
       const audioSource = platform === 'apple'
         ? resolvePlayableSong(song).then(resolved => resolved
             ? { songId: resolved.platform === 'qq' ? resolved.mid || resolved.id : resolved.id, platform: resolved.platform || 'netease' }
