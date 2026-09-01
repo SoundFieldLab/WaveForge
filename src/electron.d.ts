@@ -262,6 +262,15 @@ export interface SignalRgbBridgeAPI {
   onStatus: (callback: (status: SignalRgbStatus) => void) => () => void
 }
 
+export interface VmpStatus {
+  status: 'valid' | 'expiring' | 'expired' | 'invalid' | 'unavailable'
+  kind: 'streaming' | null
+  daysLeft: number | null
+  expiresAt: number | null
+  checkedAt: number
+  source: 'development-verify' | 'build-metadata'
+}
+
 export interface ElectronAPI {
   localPython?: {
     ensure: (service: 'beat' | 'loudness' | 'compensation') => Promise<boolean>
@@ -393,6 +402,9 @@ export interface ElectronAPI {
     onWallpaperChange: (callback: (wallpaper: WallpaperPayload | string) => void) => () => void
     /** 按需启停壁纸监控：仅桌面模式 + 壁纸联动开启时启用（避免非桌面模式持续查询拖慢性能） */
     setWallpaperWatcherEnabled: (enabled: boolean) => Promise<{ success: boolean }>
+  }
+  diagnostics?: {
+    getVmpStatus: () => Promise<VmpStatus>
   }
   developerMode: {
     set: (enabled: boolean) => Promise<{ success: boolean }>

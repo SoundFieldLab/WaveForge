@@ -1102,6 +1102,7 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
           localStorage.setItem('waveforge:transition-debug', value ? '1' : '0')
           notifyGlobalSettingChanged()
         },
+        visibleIf: () => readBool('developerMode', false),
       },
       {
         id: 'cacheClear',

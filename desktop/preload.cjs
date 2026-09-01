@@ -85,6 +85,11 @@ contextBridge.exposeInMainWorld('electron', {
     setWallpaperWatcherEnabled: (enabled) => ipcRenderer.invoke('set-wallpaper-watcher', Boolean(enabled)),
   },
   
+  // 只读构建诊断（不暴露 EVS 输出、路径或凭据）
+  diagnostics: {
+    getVmpStatus: () => ipcRenderer.invoke('diagnostics:get-vmp-status'),
+  },
+
   // 开发者模式
   developerMode: {
     set: (enabled) => ipcRenderer.invoke('set-developer-mode', enabled),

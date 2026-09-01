@@ -335,6 +335,12 @@ const { createRemoteServer, getLanIPv4Addresses } = require('./remote-server.cjs
 const { setupAirplayIpc } = require('./airplay/airplay-ipc.cjs')
 const { setupChromaIpc } = require('./chroma-ipc.cjs')
 const { setupSignalRgbIpc } = require('./signalrgb-ipc.cjs')
+const { createVmpStatusProvider } = require('./vmp-status.cjs')
+const getVmpStatus = createVmpStatusProvider({
+  isPackaged: app.isPackaged,
+  developmentPackageDir: path.join(__dirname, '..', 'node_modules', 'electron', 'dist'),
+  resourcesPath: process.resourcesPath,
+})
 logStartupTiming('Main-process modules loaded')
 
 let desktopWidgetCpuSample = null
@@ -1582,6 +1588,8 @@ const trustedIpc = createTrustedIpcGuard({
   },
 })
 const guardTrustedIpc = trustedIpc.handle
+
+ipcMain.handle('diagnostics:get-vmp-status', guardTrustedIpc('privileged', () => getVmpStatus()))
 
 let taskbarWidgetClosedByUser = false
 let taskbarWidgetInteractive = false

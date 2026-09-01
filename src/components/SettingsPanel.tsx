@@ -69,6 +69,7 @@ import {
 import { checkBridgeRunning, ensureBridgeRunning, bridgeShowWindow, bridgeHideWindow, getState as getAppleBridgeState } from '../services/appleWebViewBridge'
 import BilibiliLoginPanel from './BilibiliLoginPanel'
 import BilibiliProfileModal from './BilibiliProfileModal'
+import VmpStatusCard from './VmpStatusCard'
 import {
   isBilibiliLoggedIn,
   getStoredBilibiliUser,
@@ -4371,7 +4372,15 @@ function SettingsPanel({
 
                       {/* 调试面板子开关（开发者模式开启后显示） */}
                       {developerMode && (
-                        <div className="mt-3 rounded-xl border p-4" style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderColor: borderColor }}>
+                        <>
+                          <div className="mt-3">
+                            <VmpStatusCard
+                              dark={playerTheme === 'dark'}
+                              accent={accentColor}
+                              borderColor={playerTheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}
+                            />
+                          </div>
+                          <div className="mt-3 rounded-xl border p-4" style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderColor: borderColor }}>
                           <div className={`${textPrimary} font-medium mb-2 text-sm`}>调试面板</div>
                           {[
                             { key: 'waveforge:debug-show-backend', label: '后端日志（左下）' },
@@ -4408,6 +4417,7 @@ function SettingsPanel({
                             </span>
                           </label>
                         </div>
+                        </>
                       )}
                     </div>
                   </div>
