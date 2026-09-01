@@ -80,7 +80,7 @@ npm run sync:sponsors   # 刷新爱发电赞助名单（构建前会自动以可
 test-python-service.bat # 检测节拍服务（3002）
 ```
 
-`npm run dev:electron` 启动前会快速验证开发 ECS 的 production streaming VMP；签名仍有效时不会重签。只有首次配置、重装或升级 Electron 后才会请求一次 EVS 签名，前端热更新与普通 `npm run build` 不生成 EXE、也不触发签名。
+`npm run dev:electron` 启动前会快速验证开发 ECS 的 production streaming VMP；签名仍有效时不会重签。只有首次配置、重装或升级 Electron 后才会请求一次 EVS 签名，前端热更新与普通 `npm run build` 不生成 EXE、也不触发签名。开启应用级开发者模式后，可在“开发者选项”查看 VMP 剩余有效天数；剩余不超过 180 天时界面会提示安排续签。
 
 ## 发布（GitHub Releases）
 
@@ -92,7 +92,7 @@ git tag v<version> && git push origin v<version>
 gh release create v<version> release/WaveForge-<version>-Setup.exe --title "v<version>" --notes "..."
 ```
 
-Windows 发布机/CI 必须配置 `EVS_ACCOUNT_NAME`、`EVS_PASSWD` 并安装 `castlabs-evs`。签名发生在构建机，最终用户安装后**不需要 EVS、签名工具或任何手动签名步骤**；用户只需在应用内登录具有有效订阅的 Apple Music 账号。
+Windows 发布机/CI 必须配置 `EVS_ACCOUNT_NAME`、`EVS_PASSWD` 并安装 `castlabs-evs`。签名发生在构建机，正式构建要求 production streaming VMP 至少剩余 30 天，并将无敏感信息的有效期元数据写入安装包；低于门槛或签名无效会直接阻断发布。最终用户安装后**不需要 EVS、签名工具或任何手动签名步骤**；用户只需在应用内登录具有有效订阅的 Apple Music 账号。
 
 ## 端口一览
 
