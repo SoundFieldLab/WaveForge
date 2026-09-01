@@ -1,4 +1,4 @@
-import { spawn, execFile } from 'child_process'
+import { spawn, execFile, spawnSync } from 'child_process'
 import { build, createServer, preview } from 'vite'
 import electron from 'electron'
 import { fileURLToPath } from 'url'
@@ -24,6 +24,21 @@ const logStartup = message => {
 const projectRoot = resolve(__dirname, '..')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
+
+// 直接执行本脚本（快捷方式/IDE/`node scripts/dev-electron.mjs`）时 npm 不会运行
+// predev:electron。这里再次确保 ECS production streaming VMP，避免原生 Apple CENC
+// 因 development VMP 被 -1021 拒绝后误走 WebView2 兼容兜底。
+const vmpCheck = spawnSync(process.execPath, [resolve(projectRoot, 'scripts/ensure-dev-vmp.cjs')], {
+  cwd: projectRoot,
+  stdio: 'inherit',
+  env: process.env,
+  windowsHide: true,
+})
+if (vmpCheck.status !== 0) {
+  console.error('[EVS/VMP] 开发运行时校验失败，终止启动以避免静默退回非原生音源')
+  process.exit(vmpCheck.status || 1)
+}
+
 const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).toString('base64url')
 const userDataRoot = process.platform === 'win32'
   ? resolve(process.env.APPDATA || resolve(homedir(), 'AppData/Roaming'), 'WaveForge 澜音工坊')

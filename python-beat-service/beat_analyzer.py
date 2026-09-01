@@ -13,6 +13,11 @@ import time
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from local_service_auth import is_allowed_audio_path, is_authorized_local_request
