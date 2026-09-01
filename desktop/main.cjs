@@ -26,6 +26,12 @@ const { app, BrowserWindow, ipcMain, protocol, shell, session, safeStorage, dial
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
+
+const windowIconPath = path.join(__dirname, '..', 'logo.png')
+const windowIcon = nativeImage.createFromPath(windowIconPath)
+if (windowIcon.isEmpty()) {
+  console.warn('[Startup] Failed to decode window icon:', windowIconPath)
+}
 const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
 const { createDocumentUrlMatcher, createTrustedIpcGuard } = require('./trusted-ipc.cjs')
 const LOCAL_SERVICE_TOKEN = process.env.WAVEFORGE_LOCAL_TOKEN || crypto.randomBytes(32).toString('base64url')
@@ -311,9 +317,11 @@ app.on('child-process-gone', (_event, details) => {
   }
 })
 
-// 立即设置应用名称（必须在app.ready之前）
+// 立即设置应用名称（必须在 app.ready 之前）。打包版使用与安装器一致的
+// AppUserModelID；开发版没有该 ID 对应的开始菜单快捷方式，强行设置会让
+// Windows Shell 回退到空白文件图标，而不是 BrowserWindow 的自定义图标。
 app.setName('WaveForge 澜音工坊')
-app.setAppUserModelId('com.waveforge.desktop')
+if (app.isPackaged) app.setAppUserModelId('com.waveforge.desktop')
 
 const { execFile, execFileSync, spawn } = require('child_process')
 const os = require('os')
@@ -2211,6 +2219,7 @@ function createWindow() {
     resizable: false,
     maximizable: false,
     fullscreenable: false,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     // 显示时机：等渲染器完成首帧绘制（ready-to-show）再 show。
     // 本机 GPU 合成器为 disabled_software（软件合成，GPU 加速禁用）：
     // 窗口隐藏时渲染器默认暂停绘制（paintWhenInitiallyHidden=false），首帧可能
@@ -2264,7 +2273,6 @@ function createWindow() {
   // 创建主窗口：默认原生不透明窗口（Windows 11 系统圆角/阴影/对齐吸附）。
   // 桌面融合穿透需要透明窗口，而 transparent 仅创建时生效——开启/关闭融合时
   // 由 recreateMainWindow 销毁重建切换透明属性，普通模式始终用原生窗口。
-  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -2275,7 +2283,7 @@ function createWindow() {
     transparent: false,
     titleBarStyle: 'hidden',
     title: 'WaveForge 澜音工坊',
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     roundedCorners: true,
     show: false, // 初始隐藏窗口
     webPreferences: {
@@ -6708,7 +6716,6 @@ async function recreateMainWindow(transparent) {
   oldWindow.__wfRecreating = true
   if (!oldWindow.isDestroyed()) oldWindow.destroy()
 
-  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
   const win = new BrowserWindow({
     width: savedBounds.width,
     height: savedBounds.height,
@@ -6721,7 +6728,7 @@ async function recreateMainWindow(transparent) {
     transparent,
     titleBarStyle: 'hidden',
     title: 'WaveForge 澜音工坊',
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     // 不透明窗口用 Windows 11 原生圆角；透明窗口原生圆角无效，由渲染端 #root 自绘
     roundedCorners: !transparent,
     show: false,
