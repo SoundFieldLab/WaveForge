@@ -71,6 +71,8 @@ export interface ExploreChartSong {
   id?: number
   /** 平台歌曲标识（酷狗 hash / 抖音 music_id 等），用于直接播放 */
   mid?: string
+  /** Apple 目录曲目 id（原生取流 salableAdamId）；缺失时只能回退载体匹配 */
+  appleId?: string
   name: string
   artist: string
   coverUrl?: string
@@ -807,6 +809,8 @@ export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSigna
   if (chart.platform === 'apple') {
     const songs: Song[] = chart.songs.map(song => ({
       id: typeof song.id === 'number' ? song.id : Number(song.id) || 0,
+      // appleId 是原生取流的唯一依据：缺了就只能回退 QQ/网易云 载体匹配
+      appleId: song.appleId || undefined,
       name: song.name,
       artists: song.artist ? [{ name: song.artist }] : [],
       album: { name: '', picUrl: song.coverUrl || '' },

@@ -15,11 +15,16 @@ interface Playlist {
   isLike?: boolean
   isRecent?: boolean
   covers?: string[]
+  platform?: MusicPlatform
+  userId?: string | number
+  isCollected?: boolean
+  ownedByMe?: boolean
 }
 
 interface PlaylistCarousel3DProps {
   playlists: Playlist[]
   onPlaylistSelect: (playlist: Playlist) => void
+  onPlaylistContextMenu?: (playlist: Playlist, event: React.MouseEvent) => void
   platform: MusicPlatform
   initialFocusedIndex?: number
   /** TV 紧凑模式：卡片/间距/容器高度按比例缩小，适配遥控器桌面模式常驻显示 */
@@ -32,7 +37,7 @@ const VISIBLE_RADIUS = 4
 // TV 紧凑模式缩放系数：卡片 240→160，间距 280→186，容器 370→~247
 const COMPACT_SCALE = 0.667
 
-function PlaylistCarousel3D({ playlists, onPlaylistSelect, platform, initialFocusedIndex = 0, compact = false }: PlaylistCarousel3DProps) {
+function PlaylistCarousel3D({ playlists, onPlaylistSelect, onPlaylistContextMenu, platform, initialFocusedIndex = 0, compact = false }: PlaylistCarousel3DProps) {
   const [focusedIndex, setFocusedIndex] = useState(initialFocusedIndex)
   const wheelTimeout = useRef<NodeJS.Timeout | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -304,6 +309,7 @@ function PlaylistCarousel3D({ playlists, onPlaylistSelect, platform, initialFocu
             zIndex={zIndex}
             rotateY={rotateY}
             compact={compact}
+            onContextMenu={onPlaylistContextMenu}
             onKeyboardActivate={() => {
               // 鼠标静止点击已由容器处理（suppressClickRef），跳过避免重复打开；
               // 遥控器 OK 合成的 click 没有 pointer 序列，正常走这里
@@ -415,10 +421,11 @@ interface PlaylistCardProps {
   zIndex: number
   rotateY: number
   onKeyboardActivate: () => void
+  onContextMenu?: (playlist: Playlist, event: React.MouseEvent) => void
   compact?: boolean
 }
 
-const PlaylistCard = memo(function PlaylistCard({ playlist, platform, index, isActive, scale, opacity, xOffset, zIndex, rotateY, onKeyboardActivate, compact = false }: PlaylistCardProps) {
+const PlaylistCard = memo(function PlaylistCard({ playlist, platform, index, isActive, scale, opacity, xOffset, zIndex, rotateY, onKeyboardActivate, onContextMenu, compact = false }: PlaylistCardProps) {
   const cardSize = compact ? Math.round(240 * COMPACT_SCALE) : 240
   return (
     <motion.div
@@ -447,6 +454,12 @@ const PlaylistCard = memo(function PlaylistCard({ playlist, platform, index, isA
         height: `${cardSize}px`,
         transformStyle: 'preserve-3d',
         willChange: 'transform, opacity',
+      }}
+      onContextMenu={event => {
+        if (!onContextMenu) return
+        event.preventDefault()
+        event.stopPropagation()
+        onContextMenu(playlist, event)
       }}
       onClick={() => onKeyboardActivate()}
     >

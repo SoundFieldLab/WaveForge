@@ -12,10 +12,19 @@ const pendingOwnerMutations = new Map<string, Array<{ identifier: string; add: b
 
 const ownerKey = (platform: FavoritePlatform, userId: string) => `${platform}:${userId}`
 
+const stableCredentialKey = (value: string): string => {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
 export function getFavoriteUserId(platform: FavoritePlatform): string {
   if (platform === 'apple') {
-    // Apple 无 userId；用固定归属键（登录态存在时），凭据失效即自然失效
-    return localStorage.getItem('appleMediaUserToken') ? 'apple-user' : ''
+    const token = localStorage.getItem('appleMediaUserToken') || ''
+    return token ? `apple-${stableCredentialKey(token)}` : ''
   }
   if (platform === 'qq') return localStorage.getItem('qq_user_id') || ''
   // 汽水：归属键用自身登录态
@@ -35,7 +44,7 @@ export function getFavoriteUserId(platform: FavoritePlatform): string {
 }
 
 export function getFavoriteSongIdentifiers(song: Song): string[] {
-  return [song.id, song.mid]
+  return [song.id, song.mid, song.appleId, song.appleLibraryId]
     .filter(value => value !== undefined && value !== null && String(value).trim())
     .map(value => String(value))
 }
@@ -96,14 +105,13 @@ export function applyFavoriteMutation(detail: {
   if (!detail.platform || (detail.type !== 'like' && detail.type !== 'unlike')) return
   const userId = getFavoriteUserId(detail.platform)
   if (!userId) return
-  const ids = favoriteIdsCache.get(ownerKey(detail.platform, userId))
-  if (!ids) return
+  const key = ownerKey(detail.platform, userId)
+  const ids = favoriteIdsCache.get(key)
 
   const identifiers = [detail.songId, detail.songMid]
     .filter(value => value !== undefined && value !== null && String(value).trim())
     .map(value => String(value))
   if (!identifiers.length) return
-  const key = ownerKey(detail.platform, userId)
 
   if (!ids) {
     // 缓存尚未加载完成（loadFavoriteIdentifiers 在途）：只记录增量，

@@ -88,6 +88,13 @@ function clearSpotifySession(): void {
   window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify' } }))
 }
 
+async function parseSpotifyResponse(response: Response): Promise<any> {
+  if (response.status === 204 || response.headers.get('content-length') === '0') return { ok: true }
+  const text = await response.text()
+  if (!text.trim()) return { ok: true }
+  return JSON.parse(text)
+}
+
 export async function spotifyFetch(path: string, init?: RequestInit): Promise<any | null> {
   const token = getSpotifyToken()
   if (!token) return null
@@ -108,12 +115,12 @@ export async function spotifyFetch(path: string, init?: RequestInit): Promise<an
         const retryHeaders = new Headers(init?.headers)
         retryHeaders.set('Authorization', `Bearer ${getSpotifyToken()}`)
         const retry = await fetch(`${API}${path}`, { ...init, headers: retryHeaders })
-        if (retry.ok) return retry.json()
+        if (retry.ok) return parseSpotifyResponse(retry)
       }
       return null
     }
     if (!resp.ok) return null
-    return resp.json()
+    return parseSpotifyResponse(resp)
   } catch (e) {
     console.warn('[Spotify] 请求失败:', e)
     return null
@@ -536,8 +543,9 @@ export function spotifyTrackToSong(track: SpotifyTrack): Song {
     id: Number(parseInt(track.id.slice(0, 12), 36)) || 0,
     mid: track.id,
     name: track.name,
-    artists: track.artists.map(a => ({ name: a.name })),
+    artists: track.artists.map(a => ({ name: a.name, mid: a.id })),
     album: {
+      mid: track.album?.id,
       name: track.album?.name || '',
       picUrl: track.album?.images?.[0]?.url || '',
     },

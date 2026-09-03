@@ -1,4 +1,5 @@
 import { memo, useState, useEffect, useRef } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
@@ -10,7 +11,7 @@ import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } 
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
 import { getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, streamNeteasePlaylistTracks } from '../services/playlistService'
-import { getAppleLibraryPlaylists, enrichApplePlaylistTrackCounts, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, APPLE_LIBRARY_ID, isAppleLovedPlaylistName } from '../services/appleCatalog'
+import { getAppleLibraryPlaylists, enrichApplePlaylistTrackCounts, getAppleFavoriteSongs, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, getLastAppleMutationResult, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
 import { imageCache } from '../utils/imageCache'
 import { wallpaperManager, WallpaperFile } from '../services/wallpaperManager'
@@ -107,7 +108,7 @@ const homeModuleSessionCache = new Map<string, HomeModuleSessionSnapshot>()
 const HOME_MODULE_SESSION_CACHE_LIMIT = 6
 const HOME_MODULE_SESSION_CACHE_TTL = 5 * 60 * 1000
 const HOME_MODULE_PERSISTED_CACHE_TTL = 24 * 60 * 60 * 1000
-const HOME_MODULE_PERSISTED_CACHE_KEY = 'waveforge:home-module-cache:v1'
+const HOME_MODULE_PERSISTED_CACHE_KEY = 'waveforge:home-module-cache:v2'
 
 const readPersistedHomeModuleCache = (): Record<string, HomeModuleSessionSnapshot> => {
   try {
@@ -121,7 +122,7 @@ const readPersistedHomeModuleCache = (): Record<string, HomeModuleSessionSnapsho
 
 // localStorage 持久化只写精简字段：仅保留渲染与点击所需的小字段（均为 Song 接口字段），
 // 丢弃原始响应可能附带的歌词缓存/播放地址/privilege 等大字段，避免每次保存都同步序列化整份冗余数据。
-const SLIM_SONG_FIELDS = ['id', 'mid', 'songType', 'name', 'artists', 'album', 'duration', 'platform', 'vip', 'noCopyright', 'commentCount', 'fee', 'fusedSources'] as const
+const SLIM_SONG_FIELDS = ['id', 'mid', 'songType', 'name', 'artists', 'album', 'duration', 'platform', 'appleId', 'appleLibraryId', 'appleStorefront', 'vip', 'noCopyright', 'commentCount', 'fee', 'fusedSources'] as const
 const SLIM_PLAYLIST_FIELDS = ['id', 'name', 'coverImgUrl', 'trackCount', 'playCount', 'description', 'platform', 'source', 'creator', 'isLike', 'dirId', 'userId', 'isCollected'] as const
 
 const slimHomeModuleSnapshot = (snapshot: { songs: Song[]; playlists: any[] }): { songs: Song[]; playlists: any[] } => {
@@ -279,16 +280,19 @@ function HomeView({
   authRevision = 0
 }: HomeViewProps) {
   const [leftChartType, setLeftChartType] = useState<ChartType>('new')
-  // 从 localStorage 恢复上次选择的平台（所有平台都参与恢复，避免播放页点 Home 键回退到第一个平台）
-  const [platform, setPlatform] = useState<MusicPlatform>(() => {
-    const saved = localStorage.getItem('selectedPlatform')
-    const valid = saved === 'qq' || saved === 'netease' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda'
-    return valid ? saved : 'netease'
-  })
-  // 平台变化（药丸点击/拖动/被隐藏回退）即持久化：播放页 HomeView 卸载重挂后仍回到当前平台
+  const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'selectedPlatform'))
+  // 平台变化（药丸点击/拖动/被隐藏回退）即持久化；其他挂载视图通过事件同步
   useEffect(() => {
-    try { localStorage.setItem('selectedPlatform', platform) } catch { /* 忽略 */ }
+    syncPlatformAcrossViews(platform)
   }, [platform])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -305,7 +309,7 @@ function HomeView({
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
       setPlatform(next)
-      localStorage.setItem('selectedPlatform', next)
+      syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
 
@@ -493,7 +497,8 @@ function HomeView({
   
   // Playlist detail panel state
   const [showPlaylistDetail, setShowPlaylistDetail] = useState(false)
-  // Apple 音乐库歌曲（喜爱歌曲，amp-api；供伪歌单打开/播放）
+  // Apple 合成集合分别维护，避免将“喜爱歌曲”与整个资料库混为一谈。
+  const [appleFavoriteSongs, setAppleFavoriteSongs] = useState<Song[]>([])
   const [appleLibrarySongs, setAppleLibrarySongs] = useState<Song[]>([])
   const [playlistSongs, setPlaylistSongs] = useState<Song[]>([])
   const [loadingPlaylistSongs, setLoadingPlaylistSongs] = useState(false)
@@ -775,8 +780,13 @@ function HomeView({
     const request = (async () => {
       let data: any
 
-      // Apple：音乐库伪歌单直接用已加载的喜爱歌曲；目录歌单（pl. 前缀）走 catalog，资料库歌单走 me/library
+      // Apple 合成集合使用各自已加载曲目；真实目录/资料库歌单走对应 API。
       if (playlistPlatform === 'apple') {
+        if (String(playlist.id || '') === APPLE_FAVORITES_ID) {
+          const songs = appleFavoriteSongs
+          if (songs.length > 0) setPlaylistPlaybackCache(cacheKey, songs)
+          return songs
+        }
         if (String(playlist.id || '') === APPLE_LIBRARY_ID) {
           const songs = appleLibrarySongs.length > 0 ? appleLibrarySongs : []
           if (songs.length > 0) {
@@ -789,7 +799,9 @@ function HomeView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = playlistId.startsWith('pl.')
+          ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
+          : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         if (songs.length > 0) {
           setPlaylistPlaybackCache(cacheKey, songs)
         }
@@ -987,8 +999,15 @@ function HomeView({
     try {
       const playlistPlatform = playlist.platform || platform
 
-      // Apple：音乐库伪歌单直接用已加载的喜爱歌曲；目录歌单（pl. 前缀）走 catalog，资料库歌单走 me/library
+      // Apple 合成集合使用各自已加载曲目；真实目录/资料库歌单走对应 API。
       if (playlistPlatform === 'apple') {
+        if (String(playlist.id || '') === APPLE_FAVORITES_ID) {
+          if (isCurrentRequest()) {
+            setSelectedPlaylist({ ...playlist, platform: 'apple' })
+            setPlaylistSongs(appleFavoriteSongs)
+          }
+          return
+        }
         if (String(playlist.id || '') === APPLE_LIBRARY_ID) {
           if (isCurrentRequest()) {
             setSelectedPlaylist({ ...playlist, platform: 'apple' })
@@ -1002,7 +1021,9 @@ function HomeView({
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
         if (!isCurrentRequest()) return
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = playlistId.startsWith('pl.')
+          ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
+          : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setSelectedPlaylist({ ...playlist, platform: 'apple', trackCount: songs.length })
         setPlaylistSongs(songs)
         return
@@ -1159,9 +1180,10 @@ function HomeView({
     try {
       // Apple：amp-api 创建资料库歌单（描述/封面不受公开接口支持）
       if (platform === 'apple') {
-        const ok = await createApplePlaylist(name)
-        if (!ok) throw new Error('创建 Apple 歌单失败，请检查登录状态')
+        const ok = await createApplePlaylist(name, description)
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '创建 Apple 歌单失败')
         await refreshPlaylists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list' } }))
         setShowCreatePlaylist(false)
         showPlaylistToast('Apple 歌单创建成功', 'success')
         return
@@ -1215,8 +1237,9 @@ function HomeView({
           name: data.name,
           description: data.desc || undefined,
         })
-        if (!ok) throw new Error('更新 Apple 歌单失败，请检查登录状态')
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '更新 Apple 歌单失败')
         await refreshPlaylists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list', playlistId: String(selectedPlaylist.id || '') } }))
         setShowEditPlaylist(false)
         showPlaylistToast('Apple 歌单信息已更新', 'success')
         return
@@ -1255,8 +1278,9 @@ function HomeView({
       // Apple：删除资料库歌单（amp-api）
       if (platform === 'apple') {
         const ok = await deleteApplePlaylist(String(selectedPlaylist.id || ''))
-        if (!ok) throw new Error('删除 Apple 歌单失败，请检查登录状态')
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '删除 Apple 歌单失败')
         await refreshPlaylists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list', playlistId: String(selectedPlaylist.id || '') } }))
         setShowDeletePlaylist(false)
         setSelectedPlaylist(null)
         setShowPlaylistDetail(false)
@@ -1355,9 +1379,9 @@ function HomeView({
     if (platform === 'apple') {
       if (!selectedPlaylist || selectedPlaylist.isLike || selectedPlaylist.isCollected) return
       try {
-        const appleSongId = song.appleId || String(song.id)
+        const appleSongId = song.appleLibraryId || song.appleId || String(song.id)
         const ok = await removeAppleTracksFromPlaylist(String(selectedPlaylist.id || ''), [appleSongId])
-        if (!ok) throw new Error('从 Apple 歌单移除歌曲失败，请检查登录状态')
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '从 Apple 歌单移除歌曲失败')
         playlistPlaybackCacheRef.current.delete(getPlaylistPlaybackCacheKey(selectedPlaylist))
         setPlaylistSongs(previous => previous.filter(item => !(
           isSameSong(item, song)
@@ -1489,12 +1513,21 @@ function HomeView({
   useEffect(() => {
     const handlePlaylistContentChanged = (event: Event) => {
       const detail = (event as CustomEvent<{
-        platform?: 'netease' | 'qq'
+        platform?: MusicPlatform
         type?: string
+        playlistId?: string | number
         coverImgUrl?: string
         trackCountDelta?: number
       }>).detail
-      if (!detail || detail.platform !== platform || detail.type !== 'like') return
+      if (!detail || detail.platform !== platform) return
+      if (detail.type !== 'like' && platform === 'apple') {
+        void loadUserPlaylists(true)
+        if (selectedPlaylist && detail.playlistId && String(selectedPlaylist.id) === String(detail.playlistId)) {
+          void handlePlaylistClick(selectedPlaylist)
+        }
+        return
+      }
+      if (detail.type !== 'like') return
 
       const patchLikedPlaylist = (playlist: any) => playlist?.isLike
         ? {
@@ -1526,11 +1559,6 @@ function HomeView({
       timers.forEach(timer => window.clearTimeout(timer))
     }
   }, [userPlaylists, platform])
-  
-  // 保存平台选择到 localStorage
-  useEffect(() => {
-    localStorage.setItem('selectedPlatform', platform)
-  }, [platform])
   
   // Watch for home module configuration changes
   useEffect(() => {
@@ -1908,9 +1936,10 @@ function HomeView({
       setUserPlaylists([])
       setPlaylistLoading(true)
       try {
-        const [playlistsRes, libraryRes] = await Promise.allSettled([
+        const [playlistsRes, libraryRes, favoritesRes] = await Promise.allSettled([
           getAppleLibraryPlaylists(100),
           getAppleLibrarySongs(100),
+          getAppleFavoriteSongs(5000),
         ])
         if (loadId !== playlistLoadIdRef.current) return
         // 资料库歌单：列表接口对喜爱歌曲/收藏类不返回 trackCount → 补拉曲目数；
@@ -1921,34 +1950,35 @@ function HomeView({
         const playlists = enrichedPlaylists.map(playlist => ({
           ...playlist,
           coverImgUrl: playlist.artworkUrl || '',
-          isLike: isAppleLovedPlaylistName(playlist.name || ''),
+          isLike: false,
         }))
-        const lovedPlaylist = playlists.find(item => item.isLike)
-        if (lovedPlaylist) {
-          lovedPlaylist.name = `${appleUsername || 'Apple Music 用户'} 的喜爱歌曲`
-          const firstCover = await getApplePlaylistFirstTrackArtwork(String(lovedPlaylist.id))
-          if (firstCover) lovedPlaylist.coverImgUrl = firstCover
-        }
         let appleSongs: Song[] = []
         if (libraryRes.status === 'fulfilled') {
           appleSongs = libraryRes.value.map(track => appleLibraryTrackToSong(track))
           setAppleLibrarySongs(appleSongs)
         }
-        // 「我的音乐库」= 全部收藏歌曲，伪歌单置于顶部（非喜爱，不打爱心）
-        if (appleSongs.length > 0) {
-          setUserPlaylists([
-            {
-              id: APPLE_LIBRARY_ID,
-              name: '我的音乐库',
-              coverImgUrl: appleSongs[0]?.album.picUrl || '',
-              trackCount: appleSongs.length,
-              platform: 'apple',
-            },
-            ...playlists,
-          ])
-        } else {
-          setUserPlaylists(playlists)
-        }
+        const favoriteSongs = favoritesRes.status === 'fulfilled'
+          ? favoritesRes.value.map(track => appleSongToSong(track))
+          : []
+        setAppleFavoriteSongs(favoriteSongs)
+        const syntheticPlaylists = [
+          ...(favoriteSongs.length > 0 ? [{
+            id: APPLE_FAVORITES_ID,
+            name: `${appleUsername || 'Apple Music 用户'} 的喜爱歌曲`,
+            coverImgUrl: favoriteSongs[0]?.album.picUrl || '',
+            trackCount: favoriteSongs.length,
+            platform: 'apple' as const,
+            isLike: true,
+          }] : []),
+          ...(appleSongs.length > 0 ? [{
+            id: APPLE_LIBRARY_ID,
+            name: '我的音乐库',
+            coverImgUrl: appleSongs[0]?.album.picUrl || '',
+            trackCount: appleSongs.length,
+            platform: 'apple' as const,
+          }] : []),
+        ]
+        setUserPlaylists([...syntheticPlaylists, ...playlists])
       } catch (error) {
         console.error('Load Apple playlists failed:', error)
       } finally {
@@ -3216,10 +3246,10 @@ function HomeView({
             <motion.div
               key="pill"
               initial={{ opacity: 0, y: 20, width: '30rem' }}
-              animate={{ opacity: 1, y: 0, width: '30rem' }}
+              animate={{ opacity: 1, y: 0, width: 'auto' }}
               exit={{ opacity: 0, y: 20, width: '30rem' }}
               transition={{ type: "spring", stiffness: 300, damping: 25 }}
-              className="home-bottom-pill relative overflow-hidden px-8 py-4 rounded-full"
+              className="home-bottom-pill relative min-w-[30rem] max-w-[calc(100vw-2rem)] overflow-x-auto overflow-y-hidden rounded-full px-8 py-4"
               style={{
                 willChange: 'transform, opacity'
               }}
@@ -3232,7 +3262,7 @@ function HomeView({
                   WebkitBackdropFilter: `blur(${cardBlurAmount}px) saturate(180%)`,
                 }}
               />
-              <div className="relative z-10 flex items-center justify-center gap-6">
+              <div className="relative z-10 flex w-max min-w-full items-center justify-center gap-6 [&>button]:shrink-0">
                 {/* 播放设备控制按钮 */}
                 <motion.button
                   whileHover={{ scale: 1.1 }}
@@ -3330,7 +3360,8 @@ function HomeView({
           const artist = song.artists?.[0]
           // 汽水无艺人 ID，约定传歌手名
           const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
-            : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+            : songPlatform === 'qq' ? (artist?.mid || artist?.id)
+              : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : artist?.id
           if (onOpenArtist && artistId) onOpenArtist(String(artistId), songPlatform)
           setContextMenuVisible(false)
         }}

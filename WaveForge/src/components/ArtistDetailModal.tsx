@@ -429,11 +429,6 @@ export default function ArtistDetailModal({
   onOpenArtist,
   onCopyInfo
 }: ArtistDetailModalProps) {
-  // TV 遥控器 BACK：关闭艺人详情弹窗
-  useTvBack(() => {
-    onClose()
-    return true
-  }, [onClose])
   const [artist, setArtist] = useState<Artist | null>(null)
   const [hotSongs, setHotSongs] = useState<Song[]>([])
   const [allSongs, setAllSongs] = useState<Song[]>([])
@@ -453,6 +448,15 @@ export default function ArtistDetailModal({
   const [selectedMV, setSelectedMV] = useState<{ id: number | string; name: string; platform?: 'netease' | 'qq'; index: number } | null>(null)
   /** Apple 音乐视频：站内播放弹窗（webPlayback + HLS） */
   const [appleMvItem, setAppleMvItem] = useState<AppleWebItem | null>(null)
+  // 子视频优先消费返回键，避免关闭父艺人页。
+  useTvBack(() => {
+    if (appleMvItem) {
+      setAppleMvItem(null)
+      return true
+    }
+    onClose()
+    return true
+  }, [appleMvItem, onClose])
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   // 选歌播放：退出动画零时长，弹窗当帧卸载。整屏 backdrop-filter 退出节点在播放页
   // 同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
@@ -608,9 +612,8 @@ export default function ArtistDetailModal({
   // 如果有初始专辑ID，加载专辑数据后自动打开该专辑
   useEffect(() => {
     if (initialAlbumId && albums.length > 0) {
-      // 与 handleAlbumOpen 的 onAlbumOpen(album.mid || album.id) 保持同一键序：
-      // 优先 mid（QQ 专辑 mid 为字符串 id），并 String 归一，避免 id/mid 数字字符串不一致匹配失败
-      const album = albums.find(a => String(a.mid || a.id) === String(initialAlbumId))
+      // 与 handleAlbumOpen 的回调保持同一键序：Apple 优先 appleId，QQ 优先 mid，并 String 归一。
+      const album = albums.find(a => String(a.appleId || a.mid || a.id) === String(initialAlbumId))
       if (album) {
         setSelectedAlbum(album)
         setActiveTab('albums') // 切换到专辑标签
@@ -651,16 +654,18 @@ export default function ArtistDetailModal({
           getAppleCatalogArtist(String(artistId), storefront),
           getAppleCatalogRelatedArtists(String(artistId), storefront),
         ])
-        if (detail.status === 'fulfilled' && detail.value) {
-          const d = detail.value
+        const catalogArtist = catalog.status === 'fulfilled' ? catalog.value : null
+        if ((detail.status === 'fulfilled' && detail.value) || catalogArtist) {
+          const d = detail.status === 'fulfilled' ? detail.value : null
           setArtist({
-            id: Number(d.artist.id) || 0,
-            name: d.artist.name,
-            picUrl: (catalog.status === 'fulfilled' && catalog.value?.artworkUrl) || d.artist.artworkUrl || '',
-            description: catalog.status === 'fulfilled' ? catalog.value?.bio : undefined,
+            id: Number(d?.artist.id || catalogArtist?.id || artistId) || 0,
+            mid: String(d?.artist.id || catalogArtist?.id || artistId),
+            name: d?.artist.name || catalogArtist?.name || 'Apple Music 艺人',
+            picUrl: catalogArtist?.artworkUrl || d?.artist.artworkUrl || '',
+            description: catalogArtist?.bio,
             platform: 'apple',
           })
-          setHotSongs(d.topSongs.map(song => appleSongToSong(song, storefront)))
+          setHotSongs((d?.topSongs || []).map(song => appleSongToSong(song, storefront)))
         } else {
           setHotSongsError('未找到该 Apple 艺人')
         }
@@ -835,6 +840,7 @@ export default function ArtistDetailModal({
         const albumsData = await getAppleCatalogArtistAlbums(String(artistId), storefront, 200)
         setAlbums(albumsData.map(album => ({
           id: Number(album.id) || 0,
+          appleId: String(album.id),
           name: album.name,
           picUrl: album.artworkUrl || '',
           artist: { name: album.artistName },
@@ -987,7 +993,7 @@ export default function ArtistDetailModal({
     // 通知父组件专辑被打开
     if (onAlbumOpen) {
       // QQ音乐必须使用 mid (字符串格式)，网易云使用 id
-      onAlbumOpen(album.mid || album.id!)
+      onAlbumOpen(album.appleId || album.mid || album.id!)
     }
   }, [onAlbumOpen])
 
@@ -1034,7 +1040,7 @@ export default function ArtistDetailModal({
         onClick={() => {
           // 当子模态框（专辑详情或视频播放器）打开时，不响应背景点击
           // 避免误触导致关闭艺人详情
-          if (selectedAlbum || selectedMV) {
+          if (selectedAlbum || selectedMV || appleMvItem) {
             return
           }
           onClose()
@@ -1512,7 +1518,7 @@ export default function ArtistDetailModal({
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {albums.slice(0, 100).map((album) => (
                       <ArtistAlbumCard
-                        key={`album-${album.platform}-${album.mid || album.id}`}
+                        key={`album-${album.platform}-${album.appleId || album.mid || album.id}`}
                         album={album}
                         playerTheme={playerTheme}
                         onOpen={handleAlbumOpen}
@@ -1760,7 +1766,7 @@ export default function ArtistDetailModal({
       <AnimatePresence>
         {selectedAlbum && (
           <AlbumDetailModal
-            albumId={selectedAlbum.mid || selectedAlbum.id!}
+            albumId={selectedAlbum.appleId || selectedAlbum.mid || selectedAlbum.id!}
             platform={platform}
             onClose={() => setSelectedAlbum(null)}
             onSongSelect={(song, songs) => {

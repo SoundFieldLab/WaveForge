@@ -24,7 +24,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
 import { getAppleAuthState } from '../services/appleAuth'
 import { getPlatformRemainingDays } from '../services/loginExpiry'
-import { getAppleLibraryPlaylists, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, getApplePlaylistFirstTrackArtwork, appleSongToSong, APPLE_LIBRARY_ID, isAppleLovedPlaylistName, enrichApplePlaylistTrackCounts } from '../services/appleCatalog'
+import { getAppleLibraryPlaylists, getAppleFavoriteSongs, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, appleSongToSong, getLastAppleMutationResult, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID, enrichApplePlaylistTrackCounts } from '../services/appleCatalog'
 import { fetchSpotifyMyPlaylists, fetchSpotifyLiked, fetchSpotifyPlaylist, spotifyTrackToSong } from '../services/spotifyService'
 import { detectQQMusicVip } from '../utils/musicEntitlements'
 
@@ -672,6 +672,44 @@ function ProfileView({
   }
 
   const refreshPlaylistLists = async (showFeedback = false) => {
+    if (platform === 'apple') {
+      setLoading(true)
+      try {
+        const [raw, favoriteTracks] = await Promise.all([
+          getAppleLibraryPlaylists(200),
+          getAppleFavoriteSongs(5000),
+        ])
+        const enriched = await enrichApplePlaylistTrackCounts(raw)
+        const mapped = enriched.map(playlist => ({
+          id: String(playlist.id),
+          name: playlist.name || '未命名歌单',
+          trackCount: Number(playlist.trackCount || 0),
+          coverImgUrl: playlist.artworkUrl || '',
+          description: playlist.description || '',
+          platform: 'apple' as const,
+          isLike: false,
+        }))
+        const favoriteSongs = favoriteTracks.map(track => appleSongToSong(track))
+        setAppleFavoriteSongs(favoriteSongs)
+        setCreatedPlaylists(previous => {
+          const library = previous.find(item => item.id === APPLE_LIBRARY_ID)
+          const favorites = favoriteSongs.length > 0 ? {
+            id: APPLE_FAVORITES_ID,
+            name: `${getAppleAuthState().name || 'Apple Music 用户'} 的喜爱歌曲`,
+            coverImgUrl: favoriteSongs[0]?.album.picUrl || '',
+            trackCount: favoriteSongs.length,
+            platform: 'apple' as const,
+            isLike: true,
+          } : null
+          return [...(favorites ? [favorites] : []), ...(library ? [library] : []), ...mapped]
+        })
+        setSubscribedPlaylists([])
+        if (showFeedback) showPlaylistToast('歌单列表已刷新', 'success')
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
     if (!userId) return
     setLoading(true)
     try {
@@ -716,9 +754,10 @@ function ProfileView({
     try {
       // Apple：amp-api 创建资料库歌单（描述/封面不受公开接口支持）
       if (platform === 'apple') {
-        const ok = await createApplePlaylist(name)
-        if (!ok) throw new Error('创建 Apple 歌单失败，请检查登录状态')
+        const ok = await createApplePlaylist(name, description)
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '创建 Apple 歌单失败')
         await refreshPlaylistLists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list' } }))
         setShowCreatePlaylist(false)
         showPlaylistToast('Apple 歌单创建成功', 'success')
         return
@@ -761,9 +800,22 @@ function ProfileView({
   }
 
   const handleEditPlaylist = async (data: { name: string; desc?: string; privacy?: string; coverDataUrl?: string }) => {
-    if (!managementPlaylist || platform !== 'netease') return
+    if (!managementPlaylist) return
     setOperationLoading(true)
     try {
+      if (platform === 'apple') {
+        const ok = await updateApplePlaylist(String(managementPlaylist.id || ''), {
+          name: data.name,
+          description: data.desc || undefined,
+        })
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '更新 Apple 歌单失败')
+        setShowEditPlaylist(false)
+        await refreshPlaylistLists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list', playlistId: String(managementPlaylist.id || '') } }))
+        showPlaylistToast('Apple 歌单信息已更新', 'success')
+        return
+      }
+      if (platform !== 'netease') return
       const tags = Array.isArray((managementPlaylist as any).tags)
         ? (managementPlaylist as any).tags.join(';')
         : ((managementPlaylist as any).tags || '')
@@ -800,11 +852,12 @@ function ProfileView({
       // Apple：删除资料库歌单（amp-api）
       if (platform === 'apple') {
         const ok = await deleteApplePlaylist(String(managementPlaylist.id || ''))
-        if (!ok) throw new Error('删除 Apple 歌单失败，请检查登录状态')
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '删除 Apple 歌单失败')
         setShowDeletePlaylist(false)
         setManagementPlaylist(null)
         setShowPlaylistDetail(false)
         await refreshPlaylistLists()
+        window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list' } }))
         showPlaylistToast('Apple 歌单已删除', 'success')
         return
       }
@@ -876,8 +929,13 @@ function ProfileView({
   const handlePlayPlaylist = async (playlist: Playlist, event: React.MouseEvent) => {
     event.stopPropagation()
     try {
-      // Apple：目录/资料库歌单统一拉曲目后播放（曲目经 App 层自动匹配载体）
+      // Apple：合成集合直接使用已加载歌曲；真实目录/资料库歌单走对应 API。
       if (platform === 'apple') {
+        if (playlist.id === APPLE_FAVORITES_ID) {
+          if (appleFavoriteSongs.length > 0) handleSongSelection(appleFavoriteSongs[0], appleFavoriteSongs)
+          else showPlaylistToast('喜爱歌曲中暂无可播放歌曲', 'info')
+          return
+        }
         if (playlist.id === APPLE_LIBRARY_ID) {
           if (appleLibrarySongs.length > 0) handleSongSelection(appleLibrarySongs[0], appleLibrarySongs)
           else showPlaylistToast('音乐库中暂无可播放歌曲', 'info')
@@ -888,7 +946,9 @@ function ProfileView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = playlistId.startsWith('pl.')
+          ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
+          : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         if (songs.length > 0) handleSongSelection(songs[0], songs)
         else showPlaylistToast('歌单中暂无可播放歌曲', 'info')
         return
@@ -943,20 +1003,25 @@ function ProfileView({
   }
 
   const handleRemoveFromPlaylist = async (song: Song, playlistId: string) => {
-    if (
-      !managementPlaylist ||
-      managementPlaylist.isLike ||
+    if (!managementPlaylist || managementPlaylist.isLike || managementPlaylist.id === APPLE_LIBRARY_ID) return
+    if (platform !== 'apple' && (
       managementPlaylist.isCollected ||
       managementPlaylist.userId?.toString() !== userId.toString()
-    ) return
+    )) return
     setOperationLoading(true)
     try {
-      const result = await removeSongFromPlaylist(playlistId, song.id.toString(), userId, platform, {
-        songMid: song.mid,
-        songType: song.songType,
-      })
-      if (!isPlaylistActionSuccessful(result)) {
-        throw new Error(result?.error || result?.message || '从歌单移除歌曲失败')
+      if (platform === 'apple') {
+        const trackId = song.appleLibraryId || song.appleId || String(song.id)
+        const ok = await removeAppleTracksFromPlaylist(playlistId, [trackId])
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '从 Apple 歌单移除歌曲失败')
+      } else {
+        const result = await removeSongFromPlaylist(playlistId, song.id.toString(), userId, platform, {
+          songMid: song.mid,
+          songType: song.songType,
+        })
+        if (!isPlaylistActionSuccessful(result)) {
+          throw new Error(result?.error || result?.message || '从歌单移除歌曲失败')
+        }
       }
       setPlaylistSongs(previous => previous.filter(item => !(
         isSameSong(item, song)
@@ -998,7 +1063,8 @@ function ProfileView({
   const [selectedPlaylist, setSelectedPlaylist] = useState<any>(null)
   const [playlistSongs, setPlaylistSongs] = useState<Song[]>([])
   const [loadingPlaylistSongs, setLoadingPlaylistSongs] = useState(false)
-  // Apple 个人中心「我的音乐库」歌曲（喜欢歌曲，amp-api）
+  // Apple 合成集合分别维护。
+  const [appleFavoriteSongs, setAppleFavoriteSongs] = useState<Song[]>([])
   const [appleLibrarySongs, setAppleLibrarySongs] = useState<Song[]>([])
 
   const handleSongSelection = (song: Song, songs?: Song[]) => {
@@ -1019,8 +1085,14 @@ function ProfileView({
     try {
       let response, data
       
-      // Apple：目录歌单（pl. 前缀）走 catalog，资料库歌单走 me/library；音乐库伪歌单直接使用已加载歌曲
+      // Apple：合成集合直接使用已加载歌曲；真实目录/资料库歌单走对应 API。
       if (platform === 'apple') {
+        if (playlist.id === APPLE_FAVORITES_ID) {
+          setSelectedPlaylist({ ...playlist, platform: 'apple' })
+          setManagementPlaylist({ ...playlist, platform: 'apple' })
+          setPlaylistSongs(appleFavoriteSongs)
+          return
+        }
         if (playlist.id === APPLE_LIBRARY_ID) {
           setSelectedPlaylist({ ...playlist, platform: 'apple' })
           setManagementPlaylist({ ...playlist, platform: 'apple' })
@@ -1032,7 +1104,9 @@ function ProfileView({
         const tracks = playlistId.startsWith('pl.')
           ? await getAppleCatalogPlaylistTracks(playlistId, storefront)
           : await getApplePlaylistTracks(playlistId)
-        const songs = tracks.map(track => appleSongToSong(track, storefront))
+        const songs = playlistId.startsWith('pl.')
+          ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
+          : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setSelectedPlaylist({ ...playlist, platform: 'apple' })
         setManagementPlaylist({ ...playlist, platform: 'apple' })
         setPlaylistSongs(songs)
@@ -1265,7 +1339,7 @@ function ProfileView({
           subtitle: track.artistName || '',
           coverUrl: track.artworkUrl || '',
           playTime: 0,
-          song: appleLibraryTrackToSong(track),
+          song: appleSongToSong(track),
         })))
         return
       }
@@ -1600,12 +1674,18 @@ function ProfileView({
   useEffect(() => {
     const handlePlaylistContentChanged = (event: Event) => {
       const detail = (event as CustomEvent<{
-        platform?: 'netease' | 'qq'
+        platform?: MusicPlatform
         type?: string
+        playlistId?: string | number
         coverImgUrl?: string
         trackCountDelta?: number
       }>).detail
-      if (!detail || detail.platform !== currentPlatform || detail.type !== 'like') return
+      if (!detail || detail.platform !== currentPlatform) return
+      if (currentPlatform === 'apple' && detail.type !== 'like') {
+        void refreshPlaylistLists()
+        return
+      }
+      if (detail.type !== 'like') return
 
       setCreatedPlaylists(previous => previous.map(playlist => playlist.isLike
         ? {
@@ -1669,14 +1749,14 @@ function ProfileView({
         setLoading(false)
         return
       }
-      const [playlistsRes, libraryRes] = await Promise.allSettled([
+      const [playlistsRes, libraryRes, favoritesRes] = await Promise.allSettled([
         getAppleLibraryPlaylists(200),
         getAppleLibrarySongs(500),
+        getAppleFavoriteSongs(5000),
       ])
       if (playlistsRes.status === 'fulfilled') {
         // 列表接口对喜爱歌曲/收藏类歌单不返回 trackCount → 补拉曲目数（否则卡片显示空）
         const enriched = await enrichApplePlaylistTrackCounts(playlistsRes.value)
-        // 喜爱歌曲：重命名为「用户名 的喜爱歌曲」+ 用首曲封面（Apple 系统歌单封面不可靠）
         const mappedPlaylists = enriched.map(playlist => ({
           id: String(playlist.id),
           name: playlist.name || '未命名歌单',
@@ -1684,16 +1764,24 @@ function ProfileView({
           coverImgUrl: playlist.artworkUrl || '',
           description: playlist.description || '',
           platform: 'apple' as const,
-          isLike: isAppleLovedPlaylistName(playlist.name || ''),
+          isLike: false,
         }))
-        const lovedPlaylist = mappedPlaylists.find(item => item.isLike)
-        if (lovedPlaylist) {
-          const displayName = getAppleAuthState().name || 'Apple Music 用户'
-          lovedPlaylist.name = `${displayName} 的喜爱歌曲`
-          const firstCover = await getApplePlaylistFirstTrackArtwork(String(lovedPlaylist.id))
-          if (firstCover) lovedPlaylist.coverImgUrl = firstCover
-        }
         setCreatedPlaylists(mappedPlaylists)
+      }
+      if (favoritesRes.status === 'fulfilled') {
+        const favoriteSongs = favoritesRes.value.map(track => appleSongToSong(track))
+        setAppleFavoriteSongs(favoriteSongs)
+        if (favoriteSongs.length > 0) {
+          setCreatedPlaylists(previous => [{
+            id: APPLE_FAVORITES_ID,
+            name: `${getAppleAuthState().name || 'Apple Music 用户'} 的喜爱歌曲`,
+            coverImgUrl: favoriteSongs[0]?.album.picUrl || '',
+            trackCount: favoriteSongs.length,
+            description: 'Apple Music 中标记为喜爱的歌曲',
+            platform: 'apple',
+            isLike: true,
+          }, ...previous.filter(item => item.id !== APPLE_FAVORITES_ID)])
+        }
       }
       if (libraryRes.status === 'fulfilled') {
         const librarySongs = libraryRes.value.map(track => appleLibraryTrackToSong(track))
@@ -3164,9 +3252,13 @@ function ProfileView({
         onViewComments={onViewComments}
         onCopyInfo={onCopyInfo}
         onRemoveFromPlaylist={
-          managementPlaylist?.userId?.toString() === userId.toString() &&
-          !managementPlaylist?.isLike &&
-          !managementPlaylist?.isCollected
+          (
+            platform === 'apple'
+              ? Boolean(managementPlaylist) && !managementPlaylist?.isLike && managementPlaylist?.id !== APPLE_LIBRARY_ID
+              : managementPlaylist?.userId?.toString() === userId.toString() &&
+                !managementPlaylist?.isLike &&
+                !managementPlaylist?.isCollected
+          )
             ? handleRemoveFromPlaylist
             : undefined
         }
@@ -3188,10 +3280,13 @@ function ProfileView({
         }}
         onSubscribe={handleSubscribePlaylist}
         onShare={handleSharePlaylist}
-        isOwner={playlistContextMenu.playlist?.userId?.toString() === userId.toString()}
+        isOwner={platform === 'apple'
+          ? Boolean(playlistContextMenu.playlist) && !playlistContextMenu.playlist?.isLike && playlistContextMenu.playlist?.id !== APPLE_LIBRARY_ID
+          : playlistContextMenu.playlist?.userId?.toString() === userId.toString()}
         isSubscribed={Boolean(playlistContextMenu.playlist?.isCollected || playlistContextMenu.playlist?.subscribed)}
-        isSpecialPlaylist={Boolean(playlistContextMenu.playlist?.isLike)}
-        canEdit={platform === 'netease'}
+        isSpecialPlaylist={Boolean(playlistContextMenu.playlist?.isLike || playlistContextMenu.playlist?.id === APPLE_LIBRARY_ID)}
+        canEdit={platform === 'netease' || platform === 'apple'}
+        canShare={platform !== 'apple' || String(playlistContextMenu.playlist?.id || '').startsWith('pl.')}
       />
 
       {recentSongContextMenu.song && (
@@ -3220,7 +3315,8 @@ function ProfileView({
           onViewArtist={onOpenArtist ? (song) => {
             const songPlatform = song.platform || platform
             const artist = song.artists?.[0]
-            const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+            const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id)
+              : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : artist?.id
             if (artistId) onOpenArtist(String(artistId), songPlatform)
           } : undefined}
           onCopyInfo={onCopyInfo}

@@ -38,7 +38,15 @@ export interface PlatformCapabilities {
   /** 用户歌单（查看） */
   userPlaylists: boolean
   createPlaylist: boolean
+  /** 修改自建歌单名称/描述 */
+  updatePlaylist: boolean
   deletePlaylist: boolean
+  /** 搜索公开歌单 */
+  searchPlaylists: boolean
+  /** 生成可靠的公开歌单链接 */
+  sharePlaylist: boolean
+  /** 从自建歌单移除曲目 */
+  removeTracksFromPlaylist: boolean
   /** 歌单加歌 */
   addTracksToPlaylist: boolean
   /** 收藏他人歌单 */
@@ -86,7 +94,11 @@ const NETEASE_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true,
   createPlaylist: true,
+  updatePlaylist: true,
   deletePlaylist: true,
+  searchPlaylists: true,
+  sharePlaylist: true,
+  removeTracksFromPlaylist: true,
   addTracksToPlaylist: true,
   subscribePlaylist: true,
   likedSongs: true,
@@ -118,6 +130,7 @@ const NETEASE_CAPABILITIES: PlatformCapabilities = {
 
 const QQ_CAPABILITIES: PlatformCapabilities = {
   ...NETEASE_CAPABILITIES,
+  updatePlaylist: false,
   signin: false,
   social: true,
   // QQ 无听歌排行 / 云盘
@@ -130,7 +143,11 @@ const APPLE_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true,
   createPlaylist: true,
+  updatePlaylist: true,
   deletePlaylist: true,
+  searchPlaylists: true,
+  sharePlaylist: true,
+  removeTracksFromPlaylist: true,
   addTracksToPlaylist: true,
   // Apple Music 无"收藏他人歌单"概念（资料库歌单即我的歌单）
   subscribePlaylist: false,
@@ -167,7 +184,11 @@ const SPOTIFY_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true,
   createPlaylist: true,
+  updatePlaylist: true,
   deletePlaylist: false, // Spotify Web API 无删除歌单接口
+  searchPlaylists: true,
+  sharePlaylist: true,
+  removeTracksFromPlaylist: true,
   addTracksToPlaylist: true,
   subscribePlaylist: true, // follow/unfollow
   likedSongs: true,
@@ -203,7 +224,11 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true, // H5 签名网关
   createPlaylist: false, // 创建歌单网关未接入
+  updatePlaylist: false,
   deletePlaylist: false,
+  searchPlaylists: false,
+  sharePlaylist: false,
+  removeTracksFromPlaylist: false,
   addTracksToPlaylist: true, // /v6/add_song
   subscribePlaylist: false,
   likedSongs: true, // "我喜欢"歌单
@@ -238,7 +263,11 @@ const SODA_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true, // 逆向 Web API：用户歌单获取（含虚拟歌单）
   createPlaylist: false, // 逆向接口未提供创建歌单
+  updatePlaylist: false,
   deletePlaylist: false,
+  searchPlaylists: false,
+  sharePlaylist: false,
+  removeTracksFromPlaylist: false,
   addTracksToPlaylist: true, // me/playlist/media/append 加歌
   subscribePlaylist: true, // collection 收藏/取消收藏歌单
   likedSongs: true, // "我喜欢"虚拟歌单 qishui-liked
@@ -259,7 +288,7 @@ const SODA_CAPABILITIES: PlatformCapabilities = {
   social: false,
   rank: false,
   cloudDisk: false,
-  recentPlayed: false, // 仅上报播放，暂无听歌排行展示
+  recentPlayed: true, // 登录态 recent 接口
   artistDetail: true, // 按歌手名检索热门歌曲（无独立艺人 ID）
   albumDetail: true,
   similarSongs: true, // 同歌手热门 + 日推组合的相关探索
@@ -279,6 +308,26 @@ export const PLATFORM_CAPABILITIES: Record<MusicPlatform, PlatformCapabilities> 
 
 export function getPlatformCapabilities(platform: MusicPlatform): PlatformCapabilities {
   return PLATFORM_CAPABILITIES[platform] || NETEASE_CAPABILITIES
+}
+
+export interface PlatformFavoriteLabels {
+  add: string
+  remove: string
+  collection: string
+}
+
+const PLATFORM_FAVORITE_LABELS: Record<MusicPlatform, PlatformFavoriteLabels> = {
+  netease: { add: '我喜欢', remove: '从喜欢歌单中移除', collection: '我喜欢的音乐' },
+  qq: { add: '我喜欢', remove: '从喜欢歌单中移除', collection: '我喜欢的歌曲' },
+  apple: { add: '喜爱歌曲', remove: '从喜爱歌曲中移除', collection: '喜爱歌曲' },
+  spotify: { add: '保存到音乐库', remove: '从音乐库中移除', collection: '音乐库歌曲' },
+  kugou: { add: '我喜欢', remove: '从喜欢歌单中移除', collection: '我喜欢' },
+  soda: { add: '我喜欢', remove: '从喜欢中移除', collection: '我喜欢' },
+}
+
+/** 收藏/资料库在各平台的用户可见名称，避免菜单各自硬编码。 */
+export function getPlatformFavoriteLabels(platform: MusicPlatform): PlatformFavoriteLabels {
+  return PLATFORM_FAVORITE_LABELS[platform] || PLATFORM_FAVORITE_LABELS.netease
 }
 
 // ─────────────────────────── 平台排序（用户自定义，三模式继承） ───────────────────────────

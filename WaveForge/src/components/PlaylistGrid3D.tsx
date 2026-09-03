@@ -539,7 +539,7 @@ export default function PlaylistGrid3D({
             closeContextMenu()
           } : undefined}
           onViewAlbum={onOpenAlbum ? async (song) => {
-            const songPlatform = (song.platform || platform) as 'netease' | 'qq'
+            const songPlatform = (song.platform || platform) as MusicPlatform
             const albumId = await resolveSongAlbumIdentifier(song, songPlatform)
             if (albumId) onOpenAlbum(albumId, songPlatform)
             closeContextMenu()
@@ -549,7 +549,8 @@ export default function PlaylistGrid3D({
             const artist = song.artists?.[0]
             // 汽水无艺人 ID，约定传歌手名
             const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
-              : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+              : songPlatform === 'apple' ? (artist?.appleId || artist?.id)
+                : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
             if (artistId) onOpenArtist(String(artistId), songPlatform)
             closeContextMenu()
           } : undefined}

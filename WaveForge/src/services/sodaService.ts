@@ -237,7 +237,7 @@ async function sodaPost<T>(path: string, body: Record<string, unknown> = {}): Pr
  * Song.id 用 Number(mid.slice(0,15))||0 截断生成，与 douyinMusicToSong 一致）；
  * vip 由 vip/requiredTier(vip|svip) 推导写入 Song.vip；artists 解析为数组。
  */
-function mapSodaSongToSong(s: SodaSong): Song {
+export function sodaMediaToSong(s: SodaSong): Song {
   const mid = String(s?.id ?? '')
   const tier = s?.requiredTier
   const vip = Boolean(s?.vip || tier === 'vip' || tier === 'svip')
@@ -270,7 +270,7 @@ function mapSodaSongToSong(s: SodaSong): Song {
 /** 批量映射并剔除无 id 的脏数据 */
 function mapSodaSongs(list: SodaSong[] | undefined): Song[] {
   if (!Array.isArray(list)) return []
-  return list.map(mapSodaSongToSong).filter(song => song.mid)
+  return list.map(sodaMediaToSong).filter(song => song.mid)
 }
 
 // ────────────────────────────── 状态 / 搜索 ──────────────────────────────

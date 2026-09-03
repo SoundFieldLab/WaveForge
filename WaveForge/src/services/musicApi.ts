@@ -116,19 +116,24 @@ export interface Song {
   mid?: string // QQ音乐需要mid
   songType?: number // QQ MusicU 写操作必须使用歌曲真实类型，不能固定为 0
   name: string
-  artists: { id?: number; name: string; mid?: string }[]
+  artists: { id?: number; name: string; mid?: string; appleId?: string }[]
   album: {
     id?: number // 网易云专辑ID，用于懒加载封面
     name: string
     picUrl: string
     mid?: string
     pmid?: string | number
+    appleId?: string
   }
   duration: number
   playCount?: number // 播放次数（听歌排行等）
   platform?: MusicPlatform // 标识来源平台
-  /** Apple Music 目录/资料库 ID 原文（数字转 String(id) 后可能丢失精度，保留原串） */
+  /** Apple Music 目录 ID，用于播放、评分和加入资料库 */
   appleId?: string
+  /** Apple Music 资料库资源 ID，用于资料库删除和歌单移除 */
+  appleLibraryId?: string
+  /** Apple Music storefront，避免跨区详情回落到默认商店 */
+  appleStorefront?: string
   /** Apple Music 电台直播（流已取好；携带后跳过 webPlayback/载体匹配，直接走 HLS） */
   appleRadio?: {
     stream: import('./applePlayback').AppleNativeStream
@@ -144,6 +149,7 @@ export interface Song {
     platform: MusicPlatform
     id: number
     mid?: string
+    appleId?: string
     vip?: boolean
     noCopyright?: boolean
   }>
@@ -178,8 +184,19 @@ export function getLocalAlbumIdentifier(song: Song, platform: MusicPlatform): st
 }
 
 export async function resolveSongAlbumIdentifier(song: Song, platform: MusicPlatform): Promise<string | null> {
-  // Apple 歌曲的 album 无网易云/QQ 专辑 id，不向平台接口查询
-  if (platform === 'apple') return null
+  if (platform === 'apple') {
+    const localId = song.album?.appleId
+    if (localId) return String(localId)
+    const songId = String(song.appleId || '')
+    if (!songId) return null
+    try {
+      const { fetchAppleSongDetail } = await import('./appleWebService')
+      const detail = await fetchAppleSongDetail(songId, song.appleStorefront)
+      return detail?.album?.playId || detail?.album?.id || null
+    } catch {
+      return null
+    }
+  }
   // 汽水：直接返回专辑名标识，不向网易云/QQ 查询详情
   if (platform === 'soda') return getLocalAlbumIdentifier(song, 'soda')
   const localId = getLocalAlbumIdentifier(song, platform)
@@ -208,6 +225,7 @@ export async function resolveSongAlbumIdentifier(song: Song, platform: MusicPlat
 export interface Artist {
   id: number
   mid?: string // QQ音乐需要mid
+  appleId?: string // Apple Music 原始字符串 ID
   name: string
   picUrl: string
   albumSize?: number // 专辑数量
@@ -229,9 +247,10 @@ export interface Artist {
 export interface Album {
   id: number
   mid?: string // QQ音乐需要mid
+  appleId?: string // Apple Music 原始字符串 ID
   name: string
   picUrl: string
-  artist: { name: string; id?: number; mid?: string }
+  artist: { name: string; id?: number; mid?: string; appleId?: string }
   publishTime?: number
   size?: number // 歌曲数量
   description?: string // 专辑描述
@@ -257,15 +276,48 @@ export interface SearchResult {
 
 export interface LyricLine {
   time: number
+  endTime?: number // 行结束时间（秒）
   text: string
   words?: LyricWord[] // 逐字歌词
   translation?: string // 翻译
   roman?: string // 罗马音（纯文本）
   romanWords?: LyricWord[] // 逐字罗马音
+  role?: string
   /** Apple Music 对唱/多声部：ttm:agent id（如 v1/v2） */
   agent?: string
+  agentId?: string
   /** 该行演唱者名（由 Apple 曲目艺人列表按 agent 顺序映射） */
   agentName?: string
+  /** 同一文本的翻译、罗马音或其他角色文本。 */
+  alternateTexts?: LyricAlternateText[]
+  /** 依附于当前主行的背景和声。 */
+  backgroundVocals?: LyricBackgroundVocal[]
+}
+
+export interface LyricAlternateText {
+  role: 'translation' | 'romanization' | string
+  type?: 'translation' | 'romanization' | string
+  language?: string
+  lang?: string
+  text: string
+  agent?: string
+  time?: number
+  endTime?: number
+  words?: LyricWord[]
+}
+
+export interface LyricBackgroundVocal {
+  time: number
+  endTime: number
+  text: string
+  words: LyricWord[]
+  translation?: string
+  roman?: string
+  romanization?: string
+  agent?: string
+  agentId?: string
+  agentName?: string
+  alternateTexts?: LyricAlternateText[]
 }
 
 export interface LyricWord {
@@ -313,6 +365,12 @@ export function getProxiedImageUrl(originalUrl: string, size: number = 500): str
 export async function searchSongs(keywords: string, limit = 30, platform: MusicPlatform = 'netease'): Promise<SearchResult> {
   try {
     const devMode = localStorage.getItem('developerMode') === 'true'
+    if (platform === 'apple') {
+      const { searchAppleSongsAsSongs } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const songs = await searchAppleSongsAsSongs(keywords, storefront, limit)
+      return { songs, songCount: songs.length }
+    }
     // 酷狗：前端直连搜索接口（kugouService）
     if (platform === 'kugou') {
       const { searchKugouSongs, kugouTrackToSong } = await import('./kugouService')
@@ -463,6 +521,18 @@ export async function searchSuggest(keywords: string, platform: MusicPlatform = 
 // 搜索歌手
 export async function searchArtists(keywords: string, platform: MusicPlatform = 'netease'): Promise<Artist[]> {
   try {
+    if (platform === 'apple') {
+      const { searchAppleCatalogArtists } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const artists = await searchAppleCatalogArtists(keywords, storefront, 20)
+      return artists.map(artist => ({
+        id: Number(artist.id) || 0,
+        appleId: String(artist.id),
+        name: artist.name,
+        picUrl: artist.artworkUrl || '',
+        platform: 'apple' as const,
+      }))
+    }
     // Spotify：官方 API 艺人搜索
     if (platform === 'spotify') {
       const { searchSpotifyArtists } = await import('./spotifyService')
@@ -537,6 +607,20 @@ export async function searchArtists(keywords: string, platform: MusicPlatform = 
 // 搜索专辑
 export async function searchAlbums(keywords: string, platform: MusicPlatform = 'netease'): Promise<Album[]> {
   try {
+    if (platform === 'apple') {
+      const { searchAppleCatalogAlbums } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const albums = await searchAppleCatalogAlbums(keywords, storefront, 20)
+      return albums.map(album => ({
+        id: Number(album.id) || 0,
+        appleId: String(album.id),
+        name: album.name,
+        picUrl: album.artworkUrl || '',
+        artist: { name: album.artistName },
+        publishTime: album.releaseDate ? new Date(album.releaseDate).getTime() : undefined,
+        platform: 'apple' as const,
+      }))
+    }
     // Spotify：官方 API 专辑搜索
     if (platform === 'spotify') {
       const { searchSpotifyAlbums } = await import('./spotifyService')
@@ -1187,6 +1271,14 @@ export async function getLyrics(
     
     const useThirdParty = thirdPartyEnabled !== null ? JSON.parse(thirdPartyEnabled) : true
     const useAdaptive = adaptiveLyrics !== null ? JSON.parse(adaptiveLyrics) : true
+    const isApplePlatform = platform === 'apple'
+    if (isApplePlatform && isAppleMusicConfigured()) {
+      const appleLyrics = await getAppleMusicLyrics(songName || '', artistName || '', duration, { songId: id })
+      if (appleLyrics.length > 0 || !useThirdParty || !useAdaptive || primarySource === 'Platform') return appleLyrics
+    }
+    if (isApplePlatform && (!useThirdParty || !useAdaptive || primarySource === 'Platform')) {
+      return []
+    }
     // 如果禁用第三方或禁用自适应，直接使用当前平台
     if (!useThirdParty || !useAdaptive || primarySource === 'Platform') {
       return await getPlatformLyrics(id, platform, songName, artistName)
@@ -1210,7 +1302,6 @@ export async function getLyrics(
     
     // 默认策略：流式加载 - 先显示基础歌词，再逐步增强
     type LyricsSourceResult = { source: string; lyrics: LyricLine[]; hasWW: boolean; hasTrans: boolean; hasRom: boolean }
-    const isApplePlatform = platform === 'apple'
     const platformSourceName = platform === 'qq' ? 'QQ音乐' : isApplePlatform ? 'Apple Music' : platform === 'spotify' ? 'Spotify' : platform === 'kugou' ? '酷狗' : platform === 'soda' ? '汽水' : '网易云'
     
     // 平台互斥：QQ音乐歌曲不请求网易云API，网易云歌曲不请求QQ音乐API。
@@ -1230,7 +1321,9 @@ export async function getLyrics(
       { name: 'AMLL TTML DB', promise: amllSourcePromise },
       // Apple Music：仅在用户已完成 Apple 登录时才请求（未登录默认关闭，不替换平台歌词）
       ...(isAppleMusicConfigured()
-        ? [{ name: 'Apple Music', promise: songName && artistName ? getAppleMusicLyrics(songName, artistName, duration) : Promise.resolve([]) }]
+        ? [{ name: 'Apple Music', promise: songName && artistName
+          ? getAppleMusicLyrics(songName, artistName, duration, isApplePlatform ? { songId: id } : undefined)
+          : Promise.resolve([]) }]
         : []),
       { name: 'Lrclib', promise: songName && artistName ? getLrclibLyrics(songName, artistName, duration) : Promise.resolve([]) }
     ]
@@ -1960,6 +2053,25 @@ export async function loadAlbumCovers(songs: Song[]): Promise<Song[]> {
 // 获取歌手详情
 export async function getArtistDetail(id: number | string, platform: MusicPlatform = 'netease'): Promise<Artist | null> {
   try {
+    if (platform === 'apple') {
+      const { getAppleArtistDetail, getAppleCatalogArtist } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const [lookup, catalog] = await Promise.all([
+        getAppleArtistDetail(String(id), storefront),
+        getAppleCatalogArtist(String(id), storefront),
+      ])
+      const source = catalog || lookup?.artist
+      if (!source) return null
+      return {
+        id: Number(source.id) || 0,
+        appleId: String(source.id),
+        name: source.name,
+        picUrl: source.artworkUrl || lookup?.artist.artworkUrl || '',
+        description: 'bio' in source ? source.bio : undefined,
+        briefDesc: 'bio' in source ? source.bio : undefined,
+        platform: 'apple',
+      }
+    }
     // Spotify：官方 API 艺人详情
     if (platform === 'spotify') {
       const { spotifyFetch } = await import('./spotifyService')
@@ -1992,8 +2104,19 @@ export async function getArtistDetail(id: number | string, platform: MusicPlatfo
         platform: 'kugou' as const,
       }
     }
-    // 汽水：暂不支持艺人详情（无公开接口），返回 null → UI 不弹艺人页
-    if (platform === 'soda') return null
+    // 汽水：没有独立艺人实体，使用歌手名作为稳定标识。
+    if (platform === 'soda') {
+      const { fetchSodaArtistSongs } = await import('./sodaService')
+      const songs = await fetchSodaArtistSongs(String(id), 1)
+      return {
+        id: 0,
+        mid: String(id),
+        name: songs[0]?.artists?.[0]?.name || String(id),
+        picUrl: songs[0]?.album?.picUrl || '',
+        musicSize: undefined,
+        platform: 'soda',
+      }
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/artist?mid=${id}`)
       const data = await response.json()
@@ -2054,17 +2177,16 @@ export async function getArtistDetail(id: number | string, platform: MusicPlatfo
 // 获取歌手热门歌曲
 export async function getArtistTopSongs(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
   try {
-    // Spotify：官方 API 艺人热门歌曲
+    if (platform === 'apple') {
+      const { getAppleArtistDetail, appleSongToSong } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const detail = await getAppleArtistDetail(String(id), storefront)
+      return (detail?.topSongs || []).map(song => appleSongToSong(song, storefront))
+    }
     if (platform === 'spotify') {
-      const { spotifyFetch, spotifyTrackToSong } = await import('./spotifyService')
-      const data = await spotifyFetch(`/artists/${id}/top-tracks`)
-      return (data?.tracks || []).map((t: any) => spotifyTrackToSong({
-        id: String(t.id || ''),
-        name: String(t.name || ''),
-        artists: (t.artists || []).map((a: any) => ({ name: String(a.name || '') })),
-        album: t.album ? { name: String(t.album.name || ''), images: t.album.images || [] } : undefined,
-        duration_ms: t.duration_ms,
-      }))
+      const { fetchSpotifyArtistTopTracks, spotifyTrackToSong } = await import('./spotifyService')
+      const tracks = await fetchSpotifyArtistTopTracks(String(id), 'CN', 20)
+      return tracks.map(spotifyTrackToSong)
     }
     // 酷狗：mobilecdn 歌手热门歌曲（singer/song）
     if (platform === 'kugou') {
@@ -2072,8 +2194,10 @@ export async function getArtistTopSongs(id: number | string, platform: MusicPlat
       const tracks = await fetchKugouSingerSongs(String(id), 1, 50)
       return tracks.map(kugouTrackToSong)
     }
-    // 汽水：暂无艺人热门歌曲接口
-    if (platform === 'soda') return []
+    if (platform === 'soda') {
+      const { fetchSodaArtistSongs } = await import('./sodaService')
+      return fetchSodaArtistSongs(String(id), 50)
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/artist/songs?mid=${id}`)
       const data = await response.json()
@@ -2135,6 +2259,22 @@ export async function getArtistTopSongs(id: number | string, platform: MusicPlat
 // 获取专辑详情
 export async function getAlbumDetail(id: number | string, platform: MusicPlatform = 'netease'): Promise<Album | null> {
   try {
+    if (platform === 'apple') {
+      const { getAppleAlbumDetail } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const detail = await getAppleAlbumDetail(String(id), storefront)
+      if (!detail) return null
+      return {
+        id: Number(detail.album.id) || 0,
+        appleId: detail.album.id,
+        name: detail.album.name,
+        picUrl: detail.album.artworkUrl || '',
+        artist: { name: detail.album.artistName },
+        publishTime: detail.album.releaseDate ? Date.parse(detail.album.releaseDate) : undefined,
+        size: detail.tracks.length,
+        platform: 'apple',
+      }
+    }
     // Spotify：官方 API 专辑详情
     if (platform === 'spotify') {
       const { spotifyFetch } = await import('./spotifyService')
@@ -2145,7 +2285,7 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
         id: Number(parseInt(sid.slice(0, 12), 36)) || 0,
         mid: sid,
         name: String(data.name || ''),
-        artist: data.artists?.[0]?.name || '',
+        artist: { name: String(data.artists?.[0]?.name || ''), mid: data.artists?.[0]?.id ? String(data.artists[0].id) : undefined },
         picUrl: data.images?.[0]?.url || '',
         description: '',
         publishTime: data.release_date || '',
@@ -2158,8 +2298,21 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
       const detail = await fetchKugouAlbumDetail(String(id))
       return detail ? kugouAlbumToAlbum(detail.album) : null
     }
-    // 汽水：暂不支持专辑详情
-    if (platform === 'soda') return null
+    // 汽水：按名称/数字 ID 聚合专辑信息。
+    if (platform === 'soda') {
+      const { fetchSodaAlbumTracks } = await import('./sodaService')
+      const detail = await fetchSodaAlbumTracks(String(id))
+      if (!detail.album.name && detail.tracks.length === 0) return null
+      return {
+        id: Number(detail.album.id) || 0,
+        mid: detail.album.id || String(id),
+        name: detail.album.name || String(id),
+        picUrl: detail.album.coverUrl || detail.tracks[0]?.album?.picUrl || '',
+        artist: { name: detail.tracks[0]?.artists?.[0]?.name || '' },
+        size: detail.tracks.length,
+        platform: 'soda',
+      }
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/album?mid=${id}`)
       const data = await response.json()
@@ -2190,6 +2343,7 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
     
     const response = await fetch(`${API_BASE}/netease/album?id=${id}`)
     const data = await response.json()
+    if (!response.ok || !data?.album) return null
     return {
       id: data.album.id,
       name: data.album.name,
@@ -2209,6 +2363,21 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
 // 获取专辑歌曲列表
 export async function getAlbumSongs(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
   try {
+    if (platform === 'apple') {
+      const { getAppleAlbumDetail, appleSongToSong } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const detail = await getAppleAlbumDetail(String(id), storefront)
+      return (detail?.tracks || []).map(song => appleSongToSong(song, storefront))
+    }
+    if (platform === 'spotify') {
+      const { fetchSpotifyAlbum, spotifyTrackToSong } = await import('./spotifyService')
+      const detail = await fetchSpotifyAlbum(String(id))
+      return (detail?.songs || []).map(spotifyTrackToSong)
+    }
+    if (platform === 'soda') {
+      const { fetchSodaAlbumTracks } = await import('./sodaService')
+      return (await fetchSodaAlbumTracks(String(id))).tracks
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/album?mid=${id}`)
       const data = await response.json()
@@ -2264,8 +2433,23 @@ export async function getAlbumSongs(id: number | string, platform: MusicPlatform
 // 获取歌手全部歌曲（分页加载）
 export async function getArtistAllSongs(id: number | string, platform: MusicPlatform = 'netease', offset: number = 0, limit: number = 40): Promise<{ songs: Song[], total: number }> {
   try {
+    if (platform === 'apple') {
+      const songs = await getArtistTopSongs(id, 'apple')
+      return { songs: songs.slice(offset, offset + limit), total: songs.length }
+    }
+    if (platform === 'spotify') {
+      const { fetchSpotifyArtistTopTracks, spotifyTrackToSong } = await import('./spotifyService')
+      const tracks = await fetchSpotifyArtistTopTracks(String(id), 'CN', Math.max(offset + limit, limit))
+      const songs = tracks.map(spotifyTrackToSong)
+      return { songs: songs.slice(offset, offset + limit), total: songs.length }
+    }
+    if (platform === 'soda') {
+      const { fetchSodaArtistSongs } = await import('./sodaService')
+      const songs = await fetchSodaArtistSongs(String(id), Math.max(offset + limit, limit))
+      return { songs: songs.slice(offset, offset + limit), total: songs.length }
+    }
     if (platform === 'qq') {
-      const response = await fetch(`${API_BASE}/qq/artist/songs?mid=${id}&limit=${limit}`)
+      const response = await fetch(`${API_BASE}/qq/artist/songs?mid=${id}&limit=${limit}&offset=${offset}`)
       const data = await response.json()
       const songs = (data.songs || []).map((item: any) => ({
         id: item.id,
@@ -2318,6 +2502,21 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
 // 获取歌手专辑列表
 export async function getArtistAlbums(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0): Promise<Album[]> {
   try {
+    if (platform === 'apple') {
+      const { getAppleCatalogArtistAlbums } = await import('./appleCatalog')
+      const storefront = localStorage.getItem('appleStorefront') || 'cn'
+      const albums = await getAppleCatalogArtistAlbums(String(id), storefront, Math.max(limit + offset, limit))
+      return albums.slice(offset, offset + limit).map(album => ({
+        id: Number(album.id) || 0,
+        appleId: album.id,
+        name: album.name,
+        picUrl: album.artworkUrl || '',
+        artist: { name: album.artistName },
+        publishTime: album.releaseDate ? Date.parse(album.releaseDate) : undefined,
+        size: album.trackCount,
+        platform: 'apple' as const,
+      }))
+    }
     // Spotify：官方 API 艺人专辑
     if (platform === 'spotify') {
       const { spotifyFetch } = await import('./spotifyService')
@@ -2980,23 +3179,90 @@ export async function searchMVs(keywords: string, platform: MusicPlatform = 'net
   }
 }
 
-/** 搜索歌单（网易云 type=1000，QQ t=2） */export async function searchPlaylists(keywords: string, platform: MusicPlatform = 'netease', limit: number = 20): Promise<any> {
+export interface PlaylistSearchItem {
+  id: string
+  name: string
+  coverImgUrl: string
+  trackCount: number
+  creator: string
+  platform: MusicPlatform
+}
+
+export interface PlaylistSearchResult {
+  playlists: PlaylistSearchItem[]
+  unsupported?: boolean
+}
+
+/** 搜索歌单；所有平台返回统一结构，不支持的平台显式标记。 */
+export async function searchPlaylists(keywords: string, platform: MusicPlatform = 'netease', limit: number = 20): Promise<PlaylistSearchResult> {
   try {
+    if (platform === 'kugou' || platform === 'soda') return { playlists: [], unsupported: true }
+    if (platform === 'spotify') {
+      const { searchSpotifyPlaylists } = await import('./spotifyService')
+      const playlists = await searchSpotifyPlaylists(keywords, limit)
+      return {
+        playlists: playlists.map(playlist => ({
+          id: playlist.id,
+          name: playlist.name,
+          coverImgUrl: playlist.coverUrl || '',
+          trackCount: playlist.tracksTotal || 0,
+          creator: playlist.owner || 'Spotify',
+          platform: 'spotify',
+        })),
+      }
+    }
+    if (platform === 'apple') {
+      const { searchAppleCatalogV1 } = await import('./appleCatalog')
+      const { getAppleCredentials } = await import('./appleAuth')
+      const storefront = getAppleCredentials().storefront || 'cn'
+      const result = await searchAppleCatalogV1(keywords, storefront, limit)
+      if (result.errorStatus) throw new Error(`Apple Music 歌单搜索失败（HTTP ${result.errorStatus}）`)
+      return {
+        playlists: result.playlists.map(playlist => ({
+          id: playlist.id,
+          name: playlist.name,
+          coverImgUrl: playlist.artworkUrl || '',
+          trackCount: playlist.trackCount || 0,
+          creator: playlist.curatorName || 'Apple Music 编辑',
+          platform: 'apple',
+        })),
+      }
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&limit=${limit}&type=playlist`)
       const data = await response.json()
       if (!response.ok) throw new Error(data?.error || '歌单搜索失败')
-      return data
+      const raw = Array.isArray(data?.playlists) ? data.playlists : []
+      return {
+        playlists: raw.map((playlist: any) => ({
+          id: String(playlist.id || ''),
+          name: String(playlist.name || ''),
+          coverImgUrl: playlist.coverImgUrl || playlist.picUrl || '',
+          trackCount: Number(playlist.trackCount ?? playlist.trackNumber ?? 0),
+          creator: String(playlist.creator?.nickname || playlist.creator?.nick || playlist.creator || ''),
+          platform: 'qq' as const,
+        })).filter((playlist: PlaylistSearchItem) => playlist.id && playlist.name),
+      }
     }
     const cookie = getPlatformCookie('netease')
     const params = new URLSearchParams({ keywords, limit: String(limit), type: '1000', cookie })
     const response = await fetch(`${API_BASE}/netease/search?${params}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '歌单搜索失败')
-    return data
+    const raw = Array.isArray(data?.result?.playlists) ? data.result.playlists : []
+    return {
+      playlists: raw.map((playlist: any) => ({
+        id: String(playlist.id || ''),
+        name: String(playlist.name || ''),
+        coverImgUrl: playlist.coverImgUrl || playlist.picUrl || '',
+        trackCount: Number(playlist.trackCount ?? playlist.trackNumber ?? 0),
+        creator: String(playlist.creator?.nickname || playlist.creator || ''),
+        platform: 'netease' as const,
+      })).filter((playlist: PlaylistSearchItem) => playlist.id && playlist.name),
+    }
   } catch (error) {
     console.error('歌单搜索失败:', error)
-    return null
+    throw error
   }
 }
 

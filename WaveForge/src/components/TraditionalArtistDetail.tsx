@@ -45,6 +45,8 @@ function TraditionalArtistDetail({
   const [albums, setAlbums] = useState<any[]>([])
   const [tab, setTab] = useState<ArtistTab>('hot')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [loadRevision, setLoadRevision] = useState(0)
   const [menu, setMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const allPageRef = useRef(0)
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
@@ -54,6 +56,7 @@ function TraditionalArtistDetail({
     if (!artistId) return
     let cancelled = false
     setLoading(true)
+    setError('')
     setArtist(null)
     setHotSongs([])
     setAllSongs([])
@@ -69,9 +72,10 @@ function TraditionalArtistDetail({
       if (detailResult.status === 'fulfilled') setArtist(detailResult.value)
       if (hotResult.status === 'fulfilled' && Array.isArray(hotResult.value)) setHotSongs(hotResult.value)
       if (albumsResult.status === 'fulfilled' && Array.isArray(albumsResult.value)) setAlbums(albumsResult.value)
+      if (detailResult.status === 'rejected' && hotResult.status === 'rejected' && albumsResult.status === 'rejected') setError('歌手详情加载失败，请重试')
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [artistId, platform])
+  }, [artistId, platform, loadRevision])
 
   // 全部歌曲分页加载
   useEffect(() => {
@@ -105,7 +109,12 @@ function TraditionalArtistDetail({
         <div className="min-w-0"><div className="text-sm font-medium">歌手详情</div><div className={`truncate text-xs ${muted}`}>{platformLabel(platform)}</div></div>
       </header>
       <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
-              {loading && tab !== 'all' ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载歌手...</div> : (
+              {loading && tab !== 'all' ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载歌手...</div> : error ? (
+                <div className={`flex h-72 flex-col items-center justify-center gap-3 text-sm ${muted}`}>
+                  <span>{error}</span>
+                  <button type="button" onClick={() => setLoadRevision(value => value + 1)} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accent }}>重试</button>
+                </div>
+              ) : (
                 <>
                   <section className="flex flex-wrap items-center gap-6">
                     {artist?.picUrl ? <img src={getProxiedImageUrl(artist.picUrl)} alt="" className="h-32 w-32 rounded-full object-cover shadow-2xl" /> : <div className="flex h-32 w-32 items-center justify-center rounded-full" style={{ background: `${accent}22` }}><Music2 className="h-12 w-12" style={{ color: accent }} /></div>}
@@ -121,7 +130,7 @@ function TraditionalArtistDetail({
                       <button
                         type="button"
                         disabled={hotSongs.length === 0}
-                        onClick={() => hotSongs[0] && onSongSelect(hotSongs[0], hotSongs, { mode: 'traditional', surface: 'traditional-artist', platform: artist?.platform || platform })}
+                        onClick={() => hotSongs[0] && onSongSelect(hotSongs[0], hotSongs, { mode: 'traditional', surface: 'traditional-artist', platform: artist?.platform || platform, artistId })}
                         className="mt-4 flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium text-white disabled:opacity-45"
                         style={{ background: accent }}
                       >
@@ -139,8 +148,14 @@ function TraditionalArtistDetail({
                   {tab === 'albums' ? (
                     <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                       {albums.map((album, index) => (
-                        <button key={`${album.id}:${index}`} type="button" onClick={() => album.id && onOpenAlbum?.(String(album.id), album.platform || platform)} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${isDark ? 'border-white/10 bg-white/[.04]' : 'border-slate-200 bg-white'}`}>
-                          <img src={album.picUrl ? getProxiedImageUrl(album.picUrl) : ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                        <button key={`${album.appleId || album.mid || album.id}:${index}`} type="button" onClick={() => { const albumId = album.appleId || album.mid || album.id; if (albumId) onOpenAlbum?.(String(albumId), album.platform || platform) }} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${isDark ? 'border-white/10 bg-white/[.04]' : 'border-slate-200 bg-white'}`}>
+                          {album.picUrl ? (
+                            <img src={getProxiedImageUrl(album.picUrl)} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                          ) : (
+                            <div className="flex aspect-square w-full items-center justify-center rounded-xl" style={{ background: `${accent}22` }}>
+                              <Disc3 className="h-10 w-10" style={{ color: accent }} />
+                            </div>
+                          )}
                           <div className="mt-2 flex items-center gap-1.5 truncate text-sm"><Disc3 className="h-3.5 w-3.5 shrink-0 opacity-50" /><span className="truncate">{album.name}</span></div>
                           <div className={`text-xs ${muted}`}>{album.publishTime ? new Date(album.publishTime).getFullYear() : '专辑'}{album.size ? ` · ${album.size} 首` : ''}</div>
                         </button>
@@ -156,8 +171,8 @@ function TraditionalArtistDetail({
                         const active = currentSong ? songKey(song) === songKey(currentSong) : false
                         return (
                           <div key={`${songKey(song)}:${index}`} className={`grid grid-cols-[42px_minmax(0,1fr)_minmax(110px,.7fr)_56px_36px] items-center gap-3 px-4 py-2.5 transition ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}>
-                            <button type="button" onClick={() => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform })} className="flex h-7 w-7 items-center justify-center text-xs" style={{ color: active ? accent : undefined }}>{active ? <Play className="h-3.5 w-3.5 fill-current" /> : index + 1}</button>
-                            <button type="button" onClick={() => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform })} className="flex min-w-0 items-center gap-3 text-left">
+                            <button type="button" onClick={() => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform, artistId })} className="flex h-7 w-7 items-center justify-center text-xs" style={{ color: active ? accent : undefined }}>{active ? <Play className="h-3.5 w-3.5 fill-current" /> : index + 1}</button>
+                            <button type="button" onClick={() => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform, artistId })} className="flex min-w-0 items-center gap-3 text-left">
                               <img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" />
                               <span className="min-w-0"><span className={`block truncate text-sm ${active ? 'font-medium' : ''}`}>{song.name}</span><span className={`block truncate text-xs ${muted}`}>{song.artists?.map(artist => artist.name).join(' / ')}</span></span>
                             </button>
@@ -186,7 +201,7 @@ function TraditionalArtistDetail({
                 </>
               )}
             </main>
-      <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform })} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={onViewComments} onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)} onViewArtist={() => undefined} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={menu.song?.platform || platform} playerTheme={isDark ? 'dark' : 'light'} />
+      <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, activeSongs, { mode: 'traditional', surface: 'traditional-artist', platform: song.platform || platform, artistId })} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={onViewComments} onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} onViewArtist={() => undefined} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={menu.song?.platform || platform} playerTheme={isDark ? 'dark' : 'light'} />
     </div>
   )
 }

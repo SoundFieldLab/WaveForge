@@ -2,7 +2,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Edit3, Trash2, Star, StarOff, Share2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTvBack } from '../tv/tvCore'
-import { collectSodaPlaylist } from '../services/sodaService'
 
 /** 与 SongContextMenu.showMenuToast 一致的全局 toast 通道 */
 const showMenuToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -23,6 +22,9 @@ interface PlaylistContextMenuProps {
   isSubscribed?: boolean
   isSpecialPlaylist?: boolean
   canEdit?: boolean
+  canDelete?: boolean
+  canSubscribe?: boolean
+  canShare?: boolean
 }
 
 export default function PlaylistContextMenu({
@@ -38,7 +40,10 @@ export default function PlaylistContextMenu({
   isOwner,
   isSubscribed = false,
   isSpecialPlaylist = false,
-  canEdit = true
+  canEdit = true,
+  canDelete = true,
+  canSubscribe = true,
+  canShare = true
 }: PlaylistContextMenuProps) {
   const menuRef = useRef<HTMLDivElement>(null)
   // TV 遥控器 BACK 关闭菜单（必须带 show 守卫：本组件常驻挂载于 HomeView 等宿主，
@@ -51,8 +56,6 @@ export default function PlaylistContextMenu({
     return false
   })
   const [adjustedPosition, setAdjustedPosition] = useState({ x, y })
-  // 汽水歌单收藏操作进行中标记（防重复点击）
-  const [collectBusy, setCollectBusy] = useState(false)
 
   // 计算菜单位置，确保不超出屏幕
   useEffect(() => {
@@ -104,26 +107,6 @@ export default function PlaylistContextMenu({
 
   if (!show || !playlist) return null
 
-  // 汽水歌单：收藏/取消收藏直接走 sodaService（App 层订阅流程不覆盖汽水），
-  // 已收藏状态由调用方传入的 playlist.isCollected 决定
-  const isSodaPlaylist = String(playlist.platform || '') === 'soda'
-  const isSodaCollected = Boolean(playlist.isCollected)
-  const handleSodaCollect = () => {
-    if (collectBusy) return
-    const collected = !isSodaCollected
-    setCollectBusy(true)
-    void collectSodaPlaylist(String(playlist.id ?? ''), collected)
-      .then(ok => {
-        setCollectBusy(false)
-        if (ok) {
-          showMenuToast(collected ? '已收藏歌单' : '已取消收藏歌单', 'success')
-          onClose()
-        } else {
-          showMenuToast(collected ? '收藏歌单失败，请重试' : '取消收藏失败，请重试', 'error')
-        }
-      })
-  }
-
   const menuItems = [
     // 只有歌单主人才能编辑和删除
     ...(isOwner && !isSpecialPlaylist && canEdit ? [
@@ -133,7 +116,7 @@ export default function PlaylistContextMenu({
         onClick: () => { onEdit(playlist); onClose() }
       }
     ] : []),
-    ...(isOwner && !isSpecialPlaylist ? [
+    ...(isOwner && !isSpecialPlaylist && canDelete ? [
       {
         label: '删除歌单',
         icon: Trash2,
@@ -142,25 +125,19 @@ export default function PlaylistContextMenu({
       }
     ] : []),
     // 只有非本人歌单可以收藏或取消收藏
-    ...(!isOwner ? (isSodaPlaylist ? [
-      // 汽水歌单：收藏动作走 sodaService，不经过 App 的订阅回调
-      {
-        label: collectBusy ? '处理中...' : (isSodaCollected ? '取消收藏歌单' : '收藏歌单'),
-        icon: isSodaCollected ? StarOff : Star,
-        onClick: handleSodaCollect,
-        disabled: collectBusy
-      }
-    ] : [{
+    ...(!isOwner && canSubscribe ? [{
       label: isSubscribed ? '取消收藏' : '收藏歌单',
       icon: isSubscribed ? StarOff : Star,
       onClick: () => { onSubscribe(playlist, !isSubscribed); onClose() }
-    }]) : []),
-    { separator: true },
-    {
-      label: '分享歌单',
-      icon: Share2,
-      onClick: () => { onShare(playlist); onClose() }
-    },
+    }] : []),
+    ...(canShare ? [
+      { separator: true },
+      {
+        label: '分享歌单',
+        icon: Share2,
+        onClick: () => { onShare(playlist); onClose() }
+      },
+    ] : []),
   ]
 
   return (

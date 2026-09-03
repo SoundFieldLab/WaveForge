@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Clock3, Headphones, Heart, Play, Share2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
-import { getProxiedImageUrl } from '../services/musicApi'
+import { getProxiedImageUrl, isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
+import { APPLE_LIBRARY_ID, getLastAppleMutationResult, removeAppleTracksFromPlaylist } from '../services/appleCatalog'
 import { isSodaLoggedIn } from '../services/sodaService'
 import SongContextMenu from './SongContextMenu'
 
@@ -20,6 +21,7 @@ type Playlist = {
   creator?: { userId?: number | string; nickname?: string; avatarUrl?: string }
   tags?: string[]
   platform?: MusicPlatform
+  isLibrary?: boolean
   isCollected?: boolean
   isLike?: boolean
   /** 歌单被播放次数（QQ listennum / 网易云 playCount） */
@@ -31,6 +33,8 @@ interface TraditionalPlaylistDetailProps {
   playlist: Playlist
   songs: Song[]
   loading: boolean
+  error?: string
+  onRetry?: () => void
   currentSong: Song | null
   playerTheme: 'light' | 'dark'
   accentColor: string
@@ -42,6 +46,7 @@ interface TraditionalPlaylistDetailProps {
   onAddToFavorites?: (song: Song) => void
   onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>
   onAddToPlaylist?: (song: Song, playlistId: string) => void
+  onRemoveFromPlaylist?: (song: Song, playlistId: string) => void | Promise<void>
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
   userPlaylists?: any[]
@@ -63,12 +68,12 @@ const formatDuration = (milliseconds = 0) => {
   const seconds = Math.max(0, Math.round(milliseconds / 1000))
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
-const songKey = (song: Song) => `${song.platform}:${song.id || song.mid || song.name}`
+const songKey = (song: Song) => `${song.platform}:${song.appleId || song.mid || song.id || song.name}`
 const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
 
 function TraditionalPlaylistDetail({
-  playlist, songs, loading, currentSong, playerTheme, accentColor, onClose, onSongSelect,
-  onOpenArtist, onOpenAlbum, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist,
+  playlist, songs, loading, error = '', onRetry, currentSong, playerTheme, accentColor, onClose, onSongSelect,
+  onOpenArtist, onOpenAlbum, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onRemoveFromPlaylist,
   onViewComments, onCopyInfo, userPlaylists = [], ownUserName, ownUserAvatar, ownUserId, onOpenUserProfile,
 }: TraditionalPlaylistDetailProps) {
   const [menu, setMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
@@ -77,8 +82,10 @@ function TraditionalPlaylistDetail({
   const dark = playerTheme === 'dark'
   const muted = dark ? 'text-white/50' : 'text-slate-500'
   const platform = playlist?.platform || 'netease'
-  // 汽水歌单也显示「收藏」按钮：走 sodaService.collectSodaPlaylist（能力表暂未放开 subscribePlaylist）
-  const canSubscribePlaylist = getPlatformCapabilities(platform).subscribePlaylist || platform === 'soda'
+  const playlistId = String(playlist?.id || playlist?.dirId || '')
+  const canRemoveAppleTracks = platform === 'apple' && !playlist?.isLike && playlistId !== APPLE_LIBRARY_ID && !playlistId.startsWith('pl.')
+  const canShare = getPlatformCapabilities(platform).sharePlaylist && (platform !== 'apple' || playlistId.startsWith('pl.'))
+  const canSubscribePlaylist = getPlatformCapabilities(platform).subscribePlaylist
   const totalDuration = useMemo(() => songs.reduce((sum, song) => sum + (song.duration || 0), 0), [songs])
   const coverUrl = playlist?.coverImgUrl || playlist?.coverUrl || coverOf(songs[0])
   // 创建者：收藏歌单显示真实创建者；自建/我喜欢无 creator 时回退当前登录用户
@@ -145,15 +152,41 @@ function TraditionalPlaylistDetail({
     } finally { setCollecting(false) }
   }
 
+  const removeAppleTrack = async (song: Song) => {
+    const ok = await removeAppleTracksFromPlaylist(playlistId, [{
+      catalogId: song.appleId && !String(song.appleId).startsWith('i.') ? song.appleId : undefined,
+      libraryId: song.appleLibraryId || (String(song.appleId || '').startsWith('i.') ? song.appleId : undefined),
+    }])
+    if (!ok) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: getLastAppleMutationResult().error || '从 Apple 歌单移除失败，请重试', type: 'error' } }))
+      return
+    }
+    window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-tracks', playlistId } }))
+    window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已从歌单移除', type: 'success' } }))
+    onRetry?.()
+  }
+
   const share = () => {
-    const url = platform === 'qq' ? `https://y.qq.com/n/ryqq/playlist/${playlist?.id || playlist?.dirId || ''}` : `https://music.163.com/#/playlist?id=${playlist?.id || ''}`
+    const storefront = localStorage.getItem('appleExploreCountry') || localStorage.getItem('appleStorefront') || 'cn'
+    const url = platform === 'apple'
+      ? `https://music.apple.com/${encodeURIComponent(storefront)}/playlist/${encodeURIComponent(playlist?.name || 'playlist')}/${encodeURIComponent(playlistId)}`
+      : platform === 'qq'
+        ? `https://y.qq.com/n/ryqq/playlist/${playlistId}`
+        : platform === 'spotify'
+          ? `https://open.spotify.com/playlist/${playlistId}`
+          : `https://music.163.com/#/playlist?id=${playlistId}`
     void navigator.clipboard?.writeText(url)
     window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单链接已复制', type: 'success' } }))
   }
 
   return <div className="flex h-full min-h-0 flex-col">
     <main ref={listScrollRef} onScroll={handleListScroll} className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
-      {loading ? <div className="flex h-72 items-center justify-center"><div className={`text-sm ${muted}`}>正在加载歌单...</div></div> : (
+      {loading ? <div className="flex h-72 items-center justify-center"><div className={`text-sm ${muted}`}>正在加载歌单...</div></div> : error ? (
+        <div className={`flex h-72 flex-col items-center justify-center gap-3 text-sm ${muted}`}>
+          <span>{error}</span>
+          {onRetry && <button type="button" onClick={onRetry} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accentColor }}>重试</button>}
+        </div>
+      ) : (
         <>
           {/* 头部：封面 + 信息（QQ 音乐版式） */}
           <section className="flex flex-col gap-6 sm:flex-row">
@@ -180,7 +213,7 @@ function TraditionalPlaylistDetail({
               <div className="mt-5 flex flex-wrap items-center gap-3">
                 <button type="button" disabled={songs.length === 0} onClick={() => songs[0] && onSongSelect(songs[0], songs)} className="flex items-center gap-2 rounded-full px-6 py-2.5 text-sm font-medium text-white disabled:opacity-45" style={{ background: accentColor }}><Play className="h-4 w-4 fill-current" />播放</button>
                 {canSubscribePlaylist && <button type="button" onClick={() => void toggleCollection()} className={`flex items-center gap-2 rounded-full border px-5 py-2.5 text-sm transition ${dark ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white/70 hover:bg-slate-100'}`}><Heart className={`h-4 w-4 ${collected ? 'fill-current' : ''}`} style={{ color: collected ? accentColor : undefined }} />{collected ? '已收藏' : '收藏'}</button>}
-                {platform !== 'soda' && <button type="button" onClick={share} className={`flex items-center gap-2 rounded-full border px-5 py-2.5 text-sm transition ${dark ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white/70 hover:bg-slate-100'}`}><Share2 className="h-4 w-4" />分享</button>}
+                {canShare && <button type="button" onClick={share} className={`flex items-center gap-2 rounded-full border px-5 py-2.5 text-sm transition ${dark ? 'border-white/15 bg-white/5 hover:bg-white/10' : 'border-slate-200 bg-white/70 hover:bg-slate-100'}`}><Share2 className="h-4 w-4" />分享</button>}
               </div>
             </div>
           </section>
@@ -194,14 +227,14 @@ function TraditionalPlaylistDetail({
             {songs.length === 0 ? <div className={`rounded-xl border p-12 text-center text-sm ${muted} ${dark ? 'border-white/10' : 'border-slate-200'}`}>{platform === 'soda' && !isSodaLoggedIn() ? '登录汽水音乐后查看歌单歌曲' : '这个歌单还没有可播放的歌曲'}</div> : (
               <div className="relative" style={{ height: virtualListHeight }}>
                 {visibleSongs.map(({ song, index }) => {
-                  const active = currentSong ? songKey(song) === songKey(currentSong) : false
+                  const active = currentSong ? isSameSong(song, currentSong) : false
                   return (
                     <div
                       key={`${songKey(song)}:${index}`}
                       role="button"
                       tabIndex={0}
                       onClick={() => onSongSelect(song, songs)}
-                      onKeyDown={event => { if (event.key === 'Enter') onSongSelect(song, songs) }}
+                      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSongSelect(song, songs) } }}
                       onContextMenu={event => { event.preventDefault(); setMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
                       className={`group absolute left-0 right-0 grid cursor-pointer grid-cols-[minmax(0,1fr)_44px_minmax(110px,.7fr)_58px] items-center gap-3 px-4 transition ${active ? (dark ? 'bg-white/10' : 'bg-pink-50') : dark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                       style={{ top: index * DETAIL_ROW_HEIGHT, height: DETAIL_ROW_HEIGHT }}
@@ -216,11 +249,17 @@ function TraditionalPlaylistDetail({
                             <span className="truncate">{song.name}</span>
                             {song.vip ? <span className="shrink-0 rounded border px-1 text-[9px] leading-4" style={{ borderColor: accentColor, color: accentColor }}>VIP</span> : null}
                           </span>
-                          <span className={`block truncate text-xs ${muted}`}>{song.artists?.map(artist => artist.name).join(' / ')}</span>
+                          {(() => {
+                            const artist = song.artists?.[0]
+                            const artistId = artist?.appleId || artist?.mid || artist?.id
+                            return artistId && onOpenArtist ? (
+                              <button type="button" onClick={event => { event.stopPropagation(); onOpenArtist(String(artistId), song.platform || platform) }} className={`block max-w-full truncate text-xs hover:underline ${muted}`}>{song.artists?.map(item => item.name).join(' / ')}</button>
+                            ) : <span className={`block truncate text-xs ${muted}`}>{song.artists?.map(item => item.name).join(' / ')}</span>
+                          })()}
                         </span>
                       </span>
                       <button type="button" onClick={event => { event.stopPropagation(); onAddToFavorites?.(song) }} aria-label="收藏歌曲" className={`flex justify-center transition hover:scale-110 ${muted}`}><Heart className="h-4 w-4" /></button>
-                      <button type="button" onClick={event => { event.stopPropagation(); song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform) }} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button>
+                      <button type="button" onClick={event => { event.stopPropagation(); const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button>
                       <span className={`text-right text-xs tabular-nums ${muted}`}>{formatDuration(song.duration)}</span>
                     </div>
                   )
@@ -231,7 +270,7 @@ function TraditionalPlaylistDetail({
         </>
       )}
     </main>
-    <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, songs)} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={onViewComments} onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)} onViewArtist={song => song.artists?.[0]?.id && onOpenArtist?.(String(song.artists[0].id), song.platform || platform)} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={platform} playerTheme={playerTheme} />
+    <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, songs)} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={onRemoveFromPlaylist ? song => { void onRemoveFromPlaylist(song, playlistId) } : canRemoveAppleTracks ? song => { void removeAppleTrack(song) } : undefined} currentPlaylistId={playlistId} onViewComments={onViewComments} onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} onViewArtist={song => { const artist = song.artists?.[0]; const artistId = artist?.appleId || artist?.mid || artist?.id; if (artistId) onOpenArtist?.(String(artistId), song.platform || platform) }} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={platform} playerTheme={playerTheme} />
   </div>
 }
 

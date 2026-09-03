@@ -88,14 +88,6 @@ function PlaylistDetailPanel({
   accentColor = '#ec4899',
   currentUserId,
 }: PlaylistDetailPanelProps) {
-  // TV 遥控器 BACK：关闭歌单详情面板
-  useTvBack(() => {
-    if (show) {
-      onClose()
-      return true
-    }
-    return false
-  }, [show, onClose])
   const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
   const [heightVh, setHeightVh] = useState(80) // 从80vh开始，最大90vh
   const [subscribing, setSubscribing] = useState(false)
@@ -190,6 +182,21 @@ function PlaylistDetailPanel({
     y: 0,
     song: null
   })
+
+  // TV BACK closes nested surfaces before dismissing the playlist panel.
+  useTvBack(() => {
+    if (!show) return false
+    if (pendingRemoval) {
+      if (!removalLoading) setPendingRemoval(null)
+    } else if (contextMenu.show) {
+      setContextMenu({ show: false, x: 0, y: 0, song: null })
+    } else if (showPlaylistInfo) {
+      setShowPlaylistInfo(false)
+    } else {
+      onClose()
+    }
+    return true
+  }, [contextMenu.show, onClose, pendingRemoval, removalLoading, show, showPlaylistInfo])
   
   // 判断歌曲是否为当前播放的歌曲（Apple：id 可能为 0，用 isSameSong 按 appleId 判定）
   const isSongCurrent = (song: Song) => isSameSong(currentSong, song)
@@ -651,7 +658,7 @@ function PlaylistDetailPanel({
                     </div>
                   </div>
 
-                  {(
+                  {getPlatformCapabilities(playlist.platform || currentPlatform).comments && (
                     <motion.button
                       whileHover={{ scale: 1.03 }}
                       whileTap={{ scale: 0.97 }}
@@ -868,7 +875,7 @@ function PlaylistDetailPanel({
         </>
       )}
       
-      {playlist && (
+      {playlist && getPlatformCapabilities(playlist.platform || currentPlatform).comments && (
         <CommentModal
           isOpen={showPlaylistInfo}
           onClose={() => setShowPlaylistInfo(false)}
@@ -927,7 +934,7 @@ function PlaylistDetailPanel({
           onViewArtist={(song) => {
             const songPlatform = song.platform || currentPlatform
             const artist = song.artists?.[0]
-            const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+            const artistId = artist?.appleId || artist?.mid || artist?.id
             if (artistId) onOpenArtist?.(String(artistId), songPlatform)
             setContextMenu({ show: false, x: 0, y: 0, song: null })
           }}

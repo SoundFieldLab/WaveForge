@@ -2,6 +2,7 @@ import { memo, useEffect, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import { X, Music, Disc3, Clock, BadgeCheck, Crown, Calendar, Video, CircleDollarSign, ListMusic, Mic2, ScrollText, BookOpen, RefreshCw, Play, Activity, Loader2, ChevronRight, User } from 'lucide-react'
 import type { Song } from '../services/musicApi'
+import type { MusicPlatform } from '../services/platforms'
 import { getLyrics, getNeteaseSongWiki, getQQSongPlaylist, getProxiedImageUrl, getQQListenAlso, getQQLikeAlso, getNeteaseSimiSong, getNeteaseRelatedPlaylist, getNeteaseSongBlog } from '../services/musicApi'
 import { fetchAppleSongDetail, type AppleSongDetail } from '../services/appleWebService'
 import LyricModal from './LyricModal'
@@ -31,6 +32,8 @@ interface SongDetailModalProps {
   onOpenPlaylist?: (playlistId: string, platform: 'netease' | 'qq') => void
   /** 打开专辑详情（Apple「更多作品」用） */
   onOpenAlbum?: (albumId: string, platform: 'apple') => void
+  /** 打开出演艺人详情 */
+  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
 }
 
 function formatDuration(ms: number): string {
@@ -56,7 +59,7 @@ const NETBASE_FEE_LABELS: Record<number, string> = {
   8: '免费（低音质）',
 }
 
-function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum }: SongDetailModalProps) {
+function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum, onOpenArtist }: SongDetailModalProps) {
   // TV 遥控器 BACK：关闭歌曲详情弹窗
   useTvBack(() => {
     onClose()
@@ -146,7 +149,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
     let cancelled = false
     setAppleDetailLoading(true)
     setAppleDetail(null)
-    void fetchAppleSongDetail(appleId).then((detail) => {
+    void fetchAppleSongDetail(appleId, song.appleStorefront).then((detail) => {
       if (cancelled || !detail) return
       setAppleDetail(detail)
       // 歌词同步到通用 lyrics 状态（「查看完整歌词」弹窗复用）
@@ -154,7 +157,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
     }).catch(() => { /* 详情失败仅展示已有字段 */ })
       .finally(() => { if (!cancelled) setAppleDetailLoading(false) })
     return () => { cancelled = true }
-  }, [song.id, song.appleId, song.platform])
+  }, [song.id, song.appleId, song.appleStorefront, song.platform])
 
   // QQ 推荐：听 [歌曲] 的也在听 + 喜欢 [歌曲] 的人也爱它们
   useEffect(() => {
@@ -282,7 +285,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   const artists = Array.isArray(song.artists) ? song.artists.map(a => a.name).filter(Boolean).join(' / ') : '未知歌手'
   const albumName = song.album?.name || '未知专辑'
   const coverUrl = song.album?.picUrl || ''
-  const platformLabel = song.platform === 'qq' ? 'QQ音乐' : song.platform === 'netease' ? '网易云音乐' : ''
+  const platformLabel = song.platform === 'qq' ? 'QQ音乐' : song.platform === 'netease' ? '网易云音乐' : song.platform === 'apple' ? 'Apple Music' : ''
   const publishDate = formatDate(extra?.publishTime || 0)
   const feeLabel = extra?.fee != null && platformLabel === '网易云音乐'
     ? NETBASE_FEE_LABELS[extra.fee]
@@ -308,7 +311,9 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
       exit={{ opacity: 0 }}
       className="fixed inset-0 z-[85] flex items-center justify-center p-4"
       style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(8px)' }}
-      onClick={onClose}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
     >
       <motion.div
         initial={{ scale: 0.94, opacity: 0, y: 12 }}
@@ -452,7 +457,12 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
                       <h2 className="text-lg font-semibold text-white">出演艺人</h2>
                       <div className="mt-4 space-y-3">
                         {appleDetail.artists.map(artist => (
-                          <div key={artist.id} className="flex items-center gap-3">
+                          <button
+                            key={artist.id}
+                            type="button"
+                            onClick={() => onOpenArtist?.(String(artist.playId || artist.id), 'apple')}
+                            className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-white/[0.08]"
+                          >
                             {artist.artworkUrl ? (
                               <img src={getProxiedImageUrl(artist.artworkUrl)} alt={artist.name} className="h-11 w-11 rounded-full object-cover" />
                             ) : (
@@ -464,7 +474,8 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
                               <p className={`${textPrimary} truncate text-sm font-medium`}>{artist.name}</p>
                               <p className={`${textTertiary} text-xs`}>表演者</p>
                             </div>
-                          </div>
+                            <ChevronRight className="ml-auto h-4 w-4 shrink-0 text-white/35" />
+                          </button>
                         ))}
                       </div>
                     </div>

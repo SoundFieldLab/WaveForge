@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Search, X, Music, History, Clock, User, Disc, Sparkles, TrendingUp, ListMusic } from 'lucide-react'
 import { searchSongs, searchSuggest, searchArtists, searchAlbums, searchQuick, searchPlaylists, Song, Artist, Album, SearchSuggestion, getProxiedImageUrl, loadAlbumCovers, resolveSongAlbumIdentifier, searchHot } from '../services/musicApi'
 import { mergeFusedSearchResults, type FusedSearchIntent, type MusicPlatform } from '../services/fusedSearch'
-import { isPlatformVisible } from '../services/platforms'
+import { isPlatformVisible, platformLabel } from '../services/platforms'
 import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 import ArtistDetailModal from './ArtistDetailModal'
@@ -26,6 +26,9 @@ interface SearchPanelProps {
   qqVip?: boolean
   neteaseLoggedIn?: boolean
   qqLoggedIn?: boolean
+  appleLoggedIn?: boolean
+  spotifyLoggedIn?: boolean
+  kugouLoggedIn?: boolean
   currentSong?: Song | null
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void
@@ -53,6 +56,8 @@ const MAX_HISTORY = 5
 // 不加上限会导致 Map 无限增长（内存泄漏）。超出上限时按 LRU 淘汰最旧的 cacheKey。
 const SEARCH_CACHE_MAX = 10
 type SearchPlatform = MusicPlatform | 'fused'
+
+const entityId = (entity: Artist | Album): string => String(entity.appleId || entity.mid || entity.id)
 
 const getSearchHistoryKey = (platform: SearchPlatform): string => {
   if (platform === 'fused') return SEARCH_HISTORY_KEY_FUSED
@@ -109,6 +114,9 @@ export default function SearchPanel({
   qqVip = false,
   neteaseLoggedIn = false,
   qqLoggedIn = false,
+  appleLoggedIn = false,
+  spotifyLoggedIn = false,
+  kugouLoggedIn = false,
   currentSong = null,
   onPlayNext,
   onAddToFavorites,
@@ -121,11 +129,6 @@ export default function SearchPanel({
   onCopyInfo,
   onRestoreConsumed
 }: SearchPanelProps) {
-  // TV 遥控器 BACK：关闭搜索面板
-  useTvBack(() => {
-    onClose()
-    return true
-  }, [onClose])
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
   console.log('🔍 SearchPanel 渲染')
   console.log('  playerTheme:', playerTheme)
@@ -177,6 +180,7 @@ export default function SearchPanel({
   const [searchHistory, setSearchHistory] = useState<string[]>([]) // 搜索历史
   const [hotSearch, setHotSearch] = useState<any[]>([]) // 搜索热词
   const [loading, setLoading] = useState(false)
+  const [searchError, setSearchError] = useState('')
   const [loadingMore, setLoadingMore] = useState(false) // 加载更多状态
   const [searched, setSearched] = useState(() => {
     const saved = sessionStorage.getItem('waveforge_search_searched')
@@ -193,7 +197,7 @@ export default function SearchPanel({
   const searchRequestRef = useRef(0)
   // 搜索结果缓存 per platform，避免切换平台后重新搜索
   const searchCacheRef = useRef<Map<string, {
-    allResults: Song[]; artistResults: Artist[]; albumResults: Album[];
+    allResults: Song[]; artistResults: Artist[]; albumResults: Album[]; playlistResults: typeof playlistResults;
     artists: Artist[]; albums: Album[]; unavailable: MusicPlatform[]; intent: FusedSearchIntent
   }>>(new Map())
   const [songContextMenu, setSongContextMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({
@@ -303,10 +307,24 @@ export default function SearchPanel({
   })
   const [selectedArtist, setSelectedArtist] = useState<Artist | null>(null) // 选中的艺人
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null) // 选中的专辑
-  const selectedArtistPlatform: MusicPlatform = selectedArtist?.platform === 'qq' ? 'qq' : 'netease'
-  const selectedAlbumPlatform: MusicPlatform = selectedAlbum?.platform === 'qq' ? 'qq' : 'netease'
+  const selectedArtistPlatform: MusicPlatform = selectedArtist?.platform || 'netease'
+  const selectedAlbumPlatform: MusicPlatform = selectedAlbum?.platform || 'netease'
   const [selectedArtistAlbumId, setSelectedArtistAlbumId] = useState<string | number | undefined>()
   const [selectedArtistTab, setSelectedArtistTab] = useState<PlaybackOrigin['artistTab']>('hotSongs')
+  // TV BACK closes the deepest search surface before dismissing the whole panel.
+  useTvBack(() => {
+    if (songContextMenu.show) {
+      setSongContextMenu(previous => ({ ...previous, show: false }))
+    } else if (selectedAlbum) {
+      setSelectedAlbum(null)
+    } else if (selectedArtist) {
+      setSelectedArtist(null)
+      setSelectedArtistAlbumId(undefined)
+    } else {
+      onClose()
+    }
+    return true
+  }, [onClose, selectedAlbum, selectedArtist, songContextMenu.show])
   // 选歌播放：退出动画零时长，覆盖层当帧卸载。整屏 backdrop-filter 的退出节点在
   // 播放页同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
   const [instantClose, setInstantClose] = useState(false)
@@ -315,14 +333,15 @@ export default function SearchPanel({
     if (!restorePlaybackOrigin?.surface.startsWith('search')) return
     const restoredPlatform: SearchPlatform = restorePlaybackOrigin.searchMode === 'fused'
       ? 'fused'
-      : (restorePlaybackOrigin.platform === 'apple' ? 'netease' : (restorePlaybackOrigin.platform || platform))
+      : (restorePlaybackOrigin.platform || platform)
     if (restoredPlatform !== platform) setPlatform(restoredPlatform)
 
     if (restorePlaybackOrigin.surface === 'search-album' && restorePlaybackOrigin.albumId) {
-      const restoredAlbum = albumResults.find(album => String(album.mid || album.id) === String(restorePlaybackOrigin.albumId))
+      const restoredAlbum = albumResults.find(album => entityId(album) === String(restorePlaybackOrigin.albumId))
         || ({
           id: restorePlaybackOrigin.platform === 'netease' ? Number(restorePlaybackOrigin.albumId) : 0,
-          mid: restorePlaybackOrigin.platform === 'qq' ? String(restorePlaybackOrigin.albumId) : undefined,
+          appleId: restorePlaybackOrigin.platform === 'apple' ? String(restorePlaybackOrigin.albumId) : undefined,
+          mid: restorePlaybackOrigin.platform !== 'netease' && restorePlaybackOrigin.platform !== 'apple' ? String(restorePlaybackOrigin.albumId) : undefined,
           name: '',
           picUrl: '',
           platform: restorePlaybackOrigin.platform,
@@ -333,10 +352,11 @@ export default function SearchPanel({
     }
 
     if ((restorePlaybackOrigin.surface === 'search-artist' || restorePlaybackOrigin.surface === 'search-artist-album') && restorePlaybackOrigin.artistId) {
-      const restoredArtist = artistResults.find(artist => String(artist.mid || artist.id) === String(restorePlaybackOrigin.artistId))
+      const restoredArtist = artistResults.find(artist => entityId(artist) === String(restorePlaybackOrigin.artistId))
         || ({
           id: restorePlaybackOrigin.platform === 'netease' ? Number(restorePlaybackOrigin.artistId) : 0,
-          mid: restorePlaybackOrigin.platform === 'qq' ? String(restorePlaybackOrigin.artistId) : undefined,
+          appleId: restorePlaybackOrigin.platform === 'apple' ? String(restorePlaybackOrigin.artistId) : undefined,
+          mid: restorePlaybackOrigin.platform !== 'netease' && restorePlaybackOrigin.platform !== 'apple' ? String(restorePlaybackOrigin.artistId) : undefined,
           name: '',
           platform: restorePlaybackOrigin.platform,
         } as Artist)
@@ -534,19 +554,23 @@ export default function SearchPanel({
     
     const requestId = ++searchRequestRef.current
     setLoading(true)
+    setSearchError('')
     setSearched(true)
     setShowSuggestions(false)
     setSelectedIndex(-1)
     setDisplayCount(20) // 重置显示数量
     
-    // 检查缓存：同一平台+同一关键词的搜索结果
-    const cacheKey = `${platform}:${finalKeyword}`
+    const storefrontKey = platform === 'apple' || platform === 'fused'
+      ? localStorage.getItem('appleStorefront') || 'cn'
+      : ''
+    const cacheKey = `${platform}:${searchType}:${storefrontKey}:${finalKeyword.trim().toLocaleLowerCase()}`
     const cached = searchCacheRef.current.get(cacheKey)
     if (cached) {
       setArtistResults(cached.artistResults)
       setAlbumResults(cached.albumResults)
       setAllResults(cached.allResults)
       setDisplayedResults(cached.allResults.slice(0, 20))
+      setPlaylistResults(cached.playlistResults || [])
       setFusionUnavailablePlatforms(cached.unavailable)
       setFusionIntent(cached.intent)
       setLoading(false)
@@ -597,9 +621,9 @@ export default function SearchPanel({
           entitlements: {
             netease: { loggedIn: neteaseSessionActive, vip: neteaseVip },
             qq: { loggedIn: qqSessionActive, vip: qqVip },
-            apple: { loggedIn: false, vip: false },
-            spotify: { loggedIn: false, vip: false },
-            kugou: { loggedIn: false, vip: false },
+            apple: { loggedIn: appleLoggedIn, vip: appleLoggedIn },
+            spotify: { loggedIn: spotifyLoggedIn, vip: false },
+            kugou: { loggedIn: kugouLoggedIn, vip: false },
             soda: { loggedIn: Boolean(localStorage.getItem('soda_token')), vip: false },
           },
         })
@@ -611,7 +635,7 @@ export default function SearchPanel({
         setDisplayedResults(fused.songs.slice(0, 20))
         // 缓存结果（LRU，超出上限自动淘汰最旧条目）
         setLruCache(searchCacheRef.current, cacheKey, {
-          allResults: fused.songs, artistResults: fused.artists, albumResults: fused.albums,
+          allResults: fused.songs, artistResults: fused.artists, albumResults: fused.albums, playlistResults: [],
           artists: fused.artists, albums: fused.albums, unavailable, intent: fused.intent
         }, SEARCH_CACHE_MAX)
       } else if (platform === 'apple') {
@@ -622,15 +646,36 @@ export default function SearchPanel({
         if (hasDevToken) {
           const searched = await searchAppleCatalogV1(finalKeyword, storefront, 25)
           if (requestId !== searchRequestRef.current) return
+          if (searched.errorStatus !== undefined) {
+            if (searchType === 'song') {
+              const songs = await searchAppleSongsAsSongs(finalKeyword, storefront, 50)
+              if (requestId !== searchRequestRef.current) return
+              setAllResults(songs)
+              setDisplayedResults(songs.slice(0, 20))
+            } else if (searchType === 'artist') {
+              const artists = await searchAppleCatalogArtists(finalKeyword, storefront)
+              if (requestId !== searchRequestRef.current) return
+              setArtistResults(artists.map(artist => ({ id: Number(artist.id) || 0, appleId: artist.id, name: artist.name, picUrl: artist.artworkUrl || '', platform: 'apple' })))
+            } else if (searchType === 'album') {
+              const albums = await searchAppleCatalogAlbums(finalKeyword, storefront)
+              if (requestId !== searchRequestRef.current) return
+              setAlbumResults(albums.map(album => ({ id: Number(album.id) || 0, appleId: album.id, name: album.name, picUrl: album.artworkUrl || '', artist: { name: album.artistName }, platform: 'apple' })))
+            } else {
+              setPlaylistResults([])
+            }
+            return
+          }
           const songs = searched.songs.map(song => appleSongToSong(song, storefront))
           const artists = searched.artists.map(artist => ({
             id: Number(artist.id) || 0,
+            appleId: String(artist.id),
             name: artist.name,
             picUrl: artist.artworkUrl || '',
             platform: 'apple' as const,
           }))
           const albums = searched.albums.map(album => ({
             id: Number(album.id) || 0,
+            appleId: String(album.id),
             name: album.name,
             picUrl: album.artworkUrl || '',
             artist: { name: album.artistName },
@@ -650,7 +695,7 @@ export default function SearchPanel({
           setAlbumResults(albums)
           setPlaylistResults(playlists)
           setLruCache(searchCacheRef.current, cacheKey, {
-            allResults: songs, artistResults: artists, albumResults: albums,
+            allResults: songs, artistResults: artists, albumResults: albums, playlistResults: playlists,
             artists: [], albums: [], unavailable: [], intent: 'mixed' as const,
           }, SEARCH_CACHE_MAX)
         } else if (searchType === 'song') {
@@ -663,6 +708,7 @@ export default function SearchPanel({
           if (requestId !== searchRequestRef.current) return
           setArtistResults(artists.map(artist => ({
             id: Number(artist.id) || 0,
+            appleId: String(artist.id),
             name: artist.name,
             picUrl: artist.artworkUrl || '',
             platform: 'apple',
@@ -672,6 +718,7 @@ export default function SearchPanel({
           if (requestId !== searchRequestRef.current) return
           setAlbumResults(albums.map(album => ({
             id: Number(album.id) || 0,
+            appleId: String(album.id),
             name: album.name,
             picUrl: album.artworkUrl || '',
             artist: { name: album.artistName },
@@ -704,20 +751,14 @@ export default function SearchPanel({
         console.log('🔍 开始搜索歌单:', finalKeyword, 'platform:', platform)
         const data = await searchPlaylists(finalKeyword, platform)
         if (requestId !== searchRequestRef.current) return
-        const raw = platform === 'qq' ? (data?.playlists || []) : (data?.result?.playlists || [])
-        setPlaylistResults(Array.isArray(raw) ? raw.map((p: any) => ({
-          id: String(p.id || ''),
-          // QQ 返回的 name 含 HTML 实体（&#32; 等），渲染前解码
-          name: decodeHtmlEntities(String(p.name || '')),
-          coverImgUrl: p.coverImgUrl || p.picUrl || '',
-          trackCount: Number(p.trackCount ?? p.trackNumber ?? 0),
-          creator: decodeHtmlEntities(String(p.creator?.nickname || p.creator?.nick || p.creator || '')),
-          platform,
-        })) : [])
-        console.log('🔍 歌单搜索结果:', raw.length)
+        setPlaylistResults(data.playlists)
+        if (data.unsupported) setSearchError(`${platformLabel(platform)}暂不支持歌单搜索`)
       }
     } catch (error) {
       console.error('❌ 搜索失败:', error)
+      if (requestId === searchRequestRef.current) {
+        setSearchError(error instanceof Error ? error.message : '搜索失败，请稍后重试')
+      }
     } finally {
       console.log('🔍 搜索完成，设置 loading = false')
       if (requestId === searchRequestRef.current) setLoading(false)
@@ -810,12 +851,12 @@ export default function SearchPanel({
 
   const platformText = (platforms: MusicPlatform[]) => {
     const unique = Array.from(new Set(platforms))
-    if (unique.length > 1) return '双平台'
-    return unique[0] === 'qq' ? 'QQ音乐' : '网易云'
+    if (unique.length > 1) return `${unique.length} 个平台`
+    return platformLabel(unique[0])
   }
 
   const renderSongSourceChoice = (song: Song) => {
-    const preferredPlatform: MusicPlatform = song.platform === 'qq' ? 'qq' : 'netease'
+    const preferredPlatform: MusicPlatform = song.platform || 'netease'
     const sources = Array.from(new Set(
       (song.fusedSources || [{ platform: preferredPlatform }]).map(source => source.platform),
     ))
@@ -827,9 +868,9 @@ export default function SearchPanel({
             ? 'bg-green-500/15 text-green-300 border-green-400/20'
             : 'bg-red-500/15 text-red-300 border-red-400/20'
         }`}>
-          首选 {preferredPlatform === 'qq' ? 'QQ音乐' : '网易云'}{preferredVip ? ' · VIP' : ''}
+          首选 {platformLabel(preferredPlatform)}{preferredVip ? ' · VIP' : ''}
         </span>
-        {sources.length > 1 && <span className={`${textTertiary} text-[11px]`}>双平台</span>}
+        {sources.length > 1 && <span className={`${textTertiary} text-[11px]`}>{sources.length} 个平台</span>}
       </div>
     )
   }
@@ -845,11 +886,11 @@ export default function SearchPanel({
           </div>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
             {artistResults.map(artist => {
-              const sourcePlatform: MusicPlatform = artist.platform === 'qq' ? 'qq' : 'netease'
+              const sourcePlatform: MusicPlatform = artist.platform || 'netease'
               return (
                 <motion.button
                   type="button"
-                  key={`fused-artist-${artist.platform}-${artist.mid || artist.id}`}
+                  key={`fused-artist-${artist.platform}-${entityId(artist)}`}
                   whileHover={{ y: -1 }}
                   onClick={() => setSelectedArtist(artist)}
                   className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2 transition-colors ${hoverBg} min-w-0`}
@@ -863,7 +904,7 @@ export default function SearchPanel({
                   </div>
                   <div className={`${textPrimary} text-sm font-medium truncate flex-1 min-w-0`}>{artist.name}</div>
                   <span className={`text-[11px] flex-shrink-0 ${sourcePlatform === 'qq' ? 'text-green-300/80' : 'text-red-300/80'}`}>
-                    {sourcePlatform === 'qq' ? 'QQ音乐' : '网易云'}
+                    {platformLabel(sourcePlatform)}
                   </span>
                 </motion.button>
               )
@@ -883,7 +924,7 @@ export default function SearchPanel({
             {albumResults.map(album => (
               <motion.button
                 type="button"
-                key={`fused-album-${album.platform}-${album.mid || album.id}`}
+                key={`fused-album-${album.platform}-${entityId(album)}`}
                 whileHover={{ y: -1 }}
                 onClick={() => setSelectedAlbum(album)}
                 className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2 transition-colors ${hoverBg} min-w-0`}
@@ -900,7 +941,7 @@ export default function SearchPanel({
                   <div className={`${textSecondary} text-xs truncate`}>{album.artist?.name || '未知艺人'}</div>
                 </div>
                 <span className={`${textTertiary} text-[11px] flex-shrink-0 max-w-20 text-right leading-4`}>
-                  {platformText(album.sourcePlatforms || [album.platform === 'qq' ? 'qq' : 'netease'])}
+                  {platformText(album.sourcePlatforms || [album.platform || 'netease'])}
                 </span>
               </motion.button>
             ))}
@@ -974,10 +1015,11 @@ export default function SearchPanel({
           />
         </div>
 
-        {/* Content area */}
-        <div className="relative z-10 flex flex-col h-full">
+        {/* Content area：flex-1 + min-h-0 —— 弹窗是 max-h（高度不定），h-full 会解析成内容自然高度
+            导致超出被裁且无滚动条；弹性填充才能让下方结果区的 overflow-y-auto 正确滚动 */}
+        <div className="relative z-10 flex flex-col flex-1 min-h-0">
         {/* 头部 */}
-        <div className={`p-6 border-b ${borderColor}`}>
+        <div className={`p-6 border-b ${borderColor} flex-shrink-0`}>
           <div className="flex items-center justify-between mb-4">
             <h2 className={`text-2xl font-bold ${textPrimary}`}>搜索音乐</h2>
             <button
@@ -1157,7 +1199,7 @@ export default function SearchPanel({
           </div>
 
           {/* 搜索框 */}
-          <div className="flex gap-3 relative">
+          <div className="flex gap-3 relative flex-shrink-0">
             <div className="flex-1 relative">
               <Search className={`absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 ${textPrimary}/40`} />
               <input
@@ -1188,6 +1230,8 @@ export default function SearchPanel({
                     setAllResults([])
                     setArtistResults([])
                     setAlbumResults([])
+                  setPlaylistResults([])
+                  setSearchError('')
                   }}
                   className={`absolute right-4 top-1/2 transform -translate-y-1/2 p-1 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
                 >
@@ -1339,6 +1383,12 @@ export default function SearchPanel({
             scrollbarColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.3) transparent' : 'rgba(0,0,0,0.3) transparent'
           }}
         >
+          {searchError && !loading && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-rose-400/20 bg-rose-500/10 px-4 py-3 text-sm text-rose-200/85">
+              <span>{searchError}</span>
+              <button type="button" onClick={() => void handleSearch()} className="shrink-0 rounded-full border border-rose-200/20 px-3 py-1.5 text-xs hover:bg-rose-100/10">重试</button>
+            </div>
+          )}
           {!loading && isFused && fusionUnavailablePlatforms.length > 0 && (
             <div className="mb-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-400/20 text-amber-200/80 text-sm">
               {fusionUnavailablePlatforms.map(item => item === 'netease' ? '网易云音乐' : 'QQ音乐').join('、')} 的部分结果暂时不可用，已展示成功返回的内容。
@@ -1493,7 +1543,9 @@ export default function SearchPanel({
                     <h3 className={`${textPrimary} font-semibold`}>歌曲</h3>
                     <span className={`${textTertiary} text-xs`}>{allResults.length} 首融合结果</span>
                     <span className="text-[11px] text-green-300/70">QQ {allResults.filter(song => song.platform === 'qq').length}</span>
-                    <span className="text-[11px] text-red-300/70">网易云 {allResults.filter(song => song.platform !== 'qq').length}</span>
+                    <span className="text-[11px] text-red-300/70">网易云 {allResults.filter(song => (song.platform || 'netease') === 'netease').length}</span>
+                    <span className="text-[11px] text-pink-300/70">Apple {allResults.filter(song => song.platform === 'apple').length}</span>
+                    <span className="text-[11px] text-emerald-300/70">其他 {allResults.filter(song => !['qq', 'netease', 'apple'].includes(song.platform || 'netease')).length}</span>
                   </div>
                 </>
               )}
@@ -1509,7 +1561,7 @@ export default function SearchPanel({
                   whileHover={{ scale: 1.01 }}
                   onContextMenu={(event) => openSongContextMenu(event, song)}
                   onClick={() => {
-                    const songPlatform: MusicPlatform = song.platform === 'qq' ? 'qq' : 'netease'
+                    const songPlatform: MusicPlatform = song.platform || 'netease'
                     setInstantClose(true)
                     onSongSelect(song, allResults, { surface: 'search', platform: songPlatform, searchMode: platform })
                     onClose()
@@ -1659,7 +1711,7 @@ export default function SearchPanel({
         song={songContextMenu.song}
         onClose={() => setSongContextMenu(previous => ({ ...previous, show: false }))}
         onPlayNow={(song) => {
-          const songPlatform: MusicPlatform = song.platform === 'qq' ? 'qq' : 'netease'
+          const songPlatform: MusicPlatform = song.platform || 'netease'
           setInstantClose(true)
           onSongSelect(song, allResults, { surface: 'search', platform: songPlatform, searchMode: platform })
           onClose()
@@ -1680,7 +1732,8 @@ export default function SearchPanel({
           const artist = song.artists?.[0]
           // 汽水无艺人 ID，约定传歌手名
         const artistId = songPlatform === 'soda' ? (artist?.name || artist?.mid || artist?.id)
-          : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+          : songPlatform === 'qq' ? (artist?.mid || artist?.id)
+            : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : (artist?.mid || artist?.id)
           if (artistId) onOpenArtist?.(String(artistId), songPlatform)
         }}
         onCopyInfo={onCopyInfo}
@@ -1690,9 +1743,9 @@ export default function SearchPanel({
     )}
 
     <AnimatePresence>
-      {selectedArtist && (selectedArtistPlatform === 'qq' ? !!selectedArtist.mid : selectedArtist.id !== undefined) && (
+      {selectedArtist && entityId(selectedArtist) && (
         <ArtistDetailModal
-          artistId={selectedArtistPlatform === 'qq' ? selectedArtist.mid! : selectedArtist.id!}
+          artistId={entityId(selectedArtist)}
           platform={selectedArtistPlatform}
           onClose={() => {
             setSelectedArtist(null)
@@ -1710,7 +1763,7 @@ export default function SearchPanel({
               surface: selectedArtistAlbumId ? 'search-artist-album' : 'search-artist',
               platform: selectedArtistPlatform,
               searchMode: platform,
-              artistId: selectedArtistPlatform === 'qq' ? selectedArtist.mid : selectedArtist.id,
+              artistId: entityId(selectedArtist),
               albumId: selectedArtistAlbumId,
               artistTab: selectedArtistTab,
             })
@@ -1736,9 +1789,9 @@ export default function SearchPanel({
 
     {/* 专辑详情模态框 */}
     <AnimatePresence>
-      {selectedAlbum && (selectedAlbumPlatform === 'qq' ? !!selectedAlbum.mid : selectedAlbum.id !== undefined) && (
+      {selectedAlbum && entityId(selectedAlbum) && (
         <AlbumDetailModal
-          albumId={selectedAlbumPlatform === 'qq' ? selectedAlbum.mid! : selectedAlbum.id!}
+          albumId={entityId(selectedAlbum)}
           platform={selectedAlbumPlatform}
           onClose={() => {
             setSelectedAlbum(null)
@@ -1753,7 +1806,7 @@ export default function SearchPanel({
               surface: 'search-album',
               platform: selectedAlbumPlatform,
               searchMode: platform,
-              albumId: selectedAlbumPlatform === 'qq' ? selectedAlbum.mid : selectedAlbum.id,
+              albumId: entityId(selectedAlbum),
             })
           }}
           playerTheme={playerTheme}

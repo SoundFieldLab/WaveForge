@@ -744,7 +744,8 @@ function AlbumDetailModal({
           // 汽水约定：歌手名即歌手标识（无独立 ID 体系）
           const targetId = platform === 'soda'
             ? artist?.name
-            : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+            : platform === 'apple' ? (artist?.appleId || artist?.id)
+              : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
           if (targetId) onOpenArtist(String(targetId), platform)
         } : undefined}
         onCopyInfo={onCopyInfo}

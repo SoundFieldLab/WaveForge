@@ -5,7 +5,7 @@ import { Heart, MessageCircle, X } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getProxiedImageUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { platformLabel } from '../services/platforms'
+import { getPlatformCookie, platformLabel } from '../services/platforms'
 import { fetchSodaComments, type SodaComment } from '../services/sodaService'
 
 interface CommentItem {
@@ -139,14 +139,14 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
           more = Boolean(data.data?.hasMore)
         }
       } else if (platform === 'qq') {
-        const endpoint = `${API_BASE}/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${reset ? 1 : pageRef.current + 1}&pagesize=20&type=${view}&biztype=1&cookie=${encodeURIComponent(getCookie())}`
+        const pageNumber = reset ? 1 : pageRef.current + 1
+        const endpoint = `${API_BASE}/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageNumber}&pagesize=20&type=${view}&biztype=1&cookie=${encodeURIComponent(getPlatformCookie('qq'))}`
         const response = await fetch(endpoint)
         const data = await response.json()
-        if (data.result === 0 && data.data) {
-          hot = (data.data?.hotComments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]
-          list = (data.data?.comments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]
-          more = Boolean(data.data.hasMore)
-        }
+        if (!response.ok || data.result !== 0 || !data.data) throw new Error(data?.message || 'QQ 音乐评论加载失败')
+        hot = (data.data?.hotComments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]
+        list = (data.data?.comments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]
+        more = Boolean(data.data.hasMore)
       } else if (platform === 'soda') {
         // 汽水：游标分页（首页不传 cursor）；热门/最新视图共用同一份列表
         const requestCursor = reset ? undefined : sodaCursorRef.current
@@ -220,7 +220,12 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
         ))}
       </div>
       <main className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-        {error && <div className={`py-10 text-center text-sm ${muted}`}>{error}</div>}
+        {error && (
+          <div className={`flex flex-col items-center gap-3 py-10 text-center text-sm ${muted}`}>
+            <span>{error}</span>
+            <button type="button" onClick={() => void load(true)} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accent }}>重试</button>
+          </div>
+        )}
         {loading && comments.length === 0 && <div className={`py-14 text-center text-sm ${muted}`}>正在加载评论...</div>}
         {hotComments.length > 0 && (
           <section className="mb-5">

@@ -2,7 +2,8 @@
 // - 所有内容（搜索/音乐库/歌单/歌手/专辑/评论/个人中心）都在中间栏直接展示，不用弹窗；
 // - 平台切换为可拖拽药丸（与简约模式一致）；模式切换走全局顶部下拉条；
 // - 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部，可滚动）。
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
   Captions, ChevronLeft, ChevronRight, Disc3, Heart, History, Home, Library, ListMusic, LogIn, Music2,
@@ -10,16 +11,19 @@ import {
   Sparkles, Volume2, Waves, Check,
 } from 'lucide-react'
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
+import EditPlaylistModal from './EditPlaylistModal'
+import DeletePlaylistModal from './DeletePlaylistModal'
 import type { Song, LyricLine } from '../services/musicApi'
 import { getProxiedImageUrl, getUserFollows, getUserFolloweds, getQQFollows, getQQFans, getQQUserProfile, subscribeQQUser, subscribeNeteaseUser } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getVisiblePlatforms, getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
+import { getVisiblePlatforms, getPlatformCapabilities, getPlatformCookie, getPlatformFavoriteLabels, platformLabel, PLATFORM_ORDER_EVENT, PLATFORM_VISIBILITY_EVENT } from '../services/platforms'
 import { fetchExploreHome, fetchExplorePlaylist, type ExplorePayload, type ExplorePlaylist } from '../services/exploreApi'
-import { createPlaylist, getUserPlaylists, invalidateUserPlaylistsCache, subscribePlaylist } from '../services/playlistService'
-import { getAppleRecentPlayed, appleLibraryTrackToSong } from '../services/appleCatalog'
-import { fetchSpotifyLiked, spotifyTrackToSong } from '../services/spotifyService'
+import { createPlaylist, deletePlaylist, getUserPlaylists, invalidateUserPlaylistsCache, removeSongFromPlaylist, subscribePlaylist, updatePlaylist } from '../services/playlistService'
+import { createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getLastAppleMutationResult, getAppleCatalogPlaylistTracks, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs, getApplePlaylistTracks, getAppleRecentPlayed, appleLibraryTrackToSong, appleSongToSong, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
+import { sodaMediaToSong } from '../services/sodaService'
+import { fetchSpotifyLiked, fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spotifyService'
 import { useAudioAnalyzer, useAudioAnalyzerSnapshot, type AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
-import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
+import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS } from './ModeSelectionPanel'
 import TraditionalPlaylistDetail from './TraditionalPlaylistDetail'
@@ -30,8 +34,21 @@ import TraditionalArtistDetail from './TraditionalArtistDetail'
 import TraditionalAlbumDetail from './TraditionalAlbumDetail'
 import SongContextMenu from './SongContextMenu'
 import PlaylistContextMenu from './PlaylistContextMenu'
+import { MirroredGlobalSettings, PlatformOrderEditor, makeSkin } from './MirroredGlobalSettings'
+import { GLOBAL_SETTINGS_GROUPS, isEntryVisible, useGlobalSettings, type GlobalSettingsGroupId, type MirrorActionId } from '../services/globalSettingsRegistry'
+import { preloadOnIdle } from '../utils/lazyPreload'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler, ViewMode } from '../types/playbackNavigation'
+
+// 设置页用的共享弹窗（按需加载，只有用户在设置里点开时才拉取代码）
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
+
+// 组件挂载后：空闲时预热设置页弹窗 chunk，消除首次点击的卡顿
+const warmSettingsChunks = () => preloadOnIdle([
+  () => import('./CacheClearModal'),
+  () => import('./RemoteControlSettingsModal'),
+])
 
 type TraditionalPreferences = {
   density: 'comfortable' | 'compact'
@@ -83,12 +100,15 @@ interface TraditionalViewProps {
   appleUsername: string
   appleAvatar?: string
   spotifyLoggedIn: boolean
+  spotifyUserId?: string
   spotifyUsername: string
   spotifyAvatar?: string
   kugouLoggedIn: boolean
+  kugouUserId?: string
   kugouUsername: string
   kugouAvatar?: string
   sodaLoggedIn: boolean
+  sodaUserId?: string
   sodaUsername: string
   sodaAvatar?: string
   authRevision?: number
@@ -329,21 +349,47 @@ type TraditionalPage =
   | { name: 'album'; id: string; platform: MusicPlatform }
 
 function TraditionalView({
-  onSongSelect, currentSong, queue, isPlaying, playbackTimeStore, duration, lyrics, volume, playerTheme, dominantColor, analyserNode,
+  onSongSelect, restorePlaybackOrigin, currentSong, queue, isPlaying, playbackTimeStore, duration, lyrics, volume, playerTheme, dominantColor, analyserNode,
   neteaseLoggedIn, neteaseUsername, neteaseAvatar, neteaseUserId,
   qqLoggedIn, qqUsername, qqAvatar, qqUserId,
-  appleLoggedIn, appleUsername, appleAvatar, spotifyUsername, spotifyAvatar,
-  kugouUsername, kugouAvatar, sodaUsername, sodaAvatar, authRevision = 0,
-  onLoginClick, onSettingsClick, onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
+  appleLoggedIn, appleUsername, appleAvatar,
+  spotifyLoggedIn, spotifyUserId, spotifyUsername, spotifyAvatar,
+  kugouLoggedIn, kugouUserId, kugouUsername, kugouAvatar,
+  sodaLoggedIn, sodaUserId, sodaUsername, sodaAvatar, authRevision = 0,
+  onLoginClick, onPlayPause, onNext, onPrevious, onSeek, onVolumeChange,
   liked = false, onToggleFavorite, playMode = 'sequential', onPlayModeChange, onOpenMixingStudio,
   neteaseVip = false, qqVip = false,
   onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onCopyInfo,
 }: TraditionalViewProps) {
-  const [platform, setPlatform] = useState<MusicPlatform>(() => (localStorage.getItem('traditionalPlatform') as MusicPlatform) || 'netease')
+  const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'traditionalPlatform'))
+  const favoriteLabels = getPlatformFavoriteLabels(platform)
   const [visiblePlatforms, setVisiblePlatforms] = useState<MusicPlatform[]>(() => getVisiblePlatforms())
+  // 平台顺序 / 显隐是全软件共享的（简约模式账号页、各模式设置里都能改）：订阅事件保持顶部药丸实时同步
+  useEffect(() => {
+    const sync = () => setVisiblePlatforms(getVisiblePlatforms())
+    window.addEventListener(PLATFORM_ORDER_EVENT, sync)
+    window.addEventListener(PLATFORM_VISIBILITY_EVENT, sync)
+    return () => {
+      window.removeEventListener(PLATFORM_ORDER_EVENT, sync)
+      window.removeEventListener(PLATFORM_VISIBILITY_EVENT, sync)
+    }
+  }, [])
+  useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<MusicPlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+
+  // 空闲时预热设置弹窗 chunk
+  useEffect(() => warmSettingsChunks(), [])
   const [payload, setPayload] = useState<ExplorePayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [playlistLoading, setPlaylistLoading] = useState(false)
+  const [playlistError, setPlaylistError] = useState('')
+  const playlistRequestRef = useRef(0)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   const [preferences, setPreferences] = useState<TraditionalPreferences>(readPreferences)
   const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
@@ -354,6 +400,9 @@ function TraditionalView({
   const [creatingPlaylist, setCreatingPlaylist] = useState(false)
   const [newPlaylistName, setNewPlaylistName] = useState('')
   const [creatingPlaylistBusy, setCreatingPlaylistBusy] = useState(false)
+  const [showEditPlaylist, setShowEditPlaylist] = useState(false)
+  const [showDeletePlaylist, setShowDeletePlaylist] = useState(false)
+  const [playlistMutationBusy, setPlaylistMutationBusy] = useState(false)
   const [topBarActive, setTopBarActive] = useState(false)
   // TV 遥控器模式（无鼠标）：顶部模式下拉条常驻显示；平台药丸变成单个可聚焦单元，左右键切换。
   // 手机遥控器连上（光标模式）后恢复 PC 式 hover/拖拽交互。
@@ -418,7 +467,19 @@ function TraditionalView({
     mainRef.current?.scrollTo({ top: 0 })
   }, [history.length])
 
-  const loggedIn = platform === 'netease' ? neteaseLoggedIn : platform === 'qq' ? qqLoggedIn : platform === 'apple' ? appleLoggedIn : platform === 'spotify' ? spotifyUsername.length > 0 : platform === 'kugou' ? kugouUsername.length > 0 : sodaUsername.length > 0
+  useTvBack(() => {
+    if (showModePanel) {
+      setShowModePanel(false)
+      return true
+    }
+    if (historyIndexRef.current > 0) {
+      goBack()
+      return true
+    }
+    return false
+  }, [showModePanel, historyIndex])
+
+  const loggedIn = platform === 'netease' ? neteaseLoggedIn : platform === 'qq' ? qqLoggedIn : platform === 'apple' ? appleLoggedIn : platform === 'spotify' ? spotifyLoggedIn : platform === 'kugou' ? kugouLoggedIn : sodaLoggedIn
   const username = platform === 'netease' ? neteaseUsername : platform === 'qq' ? qqUsername : platform === 'apple' ? appleUsername : platform === 'spotify' ? spotifyUsername : platform === 'kugou' ? kugouUsername : sodaUsername
   const avatar = platform === 'netease' ? neteaseAvatar : platform === 'qq' ? qqAvatar : platform === 'apple' ? appleAvatar : platform === 'spotify' ? spotifyAvatar : platform === 'kugou' ? kugouAvatar : sodaAvatar
   const accent = PLATFORM_ACCENTS[platform]
@@ -430,13 +491,6 @@ function TraditionalView({
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
 
   useEffect(() => {
-    const syncPlatforms = () => setVisiblePlatforms(getVisiblePlatforms())
-    window.addEventListener('waveforge-platform-visibility-changed', syncPlatforms)
-    window.addEventListener('waveforge-platform-order-changed', syncPlatforms)
-    return () => { window.removeEventListener('waveforge-platform-visibility-changed', syncPlatforms); window.removeEventListener('waveforge-platform-order-changed', syncPlatforms) }
-  }, [])
-
-  useEffect(() => {
     if (!visiblePlatforms.includes(platform)) setPlatform(visiblePlatforms[0] || 'netease')
   }, [platform, visiblePlatforms])
 
@@ -445,18 +499,54 @@ function TraditionalView({
     setLoading(true)
     setPayload(null)
     void fetchExploreHome(platform).then(next => { if (!cancelled) setPayload(next) }).catch(() => { if (!cancelled) setPayload(null) }).finally(() => { if (!cancelled) setLoading(false) })
-    localStorage.setItem('traditionalPlatform', platform)
+    syncPlatformAcrossViews(platform)
     return () => { cancelled = true }
   }, [platform, authRevision])
 
   useEffect(() => {
     let cancelled = false
-    const id = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : ''
+    const id = platform === 'netease' ? neteaseUserId
+      : platform === 'qq' ? qqUserId
+        : platform === 'spotify' ? spotifyUserId
+          : platform === 'kugou' ? kugouUserId
+            : platform === 'soda' ? sodaUserId : ''
     const name = username
+    if (platform === 'apple') {
+      if (!appleLoggedIn) { setUserPlaylists([]); return }
+      void Promise.all([getAppleLibraryPlaylists(200), getAppleLibrarySongs(500), getAppleFavoriteSongs(5000)]).then(([playlists, tracks, favoriteTracks]) => {
+        if (cancelled) return
+        const mapped = playlists.map(item => ({ ...item, coverImgUrl: item.artworkUrl || '', platform: 'apple' as const, isLike: false }))
+        const librarySongs = tracks.map(appleLibraryTrackToSong)
+        const favoriteSongs = favoriteTracks.map(track => appleSongToSong(track))
+        setUserPlaylists([
+          ...(favoriteSongs.length ? [{ id: APPLE_FAVORITES_ID, name: '喜爱歌曲', coverImgUrl: favoriteSongs[0]?.album.picUrl || '', trackCount: favoriteSongs.length, platform: 'apple' as const, isLike: true }] : []),
+          ...(librarySongs.length ? [{ id: APPLE_LIBRARY_ID, name: '我的音乐库', coverImgUrl: librarySongs[0]?.album.picUrl || '', trackCount: librarySongs.length, platform: 'apple' as const }] : []),
+          ...mapped,
+        ])
+      }).catch(() => { if (!cancelled) setUserPlaylists([]) })
+      return () => { cancelled = true }
+    }
     if (!id && !name) { setUserPlaylists([]); return }
     void getUserPlaylists(platform, id || '', name || undefined).then(items => { if (!cancelled) setUserPlaylists(items || []) }).catch(() => { if (!cancelled) setUserPlaylists([]) })
     return () => { cancelled = true }
-  }, [platform, neteaseUserId, qqUserId, username, authRevision])
+  }, [platform, neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId, username, authRevision, appleLoggedIn])
+
+  useEffect(() => {
+    const reloadPlaylists = (event: Event) => {
+      const detail = (event as CustomEvent<{ platform?: MusicPlatform }>).detail
+      if (detail?.platform !== platform) return
+      const userId = platform === 'netease' ? neteaseUserId
+        : platform === 'qq' ? qqUserId
+          : platform === 'spotify' ? spotifyUserId
+            : platform === 'kugou' ? kugouUserId
+              : platform === 'soda' ? sodaUserId : ''
+      void getUserPlaylists(platform, userId || '', username || undefined, { forceRefresh: true })
+        .then(items => setUserPlaylists(items || []))
+        .catch(() => undefined)
+    }
+    window.addEventListener('playlist-content-changed', reloadPlaylists)
+    return () => window.removeEventListener('playlist-content-changed', reloadPlaylists)
+  }, [platform, neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId, username])
 
   // 未播放（无歌词）时自动切回播放列表 tab
   useEffect(() => {
@@ -467,19 +557,80 @@ function TraditionalView({
     setPreferences(prev => { const next = { ...prev, ...patch }; localStorage.setItem(PREF_KEY, JSON.stringify(next)); window.dispatchEvent(new CustomEvent('traditionalPreferencesChanged', { detail: next })); return next })
   }, [])
 
-  const openPlaylist = useCallback(async (playlist: ExplorePlaylist | any) => {
+  const openPlaylist = useCallback(async (playlist: ExplorePlaylist | any, replaceCurrent = false) => {
+    const requestId = ++playlistRequestRef.current
+    const targetHistoryIndex = replaceCurrent ? historyIndexRef.current : historyIndexRef.current + 1
     setPlaylistLoading(true)
-    navigate({ name: 'playlist', playlist: playlist || null, songs: [] })
-    try {
-      const result = await fetchExplorePlaylist({ ...playlist, platform: playlist.platform || platform })
+    setPlaylistError('')
+    if (replaceCurrent) {
       setHistory(prev => {
         const next = [...prev]
-        const last = next[next.length - 1]
-        if (last && last.name === 'playlist') next[next.length - 1] = { name: 'playlist', playlist: result.playlist || playlist, songs: result.songs || [] }
+        next[targetHistoryIndex] = { name: 'playlist', playlist: playlist || null, songs: [] }
         return next
       })
-    } catch { /* 保留 loading 占位 */ } finally { setPlaylistLoading(false) }
+    } else {
+      navigate({ name: 'playlist', playlist: playlist || null, songs: [] })
+    }
+    const applyPlaylist = (nextPlaylist: any, songs: Song[]) => {
+      if (requestId !== playlistRequestRef.current) return
+      setHistory(prev => {
+        const next = [...prev]
+        const target = next[targetHistoryIndex]
+        if (target?.name === 'playlist') next[targetHistoryIndex] = { name: 'playlist', playlist: nextPlaylist, songs }
+        return next
+      })
+    }
+    try {
+      if ((playlist.platform || platform) === 'apple') {
+        const playlistId = String(playlist.id || '')
+        const storefront = localStorage.getItem('appleStorefront') || 'cn'
+        const songs = playlistId === APPLE_FAVORITES_ID
+          ? (await getAppleFavoriteSongs(5000, storefront)).map(track => appleSongToSong(track, storefront))
+          : playlistId === APPLE_LIBRARY_ID
+            ? (await getAppleLibrarySongs(5000)).map(appleLibraryTrackToSong)
+          : playlistId.startsWith('pl.')
+            ? (await getAppleCatalogPlaylistTracks(playlistId, storefront, 5000)).map(track => appleSongToSong(track, storefront))
+            : (await getApplePlaylistTracks(playlistId, 5000)).map(appleLibraryTrackToSong)
+        applyPlaylist(playlist, songs)
+        return
+      }
+      const result = await fetchExplorePlaylist({ ...playlist, platform: playlist.platform || platform })
+      applyPlaylist(result.playlist || playlist, result.songs || [])
+    } catch (error) {
+      if (requestId === playlistRequestRef.current) setPlaylistError(error instanceof Error ? error.message : '歌单加载失败，请重试')
+    } finally {
+      if (requestId === playlistRequestRef.current) setPlaylistLoading(false)
+    }
   }, [platform, navigate])
+
+  useEffect(() => {
+    if (!restorePlaybackOrigin || !restorePlaybackOrigin.surface.startsWith('traditional-')) return
+    const originPlatform = restorePlaybackOrigin.platform || platform
+    if (originPlatform !== platform) setPlatform(originPlatform)
+    if (restorePlaybackOrigin.surface === 'traditional-playlist' && restorePlaybackOrigin.playlist) {
+      void openPlaylist(restorePlaybackOrigin.playlist as ExplorePlaylist)
+    } else if (restorePlaybackOrigin.surface === 'traditional-search') navigate({ name: 'search' })
+    else if (restorePlaybackOrigin.surface === 'traditional-recent') navigate({ name: 'recent' })
+    else if (restorePlaybackOrigin.surface === 'traditional-library') navigate({ name: 'library' })
+    else if (restorePlaybackOrigin.surface === 'traditional-album' && restorePlaybackOrigin.albumId) navigate({ name: 'album', id: String(restorePlaybackOrigin.albumId), platform: originPlatform })
+    else if (restorePlaybackOrigin.surface === 'traditional-artist' && restorePlaybackOrigin.artistId) navigate({ name: 'artist', id: String(restorePlaybackOrigin.artistId), platform: originPlatform })
+  }, [restorePlaybackOrigin?.revision])
+
+  useEffect(() => {
+    const refreshOpenPlaylist = (event: Event) => {
+      const detail = (event as CustomEvent<{ platform?: MusicPlatform; type?: string; playlistId?: string | number }>).detail
+      if (currentPage.name !== 'playlist' || detail?.platform !== (currentPage.playlist?.platform || platform)) return
+      const currentId = String(currentPage.playlist?.id || currentPage.playlist?.dirId || '')
+      if (detail.playlistId && String(detail.playlistId) !== currentId) return
+      if (detail.type === 'playlist-delete') {
+        goBack()
+        return
+      }
+      void openPlaylist(currentPage.playlist, true)
+    }
+    window.addEventListener('playlist-content-changed', refreshOpenPlaylist)
+    return () => window.removeEventListener('playlist-content-changed', refreshOpenPlaylist)
+  }, [currentPage, goBack, openPlaylist, platform])
 
   const openArtistDetail = useCallback((artistId: string, targetPlatform: MusicPlatform) => {
     if (artistId) navigate({ name: 'artist', id: String(artistId), platform: targetPlatform })
@@ -488,6 +639,39 @@ function TraditionalView({
     if (albumId) navigate({ name: 'album', id: String(albumId), platform: targetPlatform })
   }, [navigate])
   const openCommentsFor = useCallback((song: Song) => { if (song) navigate({ name: 'comments', song }) }, [navigate])
+
+  const ownsPlaylist = useCallback((playlist: any): boolean => {
+    if (!playlist || playlist.isLike || playlist.isCollected || playlist.subscribed) return false
+    const target = (playlist.platform || platform) as MusicPlatform
+    const id = String(playlist.id || '')
+    if (target === 'apple') return /^p\./i.test(id)
+    if (target === 'spotify') return playlist.ownedByMe === true || String(playlist.owner || '') === String(spotifyUserId || '')
+    const ownerId = String(playlist.userId || '')
+    const currentUserId = target === 'netease' ? neteaseUserId : target === 'qq' ? qqUserId : ''
+    return Boolean(ownerId && currentUserId && ownerId === String(currentUserId))
+  }, [neteaseUserId, platform, qqUserId, spotifyUserId])
+
+  const handleRemoveFromCurrentPlaylist = useCallback(async (song: Song, playlistId: string) => {
+    if (currentPage.name !== 'playlist' || !ownsPlaylist(currentPage.playlist)) return
+    const targetPlatform = (currentPage.playlist?.platform || platform) as MusicPlatform
+    if (!getPlatformCapabilities(targetPlatform).removeTracksFromPlaylist) return
+    const userId = targetPlatform === 'netease' ? neteaseUserId : targetPlatform === 'qq' ? qqUserId : targetPlatform === 'spotify' ? spotifyUserId : ''
+    try {
+      if (targetPlatform === 'apple') {
+        const ok = await removeAppleTracksFromPlaylist(playlistId, [{
+          catalogId: song.appleId && !String(song.appleId).startsWith('i.') ? song.appleId : undefined,
+          libraryId: song.appleLibraryId || (String(song.appleId || '').startsWith('i.') ? song.appleId : undefined),
+        }])
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '从 Apple 歌单移除失败')
+      } else {
+        await removeSongFromPlaylist(playlistId, String(song.id), userId || '', targetPlatform, { songMid: song.mid, songType: song.songType })
+      }
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: targetPlatform, type: 'playlist-tracks', playlistId, songId: song.mid || song.id } }))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已从歌单移除', type: 'success' } }))
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '从歌单移除失败', type: 'error' } }))
+    }
+  }, [currentPage, neteaseUserId, ownsPlaylist, platform, qqUserId, spotifyUserId])
 
   const handleSubscribePlaylist = useCallback(async (playlist: any, subscribe: boolean) => {
     const targetPlatform = (playlist?.platform || platform) as MusicPlatform
@@ -507,25 +691,101 @@ function TraditionalView({
     }
   }, [platform])
 
+  const refreshApplePlaylists = useCallback(async () => {
+    const [playlists, tracks, favoriteTracks] = await Promise.all([
+      getAppleLibraryPlaylists(200),
+      getAppleLibrarySongs(500),
+      getAppleFavoriteSongs(5000),
+    ])
+    const librarySongs = tracks.map(appleLibraryTrackToSong)
+    const favoriteSongs = favoriteTracks.map(track => appleSongToSong(track))
+    setUserPlaylists([
+      ...(favoriteSongs.length ? [{ id: APPLE_FAVORITES_ID, name: '喜爱歌曲', coverImgUrl: favoriteSongs[0]?.album.picUrl || '', trackCount: favoriteSongs.length, platform: 'apple' as const, isLike: true }] : []),
+      ...(librarySongs.length ? [{ id: APPLE_LIBRARY_ID, name: '我的音乐库', coverImgUrl: librarySongs[0]?.album.picUrl || '', trackCount: librarySongs.length, platform: 'apple' as const }] : []),
+      ...playlists.map(item => ({ ...item, coverImgUrl: item.artworkUrl || '', platform: 'apple' as const, isLike: false })),
+    ])
+  }, [])
+
+  const handleEditPlaylist = useCallback(async (data: { name: string; desc?: string }) => {
+    const playlist = playlistMenu.playlist
+    const targetPlatform = (playlist?.platform || platform) as MusicPlatform
+    if (!playlist || !getPlatformCapabilities(targetPlatform).updatePlaylist) return
+    setPlaylistMutationBusy(true)
+    try {
+      if (targetPlatform === 'apple') {
+        const ok = await updateApplePlaylist(String(playlist.id || ''), { name: data.name, description: data.desc || undefined })
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '更新 Apple 歌单失败')
+        await refreshApplePlaylists()
+      } else {
+        const result = await updatePlaylist(String(playlist.id || playlist.dirId || ''), targetPlatform, { name: data.name, desc: data.desc })
+        if (result?.error) throw new Error(result.error)
+      }
+      setShowEditPlaylist(false)
+      setPlaylistMenu({ show: false, x: 0, y: 0, playlist: null })
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: targetPlatform, type: 'playlist-list' } }))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单信息已更新', type: 'success' } }))
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '更新歌单失败', type: 'error' } }))
+    } finally {
+      setPlaylistMutationBusy(false)
+    }
+  }, [platform, playlistMenu.playlist, refreshApplePlaylists])
+
+  const handleDeletePlaylist = useCallback(async () => {
+    const playlist = playlistMenu.playlist
+    const targetPlatform = (playlist?.platform || platform) as MusicPlatform
+    if (!playlist || !getPlatformCapabilities(targetPlatform).deletePlaylist) return
+    setPlaylistMutationBusy(true)
+    try {
+      if (targetPlatform === 'apple') {
+        const ok = await deleteApplePlaylist(String(playlist.id || ''))
+        if (!ok) throw new Error(getLastAppleMutationResult().error || '删除 Apple 歌单失败')
+        await refreshApplePlaylists()
+      } else {
+        const deleteId = targetPlatform === 'qq' ? playlist.dirId || playlist.id : playlist.id
+        const result = await deletePlaylist(String(deleteId || ''), targetPlatform)
+        if (result?.error) throw new Error(result.error)
+      }
+      setShowDeletePlaylist(false)
+      setPlaylistMenu({ show: false, x: 0, y: 0, playlist: null })
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: targetPlatform, type: 'playlist-delete', playlistId: String(playlist.id || playlist.dirId || '') } }))
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单已删除', type: 'success' } }))
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '删除歌单失败', type: 'error' } }))
+    } finally {
+      setPlaylistMutationBusy(false)
+    }
+  }, [platform, playlistMenu.playlist, refreshApplePlaylists])
+
   const handleCreatePlaylist = useCallback(async () => {
     const name = newPlaylistName.trim()
     if (!name || creatingPlaylistBusy) return
     if (!loggedIn) { onLoginClick(platform); return }
     setCreatingPlaylistBusy(true)
     try {
-      const result = await createPlaylist(name, platform)
-      const success = result && !result.error && (result.code === 200 || result.code === undefined || result.result === 0 || result.result === 100 || result.result === undefined)
-      if (!success) throw new Error(result?.message || result?.error || '创建歌单失败')
-      invalidateUserPlaylistsCache(platform, platform === 'netease' ? (neteaseUserId || '') : (qqUserId || ''))
-      const id = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : ''
-      void getUserPlaylists(platform, id || '', username || undefined).then(items => setUserPlaylists(items || [])).catch(() => undefined)
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单已创建', type: 'success' } }))
+      if (platform === 'apple') {
+        const ok = await createApplePlaylist(name)
+        if (!ok) throw new Error('创建 Apple 歌单失败')
+        await refreshApplePlaylists()
+      } else {
+        const result = await createPlaylist(name, platform)
+        const success = result && !result.error && (result.code === 200 || result.code === undefined || result.result === 0 || result.result === 100 || result.result === undefined)
+        if (!success) throw new Error(result?.message || result?.error || '创建歌单失败')
+        invalidateUserPlaylistsCache(platform, platform === 'netease' ? (neteaseUserId || '') : (qqUserId || ''))
+        const id = platform === 'netease' ? neteaseUserId
+      : platform === 'qq' ? qqUserId
+        : platform === 'spotify' ? spotifyUserId
+          : platform === 'kugou' ? kugouUserId
+            : platform === 'soda' ? sodaUserId : ''
+        void getUserPlaylists(platform, id || '', username || undefined).then(items => setUserPlaylists(items || [])).catch(() => undefined)
+      }
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform, type: 'playlist-list' } }))
       setCreatingPlaylist(false)
       setNewPlaylistName('')
     } catch (error) {
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '创建歌单失败', type: 'error' } }))
     } finally { setCreatingPlaylistBusy(false) }
-  }, [newPlaylistName, creatingPlaylistBusy, loggedIn, platform, neteaseUserId, qqUserId, username, onLoginClick])
+  }, [newPlaylistName, creatingPlaylistBusy, loggedIn, platform, neteaseUserId, qqUserId, username, onLoginClick, refreshApplePlaylists])
 
   const recommendationSongs = useMemo(() => {
     const list = [...(payload?.dailySongs || []), ...(payload?.radioSongs || []), ...(payload?.newSongs || [])]
@@ -644,6 +904,15 @@ function TraditionalView({
           <button type="button" onClick={goBack} disabled={historyIndex <= 0} aria-label="后退" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronLeft className="h-4 w-4" /></button>
           <button type="button" onClick={goForward} disabled={historyIndex >= history.length - 1} aria-label="前进" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronRight className="h-4 w-4" /></button>
         </div>
+        <div className="flex items-center gap-1 lg:hidden">
+          <button type="button" onClick={() => navigate({ name: 'home' })} aria-label="前往发现" className="rounded-xl p-2 hover:bg-white/10"><Home className="h-4 w-4" /></button>
+          <button type="button" onClick={openLibrary} aria-label="打开音乐库" className="rounded-xl p-2 hover:bg-white/10"><Library className="h-4 w-4" /></button>
+          <button type="button" onClick={openLikedSongs} aria-label={favoriteLabels.collection} className="rounded-xl p-2 hover:bg-white/10"><Heart className="h-4 w-4" /></button>
+          <button type="button" onClick={() => navigate({ name: 'recent' })} aria-label="打开最近播放" className="rounded-xl p-2 hover:bg-white/10"><History className="h-4 w-4" /></button>
+          <button type="button" onClick={() => navigate({ name: 'search' })} aria-label="打开搜索" className="rounded-xl p-2 hover:bg-white/10"><Search className="h-4 w-4" /></button>
+          <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} aria-label="打开个人中心" className="rounded-xl p-2 hover:bg-white/10"><Music2 className="h-4 w-4" /></button>
+          <button type="button" onClick={() => navigate({ name: 'settings' })} aria-label="打开设置" className="rounded-xl p-2 hover:bg-white/10"><Settings className="h-4 w-4" /></button>
+        </div>
         <div className="min-w-0 flex-1" />
         {/* 右上角：Logo + 软件名（品牌标识，非交互；个人中心入口在右栏资料卡，避免与右上角隐藏窗口按钮抢点击） */}
         <div className="flex shrink-0 items-center gap-2">
@@ -681,13 +950,13 @@ function TraditionalView({
         </AnimatePresence>
       </div>
 
-      <div className="relative z-10 grid h-[calc(100%_-_5rem)] min-h-0" style={{ gridTemplateColumns: preferences.sidebarWidth === 'wide' ? '220px minmax(0,1fr) 320px' : '176px minmax(0,1fr) 300px' }}>
+      <div className={`relative z-10 grid h-[calc(100%_-_5rem)] min-h-0 grid-cols-1 lg:grid-cols-[176px_minmax(0,1fr)] 2xl:grid-cols-[220px_minmax(0,1fr)_320px] ${currentSong ? 'pb-16 2xl:pb-0' : ''}`}>
         {/* 左栏：导航 + 我的歌单 / 收藏歌单 */}
-        <aside className={`flex min-h-0 flex-col border-r px-3 py-5 ${isDark ? 'border-white/10' : 'border-black/10'}`}>
+        <aside className={`hidden min-h-0 flex-col border-r px-3 py-5 lg:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
           <nav className="space-y-1">
             <button type="button" onClick={() => navigate({ name: 'home' })} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm" style={{ background: currentPage.name === 'home' ? `${accent}2e` : undefined, color: currentPage.name === 'home' ? accent : undefined }}><Home className="h-4 w-4" />发现</button>
             <button type="button" onClick={openLibrary} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'library' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'library' ? { color: accent } : undefined}><Library className="h-4 w-4" />音乐库</button>
-            <button type="button" onClick={openLikedSongs} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${muted} hover:bg-white/10`}><Heart className="h-4 w-4" />我喜欢</button>
+            <button type="button" onClick={openLikedSongs} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${muted} hover:bg-white/10`}><Heart className="h-4 w-4" />{favoriteLabels.collection}</button>
             <button type="button" onClick={() => navigate({ name: 'recent' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'recent' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'recent' ? { color: accent } : undefined}><History className="h-4 w-4" />最近播放</button>
             <button type="button" onClick={() => navigate({ name: 'search' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'search' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'search' ? { color: accent } : undefined}><Search className="h-4 w-4" />搜索</button>
             <button type="button" onClick={() => navigate({ name: 'settings' })} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm ${currentPage.name === 'settings' ? '' : muted} hover:bg-white/10`} style={currentPage.name === 'settings' ? { color: accent } : undefined}><Settings className="h-4 w-4" />设置</button>
@@ -696,7 +965,9 @@ function TraditionalView({
             <button type="button" onClick={() => setPlaylistTab('mine')} className={`rounded-full px-2.5 py-1 text-xs transition ${playlistTab === 'mine' ? 'font-medium' : muted}`} style={playlistTab === 'mine' ? { color: accent } : undefined}>我的歌单</button>
             <span className={`text-xs ${muted}`}>/</span>
             <button type="button" onClick={() => setPlaylistTab('collected')} className={`rounded-full px-2.5 py-1 text-xs transition ${playlistTab === 'collected' ? 'font-medium' : muted}`} style={playlistTab === 'collected' ? { color: accent } : undefined}>收藏</button>
-            <button type="button" onClick={() => { if (!loggedIn) { onLoginClick(platform); return } setCreatingPlaylist(value => !value) }} className="ml-auto rounded p-1 hover:bg-white/10" aria-label="创建歌单"><Plus className="h-3.5 w-3.5" /></button>
+            {getPlatformCapabilities(platform).createPlaylist && (
+              <button type="button" onClick={() => { if (!loggedIn) { onLoginClick(platform); return } setCreatingPlaylist(value => !value) }} className="ml-auto rounded p-1 hover:bg-white/10" aria-label="创建歌单"><Plus className="h-3.5 w-3.5" /></button>
+            )}
           </div>
           {creatingPlaylist && (
             <div className="mt-2 flex items-center gap-1.5 px-1">
@@ -715,7 +986,7 @@ function TraditionalView({
           <div className="mt-2 flex-1 space-y-1 overflow-y-auto">
             {displayPlaylist.map((playlist: any) => (
               <button type="button" key={`${playlist.platform || platform}:${playlist.id || playlist.dirId}`} onClick={() => openPlaylist(playlist)} onContextMenu={event => { event.preventDefault(); setPlaylistSubscribed(Boolean(playlist.isCollected || playlist.subscribed)); setPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }} className={`flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition hover:bg-white/10`}>
-                <img src={playlist.coverImgUrl || playlist.coverUrl || ''} alt="" className="h-9 w-9 rounded-lg object-cover" />
+                {playlist.coverImgUrl || playlist.coverUrl ? <img src={playlist.coverImgUrl || playlist.coverUrl} alt="" className="h-9 w-9 rounded-lg object-cover" /> : <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: `${accent}22` }}><ListMusic className="h-4 w-4 opacity-35" /></span>}
                 <span className="min-w-0 flex-1 truncate text-xs">{playlist.name}</span>
               </button>
             ))}
@@ -730,13 +1001,13 @@ function TraditionalView({
           ) : currentPage.name === 'recent' ? (
             <TraditionalRecent platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
           ) : currentPage.name === 'settings' ? (
-            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onGlobalSettings={onSettingsClick} />
+            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />
           ) : currentPage.name === 'library' ? (
             <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
           ) : currentPage.name === 'profile' ? (
             <TraditionalProfile platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} selfUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} targetUserId={currentPage.userId} targetNickname={currentPage.nickname} targetAvatar={currentPage.avatarUrl} userPlaylists={userPlaylists} onBack={goBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onOpenUserProfile={(userId, nickname, avatarUrl) => navigate({ name: 'profile', userId, nickname, avatarUrl })} onOpenArtist={openArtistDetail} onLoginClick={() => onLoginClick(platform)} />
           ) : currentPage.name === 'playlist' ? (
-            <TraditionalPlaylistDetail playlist={currentPage.playlist} songs={currentPage.songs} loading={playlistLoading} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={goBack} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} ownUserName={loggedIn ? username : ''} ownUserAvatar={avatar} ownUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} onOpenUserProfile={(targetPlatform, userId, nickname, avatarUrl) => { if (targetPlatform === platform) navigate({ name: 'profile', userId, nickname, avatarUrl }) }} />
+            <TraditionalPlaylistDetail playlist={currentPage.playlist} songs={currentPage.songs} loading={playlistLoading} error={playlistError} onRetry={() => void openPlaylist(currentPage.playlist, true)} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={goBack} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform, playlist: currentPage.playlist, songs })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={ownsPlaylist(currentPage.playlist) && getPlatformCapabilities((currentPage.playlist?.platform || platform) as MusicPlatform).removeTracksFromPlaylist ? handleRemoveFromCurrentPlaylist : undefined} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} ownUserName={loggedIn ? username : ''} ownUserAvatar={avatar} ownUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} onOpenUserProfile={(targetPlatform, userId, nickname, avatarUrl) => { if (targetPlatform === platform) navigate({ name: 'profile', userId, nickname, avatarUrl }) }} />
           ) : currentPage.name === 'comments' ? (
             <TraditionalComments song={currentPage.song} accent={accent} isDark={isDark} onClose={goBack} />
           ) : currentPage.name === 'artist' ? (
@@ -755,7 +1026,7 @@ function TraditionalView({
         </main>
 
         {/* 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部可滚动） */}
-        <aside className={`flex min-h-0 flex-col border-l ${isDark ? 'border-white/10' : 'border-black/10'}`}>
+        <aside className={`hidden min-h-0 flex-col border-l 2xl:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
           <div className="shrink-0 px-4 pt-4">
             <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-white/10 ${surface}`}>
               {avatar ? <img src={avatar} alt="" className="h-10 w-10 rounded-full object-cover" /> : <div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>}
@@ -834,13 +1105,46 @@ function TraditionalView({
         </aside>
       </div>
 
-      <SongContextMenu show={songMenu.show} x={songMenu.x} y={songMenu.y} song={songMenu.song} onClose={() => setSongMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, recommendationSongs, { mode: 'traditional', surface: 'mode-root', platform: song.platform || platform })} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onViewAlbum={song => song.album?.id && openAlbumDetail(String(song.album.id), song.platform || platform)} onViewArtist={song => song.artists?.[0]?.id && openArtistDetail(String(song.artists[0].id), song.platform || platform)} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={songMenu.song?.platform || platform} playerTheme={playerTheme} />
-      <PlaylistContextMenu show={playlistMenu.show} x={playlistMenu.x} y={playlistMenu.y} playlist={playlistMenu.playlist} onClose={() => setPlaylistMenu({ show: false, x: 0, y: 0, playlist: null })} onEdit={() => undefined} onDelete={() => undefined} onSubscribe={handleSubscribePlaylist} onShare={playlist => {
+      {currentSong && (
+        <div className={`absolute inset-x-3 bottom-3 z-30 flex items-center gap-3 rounded-2xl border px-3 py-2 shadow-2xl backdrop-blur-xl 2xl:hidden ${surface}`}>
+          {coverOf(currentSong) ? <img src={coverOf(currentSong)} alt="" className="h-10 w-10 rounded-lg object-cover" /> : <div className="flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: `${songTheme}22` }}><Music2 className="h-4 w-4" /></div>}
+          <button type="button" onClick={() => switchMode('minimal')} className="min-w-0 flex-1 text-left" title="进入播放页">
+            <span className="block truncate text-sm font-medium">{currentSong.name}</span>
+            <span className={`block truncate text-xs ${muted}`}>{currentSong.artists?.map(artist => artist.name).join(' / ')}</span>
+          </button>
+          <button type="button" onClick={onPrevious} aria-label="上一首" className="rounded-full p-2 hover:bg-white/10"><SkipBack className="h-4 w-4" /></button>
+          <button type="button" onClick={onPlayPause} aria-label={isPlaying ? '暂停' : '播放'} className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: songTheme }}>{isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}</button>
+          <button type="button" onClick={onNext} aria-label="下一首" className="rounded-full p-2 hover:bg-white/10"><SkipForward className="h-4 w-4" /></button>
+          <button type="button" onClick={() => setVolumeOpen(value => !value)} aria-label="音量" className="rounded-full p-2 hover:bg-white/10"><Volume2 className="h-4 w-4" /></button>
+          {volumeOpen && <input aria-label="紧凑音量滑块" type="range" min={0} max={1} step={.01} value={volume} onChange={event => onVolumeChange(Number(event.target.value))} className="w-24" style={{ accentColor: songTheme }} />}
+        </div>
+      )}
+
+      <SongContextMenu show={songMenu.show} x={songMenu.x} y={songMenu.y} song={songMenu.song} onClose={() => setSongMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, recommendationSongs, { mode: 'traditional', surface: 'mode-root', platform: song.platform || platform })} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) openAlbumDetail(String(albumId), song.platform || platform) }} onViewArtist={song => { const artist = song.artists?.[0]; const artistId = artist?.appleId || artist?.mid || artist?.id; if (artistId) openArtistDetail(String(artistId), song.platform || platform) }} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} platform={songMenu.song?.platform || platform} playerTheme={playerTheme} />
+      <PlaylistContextMenu show={playlistMenu.show} x={playlistMenu.x} y={playlistMenu.y} playlist={playlistMenu.playlist} onClose={() => setPlaylistMenu({ show: false, x: 0, y: 0, playlist: null })} onEdit={() => setShowEditPlaylist(true)} onDelete={() => setShowDeletePlaylist(true)} onSubscribe={handleSubscribePlaylist} onShare={playlist => {
         const targetPlatform = (playlist?.platform || platform) as MusicPlatform
-        const url = targetPlatform === 'qq' ? `https://y.qq.com/n/ryqq/playlist/${playlist?.id || playlist?.dirId || ''}` : `https://music.163.com/#/playlist?id=${playlist?.id || ''}`
+        const playlistId = String(playlist?.id || playlist?.dirId || '')
+        const storefront = localStorage.getItem('appleStorefront') || 'cn'
+        const url = targetPlatform === 'apple'
+          ? `https://music.apple.com/${encodeURIComponent(storefront)}/playlist/${encodeURIComponent(playlist?.name || 'playlist')}/${encodeURIComponent(playlistId)}`
+          : targetPlatform === 'qq' ? `https://y.qq.com/n/ryqq/playlist/${playlistId}`
+            : targetPlatform === 'spotify' ? `https://open.spotify.com/playlist/${playlistId}`
+              : `https://music.163.com/#/playlist?id=${playlistId}`
         void navigator.clipboard?.writeText(url)
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单链接已复制', type: 'success' } }))
-      }} isOwner={false} isSubscribed={playlistSubscribed || Boolean(playlistMenu.playlist?.isCollected || playlistMenu.playlist?.subscribed)} isSpecialPlaylist={Boolean(playlistMenu.playlist?.isLike)} canEdit={false} />
+      }} isOwner={(() => {
+        const playlist = playlistMenu.playlist
+        if (!playlist || playlist.isLike || playlist.isCollected || playlist.subscribed) return false
+        const target = (playlist.platform || platform) as MusicPlatform
+        const id = String(playlist.id || '')
+        if (target === 'apple') return /^p\./i.test(id)
+        if (target === 'spotify') return playlist.ownedByMe === true || String(playlist.owner || '') === String(spotifyUserId || '')
+        const ownerId = String(playlist.userId || '')
+        const currentUserId = target === 'netease' ? neteaseUserId : target === 'qq' ? qqUserId : ''
+        return Boolean(ownerId && currentUserId && ownerId === String(currentUserId))
+      })()} isSubscribed={playlistSubscribed || Boolean(playlistMenu.playlist?.isCollected || playlistMenu.playlist?.subscribed)} isSpecialPlaylist={Boolean(playlistMenu.playlist?.isLike || [APPLE_LIBRARY_ID, APPLE_FAVORITES_ID].includes(String(playlistMenu.playlist?.id || '')))} canEdit={getPlatformCapabilities((playlistMenu.playlist?.platform || platform) as MusicPlatform).updatePlaylist} canDelete={getPlatformCapabilities((playlistMenu.playlist?.platform || platform) as MusicPlatform).deletePlaylist} canSubscribe={getPlatformCapabilities((playlistMenu.playlist?.platform || platform) as MusicPlatform).subscribePlaylist} canShare={getPlatformCapabilities((playlistMenu.playlist?.platform || platform) as MusicPlatform).sharePlaylist && ((playlistMenu.playlist?.platform || platform) !== 'apple' || String(playlistMenu.playlist?.id || '').startsWith('pl.'))} />
+      <EditPlaylistModal show={showEditPlaylist} onClose={() => setShowEditPlaylist(false)} onSubmit={data => { void handleEditPlaylist(data) }} playlist={playlistMenu.playlist} loading={playlistMutationBusy} />
+      <DeletePlaylistModal show={showDeletePlaylist} onClose={() => setShowDeletePlaylist(false)} onConfirm={() => { void handleDeletePlaylist() }} playlistName={playlistMenu.playlist?.name || ''} loading={playlistMutationBusy} />
       <AudioQualitySettingsModal show={showQuality} onClose={() => setShowQuality(false)} playerTheme={playerTheme} neteaseVip={neteaseVip} qqVip={qqVip} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
       <style>{`@keyframes traditionalWave { from { transform: scaleY(.45); opacity: .45; } to { transform: scaleY(1.05); opacity: 1; } }`}</style>
     </div>
@@ -848,7 +1152,7 @@ function TraditionalView({
 }
 
 // 首页内容：发现（排行榜 + 新歌 + 推荐歌单）
-function HomeContent({ platform, accent, muted, surface, loggedIn, username, payload, heroSongs, onSongSelect, onSongMenu, onPlaylistMenu, onOpenPlaylist }: {
+function HomeContent({ platform, accent, muted, surface, loggedIn, username, payload, heroSongs, preferences, onSongSelect, onSongMenu, onPlaylistMenu, onOpenPlaylist }: {
   platform: MusicPlatform; accent: string; isDark: boolean; muted: string; surface: string; loading: boolean; loggedIn: boolean; username: string; payload: ExplorePayload | null; recommendationSongs: Song[]; heroSongs: Song[]; preferences: TraditionalPreferences; onSongSelect: SongSelectHandler; onSongMenu: (menu: { show: boolean; x: number; y: number; song: Song | null }) => void; onPlaylistMenu: (menu: { show: boolean; x: number; y: number; playlist: any | null }) => void; onOpenPlaylist: (playlist: any) => void;
 }) {
   // 发现页 = 探索向内容：排行榜 + 新歌 + 推荐歌单（个性化推荐在音乐库）
@@ -858,7 +1162,7 @@ function HomeContent({ platform, accent, muted, surface, loggedIn, username, pay
   return <><div className="mb-6"><p className={`text-xs uppercase tracking-[.2em] ${muted}`}>{platformLabel(platform)}</p><h1 className="mt-1 text-3xl font-semibold tracking-tight">{username ? `欢迎回来，${username}` : '在音乐里，遇见更好的自己'}</h1><p className={`mt-2 text-sm ${muted}`}>{loggedIn ? '探索新歌与排行榜，个性推荐在音乐库' : '登录后解锁个性化推荐，游客也可以直接开始播放'}</p></div>
   <section className="relative mb-8 grid min-h-[190px] grid-cols-[minmax(0,1fr)_180px] overflow-hidden rounded-3xl border p-6" style={{ borderColor: `${accent}55`, background: `linear-gradient(125deg, ${accent}28, rgba(255,255,255,.05))` }}><div className="relative z-10 flex flex-col justify-between"><div><span className="rounded-full border px-2.5 py-1 text-[10px]" style={{ borderColor: `${accent}66`, color: accent }}>TRADITIONAL MODE</span><h2 className="mt-4 max-w-lg text-2xl font-semibold">发现好音乐，从排行榜开始</h2><p className={`mt-2 max-w-md text-sm ${muted}`}>新歌速递、热门榜单、精选歌单——探索永远不缺新意。</p></div><button type="button" onClick={() => heroSongs[0] && onSongSelect(heroSongs[0], heroSongs, { mode: 'traditional', surface: 'mode-root', platform })} className="mt-4 flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-white" style={{ background: accent }}><Play className="h-4 w-4" />播放推荐</button></div><div className="relative flex items-center justify-center"><div className="absolute h-36 w-36 rounded-full blur-3xl" style={{ background: accent, opacity: .3 }} />{heroSongs[0] ? <img src={coverOf(heroSongs[0])} alt="" className="relative h-32 w-32 rotate-3 rounded-2xl object-cover shadow-2xl" /> : <Sparkles className="relative h-16 w-16 opacity-50" />}</div></section>
 
-  {charts.length > 0 && <section className="mb-8"><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">排行榜</h2><span className={`text-xs ${muted}`}>热门榜单实时更新</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+  {preferences.showRecommendations && charts.length > 0 && <section className="mb-8"><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">排行榜</h2><span className={`text-xs ${muted}`}>热门榜单实时更新</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
     {charts.map(chart => {
       const chartSongs = (chart.songs || []).map(s => chartSongToSong(chart, s))
       return (
@@ -883,7 +1187,7 @@ function HomeContent({ platform, accent, muted, surface, loggedIn, username, pay
 
   {newSongs.length > 0 && <section className="mb-8"><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">新歌速递</h2><span className={`text-xs ${muted}`}>{newSongs.length} 首新歌</span></div><div className="grid grid-cols-2 gap-3 md:grid-cols-4">{newSongs.map(song => <button type="button" key={songKey(song)} onClick={() => onSongSelect(song, newSongs, { mode: 'traditional', surface: 'mode-root', platform: song.platform })} onContextMenu={event => { event.preventDefault(); onSongMenu({ show: true, x: event.clientX, y: event.clientY, song }) }} className={`group overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}><div className="relative aspect-square overflow-hidden rounded-xl"><img src={coverOf(song)} alt="" loading="lazy" className="h-full w-full object-cover transition duration-300 group-hover:scale-105" /><span className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-900 opacity-0 shadow-lg transition group-hover:opacity-100"><Play className="h-4 w-4 fill-current" /></span></div><div className="mt-2 truncate text-sm">{song.name}</div><div className={`truncate text-xs ${muted}`}>{song.artists?.map(a => a.name).join(' / ')}</div></button>)}</div></section>}
 
-  <section><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">推荐歌单</h2><span className={`text-xs ${muted}`}>右键歌单可收藏或分享</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">{(payload?.playlists || []).slice(0, 8).map(playlist => <button type="button" key={`${playlist.platform}:${playlist.id}`} onClick={() => onOpenPlaylist(playlist)} onContextMenu={event => { event.preventDefault(); onPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}><img src={playlist.coverUrl} alt="" loading="lazy" className="aspect-square w-full rounded-xl object-cover" /><div className="mt-2 truncate text-sm">{playlist.name}</div><div className={`text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '精选歌单'}</div></button>)}</div></section>
+  {preferences.showRecommendations && <section><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">推荐歌单</h2><span className={`text-xs ${muted}`}>右键歌单可收藏或分享</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">{(payload?.playlists || []).slice(0, 8).map(playlist => <button type="button" key={`${playlist.platform}:${playlist.id}`} onClick={() => onOpenPlaylist(playlist)} onContextMenu={event => { event.preventDefault(); onPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}><img src={playlist.coverUrl} alt="" loading="lazy" className="aspect-square w-full rounded-xl object-cover" /><div className="mt-2 truncate text-sm">{playlist.name}</div><div className={`text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '精选歌单'}</div></button>)}</div></section>}
   </>}
 
 type TraditionalProfileSocialItem = {
@@ -1130,29 +1434,6 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
 }
 
 
-// 汽水曲目（后端 mapSodaMedia 产出）→ WaveForge Song（与 ProfileView 同口径）
-const sodaMediaToSong = (raw: any): Song | undefined => {
-  const mid = String(raw?.id ?? '')
-  if (!mid) return undefined
-  const tier = raw?.requiredTier
-  const vip = Boolean(raw?.vip || tier === 'vip' || tier === 'svip')
-  const rawArtists = Array.isArray(raw?.artists) ? raw.artists : []
-  const artistNames = rawArtists.length
-    ? rawArtists.map((item: any) => (typeof item === 'string' ? item : String(item?.name || ''))).filter(Boolean)
-    : raw?.artist ? [String(raw.artist)] : []
-  return {
-    id: Number(mid.slice(0, 15)) || 0,
-    mid,
-    name: String(raw?.name || '未知歌曲'),
-    artists: artistNames.map((name: string) => ({ name })),
-    album: { name: String(raw?.album || ''), picUrl: String(raw?.coverUrl || '') },
-    duration: Number(raw?.durationMs || 0),
-    platform: 'soda',
-    vip,
-    fee: vip ? 1 : 0,
-  }
-}
-
 // 网易云最近播放行 → Song（与 ProfileView normalizeRecentSong 同口径）
 const neteaseRecentRowToSong = (row: any): Song | null => {
   const source = row?.resource || row?.data || row?.song || row
@@ -1202,13 +1483,13 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
     }
     if (platform === 'apple') {
       getAppleRecentPlayed(100)
-        .then(tracks => finish(tracks.map((track, index) => appleLibraryTrackToSong({ ...track, id: track.id || `recent-${index}` })).filter((s): s is Song => Boolean(s))))
+        .then(tracks => finish(tracks.map(track => appleSongToSong(track)).filter((song): song is Song => Boolean(song))))
         .catch(() => finish([], '最近播放加载失败，请重试'))
       return
     }
     if (platform === 'spotify') {
       // Spotify 无官方最近播放接口：展示喜欢的歌曲（与简约模式同口径）
-      fetchSpotifyLiked(50)
+      fetchSpotifyRecentlyPlayed(50)
         .then(tracks => finish(tracks.map(track => spotifyTrackToSong(track))))
         .catch(() => finish([], '最近播放加载失败，请重试'))
       return
@@ -1290,7 +1571,7 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
                   tabIndex={0}
                   onClick={() => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform })}
                   onContextMenu={event => { event.preventDefault(); setSongMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
-                  onKeyDown={event => { if (event.key === 'Enter') onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform }) }}
+                  onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform }) } }}
                   className={`group grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_minmax(100px,.6fr)_56px] items-center gap-3 border-b px-4 py-2.5 transition last:border-b-0 ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
                   <span className="flex justify-center text-xs" style={{ color: active ? accent : undefined }}>
@@ -1323,8 +1604,8 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
         onRemoveFromFavorites={onRemoveFromFavorites}
         onAddToPlaylist={onAddToPlaylist}
         onViewComments={onViewComments}
-        onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)}
-        onViewArtist={song => song.artists?.[0]?.id && onOpenArtist?.(String(song.artists[0].id), song.platform || platform)}
+        onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }}
+        onViewArtist={song => { const artist = song.artists?.[0]; const artistId = artist?.appleId || artist?.mid || artist?.id; if (artistId) onOpenArtist?.(String(artistId), song.platform || platform) }}
         onCopyInfo={onCopyInfo}
         userPlaylists={userPlaylists || []}
         platform={songMenu.song?.platform || platform}
@@ -1334,48 +1615,205 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
   )
 }
 
-// 设置页：在中间栏直接展示（不再用右侧抽屉），与主流平台「设置即一页」的交互一致
-function TraditionalSettingsPage({ preferences, playerTheme, onChange, onGlobalSettings }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onGlobalSettings: () => void }) {
+// ─────────────────────────── 设置页 ───────────────────────────
+// QQ 音乐式顶部标签 + 全宽内容，分两类：
+// 1. 镜像全局设置（常规/播放/歌词/快捷键/桌面集成/性能/网络/高级/关于）：
+//    来自 services/globalSettingsRegistry，与简约模式设置同键同事件，任意一端改动实时互通；
+// 2. 「传统自定义」：仅影响传统模式自身的布局 / 背景氛围 / 平台排序显隐。
+// 「全局设置」独立入口已移除 —— 全局设置现在就是本页的主体。
+
+type TraditionalSettingsTabId = GlobalSettingsGroupId | 'traditional'
+
+const SETTINGS_TABS: Array<{ id: TraditionalSettingsTabId; label: string }> = [
+  { id: 'general', label: '常规' },
+  { id: 'playback', label: '播放' },
+  { id: 'lyrics', label: '歌词' },
+  { id: 'shortcuts', label: '快捷键' },
+  { id: 'desktop', label: '桌面集成' },
+  { id: 'performance', label: '性能' },
+  { id: 'network', label: '网络' },
+  { id: 'advanced', label: '高级' },
+  { id: 'about', label: '关于' },
+  { id: 'traditional', label: '传统自定义' },
+]
+
+function TraditionalSettingsPage({ preferences, playerTheme, onChange, onOpenQuality }: { preferences: TraditionalPreferences; playerTheme: 'light' | 'dark'; onChange: (patch: Partial<TraditionalPreferences>) => void; onOpenQuality: () => void }) {
   const dark = playerTheme === 'dark'
-  const card = dark ? 'border-white/10 bg-white/[0.055]' : 'border-black/10 bg-white/75'
+  const { getValue } = useGlobalSettings()
+  const accent = String(getValue('accentColor') || '#3B82F6')
+  const skin = useMemo(() => makeSkin({ dark, accent }), [dark, accent])
+  const [activeTab, setActiveTab] = useState<TraditionalSettingsTabId>('general')
+  const [showCacheClear, setShowCacheClear] = useState(false)
+  const [showRemoteSettings, setShowRemoteSettings] = useState(false)
+
+  // 当前环境下没有可见条目的分组，对应标签隐藏（如 Web / TV 下的「桌面集成」「网络」）
+  const visibleTabs = useMemo(() => SETTINGS_TABS.filter(tab => {
+    if (tab.id === 'traditional') return true
+    const group = GLOBAL_SETTINGS_GROUPS.find(item => item.id === tab.id)
+    return Boolean(group && group.entries.some(isEntryVisible))
+  }), [])
+
+  useEffect(() => {
+    if (!visibleTabs.some(tab => tab.id === activeTab)) setActiveTab(visibleTabs[0]?.id ?? 'general')
+  }, [visibleTabs, activeTab])
+
+  const handleOpenModal = useCallback((actionId: MirrorActionId) => {
+    if (actionId === 'audio-quality') onOpenQuality()
+    else if (actionId === 'cache-clear') setShowCacheClear(true)
+    else if (actionId === 'remote-settings') setShowRemoteSettings(true)
+  }, [onOpenQuality])
+
   return (
-    <div className="mx-auto flex h-full min-h-0 w-full max-w-2xl flex-col">
-      <div className="mb-5">
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <div className="mb-2">
         <h1 className="flex items-center gap-2 text-xl font-semibold"><Settings className="h-5 w-5" />设置</h1>
-        <p className={`mt-1 text-xs ${dark ? 'text-white/50' : 'text-slate-500'}`}>只影响传统模式的布局与氛围</p>
+        <p className={`mt-1 text-xs ${dark ? 'text-white/50' : 'text-slate-500'}`}>全局设置与简约模式实时同步、对所有模式生效 · 「传统自定义」仅调整传统模式</p>
       </div>
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pb-6">
-        <section className={`rounded-2xl border p-5 ${card}`}>
-          <h2 className="mb-4 text-sm font-semibold">布局</h2>
-          <div className="space-y-5">
-            <SettingChoice label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} dark={dark} />
-            <SettingChoice label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} dark={dark} />
-            <Toggle label="显示推荐内容" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} dark={dark} />
-            <Toggle label="显示播放频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} dark={dark} />
-          </div>
-        </section>
-        <section className={`rounded-2xl border p-5 ${card}`}>
-          <h2 className="mb-4 text-sm font-semibold">背景氛围</h2>
-          <div className="space-y-5">
-            <SettingChoice label="背景" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} dark={dark} />
-            <SliderSetting label={`背景模糊 ${preferences.backgroundBlur > 0 ? preferences.backgroundBlur + 'px' : ''}`} value={preferences.backgroundBlur} min={0} max={28} step={1} onChange={value => onChange({ backgroundBlur: value })} dark={dark} />
-            <Toggle label="背景暗化" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} dark={dark} />
-          </div>
-        </section>
-        <button type="button" onClick={onGlobalSettings} className="flex w-full items-center justify-between rounded-2xl border border-pink-400/30 bg-pink-500/10 px-4 py-3 text-left text-sm">
-          <span><span className="block font-medium">全局设置</span><span className="mt-1 block text-xs opacity-55">账号 / 个性化 / 高级 / 关于，与简约模式实时同步</span></span>
-          <ChevronRight className="h-4 w-4" />
-        </button>
+
+      {/* 顶部标签栏 */}
+      <div className={`-mx-1 flex gap-0.5 overflow-x-auto border-b px-1 ${dark ? 'border-white/10' : 'border-black/10'}`} style={{ scrollbarWidth: 'none' }}>
+        {visibleTabs.map(tab => {
+          const active = tab.id === activeTab
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className="relative flex-shrink-0 px-3.5 py-2.5 text-[13px] transition-colors"
+              style={{ color: active ? accent : dark ? 'rgba(255,255,255,.55)' : 'rgba(15,23,42,.55)', fontWeight: active ? 600 : 400 }}
+            >
+              {tab.label}
+              {active && (
+                <motion.span
+                  layoutId="traditional-settings-tab-underline"
+                  className="absolute inset-x-3 bottom-0 h-[2.5px] rounded-full"
+                  style={{ background: accent }}
+                  transition={{ type: 'spring', stiffness: 520, damping: 42 }}
+                />
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* 内容区：全宽滚动 */}
+      <div className="min-h-0 flex-1 overflow-y-auto pb-10 pr-1 pt-4">
+        {activeTab === 'traditional' ? (
+          <TraditionalCustomTab preferences={preferences} skin={skin} onChange={onChange} />
+        ) : (
+          <MirroredGlobalSettings key={activeTab} skin={skin} variant="classic" groupId={activeTab} onOpenModal={handleOpenModal} />
+        )}
+      </div>
+
+      {/* 设置内打开的共享弹窗（音质弹窗由父级挂载） */}
+      <Suspense fallback={null}>
+        {showCacheClear && <LazyCacheClearModal show onClose={() => setShowCacheClear(false)} playerTheme={playerTheme} />}
+        {showRemoteSettings && <LazyRemoteSettingsModal show onClose={() => setShowRemoteSettings(false)} playerTheme={playerTheme} />}
+      </Suspense>
+    </div>
+  )
+}
+
+// 「传统自定义」标签：传统模式私有的布局 / 氛围 / 平台排序
+function TraditionalCustomTab({ preferences, skin, onChange }: { preferences: TraditionalPreferences; skin: ReturnType<typeof makeSkin>; onChange: (patch: Partial<TraditionalPreferences>) => void }) {
+  return (
+    <div>
+      <CustomSection title="布局" description="传统模式自身的排版密度" skin={skin}>
+        <CustomChoice skin={skin} label="内容密度" value={preferences.density} options={[['comfortable', '舒适'], ['compact', '紧凑']]} onChange={value => onChange({ density: value as TraditionalPreferences['density'] })} />
+        <CustomChoice skin={skin} label="侧栏宽度" value={preferences.sidebarWidth} options={[['wide', '宽松'], ['narrow', '紧凑']]} onChange={value => onChange({ sidebarWidth: value as TraditionalPreferences['sidebarWidth'] })} />
+        <CustomCheck skin={skin} label="显示推荐内容" description="发现页展示推荐歌单与榜单" value={preferences.showRecommendations} onChange={value => onChange({ showRecommendations: value })} />
+        <CustomCheck skin={skin} label="显示播放频谱" description="右栏「正在播放」展示实时频谱" value={preferences.showWaveform} onChange={value => onChange({ showWaveform: value })} />
+      </CustomSection>
+      <CustomSection title="背景氛围" description="传统模式自身的背景效果" skin={skin}>
+        <CustomChoice skin={skin} label="背景" value={preferences.background} options={[['aurora', '流光'], ['cover', '封面'], ['plain', '纯色']]} onChange={value => onChange({ background: value as TraditionalPreferences['background'] })} />
+        <CustomSlider skin={skin} label="背景模糊" value={preferences.backgroundBlur} min={0} max={28} step={1} unit="px" onChange={value => onChange({ backgroundBlur: value })} />
+        <CustomCheck skin={skin} label="背景暗化" description="叠加暗色遮罩，突出前景内容" value={preferences.backgroundDim} onChange={value => onChange({ backgroundDim: value })} />
+      </CustomSection>
+      <CustomSection title="平台排序与显隐" description="与简约 / 探索 / 桌面模式共用同一份平台顺序，拖拽即时同步" skin={skin}>
+        <PlatformOrderEditor skin={skin} />
+      </CustomSection>
+    </div>
+  )
+}
+
+// 传统自定义的小节外壳（与镜像设置的 classic 分组同一版式）
+function CustomSection({ title, description, skin, children }: { title: string; description?: string; skin: ReturnType<typeof makeSkin>; children: React.ReactNode }) {
+  return (
+    <section className="mb-2">
+      <h3 className="text-[15px] font-semibold" style={{ color: skin.text }}>{title}</h3>
+      {description && <p className="mt-0.5 text-[11px]" style={{ color: skin.muted }}>{description}</p>}
+      <div className="mt-3 grid gap-x-4 gap-y-0.5 border-t pt-3" style={{ borderColor: skin.cardBorder, gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
+        {children}
+      </div>
+    </section>
+  )
+}
+
+function CustomCheck({ label, description, value, onChange, skin }: { label: string; description?: string; value: boolean; onChange: (value: boolean) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <button type="button" onClick={() => onChange(!value)} className="flex items-start gap-2.5 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-white/[0.04]">
+      <span
+        className="mt-0.5 flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border-2 transition-all"
+        style={{ borderColor: value ? skin.accent : skin.dark ? 'rgba(255,255,255,0.28)' : 'rgba(15,23,42,0.3)', background: value ? skin.accent : 'transparent' }}
+      >
+        {value && <Check className="h-3 w-3 text-white" strokeWidth={3.5} />}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[13px] leading-5" style={{ color: skin.text }}>{label}</span>
+        {description && <span className="mt-0.5 block text-[11px] leading-4" style={{ color: skin.muted }}>{description}</span>}
+      </span>
+    </button>
+  )
+}
+
+function CustomChoice({ label, value, options, onChange, skin }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <div className="px-2.5 py-2">
+      <div className="text-[13px] leading-5" style={{ color: skin.text }}>{label}</div>
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        {options.map(([key, labelText]) => {
+          const active = value === key
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onChange(key)}
+              className="rounded-full border px-3.5 py-1.5 text-xs transition-all"
+              style={{
+                borderColor: active ? skin.accent : skin.cardBorder,
+                background: active ? `${skin.accent}1f` : 'transparent',
+                color: active ? skin.accent : skin.sub,
+                fontWeight: active ? 600 : 400,
+              }}
+            >
+              {labelText}
+            </button>
+          )
+        })}
       </div>
     </div>
   )
 }
 
-function SliderSetting({ label, value, min, max, step, onChange, dark }: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void; dark: boolean }) {
-  return <div><div className="mb-2 flex items-center justify-between text-sm font-medium"><span>{label}</span></div><input type="range" min={min} max={max} step={step} value={value} onChange={event => onChange(Number(event.target.value))} className="w-full" style={{ accentColor: dark ? '#ec4899' : '#db2777' }} /></div>
+function CustomSlider({ label, value, min, max, step, unit, onChange, skin }: { label: string; value: number; min: number; max: number; step: number; unit?: string; onChange: (value: number) => void; skin: ReturnType<typeof makeSkin> }) {
+  return (
+    <div className="px-2.5 py-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[13px] leading-5" style={{ color: skin.text }}>{label}</span>
+        <span className="text-xs tabular-nums" style={{ color: skin.sub }}>{value > 0 ? `${value}${unit || ''}` : '关'}</span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={event => onChange(Number(event.target.value))}
+        className="mt-2 w-full cursor-pointer"
+        style={{ accentColor: skin.accent, background: skin.controlBg }}
+      />
+    </div>
+  )
 }
-
-function SettingChoice({ label, value, options, onChange, dark }: { label: string; value: string; options: Array<[string, string]>; onChange: (value: string) => void; dark: boolean }) { return <div><div className="mb-2 text-sm font-medium">{label}</div><div className="grid grid-cols-3 gap-2">{options.map(([key, labelText]) => <button type="button" key={key} onClick={() => onChange(key)} className={`rounded-xl border px-2 py-2 text-xs ${value === key ? 'border-pink-400 bg-pink-500 text-white' : dark ? 'border-white/10 bg-white/5 opacity-70' : 'border-black/10 bg-black/5 opacity-70'}`}>{labelText}</button>)}</div></div> }
-function Toggle({ label, value, onChange, dark }: { label: string; value: boolean; onChange: (value: boolean) => void; dark: boolean }) { return <button type="button" onClick={() => onChange(!value)} className={`flex w-full items-center justify-between rounded-2xl border px-4 py-3 text-left text-sm ${dark ? 'border-white/10 bg-white/5' : 'border-black/10 bg-black/5'}`}><span>{label}</span><span className={`relative h-6 w-11 rounded-full ${value ? 'bg-pink-500' : dark ? 'bg-white/15' : 'bg-black/15'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${value ? 'left-[22px]' : 'left-0.5'}`} /></span></button> }
 
 export default memo(TraditionalView)

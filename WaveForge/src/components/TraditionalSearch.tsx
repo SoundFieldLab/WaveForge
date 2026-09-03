@@ -5,19 +5,9 @@ import { Clock3, History, Loader2, Music2, Play, Search, SearchX, Trash2 } from 
 import type { Song } from '../services/musicApi'
 import { getProxiedImageUrl, searchAlbums, searchArtists, searchPlaylists, searchSongs } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { platformLabel } from '../services/platforms'
+import { getPlatformCapabilities, platformLabel } from '../services/platforms'
 import SongContextMenu from './SongContextMenu'
 import type { PlaybackOrigin } from '../types/playbackNavigation'
-
-const decodeHtmlEntities = (input: string) => {
-  try {
-    const textarea = document.createElement('textarea')
-    textarea.innerHTML = input
-    return textarea.value
-  } catch {
-    return input
-  }
-}
 
 const formatDuration = (milliseconds = 0) => {
   const seconds = Math.max(0, Math.round(milliseconds / 1000))
@@ -50,6 +40,7 @@ interface TraditionalSearchProps {
 const TAB_LABELS: Array<[SearchTab, string]> = [
   ['songs', '歌曲'], ['artists', '歌手'], ['albums', '专辑'], ['playlists', '歌单'],
 ]
+const supportsPlaylistSearch = (platform: MusicPlatform) => getPlatformCapabilities(platform).searchPlaylists
 
 function TraditionalSearch({
   platform, accent, isDark, currentSong, onSongSelect, onOpenPlaylist,
@@ -64,12 +55,16 @@ function TraditionalSearch({
   const [artists, setArtists] = useState<any[]>([])
   const [albums, setAlbums] = useState<any[]>([])
   const [playlists, setPlaylists] = useState<any[]>([])
+  const [error, setError] = useState('')
   const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const [history, setHistory] = useState<string[]>(() => {
     try { return Array.isArray(JSON.parse(localStorage.getItem(`waveforge:traditional-search-history:${platform}`) || '[]')) ? JSON.parse(localStorage.getItem(`waveforge:traditional-search-history:${platform}`) || '[]') : [] } catch { return [] }
   })
   const inputRef = useRef<HTMLInputElement>(null)
   const requestIdRef = useRef(0)
+  const debounceRef = useRef<number | null>(null)
+  const previousTabRef = useRef<SearchTab>('songs')
+  const availableTabs = TAB_LABELS.filter(([value]) => value !== 'playlists' || supportsPlaylistSearch(platform))
 
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
@@ -94,6 +89,7 @@ function TraditionalSearch({
     const requestId = ++requestIdRef.current
     setLoading(true)
     setSearched(true)
+    setError('')
     try {
       if (targetTab === 'songs') {
         const result = await searchSongs(trimmed, 30, platform)
@@ -110,19 +106,14 @@ function TraditionalSearch({
       } else {
         const data = await searchPlaylists(trimmed, platform)
         if (requestId !== requestIdRef.current) return
-        const raw = platform === 'qq' ? (data?.playlists || []) : (data?.result?.playlists || [])
-        setPlaylists(Array.isArray(raw) ? raw.map((item: any) => ({
-          id: String(item.id || ''),
-          name: decodeHtmlEntities(String(item.name || '')),
-          coverUrl: item.coverImgUrl || item.picUrl || '',
-          coverImgUrl: item.coverImgUrl || item.picUrl || '',
-          trackCount: Number(item.trackCount ?? item.trackNumber ?? 0),
-          creator: decodeHtmlEntities(String(item.creator?.nickname || item.creator?.nick || item.creator || '')),
-          platform,
-        })) : [])
+        if (data.unsupported) throw new Error(`${platformLabel(platform)}暂不支持歌单搜索`)
+        setPlaylists(data.playlists || [])
       }
     } catch (error) {
-      if (requestId === requestIdRef.current) console.error('传统模式搜索失败:', error)
+      if (requestId === requestIdRef.current) {
+        console.error('传统模式搜索失败:', error)
+        setError(error instanceof Error ? error.message : '搜索失败，请重试')
+      }
     } finally {
       if (requestId === requestIdRef.current) setLoading(false)
     }
@@ -131,16 +122,40 @@ function TraditionalSearch({
   // 防抖：输入停顿 320ms 后自动搜歌曲（其他分栏在切到时再搜）
   useEffect(() => {
     const trimmed = keyword.trim()
-    if (!trimmed) { setSearched(false); return }
-    const timer = window.setTimeout(() => void runSearch(trimmed, 'songs'), 320)
-    return () => window.clearTimeout(timer)
-  }, [keyword, runSearch])
+    if (debounceRef.current !== null) window.clearTimeout(debounceRef.current)
+    if (!trimmed) {
+      requestIdRef.current += 1
+      setSearched(false)
+      setLoading(false)
+      setError('')
+      return
+    }
+    if (tab !== 'songs') return
+    debounceRef.current = window.setTimeout(() => {
+      debounceRef.current = null
+      void runSearch(trimmed, 'songs')
+    }, 320)
+    return () => { if (debounceRef.current !== null) window.clearTimeout(debounceRef.current) }
+  }, [keyword, tab, runSearch])
 
   useEffect(() => { inputRef.current?.focus() }, [])
   useEffect(() => {
-    if (!searched || !keyword.trim()) return
-    void runSearch(keyword.trim(), tab)
-  }, [tab, runSearch, searched, keyword])
+    if (previousTabRef.current === tab) return
+    previousTabRef.current = tab
+    if (tab !== 'songs' && keyword.trim()) void runSearch(keyword, tab)
+  }, [tab, keyword, runSearch])
+
+  useEffect(() => {
+    if (tab === 'playlists' && !supportsPlaylistSearch(platform)) setTab('songs')
+  }, [platform, tab])
+
+  const submitSearch = () => {
+    if (debounceRef.current !== null) {
+      window.clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    void runSearch(keyword, tab)
+  }
 
   const activeSong = (song: Song) => currentSong && songKey(song) === songKey(currentSong)
 
@@ -154,7 +169,7 @@ function TraditionalSearch({
             ref={inputRef}
             value={keyword}
             onChange={event => setKeyword(event.target.value)}
-            onKeyDown={event => { if (event.key === 'Enter') void runSearch(keyword.trim(), tab) }}
+            onKeyDown={event => { if (event.key === 'Enter') submitSearch() }}
             placeholder={`搜索 ${platformLabel(platform)} 的歌曲、歌手、专辑或歌单`}
             className="h-full w-full bg-transparent text-sm outline-none"
           />
@@ -163,7 +178,7 @@ function TraditionalSearch({
       </div>
 
       <div className="mb-4 flex items-center gap-1 rounded-2xl border p-1" style={{ borderColor: isDark ? 'rgba(255,255,255,.1)' : 'rgba(15,23,42,.1)' }}>
-        {TAB_LABELS.map(([value, label]) => (
+        {availableTabs.map(([value, label]) => (
           <button
             key={value}
             type="button"
@@ -202,6 +217,12 @@ function TraditionalSearch({
           <div className="space-y-2">
             {Array.from({ length: 8 }, (_, index) => <div key={index} className="h-14 animate-pulse rounded-2xl bg-white/10" />)}
           </div>
+        ) : error ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 py-16">
+            <SearchX className="h-10 w-10 opacity-30" />
+            <p className={`text-sm ${muted}`}>{error}</p>
+            <button type="button" onClick={submitSearch} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accent }}>重试</button>
+          </div>
         ) : tab === 'songs' ? (
           songs.length === 0 ? <EmptyHint keyword={keyword} /> : (
             <div className={`overflow-hidden rounded-2xl border ${surface}`}>
@@ -214,15 +235,15 @@ function TraditionalSearch({
                     tabIndex={0}
                     onClick={() => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-search', platform: song.platform || platform })}
                     onContextMenu={event => { event.preventDefault(); setSongMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
-                    onKeyDown={event => { if (event.key === 'Enter') onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-search', platform: song.platform || platform }) }}
+                    onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-search', platform: song.platform || platform }) } }}
                     className={`group grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_minmax(100px,.6fr)_56px] items-center gap-3 border-b px-4 py-2.5 transition last:border-b-0 ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                   >
                     <span className="flex justify-center text-xs" style={{ color: active ? accent : undefined }}>
                       {active ? <Music2 className="h-3.5 w-3.5" style={{ color: accent }} /> : <span className={`${muted}`}>{index + 1}</span>}
                     </span>
                     <span className="flex min-w-0 items-center gap-3">
-                      <span className="relative shrink-0">
-                        <img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" />
+                      <span className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg" style={{ background: `${accent}22` }}>
+                        {coverOf(song) ? <img src={coverOf(song)} alt="" loading="lazy" className="h-full w-full object-cover" /> : <Music2 className="h-4 w-4 opacity-35" />}
                         <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
                       </span>
                       <span className="min-w-0">
@@ -242,12 +263,15 @@ function TraditionalSearch({
             <div className={`overflow-hidden rounded-2xl border ${surface}`}>
               {artists.map((artist, index) => (
                 <button
-                  key={`${artist.id}:${index}`}
+                  key={`${artist.appleId || artist.mid || artist.id}:${index}`}
                   type="button"
-                  onClick={() => artist.id && onOpenArtist?.(String(artist.id), artist.platform || platform)}
+                  onClick={() => {
+                    const artistId = artist.appleId || artist.mid || artist.id
+                    if (artistId) onOpenArtist?.(String(artistId), artist.platform || platform)
+                  }}
                   className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left transition last:border-b-0 ${isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
-                  <img src={artist.picUrl ? getProxiedImageUrl(artist.picUrl) : ''} alt="" className="h-12 w-12 rounded-full object-cover" style={{ background: `${accent}22` }} />
+                  {artist.picUrl ? <img src={getProxiedImageUrl(artist.picUrl)} alt="" className="h-12 w-12 rounded-full object-cover" /> : <span className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: `${accent}22` }}><Music2 className="h-5 w-5 opacity-35" /></span>}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{artist.name}</span>
                     <span className={`block truncate text-xs ${muted}`}>{artist.musicSize ? `${artist.musicSize} 首歌曲` : '歌手'}</span>
@@ -262,9 +286,12 @@ function TraditionalSearch({
             <div className={`overflow-hidden rounded-2xl border ${surface}`}>
               {albums.map((album, index) => (
                 <button
-                  key={`${album.id}:${index}`}
+                  key={`${album.appleId || album.mid || album.id}:${index}`}
                   type="button"
-                  onClick={() => album.id && onOpenAlbum?.(String(album.id), album.platform || platform)}
+                  onClick={() => {
+                    const albumId = album.appleId || album.mid || album.id
+                    if (albumId) onOpenAlbum?.(String(albumId), album.platform || platform)
+                  }}
                   className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left transition last:border-b-0 ${isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
                   <img src={album.picUrl ? getProxiedImageUrl(album.picUrl) : ''} alt="" className="h-12 w-12 rounded-xl object-cover" />
@@ -306,8 +333,15 @@ function TraditionalSearch({
         onRemoveFromFavorites={onRemoveFromFavorites}
         onAddToPlaylist={onAddToPlaylist}
         onViewComments={onViewComments}
-        onViewAlbum={song => song.album?.id && onOpenAlbum?.(String(song.album.id), song.platform || platform)}
-        onViewArtist={song => song.artists?.[0]?.id && onOpenArtist?.(String(song.artists[0].id), song.platform || platform)}
+        onViewAlbum={song => {
+          const albumId = song.album?.appleId || song.album?.mid || song.album?.id
+          if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform)
+        }}
+        onViewArtist={song => {
+          const artist = song.artists?.[0]
+          const artistId = artist?.appleId || artist?.mid || artist?.id
+          if (artistId) onOpenArtist?.(String(artistId), song.platform || platform)
+        }}
         onCopyInfo={onCopyInfo}
         userPlaylists={userPlaylists}
         platform={songMenu.song?.platform || platform}

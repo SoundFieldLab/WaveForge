@@ -1,7 +1,12 @@
+/** @vitest-environment jsdom */
 // 传统模式冒烟测试（v2）：中间栏展示所有内容、搜索/音乐库/歌单/评论/歌手/专辑、顶部模式下拉、真实频谱。
 // 纯 DOM + 文本断言（不依赖截图）。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
+
+if (typeof Element !== 'undefined' && !Element.prototype.scrollTo) {
+  Element.prototype.scrollTo = () => undefined
+}
 
 const cannedHomePayload = {
   dailySongs: [
@@ -46,6 +51,8 @@ import TraditionalView from '../src/components/TraditionalView'
 import TraditionalSearch from '../src/components/TraditionalSearch'
 import TraditionalComments from '../src/components/TraditionalComments'
 import TraditionalAlbumDetail from '../src/components/TraditionalAlbumDetail'
+import TraditionalPlaylistDetail from '../src/components/TraditionalPlaylistDetail'
+import { dispatchTvBack } from '../src/tv/tvCore'
 
 const baseProps = {
   onSongSelect: vi.fn(),
@@ -54,6 +61,10 @@ const baseProps = {
   queue: [],
   currentIndex: -1,
   isPlaying: false,
+  playbackTimeStore: {
+    subscribe: () => () => undefined,
+    getSnapshot: () => ({ currentTime: 0 }),
+  },
   currentTime: 0,
   duration: 0,
   lyrics: [],
@@ -168,6 +179,75 @@ describe('传统模式 TraditionalView', () => {
     render(<TraditionalSearch platform="netease" accent="#ec4899" isDark currentSong={null} onBack={() => undefined} onSongSelect={vi.fn()} onOpenPlaylist={vi.fn()} />)
     fireEvent.change(screen.getByPlaceholderText(/搜索 网易云/), { target: { value: '周杰伦' } })
     await waitFor(() => expect(screen.getByText('搜索结果歌')).toBeTruthy(), { timeout: 3000 })
+  })
+
+  it('独立搜索组件：输入关键词只触发一次防抖搜索', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ code: 200, result: { songs: [{ id: 9, name: '搜索结果歌', artists: [{ name: '歌手C' }], album: { name: '专辑C', picUrl: '' }, duration: 200000 }] } }),
+    }))
+    globalThis.fetch = fetchMock as any
+    render(<TraditionalSearch platform="netease" accent="#ec4899" isDark currentSong={null} onBack={() => undefined} onSongSelect={vi.fn()} onOpenPlaylist={vi.fn()} />)
+    fireEvent.change(screen.getByPlaceholderText(/搜索 网易云/), { target: { value: '周杰伦' } })
+    await waitFor(() => expect(screen.getByText('搜索结果歌')).toBeTruthy(), { timeout: 3000 })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('汽水搜索隐藏当前不支持的歌单标签', () => {
+    render(<TraditionalSearch platform="soda" accent="#38bdf8" isDark currentSong={null} onBack={() => undefined} onSongSelect={vi.fn()} onOpenPlaylist={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: '歌单' })).toBeNull()
+  })
+
+  it('搜索结果行支持 Space 键播放', async () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ code: 200, result: { songs: [{ id: 10, name: '键盘歌曲', artists: [{ name: '歌手' }], album: { name: '专辑', picUrl: '' }, duration: 1000, platform: 'netease' }] } }),
+    })) as any
+    const onSongSelect = vi.fn()
+    render(<TraditionalSearch platform="netease" accent="#ec4899" isDark currentSong={null} onBack={() => undefined} onSongSelect={onSongSelect} onOpenPlaylist={vi.fn()} />)
+    fireEvent.change(screen.getByPlaceholderText(/搜索 网易云/), { target: { value: '键盘' } })
+    const row = await screen.findByRole('button', { name: /键盘歌曲/ })
+    fireEvent.keyDown(row, { key: ' ' })
+    expect(onSongSelect).toHaveBeenCalledTimes(1)
+  })
+
+  it('QQ 评论使用 QQ cookie 且加载更多递增页码', async () => {
+    localStorage.setItem('qq_cookie', 'qq-auth-cookie')
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ result: 0, data: { comments: [{ rootcommentid: `c${fetchMock.mock.calls.length}`, rootcommentcontent: 'QQ评论', nick: 'QQ用户', time: 1700000000 }], hotComments: [], hasMore: fetchMock.mock.calls.length === 1 } }),
+    }))
+    globalThis.fetch = fetchMock as any
+    const song = { id: 12, mid: 'qq-mid', name: 'QQ歌曲', artists: [{ name: '歌手' }], album: { name: '专辑', picUrl: '' }, duration: 1000, platform: 'qq' as const }
+    render(<TraditionalComments song={song} accent="#22c55e" isDark onClose={() => undefined} />)
+    await waitFor(() => expect(screen.getByText('加载更多')).toBeTruthy())
+    expect(String(fetchMock.mock.calls[0][0])).toContain('pagenum=1')
+    expect(String(fetchMock.mock.calls[0][0])).toContain('qq-auth-cookie')
+    fireEvent.click(screen.getByText('加载更多'))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    expect(String(fetchMock.mock.calls[1][0])).toContain('pagenum=2')
+  })
+
+  it('恢复 traditional-search 来源并由 TV back 返回首页', async () => {
+    render(<TraditionalView {...baseProps} restorePlaybackOrigin={{ revision: 1, mode: 'traditional', surface: 'traditional-search', platform: 'netease' }} />)
+    await waitFor(() => expect(screen.getByPlaceholderText(/搜索 网易云/)).toBeTruthy())
+    expect(dispatchTvBack()).toBe(true)
+    await waitFor(() => expect(screen.queryByPlaceholderText(/搜索 网易云/)).toBeNull())
+  })
+
+  it('关闭推荐内容后隐藏排行榜和推荐歌单', async () => {
+    localStorage.setItem('waveforge:traditional-preferences:v2', JSON.stringify({ showRecommendations: false }))
+    render(<TraditionalView {...baseProps} />)
+    await waitFor(() => expect(screen.getByText('新歌速递')).toBeTruthy())
+    expect(screen.queryByText('排行榜')).toBeNull()
+    expect(screen.queryByText('推荐歌单')).toBeNull()
+  })
+
+  it('歌单错误状态提供重试操作', () => {
+    const onRetry = vi.fn()
+    render(<TraditionalPlaylistDetail playlist={{ id: 'p1', name: '失败歌单', platform: 'netease' }} songs={[]} loading={false} error="歌单加载失败，请重试" onRetry={onRetry} currentSong={null} playerTheme="dark" accentColor="#ec4899" onClose={vi.fn()} onSongSelect={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
   })
 
   it('独立评论内容块：加载并渲染评论（中间栏直接显示）', async () => {

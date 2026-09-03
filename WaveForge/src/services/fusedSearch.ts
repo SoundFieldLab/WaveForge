@@ -83,7 +83,7 @@ const sourcePreference = (
   entitlements: FusionEntitlements,
 ) => {
   const platform = platformOf(item)
-  const account = entitlements[platform]
+  const account = entitlements[platform] || { loggedIn: false, vip: false }
   if (item.noCopyright) return -100
 
   // A subscribed platform is deliberately preferred, while a free playable version
@@ -155,7 +155,7 @@ const rankAndMergeArtists = (
     ))
     const preferred = ranked[0].item
     const score = bestMatch(keyword, [preferred.name, ...(preferred.alias || [])])
-    const account = entitlements[platformOf(preferred)]
+    const account = entitlements[platformOf(preferred)] || { loggedIn: false, vip: false }
     return {
       item: {
         ...preferred,
@@ -202,7 +202,7 @@ const rankAndMergeAlbums = (
     const titleScore = textMatchScore(keyword, preferred.name)
     const artistScore = textMatchScore(keyword, preferred.artist?.name || '')
     const score = Math.max(titleScore, artistScore * 0.9)
-    const account = entitlements[platformOf(preferred)]
+    const account = entitlements[platformOf(preferred)] || { loggedIn: false, vip: false }
     return {
       item: {
         ...preferred,
@@ -258,7 +258,7 @@ const rankAndMergeSongs = (keyword: string, songs: Song[], entitlements: FusionE
     const relevance = Math.max(titleScore, artistScore * 0.94, albumScore * 0.8)
     const apiRank = 1 - Math.min(group[0].sourceIndex, 99) / 100
     const preference = sourcePreference(preferred, entitlements)
-    const account = entitlements[platformOf(preferred)]
+    const account = entitlements[platformOf(preferred)] || { loggedIn: false, vip: false }
     // VIP 平台在整份榜单中也应有明显优势，而非只在重复歌曲二选一时生效。
     const entitlementBoost = account.vip ? 180 : account.loggedIn ? 35 : 0
     const accessBoost = preferred.noCopyright ? -300 : preferred.vip ? (account.vip ? 50 : -120) : 20
@@ -270,6 +270,7 @@ const rankAndMergeSongs = (keyword: string, songs: Song[], entitlements: FusionE
           platform: platformOf(item),
           id: item.id,
           mid: item.mid,
+          appleId: item.appleId,
           vip: item.vip,
           noCopyright: item.noCopyright,
         })),

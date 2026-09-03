@@ -1,7 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown } from 'lucide-react'
 import { Song, getProxiedImageUrl } from '../services/musicApi'
-import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../services/platforms'
+import { getPlatformCapabilities, getPlatformCookie, getPlatformFavoriteLabels, platformLabel } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
 import { useEffect, useLayoutEffect, useState, useRef } from 'react'
 import { useTvBack } from '../tv/tvCore'
@@ -145,6 +145,7 @@ export default function SongContextMenu({
   const [adjustedPosition, setAdjustedPosition] = useState({ x, y })
   const [imageLoaded, setImageLoaded] = useState(false)
   const resolvedPlatform = (song?.platform || platform) as MusicPlatform
+  const favoriteLabels = getPlatformFavoriteLabels(resolvedPlatform)
   const favoriteUserId = getFavoriteUserId(resolvedPlatform)
   const [favoriteStatus, setFavoriteStatus] = useState<boolean | null>(() => (
     hideFavoriteAction ? true : song ? peekSongFavoriteStatus(song, resolvedPlatform, favoriteUserId) : null
@@ -486,7 +487,7 @@ export default function SongContextMenu({
       onClick: () => undefined,
     }] : []),
     ...(!favoriteStatusLoading && !favoriteActionIsRemove && onAddToFavorites ? [{
-      label: '我喜欢',
+      label: favoriteLabels.add,
       icon: Heart,
       onClick: () => {
         if (handleThirdPartyAction('like')) { onClose(); return }
@@ -497,7 +498,7 @@ export default function SongContextMenu({
     // 酷狗「取消喜欢」上游无移除端点（/api/kugou/like like=false 只回执不生效）——诚实隐藏该入口，
     // 其余平台照常展示；「我喜欢」新增仍走真实网关不受影响
     ...(!favoriteStatusLoading && favoriteActionIsRemove && onRemoveFromFavorites && resolvedPlatform !== 'kugou' ? [{
-      label: '从喜欢歌单中移除',
+      label: favoriteLabels.remove,
       icon: HeartOff,
       onClick: () => {
         if (handleThirdPartyAction('unlike')) { onClose(); return }
@@ -507,13 +508,19 @@ export default function SongContextMenu({
       danger: true
     }] : []),
     // Apple Music：单曲加入资料库（web 歌曲行「添加到资料库」同款；动态引入避免全平台包体膨胀）
-    ...(resolvedPlatform === 'apple' && song?.appleId ? [{
+    ...(resolvedPlatform === 'apple' && song?.appleId && !song.appleLibraryId ? [{
       label: '添加到资料库',
       icon: ListMusic,
       onClick: () => {
-        void import('../services/appleWebService').then(({ addAppleSongToLibrary }) =>
+        void import('../services/appleCatalog').then(({ addAppleSongToLibrary, getLastAppleMutationResult }) =>
           addAppleSongToLibrary(String(song.appleId || song.id)).then(ok => {
-            showMenuToast(ok ? '已添加到 Apple Music 资料库' : '添加到资料库失败，请检查登录状态', ok ? 'success' : 'error')
+            const failure = getLastAppleMutationResult()
+            showMenuToast(ok ? '已添加到 Apple Music 资料库' : (failure.error || '添加到资料库失败'), ok ? 'success' : 'error')
+            if (ok) {
+              window.dispatchEvent(new CustomEvent('playlist-content-changed', {
+                detail: { platform: 'apple', type: 'library-add', songId: String(song.appleId || song.id) },
+              }))
+            }
           }),
         )
         onClose()

@@ -5,7 +5,8 @@ import { platformLabel } from './platforms'
  */
 
 import { indexedDBCache } from './indexedDBCache'
-import { getAppleLibrarySongs, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, appleSongToSong } from './appleCatalog'
+import { getAppleLibraryPlaylists, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, getAppleFavoriteSongIds, appleSongToSong } from './appleCatalog'
+import { getAppleCredentials } from './appleAuth'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
 
 export interface PlaylistOptions {
@@ -126,18 +127,28 @@ function isCacheableUserPlaylists(platform: MusicPlatform, playlists: any[] | un
   return platform !== 'qq' || playlists.some(playlist => Boolean(playlist?.isLike))
 }
 
+function normalizePlaylistOwnerKey(platform: MusicPlatform, userId: string): string {
+  const trimmed = userId.trim()
+  if (trimmed) return trimmed
+  if (platform === 'apple') return 'apple-session'
+  if (platform === 'spotify') return 'spotify-session'
+  if (platform === 'soda') return 'soda-session'
+  return ''
+}
+
 function getUserPlaylistsCacheKey(platform: MusicPlatform, userId: string): string {
   const cookie = getPlatformCookie(platform)
   const devMode = platform === 'qq' ? localStorage.getItem('developerMode') === 'true' : false
-  return `${USER_PLAYLIST_CACHE_VERSION}:${platform}:${userId.trim()}:${devMode ? 'dev' : 'prod'}:${fingerprint(cookie)}`
+  return `${USER_PLAYLIST_CACHE_VERSION}:${platform}:${normalizePlaylistOwnerKey(platform, userId)}:${devMode ? 'dev' : 'prod'}:${fingerprint(cookie)}`
 }
 
 export function getCachedUserPlaylists(
   platform: MusicPlatform,
   userId: string
 ): any[] | undefined {
-  if (!userId.trim()) return undefined
-  const cached = userPlaylistsCache.get(getUserPlaylistsCacheKey(platform, userId))
+  const ownerKey = normalizePlaylistOwnerKey(platform, userId)
+  if (!ownerKey) return undefined
+  const cached = userPlaylistsCache.get(getUserPlaylistsCacheKey(platform, ownerKey))
   // 空/不完整（QQ 缺「我喜欢」）的缓存视为无效，让调用方重新拉取
   if (!cached || !isCacheableUserPlaylists(platform, cached)) return undefined
   return platform === 'qq' ? normalizeCachedQQPlaylistNames(cached) : cached
@@ -147,10 +158,11 @@ export function invalidateUserPlaylistsCache(
   platform: MusicPlatform,
   userId: string
 ): void {
-  if (!userId.trim()) return
-  const key = getUserPlaylistsCacheKey(platform, userId)
+  const ownerKey = normalizePlaylistOwnerKey(platform, userId)
+  if (!ownerKey) return
+  const key = getUserPlaylistsCacheKey(platform, ownerKey)
   userPlaylistsCache.delete(key)
-  void indexedDBCache.invalidatePlaylist(key, platform)
+  void Promise.resolve(indexedDBCache.invalidatePlaylist(key, platform))
     .catch(error => console.warn('使持久化歌单缓存失效失败:', error))
 }
 
@@ -159,8 +171,9 @@ export function updateCachedUserPlaylists(
   userId: string,
   updater: (playlists: any[]) => any[]
 ): void {
-  if (!userId.trim()) return
-  const key = getUserPlaylistsCacheKey(platform, userId)
+  const ownerKey = normalizePlaylistOwnerKey(platform, userId)
+  if (!ownerKey) return
+  const key = getUserPlaylistsCacheKey(platform, ownerKey)
   const cached = userPlaylistsCache.get(key)
   if (!cached) return
 
@@ -169,6 +182,16 @@ export function updateCachedUserPlaylists(
   cacheUserPlaylists(key, normalized)
   void indexedDBCache.cachePlaylist(key, platform, normalized)
     .catch(error => console.warn('同步持久化歌单缓存失败:', error))
+}
+
+function invalidatePlatformPlaylistCaches(platform: MusicPlatform): void {
+  cacheGeneration += 1
+  for (const key of [...userPlaylistsCache.keys()]) {
+    if (key.startsWith(`${USER_PLAYLIST_CACHE_VERSION}:${platform}:`)) userPlaylistsCache.delete(key)
+  }
+  for (const key of [...userPlaylistsPending.keys()]) {
+    if (key.startsWith(`${USER_PLAYLIST_CACHE_VERSION}:${platform}:`)) userPlaylistsPending.delete(key)
+  }
 }
 
 export function clearUserPlaylistsMemoryCache(): void {
@@ -187,6 +210,41 @@ async function fetchUserPlaylists(
 ): Promise<any[]> {
   console.log('🌐 从服务器获取用户歌单列表')
   
+  if (platform === 'apple') {
+    const { APPLE_FAVORITES_ID, APPLE_LIBRARY_ID, appleLibraryTrackToSong, appleSongToSong, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs } = await import('./appleCatalog')
+    const [playlists, tracks, favoriteTracks] = await Promise.all([
+      getAppleLibraryPlaylists(200),
+      getAppleLibrarySongs(500),
+      getAppleFavoriteSongs(5000),
+    ])
+    const mapped = playlists.map(playlist => ({
+      ...playlist,
+      id: String(playlist.id),
+      coverImgUrl: playlist.artworkUrl || '',
+      platform: 'apple' as const,
+      isLike: false,
+    }))
+    const librarySongs = tracks.map(appleLibraryTrackToSong)
+    const favoriteSongs = favoriteTracks.map(track => appleSongToSong(track))
+    return [
+      ...(favoriteSongs.length ? [{
+        id: APPLE_FAVORITES_ID,
+        name: '喜爱歌曲',
+        coverImgUrl: favoriteSongs[0]?.album.picUrl || '',
+        trackCount: favoriteSongs.length,
+        platform: 'apple' as const,
+        isLike: true,
+      }] : []),
+      ...(librarySongs.length ? [{
+        id: APPLE_LIBRARY_ID,
+        name: '我的音乐库',
+        coverImgUrl: librarySongs[0]?.album.picUrl || '',
+        trackCount: librarySongs.length,
+        platform: 'apple' as const,
+      }] : []),
+      ...mapped,
+    ]
+  }
   // Spotify：我的歌单（token 驱动，无需 userId）
   if (platform === 'spotify') {
     const { fetchSpotifyMyPlaylists } = await import('./spotifyService')
@@ -194,8 +252,12 @@ async function fetchUserPlaylists(
     return playlists.map(p => ({
       id: p.id,
       name: p.name,
+      description: p.description,
       coverImgUrl: p.coverUrl || '',
-      trackCount: 0,
+      trackCount: p.tracksTotal ?? 0,
+      owner: p.owner,
+      ownedByMe: p.ownedByMe,
+      public: p.public,
       platform: 'spotify',
     }))
   }
@@ -404,10 +466,8 @@ export async function getUserPlaylists(
   username?: string,
   options: PlaylistOptions = {}
 ): Promise<any[]> {
-  // Spotify 用 token、汽水用本地 cookie（soda_token）拉歌单，均不依赖 userId；其余平台需要 userId。
-  // 注意：探索页汽水侧栏以空 userId 调用本函数（fetchUserPlaylists 的 soda 分支只认 cookie），
-  // 不能在这里被 userId 门禁短路，否则汽水歌单列表永远为空。
-  if (platform !== 'spotify' && platform !== 'soda' && !userId.trim()) return []
+  // Spotify、Apple、汽水均由平台凭据驱动，不依赖传统 userId。
+  if (platform !== 'spotify' && platform !== 'apple' && platform !== 'soda' && !userId.trim()) return []
   const cacheKey = getUserPlaylistsCacheKey(platform, userId)
   const bypassCache = options.forceRefresh || options.skipCache
   const requestGeneration = cacheGeneration
@@ -548,8 +608,9 @@ export async function getPlaylistDetail(
   }
   // Apple Music：目录/编辑歌单曲目（amp-api catalog playlists/{id}/tracks，需 Developer Token）
   if (platform === 'apple') {
-    const summary = await getAppleCatalogPlaylistSummary(playlistId).catch(() => null)
-    const tracks = await getAppleCatalogPlaylistTracks(playlistId).catch(() => [])
+    const storefront = getAppleCredentials().storefront || 'cn'
+    const summary = await getAppleCatalogPlaylistSummary(playlistId, storefront).catch(() => null)
+    const tracks = await getAppleCatalogPlaylistTracks(playlistId, storefront).catch(() => [])
     return {
       playlist: {
         id: playlistId,
@@ -561,7 +622,7 @@ export async function getPlaylistDetail(
         platform: 'apple',
       },
       // 目录曲目已是 catalog id：播放节点保持 platform=apple（统一链路：原生→载体回退）
-      tracks: tracks.map(song => appleSongToSong(song)),
+      tracks: tracks.map(song => appleSongToSong(song, storefront)),
       privileges: {},
     }
   }
@@ -680,12 +741,10 @@ export async function getLikedSongs(
   options: PlaylistOptions = {}
 ): Promise<any> {
   console.log('🌐 从服务器获取我喜欢的音乐')
-  // Apple：喜欢 = 音乐库歌曲（amp-api）；用 catalogId 与 UI 目录 id 对齐
+  // Apple：“喜爱歌曲”读取与写入统一使用 favorites。
   if (platform === 'apple') {
-    const tracks = await getAppleLibrarySongs(500)
-    return {
-      ids: tracks.map(track => track.catalogId || track.id),
-    }
+    const favoriteIds = await getAppleFavoriteSongIds(5000)
+    return { ids: favoriteIds || [] }
   }
   // 汽水：喜欢列表 =「qishui-liked」虚拟歌单曲目；返回 ids 供喜欢状态比对（favoriteStatusService 消费）。
   // 后端单页上限 50 条，这里分页拉全量，保证超过一页的喜欢列表红心状态仍准确
@@ -883,6 +942,14 @@ export async function addSongToPlaylist(
 ): Promise<any> {
   console.log(`➕ 添加歌曲 ${songId} 到歌单 ${playlistId}`)
 
+  if (platform === 'apple') {
+    const { addAppleTracksToPlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
+    const trackId = options.songMid || songId
+    const ok = await addAppleTracksToPlaylist(playlistId, [trackId])
+    if (!ok) throw new Error(getLastAppleMutationResult().error || 'Apple Music 添加歌曲失败')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 200, platform: 'apple' }
+  }
   // Spotify：官方 API 前端直连
   if (platform === 'spotify') {
     const { addTracksToSpotifyPlaylist } = await import('./spotifyService')
@@ -971,6 +1038,14 @@ export async function removeSongFromPlaylist(
 ): Promise<any> {
   console.log(`➖ 从歌单 ${playlistId} 删除歌曲 ${songId}`)
 
+  if (platform === 'apple') {
+    const { removeAppleTracksFromPlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
+    const trackId = options.songMid || songId
+    const ok = await removeAppleTracksFromPlaylist(playlistId, [trackId])
+    if (!ok) throw new Error(getLastAppleMutationResult().error || 'Apple Music 删除歌曲失败')
+    invalidateUserPlaylistsCache(platform, userId)
+    return { result: 200, platform: 'apple' }
+  }
   // Spotify：官方 API 前端直连
   if (platform === 'spotify') {
     const { removeTracksFromSpotifyPlaylist } = await import('./spotifyService')
@@ -1050,6 +1125,13 @@ export async function createPlaylist(
 ): Promise<any> {
   console.log(`🎵 创建歌单: ${name}`)
 
+  if (platform === 'apple') {
+    const { createApplePlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
+    const ok = await createApplePlaylist(name)
+    if (!ok) throw new Error(getLastAppleMutationResult().error || 'Apple Music 创建歌单失败')
+    invalidateUserPlaylistsCache(platform, '')
+    return { result: 200, platform: 'apple' }
+  }
   // Spotify：官方 API 前端直连
   if (platform === 'spotify') {
     const { createSpotifyPlaylist } = await import('./spotifyService')
@@ -1085,6 +1167,7 @@ export async function createPlaylist(
   })
 
   const data = await response.json()
+  if (response.ok && !data?.error) invalidatePlatformPlaylistCaches(platform)
   return data
 }
 
@@ -1100,6 +1183,13 @@ export async function deletePlaylist(
 ): Promise<any> {
   console.log(`🗑️ 删除歌单: ${playlistId}`)
 
+  if (platform === 'apple') {
+    const { deleteApplePlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
+    const ok = await deleteApplePlaylist(playlistId)
+    if (!ok) throw new Error(getLastAppleMutationResult().error || 'Apple Music 删除歌单失败')
+    invalidateUserPlaylistsCache(platform, '')
+    return { result: 200, platform: 'apple' }
+  }
   // 汽水：上游不存在删除歌单端点（已核实），抛出明确错误由调用方 toast 提示（不 crash）
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持删除歌单：上游未提供删除歌单的接口')
@@ -1125,6 +1215,7 @@ export async function deletePlaylist(
   })
 
   const data = await response.json()
+  if (response.ok && !data?.error) invalidatePlatformPlaylistCaches(platform)
   return data
 }
 
@@ -1142,6 +1233,21 @@ export async function updatePlaylist(
   } = {}
 ): Promise<any> {
   console.log(`✏️ 更新歌单: ${playlistId}`)
+  if (platform === 'apple') {
+    const { updateApplePlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
+    const ok = await updateApplePlaylist(playlistId, { name: options.name, description: options.desc })
+    if (!ok) throw new Error(getLastAppleMutationResult().error || 'Apple Music 更新歌单失败')
+    invalidateUserPlaylistsCache(platform, '')
+    return { result: 200, platform: 'apple' }
+  }
+  if (platform === 'spotify') {
+    const { renameSpotifyPlaylist } = await import('./spotifyService')
+    if (!options.name) throw new Error('Spotify 歌单名称不能为空')
+    const ok = await renameSpotifyPlaylist(playlistId, options.name, options.desc)
+    if (!ok) throw new Error('Spotify 歌单信息更新失败')
+    invalidateUserPlaylistsCache(platform, '')
+    return { result: 200, platform: 'spotify' }
+  }
   // 汽水：暂不支持修改歌单信息，明确报错由调用方 toast 提示（不 crash）
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持修改歌单信息')
@@ -1162,6 +1268,7 @@ export async function updatePlaylist(
   })
 
   const data = await response.json()
+  if (response.ok && !data?.error) invalidatePlatformPlaylistCaches(platform)
   return data
 }
 
@@ -1208,6 +1315,9 @@ export async function subscribePlaylist(
 ): Promise<any> {
   console.log(`收藏/取消收藏歌单: ${playlistId}`)
 
+  if (platform === 'apple') {
+    throw new Error('Apple Music 资料库歌单不支持独立的收藏/取消收藏操作')
+  }
   // Spotify：官方 API 前端直连（follow/unfollow）
   if (platform === 'spotify') {
     const { followSpotifyPlaylist } = await import('./spotifyService')
@@ -1248,6 +1358,7 @@ export async function subscribePlaylist(
   })
 
   const data = await response.json()
+  if (response.ok && !data?.error) invalidatePlatformPlaylistCaches(platform)
   return data
 }
 
