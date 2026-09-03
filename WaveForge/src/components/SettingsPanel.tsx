@@ -1,8 +1,29 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// ⚠️ 设置镜像机制声明（后续维护者 / AI 协作必读）⚠️
+//
+// 本组件是【简约模式设置】= 整软件的"总设置"。WaveForge 共 4 个界面模式
+// （简约 / 传统 / 探索 / 桌面，后续可能更多），其中【全局功能性设置】通过
+//   services/globalSettingsRegistry.ts（设置注册表，同键同事件双向同步）
+//   components/MirroredGlobalSettings.tsx（按各模式设计语言渲染的镜像 UI）
+// 自动镜像到传统 / 探索 / 桌面三个模式的设置界面。
+//
+// 因此在本面板新增设置项时，先判断它属于哪一类：
+// 1. 全局功能设置（播放 / 歌词 / 性能 / 桌面集成 / 网络等，对所有模式生效）：
+//    ✅ 除了写本面板的简约 UI，【必须】同步在 services/globalSettingsRegistry.ts
+//      登记一条（read/write 与本面板读写同一存储键、派发同一事件），
+//      其他模式的设置页就会自动出现该功能，无需逐模式手写 UI；
+//    ✅ 如需自定义控件（如字体选择器 FontPicker），在 MirroredGlobalSettings.tsx
+//      里为注册表的 control.kind 增加对应渲染分支（classic / panel 两种风格）。
+//    ❌ 只写本面板不登记 = 其他模式的用户永远看不到这个功能开关。
+// 2. 简约模式专属的自定义 / 外观设置（只影响简约模式自身，如"自定义首页显示内容"）：
+//    不需要登记，写在这里即可。
+// ═══════════════════════════════════════════════════════════════════════════
 import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Gift, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle } from 'lucide-react'
 import LoginButton from './LoginButton'
 import type { AppleUserInfo } from '../services/appleAuth'
+import type { StemModelProgress } from '../electron'
 import {
   MUSIC_PLATFORMS,
   PLATFORM_LABELS,
@@ -17,6 +38,7 @@ import {
 import HomeCustomizeModal from './HomeCustomizeModal'
 import DeviceInfoModal from './DeviceInfoModal'
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
+import FontPicker from './FontPicker'
 import RemoteControlSettingsModal from './RemoteControlSettingsModal'
 import RemoteControlGuideModal from './RemoteControlGuideModal'
 import CacheClearModal from './CacheClearModal'
@@ -44,8 +66,10 @@ import {
   getAppleMusicSettings,
   type AppleMusicSettings,
 } from '../services/appleMusic'
+import { checkBridgeRunning, ensureBridgeRunning, bridgeShowWindow, bridgeHideWindow, getState as getAppleBridgeState } from '../services/appleWebViewBridge'
 import BilibiliLoginPanel from './BilibiliLoginPanel'
 import BilibiliProfileModal from './BilibiliProfileModal'
+import VmpStatusCard from './VmpStatusCard'
 import {
   isBilibiliLoggedIn,
   getStoredBilibiliUser,
@@ -301,6 +325,39 @@ function SettingsPanel({
   // Apple 原生音源开关（Cider 式直连；默认开，localStorage 独立存储）
   const [appleNativeStreamEnabled, setAppleNativeStreamEnabled] = useState(() => localStorage.getItem('appleNativeStream') !== 'false')
 
+  // Apple Music 播放面（WebView2 bridge）状态与窗口开关
+  const [appleBridgeWindowVisible, setAppleBridgeWindowVisible] = useState(false)
+  const [appleBridgeBusy, setAppleBridgeBusy] = useState(false)
+  const [appleBridgeReady, setAppleBridgeReady] = useState(false)
+  const [appleBridgeAuthorized, setAppleBridgeAuthorized] = useState(false)
+  useEffect(() => {
+    let disposed = false
+    checkBridgeRunning().then((ok) => {
+      if (disposed) return
+      setAppleBridgeReady(ok)
+      if (ok) setAppleBridgeAuthorized(getAppleBridgeState().authorized)
+    })
+    return () => { disposed = true }
+  }, [])
+  const toggleAppleBridgeWindow = async () => {
+    if (appleBridgeWindowVisible) {
+      await bridgeHideWindow()
+      setAppleBridgeWindowVisible(false)
+      return
+    }
+    setAppleBridgeBusy(true)
+    try {
+      // 未运行时先拉起（可能等待 WebView2 冷启动），再显示窗口供登录
+      const ok = await ensureBridgeRunning()
+      if (ok) await bridgeShowWindow()
+      setAppleBridgeReady(ok)
+      setAppleBridgeAuthorized(ok && getAppleBridgeState().authorized)
+      setAppleBridgeWindowVisible(ok)
+    } finally {
+      setAppleBridgeBusy(false)
+    }
+  }
+
   // ── 哔哩哔哩「看歌」账号 ──
   const [biliLoggedIn, setBiliLoggedIn] = useState(() => isBilibiliLoggedIn())
   const [biliUser, setBiliUser] = useState(() => getStoredBilibiliUser())
@@ -339,6 +396,9 @@ function SettingsPanel({
     localStorage.setItem('appleLyricLang', next.lyricLang)
     localStorage.setItem('applePreferCover', JSON.stringify(next.preferAppleCover))
     localStorage.setItem('appleDuetColors', JSON.stringify(next.duetColors))
+    if (next.enabled !== appleMusic.enabled || next.lyricLang !== appleMusic.lyricLang || next.storefront !== appleMusic.storefront) {
+      window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
+    }
   }
 
   // 登录 Apple Music 后自动开启 Apple Music 歌词
@@ -383,6 +443,7 @@ function SettingsPanel({
   const [desktopLyricsSettings, setDesktopLyricsSettings] = useState<DesktopLyricsSettings>({
     enabled: false,
     fontSize: 58,
+    fontFamily: '',
     colorMode: 'auto',
     orientation: 'horizontal',
     doubleLine: false,
@@ -1375,6 +1436,14 @@ function SettingsPanel({
     void probeAiMixAvailable()
   }, [autoMixEnabled, autoMixEnhanced, probeAiMixAvailable])
 
+  useEffect(() => {
+    if (aiMixAvailable === false && autoMixAiMix) {
+      setAutoMixAiMix(false)
+      localStorage.setItem('autoMixAiMix', 'false')
+      window.dispatchEvent(new Event('autoMixSettingsChanged'))
+    }
+  }, [aiMixAvailable, autoMixAiMix])
+
   // AI 混音模型（DJTransGAN 仓库 + 权重）下载/删除管理
   const [aiModelStatus, setAiModelStatus] = useState<{
     installed: boolean
@@ -1398,6 +1467,63 @@ function SettingsPanel({
   } | null>(null)
   const [showAiModelDownloadDialog, setShowAiModelDownloadDialog] = useState(false)
   const [showAiModelDeleteDialog, setShowAiModelDeleteDialog] = useState(false)
+
+  // AutoMix Enhanced 核心的可选 HTDemucs 分轨模型。未安装时增强版仍使用现有 v2 DSP。
+  const [stemModelStatus, setStemModelStatus] = useState<{
+    installed: boolean
+    modelReady: boolean
+    runtimeReady: boolean
+    supported: boolean
+    modelPath: string
+    runtimePath: string
+    root: string
+    version: number
+    download: StemModelProgress
+  } | null>(null)
+  const [stemModelProgress, setStemModelProgress] = useState<StemModelProgress | null>(null)
+  const probeStemModelStatus = useCallback(async () => {
+    try {
+      const status = await window.electron?.stemModel?.getStatus?.()
+      if (status) {
+        setStemModelStatus(status)
+        if (status.download?.status && status.download.status !== 'idle') setStemModelProgress(status.download)
+      }
+    } catch { /* 可选模型探测失败保持 v2 DSP */ }
+  }, [])
+  useEffect(() => {
+    if (!autoMixEnabled || !autoMixEnhanced) return
+    void probeStemModelStatus()
+    const off = window.electron?.stemModel?.onProgress?.((progress) => {
+      setStemModelProgress(progress)
+      if (progress.status === 'done') {
+        void probeStemModelStatus()
+        window.dispatchEvent(new CustomEvent('showToast', {
+          detail: { message: 'HTDemucs 分轨模型安装完成，增强版将自动使用分轨混音', type: 'success' },
+        }))
+      }
+    })
+    return () => off?.()
+  }, [autoMixEnabled, autoMixEnhanced, probeStemModelStatus])
+  const handleStemModelDownload = () => {
+    const confirmed = window.confirm('下载 HTDemucs 分轨模型与运行环境？\n\n下载约 138MB，安装后 AutoMix 增强版会自动使用人声/鼓/贝斯分轨混音；不下载也可继续使用 DSP 兼容模式。')
+    if (!confirmed) return
+    void window.electron?.stemModel?.download?.()
+  }
+  const handleStemModelResume = () => { void window.electron?.stemModel?.download?.() }
+  const handleStemModelPause = () => { void window.electron?.stemModel?.pause?.() }
+  const handleStemModelCancel = () => { void window.electron?.stemModel?.cancel?.(); setStemModelProgress(null) }
+  const handleStemModelDelete = () => {
+    const confirmed = window.confirm('删除 HTDemucs 分轨模型和运行环境？\n\nAutoMix 增强版会继续使用 DSP 兼容模式，标准 AutoMix 不受影响。')
+    if (!confirmed) return
+    window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
+    void window.electron?.stemModel?.delete?.().then(result => {
+      if (result?.ok) {
+        setStemModelProgress(null)
+        void probeStemModelStatus()
+        window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已删除 HTDemucs 模型，增强版继续使用 DSP 兼容模式', type: 'success' } }))
+      }
+    })
+  }
 
   const probeAiModelStatus = useCallback(async () => {
     try {
@@ -1443,8 +1569,13 @@ function SettingsPanel({
     void (async () => {
       const result = await window.electron?.aiModel?.delete?.()
       if (result?.ok) {
+        // DJTransGAN 是严格可选扩展：删除模型同时持久化关闭，避免后续计划继续
+        // 标记 aiMix=true、反复冷启动失败后才回退 DSP。
+        setAutoMixAiMix(false)
+        localStorage.setItem('autoMixAiMix', 'false')
+        window.dispatchEvent(new Event('autoMixSettingsChanged'))
         window.dispatchEvent(new CustomEvent('showToast', {
-          detail: { message: '已删除 DJTransGAN 模型', type: 'success' },
+          detail: { message: '已删除 DJTransGAN 模型并关闭实验扩展', type: 'success' },
         }))
         setAiModelProgress(null)
       } else {
@@ -1678,10 +1809,12 @@ function SettingsPanel({
     window.electron?.automixLog?.('settings-toggle', `autoMixTransitionIntensity=${intensity}`).catch(() => undefined)
   }
   const handleAutoMixAiMixToggle = (enabled: boolean) => {
-    setAutoMixAiMix(enabled)
-    localStorage.setItem('autoMixAiMix', JSON.stringify(enabled))
+    // UI 事件、键盘和 TV 控制共用同一状态闸门；未安装模型时永远不能持久化 true。
+    const effectiveEnabled = enabled && aiMixAvailable === true
+    setAutoMixAiMix(effectiveEnabled)
+    localStorage.setItem('autoMixAiMix', JSON.stringify(effectiveEnabled))
     window.dispatchEvent(new Event('autoMixSettingsChanged'))
-    window.electron?.automixLog?.('settings-toggle', `autoMixAiMix=${enabled}`).catch(() => undefined)
+    window.electron?.automixLog?.('settings-toggle', `autoMixAiMix=${effectiveEnabled}`).catch(() => undefined)
   }
 
   // 深浅色主题：与播放页快捷设置共用同一存储与事件，App 监听后统一更新
@@ -2633,6 +2766,23 @@ function SettingsPanel({
                             />
                           </div>
 
+                          {/* 歌词字体：内置霞鹜文楷 / 得意黑（OFL 开源可商用）+ 推荐系统字体 + 本机字体 */}
+                          <div className="mt-4">
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="min-w-0">
+                                <div className={`${textPrimary} text-sm font-medium`}>字体</div>
+                                <div className={`${textTertiary} text-xs mt-0.5`}>内置霞鹜文楷 / 得意黑，也可选择本机字体</div>
+                              </div>
+                              <FontPicker
+                                value={desktopLyricsSettings.fontFamily}
+                                onChange={(family) => updateDesktopLyrics({ fontFamily: family })}
+                                dark={playerTheme === 'dark'}
+                                accent={accentColor}
+                                buttonWidth={200}
+                              />
+                            </div>
+                          </div>
+
                           <div>
                             <div className={`${textPrimary} text-sm font-medium mb-3`}>字体颜色</div>
                             <div className="flex flex-wrap gap-3">
@@ -3263,7 +3413,7 @@ function SettingsPanel({
                           <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: gaplessEnabled ? accentColor : '' }}></div>
                         </label>
                       </div>
-                      
+
                       {gaplessEnabled && (
                         <div className="mt-4 pt-4 border-t border-white/10 space-y-4">
                           {/* 专辑融合 */}
@@ -3383,22 +3533,67 @@ function SettingsPanel({
                                 </div>
                               </div>
 
-                              {/* v2 可选 AI 混音（GAN）：引擎可用才可开启；不可用时说明原因 */}
+                              {/* AutoMix Enhanced 分轨核心：HTDemucs 可选模型，缺失时继续 v2 DSP */}
+                              <div className={`rounded-xl border p-3 ${playerTheme === 'dark' ? 'border-white/10 bg-white/[0.03]' : 'border-black/10 bg-black/[0.02]'}`}>
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <div className={`${textPrimary} text-sm font-medium mb-0.5`}>增强版分轨引擎（HTDemucs）</div>
+                                    <div className={`${textSecondary} text-xs leading-relaxed`}>
+                                      {stemModelStatus?.installed
+                                        ? '已安装：过渡会分离人声、鼓、贝斯与其他乐器并分别交接'
+                                        : stemModelProgress?.status === 'downloading'
+                                          ? `正在从 ${stemModelProgress.host || '镜像'} 下载 ${stemModelProgress.asset || '模型'}… ${Math.round(stemModelProgress.percent)}%`
+                                          : stemModelProgress?.status === 'paused'
+                                            ? '下载已暂停，可断点继续'
+                                            : stemModelProgress?.status === 'error'
+                                              ? `下载失败：${stemModelProgress.error || '未知错误'}`
+                                              : '未安装时仍可使用增强版 DSP；安装后自动升级为分轨混音'}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-shrink-0 items-center gap-1.5">
+                                    {stemModelStatus?.installed ? (
+                                      <button type="button" onClick={handleStemModelDelete} className="rounded-lg px-3 py-1.5 text-xs font-medium" style={{ color: '#f87171', background: playerTheme === 'dark' ? 'rgba(239,68,68,0.12)' : 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.25)' }}>删除</button>
+                                    ) : stemModelProgress?.status === 'downloading' ? (
+                                      <button type="button" onClick={handleStemModelPause} className="rounded-lg px-3 py-1.5 text-xs font-medium" style={{ color: playerTheme === 'dark' ? '#f2f3f7' : '#1c1d22', background: playerTheme === 'dark' ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}>暂停</button>
+                                    ) : stemModelProgress?.status === 'paused' ? (
+                                      <>
+                                        <button type="button" onClick={handleStemModelResume} className="rounded-lg px-3 py-1.5 text-xs font-medium text-white" style={{ background: accentColor }}>继续</button>
+                                        <button type="button" onClick={handleStemModelCancel} className="rounded-lg px-2 py-1.5 text-xs" style={{ color: textSecondary }}>取消</button>
+                                      </>
+                                    ) : (
+                                      <button type="button" onClick={handleStemModelDownload} disabled={stemModelStatus?.supported === false} className="rounded-lg px-3 py-1.5 text-xs font-medium text-white disabled:opacity-40" style={{ background: accentColor }}>下载模型</button>
+                                    )}
+                                  </div>
+                                </div>
+                                {stemModelProgress && (stemModelProgress.status === 'downloading' || stemModelProgress.status === 'paused') && (
+                                  <div className="mt-2 space-y-1">
+                                    <div className={`h-1 rounded-full overflow-hidden ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`}>
+                                      <div className="h-full rounded-full transition-[width] duration-300" style={{ width: `${Math.max(0, Math.min(100, stemModelProgress.percent))}%`, background: accentColor }} />
+                                    </div>
+                                    <div className={`flex justify-between text-[10px] ${textSecondary}`}>
+                                      <span>{stemModelProgress.speed > 0 ? formatDownloadSpeed(stemModelProgress.speed) : '准备下载'}</span>
+                                      <span>{typeof stemModelProgress.eta === 'number' ? `剩余约 ${formatDownloadEta(stemModelProgress.eta)}` : ''}</span>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* DJTransGAN 严格可选扩展：不影响 AutoMix Enhanced / HTDemucs */}
                               <div className="flex items-center justify-between gap-4">
                                 <div>
-                                  <div className={`${textPrimary} text-sm font-medium mb-1`}>AI 混音（实验性 · 60s 长混音）</div>
+                                  <div className={`${textPrimary} text-sm font-medium mb-1`}>DJTransGAN 实验扩展（可选）</div>
                                   <div className={`${textSecondary} text-xs`}>
                                     {aiMixAvailable === true
-                                      ? '已检测到 DJTransGAN 引擎：AI 模型生成的 60 秒 DJ 长混音（模型固定时长，无法缩短）；想要短过渡可关闭它使用增强版 DSP'
+                                      ? '可选使用学习式推子/EQ；60 秒长混音资源占用较高，默认关闭。关闭时不会启动 Torch worker'
                                       : aiMixAvailable === false
-                                        ? 'AI 引擎未安装（需 torch + DJTransGAN 预训练模型，暂未随应用分发），当前使用内置 DSP 特效'
-                                        : '正在检测 AI 引擎…'}
+                                        ? '未安装，不影响增强版的 HTDemucs 分轨与 DSP 过渡'
+                                        : '正在检测可选扩展…'}
                                   </div>
                                 </div>
                                 <label className={`relative inline-flex flex-shrink-0 items-center ${aiMixAvailable === true ? 'cursor-pointer' : 'opacity-40 cursor-not-allowed'}`}>
                                   <input
                                     type="checkbox"
-                                    checked={autoMixAiMix}
+                                    checked={autoMixAiMix && aiMixAvailable === true}
                                     disabled={aiMixAvailable !== true}
                                     onChange={(event) => handleAutoMixAiMixToggle(event.target.checked)}
                                     className="sr-only peer"
@@ -3658,6 +3853,7 @@ function SettingsPanel({
                               const enabled = e.target.checked
                               setThirdPartyLyricsEnabled(enabled)
                               localStorage.setItem('thirdPartyLyricsEnabled', JSON.stringify(enabled))
+                              window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
                             }}
                             className="sr-only peer"
                           />
@@ -3715,6 +3911,29 @@ function SettingsPanel({
                       </div>
                     </div>
 
+                    {/* Apple Music 播放面（WebView2）：仅在原生 CENC 播放失败时作为兼容兜底；
+                        兼容窗口保留独立登录会话，未授权时继续走网易云/QQ 载体兜底 */}
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-4`}>
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <div className={`${textPrimary} font-medium mb-1`}>Apple Music 播放面</div>
+                          <div className={`${textSecondary} text-sm`}>
+                            Electron 原生 CENC 无法播放时才启用此兼容窗口；首次使用需在窗口内单独登录 Apple Music。
+                            {appleBridgeReady
+                              ? (appleBridgeAuthorized ? '播放面已授权 ✓' : '播放面未授权：点「打开窗口」登录后即可作为兼容兜底')
+                              : '正常播放无需启动；原生 CENC 失败时会自动拉起，也可手动打开登录'}
+                          </div>
+                        </div>
+                        <button
+                          onClick={toggleAppleBridgeWindow}
+                          disabled={appleBridgeBusy}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium border ${borderColor} ${textPrimary} hover:opacity-80 disabled:opacity-50 whitespace-nowrap`}
+                        >
+                          {appleBridgeBusy ? '启动中…' : appleBridgeWindowVisible ? '隐藏窗口' : '打开窗口'}
+                        </button>
+                      </div>
+                    </div>
+
                     {/* 自适应最佳歌词 */}
                     {thirdPartyLyricsEnabled && (
                       <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-4`}>
@@ -3733,6 +3952,7 @@ function SettingsPanel({
                                 const enabled = e.target.checked
                                 setAdaptiveLyrics(enabled)
                                 localStorage.setItem('adaptiveLyrics', JSON.stringify(enabled))
+                                window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
                               }}
                               className="sr-only peer"
                             />
@@ -3763,6 +3983,7 @@ function SettingsPanel({
                               onClick={() => {
                                 setPrimaryLyricsSource(source.key)
                                 localStorage.setItem('primaryLyricsSource', source.key)
+                                window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
                               }}
                               className={`w-full flex items-center gap-3 p-3 rounded-lg transition-colors border-2 ${
                                 primaryLyricsSource === source.key
@@ -4167,7 +4388,15 @@ function SettingsPanel({
 
                       {/* 调试面板子开关（开发者模式开启后显示） */}
                       {developerMode && (
-                        <div className="mt-3 rounded-xl border p-4" style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderColor: borderColor }}>
+                        <>
+                          <div className="mt-3">
+                            <VmpStatusCard
+                              dark={playerTheme === 'dark'}
+                              accent={accentColor}
+                              borderColor={playerTheme === 'dark' ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.1)'}
+                            />
+                          </div>
+                          <div className="mt-3 rounded-xl border p-4" style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)', borderColor: borderColor }}>
                           <div className={`${textPrimary} font-medium mb-2 text-sm`}>调试面板</div>
                           {[
                             { key: 'waveforge:debug-show-backend', label: '后端日志（左下）' },
@@ -4204,6 +4433,7 @@ function SettingsPanel({
                             </span>
                           </label>
                         </div>
+                        </>
                       )}
                     </div>
                   </div>
