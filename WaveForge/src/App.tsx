@@ -13,6 +13,9 @@ import FusionEnableConfirmModal from './components/FusionEnableConfirmModal'
 import UpdateManager from './components/UpdateManager'
 import UpdatePrompt from './components/UpdatePrompt'
 import CrossfadeBackground from './components/CrossfadeBackground'
+import { FoliaTransitionOverlay } from './components/folia/FoliaTransitionOverlay'
+import { FoliaUpNextCard } from './components/folia/FoliaUpNextCard'
+import { resolveFoliaPresentation } from './components/folia/foliaPresentation'
 
 import MiniPlayer from './components/MiniPlayer'
 import Toast from './components/Toast'
@@ -29,12 +32,14 @@ import { useAudioPulseStore, type AudioPulseStore } from './hooks/useAudioPulse'
 import { useAutoHideCursor } from './hooks/useAutoHideCursor'
 import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, LyricLine } from './services/musicApi'
 import type { MusicPlatform } from './services/platforms'
-import { isPlatformVisible, platformLabel } from './services/platforms'
+import { getPlatformCapabilities, isPlatformVisible, platformLabel } from './services/platforms'
 import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
 import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './services/appleAuth'
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
-import { resolvePlayableSong, addAppleSongToLibrary, removeAppleSongFromLibrary, addAppleTracksToPlaylist, getAppleLibraryPlaylists } from './services/appleCatalog'
-import { isAppleNativeStreamEnabled, isAppleEmeCapable, resolveAppleNativeStream, type AppleNativeStream } from './services/applePlayback'
+import { resolvePlayableSong, setAppleSongLoved, getLastAppleMutationResult, addAppleTracksToPlaylist, getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleHotSongs, appleLibraryTrackToSong, appleSongToSong, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
+import { ensureBridgeRunning, checkBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
+import { isAppleNativeStreamEnabled, isAppleEmeCapable, releaseAppleNativeStream, resolveAppleNativeStream, type AppleNativeStream } from './services/applePlayback'
+import { getAppleAcceptanceSnapshot, installAppleEmeAcceptanceInstrumentation, resetAppleAcceptanceSnapshot } from './services/appleAcceptanceDiagnostics'
 import AppleLoginPanel from './components/AppleLoginPanel'
 import { cacheManager } from './services/cacheManager'
 import { indexedDBCache } from './services/indexedDBCache'
@@ -50,8 +55,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Settings, Sparkles, Image as ImageIcon } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
-import type { PlaybackTimeStore } from './audio/playbackTimeStore'
+import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
+import { createSongOwnedHandoff, readSongOwnedHandoff, type SongOwnedHandoff } from './services/watchHandoff'
+import { songKeyOf as bilibiliSongKeyOf } from './services/bilibiliApi'
 import type { PlaybackOrigin, ViewMode } from './types/playbackNavigation'
+import { preloadOnIdle } from './utils/lazyPreload'
 const loadHomeView = () => import('./components/HomeView')
 const loadExploreView = () => import('./components/ExploreView')
 const loadDesktopView = () => import('./components/DesktopView')
@@ -114,7 +122,7 @@ const LazyTranslationDisplay = lazy(loadTranslationDisplay)
 const LazyWallpaperLyrics: any = lazy(loadWallpaperLyrics)
 const LazyGloriousLyrics: any = lazy(loadGloriousLyrics)
 const LazyMultidimensionalLyrics = lazy(loadMultidimensionalLyrics)
-const LazyFoliaLyricsPage: any = lazy(loadFoliaLyricsPage)
+const LazyFoliaLyricsPage = lazy(loadFoliaLyricsPage)
 const LazyPvLyricsPage: any = lazy(loadPvLyricsPage)
 const LazyModengPlayer: any = lazy(loadModengPlayer)
 const LazyBilibiliMvPlayer: any = lazy(loadBilibiliMvPlayer)
@@ -141,7 +149,10 @@ import PlatformLoginNotice from './components/PlatformLoginNotice'
 import SimilarSongsPanel from './components/SimilarSongsPanel'
 import PluginOverlay from './components/PluginOverlay'
 import { setGlobalAudioAnalyzerStore, setGlobalPlaybackActive, setGlobalAudioAnalysers } from './plugins/clients/DGLabClient'
+import { setChromaAudioAnalyzerStore, setChromaPlaybackActive } from './plugins/clients/ChromaClient'
+import { setSignalRgbAudioAnalyzerStore, setSignalRgbPlaybackActive } from './plugins/clients/SignalRgbClient'
 import { isPluginEnabled, PLUGIN_STATE_EVENT } from './services/pluginStore'
+import { hasEnabledAudioPlugin } from './plugins/registry'
 import { detectQQMusicVip } from './utils/musicEntitlements'
 import { getQQUserDisplayName } from './utils/qqUser'
 import {
@@ -232,6 +243,25 @@ const LiveMiniPlayer = memo(function LiveMiniPlayer({
   ).currentTime
 
   return <MiniPlayer {...props} currentTime={externalCurrentTime ?? storeTime} />
+})
+
+type LiveUpNextNotificationProps = Omit<ComponentProps<typeof LazyUpNextNotification>, 'secondsRemaining'> & {
+  playbackTimeStore: PlaybackTimeStore
+  eventTime: number
+}
+
+const LiveUpNextNotification = memo(function LiveUpNextNotification({
+  playbackTimeStore,
+  eventTime,
+  ...props
+}: LiveUpNextNotificationProps) {
+  const currentTime = useSyncExternalStore(
+    playbackTimeStore.subscribe,
+    playbackTimeStore.getSnapshot,
+    playbackTimeStore.getSnapshot,
+  ).currentTime
+
+  return <LazyUpNextNotification {...props} secondsRemaining={eventTime - currentTime} />
 })
 
 type DesktopLyricLine = LyricLine & {
@@ -389,6 +419,12 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
     : backgroundEffect === 'blur'
       ? 'blur(40px)'
       : `blur(${backgroundBlur}px) saturate(1.3)`
+  const crossfadeImageStyle = useMemo(() => ({
+    filter: staticFilter,
+    transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
+    transition: 'transform 0.055s linear, opacity 0.5s',
+    willChange: 'transform' as const,
+  }), [baseScale, staticFilter])
 
   return (
     <div
@@ -398,12 +434,7 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
     >
       <CrossfadeBackground
         {...crossfadeProps}
-        imageStyle={{
-          filter: staticFilter,
-          transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
-          transition: 'transform 0.055s linear, opacity 0.5s',
-          willChange: 'transform',
-        }}
+        imageStyle={crossfadeImageStyle}
       />
       <div
         ref={pulseHighlightRef}
@@ -442,7 +473,7 @@ function detectPureMusic(lyrics: LyricLine[] | undefined | null): boolean {
 
 function getSongIdentifiers(song: Song | null): string[] {
   if (!song) return []
-  return [song.id, song.mid]
+  return [song.appleId, song.appleLibraryId, song.id, song.mid]
     .filter(value => value !== undefined && value !== null && String(value).trim())
     .map(value => String(value))
 }
@@ -633,9 +664,18 @@ function App() {
   })
   
   const [isPlaying, setIsPlaying] = useState(false)
+  // App only commits playback time when a discrete presentation boundary changes.
+  // Progress bars and other continuous consumers subscribe to playbackTimeStore locally.
   const [currentTime, setCurrentTime] = useState(0)
-  const currentTimeCommitRef = useRef({ wallTime: 0, playbackTime: 0 })
+  const currentTimeRef = useRef(0)
+  const currentTimeCommitGateRef = useRef(createPlaybackTimeCommitGate())
+  const commitCurrentTime = useCallback((value: number) => {
+    currentTimeRef.current = value
+    setCurrentTime(value)
+  }, [])
   const [duration, setDuration] = useState(0)
+  /** 当前曲目是否由 WebView2 播放面播放（外部播放源模式；驱动频谱/分析器走 bridge 数据源） */
+  const [externalPlaybackActive, setExternalPlaybackActive] = useState(false)
   /** 当前曲目是否为直播流（Apple 电台等；直播时播放器显示 LIVE 指示、禁拖动） */
   const [isLive, setIsLive] = useState(false)
   const [volume, setVolume] = useState(1.0) // 默认音量100%
@@ -679,32 +719,29 @@ function App() {
   // 调音室弹窗锚点：记录打开按钮的位置，弹窗从按钮侧弹出/关闭时收缩回按钮
   const mixingStudioAnchorRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null)
   useEffect(() => {
-    const idleId = window.requestIdleCallback(() => {
-      void Promise.allSettled([
-        loadSettingsPanel(),
-        loadHomeView(),
-        loadExploreView(),
-        loadDesktopView(),
-        loadSearchPanel(),
-        loadProfileView(),
-        loadPlaylistPanel(),
-        loadLoginView(),
-        loadArtistDetailModal(),
-        loadAlbumDetailModal(),
-        loadCommentModal(),
-        loadUpNextNotification(),
-        loadPlaybackRadialMenu(),
-        loadImmersiveControls(),
-        loadTranslationDisplay(),
-        loadModernAudioVisualizer(),
-        loadWallpaperLyrics(),
-        loadGloriousLyrics(),
-        loadMultidimensionalLyrics(),
-        loadFoliaLyricsPage(),
-        loadPvLyricsPage(),
-      ])
-    }, { timeout: 2000 })
-    return () => window.cancelIdleCallback(idleId)
+    const currentViewLoader = viewMode === 'explore'
+      ? loadExploreView
+      : viewMode === 'desktop'
+        ? loadDesktopView
+        : viewMode === 'traditional'
+          ? loadTraditionalView
+          : loadHomeView
+    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView]
+      .filter(loader => loader !== currentViewLoader)
+
+    return preloadOnIdle([
+      currentViewLoader,
+      loadSearchPanel,
+      loadUpNextNotification,
+      loadSettingsPanel,
+      loadPlaylistPanel,
+      loadLoginView,
+      loadProfileView,
+      loadArtistDetailModal,
+      loadAlbumDetailModal,
+      loadCommentModal,
+      ...alternateViewLoaders,
+    ], 2000)
   }, [])
   const [playMode, setPlayMode] = useState<'sequential' | 'shuffle' | 'repeat'>('sequential')
   const [showPlaylist, setShowPlaylist] = useState(false)
@@ -758,8 +795,11 @@ function App() {
   const [selectedAlbumPlatform, setSelectedAlbumPlatform] = useState<MusicPlatform>('netease')
   const [selectedArtistAlbumId, setSelectedArtistAlbumId] = useState<string | number | undefined>()
   const [selectedArtistTab, setSelectedArtistTab] = useState<PlaybackOrigin['artistTab']>('hotSongs')
-  // 导航栈：支持叠加窗口（搜索→歌手→专辑→详情）反向关闭
-  const navigationStack = useRef<Array<{ type: 'artist' | 'album'; id: string; platform: MusicPlatform; tab?: string }>>([])
+  // 导航栈：支持歌曲详情、艺人和专辑之间反向关闭
+  const navigationStack = useRef<Array<
+    | { type: 'artist' | 'album'; id: string; platform: MusicPlatform; tab?: string }
+    | { type: 'song'; song: Song }
+  >>([])
   const [showCommentModal, setShowCommentModal] = useState(false)
   const [selectedCommentSong, setSelectedCommentSong] = useState<Song | null>(null)
   const [currentSongLiked, setCurrentSongLiked] = useState(false)
@@ -804,9 +844,18 @@ function App() {
     smartReorderAbortRef.current?.abort()
   }, [])
 
+  const appleNativePreloadKeyRef = useRef('')
+  const appleNativePreloadAttemptsRef = useRef<Map<string, number>>(new Map())
+  const appleNativePreloadRetryTimerRef = useRef<number | null>(null)
+
   const bumpQueueRevision = useCallback(() => {
     const nextRevision = queueRevisionRef.current + 1
     queueRevisionRef.current = nextRevision
+    appleNativePreloadAttemptsRef.current.clear()
+    if (appleNativePreloadRetryTimerRef.current !== null) {
+      window.clearTimeout(appleNativePreloadRetryTimerRef.current)
+      appleNativePreloadRetryTimerRef.current = null
+    }
     setQueueRevision(nextRevision)
     return nextRevision
   }, [])
@@ -820,8 +869,10 @@ function App() {
     lyricsTimestamp?: number
     lyricsLoaded?: boolean
     lyricsPromise?: Promise<LyricLine[]>
+    lyricsPolicyKey?: string
   }>>(new Map())
   const lyricsCacheGenerationRef = useRef(0)
+  const lyricsPolicyFingerprintRef = useRef('')
   const audioUrlCacheGenerationRef = useRef(0)
   const audioPlayerCacheControlRef = useRef<{
     cancelTransition: (reason?: string, preserveNext?: boolean, announceCancellation?: boolean) => void
@@ -830,6 +881,12 @@ function App() {
   useEffect(() => {
     const invalidatePreloadedAudioUrls = () => {
       audioUrlCacheGenerationRef.current += 1
+      appleNativePreloadKeyRef.current = ''
+      appleNativePreloadAttemptsRef.current.clear()
+      if (appleNativePreloadRetryTimerRef.current !== null) {
+        window.clearTimeout(appleNativePreloadRetryTimerRef.current)
+        appleNativePreloadRetryTimerRef.current = null
+      }
       audioPlayerCacheControlRef.current?.cancelTransition('audio source settings changed', false)
       for (const [key, cached] of preloadCacheRef.current) {
         if (!cached.url) continue
@@ -846,6 +903,12 @@ function App() {
     return () => {
       window.removeEventListener(AUDIO_QUALITY_SETTINGS_EVENT, invalidatePreloadedAudioUrls)
       window.removeEventListener('waveforge-auth-changed', invalidatePreloadedAudioUrls)
+    }
+  }, [])
+
+  useEffect(() => () => {
+    if (appleNativePreloadRetryTimerRef.current !== null) {
+      window.clearTimeout(appleNativePreloadRetryTimerRef.current)
     }
   }, [])
 
@@ -1105,6 +1168,20 @@ function App() {
     const saved = localStorage.getItem('autoMixAiMix')
     return parseStoredBoolean(saved, false)
   })
+  // DJTransGAN 是严格可选扩展：计划器只接收“用户开启且引擎完整可用”的有效值，
+  // 避免删除模型后旧 localStorage=true 仍让时间线误走 60 秒 AI 路径。
+  const [autoMixAiAvailable, setAutoMixAiAvailable] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    if (!autoMixAiMix) {
+      setAutoMixAiAvailable(false)
+      return () => { cancelled = true }
+    }
+    void window.electron?.render?.aiMixStatus?.()
+      .then(status => { if (!cancelled) setAutoMixAiAvailable(status?.available === true) })
+      .catch(() => { if (!cancelled) setAutoMixAiAvailable(false) })
+    return () => { cancelled = true }
+  }, [autoMixAiMix])
 
   // 看歌模式禁用交叉过渡/无缝衔接/自动混音（视频切歌做这些太割裂），只影响生效值不污染用户设置
   const watchModeActive = lyricDisplayMode === 'video'
@@ -1126,6 +1203,7 @@ function App() {
   const [transitionProgress, setTransitionProgress] = useState(0) // 过渡进度 0-1
   // 过渡缓冲时长（秒）：叠加动画窗口（最后 4 秒）按此映射 progress
   const [transitionDuration, setTransitionDuration] = useState(0)
+  const transitionTargetTimeRef = useRef(Number.NaN)
   const [transitionStartTime, setTransitionStartTime] = useState<number | null>(null)
   const [transitionFromTrack, setTransitionFromTrack] = useState<{
     trackKey: string
@@ -1160,6 +1238,30 @@ function App() {
   
   // 当前播放进度
   const currentSong = currentIndex >= 0 && currentIndex < playlist.length ? playlist[currentIndex] : null
+
+  // Apple 播放面仅在 Electron CENC 失败时按需启动；正常 Apple 歌曲走本地 L3 音频图，
+  // 不因当前平台/队列是 Apple 就常驻拉起 WebView2。
+  const appleBridgeStopTimerRef = useRef<number | null>(null)
+  // 「播放面未授权」一次性会话提示标记（避免每次点歌都弹 toast）
+  const appleBridgeAuthHintShownRef = useRef(false)
+  useEffect(() => {
+    const platform = currentSong?.platform
+    if (platform !== 'apple' && platform) {
+      if (appleBridgeStopTimerRef.current) {
+        window.clearTimeout(appleBridgeStopTimerRef.current)
+        appleBridgeStopTimerRef.current = null
+      }
+      // 切到其他平台时立即释放兼容播放面；它不参与正常原生 CENC 播放
+      void bridgeStop().catch(() => undefined)
+      void window.electron?.stopAppleBridge?.()
+    }
+    return () => {
+      if (appleBridgeStopTimerRef.current !== null) {
+        window.clearTimeout(appleBridgeStopTimerRef.current)
+        appleBridgeStopTimerRef.current = null
+      }
+    }
+  }, [currentSong?.platform])
 
   // 当前背景是否为 MV 视频（供 QuickSettings 的模糊滑块切换两套值：MV 激活时调 MV 模糊，封面时调封面模糊）
   const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback
@@ -1274,7 +1376,7 @@ function App() {
   // 已确认对齐（视频与歌曲同源）时按「视频位 − 对齐偏移」推出歌曲位，歌词随 MV 继续滚动；
   // 未确认（自由播放/货不对板）时歌词位置不可信 → 显示层回退「歌名-艺人」。
   const lyricTimelineTime = lyricDisplayMode === 'video' && watchVideoActive && watchVideoState.alignmentVerified
-    ? watchVideoState.time - Math.max(0, watchVideoState.alignmentOffset)
+    ? watchVideoState.time - watchVideoState.alignmentOffset
     : currentTime
   const watchLyricUnverified = lyricDisplayMode === 'video' && watchVideoActive && !watchVideoState.alignmentVerified
   const currentMiniLyric = useMemo(() => {
@@ -1314,6 +1416,12 @@ function App() {
     return lyrics.find(hasVisibleContent) || null
   }, [currentLyricIndex, currentLyricLine, lyrics])
   const desktopLyrics = useMemo(() => buildDesktopLyricsWithInterludes(lyrics), [lyrics])
+  const playbackLyricsRef = useRef(lyrics)
+  const playbackDesktopLyricsRef = useRef(desktopLyrics)
+  const playbackLyricOffsetRef = useRef(lyricOffset)
+  playbackLyricsRef.current = lyrics
+  playbackDesktopLyricsRef.current = desktopLyrics
+  playbackLyricOffsetRef.current = lyricOffset
   const desktopLyricLine = useMemo(() => {
     // 看歌未确认对齐（货不对板/自由播放）→ 桌面/任务栏歌词显示「歌名-艺人」兜底
     if (watchLyricUnverified) {
@@ -1360,29 +1468,53 @@ function App() {
   const ensureSongLyrics = useCallback((song: Song, cacheKey = getSongKey(song)): Promise<LyricLine[]> => {
     const cached = preloadCacheRef.current.get(cacheKey)
     const cachedUrlTimestamp = cached?.urlTimestamp ?? (cached?.url ? cached.timestamp : undefined)
-    const isFresh = cached && Date.now() - (cached.lyricsTimestamp ?? cached.timestamp) < 5 * 60 * 1000
-    if (isFresh && cached.lyricsLoaded) return Promise.resolve(cached.lyrics)
-    if (isFresh && cached.lyricsPromise) return cached.lyricsPromise
 
     const platform = song.platform || 'netease'
-    // 汽水的 item_id 是超长数字串，Number 化会截断失配，必须用原始 mid
-    const songId = (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (song.mid || song.id) : song.id
+    // 汽水的 item_id 是超长数字串，Number 化会截断失配；Apple 必须优先使用 catalog appleId。
+    const rawSongId = platform === 'apple'
+      ? (song.appleId || song.id)
+      : (platform === 'qq' || platform === 'soda' || platform === 'kugou')
+        ? (song.mid || song.id)
+        : song.id
+    const resolveLyricsSongId = async (): Promise<string | number> => {
+      const value = String(rawSongId || '')
+      if (platform === 'apple' && APPLE_LIBRARY_ID_PATTERN.test(value)) {
+        return await resolveAppleLibraryCatalogId(value).catch(() => null) || ''
+      }
+      return rawSongId
+    }
     const lyricsCacheGeneration = lyricsCacheGenerationRef.current
     let lyricsLoadedFromPersistentCache = false
     // 歌词缓存版本：评分/数据源/解析逻辑变更时递增，使旧缓存（旧解析选中的劣质/残缺源）失效。
     // v3→v4：修复 QQ 歌词请求的 songID 形态后，**递增版本强制清除今天缓存下来的残缺结果**
     //（上午 parseInt('004Iwx…')=4 的守卫 bug 让 musicu 返回空 qrc/trans/roma → 结果被
     // IndexedDB 永久缓存，后端修好后缓存仍喂旧坏数据 → 重启也无效）
-    const lyricsCacheKey = `v4:${cacheKey}`
+    // v5：保留 Apple TTML 独立翻译/罗马音、对唱 agent 和背景和声字段。
+    // 来源策略进入 key：切语言、登录态、第三方/自适应/主源后不会继续读取旧结果。
+    const lyricsPolicyKey = [
+      platform === 'apple' ? (localStorage.getItem('appleMusicEnabled') || 'default') : 'non-apple',
+      platform === 'apple' ? (localStorage.getItem('appleLyricLang') || 'zh-hans-cn') : '-',
+      platform === 'apple' ? (getAppleAuthState().loggedIn ? 'logged-in' : 'logged-out') : '-',
+      localStorage.getItem('thirdPartyLyricsEnabled') || 'default',
+      localStorage.getItem('adaptiveLyrics') || 'default',
+      localStorage.getItem('primaryLyricsSource') || 'AMLL',
+    ].join(':')
+    const lyricsCacheKey = `v5:${lyricsPolicyKey}:${cacheKey}`
+    const isFresh = cached
+      && cached.lyricsPolicyKey === lyricsPolicyKey
+      && Date.now() - (cached.lyricsTimestamp ?? cached.timestamp) < 5 * 60 * 1000
+    if (isFresh && cached.lyricsLoaded) return Promise.resolve(cached.lyrics)
+    if (isFresh && cached.lyricsPromise) return cached.lyricsPromise
     const request = indexedDBCache.getCachedLyrics<LyricLine[]>(lyricsCacheKey, platform)
       .catch(() => null)
-      .then(persistedLyrics => {
+      .then(async persistedLyrics => {
         if (Array.isArray(persistedLyrics)) {
           lyricsLoadedFromPersistentCache = true
           return persistedLyrics
         }
+        const lyricsSongId = await resolveLyricsSongId()
         return getLyrics(
-      songId,
+          lyricsSongId,
       platform,
       song.name,
       song.artists.map(artist => artist.name).join(', '),
@@ -1398,6 +1530,7 @@ function App() {
           lyricsTimestamp: Date.now(),
           lyricsLoaded: false,
           lyricsPromise: latest?.lyricsPromise,
+          lyricsPolicyKey,
         })
         if (activeTrackKeyRef.current === cacheKey) {
           debugLog(`📝 歌词更新: ${source} (${progressLyrics.length}行 逐字=${hasWordByWord})`)
@@ -1420,6 +1553,7 @@ function App() {
         urlTimestamp: latest?.urlTimestamp ?? cachedUrlTimestamp,
         lyricsTimestamp: Date.now(),
         lyricsLoaded: true,
+        lyricsPolicyKey,
       })
       if (activeTrackKeyRef.current === cacheKey) {
         setLyrics(finalLyrics)
@@ -1435,6 +1569,7 @@ function App() {
         urlTimestamp: latest?.urlTimestamp ?? cachedUrlTimestamp,
         lyricsTimestamp: latest?.lyricsTimestamp ?? cached?.lyricsTimestamp,
         lyricsLoaded: false,
+        lyricsPolicyKey,
       })
       console.warn(`[Lyrics preload] ${song.name} 加载失败:`, error)
       return []
@@ -1448,6 +1583,7 @@ function App() {
       lyricsTimestamp: Date.now(),
       lyricsLoaded: false,
       lyricsPromise: request,
+      lyricsPolicyKey,
     })
     return request
   }, [])
@@ -1507,12 +1643,23 @@ function App() {
           lyricsLoaded: false,
           lyricsPromise: undefined,
           lyricsTimestamp: undefined,
+          lyricsPolicyKey: undefined,
         })
+      }
+      const currentSong = playlistRef.current[currentIndexRef.current]
+      if (currentSong) {
+        const currentKey = getSongKey(currentSong)
+        setLyrics([])
+        void ensureSongLyrics(currentSong, currentKey)
       }
     }
     window.addEventListener('waveforge:lyrics-cache-cleared', clearLyricsMemory)
-    return () => window.removeEventListener('waveforge:lyrics-cache-cleared', clearLyricsMemory)
-  }, [])
+    window.addEventListener('waveforge:lyrics-policy-changed', clearLyricsMemory)
+    return () => {
+      window.removeEventListener('waveforge:lyrics-cache-cleared', clearLyricsMemory)
+      window.removeEventListener('waveforge:lyrics-policy-changed', clearLyricsMemory)
+    }
+  }, [ensureSongLyrics])
 
   useEffect(() => {
     const handleLyricOffsetChange = (event: Event) => {
@@ -1780,6 +1927,7 @@ function App() {
   // handleNext 与 dominantColor 的声明位置在 useAudioPlayer 之后，无法放入其回调的依赖数组，
   // 因此用 ref 保存最新引用，供回调在运行时读取，避免陈旧闭包。
   const handleNextRef = useRef<() => void>(() => undefined)
+  const appleAcceptanceActiveRef = useRef(false)
   const dominantColorRef = useRef<string>('#3B82F6')
   
   // 调音室音效引擎：通过统一适配层（IAudioEngineAdapter）接入 v1/v2/v3，App 不再直接持有引擎实例。
@@ -1893,33 +2041,54 @@ function App() {
     useCallback((state) => {
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying)
       if (state.currentTime !== undefined) {
-        const now = performance.now()
-        const lastCommit = currentTimeCommitRef.current
-        const playbackDelta = Math.abs(state.currentTime - lastCommit.playbackTime)
+        currentTimeRef.current = state.currentTime
+
+        const findTimelineIndex = (lines: LyricLine[], offset: number) => {
+          for (let index = lines.length - 1; index >= 0; index -= 1) {
+            if (lines[index].time <= state.currentTime! + offset) return index
+          }
+          return -1
+        }
+        const lyricIndex = findTimelineIndex(playbackLyricsRef.current, 0.5 + playbackLyricOffsetRef.current)
+        let desktopLyricIndex = findTimelineIndex(playbackDesktopLyricsRef.current, 0.28 + playbackLyricOffsetRef.current)
+        const activeDesktopLyric = playbackDesktopLyricsRef.current[desktopLyricIndex]
+        if (
+          activeDesktopLyric?.isGeneratedInterlude
+          && activeDesktopLyric.interludeEndTime !== undefined
+          && state.currentTime + playbackLyricOffsetRef.current >= activeDesktopLyric.interludeEndTime
+        ) {
+          desktopLyricIndex = Math.min(desktopLyricIndex + 1, playbackDesktopLyricsRef.current.length - 1)
+        }
+
         // 倒计时基准：gapless/autoMix 启用时以 transitionStartTime（=动画起点）为准，
         // 否则以歌曲结束时间为准。
         const useTransitionCountdown = effectiveAutoMixEnabled || effectiveGaplessEnabled
         const eventTime = useTransitionCountdown ? (transitionStartTime ?? duration) : duration
-        // 动画窗口前 12s 内提高 currentTime 提交频率（≤100ms），让"即将进入过渡"倒计时流畅
-        const nearEvent = state.currentTime >= (eventTime ?? 0) - 12 && state.currentTime <= (eventTime ?? 0) + 2
-        const shouldCommitToReact = state.isPlaying === false
-          || state.currentTime === 0
-          || state.currentTime + 0.5 < lastCommit.playbackTime
-          || playbackDelta >= (nearEvent ? 0.1 : 1)
-          // 常态节流：PC 1s / TV 2s（进度条走 Live wrapper 4Hz 不受影响；过渡倒计时窗口保持 100ms）
-          || now - lastCommit.wallTime >= (nearEvent ? 100 : (isTvModeActive() ? 2000 : 900))
+        const timeRemaining = (eventTime ?? duration) - state.currentTime
+        const inAnimationWindowNow = transitionStartTime === null || state.currentTime >= transitionStartTime
+        const effectiveDuration = duration > 0
+          ? duration
+          : Math.max(0, Number(currentSong?.duration) / 1000)
+        const reportThreshold = effectiveDuration > 0
+          ? Math.min(30, Math.max(10, effectiveDuration * 0.1), Math.max(1, effectiveDuration - 1))
+          : 30
+        const presentationKey = [
+          lyricIndex,
+          desktopLyricIndex,
+          inAnimationWindowNow ? 1 : 0,
+          state.currentTime >= reportThreshold ? Math.floor(state.currentTime / 15) : -1,
+        ].join(':')
 
-        if (shouldCommitToReact) {
-          currentTimeCommitRef.current = { wallTime: now, playbackTime: state.currentTime }
+        if (currentTimeCommitGateRef.current({
+          currentTime: state.currentTime,
+          isPlaying: state.isPlaying,
+          presentationKey,
+        })) {
           setCurrentTime(state.currentTime)
         }
 
-        const timeRemaining = (eventTime ?? duration) - state.currentTime
-
-        // 动画窗口：currentTime 是否已到达过渡动画起点（transitionStartTime）。
         // AI 长混音音频过渡远早于动画点开始（transitioning 全程 true）——只有真正
         // 进入动画窗口后才隐藏"即将播放/即将进入过渡"卡片（卡片负责动画前的倒计时）。
-        const inAnimationWindowNow = transitionStartTime === null || state.currentTime >= transitionStartTime
         if ((state.transitioning && inAnimationWindowNow) || state.transitionState === 'preparing-next') {
           if (showUpNext) setShowUpNext(false)
         } else if (Date.now() < suppressUpNextUntilRef.current) {
@@ -1940,6 +2109,7 @@ function App() {
     if (state.transitionStrategy !== undefined) setTransitionStrategy(state.transitionStrategy)
     if (state.transitionStyle !== undefined) setTransitionStyle(state.transitionStyle)
     if (state.transitionDuration !== undefined) setTransitionDuration(state.transitionDuration)
+    if (state.transitionTargetTime !== undefined) transitionTargetTimeRef.current = state.transitionTargetTime
     if (state.transitionDebug !== undefined) setTransitionDebug(state.transitionDebug)
     if ('transitionStartTime' in state) setTransitionStartTime(state.transitionStartTime ?? null)
     if (state.fallbackReason !== undefined || state.transitionState === 'armed' || state.transitionState === 'preparing-next') {
@@ -2114,11 +2284,24 @@ function App() {
       maxDuration: autoMixMaxDuration,
       enhanced: autoMixEnhanced,
       intensity: autoMixTransitionIntensity,
-      aiMix: autoMixAiMix,
+      aiMix: autoMixAiMix && autoMixAiAvailable,
     },
     handleAudioGraphReady
   )
   audioPlayerCacheControlRef.current = audioPlayer
+  const playerStemControl = useMemo(() => ({
+    ...audioPlayer.trackStems.state,
+    onEnable: () => audioPlayer.trackStems.enable(),
+    onVocalChange: audioPlayer.trackStems.setVocalLevel,
+    onStemChange: (stem: import('./audio/trackStemMixer').TrackStemName, gain: number) => audioPlayer.trackStems.setStemGains({ [stem]: gain }),
+    onReturnOriginal: audioPlayer.trackStems.returnToOriginal,
+  }), [
+    audioPlayer.trackStems.state,
+    audioPlayer.trackStems.enable,
+    audioPlayer.trackStems.setVocalLevel,
+    audioPlayer.trackStems.setStemGains,
+    audioPlayer.trackStems.returnToOriginal,
+  ])
   // 保持最新 audioPlayer 引用的 ref，供 useCallback 处理器读取，避免处理器身份随渲染变化
   const audioPlayerRef = useRef(audioPlayer)
   audioPlayerRef.current = audioPlayer
@@ -2193,27 +2376,86 @@ function App() {
     return saved === 'dynamic' || saved === 'restless' ? saved : 'soft'
   })
   
-  // DG_LAB 插件启用时保持音频分析流（即使封面律动关闭）
-  const [pluginDglabActive, setPluginDglabActive] = useState(() => isPluginEnabled('dglab'))
+  // 需要频谱的插件启用时保持音频分析流（即使封面律动关闭）
+  const [pluginAudioActive, setPluginAudioActive] = useState(() => hasEnabledAudioPlugin(isPluginEnabled))
   useEffect(() => {
-    const handler = () => setPluginDglabActive(isPluginEnabled('dglab'))
+    const handler = () => setPluginAudioActive(hasEnabledAudioPlugin(isPluginEnabled))
     window.addEventListener(PLUGIN_STATE_EVENT, handler)
     return () => window.removeEventListener(PLUGIN_STATE_EVENT, handler)
   }, [])
 
   // 播放器状态监听
   const pulseActive = coverPulseEnabled && isPlaying
+  const analyzerEnabledNow = audioAnalyzerEnabled && (pulseActive || pluginAudioActive) && !isPerfModeEfficiency()
+  // WebView2 播放面频谱：外部源模式下轮询 bridge /spectrum（WASAPI loopback），
+  // 供桌面频谱 tick 与主可视化分析器共同消费
+  const externalSpectrumRef = useRef<number[]>(Array(64).fill(0))
+  useEffect(() => {
+    if (!externalPlaybackActive || !analyzerEnabledNow) return
+    let disposed = false
+    let timer: number | null = null
+    const loop = async () => {
+      if (disposed) return
+      const spectrum = await fetchBridgeSpectrum()
+      if (!disposed && spectrum && spectrum.bins.length > 0) externalSpectrumRef.current = spectrum.bins
+      if (!disposed) timer = window.setTimeout(loop, 120)
+    }
+    void loop()
+    return () => {
+      disposed = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
+  }, [externalPlaybackActive, analyzerEnabledNow])
+  const externalAnalyzerSource = useMemo(() => ({
+    active: externalPlaybackActive && analyzerEnabledNow,
+    getBins: () => (externalPlaybackActive ? Uint8Array.from(externalSpectrumRef.current) : null),
+  }), [externalPlaybackActive, analyzerEnabledNow])
+  // WebView2 播放面：B 站 MV 背景读 audio.currentTime 对齐画面（约 7 处同步循环），
+  // 外部源模式下本地元素无媒体——用代理视图把 currentTime/duration/paused 重定向到 bridge，
+  // 其余属性读转发到底层元素（视频本身静音，无双重出声）
+  const externalAudioViewRef = useRef<HTMLAudioElement | null>(null)
+  const externalAudioProxyRef = useRef<any>(null)
+  if (!externalAudioProxyRef.current) {
+    // 原生方法（addEventListener 等）必须绑定底层元素再返回——否则 this 丢失会抛
+    // "Illegal invocation" 直接崩掉渲染树；按「属性+元素」缓存绑定，元素切换时重绑
+    const boundCache = new Map<string | symbol, { el: any; bound: any }>()
+    externalAudioProxyRef.current = new Proxy({} as HTMLAudioElement, {
+      get(_target, prop) {
+        if (prop === 'currentTime') return getBridgeState().position || 0
+        if (prop === 'duration') return getBridgeState().duration || 0
+        if (prop === 'paused') return !getBridgeState().playing
+        const el = externalAudioViewRef.current
+        const value = el ? (el as any)[prop] : undefined
+        if (typeof value === 'function') {
+          const cached = boundCache.get(prop)
+          if (cached && cached.el === el) return cached.bound
+          const bound = value.bind(el)
+          boundCache.set(prop, { el, bound })
+          return bound
+        }
+        return value
+      },
+      set(_target, prop, value) {
+        const el = externalAudioViewRef.current
+        if (el) { (el as any)[prop] = value }
+        return true
+      },
+    })
+  }
   const audioAnalyzer = useAudioAnalyzer(
     audioPlayer.analyserNode,
-    audioAnalyzerEnabled && (pulseActive || pluginDglabActive) && !isPerfModeEfficiency(), // 效能档关闭音频可视化省资源；DG-LAB 插件启用时保持分析流
+    analyzerEnabledNow, // 效能档关闭音频可视化省资源；DG-LAB 插件启用时保持分析流
     audioPlayer.leftAnalyserNode, // DG-LAB 立体声：左声道（音效后最终听感信号）
     audioPlayer.rightAnalyserNode, // DG-LAB 立体声：右声道
+    externalAnalyzerSource,
   )
   const audioPulseStore = useAudioPulseStore(audioAnalyzer, pulseActive, coverPulseMode)
 
-  // 插件系统（DG_LAB 等）需要访问实时音频分析流
+  // 插件系统（DG_LAB、Razer Chroma 等）需要访问实时音频分析流
   useEffect(() => {
     setGlobalAudioAnalyzerStore(audioAnalyzer)
+    setChromaAudioAnalyzerStore(audioAnalyzer)
+    setSignalRgbAudioAnalyzerStore(audioAnalyzer)
   }, [audioAnalyzer])
 
   // DG-LAB 实时波形（左右声道时域采样）用分析器
@@ -2221,9 +2463,11 @@ function App() {
     setGlobalAudioAnalysers(audioPlayer.leftAnalyserNode, audioPlayer.rightAnalyserNode)
   }, [audioPlayer.leftAnalyserNode, audioPlayer.rightAnalyserNode])
 
-  // 播放状态同步给 DG_LAB：暂停/停止时停止推送真实频谱（防暂停后仍持续输出）
+  // 播放状态同步给插件：暂停时进入各自的空闲或安全输出。
   useEffect(() => {
     setGlobalPlaybackActive(isPlaying)
+    setChromaPlaybackActive(isPlaying)
+    setSignalRgbPlaybackActive(isPlaying)
   }, [isPlaying])
   
   // 监听封面律动设置变化
@@ -2314,7 +2558,7 @@ function App() {
         // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面（与 loadAndPlaySong 一致）
         setAppleCoverUrl(null)
         resolveAppleCover(normalizedSong)
-        setCurrentTime(audioPlayer.getAudioElement()?.currentTime || 0)
+        commitCurrentTime(audioPlayer.getAudioElement()?.currentTime || 0)
         const cachedLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || []
         setLyrics(cachedLyrics)
         setIsPureMusic(detectPureMusic(cachedLyrics))
@@ -2356,7 +2600,15 @@ function App() {
       setAutoMixTransitionIntensity(
         intensity === 'subtle' || intensity === 'strong' ? intensity : 'standard',
       )
-      setAutoMixAiMix(parseStoredBoolean(aiMix, false))
+      const aiRequested = parseStoredBoolean(aiMix, false)
+      setAutoMixAiMix(aiRequested)
+      if (!aiRequested) {
+        setAutoMixAiAvailable(false)
+      } else {
+        void window.electron?.render?.aiMixStatus?.()
+          .then(status => setAutoMixAiAvailable(status?.available === true))
+          .catch(() => setAutoMixAiAvailable(false))
+      }
 
       // 设置状态写入后端日志：无论操作到哪一步，都能看到开关的真实状态
       window.electron?.automixLog?.('settings', JSON.stringify({
@@ -2721,24 +2973,44 @@ function App() {
     // 切到看歌：记录音频位置 + 停引擎（视频接管音频输出）
     if (mode === 'video') {
       const engineEl = audioPlayerRef.current?.getAudioElement?.()
-      const pos = Number(engineEl?.currentTime) || 0
-      setWatchSyncSeek(pos > 0 ? pos : 0)
-      watchEngineVolumeRef.current = engineEl?.volume ?? 1
+      const storePosition = audioPlayer.playbackTimeStore.getSnapshot().currentTime
+      const rawPosition = Number(engineEl?.currentTime) || 0
+      const renderedTransitionActive = transitionState === 'running-transition'
+        && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+      const pos = renderedTransitionActive && Number.isFinite(storePosition) && storePosition > 0
+        ? storePosition
+        : rawPosition
+      const handoffSongKey = currentSong ? bilibiliSongKeyOf({
+        songTitle: currentSong.name,
+        artists: currentSong.artists.map((artist: any) => artist.name),
+        songDuration: (currentSong.duration || 0) / 1000,
+        platform: currentSong.platform,
+        id: currentSong.id || currentSong.mid,
+      }) : ''
+      setWatchSyncSeek(createSongOwnedHandoff(handoffSongKey, pos > 0 ? pos : 0))
+      watchEngineVolumeRef.current = volume
       watchEngineMutedRef.current = engineEl?.muted ?? false
       const mvState = mvBackgroundStateRef.current
-      setWatchInitialVideo(mvState ? { ...mvState, currentTime: pos > 0 ? pos : 0 } : null)
-      // 立即暂停引擎 + 直设音量为 0（用 pause() 而非 togglePlay()——toggle 是双向的，
-      // 引擎可能已被其他路径暂停，toggle 反而会恢复播放 → 双重奏）
+      setWatchInitialVideo(mvState?.songKey === handoffSongKey
+        ? createSongOwnedHandoff(handoffSongKey, { ...mvState, currentTime: pos > 0 ? pos : 0 })
+        : null)
+      // 先冻结逻辑歌曲时间，再取消渲染过渡并把物理 deck 对齐到同一时间。
+      // 渲染型 AutoMix 期间 store 是权威时间，而底层 audio.currentTime 可能落后数秒。
+      audioPlayerRef.current?.setWatchHold?.(true)
+      const heldEngineEl = audioPlayerRef.current?.getAudioElement?.() || engineEl
       watchPausedEngineRef.current = true
-      if (engineEl) {
-        engineEl.volume = 0
-        if (!engineEl.paused) engineEl.pause()
+      if (heldEngineEl) {
+        const duration = Number(heldEngineEl.duration) || 0
+        const heldPosition = Math.max(0, Math.min(pos, duration > 0 ? duration - 0.2 : pos))
+        if (Math.abs(heldEngineEl.currentTime - heldPosition) > 0.05) heldEngineEl.currentTime = heldPosition
+        heldEngineEl.volume = 0
+        if (!heldEngineEl.paused) heldEngineEl.pause()
+        audioPlayer.playbackTimeStore.publish({ currentTime: heldPosition, isPlaying: false })
       }
       // 看歌模式视频接管时间线：中止任何在途的音频过渡并清掉过渡视觉状态，
       // 否则 transitionToTrack/预载会残留到切回歌词模式后，把下一首的 MV 叠到 MV 背景上。
-      // 挂起引擎自动过渡（setWatchHold）：看歌期间 automix 不得 prepare/启动→提交，
-      // 否则已武装的过渡会在看歌中自动 commit → 切回时已是下一首（用户实测 Shelter）
-      audioPlayerRef.current?.setWatchHold?.(true)
+      // 挂起引擎自动过渡（setWatchHold 已在冻结逻辑时钟后同步执行）：看歌期间
+      // automix 不得 prepare/启动→提交，否则已武装的过渡会在看歌中自动 commit。
       clearTransitionResetTimer()
       setIsTransitioning(false)
       setTransitionProgress(0)
@@ -2771,7 +3043,15 @@ function App() {
       //  - 视频刚进看歌还在缓冲（getCurrentTime≈0~1s，远小于进入位置）→ 下限兜底为进入位置。
       const vidTime = watchPlayerRef.current?.getCurrentTime?.() ?? 0
       const alignOffset = watchPlayerRef.current?.getAlignmentOffset?.() ?? 0
-      const resumeTime = Math.max(vidTime - alignOffset, watchSyncSeek)
+      const currentWatchSongKey = currentSong ? bilibiliSongKeyOf({
+        songTitle: currentSong.name,
+        artists: currentSong.artists.map((artist: any) => artist.name),
+        songDuration: (currentSong.duration || 0) / 1000,
+        platform: currentSong.platform,
+        id: currentSong.id || currentSong.mid,
+      }) : ''
+      const entryFloor = readSongOwnedHandoff(watchSyncSeek, currentWatchSongKey, 0)
+      const resumeTime = Math.max(vidTime - alignOffset, entryFloor)
       void (async () => {
         try { await watchPlayerRef.current?.fadeOutAudio?.() } catch { /* 淡出失败不阻断 */ }
         const engineEl = audioPlayerRef.current?.getAudioElement?.()
@@ -2898,6 +3178,18 @@ function App() {
     return Math.max(0, Math.min(1, (transitionProgress - start) / (span / dur)))
   })()
   const isVisualTransitioning = (isTransitioning && inAnimationWindow) || Boolean(transitionToTrack && overlayProgress > 0 && inAnimationWindow)
+  const getMvPlaybackTimeSeconds = useCallback(() => {
+    const renderedTransitionActive = transitionState === 'running-transition'
+      && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+    return renderedTransitionActive
+      ? audioPlayer.playbackTimeStore.getSnapshot().currentTime
+      : Number.NaN
+  }, [audioPlayer.playbackTimeStore, transitionState, transitionStrategy])
+  const getMvTransitionTargetTimeSeconds = useCallback(() => {
+    const renderedTransitionActive = transitionState === 'running-transition'
+      && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+    return renderedTransitionActive ? transitionTargetTimeRef.current : Number.NaN
+  }, [transitionState, transitionStrategy])
   // 看歌模式下视频为唯一时间线：automix/无缝/交叉过渡全部失效
   const effectiveTransitionStrategy = lyricDisplayMode === 'video' ? 'none' : transitionStrategy
   // AutoMix 过渡时，播放页过渡指示显示 AutoMix 以与无缝衔接(Gapless)区分
@@ -2971,44 +3263,39 @@ function App() {
     transitionToTrack?.title,
   ])
 
-  const closeArtistDetail = () => {
-    // 导航栈：如果有上一级，返回上一级
-    const prev = navigationStack.current.pop()
-    if (prev) {
-      if (prev.type === 'artist') {
-        setSelectedArtistId(prev.id)
-        setSelectedArtistPlatform(prev.platform)
-        setSelectedArtistTab((prev.tab || 'hotSongs') as any)
-        setShowArtistDetail(true)
-        return
-      } else if (prev.type === 'album') {
-        setSelectedAlbumId(prev.id)
-        setSelectedAlbumPlatform(prev.platform)
-        setShowAlbumDetail(true)
-        return
-      }
+  const restoreNavigationEntry = (prev: (typeof navigationStack.current)[number] | undefined): boolean => {
+    if (!prev) return false
+    setShowArtistDetail(false)
+    setShowAlbumDetail(false)
+    setShowSongDetail(false)
+    if (prev.type === 'artist') {
+      setSelectedArtistId(prev.id)
+      setSelectedArtistPlatform(prev.platform)
+      setSelectedArtistTab((prev.tab || 'hotSongs') as PlaybackOrigin['artistTab'])
+      setShowArtistDetail(true)
+      return true
     }
+    if (prev.type === 'album') {
+      setSelectedAlbumId(prev.id)
+      setSelectedAlbumPlatform(prev.platform)
+      setShowAlbumDetail(true)
+      return true
+    }
+    if (prev.type !== 'song') return false
+    setSongDetailSong(prev.song)
+    setShowSongDetail(true)
+    return true
+  }
+
+  const closeArtistDetail = () => {
+    if (restoreNavigationEntry(navigationStack.current.pop())) return
     setShowArtistDetail(false)
     setSelectedArtistId(null)
     setSelectedArtistAlbumId(undefined)
   }
 
   const closeAlbumDetail = () => {
-    const prev = navigationStack.current.pop()
-    if (prev) {
-      if (prev.type === 'album') {
-        setSelectedAlbumId(prev.id)
-        setSelectedAlbumPlatform(prev.platform)
-        setShowAlbumDetail(true)
-        return
-      } else if (prev.type === 'artist') {
-        setSelectedArtistId(prev.id)
-        setSelectedArtistPlatform(prev.platform)
-        setSelectedArtistTab((prev.tab || 'hotSongs') as any)
-        setShowArtistDetail(true)
-        return
-      }
-    }
+    if (restoreNavigationEntry(navigationStack.current.pop())) return
     setShowAlbumDetail(false)
     setSelectedAlbumId(null)
   }
@@ -3035,10 +3322,15 @@ function App() {
   }
 
   // 压栈统一入口：栈顶去重 + 深度上限，避免相似歌手自引用造成无限入栈
-  const pushNavigation = (entry: { type: 'artist' | 'album'; id: string; platform: MusicPlatform; tab?: string }) => {
+  const pushNavigation = (entry: (typeof navigationStack.current)[number]) => {
     const stack = navigationStack.current
     const top = stack[stack.length - 1]
-    if (top && top.type === entry.type && top.id === entry.id && top.platform === entry.platform) return
+    const duplicate = top?.type === entry.type && (
+      entry.type === 'song'
+        ? top.type === 'song' && getSongKey(top.song) === getSongKey(entry.song)
+        : top.type !== 'song' && top.id === entry.id && top.platform === entry.platform
+    )
+    if (duplicate) return
     if (stack.length >= 20) stack.shift()
     stack.push(entry)
   }
@@ -3164,6 +3456,8 @@ function App() {
     // 先关闭弹窗（不触发导航栈弹出）
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
+    const hadSong = showSongDetail && songDetailSong
+    const prevSong = hadSong ? { type: 'song' as const, song: songDetailSong } : null
     const prevArtist = hadArtist ? { type: 'artist' as const, id: selectedArtistId, platform: selectedArtistPlatform, tab: selectedArtistTab } : null
     const prevAlbum = hadAlbum ? { type: 'album' as const, id: selectedAlbumId, platform: selectedAlbumPlatform } : null
     // 临时阻止 closeAlbumDetail/closeCommentModal 弹出导航栈
@@ -3171,10 +3465,12 @@ function App() {
     navigationStack.current = [] as any
     closeAlbumDetail()
     closeCommentModal()
+    setShowSongDetail(false)
     navigationStack.current = savedStack
     // 压入导航栈
     if (prevAlbum) pushNavigation(prevAlbum)
     if (prevArtist) pushNavigation(prevArtist)
+    if (prevSong) pushNavigation(prevSong)
     setSelectedArtistId(artistId)
     setSelectedArtistPlatform(platform)
     setSelectedArtistAlbumId(undefined)
@@ -3188,6 +3484,8 @@ function App() {
     setDetailPlaylist(null)
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
+    const hadSong = showSongDetail && songDetailSong
+    const prevSong = hadSong ? { type: 'song' as const, song: songDetailSong } : null
     const prevArtist = hadArtist ? { type: 'artist' as const, id: selectedArtistId, platform: selectedArtistPlatform, tab: selectedArtistTab } : null
     const prevAlbum = hadAlbum ? { type: 'album' as const, id: selectedAlbumId, platform: selectedAlbumPlatform } : null
     // 临时阻止 closeArtistDetail/closeCommentModal 弹出导航栈
@@ -3195,10 +3493,12 @@ function App() {
     navigationStack.current = [] as any
     closeArtistDetail()
     closeCommentModal()
+    setShowSongDetail(false)
     navigationStack.current = savedStack
     // 压入导航栈
     if (prevArtist) pushNavigation(prevArtist)
     if (prevAlbum) pushNavigation(prevAlbum)
+    if (prevSong) pushNavigation(prevSong)
     setSelectedAlbumId(albumId)
     setSelectedAlbumPlatform(platform)
     setShowAlbumDetail(true)
@@ -3219,13 +3519,13 @@ function App() {
     // 回到来源页：弹窗全部关闭，导航栈一并清空，避免残留脏条目
     navigationStack.current = []
 
-    if ((origin.surface === 'artist' || origin.surface === 'artist-album') && origin.artistId && origin.platform && origin.platform !== 'apple') {
+    if ((origin.surface === 'artist' || origin.surface === 'artist-album') && origin.artistId && origin.platform) {
       setSelectedArtistId(String(origin.artistId))
       setSelectedArtistPlatform(origin.platform)
       setSelectedArtistAlbumId(origin.albumId)
       setSelectedArtistTab(origin.artistTab || (origin.albumId ? 'albums' : 'hotSongs'))
       setShowArtistDetail(true)
-    } else if (origin.surface === 'album' && origin.albumId && origin.platform && origin.platform !== 'apple') {
+    } else if (origin.surface === 'album' && origin.albumId && origin.platform) {
       setSelectedAlbumId(String(origin.albumId))
       setSelectedAlbumPlatform(origin.platform)
       setShowAlbumDetail(true)
@@ -3269,22 +3569,23 @@ function App() {
   const handleAddToFavorites = async (song: Song) => {
     try {
       const platform = (song.platform || 'netease') as MusicPlatform
-      // Apple：收藏 = 加入音乐库（amp-api）
+      // Apple：“喜爱”是评分状态，与“加入资料库”是两个独立操作。
       if (platform === 'apple') {
         if (!appleLoggedIn) {
           addToast('请先登录 Apple Music', 'error')
           return
         }
         const appleSongId = song.appleId || String(song.id)
-        const ok = await addAppleSongToLibrary(appleSongId)
+        const ok = await setAppleSongLoved(appleSongId, true)
         if (ok) {
-          addToast('已收藏到 Apple 音乐库', 'success')
+          addToast('已标记为喜爱歌曲', 'success')
           applyFavoriteMutation({ platform: 'apple', type: 'like', songId: appleSongId })
           window.dispatchEvent(new CustomEvent('playlist-content-changed', {
             detail: { platform: 'apple', type: 'like', songId: appleSongId }
           }))
         } else {
-          addToast('收藏失败，请检查登录状态', 'error')
+          const failure = getLastAppleMutationResult()
+          addToast(failure.error || '标记喜爱歌曲失败', 'error')
         }
         return
       }
@@ -3352,15 +3653,22 @@ function App() {
           addToast('请先登录 Apple Music', 'error')
           return
         }
-        const appleSongId = song.appleId || String(song.id)
-        const ok = await addAppleTracksToPlaylist(playlistId, [appleSongId])
+        const appleId = String(song.appleId || '')
+        const libraryId = String(song.appleLibraryId || '')
+        const appleTrack = {
+          catalogId: appleId && !APPLE_LIBRARY_ID_PATTERN.test(appleId) ? appleId : undefined,
+          libraryId: libraryId || (APPLE_LIBRARY_ID_PATTERN.test(appleId) ? appleId : undefined),
+        }
+        const ok = await addAppleTracksToPlaylist(playlistId, [appleTrack])
+        const appleSongId = appleTrack.catalogId || appleTrack.libraryId || ''
         if (ok) {
           addToast('已添加到 Apple 歌单', 'success')
           window.dispatchEvent(new CustomEvent('playlist-content-changed', {
             detail: { platform: 'apple', type: 'add', songId: appleSongId, playlistId }
           }))
         } else {
-          addToast('添加到 Apple 歌单失败，请检查登录状态', 'error')
+          const failure = getLastAppleMutationResult()
+          addToast(failure.error || '添加到 Apple 歌单失败', 'error')
         }
         return
       }
@@ -3398,6 +3706,11 @@ function App() {
 
   // 查看评论页面
   const handleViewComments = (song: Song) => {
+    const platform = (song.platform || 'netease') as MusicPlatform
+    if (!getPlatformCapabilities(platform).comments) {
+      addToast(`${platformLabel(platform)}不支持歌曲评论`, 'info')
+      return
+    }
     dismissArtistDetail()
     dismissAlbumDetail()
     setSelectedCommentSong(song)
@@ -3474,9 +3787,92 @@ function App() {
 
       // 歌词不再等待音频 URL，立即开始并复用进行中的请求。
       void ensureSongLyrics(song, cacheKey)
-      
-      // Apple：队列条目为 Apple 曲目，音频 URL 必须取自解析后的载体歌曲（网易云/QQ）。
-      // 解析仅用于取 URL，缓存键仍是 Apple 歌曲本身，loadAndPlaySong 命中缓存即用有效 URL。
+
+      // Apple 原生播放只为第一首确定的 next 预取 CENC stream，限制为 active + standby 两个会话。
+      // WebView2 是外部播放源，不能进入本地双 deck；第二首只预取歌词，不提前申请 license。
+      if (platform === 'apple' && (isAppleNativeStreamEnabled() || isBridgeReady())) {
+        if (position !== 0 || song.appleRadio || !isAppleNativeStreamEnabled() || !(effectiveCrossfadeEnabled || effectiveGaplessEnabled || effectiveAutoMixEnabled)) {
+          debugLog(`🍎 [Preload] ${song.name}: 跳过 Apple 载体预载`)
+          return
+        }
+        const nativePreloadKey = `${requestRevision}:${idx}:${cacheKey}`
+        if ((appleNativePreloadAttemptsRef.current.get(nativePreloadKey) || 0) >= 2) {
+          debugLog(`🍎 [Preload] ${song.name}: 本轮 Apple CENC standby 重试已达上限`)
+          return
+        }
+        if (appleNativePreloadKeyRef.current === nativePreloadKey) {
+          debugLog(`🍎 [Preload] ${song.name}: 复用进行中的 Apple CENC standby 请求`)
+          return
+        }
+        appleNativePreloadKeyRef.current = nativePreloadKey
+        const settleNativePreload = (success: boolean) => {
+          if (success) {
+            appleNativePreloadAttemptsRef.current.delete(nativePreloadKey)
+            return
+          }
+          if (appleNativePreloadKeyRef.current === nativePreloadKey) appleNativePreloadKeyRef.current = ''
+          const attempts = (appleNativePreloadAttemptsRef.current.get(nativePreloadKey) || 0) + 1
+          appleNativePreloadAttemptsRef.current.set(nativePreloadKey, attempts)
+          if (attempts >= 2 || appleNativePreloadRetryTimerRef.current !== null) return
+          appleNativePreloadRetryTimerRef.current = window.setTimeout(() => {
+            appleNativePreloadRetryTimerRef.current = null
+            const nextIndex = getUpcomingIndices(
+              playlistRef.current.map(getSongKey),
+              currentIndexRef.current,
+              modeOverride,
+              requestRevision,
+              1,
+            )[0]
+            if (requestRevision !== queueRevisionRef.current
+              || audioUrlGeneration !== audioUrlCacheGenerationRef.current
+              || nextIndex !== idx
+              || getSongKey(playlistRef.current[idx]) !== cacheKey) return
+            preloadUpcomingSongs(currentIndexRef.current, requestRevision, modeOverride)
+          }, 1_000)
+        }
+        void (async () => {
+          let streamId = String(song.appleId || song.id || '')
+          if (streamId && APPLE_LIBRARY_ID_PATTERN.test(streamId)) {
+            streamId = await resolveAppleLibraryCatalogId(streamId).catch(() => null) || ''
+          }
+          const stream = streamId && streamId !== '0' && await isAppleEmeCapable()
+            ? await resolveAppleNativeStream(streamId)
+            : null
+          const currentUpcoming = getUpcomingIndices(
+            playlistRef.current.map(getSongKey),
+            currentIndexRef.current,
+            modeOverride,
+            requestRevision,
+            1,
+          )[0]
+          const requestIsCurrent = requestRevision === queueRevisionRef.current
+            && audioUrlGeneration === audioUrlCacheGenerationRef.current
+            && currentUpcoming === idx
+            && getSongKey(playlistRef.current[idx]) === cacheKey
+          if (!stream || !requestIsCurrent) {
+            if (stream) releaseAppleNativeStream(stream)
+            settleNativePreload(false)
+            return
+          }
+          debugLog(`🍎 [Preload] Apple CENC standby 就绪: ${song.name}`)
+          audioPlayer.preloadNext({
+            url: stream.url,
+            appleHls: stream,
+            trackKey: cacheKey,
+            index: idx,
+            duration: song.duration / 1000,
+            albumId: getLocalAlbumIdentifier(song, platform) || undefined,
+            albumCover: song.album?.picUrl || undefined,
+            onPreloadSettled: settleNativePreload,
+          })
+        })().catch(error => {
+          settleNativePreload(false)
+          console.warn(`[Preload] Apple CENC standby 失败: ${song.name}`, error)
+        })
+        return
+      }
+
+      // Apple 原生播放被明确关闭且 bridge 未运行时，预载备用载体 URL。
       const audioSource = platform === 'apple'
         ? resolvePlayableSong(song).then(resolved => resolved
             ? { songId: resolved.platform === 'qq' ? resolved.mid || resolved.id : resolved.id, platform: resolved.platform || 'netease' }
@@ -3545,7 +3941,7 @@ function App() {
         })
       })
     })
-  }, [playlist, playMode, queueRevision, crossfadeEnabled, gaplessEnabled, autoMixEnabled, audioPlayer.preloadNext, ensureSongLyrics])
+  }, [playlist, playMode, queueRevision, effectiveCrossfadeEnabled, effectiveGaplessEnabled, effectiveAutoMixEnabled, audioPlayer.preloadNext, ensureSongLyrics])
 
   useEffect(() => {
     const continuation = infiniteExploreContinuationRef.current
@@ -3814,7 +4210,7 @@ function App() {
     // 漏清会导致 appleCoverUrl 残留旧歌封面，自动切歌后 displayCoverUrl 恒为旧图）
     setAppleCoverUrl(null)
     resolveAppleCover(normalizedSong)
-    setCurrentTime(commit.targetTime)
+    commitCurrentTime(commit.targetTime)
     setDuration(normalizedSong.duration / 1000)
     setCurrentTranslation('')
 
@@ -3829,6 +4225,7 @@ function App() {
     void ensureSongLyrics(normalizedSong, cacheKey)
 
     window.setTimeout(() => {
+      if (appleAcceptanceActiveRef.current) return
       preloadUpcomingSongs(targetIndex, nextRevision)
     }, 0)
   }, [bumpQueueRevision, playlist, preloadUpcomingSongs, ensureSongLyrics, resolveAppleCover])
@@ -3857,36 +4254,80 @@ function App() {
         currentAudio.currentTime = 0
       }
       setIsPlaying(false)
-      
+      // 上一首若是 WebView2 播放面播放，先退出外部源模式（内部会停掉播放面声音）
+      audioPlayer.disableExternalPlayback()
+      setExternalPlaybackActive(false)
+
       let normalizedSong = normalizeSongCover(song)
-      // Apple Music 原生音源（Cider 式：webPlayback + HLS + Widevine EME）：
-      // 已登录且未关闭开关、环境有 Widevine 时优先取流，命中则直接播 Apple 原版
-      // （彻底消除「货不对板」）；任何一步失败回退下方网易云/QQ 载体匹配。
+      // Apple Music 播放路由（官方支持方向）：
+      // ① ECS Browser CDM (L3) + CENC/HLS 原生播放；② WebView2 兼容兜底；③ 网易云/QQ 载体。
+      // castLabs 已确认 Windows MF CDM 是已废弃实验路径，默认 Browser CDM L3 才是生产方向。
+      let useWebView2 = false
+      const tryWebView2Fallback = async (): Promise<boolean> => {
+        if (normalizedSong.platform !== 'apple' || !normalizedSong.appleId) return false
+        if (!isLatestLoad() || !(await ensureBridgeRunning()) || !isLatestLoad()) {
+          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: bridge 不可用或请求已过期')
+          return false
+        }
+        let authorized = getBridgeState().authorized
+        for (let i = 0; i < 40 && !authorized && isLatestLoad(); i++) {
+          await new Promise(r => setTimeout(r, 300))
+          if (!isLatestLoad()) return false
+          await checkBridgeRunning()
+          authorized = getBridgeState().authorized
+        }
+        if (!isLatestLoad()) return false
+        if (!authorized) {
+          ;(window as any).electron?.log?.('[PlaySong] WebView2 fallback: 播放面未授权（等待超时）')
+          if (!appleBridgeAuthHintShownRef.current) {
+            appleBridgeAuthHintShownRef.current = true
+            addToast('Apple 兼容播放需一次授权：设置 → Apple Music 播放面 → 打开窗口登录', 'info')
+          }
+          return false
+        }
+        const ok = await bridgePlay(String(normalizedSong.appleId))
+        ;(window as any).electron?.log?.(`[PlaySong] WebView2 fallback bridgePlay(${normalizedSong.appleId}) → ${ok}`)
+        return ok
+      }
+
+      // Apple Music 原生音源：webPlayback + CENC HLS + ECS Browser CDM (L3)。
       let appleHlsStream: AppleNativeStream | null = null
-      // Apple Music 电台直播：流已由探索页经 /v1/play/assets 取好（含 playParams），
-      // 直接进 HLS 管线；不经 webPlayback，也不做网易云/QQ 载体匹配（电台没有同款歌曲）
+      // Apple Music 电台直播：流已由探索页经 /v1/play/assets 取好（含 playParams），直接进 HLS 管线。
       const radioStream = (normalizedSong as { appleRadio?: { stream: AppleNativeStream } | null }).appleRadio?.stream
       if (radioStream) {
         appleHlsStream = radioStream
         debugLog('📻 [PlaySong] Apple 电台直播流就绪: ' + radioStream.url.slice(0, 96))
       } else if (normalizedSong.platform === 'apple' && isAppleNativeStreamEnabled()) {
-        const streamId = String(normalizedSong.appleId || normalizedSong.id || '')
+        let streamId = String(normalizedSong.appleId || normalizedSong.id || '')
+        if (streamId && APPLE_LIBRARY_ID_PATTERN.test(streamId)) {
+          const catalogId = await resolveAppleLibraryCatalogId(streamId).catch(() => null)
+          if (catalogId) streamId = catalogId
+        }
         const emeCapable = await isAppleEmeCapable()
         if (streamId && streamId !== '0' && emeCapable) {
           appleHlsStream = await resolveAppleNativeStream(streamId)
-          if (!appleHlsStream) {
-            // 取流失败：静默回退载体（诊断原因已由 resolveAppleNativeStream 输出到
-            // 控制台与主进程日志，不打扰 UI）
-            debugLog('🍎 [PlaySong] Apple 原生音源取流失败，回退网易云/QQ 载体')
+          if (!isLatestLoad()) {
+            releaseAppleNativeStream(appleHlsStream)
+            return
           }
+          if (!appleHlsStream) useWebView2 = await tryWebView2Fallback()
         } else if (!emeCapable) {
-          debugLog('🍎 [PlaySong] 当前环境无 Widevine CDM，Apple 原生音源不可用，回退载体匹配')
+          debugLog('🍎 [PlaySong] ECS Browser CDM 不可用，尝试 WebView2 兼容播放')
+          useWebView2 = await tryWebView2Fallback()
+        } else if (!streamId || streamId === '0') {
+          console.warn(`🍎 [PlaySong] Apple 歌曲缺少有效曲目 id：《${normalizedSong.name}》`)
+          useWebView2 = await tryWebView2Fallback()
         }
+      }
+      if (appleHlsStream && !useWebView2) {
+        // 已命中 Electron 原生 CENC；兼容 bridge 不再参与本曲播放，立即释放其进程与轮询。
+        void bridgeStop().catch(() => undefined)
+        void window.electron?.stopAppleBridge?.()
       }
       // 需要跨平台载体转换的平台：apple（原生取流失败时）/spotify（无自源音源，始终）。
       // kugou/soda 先试原生播放（汽水走逆向 Web API，免费/试听流可播），
       // 付费/失败时在 URL 为空分支再匹配网易云/QQ 同款。
-      const needsCarrier = !appleHlsStream && (normalizedSong.platform === 'apple'
+      const needsCarrier = !appleHlsStream && !useWebView2 && (normalizedSong.platform === 'apple'
         || normalizedSong.platform === 'spotify')
       let audioSong: Song = normalizedSong
       if (needsCarrier) {
@@ -3919,7 +4360,7 @@ function App() {
       }
       const coverUrl = normalizedSong.album?.picUrl || ''
       setCurrentTrack(createTrackFromSong(normalizedSong))
-      setCurrentTime(0)
+      commitCurrentTime(0)
       // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面
       setAppleCoverUrl(null)
       resolveAppleCover(normalizedSong)
@@ -3937,7 +4378,10 @@ function App() {
       let sodaUnavailableInfo: { requiredTier?: 'free' | 'vip' | 'svip'; vipLabel?: string; reason?: string } | null = null
 
       // 音频 URL 与歌词分别判断时效，歌词请求不再等播放器完成加载后才开始。
-      if (appleHlsStream) {
+      if (useWebView2) {
+        // WebView2 播放面模式：音源在 WebView2 内解密播放，无需本地 URL；
+        // 预载缓存里的载体 URL 不可用（会造成播放面 + 本地 deck 双重出声）
+      } else if (appleHlsStream) {
         // Apple 原生 HLS：清单签名有时效且不走 getSongUrl，不写 URL 缓存，
         // 切歌/重播时重新取流（webPlayback 本身很快）
         url = appleHlsStream.url
@@ -3978,7 +4422,7 @@ function App() {
       
       
       // 检测歌曲下架
-      if (url === 'SONG_UNAVAILABLE') {
+      if (!useWebView2 && url === 'SONG_UNAVAILABLE') {
         console.error('获取歌曲URL失败，重试3次')
         addToast('获取歌曲信息失败，请稍后重试', 'error')
         // 捕获本次加载的 revision：3 秒后重试前校验用户是否已手动切歌，避免迟到跳歌
@@ -3998,7 +4442,7 @@ function App() {
           .catch(() => undefined)
       }
       
-      if (!url) {
+      if (!url && !useWebView2) {
         // 酷狗/汽水：原生播放失败（付费/版权/未登录）→ 尝试网易云/QQ 同款匹配播放
         if (normalizedSong.platform === 'kugou' || normalizedSong.platform === 'soda') {
           // 汽水源不可播：先弹一次性可感知提示（标注「汽水·」前缀，避免用户误以为播的是网易云版本），
@@ -4033,7 +4477,7 @@ function App() {
       }
       
       // 处理封面图片URL，支持网易云音乐的URL参数
-      setCurrentTrack(createTrackFromSong(normalizedSong, url))
+      setCurrentTrack(createTrackFromSong(normalizedSong, url ?? undefined))
       
       // 如果是当前播放的歌曲，确保歌词已加载且不为空
       songLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || songLyrics
@@ -4045,8 +4489,19 @@ function App() {
       setIsPureMusic(detectPureMusic(songLyrics))
       
       let started = false
-      try {
-        started = await audioPlayer.loadAndPlay(url, volume, {
+      if (useWebView2) {
+        // === WebView2 播放面模式 ===
+        // 音频在 WebView2 兼容播放窗口中解密播放，本地 deck 保持空载；
+        // 播放器进入外部源模式：bridge 状态经 emit 管线驱动全部 UI（进度/歌词/播控），
+        // 播完经 ended 语义走上层切歌/单曲循环，播控命令在 hook 内分流到 bridge。
+        started = true
+        // Song.duration 单位为毫秒（与 loadAndPlay 的 duration 传参一致，需 /1000 转秒）
+        audioPlayer.enableExternalPlayback({ duration: Number(normalizedSong.duration) / 1000 || 0 })
+        setExternalPlaybackActive(true)
+      } else {
+        try {
+        // 此分支 !useWebView2：上方 url 为空分支已 return，url 必为有效载体/HLS 地址
+        started = await audioPlayer.loadAndPlay(url!, volume, {
           trackKey: cacheKey,
           index: songIndex,
           duration: normalizedSong.duration / 1000,
@@ -4067,14 +4522,50 @@ function App() {
         // 给可感知提示即可，用户可重试或切下一首（切歌会重新走完整取流流程）
         if (appleHlsStream) {
           console.warn('[PlaySong] Apple 原生 HLS 播放失败:', firstPlaybackError)
-          // 电台直播：给出可感知提示（歌曲路径保持静默回退，用户偏好）
+          // 电台直播：给出可感知提示（无同款歌曲可回退）
           if ((normalizedSong as { appleRadio?: unknown }).appleRadio) {
             addToast('电台直播播放失败（网络或授权问题），请重试', 'error')
+            return
           }
           // 静默处理：不外弹提示（用户偏好），仅转发主进程控制台便于排查
           try {
             ;(window as any).electron?.log?.(`[ApplePlayback] HLS 播放失败: ${firstPlaybackError instanceof Error ? firstPlaybackError.message : String(firstPlaybackError)}`)
           } catch { /* 忽略 */ }
+          // Electron L3/CENC 失败后优先切到 WebView2 兼容播放；只有 bridge 也失败才加载体。
+          useWebView2 = await tryWebView2Fallback()
+          if (useWebView2 && isLatestLoad()) {
+            appleHlsStream = null
+            started = true
+            audioPlayer.enableExternalPlayback({ duration: Number(normalizedSong.duration) / 1000 || 0 })
+            setExternalPlaybackActive(true)
+            setCurrentTrack(createTrackFromSong(normalizedSong))
+            return
+          }
+
+          // WebView2 也不可用时回退网易云/QQ 载体（避免把用户晾在 0:00）。
+          const resolved = await resolvePlayableSong(normalizedSong)
+          if (resolved && isLatestLoad()) {
+            const carrierId = resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
+            const carrierUrl = await getSongUrl(carrierId, resolved.platform || 'netease')
+            if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE' && isLatestLoad()) {
+              normalizedSong = resolved
+              url = carrierUrl
+              setCurrentTrack(createTrackFromSong(normalizedSong, url))
+              songLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || songLyrics
+              started = await audioPlayer.loadAndPlay(url, volume, {
+                trackKey: cacheKey,
+                index: songIndex,
+                duration: normalizedSong.duration / 1000,
+                albumId: getLocalAlbumIdentifier(normalizedSong, resolved.platform || 'netease') || undefined,
+                albumCover: normalizedSong.album?.picUrl || undefined,
+              })
+              if (started && lyricDisplayModeRef.current === 'video') {
+                const engineEl = audioPlayerRef.current?.getAudioElement?.()
+                if (engineEl) { engineEl.volume = 0; engineEl.pause() }
+                watchPausedEngineRef.current = true
+              }
+            }
+          }
           return
         }
         // Signed playback URLs can expire or be rejected by the CDN before the
@@ -4118,11 +4609,13 @@ function App() {
           if (engineEl) { engineEl.volume = 0; engineEl.pause() }
           watchPausedEngineRef.current = true
         }
-      }
+      } // ← closes catch
+      } // ← closes else
       if (!started || !isLatestLoad()) return
       
       // 响度归一化：按曲目测量 LUFS 并施加增益（adapter 内部按 capabilities 判断，v1/v3 no-op）
-      engineAdapterRef.current.applyLoudnessNormalization(cacheKey, url)
+      // WebView2 播放面模式无本地音频链路，跳过
+      if (!useWebView2) engineAdapterRef.current.applyLoudnessNormalization(cacheKey, url!)
       
       // 请求可能已经由下一首预载启动；这里仅保持引用，避免重复调用。
       void lyricsPromise
@@ -4166,7 +4659,7 @@ function App() {
     }
     
     // 如果是第一首歌，循环到最后一首
-    setCurrentTime(0)
+    commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态?
     currentIndexRef.current = newIndex
@@ -4207,7 +4700,7 @@ function App() {
     }
     
     // 清空当前时间和歌词
-    setCurrentTime(0)
+    commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态
     currentIndexRef.current = newIndex
@@ -4215,12 +4708,145 @@ function App() {
     loadAndPlaySong(playlist[newIndex], newIndex)
   }
   handleNextRef.current = handleNext
+  const handleSongSelectRef = useRef(handleSongSelect)
+  handleSongSelectRef.current = handleSongSelect
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('appleAcceptance') !== '1') return
+
+    const waitFor = async (predicate: () => boolean, timeoutMs: number, label: string) => {
+      const deadline = Date.now() + timeoutMs
+      while (Date.now() < deadline) {
+        if (predicate()) return
+        await new Promise(resolve => window.setTimeout(resolve, 100))
+      }
+      throw new Error(`Timed out waiting for ${label}`)
+    }
+    const settingsKeys = [
+      'crossfadeEnabled',
+      'crossfadeDuration',
+      'gaplessEnabled',
+      'autoMixEnabled',
+      'autoMixEnhanced',
+      'autoMixAiMix',
+      'playMode',
+      'appleNativeStream',
+    ] as const
+    const backup = Object.fromEntries(settingsKeys.map(key => [key, localStorage.getItem(key)]))
+    let restoreEme: () => void = () => undefined
+
+    const configure = async (mode: 'crossfade' | 'gapless' | 'automix') => {
+      appleAcceptanceActiveRef.current = true
+      localStorage.setItem('appleNativeStream', 'true')
+      localStorage.setItem('crossfadeEnabled', String(mode === 'crossfade'))
+      localStorage.setItem('crossfadeDuration', '1')
+      localStorage.setItem('gaplessEnabled', String(mode === 'gapless'))
+      localStorage.setItem('autoMixEnabled', String(mode === 'automix'))
+      localStorage.setItem('autoMixEnhanced', String(mode === 'automix'))
+      localStorage.setItem('autoMixAiMix', 'false')
+      setCrossfadeEnabled(mode === 'crossfade')
+      setCrossfadeDuration(1)
+      setGaplessEnabled(mode === 'gapless')
+      setAutoMixEnabled(mode === 'automix')
+      setAutoMixEnhanced(mode === 'automix')
+      setAutoMixAiMix(false)
+      setPlayMode('sequential')
+      window.dispatchEvent(new Event('crossfadeSettingsChanged'))
+      window.dispatchEvent(new Event('gaplessSettingsChanged'))
+      window.dispatchEvent(new Event('autoMixSettingsChanged'))
+      resetAppleAcceptanceSnapshot()
+      audioPlayerRef.current.resetAcceptanceState()
+      restoreEme = installAppleEmeAcceptanceInstrumentation()
+      await new Promise(resolve => window.setTimeout(resolve, 250))
+      return { mode, configured: true }
+    }
+
+    const loadPair = async () => {
+      const auth = getAppleAuthState()
+      if (!auth.loggedIn) throw new Error('Apple account is not logged in')
+      const library = await getAppleLibrarySongs(50)
+      let songs = library.filter(track => Boolean(track.catalogId)).slice(0, 2).map(appleLibraryTrackToSong)
+      let source: 'library' | 'catalog' = 'library'
+      if (songs.length < 2) {
+        const hot = await getAppleHotSongs(auth.storefront, 10)
+        songs = hot.slice(0, 2).map(song => appleSongToSong(song, auth.storefront))
+        source = 'catalog'
+      }
+      if (songs.length < 2) throw new Error('Unable to select two Apple catalog tracks')
+      await handleSongSelectRef.current(songs[0], songs, { mode: 'minimal', surface: 'search', platform: 'apple' })
+      await waitFor(() => {
+        const player = audioPlayerRef.current
+        const state = player.getAcceptanceState()
+        const diagnostics = getAppleAcceptanceSnapshot()
+        return state.activeAppleHls && state.standbyAppleHls
+          && diagnostics.hlsReady >= 2
+          && diagnostics.licenseSuccesses >= 2
+      }, 60_000, 'two ready Apple CENC decks')
+      return { loggedIn: true, source, selectedTracks: 2 }
+    }
+
+    const snapshot = () => ({
+      auth: { loggedIn: getAppleAuthState().loggedIn },
+      player: audioPlayerRef.current.getAcceptanceState(),
+      diagnostics: getAppleAcceptanceSnapshot(),
+      heap: typeof performance !== 'undefined' && 'memory' in performance
+        ? { usedJSHeapSize: Number((performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize || 0) }
+        : null,
+    })
+
+    const transition = async () => {
+      const player = audioPlayerRef.current
+      const strategy = await player.runAcceptanceTransition()
+      await waitFor(() => {
+        const state = audioPlayerRef.current.getAcceptanceState()
+        return state.transitionState === 'playing' && state.activeAppleHls && !state.standbyAppleHls
+      }, 10_000, 'Apple transition commit and retired deck cleanup')
+      return { strategy, snapshot: snapshot() }
+    }
+
+    const cleanup = async (restoreSettings = true) => {
+      audioPlayerRef.current.releaseAcceptanceDecks()
+      await waitFor(() => {
+        const diagnostics = getAppleAcceptanceSnapshot()
+        return diagnostics.activeHls === 0 && diagnostics.activeEmeSessions === 0
+      }, 10_000, 'Apple HLS and EME session release').catch(() => undefined)
+      if (restoreSettings) {
+        appleAcceptanceActiveRef.current = false
+        restoreEme()
+        for (const key of settingsKeys) {
+          const value = backup[key]
+          if (value === null) localStorage.removeItem(key)
+          else localStorage.setItem(key, value)
+        }
+        window.dispatchEvent(new Event('crossfadeSettingsChanged'))
+        window.dispatchEvent(new Event('gaplessSettingsChanged'))
+        window.dispatchEvent(new Event('autoMixSettingsChanged'))
+      }
+      return snapshot()
+    }
+
+    ;(window as any).__waveforgeAppleAcceptance = { configure, loadPair, snapshot, transition, cleanup }
+    return () => {
+      restoreEme()
+      delete (window as any).__waveforgeAppleAcceptance
+    }
+  }, [])
   
   // 获取下一首歌曲（不播放，仅用于显示）
   const nextSongToShow = useMemo((): Song | undefined => {
     if (deterministicNextIndex === undefined) return undefined
     return playlist[deterministicNextIndex]
   }, [playlist, deterministicNextIndex])
+  const foliaPresentation = resolveFoliaPresentation({
+    isPlaybackPage,
+    lyricMode: lyricDisplayMode,
+    upNextEnabled,
+    hasNext: Boolean(nextSongToShow),
+    playMode,
+    showUpNext,
+    autoMixRunning: isAutoMixTransition && transitionState === 'running-transition',
+    transitionDuration,
+  })
 
   const handlePlayModeChange = () => {
     const now = Date.now()
@@ -4289,8 +4915,8 @@ function App() {
   const watchEngineVolumeRef = useRef(1)
   const watchEngineMutedRef = useRef(false)
   /** MV 背景当前播放的视频状态（切到看歌时复用已加载的流，避免重新缓冲卡顿） */
-  const mvBackgroundStateRef = useRef<{ bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string } | null>(null)
-  const [watchInitialVideo, setWatchInitialVideo] = useState<{ bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number } | null>(null)
+  const mvBackgroundStateRef = useRef<{ songKey: string; bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string } | null>(null)
+  const [watchInitialVideo, setWatchInitialVideo] = useState<SongOwnedHandoff<{ bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number }> | null>(null)
   /** HTMLAudioElement 音量渐变（等功率线性，避免双声爆音） */
   const fadeElementVolume = (el: HTMLAudioElement | null | undefined, from: number, to: number, ms: number): Promise<void> =>
     new Promise((resolve) => {
@@ -4311,8 +4937,8 @@ function App() {
   const watchTimelineActive = lyricDisplayMode === 'video' && watchVideoActive
   const watchTimelineActiveRef = useRef(watchTimelineActive)
   watchTimelineActiveRef.current = watchTimelineActive
-  /** 切到看歌时的音频续播位置（秒） */
-  const [watchSyncSeek, setWatchSyncSeek] = useState(0)
+  /** 切到看歌时的按歌曲归属音频续播位置（秒） */
+  const [watchSyncSeek, setWatchSyncSeek] = useState<SongOwnedHandoff<number> | null>(null)
   const watchPausedEngineRef = useRef(false)
   /**
    * 切出看歌时视频进度已越过歌曲音频末尾（MV 往往比歌长）：引擎停在歌曲末尾保持暂停，
@@ -4338,7 +4964,7 @@ function App() {
         watchPausedEngineRef.current = false
         const engineEl = audioPlayerRef.current?.getAudioElement?.()
         if (engineEl) {
-          engineEl.volume = Math.max(0.01, watchEngineVolumeRef.current)
+          audioPlayerRef.current?.setVolume(watchEngineVolumeRef.current)
           engineEl.muted = watchEngineMutedRef.current
           // 视频进度越过歌曲末尾时停在末尾保持暂停（不自动切下一首），跳过自动起播
           if (!watchResumeHeldAtEndRef.current && engineEl.paused) void engineEl.play().catch(() => {})
@@ -4387,7 +5013,10 @@ function App() {
         return
       }
       const audio = audioPlayer.getAudioElement()
-      const currentlyPlaying = isPlayingRef.current && !(audio?.paused ?? true)
+      // WebView2 播放面：本地元素恒为暂停态，"正在播"以 bridge 状态为准
+      const currentlyPlaying = audioPlayer.isExternalPlaybackActive?.()
+        ? getBridgeState().playing
+        : isPlayingRef.current && !(audio?.paused ?? true)
       if (action === 'play' && !currentlyPlaying) audioPlayer.togglePlay()
       else if (action === 'pause' && currentlyPlaying) audioPlayer.togglePlay()
       else if (action === 'toggle') audioPlayer.togglePlay()
@@ -4463,7 +5092,8 @@ function App() {
         const artist = Array.isArray(current.artists) ? current.artists[0] : null
         // 汽水无艺人 ID，约定传歌手名
         const artistId = platform === 'soda' ? (artist?.name || artist?.id)
-          : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+          : platform === 'qq' ? (artist?.mid || artist?.id)
+            : platform === 'apple' ? (artist?.appleId || artist?.id) : artist?.id
         if (!artistId) {
           addToast('当前歌曲缺少歌手信息', 'error')
           return
@@ -4493,17 +5123,23 @@ function App() {
       if (ALL_LYRIC_MODES.includes(mode)) handleLyricDisplayModeChange(mode)
     } else if (action === 'stop') {
       // 停止：暂停并回到开头（主流遥控器停止键）
-      const audio = audioPlayer.getAudioElement()
       audioPlayerRef.current.seek(0)
-      if (isPlayingRef.current && !(audio?.paused ?? true)) audioPlayer.togglePlay()
+      if (audioPlayer.isExternalPlaybackActive?.()) {
+        if (getBridgeState().playing) audioPlayer.togglePlay()
+      } else {
+        const audio = audioPlayer.getAudioElement()
+        if (isPlayingRef.current && !(audio?.paused ?? true)) audioPlayer.togglePlay()
+      }
     } else if (action === 'rewind') {
-      const audio = audioPlayer.getAudioElement()
-      const t = audio?.currentTime || 0
+      // WebView2 播放面：时间源来自 bridge（本地元素无媒体）
+      const t = audioPlayer.isExternalPlaybackActive?.()
+        ? (getBridgeState().position || 0)
+        : (audioPlayer.getAudioElement()?.currentTime || 0)
       audioPlayerRef.current.seek(Math.max(0, t - 10))
     } else if (action === 'fast-forward') {
-      const audio = audioPlayer.getAudioElement()
-      const t = audio?.currentTime || 0
-      const d = audio?.duration || 0
+      const external = audioPlayer.isExternalPlaybackActive?.()
+      const t = external ? (getBridgeState().position || 0) : (audioPlayer.getAudioElement()?.currentTime || 0)
+      const d = external ? (getBridgeState().duration || 0) : (audioPlayer.getAudioElement()?.duration || 0)
       audioPlayerRef.current.seek(Math.min(d || t + 10, t + 10))
     } else if (action === 'open-search') {
       setShowSearch(true)
@@ -4534,8 +5170,6 @@ function App() {
     return () => window.clearTimeout(t)
   }, [])
 
-  const handleSongSelectRef = useRef(handleSongSelect)
-  handleSongSelectRef.current = handleSongSelect
   const desktopSpectrumBufferRef = useRef<Uint8Array | null>(null)
   const desktopSpectrumRawRef = useRef<number[]>(Array(48).fill(0))
   const desktopSpectrumDisplayRef = useRef<number[]>(Array(48).fill(0))
@@ -4700,18 +5334,25 @@ function App() {
     void import('./services/audioOutput').then(({ initAudioOutputDevices }) => initAudioOutputDevices())
   }, [])
 
+  const airplayProbeRef = useRef({
+    title: '', artist: '', album: '', coverUrl: '', durationMs: 0, elapsedMs: 0, isPlaying: false,
+  })
+  airplayProbeRef.current = {
+    title: currentTrack.title || '',
+    artist: currentTrack.artist || '',
+    album: currentTrack.album || '',
+    coverUrl: currentTrack.coverUrl || '',
+    durationMs: Math.max(0, (Number(currentTrack.duration) || 0) * 1000),
+    elapsedMs: 0,
+    isPlaying: Boolean(isPlaying),
+  }
   useEffect(() => {
     airplayController.attachProbe(() => ({
-      title: currentTrack.title || '',
-      artist: currentTrack.artist || '',
-      album: currentTrack.album || '',
-      coverUrl: currentTrack.coverUrl || '',
-      durationMs: Math.max(0, (Number(currentTrack.duration) || 0) * 1000),
-      elapsedMs: Math.max(0, Number(currentTime) || 0) * 1000,
-      isPlaying: Boolean(isPlaying),
+      ...airplayProbeRef.current,
+      elapsedMs: Math.max(0, currentTimeRef.current) * 1000,
     }))
     return () => airplayController.detachProbe()
-  }, [currentTrack, isPlaying, currentTime])
+  }, [])
 
   // AirPlay 音量条变化（跟随软件音量开启时）→ 同步软件音量条显示
   useEffect(() => {
@@ -4901,17 +5542,26 @@ function App() {
 
       const audio = audioPlayer.getAudioElement()
       const analyser = desktopAnalyserRef.current
-      const audioActive = Boolean(analyser && isPlayingRef.current && !(audio?.paused ?? true))
+      // WebView2 播放面：WASAPI loopback 频谱来自 bridge（64 对数 bin），本地 analyser 无音频流
+      const externalPlaying = Boolean(audioPlayer.isExternalPlaybackActive?.() && getBridgeState().playing)
+      const audioActive = Boolean(externalPlaying || (analyser && isPlayingRef.current && !(audio?.paused ?? true)))
       if (!audioActive && desktopSpectrumIdleRef.current && !overlayActive) return
 
       let spectrum: number[]
-      if (audioActive && analyser) {
-        const bins = analyser.frequencyBinCount
+      if (audioActive && (analyser || externalPlaying)) {
+        const bins = externalPlaying
+          ? externalSpectrumRef.current.length
+          : (analyser?.frequencyBinCount ?? 64)
         if (!desktopSpectrumBufferRef.current || desktopSpectrumBufferRef.current.length !== bins) {
           desktopSpectrumBufferRef.current = new Uint8Array(bins)
         }
         const data = desktopSpectrumBufferRef.current
-        analyser.getByteFrequencyData(data)
+        if (externalPlaying) {
+          const extBins = externalSpectrumRef.current
+          for (let index = 0; index < bins; index += 1) data[index] = extBins[index] ?? 0
+        } else {
+          analyser!.getByteFrequencyData(data)
+        }
         const bandCount = 48
         let bands = spectrumBandsRef.current
         if (!bands || bands.bins !== bins) {
@@ -4958,7 +5608,9 @@ function App() {
         // 变化去重：进度 ≥0.5s 或频谱明显变化才推送（10Hz tick 只在有变化时扇出 IPC/遥控 TCP）
         const progressNow = watchTimelineActiveRef.current
           ? (watchVideoStateRef.current?.time || 0)
-          : (Number(audio?.currentTime) || 0) + lyricOffsetRef.current - 0.2
+          : (audioPlayer.isExternalPlaybackActive?.()
+              ? (getBridgeState().position || 0)
+              : (Number(audio?.currentTime) || 0)) + lyricOffsetRef.current - 0.2
         const progressChanged = Math.abs(progressNow - desktopSpectrumLastPushProgressRef.current) >= 0.5
         const spectrumChanged = compactSpectrum.some((value, index) => Math.abs(value - desktopSpectrumLastPushSpectrumRef.current[index]) > 0.03)
         if (progressChanged || spectrumChanged) {
@@ -4976,7 +5628,9 @@ function App() {
             window.electron?.desktopPlayer?.pushState({
               spectrum: compactSpectrum,
               progress: progressNow,
-              duration: Number(audio?.duration) || 0,
+              duration: audioPlayer.isExternalPlaybackActive?.()
+                ? (getBridgeState().duration || 0)
+                : (Number(audio?.duration) || 0),
             })
           }
         }
@@ -5020,6 +5674,16 @@ function App() {
         // 看歌模式：任务栏进度按视频
         const v = watchVideoStateRef.current
         if (v.duration > 0) window.electron?.desktopPlayer?.pushState({ progress: v.time, duration: v.duration })
+        return
+      }
+      // WebView2 播放面：时间源来自 bridge（本地 audio 元素无媒体）
+      if (audioPlayer.isExternalPlaybackActive?.()) {
+        const s = getBridgeState()
+        if (!s.playing) return
+        window.electron?.desktopPlayer?.pushState({
+          progress: (s.position || 0) + lyricOffsetRef.current - 0.2,
+          duration: s.duration || 0,
+        })
         return
       }
       const audio = audioPlayer.getAudioElement()
@@ -5261,9 +5925,8 @@ function App() {
   }
 
   const handleAppleLogout = () => {
+    void window.electron?.appleLogout?.().catch(() => undefined)
     clearAppleLogin()
-    localStorage.removeItem('appleDeveloperToken')
-    localStorage.removeItem('appleMediaUserToken')
     refreshAppleAuth(null)
     setAuthRevision(previous => previous + 1)
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'apple' } }))
@@ -5280,7 +5943,10 @@ function App() {
       if (result.refreshToken) localStorage.setItem('spotify_refresh_token', result.refreshToken)
       if (result.username) localStorage.setItem('spotify_username', result.username)
       if (result.avatar) localStorage.setItem('spotify_avatar', result.avatar)
-      if (result.userId) localStorage.setItem('spotify_user_id', result.userId)
+      if (result.userId) {
+        localStorage.setItem('spotify_user_id', result.userId)
+        setSpotifyUserId(String(result.userId))
+      }
       setSpotifyLoggedIn(true)
       if (result.username) setSpotifyUsername(result.username)
       if (result.avatar) setSpotifyAvatar(result.avatar)
@@ -5290,6 +5956,19 @@ function App() {
     })
     return () => { try { unsub?.() } catch { /* 忽略 */ } }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const handleSpotifySessionExpired = () => {
+      setSpotifyLoggedIn(false)
+      setSpotifyUserId('')
+      setSpotifyUsername('')
+      setSpotifyAvatar('')
+      setAuthRevision(previous => previous + 1)
+      addToast('Spotify 登录已过期，请重新登录', 'info')
+    }
+    window.addEventListener('spotify-session-expired', handleSpotifySessionExpired)
+    return () => window.removeEventListener('spotify-session-expired', handleSpotifySessionExpired)
   }, [])
 
   // 酷狗登录结果（主进程回调）：同步 userId/avatar 等扩展信息
@@ -5435,6 +6114,7 @@ function App() {
     // Spotify 由主进程 OAuth 写入 token；仅当存在真实 access_token 才算登录（cookie 参数仅作占位）
     const loggedIn = Boolean(localStorage.getItem('spotify_access_token'))
     setSpotifyLoggedIn(loggedIn)
+    if (loggedIn) setSpotifyUserId(localStorage.getItem('spotify_user_id') || '')
     if (username && loggedIn) {
       setSpotifyUsername(username)
       localStorage.setItem('spotify_username', username)
@@ -5569,23 +6249,24 @@ function App() {
   const handleRemoveFromFavorites = async (song: Song): Promise<boolean> => {
     try {
       const platform = (song.platform || 'netease') as MusicPlatform
-      // Apple：取消收藏 = 从音乐库移除（amp-api）
+      // Apple：取消“喜爱”评分，不从音乐资料库删除。
       if (platform === 'apple') {
         if (!appleLoggedIn) {
           addToast('请先登录 Apple Music', 'error')
           return false
         }
         const appleSongId = song.appleId || String(song.id)
-        const ok = await removeAppleSongFromLibrary(appleSongId)
+        const ok = await setAppleSongLoved(appleSongId, false)
         if (ok) {
-          addToast('已从 Apple 音乐库移除', 'success')
+          addToast('已取消喜爱', 'success')
           applyFavoriteMutation({ platform: 'apple', type: 'unlike', songId: appleSongId })
           window.dispatchEvent(new CustomEvent('playlist-content-changed', {
             detail: { platform: 'apple', type: 'unlike', songId: appleSongId }
           }))
           return true
         }
-        addToast('移除失败，请检查登录状态', 'error')
+        const failure = getLastAppleMutationResult()
+        addToast(failure.error || '取消喜爱失败', 'error')
         return false
       }
       const userId = getPlatformUserId(platform)
@@ -5652,7 +6333,8 @@ function App() {
     const artist = song.artists?.[0]
     // 汽水无艺人 ID，约定传歌手名（伪艺人页按名字检索热门曲目，与 TV 遥控器/右键菜单一致）
     const artistId = platform === 'soda' ? (artist?.name || artist?.id)
-      : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+      : platform === 'apple' ? (artist?.appleId || artist?.id)
+        : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
     if (!artistId) {
       addToast('当前歌曲缺少歌手信息', 'error')
       return
@@ -5954,7 +6636,7 @@ function App() {
   }, [])
   const handleTraditionalLogin = useCallback((platform: MusicPlatform) => {
     if (platform === 'apple') { setShowAppleLogin(true); return }
-    setLoginPlatform(platform === 'qq' ? 'qq' : 'netease')
+    setLoginPlatform(platform)
     setShowLogin(true)
   }, [])
   const handleViewProfileClick = useCallback((platform: MusicPlatform) => {
@@ -6104,10 +6786,10 @@ function App() {
               onPlayNow={viewCallbacks.onSongSelect}
               onOpenPlaylist={(id, platform) => { void handleOpenPlaylistFromDetail(id, platform) }}
               onOpenAlbum={(id, platform) => {
-                // 从歌曲详情跳专辑前先关歌曲详情：否则专辑关闭时导航栈弹出的旧艺人弹窗
-                // (z-70) 会被残留的歌曲详情(z-85)盖住成为隐形弹窗
-                closeSongDetail()
                 handleOpenAlbum(id, platform)
+              }}
+              onOpenArtist={(id, platform) => {
+                handleOpenArtist(id, platform)
               }}
             />
           </Suspense>
@@ -6343,9 +7025,10 @@ function App() {
               restorePlaybackOrigin={restorePlaybackOrigin}
               currentSong={currentSong}
               isPlaying={isPlaying}
-              currentTime={currentTime}
+              playbackTimeStore={audioPlayer.playbackTimeStore}
               desktopFusionEnabled={desktopFusionEnabled}
               onDesktopFusionChange={handleDesktopFusionChange}
+              authRevision={authRevision}
               duration={duration}
               lyrics={lyrics}
               playbackQueue={playlist}
@@ -6433,12 +7116,15 @@ function App() {
               appleUsername={appleUsername}
               appleAvatar={appleAvatar}
               spotifyLoggedIn={spotifyLoggedIn}
+              spotifyUserId={spotifyUserId}
               spotifyUsername={spotifyUsername}
               spotifyAvatar={spotifyAvatar}
               kugouLoggedIn={kugouLoggedIn}
+              kugouUserId={kugouUserId}
               kugouUsername={kugouUsername}
               kugouAvatar={kugouAvatar}
               sodaLoggedIn={sodaLoggedIn}
+              sodaUserId={sodaUserId}
               sodaUsername={sodaUsername}
               sodaAvatar={sodaAvatar}
               onLoginClick={handleTraditionalLogin}
@@ -6507,10 +7193,20 @@ function App() {
             platform={currentSong.platform}
             songId={currentSong.id || currentSong.mid}
             isPlaying={isPlaying}
-            getAudioElement={() => audioPlayerRef.current.getAudioElement()}
+            getAudioElement={() => {
+              const el = audioPlayerRef.current.getAudioElement()
+              // WebView2 播放面：MV 背景同步时间源走 bridge（代理视图）
+              if (audioPlayerRef.current.isExternalPlaybackActive?.()) {
+                externalAudioViewRef.current = el
+                return externalAudioProxyRef.current
+              }
+              return el
+            }}
+            getPlaybackTimeSeconds={getMvPlaybackTimeSeconds}
+            getTransitionTargetTimeSeconds={getMvTransitionTargetTimeSeconds}
             playerTheme={playerTheme}
             upcomingSongs={watchUpcomingSongs}
-            enabled={mvBackgroundEnabled && !mvBackgroundFallback}
+            enabled={mvBackgroundEnabled}
             // 看歌模式：常驻挂载但隐藏（display:none + 暂停），保留已缓冲的视频——
             // 切回歌词模式直接续播同一视频，不再重新搜索/拉流（与看歌复用同一数据源）
             hidden={lyricDisplayMode === 'video'}
@@ -6522,15 +7218,15 @@ function App() {
             transitionProgress={overlayProgress}
             songTrackKey={currentSong ? getSongKey(currentSong) : ''}
             onFallbackChange={setMvBackgroundFallback}
-            onPlayStateChange={(s: { bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number } | null) => {
+            onPlayStateChange={(s: { songKey: string; bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number } | null) => {
               // null = MV 背景已卸载/切歌/失败：清空复用缓存，避免切看歌时用上过期视频
-              mvBackgroundStateRef.current = s ? { bvid: s.bvid, cid: s.cid, videoUrl: s.videoUrl, cacheKey: s.cacheKey, type: s.type } : null
+              mvBackgroundStateRef.current = s ? { songKey: s.songKey, bvid: s.bvid, cid: s.cid, videoUrl: s.videoUrl, cacheKey: s.cacheKey, type: s.type } : null
             }}
           />
         )}
             {/* 渐变遮罩层 */}
             <div 
-              className="absolute inset-0 bg-gradient-to-b transition-all duration-500"
+              className="absolute inset-0 bg-gradient-to-b transition-all duration-500 pointer-events-none"
               style={{
                 backgroundImage: playerTheme === 'dark'
                   ? backgroundEffect === 'transparent'
@@ -6634,7 +7330,20 @@ function App() {
         <div className="relative flex-1 flex items-center justify-center overflow-hidden">
           {/* 看歌模式：视频播放器常驻挂载（回主页/探索也继续播，迷你播放器/桌面小窗按视频进度控制它；
               无重跳——视频从未卸载，进度不丢失） */}
-          {currentSong && lyricDisplayMode === 'video' && (
+          {currentSong && lyricDisplayMode === 'video' && (() => {
+            const currentWatchSongKey = bilibiliSongKeyOf({
+              songTitle: currentSong.name,
+              artists: currentSong.artists.map((artist: any) => artist.name),
+              songDuration: (currentSong.duration || 0) / 1000,
+              platform: currentSong.platform,
+              id: currentSong.id || currentSong.mid,
+            })
+            const currentWatchSeek = readSongOwnedHandoff(watchSyncSeek, currentWatchSongKey, 0)
+            const currentInitialVideo = readSongOwnedHandoff(watchInitialVideo, currentWatchSongKey, null)
+            // 当前歌是否有模式切换交接：有 → 引擎淡出期间可跟随实时位置；
+            // 无（冷启动看歌开播/看歌内切歌）→ 播放器必须从歌曲起点 0 开始。
+            const engineHandoffActive = Number.isFinite(readSongOwnedHandoff(watchSyncSeek, currentWatchSongKey, Number.NaN))
+            return (
             <div className={`absolute inset-0 ${showHome ? 'z-0' : 'z-10'}`} data-watch-surface>
               <LazyBilibiliMvPlayer
                 ref={watchPlayerRef}
@@ -6671,18 +7380,20 @@ function App() {
                 onToggleFavorite={() => { void handlePlaybackToggleFavorite(currentSong, currentSongLiked) }}
                 liked={currentSongLiked}
                 upcomingSongs={watchUpcomingSongs}
-                initialSeekSeconds={watchSyncSeek}
+                initialSeekSeconds={currentWatchSeek}
                 songUrl={audioPlayerRef.current?.getAudioElement?.()?.src || ''}
-                initialVideoUrl={watchInitialVideo?.videoUrl}
-                initialCid={watchInitialVideo?.cid}
-                initialBvid={watchInitialVideo?.bvid}
-                initialCacheKey={watchInitialVideo?.cacheKey}
-                initialType={watchInitialVideo?.type}
-                getEnginePosition={() => audioPlayerRef.current?.getAudioElement?.()?.currentTime ?? 0}
+                initialVideoUrl={currentInitialVideo?.videoUrl}
+                initialCid={currentInitialVideo?.cid}
+                initialBvid={currentInitialVideo?.bvid}
+                initialCacheKey={currentInitialVideo?.cacheKey}
+                initialType={currentInitialVideo?.type}
+                getEnginePosition={() => Number(audioPlayerRef.current?.getAudioElement?.()?.currentTime) || 0}
+                engineHandoffActive={engineHandoffActive}
                 surfaceVisible={!showHome}
               />
             </div>
-          )}
+            )
+          })()}
           {/* 首页包含整屏壁纸、多个 backdrop-filter 与独立合成层。这里不能使用
               AnimatePresence 保留退出节点：冷启动首次播放时 Chromium 偶发把首页
               合成快照永久留在播放页上。直接替换节点可以确保首页当帧卸载；新页面
@@ -6790,10 +7501,10 @@ function App() {
                 onCopyInfo={handleCopyInfo}
                 onContextMenuOpen={handlePlaybackContextMenuOpen}
               />
-              {/* 沉浸模式控制按钮 - 右上角（看歌模式隐藏；看歌搜索失败时显示，隐藏翻译/罗马音）。
-                  看歌兜底时经 MaybePortal 挂到 body，逃出被看歌 surface 盖住的层叠上下文 */}
+              {/* 沉浸模式控制按钮 - 右上角（看歌正常播放时由播放器内部控件接管；
+                  真正无视频/失败时经 MaybePortal 恢复全局入口）。 */}
               {(lyricDisplayMode !== 'video' || watchSearchFailed) && (
-                <MaybePortal active={lyricDisplayMode === 'video'}>
+              <MaybePortal active={lyricDisplayMode === 'video'}>
                 <LazyImmersiveControls
                   onHomeClick={handlePlayerHome}
                 onOpenMixingStudio={(anchorRect) => {
@@ -6812,6 +7523,7 @@ function App() {
                 mvBackgroundEnabled={mvBackgroundEnabled}
                 playerTheme={playerTheme}
                 isPureMusic={isPureMusic}
+                stemControl={currentSong?.platform !== 'apple' ? playerStemControl : undefined}
               />
               </MaybePortal>
               )}
@@ -7202,11 +7914,11 @@ function App() {
                       lyrics={lyrics}
                       isPlaying={isPlaying}
                       accentColor={dominantColor || '#fff'}
-                      translationEnabled={false}
-                      translationPosition="bottom-right"
+                      translationEnabled={translationEnabled}
+                      translationPosition="traditional"
                       onCurrentTranslationChange={setCurrentTranslation}
                       onSeek={audioPlayer.seek}
-                      romanEnabled={false}
+                      romanEnabled={romanEnabled}
                       displayMode="single"
                       isTransitioning={isVisualTransitioning}
                       trackId={currentSong?.id || currentSong?.mid}
@@ -7291,7 +8003,7 @@ function App() {
                     songArtist={currentSongArtistLabel}
                     songAlbum={currentSong.album?.name}
                     coverUrl={displayCoverUrl}
-                    trackId={currentSong.id || currentSong.mid}
+                    trackId={currentSong.id ?? currentSong.mid ?? getSongKey(currentSong) ?? ''}
                     translationEnabled={translationEnabled}
                     romanEnabled={romanEnabled}
                     onSeek={audioPlayer.seek}
@@ -7355,6 +8067,8 @@ function App() {
                     trackId={currentSong.id || currentSong.mid}
                     translationEnabled={translationEnabled}
                     romanEnabled={romanEnabled}
+                    onTranslationToggle={handleTranslationToggle}
+                    onRomanToggle={handleRomanToggle}
                     isTransitioning={isVisualTransitioning}
                     onSeek={audioPlayer.seek}
                     onPlayPause={handlePlayPause}
@@ -7514,7 +8228,40 @@ function App() {
             )}
           </AnimatePresence>
 
-          {/* 全局播放器 - 固定在底部（摩登模式自带控制条；看歌正常播放时隐藏，搜索失败时显示兼容音频控件） */}
+          {/* Folia 专属过渡展示层：独立于 FoliaLyricsPage，30fps progress 不触发歌词树重渲染。 */}
+          {foliaPresentation.active && currentSong && (
+            <>
+              <FoliaUpNextCard
+                visible={foliaPresentation.cardVisible}
+                isTransitioning={foliaPresentation.transitionBorderVisible}
+                progress={transitionProgress}
+                current={{ title: currentSong.name, artist: currentSongArtistLabel, coverUrl: displayCoverUrl }}
+                next={nextSongToShow ? {
+                  title: nextSongToShow.name,
+                  artist: nextSongToShow.artists.map(artist => artist.name).join(', '),
+                  coverUrl: nextSongToShow.album?.picUrl,
+                } : undefined}
+                onActivate={() => {
+                  suppressUpNextUntilRef.current = Date.now() + 3000
+                  setShowUpNext(false)
+                  handleNext()
+                }}
+                theme={playerTheme}
+                accentColor={dominantColor || '#fff'}
+              />
+              <FoliaTransitionOverlay
+                visible={foliaPresentation.overlayVisible}
+                suppressed={foliaPresentation.transitionBorderVisible}
+                progress={transitionProgress}
+                duration={transitionDuration}
+                bpm={transitionDebug?.sourceBpm}
+                accentColor={dominantColor || '#fff'}
+                theme={playerTheme}
+              />
+            </>
+          )}
+
+          {/* 全局播放器固定在底部；真正无视频/失败时通过 portal 恢复音频控制。 */}
           {currentSong && !showHome && lyricDisplayMode !== 'modeng' && (lyricDisplayMode !== 'video' || watchSearchFailed) && (
             <MaybePortal active={lyricDisplayMode === 'video'}>
             <LivePlayerControls
@@ -7599,7 +8346,7 @@ function App() {
             onSongSelect={stableDialogCallbacks.playlistSongSelect}
             neteaseVip={neteaseVip}
             qqVip={qqVip}
-            currentPlatform={currentSong?.platform === 'qq' ? 'qq' : 'netease'}
+            currentPlatform={currentSong?.platform || 'netease'}
           />
         </Suspense>
       )}
@@ -7611,15 +8358,16 @@ function App() {
 
       {/* 播放提示是全局覆盖层：播放页始终允许显示；探索、简约首页和桌面模式
           只有在“在播放页外显示播放提示”开启时才显示，且三个模式位置一致。 */}
-      {playlist.length > 0 && playMode !== 'repeat' && showUpNext && canShowUpNextOnCurrentSurface && (
+      {playlist.length > 0 && playMode !== 'repeat' && showUpNext && canShowUpNextOnCurrentSurface && foliaPresentation.useLegacyUpNext && (
         <Suspense fallback={null}>
-          <LazyUpNextNotification
+          <LiveUpNextNotification
+            playbackTimeStore={audioPlayer.playbackTimeStore}
+            eventTime={(effectiveAutoMixEnabled || effectiveGaplessEnabled)
+              ? (transitionStartTime ?? duration)
+              : duration}
             show={true}
             playerTheme={playerTheme}
             nextSong={nextSongToShow}
-            secondsRemaining={(effectiveAutoMixEnabled || effectiveGaplessEnabled)
-              ? (transitionStartTime ?? duration) - currentTime
-              : duration - currentTime}
             mode={effectiveAutoMixEnabled || effectiveGaplessEnabled ? 'transition' : 'play'}
             enhanced={effectiveAutoMixEnabled && autoMixEnhanced}
             transitionStyle={transitionStyle}
@@ -7651,6 +8399,9 @@ function App() {
             qqVip={qqVip}
             neteaseLoggedIn={neteaseLoggedIn}
             qqLoggedIn={qqLoggedIn}
+            appleLoggedIn={appleLoggedIn}
+            spotifyLoggedIn={spotifyLoggedIn}
+            kugouLoggedIn={kugouLoggedIn}
             currentSong={currentSong}
             onPlayNext={viewCallbacks.onPlayNext}
             onAddToFavorites={viewCallbacks.onAddToFavorites}

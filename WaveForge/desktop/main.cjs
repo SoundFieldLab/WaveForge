@@ -26,6 +26,32 @@ const { app, BrowserWindow, ipcMain, protocol, shell, session, safeStorage, dial
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
+const { selectWaveForgeUserData } = require('./user-data-profile.cjs')
+
+// 开发版历史上因首次 getPath(userData) 过早而长期使用 %APPDATA%/Electron。
+// 只在该目录有明确 WaveForge 标记时继续沿用，避免设置、登录和 Chromium profile 丢失；
+// 打包版始终使用正式目录。仅切换路径，不复制或覆盖任何凭据/数据库。
+const appDataRoot = process.platform === 'win32'
+  ? (process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'))
+  : (process.env.XDG_CONFIG_HOME || path.join(require('os').homedir(), '.config'))
+const selectedUserDataPath = selectWaveForgeUserData({
+  appDataRoot,
+  isPackaged: app.isPackaged,
+  overridePath: process.env.WAVEFORGE_USER_DATA,
+  platform: process.platform,
+})
+app.setName('WaveForge 澜音工坊')
+fs.mkdirSync(selectedUserDataPath, { recursive: true })
+app.setPath('userData', selectedUserDataPath)
+
+const windowIconPath = path.join(__dirname, '..', 'logo.png')
+const windowIcon = nativeImage.createFromPath(windowIconPath)
+if (windowIcon.isEmpty()) {
+  console.warn('[Startup] Failed to decode window icon:', windowIconPath)
+}
+const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
+const { createDocumentUrlMatcher, createTrustedIpcGuard } = require('./trusted-ipc.cjs')
+const LOCAL_SERVICE_TOKEN = process.env.WAVEFORGE_LOCAL_TOKEN || crypto.randomBytes(32).toString('base64url')
 const {
   loadWindowState,
   saveWindowState,
@@ -79,6 +105,9 @@ function writePerformanceSettings(settings) {
 }
 
 const performanceSettings = readPerformanceSettings()
+// Media Foundation Widevine CDM 实验已移除：castLabs 官方确认该 Windows L1 路径仅为历史实验，
+// 已在近期 Chromium/ECS 中废弃且不支持 VMP。Apple 原生 CENC 应使用 ECS 默认 Browser CDM (L3)，
+// 并单独验证生产 EVS/VMP 签名；不要再注入 ExternalClearKeyForTesting/media_foundation_cdm_path。
 // 全局高刷：用户手动选了具体档位时，启动即用 --force-frame-rate 强制 Chromium 帧率
 // （比运行时 setFrameRate 更可靠；「跟随显示器最高」档在 app ready 后按显示器实时应用）
 if (performanceSettings.highRefreshRate === true && performanceSettings.highRefreshHz) {
@@ -181,15 +210,39 @@ function findExistingEcsCdmVersion(userDataDir) {
     return ''
   }
 }
+
+/** 点分版本号比较：a > b 返回 true */
+function versionNewerEcs(a, b) {
+  const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0)
+  const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0)
+    if (d) return d > 0
+  }
+  return false
+}
 function seedEcsOfflineCdm() {
   try {
     const userDataDir = app.getPath('userData')
-    if (findExistingEcsCdmVersion(userDataDir)) return // 已注册且文件在 → 无需播种
+    const existing = findExistingEcsCdmVersion(userDataDir)
     const source = findWidevineCdm() // 系统 Chrome/Edge 的 CDM（含 manifest 版本）
     if (!source) {
-      console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
+      if (!existing) console.log('[Widevine] 离线播种：未找到系统 Chrome/Edge CDM（CUS 将尝试联网安装）')
       return
     }
+    // CDM 补丁级过期会被 Apple license 服务器拒绝（-1021/42605 WIDEVINE_CDM_EXPIRED）。
+    // 系统 Chrome/Edge 出了更新 CDM 时要升级播种目录并刷新 Local State 注册，
+    // 不能因「已注册」就永远停在旧版本上。
+    const versionNewer = (a, b) => {
+      const pa = String(a || '').split('.').map(n => parseInt(n, 10) || 0)
+      const pb = String(b || '').split('.').map(n => parseInt(n, 10) || 0)
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const d = (pa[i] || 0) - (pb[i] || 0)
+        if (d) return d > 0
+      }
+      return false
+    }
+    if (existing && !versionNewer(source.version, existing)) return // 已是最新 → 无需播种
     const version = source.version
     const vdir = path.join(userDataDir, 'WidevineCdm', version)
     fs.mkdirSync(path.join(vdir, '_platform_specific', 'win_x64'), { recursive: true })
@@ -222,14 +275,37 @@ function seedEcsOfflineCdm() {
       pv: version,
     }
     fs.writeFileSync(localStatePath, JSON.stringify(localState), 'utf8')
-    logStartupTiming(`[Widevine] 完全离线播种完成：CDM ${version} -> ${vdir}`)
+    logStartupTiming(`[Widevine] 离线播种${existing ? `升级（${existing} → ${version}）` : '完成'}：CDM ${version} -> ${vdir}`)
   } catch (error) {
     console.warn('[Widevine] 离线播种失败（不影响启动，CUS 将尝试联网安装）:', error?.message || error)
   }
 }
 if (isEcsBuild()) {
   console.log('[Widevine] 检测到 castlabs ECS 运行时：CDM 由组件服务管理，跳过自定义注入')
-  seedEcsOfflineCdm()
+  // 优先让 castlabs CUS 联网下载**官方预配置 CDM**（其设备证书被 Apple license 服务接受；
+  // 我们播种的 Chrome/Edge 经典 L3 CDM 会被 Apple 以 -1021 拒绝）。仅当网络不可达、
+  // CUS 拿不到组件时，才落盘播种系统 Chrome/Edge 的 CDM 兜底（保证 EME 可用、
+  // Apple 原生音源虽不可用但结构完整，其余 DRM 场景不受影响）。
+  app.whenReady().then(async () => {
+    try {
+      const { components } = require('electron')
+      await components.whenReady()
+      // CUS 下载窗口：castlabs 组件包约 20MB+，慢网络需要时间
+      await new Promise(resolve => setTimeout(resolve, 15000))
+      const list = (typeof components.getComponents === 'function' ? components.getComponents() : {}) || {}
+      const cdm = list[ECS_WIDEVINE_APP_ID]
+      const cusVersion = cdm && typeof cdm.version === 'string' ? cdm.version : ''
+      const seeded = findExistingEcsCdmVersion(app.getPath('userData'))
+      if (cusVersion && (!seeded || versionNewerEcs(cusVersion, seeded))) {
+        console.log(`[Widevine] CUS 已提供 castlabs 官方 CDM ${cusVersion}，使用正版组件（不播种）`)
+        return
+      }
+      if (seeded) return // 播种版仍是在用的最新可用版本
+    } catch (error) {
+      console.warn('[Widevine] CUS 状态检查失败:', error?.message || error)
+    }
+    seedEcsOfflineCdm()
+  }).catch(() => seedEcsOfflineCdm())
 } else {
   try {
     const widevine = findWidevineCdm()
@@ -258,9 +334,10 @@ app.on('child-process-gone', (_event, details) => {
   }
 })
 
-// 立即设置应用名称（必须在app.ready之前）
-app.setName('WaveForge 澜音工坊')
-app.setAppUserModelId('com.waveforge.desktop')
+// 立即设置应用名称（必须在 app.ready 之前）。打包版使用与安装器一致的
+// AppUserModelID；开发版没有该 ID 对应的开始菜单快捷方式，强行设置会让
+// Windows Shell 回退到空白文件图标，而不是 BrowserWindow 的自定义图标。
+if (app.isPackaged) app.setAppUserModelId('com.waveforge.desktop')
 
 const { execFile, execFileSync, spawn } = require('child_process')
 const os = require('os')
@@ -272,6 +349,14 @@ const { ConfigManager } = require('./config-manager.cjs')
 const deviceLicense = require('./device-license.cjs')
 const { createRemoteServer, getLanIPv4Addresses } = require('./remote-server.cjs')
 const { setupAirplayIpc } = require('./airplay/airplay-ipc.cjs')
+const { setupChromaIpc } = require('./chroma-ipc.cjs')
+const { setupSignalRgbIpc } = require('./signalrgb-ipc.cjs')
+const { createVmpStatusProvider } = require('./vmp-status.cjs')
+const getVmpStatus = createVmpStatusProvider({
+  isPackaged: app.isPackaged,
+  developmentPackageDir: path.join(__dirname, '..', 'node_modules', 'electron', 'dist'),
+  resourcesPath: process.resourcesPath,
+})
 logStartupTiming('Main-process modules loaded')
 
 let desktopWidgetCpuSample = null
@@ -345,6 +430,10 @@ function readDesktopWidgetDisks() {
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged
 const devServerUrl = process.env.WAVEFORGE_DEV_SERVER_URL || 'http://127.0.0.1:3000'
+const appleAcceptanceMode = ['crossfade', 'gapless', 'automix'].includes(process.env.WAVEFORGE_APPLE_ACCEPTANCE)
+  ? process.env.WAVEFORGE_APPLE_ACCEPTANCE
+  : ''
+const appleAcceptanceOutput = process.env.WAVEFORGE_APPLE_ACCEPTANCE_OUTPUT || ''
 
 // 导航白名单：只允许应用自身的地址（开发模式 Vite 服务器 / 生产模式打包产物），
 // 阻止同窗口被任意外部页面导航——特权 preload 桥一旦跟到外部站点就会被滥用。
@@ -382,13 +471,213 @@ function guardAgainstExternalNavigation(webContents) {
 }
 
 let mainWindow = null
+let appleAcceptanceRunning = false
+
+function getAppleAcceptanceMemory(win) {
+  const rendererPid = win && !win.isDestroyed() ? win.webContents.getOSProcessId() : 0
+  const metric = app.getAppMetrics().find(item => item.pid === rendererPid)
+  return metric ? {
+    workingSetSize: Number(metric.memory?.workingSetSize || 0),
+    privateBytes: Number(metric.memory?.privateBytes || 0),
+  } : null
+}
+
+async function collectAppleAcceptanceGarbage(win) {
+  try {
+    if (!win.webContents.debugger.isAttached()) win.webContents.debugger.attach('1.3')
+    await win.webContents.debugger.sendCommand('HeapProfiler.collectGarbage')
+  } catch (error) {
+    console.warn('[AppleAcceptance] renderer GC unavailable:', error?.message || error)
+  }
+  await new Promise(resolve => setTimeout(resolve, 2_000))
+}
+
+async function runAppleAcceptance(win, mode, outputPath) {
+  if (appleAcceptanceRunning) return
+  appleAcceptanceRunning = true
+  const result = {
+    mode,
+    phase: 'started',
+    startedAt: new Date().toISOString(),
+    vmp: { verifiedByLauncher: true, streaming: true },
+    stages: {},
+    ok: false,
+  }
+  const writeResult = () => {
+    if (!outputPath) return
+    try {
+      fs.mkdirSync(path.dirname(outputPath), { recursive: true })
+      fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8')
+    } catch (error) {
+      console.error('[AppleAcceptance] result write failed:', error?.message || error)
+    }
+  }
+  const evaluate = script => win.webContents.executeJavaScript(script, true)
+  writeResult()
+  console.log(`[AppleAcceptance] ${mode}: started`)
+  const watchdog = setTimeout(() => {
+    result.phase = 'timeout'
+    result.error = 'Apple acceptance exceeded 100 seconds'
+    result.finishedAt = new Date().toISOString()
+    writeResult()
+    console.error(`[AppleAcceptance] ${mode}: timeout`)
+    app.exit(1)
+  }, 100_000)
+  const deadline = Date.now() + 20_000
+  try {
+    while (Date.now() < deadline) {
+      if (await evaluate('Boolean(window.__waveforgeAppleAcceptance)')) break
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    if (!(await evaluate('Boolean(window.__waveforgeAppleAcceptance)'))) {
+      throw new Error('Renderer acceptance hook did not become ready')
+    }
+
+    result.phase = 'hook-ready'
+    result.stages.before = {
+      renderer: await evaluate('window.__waveforgeAppleAcceptance.snapshot()'),
+      memory: getAppleAcceptanceMemory(win),
+    }
+    await evaluate(`window.__waveforgeAppleAcceptance.configure(${JSON.stringify(mode)})`)
+    result.stages.configured = {
+      renderer: await evaluate('window.__waveforgeAppleAcceptance.snapshot()'),
+      memory: getAppleAcceptanceMemory(win),
+    }
+    const selection = await evaluate('window.__waveforgeAppleAcceptance.loadPair()')
+    result.phase = 'pair-ready'
+    result.stages.ready = {
+      selection,
+      renderer: await evaluate('window.__waveforgeAppleAcceptance.snapshot()'),
+      memory: getAppleAcceptanceMemory(win),
+    }
+    writeResult()
+
+    const transition = await evaluate('window.__waveforgeAppleAcceptance.transition()')
+    result.phase = 'transitioned'
+    result.stages.transitioned = {
+      transition,
+      renderer: await evaluate('window.__waveforgeAppleAcceptance.snapshot()'),
+      memory: getAppleAcceptanceMemory(win),
+    }
+    const requestedRounds = Number.parseInt(process.env.WAVEFORGE_APPLE_ACCEPTANCE_ROUNDS || '1', 10)
+    const roundCount = Number.isInteger(requestedRounds) ? Math.max(1, Math.min(5, requestedRounds)) : 1
+    const cleanup = await evaluate(`window.__waveforgeAppleAcceptance.cleanup(${roundCount === 1})`)
+    await collectAppleAcceptanceGarbage(win)
+    result.phase = 'cleaned'
+    result.stages.cleaned = {
+      renderer: cleanup,
+      memory: getAppleAcceptanceMemory(win),
+    }
+
+    result.stressRounds = []
+    for (let round = 2; round <= roundCount; round += 1) {
+      result.phase = `stress-round-${round}`
+      await evaluate(`window.__waveforgeAppleAcceptance.configure(${JSON.stringify(mode)})`)
+      await evaluate('window.__waveforgeAppleAcceptance.loadPair()')
+      const stressReady = await evaluate('window.__waveforgeAppleAcceptance.snapshot()')
+      const stressTransition = await evaluate('window.__waveforgeAppleAcceptance.transition()')
+      const stressCleaned = await evaluate(`window.__waveforgeAppleAcceptance.cleanup(${round === roundCount})`)
+      await collectAppleAcceptanceGarbage(win)
+      result.stressRounds.push({
+        round,
+        strategy: stressTransition.strategy,
+        ready: {
+          peakActiveHls: stressReady.diagnostics.peakActiveHls,
+          peakActiveEmeSessions: stressReady.diagnostics.peakActiveEmeSessions,
+          emeSessionsCreated: stressReady.diagnostics.emeSessionsCreated,
+          emeSessionUpdates: stressReady.diagnostics.emeSessionUpdates,
+          licenseSuccesses: stressReady.diagnostics.licenseSuccesses,
+          licenseFailures: stressReady.diagnostics.licenseFailures,
+        },
+        cleaned: {
+          activeHls: stressCleaned.diagnostics.activeHls,
+          activeEmeSessions: stressCleaned.diagnostics.activeEmeSessions,
+          emeSessionsClosed: stressCleaned.diagnostics.emeSessionsClosed,
+          hlsAttached: stressCleaned.diagnostics.hlsAttached,
+          hlsDestroyed: stressCleaned.diagnostics.hlsDestroyed,
+          manifestsCreated: stressCleaned.diagnostics.manifestsCreated,
+          manifestsRevoked: stressCleaned.diagnostics.manifestsRevoked,
+        },
+        memory: getAppleAcceptanceMemory(win),
+      })
+      writeResult()
+    }
+
+    const ready = result.stages.ready.renderer
+    const transitioned = result.stages.transitioned.renderer
+    const cleaned = result.stages.cleaned.renderer
+    const expectedStrategy = mode === 'crossfade' ? 'fixed-crossfade' : 'gapless'
+    const checks = {
+      realAccountLoggedIn: ready.auth.loggedIn === true,
+      twoHlsDecksReady: ready.player.activeAppleHls === true
+        && ready.player.standbyAppleHls === true
+        && ready.diagnostics.peakActiveHls >= 2
+        && ready.diagnostics.hlsReady >= 2,
+      twoLicensesSucceeded: ready.diagnostics.licenseSuccesses >= 2
+        && ready.diagnostics.licenseFailures === 0,
+      twoEmeSessionsObserved: ready.diagnostics.peakActiveEmeSessions >= 2
+        && ready.diagnostics.emeSessionUpdates >= 2,
+      expectedTransitionStrategy: transition.strategy === expectedStrategy,
+      autoMixDowngraded: mode !== 'automix'
+        || (ready.player.autoMixEnabled === true
+          && ready.player.resolvedPairStrategy === 'gapless'
+          && ready.player.autoMixAnalysisStarts === 0
+          && transitioned.player.autoMixAnalysisStarts === 0),
+      retiredDeckDestroyed: transitioned.diagnostics.hlsDestroyed >= 1
+        && transitioned.diagnostics.activeHls === 1,
+      allHlsReleased: cleaned.diagnostics.activeHls === 0
+        && cleaned.diagnostics.hlsDestroyed === cleaned.diagnostics.hlsAttached,
+      allManifestsRevoked: cleaned.diagnostics.manifestsRevoked === cleaned.diagnostics.manifestsCreated,
+      allEmeSessionsClosed: cleaned.diagnostics.activeEmeSessions === 0
+        && cleaned.diagnostics.emeSessionsClosed >= cleaned.diagnostics.emeSessionsCreated,
+      stressResourcesReleased: result.stressRounds.every(round =>
+        round.ready.peakActiveHls === 2
+        && round.ready.emeSessionsCreated >= 2
+        && round.ready.emeSessionUpdates >= 2
+        && round.ready.licenseSuccesses >= 2
+        && round.ready.licenseFailures === 0
+        && round.cleaned.activeHls === 0
+        && round.cleaned.activeEmeSessions === 0
+        && round.cleaned.emeSessionsClosed >= round.ready.emeSessionsCreated),
+      memoryStable: result.stressRounds.length < 2
+        || result.stressRounds.at(-1).memory.privateBytes <= result.stressRounds.at(-2).memory.privateBytes + 32 * 1024,
+    }
+    result.checks = checks
+    result.ok = Object.values(checks).every(Boolean)
+    result.phase = result.ok ? 'passed' : 'failed-checks'
+    if (!result.ok) throw new Error('One or more Apple acceptance checks failed')
+  } catch (error) {
+    if (result.phase !== 'failed-checks') result.phase = 'failed'
+    result.error = error instanceof Error ? error.message : String(error)
+    try {
+      await evaluate('window.__waveforgeAppleAcceptance?.cleanup?.(true)')
+    } catch {}
+    try {
+      result.stages.failure = {
+        renderer: await evaluate('window.__waveforgeAppleAcceptance?.snapshot?.() || null'),
+        memory: getAppleAcceptanceMemory(win),
+      }
+    } catch {}
+  } finally {
+    clearTimeout(watchdog)
+    result.finishedAt = new Date().toISOString()
+    writeResult()
+    console.log(`[AppleAcceptance] ${mode}: ${result.ok ? 'PASS' : 'FAIL'}`)
+    app.exit(result.ok ? 0 : 1)
+  }
+}
+
 let wallpaperWatcher = null
 /** AirPlay 投送端控制器句柄（whenReady 内初始化，模块作用域供冒烟自检引用） */
 let airplayControllerHandle = null
+let chromaControllerHandle = null
+let signalRgbControllerHandle = null
 let qqLoginWindow = null
 let qqLoginWindowOpening = false
 let qqSkillKeyWindow = null
 let analysisRuntime = null
+let stemRuntime = null
+let trackStemRuntime = null
 let mediaKeysEnabled = readMediaKeysEnabled()
 
 const mediaKeyAccelerators = {
@@ -459,6 +748,8 @@ let desktopLyricsMousePassthrough = false
 const DESKTOP_LYRICS_DEFAULTS = Object.freeze({
   enabled: false,
   fontSize: 58,
+  // 歌词字体族名；空字符串 = 默认字体栈。可选本机字体，因此只做字符串校验不做白名单
+  fontFamily: '',
   colorMode: 'auto',
   orientation: 'horizontal',
   doubleLine: false,
@@ -693,6 +984,10 @@ function sanitizeDesktopLyricsSettings(input = {}, base = DESKTOP_LYRICS_DEFAULT
     fontSize: input.fontSize === undefined
       ? base.fontSize
       : Math.round(Math.min(120, Math.max(26, Number(input.fontSize) || DESKTOP_LYRICS_DEFAULTS.fontSize))),
+    // 字体族名：允许任意本机字体名，仅截断长度防止异常数据；空串 = 默认字体栈
+    fontFamily: input.fontFamily === undefined
+      ? (base.fontFamily || '')
+      : String(input.fontFamily).trim().slice(0, 128),
     colorMode: input.colorMode === undefined
       ? base.colorMode
       : (DESKTOP_LYRICS_COLORS.has(input.colorMode) ? input.colorMode : 'auto'),
@@ -1466,6 +1761,52 @@ function updateTaskbar() {
 const TASKBAR_WIDGET_DEFAULTS = { enabled: false, position: 'right', width: 340, mode: 'normal', darken: false, darkenLevel: 0.5, hideControls: false }
 let taskbarWidgetSettings = { ...TASKBAR_WIDGET_DEFAULTS }
 let taskbarWidgetWindow = null
+
+// IPC 权限同时绑定窗口身份、顶层 frame 和当前文档 URL。辅助窗口只保留各自
+// 播控能力；凭据、路径、启动器、模型、下载与更新操作仅主应用文档可调用。
+const trustedIpc = createTrustedIpcGuard({
+  roles: {
+    main: {
+      getWindow: () => mainWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        devServerUrl,
+        pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+      ]),
+    },
+    desktopPlayer: {
+      getWindow: () => desktopPlayerWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        `${devServerUrl}/desktop-player.html`,
+        pathToFileURL(path.join(__dirname, '../dist/desktop-player.html')).href,
+      ]),
+    },
+    desktopLyrics: {
+      getWindow: () => desktopLyricsWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        `${devServerUrl}/desktop-lyrics.html`,
+        pathToFileURL(path.join(__dirname, '../dist/desktop-lyrics.html')).href,
+      ]),
+    },
+    taskbarWidget: {
+      getWindow: () => taskbarWidgetWindow,
+      isAllowedUrl: createDocumentUrlMatcher([
+        pathToFileURL(path.join(__dirname, 'taskbar-widget.html')).href,
+      ]),
+    },
+  },
+  capabilities: {
+    privileged: ['main'],
+    models: ['main'],
+    update: ['main'],
+    desktopPlayer: ['main', 'desktopPlayer', 'desktopLyrics'],
+    desktopLyrics: ['main', 'desktopLyrics'],
+    taskbarWidget: ['main', 'taskbarWidget'],
+  },
+})
+const guardTrustedIpc = trustedIpc.handle
+
+ipcMain.handle('diagnostics:get-vmp-status', guardTrustedIpc('privileged', () => getVmpStatus()))
+
 let taskbarWidgetClosedByUser = false
 let taskbarWidgetInteractive = false
 let taskbarWidgetExpanded = false
@@ -1659,18 +2000,17 @@ function createTaskbarWidgetWindow() {
   // 默认鼠标穿透。注意：不能靠 forward:true 转发 mouseenter 来切换交互态——
   // 在 Win11 + 透明置顶组合下，setIgnoreMouseEvents 每次切换都会让系统重新命中
   // 测试并触发 mouseenter/mouseleave 振荡，交互态永远不稳定，点击无法落窗。
-  // 改为主进程光标轮询（startTaskbarWidgetPolling）检测悬停。
+  // 改为主进程光标轮询检测悬停；轮询由窗口 show/hide/closed 生命周期控制。
   try {
     taskbarWidgetWindow.setIgnoreMouseEvents(true, { forward: true })
   } catch { /* 忽略 */ }
   taskbarWidgetWindow.loadFile(path.join(__dirname, 'taskbar-widget.html'))
+  taskbarWidgetPolling.bindWindow(taskbarWidgetWindow)
   taskbarWidgetWindow.on('closed', () => {
     taskbarWidgetWindow = null
     taskbarWidgetInteractive = false
     taskbarWidgetExpanded = false
-    stopTaskbarWidgetPolling()
   })
-  startTaskbarWidgetPolling()
   // 托盘位置后台测量：首次显示用保守预留，测出真实托盘后立即贴齐
   refreshTaskbarTray()
   return taskbarWidgetWindow
@@ -1791,7 +2131,7 @@ function setTaskbarWidgetVisible(visible) {
 // 光标轮询：任务栏 widget 悬停检测。页面 mouseenter/mouseleave 转发在
 // 透明置顶窗口上会因 setIgnoreMouseEvents 切换而振荡，改由主进程每 120ms
 // 判断光标是否落在窗口内，据此稳定切换交互态（见 createTaskbarWidgetWindow 注释）。
-let taskbarWidgetPollTimer = null
+const { createTaskbarWidgetPolling } = require('./taskbar-widget-polling.cjs')
 
 function taskbarWidgetCursorInside() {
   if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed() || !taskbarWidgetWindow.isVisible()) return false
@@ -1832,17 +2172,7 @@ function updateTaskbarWidgetInteractive() {
   }
 }
 
-function startTaskbarWidgetPolling() {
-  if (taskbarWidgetPollTimer) return
-  taskbarWidgetPollTimer = setInterval(updateTaskbarWidgetInteractive, 120)
-}
-
-function stopTaskbarWidgetPolling() {
-  if (taskbarWidgetPollTimer) {
-    clearInterval(taskbarWidgetPollTimer)
-    taskbarWidgetPollTimer = null
-  }
-}
+const taskbarWidgetPolling = createTaskbarWidgetPolling({ poll: updateTaskbarWidgetInteractive })
 
 ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
   if (action === 'close') {
@@ -2113,6 +2443,7 @@ function createWindow() {
     resizable: false,
     maximizable: false,
     fullscreenable: false,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     // 显示时机：等渲染器完成首帧绘制（ready-to-show）再 show。
     // 本机 GPU 合成器为 disabled_software（软件合成，GPU 加速禁用）：
     // 窗口隐藏时渲染器默认暂停绘制（paintWhenInitiallyHidden=false），首帧可能
@@ -2166,7 +2497,6 @@ function createWindow() {
   // 创建主窗口：默认原生不透明窗口（Windows 11 系统圆角/阴影/对齐吸附）。
   // 桌面融合穿透需要透明窗口，而 transparent 仅创建时生效——开启/关闭融合时
   // 由 recreateMainWindow 销毁重建切换透明属性，普通模式始终用原生窗口。
-  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -2177,7 +2507,7 @@ function createWindow() {
     transparent: false,
     titleBarStyle: 'hidden',
     title: 'WaveForge 澜音工坊',
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     roundedCorners: true,
     show: false, // 初始隐藏窗口
     webPreferences: {
@@ -2185,6 +2515,7 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs'),
       paintWhenInitiallyHidden: true,  // 软件合成下隐藏时也持续绘制，避免显示时首帧空白
+      backgroundThrottling: false, // Chroma 后台联动；各可视化仍由订阅者/可见性自行门控
     },
   })
 
@@ -2239,6 +2570,9 @@ function createWindow() {
     // 资源加载完成（React 已挂载）——满足主窗显示条件之一
     mainLoaded = true
     showMainWindowWhenReady()
+    if (appleAcceptanceMode) {
+      void runAppleAcceptance(mainWindow, appleAcceptanceMode, appleAcceptanceOutput)
+    }
     try {
       const rendererMetrics = await mainWindow.webContents.executeJavaScript(`(() => {
         const resources = performance.getEntriesByType('resource')
@@ -2325,13 +2659,18 @@ function createWindow() {
   }
 
   if (isDev) {
-    mainWindow.loadURL(devServerUrl)
+    const mainUrl = appleAcceptanceMode
+      ? `${devServerUrl}${devServerUrl.includes('?') ? '&' : '?'}appleAcceptance=1`
+      : devServerUrl
+    mainWindow.loadURL(mainUrl)
     if (process.env.WAVEFORGE_OPEN_DEVTOOLS === '1') {
       mainWindow.webContents.openDevTools()
     }
   } else {
-    // 生产模式加载打包后的文件
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'))
+    // 生产模式加载打包后的文件；验收参数仅在显式环境变量下附加。
+    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'), appleAcceptanceMode
+      ? { query: { appleAcceptance: '1' } }
+      : undefined)
   }
   
   // 主窗口显示：等「首帧渲染完成」且「资源加载完成（React 已挂载）」都满足才显示。
@@ -2721,7 +3060,7 @@ ipcMain.handle('get-current-wallpaper', async () => {
 })
 
 // IPC 处理：打开外部链接
-ipcMain.handle('open-external', async (event, url) => {
+ipcMain.handle('open-external', guardTrustedIpc('privileged', async (event, url) => {
   logWallpaper('📞 [IPC] 收到打开外部链接请求:', url)
   try {
     const parsed = new URL(String(url || ''))
@@ -2735,7 +3074,7 @@ ipcMain.handle('open-external', async (event, url) => {
     console.error('❌ [IPC] 打开外部链接失败:', error.message)
     return { success: false, error: error.message }
   }
-})
+}))
 
 ipcMain.handle('desktop-widgets:get-system-status', async () => {
   const current = readCpuTimes()
@@ -2757,20 +3096,20 @@ ipcMain.handle('desktop-widgets:get-system-status', async () => {
   }
 })
 
-ipcMain.handle('desktop-widgets:pick-launcher-target', async (_event, kind) => {
+ipcMain.handle('desktop-widgets:pick-launcher-target', guardTrustedIpc('privileged', async (_event, kind) => {
   const result = await dialog.showOpenDialog({
     title: kind === 'folder' ? '选择文件夹' : '选择应用或文件',
     properties: kind === 'folder' ? ['openDirectory'] : ['openFile'],
   })
   return result.canceled ? null : result.filePaths[0] || null
-})
+}))
 
 // 启动器组件合法的可执行/快捷方式类型；扩展名不在白名单内的一律拒绝打开。
 const ALLOWED_LAUNCHER_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.lnk', '.url', '.msi', '.appref-ms',
 ])
 
-ipcMain.handle('desktop-widgets:open-launcher-target', async (_event, target, kind) => {
+ipcMain.handle('desktop-widgets:open-launcher-target', guardTrustedIpc('privileged', async (_event, target, kind) => {
   const value = String(target || '').trim()
   if (!value) return { success: false, error: '目标为空' }
   if (kind === 'url') {
@@ -2789,7 +3128,7 @@ ipcMain.handle('desktop-widgets:open-launcher-target', async (_event, target, ki
   }
   const error = await shell.openPath(resolved)
   return error ? { success: false, error } : { success: true }
-})
+}))
 
 // 启动壁纸监听（每10秒检查一次）
 let lastWallpaperSignature = null
@@ -3485,7 +3824,7 @@ async function createSpotifyLoginWindow(clientId) {
           console.log('🧹 [Spotify] 已清理 Spotify 域 Cookie，从干净会话开始授权')
         } catch { /* 清理失败不阻塞 */ }
       }
-      const scope = 'user-read-private user-read-email playlist-read-private playlist-modify-private playlist-modify-public user-library-read user-library-modify user-top-read'
+      const scope = 'user-read-private user-read-email playlist-read-private playlist-modify-private playlist-modify-public user-library-read user-library-modify user-top-read user-read-recently-played'
       const authUrl = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`
       void clearSpotifyCookies().then(() => {
         if (settled) return
@@ -4110,7 +4449,7 @@ ipcMain.handle('kugou-scrape-user-info', async () => {
 // ── Apple Music amp-api 代理（Cider mkv3 同款思路）──────────────────────────
 // 渲染进程浏览器直连 amp-api.music.apple.com 会被 CORS 拦截（Failed to fetch）。
 // 改为渲染进程请求主进程 → 主进程 fetch（无 CORS）→ 返回 JSON。登录/资料库/目录全部走这里。
-ipcMain.handle('apple-api', async (event, payload) => {
+ipcMain.handle('apple-api', guardTrustedIpc('privileged', async (event, payload) => {
   const { path, method = 'GET', developerToken, mediaUserToken, body } = payload || {}
   if (!path || !developerToken) return { ok: false, status: 0, error: '缺少请求参数' }
   // 校验输入类型：path 必须是字符串且以 / 开头（防协议/内网跳转拼接），method 白名单
@@ -4151,7 +4490,7 @@ ipcMain.handle('apple-api', async (event, payload) => {
   } finally {
     clearTimeout(timer)
   }
-})
+}))
 
 // ── Apple Music 原生音源取流（Cider 同款：webPlayback 私有接口）──────────────
 // POST play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback，
@@ -4160,7 +4499,7 @@ ipcMain.handle('apple-api', async (event, payload) => {
 // （hls-key-cert-url / hls-key-server-url / widevine-cert-url）。
 // 浏览器直连该接口同样受 CORS 限制，统一走主进程（请求头与 SDK 完全一致）。
 const APPLE_MZPLAY_WEBPLAYBACK = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
-ipcMain.handle('apple-playback', async (_event, payload) => {
+ipcMain.handle('apple-playback', guardTrustedIpc('privileged', async (_event, payload) => {
   const { songId, developerToken, mediaUserToken } = payload || {}
   if (!songId || !developerToken || !mediaUserToken) {
     return { ok: false, status: 0, error: '缺少参数（songId/developerToken/mediaUserToken）' }
@@ -4195,11 +4534,11 @@ ipcMain.handle('apple-playback', async (_event, payload) => {
   } finally {
     clearTimeout(timer)
   }
-})
+}))
 
 // ── Apple HLS 清单代理：渲染层解析主清单需先拿到文本（Electron 源下直连会被
 // CORS 拦），主进程 fetch 后回传。白名单限制在 Apple/苹果静态资源域。──────────
-ipcMain.handle('apple-fetch-url', async (_event, payload) => {
+ipcMain.handle('apple-fetch-url', guardTrustedIpc('privileged', async (_event, payload) => {
   const { url } = payload || {}
   if (typeof url !== 'string' || !/^https:\/\//i.test(url)) return { ok: false, error: '非法 URL' }
   let hostname = ''
@@ -4222,7 +4561,7 @@ ipcMain.handle('apple-fetch-url', async (_event, payload) => {
   } finally {
     clearTimeout(timer)
   }
-})
+}))
 
 // ── Apple Music 电台直播取流（Cider/MusicKit v3 同款）──────────────────────
 // GET api.music.apple.com/v1/play/assets?<playParams>&keyFormat=web，响应
@@ -4230,7 +4569,7 @@ ipcMain.handle('apple-fetch-url', async (_event, payload) => {
 // widevineKeyCertificateUrl / fairPlayKeyCertificateUrl）。api 宿主不可用时
 // 回退 amp-api（gamdl 常量亦指向 amp-api；两宿主响应结构一致）。
 const APPLE_PLAY_ASSETS_HOSTS = ['https://api.music.apple.com', 'https://amp-api.music.apple.com']
-ipcMain.handle('apple-play-assets', async (_event, payload) => {
+ipcMain.handle('apple-play-assets', guardTrustedIpc('privileged', async (_event, payload) => {
   const { query, developerToken, mediaUserToken } = payload || {}
   if (typeof query !== 'string' || !query || !developerToken || !mediaUserToken) {
     return { ok: false, status: 0, error: '缺少参数（query/developerToken/mediaUserToken）' }
@@ -4249,6 +4588,7 @@ ipcMain.handle('apple-play-assets', async (_event, payload) => {
     Referer: 'https://music.apple.com/',
   }
   try {
+    let lastFailure = null
     for (const host of APPLE_PLAY_ASSETS_HOSTS) {
       try {
         const response = await fetch(`${host}/v1/play/assets?${query}`, { headers, signal: controller.signal })
@@ -4262,19 +4602,24 @@ ipcMain.handle('apple-play-assets', async (_event, payload) => {
         if (response.ok && Array.isArray(data?.results?.assets) && data.results.assets.length > 0) {
           return { ok: true, status: response.status, data }
         }
-        if (response.ok && Array.isArray(data?.errors) && data.errors.length > 0) {
-          return { ok: false, status: response.status, data, error: data.errors[0]?.title || '取流被拒' }
-        }
-      } catch { /* 换宿主重试 */ }
+        const error = Array.isArray(data?.errors) && data.errors.length > 0
+          ? data.errors[0]?.detail || data.errors[0]?.title
+          : undefined
+        lastFailure = { ok: false, status: response.status, data, error: error || `play/assets HTTP ${response.status}` }
+        if (response.status === 401 || response.status === 403 || response.status === 429) return lastFailure
+      } catch (error) {
+        lastFailure = { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+      }
     }
-    return { ok: false, status: 0, error: 'play/assets 取流失败（两个宿主均无有效响应）' }
+    return lastFailure || { ok: false, status: 0, error: 'play/assets 取流失败（两个宿主均无有效响应）' }
   } finally {
     clearTimeout(timer)
   }
-})
+}))
 
 // ── Apple 账号信息（buy.itunes 账号接口，Cider 同款：凭登录窗口抓取的 itunes cookie）──
 ipcMain.handle('apple-account-info', async (event, cookies) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
@@ -4309,17 +4654,16 @@ ipcMain.handle('apple-account-info', async (event, cookies) => {
 
 // ── Apple 个人资料页（解析 og:image 头像，需主进程避免 CORS）──
 ipcMain.handle('apple-fetch-profile', async (event, profileUrl) => {
-  // 仅允许 https 的公开网页，防止传入 file:// 等本地路径被代理读取
-  const safeUrl = typeof profileUrl === 'string' && /^https:\/\/[^/]/.test(profileUrl) ? profileUrl : 'https://music.apple.com/profile'
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
+  const safeUrl = typeof profileUrl === 'string' ? profileUrl : 'https://music.apple.com/profile'
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
   try {
-    const response = await fetch(safeUrl, {
+    const response = await fetchAllowedApplePage(fetch, safeUrl, {
       headers: { 'User-Agent': APPLE_SAFARI_UA, Accept: 'text/html' },
-      redirect: 'follow',
       signal: controller.signal,
     })
-    const text = await response.text()
+    const text = await readTextWithLimit(response)
     return { ok: response.ok, status: response.status, html: text }
   } catch (error) {
     return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
@@ -4330,6 +4674,7 @@ ipcMain.handle('apple-fetch-profile', async (event, profileUrl) => {
 
 // ── Apple 账号页面（Apple ID / Apple Account，带全量会话 cookie 解析名字与头像）──
 ipcMain.handle('apple-fetch-account', async (event, cookies) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false, status: 0, error: '不允许的请求来源' }
   if (!cookies) return { ok: false, status: 0, error: '缺少账号 cookie' }
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 15000)
@@ -4341,16 +4686,15 @@ ipcMain.handle('apple-fetch-account', async (event, cookies) => {
     ]
     for (const url of urls) {
       try {
-        const response = await fetch(url, {
+        const response = await fetchAllowedApplePage(fetch, url, {
           headers: {
             'User-Agent': APPLE_SAFARI_UA,
             Cookie: String(cookies),
             Accept: 'text/html,application/json',
           },
-          redirect: 'follow',
           signal: controller.signal,
         })
-        const text = await response.text()
+        const text = await readTextWithLimit(response)
         console.log(`[Apple账号] 资料页 ${url} HTTP ${response.status}，长度 ${text.length}`)
         // 登录后页面：200 且有一定内容即返回（SPA 壳可能偏小，放宽判定）
         if (response.ok && text.length > 500) {
@@ -4640,10 +4984,15 @@ async function extractAppleAccountProfile(win, appleSession) {
   try {
     console.log('[Apple登录] 访问 Apple 账户个人信息页…')
     await win.loadURL('https://account.apple.com/account/manage/section/information')
+    // 数据采集期顶部药丸提示（非阻塞；页面导航会清 DOM，导航后注入）
+    showApplePill(win, '正在获取用户信息…')
     // 等页面加载完成（SPA 渲染；若需登录，用户完成登录后自动进入。最多等 10 分钟）
-    const deadline = Date.now() + 10 * 60 * 1000
+    // 头像/昵称抓取总预算 1 分钟（Apple 部分地区节点返回慢，但也不宜久等）；
+    // 若触发 needLogin（用户在窗口内手动登录 Apple 账户），从提示起再给 5 分钟人工等待
+    let deadline = Date.now() + 60 * 1000
     let info = null
     let loginPrompted = false
+    let avatarOnlyStreak = 0
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 1200))
       if (!win || win.isDestroyed()) return null
@@ -4667,18 +5016,24 @@ async function extractAppleAccountProfile(win, appleSession) {
               break;
             }
           }
-          // 出生日期 / 国家或地区 / 语言（个人信息页各按钮标题，同时抓左侧图标）
+          // 出生日期 / 国家或地区 / 语言（个人信息页各按钮标题，同时抓左侧图标；
+          // 标签中英双语——account.apple.com 跟随账户语言设置，英文界面也能抓到）
           var btns = document.querySelectorAll('button, [role="button"]');
           for (var b = 0; b < btns.length; b++) {
             var bt = clean(btns[b].textContent);
-            var bm = bt.match(/^(姓名|出生日期|国家或地区|语言)\\s*(.*)$/);
+            var bm = bt.match(/^(姓名|Name|出生日期|Birthday|国家或地区|Country or Region|Country\\/Region|语言|Language)\\s*(.*)$/);
             if (bm) {
+              var key = bm[1];
+              var isName = key === '姓名' || key === 'Name';
+              var isBirth = key === '出生日期' || key === 'Birthday';
+              var isCountry = key === '国家或地区' || key === 'Country or Region' || key === 'Country/Region';
+              var isLang = key === '语言' || key === 'Language';
               var val = bm[2];
               var icon = wfAppleIcon(btns[b]);
-              if (bm[1] === '姓名' && val && !result.name) result.name = val;
-              else if (bm[1] === '出生日期' && val) { result.birthday = val; if (icon) result.icons.birthday = icon; }
-              else if (bm[1] === '国家或地区' && val) { result.country = val; if (icon) result.icons.country = icon; }
-              else if (bm[1] === '语言' && val) { result.language = val; if (icon) result.icons.language = icon; }
+              if (isName && val && !result.name) result.name = val;
+              else if (isBirth && val) { result.birthday = val; if (icon) result.icons.birthday = icon; }
+              else if (isCountry && val) { result.country = val; if (icon) result.icons.country = icon; }
+              else if (isLang && val) { result.language = val; if (icon) result.icons.language = icon; }
             }
           }
           // 邮箱
@@ -4688,12 +5043,22 @@ async function extractAppleAccountProfile(win, appleSession) {
         })()
       `).catch(() => null)
       if (info && typeof info === 'object' && String(info.name || '').trim() && String(info.avatar || '').trim()) break
+      // 空转保护：特殊布局/语言下昵称可能始终抓不到——头像连续 3 轮稳定即收手
+      //（返回仅头像的结果，昵称走账单姓名兜底），避免干等满 10 分钟超时
+      if (info && typeof info === 'object' && String(info.avatar || '').trim() && String(info.name || '').trim() === '') {
+        avatarOnlyStreak += 1
+        if (avatarOnlyStreak >= 3) break
+      } else {
+        avatarOnlyStreak = 0
+      }
       if (info && typeof info === 'object' && info.needLogin) {
         // 未登录：移除处理中遮罩（让登录表单可见），提示用户在当前窗口完成 Apple 账户登录
         // （Apple 会识别 AM 会话预填邮箱），然后继续轮询等待登录成功。
         win.webContents.executeJavaScript('(function(){var e=document.getElementById("waveforge-apple-processing");if(e&&e.parentNode)e.parentNode.removeChild(e);var c=document.getElementById("waveforge-apple-consent");if(c&&c.parentNode)c.parentNode.removeChild(c);})()').catch(() => {})
         if (!loginPrompted) {
           loginPrompted = true
+          // 人工登录不受 1 分钟预算限制：从提示起重置 5 分钟窗口
+          deadline = Math.max(deadline, Date.now() + 5 * 60 * 1000)
           console.log('[Apple登录] account.apple.com 未登录，等待用户在当前窗口完成登录…')
           win.webContents.executeJavaScript(`
             (function () {
@@ -4710,9 +5075,8 @@ async function extractAppleAccountProfile(win, appleSession) {
       }
     }
     if (!info || typeof info !== 'object') return null
-    // 登录成功：移除登录提示条，显示"正在获取用户信息…"（抓取/写入期间不回到原始页面）
+    // 登录成功：移除登录提示条（数据已就绪，顶部药丸继续显示到安全页抓取结束）
     win.webContents.executeJavaScript('(function(){var e=document.getElementById("waveforge-account-login-hint");if(e&&e.parentNode)e.parentNode.removeChild(e);})()').catch(() => {})
-    showAppleOverlay(win, '正在获取用户信息…')
     const name = String(info.name || '').trim()
     const email = String(info.email || '').trim()
     const avatar = String(info.avatar || '').trim()
@@ -4784,6 +5148,7 @@ async function extractAppleDevices(win) {
 async function extractAppleSecurity(win) {
   try {
     await win.loadURL('https://account.apple.com/account/manage/section/security')
+    showApplePill(win, '正在获取账户安全信息…')
     const deadline = Date.now() + 12000
     let info = null
     while (Date.now() < deadline) {
@@ -4865,6 +5230,41 @@ function showAppleOverlay(win, text) {
       document.body.appendChild(el);
     })()
   `).catch(() => {})
+}
+
+// ── 药丸提示（登录窗口顶部的非阻塞进度胶囊，数据采集各阶段复用） ──
+// 同一元素复用：重复调用只更新文案（跨页面导航后 DOM 重建，需在导航后重新注入）
+function showApplePill(win, text) {
+  if (!win || win.isDestroyed()) return
+  win.webContents.executeJavaScript(`
+    (function () {
+      var text = ${JSON.stringify(text || '正在获取用户信息…')};
+      var el = document.getElementById('waveforge-apple-pill');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'waveforge-apple-pill';
+        el.style.cssText = 'position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(10,10,12,0.86);border:1px solid rgba(255,255,255,0.14);border-radius:999px;padding:9px 18px;display:flex;align-items:center;gap:9px;color:#fff;font:600 12.5px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 8px 28px rgba(0,0,0,0.45);backdrop-filter:blur(8px);';
+        el.innerHTML =
+          '<span style="width:13px;height:13px;border-radius:50%;border:2px solid rgba(255,255,255,0.22);border-top-color:#fa2d48;display:inline-block;animation:wf-consent-spin 0.9s linear infinite;"></span>' +
+          '<span id="waveforge-apple-pill-text" style="opacity:0.85;">' + text + '</span>';
+        if (!document.getElementById('wf-consent-spin-style')) {
+          var st = document.createElement('style');
+          st.id = 'wf-consent-spin-style';
+          st.textContent = '@keyframes wf-consent-spin{to{transform:rotate(360deg)}}';
+          (document.head || document.documentElement).appendChild(st);
+        }
+        document.body.appendChild(el);
+      } else {
+        var t = document.getElementById('waveforge-apple-pill-text');
+        if (t) t.textContent = text;
+      }
+    })()
+  `).catch(() => {})
+}
+
+function hideApplePill(win) {
+  if (!win || win.isDestroyed()) return
+  win.webContents.executeJavaScript(`(function(){var e=document.getElementById('waveforge-apple-pill');if(e&&e.parentNode)e.parentNode.removeChild(e);})()`).catch(() => {})
 }
 
 // ── Apple 账户信息展示确认弹窗（登录窗口内，用户同意才继续抓取 account.apple.com）────
@@ -4967,6 +5367,7 @@ async function createAppleLoginWindow() {
     }
 
     // 独立分区会话：登录窗口与主应用隔离，Cookie 互不污染
+    // （castlabs 42 无会话级 WebAuthn 开关，通行密钥弹窗在窗口创建处的 dom-ready 拦截）
     const appleSession = session.fromPartition(APPLE_LOGIN_PARTITION)
 
     void (async () => {
@@ -5008,6 +5409,77 @@ async function createAppleLoginWindow() {
           },
         })
         appleLoginWindow.webContents.setUserAgent(APPLE_SAFARI_UA)
+
+        // 页面级拦截 WebAuthn（通行密钥）：castlabs 42 无会话级开关，且 Apple 登录页会自动
+        // 触发系统通行密钥选择器——Win11 下"Windows 安全中心"弹窗每次都跟着弹。
+        // 关键：Apple 的登录表单在**跨域 iframe**里（appleid/itunes 域），只补主 frame 拦不到；
+        // 这里对 framesInSubtree 的全部 frame 注入 stub（credentials.get/create 立即 NotAllowedError
+        // + 关掉平台认证器探测，让页面连通行密钥选项都不渲染），并在窗体生命周期前 90 秒内
+        // 定时补种（动态创建的 iframe 等不到事件）
+        const WEB_AUTHN_BLOCK_STUB = `
+          (function () {
+            try {
+              var c = navigator.credentials;
+              if (!c || !c.__wfWebAuthnBlocked) {
+                var reject = function () { return Promise.reject(new DOMException('WebAuthn disabled', 'NotAllowedError')); };
+                Object.defineProperty(navigator, 'credentials', {
+                  value: { __wfWebAuthnBlocked: true, get: reject, create: reject },
+                  configurable: true,
+                });
+              }
+              if (window.PublicKeyCredential) {
+                try {
+                  window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = function () { return Promise.resolve(false); };
+                  window.PublicKeyCredential.isConditionalMediationAvailable = function () { return Promise.resolve(false); };
+                } catch (e) { /* 忽略 */ }
+              }
+              // 拆条件填充触发器：邮箱输入框的 autocomplete="webauthn" 一聚焦就会发起
+              // 通行密钥自动填充（Win11 弹系统选择器）——剥掉该标记
+              var strip = function (root) {
+                try {
+                  var list = (root || document).querySelectorAll('input[autocomplete*="webauthn" i]');
+                  for (var i = 0; i < list.length; i++) {
+                    var a = list[i].getAttribute('autocomplete') || '';
+                    var next = a.replace(/webauthn/gi, '').replace(/\\s+/g, ' ').trim();
+                    list[i].setAttribute('autocomplete', next || 'off');
+                  }
+                } catch (e) { /* 忽略 */ }
+              };
+              strip(document);
+              if (!window.__wfWebauthnObserver) {
+                window.__wfWebauthnObserver = true;
+                try {
+                  new MutationObserver(function () { strip(document); })
+                    .observe(document.documentElement || document, { childList: true, subtree: true, attributes: true, attributeFilter: ['autocomplete'] });
+                } catch (e) { /* 忽略 */ }
+              }
+            } catch (e) { /* 忽略 */ }
+          })()
+        `
+        const blockAppleWebAuthnAllFrames = () => {
+          if (!appleLoginWindow || appleLoginWindow.isDestroyed()) return
+          let frames = []
+          try { frames = appleLoginWindow.webContents.mainFrame.framesInSubtree() } catch { return }
+          for (const frame of frames) {
+            try { frame.executeJavaScript(WEB_AUTHN_BLOCK_STUB).catch(() => {}) } catch { /* frame 已销毁 */ }
+          }
+        }
+        appleLoginWindow.webContents.on('dom-ready', blockAppleWebAuthnAllFrames)
+        appleLoginWindow.webContents.on('did-frame-finish-load', blockAppleWebAuthnAllFrames)
+        console.log('[AppleLogin] WebAuthn 通行密钥拦截已启用（全 frame + autocomplete 剥离 + 10 分钟补种）')
+        const webAuthnPatchTimer = setInterval(() => {
+          if (!appleLoginWindow || appleLoginWindow.isDestroyed()) { clearInterval(webAuthnPatchTimer); return }
+          blockAppleWebAuthnAllFrames()
+        }, 700)
+        setTimeout(() => clearInterval(webAuthnPatchTimer), 600_000)
+        // CDP 预注入：document-start 时机、先于任何页面脚本、自动覆盖所有 frame（含未来创建的）
+        // —— 消灭「页面脚本先于 dom-ready 补丁捕获原始 credentials 引用」的时序竞争
+        try {
+          appleLoginWindow.webContents.debugger.attach('1.3')
+          appleLoginWindow.webContents.debugger
+            .sendCommand('Page.addScriptToEvaluateOnNewDocument', { source: WEB_AUTHN_BLOCK_STUB, runImmediately: true })
+            .catch(() => { /* 失败仍有 dom-ready/定时注入兜底 */ })
+        } catch { /* debugger 被占用时忽略 */ }
 
         // 导航守卫：Apple 登录/授权只在 apple.com 域 + iCloud（提取资料用）；外链交给系统浏览器
         appleLoginWindow.webContents.on('will-navigate', (event, url) => {
@@ -5212,6 +5684,19 @@ async function createAppleLoginWindow() {
                 const allCookies = cookies
                   .map(cookie => `${cookie.name}=${cookie.value}`)
                   .join('; ')
+                // 持久化全量网页会话 Cookie：Apple license（acquireWebPlaybackLicense）会校验
+                // 网页会话，仅凭 media-user-token 会被拒（-1002 session ended）。登录分区是
+                // 内存态（应用重启即空），登录时落盘，license 代理（local-server）读取附带。
+                try {
+                  fs.writeFileSync(
+                    path.join(app.getPath('userData'), 'apple-web-cookies.json'),
+                    JSON.stringify({ cookie: allCookies, savedAt: Date.now() }),
+                    'utf8',
+                  )
+                  console.log(`[Apple登录] 网页会话 Cookie 已持久化（license 代理用，${allCookies.length} chars）`)
+                } catch (e) {
+                  console.warn('[Apple登录] Cookie 持久化失败:', e?.message || e)
+                }
                 // 从登录窗口渲染出的界面提取账号名/头像（web 播放器侧边栏一定显示，最后的数据源）。
                 // 轮询等待侧边栏渲染完成（media-token 出现时界面可能还没画完）。
                 const extractSidebarUser = () => appleLoginWindow.webContents.executeJavaScript(`
@@ -5324,6 +5809,8 @@ async function createAppleLoginWindow() {
                     const sfMatch = currentUrl.match(/\/([a-z]{2})\//)
                     const storefront = (sfMatch && sfMatch[1]) || appleLoginWindow.__wfAppleStorefront || 'cn'
                     await appleLoginWindow.loadURL(`https://music.apple.com/${storefront}/account/settings?l=zh-Hans-CN`)
+                    // 账单抓取药丸提示（导航完成后注入，避免被页面加载清掉）
+                    showApplePill(appleLoginWindow, '正在获取账单信息…')
                     // 等 iframe（CommerceKit 账户设置）加载
                     await new Promise(resolve => setTimeout(resolve, 4500))
                     const accountInfo = await appleLoginWindow.webContents.executeJavaScript(`
@@ -5410,15 +5897,15 @@ async function createAppleLoginWindow() {
                   }
                 }
 
+                // 账单摘要抓完，撤掉药丸提示再询问
+                hideApplePill(appleLoginWindow)
+
                 // ── 账户信息展示确认弹窗（登录窗口内）──
                 // 用户同意 → 继续抓取 account.apple.com（昵称/头像/个人信息/设备）；
                 // 用户拒绝 → 仅使用账单 Apple ID + 账单真实姓名 + monogram 头像。
-                if (!domEmail && !domBillingName) {
-                  // 账单信息都没抓到（异常情况），默认按拒绝处理，不弹窗打扰
-                  appleConsent = 'reject'
-                } else {
-                  appleConsent = await askAppleAccountConsent(appleLoginWindow, domBillingName || '')
-                }
+                // 注意：只要 AM 登录成功就询问——不再因摘要提取为空而静默跳过
+                //（Apple 页面语言/区域不同会让中文标签抓取落空，此前会被误判成"用户拒绝"）
+                appleConsent = await askAppleAccountConsent(appleLoginWindow, domBillingName || '')
 
                 // 用户同意后：抓取 account.apple.com 完整账户资料（SSO 会话直接生效，无需二次登录）
                 if (appleConsent === 'accept') {
@@ -5447,6 +5934,8 @@ async function createAppleLoginWindow() {
                       appleIcons = { ...appleIcons, ...accountSecurity.icons }
                     }
                   }
+                  // 账户资料抓取完毕，撤掉顶部药丸提示
+                  hideApplePill(appleLoginWindow)
                 } else {
                   console.log('[Apple登录] 用户拒绝，使用账单姓名 + monogram 头像')
                   // 拒绝时不抓取 Apple 账户资料；头像由渲染端用账单真实姓名生成 monogram
@@ -5514,7 +6003,7 @@ async function createAppleLoginWindow() {
 }
 
 // 监听打开 Apple Music 登录窗口的请求
-ipcMain.handle('apple-login', async () => {
+ipcMain.handle('apple-login', guardTrustedIpc('privileged', async () => {
   try {
     const result = await createAppleLoginWindow()
     return result
@@ -5522,7 +6011,47 @@ ipcMain.handle('apple-login', async () => {
     console.error('❌[Apple登录] 打开登录窗口失败:', err)
     return { success: false, error: err.message }
   }
-})
+}))
+
+// Apple 登出必须同时清理独立网页分区与 license 代理读取的落盘 Cookie，
+// 否则下一次登录可能静默复用旧 Apple ID 会话。
+ipcMain.handle('apple-logout', guardTrustedIpc('privileged', async () => {
+  const errors = []
+  const loginWindow = appleLoginWindow
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    try {
+      loginWindow.close()
+    } catch (error) {
+      errors.push(`关闭登录窗口失败：${error?.message || error}`)
+    }
+  }
+  appleDevTokenCapture = ''
+
+  const appleSession = session.fromPartition(APPLE_LOGIN_PARTITION)
+  try {
+    await appleSession.clearStorageData()
+    await appleSession.clearStorageData({ storages: ['cookies'] })
+  } catch (error) {
+    errors.push(`清除 Apple 会话失败：${error?.message || error}`)
+  }
+  try {
+    await appleSession.clearCache()
+  } catch (error) {
+    errors.push(`清除 Apple 缓存失败：${error?.message || error}`)
+  }
+  try {
+    await fs.promises.rm(path.join(app.getPath('userData'), 'apple-web-cookies.json'), { force: true })
+  } catch (error) {
+    errors.push(`删除 Apple Cookie 文件失败：${error?.message || error}`)
+  }
+
+  if (errors.length) {
+    console.warn('[Apple登出] 部分清理失败:', errors.join('；'))
+    return { success: false, error: errors.join('；') }
+  }
+  console.log('[Apple登出] 登录窗口、网页会话与 Cookie 文件已清理')
+  return { success: true }
+}))
 
 // ── Apple 网页开发者令牌（gamdl / Cider-fork 同款做法）────────────────────
 // Apple 网页播放器把可用的 MusicKit 开发者令牌（iss=AMPWebPlay，约 70 天有效）
@@ -5539,7 +6068,7 @@ function decodeJwtExp(token) {
   }
 }
 
-ipcMain.handle('apple-fetch-dev-token', async () => {
+ipcMain.handle('apple-fetch-dev-token', guardTrustedIpc('privileged', async () => {
   // 主进程 fetch 必须带超时，否则网络卡住会让登录面板一直转圈
   const fetchWithTimeout = async (url, options = {}, timeoutMs = 15000) => {
     const controller = new AbortController()
@@ -5562,7 +6091,7 @@ ipcMain.handle('apple-fetch-dev-token', async () => {
           const token = env && env.MEDIA_API && env.MEDIA_API.token
           if (token) {
             const exp = decodeJwtExp(token)
-            if (exp) return { success: true, token, expiresAt: exp }
+            if (exp) return { success: true, token, expiresAt: exp * 1000 }
           }
         } catch (e) { /* 继续尝试 bundle 方法 */ }
       }
@@ -5581,12 +6110,12 @@ ipcMain.handle('apple-fetch-dev-token', async () => {
     if (!tokenMatch) throw new Error('前端资源中未找到开发者令牌')
     const token = tokenMatch[0].replace(/"/g, '')
     const exp = decodeJwtExp(token)
-    return { success: true, token, expiresAt: exp || 0 }
+    return { success: true, token, expiresAt: exp ? exp * 1000 : 0 }
   } catch (err) {
     console.error('❌ [Apple登录] 获取网页开发者令牌失败:', err)
     return { success: false, error: err && err.message ? err.message : '获取开发者令牌失败' }
   }
-})
+}))
 
 // ── QQ 音乐官方增强：内置窗口领取 qmk API Key ──────────────────────────────
 const QMK_OFFICIAL_KEY_URL = 'https://y.qq.com/n/ryqq_v2/qqmusic_skills'
@@ -6464,7 +6993,6 @@ async function recreateMainWindow(transparent) {
   oldWindow.__wfRecreating = true
   if (!oldWindow.isDestroyed()) oldWindow.destroy()
 
-  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
   const win = new BrowserWindow({
     width: savedBounds.width,
     height: savedBounds.height,
@@ -6477,7 +7005,7 @@ async function recreateMainWindow(transparent) {
     transparent,
     titleBarStyle: 'hidden',
     title: 'WaveForge 澜音工坊',
-    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    icon: windowIcon.isEmpty() ? undefined : windowIcon,
     // 不透明窗口用 Windows 11 原生圆角；透明窗口原生圆角无效，由渲染端 #root 自绘
     roundedCorners: !transparent,
     show: false,
@@ -6732,28 +7260,179 @@ ipcMain.handle('get-system-location', async () => {
 })
 
 /**
- * 启动本地后端服务（仅打包版需要；开发模式由 scripts/dev-electron.mjs 负责）。
- * 1) Express API（local-server.mjs，端口 3001）——通过 utilityProcess.fork 启动，
- *    传入开发模式 API 进程会用到的同款缓存路径参数（app.getPath('userData')/cache）。
- * 2) Python 节拍服务（beat_analyzer.py，端口 3002）——优先使用嵌入式 python，
- *    启动失败仅告警（应用会自动降级到 Fixed Crossfade）。
- * 3) Python 响度测量服务（loudness_server.py，端口 3003）——响度归一化按曲目调用。
- * 4) Python 频响补偿设计服务（compensation_server.py，端口 3004）——等响度/预设/自定义 → 多段 Biquad。
- */
+ * 启动生产版常驻本地后端。Express API（local-server.mjs，端口 3001）通过
+ * utilityProcess.fork 启动；Python 3002/3003/3004 服务由 renderer 请求前按需启动。 */
 let localApiChild = null
-let localPythonChild = null
-let localLoudnessChild = null
-let localCompensationChild = null
 
-async function startLocalBackend() {
-  if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
-  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
+const PYTHON_SERVICE_IDLE_MS = Math.max(30_000, Number(process.env.WAVEFORGE_PYTHON_IDLE_MS) || 5 * 60_000)
+const PYTHON_SERVICE_START_TIMEOUT_MS = 20_000
+const pythonServices = new Map([
+  ['beat', { port: 3002, script: 'beat_analyzer.py', label: 'BeatService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+  ['loudness', { port: 3003, script: 'loudness_server.py', label: 'LoudnessService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+  ['compensation', { port: 3004, script: 'compensation_server.py', label: 'CompensationService', child: null, starting: null, idleTimer: null, activeRequests: new Set() }],
+])
+let pythonServicesQuitting = false
 
-  // 1) Express API（3001）
+function clearPythonIdleTimer(service) {
+  if (service.idleTimer) clearTimeout(service.idleTimer)
+  service.idleTimer = null
+}
+
+function stopPythonService(service, reason) {
+  clearPythonIdleTimer(service)
+  const child = service.child
+  service.child = null
+  if (!child) return
+  try { child.kill() } catch {}
+  if (process.platform === 'win32' && child.pid) {
+    try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 5000 }) } catch {}
+  }
+  console.log(`[${service.label}] stopped (${reason})`)
+}
+
+function schedulePythonServiceIdleStop(service) {
+  clearPythonIdleTimer(service)
+  if (pythonServicesQuitting || !service.child || service.activeRequests.size > 0) return
+  service.idleTimer = setTimeout(() => {
+    service.idleTimer = null
+    if (service.activeRequests.size === 0) stopPythonService(service, 'idle')
+  }, PYTHON_SERVICE_IDLE_MS)
+  service.idleTimer.unref?.()
+}
+
+async function probePythonService(service) {
   try {
+    const response = await net.fetch(`http://127.0.0.1:${service.port}/health`, {
+      headers: { 'X-WaveForge-Local-Token': LOCAL_SERVICE_TOKEN },
+      signal: AbortSignal.timeout(1500),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
 
-// ── 孤儿后端清扫：上次异常退出残留的子进程会占住 3001-3004，导致新实例误连旧后端 ──
-const BACKEND_PORTS = [3001, 3002, 3003, 3004]
+async function waitForPythonService(service, child) {
+  const deadline = Date.now() + PYTHON_SERVICE_START_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (service.child !== child) throw new Error(`${service.label} exited before becoming ready`)
+    if (await probePythonService(service)) return
+    await new Promise(resolve => setTimeout(resolve, 150))
+  }
+  throw new Error(`${service.label} startup timed out`)
+}
+
+async function ensurePythonService(name) {
+  const service = pythonServices.get(name)
+  if (!service) throw new Error(`Unknown local Python service: ${name}`)
+  clearPythonIdleTimer(service)
+  if (await probePythonService(service)) {
+    schedulePythonServiceIdleStop(service)
+    return true
+  }
+  if (service.child && service.activeRequests.size > 0) return true
+  if (service.child) stopPythonService(service, 'unresponsive')
+  if (!app.isPackaged) return false
+  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1' || pythonServicesQuitting) return false
+  if (service.starting) return service.starting
+
+  const starting = (async () => {
+    const pythonExe = path.join(process.resourcesPath, 'python-embed', 'python.exe')
+    const scriptPath = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', service.script)
+    const beatModelPath = path.join(process.resourcesPath, 'beat-this', 'final0.ckpt')
+    if (service.script === 'beat_analyzer.py' && !fs.existsSync(beatModelPath)) throw new Error('Required Beat This final0 model was not packaged')
+    if (!fs.existsSync(pythonExe)) throw new Error('Embedded Python was not found')
+    if (!fs.existsSync(scriptPath)) throw new Error(`${service.script} was not found`)
+    const child = spawn(pythonExe, [scriptPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: {
+        ...process.env,
+        WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
+        WAVEFORGE_CACHE_PATH: configManager.getCachePath(),
+        ...(service.script === 'beat_analyzer.py' ? {
+          BEAT_THIS_CHECKPOINT: beatModelPath,
+          WAVEFORGE_BEAT_MODEL_PATH: beatModelPath,
+        } : {}),
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUNBUFFERED: '1',
+      },
+    })
+    service.child = child
+    child.stdout?.on('data', chunk => { const text = String(chunk).trim(); if (text) console.log(`[${service.label}]`, text) })
+    child.stderr?.on('data', chunk => { const text = String(chunk).trim(); if (text) console.error(`[${service.label}:err]`, text) })
+    child.on('error', error => {
+      console.error(`[${service.label}] failed to spawn:`, error?.message || error)
+      if (service.child === child) service.child = null
+    })
+    child.on('exit', code => {
+      if (service.child !== child) return
+      service.child = null
+      clearPythonIdleTimer(service)
+      console.warn(`[${service.label}] exited with code`, code)
+    })
+    console.log(`[${service.label}] starting ${service.script} on port ${service.port}`)
+    try {
+      await waitForPythonService(service, child)
+      schedulePythonServiceIdleStop(service)
+      return true
+    } catch (error) {
+      if (service.child === child) stopPythonService(service, 'startup failed')
+      throw error
+    }
+  })()
+  service.starting = starting
+  try {
+    return await starting
+  } finally {
+    if (service.starting === starting) service.starting = null
+  }
+}
+
+function stopAllPythonServices(reason) {
+  pythonServicesQuitting = true
+  for (const service of pythonServices.values()) stopPythonService(service, reason)
+}
+
+ipcMain.handle('local-python:ensure', async (event, name) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return false
+  try {
+    return await ensurePythonService(name)
+  } catch (error) {
+    console.error(`[LocalPython] failed to ensure ${String(name)}:`, error?.message || error)
+    return false
+  }
+})
+
+function pythonServiceForUrl(url) {
+  let port
+  try { port = Number(new URL(url).port) } catch { return null }
+  for (const service of pythonServices.values()) {
+    if (service.port === port) return service
+  }
+  return null
+}
+
+function beginPythonServiceRequest(details) {
+  const service = pythonServiceForUrl(details.url)
+  if (!service || new URL(details.url).pathname === '/health') return
+  clearPythonIdleTimer(service)
+  service.activeRequests.add(details.id)
+}
+
+function finishPythonServiceRequest(details) {
+  const service = pythonServiceForUrl(details.url)
+  if (!service || !service.activeRequests.delete(details.id)) return
+  schedulePythonServiceIdleStop(service)
+}
+
+// ── 孤儿后端清扫：上次异常退出残留的子进程会占住后端端口，导致新实例误连旧后端 ──
+// 必须在模块级声明：will-quit 与 AppleBridge 的 python 校验都在模块作用域调用，
+// 放进 startLocalBackend 的 try 块内会因作用域不可见抛 ReferenceError（静默失效）。
+// 18790 = Apple 播放面 bridge（apple_bridge.py）控制端口
+const { promisify } = require('util')
+const execFileAsync = promisify(execFile)
+const BACKEND_PORTS = [3001, 3002, 3003, 3004, 18790]
 async function sweepBackendOrphans(reason) {
   for (const port of BACKEND_PORTS) {
     try {
@@ -6761,7 +7440,7 @@ async function sweepBackendOrphans(reason) {
         '$c = Get-NetTCPConnection -LocalPort ' + port + ' -State Listen -ErrorAction SilentlyContinue',
         'foreach ($x in $c) {',
         '  $pp = Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue',
-        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*")) { Write-Output $x.OwningProcess }',
+        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*" -or $pp.ProcessName -like "python*")) { Write-Output $x.OwningProcess }',
         '}',
       ].join('; ')
       const out = await execFileAsync('powershell', ['-NoProfile', '-Command', ps], { timeout: 12000 })
@@ -6775,12 +7454,20 @@ async function sweepBackendOrphans(reason) {
     } catch { /* 清扫失败不阻塞启动 */ }
   }
 }
-  await sweepBackendOrphans('startup')
+
+async function startLocalBackend() {
+  if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
+  if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
+
+  // 1) Express API（3001）
+  try {
+    await sweepBackendOrphans('startup')
     const serverEntry = path.join(process.resourcesPath, 'app.asar', 'local-server.mjs')
     localApiChild = utilityProcess.fork(serverEntry, [], {
       env: {
         ...process.env,
         WAVEFORGE_USERDATA: app.getPath('userData'),
+        WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
       },
       stdio: 'pipe',
     })
@@ -6801,129 +7488,169 @@ async function sweepBackendOrphans(reason) {
     console.error('[LocalAPI] failed to start:', error)
   }
 
-  // 嵌入式 Python 可执行文件路径（节拍与响度服务共用）。
-  // 必须声明在函数作用域：若放在节拍服务 try 块内，响度服务的 spawn 拿不到它，
-  // 会抛 ReferenceError 导致响度服务在打包版从未启动。
-  const pythonExe = path.join(process.resourcesPath, 'python-embed', 'python.exe')
+  // Python 3002/3003/3004 services are started by local-python:ensure on demand.
+}
 
-  // 2) Python 节拍服务（3002）——仅当嵌入式 python 与脚本都存在时启动。
-  // 缺少文件只跳过节拍服务（不再 return 整个函数，避免连带跳过响度服务）。
-  try {
-    const beatAnalyzer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'beat_analyzer.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[BeatService] 未找到嵌入式 Python，跳过节拍服务（将使用 Fixed Crossfade 降级）')
-    } else if (!fs.existsSync(beatAnalyzer)) {
-      console.warn('[BeatService] 未找到 beat_analyzer.py，跳过节拍服务')
-    } else {
-      localPythonChild = spawn(pythonExe, [beatAnalyzer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localPythonChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[BeatService]', text)
-      })
-      localPythonChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[BeatService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localPythonChild.on('error', (error) => {
-        console.error('[BeatService] failed to spawn:', error?.message || error)
-        localPythonChild = null
-      })
-      localPythonChild.on('exit', (code) => {
-        console.warn('[BeatService] exited with code', code)
-        localPythonChild = null
-      })
-      console.log('[BeatService] starting beat_analyzer.py on port 3002')
-    }
-  } catch (error) {
-    console.error('[BeatService] failed to start:', error)
-  }
+// ── Apple 播放面（WebView2 bridge）子进程管理 ──
+// apple_bridge.py 用 pywebview + WebView2 承载 music.apple.com，作为 Electron Browser CDM
+// 原生 CENC 失败时的兼容兜底；渲染进程经带会话认证的 127.0.0.1 HTTP 接口控制播放。
+let appleBridgeChild = null
+let appleBridgeSessionToken = ''
+const appleBridgePythonOkCache = new Map()
+const APPLE_BRIDGE_PORT = 18790
+// spawn 互斥：预热定时器与渲染端平台联动可能同一瞬间并发触发，双双通过 ping 检查会双开
+// （Windows 允许端口重复绑定，两个 bridge 同时监听 18790，请求只进其中一个）
+let appleBridgeSpawning = false
 
-  // 3) Python 响度测量服务（3003）——独立于节拍服务，响度归一化按曲目调用
+/** 探测 python 是否装有 pywebview（结果按 exe 路径缓存；Windows Store 占位符会自然失败） */
+async function pythonHasPywebview(pythonExe) {
+  if (appleBridgePythonOkCache.has(pythonExe)) return appleBridgePythonOkCache.get(pythonExe)
+  let ok = false
   try {
-    const loudnessServer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'loudness_server.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[LoudnessService] 未找到嵌入式 Python，跳过响度服务（响度归一化不可用）')
-    } else if (!fs.existsSync(loudnessServer)) {
-      console.warn('[LoudnessService] 未找到 loudness_server.py，跳过响度服务（响度归一化不可用）')
-    } else {
-      localLoudnessChild = spawn(pythonExe, [loudnessServer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localLoudnessChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[LoudnessService]', text)
-      })
-      localLoudnessChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[LoudnessService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localLoudnessChild.on('error', (error) => {
-        console.error('[LoudnessService] failed to spawn:', error?.message || error)
-        localLoudnessChild = null
-      })
-      localLoudnessChild.on('exit', (code) => {
-        console.warn('[LoudnessService] exited with code', code)
-        localLoudnessChild = null
-      })
-      console.log('[LoudnessService] starting loudness_server.py on port 3003')
-    }
-  } catch (error) {
-    console.error('[LoudnessService] failed to start:', error)
-  }
+    await execFileAsync(pythonExe, ['-c', 'import webview'], { timeout: 20000 })
+    ok = true
+  } catch { ok = false }
+  appleBridgePythonOkCache.set(pythonExe, ok)
+  return ok
+}
 
-  // 4) Python 频响补偿设计服务（3004）——独立于节拍/响度服务，等响度/预设/自定义 → 多段 Biquad 参数
+/** 找可用的 Python：环境变量 → 嵌入式 → 常见系统安装位置 → PATH */
+async function findAppleBridgePython() {
+  const candidates = []
+  if (process.env.WAVEFORGE_APPLE_BRIDGE_PYTHON) candidates.push(process.env.WAVEFORGE_APPLE_BRIDGE_PYTHON)
+  candidates.push(app.isPackaged
+    ? path.join(process.resourcesPath, 'python-embed', 'python.exe')
+    // dev 模式下 getAppPath() 是 desktop/，用 __dirname 回项目根
+    : path.join(__dirname, '..', 'resources', 'python-embed', 'python.exe'))
+  const localAppData = process.env.LOCALAPPDATA || ''
   try {
-    const compensationServer = path.join(process.resourcesPath, 'app.asar.unpacked', 'python-beat-service', 'compensation_server.py')
-    if (!fs.existsSync(pythonExe)) {
-      console.warn('[CompensationService] 未找到嵌入式 Python，跳过频响补偿服务（频响补偿不可用）')
-    } else if (!fs.existsSync(compensationServer)) {
-      console.warn('[CompensationService] 未找到 compensation_server.py，跳过频响补偿服务（频响补偿不可用）')
-    } else {
-      localCompensationChild = spawn(pythonExe, [compensationServer], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
-      })
-      localCompensationChild.stdout?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.log('[CompensationService]', text)
-      })
-      localCompensationChild.stderr?.on('data', (chunk) => {
-        const text = String(chunk).trim()
-        if (text) console.error('[CompensationService:err]', text)
-      })
-      // spawn 失败（如嵌入式 python 缺失/启动即退出）时避免 unhandled 'error' 事件
-      localCompensationChild.on('error', (error) => {
-        console.error('[CompensationService] failed to spawn:', error?.message || error)
-        localCompensationChild = null
-      })
-      localCompensationChild.on('exit', (code) => {
-        console.warn('[CompensationService] exited with code', code)
-        localCompensationChild = null
-      })
-      console.log('[CompensationService] starting compensation_server.py on port 3004')
+    for (const dir of fs.readdirSync(path.join(localAppData, 'Programs', 'Python'))) {
+      candidates.push(path.join(localAppData, 'Programs', 'Python', dir, 'python.exe'))
     }
-  } catch (error) {
-    console.error('[CompensationService] failed to start:', error)
+  } catch { /* 目录不存在 */ }
+  for (const root of ['C:\\', 'D:\\']) {
+    try {
+      for (const dir of fs.readdirSync(root)) {
+        if (/^python/i.test(dir)) candidates.push(path.join(root, dir, 'python.exe'))
+      }
+    } catch { /* 盘符不存在 */ }
   }
+  candidates.push('python', 'python3') // PATH 兜底（import 校验排除占位符/无 pywebview 的）
+  for (const exe of candidates) {
+    if (!exe) continue
+    if (exe !== 'python' && exe !== 'python3' && !fs.existsSync(exe)) continue
+    if (await pythonHasPywebview(exe)) return exe
+  }
+  return null
+}
+
+async function pingAppleBridge(token = appleBridgeSessionToken) {
+  if (!token) return false
+  try {
+    const res = await fetch(`http://127.0.0.1:${APPLE_BRIDGE_PORT}/ping`, {
+      headers: { 'X-WaveForge-Bridge-Token': token },
+      signal: AbortSignal.timeout(1500),
+    })
+    if (res.ok) {
+      const d = await res.json()
+      return Boolean(d && d.ok)
+    }
+  } catch { /* 未运行 */ }
+  return false
+}
+
+/** 启动 Apple 播放面 bridge（幂等：已在跑返回当前会话；并发触发合并为一次 spawn） */
+async function startAppleBridge() {
+  if (await pingAppleBridge()) return { ok: true, token: appleBridgeSessionToken }
+  if (appleBridgeChild && !appleBridgeChild.killed) return { ok: true, token: appleBridgeSessionToken }
+  if (appleBridgeSpawning) {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 500))
+      if (!appleBridgeSpawning) break
+    }
+    const ok = (await pingAppleBridge()) || Boolean(appleBridgeChild && !appleBridgeChild.killed)
+    return ok ? { ok: true, token: appleBridgeSessionToken } : { ok: false }
+  }
+  appleBridgeSpawning = true
+  try {
+    const ok = await doStartAppleBridge()
+    return ok ? { ok: true, token: appleBridgeSessionToken } : { ok: false }
+  } finally {
+    appleBridgeSpawning = false
+  }
+}
+
+async function doStartAppleBridge() {
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'app.asar.unpacked', 'python-apple-bridge', 'apple_bridge.py')
+    // dev 模式下 getAppPath() 是 main.cjs 所在目录（desktop/），必须用 __dirname 回项目根
+    : path.join(__dirname, '..', 'python-apple-bridge', 'apple_bridge.py')
+  if (!fs.existsSync(scriptPath)) {
+    console.warn('[AppleBridge] 未找到 apple_bridge.py，跳过启动')
+    return false
+  }
+  const pythonExe = await findAppleBridgePython()
+  if (!pythonExe) {
+    console.warn('[AppleBridge] 未找到装有 pywebview 的 Python，Apple 原生源不可用（走载体兜底）')
+    return false
+  }
+  // WebView2 用户数据目录：持久化 music.apple.com 登录态（登录一次长期有效）
+  const profileDir = path.join(app.getPath('userData'), 'apple-bridge-profile')
+  try { fs.mkdirSync(profileDir, { recursive: true }) } catch { /* 忽略 */ }
+  appleBridgeSessionToken = crypto.randomBytes(32).toString('base64url')
+  const childEnv = {}
+  for (const key of ['PATH', 'Path', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'USERPROFILE', 'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PYTHONHOME', 'PYTHONPATH']) {
+    if (process.env[key]) childEnv[key] = process.env[key]
+  }
+  childEnv.PYTHONIOENCODING = 'utf-8'
+  childEnv.PYTHONUNBUFFERED = '1'
+  const child = spawn(pythonExe, [scriptPath, String(APPLE_BRIDGE_PORT), '--profile', profileDir, '--token', appleBridgeSessionToken], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    env: childEnv,
+  })
+  appleBridgeChild = child
+  child.stdout?.on('data', (chunk) => {
+    const text = String(chunk).trim()
+    if (text) console.log('[AppleBridge]', text)
+  })
+  child.stderr?.on('data', (chunk) => {
+    const text = String(chunk).trim()
+    if (text) console.error('[AppleBridge:err]', text)
+  })
+  child.on('error', (error) => {
+    console.error('[AppleBridge] failed to spawn:', error?.message || error)
+    if (appleBridgeChild === child) {
+      appleBridgeChild = null
+      appleBridgeSessionToken = ''
+    }
+  })
+  child.on('exit', (code) => {
+    console.warn('[AppleBridge] exited with code', code)
+    if (appleBridgeChild === child) {
+      appleBridgeChild = null
+      appleBridgeSessionToken = ''
+    }
+  })
+  console.log('[AppleBridge] starting apple_bridge.py on port', APPLE_BRIDGE_PORT)
+  return true
 }
 
 // 应用退出时一并结束本地子进程
 app.on('will-quit', async () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
   try { localApiChild?.kill() } catch {}
+  stopAllPythonServices('app quit')
   await sweepBackendOrphans('quit')
-  try { localPythonChild?.kill() } catch {}
-  try { localLoudnessChild?.kill() } catch {}
-  try { localCompensationChild?.kill() } catch {}
+  try { appleBridgeChild?.kill() } catch {}
+  if (stemRuntime) {
+    try { stemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
+    stemRuntime = null
+  }
+  if (trackStemRuntime) {
+    try { trackStemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
+    trackStemRuntime = null
+  }
 })
 
 app.whenReady().then(async () => {
@@ -6952,15 +7679,49 @@ app.whenReady().then(async () => {
   // 放行后，天气组件才能优先使用 Windows/Chromium 的设备定位，再回退到公网 IP。
   // media 权限：放行后渲染进程才能用 navigator.mediaDevices.enumerateDevices()
   // 列出真实的音频输出设备（设置-高级「音频输出设备」）。
-  session.defaultSession.setPermissionCheckHandler((_webContents, permission) => permission === 'geolocation' || permission === 'media')
-  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-    callback(permission === 'geolocation' || permission === 'media')
+  const isTrustedPermissionRequester = (webContents) => {
+    if (!mainWindow || webContents !== mainWindow.webContents || webContents.isDestroyed()) return false
+    const url = webContents.getURL?.() || ''
+    return createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(url)
+  }
+  session.defaultSession.setPermissionCheckHandler((webContents, permission) => (
+    isTrustedPermissionRequester(webContents) && (permission === 'geolocation' || permission === 'media')
+  ))
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const frameTrusted = !details?.requestingUrl || createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(details.requestingUrl)
+    callback(isTrustedPermissionRequester(webContents) && frameTrusted && (permission === 'geolocation' || permission === 'media'))
   })
   session.defaultSession.setDevicePermissionHandler((details) => {
-    // enumerateDevices 需要设备级授权才能返回带标签的真实设备列表
+    const requestOrigin = details?.origin || details?.embeddingOrigin || ''
+    const originTrusted = createDocumentUrlMatcher([
+      devServerUrl,
+      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+    ])(requestOrigin)
+    if (!originTrusted) return false
     const type = details?.deviceType || ''
-    return type === 'audiooutput' || type === 'audio' || type === 'video' || details?.mediaType === 'audio'
+    return type === 'audiooutput' || type === 'audio' || details?.mediaType === 'audio'
   })
+
+  // Electron 本地服务请求认证：token 只存在于主进程和受控子进程环境，renderer 无法读取。
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['http://localhost:3001/*', 'http://127.0.0.1:3001/*', 'http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] },
+    (details, callback) => {
+      if (mainWindow && details.webContentsId === mainWindow.webContents.id) {
+        beginPythonServiceRequest(details)
+        details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
+      }
+      callback({ requestHeaders: details.requestHeaders })
+    },
+  )
+  const pythonServiceRequestFilter = { urls: ['http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] }
+  session.defaultSession.webRequest.onCompleted(pythonServiceRequestFilter, finishPythonServiceRequest)
+  session.defaultSession.webRequest.onErrorOccurred(pythonServiceRequestFilter, finishPythonServiceRequest)
 
   // ── Apple 音源 CORS 放行（Cider 式原生音源所需）────────────────────────────
   // 渲染层 hls.js 直接请求 Apple 的 HLS 清单/分段/Widevine license，这些接口的
@@ -7021,9 +7782,8 @@ app.whenReady().then(async () => {
     }
   })
   
-  // 启动本地后端 API 服务（端口 3001）与 Python 节拍服务（端口 3002）。
-  // 开发模式下由 scripts/dev-electron.mjs 启动；打包版必须由主进程自行启动，
-  // 否则渲染进程请求 localhost:3001 全部失败，应用只剩空壳 UI。
+  // 启动生产版常驻本地 API（3001）。Python 3002/3003/3004 由 renderer 请求前 ensure；
+  // 开发模式继续由 scripts/dev-electron.mjs 预启动全部服务。
   startLocalBackend()
   
   // 传入缓存路径给 analysis runtime。
@@ -7049,12 +7809,43 @@ app.whenReady().then(async () => {
   })
 
   setupRenderIPC(ipcMain, configManager.getCachePath(), toMediaUrl)
-  // AI 混音（DJTransGAN）运行时：可选引擎，未安装时 render:transitionAiMix 抛错、前端回退 DSP
+  try {
+    const stemModels = require('./stem-model-manager.cjs')
+    const { setupStemIPC } = require('./stem-runtime.cjs')
+    const { setupTrackStemIPC } = require('./track-stem-runtime.cjs')
+    stemModels.setupStemModelIPC(ipcMain, guardTrustedIpc)
+    stemRuntime = setupStemIPC(ipcMain, {
+      modelPath: stemModels.getModelPath(),
+      pythonPath: stemModels.getRuntimePath(),
+      isModelTrusted: stemModels.isModelTrusted,
+      isRuntimeTrusted: stemModels.isRuntimeTrusted,
+      modelsPath: stemModels.getModelRoot(),
+      cachePath: path.join(configManager.getCachePath(), 'stem-renders'),
+      ffmpegPath: process.env.WAVEFORGE_FFMPEG_PATH,
+      isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
+    })
+    trackStemRuntime = setupTrackStemIPC(ipcMain, {
+      modelPath: stemModels.getModelPath(),
+      pythonPath: stemModels.getRuntimePath(),
+      isModelTrusted: stemModels.isModelTrusted,
+      isRuntimeTrusted: stemModels.isRuntimeTrusted,
+      modelsPath: stemModels.getModelRoot(),
+      cachePath: path.join(configManager.getCachePath(), 'track-stems'),
+      ffmpegPath: process.env.WAVEFORGE_FFMPEG_PATH,
+      decoderPythonPath: app.isPackaged
+        ? path.join(process.resourcesPath, 'python-embed', 'python.exe')
+        : path.join(__dirname, '..', 'resources', 'python-embed', 'python.exe'),
+      isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
+    })
+  } catch (error) {
+    console.error('⚠️ [Stem Model] HTDemucs 模型/运行时初始化失败:', error instanceof Error ? error.message : error)
+  }
+  // AI 混音（DJTransGAN）运行时：严格可选；关闭时 renderer 不调用任何 Torch IPC
   setupAiMixIPC(ipcMain, configManager.getCachePath())
   // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理：设置面板「下载模型」用
   try {
     const { setupAiModelIPC } = require('./ai-model-manager.cjs')
-    setupAiModelIPC(ipcMain, (scope, message) => automixLog.log(scope, message))
+    setupAiModelIPC(ipcMain, (scope, message) => automixLog.log(scope, message), guardTrustedIpc)
   } catch (error) {
     console.error('⚠️ [AI Model] 模型下载管理器初始化失败:', error instanceof Error ? error.message : error)
   }
@@ -7073,17 +7864,74 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error('🎵 [AirPlay] 启动失败:', error instanceof Error ? error.message : error)
   }
+  // Razer Chroma：本地 REST 会话、设备探测与高频灯效帧。
+  try {
+    chromaControllerHandle = setupChromaIpc({ ipcMain, getMainWindow: () => mainWindow, repairBasePath: app.getPath('userData') })
+  } catch (error) {
+    console.error('[Chroma] 初始化失败:', error instanceof Error ? error.message : error)
+  }
+  // SignalRGB：Effect 安装、Local API 与 Canvas Event 桥。
+  try {
+    signalRgbControllerHandle = setupSignalRgbIpc({ ipcMain, getMainWindow: () => mainWindow, shell })
+  } catch (error) {
+    console.error('[SignalRGB] 初始化失败:', error instanceof Error ? error.message : error)
+  }
   ipcMain.handle('audio-output:is-supported', () => process.platform === 'win32' || process.platform === 'darwin')
+
+  // Apple 播放面 bridge：渲染端点 Apple 歌曲时经此自动拉起（appleWebViewBridge.ensureBridgeRunning）
+  ipcMain.handle('apple-bridge:spawn', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false }
+    try {
+      return await startAppleBridge()
+    } catch (error) {
+      console.error('[AppleBridge] spawn failed:', error?.message || error)
+      return false
+    }
+  })
+
+  // Apple 播放面 bridge：渲染端节能联动主动关闭（离开 Apple 平台 5 分钟）
+  ipcMain.handle('apple-bridge:stop', async (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return false
+    try {
+      if (appleBridgeChild && !appleBridgeChild.killed) {
+        appleBridgeChild.kill()
+        console.log('[AppleBridge] bridge stopped by renderer (平台节能)')
+      }
+      return true
+    } catch (error) {
+      console.error('[AppleBridge] stop failed:', error?.message || error)
+      return false
+    }
+  })
 
   app.on('will-quit', async () => {
     if (airplayControllerHandle) {
       try { airplayControllerHandle.dispose() } catch { /* 忽略 */ }
       airplayControllerHandle = null
     }
+    if (chromaControllerHandle) {
+      try { await chromaControllerHandle.dispose() } catch { /* 忽略 */ }
+      chromaControllerHandle = null
+    }
+    if (signalRgbControllerHandle) {
+      try { signalRgbControllerHandle.dispose() } catch { /* 忽略 */ }
+      signalRgbControllerHandle = null
+    }
   })
   
+  ipcMain.handle('audio-download:selectLocalFile', guardTrustedIpc('privileged', async () => {
+    if (!analysisRuntime?.audioDownload) throw new Error('Audio download service not initialized')
+    const result = await dialog.showOpenDialog({
+      title: '选择本地音频文件',
+      properties: ['openFile'],
+      filters: [{ name: '音频文件', extensions: ['mp3', 'flac', 'wav', 'ogg', 'm4a', 'aac', 'opus', 'webm'] }],
+    })
+    if (result.canceled || !result.filePaths[0]) return null
+    return analysisRuntime.audioDownload.authorizeLocalFile(result.filePaths[0])
+  }))
+
   // Setup audio download IPC handlers
-  ipcMain.handle('audio-download:prepare', async (_event, urlOrPath, trackKey) => {
+  ipcMain.handle('audio-download:prepare', guardTrustedIpc('privileged', async (_event, urlOrPath, trackKey) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       throw new Error('Audio download service not initialized')
     }
@@ -7091,42 +7939,41 @@ app.whenReady().then(async () => {
     const ext = String(result || '').split('.').pop()?.toLowerCase() || '?'
     automixLog.log('download', `trackKey=${trackKey} url=${String(urlOrPath).slice(0, 120)} -> ${result} (ext=${ext})`)
     return result
-  })
+  }))
+
 
   // 只读缓存命中检查（不触发下载）：看歌等场景优先用本地已缓存音轨（mv-align 已下载
   // 同一 DASH 音频），命中即秒开；未命中返回 null，调用方照旧走流式 URL。
-  ipcMain.handle('audio-download:peekCached', (_event, trackKey) => {
+  ipcMain.handle('audio-download:peekCached', guardTrustedIpc('privileged', (_event, trackKey) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       return null
     }
     return analysisRuntime.audioDownload.peekCached(trackKey)
-  })
+  }))
+
 
   // 把已下载的音频文件映射为渲染进程可 fetch 的 waveforge-media:// URL
   // （浏览器端 decodeAudioData 原生支持 m4a/aac——Python/librosa 侧 libsndfile 打不开）。
   // 仅允许下载缓存目录内的文件，与 render:getAudioUrl 同款路径校验。
-  ipcMain.handle('audio-download:getMediaUrl', (_event, filePath) => {
+  ipcMain.handle('audio-download:getMediaUrl', guardTrustedIpc('privileged', (_event, filePath) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload || !analysisRuntime.audioDownload.tempRoot) {
       throw new Error('Audio download service not initialized')
     }
     if (typeof filePath !== 'string' || !filePath.trim()) throw new Error('Media file path is required')
-    const resolved = path.resolve(filePath)
-    const relative = path.relative(path.resolve(analysisRuntime.audioDownload.tempRoot), resolved)
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (!analysisRuntime.audioDownload.isInsideTempRoot(filePath)) {
       throw new Error('Media file path is outside the audio download cache')
     }
-    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
-      throw new Error('Media file does not exist')
-    }
+    const resolved = fs.realpathSync.native(filePath)
     const url = toMediaUrl(resolved)
     automixLog.log('media-url', resolved)
     return url
-  })
+  }))
+
 
   // 保存渲染进程转码后的 WAV（Chromium decodeAudioData → 16bit PCM），供 Python
   // 渲染/AI worker 读取（libsndfile 只认 wav/flac/ogg/mp3，m4a/aac/opus 必须转码）。
   // 已存在同 key 的 WAV 直接复用，同一首歌只转码一次。
-  ipcMain.handle('audio-download:saveWav', (_event, trackKey, wavArrayBuffer) => {
+  ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', (_event, trackKey, wavArrayBuffer) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload || !analysisRuntime.audioDownload.tempRoot) {
       throw new Error('Audio download service not initialized')
     }
@@ -7134,68 +7981,92 @@ app.whenReady().then(async () => {
       throw new Error('A non-empty track key is required')
     }
     const buf = Buffer.from(wavArrayBuffer || new ArrayBuffer(0))
-    if (!buf.length || buf.length > 512 * 1024 * 1024) {
-      throw new Error('Invalid WAV payload size')
+    if (buf.length < 44 || buf.length > 512 * 1024 * 1024
+      || buf.toString('ascii', 0, 4) !== 'RIFF'
+      || buf.toString('ascii', 8, 12) !== 'WAVE') {
+      throw new Error('Invalid WAV payload')
     }
-    const safeName = trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) + '.wav'
+    const contentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
+    const safeName = `${trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100)}-${contentHash}.wav`
     const target = path.join(analysisRuntime.audioDownload.tempRoot, safeName)
-    if (fs.existsSync(target) && fs.statSync(target).isFile()) {
-      automixLog.log('saveWav', `trackKey=${trackKey} 复用已有 ${target}`)
-      return target
+    if (fs.existsSync(target)) {
+      if (!analysisRuntime.audioDownload.isInsideTempRoot(target)) {
+        throw new Error('WAV cache target escapes the audio download cache')
+      }
+      const existing = fs.realpathSync.native(target)
+      automixLog.log('saveWav', `trackKey=${trackKey} 复用已有 ${existing}`)
+      return existing
     }
-    fs.writeFileSync(target, buf)
+    const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
+    try {
+      fs.writeFileSync(temp, buf, { flag: 'wx' })
+      fs.renameSync(temp, target)
+      if (!analysisRuntime.audioDownload.isInsideTempRoot(target)) {
+        fs.rmSync(target, { force: true })
+        throw new Error('WAV cache target escapes the audio download cache')
+      }
+    } finally {
+      try { fs.rmSync(temp, { force: true }) } catch {}
+    }
     automixLog.log('saveWav', `trackKey=${trackKey} 写入 ${buf.length} bytes -> ${target}`)
     return target
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:cleanup', () => {
+  ipcMain.handle('audio-download:cleanup', guardTrustedIpc('privileged', () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
+      analysisRuntime.audioDownload.clearLocalAuthorizations()
       analysisRuntime.audioDownload.cleanupOldFiles()
     }
     return { success: true }
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:get-stats', () => {
+  ipcMain.handle('audio-download:get-stats', guardTrustedIpc('privileged', () => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       return { fileCount: 0, totalSize: 0, maxSize: 2 * 1024 * 1024 * 1024, cachePath: '' }
     }
     const stats = analysisRuntime.audioDownload.getCacheStats()
     const cachePath = path.join(configManager.getCachePath(), 'temp')
     return { ...stats, cachePath }
-  })
+  }))
+
   
-  ipcMain.handle('audio-download:clear-cache', () => {
+  ipcMain.handle('audio-download:clear-cache', guardTrustedIpc('privileged', () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
+      analysisRuntime.audioDownload.clearLocalAuthorizations()
       analysisRuntime.audioDownload.cleanupAll()
       return { success: true }
     }
     return { success: false }
-  })
+  }))
+
 
   // 应用更新管理：后台静默下载 + 退出即应用 + 更新日志/版本历史。
   // 处理器集中在 update-manager.cjs（下载进度经 update:download-status 事件广播）。
   try {
     const { setupUpdateIPC } = require('./update-manager.cjs')
-    setupUpdateIPC(ipcMain)
+    setupUpdateIPC(ipcMain, () => mainWindow, event => trustedIpc.isTrusted(event, 'update'))
   } catch (error) {
     console.error('⚠️ [更新] 更新管理器初始化失败:', error instanceof Error ? error.message : error)
   }
   
   // 配置管理 IPC 处理器
-  ipcMain.handle('config:get-cache-path', () => {
+  ipcMain.handle('config:get-cache-path', guardTrustedIpc('privileged', () => {
     return configManager.getCachePath()
-  })
+  }))
+
 
   // QQ 音乐官方 Skills Key 使用系统安全存储（Windows 上为 DPAPI）加密后再落盘。
   // 不写入项目配置、环境文件或日志。
-  ipcMain.handle('credentials:get-qqmusic-skill-key', () => ({
+  ipcMain.handle('credentials:get-qqmusic-skill-key', guardTrustedIpc('privileged', () => ({
     success: true,
     configured: Boolean(readQQMusicSkillKey()),
     key: readQQMusicSkillKey(),
     secure: safeStorage.isEncryptionAvailable()
-  }))
+  })))
 
-  ipcMain.handle('credentials:set-qqmusic-skill-key', (_event, value) => {
+  ipcMain.handle('credentials:set-qqmusic-skill-key', guardTrustedIpc('privileged', (_event, value) => {
     const key = String(value || '').trim()
     if (!/^qmk-[A-Za-z0-9._-]+$/.test(key)) {
       return { success: false, error: 'API Key 格式应为 qmk-…' }
@@ -7211,9 +8082,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message || '保存 API Key 失败' }
     }
-  })
+  }))
 
-  ipcMain.handle('credentials:delete-qqmusic-skill-key', () => {
+
+  ipcMain.handle('credentials:delete-qqmusic-skill-key', guardTrustedIpc('privileged', () => {
     try {
       const credentials = readSecureCredentials()
       delete credentials[QQMUSIC_SKILL_CREDENTIAL]
@@ -7222,9 +8094,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message || '删除 API Key 失败' }
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:set-cache-path', (event, newPath) => {
+  ipcMain.handle('config:set-cache-path', guardTrustedIpc('privileged', (event, newPath) => {
     try {
       // 验证路径是否有效
       if (typeof newPath !== 'string' || !newPath.trim() || !path.isAbsolute(newPath.trim())) {
@@ -7243,9 +8116,10 @@ app.whenReady().then(async () => {
     } catch (error) {
       return { success: false, error: error.message }
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:select-cache-path', async () => {
+  ipcMain.handle('config:select-cache-path', guardTrustedIpc('privileged', async () => {
     try {
       const result = await dialog.showOpenDialog({
         properties: ['openDirectory', 'createDirectory'],
@@ -7271,9 +8145,10 @@ app.whenReady().then(async () => {
       console.error('Failed to select cache path:', error)
       return null
     }
-  })
+  }))
+
   
-  ipcMain.handle('config:reset-cache-path', () => {
+  ipcMain.handle('config:reset-cache-path', guardTrustedIpc('privileged', () => {
     try {
       const defaultCachePath = configManager.getDefaultCachePath()
       
@@ -7289,7 +8164,8 @@ app.whenReady().then(async () => {
       console.error('Failed to reset cache path:', error)
       throw error
     }
-  })
+  }))
+
   
   registerMediaProtocol()
 
@@ -7322,6 +8198,9 @@ app.whenReady().then(async () => {
   createWindow()
   setGlobalMediaKeysEnabled(mediaKeysEnabled)
   updateTaskbar() // Windows 任务栏缩略图按钮与进度条初始化（渲染进程就绪后推送状态会再刷新）
+
+  // WebView2 播放面不在启动阶段预热：正常 Apple CENC 播放不需要它；
+  // 仅当 Electron L3/CENC 失败时由渲染端按需经 apple-bridge:spawn 拉起。
   // 全局高刷：若设置已开启，启动即应用（跟随所在显示器刷新率，最高 300Hz）
   applyHighRefreshRate()
   rebindHighRefreshRate()

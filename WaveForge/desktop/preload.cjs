@@ -85,6 +85,11 @@ contextBridge.exposeInMainWorld('electron', {
     setWallpaperWatcherEnabled: (enabled) => ipcRenderer.invoke('set-wallpaper-watcher', Boolean(enabled)),
   },
   
+  // 只读构建诊断（不暴露 EVS 输出、路径或凭据）
+  diagnostics: {
+    getVmpStatus: () => ipcRenderer.invoke('diagnostics:get-vmp-status'),
+  },
+
   // 开发者模式
   developerMode: {
     set: (enabled) => ipcRenderer.invoke('set-developer-mode', enabled),
@@ -100,6 +105,11 @@ contextBridge.exposeInMainWorld('electron', {
     reset: () => ipcRenderer.invoke('device-license:reset'),
   },
   
+  // Production Python helpers are started lazily; development may already run them.
+  localPython: {
+    ensure: (service) => ipcRenderer.invoke('local-python:ensure', service),
+  },
+
   // AutoMix 本地分析与缓存
   analysis: {
     startTrackAnalysis: (input) => ipcRenderer.invoke('analysis:start-track', input),
@@ -134,7 +144,36 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('render:aiMixAutomation', plan, sourceAudioPath, targetAudioPath),
   },
 
-  // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理
+  // HTDemucs stem-aware AutoMix Enhanced（模型缺失时返回 unavailable/null，v2 DSP 继续可用）
+  stems: {
+    status: () => ipcRenderer.invoke('stem:status'),
+    separate: (request) => ipcRenderer.invoke('stem:separate', request),
+    cancel: (requestId) => ipcRenderer.invoke('stem:cancel', requestId),
+    clearCache: () => ipcRenderer.invoke('stem:clearCache'),
+  },
+  stemModel: {
+    getStatus: () => ipcRenderer.invoke('stem-model:get-status'),
+    download: () => ipcRenderer.invoke('stem-model:download'),
+    pause: () => ipcRenderer.invoke('stem-model:pause'),
+    cancel: () => ipcRenderer.invoke('stem-model:cancel'),
+    delete: () => ipcRenderer.invoke('stem-model:delete'),
+    onProgress: (callback) => {
+      const listener = (_event, progress) => callback(progress)
+      ipcRenderer.on('stem-model:progress', listener)
+      return () => ipcRenderer.removeListener('stem-model:progress', listener)
+    },
+  },
+  trackStems: {
+    status: () => ipcRenderer.invoke('track-stem:status'),
+    materialize: (request) => ipcRenderer.invoke('track-stem:materialize', request),
+    ensureWindow: (request) => ipcRenderer.invoke('track-stem:ensureWindow', request),
+    cancel: (selector) => ipcRenderer.invoke('track-stem:cancel', selector),
+    readChunk: (filePath) => ipcRenderer.invoke('track-stem:readChunk', filePath),
+    getCacheStats: () => ipcRenderer.invoke('track-stem:getCacheStats'),
+    clearCache: () => ipcRenderer.invoke('track-stem:clearCache'),
+  },
+
+  // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理（严格可选）
   aiModel: {
     getStatus: () => ipcRenderer.invoke('ai-model:get-status'),
     download: () => ipcRenderer.invoke('ai-model:download'),
@@ -175,6 +214,7 @@ contextBridge.exposeInMainWorld('electron', {
   
   // Audio download for rendering
   audioDownload: {
+    selectLocalFile: () => ipcRenderer.invoke('audio-download:selectLocalFile'),
     prepare: (urlOrPath, trackKey) => 
       ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey),
     peekCached: (trackKey) =>
@@ -268,6 +308,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   // Apple Music 网页一键登录：内置窗口登录 Apple ID，自动抓取凭据
   appleLogin: () => ipcRenderer.invoke('apple-login'),
+  // Apple Music 登出：关闭登录窗口并清除专用网页会话与落盘 Cookie
+  appleLogout: () => ipcRenderer.invoke('apple-logout'),
   // 从 Apple 网页前端资源获取可用的 Developer Token（免密钥，约 70 天有效）
   appleFetchDevToken: () => ipcRenderer.invoke('apple-fetch-dev-token'),
   // amp-api 代理：渲染进程浏览器直连会被 CORS 拦截，改由主进程请求
@@ -287,6 +329,10 @@ contextBridge.exposeInMainWorld('electron', {
   appleFetchProfile: (profileUrl) => ipcRenderer.invoke('apple-fetch-profile', profileUrl),
   // Apple 账号页面（Apple ID / Apple Account，带全量会话 cookie 解析名字与头像）
   appleFetchAccount: (cookies) => ipcRenderer.invoke('apple-fetch-account', cookies),
+  // Apple 播放面 bridge（WebView2 原生源）：主进程拉起 apple_bridge.py（幂等）
+  spawnAppleBridge: () => ipcRenderer.invoke('apple-bridge:spawn'),
+  // Apple 播放面 bridge：渲染端节能联动（离开 Apple 平台 5 分钟）主动关闭
+  stopAppleBridge: () => ipcRenderer.invoke('apple-bridge:stop'),
   // 渲染进程日志转发到主进程控制台（后台窗口可见，便于排查）
   log: (message) => ipcRenderer.send('app-log', String(message)),
 
@@ -360,6 +406,40 @@ contextBridge.exposeInMainWorld('electron', {
       const listener = (_event, status) => callback(status)
       ipcRenderer.on('airplay:status', listener)
       return () => ipcRenderer.removeListener('airplay:status', listener)
+    },
+  },
+
+  // Razer Chroma：会话和网络访问收敛在主进程，渲染端只提交已校验的灯效帧。
+  chroma: {
+    activate: () => ipcRenderer.invoke('chroma:activate'),
+    deactivate: () => ipcRenderer.invoke('chroma:deactivate'),
+    getStatus: () => ipcRenderer.invoke('chroma:get-status'),
+    refreshDevices: () => ipcRenderer.invoke('chroma:refresh-devices'),
+    scanHardware: () => ipcRenderer.invoke('chroma:scan-hardware'),
+    setDeviceEnabled: (device, enabled) => ipcRenderer.invoke('chroma:set-device-enabled', device, enabled),
+    inspectAppList: () => ipcRenderer.invoke('chroma:inspect-app-list'),
+    repairAppList: () => ipcRenderer.invoke('chroma:repair-app-list'),
+    pushFrame: (frame) => ipcRenderer.send('chroma:frame', frame),
+    onStatus: (callback) => {
+      const listener = (_event, status) => callback(status)
+      ipcRenderer.on('chroma:status', listener)
+      return () => ipcRenderer.removeListener('chroma:status', listener)
+    },
+  },
+
+  signalrgb: {
+    getStatus: () => ipcRenderer.invoke('signalrgb:get-status'),
+    refresh: () => ipcRenderer.invoke('signalrgb:refresh'),
+    installEffect: () => ipcRenderer.invoke('signalrgb:install-effect'),
+    uninstallEffect: () => ipcRenderer.invoke('signalrgb:uninstall-effect'),
+    applyEffect: () => ipcRenderer.invoke('signalrgb:apply-effect'),
+    restoreEffect: () => ipcRenderer.invoke('signalrgb:restore-effect'),
+    sendEvent: (value, options) => ipcRenderer.invoke('signalrgb:send-event', value, options),
+    open: () => ipcRenderer.invoke('signalrgb:open-signalrgb'),
+    onStatus: (callback) => {
+      const listener = (_event, status) => callback(status)
+      ipcRenderer.on('signalrgb:status', listener)
+      return () => ipcRenderer.removeListener('signalrgb:status', listener)
     },
   },
 

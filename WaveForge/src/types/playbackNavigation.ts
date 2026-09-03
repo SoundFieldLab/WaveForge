@@ -14,6 +14,7 @@ export type PlaybackSurface =
   | 'artist-album'
   | 'album'
   | 'explore-detail'
+  | 'explore-apple'
   | 'explore-fm'
   | 'desktop-playlist'
   | 'traditional-playlist'

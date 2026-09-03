@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { createPlaybackTimeStore } from '../src/audio/playbackTimeStore.ts'
+import { createPlaybackTimeCommitGate, createPlaybackTimeStore } from '../src/audio/playbackTimeStore.ts'
 
 describe('createPlaybackTimeStore（播放时间状态存储）', () => {
   it('默认初始值为 0/0/false', () => {
@@ -85,5 +85,40 @@ describe('createPlaybackTimeStore（播放时间状态存储）', () => {
     unsubscribe()
     store.publish({ currentTime: 1 })
     expect(listener).not.toHaveBeenCalled()
+  })
+})
+
+describe('createPlaybackTimeCommitGate（根组件离散提交门控）', () => {
+  it('同一展示区间内 60Hz 连续时间只提交首帧', () => {
+    const shouldCommit = createPlaybackTimeCommitGate()
+    let commits = 0
+
+    for (let frame = 0; frame < 3600; frame += 1) {
+      if (shouldCommit({
+        currentTime: 10 + frame / 60,
+        isPlaying: true,
+        presentationKey: 'lyric-4:desktop-4:before-transition:before-report',
+      })) commits += 1
+    }
+
+    expect(commits).toBe(1)
+  })
+
+  it('歌词行、过渡窗口等展示边界变化时提交', () => {
+    const shouldCommit = createPlaybackTimeCommitGate()
+
+    expect(shouldCommit({ currentTime: 10, isPlaying: true, presentationKey: '4:4:0:0' })).toBe(true)
+    expect(shouldCommit({ currentTime: 10.2, isPlaying: true, presentationKey: '4:4:0:0' })).toBe(false)
+    expect(shouldCommit({ currentTime: 10.4, isPlaying: true, presentationKey: '5:4:0:0' })).toBe(true)
+    expect(shouldCommit({ currentTime: 10.6, isPlaying: true, presentationKey: '5:5:1:0' })).toBe(true)
+  })
+
+  it('暂停、回退 seek 与重置仍立即提交', () => {
+    const shouldCommit = createPlaybackTimeCommitGate()
+
+    expect(shouldCommit({ currentTime: 30, isPlaying: true, presentationKey: '8:8:0:1' })).toBe(true)
+    expect(shouldCommit({ currentTime: 30.1, isPlaying: false, presentationKey: '8:8:0:1' })).toBe(true)
+    expect(shouldCommit({ currentTime: 12, isPlaying: true, presentationKey: '3:3:0:0' })).toBe(true)
+    expect(shouldCommit({ currentTime: 0, isPlaying: true, presentationKey: '-1:-1:0:0' })).toBe(true)
   })
 })
