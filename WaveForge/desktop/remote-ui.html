@@ -325,7 +325,6 @@
   }
 
   var targetHostPort = location.host; // 当前连接目标（host:port），切换设备时更新
-  var targetToken = new URLSearchParams(location.search).get('t') || '';
   var currentName = CFG.computerName || 'WaveForge';
   var ws = null;
   var connected = false;
@@ -343,7 +342,7 @@
 
   function connect() {
     var proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(proto + '://' + targetHostPort + '/ws?t=' + targetToken);
+    ws = new WebSocket(proto + '://' + targetHostPort + '/ws');
     ws.onopen = function () {
       connected = true;
       send({ type: 'hello', name: getDeviceName() });
@@ -439,7 +438,6 @@
 
   function switchToDevice(d) {
     targetHostPort = location.hostname + ':' + d.port;
-    targetToken = d.token || '';
     currentName = d.name || 'WaveForge';
     document.getElementById('computerName').textContent = currentName;
     deviceList.hidden = true;

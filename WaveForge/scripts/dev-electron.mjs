@@ -1,10 +1,13 @@
-import { spawn, execFile } from 'child_process'
+import { spawn, execFile, spawnSync } from 'child_process'
 import { build, createServer, preview } from 'vite'
 import electron from 'electron'
 import { fileURLToPath } from 'url'
-import { dirname, resolve } from 'path'
+import { createRequire } from 'module'
+import { dirname, isAbsolute, resolve } from 'path'
+import { homedir } from 'os'
 import net from 'net'
-import { appendFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { randomBytes } from 'crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -20,8 +23,46 @@ const logStartup = message => {
 }
 
 const projectRoot = resolve(__dirname, '..')
+const require = createRequire(import.meta.url)
+const { selectWaveForgeUserData } = require('../desktop/user-data-profile.cjs')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
+
+// 直接执行本脚本（快捷方式/IDE/`node scripts/dev-electron.mjs`）时 npm 不会运行
+// predev:electron。这里再次确保 ECS production streaming VMP，避免原生 Apple CENC
+// 因 development VMP 被 -1021 拒绝后误走 WebView2 兼容兜底。
+const vmpCheck = spawnSync(process.execPath, [resolve(projectRoot, 'scripts/ensure-dev-vmp.cjs')], {
+  cwd: projectRoot,
+  stdio: 'inherit',
+  env: process.env,
+  windowsHide: true,
+})
+if (vmpCheck.status !== 0) {
+  console.error('[EVS/VMP] 开发运行时校验失败，终止启动以避免静默退回非原生音源')
+  process.exit(vmpCheck.status || 1)
+}
+
+const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).toString('base64url')
+const appDataRoot = process.platform === 'win32'
+  ? resolve(process.env.APPDATA || resolve(homedir(), 'AppData/Roaming'))
+  : resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), '.config'))
+const userDataRoot = selectWaveForgeUserData({
+  appDataRoot,
+  isPackaged: false,
+  overridePath: process.env.WAVEFORGE_USER_DATA,
+})
+let pythonCacheRoot = resolve(userDataRoot, 'cache')
+try {
+  const configured = JSON.parse(readFileSync(resolve(userDataRoot, 'config.json'), 'utf8'))?.cachePath
+  if (typeof configured === 'string' && isAbsolute(configured.trim())) pythonCacheRoot = resolve(configured.trim())
+} catch { /* Missing or invalid config uses the Electron default cache path. */ }
+mkdirSync(pythonCacheRoot, { recursive: true })
+const localServiceEnv = {
+  ...process.env,
+  WAVEFORGE_LOCAL_TOKEN: localServiceToken,
+  WAVEFORGE_CACHE_PATH: pythonCacheRoot,
+  WAVEFORGE_USERDATA: userDataRoot,
+}
 
 function getNewestMtime(targetPath) {
   if (!existsSync(targetPath)) return 0
@@ -117,7 +158,10 @@ async function isLocalApiServerHealthy() {
   try {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 1500)
-    const res = await fetch('http://127.0.0.1:3001/api/qq/cookie/status', { signal: controller.signal })
+    const res = await fetch('http://127.0.0.1:3001/health', {
+      headers: { 'X-WaveForge-Local-Token': localServiceToken },
+      signal: controller.signal,
+    })
     clearTimeout(timer)
     if (!res.ok) return false
     const contentType = res.headers.get('content-type') || ''
@@ -143,7 +187,7 @@ function isWaveForgeDevLeftover(commandLine) {
   const normalized = commandLine.replace(/[\\/]+/g, '/')
   const root = projectRoot.replace(/[\\/]+/g, '/')
   if (!normalized.includes(root)) return false
-  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py/.test(normalized)
+  return /vite\/bin\/vite|local-server\.mjs|compensation_server\.py|beat_analyzer\.py|loudness_server\.py|apple_bridge\.py/.test(normalized)
 }
 
 async function killProcess(pid) {
@@ -195,7 +239,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -227,7 +271,7 @@ async function startDev() {
       {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
+        env: { ...localServiceEnv, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' },
       }
     )
     // spawn 失败（嵌入式 python 缺失等）时避免未捕获的 'error' 事件崩掉启动器
@@ -254,6 +298,8 @@ async function startDev() {
     console.log('Starting Python Beat Service...')
     const pythonExe = resolve(__dirname, '../resources/python-embed/python.exe')
     const beatAnalyzer = resolve(__dirname, '../python-beat-service/beat_analyzer.py')
+    const beatModel = resolve(__dirname, '../resources/beat-this/final0.ckpt')
+    if (!existsSync(beatModel)) throw new Error(`Required Beat This model missing: ${beatModel}`)
     
     const pythonProc = spawn(
       pythonExe,
@@ -262,7 +308,9 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
+          BEAT_THIS_CHECKPOINT: beatModel,
+          WAVEFORGE_BEAT_MODEL_PATH: beatModel,
           PYTHONIOENCODING: 'utf-8',
           PYTHONUNBUFFERED: '1'
         }
@@ -304,7 +352,7 @@ async function startDev() {
         stdio: ['ignore', 'inherit', 'inherit'],
         windowsHide: true,
         env: {
-          ...process.env,
+          ...localServiceEnv,
           FORCE_COLOR: '1'
         }
       }
@@ -386,7 +434,8 @@ async function startDev() {
     {
       stdio: 'inherit',
       env: {
-        ...process.env,
+        ...localServiceEnv,
+        WAVEFORGE_USER_DATA: userDataRoot,
         WAVEFORGE_DEV_SERVER_URL: devServerUrl,
         WAVEFORGE_STARTUP_LOG: startupLogFile,
         PYTHONIOENCODING: 'utf-8',
@@ -414,9 +463,9 @@ async function startDev() {
     }
   }
 
-  electronProcess.on('close', () => {
+  electronProcess.on('close', code => {
     cleanup()
-    process.exit()
+    process.exit(typeof code === 'number' ? code : 1)
   })
 
   process.on('SIGINT', () => {

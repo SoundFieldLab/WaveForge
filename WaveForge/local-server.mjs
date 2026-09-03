@@ -32,6 +32,8 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 // 汽水加密音频解密代理（/api/soda/audio）：CENC 流服务端解密为可播 FLAC/m4a
 import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
+import { ByteLruCache, readResponseWithLimit } from './server/byte-lru-cache.mjs'
+import { isAuthorizedLocalRequest } from './server/local-service-auth.mjs'
 import dglabRelayModule from './server/dglab-relay.cjs'
 const { createDGLabRelay } = dglabRelayModule
 
@@ -67,6 +69,7 @@ axios.defaults.httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 })
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3001
+const LOCAL_SERVICE_TOKEN = String(process.env.WAVEFORGE_LOCAL_TOKEN || '')
 const ALLOWED_RENDERER_ORIGINS = new Set([
   'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -981,17 +984,29 @@ app.use((req, res, next) => {
     return res.status(426).json({ error: 'WebSocket 不在此服务，请连接遥控器服务的 /ws' })
   }
   const origin = req.headers.origin
+  const suppliedLocalToken = req.headers['x-waveforge-local-token']
+  const tokenAuthorized = isAuthorizedLocalRequest({
+    configuredToken: LOCAL_SERVICE_TOKEN,
+    suppliedToken: suppliedLocalToken,
+  })
   if (origin && !ALLOWED_RENDERER_ORIGINS.has(origin)) {
     return res.status(403).json({ error: 'Origin not allowed' })
+  }
+  if ((origin === 'null' || origin === 'file://') && !tokenAuthorized) {
+    return res.status(403).json({ error: 'Origin requires local service authentication' })
   }
   if (origin) {
     res.header('Access-Control-Allow-Origin', origin)
     res.header('Vary', 'Origin')
   }
   // QQ Music Skills 的用户密钥只通过本机请求头传递，避免出现在 URL、历史记录和日志中。
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-QQMusic-Skill-Key')
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE')
+  // Apple license 代理：兼容规范 Media-User-Token 与历史 X-Apple-Music-User-Token。
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Local-Token, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal')
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
+  if (!tokenAuthorized) {
+    return res.status(403).json({ error: 'Unauthorized local service request' })
+  }
   next()
 })
 
@@ -1004,10 +1019,9 @@ registerSodaRoutes(app)
 registerSodaAudioProxy(app)
 registerAppleArtworkRoutes(app)
 
-// DG_LAB 郊狼插件中继（默认 30082 端口，127.0.0.1 监听；「允许局域网连接」时绑 0.0.0.0 供手机扫码）
+// DG_LAB 郊狼插件中继：仅注册控制路由；插件显式启用后才启动 30082 监听。
 const dglabRelay = createDGLabRelay()
 dglabRelay.registerHttp(app)
-dglabRelay.start()
 
 const fetchLocationProvider = async (url, normalize) => {
   const controller = new AbortController()
@@ -1346,9 +1360,10 @@ async function isBlockedFetchUrl(rawUrl) {
 // 图片代理（解决防盗链和CORS）
 // 封面内存缓存：同一 URL 不重复请求上游。大歌单滚动浏览/反复进入歌单时，
 // 避免几千个封面请求反复打穿代理与上游 CDN。
-const coverCache = new Map()
-const COVER_CACHE_MAX = 800
+const COVER_CACHE_MAX_BYTES = 128 * 1024 * 1024
+const COVER_CACHE_ITEM_MAX_BYTES = 10 * 1024 * 1024
 const COVER_CACHE_TTL_MS = 6 * 60 * 60 * 1000
+const coverCache = new ByteLruCache({ maxBytes: COVER_CACHE_MAX_BYTES, maxEntries: 800, ttlMs: COVER_CACHE_TTL_MS })
 
 app.get('/api/cover', async (req, res) => {
   try {
@@ -1373,7 +1388,7 @@ app.get('/api/cover', async (req, res) => {
 
     // 缓存命中：直接回缓存字节（带 Cache-Control 供浏览器二次命中）
     const cached = typeof url === 'string' ? coverCache.get(url) : null
-    if (cached && Date.now() - cached.at < COVER_CACHE_TTL_MS) {
+    if (cached) {
       res.set({
         'Content-Type': cached.type,
         'Access-Control-Allow-Origin': '*',
@@ -1454,14 +1469,12 @@ app.get('/api/cover', async (req, res) => {
 
     // 读取字节并写入缓存（≤10MB 才缓存），再返回给浏览器
     const contentType = response.headers.get('content-type') || 'image/jpeg'
-    const arrayBuffer = await response.arrayBuffer()
-    const buf = Buffer.from(arrayBuffer)
-    if (typeof url === 'string' && buf.length <= 10 * 1024 * 1024) {
-      if (coverCache.size >= COVER_CACHE_MAX) {
-        const oldestKey = coverCache.keys().next().value
-        coverCache.delete(oldestKey)
-      }
-      coverCache.set(url, { buffer: buf, type: contentType, at: Date.now() })
+    if (!contentType.toLowerCase().startsWith('image/')) {
+      throw new Error('Cover response is not an image')
+    }
+    const buf = await readResponseWithLimit(response, COVER_CACHE_ITEM_MAX_BYTES)
+    if (typeof url === 'string') {
+      coverCache.set(url, { buffer: buf, type: contentType }, buf.length)
     }
     res.set({
       'Content-Type': contentType,
@@ -4262,12 +4275,15 @@ app.get('/api/qq/album', async (req, res) => {
 // QQ音乐 - 获取艺人歌曲
 app.get('/api/qq/artist/songs', async (req, res) => {
   try {
-    const { mid, limit = 50 } = req.query
+    const { mid, limit = 50, offset = 0 } = req.query
     if (!mid) {
       return res.status(400).json({ error: '请提供歌手mid' })
     }
-    // 使用 qq-music-api 库获取歌手歌曲
-    const result = await qqMusicApi.api('singer/songs', { singermid: mid, num: limit })
+    const pageSize = Math.max(1, Math.min(100, Number(limit) || 50))
+    const normalizedOffset = Math.max(0, Number(offset) || 0)
+    const page = Math.floor(normalizedOffset / pageSize) + 1
+    // qq-music-api singer/songs 使用一基页码。
+    const result = await qqMusicApi.api('singer/songs', { singermid: mid, num: pageSize, page })
     // 兼容两种数据结构：result.data 或直接 result
     const data = result.data || result
     
@@ -4292,7 +4308,7 @@ app.get('/api/qq/artist/songs', async (req, res) => {
       console.log('[QQ音乐艺人歌曲] 前5首歌曲:', JSON.stringify(songs.slice(0, 5), null, 2))
     }
     
-    res.json({ songs, total: data.total })
+    res.json({ songs, total: data.total, offset: normalizedOffset, limit: pageSize, page })
   } catch (error) {
     console.error('[QQ音乐艺人歌曲] 错误:', error)
     res.status(500).json({ error: error.message, songs: [] })
@@ -8529,9 +8545,8 @@ function getWallpaperEnginePaths(customPath = null) {
 // WallpaperEngine 壁纸扫描 API
 app.get('/api/wallpaper-engine/scan', async (req, res) => {
   try {
-    // 获取所有可能的路径
-    const customPath = req.query.path
-    const possiblePaths = await getWallpaperEnginePaths(customPath)
+    // 仅扫描系统/Steam 已知安装位置。HTTP 查询参数不能授予任意本地目录读取能力。
+    const possiblePaths = await getWallpaperEnginePaths()
     possiblePaths.forEach((p, i) => console.log(`   ${i + 1}. ${p}`))
 
     // 找到所有存在的目录
@@ -10917,6 +10932,60 @@ app.get('/api/apple/amp', proxyAppleAmpApi)
 app.post('/api/apple/amp', proxyAppleAmpApi)
 app.patch('/api/apple/amp', proxyAppleAmpApi)
 app.delete('/api/apple/amp', proxyAppleAmpApi)
+
+// ── Apple Music Widevine license 代理（acquireWebPlaybackLicense）───────────
+// 渲染进程直连时 Origin 是本机页面（127.0.0.1:3000），Apple license 服务会做来源
+// 校验并返回 200 + 错误 JSON（无 license 字段）。统一走本地代理，请求头与
+// webPlayback 同款（Origin/Referer = music.apple.com）。
+const APPLE_LICENSE_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense'
+// Apple 网页会话 Cookie（登录时由 main 进程落盘）：license 接口校验网页会话，
+// 仅凭 media-user-token 会被拒（-1002 session ended）
+function readAppleWebCookieHeader() {
+  try {
+    const base = process.env.WAVEFORGE_USERDATA
+      || join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'Electron')
+    const data = JSON.parse(readFileSync(join(base, 'apple-web-cookies.json'), 'utf8'))
+    return typeof data?.cookie === 'string' && data.cookie ? data.cookie : ''
+  } catch {
+    return ''
+  }
+}
+app.post('/api/apple/license', async (req, res) => {
+  const headers = {
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+    Origin: 'https://music.apple.com',
+    Referer: 'https://music.apple.com/',
+    'X-Apple-Renewal': 'true',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  }
+  const auth = req.headers['authorization']
+  if (auth) headers.Authorization = auth
+  // 兼容渲染端历史头名，并统一转发 Apple 私有 license 接口需要的 Media-User-Token。
+  // 此前只读 media-user-token，导致 X-Apple-Music-User-Token 在代理边界丢失。
+  const mut = req.headers['media-user-token'] || req.headers['x-apple-music-user-token']
+  if (mut) headers['Media-User-Token'] = String(mut)
+  const cookieHeader = readAppleWebCookieHeader()
+  if (cookieHeader) headers.Cookie = cookieHeader
+  try {
+    const response = await axios({
+      method: 'POST',
+      url: APPLE_LICENSE_URL,
+      timeout: 20000,
+      headers,
+      data: req.body || undefined,
+      responseType: 'text',
+      validateStatus: () => true,
+    })
+    const text = String(response.data || '')
+    console.log(`[Apple License 代理] HTTP ${response.status} len=${text.length}${text.length < 200 ? ' body=' + text : ''}${cookieHeader ? ' cookie=yes' : ' cookie=NO'}`)
+    res.status(response.status)
+    res.type('application/json').send(text)
+  } catch (error) {
+    console.error('[Apple License 代理] 失败:', error.message || error)
+    res.status(502).json({ error: error.message || 'Apple license 请求失败' })
+  }
+})
 
 // 健康检查
 app.get('/health', (req, res) => {
