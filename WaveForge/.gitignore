@@ -41,12 +41,13 @@ waveforge-wallpapers/
 # TV 端兑换授权记录（dev 时存项目根，运行时生成不入库）
 tv-license.json
 
-# 根目录文档：仅保留 4 个核心 md（AGENTS/README/HANDOVER/CONTEXT），其余本地文档不入库
+# 根目录文档：仅保留 4 个核心 md（AGENTS/README/HANDOVER/CONTEXT）+ 私有许可，其余本地文档不入库
 /*.md
 !/AGENTS.md
 !/README.md
 !/HANDOVER.md
 !/CONTEXT.md
+!/PRIVATE-LICENSE.md
 
 # v3 融合临时目录（用户待删，不入库）
 temp/

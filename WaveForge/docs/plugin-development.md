@@ -141,14 +141,15 @@ interface PluginContext {
 
 ## 7. 安全边界与限制
 
-导入插件在**受限沙箱**中执行：
+导入插件的运行时代码当前与 WaveForge renderer **同权限执行，不是安全沙箱**：
 
-- 无 DOM / `window` / `document` 访问；
-- 无 `require` / `import`（不提供模块加载器）；
-- 仅可访问 `ctx` 白名单 API（见第 3 节）；
-- 建议：不要请求远程资源；状态用 `ctx.storage` 持久化。
+- 不提供 CommonJS `require`，但代码仍可访问 `window`、`document`、`fetch` 和页面存储；
+- 仅安装来源可信、可审计的插件文件；安装界面会明确标记含运行时代码的插件；
+- 插件停用或卸载时，宿主会调用同一 lifecycle 的 `onDisable`，并强制释放通过 `ctx.audio.subscribe` 建立的订阅；
+- 单个 manifest 的运行时代码上限为 256 KB，避免超大输入阻塞 renderer；
+- 插件状态应优先使用 `ctx.storage`，网络和敏感数据访问应在插件说明中明确披露。
 
-请让用户明确知晓插件行为，避免误用。
+未来若要运行不受信代码，必须迁移到独立进程或具备真实隔离边界的执行环境。
 
 ## 8. 完整示例
 
@@ -175,3 +176,22 @@ interface PluginContext {
 - **体感风格引擎**（`server/dglab-relay.cjs` STYLES）：7 套风格（立体声/心跳/呼吸/潮汐/敲击/流动/重拳），每套 = 特征→AB 强度映射 + 自研脉冲包络（不依赖原厂波形）+ 通道角色；切换走安全链（强度差/上限/恢复淡入/死区/Duty）。
 - 强度差三档体质（强30/中12/弱5/自定义）与恢复适应时间三档（快1s/中2.5s/慢5s）为最轻度的安全默认；音乐升降速度由乐速因子（节拍间隔+flux 速率）动态适配。
 - 播放暂停立即归零、续播按恢复档缓升；波形输出可一键启禁（仅停输出、不断连）。
+
+## 附录：Razer Chroma 插件架构契约
+
+- **设备边界**：Chroma REST API 只能可靠控制 `keyboard`、`mouse`、`mousepad`、`headset`、`keypad`、`chromalink` 六类广播端点，不能枚举具体硬件型号。`desktop/razer-device-discovery.cjs` 通过 Windows PnP 与 VID/PID 独立补充真实型号；UI 必须区分物理设备与 SDK 输出通道。
+- **区域协商**：内部鼠标垫预览采用 REST v4 的 20 区布局；发送端若收到旧服务的 `expecting an array of 15 elements`，自动降采样并锁定本会话 15 区能力。
+- **会话归属**：注册、心跳、设备效果和会话注销全部由 Electron 主进程的 `desktop/chroma-ipc.cjs` 管理。渲染端只能通过受限 IPC 提交白名单设备的定长灯效帧。
+- **所见即所得**：`src/plugins/clients/chroma/chromaStyles.ts` 是真机输出与控制台预览共用的唯一灯效引擎，避免预览和硬件行为分叉。
+- **后台门控**：插件仅在启用且用户打开后台联动时持有音频分析器后台租约。插件关闭后必须释放租约和 Chroma 会话，将灯光控制权交还雷云。
+- **兼容策略**：REST 传输封装必须保持独立。若未来迁移到 Wyvrn ChromaRGB SDK，只替换主进程传输层，不改灯效引擎与控制台。
+- **Synapse 应用列表编码**：SDK 注册标题固定使用 ASCII `WaveForge`。Synapse 4 / Chroma SDK 4.0.1 的应用索引 JSON 对非 ASCII helper 名称存在 `invalid UTF-8 byte` 缺陷；该错误会让整个优先级列表为空。控制台只清理 WaveForge 自己生成的旧调试条目，第三方非 ASCII 应用只诊断、不自动修改。
+
+## 附录：SignalRGB 插件架构契约
+
+- **官方扩展模型**：SignalRGB 没有稳定的外部逐 LED 写入 API。WaveForge 安装自主编写的 `WaveForge.html` Dynamic Effect，由 Effect 直接读取 `engine.audio` 并绘制 320×200 灯光画布，SignalRGB 负责映射到用户布局与全部受支持设备。
+- **低频通信**：WaveForge 只通过 Canvas Event 发送播放、暂停、重拍、主题、风格和段落等白名单语义事件，不发送频谱或 LED 帧。
+- **Pro 降级**：Local API 只用于自动应用/恢复效果和读取布局。HTTP 403 表示没有 Pro 或未授权，必须降级为用户在 SignalRGB 中手动选择 Effect，不作为插件故障。
+- **安全安装**：Effect 仅在用户于控制台明确确认后写入 SignalRGB 最新版本的 `Effects/Dynamic` 目录。更新和卸载必须校验 WaveForge sidecar 与 SHA-256；无法证明所有权时拒绝覆盖或删除。
+- **版本迁移**：SignalRGB 的 `app-*` 目录会随更新变化。检测到 Effect 仅存在于旧版本目录时，提示用户重新确认安装并重启 SignalRGB。
+- **能力边界**：Local API 不公开物理设备型号、LED 拓扑和电量，SignalRGB 控制台不得伪造这些数据。

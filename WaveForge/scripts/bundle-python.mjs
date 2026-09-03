@@ -10,6 +10,7 @@
  * 4. 打包到 resources/python-embed/
  */
 
+import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import https from 'https'
@@ -24,8 +25,24 @@ const __dirname = path.dirname(__filename)
 
 const PROJECT_ROOT = path.resolve(__dirname, '..')
 const PYTHON_EMBED_DIR = path.join(PROJECT_ROOT, 'resources', 'python-embed')
+const CANONICAL_REQUIREMENTS_PATH = path.join(PROJECT_ROOT, 'requirements.txt')
 const PYTHON_VERSION = '3.13.15' // 使用稳定版本
 const PYTHON_ARCH = 'amd64' // 64位
+
+const BEAT_THIS_MODEL_DIR = path.join(PROJECT_ROOT, 'resources', 'beat-this')
+const BEAT_THIS_MODEL_PATH = path.join(BEAT_THIS_MODEL_DIR, 'final0.ckpt')
+const BEAT_THIS_MODEL_METADATA_PATH = path.join(BEAT_THIS_MODEL_DIR, 'model.json')
+const BEAT_THIS_MODEL_METADATA = {
+  schemaVersion: 1,
+  provider: 'beat-this',
+  version: '1.1.0',
+  modelId: 'final0',
+  file: 'final0.ckpt',
+  bytes: 81058141,
+  sha256: '8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331',
+  bundled: true,
+  acquisitionRequired: false,
+}
 
 // Python 嵌入式版本下载 URL
 const PYTHON_EMBED_URL = `https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-${PYTHON_ARCH}.zip`
@@ -137,6 +154,19 @@ async function installPip(pythonDir) {
   fs.unlinkSync(getPipPath)
 }
 
+function verifyBeatThisModel() {
+  if (!fs.existsSync(BEAT_THIS_MODEL_PATH)) {
+    throw new Error(`缺少必要的 Beat This 模型: ${BEAT_THIS_MODEL_PATH}`)
+  }
+  const bytes = fs.statSync(BEAT_THIS_MODEL_PATH).size
+  const sha256 = crypto.createHash('sha256').update(fs.readFileSync(BEAT_THIS_MODEL_PATH)).digest('hex')
+  if (bytes !== BEAT_THIS_MODEL_METADATA.bytes || sha256 !== BEAT_THIS_MODEL_METADATA.sha256) {
+    throw new Error(`Beat This final0 完整性校验失败（bytes=${bytes}, sha256=${sha256}）`)
+  }
+  fs.writeFileSync(BEAT_THIS_MODEL_METADATA_PATH, `${JSON.stringify(BEAT_THIS_MODEL_METADATA, null, 2)}\n`, 'utf8')
+  console.log('✅ Beat This final0 模型完整性校验通过')
+}
+
 /**
  * 安装 Python 依赖
  */
@@ -144,22 +174,20 @@ async function installDependencies(pythonDir) {
   console.log('📦 安装项目依赖...')
   
   const pythonExe = path.join(pythonDir, 'python.exe')
-  const requirementsPath = path.join(PROJECT_ROOT, 'requirements.txt')
+  const requirementsPath = CANONICAL_REQUIREMENTS_PATH
   
   if (!fs.existsSync(requirementsPath)) {
-    console.error('❌ 未找到 requirements.txt')
-    process.exit(1)
+    throw new Error(`未找到规范依赖锁文件: ${requirementsPath}`)
   }
   
-  // 镜像源由调用方控制（pip 原生 PIP_INDEX_URL 环境变量）：
-  //  - GitHub Actions 在 yml 里设 PIP_INDEX_URL=https://pypi.org/simple（官方直连）
-  //  - 本地（国内）用户设 PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 加速
-  //  - 未设 → pip 默认官方 PyPI
-  // 脚本不自行决定镜像，只透传环境变量。
-  // --only-binary :all: 防止 numpy/scipy 在无预编译 wheel 时走源码构建
-  // （嵌入式 Python 无 meson/ninja 编译工具链，源码构建必然失败）
-  console.log(`⚙️  安装依赖...${process.env.PIP_INDEX_URL ? `（镜像：${process.env.PIP_INDEX_URL}）` : '（pip 默认官方 PyPI）'}`)
-  const cmd = `"${pythonExe}" -m pip install -r "${requirementsPath}" --only-binary :all: --no-warn-script-location`
+  // 镜像源由调用方控制（pip 原生 PIP_INDEX_URL 环境变量）。依赖锁、平台和
+  // wheel-only 策略由此脚本固定，避免构建环境解析出不同的 Beat This/Torch 组合。
+  console.log(`⚙️  安装锁定依赖: ${path.relative(PROJECT_ROOT, requirementsPath)}`)
+  console.log(`⚙️  平台: CPython ${PYTHON_VERSION} win_amd64${process.env.PIP_INDEX_URL ? `；镜像：${process.env.PIP_INDEX_URL}` : '；pip 默认索引'}`)
+  // proxy-tools 0.1.0 is a small pure-Python dependency of pywebview and has no wheel.
+  // Install that exact source distribution first; every remaining package stays wheel-only.
+  await execAsync(`"${pythonExe}" -m pip install proxy-tools==0.1.0 --no-deps --no-warn-script-location --disable-pip-version-check`, { maxBuffer: 10 * 1024 * 1024 })
+  const cmd = `"${pythonExe}" -m pip install --requirement "${requirementsPath}" --only-binary :all: --no-warn-script-location --disable-pip-version-check`
   
   const { stdout, stderr } = await execAsync(cmd, { maxBuffer: 10 * 1024 * 1024 })
   
@@ -217,24 +245,23 @@ function createVersionInfo(pythonDir) {
     pythonVersion: PYTHON_VERSION,
     arch: PYTHON_ARCH,
     createdAt: new Date().toISOString(),
+    canonicalRequirements: path.relative(PROJECT_ROOT, CANONICAL_REQUIREMENTS_PATH).replaceAll('\\', '/'),
+    modelAcquisition: BEAT_THIS_MODEL_METADATA,
     packages: {}
   }
   
-  // 尝试读取已安装的包列表
   const pythonExe = path.join(pythonDir, 'python.exe')
   
-  exec(`"${pythonExe}" -m pip list --format=json`, (error, stdout) => {
-    if (!error) {
+  return execAsync(`"${pythonExe}" -m pip list --format=json`)
+    .then(({ stdout }) => {
       const packages = JSON.parse(stdout)
       packages.forEach(pkg => {
         versionInfo.packages[pkg.name] = pkg.version
       })
-    }
-    
-    const infoPath = path.join(pythonDir, 'VERSION.json')
-    fs.writeFileSync(infoPath, JSON.stringify(versionInfo, null, 2))
-    console.log('✅ 版本信息已保存')
-  })
+      const infoPath = path.join(pythonDir, 'VERSION.json')
+      fs.writeFileSync(infoPath, JSON.stringify(versionInfo, null, 2))
+      console.log('✅ 版本和模型获取信息已保存')
+    })
 }
 
 /**
@@ -242,7 +269,10 @@ function createVersionInfo(pythonDir) {
  */
 async function main() {
   try {
-    // 1. 创建目录
+    // 1. Verify the required bundled model before rebuilding the runtime.
+    verifyBeatThisModel()
+
+    // 2. 创建目录
     console.log('📁 创建目录结构...')
     fs.mkdirSync(PYTHON_EMBED_DIR, { recursive: true })
     
@@ -274,7 +304,7 @@ async function main() {
     cleanupCache(PYTHON_EMBED_DIR)
     
     // 8. 创建版本信息
-    createVersionInfo(PYTHON_EMBED_DIR)
+    await createVersionInfo(PYTHON_EMBED_DIR)
     
     // 9. 清理临时文件
     console.log('🧹 清理临时文件...')

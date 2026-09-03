@@ -1,7 +1,2 @@
-beat-this>=1.0.0
-librosa>=0.10.0
-numpy>=1.24.0
-soundfile>=0.12.0
-pedalboard>=0.9.0
-scipy>=1.10.0
-numba>=0.57.0
+# Canonical dependency lock. Run pip from the repository root or use this file directly.
+-r ../requirements.txt

@@ -1,7 +1,23 @@
+# WaveForge canonical Python runtime lock (CPython 3.13, Windows x64)
+# Keep this file as the single dependency source consumed by scripts/bundle-python.mjs.
+# Update pins together and regenerate the embedded runtime when changing this file.
 pedalboard==0.9.24
-numpy>=1.26.4,<3.0.0
-scipy>=1.13.0,<2.0.0
-librosa>=0.11.0,<0.12.0
-soundfile>=0.12.1
+numpy==2.5.2
+scipy==1.18.0
+librosa==0.11.0
+soundfile==0.14.0
+soxr==1.1.0
+numba==0.67.0
+llvmlite==0.49.0
+scikit-learn==1.9.0
 flask==3.0.0
 flask-cors==4.0.0
+pywebview==6.1
+proxy-tools==0.1.0
+pyaudiowpatch==0.2.12.8
+beat-this==1.1.0
+torch==2.7.1
+torchaudio==2.7.1
+einops==0.8.1
+rotary-embedding-torch==0.8.9
+setuptools==69.5.1
