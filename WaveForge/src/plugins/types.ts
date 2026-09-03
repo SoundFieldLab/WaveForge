@@ -39,6 +39,8 @@ export interface PluginManifest {
   notice?: PluginNotice
   /** 导入插件的运行时代码（可选，受限沙箱执行）。 */
   code?: string
+  /** 启用后需要保持实时音频分析器运行。 */
+  needsAudio?: boolean
   source: PluginSource
   installedAt?: number
 }

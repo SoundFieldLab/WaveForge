@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { AudioResampler, convertToS16Le, float32ToS16LePcm } from '../src/services/audioResample'
 
 /** 生成交错立体声正弦波（左声道 sin，右声道 -sin） */
@@ -28,6 +28,57 @@ function leftChannel(interleaved: Float32Array): Float32Array {
   const out = new Float32Array(frames)
   for (let i = 0; i < frames; i += 1) out[i] = interleaved[i * 2]
   return out
+}
+
+/** 优化前的直接计算实现，用于锁定分块输出和数值结果。 */
+class ReferenceAudioResampler {
+  private readonly ratio: number
+  private tails: Float32Array[] = []
+  private totalInput = 0
+  private outPosition = 0
+
+  constructor(inputRate: number, outputRate: number, private readonly channels: number) {
+    this.ratio = inputRate / outputRate
+  }
+
+  process(input: Float32Array): Float32Array {
+    const frameCount = input.length / this.channels
+    const tailLen = this.tails.length === this.channels ? this.tails[0].length : 0
+    const total = tailLen + frameCount
+    const channelsData: Float32Array[] = []
+    for (let c = 0; c < this.channels; c += 1) {
+      const data = new Float32Array(total)
+      if (tailLen > 0) data.set(this.tails[c])
+      for (let i = 0; i < frameCount; i += 1) data[tailLen + i] = input[i * this.channels + c]
+      channelsData.push(data)
+    }
+
+    this.totalInput += frameCount
+    const nextOut = Math.floor(Math.max(0, this.totalInput - 18) / this.ratio)
+    const out = new Float32Array(Math.max(0, nextOut - this.outPosition) * this.channels)
+    const windowBase = this.totalInput - frameCount - tailLen
+    for (let o = 0; o < out.length / this.channels; o += 1) {
+      const windowPos = (this.outPosition + o) * this.ratio - windowBase
+      const center = Math.floor(windowPos)
+      for (let c = 0; c < this.channels; c += 1) {
+        let sum = 0
+        for (let k = -15; k <= 16; k += 1) {
+          const idx = center + k
+          if (idx < 0 || idx >= total) continue
+          const x = windowPos - idx
+          const sincX = Math.abs(x) < 1e-9 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)
+          const wx = (x + 16) / 32
+          const window = 0.42 - 0.5 * Math.cos(2 * Math.PI * wx) + 0.08 * Math.cos(4 * Math.PI * wx)
+          sum += channelsData[c][idx] * sincX * window
+        }
+        out[o * this.channels + c] = sum
+      }
+    }
+    this.outPosition = nextOut
+    const keep = Math.min(total, 32)
+    this.tails = channelsData.map((data) => data.subarray(total - keep).slice())
+    return out
+  }
 }
 
 describe('AudioResampler（窗函数 sinc 重采样）', () => {
@@ -97,6 +148,34 @@ describe('AudioResampler（窗函数 sinc 重采样）', () => {
     resampler.reset()
     const out = resampler.process(makeSine(1000, 48000, 0.5))
     expect(out.length).toBeGreaterThan(0)
+  })
+
+  it('固定小块流与原始窗函数 sinc 实现逐样本一致', () => {
+    const input = makeSine(997, 48000, 0.25)
+    const optimized = new AudioResampler(48000, 44100, 2)
+    const reference = new ReferenceAudioResampler(48000, 44100, 2)
+    let offset = 0
+    for (const frames of [1, 17, 128, 509, 64, 1024, 7, 333, 2048, 4096]) {
+      if (offset >= input.length) break
+      const end = Math.min(input.length, offset + frames * 2)
+      expect(optimized.process(input.subarray(offset, end))).toEqual(reference.process(input.subarray(offset, end)))
+      offset = end
+    }
+    if (offset < input.length) {
+      expect(optimized.process(input.subarray(offset))).toEqual(reference.process(input.subarray(offset)))
+    }
+  })
+
+  it('process 热路径不再计算 sin/cos 系数', () => {
+    const input = makeSine(440, 48000, 0.1)
+    const resampler = new AudioResampler(48000, 44100, 2)
+    const sin = vi.spyOn(Math, 'sin')
+    const cos = vi.spyOn(Math, 'cos')
+    resampler.process(input)
+    expect(sin).not.toHaveBeenCalled()
+    expect(cos).not.toHaveBeenCalled()
+    sin.mockRestore()
+    cos.mockRestore()
   })
 })
 

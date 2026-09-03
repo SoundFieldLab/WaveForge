@@ -5,14 +5,9 @@
  *  - 输出模式：双耳 Binaural / 立体声下混 可切换（→ onPatch({ output })，字段
  *    SpatialParams.output = 'binaural' | 'stereo' | 'multichannel' 已落地）；
  *    多声道（开发中 禁用）；
- *  - HRTF 数据集：内置两套选择（MIT KEMAR / CIPIC subject_003，规划书 §4.1——
- *    setBuiltinDataset 解码内嵌网格 → postGrid 热更新 + localStorage 锚点；
- *    CIPIC 未打包（datasets.ts base64 null）时禁用并标注「数据未打包」）+
- *    当前数据集状态行（内置选择 / 导入后显示已导入文件名）+ 「导入 SOFA 数据集」
- *    按钮（.sofa 文件 → parseSofaFile → setHrtfDataset，两函数契约已落地：
- *    sofa.ts 解析 + fusion.ts 热更新/持久化/校验，无待收口项）；
- *    SADIE II 需注册下载，保持禁用（注释：后续 wave 接入）；
- *  - 卷积模式：时域已由引擎后端实现（并行代理），UI 启用按钮留收口确认（保持禁用标注）；
+ *  - HRTF：当前使用 EngineV3 内联合成解析 HRTF；外部数据集导入尚未实现，
+ *    因此不展示无效的文件选择控件；
+ *  - 卷积模式：时域与分区 FFT 由引擎后端实现；
  *  - 渲染资源：最大对象数 16 → 64（引擎支持到 64 对象，本波性能基准已覆盖）。
  *
  * 保持既有：性能模式（已接线 spatial.perfMode，随快照持久化）、主题静态展示。
@@ -25,14 +20,12 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Settings2, Upload, X } from 'lucide-react'
+import { Settings2, X } from 'lucide-react'
 import type { HSETheme } from '../hse-theme'
 import type { DeepPartial, SpatialParams } from '../../src/spatial/types'
-// 空间音频已内联 EngineV3（纯 TS DSP），独立 fusion worklet 层已移除：
-//  - SOFA 数据集导入（sofa.ts）与内置数据集切换（gridSource + fusion setBuiltinDataset）
-//    依赖已删模块，本波标注「开发中」禁用，后续 wave 改走 EngineV3 内联合成 HRTF；
-//  - 输出设备枚举/切换（fusion listOutputDevices/setOutputDevice）同样依赖已删模块，
-//    标注「开发中」禁用，后续 wave 接主播放器 AudioContext.setSinkId。
+// 空间音频已内联 EngineV3（纯 TS DSP），当前使用合成解析 HRTF。
+// 外部 SOFA 数据集导入与独立 fusion worklet 已移除，避免展示不可操作的占位控件。
+// 输出设备切换仍由主播放器的独立设备控制入口负责。
 import { Segmented, Slider } from './Primitives'
 import { DEFAULT_KEYMAP } from './worldControl'
 import type { KeyMap } from './worldControl'
@@ -130,8 +123,6 @@ const DISTANCE_MODELS: { value: 'inverse' | 'linear' | 'exponential'; label: str
 ]
 
 export default function SpatialSettingsModal({ open, onClose, theme, spatial, onPatch }: SpatialSettingsModalProps) {
-  /** SOFA 文件选择 input（隐藏，点击导入按钮触发；导入功能开发中，保留 ref 备用） */
-  const sofaInputRef = useRef<HTMLInputElement>(null)
   /** 弹窗面板 ref：open 时聚焦（a11y：role=dialog 焦点起点；完整 focus trap 后续） */
   const containerRef = useRef<HTMLDivElement>(null)
   /** 键位捕获态（null = 未捕获；捕获期间 window keydown 写回 keymap） */
@@ -269,64 +260,12 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
             输出设备切换后续 wave 接入主播放器 AudioContext.setSinkId。
           </p>
 
-          {/* HRTF 数据集：空间音频已内联 EngineV3，用合成解析 HRTF（analyticHrtf）；
-              原 sofa.ts 导入 + gridSource 内置数据集切换 + fusion 热更新已移除，
-              标注「开发中」，后续 wave 改走 EngineV3 内联合成 HRTF / 运行时数据集加载 */}
+          {/* HRTF 数据集：空间音频由 EngineV3 的 analyticHrtf 提供合成解析 HRTF。 */}
           <SectionTitle theme={theme}>HRTF 数据集</SectionTitle>
           <div className="flex items-center justify-between py-1">
             <span className={`${theme.textTertiary} text-[11px]`}>当前数据集</span>
-            <span className={`hse-mono text-[11px] ${theme.textSecondary}`}>合成 HRTF（开发中）</span>
+            <span className={`hse-mono text-[11px] ${theme.textSecondary}`}>合成解析 HRTF</span>
           </div>
-          <div className="space-y-1">
-            {/* 内置 KEMAR / CIPIC 数据集切换：原 gridSource 内嵌数据已废弃（合成兜底替代），
-                禁用占位，后续 wave 接运行时 fetch / EngineV3 内联数据集 */}
-            {([
-              { id: 'kemar', name: 'MIT KEMAR' },
-              { id: 'cipic', name: 'CIPIC subject_003' },
-            ] as const).map((ds) => (
-              <button
-                key={ds.id}
-                type="button"
-                disabled
-                className="w-full flex items-center justify-between py-1.5 px-2.5 rounded-lg text-[11px] transition-all cursor-not-allowed opacity-50"
-                style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}
-              >
-                <span>内置 {ds.name}</span>
-                <span className="text-[10px]" style={{ color: 'rgba(255,255,255,0.5)' }}>开发中</span>
-              </button>
-            ))}
-            {/* SADIE II：需注册下载（sofacoustics 官方库需登录），后续 wave 接入 */}
-            <button
-              type="button"
-              disabled
-              className={`w-full flex items-center justify-between py-1.5 px-2.5 rounded-lg text-[11px] transition-all cursor-not-allowed opacity-50 ${theme.textTertiary}`}
-              style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}
-            >
-              <span>SADIE II</span>
-              <DevBadge theme={theme} />
-            </button>
-          </div>
-          {/* SOFA 导入按钮：sofa.ts 已移除，禁用占位（input 保留 ref 备后续 wave 接线） */}
-          <input
-            ref={sofaInputRef}
-            type="file"
-            accept=".sofa,application/sofa"
-            className="hidden"
-            onChange={() => { /* SOFA 导入开发中，后续 wave 接 EngineV3 内联 */ }}
-          />
-          <button
-            type="button"
-            disabled
-            className="w-full py-2 rounded-lg text-[11px] text-center transition-all cursor-not-allowed opacity-50"
-            style={{ background: `${theme.accentColor}12`, border: `1px dashed ${theme.accentColor}55`, color: theme.textSecondary }}
-          >
-            <Upload className="w-3.5 h-3.5 inline mr-1 align-[-2px]" />
-            导入 SOFA 数据集（开发中）
-          </button>
-          <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>
-            空间音频现用合成解析 HRTF（无需数据文件）；SOFA 数据集导入后续 wave 接入。
-          </p>
-
           {/* 卷积模式（分区 FFT 卷积 / 时域直接卷积；后端契约 spatial_set_convolution_mode，已全量实现） */}
           <SectionTitle theme={theme}>卷积模式</SectionTitle>
           <div className="flex gap-1.5 mb-2">

@@ -123,12 +123,14 @@ export class LoudnessNormalizationService {
     if (existing) return existing
 
     const task = (async () => {
-      if (!this.isPythonReady()) return null
-      const controller = new AbortController()
-      const timeoutId = window.setTimeout(() => controller.abort(new DOMException('lufs timed out', 'TimeoutError')), LUFS_TIMEOUT_MS)
+      let timeoutId: number | undefined
       try {
+        if (!this.isPythonReady()) return null
         const audioPath = await this.resolveLocalPath(url, key)
         if (!audioPath) return null
+        if (window.electron?.localPython && !await window.electron.localPython.ensure('loudness')) return null
+        const controller = new AbortController()
+        timeoutId = window.setTimeout(() => controller.abort(new DOMException('lufs timed out', 'TimeoutError')), LUFS_TIMEOUT_MS)
         const response = await fetch(`${PYTHON_BEAT_SERVICE_URL}/lufs`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -149,7 +151,7 @@ export class LoudnessNormalizationService {
         this.pythonUnavailableUntil = Date.now() + PYTHON_UNAVAILABLE_RETRY_MS
         return null
       } finally {
-        window.clearTimeout(timeoutId)
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId)
       }
     })()
 

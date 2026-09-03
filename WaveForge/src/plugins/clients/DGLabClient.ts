@@ -371,11 +371,13 @@ function createClient() {
     listeners.forEach(l => l())
   }
 
+  let controlToken = ''
   const fetchStatus = async () => {
     const seq = ++fetchSeq
     try {
       const res = await fetch(`${DGLAB_API}/status`, { signal: AbortSignal.timeout(2500) })
       const json = await res.json()
+      if (typeof json.controlToken === 'string') controlToken = json.controlToken
       if (seq !== fetchSeq) return json
       set({
         available: true,
@@ -411,7 +413,8 @@ function createClient() {
   const connect = () => {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
     const settings = loadDGLabSettings()
-    const url = `ws://127.0.0.1:${settings.port}/dglab/ctrl`
+    if (!controlToken) return
+    const url = `ws://127.0.0.1:${settings.port}/dglab/ctrl?token=${encodeURIComponent(controlToken)}`
     try {
       const socket = new WebSocket(url)
       ws = socket
@@ -502,9 +505,10 @@ function createClient() {
     set({ connected: false, out: null, state: snapshot.running ? 'idle' : snapshot.state })
   }
 
-  /** 订阅全局音频分析 store：插件激活且有 store 时，30fps 特征流推给中继。 */
+  /** 订阅全局音频分析 store：仅在插件激活、输出开启且使用应用内音源时推送 30fps 特征流。 */
   const ensureStream = () => {
-    if (!active) {
+    const settings = loadDGLabSettings()
+    if (!active || !settings.outputEnabled || settings.systemCapture) {
       if (unsubStore) {
         unsubStore()
         unsubStore = null
@@ -710,6 +714,7 @@ function createClient() {
   /** 波形输出启禁（播放页按钮）：仅暂停输出，不断开、不关插件。 */
   const setOutputEnabled = (on: boolean) => {
     saveDGLabSettings({ outputEnabled: on })
+    ensureStream()
     if (ws && ws.readyState === WebSocket.OPEN && active) {
       ws.send(JSON.stringify({ t: 'output', on }))
     }
@@ -785,6 +790,7 @@ function createClient() {
       active = false
       disconnect()
       ensureStream()
+      void control('stop')
     },
     isActive: () => active,
     ensureStream,

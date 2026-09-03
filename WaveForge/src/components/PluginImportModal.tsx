@@ -47,6 +47,9 @@ export default function PluginImportModal() {
       const text = String(reader.result ?? '')
       try {
         const parsed = JSON.parse(text) as Record<string, unknown>
+        if (typeof parsed.code === 'string' && parsed.code.length > 256_000) {
+          throw new ManifestError('插件运行时代码不能超过 256 KB')
+        }
         validateManifest(parsed)
         setManifest({
           ...parsed as unknown as PluginManifest,
@@ -180,7 +183,7 @@ export default function PluginImportModal() {
                   </div>
                   <p className="text-xs leading-relaxed text-white/60">{manifest.description}</p>
                   <div className="flex flex-wrap gap-2 text-[10px] text-white/45">
-                    <span className="rounded-md bg-white/[0.06] px-2 py-0.5">{manifest.code ? '含运行时代码（受限沙箱）' : '仅元信息（展示型插件）'}</span>
+                    <span className="rounded-md bg-white/[0.06] px-2 py-0.5">{manifest.code ? '含运行时代码（与应用同权限，仅安装可信来源）' : '仅元信息（展示型插件）'}</span>
                     <span className="rounded-md bg-white/[0.06] px-2 py-0.5">{manifest.screenshots?.length ? `${manifest.screenshots.length} 张截图` : '无截图'}</span>
                   </div>
                 </div>
