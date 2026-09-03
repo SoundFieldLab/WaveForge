@@ -18,6 +18,9 @@ import { appleApiRequest } from './appleApiBridge'
 
 export interface AppleCatalogSong {
   id: string
+  storefront?: string
+  artistId?: string
+  albumId?: string
   name: string
   artistName: string
   albumName?: string
@@ -85,6 +88,8 @@ const rssGet = async (country: string, path: string): Promise<any[]> => {
 
 const normalizeSong = (item: any): AppleCatalogSong => ({
   id: String(item.id ?? item.trackId ?? ''),
+  artistId: item.artistId ? String(item.artistId) : undefined,
+  albumId: item.collectionId ? String(item.collectionId) : undefined,
   name: item.name ?? item.trackName ?? '',
   artistName: item.artistName ?? '',
   albumName: item.collectionName ?? item.albumName ?? undefined,
@@ -134,11 +139,12 @@ export async function getAppleAlbumTracks(albumId: string, country = 'cn'): Prom
   }
 }
 
-export async function searchAppleCatalog(title: string, artist = '', limit = 25): Promise<AppleCatalogSong[]> {
+export async function searchAppleCatalog(title: string, artist = '', limit = 25, storefront?: string): Promise<AppleCatalogSong[]> {
   if (!title.trim()) return []
-  const tracks = await searchAppleTracks(title, artist, undefined, limit)
+  const tracks = await searchAppleTracks(title, artist, undefined, limit, storefront)
   return tracks.map(track => ({
     id: track.songId,
+    storefront: track.storefront,
     name: track.trackName,
     artistName: track.artistName,
     albumName: track.albumName,
@@ -217,6 +223,7 @@ export async function findPlayableAppleSong(track: {
 
 export interface AppleLibraryPlaylist {
   id: string
+  catalogId?: string
   name: string
   description?: string
   artworkUrl?: string
@@ -228,6 +235,8 @@ export interface AppleLibraryTrack {
   id: string
   /** 目录歌曲 id（资料库歌曲经 include=catalog 返回；用于与 UI 中目录 id 对齐） */
   catalogId?: string
+  artistId?: string
+  albumId?: string
   name: string
   artistName: string
   albumName?: string
@@ -260,15 +269,56 @@ const appleMeFetch = async (path: string): Promise<any | null> => {
   return result.data
 }
 
+const toAppleApiPath = (next: unknown): string | null => {
+  if (typeof next !== 'string' || !next.trim()) return null
+  try {
+    const url = new URL(next, AMP_API)
+    if (!/(^|\.)music\.apple\.com$/i.test(url.hostname)) return null
+    return `${url.pathname}${url.search}`
+  } catch {
+    return next.startsWith('/') ? next : null
+  }
+}
+
+async function fetchAppleMePages(path: string, requestedLimit: number): Promise<{ items: any[]; included: any[] }> {
+  const target = Math.max(1, requestedLimit)
+  const items: any[] = []
+  const included: any[] = []
+  const seen = new Set<string>()
+  let next: string | null = path
+  for (let page = 0; next && items.length < target && page < 100; page += 1) {
+    const data = await appleMeFetch(next)
+    if (!data) break
+    for (const item of Array.isArray(data.data) ? data.data : []) {
+      const key = `${item?.type || ''}:${item?.id || ''}`
+      if (!item?.id || seen.has(key)) continue
+      seen.add(key)
+      items.push(item)
+      if (items.length >= target) break
+    }
+    if (Array.isArray(data.included)) included.push(...data.included)
+    next = toAppleApiPath(data.next)
+  }
+  return { items, included }
+}
+
+const withPageLimit = (path: string, limit: number): string => {
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}limit=${Math.min(100, Math.max(1, limit))}`
+}
+
 /** 当前登录用户的歌单列表 */
 export async function getAppleLibraryPlaylists(limit = 100): Promise<AppleLibraryPlaylist[]> {
   // web 播放器同款（列表层不带 include=tracks；platform=web 为 me 接口的当前门槛参数）
-  const data = await appleMeFetch(`/v1/me/library/playlists?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  const { items } = await fetchAppleMePages(
+    withPageLimit('/v1/me/library/playlists?platform=web&include=catalog&omit[resource]=autos', limit),
+    limit,
+  )
   return items
     .filter(item => item?.id && item?.attributes)
     .map(item => ({
       id: String(item.id),
+      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
       name: item.attributes.name || '',
       description: item.attributes.description?.standard || undefined,
       artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
@@ -278,21 +328,37 @@ export async function getAppleLibraryPlaylists(limit = 100): Promise<AppleLibrar
     .filter(playlist => playlist.name)
 }
 
+const mapAppleLibraryTrack = (item: any, includedById: Map<string, any>): AppleLibraryTrack => {
+  const catalogRef = item?.relationships?.catalog?.data?.[0]
+  const catalog = catalogRef?.id ? includedById.get(`${catalogRef.type || 'songs'}:${catalogRef.id}`) : null
+  const catalogResource = catalog || catalogRef || {}
+  return {
+    id: String(item.id),
+    catalogId: catalogRef?.id ? String(catalogRef.id) : undefined,
+    artistId: catalogResource?.relationships?.artists?.data?.[0]?.id
+      ? String(catalogResource.relationships.artists.data[0].id)
+      : undefined,
+    albumId: catalogResource?.relationships?.albums?.data?.[0]?.id
+      ? String(catalogResource.relationships.albums.data[0].id)
+      : undefined,
+    name: item.attributes.name || catalogResource?.attributes?.name || '',
+    artistName: item.attributes.artistName || catalogResource?.attributes?.artistName || '',
+    albumName: item.attributes.albumName || catalogResource?.attributes?.albumName || undefined,
+    artworkUrl: toHighResArtwork(item.attributes.artwork?.url || catalogResource?.attributes?.artwork?.url || ''),
+    durationMs: item.attributes.durationInMillis || catalogResource?.attributes?.durationInMillis,
+  }
+}
+
 /** 用户歌单的曲目 */
 export async function getApplePlaylistTracks(playlistId: string, limit = 300): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  const { items, included } = await fetchAppleMePages(
+    withPageLimit(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks?platform=web&include=catalog`, limit),
+    limit,
+  )
+  const includedById = new Map(included.filter(item => item?.id).map(item => [`${item.type}:${item.id}`, item]))
   return items
     .filter(item => item?.id && item?.attributes)
-    .map(item => ({
-      id: String(item.id),
-      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
-      name: item.attributes.name || '',
-      artistName: item.attributes.artistName || '',
-      albumName: item.attributes.albumName || undefined,
-      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
-      durationMs: item.attributes.durationInMillis,
-    }))
+    .map(item => mapAppleLibraryTrack(item, includedById))
     .filter(track => track.name)
 }
 
@@ -329,8 +395,10 @@ export interface AppleLibraryMusicVideo {
 }
 
 export async function getAppleLibraryMusicVideos(limit = 100): Promise<AppleLibraryMusicVideo[]> {
-  const data = await appleMeFetch(`/v1/me/library/music-videos?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  const { items } = await fetchAppleMePages(
+    withPageLimit('/v1/me/library/music-videos?platform=web&include=catalog', limit),
+    limit,
+  )
   return items
     .filter(item => item?.id && item?.attributes?.name)
     .map((item: any): AppleLibraryMusicVideo => ({
@@ -345,25 +413,21 @@ export async function getAppleLibraryMusicVideos(limit = 100): Promise<AppleLibr
 
 /** 用户资料库全部歌曲（「我的音乐」） */
 export async function getAppleLibrarySongs(limit = 200): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/songs?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  const { items, included } = await fetchAppleMePages(
+    withPageLimit('/v1/me/library/songs?platform=web&include=catalog', limit),
+    limit,
+  )
+  const includedById = new Map(included.filter(item => item?.id).map(item => [`${item.type}:${item.id}`, item]))
   return items
     .filter(item => item?.id && item?.attributes)
-    .map(item => ({
-      id: String(item.id),
-      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
-      name: item.attributes.name || '',
-      artistName: item.attributes.artistName || '',
-      albumName: item.attributes.albumName || undefined,
-      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
-      durationMs: item.attributes.durationInMillis,
-    }))
+    .map(item => mapAppleLibraryTrack(item, includedById))
     .filter(track => track.name)
 }
 
 /** 资料库专辑（web「资料库」页 albums 分区同款接口） */
 export interface AppleLibraryAlbum {
   id: string
+  catalogId?: string
   name: string
   artistName: string
   artworkUrl?: string
@@ -374,64 +438,83 @@ export interface AppleLibraryAlbum {
 /** 资料库艺人 */
 export interface AppleLibraryArtist {
   id: string
+  catalogId?: string
   name: string
   artworkUrl?: string
   genreName?: string
 }
 
-async function fetchLibraryCollection(path: string): Promise<any[]> {
-  const data = await appleMeFetch(path)
-  return Array.isArray(data?.data) ? data.data : []
+async function fetchLibraryCollection(path: string, limit: number): Promise<{ items: any[]; included: any[] }> {
+  return fetchAppleMePages(withPageLimit(path, limit), limit)
 }
 
 /** 用户资料库全部专辑 */
 export async function getAppleLibraryAlbums(limit = 200): Promise<AppleLibraryAlbum[]> {
-  const items = await fetchLibraryCollection(`/v1/me/library/albums?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  const { items, included } = await fetchLibraryCollection('/v1/me/library/albums?platform=web&include=catalog&omit[resource]=autos', limit)
+  const includedById = new Map(
+    included.filter(item => item?.id).map(item => [`${item.type}:${item.id}`, item] as const),
+  )
   return items
     .filter(item => item?.id && item?.attributes?.name)
-    .map((item: any) => ({
-      id: String(item.id),
-      name: item.attributes.name || '',
-      artistName: item.attributes.artistName || '',
-      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
-      releaseDate: item.attributes.releaseDate,
-      trackCount: item.attributes.trackCount ?? item.relationships?.tracks?.data?.length,
-    }))
+    .map((item: any) => {
+      const catalogRef = item.relationships?.catalog?.data?.[0]
+      const catalog = catalogRef ? includedById.get(`${catalogRef.type}:${catalogRef.id}`) : null
+      const attrs = item.attributes || {}
+      const catalogAttrs = catalog?.attributes || catalogRef?.attributes || {}
+      return {
+        id: String(item.id),
+        catalogId: catalogRef?.id ? String(catalogRef.id) : undefined,
+        name: attrs.name || catalogAttrs.name || '',
+        artistName: attrs.artistName || catalogAttrs.artistName || '',
+        artworkUrl: toHighResArtwork(attrs.artwork?.url || catalogAttrs.artwork?.url || ''),
+        releaseDate: attrs.releaseDate || catalogAttrs.releaseDate,
+        trackCount: attrs.trackCount ?? catalogAttrs.trackCount ?? item.relationships?.tracks?.data?.length,
+      }
+    })
 }
 
 /** 用户资料库全部艺人 */
 export async function getAppleLibraryArtists(limit = 200): Promise<AppleLibraryArtist[]> {
-  const items = await fetchLibraryCollection(`/v1/me/library/artists?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  const { items, included } = await fetchLibraryCollection('/v1/me/library/artists?platform=web&include=catalog&omit[resource]=autos', limit)
+  const includedById = new Map(
+    included.filter(item => item?.id).map(item => [`${item.type}:${item.id}`, item] as const),
+  )
   return items
     .filter(item => item?.id && item?.attributes?.name)
-    .map((item: any) => ({
-      id: String(item.id),
-      name: item.attributes.name || '',
-      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
-      genreName: Array.isArray(item.attributes.genreNames) ? item.attributes.genreNames[0] : undefined,
-    }))
+    .map((item: any) => {
+      const catalogRef = item.relationships?.catalog?.data?.[0]
+      const catalog = catalogRef ? includedById.get(`${catalogRef.type}:${catalogRef.id}`) : null
+      const attrs = item.attributes || {}
+      const catalogAttrs = catalog?.attributes || catalogRef?.attributes || {}
+      return {
+        id: String(item.id),
+        catalogId: catalogRef?.id ? String(catalogRef.id) : undefined,
+        name: attrs.name || catalogAttrs.name || '',
+        artworkUrl: toHighResArtwork(attrs.artwork?.url || catalogAttrs.artwork?.url || ''),
+        genreName: Array.isArray(attrs.genreNames) ? attrs.genreNames[0]
+          : Array.isArray(catalogAttrs.genreNames) ? catalogAttrs.genreNames[0] : undefined,
+      }
+    })
 }
 
 /** 单张库专辑曲目（include=catalog 带回目录 id 供播放） */
 export async function getAppleLibraryAlbumTracks(albumId: string, limit = 300): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks?platform=web&limit=${Math.min(100, Math.max(1, limit))}&include=catalog`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+  const { items, included } = await fetchAppleMePages(
+    withPageLimit(`/v1/me/library/albums/${encodeURIComponent(albumId)}/tracks?platform=web&include=catalog`, limit),
+    limit,
+  )
+  const includedById = new Map(included.filter(item => item?.id).map(item => [`${item.type}:${item.id}`, item]))
   return items
     .filter(item => item?.id && item?.attributes?.name)
-    .map((item: any): AppleLibraryTrack => ({
-      id: String(item.id),
-      catalogId: item?.relationships?.catalog?.data?.[0]?.id ? String(item.relationships.catalog.data[0].id) : undefined,
-      name: item.attributes.name || '',
-      artistName: item.attributes.artistName || '',
-      albumName: item.attributes.albumName || undefined,
-      artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
-      durationMs: item.attributes.durationInMillis,
-    }))
+    .map(item => mapAppleLibraryTrack(item, includedById))
 }
 
 /** 某库艺人在资料库内的专辑 */
 export async function getAppleLibraryArtistAlbums(artistId: string, limit = 100): Promise<AppleLibraryAlbum[]> {
-  const items = await fetchLibraryCollection(`/v1/me/library/artists/${encodeURIComponent(artistId)}/albums?limit=${Math.min(100, Math.max(1, limit))}&platform=web&omit[resource]=autos`)
+  const { items } = await fetchLibraryCollection(
+    `/v1/me/library/artists/${encodeURIComponent(artistId)}/albums?platform=web&omit[resource]=autos`,
+    limit,
+  )
   return items
     .filter(item => item?.id && item?.attributes?.name)
     .map((item: any): AppleLibraryAlbum => ({
@@ -578,7 +661,8 @@ export interface AppleChartGroup {
   group: string
   description?: string
   coverUrl: string
-  songs: Array<{ name: string; artist: string; coverUrl?: string }>
+  /** songs 仅热门歌曲榜携带 id（RSS 目录曲目 id，原生取流必需）；专辑/歌单榜为条目名 */
+  songs: Array<{ id?: string; name: string; artist: string; coverUrl?: string }>
 }
 
 /** 探索页排行榜数据：热门歌曲 / 热门专辑 / 精选歌单三榜（免 token） */
@@ -600,7 +684,14 @@ export async function getAppleChartGroups(country = 'cn'): Promise<AppleChartGro
       group: 'Apple Music 全球热度',
       description: '各地区最受欢迎的歌曲',
       coverUrl: toHighResArtwork(songItems[0]?.artworkUrl100 || ''),
-      songs: songItems.map((item: any) => ({ name: item.name ?? '', artist: item.artistName ?? '', coverUrl: toHighResArtwork(item.artworkUrl100 || '') })),
+      // id 必须保留：原生取流（webPlayback salableAdamId）与缓存键都依赖目录曲目 id；
+      // 此前丢弃 id 导致队列退化为 apple-0/1/2 排名键，原生取流被静默跳过 → 全部回退 QQ/网易云
+      songs: songItems.map((item: any) => ({
+        id: String(item?.id ?? '') || undefined,
+        name: item.name ?? '',
+        artist: item.artistName ?? '',
+        coverUrl: toHighResArtwork(item.artworkUrl100 || ''),
+      })),
     })
   }
   if (albumItems.length > 0) {
@@ -642,14 +733,42 @@ const appleCatalogFetch = async (path: string, timeoutMs = 8000): Promise<any | 
   return result.data
 }
 
+async function fetchAppleCatalogPages(path: string, requestedLimit: number): Promise<any[]> {
+  const target = Math.max(1, requestedLimit)
+  const items: any[] = []
+  const seenItems = new Set<string>()
+  const seenPages = new Set<string>()
+  let next: string | null = path
+  for (let page = 0; next && items.length < target && page < 100; page += 1) {
+    if (seenPages.has(next)) break
+    seenPages.add(next)
+    const data = await appleCatalogFetch(next, 10000)
+    if (!data) break
+    for (const item of Array.isArray(data.data) ? data.data : []) {
+      const key = `${item?.type || ''}:${item?.id || ''}`
+      if (!item?.id || seenItems.has(key)) continue
+      seenItems.add(key)
+      items.push(item)
+      if (items.length >= target) break
+    }
+    next = toAppleApiPath(data.next)
+  }
+  return items
+}
+
 /** 编辑精选歌单曲目（amp-api catalog，需 dev token；无 token 返回空） */
-export async function getAppleCatalogPlaylistTracks(playlistId: string, country = 'cn'): Promise<AppleCatalogSong[]> {
-  const data = await appleCatalogFetch(`/v1/catalog/${encodeURIComponent(country)}/playlists/${encodeURIComponent(playlistId)}/tracks?limit=100`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+export async function getAppleCatalogPlaylistTracks(playlistId: string, country = 'cn', limit = 5000): Promise<AppleCatalogSong[]> {
+  const items = await fetchAppleCatalogPages(
+    `/v1/catalog/${encodeURIComponent(country)}/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${Math.min(100, Math.max(1, limit))}&include=artists,albums`,
+    limit,
+  )
   return items
     .filter(item => item?.id && item?.attributes)
     .map(item => ({
       id: String(item.id),
+      storefront: country,
+      artistId: item?.relationships?.artists?.data?.[0]?.id ? String(item.relationships.artists.data[0].id) : undefined,
+      albumId: item?.relationships?.albums?.data?.[0]?.id ? String(item.relationships.albums.data[0].id) : undefined,
       name: item.attributes.name || '',
       artistName: item.attributes.artistName || '',
       albumName: item.attributes.albumName || undefined,
@@ -680,6 +799,8 @@ export async function getAppleAlbumDetail(albumId: string, country = 'cn'): Prom
       .filter((item: any) => item.wrapperType === 'track' && item.trackId)
       .map((item: any): AppleCatalogSong => ({
         id: String(item.trackId),
+        artistId: item.artistId ? String(item.artistId) : undefined,
+        albumId: item.collectionId ? String(item.collectionId) : String(albumId),
         name: item.trackName || '',
         artistName: item.artistName || '',
         albumName: item.collectionName || undefined,
@@ -723,6 +844,8 @@ export async function getAppleArtistDetail(artistId: string, country = 'cn'): Pr
       .filter((item: any) => item.wrapperType === 'track' && item.trackId)
       .map((item: any): AppleCatalogSong => ({
         id: String(item.trackId),
+        artistId: item.artistId ? String(item.artistId) : String(artistId),
+        albumId: item.collectionId ? String(item.collectionId) : undefined,
         name: item.trackName || '',
         artistName: item.artistName || '',
         albumName: item.collectionName || undefined,
@@ -785,11 +908,10 @@ export async function getAppleCatalogArtist(artistId: string, storefront = 'cn')
 export async function getAppleCatalogArtistAlbums(artistId: string, storefront = 'cn', limit = 200): Promise<AppleCatalogAlbum[]> {
   const credentials = getAppleCredentials()
   if (!credentials.developerToken) return []
-  const result = await appleApiRequest(
+  const items = await fetchAppleCatalogPages(
     `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}/albums?limit=${Math.min(200, Math.max(1, limit))}&include=artists`,
-    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+    limit,
   )
-  const items = result.ok && Array.isArray(result.data?.data) ? result.data.data : []
   return items
     .filter((item: any) => item?.attributes?.name)
     .map((item: any): AppleCatalogAlbum => ({
@@ -815,11 +937,10 @@ export interface AppleCatalogMusicVideo {
 export async function getAppleCatalogArtistMusicVideos(artistId: string, storefront = 'cn', limit = 100): Promise<AppleCatalogMusicVideo[]> {
   const credentials = getAppleCredentials()
   if (!credentials.developerToken) return []
-  const result = await appleApiRequest(
+  const items = await fetchAppleCatalogPages(
     `/v1/catalog/${encodeURIComponent(storefront)}/artists/${encodeURIComponent(artistId)}/music-videos?limit=${Math.min(100, Math.max(1, limit))}&include=artists`,
-    { developerToken: credentials.developerToken, timeoutMs: 10000 },
+    limit,
   )
-  const items = result.ok && Array.isArray(result.data?.data) ? result.data.data : []
   return items
     .filter((item: any) => item?.attributes?.name)
     .map((item: any): AppleCatalogMusicVideo => ({
@@ -862,9 +983,25 @@ export async function getAppleCatalogRelatedArtists(artistId: string, storefront
 
 // ─────────────────────────── 资料库写操作（需登录：Media-User-Token） ───────────────────────────
 
-const appleMeMutate = async (path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: unknown): Promise<boolean> => {
+type AppleMutationMethod = 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+
+export interface AppleMutationResult {
+  ok: boolean
+  status: number
+  error?: string
+}
+
+let lastAppleMutationResult: AppleMutationResult = { ok: true, status: 200 }
+
+export function getLastAppleMutationResult(): AppleMutationResult {
+  return lastAppleMutationResult
+}
+
+const appleMeMutateResult = async (path: string, method: AppleMutationMethod, body?: unknown): Promise<AppleMutationResult> => {
   const credentials = getAppleCredentials()
-  if (!credentials.developerToken || !credentials.mediaUserToken) return false
+  if (!credentials.developerToken || !credentials.mediaUserToken) {
+    return { ok: false, status: 401, error: 'Apple Music 登录凭据缺失' }
+  }
   const result = await appleApiRequest(path, {
     method,
     developerToken: credentials.developerToken,
@@ -873,17 +1010,24 @@ const appleMeMutate = async (path: string, method: 'POST' | 'PATCH' | 'DELETE', 
     timeoutMs: 10000,
   })
   if (!result.ok) {
-    console.warn(`[AppleCatalog] 资料库写操作失败:`, path, result.status, result.error || '')
-    return false
+    const apiError = result.data?.errors?.[0]
+    const error = apiError?.detail || apiError?.title || result.error || `Apple Music 请求失败 (${result.status || '网络错误'})`
+    console.warn('[AppleCatalog] 资料库写操作失败:', path, result.status, error)
+    return { ok: false, status: result.status, error }
   }
-  return true
+  return { ok: true, status: result.status }
+}
+
+const appleMeMutate = async (path: string, method: AppleMutationMethod, body?: unknown): Promise<boolean> => {
+  lastAppleMutationResult = await appleMeMutateResult(path, method, body)
+  return lastAppleMutationResult.ok
 }
 
 /** 创建资料库歌单 */
 export async function createApplePlaylist(name: string, description?: string): Promise<boolean> {
   const attributes: Record<string, string> = { name }
   if (description) attributes.description = description
-  return appleMeMutate('/v1/me/library/playlists', 'POST', { data: [{ attributes }] })
+  return appleMeMutate('/v1/me/library/playlists', 'POST', { attributes })
 }
 
 /** 删除资料库歌单 */
@@ -897,44 +1041,206 @@ export async function updateApplePlaylist(playlistId: string, attributes: { name
   return appleMeMutate(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}`, 'PATCH', { attributes })
 }
 
-/** 向资料库歌单添加曲目（songIds 为 Apple 目录歌曲 id） */
-export async function addAppleTracksToPlaylist(playlistId: string, songIds: string[]): Promise<boolean> {
-  if (!playlistId || songIds.length === 0) return false
-  const data = songIds.map(id => ({ id, type: 'songs' as const }))
+/** 向资料库歌单添加曲目；目录歌曲使用 songs，上传曲目使用 library-songs。 */
+export async function addAppleTracksToPlaylist(
+  playlistId: string,
+  tracks: Array<string | ApplePlaylistTrackIdentifier>,
+): Promise<boolean> {
+  if (!playlistId || tracks.length === 0) return false
+  const resolved = await Promise.all(tracks.map(async track => {
+    if (typeof track === 'string') {
+      const id = track.trim()
+      if (!id) return null
+      if (!APPLE_LIBRARY_ID_PATTERN.test(id)) return { id, type: 'songs' as const }
+      const catalogId = await resolveAppleLibraryCatalogId(id)
+      return catalogId
+        ? { id: catalogId, type: 'songs' as const }
+        : { id, type: 'library-songs' as const }
+    }
+    const catalogId = String(track.catalogId || '').trim()
+    if (catalogId) return { id: catalogId, type: 'songs' as const }
+    const libraryId = String(track.libraryId || '').trim()
+    if (!libraryId) return null
+    const resolvedCatalogId = await resolveAppleLibraryCatalogId(libraryId)
+    return resolvedCatalogId
+      ? { id: resolvedCatalogId, type: 'songs' as const }
+      : { id: libraryId, type: 'library-songs' as const }
+  }))
+  const data = resolved.filter((item): item is NonNullable<typeof item> => item !== null)
+  if (data.length === 0) return false
   return appleMeMutate(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks`, 'POST', { data })
 }
 
-/** 从资料库歌单移除曲目 */
-export async function removeAppleTracksFromPlaylist(playlistId: string, songIds: string[]): Promise<boolean> {
-  if (!playlistId || songIds.length === 0) return false
-  const data = songIds.map(id => ({ id, type: 'songs' as const }))
+export interface ApplePlaylistTrackIdentifier {
+  /** 优先使用目录歌曲 id；Apple 的歌单 tracks 删除接口首先接受 songs。 */
+  catalogId?: string
+  /** 仅无目录关联（如上传曲目）时使用资料库歌曲 id，并发送 library-songs。 */
+  libraryId?: string
+}
+
+/** 从资料库歌单移除曲目：优先 catalog songs，缺失时才回退 library-songs。 */
+export async function removeAppleTracksFromPlaylist(
+  playlistId: string,
+  tracks: Array<string | ApplePlaylistTrackIdentifier>,
+): Promise<boolean> {
+  if (!playlistId || tracks.length === 0) return false
+  const resolved = await Promise.all(tracks.map(async track => {
+    if (typeof track === 'string') {
+      const id = track.trim()
+      if (!id) return null
+      if (!APPLE_LIBRARY_ID_PATTERN.test(id)) return { id, type: 'songs' as const }
+      const catalogId = await resolveAppleLibraryCatalogId(id)
+      return catalogId
+        ? { id: catalogId, type: 'songs' as const }
+        : { id, type: 'library-songs' as const }
+    }
+    const catalogId = String(track.catalogId || '').trim()
+    if (catalogId) return { id: catalogId, type: 'songs' as const }
+    const libraryId = String(track.libraryId || '').trim()
+    if (!libraryId) return null
+    const resolvedCatalogId = await resolveAppleLibraryCatalogId(libraryId)
+    return resolvedCatalogId
+      ? { id: resolvedCatalogId, type: 'songs' as const }
+      : { id: libraryId, type: 'library-songs' as const }
+  }))
+  const data = resolved.filter((item): item is NonNullable<typeof item> => item !== null)
+  if (data.length === 0) return false
   return appleMeMutate(`/v1/me/library/playlists/${encodeURIComponent(playlistId)}/tracks`, 'DELETE', { data })
 }
 
-/** 收藏歌曲 = 加入 Apple 音乐资料库（传入 Apple 目录 songId） */
+/** 加入 Apple Music 资料库（独立于“喜爱”评分）。 */
 export async function addAppleSongToLibrary(songId: string): Promise<boolean> {
   if (!songId) return false
   return appleMeMutate('/v1/me/library', 'POST', { data: [{ id: songId, type: 'songs' }] })
 }
 
-/** 取消收藏 = 从 Apple 音乐资料库移除（传入资料库 songId） */
+/** 设置 Apple Music 目录歌曲的“喜爱”状态；网页 favorites 为主，ratings 为兼容回退。 */
+export async function setAppleSongLoved(songId: string, loved: boolean): Promise<boolean> {
+  if (!songId) return false
+  const favoritePath = `/v1/me/favorites?ids[songs]=${encodeURIComponent(songId)}`
+  if (await appleMeMutate(favoritePath, loved ? 'POST' : 'DELETE')) return true
+  const favoriteFailure = getLastAppleMutationResult()
+  if (favoriteFailure.status !== 404 && favoriteFailure.status !== 405) return false
+  const ratingPath = `/v1/me/ratings/songs/${encodeURIComponent(songId)}`
+  return loved
+    ? appleMeMutate(ratingPath, 'PUT', { type: 'ratings', attributes: { value: 1 } })
+    : appleMeMutate(ratingPath, 'DELETE')
+}
+
+/** 读取 favorites 歌曲集合；null 表示端点不可用，空数组表示成功但没有收藏。 */
+export async function getAppleFavoriteSongIds(limit = 5000): Promise<string[] | null> {
+  const target = Math.max(1, limit)
+  const ids = new Set<string>()
+  const seenPages = new Set<string>()
+  let next: string | null = `/v1/me/favorites/songs?limit=${Math.min(100, target)}`
+  for (let page = 0; next && ids.size < target && page < 100; page += 1) {
+    if (seenPages.has(next)) break
+    seenPages.add(next)
+    const data = await appleMeFetch(next)
+    if (!data) return null
+    for (const item of Array.isArray(data.data) ? data.data : []) {
+      const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
+      if (id) ids.add(String(id))
+      if (ids.size >= target) break
+    }
+    next = toAppleApiPath(data.next)
+  }
+  return [...ids]
+}
+
+/** 读取 favorites 对应的完整目录歌曲，保持 favorites 返回顺序。 */
+export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleCredentials().storefront || 'cn'): Promise<AppleCatalogSong[]> {
+  const ids = await getAppleFavoriteSongIds(limit)
+  if (!ids || ids.length === 0) return []
+  const songsById = new Map<string, AppleCatalogSong>()
+  for (let index = 0; index < ids.length; index += 100) {
+    const batch = ids.slice(index, index + 100)
+    const data = await appleCatalogFetch(
+      `/v1/catalog/${encodeURIComponent(storefront)}/songs?ids=${encodeURIComponent(batch.join(','))}&include=artists,albums`,
+      10000,
+    )
+    for (const item of Array.isArray(data?.data) ? data.data : []) {
+      if (!item?.id || !item?.attributes) continue
+      songsById.set(String(item.id), {
+        id: String(item.id),
+        storefront,
+        artistId: item?.relationships?.artists?.data?.[0]?.id ? String(item.relationships.artists.data[0].id) : undefined,
+        albumId: item?.relationships?.albums?.data?.[0]?.id ? String(item.relationships.albums.data[0].id) : undefined,
+        name: item.attributes.name || '',
+        artistName: item.attributes.artistName || '',
+        albumName: item.attributes.albumName || undefined,
+        artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+        releaseDate: item.attributes.releaseDate,
+        durationMs: item.attributes.durationInMillis,
+      })
+    }
+  }
+  return ids.map(id => songsById.get(id)).filter((song): song is AppleCatalogSong => Boolean(song?.name))
+}
+
+/** 批量读取 Apple Music favorites；旧服务不支持状态接口时回退 ratings。 */
+export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
+  const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
+  const loved = new Set<string>()
+  for (let index = 0; index < ids.length; index += 100) {
+    const batch = ids.slice(index, index + 100)
+    const favoriteData = await appleMeFetch(`/v1/me/favorites?ids[songs]=${encodeURIComponent(batch.join(','))}`)
+    const favoriteItems = Array.isArray(favoriteData?.data) ? favoriteData.data : null
+    if (favoriteItems) {
+      for (const item of favoriteItems) {
+        const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
+        if (id) loved.add(String(id))
+      }
+      continue
+    }
+    const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
+    for (const item of Array.isArray(ratingData?.data) ? ratingData.data : []) {
+      if (Number(item?.attributes?.value) === 1 && item?.id) loved.add(String(item.id))
+    }
+  }
+  return [...loved]
+}
+
+/** 根据目录歌曲 ID 找到对应的资料库歌曲 ID。 */
+export async function resolveAppleCatalogLibraryId(catalogId: string): Promise<string | null> {
+  if (!catalogId) return null
+  if (APPLE_LIBRARY_ID_PATTERN.test(catalogId)) return catalogId
+  const data = await appleMeFetch(`/v1/me/library/songs?filter[catalog-id]=${encodeURIComponent(catalogId)}&include=catalog&limit=1`)
+  const item = Array.isArray(data?.data) ? data.data[0] : null
+  return item?.id ? String(item.id) : null
+}
+
+/** 从资料库移除歌曲；既接受 library ID，也接受 catalog ID。 */
 export async function removeAppleSongFromLibrary(songId: string): Promise<boolean> {
   if (!songId) return false
-  return appleMeMutate(`/v1/me/library/songs/${encodeURIComponent(songId)}`, 'DELETE')
+  const libraryId = APPLE_LIBRARY_ID_PATTERN.test(songId)
+    ? songId
+    : await resolveAppleCatalogLibraryId(songId)
+  if (!libraryId) {
+    lastAppleMutationResult = { ok: false, status: 404, error: '歌曲不在 Apple Music 资料库中' }
+    return false
+  }
+  return appleMeMutate(`/v1/me/library/songs/${encodeURIComponent(libraryId)}`, 'DELETE')
 }
 
 /** 最近播放（需登录） */
-export async function getAppleRecentPlayed(limit = 50): Promise<AppleLibraryTrack[]> {
-  const data = await appleMeFetch(`/v1/me/recent/played/tracks?platform=web&limit=${Math.min(25, Math.max(1, limit))}`)
-  const items: any[] = Array.isArray(data?.data) ? data.data : []
+export async function getAppleRecentPlayed(limit = 50): Promise<AppleCatalogSong[]> {
+  const target = Math.max(1, limit)
+  const { items } = await fetchAppleMePages(
+    `/v1/me/recent/played/tracks?platform=web&limit=${Math.min(25, target)}`,
+    target,
+  )
   return items
     .filter(item => item?.id && item?.attributes)
     .map(item => ({
       id: String(item.id),
+      artistId: item?.relationships?.artists?.data?.[0]?.id ? String(item.relationships.artists.data[0].id) : undefined,
+      albumId: item?.relationships?.albums?.data?.[0]?.id ? String(item.relationships.albums.data[0].id) : undefined,
       name: item.attributes.name || '',
       artistName: item.attributes.artistName || '',
       albumName: item.attributes.albumName || undefined,
       artworkUrl: toHighResArtwork(item.attributes.artwork?.url || ''),
+      releaseDate: item.attributes.releaseDate,
       durationMs: item.attributes.durationInMillis,
     }))
     .filter(track => track.name)
@@ -942,15 +1248,11 @@ export async function getAppleRecentPlayed(limit = 50): Promise<AppleLibraryTrac
 
 // ─────────────────────────── Apple 曲目 → WaveForge Song（统一播放转换） ───────────────────────────
 
-/** Apple「音乐库 / 喜爱歌曲」伪歌单 id（个人中心与首页歌单共用） */
+/** Apple 合成集合 ID（与真实 library-playlists ID 永不冲突）。 */
 export const APPLE_LIBRARY_ID = '__apple_library__'
+export const APPLE_FAVORITES_ID = '__apple_favorites__'
 
-/** 判断是否为 Apple 的「喜爱歌曲（Loved）」自动歌单（按名称识别，中英文） */
-export function isAppleLovedPlaylistName(name: string): boolean {
-  return /喜爱|喜欢|loved|heart|favourite|favorite/i.test(name || '')
-}
-
-/** 取歌单第一首曲目的封面（喜爱歌曲等系统歌单的特殊封面不可用时，用首曲封面顶替） */
+/** 取歌单第一首曲目的封面（系统封面不可用时，用首曲封面顶替） */
 export async function getApplePlaylistFirstTrackArtwork(playlistId: string): Promise<string> {
   try {
     const tracks = await getApplePlaylistTracks(playlistId, 1)
@@ -962,13 +1264,15 @@ export async function getApplePlaylistFirstTrackArtwork(playlistId: string): Pro
 }
 
 /** Apple 目录歌曲 → WaveForge Song（platform: 'apple'，播放时统一走匹配载体） */
-export function appleSongToSong(song: AppleCatalogSong, storefront = 'cn'): Song {
+export function appleSongToSong(song: AppleCatalogSong, storefront = song.storefront || getAppleCredentials().storefront || 'cn'): Song {
   return {
     id: Number(song.id) || 0,
     appleId: String(song.id || ''),
+    appleStorefront: storefront,
     name: song.name || '',
-    artists: song.artistName ? [{ name: song.artistName }] : [],
+    artists: song.artistName ? [{ name: song.artistName, appleId: song.artistId }] : [],
     album: {
+      appleId: song.albumId,
       name: song.albumName || '',
       picUrl: song.artworkUrl || '',
     },
@@ -985,9 +1289,12 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
     // 原生音源（webPlayback）需要目录歌曲 id（salableAdamId）；资料库 id 仅在
     // 无 catalogId（用户自传云曲目）时兜底，此时取流大概率失败 → 回退载体匹配
     appleId: track.catalogId || String(track.id || ''),
+    appleLibraryId: String(track.id || ''),
+    appleStorefront: getAppleCredentials().storefront,
     name: track.name || '',
-    artists: track.artistName ? [{ name: track.artistName }] : [],
+    artists: track.artistName ? [{ name: track.artistName, appleId: track.artistId }] : [],
     album: {
+      appleId: track.albumId,
       name: track.albumName || '',
       picUrl: track.artworkUrl || '',
     },
@@ -995,6 +1302,22 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
     platform: 'apple',
     vip: false,
   }
+}
+
+/** 资料库曲目 id 前缀（i./l./p. 等），区别于纯数字目录曲目 id */
+export const APPLE_LIBRARY_ID_PATTERN = /^(i|l|p|ra)\./
+
+/**
+ * 资料库曲目 id（i.xxx）→ 目录曲目 id（webPlayback 的 salableAdamId 必须是目录 id）。
+ * 资料库条目通过 include=catalog 关联目录曲目；用户自传云盘曲目无目录关联 → 返回 null
+ * （上层保持库 id，取流会失败并回退载体匹配，这是预期行为）。
+ */
+export async function resolveAppleLibraryCatalogId(libraryId: string): Promise<string | null> {
+  if (!libraryId || !APPLE_LIBRARY_ID_PATTERN.test(libraryId)) return null
+  const data = await appleMeFetch(`/v1/me/library/songs/${encodeURIComponent(libraryId)}?include=catalog&platform=web`)
+  const item = Array.isArray(data?.data) ? data.data[0] : null
+  const catalogId = item?.relationships?.catalog?.data?.[0]?.id
+  return catalogId && String(catalogId).trim() ? String(catalogId) : null
 }
 
 /**
@@ -1019,8 +1342,8 @@ export async function resolvePlayableSong(song: Song): Promise<Song | null> {
 
 /** 目录搜索 → Song[]（SearchPanel 的 Apple 搜索用） */
 export async function searchAppleSongsAsSongs(keywords: string, country = 'cn', limit = 25): Promise<Song[]> {
-  const tracks = await searchAppleCatalog(keywords, '', limit)
-  return tracks.map(track => appleSongToSong(track, country))
+  const tracks = await searchAppleCatalog(keywords, '', limit, country)
+  return tracks.map(track => appleSongToSong(track))
 }
 
 // ─────────────────────────── amp-api 目录搜索（web 播放器同款） ───────────────────────────
@@ -1030,11 +1353,12 @@ export interface AppleSearchV1Result {
   albums: AppleCatalogAlbum[]
   artists: AppleCatalogArtist[]
   playlists: AppleCatalogPlaylist[]
+  errorStatus?: number
 }
 
 /**
  * amp-api 目录搜索（music.apple.com 搜索框同款接口）：
- * GET /v1/catalog/{storefront}/search?term=...&types=songs,albums,artists,playlists,stations
+ * GET /v1/catalog/{storefront}/search?term=...&types=songs,albums,artists,playlists
  * 需 Developer Token；未配置 token 时返回空（调用方回退 iTunes Search）。
  */
 export async function searchAppleCatalogV1(
@@ -1047,12 +1371,21 @@ export async function searchAppleCatalogV1(
   const credentials = getAppleCredentials()
   if (!credentials.developerToken) return empty
   const url = `/v1/catalog/${encodeURIComponent(storefront)}/search?term=${encodeURIComponent(keywords.trim())}`
-    + `&types=songs,albums,artists,playlists,stations&limit=${Math.min(50, Math.max(1, limit))}&include[songs]=artists&include[albums]=artists&include[playlists]=tracks`
+    + `&types=songs,albums,artists,playlists&limit=${Math.min(50, Math.max(1, limit))}&include[songs]=artists&include[albums]=artists&include[playlists]=tracks`
   const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 15000 })
-  if (!result.ok) return empty
+  if (!result.ok) return { ...empty, errorStatus: result.status || -1 }
   const results = result.data?.results || {}
+  const included: any[] = Array.isArray(result.data?.included) ? result.data.included : []
+  const relationshipId = (resource: any, relation: string): string | undefined => {
+    const ref = resource?.relationships?.[relation]?.data?.[0]
+    if (ref?.id) return String(ref.id)
+    const linked = included.find(item => item?.type === relation && item?.attributes?.name === resource?.attributes?.[relation === 'albums' ? 'albumName' : 'artistName'])
+    return linked?.id ? String(linked.id) : undefined
+  }
   const mapSongs = (data?: any[]): AppleCatalogSong[] => Array.isArray(data) ? data.map((song: any) => ({
     id: String(song?.id ?? ''),
+    artistId: relationshipId(song, 'artists'),
+    albumId: relationshipId(song, 'albums'),
     name: song?.attributes?.name || '',
     artistName: song?.attributes?.artistName || '',
     albumName: song?.attributes?.albumName || undefined,
@@ -1100,7 +1433,7 @@ export async function getAppleSearchSuggestions(keywords: string, storefront = '
   if (!keywords.trim()) return []
   const credentials = getAppleCredentials()
   if (!credentials.developerToken) return []
-  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search/suggestions?term=${encodeURIComponent(keywords.trim())}&types=songs,albums,artists,playlists,stations`
+  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search/suggestions?term=${encodeURIComponent(keywords.trim())}&types=songs,albums,artists,playlists`
   const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 8000 })
   if (!result.ok) return []
   const item: any = Array.isArray(result.data?.data) ? result.data.data[0] : null

@@ -55,7 +55,7 @@ function forwardToMainLog(message: string): void {
 
 // ─────────────────────────── 类型 ───────────────────────────
 
-export type AppleWebItemType = 'songs' | 'playlists' | 'albums' | 'stations' | 'artists' | 'music-videos' | 'uploaded-videos' | 'posts' | 'rooms'
+export type AppleWebItemType = 'songs' | 'playlists' | 'albums' | 'stations' | 'radio-shows' | 'artists' | 'music-videos' | 'uploaded-videos' | 'posts' | 'rooms'
 
 export interface AppleWebItem {
   id: string
@@ -73,12 +73,18 @@ export interface AppleWebItem {
   /** 编辑横幅大图（hero/编辑元素用） */
   heroArtworkUrl?: string
   artistName?: string
+  artistId?: string
+  albumId?: string
   durationMs?: number
   curatorName?: string
   trackCount?: number
   releaseDate?: string
   /** stations：所属节目 */
   showName?: string
+  /** 库资源自身 id；recently-added 等混合资源保留用于库内操作。 */
+  libraryId?: string
+  /** 库资源关联的目录 id；播放和目录详情优先使用。 */
+  catalogId?: string
   /** 库内条目（点击走库内详情/曲目，而非目录打开） */
   isLibrary?: boolean
   /** 该条目在 web 上的 canonical url */
@@ -99,6 +105,8 @@ export interface AppleWebItem {
   playParams?: AppleRadioPlayParams
   /** stations：resource 自带的 offers[0].hlsUrl（部分电台免 play/assets 直接可播） */
   offersHlsUrl?: string
+  /** offers 快捷流是否声明 DRM；未知时不得绕过 play/assets 的 license 信息 */
+  offersHasDrm?: boolean
   // ── 歌曲字段（详情页用） ──
   audioTraits?: string[]
   composerName?: string
@@ -187,7 +195,12 @@ function displayString(value: unknown): string {
 }
 
 /** 可作为卡片/行展示的内容类型（editorial contents 白名单） */
-const CONTENT_TYPES: string[] = ['songs', 'albums', 'playlists', 'stations', 'artists', 'music-videos', 'uploaded-videos', 'posts', 'rooms']
+const CONTENT_TYPES: string[] = ['songs', 'albums', 'playlists', 'stations', 'radio-shows', 'radio-show', 'artists', 'music-videos', 'uploaded-videos', 'posts', 'rooms']
+
+function normalizeContentType(type: string): AppleWebItemType | null {
+  if (type === 'radio-show') return 'radio-shows'
+  return CONTENT_TYPES.includes(type) ? type as AppleWebItemType : null
+}
 
 function itemize(resource: any, type: AppleWebItemType, preferredId?: string): AppleWebItem | null {
   const attributes = resource?.attributes || {}
@@ -216,6 +229,8 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string): A
     motionPosterUrl: motion.poster,
     heroArtworkUrl: extractHeroArtwork(resource),
     artistName: attributes.artistName,
+    artistId: resource?.relationships?.artists?.data?.[0]?.id ? String(resource.relationships.artists.data[0].id) : undefined,
+    albumId: resource?.relationships?.albums?.data?.[0]?.id ? String(resource.relationships.albums.data[0].id) : undefined,
     durationMs: attributes.durationInMillis || attributes.durationMillis || attributes.durationInMilliseconds,
     curatorName: attributes.curatorName,
     trackCount: attributes.trackCount ?? attributes.playlistTrackCount ?? (Array.isArray(resource?.relationships?.tracks?.data) ? resource.relationships.tracks.data.length : undefined),
@@ -229,6 +244,13 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string): A
     playParams: Object.keys(playParamsFields).length > 0 ? playParamsFields : undefined,
     offersHlsUrl: Array.isArray(attributes.offers) && typeof attributes.offers[0]?.hlsUrl === 'string'
       ? attributes.offers[0].hlsUrl
+      : undefined,
+    offersHasDrm: Array.isArray(attributes.offers) && attributes.offers[0]
+      ? (typeof attributes.offers[0].hasDrm === 'boolean'
+          ? attributes.offers[0].hasDrm
+          : typeof attributes.offers[0].drmType === 'string' || typeof attributes.offers[0].keyServerUrl === 'string'
+            ? true
+            : undefined)
       : undefined,
     audioTraits: Array.isArray(attributes.audioTraits) ? attributes.audioTraits : undefined,
     composerName: attributes.composerName,
@@ -348,9 +370,9 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
       pushInner(parseEditorialSections(relations.children?.data || [], depth + 1))
     } else if (kind === '317') {
       const content = relations.contents?.data?.[0]
-      const itemType = String(content?.type || 'playlists')
-      if (CONTENT_TYPES.includes(itemType)) {
-        const item = itemize(content, itemType as AppleWebItemType)
+      const itemType = normalizeContentType(String(content?.type || 'playlists'))
+      if (itemType) {
+        const item = itemize(content, itemType)
         if (item) {
           item.badge = attributes.designBadge || undefined
           item.tag = attributes.designTag || undefined
@@ -360,9 +382,9 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
       }
     } else if (kind === '320') {
       const content = relations.contents?.data?.[0]
-      const itemType = String(content?.type || '')
-      const item = CONTENT_TYPES.includes(itemType)
-        ? itemize(content, itemType as AppleWebItemType)
+      const itemType = normalizeContentType(String(content?.type || ''))
+      const item = itemType
+        ? itemize(content, itemType)
         : null
       const bannerUrl = attributes.artwork?.url ? bannerArt(attributes) : undefined
       if (item || bannerUrl) {
@@ -380,9 +402,9 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
       const contents: any[] = relations.contents?.data || []
       const items: AppleWebItem[] = []
       contents.forEach((content: any) => {
-        const itemType = String(content?.type || '')
-        if (!CONTENT_TYPES.includes(itemType)) return
-        const item = itemize(content, itemType as AppleWebItemType)
+        const itemType = normalizeContentType(String(content?.type || ''))
+        if (!itemType) return
+        const item = itemize(content, itemType)
         if (item) items.push(item)
       })
       if (items.length > 0) {
@@ -398,16 +420,34 @@ function parseEditorialSections(elements: any[], depth = 0): AppleWebSection[] {
       const shows: AppleWebItem[] = []
       ;(relations.children?.data || []).forEach((show: any) => {
         const showAttrs = show?.attributes || {}
-        const name = showAttrs.designTag || showAttrs.name || ''
+        const name = displayString(showAttrs.designTag) || displayString(showAttrs.name)
         if (!name) return
+
+        const stationResource = (show?.relationships?.contents?.data || [])
+          .find((resource: any) => normalizeContentType(String(resource?.type || '')) === 'stations')
+        const station = stationResource ? itemize(stationResource, 'stations') : null
+        const rawUrl = typeof showAttrs.link?.url === 'string'
+          ? showAttrs.link.url
+          : typeof showAttrs.url === 'string' ? showAttrs.url : ''
+        let linkedStationId = ''
+        try {
+          const url = new URL(rawUrl, 'https://music.apple.com')
+          if (url.hostname === 'music.apple.com' && /\/station\//.test(url.pathname)) {
+            linkedStationId = url.pathname.match(/\/(ra\.\d+)\/?$/)?.[1] || ''
+          }
+        } catch {
+          linkedStationId = ''
+        }
+
         shows.push({
-          id: String(show.id || ''),
-          playId: '',
-          type: 'stations',
+          ...(station || {}),
+          id: station?.id || String(show.id || ''),
+          playId: station?.playId || linkedStationId,
+          type: station || linkedStationId ? 'stations' : 'radio-shows',
           name,
-          tag: showAttrs.designTag,
-          bannerUrl: showAttrs.artwork?.url ? bannerArt(showAttrs) : undefined,
-          url: showAttrs.link?.url,
+          tag: displayString(showAttrs.designTag) || undefined,
+          bannerUrl: showAttrs.artwork?.url ? bannerArt(showAttrs) : station?.bannerUrl,
+          url: rawUrl || station?.url,
         })
       })
       if (shows.length > 0) {
@@ -467,18 +507,25 @@ async function fetchEditorialPage(name: string, storefront: string): Promise<{ s
 // ─────────────────────────── 主页（Listen Now） ───────────────────────────
 
 /** 最近添加（资料库新增，优先登录）：/v1/me/library/recently-added */
-async function fetchHomeRecentlyAdded(): Promise<AppleWebSection | null> {
+export async function fetchHomeRecentlyAdded(): Promise<AppleWebSection | null> {
   const data = await gemsRequest('/v1/me/library/recently-added?limit=25&platform=web&include=catalog', { mediaUserToken: true })
   if (!data) return null
   const resources: any[] = Array.isArray(data.data) ? data.data : []
   if (resources.length === 0) return null
   const collected: AppleWebItem[] = []
   resources.forEach((resource: any) => {
-    const kind = resource?.type
-    if (!['songs', 'albums', 'playlists'].includes(kind)) return
-    const item = itemize(resource, kind)
+    const rawType = String(resource?.type || '')
+    const kind = rawType.startsWith('library-') ? rawType.slice('library-'.length) : rawType
+    if (!['songs', 'albums', 'playlists', 'music-videos', 'uploaded-videos'].includes(kind)) return
+    const normalizedKind = kind === 'uploaded-videos' ? 'uploaded-videos' : kind
+    const catalogId = resource?.relationships?.catalog?.data?.[0]?.id
+      ? String(resource.relationships.catalog.data[0].id)
+      : undefined
+    const item = itemize(resource, normalizedKind as AppleWebItemType, catalogId || String(resource.id || ''))
     if (item) {
-      item.playId = kind === 'songs' ? catalogIdOf(resource) : String(resource.id)
+      item.libraryId = rawType.startsWith('library-') ? String(resource.id || '') : undefined
+      item.catalogId = catalogId
+      item.isLibrary = rawType.startsWith('library-')
       collected.push(item)
     }
   })
@@ -838,6 +885,37 @@ export async function fetchAppleCuratorPage(curatorId: string, storefront?: stri
   return { curator, sections, playlists, playlistCount: attributes.playlistCount }
 }
 
+export interface AppleRadioShowDetail {
+  show: AppleWebItem
+  episodes: AppleWebItem[]
+}
+
+/** 广播节目详情：节目容器本身不可播放，展开其 episodes/stations 后再播放。 */
+export async function fetchAppleRadioShowDetail(showId: string, storefront?: string): Promise<AppleRadioShowDetail | null> {
+  if (!showId) return null
+  const sf = storefront || getStorefront()
+  const data = await gemsRequest(
+    `/v1/catalog/${encodeURIComponent(sf)}/radio-shows/${encodeURIComponent(showId)}?include=episodes,stations&extend=editorialArtwork,editorialVideo`,
+  )
+  const resource = Array.isArray(data?.data) ? data.data[0] : null
+  if (!resource) return null
+  const show = itemize(resource, 'radio-shows')
+  if (!show) return null
+  const episodes: AppleWebItem[] = []
+  const candidates = [
+    ...(resource.relationships?.episodes?.data || []),
+    ...(resource.relationships?.stations?.data || []),
+    ...(resource.relationships?.contents?.data || []),
+  ]
+  for (const item of candidates) {
+    const type = normalizeContentType(String(item?.type || 'stations'))
+    if (!type || (type !== 'stations' && type !== 'music-videos')) continue
+    const mapped = itemize(item, type)
+    if (mapped && !episodes.some(existing => existing.id === mapped.id)) episodes.push(mapped)
+  }
+  return { show, episodes }
+}
+
 // ─────────────────────────── 歌曲详情（web /song/… 同款） ───────────────────────────
 
 export interface AppleSongDetail {
@@ -983,10 +1061,14 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
   if (artists.status === 'fulfilled' && artists.value.length > 0) {
     sections.push({
       id: 'library-artists', kind: 'row', title: '艺人', subtitle: `资料库共 ${artists.value.length} 位`,
-      items: artists.value.map((artist): AppleWebItem => ({
-        id: artist.id, playId: artist.id, type: 'artists', name: artist.name,
-        subtitle: artist.genreName, artworkUrl: artist.artworkUrl,
-      })),
+      items: artists.value.map((artist): AppleWebItem => {
+        const catalogId = (artist as typeof artist & { catalogId?: string }).catalogId
+        return {
+          id: artist.id, playId: catalogId || artist.id, libraryId: artist.id, catalogId,
+          type: 'artists', name: artist.name,
+          subtitle: artist.genreName, artworkUrl: artist.artworkUrl, isLibrary: !catalogId,
+        }
+      }),
     })
   }
   if (playlists.status === 'fulfilled' && playlists.value) sections.push(playlists.value)
@@ -994,9 +1076,10 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
     sections.push({
       id: 'library-albums', kind: 'row', title: '专辑', subtitle: `资料库共 ${albums.value.length} 张`,
       items: albums.value.map((album): AppleWebItem => ({
-        id: album.id, playId: album.id, type: 'albums', name: album.name,
+        id: album.id, playId: album.catalogId || album.id, libraryId: album.id, catalogId: album.catalogId,
+        type: 'albums', name: album.name,
         subtitle: album.artistName, artworkUrl: album.artworkUrl, artistName: album.artistName,
-        releaseDate: album.releaseDate, trackCount: album.trackCount, isLibrary: true,
+        releaseDate: album.releaseDate, trackCount: album.trackCount, isLibrary: !album.catalogId,
       })),
     })
   }
@@ -1005,7 +1088,8 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
     sections.push({
       id: 'library-songs', kind: 'row', title: '歌曲', subtitle: `资料库共 ${songs.value.length} 首`,
       items: songs.value.map((track): AppleWebItem => ({
-        id: track.id, playId: track.catalogId || track.id, type: 'songs',
+        id: track.id, playId: track.catalogId || track.id, libraryId: track.id, catalogId: track.catalogId,
+        type: 'songs',
         name: track.name, subtitle: track.artistName, artworkUrl: track.artworkUrl,
         artistName: track.artistName, durationMs: track.durationMs, isLibrary: true,
       })),
@@ -1038,9 +1122,11 @@ export async function fetchLibraryArtistAlbumsForDrawer(artistId: string): Promi
 
 /** 行内条目 → 可播放 Song（platform=apple，走统一播放链路：原生→载体回退） */
 export function appleWebItemToSong(item: AppleWebItem, storefront?: string): Song {
-  return appleSongToSong(
+  const song = appleSongToSong(
     {
       id: item.playId || item.id,
+      artistId: item.artistId,
+      albumId: item.albumId,
       name: item.name,
       artistName: item.artistName || item.subtitle || '',
       artworkUrl: item.artworkUrl,
@@ -1048,6 +1134,8 @@ export function appleWebItemToSong(item: AppleWebItem, storefront?: string): Son
     },
     storefront || getStorefront(),
   )
+  if (item.libraryId) song.appleLibraryId = item.libraryId
+  return song
 }
 
 /**
@@ -1174,7 +1262,9 @@ export async function fetchAppleLibraryPlaylistsSection(): Promise<AppleWebSecti
     subtitle: '你的资料库歌单',
     items: playlists.map(playlist => ({
       id: playlist.id,
-      playId: playlist.id,
+      playId: playlist.catalogId || playlist.id,
+      libraryId: playlist.id,
+      catalogId: playlist.catalogId,
       type: 'playlists',
       isLibrary: true,
       name: playlist.name,

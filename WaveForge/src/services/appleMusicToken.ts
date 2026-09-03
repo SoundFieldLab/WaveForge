@@ -13,7 +13,7 @@
 const WEB_TOKEN_KEY = 'appleWebDevToken'
 const WEB_TOKEN_EXP_KEY = 'appleWebDevTokenExp'
 /** 剩余有效期不足 24 小时时主动刷新 */
-const REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000
+export const APPLE_DEV_TOKEN_REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000
 
 const ALLORIGINS = 'https://api.allorigins.win/raw?url='
 
@@ -29,6 +29,20 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   } catch {
     return null
   }
+}
+
+export function getAppleDeveloperTokenExpiresAt(token: string): number {
+  const payload = decodeJwtPayload(token)
+  return payload && typeof payload.exp === 'number' ? payload.exp * 1000 : 0
+}
+
+export function shouldRefreshAppleDeveloperToken(
+  token: string,
+  now = Date.now(),
+  thresholdMs = APPLE_DEV_TOKEN_REFRESH_THRESHOLD_MS,
+): boolean {
+  const expiresAt = getAppleDeveloperTokenExpiresAt(token)
+  return expiresAt === 0 || expiresAt <= now + thresholdMs
 }
 
 function extractTokenFromBundleJs(js: string): string | null {
@@ -73,7 +87,7 @@ export function getCachedAppleWebDevToken(): { token: string; expiresAt: number 
     const expRaw = localStorage.getItem(WEB_TOKEN_EXP_KEY)
     const expiresAt = expRaw ? Number(expRaw) : 0
     if (!token) return null
-    if (expiresAt > Date.now() + REFRESH_THRESHOLD_MS) {
+    if (expiresAt > Date.now() + APPLE_DEV_TOKEN_REFRESH_THRESHOLD_MS) {
       return { token, expiresAt }
     }
     return null
@@ -83,19 +97,46 @@ export function getCachedAppleWebDevToken(): { token: string; expiresAt: number 
 }
 
 /** 确保拿到可用的开发者令牌：优先缓存，失效则重新抓取并缓存 */
+let tokenRefreshPromise: Promise<string> | null = null
+
 export async function ensureAppleWebDevToken(forceRefresh = false): Promise<string> {
   if (!forceRefresh) {
     const cached = getCachedAppleWebDevToken()
     if (cached) return cached.token
   }
-  const fresh = await fetchAppleWebDevToken()
+  if (tokenRefreshPromise) return tokenRefreshPromise
+
+  tokenRefreshPromise = (async () => {
+    const fresh = await fetchAppleWebDevToken()
+    try {
+      localStorage.setItem(WEB_TOKEN_KEY, fresh.token)
+      localStorage.setItem(WEB_TOKEN_EXP_KEY, String(fresh.expiresAt || getAppleDeveloperTokenExpiresAt(fresh.token)))
+    } catch {
+      // 存储失败不影响本次使用
+    }
+    return fresh.token
+  })()
   try {
-    localStorage.setItem(WEB_TOKEN_KEY, fresh.token)
-    localStorage.setItem(WEB_TOKEN_EXP_KEY, String(fresh.expiresAt))
-  } catch {
-    // 存储失败不影响本次使用
+    return await tokenRefreshPromise
+  } finally {
+    tokenRefreshPromise = null
   }
-  return fresh.token
+}
+
+/** 请求前选取 Developer Token；只有 JWT 已过期/将过期时才抓取新 token。 */
+export async function prepareAppleDeveloperToken(token: string): Promise<string> {
+  if (!shouldRefreshAppleDeveloperToken(token)) return token
+  try {
+    const fresh = await ensureAppleWebDevToken(true)
+    if (fresh) {
+      localStorage.setItem('appleDeveloperToken', fresh)
+      return fresh
+    }
+  } catch {
+    if (getAppleDeveloperTokenExpiresAt(token) > Date.now()) return token
+    throw new Error('Apple Developer Token 已过期且刷新失败')
+  }
+  return token
 }
 
 /** 清除缓存的网页令牌（登出/手动清理时调用） */

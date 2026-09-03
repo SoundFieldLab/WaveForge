@@ -13,9 +13,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2, X, Play } from 'lucide-react'
-import { resolveAppleNativeStream } from '../services/applePlayback'
+import { releaseAppleNativeStream, resolveAppleNativeStream } from '../services/applePlayback'
 import { attachAppleHls, detachAppleHls } from '../services/appleHlsPlayer'
 import type { AppleWebItem } from '../services/appleWebService'
+import { useTvBack } from '../tv/tvCore'
 
 interface AppleVideoModalProps {
   item: AppleWebItem
@@ -27,6 +28,12 @@ export default function AppleVideoModal({ item, onClose }: AppleVideoModalProps)
   const [state, setState] = useState<'loading' | 'playing' | 'error'>('loading')
   const [error, setError] = useState('')
   const [manualPaused, setManualPaused] = useState(false)
+  const [retryToken, setRetryToken] = useState(0)
+
+  useTvBack(() => {
+    onClose()
+    return true
+  }, [onClose])
 
   useEffect(() => {
     let cancelled = false
@@ -36,6 +43,7 @@ export default function AppleVideoModal({ item, onClose }: AppleVideoModalProps)
       try {
         const stream = await resolveAppleNativeStream(item.playId || item.id)
         if (cancelled || !stream || !videoRef.current) {
+          if (stream) releaseAppleNativeStream(stream)
           if (!cancelled && !stream) throw new Error('视频取流失败（可能需要订阅 Apple Music）')
           return
         }
@@ -59,7 +67,7 @@ export default function AppleVideoModal({ item, onClose }: AppleVideoModalProps)
       cancelled = true
       detachAppleHls(videoRef.current)
     }
-  }, [item])
+  }, [item, retryToken])
 
   return (
     <AnimatePresence>
@@ -68,7 +76,10 @@ export default function AppleVideoModal({ item, onClose }: AppleVideoModalProps)
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-[180] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md md:p-10"
-        onClick={onClose}
+        onClick={(event) => {
+          event.stopPropagation()
+          if (event.target === event.currentTarget) onClose()
+        }}
       >
         <motion.div
           initial={{ scale: 0.96, opacity: 0 }}
@@ -98,7 +109,7 @@ export default function AppleVideoModal({ item, onClose }: AppleVideoModalProps)
                 <p className="text-sm text-white/80">{error}</p>
                 <button
                   type="button"
-                  onClick={() => setState('loading')}
+                  onClick={() => setRetryToken(token => token + 1)}
                   className="flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold"
                   style={{ background: '#fa2d48', color: '#0a0f14' }}
                 >

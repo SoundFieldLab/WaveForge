@@ -158,9 +158,10 @@ export async function searchAppleTracks(
   artist: string,
   _durationMs?: number,
   limit = 8,
+  storefront?: string,
 ): Promise<AppleTrackMatch[]> {
   const settings = getAppleMusicSettings()
-  const configured = STOREFRONT_TO_COUNTRY[settings.storefront]
+  const configured = STOREFRONT_TO_COUNTRY[(storefront || settings.storefront).toLowerCase()]
   const ordered = [...new Set([configured, 'CN', 'US', 'TW', 'HK', 'JP'].filter(Boolean))] as string[]
 
   const settled = await Promise.allSettled(
@@ -221,10 +222,107 @@ const LANG_MAP: Record<string, { lyrics: string; script?: string; accept: string
   'en-gb': { lyrics: 'en-gb', accept: 'en-GB,en;q=0.9' },
 }
 
+export interface AppleTtmlBundle {
+  primary: string
+  localizations: string[]
+}
+
+function normalizeLocaleCode(value: string): string {
+  return value.toLowerCase().replace(/_/g, '-')
+}
+
+export function collectAppleTtml(attributes: any, settings: AppleMusicSettings): AppleTtmlBundle | null {
+  const localizations = attributes?.ttmlLocalizations && typeof attributes.ttmlLocalizations === 'object'
+    ? attributes.ttmlLocalizations as Record<string, unknown>
+    : {}
+  const requested = normalizeLocaleCode(settings.lyricLang)
+  const requestedScript = requested.includes('hant') ? 'zh-hant' : requested.includes('hans') ? 'zh-hans' : requested.split('-').slice(0, 2).join('-')
+  const entries = Object.entries(localizations)
+    .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && Boolean(entry[1].trim()))
+    .sort(([left], [right]) => {
+      const rank = (code: string) => {
+        const normalized = normalizeLocaleCode(code)
+        if (normalized === requested) return 0
+        if (normalized.startsWith(requestedScript)) return 1
+        if (normalized.startsWith('zh-hans')) return 2
+        if (normalized.startsWith('zh-hant')) return 3
+        if (normalized.startsWith('en')) return 4
+        return 5
+      }
+      return rank(left) - rank(right)
+    })
+  const values = entries.map(([, value]) => value)
+  if (typeof attributes?.ttml === 'string' && attributes.ttml.trim()) values.push(attributes.ttml)
+  const unique = values.filter((value, index) => values.indexOf(value) === index)
+  if (unique.length === 0) return null
+
+  let primary = unique[0]
+  let bestPrimaryLines = -1
+  for (const value of unique) {
+    try {
+      const primaryLines = parseTTML(value).lines.filter(line => line.words.length > 0).length
+      if (primaryLines > bestPrimaryLines) {
+        primary = value
+        bestPrimaryLines = primaryLines
+      }
+    } catch { /* malformed candidate ignored */ }
+  }
+  return { primary, localizations: unique.filter(value => value !== primary) }
+}
+
+export function mergeAppleTtmlBundle(bundle: AppleTtmlBundle): string {
+  if (bundle.localizations.length === 0) return bundle.primary
+  const primaryDoc = new DOMParser().parseFromString(bundle.primary, 'text/xml')
+  const primaryParagraphs = Array.from(primaryDoc.getElementsByTagNameNS('*', 'p'))
+    .filter(element => !['x-translation', 'x-roman'].includes(
+      element.getAttributeNS('http://www.w3.org/ns/ttml#metadata', 'role') || element.getAttribute('ttm:role') || '',
+    ))
+  const keyOf = (element: Element) => {
+    const begin = element.getAttribute('begin') || ''
+    const end = element.getAttribute('end') || ''
+    const agent = element.getAttributeNS('http://www.w3.org/ns/ttml#metadata', 'agent') || element.getAttribute('ttm:agent') || ''
+    return `${begin}|${end}|${agent}`
+  }
+  const byKey = new Map(primaryParagraphs.map(element => [keyOf(element), element]))
+  for (const localization of bundle.localizations) {
+    try {
+      const doc = new DOMParser().parseFromString(localization, 'text/xml')
+      for (const paragraph of Array.from(doc.getElementsByTagNameNS('*', 'p'))) {
+        const role = paragraph.getAttributeNS('http://www.w3.org/ns/ttml#metadata', 'role') || paragraph.getAttribute('ttm:role') || ''
+        const target = byKey.get(keyOf(paragraph))
+        if (!target) continue
+        const appendAlternate = (source: Element, alternateRole: string) => {
+          const wrapper = primaryDoc.createElementNS(target.namespaceURI, 'span')
+          wrapper.setAttributeNS('http://www.w3.org/ns/ttml#metadata', 'ttm:role', alternateRole)
+          const lang = source.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang') || source.getAttribute('xml:lang')
+          if (lang) wrapper.setAttributeNS('http://www.w3.org/XML/1998/namespace', 'xml:lang', lang)
+          const imported = primaryDoc.importNode(source, true)
+          while (imported.firstChild) wrapper.appendChild(imported.firstChild)
+          const text = wrapper.textContent?.trim()
+          const duplicate = Array.from(target.children).some(child => {
+            const childRole = child.getAttributeNS('http://www.w3.org/ns/ttml#metadata', 'role') || child.getAttribute('ttm:role') || ''
+            return childRole === alternateRole && child.textContent?.trim() === text
+          })
+          if (!duplicate) target.appendChild(wrapper)
+        }
+        if (role === 'x-translation' || role === 'x-roman') {
+          appendAlternate(paragraph, role)
+          continue
+        }
+        for (const child of Array.from(paragraph.children)) {
+          const childRole = child.getAttributeNS('http://www.w3.org/ns/ttml#metadata', 'role') || child.getAttribute('ttm:role') || ''
+          if (childRole === 'x-translation' || childRole === 'x-roman') appendAlternate(child, childRole)
+        }
+      }
+    } catch { /* malformed localization ignored */ }
+  }
+  return new XMLSerializer().serializeToString(primaryDoc)
+}
+
 export async function fetchAppleSyllableLyricsDirect(
   match: AppleTrackMatch,
   settings: AppleMusicSettings = getAppleMusicSettings(),
-): Promise<string | null> {
+): Promise<AppleTtmlBundle | null> {
   const storefront = settings.storefront || match.storefront || 'cn'
   const params = new URLSearchParams()
   const lang = LANG_MAP[settings.lyricLang] || LANG_MAP['zh-hans-cn']
@@ -251,17 +349,7 @@ export async function fetchAppleSyllableLyricsDirect(
   }
   const attributes = result.data?.data?.[0]?.attributes
   if (!attributes) return null
-  // 优先当前语言（ttmlLocalizations 是按语言码 → TTML 字符串的映射）
-  const localizations = attributes.ttmlLocalizations
-  if (localizations && typeof localizations === 'object') {
-    const candidates = [settings.lyricLang, 'zh-Hans', 'zh-Hant', 'en-US']
-    for (const code of candidates) {
-      const ttml = localizations[code]
-      if (typeof ttml === 'string' && ttml.trim().length > 0) return ttml
-    }
-  }
-  if (typeof attributes.ttml === 'string' && attributes.ttml.trim().length > 0) return attributes.ttml
-  return null
+  return collectAppleTtml(attributes, settings)
 }
 
 // ─────────────────────────── AMLL am-lyrics 社区库（免 token） ───────────────────────────
@@ -326,14 +414,58 @@ export function convertAppleTTMLToLyrics(
         duration: Math.max(0, word.endTime - word.startTime),
       }))
       const text = words.map(word => word.word).join('').trim()
+      const lineTime = Math.max(0, line.startTime - silenceMs) / 1000
+      const alternateTexts = line.alternateTexts?.map(alternate => ({
+        role: alternate.role,
+        type: alternate.type,
+        language: alternate.language,
+        lang: alternate.lang,
+        text: alternate.text,
+        agent: alternate.agent,
+        time: Math.max(0, alternate.startTime - silenceMs) / 1000,
+        endTime: Math.max(0, alternate.endTime - silenceMs) / 1000,
+        words: alternate.words?.map(word => ({
+          word: word.text,
+          startTime: Math.max(0, word.startTime - alternate.startTime),
+          duration: Math.max(0, word.endTime - word.startTime),
+        })),
+      }))
+      const backgroundVocals = line.backgroundVocals?.map(vocal => ({
+        time: Math.max(0, vocal.startTime - silenceMs) / 1000,
+        endTime: Math.max(0, vocal.endTime - silenceMs) / 1000,
+        text: vocal.text,
+        words: vocal.words.map(word => ({
+          word: word.text,
+          startTime: Math.max(0, word.startTime - vocal.startTime),
+          duration: Math.max(0, word.endTime - word.startTime),
+        })),
+        translation: vocal.translation,
+        roman: vocal.roman || vocal.romanization,
+        romanization: vocal.romanization || vocal.roman,
+        agent: vocal.agent,
+        agentId: vocal.agentId || vocal.agent,
+        agentName: vocal.agent ? agentNameOf(vocal.agent) : undefined,
+        alternateTexts: vocal.alternateTexts?.map(alternate => ({
+          role: alternate.role,
+          type: alternate.type,
+          language: alternate.language,
+          lang: alternate.lang,
+          text: alternate.text,
+          agent: alternate.agent,
+        })),
+      }))
       return {
-        time: Math.max(0, line.startTime - silenceMs) / 1000,
+        time: lineTime,
+        endTime: Math.max(0, line.endTime - silenceMs) / 1000,
         text,
         words: words.length > 0 ? words : undefined,
         translation: line.translation?.trim() || undefined,
         roman: line.roman?.trim() || undefined,
+        role: line.role,
         agent: line.agent || undefined,
         agentName: line.agent ? agentNameOf(line.agent) : undefined,
+        alternateTexts: alternateTexts?.length ? alternateTexts : undefined,
+        backgroundVocals: backgroundVocals?.length ? backgroundVocals : undefined,
       }
     })
     .filter(line => line.text)
@@ -383,19 +515,33 @@ export async function getAppleMusicLyrics(
   title: string,
   artist: string,
   durationMs?: number,
+  options?: { songId?: string | number; storefront?: string },
 ): Promise<LyricLine[]> {
   const settings = getAppleMusicSettings()
   // 未登录默认关闭 AM 歌词：不请求 Apple 官方接口，也不用社区库替换平台歌词
-  if (!settings.enabled || !title || !artist || !isAppleMusicConfigured()) return []
+  if (!settings.enabled || !isAppleMusicConfigured()) return []
 
-  const match = await resolveAppleTrack(title, artist, durationMs)
+  const directSongId = String(options?.songId || '').trim()
+  const usableDirectSongId = directSongId && directSongId !== '0' && !/^(?:i|l|p|ra)\./i.test(directSongId)
+  const match: AppleTrackMatch | null = usableDirectSongId
+    ? {
+        songId: directSongId,
+        trackName: title || directSongId,
+        artistName: artist || '',
+        durationMs,
+        storefront: options?.storefront || settings.storefront || 'cn',
+      }
+    : title && artist
+      ? await resolveAppleTrack(title, artist, durationMs)
+      : null
   if (!match) return []
 
   let ttml: string | null = null
   // 仅「已登录」才请求 Apple 官方接口（token 存在但未登录成功时直接走社区库）
   const loggedIn = getAppleAuthState().loggedIn
   if (loggedIn && settings.developerToken && settings.mediaUserToken) {
-    ttml = await fetchAppleSyllableLyricsDirect(match, settings)
+    const bundle = await fetchAppleSyllableLyricsDirect(match, settings)
+    if (bundle) ttml = mergeAppleTtmlBundle(bundle)
   }
   if (!ttml) {
     ttml = await fetchAmLyricsTtml(match.songId)
@@ -470,13 +616,14 @@ export function getAgentTintColor(
   agentCount: number,
   dark: boolean,
   accentColor?: string,
+  agentOrder?: string[],
 ): string | undefined {
   if (!agentId || agentCount < 2) return undefined
-  const index = agentId.match(/(\d+)$/)?.[1] ? Number(agentId.match(/(\d+)$/)?.[1]) : 0
-  if (index <= 1) return undefined // v1 / 主唱：不染色
+  const numeric = agentId.match(/(\d+)$/)?.[1]
+  const index = numeric ? Math.max(0, Number(numeric) - 1) : Math.max(0, agentOrder?.indexOf(agentId) ?? 0)
+  if (index === 0) return undefined
   const palette = dark
     ? DUET_AGENT_COLORS
     : ['#111114', '#e8682f', '#0f83c9', '#e0556d', '#4d7c0f', '#7c3aed']
-  const color = palette[Math.min(index - 1, palette.length - 1)]
-  return accentColor && index === 1 ? accentColor : color
+  return palette[Math.min(index, palette.length - 1)]
 }

@@ -154,6 +154,12 @@ export function clearAppleLogin(): void {
   localStorage.removeItem('appleAccountSignInWithApple')
   localStorage.removeItem('appleAccountDevices')
   localStorage.removeItem('appleAccountIcons')
+  localStorage.removeItem('appleDeveloperToken')
+  localStorage.removeItem('appleMediaUserToken')
+  localStorage.removeItem('appleStorefront')
+  localStorage.removeItem('appleWebDevToken')
+  localStorage.removeItem('appleWebDevTokenExp')
+  localStorage.removeItem('wf_login_expiry_apple')
 }
 
 export function saveAppleLogin(user: AppleUserInfo): void {

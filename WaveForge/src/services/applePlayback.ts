@@ -23,6 +23,8 @@
  * - 无 Widevine 或取流失败 → 上层回退网易云/QQ 载体匹配（原有路径不变）
  */
 import { getAppleCredentials } from './appleAuth'
+import { recordAppleAcceptanceEvent } from './appleAcceptanceDiagnostics'
+import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
 
 const APPLE_WEBPLAYBACK_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
 
@@ -39,6 +41,10 @@ export interface AppleNativeStream {
   licenseAdamId?: string
   /** 触发的曲目 id（诊断用） */
   songId: string
+  /** CENC 清单中原始的 EXT-X-KEY data: URI（license 请求的 uri 字段必须用它，而非改写后的 PSSH URI） */
+  cencKeyUri?: string
+  /** 当前流改写清单对应的 blob URL；由挂载该流的播放器负责释放 */
+  manifestObjectUrl?: string
   /** 直播流（电台/直播视频）：时长按 Infinity 处理，不做进度/切歌 */
   live?: boolean
 }
@@ -50,6 +56,19 @@ export function isAppleNativeStreamEnabled(): boolean {
 
 /** 最近一次原生取流的失败原因（供 UI 提示/诊断；成功或未尝试时为空） */
 let lastNativeFailReason = ''
+
+// Apple license 明确拒绝（例如 -1021）后，本会话内不重复消耗 30s HLS/EME 超时；
+// 上层会立即走 WebView2 兼容播放。-1021 可能来自 VMP、session、限流或服务端状态，
+// 不能再解释为“Apple 整类拒绝 L3/MF 才可用”。重启应用会重新探活一次。
+let cencRejected = false
+export function markCencRejected(): void {
+  cencRejected = true
+  console.warn('[ApplePlayback] CENC license 本会话被拒，后续直接走兼容播放（重启后重新探活）')
+}
+function isCencRejected(): boolean {
+  return cencRejected
+}
+
 /** 最近一次 EME 能力检测的失败原因（供 UI 提示） */
 let lastEmeFailReason = ''
 export function getAppleNativeFailReason(): string {
@@ -77,7 +96,7 @@ function forwardToMainLog(message: string): void {
 
 interface AppleWebPlaybackItem {
   songId?: unknown
-  assets?: Array<{ URL?: unknown }>
+  assets?: Array<{ URL?: unknown; url?: unknown }>
   attributes?: {
     assetUrl?: unknown
     offers?: Array<{ hlsUrl?: unknown }>
@@ -87,52 +106,85 @@ interface AppleWebPlaybackItem {
   'widevine-cert-url'?: unknown
 }
 
-/** 主进程代理取流（Electron）；纯浏览器退化为直连（大概率 CORS 失败 → null） */
-async function fetchWebPlayback(songId: string, developerToken: string, mediaUserToken: string): Promise<AppleWebPlaybackItem | null> {
+interface ApplePlaybackRequestResult<T> {
+  ok: boolean
+  status: number
+  data?: T
+  error?: string
+}
+
+async function runWebPlaybackRequest(
+  songId: string,
+  developerToken: string,
+  mediaUserToken: string,
+): Promise<ApplePlaybackRequestResult<AppleWebPlaybackItem>> {
   const bridge = (window as any).electron?.applePlayback
   if (typeof bridge === 'function') {
     try {
       const result = await bridge(songId, developerToken, mediaUserToken)
-      if (!result?.ok) {
-        setNativeFailReason(`webPlayback HTTP ${result?.status || '?'}${result?.error ? '（' + result.error + '）' : ''}`)
-        return null
-      }
       const songList = Array.isArray(result?.data?.songList) ? result.data.songList : []
-      return (songList[0] as AppleWebPlaybackItem) || null
+      return { ok: Boolean(result?.ok), status: Number(result?.status) || 0, data: songList[0], error: result?.error }
     } catch (error) {
-      setNativeFailReason(`主进程取流调用失败：${error instanceof Error ? error.message : String(error)}`)
-      return null
+      return { ok: false, status: 0, error: `主进程取流调用失败：${error instanceof Error ? error.message : String(error)}` }
     }
   }
-  // 浏览器直连兜底（amp-api 与 itunes 域通常无 CORS 放行，仅开发模式可用）
+
   try {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 15000)
-    const response = await fetch(APPLE_WEBPLAYBACK_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${developerToken}`,
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'X-Apple-Music-User-Token': mediaUserToken,
-        Origin: 'https://music.apple.com',
-        Referer: 'https://music.apple.com/',
-      },
-      body: JSON.stringify({ salableAdamId: String(songId) }),
-      signal: controller.signal,
-    })
-    window.clearTimeout(timeout)
-    if (!response.ok) {
-      setNativeFailReason(`浏览器直连 webPlayback HTTP ${response.status}（建议检查主进程 IPC）`)
-      return null
+    try {
+      const response = await fetch(APPLE_WEBPLAYBACK_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${developerToken}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'X-Apple-Music-User-Token': mediaUserToken,
+          Origin: 'https://music.apple.com',
+          Referer: 'https://music.apple.com/',
+        },
+        body: JSON.stringify({ salableAdamId: String(songId) }),
+        signal: controller.signal,
+      })
+      const data = await response.json().catch(() => null)
+      const songList = Array.isArray(data?.songList) ? data.songList : []
+      return { ok: response.ok, status: response.status, data: songList[0] }
+    } finally {
+      window.clearTimeout(timeout)
     }
-    const data = await response.json().catch(() => null)
-    const songList = Array.isArray(data?.songList) ? data.songList : []
-    return (songList[0] as AppleWebPlaybackItem) || null
   } catch (error) {
-    setNativeFailReason(`浏览器直连 webPlayback 被拦截（CORS/网络）：${error instanceof Error ? error.message : String(error)}`)
+    return { ok: false, status: 0, error: `浏览器直连 webPlayback 被拦截（CORS/网络）：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
+/** 主进程代理取流（Electron）；纯浏览器退化为直连（大概率 CORS 失败 → null） */
+async function fetchWebPlayback(songId: string, developerToken: string, mediaUserToken: string): Promise<AppleWebPlaybackItem | null> {
+  let token = developerToken
+  try {
+    token = await prepareAppleDeveloperToken(token)
+  } catch (error) {
+    setNativeFailReason(error instanceof Error ? error.message : String(error))
     return null
   }
+
+  let result = await runWebPlaybackRequest(songId, token, mediaUserToken)
+  if ((result.status === 401 || result.status === 403) && shouldRefreshAppleDeveloperToken(token)) {
+    try {
+      const refreshedToken = await ensureAppleWebDevToken(true)
+      if (refreshedToken && refreshedToken !== token) {
+        localStorage.setItem('appleDeveloperToken', refreshedToken)
+        token = refreshedToken
+        result = await runWebPlaybackRequest(songId, token, mediaUserToken)
+      }
+    } catch {
+      // 保留第一次响应；MUT/订阅错误不得覆盖当前有效 Developer Token。
+    }
+  }
+  if (!result.ok) {
+    setNativeFailReason(result.error || `webPlayback HTTP ${result.status || '?'}`)
+    return null
+  }
+  return result.data || null
 }
 
 /** 取文本（Electron 走主进程代理避开 CORS；浏览器直连兜底） */
@@ -161,12 +213,6 @@ async function fetchText(url: string): Promise<string | null> {
 
 // ─────────────────────────── HLS 主清单解析 ───────────────────────────
 
-interface HlsVariant {
-  bandwidth: number
-  codec: string
-  url: string
-}
-
 function resolveUrl(uri: string, base: string): string {
   try {
     const resolved = new URL(uri, base).href
@@ -177,51 +223,110 @@ function resolveUrl(uri: string, base: string): string {
   }
 }
 
-/** 解析主清单（#EXT-X-STREAM-INF 变体列表），与 SDK fetchPlaylistAssets 同口径 */
-function parseMasterVariants(text: string, baseUrl: string): HlsVariant[] {
-  const variants: HlsVariant[] = []
-  const re = /#EXT-X-STREAM-INF:([^\n]*)[\r\n]+([^\r\n]+)/g
-  let match: RegExpExecArray | null
-  while ((match = re.exec(text)) !== null) {
-    const attrs = match[1]
-    const uri = String(match[2]).trim()
-    const codecs = /CODECS="([^"]*)"/.exec(attrs)?.[1] || ''
-    const bandwidth = Number(/(?:^|,)BANDWIDTH=(\d+)/.exec(attrs)?.[1] || 0)
-    if (!uri) continue
-    variants.push({ bandwidth, codec: codecs, url: resolveUrl(uri, baseUrl) })
+// ─────────────────────────── CENC/Widevine 清单处理 ───────────────────────────
+
+export function releaseAppleNativeStream(stream: AppleNativeStream | null | undefined): void {
+  const objectUrl = stream?.manifestObjectUrl
+  if (!objectUrl) return
+  stream!.manifestObjectUrl = undefined
+  try { URL.revokeObjectURL(objectUrl) } catch { /* 忽略 */ }
+  recordAppleAcceptanceEvent('manifest-revoked')
+}
+
+function bytesFromBase64(b64: string): Uint8Array {
+  const binary = typeof atob === 'function' ? atob(b64) : Buffer.from(b64, 'base64').toString('binary')
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+  return bytes
+}
+
+function base64FromBytes(bytes: Uint8Array): string {
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)) as number[])
   }
-  return variants
+  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64')
 }
 
-/** 选最佳音质变体：优先 AAC-LC（mp4a.40.2，Chromium 解码最稳），同级取最高码率 */
-function pickBestVariant(variants: HlsVariant[]): HlsVariant | null {
-  if (variants.length === 0) return null
-  const aac = variants
-    .filter(variant => /mp4a\.40\.2/i.test(variant.codec))
-    .sort((a, b) => b.bandwidth - a.bandwidth)
-  const pool = aac.length > 0 ? aac : [...variants].sort((a, b) => b.bandwidth - a.bandwidth)
-  return pool[0]
+const WIDEVINE_SYSTEM_ID = new Uint8Array([
+  0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+])
+
+/**
+ * KID → Widevine PSSH（与 MusicKit JS 实测形态逐字节同构，Chrome 抓包验证）：
+ * pssh v0（version+flags=0）+ widevine systemId + dataSize=20 +
+ * data = protobuf `08 01 12 10 <KID 原文>`（field1=1, field2=16字节 KID）。
+ * 不要改成 pssh v1 kid-list 形态：license 请求的 content_id 会随之改变，
+ * Apple 服务器解析失败会返回 -1021（表面上是 CDM_EXPIRED）。
+ */
+function buildWidevinePssh(kid: Uint8Array): Uint8Array {
+  const data = new Uint8Array(20)
+  data[0] = 0x08
+  data[1] = 0x01 // field 1 (varint): version = 1
+  data[2] = 0x12
+  data[3] = 0x10 // field 2 (bytes): length 16
+  data.set(kid, 4)
+  const box = new Uint8Array(32 + data.length)
+  const view = new DataView(box.buffer)
+  view.setUint32(0, box.length)
+  box.set([0x70, 0x73, 0x73, 0x68], 4) // 'pssh'
+  view.setUint32(8, 0) // version 0 + flags
+  box.set(WIDEVINE_SYSTEM_ID, 12)
+  view.setUint32(28, data.length)
+  box.set(data, 32)
+  return box
 }
 
-function findMasterUrl(item: AppleWebPlaybackItem | null): string | null {
-  if (!item) return null
-  const candidates: unknown[] = [
-    item.attributes?.assetUrl,
-    item.attributes?.offers?.[0]?.hlsUrl,
-    item.assets?.[0]?.URL,
-  ]
-  for (const raw of candidates) {
-    if (typeof raw !== 'string' || !raw) continue
+/** webPlayback 资产 → 候选清单 URL 列表（CENC 命名 rphq/rpsl 优先，FairPlay cphq/cpsl 与 identity ibhp* 靠后） */
+function collectManifestCandidates(item: AppleWebPlaybackItem | null): string[] {
+  if (!item) return []
+  const urls: string[] = []
+  const push = (raw: unknown) => {
+    if (typeof raw !== 'string' || !raw) return
     const url = raw.startsWith('manifest://') ? raw.replace(/^manifest:\/\//, 'https://') : raw
-    if (url.startsWith('http://') || url.startsWith('https://')) return url
+    if ((url.startsWith('http://') || url.startsWith('https://')) && !urls.includes(url)) urls.push(url)
   }
-  return null
+  for (const asset of Array.isArray(item.assets) ? item.assets : []) {
+    push(asset?.URL ?? asset?.url)
+  }
+  push(item.attributes?.assetUrl)
+  push(item.attributes?.offers?.[0]?.hlsUrl)
+  const score = (url: string) => (/\.rphq\./i.test(url) ? 0 : /\.rpsl\./i.test(url) ? 1 : 2)
+  return urls.sort((a, b) => score(a) - score(b))
+}
+
+/**
+ * 改写 CENC 清单为 hls.js 可用的 Widevine 形态：
+ * - EXT-X-KEY：ISO-23001-7 + 裸 KID 不在 hls.js 支持列表（会被静默忽略）→
+ *   换成 METHOD=SAMPLE-AES-CTR + widevine uuid keyFormat + data: PSSH URI，
+ *   hls.js 会把 data: 字节直接当 pssh/initData 建 license 会话
+ * - 分片与 EXT-X-MAP 的相对 URI 绝对化（清单以 blob: URL 加载，相对路径失锚）
+ */
+function rewriteCencManifest(text: string, manifestUrl: string, psshB64: string): string {
+  return text.split('\n').map(line => {
+    const trimmed = line.trim()
+    if (!trimmed) return line
+    if (trimmed.startsWith('#EXT-X-KEY')) {
+      return `#EXT-X-KEY:METHOD=SAMPLE-AES-CTR,URI="data:text/plain;base64,${psshB64}",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"`
+    }
+    if (trimmed.startsWith('#EXT-X-MAP')) {
+      return trimmed.replace(/URI="([^"]+)"/, (_all, uri: string) => `URI="${resolveUrl(uri, manifestUrl)}"`)
+    }
+    if (trimmed.startsWith('#')) return line
+    return resolveUrl(trimmed, manifestUrl)
+  }).join('\n')
 }
 
 /** 取流 + 选变体，返回可直接交给 hls.js 的媒体清单 URL 与 EME 配置 */
 export async function resolveAppleNativeStream(songId: string): Promise<AppleNativeStream | null> {
   if (!isAppleNativeStreamEnabled()) return null
   if (!songId) return null
+  // license 刚被 Apple 整类拒绝过：跳过本轮（回退载体），等冷却期过后再试
+  if (isCencRejected()) {
+    setNativeFailReason('CENC license 冷却期内（近期被 Apple 拒绝），跳过取流')
+    return null
+  }
   const credentials = getAppleCredentials()
   if (!credentials.developerToken || !credentials.mediaUserToken) {
     setNativeFailReason('AM 凭据缺失（developerToken/mediaUserToken 未配置）')
@@ -229,43 +334,61 @@ export async function resolveAppleNativeStream(songId: string): Promise<AppleNat
   }
 
   const item = await fetchWebPlayback(songId, credentials.developerToken, credentials.mediaUserToken)
-  const masterUrl = findMasterUrl(item)
-  if (!masterUrl) {
-    setNativeFailReason('webPlayback 未返回可用的 HLS 主清单（非目录曲目 / 订阅态异常 / token 校验失败）')
-    return null
-  }
-
-  let playableUrl = masterUrl
-  let pickedCodec = ''
-  const masterText = await fetchText(masterUrl)
-  if (!masterText) {
-    setNativeFailReason('主清单拉取失败（HLS 清单网络/代理问题）')
-    return null
-  }
-  if (masterText.includes('#EXT-X-STREAM-INF')) {
-    const variants = parseMasterVariants(masterText, masterUrl)
-    const best = pickBestVariant(variants)
-    if (best) {
-      playableUrl = best.url
-      pickedCodec = best.codec || ''
-    }
-  }
-  lastNativeFailReason = ''
-  // license adam-id 采用 webPlayback 返回的 songId（与 MusicKit SDK 一致；订阅态下
-  // 该 id 才是 license 服务按歌曲聚合的正确键，传 salableAdamId 可能导致授权失败）
   const licenseAdamId = item && item.songId ? String(item.songId) : songId
   const hasKeys = Boolean(item && (item['hls-key-cert-url'] || item['hls-key-server-url'] || item['widevine-cert-url']))
-  forwardToMainLog(`[ApplePlayback] 原生 HLS 就绪: ${playableUrl.slice(0, 96)} codec=${pickedCodec || '?'} keys=${hasKeys ? 'yes' : 'NO'} adam-id=${licenseAdamId.slice(0, 40)}`)
 
-  // 极端兜底：主清单/变体解析失败时仍把主清单交给 hls.js（hls.js 可自己处理）
+  // Chromium/hls.js 无法解 FairPlay（com.apple.streamingkeydelivery），必须选
+  // CENC（METHOD=ISO-23001-7，Widevine/PlayReady 通用加密）资产变体；assets[0]
+  // 通常是 FairPlay 专用（cphq/cpsl），直接用会「清单就绪但静默卡死 0:00」。
+  const candidates = collectManifestCandidates(item)
+  let cencUrl = ''
+  let cencText = ''
+  for (const candidate of candidates) {
+    const text = await fetchText(candidate)
+    if (!text || !text.includes('ISO-23001-7')) continue
+    cencUrl = candidate
+    cencText = text
+    break
+  }
+  if (!cencUrl) {
+    setNativeFailReason(`webPlayback 资产中无 CENC(Widevine) 清单（仅 FairPlay/identity 变体，共 ${candidates.length} 个，Chromium 无法解密）`)
+    return null
+  }
+
+  const keyUriMatch = /#EXT-X-KEY:[^\n]*URI="([^"]+)"/.exec(cencText)
+  const cencKeyUri = keyUriMatch ? keyUriMatch[1] : ''
+  const kidB64 = cencKeyUri.includes('base64,') ? cencKeyUri.slice(cencKeyUri.indexOf('base64,') + 7).trim() : ''
+  let kid = new Uint8Array(0)
+  try { kid = bytesFromBase64(kidB64) } catch { /* 无效 KID 走下方兜底 */ }
+  if (!kid.length) {
+    setNativeFailReason('CENC 清单缺少可解析的 EXT-X-KEY KID（data: URI）')
+    return null
+  }
+
+  // KID → Widevine PSSH v1（hls.js 对 widevine keyFormat 的 data: URI 直接当作
+  // pssh/initData 使用，必须是完整 pssh box，裸 KID 无法让 CDM 生成 challenge）
+  const psshB64 = base64FromBytes(buildWidevinePssh(kid))
+  // 改写清单：KEY 行换 hls.js 支持的 widevine 形态 + 分片/EXT-X-MAP URI 绝对化
+  // （清单以 blob: URL 交给 hls.js，相对路径会失锚）
+  const manifest = rewriteCencManifest(cencText, cencUrl, psshB64)
+  const manifestObjectUrl = URL.createObjectURL(new Blob([manifest], { type: 'application/vnd.apple.mpegurl' }))
+  // 追加 .m3u8 伪后缀（fragment）：让 isHlsUrl() 等按 URL 形态的 HLS 判定继续生效；
+  // blob: 取内容时 fragment 被浏览器忽略，对 hls.js 无副作用。
+  const blobUrl = `${manifestObjectUrl}#apple-hls.m3u8`
+  recordAppleAcceptanceEvent('manifest-created')
+
+  lastNativeFailReason = ''
+  forwardToMainLog(`[ApplePlayback] CENC/Widevine HLS 就绪: keys=${hasKeys ? 'yes' : 'no'}`)
   return {
-    url: playableUrl,
-    masterUrl,
+    url: blobUrl,
+    masterUrl: cencUrl,
     hlsKeyCertUrl: item ? String(item['hls-key-cert-url'] || '') : undefined,
     hlsKeyServerUrl: item ? String(item['hls-key-server-url'] || '') : undefined,
     widevineCertUrl: item ? String(item['widevine-cert-url'] || '') : undefined,
     licenseAdamId,
     songId,
+    cencKeyUri,
+    manifestObjectUrl,
   }
 }
 
@@ -283,49 +406,76 @@ export interface AppleRadioPlayParams {
 
 const APPLE_PLAY_ASSETS_URL = 'https://api.music.apple.com/v1/play/assets'
 
+async function runPlayAssetsRequest(
+  query: string,
+  developerToken: string,
+  mediaUserToken: string,
+): Promise<ApplePlaybackRequestResult<any>> {
+  const bridge = (window as any).electron?.applePlayAssets
+  if (typeof bridge === 'function') {
+    try {
+      const result = await bridge(query, developerToken, mediaUserToken)
+      return { ok: Boolean(result?.ok), status: Number(result?.status) || 0, data: result?.data, error: result?.error }
+    } catch (error) {
+      return { ok: false, status: 0, error: `主进程 play/assets 调用失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
+  try {
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 15000)
+    try {
+      const response = await fetch(`${APPLE_PLAY_ASSETS_URL}?${query}`, {
+        headers: {
+          Authorization: `Bearer ${developerToken}`,
+          Accept: 'application/json',
+          'X-Apple-Music-User-Token': mediaUserToken,
+          Origin: 'https://music.apple.com',
+          Referer: 'https://music.apple.com/',
+        },
+        signal: controller.signal,
+      })
+      return { ok: response.ok, status: response.status, data: await response.json().catch(() => null) }
+    } finally {
+      window.clearTimeout(timeout)
+    }
+  } catch (error) {
+    return { ok: false, status: 0, error: `浏览器直连 play/assets 被拦截（CORS/网络）：${error instanceof Error ? error.message : String(error)}` }
+  }
+}
+
 /** 主进程代理取流（Electron）；纯浏览器退化直连（大概率 CORS 失败 → null） */
 async function fetchPlayAssets(
   query: string,
   developerToken: string,
   mediaUserToken: string,
 ): Promise<any | null> {
-  const bridge = (window as any).electron?.applePlayAssets
-  if (typeof bridge === 'function') {
-    try {
-      const result = await bridge(query, developerToken, mediaUserToken)
-      if (!result?.ok) {
-        setNativeFailReason(`play/assets HTTP ${result?.status || '?'}${result?.error ? '（' + result.error + '）' : ''}`)
-        return null
-      }
-      return result.data
-    } catch (error) {
-      setNativeFailReason(`主进程 play/assets 调用失败：${error instanceof Error ? error.message : String(error)}`)
-      return null
-    }
-  }
+  let token = developerToken
   try {
-    const controller = new AbortController()
-    const timeout = window.setTimeout(() => controller.abort(), 15000)
-    const response = await fetch(`${APPLE_PLAY_ASSETS_URL}?${query}`, {
-      headers: {
-        Authorization: `Bearer ${developerToken}`,
-        Accept: 'application/json',
-        'X-Apple-Music-User-Token': mediaUserToken,
-        Origin: 'https://music.apple.com',
-        Referer: 'https://music.apple.com/',
-      },
-      signal: controller.signal,
-    })
-    window.clearTimeout(timeout)
-    if (!response.ok) {
-      setNativeFailReason(`浏览器直连 play/assets HTTP ${response.status}（建议检查主进程 IPC）`)
-      return null
-    }
-    return await response.json().catch(() => null)
+    token = await prepareAppleDeveloperToken(token)
   } catch (error) {
-    setNativeFailReason(`浏览器直连 play/assets 被拦截（CORS/网络）：${error instanceof Error ? error.message : String(error)}`)
+    setNativeFailReason(error instanceof Error ? error.message : String(error))
     return null
   }
+
+  let result = await runPlayAssetsRequest(query, token, mediaUserToken)
+  if ((result.status === 401 || result.status === 403) && shouldRefreshAppleDeveloperToken(token)) {
+    try {
+      const refreshedToken = await ensureAppleWebDevToken(true)
+      if (refreshedToken && refreshedToken !== token) {
+        localStorage.setItem('appleDeveloperToken', refreshedToken)
+        token = refreshedToken
+        result = await runPlayAssetsRequest(query, token, mediaUserToken)
+      }
+    } catch {
+      // 保留第一次响应；MUT/订阅错误不得覆盖当前有效 Developer Token。
+    }
+  }
+  if (!result.ok) {
+    setNativeFailReason(result.error || `play/assets HTTP ${result.status || '?'}`)
+    return null
+  }
+  return result.data
 }
 
 /**
@@ -357,8 +507,14 @@ export async function resolveAppleRadioStream(
   const query = new URLSearchParams(params).toString()
 
   const data = await fetchPlayAssets(query, credentials.developerToken, credentials.mediaUserToken)
-  const asset = Array.isArray(data?.results?.assets) ? data.results.assets[0] : null
-  const masterUrl = typeof asset?.url === 'string' ? asset.url : ''
+  const assets: any[] = Array.isArray(data?.results?.assets) ? data.results.assets : []
+  const candidates = assets.filter(asset => typeof (asset?.url || asset?.URL) === 'string')
+  const asset = candidates.find(asset => {
+    const keyServer = asset?.keyServerUrl || asset?.['hls-key-server-url']
+    const certificate = asset?.widevineKeyCertificateUrl || asset?.['widevine-cert-url']
+    return Boolean(keyServer && certificate)
+  }) || candidates.find(asset => !asset?.hasDrm && !asset?.keyServerUrl) || candidates[0]
+  const masterUrl = typeof (asset?.url || asset?.URL) === 'string' ? String(asset.url || asset.URL) : ''
   if (!masterUrl) {
     setNativeFailReason('play/assets 未返回可用 HLS 主清单（订阅态异常 / 地区限制 / 电台不可用）')
     return null
@@ -370,8 +526,10 @@ export async function resolveAppleRadioStream(
   return {
     url: resolved,
     masterUrl: resolved,
-    hlsKeyServerUrl: typeof asset?.keyServerUrl === 'string' && asset.keyServerUrl ? String(asset.keyServerUrl) : undefined,
-    widevineCertUrl: typeof asset?.widevineKeyCertificateUrl === 'string' && asset.widevineKeyCertificateUrl ? String(asset.widevineKeyCertificateUrl) : undefined,
+    hlsKeyServerUrl: typeof (asset?.keyServerUrl || asset?.['hls-key-server-url']) === 'string'
+      ? String(asset.keyServerUrl || asset['hls-key-server-url']) : undefined,
+    widevineCertUrl: typeof (asset?.widevineKeyCertificateUrl || asset?.['widevine-cert-url']) === 'string'
+      ? String(asset.widevineKeyCertificateUrl || asset['widevine-cert-url']) : undefined,
     licenseAdamId,
     songId: stationId,
     live: true,
@@ -444,8 +602,9 @@ function bytesToBase64(bytes: Uint8Array): string {
 /**
  * 构建 hls.js 播放 Apple HLS 流的配置：
  * - emeEnabled + drmSystems.widevine（licenseUrl + serverCertificateUrl）
- * - licenseXhrSetup：把 raw challenge 包装成 Apple webPlaybackLicense 的 JSON 协议
- *   （与 MusicKit JS 的 createLicenseChallengeBody 完全一致），其返回值即请求体
+ * - licenseXhrSetup：把 raw challenge 包装成 Apple license 服务的 JSON 协议
+ *   （与 MusicKit JS createLicenseChallengeBody 的目录歌曲分支一致：平铺对象，
+ *   字段 challenge/uri/key-system/adamId/isLibrary/user-initiated）
  * - licenseResponseCallback：license 响应 JSON → MediaKeySession.update 的 ArrayBuffer
  */
 export function createAppleHlsConfig(
@@ -461,6 +620,13 @@ export function createAppleHlsConfig(
         licenseUrl: stream.hlsKeyServerUrl,
         ...(stream.widevineCertUrl ? { serverCertificateUrl: stream.widevineCertUrl } : {}),
       },
+      // hls.js 的证书/license 查找用完整密钥系统名（drmSystems["com.widevine.alpha"]），
+      // 只写短名 widevine 时 serverCertificateUrl 会被跳过 → CDM 无证书 → 发 2 字节
+      // SERVICE_CERTIFICATE_REQUEST 被当 license 请求 → 服务器 500
+      'com.widevine.alpha': {
+        licenseUrl: stream.hlsKeyServerUrl,
+        ...(stream.widevineCertUrl ? { serverCertificateUrl: stream.widevineCertUrl } : {}),
+      },
     },
     drmSystemOptions: {
       audioEncryptionScheme: 'cenc',
@@ -469,31 +635,41 @@ export function createAppleHlsConfig(
     // 直播流（电台）：时长置 Infinity 而非滑动窗口（避免进度条在窗口内来回走），
     // 音轨不追赶直播边缘（maxLiveSyncPlaybackRate=1，防止变速追尾）
     ...(stream.live ? { liveDurationInfinity: true, maxLiveSyncPlaybackRate: 1 } : {}),
-    licenseXhrSetup: (_hls: unknown, xhr: XMLHttpRequest, _url: string, keyContext: any, licenseChallenge: Uint8Array) => {
-      xhr.open('POST', stream.hlsKeyServerUrl || _url, true)
+    // hls.js 1.7 签名：licenseXhrSetup(xhr, url, keyContext, licenseChallenge)——
+    // 注意没有 hls 实例参数（旧版五参写法会把 url 字符串当 xhr 用 → o.open is not a function）
+    licenseXhrSetup: (xhr: XMLHttpRequest, url: string, keyContext: any, licenseChallenge: Uint8Array) => {
+      recordAppleAcceptanceEvent('license-request')
+      // 桌面端经本地 API 服务器代理（补 music.apple.com Origin/Referer；渲染进程直连时
+      // Apple license 服务做来源校验，返回 200 + 无 license 的错误 JSON）
+      const desktop = typeof window !== 'undefined' && Boolean((window as any).electron)
+      const endpoint = desktop ? 'http://localhost:3001/api/apple/license' : (stream.hlsKeyServerUrl || url)
+      if (!xhr.readyState) xhr.open('POST', endpoint, true)
       xhr.setRequestHeader('Content-Type', 'application/json')
       xhr.setRequestHeader('Accept', 'application/json')
       if (developerToken) xhr.setRequestHeader('Authorization', `Bearer ${developerToken}`)
-      if (mediaUserToken) xhr.setRequestHeader('X-Apple-Music-User-Token', mediaUserToken)
-      xhr.setRequestHeader('X-Apple-Renewal', 'true')
-      const keyUri = (keyContext?.decryptdata?.uri as string) || ''
-      const payload = {
-        'license-requests': [
-          {
-            challenge: bytesToBase64(licenseChallenge instanceof Uint8Array ? licenseChallenge : new Uint8Array(licenseChallenge)),
-            uri: keyUri,
-            'key-system': 'com.widevine.alpha',
-            'adam-id': stream.licenseAdamId || stream.songId,
-            id: 1,
-          },
-        ],
+      if (mediaUserToken) {
+        // 本地代理兼容两种入站头并统一转发 Apple 私有 license 所需的 Media-User-Token。
+        // 直接发送规范名，避免 token 在代理边界丢失。
+        xhr.setRequestHeader('Media-User-Token', mediaUserToken)
       }
-      return JSON.stringify(payload)
+      xhr.setRequestHeader('X-Apple-Renewal', 'true')
+      // uri 必须用清单里原始的 CENC data: KID URI（改写后的 PSSH URI 服务器不认），
+      // 平铺协议同 MusicKit JS：无 license-requests 包裹、无 id、字段为 adamId
+      const body = {
+        challenge: bytesToBase64(licenseChallenge instanceof Uint8Array ? licenseChallenge : new Uint8Array(licenseChallenge)),
+        uri: stream.cencKeyUri || (keyContext?.decryptdata?.uri as string) || '',
+        'key-system': 'com.widevine.alpha',
+        adamId: stream.licenseAdamId || stream.songId,
+        isLibrary: false,
+        'user-initiated': true,
+      }
+      return JSON.stringify(body)
     },
-    licenseResponseCallback: (_hls: unknown, xhr: XMLHttpRequest) => {
+    // hls.js 1.7 签名：licenseResponseCallback(xhr, url, keyContext)，返回即最终 license 字节
+    licenseResponseCallback: (xhr: XMLHttpRequest, _url: string, _keyContext: any) => {
       // hls.js 的 license XHR 是 responseType=arraybuffer，responseText 恒为空，
       // 需从 xhr.response（ArrayBuffer）解码后解析 JSON
-      const raw: unknown = (xhr as any).response
+      const raw: unknown = xhr.response
       let text = ''
       if (raw instanceof ArrayBuffer) {
         text = new TextDecoder().decode(raw)
@@ -508,13 +684,37 @@ export function createAppleHlsConfig(
       } catch {
         data = null
       }
-      const b64: unknown = data?.license ?? data?.licenseResponse
+      // 兼容平铺（{status, license}）与数组（{license-responses:[...]}）两种形态
+      let payload: any = data
+      if (payload && Array.isArray(payload['license-responses']) && payload['license-responses'].length) {
+        payload = payload['license-responses'][0]
+      }
+      if (payload && typeof payload.status === 'number' && payload.status !== 0) {
+        recordAppleAcceptanceEvent('license-failure')
+        forwardToMainLog(`[ApplePlayback] license 响应被拒 status=${payload.status}`)
+        // -1021 = CDM 身份类被 Apple 拒绝（Electron 经典 L3 CDM）：进入冷却，
+        // 后续 Apple 歌曲跳过 CENC 空转直接走载体（10 分钟后自动重试）
+        if (payload.status === -1021) markCencRejected()
+        // -1002（failureType 2002）= Apple 账号会话过期：可感知提示引导重新登录，而非静默回退
+        if (payload.status === -1002 && typeof window !== 'undefined') {
+          try {
+            window.dispatchEvent(new CustomEvent('app-toast', {
+              detail: { message: 'Apple Music 登录会话已过期，请重新登录后再试', type: 'error' },
+            }))
+          } catch { /* 忽略 */ }
+        }
+        throw new Error(`[ApplePlayback] license 被拒 status=${payload.status}`)
+      }
+      const b64: unknown = payload?.license ?? payload?.licenseResponse
       if (typeof b64 !== 'string' || !b64) {
+        recordAppleAcceptanceEvent('license-failure')
+        forwardToMainLog(`[ApplePlayback] license 响应缺少 license 字段(HTTP ${xhr.status})`)
         throw new Error('[ApplePlayback] license 响应缺少 license 字段')
       }
       const binary = typeof atob === 'function' ? atob(b64) : Buffer.from(b64, 'base64').toString('binary')
       const bytes = new Uint8Array(binary.length)
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+      recordAppleAcceptanceEvent('license-success')
       return bytes.buffer as ArrayBuffer
     },
   }

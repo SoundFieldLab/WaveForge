@@ -282,10 +282,13 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
     }
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await window.electron?.appleLogout?.()
+    } catch {
+      // 本地凭据仍需清除；桌面会话可在下次登录前再次清理。
+    }
     clearAppleLogin()
-    localStorage.removeItem('appleDeveloperToken')
-    localStorage.removeItem('appleMediaUserToken')
     localStorage.removeItem('appleAccountFullEnabled')
     clearLoginExpiry('apple')
     setCurrentUser({ loggedIn: false, name: '', storefront })
@@ -373,7 +376,7 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
               </div>
               <button
                 type="button"
-                onClick={handleLogout}
+                onClick={() => void handleLogout()}
                 className="flex items-center gap-1.5 rounded-lg border border-white/12 px-2.5 py-1.5 text-xs text-white/65 transition hover:bg-white/10"
               >
                 <LogOut className="h-3.5 w-3.5" /> 退出

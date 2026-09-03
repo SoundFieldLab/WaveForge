@@ -12,6 +12,8 @@
  * 3) 浏览器直连兜底（amp-api 通常无 CORS 放行，仅作后备）
  */
 
+import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
+
 export interface AppleApiResult {
   ok: boolean
   status: number
@@ -22,7 +24,7 @@ export interface AppleApiResult {
 /** 路径归一化：统一带 /v1 前缀 */
 const normalizeApiPath = (path: string) => (path.startsWith('/v1') ? path : `/v1${path}`)
 
-export async function appleApiRequest(
+const runAppleApiRequest = async (
   path: string,
   options: {
     method?: string
@@ -30,8 +32,8 @@ export async function appleApiRequest(
     mediaUserToken?: string
     body?: unknown
     timeoutMs?: number
-  }
-): Promise<AppleApiResult> {
+  },
+): Promise<AppleApiResult> => {
   const apiPath = normalizeApiPath(path)
 
   // 1) Electron 主进程代理（优先）
@@ -107,4 +109,41 @@ export async function appleApiRequest(
   } finally {
     window.clearTimeout(timeout)
   }
+}
+
+/**
+ * 统一 Apple API 请求。Developer Token 失效时刷新网页 token 并只重试一次；
+ * Media User Token 无效仍原样返回 401/403，由业务层提示重新登录或订阅状态。
+ */
+export async function appleApiRequest(
+  path: string,
+  options: {
+    method?: string
+    developerToken: string
+    mediaUserToken?: string
+    body?: unknown
+    timeoutMs?: number
+  },
+): Promise<AppleApiResult> {
+  let developerToken = options.developerToken
+  try {
+    developerToken = await prepareAppleDeveloperToken(developerToken)
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : String(error) }
+  }
+
+  let result = await runAppleApiRequest(path, { ...options, developerToken })
+  if ((result.status !== 401 && result.status !== 403) || !shouldRefreshAppleDeveloperToken(developerToken)) {
+    return result
+  }
+
+  try {
+    const refreshedToken = await ensureAppleWebDevToken(true)
+    if (!refreshedToken || refreshedToken === developerToken) return result
+    localStorage.setItem('appleDeveloperToken', refreshedToken)
+    result = await runAppleApiRequest(path, { ...options, developerToken: refreshedToken })
+  } catch {
+    // 保留第一次响应，业务层可据其状态给出准确提示。
+  }
+  return result
 }
