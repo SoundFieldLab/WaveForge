@@ -28,7 +28,7 @@ import {
   getBilibiliWatchSettings,
   type BilibiliSubtitleLine,
 } from './bilibiliApi'
-import { autoMixAnalysisService, decodeAudioUrl, computeFrameEnvelope, detectLiveMusicEntry } from './autoMixAnalysisService'
+import { autoMixAnalysisService, decodeAudioUrl, computeFrameEnvelope, detectLiveMusicEntry, envelopeOffsetOf } from './autoMixAnalysisService'
 
 export interface MvAlignment {
   /** MV 视频时间 - 歌曲音频时间的偏移（秒）：歌曲位置 s 对应视频位置 s + offsetSeconds */
@@ -43,9 +43,10 @@ export const MIN_ALIGNMENT_CONFIDENCE = 0.5
 /** 偏移量合理性上限：前摇超过 45s 基本是货不对板（别的现场/剪辑），不冒险对齐 */
 const MAX_SANE_OFFSET_SECONDS = 45
 
-const STORAGE_KEY = 'waveforge:mv-alignments'
+const STORAGE_KEY = 'waveforge:mv-alignments:v2-seconds'
 const CACHE_MAX = 200
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 天
+const NEGATIVE_CACHE_TTL_MS = 30 * 1000
 
 interface CachedEntry extends MvAlignment {
   ts: number
@@ -54,6 +55,53 @@ interface CachedEntry extends MvAlignment {
 const memoryCache = new Map<string, MvAlignment>()
 const inFlight = new Map<string, Promise<MvAlignment | null>>()
 const prewarmInFlight = new Map<string, Promise<void>>()
+const negativeCache = new Map<string, { signature: string; expiresAt: number }>()
+
+function hashString(value: string): string {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+/** 失败缓存按当前可用输入签名隔离；歌词加载完成或流 URL 刷新后应立即允许重试。 */
+export function mvAlignmentInputSignature(input: MvAlignmentInput): string {
+  const lyrics = Array.isArray(input.lyrics)
+    ? input.lyrics.map(line => `${line?.time ?? ''}:${line?.text ?? ''}`).join('\n')
+    : ''
+  return [
+    `lyrics:${lyrics ? hashString(lyrics) : '-'}`,
+    `song:${input.songUrl ? hashString(input.songUrl) : '-'}`,
+    `video:${input.videoUrl ? hashString(input.videoUrl) : '-'}`,
+    `cid:${input.cid || 0}`,
+    `type:${input.candidateType || '-'}`,
+    `cc:${input.ccVerification || 'unverified'}`,
+  ].join('|')
+}
+
+function isNegativelyCached(key: string, signature: string): boolean {
+  const cached = negativeCache.get(key)
+  if (!cached) return false
+  if (cached.expiresAt <= Date.now() || cached.signature !== signature) {
+    negativeCache.delete(key)
+    return false
+  }
+  return true
+}
+
+function rememberAlignmentFailure(key: string, signature: string, signal?: AbortSignal): void {
+  if (!signal?.aborted) negativeCache.set(key, { signature, expiresAt: Date.now() + NEGATIVE_CACHE_TTL_MS })
+}
+
+/** 测试隔离用；生产代码不应调用。 */
+export function resetMvAlignmentCachesForTests(): void {
+  memoryCache.clear()
+  inFlight.clear()
+  prewarmInFlight.clear()
+  negativeCache.clear()
+}
 
 /** MV 对齐调试日志：写入 userData/automix-backend.log（[renderer:MvAlign]），便于人工核对 */
 const mvLog = (msg: string): void => {
@@ -107,6 +155,34 @@ export function getMvAlignment(songKey: string, bvid: string): MvAlignment | nul
   return memoryCache.get(key) || null
 }
 
+/**
+ * 缓存可信度闸门：非官方/非歌词视频且 CC 内容与歌词不符（剪辑/二创）时，
+ * beat-only 偏移不可信（节拍自洽≠同一录音）。该规则必须同时约束
+ * ensureMvAlignment 的写入端和播放器/背景的快速读取端——否则旧缓存
+ * 会绕过写入端检查被直接消费（实测 Villain 6s→17s）。
+ */
+export function shouldRejectAlignmentFor(
+  cached: MvAlignment | null | undefined,
+  owner: { candidateType?: string; ccVerification?: MvAlignmentInput['ccVerification'] } | null | undefined,
+): boolean {
+  return Boolean(
+    cached
+    && cached.method === 'beat'
+    && owner?.candidateType === 'other'
+    && owner?.ccVerification === 'mismatch',
+  )
+}
+
+/** 带候选可信度闸门的缓存读取：快速路径（播放器/背景）必须用这个而不是裸 getMvAlignment。 */
+export function getMvAlignmentFor(
+  songKey: string,
+  bvid: string,
+  owner: { candidateType?: string; ccVerification?: MvAlignmentInput['ccVerification'] } | null | undefined,
+): MvAlignment | null {
+  const cached = getMvAlignment(songKey, bvid)
+  return shouldRejectAlignmentFor(cached, owner) ? null : cached
+}
+
 export interface MvAlignmentInput {
   songKey: string
   songTitle: string
@@ -127,47 +203,92 @@ export interface MvAlignmentInput {
    * 节拍与音源无法对齐（现场版节奏/编曲不同），这类 MV 背景应自由播放——不计算对齐。
    */
   candidateType?: string
+  /** 候选 CC 与歌曲歌词的内容验证；mismatch 只限制 beat-only 对齐，不否定视频身份。 */
+  ccVerification?: 'match' | 'mismatch' | 'unverified'
   signal?: AbortSignal
+}
+
+function awaitSharedAlignment(
+  promise: Promise<MvAlignment | null>,
+  signal?: AbortSignal,
+): Promise<MvAlignment | null> {
+  if (!signal) return promise
+  if (signal.aborted) return Promise.resolve(null)
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort)
+      resolve(null)
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    promise.then(
+      result => {
+        signal.removeEventListener('abort', abort)
+        resolve(result)
+      },
+      error => {
+        signal.removeEventListener('abort', abort)
+        reject(error)
+      },
+    )
+  })
 }
 
 /** 计算并对齐缓存；已缓存/在途时直接返回。失败或置信度不足返回 null。 */
 export async function ensureMvAlignment(input: MvAlignmentInput, signal?: AbortSignal): Promise<MvAlignment | null> {
   const { songKey, bvid } = input
   if (!songKey || !bvid || bvid.startsWith('fallback-')) return null
-  // live/cover/二创与音源是不同录音：节拍无法对齐。但 **MV 自带 CC 字幕可逐句对齐**
-  // —— 字幕文本与本地歌词同源，与录音无关，现场变速也不怕（比"音乐入口"启发更准）。
-  // 有字幕/歌词能匹配上就优先用字幕偏移；否则退回前奏声乐补偿（音乐入口 − 锚点）。
-  if (input.candidateType === 'live' || input.candidateType === 'cover' || input.candidateType === 'instrumental') {
-    const cachedLive = getMvAlignment(songKey, bvid)
-    if (cachedLive) {
-      mvLog(`命中缓存：${songKey} ${bvid} offset=${cachedLive.offsetSeconds}s conf=${cachedLive.confidence.toFixed(2)} method=${cachedLive.method}`)
-      return cachedLive
-    }
-    if (Array.isArray(input.lyrics) && input.lyrics.length > 0) {
-      const subLive = await detectViaSubtitles(input, signal)
-      if (subLive && subLive.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
-        memoryCache.set(`${songKey}|${bvid}`, subLive)
-        persist()
-        mvLog(`对齐成功（现场版字幕）：${songKey} ${bvid} offset=${subLive.offsetSeconds}s conf=${subLive.confidence.toFixed(2)} method=subtitle`)
-        return subLive
-      }
-    }
-    return computeLiveCompensation(input, signal)
-  }
   const key = `${songKey}|${bvid}`
   const cached = getMvAlignment(songKey, bvid)
-  if (cached) {
+  const rejectCachedBeat = shouldRejectAlignmentFor(cached, input)
+  if (cached && !rejectCachedBeat) {
     mvLog(`命中缓存：${songKey} ${bvid} offset=${cached.offsetSeconds}s conf=${cached.confidence.toFixed(2)} method=${cached.method}`)
     return cached
   }
-  if (inFlight.has(key)) return inFlight.get(key)!
+  if (rejectCachedBeat && cached) {
+    memoryCache.delete(key)
+    persist()
+    mvLog(`丢弃旧节拍缓存：${songKey} ${bvid} type=other cc=mismatch offset=${cached.offsetSeconds}s`)
+  }
+  const inputSignature = mvAlignmentInputSignature(input)
+  if (isNegativelyCached(key, inputSignature)) {
+    mvLog(`命中短期失败缓存：${songKey} ${bvid}（输入未变化，跳过重复对齐）`)
+    return null
+  }
+  const flightKey = `${key}|${inputSignature}`
+  const existing = inFlight.get(flightKey)
+  if (existing) return awaitSharedAlignment(existing, signal)
+  const sharedInput = { ...input, signal: undefined }
+  // live/cover/二创与音源是不同录音：节拍无法对齐。但 MV 自带 CC 字幕仍可逐句对齐；
+  // 字幕失败后才退到现场版的音乐入口补偿。
+  if (input.candidateType === 'live' || input.candidateType === 'cover' || input.candidateType === 'instrumental') {
+    const promise = (async () => {
+      if (Array.isArray(input.lyrics) && input.lyrics.length > 0) {
+        const subLive = await detectViaSubtitles(sharedInput)
+        if (subLive && subLive.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
+          memoryCache.set(key, subLive)
+          negativeCache.delete(key)
+          persist()
+          mvLog(`对齐成功（现场版字幕）：${songKey} ${bvid} offset=${subLive.offsetSeconds}s conf=${subLive.confidence.toFixed(2)} method=subtitle`)
+          return subLive
+        }
+      }
+      const compensation = await computeLiveCompensation(sharedInput)
+      if (!compensation) rememberAlignmentFailure(key, inputSignature)
+      return compensation
+    })()
+    inFlight.set(flightKey, promise)
+    void promise.then(
+      () => { if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey) },
+      () => { if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey) },
+    )
+    return awaitSharedAlignment(promise, signal)
+  }
   mvLog(`开始对齐：${songKey} ${bvid} candidateType=${input.candidateType || '-'} songDur=${input.songDuration}s videoDur? cid=${input.cid}`)
-  const promise = detectAlignment(input, signal)
-  inFlight.set(key, promise)
-  try {
-    const result = await promise
+  const promise = (async () => {
+    const result = await detectAlignment(sharedInput)
     if (result && result.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
       memoryCache.set(key, result)
+      negativeCache.delete(key)
       persist()
       mvLog(`对齐成功：${songKey} ${bvid} offset=${result.offsetSeconds}s conf=${result.confidence.toFixed(2)} method=${result.method}`)
       return result
@@ -177,19 +298,29 @@ export async function ensureMvAlignment(input: MvAlignmentInput, signal?: AbortS
     // 歌曲首句歌词），至少把前奏/开唱位置对上去（实测 黒音さや 翻唱 rainy tone）。
     // 官方 MV 是同一录音、网格失败通常是信号问题，不做此补偿（会加错误偏移）。
     if (input.candidateType !== 'official' && input.candidateType !== 'lyrics') {
-      const comp = await computeLiveCompensation(input, signal)
+      const comp = await computeLiveCompensation(sharedInput)
       if (comp && comp.confidence >= MIN_ALIGNMENT_CONFIDENCE) {
         memoryCache.set(key, comp)
+        negativeCache.delete(key)
         persist()
         mvLog(`对齐成功（补偿兜底）：${songKey} ${bvid} offset=${comp.offsetSeconds}s conf=${comp.confidence.toFixed(2)} method=${comp.method}`)
         return comp
       }
     }
     mvLog(`对齐未通过门槛：${songKey} ${bvid} result=${result ? `${result.offsetSeconds}s conf=${result.confidence.toFixed(2)}` : 'null'}（门槛=${MIN_ALIGNMENT_CONFIDENCE}，自由播放）`)
+    rememberAlignmentFailure(key, inputSignature)
     return null
-  } finally {
-    inFlight.delete(key)
-  }
+  })()
+  inFlight.set(flightKey, promise)
+  void promise.then(
+    () => {
+      if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey)
+    },
+    () => {
+      if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey)
+    },
+  )
+  return awaitSharedAlignment(promise, signal)
 }
 
 /**
@@ -208,12 +339,14 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
     return null
   }
   const key = `${input.songKey}|${input.bvid}`
+  const flightKey = `live:${key}|${mvAlignmentInputSignature(input)}`
   const cached = getMvAlignment(input.songKey, input.bvid)
   if (cached) return cached
-  if (inFlight.has(key)) return inFlight.get(key)!
+  const existing = inFlight.get(flightKey)
+  if (existing) return existing
   const promise = (async () => {
     try {
-      const buffer = await decodeAudioUrl(input.videoUrl!, signal)
+      const { buffer } = await decodeAudioUrl(input.videoUrl!, signal)
       const { frameRms, frameRate } = computeFrameEnvelope(buffer)
       // 现场版动态压缩，绝对电平阈值（detectMusicStart）不稳定（实测同曲 12kHz 22.4s /
       // 22050Hz 55.4s）→ 用 60 分位+持续判定的入口检测（两种采样率一致）
@@ -229,8 +362,8 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
       let offsetB: number | null = null
       if (input.songUrl?.startsWith('http')) {
         try {
-          const songBuffer = await decodeAudioUrl(input.songUrl, signal)
-          const songEnv = computeFrameEnvelope(songBuffer)
+          const songDecoded = await decodeAudioUrl(input.songUrl, signal)
+          const songEnv = computeFrameEnvelope(songDecoded.buffer)
           const songMusicStart = detectLiveMusicEntry(songEnv.frameRms, songEnv.frameRate)
           if (Number.isFinite(songMusicStart)) offsetB = mvMusicStart - songMusicStart
         } catch (error) {
@@ -262,21 +395,21 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
       return null
     }
   })()
-  inFlight.set(key, promise)
+  inFlight.set(flightKey, promise)
   try {
     return await promise
   } finally {
-    inFlight.delete(key)
+    if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey)
   }
 }
 
 /** 取本地歌词里第一条有文本的歌词行时间（秒）；无歌词/纯伴奏返回 null */
-function firstLyricTime(lyrics?: LyricLine[]): number | null {
+export function firstLyricTime(lyrics?: LyricLine[]): number | null {
   if (!Array.isArray(lyrics)) return null
   let best: number | null = null
   for (const line of lyrics) {
     if (!line || !line.text || !String(line.text).trim()) continue
-    const t = (line.time ?? 0) / 1000
+    const t = line.time ?? 0
     if (t < 0) continue
     const text = String(line.text).trim()
     // 跳过元数据/署名行：词/曲/编曲等（「词：Vaundy」）；以及开头的"歌名 - 歌手"标题行
@@ -289,6 +422,87 @@ function firstLyricTime(lyrics?: LyricLine[]): number | null {
     if (best == null || t < best) best = t
   }
   return best
+}
+
+async function sampleMediaEnvelope(url: string, signal?: AbortSignal): Promise<{ frameRms: number[]; frameRate: number } | null> {
+  if (typeof Audio === 'undefined' || typeof window === 'undefined') return null
+  const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  if (!AudioContextCtor) return null
+  const media = new Audio()
+  media.crossOrigin = 'anonymous'
+  media.preload = 'auto'
+  media.src = url
+  media.playbackRate = 8
+  const context = new AudioContextCtor()
+  let source: MediaElementAudioSourceNode | null = null
+  let analyser: AnalyserNode | null = null
+  let silent: GainNode | null = null
+  const abort = () => media.pause()
+  signal?.addEventListener('abort', abort, { once: true })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error('MV media metadata timed out')), 15_000)
+      const done = () => { window.clearTimeout(timer); resolve() }
+      const fail = () => { window.clearTimeout(timer); reject(new Error(media.error?.message || 'MV media failed to load')) }
+      media.addEventListener('loadedmetadata', done, { once: true })
+      media.addEventListener('error', fail, { once: true })
+    })
+    if (signal?.aborted) return null
+    source = context.createMediaElementSource(media)
+    analyser = context.createAnalyser()
+    analyser.fftSize = 2048
+    silent = context.createGain()
+    silent.gain.value = 0
+    source.connect(analyser)
+    analyser.connect(silent)
+    silent.connect(context.destination)
+    if (context.state === 'suspended') await context.resume()
+    const frameRate = 10
+    const maxDuration = Math.min(Number.isFinite(media.duration) ? media.duration : 240, 240)
+    const frameRms = new Array(Math.max(1, Math.ceil(maxDuration * frameRate))).fill(0)
+    const samples = new Float32Array(analyser.fftSize)
+    await media.play()
+    const wallDeadline = performance.now() + 35_000
+    while (!media.ended && media.currentTime < maxDuration && performance.now() < wallDeadline) {
+      if (signal?.aborted) return null
+      analyser.getFloatTimeDomainData(samples)
+      let sum = 0
+      for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index]
+      const frame = Math.min(frameRms.length - 1, Math.max(0, Math.round(media.currentTime * frameRate)))
+      frameRms[frame] = Math.max(frameRms[frame], Math.sqrt(sum / samples.length))
+      await new Promise(resolve => window.setTimeout(resolve, 20))
+    }
+    if (media.currentTime < Math.min(maxDuration, 30)) return null
+    for (let index = 1; index < frameRms.length; index += 1) {
+      if (frameRms[index] === 0) frameRms[index] = frameRms[index - 1]
+    }
+    return { frameRms, frameRate }
+  } catch {
+    return null
+  } finally {
+    signal?.removeEventListener('abort', abort)
+    media.pause()
+    media.removeAttribute('src')
+    media.load()
+    try { source?.disconnect(); analyser?.disconnect(); silent?.disconnect() } catch {}
+    void context.close()
+  }
+}
+
+async function mediaEnvelopeAlignmentFallback(
+  songUrl: string,
+  videoUrl: string,
+  signal?: AbortSignal,
+): Promise<MvAlignment | null> {
+  const [song, mv] = await Promise.all([
+    sampleMediaEnvelope(songUrl, signal),
+    sampleMediaEnvelope(videoUrl, signal),
+  ])
+  if (!song || !mv || Math.abs(song.frameRate - mv.frameRate) > 0.01) return null
+  const result = envelopeOffsetOf(mv.frameRms, song.frameRms, song.frameRate)
+  if (!Number.isFinite(result.offset) || result.peak < 0.6 || Math.abs(result.offset) > MAX_SANE_OFFSET_SECONDS) return null
+  mvLog(`媒体元素包络对齐：offset=${result.offset.toFixed(2)}s peak=${result.peak.toFixed(3)}`)
+  return { offsetSeconds: Math.round(result.offset * 100) / 100, confidence: Math.min(0.85, result.peak), method: 'envelope' }
 }
 
 async function detectAlignment(input: MvAlignmentInput, signal?: AbortSignal): Promise<MvAlignment | null> {
@@ -401,9 +615,19 @@ export function detectOffsetFromSubtitles(
   subLines: BilibiliSubtitleLine[],
 ): MvAlignment | null {
   if (!songLyrics.length || !subLines.length) return null
+  // 歌词云：正文与翻译都参与匹配（英文歌 + 中文翻译 CC 是常见组合，
+  // 实测 Villain 官方 MV 只挂翻译 CC——只比原文会导致"明明同源却无法对齐"）。
   const lyricEntries = songLyrics
-    .filter((l) => l.text && l.text.trim())
-    .map((l) => ({ timeSeconds: l.time / 1000, norm: normalizeText(l.text) }))
+    .flatMap((l) => {
+      const entries: Array<{ timeSeconds: number; norm: string }> = []
+      const text = String(l.text || '').trim()
+      const translation = String((l as { translation?: string }).translation || '').trim()
+      if (text) entries.push({ timeSeconds: l.time, norm: normalizeText(text) })
+      if (translation && normalizeText(translation) !== (text ? normalizeText(text) : '')) {
+        entries.push({ timeSeconds: l.time, norm: normalizeText(translation) })
+      }
+      return entries
+    })
     .filter((e) => e.norm.length >= 2)
   if (lyricEntries.length < 3) return null
 
@@ -611,9 +835,9 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
       try {
         const localSong = await window.electron?.audioDownload?.prepare?.(songUrl, input.songKey)
         const mediaSong = localSong ? await window.electron?.audioDownload?.getMediaUrl?.(localSong) : null
-        const buffer = await decodeAudioUrl(mediaSong || songUrl, signal)
-        songRms = computeFrameEnvelope(buffer).frameRms
-        mvLog(`歌曲包络来源：解码歌曲音频（${buffer.duration.toFixed(1)}s → ${songRms.length} 帧）`)
+        const songDecoded = await decodeAudioUrl(mediaSong || songUrl, signal)
+        songRms = computeFrameEnvelope(songDecoded.buffer).frameRms
+        mvLog(`歌曲包络来源：解码歌曲音频（${songDecoded.buffer.duration.toFixed(1)}s → ${songRms.length} 帧）`)
       } catch (error) {
         mvLog(`歌曲包络解码失败：${error instanceof Error ? error.message : String(error)}（回退音乐起始锚点）`)
       }
@@ -631,8 +855,8 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
     })
     const mvBeats = mvAnalysis?.beats || null
     if (!mvBeats || mvBeats.length < 10) {
-      mvLog(`节拍对齐中止：${input.bvid} MV 节拍不足（${mvBeats?.length || 0}）`)
-      return null
+      mvLog(`节拍对齐中止：${input.bvid} MV 节拍不足（${mvBeats?.length || 0}）；尝试媒体元素包络`)
+      return mediaEnvelopeAlignmentFallback(songUrl, videoUrl, signal)
     }
     // 网格需与 MV 音频贴合：锚点/混叠失败的网格（gridOnsetConfidence 低）即使自洽
     // 也会让互相关算出错误偏移并套用——置信度低于阈值时拒绝对齐（自由播放，不乱跳）。
@@ -644,14 +868,24 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
         mvLog(`包络兜底对齐：${input.bvid} 网格 ${(mvAnalysis?.confidence ?? 0).toFixed(3)} 弱但包络 peak=${mvAnalysis.envelopePeak.toFixed(2)}≥0.6 → offset=${mvAnalysis.envelopeOffset.toFixed(2)}s conf=0.55（MV 节拍分析不可用）`)
         return { offsetSeconds: Math.round(mvAnalysis.envelopeOffset * 100) / 100, confidence: 0.55, method: 'envelope' }
       }
-      mvLog(`节拍对齐拒绝：${input.bvid} MV 网格置信度 ${(mvAnalysis?.confidence ?? 0).toFixed(3)} < 0.15（网格不贴合 MV 音频，自由播放）`)
-      return null
+      mvLog(`节拍对齐拒绝：${input.bvid} MV 网格置信度 ${(mvAnalysis?.confidence ?? 0).toFixed(3)} < 0.15；尝试媒体元素包络`)
+      return mediaEnvelopeAlignmentFallback(songUrl, videoUrl, signal)
     }
     mvLog(`MV 网格：${input.bvid} conf=${mvAnalysis.confidence.toFixed(3)} beats=${mvBeats.length}（锚点/偏移见 findBeatPatternGrid 日志）`)
 
-    return detectOffsetFromBeats(songBeats, mvBeats)
+  const result = detectOffsetFromBeats(songBeats, mvBeats)
+  // 非官方/非歌词视频且 CC 内容与歌词不符（剪辑/二创/直播切片）时，节拍自洽≠同一录音：
+  // 拒绝 beat-only 偏移，退回包络兜底（包络强相关才可信），否则自由播放。
+  if (result && result.method === 'beat' && input.candidateType === 'other' && input.ccVerification === 'mismatch') {
+    mvLog(`拒绝节拍对齐：${input.bvid} type=other cc=mismatch（节拍自洽≠同一录音）`)
+    return mediaEnvelopeAlignmentFallback(songUrl, videoUrl, signal)
+  }
+  return result
   } catch (error) {
-    mvLog(`节拍对齐异常：${input.bvid} ${error instanceof Error ? error.message : String(error)}`)
+    mvLog(`节拍对齐异常：${input.bvid} ${error instanceof Error ? error.message : String(error)}；尝试媒体元素包络`)
+    if (songUrl.startsWith('http') && videoUrl.startsWith('http')) {
+      return mediaEnvelopeAlignmentFallback(songUrl, videoUrl, signal)
+    }
     return null
   }
 }

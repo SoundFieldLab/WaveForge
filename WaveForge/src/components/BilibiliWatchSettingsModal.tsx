@@ -243,6 +243,17 @@ export default function BilibiliWatchSettingsModal({ onClose, playerTheme = 'dar
               )}
             </section>
 
+            {/* 低置信候选预选 */}
+            <section className="space-y-1 border-t pt-3" style={{ borderColor: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
+              <ToggleRow
+                dark={dark}
+                label="MV背景/看歌置信度不足时显示预选内容"
+                desc="关闭时自动播放最高置信度视频；打开后仍会播放最佳视频，同时显示可选预览"
+                checked={settings.showLowConfidenceCandidates}
+                onChange={(v) => update({ showLowConfidenceCandidates: v })}
+              />
+            </section>
+
             {/* 视频结束行为 */}
             <section>
               <h3 className={`text-xs font-semibold mb-2 ${dark ? 'text-white/55' : 'text-black/50'}`}>视频播完时</h3>

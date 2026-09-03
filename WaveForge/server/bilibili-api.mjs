@@ -200,6 +200,25 @@ function extractCookieValue(setCookieArray, name) {
   return ''
 }
 
+const officialVerifyCache = new Map()
+const OFFICIAL_VERIFY_CACHE_TTL = 60 * 60 * 1000
+
+async function getOfficialVerifyType(mid, cookie) {
+  const numericMid = Number(mid) || 0
+  if (!numericMid) return -1
+  const cached = officialVerifyCache.get(numericMid)
+  if (cached && Date.now() - cached.at < OFFICIAL_VERIFY_CACHE_TTL) return cached.type
+  try {
+    const json = await fetchBiliJsonWithRiskRetry(`${API_BASE}/x/web-interface/card`, { params: { mid: numericMid }, cookie })
+    const type = Number(json.data?.card?.official_verify?.type)
+    const normalized = type === 0 || type === 1 ? type : -1
+    officialVerifyCache.set(numericMid, { at: Date.now(), type: normalized })
+    return normalized
+  } catch {
+    return -1
+  }
+}
+
 // ===== 路由注册 =====
 
 export function registerBilibiliRoutes(app) {
@@ -245,6 +264,7 @@ export function registerBilibiliRoutes(app) {
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '视频不存在' })
       const data = json.data || {}
       const page = (data.pages || [])[0] || {}
+      const officialVerifyType = await getOfficialVerifyType(data.owner?.mid, req.query.cookie)
       res.json({
         code: 0,
         data: {
@@ -266,7 +286,7 @@ export function registerBilibiliRoutes(app) {
             mid: data.owner?.mid || 0,
             name: data.owner?.name || '',
             face: data.owner?.face || '',
-            officialVerifyType: data.owner?.official_verify?.type ?? -1,
+            officialVerifyType,
           },
         },
       })
@@ -1079,7 +1099,7 @@ export function registerBilibiliRoutes(app) {
           fans: card.fans || 0,
           attention: card.attention || 0,
           likes: card.likes || 0,
-          officialVerify: card.official_verify?.type ?? 0,
+          officialVerify: card.official_verify?.type ?? -1,
           // 个人主页皮肤横幅（用户可自换，按用户当前设置；B 站给的是原始 URL，前端再拼尺寸后缀）
           topPhoto,
         },

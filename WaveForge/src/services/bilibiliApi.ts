@@ -55,7 +55,7 @@ export interface BilibiliViewData {
   owner: {
     mid: number
     name: string
-    officialVerifyType: number // -1 未知 / 0 未认证 / 1 个人认证 / 2 机构认证
+    officialVerifyType: number // B 站原始值：-1 未认证/未知，0 个人认证，1 机构认证
   }
 }
 
@@ -128,6 +128,10 @@ export interface MatchContext {
   songDuration: number
   platform?: string
   id?: string | number
+  /** 可选版本目标；音乐平台能识别时用于区分 TV/SEKAI/Vocaloid 等录音 */
+  targetVersion?: 'full-original' | 'tv-size' | 'sekai-version' | 'virtual-singer' | 'specific-performance'
+  /** 可选作品/IP，用于高碰撞标题和游戏、动画主题曲消歧 */
+  franchise?: string
 }
 
 export interface CandidateSignals {
@@ -145,6 +149,8 @@ export interface CandidateSignals {
   hdMarker: boolean
   /** 作者名=歌手（音乐人官号） */
   uploaderMatchesArtist: boolean
+  /** 作者名命中已知官方渠道，或命中当前艺人的官方频道别名 */
+  officialChannel: boolean
   /** 复审拿到 B 站 CC 字幕（人工/AI 任一） */
   ccSubtitle: boolean
 }
@@ -158,14 +164,24 @@ export interface CandidateScore {
   signals: CandidateSignals
   /** 搜索返回序号（0 起，作相关度信号） */
   rank: number
-  /** 复审拿到的作者认证：-1 未知 / 0 未认证 / 1 个人 / 2 机构 */
+  /** 复审拿到的作者认证（B 站原始值）：-1 未认证/未知，0 个人，1 机构 */
   officialVerifyType: number
   manualZhSubtitle: boolean
   autoSubtitle: boolean
+  /** CC 字幕与歌词的比对结论（复审/重扫阶段填充；undefined 视同 unverified） */
+  ccVerification?: CCVerification
   /** 复审拿到的 cid（供播放地址使用，0 = 未复审） */
   cid?: number
+  /** 复审用的评分时长（多 P 视频为选中分 P 时长；重扫需还原同一评分口径） */
+  effectiveDuration?: number
   type: CandidateType
 }
+
+/** CC 字幕内容与歌词的比对结论：
+ * - match     字幕内容与歌词相符（抽样过半命中）→ CC 加分足额
+ * - mismatch  字幕可比对但与歌词明显不符（直播切片/无关解说）→ CC 加分变惩罚
+ * - unverified 无法验证（歌词缺失/纯音乐/语言体系不通/有效行太少）→ CC 加分大幅缩水 */
+export type CCVerification = 'match' | 'mismatch' | 'unverified'
 
 export type BilibiliMatchStatus = 'auto' | 'confirm' | 'none' | 'error'
 
@@ -173,11 +189,13 @@ export interface BilibiliMatchResult {
   status: BilibiliMatchStatus
   /** status==='auto' 时存在 */
   best?: CandidateScore
-  /** 候选列表（confirm 态展示，最多 5 条） */
+  /** 候选列表（confirm 态展示，最多 12 条） */
   candidates: CandidateScore[]
   /** 全部排序候选（自动回退链：首选失败时依次尝试，跳过失效/受限/黑名单） */
   fallbackChain: CandidateScore[]
   error?: string
+  /** 匹配时有候选拿到 CC 但当时没有歌词可比（结果偏保守）；调用方拿到歌词后可重扫升级 */
+  ccUnverifiedWithoutLyrics?: boolean
 }
 
 // ===== 看歌设置 =====
@@ -211,10 +229,14 @@ export interface BilibiliWatchSettings {
   customKeywordTemplate: string
   /** 看歌模式默认播放系统赋分最高：开启后即使不是完美匹配也直接播放评分最高的视频（跳过候选确认） */
   forceAutoPlayHighest: boolean
+  /** 置信度不足时显示候选预选；关闭时仍自动播放最高置信度视频 */
+  showLowConfidenceCandidates: boolean
 }
 
 export const WATCH_SETTINGS_EVENT = 'bilibili-settings-changed'
 const SETTINGS_KEY = 'bilibili_watch_settings'
+const SETTINGS_SCHEMA_KEY = 'bilibili_watch_settings_schema'
+const SETTINGS_SCHEMA_VERSION = 3
 
 export const DEFAULT_WATCH_SETTINGS: BilibiliWatchSettings = {
   matchPreference: 'balanced',
@@ -227,14 +249,24 @@ export const DEFAULT_WATCH_SETTINGS: BilibiliWatchSettings = {
   useRememberedOverride: true,
   keywordTemplate: 'auto',
   customKeywordTemplate: '{title} {artist} MV',
-  forceAutoPlayHighest: true,
+  forceAutoPlayHighest: false,
+  showLowConfidenceCandidates: false,
 }
 
 export function getBilibiliWatchSettings(): BilibiliWatchSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
     if (!raw) return { ...DEFAULT_WATCH_SETTINGS }
-    return { ...DEFAULT_WATCH_SETTINGS, ...(JSON.parse(raw) as Partial<BilibiliWatchSettings>) }
+    const stored = JSON.parse(raw) as Partial<BilibiliWatchSettings>
+    const schemaVersion = Number(localStorage.getItem(SETTINGS_SCHEMA_KEY) || 0)
+    if (schemaVersion < SETTINGS_SCHEMA_VERSION) {
+      // v1 默认值曾为 true，无法区分用户主动选择与被动持久化；一次性迁移到安全默认。
+      stored.forceAutoPlayHighest = false
+      stored.showLowConfidenceCandidates = false
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(stored))
+      localStorage.setItem(SETTINGS_SCHEMA_KEY, String(SETTINGS_SCHEMA_VERSION))
+    }
+    return { ...DEFAULT_WATCH_SETTINGS, ...stored }
   } catch {
     return { ...DEFAULT_WATCH_SETTINGS }
   }
@@ -244,10 +276,11 @@ export function saveBilibiliWatchSettings(patch: Partial<BilibiliWatchSettings>)
   const next = { ...getBilibiliWatchSettings(), ...patch }
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(next))
+    localStorage.setItem(SETTINGS_SCHEMA_KEY, String(SETTINGS_SCHEMA_VERSION))
   } catch {
     // 忽略存储失败
   }
-  window.dispatchEvent(new CustomEvent(WATCH_SETTINGS_EVENT, { detail: next }))
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(WATCH_SETTINGS_EVENT, { detail: next }))
   return next
 }
 
@@ -643,6 +676,7 @@ export interface BilibiliSpaceUser {
   fans: number
   attention: number
   likes: number
+  /** B 站原始认证值：-1 未认证/未知，0 个人认证，1 机构认证 */
   officialVerify: number
   /** 个人主页皮肤横幅（部分用户设置） */
   topPhoto?: string
@@ -806,17 +840,29 @@ export function cleanSongTitle(title: string): string {
 const OFFICIAL_MARKERS = ['官方', 'official']
 const MV_MARKERS = ['mv', 'pv', '音乐录影带']
 const NEGATIVE_MARKERS = [
-  '翻唱', 'cover', '教学', '教程', '讲解', '指弹', '演奏', '钢琴', '吉他',
+  '翻唱', 'cover', '教学', '教程', '讲解', '指弹', '演奏', '钢琴', '吉他', '翻弹',
   '笛子', '古筝', '二胡', '萨克斯', '伴奏', 'remix', '鬼畜', '修复', '卡拉ok', 'k歌',
   '鼓谱', '架子鼓', '弹唱', '跟练', '扒谱', '练唱', '音游', '手元', '谱面', '全连', 'gameplay',
-  '学日语', '学唱歌', '听歌学', '纯人声', '红石音乐',
+  '学日语', '学唱歌', '听歌学', '纯人声', '消音', '伴唱消除', '红石音乐', '歌ってみた', '歌ってみました',
   'guitar', 'piano', 'fingerstyle', 'drum', 'violin', 'cello', 'bass', '贝斯', 'flute', 'sax', 'saxophone',
   'instrumental', 'karaoke', 'playthrough', 'trumpet', 'trombone', 'harmonica', 'bassboost',
+  '舞蹈', '跳舞', '翻跳', '踊ってみた', 'dance cover',
   '两三键', 'sky studio', '新手进阶', '教你', '学唱', '零基础', '一学就会', '入门教程', '简谱教程',
 ]
+/** 花絮、玩法和解说等相关视频不是目标录音，不能靠标题与播放量进入高置信区。 */
+const NON_MUSIC_CONTENT_MARKERS = [
+  '花絮', '幕后', '制作特辑', '创作故事', '访谈', '采访', 'reaction', '反应',
+  '玩法预告', '实机预告', '游戏预告', '宣传片', '探险指南', '攻略', '任务线', '剧情解析', '武器展示',
+  'adventure guide', 'gameplay trailer', 'weapon showcase', 'behind the scenes', 'making of',
+]
+const ALTERNATE_VERSION_MARKERS = [
+  'acoustic', 'unplugged', 'stripped', 'one take', 'singthrough', 'first take',
+  'remix', '重混音', '混音版', 'arrange', '现场', '演唱会', '演出', 'live版', 'colorful live', 'magical mirai', '魔法未来', '歌ってみた', '翻唱',
+]
+const DERIVED_EXTENDED_MARKERS = ['加长', '延长', 'extended', 'loop', '循环', '完整版自制', '民间完整版']
 /** 合集/盘点类标题：包含多首歌，通常不是单曲正片 */
 const COMPILATION_MARKERS = ['合集', '串烧', '盘点', '榜单', '精选歌', '歌单', '经典歌曲', '怀旧金曲', 'top50', 'top10', '100首', '50首']
-const POSITIVE_EXTRA_MARKERS = ['歌词', '字幕', '4k', '1080p', '正式版', '预告', '中字', '高清', '超清']
+const POSITIVE_EXTRA_MARKERS = ['歌词', '字幕', '4k', '1080p', '正式版', '中字', '高清', '超清']
 /** 正片增强标记：动漫/剧集主题曲 MV、加长版、完整版更可能是完整正片（用户反馈红莲华场景） */
 const POSITIVE_SONG_MARKERS = ['主题曲', '主題曲', '主题歌', '主題歌', 'テーマソング', '加长版', '加長版', '完整版']
 const LIVE_MARKERS = ['live', '现场', '演唱会', 'livehouse', '音乐节', 'live版', 'the first take', 'first take', '一発撮り', 'ファーストテイク']
@@ -911,6 +957,90 @@ const ARTIST_ALIASES: Record<string, string[]> = {
   'プロジェクトセカイ': ['Project SEKAI', '世界计划', 'pjsk', '世界計畫'],
   'Project SEKAI': ['プロジェクトセカイ', '世界计划', 'pjsk', '世界計畫'],
   世界计划: ['プロジェクトセカイ', 'Project SEKAI', 'pjsk'],
+  'VALORANT Music': ['VALORANT', '无畏契约', '拳头游戏音乐', 'Riot Games', '拳头游戏'],
+  VALORANT: ['VALORANT Music', '无畏契约', '拳头游戏音乐', 'Riot Games', '拳头游戏'],
+}
+
+export interface ResolvedArtistNames {
+  raw: string[]
+  normalized: string[]
+  aliases: string[]
+}
+
+/** 统一解析平台歌手字段及别名，供搜索、标题和上传者证据共用。 */
+export function resolveArtistNames(artists: string[]): ResolvedArtistNames {
+  const raw: string[] = []
+  const normalized: string[] = []
+  const aliases: string[] = []
+  const pushUnique = (list: string[], value: string): void => {
+    if (value && !list.includes(value)) list.push(value)
+  }
+  const pushAlias = (value: string): void => {
+    const norm = normalizeText(value)
+    if (norm.length >= 2) pushUnique(aliases, norm)
+  }
+
+  for (const artist of artists || []) {
+    for (const name of expandArtistNames(String(artist))) {
+      pushUnique(raw, name)
+      const norm = normalizeText(name)
+      if (norm.length >= 2) pushUnique(normalized, norm)
+      for (const key of [name, norm]) {
+        for (const alias of ARTIST_ALIASES[key] || []) pushAlias(alias)
+      }
+    }
+  }
+  return { raw, normalized, aliases }
+}
+
+export type ExactTitleMatch = 'none' | 'title-only' | 'artist-title'
+
+/** 识别低噪声标题；分隔符必须从原始标题解析，不能在 normalizeText 后判断。 */
+export function classifyExactTitleMatch(title: string, songTitle: string, artistNames: ResolvedArtistNames): ExactTitleMatch {
+  const songNorm = normalizeText(cleanSongTitle(songTitle))
+  const cleaned = String(title || '').replace(/^(?:【[^】]*】\s*)+/, '').trim()
+  if (normalizeText(cleaned) === songNorm) return 'title-only'
+  const parts = cleaned.split(/\s*[-–—:：]\s*/).map((part) => normalizeText(part)).filter(Boolean)
+  if (parts.length !== 2) return 'none'
+  const names = [...artistNames.normalized, ...artistNames.aliases]
+  const isArtist = (value: string) => names.some((name) => value === name)
+  if ((isArtist(parts[0]) && parts[1] === songNorm) || (parts[0] === songNorm && isArtist(parts[1]))) return 'artist-title'
+  return 'none'
+}
+
+/** 播放量是质量先验而非正确性证明：按数量级递减增长，并在超高播放处封顶。 */
+export function playCountScore(play: unknown): number {
+  const value = Number(play)
+  if (!Number.isFinite(value) || value <= 0) return 0
+  return Math.min(90, Math.log10(value) * 13)
+}
+
+function uploaderMatchesName(authorNorm: string, name: string): boolean {
+  if (!name) return false
+  if (authorNorm === name) return true
+  return [`${name}官方`, `${name}official`, `${name}channel`, `${name}频道`].some((value) => authorNorm === value)
+}
+
+/** B 站认证原始值：0 个人认证，1 机构认证。 */
+export function verificationScore(type: number): number {
+  if (type === 1) return 30
+  if (type === 0) return 15
+  return 0
+}
+
+/** 稳定排序：综合分相同时，优先可靠来源、播放量、原搜索顺序。 */
+export function compareCandidates(a: CandidateScore, b: CandidateScore): number {
+  const aScore = Number.isNaN(a.score) ? -Infinity : a.score
+  const bScore = Number.isNaN(b.score) ? -Infinity : b.score
+  if (aScore !== bScore) return aScore < bScore ? 1 : -1
+  const aSource = (a.signals.officialChannel ? 3 : 0) + (a.officialVerifyType === 1 ? 2 : a.officialVerifyType === 0 ? 1 : 0) + (a.signals.uploaderMatchesArtist ? 1 : 0)
+  const bSource = (b.signals.officialChannel ? 3 : 0) + (b.officialVerifyType === 1 ? 2 : b.officialVerifyType === 0 ? 1 : 0) + (b.signals.uploaderMatchesArtist ? 1 : 0)
+  if (aSource !== bSource) return bSource - aSource
+  const aPlay = Number.isFinite(a.video.play) ? a.video.play : 0
+  const bPlay = Number.isFinite(b.video.play) ? b.video.play : 0
+  if (aPlay !== bPlay) return bPlay - aPlay
+  if (a.rank !== b.rank) return a.rank - b.rank
+  return a.video.bvid.localeCompare(b.video.bvid)
 }
 
 /**
@@ -932,7 +1062,8 @@ export function expandArtistNames(raw: string): string[] {
   // 直接 0 结果（实测 rainy tone (K)NoW_NAME → 0，rainy tone NoW_NAME → 20 条含正主）
   const fullNoParen = full.replace(/[（(][^（）()]*[）)]/g, '').trim()
   if (fullNoParen && fullNoParen !== full && !result.includes(fullNoParen)) result.push(fullNoParen)
-  const segments = full.split(/\s+(?:feat(?:uring)?|ft)\.?\s+|\s*&\s*|,|，|、|;|；|\||\//gi)
+  // 保留带斜杠的正式艺人名（Leo/need、AC/DC）；只有斜杠两侧有空格时才视作多人分隔。
+  const segments = full.split(/\s+(?:feat(?:uring)?|ft)\.?\s+|\s*&\s*|,|，|、|;|；|\||\s+\/\s+/gi)
   for (const seg of segments) {
     const trimmed = seg.trim()
     if (!trimmed || trimmed === full) continue
@@ -948,13 +1079,7 @@ export function expandArtistNames(raw: string): string[] {
 const OFFICIAL_CHANNEL_KEYWORDS = [
   '杰威尔', '索尼音乐', 'sonymusic', '环球音乐', 'universalmusic', '华纳音乐', 'warnermusic',
   '滚石', '相信音乐', '福茂', '华研', 'avex', '艾回', '太合', '摩登天空', '网易云音乐',
-  'qq音乐', '官方频道', 'official', 'jvr',
-  // 动漫/游戏音乐官方渠道：官方发布或高播放的一般都是精品（HOYO-MiX/原神/崩坏/鸣潮/明日方舟/pjsk 等）
-  'hoyomix', 'hoyo-mix', '米哈游', 'mihoyo', '原神', '崩坏', '星穹铁道', '绝区零',
-  '鸣潮', '库洛', 'kuro games', '明日方舟', 'arknights', '鹰角', 'hypergryph',
-  'project_sekai', 'project sekai', '世界计划', 'プロジェクトセカイ', 'sega',
-  'cygames', '赛马娘', '公主连结', 'fgo', 'bang dream', 'bangdream', 'lovelive', 'ラブライブ',
-  '初音ミク', 'vocaloid', '歌姬计划',
+  'qq音乐', 'jvr',
 ]
 
 /** 精品社区/资讯站频道（非官方但内容质量稳定：翻译组、游戏资讯站等），加分低于官方 */
@@ -962,29 +1087,252 @@ const QUALITY_COMMUNITY_KEYWORDS = [
   '汉化组', '字幕组', 'Project_SEKAI资讯站', 'pjsk', 'sekaiofficial',
 ]
 
+interface ScopedOfficialSource {
+  mid: number
+  scopes?: string[]
+}
+
+/** 经真实账号页核验的稳定 MID。带 scopes 的来源只对相关艺人/IP 生效。 */
+const VERIFIED_OFFICIAL_SOURCES: ScopedOfficialSource[] = [
+  { mid: 486906719 },
+  { mid: 669334488 },
+  { mid: 147546636, scopes: ['valorant', '无畏契约'] },
+  { mid: 2135890650, scopes: ['valorant', '无畏契约', 'riotgames', '拳头游戏'] },
+  { mid: 27534330, scopes: ['崩坏3', 'honkaiimpact'] },
+  { mid: 1636034895, scopes: ['绝区零', 'zenlesszonezero'] },
+  { mid: 161775300, scopes: ['明日方舟', 'arknights'] },
+  { mid: 349984754, scopes: ['永劫无间', 'naraka'] },
+  { mid: 108532523, scopes: ['英雄联盟', 'leagueoflegends'] },
+  { mid: 177291194, scopes: ['deco27'] },
+  { mid: 203655966, scopes: ['ピノキオピー', 'pinocchiop'] },
+  { mid: 26040194, scopes: ['稲葉曇', 'inabakumori'] },
+  { mid: 400813602, scopes: ['yoasobi', 'ayase'] },
+]
+
+function matchesVerifiedOfficialSource(video: BilibiliVideo, ctx: MatchContext, artists: ResolvedArtistNames): boolean {
+  if (!video.mid) return false
+  const source = VERIFIED_OFFICIAL_SOURCES.find((entry) => entry.mid === video.mid)
+  if (!source) return false
+  if (!source.scopes?.length) return true
+  const context = normalizeText([ctx.franchise || '', ...artists.raw, ...artists.aliases].join(' '))
+  return source.scopes.some((scope) => context.includes(normalizeText(scope)))
+}
+
+export function hasLiveMarker(title: string): boolean {
+  const raw = String(title || '')
+  const normalized = normalizeText(raw)
+  return /(^|[^a-z])live([^a-z]|$)/i.test(raw)
+    || LIVE_MARKERS.filter((marker) => marker !== 'live').some((marker) => normalized.includes(normalizeText(marker)))
+}
+
+const FRANCHISE_ALIASES: Record<string, string[]> = {
+  valorant: ['无畏契约', '瓦罗兰特'],
+  'leagueoflegends': ['英雄联盟', 'lol'],
+  'genshinimpact': ['原神'],
+  'honkaiimpact3rd': ['崩坏3'],
+  'honkai:starrail': ['崩坏星穹铁道', '星穹铁道'],
+  'zenlesszonezero': ['绝区零'],
+  arknights: ['明日方舟'],
+  'wutheringwaves': ['鸣潮'],
+  naraka: ['永劫无间'],
+  'nier:automata': ['尼尔机械纪元', '尼尔自动人形', '2b'],
+  'eldenring': ['艾尔登法环'],
+  'finalfantasyxiv': ['最终幻想14', 'ff14'],
+  'persona5': ['女神异闻录5', 'p5'],
+  'cowboybebop': ['星际牛仔'],
+  'projectsekai': ['世界计划', 'プロジェクトセカイ', 'pjsk'],
+}
+
+function resolveFranchiseNames(franchise?: string): string[] {
+  const raw = String(franchise || '').trim()
+  if (!raw) return []
+  const key = normalizeText(raw)
+  return [raw, ...(FRANCHISE_ALIASES[key] || [])]
+}
+
 /** 候选类型识别（标题标记驱动） */
 export function classifyCandidateType(title: string): CandidateType {
   const t = normalizeText(title)
   if (INSTRUMENT_MARKERS.some((m) => t.includes(m))) return 'instrumental'
-  if (/翻唱|cover|弹唱/.test(t)) return 'cover'
-  if (LIVE_MARKERS.some((m) => t.includes(m))) return 'live'
+  if (/翻唱|cover|弹唱|歌ってみた/.test(t)) return 'cover'
+  if (hasLiveMarker(title)) return 'live'
   if (OFFICIAL_MARKERS.some((m) => t.includes(m)) || MV_MARKERS.some((m) => t.includes(m))) return 'official'
   if (/歌词|字幕/.test(t)) return 'lyrics'
   return 'other'
 }
 
+// ===== CC 字幕 ↔ 歌词内容比对 =====
+// 背景（用户实测 Starboy →「一滴泪」直播切片）：人工 CC 字幕 +25 会把"标题完美但内容无关"
+// 的视频推上最佳（245 分）。CC 字幕必须验证内容是否真是这首歌，才能决定给足额加分、缩水还是惩罚。
+
+/** 歌词/字幕里的制作人员信息行（非演唱正文，比对前剔除，防止歌词前奏 credits 拉低命中）。
+ *  CJK credits 需带分隔符（"作词："），避免误伤以"作词人"开头的真实歌词行 */
+const LYRIC_CREDIT_RE = /^(作词|作詞|作曲|编曲|編曲|填詞|填词|监制|監製|制作|製作|演唱|演奏|混音|母带|母帶|和声|和聲|录音|錄音|配唱|词曲)[:：\s]|^(作词|作詞|作曲|编曲|編曲|填詞|填词|词曲)$|^(lyrics?|music|composed?|written?|produced?|performed?|arranged?|mixed?|mastered?)\s*(by|:)\s*/i
+
+/** CJK（汉字+假名）判定：字幕/歌词的书写体系分 side 用 */
+const CJK_RE = /[\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf]/
+
+export interface SubtitleVerifyResult {
+  verdict: CCVerification
+  /** 实际参与判定的采样段数 */
+  sampled: number
+  /** 其中与歌词命中（bigram 包含率达标）的段数 */
+  matched: number
+  /** 与歌词书写体系可比对的有效字幕段数（0 = 语言不通/无有效内容） */
+  comparable: number
+}
+
+/** 字符 bigram 集合（规范化后的文本按 2-gram 切，容忍翻译措辞差异的模糊比对基础） */
+function bigramSetOf(norm: string): Set<string> {
+  const set = new Set<string>()
+  for (let i = 0; i < norm.length - 1; i += 1) set.add(norm.slice(i, i + 2))
+  return set
+}
+
+/** 段落被歌词云包含的程度：|seg ∩ lyrics| / |seg|（0~1，越高越像同一段词） */
+function containmentOf(segNorm: string, lyricBigrams: Set<string>): number {
+  const segBigrams = bigramSetOf(segNorm)
+  if (!segBigrams.size) return 0
+  let hit = 0
+  for (const bg of segBigrams) if (lyricBigrams.has(bg)) hit += 1
+  return hit / segBigrams.size
+}
+
+/** 单段是否有效可比：规范化后 ≥6 字（过滤"哈哈"/"谢谢"类无信息量短行） */
+function isVerifiableSegment(norm: string): boolean {
+  return norm.length >= 6
+}
+
+/** 判断规范化段与歌词云是否可比对（至少共享一种书写体系） */
+function isComparableSegment(segNorm: string, lyricHasCJK: boolean, lyricHasLatin: boolean): boolean {
+  const segCJK = CJK_RE.test(segNorm)
+  const segLatin = /[a-z]/.test(segNorm)
+  return (segCJK && lyricHasCJK) || (segLatin && lyricHasLatin)
+}
+
+/**
+ * CC 字幕内容 ↔ 歌词比对（纯函数，可单测）。
+ *
+ * 设计要点（对应真实误伤场景）：
+ * - **前段说话、后面正片**（Live 前奏问候/混剪片头）：按时间轴等距抽样、天然跳过片头，
+ *   且"命中过半"才判 match——片头几行闲聊不影响整体判定；
+ * - **双语/翻译字幕**：一行多段（B 站 CC 常见 `原文\n译文`）拆开逐段比对，与歌词任一
+ *   书写体系（CJK/拉丁）相同即参与判定——中文翻译字幕对英文歌词不可字面比对，
+ *   故调用方应把平台歌词的翻译文本一并传入（flattenLyricLinesForMatch 已含 translation）；
+ * - **翻译措辞因人而异**：bigram 包含率（非全等）做模糊命中，改写少量字仍命中；
+ * - **人工填充的无关字幕**（直播切片的聊天/导流）：可比对却几乎不命中 → mismatch 惩罚；
+ * - **AI 字幕整段"♪音乐♪"**：清洗后无有效行 → unverified（不奖不罚）。
+ */
+export function compareSubtitleWithLyrics(
+  /** 字幕行：兼容原始 BilibiliSubtitleLine（content）与复审缓存的规范化段（text） */
+  subLines: Array<{ from?: number; content?: string; text?: string }> | undefined | null,
+  lyricsText: string | undefined | null,
+): SubtitleVerifyResult {
+  const unverified = (sampled = 0, comparable = 0): SubtitleVerifyResult => ({ verdict: 'unverified', sampled, matched: 0, comparable })
+
+  // 1. 歌词云：剔 credits 行 → 规范化 → bigram 集合。过短（纯音乐/空壳歌词）无法验证。
+  const lyricBody = String(lyricsText || '')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s && !LYRIC_CREDIT_RE.test(s))
+  const lyricNorm = normalizeText(lyricBody.join(''))
+  if (lyricNorm.length < 40) return unverified()
+  const lyricBigrams = bigramSetOf(lyricNorm)
+  const lyricHasCJK = CJK_RE.test(lyricNorm)
+  const lyricHasLatin = /[a-z]/.test(lyricNorm)
+
+  // 2. 字幕段：清洗噪音行（♪音乐♪ 等）→ 拆双语段 → 规范化 → 过滤短行/credits → 去重
+  const segs: Array<{ from: number; norm: string }> = []
+  const seenSeg = new Set<string>()
+  for (const line of subLines || []) {
+    for (const raw of String(line?.content ?? (line?.text || '')).split(/\n/)) {
+      const trimmed = raw.trim()
+      if (!trimmed || LYRIC_CREDIT_RE.test(trimmed)) continue
+      const norm = normalizeText(trimmed)
+      if (!isVerifiableSegment(norm) || seenSeg.has(norm)) continue
+      seenSeg.add(norm)
+      segs.push({ from: Number(line?.from) || 0, norm })
+    }
+  }
+
+  // 3. 只留与歌词可比对（共享书写体系）的段：中文翻译字幕 vs 英文原文歌词 → 不可比 → unverified
+  const comparableSegs = segs.filter((s) => isComparableSegment(s.norm, lyricHasCJK, lyricHasLatin))
+  if (!comparableSegs.length) return unverified(0, 0)
+
+  // 4. 时间轴抽样：跳过首行（常为片头/标题问候），等距最多取 8 段——
+  //    Live 前段说话/混剪片头只占少数采样，正片歌词段占多数即可判 match
+  const sorted = [...comparableSegs].sort((a, b) => a.from - b.from)
+  const pool = sorted.length > 4 ? sorted.slice(1) : sorted
+  const SAMPLE_MAX = 8
+  const samples: Array<{ from: number; norm: string }> = []
+  if (pool.length <= SAMPLE_MAX) {
+    samples.push(...pool)
+  } else {
+    for (let i = 0; i < SAMPLE_MAX; i += 1) {
+      const seg = pool[Math.min(pool.length - 1, Math.round(((i + 0.5) * pool.length) / SAMPLE_MAX))]
+      if (seg && !samples.includes(seg)) samples.push(seg)
+    }
+  }
+  if (!samples.length) return unverified(0, comparableSegs.length)
+
+  // 5. 判定：命中（包含率 ≥0.6）过半 → match；可比样本 ≥3 且全不命中 → mismatch；中间态 → unverified
+  const CONTAIN_THRESHOLD = 0.6
+  let matched = 0
+  for (const s of samples) {
+    if (containmentOf(s.norm, lyricBigrams) >= CONTAIN_THRESHOLD) matched += 1
+  }
+  const ratio = matched / samples.length
+  if (ratio >= 0.5) return { verdict: 'match', sampled: samples.length, matched, comparable: comparableSegs.length }
+  if (matched === 0 && samples.length >= 3) return { verdict: 'mismatch', sampled: samples.length, matched, comparable: comparableSegs.length }
+  return unverified(samples.length, comparableSegs.length)
+}
+
+/**
+ * 把平台歌词行（LyricLine 结构鸭子类型：text + translation）压平成比对用文本。
+ * 正文与翻译都进歌词云：英文歌 + 中文 CC 字幕时，字幕可与中文翻译歌词比对。
+ */
+export function flattenLyricLinesForMatch(lines: Array<{ text?: string; translation?: string }> | undefined | null): string {
+  if (!Array.isArray(lines)) return ''
+  const parts: string[] = []
+  for (const l of lines) {
+    const text = String(l?.text || '').trim()
+    const translation = String(l?.translation || '').trim()
+    if (text) parts.push(text)
+    if (translation && translation !== text) parts.push(translation)
+  }
+  return parts.join('\n')
+}
+
+export type RecordingTarget = NonNullable<MatchContext['targetVersion']>
+
+export function inferRecordingTarget(ctx: MatchContext): RecordingTarget | undefined {
+  if (ctx.targetVersion) return ctx.targetVersion
+  if (/\b(?:tv\s*(?:size|ver(?:sion)?))\b|电视版|tv版/i.test(ctx.songTitle)) return 'tv-size'
+  const artistNames = resolveArtistNames(ctx.artists || []).normalized
+  const artistsText = normalizeText((ctx.artists || []).join(' '))
+  if (/leoneed|moremorejump|vividbadsquad|wonderlands×?showtime|25时ナイトコード|25時ナイトコード/.test(artistsText)) return 'sekai-version'
+  const virtualSingerNames = ['初音ミク', '鏡音リン', '镜音铃', '鏡音レン', '镜音连', '巡音ルカ', '巡音流歌', '歌愛ユキ', '歌爱雪', '重音テト', 'gumi', 'flower', 'vocaloid', 'utau'].map(normalizeText)
+  const virtualSinger = artistNames.some((artist) => virtualSingerNames.includes(artist))
+  if (virtualSinger && (ctx.artists || []).length >= 2) return 'virtual-singer'
+  return undefined
+}
+
+export interface ScoreCandidateOptions {
+  rank?: number
+  officialVerifyType?: number
+  manualZhSubtitle?: boolean
+  autoSubtitle?: boolean
+  preference?: MatchPreference
+  /** 多 P 视频的选中分 P 时长（用于时长贴近评分） */
+  effectiveDuration?: number
+  /** CC 字幕与歌词的比对结论（缺省视为 unverified 缩水档） */
+  ccVerification?: CCVerification
+}
+
 export function scoreCandidate(
   video: BilibiliVideo,
   ctx: MatchContext,
-  extra?: {
-    rank?: number
-    officialVerifyType?: number
-    manualZhSubtitle?: boolean
-    autoSubtitle?: boolean
-    preference?: MatchPreference
-    /** 多 P 视频的选中分 P 时长（用于时长贴近评分） */
-    effectiveDuration?: number
-  },
+  extra?: ScoreCandidateOptions,
 ): CandidateScore {
   const songTitleRaw = cleanSongTitle(ctx.songTitle)
   const songTitleNorm = normalizeText(songTitleRaw)
@@ -1003,49 +1351,24 @@ export function scoreCandidate(
     nearDuration: false,
     hdMarker: /4k|1080p|高清|超清|120帧|120fps|高帧率/.test(titleNorm),
     uploaderMatchesArtist: false,
+    officialChannel: false,
     ccSubtitle: Boolean(extra?.manualZhSubtitle || extra?.autoSubtitle),
   }
+  const officialVerifyType = extra?.officialVerifyType ?? -1
+  const manualZhSubtitle = Boolean(extra?.manualZhSubtitle)
+  const autoSubtitle = Boolean(extra?.autoSubtitle)
+  const ccVerification = extra?.ccVerification ?? 'unverified'
+  const effectiveDuration = extra?.effectiveDuration
 
   // 硬淘汰：任一歌名变体未完整出现在视频标题 → 无关视频，直接丢弃
   if (!songTitleVariants.length || !songTitleVariants.some((t) => titleNorm.includes(t))) {
-    return { video, score: -Infinity, signals, rank, officialVerifyType: extra?.officialVerifyType ?? -1, manualZhSubtitle: false, autoSubtitle: false, type: classifyCandidateType(video.title) }
+    return { video, score: -Infinity, signals, rank, officialVerifyType, manualZhSubtitle, autoSubtitle, ccVerification, effectiveDuration, type: classifyCandidateType(video.title) }
   }
 
   let score = 100 // 歌名完整命中
-  // 歌手名自动拆解（跨平台）：feat/分隔符拆多歌手 + 去括号中文翻译变体
-  const artistNames: string[] = []
-  for (const a of ctx.artists) {
-    for (const name of expandArtistNames(String(a))) {
-      const n = normalizeText(name)
-      if (n.length >= 2 && !artistNames.includes(n)) artistNames.push(n)
-    }
-  }
-  const artistNormList = artistNames
-  // 歌手别名匹配：标题写「宇多田ヒカル」而歌手字段是「宇多田光」也能命中。
-  // 查表键优先原始名，其次规范化名；QQ 音乐等平台的歌手字段常带「 (中文名｡)」后缀，
-  // 规范化后仍包含纯日文名（如「ずっと真夜中でいいのに」），故再做"规范化名包含表键"兜底。
-  const aliasNormList: string[] = []
-  const pushAlias = (alias: string): void => {
-    const n = normalizeText(alias)
-    if (n.length >= 2) aliasNormList.push(n)
-  }
-  for (const a of ctx.artists) {
-    for (const name of expandArtistNames(String(a))) {
-      const norm = normalizeText(name)
-      for (const key of [name, norm]) {
-        for (const alias of ARTIST_ALIASES[key] || []) pushAlias(alias)
-      }
-      // 兜底：规范化歌手名包含某个表键 → 收集其别名（ZUTOMAYO 官方 MV 场景）
-      if (norm.length >= 2) {
-        for (const key of Object.keys(ARTIST_ALIASES)) {
-          const kn = normalizeText(key)
-          if (kn.length >= 2 && norm.includes(kn)) {
-            for (const alias of ARTIST_ALIASES[key]) pushAlias(alias)
-          }
-        }
-      }
-    }
-  }
+  const resolvedArtists = resolveArtistNames(ctx.artists)
+  const artistNormList = resolvedArtists.normalized
+  const aliasNormList = resolvedArtists.aliases
   if (artistNormList.some((a) => titleNorm.includes(a)) || aliasNormList.some((a) => titleNorm.includes(a))) {
     score += 15
     signals.hasArtist = true
@@ -1057,17 +1380,52 @@ export function scoreCandidate(
   if (artistNormList.some((a) => authorNorm === a) || aliasNormList.some((a) => authorNorm === a)) {
     score += 25
     signals.uploaderMatchesArtist = true
-  } else if (artistNormList.some((a) => authorNorm.includes(a)) || aliasNormList.some((a) => authorNorm.includes(a))) {
+  } else if (artistNormList.some((a) => uploaderMatchesName(authorNorm, a)) || aliasNormList.some((a) => uploaderMatchesName(authorNorm, a))) {
     score += 15
     signals.uploaderMatchesArtist = true
   }
+  signals.officialChannel = matchesVerifiedOfficialSource(video, ctx, resolvedArtists)
+    || OFFICIAL_CHANNEL_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))
+    || aliasNormList.some((alias) => authorNorm === alias)
 
-  // 精确命中：标题主体与歌名完全一致（如「晴天」或「周杰伦 - 晴天」），高置信正片
-  const exactTitle = normalizeText(video.title.replace(/^(【[^】]*】)?\s*/, '').trim())
-  if (exactTitle === songTitleNorm) score += 30
-  // 标题即「歌手 - 歌名」形态（无任何多余标记），视为完整正片
-  const dashForm = titleNorm.replace(/^([^-]{2,20})-([^-]{1,20})$/, '$1-$2')
-  if (dashForm !== titleNorm && artistNormList.some((a) => titleNorm.startsWith(a))) score += 15
+  // 官方标记只有与艺人本人上传者相互印证时才成为可靠来源信号。
+  if (signals.officialMarker && signals.uploaderMatchesArtist) score += 20
+
+  // 纯歌名只有弱奖励；正确艺人-歌名结构才是高置信正片证据。
+  const exactTitleMatch = classifyExactTitleMatch(video.title, songTitleRaw, resolvedArtists)
+  if (exactTitleMatch === 'title-only') score += 10
+  else if (exactTitleMatch === 'artist-title') score += 25
+
+  // 标题明确把另一首歌放进书名号，而目标歌名只出现在附带说明中，通常是专辑/彩蛋提及。
+  const rawVideoTitle = String(video.title || '')
+  const quotedTitles = [...rawVideoTitle.matchAll(/[《「『“\"]([^》」』”\"]{2,80})[》」』”\"]/g)]
+  const firstQuotedIndex = quotedTitles[0]?.index ?? -1
+  const targetAppearsBeforeQuote = firstQuotedIndex > 0
+    && songTitleVariants.some((variant) => normalizeText(rawVideoTitle.slice(0, firstQuotedIndex)).includes(variant))
+  const quotedTitleNorms = quotedTitles.map((match) => normalizeText(match[1])).filter(Boolean)
+  if (quotedTitleNorms.length && !targetAppearsBeforeQuote
+    && !quotedTitleNorms.some((quoted) => songTitleVariants.some((variant) => quoted.includes(variant)))) {
+    score -= 85
+  }
+
+  // 「其他歌手 | 歌名 | 作品名」形态：首段通常是演唱者。首段不匹配目标艺人/IP时降权。
+  if (!signals.hasArtist && /[|｜]/.test(video.title)) {
+    const segments = String(video.title || '')
+      .replace(/^(?:【[^】]*】\s*)+/, '')
+      .split(/[|｜]/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+    const songSegmentIndex = segments.findIndex((part) => songTitleVariants.some((variant) => normalizeText(part) === variant))
+    if (songSegmentIndex > 0) {
+      const lead = normalizeText(segments[0])
+      const franchiseNames = resolveFranchiseNames(ctx.franchise).map(normalizeText)
+      const isExpectedSource = artistNormList.some((artist) => lead.includes(artist))
+        || aliasNormList.some((alias) => lead.includes(alias))
+        || franchiseNames.some((name) => lead.includes(name))
+        || /官方|字幕|歌词|mv|pv|4k|1080p|hires|无损/.test(lead)
+      if (lead.length >= 2 && !isExpectedSource) score -= 65
+    }
+  }
 
   // 歌名不含歌手（无歌手证据）：可能是同名的其它歌曲（货不对板防御，任何歌名长度都适用——
   // 否则同名不同歌手的官方 MV 会靠官方/播放加成胜出，如 SawanoHiroyuki 与 NMIXX 的 Roller Coaster）。
@@ -1080,7 +1438,7 @@ export function scoreCandidate(
   // 未命中歌手 + 却带官方/MV 标记 → 极可能是"别的歌手的官方MV"（张冠李戴，如王艺瑾-喜欢你），再重罚
   if (!signals.hasArtist && (signals.officialMarker || signals.mvMarker)) score -= 40
   // 无歌手命中 + live 标记 → "别人的演唱会现场"（如日语曲匹配到张国荣热情演唱会），同级别重罚
-  if (!signals.hasArtist && LIVE_MARKERS.some((m) => titleNorm.includes(m))) score -= 30
+  if (!signals.hasArtist && hasLiveMarker(video.title)) score -= 30
   // 「他人《歌名》」形态：书名号前的文本通常是演唱者（如「张国荣Leslie《春夏秋冬》」）。
   // 去掉【..】与画质/规格标签后仍有实质文本、且不含本曲歌手/别名 → 明确演唱者不符。
   // 书名号会被 normalizeText 剥掉，须在原始标题上检测。
@@ -1191,8 +1549,8 @@ export function scoreCandidate(
   if (video.typename === '音乐') score += 15
   else if (video.typename && ['影视剪辑', '日常', '游戏', '知识', '生活'].includes(video.typename)) score -= 20
 
-  // 标题标记
-  for (const m of OFFICIAL_MARKERS) if (titleNorm.includes(m)) score += 25
+  // 标题自称“官方”只能作为弱内容标记，不能替代账号来源证据。
+  for (const m of OFFICIAL_MARKERS) if (titleNorm.includes(m)) score += 8
   for (const m of MV_MARKERS) if (titleNorm.includes(m)) score += 15
   for (const m of NEGATIVE_MARKERS) if (titleNorm.includes(m)) score -= 35
   for (const m of COMPILATION_MARKERS) if (titleNorm.includes(m)) score -= 60
@@ -1204,7 +1562,7 @@ export function scoreCandidate(
   // 加长版就是官方 MV 本体，播放量到量级后应稳压"更花哨但非本体"的版本。）
   if (signals.hasArtist && (video.play || 0) >= 10000
     && /完整版|加长版|加長版|完整フル|フルバージョン/.test(titleNorm)
-    && !LIVE_MARKERS.some((m) => titleNorm.includes(m))
+    && !hasLiveMarker(video.title)
     && !/翻唱|cover|カバー/.test(titleNorm)) {
     score += 25
   }
@@ -1230,7 +1588,44 @@ export function scoreCandidate(
   if (signals.hasArtist && signals.mvMarker) score += 10
   // live 只计一次（"演唱会现场版"会同时命中 现场/演唱会 两个标记，不应叠加）；
   // 均衡偏好下轻微降权，live 偏好下不降（用户明确要现场版）
-  if (LIVE_MARKERS.some((m) => titleNorm.includes(m)) && (extra?.preference ?? 'balanced') !== 'live') score -= 5
+  if (hasLiveMarker(video.title) && (extra?.preference ?? 'balanced') !== 'live') score -= 5
+
+  // 非音乐内容即使标题、时长和播放量都接近，也只能作为低优先级相关视频。
+  if (NON_MUSIC_CONTENT_MARKERS.some((marker) => titleNorm.includes(normalizeText(marker)))) score -= 90
+  const hasAlternateVersion = ALTERNATE_VERSION_MARKERS.some((marker) => titleNorm.includes(normalizeText(marker)))
+  const hasDerivedExtension = DERIVED_EXTENDED_MARKERS.some((marker) => titleNorm.includes(normalizeText(marker)))
+  const penalizeAlternateVersion = (): void => {
+    if (hasAlternateVersion) score -= 45
+    if (hasDerivedExtension) score -= 55
+  }
+  const targetVersion = inferRecordingTarget(ctx)
+  if (targetVersion === 'full-original') {
+    penalizeAlternateVersion()
+  } else if (targetVersion === 'tv-size') {
+    const isDerivative = signals.negativeHit || classifyCandidateType(video.title) === 'instrumental'
+    if (!isDerivative && /tv\s*(size|ver)|电视版|tv版/i.test(video.title)) score += 35
+    if (!isDerivative && video.duration >= 70 && video.duration <= 110) score += 25
+  } else if (targetVersion === 'virtual-singer') {
+    penalizeAlternateVersion()
+    if (/世界计划|project\s*sekai|pjsk|2dmv|3dmv|sekai\s*ver/i.test(video.title + video.author)) score -= 55
+    if (/初音ミク|gumi|歌愛ユキ|flower|重音テト|vocaloid|utau/i.test(video.title)) score += 20
+  } else if (targetVersion === 'sekai-version') {
+    penalizeAlternateVersion()
+    if (/世界计划|project\s*sekai|pjsk|2dmv|3dmv|sekai\s*ver/i.test(video.title + video.author)) score += 35
+    if (/game\s*size|游戏短版|短版/i.test(video.title)) score -= 25
+  } else if (targetVersion === 'specific-performance') {
+    const primaryPerformer = artistNormList[0]
+    if (primaryPerformer && titleNorm.includes(primaryPerformer)) score += 35
+    else score -= 55
+  }
+
+  const franchiseNorms = resolveFranchiseNames(ctx.franchise).map(normalizeText).filter((name) => name.length >= 2)
+  const hasFranchise = franchiseNorms.some((name) => titleNorm.includes(name))
+  if (hasFranchise) score += 25
+  // 短而泛化的英文标题极易撞到问答、预告和其他游戏；可信来源只能证明上传者身份，
+  // 不能证明这是当前艺人的同名作品，因此仍需艺人或 IP 证据。
+  const genericTitle = /^[a-z0-9 ]+$/i.test(songTitleRaw) && songTitleRaw.trim().split(/\s+/).length <= 3
+  if (genericTitle && !signals.hasArtist && !hasFranchise) score -= 45
 
   const songDur = Math.max(1, ctx.songDuration || 0)
   // 多 P 视频用选中分 P 的时长评分（视频总时长对多版本视频无意义）
@@ -1244,46 +1639,36 @@ export function scoreCandidate(
   else if (diffRatio <= 0.5) score -= 15
   else score -= 35
 
-  // OP/ED 但视频是 TV 版短时长（约 1分30秒 ±20秒 = 70~110s）：虽然相关但是片头片尾短版，
-  // 听歌要的是完整版 → 降级，让同曲的完整版/MV 排到前面
-  if (isOpEdTitle && compareDuration >= 70 && compareDuration <= 110) score -= 25
+  // OP/ED 但视频是 TV 版短时长：输入本身要求 TV size 时是精确版本，否则作为完整版的降级候选。
+  if (isOpEdTitle && compareDuration >= 70 && compareDuration <= 110 && targetVersion !== 'tv-size') score -= 25
 
-  // 播放量（对数加权，热门更可能是正片/高质量 MV）：MV 背景要的是"好看"，高播放视频
-  // 通常是有画面的真 MV（低播放常是纯音频搬运）。权重×13 让数量级差异决定性——
-  // 13.2 万播放的官方向 MV 应胜过 2 千播放的纯音频搬运（后者只是标题写了歌手）。
-  // 未命中歌手时**不衰减**：高播放本身就是正确性的强证据（"同名不同歌"风险由上方
-  // 按播放量软化的无歌手惩罚 + live/翻唱/语言一致性扣分兜底）。
-  if (video.play > 0) {
-    score += Math.min(75, Math.log10(video.play) * 13)
-  }
+  // 播放量只作为质量先验；曲线在超高播放处继续保留小幅区分。
+  score += playCountScore(video.play)
 
-  // 搜索排名（B 站相关度顺序偏"标题精确命中"而非"MV 质量"，权重从 0.8 降至 0.5——
-  // 干净标题的低播放搬运常排首位，不应压过高播放真 MV）
+  // 搜索排名（B 站相关度顺序偏"标题精确命中"而非"MV 质量"，只作弱信号）
   score += Math.max(0, 15 - rank) * 0.5
 
-  // 官方频道关键词（作者名命中，authorNorm 已在歌手匹配段计算）
-  if (OFFICIAL_CHANNEL_KEYWORDS.some((k) => authorNorm.includes(k))) score += 25
-  // 精品社区/资讯站频道（翻译组、游戏资讯站等，非官方但质量稳定）
-  if (QUALITY_COMMUNITY_KEYWORDS.some((k) => authorNorm.includes(k))) score += 15
+  // 官方频道与精品社区来源
+  if (signals.officialChannel) score += 25
+  if (QUALITY_COMMUNITY_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))) score += 15
 
-  // 复审增强
-  const officialVerifyType = extra?.officialVerifyType ?? -1
-  const manualZhSubtitle = Boolean(extra?.manualZhSubtitle)
-  const autoSubtitle = Boolean(extra?.autoSubtitle)
-  if (officialVerifyType === 2) score += 30
-  else if (officialVerifyType === 1) score += 15
-  // 官号 + 个人认证：作者=歌手且通过个人认证 → 音乐人本人官方账号，额外加成
-  if (signals.uploaderMatchesArtist && officialVerifyType === 1) score += 10
-  // CC 字幕（B 站字幕）权重：人工中文字幕最高，AI 字幕次之
-  if (manualZhSubtitle) score += 25
-  else if (autoSubtitle) score += 10
+  // 复审增强：B 站原始认证值为 -1 未认证、0 个人、1 机构。
+  score += verificationScore(officialVerifyType)
+  if (signals.uploaderMatchesArtist && officialVerifyType >= 0) score += 10
+  // 机构认证与上下文官号/艺人别名相互印证，优先于仅标题干净的转载。
+  if (officialVerifyType === 1 && (signals.officialChannel || signals.uploaderMatchesArtist)) score += 10
+  // CC 字幕权重（分档）：内容与歌词比对后 match 足额 / unverified 缩水 / mismatch 反罚。
+  // 背景（Starboy →「一滴泪」直播切片）：人工 CC +25 无差别加分曾把无关视频推上最佳（245 分）——
+  // CC 只证明"有字幕"，不证明"是这首歌"，必须验证内容后才值得高分。
+  if (manualZhSubtitle) score += ccVerification === 'match' ? 25 : ccVerification === 'mismatch' ? -20 : 8
+  else if (autoSubtitle) score += ccVerification === 'match' ? 10 : ccVerification === 'mismatch' ? -8 : 3
 
   // 偏好加权
   const preference = extra?.preference ?? 'balanced'
   const type = classifyCandidateType(video.title)
   score += preferenceAdjustment(type, preference, signals)
 
-  return { video, score, signals, rank, officialVerifyType, manualZhSubtitle, autoSubtitle, type }
+  return { video, score, signals, rank, officialVerifyType, manualZhSubtitle, autoSubtitle, ccVerification, effectiveDuration, type }
 }
 
 /** 偏好加权：不同用户想要不同类型的视频 */
@@ -1313,10 +1698,13 @@ export function preferenceAdjustment(type: CandidateType, preference: MatchPrefe
  * 额外：类型为官方且歌手+歌名+时长贴近（明显正片）时降低自动播放门槛。
  */
 export function shouldAutoPlay(candidate: CandidateScore, strictness: AutoPlayStrictness = 'standard'): boolean {
+  // 明确的翻唱、伴奏、教学/变速等负向类型不能仅靠播放量越过自动播放门槛。
+  if (candidate.signals.negativeHit || candidate.type === 'cover' || candidate.type === 'instrumental') return false
+  // 人工 CC 字幕只有内容验证过与歌词相符才算"强信号"（未验证的 CC 不再单独撑起自动播放）
   const strong =
-    candidate.signals.officialMarker ||
-    candidate.officialVerifyType >= 1 ||
-    candidate.manualZhSubtitle ||
+    candidate.signals.officialChannel ||
+    candidate.officialVerifyType === 1 ||
+    (candidate.manualZhSubtitle && candidate.ccVerification === 'match') ||
     candidate.signals.uploaderMatchesArtist
   // 歌手+歌名+MV/官方 且时长贴近 → 高置信正片
   const obviousOfficial = candidate.type === 'official' && candidate.signals.hasArtist && candidate.signals.nearDuration
@@ -1334,6 +1722,7 @@ export function shouldAutoPlay(candidate: CandidateScore, strictness: AutoPlaySt
 // ===== 按歌缓存 + 手动选择记忆 + 黑名单 =====
 
 const MATCH_CACHE_TTL = 24 * 60 * 60 * 1000
+const MATCH_SCORE_VERSION = 'v6-audited-identity'
 /** 匹配缓存 LRU 上限（防止长时间会话无界增长） */
 const MATCH_CACHE_MAX = 60
 const matchCache = new Map<string, { at: number; result: BilibiliMatchResult }>()
@@ -1457,8 +1846,10 @@ export function addBilibiliBlacklist(songKey: string, bvid: string): string[] {
 const TOP_CONFIRM_COUNT = 12
 const REVIEW_TOP_N = 8
 
+/** 复审缓存的字幕条目：清洗后的分段（原始内容，供歌词比对），有 CC 才抓取 */
+interface ReviewSubtitleSegment { from: number; text: string }
 /** 复审 view/字幕的全局 bvid 缓存（跨歌曲复用，1h TTL；LRU 上限防无界增长） */
-const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number }>()
+const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number; subLines?: ReviewSubtitleSegment[] }>()
 
 /**
  * 清除 MV 匹配缓存：24h 内存匹配结果 + 复审缓存 + 手动标记/黑名单（localStorage）。
@@ -1498,15 +1889,9 @@ function pruneReviewCache() {
 /** 按偏好构建搜索关键词列表（多元拆分：原文标题+歌手 → 逐歌手 → 仅标题 → 标题+MV → 偏好词） */
 export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSettings, 'matchPreference' | 'keywordTemplate' | 'customKeywordTemplate'>): string[] {
   const title = cleanSongTitle(song.songTitle)
-  const rawArtists = (song.artists || []).filter((a) => String(a).trim().length > 0)
-  // 歌手名自动拆解（feat/分隔/括号翻译），避免平台特有后缀（如「 (永远是深夜有多好｡)」）拉低搜索召回
-  const artists: string[] = []
-  for (const a of rawArtists) {
-    for (const name of expandArtistNames(String(a))) {
-      if (!artists.includes(name)) artists.push(name)
-    }
-  }
-  const artist = artists.join(' ')
+  const resolvedArtists = resolveArtistNames(song.artists || [])
+  const artists = resolvedArtists.raw
+  const artist = (song.artists || []).map((value) => String(value).trim()).filter(Boolean).join(' ')
   const template = settings?.keywordTemplate ?? 'auto'
   if (template === 'custom') {
     const custom = (settings?.customKeywordTemplate || '').trim()
@@ -1521,16 +1906,18 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   const queries: string[] = []
   // 1. 原文标题 + 全部歌手（首选；日韩等原文标题直接搜原文，中文仅作辅助）
   if (artist) queries.push(`${title} ${artist}`.trim())
+  const franchiseNames = resolveFranchiseNames(song.franchise)
+  for (const franchise of franchiseNames) queries.push(`${title} ${franchise}`.trim())
   // 2. 逐个歌手 + 歌手别名尝试（如 宇多田光 ↔ 宇多田ヒカル，B 站标题两种写法都常见）
   const artistVariants: string[] = []
   for (const a of artists) {
     const q = `${title} ${a}`.trim()
     if (q && !queries.includes(q)) queries.push(q)
-    const aliases = ARTIST_ALIASES[a] || []
-    for (const alias of aliases) {
-      const aq = `${title} ${alias}`.trim()
-      if (aq && !queries.includes(aq) && !artistVariants.includes(aq)) artistVariants.push(aq)
-    }
+  }
+  for (const aliasNorm of resolvedArtists.aliases.slice(0, 4)) {
+    const alias = Object.values(ARTIST_ALIASES).flat().find((value) => normalizeText(value) === aliasNorm) || aliasNorm
+    const aq = `${title} ${alias}`.trim()
+    if (aq && !queries.includes(aq) && !artistVariants.includes(aq)) artistVariants.push(aq)
   }
   // 别名查询放在歌手主查询之后、仅标题之前
   for (const aq of artistVariants) queries.push(aq)
@@ -1549,7 +1936,15 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   if (artists.some((a) => /leoneed|more\s*more\s*jump|vivid\s*bad\s*squad|wonderlands|ナイトコード|25時/i.test(String(a)))) {
     queries.push(`${title} 世界计划`.trim(), `${title} pjsk`.trim(), `${title} Project SEKAI`.trim())
   }
-  return queries
+  const uniqueQueries: string[] = []
+  const seenQueries = new Set<string>()
+  for (const query of queries) {
+    const key = normalizeText(query)
+    if (!key || seenQueries.has(key)) continue
+    seenQueries.add(key)
+    uniqueQueries.push(query)
+  }
+  return uniqueQueries.slice(0, 10)
 }
 
 /** 近重复标题去重：保留综合评分更高者（评分含时长贴近/歌手/播放量）。
@@ -1604,13 +1999,17 @@ function applyPreferenceToReview(review: { manualZh: boolean; autoZh: boolean },
   return { manualZhSubtitle: review.manualZh, autoSubtitle: review.autoZh }
 }
 
-/** 复审候选（view 拿 cid/作者认证 + 字幕），带全局 bvid 缓存 */
+/** 复审候选（view 拿 cid/作者认证 + 字幕 + CC 内容歌词比对），带全局 bvid 缓存。
+ *  lyricsText：平台歌词（含翻译，flattenLyricLinesForMatch 产物）；为空时 CC 一律按 unverified 缩水档，
+ *  绝不为验证歌词额外等待网络——验证是"顺路"增强，不能拖慢匹配。 */
 async function reviewCandidates(
   candidates: CandidateScore[],
   ctx: MatchContext,
   preference: MatchPreference,
   signal?: AbortSignal,
+  lyricsText?: string,
 ): Promise<CandidateScore[]> {
+  // 复审候选数固定为 8；每个候选可能包含 view、字幕目录和一条字幕正文请求。
   const top = candidates.slice(0, REVIEW_TOP_N)
   const reviewed = await Promise.all(
     top.map(async (candidate) => {
@@ -1624,6 +2023,7 @@ async function reviewCandidates(
           let effectiveDuration = 0
           let manualZh = false
           let autoZh = false
+          let subLines: ReviewSubtitleSegment[] | undefined
           if (view.code === 0) {
             officialVerifyType = view.data.owner.officialVerifyType
             // 多 P（选集）视频：选择最匹配歌曲的分 P —— 该 P 的 cid 直接用于播放，
@@ -1643,16 +2043,27 @@ async function reviewCandidates(
                 () => ({ code: -1, subtitles: [] as BilibiliSubtitleInfo[] }),
               )
               if (subInfo.code === 0 && subInfo.subtitles.length) {
+                let chosenSub: BilibiliSubtitleInfo | null = null
                 for (const s of subInfo.subtitles) {
                   if (/zh|中文/i.test(`${s.lan}${s.lanDoc}`)) {
                     if (s.aiType === 0) manualZh = true
                     else autoZh = true
+                    // 比对用字幕内容：优先人工字幕，其次 AI 字幕（只取一条，不额外多打请求）
+                    if (!chosenSub || s.aiType === 0) chosenSub = s
                   }
+                }
+                // CC 内容抓取：仅限有 CC 的候选（多数视频 0 次），且与复审并行不串行；
+                // 内容进 1h 全局缓存——预加载时抓过，切歌命中 24h 匹配缓存后重扫零网络
+                if ((manualZh || autoZh) && chosenSub) {
+                  const json = await getBilibiliSubtitleJson(chosenSub.cacheKey, signal).catch(() => [])
+                  subLines = (cleanSubtitleLines(json) || [])
+                    .flatMap((l) => String(l?.content || '').split('\n').map((part) => ({ from: Number(l?.from) || 0, text: part.trim() })))
+                    .filter((s) => s.text)
                 }
               }
             }
           }
-          cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration }
+          cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration, subLines }
           reviewCache.set(bvid, cached)
           pruneReviewCache()
         } catch {
@@ -1662,6 +2073,11 @@ async function reviewCandidates(
         }
       }
       const { manualZhSubtitle, autoSubtitle } = applyPreferenceToReview(cached, preference)
+      // CC 内容 ↔ 歌词比对：有 CC 且有歌词才可比；无歌词时按 unverified 缩水档（不惩罚）
+      let ccVerification: CCVerification = 'unverified'
+      if ((cached.manualZh || cached.autoZh) && lyricsText) {
+        ccVerification = compareSubtitleWithLyrics(cached.subLines, lyricsText).verdict
+      }
       const rescored = scoreCandidate(candidate.video, ctx, {
         rank: candidate.rank,
         officialVerifyType: cached.officialVerifyType,
@@ -1669,18 +2085,71 @@ async function reviewCandidates(
         autoSubtitle,
         preference,
         effectiveDuration: cached.effectiveDuration,
+        ccVerification,
       })
-      return { ...rescored, cid: cached.cid }
+      return { ...rescored, cid: cached.cid, effectiveDuration: cached.effectiveDuration, ccVerification }
     }),
   )
   const reviewedSet = new Set(reviewed.map((c) => c.video.bvid))
   const rest = candidates.filter((c) => !reviewedSet.has(c.video.bvid))
-  return [...reviewed, ...rest].sort((a, b) => b.score - a.score)
+  return [...reviewed, ...rest].sort(compareCandidates)
+}
+
+/** 缓存命中但匹配时无歌词可比的候选：拿到歌词后用复审缓存的字幕内容纯本地重扫（零网络、微秒级）。
+ *  记忆视频仍无条件置顶；门槛按设置重算（重扫后过线则 confirm 升为 auto）。
+ *  reviewLookup 供测试注入复审缓存桩（生产默认 reviewCache）。 */
+export function rescoreResultWithLyrics(
+  result: BilibiliMatchResult,
+  song: MatchContext,
+  settings: Pick<BilibiliWatchSettings, 'matchPreference' | 'autoPlayStrictness' | 'forceAutoPlayHighest'>,
+  lyricsText: string,
+  overrideBvid: string,
+  reviewLookup: (bvid: string) => { manualZh?: boolean; autoZh?: boolean; subLines?: Array<{ from?: number; text?: string }>; cid?: number } | undefined = (bvid) => reviewCache.get(bvid),
+): BilibiliMatchResult {
+  if (!result.ccUnverifiedWithoutLyrics || !result.fallbackChain.length) return result
+  const preference = settings.matchPreference
+  const rescored = result.fallbackChain.map((c) => {
+    const rc = reviewLookup(c.video.bvid)
+    let ccVerification: CCVerification = 'unverified'
+    if (rc && (rc.manualZh || rc.autoZh)) ccVerification = compareSubtitleWithLyrics(rc?.subLines, lyricsText).verdict
+    const s = scoreCandidate(c.video, song, {
+      rank: c.rank,
+      officialVerifyType: c.officialVerifyType,
+      manualZhSubtitle: c.manualZhSubtitle,
+      autoSubtitle: c.autoSubtitle,
+      preference,
+      effectiveDuration: c.effectiveDuration,
+      ccVerification,
+    })
+    return { ...s, cid: c.cid ?? rc?.cid ?? 0, effectiveDuration: c.effectiveDuration, ccVerification }
+  }).sort(compareCandidates)
+  let chain = rescored
+  let best = rescored[0]
+  if (overrideBvid) {
+    const remembered = rescored.find((c) => c.video.bvid === overrideBvid)
+    if (remembered) {
+      chain = [remembered, ...rescored.filter((c) => c.video.bvid !== overrideBvid)]
+      best = remembered
+    }
+  }
+  let status: BilibiliMatchStatus
+  if (!best) status = 'none'
+  else if (overrideBvid) status = 'auto'
+  else if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) status = 'auto'
+  else status = 'confirm'
+  const ccUnverifiedWithoutLyrics = rescored.some((c) => (c.manualZhSubtitle || c.autoSubtitle) && c.ccVerification === 'unverified') && !lyricsText
+  return { status, best, candidates: chain.slice(0, TOP_CONFIRM_COUNT), fallbackChain: chain, ccUnverifiedWithoutLyrics: ccUnverifiedWithoutLyrics || undefined }
 }
 
 export async function findBestBilibiliMv(
   song: MatchContext,
-  opts?: { signal?: AbortSignal; settings?: Partial<BilibiliWatchSettings> },
+  opts?: {
+    signal?: AbortSignal
+    settings?: Partial<BilibiliWatchSettings>
+    /** 同步取当前歌歌词（含翻译，flattenLyricLinesForMatch 产物）。仅用于 CC 字幕内容验证：
+     *  匹配时已加载就传入（验证 +25/-20 分档），没加载就返回空（unverified 缩水档）——绝不为此等待网络。 */
+    lyricsProvider?: () => string | null | undefined
+  },
 ): Promise<BilibiliMatchResult> {
   const settings = { ...DEFAULT_WATCH_SETTINGS, ...(opts?.settings || getBilibiliWatchSettings()) }
   // 缓存键必须包含设置指纹：偏好/门槛/模板/强制最高分不同 → 匹配结果（排序与门槛判定）不同
@@ -1688,6 +2157,7 @@ export async function findBestBilibiliMv(
   const songKey = songKeyOf(song)
   const overrideBvid = settings.useRememberedOverride ? (getBilibiliOverride(songKey) || '') : ''
   const settingsFingerprint = [
+    MATCH_SCORE_VERSION,
     settings.matchPreference,
     settings.autoPlayStrictness,
     settings.keywordTemplate,
@@ -1697,8 +2167,17 @@ export async function findBestBilibiliMv(
   ].join('|')
   const cacheKey = `${songKey}::${settingsFingerprint}`
   const cached = matchCache.get(cacheKey)
-  if (cached && Date.now() - cached.at < MATCH_CACHE_TTL) return cached.result
-  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal)
+  if (cached && Date.now() - cached.at < MATCH_CACHE_TTL) {
+    // 命中缓存但当时无歌词可比：现在有歌词了 → 用缓存的字幕内容零网络重扫升级（CC 验证分档生效）
+    const lyricsText = String(opts?.lyricsProvider?.() || '').trim()
+    if (lyricsText && cached.result.ccUnverifiedWithoutLyrics) {
+      const upgraded = rescoreResultWithLyrics(cached.result, song, settings, lyricsText, overrideBvid)
+      if (upgraded !== cached.result) matchCache.set(cacheKey, { at: cached.at, result: upgraded })
+      return upgraded
+    }
+    return cached.result
+  }
+  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider)
   matchCache.set(cacheKey, { at: Date.now(), result })
   pruneMatchCache()
   return result
@@ -1709,11 +2188,21 @@ async function findBestBilibiliMvUncached(
   cacheKey: string,
   settings: BilibiliWatchSettings,
   signal?: AbortSignal,
+  lyricsProvider?: () => string | null | undefined,
 ): Promise<BilibiliMatchResult> {
   // override/黑名单按歌曲存储键读写（与缓存键分离：不含设置指纹）
   const songKey = songKeyOf(song)
   const empty = (error?: string): BilibiliMatchResult => ({ status: 'error', candidates: [], fallbackChain: [], error })
   const blacklist = new Set(getBilibiliBlacklist(songKey))
+  // 歌词同步取一次（调用方已加载就用；没有就整轮按 unverified 缩水档，不等待网络）
+  const lyricsText = String(lyricsProvider?.() || '').trim()
+  /** 匹配轮次收尾：无歌词时有候选拿着 CC 缩水分 → 标记，供拿到歌词后零网络重扫升级 */
+  const finish = (result: BilibiliMatchResult): BilibiliMatchResult => {
+    if (!lyricsText && result.fallbackChain.some((c) => (c.manualZhSubtitle || c.autoSubtitle) && c.ccVerification === 'unverified')) {
+      result.ccUnverifiedWithoutLyrics = true
+    }
+    return result
+  }
 
   // 0. 用户手动选择记忆：优先播放该视频，但不短路——完整搜索照常跑，
   //    候选列表保留全部结果（否则列表只剩记忆视频一个，用户无法换回其他 MV）。
@@ -1732,7 +2221,7 @@ async function findBestBilibiliMvUncached(
             author: view.data.owner.name,
             pic: view.data.pic,
           }
-          const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal)
+          const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal, lyricsText)
           rememberedOverride = scored[0] || null
         }
       } catch {
@@ -1743,7 +2232,7 @@ async function findBestBilibiliMvUncached(
   }
   /** 记忆视频直接播放（搜索失败/无候选时也要能放记忆的视频） */
   const rememberedOnly = (): BilibiliMatchResult | null =>
-    rememberedOverride ? { status: 'auto', best: rememberedOverride, candidates: [rememberedOverride], fallbackChain: [rememberedOverride] } : null
+    rememberedOverride ? finish({ status: 'auto', best: rememberedOverride, candidates: [rememberedOverride], fallbackChain: [rememberedOverride] }) : null
 
   // 1. 偏好感知多查询搜索（前两页提升召回）
   const queries = buildQueries(song, settings)
@@ -1773,13 +2262,14 @@ async function findBestBilibiliMvUncached(
   let candidates = videos
     .map((v, index) => scoreCandidate(v, song, { rank: index, preference: settings.matchPreference }))
     .filter((c) => c.score !== -Infinity && !blacklist.has(c.video.bvid))
-  // 近重复标题去重（保留播放量最高）
-  candidates = dedupeCandidates(candidates).sort((a, b) => b.score - a.score)
+    .sort(compareCandidates)
 
   if (!candidates.length) return rememberedOnly() || { status: 'none', candidates: [], fallbackChain: [] }
 
-  // 3. TOP-5 复审（作者认证 + 字幕，全局 bvid 缓存）
-  candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal)
+  // 3. 前 8 名复审（作者认证 + 字幕 + CC 内容歌词比对，全局 bvid 缓存）。
+  // 同标题稿件必须先完成来源复审再去重，否则社区转载可能在官号认证加分前将其挤掉。
+  candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal, lyricsText)
+  candidates = dedupeCandidates(candidates).sort(compareCandidates)
 
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
   let fallbackChain = candidates
@@ -1793,10 +2283,10 @@ async function findBestBilibiliMvUncached(
   const topCandidates = fallbackChain.slice(0, TOP_CONFIRM_COUNT)
   if (rememberedOverride || !best) {
     if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
-    return { status: 'auto', best, candidates: topCandidates, fallbackChain }
+    return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }
   if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) {
-    return { status: 'auto', best, candidates: topCandidates, fallbackChain }
+    return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }
-  return { status: 'confirm', candidates: topCandidates, fallbackChain }
+  return finish({ status: 'confirm', candidates: topCandidates, fallbackChain })
 }

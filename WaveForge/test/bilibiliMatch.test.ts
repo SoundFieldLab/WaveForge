@@ -9,9 +9,18 @@ import {
   classifyCandidateType,
   buildQueries,
   dedupeCandidates,
+  compareCandidates,
+  playCountScore,
+  classifyExactTitleMatch,
+  resolveArtistNames,
+  inferRecordingTarget,
+  compareSubtitleWithLyrics,
+  flattenLyricLinesForMatch,
+  rescoreResultWithLyrics,
   getBilibiliBlacklist,
   addBilibiliBlacklist,
   getBilibiliWatchSettings,
+  saveBilibiliWatchSettings,
   type MatchContext,
   type BilibiliVideo,
   type CandidateScore,
@@ -41,6 +50,7 @@ const fakeCandidate = (score: number, strong: boolean): CandidateScore => {
     nearDuration: true,
     hdMarker: false,
     uploaderMatchesArtist: strong,
+    officialChannel: false,
     ccSubtitle: false,
   }
   return {
@@ -48,7 +58,7 @@ const fakeCandidate = (score: number, strong: boolean): CandidateScore => {
     score,
     signals,
     rank: 0,
-    officialVerifyType: strong ? 1 : 0,
+    officialVerifyType: strong ? 1 : -1,
     manualZhSubtitle: false,
     autoSubtitle: false,
     type: 'official',
@@ -93,7 +103,7 @@ describe('scoreCandidate（候选打分）', () => {
     const official = scoreCandidate(
       video({ title: '【官方MV】周杰倫《稻香》- Official Music Video', duration: 223, play: 10_000_000, author: '杰威尔音乐' }),
       ctx,
-      { officialVerifyType: 2, manualZhSubtitle: true },
+      { officialVerifyType: 1, manualZhSubtitle: true },
     )
     expect(official.score).toBeGreaterThanOrEqual(230)
     expect(official.signals.officialMarker).toBe(true)
@@ -106,7 +116,7 @@ describe('scoreCandidate（候选打分）', () => {
     const remaster = scoreCandidate(
       video({ title: '【私藏馆】周杰伦《稻香》超治愈神作！', duration: 223, play: 9_260_000, author: '音乐私藏馆' }),
       ctx,
-      { officialVerifyType: 0 },
+      { officialVerifyType: -1 },
     )
     expect(remaster.score).toBeGreaterThanOrEqual(150)
     // 播放加成 ×13 不封顶后，926 万播放足以越过 standard 档 230 纯分数线
@@ -165,7 +175,7 @@ describe('scoreCandidate（候选打分）', () => {
     const strong = scoreCandidate(
       video({ title: '周杰伦 稻香 MV 官方字幕 4K', duration: 225, play: 100_000_000 }),
       ctx,
-      { officialVerifyType: 0 },
+      { officialVerifyType: -1 },
     )
     expect(strong.score).toBeGreaterThanOrEqual(230)
     expect(shouldAutoPlay(strong)).toBe(true)
@@ -184,14 +194,24 @@ describe('scoreCandidate（候选打分）', () => {
     expect(hd120.score - base.score).toBe(18)
   })
 
-  it('CC 字幕权重：人工中文字幕 > AI 字幕 > 无字幕', () => {
+  it('CC 字幕权重分档：验证 match 足额 > unverified 缩水 > mismatch 反罚', () => {
     const base = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx)
     const manual = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true })
     const auto = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true })
-    expect(manual.score - base.score).toBe(25)
-    expect(auto.score - base.score).toBe(10)
+    // 缺省（未验证/无法验证）缩水档：人工 +8 / AI +3——CC 只证明"有字幕"，不证明"是这首歌"
+    expect(manual.score - base.score).toBe(8)
+    expect(auto.score - base.score).toBe(3)
     expect(manual.signals.ccSubtitle).toBe(true)
-    expect(auto.signals.ccSubtitle).toBe(true)
+    // 比对 match：人工 +25 / AI +10（足额）
+    const manualOk = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true, ccVerification: 'match' })
+    const autoOk = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true, ccVerification: 'match' })
+    expect(manualOk.score - base.score).toBe(25)
+    expect(autoOk.score - base.score).toBe(10)
+    // 比对 mismatch（字幕内容与歌词无关，如直播切片）：加分变惩罚
+    const manualBad = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { manualZhSubtitle: true, ccVerification: 'mismatch' })
+    const autoBad = scoreCandidate(video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000 }), ctx, { autoSubtitle: true, ccVerification: 'mismatch' })
+    expect(manualBad.score - base.score).toBe(-20)
+    expect(autoBad.score - base.score).toBe(-8)
   })
 
   it('官号：作者名=歌手（音乐人本人官号）加分', () => {
@@ -209,12 +229,12 @@ describe('scoreCandidate（候选打分）', () => {
     const artistOfficial = scoreCandidate(
       video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦' }),
       ctx,
-      { officialVerifyType: 1 },
+      { officialVerifyType: 0 },
     )
     const noVerify = scoreCandidate(
       video({ title: '周杰伦《稻香》MV', duration: 223, play: 100_000, author: '周杰伦' }),
       ctx,
-      { officialVerifyType: 0 },
+      { officialVerifyType: -1 },
     )
     expect(artistOfficial.score - noVerify.score).toBe(25) // +15 个人认证 +10 官号认证叠加
   })
@@ -320,6 +340,204 @@ describe('scoreCandidate（候选打分）', () => {
   })
 })
 
+describe('来源证据与稳定排序回归', () => {
+  const valorantCtx: MatchContext = {
+    songTitle: 'Ticking Away',
+    artists: ['VALORANT Music, Grabbitz & bbno$'],
+    songDuration: 205,
+  }
+
+  it('Ticking Away：官方游戏频道候选稳定排在低播放纯标题转载之前', () => {
+    const repost = scoreCandidate(video({
+      bvid: 'BVrepost', title: 'Ticking Away', duration: 206, play: 14_000, author: 'FlyingTiercel',
+    }), valorantCtx, { rank: 0, officialVerifyType: -1 })
+    const riotMusic = scoreCandidate(video({
+      bvid: 'BVriotmusic', title: 'Ticking Away（流光似箭）｜无畏契约2023全球冠军赛主题曲', duration: 205, play: 1_031_000, author: '拳头游戏音乐',
+    }), valorantCtx, { rank: 2, officialVerifyType: 1 })
+    const valorant = scoreCandidate(video({
+      bvid: 'BVvalorant', title: '《Ticking Away 流光似箭》// 2023无畏契约全球冠军赛主题曲', duration: 205, play: 20_551_000, author: '无畏契约',
+    }), valorantCtx, { rank: 6, officialVerifyType: 1 })
+
+    const sorted = [repost, riotMusic, valorant].sort(compareCandidates)
+    expect(sorted[0].video.bvid).toBe('BVvalorant')
+    expect(sorted[1].video.bvid).toBe('BVriotmusic')
+    expect(sorted[2].video.bvid).toBe('BVrepost')
+    expect(riotMusic.signals.officialChannel).toBe(true)
+    expect(valorant.signals.uploaderMatchesArtist).toBe(true)
+  })
+
+  it('手动推荐排序保留不相关结果，并把它放在有限分数候选之后', () => {
+    const relevant = scoreCandidate(video({ bvid: 'BVok', title: 'Grabbitz - Ticking Away', duration: 205, play: 10_000 }), valorantCtx, { rank: 1 })
+    const unrelated = scoreCandidate(video({ bvid: 'BVother', title: '完全无关的视频', duration: 100, play: 99_000_000 }), valorantCtx, { rank: 0 })
+    const secondUnrelated = scoreCandidate(video({ bvid: 'BVother2', title: '另一个无关视频', duration: 100, play: Number.NaN }), valorantCtx, { rank: 2 })
+    const sorted = [secondUnrelated, unrelated, relevant].sort(compareCandidates)
+    expect(sorted.map((candidate) => candidate.video.bvid)).toEqual(['BVok', 'BVother', 'BVother2'])
+    expect(unrelated.score).toBe(-Infinity)
+  })
+
+  it('Come Alive 中的 alive 不是 live 现场标记', () => {
+    expect(classifyCandidateType('HOYO-MiX - Come Alive')).not.toBe('live')
+  })
+
+  it('Leo/need 保持为完整组合名，不拆成 Leo 和 need', () => {
+    expect(resolveArtistNames(['Leo/need']).raw).toEqual(['Leo/need'])
+  })
+
+  it('泛化英文歌名缺少艺人/IP证据时显著降权', () => {
+    const answersCtx: MatchContext = { songTitle: 'Answers', artists: ['植松伸夫', 'Susan Calloway'], songDuration: 427, targetVersion: 'full-original', franchise: 'FINAL FANTASY XIV' }
+    const unrelated = scoreCandidate(video({ title: 'Dr. Harley Sawyer Answers Some Burning Questions', duration: 428, play: 211_443, typename: '单机游戏' }), answersCtx)
+    const correct = scoreCandidate(video({ title: '【FF14】Answers 最终幻想14主题曲 Susan Calloway', duration: 442, play: 86_376, typename: '网络游戏' }), answersCtx)
+    expect(correct.score).toBeGreaterThan(unrelated.score)
+  })
+
+  it('virtual-singer 目标下原 Vocaloid 版优先于 Project SEKAI 翻唱', () => {
+    const vocaloidCtx: MatchContext = { songTitle: '神っぽいな', artists: ['ピノキオピー', '初音ミク'], songDuration: 204, targetVersion: 'virtual-singer' }
+    const sekai = scoreCandidate(video({ title: '【25時、ナイトコードで。×初音ミク】神っぽいな【2DMV／世界计划】', author: 'Project_SEKAI资讯站', duration: 207, play: 1_129_343 }), vocaloidCtx)
+    const original = scoreCandidate(video({ title: '【初音ミク】神っぽいな【ピノキオピー】', author: 'ピノキオピー_official', duration: 205, play: 14_606_762 }), vocaloidCtx)
+    expect(original.score).toBeGreaterThan(sekai.score)
+  })
+
+  it('TV size 目标奖励原版 90 秒候选，但不奖励教学或演奏版', () => {
+    const tvCtx: MatchContext = { songTitle: 'Tank! (TV Size)', artists: ['SEATBELTS'], songDuration: 90, targetVersion: 'tv-size', franchise: 'Cowboy Bebop' }
+    const tv = scoreCandidate(video({ title: 'Cowboy Bebop OP Tank! TV Size SEATBELTS', duration: 90, play: 100_000 }), tvCtx)
+    const tutorial = scoreCandidate(video({ title: 'Cowboy Bebop OP Tank! 吉他带谱教学 SEATBELTS', duration: 90, play: 100_000 }), tvCtx)
+    const full = scoreCandidate(video({ title: 'Cowboy Bebop OP Tank! TV Size SEATBELTS', duration: 90, play: 100_000 }), { ...tvCtx, songTitle: 'Tank!', songDuration: 220, targetVersion: 'full-original' })
+    expect(tv.score).toBeGreaterThan(tutorial.score)
+    expect(tv.score).toBeGreaterThan(full.score)
+  })
+
+  it('完整版目标下现场演出不能靠播放量压过录音室版本', () => {
+    const popCtx: MatchContext = { songTitle: 'Blinding Lights', artists: ['The Weeknd'], songDuration: 200, targetVersion: 'full-original' }
+    const performance = scoreCandidate(video({ title: 'The Weeknd VMA 2020《Blinding Lights》完整版演出', duration: 198, play: 423_731 }), popCtx)
+    const studio = scoreCandidate(video({ title: '【MV中英字幕】Blinding Lights - The Weeknd', duration: 245, play: 21_244 }), popCtx)
+    expect(studio.score).toBeGreaterThan(performance.score)
+  })
+
+  it('其他歌手位于分隔段首位时不能借 franchise 冒充目标录音', () => {
+    const answersCtx: MatchContext = { songTitle: 'Answers', artists: ['植松伸夫', 'Susan Calloway'], songDuration: 427, targetVersion: 'full-original', franchise: 'FINAL FANTASY XIV' }
+    const wrongSinger = scoreCandidate(video({ title: '尚雯婕 | Answers | 最终幻想ff14主题曲', duration: 469, play: 20_702 }), answersCtx)
+    const right = scoreCandidate(video({ title: 'Answers - 植松伸夫 & Susan Calloway', duration: 401, play: 144 }), answersCtx)
+    expect(right.score).toBeGreaterThan(wrongSinger.score)
+  })
+
+  it('可信唱片来源不能替代泛化标题的艺人身份', () => {
+    const comeAliveCtx: MatchContext = { songTitle: 'Come Alive', artists: ['HOYO-MiX', 'San-Z', 'Sam Haft'], songDuration: 221, targetVersion: 'full-original', franchise: '绝区零' }
+    const wrongLabelSong = scoreCandidate(video({ title: 'Cannons「Come Alive」', author: '索尼音乐中国', mid: 486906719, duration: 217, play: 10_000 }), comeAliveCtx)
+    const right = scoreCandidate(video({ title: 'Sān-Z Studio & HOYO-MiX - Come Alive 绝区零', author: '音乐分享', duration: 217, play: 1_000 }), comeAliveCtx)
+    expect(wrongLabelSong.signals.officialChannel).toBe(true)
+    expect(right.score).toBeGreaterThan(wrongLabelSong.score)
+  })
+
+  it('虚拟歌手原版目标下舞蹈投稿属于衍生版本', () => {
+    const vocaloidCtx: MatchContext = { songTitle: 'ボルテッカー', artists: ['DECO*27', '初音ミク'], songDuration: 161, targetVersion: 'virtual-singer' }
+    const dance = scoreCandidate(video({ title: 'ボルテッカー/DECO*27 踊ってみた 初音ミク', duration: 161, play: 100_000 }), vocaloidCtx)
+    const original = scoreCandidate(video({ title: 'DECO*27 - ボルテッカー feat. 初音ミク', duration: 161, play: 10_000 }), vocaloidCtx)
+    expect(original.score).toBeGreaterThan(dance.score)
+  })
+
+  it('主标题是另一首歌时，不因附带说明提及目标歌名而误匹配', () => {
+    const starboyCtx: MatchContext = { songTitle: 'Starboy', artists: ['The Weeknd', 'Daft Punk'], songDuration: 230, targetVersion: 'full-original' }
+    const wrong = scoreCandidate(video({ title: 'The Weeknd热单《Die For You》超清MV，Starboy五周年彩蛋', author: '欧美纪westworld', duration: 281, play: 105_676 }), starboyCtx)
+    const right = scoreCandidate(video({ title: 'Starboy - The Weeknd & Daft Punk', author: '音乐分享', duration: 227, play: 828_557 }), starboyCtx)
+    expect(right.score).toBeGreaterThan(wrong.score)
+  })
+
+  it('目标歌名在书名号前时允许后续动画或 IP 名称', () => {
+    const animeCtx: MatchContext = { songTitle: '紅蓮華', artists: ['LiSA'], songDuration: 236, targetVersion: 'full-original' }
+    const withAnimeName = scoreCandidate(video({ title: 'LiSA 紅蓮華《鬼滅の刃》OP', duration: 236, play: 100_000 }), animeCtx)
+    const plain = scoreCandidate(video({ title: 'LiSA 紅蓮華 OP', duration: 236, play: 100_000 }), animeCtx)
+    expect(withAnimeName.score).toBe(plain.score)
+  })
+
+  it('指定古典录音要求主要演奏者或指挥证据', () => {
+    const classicalCtx: MatchContext = { songTitle: 'Symphony No. 5 in C Minor, Op. 67', artists: ['Carlos Kleiber', 'Vienna Philharmonic'], songDuration: 1978, targetVersion: 'specific-performance' }
+    const wrongConductor = scoreCandidate(video({ title: 'Beethoven Symphony No. 5 in C Minor, Op. 67 卡拉扬指挥', duration: 1968, play: 4780 }), classicalCtx)
+    const target = scoreCandidate(video({ title: 'Carlos Kleiber - Symphony No. 5 in C Minor, Op. 67', duration: 1978, play: 500 }), classicalCtx)
+    expect(target.score).toBeGreaterThan(wrongConductor.score)
+  })
+
+  it('franchise 参与查询，提升 TV size 和游戏泛词歌曲召回', () => {
+    const queries = buildQueries({ songTitle: 'Tank! (TV Size)', artists: ['SEATBELTS'], songDuration: 90, targetVersion: 'tv-size', franchise: 'Cowboy Bebop' })
+    expect(queries).toContain('Tank! Cowboy Bebop')
+  })
+
+  it('只在明确元数据下自动推断 TV、SEKAI 与虚拟歌手版本', () => {
+    expect(inferRecordingTarget({ songTitle: 'Tank! (TV Size)', artists: ['SEATBELTS'], songDuration: 90 })).toBe('tv-size')
+    expect(inferRecordingTarget({ songTitle: 'ステラ', artists: ['Leo/need'], songDuration: 326 })).toBe('sekai-version')
+    expect(inferRecordingTarget({ songTitle: '神っぽいな', artists: ['ピノキオピー', '初音ミク'], songDuration: 204 })).toBe('virtual-singer')
+    expect(inferRecordingTarget({ songTitle: 'unravel', artists: ['TK from 凛として時雨'], songDuration: 238 })).toBeUndefined()
+  })
+
+  it('社区合作频道不会冒充官方来源，SEKAI 版本仅由版本证据加权', () => {
+    const sekaiVideo = video({ title: '【2DMV】神っぽいな 初音ミク', author: 'Project_SEKAI资讯站', mid: 13148307, duration: 205, play: 1_000_000 })
+    const vocaloid = scoreCandidate(sekaiVideo, { songTitle: '神っぽいな', artists: ['ピノキオピー', '初音ミク'], songDuration: 204, targetVersion: 'virtual-singer' })
+    const sekai = scoreCandidate(sekaiVideo, { songTitle: '神っぽいな', artists: ['25時、ナイトコードで。'], songDuration: 207, targetVersion: 'sekai-version', franchise: 'Project SEKAI' })
+    expect(vocaloid.signals.officialChannel).toBe(false)
+    expect(sekai.signals.officialChannel).toBe(false)
+    expect(sekai.score).toBeGreaterThan(vocaloid.score)
+  })
+
+  it('精确标题只奖励纯歌名或正确艺人，不奖励错误艺人的同名歌', () => {
+    const artists = resolveArtistNames(['VALORANT Music, Grabbitz & bbno$'])
+    expect(classifyExactTitleMatch('Ticking Away', 'Ticking Away', artists)).toBe('title-only')
+    expect(classifyExactTitleMatch('Grabbitz - Ticking Away', 'Ticking Away', artists)).toBe('artist-title')
+    expect(classifyExactTitleMatch('Other Artist - Ticking Away', 'Ticking Away', artists)).toBe('none')
+    expect(classifyExactTitleMatch('A Fan of Grabbitz - Ticking Away', 'Ticking Away', artists)).toBe('none')
+  })
+
+  it('艺人别名只按完整名字展开，不因子串把 Shadow 误认成 Ado', () => {
+    const artists = resolveArtistNames(['Shadow'])
+    expect(artists.aliases).not.toContain(normalizeText('アド'))
+  })
+
+  it('上传者名称按完整边界匹配，不把 ShadowMusic 误认成 Ado', () => {
+    const adoCtx: MatchContext = { songTitle: '新時代', artists: ['Ado'], songDuration: 226 }
+    const candidate = scoreCandidate(video({ title: 'Ado 新時代', author: 'ShadowMusic', duration: 226, play: 100_000 }), adoCtx)
+    expect(candidate.signals.hasArtist).toBe(true)
+    expect(candidate.signals.uploaderMatchesArtist).toBe(false)
+  })
+
+  it('受限官方 MID 不能靠候选标题自行证明作用域', () => {
+    const unrelatedCtx: MatchContext = { songTitle: 'Other Song', artists: ['Other Artist'], songDuration: 180 }
+    const candidate = scoreCandidate(video({ title: 'DECO*27 Other Song', author: 'DECO27_Official', mid: 177291194, duration: 180, play: 100_000 }), unrelatedCtx)
+    expect(candidate.signals.officialChannel).toBe(false)
+  })
+
+  it('普通艺人名称包含 flower 或 GUMI 时不误判为虚拟歌手版本', () => {
+    expect(inferRecordingTarget({ songTitle: 'Song', artists: ['The Flower Kings', 'Guest'], songDuration: 200 })).toBeUndefined()
+    expect(inferRecordingTarget({ songTitle: 'Song', artists: ['GUMI Inc.', 'Guest'], songDuration: 200 })).toBeUndefined()
+  })
+
+  it('播放量曲线单调、递减增长且始终有限', () => {
+    const values = [0, 10_000, 1_000_000, 20_000_000].map(playCountScore)
+    expect(values[0]).toBe(0)
+    expect(values[1]).toBeLessThan(values[2])
+    expect(values[2]).toBeLessThan(values[3])
+    expect(values[3]).toBeLessThanOrEqual(90)
+    expect(playCountScore(Number.NaN)).toBe(0)
+    expect(playCountScore(-10)).toBe(0)
+  })
+
+  it('标题自称官方不是自动播放强来源证据', () => {
+    const claimed = scoreCandidate(video({ title: '【官方MV】稻香', duration: 223, play: 100, author: '普通账号' }), ctx)
+    expect(claimed.signals.officialMarker).toBe(true)
+    expect(claimed.signals.officialChannel).toBe(false)
+    expect(shouldAutoPlay({ ...claimed, score: 160 }, 'standard')).toBe(false)
+  })
+
+  it('机构认证强于个人认证，只有机构认证可单独构成强信号', () => {
+    const baseVideo = video({ title: '周杰伦《稻香》', duration: 223, play: 100_000, author: '普通账号' })
+    const unverified = scoreCandidate(baseVideo, ctx, { officialVerifyType: -1 })
+    const personal = scoreCandidate(baseVideo, ctx, { officialVerifyType: 0 })
+    const organization = scoreCandidate(baseVideo, ctx, { officialVerifyType: 1 })
+    expect(personal.score - unverified.score).toBe(15)
+    expect(organization.score - unverified.score).toBe(30)
+    expect(shouldAutoPlay({ ...unverified, score: 160 }, 'standard')).toBe(false)
+    expect(shouldAutoPlay({ ...personal, score: 160 }, 'standard')).toBe(false)
+    expect(shouldAutoPlay({ ...organization, score: 160 }, 'standard')).toBe(true)
+  })
+})
+
 describe('shouldAutoPlay（门槛随严格度）', () => {
   it('strict 严格：200 分 + 官方信号自动；180 分 + 官方信号不自动', () => {
     expect(shouldAutoPlay(fakeCandidate(200, true), 'strict')).toBe(true)
@@ -340,9 +558,9 @@ describe('shouldAutoPlay（门槛随严格度）', () => {
     const withUploader: CandidateScore = {
       video: video({ title: '周杰伦 稻香 MV', duration: 223, play: 1_000_000, author: '周杰伦' }),
       score: 160,
-      signals: { officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: true, nearDuration: false, hdMarker: false, uploaderMatchesArtist: true, ccSubtitle: false },
+      signals: { officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: true, nearDuration: false, hdMarker: false, uploaderMatchesArtist: true, officialChannel: false, ccSubtitle: false },
       rank: 0,
-      officialVerifyType: 0,
+      officialVerifyType: -1,
       manualZhSubtitle: false,
       autoSubtitle: false,
       type: 'other',
@@ -394,6 +612,13 @@ describe('buildQueries（关键词构建）', () => {
   })
   it('auto 现场偏好：追加现场词', () => {
     expect(buildQueries(ctx, { matchPreference: 'live' })).toEqual(['稻香 周杰伦', '稻香', '稻香 MV', '稻香 周杰伦 现场', '稻香 演唱会'])
+  })
+  it('组合艺人查询去重且有上限，不随别名数无限膨胀', () => {
+    const queries = buildQueries({ songTitle: 'Ticking Away', artists: ['VALORANT Music, Grabbitz & bbno$'], songDuration: 205 })
+    expect(queries.length).toBeLessThanOrEqual(10)
+    expect(new Set(queries.map(normalizeText)).size).toBe(queries.length)
+    expect(queries).toContain('Ticking Away VALORANT')
+    expect(queries).toContain('Ticking Away MV')
   })
   it('自定义模板：占位符替换', () => {
     expect(buildQueries(ctx, { keywordTemplate: 'custom', customKeywordTemplate: '{title} {artist} 官方 4K' })).toEqual(['稻香 周杰伦 官方 4K'])
@@ -447,11 +672,22 @@ describe('黑名单（不喜欢记忆）', () => {
 })
 
 describe('看歌设置持久化', () => {
-  it('getBilibiliWatchSettings 返回默认值（未设置时）', () => {
+  it('getBilibiliWatchSettings 返回安全默认值（未设置时）', () => {
     const settings = getBilibiliWatchSettings()
     expect(settings.matchPreference).toBe('balanced')
     expect(settings.autoPlayStrictness).toBe('standard')
     expect(settings.videoEndBehavior).toBe('next')
+    expect(settings.forceAutoPlayHighest).toBe(false)
+    expect(settings.showLowConfidenceCandidates).toBe(false)
+  })
+
+  it('旧设置首次迁移关闭强制最高分，迁移后尊重用户重新开启', () => {
+    localStorage.setItem('bilibili_watch_settings', JSON.stringify({ forceAutoPlayHighest: true, matchPreference: 'hd' }))
+    localStorage.removeItem('bilibili_watch_settings_schema')
+    expect(getBilibiliWatchSettings().forceAutoPlayHighest).toBe(false)
+    expect(getBilibiliWatchSettings().matchPreference).toBe('hd')
+    saveBilibiliWatchSettings({ forceAutoPlayHighest: true })
+    expect(getBilibiliWatchSettings().forceAutoPlayHighest).toBe(true)
   })
 })
 
@@ -537,5 +773,218 @@ describe('货不对板识别（同名不同歌手，如日语曲撞中文同名�
       {},
     )
     expect(live.score).toBeLessThan(normal.score)
+  })
+})
+
+/** 稻香歌词（CC 比对用例共用：歌词字幕/Live 前段说话/直播切片闲聊等场景的基准歌词） */
+const daoXiangLyrics = [
+  '对这个世界如果你有太多的抱怨',
+  '跌倒了就不敢继续往前走',
+  '为什么人要这么的脆弱堕落',
+  '请你打开电视看看',
+  '多少人为生命在努力勇敢的走下去',
+  '我们是不是该知足',
+  '珍惜一切 就算没有拥有',
+  '还记得你说家是唯一的城堡',
+  '随着稻香河流继续奔跑',
+  '微微笑 小时候的梦我知道',
+  '不要哭让萤火虫带着你逃跑',
+  '乡间的歌谣永远的依靠',
+  '回家吧 回到最初的美好',
+].join('\n')
+
+describe('compareSubtitleWithLyrics（CC 字幕 ↔ 歌词内容比对）', () => {
+  // 真实背景：Starboy (Explicit) 曾匹配到「一滴泪」直播切片——其人工 CC 字幕 +25 分把它推上最佳（245）。
+  // 比对器让"字幕内容是否真是这首歌"决定 CC 分档：match 足额 / unverified 缩水 / mismatch 反罚。
+  const line = (from: number, content: string) => ({ from, content })
+  const starboyLyrics = [
+    "I'm trying to put you in the worst mood, ah",
+    'P1 cleaner than your church shoes, ah',
+    "Million' done, we make it move, ah",
+    'You lookin at the truth, ah',
+    'Look what you done did to the boy',
+  ].join('\n')
+
+  it('歌词字幕视频：字幕行即歌词 → match', () => {
+    const subs = [
+      '对这个世界如果你有太多的抱怨',
+      '跌倒了就不敢继续往前走',
+      '还记得你说家是唯一的城堡',
+      '随着稻香河流继续奔跑',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('翻译措辞因人而异（分段微调/少字）不伤判定（bigram 模糊命中）', () => {
+    const subs = [
+      '这个世界 如果你有太多的抱怨',
+      '跌倒了 就不敢继续往前走',
+      '还记得你说 家是唯一的城堡',
+      '我们是不是该知足',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('Live 前段说话、后面正片：闲聊行占少数采样 → 仍判 match', () => {
+    const subs = [
+      line(0, '大家好欢迎来到今天的直播间'),
+      line(10, '今天给大家唱一首稻香'),
+      line(20, '对这个世界如果你有太多的抱怨'),
+      line(35, '跌倒了就不敢继续往前走'),
+      line(50, '还记得你说家是唯一的城堡'),
+      line(65, '随着稻香河流继续奔跑'),
+      line(80, '回家吧 回到最初的美好'),
+    ]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('match')
+  })
+
+  it('直播切片闲聊字幕（可比对却全不命中）→ mismatch 反罚', () => {
+    const subs = [
+      '谢谢哥送的火箭么么哒呀',
+      '不要骂我了宝宝们委屈',
+      '加我粉丝团看更多精彩直播',
+      '宝宝美瞳是什么牌子的',
+      '想要同款的私信我上链接',
+    ].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('mismatch')
+  })
+
+  it('英文歌 + 闲聊中文翻译字幕（歌词侧无翻译可比）→ unverified 不误罚', () => {
+    const subs = [
+      '不要骂我了宝宝们委屈',
+      '加我粉丝团看更多精彩直播',
+      '想要同款的私信我上链接',
+    ].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, starboyLyrics).verdict).toBe('unverified')
+  })
+
+  it('英文歌 + 英文 CC 歌词字幕 → match', () => {
+    const subs = [
+      "I'm trying to put you in the worst mood",
+      'P1 cleaner than your church shoes',
+      'You lookin at the truth',
+      'Look what you done did to the boy',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, starboyLyrics).verdict).toBe('match')
+  })
+
+  it('中英双语 CC（原文+译文分段）→ 译文侧与歌词比对命中', () => {
+    const subs = [
+      'The world has too many complaints\n对这个世界如果你有太多的抱怨',
+      'Fall down and dare not go on\n跌倒了就不敢继续往前走',
+      'Home is the only castle\n还记得你说家是唯一的城堡',
+      'Run along the fragrance river\n随着稻香河流继续奔跑',
+      'Back to the initial beauty\n回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    const r = compareSubtitleWithLyrics(subs, daoXiangLyrics)
+    expect(r.verdict).toBe('match')
+    expect(r.comparable).toBe(5) // 拉丁段与纯中文歌词不可比，只计译文段
+  })
+
+  it('AI 字幕全是「♪音乐♪」噪音行 → unverified（不奖不罚）', () => {
+    const subs = [line(0, '♪ 音乐 ♪'), line(10, '音乐'), line(20, '♪音乐♪')]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('unverified')
+  })
+
+  it('歌词过短/纯 credits（纯音乐空壳）→ unverified', () => {
+    const subs = ['随便什么话内容足够长'].map((c, i) => line(i * 10, c))
+    expect(compareSubtitleWithLyrics(subs, '作词：某某\n作曲：某某').verdict).toBe('unverified')
+  })
+
+  it('歌词带 credits 头不伤判定（剔除作词/作曲行）', () => {
+    const subs = [
+      '对这个世界如果你有太多的抱怨',
+      '跌倒了就不敢继续往前走',
+      '还记得你说家是唯一的城堡',
+      '随着稻香河流继续奔跑',
+      '回家吧 回到最初的美好',
+    ].map((c, i) => line(i * 15, c))
+    expect(compareSubtitleWithLyrics(subs, `作词：周杰伦\n作曲：周杰伦\n${daoXiangLyrics}`).verdict).toBe('match')
+  })
+
+  it('可比样本太少（1~2 段）不敢判 mismatch → unverified', () => {
+    const subs = [line(0, '完全无关的一句话呀'), line(10, '再说一句无关的话吧')]
+    expect(compareSubtitleWithLyrics(subs, daoXiangLyrics).verdict).toBe('unverified')
+  })
+})
+
+describe('flattenLyricLinesForMatch（歌词压平：正文+翻译都进比对云）', () => {
+  it('text 与 translation 都保留，空行剔除', () => {
+    expect(flattenLyricLinesForMatch([
+      { text: '稻香', translation: 'Dao Xiang' },
+      { text: '' },
+      { text: '回家吧', translation: '' },
+    ])).toBe('稻香\nDao Xiang\n回家吧')
+  })
+  it('空/非法输入返回空串', () => {
+    expect(flattenLyricLinesForMatch(undefined)).toBe('')
+    expect(flattenLyricLinesForMatch([])).toBe('')
+  })
+})
+
+describe('CC 验证接线（shouldAutoPlay strong 收紧 + 缓存命中零网络升级）', () => {
+  const manualCcCandidate = (ccVerification?: 'match' | 'mismatch' | 'unverified'): CandidateScore => ({
+    video: video({ title: '周杰伦 稻香 MV', duration: 223, play: 50_000 }),
+    score: 160,
+    signals: {
+      officialMarker: false, mvMarker: false, negativeHit: false, hasArtist: true,
+      nearDuration: false, hdMarker: false, uploaderMatchesArtist: false, officialChannel: false, ccSubtitle: true,
+    },
+    rank: 0,
+    officialVerifyType: -1,
+    manualZhSubtitle: true,
+    autoSubtitle: false,
+    ...(ccVerification ? { ccVerification } : {}),
+    type: 'other',
+  })
+
+  it('未验证的人工 CC 不再单独撑起自动播放；验证 match 才算 strong', () => {
+    expect(shouldAutoPlay(manualCcCandidate(), 'standard')).toBe(false)
+    expect(shouldAutoPlay(manualCcCandidate('unverified'), 'standard')).toBe(false)
+    expect(shouldAutoPlay(manualCcCandidate('match'), 'standard')).toBe(true)
+    expect(shouldAutoPlay(manualCcCandidate('mismatch'), 'standard')).toBe(false)
+  })
+
+  it('缓存命中后拿到歌词：零网络重扫升级（mismatch 把无关视频拉下最佳）', () => {
+    const sbCtx: MatchContext = { songTitle: '稻香', artists: ['周杰伦'], songDuration: 223 }
+    // 「一滴泪」型：标题完美 + 人工 CC，无歌词时按 unverified 缩水档仍险胜低播放正片
+    const junk = scoreCandidate(
+      video({ bvid: 'BVjunk', title: '周杰伦 稻香（直播切片）', duration: 223, play: 27_700, author: '捷王中王' }),
+      sbCtx,
+      { rank: 0, manualZhSubtitle: true, ccVerification: 'unverified' },
+    )
+    const real = scoreCandidate(
+      video({ bvid: 'BVreal', title: '周杰伦《稻香》', duration: 223, play: 6_000, author: '路人' }),
+      sbCtx,
+      { rank: 0 },
+    )
+    expect(junk.score).toBeGreaterThan(real.score) // 无歌词时的排序（CC 缩水档仍让它领先）
+    const result = {
+      status: 'auto' as const,
+      best: junk,
+      candidates: [junk, real],
+      fallbackChain: [junk, real],
+      ccUnverifiedWithoutLyrics: true,
+    }
+    const settings = { matchPreference: 'balanced' as const, autoPlayStrictness: 'standard' as const, forceAutoPlayHighest: true }
+    const chatSubs = ['谢谢哥送的火箭么么哒呀', '不要骂我了宝宝们委屈', '加我粉丝团看更多精彩直播', '宝宝美瞳是什么牌子的', '想要同款的私信我上链接']
+      .map((c, i) => ({ from: i * 10, text: c }))
+    const upgraded = rescoreResultWithLyrics(
+      result,
+      sbCtx,
+      settings,
+      daoXiangLyrics,
+      '',
+      (bvid) => (bvid === 'BVjunk' ? { manualZh: true, subLines: chatSubs } : undefined),
+    )
+    expect(upgraded).not.toBe(result)
+    const junkAfter = upgraded.fallbackChain.find((c) => c.video.bvid === 'BVjunk')
+    expect(junkAfter?.ccVerification).toBe('mismatch')
+    expect(upgraded.best?.video.bvid).toBe('BVreal')
+    expect(upgraded.candidates[0].video.bvid).toBe('BVreal')
+    // 拿到歌词重扫后不再缺歌词标记
+    expect(upgraded.ccUnverifiedWithoutLyrics).toBeFalsy()
   })
 })
