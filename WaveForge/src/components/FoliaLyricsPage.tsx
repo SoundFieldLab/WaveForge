@@ -9,17 +9,28 @@
  */
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useMotionValue } from 'framer-motion'
-import type { LyricLine } from '../services/musicApi'
+import type { LyricAlternateText, LyricBackgroundVocal, LyricLine, LyricWord } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { ensureFoliaI18n } from '../vendor/folia/i18n'
 import { resolveReadableThemeColor } from '../services/foliaReadableColor'
 import VisualizerRenderer from '../vendor/folia/components/visualizer/VisualizerRenderer'
 import { hasVisualizerMode, DEFAULT_VISUALIZER_MODE } from '../vendor/folia/components/visualizer/registry'
-import { DEFAULT_TEMPERA_TUNING, DEFAULT_SONNET_TUNING, type Line, type Theme, type Word, type VisualizerMode } from '../vendor/folia/types'
+import { DEFAULT_TEMPERA_TUNING, DEFAULT_SONNET_TUNING, type Line, type LyricAlternateText as FoliaAlternateText, type LyricBackgroundVocal as FoliaBackgroundVocal, type Theme, type Word, type VisualizerMode } from '../vendor/folia/types'
 import type { VisualizerBackgroundConfig } from '../vendor/folia/components/visualizer/backgrounds/definition'
 
 ensureFoliaI18n()
+
+export function scaleAnalyzerSnapshotForFolia(snapshot: { overall: number; bass: number; mid: number; high: number }) {
+  return {
+    overall: snapshot.overall * 255,
+    bass: snapshot.bass * 255,
+    lowMid: (snapshot.bass + snapshot.mid) * 127.5,
+    mid: snapshot.mid * 255,
+    vocal: (snapshot.mid * 0.4 + snapshot.high * 0.6) * 255,
+    treble: snapshot.high * 255,
+  }
+}
 
 export interface FoliaLyricsPageProps {
   lyrics: LyricLine[]
@@ -46,20 +57,59 @@ export interface FoliaLyricsPageProps {
   mvBackgroundActive?: boolean
 }
 
-/** LyricLine[]（行秒 + 逐字毫秒）→ folia Line[]（全秒制），translation/罗马音/对唱 agent 一并映射 */
-function convertLyricsToFoliaLines(
+/** LyricLine[]（行秒 + 逐字毫秒）→ folia Line[]（全秒制），完整保留字幕、对唱和背景和声。 */
+const convertWords = (words: LyricWord[] | undefined, lineTime: number): Word[] => (words || []).map(word => ({
+  text: word.word,
+  startTime: lineTime + word.startTime / 1000,
+  endTime: lineTime + (word.startTime + word.duration) / 1000,
+}))
+
+const convertAlternateTexts = (
+  alternateTexts: LyricAlternateText[] | undefined,
+  translationEnabled: boolean,
+  romanEnabled: boolean,
+): FoliaAlternateText[] | undefined => {
+  const filtered = alternateTexts?.filter(text => {
+    const role = text.role || text.type
+    return (role !== 'translation' || translationEnabled) && (role !== 'romanization' || romanEnabled)
+  }).map(text => ({
+    role: text.role || text.type || 'alternate',
+    language: text.language || text.lang,
+    text: text.text,
+  }))
+  return filtered?.length ? filtered : undefined
+}
+
+const convertBackgroundVocal = (
+  vocal: LyricBackgroundVocal,
+  translationEnabled: boolean,
+  romanEnabled: boolean,
+): FoliaBackgroundVocal => {
+  const words = convertWords(vocal.words, vocal.time)
+  return {
+    text: vocal.text,
+    startTime: vocal.time,
+    endTime: vocal.endTime ?? words.at(-1)?.endTime ?? vocal.time + 3,
+    words,
+    agentId: vocal.agentId || vocal.agent,
+    translation: translationEnabled ? vocal.translation : undefined,
+    romanization: romanEnabled ? (vocal.romanization || vocal.roman) : undefined,
+    alternateTexts: convertAlternateTexts(vocal.alternateTexts, translationEnabled, romanEnabled),
+  }
+}
+
+export function convertLyricsToFoliaLines(
   lyrics: LyricLine[],
   trackId: string | number,
   translationEnabled: boolean,
   romanEnabled: boolean,
 ): Line[] {
   return lyrics.map((line, index) => {
-    const words: Word[] = (line.words || []).map(word => ({
-      text: word.word,
-      startTime: line.time + word.startTime / 1000,
-      endTime: line.time + (word.startTime + word.duration) / 1000,
-    }))
-    const endTime = words.length > 0 ? words[words.length - 1].endTime : line.time + 3
+    const words = convertWords(line.words, line.time)
+    const endTime = line.endTime ?? words.at(-1)?.endTime ?? lyrics[index + 1]?.time ?? line.time + 3
+    const backgroundVocals = line.backgroundVocals?.map(vocal => (
+      convertBackgroundVocal(vocal, translationEnabled, romanEnabled)
+    ))
     return {
       words,
       startTime: line.time,
@@ -67,8 +117,10 @@ function convertLyricsToFoliaLines(
       fullText: line.text,
       translation: translationEnabled ? line.translation : undefined,
       romanization: romanEnabled ? line.roman : undefined,
+      alternateTexts: convertAlternateTexts(line.alternateTexts, translationEnabled, romanEnabled),
       id: `${trackId}-${index}`,
-      agentId: line.agent,
+      agentId: line.agentId || line.agent,
+      backgroundVocals: backgroundVocals?.length ? backgroundVocals : undefined,
     }
   })
 }
@@ -149,6 +201,10 @@ export function FoliaLyricsPage({
   const vocalBand = useMotionValue(0)
   const trebleBand = useMotionValue(0)
   const spectrumBand = useMotionValue<Uint8Array>(new Uint8Array(0))
+  // 双缓冲复用：每次仍交替不同引用以触发 MotionValue 订阅，但不再每个 analyzer tick
+  // 分配新 Uint8Array，保持频谱精度/刷新率与所有 Folia 效果不变。
+  const spectrumBuffersRef = useRef<[Uint8Array, Uint8Array]>([new Uint8Array(0), new Uint8Array(0)])
+  const spectrumBufferIndexRef = useRef(0)
   const audioBands = useMemo(() => ({
     bass: bassBand,
     lowMid: lowMidBand,
@@ -161,14 +217,24 @@ export function FoliaLyricsPage({
     if (!analyzerStore) return
     const update = () => {
       const snapshot = analyzerStore.getSnapshot()
-      audioPower.set(snapshot.overall)
-      bassBand.set(snapshot.bass)
-      lowMidBand.set((snapshot.bass + snapshot.mid) / 2)
-      midBand.set(snapshot.mid)
-      vocalBand.set(snapshot.mid * 0.4 + snapshot.high * 0.6)
-      trebleBand.set(snapshot.high)
-      const bins = new Uint8Array(snapshot.spectrum.length)
-      for (let i = 0; i < snapshot.spectrum.length; i++) bins[i] = Math.round(snapshot.spectrum[i] * 255)
+      const scaled = scaleAnalyzerSnapshotForFolia(snapshot)
+      audioPower.set(scaled.overall)
+      bassBand.set(scaled.bass)
+      lowMidBand.set(scaled.lowMid)
+      midBand.set(scaled.mid)
+      vocalBand.set(scaled.vocal)
+      trebleBand.set(scaled.treble)
+      const spectrum = snapshot.spectrum
+      let buffers = spectrumBuffersRef.current
+      if (buffers[0].length !== spectrum.length) {
+        buffers = [new Uint8Array(spectrum.length), new Uint8Array(spectrum.length)]
+        spectrumBuffersRef.current = buffers
+        spectrumBufferIndexRef.current = 0
+      }
+      const nextIndex = spectrumBufferIndexRef.current ^ 1
+      const bins = buffers[nextIndex]
+      spectrumBufferIndexRef.current = nextIndex
+      for (let i = 0; i < spectrum.length; i++) bins[i] = Math.round(spectrum[i] * 255)
       spectrumBand.set(bins)
     }
     update()

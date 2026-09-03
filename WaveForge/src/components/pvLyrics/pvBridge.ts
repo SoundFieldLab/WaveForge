@@ -29,6 +29,24 @@ export function toPvLyrics(lyrics: WfLyricLine[]): PvLyricLine[] {
       words,
       translation: line.translation,
       roman: line.roman,
+      agentId: line.agentId || line.agent,
+      alternateTexts: line.alternateTexts?.map(text => ({
+        role: text.role,
+        language: text.language || text.lang,
+        text: text.text,
+      })),
+      backgroundVocals: line.backgroundVocals?.map(vocal => ({
+        time: vocal.time,
+        endTime: vocal.endTime,
+        text: vocal.text,
+        agentId: vocal.agentId || vocal.agent,
+        translation: vocal.translation,
+        roman: vocal.romanization || vocal.roman,
+        words: vocal.words?.map(word => {
+          const start = vocal.time + word.startTime / 1000
+          return { text: word.word, time: start, endTime: start + word.duration / 1000 }
+        }),
+      })),
     }
   })
 }

@@ -3,6 +3,7 @@ import { AudioLines, Captions, Film, Home, Languages } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import QuickSettings from './QuickSettings'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
+import StemMixerPopover, { type TrackStemControlModel } from './StemMixerPopover'
 
 interface ImmersiveControlsProps {
   onHomeClick: () => void
@@ -18,6 +19,7 @@ interface ImmersiveControlsProps {
   mvBackgroundEnabled?: boolean
   playerTheme?: 'light' | 'dark'
   isPureMusic?: boolean // 新增：是否为纯音乐
+  stemControl?: TrackStemControlModel
 }
 
 export default function ImmersiveControls({
@@ -33,6 +35,7 @@ export default function ImmersiveControls({
   mvBackgroundEnabled = false,
   playerTheme = 'dark',
   isPureMusic = false, // 默认非纯音乐
+  stemControl,
 }: ImmersiveControlsProps) {
   const [isVisible, setIsVisible] = useState(true)
   const [isHovered, setIsHovered] = useState(false)
@@ -82,15 +85,20 @@ export default function ImmersiveControls({
   }
 
   const showMvButton = typeof onMvBackgroundToggle === 'function'
-  const featureButtonCount = (hasTranslation ? 1 : 0) + (hasRoman ? 1 : 0) + (showMvButton ? 1 : 0) // MV 背景按钮常驻
+  const translationRow = hasTranslation ? 1 : 0
+  const romanRow = hasRoman ? 1 : 0
+  const mvRow = showMvButton ? 1 : 0
+  const stemRow = stemControl ? 1 : 0
+  const featureButtonCount = translationRow + romanRow + mvRow + stemRow
   const rowRem = tvCompact ? 3.2 : 4 // 每个按钮行占位高度（rem），TV 紧凑更小
   // 各按钮顶位置都按同一行高网格计算（不能混用 Tailwind top-16=4rem：TV 紧凑档会错位/重叠）
-  const translationButtonTop = `${(tvCompact ? 3.2 : 4)}rem`
-  const romanButtonTop = hasTranslation ? `${(tvCompact ? 6.4 : 8)}rem` : `${(tvCompact ? 3.2 : 4)}rem`
-  // MV 背景按钮：紧跟翻译/罗马音功能行的下一行
-  const mvButtonTop = `${(tvCompact ? 3.2 : 4) + (featureButtonCount - 1) * rowRem}rem`
-  const quickSettingsTop = `${(tvCompact ? 3.2 : 4) + featureButtonCount * rowRem}rem`
-  const mixingStudioTop = `${(tvCompact ? 6.4 : 8) + featureButtonCount * rowRem}rem`
+  const firstFeatureTop = tvCompact ? 3.2 : 4
+  const translationButtonTop = `${firstFeatureTop}rem`
+  const romanButtonTop = `${firstFeatureTop + translationRow * rowRem}rem`
+  const mvButtonTop = `${firstFeatureTop + (translationRow + romanRow) * rowRem}rem`
+  const stemButtonTop = `${firstFeatureTop + (translationRow + romanRow + mvRow) * rowRem}rem`
+  const quickSettingsTop = `${firstFeatureTop + featureButtonCount * rowRem}rem`
+  const mixingStudioTop = `${firstFeatureTop + (featureButtonCount + 1) * rowRem}rem`
   const btnPad = tvCompact ? 'p-2.5' : 'p-3' // 按钮内边距
   const iconCls = tvCompact ? 'w-5 h-5' : 'w-6 h-6' // 图标尺寸
   const featureButtonTransition = {
@@ -280,6 +288,31 @@ export default function ImmersiveControls({
           }}
         />
       </motion.button>
+      )}
+
+      {stemControl && (
+        <motion.div
+          key="stem-mixer-button"
+          initial={{ x: 44, opacity: 0, scale: 0.96, filter: 'blur(6px)' }}
+          animate={{
+            x: isVisible ? 0 : 44,
+            opacity: isVisible ? 1 : 0,
+            scale: isVisible ? 1 : 0.96,
+            filter: isVisible ? 'blur(0px)' : 'blur(6px)',
+          }}
+          transition={featureButtonTransition}
+          className="absolute right-6"
+          style={{ top: stemButtonTop }}
+        >
+          <StemMixerPopover
+            control={stemControl}
+            accentColor={accentColor}
+            theme={playerTheme}
+            variant="immersive"
+            placement="left"
+            size={tvCompact ? 'compact' : 'default'}
+          />
+        </motion.div>
       )}
 
       {/* 快速设置按钮 */}

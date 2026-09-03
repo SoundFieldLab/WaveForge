@@ -51,6 +51,8 @@ interface ModengPlayerPageProps {
   trackId?: string | number
   translationEnabled?: boolean
   romanEnabled?: boolean
+  onTranslationToggle?: () => void
+  onRomanToggle?: () => void
   isTransitioning?: boolean
   onSeek?: (time: number) => void
   onPlayPause?: () => void
@@ -111,6 +113,10 @@ export default function ModengPlayerPage({
   appleCoverUrl,
   animatedCoverUrl,
   animatedCoverPoster,
+  translationEnabled = false,
+  romanEnabled = false,
+  onTranslationToggle,
+  onRomanToggle,
   isTransitioning,
   onSeek,
   onPlayPause,
@@ -154,14 +160,15 @@ export default function ModengPlayerPage({
   const lineWords = useMemo(() => lyrics.map(buildLineWords), [lyrics])
 
   // 对唱歌词：演唱者数量 ≥2 时按 ttm:agent 着色（Apple 风格）
-  const appleAgentCount = useMemo(
-    () => new Set(lyrics.map(line => line.agent).filter(Boolean)).size,
+  const appleAgentOrder = useMemo(
+    () => [...new Set(lyrics.map(line => line.agentId || line.agent).filter((agent): agent is string => Boolean(agent)))],
     [lyrics],
   )
+  const appleAgentCount = appleAgentOrder.length
   const appleDuetColorsEnabled = useMemo(() => getAppleMusicSettings().duetColors, [])
   const agentTintOf = (agent: string | undefined) =>
     appleDuetColorsEnabled && appleAgentCount >= 2 && agent
-      ? getAgentTintColor(agent, appleAgentCount, dark)
+      ? getAgentTintColor(agent, appleAgentCount, dark, undefined, appleAgentOrder)
       : undefined
   /** 非当前行颜色：对唱行带演唱者色相 */
   const duetLineColor = (agent: string | undefined, fade: number) => {
@@ -226,11 +233,11 @@ export default function ModengPlayerPage({
             const el = wordColorRefs.current.get(`w${currentIndex}-${wordIndex}`)
             if (!el) return
             const span = Math.max(0.001, word.endTime - word.startTime)
-            el.style.color = mixWordColor(clamp01((t - word.startTime) / span), line.agent)
+            el.style.color = mixWordColor(clamp01((t - word.startTime) / span), line.agentId || line.agent)
           })
         } else {
           const el = wordColorRefs.current.get(`l${currentIndex}`)
-          if (el) el.style.color = mixWordColor(clamp01((t - line.time) / 0.3), line.agent)
+          if (el) el.style.color = mixWordColor(clamp01((t - line.time) / 0.3), line.agentId || line.agent)
         }
       }
       const dur = durationRef.current
@@ -350,6 +357,9 @@ export default function ModengPlayerPage({
 
   const scrollOffset = currentY - (currentIndex + 0.5) * lineH
   const VolumeIcon = volume <= 0.001 ? VolumeX : volume < 0.5 ? Volume1 : Volume2
+  const activeLine = lyrics[currentIndex]
+  const activeRoman = romanEnabled ? activeLine?.roman?.trim() : ''
+  const activeTranslation = translationEnabled ? activeLine?.translation?.trim() : ''
 
   return (
     <div
@@ -587,10 +597,32 @@ export default function ModengPlayerPage({
               <button
                 type="button"
                 aria-label="翻译"
+                aria-pressed={translationEnabled}
+                onClick={onTranslationToggle}
                 className="flex items-center justify-center rounded-lg"
-                style={{ width: 28 * s, height: 28 * s, background: c.chip, color: c.sub }}
+                style={{
+                  width: 28 * s,
+                  height: 28 * s,
+                  background: translationEnabled ? c.title : c.chip,
+                  color: translationEnabled ? c.base : c.sub,
+                }}
               >
                 <Languages style={{ width: 14 * s, height: 14 * s }} />
+              </button>
+              <button
+                type="button"
+                aria-label="罗马音"
+                aria-pressed={romanEnabled}
+                onClick={onRomanToggle}
+                className="flex items-center justify-center rounded-lg"
+                style={{
+                  width: 28 * s,
+                  height: 28 * s,
+                  background: romanEnabled ? c.title : c.chip,
+                  color: romanEnabled ? c.base : c.sub,
+                }}
+              >
+                <span style={{ fontSize: 11 * s, fontWeight: 700, lineHeight: 1 }}>R</span>
               </button>
               <button
                 type="button"
@@ -616,10 +648,11 @@ export default function ModengPlayerPage({
               const distance = index - currentIndex
               const isCurrent = distance === 0
               const words = lineWords[index]
+              const lineAgent = line.agentId || line.agent
               const lineBaseColor = isCurrent
-                ? (duetUnsungColor(line.agent) ?? c.lineUnsungCurrent)
-                : lineColor(distance, line.agent)
-              const wordInitialColor = duetUnsungColor(line.agent) ?? unsungColor
+                ? (duetUnsungColor(lineAgent) ?? c.lineUnsungCurrent)
+                : lineColor(distance, lineAgent)
+              const wordInitialColor = duetUnsungColor(lineAgent) ?? unsungColor
               return (
                 <div
                   key={`${line.time}-${index}`}
@@ -674,6 +707,29 @@ export default function ModengPlayerPage({
               )
             })}
           </div>
+          {(activeRoman || activeTranslation) && (
+            <div
+              className="pointer-events-none absolute z-10"
+              style={{
+                left: 0,
+                top: currentY + lineH * 0.64,
+                maxWidth: `calc(100% - ${32 * s}px)`,
+                color: c.title,
+                textShadow: dark ? '0 2px 12px rgba(0,0,0,0.55)' : '0 1px 8px rgba(255,255,255,0.5)',
+              }}
+            >
+              {activeRoman && (
+                <div data-testid="modeng-roman" style={{ fontSize: 15 * s, fontWeight: 500, opacity: 0.58, lineHeight: 1.4 }}>
+                  {activeRoman}
+                </div>
+              )}
+              {activeTranslation && (
+                <div data-testid="modeng-translation" style={{ marginTop: activeRoman ? 4 * s : 0, fontSize: 17 * s, fontWeight: 500, opacity: 0.76, lineHeight: 1.4 }}>
+                  {activeTranslation}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

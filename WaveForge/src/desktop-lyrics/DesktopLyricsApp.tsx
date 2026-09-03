@@ -23,8 +23,20 @@ const DEFAULT_STATE: DesktopPlayerSnapshot = {
 }
 
 const DEFAULT_SETTINGS: DesktopLyricsSettings = {
-  enabled: false, fontSize: 58, colorMode: 'auto', orientation: 'horizontal',
+  enabled: false, fontSize: 58, fontFamily: '', colorMode: 'auto', orientation: 'horizontal',
   doubleLine: false, translationEnabled: false, romajiEnabled: false, traditionalEnabled: false, locked: false,
+}
+
+/** 默认字体栈（style.css 的 :root 与此保持一致） */
+const DEFAULT_FONT_STACK = '"Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif'
+
+/** 歌词字体 CSS 值：指定字体优先，找不到时逐级回退到默认栈 */
+const lyricFontStack = (family: string) => {
+  const name = (family || '').trim()
+  if (!name) return DEFAULT_FONT_STACK
+  // 内置字体名 / 带引号的名字原样使用；其余按单个族名加引号（处理含空格的本机字体）
+  if (/^['"]/.test(name)) return `${name}, ${DEFAULT_FONT_STACK}`
+  return `"${name}", ${DEFAULT_FONT_STACK}`
 }
 
 const COLOR_PRESETS: Array<{ value: DesktopLyricsColorMode; label: string; color: string }> = [
@@ -415,6 +427,7 @@ export default function DesktopLyricsApp() {
         '--font-size': `${settings.fontSize}px`,
         '--lyric-color': color,
         '--lyric-filled-color': filledColor,
+        fontFamily: lyricFontStack(settings.fontFamily),
       } as CSSProperties}
       onPointerEnter={() => { if (!settings.locked) setHovered(true) }}
       onPointerLeave={() => { setHovered(false); if (!settingsOpen) setSettingsOpen(false) }}
@@ -488,6 +501,18 @@ export default function DesktopLyricsApp() {
             <span><Type />字体大小</span><b>{settings.fontSize}</b>
             <input type="range" min="26" max="120" step="2" value={settings.fontSize} onChange={event => update({ fontSize: Number(event.target.value) })} />
           </label>
+          <label className="dl-range-row dl-font-row">
+            <span><Type />字体</span>
+            <select
+              className="dl-font-select"
+              value={settings.fontFamily}
+              onChange={event => update({ fontFamily: event.target.value })}
+            >
+              <option value="">默认字体</option>
+              <option value="LXGW WenKai">霞鹜文楷</option>
+              <option value="Smiley Sans">得意黑</option>
+            </select>
+          </label>
           <div className="dl-setting-title"><Palette />字体颜色</div>
           <div className="dl-colors">
             {COLOR_PRESETS.map(preset => (
@@ -501,7 +526,7 @@ export default function DesktopLyricsApp() {
           {state.hasTranslation && <Toggle checked={settings.translationEnabled} label="翻译歌词" onClick={() => update({ translationEnabled: !settings.translationEnabled })} />}
           {state.hasRomaji && <Toggle checked={settings.romajiEnabled} label="罗马音歌词" onClick={() => update({ romajiEnabled: !settings.romajiEnabled })} />}
           <Toggle checked={settings.traditionalEnabled} label="显示繁体歌词" onClick={() => update({ traditionalEnabled: !settings.traditionalEnabled })} />
-          <button className="dl-reset" onClick={() => update({ fontSize: 58, colorMode: 'auto', orientation: 'horizontal', doubleLine: false, translationEnabled: false, romajiEnabled: false, traditionalEnabled: false, locked: false })}><RotateCcw />恢复默认</button>
+          <button className="dl-reset" onClick={() => update({ fontSize: 58, fontFamily: '', colorMode: 'auto', orientation: 'horizontal', doubleLine: false, translationEnabled: false, romajiEnabled: false, traditionalEnabled: false, locked: false })}><RotateCcw />恢复默认</button>
           <footer><LockKeyhole />窗口始终置顶</footer>
         </aside>
         </div>

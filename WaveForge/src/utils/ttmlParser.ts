@@ -2,10 +2,7 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-/**
- * TTML (Timed Text Markup Language) 解析器
- * 用于解析 Apple Music / AMLL TTML DB 的逐字歌词格式
- */
+/** TTML parser for Apple Music and the AMLL TTML database. */
 
 export interface TTMLWord {
   text: string
@@ -13,15 +10,46 @@ export interface TTMLWord {
   endTime: number
 }
 
+export type TTMLAlternateTextType = 'translation' | 'romanization' | string
+
+export interface TTMLAlternateText {
+  role: TTMLAlternateTextType
+  type: TTMLAlternateTextType
+  text: string
+  language?: string
+  lang?: string
+  agent?: string
+  startTime: number
+  endTime: number
+  time: number
+  words?: TTMLWord[]
+}
+
+export interface TTMLBackgroundVocal {
+  text: string
+  startTime: number
+  endTime: number
+  time: number
+  words: TTMLWord[]
+  agent?: string
+  agentId?: string
+  translation?: string
+  roman?: string
+  romanization?: string
+  alternateTexts?: TTMLAlternateText[]
+}
+
 export interface TTMLLine {
   words: TTMLWord[]
   startTime: number
   endTime: number
+  role?: string
   translation?: string
   roman?: string
-  /** 演唱者（ttm:agent 引用，如 v1/v2）——对唱/多声部歌曲用于逐人着色 */
   agent?: string
-  /** x-bg 背景和声词（带独立时间轴，可作弱化渲染） */
+  alternateTexts?: TTMLAlternateText[]
+  backgroundVocals?: TTMLBackgroundVocal[]
+  /** Legacy compatibility for existing Apple lyric renderers. */
   bgWords?: TTMLWord[]
 }
 
@@ -32,20 +60,16 @@ export interface TTMLAgent {
 
 export interface TTMLLyric {
   lines: TTMLLine[]
-  /** head 中声明的演唱者（person/group/other） */
   agents?: TTMLAgent[]
-  /** 前导静音偏移（毫秒），时间轴整体平移用 */
   leadingSilenceMs?: number
+  /** 当前文档内没有主行可归并的独立翻译/罗马音，供跨 localization 文档归并。 */
+  standaloneAlternates?: TTMLAlternateText[]
 }
 
-/**
- * 解析时间字符串（格式：HH:MM:SS.mmm / MM:SS.mmm / 1,234 秒,毫秒 / 纯秒）
- */
 function parseTime(timeStr: string): number {
   const normalized = timeStr.trim()
   if (normalized.endsWith('ms')) return Number.parseFloat(normalized) || 0
   if (normalized.endsWith('s')) return (Number.parseFloat(normalized) || 0) * 1000
-  // AMLL 方言：begin="1,234" 表示 1秒+234毫秒
   if (/^\d+,\d+$/.test(normalized)) {
     const [secondsPart, msPart] = normalized.split(',')
     return (Number.parseInt(secondsPart, 10) || 0) * 1000 + (Number.parseInt(msPart, 10) || 0)
@@ -53,87 +77,187 @@ function parseTime(timeStr: string): number {
 
   const parts = normalized.split(':')
   let seconds = 0
-  
   if (parts.length === 3) {
-    // HH:MM:SS.mmm
-    seconds = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2])
+    seconds = Number.parseInt(parts[0], 10) * 3600 + Number.parseInt(parts[1], 10) * 60 + Number.parseFloat(parts[2])
   } else if (parts.length === 2) {
-    // MM:SS.mmm
-    seconds = parseInt(parts[0]) * 60 + parseFloat(parts[1])
+    seconds = Number.parseInt(parts[0], 10) * 60 + Number.parseFloat(parts[1])
   } else {
-    seconds = parseFloat(timeStr)
+    seconds = Number.parseFloat(normalized)
   }
-  
-  return seconds * 1000 // 转换为毫秒
+  return Number.isFinite(seconds) ? seconds * 1000 : 0
 }
 
-const getTtmlAttr = (element: Element, qualifiedName: string, namespace = 'http://www.w3.org/ns/ttml#metadata') =>
-  element.getAttributeNS(namespace, qualifiedName) || element.getAttribute(`ttm:${qualifiedName}`)
+const getTtmlAttr = (element: Element, name: string) =>
+  element.getAttributeNS('http://www.w3.org/ns/ttml#metadata', name)
+  || element.getAttribute(`ttm:${name}`)
+  || element.getAttribute(name)
+  || undefined
 
-/**
- * 解析TTML XML文本
- */
-export function parseTTML(ttmlText: string): TTMLLyric {
-  const parser = new DOMParser()
-  const xmlDoc = parser.parseFromString(ttmlText, 'text/xml')
-  if (xmlDoc.getElementsByTagName('parsererror').length > 0) {
-    throw new Error('AMLL TTML XML 解析失败')
+const getLanguage = (element: Element): string | undefined =>
+  element.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang')
+  || element.getAttribute('xml:lang')
+  || undefined
+
+const normalizeRole = (role?: string): TTMLAlternateTextType => {
+  if (role === 'x-translation') return 'translation'
+  if (role === 'x-roman') return 'romanization'
+  return role || 'alternate'
+}
+
+const textOf = (element: Element) => (element.textContent || '').trim()
+
+function collectTimedWords(element: Element, fallbackStart: number, fallbackEnd: number): TTMLWord[] {
+  const words: TTMLWord[] = []
+  const visit = (node: Node, inheritedStart: number, inheritedEnd: number) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.textContent || ''
+      if (!text) return
+      if (words.length > 0) words[words.length - 1].text += text
+      else words.push({ text, startTime: inheritedStart, endTime: inheritedEnd })
+      return
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return
+    const child = node as Element
+    if (child.localName !== 'span') return
+    const role = getTtmlAttr(child, 'role')
+    if (role === 'x-translation' || role === 'x-roman') return
+    const start = child.getAttribute('begin') ? parseTime(child.getAttribute('begin')!) : inheritedStart
+    const end = child.getAttribute('end') ? parseTime(child.getAttribute('end')!) : inheritedEnd
+    const hasNestedSpan = Array.from(child.children).some(grandchild => grandchild.localName === 'span')
+    if (!hasNestedSpan) {
+      const text = child.textContent || ''
+      if (text) words.push({ text, startTime: start, endTime: end })
+      return
+    }
+    Array.from(child.childNodes).forEach(grandchild => visit(grandchild, start, end))
   }
+  Array.from(element.childNodes).forEach(node => visit(node, fallbackStart, fallbackEnd))
+  return words
+}
+
+function createAlternateText(
+  element: Element,
+  role: string,
+  startTime: number,
+  endTime: number,
+  inheritedAgent?: string,
+): TTMLAlternateText | null {
+  const text = textOf(element)
+  if (!text) return null
+  const type = normalizeRole(role)
+  const language = getLanguage(element)
+  const agent = getTtmlAttr(element, 'agent') || inheritedAgent
+  const words = collectTimedWords(element, startTime, endTime)
+  return {
+    role: type,
+    type,
+    text,
+    language,
+    lang: language,
+    agent,
+    startTime,
+    endTime,
+    time: startTime,
+    words: words.length > 0 ? words : undefined,
+  }
+}
+
+function appendAlternate(target: { alternateTexts?: TTMLAlternateText[] }, alternate: TTMLAlternateText) {
+  const current = target.alternateTexts ?? []
+  if (!current.some(item => item.role === alternate.role && item.text === alternate.text && item.language === alternate.language)) {
+    current.push(alternate)
+  }
+  target.alternateTexts = current
+}
+
+function applyAlternateCompatibility(target: TTMLLine | TTMLBackgroundVocal, alternate: TTMLAlternateText) {
+  appendAlternate(target, alternate)
+  if (alternate.role === 'translation' && !target.translation) target.translation = alternate.text
+  if (alternate.role === 'romanization' && !target.roman) target.roman = alternate.text
+  if ('romanization' in target && alternate.role === 'romanization' && !target.romanization) {
+    target.romanization = alternate.text
+  }
+}
+
+function parseBackgroundVocal(
+  element: Element,
+  lineStart: number,
+  lineEnd: number,
+  inheritedAgent?: string,
+): TTMLBackgroundVocal | null {
+  const startTime = element.getAttribute('begin') ? parseTime(element.getAttribute('begin')!) : lineStart
+  const endTime = element.getAttribute('end') ? parseTime(element.getAttribute('end')!) : lineEnd
+  const agent = getTtmlAttr(element, 'agent') || inheritedAgent
+  const words = collectTimedWords(element, startTime, endTime)
+  const vocal: TTMLBackgroundVocal = {
+    text: words.map(word => word.text).join('').trim(),
+    startTime,
+    endTime,
+    time: startTime,
+    words,
+    agent,
+    agentId: agent,
+  }
+  Array.from(element.children).forEach(child => {
+    const role = getTtmlAttr(child, 'role')
+    if (role !== 'x-translation' && role !== 'x-roman') return
+    const alternate = createAlternateText(child, role, startTime, endTime, agent)
+    if (alternate) applyAlternateCompatibility(vocal, alternate)
+  })
+  return vocal.text || vocal.alternateTexts?.length ? vocal : null
+}
+
+function sameTimedAgent(line: TTMLLine, alternate: TTMLAlternateText): boolean {
+  const sameTime = Math.abs(line.startTime - alternate.startTime) <= 1
+    && Math.abs(line.endTime - alternate.endTime) <= 1
+  return sameTime && (line.agent || '') === (alternate.agent || '')
+}
+
+export function parseTTML(ttmlText: string): TTMLLyric {
+  const xmlDoc = new DOMParser().parseFromString(ttmlText, 'text/xml')
+  if (xmlDoc.getElementsByTagName('parsererror').length > 0) throw new Error('AMLL TTML XML 解析失败')
 
   const lines: TTMLLine[] = []
+  const standaloneAlternates: TTMLAlternateText[] = []
   const agents: TTMLAgent[] = []
   let leadingSilenceMs: number | undefined
 
-  // head 元数据：演唱者声明 + 前导静音
-  const metadataNodes = Array.from(xmlDoc.getElementsByTagNameNS('*', 'metadata'))
-  metadataNodes.forEach(metadata => {
+  Array.from(xmlDoc.getElementsByTagNameNS('*', 'metadata')).forEach(metadata => {
     Array.from(metadata.children).forEach(node => {
-      const local = node.localName || ''
-      if (local === 'agent') {
+      if (node.localName === 'agent') {
         const id = node.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'id') || node.getAttribute('xml:id') || ''
-        const type = node.getAttribute('type') || 'other'
-        if (id && !agents.some(agent => agent.id === id)) agents.push({ id, type })
-      } else if (local === 'leadingSilence') {
-        const text = (node.textContent || '').trim()
-        if (!text) return
+        if (id && !agents.some(agent => agent.id === id)) agents.push({ id, type: node.getAttribute('type') || 'other' })
+      } else if (node.localName === 'leadingSilence') {
+        const text = textOf(node)
         const value = Number.parseFloat(text)
         if (Number.isFinite(value)) {
-          // 兼容三种写法：带 ms 后缀（毫秒）、小数（秒）、纯数字（毫秒）
-          leadingSilenceMs = text.endsWith('ms')
-            ? Math.round(value)
-            : String(text).includes('.')
-              ? Math.round(value * 1000)
-              : Math.round(value)
+          leadingSilenceMs = text.endsWith('ms') ? Math.round(value) : text.includes('.') ? Math.round(value * 1000) : Math.round(value)
         }
       }
     })
   })
 
-  // 获取所有 <p> 元素（每个代表一行歌词）
-  const paragraphs = Array.from(xmlDoc.getElementsByTagNameNS('*', 'p'))
-
-  paragraphs.forEach(p => {
-    // 个别 Apple 文件把翻译/罗马音作为独立 <p> 行：不作为主歌词行渲染
-    const paragraphRole = getTtmlAttr(p, 'role')
-    if (paragraphRole === 'x-translation' || paragraphRole === 'x-roman') return
-
-    const begin = p.getAttribute('begin')
-    const end = p.getAttribute('end')
-    
+  Array.from(xmlDoc.getElementsByTagNameNS('*', 'p')).forEach(paragraph => {
+    const begin = paragraph.getAttribute('begin')
+    const end = paragraph.getAttribute('end')
     if (!begin || !end) return
-    
-    const lineStartTime = parseTime(begin)
-    const lineEndTime = parseTime(end)
-    
+    const startTime = parseTime(begin)
+    const endTime = parseTime(end)
+    const role = getTtmlAttr(paragraph, 'role')
+    const agent = getTtmlAttr(paragraph, 'agent')
+
+    if (role === 'x-translation' || role === 'x-roman') {
+      const alternate = createAlternateText(paragraph, role, startTime, endTime, agent)
+      if (alternate) standaloneAlternates.push(alternate)
+      return
+    }
+
     const words: TTMLWord[] = []
-    const bgWords: TTMLWord[] = []
-    let translation = ''
-    let roman = ''
+    const backgroundVocals: TTMLBackgroundVocal[] = []
     let primaryText = ''
-    
-    // 只解析当前行的直接子节点。背景人声 span 内还会嵌套 span，若递归
-    // querySelectorAll 会把主歌词、背景歌词和辅助文本重复拼接。
-    Array.from(p.childNodes).forEach(node => {
+    const line: TTMLLine = { words, startTime, endTime, role, agent }
+
+    Array.from(paragraph.childNodes).forEach(node => {
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent || ''
         primaryText += text
@@ -144,156 +268,69 @@ export function parseTTML(ttmlText: string): TTMLLyric {
         return
       }
       if (node.nodeType !== Node.ELEMENT_NODE) return
-
       const span = node as Element
       if (span.localName !== 'span') return
-      const role = getTtmlAttr(span, 'role')
-
-      if (role === 'x-translation') {
-        // 翻译文本
-        translation = span.textContent || ''
-      } else if (role === 'x-roman') {
-        // 罗马音
-        roman = span.textContent || ''
-      } else if (role === 'x-bg') {
-        // 背景和声：递归收集带时间的词（弱化渲染用）
-        const collectBg = (el: Element): TTMLWord[] => {
-          const collected: TTMLWord[] = []
-          Array.from(el.childNodes).forEach(child => {
-            if (child.nodeType === Node.TEXT_NODE) {
-              const text = child.textContent || ''
-              if (text && collected.length > 0) {
-                collected[collected.length - 1].text += text
-              } else if (text) {
-                collected.push({ text, startTime: lineStartTime, endTime: lineEndTime })
-              }
-              return
-            }
-            if (child.nodeType !== Node.ELEMENT_NODE) return
-            const childEl = child as Element
-            if (childEl.localName !== 'span') return
-            const subRole = getTtmlAttr(childEl, 'role')
-            if (subRole && subRole !== 'x-bg') return
-            const wordBegin = childEl.getAttribute('begin')
-            const wordEnd = childEl.getAttribute('end')
-            const text = childEl.textContent || ''
-            if (wordBegin && wordEnd && text) {
-              collected.push({ text, startTime: parseTime(wordBegin), endTime: parseTime(wordEnd) })
-            } else {
-              collected.push(...collectBg(childEl))
-            }
-          })
-          return collected
-        }
-        bgWords.push(...collectBg(span))
+      const spanRole = getTtmlAttr(span, 'role')
+      if (spanRole === 'x-translation' || spanRole === 'x-roman') {
+        const alternate = createAlternateText(span, spanRole, startTime, endTime, agent)
+        if (alternate) applyAlternateCompatibility(line, alternate)
+      } else if (spanRole === 'x-bg') {
+        const vocal = parseBackgroundVocal(span, startTime, endTime, agent)
+        if (vocal) backgroundVocals.push(vocal)
       } else {
-        // 普通歌词词语
-        const wordBegin = span.getAttribute('begin')
-        const wordEnd = span.getAttribute('end')
-        const text = span.textContent || ''
-        primaryText += text
-        
-        if (wordBegin && wordEnd && text) {
-          words.push({
-            text,
-            startTime: parseTime(wordBegin),
-            endTime: parseTime(wordEnd)
-          })
-        } else if (text && words.length > 0) {
-          words[words.length - 1].text += text
-        }
+        primaryText += span.textContent || ''
+        words.push(...collectTimedWords(span, startTime, endTime))
       }
     })
-    
-    // 如果没有逐字时间轴，尝试获取整行文本
-    if (words.length === 0) {
-      if (primaryText.trim()) {
-        words.push({
-          text: primaryText.trim(),
-          startTime: lineStartTime,
-          endTime: lineEndTime
-        })
-      }
+
+    if (words.length === 0 && primaryText.trim()) words.push({ text: primaryText.trim(), startTime, endTime })
+    if (words.length === 0) return
+    if (backgroundVocals.length > 0) {
+      line.backgroundVocals = backgroundVocals
+      line.bgWords = backgroundVocals.flatMap(vocal => vocal.words)
     }
-    
-    if (words.length > 0) {
-      lines.push({
-        words,
-        startTime: lineStartTime,
-        endTime: lineEndTime,
-        translation: translation || undefined,
-        roman: roman || undefined,
-        agent: getTtmlAttr(p, 'agent') || undefined,
-        bgWords: bgWords.length > 0 ? bgWords : undefined,
-      })
-    }
+    lines.push(line)
   })
-  
-  return { lines, agents: agents.length > 0 ? agents : undefined, leadingSilenceMs }
+
+  const unmatchedAlternates: TTMLAlternateText[] = []
+  standaloneAlternates.forEach(alternate => {
+    const target = lines.find(line => sameTimedAgent(line, alternate))
+    if (target) applyAlternateCompatibility(target, alternate)
+    else unmatchedAlternates.push(alternate)
+  })
+
+  return {
+    lines: lines.sort((a, b) => a.startTime - b.startTime),
+    agents: agents.length > 0 ? agents : undefined,
+    leadingSilenceMs,
+    standaloneAlternates: unmatchedAlternates.length > 0 ? unmatchedAlternates : undefined,
+  }
 }
 
-/**
- * 将TTML格式转换为LRC格式
- */
 export function ttmlToLRC(ttml: TTMLLyric): string {
-  const lrcLines: string[] = []
-  
-  ttml.lines.forEach(line => {
+  return ttml.lines.map(line => {
     const minutes = Math.floor(line.startTime / 60000)
     const seconds = Math.floor((line.startTime % 60000) / 1000)
     const milliseconds = Math.floor((line.startTime % 1000) / 10)
-    
-    const timestamp = `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(2, '0')}]`
-    const text = line.words.map(w => w.text).join('')
-    
-    lrcLines.push(`${timestamp}${text}`)
-  })
-  
-  return lrcLines.join('\n')
+    return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(2, '0')}]${line.words.map(word => word.text).join('')}`
+  }).join('\n')
 }
 
-/**
- * 将TTML格式转换为翻译LRC格式
- */
 export function ttmlToTranslationLRC(ttml: TTMLLyric): string {
-  const lrcLines: string[] = []
-  
-  ttml.lines.forEach(line => {
-    if (!line.translation) return
-    
+  return ttml.lines.filter(line => line.translation).map(line => {
     const minutes = Math.floor(line.startTime / 60000)
     const seconds = Math.floor((line.startTime % 60000) / 1000)
     const milliseconds = Math.floor((line.startTime % 1000) / 10)
-    
-    const timestamp = `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(2, '0')}]`
-    
-    lrcLines.push(`${timestamp}${line.translation}`)
-  })
-  
-  return lrcLines.join('\n')
+    return `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(2, '0')}]${line.translation}`
+  }).join('\n')
 }
 
-/**
- * 将TTML格式转换为YRC逐字格式（类似网易云YRC）
- */
 export function ttmlToYRC(ttml: TTMLLyric): string {
-  const yrcLines: string[] = []
-  
-  ttml.lines.forEach(line => {
+  return ttml.lines.map(line => {
     const minutes = Math.floor(line.startTime / 60000)
     const seconds = Math.floor((line.startTime % 60000) / 1000)
     const milliseconds = Math.floor(line.startTime % 1000)
-    
     const timestamp = `[${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(milliseconds).padStart(3, '0')}]`
-    
-    // 构建逐字时间轴
-    const wordTimings = line.words.map(word => {
-      const duration = word.endTime - word.startTime
-      return `(${word.startTime},${duration})${word.text}`
-    }).join('')
-    
-    yrcLines.push(`${timestamp}${wordTimings}`)
-  })
-  
-  return yrcLines.join('\n')
+    return timestamp + line.words.map(word => `(${word.startTime},${word.endTime - word.startTime})${word.text}`).join('')
+  }).join('\n')
 }

@@ -24,6 +24,17 @@ export interface LineRenderHints {
   wordRevealMode: 'normal' | 'fast' | 'instant'
 }
 
+export interface LineBackgroundVocal {
+  text: string
+  startTime: number
+  endTime: number
+  words: Word[]
+  agentId?: string
+  translation?: string
+  romanization?: string
+  alternateTexts?: Array<{ role: string; language?: string; text: string }>
+}
+
 export interface Line {
   words: Word[]
   startTime: number
@@ -31,9 +42,12 @@ export interface Line {
   fullText: string
   translation?: string
   id?: string
+  agentId?: string
   songPart?: string
   blockIndex?: number
   romanization?: string
+  alternateTexts?: Array<{ role: string; language?: string; text: string }>
+  backgroundVocals?: LineBackgroundVocal[]
   renderHints?: LineRenderHints
   isChorus?: boolean
 }

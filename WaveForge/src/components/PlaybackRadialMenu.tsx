@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Disc3, Heart, HeartOff, MessageCircle, UserRound, Info } from 'lucide-react'
 import type { Song } from '../services/musicApi'
+import { getPlatformCapabilities, getPlatformFavoriteLabels } from '../services/platforms'
 import SongContextMenu from './SongContextMenu'
 
 type RadialDirection = 'up' | 'down' | 'left' | 'right' | 'up-left' | 'up-right' | 'down-left' | 'down-right'
@@ -137,7 +138,7 @@ export default function PlaybackRadialMenu({
       if (wasRadialGesture) {
         const currentSong = songRef.current
         if (direction === 'up') actionsRef.current.onToggleFavorite(currentSong, likedRef.current)
-        else if (direction === 'down') actionsRef.current.onViewComments(currentSong)
+        else if (direction === 'down' && getPlatformCapabilities(currentSong.platform || 'netease').comments) actionsRef.current.onViewComments(currentSong)
         else if (direction === 'left') actionsRef.current.onViewArtist(currentSong)
         else if (direction === 'right') actionsRef.current.onViewAlbum(currentSong)
         else if (direction === 'up-left') {
@@ -176,14 +177,16 @@ export default function PlaybackRadialMenu({
     }
   }, [])
 
+  const favoriteLabels = getPlatformFavoriteLabels(song.platform || 'netease')
+  const supportsComments = getPlatformCapabilities(song.platform || 'netease').comments
   const options: Array<{
     direction: RadialDirection
     label: string
     Icon: typeof Heart
     className: string
   }> = [
-    { direction: 'up', label: liked ? '取消喜欢' : '我喜欢', Icon: liked ? HeartOff : Heart, className: 'left-1/2 top-3 -translate-x-1/2' },
-    { direction: 'down', label: '查看评论', Icon: MessageCircle, className: 'bottom-3 left-1/2 -translate-x-1/2' },
+    { direction: 'up', label: liked ? favoriteLabels.remove : favoriteLabels.add, Icon: liked ? HeartOff : Heart, className: 'left-1/2 top-3 -translate-x-1/2' },
+    ...(supportsComments ? [{ direction: 'down' as const, label: '查看评论', Icon: MessageCircle, className: 'bottom-3 left-1/2 -translate-x-1/2' }] : []),
     { direction: 'left', label: '查看歌手', Icon: UserRound, className: 'left-3 top-1/2 -translate-y-1/2' },
     { direction: 'right', label: '查看专辑', Icon: Disc3, className: 'right-3 top-1/2 -translate-y-1/2' },
     { direction: 'up-left', label: '查看详情', Icon: Info, className: 'left-3 top-3' },

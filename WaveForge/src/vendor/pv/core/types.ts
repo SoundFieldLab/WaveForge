@@ -113,6 +113,17 @@ export interface LyricLine {
   translation?: string;
   /** WaveForge 扩展：当前行罗马音 */
   roman?: string;
+  agentId?: string;
+  alternateTexts?: Array<{ role: string; language?: string; text: string }>;
+  backgroundVocals?: Array<{
+    time: number;
+    endTime: number;
+    text: string;
+    agentId?: string;
+    translation?: string;
+    roman?: string;
+    words?: LyricWordTiming[];
+  }>;
 }
 
 export interface Segment {

@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { useMotionValue } from 'framer-motion'
-import type { LyricLine, LyricWord } from '../../services/musicApi'
+import type { LyricBackgroundVocal, LyricLine, LyricWord } from '../../services/musicApi'
 import type { PlaybackTimeStore } from '../../audio/playbackTimeStore'
 import { DEFAULT_DIORAMA_TUNING, type Line, type Word } from './types'
 import { resolveDioramaMotionParams } from './cameraPath'
@@ -32,11 +32,26 @@ const convertWord = (word: LyricWord, lineTime: number): Word => ({
   endTime: lineTime + ((word.startTime ?? 0) + (word.duration ?? 400)) / 1000,
 })
 
+const convertBackgroundVocal = (vocal: LyricBackgroundVocal): NonNullable<Line['backgroundVocals']>[number] => ({
+  text: vocal.text,
+  startTime: vocal.time,
+  endTime: vocal.endTime,
+  words: (vocal.words || []).map(word => convertWord(word, vocal.time)),
+  agentId: vocal.agentId || vocal.agent,
+  translation: vocal.translation,
+  romanization: vocal.romanization || vocal.roman,
+  alternateTexts: vocal.alternateTexts?.map(text => ({
+    role: text.role,
+    language: text.language || text.lang,
+    text: text.text,
+  })),
+})
+
 /** WaveForge LyricLine[] → folia Line[]（1:1 索引，空行保留但 fullText 为空）。 */
 export const convertLyricsToFoliaLines = (lyrics: LyricLine[]): Line[] => {
   const withEnd = lyrics.map((line, index) => {
     const next = lyrics[index + 1]
-    const endTime = next ? Math.max(line.time + 0.4, next.time - 0.12) : line.time + 6
+    const endTime = line.endTime ?? (next ? Math.max(line.time + 0.4, next.time - 0.12) : line.time + 6)
     return { line, endTime }
   })
   // 简化副歌检测：trimmed 文本重复出现 ≥2 次的行判为副歌（副歌天然复现）。
@@ -74,6 +89,13 @@ export const convertLyricsToFoliaLines = (lyrics: LyricLine[]): Line[] => {
       fullText: text,
       translation: line.translation || undefined,
       romanization: line.roman || undefined,
+      agentId: line.agentId || line.agent,
+      alternateTexts: line.alternateTexts?.map(text => ({
+        role: text.role,
+        language: text.language || text.lang,
+        text: text.text,
+      })),
+      backgroundVocals: line.backgroundVocals?.map(convertBackgroundVocal),
       id: `${index}`,
       songPart: isChorus ? 'chorus' : 'verse',
       blockIndex: Math.floor(index / 4),
