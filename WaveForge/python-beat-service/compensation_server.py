@@ -20,8 +20,15 @@ Frequency Response Compensation Service - 独立频响补偿设计服务（端�
 import os
 import sys
 import math
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from local_service_auth import is_authorized_local_request
 import numpy as np
 
 if sys.platform == 'win32':
@@ -32,7 +39,14 @@ if sys.platform == 'win32':
 PORT = int(os.environ.get('WAVEFORGE_COMPENSATION_PORT', '3004'))
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"])
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"], allow_headers=["Content-Type", "X-WaveForge-Local-Token"])
+
+
+@app.before_request
+def require_local_service_token():
+    if not is_authorized_local_request(request.headers.get('X-WaveForge-Local-Token', '')):
+        return jsonify({'error': 'unauthorized'}), 403
+    return None
 
 # ============ 补偿强度参数（工程参考，081402 §6.1） ============
 # 参考 SPL：80 dB（高音量，补偿 0）

@@ -16,6 +16,7 @@ from pedalboard import Pedalboard, Compressor
 from pedalboard.io import AudioFile
 import logging
 import os
+import uuid
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -25,6 +26,22 @@ try:
     LIBROSA_AVAILABLE = True
 except ImportError:
     LIBROSA_AVAILABLE = False
+
+
+def write_wav_atomic(output_path: str, audio: np.ndarray, sample_rate: int, channels: int) -> int:
+    if not np.all(np.isfinite(audio)):
+        raise ValueError("Refusing to write non-finite transition audio")
+    temp_path = f"{output_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp.wav"
+    try:
+        with AudioFile(temp_path, 'w', sample_rate, num_channels=channels) as f:
+            f.write(audio)
+        if os.path.getsize(temp_path) <= 44:
+            raise ValueError("Rendered transition WAV is empty")
+        os.replace(temp_path, output_path)
+        return os.path.getsize(output_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 def ensure_stereo(audio: np.ndarray) -> np.ndarray:
@@ -1043,13 +1060,159 @@ def spectral_seam_mix(source: np.ndarray, target: np.ndarray, sample_rate: int) 
         return source + target
 
 
-def render_transition_v2(params: dict) -> dict:
-    """AutoMix 增强版（v2）渲染：v1 的逐拍共拍网格拉伸 + choreography 特效编排。
+def _piecewise_gain(points: list, samples: int, sample_rate: int) -> np.ndarray:
+    """Render deterministic linear gain keyframes from the stem choreography."""
+    if samples <= 0:
+        return np.zeros(0, dtype=np.float32)
+    valid = sorted(
+        (float(point.get('time', 0)), float(point.get('gain', 0)))
+        for point in (points or [])
+        if np.isfinite(point.get('time', 0)) and np.isfinite(point.get('gain', 0))
+    )
+    if not valid:
+        return np.ones(samples, dtype=np.float32)
+    positions = np.asarray([max(0, min(samples - 1, round(t * sample_rate))) for t, _ in valid], dtype=np.float64)
+    gains = np.asarray([max(0, min(1, gain)) for _, gain in valid], dtype=np.float64)
+    # Collapse duplicate positions so np.interp always receives an increasing axis.
+    unique_positions, unique_indices = np.unique(positions, return_index=True)
+    unique_gains = gains[unique_indices]
+    return np.interp(np.arange(samples), unique_positions, unique_gains,
+                     left=unique_gains[0], right=unique_gains[-1]).astype(np.float32)
 
-    plan.v2.choreography 驱动：style（energetic/atmospheric/clean）+ intensity
-    （subtle/standard/strong）+ 各特效开关。渲染结果与 v1 共用同一个
-    TransitionRenderer 缓存/播放链路，仅 plan.id（rendererVersion=v2）隔离。
-    """
+
+def _load_stem_window(artifact: dict, stem: str, plan_start: float, plan_end: float, output_rate: int) -> np.ndarray:
+    stem_path = artifact.get('files', {}).get(stem)
+    if not stem_path or not os.path.isfile(stem_path):
+        raise FileNotFoundError(f"missing {stem} artifact")
+    artifact_start = float(artifact.get('startSeconds', 0) or 0)
+    with AudioFile(stem_path) as reader:
+        rate = reader.samplerate
+        start = max(0, int(round((plan_start - artifact_start) * rate)))
+        frames = max(1, int(round((plan_end - plan_start) * rate)))
+        reader.seek(start)
+        audio = ensure_stereo(reader.read(frames))
+    if rate != output_rate:
+        if LIBROSA_AVAILABLE:
+            audio = librosa.resample(audio, orig_sr=rate, target_sr=output_rate)
+        else:
+            audio = signal.resample(audio, int(round(audio.shape[1] * output_rate / rate)), axis=1)
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _render_stem_mix(plan: dict, output_rate: int, output_length: int,
+                     output_beat_durations: list, without_grid: bool) -> np.ndarray | None:
+    v2 = plan.get('v2') or {}
+    is_folia_backend = v2.get('backend') == 'folia-htdemucs'
+    artifacts = v2.get('stemArtifacts') or {}
+    choreography = v2.get('stemChoreography') or {}
+    if not artifacts.get('source') or not artifacts.get('target') or not choreography:
+        return None
+    source_beats = [t - plan['sourceStartTime'] for t in plan.get('sourceBeatTimes', [])]
+    target_beats = [t - plan['targetStartTime'] for t in plan.get('targetBeatTimes', [])]
+    channels = 2
+    output = np.zeros((channels, output_length), dtype=np.float32)
+    pitch_shift = float(v2.get('pitchShiftSemitones', 0) or 0)
+    gain_offset_db = float(plan.get('gainOffsetDb', 0) or 0)
+    target_compensation = min(1.25, max(0.8, 10.0 ** (gain_offset_db / 20.0)))
+    for stem in ('vocals', 'drums', 'bass', 'other'):
+        source = _load_stem_window(artifacts['source'], stem, plan['sourceStartTime'], plan['sourceEndTime'], output_rate)
+        target = _load_stem_window(artifacts['target'], stem, plan['targetStartTime'], plan['targetEndTime'], output_rate)
+        # Preserve drum transients: harmonic pitch correction never touches the drum stem.
+        if stem != 'drums' and abs(pitch_shift) > 0.01 and LIBROSA_AVAILABLE and not is_folia_backend:
+            target = librosa.effects.pitch_shift(target, sr=output_rate, n_steps=pitch_shift).astype(np.float32)
+        if without_grid:
+            source_rendered = np.pad(source, ((0, 0), (0, max(0, output_length - source.shape[1]))))[:, :output_length]
+            target_rendered = np.pad(target, ((0, 0), (0, max(0, output_length - target.shape[1]))))[:, :output_length]
+        else:
+            source_rendered = progressive_beat_stretch(
+                source, output_rate, source_beats, output_beat_durations, f'source-{stem}',
+                rate_bounds=(0.8, 1.2), quality_stretch=False,
+            )
+            target_rendered = progressive_beat_stretch(
+                target, output_rate, target_beats, output_beat_durations, f'target-{stem}',
+                rate_bounds=(0.8, 1.2), quality_stretch=False,
+            )
+            source_rendered = source_rendered[:, :output_length]
+            target_rendered = target_rendered[:, :output_length]
+        # Preserve WaveForge's complementary v2 processing inside the stem path:
+        # - drums keep transient shape and pitch;
+        # - harmonic stems can receive pitch correction and filter motion;
+        # - source vocals/other retain the reverb-dip phrase exit.
+        effects = plan.get('djEffects') or {}
+        v2_choreography = v2.get('choreography') or {}
+        if stem != 'drums' and effects.get('filterSweep', True) and not is_folia_backend:
+            source_rendered, target_rendered = apply_filter_sweep(
+                source_rendered, target_rendered, output_rate, output_beat_durations,
+                float(np.clip(effects.get('intensity', 0.55), 0.0, 1.0)),
+            )
+        if stem in ('vocals', 'other') and v2_choreography.get('reverbDip', False) and not is_folia_backend:
+            source_rendered = apply_reverb_dip(
+                source_rendered, output_rate, output_beat_durations,
+                float(INTENSITY_FACTOR.get(v2_choreography.get('intensity', 'standard'), 0.75)),
+                start_beat=v2_choreography.get('reverbStartBeat'),
+            )
+        stem_plan = choreography.get(stem) or {}
+        source_gain = _piecewise_gain(stem_plan.get('source') or [], output_length, output_rate)
+        target_gain = _piecewise_gain(stem_plan.get('target') or [], output_length, output_rate)
+        output += source_rendered * source_gain[None, :] + target_rendered * target_gain[None, :] * target_compensation
+    logger.info("🎚️ [%s] HTDemucs stem choreography applied: %s", "folia" if is_folia_backend else "v2", choreography.get('style', 'unknown'))
+    return output
+
+
+def render_transition_folia(params: dict) -> dict:
+    """Folia-only renderer: Beat This grid + HTDemucs artifacts, without v2 full-mix DSP."""
+    try:
+        plan = params['plan']
+        output_path = params['outputPath']
+        v2 = plan.get('v2') or {}
+        if v2.get('backend') != 'folia-htdemucs':
+            raise ValueError('Folia renderer requires folia-htdemucs backend')
+        artifacts = v2.get('stemArtifacts') or {}
+        choreography = v2.get('stemChoreography') or {}
+        if not artifacts.get('source') or not artifacts.get('target') or not choreography:
+            raise ValueError('Folia renderer requires source/target HTDemucs artifacts and choreography')
+        source_stem_path = artifacts['source'].get('files', {}).get('vocals')
+        if not source_stem_path or not os.path.isfile(source_stem_path):
+            raise ValueError('Folia renderer requires a readable source stem')
+        with AudioFile(source_stem_path) as reader:
+            output_rate = reader.samplerate
+        without_grid = bool(v2.get('withoutBeatGrid', False))
+        if without_grid:
+            output_length = max(1, int(round((plan['sourceEndTime'] - plan['sourceStartTime']) * output_rate)))
+            beat_durations = [0.5] * max(1, int(output_length / output_rate / 0.5) + 1)
+        else:
+            source_beats = [t - plan['sourceStartTime'] for t in plan.get('sourceBeatTimes', [])]
+            target_beats = [t - plan['targetStartTime'] for t in plan.get('targetBeatTimes', [])]
+            beat_durations = v2_output_beat_durations(source_beats, target_beats, plan['beatCount'])
+            output_length = max(1, int(round(sum(beat_durations) * output_rate)))
+        output = _render_stem_mix(plan, output_rate, output_length, beat_durations, without_grid)
+        if output is None:
+            raise ValueError('HTDemucs stem output unavailable')
+        if not np.all(np.isfinite(output)):
+            raise ValueError('Folia output contains non-finite samples')
+        peak = float(np.max(np.abs(output)))
+        if peak > 0.98:
+            output = np.tanh(output * 0.95) * 0.95
+        size = write_wav_atomic(output_path, output, output_rate, output.shape[0])
+        duration = output.shape[1] / output_rate
+        target_span = max(0.0, plan['targetEndTime'] - plan['targetStartTime'])
+        target_resume_time = plan['targetStartTime'] + min(duration, target_span)
+        return {
+            'success': True, 'outputPath': output_path, 'duration': duration,
+            'sampleRate': output_rate, 'channels': output.shape[0], 'size': size,
+            'stretchApplied': True, 'djEffectsApplied': False,
+            'targetResumeTime': target_resume_time,
+            'rendererVersion': plan.get('rendererVersion', 'folia-beatthis-htdemucs-v1'),
+            'backend': 'folia-htdemucs', 'beatProvider': v2.get('beatProvider') or 'fallback',
+            'v2ChoreographyApplied': False, 'stemMixApplied': True,
+        }
+    except Exception as error:
+        logger.error(f'[folia] Render failed: {error}', exc_info=True)
+        return {'success': False, 'error': str(error), 'backend': 'folia-unavailable'}
+
+
+def render_transition_v2(params: dict) -> dict:
+    """AutoMix enhanced v2 full-mix DSP renderer; isolated from the Folia stem renderer."""
     try:
         plan = params['plan']
         source_path = params['sourceAudioPath']
@@ -1057,6 +1220,9 @@ def render_transition_v2(params: dict) -> dict:
         output_path = params['outputPath']
 
         v2 = plan.get('v2') or {}
+        if v2.get('backend') == 'folia-htdemucs':
+            raise ValueError('Folia plans must use the render_folia worker message')
+        is_folia_backend = False
         choreography = v2.get('choreography') or {}
         style = choreography.get('style', 'clean')
         intensity = float(INTENSITY_FACTOR.get(choreography.get('intensity', 'standard'), 0.75))
@@ -1066,7 +1232,7 @@ def render_transition_v2(params: dict) -> dict:
         use_reverb_dip = bool(choreography.get('reverbDip', False))
         use_noise_sweep = bool(choreography.get('noiseSweep', False))
 
-        logger.info(f"🎵 [v2] Rendering enhanced transition: {plan['beatCount']} beats, "
+        logger.info(f"🎵 [{'folia' if is_folia_backend else 'v2'}] Rendering enhanced transition: {plan['beatCount']} beats, "
                    f"style={style}, intensity={choreography.get('intensity', 'standard')}, "
                    f"{plan['sourceBpm']:.1f} → {plan['targetBpm']:.1f} BPM")
 
@@ -1230,7 +1396,7 @@ def render_transition_v2(params: dict) -> dict:
         # 5.5) 人声 ducking：目标窗口逐拍 vocalness 高的位置压低进入音量，
         #      避免与源曲人声重叠（plan.v2.targetVocalness 由计划器提供）。
         target_vocalness = (plan.get('v2') or {}).get('targetVocalness') or []
-        if target_vocalness and len(target_vocalness) >= 2:
+        if target_vocalness and len(target_vocalness) >= 2 and not is_folia_backend:
             points = []
             count = len(target_vocalness)
             for i, vocal in enumerate(target_vocalness):
@@ -1240,19 +1406,30 @@ def render_transition_v2(params: dict) -> dict:
             duck_envelope = beat_automation(target_with_gain.shape[1], output_sample_rate, output_beat_durations, points)
             target_with_gain = target_with_gain * duck_envelope[None, :]
 
-        # 6) 混合
+        # 6) 混合：有 HTDemucs artifacts 时用四轨 choreography；否则保持现有 full-mix DSP。
         channels = max(source_with_gain.shape[0], target_with_gain.shape[0])
-        output = np.zeros((channels, output_length), dtype=np.float32)
+        stem_output = _render_stem_mix(plan, output_sample_rate, output_length, output_beat_durations, without_grid)
+        stem_mix_applied = stem_output is not None
+        # Folia uses the Beat This grid only as a timing contract and lets the
+        # separated stems own the transition. Do not inject v2-only FX or DJ automation.
+        if is_folia_backend and stem_output is not None:
+            output = stem_output
+            stem_mix_applied = True
+            effects_applied = False
+            echo_return = np.zeros_like(output, dtype=np.float32)
+            logger.info("🎚️ [folia] Beat This + HTDemucs stem transition applied")
+        else:
+            output = np.zeros((channels, output_length), dtype=np.float32) if stem_output is None else stem_output
         # 回声可闻度 boost（v2 专用；v1 的 create_echo_out 产物不受影响）
         fx_echo_boost = 2.0
-        if without_grid and len(automation) != 2:
+        if stem_output is None and without_grid and len(automation) != 2:
             # 图割频谱 crossfade（大 BPM 差无节拍对齐路径）：逐频段选切换时刻，
             # 避免宽带等功率叠加的相位抵消/浑浊；失败自动回退逐点相加。
             output = spectral_seam_mix(source_with_gain, target_with_gain, output_sample_rate)
             for ch in range(min(channels, output.shape[0])):
                 if ch < echo_return.shape[0]:
                     output[ch] += echo_return[ch] * fx_echo_boost
-        else:
+        elif stem_output is None:
             for ch in range(channels):
                 if ch < source_with_gain.shape[0]:
                     output[ch] += source_with_gain[ch]
@@ -1260,6 +1437,10 @@ def render_transition_v2(params: dict) -> dict:
                     output[ch] += echo_return[ch] * fx_echo_boost
                 if ch < target_with_gain.shape[0]:
                     output[ch] += target_with_gain[ch]
+        else:
+            # Stem choreography owns the source/target mix; the existing echo/riser/noise layers remain complementary.
+            for ch in range(min(channels, echo_return.shape[0])):
+                output[ch] += echo_return[ch] * fx_echo_boost
 
         reference_rms = max(
             float(np.sqrt(np.mean(source_stretched * source_stretched))),
@@ -1272,15 +1453,15 @@ def render_transition_v2(params: dict) -> dict:
         # 特效可闻度 boost：v2 过渡应能听出 DJ 效果（用户反馈"听不到额外音效"）。
         # 共享特效函数（v1 也在用）不改，只在 v2 调用处放大；v1 渲染产物不受影响。
         fx_boost = 2.0
-        if use_riser:
+        if use_riser and not is_folia_backend:
             output += create_riser(
                 channels, output_length, output_sample_rate, output_beat_durations, intensity, reference_rms, seed_text,
                 start_beat=choreography.get('riserStartBeat'),
                 end_freq=float(choreography.get('riserEndFreq', 2400)),
             ) * fx_boost
-        if drum_fill_beats > 0:
+        if drum_fill_beats > 0 and not is_folia_backend:
             output += create_drum_fill(channels, output_length, output_sample_rate, output_beat_durations, drum_fill_beats, intensity, reference_rms, seed_text) * fx_boost
-        if use_noise_sweep:
+        if use_noise_sweep and not is_folia_backend:
             output += create_sweep_fx(channels, output_length, output_sample_rate, output_beat_durations, float(effects.get('intensity', 0.55)), reference_rms, seed_text) * fx_boost
 
         # 8) Pedalboard 轻压缩 + 软限幅（与 v1 相同）
@@ -1296,11 +1477,9 @@ def render_transition_v2(params: dict) -> dict:
             logger.info(f"Applying soft limiting (peak: {max_amplitude:.2f})")
             output = np.tanh(output * 0.95) * 0.95
 
-        with AudioFile(output_path, 'w', output_sample_rate, num_channels=channels) as f:
-            f.write(output)
+        file_size = write_wav_atomic(output_path, output, output_sample_rate, channels)
 
         duration = output_length / output_sample_rate
-        file_size = os.path.getsize(output_path)
         logger.info(f"🎉 [v2] Render complete: {channels} channels, {duration:.2f}s, {file_size / 1024:.1f} KB")
 
         return {
@@ -1314,7 +1493,10 @@ def render_transition_v2(params: dict) -> dict:
             'djEffectsApplied': effects_applied,
             'targetResumeTime': resume_time,
             'rendererVersion': plan.get('rendererVersion', 'unknown'),
+            'backend': 'folia-htdemucs' if is_folia_backend and stem_mix_applied else ('v2-dsp' if is_folia_backend else 'v2-dsp'),
+            'beatProvider': v2.get('beatProvider') or 'fallback',
             'v2ChoreographyApplied': True,
+            'stemMixApplied': stem_mix_applied,
         }
     except Exception as e:
         logger.error(f"[v2] Render failed: {e}", exc_info=True)
@@ -1343,6 +1525,13 @@ def main():
                 }
             elif message_type == 'render_v2':
                 result = render_transition_v2(request['params'])
+                response = {
+                    'type': 'result',
+                    'id': message_id,
+                    'data': result
+                }
+            elif message_type == 'render_folia':
+                result = render_transition_folia(request['params'])
                 response = {
                     'type': 'result',
                     'id': message_id,

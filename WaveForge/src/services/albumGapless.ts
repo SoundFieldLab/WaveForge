@@ -128,6 +128,10 @@ export class AlbumGaplessService {
       onTransitionStart?: (targetTrackKey: string, duration: number) => void
       onTransitionProgress?: (progress: number) => void
       onTransitionCancel?: () => void
+      /** 分析期静音边界快查（AutoMix 分析缓存复用）：有值时确定性触发混音，
+       *  替代尾部运行时探测的"就近"判定（QQ 无缝跳过首尾静音同语义）。
+       *  无缓存/无静音返回 null，维持原有探测路径 */
+      getTrackAnalysis?: (trackKey: string) => { introSilence: number; outroSilence: number } | null
     }
   ) {}
 
@@ -407,9 +411,10 @@ export class AlbumGaplessService {
     preload.releaseReason = reason
 
     // 如果需要重置，暂停并重置到开头
-    if ((reason === 'boundary-crossmix-reset' || 
-         reason === 'tail-silence-fast-crossmix' || 
-         reason === 'tail-direct-silence-crossmix') && 
+    if ((reason === 'boundary-crossmix-reset' ||
+         reason === 'tail-silence-fast-crossmix' ||
+         reason === 'tail-analysis-silence-crossmix' ||
+         reason === 'tail-direct-silence-crossmix') &&
         preload.prerollStarted) {
       try {
         preload.media.pause()
@@ -606,6 +611,19 @@ export class AlbumGaplessService {
       }
 
       if (!preload.media || preload.media.readyState < 2) return
+
+      // 确定性裁剪触发（分析期数据优先）：源曲分析给出 outroSilence > 0 时，
+      // 在"有声内容结束"处（remaining ≤ outroSilence + 混音时长）精确启动混音，
+      // 不再依赖运行时探测的就近判定。outroSilence ≈ 0（真正的无缝专辑）时
+      // 不启用——保持边界/探测路径原语义。
+      const analysisSilence = this.deps.getTrackAnalysis?.(preload.sourceKey)
+      if (analysisSilence && Number.isFinite(analysisSilence.outroSilence) && analysisSilence.outroSilence > 0.05) {
+        if (remaining <= analysisSilence.outroSilence + ALBUM_GAPLESS_MIX_SECONDS) {
+          debugLog(`⚡ [AlbumGapless] 分析期裁剪触发：outroSilence=${analysisSilence.outroSilence.toFixed(2)}s, remaining=${remaining.toFixed(2)}s`)
+          void this.startMix(preload, 'tail-analysis-silence-crossmix', remaining)
+        }
+        return
+      }
 
       // 尾部静音检测
       const nowMs = performance.now()

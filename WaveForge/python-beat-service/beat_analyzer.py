@@ -11,12 +11,39 @@ import json
 import hashlib
 import time
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from local_service_auth import is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
+import soundfile as sf
+
+try:
+    from beat_this.inference import File2Beats
+    BEAT_THIS_IMPORT_ERROR = None
+except ImportError as error:
+    File2Beats = None
+    BEAT_THIS_IMPORT_ERROR = f'{error.__class__.__name__}: Beat This runtime unavailable'
+
+BEAT_THIS_CHECKPOINT = os.environ.get('BEAT_THIS_CHECKPOINT') or os.environ.get('WAVEFORGE_BEAT_MODEL_PATH') or 'final0'
+BEAT_THIS_TRACKER = None
+BEAT_THIS_INFERENCE_LOCK = threading.Lock()
+BEAT_THIS_INIT_ERROR = BEAT_THIS_IMPORT_ERROR
+if File2Beats is not None:
+    try:
+        BEAT_THIS_TRACKER = File2Beats(checkpoint_path=BEAT_THIS_CHECKPOINT, device='cpu', float16=False, dbn=False)
+        BEAT_THIS_INIT_ERROR = None
+    except Exception as error:
+        BEAT_THIS_INIT_ERROR = f'{error.__class__.__name__}: Beat This model initialization failed'
+
 
 # 设置 UTF-8 编码
 if sys.platform == 'win32':
@@ -25,7 +52,14 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"])
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"], allow_headers=["Content-Type", "X-WaveForge-Local-Token"])
+
+
+@app.before_request
+def require_local_service_token():
+    if not is_authorized_local_request(request.headers.get('X-WaveForge-Local-Token', '')):
+        return jsonify({'error': 'unauthorized'}), 403
+    return None
 
 
 def default_cache_root() -> Path:
@@ -44,7 +78,7 @@ CACHE_ROOT = default_cache_root()
 CACHE_DIR = CACHE_ROOT / "beat_analysis"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-ANALYSIS_VERSION = "librosa-dsp-v2"
+ANALYSIS_VERSION = "beat-this-dsp-v1"
 CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 CACHE_MAX_SIZE_BYTES = 512 * 1024 * 1024
 
@@ -105,9 +139,16 @@ def convert_to_native_types(obj):
     else:
         return obj
 
-def get_cache_key(track_key: str, duration: float) -> str:
-    """生成缓存键"""
-    return hashlib.md5(f"{track_key}:{duration}:{ANALYSIS_VERSION}".encode()).hexdigest()
+def get_cache_key(track_key: str, duration: float, audio_path: str = '', source_signature: str = '') -> str:
+    """生成与实际音频文件绑定的缓存键，避免同曲换源后复用旧分析。"""
+    resolved_path = os.path.normcase(os.path.abspath(audio_path)) if audio_path else ''
+    try:
+        stat = os.stat(audio_path)
+        file_identity = f'{resolved_path}:{stat.st_mtime_ns}:{stat.st_size}'
+    except OSError:
+        file_identity = resolved_path
+    fingerprint = f'{track_key}:{duration}:{file_identity}:{source_signature}:{ANALYSIS_VERSION}'
+    return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def load_from_cache(cache_key: str):
     """从缓存加载分析结果"""
@@ -200,47 +241,33 @@ def _detect_sections(beat_features, duration):
     return sections
 
 
-def analyze_audio_file(file_path: str, track_key: str) -> dict:
-    """Analyze beat timing and beat-synchronous transition features with Librosa."""
-    print(f"📊 开始分析音频: {track_key}")
-    print(f"   文件路径: {file_path}")
+def _detect_silence_bounds(y: np.ndarray, sr: int, frame_duration: float = 0.05) -> tuple:
+    """固定绝对阈值（-45dBFS）的首尾静音边界（秒）。
 
-    y, sr = librosa.load(file_path, sr=22050, mono=True)
-    duration = float(librosa.get_duration(y=y, sr=sr))
-    print(f"   音频时长: {duration:.2f}s, 采样率: {sr}Hz")
+    语义与浏览器回退分析保持一致：逐帧 RMS 对比绝对幅度阈值，不随曲目响度
+    自适应（相对峰值/中位数的自适应阈值会把安静乐段误判成静音，导致裁剪点
+    漂移）。帧长 50ms，边界取最后一帧有声位置的帧边界。
+    """
+    amplitude_threshold = 10.0 ** (-45.0 / 20.0)  # ≈0.00562 线性幅度
+    frame_len = max(1, int(sr * frame_duration))
+    n_frames = len(y) // frame_len
+    if n_frames <= 0:
+        return 0.0, 0.0
+    frames = np.abs(y[: n_frames * frame_len].reshape(n_frames, frame_len))
+    rms = np.sqrt(np.mean(frames * frames, axis=1))
+    loud = np.nonzero(rms > amplitude_threshold)[0]
+    if len(loud) == 0:
+        return 0.0, 0.0
+    first = int(loud[0])
+    last = int(loud[-1])
+    intro = first * frame_duration
+    outro = max(0.0, (n_frames - (last + 1)) * frame_duration)
+    return float(intro), float(outro)
 
+
+def _extract_beat_features(y: np.ndarray, sr: int, beats: np.ndarray) -> list:
     hop_length = 512
-    onset_envelope = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
-    tempo, beat_frames = librosa.beat.beat_track(
-        onset_envelope=onset_envelope,
-        sr=sr,
-        hop_length=hop_length,
-        units='frames',
-    )
-    # 静音音频时 librosa 返回 tempo=0.0，需回退为默认 BPM
-    if tempo == 0 or not np.asarray(beat_frames).size:
-        tempo = 120.0
-    tempo = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 120.0
-    beat_frames = np.asarray(beat_frames, dtype=int)
-    beats = librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length).astype(float).tolist()
-
-    beat_strengths = onset_envelope[np.clip(beat_frames, 0, max(0, len(onset_envelope) - 1))] if len(beat_frames) else np.array([])
-    phase_scores = [float(np.mean(beat_strengths[phase::4])) if len(beat_strengths[phase::4]) else 0.0 for phase in range(4)]
-    downbeat_phase = int(np.argmax(phase_scores)) if phase_scores else 0
-    downbeat_indices = list(range(downbeat_phase, len(beats), 4))
-    downbeats = [beats[index] for index in downbeat_indices]
-
-    intervals = np.diff(beats)
-    if len(intervals):
-        consistency = float(np.clip(1.0 - np.std(intervals) / max(1e-6, np.median(intervals)), 0.0, 1.0))
-    else:
-        consistency = 0.0
-    if len(beat_strengths) and np.max(onset_envelope) > 0:
-        strength = float(np.clip(np.mean(beat_strengths) / np.percentile(onset_envelope, 90), 0.0, 1.0))
-    else:
-        strength = 0.0
-    confidence = float(np.clip(0.2 + consistency * 0.55 + strength * 0.25, 0.0, 0.95))
-
+    beat_frames = librosa.time_to_frames(beats, sr=sr, hop_length=hop_length)
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length)
     rms_frames = librosa.feature.rms(y=y, hop_length=hop_length)[0]
@@ -249,26 +276,21 @@ def analyze_audio_file(file_path: str, track_key: str) -> dict:
     flatness_frames = librosa.feature.spectral_flatness(S=magnitude)[0]
     frequencies = librosa.fft_frequencies(sr=sr)
     vocal_band = (frequencies >= 180) & (frequencies <= 4200)
-    feature_frame_count = min(
-        chroma.shape[1], mfcc.shape[1], len(rms_frames), len(zcr_frames),
-        magnitude.shape[1], len(flatness_frames),
-    )
-
-    beat_features = []
+    feature_frame_count = min(chroma.shape[1], mfcc.shape[1], len(rms_frames), len(zcr_frames), magnitude.shape[1], len(flatness_frames))
+    features = []
     for index, beat_time in enumerate(beats):
-        frame_start = int(beat_frames[index])
-        frame_start = min(frame_start, max(0, feature_frame_count - 1))
-        frame_end = int(beat_frames[index + 1]) if index + 1 < len(beat_frames) else min(feature_frame_count, frame_start + 24)
-        frame_end = max(frame_start + 1, min(feature_frame_count, frame_end))
-        frame_slice = slice(frame_start, frame_end)
-        rms = float(np.mean(rms_frames[frame_slice])) if frame_start < len(rms_frames) else 0.0
+        start = min(int(beat_frames[index]), max(0, feature_frame_count - 1))
+        end = int(beat_frames[index + 1]) if index + 1 < len(beat_frames) else min(feature_frame_count, start + 24)
+        end = max(start + 1, min(feature_frame_count, end))
+        frame_slice = slice(start, end)
+        rms = float(np.mean(rms_frames[frame_slice])) if start < len(rms_frames) else 0.0
         spectrum = magnitude[:, frame_slice]
         total_energy = float(np.sum(spectrum))
         mid_energy = float(np.sum(spectrum[vocal_band])) / max(1e-9, total_energy)
-        flatness = float(np.mean(flatness_frames[frame_slice])) if frame_start < len(flatness_frames) else 1.0
-        zcr = float(np.mean(zcr_frames[frame_slice])) if frame_start < len(zcr_frames) else 1.0
+        flatness = float(np.mean(flatness_frames[frame_slice])) if start < len(flatness_frames) else 1.0
+        zcr = float(np.mean(zcr_frames[frame_slice])) if start < len(zcr_frames) else 1.0
         vocalness = float(np.clip(mid_energy * np.sqrt(max(0.0, 1.0 - flatness)) * (1.0 - min(1.0, zcr * 5.0)), 0.0, 1.0))
-        beat_features.append({
+        features.append({
             'beatIndex': index,
             'time': float(beat_time),
             'loudness': float(librosa.amplitude_to_db(np.asarray([max(rms, 1e-8)]), ref=1.0)[0]),
@@ -278,52 +300,86 @@ def analyze_audio_file(file_path: str, track_key: str) -> dict:
             'vocalness': vocalness,
             'energy': rms * rms,
         })
+    return features
 
+
+def analyze_audio_file(file_path: str, track_key: str, source_signature: str = '') -> dict:
+    """Analyze beat timing with required Beat This plus librosa feature extraction."""
+    if BEAT_THIS_TRACKER is None:
+        raise RuntimeError(BEAT_THIS_INIT_ERROR or 'Beat This model is unavailable')
+    print(f"📊 开始分析音频: {track_key}")
+    print(f"   文件路径: {file_path}")
+
+    y, sr = librosa.load(file_path, sr=22050, mono=True)
+    duration = float(librosa.get_duration(y=y, sr=sr))
+    print(f"   音频时长: {duration:.2f}s, 采样率: {sr}Hz")
+
+    with BEAT_THIS_INFERENCE_LOCK:
+        beats_raw, downbeats_raw = BEAT_THIS_TRACKER(file_path)
+    beats = np.asarray(beats_raw.tolist() if hasattr(beats_raw, 'tolist') else beats_raw, dtype=float)
+    downbeats = np.asarray(downbeats_raw.tolist() if hasattr(downbeats_raw, 'tolist') else downbeats_raw, dtype=float)
+    beats = np.asarray(sorted({float(value) for value in beats if np.isfinite(value) and value >= 0}), dtype=float)
+    downbeats = np.asarray(sorted({float(value) for value in downbeats if np.isfinite(value) and value >= 0}), dtype=float)
+    if beats.size < 2 or downbeats.size < 2:
+        raise RuntimeError('Beat This returned insufficient beat/downbeat data')
+
+    intervals = np.diff(beats)
+    median_interval = float(np.median(intervals)) if intervals.size else 0.5
+    tempo = float(np.clip(60.0 / max(1e-6, median_interval), 30.0, 300.0))
+    consistency = float(np.clip(1.0 - np.std(intervals) / max(1e-6, median_interval), 0.0, 1.0)) if intervals.size else 0.0
+    confidence = float(np.clip(0.35 + consistency * 0.6, 0.0, 0.98))
+    beats_per_bar = []
+    for index in range(len(downbeats) - 1):
+        count = int(np.sum((beats >= downbeats[index]) & (beats < downbeats[index + 1])))
+        if count > 0: beats_per_bar.append(count)
+    meter = int(np.median(beats_per_bar)) if beats_per_bar else 4
+
+    beat_features = _extract_beat_features(y, sr, beats)
     sections = _detect_sections(beat_features, duration)
-    non_silent = librosa.effects.split(y, top_db=40)
-    if len(non_silent):
-        intro_silence = float(non_silent[0][0] / sr)
-        outro_silence = float(max(0, len(y) - non_silent[-1][1]) / sr)
-    else:
-        intro_silence = 0.0
-        outro_silence = 0.0
+    intro_silence, outro_silence = _detect_silence_bounds(y, sr)
+    audio_format = None
+    try:
+        info = sf.info(file_path)
+        audio_format = {'sampleRate': int(info.samplerate), 'channels': int(info.channels)}
+    except Exception as exc:
+        print(f"   ⚠️ 无法读取源文件格式（跳过 audioFormat）: {exc}")
 
     timestamp = int(os.path.getmtime(file_path) * 1000) if os.path.exists(file_path) else 0
-    result = {
+    return {
         'schemaVersion': 1,
         'trackKey': track_key,
         'duration': duration,
-        'provider': 'librosa-fallback',
-        'beats': beats,
-        'downbeats': downbeats,
+        'provider': 'beat_this',
+        'beats': beats.tolist(),
+        'downbeats': downbeats.tolist(),
         'beatConfidence': [confidence] * len(beats),
-        'downbeatConfidence': [confidence * 0.85] * len(downbeats),
+        'downbeatConfidence': [confidence] * len(downbeats),
         'estimatedBpm': tempo,
-        'meter': 4,
+        'meter': meter,
         'confidence': confidence,
         'sections': sections,
         'beatFeatures': beat_features,
         'introSilence': intro_silence,
         'outroSilence': outro_silence,
+        'audioFormat': audio_format,
+        'sourceSignature': source_signature,
         'analysisVersion': ANALYSIS_VERSION,
         'createdAt': timestamp,
         'lastAccessAt': timestamp,
     }
 
-    print(
-        f"✅ 分析完成: BPM={tempo:.1f}, 节拍数={len(beats)}, "
-        f"段落数={len(sections)}, 置信度={confidence:.2f}"
-    )
-    return result
-
 @app.route('/health', methods=['GET'])
 def health():
     """健康检查"""
     return jsonify({
-        'status': 'ok',
-        'service': 'librosa',
-        'version': ANALYSIS_VERSION
-    })
+        'status': 'ok' if BEAT_THIS_TRACKER is not None else 'failed',
+        'service': 'beat_this' if BEAT_THIS_TRACKER is not None else 'unavailable',
+        'provider': 'beat_this' if BEAT_THIS_TRACKER is not None else 'unavailable',
+        'model': Path(BEAT_THIS_CHECKPOINT).name or 'final0',
+        'beatThisAvailable': BEAT_THIS_TRACKER is not None,
+        'version': ANALYSIS_VERSION,
+        **({'error': BEAT_THIS_INIT_ERROR} if BEAT_THIS_INIT_ERROR else {}),
+    }), (200 if BEAT_THIS_TRACKER is not None else 503)
 
 def _validate_audio_path(audio_path: str):
     """校验音频路径：扩展名必须在允许列表内，且文件大小不超过上限。
@@ -402,6 +458,7 @@ def analyze():
         track_key = str(data.get('trackKey') or '').strip()
         audio_path = str(data.get('audioPath') or '').strip()
         duration = data.get('duration', 0)
+        source_signature = str(data.get('sourceSignature') or '').strip()
         
         print(f"📥 收到分析请求:")
         print(f"   trackKey: {track_key}")
@@ -414,9 +471,11 @@ def analyze():
         # 校验 audioPath 必须是字符串（而非数字/布尔等被 str() 强转的值）
         if not isinstance(data.get('audioPath'), str):
             return jsonify({'error': 'audioPath must be a string'}), 400
+        if not is_allowed_audio_path(audio_path):
+            return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
         
         # 检查缓存
-        cache_key = get_cache_key(track_key, duration)
+        cache_key = get_cache_key(track_key, duration, audio_path, source_signature)
         cached = load_from_cache(cache_key)
         if cached:
             print(f"💾 使用缓存: {track_key}")
@@ -446,7 +505,7 @@ def analyze():
             return jsonify({'error': validation_error}), 400
         
         # 分析音频
-        result = analyze_audio_file(audio_path, track_key)
+        result = analyze_audio_file(audio_path, track_key, source_signature)
         
         # 确保所有数据都是原生 Python 类型
         result = convert_to_native_types(result)
@@ -456,17 +515,12 @@ def analyze():
         
         return jsonify(result)
     
-    except Exception as e:
-        error_msg = str(e)
-        print(f"[ERROR] 分析失败: {error_msg}")
-        import traceback
-        tb_str = traceback.format_exc()
-        print(tb_str)
+    except Exception as error:
+        error_type = error.__class__.__name__
+        print(f"[ERROR] 分析失败: {error_type}")
         return jsonify({
-            'error': error_msg,
-            'traceback': tb_str,
-            'trackKey': data.get('trackKey', 'unknown'),
-            'audioPath': data.get('audioPath', 'unknown')
+            'error': f'Audio analysis failed: {error_type}',
+            'trackKey': str(data.get('trackKey') or 'unknown'),
         }), 500
 
 @app.route('/clear-cache', methods=['POST'])
@@ -524,6 +578,7 @@ if __name__ == '__main__':
     print(f"Cache directory: {CACHE_DIR}")
     print(f"Log file: {log_file}")
     print(f"Analysis version: {ANALYSIS_VERSION}")
+    print(f"Beat This model: {Path(BEAT_THIS_CHECKPOINT).name if BEAT_THIS_TRACKER is not None else 'unavailable'}")
     print(f"Service URL: http://localhost:3002")
     print("=" * 60)
     

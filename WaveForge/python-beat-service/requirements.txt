@@ -1,6 +1,2 @@
-flask==3.0.0
-flask-cors==4.0.0
-librosa>=0.11.0
-numpy>=1.26.0
-soundfile>=0.12.1
-setuptools>=65.0.0,<70.0.0
+# Canonical dependency lock for the embedded Beat This service.
+-r ../requirements.txt

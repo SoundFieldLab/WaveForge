@@ -60,6 +60,33 @@ const TARGET = makeAnalysis('netease-target')
 const SMART_SETTINGS = { beatMatching: true, skipSilence: false }
 
 describe('planTransition（过渡计划降级逻辑）', () => {
+  it('标准 AutoMix v1 代表性计划契约保持不变', () => {
+    const plan = planTransition(SOURCE, TARGET, SMART_SETTINGS, 'smart-rendered')
+    expect({
+      id: plan.id,
+      strategy: plan.strategy,
+      sourceStartTime: plan.sourceStartTime,
+      sourceEndTime: plan.sourceEndTime,
+      targetStartTime: plan.targetStartTime,
+      targetEndTime: plan.targetEndTime,
+      beatCount: plan.beatCount,
+      rendererVersion: plan.rendererVersion,
+      curvePoints: plan.gainCurve.source.length,
+      hasV2Fields: plan.v2 !== undefined,
+    }).toEqual({
+      id: 'netease-source->netease-target:smart-rendered:78.000-90.000:0.000-12.000:24:0.0:pitch-preserving-beatgrid-djfx-v4',
+      strategy: 'smart-rendered',
+      sourceStartTime: 78,
+      sourceEndTime: 90,
+      targetStartTime: 0,
+      targetEndTime: 12,
+      beatCount: 24,
+      rendererVersion: 'pitch-preserving-beatgrid-djfx-v4',
+      curvePoints: 384,
+      hasV2Fields: false,
+    })
+  })
+
   it('完整可靠节拍网格 + 相同 BPM 时使用智能渲染策略', () => {
     const plan = planTransition(SOURCE, TARGET, SMART_SETTINGS, 'smart-rendered')
     expect(plan.strategy).toBe('smart-rendered')
@@ -310,7 +337,9 @@ describe('planTransitionV2（AutoMix 增强版）', () => {
     const plan = planTransitionV2(SOURCE, TARGET, SMART_SETTINGS, 'smart-rendered-v2')
     expect(plan.strategy).toBe('smart-rendered-v2')
     expect(plan.fallbackReason).toBeUndefined()
-    expect(plan.rendererVersion).toContain('v2')
+    expect(plan.rendererVersion).toContain('folia')
+    expect(plan.v2?.backend).toBe('folia-htdemucs')
+    expect(plan.v2?.beatProvider).toBe('beat_this')
     expect(plan.v2).toBeDefined()
     expect(plan.v2?.choreography).toBeDefined()
     expect(plan.v2?.intensity).toBe('standard')
@@ -407,7 +436,12 @@ describe('planTransitionV2（AutoMix 增强版）', () => {
     expect(v2.id).toContain('smart-rendered-v2')
     expect(v1.v2).toBeUndefined()
     expect(v1.rendererVersion).toContain('pitch-preserving-beatgrid-djfx')
-    expect(v2.rendererVersion).toContain('automix-v2')
+    expect(v2.rendererVersion).toContain('folia')
+    expect(v2.v2?.backend).toBe('folia-htdemucs')
+    const dj = planTransitionV2(SOURCE, TARGET, { ...SMART_SETTINGS, aiMix: true }, 'smart-rendered-v2')
+    expect(dj.v2?.backend).toBe('djtransgan')
+    expect(dj.rendererVersion).toContain('automix-v2-dsp')
+    expect(dj.id).not.toBe(v2.id)
   })
 })
 
@@ -608,5 +642,20 @@ describe('planTransitionV2 谐波变调（目标窗口变调到源曲主音）',
   it('低置信度（one-hot chroma，detectKey 置信度≈0.31<0.4）：不变调', () => {
     const plan = planTransitionV2(SOURCE, TARGET, SMART_SETTINGS, 'smart-rendered-v2')
     expect(plan.v2?.pitchShiftSemitones).toBeUndefined()
+  })
+})
+
+describe('尾部静音确定性裁剪（outroSilence，skipSilence）', () => {
+  it('源曲有大段尾静音时，过渡窗口不越过 duration - outroSilence', () => {
+    // 120s 曲目带 20s 尾静音：有声内容只到 100s，out 点必须 ≤100s
+    const source = makeAnalysis('tail-silence-source', { outroSilence: 20 })
+    const plan = planTransition(source, TARGET, { beatMatching: true, skipSilence: true }, 'smart-rendered')
+    expect(plan.sourceEndTime).toBeLessThanOrEqual(100 + 1e-6)
+  })
+
+  it('v2 同样消费 outroSilence 裁剪', () => {
+    const source = makeAnalysis('tail-silence-source-v2', { outroSilence: 20 })
+    const plan = planTransitionV2(source, TARGET, { beatMatching: true, skipSilence: true, intensity: 'standard' }, 'smart-rendered-v2')
+    expect(plan.sourceEndTime).toBeLessThanOrEqual(100 + 1e-6)
   })
 })

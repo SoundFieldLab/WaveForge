@@ -10,6 +10,31 @@ export interface PlaybackTimeStore {
   publish: (state: Partial<PlaybackTimeSnapshot>) => void
 }
 
+export interface PlaybackTimeCommitSample {
+  currentTime: number
+  isPlaying?: boolean
+  presentationKey: string
+}
+
+/**
+ * Gates App-level React state to discrete presentation changes. Continuous consumers
+ * should subscribe to PlaybackTimeStore directly instead of using this gate.
+ */
+export function createPlaybackTimeCommitGate() {
+  let lastTime = 0
+  let lastPresentationKey = ''
+
+  return (sample: PlaybackTimeCommitSample) => {
+    const discontinuity = sample.currentTime === 0 || sample.currentTime + 0.5 < lastTime
+    const presentationChanged = sample.presentationKey !== lastPresentationKey
+    const shouldCommit = sample.isPlaying === false || discontinuity || presentationChanged
+
+    lastTime = sample.currentTime
+    lastPresentationKey = sample.presentationKey
+    return shouldCommit
+  }
+}
+
 export function createPlaybackTimeStore(initial: Partial<PlaybackTimeSnapshot> = {}): PlaybackTimeStore {
   let snapshot: PlaybackTimeSnapshot = {
     currentTime: initial.currentTime ?? 0,

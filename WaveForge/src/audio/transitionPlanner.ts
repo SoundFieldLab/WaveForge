@@ -24,6 +24,8 @@ const MIN_ANALYSIS_CONFIDENCE_V2 = 0.35
 const RENDERER_VERSION = 'pitch-preserving-beatgrid-djfx-v4'
 // AutoMix 增强版（v2）渲染器版本：独立于 v1，参与 v2 plan.id 与磁盘缓存 key 隔离。
 const RENDERER_VERSION_V2 = 'automix-v2-dsp-r1'
+// Enhanced 默认走 Folia 的独立 stem renderer；DJTransGAN 仅由显式开关选择。
+const RENDERER_VERSION_FOLIA = 'folia-beatthis-htdemucs-automix-v2-r1'
 
 interface CandidatePoint {
   time: number
@@ -306,9 +308,17 @@ export function planTransition(
   const sourceLoudness = loudnessNormalizer(source)
   const targetLoudness = loudnessNormalizer(target)
 
-  const sourceWindows = candidatePoints(source, 0, source.duration)
+  // 尾部静音确定性裁剪（skipSilence）：过渡窗口不进入 outroSilence 静音区，
+  // out 点落在真静音边界前（-45dBFS 语义，QQ 无缝"跳过首尾静音"同款）。
+  // 分析缺失/无尾静音时 cap=duration，与原行为一致。
+  const sourceEndCap = settings.skipSilence && Number.isFinite(source.outroSilence) && source.outroSilence > 0
+    ? Math.max(0, source.duration - source.outroSilence)
+    : source.duration
+  // 过滤阈值跟随 cap 收缩：大段尾静音被裁掉后，避免候选窗被 75% 过滤器全部排除
+  const sourceEndFilter = Math.min(source.duration * 0.75, Math.max(0, sourceEndCap - 1))
+  const sourceWindows = candidatePoints(source, 0, sourceEndCap)
     .map(point => buildWindow(source, point, beatCount, sourceFrameByBeat))
-    .filter((window): window is BeatWindow => Boolean(window && window.endTime >= source.duration * 0.75))
+    .filter((window): window is BeatWindow => Boolean(window && window.endTime >= sourceEndFilter))
   const targetStartMin = settings.skipSilence ? Math.max(0, target.introSilence) : 0
   const targetStartMax = Math.max(targetStartMin, target.duration * 0.2)
   const targetWindows = candidatePoints(target, targetStartMin, targetStartMax)
@@ -759,9 +769,17 @@ export function planTransitionV2(
   const sourceLoudness = loudnessNormalizer(source)
   const targetLoudness = loudnessNormalizer(target)
 
-  const sourceWindows = candidatePoints(source, 0, source.duration)
+  // 尾部静音确定性裁剪（skipSilence）：过渡窗口不进入 outroSilence 静音区，
+  // out 点落在真静音边界前（-45dBFS 语义，QQ 无缝"跳过首尾静音"同款）。
+  // 分析缺失/无尾静音时 cap=duration，与原行为一致。
+  const sourceEndCap = settings.skipSilence && Number.isFinite(source.outroSilence) && source.outroSilence > 0
+    ? Math.max(0, source.duration - source.outroSilence)
+    : source.duration
+  // 过滤阈值跟随 cap 收缩：大段尾静音被裁掉后，避免候选窗被 75% 过滤器全部排除
+  const sourceEndFilter = Math.min(source.duration * 0.75, Math.max(0, sourceEndCap - 1))
+  const sourceWindows = candidatePoints(source, 0, sourceEndCap)
     .map(point => buildWindow(source, point, beatCount, sourceFrameByBeat))
-    .filter((window): window is BeatWindow => Boolean(window && window.endTime >= source.duration * 0.75))
+    .filter((window): window is BeatWindow => Boolean(window && window.endTime >= sourceEndFilter))
   const targetStartMin = settings.skipSilence ? Math.max(0, target.introSilence) : 0
   const targetStartMax = Math.max(targetStartMin, target.duration * 0.2)
   const targetWindows = candidatePoints(target, targetStartMin, targetStartMax)
@@ -938,11 +956,34 @@ export function planTransitionV2(
   const pitchShiftSemitones = keyPitchShiftSemitones(sourceKey, targetKey)
   // 能量平衡：target 更响 → 正，交叉中点略提前
   const energyBalance = (targetEnergy - sourceEnergy) / Math.max(0.1, targetEnergy + sourceEnergy)
+  // Stem 分离窗口围绕 v2 粗计划的实际接缝，而不是机械取整曲头/尾：
+  // source 覆盖出点前最多 30s；target 从入点开始覆盖最多 30s。
+  // 缺模型/失败时 renderer 忽略该声明并保持原 full-mix v2 DSP。
+  const stemSourceStart = Math.max(0, sourceEndTime - 40)
+  const stemTargetStart = Math.max(0, targetStartTime)
+  const stemRequirement = {
+    source: { role: 'tail' as const, startTime: stemSourceStart, duration: Math.max(0.8, sourceEndTime - stemSourceStart) },
+    target: { role: 'head' as const, startTime: stemTargetStart, duration: Math.max(0.8, Math.min(40, target.duration - stemTargetStart)) },
+    model: 'htdemucs' as const,
+    modelVersion: 'htdemucs-waveforge-v1',
+  }
+  const selectedBackend = settings.aiMix === true ? 'djtransgan' as const : 'folia-htdemucs' as const
+  const beatProvider = source.provider === 'beat_this' && target.provider === 'beat_this' ? 'beat_this' as const : 'fallback' as const
+  const rendererVersion = selectedBackend === 'folia-htdemucs' ? RENDERER_VERSION_FOLIA : RENDERER_VERSION_V2
   const v2 = {
+    backend: selectedBackend,
+    beatProvider,
+    folia: {
+      beatProvider,
+      maxStemWindowSeconds: 40,
+      sourceDownbeats: source.downbeats.filter(time => time >= sourceStartTime && time <= sourceEndTime),
+      targetDownbeats: target.downbeats.filter(time => time >= targetStartTime && time <= targetEndTime),
+    },
     key: { source: sourceKey, target: targetKey },
     choreography: anchoredChoreography,
     intensity,
     aiMix: settings.aiMix === true,
+    stemRequirement,
     withoutBeatGrid,
     ...(partialSyncN > 0 ? { partialSyncN } : {}),
     ...(pitchShiftSemitones !== 0 ? { pitchShiftSemitones } : {}),
@@ -950,7 +991,7 @@ export function planTransitionV2(
   }
 
   return {
-    id: `${source.trackKey}->${target.trackKey}:${finalStrategy}:${sourceStartTime.toFixed(3)}-${sourceEndTime.toFixed(3)}:${targetStartTime.toFixed(3)}-${targetEndTime.toFixed(3)}:${beatCount}:${gainOffsetDb.toFixed(1)}:${intensity}:${settings.aiMix ? 'ai' : 'dsp'}${withoutBeatGrid ? ':nogrid' : ''}${partialSyncN > 0 ? `:ps${partialSyncN}` : ''}${pitchShiftSemitones !== 0 ? `:pshift${pitchShiftSemitones > 0 ? '+' : ''}${pitchShiftSemitones}` : ''}:${RENDERER_VERSION_V2}`,
+    id: `${source.trackKey}->${target.trackKey}:${finalStrategy}:${sourceStartTime.toFixed(3)}-${sourceEndTime.toFixed(3)}:${targetStartTime.toFixed(3)}-${targetEndTime.toFixed(3)}:${beatCount}:${gainOffsetDb.toFixed(1)}:${intensity}:${selectedBackend}:${beatProvider}${withoutBeatGrid ? ':nogrid' : ''}${partialSyncN > 0 ? `:ps${partialSyncN}` : ''}${pitchShiftSemitones !== 0 ? `:pshift${pitchShiftSemitones > 0 ? '+' : ''}${pitchShiftSemitones}` : ''}:${rendererVersion}`,
     sourceTrackKey: source.trackKey,
     targetTrackKey: target.trackKey,
     sourceStartTime,
@@ -975,7 +1016,7 @@ export function planTransitionV2(
     strategy: finalStrategy,
     fallbackReason: reason,
     analysisVersion: source.analysisVersion === target.analysisVersion ? source.analysisVersion : 'mixed-analysis',
-    rendererVersion: RENDERER_VERSION_V2,
+    rendererVersion,
   }
 }
 

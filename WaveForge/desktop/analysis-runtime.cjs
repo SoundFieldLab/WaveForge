@@ -160,11 +160,20 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       return
     }
     
-    console.log('Starting Python analysis worker...')
-    
+    const checkpointPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'beat-this', 'final0.ckpt')
+      : path.join(__dirname, '..', 'resources', 'beat-this', 'final0.ckpt')
+    if (!fs.existsSync(checkpointPath)) {
+      console.error('Beat This checkpoint not found:', checkpointPath)
+      workerStarting = false
+      failPendingRequests(new Error('Required Beat This final0 model is missing'))
+      return
+    }
+
+    console.log('Starting Python Beat This analysis worker...')
     pythonWorker = spawn(pythonExe, ['-u', workerScript], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+      env: { ...process.env, PYTHONUNBUFFERED: '1', BEAT_THIS_CHECKPOINT: checkpointPath },
       windowsHide: true,
     })
     
@@ -240,7 +249,12 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       // Initial status message
       console.log('Worker status:', message.data)
       workerCapabilities = message.data || null
-      workerReady = true
+      workerReady = workerCapabilities?.status === 'ready' && workerCapabilities?.beatThisAvailable === true
+      if (!workerReady) {
+        const reason = workerCapabilities?.error || 'Required Beat This model is unavailable'
+        failPendingRequests(new Error(reason))
+        return
+      }
       // 成功就绪说明崩溃已恢复，重置退避计数与冷却
       workerCrashCount = 0
       workerRestartBlockedUntil = 0
@@ -431,10 +445,10 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     return {
       available: workerReady || pythonWorker !== null,
       provider: workerReady ? 'python-worker' : (pythonWorker ? 'python-starting' : 'not-started'),
-      model: workerCapabilities?.beatThisAvailable ? 'beat_this-final0' : 'librosa',
+      model: workerCapabilities?.beatThisAvailable ? 'beat_this-final0' : 'unavailable',
       version: ANALYSIS_RUNTIME_VERSION,
       reason: workerReady
-        ? `Python worker with ${workerCapabilities?.beatThisAvailable ? 'Beat This' : 'Librosa'} is ready`
+        ? `Python worker with Beat This ${workerCapabilities.model || 'final0'} is ready`
         : (pythonWorker ? 'Python worker is starting...' : 'Python worker not started'),
       cacheRoot,
       pythonAvailable: findPythonExecutable() !== null
@@ -571,11 +585,17 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       const result = await sendToWorker('analyze', {
         audioPath,
         trackKey,
-        duration: input.duration
+        duration: input.duration,
+        sourceSignature: input.sourceSignature
       })
-      if (!result || result.error || !Array.isArray(result.beats)) {
-        automixLog.log('analysis:fail', `trackKey=${trackKey} error=${result?.error || 'invalid result'}`)
-        throw new Error(result?.error || 'Analysis worker returned an invalid result')
+      const hasUsableBeatThisResult = result?.provider === 'beat_this' &&
+        result?.analysisVersion === 'beat-this-dsp-v1' &&
+        Array.isArray(result?.beats) && result.beats.length >= 8 &&
+        Array.isArray(result?.downbeats) && result.downbeats.length >= 2
+      if (!hasUsableBeatThisResult) {
+        const reason = result?.error || 'Beat This returned insufficient beat/downbeat data'
+        automixLog.log('analysis:fail', `trackKey=${trackKey} error=${reason}`)
+        throw new Error(reason)
       }
       automixLog.log('analysis:ok', [
         `trackKey=${trackKey}`,

@@ -16,6 +16,68 @@ const RENDER_TIMEOUT = 120_000 // 2 minutes for complex renders
 // 常规转换渲染（秒级过渡）远小于此值；超大渲染应走 render:getAudioUrl 流式 URL 路径。
 const MAX_IPC_AUDIO_FILE_BYTES = 256 * 1024 * 1024
 
+function fileIdentity(filePath) {
+  try {
+    const stat = fs.statSync(filePath)
+    return { path: path.resolve(filePath), size: stat.size, mtimeMs: stat.mtimeMs }
+  } catch {
+    return { path: path.resolve(String(filePath || '')), missing: true }
+  }
+}
+
+function isValidWav(filePath, expectedDuration = null) {
+  try {
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile() || stat.size < 44) return false
+    const fd = fs.openSync(filePath, 'r')
+    const header = Buffer.alloc(Math.min(stat.size, 1024 * 1024))
+    const bytesRead = fs.readSync(fd, header, 0, header.length, 0)
+    fs.closeSync(fd)
+    if (bytesRead < 44 || header.toString('ascii', 0, 4) !== 'RIFF' || header.toString('ascii', 8, 12) !== 'WAVE') return false
+    let offset = 12
+    let sampleRate = 0
+    let blockAlign = 0
+    let dataSize = 0
+    while (offset + 8 <= bytesRead) {
+      const chunkId = header.toString('ascii', offset, offset + 4)
+      const chunkSize = header.readUInt32LE(offset + 4)
+      const dataOffset = offset + 8
+      if (chunkId === 'fmt ' && chunkSize >= 16 && dataOffset + 16 <= bytesRead) {
+        sampleRate = header.readUInt32LE(dataOffset + 4)
+        blockAlign = header.readUInt16LE(dataOffset + 12)
+      } else if (chunkId === 'data') {
+        dataSize = chunkSize
+        if (dataOffset + dataSize > stat.size + 1) return false
+        break
+      }
+      offset = dataOffset + chunkSize + (chunkSize % 2)
+    }
+    if (!sampleRate || !blockAlign || dataSize <= 0) return false
+    if (expectedDuration != null) {
+      const duration = dataSize / (sampleRate * blockAlign)
+      if (!Number.isFinite(duration) || Math.abs(duration - expectedDuration) > 0.15) return false
+    }
+    return true
+  } catch { return false }
+}
+
+function writeJsonAtomic(filePath, value) {
+  const tempPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(value))
+    fs.renameSync(tempPath, filePath)
+  } finally {
+    try { fs.rmSync(tempPath, { force: true }) } catch {}
+  }
+}
+
+function noGridResumeTime(plan) {
+  return plan.targetStartTime + Math.min(
+    plan.sourceEndTime - plan.sourceStartTime,
+    plan.targetEndTime - plan.targetStartTime,
+  )
+}
+
 function externalProcessPath(candidate) {
   if (!app.isPackaged) return candidate
   return candidate.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`)
@@ -299,8 +361,9 @@ class RenderRuntime {
     try {
       this._validateRenderInput(plan, sourceAudioPath, targetAudioPath)
       // Generate cache key
-      const cacheKey = this._generateCacheKey(plan)
+      const cacheKey = this._generateCacheKey(plan, sourceAudioPath, targetAudioPath)
       const outputPath = path.join(this.cacheDir, `${cacheKey}.wav`)
+      const metaPath = `${outputPath}.json`
       automixLog.log('render:entry', [
         `strategy=${plan.strategy}`,
         `aiMix=${plan.v2?.aiMix === true}`,
@@ -311,27 +374,50 @@ class RenderRuntime {
       ].join(' '))
 
       // Check cache
-      if (fs.existsSync(outputPath)) {
-        automixLog.log('render:cache-hit', `cacheKey=${cacheKey} size=${fs.statSync(outputPath).size}`)
-        console.log('[Render Runtime] Using cached render:', cacheKey)
-        const stats = fs.statSync(outputPath)
-        if (!stats.isFile() || stats.size <= 44) {
+      if (fs.existsSync(outputPath) && fs.existsSync(metaPath)) {
+        let meta = null
+        try { meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) } catch {}
+        const expectedDuration = Number.isFinite(meta?.duration) ? meta.duration : null
+        const expectedBackend = plan.strategy === 'smart-rendered-v2'
+          ? (plan.v2?.backend || 'v2-dsp')
+          : 'standard-v1'
+        const expectedBeatProvider = plan.strategy === 'smart-rendered-v2'
+          ? (plan.v2?.beatProvider || 'fallback')
+          : null
+        const cacheIdentityMatches = meta
+          && meta.rendererVersion === plan.rendererVersion
+          && meta.backend === expectedBackend
+          && (expectedBeatProvider === null || meta.beatProvider === expectedBeatProvider)
+        if (!cacheIdentityMatches || !isValidWav(outputPath, expectedDuration)) {
           fs.rmSync(outputPath, { force: true })
+          fs.rmSync(metaPath, { force: true })
         } else {
+          const stats = fs.statSync(outputPath)
+          automixLog.log('render:cache-hit', `cacheKey=${cacheKey} size=${stats.size}`)
+          console.log('[Render Runtime] Using cached render:', cacheKey)
           // Windows may not update access time, so explicitly refresh mtime for LRU cleanup.
           const now = new Date()
           try { fs.utimesSync(outputPath, now, now) } catch {}
+          const targetResumeTime = Number.isFinite(meta.targetResumeTime)
+            ? meta.targetResumeTime
+            : plan.strategy === 'smart-rendered-v2' && plan.v2?.withoutBeatGrid === true
+              ? noGridResumeTime(plan)
+              : plan.targetEndTime
           return {
             success: true,
             outputPath,
-            duration: plan.sourceEndTime - plan.sourceStartTime,
+            duration: meta.duration,
             cached: true,
             size: stats.size,
             stretchApplied: true,
-            djEffectsApplied: plan.djEffects?.enabled === true,
-            targetResumeTime: plan.targetEndTime,
+            djEffectsApplied: meta.djEffectsApplied === true,
+            stemMixApplied: meta.stemMixApplied === true,
+            targetResumeTime,
             rendererVersion: plan.rendererVersion,
-          }
+            backend: meta.backend,
+            beatProvider: meta.beatProvider || undefined,
+            }
+
         }
       }
       
@@ -342,7 +428,9 @@ class RenderRuntime {
       // Render
       // v2 计划（smart-rendered-v2）走独立渲染函数 render_transition_v2（render_worker.py 内新增），
       // 与 v1 的 'render' 消息完全隔离；v1 路径一行未动。
-      const messageType = plan.strategy === 'smart-rendered-v2' ? 'render_v2' : 'render'
+      const messageType = plan.strategy === 'smart-rendered-v2'
+        ? (plan.v2?.backend === 'folia-htdemucs' ? 'render_folia' : 'render_v2')
+        : 'render'
       automixLog.log('render:dispatch', `messageType=${messageType}`)
       const result = await this._sendMessage(messageType, {
         plan,
@@ -356,6 +444,16 @@ class RenderRuntime {
       }
 
       if (result?.success) {
+        writeJsonAtomic(metaPath, {
+          duration: result.duration,
+          targetResumeTime: result.targetResumeTime,
+          rendererVersion: result.rendererVersion || plan.rendererVersion,
+          size: result.size,
+          backend: result.backend || (plan.strategy === 'smart-rendered-v2' ? (plan.v2?.backend || 'v2-dsp') : 'standard-v1'),
+          beatProvider: plan.strategy === 'smart-rendered-v2' ? (result.beatProvider || plan.v2?.beatProvider || 'fallback') : null,
+          stemMixApplied: result.stemMixApplied === true,
+          djEffectsApplied: result.djEffectsApplied === true,
+        })
         automixLog.log('render:ok', `cacheKey=${cacheKey} duration=${result.duration} output=${result.outputPath}`)
       } else {
         automixLog.log('render:fail', `cacheKey=${cacheKey} error=${result?.error || 'unknown'}`)
@@ -398,11 +496,10 @@ class RenderRuntime {
   }
   
   /**
-   * Generate cache key for transition plan
-   * 注意：v2 专属字段（intensity/style）只在 smart-rendered-v2 时并入 key，
-   * v1 计划的 key 字段集合与历史完全一致（保持 v1 磁盘缓存键零变化）。
+   * Generate cache key for transition plan.
+   * v1 字段集合保持历史不变；v2 额外纳入所有会改变听感的编排字段与 stem 指纹。
    */
-  _generateCacheKey(plan) {
+  _generateCacheKey(plan, sourceAudioPath = null, targetAudioPath = null) {
     const key = JSON.stringify({
       sourceTrackKey: plan.sourceTrackKey,
       targetTrackKey: plan.targetTrackKey,
@@ -417,9 +514,32 @@ class RenderRuntime {
       targetBeatTimes: plan.targetBeatTimes,
       djEffects: plan.djEffects,
       ...(plan.strategy === 'smart-rendered-v2'
-        ? { v2Intensity: plan.v2?.intensity || null, v2Style: plan.v2?.choreography?.style || null }
+        ? {
+          v2: {
+            intensity: plan.v2?.intensity || null,
+            backend: plan.v2?.backend || null,
+            beatProvider: plan.v2?.beatProvider || null,
+            folia: plan.v2?.folia || null,
+            choreography: plan.v2?.choreography || null,
+            withoutBeatGrid: plan.v2?.withoutBeatGrid === true,
+            partialSyncN: plan.v2?.partialSyncN || null,
+            pitchShiftSemitones: plan.v2?.pitchShiftSemitones || null,
+            targetVocalness: plan.v2?.targetVocalness || null,
+            automation: plan.v2?.automation || null,
+            stemChoreography: plan.v2?.stemChoreography || null,
+            stemFingerprint: plan.v2?.stemFingerprint || null,
+          },
+          gainCurve: plan.gainCurve,
+          gainOffsetDb: plan.gainOffsetDb || 0,
+        }
         : {}),
       rendererVersion: plan.rendererVersion,
+      ...(plan.strategy === 'smart-rendered-v2'
+        ? {
+          sourceIdentity: fileIdentity(sourceAudioPath),
+          targetIdentity: fileIdentity(targetAudioPath),
+        }
+        : {}),
     })
     return crypto.createHash('sha256').update(key).digest('hex').substring(0, 16)
   }
@@ -766,11 +886,10 @@ class AiMixRuntime {
   async renderTransition(plan, sourceAudioPath, targetAudioPath) {
     this._validateInput(plan, sourceAudioPath, targetAudioPath)
     const cacheKey = crypto.createHash('sha256').update(JSON.stringify({
-      sourceTrackKey: plan.sourceTrackKey,
-      targetTrackKey: plan.targetTrackKey,
-      sourceEndTime: plan.sourceEndTime,
-      targetStartTime: plan.targetStartTime,
-      rendererVersion: 'djtransgan-v2', // v2: 修复 resume 时间轴映射，旧缓存失效
+      plan,
+      sourceIdentity: fileIdentity(sourceAudioPath),
+      targetIdentity: fileIdentity(targetAudioPath),
+      rendererVersion: 'djtransgan-v3',
     })).digest('hex').substring(0, 16)
     const outputPath = path.join(this.cacheDir, `aimix-${cacheKey}.wav`)
     const metaPath = `${outputPath}.json`
@@ -780,7 +899,10 @@ class AiMixRuntime {
     if (fs.existsSync(outputPath) && fs.existsSync(metaPath)) {
       try {
         const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'))
-        if (Number.isFinite(meta.transitionStart) && Number.isFinite(meta.targetResumeTime)) {
+        if (Number.isFinite(meta.transitionStart)
+          && Number.isFinite(meta.targetResumeTime)
+          && Number.isFinite(meta.duration)
+          && isValidWav(outputPath, meta.duration)) {
           automixLog.log('aimix:cache-hit', `cacheKey=${cacheKey}`)
           return { ...meta, outputPath, success: true, cached: true }
         }
@@ -807,12 +929,15 @@ class AiMixRuntime {
     if (result?.success) {
       // 3) 落盘缓存元数据：后续命中直接返回，无需重渲染
       try {
-        fs.writeFileSync(metaPath, JSON.stringify({
+        const meta = {
           transitionStart: result.transitionStart,
           targetResumeTime: result.targetResumeTime,
           duration: result.duration,
           rendererVersion: result.rendererVersion,
-        }))
+          sourceIdentity: fileIdentity(sourceAudioPath),
+          targetIdentity: fileIdentity(targetAudioPath),
+        }
+        writeJsonAtomic(metaPath, meta)
       } catch { /* 缓存失败不影响播放 */ }
       automixLog.log('aimix:ok', `cacheKey=${cacheKey} duration=${result.duration} transitionStart=${result.transitionStart} targetResume=${result.targetResumeTime}`)
     } else {
@@ -828,11 +953,10 @@ class AiMixRuntime {
   async getAutomation(plan, sourceAudioPath, targetAudioPath) {
     this._validateInput(plan, sourceAudioPath, targetAudioPath)
     const cacheKey = crypto.createHash('sha256').update(JSON.stringify({
-      sourceTrackKey: plan.sourceTrackKey,
-      targetTrackKey: plan.targetTrackKey,
-      sourceEndTime: plan.sourceEndTime,
-      targetStartTime: plan.targetStartTime,
-      rendererVersion: 'djtransgan-v2',
+      plan,
+      sourceIdentity: fileIdentity(sourceAudioPath),
+      targetIdentity: fileIdentity(targetAudioPath),
+      rendererVersion: 'djtransgan-automation-v3',
     })).digest('hex').substring(0, 16)
     const paramsPath = path.join(this.cacheDir, `aimix-${cacheKey}.params.json`)
     if (fs.existsSync(paramsPath)) {
@@ -849,7 +973,7 @@ class AiMixRuntime {
       automixLog.log('aimix:automation', `cacheKey=${cacheKey} srcEnd=${plan.sourceEndTime} tgtStart=${plan.targetStartTime}`)
       const result = await this._sendMessage('automation', { plan, sourceAudioPath, targetAudioPath })
       if (result?.success) {
-        try { fs.writeFileSync(paramsPath, JSON.stringify(result)) } catch { /* ignore */ }
+        try { writeJsonAtomic(paramsPath, result) } catch { /* ignore */ }
       }
       return result
     })()

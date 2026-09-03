@@ -49,15 +49,20 @@ const EXTRA_PYPI_PKGS = ['torchlibrosa', 'joblib', 'pyloudnorm']
 
 const REPO_OWNER = 'ChenPaulYu'
 const REPO_NAME = 'DJtransGAN'
-const REPO_REF = 'main'
+// 固定到本机已验证可运行的上游 commit，避免 main 漂移后补丁静默失效。
+const REPO_REF = '64228931f3b4514f289fbbbc0e5675adb57aeb88'
+const REPO_ARCHIVE_BYTES = 72523006
+const REPO_ARCHIVE_SHA256 = 'c2a938c0868e83c85d7c1c6c8408b7335d7b6906dd6f0180b9e22efbd8616894'
 const REPO_ZIP_URLS = [
-  `https://gh-proxy.com/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/${REPO_REF}.zip`,
-  `https://ghfast.top/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/${REPO_REF}.zip`,
-  `https://ghproxy.net/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/${REPO_REF}.zip`,
-  `https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/${REPO_REF}.zip`,
+  `https://gh-proxy.com/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REPO_REF}.zip`,
+  `https://ghfast.top/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REPO_REF}.zip`,
+  `https://ghproxy.net/https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REPO_REF}.zip`,
+  `https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/${REPO_REF}.zip`,
 ]
 // 预训练权重（djtransgan_minmax.pt）Google Drive 文件 ID（作者仓库 download_pretrained）
 const WEIGHTS_FILE_ID = '1JtBUJL3sERl5HaM7sSH7p2Tw5Wnejvtt'
+const WEIGHTS_BYTES = 139935693
+const WEIGHTS_SHA256 = '495987d70bd873fb94838b3af705be85d368a6639659f2ffcc2b05a9740e8fd2'
 const WEIGHTS_URLS = [
   `https://drive.usercontent.google.com/download?id=${WEIGHTS_FILE_ID}&export=download&confirm=t`,
   `https://drive.google.com/u/0/uc?id=${WEIGHTS_FILE_ID}&export=download&confirm=t`,
@@ -94,6 +99,12 @@ function getModelDir() {
 function getWeightsPath() {
   return path.join(getModelDir(), 'pretrained', 'djtransgan_minmax.pt')
 }
+function getWeightsMarkerPath() {
+  return `${getWeightsPath()}.verified.json`
+}
+function getRepoMarkerPath() {
+  return path.join(getModelDir(), '.waveforge-source.json')
+}
 
 function pythonExists() { return fs.existsSync(getPythonPath()) }
 function depsReady() {
@@ -101,10 +112,45 @@ function depsReady() {
     && fs.existsSync(path.join(getSitePackages(), 'torchlibrosa'))
 }
 function repoReady() {
-  return fs.existsSync(path.join(getModelDir(), 'djtransgan', 'model', '__init__.py'))
+  try {
+    const marker = JSON.parse(fs.readFileSync(getRepoMarkerPath(), 'utf8'))
+    return marker.repoRef === REPO_REF
+      && marker.archiveSha256 === REPO_ARCHIVE_SHA256
+      && fs.existsSync(path.join(getModelDir(), 'djtransgan', 'model', '__init__.py'))
+  } catch { return false }
 }
 function weightsReady() {
-  return fs.existsSync(getWeightsPath()) && fs.statSync(getWeightsPath()).size > 1024 * 1024
+  try {
+    const stat = fs.statSync(getWeightsPath())
+    const marker = JSON.parse(fs.readFileSync(getWeightsMarkerPath(), 'utf8'))
+    return stat.isFile()
+      && stat.size === WEIGHTS_BYTES
+      && marker.sha256 === WEIGHTS_SHA256
+      && marker.bytes === WEIGHTS_BYTES
+      && marker.mtimeMs === stat.mtimeMs
+  } catch { return false }
+}
+
+async function sha256File(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = require('crypto').createHash('sha256')
+    fs.createReadStream(filePath)
+      .on('data', chunk => hash.update(chunk))
+      .on('error', reject)
+      .on('end', () => resolve(hash.digest('hex')))
+  })
+}
+
+async function verifyWeights() {
+  let stat
+  try { stat = fs.statSync(getWeightsPath()) } catch { return false }
+  if (!stat.isFile() || stat.size !== WEIGHTS_BYTES) return false
+  if ((await sha256File(getWeightsPath())) !== WEIGHTS_SHA256) return false
+  const markerPath = getWeightsMarkerPath()
+  const temporary = `${markerPath}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify({ bytes: WEIGHTS_BYTES, sha256: WEIGHTS_SHA256, mtimeMs: stat.mtimeMs }))
+  fs.renameSync(temporary, markerPath)
+  return true
 }
 
 /** 是否存在可用的 torch Python（与 render-runtime.cjs 的 aiPythonCandidates 一致） */
@@ -179,6 +225,18 @@ function logMessage(message) {
 
 /** 下载单个文件：多源按序尝试；返回 true 成功 */
 async function downloadFile(urls, destPath) {
+  // A previous pause/crash may have left a complete weight file under .part. Verify and promote
+  // it before sending an invalid Range bytes=size- request.
+  if (destPath === getWeightsPath()) {
+    const part = `${destPath}.part`
+    try {
+      if (fs.statSync(part).size === WEIGHTS_BYTES && await sha256File(part) === WEIGHTS_SHA256) {
+        fs.rmSync(destPath, { force: true })
+        fs.renameSync(part, destPath)
+        return true
+      }
+    } catch { /* incomplete/missing partial continues through normal resume */ }
+  }
   let proxySession = null
   // 代理自动配置开启时，显式路由到本地代理会话（不依赖系统代理设置）
   try {
@@ -192,6 +250,11 @@ async function downloadFile(urls, destPath) {
       let aborted = false
       // Electron 42：setRedirectMode 已移除；不监听 'redirect' 事件时自动跟随重定向（默认）
       const request = proxySession ? net.request({ url, session: proxySession }) : net.request(url)
+      fs.mkdirSync(path.dirname(destPath), { recursive: true })
+      const partPath = destPath + '.part'
+      let resumeOffset = 0
+      try { resumeOffset = fs.statSync(partPath).size } catch { /* no partial file */ }
+      if (resumeOffset > 0) request.setHeader('Range', `bytes=${resumeOffset}-`)
       const abort = () => { aborted = true; request.abort() }
       state.controller.onAbort = abort
       request.on('response', (response) => {
@@ -201,17 +264,23 @@ async function downloadFile(urls, destPath) {
           tryUrl(index + 1)
           return
         }
-        const total = Number(response.headers['content-length'] || 0)
-        let received = 0
+        const responseBytes = Number(response.headers['content-length'] || 0)
+        // 206 表示服务端接受断点；200 表示忽略 Range，必须从零重写，不能把整文件追加到 part。
+        const resumed = resumeOffset > 0 && response.statusCode === 206
+        if (resumeOffset > 0 && !resumed) {
+          try { fs.rmSync(partPath, { force: true }) } catch { /* restart from zero */ }
+          resumeOffset = 0
+        }
+        const total = resumed && responseBytes > 0 ? resumeOffset + responseBytes : responseBytes
+        let received = resumeOffset
         // 本次文件的速率采样窗口（约每 500ms 采一次，避免逐 chunk 抖动）
         let lastSpeedAt = Date.now()
-        let lastSpeedBytes = 0
-        state.downloadBytes = 0
+        let lastSpeedBytes = received
+        state.downloadBytes = received
         state.downloadTotal = total
         state.downloadSpeed = 0
         state.downloadEta = null
-        fs.mkdirSync(path.dirname(destPath), { recursive: true })
-        const writeStream = fs.createWriteStream(destPath + '.part')
+        const writeStream = fs.createWriteStream(partPath, { flags: resumed ? 'a' : 'w' })
         let finished = false
         const cleanup = () => { if (!finished) { finished = true; try { writeStream.destroy() } catch { /* ignore */ } } }
         writeStream.on('error', () => { cleanup(); if (!aborted) { state.error = `写入失败: ${destPath}`; resolve(false) } })
@@ -239,7 +308,7 @@ async function downloadFile(urls, destPath) {
           if (aborted) { cleanup(); resolve(false); return }
           writeStream.end(() => {
             finished = true
-            fs.renameSync(destPath + '.part', destPath)
+            fs.renameSync(partPath, destPath)
             state.phasePercent = 100
             state.downloadSpeed = 0
             state.downloadEta = null
@@ -415,15 +484,38 @@ function applyRepoPatches(repoDir) {
     "    import librosa\n    if isinstance(audio, torch.Tensor): \n        stretched = torch.from_numpy(librosa.effects.time_stretch(squeeze_dim(audio).numpy(), rate=ratio)).unsqueeze(0)\n    else:\n        stretched = librosa.effects.time_stretch(audio, rate=ratio)")
 }
 
+function assertSafeArchive(zip, targetRoot) {
+  const root = path.resolve(targetRoot) + path.sep
+  for (const entry of zip.getEntries()) {
+    const resolved = path.resolve(targetRoot, entry.entryName)
+    if (!resolved.startsWith(root)) throw new Error(`压缩包包含不安全路径: ${entry.entryName}`)
+  }
+}
+
 async function downloadRepo() {
   state.phase = 'repo'
   state.phasePercent = 0
   const zipPath = path.join(getModelRoot(), 'repo.zip')
   const ok = await downloadFile(REPO_ZIP_URLS, zipPath)
   if (!ok || state.status === 'cancelled' || state.status === 'paused') return false
+  try {
+    const stat = fs.statSync(zipPath)
+    if (stat.size !== REPO_ARCHIVE_BYTES || await sha256File(zipPath) !== REPO_ARCHIVE_SHA256) {
+      state.error = 'DJTransGAN 源码归档大小或 SHA-256 校验失败'
+      fs.rmSync(zipPath, { force: true })
+      return false
+    }
+  } catch (error) {
+    state.error = `DJTransGAN 源码归档校验失败: ${error?.message || error}`
+    return false
+  }
   const extracted = path.join(getModelRoot(), 'repo-src')
   if (fs.existsSync(extracted)) fs.rmSync(extracted, { recursive: true, force: true })
-  try { new AdmZip(zipPath).extractAllTo(extracted, true) } catch (error) {
+  try {
+    const zip = new AdmZip(zipPath)
+    assertSafeArchive(zip, extracted)
+    zip.extractAllTo(extracted, true)
+  } catch (error) {
     state.error = `解压仓库失败: ${error?.message || error}`; return false
   } finally { try { fs.rmSync(zipPath, { force: true }) } catch { /* ignore */ } }
   // zip 内层目录名可能是 DJtransGAN-main / DJTransGAN-main / 直接 djtransgan
@@ -451,12 +543,23 @@ async function downloadRepo() {
 async function downloadWeights() {
   state.phase = 'weights'
   state.phasePercent = 0
+  // 旧安装没有 marker 时先完整哈希一次；验证成功后写 marker，之后启动只做身份快检。
+  if (await verifyWeights()) return true
+  if (fs.existsSync(getWeightsPath())) {
+    try { fs.rmSync(getWeightsPath(), { force: true }) } catch { /* overwrite path cleanup */ }
+  }
   const ok = await downloadFile(WEIGHTS_URLS, getWeightsPath())
   if (!ok) {
     state.error = `预训练权重下载失败（Google Drive 在国内网络受限）。其余部分已就绪：`
       + `请在有代理/加速的网络下重试，或将权重文件放入 ${getWeightsPath()}`
+    return false
   }
-  return ok && weightsReady()
+  if (!await verifyWeights()) {
+    try { fs.rmSync(getWeightsPath(), { force: true }) } catch { /* invalid file removed */ }
+    state.error = '预训练权重大小或 SHA-256 校验失败，请重试下载'
+    return false
+  }
+  return true
 }
 
 async function runDownload() {
@@ -510,30 +613,41 @@ async function runDownload() {
   }
 }
 
-function startDownload() {
+async function startDownload() {
   if (state.status === 'downloading') return { ok: true, already: true }
+  if (state.running) {
+    try { await state.running } catch { /* state carries the failure */ }
+  }
   state.controller = { abort: null, onAbort: null }
   state.controller.abort = () => {
     if (typeof state.controller.onAbort === 'function') {
       try { state.controller.onAbort() } catch { /* ignore */ }
     }
   }
-  state.running = runDownload()
+  const running = runDownload()
+  state.running = running
+  void running.finally(() => { if (state.running === running) state.running = null }).catch(() => undefined)
   return { ok: true }
 }
 
-function pauseDownload() {
+async function pauseDownload() {
   if (state.status !== 'downloading') return { ok: false }
+  const running = state.running
   state.controller?.abort()
+  state.status = 'paused'
+  broadcastProgress()
+  if (running) await running.catch(() => undefined)
   state.status = 'paused'
   broadcastProgress()
   return { ok: true }
 }
 
-function cancelDownload() {
+async function cancelDownload() {
   if (state.status !== 'downloading' && state.status !== 'paused') return { ok: false }
+  const running = state.running
   state.controller?.abort()
   state.status = 'cancelled'
+  if (running) await running.catch(() => undefined)
   state.phase = null
   state.phasePercent = 0
   state.overallPercent = 0
@@ -555,6 +669,9 @@ function cleanupPartial() {
 }
 
 async function deleteModel() {
+  const running = state.running
+  state.controller?.abort()
+  if (running) await running.catch(() => undefined)
   const root = getModelRoot()
   if (fs.existsSync(root)) {
     // 删除可能耗时（数 GB 目录/数万文件）：先广播 deleting 状态让界面显示「删除中…」，
@@ -582,14 +699,25 @@ async function deleteModel() {
   return { ok: true }
 }
 
-function setupAiModelIPC(ipcMain, automixLogFn) {
+function setupAiModelIPC(ipcMain, automixLogFn, guardHandler = (_capability, handler) => handler) {
   if (automixLogFn) setAutomixLogger(automixLogFn)
   cleanupLegacyLocation()
-  ipcMain.handle('ai-model:get-status', () => getStatus())
-  ipcMain.handle('ai-model:download', () => startDownload())
-  ipcMain.handle('ai-model:pause', () => pauseDownload())
-  ipcMain.handle('ai-model:cancel', () => cancelDownload())
-  ipcMain.handle('ai-model:delete', () => deleteModel())
+  // Existing/manual installs are not trusted by name or size alone. Verify once asynchronously
+  // and write the identity marker before exposing engineAvailable=true.
+  if (!weightsReady() && fs.existsSync(getWeightsPath())) {
+    void verifyWeights().then(ok => {
+      if (!ok) logMessage('现有 DJTransGAN 权重完整性校验失败，保持扩展不可用')
+      broadcastProgress()
+    }).catch(() => undefined)
+  }
+  ipcMain.handle('ai-model:get-status', guardHandler('models', async () => {
+    if (!weightsReady() && fs.existsSync(getWeightsPath())) await verifyWeights().catch(() => false)
+    return getStatus()
+  }))
+  ipcMain.handle('ai-model:download', guardHandler('models', () => startDownload()))
+  ipcMain.handle('ai-model:pause', guardHandler('models', () => pauseDownload()))
+  ipcMain.handle('ai-model:cancel', guardHandler('models', () => cancelDownload()))
+  ipcMain.handle('ai-model:delete', guardHandler('models', () => deleteModel()))
 }
 
 /** 清理旧位置（userData/ai-mix-engine）残留：模型位置改到应用安装目录后，C 盘用户目录里的旧副本作废 */
@@ -611,4 +739,12 @@ module.exports = {
   getWeightsPath,
   pythonCandidates,
   applyRepoPatches,
+  _assertSafeArchive: assertSafeArchive,
+  _assetInfo: {
+    repoRef: REPO_REF,
+    repoArchiveBytes: REPO_ARCHIVE_BYTES,
+    repoArchiveSha256: REPO_ARCHIVE_SHA256,
+    weightsBytes: WEIGHTS_BYTES,
+    weightsSha256: WEIGHTS_SHA256,
+  },
 }

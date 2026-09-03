@@ -34,6 +34,8 @@ export interface GaplessIntegrationOptions {
   playAt: (index: number, options: any) => Promise<boolean>
   prepareAudioUrl: (song: GaplessSong) => Promise<string>
   onStateChange?: (state: any) => void
+  /** 分析期静音边界快查（AutoMix 缓存复用；见 AlbumGaplessService.deps） */
+  getTrackAnalysis?: (trackKey: string) => { introSilence: number; outroSilence: number } | null
 }
 
 export class GaplessIntegration {
@@ -58,6 +60,7 @@ export class GaplessIntegration {
       },
       onTransitionProgress: progress => this.emitTransitionProgress(progress),
       onTransitionCancel: () => this.cancelVisualTransition(true),
+      getTrackAnalysis: options.getTrackAnalysis,
     })
   }
 
@@ -167,14 +170,29 @@ export class GaplessIntegration {
     })
 
     if (sameAlbum) {
-      // 专辑场景：三方案分流，首选【第一种·直接拼接】（头尾都不掐）。
-      // 不激活 Album Gapless 的交叉淡化（第三种方案）——置位直接拼接优先，
-      // 其 monitor 若激活会在歌曲尾部抢先 startMix，ended 时 hasActiveTransition()
-      // 挡住首选拼接，听感变成 1.8s 淡入淡出而非直接接上。非专辑场景的
-      // 第二种（60ms 淡入淡出）由 useAudioPlayer 的 handleTimeUpdate 负责。
-      debugLog('[Gapless] 同专辑：首选直接拼接（albumGapless 交叉淡化让路）')
-      this.albumGapless.setDirectJoinPreferred(true)
+      const albumKey = this.albumGapless.getSongAlbumKey({
+        key: ctx.currentSong.key,
+        url: ctx.currentSong.url,
+        albumId: currentAlbumId,
+        albumCover: currentAlbumCover,
+      })
+      this.albumGapless.setDirectJoinPreferred(false)
+      const enabled = this.albumGapless.setEnabled(true, null, albumKey)
+      const preparedNextUrl = await this.options.prepareAudioUrl(ctx.nextSong)
+      if (!preparedNextUrl) throw new Error('Album gapless could not prepare the next audio URL')
+      const scheduled = enabled && await this.albumGapless.schedulePreload(ctx.token, ctx.nextIndex, {
+        key: ctx.nextSong.key,
+        url: preparedNextUrl,
+        albumId: nextAlbumId,
+        albumCover: nextAlbumCover,
+      })
+      if (scheduled) {
+        debugLog('[Gapless] 同专辑：专辑融合已预载并等待尾部检测')
+        return { success: true, mode: 'album-gapless' }
+      }
       this.albumGapless.setEnabled(false)
+      debugLog('[Gapless] 同专辑融合预载失败，回退直接拼接')
+      this.albumGapless.setDirectJoinPreferred(true)
       return { success: false, mode: 'disabled' }
     }
 

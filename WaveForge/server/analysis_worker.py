@@ -17,9 +17,11 @@ import numpy as np
 try:
     from beat_this.inference import File2Beats, Audio2Beats
     BEAT_THIS_AVAILABLE = True
+    BEAT_THIS_IMPORT_ERROR = None
 except ImportError:
     BEAT_THIS_AVAILABLE = False
-    print("WARNING: beat_this not installed, using fallback", file=sys.stderr)
+    BEAT_THIS_IMPORT_ERROR = "Beat This import unavailable"
+    print("WARNING: beat_this not installed", file=sys.stderr)
 
 # Check if librosa is available for feature extraction
 try:
@@ -54,28 +56,64 @@ def probe_audio_format(file_path):
     return False  # m4a/mp4/aac/opus/未知格式
 
 
+def safe_error(error):
+    """Return an error suitable for protocol output without local paths."""
+    text = str(error) or error.__class__.__name__
+    return text.replace('\\', '/').split('/')[-1] if '/' in text or '\\' in text else text
+
+
+def normalize_timing(values):
+    """Keep finite, strictly ascending timing values in seconds."""
+    if values is None:
+        return []
+    try:
+        values = values.tolist() if hasattr(values, 'tolist') else values
+        normalized = []
+        for value in values:
+            value = float(value)
+            if np.isfinite(value):
+                normalized.append(value)
+        return sorted(set(normalized))
+    except (TypeError, ValueError):
+        return []
+
+
+def normalize_confidence(values, count, default=0.0):
+    """Return one finite confidence value per timing value."""
+    try:
+        values = values.tolist() if hasattr(values, 'tolist') else values
+        result = [float(value) for value in values]
+    except (TypeError, ValueError):
+        result = []
+    result = [value if np.isfinite(value) else default for value in result]
+    return (result + [default] * count)[:count]
+
+
 class AnalysisWorker:
     """Main worker class for audio analysis"""
     
     def __init__(self):
         self.beat_tracker = None
         self.device = 'cpu'  # Default to CPU for stability
+        self.checkpoint_path = os.environ.get('BEAT_THIS_CHECKPOINT', 'final0')
+        self.beat_this_error = BEAT_THIS_IMPORT_ERROR
         
         # Try to initialize Beat This
         if BEAT_THIS_AVAILABLE:
             try:
                 self.beat_tracker = File2Beats(
-                    checkpoint_path='final0',
+                    checkpoint_path=self.checkpoint_path,
                     device=self.device,
                     float16=False,
                     dbn=False
                 )
                 print("Beat This initialized successfully", file=sys.stderr)
             except Exception as e:
-                print(f"Failed to initialize Beat This: {e}", file=sys.stderr)
+                self.beat_this_error = safe_error(e)
+                print(f"Failed to initialize Beat This: {self.beat_this_error}", file=sys.stderr)
                 self.beat_tracker = None
     
-    def analyze_track(self, audio_path, track_key=None, duration=None):
+    def analyze_track(self, audio_path, track_key=None, duration=None, source_signature=None):
         """
         Analyze a single track and return beat tracking results
         
@@ -107,105 +145,62 @@ class AnalysisWorker:
                 'beatFeatures': [],
                 'introSilence': 0,
                 'outroSilence': 0,
-                'analysisVersion': 'librosa-dsp-v2',
+                'analysisVersion': 'beat-this-dsp-v1',
                 'duration': duration or 0
             }
+            if source_signature is not None:
+                result['sourceSignature'] = source_signature
             
-            # 格式探测：libsndfile 打不开 m4a/aac/opus（B 站 DASH 音频轨是 AAC/MP4），
-            # 直接返回 metadata-only，避免 librosa 解码失败刷出 mpg123 的 stderr 噪音。
+            if self.beat_tracker is None:
+                raise RuntimeError(self.beat_this_error or "Required Beat This model is unavailable")
+
+            # Unsupported containers are decoded by the browser analysis path. This is
+            # distinct from a missing model, which is always a hard failure.
             if not probe_audio_format(audio_path):
-                print(f"Skipping librosa for unsupported format: {audio_path}", file=sys.stderr)
+                print("Skipping librosa for unsupported format", file=sys.stderr)
                 result['provider'] = 'metadata-only'
                 return result
             
-            # Try Beat This analysis
-            if self.beat_tracker is not None:
-                try:
-                    beats, downbeats = self.beat_tracker(audio_path)
-                    
-                    result['provider'] = 'beat_this'
-                    result['beats'] = beats.tolist() if hasattr(beats, 'tolist') else list(beats)
-                    result['downbeats'] = downbeats.tolist() if hasattr(downbeats, 'tolist') else list(downbeats)
-                    
-                    # Estimate BPM from beats
-                    if len(beats) > 1:
-                        intervals = np.diff(beats)
-                        median_interval = np.median(intervals)
-                        result['estimatedBpm'] = round(60.0 / median_interval, 1)
-                        
-                        # Calculate beat confidence (based on interval consistency)
-                        interval_std = np.std(intervals)
-                        interval_consistency = 1.0 / (1.0 + interval_std)
-                        result['confidence'] = float(interval_consistency)
-                        result['beatConfidence'] = [result['confidence']] * len(beats)
-                    
-                    # Estimate meter from downbeat spacing
-                    if len(downbeats) > 1 and len(beats) > 0:
-                        beats_per_bar = []
-                        for i in range(len(downbeats) - 1):
-                            db1, db2 = downbeats[i], downbeats[i+1]
-                            num_beats = np.sum((beats >= db1) & (beats < db2))
-                            if num_beats > 0:
-                                beats_per_bar.append(num_beats)
-                        if beats_per_bar:
-                            result['meter'] = int(np.median(beats_per_bar))
-                    
-                    result['downbeatConfidence'] = [result['confidence']] * len(downbeats)
-                    
-                    print(f"Beat This: found {len(beats)} beats, {len(downbeats)} downbeats, BPM: {result['estimatedBpm']}", file=sys.stderr)
-                    
-                except Exception as e:
-                    print(f"Beat This analysis failed: {e}", file=sys.stderr)
-                    result['provider'] = 'beat_this_failed'
-            
-            # Fallback: librosa analysis
-            if result['provider'] not in ['beat_this'] and LIBROSA_AVAILABLE:
-                try:
-                    y, sr = librosa.load(audio_path, sr=22050, mono=True)
-                    result['duration'] = len(y) / sr
-                    
-                    onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
-                    tempo, beat_frame_indices = librosa.beat.beat_track(
-                        onset_envelope=onset, sr=sr, hop_length=512, units='frames'
-                    )
-                    beat_frame_indices = np.asarray(beat_frame_indices, dtype=int)
-                    beat_times = librosa.frames_to_time(beat_frame_indices, sr=sr, hop_length=512)
-                    result['beats'] = beat_times.astype(float).tolist()
-                    # 静音音频时 librosa 返回 tempo=0.0，需回退为默认 BPM
-                    if tempo == 0 or not np.asarray(beat_frame_indices).size:
-                        tempo = 120.0
-                    result['estimatedBpm'] = float(np.asarray(tempo).reshape(-1)[0])
-                    result['provider'] = 'librosa-fallback'
+            try:
+                beats, downbeats = self.beat_tracker(audio_path)
+                result['provider'] = 'beat_this'
+                result['beats'] = normalize_timing(beats)
+                result['downbeats'] = normalize_timing(downbeats)
 
-                    intervals = np.diff(beat_times)
-                    consistency = float(np.clip(
-                        1.0 - np.std(intervals) / max(1e-6, np.median(intervals)), 0.0, 1.0
-                    )) if len(intervals) else 0.0
-                    strengths = onset[np.clip(beat_frame_indices, 0, max(0, len(onset) - 1))] if len(beat_frame_indices) else np.array([])
-                    strength = float(np.clip(
-                        np.mean(strengths) / max(1e-6, np.percentile(onset, 90)), 0.0, 1.0
-                    )) if len(strengths) else 0.0
-                    result['confidence'] = float(np.clip(0.2 + consistency * 0.55 + strength * 0.25, 0.0, 0.95))
-                    result['beatConfidence'] = [result['confidence']] * len(beat_times)
+                if len(result['beats']) < 2 or len(result['downbeats']) < 2:
+                    raise RuntimeError('Beat This returned insufficient beat/downbeat data')
 
-                    phase_scores = [
-                        float(np.mean(strengths[phase::4])) if len(strengths[phase::4]) else 0.0
-                        for phase in range(4)
-                    ]
-                    phase = int(np.argmax(phase_scores)) if phase_scores else 0
-                    result['downbeats'] = beat_times[phase::4].astype(float).tolist()
-                    result['downbeatConfidence'] = [result['confidence'] * 0.85] * len(result['downbeats'])
-                    
-                    print(f"Librosa fallback: {len(beat_times)} beats, BPM: {result['estimatedBpm']}", file=sys.stderr)
-                    
-                except Exception as e:
-                    print(f"Librosa analysis failed: {e}", file=sys.stderr)
-                    result['provider'] = 'librosa_failed'
-            
-            # Last resort: metadata-only
-            if not result['beats']:
-                result['provider'] = 'metadata-only'
-                print("No beat tracking available, using metadata only", file=sys.stderr)
+                intervals = np.diff(result['beats'])
+                median_interval = np.median(intervals)
+                result['estimatedBpm'] = round(60.0 / median_interval, 1)
+                interval_std = np.std(intervals)
+                interval_consistency = 1.0 / (1.0 + interval_std)
+                result['confidence'] = float(interval_consistency)
+
+                beats_per_bar = []
+                normalized_beats = np.asarray(result['beats'])
+                for i in range(len(result['downbeats']) - 1):
+                    db1, db2 = result['downbeats'][i], result['downbeats'][i + 1]
+                    num_beats = np.sum((normalized_beats >= db1) & (normalized_beats < db2))
+                    if num_beats > 0:
+                        beats_per_bar.append(num_beats)
+                if beats_per_bar:
+                    result['meter'] = int(np.median(beats_per_bar))
+
+                result['downbeatConfidence'] = normalize_confidence(
+                    [result['confidence']] * len(result['downbeats']),
+                    len(result['downbeats']),
+                )
+                result['beatConfidence'] = normalize_confidence(
+                    [result['confidence']] * len(result['beats']),
+                    len(result['beats']),
+                )
+                print(
+                    f"Beat This: found {len(beats)} beats, {len(downbeats)} downbeats, BPM: {result['estimatedBpm']}",
+                    file=sys.stderr,
+                )
+            except Exception as e:
+                raise RuntimeError(f"Beat This analysis failed: {safe_error(e)}") from e
             
             # Extract beat-synchronous features if we have beats
             if result['beats'] and LIBROSA_AVAILABLE:
@@ -213,7 +208,7 @@ class AnalysisWorker:
                     result['beatFeatures'] = self._extract_beat_features(audio_path, result['beats'])
                     result['sections'] = self._detect_sections(result['beatFeatures'], result['duration'])
                 except Exception as e:
-                    print(f"Feature extraction failed: {e}", file=sys.stderr)
+                    print(f"Feature extraction failed: {safe_error(e)}", file=sys.stderr)
             
             # Detect silence regions
             if LIBROSA_AVAILABLE:
@@ -222,16 +217,15 @@ class AnalysisWorker:
                     result['introSilence'] = intro
                     result['outroSilence'] = outro
                 except Exception as e:
-                    print(f"Silence detection failed: {e}", file=sys.stderr)
+                    print(f"Silence detection failed: {safe_error(e)}", file=sys.stderr)
             
             return result
             
         except Exception as e:
-            print(f"Track analysis error: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            print(f"Track analysis error: {safe_error(e)}", file=sys.stderr)
             return {
-                'error': str(e),
-                'trackKey': track_key or audio_path,
+                'error': safe_error(e),
+                'trackKey': track_key or 'unknown',
                 'provider': 'error'
             }
     
@@ -370,11 +364,15 @@ class AnalysisWorker:
     
     def get_status(self):
         """Return worker status"""
+        available = BEAT_THIS_AVAILABLE and self.beat_tracker is not None
         return {
-            'status': 'ready',
-            'beatThisAvailable': BEAT_THIS_AVAILABLE and self.beat_tracker is not None,
+            'status': 'ready' if available else 'failed',
+            'beatThisAvailable': available,
+            'model': Path(self.checkpoint_path).name or 'final0',
+            'provider': 'beat_this' if available else 'unavailable',
             'librosaAvailable': LIBROSA_AVAILABLE,
-            'device': self.device
+            'device': self.device,
+            **({'error': self.beat_this_error} if self.beat_this_error else {})
         }
 
 
@@ -404,8 +402,9 @@ def main():
                 audio_path = message.get('audioPath')
                 track_key = message.get('trackKey')
                 duration = message.get('duration')
+                source_signature = message.get('sourceSignature')
                 
-                result = worker.analyze_track(audio_path, track_key, duration)
+                result = worker.analyze_track(audio_path, track_key, duration, source_signature)
                 
                 response = {
                     'type': 'result',
@@ -444,7 +443,7 @@ def main():
         except Exception as e:
             print(json.dumps({
                 'type': 'error',
-                'error': str(e)
+                'error': safe_error(e)
             }))
             sys.stdout.flush()
             traceback.print_exc(file=sys.stderr)

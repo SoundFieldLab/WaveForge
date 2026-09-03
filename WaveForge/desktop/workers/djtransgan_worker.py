@@ -19,6 +19,7 @@ AI 混音（DJTransGAN）渲染 Worker —— 独立于 render_worker.py。
 import json
 import os
 import sys
+import uuid
 
 REPO_DIR = os.environ.get('WAVEFORGE_DJTRANSGAN_DIR', r'D:\opencode\DJTransGAN')
 
@@ -458,8 +459,18 @@ def render_ai_transition(plan, source_path, target_path, output_path):
     except Exception as _fx:
         print(f"[AutoMix-AI] choreography effects skipped: {_fx}", file=sys.stderr, flush=True)
 
+    if not np.all(np.isfinite(mix)):
+        raise ValueError('DJTransGAN produced non-finite audio')
     import soundfile
-    soundfile.write(output_path, mix.T, SR)
+    temp_output = f"{output_path}.{os.getpid()}.{uuid.uuid4().hex}.tmp.wav"
+    try:
+        soundfile.write(temp_output, mix.T, SR)
+        if os.path.getsize(temp_output) <= 44:
+            raise ValueError('DJTransGAN output WAV is empty')
+        os.replace(temp_output, output_path)
+    finally:
+        if os.path.exists(temp_output):
+            os.remove(temp_output)
 
     print(f"[AutoMix-AI] render ok: duration={float(mix.shape[-1]) / SR:.1f}s transitionStart={float(transition_start):.1f}s targetResume={float(target_resume):.1f}s", file=sys.stderr, flush=True)
 

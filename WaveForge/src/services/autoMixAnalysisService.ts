@@ -47,7 +47,7 @@ export interface TrackAnalysisInput {
 }
 
 const ANALYSIS_VERSION = 'fallback-dsp-v1'
-const PYTHON_ANALYSIS_VERSION = 'librosa-dsp-v2'
+const PYTHON_ANALYSIS_VERSIONS = new Set(['librosa-dsp-v3', 'beat-this-dsp-v1'])
 /** 低于该置信度的 browser-fallback 结果视为节拍网格不可信，不缓存/不复用 */
 const BROWSER_FALLBACK_MIN_PERSIST_CONFIDENCE = 0.4
 const memoryCache = new Map<string, TrackAnalysis>()
@@ -80,7 +80,7 @@ function cacheInMemory(key: string, analysis: TrackAnalysis): void {
 }
 
 function isSupportedAnalysis(analysis: TrackAnalysis): boolean {
-  return analysis.analysisVersion === ANALYSIS_VERSION || analysis.analysisVersion === PYTHON_ANALYSIS_VERSION
+  return analysis.analysisVersion === ANALYSIS_VERSION || PYTHON_ANALYSIS_VERSIONS.has(analysis.analysisVersion)
 }
 
 /**
@@ -511,7 +511,7 @@ function medianOf(values: number[]): number {
  * 相差一个偏移。皮尔逊相关对幅度不敏感，安静前奏/节拍混叠下最鲁棒（onset 相关在
  * 安静前奏区噪声大，实测 rainy tone 偏移晚 ~10s）。先降采样到 10fps，粗扫 0.25s + 精化。
  */
-function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: number): { offset: number; peak: number } {
+export function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: number): { offset: number; peak: number } {
   const step = Math.max(1, Math.round(frameRate / 10))
   const song: number[] = []
   for (let i = 0; i < songRms.length; i += step) song.push(songRms[i])
@@ -562,13 +562,14 @@ function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: number)
 }
 
 function detectSilence(frameRms: number[], frameDuration: number, duration: number) {
-  const sorted = [...frameRms].sort((a, b) => a - b)
-  const median = sorted[Math.floor(sorted.length / 2)] || 0
-  const threshold = Math.max(0.0015, median * 0.12)
+  // 固定绝对阈值（-45dBFS）：与 Python 分析（beat_analyzer.py _detect_silence_bounds）同一语义。
+  // 不用相对中位数自适应——安静乐段会被误判成静音，裁剪点随曲目漂移；
+  // 过渡入点/无缝拼接需要的是确定性的"真静音"边界。
+  const amplitudeThreshold = 10 ** (-45 / 20)
   let first = 0
-  while (first < frameRms.length && frameRms[first] <= threshold) first += 1
+  while (first < frameRms.length && frameRms[first] <= amplitudeThreshold) first += 1
   let last = frameRms.length - 1
-  while (last >= 0 && frameRms[last] <= threshold) last -= 1
+  while (last >= 0 && frameRms[last] <= amplitudeThreshold) last -= 1
   return {
     introSilence: Math.min(duration, first * frameDuration),
     outroSilence: Math.max(0, duration - (last + 1) * frameDuration),
@@ -654,7 +655,13 @@ function toMonoDownsampled(buffer: AudioBuffer, context: AudioContext, targetRat
   return output
 }
 
-export async function decodeAudioUrl(url: string, signal?: AbortSignal): Promise<AudioBuffer> {
+/** 解码产物：buffer 为降采样单声道分析载体；format 保留解码前容器真实格式 */
+export interface DecodedAudio {
+  buffer: AudioBuffer
+  format: { sampleRate: number; channels: number }
+}
+
+export async function decodeAudioUrl(url: string, signal?: AbortSignal): Promise<DecodedAudio> {
   const response = await fetch(url, { signal })
   if (!response.ok) throw new Error(`audio fetch failed: ${response.status}`)
   const data = await response.arrayBuffer()
@@ -664,8 +671,10 @@ export async function decodeAudioUrl(url: string, signal?: AbortSignal): Promise
   const context = new AudioContextCtor()
   try {
     const decoded = await context.decodeAudioData(data)
-    // 解码后立即降采样为单声道，避免整曲立体声 PCM 留在内存里
-    return toMonoDownsampled(decoded, context)
+    // 记录解码前容器的真实格式（声道数/采样率）——过渡格式预检消费；
+    // 随后立即降采样为单声道，避免整曲立体声 PCM 留在内存里
+    const format = { sampleRate: decoded.sampleRate, channels: decoded.numberOfChannels }
+    return { buffer: toMonoDownsampled(decoded, context), format }
   } finally {
     void context.close()
   }
@@ -716,7 +725,7 @@ function metadataOnly(input: TrackAnalysisInput, reason: TrackAnalysis['provider
   }
 }
 
-function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer): TrackAnalysis {
+function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: { sampleRate: number; channels: number }): TrackAnalysis {
   const channel = buffer.getChannelData(0)
   const sampleRate = buffer.sampleRate
   const duration = buffer.duration
@@ -793,6 +802,7 @@ function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer): TrackAna
     beatFeatures,
     introSilence: silence.introSilence,
     outroSilence: silence.outroSilence,
+    audioFormat: format,
     rmsEnvelope: frameRms,
     sourceSignature: input.sourceSignature,
     analysisVersion: ANALYSIS_VERSION,
@@ -827,24 +837,31 @@ class AutoMixAnalysisService {
   }
 
   private async probePythonService(): Promise<boolean> {
-    const controller = new AbortController()
-    const timeoutId = window.setTimeout(() => controller.abort(), PYTHON_HEALTH_TIMEOUT_MS)
     try {
-      const response = await fetch(`${PYTHON_BEAT_SERVICE_URL}/health`, {
-        signal: controller.signal
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        this.pythonServiceAvailable = data.status === 'ok'
-        if (this.pythonServiceAvailable) debugLog('✅ [AutoMix] Python Beat Service 可用:', data.version)
-      } else {
+      if (window.electron?.localPython && !await window.electron.localPython.ensure('beat')) {
         this.pythonServiceAvailable = false
+        return false
+      }
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), PYTHON_HEALTH_TIMEOUT_MS)
+      try {
+        const response = await fetch(`${PYTHON_BEAT_SERVICE_URL}/health`, {
+          signal: controller.signal
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          this.pythonServiceAvailable = data.status === 'ok'
+          if (this.pythonServiceAvailable) debugLog('✅ [AutoMix] Python Beat Service 可用:', data.version)
+        } else {
+          this.pythonServiceAvailable = false
+        }
+      } finally {
+        window.clearTimeout(timeoutId)
       }
     } catch {
       this.pythonServiceAvailable = false
     } finally {
-      window.clearTimeout(timeoutId)
       this.pythonServiceCheckedAt = Date.now()
     }
 
@@ -897,7 +914,8 @@ class AutoMixAnalysisService {
         body: JSON.stringify({
           trackKey: input.trackKey,
           audioPath: audioPath,
-          duration: input.duration || 0
+          duration: input.duration || 0,
+          sourceSignature: input.sourceSignature || '',
         }),
         signal: controller.signal
       })
@@ -943,6 +961,22 @@ class AutoMixAnalysisService {
     }
   }
 
+  /** 同步快查首尾静音边界（仅内存层，不触发磁盘/网络）：
+   *  无缝衔接的确定性裁剪触发用——分析由 AutoMix 正常产生后无缝免费复用，
+   *  无缓存时返回 null，消费方维持原有运行时探测行为。 */
+  peekSilenceBounds(trackKey: string): { introSilence: number; outroSilence: number } | null {
+    const normalized = trackKey.trim()
+    if (!normalized) return null
+    for (const analysis of memoryCache.values()) {
+      if (analysis.trackKey !== normalized || !isSupportedAnalysis(analysis)) continue
+      // metadata-only 等降级产物没有真实静音数据（恒为 0），不作为有效边界
+      if (analysis.provider === 'metadata-only' || analysis.provider === 'tv-metadata-only' || analysis.provider === 'electron-unavailable') continue
+      if (!Number.isFinite(analysis.introSilence) || !Number.isFinite(analysis.outroSilence)) continue
+      return { introSilence: analysis.introSilence, outroSilence: analysis.outroSilence }
+    }
+    return null
+  }
+
   async getCached(trackKey: string): Promise<TrackAnalysis | null> {
     const normalizedTrackKey = trackKey.trim()
     if (!normalizedTrackKey) return null
@@ -975,13 +1009,15 @@ class AutoMixAnalysisService {
       const mediaUrl = localPath ? await window.electron?.audioDownload?.getMediaUrl?.(localPath) : undefined
       if (mediaUrl) {
         debugLog('🎧 [AutoMix] 浏览器解码本地文件（可支持 m4a/aac）:', localPath)
-        return analyzeBuffer(input, await decodeAudioUrl(mediaUrl, input.signal))
+        const decoded = await decodeAudioUrl(mediaUrl, input.signal)
+        return analyzeBuffer(input, decoded.buffer, decoded.format)
       }
     } catch (error) {
       debugLog('⚠️ [AutoMix] 本地文件解码失败，尝试直接抓取 URL:', error)
     }
     debugLog('🎧 [AutoMix] 直接抓取原始 URL 解码')
-    return analyzeBuffer(input, await decodeAudioUrl(input.url, input.signal))
+    const decoded = await decodeAudioUrl(input.url, input.signal)
+    return analyzeBuffer(input, decoded.buffer, decoded.format)
   }
 
   private async analyzeAndCache(input: TrackAnalysisInput, key: string): Promise<TrackAnalysis> {
@@ -1050,7 +1086,8 @@ class AutoMixAnalysisService {
         } else {
           // Web 版没有独立分析进程，才使用浏览器本地检测。
           debugLog('⚠️ [AutoMix] 使用浏览器本地节拍检测')
-          analysis = analyzeBuffer(input, await decodeAudioUrl(input.url, input.signal))
+          const decoded = await decodeAudioUrl(input.url, input.signal)
+          analysis = analyzeBuffer(input, decoded.buffer, decoded.format)
         }
       }
     } catch (error) {

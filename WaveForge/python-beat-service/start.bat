@@ -1,72 +1,52 @@
 @echo off
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 > nul
+
 echo ========================================
 echo Beat Analysis Service - Startup
 echo ========================================
 echo.
 
-REM Use project's embedded Python
-set PYTHON_EXE=..\resources\python-embed\python.exe
-set PIP_EXE=..\resources\python-embed\Scripts\pip.exe
+set "SERVICE_DIR=%~dp0"
+set "PYTHON_EXE=%SERVICE_DIR%..\resources\python-embed\python.exe"
+set "BUNDLED_MODEL=%SERVICE_DIR%..\resources\beat-this\final0.ckpt"
+set "EXPECTED_MODEL_SHA256=8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
 
-REM Check if Python exists
 if not exist "%PYTHON_EXE%" (
     echo ERROR: Built-in Python not found at %PYTHON_EXE%
-    echo Please ensure the project structure is intact
-    echo.
-    pause
     exit /b 1
 )
 
-echo [1/3] Using built-in Python:
-"%PYTHON_EXE%" --version
-echo.
+if not defined BEAT_THIS_CHECKPOINT set "BEAT_THIS_CHECKPOINT=%BUNDLED_MODEL%"
+if not defined WAVEFORGE_BEAT_MODEL_PATH set "WAVEFORGE_BEAT_MODEL_PATH=%BEAT_THIS_CHECKPOINT%"
 
-REM Check if dependencies are installed
-echo [2/3] Checking dependencies...
-"%PYTHON_EXE%" -c "import flask" 2>nul
-if %errorlevel% neq 0 (
-    echo Dependencies not installed. Installing from local packages...
-    echo This will be fast - using offline packages...
-    echo.
-    "%PIP_EXE%" install --no-index --find-links=packages -r requirements.txt
-    if %errorlevel% neq 0 (
-        echo.
-        echo ERROR: Failed to install dependencies from local packages
-        echo Trying online installation as fallback...
-        echo.
-        "%PIP_EXE%" install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-        if %errorlevel% neq 0 (
-            echo.
-            echo ERROR: Failed to install dependencies
-            echo Please check your network or contact support
-            echo.
-            pause
-            exit /b 1
-        )
-    )
-    echo Dependencies installed successfully
-) else (
-    echo Dependencies already installed
+"%PYTHON_EXE%" --version
+
+echo [1/3] Checking required runtime...
+"%PYTHON_EXE%" -c "import beat_this, torch, torchaudio, einops, rotary_embedding_torch, soxr"
+if errorlevel 1 (
+    echo ERROR: Required Beat This runtime dependencies are missing.
+    echo Rebuild the embedded runtime with npm run bundle-python.
+    exit /b 1
 )
+
+echo [2/3] Checking Beat This model...
+if not exist "%BEAT_THIS_CHECKPOINT%" (
+    echo ERROR: Required Beat This final0 model is missing.
+    exit /b 1
+)
+set "ACTUAL_SHA256="
+for /f "skip=1 tokens=1" %%H in ('certutil -hashfile "%BEAT_THIS_CHECKPOINT%" SHA256 ^| findstr /r /v "certutil"') do if not defined ACTUAL_SHA256 set "ACTUAL_SHA256=%%H"
+if /i not "%ACTUAL_SHA256%"=="%EXPECTED_MODEL_SHA256%" (
+    echo ERROR: Beat This final0 SHA-256 mismatch. Refusing to start.
+    exit /b 1
+)
+echo Model verified: %BEAT_THIS_CHECKPOINT%
 echo.
 
 echo [3/3] Starting service...
-echo.
-echo ========================================
-echo Beat Analysis Service Running
-echo ========================================
 echo Service URL: http://localhost:3002
 echo Health check: http://localhost:3002/health
 echo.
-echo TIP: Press Ctrl+C to stop
-echo TIP: Keep this window open
-echo ========================================
-echo.
-
-REM Start service
-"%PYTHON_EXE%" beat_analyzer.py
-
-echo.
-echo Service stopped
-pause
+"%PYTHON_EXE%" "%SERVICE_DIR%beat_analyzer.py"
+exit /b %errorlevel%
