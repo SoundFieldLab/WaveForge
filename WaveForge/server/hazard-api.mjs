@@ -131,32 +131,79 @@ async function loadTyphoons({ force = false } = {}) {
   return typhoonPending
 }
 
+async function fetchEarthquakesFromCeic() {
+  const text = await fetchText('https://www.ceic.ac.cn/data/data.json?t=' + Date.now(), {
+    referer: 'https://www.ceic.ac.cn/',
+  })
+  const rows = JSON.parse(text)
+  const items = (Array.isArray(rows) ? rows : []).map(row => ({
+    id: String(row?.id || ''),
+    time: String(row?.time || ''),
+    latitude: Number(row?.latitude),
+    longitude: Number(row?.longitude),
+    depth: Number(row?.depth) || 0,
+    magnitude: Number(row?.magnitude) || 0,
+    location: String(row?.location || '未知区域'),
+  })).filter(item => item.id && Number.isFinite(item.latitude) && Number.isFinite(item.longitude))
+    .slice(0, 300)
+  return {
+    source: '中国地震台网中心地震目录',
+    sourceUrl: 'https://www.ceic.ac.cn/',
+    items,
+  }
+}
+
+// 备用源：中国地震台网不可达时，改用 USGS 全球地震目录（中国及周边区域框，近 3 天）
+async function fetchEarthquakesFromUsgs() {
+  const since = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString()
+  const url = 'https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson'
+    + '&starttime=' + encodeURIComponent(since)
+    + '&minlatitude=15&maxlatitude=55&minlongitude=70&maxlongitude=140&orderby=time'
+  const text = await fetchText(url, { referer: 'https://earthquake.usgs.gov/', timeout: 15000 })
+  const data = JSON.parse(text)
+  const pad = (n) => String(n).padStart(2, '0')
+  const items = (Array.isArray(data?.features) ? data.features : []).map(feature => {
+    const happenedAt = new Date(Number(feature?.properties?.time) || Date.now())
+    const [longitude, latitude, depth] = feature?.geometry?.coordinates || []
+    return {
+      id: String(feature?.id || ''),
+      time: `${happenedAt.getFullYear()}-${pad(happenedAt.getMonth() + 1)}-${pad(happenedAt.getDate())} ${pad(happenedAt.getHours())}:${pad(happenedAt.getMinutes())}:${pad(happenedAt.getSeconds())}`,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      depth: Number(depth) || 0,
+      magnitude: Number(feature?.properties?.mag) || 0,
+      location: String(feature?.properties?.place || '未知区域'),
+    }
+  }).filter(item => item.id && Number.isFinite(item.latitude) && Number.isFinite(item.longitude))
+    .slice(0, 300)
+  return {
+    source: '美国地质调查局（USGS）地震目录 · 备用源',
+    sourceUrl: 'https://earthquake.usgs.gov/',
+    items,
+  }
+}
+
 async function loadEarthquakes({ force = false } = {}) {
   const now = Date.now()
   if (!force && earthquakeCache && now - earthquakeCacheAt < EARTHQUAKE_CACHE_TTL) return earthquakeCache
   if (!force && earthquakePending) return earthquakePending
 
   earthquakePending = (async () => {
-    const text = await fetchText('https://www.ceic.ac.cn/data/data.json?t=' + Date.now(), {
-      referer: 'https://www.ceic.ac.cn/',
-    })
-    const rows = JSON.parse(text)
-    const items = (Array.isArray(rows) ? rows : []).map(row => ({
-      id: String(row?.id || ''),
-      time: String(row?.time || ''),
-      latitude: Number(row?.latitude),
-      longitude: Number(row?.longitude),
-      depth: Number(row?.depth) || 0,
-      magnitude: Number(row?.magnitude) || 0,
-      location: String(row?.location || '未知区域'),
-    })).filter(item => item.id && Number.isFinite(item.latitude) && Number.isFinite(item.longitude))
-      .slice(0, 300)
-
+    let result
+    try {
+      result = await fetchEarthquakesFromCeic()
+    } catch (ceicError) {
+      console.warn('[地震数据] 中国地震台网获取失败，切换 USGS 备用源:', ceicError?.message || ceicError)
+      try {
+        result = await fetchEarthquakesFromUsgs()
+      } catch (usgsError) {
+        console.warn('[地震数据] USGS 备用源获取失败:', usgsError?.message || usgsError)
+        throw new Error('地震目录暂时无法获取（主源与备用源均失败）')
+      }
+    }
     earthquakeCache = {
-      source: '中国地震台网中心地震目录',
-      sourceUrl: 'https://www.ceic.ac.cn/',
+      ...result,
       updatedAt: Date.now(),
-      items,
     }
     earthquakeCacheAt = Date.now()
     return earthquakeCache
