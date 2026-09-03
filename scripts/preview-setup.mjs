@@ -7,15 +7,28 @@
  * 用法：npm run preview:setup
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const NSI = join(ROOT, 'scripts', 'setup-preview', 'preview.nsi')
+const UNINSTALL_NSI = join(ROOT, 'scripts', 'setup-preview', 'uninstall-preview.nsi')
 const OUT = join(ROOT, 'release', 'setup-preview.exe')
+const UNINSTALL_OUT = join(ROOT, 'release', 'uninstall-preview.exe')
+const UNINSTALL_BUILDER = join(ROOT, 'release', 'uninstall-preview-builder.exe')
 const APP_VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version || '0.1.4'
+
+function directorySize(path) {
+  if (!existsSync(path)) return 0
+  return readdirSync(path, { withFileTypes: true }).reduce((total, entry) => {
+    const item = join(path, entry.name)
+    return total + (entry.isDirectory() ? directorySize(item) : statSync(item).size)
+  }, 0)
+}
+
+const estimatedSizeKb = Math.ceil(directorySize(join(ROOT, 'release', 'win-unpacked')) / 1024)
 
 // 生成 UI 位图（背景/按钮/卡片）
 execFileSync(process.execPath, [join(__dirname, 'generate-installer-ui.mjs')], { stdio: 'inherit', cwd: ROOT })
@@ -38,5 +51,8 @@ if (!makensis) {
   process.exit(1)
 }
 
-execFileSync(makensis, ['/V2', `/DSRC=${ROOT.replace(/\\/g, '/')}`, `/DAPP_VERSION=${APP_VERSION}`, NSI], { stdio: 'inherit', cwd: ROOT })
-console.log(`\n✅ 预览安装器已生成：${OUT}\n   直接运行即可查看向导界面（可安装到任意目录，卸载用其中的 uninstall-preview.exe）`)
+execFileSync(makensis, ['/V2', `/DSRC=${ROOT.replace(/\\/g, '/')}`, `/DAPP_VERSION=${APP_VERSION}`, `/DESTIMATED_SIZE=${estimatedSizeKb}`, NSI], { stdio: 'inherit', cwd: ROOT })
+execFileSync(makensis, ['/V2', `/DSRC=${ROOT.replace(/\\/g, '/')}`, UNINSTALL_NSI], { stdio: 'inherit', cwd: ROOT })
+execFileSync(UNINSTALL_BUILDER, [], { stdio: 'inherit', cwd: ROOT })
+unlinkSync(UNINSTALL_BUILDER)
+console.log(`\n安装预览：${OUT}\n卸载预览：${UNINSTALL_OUT}\n两个预览都不会写入或删除应用文件。`)
