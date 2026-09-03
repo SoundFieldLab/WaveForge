@@ -16,6 +16,7 @@ import type { MusicPlatform } from '../services/platforms'
 import type { Song } from '../services/musicApi'
 import { fetchExploreHome, fetchExploreRecommendationBatch } from '../services/exploreApi'
 import { getNeteasePlaylistTrackPage, getPlaylistDetail } from '../services/playlistService'
+import { appleLibraryTrackToSong, getApplePlaylistTracks } from '../services/appleCatalog'
 import {
   clearDesktopMusicActivity,
   DESKTOP_MUSIC_ACTIVITY_EVENT,
@@ -94,7 +95,7 @@ const WIDGET_META: Record<string, { title: string; subtitle: string; icon: typeo
   recentlyPlayed: { title: '最近播放', subtitle: '继续刚才的旋律', icon: History },
   dailyRecommendations: { title: '每日推荐', subtitle: '为你精选', icon: WandSparkles },
   playQueue: { title: '播放队列', subtitle: '接下来播放', icon: ListMusic },
-  favoriteSongs: { title: '收藏速览', subtitle: '我喜欢的音乐', icon: Heart },
+  favoriteSongs: { title: '喜爱歌曲', subtitle: '喜爱歌曲', icon: Heart },
   playlistShortcuts: { title: '歌单入口', subtitle: '常用歌单', icon: Library },
   listeningStats: { title: '听歌统计', subtitle: '聆听足迹', icon: ChartNoAxesColumnIncreasing },
   musicCalendar: { title: '音乐日历', subtitle: '每日听歌热力', icon: CalendarRange },
@@ -142,6 +143,9 @@ const formatBytes = (bytes: number) => {
 
 function normalizePlaylistSongs(data: any, platform: MusicPlatform): Song[] {
   const raw = platform === 'qq' ? data?.songlist || data?.playlist?.tracks || [] : data?.playlist?.tracks || data?.songs || []
+  if (platform === 'apple') {
+    return raw.filter((song: Song) => Boolean(song.appleId || song.appleLibraryId || song.id))
+  }
   return raw.map((item: any) => platform === 'qq' ? {
     id: Number(item.id || item.songid || 0), mid: item.mid || item.songmid, name: item.name || item.songname || '未知歌曲',
     artists: (item.artists || item.singer || []).map((artist: any) => ({ id: artist.id, mid: artist.mid, name: artist.name })),
@@ -356,14 +360,14 @@ export default function DesktopExtraWidget({ type, cardBlurAmount, accentColor, 
     if (type !== 'favoriteSongs') return
     const liked = context.playlists.find(playlist => playlist.isLike) || context.playlists[0]
     if (!liked) { setFavoriteSongs([]); return }
-    // Apple 无"我喜欢"歌单接口（喜欢=音乐库，走 amp-api），组件留空
-    if (context.platform === 'apple') { setFavoriteSongs([]); setFavoritesLoading(false); return }
     let active = true
     setFavoritesLoading(true)
-    const request = context.platform === 'netease'
-      ? getNeteasePlaylistTrackPage(liked.id, 0, 120).then(page => ({ playlist: { tracks: page.tracks } }))
-      : getPlaylistDetail(String(liked.id), context.platform)
-    request.then(data => { if (active) setFavoriteSongs(normalizePlaylistSongs(data, context.platform)) }).catch(() => { if (active) setFavoriteSongs([]) }).finally(() => { if (active) setFavoritesLoading(false) })
+    const request: Promise<Song[]> = context.platform === 'apple'
+      ? getApplePlaylistTracks(String(liked.id), 5000).then(tracks => tracks.map(appleLibraryTrackToSong))
+      : context.platform === 'netease'
+        ? getNeteasePlaylistTrackPage(liked.id, 0, 120).then(page => normalizePlaylistSongs({ playlist: { tracks: page.tracks } }, context.platform))
+        : getPlaylistDetail(String(liked.id), context.platform).then(data => normalizePlaylistSongs(data, context.platform))
+    request.then(songs => { if (active) setFavoriteSongs(songs) }).catch(() => { if (active) setFavoriteSongs([]) }).finally(() => { if (active) setFavoritesLoading(false) })
     return () => { active = false }
   }, [context.platform, context.playlists, type])
 
@@ -452,7 +456,7 @@ export default function DesktopExtraWidget({ type, cardBlurAmount, accentColor, 
     details = <div className="space-y-1">{context.queue.slice(0, 100).map((song, index) => { const active = index === context.currentIndex; return <div key={`${getDesktopSongKey(song)}:${index}`} className="flex items-center gap-1 rounded-2xl" style={{ background: active ? 'rgba(255,255,255,.08)' : undefined }}><div className="min-w-0 flex-1"><SongRow song={song} index={index} active={active} onClick={() => play(song, context.queue)} /></div><button type="button" disabled={index === 0} onClick={() => context.onMoveQueueItem(index, index - 1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-white/35 hover:bg-white/8 disabled:opacity-15"><ArrowUp className="h-3.5 w-3.5" /></button><button type="button" disabled={index === context.queue.length - 1} onClick={() => context.onMoveQueueItem(index, index + 1)} className="flex h-8 w-8 items-center justify-center rounded-lg text-white/35 hover:bg-white/8 disabled:opacity-15"><ArrowDown className="h-3.5 w-3.5" /></button><button type="button" disabled={active} onClick={() => context.onRemoveQueueItem(index)} title={active ? '正在播放的歌曲不能直接移除' : '从队列移除'} className="flex h-8 w-8 items-center justify-center rounded-lg text-rose-300/45 hover:bg-rose-400/10 disabled:opacity-15"><Trash2 className="h-3.5 w-3.5" /></button></div> })}</div>
     settings = <SettingCount value={count} onChange={setCount} />
   } else if (type === 'favoriteSongs') {
-    card = <><Header type={type} accentColor={accentColor} trailing={favoritesLoading ? <LoaderCircle className="h-4 w-4 animate-spin text-white/40" /> : <Heart className="h-4 w-4" fill={accentColor} style={{ color: accentColor }} />} /><div className="mt-3 space-y-1">{favoriteSongs.slice(0, count).map(song => <SongRow key={getDesktopSongKey(song)} song={song} onClick={() => play(song, favoriteSongs)} />)}{!favoriteSongs.length && <Empty text="登录后读取我喜欢的音乐" />}</div></>
+    card = <><Header type={type} accentColor={accentColor} trailing={favoritesLoading ? <LoaderCircle className="h-4 w-4 animate-spin text-white/40" /> : <Heart className="h-4 w-4" fill={accentColor} style={{ color: accentColor }} />} /><div className="mt-3 space-y-1">{favoriteSongs.slice(0, count).map(song => <SongRow key={getDesktopSongKey(song)} song={song} onClick={() => play(song, favoriteSongs)} />)}{!favoriteSongs.length && <Empty text="登录后读取喜爱歌曲" />}</div></>
     details = <SongList songs={favoriteSongs} onPlay={song => play(song, favoriteSongs)} />
     settings = <SettingCount value={count} onChange={setCount} />
   } else if (type === 'playlistShortcuts') {

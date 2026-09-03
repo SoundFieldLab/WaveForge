@@ -31,7 +31,8 @@ import {
   WeatherSnapshot,
 } from '../services/weatherService'
 // 天气主题纯函数/类型/纯视觉组件走轻量模块（无 leaflet）；模态框本体（含 leaflet 地图）懒加载。
-import { getWeatherVisualTheme, WeatherAtmosphere, WeatherGlyph, type WeatherDetailsTab } from './weatherVisualTheme'
+import { getWeatherVisualTheme, WeatherAtmosphere, WeatherGlyph, WeatherRainGlass, isRainySceneKind, type WeatherDetailsTab } from './weatherVisualTheme'
+import { WeatherSimpleCard } from './WeatherSimpleCard'
 const WeatherDetailsModal = lazy(() => import('./WeatherDetailsModal'))
 import DesktopTimeCenter, { formatRemaining } from './DesktopTimeCenter'
 import { useDesktopFocusTimer } from '../hooks/useDesktopFocusTimer'
@@ -325,11 +326,29 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
     requestControllerRef.current?.abort()
     setWeather(staleCache)
     setError('')
-    // 后台预取若已生成新鲜缓存则直接复用；缓存过期时才重新定位并请求。
-    void refreshWeather(false)
-    const timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
+    let timer: number | null = null
+    const stopTimer = () => {
+      if (timer !== null) window.clearInterval(timer)
+      timer = null
+    }
+    const startTimer = () => {
+      stopTimer()
+      if (document.visibilityState !== 'visible') return
+      void refreshWeather(false)
+      timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
+    }
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') startTimer()
+      else {
+        stopTimer()
+        requestControllerRef.current?.abort()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    startTimer()
     return () => {
-      window.clearInterval(timer)
+      stopTimer()
+      document.removeEventListener('visibilitychange', onVisibilityChange)
       requestControllerRef.current?.abort()
     }
   }, [refreshWeather, weatherIdentity])
@@ -401,6 +420,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
       : settings.weatherDistrict || settings.weatherCity || settings.weatherProvince || '未设置地区')
   const locationAddress = weather ? getWeatherLocationAddress(weather.location) : locationLabel
   const precipitationChance = Math.round(weather?.daily[0]?.precipitationProbability || weather?.hourly[0]?.precipitationProbability || 0)
+  const simpleMode = settings.weatherCardMode === 'simple'
 
   const openDetails = (tab: WeatherDetailsTab = 'weather') => {
     setDetailsTab(tab)
@@ -434,6 +454,10 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
         }}
         aria-label={`查看${locationAddress}天气详情`}
       >
+        {simpleMode && weather ? (
+          <WeatherSimpleCard weather={weather} locationLabel={locationLabel} />
+        ) : (
+          <>
         {weatherTheme && <WeatherAtmosphere theme={weatherTheme} compact />}
         <div className="relative z-10 px-5 pb-4 pt-4">
           <div className="flex min-w-0 items-center gap-1.5 text-xs font-medium text-white/70">
@@ -499,6 +523,11 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
             </div>
           </div>
         )}
+
+          </>
+        )}
+
+        {weatherTheme && !simpleMode && isRainySceneKind(weatherTheme.kind) && <WeatherRainGlass kind={weatherTheme.kind} className="absolute inset-0 z-20" />}
       </div>
 
       {(typhoonRisk || earthquakeRisk) && (

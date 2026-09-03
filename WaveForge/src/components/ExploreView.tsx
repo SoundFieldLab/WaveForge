@@ -2,9 +2,10 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
-import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
+import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
 import {
@@ -54,6 +55,7 @@ import { AppleExplorePanel } from './AppleExplorePanel'
 import QQMusicJourney from './QQMusicJourney'
 import NeteaseMusicJourney from './NeteaseMusicJourney'
 import { getAppleLibraryPlaylists, APPLE_EXPLORE_COUNTRIES } from '../services/appleCatalog'
+import { fetchApplePlaylistTracksForPlay, fetchLibraryPlaylistTracksForPlay } from '../services/appleWebService'
 import { getPlatformCapabilities, getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
 import ExploreSettingsPanel, {
   EXPLORE_SECTION_LABELS,
@@ -67,11 +69,20 @@ import SongContextMenu from './SongContextMenu'
 import MVExploreModal from './MVExploreModal'
 import { getUserPlaylists } from '../services/playlistService'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
+import type { MirrorActionId } from '../services/globalSettingsRegistry'
+import { preloadOnIdle } from '../utils/lazyPreload'
+
+// 全局设置镜像里的共享弹窗（按需加载）
+const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
+const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
+const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
 type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
-const EXPLORE_CACHE_KEY = 'exploreHomeCache-v2'
+// v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
+// 是无 appleId 的旧结构（id=榜单排名），按天缓存会让坏数据在当天内一直生效。
+const EXPLORE_CACHE_KEY = 'exploreHomeCache-v3'
 const EXPLORE_SESSION_REFRESH_PREFIX = 'exploreHomeRefreshed:'
 
 /** 探索页平台元信息：名称 / 页签短名 / 主题色 / 主题色 RGB */
@@ -545,17 +556,7 @@ function ExploreView({
   onViewComments,
   onCopyInfo,
 }: ExploreViewProps) {
-  const [platform, setPlatform] = useState<ExplorePlatform>(() => {
-    const saved = localStorage.getItem('explorePlatform')
-    if (saved === 'qq' || saved === 'apple' || saved === 'spotify' || saved === 'kugou' || saved === 'soda') return saved
-    // 探索页从未显式选过平台：继承其他视图（首页/传统/桌面）上次使用的平台，
-    // 避免每次进入探索页都默认回到网易云
-    for (const key of ['selectedPlatform', 'traditionalPlatform', 'desktopModePlatform']) {
-      const inherited = localStorage.getItem(key)
-      if (inherited === 'qq' || inherited === 'apple' || inherited === 'spotify' || inherited === 'kugou' || inherited === 'soda') return inherited
-    }
-    return 'netease'
-  })
+  const [platform, setPlatform] = useState<ExplorePlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'explorePlatform'))
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<ExplorePlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -568,11 +569,19 @@ function ExploreView({
     }
   }, [])
   useEffect(() => {
+    const onPlatformChanged = (event: Event) => {
+      const next = (event as CustomEvent<ExplorePlatform>).detail
+      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+    }
+    window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+    return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
+  }, [])
+  useEffect(() => {
     // 当前平台被隐藏时切换到第一个可见平台
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
       setPlatform(next)
-      localStorage.setItem('explorePlatform', next)
+      syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
   const [dataByPlatform, setDataByPlatform] = useState<Partial<Record<ExplorePlatform, ExplorePayload>>>(() => readExploreCache())
@@ -640,12 +649,22 @@ function ExploreView({
     const playlistMatch = url.match(/playlist\?id=(\d+)/)
     const songMatch = url.match(/song\?id=(\d+)/)
     if (playlistMatch) {
+      detailControllerRef.current?.abort()
+      const controller = new AbortController()
+      detailControllerRef.current = controller
+      const requestId = ++detailRequestRef.current
+      setDetailLoading(true)
+      setDetailError('')
       void fetchExplorePlaylist({ id: playlistMatch[1], platform: 'netease' } as ExplorePlaylist).then((detail) => {
-        if (detail) {
-          setDetail(detail)
-          setDetailOpen(true)
-          setDetailError('')
-        }
+        if (requestId !== detailRequestRef.current || controller.signal.aborted) return
+        if (!detail) throw new Error('歌单加载失败')
+        setDetail(detail)
+        setDetailOpen(true)
+      }).catch(error => {
+        if (requestId !== detailRequestRef.current || controller.signal.aborted) return
+        setDetailError(error instanceof Error ? error.message : '歌单加载失败')
+      }).finally(() => {
+        if (requestId === detailRequestRef.current) setDetailLoading(false)
       })
     } else if (songMatch) {
       void fetchExploreHome('netease').then(() => {
@@ -747,7 +766,22 @@ function ExploreView({
     return () => window.removeEventListener('viewModeChanged', closeForModeSwitch)
   }, [])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 全局设置镜像里打开的共享弹窗（音质 / 缓存清理 / 遥控器个性化）
+  const [globalModal, setGlobalModal] = useState<MirrorActionId | null>(null)
+  // 空闲时预热共享弹窗 chunk，消除首次点击的卡顿
+  useEffect(() => preloadOnIdle([
+    () => import('./AudioQualitySettingsModal'),
+    () => import('./CacheClearModal'),
+    () => import('./RemoteControlSettingsModal'),
+  ]), [])
   const [moreSection, setMoreSection] = useState<ExploreSectionId | null>(null)
+  useTvBack(() => {
+    if (globalModal) { setGlobalModal(null); return true }
+    if (settingsOpen) { setSettingsOpen(false); return true }
+    if (moreSection) { setMoreSection(null); return true }
+    if (showModePanel) { setShowModePanel(false); return true }
+    return false
+  }, [globalModal, moreSection, settingsOpen, showModePanel])
   const [preferences, setPreferences] = useState<ExplorePreferences>(() => {
     try {
       const saved = localStorage.getItem('explorePreferences')
@@ -801,10 +835,17 @@ function ExploreView({
   } as CSSProperties
 
   const loadExplore = useCallback(async (signal?: AbortSignal, forceRefresh = false) => {
+    // Apple renders through AppleExplorePanel. Avoid running the legacy ExplorePayload
+    // pipeline behind it, which duplicates requests and can surface hidden errors.
+    if (platform === 'apple') {
+      setLoading(false)
+      setError('')
+      return
+    }
     setLoading(true)
     setError('')
     try {
-      const result = await fetchExploreHome(platform, signal, { forceRefresh, enhanced: platformPreferences.enhancedApi, appleCountry: platform === 'apple' ? appleCountry : undefined })
+      const result = await fetchExploreHome(platform, signal, { forceRefresh, enhanced: platformPreferences.enhancedApi })
       writeExploreCache(platform, result)
       setDataByPlatform(previous => ({ ...previous, [platform]: result }))
     } catch (requestError) {
@@ -817,7 +858,7 @@ function ExploreView({
   }, [platform, qqLoggedIn, neteaseLoggedIn, authRevision, platformPreferences.enhancedApi, appleCountry])
 
   useEffect(() => {
-    localStorage.setItem('explorePlatform', platform)
+    syncPlatformAcrossViews(platform)
     const sessionKey = `${EXPLORE_SESSION_REFRESH_PREFIX}${platform}`
     const requiresPersonalizedPayload = platform === 'qq' && qqLoggedIn
     const inMemoryPayload = dataByPlatform[platform]
@@ -1076,6 +1117,41 @@ function ExploreView({
     description: playlist.description,
     platform: playlist.platform,
   }, signal => fetchExplorePlaylist(playlist, signal), autoplay)
+
+  const handleApplePlaylist = useCallback((playlist: {
+    id: string
+    name: string
+    coverUrl?: string
+    creator?: string
+    trackCount?: number
+    description?: string
+    platform: 'apple'
+    isLibrary?: boolean
+  }, autoplay = false) => openDetail({
+    id: playlist.id,
+    name: playlist.name,
+    coverImgUrl: playlist.coverUrl || '',
+    trackCount: playlist.trackCount || 0,
+    description: playlist.description,
+    creator: playlist.creator ? { nickname: playlist.creator } : undefined,
+    platform: 'apple',
+  }, async () => {
+    const songs = playlist.isLibrary
+      ? await fetchLibraryPlaylistTracksForPlay(playlist.id)
+      : await fetchApplePlaylistTracksForPlay(playlist.id, appleStorefront)
+    return {
+      playlist: {
+        id: playlist.id,
+        name: playlist.name,
+        coverImgUrl: playlist.coverUrl || '',
+        trackCount: songs.length || playlist.trackCount || 0,
+        description: playlist.description,
+        creator: playlist.creator ? { nickname: playlist.creator } : undefined,
+        platform: 'apple',
+      },
+      songs,
+    }
+  }, autoplay), [appleStorefront, openDetail])
 
   const handleChart = (chart: ExploreChart, autoplay = false) => openDetail({
     id: chart.id,
@@ -1563,8 +1639,10 @@ function ExploreView({
               onSongSelect={onSongSelect}
               onLoginClick={() => onLoginClick('apple')}
               onOpenAlbum={onOpenAlbum}
+              onOpenPlaylistPanel={handleApplePlaylist}
               onOpenArtistPanel={onOpenArtist}
               onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
+              restorePlaybackOrigin={restorePlaybackOrigin}
               refreshSignal={appleRefreshSignal}
             />
           ) : (
@@ -2065,6 +2143,7 @@ function ExploreView({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[160] bg-[#080b11]/98 text-white backdrop-blur-2xl"
+            data-tv-scope
           >
             <div className="flex h-full flex-col pt-8">
               <div className="flex items-center gap-4 border-b border-white/[0.08] px-5 py-4 md:px-8 lg:px-10">
@@ -2096,16 +2175,32 @@ function ExploreView({
         )}
       </AnimatePresence>
 
-      <ExploreSettingsPanel
-        show={settingsOpen}
-        platform={platform}
-        preferences={preferences}
-        accent={accent}
-        playerTheme={playerTheme}
-        onClose={() => setSettingsOpen(false)}
-        onPlatformChange={setPlatform}
-        onChange={setPreferences}
-      />
+      <div data-tv-scope={settingsOpen ? '' : undefined}>
+        <ExploreSettingsPanel
+          show={settingsOpen}
+          platform={platform}
+          preferences={preferences}
+          accent={accent}
+          playerTheme={playerTheme}
+          onClose={() => setSettingsOpen(false)}
+          onPlatformChange={setPlatform}
+          onChange={setPreferences}
+          onOpenGlobalModal={setGlobalModal}
+        />
+      </div>
+
+      {/* 全局设置镜像的共享弹窗（与简约 / 传统模式同一组件） */}
+      <Suspense fallback={null}>
+        {globalModal === 'audio-quality' && (
+          <LazyAudioQualityModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} neteaseVip={Boolean(neteaseVip)} qqVip={Boolean(qqVip)} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
+        )}
+        {globalModal === 'cache-clear' && (
+          <LazyCacheClearModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+        {globalModal === 'remote-settings' && (
+          <LazyRemoteSettingsModal show onClose={() => setGlobalModal(null)} playerTheme={playerTheme} />
+        )}
+      </Suspense>
 
       {detailLoading && !detailOpen && (
         <div className="pointer-events-none fixed bottom-7 left-1/2 z-[200] flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/[0.1] bg-black/65 px-4 py-2 text-xs text-white/68 shadow-xl backdrop-blur-xl">

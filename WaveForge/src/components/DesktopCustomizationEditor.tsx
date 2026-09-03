@@ -4,6 +4,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import type { DragEvent } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   CalendarDays,
@@ -113,6 +114,13 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
   const [locationSearchError, setLocationSearchError] = useState<string | null>(null)
   const [activeLocationResult, setActiveLocationResult] = useState(0)
   const autoLocationLabel = useMemo(() => formatLocationLabel(draft), [draft])
+
+  useTvBack(() => {
+    if (!open) return false
+    if (showOptions) setShowOptions(false)
+    else onClose()
+    return true
+  }, [open, showOptions, onClose])
 
   useEffect(() => {
     if (open) {
@@ -258,12 +266,12 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[240]">
           <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-slate-950/18" />
 
-          <motion.header initial={{ y: -24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -24, opacity: 0 }} className="pointer-events-auto absolute left-1/2 top-5 flex w-[min(920px,calc(100vw-40px))] -translate-x-1/2 items-center justify-between gap-5 rounded-[24px] border border-white/15 bg-slate-950/72 px-4 py-3 text-white shadow-2xl backdrop-blur-2xl">
+          <motion.header initial={{ y: -24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -24, opacity: 0 }} className="pointer-events-auto absolute left-1/2 top-2 flex max-h-[calc(100vh-1rem)] w-[min(920px,calc(100vw-16px))] -translate-x-1/2 flex-wrap items-center justify-between gap-2 overflow-y-auto rounded-[24px] border border-white/15 bg-slate-950/72 px-3 py-3 text-white shadow-2xl backdrop-blur-2xl sm:top-5 sm:w-[min(920px,calc(100vw-40px))] sm:flex-nowrap sm:gap-5 sm:px-4">
             <div className="flex min-w-0 items-center gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-cyan-400/16"><LayoutDashboard className="h-5 w-5 text-cyan-200" /></div>
               <div className="min-w-0"><div className="font-semibold">编辑桌面布局</div><div className="mt-0.5 truncate text-xs text-white/42">从底部拖动元素，放进桌面两侧发光区域</div></div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-nowrap">
               <button type="button" onClick={() => update({ ...draft, left: [], right: [] })} className="flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 text-xs text-white/60 transition hover:bg-white/10"><RotateCcw className="h-3.5 w-3.5" />清空布局</button>
               <button type="button" onClick={() => setShowOptions(true)} className="flex h-10 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-4 text-xs text-white/70 transition hover:bg-white/10"><Settings2 className="h-3.5 w-3.5" />桌面选项</button>
               <button type="button" onClick={onClose} className="flex h-10 items-center gap-2 rounded-full bg-white px-5 text-xs font-semibold text-slate-950 transition hover:bg-cyan-100"><Check className="h-4 w-4" />完成</button>
@@ -302,9 +310,9 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
             )
           })}
 
-          <motion.div initial={{ y: 36, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 36, opacity: 0 }} className="pointer-events-auto absolute bottom-5 left-1/2 w-[min(980px,calc(100vw-40px))] -translate-x-1/2 rounded-[28px] border border-white/15 bg-slate-950/78 p-3 text-white shadow-[0_24px_80px_rgba(0,0,0,.5)] backdrop-blur-2xl">
+          <motion.div initial={{ y: 36, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 36, opacity: 0 }} className="pointer-events-auto absolute bottom-2 left-1/2 max-h-[42vh] w-[min(980px,calc(100vw-16px))] -translate-x-1/2 overflow-y-auto rounded-[28px] border border-white/15 bg-slate-950/78 p-3 text-white shadow-[0_24px_80px_rgba(0,0,0,.5)] backdrop-blur-2xl sm:bottom-5 sm:w-[min(980px,calc(100vw-40px))]">
             <div className="mb-2 flex items-center justify-between px-2"><div><span className="text-sm font-medium">支持的桌面元素</span><span className="ml-3 text-xs text-white/35">可自由添加；内容超出屏幕后可在左右区域滚动</span></div><div className="flex items-center gap-3 text-[10px] text-white/35"><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-300" />已添加</span><span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full border border-white/30" />可添加</span></div></div>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">
               {WIDGET_OPTIONS.map(option => {
                 const Icon = option.icon
                 const side = widgetSide.get(option.type)
@@ -323,7 +331,7 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
             {showOptions && (
               <>
                 <motion.button type="button" aria-label="关闭桌面选项" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowOptions(false)} className="pointer-events-auto absolute inset-0 z-20 bg-black/5" />
-                <motion.aside initial={{ x: 420 }} animate={{ x: 0 }} exit={{ x: 420 }} transition={{ type: 'spring', damping: 30, stiffness: 330 }} className="pointer-events-auto absolute bottom-4 right-4 top-4 z-30 w-[390px] overflow-y-auto rounded-[30px] border border-white/12 bg-slate-950/94 p-5 text-white shadow-2xl custom-scrollbar">
+                <motion.aside initial={{ x: 420 }} animate={{ x: 0 }} exit={{ x: 420 }} transition={{ type: 'spring', damping: 30, stiffness: 330 }} className="pointer-events-auto absolute bottom-2 right-2 top-2 z-30 w-[min(390px,calc(100vw-16px))] overflow-y-auto rounded-[30px] border border-white/12 bg-slate-950/94 p-4 text-white shadow-2xl custom-scrollbar sm:bottom-4 sm:right-4 sm:top-4 sm:p-5">
                   <div className="flex items-center justify-between"><div><div className="text-lg font-semibold">桌面选项</div><div className="mt-1 text-xs text-white/38">设置歌词、背景效果和天气位置</div></div><button type="button" onClick={() => setShowOptions(false)} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/7 text-white/60"><X className="h-4 w-4" /></button></div>
                   <section className="mt-6 rounded-[24px] border border-white/10 bg-white/[0.04] p-4">
                     <div className="flex items-center gap-2 text-sm font-medium"><Captions className="h-4 w-4 text-violet-300" />桌面歌词样式</div>
@@ -361,6 +369,13 @@ export default function DesktopCustomizationEditor({ open, settings, onClose }: 
                     <div className="mt-3 grid grid-cols-2 gap-2">
                       <button type="button" onClick={() => update({ ...draft, weatherLocationMode: 'auto' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherLocationMode === 'auto' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherLocationMode === 'auto' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>自动定位<div className="mt-1 text-[10px] text-white/35">依据当前网络位置</div></button>
                       <button type="button" onClick={() => update({ ...draft, weatherLocationMode: 'manual' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherLocationMode === 'manual' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherLocationMode === 'manual' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>搜索地区<div className="mt-1 text-[10px] text-white/35">输入城市或区县自动匹配</div></button>
+                    </div>
+                    <div className="mt-4">
+                      <div className="mb-2 text-[11px] text-white/40">天气卡片样式</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button type="button" onClick={() => update({ ...draft, weatherCardMode: 'full' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherCardMode !== 'simple' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherCardMode !== 'simple' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>完整模式<div className="mt-1 text-[10px] text-white/35">动态天空场景 · 当前样式</div></button>
+                        <button type="button" onClick={() => update({ ...draft, weatherCardMode: 'simple' })} className="rounded-2xl border p-3 text-left text-sm" style={{ borderColor: draft.weatherCardMode === 'simple' ? 'rgba(103,232,249,.55)' : 'rgba(255,255,255,.08)', background: draft.weatherCardMode === 'simple' ? 'rgba(34,211,238,.14)' : 'rgba(255,255,255,.025)' }}>简约模式<div className="mt-1 text-[10px] text-white/35">苹果小组件风格 · 大温度与逐小时</div></button>
+                      </div>
                     </div>
                     {draft.weatherLocationMode === 'auto' && <div className="mt-3 flex items-start gap-2 rounded-2xl border border-cyan-200/12 bg-cyan-300/[0.06] p-3 text-[11px] leading-5 text-white/55"><LocateFixed className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan-300" /><span>当前自动定位：{autoLocationLabel}</span></div>}
                     {draft.weatherLocationMode === 'manual' && (
