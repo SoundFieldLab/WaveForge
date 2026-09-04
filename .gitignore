@@ -57,7 +57,7 @@ wf-screen-check.png
 
 # 大型构建产物（不纳入 git 版本管理）
 android/
-python-beat-service/
+python-beat-service/packages/
 
 # 密钥与本地测试凭据
 license-*.pem

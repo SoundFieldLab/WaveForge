@@ -15,9 +15,13 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo Testing health check endpoint (http://localhost:5001/health)...
+echo Testing health check endpoint (http://localhost:3002/health)...
 echo.
-curl -s http://localhost:5001/health
+if defined WAVEFORGE_LOCAL_TOKEN (
+    curl -s -H "X-WaveForge-Local-Token: %WAVEFORGE_LOCAL_TOKEN%" http://localhost:3002/health
+) else (
+    curl -s http://localhost:3002/health
+)
 set CURL_ERROR=%errorlevel%
 
 if %CURL_ERROR% neq 0 (
@@ -43,7 +47,7 @@ echo ========================================
 echo Python Beat Service is running!
 echo ========================================
 echo.
-echo Service URL: http://localhost:5001
+echo Service URL: http://localhost:3002
 echo Ready to use Smart AutoMix!
 echo.
 pause

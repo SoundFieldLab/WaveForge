@@ -124,7 +124,7 @@ POST http://localhost:3002/clear-cache
 
 修改 `beat_analyzer.py` 中的端口：
 ```python
-app.run(host='0.0.0.0', port=5001)  # 改为其他端口
+app.run(host='0.0.0.0', port=3002)  # 改为其他端口
 ```
 
 ### librosa 安装失败
