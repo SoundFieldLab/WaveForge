@@ -61,6 +61,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: 确保 Gradle Wrapper 可执行
+        run: chmod +x android/gradlew
+
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
