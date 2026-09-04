@@ -1,24 +1,76 @@
-# 外层聚合仓库（D:\opencode）根目录：排除密钥/测试产物/第三方实验代码/本地工具痕迹
-# 代码本体在 WaveForge/ 子目录，其自己的 .gitignore 已覆盖 node_modules/dist 等
+node_modules
+dist
+release
+*.log
+.env
+.DS_Store
+Thumbs.db
+*.local
+data/
+cache/
+venv/
+tmp/
+__pycache__/
+*.py[cod]
+.zcode
+HANDOVER-AI-COLLAB.md
+HANDOVER_DEV.md
 
-# 密钥（即使内容像测试用也绝不入库）
-license-*.pem
+# 嵌入式 Python 运行时（由 npm run bundle-python 生成，可重建）
+resources/python-embed/
 
-# 本地工具/会话痕迹
-.zcode/
+# 城市数据拆分产物（由 vite 插件 scripts/split-city-data.mjs 在 build/dev 前自动生成，可重建）
+src/generated/city-data/
+
+# Playwright 测试产物
+.playwright-mcp/
+
+# 会话/抓取临时文件（本地开发痕迹，不入库）
+.zcode*
 .codex-*
 .browser-*
+.codex-perf/
+local-page.*
+.patch-test.txt
+probe*.wav
+logs/
 
-# 其他任务/会话的临时特性标记与测试产物
+# TV 壁纸扫码上传（dev-tv-server.mjs 存项目根，运行时生成不入库）
+waveforge-wallpapers/
+
+# TV 端兑换授权记录（dev 时存项目根，运行时生成不入库）
+tv-license.json
+
+# 根目录文档：仅保留 4 个核心 md（AGENTS/README/HANDOVER/CONTEXT）+ 私有许可，其余本地文档不入库
+/*.md
+!/AGENTS.md
+!/README.md
+!/HANDOVER.md
+!/CONTEXT.md
+!/PRIVATE-LICENSE.md
+
+# v3 融合临时目录（用户待删，不入库）
+temp/
+
+# 调试截图
+wf-screen-check.png
+
+# 大型构建产物（不纳入 git 版本管理）
+android/
+python-beat-service/
+
+# 密钥与本地测试凭据
+license-*.pem
+
+# 本地测试与探针产物
 feat_*.txt
 wf-*.py
 djtransgan-*.py
 wf-*.json
 wf-*.cjs
 tmp-*.wav
-probe*.wav
 
-# 第三方/实验/参考代码（确认需要入库前不提交）
+# 第三方实验与参考代码
 DJTransGAN/
 beat_this/
 echo-src/
