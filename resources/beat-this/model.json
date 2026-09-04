@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "provider": "beat-this",
+  "version": "1.1.0",
+  "modelId": "final0",
+  "file": "final0.ckpt",
+  "bytes": 81058141,
+  "sha256": "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331",
+  "bundled": true,
+  "acquisitionRequired": false
+}

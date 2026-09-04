@@ -51,7 +51,7 @@
     "version:dry": "node scripts/bump-version.mjs --dry-run",
     "build:v3-worklet": "node scripts/build-v3-worklet.mjs",
     "predev": "node scripts/build-v3-worklet.mjs",
-    "predev:electron": "node scripts/build-v3-worklet.mjs && node scripts/ensure-dev-vmp.cjs"
+    "predev:electron": "node scripts/build-v3-worklet.mjs"
   },
   "build": {
     "appId": "com.waveforge.desktop",
