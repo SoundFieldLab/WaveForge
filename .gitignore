@@ -1,15 +1,20 @@
 node_modules
-dist
-release
+/dist
+/release
 *.log
 .env
 .DS_Store
 Thumbs.db
 *.local
-data/
-cache/
+# 目录规则必须锚定根目录：不带 / 前缀的规则会匹配任意层级的同名目录。
+# 2026-09 事故：`data/` 把 src/data/bilibiliMvDeclarations.ts 连坐忽略，
+# 5a6cc58 提交后文件只在提交者本地存在，master 全新 clone 构建失败。
+/data/
+# src/data 仅忽略 prebuild 再生成的赞助商名单；手写源码（如 bilibiliMvDeclarations.ts）必须入库
+src/data/*.generated.json
+/cache/
 venv/
-tmp/
+/tmp/
 __pycache__/
 *.py[cod]
 .zcode
@@ -35,7 +40,7 @@ src/generated/city-data/
 local-page.*
 .patch-test.txt
 probe*.wav
-logs/
+/logs/
 
 # TV 壁纸扫码上传（dev-tv-server.mjs 存项目根，运行时生成不入库）
 waveforge-wallpapers/
@@ -52,7 +57,7 @@ tv-license.json
 !/PRIVATE-LICENSE.md
 
 # v3 融合临时目录（用户待删，不入库）
-temp/
+/temp/
 
 # 调试截图
 wf-screen-check.png

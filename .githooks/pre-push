@@ -1,0 +1,6 @@
+#!/bin/sh
+# pre-push 守卫：阻止“本地有源码、仓库里没有”的提交被推上去。
+# 背景：5a6cc58 提交时 src/data/bilibiliMvDeclarations.ts 被 .gitignore 连坐，
+# 文件只存在于提交者本地，master 全新 clone 构建失败。
+# 报错时按脚本提示处理：git add <文件>、修正 .gitignore，或删除临时文件。
+node scripts/check-ignored-source.mjs || exit 1

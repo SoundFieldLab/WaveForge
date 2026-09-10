@@ -93,9 +93,12 @@ WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探�
 - `desktop/main.cjs` 还含 **QQ音乐 QMK API Key 领取窗口**（`QMK_OFFICIAL_KEY_URL` y.qq.com；独立 session partition `waveforge-qq-skill-key`，每次打开前清空避免复用登录态）——编辑时保留隔离分区与导航守卫逻辑。
 - `scripts/` — dev 启动器（`dev-electron.mjs`、`start-api.mjs`、debug/hidden VBS）、`bundle-python.mjs`（重建嵌入式 Python）、`build-android-assets.mjs` / `fetch-nodejs-mobile.mjs` / `publish-release.mjs`（Android 与发布）、`sync-afdian-sponsors.mjs`、`test-device-license.cjs`。
 - `python-beat-service/` — Flask beat analysis (port 3002) for Smart AutoMix; app degrades to Fixed Crossfade when down. `loudness_server.py`（port 3003）为独立响度测量服务（`/lufs`，响度归一化用）；`compensation_server.py`（port 3004）为独立频响补偿设计服务（`/compensation`，ISO 226 简化等响度模型 + 场景预设 + 自定义频段 → 多段 Biquad 参数）。三服务完全解耦、三入口（dev-electron.mjs / main.cjs / start-full.bat）同模式拉起。三服务均已做性能优化：beat 缓存清理 60s 节流、loudness 分段积分向量化 + 测量磁盘缓存（256MB/30 天）、线程并发（threaded=True）。
-- **Git repo** (has history — use `git log`/`git blame`; rollback via `git reset`). `data/`, `cache/`, `logs/`, `dist/`, `release/` are ignored runtime artifacts.
+- **Git repo** (has history — use `git log`/`git blame`; rollback via `git reset`). 根目录 `/data/`、`/cache/`、`/logs/`、`/dist/`、`/release/` 是被忽略的运行时产物（规则已锚定根目录，含义见下方 Conventions 的 .gitignore 约定）。
 
 ## Conventions
+
+- **⚠️ .gitignore 目录规则必须锚定根目录（全部电脑统一执行的约定）**：忽略根目录产物写 `/data/`、`/cache/`、`/tmp/`、`/logs/`、`/dist`、`/release`，**禁止写裸 `data/` 这类不锚定规则**——它会匹配任意层级的同名目录。2026-09 事故：裸 `data/` 把 `src/data/bilibiliMvDeclarations.ts` 连坐忽略，5a6cc58 后文件只存在于提交者本地，master 全新 clone 构建失败。例外：Python 运行时产物（`__pycache__/`、`venv/`、`*.py[cod]`）确实出现在任意层级，保持不锚定。`src/data/` 内手写源码必须入库，仅 `src/data/*.generated.json`（prebuild 再生成）忽略。
+- **守卫（防同类事故，三层防线）**：① `npm run check:git`（`scripts/check-ignored-source.mjs`：src/ test/ scripts/ server/ desktop/ shared/ resources/ python-beat-service/ python-apple-bridge/ 内不允许存在「被 .gitignore 忽略的源码」或「未 git add 的源码」；可再生产物 src/generated/、*.generated.json、python-beat-service/packages/、resources/python-embed/ 白名单放行）；② pre-push 钩子自动跑同一检查（首次 clone 后执行一次 `npm install` 自动启用，等价 `git config core.hooksPath .githooks`）；③ CI 快速检查 job 的「守卫检查」步骤（npm ci 前先跑，失败立现红叉）。**其他电脑拉取本仓库后务必跑一次 `npm install`** 以启用 pre-push 钩子；CI 与 .gitignore 修复随 git pull 自动统一。
 
 - **Relative imports everywhere** — `@/` alias is configured but unused; match the `./`/`../` style.
 - **No ESLint** — `npm run lint` is typecheck only. Strict TS in `src/`.

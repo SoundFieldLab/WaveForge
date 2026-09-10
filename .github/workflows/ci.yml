@@ -32,10 +32,13 @@ jobs:
           node-version: 24
           cache: npm
 
+      - name: 守卫检查（第一方源码不得被忽略/漏提交，无需依赖）
+        run: npm run check:git
+
       - name: 安装依赖
         run: npm ci
 
-      - name: 生成赞助商数据（prebuild 钩子，src/data 被 gitignore）
+      - name: 生成赞助商数据（prebuild 钩子，生成产物不入库）
         run: npm run prebuild
 
       - name: 类型检查（tsc --noEmit）

@@ -1,0 +1,3 @@
+# pre-push 钩子必须保持 LF：Windows autocrlf 检出 CRLF 会让 `#!/bin/sh` 变成
+# `#!/bin/sh\r`，git push 时报 cannot spawn。只做定向规则，不加全局 * 规则以免触发全库行尾重整。
+.githooks/* text eol=lf

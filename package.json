@@ -31,6 +31,8 @@
     "fetch:nodejs-mobile": "node scripts/fetch-nodejs-mobile.mjs",
     "prebuild:android": "node scripts/sync-afdian-sponsors.mjs --optional",
     "postinstall": "node scripts/patch-airplay-chacha.cjs || true",
+    "prepare": "git config core.hooksPath .githooks",
+    "check:git": "node scripts/check-ignored-source.mjs",
     "build:android": "node scripts/build-android-assets.mjs",
     "publish:release": "node scripts/publish-release.mjs",
     "test": "vitest run",
