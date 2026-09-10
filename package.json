@@ -39,7 +39,7 @@
     "test:chroma": "node scripts/test-chroma.cjs && node scripts/test-razer-device-discovery.cjs && node scripts/test-chroma-app-list-repair.cjs",
     "test:signalrgb": "node scripts/test-signalrgb.cjs && node scripts/test-signalrgb-effect.cjs",
     "benchmark:mv": "node scripts/bilibili-mv-benchmark.mjs",
-    "test:desktop": "node --test test/apple-url-policy.test.cjs test/audio-download-security.test.cjs test/audio-download-policy.test.cjs test/dglab-relay-lifecycle.test.cjs test/local-python-service-lifecycle.test.cjs test/remote-server-security.test.cjs test/taskbar-widget-polling.test.cjs test/trusted-ipc.test.cjs test/update-manager-security.test.cjs test/vmp-status.test.cjs test/vmp-status-wiring.test.cjs",
+    "test:desktop": "node --test test/apple-url-policy.test.cjs test/audio-download-security.test.cjs test/audio-download-policy.test.cjs test/dev-runtime-bootstrap.test.cjs test/dglab-relay-lifecycle.test.cjs test/local-python-service-lifecycle.test.cjs test/remote-server-security.test.cjs test/taskbar-widget-polling.test.cjs test/trusted-ipc.test.cjs test/update-manager-security.test.cjs test/user-data-profile.test.cjs test/vmp-status.test.cjs test/vmp-status-wiring.test.cjs",
     "test:stems:node": "node test/audio-download-security.test.cjs && node test/ai-model-manager.test.cjs && node test/stem-model-manager.test.cjs && node test/stem-runtime.test.cjs && node test/track-stem-runtime.test.cjs",
     "test:stems:python": "node scripts/run-stem-python-tests.cjs",
     "lint": "tsc --noEmit",

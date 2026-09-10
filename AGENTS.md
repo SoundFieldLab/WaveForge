@@ -93,6 +93,7 @@ WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探�
 - `desktop/main.cjs` 还含 **QQ音乐 QMK API Key 领取窗口**（`QMK_OFFICIAL_KEY_URL` y.qq.com；独立 session partition `waveforge-qq-skill-key`，每次打开前清空避免复用登录态）——编辑时保留隔离分区与导航守卫逻辑。
 - `scripts/` — dev 启动器（`dev-electron.mjs`、`start-api.mjs`、debug/hidden VBS）、`bundle-python.mjs`（重建嵌入式 Python）、`build-android-assets.mjs` / `fetch-nodejs-mobile.mjs` / `publish-release.mjs`（Android 与发布）、`sync-afdian-sponsors.mjs`、`test-device-license.cjs`。
 - `python-beat-service/` — Flask beat analysis (port 3002) for Smart AutoMix; app degrades to Fixed Crossfade when down. `loudness_server.py`（port 3003）为独立响度测量服务（`/lufs`，响度归一化用）；`compensation_server.py`（port 3004）为独立频响补偿设计服务（`/compensation`，ISO 226 简化等响度模型 + 场景预设 + 自定义频段 → 多段 Biquad 参数）。三服务完全解耦、三入口（dev-electron.mjs / main.cjs / start-full.bat）同模式拉起。三服务均已做性能优化：beat 缓存清理 60s 节流、loudness 分段积分向量化 + 测量磁盘缓存（256MB/30 天）、线程并发（threaded=True）。
+- **开发 profile 迁移**：旧开发版可能把设置和登录态写在 `%APPDATA%/Electron/`。`desktop/user-data-profile.cjs` 会在 Windows 开发启动前将明确属于 WaveForge 的持久化数据一次性迁到 `%APPDATA%/WaveForge 澜音工坊/`；旧目录始终保留，目标冲突数据备份到稳定目录内的版本化 migration backup。迁移必须在 `dev-electron.mjs` 读取配置、启动后端以及 `main.cjs` 调用 `app.setPath('userData')` 之前完成。不要改回直接使用通用 Electron profile，也不要无过滤复制 Cache、日志、运行锁或任意站点数据。
 - **Git repo** (has history — use `git log`/`git blame`; rollback via `git reset`). 根目录 `/data/`、`/cache/`、`/logs/`、`/dist/`、`/release/` 是被忽略的运行时产物（规则已锚定根目录，含义见下方 Conventions 的 .gitignore 约定）。
 
 ## Conventions

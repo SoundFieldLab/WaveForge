@@ -31,20 +31,25 @@ const dns = require('node:dns')
 // 当前 Windows 网络的 IPv6 路由可能不可达；外部音乐 CDN/API 优先走 IPv4。
 dns.setDefaultResultOrder('ipv4first')
 
-const { selectWaveForgeUserData } = require('./user-data-profile.cjs')
+const { prepareWaveForgeUserData } = require('./user-data-profile.cjs')
 
-// 开发版历史上因首次 getPath(userData) 过早而长期使用 %APPDATA%/Electron。
-// 只在该目录有明确 WaveForge 标记时继续沿用，避免设置、登录和 Chromium profile 丢失；
-// 打包版始终使用正式目录。仅切换路径，不复制或覆盖任何凭据/数据库。
+// 开发版历史上曾使用 %APPDATA%/Electron。启动前一次性迁移到稳定产品目录；
+// 旧目录保留，目标冲突数据写入迁移备份，后续开发版与打包版共用同一 profile。
 const appDataRoot = process.platform === 'win32'
   ? (process.env.APPDATA || path.join(require('os').homedir(), 'AppData', 'Roaming'))
   : (process.env.XDG_CONFIG_HOME || path.join(require('os').homedir(), '.config'))
-const selectedUserDataPath = selectWaveForgeUserData({
+const profilePreparation = prepareWaveForgeUserData({
   appDataRoot,
   isPackaged: app.isPackaged,
   overridePath: process.env.WAVEFORGE_USER_DATA,
   platform: process.platform,
 })
+const selectedUserDataPath = profilePreparation.userDataPath
+if (profilePreparation.status === 'migrated') {
+  console.log(`[Profile] 已将旧 Electron 数据迁移到 ${selectedUserDataPath}`)
+} else if (profilePreparation.status === 'profile-active') {
+  console.warn('[Profile] WaveForge profile 正在使用，迁移延期到下次启动')
+}
 app.setName('WaveForge 澜音工坊')
 fs.mkdirSync(selectedUserDataPath, { recursive: true })
 app.setPath('userData', selectedUserDataPath)
