@@ -140,8 +140,61 @@ export interface SodaPlaybackInfo {
   requiredTier?: 'free' | 'vip' | 'svip'
   /** 当前账号会员标签（如「SVIP」），用于提示文案 */
   vipLabel?: string
-  /** 不可播原因（后端给出的中文说明，可能缺省） */
+  /** 不可播原因（后端给出的中文说明，可能缺省；401 登录态缺失约定为 'login_required'） */
   reason?: string
+}
+
+/** 搜索联想条目（GET /search/suggest 返回项；type 为候选类别，失败/未命中后端恒 200 + 空数组） */
+export interface SodaSearchSuggestion {
+  text: string
+  type: 'song' | 'artist' | 'album'
+}
+
+/**
+ * 搜索歌手聚合条目（GET /search/artists 返回项）。
+ * id = 歌手名（伪艺人约定：与按名检索 /api/soda/artist/songs?name= 同口径）；
+ * avatarUrl 仅上游结果带头像才出现，游客模式基本缺失——消费侧必须容忍缺省。
+ */
+export interface SodaSearchArtist {
+  /** 歌手名即伪艺人 id */
+  id: string
+  name: string
+  /** 聚合歌曲计数（热度参考） */
+  songCount: number
+  /** 诚实来源标注：搜索结果派生聚合 */
+  source: 'soda-search-derived'
+  /** 歌手头像（可选；上游带才下发） */
+  avatarUrl?: string
+}
+
+/**
+ * 搜索专辑聚合条目（GET /search/albums 返回项）。
+ * id 优先取组内真实专辑 id，缺失回退专辑名（详情端点 /album/tracks 按名/按 id 双口径均可消费）。
+ * ⚠️ 游客模式上游公开目录无专辑字段，本端点恒返回空数组——消费侧必须容忍空。
+ */
+export interface SodaSearchAlbum {
+  id: string
+  name: string
+  artist: string
+  picUrl?: string
+  songCount?: number
+  /** 诚实来源标注：搜索结果派生聚合 */
+  source: 'soda-search-derived'
+}
+
+/**
+ * 前端派生专辑（从曲目 album 字段聚拢；exploreApi「新碟」区块与 musicApi.getArtistAlbums 共用）。
+ * 真实专辑 id 缺失时 id 回退专辑名（详情端点双口径）。
+ */
+export interface SodaDerivedAlbum {
+  id: string
+  name: string
+  artist: string
+  coverUrl?: string
+  /** 聚拢窗口内的曲目数 */
+  songCount: number
+  /** 诚实来源标注：曲目字段派生聚合 */
+  source: 'soda-derived-albums'
 }
 
 /** 歌单曲目页（虚拟歌单 qishui-feed / qishui-liked / qishui-recent 同构） */
@@ -277,6 +330,162 @@ function mapSodaSongs(list: SodaSong[] | undefined): Song[] {
   return list.map(sodaMediaToSong).filter(song => song.mid)
 }
 
+// ────────────────────────────── 派生数据纯函数 ──────────────────────────────
+// 汽水无独立歌手/专辑实体，搜索与探索页的歌手/专辑维度均为「从曲目字段派生聚合」。
+// 以下纯函数与后端 qishui-api.mjs 的派生端点同口径（多歌手拆分正则、归一去重键、cap 截断），
+// 供 musicApi / exploreApi 消费；单测见 test/sodaDerivedExplore.test.ts。
+
+/** 多歌手拆分分隔符：与后端 SODA_ARTIST_NAME_SPLIT_RE 同口径（/ , & 三种，中文顿号不拆） */
+const SODA_ARTIST_NAME_SPLIT_RE = /\s*\/\s*|\s*,\s*|\s*&\s*/
+
+/** 名字归一键：NFKC + 小写 + 去空白与 ASCII 标点/符号（与后端 sodaSearchComparable 同口径，仅用于去重/排序键） */
+function sodaComparableKey(value: string): string {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    // 与后端同因：nodejs-mobile 的 V8 不支持字符类内 \p{...}，用纯 ASCII 区间等价写法
+    .replace(/[\s!-\/:-@\[-`{-~]+/g, '')
+}
+
+/** 拆分一首歌的多歌手字段（含 "A/B" 组合形态）→ 归一去重后的歌手名数组（保留首个展示形态） */
+export function splitSodaArtistNames(song: Song): string[] {
+  const rawNames = (song?.artists || []).map(item => String(item?.name || '')).filter(Boolean)
+  const seen = new Set<string>()
+  const names: string[] = []
+  for (const raw of rawNames) {
+    for (const part of raw.split(SODA_ARTIST_NAME_SPLIT_RE)) {
+      const name = part.trim()
+      const key = sodaComparableKey(name)
+      if (!name || !key || seen.has(key)) continue
+      seen.add(key)
+      names.push(name)
+    }
+  }
+  return names
+}
+
+/**
+ * 歌手聚合去重（纯函数）：曲目列表 → 按歌手名聚合计数（多歌手拆分、归一去重、cap 截断）。
+ * 排序与后端 /search/artists 同口径：关键词前缀命中优先 → 计数（热度）→ 首现顺序。
+ * 消费方：musicApi.searchArtists 汽水分支的兜底派生（专属端点失败/未命中时）。
+ */
+export function aggregateSodaArtistsFromSongs(songs: Song[], cap = 20, keywords?: string): SodaSearchArtist[] {
+  const list = Array.isArray(songs) ? songs : []
+  if (!list.length) return []
+  const query = sodaComparableKey(String(keywords || ''))
+  const byName = new Map<string, { name: string; songCount: number; order: number }>()
+  for (const song of list) {
+    for (const name of splitSodaArtistNames(song)) {
+      const key = sodaComparableKey(name)
+      if (!key) continue
+      const existing = byName.get(key)
+      if (existing) {
+        existing.songCount += 1
+      } else {
+        byName.set(key, { name, songCount: 1, order: byName.size })
+      }
+    }
+  }
+  const relRank = (name: string) => (query && sodaComparableKey(name).startsWith(query) ? 1 : 0)
+  return [...byName.values()]
+    .sort((a, b) => {
+      const relA = relRank(a.name)
+      const relB = relRank(b.name)
+      if (relA !== relB) return relB - relA
+      if (a.songCount !== b.songCount) return b.songCount - a.songCount
+      return a.order - b.order
+    })
+    .slice(0, Math.max(1, cap))
+    .map(entry => ({ id: entry.name, name: entry.name, songCount: entry.songCount, source: 'soda-search-derived' as const }))
+}
+
+/**
+ * 专辑聚拢（纯函数）：曲目列表 → 按「专辑名（主键）+ 封面（消歧）」聚拢去重、cap 截断。
+ * 合并规则：同名且封面相同/任一方缺封面 → 并组（缺封面由后到者补齐）；同名但封面不同 →
+ * 视为同名异版拆为独立分组。无专辑名的曲目跳过。id 优先取曲目自带的真实专辑 id
+ * （Song.album.id，汽水映射通常缺失），回退专辑名（详情端点按名查询）。
+ * 排序：关键词前缀命中优先 → 组内曲目数 → 首现顺序；未传 keywords 时按曲目数排序。
+ * 消费方：exploreApi 汽水「新碟」区块（payload.albums）与 musicApi.getArtistAlbums 汽水分支。
+ */
+export function clusterSodaAlbumsFromSongs(songs: Song[], cap = 12, keywords?: string): SodaDerivedAlbum[] {
+  const list = Array.isArray(songs) ? songs : []
+  if (!list.length) return []
+  const query = sodaComparableKey(String(keywords || ''))
+  const groups: Array<{ album: SodaDerivedAlbum; coverKey: string; order: number }> = []
+  const byName = new Map<string, Array<{ album: SodaDerivedAlbum; coverKey: string; order: number }>>()
+  for (const song of list) {
+    const name = String(song?.album?.name || '').trim()
+    if (!name) continue
+    const coverUrl = String(song?.album?.picUrl || '').trim()
+    const coverKey = sodaComparableKey(coverUrl)
+    const artist = splitSodaArtistNames(song)[0] || ''
+    const nameKey = sodaComparableKey(name)
+    const siblings = byName.get(nameKey)
+    const target = siblings?.find(item => !item.coverKey || !coverKey || item.coverKey === coverKey)
+    if (target) {
+      target.album.songCount += 1
+      if (!target.album.coverUrl && coverUrl) {
+        target.album.coverUrl = coverUrl
+        target.coverKey = coverKey
+      }
+      if (!target.album.artist && artist) target.album.artist = artist
+      continue
+    }
+    const rawAlbumId = (song.album as { id?: number | string } | undefined)?.id
+    const album: SodaDerivedAlbum = {
+      id: rawAlbumId !== undefined && rawAlbumId !== null && String(rawAlbumId) !== '' ? String(rawAlbumId) : name,
+      name,
+      artist,
+      coverUrl: coverUrl || undefined,
+      songCount: 1,
+      source: 'soda-derived-albums',
+    }
+    const group = { album, coverKey, order: groups.length }
+    groups.push(group)
+    if (siblings) siblings.push(group)
+    else byName.set(nameKey, [group])
+  }
+  const relRank = (name: string) => (query && sodaComparableKey(name).startsWith(query) ? 1 : 0)
+  return groups
+    .sort((a, b) => {
+      const relA = relRank(a.album.name)
+      const relB = relRank(b.album.name)
+      if (relA !== relB) return relB - relA
+      if (a.album.songCount !== b.album.songCount) return b.album.songCount - a.album.songCount
+      return a.order - b.order
+    })
+    .slice(0, Math.max(1, cap))
+    .map(group => group.album)
+}
+
+/**
+ * 搜索联想排序（纯函数）：归一去重 + 关键词前缀命中优先（其余保持上游相关性顺序，sort 稳定）+ cap。
+ * 与后端 /search/suggest 的派生排序同口径；前端复排一次保证契约不随上游变化漂移。
+ */
+export function rankSodaSuggestCandidates(
+  candidates: SodaSearchSuggestion[],
+  keywords: string,
+  cap = 8,
+): SodaSearchSuggestion[] {
+  const query = sodaComparableKey(String(keywords || ''))
+  const seen = new Set<string>()
+  const list: Array<SodaSearchSuggestion & { prefix: boolean }> = []
+  for (const item of Array.isArray(candidates) ? candidates : []) {
+    const text = String(item?.text || '').trim()
+    if (!text) continue
+    const key = sodaComparableKey(text)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    list.push({
+      text,
+      type: item?.type === 'artist' ? 'artist' : item?.type === 'album' ? 'album' : 'song',
+      prefix: Boolean(query) && key.startsWith(query),
+    })
+  }
+  list.sort((a, b) => (a.prefix === b.prefix ? 0 : a.prefix ? -1 : 1))
+  return list.slice(0, Math.max(1, cap)).map(({ text, type }) => ({ text, type }))
+}
+
 // ────────────────────────────── 状态 / 搜索 ──────────────────────────────
 
 /**
@@ -340,14 +549,81 @@ export async function searchSodaSongs(keyword: string, limit = 30): Promise<Song
   return source.map(item => douyinMusicToSong(item))
 }
 
+/** 搜索联想（派生端点：歌曲名/歌手名/专辑名候选；失败/未命中一律返回空数组，不抛错） */
+export async function fetchSodaSearchSuggest(keywords: string, limit = 8): Promise<SodaSearchSuggestion[]> {
+  const kw = String(keywords || '').trim()
+  if (!kw) return []
+  const data = await sodaGet<{ suggestions?: SodaSearchSuggestion[] }>('/search/suggest', { keywords: kw, limit })
+  // 前端复排：归一去重 + 前缀命中优先（与后端同口径，防上游排序漂移）
+  return rankSodaSuggestCandidates(data?.suggestions || [], kw, limit)
+}
+
+/**
+ * 搜索歌手聚合（派生端点）：id = 歌手名（伪艺人约定）；songCount 为聚合计数。
+ * avatarUrl 上游带头像才出现（游客模式基本缺失）；失败/未命中返回空数组。
+ */
+export async function fetchSodaSearchArtists(keywords: string, limit = 10): Promise<SodaSearchArtist[]> {
+  const kw = String(keywords || '').trim()
+  if (!kw) return []
+  const data = await sodaGet<{ artists?: SodaSearchArtist[] }>('/search/artists', { keywords: kw, limit })
+  if (!Array.isArray(data?.artists)) return []
+  return data.artists
+    .filter(item => item && typeof item.id === 'string' && item.id && typeof item.name === 'string' && item.name)
+    .map(item => ({
+      id: String(item.id),
+      name: String(item.name),
+      songCount: Number(item.songCount) || 0,
+      source: 'soda-search-derived' as const,
+      ...(item.avatarUrl ? { avatarUrl: String(item.avatarUrl) } : {}),
+    }))
+}
+
+/**
+ * 搜索专辑聚合（派生端点）：按「专辑名+歌手」聚拢，封面取组内首曲封面。
+ * ⚠️ 游客模式上游公开目录无专辑字段，恒返回空数组——消费侧须容忍空（展示诚实空态）。
+ */
+export async function fetchSodaSearchAlbums(keywords: string, limit = 10): Promise<SodaSearchAlbum[]> {
+  const kw = String(keywords || '').trim()
+  if (!kw) return []
+  const data = await sodaGet<{ albums?: SodaSearchAlbum[] }>('/search/albums', { keywords: kw, limit })
+  if (!Array.isArray(data?.albums)) return []
+  return data.albums
+    .filter(item => item && typeof item.id === 'string' && item.id && typeof item.name === 'string' && item.name)
+    .map(item => ({
+      id: String(item.id),
+      name: String(item.name),
+      artist: String(item.artist || ''),
+      ...(item.picUrl ? { picUrl: String(item.picUrl) } : {}),
+      ...(item.songCount !== undefined ? { songCount: Number(item.songCount) || 0 } : {}),
+      source: 'soda-search-derived' as const,
+    }))
+}
+
 // ────────────────────────────── 推荐 / 榜单 ──────────────────────────────
 
-/** 个性化推荐流（需登录；未登录/失败返回空列表） */
-export async function fetchSodaFeed(limit = 30): Promise<{ name?: string; songs: Song[] }> {
-  const data = await sodaGet<{ name?: string; songs?: SodaSong[] }>('/feed', { limit })
+/**
+ * 个性化推荐流（需登录；未登录/失败返回空列表）。
+ * cursor 可选：后端透传上游翻页游标，回程带 nextCursor/hasMore（未知时省略，字段名逐字对齐契约）；
+ * 游标请求失败/到底时后端如实返回空页（不回退媒体库拼凑），前端续拉据此判断是否继续。
+ */
+export async function fetchSodaFeed(
+  limit = 30,
+  cursor?: string,
+): Promise<{ name?: string; songs: Song[]; nextCursor?: string; hasMore?: boolean }> {
+  const data = await sodaGet<{
+    name?: string
+    songs?: SodaSong[]
+    nextCursor?: string | number
+    hasMore?: boolean
+  }>('/feed', { limit, cursor: cursor || undefined })
   return {
     name: data?.name ? String(data.name) : undefined,
     songs: mapSodaSongs(data?.songs),
+    nextCursor:
+      data?.nextCursor !== undefined && data.nextCursor !== null && String(data.nextCursor) !== ''
+        ? String(data.nextCursor)
+        : undefined,
+    hasMore: typeof data?.hasMore === 'boolean' ? data.hasMore : undefined,
   }
 }
 
@@ -644,38 +920,81 @@ export async function getSodaTranslation(id: string): Promise<Record<number, str
 
 // ────────────────────────────── 播放地址 ──────────────────────────────
 
-/** 请求播放地址详情（不可播时 url 为 null，附会员档位与原因供 UI 提示） */
-async function requestSodaPlaybackInfo(id: string): Promise<SodaPlaybackInfo> {
+/**
+ * 播放地址详情（唯一低层实现）：GET /api/soda/song/url?id=&quality=&cookie=
+ * - quality 可选透传后端选档枚举（standard|high|lossless|hires|纯数字码率）；缺省 = 旧行为（会员允许内最优）；
+ *   后端在 free<vip<svip 闸门内就近选档，越权请求自动落低档、不会报错；
+ * - 401 = 登录态缺失（sodaRequireLogin）：按后端约定回传 reason 'login_required'
+ *   （App 换源提示文案依赖该口径，musicApi.getSodaPlaybackInfo 委托本函数后语义不变）；
+ * - 其余 HTTP/网络错误一律降级 { url: null }，不向 UI 抛错。
+ */
+async function requestSodaPlaybackInfo(id: string, quality?: string): Promise<SodaPlaybackInfo> {
   if (!id) return { url: null }
-  const data = await sodaGet<{
-    url?: string
-    playable?: boolean
-    requiredTier?: 'free' | 'vip' | 'svip'
-    membership?: SodaMembership
-    reason?: string
-  }>('/song/url', { id })
-  const url = data?.url ? String(data.url) : ''
-  const playable = url !== '' && data?.playable !== false
-  return {
-    url: playable ? url : null,
-    requiredTier: data?.requiredTier,
-    vipLabel: data?.membership?.vipLabel ? String(data.membership.vipLabel) : undefined,
-    reason: data?.reason ? String(data.reason) : undefined,
+  const params: Record<string, string | number | undefined> = { id }
+  const requested = String(quality || '').trim()
+  if (requested) params.quality = requested
+  try {
+    const query = buildQuery(params)
+    const resp = await fetch(`${SODA_API}/song/url${query ? `?${query}` : ''}`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    if (resp.status === 401) return { url: null, reason: 'login_required' }
+    if (!resp.ok) {
+      debugLog(`[汽水] GET /song/url HTTP ${resp.status}`)
+      return { url: null }
+    }
+    const data = (await resp.json()) as {
+      url?: string
+      playable?: boolean
+      requiredTier?: 'free' | 'vip' | 'svip'
+      vipLabel?: string
+      membership?: SodaMembership
+      reason?: string
+    }
+    const url = data?.url ? String(data.url) : ''
+    const playable = url !== '' && data?.playable !== false
+    // 后端会员视图顶层/嵌套 membership 双写（审计四-3），两处任一有值即透传
+    const vipLabel = data?.vipLabel || data?.membership?.vipLabel
+    return {
+      url: playable ? url : null,
+      requiredTier: data?.requiredTier,
+      vipLabel: vipLabel ? String(vipLabel) : undefined,
+      reason: data?.reason ? String(data.reason) : undefined,
+    }
+  } catch (e) {
+    console.warn('[汽水] GET /song/url 请求失败:', e)
+    return { url: null }
   }
 }
 
 /**
- * 汽水音乐播放直链（真实现：调后端 /song/url）。
- * 成功返回 url 字符串；不可播/未登录/失败返回 null（上层降级跨平台匹配）。
+ * 音质偏好 → 汽水后端选档枚举映射（纯函数）：'hi-res' → 'hires'、'very-high' → 'high'（汽水无独立 very-high 档），
+ * 'auto'/未知档 → undefined（不带 quality，保持后端缺省选档 = 旧行为）。
+ * 消费方：musicApi.getSongUrl 汽水分支与 getSodaPlaybackInfo 委托。
  */
-export async function getSodaSongUrl(id: string): Promise<string | null> {
-  const info = await requestSodaPlaybackInfo(String(id || ''))
-  return info.url
+export function mapSodaQualityParam(preference: string | undefined | null): string | undefined {
+  switch (String(preference || '').trim()) {
+    case 'standard':
+      return 'standard'
+    case 'high':
+    case 'very-high':
+      return 'high'
+    case 'lossless':
+      return 'lossless'
+    case 'hi-res':
+      return 'hires'
+    default:
+      return undefined
+  }
 }
 
-/** 播放地址详情（含 requiredTier/vipLabel/reason，供 UI 显示 VIP 提示） */
-export async function getSodaPlaybackInfo(id: string): Promise<SodaPlaybackInfo> {
-  return requestSodaPlaybackInfo(String(id || ''))
+/**
+ * 汽水音乐播放地址详情（含 requiredTier/vipLabel/reason，供 UI 显示 VIP/换源提示）。
+ * quality 可选透传后端选档枚举；音质偏好映射统一走 mapSodaQualityParam。
+ */
+export async function getSodaPlaybackInfo(id: string, quality?: string): Promise<SodaPlaybackInfo> {
+  return requestSodaPlaybackInfo(String(id || ''), quality)
 }
 
 // ────────────────────────────── 艺人 / 专辑 ──────────────────────────────

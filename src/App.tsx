@@ -6870,9 +6870,10 @@ function App() {
     onOpenDeviceControl: () => setShowDeviceControl(true),
     onSettingsClick: () => setShowSettings(true),
     onProfileClick: (platform, initialTab = 'created') => {
-      // ProfileView 只支持网易云/QQ/Apple：酷狗/Spotify/汽水登录用户按钮可见但渲染条件
+      // ProfileView 支持网易云/QQ/Apple/汽水（汽水分支数据自足：资料读 localStorage，
+      // 歌单/最近播放走 /api/soda/* 路由）；酷狗/Spotify 登录用户按钮可见但渲染条件
       // 短路（点了没反应），改为明确提示
-      if (!['netease', 'qq', 'apple'].includes(platform)) {
+      if (!['netease', 'qq', 'apple', 'soda'].includes(platform)) {
         addToast('该平台暂不支持查看个人主页', 'info')
         return
       }
@@ -8901,11 +8902,11 @@ function App() {
           backdrop-filter，退出节点在播放页挂载时会被 Chromium/framer-motion 卡住不卸载
           → 最近播放等弹窗选歌后残留盖在播放页上；普通条件渲染关闭即当帧卸载。 */}
       <Suspense fallback={null}>
-          {showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn) && (
+          {showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && (
             <LazyProfileView
             initialPlatform={profileInitialPlatform}
             initialTab={profileInitialTab}
-            canSwitchPlatform={[neteaseLoggedIn, qqLoggedIn, appleLoggedIn].filter(Boolean).length >= 2}
+            canSwitchPlatform={[neteaseLoggedIn, qqLoggedIn, appleLoggedIn, sodaLoggedIn].filter(Boolean).length >= 2}
             userId={profileInitialPlatform === 'netease' ? neteaseUserId : profileInitialPlatform === 'qq' ? qqUserId : ''}
             cookie={profileInitialPlatform === 'netease' ? _neteaseCookie : profileInitialPlatform === 'qq' ? _qqCookie : ''}
             onClose={stableDialogCallbacks.closeProfile}

@@ -102,6 +102,11 @@ type RecentPlaybackType = 'song' | 'playlist' | 'album' | 'dj' | 'voice'
 
 // 平台切换轮转顺序（与 App.tsx 的已登录平台轮换一致；仅用于按钮文案/配色）
 const PLATFORM_SWITCH_ORDER: MusicPlatform[] = ['netease', 'qq', 'apple', 'spotify', 'kugou', 'soda']
+
+// 汽水虚拟歌单 id（后端 server/qishui-api.mjs 的 SODA_WEB_LIKED/RECENT/FEED_PLAYLIST_ID 约定，
+// 与 services/addablePlaylists 的 VIRTUAL_PLAYLIST_IDS 同口径）：它们不是用户创建/收藏的
+// 真实歌单，「我创建的歌单」分栏必须剔除，否则「汽水最近播放」等虚拟卡会混进创建栏
+const SODA_VIRTUAL_PLAYLIST_IDS = new Set(['qishui-liked', 'qishui-recent', 'qishui-feed'])
 const SWITCH_PLATFORM_COLORS: Record<MusicPlatform, string> = {
   netease: 'bg-green-600 hover:bg-green-700 text-white',
   qq: 'bg-red-600 hover:bg-red-700 text-white',
@@ -544,6 +549,8 @@ function ProfileView({
   const [recentItems, setRecentItems] = useState<RecentPlaybackItem[]>([])
   const [recentLoading, setRecentLoading] = useState(false)
   const [recentError, setRecentError] = useState('')
+  // 最近播放的中性提示（非错误）：如汽水未登录时告知原因，与错误红框区分
+  const [recentNotice, setRecentNotice] = useState('')
   const recentRequestRef = useRef<{ revision: number; controller: AbortController | null }>({
     revision: 0,
     controller: null,
@@ -582,6 +589,12 @@ function ProfileView({
   const [rankError, setRankError] = useState('')
   const [createdPlaylists, setCreatedPlaylists] = useState<Playlist[]>([])
   const [subscribedPlaylists, setSubscribedPlaylists] = useState<Playlist[]>([])
+  // 汽水「我喜欢」（qishui-liked 虚拟歌单）——仅汽水个人主页的「我喜欢」tab
+  const [sodaLikedSongs, setSodaLikedSongs] = useState<Song[]>([])
+  const [sodaLikedLoading, setSodaLikedLoading] = useState(false)
+  const [sodaLikedError, setSodaLikedError] = useState('')
+  // 汽水登录态快照（fetchUserData 时刷新）：空态文案区分「未登录」与「暂无数据」
+  const [sodaLoggedIn, setSodaLoggedIn] = useState(false)
   const [userDetail, setUserDetail] = useState<UserDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [showCreatePlaylist, setShowCreatePlaylist] = useState(false)
@@ -714,12 +727,12 @@ function ProfileView({
     setLoading(true)
     try {
       const playlists = await getUserPlaylists(platform, userId, undefined, { forceRefresh: true })
-      // 汽水：与 fetchUserData 分栏规则一致——收藏的进收藏栏，自建（非我喜欢）进创建栏
+      // 汽水：与 fetchUserData 分栏规则一致——收藏的进收藏栏，自建（非我喜欢、非虚拟歌单）进创建栏
       const created = playlists.filter((playlist: Playlist) => (
         platform === 'qq'
           ? !playlist.isCollected
           : platform === 'soda'
-            ? !playlist.isCollected && !playlist.isLike
+            ? !playlist.isCollected && !playlist.isLike && !SODA_VIRTUAL_PLAYLIST_IDS.has(String(playlist.id))
             : playlist.userId?.toString() === userId.toString()
       ))
       const subscribed = playlists.filter((playlist: Playlist) => (
@@ -1326,6 +1339,7 @@ function ProfileView({
     const requestCookie = cookie
     setRecentLoading(true)
     setRecentError('')
+    setRecentNotice('')
     setRecentItems([])
     try {
       // Apple：最近播放走 amp-api（需登录 token）
@@ -1363,6 +1377,8 @@ function ProfileView({
       if (currentPlatform === 'soda') {
         const sdCookie = getPlatformCookie('soda')
         if (!sdCookie) {
+          // 未登录：中性提示而非错误红框，与「暂无记录」区分开
+          setRecentNotice('未登录汽水音乐，登录后可查看最近播放')
           setRecentItems([])
           return
         }
@@ -1581,6 +1597,30 @@ function ProfileView({
     })
     return () => { cancelled = true }
   }, [activeTab, platform, activeUserId, viewTarget, cookie])
+
+  // 汽水「我喜欢」数据获取（仅自己的个人中心）：qishui-liked 虚拟歌单经
+  // playlistService.getPlaylistDetail 分页合并全量曲目；未登录不发请求，空态如实提示
+  useEffect(() => {
+    if (activeTab !== 'favs' || currentPlatform !== 'soda' || viewTarget) return
+    if (!getPlatformCookie('soda')) return
+    let cancelled = false
+    setSodaLikedLoading(true)
+    setSodaLikedError('')
+    void (async () => {
+      try {
+        const data = await getPlaylistDetail('qishui-liked', 'soda')
+        if (cancelled) return
+        setSodaLikedSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+      } catch (error) {
+        if (cancelled) return
+        setSodaLikedSongs([])
+        setSodaLikedError(error instanceof Error ? error.message : '「我喜欢」加载失败，请重试')
+      } finally {
+        if (!cancelled) setSodaLikedLoading(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [activeTab, currentPlatform, viewTarget])
 
   // 收藏的专辑 / 关注的歌手（仅自己的个人中心；QQ 用 RelationList/collect）
   useEffect(() => {
@@ -2012,10 +2052,13 @@ function ProfileView({
       const createdPlaylists: Playlist[] = []
       const subscribedPlaylists: Playlist[] = []
       try {
-        // 字段映射参考上方酷狗分支；「汽水我的喜欢」虚拟歌单（isLikedLike）不进两个分栏，
-        // 喜欢歌曲由全局红心/我喜欢入口承担
+        // 字段映射参考上方酷狗分支；「汽水我的喜欢」（isLikedLike）与「汽水最近播放」等
+        // 虚拟歌单（SODA_VIRTUAL_PLAYLIST_IDS）不进两个分栏——喜欢歌曲由本页「我喜欢」tab 承担，
+        // 最近播放由「最近播放」tab 承担
         const { fetchSodaUserPlaylists, isSodaLoggedIn } = await import('../services/sodaService')
-        if (!isSodaLoggedIn()) {
+        const loggedIn = isSodaLoggedIn()
+        setSodaLoggedIn(loggedIn)
+        if (!loggedIn) {
           setCreatedPlaylists([])
           setSubscribedPlaylists([])
         } else {
@@ -2030,7 +2073,7 @@ function ProfileView({
                 platform: 'soda',
                 isCollected: true,
               })
-            } else if (!item.isLikedLike) {
+            } else if (!item.isLikedLike && !SODA_VIRTUAL_PLAYLIST_IDS.has(String(item.id))) {
               createdPlaylists.push({
                 id: item.id,
                 name: item.name || '未命名歌单',
@@ -2215,7 +2258,9 @@ function ProfileView({
                   <RefreshCw className={`w-5 h-5 text-white/70 ${loading ? 'animate-spin' : ''}`} />
                 </motion.button>
               )}
-              {activeTab === 'created' && !viewTarget && (
+              {/* 创建歌单按钮按能力表驱动：SODA_CAPABILITIES/KUGOU_CAPABILITIES.createPlaylist=false
+                  （逆向接口未提供创建）时不渲染，避免点了必然失败 */}
+              {activeTab === 'created' && !viewTarget && getPlatformCapabilities(platform).createPlaylist && (
                 <motion.button
                   whileHover={{ scale: 1.08 }}
                   whileTap={{ scale: 0.92 }}
@@ -2295,6 +2340,20 @@ function ProfileView({
             >
               <History className="w-5 h-5" />
               最近播放
+            </button>
+            )}
+            {/* 汽水「我喜欢」：SODA_CAPABILITIES.likedSongs=true（qishui-liked 虚拟歌单），
+                其他平台的我喜欢已由「我创建的歌单」栏的 isLike 卡片承担，不重复展示 */}
+            {!viewTarget && currentPlatform === 'soda' && getPlatformCapabilities(currentPlatform).likedSongs && (
+            <button
+              onClick={() => setActiveTab('favs')}
+              className={`relative flex-1 px-6 py-4 text-center font-medium transition-all flex items-center justify-center gap-2 ${
+                activeTab === 'favs' ? 'text-white bg-white/10' : 'text-white/60 hover:text-white hover:bg-white/5'
+              }`}
+              style={activeTab === 'favs' ? { borderBottom: `2px solid ${accentColor}` } : {}}
+            >
+              <Heart className="w-5 h-5" />
+              我喜欢
             </button>
             )}
             {currentPlatform === 'netease' && (
@@ -2424,6 +2483,12 @@ function ProfileView({
                     ))}
                   </div>
                 )}
+                {/* 汽水：创建栏空态如实区分「未登录」与「暂无数据」 */}
+                {activeTab === 'created' && platform === 'soda' && !viewTarget && createdPlaylists.length === 0 && (
+                  <div className="py-14 text-center">
+                    <p className="text-white/45 text-sm">{sodaLoggedIn ? '暂无创建的歌单' : '未登录汽水音乐，登录后可查看歌单'}</p>
+                  </div>
+                )}
 
                 {/* 收藏的歌单 */}
                 {activeTab === 'subscribed' && viewTarget && platform === 'qq' && (
@@ -2446,6 +2511,12 @@ function ProfileView({
                         onPlay={stablePlayPlaylist}
                       />
                     ))}
+                  </div>
+                )}
+                {/* 汽水：收藏栏空态如实区分「未登录」与「暂无数据」 */}
+                {activeTab === 'subscribed' && platform === 'soda' && !viewTarget && subscribedPlaylists.length === 0 && (
+                  <div className="py-14 text-center">
+                    <p className="text-white/45 text-sm">{sodaLoggedIn ? '暂无收藏的歌单' : '未登录汽水音乐，登录后可查看歌单'}</p>
                   </div>
                 )}
 
@@ -2471,7 +2542,7 @@ function ProfileView({
                       </div>
                     ) : null}
                     {recentError && <div className="text-sm text-red-300 bg-red-400/10 border border-red-300/20 rounded-lg p-3">{recentError}</div>}
-                    {recentLoading ? <div className="py-16 text-center text-white/55">正在读取平台最近播放…</div> : recentItems.length === 0 ? <div className="py-16 text-center text-white/45">暂无平台最近播放记录</div> : (
+                    {recentLoading ? <div className="py-16 text-center text-white/55">正在读取平台最近播放…</div> : recentItems.length === 0 ? <div className="py-16 text-center text-white/45">{recentNotice || '暂无平台最近播放记录'}</div> : (
                       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
                         {recentItems.map((item, index) => (
                           <RecentPlaybackCard
@@ -2657,6 +2728,60 @@ function ProfileView({
                                 {Array.isArray(item.vec_singer) ? item.vec_singer.map((s: any) => s.name).join(' / ') : ''}
                                 {item.song_num ? ` · ${item.song_num} 首` : ''}
                               </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                  </div>
+                )}
+                {/* 汽水「我喜欢」：qishui-liked 虚拟歌单曲目（仅自己的个人中心）；
+                    行右键复用最近播放的 SongContextMenu 通道，加歌/喜欢均有真实写入口 */}
+                {activeTab === 'favs' && platform === 'soda' && !viewTarget && (
+                  <div>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Heart className="w-4 h-4 text-white/60" />
+                      <h3 className="text-sm font-medium text-white/80">我喜欢（{sodaLikedSongs.length}）</h3>
+                    </div>
+                    {sodaLikedError && <div className="text-sm text-red-300 bg-red-400/10 border border-red-300/20 rounded-lg p-3">{sodaLikedError}</div>}
+                    {sodaLikedLoading ? <div className="py-12 text-center text-white/45 text-sm">正在读取「我喜欢」…</div>
+                      : sodaLikedSongs.length === 0 ? (
+                        <div className="py-12 text-center text-white/45 text-sm">
+                          {sodaLoggedIn ? '暂无喜欢的歌曲' : '未登录汽水音乐，登录后可查看「我喜欢」'}
+                        </div>
+                      ) : (
+                        <div className="space-y-1">
+                          {sodaLikedSongs.map((song, index) => (
+                            <div
+                              key={`soda-liked-${song.mid || song.id || index}-${index}`}
+                              className="flex items-center gap-3 rounded-xl px-3 py-2 hover:bg-white/5 transition-colors group cursor-pointer"
+                              onClick={() => stableSongSelect(song, sodaLikedSongs)}
+                              onContextMenu={(event) => openRecentSongContextMenu(song, sodaLikedSongs, event)}
+                            >
+                              <span className="w-8 text-center text-xs text-white/40 shrink-0">{index + 1}</span>
+                              <div className="w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-white/10">
+                                {song.album?.picUrl ? (
+                                  <CachedImage
+                                    src={song.album.picUrl}
+                                    alt={song.name}
+                                    className="w-full h-full object-cover"
+                                    fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
+                                  />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <p className="text-white text-sm font-medium truncate">{song.name}</p>
+                                  {song.vip && (
+                                    <span className="flex-shrink-0 px-1.5 py-0.5 text-xs font-bold rounded border border-yellow-500 text-yellow-500">VIP</span>
+                                  )}
+                                </div>
+                                <p className="text-white/45 text-xs truncate">{(song.artists || []).map(a => a.name).join(' / ') || '未知歌手'}</p>
+                              </div>
+                              <button type="button" onClick={(event) => { event.stopPropagation(); stableSongSelect(song, sodaLikedSongs) }} className="p-2 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg" aria-label="播放">
+                                <Play className="w-4 h-4" fill="currentColor" />
+                              </button>
                             </div>
                           ))}
                         </div>

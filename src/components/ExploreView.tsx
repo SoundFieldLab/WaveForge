@@ -2320,7 +2320,10 @@ function ExploreView({
           onSubscribe={(_, subscribe) => {
             const previous = subscribed
             setFeedPlaylistSubscriptions(values => new Map(values).set(key, subscribe))
-            void subscribePlaylist(key, subscribe, 'netease').then(result => {
+            // 按歌单归属平台分发：汽水歌单走 subscribePlaylist 的汽水分支（collection 收藏/取消），
+            // 其余平台沿用原路径；歌单缺平台标记时回退当前探索平台（网易云等行为不变）
+            const targetPlatform = playlist.platform || platform
+            void subscribePlaylist(key, subscribe, targetPlatform).then(result => {
               const success = result?.code === 200 || result?.result === 200 || result?.data?.code === 200
               if (!success) throw new Error(result?.message || result?.error || '歌单收藏操作失败')
               window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: subscribe ? '已收藏歌单' : '已取消收藏', type: 'success' } }))
@@ -2338,7 +2341,10 @@ function ExploreView({
           isSpecialPlaylist={false}
           canEdit={false}
           canDelete={false}
-          canSubscribe={neteaseLoggedIn && Boolean(neteaseUserId) && !isPlaylistOwner(playlist, { neteaseUserId })}
+          canSubscribe={(playlist.platform === 'soda'
+            ? sodaLoggedIn
+            : neteaseLoggedIn && Boolean(neteaseUserId))
+            && !isPlaylistOwner(playlist, { neteaseUserId })}
           canShare
         />
       })()}

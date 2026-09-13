@@ -125,6 +125,10 @@ const sodaTrackV2ErrorCache = new Map()
 const SODA_TRACK_V2_ERROR_TTL_MS = 45 * 1000
 const SODA_TRACK_V2_ERROR_CACHE_LIMIT = 256
 const sodaChartCache = createTtlCache(16, 10 * 60 * 1000)
+/** 搜索派生端点（联想/歌手/专辑）缓存：短 TTL + createTtlCache.wrap 自带同 key 并发去重（同一关键词并发只打一次上游） */
+const sodaSuggestCache = createTtlCache(120, 2 * 60 * 1000)
+const sodaSearchArtistsCache = createTtlCache(80, 2 * 60 * 1000)
+const sodaSearchAlbumsCache = createTtlCache(80, 2 * 60 * 1000)
 
 /** 写操作成功后失效账号库相关缓存（喜欢/收藏/加歌/上报后立即生效） */
 function invalidateSodaLibraryCaches() {
@@ -1141,6 +1145,75 @@ function sodaBestStreamCandidateForMembership(candidates, membership) {
   return sodaBestStreamCandidate((candidates || []).filter((item) => sodaStreamAllowedForMembership(item, membership)))
 }
 
+/**
+ * 请求音质选档（/api/soda/song/url 的 quality 参数）：在会员允许的候选流里挑最贴近请求档位的一档。
+ * - 'standard'（含 low/normal/medium/128）→ 最低可用档；
+ * - 'high'（含 higher/hq/exhigh/320）→ 中档（按质量分就近，同距取低档，宁低勿败）；
+ * - 'lossless'（含 sq/flac）→ 无损档；'hires'（含 master/highres）→ Hi-Res 档；
+ * - 纯数字 → 按码率（kbps，兼容 bps 原始值）就近匹配，同距取低码率。
+ * 未识别的标签 / 候选为空 / 全是质量分未知(0)的流 时回退 fallbackBest（= 现行"会员允许内最优"），
+ * 保证缺省 quality 与旧行为完全一致；请求档位越权时上游候选已被会员过滤剔除，自然落回低档而非报错。
+ * 明显截断的试听片段（时长比候选最长还要短 2s 以上）不参与选档，避免 standard 档选中 30s 预览。
+ */
+function sodaPickStreamForQuality(streams, requestedQuality, fallbackBest) {
+  const candidates = (streams || []).filter((item) => item && item.url)
+  if (!candidates.length || !fallbackBest) return fallbackBest
+  const compact = normalizeText(requestedQuality).toLowerCase().replace(/[-_\s]/g, '')
+  if (!compact) return fallbackBest
+  let maxDuration = 0
+  candidates.forEach((item) => {
+    maxDuration = Math.max(maxDuration, sodaNormalizeDurationSeconds(item.duration))
+  })
+  const fullLength = maxDuration
+    ? candidates.filter((item) => {
+        const duration = sodaNormalizeDurationSeconds(item.duration)
+        return !(duration > 0 && duration + 2 < maxDuration)
+      })
+    : candidates
+  const pool = fullLength.length ? fullLength : candidates
+  // 纯数字码率：就近匹配
+  if (/^\d+(?:\.\d+)?$/.test(compact)) {
+    const target = sodaNormalizeBitrateKbps(compact)
+    if (!(target > 0)) return fallbackBest
+    let pick = null
+    let pickDiff = 0
+    for (const item of pool) {
+      const kbps = sodaNormalizeBitrateKbps(item.bitrate)
+      if (!(kbps > 0)) continue
+      const diff = Math.abs(kbps - target)
+      if (!pick || diff < pickDiff || (diff === pickDiff && kbps < sodaNormalizeBitrateKbps(pick.bitrate))) {
+        pick = item
+        pickDiff = diff
+      }
+    }
+    return pick || fallbackBest
+  }
+  // 标签档位：映射到 sodaQualityRank 同一标尺的目标分，就近挑档，同距取低档
+  const targetRank = /^(standard|normal|medium|low|preview|128)$/.test(compact)
+    ? 0
+    : /^(high|higher|hq|exhigh|320)$/.test(compact)
+      ? 70
+      : /^(lossless|sq|flac)$/.test(compact)
+        ? 100
+        : /^(hires|master|highres|highresolution)$/.test(compact)
+          ? 110
+          : -1
+  if (targetRank < 0) return fallbackBest
+  let pick = null
+  let pickDiff = 0
+  for (const item of pool) {
+    const rank = sodaQualityRank(item.quality, item.format, item.bitrate)
+    // 质量分未知（0）的流不冒充"最低档"——可能只是缺元数据的高码率流
+    if (targetRank === 0 && rank <= 0) continue
+    const diff = Math.abs(rank - targetRank)
+    if (!pick || diff < pickDiff || (diff === pickDiff && rank < sodaQualityRank(pick.quality, pick.format, pick.bitrate))) {
+      pick = item
+      pickDiff = diff
+    }
+  }
+  return pick || fallbackBest
+}
+
 function sodaStreamUrlFrom(value) {
   return normalizeText(
     qishuiObjectString(value, [
@@ -1514,6 +1587,9 @@ function extractSodaMediaList(payload) {
   return candidates
 }
 
+/** 多歌手名拆分（沿用原实现的分隔符："A/B"、"A,B"、"A&B"；搜索派生端点聚合歌手时同款拆法，勿两处漂移） */
+const SODA_ARTIST_NAME_SPLIT_RE = /\s*\/\s*|\s*,\s*|\s*&\s*/
+
 function sodaArtists(related, base, display, track, media) {
   const links = pickArray(
     related.artist_links,
@@ -1529,14 +1605,22 @@ function sodaArtists(related, base, display, track, media) {
   links.forEach((item) => {
     const name = normalizeText(item && (item.name || item.display_name || item.simple_display_name || item.title || item.artist_name))
     if (!name || out.some((a) => a.name === name)) return
-    out.push({
-      id: String((item && (item.id || item.artist_id || item.open_id)) || ''),
-      name,
-    })
+    const artist = { id: String((item && (item.id || item.artist_id || item.open_id)) || ''), name }
+    // 歌手头像（上游结果带才透传；搜索派生歌手端点聚合 avatarUrl 用，缺失时不出该字段）
+    const avatar = qishuiFirstImageUrl(
+      '~c5_300x300.jpg',
+      item.avatar_url,
+      item.avatarUrl,
+      item.avatar,
+      item.large_avatar_url,
+      item.medium_avatar_url,
+    )
+    if (avatar) artist.avatarUrl = avatar
+    out.push(artist)
   })
   const fallback = normalizeText(base.artist_name || display.artist_name || related.artist_name || (track && track.artist_name) || (media && media.artist_name))
   if (fallback && !out.length) {
-    fallback.split(/\s*\/\s*|\s*,\s*|\s*&\s*/).forEach((name) => {
+    fallback.split(SODA_ARTIST_NAME_SPLIT_RE).forEach((name) => {
       name = normalizeText(name)
       if (name) out.push({ id: '', name })
     })
@@ -1659,7 +1743,19 @@ function mapSodaPublicItem(raw, index, query) {
     vip,
     requiredTier: vip ? 'vip' : 'free',
   }
-  if (artistName) song.artists = [{ id: normalizeText(author.id || author.author_id), name: artistName }]
+  if (artistName) {
+    song.artists = [{ id: normalizeText(author.id || author.author_id), name: artistName }]
+    // 公开目录作者头像（author_info.avatar_url 等字段上游带才透传，缺失不出该字段）
+    const artistAvatar = qishuiFirstImageUrl(
+      '~c5_300x300.jpg',
+      author.avatar_url,
+      author.avatarUrl,
+      author.avatar,
+      author.large_avatar_url,
+      author.medium_avatar_url,
+    )
+    if (artistAvatar) song.artists[0].avatarUrl = artistAvatar
+  }
   const albumId = normalizeText(albumObj.id || raw.album_id || '')
   if (albumId) song.albumId = albumId
   if (vip) song.onlyVipPlayable = true
@@ -1782,8 +1878,11 @@ async function handleSodaPublicSearch(keywords, limit, cookieText, offset) {
     offset,
     nextOffset: offset + songs.length,
     // 原版等价判断（移植时弱化为 songs.length>=limit，会在候选集末尾多发空页请求）：
-    // 本页已满 且 （本地排序集还有剩余 或 上游候选窗口还没拉到上限）
-    hasMore: songs.length >= limit && (offset + songs.length < rankedSongs.length || requestLimit < 100),
+    // 本页已满 且 （本地排序集还有剩余 或 上游确实拉满了候选窗口——上游没给满窗口说明该词候选已耗尽，
+    // 不再凭 requestLimit<100 乐观猜"可能还有"，避免前端按 hasMore 探测到必空的下页）
+    hasMore:
+      songs.length >= limit &&
+      (offset + songs.length < rankedSongs.length || (requestLimit < 100 && list.length >= requestLimit)),
     message: songs.length ? '' : '汽水公开搜索暂时没有返回匹配结果。',
   }
 }
@@ -1859,28 +1958,50 @@ async function fetchSodaPublicDetail(id) {
 
 // ─────────────────────────── 个性化 feed 与账号媒体库 ───────────────────────────
 
-/** 个性化推荐 feed（需登录）：song-tab 两路径尝试 + 媒体库回退 */
-async function fetchSodaWebFeedSongs(cookieText, limit) {
+/** 个性化推荐 feed（需登录）：song-tab 两路径尝试 + 媒体库回退；cursor 透传上游翻页，回程透出 nextCursor/hasMore */
+async function fetchSodaWebFeedSongs(cookieText, limit, cursor) {
   const cookie = normalizeSodaCookieInput(cookieText)
   if (!sodaCookieHasLogin(cookie)) {
     return { source: 'none', songs: [], error: 'QISHUI_COOKIE_REQUIRED' }
   }
   limit = Math.max(1, Math.min(50, Number(limit) || 8))
-  const cacheKey = 'web-feed|' + sodaCookieFingerprint(cookie) + '|' + limit
+  cursor = normalizeText(cursor)
+  const cacheKey = 'web-feed|' + sodaCookieFingerprint(cookie) + '|' + limit + '|' + (cursor || 'head')
   return sodaFeedCache.wrap(cacheKey, 90 * 1000, async () => {
     const candidates = [
-      { path: '/luna/feed/song-tab', params: { cursor: 0, cnt: limit, count: limit } },
-      { path: '/luna/pc/feed/song-tab', params: { cursor: 0, cnt: limit, count: limit } },
+      { path: '/luna/feed/song-tab', params: { cursor: cursor || 0, cnt: limit, count: limit } },
+      { path: '/luna/pc/feed/song-tab', params: { cursor: cursor || 0, cnt: limit, count: limit } },
     ]
     let lastErr = null
+    let sawSongTabEmpty = false
     for (const item of candidates) {
       try {
         const json = await sodaWebRequestJson(item.path, item.params, cookie, { timeoutMs: 8000 })
         const rawItems = extractSodaMediaList(json)
         const songs = mapSodaMediaList(rawItems, 'web-feed').slice(0, limit)
-        if (songs.length) return { source: 'song-tab', songs, rawCount: rawItems.length }
+        if (songs.length) {
+          // 从上游响应提取下一页游标与 has_more（只信 next_cursor 形态，不用回显式 cursor 防同页循环）
+          const data = (json && json.data) || json || {}
+          const nextCursor = normalizeText(data.next_cursor || data.nextCursor || (json && (json.next_cursor || json.nextCursor)) || '')
+          const hasMore = !!(data.has_more || data.hasMore) || !!nextCursor
+          const page = { source: 'song-tab', songs, rawCount: rawItems.length }
+          if (nextCursor) page.nextCursor = nextCursor
+          if (hasMore || nextCursor) page.hasMore = hasMore
+          return page
+        }
+        sawSongTabEmpty = true
       } catch (err) {
         lastErr = err
+      }
+    }
+    if (cursor) {
+      // 游标翻页到底/失败：如实返回空页，不回退媒体库拼凑（避免第 2 页起混入"我喜欢/最近播放"等无关曲目）
+      return {
+        source: 'song-tab',
+        songs: [],
+        rawCount: 0,
+        hasMore: false,
+        error: (lastErr && lastErr.message) || (sawSongTabEmpty ? '' : 'SODA_WEB_FEED_EMPTY'),
       }
     }
     try {
@@ -2646,8 +2767,10 @@ async function resolveSodaDownloadInfo(trackId, payload, cookieText, membership)
       collected.playerInfoError = (err && err.message) || String(err)
     }
   }
+  // 会员允许的候选全集（play_info_list / video_model / url_player_info 补充流）：quality 选档在此基础上就近挑档
+  const allowedStreams = (collected.streams || []).filter((item) => sodaStreamAllowedForMembership(item, membership))
   const best =
-    sodaBestStreamCandidateForMembership(collected.streams, membership) ||
+    sodaBestStreamCandidate(allowedStreams) ||
     sodaBestStreamCandidateForMembership(collected.fallbackStreams, membership)
   if (!best) {
     const unrestricted =
@@ -2663,7 +2786,11 @@ async function resolveSodaDownloadInfo(trackId, payload, cookieText, membership)
     err.requiredTier = requiredTier
     throw err
   }
-  return Object.assign(collected, { best })
+  // 主候选全集为空时（仅 bit_rates 兜底命中），选档池退回 bit_rates 里会员允许的档位
+  const qualityPool = allowedStreams.length
+    ? allowedStreams
+    : (collected.fallbackStreams || []).filter((item) => sodaStreamAllowedForMembership(item, membership))
+  return Object.assign(collected, { best, qualityPool })
 }
 
 /** 给 CDN 地址附加 #auth= 播放凭证（上游要求） */
@@ -2766,7 +2893,8 @@ async function handleSodaSongUrl(opts, cookieText) {
       }
       const resolved = await resolveSodaDownloadInfo(id, payload, cookie, membership)
       const track = resolved.track || {}
-      const stream = resolved.best
+      // 请求音质选档：会员允许的多档位里就近挑档；缺省/未识别/越权回退最优流（宁低勿败，缺省行为与旧版一致）
+      const stream = sodaPickStreamForQuality(resolved.qualityPool, requestedQuality, resolved.best)
       const duration = stream.duration || sodaNormalizeDurationSeconds(track.duration_ms || track.duration || 0)
       const fullDuration = sodaNormalizeDurationSeconds(track.duration_ms || track.duration || 0)
       // 试听判定：流时长明显小于整曲时长
@@ -3145,6 +3273,184 @@ async function handleSodaAlbumTracks(albumName, albumId, limit, cookieText) {
   return { album, tracks, message: tracks.length ? '' : '未能通过搜索定位到该专辑的曲目，仅供参考。' }
 }
 
+// ─────────────────────────── 搜索派生端点（suggest / artists / albums）───────────────────────────
+// 三者都复用 handleSodaSearch（登录优先 PC 会话搜索、失败/未登录回退火山公开目录，与 /api/soda/search
+// 同模式同缓存），只在上游一次搜索结果上做本地派生聚合；各带短 TTL 缓存（createTtlCache.wrap 自带
+// 同 key 并发去重，同关键词并发只打一次上游）。
+
+/**
+ * 从统一 SodaSong 提取歌手名列表：优先 artists 数组，否则按既有分隔符拆 artist 串；
+ * 两者都再做一次既有拆法二次拆分——公开目录 author_info 常见「A/B」「A,B」合并形态
+ * （如 "周杰伦/那英"），派生聚合前须拆成单名（拆法与 sodaArtists 回退路径一致）。
+ */
+function sodaSongArtistNames(song) {
+  const rawNames =
+    song && Array.isArray(song.artists) && song.artists.length
+      ? song.artists.map((item) => normalizeText(item && item.name)).filter(Boolean)
+      : [normalizeText(song && song.artist)]
+  return rawNames.flatMap((name) =>
+    name.split(SODA_ARTIST_NAME_SPLIT_RE).map((part) => normalizeText(part)).filter(Boolean),
+  )
+}
+
+/** 歌手名 → 头像映射（仅上游结果带头像字段时非空；供派生歌手端点透传 avatarUrl） */
+function sodaSongArtistAvatarMap(song) {
+  const map = new Map()
+  if (song && Array.isArray(song.artists)) {
+    song.artists.forEach((item) => {
+      const avatar = normalizeText(item && item.avatarUrl)
+      if (!avatar) return
+      // 合并形态条目（"A/B"）的头像登记到拆分后的每个单名上（上游对合并条目通常也不带头像，实际影响小）
+      sodaSongArtistNames({ artists: [item] }).forEach((name) => {
+        if (name && !map.has(name)) map.set(name, avatar)
+      })
+    })
+  }
+  return map
+}
+
+/** 派生端点排序：与关键词前缀匹配者优先 → 其余维持上游相关性顺序（稳定排序） */
+function sodaDerivedRelevanceRank(text, query) {
+  const comparable = sodaSearchComparable(text)
+  if (!query || !comparable) return 0
+  if (comparable.startsWith(query)) return 2
+  if (comparable.includes(query)) return 1
+  return 0
+}
+
+/**
+ * 搜索联想（派生端点）：一次轻量搜索（limit 20）→ 歌曲名/歌手名/专辑名候选去重。
+ * type ∈ 'song' | 'artist' | 'album'；未命中返回空 suggestions。
+ */
+async function handleSodaSearchSuggest(keywords, limit, cookieText) {
+  keywords = normalizeText(keywords)
+  limit = Math.max(1, Math.min(20, Number(limit) || 8))
+  if (!keywords) return { suggestions: [] }
+  const loggedIn = sodaCookieHasLogin(normalizeSodaCookieInput(cookieText))
+  const cacheKey =
+    'suggest|' + keywords.toLowerCase() + '|' + limit + '|' + (loggedIn ? sodaCookieFingerprint(cookieText) : 'public')
+  return sodaSuggestCache.wrap(cacheKey, 2 * 60 * 1000, async () => {
+    const result = await handleSodaSearch(keywords, 20, cookieText, 0)
+    const query = sodaSearchComparable(keywords)
+    const seen = new Set()
+    const candidates = []
+    const push = (text, type) => {
+      text = normalizeText(text)
+      if (!text) return
+      const key = sodaSearchComparable(text)
+      if (!key || seen.has(key)) return
+      seen.add(key)
+      candidates.push({ text, type, prefix: sodaDerivedRelevanceRank(text, query) === 2 })
+    }
+    for (const song of result.songs || []) {
+      push(song.name, 'song')
+      sodaSongArtistNames(song).forEach((name) => push(name, 'artist'))
+      push(song.album, 'album')
+    }
+    // 前缀匹配优先，其余保持上游相关性顺序（sort 稳定）
+    candidates.sort((a, b) => (a.prefix === b.prefix ? 0 : a.prefix ? -1 : 1))
+    return { suggestions: candidates.slice(0, limit).map(({ text, type }) => ({ text, type })) }
+  })
+}
+
+/**
+ * 搜索歌手聚合（派生端点）：搜索（limit 50）→ 按歌手名聚合去重（多歌手拆分沿用模块内既有拆法，
+ * 见 SODA_ARTIST_NAME_SPLIT_RE）→ songCount 聚合计数；按"关键词相关度 → 计数（热度）→ 上游顺序"排序。
+ * id = 歌手名（与现有伪艺人按名检索 /api/soda/artist/songs?name= 的约定一致）；
+ * avatarUrl 仅上游结果带头像字段才透传，缺失不出该字段。
+ */
+async function handleSodaSearchArtists(keywords, limit, cookieText) {
+  keywords = normalizeText(keywords)
+  limit = Math.max(1, Math.min(50, Number(limit) || 10))
+  if (!keywords) return { artists: [] }
+  const loggedIn = sodaCookieHasLogin(normalizeSodaCookieInput(cookieText))
+  const cacheKey =
+    'search-artists|' + keywords.toLowerCase() + '|' + limit + '|' + (loggedIn ? sodaCookieFingerprint(cookieText) : 'public')
+  return sodaSearchArtistsCache.wrap(cacheKey, 2 * 60 * 1000, async () => {
+    const result = await handleSodaSearch(keywords, 50, cookieText, 0)
+    const query = sodaSearchComparable(keywords)
+    const byName = new Map()
+    for (const song of result.songs || []) {
+      const avatars = sodaSongArtistAvatarMap(song)
+      for (const name of sodaSongArtistNames(song)) {
+        const key = sodaSearchComparable(name)
+        if (!key) continue
+        let entry = byName.get(key)
+        if (!entry) {
+          entry = { name, songCount: 0, avatarUrl: '', order: byName.size }
+          byName.set(key, entry)
+        }
+        entry.songCount += 1
+        if (!entry.avatarUrl) entry.avatarUrl = avatars.get(name) || ''
+      }
+    }
+    const artists = Array.from(byName.values())
+      .sort((a, b) => {
+        const relA = sodaDerivedRelevanceRank(a.name, query)
+        const relB = sodaDerivedRelevanceRank(b.name, query)
+        if (relA !== relB) return relB - relA
+        if (a.songCount !== b.songCount) return b.songCount - a.songCount
+        return a.order - b.order
+      })
+      .slice(0, limit)
+      .map((entry) => {
+        const artist = { id: entry.name, name: entry.name, songCount: entry.songCount, source: 'soda-search-derived' }
+        if (entry.avatarUrl) artist.avatarUrl = entry.avatarUrl
+        return artist
+      })
+    return { artists }
+  })
+}
+
+/**
+ * 搜索专辑聚合（派生端点）：搜索（limit 50）→ 按「专辑名+歌手」键聚拢（sodaSearchComparable 归一后
+ * 合并大小写/空白变体，与 /api/soda/album/tracks 的按名归拢同口径）→ 封面取组内首曲封面。
+ * id 优先取组内真实 albumId，缺失回退专辑名（专辑详情端点按名/按 id 双口径均可消费）。
+ */
+async function handleSodaSearchAlbums(keywords, limit, cookieText) {
+  keywords = normalizeText(keywords)
+  limit = Math.max(1, Math.min(50, Number(limit) || 10))
+  if (!keywords) return { albums: [] }
+  const loggedIn = sodaCookieHasLogin(normalizeSodaCookieInput(cookieText))
+  const cacheKey =
+    'search-albums|' + keywords.toLowerCase() + '|' + limit + '|' + (loggedIn ? sodaCookieFingerprint(cookieText) : 'public')
+  return sodaSearchAlbumsCache.wrap(cacheKey, 2 * 60 * 1000, async () => {
+    const result = await handleSodaSearch(keywords, 50, cookieText, 0)
+    const query = sodaSearchComparable(keywords)
+    const byKey = new Map()
+    for (const song of result.songs || []) {
+      const name = normalizeText(song.album)
+      if (!name) continue
+      const artistName = sodaSongArtistNames(song)[0] || normalizeText(song.artist) || ''
+      const albumId = normalizeText(song.albumId)
+      const key = sodaSearchComparable(name) + '|' + sodaSearchComparable(artistName)
+      let entry = byKey.get(key)
+      if (!entry) {
+        entry = { id: albumId || name, name, artist: artistName, picUrl: normalizeText(song.coverUrl) || '', songCount: 0, order: byKey.size }
+        byKey.set(key, entry)
+      }
+      entry.songCount += 1
+      if (!entry.picUrl) entry.picUrl = normalizeText(song.coverUrl) || ''
+      if (!/^\d+$/.test(entry.id) && albumId) entry.id = albumId
+    }
+    const albums = Array.from(byKey.values())
+      .sort((a, b) => {
+        const relA = sodaDerivedRelevanceRank(a.name, query)
+        const relB = sodaDerivedRelevanceRank(b.name, query)
+        if (relA !== relB) return relB - relA
+        if (a.songCount !== b.songCount) return b.songCount - a.songCount
+        return a.order - b.order
+      })
+      .slice(0, limit)
+      .map((entry) => {
+        const album = { id: entry.id, name: entry.name, artist: entry.artist, songCount: entry.songCount, source: 'soda-search-derived' }
+        if (entry.picUrl) album.picUrl = entry.picUrl
+        return album
+      })
+    return { albums }
+  })
+}
+
 // ─────────────────────────── 路由注册 ───────────────────────────
 
 /** 本次请求的汽水 cookie（GET query 或 POST body；只读使用，绝不落盘/回写任何全局） */
@@ -3191,20 +3497,75 @@ export function registerSodaRoutes(app) {
       const limit = sodaClampInt(req.query.limit, 20, 1, 50)
       const offset = sodaClampInt(req.query.offset, 0, 0, 100000)
       const result = await handleSodaSearch(keywords, limit, sodaRequestCookie(req), offset)
-      res.json({ songs: result.songs || [], source: result.source || '', message: result.message || undefined })
+      // 分页状态（升级用可选字段）：诚实透出内部判定——PC 会话搜索单独凭上游 has_more/游标，公开目录按
+      // 本页填充数 + 候选窗口余量判定；hasMore:false 时不下发 nextOffset，避免暗示还有下一页
+      const hasMore = !!result.hasMore
+      res.json({
+        songs: result.songs || [],
+        source: result.source || '',
+        message: result.message || undefined,
+        hasMore,
+        nextOffset: hasMore ? Number(result.nextOffset) || undefined : undefined,
+      })
     } catch (err) {
       sodaSendError(res, 'Search', err, { songs: [] })
     }
   })
 
-  // 3. 个性化推荐 feed（需登录）
+  // 2.1 搜索联想（派生端点：歌曲名/歌手名/专辑名候选；契约约定失败/未命中一律 200 + 空 suggestions）
+  app.get('/api/soda/search/suggest', async (req, res) => {
+    const keywords = String(req.query.keywords || req.query.keyword || '').trim()
+    const limit = sodaClampInt(req.query.limit, 8, 1, 20)
+    try {
+      const result = await handleSodaSearchSuggest(keywords, limit, sodaRequestCookie(req))
+      res.json({ suggestions: result.suggestions || [] })
+    } catch (err) {
+      console.error('[Soda/SearchSuggest]', (err && err.message) || err)
+      res.json({ suggestions: [], error: String((err && err.message) || err || '请求失败') })
+    }
+  })
+
+  // 2.2 搜索歌手聚合（派生端点：按歌手名聚合去重 + 热度计数排序；id=歌手名，与伪艺人按名检索约定一致）
+  app.get('/api/soda/search/artists', async (req, res) => {
+    try {
+      const keywords = String(req.query.keywords || req.query.keyword || '').trim()
+      if (!keywords) return res.json({ artists: [] })
+      const limit = sodaClampInt(req.query.limit, 10, 1, 50)
+      const result = await handleSodaSearchArtists(keywords, limit, sodaRequestCookie(req))
+      res.json({ artists: result.artists || [] })
+    } catch (err) {
+      sodaSendError(res, 'SearchArtists', err, { artists: [] })
+    }
+  })
+
+  // 2.3 搜索专辑聚合（派生端点：按「专辑名+歌手」聚拢，封面取组内首曲封面）
+  app.get('/api/soda/search/albums', async (req, res) => {
+    try {
+      const keywords = String(req.query.keywords || req.query.keyword || '').trim()
+      if (!keywords) return res.json({ albums: [] })
+      const limit = sodaClampInt(req.query.limit, 10, 1, 50)
+      const result = await handleSodaSearchAlbums(keywords, limit, sodaRequestCookie(req))
+      res.json({ albums: result.albums || [] })
+    } catch (err) {
+      sodaSendError(res, 'SearchAlbums', err, { albums: [] })
+    }
+  })
+
+  // 3. 个性化推荐 feed（需登录；cursor 可选透传上游翻页，回程带 nextCursor/hasMore 可选字段）
   app.get('/api/soda/feed', async (req, res) => {
     try {
       const cookie = sodaRequestCookie(req)
       if (!sodaRequireLogin(res, cookie)) return
       const limit = sodaClampInt(req.query.limit, 12, 1, 50)
-      const feed = await fetchSodaWebFeedSongs(cookie, limit)
-      res.json({ name: '汽水推荐', songs: feed.songs || [], error: feed.error || undefined })
+      const cursor = normalizeText(req.query.cursor)
+      const feed = await fetchSodaWebFeedSongs(cookie, limit, cursor)
+      res.json({
+        name: '汽水推荐',
+        songs: feed.songs || [],
+        error: feed.error || undefined,
+        nextCursor: feed.nextCursor || undefined,
+        hasMore: feed.hasMore == null ? undefined : !!feed.hasMore,
+      })
     } catch (err) {
       sodaSendError(res, 'Feed', err, { songs: [] })
     }

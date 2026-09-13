@@ -444,7 +444,7 @@ export default function ArtistDetailModal({
   const [loadingMVs, setLoadingMVs] = useState(false)
   const [allSongsError, setAllSongsError] = useState<string | null>(null) // 全部歌曲加载错误
   const [hotSongsError, setHotSongsError] = useState<string | null>(null) // 热门歌曲加载错误
-  // 汽水仅「精选」标签有数据源，初始标签收敛到精选
+  // 汽水从外部跳转时把「歌手名」当 artistId，恢复记忆标签可能无对应数据，默认收敛到精选
   const [activeTab, setActiveTab] = useState<TabType>(platform === 'soda' ? 'hotSongs' : initialTab)
   const [selectedAlbum, setSelectedAlbum] = useState<Album | null>(null)
   const [selectedMV, setSelectedMV] = useState<{ id: number | string; name: string; platform?: 'netease' | 'qq'; index: number } | null>(null)
@@ -500,6 +500,10 @@ export default function ArtistDetailModal({
   // 汽水暂无本地会员态：按非会员处理，Song.vip 为真的曲目始终显示 VIP 徽标
   const isVip = platform === 'netease' ? neteaseVip : platform === 'qq' ? qqVip : false
   const readableAccentColor = getReadableAccentColor(accentColor, '#dbeafe')
+  // 汽水图片为字节 CDN 直链：不走 /api/cover 代理、不拼网易云专用的 param= 宽高参数
+  //（对齐 AlbumDetailModal 的 coverImageUrl 约定），代理改写会导致汽水图片加载失败
+  const artistImageUrl = (url: string | undefined | null): string =>
+    platform === 'soda' ? String(url || '') : getProxiedImageUrl(String(url || ''))
 
   // 格式化粉丝数显示
   const formatFansCount = (fans: number): string => {
@@ -677,13 +681,24 @@ export default function ArtistDetailModal({
         setLoading(false)
         return
       }
-      // 汽水音乐：逆向无艺人详情接口，不做额外请求——外部把「歌手名」当 artistId 传入，
-      // 直接以名字构造头部信息；热门歌曲走 fetchSodaArtistSongs（上限 50，
-      // 服务内部降级不抛错，失败/无结果返回空数组 → 复用「暂无热门歌曲」空态文案）
+      // 汽水音乐：逆向无艺人详情接口——外部把「歌手名」当 artistId 传入，直接以名字构造头部；
+      // 热门歌曲走 fetchSodaArtistSongs（服务内部降级不抛错，失败/无结果返回空数组
+      // → 复用「暂无热门歌曲」空态文案）。getArtistDetail 的汽水分支为并行补齐的头像通道：
+      // 尽力而为并行取一次，若其结果带 avatarUrl 可选字段则渲染真头像，否则保持首字占位
       if (platform === 'soda') {
         const name = decodeSodaName(String(artistId))
-        setArtist({ id: 0, name, picUrl: '', platform: 'soda' })
-        const songs = await fetchSodaArtistSongs(name, 50)
+        const [songsResult, detailResult] = await Promise.allSettled([
+          fetchSodaArtistSongs(name, 50),
+          getArtistDetail(name, 'soda'),
+        ])
+        const songs = songsResult.status === 'fulfilled' ? songsResult.value : []
+        const detail = detailResult.status === 'fulfilled' ? detailResult.value : null
+        // 头像尽力而为：avatarUrl 为并行代理可能补的可选字段，勿依赖必然存在；
+        // 不取 detail.picUrl（那是按名造伪艺人时借用的首曲封面，不当艺人头像用）
+        const avatarUrl = detail
+          ? (detail as Artist & { avatarUrl?: string }).avatarUrl || ''
+          : ''
+        setArtist({ id: 0, name, picUrl: avatarUrl, platform: 'soda' })
         setHotSongs(songs)
         return
       }
@@ -741,7 +756,13 @@ export default function ArtistDetailModal({
       let total = 0
       let hasMore = false
       
-      if (platform === 'netease') {
+      if (platform === 'soda') {
+        // 汽水：按「歌手名」搜索拼接分页（getArtistAllSongs 内部 offset 截取），
+        // 结果为搜索派生的热门集合（非全量曲库），数据到达即按通用队列渲染
+        const page = await getArtistAllSongs(decodeSodaName(String(artistId)), 'soda', offset, limit)
+        formattedSongs = page.songs
+        total = page.total
+      } else if (platform === 'netease') {
         // 网易云音乐：调用全部歌曲接口
         const response = await fetch(`http://localhost:3001/api/netease/artist/songs?id=${artistId}&limit=${limit}&offset=${offset}`)
         const data = await response.json()
@@ -816,7 +837,12 @@ export default function ArtistDetailModal({
       }
       
       // 检查是否还有更多歌曲
-      if (platform === 'netease') {
+      if (platform === 'soda') {
+        // 汽水：服务层 total 是「已取回条数」而非真实总数，QQ 式 currentTotal<total
+        // 在整页返回时会误判为已取尽；改用整页启发式——本页取满 limit 视为可能还有更多，
+        // 不足一页即已取尽（空页续拉一次后自然收敛为 false，无死循环）
+        setAllSongsHasMore(formattedSongs.length >= limit)
+      } else if (platform === 'netease') {
         setAllSongsHasMore(hasMore)
       } else {
         const currentTotal = reset ? formattedSongs.length : allSongsOffset + formattedSongs.length
@@ -851,6 +877,15 @@ export default function ArtistDetailModal({
           platform: 'apple' as const,
         })))
         setLoadingAlbums(false)
+        return
+      }
+
+      // 汽水：专辑列表为按名搜索的派生实现（getArtistAlbums 汽水分支，数据由并行代理补齐；
+      // 未就绪时返回空数组 → 走「暂无专辑」诚实空态，数据到达后 tab 内即亮）。
+      // 派生实现无分页语义——单次拉取即可，避免通用翻页循环把同一份派生结果重复拼接
+      if (platform === 'soda') {
+        const albumsData = await getArtistAlbums(decodeSodaName(String(artistId)), 'soda')
+        setAlbums(albumsData)
         return
       }
 
@@ -1064,7 +1099,7 @@ export default function ArtistDetailModal({
             <div
               className="absolute inset-0 bg-cover bg-center"
               style={{
-                backgroundImage: `url(${getProxiedImageUrl(backgroundImage)})`,
+                backgroundImage: `url(${artistImageUrl(backgroundImage)})`,
                 filter: 'blur(40px) brightness(0.6)',
               }}
             />
@@ -1127,8 +1162,8 @@ export default function ArtistDetailModal({
                 {/* 艺人头像 */}
                 <div className="w-28 h-28 rounded-full overflow-hidden bg-white/5 flex-shrink-0 shadow-xl">
                   {artist.picUrl ? (
-                    <CachedImage 
-                      src={getProxiedImageUrl(artist.picUrl)}
+                    <CachedImage
+                      src={artistImageUrl(artist.picUrl)}
                       alt={artist.name}
                       className="w-full h-full object-cover"
                       fallback={
@@ -1175,6 +1210,12 @@ export default function ArtistDetailModal({
                         <span>专辑: {artist.albumSize}</span>
                       )}
                     </div>
+                    {/* 汽水：无独立艺人实体，下列内容均为按名搜索的派生结果，如实标注 */}
+                    {platform === 'soda' && (
+                      <div className={`text-xs ${textTertiary}`}>
+                        汽水搜索派生 · 按歌手名检索的热门内容（非平台全量数据）
+                      </div>
+                    )}
                   </div>
 
                   {/* 播放按钮和关注 */}
@@ -1273,8 +1314,7 @@ export default function ArtistDetailModal({
                 />
               )}
             </button>
-            {/* 汽水无艺人专辑列表接口，不显示「专辑」标签 */}
-            {platform !== 'soda' && (
+            {/* 专辑：汽水走 getArtistAlbums 按名派生（无独立专辑接口），无数据时 tab 内显示诚实空态 */}
             <button
               onClick={() => setActiveTab('albums')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${
@@ -1287,13 +1327,12 @@ export default function ArtistDetailModal({
               专辑
               {activeTab === 'albums' && (
                 <motion.div
-                   
+
                   className="absolute bottom-0 left-0 right-0 h-0.5"
                   style={{ backgroundColor: readableAccentColor }}
                 />
               )}
             </button>
-            )}
             {/* 汽水无 MV 数据源，不显示「视频」标签 */}
             {platform !== 'soda' && platform !== 'kugou' && (
             <button
@@ -1315,8 +1354,9 @@ export default function ArtistDetailModal({
               )}
             </button>
             )}
-            {/* 汽水仅能按名检索热门歌曲（无全量分页接口），不显示「全部歌曲」标签 */}
-            {platform !== 'apple' && platform !== 'soda' && (
+            {/* 全部歌曲：汽水复用 getArtistAllSongs 的按名 offset 拼接实现（搜索派生集合）
+                —— 消费方式与 QQ/网易云的全部歌曲 tab 一致；Apple 仍无此数据源，保持隐藏 */}
+            {platform !== 'apple' && (
             <button
               onClick={() => setActiveTab('allSongs')}
               className={`pb-3 px-3 font-medium transition-all relative text-sm ${

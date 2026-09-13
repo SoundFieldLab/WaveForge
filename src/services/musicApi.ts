@@ -269,6 +269,12 @@ export interface Artist {
   appleId?: string // Apple Music 原始字符串 ID
   name: string
   picUrl: string
+  /**
+   * 艺人真头像（可选；目前仅汽水分支透传——汽水无独立艺人实体，
+   * 按名聚合端点上游带头像才下发，游客模式基本缺失。注意与 picUrl 区分：
+   * picUrl 在部分平台是借用歌曲封面，不一定是艺人头像）。
+   */
+  avatarUrl?: string
   albumSize?: number // 专辑数量
   musicSize?: number // 歌曲数量
   description?: string // 艺人介绍
@@ -505,8 +511,12 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
 // 搜索建议
 export async function searchSuggest(keywords: string, platform: MusicPlatform = 'netease'): Promise<SearchSuggestion[]> {
   try {
-    // 汽水：逆向接口无搜索建议端点，返回空（避免误用网易云建议造成串台）
-    if (platform === 'soda') return []
+    // 汽水：派生联想端点（服务端从搜索结果聚拢歌曲名/歌手名/专辑名候选；失败/未命中一律空数组）
+    if (platform === 'soda') {
+      const { fetchSodaSearchSuggest } = await import('./sodaService')
+      const rows = await fetchSodaSearchSuggest(keywords, 8)
+      return rows.map(item => ({ keyword: item.text, type: item.type }))
+    }
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/suggest?keywords=${encodeURIComponent(keywords)}`)
       const data = await response.json()
@@ -598,8 +608,27 @@ export async function searchArtists(keywords: string, platform: MusicPlatform = 
         platform: 'spotify' as const,
       }))
     }
-    // 酷狗/汽水：暂不支持独立艺人搜索
-    if (platform === 'kugou' || platform === 'soda') return []
+    // 酷狗：暂不支持独立艺人搜索
+    if (platform === 'kugou') return []
+    // 汽水：派生歌手聚合端点（id = 歌手名，伪艺人约定——SearchPanel 经 entityId 取 mid
+    // 作为 artistId 打开艺人页，ArtistDetailModal decodeSodaName 解码）。
+    // avatarUrl 为可选字段（游客模式基本缺失），有则充当搜索结果头像。
+    if (platform === 'soda') {
+      const { fetchSodaSearchArtists, aggregateSodaArtistsFromSongs, searchSodaSongs } = await import('./sodaService')
+      const rows = await fetchSodaSearchArtists(keywords, 20)
+      const derived = rows.length
+        ? rows
+        // 专属端点失败/未命中 → 从歌曲搜索结果二次派生（同源同口径的诚实派生，标注不变）
+        : aggregateSodaArtistsFromSongs(await searchSodaSongs(keywords, 50), 20, keywords)
+      return derived.map(item => ({
+        id: 0,
+        mid: item.id, // 歌手名即伪艺人 id
+        name: item.name,
+        picUrl: item.avatarUrl || '',
+        musicSize: item.songCount,
+        platform: 'soda' as const,
+      }))
+    }
     const devMode = localStorage.getItem('developerMode') === 'true'
     if (platform === 'qq') {
       const url = `${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&type=singer&devMode=${devMode}`
@@ -688,8 +717,23 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
         platform: 'spotify' as const,
       }))
     }
-    // 酷狗/汽水：暂不支持独立专辑搜索
-    if (platform === 'kugou' || platform === 'soda') return []
+    // 酷狗：暂不支持独立专辑搜索
+    if (platform === 'kugou') return []
+    // 汽水：派生专辑聚合端点（⚠️ 游客模式上游无专辑字段恒空数组——搜索面板展示诚实空态）。
+    // mid 优先真实专辑 id、缺失回退专辑名（AlbumDetailModal → /album/tracks 按名/按 id 双口径）。
+    if (platform === 'soda') {
+      const { fetchSodaSearchAlbums } = await import('./sodaService')
+      const rows = await fetchSodaSearchAlbums(keywords, 20)
+      return rows.map(item => ({
+        id: Number(String(item.id).slice(0, 15)) || 0,
+        mid: item.id,
+        name: item.name,
+        picUrl: item.picUrl || '',
+        artist: { name: item.artist },
+        size: item.songCount,
+        platform: 'soda' as const,
+      }))
+    }
     const devMode = localStorage.getItem('developerMode') === 'true'
     if (platform === 'qq') {
       const response = await fetch(`${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&type=album&devMode=${devMode}`)
@@ -761,9 +805,12 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         readUrl = data => data.url || null
       } else if (platform === 'soda') {
         // 汽水音乐：逆向 Web API 音源（VIP/SVIP 分层过滤在服务端完成；
-        // 未登录或无可用流时 url 为空 → 返回 null 走上层网易云/QQ 降级匹配）
+        // 未登录或无可用流时 url 为空 → 返回 null 走上层网易云/QQ 降级匹配）。
+        // 音质偏好映射为后端选档枚举透传（hi-res→hires / very-high→high / auto→缺省旧行为）
         const { preference } = getAudioQualityRequest('soda')
-        apiUrl = `${API_BASE}/soda/song/url?id=${encodeURIComponent(String(id))}&quality=${encodeURIComponent(preference)}${
+        const { mapSodaQualityParam } = await import('./sodaService')
+        const sodaQuality = mapSodaQualityParam(preference)
+        apiUrl = `${API_BASE}/soda/song/url?id=${encodeURIComponent(String(id))}${sodaQuality ? `&quality=${encodeURIComponent(sodaQuality)}` : ''}${
           (() => {
             const sdCookie = localStorage.getItem('soda_token') || ''
             return sdCookie ? '&cookie=' + encodeURIComponent(sdCookie) : ''
@@ -826,9 +873,10 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
 
 /**
  * 汽水播放地址详情（结构化不可播原因）：
- * 与 getSongUrl 汽水分支同口径（音质偏好 + soda_token cookie 一致），替代裸调直取 URL，
- * 不可播时带回顶层 requiredTier/vipLabel/reason（/api/soda/song/url playable:false 时的结构化原因），
- * 供上层换源提示文案使用；请求失败统一降级为 { url: null }，不向调用方抛错。
+ * 委托 sodaService.getSodaPlaybackInfo（唯一低层实现，消除双实现）：cookie/超时/401 login_required
+ * 口径均在服务内统一；音质偏好经 mapSodaQualityParam 映射为后端选档枚举
+ * （standard|high|lossless|hires；auto → 缺省旧行为，后端在会员闸门内就近选档）。
+ * 导出签名与返回类型保持不变（App.tsx 换源提示文案在用）；请求失败统一降级 { url: null }，不向调用方抛错。
  */
 export async function getSodaPlaybackInfo(id: number | string): Promise<{
   url: string | null
@@ -838,25 +886,8 @@ export async function getSodaPlaybackInfo(id: number | string): Promise<{
 }> {
   if (!String(id).trim()) return { url: null }
   const { preference } = getAudioQualityRequest('soda')
-  const query = new URLSearchParams({ id: String(id), quality: preference })
-  const sdCookie = localStorage.getItem('soda_token') || ''
-  if (sdCookie) query.set('cookie', sdCookie)
-  try {
-    const response = await fetchSongUrlResponse(`${API_BASE}/soda/song/url?${query.toString()}`)
-    // 401 = 登录态缺失（sodaRequireLogin）：按后端约定的 login_required 原因口径回传；其余失败不带 reason
-    if (!response.ok) {
-      return { url: null, reason: response.status === 401 ? 'login_required' : undefined }
-    }
-    const data: any = await response.json().catch(() => ({}))
-    return {
-      url: data?.url ? String(data.url) : null,
-      requiredTier: data?.requiredTier,
-      vipLabel: data?.vipLabel ? String(data.vipLabel) : undefined,
-      reason: data?.reason ? String(data.reason) : undefined,
-    }
-  } catch {
-    return { url: null }
-  }
+  const { getSodaPlaybackInfo: fetchSodaPlaybackInfo, mapSodaQualityParam } = await import('./sodaService')
+  return fetchSodaPlaybackInfo(String(id), mapSodaQualityParam(preference))
 }
 
 // Song details
@@ -2158,13 +2189,32 @@ export async function getArtistDetail(id: number | string, platform: MusicPlatfo
       }
     }
     // 汽水：没有独立艺人实体，使用歌手名作为稳定标识。
+    // avatarUrl 头像通道（可选字段，ArtistDetailModal 按 (detail as Artist & { avatarUrl?: string }) 消费）：
+    // 复用 /search/artists 聚合端点（单请求同时拿到 name/songCount/avatarUrl，不额外多发请求；
+    // 登录态上游带头像才透传，游客模式基本缺失 → 保持可选）。该端点失败/未命中时回退单曲探测，
+    // 仅用于兜底构造名字与首曲封面 picUrl（首曲封面是借用的歌曲封面，调用方明确不把它当艺人头像渲染）。
     if (platform === 'soda') {
-      const { fetchSodaArtistSongs } = await import('./sodaService')
-      const songs = await fetchSodaArtistSongs(String(id), 1)
+      const name = String(id)
+      const { fetchSodaSearchArtists, fetchSodaArtistSongs } = await import('./sodaService')
+      const derived = await fetchSodaSearchArtists(name, 1)
+      const matched = derived.find(item => item.name === name) || derived[0]
+      if (matched) {
+        return {
+          id: 0,
+          mid: name,
+          name: matched.name || name,
+          // picUrl 同步真头像（有则填）；无真头像时保持空串，不借用首曲封面冒充艺人头像
+          picUrl: matched.avatarUrl || '',
+          musicSize: matched.songCount,
+          platform: 'soda',
+          ...(matched.avatarUrl ? { avatarUrl: matched.avatarUrl } : {}),
+        }
+      }
+      const songs = await fetchSodaArtistSongs(name, 1)
       return {
         id: 0,
-        mid: String(id),
-        name: songs[0]?.artists?.[0]?.name || String(id),
+        mid: name,
+        name: songs[0]?.artists?.[0]?.name || name,
         picUrl: songs[0]?.album?.picUrl || '',
         musicSize: undefined,
         platform: 'soda',
@@ -2593,8 +2643,23 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
       const albums = await fetchKugouSingerAlbums(String(id), 1, Math.min(Math.max(limit, 20), 200))
       return albums.map(kugouAlbumToAlbum)
     }
-    // 汽水：暂不支持艺人专辑
-    if (platform === 'soda') return []
+    // 汽水：无独立艺人专辑接口——按「歌手名」（伪艺人 id）取热门歌曲 → 专辑聚拢去重
+    // （clusterSodaAlbumsFromSongs：专辑名+封面键、cap 12）。派生集合非全量专辑库
+    // （上限受热门歌曲窗口约束），无数据时调用方（ArtistDetailModal 专辑 tab）展示诚实空态。
+    if (platform === 'soda') {
+      const { fetchSodaArtistSongs, clusterSodaAlbumsFromSongs } = await import('./sodaService')
+      const songs = await fetchSodaArtistSongs(String(id), 50)
+      const derived = clusterSodaAlbumsFromSongs(songs, 12)
+      return derived.slice(offset, offset + limit).map(item => ({
+        id: Number(item.id.slice(0, 15)) || 0,
+        mid: item.id, // 真实专辑 id 缺失时回退专辑名（/album/tracks 按名/按 id 双口径）
+        name: item.name,
+        picUrl: item.coverUrl || '',
+        artist: { name: item.artist },
+        size: item.songCount,
+        platform: 'soda' as const,
+      }))
+    }
     if (platform === 'qq') {
       const page = Math.floor(offset / limit) + 1
       const response = await fetch(`${API_BASE}/qq/artist/albums?mid=${id}&page=${page}&pageSize=${limit}`)

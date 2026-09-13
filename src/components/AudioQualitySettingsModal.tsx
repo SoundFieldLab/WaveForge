@@ -8,6 +8,7 @@ import {
   type AudioQualityPreference,
   type AudioQualitySettings,
 } from '../services/audioQualitySettings'
+import type { EntitlementTier } from '../utils/musicEntitlements'
 import { useTvBack } from '../tv/tvCore'
 
 interface AudioQualitySettingsModalProps {
@@ -63,6 +64,22 @@ const APPLE_OPTIONS: QualityOption[] = [
   { value: 'lossless', label: '无损音频', description: '当前网页 Widevine 播放链路尚未检测到可用的 Apple Lossless 资产', disabled: true },
   { value: 'hi-res-lossless', label: '高解析度无损', description: '需要 Apple 提供兼容资产和当前设备具备对应解码能力', disabled: true },
   { value: 'atmos', label: '杜比全景声与空间音频', description: '曲目标签不等于可播放流；检测到兼容 Atmos 资产后才会开放', disabled: true },
+]
+
+/**
+ * 汽水音质选项（按会员档位禁用不可用档）：
+ * - 后端 /api/soda/song/url 的选档枚举为 standard|high|lossless|hires（free<vip<svip 闸门内就近落档）；
+ * - 偏好值仍存 AudioQualityPreference（'hi-res'），下发时经 mapSodaQualityParam 映射为 'hires'；
+ * - 会员状态读 localStorage['soda_entitlement']（App 登录流程落盘的 EntitlementTier）：
+ *   free → 无损/Hi-Res 禁用（明确不可用）；vip/svip → 全开放；unknown（未登录/档位未知）→
+ *   不禁用（未知 ≠ 不可用，后端会自动落低档），仅以皇冠标注会员档。
+ */
+const buildSodaOptions = (isVip: boolean, tierKnown: boolean): QualityOption[] => [
+  { value: 'auto', label: '自动最高音质', description: '按账号会员档位和歌曲可用性就近选档，无需手动切换' },
+  { value: 'standard', label: '标准音质', description: '优先使用标准码率音源，流量占用较低' },
+  { value: 'high', label: '高品质', description: '优先使用高码率音源（约 320 kbps 档）' },
+  { value: 'lossless', label: '无损音质', description: '优先请求无损音质；非会员自动落低档', requiresVip: true, disabled: tierKnown && !isVip },
+  { value: 'hi-res', label: 'Hi-Res', description: '优先请求 Hi-Res 音质；非会员自动落低档', requiresVip: true, disabled: tierKnown && !isVip },
 ]
 
 function QualityOptionButton({
@@ -127,6 +144,11 @@ export default function AudioQualitySettingsModal({
     return false
   }, [show, onClose])
   const [settings, setSettings] = useState<AudioQualitySettings>(loadAudioQualitySettings)
+  // 汽水会员档位：localStorage['soda_entitlement']（App 登录流程落盘的 EntitlementTier，
+  // 'unknown'|'free'|'vip'|'svip'）；弹窗每次打开时重读，跟进登录/会员变化（App 侧 props 未下发该状态）
+  const [sodaTier, setSodaTier] = useState<EntitlementTier>(() => (
+    (localStorage.getItem('soda_entitlement') as EntitlementTier | null) || 'unknown'
+  ))
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const textPrimary = playerTheme === 'dark' ? 'text-white' : 'text-black'
   const textSecondary = playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'
@@ -137,6 +159,7 @@ export default function AudioQualitySettingsModal({
   useEffect(() => {
     if (!show) return
     setSettings(loadAudioQualitySettings())
+    setSodaTier((localStorage.getItem('soda_entitlement') as EntitlementTier | null) || 'unknown')
   }, [show])
 
   useEffect(() => {
@@ -225,8 +248,15 @@ export default function AudioQualitySettingsModal({
               {renderPlatform('apple', 'Apple Music', <span className="font-bold text-sm">AM</span>, APPLE_OPTIONS, appleLoggedIn, appleLoggedIn)}
               {renderPlatform('spotify', 'Spotify', <span className="font-bold text-sm">S</span>, GENERIC_OPTIONS, false, spotifyLoggedIn)}
               {renderPlatform('kugou', '酷狗音乐', <span className="font-bold text-sm">狗</span>, GENERIC_OPTIONS, false, kugouLoggedIn)}
-              {renderPlatform('soda', '汽水音乐', <span className="font-bold text-sm">汽</span>, GENERIC_OPTIONS, false, sodaLoggedIn)}
-              <p className={`${textTertiary} text-xs leading-relaxed`}>设置会立即保存，并作用于播放、下一首预加载及新的播放链接缓存。Apple Music 的无损与空间音频只会在实际播放资产和当前设备均支持时开放；曲目支持标签不会被当作本次播放音质。Spotify/酷狗/汽水自身直源受限时，播放自动降级到网易云/QQ 载体。</p>
+              {renderPlatform(
+                'soda',
+                '汽水音乐',
+                <span className="font-bold text-sm">汽</span>,
+                buildSodaOptions(sodaTier === 'vip' || sodaTier === 'svip', sodaTier !== 'unknown'),
+                sodaTier === 'vip' || sodaTier === 'svip',
+                sodaLoggedIn,
+              )}
+              <p className={`${textTertiary} text-xs leading-relaxed`}>设置会立即保存，并作用于播放、下一首预加载及新的播放链接缓存。Apple Music 的无损与空间音频只会在实际播放资产和当前设备均支持时开放；曲目支持标签不会被当作本次播放音质。Spotify/酷狗自身直源受限时，播放自动降级到网易云/QQ 载体。汽水音质在账号会员档位闸门内就近选档，越权请求自动落低档，不会报错或卡住。</p>
             </div>
           </motion.div>
         </>

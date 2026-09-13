@@ -220,3 +220,7 @@ git log --oneline             # 查看历史；git reset --hard <sha> 回退
 **隔离边界**：只新增 pvLyrics/ 目录 + App.tsx 模式接入；未改动任何既有歌词页组件与 `Apple*` 分支。
 
 **验证**：非 Apple 分支 lint 0 错；`test/pvLyrics.test.ts` 20 用例全过（桥接/推荐/编排）；`npm run build` 通过。全量 lint 存量错误来自并行 AI 的 Apple 分支在途代码，与本模式无关。
+
+## 9. 汽水音乐探索模式补齐·首批（2026-09-14，现有端点全接线）
+
+四写代理并行（文件所有权互斥）完成探索模式汽水功能补齐：探索页**无限续播**（feed 游标透传 + fetchExploreRecommendationBatch soda 分支）、推荐歌单含收藏歌单、新碟区块派生聚合、搜索建议/歌手 tab/专辑 tab 派生端点（`/api/soda/search/suggest|artists|albums`）、**个人主页解锁 soda**（ProfileView 创建/收藏歌单分栏+最近播放+我喜欢 tab）、艺人页增 专辑/全部歌曲 tab+头像、专辑页加歌菜单恢复、歌单右键收藏按平台分发、音质弹窗汽水 5 档（quality 选档，会员闸门内就近落档）。死代码 getSodaSongUrl 删除、getSodaPlaybackInfo 双实现收敛。新增 `test/sodaDerivedExplore.test.ts` 17 用例。细节与残留项见 `docs/汽水业务审计-20260826.md` §八。**门禁**：tsc 零错；vitest 的 5 个失败（ImmersiveControls/modeIntegrationWiring/mvAlignment/specialLyricsRendering）经 HEAD 干净工作树对照实锤为既有失败，与本轮无关。**下轮大项**（MV/电台/歌单 CRUD 等需端点发现后实现）亦记录在该节。

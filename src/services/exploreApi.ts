@@ -502,7 +502,7 @@ export async function fetchExploreHome(
   // （/api/soda/charts）与（登录时）用户歌单卡（/api/soda/user/playlists）；
   // 三者全空（后端未就绪/全挂）时回退旧 fetchSodaExplore 关键词聚合路径，保证区块不空白。
   if (platform === 'soda') {
-    const { fetchSodaDaily, fetchSodaCharts, fetchSodaUserPlaylists, fetchSodaExplore, isSodaLoggedIn } =
+    const { fetchSodaDaily, fetchSodaCharts, fetchSodaUserPlaylists, fetchSodaExplore, isSodaLoggedIn, clusterSodaAlbumsFromSongs } =
       await import('./sodaService')
     // 登录态粗判仅决定是否请求用户歌单卡；daily 的 personalized 由后端按会话判定
     const loggedIn = isSodaLoggedIn()
@@ -542,21 +542,37 @@ export async function fetchExploreHome(
     const newSongGroup = chartGroups.find(group => /新歌|新曲/.test(group.name))
     const newSongs: Song[] = (newSongGroup ? newSongGroup.songs : chartGroups[0]?.songs || []).slice(0, 20)
 
-    // 推荐歌单卡：仅登录时取用户歌单前 8 个（coverUrl 有则透传）；未登录保持空数组
-    const playlists: ExplorePlaylist[] = userPlaylistCards.slice(0, 8).map(item => ({
+    // 推荐歌单卡：登录时取用户歌单前 12 张（fetchSodaUserPlaylists 已聚合创建+收藏，
+    // source 区分自建/收藏供详情侧识别；未登录保持空数组）
+    const playlists: ExplorePlaylist[] = userPlaylistCards.slice(0, 12).map(item => ({
       id: item.id,
       name: item.name,
       coverUrl: item.coverUrl || '',
       trackCount: item.trackCount,
       creator: '汽水音乐',
       platform: 'soda',
-      source: 'soda-user-playlist',
+      source: item.collected ? 'soda-collected-playlist' : 'soda-user-playlist',
+    }))
+
+    // 新碟区块（派生聚合）：从每日推荐 + 新歌 + 各榜单组曲目的专辑字段聚拢去重
+    // （clusterSodaAlbumsFromSongs：专辑名+封面键、cap 12、诚实标注 soda-derived-albums）。
+    // 游客模式上游曲目常缺专辑字段 → 如实留空，区块由 sectionHasData 自动隐藏（预期诚实行为，非缺陷）。
+    const albums: ExploreAlbum[] = clusterSodaAlbumsFromSongs(
+      [...daily.songs, ...newSongs, ...chartGroups.flatMap(group => group.songs)],
+      12,
+    ).map(item => ({
+      id: Number(item.id.slice(0, 15)) || 0,
+      mid: item.id, // 真实专辑 id 缺失时回退专辑名（/album/tracks 按名/按 id 双口径）
+      name: item.name,
+      artist: item.artist,
+      coverUrl: item.coverUrl || '',
+      platform: 'soda' as const,
     }))
 
     // 统一装配：保持 ExplorePayload 形状与缓存写入逻辑不变
     const assembleSodaPayload = (
       source: string,
-      data: Pick<ExplorePayload, 'personalized' | 'dailySongs' | 'newSongs' | 'playlists' | 'charts'>
+      data: Pick<ExplorePayload, 'personalized' | 'dailySongs' | 'newSongs' | 'playlists' | 'charts' | 'albums'>
     ): ExplorePayload => ({
       code: 0,
       platform: 'soda',
@@ -567,7 +583,7 @@ export async function fetchExploreHome(
       newSongs: data.newSongs,
       playlists: data.playlists,
       charts: data.charts,
-      albums: [],
+      albums: data.albums,
       channels: [],
       meta: { source, updatedAt: Date.now() },
     })
@@ -606,6 +622,15 @@ export async function fetchExploreHome(
           source: 'soda-web-api-fallback',
         })),
         charts: fallbackCharts,
+        // 回退路径同样派生新碟（旧关键词聚合的曲目字段），保持区块行为一致
+        albums: clusterSodaAlbumsFromSongs(explore.songs, 12).map(item => ({
+          id: Number(item.id.slice(0, 15)) || 0,
+          mid: item.id,
+          name: item.name,
+          artist: item.artist,
+          coverUrl: item.coverUrl || '',
+          platform: 'soda' as const,
+        })),
       })
       exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
       return payload
@@ -618,6 +643,7 @@ export async function fetchExploreHome(
       newSongs,
       playlists,
       charts,
+      albums,
     })
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
     return payload
@@ -719,14 +745,41 @@ export async function fetchQQGuessYouLikeBatch(
     .filter((song: Song | null): song is Song => Boolean(song))
 }
 
+// 汽水无限续播游标状态（模块级单例）：batch<=1 视为新会话重置；到底后停止续拉（重试不再打网络）。
+// App 探索无限续播与桌面小组件共用本入口，两者均从 batch=1/2 起步、按调用序推进游标；
+// 极端交叉调用可能复用同一游标取到重复曲目，下游已有按歌曲 key 去重兜底（App additions 过滤）。
+let sodaFeedContinuationCursor: string | undefined
+let sodaFeedContinuationExhausted = false
+
 export async function fetchExploreRecommendationBatch(
   platform: ExplorePlatform,
   batch: number,
   excludeSongKeys: string[] = [],
   signal?: AbortSignal
 ): Promise<Song[]> {
-  // Apple/Spotify/酷狗/汽水音乐 无连续电台接口
-  if (platform === 'apple' || platform === 'spotify' || platform === 'kugou' || platform === 'soda') return []
+  // Apple/Spotify/酷狗 无连续电台接口
+  if (platform === 'apple' || platform === 'spotify' || platform === 'kugou') return []
+  // 汽水：登录态个性化 feed 游标续拉（契约：游标请求失败/到底如实返回空页，后端不回退媒体库拼凑）；
+  // 未登录返回空数组（维持现语义：该平台无限续播静默停止，由 explore 首页批次兜底）
+  if (platform === 'soda') {
+    const { fetchSodaFeed, isSodaLoggedIn } = await import('./sodaService')
+    if (!isSodaLoggedIn()) return []
+    if (batch <= 1) {
+      sodaFeedContinuationCursor = undefined
+      sodaFeedContinuationExhausted = false
+    }
+    if (sodaFeedContinuationExhausted) return []
+    const page = await fetchSodaFeed(30, sodaFeedContinuationCursor)
+    if (page.nextCursor) {
+      sodaFeedContinuationCursor = page.nextCursor
+      if (page.hasMore === false) sodaFeedContinuationExhausted = true
+    } else if (page.hasMore === false || page.songs.length > 0) {
+      // 明确到底（hasMore:false）或旧后端单页（有歌无游标，无法续拉）→ 停止续拉
+      sodaFeedContinuationExhausted = true
+    }
+    // 其余（空页且未明确到底）= 请求失败或瞬时无数据：保留游标，交由上层重试机制用同一游标再探
+    return page.songs
+  }
   const cookie = getExploreCookie(platform)
   if (platform === 'qq') {
     return fetchQQGuessYouLikeBatch(batch, excludeSongKeys, signal)

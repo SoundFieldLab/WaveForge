@@ -294,16 +294,17 @@ const SODA_CAPABILITIES: PlatformCapabilities = {
   likedSongs: true, // "我喜欢"虚拟歌单 qishui-liked
   likeSong: true, // collection/media 喜欢写入
   explore: true,
-  exploreSections: ['discover', 'playlists', 'charts', 'newSongs'],
+  // 探索页区块：无旅程/频道；albums = 新碟派生聚合区块（payload.albums 由曲目字段聚拢，游客模式为空自动隐藏）
+  exploreSections: ['discover', 'playlists', 'charts', 'newSongs', 'albums'],
   search: true,
-  searchSuggest: false,
+  searchSuggest: true, // 派生联想：/api/soda/search/suggest 从搜索结果聚拢歌曲名/歌手名/专辑名候选
   lyrics: true,
   comments: true, // luna/pc/comments 读取与发表
   dailyRecommend: true, // 登录 feed 日推；未登录回退公开热歌
   charts: true,
   channels: false,
   newSongs: true,
-  albums: true, // 按专辑名聚合的尽力而为实现
+  albums: true, // 无独立专辑实体：搜索与新碟区块均走「曲目字段派生聚拢」（专辑名+封面键去重）
   mv: false,
   signin: false,
   social: false,
@@ -315,7 +316,7 @@ const SODA_CAPABILITIES: PlatformCapabilities = {
   similarSongs: true, // 同歌手热门 + 日推组合的相关探索
   radio: false,
   playAsCarrier: true, // 逆向 Web API 音源（免费/试听流可播）；失败时上层降级网易云/QQ
-  audioQuality: false,
+  audioQuality: true, // /api/soda/song/url quality 选档（standard|high|lossless|hires，会员闸门内就近落档）
 }
 
 export const PLATFORM_CAPABILITIES: Record<MusicPlatform, PlatformCapabilities> = {
