@@ -184,6 +184,8 @@ export interface Song {
   /** 播放该曲所需的规范化会员档位；旧数据仅有 vip 时按 vip 处理。 */
   requiredTier?: EntitlementTier
   noCopyright?: boolean // 是否无版权
+  /** 播客节目（网易云电台节目等）：没有歌词与 MV 背景，播放页自动使用纯音乐样式 */
+  isPodcast?: boolean
   commentCount?: number
   fee?: number // 付费类型（网易云）0免费 1VIP 4付费专辑 8低音质免费
   /** 融合搜索中，同一首歌可用的所有平台版本（第一项为当前优选版本） */
@@ -1299,6 +1301,116 @@ export interface LyricsFinalInfo {
   allCompleted: boolean
 }
 
+/** Apple 官方 API 不提供歌词翻译/罗马音（官方 App 为端侧翻译）：按标题+艺人交叉匹配
+ *  其他平台歌词补齐——**QQ 音乐优先**（数据最全：一次请求同时拿 qrc 逐字正文/trans 翻译/roma 罗马音，
+ *  实测覆盖率最高），缺口再由网易云互补兜底（tlyric 翻译/romalrc 罗马音/yrc 逐字正文）。 */
+async function fetchCrossPlatformLyricFill(
+  songName: string,
+  artistName: string,
+  duration?: number,
+): Promise<{ translations: LyricLine[]; romans: LyricLine[]; wordByWord: LyricLine[] }> {
+  const fills: { translations: LyricLine[]; romans: LyricLine[]; wordByWord: LyricLine[] } = { translations: [], romans: [], wordByWord: [] }
+  const keywords = `${songName} ${artistName}`.trim()
+  if (!keywords) return fills
+  const pickBest = (songs: Song[]): Song | null => {
+    const candidates = songs.filter(song => song.platform && song.id)
+    if (candidates.length === 0) return null
+    if (!duration) return candidates[0]
+    return candidates.slice().sort((a, b) => Math.abs((a.duration || 0) - duration) - Math.abs((b.duration || 0) - duration))[0]
+  }
+  // ① QQ 音乐优先：trans（翻译）+ roma（罗马音，YRC 格式）+ qrc（逐字正文）
+  try {
+    const search = await searchSongs(keywords, 5, 'qq')
+    const best = pickBest(search.songs || [])
+    if (best?.id) {
+      // 同一参数既可能是 songmid（字符串/数字）也可能是 songID（纯数字）：两种都传，
+      // 后端 musicu 按有效字段取——只传 mid 时，songID 型 id 会被当成 songMID 查询 → 空歌词
+      //（实测 rainy tone qq:233811640 只传 mid 返回空，带 songID 才有完整 LRC）
+      const res = await fetch(`${API_BASE}/qq/lyric?mid=${encodeURIComponent(String(best.mid || best.id))}&id=${best.id}`, { signal: AbortSignal.timeout(6000) })
+      const data = await res.json()
+      fills.translations = parseLyric(data.trans?.lyric || '')
+      // QQ 的 roma 部分歌曲是 YRC 逐字格式、部分是普通 LRC：先按 YRC 解析（保留逐字），失败退 LRC
+      if (data.roma?.lyric) {
+        fills.romans = parseYrc(data.roma.lyric)
+        if (fills.romans.length === 0) fills.romans = parseLyric(data.roma.lyric)
+      }
+      // 逐字正文：QQ 的 QRC 与网易云 YRC 同格式；kana 格式需 lrc+qrc 合并解析
+      const qrcText = data.qrc?.lyric || ''
+      if (qrcText) {
+        fills.wordByWord = parseYrc(qrcText)
+        if (fills.wordByWord.length === 0 && qrcText.includes('[kana:') && data.lrc?.lyric) {
+          fills.wordByWord = parseQQKanaLyric(data.lrc.lyric, qrcText)
+        }
+      }
+    }
+  } catch { /* 静默：网易云互补 */ }
+  // ② 网易云互补兜底：只补 QQ 没拿到的部分
+  if (fills.translations.length === 0 || fills.romans.length === 0 || fills.wordByWord.length === 0) {
+    try {
+      const search = await searchSongs(keywords, 5, 'netease')
+      const best = pickBest(search.songs || [])
+      if (best?.id) {
+        const res = await fetch(`${API_BASE}/netease/lyric?id=${best.id}`, { signal: AbortSignal.timeout(6000) })
+        const data = await res.json()
+        if (fills.translations.length === 0) fills.translations = parseLyric(data.tlyric?.lyric || '')
+        if (fills.romans.length === 0) fills.romans = parseLyric(data.romalrc?.lyric || '')
+        if (fills.wordByWord.length === 0) fills.wordByWord = parseYrc(data.yrc?.lyric || '')
+      }
+    } catch { /* 静默 */ }
+  }
+  return fills
+}
+
+/** 时间轴贪心对齐：为 Apple 歌词行补 translation/roman/words（±0.6s 内取最近且未占用的行）。
+ *  words 逐字借用：Apple 行级歌词借用跨平台逐字词时间（卡拉OK），词时间相对借用源行首，
+ *  需按两平台行首差平移回 Apple 行首基准；正文文本仍以 Apple 为准。 */
+function mergeCrossPlatformLyricTexts(
+  lyrics: LyricLine[],
+  fills: { translations: LyricLine[]; romans: LyricLine[]; wordByWord?: LyricLine[] },
+): void {
+  if (!lyrics.length) return
+  const TOLERANCE = 0.6
+  const alignFactory = (pool: LyricLine[], used: Set<number>) => (time: number): LyricLine | null => {
+    let bestIndex = -1
+    let bestDiff = TOLERANCE
+    pool.forEach((line, index) => {
+      if (used.has(index) || !line.text?.trim()) return
+      const diff = Math.abs((line.time || 0) - time)
+      if (diff < bestDiff) { bestDiff = diff; bestIndex = index }
+    })
+    if (bestIndex < 0) return null
+    used.add(bestIndex)
+    return pool[bestIndex]
+  }
+  const usedTranslations = new Set<number>()
+  const usedRomans = new Set<number>()
+  const usedWordByWord = new Set<number>()
+  const alignTranslation = alignFactory(fills.translations, usedTranslations)
+  const alignRoman = alignFactory(fills.romans, usedRomans)
+  const alignWordByWord = fills.wordByWord && fills.wordByWord.length > 0
+    ? alignFactory(fills.wordByWord, usedWordByWord)
+    : null
+  for (const line of lyrics) {
+    if (!line.translation) {
+      const match = alignTranslation(line.time || 0)
+      if (match?.text) line.translation = match.text.trim()
+    }
+    if (!line.roman) {
+      const match = alignRoman(line.time || 0)
+      if (match?.text) line.roman = match.text.trim()
+      // QQ/网易云的罗马音源自 YRC 解析，行内自带逐字时间：顺带借给缺逐字罗马音的行
+      if (match?.words?.length && !line.romanWords?.length) line.romanWords = match.words
+    }
+    if (!line.words?.length && alignWordByWord) {
+      const match = alignWordByWord(line.time || 0)
+      if (match?.words?.length) {
+        const offsetMs = ((match.time || 0) - (line.time || 0)) * 1000
+        line.words = match.words.map(word => ({ ...word, startTime: Math.max(0, word.startTime + offsetMs) }))
+      }
+    }
+  }
+}
+
 export async function getLyrics(
   id: number | string, 
   platform: MusicPlatform = 'netease',
@@ -1329,7 +1441,27 @@ export async function getLyrics(
     const isApplePlatform = platform === 'apple'
     if (isApplePlatform && isAppleMusicConfigured()) {
       const appleLyrics = await getAppleMusicLyrics(songName || '', artistName || '', duration, { songId: id })
-      if (appleLyrics.length > 0 || !useThirdParty || !useAdaptive || primarySource === 'Platform') return appleLyrics
+      // Apple 无歌词：QQ 音乐（优先，qrc 逐字覆盖极高）/网易云互补兜底正文（翻译/罗马音一并带上）；
+      // 仍无果再掉到通用流式管线（Lrclib 等）。
+      if (appleLyrics.length === 0 && useThirdParty && useAdaptive && primarySource !== 'Platform' && songName) {
+        const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
+        if (fills.wordByWord.length > 0) {
+          mergeCrossPlatformLyricTexts(fills.wordByWord, fills)
+          return fills.wordByWord
+        }
+      }
+      if (appleLyrics.length > 0 || !useThirdParty || !useAdaptive || primarySource === 'Platform') {
+        // Apple 官方 API 不提供歌词翻译/罗马音：缺失时交叉借用 QQ 音乐（优先，一次请求拿
+        // qrc 逐字/trans 翻译/roma 罗马音）/网易云（互补兜底）按时间轴对齐补齐；
+        // Apple 行级歌词（无逐字）同时借用跨平台逐字词时间补卡拉OK。正文文本仍以 Apple 为准。
+        const missingTranslationOrRoman = !appleLyrics.some(line => line.translation || line.roman)
+        const missingWordTiming = !appleLyrics.some(line => line.words?.length)
+        if (appleLyrics.length > 0 && songName && (missingTranslationOrRoman || missingWordTiming)) {
+          const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
+          mergeCrossPlatformLyricTexts(appleLyrics, fills)
+        }
+        return appleLyrics
+      }
     }
     if (isApplePlatform && (!useThirdParty || !useAdaptive || primarySource === 'Platform')) {
       return []
