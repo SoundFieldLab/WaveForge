@@ -4,6 +4,15 @@ import { memo, useEffect, useLayoutEffect, useMemo, useState, useRef, useSyncExt
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
 import { normalizeSequentialWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
+import {
+  LYRIC_STYLE_MODE_EVENT,
+  readLyricStyleMode,
+  scrollStyleOfStyle,
+  wordEffectModeOfStyle,
+  type LyricStyleMode,
+  type ScrollTransitionStyle,
+  type WordByWordEffectMode,
+} from '../utils/lyricStyle'
 
 /** 十六进制色 → rgba（对唱演唱者着色用） */
 const hexToRgba = (hex: string, alpha: number) => {
@@ -53,9 +62,10 @@ interface LyricLine {
   agent?: string
   agentId?: string
   agentName?: string
+  /** Apple Music 对唱：该行靠右显示（由 ttm:agent 交替算法派生） */
+  isDuet?: boolean
 }
 
-type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
 type AppleLyricLinePhase = 'played' | 'current' | 'upcoming'
 
 interface AppleLyricLineMotion {
@@ -113,14 +123,18 @@ const interpolateColor = (from: string, to: string, t: number) => {
   return `rgba(${Math.round(start.r + (end.r - start.r) * k)}, ${Math.round(start.g + (end.g - start.g) * k)}, ${Math.round(start.b + (end.b - start.b) * k)}, ${(start.a + (end.a - start.a) * k).toFixed(3)})`
 }
 
+/** Apple Music 背景和声（TTML ttm:role="x-bg"）：作为独立小字行显示在主行下方，与主行同时进行。
+ *  摩登风格按和声自己的逐字时间点亮（唱到的字变亮，未唱更暗），柔和风格整段柔光淡入淡出。 */
 function BackgroundVocals({
   vocals,
   playbackTime,
   colorForAgent,
+  wordTimed = false,
 }: {
   vocals: LyricBackgroundVocal[]
   playbackTime: number
   colorForAgent: (agent?: string) => string | undefined
+  wordTimed?: boolean
 }) {
   return <>
     {vocals.map((vocal, index) => {
@@ -128,10 +142,10 @@ function BackgroundVocals({
         Math.max(latest, vocal.time + (word.startTime + word.duration) / 1000)
       ), vocal.time) ?? vocal.time
       const endTime = vocal.endTime ?? Math.max(vocal.time + 0.8, wordEnd)
-      const fadeIn = clamp((playbackTime - vocal.time) / 0.18)
-      const fadeOut = clamp((endTime - playbackTime) / 0.24)
-      const opacity = Math.min(fadeIn, fadeOut) * 0.58
-      if (opacity <= 0) return null
+      const fadeIn = clamp((playbackTime - vocal.time) / (wordTimed ? 0.24 : 0.44))
+      const fadeOut = clamp((endTime - playbackTime) / 0.36)
+      const presence = Math.min(fadeIn, fadeOut)
+      if (presence <= 0) return null
       return (
         <span
           key={`${vocal.time}-${index}-${vocal.text}`}
@@ -139,13 +153,32 @@ function BackgroundVocals({
           className="block mt-1.5 font-normal"
           style={{
             color: colorForAgent(vocal.agentId || vocal.agent),
-            fontSize: '0.42em',
-            lineHeight: 1.35,
-            opacity,
+            fontSize: '0.46em',
+            lineHeight: 1.4,
+            opacity: wordTimed ? presence : presence * 0.62,
             textShadow: '0 1px 8px rgba(0,0,0,0.45)',
           }}
         >
-          （{vocal.text}）
+          {wordTimed && vocal.words && vocal.words.length > 0
+            ? vocal.words.map((word, wordIndex) => {
+                if (!word.word) return null
+                const start = vocal.time + word.startTime / 1000
+                const end = start + Math.max(word.duration, 1) / 1000
+                const isSung = playbackTime >= end
+                // 未唱的字压暗，唱到即点亮：整段和声的"逐字点亮"但整体比主行暗
+                return (
+                  <span
+                    key={wordIndex}
+                    style={{
+                      opacity: isSung ? 0.94 : 0.34,
+                      transition: 'opacity 200ms ease-out',
+                    }}
+                  >
+                    {word.word}
+                  </span>
+                )
+              })
+            : vocal.text}
         </span>
       )
     })}
@@ -562,8 +595,11 @@ interface LyricsDisplayProps {
   trackId?: string | number
   pulseStore?: AudioPulseStore
   playerTheme?: 'light' | 'dark'
-  /** 歌词切换动画：传统（原生 scrollTo 居中）或 崭新（弹簧 transform，零布局跳动，Apple Music 风） */
-  scrollTransitionStyle?: 'classic' | 'amodern'
+  /** 歌词风格样式（统一设置项）：柔和＝柔光扩散逐字＋传统滚动；摩登＝Apple 逐词点亮＋弹簧滚动。
+   *  未传时读 localStorage（含旧设置的等价迁移）。 */
+  lyricStyleMode?: LyricStyleMode
+  /** @deprecated 由 lyricStyleMode 统一决定；仅在需要强制指定滚动动画时覆盖（桌面视图）。 */
+  scrollTransitionStyle?: ScrollTransitionStyle
 }
 
 export default memo(function LyricsDisplay({ 
@@ -594,10 +630,14 @@ export default memo(function LyricsDisplay({
   trackId,
   pulseStore = EMPTY_AUDIO_PULSE_STORE,
   playerTheme = 'dark',
-  scrollTransitionStyle = 'classic',
+  lyricStyleMode,
+  scrollTransitionStyle,
 }: LyricsDisplayProps) {
   const isLightTheme = playerTheme === 'light'
-  const isModernScroll = displayMode === 'scroll' && scrollTransitionStyle === 'amodern'
+  const [storedLyricStyle, setStoredLyricStyle] = useState<LyricStyleMode>(readLyricStyleMode)
+  const effectiveLyricStyle = lyricStyleMode ?? storedLyricStyle
+  const effectiveScrollTransitionStyle = scrollTransitionStyle ?? scrollStyleOfStyle(effectiveLyricStyle)
+  const isModernScroll = displayMode === 'scroll' && effectiveScrollTransitionStyle === 'amodern'
   // 浅色主题下歌词用深色文字，保证在淡白雾背景上可读
   const activeLyricColor = isLightTheme ? 'rgba(15, 15, 15, 0.92)' : 'rgba(255, 255, 255, 1)'
   const inactiveLyricColor = isLightTheme ? 'rgba(0, 0, 0, 0.38)' : 'rgba(255, 255, 255, 0.38)'
@@ -613,11 +653,6 @@ export default memo(function LyricsDisplay({
   const [wordByWordEnabled, setWordByWordEnabled] = useState(() => {
     const saved = localStorage.getItem('wordByWordLyrics')
     return saved !== null ? JSON.parse(saved) : true
-  })
-  const [wordByWordEffectMode, setWordByWordEffectMode] = useState<WordByWordEffectMode>(() => {
-    const saved = localStorage.getItem('wordByWordEffectMode')
-    if (saved === 'soft' || saved === 'apple') return saved
-    return 'clear'
   })
   const [lyricSize, setLyricSize] = useState(() => {
     const saved = localStorage.getItem('lyricSize')
@@ -641,7 +676,8 @@ export default memo(function LyricsDisplay({
   })
   const effectiveLyricSize = lyricSizeOverride ?? lyricSize
   const effectiveWordByWordEnabled = wordByWordEnabledOverride ?? wordByWordEnabled
-  const effectiveWordByWordEffectMode = wordByWordEffectModeOverride ?? wordByWordEffectMode
+  const effectiveWordByWordEffectMode: WordByWordEffectMode =
+    wordByWordEffectModeOverride ?? wordEffectModeOfStyle(effectiveLyricStyle)
   const effectiveLyricGlow = lyricGlowOverride ?? lyricGlow
   const sustainGlowColor = useMemo(() => resolveReadableSustainColor(accentColor), [accentColor])
   const effectiveAnimationMode = animationModeOverride ?? animationMode
@@ -709,6 +745,11 @@ export default memo(function LyricsDisplay({
   )
   const appleAgentCount = appleAgentOrder.length
   const appleDuetColorsEnabled = useMemo(() => getAppleMusicSettings().duetColors, [])
+  // 对唱歌词：整首歌存在靠右行时才启用左右分栏（非对唱行让出右侧、对唱行让出左侧，对齐 Apple Music）
+  const hasDuetLines = useMemo(
+    () => displayLyricsData.some(line => Boolean(line.isDuet)),
+    [displayLyricsData]
+  )
 
   useEffect(() => {
     const updatePulseScale = () => {
@@ -1001,10 +1042,9 @@ export default memo(function LyricsDisplay({
       setLyricGlow(saved !== null ? JSON.parse(saved) : true)
     }
 
-    const handleWordByWordEffectModeChange = (e: Event) => {
-      const customEvent = e as CustomEvent<WordByWordEffectMode>
-      const next = customEvent.detail
-      setWordByWordEffectMode(next === 'soft' || next === 'apple' ? next : 'clear')
+    const handleLyricStyleModeChange = (e: Event) => {
+      const customEvent = e as CustomEvent<LyricStyleMode>
+      setStoredLyricStyle(customEvent.detail === 'modern' ? 'modern' : 'soft')
     }
     
     const handleLyricOffsetChange = (e: Event) => {
@@ -1024,7 +1064,7 @@ export default memo(function LyricsDisplay({
     
     window.addEventListener('storage', handleStorageChange)
     window.addEventListener('wordByWordLyricsChanged', handleStorageChange)
-    window.addEventListener('wordByWordEffectModeChanged', handleWordByWordEffectModeChange as EventListener)
+    window.addEventListener(LYRIC_STYLE_MODE_EVENT, handleLyricStyleModeChange as EventListener)
     window.addEventListener('lyricSizeChanged', handleLyricSizeChange as EventListener)
     window.addEventListener('lyricGlowChanged', handleLyricGlowChange)
     window.addEventListener('lyricOffsetChanged', handleLyricOffsetChange as EventListener)
@@ -1034,7 +1074,7 @@ export default memo(function LyricsDisplay({
     return () => {
       window.removeEventListener('storage', handleStorageChange)
       window.removeEventListener('wordByWordLyricsChanged', handleStorageChange)
-      window.removeEventListener('wordByWordEffectModeChanged', handleWordByWordEffectModeChange as EventListener)
+      window.removeEventListener(LYRIC_STYLE_MODE_EVENT, handleLyricStyleModeChange as EventListener)
       window.removeEventListener('lyricSizeChanged', handleLyricSizeChange as EventListener)
       window.removeEventListener('lyricGlowChanged', handleLyricGlowChange)
       window.removeEventListener('lyricOffsetChanged', handleLyricOffsetChange as EventListener)
@@ -2156,6 +2196,7 @@ export default memo(function LyricsDisplay({
                       <BackgroundVocals
                         vocals={singleLyric.backgroundVocals!}
                         playbackTime={playbackTime + lyricOffset}
+                        wordTimed={effectiveLyricStyle === 'modern' && effectiveWordByWordEnabled}
                         colorForAgent={agent => {
                           if (!appleDuetColorsEnabled || appleAgentCount < 2 || !agent) return undefined
                           const tint = getAgentTintColor(agent, appleAgentCount, !isLightTheme, undefined, appleAgentOrder)
@@ -2329,10 +2370,18 @@ export default memo(function LyricsDisplay({
                 ...(lineScale === undefined ? {} : { scale: lineScale }),
               }}
               style={{
-                transformOrigin: scrollAlignment === 'center' ? 'center center' : 'left center',
+                transformOrigin: hasDuetLines && lyric.isDuet
+                  ? 'right center'
+                  : scrollAlignment === 'center' ? 'center center' : 'left center',
                 scale: lineScale === undefined ? (isCurrent ? 'var(--restless-lyric-scale, 1.008)' : 1) : undefined,
                 transition: lineScale === undefined ? 'scale 140ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined,
                 zIndex: isCurrent ? 2 : lineTiming.upcomingProgress > 0 ? 1 : 0,
+                // 对唱左右分栏（Apple Music）：对唱行靠右并让出左侧，其余行让出右侧
+                ...(hasDuetLines && scrollAlignment !== 'center'
+                  ? lyric.isDuet
+                    ? { textAlign: 'right' as const, paddingLeft: '15%' }
+                    : { paddingRight: '15%' }
+                  : {}),
               }}
               transition={{
                 opacity: isBlinking
@@ -2469,6 +2518,7 @@ export default memo(function LyricsDisplay({
                     <BackgroundVocals
                       vocals={lyric.backgroundVocals!}
                       playbackTime={playbackTime + lyricOffset}
+                      wordTimed={effectiveLyricStyle === 'modern' && effectiveWordByWordEnabled}
                       colorForAgent={agent => {
                         if (!appleDuetColorsEnabled || appleAgentCount < 2 || !agent) return undefined
                         const tint = getAgentTintColor(agent, appleAgentCount, !isLightTheme, undefined, appleAgentOrder)

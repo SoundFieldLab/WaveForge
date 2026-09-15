@@ -2,6 +2,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { memo, useState, useEffect, type CSSProperties } from 'react'
 import { SlidersHorizontal, Plus, Minus, X } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
+import {
+  readLyricStyleMode,
+  persistLyricStyleMode,
+  type LyricStyleMode,
+} from '../utils/lyricStyle'
 
 interface QuickSettingsProps {
   forceClose?: boolean
@@ -23,7 +28,6 @@ interface QuickSettingsProps {
 }
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
-type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
 type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'modeng' | 'video' | 'pv'
 
 // 大体积设置面板（约 900 行 JSX）：props 均为原语（forceClose/playerTheme/isPureMusic），
@@ -104,20 +108,11 @@ export default memo(function QuickSettings({
     return saved !== null ? JSON.parse(saved) : true
   })
 
-  const [wordByWordEffectMode, setWordByWordEffectMode] = useState<WordByWordEffectMode>(() => {
-    const saved = localStorage.getItem('wordByWordEffectMode')
-    if (saved === 'soft' || saved === 'apple') return saved
-    return 'clear'
-  })
+  const [lyricStyle, setLyricStyle] = useState<LyricStyleMode>(readLyricStyleMode)
 
   const [lyricGlow, setLyricGlow] = useState(() => {
     const saved = localStorage.getItem('lyricGlow')
     return saved !== null ? JSON.parse(saved) : true
-  })
-
-  const [lyricScrollTransition, setLyricScrollTransition] = useState<'classic' | 'amodern'>(() => {
-    const saved = localStorage.getItem('lyricScrollTransitionStyle')
-    return saved === 'amodern' ? 'amodern' : 'classic'
   })
 
   const [coverPulseEnabled, setCoverPulseEnabled] = useState(() => {
@@ -216,10 +211,9 @@ export default memo(function QuickSettings({
     window.dispatchEvent(new Event('wordByWordLyricsChanged'))
   }
 
-  const handleWordByWordEffectModeChange = (mode: WordByWordEffectMode) => {
-    setWordByWordEffectMode(mode)
-    localStorage.setItem('wordByWordEffectMode', mode)
-    window.dispatchEvent(new CustomEvent('wordByWordEffectModeChanged', { detail: mode }))
+  const handleLyricStyleChange = (mode: LyricStyleMode) => {
+    setLyricStyle(mode)
+    persistLyricStyleMode(mode)
   }
 
   const handleLyricGlowToggle = () => {
@@ -227,12 +221,6 @@ export default memo(function QuickSettings({
     setLyricGlow(newValue)
     localStorage.setItem('lyricGlow', JSON.stringify(newValue))
     window.dispatchEvent(new Event('lyricGlowChanged'))
-  }
-
-  const handleLyricScrollTransitionChange = (style: 'classic' | 'amodern') => {
-    setLyricScrollTransition(style)
-    localStorage.setItem('lyricScrollTransitionStyle', style)
-    window.dispatchEvent(new CustomEvent('lyricScrollTransitionStyleChanged', { detail: style }))
   }
 
   const handleCoverPulseToggle = () => {
@@ -921,92 +909,41 @@ export default memo(function QuickSettings({
                           </button>
                         </div>
 
-                        {wordByWord && (
-                          <div className="flex flex-col gap-2">
-                            <span className={`text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'}`}>
-                              逐字效果
-                            </span>
-                            <div className="grid grid-cols-3 gap-2">
-                              {([
-                                ['clear', '清晰', '精准填充'],
-                                ['soft', '柔和', '柔光扩散'],
-                                ['apple', 'Apple', '逐词点亮'],
-                              ] as const).map(([mode, label, hint]) => (
-                                <button
-                                  key={mode}
-                                  onClick={() => handleWordByWordEffectModeChange(mode)}
-                                  className="flex min-h-[48px] flex-col items-center justify-center rounded-lg px-1.5 py-1.5 text-xs font-medium leading-tight transition-all"
-                                  style={{
-                                    backgroundColor:
-                                      wordByWordEffectMode === mode
-                                        ? accentColor
-                                        : playerTheme === 'dark'
-                                        ? 'rgba(255,255,255,0.1)'
-                                        : 'rgba(0,0,0,0.1)',
-                                    color:
-                                      wordByWordEffectMode === mode
-                                        ? '#fff'
-                                        : playerTheme === 'dark'
-                                        ? 'rgba(255,255,255,0.65)'
-                                        : 'rgba(0,0,0,0.65)',
-                                    boxShadow:
-                                      wordByWordEffectMode === mode ? `0 0 8px ${accentColor}30` : 'none',
-                                  }}
-                                >
-                                  <span>{label}</span>
-                                  <span
-                                    className="mt-0.5 text-[10px] font-normal"
-                                    style={{
-                                      color: wordByWordEffectMode === mode
-                                        ? 'rgba(255,255,255,0.78)'
-                                        : playerTheme === 'dark'
-                                        ? 'rgba(255,255,255,0.42)'
-                                        : 'rgba(0,0,0,0.42)',
-                                    }}
-                                  >
-                                    {hint}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-
                         <div className="flex flex-col gap-2">
                           <span className={`text-xs ${playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'}`}>
-                            歌词切换动画
+                            歌词风格样式
                           </span>
                           <div className="grid grid-cols-2 gap-2">
                             {([
-                              ['classic', '传统', '当前效果'],
-                              ['amodern', '崭新', 'Apple 风弹簧'],
-                            ] as const).map(([style, label, hint]) => (
+                              ['soft', '柔和', '柔光扩散 · 传统滚动'],
+                              ['modern', '摩登', '逐词点亮 · 苹果风滚动'],
+                            ] as const).map(([mode, label, hint]) => (
                               <button
-                                key={style}
-                                onClick={() => handleLyricScrollTransitionChange(style)}
+                                key={mode}
+                                onClick={() => handleLyricStyleChange(mode)}
                                 className="flex min-h-[48px] flex-col items-center justify-center rounded-lg px-1.5 py-1.5 text-xs font-medium leading-tight transition-all"
                                 style={{
                                   backgroundColor:
-                                    lyricScrollTransition === style
+                                    lyricStyle === mode
                                       ? accentColor
                                       : playerTheme === 'dark'
                                       ? 'rgba(255,255,255,0.1)'
                                       : 'rgba(0,0,0,0.1)',
                                   color:
-                                    lyricScrollTransition === style
+                                    lyricStyle === mode
                                       ? '#fff'
                                       : playerTheme === 'dark'
                                       ? 'rgba(255,255,255,0.65)'
                                       : 'rgba(0,0,0,0.65)',
                                   boxShadow:
-                                    lyricScrollTransition === style ? `0 0 8px ${accentColor}30` : 'none',
+                                    lyricStyle === mode ? `0 0 8px ${accentColor}30` : 'none',
                                 }}
                               >
                                 <span>{label}</span>
                                 <span
                                   className="mt-0.5 text-[10px] font-normal"
                                   style={{
-                                    color: lyricScrollTransition === style
+                                    color: lyricStyle === mode
                                       ? 'rgba(255,255,255,0.78)'
                                       : playerTheme === 'dark'
                                       ? 'rgba(255,255,255,0.42)'

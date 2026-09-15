@@ -410,6 +410,25 @@ export function convertAppleTTMLToLyrics(
     return artistNames[Math.min(index, artistNames.length - 1)]
   }
 
+  // 对唱左右判定（对齐 AMLL 的 agent 交替算法）：group（合唱）始终非对唱且不参与交替；
+  // person/other 声部每换一次 agent 就翻转左右侧，首个 other 声部强制为对唱。
+  let lastPersonAgentId: string | null = null
+  let lastPersonIsDuet = false
+  const resolveDuet = (agentId?: string): boolean => {
+    const id = agentId || 'v1'
+    const type = agents.find(agent => agent.id === id)?.type
+    if (type === 'group') return false
+    if (lastPersonAgentId === null) {
+      lastPersonIsDuet = type === 'other'
+      lastPersonAgentId = id
+      return lastPersonIsDuet
+    }
+    if (lastPersonAgentId === id) return lastPersonIsDuet
+    lastPersonIsDuet = !lastPersonIsDuet
+    lastPersonAgentId = id
+    return lastPersonIsDuet
+  }
+
   const lyrics: LyricLine[] = parsed.lines
     .map(line => {
       const words = line.words.map(word => ({
@@ -468,6 +487,7 @@ export function convertAppleTTMLToLyrics(
         role: line.role,
         agent: line.agent || undefined,
         agentName: line.agent ? agentNameOf(line.agent) : undefined,
+        isDuet: resolveDuet(line.agent) || undefined,
         alternateTexts: alternateTexts?.length ? alternateTexts : undefined,
         backgroundVocals: backgroundVocals?.length ? backgroundVocals : undefined,
       }

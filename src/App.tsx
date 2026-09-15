@@ -171,6 +171,7 @@ import {
   type EntitlementTier,
 } from './utils/musicEntitlements'
 import { getQQUserDisplayName } from './utils/qqUser'
+import { LYRIC_STYLE_MODE_EVENT, readLyricStyleMode, type LyricStyleMode } from './utils/lyricStyle'
 import { getAppleLovedSongIds } from './services/appleCatalog'
 import {
   applyFavoriteMutation,
@@ -830,10 +831,7 @@ function App() {
   const [lyrics, setLyrics] = useState<LyricLine[]>([])
   const [appleCoverUrl, setAppleCoverUrl] = useState<string | null>(null)
   const [lyricOffset, setLyricOffset] = useState(() => Number(localStorage.getItem('lyricOffset')) || 0)
-  const [lyricScrollTransitionStyle, setLyricScrollTransitionStyle] = useState<'classic' | 'amodern'>(() => {
-    const saved = localStorage.getItem('lyricScrollTransitionStyle')
-    return saved === 'amodern' ? 'amodern' : 'classic'
-  })
+  const [lyricStyleMode, setLyricStyleMode] = useState<LyricStyleMode>(readLyricStyleMode)
   const [playlist, setPlaylist] = useState<Song[]>([])
   const playlistRef = useRef<Song[]>([])
   const [currentIndex, setCurrentIndex] = useState(-1)
@@ -1314,8 +1312,11 @@ function App() {
     }
   }, [currentSong?.platform])
 
+  // 播客节目没有歌词、也没有 MV 背景：自动使用纯音乐播放页并隐藏 MV 入口
+  const podcastPlayback = Boolean(currentSong?.isPodcast)
+  const pureMusicPlayback = isPureMusic || podcastPlayback
   // 只有视频已经真正出画面时才让歌词页面透明；搜索/拉流/canplay 前继续显示封面兜底。
-  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback && mvBackgroundReady
+  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback && mvBackgroundReady && !podcastPlayback
   // Apple Music 动态封面（图层叠加式）：未开启/无动态封面/查询失败时为 null，封面永远回退平台静态图
   const appleDynamicCover = useAppleDynamicCover({
     title: isAppleRadioPlayback ? '' : currentSong?.name || '',
@@ -1724,11 +1725,11 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const handleLyricScrollTransitionStyleChange = (event: Event) => {
-      setLyricScrollTransitionStyle((event as CustomEvent<'classic' | 'amodern'>).detail)
+    const handleLyricStyleModeChange = (event: Event) => {
+      setLyricStyleMode((event as CustomEvent<LyricStyleMode>).detail === 'modern' ? 'modern' : 'soft')
     }
-    window.addEventListener('lyricScrollTransitionStyleChanged', handleLyricScrollTransitionStyleChange)
-    return () => window.removeEventListener('lyricScrollTransitionStyleChanged', handleLyricScrollTransitionStyleChange)
+    window.addEventListener(LYRIC_STYLE_MODE_EVENT, handleLyricStyleModeChange)
+    return () => window.removeEventListener(LYRIC_STYLE_MODE_EVENT, handleLyricStyleModeChange)
   }, [])
 
   useEffect(() => {
@@ -7641,7 +7642,7 @@ function App() {
             backgroundBlur={backgroundBlur}
           />
         )}
-        {currentSong && !isAppleRadioPlayback && (
+        {currentSong && !isAppleRadioPlayback && !podcastPlayback && (
           <LazyBilibiliMvBackground
             songTitle={currentSong.name}
             songArtists={currentSongArtists}
@@ -7662,7 +7663,7 @@ function App() {
             getTransitionTargetTimeSeconds={getMvTransitionTargetTimeSeconds}
             playerTheme={playerTheme}
             upcomingSongs={watchUpcomingSongs}
-            enabled={mvBackgroundEnabled}
+            enabled={mvBackgroundEnabled && !podcastPlayback}
             // 看歌模式：常驻挂载但隐藏（display:none + 暂停），保留已缓冲的视频——
             // 切回歌词模式直接续播同一视频，不再重新搜索/拉流（与看歌复用同一数据源）
             hidden={lyricDisplayMode === 'video'}
@@ -7976,10 +7977,10 @@ function App() {
                 onRomanToggle={handleRomanToggle}
                 romanEnabled={romanEnabled}
                 hasRoman={lyricDisplayMode !== 'video' ? hasRoman : false}
-                onMvBackgroundToggle={handleMvBackgroundToggle}
-                mvBackgroundEnabled={mvBackgroundEnabled}
+                onMvBackgroundToggle={podcastPlayback ? undefined : handleMvBackgroundToggle}
+                mvBackgroundEnabled={mvBackgroundEnabled && !podcastPlayback}
                 playerTheme={playerTheme}
-                isPureMusic={isPureMusic}
+                isPureMusic={pureMusicPlayback}
                 stemControl={currentSong?.platform !== 'apple' ? playerStemControl : undefined}
               />
               </MaybePortal>
@@ -7987,7 +7988,7 @@ function App() {
 
               {/* 顶部中央歌词模式切换：createPortal 挂到 body，逃出 minimal-playback-surface 的
                   transform 层叠上下文——否则在看歌模式下会被 data-watch-surface(z-10) 盖住，无法 hover */}
-              {!isPureMusic && !isAppleRadioPlayback && createPortal((
+              {!pureMusicPlayback && !isAppleRadioPlayback && createPortal((
                 <>
                   <button
                     type="button"
@@ -8302,7 +8303,7 @@ function App() {
                   }}
                 />
               </motion.div>
-            ) : isPureMusic && lyricDisplayMode !== 'modeng' ? (
+            ) : (isPureMusic && lyricDisplayMode !== 'modeng') || podcastPlayback ? (
               /* 纯音乐愭椂灞呬腑显示 */
               <motion.div
                 key="no-lyrics-player"
@@ -8698,7 +8699,7 @@ function App() {
                           trackId={currentSong?.id || currentSong?.mid}
                           pulseStore={audioPulseStore}
                           playerTheme={playerTheme}
-                          scrollTransitionStyle={lyricScrollTransitionStyle}
+                          lyricStyleMode={lyricStyleMode}
                         />
                       </div>
                     </div>

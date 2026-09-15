@@ -105,7 +105,7 @@ describe('special lyric rendering', () => {
     ]))
   })
 
-  it('shows parenthesized background vocals only inside their time window', async () => {
+  it('shows background vocals as their own line only inside their time window', async () => {
     const view = render(
       <LyricsDisplay
         currentTime={11}
@@ -116,7 +116,7 @@ describe('special lyric rendering', () => {
       />,
     )
 
-    expect(await screen.findByText('（Harmony）')).toBeTruthy()
+    expect(await screen.findByText('Harmony')).toBeTruthy()
 
     view.rerender(
       <LyricsDisplay
@@ -127,7 +127,7 @@ describe('special lyric rendering', () => {
         displayMode="single"
       />,
     )
-    await waitFor(() => expect(screen.queryByText('（Harmony）')).toBeNull())
+    await waitFor(() => expect(screen.queryByText('Harmony')).toBeNull())
   })
 
   it('uses controlled Modern switches and displays enabled subtitles', () => {
@@ -147,6 +147,8 @@ describe('special lyric rendering', () => {
         songArtist="Artist"
         translationEnabled
         romanEnabled
+        hasTranslation
+        hasRoman
         onTranslationToggle={onTranslationToggle}
         onRomanToggle={onRomanToggle}
       />,

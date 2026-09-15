@@ -338,6 +338,8 @@ export interface LyricLine {
   agentId?: string
   /** 该行演唱者名（由 Apple 曲目艺人列表按 agent 顺序映射） */
   agentName?: string
+  /** Apple Music 对唱：该行是否靠右（由 ttm:agent 交替算法派生，见 convertAppleTTMLToLyrics） */
+  isDuet?: boolean
   /** 同一文本的翻译、罗马音或其他角色文本。 */
   alternateTexts?: LyricAlternateText[]
   /** 依附于当前主行的背景和声。 */

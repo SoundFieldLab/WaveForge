@@ -588,6 +588,9 @@ export default function ModengPlayerPage({
   // ---- 时间驱动：rAF 推进逐词混色 / 行弹簧动画 / 节拍背景 / 进度条 / 时间标签 ----
   // 高刷屏限 120fps：所有进度按真实时间计算，跳帧不影响正确性（纯时间推导，无累积误差）
   const wordColorRefs = useRef(new Map<string, HTMLSpanElement>())
+  // Apple 背景和声（ttm:role="x-bg"）：主行下方的小字行，与主行同时逐字点亮
+  const bgVocalWordRefs = useRef(new Map<string, HTMLSpanElement>())
+  const bgVocalRowRefs = useRef(new Map<string, HTMLDivElement>())
   const progressFillRef = useRef<HTMLDivElement | null>(null)
   const elapsedRef = useRef<HTMLSpanElement | null>(null)
   const remainRef = useRef<HTMLSpanElement | null>(null)
@@ -789,6 +792,29 @@ export default function ModengPlayerPage({
           }
           activeWordIdxRef.current = newActiveWord
         }
+
+        // —— 1c. Apple 背景和声（TTML ttm:role="x-bg"）——
+        //   主行下方的小字行，与主行同时进行、各自逐字点亮（对齐 Apple Music 的 x-bg 呈现）。
+        //   和声整体比主行克制：未唱更暗、唱到才亮，整段随所属主行淡入淡出。
+        const bgVocals = line.backgroundVocals || []
+        bgVocals.forEach((vocal, vi) => {
+          const lastWord = vocal.words?.[vocal.words.length - 1]
+          const vocalEnd = vocal.endTime
+            ?? (lastWord ? vocal.time + (lastWord.startTime + lastWord.duration) / 1000 : vocal.time + 1)
+          const rowEl = bgVocalRowRefs.current.get(`bg${ci}-${vi}`)
+          if (rowEl) {
+            const fadeIn = clamp01((t - vocal.time) / 0.24)
+            const fadeOut = clamp01((vocalEnd - t) / 0.36)
+            rowEl.style.opacity = Math.min(fadeIn, fadeOut).toFixed(3)
+          }
+          ;(vocal.words || []).forEach((word, wi) => {
+            const el = bgVocalWordRefs.current.get(`bg${ci}-${vi}-${wi}`)
+            if (!el) return
+            const absStart = vocal.time + word.startTime / 1000
+            const absEnd = absStart + Math.max(word.duration, 1) / 1000
+            el.style.opacity = t >= absEnd ? '0.95' : t >= absStart ? '0.72' : '0.32'
+          })
+        })
       }
 
       // —— 2. 行切换动画（AMLL spring 物理）——
@@ -2139,6 +2165,7 @@ export default function ModengPlayerPage({
                     {/* 罗马音行（逐字或整行）：显示在主歌词上方，淡色与行距离同步 */}
                     {romanEnabled && Boolean(line.roman || line.romanWords?.length) ? (
                       <div
+                        data-testid="modeng-roman"
                         style={{
                           fontSize: (isCurrent ? 20 : 16) * s,
                           fontWeight: isCurrent ? 500 : 400,
@@ -2203,6 +2230,54 @@ export default function ModengPlayerPage({
                         </span>
                       )}
                     </div>
+                    {/* Apple 背景和声（TTML ttm:role="x-bg"）：主行下方独立小字行，与主行同时逐字点亮。
+                        仅在当前行渲染（和声依附所属主行进行），词级亮度由 rAF 随时间写入。
+                        对唱行时和声继承该行左右分栏。 */}
+                    {isCurrent && line.backgroundVocals?.length ? (
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: lineSideFor(index) === 'right' ? 'flex-end' : 'flex-start',
+                          marginTop: 4 * s,
+                          willChange: 'opacity',
+                        }}
+                      >
+                        {line.backgroundVocals.map((vocal, vi) => (
+                          <div
+                            key={`bg-${index}-${vi}`}
+                            ref={el => {
+                              if (el) bgVocalRowRefs.current.set(`bg${index}-${vi}`, el)
+                              else bgVocalRowRefs.current.delete(`bg${index}-${vi}`)
+                            }}
+                            style={{
+                              fontSize: (isCurrent ? 22 : 18) * s,
+                              fontWeight: 500,
+                              color: lineColor(distance, vocal.agentId || vocal.agent),
+                              letterSpacing: 0.4 * s,
+                              lineHeight: 1.3,
+                              opacity: 0,
+                            }}
+                          >
+                            {vocal.words?.length
+                              ? vocal.words.map((word, wi) => (
+                                  <span
+                                    key={`bgw-${index}-${vi}-${wi}`}
+                                    ref={el => {
+                                      if (el) bgVocalWordRefs.current.set(`bg${index}-${vi}-${wi}`, el)
+                                      else bgVocalWordRefs.current.delete(`bg${index}-${vi}-${wi}`)
+                                    }}
+                                    className="inline-block"
+                                    style={{ opacity: 0.32 }}
+                                  >
+                                    {word.word}
+                                  </span>
+                                ))
+                              : vocal.text}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
                     {/* 间奏三点：仅在当前行渲染、且检测到"两句间 gap>=4s"时由 rAF 显示。
                        三点错峰呼吸（~0.9s beat 周期，0.3s/点相位差），临近下一句时按
                        remain 错峰依次"熄灭"对齐开唱时机。与歌词主文本行保持同样的行高与
@@ -2252,6 +2327,7 @@ export default function ModengPlayerPage({
                     {/* 翻译行：显示在主歌词下方，淡色与行距离同步；仅当前行稍亮强调 */}
                     {translationEnabled && line.translation?.trim() ? (
                       <div
+                        data-testid="modeng-translation"
                         style={{
                           fontSize: (isCurrent ? 20 : 16) * s,
                           fontWeight: isCurrent ? 500 : 400,
