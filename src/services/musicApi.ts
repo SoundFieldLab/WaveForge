@@ -5,6 +5,7 @@ import { resolveArtworkUrl } from './artwork'
 const API_BASE = getApiBase()
 
 import { parseTTML } from '../utils/ttmlParser'
+import { selectTimingVerifiedLines } from '../utils/lyricTimingBorrow'
 import {
   AUDIO_QUALITY_SETTINGS_EVENT,
   getAudioQualityRequest,
@@ -1731,6 +1732,33 @@ export async function getLyrics(
           hasRoman = true
           finalSourceTracking.roman = result.source
         }
+      }
+
+      // 歌词本体完全没有逐字（网易云 LRC / Apple 无逐字曲目等）：跨平台借"词级时间"。
+      // 只借时间不改正文，且要求时间对齐 + 归一化文本一致、整体命中率达标（见 selectTimingVerifiedLines），
+      // 避免把别的句子的词时间挂错行。这是"平台互斥"原则的例外：正文仍以本平台为准，仅为逐字效果补时间。
+      if (!hasWordByWord && songName && currentLyrics.length > 0) {
+        try {
+          const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
+          const matched = selectTimingVerifiedLines(currentLyrics, fills.wordByWord)
+          if (matched.length > 0) {
+            mergeCrossPlatformLyricTexts(currentLyrics, {
+              translations: fills.translations,
+              romans: fills.romans,
+              wordByWord: matched,
+            })
+            hasWordByWord = currentLyrics.some(line => Boolean(line.words?.length))
+            if (hasWordByWord) finalSourceTracking.wordByWord = '跨平台逐字互补'
+            if (!hasTranslation && fills.translations.length > 0) {
+              hasTranslation = true
+              finalSourceTracking.translation = '跨平台互补'
+            }
+            if (!hasRoman && fills.romans.length > 0) {
+              hasRoman = true
+              finalSourceTracking.roman = '跨平台互补'
+            }
+          }
+        } catch { /* 静默：借不到逐字不影响正文与其它能力 */ }
       }
 
       console.log(`  [Lyrics] 组合完成: 骨架=${baseResult.source}, 逐字=${hasWordByWord}, 罗马音=${hasRoman}, 翻译=${hasTranslation}`)
