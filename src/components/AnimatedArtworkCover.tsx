@@ -32,6 +32,13 @@ export default function AnimatedArtworkCover({
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [failed, setFailed] = useState(false)
   const activeRef = useRef(active)
+  // onError 用 ref 持有：调用方常传内联箭头函数，若进依赖数组会导致
+  // 父组件每次重渲染都销毁重建 HLS 引擎（封面闪烁、播放永远卡在首帧）。
+  const onErrorRef = useRef(onError)
+
+  useEffect(() => {
+    onErrorRef.current = onError
+  })
 
   useEffect(() => {
     activeRef.current = active
@@ -55,7 +62,7 @@ export default function AnimatedArtworkCover({
       if (cancelled) return
       console.warn(`[AppleMotion] 动态封面失败 stage=${stage}`)
       setFailed(true)
-      onError?.()
+      onErrorRef.current?.()
     }
     const playWhenActive = () => {
       if (!cancelled && activeRef.current) void video.play().catch(() => fail('play'))
@@ -96,7 +103,7 @@ export default function AnimatedArtworkCover({
       video.removeAttribute('src')
       video.load()
     }
-  }, [videoUrl, onError])
+  }, [videoUrl])
 
   if (!videoUrl || failed) return null
   return (
