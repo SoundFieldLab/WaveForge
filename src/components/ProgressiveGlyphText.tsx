@@ -91,7 +91,10 @@ export default function ProgressiveGlyphText({
         // 进度基本未变的帧：跳过该字全部样式写（宽度取 0.05% 步进，低于人眼分辨率）
         if (Math.abs(progress - lastProgress[index]) <= 0.0005) return
         lastProgress[index] = progress
-        element.style.width = `${(progress * 100).toFixed(2)}%`
+        // 用 clip-path 裁剪推进，而不是改 width：width 是布局属性，每帧修改会强制
+        // 重新布局 + 重绘（实测进入播放页后仍持续 40+ 次/秒的样式重算与布局）。
+        // clip-path inset 只影响绘制，不触发布局，视觉完全一致。
+        element.style.clipPath = `inset(0 ${(100 - progress * 100).toFixed(2)}% 0 0)`
         element.style.opacity = progress <= 0.001 ? '0' : '1'
         const glowOn = progress > 0.002 && progress < 0.998
         if (glowOn !== Boolean(lastGlow[index])) {
@@ -175,10 +178,10 @@ export default function ProgressiveGlyphText({
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-y-0 left-0 overflow-hidden"
                     style={{
-                      width: 0,
+                      width: '100%',
+                      clipPath: 'inset(0 100% 0 0)',
                       color: filledColor,
                       whiteSpace: 'nowrap',
-                      willChange: 'width',
                       textShadow: `0 0 1px rgba(255,255,255,.72), 0 0 16px ${glowColor}`,
                     }}
                   >

@@ -111,6 +111,11 @@ interface ExploreViewProps {
   onSongSelect: SongSelectHandler
   restorePlaybackOrigin?: (PlaybackOrigin & { revision: number }) | null
   currentSong?: Song | null
+  /** 播放页以覆盖层叠在探索页之上（keep-alive 保留现场）时为 true：
+   *  此时探索页完全不可见，但它的全屏 backdrop-filter 封面墙仍会被每帧重新模糊——
+   *  实测这是"进入播放页卡 1.2 秒"的最大单项（全屏 56px 毛玻璃重算）。
+   *  被覆盖期间停掉模糊与漂移，返回时立即恢复。 */
+  suspended?: boolean
   isPlaying: boolean
   /** 播放时间不再经 App 每秒下传（会击穿 memo 整树重渲染）：改由内部叶子组件订阅 */
   playbackTimeStore: PlaybackTimeStore
@@ -502,6 +507,7 @@ function ExploreView({
   onSongSelect,
   restorePlaybackOrigin,
   currentSong = null,
+  suspended = false,
   isPlaying,
   playbackTimeStore,
   duration,
@@ -1379,12 +1385,12 @@ function ExploreView({
         <CoverWallBackground
           covers={heroSongs.map(song => song.album?.picUrl || '')}
           style={platformPreferences.coverWallStyle}
-          animated={platformPreferences.coverWallAnimated}
-          blurPx={
+          animated={platformPreferences.coverWallAnimated && !suspended}
+          blurPx={suspended ? 0 : (
             platformPreferences.coverWallBlur === 'custom'
               ? platformPreferences.coverWallBlurCustom
               : ({ soft: 18, medium: 32, strong: 56 } as const)[platformPreferences.coverWallBlur]
-          }
+          )}
           accentRgb={accentRgb}
         />
       )}

@@ -10,7 +10,10 @@ const DEFAULT_ROLE_SIZE: Record<ArtworkRole, number> = {
   card: 256,
   hero: 512,
   player: 512,
-  background: 1024,
+  // 背景层永远以「全屏大幅模糊」呈现（blur 30~40px），源图细节完全看不到：
+  // 用 1024 源图会让全屏模糊的光栅化成本放大十几倍——实测进入播放页单帧卡到 1.29s
+  // 的主因之一（大图解码 + 整屏高斯模糊）。128（×DPR 后 ≤512 桶）已足够。
+  background: 128,
   texture: 1024,
 }
 

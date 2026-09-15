@@ -422,6 +422,12 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
   const baseScale = backgroundEffect === 'immersive' ? 1.15 : 1.1
 
   useEffect(() => {
+    // 脉冲写入节流：pulseStore 由音频分析驱动，实测每秒写入约 97 次
+    // （--cover-pulse-scale 是继承型 CSS 变量，每次写入都会让整个背景子树重算样式，
+    //   实测进入播放页 8 秒内 RecalcStyle 达 1325 次/816ms，是"进入播放页卡一下"的主因）。
+    // 脉冲本身是缓慢的呼吸效果，30fps 视觉上无差别。
+    const PULSE_MIN_INTERVAL_MS = 32
+    let lastAppliedAt = 0
     const applyPulse = () => {
       const root = pulseRootRef.current
       const highlight = pulseHighlightRef.current
@@ -435,8 +441,15 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
       highlight.style.opacity = String(Math.min(0.22, pulse.brightness * 0.72 + pulse.saturation * 0.055))
     }
 
+    const applyPulseThrottled = () => {
+      const now = performance.now()
+      if (now - lastAppliedAt < PULSE_MIN_INTERVAL_MS) return
+      lastAppliedAt = now
+      applyPulse()
+    }
+
     applyPulse()
-    return pulseStore.subscribe(applyPulse)
+    return pulseStore.subscribe(applyPulseThrottled)
   }, [pulseStore])
 
   const staticFilter = backgroundEffect === 'transparent'
@@ -7417,6 +7430,7 @@ function App() {
           >
             <LazyExploreView
               motionSuspended={exploreKeptAlive}
+              suspended={exploreKeptAlive}
               onSongSelect={viewCallbacks.onSongSelect}
               restorePlaybackOrigin={restorePlaybackOrigin}
               currentSong={currentSong}

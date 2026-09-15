@@ -1726,7 +1726,10 @@ export default memo(function LyricsDisplay({
                           aria-hidden="true"
                           className="absolute left-0 top-0 z-10 overflow-hidden whitespace-nowrap pointer-events-none"
                           style={{
-                            width: `${fillWidth}%`,
+                            // 用 clip-path 裁剪推进而非改 width：width 触发布局重算，
+                            // 每帧修改会让整行逐字动画持续产生布局+重绘开销。
+                            width: '100%',
+                            clipPath: `inset(0 ${(100 - fillWidth).toFixed(2)}% 0 0)`,
                             color: activeLyricColor,
                             textShadow: 'none',
                             top: '50%',
