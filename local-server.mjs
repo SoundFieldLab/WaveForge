@@ -33,7 +33,7 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 // 汽水加密音频解密代理（/api/soda/audio）：CENC 流服务端解密为可播 FLAC/m4a
 import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
-import { ByteLruCache, readResponseWithLimit } from './server/byte-lru-cache.mjs'
+import { registerImageProxyRoutes } from './server/image-proxy.mjs'
 import { isAuthorizedLocalRequest } from './server/local-service-auth.mjs'
 import { LOCAL_API_PROTOCOL_VERSION, LOCAL_API_SERVICE } from './server/local-api-health.mjs'
 import { registerNeteaseNativeExploreRoutes } from './server/netease-native-explore.mjs'
@@ -172,6 +172,24 @@ function parseQQCookie(cookie = qqMusicCookie) {
       result[part.slice(0, separatorIndex).trim()] = part.slice(separatorIndex + 1).trim()
       return result
     }, {})
+}
+
+function normalizeQQImageCandidate(value, depth = 0) {
+  if (depth > 2 || value == null) return ''
+  if (typeof value === 'string' || typeof value === 'number') return normalizeQQImageUrl(value)
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const candidate = normalizeQQImageCandidate(item, depth + 1)
+      if (candidate) return candidate
+    }
+    return ''
+  }
+  if (typeof value !== 'object') return ''
+  for (const key of ['url', 'src', 'uri', 'picUrl', 'pic_url', 'imageUrl', 'image_url', 'coverUrl', 'cover_url', 'imgUrl', 'img_url']) {
+    const candidate = normalizeQQImageCandidate(value[key], depth + 1)
+    if (candidate) return candidate
+  }
+  return ''
 }
 
 function normalizeQQImageUrl(value) {
@@ -1332,42 +1350,6 @@ function parseTimeToMs(timeStr) {
 // ========== TTML解析器结束 ==========
 
 
-// 图片代理常量与 SSRF 防护（/api/cover 与 /api/proxy-image 共用）
-const FETCH_TIMEOUT_MS = 8000
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024
-
-// 流式转发图片代理响应：保留 Content-Length 预检（超限时在发送任何字节前返回干净的 502），
-// 转发过程中再统计实际字节数兜底（无 Content-Length 的上游）。不再整读进内存，
-// 降低大图/多请求并发时的内存峰值；客户端中途断连或超限时销毁对端流，避免句柄泄漏。
-function streamProxyImage(response, res, label, tooLargeMessage) {
-  const contentLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(contentLength) && contentLength > MAX_IMAGE_BYTES) {
-    console.error(`${label} content-length too large:`, contentLength)
-    res.status(502).set('Access-Control-Allow-Origin', '*').send(tooLargeMessage)
-    return false
-  }
-  const contentType = response.headers.get('content-type') || 'image/jpeg'
-  res.set({
-    'Content-Type': contentType,
-    'Access-Control-Allow-Origin': '*',
-    'Cross-Origin-Resource-Policy': 'cross-origin',
-    'Cache-Control': 'public, max-age=86400',
-  })
-  let streamedBytes = 0
-  const body = Readable.fromWeb(response.body)
-  body.on('data', (chunk) => {
-    streamedBytes += chunk.length
-    if (streamedBytes > MAX_IMAGE_BYTES) {
-      body.destroy()
-      res.destroy()
-    }
-  })
-  body.on('error', () => res.destroy())
-  res.on('close', () => body.destroy())
-  body.pipe(res)
-  return true
-}
-
 // 判断地址是否属于内网/本机/链路本地等不允许代理访问的网段
 function isPrivateNetworkAddress(address) {
   if (address.includes(':')) {
@@ -1429,14 +1411,6 @@ async function isBlockedFetchUrl(rawUrl) {
   }
 }
 
-// 图片代理（解决防盗链和CORS）
-// 封面内存缓存：同一 URL 不重复请求上游。大歌单滚动浏览/反复进入歌单时，
-// 避免几千个封面请求反复打穿代理与上游 CDN。
-const COVER_CACHE_MAX_BYTES = 128 * 1024 * 1024
-const COVER_CACHE_ITEM_MAX_BYTES = 10 * 1024 * 1024
-const COVER_CACHE_TTL_MS = 6 * 60 * 60 * 1000
-const coverCache = new ByteLruCache({ maxBytes: COVER_CACHE_MAX_BYTES, maxEntries: 800, ttlMs: COVER_CACHE_TTL_MS })
-
 // 音频播放代理：浏览器直接访问 QQ/网易云临时地址时可能被 CDN 以 403 拒绝，
 // 由本地服务代为携带站点请求头，并透传 Range 以支持流式播放和拖动进度。
 app.get('/api/audio', async (req, res) => {
@@ -1476,207 +1450,8 @@ app.get('/api/audio', async (req, res) => {
   }
 })
 
-app.get('/api/cover', async (req, res) => {
-  try {
-    const { url, devMode } = req.query
-    const isDev = devMode === 'true'
-    
-    // URL 校验
-    if (!url || !/^https?:\/\//i.test(url)) {
-      console.error('Invalid cover URL:', url)
-      res.status(400).set('Access-Control-Allow-Origin', '*').send('Invalid cover url')
-      return
-    }
-
-    // SSRF 防护：拒绝指向内网/本机/链路本地地址的 URL
-    if (await isBlockedFetchUrl(url)) {
-      console.error('Blocked cover URL:', url)
-      res.status(400).set('Access-Control-Allow-Origin', '*').send('Invalid cover url')
-      return
-    }
-
-    if (isDev) console.log('Fetching cover:', url)
-
-    // 缓存命中：直接回缓存字节（带 Cache-Control 供浏览器二次命中）
-    const cached = typeof url === 'string' ? coverCache.get(url) : null
-    if (cached) {
-      res.set({
-        'Content-Type': cached.type,
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'max-age=3600',
-      })
-      res.send(cached.buffer)
-      return
-    }
-
-    // 重试机制：最多尝试3次
-    let response
-    let lastError
-    const maxRetries = 3
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-        try {
-          // 转发请求，添加必要的 headers
-          response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-              'Referer': 'https://music.163.com/',
-              'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            }
-          })
-        } finally {
-          clearTimeout(timeoutId)
-        }
-        
-        // 成功获取响应，跳出循环
-        if (attempt > 1 && isDev) {
-        }
-        break
-      } catch (error) {
-        lastError = error
-        if (isDev) console.error(`封面获取第 ${attempt} 次尝试失败:`, error.message)
-        
-        // 如果是最后一次尝试，不再等待
-        if (attempt < maxRetries) {
-          const waitTime = attempt * 300 // 递增等待时间：300ms, 600ms
-          await new Promise(resolve => setTimeout(resolve, waitTime))
-        }
-      }
-    }
-    
-    // 如果所有尝试都失败，返回占位图
-    if (!response) {
-      console.error('封面获取失败（已重试3次）:', lastError?.message || lastError)
-      res.status(200).set({
-        'Content-Type': 'image/svg+xml',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'no-cache',
-      }).send(`<svg width="500" height="500" xmlns="http://www.w3.org/2000/svg">
-        <rect width="500" height="500" fill="#1a1a1a"/>
-        <text x="250" y="250" font-family="Arial" font-size="24" fill="#666" text-anchor="middle">封面加载失败</text>
-      </svg>`)
-      return
-    }
-
-    if (!response.ok) {
-      console.error('Cover fetch failed:', response.status, response.statusText)
-      
-      // 返回默认占位图
-      res.status(200).set({
-        'Content-Type': 'image/svg+xml',
-        'Access-Control-Allow-Origin': '*',
-        'Cache-Control': 'no-cache',
-      }).send(`<svg width="500" height="500" xmlns="http://www.w3.org/2000/svg">
-        <rect width="500" height="500" fill="#1a1a1a"/>
-        <text x="250" y="250" font-family="Arial" font-size="24" fill="#666" text-anchor="middle">封面加载失败</text>
-      </svg>`)
-      return
-    }
-
-    // 读取字节并写入缓存（≤10MB 才缓存），再返回给浏览器
-    const contentType = response.headers.get('content-type') || 'image/jpeg'
-    if (!contentType.toLowerCase().startsWith('image/')) {
-      throw new Error('Cover response is not an image')
-    }
-    const buf = await readResponseWithLimit(response, COVER_CACHE_ITEM_MAX_BYTES)
-    if (typeof url === 'string') {
-      coverCache.set(url, { buffer: buf, type: contentType }, buf.length)
-    }
-    res.set({
-      'Content-Type': contentType,
-      'Access-Control-Allow-Origin': '*',
-      'Cache-Control': 'max-age=3600',
-    })
-    res.send(buf)
-  } catch (error) {
-    console.error('封面代理错误:', error)
-    res.status(500).set('Access-Control-Allow-Origin', '*').send('Failed to load cover')
-  }
-})
-
-// 图片代理接口（返回二进制数据供前端缓存）
-app.get('/api/proxy-image', async (req, res) => {
-  try {
-    const { url } = req.query
-    
-    // URL 校验
-    if (!url || !/^https?:\/\//i.test(url)) {
-      console.error('Invalid image URL:', url)
-      res.status(400).set('Access-Control-Allow-Origin', '*').send('Invalid image url')
-      return
-    }
-
-    // SSRF 防护：拒绝指向内网/本机/链路本地地址的 URL
-    if (await isBlockedFetchUrl(url)) {
-      console.error('Blocked image URL:', url)
-      res.status(400).set('Access-Control-Allow-Origin', '*').send('Invalid image url')
-      return
-    }
-    // 重试机制：最多尝试3次
-    let response
-    let lastError
-    const maxRetries = 3
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        const controller = new AbortController()
-        const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-        try {
-          // 转发请求，添加必要的 headers
-          response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-              'Referer': url.includes('music.163.com') ? 'https://music.163.com/' : 'https://y.qq.com/',
-              'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-              'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            }
-          })
-        } finally {
-          clearTimeout(timeoutId)
-        }
-        
-        // 成功获取响应，跳出循环
-        if (attempt > 1) {
-        }
-        break
-      } catch (error) {
-        lastError = error
-        console.error(`图片获取第 ${attempt} 次尝试失败:`, error.message)
-        
-        // 如果是最后一次尝试，不再等待
-        if (attempt < maxRetries) {
-          const waitTime = attempt * 300 // 递增等待时间：300ms, 600ms
-          await new Promise(resolve => setTimeout(resolve, waitTime))
-        }
-      }
-    }
-    
-    // 如果所有尝试都失败，返回错误
-    if (!response) {
-      console.error('图片获取失败（已重试3次）:', lastError?.message || lastError)
-      res.status(500).set('Access-Control-Allow-Origin', '*').send('Failed to load image after 3 retries')
-      return
-    }
-
-    if (!response.ok) {
-      console.error('Image fetch failed:', response.status, response.statusText)
-      res.status(response.status).set('Access-Control-Allow-Origin', '*').send('Failed to fetch image')
-      return
-    }
-
-    // 流式转发（保留 Content-Length 预检 + 实际字节数兜底，不整读进内存）
-    streamProxyImage(response, res, 'Image', 'Image too large')
-  } catch (error) {
-    console.error('图片代理错误:', error)
-    res.status(500).set('Access-Control-Allow-Origin', '*').send('Failed to load image')
-  }
-})
+// 两个历史入口共用同一图片代理底层，保留路径与 url 查询参数兼容性。
+registerImageProxyRoutes(app)
 
 // 动态导入网易云音乐 API
 let NeteaseAPI = null
@@ -7162,6 +6937,11 @@ function qqMusicHallAction(card) {
   if (jumpType === 10012 && /^\d+$/.test(id)) return { type: 'open-mv', mvId: id }
   if (jumpType === 2012 || title === '排行') return { type: 'open-section', section: 'charts' }
   if (title === '歌单') return { type: 'open-section', section: 'playlists' }
+  const miscellany = card?.miscellany || {}
+  const safeUrl = [card?.url, card?.link, card?.targetUrl, miscellany.url, miscellany.link, miscellany.targetUrl]
+    .map(value => String(value || ''))
+    .find(isAllowedQQExploreUrl)
+  if (safeUrl) return { type: 'open-external', url: safeUrl }
   if (isAllowedQQExploreUrl(id)) return { type: 'open-external', url: id }
   return { type: 'unsupported' }
 }
@@ -7169,11 +6949,32 @@ function qqMusicHallAction(card) {
 function qqNativeCardCover(card, songs = []) {
   const miscellany = card?.miscellany || {}
   const user = Array.isArray(card?.v_user) ? card.v_user[0] : card?.v_user
-  return normalizeQQImageUrl(
-    card?.cover || miscellany.foryou_headurl || miscellany.cover || miscellany.cover_url ||
-    miscellany.pic_url || miscellany.picUrl || miscellany.img_url || miscellany.imgUrl ||
-    songs[0]?.album?.picUrl || user?.avatar || user?.headurl || user?.pic_url
-  )
+  const candidates = [
+    card?.cover,
+    card?.image,
+    card?.vector,
+    card?.layer,
+    miscellany.foryou_headurl,
+    miscellany.cover,
+    miscellany.cover_url,
+    miscellany.pic_url,
+    miscellany.picUrl,
+    miscellany.img_url,
+    miscellany.imgUrl,
+    miscellany.image,
+    miscellany.vector,
+    miscellany.layer,
+    miscellany.layer_url,
+    songs[0]?.album?.picUrl,
+    user?.avatar,
+    user?.headurl,
+    user?.pic_url,
+  ]
+  for (const candidate of candidates) {
+    const normalized = normalizeQQImageCandidate(candidate)
+    if (normalized) return normalized
+  }
+  return ''
 }
 
 function normalizeQQNativeMusicHall(data) {
@@ -7622,18 +7423,20 @@ app.post('/api/explore/qq/native/feed', async (req, res) => {
   }
 })
 
-app.get('/api/explore/qq/radio/next', async (req, res) => {
+app.all('/api/explore/qq/radio/next', async (req, res) => {
   try {
-    const cookie = String(req.query.cookie || '')
+    const input = { ...req.query, ...(req.body || {}) }
+    const cookie = String(input.cookie || '')
     const hasLogin = Boolean(resolveRequestCookie(cookie))
-    const count = Math.max(5, Math.min(Number(req.query.count) || 30, 60))
-    const batch = Math.max(1, Math.floor(Number(req.query.batch) || 1))
-    const excluded = new Set(String(req.query.exclude || '').split(',').map(value => value.trim()).filter(Boolean))
+    const count = Math.max(1, Math.min(Number(input.count) || 30, 60))
+    const batch = Math.max(1, Math.floor(Number(input.batch) || 1))
+    const rawExclude = Array.isArray(input.exclude) ? input.exclude : String(input.exclude || '').split(',')
+    const excluded = new Set(rawExclude.map(value => String(value).trim()).filter(Boolean))
     const songs = []
     const seen = new Set(excluded)
     if (hasLogin) {
       for (let attempt = 0; attempt < 4 && songs.length < count; attempt += 1) {
-        const radio = await fetchQQRadioBatches(99, count, 8, cookie, batch + attempt)
+        const radio = await fetchQQRadioBatches(99, count, 8, cookie, Math.max(0, batch - 1 + attempt))
         const candidates = (radio?.tracks || radio?.songlist || radio?.list || [])
           .map(song => normalizeQQExploreSong(song))
           .filter(Boolean)
@@ -11709,7 +11512,10 @@ async function proxyAppleAmpApi(req, res) {
   if (!rawPath.startsWith('/v1/')) {
     return res.status(400).json({ error: 'path 必须以 /v1/ 开头' })
   }
-  const url = `${APPLE_AMP_API_BASE}${rawPath}`
+  const apiHost = rawPath.startsWith('/v1/editorial/')
+    ? 'https://amp-api-edge.music.apple.com'
+    : APPLE_AMP_API_BASE
+  const url = `${apiHost}${rawPath}`
   const headers = {
     Accept: 'application/json',
     Origin: 'https://music.apple.com',
