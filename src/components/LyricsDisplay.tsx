@@ -692,9 +692,6 @@ export default memo(function LyricsDisplay({
   const sustainGlowColor = useMemo(() => resolveReadableSustainColor(accentColor), [accentColor])
   const effectiveAnimationMode = animationModeOverride ?? animationMode
   const prefersReducedMotion = Boolean(useReducedMotion())
-  const isAppleLineMode = displayMode === 'scroll'
-    && effectiveWordByWordEnabled
-    && effectiveWordByWordEffectMode === 'apple'
   const isDesktopLayout = layoutContext === 'desktop'
   // 摩登（AMLL 风格）行视觉：整行随弹簧平移，行自身只做 scale/blur/opacity——
   // 不含行级 y 位移（旧实现让行在 upcoming→current→played 切换时上下跳 2~3px）。
@@ -703,8 +700,8 @@ export default memo(function LyricsDisplay({
   const isAmllFill = isAmllLyricMotion && effectiveWordByWordEnabled
   /** plus-lighter 混合：复刻 AM"白但非纯白"（白字与背景加法混合染上背景色）；浅色主题会过曝，故只用于深色 */
   const usePlusLighterBlend = isAmllFill && !isLightTheme
-  /** 需要按"焦点行视觉模型"渲染的行（Apple 逐字覆盖或摩登风格） */
-  const useLineMotionModel = isAppleLineMode || isAmllLyricMotion
+  /** 焦点行视觉模型（摩登风格）：行级 opacity/scale/blur/字体由它驱动 */
+  const useLineMotionModel = isAmllLyricMotion
   const containerRef = useRef<HTMLDivElement>(null)
   // 崭新模式：弹簧 transform 滚动引擎（零布局跳动，Apple Music 风）
   const springY = useSpring(0, { stiffness: 190, damping: 26, mass: 1.1 })
@@ -1342,23 +1339,6 @@ export default memo(function LyricsDisplay({
 
   const getWordEffectConfig = (mode: WordByWordEffectMode, style: LyricStyleMode) => {
     switch (mode) {
-      case 'apple':
-        // Apple Music 风格：词/字整体渐亮（不走 clear/soft 的 mask 填充路径）。
-        // 独立配置，不影响 clear/soft。
-        return {
-          isSoft: true,
-          isApple: true,
-          wordRowGap: '0.12em',
-          wordPaddingX: '0',
-          linePaddingX: '0.14em',
-          wordLineHeight: 1.26,
-          inactiveColor: isLightTheme ? 'rgba(0, 0, 0, 0.36)' : 'rgba(255, 255, 255, 0.36)',
-          inactiveFilter: 'none',
-          fillExtension: 0,
-          baseTextShadow: isLightTheme ? '0 2px 9px rgba(255,255,255,0.24)' : '0 2px 9px rgba(0,0,0,0.24)',
-          activeTextShadow: isLightTheme ? '0 2px 10px rgba(255,255,255,0.32)' : '0 0 16px rgba(255,255,255,0.28), 0 2px 10px rgba(0,0,0,0.34)',
-          completedTextShadow: isLightTheme ? '0 2px 9px rgba(255,255,255,0.3)' : '0 2px 9px rgba(0,0,0,0.3)',
-        }
       case 'soft':
         return {
           isSoft: true,
@@ -2483,7 +2463,7 @@ export default memo(function LyricsDisplay({
           const lineOpacity = useLineMotionModel ? appleLineMotion.opacity : opacityValue
           // 摩登：行级 y 恒为 0——行切换的上下位移完全交给弹簧平移，
           // 不再叠加 upcoming/played 的 ±2~3px 位移（用户反馈"正在播放→已播放完毕会上下动一下"）。
-          const lineY = isAmllLyricMotion ? 0 : isAppleLineMode ? appleLineMotion.y : skiaY
+          const lineY = isAmllLyricMotion ? 0 : skiaY
           const lineScale = useLineMotionModel
             ? appleLineMotion.scale
             : isModernScroll ? (isCurrent ? 1 : distanceFromCurrent >= 2 ? 0.74 : 0.80) : undefined

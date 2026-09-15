@@ -9,8 +9,9 @@
  */
 export type LyricStyleMode = 'soft' | 'modern'
 
-/** 逐字效果：clear 仅保留给桌面播放器等内部覆盖使用，不再出现在设置项中。 */
-export type WordByWordEffectMode = 'clear' | 'soft' | 'apple'
+/** 逐字填充模式：clear 仅供桌面播放器等内部覆盖使用（不再出现在设置项中）。
+ *  原先的 'apple' 逐词点亮分支已不可达（摩登风格改走 AMLL 光带实现），故从类型中移除。 */
+export type WordByWordEffectMode = 'clear' | 'soft'
 
 /** 滚动动画：classic 原生居中滚动 / amodern 弹簧 transform 滚动。 */
 export type ScrollTransitionStyle = 'classic' | 'amodern'
