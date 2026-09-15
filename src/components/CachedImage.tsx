@@ -1,6 +1,8 @@
-import { useState, useEffect, useMemo, useRef, memo } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { imageCache } from '../utils/imageCache'
-import { getProxiedImageUrl } from '../services/musicApi'
+import { getArtworkEpoch, getArtworkCacheKey, getResolvedArtworkUrl, preloadArtwork, subscribeArtworkEpoch } from '../services/artworkLoader'
+import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
+import type { MusicPlatform } from '../services/platforms'
 
 interface CachedImageProps {
   src: string
@@ -10,231 +12,177 @@ interface CachedImageProps {
   onError?: (e: React.SyntheticEvent<HTMLImageElement, Event>) => void
   onLoad?: React.ReactEventHandler<HTMLImageElement>
   draggable?: boolean
-  lazy?: boolean // 是否启用懒加载，默认 true
+  lazy?: boolean
+  role?: ArtworkRole
+  size?: number
+  priority?: ArtworkPriority
+  retries?: number
+  platform?: MusicPlatform
+  retainPrevious?: boolean
+  fit?: 'cover' | 'contain'
 }
 
-// 模块级共享加载去重：同一 URL 在同一时刻被多个 CachedImage 实例请求时，
-// 只发起一次 Image 加载，其余实例复用同一个 Promise，避免每行重复下载封面。
-type SharedLoad = Promise<string> // resolve 为已加载成功的代理 URL
-const pendingImageLoads = new Map<string, SharedLoad>()
-
-function loadImageShared(normalizedSrc: string): SharedLoad {
-  const existing = pendingImageLoads.get(normalizedSrc)
-  if (existing) return existing
-
-  const load: SharedLoad = new Promise((resolve, reject) => {
-    const img = new Image()
-    const settle = (succeeded: boolean) => {
-      // 加载完成后断开引用并释放解码图片，避免残留占用内存
-      img.onload = null
-      img.onerror = null
-      img.src = ''
-      if (succeeded) resolve(normalizedSrc)
-      else reject(new Error('图片加载失败'))
-    }
-    img.onload = () => settle(true)
-    img.onerror = () => settle(false)
-    img.src = normalizedSrc
-  })
-
-  pendingImageLoads.set(normalizedSrc, load)
-  // 加载结束后无论成败都从共享表移除，允许后续重新加载
-  void load.then(
-    () => { if (pendingImageLoads.get(normalizedSrc) === load) pendingImageLoads.delete(normalizedSrc) },
-    () => { if (pendingImageLoads.get(normalizedSrc) === load) pendingImageLoads.delete(normalizedSrc) },
+function CachedImage({
+  src,
+  alt,
+  className,
+  fallback,
+  onError,
+  onLoad,
+  draggable,
+  lazy = true,
+  role = 'card',
+  size,
+  priority,
+  retries,
+  platform,
+  retainPrevious = false,
+  fit = 'cover',
+}: CachedImageProps) {
+  const artworkEpoch = useSyncExternalStore(subscribeArtworkEpoch, getArtworkEpoch, getArtworkEpoch)
+  const normalizedSrc = useMemo(
+    () => src?.trim() ? getResolvedArtworkUrl(src, { role, size, platform }) : '',
+    [platform, role, size, src],
   )
-  return load
-}
-
-/**
- * 带懒加载功能的图片组件
- * 1. 使用 IntersectionObserver 实现懒加载
- * 2. 通过代理服务器获取图片（解决跨域问题）
- * 3. 使用浏览器内存缓存，不使用 IndexedDB
- */
-function CachedImage({ src, alt, className, fallback, onError, onLoad, draggable, lazy = true }: CachedImageProps) {
-  const normalizedSrc = useMemo(() => {
-    if (!src || src.trim() === '') return ''
-    return getProxiedImageUrl(src) || src
-  }, [src])
-  const initialCachedSrc = normalizedSrc ? imageCache.get(normalizedSrc) || '' : ''
-  const [imageSrc, setImageSrc] = useState<string>(initialCachedSrc)
-  const [loading, setLoading] = useState(!initialCachedSrc)
-  const [error, setError] = useState(false)
+  const cacheKey = useMemo(
+    () => src?.trim() ? getArtworkCacheKey(src, { role, size, platform }) || normalizedSrc : '',
+    [normalizedSrc, platform, role, size, src],
+  )
+  const cached = cacheKey ? imageCache.get(cacheKey) : null
+  const [imageSrc, setImageSrc] = useState(cached || '')
+  const [previousImageSrc, setPreviousImageSrc] = useState('')
+  const [fadeIn, setFadeIn] = useState(false)
+  const [loading, setLoading] = useState(Boolean(normalizedSrc && !cached))
+  const [error, setError] = useState(!normalizedSrc)
   const [isVisible, setIsVisible] = useState(!lazy)
-  const cachedImageSrc = normalizedSrc ? imageCache.get(normalizedSrc) : null
-  const displaySrc = normalizedSrc ? (cachedImageSrc || (imageSrc === normalizedSrc ? imageSrc : '')) : ''
-  
-  // 使用 ref 跟踪当前请求的 URL，避免竞态条件
-  const currentLoadingUrlRef = useRef<string>('')
-  // 图片容器的 ref，用于 IntersectionObserver
+  const requestRef = useRef('')
   const containerRef = useRef<HTMLDivElement>(null)
+  const displaySrc = imageSrc && (cacheKey
+    ? imageSrc === cached || imageSrc === normalizedSrc || imageSrc.startsWith('blob:') || retainPrevious
+    : retainPrevious || imageSrc === normalizedSrc)
+    ? imageSrc
+    : (cached || '')
+  const wrapperPositionClass = /(?:^|\s)(?:absolute|fixed|sticky|static)(?:\s|$)/.test(className || '') ? '' : 'relative'
 
-  // 懒加载：只在元素可见时才加载图片（可选）
   useEffect(() => {
-    if (!lazy) {
-      // 如果禁用懒加载，立即标记为可见
+    if (!lazy || (cacheKey && imageCache.get(cacheKey)) || typeof IntersectionObserver === 'undefined') {
       setIsVisible(true)
       return
     }
-
-    if (!containerRef.current) return
-
-    // 图片已在内存缓存中（如其他列表项已加载同一封面），无需再创建 IO 实例观察
-    if (normalizedSrc && imageCache.get(normalizedSrc)) {
-      setIsVisible(true)
-      return
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            setIsVisible(true)
-            // 一旦可见就不再观察
-            observer.disconnect()
-          }
-        })
-      },
-      {
-        rootMargin: '50px', // 提前50px开始加载
-        threshold: 0.01
+    const element = containerRef.current
+    if (!element) return
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setIsVisible(true)
+        observer.disconnect()
       }
-    )
-
-    observer.observe(containerRef.current)
-
+    }, { rootMargin: '160px', threshold: 0.01 })
+    observer.observe(element)
+    // Electron/WebView 在复杂滚动容器或窗口刚恢复时可能不派发 intersection；
+    // 不能让封面永久停留在占位符，超时后退化为主动加载。
+    const fallbackTimer = window.setTimeout(() => setIsVisible(true), 800)
     return () => {
       observer.disconnect()
+      window.clearTimeout(fallbackTimer)
     }
-  }, [lazy, normalizedSrc])
+  }, [lazy, normalizedSrc, cacheKey])
 
   useEffect(() => {
-    // 只有在可见时才加载图片
+    const requestKey = `${artworkEpoch}:${normalizedSrc}`
+    requestRef.current = requestKey
     if (!isVisible) return
-
-    // 验证 URL 是否有效
-    if (!normalizedSrc || normalizedSrc.trim() === '') {
-      setImageSrc('') // 清空旧图片
+    if (!normalizedSrc || normalizedSrc.includes('M000.jpg')) {
+      if (!retainPrevious) setImageSrc('')
       setLoading(false)
       setError(true)
       return
     }
 
-    // 跳过无效的 QQ 音乐封面 URL（包含 M000.jpg 的是无效 URL）
-    if (normalizedSrc.includes('M000.jpg') || normalizedSrc.endsWith('M000.jpg')) {
-      setImageSrc('') // 清空旧图片
+    const cachedUrl = cacheKey ? imageCache.get(cacheKey) : null
+    if (cachedUrl) {
+      setImageSrc(cachedUrl)
+      setPreviousImageSrc('')
+      setFadeIn(false)
       setLoading(false)
-      setError(true)
-      return
-    }
-
-    const loadImage = async () => {
-      // 标记当前正在加载的 URL
-      currentLoadingUrlRef.current = normalizedSrc
       setError(false)
+      return
+    }
 
-      try {
-        // 先检查缓存
-        const cachedUrl = imageCache.get(normalizedSrc)
-        if (cachedUrl) {
-          // 检查是否还是当前请求
-          if (currentLoadingUrlRef.current !== normalizedSrc) return
-          
-          // 缓存命中 - 立即显示，不设置 loading 状态
-          setImageSrc(cachedUrl)
-          setLoading(false)
-          return
-        }
-
-        // 缓存未命中 - 立即清空旧图片，避免显示错误的封面
-        if (!lazy) {
-          // 对于非懒加载的图片（如播放器封面），立即清空
-          setImageSrc('')
-        }
-        setLoading(true)
-
-        // src 已经是代理后的 URL，直接使用
-        const imageUrl = normalizedSrc
-
-        // 共享加载：同一 URL 并发请求时只发一次网络请求，完成后所有实例同时显示
-        await loadImageShared(normalizedSrc)
-
-        // 检查是否还是当前请求（防止竞态条件）
-        if (currentLoadingUrlRef.current !== normalizedSrc) return
-
-        // 缓存这个 URL
-        imageCache.set(normalizedSrc, imageUrl)
-        // 图片加载完成后才更新显示
-        setImageSrc(imageUrl)
-        setLoading(false)
-      } catch (error) {
-        if (currentLoadingUrlRef.current !== normalizedSrc) return
-        console.error('❌ 加载图片失败:', normalizedSrc)
-        setImageSrc('') // 加载失败时才清空
-        setError(true)
-        setLoading(false)
+    if (!retainPrevious) {
+      // 先交给真实 img：Chromium HTTP cache 命中时可立即显示；loader 在后台
+      // 负责 IndexedDB、解码、去重和重试，不把隐藏预解码变成首屏阻塞点。
+      setImageSrc(normalizedSrc)
+      setPreviousImageSrc('')
+    } else if (imageSrc) {
+      setPreviousImageSrc(imageSrc)
+      setFadeIn(false)
+    }
+    setLoading(true)
+    setError(false)
+    void preloadArtwork(normalizedSrc, {
+      role,
+      size,
+      priority: priority || (lazy ? 'visible' : 'critical'),
+      retries,
+      platform,
+    }).then(loadedUrl => {
+      if (requestRef.current !== requestKey) return
+      const oldUrl = retainPrevious && imageSrc && imageSrc !== loadedUrl ? imageSrc : ''
+      setPreviousImageSrc(oldUrl)
+      setImageSrc(loadedUrl)
+      setFadeIn(Boolean(oldUrl))
+      setLoading(false)
+      if (oldUrl) {
+        window.setTimeout(() => {
+          if (requestRef.current === requestKey) setPreviousImageSrc('')
+        }, 260)
       }
-    }
+    }).catch(() => {
+      if (requestRef.current !== requestKey) return
+      if (!retainPrevious) setImageSrc('')
+      setError(true)
+      setLoading(false)
+    })
+  }, [artworkEpoch, isVisible, lazy, normalizedSrc, cacheKey, platform, priority, retries, retainPrevious, role, size])
 
-    void loadImage()
-  }, [normalizedSrc, isVisible, lazy])
-
-  const handleError = (e: React.SyntheticEvent<HTMLImageElement, Event>) => {
+  const handleError = (event: React.SyntheticEvent<HTMLImageElement, Event>) => {
     setError(true)
-    if (onError) {
-      onError(e)
-    }
+    if (!retainPrevious) setImageSrc('')
+    onError?.(event)
   }
 
-  // 如果出错且没有图片，显示 fallback
-  if (error && !displaySrc && fallback) {
-    return <div ref={containerRef}>{fallback}</div>
-  }
-
-  // 如果正在加载且还没有图片，显示 fallback（如果有）或占位符
-  if (loading && !displaySrc) {
-    if (fallback) {
-      return <div ref={containerRef}>{fallback}</div>
-    }
+  if ((error || loading) && !displaySrc && fallback) return <div ref={containerRef} className={className}>{fallback}</div>
+  if (!displaySrc) {
     return (
       <div ref={containerRef} className={className}>
-        <div className="w-full h-full flex items-center justify-center bg-white/10">
-          {/* 加载占位 */}
-        </div>
-      </div>
-    )
-  }
-
-  // 如果 displaySrc 为空，显示 fallback 或占位符
-  if (!displaySrc || displaySrc.trim() === '') {
-    if (fallback) {
-      return <div ref={containerRef}>{fallback}</div>
-    }
-    return (
-      <div ref={containerRef} className={className}>
-        <div className="w-full h-full flex items-center justify-center bg-white/10">
-          {/* 空占位 */}
-        </div>
+        <div className="w-full h-full flex items-center justify-center bg-white/10" />
       </div>
     )
   }
 
   return (
-    <div ref={containerRef} className={`${className} overflow-hidden`}>
+    <div ref={containerRef} className={`${className || ''} ${wrapperPositionClass} overflow-hidden`}>
+      {previousImageSrc && (
+        <img
+          draggable={draggable}
+          src={previousImageSrc}
+          alt=""
+          aria-hidden="true"
+          className={`absolute inset-0 h-full w-full object-${fit}`}
+          style={{ opacity: fadeIn ? 0 : 1, transition: 'opacity 0.24s ease-in-out' }}
+        />
+      )}
       <img
         draggable={draggable}
         onLoad={onLoad}
         src={displaySrc}
         alt={alt}
         loading={lazy ? 'lazy' : 'eager'}
+        fetchPriority={priority === 'critical' ? 'high' : priority === 'deferred' ? 'low' : 'auto'}
         decoding="async"
-        className="w-full h-full object-cover"
+        className={`relative h-full w-full object-${fit}`}
         onError={handleError}
-        style={{
-          opacity: 1,
-          transition: 'opacity 0.2s ease-in-out'
-        }}
+        style={{ opacity: previousImageSrc ? (fadeIn ? 1 : 0) : 1, transition: 'opacity 0.24s ease-in-out' }}
       />
     </div>
   )

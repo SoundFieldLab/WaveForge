@@ -27,9 +27,8 @@ async function loadCoverAsObjectUrl(imageUrl: string): Promise<CoverSource> {
   } catch {
     // 缓存读取失败时直接走代理下载
   }
-  const proxyUrl = `http://localhost:3001/api/proxy-image?url=${encodeURIComponent(imageUrl)}`
   try {
-    const response = await fetch(proxyUrl)
+    const response = await fetch(imageUrl)
     if (!response.ok) return { url: imageUrl, isObjectUrl: false }
     const blob = await response.blob()
     await indexedDBCache.cacheCover(imageUrl, blob)

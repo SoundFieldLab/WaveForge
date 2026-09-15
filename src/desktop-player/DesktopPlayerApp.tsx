@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import type { DesktopPlayerSnapshot, DesktopPlayerControlAction, DesktopPlayerBridgeAPI } from '../electron'
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
+import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
 import {
   getInterpolatedDesktopProgress,
   publishDesktopRealtime,
@@ -63,6 +64,30 @@ const CloseIcon = () => <Icon size={15}><path d="M6 6l12 12M18 6L6 18" /></Icon>
 const ListIcon = () => <Icon><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01" /></Icon>
 const TranslateIcon = () => <Icon><path d="M4 5h7M7.5 3v2M5 8c1 2 2.5 3.5 5 5M10 8c-.8 2.1-2.4 4-5 5M13 19l3.5-9 3.5 9M14.2 16h4.6" /></Icon>
 const RomajiIcon = () => <span className="dp-letter-icon">あ</span>
+
+function DecodedCover({ url, className }: { url: string; className: string }) {
+  const resolvedUrl = url ? getResolvedArtworkUrl(url, { role: 'player', size: 512 }) : ''
+  const [displayUrl, setDisplayUrl] = useState('')
+  const requestRef = useRef(0)
+
+  useEffect(() => {
+    const request = ++requestRef.current
+    if (!resolvedUrl) {
+      setDisplayUrl('')
+      return
+    }
+    void preloadArtwork(resolvedUrl, { role: 'player', size: 512, priority: 'critical', retries: 1 }).then(loadedUrl => {
+      if (requestRef.current === request) setDisplayUrl(loadedUrl)
+    }).catch(() => {
+      if (requestRef.current === request) setDisplayUrl('')
+    })
+    return () => { requestRef.current++ }
+  }, [resolvedUrl])
+
+  return displayUrl
+    ? <img className={className} src={displayUrl} alt="" draggable={false} onError={() => setDisplayUrl('')} />
+    : <div className={`${className} empty`} aria-label="暂无封面">♪</div>
+}
 
 
 type DesktopWord = NonNullable<DesktopPlayerSnapshot['lyric']>['words'][number]
@@ -646,7 +671,7 @@ export default function DesktopPlayerApp() {
 
   const surface = state.form === 'bar' ? (
     <div className="dp-bar-surface" onMouseDown={startDrag} onClick={handleSurfaceClick}>
-      {cover ? <img className="dp-bar-cover" src={cover} alt="" draggable={false} /> : <div className="dp-bar-cover empty">♪</div>}
+      <DecodedCover className="dp-bar-cover" url={cover} />
       <div className="dp-bar-copy">
         <div className="dp-bar-title">{title}{artists ? <span>{artists}</span> : null}</div>
         <LyricLineView state={state} showTranslation={showTranslation} showRomaji={showRomaji} compact />
@@ -660,7 +685,7 @@ export default function DesktopPlayerApp() {
       onMouseDown={startDrag}
       onClick={handleSurfaceClick}
     >
-      {cover ? <img className="dp-card-cover" src={cover} alt="" draggable={false} /> : <div className="dp-card-cover empty">♪</div>}
+      <DecodedCover className="dp-card-cover" url={cover} />
       <div className="dp-card-copy">
         <div className="dp-card-title">{title}</div>
         {artists ? <div className="dp-card-artist">{artists}</div> : null}

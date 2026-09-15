@@ -119,6 +119,10 @@ function AlbumCoverPlayer({
                 alt="Previous Album Cover"
                 className="h-full w-full"
                 lazy={false}
+                role="player"
+                size={512}
+                priority="critical"
+                retainPrevious
                 fallback={
                   <img
                     src={defaultCover}
@@ -141,6 +145,10 @@ function AlbumCoverPlayer({
                 alt="Next Album Cover"
                 className="h-full w-full"
                 lazy={false}
+                role="player"
+                size={512}
+                priority="critical"
+                retainPrevious
                 fallback={
                   <img
                     src={defaultCover}
@@ -166,6 +174,10 @@ function AlbumCoverPlayer({
               alt="Album Cover"
               className="h-full w-full"
               lazy={false}
+              role="player"
+              size={512}
+              priority="critical"
+              retainPrevious
               fallback={
                 <img
                   src={defaultCover}
