@@ -1129,8 +1129,9 @@ export function AppleExplorePanel({
   // ── 卡片子组件 ──
 
   /** 徽章卡。`textFirst` 只在「新发现」精品推荐启用（官网该区块为文字在上、图在下）；
-   *  主页「专属精选推荐」等保持原有「图在上、文字在下」样式，避免影响其它页签。 */
-  const FeaturedCard = ({ item, items, portrait = false, textFirst = false }: { item: AppleWebItem; items: AppleWebItem[]; portrait?: boolean; textFirst?: boolean }) => {
+   *  `overlayMeta` 用于主页「专属精选推荐」（官网同款：名称/副标题/简介内嵌卡片底部渐变）；
+   *  其余保持「图在上、文字在下」样式。 */
+  const FeaturedCard = ({ item, items, portrait = false, textFirst = false, overlayMeta = false }: { item: AppleWebItem; items: AppleWebItem[]; portrait?: boolean; textFirst?: boolean; overlayMeta?: boolean }) => {
     const isPlaylist = item.type === 'playlists'
     const meta = (
       <>
@@ -1159,23 +1160,33 @@ export function AppleExplorePanel({
         {textFirst && <div className="mb-2 min-w-0 px-0.5">{meta}</div>}
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
           {item.bannerUrl && !item.motionArtworkUrl ? (
-            <img src={item.bannerUrl} alt={item.name} loading="lazy" className={`${portrait ? 'aspect-[3/4]' : 'aspect-[16/10]'} w-full object-cover`} />
+            <img src={item.bannerUrl} alt={item.name} loading="lazy" className={`${portrait ? 'aspect-[125/181]' : 'aspect-[16/10]'} w-full object-cover`} />
           ) : (
-            <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[3/4]' : 'aspect-[16/10]'} w-full`} />
+            <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[125/181]' : 'aspect-[16/10]'} w-full`} />
           )}
           {!textFirst && item.badge && (
             <span className="absolute left-3 top-3 z-10 rounded-md bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 backdrop-blur-md">
               {item.badge}
             </span>
           )}
-          {/* 描述叠加层（web 卡片同款：底部渐变 + 编辑描述） */}
-          {item.description && (
-            <>
-              <div className="absolute inset-x-0 bottom-0 h-2/3 bg-[linear-gradient(0deg,rgba(6,9,14,0.88)_0%,rgba(6,9,14,0.4)_55%,transparent_100%)]" />
-              <p className="absolute inset-x-0 bottom-0 z-10 line-clamp-2 px-3.5 pb-3 text-xs leading-relaxed text-white/75">
-                {item.description}
-              </p>
-            </>
+          {/* 描述叠加层（web 卡片同款：底部渐变 + 编辑描述）；overlayMeta 时名称/副标题/简介合并内嵌 */}
+          {overlayMeta ? (
+            <div className="absolute inset-x-0 bottom-0 z-10 bg-[linear-gradient(0deg,rgba(4,6,10,0.9)_0%,rgba(4,6,10,0.42)_58%,transparent_100%)] px-3.5 pb-3 pt-10">
+              <p className="truncate text-sm font-semibold leading-tight">{item.name}</p>
+              <p className="mt-0.5 truncate text-xs text-white/55">{item.curatorName || item.artistName || item.subtitle || 'Apple Music'}</p>
+              {item.description && (
+                <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-white/70">{item.description}</p>
+              )}
+            </div>
+          ) : (
+            item.description && (
+              <>
+                <div className="absolute inset-x-0 bottom-0 h-2/3 bg-[linear-gradient(0deg,rgba(6,9,14,0.88)_0%,rgba(6,9,14,0.4)_55%,transparent_100%)]" />
+                <p className="absolute inset-x-0 bottom-0 z-10 line-clamp-2 px-3.5 pb-3 text-xs leading-relaxed text-white/75">
+                  {item.description}
+                </p>
+              </>
+            )
           )}
           {/* hover 播放按钮 */}
           {(isPlayableItem(item) || (item.type === 'stations' && Boolean(item.playId || item.id))) && (
@@ -1190,7 +1201,7 @@ export function AppleExplorePanel({
             </button>
           )}
         </div>
-        {!textFirst && <div className="mt-2 px-0.5">{meta}</div>}
+        {!textFirst && !overlayMeta && <div className="mt-2 px-0.5">{meta}</div>}
       </motion.div>
     )
   }
@@ -1482,7 +1493,7 @@ export function AppleExplorePanel({
   )
 
   /** 主页横向行卡片（歌曲/歌单/专辑/艺人/电台） */
-  const RowCard = ({ item, items, fluid = false }: { item: AppleWebItem; items: AppleWebItem[]; fluid?: boolean }) => {
+  const RowCard = ({ item, items, fluid = false, portrait = false }: { item: AppleWebItem; items: AppleWebItem[]; fluid?: boolean; portrait?: boolean }) => {
     const isFav = favorited.has(item.playId)
     const isSaved = savedPlaylists.has(item.playId)
     const isPlaylist = item.type === 'playlists'
@@ -1500,7 +1511,7 @@ export function AppleExplorePanel({
         onClick={() => activateItem(item, items)}
       >
         <div className="relative overflow-hidden rounded-xl">
-          <MotionArtworkCover item={item} storefront={storefront} className="aspect-square w-full" />
+          <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[4/5]' : 'aspect-square'} w-full`} />
           {isStation && item.isLive && (
             <span className="absolute left-2 top-2 rounded-md bg-[#fa2d48] px-1.5 py-0.5 text-[10px] font-semibold text-white">直播中</span>
           )}
@@ -1772,9 +1783,9 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title="专属精选推荐" subtitle={section.subtitle} />
-            {/* 实测官网主页该货架：卡片固定 250×362（一行 4-5 张），不随面板宽度拉伸。 */}
+            {/* 官网主页该货架：卡片固定 250×362（一行 4-5 张），名称/简介内嵌卡片底部渐变。 */}
             <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[min(250px,58vw)] shrink-0">
-              {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} portrait />)}
+              {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} portrait overlayMeta />)}
             </HorizontalShelf>
           </section>
         )
@@ -1953,8 +1964,9 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
-              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid />)}
+            {/* 官网主页普通货架：卡片 230×288 竖版（4:5），文字在下方 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[min(230px,46vw)] shrink-0">
+              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid portrait />)}
               {section.items.length === 0 && (
                 <div className="w-full px-4 py-6 text-sm text-white/36">暂无内容</div>
               )}
