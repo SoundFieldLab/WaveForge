@@ -74,28 +74,25 @@ export default function AnimatedArtworkCover({
       video.src = videoUrl
       playWhenActive()
     } else {
-      const nativeHls = video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL')
-      if (nativeHls) {
-        video.src = videoUrl
-        playWhenActive()
-      } else {
-        void import('hls.js').then(({ default: Hls }) => {
-          if (cancelled) return
-          if (!Hls.isSupported()) {
-            video.src = videoUrl
-            playWhenActive()
-            return
-          }
+      // ⚠️ 不要走 canPlayType 原生 HLS 捷径：新版 Chromium 对 vnd.apple.mpegurl
+      // 返回 "maybe" 但实际不解复用，直接 src=m3u8 必然 MEDIA_ERR_SRC_NOT_SUPPORTED。
+      // 一律 hls.js（MSE）——与验证可用的 DynamicCover 一致；仅真无 MSE 时才直连兜底。
+      void import('hls.js').then(({ default: Hls }) => {
+        if (cancelled) return
+        if (!Hls.isSupported()) {
+          video.src = videoUrl
+          playWhenActive()
+          return
+        }
           const instance = new Hls({ capLevelToPlayerSize: true, maxBufferLength: 12, backBufferLength: 0 })
           engine = instance
           instance.on(Hls.Events.ERROR, (_event: string, data: { fatal?: boolean }) => {
             if (data.fatal) fail('hls-fatal')
           })
-          instance.on(Hls.Events.MANIFEST_PARSED, playWhenActive)
-          instance.loadSource(videoUrl)
-          instance.attachMedia(video)
-        }).catch(() => fail('hls-import'))
-      }
+        instance.on(Hls.Events.MANIFEST_PARSED, playWhenActive)
+        instance.loadSource(videoUrl)
+        instance.attachMedia(video)
+      }).catch(() => fail('hls-import'))
     }
 
     return () => {
