@@ -1964,9 +1964,8 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            {/* 官网主页普通货架：卡片 230×288 竖版（4:5），文字在下方 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[min(230px,46vw)] shrink-0">
-              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid portrait />)}
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid />)}
               {section.items.length === 0 && (
                 <div className="w-full px-4 py-6 text-sm text-white/36">暂无内容</div>
               )}
@@ -2021,17 +2020,37 @@ export function AppleExplorePanel({
     let index = 0
     while (index < sections.length) {
       const section = sections[index]
-      if (section.kind === 'new-hero') {
-        const heroSections: AppleWebSection[] = [section]
+      if (section.kind === 'new-hero'
+        || (section.kind === 'banner' && (() => {
+          // 仅当 banner 组后面紧跟卡片组（新发现顶行）才并入合并货架；
+          // 广播页的纯 banner 组保持 BannerCard 样式，不受影响。
+          let i = index
+          while (i < sections.length && sections[i].kind === 'banner') i += 1
+          const next = sections[i]
+          return Boolean(next && (next.kind === 'new-hero' || next.kind === 'featured-cards'))
+        })())) {
+        // 官网「新发现」顶部：必听经典(banner 320)与徽章卡(317)是同一行"文字在上"卡片，
+        // 不带区块标题。相邻的 banner / new-hero / featured-cards 合并为一个货架，
+        // banner 转为携带宽幅海报的伪条目，避免被拆成多个板块或渲染成全宽大卡。
+        const group: AppleWebSection[] = [section]
         index += 1
-        while (index < sections.length && (sections[index].kind === 'banner' || sections[index].kind === 'featured-cards')) {
-          heroSections.push(sections[index])
+        while (index < sections.length && (sections[index].kind === 'banner' || sections[index].kind === 'featured-cards' || sections[index].kind === 'new-hero')) {
+          group.push(sections[index])
           index += 1
         }
-        const heroItems = heroSections.flatMap(entry => entry.items)
+        const heroItems: AppleWebItem[] = group.flatMap(entry => {
+          if (entry.kind !== 'banner') return entry.items
+          const base = entry.items[0]
+          if (!base) return []
+          return [{
+            ...base,
+            bannerUrl: entry.bannerUrl || base.bannerUrl,
+            badge: entry.title || base.badge,
+            tag: entry.tag || base.tag,
+          }]
+        })
         nodes.push(
           <section key={`${section.id}-hero-shelf`} className="space-y-3">
-            <SectionTitle title={section.title || '精品推荐'} section={section} />
             {/* 实测官网精品推荐：卡片 540×310、文字在上、一屏 2 张并露出第三张约 45px，横向滚动。 */}
             <HorizontalShelf edgeControls="hover" ariaLabel="精品推荐" itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
               {heroItems.map(item => (
