@@ -248,12 +248,21 @@ export interface AppleLibraryTrack {
   durationMs?: number
 }
 
+/** 最近一次 me 请求的 HTTP 状态（0 = 网络错误）。用于把"端点不存在（404/405）"与
+ *  "暂时性失败（网络抖动/超时）"区分开——前者应记住不再重试，后者不该降级。 */
+let lastAppleMeFetchStatus = 0
+
+export function getLastAppleMeFetchStatus(): number {
+  return lastAppleMeFetchStatus
+}
+
 /** 带登录凭据的 amp-api「me」请求（需要 Developer Token + Media-User-Token） */
 const appleMeFetch = async (path: string, strict = false): Promise<any | null> => {
   const credentials = getAppleCredentials()
   if (!credentials.developerToken || !credentials.mediaUserToken) {
     const message = `${path} 未配置凭据（developerToken/mediaUserToken 缺失）`
     forwardToBackend(message)
+    lastAppleMeFetchStatus = 401
     if (strict) throw Object.assign(new Error('Apple Music 登录状态无效，请重新登录'), { status: 401 })
     return null
   }
@@ -262,6 +271,7 @@ const appleMeFetch = async (path: string, strict = false): Promise<any | null> =
     mediaUserToken: credentials.mediaUserToken,
     timeoutMs: 10000,
   })
+  lastAppleMeFetchStatus = result.status
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
       forwardToBackend(`${path} HTTP ${result.status}：资料库无权限（token 失效或账号无 Apple Music 订阅）`)
@@ -1287,6 +1297,8 @@ export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleC
 /** 批量读取 Apple Music favorites；旧服务不支持状态接口时回退 ratings。
  *  实测部分账号/商店该端点直接 404，此时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
 let favoritesEndpointsUnavailable = false
+/** favorites 端点在本账号/商店不存在（404/405）：后续批次直接走 ratings，不再每次白跑一次失败请求。 */
+let favoritesEndpointMissing = false
 
 export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
   const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
@@ -1294,14 +1306,19 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
   const loved = new Set<string>()
   for (let index = 0; index < ids.length; index += 100) {
     const batch = ids.slice(index, index + 100)
-    const favoriteData = await appleMeFetch(`/v1/me/favorites?ids[songs]=${encodeURIComponent(batch.join(','))}`)
-    const favoriteItems = Array.isArray(favoriteData?.data) ? favoriteData.data : null
-    if (favoriteItems) {
-      for (const item of favoriteItems) {
-        const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
-        if (id) loved.add(String(id))
+    if (!favoritesEndpointMissing) {
+      const favoriteData = await appleMeFetch(`/v1/me/favorites?ids[songs]=${encodeURIComponent(batch.join(','))}`)
+      const favoriteItems = Array.isArray(favoriteData?.data) ? favoriteData.data : null
+      if (favoriteItems) {
+        for (const item of favoriteItems) {
+          const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
+          if (id) loved.add(String(id))
+        }
+        continue
       }
-      continue
+      // 端点不存在才记住；网络抖动/超时保持原样，下一次仍会尝试 favorites。
+      const favoriteStatus = getLastAppleMeFetchStatus()
+      if (favoriteStatus === 404 || favoriteStatus === 405) favoritesEndpointMissing = true
     }
     const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
     const ratingItems = Array.isArray(ratingData?.data) ? ratingData.data : null

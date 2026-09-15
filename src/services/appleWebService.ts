@@ -40,6 +40,7 @@ import {
   appleSongToSong,
   type AppleCatalogSong,
   type AppleLibraryAlbum,
+  APPLE_LIBRARY_ID_PATTERN,
 } from './appleCatalog'
 import { toHighResArtwork } from './appleMusic'
 import { sanitizeAppleRadioPlayParams, type AppleNativeStream, type AppleRadioPlayParams } from './applePlayback'
@@ -1497,13 +1498,15 @@ export async function fetchAppleSongDetail(songId: string, storefront?: string):
 
 // ─────────────────────────── 动态封面 / 电台详情 ───────────────────────────
 
-/** 目录资源动态封面（web powerswoosh）：按资源类型读取 editorialVideo。 */
+/** 目录资源动态封面（web powerswoosh）：按资源类型读取 editorialVideo。
+ *  库资源 id（i./l./p./ra.，如 `l.MdP4G6j`）在目录端点上必然 404：动态封面是目录侧的编辑内容，
+ *  库条目没有目录关联（catalogId 缺失 → playId 退回库 id）时根本取不到，直接跳过并保留静态封面。 */
 export async function fetchAppleResourceMotion(
   type: 'playlists' | 'albums' | 'stations',
   resourceId: string,
   storefront?: string,
 ): Promise<{ video?: string; poster?: string } | null> {
-  if (!resourceId) return null
+  if (!resourceId || APPLE_LIBRARY_ID_PATTERN.test(resourceId)) return null
   const sf = storefront || getStorefront()
   const endpoint = type === 'stations'
     ? `/v1/catalog/${encodeURIComponent(sf)}/stations/${encodeURIComponent(resourceId)}?extend=editorialVideo,editorialArtwork&include=radio-show`
