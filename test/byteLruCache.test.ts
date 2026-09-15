@@ -20,12 +20,36 @@ describe('ByteLruCache', () => {
     expect(cache.set('huge', 'H', 6, 12)).toBe(false)
     expect(cache.size).toBe(0)
   })
+
+  it('validates byte accounting and clears entries atomically', () => {
+    expect(() => new ByteLruCache({ maxBytes: 0, maxEntries: 1, ttlMs: 1 })).toThrow(/maxBytes/)
+    const cache = new ByteLruCache({ maxBytes: 10, maxEntries: 2, ttlMs: 1_000 })
+    expect(() => cache.set('bad', 'value', -1)).toThrow(/bytes/)
+    cache.set('a', 'A', 4)
+    cache.clear()
+    expect(cache.size).toBe(0)
+    expect(cache.bytes).toBe(0)
+  })
+  it('reports hit/miss counters and supports active pruning', () => {
+    const cache = new ByteLruCache({ maxBytes: 10, maxEntries: 2, ttlMs: 10 })
+    cache.set('a', 'A', 4, 0)
+    expect(cache.get('a', 1)).toBe('A')
+    expect(cache.get('missing', 1)).toBeNull()
+    expect(cache.prune(11)).toBe(1)
+    expect(cache.stats()).toMatchObject({ size: 0, bytes: 0, hits: 1, misses: 1, expirations: 1 })
+  })
 })
+
 
 describe('readResponseWithLimit', () => {
   it('rejects an oversized declared length without reading the body', async () => {
     const response = new Response('small', { headers: { 'content-length': '99' } })
     await expect(readResponseWithLimit(response, 10)).rejects.toThrow(/byte limit/)
+  })
+
+  it('rejects invalid content-length values', async () => {
+    const response = new Response('small', { headers: { 'content-length': '-1' } })
+    await expect(readResponseWithLimit(response, 10)).rejects.toThrow(/content-length/)
   })
 
   it('cancels a streaming response once actual bytes exceed the limit', async () => {

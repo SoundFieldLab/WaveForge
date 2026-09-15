@@ -84,6 +84,12 @@ interface BilibiliMvBackgroundProps {
    */
   onPlayStateChange?: (state: { songKey: string; bvid: string; cid: number; videoUrl: string; cacheKey: string; currentTime: number } | null) => void
   /**
+   * 视频是否已经真正出画面（活跃/渐入槽触发 canplay）：
+   * 搜索 + 拉流要几秒，这段时间本层是空的。外部据此决定是否继续保留封面兜底背景，
+   * 否则歌词页在 MV 就绪前只剩纯黑/透明（实测从探索页打开播放页会黑一下并透出上一页）。
+   */
+  onReadyChange?: (ready: boolean) => void
+  /**
    * 用户开关。关闭时中止搜索/预热/对齐并释放两个视频槽；重新开启后按当前歌曲重新匹配。
    */
   enabled?: boolean
@@ -241,6 +247,7 @@ export default function BilibiliMvBackground({
   upcomingSongs = [],
   onFallbackChange,
   onPlayStateChange,
+  onReadyChange,
   enabled = true,
   hidden = false,
   lyrics = [],
@@ -294,6 +301,8 @@ export default function BilibiliMvBackground({
   // A/B 双视频槽位：切歌时旧视频继续播放，新视频在另一槽位缓冲好后盖在旧视频上渐入（封面式过渡，无黑屏）
   const [slotAUrl, setSlotAUrl] = useState<string | null>(null)
   const [slotBUrl, setSlotBUrl] = useState<string | null>(null)
+  // 各槽是否已触发过 canplay（真正有帧可显示）；用于向外部上报 MV 背景是否已出画面
+  const [paintedSlots, setPaintedSlots] = useState<{ A: boolean; B: boolean }>({ A: false, B: false })
   // 槽位 URL 清除时释放 GPU 视频解码器（不清除会累积解码帧，导致渐卡并最终耗尽）
   useEffect(() => { if (!slotAUrl && slotARef.current) slotARef.current.load() }, [slotAUrl])
   useEffect(() => { if (!slotBUrl && slotBRef.current) slotBRef.current.load() }, [slotBUrl])
@@ -477,6 +486,16 @@ export default function BilibiliMvBackground({
   )
   const activeEl = () => slotEl(activeSlotRef.current)
   const otherSlot = (slot: 'A' | 'B') => (slot === 'A' ? 'B' : 'A')
+  const resumeSlot = useCallback((slot: 'A' | 'B') => {
+    const video = slotEl(slot)
+    const shouldResume = enabled
+      && !hidden
+      && isPlayingRef.current
+      && (slot === activeSlotRef.current || slot === incomingSlotRef.current)
+    if (!shouldResume || !video || !video.paused || video.readyState < HTMLMediaElement.HAVE_FUTURE_DATA) return false
+    void video.play().catch(() => undefined)
+    return true
+  }, [enabled, hidden])
 
   const loadVideo = useCallback(
     (candidate: CandidateScore, chainIndex = 0, stagedOnly = false, ownerSongKey?: string) => {
@@ -634,15 +653,12 @@ export default function BilibiliMvBackground({
   // 完成后新槽晋升为 active 并释放旧槽。快速切歌时该槽若已被新目标顶掉，定时器直接放弃本次晋升。
   const beginCrossfade = (slot: 'A' | 'B') => {
     if (stagedSlotRef.current !== slot) return
-    const stagedVideo = slotEl(slot)
-    if (stagedVideo && isPlayingRef.current && !hidden && stagedVideo.paused) {
-      void stagedVideo.play().catch(() => undefined)
-    }
     const prevActive = activeSlotRef.current
     stagedSlotRef.current = null
     pendingPromotionRef.current = null
     incomingSlotRef.current = slot
     setIncomingSlot(slot)
+    resumeSlot(slot)
     setStatus('playing')
     if (crossfadeTimerRef.current) window.clearTimeout(crossfadeTimerRef.current)
     crossfadeTimerRef.current = window.setTimeout(() => {
@@ -1027,6 +1043,28 @@ export default function BilibiliMvBackground({
     onFallbackChange?.(fallbackActive)
   }, [status, showCandidates, onFallbackChange])
 
+  // 槽位是否已经真正出过画面：canplay 才算（拿到 URL 不等于有帧可显示）。
+  // URL 被清空（切歌/释放解码器/关闭开关）时同步失效。
+  useEffect(() => {
+    setPaintedSlots(prev => {
+      const next = { A: prev.A && Boolean(slotAUrl), B: prev.B && Boolean(slotBUrl) }
+      return next.A === prev.A && next.B === prev.B ? prev : next
+    })
+  }, [slotAUrl, slotBUrl])
+
+  const updateReadyChangeRef = useRef(onReadyChange)
+  updateReadyChangeRef.current = onReadyChange
+  // 活跃槽或正在渐入的槽有画面 → MV 背景可视为已渲染；否则（搜索/拉流/切换中）外部应继续用封面兜底。
+  const mvFramePainted = enabled && !hidden && (
+    (paintedSlots.A && Boolean(slotAUrl) && (activeSlot === 'A' || incomingSlot === 'A'))
+    || (paintedSlots.B && Boolean(slotBUrl) && (activeSlot === 'B' || incomingSlot === 'B'))
+  )
+  useEffect(() => {
+    updateReadyChangeRef.current?.(mvFramePainted)
+  }, [mvFramePainted])
+  // 卸载（或整层被摘掉）时归还封面兜底，避免外部一直认为 MV 已就绪。
+  useEffect(() => () => { updateReadyChangeRef.current?.(false) }, [])
+
   // 位置跟随：仅对「已确认对齐」的 MV 做音频时钟校正（歌曲位置 + 偏移 → 视频位置）。
   // 对不上的视频（现场版/翻唱/无对齐结果）自由循环播放、不做任何周期性 seek——
   // 盲目按「音频位置 % 视频时长」校正会让对不上的视频反复 seek，而每次 seek 都触发
@@ -1060,7 +1098,7 @@ export default function BilibiliMvBackground({
         // 否则视频从隐藏前的旧位置续播、小偏移逐次累积变大（实测切 2 次后慢 ~10s）
         lastSyncCorrectionRef.current = performance.now()
         v.currentTime = target
-        if (v.paused) void v.play().catch(() => undefined)
+        resumeSlot(activeSlotRef.current)
         return true
       }
       // 隐藏期视频缓冲可能被系统回收、暂不可 seek：立即尝试 + 每 500ms 重试，
@@ -1081,9 +1119,9 @@ export default function BilibiliMvBackground({
     // 恢复播放：活跃槽 + 已 staged 槽
     for (const [slot, ref] of [['A', slotARef], ['B', slotBRef]] as const) {
       const video = ref.current
-      if (!video || video.readyState < 2) continue
+      if (!video) continue
       if (shouldPlaySlot(slot)) {
-        if (video.paused) void video.play().catch(() => undefined)
+        resumeSlot(slot)
       } else if (!video.paused) {
         video.pause()
       }
@@ -1144,7 +1182,7 @@ export default function BilibiliMvBackground({
       const video = slotEl(activeSlotRef.current)
       if (!video || video.readyState < 2) return
       // 自愈：视频因网络停顿/缓冲被暂停时恢复播放（否则会冻结在当前帧）
-      if (video.paused && !video.seeking) void video.play().catch(() => undefined)
+      resumeSlot(activeSlotRef.current)
       if (video.seeking) return
       const target = computeMvSyncTarget(playbackTime(audio) + offset, video.duration)
       if (target === null) return
@@ -1160,7 +1198,18 @@ export default function BilibiliMvBackground({
         returnSyncTimerRef.current = null
       }
     }
-  }, [isPlaying, enabled, hidden, songKey, transitionActive, activeSlot, incomingSlot])
+  }, [isPlaying, enabled, hidden, songKey, transitionActive, activeSlot, incomingSlot, resumeSlot])
+
+  // 窗口从后台恢复时 Chromium 可能只恢复音频而暂停视频解码；可见性事件直接触发一次恢复。
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible') return
+      resumeSlot(activeSlotRef.current)
+      if (incomingSlotRef.current) resumeSlot(incomingSlotRef.current)
+    }
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange)
+  }, [resumeSlot])
 
   // Seek events stay registered while paused. Explicit media seeks use audio.currentTime so a paused
   // rendered-transition clock cannot mask the user's new position, and never force video playback.
@@ -1363,12 +1412,22 @@ export default function BilibiliMvBackground({
   // - staged 槽：过渡期由 transitionProgress 驱动渐入（提交后主路径接管）；否则开始盖在旧视频上的渐入过渡
   // - 直进当前槽（首个视频/同一视频）：未渐入过则触发首个渐入（封面兜底→视频淡入）
   const handleCanPlay = (slot: 'A' | 'B') => {
+    setPaintedSlots(prev => prev[slot] ? prev : { ...prev, [slot]: true })
+    resumeSlot(slot)
     if (stagedSlotRef.current === slot) {
       // staged 槽是"过渡预载"（transitionPreloadRef 未消费）或过渡动画进行中时：
       // 一律不在此切换 active——预载只需缓冲，切换统一由 commit 后主路径接管
       // （beginCrossfade），否则 active 提前切走/旧槽被清，commit 时无槽可接管 → MV 残留。
-      const preloading = Boolean(transitionPreloadRef.current && !transitionPreloadRef.current.failed)
-      if (transitionActive || preloading) return
+      // 但 commit 后若该槽已经归属于当前歌曲，canplay 必须能够完成晋升；
+      // 否则下一首的全局 transitionPreloadRef 会把当前槽永久拦住，过渡透明度归零后只剩封面。
+      const stagedOwner = slotOwnerRef.current[slot]
+      const belongsToCurrentSong = stagedOwner === songKeyRef.current
+      const preloadingOtherSong = Boolean(
+        transitionPreloadRef.current
+        && !transitionPreloadRef.current.failed
+        && !belongsToCurrentSong,
+      )
+      if (transitionActive || preloadingOtherSong) return
       beginCrossfade(slot)
       return
     }

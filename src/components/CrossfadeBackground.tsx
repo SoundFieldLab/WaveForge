@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion'
 import { memo, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
 
 interface CrossfadeBackgroundProps {
   coverUrl: string
@@ -22,26 +23,24 @@ function CrossfadeBackground({
   transitionProgress,
   imageStyle,
 }: CrossfadeBackgroundProps) {
-  const initialUrl = isUsableCover(coverUrl) ? coverUrl : ''
-  const [visibleUrl, setVisibleUrl] = useState(initialUrl)
+  const resolvedCoverUrl = isUsableCover(coverUrl) ? getResolvedArtworkUrl(coverUrl, { role: 'background' }) : ''
+  const resolvedTransitionFromUrl = isUsableCover(transitionFromUrl) ? getResolvedArtworkUrl(transitionFromUrl, { role: 'background' }) : ''
+  const resolvedTransitionToUrl = isUsableCover(transitionToUrl) ? getResolvedArtworkUrl(transitionToUrl, { role: 'background' }) : ''
+  const [visibleUrl, setVisibleUrl] = useState('')
   const [incomingUrl, setIncomingUrl] = useState('')
+  const [readyTransitionToUrl, setReadyTransitionToUrl] = useState('')
   const requestSerialRef = useRef(0)
 
-  // Ordinary/manual track changes also keep the old image until the new one is decoded.
   useEffect(() => {
-    if (isTransitioning || !isUsableCover(coverUrl) || coverUrl === visibleUrl || coverUrl === incomingUrl) return
-
+    if (!resolvedCoverUrl || isTransitioning) return
+    if (resolvedCoverUrl === visibleUrl || resolvedCoverUrl === incomingUrl) return
     const serial = ++requestSerialRef.current
-    const image = new Image()
-    image.onload = () => {
-      if (serial === requestSerialRef.current) setIncomingUrl(coverUrl)
-    }
-    image.src = coverUrl
-
-    return () => {
-      image.onload = null
-    }
-  }, [coverUrl, incomingUrl, isTransitioning, visibleUrl])
+    void preloadArtwork(resolvedCoverUrl, { role: 'background', priority: 'critical', retries: 1 }).then(() => {
+      if (serial === requestSerialRef.current) setIncomingUrl(resolvedCoverUrl)
+    }).catch(() => {
+      if (serial === requestSerialRef.current) setIncomingUrl('')
+    })
+  }, [incomingUrl, isTransitioning, resolvedCoverUrl, visibleUrl])
 
   // 兜底提升：淡入动画完成回调（onAnimationComplete）在快速连续切歌/动画中断时
   // 可能不触发，incomingUrl 永远不晋升为 visibleUrl → 封面停留在旧歌。这里用定时器
@@ -58,21 +57,33 @@ function CrossfadeBackground({
 
   const explicitTransition = Boolean(
     isTransitioning
-      && isUsableCover(transitionFromUrl)
-      && isUsableCover(transitionToUrl)
+      && resolvedTransitionFromUrl
+      && resolvedTransitionToUrl
   )
+  useEffect(() => {
+    let cancelled = false
+    if (!resolvedTransitionToUrl) {
+      setReadyTransitionToUrl('')
+      return
+    }
+    setReadyTransitionToUrl('')
+    void preloadArtwork(resolvedTransitionToUrl, { role: 'background', priority: 'critical', retries: 1 }).then(() => {
+      if (!cancelled) setReadyTransitionToUrl(resolvedTransitionToUrl)
+    }).catch(() => undefined)
+    return () => { cancelled = true }
+  }, [resolvedTransitionToUrl])
   const clampedProgress = Math.max(0, Math.min(1, transitionProgress))
 
   useEffect(() => {
     if (
       explicitTransition
-      && transitionToUrl
-      && (coverUrl === transitionToUrl || clampedProgress >= 0.995)
+      && readyTransitionToUrl
+      && (resolvedCoverUrl === readyTransitionToUrl || clampedProgress >= 0.995)
     ) {
-      setVisibleUrl(transitionToUrl)
+      setVisibleUrl(readyTransitionToUrl)
       setIncomingUrl('')
     }
-  }, [clampedProgress, coverUrl, explicitTransition, transitionToUrl])
+  }, [clampedProgress, explicitTransition, readyTransitionToUrl, resolvedCoverUrl])
 
   const layerStyle = (url: string): CSSProperties => ({
     ...imageStyle,
@@ -86,17 +97,17 @@ function CrossfadeBackground({
       )}
 
       {explicitTransition
-        && transitionFromUrl
-        && transitionFromUrl !== visibleUrl
+        && resolvedTransitionFromUrl
+        && resolvedTransitionFromUrl !== visibleUrl
         && (
-          <div className="absolute inset-0 bg-cover bg-center" style={layerStyle(transitionFromUrl)} />
+          <div className="absolute inset-0 bg-cover bg-center" style={layerStyle(resolvedTransitionFromUrl)} />
         )}
 
-      {explicitTransition && transitionToUrl ? (
+      {explicitTransition && readyTransitionToUrl ? (
         <div
           className="absolute inset-0 bg-cover bg-center"
           style={{
-            ...layerStyle(transitionToUrl),
+            ...layerStyle(readyTransitionToUrl),
             opacity: clampedProgress,
             transition: `${imageStyle.transition || ''}, opacity 80ms linear`,
           }}

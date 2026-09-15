@@ -369,6 +369,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const lastVolumeRef = useRef(0.8)
   /** 视频状态上报节流（播放中 timeupdate 最多每 1s 上报一次给 App） */
   const lastVideoStateReportRef = useRef(0)
+  /** 媒体重挂载/metadata 未到达期间保留上一份有效时间，避免 0 覆盖模式交接位置。 */
+  const lastValidVideoTimeRef = useRef(0)
+  /** DASH 音频轨短暂重置时仍保留最近有效的 MV 时间，供反向 handoff 续接。 */
+  const lastValidWatchTimeRef = useRef(0)
   /** 音频轨音量渐变（等功率线性）：用于进入看歌淡入 / 切出淡出，避免双声爆音 */
   const fadeGenerationRef = useRef(0)
   const fadeAudioVolume = (from: number, to: number, ms: number): Promise<void> => {
@@ -535,6 +539,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     startupSeekRef.current = initialSeekSeconds != null && Number.isFinite(initialSeekSeconds)
       ? { songTime: initialSeekSeconds, videoApplied: false, audioApplied: false }
       : null
+    lastValidVideoTimeRef.current = initialSeekSeconds != null && Number.isFinite(initialSeekSeconds) && initialSeekSeconds > 0
+      ? initialSeekSeconds
+      : 0
+    lastValidWatchTimeRef.current = lastValidVideoTimeRef.current
     initialVideoRef.current = initialVideoUrl && initialCid && initialBvid
       ? { bvid: initialBvid, cid: initialCid, videoUrl: initialVideoUrl, cacheKey: initialCacheKey, type: initialType }
       : null
@@ -1539,9 +1547,22 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
    *  写回为 0/中途值 → 下次切进看歌默认静音（用户实测的"看歌音量不共用"根因）。 */
   const reportVideoState = useCallback(() => {
     const video = videoRef.current
+    const mediaTime = video ? Number(video.currentTime) : NaN
+    const startupPending = Boolean(startupSeekRef.current && (!startupSeekRef.current.videoApplied || !startupSeekRef.current.audioApplied))
+    if (Number.isFinite(mediaTime) && mediaTime > 0) {
+      lastValidVideoTimeRef.current = mediaTime
+      lastValidWatchTimeRef.current = mediaTime
+    }
+    const audioTime = audioRef.current ? Number(audioRef.current.currentTime) : NaN
+    if (Number.isFinite(audioTime) && audioTime > 0) lastValidWatchTimeRef.current = audioTime
+    const time = Number.isFinite(mediaTime) && mediaTime > 0
+      ? mediaTime
+      : startupPending
+        ? lastValidVideoTimeRef.current
+        : 0
     onVideoStateChange?.({
-      playing: Boolean(video && !video.paused && !video.ended),
-      time: video?.currentTime || 0,
+      playing: Boolean(video && !video.paused && !video.ended && time > 0),
+      time,
       duration: (video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : videoDuration) || 0,
       volume: isMuted ? 0 : volume,
       // 对齐信息：外部（迷你/桌面歌词）据此把视频位换算成歌曲位继续显示歌词
@@ -1575,7 +1596,19 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       seekTo: handleSeekTo,
       setVolume: handleSetVolume,
       /** 当前播放精确位置（秒）：优先取 DASH 音频轨（用户实际听到的时钟），视频轨 drift 校正前可能与音频差一点 */
-      getCurrentTime: () => audioRef.current?.currentTime ?? videoRef.current?.currentTime ?? 0,
+      getCurrentTime: () => {
+        const audioTime = Number(audioRef.current?.currentTime)
+        if (Number.isFinite(audioTime) && audioTime > 0) {
+          lastValidWatchTimeRef.current = audioTime
+          return audioTime
+        }
+        const videoTime = Number(videoRef.current?.currentTime)
+        if (Number.isFinite(videoTime) && videoTime > 0) {
+          lastValidWatchTimeRef.current = videoTime
+          return videoTime
+        }
+        return lastValidWatchTimeRef.current
+      },
       /** 当前应用的对齐偏移（秒）：MV 位置 = 歌曲位置 + 偏移。切回歌词模式时引擎
        *  必须续播在「视频位 − 偏移」的歌曲位上，否则大偏移歌（如 Die For You +19.89s）
        *  会把歌曲/歌词整体往前推 1~2 句 */

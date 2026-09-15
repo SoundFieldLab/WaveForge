@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { X, Film, Play, Search, XCircle, ChevronRight } from 'lucide-react'
+import { X, Film, Play, Search, XCircle, ChevronRight, Loader2 } from 'lucide-react'
 import {
   getAllMVs,
   getMVCategories,
@@ -26,6 +26,8 @@ interface MVExploreModalProps {
   initialMvId?: string | number
   onClose: () => void
   playerTheme?: 'dark' | 'light'
+  /** 直接播放模式：只出播放器，不显示 MV 专区列表（乐流里的 MV 卡片用） */
+  directPlay?: boolean
 }
 
 const formatCount = (value?: number) => {
@@ -39,7 +41,7 @@ const formatCount = (value?: number) => {
 const NETESE_AREAS = ['全部', '内地', '港台', '欧美', '日本', '韩国', '其他']
 const NETEASE_TYPES = ['全部', '官方版', '原声', '现场版', '网易出品']
 
-export default function MVExploreModal({ initialPlatform = 'netease', initialMvId, onClose, playerTheme = 'dark' }: MVExploreModalProps) {
+export default function MVExploreModal({ initialPlatform = 'netease', initialMvId, onClose, playerTheme = 'dark', directPlay = false }: MVExploreModalProps) {
   // TV 遥控器 BACK：关闭 MV 浏览弹窗
   useTvBack(() => {
     onClose()
@@ -76,6 +78,8 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
   useEffect(() => {
     if (!initialMvId || initialPlatform !== 'netease') return
     let cancelled = false
+    setLoading(true)
+    setError('')
     void getMVDetail(initialMvId, 'netease').then(data => {
       if (cancelled) return
       const detail = data?.data || data || {}
@@ -89,7 +93,12 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
       }
       setPlayingMV(item)
       setIsVideoOpen(true)
-    }).catch(() => undefined)
+      setLoading(false)
+    }).catch(() => {
+      if (cancelled) return
+      setError('加载 MV 失败')
+      setLoading(false)
+    })
     return () => { cancelled = true }
   }, [initialMvId, initialPlatform])
 
@@ -118,6 +127,10 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
 
   // 平台切换/筛选变化时加载列表（搜索模式下按关键词搜索）
   useEffect(() => {
+    if (directPlay) {
+      setMvs([])
+      return
+    }
     // 未进入搜索模式时，仅搜索词变化（输入框打字、未提交）不重载列表
     const kwChanged = prevSearchKeywordRef.current !== searchKeyword
     prevSearchKeywordRef.current = searchKeyword
@@ -174,7 +187,7 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
         setLoading(false)
       })
     }
-  }, [platform, neteaseArea, neteaseType, qqVersion, qqArea, isSearchMode, searchKeyword])
+  }, [directPlay, platform, neteaseArea, neteaseType, qqVersion, qqArea, isSearchMode, searchKeyword])
 
   const normalizeNetease = (list: any[]): MVItem[] => list.map((item) => ({
     id: item.id,
@@ -242,6 +255,32 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
   }
 
   const mvListForPlayer: any[] = playingMV ? [playingMV] : []
+
+  if (directPlay) {
+    return (
+      <>
+        {!isVideoOpen && (
+          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/70" role="status">
+            {loading || !error ? (
+              <Loader2 className="h-8 w-8 animate-spin text-white/80" />
+            ) : (
+              <div className="text-sm text-white/80">{error || '暂无可播放的 MV'}</div>
+            )}
+          </div>
+        )}
+        {isVideoOpen && playingMV && (
+          <VideoPlayer
+            mvId={playingMV.id}
+            mvName={playingMV.name}
+            platform={playingMV.platform}
+            onClose={onClose}
+            mvList={mvListForPlayer}
+            currentIndex={0}
+          />
+        )}
+      </>
+    )
+  }
 
   return (
     <motion.div

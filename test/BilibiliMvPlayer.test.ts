@@ -62,6 +62,22 @@ describe('BilibiliMvPlayer signed watch timeline', () => {
   it('never resolves startup before the captured entry floor', () => {
     expect(resolveWatchSongTime({ entryFloor: 73, engineTime: 0, watchTime: 1, appliedOffset: 0, watchReady: true })).toBe(73)
   })
+
+  it('keeps the last valid handoff when the engine briefly reports NaN', () => {
+    expect(resolveWatchSongTime({ entryFloor: 42, engineTime: Number.NaN, watchTime: 0, appliedOffset: 0, watchReady: false })).toBe(42)
+  })
+  it('keeps the latest watch position when the audio handoff finishes later', () => {
+    const resumeTime = resolveWatchSongTime({
+      entryFloor: 72.8,
+      engineTime: 72.8,
+      watchTime: 80.9,
+      appliedOffset: 3.715,
+      watchReady: true,
+    })
+    expect(resumeTime).toBeCloseTo(77.185, 3)
+    expect(resumeTime).toBeGreaterThan(72.8)
+  })
+
   it('maps a Villain-style late-entry target onto a short MV and clamps negative results', () => {
     // 歌曲 66.1s + 缓存偏移 9.86s → 视频目标 75.96s；两个媒体轨都必须消费同一目标，
     // 音频 metadata 晚到时不得回退到 0 再触发大幅回拉。

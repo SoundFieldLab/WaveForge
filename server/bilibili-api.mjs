@@ -55,6 +55,11 @@ const danmakuCache = new Map()
 const STREAM_CACHE_TTL = 10 * 60 * 1000
 const WBI_CACHE_TTL = 60 * 60 * 1000
 const DANMAKU_CACHE_TTL = 10 * 60 * 1000
+const STREAM_CACHE_MAX_ENTRIES = 512
+const SUBTITLE_CACHE_MAX_ENTRIES = 512
+const DANMAKU_CACHE_MAX_ENTRIES = 256
+const OFFICIAL_VERIFY_CACHE_MAX_ENTRIES = 2048
+const STREAM_REQUEST_TIMEOUT_MS = 30_000
 
 // ===== 基础工具 =====
 
@@ -72,10 +77,14 @@ function resolveBiliCookie(cookie) {
   return bilibiliCookie
 }
 
-function pruneCache(map, ttl) {
+function pruneCache(map, ttl, maxEntries) {
   const now = Date.now()
   for (const [key, entry] of map) {
     if (now - entry.createdAt > ttl) map.delete(key)
+  }
+  if (map.size > maxEntries) {
+    const oldest = [...map.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)
+    for (const [key] of oldest.slice(0, map.size - maxEntries)) map.delete(key)
   }
 }
 
@@ -212,7 +221,8 @@ async function getOfficialVerifyType(mid, cookie) {
     const json = await fetchBiliJsonWithRiskRetry(`${API_BASE}/x/web-interface/card`, { params: { mid: numericMid }, cookie })
     const type = Number(json.data?.card?.official_verify?.type)
     const normalized = type === 0 || type === 1 ? type : -1
-    officialVerifyCache.set(numericMid, { at: Date.now(), type: normalized })
+    officialVerifyCache.set(numericMid, { at: Date.now(), createdAt: Date.now(), type: normalized })
+    pruneCache(officialVerifyCache, OFFICIAL_VERIFY_CACHE_TTL, OFFICIAL_VERIFY_CACHE_MAX_ENTRIES)
     return normalized
   } catch {
     return -1
@@ -349,7 +359,7 @@ export function registerBilibiliRoutes(app) {
         audioId: audio.id,
         createdAt: Date.now(),
       })
-      pruneCache(streamCache, STREAM_CACHE_TTL)
+      pruneCache(streamCache, STREAM_CACHE_TTL, STREAM_CACHE_MAX_ENTRIES)
       // 大会员专享：接受的画质整体 < 480p 视为受限（前端据此跳过该候选）
       const vipLimited = acceptQuality.length > 0 && acceptQuality.every((q) => q <= 32)
       res.json({
@@ -372,6 +382,7 @@ export function registerBilibiliRoutes(app) {
   app.get('/api/bilibili/stream', async (req, res) => {
     const key = String(req.query.key || '')
     const type = String(req.query.type || 'video') === 'audio' ? 1 : 0
+    pruneCache(streamCache, STREAM_CACHE_TTL, STREAM_CACHE_MAX_ENTRIES)
     const entry = key ? streamCache.get(key) : undefined
     if (!entry) return res.status(410).json({ error: '播放地址已过期，请重新获取' })
     const url = entry.urls[type]
@@ -388,10 +399,23 @@ export function registerBilibiliRoutes(app) {
     }
 
     try {
-      let upstream = await fetch(url, fetchOptions)
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), STREAM_REQUEST_TIMEOUT_MS)
+      let upstream
+      try {
+        upstream = await fetch(url, { ...fetchOptions, signal: controller.signal })
+      } finally {
+        clearTimeout(timer)
+      }
       // CDN 重定向后可能丢失 Referer 导致 403/400：用最终 URL 重试一次
       if (!upstream.ok && upstream.redirected) {
-        upstream = await fetch(upstream.url, fetchOptions)
+        const retryController = new AbortController()
+        const retryTimer = setTimeout(() => retryController.abort(), STREAM_REQUEST_TIMEOUT_MS)
+        try {
+          upstream = await fetch(upstream.url, { ...fetchOptions, signal: retryController.signal })
+        } finally {
+          clearTimeout(retryTimer)
+        }
       }
       if (!upstream.ok && upstream.status !== 206) {
         return res.status(upstream.status).json({ error: `上游返回 ${upstream.status}` })
@@ -403,7 +427,7 @@ export function registerBilibiliRoutes(app) {
         'Accept-Ranges': 'bytes',
         'Access-Control-Allow-Origin': '*',
         'Cross-Origin-Resource-Policy': 'cross-origin',
-        'Cache-Control': 'public, max-age=3600',
+        'Cache-Control': `public, max-age=${Math.max(1, Math.floor((STREAM_CACHE_TTL - (Date.now() - entry.createdAt)) / 1000))}`,
       })
       const contentLength = upstream.headers.get('content-length')
       if (contentLength) res.set('Content-Length', contentLength)
@@ -436,7 +460,7 @@ export function registerBilibiliRoutes(app) {
         // B 站返回协议相对 URL（//aisubtitle.hdslb.com/...），Node fetch 需补 https: 否则解析失败
         const subUrl = String(s.subtitle_url || '')
         subtitleJsonCache.set(subCacheKey, { url: subUrl.startsWith('//') ? `https:${subUrl}` : subUrl, createdAt: Date.now() })
-        pruneCache(subtitleJsonCache, STREAM_CACHE_TTL)
+        pruneCache(subtitleJsonCache, STREAM_CACHE_TTL, SUBTITLE_CACHE_MAX_ENTRIES)
         return {
           lan: s.lan || '',
           lanDoc: s.lan_doc || '',
@@ -675,7 +699,7 @@ export function registerBilibiliRoutes(app) {
       }
       if (items.length > 0) {
         danmakuCache.set(cid, { items, createdAt: Date.now() })
-        pruneCache(danmakuCache, DANMAKU_CACHE_TTL)
+        pruneCache(danmakuCache, DANMAKU_CACHE_TTL, DANMAKU_CACHE_MAX_ENTRIES)
         return res.json({ code: 0, danmaku: items })
       }
       if (fetchedOk) {

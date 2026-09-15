@@ -137,6 +137,25 @@ describe('BilibiliMvBackground regressions', () => {
     ))
   })
 
+  it('keeps the cover fallback until the MV has a playable frame', async () => {
+    const audio = new Audio()
+    vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('ready-bvid'))
+    const onReadyChange = vi.fn()
+
+    const { container, unmount } = render(
+      <BilibiliMvBackground {...baseProps(audio)} onReadyChange={onReadyChange} />,
+    )
+
+    await waitFor(() => expect(container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache/video'))
+    expect(onReadyChange).toHaveBeenLastCalledWith(false)
+
+    fireEvent.canPlay(container.querySelector('video')!)
+    await waitFor(() => expect(onReadyChange).toHaveBeenLastCalledWith(true))
+
+    unmount()
+    expect(onReadyChange).toHaveBeenLastCalledWith(false)
+  })
+
   it('prewarms alignment only for the immediate upcoming track across platforms', async () => {
     const audio = new Audio()
     vi.mocked(bili.findBestBilibiliMv).mockImplementation((ctx: any) => Promise.resolve(autoResult(`${ctx.platform}-bvid`)) as any)
@@ -273,6 +292,71 @@ describe('BilibiliMvBackground regressions', () => {
     expect(targetVideo.currentTime).toBe(18)
   })
 
+  it('promotes a committed staged MV after the transition preload ref moves on', async () => {
+    const audio = new Audio()
+    vi.mocked(bili.findBestBilibiliMv).mockImplementation((ctx: any) => Promise.resolve(
+      autoResult(ctx.songTitle === 'Target' ? 'target-bvid' : 'current-bvid'),
+    ) as any)
+    vi.mocked(bili.getBilibiliPlayUrl).mockImplementation(async (bvid: string) => ({ code: 0, cacheKey: `cache-${bvid}` }) as any)
+
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} />)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache-current-bvid/video'))
+    const currentVideo = view.container.querySelector('video')!
+    setMediaState(currentVideo, { readyState: 4, duration: 180 })
+    fireEvent.canPlay(currentVideo)
+
+    view.rerender(
+      <BilibiliMvBackground
+        {...baseProps(audio)}
+        isPlaying
+        transitionProgress={1}
+        transitionToTrack={{ trackKey: 'target-track', coverUrl: '', title: 'Target', artist: 'Artist', duration: 180, id: 'target' }}
+      />,
+    )
+    const targetVideo = await waitFor(() => {
+      const videos = [...view.container.querySelectorAll('video')]
+      const video = videos.find(item => item.getAttribute('src') === 'http://stream/cache-target-bvid/video')
+      expect(video).toBeTruthy()
+      return video!
+    })
+    setMediaState(targetVideo, { readyState: 1, duration: 180 })
+
+    view.rerender(
+      <BilibiliMvBackground
+        {...baseProps(audio)}
+        songTitle="Target"
+        songId="target"
+        songTrackKey="target-track"
+        isPlaying
+        transitionToTrack={null}
+      />,
+    )
+    view.rerender(
+      <BilibiliMvBackground
+        {...baseProps(audio)}
+        songTitle="Target"
+        songId="target"
+        songTrackKey="target-track"
+        isPlaying
+        transitionToTrack={{ trackKey: 'later-track', coverUrl: '', title: 'Later', artist: 'Artist', duration: 180, id: 'later' }}
+      />,
+    )
+    view.rerender(
+      <BilibiliMvBackground
+        {...baseProps(audio)}
+        songTitle="Target"
+        songId="target"
+        songTrackKey="target-track"
+        isPlaying
+        transitionToTrack={null}
+      />,
+    )
+
+    setMediaState(targetVideo, { readyState: 4 })
+    fireEvent.canPlay(targetVideo)
+    await waitFor(() => expect(targetVideo.style.opacity).toBe('1'))
+  })
+
   it('releases both media slots and aborts in-flight work when disabled', async () => {
     const audio = new Audio()
     let searchSignal: AbortSignal | undefined
@@ -314,6 +398,43 @@ describe('BilibiliMvBackground regressions', () => {
 
     expect(video.getAttribute('src')).toBe('http://stream/cache/video')
     expect(loadSpy).not.toHaveBeenCalled()
+  })
+
+  it('resumes a buffered MV when returning from watch mode while audio is playing', async () => {
+    const audio = new Audio()
+    vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('current-bvid'))
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} isPlaying />)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache/video'))
+    const video = view.container.querySelector('video')!
+    setMediaState(video, { readyState: 4, duration: 180, currentTime: 12 })
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play)
+    playSpy.mockClear()
+
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying hidden />)
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying={true} hidden={false} />)
+
+    await waitFor(() => expect(playSpy).toHaveBeenCalled())
+    expect(video.getAttribute('src')).toBe('http://stream/cache/video')
+  })
+
+  it('retries MV playback from canplay after returning from watch mode', async () => {
+    const audio = new Audio()
+    vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('current-bvid'))
+    const playSpy = vi.mocked(HTMLMediaElement.prototype.play)
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} isPlaying />)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache/video'))
+    const video = view.container.querySelector('video')!
+    setMediaState(video, { readyState: 4, duration: 180, currentTime: 12 })
+    playSpy.mockClear()
+    playSpy.mockRejectedValueOnce(new DOMException('buffering', 'AbortError')).mockResolvedValue(undefined)
+
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying hidden />)
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying hidden={false} />)
+    await waitFor(() => expect(playSpy.mock.calls.length).toBeGreaterThan(0))
+    const callsBeforeCanPlay = playSpy.mock.calls.length
+
+    fireEvent.canPlay(video)
+    await waitFor(() => expect(playSpy.mock.calls.length).toBeGreaterThan(callsBeforeCanPlay))
   })
 
   it('plays the best low-confidence candidate without showing a picker by default', async () => {
