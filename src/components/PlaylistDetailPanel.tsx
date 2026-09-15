@@ -6,6 +6,8 @@ import type { MusicPlatform } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
 import { useState, useRef, useEffect, useCallback, useMemo, memo, type UIEvent } from 'react'
 import CachedImage from './CachedImage'
+import AnimatedArtworkCover from './AnimatedArtworkCover'
+import { fetchApplePlaylistMotion } from '../services/appleWebService'
 import { preloadArtwork } from '../services/artworkLoader'
 import SongContextMenu from './SongContextMenu'
 import ScrollToTop from './ScrollToTop'
@@ -28,6 +30,8 @@ interface PlaylistDetailPanelProps {
   overlayZ?: number // 弹窗层级（默认 40/50；跨弹窗打开时传更高值置于其上）
   playlist: {
     id: number | string
+    /** Apple 歌单的目录 id（用于拉取 editorialVideo 动态封面） */
+    playId?: number | string
     dirId?: number | string
     name: string
     coverImgUrl: string
@@ -102,6 +106,19 @@ function PlaylistDetailPanel({
   const [subscribing, setSubscribing] = useState(false)
   const [collected, setCollected] = useState(Boolean(playlist?.isCollected))
   const [smartLoading, setSmartLoading] = useState(false)
+
+  // Apple 歌单详情头部动态封面（官网同款：详情页大图自动播放 editorialVideo）。
+  const [appleMotion, setAppleMotion] = useState<{ video?: string; poster?: string } | null>(null)
+  const appleMotionId = playlist?.platform === 'apple' ? String(playlist.playId || playlist.id || '') : ''
+  useEffect(() => {
+    setAppleMotion(null)
+    if (!appleMotionId) return
+    let cancelled = false
+    void fetchApplePlaylistMotion(appleMotionId).then(result => {
+      if (!cancelled) setAppleMotion(result)
+    }).catch(() => { if (!cancelled) setAppleMotion(null) })
+    return () => { cancelled = true }
+  }, [appleMotionId])
 
   // 网易云智能播放（playmode/intelligence）：按当前歌单/歌曲生成智能续播列表。
   // 接口返回"分组"结构（每组 { id, songs: [曲目] }），必须展开各组 songs 再映射，
@@ -527,9 +544,9 @@ function PlaylistDetailPanel({
                   {/* 封面 */}
                   <div className={`relative w-20 h-20 rounded-lg overflow-hidden flex-shrink-0 shadow-xl ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`}>
                     {playlist.coverImgUrl ? (
-                      <CachedImage 
-                        src={playlist.coverImgUrl} 
-                        alt={playlist.name} 
+                      <CachedImage
+                        src={playlist.coverImgUrl}
+                        alt={playlist.name}
                         className="w-full h-full object-cover"
                         lazy={false}
                         role="card"
@@ -545,6 +562,14 @@ function PlaylistDetailPanel({
                       <div className="w-full h-full flex items-center justify-center">
                         <Music className={`w-8 h-8 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
                       </div>
+                    )}
+                    {appleMotion?.video && (
+                      <AnimatedArtworkCover
+                        videoUrl={appleMotion.video}
+                        posterUrl={appleMotion.poster}
+                        staticCoverUrl={playlist.coverImgUrl}
+                        className="absolute inset-0 h-full w-full"
+                      />
                     )}
                     {playlist.platform === 'qq' && playlist.isLike && (
                       <div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden="true">
