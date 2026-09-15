@@ -18,7 +18,7 @@
  *
  * 地区：固定使用账号商店（个性化内容绑定账号 storefront），无地区切换。
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import {
   Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Home, Info, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
@@ -93,13 +93,17 @@ function AppleExploreImage(props: React.ComponentProps<typeof CachedImage>) {
 
 // ─────────────────────────── 动态封面 ───────────────────────────
 
+/** 播放页以覆盖层覆盖探索页时置 true：面板内所有动态封面视频暂停取流/播放 */
+const MotionSuspendContext = createContext(false)
+
 /** 动态封面（web powerswoosh 同款）：HLS 流 → hls.js 播放；失败/无则静态帧/静态图 */
 function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; className?: string; iconClassName?: string }) {
+  const suspended = useContext(MotionSuspendContext)
   const [videoFailed, setVideoFailed] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const motionHls = item.motionArtworkUrl
   useEffect(() => {
-    if (!motionHls || videoFailed) return
+    if (!motionHls || videoFailed || suspended) return
     let hls: { destroy: () => void; __visibilityCleanup?: () => void } | null = null
     let cancelled = false
     ;(async () => {
@@ -112,13 +116,13 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
         inst.loadSource(motionHls)
         inst.attachMedia(videoRef.current)
         inst.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (cancelled || document.hidden) return
+          if (cancelled || document.hidden || suspended) return
           void videoRef.current?.play().catch(() => undefined)
         })
         const onVisibilityChange = () => {
           const video = videoRef.current
           if (!video) return
-          if (document.hidden) video.pause()
+          if (document.hidden || suspended) video.pause()
           else void video.play().catch(() => undefined)
         }
         document.addEventListener('visibilitychange', onVisibilityChange)
@@ -136,7 +140,7 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
       try { hls?.__visibilityCleanup?.() } catch { /* 忽略 */ }
       try { hls?.destroy() } catch { /* 忽略 */ }
     }
-  }, [motionHls, videoFailed])
+  }, [motionHls, videoFailed, suspended])
 
   if (motionHls && !videoFailed) {
     return (
@@ -308,10 +312,11 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   const itemKey = `${storefront}:${item.type}:${item.playId || item.id}`
   // 动态封面按目录资源 id 拉取：playId 缺失时回退资源 id（与 openStation 的取 id 规则一致）。
   const motionResourceId = item.playId || item.id
+  const motionSuspended = useContext(MotionSuspendContext)
   useEffect(() => {
     setMotion(item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined)
   }, [itemKey, item.motionArtworkUrl, item.motionPosterUrl])
-  const active = pageVisible && everVisible
+  const active = pageVisible && everVisible && !motionSuspended
 
   useEffect(() => {
     const onVisibility = () => setPageVisible(!document.hidden)
@@ -379,6 +384,8 @@ interface AppleExplorePanelProps {
   appleAvatar?: string
   /** 账号 storefront（cn/us/hk/tw…），缺省 'cn' */
   defaultStorefront?: string
+  /** 播放页覆盖探索页时置 true：暂停面板内所有动态封面视频流 */
+  motionSuspended?: boolean
   accentColor?: string
   accentRgb?: string
   playerTheme?: 'light' | 'dark'
@@ -442,6 +449,7 @@ export function AppleExplorePanel({
   onSongContextMenu,
   restorePlaybackOrigin,
   refreshSignal,
+  motionSuspended = false,
 }: AppleExplorePanelProps) {
   const storefront = defaultStorefront || 'cn'
   const [tab, setTab] = useState<AmTab>('home')
@@ -2470,6 +2478,7 @@ export function AppleExplorePanel({
   )
 
   return (
+    <MotionSuspendContext.Provider value={motionSuspended}>
     <div
       className="space-y-6"
       ref={panelRef}
@@ -2738,6 +2747,7 @@ export function AppleExplorePanel({
         />
       )}
     </div>
+    </MotionSuspendContext.Provider>
   )
 }
 

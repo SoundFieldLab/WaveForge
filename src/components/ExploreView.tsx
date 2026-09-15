@@ -162,6 +162,8 @@ interface ExploreViewProps {
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
+  /** 播放页以覆盖层覆盖探索页时置 true：暂停动态封面等后台流，省流省解码 */
+  motionSuspended?: boolean
 }
 
 interface CoverProps {
@@ -550,6 +552,7 @@ function ExploreView({
   onAddToPlaylist,
   onViewComments,
   onCopyInfo,
+  motionSuspended = false,
 }: ExploreViewProps) {
   const [platform, setPlatform] = useState<ExplorePlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'explorePlatform'))
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
@@ -1710,6 +1713,7 @@ function ExploreView({
             />
           ) : platform === 'apple' ? (
             <AppleExplorePanel
+              motionSuspended={motionSuspended}
               appleLoggedIn={appleLoggedIn}
               appleUsername={appleUsername}
               appleAvatar={appleAvatar}
@@ -2280,8 +2284,8 @@ function ExploreView({
         onRetry={() => detailRetryRef.current?.()}
         onClose={closeExploreDetail}
         onSongSelect={(song, songs) => {
-          // 选歌后关闭歌单详情覆盖层，否则播放页出现后歌单界面还叠在上面
-          closeExploreDetail()
+          // 选歌后歌单详情覆盖层保持打开：用户可以直接继续挑下一首；
+          // 进入播放页时探索页整体保持挂载（隐藏），返回时弹窗原样呈现。
           onSongSelect(song, songs, {
             surface: 'explore-detail',
             detail: detail || undefined,

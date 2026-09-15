@@ -3632,8 +3632,10 @@ function App() {
 
     const originMode = inferredOrigin.mode || viewMode
     const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore')
+    // 电台从探索页点播：探索页（含电台弹窗）保持挂载，播放页以覆盖层打开，返回时原样呈现弹窗
+    const exploreRadioOverlay = isRadioSelection && originMode === 'explore'
     setEnteredFromMode(originMode)
-    if (viewMode !== 'minimal' && (!playsInPlace || isRadioSelection)) {
+    if (viewMode !== 'minimal' && !playsInPlace && !exploreRadioOverlay) {
       setViewMode('minimal')
       localStorage.setItem('viewMode', 'minimal')
     }
@@ -3645,9 +3647,26 @@ function App() {
     if (isRadioSelection) {
       void playbackSurfaceReady
       setShowHome(false)
-      setShowSharedPlayer(false)
+      if (exploreRadioOverlay) {
+        playbackOriginRef.current = inferredOrigin
+        setEnteredFromMode('explore')
+        setShowSharedPlayer(true)
+      } else {
+        setShowSharedPlayer(false)
+      }
     } else if (originMode === 'explore') {
       setShowHome(true)
+      // 探索页设置「点击歌曲直接进入播放页」：探索页保持挂载，播放页覆盖其上
+      let exploreOpenPlayerPref = false
+      try {
+        exploreOpenPlayerPref = (JSON.parse(localStorage.getItem('explorePreferences') || '{}') as { openPlayerOnSongSelect?: unknown }).openPlayerOnSongSelect === true
+      } catch { /* 偏好缺失按默认（留在探索页）处理 */ }
+      if (exploreOpenPlayerPref) {
+        playbackOriginRef.current = inferredOrigin
+        setRestorePlaybackOrigin(null)
+        setEnteredFromMode('explore')
+        setShowSharedPlayer(true)
+      }
     } else if (!playsInPlace) {
       await playbackSurfaceReady
       setShowHome(false)
@@ -3718,6 +3737,13 @@ function App() {
     const targetMode = origin.mode || enteredFromMode || 'minimal'
 
     setAppleRadioSurfaceLocked(false)
+    if (targetMode === 'explore' && viewModeRef.current === 'explore') {
+      // 探索页保持挂载：直接关播放页覆盖层，滚动位置/弹窗/已加载内容原样保留，不重载
+      setEnteredFromMode('explore')
+      setShowSharedPlayer(false)
+      setShowHome(true)
+      return
+    }
     setViewMode(targetMode)
     localStorage.setItem('viewMode', targetMode)
     setEnteredFromMode(targetMode)
@@ -7142,6 +7168,9 @@ function App() {
   }, [])
 
   const renderedMode: ViewMode = isPlaybackPage ? 'minimal' : viewMode
+  // 探索页进入播放页时不再卸载探索页：播放页以覆盖层叠在其上（zIndex 4 > 探索 1），
+  // 返回时只关覆盖层——滚动位置、打开中的歌单/电台弹窗、已加载内容全部原样保留。
+  const exploreKeptAlive = isPlaybackPage && enteredFromMode === 'explore' && viewMode === 'explore'
   // 探索页是独立的不透明工作面；从其 mini 播放器进入播放页时，播放页首帧必须完全覆盖探索页。
   // 否则 AnimatePresence 的同步淡入/淡出会把两个页面叠在一起，表现为用户截图中的整屏透底。
   const enteringPlayerFromExplore = isPlaybackPage && enteredFromMode === 'explore'
@@ -7359,7 +7388,7 @@ function App() {
       
       <Suspense fallback={null}><AnimatePresence initial={false} mode="sync" presenceAffectsLayout={false}>
         {/* 桌面模式 */}
-        {renderedMode === 'explore' ? (
+        {(renderedMode === 'explore' || exploreKeptAlive) && (
           <motion.div
             key="explore-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -7367,9 +7396,10 @@ function App() {
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-full w-full"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: exploreKeptAlive ? 1 : 2, visibility: exploreKeptAlive ? 'hidden' : 'visible' }}
           >
             <LazyExploreView
+              motionSuspended={exploreKeptAlive}
               onSongSelect={viewCallbacks.onSongSelect}
               restorePlaybackOrigin={restorePlaybackOrigin}
               currentSong={currentSong}
@@ -7426,7 +7456,8 @@ function App() {
             />
 
           </motion.div>
-        ) : renderedMode === 'desktop' ? (
+        )}
+        {renderedMode === 'desktop' && (
           <motion.div
             key="desktop-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -7493,7 +7524,8 @@ function App() {
               onOpenDeviceControl={viewCallbacks.onOpenDeviceControl}
             />
           </motion.div>
-        ) : renderedMode === 'traditional' ? (
+        )}
+        {renderedMode === 'traditional' && (
           <motion.div
             key="traditional-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -7569,7 +7601,8 @@ function App() {
               onCopyInfo={viewCallbacks.onCopyInfo}
             />
           </motion.div>
-        ) : (
+        )}
+        {(renderedMode === 'minimal' || exploreKeptAlive) && (
           /* 简约模式 */
           <motion.div
             key="minimal-mode"
@@ -7578,7 +7611,7 @@ function App() {
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={enteringPlayerFromExplore ? { duration: 0 } : { duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-screen w-full flex items-center justify-center overflow-hidden bg-black"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: exploreKeptAlive ? 4 : 2 }}
           >
 
       {/* 默认背景 - 始终存在 */}

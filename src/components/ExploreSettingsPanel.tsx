@@ -59,6 +59,8 @@ export interface ExplorePreferences {
   spotify: ExplorePlatformPreferences
   kugou: ExplorePlatformPreferences
   soda: ExplorePlatformPreferences
+  /** 点击歌曲后的导航行为：false=留在探索页（默认），true=直接进入播放页 */
+  openPlayerOnSongSelect: boolean
 }
 
 export const EXPLORE_SECTION_LABELS: Record<ExploreSectionId, string> = {
@@ -109,6 +111,7 @@ export const createDefaultExplorePreferences = (): ExplorePreferences => {
       ...DEFAULT_PLATFORM_PREFS,
     }
   }
+  all.openPlayerOnSongSelect = false
   return all
 }
 
@@ -158,6 +161,7 @@ export function normalizeExplorePreferences(input: unknown): ExplorePreferences 
     }
   }
 
+  defaults.openPlayerOnSongSelect = (raw as { openPlayerOnSongSelect?: unknown }).openPlayerOnSongSelect === true
   return defaults
 }
 
@@ -470,6 +474,22 @@ export default function ExploreSettingsPanel({
                   isDark={isDark}
                   onChange={value => updateCurrent({ enhancedApi: value })}
                 />
+              </section>
+
+              <section className="mb-7 space-y-4">
+                <h3 className={`text-sm font-semibold ${textPrimary}`}>播放与导航</h3>
+                <SettingChoice
+                  label="点击歌曲后"
+                  description="「留在探索页」：播放后停留原地，歌单/电台弹窗保持打开，方便继续挑歌，点 mini 播放器进入播放页。"
+                  value={preferences.openPlayerOnSongSelect ? 'player' : 'stay'}
+                  options={[['stay', '留在探索页'], ['player', '直接进入播放页']]}
+                  accent={accent}
+                  isDark={isDark}
+                  onChange={value => onChange({ ...preferences, openPlayerOnSongSelect: value === 'player' })}
+                />
+                <p className={`text-xs leading-relaxed ${textMuted}`}>
+                  从播放页返回时会回到进入前的界面（歌单/电台弹窗、滚动位置原样保留），探索页不会重新加载。
+                </p>
               </section>
 
               {/* 全局设置（镜像）：读写在 services/globalSettingsRegistry，与简约模式设置同键同事件。

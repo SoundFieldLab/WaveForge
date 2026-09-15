@@ -20,17 +20,26 @@ describe('mode integration wiring', () => {
     expect(app).toContain('const mixingStudioAudio = showMixingStudio ? audioPlayer.getAudioElement() : null')
     expect(app).toContain('sourceUrl: mixingStudioAudio?.src || undefined')
     expect(app).toContain('调音室是全模式共享弹层')
-    expect(app).not.toContain("setEnteredFromMode('explore')")
+    // 探索页进入播放页：探索页保持挂载（覆盖层模式），返回不重载
+    expect(app).toContain("const exploreKeptAlive = isPlaybackPage && enteredFromMode === 'explore' && viewMode === 'explore'")
+    expect(app).toContain('motionSuspended={exploreKeptAlive}')
   })
 
   it('keeps Explore song selection in place with its mini player', () => {
     const app = source('App.tsx')
     const explore = source('components/ExploreView.tsx')
+    const settingsPanel = source('components/ExploreSettingsPanel.tsx')
     expect(app).toContain("const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore')")
-    expect(app).toContain("if (viewMode !== 'minimal' && (!playsInPlace || isRadioSelection))")
+    expect(app).toContain("const exploreRadioOverlay = isRadioSelection && originMode === 'explore'")
+    expect(app).toContain("if (viewMode !== 'minimal' && !playsInPlace && !exploreRadioOverlay)")
     expect(app).toContain("if (originMode === 'explore')")
     expect(app).toContain('setShowHome(true)')
     expect(app).toContain('} else if (!playsInPlace) {')
+    // 新增导航偏好：点击歌曲可直接进入播放页（探索页保持挂载，返回原样呈现）
+    expect(settingsPanel).toContain('openPlayerOnSongSelect')
+    expect(app).toContain('exploreOpenPlayerPref')
+    // 歌单详情选歌后不再自动关闭，方便继续挑歌
+    expect(explore).toContain('歌单详情覆盖层保持打开')
     expect(explore).toContain("continuation: 'explore-infinite'")
     expect(explore).toContain('show={Boolean(currentSong) && !detailOpen}')
     expect(explore).toContain('onClick={onOpenPlayer}')
