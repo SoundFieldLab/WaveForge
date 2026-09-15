@@ -313,11 +313,10 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
   const name = displayString(attributes.name) || displayString(attributes.title) || displayString(notes?.name)
   if (!name && !resource?.id) return null
   const playParams = attributes.playParams || {}
-  // 个人电台（ra.u-）在开启隐私保护时全局显示为「**的歌单」。
+  // 个人电台（ra.u-）在开启隐私保护时全局显示为「**的电台」。
   const rawName = name || displayString(attributes.title)
   const safeName = type === 'stations' ? protectStationName(rawName || '', String(resource.id || '')) : rawName
-  // 策展人（类别浏览）官网标题用 shortName，完整名放在副标题。
-  const displayName = type === 'curators' ? (attributes.shortName || safeName) : safeName
+  const displayName = safeName
   const motion = extractMotionArtwork(resource, 600, displayKind)
   const playParamsFields = sanitizeAppleRadioPlayParams(playParams)
   return {
@@ -327,7 +326,8 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
     name: displayName,
     subtitle: type === 'songs' || type === 'albums' ? attributes.artistName
       : type === 'playlists' ? attributes.curatorName
-        : type === 'curators' ? (attributes.name || 'Apple Music')
+        // 策展人：卡片标题用 name 短名，品牌全名（shortName）放副标题。
+        : type === 'curators' ? (attributes.shortName || safeName || 'Apple Music')
           : attributes.radioShowName || displayString(notes?.short) || attributes.editorialNotes?.short,
     description: displayString(notes?.tagline) || displayString(notes?.short) || attributes.description?.short || attributes.description?.standard || attributes.editorialNotes?.short || attributes.editorialNotes?.standard,
     artworkUrl: presentation.artworkUrl || art(attributes),
@@ -371,25 +371,32 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
 
 /**
  * 从 resource 提取动态封面（editorialVideo.motion*.video=.m3u8 + previewFrame.url 静态帧）。
- * 实测键：motionDetailSquare / motionDetailTall / motionSquareVideo1x1 / motionTallVideo3x4 / motionWideVideo21x9。
+ * 实测键：motionDetailSquare / motionDetailTall / motionSquareVideo1x1 / motionTallVideo3x4 / motionWideVideo21x9 / motionHero。
+ * card（plainEditorialCard）与 attributes 两个 editorialVideo 源按 motion 键合并（同键 card 优先），
+ * 再按 displayKind 偏好顺序扫描，未列出的键兜底在后。
  */
 function extractMotionArtwork(resource: any, size = 600, displayKind?: string): { video?: string; poster?: string } {
   try {
     const attributes = resource?.attributes || {}
     const presentation = extractEditorialPresentation(resource, displayKind)
     const sources = [presentation.card?.editorialVideo, attributes.editorialVideo]
+    const merged: Record<string, any> = {}
+    for (const ev of sources) {
+      if (!ev || typeof ev !== 'object') continue
+      for (const [key, node] of Object.entries(ev as Record<string, any>)) {
+        if (node && typeof node === 'object' && !merged[key]) merged[key] = node
+      }
+    }
     const keys = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
       ? ['motionDetailTall', 'motionTallVideo3x4', 'motionHero', 'motionWideVideo21x9', 'motionDetailSquare', 'motionSquareVideo1x1', 'motionArtistSquare']
       : ['motionDetailSquare', 'motionSquareVideo1x1', 'motionArtistSquare', 'motionDetailTall', 'motionTallVideo3x4', 'motionWideVideo21x9', 'motionHero']
-    for (const ev of sources) {
-      for (const key of keys) {
-        const node = ev?.[key]
-        const video = node?.video
-        if (typeof video === 'string' && /\.m3u8(?:$|[?#])/i.test(video)) {
-          const frameUrl = node?.previewFrame?.url || ''
-          const poster = typeof frameUrl === 'string' && frameUrl ? toHighResArtwork(frameUrl, size) : ''
-          return { video, poster: poster || undefined }
-        }
+    for (const key of [...keys, ...Object.keys(merged).filter(k => !keys.includes(k))]) {
+      const node = merged[key]
+      const video = node?.video
+      if (typeof video === 'string' && /\.m3u8(?:$|[?#])/i.test(video)) {
+        const frameUrl = node?.previewFrame?.url || ''
+        const poster = typeof frameUrl === 'string' && frameUrl ? toHighResArtwork(frameUrl, size) : ''
+        return { video, poster: poster || undefined }
       }
     }
     return {}

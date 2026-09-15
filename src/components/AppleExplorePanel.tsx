@@ -95,7 +95,7 @@ function AppleExploreImage(props: React.ComponentProps<typeof CachedImage>) {
 
 /** 动态封面（web powerswoosh 同款）：HLS 流 → hls.js 播放；失败/无则静态帧/静态图 */
 function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; className?: string; iconClassName?: string }) {
-  const [videoFailed, setVideoFailed] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false)
+  const [videoFailed, setVideoFailed] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const motionHls = item.motionArtworkUrl
   useEffect(() => {
@@ -292,25 +292,16 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
     const [motion, setMotion] = useState<{ video?: string; poster?: string } | null | undefined>(
     item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined,
   )
-  const [reducedMotion, setReducedMotion] = useState(false)
   const itemKey = `${storefront}:${item.type}:${item.playId || item.id}`
   useEffect(() => {
     setMotion(item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined)
   }, [itemKey, item.motionArtworkUrl, item.motionPosterUrl])
-  const active = visible && pageVisible && !reducedMotion
+  const active = visible && pageVisible
 
   useEffect(() => {
     const onVisibility = () => setPageVisible(!document.hidden)
     document.addEventListener('visibilitychange', onVisibility)
     return () => document.removeEventListener('visibilitychange', onVisibility)
-  }, [])
-
-  useEffect(() => {
-    const query = window.matchMedia?.('(prefers-reduced-motion: reduce)')
-    const update = () => setReducedMotion(Boolean(query?.matches))
-    update()
-    query?.addEventListener?.('change', update)
-    return () => query?.removeEventListener?.('change', update)
   }, [])
 
   useEffect(() => {
@@ -322,13 +313,13 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   }, [])
 
   useEffect(() => {
-    if (!visible || motion !== undefined || reducedMotion || !item.playId || !isMotionResourceType(item.type)) return
+    if (!visible || motion !== undefined || !item.playId || !isMotionResourceType(item.type)) return
     let cancelled = false
     void loadResourceMotion(item.type, item.playId, storefront).then(result => {
       if (!cancelled) setMotion(result)
     }).catch(() => { if (!cancelled) setMotion(null) })
     return () => { cancelled = true }
-  }, [item.playId, item.type, motion, reducedMotion, storefront, visible])
+  }, [item.playId, item.type, motion, storefront, visible])
 
   return (
     <div
@@ -337,7 +328,7 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
     >
       {/* 静态层固定用作品封面（不用动态封面预览帧），避免动态数据到达后画面自行"变一下"。 */}
       <AppleExploreImage src={item.artworkUrl || motion?.poster || ''} alt={item.name} className="h-full w-full object-cover" role="card" />
-      {motion?.video && !reducedMotion && (
+      {motion?.video && (
         <AnimatedArtworkCover
           videoUrl={motion.video}
           posterUrl={motion.poster}
@@ -345,6 +336,7 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
           active={active}
           className="absolute inset-0 h-full w-full"
           objectFit="cover"
+          onError={() => setMotion(null)}
         />
       )}
       {!item.artworkUrl && !motion?.poster && <div className="absolute inset-0 flex items-center justify-center bg-white/[0.06]"><MusicGlyph className={iconClassName || 'h-7 w-7 opacity-40'} /></div>}

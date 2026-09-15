@@ -4585,6 +4585,7 @@ ipcMain.handle('apple-playback', guardTrustedIpc('privileged', async (_event, pa
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'X-Apple-Music-User-Token': String(mediaUserToken),
+    'Media-User-Token': String(mediaUserToken),
       Origin: 'https://music.apple.com',
       Referer: 'https://music.apple.com/',
     }
@@ -4657,6 +4658,7 @@ ipcMain.handle('apple-play-assets', guardTrustedIpc('privileged', async (_event,
     Authorization: `Bearer ${developerToken}`,
     Accept: 'application/json',
     'X-Apple-Music-User-Token': String(mediaUserToken),
+    'Media-User-Token': String(mediaUserToken),
     Origin: 'https://music.apple.com',
     Referer: 'https://music.apple.com/',
   }

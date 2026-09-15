@@ -8,7 +8,8 @@
  * 数据链路（依据 MusicKit JS v3 SDK 逆向成果）：
  * 1. POST play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback
  *    body: {"salableAdamId":"<catalogSongId>"}
- *    headers: Authorization: Bearer <developerToken> + X-Apple-Music-User-Token
+ *    headers: Authorization: Bearer <developerToken> + Media-User-Token（标准头，
+ *    与 X-Apple-Music-User-Token 并发以提高私有端点兼容性）
  *    响应 songList[0] 直接携带：songId、HLS 主清单（attributes.assetUrl /
  *    offers[0].hlsUrl）与 EME keyURLs（hls-key-cert-url / hls-key-server-url /
  *    widevine-cert-url）
@@ -157,6 +158,7 @@ async function runWebPlaybackRequest(
           Accept: 'application/json',
           'Content-Type': 'application/json',
           'X-Apple-Music-User-Token': mediaUserToken,
+          'Media-User-Token': mediaUserToken,
           Origin: 'https://music.apple.com',
           Referer: 'https://music.apple.com/',
         },
@@ -461,6 +463,7 @@ async function runPlayAssetsRequest(
           Authorization: `Bearer ${developerToken}`,
           Accept: 'application/json',
           'X-Apple-Music-User-Token': mediaUserToken,
+          'Media-User-Token': mediaUserToken,
           Origin: 'https://music.apple.com',
           Referer: 'https://music.apple.com/',
         },
