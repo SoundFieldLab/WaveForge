@@ -661,14 +661,17 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     return { success: true }
   })
 
-  ipcMain.handle('analysis:clear-cache', () => {
+  function clearCache() {
     for (const root of [trackRoot, legacyBeatRoot]) {
       if (!isInsideCache(root)) return { success: false, error: 'invalid cache directory' }
       fs.rmSync(root, { recursive: true, force: true })
     }
     ensureDirectories()
+    audioDownload.cleanupOldFiles(0)
     return { success: true }
-  })
+  }
+
+  ipcMain.handle('analysis:clear-cache', () => clearCache())
   
   // Cleanup on app quit
   const handleWillQuit = () => {
@@ -688,6 +691,7 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     cacheRoot, 
     runtimeStatus, 
     cleanupRenderCache,
+    clearCache,
     startPythonWorker,
     cleanupWorker,
     audioDownload

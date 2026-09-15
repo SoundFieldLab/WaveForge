@@ -186,28 +186,45 @@ class StemRuntime {
     return false
   }
 
-  async clearCache() {
-    for (const job of this.queue.splice(0)) this._settle(job, new Error('Stem cache cleared'))
-    if (this.active) {
-      this.active.cancelled = true
-      this.worker?.kill()
-      const deadline = Date.now() + 3000
-      while (this.active && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
-    }
-    let cleared = 0
+  getCacheStats() {
+    let count = 0
+    let size = 0
     for (const entry of fs.readdirSync(this.cacheDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name === '.tmp') continue
+      try { count++; size += directorySize(path.join(this.cacheDir, entry.name)) } catch {}
+    }
+    return { count, size, totalSize: size, maxBytes: this.cacheMaxBytes, cachePath: this.cacheDir }
+  }
+
+  async clearCache() {
+    const protectedKeys = new Set([
+      ...this.queue.flatMap(job => job.cacheKeys),
+      ...(this.active?.cacheKeys || []),
+    ])
+    let cleared = 0
+    for (const entry of fs.readdirSync(this.tempDir, { withFileTypes: true })) {
+      const target = path.join(this.tempDir, entry.name)
+      if (this.active?.tempRunDir === target) continue
+      try { fs.rmSync(target, { recursive: entry.isDirectory(), force: true }) } catch {}
+    }
+    for (const entry of fs.readdirSync(this.cacheDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name === '.tmp' || protectedKeys.has(entry.name)) continue
       fs.rmSync(path.join(this.cacheDir, entry.name), { recursive: true, force: true })
       cleared++
     }
-    return { success: true, cleared }
+    return { success: true, cleared, skippedActive: protectedKeys.size }
   }
 
   cleanupCache(now = Date.now()) {
+    const protectedKeys = new Set([
+      ...this.queue.flatMap(job => job.cacheKeys),
+      ...(this.active?.cacheKeys || []),
+    ])
     const entries = []
     for (const entry of fs.readdirSync(this.cacheDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name === '.tmp') continue
       const target = path.join(this.cacheDir, entry.name)
+      if (protectedKeys.has(entry.name)) continue
       try {
         const stats = fs.statSync(target)
         if (now - stats.mtimeMs > this.cacheTtlMs) {
@@ -329,6 +346,7 @@ class StemRuntime {
   async _run(job) {
     this.cleanupCache()
     const runDir = fs.mkdtempSync(path.join(this.tempDir, 'run-'))
+    job.tempRunDir = runDir
     const configs = job.requests.map((request, index) => {
       const outputDir = path.join(runDir, `output-${index}`)
       fs.mkdirSync(outputDir)
@@ -363,6 +381,7 @@ class StemRuntime {
       ))
     } finally {
       fs.rmSync(runDir, { recursive: true, force: true })
+      job.tempRunDir = null
     }
   }
 

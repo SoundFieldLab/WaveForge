@@ -23,6 +23,8 @@ for (const stream of [process.stdout, process.stderr]) {
 // Avoid spawning chcp/cmd.exe here. Electron is a GUI process, and the child
 // console can flash visibly whenever the main process is initialized.
 const { app, BrowserWindow, ipcMain, protocol, shell, session, safeStorage, dialog, globalShortcut, clipboard, utilityProcess, net, nativeImage } = require('electron')
+const LOCAL_API_SERVICE = 'waveforge-local-api'
+const LOCAL_API_PROTOCOL_VERSION = 1
 const path = require('path')
 const fs = require('fs')
 const crypto = require('crypto')
@@ -955,7 +957,6 @@ function createDesktopPlayerWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'desktop-player-preload.cjs'),
       backgroundThrottling: false,
-      cache: false,
     },
   })
 
@@ -1146,7 +1147,6 @@ function createDesktopLyricsWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'desktop-lyrics-preload.cjs'),
       backgroundThrottling: false,
-      cache: false,
     },
   })
 
@@ -2113,8 +2113,11 @@ function updateTaskbarWidget() {
   const song = desktopPlayerState.song || {}
   const lyric = desktopPlayerState.lyric || null
   const { nativeTheme } = require('electron')
-  // 内容键：歌曲/播放态/歌词行/静音/主题变化必须立即推送，仅进度变化时允许节流
-  const contentKey = `${song.name}|${desktopPlayerState.playing === true}|${desktopPlayerState.live === true}|${lyric?.line || ''}|${desktopPlayerState.muted === true}|${nativeTheme.shouldUseDarkColors}`
+  // 内容键：歌曲/封面/播放态/歌词行/静音/主题变化必须立即推送，仅进度变化时允许节流。
+  // revision 兼容未来同 URL 封面内容刷新；当前 song 未提供时为空字符串。
+  const coverUrl = song.coverUrl || ''
+  const coverRevision = song.coverRevision ?? song.coverRev ?? song.revision ?? ''
+  const contentKey = `${song.name}|${coverUrl}|${coverRevision}|${desktopPlayerState.playing === true}|${desktopPlayerState.live === true}|${lyric?.line || ''}|${desktopPlayerState.muted === true}|${nativeTheme.shouldUseDarkColors}`
   const now = Date.now()
   if (contentKey === taskbarWidgetLastSendKey && now - taskbarWidgetLastSendAt < TASKBAR_WIDGET_SEND_THROTTLE_MS) {
     return
@@ -2124,7 +2127,8 @@ function updateTaskbarWidget() {
   const payload = {
     title: song.name || '',
     artist: Array.isArray(song.artists) ? song.artists.join(' / ') : (song.artists || ''),
-    cover: song.coverUrl || '',
+    cover: coverUrl,
+    coverRevision,
     playing: desktopPlayerState.playing === true,
     live: desktopPlayerState.live === true,
     cur: desktopPlayerState.live === true ? 0 : Number(desktopPlayerState.progress) || 0,
@@ -2562,6 +2566,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
       paintWhenInitiallyHidden: true,  // 软件合成下隐藏时也持续绘制，避免显示时首帧空白
       backgroundThrottling: false, // Chroma 后台联动；各可视化仍由订阅者/可见性自行门控
+      webviewTag: true, // 网易云探索页的站内网页面板需要内嵌 webview（替代跳系统浏览器）
     },
   })
 
@@ -4492,6 +4497,17 @@ ipcMain.handle('kugou-scrape-user-info', async () => {
   }
 })
 
+// 读取登录窗口持久化的 Apple 网页会话 Cookie；仅用于 editorial 请求的会话校验，不记录 Cookie 内容。
+function readAppleWebCookieHeader() {
+  try {
+    const file = path.join(app.getPath('userData'), 'apple-web-cookies.json')
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return typeof data?.cookie === 'string' ? data.cookie : ''
+  } catch {
+    return ''
+  }
+}
+
 // ── Apple Music amp-api 代理（Cider mkv3 同款思路）──────────────────────────
 // 渲染进程浏览器直连 amp-api.music.apple.com 会被 CORS 拦截（Failed to fetch）。
 // 改为渲染进程请求主进程 → 主进程 fetch（无 CORS）→ 返回 JSON。登录/资料库/目录全部走这里。
@@ -4516,14 +4532,25 @@ ipcMain.handle('apple-api', guardTrustedIpc('privileged', async (event, payload)
       Accept: 'application/json',
     }
     if (mediaUserToken) headers['Media-User-Token'] = mediaUserToken
+    if (apiPath.startsWith('/v1/editorial/')) {
+      const cookie = readAppleWebCookieHeader()
+      if (cookie) headers.Cookie = cookie
+    }
     if (body !== undefined && body !== null) headers['Content-Type'] = 'application/json'
-    const response = await fetch(`https://amp-api.music.apple.com${apiPath}`, {
+    const appleApiHost = apiPath.startsWith('/v1/editorial/')
+      ? 'https://amp-api-edge.music.apple.com'
+      : 'https://amp-api.music.apple.com'
+    const response = await fetch(`${appleApiHost}${apiPath}`, {
       method: safeMethod,
       headers,
       body: body !== undefined && body !== null ? body : undefined,
       signal: controller.signal,
     })
     const text = await response.text()
+    // 逐条请求日志只在显式开启调试时输出，避免刷屏（探索页一次加载会发上百个 amp-api 请求）。
+    if (process.env.WAVEFORGE_DEBUG_APPLE === '1') {
+      console.log(`[AppleWeb] editorial proxy status=${response.status} host=${appleApiHost} bytes=${text.length}`)
+    }
     let data = null
     try {
       data = text ? JSON.parse(text) : null
@@ -7507,6 +7534,24 @@ async function sweepBackendOrphans(reason) {
   }
 }
 
+async function waitForLocalApiReady(timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch('http://127.0.0.1:3001/health', {
+        headers: { 'X-WaveForge-Local-Token': LOCAL_SERVICE_TOKEN },
+        signal: AbortSignal.timeout(350),
+      })
+      const body = await response.json()
+      if (response.ok && body?.service === LOCAL_API_SERVICE && body?.protocolVersion === LOCAL_API_PROTOCOL_VERSION) return true
+    } catch {
+      // The utility process is still loading modules or binding its port.
+    }
+    await new Promise(resolve => setTimeout(resolve, 80))
+  }
+  return false
+}
+
 async function startLocalBackend() {
   if (!app.isPackaged) return // 开发模式由 dev-electron.mjs 启动
   if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1') return
@@ -7536,6 +7581,9 @@ async function startLocalBackend() {
       localApiChild = null
     })
     console.log('[LocalAPI] starting local-server.mjs via utilityProcess')
+    if (!await waitForLocalApiReady()) {
+      console.warn('[LocalAPI] health check timed out; renderer will retry requests normally')
+    }
   } catch (error) {
     console.error('[LocalAPI] failed to start:', error)
   }
@@ -7761,10 +7809,16 @@ app.whenReady().then(async () => {
   })
 
   // Electron 本地服务请求认证：token 只存在于主进程和受控子进程环境，renderer 无法读取。
+  // 仅 WaveForge 自身的四个窗口可以携带 token；登录和远端窗口不在此集合中。
+  const getTrustedWaveForgeWindowIds = () => new Set(
+    [mainWindow, desktopPlayerWindow, desktopLyricsWindow, taskbarWidgetWindow]
+      .filter(win => win && !win.isDestroyed())
+      .map(win => win.webContents.id),
+  )
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['http://localhost:3001/*', 'http://127.0.0.1:3001/*', 'http://localhost:3002/*', 'http://127.0.0.1:3002/*', 'http://localhost:3003/*', 'http://127.0.0.1:3003/*', 'http://localhost:3004/*', 'http://127.0.0.1:3004/*'] },
     (details, callback) => {
-      if (mainWindow && details.webContentsId === mainWindow.webContents.id) {
+      if (getTrustedWaveForgeWindowIds().has(details.webContentsId)) {
         beginPythonServiceRequest(details)
         details.requestHeaders['X-WaveForge-Local-Token'] = LOCAL_SERVICE_TOKEN
       }
@@ -7836,7 +7890,7 @@ app.whenReady().then(async () => {
   
   // 启动生产版常驻本地 API（3001）。Python 3002/3003/3004 由 renderer 请求前 ensure；
   // 开发模式继续由 scripts/dev-electron.mjs 预启动全部服务。
-  startLocalBackend()
+  await startLocalBackend()
   
   // 传入缓存路径给 analysis runtime。
   // 延迟到 setImmediate 初始化：createAnalysisRuntime 内部 AudioDownloadService 构造时会
@@ -8091,6 +8145,43 @@ app.whenReady().then(async () => {
       return { success: true }
     }
     return { success: false }
+  }))
+
+  // 统一缓存入口：聚合各运行时的统计并按运行时自己的活跃任务保护规则清理。
+  ipcMain.handle('cache:get-stats', guardTrustedIpc('privileged', async () => {
+    const caches = {}
+    if (analysisRuntime?.audioDownload) caches.audio = analysisRuntime.audioDownload.getCacheStats()
+    if (analysisRuntime) {
+      let analysis = { fileCount: 0, totalSize: 0, cachePath: analysisRuntime.cacheRoot }
+      for (const root of [path.join(analysisRuntime.cacheRoot, 'tracks'), path.join(analysisRuntime.cacheRoot, 'beat_analysis')]) {
+        if (!fs.existsSync(root)) continue
+        for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+          if (!entry.isFile()) continue
+          try { analysis.fileCount++; analysis.totalSize += fs.statSync(path.join(root, entry.name)).size } catch {}
+        }
+      }
+      caches.analysis = analysis
+    }
+    try { caches.render = await require('./render-runtime.cjs').getRenderRuntime(configManager.getCachePath()).getCacheStats() } catch {}
+    if (stemRuntime?.getCacheStats) caches.stems = stemRuntime.getCacheStats()
+    if (trackStemRuntime?.getCacheStats) caches.trackStems = trackStemRuntime.getCacheStats()
+    const totalSize = Object.values(caches).reduce((sum, stats) => sum + Number(stats.totalSize ?? stats.size ?? 0), 0)
+    const fileCount = Object.values(caches).reduce((sum, stats) => sum + Number(stats.fileCount ?? stats.count ?? 0), 0)
+    return { fileCount, totalSize, caches }
+  }))
+
+  ipcMain.handle('cache:clear', guardTrustedIpc('privileged', async () => {
+    const results = {}
+    if (analysisRuntime?.audioDownload) {
+      analysisRuntime.audioDownload.clearLocalAuthorizations()
+      analysisRuntime.audioDownload.cleanupAll()
+      results.audio = { success: true }
+    }
+    if (analysisRuntime) results.analysis = analysisRuntime.clearCache?.() || { success: false }
+    try { results.render = await require('./render-runtime.cjs').getRenderRuntime(configManager.getCachePath()).clearCache() } catch (error) { results.render = { success: false, error: error.message } }
+    if (stemRuntime?.clearCache) results.stems = await stemRuntime.clearCache()
+    if (trackStemRuntime?.clearCache) results.trackStems = await trackStemRuntime.clearCache()
+    return { success: Object.values(results).every(result => result?.success !== false), results }
   }))
 
 

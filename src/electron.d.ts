@@ -787,6 +787,7 @@ export interface DesktopPlayerSongInfo {
   name: string
   artists: string
   coverUrl: string
+  coverRevision?: string
 }
 
 export interface DesktopPlayerLyricWord {

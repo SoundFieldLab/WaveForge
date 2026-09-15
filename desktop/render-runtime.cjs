@@ -89,6 +89,7 @@ class RenderRuntime {
     this.workerReady = false
     this.workerStartPromise = null
     this.pendingRequests = new Map()
+    this.activeOutputPaths = new Set()
     this.messageId = 0
     this.idleTimer = null
     this.cacheDir = null
@@ -358,12 +359,15 @@ class RenderRuntime {
    * Render a transition
    */
   async renderTransition(plan, sourceAudioPath, targetAudioPath, progressCallback) {
+    let activeOutputPath = null
     try {
       this._validateRenderInput(plan, sourceAudioPath, targetAudioPath)
       // Generate cache key
       const cacheKey = this._generateCacheKey(plan, sourceAudioPath, targetAudioPath)
       const outputPath = path.join(this.cacheDir, `${cacheKey}.wav`)
       const metaPath = `${outputPath}.json`
+      activeOutputPath = outputPath
+      this.activeOutputPaths.add(outputPath)
       automixLog.log('render:entry', [
         `strategy=${plan.strategy}`,
         `aiMix=${plan.v2?.aiMix === true}`,
@@ -468,6 +472,8 @@ class RenderRuntime {
       automixLog.log('render:error', `strategy=${plan?.strategy} error=${String(error?.message || error)}`)
       console.error('[Render Runtime] Render failed:', error)
       throw error
+    } finally {
+      if (activeOutputPath) this.activeOutputPaths.delete(activeOutputPath)
     }
   }
 
@@ -551,10 +557,11 @@ class RenderRuntime {
     try {
       const files = fs.readdirSync(this.cacheDir, { withFileTypes: true })
       let cleared = 0
-      
       for (const file of files) {
         if (!file.isFile()) continue
-        fs.unlinkSync(path.join(this.cacheDir, file.name))
+        const target = path.join(this.cacheDir, file.name)
+        if (this.activeOutputPaths.has(target)) continue
+        fs.rmSync(target, { force: true })
         cleared++
       }
       
@@ -578,8 +585,9 @@ class RenderRuntime {
       
       for (const file of files) {
         if (!file.isFile()) continue
-        const stats = fs.statSync(path.join(this.cacheDir, file.name))
-        totalSize += stats.size
+        const target = path.join(this.cacheDir, file.name)
+        if (file.name.endsWith('.tmp') || this.activeOutputPaths.has(target)) continue
+        totalSize += fs.statSync(target).size
         count++
       }
       

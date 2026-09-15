@@ -95,8 +95,46 @@
 <script>
   const $ = (id) => document.getElementById(id)
   const bridge = window.taskbarWidget
-  const state = { playing: false, live: false, title: '', artist: '', cover: '', cur: 0, dur: 0, muted: false, lyric: null, theme: 'dark', accent: '#FB7299' }
+  const state = { playing: false, live: false, title: '', artist: '', cover: '', coverRevision: '', cur: 0, dur: 0, muted: false, lyric: null, theme: 'dark', accent: '#FB7299' }
   let mode = 'normal'
+  const COVER_PLACEHOLDER = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
+  const MAX_COVER_RETRIES = 1
+  let requestedCoverKey = ''
+  let coverRequest = 0
+
+  function showCoverPlaceholder() {
+    $('cover').innerHTML = COVER_PLACEHOLDER
+  }
+
+  function updateCover(nextUrl, revision, attempt = 0) {
+    const url = String(nextUrl || '')
+    const key = `${url}|${revision || ''}`
+    if (key === requestedCoverKey && attempt === 0) return
+    requestedCoverKey = key
+    const request = ++coverRequest
+    if (!url) {
+      showCoverPlaceholder()
+      return
+    }
+    const image = new Image()
+    image.alt = ''
+    image.draggable = false
+    const retry = () => {
+      if (request !== coverRequest) return
+      if (attempt < MAX_COVER_RETRIES) {
+        window.setTimeout(() => updateCover(url, revision, attempt + 1), 150)
+      } else {
+        requestedCoverKey = ''
+        showCoverPlaceholder()
+      }
+    }
+    image.onerror = retry
+    image.src = url
+    image.decode().then(() => {
+      if (request !== coverRequest || requestedCoverKey !== key) return
+      $('cover').replaceChildren(image)
+    }).catch(retry)
+  }
 
   // ── 逐字时序归一化 ──
   const FALLBACK_FIRST_WORD_DURATION_MS = 140; const clamp01 = (v) => Math.max(0, Math.min(1, v))
@@ -223,13 +261,8 @@
 
   function apply() {
     const hasSong = Boolean(state.title); document.body.classList.toggle('idle', !hasSong); document.body.classList.toggle('live', state.live === true)
-    const coverEl = $('cover'); coverEl.innerHTML = ''
-    if (hasSong) {
-      coverEl.innerHTML = ''
-      if (state.cover) { const img = document.createElement('img'); img.src = state.cover; img.onerror = () => { coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>' }; coverEl.appendChild(img) }
-      else coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
-    } else {
-      coverEl.innerHTML = '<svg class="placeholder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>'
+    updateCover(hasSong ? state.cover : '', state.coverRevision)
+    if (!hasSong) {
       const primary = $('linePrimary'); primary.textContent = ''; const span = document.createElement('span')
       span.textContent = 'WaveForge 音澜工坊'; span.style.background = 'linear-gradient(90deg, #FB7299, #7c6cff, #49d6e8, #FB7299)'; span.style.backgroundClip = 'text'; span.style.webkitBackgroundClip = 'text'; span.style.webkitTextFillColor = 'transparent'; span.style.backgroundSize = '300% 100%'; span.style.animation = 'brand-shimmer 3s linear infinite'; primary.appendChild(span)
       if (!document.getElementById('brand-keyframes')) { const s = document.createElement('style'); s.id = 'brand-keyframes'; s.textContent = '@keyframes brand-shimmer { 0% { background-position: 0% 50% } 100% { background-position: 300% 50% } }'; document.head.appendChild(s) }

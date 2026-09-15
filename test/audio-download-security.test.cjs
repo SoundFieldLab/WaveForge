@@ -58,6 +58,28 @@ test('rejects a cache junction or symlink that resolves outside the cache', asyn
   await assert.rejects(service.prepareAudioFile(escaped, 'escaped'), /not authorized/)
 })
 
+test('failed cache deletion keeps the index entry', t => {
+  const { cache, service } = fixture(t)
+  const cached = path.join(cache, 'indexed.wav')
+  fs.writeFileSync(cached, 'audio')
+  service.cacheIndex.set('indexed', { trackKey: 'indexed', filePath: cached, size: 5, timestamp: Date.now(), lastAccess: 0 })
+  service.activeCacheFiles.add(path.resolve(cached))
+  assert.equal(service.deleteCacheFile('indexed'), false)
+  assert.equal(service.cacheIndex.has('indexed'), true)
+  assert.equal(fs.existsSync(cached), true)
+})
+
+test('cleanup removes orphan tmp files but skips active downloads', t => {
+  const { cache, service } = fixture(t)
+  const orphan = path.join(cache, 'orphan.tmp')
+  const active = path.join(cache, 'active.tmp')
+  fs.writeFileSync(orphan, 'partial')
+  fs.writeFileSync(active, 'active')
+  service.activeCacheFiles.add(path.resolve(active))
+  service.cleanupOldFiles()
+  assert.equal(fs.existsSync(orphan), false)
+  assert.equal(fs.existsSync(active), true)
+})
 test('remote downloads are materialized inside the controlled cache', async t => {
   const { service } = fixture(t)
   const server = http.createServer((_request, response) => {

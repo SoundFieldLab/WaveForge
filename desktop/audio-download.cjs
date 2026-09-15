@@ -65,6 +65,7 @@ class AudioDownloadService {
     this.activeDownloads = new Map()
     this.forbiddenUntilByUrl = new Map()
     this.activeRequests = new Set()
+    this.activeCacheFiles = new Set()
     this.cacheIndex = new Map() // trackKey -> {filePath, size, timestamp, lastAccess}
     this.maxCacheSize = 2 * 1024 * 1024 * 1024 // 2GB
     this.cacheIndexFile = path.join(this.tempRoot, 'cache-index.json')
@@ -185,8 +186,7 @@ class AudioDownloadService {
       for (const file of sortedFiles) {
         if (freedSize >= targetFreeSize) break
         
-        this.deleteCacheFile(file.trackKey)
-        freedSize += file.size
+        if (this.deleteCacheFile(file.trackKey)) freedSize += file.size
       }
       
       console.log(`[AudioCache] Cleanup complete, freed ${this.formatSize(freedSize)}`)
@@ -198,7 +198,8 @@ class AudioDownloadService {
    */
   deleteCacheFile(trackKey) {
     const cached = this.cacheIndex.get(trackKey)
-    if (!cached) return
+    if (!cached) return false
+    if (this.activeCacheFiles.has(path.resolve(cached.filePath))) return false
 
     try {
       if (fs.existsSync(cached.filePath)) {
@@ -207,8 +208,10 @@ class AudioDownloadService {
       this.cacheIndex.delete(trackKey)
       this.saveCacheIndex()
       console.log(`[AudioCache] Deleted: ${trackKey}`)
+      return true
     } catch (error) {
       console.error('[AudioCache] Failed to delete file:', error)
+      return false
     }
   }
 
@@ -339,6 +342,7 @@ class AudioDownloadService {
         if (removePartial) {
           try { fs.unlinkSync(cacheFile) } catch {}
         }
+        this.activeCacheFiles.delete(path.resolve(cacheFile))
       }
 
       const fail = (error) => {
@@ -360,6 +364,7 @@ class AudioDownloadService {
         const ext = magicExt || headerExt || fallbackExt || 'mp3'
         const targetFile = path.join(this.tempRoot, `${hash}.${ext}`)
         cacheFile = targetFile
+        this.activeCacheFiles.add(path.resolve(cacheFile))
 
         if (fs.existsSync(targetFile)) {
           if (!this.isInsideTempRoot(targetFile)) {
@@ -576,9 +581,18 @@ class AudioDownloadService {
     let deletedCount = 0
     for (const [trackKey, entry] of this.cacheIndex) {
       if (!fs.existsSync(entry.filePath) || Number(entry.lastAccess || entry.timestamp || 0) < cutoff) {
-        this.deleteCacheFile(trackKey)
-        deletedCount++
+        if (this.deleteCacheFile(trackKey)) deletedCount++
       }
+    }
+    const indexedPaths = new Set(Array.from(this.cacheIndex.values(), entry => path.resolve(entry.filePath)))
+    for (const entry of fs.readdirSync(this.tempRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || entry.name === 'cache-index.json') continue
+      const target = path.join(this.tempRoot, entry.name)
+      const resolvedTarget = path.resolve(target)
+      if (this.activeCacheFiles.has(resolvedTarget)) continue
+      try {
+        if (entry.name.endsWith('.tmp') || !indexedPaths.has(resolvedTarget)) fs.rmSync(target, { force: true })
+      } catch {}
     }
     this.checkAndCleanupCache()
     return deletedCount
@@ -602,15 +616,19 @@ class AudioDownloadService {
       if (file === 'cache-index.json') continue
       
       try {
-        fs.unlinkSync(path.join(this.tempRoot, file))
+        const target = path.join(this.tempRoot, file)
+        if (this.activeCacheFiles.has(path.resolve(target))) continue
+        fs.unlinkSync(target)
         deletedCount++
       } catch (e) {
         // Ignore
       }
     }
     
-    // Clear cache index
-    this.cacheIndex.clear()
+    for (const [trackKey, entry] of this.cacheIndex) {
+      if (!fs.existsSync(entry.filePath) || this.activeCacheFiles.has(path.resolve(entry.filePath))) continue
+      this.cacheIndex.delete(trackKey)
+    }
     this.saveCacheIndex()
     
     console.log(`[AudioCache] Cleaned up ${deletedCount} cached files`)

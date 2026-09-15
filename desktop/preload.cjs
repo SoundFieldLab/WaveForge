@@ -228,6 +228,12 @@ contextBridge.exposeInMainWorld('electron', {
     clearCache: () => ipcRenderer.invoke('audio-download:clear-cache'),
   },
 
+  // 所有桌面音频/分析缓存的统一入口
+  cache: {
+    getStats: () => ipcRenderer.invoke('cache:get-stats'),
+    clear: () => ipcRenderer.invoke('cache:clear'),
+  },
+
   // 应用更新：后台静默下载 + 退出即应用 + 更新日志/版本历史
   update: {
     downloadAndInstall: (urls, sha256) =>
