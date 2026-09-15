@@ -1,6 +1,7 @@
 import type { MusicPlatform } from './platforms'
 import type { EntitlementTier } from '../utils/musicEntitlements'
 import { getApiBase } from './apiConfig'
+import { resolveArtworkUrl } from './artwork'
 const API_BASE = getApiBase()
 
 import { parseTTML } from '../utils/ttmlParser'
@@ -373,39 +374,9 @@ export interface LyricWord {
   duration: number // 持续时间（毫秒）
 }
 
-// 添加尺寸参数（网易云 CDN 支持）
-function addCoverSizeParam(url: string, size: number = 500): string {
-  if (!url || !/^https?:\/\//i.test(url)) return url
-  const param = `param=${size}y${size}`
-  if (/[?&]param=\d+y\d+/i.test(url)) {
-    return url.replace(/([?&])param=\d+y\d+/i, `$1${param}`)
-  }
-  return url + (url.indexOf('?') >= 0 ? '&' : '?') + param
-}
-
-// 图片代理（解决防盗链和CORS）
+// 图片代理（解决防盗链和 CORS）。尺寸与旧代理解包由统一 Artwork resolver 处理。
 export function getProxiedImageUrl(originalUrl: string, size: number = 500): string {
-  if (!originalUrl || !/^https?:\/\//i.test(originalUrl)) return ''
-
-  // CachedImage and API mappers may both normalize the same cover. Keep the
-  // operation idempotent so /api/cover never becomes nested inside itself.
-  try {
-    const input = new URL(originalUrl)
-    const proxy = new URL(`${API_BASE}/cover`)
-    if (input.origin === proxy.origin && input.pathname === proxy.pathname) {
-      return originalUrl
-    }
-  } catch {
-    return originalUrl
-  }
-  
-  // QQ音乐和网易云都需要代理
-  const urlWithSize = addCoverSizeParam(originalUrl, size)
-  
-  // 检查开发者模式
-  const devMode = localStorage.getItem('developerMode') === 'true'
-  
-  return `${API_BASE}/cover?url=${encodeURIComponent(urlWithSize)}&devMode=${devMode}`
+  return resolveArtworkUrl(originalUrl, { size })
 }
 
 export function getProxiedAudioUrl(originalUrl: string): string {

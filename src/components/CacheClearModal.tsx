@@ -3,9 +3,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Trash2, FolderOpen, ListMusic, AlertCircle, HardDrive, Clock, Check, Image as ImageIcon } from 'lucide-react'
 import { cacheManager } from '../services/cacheManager'
 import { indexedDBCache } from '../services/indexedDBCache'
+import { clearArtworkMemoryCache } from '../services/artworkLoader'
 import { clearUserPlaylistsMemoryCache } from '../services/playlistService'
 import GlobalToast from './GlobalToast'
 import { useTvBack } from '../tv/tvCore'
+import { isDesktop } from '../platform'
 
 interface CacheClearModalProps {
   show: boolean
@@ -49,6 +51,8 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     analysisSize: 0,
     transitionCount: 0,
     transitionSize: 0,
+    metadataCount: 0,
+    metadataSize: 0,
     totalSize: 0
   })
   
@@ -68,6 +72,8 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
   
   // 清理所有缓存的二次确认状态
   const [clearAllConfirm, setClearAllConfirm] = useState(false)
+  const [busyTarget, setBusyTarget] = useState<string | null>(null)
+  const [failedTargets, setFailedTargets] = useState<string[]>([])
   const clearAllTimerRef = useRef<NodeJS.Timeout | null>(null)
   
   const showToastMessage = (message: string) => {
@@ -102,13 +108,13 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       setAutoClearSettings(cacheManager.getAutoClearSettings())
       setDaysUntilNextClear(cacheManager.getDaysUntilNextClear())
       
-      // Get cache directory from Electron config
-      if (window.electron?.config) {
-        window.electron.config.getCachePath().then(path => {
-          setCacheDir(path)
-        }).catch(err => {
+      if (isDesktop() && window.electron?.config) {
+        window.electron.config.getCachePath().then(setCacheDir).catch(err => {
           console.error('Failed to get cache path:', err)
+          setCacheDir('')
         })
+      } else {
+        setCacheDir('')
       }
       
     }
@@ -126,8 +132,11 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
   }, [])
   
   const refreshStats = async () => {
-    const localStats = cacheManager.getCacheStats()
-    const indexedStats = await indexedDBCache.getCacheStats().catch(() => ({ coverCount: 0, coverSize: 0, playlistCount: 0, playlistSize: 0, lyricsCount: 0, lyricsSize: 0 }))
+    const [localStats, indexedStats, metadataStats] = await Promise.all([
+      Promise.resolve(cacheManager.getCacheStats()),
+      indexedDBCache.getCacheStats().catch(() => ({ coverCount: 0, coverSize: 0, playlistCount: 0, playlistSize: 0, lyricsCount: 0, lyricsSize: 0, metadataCount: 0, metadataSize: 0 })),
+      cacheManager.getMetadataCacheStats().catch(() => ({ count: 0, size: 0 })),
+    ])
     const audioStats = await window.electron?.audioDownload?.getStats().catch(() => null) || null
     const analysisStats = await window.electron?.analysis?.getCacheStats().catch(() => null) || null
     const transitionStats = await window.electron?.render?.getCacheStats().catch(() => null) || null
@@ -152,100 +161,82 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       analysisSize: analysisStats?.totalSize || 0,
       transitionCount: (transitionStats?.count || 0) + (trackStemStats?.count || 0),
       transitionSize: (transitionStats?.size || 0) + (trackStemStats?.size || 0),
-      totalSize: coverSize + localStats.playlistSize + indexedStats.playlistSize + indexedStats.lyricsSize + localStats.errorLogSize
+      metadataCount: metadataStats.count,
+      metadataSize: metadataStats.size,
+      totalSize: coverSize + localStats.playlistSize + indexedStats.playlistSize + indexedStats.lyricsSize + metadataStats.size + localStats.errorLogSize
         + (audioStats?.totalSize || 0) + (analysisStats?.totalSize || 0) + (transitionStats?.size || 0) + (trackStemStats?.size || 0),
     })
   }
 
-  const handleClearCovers = async () => {
+  const runTarget = async (target: string, action: () => Promise<void> | void, success: string) => {
+    if (busyTarget) return
+    setBusyTarget(target)
+    setFailedTargets(previous => previous.filter(item => item !== target))
     try {
-      cacheManager.clearCovers()
-      await indexedDBCache.clearCovers()
+      await action()
       await refreshStats()
-      showToastMessage('封面缓存清理成功')
+      showToastMessage(success)
     } catch (error) {
-      console.error('Failed to clear cover cache:', error)
-      showToastMessage('封面缓存清理失败')
-    }
-  }
-  
-  const handleClearPlaylists = async () => {
-    try {
-      cacheManager.clearPlaylists()
-      clearUserPlaylistsMemoryCache()
-      await indexedDBCache.clearPlaylists()
-      await refreshStats()
-      showToastMessage('歌单列表缓存清理成功')
-    } catch (error) {
-      console.error('Failed to clear playlist cache:', error)
-      showToastMessage('歌单列表缓存清理失败')
+      console.error(`缓存清理失败 [${target}]:`, error)
+      setFailedTargets(previous => previous.includes(target) ? previous : [...previous, target])
+      showToastMessage(`${target}清理失败，可重试`)
+    } finally {
+      setBusyTarget(null)
     }
   }
 
-  const handleClearLyrics = async () => {
-    try {
-      window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
-      await indexedDBCache.clearLyrics()
-      await refreshStats()
-      showToastMessage('歌词缓存清理成功')
-    } catch (error) {
-      console.error('Failed to clear lyrics cache:', error)
-      showToastMessage('歌词缓存清理失败')
-    }
-  }
-  
-  const handleClearErrorLogs = () => {
-    cacheManager.clearErrorLogs()
-    refreshStats()
-    showToastMessage('错误日志清理成功')
-  }
-  
+  const handleClearCovers = async () => runTarget('封面', async () => {
+    cacheManager.clearCovers()
+    clearArtworkMemoryCache()
+    await indexedDBCache.clearCovers()
+  }, '封面缓存清理成功')
+
+  const handleClearPlaylists = async () => runTarget('歌单列表', async () => {
+    cacheManager.clearPlaylists()
+    clearUserPlaylistsMemoryCache()
+    await indexedDBCache.clearPlaylists()
+  }, '歌单列表缓存清理成功')
+
+  const handleClearLyrics = async () => runTarget('歌词', async () => {
+    window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
+    await indexedDBCache.clearLyrics()
+  }, '歌词缓存清理成功')
+
+  const handleClearMetadata = async () => runTarget('歌曲信息', () => cacheManager.clearMetadata(), '歌曲信息缓存清理成功')
+
+  const handleClearErrorLogs = async () => runTarget('错误日志', () => cacheManager.clearErrorLogs(), '错误日志清理成功')
+
   const handleClearAudioCache = async () => {
-    if (window.electron?.audioDownload) {
-      try {
-        const result = await window.electron.audioDownload.clearCache()
-        if (!result.success) throw new Error('音频缓存清理失败')
-        await refreshStats()
-        showToastMessage('音频缓存清理成功')
-      } catch (err) {
-        console.error('Failed to clear audio cache:', err)
-        showToastMessage('音频缓存清理失败')
-      }
-    }
+    if (!window.electron?.audioDownload) return
+    await runTarget('音频', async () => {
+      const result = await window.electron!.audioDownload!.clearCache()
+      if (!result.success) throw new Error('音频缓存清理失败')
+    }, '音频缓存清理成功')
   }
 
   const handleClearAnalysisCache = async () => {
     if (!window.electron?.analysis) return
-    try {
-      const result = await window.electron.analysis.clearCache()
+    await runTarget('分析', async () => {
+      const result = await window.electron!.analysis!.clearCache()
       if (!result.success) throw new Error(result.error || '分析缓存清理失败')
-      await refreshStats()
-      showToastMessage('分析缓存清理成功')
-    } catch (err) {
-      console.error('Failed to clear analysis cache:', err)
-      showToastMessage('分析缓存清理失败')
-    }
+    }, '分析缓存清理成功')
   }
 
   const handleClearTransitionCache = async () => {
     if (!window.electron?.render) return
-    try {
+    await runTarget('过渡', async () => {
       window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
       const [renderResult, stemResult, trackStemResult] = await Promise.all([
-        window.electron.render.clearCache(),
-        window.electron.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
-        window.electron.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron!.render!.clearCache(),
+        window.electron!.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron!.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
       ])
       if (!renderResult.success || !stemResult.success || !trackStemResult.success) throw new Error('过渡音频缓存清理失败')
-      await refreshStats()
-      showToastMessage('过渡音频与分轨缓存清理成功')
-    } catch (err) {
-      console.error('Failed to clear transition cache:', err)
-      showToastMessage('过渡音频缓存清理失败')
-    }
+    }, '过渡音频与分轨缓存清理成功')
   }
   
   const handleClearAll = async () => {
+    if (busyTarget) return
     if (!clearAllConfirm) {
       // 第一次点击，进入确认状态
       setClearAllConfirm(true)
@@ -258,69 +249,51 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
         setClearAllConfirm(false)
       }, 5000)
     } else {
-      // 第二次点击，执行清理
-      let failed = false
+      const failed: string[] = []
+      setBusyTarget('全部')
+      setFailedTargets([])
       window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
       cacheManager.clearAll()
+      clearArtworkMemoryCache()
       clearUserPlaylistsMemoryCache()
       window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
-      try {
-        await indexedDBCache.clearAll()
-      } catch (err) {
-        failed = true
-        console.error('Failed to clear IndexedDB cache:', err)
-      }
-      
-      // Also clear audio cache
-      if (window.electron?.audioDownload) {
+      const clearTarget = async (target: string, action: () => Promise<unknown>) => {
         try {
-          const result = await window.electron.audioDownload.clearCache()
-          if (!result.success) throw new Error('音频缓存清理失败')
-        } catch (err) {
-          failed = true
-          console.error('Failed to clear audio cache:', err)
+          await action()
+        } catch (error) {
+          failed.push(target)
+          console.error(`缓存清理失败 [${target}]:`, error)
         }
+      }
+      await clearTarget('IndexedDB', () => indexedDBCache.clearAll())
+      await clearTarget('歌曲信息', () => cacheManager.clearMetadata())
+      if (window.electron?.audioDownload) {
+        await clearTarget('音频', async () => {
+          const result = await window.electron!.audioDownload!.clearCache()
+          if (!result.success) throw new Error('音频缓存清理失败')
+        })
       }
       if (window.electron?.analysis) {
-        try {
-          const result = await window.electron.analysis.clearCache()
+        await clearTarget('分析', async () => {
+          const result = await window.electron!.analysis!.clearCache()
           if (!result.success) throw new Error(result.error || '分析缓存清理失败')
-        } catch (err) {
-          failed = true
-          console.error('Failed to clear analysis cache:', err)
-        }
+        })
       }
       if (window.electron?.render) {
-        try {
-          const result = await window.electron.render.clearCache()
-          if (!result.success) throw new Error('过渡音频缓存清理失败')
-        } catch (err) {
-          failed = true
-          console.error('Failed to clear transition cache:', err)
-        }
+        await clearTarget('过渡', async () => {
+          const [renderResult, stemResult, trackStemResult] = await Promise.all([
+            window.electron!.render!.clearCache(),
+            window.electron!.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+            window.electron!.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+          ])
+          if (!renderResult.success || !stemResult.success || !trackStemResult.success) throw new Error('过渡或分轨缓存清理失败')
+        })
       }
-      if (window.electron?.stems) {
-        try {
-          const result = await window.electron.stems.clearCache()
-          if (!result.success) throw new Error('过渡分轨缓存清理失败')
-        } catch (err) {
-          failed = true
-          console.error('Failed to clear transition stem cache:', err)
-        }
-      }
-      if (window.electron?.trackStems) {
-        try {
-          const result = await window.electron.trackStems.clearCache()
-          if (!result.success) throw new Error('歌曲分轨缓存清理失败')
-        } catch (err) {
-          failed = true
-          console.error('Failed to clear track stem cache:', err)
-        }
-      }
-      
       await refreshStats()
-      showToastMessage(failed ? '部分缓存清理失败，请重试' : '所有缓存清理成功')
+      setFailedTargets(failed)
+      showToastMessage(failed.length ? `部分缓存清理失败：${failed.join('、')}，可重试` : '所有缓存清理成功')
       setClearAllConfirm(false)
+      setBusyTarget(null)
       
       if (clearAllTimerRef.current) {
         clearTimeout(clearAllTimerRef.current)
@@ -412,29 +385,26 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   {cacheManager.formatSize(cacheStats.totalSize)}
                 </div>
                 <div className={`${textSecondary} text-sm`}>
-                  共 {cacheStats.coverCount + cacheStats.playlistCount + cacheStats.errorLogCount + cacheStats.audioCount + cacheStats.analysisCount} 项缓存
+                  共 {cacheStats.coverCount + cacheStats.playlistCount + cacheStats.lyricsCount + cacheStats.metadataCount + cacheStats.errorLogCount + cacheStats.audioCount + cacheStats.analysisCount + cacheStats.transitionCount} 项缓存
                 </div>
               </div>
               
               {/* 缓存目录 */}
+              {isDesktop() && window.electron?.config?.getCachePath && (
               <div className={`p-4 rounded-xl mb-6 ${bgCard} border ${borderColor}`}>
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
                     <FolderOpen className="w-4 h-4" style={{ color: accentColor }} />
                     <span className={`${textPrimary} text-sm font-medium`}>缓存目录</span>
                   </div>
+                  {window.electron?.config?.selectCachePath && (
                   <button
                     onClick={async () => {
-                      const result = await window.electron?.config?.selectCachePath();
+                      const result = await window.electron?.config?.selectCachePath()
                       if (result) {
-                        // 显示成功提示
-                        const toast = document.createElement('div');
-                        toast.className = 'fixed top-20 left-1/2 transform -translate-x-1/2 z-50 px-6 py-3 rounded-lg shadow-lg';
-                        toast.style.backgroundColor = playerTheme === 'dark' ? 'rgba(255, 255, 255, 0.9)' : 'rgba(0, 0, 0, 0.8)';
-                        toast.style.color = playerTheme === 'dark' ? '#000' : '#fff';
-                        toast.textContent = '✅ 修改完毕，请重启软件生效';
-                        document.body.appendChild(toast);
-                        setTimeout(() => toast.remove(), 3000);
+                        const refreshedPath = await window.electron?.config?.getCachePath().catch(() => result)
+                        setCacheDir(refreshedPath || result)
+                        showToastMessage('缓存目录已更新')
                       }
                     }}
                     className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
@@ -445,11 +415,13 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   >
                     更改
                   </button>
+                  )}
                 </div>
                 <div className={`${textSecondary} text-xs break-all`}>
                   {cacheDir || '加载中...'}
                 </div>
               </div>
+              )}
               
               {/* 封面缓存 */}
               <div className={`p-4 rounded-xl mb-4 ${bgCard} border ${borderColor} relative`}>
@@ -462,7 +434,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   </div>
                   <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.coverSize)}</div>
                 </div>
-                <button onClick={handleClearCovers} disabled={cacheStats.coverCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理封面缓存"><Trash2 className="w-4 h-4" /></button>
+                <button onClick={handleClearCovers} disabled={cacheStats.coverCount === 0 || !!busyTarget} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理封面缓存"><Trash2 className="w-4 h-4" /></button>
               </div>
 
               {/* 歌单列表缓存 */}
@@ -492,7 +464,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                 {/* 垃圾桶按钮 - 右下角 */}
                 <button
                   onClick={handleClearPlaylists}
-                  disabled={cacheStats.playlistCount === 0}
+                  disabled={cacheStats.playlistCount === 0 || !!busyTarget}
                   className={`absolute bottom-3 right-3 p-2 rounded-lg transition-all ${
                     cacheStats.playlistCount === 0 
                       ? 'opacity-30 cursor-not-allowed' 
@@ -535,7 +507,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                 {/* 垃圾桶按钮 - 右下角 */}
                 <button
                   onClick={handleClearErrorLogs}
-                  disabled={cacheStats.errorLogCount === 0}
+                  disabled={cacheStats.errorLogCount === 0 || !!busyTarget}
                   className={`absolute bottom-3 right-3 p-2 rounded-lg transition-all ${
                     cacheStats.errorLogCount === 0 
                       ? 'opacity-30 cursor-not-allowed' 
@@ -582,7 +554,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   {/* 垃圾桶按钮 - 右下角 */}
                   <button
                     onClick={handleClearAudioCache}
-                    disabled={cacheStats.audioCount === 0}
+                    disabled={cacheStats.audioCount === 0 || !!busyTarget}
                     className={`absolute bottom-3 right-3 p-2 rounded-lg transition-all ${
                       cacheStats.audioCount === 0 
                         ? 'opacity-30 cursor-not-allowed' 
@@ -605,7 +577,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                   <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.lyricsSize)}</div>
                 </div>
                 <div className={`${textSecondary} text-xs mb-2`}>最多保留 1000 首或 128MB，30 天未使用会自动清理</div>
-                <button onClick={() => void handleClearLyrics()} disabled={cacheStats.lyricsCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理歌词缓存"><Trash2 className="w-4 h-4" /></button>
+                <button onClick={() => void handleClearLyrics()} disabled={cacheStats.lyricsCount === 0 || !!busyTarget} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理歌词缓存"><Trash2 className="w-4 h-4" /></button>
               </div>
 
               {window.electron?.render && (
@@ -615,7 +587,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                     <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.transitionSize)}</div>
                   </div>
                   <div className={`${textSecondary} text-xs mb-2`}>限制为 512MB，超过 24 小时未使用会自动清理</div>
-                  <button onClick={() => void handleClearTransitionCache()} disabled={cacheStats.transitionCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理过渡与歌曲分轨缓存"><Trash2 className="w-4 h-4" /></button>
+                  <button onClick={() => void handleClearTransitionCache()} disabled={cacheStats.transitionCount === 0 || !!busyTarget} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理过渡与歌曲分轨缓存"><Trash2 className="w-4 h-4" /></button>
                 </div>
               )}
 
@@ -629,11 +601,19 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                     <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.analysisSize)}</div>
                   </div>
                   <div className={`${textSecondary} text-xs mb-2`}>节拍与段落分析缓存（自动按时间和容量清理）</div>
-                  <button onClick={() => void handleClearAnalysisCache()} disabled={cacheStats.analysisCount === 0} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理分析缓存"><Trash2 className="w-4 h-4" /></button>
+                  <button onClick={() => void handleClearAnalysisCache()} disabled={cacheStats.analysisCount === 0 || !!busyTarget} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理分析缓存"><Trash2 className="w-4 h-4" /></button>
                 </div>
               )}
               
-              {/* 自动清理设置 */}
+              <div className={`p-4 rounded-xl mb-6 ${bgCard} border ${borderColor} relative`}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3"><div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${accentColor}20` }}><ListMusic className="w-5 h-5" style={{ color: accentColor }} /></div><div><div className={`${textPrimary} text-sm font-medium`}>歌曲信息</div><div className={`${textTertiary} text-xs`}>{cacheStats.metadataCount} 条记录</div></div></div>
+                  <div className={`${textPrimary} text-sm font-bold`}>{cacheManager.formatSize(cacheStats.metadataSize)}</div>
+                </div>
+                <div className={`${textSecondary} text-xs mb-2`}>歌曲元数据缓存，用于减少重复请求</div>
+                <button onClick={() => void handleClearMetadata()} disabled={cacheStats.metadataCount === 0 || busyTarget !== null} className="absolute bottom-3 right-3 p-2 rounded-lg transition-all disabled:opacity-30" style={{ backgroundColor: `${accentColor}20`, color: accentColor }} title="清理歌曲信息缓存"><Trash2 className="w-4 h-4" /></button>
+              </div>
+
               <div className={`p-4 rounded-xl mb-6 ${bgCard} border ${borderColor}`}>
                 <div className="flex items-center gap-3 mb-4">
                   <Clock className="w-5 h-5" style={{ color: accentColor }} />
@@ -756,6 +736,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
                           ['audio', '音频下载'],
                           ['analysis', '音频分析'],
                           ['transitions', '过渡音频'],
+                          ['metadata', '歌曲信息'],
                         ] as const).map(([target, label]) => (
                           <button
                             key={target}
@@ -797,7 +778,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
               {/* 清理所有 */}
               <motion.button
                 onClick={handleClearAll}
-                disabled={cacheStats.totalSize === 0}
+                disabled={cacheStats.totalSize === 0 || !!busyTarget}
                 animate={clearAllConfirm ? {
                   scale: [1, 1.05, 1, 1.05, 1],
                 } : {}}
@@ -823,6 +804,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
               </motion.button>
               
               <div className={`${textTertiary} text-xs text-center mt-3`}>
+                {failedTargets.length > 0 && <div className="mb-2 text-red-400">失败目标：{failedTargets.join('、')}，点击对应垃圾桶可重试</div>}
                 {clearAllConfirm 
                   ? '确认后将清理所有缓存，此操作不可恢复'
                   : '清理缓存后，下次加载时可能会稍慢'

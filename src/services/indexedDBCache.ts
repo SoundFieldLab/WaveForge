@@ -45,6 +45,8 @@ export interface IndexedDBCacheStats {
   playlistSize: number
   lyricsCount: number
   lyricsSize: number
+  metadataCount: number
+  metadataSize: number
 }
 
 function serializedSize(value: unknown): number {
@@ -107,7 +109,7 @@ class IndexedDBCache {
     // 命中这里时直接返回，避免每次切歌都对同一封面重复执行写事务与空间修剪。
     const readStore = await this.store(COVER_STORE, 'readonly')
     const existing = await this.request(readStore.get(url)) as CoverCacheItem | undefined
-    if (existing && now - Math.max(existing.timestamp, existing.lastAccess || 0) <= COVER_TTL) return
+    if (existing && now - existing.timestamp <= COVER_TTL) return
     await this.enforceLimit(COVER_STORE, MAX_COVERS() - 1, MAX_COVER_BYTES() - blob.size, COVER_TTL)
     const writeStore = await this.store(COVER_STORE, 'readwrite')
     await this.request(writeStore.put({ url, data: blob, timestamp: now, size: blob.size, accessCount: 1, lastAccess: now } as CoverCacheItem))
@@ -123,7 +125,7 @@ class IndexedDBCache {
     const readStore = await this.store(COVER_STORE, 'readonly')
     const item = await this.request(readStore.get(url)) as CoverCacheItem | undefined
     if (!item) return null
-    if (Date.now() - Math.max(item.timestamp, item.lastAccess || 0) > COVER_TTL) {
+    if (Date.now() - item.timestamp > COVER_TTL) {
       const deleteStore = await this.store(COVER_STORE, 'readwrite')
       await this.request(deleteStore.delete(url))
       return null
@@ -188,7 +190,7 @@ class IndexedDBCache {
     const key = `${platform}_${id}`
     const item = await this.request(store.get(key)) as DataCacheItem | undefined
     if (!item) return null
-    if (Date.now() - Math.max(item.timestamp, item.lastAccess || 0) > ttl) {
+    if (Date.now() - item.timestamp > ttl) {
       const deleteStore = await this.store(storeName, 'readwrite')
       await this.request(deleteStore.delete(key))
       return null
@@ -227,7 +229,7 @@ class IndexedDBCache {
     }
     this.lastEnforceLimitAt[storeName] = now
     const items = await this.readItems(storeName)
-    const remove = new Set<IDBValidKey>(items.filter(item => now - Math.max(item.timestamp, item.lastAccess) > ttl).map(item => item.key))
+    const remove = new Set<IDBValidKey>(items.filter(item => now - item.timestamp > ttl).map(item => item.key))
     let remaining = items.filter(item => !remove.has(item.key)).sort((a, b) => a.lastAccess - b.lastAccess)
     let bytes = remaining.reduce((sum, item) => sum + item.size, 0)
     while (remaining.length > maxCount || bytes > maxBytes) {
@@ -250,9 +252,23 @@ class IndexedDBCache {
 
   async getCacheStats(): Promise<IndexedDBCacheStats> {
     await this.cleanupExpired()
-    const [covers, playlists, lyrics] = await Promise.all([this.readItems(COVER_STORE), this.readItems(PLAYLIST_STORE), this.readItems(LYRICS_STORE)])
+    const [covers, playlists, lyrics, metadata] = await Promise.all([
+      this.readItems(COVER_STORE),
+      this.readItems(PLAYLIST_STORE),
+      this.readItems(LYRICS_STORE),
+      this.readItems(METADATA_STORE),
+    ])
     const sum = (items: Array<{ size: number }>) => items.reduce((total, item) => total + item.size, 0)
-    return { coverCount: covers.length, coverSize: sum(covers), playlistCount: playlists.length, playlistSize: sum(playlists), lyricsCount: lyrics.length, lyricsSize: sum(lyrics) }
+    return {
+      coverCount: covers.length,
+      coverSize: sum(covers),
+      playlistCount: playlists.length,
+      playlistSize: sum(playlists),
+      lyricsCount: lyrics.length,
+      lyricsSize: sum(lyrics),
+      metadataCount: metadata.length,
+      metadataSize: sum(metadata),
+    }
   }
 
   private async clearStore(name: string): Promise<void> {
@@ -263,7 +279,10 @@ class IndexedDBCache {
   clearCovers(): Promise<void> { return this.clearStore(COVER_STORE) }
   clearPlaylists(): Promise<void> { return this.clearStore(PLAYLIST_STORE) }
   clearLyrics(): Promise<void> { return this.clearStore(LYRICS_STORE) }
-  async clearAll(): Promise<void> { await Promise.all([this.clearCovers(), this.clearPlaylists(), this.clearLyrics()]) }
+  async clearAll(): Promise<void> {
+    await Promise.all([this.clearCovers(), this.clearPlaylists(), this.clearLyrics(), this.clearStore(METADATA_STORE)])
+    this.lastEnforceLimitAt = {}
+  }
 
   formatSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`

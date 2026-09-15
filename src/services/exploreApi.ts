@@ -729,16 +729,24 @@ export async function fetchQQNativeFeedPage(
 export async function fetchQQGuessYouLikeBatch(
   batch: number,
   excludeSongKeys: string[] = [],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  count = 30,
 ): Promise<Song[]> {
   const cookie = getExploreCookie('qq')
   if (cookie) await syncQQExploreCookie(cookie, signal)
-  const data = await fetchExploreJson('/explore/qq/radio/next', {
-    cookie,
-    batch: String(Math.max(1, Math.floor(batch))),
-    count: '30',
-    exclude: excludeSongKeys.slice(-300).join(',') || undefined
-  }, signal)
+  const response = await fetch(`${API_BASES[0]}/explore/qq/radio/next`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...(await getQQMusicSkillHeaders()) },
+    body: JSON.stringify({
+      cookie,
+      batch: Math.max(1, Math.floor(batch)),
+      count: Math.max(1, Math.min(60, Math.floor(count))),
+      exclude: excludeSongKeys.slice(-300),
+    }),
+    signal,
+    cache: 'no-store',
+  })
+  const data = await ensureOk(response)
   const songs = Array.isArray(data.songs) ? data.songs : []
   return songs
     .map((song: any) => normalizeQQSong(song))

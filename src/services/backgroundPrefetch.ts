@@ -4,12 +4,17 @@ import type { ViewMode } from '../types/playbackNavigation'
 import { loadDesktopCustomization } from './desktopCustomization'
 import { prefetchExploreHome } from './exploreApi'
 import { getUserPlaylists } from './playlistService'
+import { preloadArtwork } from './artworkLoader'
 import { ensureWeatherSnapshot, getCachedWeather } from './weatherService'
 
 interface BackgroundPrefetchContext {
   viewMode: ViewMode
   neteaseLoggedIn: boolean
   qqLoggedIn: boolean
+  appleLoggedIn?: boolean
+  sodaLoggedIn?: boolean
+  appleStorefront?: string
+  sodaAccountId?: string
 }
 
 interface PrefetchJob {
@@ -19,6 +24,7 @@ interface PrefetchJob {
 
 const PREFETCH_COOLDOWN = 5 * 60 * 1000
 const JOB_TIMEOUT = 20_000
+const MAX_ARTWORK_PER_PLATFORM = 40
 const MAX_COMPLETED_ENTRIES = 32
 const completedAt = new Map<string, number>()
 const pending = new Map<string, Promise<void>>()
@@ -34,11 +40,69 @@ const rememberCompleted = (identity: string): void => {
   }
 }
 
-const getStoredUserId = (platform: MusicPlatform) =>
-  localStorage.getItem(platform === 'qq' ? 'qq_user_id' : 'netease_user_id') || ''
+const getStoredUserId = (platform: MusicPlatform) => {
+  const keyByPlatform: Partial<Record<MusicPlatform, string>> = {
+    netease: 'netease_user_id',
+    qq: 'qq_user_id',
+    apple: 'apple_account_id',
+    spotify: 'spotify_user_id',
+    kugou: 'kugou_user_id',
+    soda: 'soda_user_id',
+  }
+  return localStorage.getItem(keyByPlatform[platform] || '') || ''
+}
 
-const getAccountIdentity = (platform: MusicPlatform) =>
-  `${platform}:${getStoredUserId(platform) || 'guest'}`
+const getAccountIdentity = (platform: MusicPlatform) => {
+  if (platform === 'apple') {
+    return `apple:${localStorage.getItem('appleAccountEmail') || localStorage.getItem('appleAccountName') || 'guest'}:${localStorage.getItem('appleStorefront') || 'cn'}`
+  }
+  if (platform === 'soda') return `soda:${localStorage.getItem('soda_user_id') || 'session'}`
+  return `${platform}:${getStoredUserId(platform) || 'guest'}`
+}
+
+const addArtwork = (urls: string[], seen: Set<string>, value: unknown) => {
+  const url = typeof value === 'string' ? value.trim() : ''
+  if (!url || seen.has(url) || urls.length >= MAX_ARTWORK_PER_PLATFORM) return
+  seen.add(url)
+  urls.push(url)
+}
+
+export function collectPrefetchArtwork(payload: any, playlists: any[] = []): string[] {
+  const urls: string[] = []
+  const seen = new Set<string>()
+  const addSong = (song: any) => addArtwork(urls, seen, song?.album?.picUrl || song?.coverUrl)
+  for (const group of [payload?.dailySongs, payload?.radioSongs, payload?.newSongs]) {
+    if (Array.isArray(group)) group.forEach(addSong)
+  }
+  for (const item of payload?.playlists || []) addArtwork(urls, seen, item?.coverUrl || item?.coverImgUrl)
+  for (const item of payload?.albums || []) addArtwork(urls, seen, item?.coverUrl || item?.picUrl)
+  for (const item of payload?.charts || []) {
+    addArtwork(urls, seen, item?.coverUrl)
+    if (Array.isArray(item?.songs)) item.songs.forEach(addSong)
+  }
+  for (const item of payload?.channels || []) addArtwork(urls, seen, item?.coverUrl)
+  const qqNative = payload?.qqNative
+  if (Array.isArray(qqNative?.daily30?.songs)) qqNative.daily30.songs.forEach(addSong)
+  for (const module of qqNative?.modules || []) {
+    for (const card of module?.cards || []) {
+      addArtwork(urls, seen, card?.coverUrl || card?.playlist?.coverUrl)
+      if (Array.isArray(card?.songs)) card.songs.forEach(addSong)
+    }
+  }
+  for (const playlist of playlists) addArtwork(urls, seen, playlist?.coverImgUrl || playlist?.coverUrl)
+  return urls
+}
+
+async function prefetchArtworkBatch(platform: MusicPlatform, urls: string[]): Promise<void> {
+  for (let index = 0; index < urls.length; index += 4) {
+    await Promise.all(urls.slice(index, index + 4).map(url => preloadArtwork(url, {
+      role: 'card',
+      priority: 'deferred',
+      retries: 0,
+      platform,
+    }).catch(() => undefined)))
+  }
+}
 
 const getConfiguredWeather = () => {
   const settings = loadDesktopCustomization()
@@ -89,11 +153,27 @@ const createPlaylistJob = (
   loggedIn: boolean
 ): PrefetchJob | null => {
   const userId = getStoredUserId(platform)
-  if (!loggedIn || !userId) return null
-  const username = localStorage.getItem(platform === 'qq' ? 'qq_username' : 'netease_username') || ''
+  if (!loggedIn || ((platform === 'netease' || platform === 'qq') && !userId)) return null
+  const username = localStorage.getItem(platform === 'qq' ? 'qq_username' : platform === 'netease' ? 'netease_username' : '') || ''
   return {
-    label: `${platform === 'qq' ? 'QQ音乐' : '网易云'}用户歌单`,
-    run: () => getUserPlaylists(platform, userId, username)
+    label: `${platform === 'qq' ? 'QQ音乐' : platform === 'netease' ? '网易云' : platform}用户歌单`,
+    run: async () => {
+      const playlists = await getUserPlaylists(platform, userId, username)
+      await prefetchArtworkBatch(platform, collectPrefetchArtwork(null, playlists))
+      return playlists
+    },
+  }
+}
+
+const createArtworkJob = (platform: MusicPlatform, loggedIn: boolean): PrefetchJob | null => {
+  if (!loggedIn) return null
+  return {
+    label: `${platform}封面预取`,
+    run: async () => {
+      const payload = await prefetchExploreHome(platform)
+      await prefetchArtworkBatch(platform, collectPrefetchArtwork(payload))
+      return payload
+    },
   }
 }
 
@@ -115,12 +195,19 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
   }
   const minimalPlatform = readCorePlatform('selectedPlatform')
   const explorePlatform = readCorePlatform('explorePlatform')
+  const traditionalPlatform = readCorePlatform('traditionalPlatform') || minimalPlatform
   const desktopPlatform = readCorePlatform('desktopModePlatform')
   const neteasePlaylist = createPlaylistJob('netease', context.neteaseLoggedIn)
   const qqPlaylist = createPlaylistJob('qq', context.qqLoggedIn)
+  const applePlaylist = createPlaylistJob('apple', Boolean(context.appleLoggedIn))
+  const sodaPlaylist = createPlaylistJob('soda', Boolean(context.sodaLoggedIn))
   const weather = createWeatherJob()
   const neteaseExplore = createExploreJob('netease')
   const qqExplore = createExploreJob('qq')
+  const neteaseArtwork = createArtworkJob('netease', context.neteaseLoggedIn)
+  const qqArtwork = createArtworkJob('qq', context.qqLoggedIn)
+  const appleArtwork = createArtworkJob('apple', Boolean(context.appleLoggedIn))
+  const sodaArtwork = createArtworkJob('soda', Boolean(context.sodaLoggedIn))
 
   const identity = [
     context.viewMode,
@@ -129,8 +216,12 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
     desktopPlatform,
     getAccountIdentity('netease'),
     getAccountIdentity('qq'),
+    getAccountIdentity('apple'),
+    getAccountIdentity('soda'),
     context.neteaseLoggedIn ? 'netease-login' : 'netease-guest',
-    context.qqLoggedIn ? 'qq-login' : 'qq-guest'
+    context.qqLoggedIn ? 'qq-login' : 'qq-guest',
+    context.appleLoggedIn ? `apple-login:${context.appleStorefront || 'cn'}` : 'apple-guest',
+    context.sodaLoggedIn ? `soda-login:${context.sodaAccountId || getAccountIdentity('soda')}` : 'soda-guest'
   ].join('|')
 
   const lastCompleted = completedAt.get(identity) || 0
@@ -166,6 +257,7 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
 
     await runJobs(priorityJobs)
     await runJobs(secondaryJobs)
+    await runJobs([neteaseArtwork, qqArtwork, appleArtwork, sodaArtwork, applePlaylist, sodaPlaylist].filter((job): job is PrefetchJob => Boolean(job)))
     rememberCompleted(identity)
   })()
 

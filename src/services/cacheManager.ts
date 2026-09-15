@@ -6,6 +6,7 @@ import type { MusicPlatform } from './platforms'
 
 import { indexedDBCache } from './indexedDBCache'
 import { clearUserPlaylistsMemoryCache } from './playlistService'
+import { clearArtworkMemoryCache } from './artworkLoader'
 import { getCacheLimits } from '../tv/perfMode'
 
 interface CacheItem {
@@ -26,6 +27,15 @@ interface CacheStats {
   totalSize: number
 }
 
+export interface MetadataCacheStats {
+  count: number
+  size: number
+}
+
+const METADATA_DB_NAME = 'WaveForgeCache'
+const METADATA_DB_VERSION = 2
+const METADATA_STORE_NAME = 'metadata'
+
 interface AutoClearSettings {
   enabled: boolean
   days: number  // 多少天后自动清理
@@ -38,6 +48,7 @@ interface AutoClearSettings {
     audio: boolean
     analysis: boolean
     transitions: boolean
+    metadata: boolean
   }
 }
 
@@ -58,8 +69,10 @@ class CacheManager {
   private async initializeCleanup(): Promise<void> {
     await indexedDBCache.cleanupExpired()
     const settings = this.getAutoClearSettings()
-    if (localStorage.getItem(this.PENDING_CLOSE_CLEAR_KEY) === 'true') {
+    if (localStorage.getItem(this.PENDING_CLOSE_CLEAR_KEY) === 'true' && settings.enabled) {
       await this.autoCleanCache(settings.targets)
+      localStorage.removeItem(this.PENDING_CLOSE_CLEAR_KEY)
+    } else if (!settings.enabled) {
       localStorage.removeItem(this.PENDING_CLOSE_CLEAR_KEY)
     }
     await this.checkAutoClear()
@@ -482,9 +495,47 @@ class CacheManager {
     return totalSize
   }
   
-  /**
-   * URL 哈希（简单实现）
-   */
+  private metadataRequest<T>(request: IDBRequest<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error || new Error('元数据缓存操作失败'))
+    })
+  }
+
+  async getMetadataCacheStats(): Promise<MetadataCacheStats> {
+    if (typeof indexedDB === 'undefined') return { count: 0, size: 0 }
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(METADATA_DB_NAME, METADATA_DB_VERSION)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error || new Error('缓存数据库打开失败'))
+    })
+    try {
+      if (!db.objectStoreNames.contains(METADATA_STORE_NAME)) return { count: 0, size: 0 }
+      const store = db.transaction(METADATA_STORE_NAME, 'readonly').objectStore(METADATA_STORE_NAME)
+      const values = await this.metadataRequest<unknown[]>(store.getAll())
+      return { count: values.length, size: values.reduce<number>((sum, value) => sum + new Blob([JSON.stringify(value)]).size, 0) }
+    } finally {
+      db.close()
+    }
+  }
+
+  async clearMetadata(): Promise<void> {
+    if (typeof indexedDB === 'undefined') return
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(METADATA_DB_NAME, METADATA_DB_VERSION)
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error || new Error('缓存数据库打开失败'))
+    })
+    try {
+      if (db.objectStoreNames.contains(METADATA_STORE_NAME)) {
+        await this.metadataRequest(db.transaction(METADATA_STORE_NAME, 'readwrite').objectStore(METADATA_STORE_NAME).clear())
+      }
+    } finally {
+      db.close()
+    }
+  }
+
+  /** URL 哈希（简单实现） */
   private hashUrl(url: string): string {
     let hash = 0
     for (let i = 0; i < url.length; i++) {
@@ -512,7 +563,7 @@ class CacheManager {
       enabled: false,
       days: 14,
       clearOnClose: false,
-      targets: { covers: true, playlists: false, lyrics: false, errorLogs: true, audio: false, analysis: false, transitions: false }
+      targets: { covers: true, playlists: false, lyrics: false, errorLogs: true, audio: false, analysis: false, transitions: false, metadata: false }
     }
     const saved = localStorage.getItem(this.AUTO_CLEAR_SETTINGS_KEY)
     if (saved) {
@@ -530,6 +581,7 @@ class CacheManager {
             audio: parsed.targets?.audio === true,
             analysis: parsed.targets?.analysis === true,
             transitions: parsed.targets?.transitions === true,
+            metadata: parsed.targets?.metadata === true,
           },
         }
       } catch {}
@@ -588,60 +640,47 @@ class CacheManager {
    * 自动清理缓存
    */
   private async autoCleanCache(targets: AutoClearSettings['targets']): Promise<void> {
-    let cleared = false
-    
-    if (targets.covers) {
-      this.clearCovers()
-      await indexedDBCache.clearCovers()
-      cleared = true
+    const failures: string[] = []
+    const cleanTarget = async (label: string, action: () => Promise<void> | void) => {
+      try { await action() } catch (error) { failures.push(label); console.error(`自动清理失败 [${label}]:`, error) }
     }
-    
-    if (targets.playlists) {
+
+    if (targets.covers) await cleanTarget('封面', async () => {
+      this.clearCovers()
+      clearArtworkMemoryCache()
+      await indexedDBCache.clearCovers()
+    })
+    if (targets.playlists) await cleanTarget('歌单列表', async () => {
       this.clearPlaylists()
       clearUserPlaylistsMemoryCache()
       await indexedDBCache.clearPlaylists()
-      cleared = true
-    }
-
-    if (targets.lyrics) {
+    })
+    if (targets.lyrics) await cleanTarget('歌词', async () => {
       window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
       await indexedDBCache.clearLyrics()
-      cleared = true
-    }
-    
-    if (targets.errorLogs) {
-      this.clearErrorLogs()
-      cleared = true
-    }
-
-    if (targets.audio && window.electron?.audioDownload) {
-      const result = await window.electron.audioDownload.clearCache()
+    })
+    if (targets.metadata) await cleanTarget('歌曲信息', () => this.clearMetadata())
+    if (targets.errorLogs) await cleanTarget('错误日志', () => this.clearErrorLogs())
+    if (targets.audio && window.electron?.audioDownload) await cleanTarget('音频', async () => {
+      const result = await window.electron!.audioDownload!.clearCache()
       if (!result.success) throw new Error('音频缓存清理失败')
-      cleared = true
-    }
-
-    if (targets.analysis && window.electron?.analysis) {
-      const result = await window.electron.analysis.clearCache()
+    })
+    if (targets.analysis && window.electron?.analysis) await cleanTarget('分析', async () => {
+      const result = await window.electron!.analysis!.clearCache()
       if (!result.success) throw new Error(result.error || '分析缓存清理失败')
-      cleared = true
-    }
-
-    if (targets.transitions && window.electron?.render) {
+    })
+    if (targets.transitions && window.electron?.render) await cleanTarget('过渡', async () => {
       window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
       const [renderResult, stemResult, trackStemResult] = await Promise.all([
-        window.electron.render.clearCache(),
-        window.electron.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
-        window.electron.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron!.render!.clearCache(),
+        window.electron!.stems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
+        window.electron!.trackStems?.clearCache?.() ?? Promise.resolve({ success: true, cleared: 0 }),
       ])
-      if (!renderResult.success || !stemResult.success || !trackStemResult.success) {
-        throw new Error('过渡或分轨缓存清理失败')
-      }
-      cleared = true
-    }
-    
-    if (cleared) {
-      console.log('✅ 自动清理完成')
-    }
+      if (!renderResult.success || !stemResult.success || !trackStemResult.success) throw new Error('过渡或分轨缓存清理失败')
+    })
+
+    if (failures.length) throw new Error(`自动清理失败：${failures.join('、')}`)
+    console.log('✅ 自动清理完成')
   }
   
   /**
@@ -650,7 +689,7 @@ class CacheManager {
   async clearOnClose(): Promise<void> {
     const settings = this.getAutoClearSettings()
     
-    if (!settings.clearOnClose) {
+    if (!settings.enabled || !settings.clearOnClose) {
       return
     }
     
