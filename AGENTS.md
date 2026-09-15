@@ -95,6 +95,24 @@ WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探�
 - `python-beat-service/` — Flask beat analysis (port 3002) for Smart AutoMix; app degrades to Fixed Crossfade when down. `loudness_server.py`（port 3003）为独立响度测量服务（`/lufs`，响度归一化用）；`compensation_server.py`（port 3004）为独立频响补偿设计服务（`/compensation`，ISO 226 简化等响度模型 + 场景预设 + 自定义频段 → 多段 Biquad 参数）。三服务完全解耦、三入口（dev-electron.mjs / main.cjs / start-full.bat）同模式拉起。三服务均已做性能优化：beat 缓存清理 60s 节流、loudness 分段积分向量化 + 测量磁盘缓存（256MB/30 天）、线程并发（threaded=True）。
 - **Git repo** (has history — use `git log`/`git blame`; rollback via `git reset`). 根目录 `/data/`、`/cache/`、`/logs/`、`/dist/`、`/release/` 是被忽略的运行时产物（规则已锚定根目录，含义见下方 Conventions 的 .gitignore 约定）。
 
+## Workspace and repository roots
+
+WaveForge is developed by multiple people, AI agents, and computers. Local directory layouts are intentionally not uniform:
+
+- **Direct-root layout:** the developer's working directory is the WaveForge repository root.
+- **Multi-project layout:** an AI or developer workspace contains several projects, and its direct `WaveForge/` child is the repository root.
+- The remote repository always stores project files at its repository root. A clone into a local `WaveForge/` directory naturally maps that remote root into the local child directory; do not change the remote layout to mirror a parent workspace.
+
+Before any Git operation, edit, test, build, launch, synchronization, merge, release, or version change:
+
+1. Check only two root candidates, in order: the current directory, then its direct `WaveForge/` child.
+2. A candidate is WaveForge only when it contains all three markers: `package.json`, `scripts/dev-electron.mjs`, and `desktop/main.cjs`. When Git metadata is present, also run `git rev-parse --show-toplevel` inside that candidate and keep every operation inside the returned root.
+3. Never recursively search for a directory named WaveForge or select similarly named copies such as `WaveForge-clean-check`, `WaveForge-master-hotfix`, temporary exports, or build output.
+4. If neither candidate is valid, or if nested `.git` directories or multiple plausible repositories are found, report the candidates and stop for explicit user confirmation. Do not infer a root from the shell directory, parent directory name, or a machine-specific absolute path.
+5. Never move, copy, delete, stash, reset, merge, commit, or restore one repository's files into another repository merely to reconcile different local layouts.
+
+For multi-developer, multi-computer, and multi-worktree collaboration, uncommitted changes belong to their current working tree unless explicitly handed off. Before synchronization or publishing, verify the selected root's `git status --short --branch`, branch, remotes, and `git worktree list`. Commands documented as bare `npm run ...` assume the terminal is already inside the verified WaveForge root; external automation should prefer `npm --prefix "<verified-root>" run ...`.
+
 ## Conventions
 
 - **⚠️ .gitignore 目录规则必须锚定根目录（全部电脑统一执行的约定）**：忽略根目录产物写 `/data/`、`/cache/`、`/tmp/`、`/logs/`、`/dist`、`/release`，**禁止写裸 `data/` 这类不锚定规则**——它会匹配任意层级的同名目录。2026-09 事故：裸 `data/` 把 `src/data/bilibiliMvDeclarations.ts` 连坐忽略，5a6cc58 后文件只存在于提交者本地，master 全新 clone 构建失败。例外：Python 运行时产物（`__pycache__/`、`venv/`、`*.py[cod]`）确实出现在任意层级，保持不锚定。`src/data/` 内手写源码必须入库，仅 `src/data/*.generated.json`（prebuild 再生成）忽略。

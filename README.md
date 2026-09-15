@@ -9,6 +9,8 @@ npm install                    # 安装依赖
 npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electron 窗口
 ```
 
+开发命令必须在已确认的 WaveForge 项目根运行。团队允许工作目录本身就是项目根，也允许多项目/AI 工作目录下的 `WaveForge/` 子目录才是项目根；外部自动化应先验证 `package.json`、`scripts/dev-electron.mjs`、`desktop/main.cjs`，再使用 `npm --prefix "<项目根>" run dev:electron`。不要把机器专属绝对路径写入脚本或文档。
+
 - **高级功能（Smart AutoMix 节拍匹配）**：项目已内置 Python 3.13 运行时（`resources/python-embed/`），直接可用；启动 `start-full.bat` 或先运行 `python-beat-service/start.bat` 启动节拍服务（端口 **3002**）。
 - 节拍服务未启动时，应用自动降级为 Fixed Crossfade，不影响基础播放。
 
