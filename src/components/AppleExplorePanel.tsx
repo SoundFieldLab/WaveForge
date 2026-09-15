@@ -298,7 +298,9 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   iconClassName?: string
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
-  const [visible, setVisible] = useState(false)
+  // 一旦可见过就保持“可见资格”：IO 在货架/动画容器里可能来回抖动，
+  // 播放资格若跟随闪烁会反复 pause 冻在海报帧。取流与播放都用粘性标记。
+  const [everVisible, setEverVisible] = useState(false)
   const [pageVisible, setPageVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
     const [motion, setMotion] = useState<{ video?: string; poster?: string } | null | undefined>(
     item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined,
@@ -309,7 +311,7 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   useEffect(() => {
     setMotion(item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined)
   }, [itemKey, item.motionArtworkUrl, item.motionPosterUrl])
-  const active = visible && pageVisible
+  const active = pageVisible && everVisible
 
   useEffect(() => {
     const onVisibility = () => setPageVisible(!document.hidden)
@@ -320,19 +322,21 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   useEffect(() => {
     const node = hostRef.current
     if (!node) return
-    const observer = new IntersectionObserver(entries => setVisible(Boolean(entries[0]?.isIntersecting)), { rootMargin: '200px', threshold: 0.1 })
+    const observer = new IntersectionObserver(entries => {
+      if (entries[0]?.isIntersecting) setEverVisible(true)
+    }, { rootMargin: '400px', threshold: 0 })
     observer.observe(node)
     return () => observer.disconnect()
   }, [])
 
   useEffect(() => {
-    if (!visible || motion !== undefined || !motionResourceId || !isMotionResourceType(item.type)) return
+    if (!everVisible || motion !== undefined || !motionResourceId || !isMotionResourceType(item.type)) return
     let cancelled = false
     void loadResourceMotion(item.type, motionResourceId, storefront).then(result => {
       if (!cancelled) setMotion(result)
     }).catch(() => { if (!cancelled) setMotion(null) })
     return () => { cancelled = true }
-  }, [item.type, motion, motionResourceId, storefront, visible])
+  }, [everVisible, item.type, motion, motionResourceId, storefront])
 
   return (
     <div

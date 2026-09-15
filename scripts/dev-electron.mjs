@@ -457,8 +457,11 @@ async function startDev() {
   console.log(`Electron loading ${devServerUrl}`)
 
   logStartup('Spawning Electron')
+  // dev 默认开放 CDP 调试端口（9223），便于自动化工具连接渲染进程排查；
+  // 设 WAVEFORGE_REMOTE_DEBUG_PORT='' 可关闭，或设其他值换端口。
+  const remoteDebugPort = process.env.WAVEFORGE_REMOTE_DEBUG_PORT === undefined ? '9223' : process.env.WAVEFORGE_REMOTE_DEBUG_PORT
   const electronArgs = [
-    ...(process.env.WAVEFORGE_REMOTE_DEBUG_PORT ? [`--remote-debugging-port=${process.env.WAVEFORGE_REMOTE_DEBUG_PORT}`] : []),
+    ...(remoteDebugPort ? [`--remote-debugging-port=${remoteDebugPort}`] : []),
     resolve(__dirname, '../desktop/main.cjs'),
   ]
   const electronProcess = spawn(

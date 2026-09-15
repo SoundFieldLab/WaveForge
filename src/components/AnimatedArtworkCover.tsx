@@ -65,7 +65,9 @@ export default function AnimatedArtworkCover({
       onErrorRef.current?.()
     }
     const playWhenActive = () => {
-      if (!cancelled && activeRef.current) void video.play().catch(() => fail('play'))
+      // play() 的偶发 rejection（src 交换窗口期等）不应永久判死整个封面；
+      // 致命问题由 Hls ERROR 事件与 video 元素 onError 兜底（与 DynamicCover 行为一致）。
+      if (!cancelled && activeRef.current) void video.play().catch(() => undefined)
     }
 
     if (!isHlsSource(videoUrl)) {
