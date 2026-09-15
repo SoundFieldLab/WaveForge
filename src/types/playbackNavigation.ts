@@ -36,6 +36,15 @@ export interface PlaybackOrigin {
   songs?: Song[]
   detail?: unknown
   continuation?: 'explore-infinite'
+  neteaseContinuation?:
+    | { mode: 'heart-mode'; playlistId: string }
+    | { mode: 'roam' }
+  qqRadarContinuation?: {
+    mode: 'radar'
+    page: number
+    reqType: number
+    entranceSongs: number[]
+  }
 }
 
 export type SongSelectHandler = (

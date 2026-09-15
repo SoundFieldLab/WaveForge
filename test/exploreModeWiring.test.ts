@@ -44,7 +44,14 @@ describe('Explore mode wiring regressions', () => {
     expect(source).toContain("onClick={(event) => { event.stopPropagation(); openSongMenu(event, item, items) }}")
     expect(source).toContain('const showId = item.playId || item.id')
     expect(source).toContain('const stationId = item.playId || item.id')
-    expect(source).toContain("split(/[?#]/, 1)[0].replace(/\\/+$/, '')")
+    // room/grouping/multiroom/curator 入口统一走 resolveExploreTarget + 层级栈，而不是就地切分 URL。
+    expect(source).toContain('resolveExploreTarget(item.url)')
+    expect(service('appleWebService.ts')).toContain('export function resolveExploreTarget')
+    expect(service('appleWebService.ts')).toContain('viewMultiRoom')
+    expect(service('appleWebService.ts')).toContain('fetchAppleGroupingPage')
+    expect(service('appleWebService.ts')).toContain('fetchAppleMultiRoomPage')
+    expect(service('appleWebService.ts')).toContain("kind === '345'")
+    expect(service('appleWebService.ts')).toContain("kind === '404'")
     expect(source).toContain('void getAppleLovedSongIds(visibleSongIds)')
     expect(source).not.toContain('喜爱状态暂不可用')
     expect(source).toContain("window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: '喜爱状态更新失败，请重试', type: 'error' } }))")
@@ -56,6 +63,27 @@ describe('Explore mode wiring regressions', () => {
     expect(source).toContain('{stationDetail.station.url && (')
     expect(source).toContain('storefront={storefront}')
     expect(source).toContain('data-tv-scope')
+  })
+
+  it('wires direct MV playback separately from the MV browse modal', () => {
+    const view = component('ExploreView.tsx')
+    const modal = component('MVExploreModal.tsx')
+    expect(view).toContain('directPlay={mvDirectPlay}')
+    expect(view).toContain('setMvDirectPlay(false)')
+    expect(modal).toContain('if (directPlay) {')
+    expect(modal).toContain('onClose={onClose}')
+  })
+
+  it('opens the player from Explore with an opaque first frame and waits for the MV frame', () => {
+    const source = component('../App.tsx')
+    const background = component('BilibiliMvBackground.tsx')
+    expect(source).toContain("const enteringPlayerFromExplore = isPlaybackPage && enteredFromMode === 'explore'")
+    expect(source).toContain('initial={enteringPlayerFromExplore ? { opacity: 1, y: 0, scale: 1 }')
+    expect(source).toContain('className="absolute inset-0 h-screen w-full flex items-center justify-center overflow-hidden bg-black"')
+    expect(source).toContain('&& mvBackgroundReady')
+    expect(source).toContain('onReadyChange={setMvBackgroundReady}')
+    expect(background).toContain('onReadyChange?: (ready: boolean) => void')
+    expect(background).toContain("setPaintedSlots(prev => prev[slot] ? prev : { ...prev, [slot]: true })")
   })
 
   it('keeps Apple radio retries scoped to the active station', () => {

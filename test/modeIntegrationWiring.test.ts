@@ -122,4 +122,15 @@ describe('mode integration wiring', () => {
     expect(app).toContain('getEnginePosition={() => Number(audioPlayerRef.current?.getAudioElement?.()?.currentTime) || 0}')
     expect(app).toContain("mvState?.songKey === handoffSongKey")
   })
+
+  it('restores the background MV playback signal after leaving watch mode', () => {
+    const app = source('App.tsx')
+    const publishIndex = app.indexOf('setIsPlaying(true)')
+    const playIndex = app.indexOf('const playPromise = engineEl.play()')
+    expect(publishIndex).toBeGreaterThan(-1)
+    expect(playIndex).toBeGreaterThan(publishIndex)
+    expect(app).toContain("lyricDisplayModeRef.current === 'video' || activeEngineEl !== engineEl || !engineEl.paused")
+    expect(app).toContain('if (!watchResumeHeldAtEndRef.current && engineEl.paused)')
+    expect(app).toContain('}, [lyricDisplayMode, watchVideoActive])')
+  })
 })

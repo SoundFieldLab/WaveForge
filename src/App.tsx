@@ -52,7 +52,10 @@ import { getEngineAdapter, getAvailableEngines, getAvailableEngineIds, type IAud
 import { sequenceTracksHam2, type SequencingEntry } from './services/playlistSequencing'
 import { likeSong, addSongToPlaylist, getUserPlaylists, updateCachedUserPlaylists, getPlaylistDetail } from './services/playlistService'
 import { fetchExploreRecommendationBatch } from './services/exploreApi'
+import { fetchNeteaseHeartMode, fetchNeteaseRoam } from './features/neteaseExplore/api'
+import { fetchQQRadarSongs } from './features/qqExplore/api'
 import { scheduleBackgroundPrefetch } from './services/backgroundPrefetch'
+import { getResolvedArtworkUrl, preloadArtwork } from './services/artworkLoader'
 import { getDesktopSpectrumConsumerCount, subscribeDesktopSpectrumConsumers } from './services/desktopSpectrum'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Settings, Sparkles, Image as ImageIcon } from 'lucide-react'
@@ -683,6 +686,8 @@ function App() {
   // Progress bars and other continuous consumers subscribe to playbackTimeStore locally.
   const [currentTime, setCurrentTime] = useState(0)
   const currentTimeRef = useRef(0)
+  /** 模式切换交接用的最近有效歌曲进度；媒体重挂载期间不得用 0 覆盖它。 */
+  const modeHandoffTimeRef = useRef<{ songKey: string; time: number } | null>(null)
   const currentTimeCommitGateRef = useRef(createPlaybackTimeCommitGate())
   const commitCurrentTime = useCallback((value: number) => {
     currentTimeRef.current = value
@@ -744,8 +749,8 @@ function App() {
     const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView]
       .filter(loader => loader !== currentViewLoader)
 
+    void currentViewLoader()
     return preloadOnIdle([
-      currentViewLoader,
       loadSearchPanel,
       loadUpNextNotification,
       loadSettingsPanel,
@@ -1036,6 +1041,8 @@ function App() {
   })
   // MV 背景回退：未找到 MV / 播放失败时自动切回普通封面背景（由 BilibiliMvBackground 上报）
   const [mvBackgroundFallback, setMvBackgroundFallback] = useState(false)
+  // 搜索到 MV 不等于视频已经出画面；在 canplay 前保留封面兜底，避免播放页黑屏或透出上一页。
+  const [mvBackgroundReady, setMvBackgroundReady] = useState(false)
 
   // OOBE：默认不启用，仅由 设置→高级 卡片通过事件手动触发（计数器作 key，可重复触发）
   const [oobeOpenCount, setOobeOpenCount] = useState(0)
@@ -1049,6 +1056,11 @@ function App() {
   // 摩登模式状态 ref：resolveAppleCover 等回调读取最新值（AM 封面仅摩登使用）
   const lyricDisplayModeRef = useRef(lyricDisplayMode)
   lyricDisplayModeRef.current = lyricDisplayMode
+  useEffect(() => {
+    const loader = LYRIC_MODE_LOADERS[lyricDisplayMode]
+    if (!loader) return
+    return preloadOnIdle([loader], 350)
+  }, [])
   const [modernAudioVisualizerEnabled, setModernAudioVisualizerEnabled] = useState(() => {
     const saved = localStorage.getItem('modernAudioVisualizerEnabled')
     return parseStoredBoolean(saved, true)
@@ -1260,6 +1272,9 @@ function App() {
 
   const [appleRadioStatus, setAppleRadioStatus] = useState<'connecting' | 'playing' | 'reconnecting' | 'error'>('connecting')
   const [appleRadioError, setAppleRadioError] = useState('')
+  /** 电台点选瞬间锁定专页，避免 currentSong 尚未切换时短暂显示上一首歌曲播放页。 */
+  const [appleRadioSurfaceLocked, setAppleRadioSurfaceLocked] = useState(false)
+  const [pendingAppleRadioSong, setPendingAppleRadioSong] = useState<Song | null>(null)
   const appleRadioAcceptanceRef = useRef({
     currentSong,
     status: appleRadioStatus,
@@ -1299,8 +1314,8 @@ function App() {
     }
   }, [currentSong?.platform])
 
-  // 当前背景是否为 MV 视频（供 QuickSettings 的模糊滑块切换两套值：MV 激活时调 MV 模糊，封面时调封面模糊）
-  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback
+  // 只有视频已经真正出画面时才让歌词页面透明；搜索/拉流/canplay 前继续显示封面兜底。
+  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback && mvBackgroundReady
   // Apple Music 动态封面（图层叠加式）：未开启/无动态封面/查询失败时为 null，封面永远回退平台静态图
   const appleDynamicCover = useAppleDynamicCover({
     title: isAppleRadioPlayback ? '' : currentSong?.name || '',
@@ -1349,9 +1364,10 @@ function App() {
     tryConsume()
     return () => off?.()
   }, [])
-  // 切歌时重置 MV 背景回退标记：上一首未找到 MV 不影响下一首重新匹配（回退期间 MV 层已卸载，无法自行上报）
+  // 切歌时重置 MV 背景状态：上一首的回退/就绪状态都不能泄漏到下一首。
   useEffect(() => {
     setMvBackgroundFallback(false)
+    setMvBackgroundReady(false)
   }, [currentSong?.id, currentSong?.mid, currentSong?.name])
   // 稳定的歌手名数组（避免每次渲染新引用导致 MV 背景等组件反复重挂/重跑）
   const currentSongArtists = useMemo(
@@ -2103,7 +2119,17 @@ function App() {
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying)
       if (state.currentTime !== undefined) {
         currentTimeRef.current = state.currentTime
-
+        const activeSong = playlistRef.current[currentIndexRef.current]
+        const songKey = activeSong ? bilibiliSongKeyOf({
+          songTitle: activeSong.name,
+          artists: (activeSong.artists || []).map((artist: any) => artist.name),
+          songDuration: (activeSong.duration || 0) / 1000,
+          platform: activeSong.platform,
+          id: activeSong.id || activeSong.mid,
+        }) : ''
+        if (songKey && Number.isFinite(state.currentTime) && state.currentTime > 0) {
+          modeHandoffTimeRef.current = { songKey, time: state.currentTime }
+        }
         const findTimelineIndex = (lines: LyricLine[], offset: number) => {
           for (let index = lines.length - 1; index >= 0; index -= 1) {
             if (lines[index].time <= state.currentTime! + offset) return index
@@ -3113,12 +3139,7 @@ function App() {
     if (mode === 'video') {
       const engineEl = audioPlayerRef.current?.getAudioElement?.()
       const storePosition = audioPlayer.playbackTimeStore.getSnapshot().currentTime
-      const rawPosition = Number(engineEl?.currentTime) || 0
-      const renderedTransitionActive = transitionState === 'running-transition'
-        && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
-      const pos = renderedTransitionActive && Number.isFinite(storePosition) && storePosition > 0
-        ? storePosition
-        : rawPosition
+      const rawPosition = Number(engineEl?.currentTime)
       const handoffSongKey = currentSong ? bilibiliSongKeyOf({
         songTitle: currentSong.name,
         artists: currentSong.artists.map((artist: any) => artist.name),
@@ -3126,12 +3147,31 @@ function App() {
         platform: currentSong.platform,
         id: currentSong.id || currentSong.mid,
       }) : ''
-      setWatchSyncSeek(createSongOwnedHandoff(handoffSongKey, pos > 0 ? pos : 0))
+      const rememberedPosition = modeHandoffTimeRef.current?.songKey === handoffSongKey
+        ? modeHandoffTimeRef.current.time
+        : 0
+      const livePosition = Number.isFinite(rawPosition) && rawPosition > 0 ? rawPosition : 0
+      const storedPosition = Number.isFinite(storePosition) && storePosition > 0 ? storePosition : 0
+      const renderedTransitionActive = transitionState === 'running-transition'
+        && (transitionStrategy === 'smart-rendered' || transitionStrategy === 'smart-rendered-v2')
+      const pos = renderedTransitionActive
+        ? Math.max(storedPosition, livePosition, rememberedPosition)
+        : Math.max(livePosition, storedPosition, rememberedPosition)
+      modeHandoffTimeRef.current = { songKey: handoffSongKey, time: pos }
+      setWatchSyncSeek(createSongOwnedHandoff(handoffSongKey, pos))
+      setWatchVideoState(previous => ({
+        ...previous,
+        playing: false,
+        time: pos,
+        duration: (currentSong?.duration || 0) / 1000,
+        alignmentOffset: 0,
+        alignmentVerified: false,
+      }))
       watchEngineVolumeRef.current = volume
       watchEngineMutedRef.current = engineEl?.muted ?? false
       const mvState = mvBackgroundStateRef.current
       setWatchInitialVideo(mvState?.songKey === handoffSongKey
-        ? createSongOwnedHandoff(handoffSongKey, { ...mvState, currentTime: pos > 0 ? pos : 0 })
+        ? createSongOwnedHandoff(handoffSongKey, { ...mvState, currentTime: pos })
         : null)
       // 保持引擎继续播放，直到看歌播放器报告 active；目标 ready 后由 handoff effect 淡出并暂停。
       watchHandoffPendingRef.current = true
@@ -3189,13 +3229,19 @@ function App() {
         id: currentSong.id || currentSong.mid,
       }) : ''
       const entryFloor = readSongOwnedHandoff(watchSyncSeek, currentWatchSongKey, 0)
-      const resumeTime = Math.max(vidTime - alignOffset, entryFloor)
+      const capturedResumeTime = Math.max(vidTime - alignOffset, entryFloor)
       void (async () => {
         try { await watchPlayerRef.current?.fadeOutAudio?.() } catch { /* 淡出失败不阻断 */ }
+
+        // 淡出期间看歌时间线仍在前进；在真正移交控制权时再取一次，避免固定回退约 200ms。
+        const handoffWatchTime = watchPlayerRef.current?.getCurrentTime?.() ?? 0
+        const handoffOffset = watchPlayerRef.current?.getAlignmentOffset?.() ?? alignOffset
+        const resumeTime = Math.max(capturedResumeTime, handoffWatchTime - handoffOffset, entryFloor)
         const engineEl = audioPlayerRef.current?.getAudioElement?.()
         if (engineEl && resumeTime > 0) {
           const dur = Number(engineEl.duration) || 0
           const restored = dur > 0 ? Math.max(0, Math.min(resumeTime, dur - 0.2)) : Math.max(0, resumeTime)
+          modeHandoffTimeRef.current = { songKey: currentWatchSongKey, time: restored }
           if (dur > 0 && resumeTime >= dur - 0.5) {
             audioPlayerRef.current?.seek(restored)
             watchResumeHeldAtEndRef.current = true
@@ -3517,6 +3563,8 @@ function App() {
     // Keep the source view painted while the first-use playback chunks are prepared. Without
     // this, the app-level Suspense boundary can reveal the fixed black base on the first song.
     const isRadioSelection = Boolean(song.appleRadio)
+    setAppleRadioSurfaceLocked(isRadioSelection)
+    setPendingAppleRadioSong(isRadioSelection ? song : null)
     if (appleRadioReconnectTimerRef.current !== null) {
       window.clearTimeout(appleRadioReconnectTimerRef.current)
       appleRadioReconnectTimerRef.current = null
@@ -3669,6 +3717,7 @@ function App() {
     const origin = playbackOriginRef.current
     const targetMode = origin.mode || enteredFromMode || 'minimal'
 
+    setAppleRadioSurfaceLocked(false)
     setViewMode(targetMode)
     localStorage.setItem('viewMode', targetMode)
     setEnteredFromMode(targetMode)
@@ -3951,8 +4000,13 @@ function App() {
       debugLog(`🎵 [Preload] 第 ${position + 1} 首歌曲: ${song.name}`)
       debugLog(`   索引: ${idx}, 缓存键: ${cacheKey}`)
 
-      // 歌词不再等待音频 URL，立即开始并复用进行中的请求。
+      // Lyrics and artwork begin together with audio preparation. The upcoming
+      // player image is decoded before transition state starts using it.
       void ensureSongLyrics(song, cacheKey)
+      void preloadArtwork(song.album?.picUrl || '', {
+        role: position === 0 ? 'background' : 'player',
+        priority: position === 0 ? 'critical' : 'visible',
+      }).catch(() => undefined)
 
       // Apple 原生播放只为第一首确定的 next 预取 CENC stream，限制为 active + standby 两个会话。
       // WebView2 是外部播放源，不能进入本地双 deck；第二首只预取歌词，不提前申请 license。
@@ -4129,10 +4183,19 @@ function App() {
 
     const excludedSongKeys = playlistRef.current.map(song => String(song.mid || song.id || '')).filter(Boolean)
     const continuationPlatform = playbackOriginRef.current.platform || playlist[0]?.platform || 'netease'
-    // 请求发起时的加载修订号：若等待期间用户手动选了别的歌（loadAndPlaySong 递增修订号），
-    // 则本次续载只追加队列、不再自动播放下一首，避免过期请求覆盖用户的选择。
+    const neteaseContinuation = playbackOriginRef.current.neteaseContinuation
+    const qqRadarContinuation = playbackOriginRef.current.qqRadarContinuation
+    // 网易云心动/漫游和 QQ 刷歌沿用各自的原生接口，其他平台保持原有推荐续取路径。
+    const continuationRequest = continuationPlatform === 'netease' && neteaseContinuation?.mode === 'heart-mode'
+      ? fetchNeteaseHeartMode(playlist[currentIndex]?.id || playlist[playlist.length - 1]?.id || 0, neteaseContinuation.playlistId, undefined, { count: 30 })
+      : continuationPlatform === 'netease' && neteaseContinuation?.mode === 'roam'
+        ? fetchNeteaseRoam(undefined, { unplaySongIds: excludedSongKeys })
+        : continuationPlatform === 'qq' && qqRadarContinuation?.mode === 'radar'
+          ? fetchQQRadarSongs({ page: qqRadarContinuation.page + 1, reqType: qqRadarContinuation.reqType, entranceSongs: qqRadarContinuation.entranceSongs }).then(result => result.songs)
+          : fetchExploreRecommendationBatch(continuationPlatform, requestedBatch, excludedSongKeys)
+    // 请求发起时的加载修订号：若用户等待期间手动换歌，只追加队列，不自动抢播。
     const loadRevisionAtRequest = songLoadRevisionRef.current
-    void fetchExploreRecommendationBatch(continuationPlatform, requestedBatch, excludedSongKeys)
+    void continuationRequest
       .then(songs => {
         if (playbackOriginRef.current.continuation !== 'explore-infinite') return
         const currentQueue = playlistRef.current
@@ -4485,6 +4548,8 @@ function App() {
         })
         if (!isLatestLoad()) return
         if (!appleHlsStream) {
+          // 电台不启用 WebView2 二次登录：原生 HLS/EME 失败时直接报告真实原因，
+          // 不把用户带到另一个需要重新登录的播放窗口。
           setAppleRadioError(getAppleRadioFailReason())
           setAppleRadioStatus('error')
           setCurrentTrack(createTrackFromSong(normalizedSong))
@@ -5227,7 +5292,17 @@ function App() {
           audioPlayerRef.current?.setVolume(watchEngineVolumeRef.current)
           engineEl.muted = watchEngineMutedRef.current
           // 视频进度越过歌曲末尾时停在末尾保持暂停（不自动切下一首），跳过自动起播
-          if (!watchResumeHeldAtEndRef.current && engineEl.paused) void engineEl.play().catch(() => {})
+          if (!watchResumeHeldAtEndRef.current && engineEl.paused) {
+            // play() 的媒体事件是异步的；先同步发布恢复意图，避免背景层在 hidden=false
+            // 的首个 render 中仍看到看歌接管期间的 isPlaying=false 而再次暂停视频。
+            setIsPlaying(true)
+            const playPromise = engineEl.play()
+            void playPromise.catch(() => {
+              const activeEngineEl = audioPlayerRef.current?.getAudioElement?.()
+              if (lyricDisplayModeRef.current === 'video' || activeEngineEl !== engineEl || !engineEl.paused) return
+              setIsPlaying(false)
+            })
+          }
         }
       }
       return
@@ -5262,7 +5337,7 @@ function App() {
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [lyricDisplayMode])
+  }, [lyricDisplayMode, watchVideoActive])
 
   // ===== 桌面播放器：独立置顶小窗口的状态桥接 =====
   const isPlayingRef = useRef(isPlaying)
@@ -5680,7 +5755,8 @@ function App() {
             artists: Array.isArray(currentSong.artists)
               ? currentSong.artists.map((artist: any) => artist?.name).filter(Boolean).join(' / ')
               : '',
-            coverUrl: currentSong.album?.picUrl || '',
+            coverUrl: getResolvedArtworkUrl(currentSong.album?.picUrl || '', { role: 'player', size: 512 }),
+            coverRevision: currentSong.album?.picUrl || '',
           }
         : null,
       // 时长（秒）：主进程据此把任务栏进度条换算为 0-1
@@ -6715,8 +6791,16 @@ function App() {
 
   useEffect(() => {
     if (!loginRestoreComplete) return
-    return scheduleBackgroundPrefetch({ viewMode, neteaseLoggedIn, qqLoggedIn })
-  }, [loginRestoreComplete, viewMode, neteaseLoggedIn, qqLoggedIn, neteaseUserId, qqUserId])
+    return scheduleBackgroundPrefetch({
+      viewMode,
+      neteaseLoggedIn,
+      qqLoggedIn,
+      appleLoggedIn,
+      sodaLoggedIn,
+      appleStorefront,
+      sodaAccountId: sodaUserId,
+    })
+  }, [loginRestoreComplete, viewMode, neteaseLoggedIn, qqLoggedIn, appleLoggedIn, sodaLoggedIn, appleStorefront, neteaseUserId, qqUserId, sodaUserId])
 
   // 处理喜欢按钮点击 - 切换喜欢状态
   const getBackgroundStyle = () => {
@@ -7058,6 +7142,9 @@ function App() {
   }, [])
 
   const renderedMode: ViewMode = isPlaybackPage ? 'minimal' : viewMode
+  // 探索页是独立的不透明工作面；从其 mini 播放器进入播放页时，播放页首帧必须完全覆盖探索页。
+  // 否则 AnimatePresence 的同步淡入/淡出会把两个页面叠在一起，表现为用户截图中的整屏透底。
+  const enteringPlayerFromExplore = isPlaybackPage && enteredFromMode === 'explore'
   const mixingStudioAudio = showMixingStudio ? audioPlayer.getAudioElement() : null
 
   return (
@@ -7486,11 +7573,11 @@ function App() {
           /* 简约模式 */
           <motion.div
             key="minimal-mode"
-            initial={{ opacity: 0, y: 26, scale: 0.985 }}
+            initial={enteringPlayerFromExplore ? { opacity: 1, y: 0, scale: 1 } : { opacity: 0, y: 26, scale: 0.985 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
-            transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute inset-0 h-screen w-full flex items-center justify-center overflow-hidden"
+            transition={enteringPlayerFromExplore ? { duration: 0 } : { duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute inset-0 h-screen w-full flex items-center justify-center overflow-hidden bg-black"
             style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
           >
 
@@ -7549,6 +7636,7 @@ function App() {
             transitionProgress={overlayProgress}
             songTrackKey={currentSong ? getSongKey(currentSong) : ''}
             onFallbackChange={setMvBackgroundFallback}
+            onReadyChange={setMvBackgroundReady}
             onPlayStateChange={(s: { songKey: string; bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number } | null) => {
               // null = MV 背景已卸载/切歌/失败：清空复用缓存，避免切看歌时用上过期视频
               mvBackgroundStateRef.current = s ? { songKey: s.songKey, bvid: s.bvid, cid: s.cid, videoUrl: s.videoUrl, cacheKey: s.cacheKey, type: s.type } : null
@@ -7682,6 +7770,19 @@ function App() {
                     alignmentOffset: state.alignmentOffset ?? 0,
                     alignmentVerified: state.alignmentVerified ?? false,
                   })
+                  if (state.alignmentVerified && Number.isFinite(state.time) && state.time > 0) {
+                    const songKey = currentSong ? bilibiliSongKeyOf({
+                      songTitle: currentSong.name,
+                      artists: currentSong.artists.map((artist: any) => artist.name),
+                      songDuration: (currentSong.duration || 0) / 1000,
+                      platform: currentSong.platform,
+                      id: currentSong.id || currentSong.mid,
+                    }) : ''
+                    if (songKey) modeHandoffTimeRef.current = {
+                      songKey,
+                      time: Math.max(0, state.time - (state.alignmentOffset ?? 0)),
+                    }
+                  }
                   // 看歌里调音量 → 同步全局音量（其它播放模式跟随）
                   if (typeof state.volume === 'number' && state.volume >= 0 && state.volume <= 1) {
                     setVolume(state.volume)
@@ -7701,7 +7802,7 @@ function App() {
                 initialType={currentInitialVideo?.type}
                 getEnginePosition={() => Number(audioPlayerRef.current?.getAudioElement?.()?.currentTime) || 0}
                 engineHandoffActive={engineHandoffActive}
-                surfaceVisible={!showHome}
+                surfaceVisible={!showHome && lyricDisplayMode === 'video'}
               />
             </div>
             )
@@ -8135,7 +8236,7 @@ function App() {
 
               {(() => {
             // 播放器事件监听，处理播放状态变化
-            return isAppleRadioPlayback && currentSong ? (
+            return (isAppleRadioPlayback || (appleRadioSurfaceLocked && pendingAppleRadioSong?.appleRadio)) ? (
               <motion.div
                 key="apple-radio-player"
                 initial={{ opacity: 0 }}
@@ -8144,7 +8245,7 @@ function App() {
                 className="absolute inset-0 z-20"
               >
                 <LazyAppleRadioNowPlayingPage
-                  song={currentSong}
+                  song={(isAppleRadioPlayback ? currentSong : pendingAppleRadioSong)!}
                   isPlaying={isPlaying}
                   currentTime={currentTime}
                   duration={duration}
@@ -8156,7 +8257,10 @@ function App() {
                   onPlayPause={handlePlayPause}
                   onSeek={audioPlayer.seek}
                   onVolumeChange={handleVolumeChange}
-                  onRetry={() => { void loadAndPlaySong(currentSong, currentIndex, [currentSong]) }}
+                  onRetry={() => {
+                    const target = (isAppleRadioPlayback ? currentSong : pendingAppleRadioSong)
+                    if (target) void loadAndPlaySong(target, 0, [target])
+                  }}
                 />
               </motion.div>
             ) : isPureMusic && lyricDisplayMode !== 'modeng' ? (
@@ -8573,7 +8677,7 @@ function App() {
           })()}
 
           <AnimatePresence>
-            {currentSong && !showHome && lyricDisplayMode === 'modern' && modernAudioVisualizerEnabled && (
+            {currentSong && !showHome && !isAppleRadioPlayback && !appleRadioSurfaceLocked && lyricDisplayMode === 'modern' && modernAudioVisualizerEnabled && (
               <LazyModernAudioVisualizer
                 key="modern-audio-visualizer"
                 analyser={audioPlayer.analyserNode}
@@ -8587,7 +8691,7 @@ function App() {
           </AnimatePresence>
 
           {/* Folia 专属过渡展示层：独立于 FoliaLyricsPage，30fps progress 不触发歌词树重渲染。 */}
-          {foliaPresentation.active && currentSong && (
+          {foliaPresentation.active && currentSong && !isAppleRadioPlayback && !appleRadioSurfaceLocked && (
             <>
               <FoliaUpNextCard
                 visible={foliaPresentation.cardVisible}
@@ -8620,7 +8724,7 @@ function App() {
           )}
 
           {/* 全局播放器固定在底部；真正无视频/失败时通过 portal 恢复音频控制。 */}
-          {currentSong && !showHome && lyricDisplayMode !== 'modeng' && (lyricDisplayMode !== 'video' || watchSearchFailed) && (
+          {currentSong && !showHome && !isAppleRadioPlayback && !appleRadioSurfaceLocked && lyricDisplayMode !== 'modeng' && (lyricDisplayMode !== 'video' || watchSearchFailed) && (
             <MaybePortal active={lyricDisplayMode === 'video'}>
             <LivePlayerControls
                       playbackTimeStore={audioPlayer.playbackTimeStore}
