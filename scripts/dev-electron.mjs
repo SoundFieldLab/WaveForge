@@ -457,9 +457,13 @@ async function startDev() {
   console.log(`Electron loading ${devServerUrl}`)
 
   logStartup('Spawning Electron')
+  const electronArgs = [
+    ...(process.env.WAVEFORGE_REMOTE_DEBUG_PORT ? [`--remote-debugging-port=${process.env.WAVEFORGE_REMOTE_DEBUG_PORT}`] : []),
+    resolve(__dirname, '../desktop/main.cjs'),
+  ]
   const electronProcess = spawn(
     electron,
-    [resolve(__dirname, '../desktop/main.cjs')],
+    electronArgs,
     {
       stdio: 'inherit',
       env: {
