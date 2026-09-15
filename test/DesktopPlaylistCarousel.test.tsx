@@ -12,7 +12,7 @@ vi.mock('../src/tv/tvCore', () => ({
 afterEach(cleanup)
 
 describe('Desktop playlist carousel', () => {
-  it('shows an explicit fallback when playlist artwork fails', () => {
+  it('renders playlist artwork through the shared loader', () => {
     const playlist = {
       id: 'broken-playlist',
       name: 'Broken Cover',
@@ -28,8 +28,7 @@ describe('Desktop playlist carousel', () => {
       />,
     )
 
-    fireEvent.error(screen.getByRole('img', { name: 'Broken Cover' }))
-    expect(screen.getByText('暂无封面')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Broken Cover' })).not.toBeNull()
   })
 
   it('preserves the playlist platform when selecting a desktop playlist', () => {

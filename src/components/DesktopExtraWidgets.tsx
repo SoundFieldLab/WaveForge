@@ -35,6 +35,7 @@ import {
   useDesktopChartDetail,
   useDesktopExploreHome,
 } from './DesktopExploreWidgets'
+import CachedImage from './CachedImage'
 
 export interface DesktopWidgetPlaylist {
   id: string | number
@@ -193,7 +194,7 @@ function Header({ type, accentColor, trailing }: { type: DesktopWidgetType; acce
 
 function SongRow({ song, index, active, onClick }: { song: Song; index?: number; active?: boolean; onClick: () => void }) {
   return <button type="button" onClick={event => { event.stopPropagation(); onClick() }} className="flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left transition hover:bg-white/8" style={{ background: active ? 'rgba(255,255,255,.08)' : undefined }}>
-    {cover(song) ? <img src={cover(song)} alt="" className="h-10 w-10 shrink-0 rounded-xl object-cover" /> : <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/8 text-white/35">{index === undefined ? <Music2 className="h-4 w-4" /> : index + 1}</span>}
+    {cover(song) ? <CachedImage src={cover(song)} alt="" className="h-10 w-10 shrink-0 rounded-xl" role="row" priority="visible" fallback={<span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/8 text-white/35">{index === undefined ? <Music2 className="h-4 w-4" /> : index + 1}</span>} /> : <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white/8 text-white/35">{index === undefined ? <Music2 className="h-4 w-4" /> : index + 1}</span>}
     <span className="min-w-0 flex-1"><span className="block truncate text-sm text-white/86">{song.name}</span><span className="mt-0.5 block truncate text-[11px] text-white/38">{artistsText(song)}</span></span>
     <Play className="h-3.5 w-3.5 text-white/30" />
   </button>
@@ -369,7 +370,7 @@ function PlaybackProgress({ context, accentColor }: { context: DesktopMusicWidge
   const formatTime = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`
   return <div className="desktop-widget-card w-full overflow-hidden rounded-[28px] p-4 text-white" style={{ background: `linear-gradient(145deg, ${accentColor}35, rgba(8,12,24,.58) 48%, rgba(255,255,255,.07))`, backdropFilter: 'blur(22px)' }}>
     <div className="flex items-center gap-3">
-      {current?.album.picUrl ? <img src={current.album.picUrl} alt="" className="h-11 w-11 shrink-0 rounded-xl object-cover" /> : <span className="h-11 w-11 shrink-0 rounded-xl bg-white/10" />}
+      {current?.album.picUrl ? <CachedImage src={current.album.picUrl} alt="" className="h-11 w-11 shrink-0 rounded-xl" role="row" priority="visible" fallback={<span className="h-11 w-11 shrink-0 rounded-xl bg-white/10" />} /> : <span className="h-11 w-11 shrink-0 rounded-xl bg-white/10" />}
       <div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{current?.name || '等待播放'}</div><div className="mt-1 truncate text-[11px] text-white/40">{current?.artists.map(artist => artist.name).join(' / ') || '暂无歌曲'}</div></div>
     </div>
     <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full" style={{ width: `${progress * 100}%`, background: accentColor }} /></div>
@@ -543,8 +544,8 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
     details = <SongList songs={favoriteSongs} onPlay={song => play(song, favoriteSongs)} />
     settings = <SettingCount value={count} onChange={setCount} />
   } else if (type === 'playlistShortcuts') {
-    card = <><Header type={type} accentColor={accentColor} /><div className="mt-3 grid grid-cols-3 gap-2">{pinnedPlaylists.slice(0, count).map(item => <button key={item.id} type="button" onClick={event => { event.stopPropagation(); context.onPlaylistSelect(item) }} className="min-w-0"><img src={item.coverImgUrl} alt="" className="aspect-square w-full rounded-xl object-cover" /><span className="mt-1 block truncate text-[10px] text-white/55">{item.name}</span></button>)}</div></>
-    details = <div className="grid grid-cols-3 gap-3">{context.playlists.map(item => <button key={item.id} type="button" onClick={() => context.onPlaylistSelect(item)} className="rounded-2xl border border-white/8 bg-white/[.035] p-3 text-left hover:bg-white/8"><img src={item.coverImgUrl} alt="" className="aspect-square w-full rounded-xl object-cover" /><div className="mt-2 truncate text-sm">{item.name}</div><div className="mt-1 text-[10px] text-white/35">{item.trackCount || 0} 首</div></button>)}</div>
+    card = <><Header type={type} accentColor={accentColor} /><div className="mt-3 grid grid-cols-3 gap-2">{pinnedPlaylists.slice(0, count).map(item => <button key={item.id} type="button" onClick={event => { event.stopPropagation(); context.onPlaylistSelect(item) }} className="min-w-0"><CachedImage src={item.coverImgUrl} alt="" className="aspect-square w-full rounded-xl" role="card" priority="visible" fallback={<span className="flex aspect-square w-full items-center justify-center rounded-xl bg-white/8"><Library className="h-5 w-5 text-white/30" /></span>} /><span className="mt-1 block truncate text-[10px] text-white/55">{item.name}</span></button>)}</div></>
+    details = <div className="grid grid-cols-3 gap-3">{context.playlists.map(item => <button key={item.id} type="button" onClick={() => context.onPlaylistSelect(item)} className="rounded-2xl border border-white/8 bg-white/[.035] p-3 text-left hover:bg-white/8"><CachedImage src={item.coverImgUrl} alt="" className="aspect-square w-full rounded-xl" role="card" priority="visible" fallback={<span className="flex aspect-square w-full items-center justify-center rounded-xl bg-white/8"><Library className="h-6 w-6 text-white/30" /></span>} /><div className="mt-2 truncate text-sm">{item.name}</div><div className="mt-1 text-[10px] text-white/35">{item.trackCount || 0} 首</div></button>)}</div>
     settings = <><SettingCount value={count} onChange={setCount} /><div className="mt-4 text-xs text-white/42">固定歌单</div><div className="mt-2 max-h-72 space-y-1 overflow-y-auto">{context.playlists.map(item => { const key = pinnedKey(item); const selected = preferences.pinnedPlaylistIds.includes(key) || preferences.pinnedPlaylistIds.includes(String(item.id)); return <button key={item.id} type="button" onClick={() => update({ pinnedPlaylistIds: selected ? preferences.pinnedPlaylistIds.filter(id => id !== key && id !== String(item.id)) : [...preferences.pinnedPlaylistIds, key] })} className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-xs hover:bg-white/8"><span className="flex h-5 w-5 items-center justify-center rounded-md border" style={{ borderColor: selected ? accentColor : 'rgba(255,255,255,.2)', background: selected ? accentColor : 'transparent' }}>{selected && <Check className="h-3 w-3 text-slate-950" />}</span><span className="truncate">{item.name}</span></button> })}</div></>
   } else if (type === 'listeningStats') {
     card = <><Header type={type} accentColor={accentColor} /><div className="mt-4 grid grid-cols-2 gap-2"><Stat label="今日" value={formatMinutes(today.listenedSeconds)} /><Stat label="本周" value={formatMinutes(weekSeconds)} /></div><div className="mt-2 text-[11px] text-white/38">今日开始播放 {today.songStarts} 首</div></>

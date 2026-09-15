@@ -2,6 +2,7 @@ import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import { useEffect, useMemo, useRef } from 'react'
 import type { LyricLine } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
+import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
 import { buildTimedLyricGlyphs } from '../utils/lyricWordTiming'
 import ProgressiveGlyphText from './ProgressiveGlyphText'
 
@@ -137,6 +138,13 @@ export default function GloriousLyrics({
   const previous = findVisibleLine(lyrics, activeIndex - 1, -1)
   const next = findVisibleLine(lyrics, activeIndex + 1, 1)
   const palette = useMemo(() => resolvePalette(accentColor), [accentColor])
+  const resolvedCoverUrl = useMemo(
+    () => coverUrl ? getResolvedArtworkUrl(coverUrl, { role: 'background' }) : '',
+    [coverUrl],
+  )
+  useEffect(() => {
+    if (resolvedCoverUrl) void preloadArtwork(resolvedCoverUrl, { role: 'background', priority: 'visible' }).catch(() => undefined)
+  }, [resolvedCoverUrl])
   const scene = SCENES[Math.max(0, activeIndex) % SCENES.length]
   const wordTimingAvailable = useMemo(
     () => Boolean(currentLine && buildTimedLyricGlyphs(currentLine).length > 0),
@@ -169,10 +177,10 @@ export default function GloriousLyrics({
         }
       `}</style>
 
-      {coverUrl && (
+      {resolvedCoverUrl && (
         <div className="pointer-events-none absolute inset-0" aria-hidden="true">
           <img
-            src={coverUrl}
+            src={resolvedCoverUrl}
             alt=""
             draggable={false}
             className="absolute inset-[-8%] h-[116%] w-[116%] object-cover"
@@ -185,7 +193,7 @@ export default function GloriousLyrics({
         </div>
       )}
 
-      {coverUrl && (
+      {resolvedCoverUrl && (
         <div
           aria-hidden="true"
           className="pointer-events-none absolute -right-[1vw] top-[10vh] z-[2] w-[min(22vw,300px)]"
@@ -198,7 +206,7 @@ export default function GloriousLyrics({
               boxShadow: `0 0 0 6px rgba(8,9,14,.88), 0 0 0 8px ${colorWithAlpha(palette.highlight, .3)}, 0 42px 110px rgba(0,0,0,.62), 0 0 64px ${colorWithAlpha(palette.vivid, .2)}`,
             }}
           >
-            <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ filter: 'saturate(1.22) contrast(1.08) brightness(.82)' }} />
+            <img src={resolvedCoverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ filter: 'saturate(1.22) contrast(1.08) brightness(.82)' }} />
             <div className="absolute inset-0" style={{ background: 'linear-gradient(115deg, rgba(255,255,255,.18), transparent 28%, rgba(0,0,0,.08) 55%, rgba(0,0,0,.62))' }} />
             <div className="absolute inset-x-0 bottom-0 border-t border-white/20 bg-black/40 px-4 py-3 backdrop-blur-md">
               <div className="font-mono text-[8px] font-bold uppercase tracking-[.32em] text-white/65">featured cover / side a</div>

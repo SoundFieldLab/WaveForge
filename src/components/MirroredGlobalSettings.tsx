@@ -229,7 +229,8 @@ function ClassicEntryRow({ entry, value, skin, onToggle, onChoice, onSlide, onAc
     <button
       type="button"
       onClick={() => onAction(entry)}
-      className="group flex w-full items-center justify-between gap-3 rounded-xl px-2.5 py-2.5 text-left transition-colors hover:bg-white/[0.04]"
+      disabled={busy}
+      className="group flex w-full items-center justify-between gap-3 rounded-xl px-2.5 py-2.5 text-left transition-colors hover:bg-white/[0.04] disabled:cursor-wait disabled:opacity-60"
     >
       <span className="min-w-0">
         <span className="block text-[13px] leading-5" style={{ color: skin.text }}>{entry.label}</span>
@@ -352,7 +353,8 @@ function PanelEntryRow({ entry, value, skin, onToggle, onChoice, onSlide, onActi
     <button
       type="button"
       onClick={() => onAction(entry)}
-      className="group flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left transition-colors"
+      disabled={busy}
+      className="group flex w-full items-center justify-between gap-3 rounded-xl px-3 py-2.5 text-left transition-colors disabled:cursor-wait disabled:opacity-60"
     >
       <span className="min-w-0">
         <span className="block text-[13px] font-medium leading-5" style={{ color: skin.text }}>{entry.label}</span>

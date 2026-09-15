@@ -1,13 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Clock3, Headphones, Heart, Play, Share2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
-import { getProxiedImageUrl, isSameSong } from '../services/musicApi'
+import { isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
 import { APPLE_LIBRARY_ID, getLastAppleMutationResult, removeAppleTracksFromPlaylist } from '../services/appleCatalog'
 import { isSodaLoggedIn } from '../services/sodaService'
 import SongContextMenu from './SongContextMenu'
+import CachedImage from './CachedImage'
 
 type Playlist = {
   id: number | string
@@ -70,11 +71,10 @@ const formatDuration = (milliseconds = 0) => {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 const songKey = (song: Song) => `${song.platform}:${song.appleId || song.mid || song.id || song.name}`
-const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
-const DetailCover = ({ src, alt, className }: { src?: string; alt: string; className: string }) => {
-  const [failed, setFailed] = useState(false)
-  if (!src || failed) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Headphones className="h-1/3 w-1/3 opacity-40" /></span>
-  return <img src={src} alt={alt} className={className} onError={() => setFailed(true)} />
+const coverOf = (song?: Song | null) => song?.album?.picUrl || ''
+const DetailCover = ({ src, alt, className, role = 'card', priority = 'critical', lazy = false }: { src?: string; alt: string; className: string; role?: 'row' | 'card'; priority?: 'critical' | 'visible'; lazy?: boolean }) => {
+  if (!src) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Headphones className="h-1/3 w-1/3 opacity-40" /></span>
+  return <CachedImage src={src} alt={alt} className={className} role={role} priority={priority} lazy={lazy} fallback={<span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Headphones className="h-1/3 w-1/3 opacity-40" /></span>} />
 }
 
 function TraditionalPlaylistDetail({
@@ -206,7 +206,7 @@ function TraditionalPlaylistDetail({
             <div className="min-w-0 flex-1">
               <h1 className="text-3xl font-bold leading-tight">{playlist?.name || '歌单'}</h1>
               <div className={`mt-3 flex flex-wrap items-center gap-2 text-sm ${muted}`}>
-                {(playlist?.creator?.avatarUrl || ownUserAvatar) ? <img src={playlist?.creator?.avatarUrl || ownUserAvatar} alt="" className="h-5 w-5 rounded-full object-cover" /> : null}
+                {(playlist?.creator?.avatarUrl || ownUserAvatar) ? <CachedImage src={playlist?.creator?.avatarUrl || ownUserAvatar || ''} alt="" className="h-5 w-5 rounded-full object-cover" role="row" size={64} priority="visible" /> : null}
                 {creatorId && onOpenUserProfile ? (
                   <button type="button" onClick={() => onOpenUserProfile(platform, creatorId, creatorName, playlist?.creator?.avatarUrl || ownUserAvatar)} className="transition hover:underline" style={{ color: accentColor }}>{creatorName}</button>
                 ) : (
@@ -247,7 +247,7 @@ function TraditionalPlaylistDetail({
                     >
                       <span className="flex min-w-0 items-center gap-3">
                         <span className="relative shrink-0">
-                          <DetailCover src={coverOf(song)} alt={`${song.name} 封面`} className="h-10 w-10 rounded-lg object-cover" />
+                          <DetailCover src={coverOf(song)} alt={`${song.name} 封面`} className="h-10 w-10 rounded-lg object-cover" role="row" priority="visible" lazy />
                           <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
                         </span>
                         <span className="min-w-0">

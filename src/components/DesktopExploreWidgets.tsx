@@ -9,6 +9,7 @@ import {
   type ExplorePayload,
 } from '../services/exploreApi'
 import type { MusicPlatform } from '../services/platforms'
+import CachedImage from './CachedImage'
 
 export function useDesktopExploreHome(platform: MusicPlatform, enabled: boolean) {
   const [data, setData] = useState<ExplorePayload | null>(null)
@@ -57,14 +58,14 @@ const songKey = (song: Song, index: number) => `${song.platform || 'unknown'}:${
 
 export function DesktopNewSongsView({ songs, compact, onPlay }: { songs: Song[]; compact: boolean; onPlay: (song: Song) => void }) {
   return <div className="space-y-1">{songs.map((song, index) => <button key={songKey(song, index)} type="button" onClick={event => { event.stopPropagation(); onPlay(song) }} className="flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left transition hover:bg-white/8">
-    {song.album.picUrl ? <img src={song.album.picUrl} alt="" className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0 rounded-xl object-cover`} /> : <span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>}
+    {song.album.picUrl ? <CachedImage src={song.album.picUrl} alt="" className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0 rounded-xl`} role="row" priority="visible" fallback={<span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>} /> : <span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>}
     <span className="min-w-0 flex-1"><span className="block truncate text-sm text-white/86">{song.name}</span><span className="mt-0.5 block truncate text-[11px] text-white/38">{artistsText(song)}</span></span><Play className="h-3.5 w-3.5 text-white/30" />
   </button>)}</div>
 }
 
 export function DesktopChartsView({ charts, compact, selectedId, onSelect }: { charts: ExploreChart[]; compact: boolean; selectedId?: string; onSelect: (chart: ExploreChart) => void }) {
   return <div className={compact ? 'space-y-1' : 'grid grid-cols-2 gap-3'}>{charts.map(chart => <button key={`${chart.platform}:${chart.id}`} type="button" onClick={event => { event.stopPropagation(); onSelect(chart) }} className={`flex items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-white/8 ${selectedId === chart.id ? 'border-cyan-200/35 bg-cyan-300/8' : 'border-white/7 bg-white/[.035]'}`}>
-    {chart.coverUrl ? <img src={chart.coverUrl} alt="" className={`${compact ? 'h-10 w-10' : 'h-14 w-14'} shrink-0 rounded-xl object-cover`} /> : <span className={`${compact ? 'h-10 w-10' : 'h-14 w-14'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><ListMusic className="h-4 w-4 text-white/35" /></span>}
+    {chart.coverUrl ? <CachedImage src={chart.coverUrl} alt="" className={`${compact ? 'h-10 w-10' : 'h-14 w-14'} shrink-0 rounded-xl`} role="compact" priority="visible" fallback={<span className={`${compact ? 'h-10 w-10' : 'h-14 w-14'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><ListMusic className="h-4 w-4 text-white/35" /></span>} /> : <span className={`${compact ? 'h-10 w-10' : 'h-14 w-14'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><ListMusic className="h-4 w-4 text-white/35" /></span>}
     <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{chart.name}</span><span className="mt-1 block truncate text-[10px] text-white/35">{chart.updateText || chart.group || `${chart.songs.length} 首预览`}</span></span>
   </button>)}</div>
 }
@@ -106,7 +107,7 @@ const formatPublishDate = (value: ExploreAlbum['publishTime']) => {
 
 export function DesktopAlbumsView({ albums, compact, onOpen }: { albums: ExploreAlbum[]; compact: boolean; onOpen: (album: ExploreAlbum) => void }) {
   return <div className={compact ? 'grid grid-cols-3 gap-2' : 'grid grid-cols-3 gap-3'}>{albums.map(album => <button key={`${album.platform}:${album.mid || album.id}`} type="button" onClick={event => { event.stopPropagation(); onOpen(album) }} className="min-w-0 rounded-2xl p-1 text-left transition hover:bg-white/8">
-    {album.coverUrl ? <img src={album.coverUrl} alt="" className="aspect-square w-full rounded-xl object-cover" /> : <span className="flex aspect-square w-full items-center justify-center rounded-xl bg-white/8"><Disc3 className="h-6 w-6 text-white/30" /></span>}
+    {album.coverUrl ? <CachedImage src={album.coverUrl} alt="" className="aspect-square w-full rounded-xl" role="card" priority="visible" fallback={<span className="flex aspect-square w-full items-center justify-center rounded-xl bg-white/8"><Disc3 className="h-6 w-6 text-white/30" /></span>} /> : <span className="flex aspect-square w-full items-center justify-center rounded-xl bg-white/8"><Disc3 className="h-6 w-6 text-white/30" /></span>}
     <span className="mt-2 block truncate text-xs font-medium text-white/82">{album.name}</span><span className="mt-0.5 block truncate text-[10px] text-white/35">{compact ? album.artist : `${album.artist} · ${formatPublishDate(album.publishTime)}`}</span>
   </button>)}</div>
 }

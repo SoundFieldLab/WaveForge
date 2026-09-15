@@ -4,6 +4,7 @@ import { motion, useMotionValue, animate } from 'framer-motion'
 import { Heart, History, ImageOff } from 'lucide-react'
 import { setTvFocus, useTvFocus } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
+import CachedImage from './CachedImage'
 
 interface Playlist {
   id: string | number
@@ -491,13 +492,15 @@ const PlaylistCard = memo(function PlaylistCard({ playlist, platform, index, isA
             {Array.from({ length: 4 }).map((_, coverIndex) => {
               const cover = playlist.covers?.[coverIndex]
               return cover && !failedCovers.has(coverIndex) ? (
-                <img
+                <CachedImage
                   key={coverIndex}
                   src={cover}
                   alt=""
-                  className="h-full w-full object-cover"
+                  className="h-full w-full"
                   draggable={false}
-                  onError={() => setFailedCovers(previous => new Set(previous).add(coverIndex))}
+                  role="card"
+                  priority="visible"
+                  fallback={<div className="flex h-full w-full items-center justify-center bg-white/10"><History className="h-6 w-6 text-white/30" /></div>}
                 />
               ) : (
                 <div key={coverIndex} className="flex h-full w-full items-center justify-center bg-white/10">
@@ -509,14 +512,15 @@ const PlaylistCard = memo(function PlaylistCard({ playlist, platform, index, isA
         ) : artworkFailed || !playlist.coverImgUrl ? (
           fallbackArtwork(compact)
         ) : (
-          <img
+          <CachedImage
             src={playlist.coverImgUrl}
             alt={playlist.name}
-            className="block h-full w-full rounded-[18px] object-cover"
-            loading={isActive ? 'eager' : 'lazy'}
-            decoding="async"
+            className="block h-full w-full rounded-[18px]"
+            lazy={!isActive}
+            priority={isActive ? 'critical' : 'visible'}
             draggable={false}
-            onError={() => setArtworkFailed(true)}
+            role="card"
+            fallback={fallbackArtwork(compact)}
           />
         )}
 

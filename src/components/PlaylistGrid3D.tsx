@@ -8,6 +8,7 @@ import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
 import SongContextMenu from './SongContextMenu'
 import DeleteSongModal from './DeleteSongModal'
+import CachedImage from './CachedImage'
 
 // 3D网格歌单视图组件 - 简化版本，移除拖拽功能
 interface PlaylistGrid3DProps {
@@ -79,12 +80,14 @@ const SongCard = ({ song, onPlay, onPlayNext, onContextMenu, formatDuration, car
         {/* 封面区域 */}
         <div className="w-full aspect-square rounded-lg overflow-hidden bg-zinc-800/60 relative shadow-inner flex items-center justify-center shrink-0 mb-3">
           {song.album?.picUrl ? (
-            <img
+            <CachedImage
               src={song.album.picUrl}
               alt={song.name}
-              className="w-full h-full object-cover"
-              loading="lazy"
-              draggable="false"
+              className="w-full h-full"
+              lazy
+              draggable={false}
+              role="card"
+              priority="visible"
             />
           ) : (
             <div className="w-full h-full bg-gradient-to-br from-zinc-700 to-zinc-900 flex items-center justify-center">

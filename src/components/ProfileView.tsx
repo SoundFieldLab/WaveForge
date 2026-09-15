@@ -1,7 +1,7 @@
 import { getQQUserDisplayName } from '../utils/qqUser'
 import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Cloud } from 'lucide-react'
+import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Cloud, Eye, EyeOff, ShieldCheck, ChevronDown, ChevronUp } from 'lucide-react'
 import { Song, isSameSong, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages, getNeteaseCloudSongs } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import CachedImage from './CachedImage'
@@ -25,8 +25,12 @@ import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../se
 import { getAppleAuthState } from '../services/appleAuth'
 import { getPlatformRemainingDays } from '../services/loginExpiry'
 import { getAppleLibraryPlaylists, getAppleFavoriteSongs, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, appleSongToSong, getLastAppleMutationResult, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID, enrichApplePlaylistTrackCounts } from '../services/appleCatalog'
+import { preloadArtwork } from '../services/artworkLoader'
+import { fetchNeteaseRecentSongs } from '../services/neteaseRecentPlayback'
 import { fetchSpotifyMyPlaylists, fetchSpotifyLiked, fetchSpotifyPlaylist, spotifyTrackToSong } from '../services/spotifyService'
 import { detectQQMusicVip } from '../utils/musicEntitlements'
+import { isAccountFieldsMasked, setAccountFieldsMasked, isPersonalStationProtected, setPersonalStationProtected, getCachedPersonalStation, PERSONAL_STATION_MASK } from '../utils/applePrivacy'
+import { fetchApplePersonalStation } from '../services/appleWebService'
 
 interface Playlist {
   id: string | number
@@ -250,6 +254,8 @@ const PlaylistGridCard = memo(function PlaylistGridCard({
                 <Music className="w-8 h-8 text-white/20" />
               </div>
             }
+            role="card"
+            priority="visible"
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center">
@@ -327,7 +333,7 @@ const RecentPlaybackCard = memo(function RecentPlaybackCard({
       }}
     >
       <div className="relative w-full aspect-square rounded-lg overflow-hidden bg-white/10 mb-3">
-        {item.coverUrl ? <CachedImage src={item.coverUrl} alt={item.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-8 h-8 text-white/20" /></div>} /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-8 h-8 text-white/20" /></div>}
+        {item.coverUrl ? <CachedImage src={item.coverUrl} alt={item.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-8 h-8 text-white/20" /></div>} lazy={platform !== 'apple'} role="card" priority={platform === 'apple' ? 'critical' : 'visible'} retries={platform === 'apple' ? 1 : undefined} /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-8 h-8 text-white/20" /></div>}
         {item.type === 'song' && item.song && <button type="button" onClick={(event) => { event.stopPropagation(); onSongSelect(item.song!, songItems.map(entry => entry.song!)) }} className="absolute bottom-2 right-2 p-3 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg" aria-label="播放"><Play className="w-5 h-5" fill="currentColor" /></button>}
         {item.type === 'playlist' && item.playlist && <button type="button" onClick={(event) => onPlaylistPlay(item.playlist!, event)} className="absolute bottom-2 right-2 p-3 rounded-full bg-black/60 hover:bg-black/80 text-white opacity-0 group-hover:opacity-100 transition-opacity shadow-lg" aria-label="播放歌单"><Play className="w-5 h-5" fill="currentColor" /></button>}
       </div>
@@ -370,7 +376,7 @@ const SocialUserCard = memo(function SocialUserCard({
     >
       <div className="flex items-center gap-3">
         <div className="w-12 h-12 rounded-full overflow-hidden shrink-0 bg-white/10">
-          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.nickname} loading="lazy" className="w-full h-full object-cover" /> : <User className="w-6 h-6 m-auto mt-3 text-white/30" />}
+          {user.avatarUrl ? <CachedImage src={user.avatarUrl} alt={user.nickname} className="w-full h-full object-cover" role="compact" priority="visible" /> : <User className="w-6 h-6 m-auto mt-3 text-white/30" />}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-white text-sm font-medium truncate">{user.nickname}</p>
@@ -428,7 +434,7 @@ const QqSocialUserCard = memo(function QqSocialUserCard({
     >
       <div className="flex items-center gap-3">
         <div className="w-12 h-12 rounded-full overflow-hidden shrink-0 bg-white/10">
-          {user.avatarUrl ? <img src={user.avatarUrl} alt={user.name} loading="lazy" className="w-full h-full object-cover" /> : <Users className="w-6 h-6 m-auto mt-3 text-white/30" />}
+          {user.avatarUrl ? <CachedImage src={user.avatarUrl} alt={user.name} className="w-full h-full object-cover" role="compact" priority="visible" /> : <Users className="w-6 h-6 m-auto mt-3 text-white/30" />}
         </div>
         <div className="min-w-0 flex-1">
           <p className="text-white text-sm font-medium truncate">{user.name}</p>
@@ -482,7 +488,7 @@ const RankSongRow = memo(function RankSongRow({
     >
       <span className={`w-8 text-center text-sm font-semibold shrink-0 ${index < 3 ? '' : 'text-white/40'}`} style={index < 3 ? { color: accentColor } : {}}>{index + 1}</span>
       <div className="w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-white/10">
-        {song.album?.picUrl ? <CachedImage src={song.album.picUrl} alt={song.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>} /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
+        {song.album?.picUrl ? <CachedImage src={song.album.picUrl} alt={song.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>} role="row" priority="visible" /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-white text-sm font-medium truncate">{song.name}</p>
@@ -544,6 +550,27 @@ function ProfileView({
   onCopyInfo
 }: ProfileViewProps) {
   const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(initialPlatform)
+
+  /** 个人中心隐私：敏感字段默认以波浪占位，小眼睛展开；状态持久化。 */
+  const [accountFieldsMasked, setAccountFieldsMaskedState] = useState(() => isAccountFieldsMasked())
+  const [privacyOpen, setPrivacyOpen] = useState(false)
+  const [protectPersonalStation, setProtectPersonalStationState] = useState(() => isPersonalStationProtected())
+  const [personalStation, setPersonalStation] = useState(() => getCachedPersonalStation())
+
+  // 进入个人中心时探测 Apple 个人电台（ra.u- 前缀，名称来自真实姓名）
+  useEffect(() => {
+    let cancelled = false
+    void fetchApplePersonalStation()
+      .then(info => { if (!cancelled && info) setPersonalStation(info) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
+  /** 敏感字段：遮罩时显示波浪占位（替代 ****），展开后显示真实内容。 */
+  const Masked = ({ children, widthClass = 'w-[6.5rem]' }: { children: React.ReactNode; widthClass?: string }) => (
+    accountFieldsMasked
+      ? <span className={`wf-privacy-wave ${widthClass}`} aria-label="已脱敏" />
+      : <>{children}</>
+  )
   const [activeTab, setActiveTab] = useState<ProfileTab>(initialTab)
   const [recentType, setRecentType] = useState<RecentPlaybackType>('song')
   const [recentItems, setRecentItems] = useState<RecentPlaybackItem[]>([])
@@ -1346,7 +1373,7 @@ function ProfileView({
       if (currentPlatform === 'apple') {
         const tracks = await getAppleRecentPlayed(100)
         if (recentRequestRef.current.revision !== revision) return
-        setRecentItems(tracks.map((track, index) => ({
+        const recentItems = tracks.map((track, index) => ({
           id: String(track.id || index),
           type: 'song' as const,
           name: track.name || '未知歌曲',
@@ -1354,7 +1381,15 @@ function ProfileView({
           coverUrl: track.artworkUrl || '',
           playTime: 0,
           song: appleSongToSong(track),
-        })))
+        }))
+        setRecentItems(recentItems)
+        void Promise.allSettled(
+          recentItems.slice(0, 8).map(item => preloadArtwork(item.coverUrl, {
+            role: 'card',
+            priority: 'critical',
+            retries: 1,
+          })),
+        )
         return
       }
       // Spotify：无最近播放官方接口，尽力而为（展示音乐库喜欢的歌曲）
@@ -1405,6 +1440,20 @@ function ProfileView({
       // 酷狗：暂无最近播放接口，返回空（不报错）
       if (currentPlatform === 'kugou') {
         setRecentItems([])
+        return
+      }
+      if (requestPlatform === 'netease' && type === 'song') {
+        const result = await fetchNeteaseRecentSongs(requestCookie, 100)
+        if (recentRequestRef.current.revision !== revision) return
+        setRecentItems(result.songs.map((song, index) => ({
+          id: String(song.id ?? index),
+          type: 'song' as const,
+          name: song.name,
+          subtitle: song.artists.map(artist => artist.name).join(' / '),
+          coverUrl: song.album?.picUrl || '',
+          playTime: 0,
+          song,
+        })))
         return
       }
       const requestType = requestPlatform === 'qq' ? 'song' : type
@@ -2591,7 +2640,7 @@ function ProfileView({
                                       <div key={`${c.commentId || c.id || index}`} className="rounded-xl px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
                                         <div className="flex items-center gap-2 mb-1">
                                           <div className="w-6 h-6 rounded-full overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
-                                            {c.user?.avatarUrl ? <img src={c.user.avatarUrl} alt="" className="w-full h-full object-cover" /> : <User className="w-3 h-3 m-auto mt-1.5 text-white/30" />}
+                                            {c.user?.avatarUrl ? <CachedImage src={c.user.avatarUrl} alt="" className="w-full h-full object-cover" role="compact" priority="deferred" /> : <User className="w-3 h-3 m-auto mt-1.5 text-white/30" />}
                                           </div>
                                           <p className="text-white/85 text-xs font-medium truncate">{c.user?.nickname || '用户'}</p>
                                         </div>
@@ -2634,7 +2683,7 @@ function ProfileView({
                                   <div key={`${ev.id || index}`} className="rounded-xl p-4" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
                                     <div className="flex items-center gap-3 mb-2">
                                       <div className="w-9 h-9 rounded-full overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
-                                        {user.avatarUrl ? <img src={user.avatarUrl} alt={user.nickname || ''} className="w-full h-full object-cover" /> : <User className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
+                                        {user.avatarUrl ? <CachedImage src={user.avatarUrl} alt={user.nickname || ''} className="w-full h-full object-cover" role="compact" priority="visible" /> : <User className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
                                       </div>
                                       <div className="min-w-0 flex-1">
                                         <p className="text-white text-sm font-medium truncate">{user.nickname || '用户'}</p>
@@ -2721,7 +2770,7 @@ function ProfileView({
                           {qqFavItems.map((item, index) => (
                             <div key={`${item.id || index}-${index}`} className="rounded-xl p-2.5 transition-all" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
                               <div className="relative w-full aspect-square rounded-lg overflow-hidden mb-2" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                {item.logo ? <img src={item.logo} alt={item.title || ''} className="w-full h-full object-cover" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
+                                {item.logo ? <CachedImage src={item.logo} alt={item.title || ''} className="w-full h-full object-cover" role="card" priority="visible" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
                               </div>
                               <p className="text-white/90 text-xs font-medium truncate">{item.title || item.name || '未知'}</p>
                               <p className="text-white/40 text-[11px] truncate mt-0.5">
@@ -2808,7 +2857,7 @@ function ProfileView({
                                 <div key={`${albumId || index}-${index}`} className="rounded-xl p-2.5 transition-all cursor-pointer" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
                                   onClick={() => { if (albumId && onOpenAlbum) onOpenAlbum(String(albumId), platform) }} title="点击打开专辑">
                                   <div className="relative w-full aspect-square rounded-lg overflow-hidden mb-2" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                    {cover ? <img src={cover} alt={albumName} loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
+                                    {cover ? <CachedImage src={cover} alt={albumName} className="w-full h-full object-cover" role="card" priority="visible" /> : <Music className="w-8 h-8 m-auto text-white/20" />}
                                   </div>
                                   <p className="text-white/90 text-xs font-medium truncate">{albumName}</p>
                                   <p className="text-white/40 text-[11px] truncate mt-0.5">{singerName}</p>
@@ -2834,7 +2883,7 @@ function ProfileView({
                                 <div key={`${artistId || index}-${index}`} className="rounded-xl p-4 transition-all cursor-pointer flex items-center gap-3" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
                                   onClick={() => { if (artistId && onOpenArtist) onOpenArtist(String(artistId), platform) }} title="点击打开歌手">
                                   <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
-                                    {cover ? <img src={cover} alt={artistName} loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-6 h-6 m-auto mt-3 text-white/30" />}
+                                    {cover ? <CachedImage src={cover} alt={artistName} className="w-full h-full object-cover" role="compact" priority="visible" /> : <Music className="w-6 h-6 m-auto mt-3 text-white/30" />}
                                   </div>
                                   <p className="text-white/90 text-xs font-medium truncate">{artistName}</p>
                                 </div>
@@ -2953,7 +3002,7 @@ function ProfileView({
                               >
                                 <span className="w-5 text-center text-xs text-white/40">{index + 1}</span>
                                 <div className="w-9 h-9 rounded-md overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.08)' }}>
-                                  {cover ? <img src={cover} alt="" loading="lazy" className="w-full h-full object-cover" /> : <Music className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
+                                  {cover ? <CachedImage src={cover} alt="" className="w-full h-full object-cover" role="row" priority="visible" /> : <Music className="w-4 h-4 m-auto mt-2.5 text-white/30" />}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <p className="text-white text-sm truncate">{songName}</p>
@@ -2970,6 +3019,18 @@ function ProfileView({
                 {activeTab === 'detail' && userDetail && (
                   <div className="max-w-2xl mx-auto">
                     <div className="relative flex flex-col items-center mb-8">
+                      {/* 小眼睛：放在姓名区右侧（敏感字段默认波浪脱敏，点这里显示真实内容） */}
+                      {platform === 'apple' && (
+                        <button
+                          type="button"
+                          onClick={() => { const next = !accountFieldsMasked; setAccountFieldsMaskedState(next); setAccountFieldsMasked(next) }}
+                          aria-label={accountFieldsMasked ? '显示敏感信息' : '隐藏敏感信息'}
+                          title={accountFieldsMasked ? '显示敏感信息' : '隐藏敏感信息'}
+                          className="absolute bottom-0 right-0 flex h-9 w-9 items-center justify-center rounded-full border border-white/12 bg-white/[0.06] text-white/70 transition hover:bg-white/[0.12] hover:text-white"
+                        >
+                          {accountFieldsMasked ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                        </button>
+                      )}
                       {/* 登录有效期（用户信息右上角） */}
                       {(() => {
                         const remaining = getPlatformRemainingDays(platform)
@@ -2994,7 +3055,7 @@ function ProfileView({
                       {/* 大头像 */}
                       <div className="w-32 h-32 rounded-full overflow-hidden mb-4 border-4 border-white/20">
                         {userDetail.avatarUrl ? (
-                          <img src={userDetail.avatarUrl} alt={userDetail.nickname} className="w-full h-full object-cover" />
+                          <CachedImage src={userDetail.avatarUrl} alt={userDetail.nickname} className="w-full h-full object-cover" role="compact" priority="critical" lazy={false} />
                         ) : (
                           <div className="w-full h-full bg-white/10 flex items-center justify-center">
                             <User className="w-16 h-16 text-white/20" />
@@ -3019,19 +3080,59 @@ function ProfileView({
                     </div>
 
                     {/* 详细信息卡片 */}
-                    <div className="bg-white/5 rounded-xl p-6 space-y-4">
+                    <div className="relative bg-white/5 rounded-xl p-6 space-y-4">
+
+                      {/* 折叠：用户数据脱敏（隐私） */}
+                      <div className="rounded-lg border border-white/10 bg-white/[0.03]">
+                        <button
+                          type="button"
+                          onClick={() => setPrivacyOpen(v => !v)}
+                          className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left"
+                        >
+                          <span className="flex items-center gap-2 text-sm font-medium text-white/85">
+                            <ShieldCheck className="h-4 w-4 text-white/50" /> 用户数据脱敏（隐私）
+                          </span>
+                          {privacyOpen ? <ChevronUp className="h-4 w-4 text-white/45" /> : <ChevronDown className="h-4 w-4 text-white/45" />}
+                        </button>
+                        {privacyOpen && (
+                          <div className="space-y-3 border-t border-white/10 px-4 py-3">
+                            <p className="text-xs leading-relaxed text-white/55">
+                              Apple 官方会用您的真实姓名给个人电台命名（形如「真实姓名 + 的电台」）。
+                              开启保护后，该电台名会在全局显示为「{PERSONAL_STATION_MASK}」，适合直播或录屏场景。
+                            </p>
+                            <div className="rounded-md bg-white/[0.04] px-3 py-2 text-xs text-white/60">
+                              当前检测到您的个人电台：
+                              {personalStation
+                                ? <span className="ml-1 font-medium text-white/85">{protectPersonalStation ? PERSONAL_STATION_MASK : personalStation.name}</span>
+                                : <span className="ml-1 text-white/45">未检测到（登录 Apple Music 后可见）</span>}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { const next = !protectPersonalStation; setProtectPersonalStationState(next); setPersonalStationProtected(next) }}
+                              className={`w-full rounded-lg px-4 py-2.5 text-sm font-medium transition ${
+                                protectPersonalStation
+                                  ? 'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                                  : 'bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
+                              }`}
+                            >
+                              {protectPersonalStation ? '当前已启用 · 个人电台名已脱敏' : '当前已禁用 · 点击启用个人电台名保护'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
                       <div className="grid grid-cols-2 gap-4">
                         <div className="bg-white/5 rounded-lg p-4">
                           <div className="text-white/50 text-sm mb-1">用户ID</div>
                           {/* Apple 无数字 ID：用户 ID 即 Apple ID 邮箱 */}
-                          <div className="text-white font-medium break-all">{platform === 'apple' ? userDetail.email || userDetail.userId : userDetail.userId}</div>
+                          <div className="text-white font-medium break-all"><Masked widthClass="w-[10rem]">{platform === 'apple' ? userDetail.email || userDetail.userId : userDetail.userId}</Masked></div>
                         </div>
 
                         {/* Apple：Apple ID 邮箱 */}
                         {userDetail.email && platform === 'apple' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">Apple ID</div>
-                            <div className="text-white font-medium break-all">{userDetail.email}</div>
+                            <div className="text-white font-medium break-all"><Masked widthClass="w-[10rem]">{userDetail.email}</Masked></div>
                           </div>
                         )}
 
@@ -3039,7 +3140,7 @@ function ProfileView({
                         {userDetail.realName && platform === 'apple' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">真实姓名</div>
-                            <div className="text-white font-medium">{userDetail.realName}</div>
+                            <div className="text-white font-medium"><Masked>{userDetail.realName}</Masked></div>
                           </div>
                         )}
 
@@ -3053,7 +3154,7 @@ function ProfileView({
                               />
                             )}
                             <div className="text-white/50 text-sm mb-1">出生日期</div>
-                            <div className="text-white font-medium">{userDetail.birthdayStr}</div>
+                            <div className="text-white font-medium"><Masked>{userDetail.birthdayStr}</Masked></div>
                           </div>
                         )}
 
@@ -3089,7 +3190,7 @@ function ProfileView({
                         {userDetail.billingAddress && platform === 'apple' && (
                           <div className="bg-white/5 rounded-lg p-4 col-span-2">
                             <div className="text-white/50 text-sm mb-1">账单寄送地址</div>
-                            <div className="text-white font-medium break-all">{userDetail.billingAddress}</div>
+                            <div className="text-white font-medium break-all"><Masked widthClass="w-[12rem]">{userDetail.billingAddress}</Masked></div>
                           </div>
                         )}
 
@@ -3097,7 +3198,7 @@ function ProfileView({
                         {userDetail.paymentType && platform === 'apple' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">付款类型</div>
-                            <div className="text-white font-medium break-all">{userDetail.paymentType}</div>
+                            <div className="text-white font-medium break-all"><Masked widthClass="w-[9rem]">{userDetail.paymentType}</Masked></div>
                           </div>
                         )}
 
@@ -3105,7 +3206,7 @@ function ProfileView({
                         {userDetail.accountBalance && platform === 'apple' && (
                           <div className="bg-white/5 rounded-lg p-4">
                             <div className="text-white/50 text-sm mb-1">Apple 账户余额</div>
-                            <div className="text-white font-medium">{userDetail.accountBalance}</div>
+                            <div className="text-white font-medium"><Masked>{userDetail.accountBalance}</Masked></div>
                           </div>
                         )}
 

@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown } from 'lucide-react'
+import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal } from 'lucide-react'
 import { Song, getProxiedImageUrl } from '../services/musicApi'
 import { getPlatformCapabilities, getPlatformCookie, getPlatformFavoriteLabels, platformLabel } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
@@ -34,6 +34,8 @@ interface SongContextMenuProps {
   onViewArtist?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
   onDislike?: (song: Song) => void
+  onAdjustPreferences?: () => void
+  onAdjustRecommendation?: (song: Song) => void
   userPlaylists: any[]
   platform: MusicPlatform
   playerTheme?: 'light' | 'dark'
@@ -130,6 +132,8 @@ export default function SongContextMenu({
   onViewArtist,
   onCopyInfo,
   onDislike,
+  onAdjustPreferences,
+  onAdjustRecommendation,
   userPlaylists,
   platform,
   playerTheme = 'dark',
@@ -586,6 +590,16 @@ export default function SongContextMenu({
         onClose()
       }
     },
+    ...(onAdjustPreferences && resolvedPlatform === 'qq' ? [{
+      label: '调整听歌偏好',
+      icon: SlidersHorizontal,
+      onClick: () => { onAdjustPreferences(); onClose() },
+    }] : []),
+    ...(onAdjustRecommendation && resolvedPlatform === 'qq' ? [{
+      label: '不感兴趣',
+      icon: ThumbsDown,
+      onClick: () => { onAdjustRecommendation(song); onClose() },
+    }] : []),
     ...(onDislike && song?.platform === 'netease' ? [{
       label: '不感兴趣',
       icon: ThumbsDown,

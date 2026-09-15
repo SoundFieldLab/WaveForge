@@ -3,11 +3,12 @@ import { List, useDynamicRowHeight, type ListImperativeAPI, type RowComponentPro
 import { motion, AnimatePresence } from 'framer-motion'
 import { Song } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
-import { getProxiedImageUrl } from '../services/musicApi'
 import { createSodaComment, fetchSodaComments, isSodaLoggedIn, type SodaComment } from '../services/sodaService'
 import { ThumbsUp, MessageCircle, Trash2, Send, ChevronDown, Edit3 } from 'lucide-react'
 import ScrollToTop from './ScrollToTop'
 import DeleteCommentModal from './DeleteCommentModal'
+import CachedImage from './CachedImage'
+import { getResolvedArtworkUrl } from '../services/artworkLoader'
 
 interface PlaylistCommentResource {
   id: number | string
@@ -250,15 +251,14 @@ const CommentItem = memo(function CommentItem({
       className="p-4 hover:bg-white/3 transition-colors"
     >
       <div className="flex items-start space-x-3">
-        <img
-          src={comment.user.avatarUrl ? `http://localhost:3001/api/proxy-image?url=${encodeURIComponent(comment.user.avatarUrl)}` : ''}
+        <CachedImage
+          src={comment.user.avatarUrl}
           alt={comment.user.nickname}
-          loading="lazy"
           className="w-10 h-10 rounded-full object-cover flex-shrink-0"
-          onError={(e) => {
-            const target = e.target as HTMLImageElement;
-            target.src = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="40" height="40"%3E%3Crect fill="%23374151" width="40" height="40"/%3E%3Ctext x="50%25" y="50%25" text-anchor="middle" dy=".3em" fill="%239CA3AF" font-size="16"%3E?%3C/text%3E%3C/svg%3E';
-          }}
+          role="row"
+          size={64}
+          priority="visible"
+          fallback={<div className="w-10 h-10 rounded-full bg-gray-700 flex-shrink-0" />}
         />
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline space-x-2 mb-1">
@@ -467,6 +467,9 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const commentType = isPlaylistResource ? 2 : 0
   const qqCommentBizType = isPlaylistResource ? 3 : 1
   const resourceCoverUrl = isPlaylistResource ? (playlist?.coverImgUrl || '') : (song?.album?.picUrl || '')
+  const resourceBackgroundUrl = resourceCoverUrl
+    ? getResolvedArtworkUrl(resourceCoverUrl, { role: 'background' })
+    : ''
   const resourceName = isPlaylistResource ? (playlist?.name || '歌单详情') : (song?.name || '')
   const resourceSubtitle = isPlaylistResource
     ? (playlist?.creator?.nickname || (resourcePlatform === 'qq' ? 'QQ音乐歌单' : '网易云歌单'))
@@ -1332,7 +1335,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
               <div
                 className="absolute -inset-20"
                 style={{
-                  backgroundImage: `url(${resourceCoverUrl})`,
+                  backgroundImage: `url(${resourceBackgroundUrl})`,
                   backgroundSize: 'cover',
                   backgroundPosition: 'center',
                   filter: 'blur(80px)',
@@ -1347,10 +1350,14 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-3">
                 {resourceCoverUrl && (
-                  <img
+                  <CachedImage
                     src={resourceCoverUrl}
                     alt={resourceName}
                     className="w-12 h-12 rounded-lg object-cover shadow-lg"
+                    role="compact"
+                    size={128}
+                    priority="critical"
+                    lazy={false}
                   />
                 )}
                 <div>
@@ -1391,7 +1398,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
               <div className="mt-4 rounded-xl border border-white/10 bg-white/5 p-4 space-y-3 text-sm text-white/75">
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                   {playlist.creator?.avatarUrl && (
-                    <img src={playlist.creator.avatarUrl} alt={playlist.creator.nickname || '创建者'} className="w-7 h-7 rounded-full object-cover" />
+                    <CachedImage src={playlist.creator.avatarUrl} alt={playlist.creator.nickname || '创建者'} className="w-7 h-7 rounded-full object-cover" role="row" size={64} priority="visible" />
                   )}
                   <span>创建者：{playlist.creator?.nickname || '未知用户'}</span>
                   {playlist.createTime && <span>创建日期：{new Date(playlist.createTime).toLocaleDateString('zh-CN')}</span>}

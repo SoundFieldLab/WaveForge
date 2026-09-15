@@ -7,6 +7,7 @@ import { getProxiedImageUrl, searchAlbums, searchArtists, searchPlaylists, searc
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities, platformLabel } from '../services/platforms'
 import SongContextMenu from './SongContextMenu'
+import CachedImage from './CachedImage'
 import type { PlaybackOrigin } from '../types/playbackNavigation'
 
 const formatDuration = (milliseconds = 0) => {
@@ -243,7 +244,7 @@ function TraditionalSearch({
                     </span>
                     <span className="flex min-w-0 items-center gap-3">
                       <span className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg" style={{ background: `${accent}22` }}>
-                        {coverOf(song) ? <img src={coverOf(song)} alt="" loading="lazy" className="h-full w-full object-cover" /> : <Music2 className="h-4 w-4 opacity-35" />}
+                        {coverOf(song) ? <CachedImage src={coverOf(song)} alt="" className="h-full w-full object-cover" role="row" priority="visible" fallback={<Music2 className="h-4 w-4 opacity-35" />} /> : <Music2 className="h-4 w-4 opacity-35" />}
                         <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
                       </span>
                       <span className="min-w-0">
@@ -271,7 +272,7 @@ function TraditionalSearch({
                   }}
                   className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left transition last:border-b-0 ${isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
-                  {artist.picUrl ? <img src={getProxiedImageUrl(artist.picUrl)} alt="" className="h-12 w-12 rounded-full object-cover" /> : <span className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: `${accent}22` }}><Music2 className="h-5 w-5 opacity-35" /></span>}
+                  {artist.picUrl ? <CachedImage src={artist.picUrl} alt="" className="h-12 w-12 rounded-full object-cover" role="compact" priority="visible" /> : <span className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: `${accent}22` }}><Music2 className="h-5 w-5 opacity-35" /></span>}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{artist.name}</span>
                     <span className={`block truncate text-xs ${muted}`}>{artist.musicSize ? `${artist.musicSize} 首歌曲` : '歌手'}</span>
@@ -294,7 +295,7 @@ function TraditionalSearch({
                   }}
                   className={`flex w-full items-center gap-3 border-b px-4 py-3 text-left transition last:border-b-0 ${isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
-                  <img src={album.picUrl ? getProxiedImageUrl(album.picUrl) : ''} alt="" className="h-12 w-12 rounded-xl object-cover" />
+                  <CachedImage src={album.picUrl || ''} alt="" className="h-12 w-12 rounded-xl object-cover" role="compact" priority="visible" fallback={<span className="flex h-12 w-12 items-center justify-center rounded-xl" style={{ background: `${accent}22` }}><Music2 className="h-5 w-5 opacity-35" /></span>} />
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm">{album.name}</span>
                     <span className={`block truncate text-xs ${muted}`}>{album.artist?.name || '未知歌手'}</span>
@@ -314,7 +315,7 @@ function TraditionalSearch({
                   onClick={() => onOpenPlaylist(playlist)}
                   className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}
                 >
-                  <img src={playlist.coverUrl || playlist.coverImgUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                  <CachedImage src={playlist.coverUrl || playlist.coverImgUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" role="card" priority="visible" fallback={<div className="flex aspect-square w-full items-center justify-center rounded-xl" style={{ background: `${accent}22` }}><Music2 className="h-6 w-6 opacity-35" /></div>} />
                   <div className="mt-2 truncate text-sm">{playlist.name}</div>
                   <div className={`truncate text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : playlist.creator || '精选歌单'}</div>
                 </button>

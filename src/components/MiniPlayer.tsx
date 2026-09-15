@@ -212,7 +212,7 @@ export default function MiniPlayer({
             <AnimatePresence initial={false}>
               {isHovered && (
                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="absolute inset-0 overflow-hidden rounded-[22px]">
-                  <CachedImage src={coverUrl} alt="" className="h-full w-full scale-125 object-cover blur-2xl" draggable={false} />
+                  <CachedImage src={coverUrl} alt="" className="h-full w-full scale-125 object-cover blur-2xl" draggable={false} role="background" priority="deferred" retainPrevious />
                   <div className="absolute inset-0 bg-black/55 backdrop-blur-xl" />
                   <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-black/35" />
                 </motion.div>
@@ -397,6 +397,11 @@ export default function MiniPlayer({
                     alt={`${title} 封面`}
                     className="h-full w-full object-cover"
                     draggable={false}
+                    lazy={false}
+                    role="compact"
+                    size={128}
+                    priority="critical"
+                    retainPrevious
                   />
                 </motion.div>
               </AnimatePresence>

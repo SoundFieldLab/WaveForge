@@ -1579,6 +1579,9 @@ export default function SearchPanel({
                         src={getProxiedImageUrl(song.album.picUrl)} 
                         alt={song.name} 
                         className="w-full h-full object-cover"
+                        role="compact"
+                        size={128}
+                        priority="visible"
                         fallback={
                           <div className="w-full h-full flex items-center justify-center">
                             <Music className={`w-6 h-6 ${textPrimary}/20`} />

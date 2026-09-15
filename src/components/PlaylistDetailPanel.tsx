@@ -6,7 +6,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
 import { useState, useRef, useEffect, useCallback, useMemo, memo, type UIEvent } from 'react'
 import CachedImage from './CachedImage'
-import { imageCache } from '../utils/imageCache'
+import { preloadArtwork } from '../services/artworkLoader'
 import SongContextMenu from './SongContextMenu'
 import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
@@ -17,6 +17,11 @@ import { useTvBack } from '../tv/tvCore'
 const DETAIL_ROW_HEIGHT = 60
 const DETAIL_CARD_HEIGHT = 56
 const DETAIL_OVERSCAN = 8
+const ARTWORK_PREFETCH_INITIAL = 80
+const ARTWORK_PREFETCH_STEP = 80
+const ARTWORK_PREFETCH_TRIGGER = 24
+const ARTWORK_PREFETCH_BATCH = 8
+const ARTWORK_PREFETCH_CONCURRENCY = 3
 
 interface PlaylistDetailPanelProps {
   show: boolean
@@ -131,9 +136,9 @@ function PlaylistDetailPanel({
     }
   }
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const [imagesLoaded, setImagesLoaded] = useState(false)
-  const [loadedImageCount, setLoadedImageCount] = useState(0)
   const [showPlaylistInfo, setShowPlaylistInfo] = useState(false)
+  /** 歌单官方介绍是否展开（默认只显示 3 行摘要）。 */
+  const [descExpanded, setDescExpanded] = useState(false)
   const [pendingRemoval, setPendingRemoval] = useState<{
     song: Song
     fromFavorites: boolean
@@ -141,6 +146,8 @@ function PlaylistDetailPanel({
   const [removalLoading, setRemovalLoading] = useState(false)
   const viewportFrameRef = useRef<number | null>(null)
   const pendingViewportRef = useRef({ scrollTop: 0, height: 0 })
+  const artworkPrefetchEndRef = useRef(0)
+  const artworkPrefetchInFlightRef = useRef(false)
   const [viewport, setViewport] = useState({ scrollTop: 0, height: 0 })
   // 高度渐变同样走 rAF 合并：滚动高频触发时同一帧只提交一次 setState
   const heightFrameRef = useRef<number | null>(null)
@@ -325,100 +332,59 @@ function PlaylistDetailPanel({
   useEffect(() => {
     if (!show) {
       setHeightVh(80)
-      setImagesLoaded(false)
-      setLoadedImageCount(0)
       setShowPlaylistInfo(false)
     }
   }, [show])
   
-  // 监听歌曲加载和封面预加载
+  // 封面只按用户可能访问的窗口渐进预取：首段 80 首，接近边界时再追加 80 首。
+  // 预取只写 artwork 缓存，不缓存歌单数据；共享 preloadArtwork 会合并可见行与后台请求。
   useEffect(() => {
     if (!show || loading || songs.length === 0) {
-      if (!show || loading) {
-        setImagesLoaded(false)
-        setLoadedImageCount(0)
-      }
+      artworkPrefetchEndRef.current = 0
+      artworkPrefetchInFlightRef.current = false
       return
     }
-    if (imagesLoaded) return
 
-    const songsToPreload = songs.slice(0, 20)
-    const imagesToLoad = [...new Set(songsToPreload
+    const visibleEndIndex = Math.min(songs.length, visibleEnd)
+    const shouldStart = artworkPrefetchEndRef.current === 0
+    const nearBoundary = visibleEndIndex + ARTWORK_PREFETCH_TRIGGER >= artworkPrefetchEndRef.current
+    if (!shouldStart && (!nearBoundary || artworkPrefetchInFlightRef.current)) return
+
+    const start = artworkPrefetchEndRef.current
+    const end = Math.min(songs.length, Math.max(ARTWORK_PREFETCH_INITIAL, start + ARTWORK_PREFETCH_STEP))
+    if (end <= start) return
+    artworkPrefetchEndRef.current = end
+    artworkPrefetchInFlightRef.current = true
+    let cancelled = false
+
+    const urls = [...new Set(songs.slice(start, end)
       .map(song => song.album?.picUrl)
       .filter((url): url is string => Boolean(url)))]
 
-    if (imagesToLoad.length === 0) {
-      setImagesLoaded(true)
-      return
-    }
-
-    let cancelled = false
-    let loadedCount = 0
-    let revealTimer: number | null = null
-    const totalImages = imagesToLoad.length
-
-    const handleImageLoad = () => {
-      if (cancelled) return
-      loadedCount++
-      setLoadedImageCount(loadedCount)
-      if (loadedCount >= totalImages && revealTimer === null) {
-        revealTimer = window.setTimeout(() => {
-          revealTimer = null
-          if (!cancelled) setImagesLoaded(true)
-        }, 100)
-      }
-    }
-
-    const pendingUrls: string[] = []
-    const images: HTMLImageElement[] = []
-    imagesToLoad.forEach(url => {
-      const proxyUrl = getProxiedImageUrl(url)
-      if (imageCache.get(proxyUrl)) {
-        handleImageLoad()
-        return
-      }
-      const image = new Image()
-      pendingUrls.push(proxyUrl)
-      images.push(image)
-    })
-    // 并发窗口：最多 CONCURRENCY 张在途，完成一张启动下一张，避免一次性 20 个封面请求打穿代理
-    const CONCURRENCY = 4
-    let startedCount = 0
-    const maybeStartNext = () => {
-      while (startedCount - loadedCount < CONCURRENCY && startedCount < images.length) {
-        const index = startedCount
-        startedCount += 1
-        const image = images[index]
-        image.onload = () => {
-          if (cancelled) return
-          imageCache.set(pendingUrls[index], pendingUrls[index])
-          handleImageLoad()
-          maybeStartNext()
+    const run = async () => {
+      for (let offset = 0; offset < urls.length && !cancelled; offset += ARTWORK_PREFETCH_BATCH) {
+        const batch = urls.slice(offset, offset + ARTWORK_PREFETCH_BATCH)
+        for (let index = 0; index < batch.length && !cancelled; index += ARTWORK_PREFETCH_CONCURRENCY) {
+          const group = batch.slice(index, index + ARTWORK_PREFETCH_CONCURRENCY)
+          await Promise.allSettled(group.map(url => preloadArtwork(url, {
+            role: 'row',
+            priority: 'deferred',
+            retries: 0,
+            platform: playlist?.platform || currentPlatform,
+          })))
         }
-        image.onerror = () => { handleImageLoad(); maybeStartNext() }
-        if (!cancelled) image.src = pendingUrls[index]
+        await new Promise<void>(resolve => window.setTimeout(resolve, 0))
       }
+      if (!cancelled) artworkPrefetchInFlightRef.current = false
     }
-    maybeStartNext()
-
-    const timeout = window.setTimeout(() => {
-      if (!cancelled) {
-        console.warn('[PlaylistDetail] cover preload timed out; showing list')
-        setImagesLoaded(true)
-      }
-    }, 5000)
+    void run()
 
     return () => {
       cancelled = true
-      window.clearTimeout(timeout)
-      if (revealTimer !== null) window.clearTimeout(revealTimer)
-      for (const image of images) {
-        image.onload = null
-        image.onerror = null
-        image.src = ''
-      }
+      artworkPrefetchInFlightRef.current = false
     }
-  }, [songs, loading, show, imagesLoaded])
+  }, [currentPlatform, loading, playlist?.platform, show, songs, visibleEnd])
+
   
   // Format duration.
   const formatDuration = (ms: number) => {
@@ -492,7 +458,7 @@ function PlaylistDetailPanel({
                   <div 
                     className="absolute inset-0"
                     style={{
-                      backgroundImage: `url(http://localhost:3001/api/proxy-image?url=${encodeURIComponent(playlist.coverImgUrl)})`,
+                      backgroundImage: `url(${getProxiedImageUrl(playlist.coverImgUrl, 1024)})`,
                       backgroundSize: 'cover',
                       backgroundPosition: 'center',
                       filter: playerTheme === 'dark' ? 'blur(60px) brightness(0.8)' : 'blur(60px) brightness(1.05)',
@@ -566,6 +532,9 @@ function PlaylistDetailPanel({
                         alt={playlist.name} 
                         className="w-full h-full object-cover"
                         lazy={false}
+                        role="card"
+                        size={256}
+                        priority="critical"
                         fallback={
                           <div className="w-full h-full flex items-center justify-center">
                             <Music className={`w-8 h-8 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
@@ -602,6 +571,27 @@ function PlaylistDetailPanel({
                         </span>
                       )}
                     </div>
+
+                    {/* 官方歌单介绍（Apple/网易云等均提供；此前只藏在「详情」弹窗里，这里按官网做法直接显示摘要） */}
+                    {(() => {
+                      const intro = String(playlist.description || playlist.desc || '').trim()
+                      if (!intro) return null
+                      const long = intro.length > 120
+                      return (
+                        <div className={`mt-2 text-xs leading-relaxed ${playerTheme === 'dark' ? 'text-white/55' : 'text-black/55'}`}>
+                          <p className={descExpanded || !long ? 'whitespace-pre-wrap' : 'line-clamp-3 whitespace-pre-wrap'}>{intro}</p>
+                          {long && (
+                            <button
+                              type="button"
+                              onClick={() => setDescExpanded(v => !v)}
+                              className={`mt-1 text-[11px] font-medium ${playerTheme === 'dark' ? 'text-white/70 hover:text-white' : 'text-black/60 hover:text-black'}`}
+                            >
+                              {descExpanded ? '收起' : '展开'}
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })()}
 
                     {/* 播放全部 + 收藏 */}
                     <div className="mt-2 flex items-center gap-2">
@@ -690,7 +680,7 @@ function PlaylistDetailPanel({
                 }}
               >
                 <div className="px-8 py-4">
-                  {loading || (songs.length > 0 && !imagesLoaded) ? (
+                  {loading ? (
                     <div className="flex flex-col items-center justify-center h-64 gap-6">
                       {/* 优雅的音符加载动画 */}
                       <div className="relative w-20 h-20">
@@ -810,6 +800,10 @@ function PlaylistDetailPanel({
                                 alt={song.name} 
                                 className="w-full h-full object-cover"
                                 lazy={false}
+                                role="row"
+                                size={64}
+                                priority="visible"
+                                platform={playlist?.platform || currentPlatform}
                                 fallback={
                                   <div className="w-full h-full flex items-center justify-center">
                                     <Music className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />

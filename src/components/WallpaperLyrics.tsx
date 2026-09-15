@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useReducedMotion } from 'framer-motion'
 import type { LyricLine } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
+import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
 import ProgressiveGlyphText from './ProgressiveGlyphText'
 
 interface WallpaperLyricsProps {
@@ -334,6 +335,13 @@ export default function WallpaperLyrics({
   }, [activeBlock, cameraScale, layout.blocks, viewport.height, viewport.width])
 
   const isDark = playerTheme === 'dark'
+  const resolvedCoverUrl = useMemo(
+    () => coverUrl ? getResolvedArtworkUrl(coverUrl, { role: 'background' }) : '',
+    [coverUrl],
+  )
+  useEffect(() => {
+    if (resolvedCoverUrl) void preloadArtwork(resolvedCoverUrl, { role: 'background', priority: 'visible' }).catch(() => undefined)
+  }, [resolvedCoverUrl])
   const wallpaperPalette = useMemo(() => resolveWallpaperPalette(accentColor, isDark), [accentColor, isDark])
   const wallpaperAccent = wallpaperPalette.vivid
   const wallpaperFill = mixRgbColor(
@@ -348,10 +356,10 @@ export default function WallpaperLyrics({
 
   return (
     <div ref={containerRef} className="relative h-full w-full min-h-[420px] overflow-hidden" style={{ opacity: isTransitioning ? 0 : 1, transition: 'opacity 300ms ease', contain: 'layout paint style' }}>
-      {coverUrl && <img src={coverUrl} alt="" draggable={false} className="pointer-events-none absolute inset-[-5%] h-[110%] w-[110%] object-cover" style={{ opacity: isDark ? 0.34 : 0.22, filter: 'blur(22px) saturate(1.28) contrast(1.08)', transform: 'translateZ(0) scale(1.03)', mixBlendMode: isDark ? 'screen' : 'multiply' }} />}
+      {resolvedCoverUrl && <img src={resolvedCoverUrl} alt="" draggable={false} className="pointer-events-none absolute inset-[-5%] h-[110%] w-[110%] object-cover" style={{ opacity: isDark ? 0.34 : 0.22, filter: 'blur(22px) saturate(1.28) contrast(1.08)', transform: 'translateZ(0) scale(1.03)', mixBlendMode: isDark ? 'screen' : 'multiply' }} />}
       <div className="absolute inset-0" style={{ backgroundColor: colorWithAlpha(wallpaperPalette.surface, isDark ? 0.82 : 0.88), backgroundImage: `radial-gradient(circle at 78% 18%, ${colorWithAlpha(wallpaperAccent, isDark ? 0.34 : 0.2)} 0%, transparent 50%), radial-gradient(circle at 18% 82%, ${colorWithAlpha(accentColor, isDark ? 0.2 : 0.14)} 0%, transparent 42%), linear-gradient(115deg, ${colorWithAlpha(wallpaperPalette.paper, isDark ? 0.78 : 0.84)} 0%, ${colorWithAlpha(wallpaperPalette.surface, isDark ? 0.72 : 0.82)} 100%)` }} />
       <div aria-hidden="true" className="pointer-events-none absolute inset-0 opacity-30" style={{ backgroundImage: isDark ? 'repeating-linear-gradient(104deg, rgba(255,255,255,.018) 0 1px, transparent 1px 5px)' : 'repeating-linear-gradient(104deg, rgba(74,64,48,.025) 0 1px, transparent 1px 5px)' }} />
-      {coverUrl && (
+      {resolvedCoverUrl && (
         <div
           aria-hidden="true"
           className="pointer-events-none absolute bottom-[10%] right-[1.5vw] z-[1] w-[min(30vw,340px)]"
@@ -366,7 +374,7 @@ export default function WallpaperLyrics({
             }}
           >
             <div className="aspect-[4/3] overflow-hidden">
-              <img src={coverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ opacity: isDark ? .9 : .85, filter: 'saturate(1.1) contrast(1.04)' }} />
+              <img src={resolvedCoverUrl} alt="" draggable={false} className="h-full w-full object-cover" style={{ opacity: isDark ? .9 : .85, filter: 'saturate(1.1) contrast(1.04)' }} />
             </div>
             <div className="mt-3 flex items-end justify-between gap-3 px-0.5">
               <div className="min-w-0">

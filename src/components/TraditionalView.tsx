@@ -33,12 +33,14 @@ import TraditionalLibrary from './TraditionalLibrary'
 import TraditionalComments from './TraditionalComments'
 import TraditionalArtistDetail from './TraditionalArtistDetail'
 import TraditionalAlbumDetail from './TraditionalAlbumDetail'
+import CachedImage from './CachedImage'
 import SongContextMenu from './SongContextMenu'
 import PlaylistContextMenu from './PlaylistContextMenu'
 import { MirroredGlobalSettings, PlatformOrderEditor, makeSkin } from './MirroredGlobalSettings'
 import { GLOBAL_SETTINGS_GROUPS, isEntryVisible, useGlobalSettings, type GlobalSettingsGroupId, type MirrorActionId } from '../services/globalSettingsRegistry'
 import { preloadOnIdle } from '../utils/lazyPreload'
 import { resolveReadableForegroundColor } from '../services/foliaReadableColor'
+import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler, ViewMode } from '../types/playbackNavigation'
 
@@ -156,10 +158,9 @@ const PLATFORM_ACCENTS: Record<MusicPlatform, string> = {
 const platformShortName = (platform: MusicPlatform) => ({ netease: '网易云', qq: 'QQ音乐', apple: 'Apple', spotify: 'Spotify', kugou: '酷狗', soda: '汽水' })[platform]
 const songKey = (song: Song) => `${song.platform}:${song.id || song.mid || song.name}`
 const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
-const CoverImage = ({ src, alt, className }: { src?: string; alt: string; className: string }) => {
-  const [failed, setFailed] = useState(false)
-  if (!src || failed) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Music2 className="h-1/3 w-1/3 opacity-40" /></span>
-  return <img src={src} alt={alt} className={className} onError={() => setFailed(true)} />
+const CoverImage = ({ src, alt, className, lazy = true, priority = 'visible', role = 'card' }: { src?: string; alt: string; className: string; lazy?: boolean; priority?: ArtworkPriority; role?: ArtworkRole }) => {
+  if (!src) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Music2 className="h-1/3 w-1/3 opacity-40" /></span>
+  return <CachedImage src={src} alt={alt} className={className} lazy={lazy} role={role} priority={priority} fallback={<span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Music2 className="h-1/3 w-1/3 opacity-40" /></span>} />
 }
 const formatTime = (value: number) => {
   const total = Math.max(0, Math.floor(value || 0))
@@ -1231,7 +1232,7 @@ function TraditionalView({
           <div ref={playlistScrollRef} data-testid="traditional-playlist-scroll" className="mt-2 flex-1 space-y-1 overflow-y-auto">
             {displayPlaylist.map((playlist: any) => (
               <button type="button" key={`${playlist.platform || platform}:${playlist.id || playlist.dirId}`} onClick={() => openPlaylist(playlist)} onContextMenu={event => { event.preventDefault(); setPlaylistSubscribed(Boolean(playlist.isCollected || playlist.subscribed)); setPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }} className={`flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left transition hover:bg-white/10`}>
-                {playlist.coverImgUrl || playlist.coverUrl ? <img src={playlist.coverImgUrl || playlist.coverUrl} alt={`${playlist.name} 封面`} className="h-9 w-9 rounded-lg object-cover" /> : <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: `${accent}22` }}><ListMusic className="h-4 w-4 opacity-35" /></span>}
+                {playlist.coverImgUrl || playlist.coverUrl ? <CachedImage src={playlist.coverImgUrl || playlist.coverUrl} alt={`${playlist.name} 封面`} className="h-9 w-9 rounded-lg object-cover" role="compact" priority="visible" fallback={<span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: `${accent}22` }}><ListMusic className="h-4 w-4 opacity-35" /></span>} /> : <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg" style={{ background: `${accent}22` }}><ListMusic className="h-4 w-4 opacity-35" /></span>}
                 <span className="min-w-0 flex-1 truncate text-xs">{playlist.name}</span>
               </button>
             ))}
@@ -1274,7 +1275,7 @@ function TraditionalView({
         <aside className={`hidden min-h-0 flex-col overflow-hidden border-l min-[1180px]:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
           <div className="shrink-0 px-4 pt-4">
             <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-white/10 ${surface}`}>
-              {avatar ? <img src={avatar} alt={`${loggedIn ? username || '用户' : '游客'}头像`} className="h-10 w-10 rounded-full object-cover" /> : <div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>}
+              {avatar ? <CachedImage src={avatar} alt={`${loggedIn ? username || '用户' : '游客'}头像`} className="h-10 w-10 rounded-full object-cover" role="compact" priority="visible" fallback={<div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>} /> : <div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>}
               <span className="min-w-0" title={loggedIn ? username || '我的账户' : '游客模式'}><span className="block truncate text-sm font-medium">{loggedIn ? username || '我的账户' : '游客模式'}</span><span className={`mt-0.5 block text-xs ${muted}`}>{loggedIn ? `${platformLabel(platform)} · 个人音乐库` : '登录后同步收藏与歌单'}</span></span>
             </button>
           </div>
@@ -1291,7 +1292,7 @@ function TraditionalView({
                 <>
                   {/* 点击歌曲信息进入播放页（传统模式选歌原地播放，播放页入口在此） */}
                   <button type="button" onClick={() => onOpenPlayer(currentPlaybackOrigin)} title="进入播放页" className="flex w-full items-center gap-4 rounded-xl text-left transition hover:bg-white/5">
-                    <CoverImage src={coverOf(currentSong)} alt={`${currentSong.name} 封面`} className="h-[76px] w-[76px] shrink-0 rounded-xl object-cover shadow-lg" />
+                    <CoverImage src={coverOf(currentSong)} alt={`${currentSong.name} 封面`} className="h-[76px] w-[76px] shrink-0 rounded-xl object-cover shadow-lg" lazy={false} role="player" priority="critical" />
                     <span className="min-w-0 flex-1"><span className="block truncate text-[15px] font-medium">{currentSong.name}</span><span className={`mt-1.5 block truncate text-xs ${muted}`}>{currentSong.artists?.map(a => a.name).join(' / ')}</span><span className={`mt-1 block truncate text-[10px] ${muted}`}>{currentSong.album?.name || '未知专辑'}</span></span>
                   </button>
                   {preferences.showWaveform && (
@@ -1362,7 +1363,7 @@ function TraditionalView({
                 <TraditionalVerticalLyrics playbackTimeStore={playbackTimeStore} lyrics={lyrics} readableAccentColor={readableSongTheme} mutedText={muted} />
               ) : (
                 <div className="min-h-0 flex-1 space-y-1 overflow-y-auto traditional-scroll">
-                  {queuedSongs.map((song, index) => { const active = currentSong && songKey(song) === songKey(currentSong); return <button type="button" key={`${songKey(song)}:${index}`} onClick={() => onSongSelect(song, queuedSongs, currentPlaybackOrigin)} className={`flex w-full items-center gap-2 rounded-xl px-1.5 py-1.5 text-left transition ${active ? 'bg-white/10' : 'hover:bg-white/8'}`}><span className={`w-4 text-center text-[10px] ${muted}`}>{active && isPlaying ? <Waves className="h-3.5 w-3.5" style={{ color: songTheme }} /> : index + 1}</span><CoverImage src={coverOf(song)} alt={`${song.name} 封面`} className="h-8 w-8 rounded-lg object-cover" /><span className="min-w-0 flex-1"><span className="block truncate text-xs">{song.name}</span><span className={`block truncate text-[10px] ${muted}`}>{song.artists?.map(a => a.name).join(' / ')}</span></span></button> })}
+                  {queuedSongs.map((song, index) => { const active = currentSong && songKey(song) === songKey(currentSong); return <button type="button" key={`${songKey(song)}:${index}`} onClick={() => onSongSelect(song, queuedSongs, currentPlaybackOrigin)} className={`flex w-full items-center gap-2 rounded-xl px-1.5 py-1.5 text-left transition ${active ? 'bg-white/10' : 'hover:bg-white/8'}`}><span className={`w-4 text-center text-[10px] ${muted}`}>{active && isPlaying ? <Waves className="h-3.5 w-3.5" style={{ color: songTheme }} /> : index + 1}</span><CoverImage src={coverOf(song)} alt={`${song.name} 封面`} className="h-8 w-8 rounded-lg object-cover" role="row" /><span className="min-w-0 flex-1"><span className="block truncate text-xs">{song.name}</span><span className={`block truncate text-[10px] ${muted}`}>{song.artists?.map(a => a.name).join(' / ')}</span></span></button> })}
                   {queuedSongs.length === 0 && <p className={`px-2 py-5 text-center text-xs ${muted}`}>播放列表为空</p>}
                 </div>
               )}
@@ -1373,7 +1374,7 @@ function TraditionalView({
 
       {currentSong && (
         <div className={`absolute inset-x-3 bottom-3 z-30 flex items-center gap-3 rounded-2xl border px-3 py-2 shadow-2xl backdrop-blur-xl min-[1180px]:hidden ${surface}`}>
-          {coverOf(currentSong) ? <img src={coverOf(currentSong)} alt={`${currentSong.name} 封面`} className="h-10 w-10 rounded-lg object-cover" /> : <div className="flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: `color-mix(in srgb, ${songTheme} 13%, transparent)` }}><Music2 className="h-4 w-4" /></div>}
+          {coverOf(currentSong) ? <CachedImage src={coverOf(currentSong)} alt={`${currentSong.name} 封面`} className="h-10 w-10 rounded-lg object-cover" role="player" priority="critical" lazy={false} /> : <div className="flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: `color-mix(in srgb, ${songTheme} 13%, transparent)` }}><Music2 className="h-4 w-4" /></div>}
           <button type="button" onClick={() => onOpenPlayer(currentPlaybackOrigin)} className="min-w-0 flex-1 text-left" title="进入播放页">
             <span className="block truncate text-sm font-medium">{currentSong.name}</span>
             <span className={`block truncate text-xs ${muted}`}>{currentSong.artists?.map(artist => artist.name).join(' / ')}</span>
@@ -1456,14 +1457,14 @@ function HomeContent({ platform, accent, muted, surface, loggedIn, username, pay
   if (!hasContent) return <div className={`py-20 text-center text-sm ${muted}`}><Music2 className="mx-auto mb-2 h-8 w-8 opacity-40" /><p>{loggedIn ? '暂时没有可用的推荐内容' : '登录后可获得个性化推荐，当前暂无公开内容'}</p></div>
 
   return <><div className="mb-4 min-w-0"><h1 className="truncate text-3xl font-semibold tracking-tight" title={username ? `欢迎回来，${username}` : undefined}>{username ? `欢迎回来，${username}` : '在音乐里，遇见更好的自己'}</h1><p className={`mt-1.5 text-sm ${muted}`}>{loggedIn ? '探索新歌与排行榜，个性推荐在音乐库' : '登录后解锁个性化推荐，游客也可以直接开始播放'}</p></div>
-  <section data-testid="traditional-home-hero" className="relative mb-8 grid min-h-[190px] grid-cols-1 gap-5 overflow-hidden rounded-3xl border p-4 sm:grid-cols-[minmax(0,1fr)_160px] sm:p-6 lg:grid-cols-[minmax(0,1fr)_180px]" style={{ borderColor: `${accent}55`, background: `linear-gradient(125deg, ${accent}28, rgba(255,255,255,.05))` }}><div className="relative z-10 flex flex-col justify-between"><div><span className="rounded-full border px-2.5 py-1 text-[10px]" style={{ borderColor: `${accent}66`, color: accent }}>TRADITIONAL MODE</span><h2 className="mt-4 max-w-lg text-2xl font-semibold">发现好音乐，从排行榜开始</h2><p className={`mt-2 max-w-md text-sm ${muted}`}>新歌速递、热门榜单、精选歌单——探索永远不缺新意。</p></div><button type="button" disabled={!heroSongs[0]} onClick={() => heroSongs[0] && onSongSelect(heroSongs[0], heroSongs, { mode: 'traditional', surface: 'mode-root', platform })} className="mt-4 flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40" style={{ background: accent }} aria-label={heroSongs[0] ? '播放推荐' : '暂无可播放的推荐歌曲'}><Play className="h-4 w-4" />播放推荐</button></div><div className="relative flex items-center justify-center"><div className="absolute h-36 w-36 rounded-full blur-3xl" style={{ background: accent, opacity: .3 }} />{heroSongs[0] ? <img src={coverOf(heroSongs[0])} alt="" className="relative h-32 w-32 rotate-3 rounded-2xl object-cover shadow-2xl" /> : <Sparkles className="relative h-16 w-16 opacity-50" />}</div></section>
+  <section data-testid="traditional-home-hero" className="relative mb-8 grid min-h-[190px] grid-cols-1 gap-5 overflow-hidden rounded-3xl border p-4 sm:grid-cols-[minmax(0,1fr)_160px] sm:p-6 lg:grid-cols-[minmax(0,1fr)_180px]" style={{ borderColor: `${accent}55`, background: `linear-gradient(125deg, ${accent}28, rgba(255,255,255,.05))` }}><div className="relative z-10 flex flex-col justify-between"><div><span className="rounded-full border px-2.5 py-1 text-[10px]" style={{ borderColor: `${accent}66`, color: accent }}>TRADITIONAL MODE</span><h2 className="mt-4 max-w-lg text-2xl font-semibold">发现好音乐，从排行榜开始</h2><p className={`mt-2 max-w-md text-sm ${muted}`}>新歌速递、热门榜单、精选歌单——探索永远不缺新意。</p></div><button type="button" disabled={!heroSongs[0]} onClick={() => heroSongs[0] && onSongSelect(heroSongs[0], heroSongs, { mode: 'traditional', surface: 'mode-root', platform })} className="mt-4 flex w-fit items-center gap-2 rounded-full px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40" style={{ background: accent }} aria-label={heroSongs[0] ? '播放推荐' : '暂无可播放的推荐歌曲'}><Play className="h-4 w-4" />播放推荐</button></div><div className="relative flex items-center justify-center"><div className="absolute h-36 w-36 rounded-full blur-3xl" style={{ background: accent, opacity: .3 }} />{heroSongs[0] ? <CachedImage src={coverOf(heroSongs[0])} alt="" className="relative h-32 w-32 rotate-3 rounded-2xl object-cover shadow-2xl" lazy={false} role="hero" priority="critical" /> : <Sparkles className="relative h-16 w-16 opacity-50" />}</div></section>
 
   {charts.length > 0 && <section className="mb-8"><div className="mb-3 flex items-center justify-between"><h2 className="text-lg font-semibold">排行榜</h2><span className={`text-xs ${muted}`}>热门榜单实时更新</span></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
     {charts.map(chart => {
       return (
         <div key={`${chart.id}:${chart.name}`} className={`overflow-hidden rounded-2xl border transition hover:-translate-y-1 ${surface}`}>
           <button type="button" disabled={chartLoadingId === chart.id} onClick={() => void playChartSong(chart, 0)} className="group relative block w-full text-left">
-            {chart.coverUrl ? <img src={chart.coverUrl} alt={`${chart.name} 封面`} loading="lazy" className="aspect-square w-full object-cover" onError={event => { event.currentTarget.style.display = 'none' }} /> : <span aria-label={`${chart.name} 封面占位`} className="flex aspect-square w-full items-center justify-center bg-black/10"><Music2 className="h-8 w-8 opacity-40" /></span>}
+            {chart.coverUrl ? <CachedImage src={chart.coverUrl} alt={`${chart.name} 封面`} className="aspect-square w-full object-cover" role="card" priority="visible" fallback={<span aria-label={`${chart.name} 封面占位`} className="flex aspect-square w-full items-center justify-center bg-black/10"><Music2 className="h-8 w-8 opacity-40" /></span>} /> : <span aria-label={`${chart.name} 封面占位`} className="flex aspect-square w-full items-center justify-center bg-black/10"><Music2 className="h-8 w-8 opacity-40" /></span>}
             <span className="absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition group-hover:opacity-100"><span className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-slate-900"><Play className="h-4 w-4 fill-current" /></span></span>
             <span className="absolute left-2 top-2 rounded-full bg-black/55 px-2 py-0.5 text-[10px] text-white backdrop-blur">{chart.name}</span>
           </button>
@@ -1653,7 +1654,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
               {shownSocialItems.map(item => (
                 <div key={`${item.kind}:${item.id}`} className={`flex flex-col items-center gap-3 rounded-2xl border p-5 ${surface}`}>
                   <button type="button" onClick={() => item.kind === 'user' ? onOpenUserProfile(item.id, item.name, item.avatarUrl) : item.artistMid && onOpenArtist?.(item.artistMid, platform)} className="transition hover:opacity-85">
-                    <img src={item.avatarUrl} alt="" className="h-24 w-24 rounded-full object-cover" />
+                    <CachedImage src={item.avatarUrl} alt="" className="h-24 w-24 rounded-full object-cover" role="compact" priority="visible" fallback={<span className="flex h-24 w-24 items-center justify-center rounded-full bg-black/10"><Music2 className="h-8 w-8 opacity-40" /></span>} />
                   </button>
                   <button type="button" onClick={() => item.kind === 'user' ? onOpenUserProfile(item.id, item.name, item.avatarUrl) : item.artistMid && onOpenArtist?.(item.artistMid, platform)} className="w-full truncate text-center text-sm font-medium">{item.name}</button>
                   <button type="button" onClick={() => void toggleFollow(item)} className={`w-full rounded-full px-4 py-1.5 text-xs transition ${item.isFollow ? (isDark ? 'bg-white/10 text-white/60' : 'bg-black/5 text-slate-500') : 'text-white'}`} style={item.isFollow ? undefined : { background: accent }}>{item.isFollow ? '已关注' : '关注'}</button>
@@ -1679,7 +1680,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
         ) : (
           <>
             <div className="flex items-center gap-6">
-              {detail?.avatarUrl ? <img src={detail.avatarUrl} alt="" className="h-28 w-28 shrink-0 rounded-full object-cover shadow-xl" /> : <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full text-3xl text-white" style={{ background: accent }}>{(detail?.nickname || username || '?').slice(0, 1)}</div>}
+              {detail?.avatarUrl ? <CachedImage src={detail.avatarUrl} alt="" className="h-28 w-28 shrink-0 rounded-full object-cover shadow-xl" role="compact" priority="critical" lazy={false} /> : <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full text-3xl text-white" style={{ background: accent }}>{(detail?.nickname || username || '?').slice(0, 1)}</div>}
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h1 className="truncate text-3xl font-bold">{detail?.nickname || username}</h1>
@@ -1712,7 +1713,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
                   {createdPlaylists.map((playlist, index) => (
                     <button key={`${playlist.platform || platform}:${playlist.id || playlist.dirId}:${index}`} type="button" onClick={() => onOpenPlaylist(playlist)} className={`overflow-hidden rounded-2xl border p-2 text-left transition hover:-translate-y-1 ${surface}`}>
-                      <img src={playlist.coverImgUrl || playlist.coverUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
+                      <CoverImage src={playlist.coverImgUrl || playlist.coverUrl || ''} alt="" className="aspect-square w-full rounded-xl object-cover" />
                       <div className="mt-2 truncate text-sm">{playlist.name}</div>
                       <div className={`truncate text-xs ${muted}`}>{playlist.trackCount ? `${playlist.trackCount} 首` : '歌单'}</div>
                     </button>
@@ -1874,7 +1875,7 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
                   </span>
                   <span className="flex min-w-0 items-center gap-3">
                     <span className="relative shrink-0">
-                      <img src={coverOf(song)} alt="" loading="lazy" className="h-10 w-10 rounded-lg object-cover" />
+                      <CoverImage src={coverOf(song)} alt="" className="h-10 w-10 rounded-lg object-cover" role="row" />
                       <span className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/40 group-hover:flex"><Play className="h-4 w-4 fill-current text-white" /></span>
                     </span>
                     <span className="min-w-0">

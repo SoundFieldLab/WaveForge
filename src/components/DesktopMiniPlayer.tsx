@@ -5,6 +5,7 @@
 import { motion } from 'framer-motion'
 import { Play, Pause, SkipForward, SkipBack } from 'lucide-react'
 import { Song } from '../services/musicApi'
+import CachedImage from './CachedImage'
 import React from 'react'
 
 interface DesktopMiniPlayerProps {
@@ -86,11 +87,16 @@ function DesktopMiniPlayer({
         <div className="flex items-center gap-3 px-4 py-3 min-[1360px]:gap-4 min-[1360px]:px-6 min-[1360px]:py-4">
           {/* 封面 */}
           {currentSong.album?.picUrl ? (
-            <img
+            <CachedImage
               src={currentSong.album.picUrl}
               alt={currentSong.name}
-              className="h-12 w-12 rounded-lg object-cover shadow-lg min-[1360px]:h-14 min-[1360px]:w-14"
+              className="h-12 w-12 rounded-lg shadow-lg min-[1360px]:h-14 min-[1360px]:w-14"
               draggable={false}
+              lazy={false}
+              role="compact"
+              size={128}
+              priority="critical"
+              fallback={<div aria-label={`${currentSong.name} 封面占位`} className="h-12 w-12 shrink-0 rounded-lg bg-white/10 min-[1360px]:h-14 min-[1360px]:w-14" />}
             />
           ) : (
             <div aria-label={`${currentSong.name} 封面占位`} className="h-12 w-12 shrink-0 rounded-lg bg-white/10 min-[1360px]:h-14 min-[1360px]:w-14" />

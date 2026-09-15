@@ -5,7 +5,7 @@ import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
 import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
-import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
+import { Song, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
@@ -13,7 +13,7 @@ import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGH
 import { getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, streamNeteasePlaylistTracks } from '../services/playlistService'
 import { getAppleLibraryPlaylists, enrichApplePlaylistTrackCounts, getAppleFavoriteSongs, getAppleRecentPlayed, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, appleSongToSong, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, removeAppleTracksFromPlaylist, getLastAppleMutationResult, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
-import { imageCache } from '../utils/imageCache'
+import { preloadArtwork } from '../services/artworkLoader'
 import { wallpaperManager, WallpaperFile } from '../services/wallpaperManager'
 import SongContextMenu from './SongContextMenu'
 import { Plus, RefreshCw } from 'lucide-react'
@@ -24,6 +24,7 @@ import EditPlaylistModal from './EditPlaylistModal'
 import DeletePlaylistModal from './DeletePlaylistModal'
 import PluginShortcuts from './PluginShortcuts'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
+import { fetchNeteaseRecentSongs } from '../services/neteaseRecentPlayback'
 import { fetchExploreChart, fetchExploreHome, fetchExplorePlaylist } from '../services/exploreApi'
 import {
   getDefaultHomeModules,
@@ -674,55 +675,21 @@ function HomeView({
     }
 
     let cancelled = false
-    let completed = 0
-    const preloadImages = new Set<HTMLImageElement>()
-
-    const markDone = () => {
-      completed += 1
-      if (!cancelled && completed >= coverUrls.length) {
-        setModuleCoversReady(true)
-      }
-    }
-
     setModuleCoversReady(false)
-
-    coverUrls.forEach((url) => {
-      const proxyUrl = getProxiedImageUrl(url)
-      if (!proxyUrl || imageCache.get(proxyUrl)) {
-        markDone()
-        return
-      }
-
-      const img = new Image()
-      preloadImages.add(img)
-      const finish = (loaded: boolean) => {
-        if (loaded) imageCache.set(proxyUrl, proxyUrl)
-        img.onload = null
-        img.onerror = null
-        preloadImages.delete(img)
-        markDone()
-      }
-      img.onload = () => finish(true)
-      img.onerror = () => finish(false)
-      img.decoding = 'async'
-      img.src = proxyUrl
+    void Promise.allSettled(coverUrls.map(url => preloadArtwork(url, {
+      role: 'card',
+      priority: 'critical',
+    }))).then(() => {
+      if (!cancelled) setModuleCoversReady(true)
     })
 
     const timeout = window.setTimeout(() => {
-      if (!cancelled) {
-        setModuleCoversReady(true)
-      }
-    }, 5000)
+      if (!cancelled) setModuleCoversReady(true)
+    }, 2500)
 
     return () => {
       cancelled = true
       window.clearTimeout(timeout)
-      preloadImages.forEach(img => {
-        img.onload = null
-        img.onerror = null
-        img.src = ''
-      })
-      preloadImages.clear()
     }
   }, [moduleLoading, moduleSongs, modulePlaylists])
 
@@ -2133,6 +2100,22 @@ function HomeView({
           setRecentPlaybackSummary({ covers, count: tracks.length })
           return
         }
+        if (platform === 'netease') {
+          const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+          if (!cookie) return
+          const result = await fetchNeteaseRecentSongs(cookie, 100)
+          if (controller.signal.aborted) return
+          const covers = result.songs.map(song => song.album?.picUrl || '').filter(Boolean).slice(0, 4)
+          setRecentPlaybackSummary({ covers, count: result.total })
+          void Promise.allSettled(covers.map(url => preloadArtwork(url, {
+            role: 'compact',
+            size: 128,
+            priority: 'critical',
+            retries: 1,
+            platform: 'netease',
+          })))
+          return
+        }
         const cookie = platform === 'qq'
           ? localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
           : localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
@@ -2162,7 +2145,8 @@ function HomeView({
             ].find(Array.isArray) || [])
         const covers = rows.map((row: any) => {
           const song = platform === 'qq' ? (row?.song || row) : (row?.resource || row?.data || row?.song || row)
-          return song?.album?.picUrl || song?.al?.picUrl || song?.albumpic || song?.picUrl || ''
+          const nestedSong = song?.song || song?.data || row?.resource?.song || row?.data?.song || row?.song || {}
+          return song?.album?.picUrl || song?.al?.picUrl || nestedSong?.album?.picUrl || nestedSong?.al?.picUrl || song?.albumpic || nestedSong?.albumpic || song?.picUrl || nestedSong?.picUrl || ''
         }).filter((url: unknown): url is string => typeof url === 'string' && url.length > 0).slice(0, 4)
         const reportedCount = Number(payload?.total ?? payload?.data?.total ?? payload?.songnum ?? rows.length)
         setRecentPlaybackSummary({ covers, count: Number.isFinite(reportedCount) ? reportedCount : rows.length })
@@ -2639,6 +2623,9 @@ function HomeView({
                                 src={song.album.picUrl} 
                                 alt={song.name} 
                                 className="w-full h-full object-cover"
+                                role="row"
+                                size={64}
+                                priority="visible"
                                 fallback={
                                   <div className="w-full h-full flex items-center justify-center">
                                     <Music className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
@@ -2701,6 +2688,9 @@ function HomeView({
                                 src={playlist.coverImgUrl}
                                 alt={playlist.name}
                                 className="w-full h-full object-cover"
+                                role="compact"
+                                size={128}
+                                priority="visible"
                                 fallback={
                                   <div className="w-full h-full flex items-center justify-center">
                                     <Music className={`w-6 h-6 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
@@ -3054,7 +3044,7 @@ function HomeView({
                     {Array.from({ length: 4 }).map((_, index) => {
                       const cover = recentPlaybackSummary.covers[index]
                       return cover ? (
-                        <CachedImage key={`${cover}-${index}`} src={cover} alt="最近播放封面" className="h-full w-full object-cover" />
+                        <CachedImage key={`${cover}-${index}`} src={cover} alt="最近播放封面" className="h-full w-full object-cover" platform={platform} role="compact" size={128} priority="visible" lazy={false} />
                       ) : (
                         <div key={`recent-placeholder-${index}`} className={`flex h-full w-full items-center justify-center ${playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'}`}>
                           <Music className={`h-4 w-4 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
@@ -3085,7 +3075,7 @@ function HomeView({
                 {/* 头像 */}
                 <div className={`w-24 h-24 rounded-full overflow-hidden mx-auto mb-4 border-2 ${playerTheme === 'dark' ? 'border-white/20' : 'border-black/15'}`}>
                   {avatar ? (
-                    <img src={avatar} alt={username} className="w-full h-full object-cover" />
+                    <CachedImage src={avatar} alt={username} className="w-full h-full object-cover" role="compact" size={128} priority="visible" />
                   ) : (
                     <div className={`w-full h-full flex items-center justify-center ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`}>
                       <Music className={`w-12 h-12 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />

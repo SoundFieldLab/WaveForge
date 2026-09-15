@@ -75,6 +75,8 @@ import ScrollToTop from './ScrollToTop'
 import QQExplorePage from '../features/qqExplore/QQExplorePage'
 import NeteaseExplorePage from '../features/neteaseExplore/NeteaseExplorePage'
 import { shouldShowEntitlementBadge, type PlatformEntitlements } from '../utils/musicEntitlements'
+import CachedImage from './CachedImage'
+import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 
 // 全局设置镜像里的共享弹窗（按需加载）
 const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
@@ -168,6 +170,8 @@ interface CoverProps {
   className?: string
   iconClassName?: string
   eager?: boolean
+  role?: ArtworkRole
+  priority?: ArtworkPriority
 }
 
 const formatCount = (value?: number) => {
@@ -197,34 +201,19 @@ const getGreeting = () => {
 
 // memo 包装：父级探索页内部状态（Banner 轮播、设置面板、换一批等）触发重渲染时，
 // 封面 props 均为原始类型且引用稳定，可跳过所有列表项 Cover 的重渲染。
-const Cover = memo(function Cover({ src, alt, className = '', iconClassName = 'w-8 h-8', eager = false }: CoverProps) {
-  const [failed, setFailed] = useState(false)
-  const resolved = src || ''
-
-  useEffect(() => {
-    setFailed(false)
-  }, [resolved])
-
-  if (!resolved || failed) {
-    return (
-      <div
-        className={`flex items-center justify-center bg-[linear-gradient(135deg,rgba(124,92,255,0.9),rgba(20,184,166,0.72))] text-white/80 ${className}`}
-        aria-label={alt}
-      >
-        <Music2 className={iconClassName} />
-      </div>
-    )
-  }
+const Cover = memo(function Cover({ src, alt, className = '', iconClassName = 'w-8 h-8', eager = false, role = 'card', priority }: CoverProps) {
+  const fallback = <div className="flex h-full w-full items-center justify-center bg-[linear-gradient(135deg,rgba(124,92,255,0.9),rgba(20,184,166,0.72))] text-white/80" aria-label={alt}><Music2 className={iconClassName} /></div>
 
   return (
-    <img
-      src={resolved}
+    <CachedImage
+      src={src || ''}
       alt={alt}
       className={className}
-      loading={eager ? 'eager' : 'lazy'}
-      decoding="async"
       draggable={false}
-      onError={() => setFailed(true)}
+      lazy={!eager}
+      role={role}
+      priority={priority || (eager ? 'critical' : 'visible')}
+      fallback={fallback}
     />
   )
 })
@@ -295,7 +284,7 @@ function CoverWallBackground({
               border: '1px solid rgba(255,255,255,0.08)',
             }}
           >
-            <img src={url} alt="" className="h-full w-full object-cover" loading="lazy" decoding="async" draggable={false} />
+            <CachedImage src={url} alt="" className="h-full w-full object-cover" draggable={false} lazy role="background" priority="deferred" />
           </div>
         ))}
       </div>
@@ -633,6 +622,8 @@ function ExploreView({
   const [showModePanel, setShowModePanel] = useState(false)
   const [showMVExplore, setShowMVExplore] = useState(false)
   const [neteaseFeedMvId, setNeteaseFeedMvId] = useState<string | null>(null)
+  // 来自探索页的 MV 卡片时直接播放；只有点「MV 专区」才展示专区列表
+  const [mvDirectPlay, setMvDirectPlay] = useState(false)
   const [fmLoading, setFmLoading] = useState(false)
 
   // 处理 Banner 点击（解析网易云 url 打开歌单/歌曲）
@@ -989,13 +980,15 @@ function ExploreView({
   const highlightPlaylists = rotatedPlaylists.slice(0, 4)
   const isQQGuessYouLike = platform === 'qq' && Boolean(payload?.radioSongs.length)
   const displayName = username || '音乐旅人'
-  const playExploreCollection = useCallback((song: Song, songs: Song[], continuous = false) => {
+  const playExploreCollection = useCallback((song: Song, songs: Song[], continuous = false, neteaseContinuation?: PlaybackOrigin['neteaseContinuation'], qqRadarContinuation?: PlaybackOrigin['qqRadarContinuation']) => {
     onSongSelect(song, songs, continuous ? {
       mode: 'explore',
       surface: 'mode-root',
       platform,
       songs,
-      continuation: 'explore-infinite'
+      continuation: 'explore-infinite',
+      neteaseContinuation,
+      qqRadarContinuation,
     } : undefined)
   }, [onSongSelect, platform])
 
@@ -1659,7 +1652,11 @@ function ExploreView({
               officialEnhanced={Boolean(payload?.officialEnhanced)}
               publicContent={payload}
               onLogin={() => onLoginClick('qq')}
-              onPlaySongs={(song, songs, continuous) => playExploreCollection(song, songs, continuous)}
+              currentSong={currentSong}
+              isPlaying={isPlaying}
+              onPlayPause={onPlayPause}
+              onPlaySongs={(song, songs, continuous, qqRadarContinuation) => playExploreCollection(song, songs, continuous, undefined, qqRadarContinuation)}
+              onPlayDaily30={(song, songs) => playExploreCollection(song, songs, false)}
               onOpenPlaylist={(playlist, autoplay) => void handlePlaylist(playlist, autoplay)}
               onOpenChart={(chart, autoplay) => void handleChart(chart, autoplay)}
               onOpenAlbum={onOpenAlbum}
@@ -1675,6 +1672,7 @@ function ExploreView({
               onConfiguredChange={() => setRefreshKey(key => key + 1)}
               onOpenPlaylists={() => setMoreSection('playlists')}
               onOpenCharts={() => setMoreSection('charts')}
+              onOpenMVs={() => { setMvDirectPlay(false); setShowMVExplore(true) }}
               onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
               onViewComments={onViewComments}
               onAddToFavorites={onAddToFavorites}
@@ -1694,13 +1692,14 @@ function ExploreView({
               accountPlaylists={userPlaylists}
               onRequestFallback={() => { void loadExplore(undefined, true, true) }}
               onLogin={() => onLoginClick('netease')}
-              onPlaySongs={(song, songs, continuous) => playExploreCollection(song, songs, continuous)}
+              onPlaySongs={(song, songs, continuous, neteaseContinuation) => playExploreCollection(song, songs, continuous, neteaseContinuation)}
               onOpenPlaylist={(playlist, autoplay) => void handlePlaylist(playlist, autoplay)}
               onOpenChannel={(channel, autoplay) => void handleChannel(channel, autoplay)}
               onOpenAlbum={albumId => onOpenAlbum?.(albumId, 'netease')}
               onOpenArtist={artistId => onOpenArtist?.(artistId, 'netease')}
               onOpenMV={mvId => {
                 setNeteaseFeedMvId(mvId)
+                setMvDirectPlay(true)
                 setShowMVExplore(true)
               }}
               onViewComments={onViewComments}
@@ -2407,6 +2406,8 @@ function ExploreView({
           }}
           onCopyInfo={onCopyInfo}
           onDislike={handleDislike}
+          onAdjustPreferences={platform === 'qq' ? () => window.dispatchEvent(new Event('waveforge:qq-open-preferences')) : undefined}
+          onAdjustRecommendation={platform === 'qq' ? song => window.dispatchEvent(new CustomEvent('waveforge:qq-open-recommendation-feedback', { detail: song })) : undefined}
           userPlaylists={userPlaylists}
           platform={songContextMenu.song.platform || platform}
         />
@@ -2418,9 +2419,11 @@ function ExploreView({
             initialPlatform={(platform === 'apple' || platform === 'spotify' || platform === 'soda' || platform === 'kugou') ? 'netease' : platform}
             initialMvId={neteaseFeedMvId || undefined}
             playerTheme={playerTheme}
+            directPlay={mvDirectPlay}
             onClose={() => {
               setShowMVExplore(false)
               setNeteaseFeedMvId(null)
+              setMvDirectPlay(false)
             }}
           />
         )}

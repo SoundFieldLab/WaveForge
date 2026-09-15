@@ -230,6 +230,8 @@ function AlbumDetailModal({
             picUrl: detail.album.artworkUrl || '',
             artist: { name: detail.album.artistName },
             publishTime: detail.album.releaseDate ? Date.parse(detail.album.releaseDate) : undefined,
+            // 专辑简介来自 attributes.editorialNotes.standard（getAppleAlbumDetail 已请求 extend=editorialNotes）。
+            description: detail.album.description,
             platform: 'apple',
           })
           setSongs(detail.tracks.map(track => appleSongToSong(track, storefront)))

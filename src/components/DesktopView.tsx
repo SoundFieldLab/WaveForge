@@ -14,6 +14,7 @@ import PlaylistContextMenu from './PlaylistContextMenu'
 import EditPlaylistModal from './EditPlaylistModal'
 import DeletePlaylistModal from './DeletePlaylistModal'
 import DesktopMiniPlayer from './DesktopMiniPlayer'
+import CachedImage from './CachedImage'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
 import GlobalToast from './GlobalToast'
 import LyricsDisplay from './LyricsDisplay'
@@ -2847,7 +2848,7 @@ function DesktopView({
             {Array.from({ length: 4 }).map((_, coverIndex) => {
               const cover = selectedPlaylist.covers?.[coverIndex]
               return cover ? (
-                <img key={coverIndex} src={cover} alt="" className="h-full w-full object-cover" />
+                <CachedImage key={coverIndex} src={cover} alt="" className="h-full w-full object-cover" role="row" priority="critical" lazy={false} />
               ) : (
                 <div key={coverIndex} className="flex h-full w-full items-center justify-center bg-white/10">
                   <Clock className="h-4 w-4 text-white/25" />
@@ -2857,10 +2858,13 @@ function DesktopView({
           </div>
         ) : (
           <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl shadow-2xl">
-            <img
+            <CachedImage
               src={selectedPlaylist.coverImgUrl}
               alt={selectedPlaylist.name}
               className="h-full w-full object-cover"
+              role="compact"
+              priority="critical"
+              lazy={false}
             />
             {selectedPlaylistPlatform === 'qq' && selectedPlaylist.isLike && (
               <div className="pointer-events-none absolute inset-0 flex items-center justify-center" aria-hidden="true">
