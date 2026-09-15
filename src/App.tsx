@@ -13,6 +13,7 @@ import FusionEnableConfirmModal from './components/FusionEnableConfirmModal'
 import UpdateManager from './components/UpdateManager'
 import UpdatePrompt from './components/UpdatePrompt'
 import CrossfadeBackground from './components/CrossfadeBackground'
+import ModernFluidBackground from './components/ModernFluidBackground'
 import { FoliaTransitionOverlay } from './components/folia/FoliaTransitionOverlay'
 import { FoliaUpNextCard } from './components/folia/FoliaUpNextCard'
 import { resolveFoliaPresentation } from './components/folia/foliaPresentation'
@@ -401,18 +402,23 @@ interface PulsingCrossfadeBackgroundProps {
   isTransitioning: boolean
   transitionProgress: number
   pulseStore: AudioPulseStore
-  backgroundEffect: 'transparent' | 'blur' | 'immersive'
+  backgroundEffect: 'transparent' | 'blur' | 'immersive' | 'modern'
   backgroundBlur: number
+  isPlaying: boolean
+  playerTheme: 'light' | 'dark'
 }
 
 const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
   pulseStore,
   backgroundEffect,
   backgroundBlur,
+  isPlaying,
+  playerTheme,
   ...crossfadeProps
 }: PulsingCrossfadeBackgroundProps) {
   const pulseRootRef = useRef<HTMLDivElement>(null)
   const pulseHighlightRef = useRef<HTMLDivElement>(null)
+  const isModernBackground = backgroundEffect === 'modern'
   const baseScale = backgroundEffect === 'immersive' ? 1.15 : 1.1
 
   useEffect(() => {
@@ -443,7 +449,9 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
     transform: `translate3d(0, 0, 0) scale(calc(${baseScale} + var(--cover-pulse-scale, 0)))`,
     transition: 'transform 0.055s linear, opacity 0.5s',
     willChange: 'transform' as const,
-  }), [baseScale, staticFilter])
+    // 摩登背景：封面图让位给流体层（保留挂载以便切回其它模式时无闪回）
+    ...(isModernBackground ? { opacity: 0 } : {}),
+  }), [baseScale, staticFilter, isModernBackground])
 
   return (
     <div
@@ -451,6 +459,9 @@ const PulsingCrossfadeBackground = memo(function PulsingCrossfadeBackground({
       className="absolute inset-0 overflow-hidden"
       style={{ ['--cover-pulse-scale' as string]: 0 }}
     >
+      {isModernBackground && (
+        <ModernFluidBackground coverUrl={crossfadeProps.coverUrl} isPlaying={isPlaying} playerTheme={playerTheme} />
+      )}
       <CrossfadeBackground
         {...crossfadeProps}
         imageStyle={crossfadeImageStyle}
@@ -1111,9 +1122,9 @@ function App() {
   }, [playerTheme])
   
   // 歌词状态
-  const [backgroundEffect, setBackgroundEffect] = useState<'transparent' | 'blur' | 'immersive'>(() => {
+  const [backgroundEffect, setBackgroundEffect] = useState<'transparent' | 'blur' | 'immersive' | 'modern'>(() => {
     const saved = localStorage.getItem('backgroundEffect')
-    return (saved as 'transparent' | 'blur' | 'immersive') || 'blur'
+    return (saved as 'transparent' | 'blur' | 'immersive' | 'modern') || 'blur'
   })
   
   // 背景模糊度（仅用于透明模式）
@@ -7640,6 +7651,8 @@ function App() {
             pulseStore={audioPulseStore}
             backgroundEffect={backgroundEffect}
             backgroundBlur={backgroundBlur}
+            isPlaying={isPlaying}
+            playerTheme={playerTheme}
           />
         )}
         {currentSong && !isAppleRadioPlayback && !podcastPlayback && (
@@ -7691,11 +7704,15 @@ function App() {
                     ? 'linear-gradient(to bottom, rgba(0,0,0,0.05), rgba(0,0,0,0.05), rgba(0,0,0,0.05))'  // 深色透明模式增加5%白色叠加
                     : backgroundEffect === 'blur'
                     ? 'linear-gradient(to bottom, rgba(0,0,0,0.65), rgba(0,0,0,0.55), rgba(0,0,0,0.7))'  // 深色模糊：中等压暗
+                    : backgroundEffect === 'modern'
+                    ? 'linear-gradient(to bottom, rgba(0,0,0,0.42), rgba(0,0,0,0.3), rgba(0,0,0,0.48))'  // 摩登流体：背景自身已压暗，这里只补一点均匀压暗
                     : 'linear-gradient(135deg, rgba(0,0,0,0.5) 0%, rgba(0,0,0,0.75) 50%, rgba(0,0,0,0.6) 100%)'  // 深色沉浸：强压暗+渐变
                   : backgroundEffect === 'transparent'
                     ? 'linear-gradient(to bottom, rgba(255,255,255,0.05), rgba(255,255,255,0.05), rgba(255,255,255,0.05))'  // 浅色透明模式增加5%黑色叠加
                     : backgroundEffect === 'blur'
                     ? 'linear-gradient(to bottom, rgba(250,250,248,0.42), rgba(250,250,248,0.32), rgba(250,250,248,0.46))'  // 浅色模糊：明显白雾
+                    : backgroundEffect === 'modern'
+                    ? 'linear-gradient(to bottom, rgba(250,250,248,0.4), rgba(250,250,248,0.3), rgba(250,250,248,0.44))'  // 浅色摩登流体：中等白雾保证可读
                     : 'linear-gradient(135deg, rgba(250,250,248,0.3) 0%, rgba(250,250,248,0.52) 50%, rgba(250,250,248,0.4) 100%)'  // 浅色沉浸：强白雾+渐变
               }}
             />

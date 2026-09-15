@@ -105,7 +105,7 @@ export const getAppleLyricLineMotion = (
 }
 
 type ImmersiveLyricEffect = 'soft-focus' | 'float' | 'breathe' | 'cinematic' | 'minimal'
-type BackgroundEffect = 'transparent' | 'blur' | 'immersive'
+type BackgroundEffect = 'transparent' | 'blur' | 'immersive' | 'modern'
 
 const LYRIC_TIMING_LEAD_SECONDS = 0.28
 const LYRIC_FRAME_INTERVAL_MS = 1000 / 30

@@ -30,7 +30,7 @@ interface PlayerControlsProps {
   playMode?: 'sequential' | 'shuffle' | 'repeat'
   onPlayModeChange?: () => void
   playerTheme?: 'light' | 'dark'
-  backgroundEffect?: 'transparent' | 'blur' | 'immersive'
+  backgroundEffect?: 'transparent' | 'blur' | 'immersive' | 'modern'
   isTransitioning?: boolean
   isAutoMixTransition?: boolean
   /** AutoMix 增强版（v2）：过渡指示显示「AutoMix 增强版」独立样式（缺省时与历史一致） */

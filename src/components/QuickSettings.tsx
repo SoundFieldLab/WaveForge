@@ -131,9 +131,9 @@ export default memo(function QuickSettings({
     return (saved as 'dark' | 'light') || 'dark'
   })
 
-  const [backgroundEffect, setBackgroundEffect] = useState<'transparent' | 'blur' | 'immersive'>(() => {
+  const [backgroundEffect, setBackgroundEffect] = useState<'transparent' | 'blur' | 'immersive' | 'modern'>(() => {
     const saved = localStorage.getItem('backgroundEffect')
-    return (saved as 'transparent' | 'blur' | 'immersive') || 'blur'
+    return (saved as 'transparent' | 'blur' | 'immersive' | 'modern') || 'blur'
   })
 
   const [backgroundBlur, setBackgroundBlur] = useState(() => {
@@ -242,7 +242,7 @@ export default memo(function QuickSettings({
     window.dispatchEvent(new CustomEvent('playerThemeChanged', { detail: newTheme }))
   }
 
-  const handleBackgroundEffectChange = (effect: 'transparent' | 'blur' | 'immersive') => {
+  const handleBackgroundEffectChange = (effect: 'transparent' | 'blur' | 'immersive' | 'modern') => {
     setBackgroundEffect(effect)
     localStorage.setItem('backgroundEffect', effect)
     window.dispatchEvent(new CustomEvent('backgroundEffectChanged', { detail: effect }))
@@ -611,7 +611,7 @@ export default memo(function QuickSettings({
                         背景效果
                       </span>
                       <div className="flex gap-2">
-                        {(['transparent', 'blur', 'immersive'] as const).map((effect) => (
+                        {(['transparent', 'blur', 'immersive', 'modern'] as const).map((effect) => (
                           <button
                             key={effect}
                             onClick={() => handleBackgroundEffectChange(effect)}
@@ -633,7 +633,7 @@ export default memo(function QuickSettings({
                                 backgroundEffect === effect ? `0 0 8px ${accentColor}30` : 'none',
                             }}
                           >
-                            {effect === 'transparent' ? '通透' : effect === 'blur' ? '模糊' : '沉浸'}
+                            {effect === 'transparent' ? '通透' : effect === 'blur' ? '模糊' : effect === 'modern' ? '摩登' : '沉浸'}
                           </button>
                         ))}
                       </div>
