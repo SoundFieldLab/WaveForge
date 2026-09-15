@@ -162,23 +162,34 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
   )
 }
 
-/** 歌单动态封面缓存（模块级：同页多卡共享，切 tab 不重复请求） */
+/** 歌单动态封面缓存（模块级：同页多卡共享，切 tab 不重复请求）。
+ *  成功结果长期缓存；空结果（电台无动态图/请求早期失败）只保留 60s 负缓存后重试，
+ *  避免启动早期一次失败就把卡片封面永久钉死成静态图。 */
 const motionCache = new Map<string, { video?: string; poster?: string } | null>()
+const motionCachedAt = new Map<string, number>()
 const motionPending = new Map<string, Promise<{ video?: string; poster?: string } | null>>()
+const MOTION_NULL_TTL_MS = 60_000
 
 function loadResourceMotion(resourceType: 'playlists' | 'albums' | 'stations', resourceId: string, storefront: string): Promise<{ video?: string; poster?: string } | null> {
   const key = `${storefront}:${resourceType}:${resourceId}`
-  if (motionCache.has(key)) return Promise.resolve(motionCache.get(key) ?? null)
+  if (motionCache.has(key)) {
+    const cached = motionCache.get(key) ?? null
+    if (cached || Date.now() - (motionCachedAt.get(key) || 0) < MOTION_NULL_TTL_MS) return Promise.resolve(cached)
+    motionCache.delete(key)
+    motionCachedAt.delete(key)
+  }
   const pending = motionPending.get(key)
   if (pending) return pending
   const task = fetchAppleResourceMotion(resourceType, resourceId, storefront)
     .then(result => {
       motionCache.set(key, result)
+      motionCachedAt.set(key, Date.now())
       motionPending.delete(key)
       return result
     })
     .catch(() => {
       motionCache.delete(key)
+      motionCachedAt.delete(key)
       motionPending.delete(key)
       return null
     })
@@ -293,6 +304,8 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
     item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined,
   )
   const itemKey = `${storefront}:${item.type}:${item.playId || item.id}`
+  // 动态封面按目录资源 id 拉取：playId 缺失时回退资源 id（与 openStation 的取 id 规则一致）。
+  const motionResourceId = item.playId || item.id
   useEffect(() => {
     setMotion(item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined)
   }, [itemKey, item.motionArtworkUrl, item.motionPosterUrl])
@@ -313,13 +326,13 @@ function MotionArtworkCover({ item, storefront, className, iconClassName }: {
   }, [])
 
   useEffect(() => {
-    if (!visible || motion !== undefined || !item.playId || !isMotionResourceType(item.type)) return
+    if (!visible || motion !== undefined || !motionResourceId || !isMotionResourceType(item.type)) return
     let cancelled = false
-    void loadResourceMotion(item.type, item.playId, storefront).then(result => {
+    void loadResourceMotion(item.type, motionResourceId, storefront).then(result => {
       if (!cancelled) setMotion(result)
     }).catch(() => { if (!cancelled) setMotion(null) })
     return () => { cancelled = true }
-  }, [item.playId, item.type, motion, storefront, visible])
+  }, [item.type, motion, motionResourceId, storefront, visible])
 
   return (
     <div
@@ -1747,7 +1760,8 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title="专属精选推荐" subtitle={section.subtitle} />
-            <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[calc((100%-2rem)/3.2)] shrink-0">
+            {/* 实测官网主页该货架：卡片固定 250×362（一行 4-5 张），不随面板宽度拉伸。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[min(250px,58vw)] shrink-0">
               {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} portrait />)}
             </HorizontalShelf>
           </section>
@@ -2008,19 +2022,16 @@ export function AppleExplorePanel({
           banners.push(sections[index])
           index += 1
         }
-        if (banners.length === 1) {
-          nodes.push(renderSection(banners[0], context))
-        } else {
-          // 实测广播页的多个「推荐单集」是 460×264 横向轮播（不是两列网格）。
-          nodes.push(
-            <section key={`${banners[0].id}-banner-shelf`} className="space-y-3">
-              <SectionTitle title={tab === 'browse' ? '精品推荐' : '推荐'} />
-              <HorizontalShelf edgeControls="hover" ariaLabel="推荐" itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
-                {banners.map(banner => <BannerCard key={banner.id} section={banner} />)}
-              </HorizontalShelf>
-            </section>,
-          )
-        }
+        // 官网单张/多张 banner 都是紧凑横卡货架（~2.2 分之一内容宽、460×260），不是全宽大卡；
+        // 全宽渲染会把 4320×1080 组合图 object-cover 放大数倍（"周年纪念"文字巨大且错位）。
+        nodes.push(
+          <section key={`${banners[0].id}-banner-shelf`} className="space-y-3">
+            <SectionTitle title={banners[0].title || (tab === 'browse' ? '精品推荐' : '推荐')} />
+            <HorizontalShelf edgeControls="hover" ariaLabel={tab === 'browse' ? '精品推荐' : '推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+              {banners.map(banner => <BannerCard key={banner.id} section={banner} />)}
+            </HorizontalShelf>
+          </section>,
+        )
       } else {
         nodes.push(renderSection(section, context))
         index += 1
