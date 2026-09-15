@@ -2135,23 +2135,25 @@ async function getAMLLTTMLLyrics(id: number | string, platform: MusicPlatform): 
   if (platform === 'spotify' || platform === 'soda') return []
   const folder = platform === 'qq' ? 'qq-lyrics' : 'ncm-lyrics'
   const encodedId = encodeURIComponent(String(id))
+  const mirrorPath = platform === 'qq' ? 'qq' : 'ncm'
   const primaryEndpoints: AMLLEndpoint[] = [
     {
       name: 'GitHub Raw',
-      url: `https://raw.githubusercontent.com/amll-dev/amll-ttml-db/refs/heads/main/${folder}/${encodedId}.ttml`,
+      // 分支必须写 `main`：`refs/heads/main` 形式实测连接直接失败（curl http=000），
+      // 会导致首选源永远空跑、只剩镜像兜底（用户反馈"逐字歌词拿不到"的根因之一）。
+      url: `https://raw.githubusercontent.com/amll-dev/amll-ttml-db/main/${folder}/${encodedId}.ttml`,
       timeout: 4500,
     },
-    platform === 'netease'
-      ? {
-          name: 'AMLL 作者镜像',
-          url: `https://amll-ttml-db.stevexmh.net/ncm/${encodedId}`,
-          timeout: 4500,
-        }
-      : {
-          name: 'jsDelivr',
-          url: `https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/${folder}/${encodedId}.ttml`,
-          timeout: 4500,
-        },
+    {
+      name: 'AMLL 作者镜像',
+      url: `https://amll-ttml-db.stevexmh.net/${mirrorPath}/${encodedId}`,
+      timeout: 4500,
+    },
+    {
+      name: 'jsDelivr',
+      url: `https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/${folder}/${encodedId}.ttml`,
+      timeout: 4500,
+    },
   ]
 
   const primary = await fetchFirstValidAMLL(primaryEndpoints)
@@ -2162,16 +2164,12 @@ async function getAMLLTTMLLyrics(id: number | string, platform: MusicPlatform): 
     return primary.lyrics
   }
 
+  // 兜底：Dimeta 镜像（仅网易云目录）。QQ 目录的三条主源已覆盖（作者镜像走 /qq），无需重复。
   if (platform === 'netease') {
     const fallback = await fetchFirstValidAMLL([
       {
         name: 'Dimeta 镜像',
         url: `https://amll.mirror.dimeta.top/api/db/ncm-lyrics/${encodedId}.ttml`,
-        timeout: 5500,
-      },
-      {
-        name: 'jsDelivr',
-        url: `https://cdn.jsdelivr.net/gh/amll-dev/amll-ttml-db@main/${folder}/${encodedId}.ttml`,
         timeout: 5500,
       },
     ])
