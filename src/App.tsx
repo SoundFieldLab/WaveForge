@@ -7171,6 +7171,11 @@ function App() {
   // 探索页进入播放页时不再卸载探索页：播放页以覆盖层叠在其上（zIndex 4 > 探索 1），
   // 返回时只关覆盖层——滚动位置、打开中的歌单/电台弹窗、已加载内容全部原样保留。
   const exploreKeptAlive = isPlaybackPage && enteredFromMode === 'explore' && viewMode === 'explore'
+  // 传统模式同理：播放页覆盖其上，传统视图内部导航与已加载歌单原样保留。
+  const traditionalKeptAlive = isPlaybackPage && enteredFromMode === 'traditional' && viewMode === 'traditional'
+  // 简约模式主页↔播放页在同一分支内共存：主页隐藏不卸载（注意不能用 AnimatePresence
+  // 保留退场节点——首页壁纸+多层 backdrop-filter 的合成快照会残留，见下方分支内注释）。
+  const minimalHomeKeptAlive = isPlaybackPage && enteredFromMode === 'minimal' && viewMode === 'minimal'
   // 探索页是独立的不透明工作面；从其 mini 播放器进入播放页时，播放页首帧必须完全覆盖探索页。
   // 否则 AnimatePresence 的同步淡入/淡出会把两个页面叠在一起，表现为用户截图中的整屏透底。
   const enteringPlayerFromExplore = isPlaybackPage && enteredFromMode === 'explore'
@@ -7525,7 +7530,7 @@ function App() {
             />
           </motion.div>
         )}
-        {renderedMode === 'traditional' && (
+        {(renderedMode === 'traditional' || traditionalKeptAlive) && (
           <motion.div
             key="traditional-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -7533,7 +7538,7 @@ function App() {
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-full w-full"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: traditionalKeptAlive ? 1 : 2, visibility: traditionalKeptAlive ? 'hidden' : 'visible' }}
           >
             <LazyTraditionalView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -7844,7 +7849,7 @@ function App() {
               AnimatePresence 保留退出节点：冷启动首次播放时 Chromium 偶发把首页
               合成快照永久留在播放页上。直接替换节点可以确保首页当帧卸载；新页面
               自身的 initial/animate 仍提供完整入场过渡。 */}
-          {!currentSong || showHome ? (
+          {(!currentSong || showHome || minimalHomeKeptAlive) && (
             /* 有歌词时使用两列布局，左侧封面右侧歌词 */
             <motion.div
               key="minimal-home-surface"
@@ -7857,7 +7862,7 @@ function App() {
                 filter: { duration: 0.38, ease: [0.22, 1, 0.36, 1] },
               }}
               className="absolute inset-0"
-              style={{ willChange: 'transform, opacity, filter' }}
+              style={{ willChange: 'transform, opacity, filter', visibility: minimalHomeKeptAlive ? 'hidden' : 'visible', zIndex: 0 }}
             >
             <LazyHomeView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -7918,7 +7923,8 @@ function App() {
               playerTheme={playerTheme}
             />
             </motion.div>
-          ) : (
+          )}
+          {currentSong && !showHome && (
             <motion.div
               key="minimal-playback-surface"
               initial={{ opacity: 0, y: 24, scale: 0.985, filter: 'blur(10px)' }}
