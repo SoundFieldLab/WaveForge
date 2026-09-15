@@ -35,10 +35,14 @@ export const persistLyricStyleMode = (mode: LyricStyleMode): void => {
   window.dispatchEvent(new CustomEvent(LYRIC_STYLE_MODE_EVENT, { detail: mode }))
 }
 
-/** 风格 → 逐字效果 */
-export const wordEffectModeOfStyle = (style: LyricStyleMode): WordByWordEffectMode =>
-  style === 'modern' ? 'apple' : 'soft'
-
 /** 风格 → 歌词切换动画 */
 export const scrollStyleOfStyle = (style: LyricStyleMode): ScrollTransitionStyle =>
   style === 'modern' ? 'amodern' : 'classic'
+
+/**
+ * 逐字填充说明：两种风格共用「整行连续光带」填充（已唱亮 / 未唱暗，边界羽化），
+ * 不再按词独立擦亮。差异只体现在光带宽度与滚动/行视觉上——
+ * 柔和 = 大面积柔光扩散 + 传统滚动；摩登 = AMLL 式窄光带 + 弹簧滚动（无行级 y 位移）。
+ * 光带宽度在 LyricsDisplay 的 getWordEffectConfig 里按风格取值。
+ */
+export const LYRIC_FILL_EFFECT_MODE: WordByWordEffectMode = 'soft'

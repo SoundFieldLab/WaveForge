@@ -5,10 +5,10 @@ import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
 import { normalizeSequentialWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
 import {
+  LYRIC_FILL_EFFECT_MODE,
   LYRIC_STYLE_MODE_EVENT,
   readLyricStyleMode,
   scrollStyleOfStyle,
-  wordEffectModeOfStyle,
   type LyricStyleMode,
   type ScrollTransitionStyle,
   type WordByWordEffectMode,
@@ -677,7 +677,7 @@ export default memo(function LyricsDisplay({
   const effectiveLyricSize = lyricSizeOverride ?? lyricSize
   const effectiveWordByWordEnabled = wordByWordEnabledOverride ?? wordByWordEnabled
   const effectiveWordByWordEffectMode: WordByWordEffectMode =
-    wordByWordEffectModeOverride ?? wordEffectModeOfStyle(effectiveLyricStyle)
+    wordByWordEffectModeOverride ?? LYRIC_FILL_EFFECT_MODE
   const effectiveLyricGlow = lyricGlowOverride ?? lyricGlow
   const sustainGlowColor = useMemo(() => resolveReadableSustainColor(accentColor), [accentColor])
   const effectiveAnimationMode = animationModeOverride ?? animationMode
@@ -686,6 +686,11 @@ export default memo(function LyricsDisplay({
     && effectiveWordByWordEnabled
     && effectiveWordByWordEffectMode === 'apple'
   const isDesktopLayout = layoutContext === 'desktop'
+  // 摩登（AMLL 风格）行视觉：整行随弹簧平移，行自身只做 scale/blur/opacity——
+  // 不含行级 y 位移（旧实现让行在 upcoming→current→played 切换时上下跳 2~3px）。
+  const isAmllLyricMotion = isModernScroll && !isDesktopLayout
+  /** 需要按"焦点行视觉模型"渲染的行（Apple 逐字覆盖或摩登风格） */
+  const useLineMotionModel = isAppleLineMode || isAmllLyricMotion
   const containerRef = useRef<HTMLDivElement>(null)
   // 崭新模式：弹簧 transform 滚动引擎（零布局跳动，Apple Music 风）
   const springY = useSpring(0, { stiffness: 190, damping: 26, mass: 1.1 })
@@ -1321,7 +1326,7 @@ export default memo(function LyricsDisplay({
     }
   }
 
-  const getWordEffectConfig = (mode: WordByWordEffectMode) => {
+  const getWordEffectConfig = (mode: WordByWordEffectMode, style: LyricStyleMode) => {
     switch (mode) {
       case 'apple':
         // Apple Music 风格：词/字整体渐亮（不走 clear/soft 的 mask 填充路径）。
@@ -1348,9 +1353,12 @@ export default memo(function LyricsDisplay({
           wordPaddingX: '0',
           linePaddingX: '0.12em',
           wordLineHeight: 1.28,
-          inactiveColor: isLightTheme ? 'rgba(0, 0, 0, 0.38)' : 'rgba(255, 255, 255, 0.38)',
-          inactiveFilter: 'blur(0.3px)',
-          fillExtension: 42,
+          inactiveColor: style === 'modern'
+            ? (isLightTheme ? 'rgba(0, 0, 0, 0.36)' : 'rgba(255, 255, 255, 0.36)')
+            : (isLightTheme ? 'rgba(0, 0, 0, 0.38)' : 'rgba(255, 255, 255, 0.38)'),
+          inactiveFilter: style === 'modern' ? 'none' : 'blur(0.3px)',
+          // 光带宽度：柔和 = 大面积柔光扩散；摩登 = AMLL 式窄光带（边界利落，接近真机 0.5em 光带）
+          fillExtension: style === 'modern' ? 12 : 42,
           baseTextShadow: isLightTheme ? '0 2px 9px rgba(255,255,255,0.24)' : '0 2px 9px rgba(0,0,0,0.24)',
           activeTextShadow: isLightTheme ? '0 3px 12px rgba(255,255,255,0.36)' : '0 0 14px rgba(255,255,255,0.25), 0 3px 12px rgba(0,0,0,0.36)',
           completedTextShadow: isLightTheme ? '0 2px 9px rgba(255,255,255,0.3)' : '0 2px 9px rgba(0,0,0,0.3)',
@@ -1450,7 +1458,7 @@ export default memo(function LyricsDisplay({
       const WORD_BY_WORD_DELAY_MS = 200
       const currentMs = Math.max(0, absoluteCurrentMs - lineStartTime - WORD_BY_WORD_DELAY_MS)
       
-      const effectConfig = getWordEffectConfig(effectiveWordByWordEffectMode)
+      const effectConfig = getWordEffectConfig(effectiveWordByWordEffectMode, effectiveLyricStyle)
       // 对唱行：未唱底色带演唱者色相（主唱保持默认灰，其余演唱者取调色板色）
       const lyricAgent = lyric.agentId || lyric.agent
       const lineInactiveColor = appleDuetColorsEnabled && appleAgentCount >= 2 && lyricAgent
@@ -1545,7 +1553,8 @@ export default memo(function LyricsDisplay({
           const softLiftProgress = 1 - Math.pow(1 - softLiftRaw, 3)
           const softLiftStyle = effectConfig.isSoft
             ? {
-                transform: `translateY(${(effectConfig.isApple ? -0.045 : -0.075) * softLiftProgress}em)`,
+                // 摩登（AMLL）：字上浮更克制（0.05em）；柔和保留原有的 0.075em 扩散感
+                transform: `translateY(${(effectiveLyricStyle === 'modern' ? -0.05 : effectConfig.isApple ? -0.045 : -0.075) * softLiftProgress}em)`,
                 transformOrigin: 'center bottom',
                 willChange: 'transform' as const,
               }
@@ -2354,18 +2363,20 @@ export default memo(function LyricsDisplay({
             distanceFromCurrent,
             isManualScrolling,
           )
-          const lineFilter = isAppleLineMode
+          const lineFilter = useLineMotionModel
             ? `blur(${appleLineMotion.blur}px)`
             : isModernScroll
               ? (isManualScrolling ? 'none' : `blur(${isCurrent ? 0 : distanceFromCurrent >= 3 ? 3.4 : distanceFromCurrent >= 2 ? 2.2 : 1.1}px)`)
               : `blur(${Math.max(timingBlur, immersiveDistanceBlur)}px)`
-          const lineFontSize = isModernScroll || isAppleLineMode
+          const lineFontSize = isModernScroll || useLineMotionModel
             ? `${effectiveLyricSize}rem`
             : isCurrent ? `${effectiveLyricSize}rem` : `${effectiveLyricSize * 0.63}rem`
-          const lineFontWeight = isModernScroll ? 600 : (isAppleLineMode ? 500 : (isCurrent ? 700 : 400))
-          const lineOpacity = isAppleLineMode ? appleLineMotion.opacity : opacityValue
-          const lineY = isAppleLineMode ? appleLineMotion.y : skiaY
-          const lineScale = isAppleLineMode
+          const lineFontWeight = isModernScroll ? 600 : (useLineMotionModel ? 500 : (isCurrent ? 700 : 400))
+          const lineOpacity = useLineMotionModel ? appleLineMotion.opacity : opacityValue
+          // 摩登：行级 y 恒为 0——行切换的上下位移完全交给弹簧平移，
+          // 不再叠加 upcoming/played 的 ±2~3px 位移（用户反馈"正在播放→已播放完毕会上下动一下"）。
+          const lineY = isAmllLyricMotion ? 0 : isAppleLineMode ? appleLineMotion.y : skiaY
+          const lineScale = useLineMotionModel
             ? appleLineMotion.scale
             : isModernScroll ? (isCurrent ? 1 : distanceFromCurrent >= 2 ? 0.74 : 0.80) : undefined
           const appleTransformTransition = prefersReducedMotion || isManualScrolling || isInactiveGeneratedInterlude
@@ -2409,16 +2420,16 @@ export default memo(function LyricsDisplay({
               transition={{
                 opacity: isBlinking
                   ? { duration: 2.0, repeat: Infinity, ease: [0.4, 0, 0.6, 1] }
-                  : prefersReducedMotion ? { duration: 0 } : isAppleLineMode
+                  : prefersReducedMotion ? { duration: 0 } : useLineMotionModel
                     ? { duration: 0.22, ease: [0.22, 1, 0.36, 1] }
                     : transitionConfig.opacity,
-                y: isAppleLineMode ? appleTransformTransition : { duration: prefersReducedMotion ? 0 : 0.04, ease: 'linear' },
-                scale: isAppleLineMode
+                y: useLineMotionModel ? appleTransformTransition : { duration: prefersReducedMotion ? 0 : 0.04, ease: 'linear' },
+                scale: useLineMotionModel
                   ? appleTransformTransition
                   : isModernScroll && !prefersReducedMotion
                     ? { type: 'spring', stiffness: 240, damping: 24, mass: 0.9 }
                     : { duration: 0 },
-                filter: { duration: prefersReducedMotion ? 0 : isAppleLineMode ? 0.3 : 0.45, ease: [0.22, 1, 0.36, 1] },
+                filter: { duration: prefersReducedMotion ? 0 : useLineMotionModel ? 0.3 : 0.45, ease: [0.22, 1, 0.36, 1] },
               }}
             >
               {/* 液态玻璃框 */}
@@ -2493,8 +2504,10 @@ export default memo(function LyricsDisplay({
                 className={`${scrollAlignment === 'center' ? 'text-center' : 'text-left'} font-medium leading-relaxed whitespace-normal break-words [overflow-wrap:anywhere] relative z-10 lyric-skia-text`}
                 initial={false}
                 animate={{
-                  scale: isAppleLineMode ? 1 : (isCurrent ? 1.006 : 1),
-                  y: isCurrent ? 0 : lineTiming.releaseProgress > 0 ? -3 * lineTiming.releaseProgress : 0,
+                  scale: useLineMotionModel ? 1 : (isCurrent ? 1.006 : 1),
+                  // 摩登/Apple 行视觉：行内不做 y 位移。原实现在"刚唱完"（releaseProgress>0）
+                  // 时给整行 -3px 上移，叠加行级 motion.y 就是用户看到的"唱完上下动一下"。
+                  y: useLineMotionModel ? 0 : (isCurrent ? 0 : lineTiming.releaseProgress > 0 ? -3 * lineTiming.releaseProgress : 0),
                 }}
                 transition={{
                   scale: isBlinking 
@@ -2521,7 +2534,7 @@ export default memo(function LyricsDisplay({
                   maxWidth: '100%',
                   fontSize: lineFontSize,
                   fontWeight: lineFontWeight,
-                  fontFamily: isAppleLineMode
+                  fontFamily: useLineMotionModel
                     ? "'SF Pro Display', 'PingFang SC', 'Helvetica Neue', 'Segoe UI', 'Roboto', 'Arial', sans-serif"
                     : undefined,
                   wordBreak: 'break-word',

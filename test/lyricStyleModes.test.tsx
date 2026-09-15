@@ -118,6 +118,32 @@ describe('歌词风格样式', () => {
   })
 })
 
+describe('逐字填充（连续光带）', () => {
+  const fillMasks = (style: 'soft' | 'modern', currentTime: number) => {
+    const { container } = renderLyrics(style, currentTime)
+    const masks = Array.from(container.querySelectorAll('span'))
+      .map(node => (node as HTMLElement).style.webkitMaskImage || (node as HTMLElement).style.maskImage || '')
+      .filter(value => value.includes('linear-gradient'))
+    cleanup()
+    return masks
+  }
+
+  it('摩登与柔和都用连续光带遮罩填充（不是按词硬边擦亮）', () => {
+    // currentTime 落在第一行第一个词的演唱区间内 → 出现从左推进的填充层
+    for (const style of ['soft', 'modern'] as const) {
+      expect(fillMasks(style, 0.3).length).toBeGreaterThan(0)
+    }
+  })
+
+  it('摩登的光带比柔和更窄（柔和=大面积柔光扩散）', () => {
+    const softMask = fillMasks('soft', 0.3)[0]
+    const modernMask = fillMasks('modern', 0.3)[0]
+    expect(softMask).toBeTruthy()
+    expect(modernMask).toBeTruthy()
+    expect(softMask).not.toBe(modernMask)
+  })
+})
+
 describe('Apple 对唱左右分栏', () => {
   it('对唱行靠右并让出左侧，其余行让出右侧', () => {
     const { container } = renderLyrics('modern')
