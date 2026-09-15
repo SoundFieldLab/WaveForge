@@ -16,6 +16,7 @@ import json
 import time
 import hashlib
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -78,6 +79,11 @@ LOUDNESS_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 LOUDNESS_CACHE_MAX_SIZE_BYTES = 256 * 1024 * 1024
 # 清理节流：避免每次写入都 glob+stat 整个缓存目录（文件多时可达数百毫秒）
 _last_loudness_cleanup_time = [0.0]
+_LOUDNESS_CLEANUP_LOCK = threading.Lock()
+_LOUDNESS_ANALYSIS_LIMIT = max(1, int(os.environ.get('WAVEFORGE_ANALYSIS_CONCURRENCY', '2')))
+_LOUDNESS_SEMAPHORE = threading.BoundedSemaphore(_LOUDNESS_ANALYSIS_LIMIT)
+_LOUDNESS_INFLIGHT = {}
+_LOUDNESS_INFLIGHT_LOCK = threading.Lock()
 
 
 def _loudness_cache_key(track_key: str, audio_path: str, sr: int) -> str:
@@ -119,19 +125,25 @@ def _save_loudness_cache(cache_key: str, value: float):
 
 def _cleanup_loudness_cache(force=False):
     now = time.time()
-    if not force and now - _last_loudness_cleanup_time[0] < 60.0:
-        return
-    _last_loudness_cleanup_time[0] = now
-    entries = []
-    for cache_file in LOUDNESS_CACHE_DIR.glob('*.json'):
-        try:
-            stat = cache_file.stat()
-            if now - stat.st_mtime > LOUDNESS_CACHE_MAX_AGE_SECONDS:
-                cache_file.unlink(missing_ok=True)
+    with _LOUDNESS_CLEANUP_LOCK:
+        if not force and now - _last_loudness_cleanup_time[0] < 60.0:
+            return
+        _last_loudness_cleanup_time[0] = now
+        entries = []
+        for cache_file in LOUDNESS_CACHE_DIR.iterdir():
+            try:
+                stat = cache_file.stat()
+                if cache_file.suffix == '.tmp' or cache_file.name.endswith('.tmp'):
+                    if now - stat.st_mtime > 300:
+                        cache_file.unlink(missing_ok=True)
+                    continue
+                if cache_file.suffix != '.json' or now - stat.st_mtime > LOUDNESS_CACHE_MAX_AGE_SECONDS:
+                    if cache_file.is_file():
+                        cache_file.unlink(missing_ok=True)
+                    continue
+                entries.append((cache_file, stat.st_size, stat.st_mtime))
+            except OSError:
                 continue
-            entries.append((cache_file, stat.st_size, stat.st_mtime))
-        except OSError:
-            continue
     total_size = sum(size for _, size, _ in entries)
     for cache_file, size, _ in sorted(entries, key=lambda entry: entry[2]):
         if total_size <= LOUDNESS_CACHE_MAX_SIZE_BYTES:
@@ -264,11 +276,36 @@ def measure_lufs():
         if cached is not None:
             print(f"💾 响度测量缓存命中: {track_key} → {cached} LUFS")
             return jsonify({'trackKey': track_key, 'integratedLufs': cached})
-        y, sr = librosa.load(audio_path, sr=sr, mono=True)
-        integrated = integrated_lufs(y, sr)
-        _save_loudness_cache(cache_key, integrated)
-        print(f"🔊 响度测量: {track_key} → {integrated} LUFS")
-        return jsonify({'trackKey': track_key, 'integratedLufs': integrated})
+        with _LOUDNESS_INFLIGHT_LOCK:
+            inflight = _LOUDNESS_INFLIGHT.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _LOUDNESS_INFLIGHT[cache_key] = inflight
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            inflight.wait(timeout=300)
+            cached = _load_loudness_cache(cache_key)
+            if cached is not None:
+                return jsonify({'trackKey': track_key, 'integratedLufs': cached})
+            return jsonify({'error': 'Loudness measurement did not produce a cache result'}), 503
+        if not _LOUDNESS_SEMAPHORE.acquire(timeout=300):
+            with _LOUDNESS_INFLIGHT_LOCK:
+                _LOUDNESS_INFLIGHT.pop(cache_key, None)
+                inflight.set()
+            return jsonify({'error': 'Too many loudness measurements in progress'}), 503
+        try:
+            y, sr = librosa.load(audio_path, sr=sr, mono=True)
+            integrated = integrated_lufs(y, sr)
+            _save_loudness_cache(cache_key, integrated)
+            print(f"🔊 响度测量: {track_key} → {integrated} LUFS")
+            return jsonify({'trackKey': track_key, 'integratedLufs': integrated})
+        finally:
+            _LOUDNESS_SEMAPHORE.release()
+            with _LOUDNESS_INFLIGHT_LOCK:
+                _LOUDNESS_INFLIGHT.pop(cache_key, None)
+                inflight.set()
     except Exception as e:
         print(f"[ERROR] 响度测量失败: {e}")
         return jsonify({'error': str(e)}), 500

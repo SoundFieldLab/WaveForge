@@ -1,12 +1,16 @@
 @echo off
+setlocal
 chcp 65001 >nul
+set "PROJECT_ROOT=%~dp0"
+pushd "%PROJECT_ROOT%" >nul
 echo ========================================
 echo WaveForge Python 依赖安装脚本
 echo ========================================
 echo.
 
-set PYTHON_EXE=resources\python-embed\python.exe
-set PIP_EXE=resources\python-embed\Scripts\pip.exe
+set "PYTHON_EXE=%PROJECT_ROOT%resources\python-embed\python.exe"
+set "PIP_EXE=%PROJECT_ROOT%resources\python-embed\Scripts\pip.exe"
+set "REQUIREMENTS=%PROJECT_ROOT%requirements.txt"
 
 REM 检查内嵌 Python 是否存在
 echo [1/3] 检查项目内嵌 Python 环境...
@@ -26,7 +30,7 @@ REM 安装依赖
 echo [2/3] 安装 Python 依赖包...
 echo 使用清华大学镜像源加速下载...
 echo.
-"%PIP_EXE%" install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+"%PIP_EXE%" install -r "%REQUIREMENTS%" -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 if %errorlevel% neq 0 (
     echo.

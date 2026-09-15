@@ -95,34 +95,45 @@ MAX_AUDIO_FILE_SIZE_BYTES = 300 * 1024 * 1024
 # 每次 save 都全量清理会显著拖慢新曲目分析，故按时间节流——最多每 60 秒清理一次，
 # 缓存总量上限与过期清理改为"最终一致"（延后至多 60 秒生效），不影响输出语义。
 _last_cleanup_time = [0.0]
+_CACHE_CLEANUP_LOCK = threading.Lock()
+_ANALYSIS_LIMIT = max(1, int(os.environ.get('WAVEFORGE_ANALYSIS_CONCURRENCY', '2')))
+_ANALYSIS_SEMAPHORE = threading.BoundedSemaphore(_ANALYSIS_LIMIT)
+_INFLIGHT_ANALYSES = {}
+_INFLIGHT_LOCK = threading.Lock()
 
 
 def cleanup_cache(force=False):
-    """删除过期缓存，并按最近使用时间把总量限制在 512MB。"""
+    """删除过期缓存、临时文件，并按最近使用时间把总量限制在 512MB。"""
     now = time.time()
-    if not force and now - _last_cleanup_time[0] < 60.0:
-        return
-    _last_cleanup_time[0] = now
-    entries = []
-    for cache_file in CACHE_DIR.glob("*.json"):
-        try:
-            stat = cache_file.stat()
-            if now - stat.st_mtime > CACHE_MAX_AGE_SECONDS:
-                cache_file.unlink(missing_ok=True)
+    with _CACHE_CLEANUP_LOCK:
+        if not force and now - _last_cleanup_time[0] < 60.0:
+            return
+        _last_cleanup_time[0] = now
+        entries = []
+        for cache_file in CACHE_DIR.iterdir():
+            try:
+                stat = cache_file.stat()
+                if cache_file.suffix == '.tmp' or cache_file.name.endswith('.tmp'):
+                    if now - stat.st_mtime > 300:
+                        cache_file.unlink(missing_ok=True)
+                    continue
+                if cache_file.suffix != '.json' or now - stat.st_mtime > CACHE_MAX_AGE_SECONDS:
+                    if cache_file.is_file() and (cache_file.suffix != '.json' or now - stat.st_mtime > CACHE_MAX_AGE_SECONDS):
+                        cache_file.unlink(missing_ok=True)
+                    continue
+                entries.append((cache_file, stat.st_size, stat.st_mtime))
+            except OSError:
                 continue
-            entries.append((cache_file, stat.st_size, stat.st_mtime))
-        except OSError:
-            continue
 
-    total_size = sum(size for _, size, _ in entries)
-    for cache_file, size, _ in sorted(entries, key=lambda entry: entry[2]):
-        if total_size <= CACHE_MAX_SIZE_BYTES:
-            break
-        try:
-            cache_file.unlink(missing_ok=True)
-            total_size -= size
-        except OSError:
-            continue
+        total_size = sum(size for _, size, _ in entries)
+        for cache_file, size, _ in sorted(entries, key=lambda entry: entry[2]):
+            if total_size <= CACHE_MAX_SIZE_BYTES:
+                break
+            try:
+                cache_file.unlink(missing_ok=True)
+                total_size -= size
+            except OSError:
+                continue
 
 def convert_to_native_types(obj):
     """递归转换 numpy 类型为 Python 原生类型"""
@@ -480,41 +491,55 @@ def analyze():
         if cached:
             print(f"💾 使用缓存: {track_key}")
             return jsonify(cached)
-        
-        # 检查文件是否存在
-        print(f"🔍 检查文件是否存在: {audio_path}")
-        if not os.path.exists(audio_path):
-            print(f"❌ 文件不存在: {audio_path}")
-            # 如果是 URL，尝试下载
-            if audio_path.startswith('http'):
-                return jsonify({'error': 'audioPath must reference a local file prepared by WaveForge'}), 400
-            return jsonify({'error': f'File not found: {audio_path}'}), 404
-        
-        print(f"✅ 文件存在，开始分析...")
-        
-        # 内容探测：libsndfile 打不开 m4a/aac/opus（B 站 DASH 音频轨是 AAC/MP4）。
-        # 返回 metadata-only 让调用方走浏览器解码回退，而不是 500 大堆栈。
-        if not _probe_audio_format(audio_path):
-            print(f"⚠️ 格式不支持 librosa 解码（m4a/aac 等），返回 metadata-only: {audio_path}")
-            return jsonify(_metadata_only_result(track_key, duration))
-        
-        # 校验扩展名与文件大小，防止非音频文件或超大文件导致资源耗尽
-        valid, validation_error = _validate_audio_path(audio_path)
-        if not valid:
-            print(f"❌ 音频路径校验失败: {validation_error}")
-            return jsonify({'error': validation_error}), 400
-        
-        # 分析音频
-        result = analyze_audio_file(audio_path, track_key, source_signature)
-        
-        # 确保所有数据都是原生 Python 类型
-        result = convert_to_native_types(result)
-        
-        # 保存到缓存
-        save_to_cache(cache_key, result)
-        
-        return jsonify(result)
-    
+
+        # 同一缓存键只允许一个分析任务，其他请求等待结果落盘后读取。
+        with _INFLIGHT_LOCK:
+            inflight = _INFLIGHT_ANALYSES.get(cache_key)
+            if inflight is None:
+                inflight = threading.Event()
+                _INFLIGHT_ANALYSES[cache_key] = inflight
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            inflight.wait(timeout=900)
+            cached = load_from_cache(cache_key)
+            if cached:
+                return jsonify(cached)
+            return jsonify({'error': 'Audio analysis did not produce a cache result'}), 503
+
+        acquired = _ANALYSIS_SEMAPHORE.acquire(timeout=900)
+        if not acquired:
+            with _INFLIGHT_LOCK:
+                _INFLIGHT_ANALYSES.pop(cache_key, None)
+                inflight.set()
+            return jsonify({'error': 'Too many audio analyses in progress'}), 503
+        try:
+            print(f"🔍 检查文件是否存在: {audio_path}")
+            if not os.path.exists(audio_path):
+                print(f"❌ 文件不存在: {audio_path}")
+                if audio_path.startswith('http'):
+                    return jsonify({'error': 'audioPath must reference a local file prepared by WaveForge'}), 400
+                return jsonify({'error': f'File not found: {audio_path}'}), 404
+
+            print(f"✅ 文件存在，开始分析...")
+            if not _probe_audio_format(audio_path):
+                print(f"⚠️ 格式不支持 librosa 解码（m4a/aac 等），返回 metadata-only: {audio_path}")
+                result = _metadata_only_result(track_key, duration)
+            else:
+                valid, validation_error = _validate_audio_path(audio_path)
+                if not valid:
+                    print(f"❌ 音频路径校验失败: {validation_error}")
+                    return jsonify({'error': validation_error}), 400
+                result = convert_to_native_types(analyze_audio_file(audio_path, track_key, source_signature))
+                save_to_cache(cache_key, result)
+            return jsonify(result)
+        finally:
+            _ANALYSIS_SEMAPHORE.release()
+            with _INFLIGHT_LOCK:
+                _INFLIGHT_ANALYSES.pop(cache_key, None)
+                inflight.set()
+
     except Exception as error:
         error_type = error.__class__.__name__
         print(f"[ERROR] 分析失败: {error_type}")

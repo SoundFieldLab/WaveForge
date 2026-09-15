@@ -16,11 +16,11 @@ def _cache_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     if os.name == 'nt':
-        app_data = os.environ.get('APPDATA', '').strip()
-        if app_data:
-            return Path(app_data) / 'WaveForge 澜音工坊' / 'cache'
-    xdg_config = os.environ.get('XDG_CONFIG_HOME', '').strip()
-    return (Path(xdg_config) if xdg_config else Path.home() / '.config') / 'WaveForge 澜音工坊' / 'cache'
+        base = os.environ.get('LOCALAPPDATA', '').strip() or os.environ.get('APPDATA', '').strip()
+        if base:
+            return Path(base) / 'WaveForge' / 'cache'
+    xdg_cache = os.environ.get('XDG_CACHE_HOME', '').strip()
+    return (Path(xdg_cache) if xdg_cache else Path.home() / '.cache') / 'waveforge'
 
 
 def is_allowed_audio_path(candidate: str) -> bool:
