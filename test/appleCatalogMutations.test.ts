@@ -262,6 +262,10 @@ describe('Apple catalog pagination', () => {
 
     const result = await load()
     expect(result.map(item => item.id)).toEqual(['1', '2', '3'])
+    expect(apiRequest.mock.calls[0][1]).toEqual(expect.objectContaining({
+      developerToken: 'developer-token',
+      mediaUserToken: 'media-token',
+    }))
     expect(apiRequest.mock.calls[1][0]).toBe(`/v1/catalog/jp/${type}?offset=2`)
   })
 
@@ -286,6 +290,15 @@ describe('Apple catalog pagination', () => {
       incomplete: true,
     })
     vi.unstubAllGlobals()
+  })
+
+  it('requests playlist tracks without relationship expansion that stalls Apple AMP', async () => {
+    apiRequest.mockResolvedValue({ ok: true, status: 200, data: { data: [] } })
+
+    await catalog.getAppleCatalogPlaylistTracks('pl.personal', 'cn', 100)
+
+    expect(apiRequest.mock.calls[0][0]).toBe('/v1/catalog/cn/playlists/pl.personal/tracks?limit=100')
+    expect(apiRequest.mock.calls[0][0]).not.toContain('include=')
   })
 
   it('propagates catalog playlist request failures instead of returning an empty list', async () => {

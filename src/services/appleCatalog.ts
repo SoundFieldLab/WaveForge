@@ -38,6 +38,8 @@ export interface AppleCatalogAlbum {
   genres?: string[]
   /** 目录专辑曲目数（部分接口返回） */
   trackCount?: number
+  /** 编辑撰写的专辑简介（attributes.editorialNotes.standard，需 extend=editorialNotes）。 */
+  description?: string
 }
 
 export const APPLE_EXPLORE_COUNTRIES = [
@@ -748,16 +750,23 @@ const appleCatalogFetch = async (path: string, timeoutMs = 8000, strict = false)
   }
   const result = await appleApiRequest(path, {
     developerToken: credentials.developerToken,
+    mediaUserToken: credentials.mediaUserToken,
     timeoutMs,
   })
+  if (!result) return null
   if (!result.ok) {
+    const apiError = result.data?.errors?.[0]
+    const detail = apiError?.detail || apiError?.title || result.error || ''
+    forwardToBackend(`[AppleCatalog] 目录请求失败: ${path} HTTP ${result.status}${detail ? `：${detail}` : ''}`)
     if (result.status === 0) console.warn('[AppleCatalog] 目录请求网络错误:', path, result.error)
     if (strict) {
       const message = result.status === 401 || result.status === 403
         ? 'Apple Music 目录授权失败，请重新登录'
         : result.status === 0
           ? 'Apple Music 网络连接失败，请重试'
-          : `Apple Music 目录请求失败（HTTP ${result.status}）`
+          : detail
+            ? `Apple Music 目录请求失败（HTTP ${result.status}）：${detail}`
+            : `Apple Music 目录请求失败（HTTP ${result.status}）`
       throw Object.assign(new Error(message), { status: result.status })
     }
     return null
@@ -791,7 +800,7 @@ async function fetchAppleCatalogPages(path: string, requestedLimit: number, stri
 /** 编辑精选歌单曲目（amp-api catalog，需 dev token；无 token 返回空） */
 export async function getAppleCatalogPlaylistTracks(playlistId: string, country = 'cn', limit = 5000): Promise<AppleCatalogSong[]> {
   const items = await fetchAppleCatalogPages(
-    `/v1/catalog/${encodeURIComponent(country)}/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${Math.min(100, Math.max(1, limit))}&include=artists,albums`,
+    `/v1/catalog/${encodeURIComponent(country)}/playlists/${encodeURIComponent(playlistId)}/tracks?limit=${Math.min(100, Math.max(1, limit))}`,
     limit,
     true,
   )
@@ -819,9 +828,71 @@ export interface AppleAlbumDetail {
   incomplete?: boolean
 }
 
-/** 专辑详情 + 曲目（iTunes Lookup entity=song，一次返回专辑信息与全部曲目） */
+/** 专辑详情 + 曲目（Apple Music Catalog 优先，iTunes Lookup 兜底） */
 export async function getAppleAlbumDetail(albumId: string, country = 'cn'): Promise<AppleAlbumDetail | null> {
   if (!albumId) return null
+
+  const catalogData = await appleCatalogFetch(
+    // extend=editorialNotes 才会返回专辑简介（实测 attributes.editorialNotes.standard）。
+    `/v1/catalog/${encodeURIComponent(country)}/albums/${encodeURIComponent(albumId)}?include=tracks&extend=editorialNotes`,
+    10000,
+  )
+  const catalogAlbum = Array.isArray(catalogData?.data) ? catalogData.data[0] : null
+  if (catalogAlbum?.id && catalogAlbum?.attributes) {
+    const trackRefs = catalogAlbum.relationships?.tracks?.data
+    let tracks = Array.isArray(trackRefs)
+      ? trackRefs
+        .filter((item: any) => item?.id && item?.attributes)
+        .map((item: any): AppleCatalogSong => ({
+          id: String(item.id),
+          artistId: item.relationships?.artists?.data?.[0]?.id ? String(item.relationships.artists.data[0].id) : undefined,
+          albumId: String(catalogAlbum.id),
+          name: item.attributes.name || '',
+          artistName: item.attributes.artistName || '',
+          albumName: item.attributes.albumName || catalogAlbum.attributes.name || undefined,
+          artworkUrl: toHighResArtwork(item.attributes.artwork?.url || catalogAlbum.attributes.artwork?.url || ''),
+          durationMs: item.attributes.durationInMillis,
+        }))
+        .filter(track => track.name)
+      : []
+    if (tracks.length === 0) {
+      const trackData = await appleCatalogFetch(
+        `/v1/catalog/${encodeURIComponent(country)}/albums/${encodeURIComponent(albumId)}/tracks?limit=100`,
+        10000,
+      )
+      tracks = (Array.isArray(trackData?.data) ? trackData.data : [])
+        .filter((item: any) => item?.id && item?.attributes)
+        .map((item: any): AppleCatalogSong => ({
+          id: String(item.id),
+          artistId: item.relationships?.artists?.data?.[0]?.id ? String(item.relationships.artists.data[0].id) : undefined,
+          albumId: String(catalogAlbum.id),
+          name: item.attributes.name || '',
+          artistName: item.attributes.artistName || '',
+          albumName: item.attributes.albumName || catalogAlbum.attributes.name || undefined,
+          artworkUrl: toHighResArtwork(item.attributes.artwork?.url || catalogAlbum.attributes.artwork?.url || ''),
+          durationMs: item.attributes.durationInMillis,
+        }))
+        .filter((track: AppleCatalogSong) => track.name)
+    }
+    return {
+      album: {
+        id: String(catalogAlbum.id),
+        name: catalogAlbum.attributes.name || '',
+        artistName: catalogAlbum.attributes.artistName || '',
+        artworkUrl: toHighResArtwork(catalogAlbum.attributes.artwork?.url || ''),
+        releaseDate: catalogAlbum.attributes.releaseDate,
+        genres: Array.isArray(catalogAlbum.attributes.genreNames) ? catalogAlbum.attributes.genreNames : undefined,
+        trackCount: catalogAlbum.attributes.trackCount,
+        description: catalogAlbum.attributes.editorialNotes?.standard
+          || catalogAlbum.attributes.editorialNotes?.short
+          || catalogAlbum.attributes.description?.standard
+          || undefined,
+      },
+      tracks,
+      incomplete: tracks.length === 0 && Number(catalogAlbum.attributes.trackCount) > 0,
+    }
+  }
+
   const url = `https://itunes.apple.com/lookup?id=${encodeURIComponent(albumId)}&entity=song&country=${COUNTRY_PARAM(country)}&limit=200`
   try {
     const response = await fetch(url)
@@ -1213,9 +1284,13 @@ export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleC
   return ids.map(id => songsById.get(id)).filter((song): song is AppleCatalogSong => Boolean(song?.name))
 }
 
-/** 批量读取 Apple Music favorites；旧服务不支持状态接口时回退 ratings。 */
+/** 批量读取 Apple Music favorites；旧服务不支持状态接口时回退 ratings。
+ *  实测部分账号/商店该端点直接 404，此时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
+let favoritesEndpointsUnavailable = false
+
 export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
   const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
+  if (ids.length === 0 || favoritesEndpointsUnavailable) return []
   const loved = new Set<string>()
   for (let index = 0; index < ids.length; index += 100) {
     const batch = ids.slice(index, index + 100)
@@ -1229,7 +1304,13 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
       continue
     }
     const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
-    for (const item of Array.isArray(ratingData?.data) ? ratingData.data : []) {
+    const ratingItems = Array.isArray(ratingData?.data) ? ratingData.data : null
+    if (!ratingItems) {
+      // favorites 与 ratings 都不可用 → 本次会话不再重试。
+      favoritesEndpointsUnavailable = true
+      return [...loved]
+    }
+    for (const item of ratingItems) {
       if (Number(item?.attributes?.value) === 1 && item?.id) loved.add(String(item.id))
     }
   }

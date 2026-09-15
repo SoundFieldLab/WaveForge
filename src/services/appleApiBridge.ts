@@ -90,7 +90,10 @@ const runAppleApiRequest = async (
     }
     if (options.mediaUserToken) headers['Media-User-Token'] = options.mediaUserToken
     if (options.body !== undefined) headers['Content-Type'] = 'application/json'
-    const response = await fetch(`https://amp-api.music.apple.com${apiPath}`, {
+    const appleHost = apiPath.startsWith('/v1/editorial/')
+      ? 'https://amp-api-edge.music.apple.com'
+      : 'https://amp-api.music.apple.com'
+    const response = await fetch(`${appleHost}${apiPath}`, {
       method: options.method || 'GET',
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),

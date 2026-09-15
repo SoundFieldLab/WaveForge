@@ -119,9 +119,9 @@ describe('HorizontalShelf', () => {
     const button = screen.getByRole('button', { name: '播放' })
 
     fireEvent.pointerDown(button, { pointerId: 2, pointerType: 'mouse', button: 0, clientX: 100 })
-    expect(shelf.firstElementChild?.className).toContain('scale-100')
+    expect(shelf.firstElementChild?.className).not.toContain('rotateY')
     fireEvent.pointerMove(button, { pointerId: 2, pointerType: 'mouse', clientX: 96 })
-    expect(shelf.firstElementChild?.className).toContain('scale-100')
+    expect(shelf.firstElementChild?.className).not.toContain('rotateY')
     fireEvent.pointerUp(button, { pointerId: 2, pointerType: 'mouse', clientX: 96 })
     fireEvent.click(button)
 
@@ -129,7 +129,7 @@ describe('HorizontalShelf', () => {
     expect(shelf.setPointerCapture).not.toHaveBeenCalled()
   })
 
-  it('drags, snaps to the nearest card, and suppresses click and context menu', () => {
+  it('drags continuously, keeps the projected release position, and suppresses click and context menu', () => {
     const clicked = vi.fn()
     const contextMenu = vi.fn()
     render(
@@ -146,18 +146,35 @@ describe('HorizontalShelf', () => {
     fireEvent.pointerDown(button, { pointerId: 1, pointerType: 'mouse', button: 0, clientX: 300 })
     fireEvent.pointerMove(button, { pointerId: 1, pointerType: 'mouse', clientX: 165 })
     expect(shelf.scrollLeft).toBe(135)
-    expect(shelf.firstElementChild?.className).toContain('scale-[0.975]')
-    expect(shelf.firstElementChild?.className).toContain('rotateY(1.5deg)')
+    expect(shelf.className).not.toContain('snap-')
+    expect(shelf.firstElementChild?.className).not.toContain('snap-start')
     fireEvent.pointerUp(button, { pointerId: 1, pointerType: 'mouse', clientX: 165 })
-    expect(shelf.firstElementChild?.className).toContain('scale-100')
+    expect(shelf.firstElementChild?.className).not.toContain('rotateY')
     fireEvent.click(button)
     fireEvent.contextMenu(button)
 
-    expect(shelf.scrollLeft).toBe(220)
+    expect(shelf.scrollLeft).toBeGreaterThanOrEqual(135)
+    expect(shelf.scrollLeft).toBeLessThanOrEqual(600)
     expect(clicked).not.toHaveBeenCalled()
     expect(contextMenu).not.toHaveBeenCalled()
     expect(shelf.setPointerCapture).toHaveBeenCalledWith(1)
     expect(shelf.releasePointerCapture).toHaveBeenCalledWith(1)
+  })
+
+  it('releases pointer capture and cancels inertia on pointercancel', () => {
+    renderShelf()
+    const shelf = screen.getByRole('region', { name: '推荐内容' }) as HTMLDivElement
+    setShelfGeometry(shelf)
+    mockPointerCapture(shelf)
+    const button = screen.getByRole('button', { name: '第一项' })
+
+    fireEvent.pointerDown(button, { pointerId: 3, pointerType: 'touch', button: 0, clientX: 300 })
+    fireEvent.pointerMove(button, { pointerId: 3, pointerType: 'touch', clientX: 220 })
+    expect(shelf.className).not.toContain('snap-')
+    fireEvent.pointerCancel(button, { pointerId: 3, pointerType: 'touch', clientX: 220 })
+
+    expect(shelf.className).not.toContain('snap-')
+    expect(shelf.releasePointerCapture).toHaveBeenCalledWith(3)
   })
 
   it('does not intercept vertical or horizontal wheel input', () => {
@@ -175,15 +192,20 @@ describe('HorizontalShelf', () => {
     expect(shelf.scrollLeft).toBe(0)
   })
 
-  it('keeps edge controls visible by default for existing consumers', () => {
+  it('hides compact edge controls until the pointer reaches an edge by default', () => {
     renderShelf()
     const shelf = screen.getByRole('region', { name: '推荐内容' }) as HTMLDivElement
+    const wrapper = shelf.parentElement as HTMLDivElement
     setShelfGeometry(shelf)
+    wrapper.getBoundingClientRect = () => ({ x: 0, y: 0, left: 0, top: 0, right: 400, bottom: 240, width: 400, height: 240, toJSON: () => ({}) })
 
     fireEvent.scroll(shelf)
     const right = screen.getByRole('button', { name: '向右浏览推荐内容' })
+    expect(right.className).toContain('pointer-events-none opacity-0')
+    expect(right.className).toContain('h-11 w-11')
+    expect(right.className).toContain('bg-black/35')
+    fireEvent.pointerMove(wrapper, { pointerType: 'mouse', clientX: 380 })
     expect(right.className).toContain('pointer-events-auto opacity-100')
-    expect(right.querySelector('svg')?.getAttribute('class')).toContain('h-10 w-5')
   })
 
   it('shows hover controls only in their available edge hot zones and keeps focus visibility', () => {
@@ -195,14 +217,14 @@ describe('HorizontalShelf', () => {
 
     fireEvent.scroll(shelf)
     const right = screen.getByRole('button', { name: '向右浏览推荐内容' })
-    expect(right.className).toContain('h-20 w-10')
+    expect(right.className).toContain('h-11 w-11')
     expect(right.className).toContain('rounded-full')
     expect(right.className).toContain('-right-5')
     expect(right.className).toContain('opacity-0')
     expect(right.className).toContain('pointer-events-none')
     expect(right.className).toContain('focus-visible:opacity-100')
     expect(right.className).toContain('focus-visible:ring-2')
-    expect(right.querySelector('svg')?.getAttribute('class')).toContain('h-10 w-5')
+    expect(right.querySelector('svg')?.getAttribute('class')).toContain('h-4 w-4')
     fireEvent.pointerMove(wrapper, { pointerType: 'mouse', clientX: 380 })
     expect(right.className).toContain('opacity-100')
     fireEvent.pointerMove(wrapper, { pointerType: 'mouse', clientX: 200 })

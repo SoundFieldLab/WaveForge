@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import Hls from 'hls.js'
 import { ArrowLeft, Pause, Play, Radio, RotateCw, Volume2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
+import CachedImage from './CachedImage'
 
 type Props = {
   song: Song
@@ -73,7 +74,7 @@ export default function AppleRadioNowPlayingPage({
 
   return (
     <div className={`relative flex h-full min-h-0 w-full flex-col overflow-hidden ${isDark ? 'bg-[#08090d] text-white' : 'bg-[#f5f5f7] text-black'}`} data-apple-radio-player>
-      {poster && <img src={poster} alt="" className="absolute inset-0 h-full w-full scale-110 object-cover opacity-30 blur-3xl" />}
+      {poster && <CachedImage src={poster} alt="" className="absolute inset-0 h-full w-full scale-110 opacity-30 blur-3xl" role="background" priority="deferred" />}
       <div className={`absolute inset-0 ${isDark ? 'bg-black/55' : 'bg-white/70'}`} />
 
       <header className="relative z-10 flex h-20 shrink-0 items-center justify-between px-5 md:px-10">
@@ -90,7 +91,7 @@ export default function AppleRadioNowPlayingPage({
             {motionUrl && motionEnabled && !motionFailed ? (
               <video ref={motionRef} muted loop playsInline poster={poster || undefined} className="h-full w-full object-cover" />
             ) : poster ? (
-              <img src={poster} alt={song.name} className="h-full w-full object-cover" />
+              <CachedImage src={poster} alt={song.name} className="h-full w-full" role="hero" priority="critical" lazy={false} />
             ) : (
               <div className="flex h-full w-full items-center justify-center"><Radio className="h-24 w-24 opacity-25" /></div>
             )}

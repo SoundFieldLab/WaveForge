@@ -20,6 +20,7 @@ type HorizontalShelfProps = {
   rightPeek?: number | string
   edgeHotZoneWidth?: number
   edgeControls?: 'always' | 'hover'
+  edgeControlSize?: 'default' | 'compact'
 }
 
 type DragState = {
@@ -48,7 +49,8 @@ export function HorizontalShelf({
   itemClassName = '',
   rightPeek,
   edgeHotZoneWidth = 56,
-  edgeControls = 'always',
+  edgeControls = 'hover',
+  edgeControlSize = 'compact',
 }: HorizontalShelfProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
   const animationRef = useRef<number | null>(null)
@@ -165,8 +167,8 @@ export function HorizontalShelf({
     const distance = event.clientX - drag.startX
     if (Math.abs(distance) >= DRAG_THRESHOLD && !drag.moved) {
       drag.moved = true
-      setIsDragging(true)
       node.setPointerCapture?.(event.pointerId)
+      setIsDragging(true)
     }
     if (!drag.moved) return
     event.preventDefault()
@@ -194,7 +196,8 @@ export function HorizontalShelf({
     }
     suppressActivationAfterDrag()
     const projected = cancelled ? node.scrollLeft : node.scrollLeft + drag.velocity * INERTIA_PROJECTION_MS
-    animateTo(nearestSnapPoint(projected), cancelled ? 160 : 300)
+    const max = Math.max(0, node.scrollWidth - node.clientWidth)
+    animateTo(Math.min(max, Math.max(0, projected)), cancelled ? 0 : 160)
   }
 
   const suppressDraggedActivation = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -223,7 +226,22 @@ export function HorizontalShelf({
   const peekStyle = rightPeek === undefined
     ? undefined
     : ({ paddingInlineEnd: typeof rightPeek === 'number' ? `${rightPeek}px` : rightPeek } as CSSProperties)
-  const arrowClass = 'absolute top-1/2 z-30 flex h-20 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/18 bg-white/88 text-black/65 shadow-xl backdrop-blur-md transition-[background-color,color,opacity,transform] hover:bg-white hover:text-black active:scale-95 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80'
+  // 官网同款：可横向滚动的一侧用渐隐遮罩，拖拽时边缘内容淡出（而不是被硬切）。
+  const EDGE_FADE = '28px'
+  const edgeMaskStyle: CSSProperties = (() => {
+    const left = canScrollLeft ? `transparent 0, #000 ${EDGE_FADE}` : null
+    const right = canScrollRight ? `#000 calc(100% - ${EDGE_FADE}), transparent 100%` : null
+    if (!left && !right) return {}
+    const gradient = `linear-gradient(90deg, ${left ?? '#000 0'}, ${right ?? '#000 100%'})`
+    return {
+      maskImage: gradient,
+      WebkitMaskImage: gradient,
+    } as CSSProperties
+  })()
+  const arrowClass = edgeControlSize === 'compact'
+    ? 'absolute top-1/2 z-30 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/35 text-white/70 shadow-lg backdrop-blur-md transition-[background-color,color,opacity,transform] hover:bg-white/12 hover:text-white active:scale-95 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+    : 'absolute top-1/2 z-30 flex h-20 w-10 -translate-y-1/2 items-center justify-center rounded-full border border-white/18 bg-white/88 text-black/65 shadow-xl backdrop-blur-md transition-[background-color,color,opacity,transform] hover:bg-white hover:text-black active:scale-95 focus-visible:pointer-events-auto focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80'
+  const arrowIconClass = edgeControlSize === 'compact' ? 'h-4 w-4' : 'h-10 w-5'
   const edgeControlClass = (edge: 'left' | 'right') => edgeControls === 'always'
     ? 'pointer-events-auto opacity-100'
     : hotEdge === edge
@@ -255,13 +273,13 @@ export function HorizontalShelf({
           if (event.key === 'ArrowLeft') { event.preventDefault(); scrollPage(-1) }
           if (event.key === 'ArrowRight') { event.preventDefault(); scrollPage(1) }
         }}
-        className={`wf-no-scrollbar flex snap-x snap-mandatory gap-4 overflow-x-auto overscroll-x-contain pb-2 select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'} ${viewportClassName}`}
-        style={{ touchAction: 'pan-y pinch-zoom', ...peekStyle }}
+        className={`wf-no-scrollbar flex gap-4 overflow-x-auto overscroll-x-contain pt-2 pb-2 select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'} ${viewportClassName}`}
+        style={{ touchAction: 'pan-y pinch-zoom', ...peekStyle, ...edgeMaskStyle }}
       >
         {Children.map(children, child => (
           <div
             data-horizontal-shelf-item=""
-            className={`shrink-0 snap-start transition-transform duration-[360ms] [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] ${isDragging ? 'scale-[0.975] [transform:perspective(900px)_translateY(3px)_rotateY(1.5deg)]' : 'scale-100 [transform:perspective(900px)_translateY(0)_rotateY(0deg)]'} ${itemClassName}`}
+            className={`shrink-0 ${isDragging ? 'shadow-[0_8px_24px_rgba(0,0,0,0.18)]' : ''} ${itemClassName}`}
           >
             {child}
           </div>
@@ -275,7 +293,7 @@ export function HorizontalShelf({
           onClick={() => scrollPage(-1)}
           className={`${arrowClass} -left-5 ${edgeControlClass('left')}`}
         >
-          <ChevronLeft className="h-10 w-5" strokeWidth={1.5} />
+          <ChevronLeft className={arrowIconClass} strokeWidth={edgeControlSize === 'compact' ? 2 : 1.5} />
         </button>
       )}
       {canScrollRight && (
@@ -286,7 +304,7 @@ export function HorizontalShelf({
           onClick={() => scrollPage(1)}
           className={`${arrowClass} -right-5 ${edgeControlClass('right')}`}
         >
-          <ChevronRight className="h-10 w-5" strokeWidth={1.5} />
+          <ChevronRight className={arrowIconClass} strokeWidth={edgeControlSize === 'compact' ? 2 : 1.5} />
         </button>
       )}
     </div>

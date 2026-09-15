@@ -8,6 +8,7 @@ import { validateAppleLogin, clearAppleLogin, saveAppleLogin, getAppleAuthState,
 import { ensureAppleWebDevToken } from '../services/appleMusicToken'
 import { recordLogin, clearLoginExpiry } from '../services/loginExpiry'
 import { useTvBack } from '../tv/tvCore'
+import CachedImage from './CachedImage'
 
 const STOREFRONTS = [
   { code: 'cn', label: '中国大陆 (cn)' },
@@ -361,7 +362,7 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
           {currentUser.loggedIn && (
             <div className="flex items-center gap-3 rounded-2xl border border-emerald-400/25 bg-emerald-400/10 p-3.5">
               {currentUser.avatarUrl ? (
-                <img src={currentUser.avatarUrl} alt={currentUser.name} className="h-10 w-10 rounded-full object-cover" />
+                <CachedImage src={currentUser.avatarUrl} alt={currentUser.name} className="h-10 w-10 rounded-full object-cover" role="row" size={64} priority="visible" />
               ) : (
                 <span className="flex h-10 w-10 items-center justify-center rounded-full bg-white/10">
                   <ShieldCheck className="h-5 w-5 text-emerald-300" />

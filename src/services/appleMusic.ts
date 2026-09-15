@@ -98,6 +98,10 @@ export function toHighResArtwork(url: string, size = 600): string {
     .replace(/\d+x\d+bb/g, `${size}x${size}bb`)
     .replace(/\{w\}/g, String(size))
     .replace(/\{h\}/g, String(size))
+    // {c} 是裁切位：歌曲/电台模板为 {w}x{h}{c}.{f}。必须替换成 cc（居中方形裁切）：
+    // 实测替换成 bb（保持原图比例）时，4320×1080 的电台原图只会返回 204×51 的细条，
+    // 再被 object-cover 拉伸填进方形卡片 → 严重模糊。
+    .replace(/\{c\}/g, 'cc')
     .replace(/\{f\}/g, 'jpg')
 }
 

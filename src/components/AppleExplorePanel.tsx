@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import {
-  Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Info, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
+  Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Home, Info, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
 } from 'lucide-react'
 import type { SongSelectHandler } from '../types/playbackNavigation'
 import type { Song } from '../services/musicApi'
@@ -38,9 +38,12 @@ import {
   appleWebItemToSong,
   fetchAppleBrowsePage,
   fetchAppleChartsPage,
+  fetchAppleCuratorPage,
+  fetchAppleGroupingPage,
   fetchAppleHomePage,
   fetchAppleLibraryPage,
-  fetchApplePlaylistMotion,
+  fetchAppleMultiRoomPage,
+  fetchAppleResourceMotion,
   fetchApplePostDetail,
   fetchAppleRadioPage,
   fetchAppleRadioShowDetail,
@@ -48,7 +51,10 @@ import {
   fetchAppleStationDetail,
   fetchLibraryAlbumTracksForPlay,
   fetchLibraryArtistAlbumsForDrawer,
+  resolveExploreTarget,
   setAppleFavorite,
+  type AppleCuratorPage,
+  type AppleExploreTarget,
   type ApplePostDetail,
   type AppleRadioShowDetail,
   type AppleWebItem,
@@ -61,6 +67,29 @@ import { useTvBack } from '../tv/tvCore'
 import AppleSearchBrowse from './AppleSearchBrowse'
 import AppleVideoModal from './AppleVideoModal'
 import { HorizontalShelf } from './apple-explore/HorizontalShelf'
+import CachedImage from './CachedImage'
+import AnimatedArtworkCover from './AnimatedArtworkCover'
+
+/** 把列表按每组 size 个切成"列"（官网歌曲轨是每列固定行数的横向分列布局）。 */
+function chunkBy<T>(items: T[], size: number): T[][] {
+  const out: T[][] = []
+  for (let index = 0; index < items.length; index += size) out.push(items.slice(index, index + size))
+  return out
+}
+
+/** 探索页站内嵌套层：room / grouping / multiroom / curator（可任意互相进入）。 */
+type ExploreLayer = {
+  kind: 'room' | 'grouping' | 'multiroom' | 'curator' | 'section'
+  id: string
+  name: string
+  page: AppleWebPage | null
+  curator?: AppleCuratorPage | null
+  loading: boolean
+}
+
+function AppleExploreImage(props: React.ComponentProps<typeof CachedImage>) {
+  return <CachedImage {...props} platform="apple" retainPrevious />
+}
 
 // ─────────────────────────── 动态封面 ───────────────────────────
 
@@ -134,25 +163,26 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
 }
 
 /** 歌单动态封面缓存（模块级：同页多卡共享，切 tab 不重复请求） */
-const motionCache = new Map<string, { video: string; poster?: string } | null>()
-const motionPending = new Map<string, Promise<{ video: string; poster?: string } | null>>()
+const motionCache = new Map<string, { video?: string; poster?: string } | null>()
+const motionPending = new Map<string, Promise<{ video?: string; poster?: string } | null>>()
 
-function loadPlaylistMotion(playlistId: string, storefront: string): Promise<{ video: string; poster?: string } | null> {
-  if (motionCache.has(playlistId)) return Promise.resolve(motionCache.get(playlistId) ?? null)
-  const pending = motionPending.get(playlistId)
+function loadResourceMotion(resourceType: 'playlists' | 'albums' | 'stations', resourceId: string, storefront: string): Promise<{ video?: string; poster?: string } | null> {
+  const key = `${storefront}:${resourceType}:${resourceId}`
+  if (motionCache.has(key)) return Promise.resolve(motionCache.get(key) ?? null)
+  const pending = motionPending.get(key)
   if (pending) return pending
-  const task = fetchApplePlaylistMotion(playlistId, storefront)
+  const task = fetchAppleResourceMotion(resourceType, resourceId, storefront)
     .then(result => {
-      motionCache.set(playlistId, result)
-      motionPending.delete(playlistId)
+      motionCache.set(key, result)
+      motionPending.delete(key)
       return result
     })
     .catch(() => {
-      motionCache.set(playlistId, null)
-      motionPending.delete(playlistId)
+      motionCache.delete(key)
+      motionPending.delete(key)
       return null
     })
-  motionPending.set(playlistId, task)
+  motionPending.set(key, task)
   return task
 }
 
@@ -166,8 +196,11 @@ function MotionPlaylistCover({ item, storefront, className, iconClassName }: {
   className?: string
   iconClassName?: string
 }) {
-  const [motion, setMotion] = useState<{ video: string; poster?: string } | null | undefined>(
-    () => (motionCache.has(item.playId) ? motionCache.get(item.playId) ?? null : undefined),
+    const [motion, setMotion] = useState<{ video?: string; poster?: string } | null | undefined>(
+    () => {
+      const key = `${storefront}:playlists:${item.playId}`
+      return motionCache.has(key) ? motionCache.get(key) ?? null : undefined
+    },
   )
   const [videoFailed, setVideoFailed] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
@@ -177,11 +210,12 @@ function MotionPlaylistCover({ item, storefront, className, iconClassName }: {
     if (motion === null || videoFailed) return
     let videoUrl = motion?.video
     if (!videoUrl) {
-      const loaded = await loadPlaylistMotion(item.playId, storefront)
+      const loaded = await loadResourceMotion('playlists', item.playId, storefront)
       setMotion(loaded)
       if (!loaded) return
       videoUrl = loaded.video
     }
+    if (!videoUrl) return
     const video = videoRef.current
     if (!video) return
     if (!hlsRef.current) {
@@ -244,7 +278,80 @@ function MotionPlaylistCover({ item, storefront, className, iconClassName }: {
   )
 }
 
-// ─────────────────────────── 面板 ───────────────────────────
+const isMotionResourceType = (type: AppleWebItem['type']): type is 'playlists' | 'albums' | 'stations' => type === 'playlists' || type === 'albums' || type === 'stations'
+
+function MotionArtworkCover({ item, storefront, className, iconClassName }: {
+  item: AppleWebItem
+  storefront: string
+  className?: string
+  iconClassName?: string
+}) {
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  const [visible, setVisible] = useState(false)
+  const [pageVisible, setPageVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
+    const [motion, setMotion] = useState<{ video?: string; poster?: string } | null | undefined>(
+    item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined,
+  )
+  const [reducedMotion, setReducedMotion] = useState(false)
+  const itemKey = `${storefront}:${item.type}:${item.playId || item.id}`
+  useEffect(() => {
+    setMotion(item.motionArtworkUrl ? { video: item.motionArtworkUrl, poster: item.motionPosterUrl } : undefined)
+  }, [itemKey, item.motionArtworkUrl, item.motionPosterUrl])
+  const active = visible && pageVisible && !reducedMotion
+
+  useEffect(() => {
+    const onVisibility = () => setPageVisible(!document.hidden)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [])
+
+  useEffect(() => {
+    const query = window.matchMedia?.('(prefers-reduced-motion: reduce)')
+    const update = () => setReducedMotion(Boolean(query?.matches))
+    update()
+    query?.addEventListener?.('change', update)
+    return () => query?.removeEventListener?.('change', update)
+  }, [])
+
+  useEffect(() => {
+    const node = hostRef.current
+    if (!node) return
+    const observer = new IntersectionObserver(entries => setVisible(Boolean(entries[0]?.isIntersecting)), { rootMargin: '200px', threshold: 0.1 })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!visible || motion !== undefined || reducedMotion || !item.playId || !isMotionResourceType(item.type)) return
+    let cancelled = false
+    void loadResourceMotion(item.type, item.playId, storefront).then(result => {
+      if (!cancelled) setMotion(result)
+    }).catch(() => { if (!cancelled) setMotion(null) })
+    return () => { cancelled = true }
+  }, [item.playId, item.type, motion, reducedMotion, storefront, visible])
+
+  return (
+    <div
+      ref={hostRef}
+      className={`relative overflow-hidden ${className || ''}`}
+    >
+      {/* 静态层固定用作品封面（不用动态封面预览帧），避免动态数据到达后画面自行"变一下"。 */}
+      <AppleExploreImage src={item.artworkUrl || motion?.poster || ''} alt={item.name} className="h-full w-full object-cover" role="card" />
+      {motion?.video && !reducedMotion && (
+        <AnimatedArtworkCover
+          videoUrl={motion.video}
+          posterUrl={motion.poster}
+          staticCoverUrl={item.artworkUrl}
+          active={active}
+          className="absolute inset-0 h-full w-full"
+          objectFit="cover"
+        />
+      )}
+      {!item.artworkUrl && !motion?.poster && <div className="absolute inset-0 flex items-center justify-center bg-white/[0.06]"><MusicGlyph className={iconClassName || 'h-7 w-7 opacity-40'} /></div>}
+    </div>
+  )
+}
+
 
 type AmTab = 'home' | 'browse' | 'radio' | 'categories' | 'charts' | 'library'
 
@@ -292,6 +399,15 @@ const PAGE_FETCHERS: Record<Exclude<AmTab, 'categories'>, (storefront: string) =
 
 /** 只有 catalog song 才能进入统一歌曲播放链路。 */
 const isPlayableItem = (item: AppleWebItem) => item.type === 'songs' && Boolean(item.playId)
+
+/** 歌曲时长（ms → m:ss；未知时留空，避免显示 0:00 造成误导）。 */
+function formatDuration(durationMs?: number): string {
+  if (!Number.isFinite(durationMs) || (durationMs as number) <= 0) return ''
+  const totalSeconds = Math.round((durationMs as number) / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
 
 /** Apple audioTraits → 列表卡音质徽标（web 歌曲行同款；与歌曲详情保持一致） */
 function songTraitLabel(item: AppleWebItem): string {
@@ -343,14 +459,48 @@ export function AppleExplorePanel({
   const [videoItem, setVideoItem] = useState<AppleWebItem | null>(null)
   /** 帖子详情弹窗（艺人分享 /post/…） */
   const [postDetail, setPostDetail] = useState<{ item: AppleWebItem; detail: ApplePostDetail | null; loading: boolean } | null>(null)
-  /** 探索更多 room 页（按风格浏览/年代之声/…；/room/{id} 编辑树） */
-  const [roomDetail, setRoomDetail] = useState<{ id: string; name: string; page: AppleWebPage | null; loading: boolean } | null>(null)
+  /**
+   * 站内嵌套层级栈：room / grouping / multiroom / curator 可任意互相进入（官网实测 curator 页内还会出现 room），
+   * 因此用有序栈而非单一 roomDetail，返回时逐层弹出。
+   */
+  const [layers, setLayers] = useState<ExploreLayer[]>([])
+  const activeLayer = layers.length > 0 ? layers[layers.length - 1] : null
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  /** 各层级（含 root）的滚动位置记忆：进入更深层时保存当前层，返回时恢复目标层。 */
+  const scrollByLevelRef = useRef<Record<string, number>>({ root: 0 })
+  const pendingScrollRef = useRef<number | null>(null)
+  const levelKeyOf = (stack: ExploreLayer[]) => stack.length > 0
+    ? `${stack.length}:${stack[stack.length - 1].kind}:${stack[stack.length - 1].id}`
+    : 'root'
+  const currentLevelKeyRef = useRef('root')
+  currentLevelKeyRef.current = levelKeyOf(layers)
+
+  /** 找到真实滚动容器（面板本身不一定可滚，通常是祖先节点）。 */
+  const findScroller = useCallback((): HTMLElement | Window => {
+    let el: HTMLElement | null = panelRef.current?.parentElement || null
+    while (el) {
+      const style = window.getComputedStyle(el)
+      if (/(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight + 4) return el
+      el = el.parentElement
+    }
+    return window
+  }, [])
+  const readScroll = useCallback(() => {
+    const scroller = findScroller()
+    return scroller instanceof Window ? (window.scrollY || 0) : scroller.scrollTop
+  }, [findScroller])
+  const writeScroll = useCallback((value: number) => {
+    const scroller = findScroller()
+    if (scroller instanceof Window) window.scrollTo({ top: value })
+    else scroller.scrollTop = value
+  }, [findScroller])
   const pageContextRef = useRef(`${appleLoggedIn}:${storefront}`)
   const pageRequestRef = useRef<Record<Exclude<AmTab, 'categories'>, number>>({ home: 0, browse: 0, radio: 0, charts: 0, library: 0 })
 
   const isDark = playerTheme === 'dark'
   const cardBg = isDark ? 'bg-white/[0.05]' : 'bg-black/[0.04]'
   const cardBorder = isDark ? 'border-white/[0.09]' : 'border-black/[0.08]'
+  const nativeLight = playerTheme === 'light'
 
   const loadTab = useCallback(async (target: Exclude<AmTab, 'categories'>, force = false) => {
     if (!force && (pages[target] || loading[target])) return
@@ -389,7 +539,7 @@ export function AppleExplorePanel({
     setChartDetail(null)
     setVideoItem(null)
     setPostDetail(null)
-    setRoomDetail(null)
+    setLayers([])
     if (tab !== 'categories') void loadTab(tab, true)
   }, [appleLoggedIn, storefront]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -492,12 +642,12 @@ export function AppleExplorePanel({
     platform: 'apple' as const,
     detail: {
       tab,
-      ...(roomDetail ? { room: { id: roomDetail.id, name: roomDetail.name } } : {}),
+      ...(activeLayer && activeLayer.kind === 'room' ? { room: { id: activeLayer.id, name: activeLayer.name } } : {}),
       ...(postDetail ? { postItem: postDetail.item } : {}),
       ...(chartDetail ? { chart: chartDetail } : {}),
       ...detail,
     },
-  }), [chartDetail, postDetail, roomDetail, tab])
+  }), [activeLayer, chartDetail, postDetail, tab])
 
   const playItem = useCallback((item: AppleWebItem) => {
     if (!isPlayableItem(item)) return
@@ -658,17 +808,103 @@ export function AppleExplorePanel({
       : prev)
   }, [storefront])
 
-  /** 探索更多 room 页：/room/{id} 编辑树 → 复用整页分区渲染 */
-  const openRoom = useCallback(async (item: AppleWebItem) => {
-    const path = String(item.url || '').split(/[?#]/, 1)[0].replace(/\/+$/, '')
-    const roomId = path.split('/').pop() || item.id
-    if (!roomId) return
-    setRoomDetail({ id: roomId, name: item.name || '探索', page: null, loading: true })
-    const page = await fetchAppleRoomPage(roomId, storefront).catch(() => null)
-    setRoomDetail(prev => prev && prev.id === roomId
-      ? { ...prev, page: page || { sections: [], hero: null, personalized: false, sourceLabel: 'room 加载失败' }, loading: false }
-      : prev)
+  /** 打开一个站内嵌套层（room / grouping / multiroom / curator），压入层级栈。
+   *  进入前记住当前层滚动位置，进入后新层从顶部开始（官网同款行为）。 */
+  const openLayer = useCallback(async (kind: ExploreLayer['kind'], id: string, name: string) => {
+    if (!id) return
+    scrollByLevelRef.current[currentLevelKeyRef.current] = readScroll()
+    pendingScrollRef.current = 0
+    const fallbackName = name || '探索'
+    setLayers(prev => [...prev, { kind, id, name: fallbackName, page: null, loading: true }])
+    const settle = (patch: Partial<ExploreLayer>) => setLayers(prev => {
+      if (prev.length === 0) return prev
+      const last = prev[prev.length - 1]
+      if (last.id !== id || last.kind !== kind) return prev
+      return [...prev.slice(0, -1), { ...last, ...patch }]
+    })
+    const failed: AppleWebPage = { sections: [], hero: null, personalized: false, sourceLabel: `${kind} 加载失败` }
+    try {
+      if (kind === 'grouping') {
+        settle({ page: await fetchAppleGroupingPage(id, storefront), loading: false })
+        return
+      }
+      if (kind === 'multiroom') {
+        settle({ page: await fetchAppleMultiRoomPage(id, storefront), loading: false })
+        return
+      }
+      if (kind === 'curator') {
+        const curatorPage = await fetchAppleCuratorPage(id, storefront)
+        if (!curatorPage) { settle({ page: failed, loading: false }); return }
+        settle({
+          name: curatorPage.curator.name || fallbackName,
+          curator: curatorPage,
+          // curator 页 = curator 头 + 标准编辑树分区；这里复用分区渲染。
+          page: { sections: curatorPage.sections, hero: null, personalized: false, sourceLabel: `curator(${curatorPage.curator.name})` },
+          loading: false,
+        })
+        return
+      }
+      settle({ page: await fetchAppleRoomPage(id, storefront), loading: false })
+    } catch {
+      settle({ page: failed, loading: false })
+    }
   }, [storefront])
+
+  const popLayer = useCallback(() => setLayers(prev => prev.slice(0, -1)), [])
+
+  /** 资料库区块的二级铺开页：把该区块的全部条目以换行网格展开（不取数）。 */
+  const openSectionSpread = useCallback((section: AppleWebSection) => {
+    scrollByLevelRef.current[currentLevelKeyRef.current] = readScroll()
+    pendingScrollRef.current = 0
+    const spread: AppleWebSection = { ...section, id: `spread-${section.id}`, layoutType: 'room-grid', roomId: undefined, multiRoomId: undefined }
+    setLayers(prev => [...prev, {
+      kind: 'section',
+      id: spread.id,
+      name: section.title || '全部',
+      page: { sections: [spread], hero: null, personalized: false, sourceLabel: '' },
+      loading: false,
+    }])
+  }, [readScroll])
+
+  /** 跳到指定深度（0 = 新发现根层级），并恢复该层此前的滚动位置。 */
+  const goToDepth = useCallback((depth: number) => {
+    setLayers(prev => {
+      const target = prev.slice(0, Math.max(0, Math.min(depth, prev.length)))
+      scrollByLevelRef.current[currentLevelKeyRef.current] = readScroll()
+      pendingScrollRef.current = scrollByLevelRef.current[levelKeyOf(target)] ?? 0
+      return target
+    })
+  }, [readScroll])
+
+  /** 层级切换后应用滚动位置：进入新层回顶部，返回/跳转回到该层记忆的位置。 */
+  useEffect(() => {
+    const pending = pendingScrollRef.current
+    if (pending === null) return
+    pendingScrollRef.current = null
+    const raf = window.requestAnimationFrame(() => {
+      writeScroll(pending)
+      // 内容异步加载后高度会变化，再补一次以贴近记忆位置。
+      window.setTimeout(() => writeScroll(pending), 260)
+    })
+    return () => window.cancelAnimationFrame(raf)
+  }, [layers, writeScroll])
+
+  /** 按 URL 归一化结果打开对应层级；无法识别时返回 false 交给调用方兜底。 */
+  const openExploreTarget = useCallback((target: AppleExploreTarget | null, name: string): boolean => {
+    if (!target) return false
+    if (target.kind === 'room') { void openLayer('room', target.id, name); return true }
+    if (target.kind === 'grouping') { void openLayer('grouping', target.id, name); return true }
+    if (target.kind === 'multiroom') { void openLayer('multiroom', target.id, name); return true }
+    if (target.kind === 'curator') { void openLayer('curator', target.id, name); return true }
+    return false
+  }, [openLayer])
+
+  /** 兼容旧调用：从条目 URL 推断目标层级。 */
+  const openRoom = useCallback(async (item: AppleWebItem) => {
+    if (openExploreTarget(resolveExploreTarget(item.url), item.name || '')) return
+    // 没有可识别 URL 时，退化为把 id 当 room id（探索更多部分入口只给 id）。
+    if (item.id) void openLayer('room', String(item.id), item.name || '探索')
+  }, [openExploreTarget, openLayer])
 
   useEffect(() => {
     if (restorePlaybackOrigin?.surface !== 'explore-apple') return
@@ -811,6 +1047,12 @@ export function AppleExplorePanel({
   }, [])
 
   const activateItem = useCallback((item: AppleWebItem, items: AppleWebItem[] = [item]) => {
+    // 带站内编辑层链接的条目优先按链接跳转（实测广播「电台主持人/艺人主持节目」的节目卡
+    // 指向 viewMultiRoom，属于三级页；新发现的推荐系列 banner 同理）。
+    const entryTarget = resolveExploreTarget(item.url)
+    if (entryTarget && entryTarget.kind !== 'external' && entryTarget.kind !== 'charts') {
+      if (openExploreTarget(entryTarget, item.name)) return
+    }
     switch (item.type) {
       case 'songs':
         playItemWithQueue(item, items)
@@ -845,8 +1087,15 @@ export function AppleExplorePanel({
       case 'rooms':
         void openRoom(item)
         break
+      case 'curators':
+        // 策展人（如「来自全球」下的语种/风格）→ 站内 curator 层。
+        void openLayer('curator', String(item.playId || item.id), item.name)
+        break
+      case 'groupings':
+        void openLayer('grouping', String(item.playId || item.id), item.name)
+        break
     }
-  }, [onOpenAlbum, onOpenArtistPanel, openAlbumDrawer, openArtistDrawer, openPlaylistPanel, openPost, openRadioShow, openRoom, openStation, playItemWithQueue, playVideo])
+  }, [onOpenAlbum, onOpenArtistPanel, openAlbumDrawer, openArtistDrawer, openExploreTarget, openPlaylistPanel, openPost, openRadioShow, openRoom, openStation, playItemWithQueue, playVideo])
 
   useTvBack(() => {
     if (albumDrawer) setAlbumDrawer(null)
@@ -855,16 +1104,28 @@ export function AppleExplorePanel({
     else if (postDetail) setPostDetail(null)
     else if (chartDetail) setChartDetail(null)
     else if (artistDrawer) setArtistDrawer(null)
-    else if (roomDetail) setRoomDetail(null)
+    else if (layers.length > 0) goToDepth(layers.length - 1)
     else return false
     return true
-  }, [albumDrawer, stationDetail, radioShowDetail, postDetail, chartDetail, artistDrawer, roomDetail])
+  }, [albumDrawer, stationDetail, radioShowDetail, postDetail, chartDetail, artistDrawer, layers.length, goToDepth])
 
   // ── 卡片子组件 ──
 
-  /** 新发现徽章卡（web /new 主视觉：大图 + 左上角 designBadge + 名称/策划人） */
-  const FeaturedCard = ({ item, items }: { item: AppleWebItem; items: AppleWebItem[] }) => {
+  /** 徽章卡。`textFirst` 只在「新发现」精品推荐启用（官网该区块为文字在上、图在下）；
+   *  主页「专属精选推荐」等保持原有「图在上、文字在下」样式，避免影响其它页签。 */
+  const FeaturedCard = ({ item, items, portrait = false, textFirst = false }: { item: AppleWebItem; items: AppleWebItem[]; portrait?: boolean; textFirst?: boolean }) => {
     const isPlaylist = item.type === 'playlists'
+    const meta = (
+      <>
+        {item.badge && textFirst && (
+          <span className="mb-1.5 inline-block rounded-md border border-white/[0.14] bg-white/[0.06] px-2 py-0.5 text-[11px] font-medium text-white/80">
+            {item.badge}
+          </span>
+        )}
+        <p className={`truncate leading-tight ${textFirst ? 'text-sm font-semibold' : 'text-sm font-medium'}`}>{item.name}</p>
+        <p className="mt-0.5 truncate text-xs text-white/40">{item.curatorName || item.artistName || item.subtitle || 'Apple Music'}</p>
+      </>
+    )
     return (
       <motion.div
         whileHover={{ y: -3 }}
@@ -878,17 +1139,14 @@ export function AppleExplorePanel({
           activateItem(item, items)
         }}
       >
+        {textFirst && <div className="mb-2 min-w-0 px-0.5">{meta}</div>}
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
-          {isPlaylist ? (
-            <MotionPlaylistCover item={item} storefront={storefront} className="aspect-[16/10] w-full" />
-          ) : item.artworkUrl ? (
-            <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-[16/10] w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+          {item.bannerUrl && !item.motionArtworkUrl ? (
+            <img src={item.bannerUrl} alt={item.name} loading="lazy" className={`${portrait ? 'aspect-[3/4]' : 'aspect-[16/10]'} w-full object-cover`} />
           ) : (
-            <div className="flex aspect-[16/10] w-full items-center justify-center bg-white/[0.06]">
-              <MusicGlyph className="h-8 w-8 opacity-40" />
-            </div>
+            <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[3/4]' : 'aspect-[16/10]'} w-full`} />
           )}
-          {item.badge && (
+          {!textFirst && item.badge && (
             <span className="absolute left-3 top-3 z-10 rounded-md bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 backdrop-blur-md">
               {item.badge}
             </span>
@@ -915,10 +1173,7 @@ export function AppleExplorePanel({
             </button>
           )}
         </div>
-        <div className="mt-2 px-0.5">
-          <p className="truncate text-sm font-medium leading-tight">{item.name}</p>
-          <p className="mt-0.5 truncate text-xs text-white/40">{item.curatorName || item.artistName || item.subtitle || 'Apple Music'}</p>
-        </div>
+        {!textFirst && <div className="mt-2 px-0.5">{meta}</div>}
       </motion.div>
     )
   }
@@ -929,11 +1184,16 @@ export function AppleExplorePanel({
     return (
       <motion.div
         whileHover={{ y: -2 }}
-        className={`group relative w-full cursor-pointer overflow-hidden rounded-2xl border border-white/[0.08] ${wide ? '' : 'min-h-[220px]'}`}
+        className={`group relative w-full cursor-pointer overflow-hidden rounded-2xl border border-white/[0.08] ${wide ? '' : 'aspect-[460/264] min-h-[220px]'}`}
         onClick={() => { if (item) activateItem(item, section.items) }}
       >
-        {section.bannerUrl ? (
-          <img src={section.bannerUrl} alt={section.title} loading="lazy" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-[1.02]" />
+        {section.bannerUrl || item?.motionArtworkUrl || item?.artworkUrl ? (
+          <div className="absolute inset-0">
+            {section.bannerUrl && <img src={section.bannerUrl} alt={section.title} loading="lazy" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-[1.02]" />}
+            {item?.bannerUrl && !section.bannerUrl && <img src={item.bannerUrl} alt={item.name} loading="lazy" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-[1.02]" />}
+            {item?.motionArtworkUrl && <MotionArtworkCover item={item} storefront={storefront} className="absolute inset-0 h-full w-full" />}
+            {!section.bannerUrl && !item?.bannerUrl && !item?.motionArtworkUrl && item?.artworkUrl && <MotionArtworkCover item={item} storefront={storefront} className="h-full w-full" />}
+          </div>
         ) : (
           <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(250,45,72,0.25),rgba(10,10,14,0.9))]" />
         )}
@@ -983,8 +1243,8 @@ export function AppleExplorePanel({
         className="group min-w-0 text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
       >
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
-          {item.artworkUrl ? (
-            <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+          {item.motionArtworkUrl || item.artworkUrl ? (
+            <MotionArtworkCover item={item} storefront={storefront} className="aspect-square w-full transition duration-500 group-hover:scale-[1.03]" />
           ) : (
             <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
               <Radio className="h-7 w-7 opacity-40" />
@@ -1050,7 +1310,7 @@ export function AppleExplorePanel({
         )}
         <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-lg">
           {item.artworkUrl ? (
-            <img src={item.artworkUrl} alt={item.name} loading="lazy" className="h-full w-full object-cover" />
+            <AppleExploreImage src={item.artworkUrl} alt={item.name} className="h-full w-full" role="row" />
           ) : (
             <div className="flex h-full w-full items-center justify-center bg-white/[0.06]">
               <MusicGlyph className="h-5 w-5 opacity-40" />
@@ -1109,6 +1369,71 @@ export function AppleExplorePanel({
     )
   }
 
+  /** 歌曲表格行（room 页「新歌精选」同款：歌曲 / 艺人 / 专辑 / 时长 四列） */
+  const SongTableRow = ({ item, items }: { item: AppleWebItem; items: AppleWebItem[] }) => {
+    const isFav = favorited.has(item.playId)
+    const isSaved = savedPlaylists.has(`lib:songs:${item.playId}`)
+    const artists = item.artistName || item.subtitle || ''
+    return (
+      <div
+        tabIndex={0}
+        data-tv-focus
+        className="group grid min-w-0 cursor-pointer grid-cols-[minmax(0,3fr)_minmax(0,2fr)] items-center gap-4 rounded-lg px-2 py-1.5 outline-none transition hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-[#fa2d48] md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_minmax(0,2fr)_4rem]"
+        onClick={() => playItemWithQueue(item, items)}
+        onContextMenu={(event) => openSongMenu(event, item, items)}
+      >
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            aria-label={isFav ? '取消喜爱' : '喜爱歌曲'}
+            onClick={(event) => { event.stopPropagation(); void toggleFavorite(item) }}
+            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition ${
+              isFav ? 'text-[#fa2d48] opacity-100' : 'text-white/40 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100'
+            }`}
+          >
+            <Heart className={`h-3.5 w-3.5 ${isFav ? 'fill-current' : ''}`} />
+          </button>
+          <div className="relative h-9 w-9 shrink-0 overflow-hidden rounded-md">
+            {item.artworkUrl ? (
+              <AppleExploreImage src={item.artworkUrl} alt={item.name} className="h-full w-full" role="row" />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center bg-white/[0.06]">
+                <MusicGlyph className="h-4 w-4 opacity-40" />
+              </div>
+            )}
+          </div>
+          <p className="min-w-0 flex-1 truncate text-[13px] font-medium leading-tight">{item.name}</p>
+        </div>
+        <p className="min-w-0 truncate text-[13px] text-white/55">{artists}</p>
+        <p className="hidden min-w-0 truncate text-[13px] text-white/40 md:block">{item.albumName || ''}</p>
+        <div className="hidden items-center justify-end gap-1 md:flex">
+          {!item.isLibrary && (
+            <button
+              type="button"
+              aria-label={isSaved ? '从资料库移除' : '添加到资料库'}
+              disabled={libraryMutations.has(`lib:songs:${item.playId}`)}
+              onClick={(event) => { event.stopPropagation(); void saveToLibrary(item) }}
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full transition ${
+                isSaved ? 'text-[#fa2d48] opacity-100' : 'text-white/40 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100'
+              }`}
+            >
+              {isSaved ? <Check className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+            </button>
+          )}
+          <span className="w-10 shrink-0 text-right text-[12px] tabular-nums text-white/35">{formatDuration(item.durationMs)}</span>
+          <button
+            type="button"
+            aria-label="更多操作"
+            onClick={(event) => { event.stopPropagation(); openSongMenu(event, item, items) }}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white/40 opacity-0 transition hover:bg-white/10 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100"
+          >
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   /** 节目卡（web [394]：宽幅横幅 + 节目名） */
   const ShowCard = ({ item }: { item: AppleWebItem }) => (
     <motion.div
@@ -1120,8 +1445,10 @@ export function AppleExplorePanel({
           ? void openRadioShow(item)
           : openExternal(item.url)}
     >
-      {item.bannerUrl ? (
-        <img src={item.bannerUrl} alt={item.name} loading="lazy" className="aspect-[16/9] w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+      {item.bannerUrl || item.motionArtworkUrl || item.artworkUrl ? (
+        <div className="relative aspect-[16/9] w-full">
+          <MotionArtworkCover item={item} storefront={storefront} className="h-full w-full" />
+        </div>
       ) : (
         <div className="flex aspect-[16/9] w-full items-center justify-center bg-white/[0.06]">
           <Radio className="h-7 w-7 opacity-40" />
@@ -1138,7 +1465,7 @@ export function AppleExplorePanel({
   )
 
   /** 主页横向行卡片（歌曲/歌单/专辑/艺人/电台） */
-  const RowCard = ({ item, items }: { item: AppleWebItem; items: AppleWebItem[] }) => {
+  const RowCard = ({ item, items, fluid = false }: { item: AppleWebItem; items: AppleWebItem[]; fluid?: boolean }) => {
     const isFav = favorited.has(item.playId)
     const isSaved = savedPlaylists.has(item.playId)
     const isPlaylist = item.type === 'playlists'
@@ -1152,19 +1479,11 @@ export function AppleExplorePanel({
         whileHover={{ y: -3 }}
         tabIndex={0}
         data-tv-focus
-        className="group w-[148px] cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48] sm:w-[164px] lg:w-[176px]"
+        className={`group cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48] ${fluid ? 'w-full' : 'w-[148px] sm:w-[164px] lg:w-[176px]'}`}
         onClick={() => activateItem(item, items)}
       >
         <div className="relative overflow-hidden rounded-xl">
-          {isPlaylist ? (
-            <MotionPlaylistCover item={item} storefront={storefront} className="aspect-square w-full" />
-          ) : item.artworkUrl ? (
-            <img src={item.artworkUrl} alt={item.name} loading="lazy" className={`w-full object-cover ${isArtist ? 'aspect-square rounded-full' : 'aspect-square'}`} />
-          ) : (
-            <div className={`flex aspect-square w-full items-center justify-center ${isDark ? 'bg-white/[0.07]' : 'bg-black/[0.06]'}`}>
-              {isArtist ? <UserRound className="h-7 w-7 opacity-40" /> : isStation ? <Radio className="h-7 w-7 opacity-40" /> : <MusicGlyph className="h-7 w-7 opacity-40" />}
-            </div>
-          )}
+          <MotionArtworkCover item={item} storefront={storefront} className="aspect-square w-full" />
           {isStation && item.isLive && (
             <span className="absolute left-2 top-2 rounded-md bg-[#fa2d48] px-1.5 py-0.5 text-[10px] font-semibold text-white">直播中</span>
           )}
@@ -1199,13 +1518,253 @@ export function AppleExplorePanel({
 
   // ── 分区渲染 ──
 
-  const renderSection = (section: AppleWebSection) => {
+  /** 分区渲染语境：browse/room 使用官网横向货架与完整列表，default 保留其它页签原有布局。 */
+  type SectionContext = 'browse' | 'room' | 'default'
+
+  const renderSection = (section: AppleWebSection, context: SectionContext = 'default') => {
+    const isRoom = context === 'room'
+    const useShelf = context === 'browse' || context === 'room'
+    // 实测官网 room 页（如「每周热门 100 首」）条目是**换行网格**（204px × 5 列、不横向滚动、无翻页），
+    // 不是单行货架；歌曲 room 仍走表格（song-grid + isRoom 分支）。
+    if (section.layoutType === 'room-grid' && section.kind !== 'song-grid') {
+      const squareOnly = section.items.every(item =>
+        item.type === 'albums' || item.type === 'playlists' || item.type === 'stations'
+        || item.type === 'artists' || item.type === 'curators' || item.type === 'rooms')
+      return (
+        <section key={section.id} className="space-y-3">
+          <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+          <div className="grid grid-cols-2 gap-x-5 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+            {section.items.map(item => (
+              squareOnly
+                ? <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />
+                : <div key={`${section.id}-${item.type}-${item.id}`} className="min-w-0"><ShowCard item={item} /></div>
+            ))}
+          </div>
+        </section>
+      )
+    }
     switch (section.kind) {
+      case 'new-hero':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title || '精品推荐'} subtitle={section.subtitle} section={section} />
+            {/* 实测官网精品推荐：卡片 540×310、一屏 2 张并露出第三张约 45px，横向滚动；全部条目来自首次响应。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title || '精品推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+              {section.items.map(item => (
+                <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} textFirst />
+              ))}
+            </HorizontalShelf>
+          </section>
+        )
+      case 'song-grid':
+        // room 页（如「新歌精选」）与资料库「歌曲」都是官网的完整歌曲表格；主页面为紧凑多列列表。
+        if (isRoom || section.layoutType === 'library-track') {
+          const songs = section.items.filter(item => item.type === 'songs')
+          return (
+            <section key={section.id} className="space-y-2">
+              <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+              <div className="grid grid-cols-[minmax(0,3fr)_minmax(0,2fr)] items-center gap-4 border-b border-white/[0.07] px-2 pb-1.5 text-[11px] uppercase tracking-wide text-white/32 md:grid-cols-[minmax(0,3fr)_minmax(0,2fr)_minmax(0,2fr)_4rem]">
+                <span>歌曲</span>
+                <span>艺人</span>
+                <span className="hidden md:block">专辑</span>
+                <span className="hidden text-right md:block">时长</span>
+              </div>
+              <div>
+                {songs.map(item => (
+                  <SongTableRow key={`${section.id}-${item.id}`} item={item} items={songs} />
+                ))}
+              </div>
+            </section>
+          )
+        }
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 官网歌曲轨：每列 4 行；列宽按面板宽度算，保证一屏 4 列 + 第 5 列露出一点（诱导拖拽）。 */}
+            <HorizontalShelf
+              edgeControls="hover"
+              ariaLabel={section.title}
+              itemClassName="w-[calc((100%-4rem)/4.4)] shrink-0"
+            >
+              {chunkBy(section.items, 4).map((column, columnIndex) => (
+                <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-0.5">
+                  {column.map((item: AppleWebItem, rowIndex: number) => (
+                    <SongRow
+                      key={`${section.id}-${item.id}-${rowIndex}`}
+                      item={item}
+                      items={section.items}
+                    />
+                  ))}
+                </div>
+              ))}
+            </HorizontalShelf>
+          </section>
+        )
+      case 'album-shelf':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 实测官网方形货架：卡片 172×172、每行 7 个，compact 1 行 / expanded 2 行。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+              {section.items.map(item => <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />)}
+            </HorizontalShelf>
+          </section>
+        )
+      case 'curators':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 实测官网 /cn/search 类别卡：216×122 宽卡、每行 4 个（不是方形网格）。 */}
+            <div className="grid grid-cols-2 gap-x-4 gap-y-5 lg:grid-cols-3 xl:grid-cols-4">
+              {section.items.map(item => (
+                <button
+                  type="button"
+                  key={`${section.id}-${item.id}`}
+                  onClick={() => void openLayer('curator', String(item.playId || item.id), item.name)}
+                  className="group min-w-0 cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
+                >
+                  <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
+                    {item.artworkUrl ? (
+                      <AppleExploreImage src={item.artworkUrl} alt={item.name} className="aspect-[216/122] w-full transition duration-500 group-hover:scale-[1.03]" role="card" />
+                    ) : (
+                      <div className="flex aspect-[216/122] w-full items-center justify-center bg-white/[0.06]">
+                        <MusicGlyph className="h-7 w-7 opacity-40" />
+                      </div>
+                    )}
+                  </div>
+                  <p className="mt-2 truncate text-[13px] font-medium leading-tight">{item.name}</p>
+                  <p className="mt-0.5 truncate text-[11px] text-white/40">{item.subtitle || 'Apple Music'}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+        )
+      case 'text-block':
+        return (
+          <section key={section.id} className="space-y-2 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-5 py-4">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 404 区块正文是 HTML；去掉标签后按纯文本渲染，避免注入远程标记。 */}
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-white/60">
+              {String(section.bodyHtml || '').replace(/<[^>]*>/g, '')}
+            </p>
+          </section>
+        )
+      case 'station-grid': {
+        // 实测官网两种电台形态（由 displayStyle 决定）：
+        // - expanded：97×97 封面 + 右侧文字的「行卡」，每列 2 行，单元格约占内容宽 32%（一屏约 3 列）
+        // - compact ：204×204 方形卡（封面+下方文字），约占内容宽 17.5%（一屏约 5~6 个）
+        const isExpanded = section.displayStyle === 'expanded'
+        if (isExpanded) {
+          const columns = chunkBy(section.items, 2)
+          return (
+            <section key={section.id} className="space-y-3">
+              <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+              <HorizontalShelf
+                edgeControls="hover"
+                ariaLabel={section.title}
+                itemClassName="w-[calc((100%-3rem)/3.1)] shrink-0"
+              >
+                {columns.map((column, columnIndex) => (
+                  <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-3">
+                    {column.map(item => (
+                      <button
+                        type="button"
+                        key={`${section.id}-${item.id}`}
+                        onClick={() => void openStation(item)}
+                        className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
+                      >
+                        <div className="relative h-[97px] w-[97px] shrink-0 overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.04]">
+                          <MotionArtworkCover item={item} storefront={storefront} className="h-full w-full" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[13px] font-medium leading-tight">{item.name}</p>
+                          <p className="mt-0.5 truncate text-[11px] text-white/40">{item.showName || item.subtitle || 'Apple Music 电台'}</p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ))}
+              </HorizontalShelf>
+            </section>
+          )
+        }
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            <HorizontalShelf
+              edgeControls="hover"
+              ariaLabel={section.title}
+              itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0"
+            >
+              {section.items.map(item => (
+                <button
+                  type="button"
+                  key={`${section.id}-${item.type}-${item.id}`}
+                  onClick={() => void openStation(item)}
+                  className="group w-full min-w-0 cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
+                >
+                  <div className="relative overflow-hidden rounded-xl border border-white/[0.08] bg-white/[0.04]">
+                    <MotionArtworkCover item={item} storefront={storefront} className="aspect-square w-full" />
+                  </div>
+                  <p className="mt-1.5 truncate text-[11px] font-medium leading-tight">{item.name}</p>
+                </button>
+              ))}
+            </HorizontalShelf>
+          </section>
+        )
+      }
+      case 'video-shelf':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 实测官网视频货架：卡片 220×124（16:9）、每行 6 个。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] shrink-0">
+              {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />)}
+            </HorizontalShelf>
+          </section>
+        )
+      case 'explore-links':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            {/* 实测官网「探索更多」：295×58 的链接块排在 <ul> 多列里，不是卡片网格。
+                目标由 resolveExploreTarget 归一化（fcId→room、viewGrouping→grouping、viewTop→排行榜）。 */}
+            <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {section.items.map(item => (
+                <li key={`${section.id}-${item.id}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = resolveExploreTarget(item.url)
+                      if (target && openExploreTarget(target, item.name)) return
+                      if (target?.kind === 'charts') { setTab('charts'); return }
+                      if (target?.kind === 'external') openExternal(target.url)
+                    }}
+                    className="flex h-[58px] w-full items-center justify-between gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 text-left text-sm font-medium transition hover:bg-white/[0.08]"
+                  >
+                    <span className="truncate">{item.name}</span>
+                    <ChevronRight className="h-4 w-4 shrink-0 text-white/35" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )
+
+      case 'home-featured':
+        return (
+          <section key={section.id} className="space-y-3">
+            <SectionTitle title="专属精选推荐" subtitle={section.subtitle} />
+            <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[calc((100%-2rem)/3.2)] shrink-0">
+              {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} portrait />)}
+            </HorizontalShelf>
+          </section>
+        )
       case 'featured-cards':
         return (
           <section key={section.id} className="space-y-3">
-            <SectionTitle title={section.title} subtitle={section.subtitle} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[min(78vw,360px)] sm:w-[340px] lg:w-[380px]">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
               {section.items.map(item => <FeaturedCard key={`${section.id}-${item.id}`} item={item} items={section.items} />)}
             </HorizontalShelf>
           </section>
@@ -1219,8 +1778,8 @@ export function AppleExplorePanel({
       case 'show-cards':
         return (
           <section key={section.id} className="space-y-3">
-            <SectionTitle title={section.title} subtitle={section.subtitle} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[min(78vw,320px)] sm:w-[300px] lg:w-[330px]">
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] shrink-0">
               {section.items.map(item => <ShowCard key={`${section.id}-${item.id}`} item={item} />)}
             </HorizontalShelf>
           </section>
@@ -1229,7 +1788,7 @@ export function AppleExplorePanel({
         const songsOnly = section.items.length > 0 && section.items.every(item => item.type === 'songs')
         return (
           <section key={section.id} className="space-y-3">
-            <SectionTitle title={section.title} subtitle={section.subtitle} />
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
             {songsOnly ? (
               <div className="grid gap-x-6 md:grid-cols-2 xl:grid-cols-3">
                 {section.items.slice(0, 30).map(item => (
@@ -1275,66 +1834,29 @@ export function AppleExplorePanel({
             </section>
           )
         }
-        // 歌曲/专辑榜：整榜一张卡（封面 + 榜名），点开抽屉看完整排名（web /new/top-charts 同款）
-        if (chartItemType === 'songs' || chartItemType === 'albums') {
-          const cover = section.items[0]?.artworkUrl
-          const unit = chartItemType === 'songs' ? '首' : '张'
+        // 歌曲榜：实测官网为 40×40 紧凑行、每行 4 个、6 行（最多 24 条）。
+        if (chartItemType === 'songs') {
           return (
             <section key={section.id} className="space-y-3">
-              <SectionTitle title={section.title} subtitle={`Top ${section.items.length} ${unit} · 点击查看完整榜单`} />
-              <motion.button
-                type="button"
-                whileHover={{ y: -3 }}
-                onClick={() => setChartDetail(section)}
-                className="group flex w-full items-center gap-4 rounded-2xl border border-white/[0.08] bg-white/[0.04] p-3 text-left transition hover:bg-white/[0.07]"
-              >
-                <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-xl">
-                  {cover ? (
-                    <img src={cover} alt={section.title} loading="lazy" className="h-full w-full object-cover transition duration-500 group-hover:scale-105" />
-                  ) : (
-                    <div className="flex h-full w-full items-center justify-center bg-white/[0.06]">
-                      <Trophy className="h-7 w-7 opacity-40" />
-                    </div>
-                  )}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-base font-semibold">{section.title}</p>
-                  <p className="mt-1 truncate text-xs text-white/40">
-                    {section.items.slice(0, 3).map(item => item.name).join(' · ')}
-                  </p>
-                </div>
-                <ChevronRight className="h-5 w-5 shrink-0 text-white/25 transition group-hover:text-white/60" />
-              </motion.button>
+              <SectionTitle title={section.title} subtitle={`Top ${section.items.length} 首`} />
+              <div className="grid gap-x-6 gap-y-0.5 md:grid-cols-2 xl:grid-cols-4">
+                {section.items.slice(0, 24).map((item, rank) => (
+                  <SongRow key={`${section.id}-${item.id}`} item={item} items={section.items} rank={rank + 1} />
+                ))}
+              </div>
             </section>
           )
         }
-        // 地区榜（每周热门100/城市榜）：条目本身就是歌单 → 歌单卡网格，点开进歌单详情
-        if (chartItemType === 'playlists') {
+        // 专辑/歌单榜：实测官网为 172×172 方形货架。
+        if (chartItemType === 'albums' || chartItemType === 'playlists') {
           return (
             <section key={section.id} className="space-y-3">
-              <SectionTitle title={section.title} subtitle="各地区榜单 · 点击进入" />
-              <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+              <SectionTitle title={section.title} subtitle={`${section.items.length} 项`} />
+              <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
                 {section.items.map(item => (
-                  <button type="button" key={`${section.id}-${item.id}`} className="group min-w-0 cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]" onClick={() => openPlaylistPanel(item)}>
-                    <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
-                      {item.artworkUrl ? (
-                        <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
-                      ) : (
-                        <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
-                          <ListMusic className="h-7 w-7 opacity-40" />
-                        </div>
-                      )}
-                      <span className="absolute bottom-3 right-3 flex h-10 w-10 items-center justify-center rounded-full text-[#0a0f14] opacity-0 [@media(hover:none)]:opacity-100 shadow-xl transition group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100" style={{ background: accentColor }}>
-                        <ListMusic className="h-4 w-4" />
-                      </span>
-                    </div>
-                    <div className="mt-2 px-0.5">
-                      <p className="truncate text-[13px] font-medium leading-tight">{item.name}</p>
-                      <p className="mt-0.5 truncate text-[11px] text-white/40">{item.curatorName || 'Apple Music 榜单'}</p>
-                    </div>
-                  </button>
+                  <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />
                 ))}
-              </div>
+              </HorizontalShelf>
             </section>
           )
         }
@@ -1347,7 +1869,7 @@ export function AppleExplorePanel({
                 <button type="button" key={`${section.id}-${item.id}`} className="group min-w-0 cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]" onClick={() => playVideo(item)}>
                   <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
                     {item.artworkUrl ? (
-                      <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                      <AppleExploreImage src={item.artworkUrl} alt={item.name} className="aspect-square w-full transition duration-500 group-hover:scale-[1.03]" role="card" />
                     ) : (
                       <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
                         <MusicGlyph className="h-7 w-7 opacity-40" />
@@ -1367,15 +1889,54 @@ export function AppleExplorePanel({
           </section>
         )
       }
-      case 'curators':
-        return null // 搜索落地页在 SearchPanel 渲染
       case 'row':
       default:
+        // 资料库：官网是「N 行 + 每行 5 个并露出第 6 个一点」的横向货架
+        // （最近添加/艺人/专辑 2 行，歌曲 4 行）；区块标题右侧箭头进入二级铺开页。
+        if (section.layoutType === 'library-rows' || section.layoutType === 'library-track-rows') {
+          const rows = section.layoutType === 'library-track-rows' ? 4 : 2
+          const columns = chunkBy(section.items, rows)
+          return (
+            <section key={section.id} className="space-y-3">
+              <SectionTitle
+                title={section.title}
+                subtitle={section.subtitle}
+                onOpen={() => openSectionSpread(section)}
+                entryLabel={`打开${section.title}`}
+              />
+              <HorizontalShelf
+                edgeControls="hover"
+                ariaLabel={section.title}
+                itemClassName="w-[calc((100%-4rem)/5.5)] shrink-0"
+              >
+                {columns.map((column, columnIndex) => (
+                  <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-4">
+                    {column.map(item => (
+                      <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />
+                    ))}
+                  </div>
+                ))}
+              </HorizontalShelf>
+            </section>
+          )
+        }
+        if (section.layoutType === 'library-grid') {
+          return (
+            <section key={section.id} className="space-y-3">
+              <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+              <div className="grid grid-cols-2 gap-x-4 gap-y-5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
+                {section.items.map(item => (
+                  <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />
+                ))}
+              </div>
+            </section>
+          )
+        }
         return (
           <section key={section.id} className="space-y-3">
-            <SectionTitle title={section.title} subtitle={section.subtitle} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title}>
-              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} />)}
+            <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+              {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid />)}
               {section.items.length === 0 && (
                 <div className="w-full px-4 py-6 text-sm text-white/36">暂无内容</div>
               )}
@@ -1385,43 +1946,91 @@ export function AppleExplorePanel({
     }
   }
 
-  const SectionTitle = ({ title, subtitle }: { title: string; subtitle?: string }) => (
-    <div className="border-b border-white/[0.08] pb-2.5">
-      <div className="min-w-0">
-        <h3 className="truncate text-lg font-semibold tracking-tight">{title}</h3>
-        {subtitle && <p className="mt-0.5 truncate text-xs text-white/42">{subtitle}</p>}
-      </div>
+  const SectionTitle = ({ title, subtitle, section, onOpen, entryLabel }: {
+    title: string
+    subtitle?: string
+    section?: AppleWebSection
+    /** 通用区块入口（资料库分区用；room/multiroom 走 section 上的引用字段）。 */
+    onOpen?: () => void
+    entryLabel?: string
+  }) => {
+    if (!title) return null
+    // 区块标题的 `>` 入口来自实测的 room / multiroom 引用，不按标题拼 URL。
+    // 城市排行榜在接口里同样带 room 引用，但官网该区块不渲染链接，故按可观察行为显式排除。
+    const showEntry = Boolean(onOpen)
+      || (Boolean(section) && title !== '城市排行榜' && Boolean(section?.roomId || section?.multiRoomId))
+    return (
+    <div className="flex items-center gap-1.5 border-b border-white/[0.08] pb-2.5">
+      {/* 箭头紧贴标题文字（官网样式），不是推到行尾。 */}
+      <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{title}</h3>
+      {showEntry && (
+        <button
+          type="button"
+          aria-label={entryLabel || `打开${title}`}
+          onClick={() => {
+            if (onOpen) { onOpen(); return }
+            if (section?.roomId) void openLayer('room', section.roomId, title)
+            else if (section?.multiRoomId) void openLayer('multiroom', section.multiRoomId, title)
+          }}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-white/45 transition hover:bg-white/[0.08] hover:text-white"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      )}
+      {subtitle && <p className="ml-1 min-w-0 truncate text-xs text-white/42">{subtitle}</p>}
     </div>
-  )
+    )
+  }
 
   /**
    * 渲染整页分区：连续的 banner（如广播页「推荐单集」多张宽幅大卡）
    * 合并为 2 列网格（web /radio 同款并排布局），其余分区原样渲染。
    */
-  const renderAllSections = (sections: AppleWebSection[]) => {
+  const renderAllSections = (sections: AppleWebSection[], context: SectionContext = 'default') => {
     const nodes: ReactNode[] = []
     let index = 0
     while (index < sections.length) {
       const section = sections[index]
-      if (section.kind === 'banner') {
+      if (section.kind === 'new-hero') {
+        const heroSections: AppleWebSection[] = [section]
+        index += 1
+        while (index < sections.length && (sections[index].kind === 'banner' || sections[index].kind === 'featured-cards')) {
+          heroSections.push(sections[index])
+          index += 1
+        }
+        const heroItems = heroSections.flatMap(entry => entry.items)
+        nodes.push(
+          <section key={`${section.id}-hero-shelf`} className="space-y-3">
+            <SectionTitle title={section.title || '精品推荐'} section={section} />
+            {/* 实测官网精品推荐：卡片 540×310、文字在上、一屏 2 张并露出第三张约 45px，横向滚动。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel="精品推荐" itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+              {heroItems.map(item => (
+                <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={heroItems} textFirst />
+              ))}
+            </HorizontalShelf>
+          </section>,
+        )
+      } else if (section.kind === 'banner') {
         const banners: AppleWebSection[] = []
         while (index < sections.length && sections[index].kind === 'banner') {
           banners.push(sections[index])
           index += 1
         }
         if (banners.length === 1) {
-          nodes.push(renderSection(banners[0]))
+          nodes.push(renderSection(banners[0], context))
         } else {
+          // 实测广播页的多个「推荐单集」是 460×264 横向轮播（不是两列网格）。
           nodes.push(
-            <section key={`${banners[0].id}-banner-shelf`}>
-              <HorizontalShelf edgeControls="hover" ariaLabel="精品推荐" itemClassName="w-[min(86vw,620px)] sm:w-[520px] lg:w-[min(48vw,620px)]">
+            <section key={`${banners[0].id}-banner-shelf`} className="space-y-3">
+              <SectionTitle title={tab === 'browse' ? '精品推荐' : '推荐'} />
+              <HorizontalShelf edgeControls="hover" ariaLabel="推荐" itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
                 {banners.map(banner => <BannerCard key={banner.id} section={banner} />)}
               </HorizontalShelf>
             </section>,
           )
         }
       } else {
-        nodes.push(renderSection(section))
+        nodes.push(renderSection(section, context))
         index += 1
       }
     }
@@ -1468,7 +2077,7 @@ export function AppleExplorePanel({
           >
             <span className="w-5 text-center text-xs text-white/30">{index + 1}</span>
             {song.album?.picUrl
-              ? <img src={song.album.picUrl} alt="" className="h-10 w-10 rounded-lg object-cover" />
+              ? <AppleExploreImage src={song.album.picUrl} alt="" className="h-10 w-10 rounded-lg" role="row" />
               : <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/[0.07]"><MusicGlyph className="h-5 w-5 opacity-40" /></div>}
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{song.name}</p>
@@ -1499,7 +2108,7 @@ export function AppleExplorePanel({
         <div className="flex items-center justify-between px-6 pt-5">
           <div className="flex items-center gap-4">
             {albumDrawer.album.artworkUrl
-              ? <img src={albumDrawer.album.artworkUrl} alt="" className="h-16 w-16 rounded-2xl object-cover" />
+              ? <AppleExploreImage src={albumDrawer.album.artworkUrl} alt="" className="h-16 w-16 rounded-2xl" role="hero" priority="visible" />
               : <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/[0.07]"><Disc3 className="h-6 w-6 opacity-50" /></div>}
             <div>
               <h3 className="line-clamp-1 text-xl font-semibold">{albumDrawer.album.name}</h3>
@@ -1531,7 +2140,7 @@ export function AppleExplorePanel({
         <div className="flex items-center justify-between px-6 pt-5">
           <div className="flex items-center gap-4">
             {artistDrawer.artist.artworkUrl
-              ? <img src={artistDrawer.artist.artworkUrl} alt="" className="h-16 w-16 rounded-full object-cover" />
+              ? <AppleExploreImage src={artistDrawer.artist.artworkUrl} alt="" className="h-16 w-16 rounded-full" role="hero" priority="visible" />
               : <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/[0.07]"><UserRound className="h-7 w-7 opacity-50" /></div>}
             <div>
               <h3 className="line-clamp-1 text-xl font-semibold">{artistDrawer.artist.name}</h3>
@@ -1565,7 +2174,7 @@ export function AppleExplorePanel({
                 className="group cursor-pointer rounded-2xl border border-white/[0.08] bg-white/[0.05] p-2"
               >
                 {album.artworkUrl
-                  ? <img src={album.artworkUrl} alt={album.name} loading="lazy" className="aspect-square w-full rounded-xl object-cover" />
+                  ? <AppleExploreImage src={album.artworkUrl} alt={album.name} className="aspect-square w-full rounded-xl" role="card" />
                   : <div className="aspect-square w-full rounded-xl bg-white/[0.06] flex items-center justify-center"><Disc3 className="h-7 w-7 opacity-40" /></div>}
                 <p className="mt-2 truncate text-[13px] font-medium">{album.name}</p>
                 <p className="truncate text-[11px] text-white/45">{album.artistName}</p>
@@ -1589,7 +2198,7 @@ export function AppleExplorePanel({
       >
         <div className="relative h-52 w-full overflow-hidden">
           {postDetail.item.artworkUrl ? (
-            <img src={postDetail.item.artworkUrl} alt="" className="h-full w-full object-cover" />
+            <AppleExploreImage src={postDetail.item.artworkUrl} alt="" className="h-full w-full" role="hero" priority="visible" />
           ) : (
             <div className="flex h-full w-full items-center justify-center bg-white/[0.05]">
               <UserRound className="h-10 w-10 opacity-40" />
@@ -1632,7 +2241,7 @@ export function AppleExplorePanel({
                   className="flex w-full items-center gap-3 rounded-xl border border-white/[0.08] bg-white/[0.04] p-2.5 text-left transition hover:bg-white/[0.08]"
                 >
                   {media.artworkUrl ? (
-                    <img src={media.artworkUrl} alt="" className="h-12 w-12 shrink-0 rounded-lg object-cover" />
+                    <AppleExploreImage src={media.artworkUrl} alt="" className="h-12 w-12 shrink-0 rounded-lg" role="compact" />
                   ) : (
                     <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/[0.06]">
                       {media.type === 'music-videos' ? <MusicGlyph className="h-5 w-5 opacity-50" /> : <ListMusic className="h-5 w-5 opacity-50" />}
@@ -1700,7 +2309,7 @@ export function AppleExplorePanel({
                 {index + 1}
               </span>
               {item.artworkUrl ? (
-                <img src={item.artworkUrl} alt={item.name} loading="lazy" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+                <AppleExploreImage src={item.artworkUrl} alt={item.name} className="h-11 w-11 shrink-0 rounded-lg" role="row" />
               ) : (
                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-white/[0.07]">
                   <MusicGlyph className="h-5 w-5 opacity-40" />
@@ -1738,7 +2347,7 @@ export function AppleExplorePanel({
         <div className="flex items-start justify-between gap-4 border-b border-white/[0.08] p-6">
           <div className="flex min-w-0 items-center gap-4">
             {radioShowDetail.item.artworkUrl || radioShowDetail.item.bannerUrl ? (
-              <img src={radioShowDetail.item.artworkUrl || radioShowDetail.item.bannerUrl} alt="" className="h-20 w-20 shrink-0 rounded-xl object-cover" />
+              <AppleExploreImage src={radioShowDetail.item.artworkUrl || radioShowDetail.item.bannerUrl || ''} alt="" className="h-20 w-20 shrink-0 rounded-xl" role="hero" priority="visible" />
             ) : (
               <div className="flex h-20 w-20 shrink-0 items-center justify-center rounded-xl bg-white/[0.07]"><Radio className="h-7 w-7 opacity-50" /></div>
             )}
@@ -1763,7 +2372,7 @@ export function AppleExplorePanel({
                   className="flex w-full items-center gap-3 rounded-xl p-3 text-left transition hover:bg-white/[0.07]"
                 >
                   <span className="w-6 shrink-0 text-center text-xs tabular-nums text-white/35">{index + 1}</span>
-                  {episode.artworkUrl ? <img src={episode.artworkUrl} alt="" className="h-12 w-12 shrink-0 rounded-lg object-cover" /> : <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/[0.07]"><Radio className="h-5 w-5 opacity-45" /></div>}
+                  {episode.artworkUrl ? <AppleExploreImage src={episode.artworkUrl} alt="" className="h-12 w-12 shrink-0 rounded-lg" role="row" /> : <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-lg bg-white/[0.07]"><Radio className="h-5 w-5 opacity-45" /></div>}
                   <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{episode.name}</span><span className="mt-0.5 block truncate text-xs text-white/45">{episode.showName || episode.subtitle || 'Apple Music 广播'}</span></span>
                   <ChevronRight className="h-4 w-4 shrink-0 text-white/35" />
                 </button>
@@ -1855,6 +2464,7 @@ export function AppleExplorePanel({
   return (
     <div
       className="space-y-6"
+      ref={panelRef}
       data-apple-explore-panel
       onDragStart={event => {
         if (event.target instanceof HTMLImageElement) event.preventDefault()
@@ -1886,7 +2496,11 @@ export function AppleExplorePanel({
             type="button"
             role="tab"
             aria-selected={tab === id}
-            onClick={() => setTab(id)}
+            onClick={() => {
+              // 切换页签必须退出站内嵌套层级栈，否则会一直停在二级/三级页面上（此前必须手动「返回」才能切走）。
+              if (layers.length > 0) setLayers([])
+              setTab(id)
+            }}
             className={`flex h-10 shrink-0 items-center gap-2 rounded-full px-5 text-sm font-medium transition ${
               tab === id
                 ? 'text-[#081017]'
@@ -1904,33 +2518,95 @@ export function AppleExplorePanel({
       </div>
 
       {/* 内容 */}
-      {roomDetail && (
-        <div className="space-y-6">
-          <button
-            type="button"
-            onClick={() => setRoomDetail(null)}
-            className="flex items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.045] px-4 py-2 text-sm text-white/70 transition hover:bg-white/[0.09] hover:text-white"
-          >
-            <ChevronRight className="h-4 w-4 rotate-180" /> 返回
-          </button>
-          <h2 className="text-2xl font-semibold">{roomDetail.name}</h2>
-          {roomDetail.loading ? skeleton : roomDetail.page ? (
+      {activeLayer && (
+        <motion.div
+          key={`${activeLayer.kind}-${activeLayer.id}-${layers.length}`}
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.22, ease: 'easeOut' }}
+          className="space-y-6"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            {/* 房子：直接回到「新发现」根层级，并恢复进入子层前的滚动位置 */}
+            <button
+              type="button"
+              onClick={() => goToDepth(0)}
+              aria-label="回到新发现"
+              title="回到新发现"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-white/[0.1] bg-white/[0.045] text-white/70 transition hover:bg-white/[0.09] hover:text-white"
+            >
+              <Home className="h-4 w-4" />
+            </button>
+            {/* 返回：回到上一层级，并恢复该层滚动位置 */}
+            <button
+              type="button"
+              onClick={() => goToDepth(layers.length - 1)}
+              className="flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-white/[0.1] bg-white/[0.045] px-3.5 text-sm text-white/70 transition hover:bg-white/[0.09] hover:text-white"
+            >
+              <ChevronRight className="h-4 w-4 rotate-180" /> 返回
+            </button>
+            {/* 路径：新发现 > 年代之声 > Apple Music 怀旧，每段可直接跳转 */}
+            <nav aria-label="浏览路径" className="flex min-w-0 flex-wrap items-center gap-1 text-sm">
+              <button
+                type="button"
+                onClick={() => goToDepth(0)}
+                className="shrink-0 rounded px-1.5 py-0.5 text-white/55 transition hover:bg-white/[0.08] hover:text-white"
+              >
+                新发现
+              </button>
+              {layers.map((layer, index) => (
+                <span key={`${layer.kind}-${layer.id}-${index}`} className="flex min-w-0 items-center gap-1">
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-white/25" />
+                  <button
+                    type="button"
+                    onClick={() => goToDepth(index + 1)}
+                    aria-current={index === layers.length - 1 ? 'page' : undefined}
+                    className={`max-w-[14rem] truncate rounded px-1.5 py-0.5 transition hover:bg-white/[0.08] ${
+                      index === layers.length - 1 ? 'font-medium text-white/85' : 'text-white/55 hover:text-white'
+                    }`}
+                  >
+                    {layer.name}
+                  </button>
+                </span>
+              ))}
+            </nav>
+          </div>
+          <h2 className="text-2xl font-semibold">{activeLayer.name}</h2>
+          {activeLayer.curator && (
+            <div className="flex items-center gap-4">
+              {activeLayer.curator.curator.artworkUrl && (
+                <AppleExploreImage
+                  src={activeLayer.curator.curator.heroArtworkUrl || activeLayer.curator.curator.artworkUrl}
+                  alt={activeLayer.curator.curator.name}
+                  className="h-24 w-24 rounded-2xl"
+                  role="hero"
+                />
+              )}
+              <div className="min-w-0 text-sm text-white/55">
+                <p className="truncate text-base font-medium text-white/85">{activeLayer.curator.curator.name}</p>
+                {typeof activeLayer.curator.playlistCount === 'number' && (
+                  <p className="mt-0.5">{activeLayer.curator.playlistCount} 个歌单</p>
+                )}
+              </div>
+            </div>
+          )}
+          {activeLayer.loading ? skeleton : activeLayer.page ? (
             <>
-              {renderAllSections(roomDetail.page.sections)}
-              {roomDetail.page.sections.length === 0 && (
+              {renderAllSections(activeLayer.page.sections, activeLayer.kind === 'room' ? 'room' : 'browse')}
+              {activeLayer.page.sections.length === 0 && (
                 <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] px-6 py-14 text-center text-sm text-white/40">
-                  {roomDetail.page.sourceLabel}
+                  {activeLayer.page.sourceLabel}
                 </div>
               )}
             </>
           ) : (
             <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] px-6 py-14 text-center text-sm text-white/40">
-              room 加载失败
+              {activeLayer.kind} 加载失败
             </div>
           )}
-        </div>
+        </motion.div>
       )}
-      {!roomDetail && (<>
+      {!activeLayer && (<>
       {currentError && (
         <div className="flex items-center justify-between gap-3 rounded-2xl border border-rose-300/15 bg-rose-300/[0.08] px-4 py-3 text-sm text-rose-100/80">
           <span>加载失败：{currentError}</span>
@@ -1990,10 +2666,13 @@ export function AppleExplorePanel({
                     Apple Music · {tab === 'radio' ? '广播精选' : tab === 'browse' ? '新发现' : '专属推荐'}
                   </div>
                   {currentPage.hero.artworkUrl || currentPage.hero.heroArtworkUrl ? (
-                    <img
-                      src={currentPage.hero.heroArtworkUrl || currentPage.hero.artworkUrl}
+                    <AppleExploreImage
+                      src={currentPage.hero.heroArtworkUrl || currentPage.hero.artworkUrl || ''}
                       alt=""
-                      className="mb-4 h-24 w-24 rounded-2xl object-cover shadow-lg md:h-28 md:w-28"
+                      className="mb-4 h-24 w-24 rounded-2xl shadow-lg md:h-28 md:w-28"
+                      role="hero"
+                      priority="critical"
+                      lazy={false}
                     />
                   ) : null}
                   <h2 className="max-w-xl text-2xl font-semibold leading-tight md:text-4xl">{currentPage.hero.name}</h2>
@@ -2024,7 +2703,7 @@ export function AppleExplorePanel({
                 </div>
               </section>
             )}
-            {renderAllSections(currentPage.sections)}
+            {renderAllSections(currentPage.sections, tab === 'browse' ? 'browse' : 'default')}
             {currentPage.sections.length === 0 && (
               <div className="rounded-2xl border border-white/[0.08] bg-white/[0.035] px-6 py-14 text-center text-sm text-white/40">
                 {currentPage.sourceLabel}
@@ -2033,7 +2712,6 @@ export function AppleExplorePanel({
           </div>
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-white/[0.07] pt-5 text-xs text-white/28">
             <span>来源：{currentPage.sourceLabel}</span>
-            <span>{currentPage.personalized ? '已个性化' : '公开内容'}</span>
           </footer>
         </>
       ) : null}

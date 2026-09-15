@@ -23,6 +23,7 @@ import {
 import type { SongSelectHandler } from '../types/playbackNavigation'
 import type { Song } from '../services/musicApi'
 import { useTvBack } from '../tv/tvCore'
+import CachedImage from './CachedImage'
 
 interface AppleSearchBrowseProps {
   playerTheme?: 'light' | 'dark'
@@ -155,9 +156,9 @@ export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, on
         {/* 头部 */}
         <div className="mb-6 flex items-center gap-5">
           {curator.heroArtworkUrl ? (
-            <img src={curator.heroArtworkUrl} alt={curator.name} className="h-24 w-44 shrink-0 rounded-2xl object-cover shadow-xl md:h-28 md:w-52" />
+            <CachedImage src={curator.heroArtworkUrl} alt={curator.name} className="h-24 w-44 shrink-0 rounded-2xl shadow-xl md:h-28 md:w-52" role="hero" priority="critical" lazy={false} />
           ) : curator.artworkUrl ? (
-            <img src={curator.artworkUrl} alt={curator.name} className="h-24 w-24 shrink-0 rounded-2xl object-cover shadow-xl" />
+            <CachedImage src={curator.artworkUrl} alt={curator.name} className="h-24 w-24 shrink-0 rounded-2xl shadow-xl" role="hero" priority="critical" lazy={false} />
           ) : null}
           <div className="min-w-0">
             <h2 className="truncate text-2xl font-bold md:text-3xl">{curator.name}</h2>
@@ -190,7 +191,7 @@ export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, on
                   >
                     <span className={`w-6 shrink-0 text-center text-sm tabular-nums ${index < 3 ? 'font-semibold' : textTertiary}`}>{index + 1}</span>
                     {item.artworkUrl ? (
-                      <img src={item.artworkUrl} alt={item.name} loading="lazy" className="h-11 w-11 shrink-0 rounded-lg object-cover" />
+                      <CachedImage src={item.artworkUrl} alt={item.name} className="h-11 w-11 shrink-0 rounded-lg" role="row" priority={index < 3 ? 'visible' : undefined} />
                     ) : (
                       <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg ${isDark ? 'bg-white/[0.06]' : 'bg-black/[0.06]'}`}>
                         <Music className="h-5 w-5 opacity-40" />
@@ -209,7 +210,7 @@ export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, on
                   <div key={`${section.id}-${item.id}`} tabIndex={0} role="button" data-tv-focus className="group min-w-0 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]" onClick={() => onOpenItem?.(item, section.items)} onKeyDown={event => activateWithKeyboard(event, () => onOpenItem?.(item, section.items))}>
                     <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
                       {item.artworkUrl ? (
-                        <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                        <CachedImage src={item.artworkUrl} alt={item.name} className="aspect-square w-full transition duration-500 group-hover:scale-[1.03]" role="card" />
                       ) : (
                         <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
                           <ListMusic className="h-7 w-7 opacity-40" />
@@ -236,7 +237,7 @@ export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, on
                 <div key={item.id} tabIndex={0} role="button" data-tv-focus className="group min-w-0 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]" onClick={() => openPlaylist(item)} onKeyDown={event => activateWithKeyboard(event, () => openPlaylist(item))}>
                   <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
                     {item.artworkUrl ? (
-                      <img src={item.artworkUrl} alt={item.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.03]" />
+                      <CachedImage src={item.artworkUrl} alt={item.name} className="aspect-square w-full transition duration-500 group-hover:scale-[1.03]" role="card" />
                     ) : (
                       <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
                         <ListMusic className="h-7 w-7 opacity-40" />
@@ -294,7 +295,7 @@ export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, on
             >
               <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
                 {curator.artworkUrl ? (
-                  <img src={curator.artworkUrl} alt={curator.name} loading="lazy" className="aspect-square w-full object-cover transition duration-500 group-hover:scale-[1.04]" />
+                  <CachedImage src={curator.artworkUrl} alt={curator.name} className="aspect-square w-full transition duration-500 group-hover:scale-[1.04]" role="card" priority="visible" />
                 ) : (
                   <div className="flex aspect-square w-full items-center justify-center bg-white/[0.06]">
                     <Music className="h-7 w-7 opacity-40" />
