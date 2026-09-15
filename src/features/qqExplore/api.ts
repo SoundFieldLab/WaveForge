@@ -1,8 +1,9 @@
+import { getApiBase } from '../../services/apiConfig'
 import { getExploreCookie } from '../../services/exploreApi'
 import type { Song } from '../../services/musicApi'
 import type { QQExploreCursor, QQExploreFeed, QQExploreRefreshToken, QQExploreSnapshot } from './model'
 
-const API_BASE = 'http://localhost:3001/api/explore/qq/native'
+const API_PATH = '/explore/qq/native'
 
 async function post<T>(path: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
   const cookie = getExploreCookie('qq')
@@ -12,7 +13,7 @@ async function post<T>(path: string, body: Record<string, unknown>, signal?: Abo
   const abort = () => timeoutController.abort()
   signal?.addEventListener('abort', abort, { once: true })
   try {
-    const response = await fetch(`${API_BASE}${path}`, {
+    const response = await fetch(`${getApiBase()}${API_PATH}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cookie, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, ...body }),
@@ -52,8 +53,13 @@ export function fetchQQExploreFeed(
   }, signal)
 }
 
-export function fetchQQExploreAppendShelf(appendToken: string, action: 'play' | 'like', signal?: AbortSignal): Promise<{ modules: QQExploreFeed['modules'] }> {
-  return post('/card/append', { appendToken, action }, signal)
+export async function fetchQQExploreAppendShelf(appendToken: string, action: 'play' | 'like', signal?: AbortSignal): Promise<{ modules: QQExploreFeed['modules'] }> {
+  try {
+    return await post('/card/append', { appendToken, action }, signal)
+  } catch (error) {
+    if (error instanceof Error && /60001|GetRecommendAppendShelf.*60001/i.test(error.message)) return { modules: [] }
+    throw error
+  }
 }
 
 export function fetchQQExploreSimilarShelf(appendToken: string, signal?: AbortSignal): Promise<{ modules: QQExploreFeed['modules'] }> {

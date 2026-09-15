@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { dedupeQQModules, qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, type QQExploreCard, type QQExploreModule } from '../src/features/qqExplore/model'
+import { dedupeQQModules, isHiddenQQMusicHallShelf, isQQStarLightCard, qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, type QQExploreCard, type QQExploreModule } from '../src/features/qqExplore/model'
 
 const read = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 
@@ -45,6 +45,20 @@ function module(id: string, cards: QQExploreCard[]): QQExploreModule {
 }
 
 describe('QQ native Explore contracts', () => {
+  it('filters only the requested MusicHall columns by source-level shelf labels', () => {
+    expect(isHiddenQQMusicHallShelf({ id: '1', title: '数字专辑', style: 0, nicheStyle: 0, serverOrder: 0, cards: [] })).toBe(false)
+    expect(isHiddenQQMusicHallShelf({ id: '1', title: '数字专辑', style: 0, nicheStyle: 0, serverOrder: 0, cards: [card() as any] })).toBe(true)
+    expect(isHiddenQQMusicHallShelf({ id: '2', title: '推荐歌单', style: 0, nicheStyle: 0, serverOrder: 1, cards: [card() as any] })).toBe(false)
+    expect(isHiddenQQMusicHallShelf({ id: '3', title: '直播精选', style: 0, nicheStyle: 0, serverOrder: 2, cards: [card() as any] })).toBe(true)
+    expect(isHiddenQQMusicHallShelf({ id: '4', title: '编辑甄选', style: 0, nicheStyle: 0, serverOrder: 3, cards: [card() as any] })).toBe(true)
+  })
+
+  it('filters only unsupported star-light cards from the recommendation feed', () => {
+    expect(isQQStarLightCard(card({ type: 217, action: { type: 'unsupported' }, title: '典藏星光卡即刻拥有' }))).toBe(true)
+    expect(isQQStarLightCard(card({ type: 217, action: { type: 'unsupported' }, title: '普通权益卡' }))).toBe(false)
+    expect(isQQStarLightCard(card({ type: 500, title: '星光推荐' }))).toBe(false)
+  })
+
   it('converts server-driven playlist cards without guessing an id', () => {
     expect(qqCardPlaylist(card())).toEqual({
       id: '211111',
@@ -200,9 +214,40 @@ describe('QQ native Explore contracts', () => {
     expect(page).toContain("card.action.type === 'open-external'")
     expect(page).toContain('card.style === 304')
     expect(page).not.toContain('card.layerUrl || card.coverUrl || daily?.coverUrl')
-    expect(page).toContain('AI 推荐歌单')
-    expect(page).toContain('电台频道')
-    expect(page).toContain('排行榜')
+    expect(page).toContain("'猜你喜欢': 'For You'")
+    expect(page).toContain("'每日30首': 'Daily 30'")
+    expect(page).toContain("'雷达模式': 'Fav Radar'")
+    expect(page).toContain("guess: '猜你喜欢'")
+    expect(page).toContain("daily: '每日30首'")
+    expect(page).toContain("radar: '刷歌'")
+    expect(page).toContain("kind === 'guess' ? 'For You'")
+    expect(page).toContain('fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 1)')
+    expect(page).toContain('fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 30)')
+    expect(page).toContain('guessSongs.length > 0 ? guessSongs')
+    expect(page).toContain('[authRevision, guessRefreshRevision, loggedIn]')
+    expect(page).not.toContain('[authRevision, loggedIn, snapshot?.generatedAt]')
+    expect(server).toContain('Math.max(0, batch - 1 + attempt)')
+    expect(page).toContain("if (card.subtype === 510 && card.style === 202) return 'daily'")
+    expect(page).toContain("if (card.subtype === 991 && card.style === 202) return 'radar'")
+    expect(page).toContain('QQRadarPlayer')
+    expect(page).toContain('进入刷歌模式')
+    expect(page).toContain('qqRadarContinuation')
+    expect(page).toContain("const ENTRY_ORDER = ['guess', 'daily', 'radar', 'top-fav', 'new-songs', 'star-mix'] as const")
+    expect(page).toContain('const entries = topEntryCards(entryModule)')
+    expect(page).toContain("const entryCover = kind === 'guess'")
+    expect(page).toContain('entrySong.name')
+    expect(page).toContain("entrySong.artists.map(artist => artist.name).join('/')")
+    expect(page).toContain("else if (action.section === 'mvs') onOpenMVs()")
+    expect(page).toContain('skillPlaylists.slice(0, 12)')
+    expect(page).toContain('cards: module.cards.filter(card => !isQQStarLightCard(card))')
+    expect(page).not.toContain('card.songs[0] || {')
+    expect(page).toContain('aspect-square w-full overflow-hidden')
+    expect(page).toContain('isHiddenQQRecommendationModule')
+    expect(page).toContain('isUsableQQMusicHallCard')
+    expect(page).toContain('cleanQQSubtitle(card.subtitle)')
+    expect(page).not.toContain("{card.action.type === 'unsupported' ? 'QQ 客户端专属' : '打开'}")
+    expect(page).not.toContain('guessExpanded')
+    expect(page).not.toContain('展开猜你喜欢详情')
   })
 
   it('requests and returns the native MusicHall shelves without replacing legacy supplemental sections', () => {
@@ -213,11 +258,15 @@ describe('QQ native Explore contracts', () => {
     expect(server).toContain('feed, musicHall, daily30')
     expect(server).toContain('isAllowedQQExploreUrl')
     expect(page).toContain('musicHallShelves.map')
-    expect(page).toContain("HIDDEN_MUSIC_HALL_SHELVES = new Set(['精选视频', '墙裂推荐', '明星空降', '数字专辑', '编辑甄选'])")
-    expect(page).toContain("HIDDEN_MUSIC_HALL_EXACT = new Set(['直播', '排行榜'])")
-    expect(page).toContain('HIDDEN_MUSIC_HALL_EXACT.has(title)')
-    expect(page).toContain('title.includes(hidden)')
-    expect(server).toContain('qqNativeCardCover(card, songs)')
+    expect(page).toContain('.sort((left, right) => left.serverOrder - right.serverOrder)')
+    expect(page).not.toContain('HIDDEN_MUSIC_HALL_SHELVES')
+    expect(page).not.toContain('HIDDEN_MUSIC_HALL_EXACT')
+    expect(server).toContain('function normalizeQQImageCandidate(value, depth = 0)')
+    expect(server).toContain('card?.image,')
+    expect(server).toContain('card?.vector,')
+    expect(server).toContain('miscellany.layer_url,')
+    expect(server).toContain('const safeUrl = [card?.url, card?.link, card?.targetUrl')
+    expect(server).toContain("return { type: 'unsupported' }")
     expect(page).toContain('AI 推荐歌单')
     expect(page).toContain('电台频道')
   })
@@ -250,11 +299,47 @@ describe('QQ native Explore contracts', () => {
   it('renders QQ title templates and resolves full shelves through one frontend request', () => {
     const server = read('local-server.mjs')
     const api = read('src/features/qqExplore/api.ts')
+    const controller = read('src/features/qqExplore/useQQExploreController.ts')
     expect(server).toContain("titleTemplate.replaceAll('{String}', titleContent)")
     expect(server).toContain('input.Name || input.MID || input.Mid || input.SingerName')
     expect(server).toContain('value.MID || value.Mid')
     expect(server).toContain("app.post('/api/explore/qq/native/songs'")
     expect(server).toContain('req.body.cards.slice(0, 36)')
     expect(api).toContain("post<{ songs: Song[] }>('/songs'")
+    expect(api).toContain("getApiBase()}${API_PATH}${path}")
+    expect(controller).toContain('contextualController.current?.abort()')
+    expect(controller).toContain('fetchQQExploreAppendShelf(card.appendToken, action, abortController.signal)')
+    expect(controller).toContain('fetchQQExploreSimilarShelf(card.appendToken, abortController.signal)')
+    expect(controller).toContain('abortController.signal.aborted || requestGeneration !== generation.current')
+    expect(server).toContain("app.all('/api/explore/qq/radio/next'")
+    expect(server).toContain('const input = { ...req.query, ...(req.body || {}) }')
+  })
+
+  it('degrades unsupported append shelves without surfacing a playback error', () => {
+    const api = read('src/features/qqExplore/api.ts')
+    expect(api).toContain('GetRecommendAppendShelf.*60001')
+    expect(api).toContain('return { modules: [] }')
+  })
+
+  it('keeps the QQ preference and recommendation entries inside the right-click menu only', () => {
+    const menu = read('src/components/SongContextMenu.tsx')
+    const view = read('src/components/ExploreView.tsx')
+    expect(menu).toContain('onAdjustPreferences?: () => void')
+    expect(menu).toContain('onAdjustRecommendation?: (song: Song) => void')
+    expect(menu).toContain("onAdjustPreferences && resolvedPlatform === 'qq'")
+    expect(menu).toContain("onAdjustRecommendation && resolvedPlatform === 'qq'")
+    expect(view).toContain("platform === 'qq' ? () => window.dispatchEvent(new Event('waveforge:qq-open-preferences'))")
+    expect(view).toContain("platform === 'qq' ? song => window.dispatchEvent(new CustomEvent('waveforge:qq-open-recommendation-feedback'")
+    const page = read('src/features/qqExplore/QQExplorePage.tsx')
+    expect(page).toContain("window.addEventListener('waveforge:qq-open-preferences'")
+    expect(page).toContain("window.addEventListener('waveforge:qq-open-recommendation-feedback'")
+  })
+
+  it('uses a real-account favorite heart on song rows instead of the feedback ellipsis', () => {
+    const page = read('src/features/qqExplore/QQExplorePage.tsx')
+    expect(page).toContain('const cardFavoriteKey = useCallback')
+    expect(page).toContain('aria-label={isSongFavorite(resolvedSong, card)')
+    expect(page).not.toContain('card.isFavorite ||')
+    expect(page).not.toContain('MoreHorizontal')
   })
 })

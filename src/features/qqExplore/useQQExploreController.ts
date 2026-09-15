@@ -59,6 +59,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
   }))
   const generation = useRef(0)
   const controller = useRef<AbortController | null>(null)
+  const contextualController = useRef<AbortController | null>(null)
 
   const applySnapshot = useCallback((snapshot: QQExploreSnapshot) => {
     writeCache(userId, snapshot)
@@ -72,6 +73,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     }
     const id = ++generation.current
     controller.current?.abort()
+    contextualController.current?.abort()
     const abortController = new AbortController()
     controller.current = abortController
     const cached = readCache(userId)
@@ -116,6 +118,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     return () => {
       generation.current += 1
       controller.current?.abort()
+      contextualController.current?.abort()
     }
   }, [loadInitial, authRevision, userId])
 
@@ -124,6 +127,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     if (!current || state.initialLoading || state.refreshing || state.refreshingModuleId || state.loadingMore) return
     const id = ++generation.current
     controller.current?.abort()
+    contextualController.current?.abort()
     const abortController = new AbortController()
     controller.current = abortController
     setState(previous => ({ ...previous, refreshing: true, loadingMore: false, loadingMoreProgress: 0, error: '', paginationError: '' }))
@@ -160,6 +164,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     const targetIdentity = qqModuleIdentity(module)
     const id = ++generation.current
     controller.current?.abort()
+    contextualController.current?.abort()
     const abortController = new AbortController()
     controller.current = abortController
     setState(previous => ({ ...previous, refreshingModuleId: targetIdentity, moduleErrors: { ...previous.moduleErrors, [targetIdentity]: '' } }))
@@ -196,12 +201,14 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
   }, [state.initialLoading, state.loadingMore, state.refreshing, state.refreshingModuleId, state.snapshot, userId])
 
   const appendFromCard = useCallback(async (module: QQExploreModule, card: QQExploreCard, action: 'play' | 'like') => {
-    if (!state.snapshot || !card.appendToken || state.initialLoading || state.refreshing || state.refreshingModuleId || state.loadingMore) return
-    const requestGeneration = generation.current
+    if (!state.snapshot || !card.appendToken || state.initialLoading || state.refreshing || state.refreshingModuleId || state.loadingMore || contextualController.current) return
+    const requestGeneration = ++generation.current
     const requestAccount = qqExploreAccountKey(userId)
     const moduleIdentity = qqModuleIdentity(module)
+    const abortController = new AbortController()
+    contextualController.current = abortController
     try {
-      const result = await fetchQQExploreAppendShelf(card.appendToken, action)
+      const result = await fetchQQExploreAppendShelf(card.appendToken, action, abortController.signal)
       if (requestGeneration !== generation.current || requestAccount !== qqExploreAccountKey(userId)) return
       setState(previous => {
         if (!previous.snapshot) return previous
@@ -211,19 +218,23 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
         return { ...previous, snapshot: next, moduleErrors: { ...previous.moduleErrors, [moduleIdentity]: '' } }
       })
     } catch (error) {
-      if (requestGeneration !== generation.current || requestAccount !== qqExploreAccountKey(userId)) return
+      if (abortController.signal.aborted || requestGeneration !== generation.current || requestAccount !== qqExploreAccountKey(userId)) return
       setState(previous => ({ ...previous, moduleErrors: { ...previous.moduleErrors, [moduleIdentity]: error instanceof Error ? error.message : '追加推荐加载失败' } }))
+    } finally {
+      if (contextualController.current === abortController) contextualController.current = null
     }
   }, [state.initialLoading, state.loadingMore, state.refreshing, state.refreshingModuleId, state.snapshot, userId])
 
   const replaceWithSimilar = useCallback(async (module: QQExploreModule, card: QQExploreCard) => {
-    if (!state.snapshot || !card.appendToken || state.refreshing || state.refreshingModuleId || state.loadingMore) return
+    if (!state.snapshot || !card.appendToken || state.refreshing || state.refreshingModuleId || state.loadingMore || contextualController.current) return
     const moduleIdentity = qqModuleIdentity(module)
-    const requestGeneration = generation.current
+    const requestGeneration = ++generation.current
     const requestAccount = qqExploreAccountKey(userId)
+    const abortController = new AbortController()
+    contextualController.current = abortController
     setState(previous => ({ ...previous, refreshingModuleId: moduleIdentity, moduleErrors: { ...previous.moduleErrors, [moduleIdentity]: '' } }))
     try {
-      const result = await fetchQQExploreSimilarShelf(card.appendToken)
+      const result = await fetchQQExploreSimilarShelf(card.appendToken, abortController.signal)
       if (requestGeneration !== generation.current || requestAccount !== qqExploreAccountKey(userId)) return
       setState(previous => {
         if (!previous.snapshot) return previous
@@ -236,7 +247,10 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
         return { ...previous, snapshot: next, refreshingModuleId: '', moduleErrors: { ...previous.moduleErrors, [moduleIdentity]: '' } }
       })
     } catch (error) {
+      if (abortController.signal.aborted || requestGeneration !== generation.current || requestAccount !== qqExploreAccountKey(userId)) return
       setState(previous => ({ ...previous, refreshingModuleId: '', moduleErrors: { ...previous.moduleErrors, [moduleIdentity]: error instanceof Error ? error.message : '相似推荐加载失败' } }))
+    } finally {
+      if (contextualController.current === abortController) contextualController.current = null
     }
   }, [state.loadingMore, state.refreshing, state.refreshingModuleId, state.snapshot, userId])
 
@@ -245,6 +259,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     const snapshot = state.snapshot
     const id = ++generation.current
     controller.current?.abort()
+    contextualController.current?.abort()
     const abortController = new AbortController()
     controller.current = abortController
     setState(previous => ({ ...previous, loadingMore: true, loadingMoreProgress: 0, paginationError: '' }))

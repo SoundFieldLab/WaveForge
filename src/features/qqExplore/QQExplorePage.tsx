@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, ChevronRight, Disc3, Headphones, Heart, Loader2, MessageCircle, MoreHorizontal, Play, Radio, RefreshCw, SlidersHorizontal, Sparkles, Trophy, X } from 'lucide-react'
+import { AlertCircle, ChevronRight, Disc3, Headphones, Heart, Loader2, MessageCircle, Play, Radio, RefreshCw, SlidersHorizontal, Sparkles, Trophy, X } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
 import type { ExploreChart, ExplorePayload, ExplorePlaylist } from '../../services/exploreApi'
 import type { MusicPlatform } from '../../services/platforms'
 import type { EntitlementTier } from '../../utils/musicEntitlements'
 import { shouldShowEntitlementBadge } from '../../utils/musicEntitlements'
 import { HorizontalShelf } from '../../components/apple-explore/HorizontalShelf'
+import CachedImage from '../../components/CachedImage'
 import VideoPlayer from '../../components/VideoPlayer'
 import QQMusicJourney from '../../components/QQMusicJourney'
 import { fetchQQGuessYouLikeBatch, getExploreCookie } from '../../services/exploreApi'
 import { applyFavoriteMutation, getFavoriteSongIdentifiers, getFavoriteUserId, loadFavoriteIdentifiers } from '../../services/favoriteStatusService'
 import { fetchQQExploreFeedbackOptions, fetchQQExplorePreferences, fetchQQRadarSongs, resolveQQExploreSong, resolveQQExploreSongs, saveQQExplorePreferences, submitQQExploreFeedback, type QQExploreFeedbackOption, type QQExplorePreferenceItem } from './api'
-import { qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, type QQExploreCard, type QQExploreModule, type QQMusicHallCard, type QQMusicHallShelf } from './model'
+import { qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, isQQStarLightCard, isHiddenQQMusicHallShelf, type QQExploreCard, type QQExploreModule, type QQMusicHallCard, type QQMusicHallShelf } from './model'
+import QQRadarPlayer, { type QQRadarContinuation } from './QQRadarPlayer'
 import { qqExploreAccountKey, useQQExploreController } from './useQQExploreController'
 
 interface QQExplorePageProps {
@@ -25,7 +27,11 @@ interface QQExplorePageProps {
   officialEnhanced: boolean
   publicContent?: ExplorePayload | null
   onLogin: () => void
-  onPlaySongs: (song: Song, songs: Song[], continuous?: boolean) => void
+  currentSong?: Song | null
+  isPlaying: boolean
+  onPlayPause: () => void
+  onPlaySongs: (song: Song, songs: Song[], continuous?: boolean, qqRadarContinuation?: QQRadarContinuation) => void
+  onPlayDaily30: (song: Song, songs: Song[]) => void
   onOpenPlaylist: (playlist: ExplorePlaylist, autoplay?: boolean) => void
   onOpenChart: (chart: ExplorePayload['charts'][number], autoplay?: boolean) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
@@ -34,6 +40,7 @@ interface QQExplorePageProps {
   onConfiguredChange: (configured: boolean) => void
   onOpenPlaylists: () => void
   onOpenCharts: () => void
+  onOpenMVs: () => void
   onSongContextMenu: (event: React.MouseEvent, song: Song, songs: Song[]) => void
   onViewComments?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void | Promise<boolean>
@@ -44,39 +51,83 @@ const ENTRY_LABELS: Record<string, string> = {
   '猜你喜欢': 'For You',
   '每日30首': 'Daily 30',
   '雷达模式': 'Fav Radar',
+  '刷歌': 'Fav Radar',
   '百万收藏': 'Top Fav',
   '新歌推荐': 'New Songs',
   '歌手漫游': 'Star Mix',
 }
 
-const HIDDEN_MUSIC_HALL_SHELVES = new Set(['精选视频', '墙裂推荐', '明星空降', '数字专辑', '编辑甄选'])
-const HIDDEN_MUSIC_HALL_EXACT = new Set(['直播', '排行榜'])
-const HIDDEN_QUICK_LINK_TITLES = new Set(['歌手', '排行', '歌单', '星光', '农场', '专辑', '商城', 'bubble', 'DM', '写歌', '歌词卡', '频道'])
+const ENTRY_SUBLABELS: Record<TopEntryKind, string> = {
+  guess: '猜你喜欢',
+  daily: '每日30首',
+  radar: '刷歌',
+  'top-fav': '百万收藏',
+  'new-songs': '新歌推荐',
+  'star-mix': '歌手漫游',
+}
+
+function cleanQQSubtitle(value?: string) {
+  return (value || '').replace(/^\s*[_\-—·•]+\s*/, '').trim()
+}
+
+function isHiddenQQRecommendationModule(module: QQExploreModule) {
+  const text = `${module.title} ${module.cards.map(card => `${card.title} ${card.subtitle || ''} ${card.reason || ''}`).join(' ')}`
+  return /直播|编辑甄选/.test(text)
+}
+
+function isUsableQQMusicHallCard(card: QQMusicHallCard) {
+  const hasContent = Boolean(card.title.trim() || card.subtitle.trim() || card.coverUrl || card.songs.length)
+  const hasAction = card.action.type !== 'unsupported'
+  return hasContent && hasAction
+}
 
 function visibleMusicHallShelves(shelves: QQMusicHallShelf[]) {
-  return shelves.filter(shelf => {
-    const title = shelf.title.trim()
-    const cardTitles = shelf.cards.map(card => card.title.trim()).filter(Boolean)
-    const quickLinkMatches = cardTitles.filter(cardTitle => HIDDEN_QUICK_LINK_TITLES.has(cardTitle)).length
-    if (shelf.id === '3' || !title || title === '更多' || quickLinkMatches >= 3 || HIDDEN_MUSIC_HALL_EXACT.has(title)) return false
-    return !Array.from(HIDDEN_MUSIC_HALL_SHELVES).some(hidden => title.includes(hidden))
-  })
+  return shelves
+    .map(shelf => ({ ...shelf, cards: shelf.cards.filter(isUsableQQMusicHallCard) }))
+    .filter(shelf => shelf.title.trim() && shelf.cards.length > 0 && !isHiddenQQMusicHallShelf(shelf))
+    .sort((left, right) => left.serverOrder - right.serverOrder)
 }
 
 function isEntryModule(module: QQExploreModule) {
-  return module.id === '301'
+  if (module.id === '301') return true
+  const entrySubtypes = new Set([11, 510, 711, 712, 991])
+  return module.cards.length >= 3 && module.cards.some(card => entrySubtypes.has(card.subtype))
 }
 
 function isPersonalizedFlowModule(module: QQExploreModule) {
-  return module.id === '315'
+  return module.id === '315' || module.cards.some(card => card.twoColumn)
 }
 
-function topCardKind(card: QQExploreCard): 'guess' | 'daily' | 'radar' | 'generic' {
-  if (card.style !== 202) return 'generic'
-  if (card.type === 700 && card.subtype === 711 && card.classification === '10001') return 'guess'
-  if (card.type === 500 && card.subtype === 510 && card.classification === '10002') return 'daily'
-  if (card.type === 900 && card.subtype === 991 && card.classification === '22000') return 'radar'
-  return 'generic'
+const ENTRY_ORDER = ['guess', 'daily', 'radar', 'top-fav', 'new-songs', 'star-mix'] as const
+
+type TopEntryKind = typeof ENTRY_ORDER[number]
+
+function topCardKind(card: QQExploreCard): TopEntryKind | null {
+  if (card.subtype === 711 && card.style === 201) return 'guess'
+  if (card.subtype === 510 && card.style === 202) return 'daily'
+  if (card.subtype === 991 && card.style === 202) return 'radar'
+  if (card.subtype === 513 && card.style === 202) {
+    const text = `${card.title} ${card.subtitle || ''}`
+    if (/百万收藏|Top\s*Fav/i.test(text)) return 'top-fav'
+    if (/新歌|New\s*Songs/i.test(text)) return 'new-songs'
+    if (/歌手漫游|Star\s*Mix/i.test(text)) return 'star-mix'
+  }
+  return null
+}
+
+function topEntryCards(module: QQExploreModule | undefined): Array<{ card: QQExploreCard; kind: TopEntryKind }> {
+  if (!module) return []
+  const seen = new Set<string>()
+  return module.cards
+    .map(card => ({ card, kind: topCardKind(card) }))
+    .filter((item): item is { card: QQExploreCard; kind: TopEntryKind } => Boolean(item.kind))
+    .filter(item => {
+      const key = item.card.feedKey || `${item.card.type}:${item.card.subtype}:${item.card.style}:${item.card.jumpType}:${item.card.id}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .sort((left, right) => ENTRY_ORDER.indexOf(left.kind) - ENTRY_ORDER.indexOf(right.kind))
 }
 
 function groupIntoRows<T>(items: T[], size = 3): T[][] {
@@ -89,15 +140,8 @@ function isSongCard(card: QQExploreCard) {
   return card.action.type === 'play-songs'
 }
 
-function cardSong(card: QQExploreCard): Song {
-  return card.songs[0] || {
-    id: Number(card.id) || 0,
-    name: card.title,
-    artists: card.subtitle ? [{ name: card.subtitle }] : [],
-    album: { name: '', picUrl: card.coverUrl || '' },
-    duration: 0,
-    platform: 'qq',
-  }
+function cardSong(card: QQExploreCard): Song | null {
+  return card.songs[0] || null
 }
 
 function closedShelfStorageKey(account: string) {
@@ -113,15 +157,15 @@ function qqFavoriteUserId(userId?: string) {
   return match?.[1] || ''
 }
 
-function QQImage({ src, className, fallbackClassName = '' }: { src?: string; className: string; fallbackClassName?: string }) {
-  const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [src])
-  if (!src || failed) return <span aria-hidden="true" className={`block bg-[linear-gradient(135deg,rgba(60,70,82,0.8),rgba(22,26,32,0.95))] ${fallbackClassName || className}`} />
-  return <img src={src} alt="" loading="lazy" decoding="async" draggable={false} onLoad={event => event.currentTarget.classList.add('wf-qq-image-loaded')} onError={() => setFailed(true)} className={`wf-qq-image ${className}`} />
+function QQImage({ src, className, fallbackClassName = '', role = 'card', priority = 'visible', lazy = true, fit = 'cover' }: { src?: string; className: string; fallbackClassName?: string; role?: 'row' | 'compact' | 'card' | 'hero'; priority?: 'critical' | 'visible' | 'deferred'; lazy?: boolean; fit?: 'cover' | 'contain' }) {
+  return <CachedImage src={src || ''} alt="" draggable={false} lazy={lazy} role={role} priority={priority} platform="qq" retainPrevious fit={fit} className={className} fallback={<span aria-hidden="true" className={`block h-full w-full bg-[linear-gradient(135deg,rgba(60,70,82,0.8),rgba(22,26,32,0.95))] ${fallbackClassName || className}`} />} />
 }
 
 function FavoriteCountIcon({ count, active = false, loading = false }: { count?: string; active?: boolean; loading?: boolean }) {
-  return <span className="relative inline-flex h-8 min-w-12 items-end justify-start" aria-hidden="true">{loading ? <Loader2 className="mb-0.5 h-5 w-5 animate-spin" /> : <Heart strokeWidth={1.8} className={`h-7 w-7 ${active ? 'text-white/78' : 'text-white/48'}`} />}{count && <span className="absolute left-[23px] top-0 whitespace-nowrap text-[11px] font-semibold leading-none text-white/58">{count}</span>}</span>
+  return <span className="relative inline-flex h-8 w-12 items-start justify-start" aria-hidden="true">
+    {loading ? <Loader2 className="mt-1 h-4 w-4 animate-spin" /> : <Heart strokeWidth={1.45} className={`mt-0.5 h-6 w-6 ${active ? 'fill-rose-300/20 text-rose-300' : 'text-white/55'}`} />}
+    {count && <span className="absolute left-5 top-0 whitespace-nowrap text-[9px] font-medium leading-none text-white/52">{count}</span>}
+  </span>
 }
 
 function FlowFavoriteCount({ count, active }: { count?: string; active: boolean }) {
@@ -149,7 +193,7 @@ function FlowCard({ card, entitlement, loading, favoritesReady, favoritePending,
     return (
       <div className="relative min-w-0 self-start overflow-hidden rounded-lg border border-white/[0.08] bg-white/[0.045] p-3">
         <div className="mb-2 truncate text-[13px] font-medium text-white/88">{card.title}</div>
-        <div className="space-y-0.5">{songs.slice(0, 3).map(song => <div key={song.mid || song.id} role="button" tabIndex={song.noCopyright ? -1 : 0} aria-disabled={song.noCopyright || undefined} onClick={() => { if (!song.noCopyright) onSongClick(song) }} onContextMenu={event => onSongContextMenu(event, song)} onKeyDown={event => { if (!song.noCopyright && (event.key === 'Enter' || event.key === ' ')) onSongClick(song) }} className={`group/song flex items-center gap-2 rounded-md p-1 ${song.noCopyright ? 'cursor-not-allowed opacity-45' : 'cursor-pointer hover:bg-white/[0.055]'}`}><QQImage src={song.album.picUrl} className="h-10 w-10 rounded object-cover" /><span className="min-w-0 flex-1"><span className="flex items-center gap-1"><span className="truncate text-[13px] text-white/85">{song.name}</span><SongStateBadges song={song} entitlement={entitlement} /></span><span className="block truncate text-[11px] text-white/38">{song.artists.map(artist => artist.name).join('/')}</span></span><button type="button" disabled={!favoritesReady || favoritePending.has(String(song.mid || song.id))} onClick={event => onSongFavorite(event, song)} className="h-7 w-7 shrink-0 text-white/30 hover:text-rose-300 disabled:opacity-40" aria-label={isSongFavorite(song) ? `取消喜欢${song.name}` : `喜欢${song.name}`}>{favoritePending.has(String(song.mid || song.id)) ? <Loader2 className="mx-auto h-3.5 w-3.5 animate-spin" /> : <Heart className={`mx-auto h-3.5 w-3.5 ${isSongFavorite(song) ? 'fill-rose-400 text-rose-400' : ''}`} />}</button></div>)}</div>
+        <div className="space-y-0.5">{songs.slice(0, 3).map(song => <div key={song.mid || song.id} role="button" tabIndex={song.noCopyright ? -1 : 0} aria-disabled={song.noCopyright || undefined} onClick={() => { if (!song.noCopyright) onSongClick(song) }} onContextMenu={event => onSongContextMenu(event, song)} onKeyDown={event => { if (!song.noCopyright && (event.key === 'Enter' || event.key === ' ')) onSongClick(song) }} className={`group/song flex items-center gap-2 rounded-md p-1 ${song.noCopyright ? 'cursor-not-allowed opacity-45' : 'cursor-pointer hover:bg-white/[0.055]'}`}><QQImage src={song.album.picUrl} className="h-10 w-10 rounded object-cover" role="row" priority="visible" /><span className="min-w-0 flex-1"><span className="flex items-center gap-1"><span className="truncate text-[13px] text-white/85">{song.name}</span><SongStateBadges song={song} entitlement={entitlement} /></span><span className="block truncate text-[11px] text-white/38">{song.artists.map(artist => artist.name).join('/')}</span></span><button type="button" disabled={!favoritesReady || favoritePending.has(String(song.mid || song.id))} onClick={event => onSongFavorite(event, song)} className="h-7 w-7 shrink-0 text-white/30 hover:text-rose-300 disabled:opacity-40" aria-label={isSongFavorite(song) ? `取消喜欢${song.name}` : `喜欢${song.name}`}>{favoritePending.has(String(song.mid || song.id)) ? <Loader2 className="mx-auto h-3.5 w-3.5 animate-spin" /> : <Heart className={`mx-auto h-3.5 w-3.5 ${isSongFavorite(song) ? 'fill-rose-400 text-rose-400' : ''}`} />}</button></div>)}</div>
         {loading && <span className="absolute inset-0 flex items-center justify-center bg-black/35"><Loader2 className="h-5 w-5 animate-spin" /></span>}
       </div>
     )
@@ -158,7 +202,7 @@ function FlowCard({ card, entitlement, loading, favoritesReady, favoritePending,
   const unavailable = Boolean(primarySong?.noCopyright)
   return (
     <button type="button" disabled={unavailable} onClick={onClick} onContextMenu={event => primarySong && onSongContextMenu(event, primarySong)} className="group relative w-full min-w-0 overflow-hidden rounded-lg border border-white/[0.08] bg-white/[0.045] text-left disabled:cursor-not-allowed disabled:opacity-50">
-      <span className="relative block">{card.coverUrl && <QQImage src={card.coverUrl} className="aspect-[4/3] w-full object-contain transition duration-500 group-hover:scale-[1.015]" />}{card.typeTag && <span className="absolute left-2 top-2 max-w-[70%] truncate rounded bg-black/48 px-2 py-1 text-[10px] font-medium text-white backdrop-blur-sm">{card.typeTag}</span>}<span className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
+      <span className="relative block">{card.coverUrl && <QQImage src={card.coverUrl} className="aspect-[4/3] w-full object-contain transition duration-500 group-hover:scale-[1.015]" role="card" priority="visible" />}{card.typeTag && <span className="absolute left-2 top-2 max-w-[70%] truncate rounded bg-black/48 px-2 py-1 text-[10px] font-medium text-white backdrop-blur-sm">{card.typeTag}</span>}<span className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
       <span className="block p-3"><span className="flex items-center gap-1.5"><span className="block min-w-0 truncate text-[13px] font-medium">{card.title}</span>{primarySong && <SongStateBadges song={primarySong} entitlement={entitlement} />}</span>{(card.reason || card.subtitle || card.content) && <span className="mt-1 block line-clamp-2 text-[11px] text-white/40">{card.reason || card.subtitle || card.content}</span>}<span className="mt-2 flex min-h-7 items-end gap-2"><span className="flex min-w-0 flex-1 flex-wrap gap-1">{(card.lowerTags.length > 0 ? card.lowerTags.map(tag => tag.tag) : card.countContent ? [card.countContent] : card.badges).slice(0, 3).map(label => <span key={label} className="max-w-full truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/48">{label}</span>)}</span><FlowFavoriteCount count={card.favoriteCount} active={card.isFavorite} /></span></span>
       {loading && <span className="absolute inset-0 flex items-center justify-center bg-black/35"><Loader2 className="h-5 w-5 animate-spin" /></span>}
     </button>
@@ -176,7 +220,11 @@ export default function QQExplorePage({
   officialEnhanced,
   publicContent,
   onLogin,
+  currentSong,
+  isPlaying,
+  onPlayPause,
   onPlaySongs,
+  onPlayDaily30,
   onOpenPlaylist,
   onOpenChart,
   onOpenAlbum,
@@ -185,6 +233,7 @@ export default function QQExplorePage({
   onConfiguredChange,
   onOpenPlaylists,
   onOpenCharts,
+  onOpenMVs,
   onSongContextMenu,
   onViewComments,
   onAddToFavorites,
@@ -203,11 +252,14 @@ export default function QQExplorePage({
   const [favoriteCountOverrides, setFavoriteCountOverrides] = useState<Map<string, string>>(new Map())
   const favoritePendingRef = useRef(new Set<string>())
   const [guessSong, setGuessSong] = useState<Song | null>(null)
+  const [guessSongs, setGuessSongs] = useState<Song[]>([])
   const [guessLoading, setGuessLoading] = useState(false)
   const [guessError, setGuessError] = useState('')
   const guessBatch = useRef(0)
   const guessGeneration = useRef(0)
+  const [guessRefreshRevision, setGuessRefreshRevision] = useState(0)
   const [playingMV, setPlayingMV] = useState<{ id: string; name: string } | null>(null)
+  const [radarPlayer, setRadarPlayer] = useState<{ songs: Song[]; continuation: QQRadarContinuation } | null>(null)
   const [preferencesOpen, setPreferencesOpen] = useState(false)
   const [preferences, setPreferences] = useState<QQExplorePreferenceItem[]>([])
   const [initialPreferences, setInitialPreferences] = useState<Map<string, boolean>>(new Map())
@@ -226,11 +278,14 @@ export default function QQExplorePage({
   const snapshot = state.snapshot
   const musicHallShelves = visibleMusicHallShelves(snapshot?.musicHall || [])
   const entryModule = snapshot?.feed.modules.find(isEntryModule)
-  const entries = entryModule?.cards || []
+  const entries = topEntryCards(entryModule)
   const skillPlaylists = (publicContent?.playlists || []).filter(playlist => playlist.source === 'qqmusic-skills')
   const communityPlaylists = (publicContent?.playlists || []).filter(playlist => playlist.source !== 'qqmusic-skills')
   const contentModules = useMemo(
-    () => (snapshot?.feed.modules || []).filter(module => !isEntryModule(module) && !closedShelves.has(qqModuleInstanceIdentity(module))),
+    () => (snapshot?.feed.modules || []).filter(module => !isEntryModule(module) && !isHiddenQQRecommendationModule(module) && !closedShelves.has(qqModuleInstanceIdentity(module))).map(module => ({
+      ...module,
+      cards: module.cards.filter(card => !isQQStarLightCard(card)),
+    })).filter(module => module.cards.length > 0),
     [closedShelves, snapshot?.feed.modules],
   )
 
@@ -259,22 +314,33 @@ export default function QQExplorePage({
     if (!loggedIn) {
       guessBatch.current = 0
       setGuessSong(null)
+      setGuessSongs([])
       setGuessLoading(false)
       setGuessError('')
       return
     }
     const previousKey = guessSong ? String(guessSong.mid || guessSong.id) : ''
     const batch = ++guessBatch.current
-    setGuessSong(null)
-    setGuessLoading(true)
+    setGuessLoading(!guessSong)
     setGuessError('')
     const abortController = new AbortController()
-    void fetchQQGuessYouLikeBatch(batch, previousKey ? [previousKey] : [], abortController.signal).then(songs => {
-      if (requestId === guessGeneration.current) setGuessSong(songs[0] || null)
+    const exclude = previousKey ? [previousKey] : []
+
+    void fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 1).then(preview => {
+      if (requestId !== guessGeneration.current || abortController.signal.aborted) return
+      if (preview[0]) {
+        setGuessSong(preview[0])
+        setGuessLoading(false)
+      }
+      return fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 30)
+    }).then(songs => {
+      if (!songs || requestId !== guessGeneration.current || abortController.signal.aborted) return
+      setGuessSongs(songs)
+      if (!guessSong && songs[0]) setGuessSong(songs[0])
     }).catch(error => {
       const message = error instanceof Error ? error.message : String(error || '')
       const cancelled = abortController.signal.aborted || error instanceof DOMException && error.name === 'AbortError' || /aborted without reason/i.test(message)
-      if (!cancelled && requestId === guessGeneration.current) setGuessError(message || '代表歌曲加载失败')
+      if (!cancelled && requestId === guessGeneration.current && !guessSong) setGuessError(message || '代表歌曲加载失败')
     }).finally(() => {
       if (requestId === guessGeneration.current) setGuessLoading(false)
     })
@@ -282,7 +348,7 @@ export default function QQExplorePage({
       guessGeneration.current += 1
       abortController.abort()
     }
-  }, [authRevision, loggedIn, snapshot?.generatedAt])
+  }, [authRevision, guessRefreshRevision, loggedIn])
 
   useEffect(() => {
     const owner = loggedIn && favoriteUserId ? `qq:${favoriteUserId}` : ''
@@ -331,15 +397,23 @@ export default function QQExplorePage({
     }
   }, [favoriteUserId, loggedIn])
 
-  const isSongFavorite = useCallback((song: Song | undefined, card: QQExploreCard) => {
-    const key = String(song?.mid || song?.id || card.id)
-    if (favoriteOverrides.has(key)) return Boolean(favoriteOverrides.get(key))
-    return Boolean(card.isFavorite || (song && getFavoriteSongIdentifiers(song).some(identifier => favoriteIds.has(identifier))))
-  }, [favoriteIds, favoriteOverrides])
+  const cardFavoriteKey = useCallback((card: QQExploreCard) => {
+    const song = card.songs[0]
+    return String(song?.mid || song?.id || card.id)
+  }, [])
 
-  const mutateFavorite = useCallback(async (song: Song, current: boolean): Promise<boolean> => {
+  // 收藏状态只认当前账号的真实收藏列表：card.isFavorite 是推荐卡自带的标记，
+  // 不代表用户真的收藏过，不能拿来当红心状态。
+  const isSongFavorite = useCallback((song: Song | null | undefined, card: QQExploreCard) => {
+    const key = cardFavoriteKey(card)
+    if (favoriteOverrides.has(key)) return Boolean(favoriteOverrides.get(key))
+    const identifiers = [...(song ? getFavoriteSongIdentifiers(song) : []), card.id]
+    return identifiers.some(identifier => favoriteIds.has(identifier))
+  }, [cardFavoriteKey, favoriteIds, favoriteOverrides])
+
+  const mutateFavorite = useCallback(async (song: Song, current: boolean, overrideKey?: string): Promise<boolean> => {
     const identifiers = getFavoriteSongIdentifiers(song)
-    const key = String(song.mid || song.id)
+    const key = overrideKey || String(song.mid || song.id)
     if (!favoritesReady || favoritePendingRef.current.has(key)) return false
     favoritePendingRef.current.add(key)
     const previousOverride = favoriteOverrides.get(key)
@@ -362,6 +436,12 @@ export default function QQExplorePage({
         const next = new Map(previous)
         const card = snapshot?.feed.modules.flatMap(module => module.cards).find(item => item.songs.some(value => String(value.mid || value.id) === key) || String(item.id) === String(song.id))
         if (card) next.set(key, adjustFavoriteCount(next.get(key) ?? card.favoriteCount, current ? -1 : 1))
+        return next
+      })
+      // 成功后清掉乐观覆盖，让红心回落到已更新的账号收藏列表
+      setFavoriteOverrides(previous => {
+        const next = new Map(previous)
+        next.delete(key)
         return next
       })
       return true
@@ -389,26 +469,27 @@ export default function QQExplorePage({
     event.stopPropagation()
     try {
       const fallbackSong = cardSong(card)
-      const song = fallbackSong.mid ? fallbackSong : await resolveQQExploreSong(card.id, { title: card.title, artist: card.subtitle, coverUrl: card.coverUrl })
+      const song = fallbackSong?.mid ? fallbackSong : await resolveQQExploreSong(card.id, { title: card.title, artist: card.subtitle, coverUrl: card.coverUrl })
       const wasFavorite = isSongFavorite(song, card)
-      const success = await mutateFavorite(song, wasFavorite)
+      const success = await mutateFavorite(song, wasFavorite, cardFavoriteKey(card))
       if (success && !wasFavorite && module) void appendFromCard(module, card, 'like')
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '收藏状态更新失败')
     }
-  }, [appendFromCard, isSongFavorite, mutateFavorite])
+  }, [appendFromCard, cardFavoriteKey, isSongFavorite, mutateFavorite])
 
   const isStandaloneSongFavorite = useCallback((song: Song, card?: QQExploreCard) => {
-    const key = String(song.mid || song.id)
+    const key = card ? cardFavoriteKey(card) : String(song.mid || song.id)
     if (favoriteOverrides.has(key)) return Boolean(favoriteOverrides.get(key))
-    return Boolean(card?.isFavorite || getFavoriteSongIdentifiers(song).some(identifier => favoriteIds.has(identifier)))
-  }, [favoriteIds, favoriteOverrides])
+    const identifiers = [...getFavoriteSongIdentifiers(song), ...(card ? [card.id] : [])]
+    return identifiers.some(identifier => favoriteIds.has(identifier))
+  }, [cardFavoriteKey, favoriteIds, favoriteOverrides])
 
   const toggleStandaloneFavorite = useCallback((event: React.MouseEvent, song: Song, card?: QQExploreCard) => {
     event.preventDefault()
     event.stopPropagation()
-    void mutateFavorite(song, isStandaloneSongFavorite(song, card))
-  }, [isStandaloneSongFavorite, mutateFavorite])
+    void mutateFavorite(song, isStandaloneSongFavorite(song, card), card ? cardFavoriteKey(card) : undefined)
+  }, [cardFavoriteKey, isStandaloneSongFavorite, mutateFavorite])
 
   const resolveCards = useCallback(async (cards: QQExploreCard[]) => {
     const alreadyResolved = new Map(cards
@@ -484,6 +565,27 @@ export default function QQExplorePage({
     }
   }, [])
 
+  useEffect(() => {
+    const handleOpenPreferences = () => { void openPreferences() }
+    window.addEventListener('waveforge:qq-open-preferences', handleOpenPreferences)
+    return () => window.removeEventListener('waveforge:qq-open-preferences', handleOpenPreferences)
+  }, [openPreferences])
+
+  useEffect(() => {
+    const handleOpenRecommendationFeedback = (event: Event) => {
+      const song = (event as CustomEvent<Song>).detail
+      if (!song) return
+      const modules = snapshot?.feed.modules || []
+      for (const module of modules) {
+        const card = module.cards.find(item => item.feedbackToken && item.songs.some(value => String(value.mid || value.id) === String(song.mid || song.id)))
+        if (card) { void openFeedback(card, module); return }
+      }
+      setActionError('该歌曲暂时没有可调整的推荐项')
+    }
+    window.addEventListener('waveforge:qq-open-recommendation-feedback', handleOpenRecommendationFeedback)
+    return () => window.removeEventListener('waveforge:qq-open-recommendation-feedback', handleOpenRecommendationFeedback)
+  }, [openFeedback, snapshot?.feed.modules])
+
   const savePreferences = useCallback(async () => {
     const changed = preferences.filter(item => initialPreferences.get(item.id) !== item.selected)
     if (changed.length === 0) {
@@ -514,13 +616,17 @@ export default function QQExplorePage({
         return
       }
       if (card.action.type === 'play-radio') {
-        const songs = await fetchQQGuessYouLikeBatch(1)
+        const songs = guessSongs.length > 0 ? guessSongs : await fetchQQGuessYouLikeBatch(1, [], undefined, 30)
         if (songs[0]) onPlaySongs(songs[0], songs, true)
         return
       }
       if (card.action.type === 'play-radar') {
         const result = await fetchQQRadarSongs(card.action)
-        if (result.songs[0]) onPlaySongs(result.songs[0], result.songs, true)
+        if (result.songs[0]) {
+          const continuation: QQRadarContinuation = { mode: 'radar', page: result.page, reqType: card.action.reqType, entranceSongs: card.action.entranceSongs }
+          setRadarPlayer({ songs: result.songs, continuation })
+          onPlaySongs(result.songs[0], result.songs, true, continuation)
+        }
         return
       }
       if (card.action.type === 'play-songs') {
@@ -556,14 +662,22 @@ export default function QQExplorePage({
     } finally {
       setActionLoading('')
     }
-  }, [actionLoading, appendFromCard, onOpenPlaylist, onOpenSearch, onPlaySongs, openPreferences, resolveCards])
+  }, [actionLoading, appendFromCard, guessSongs, onOpenPlaylist, onOpenSearch, onPlaySongs, openPreferences, resolveCards])
 
   const executeMusicHallCard = useCallback(async (card: QQMusicHallCard, shelf: QQMusicHallShelf) => {
     const action = card.action
     if (action.type === 'play-songs') {
       const song = card.songs[0] || await resolveQQExploreSongs([{ songId: card.id, title: card.title, artist: card.subtitle, coverUrl: card.coverUrl }]).then(items => items[0])
       const queue = shelf.cards.flatMap(item => item.songs).filter(item => !item.noCopyright)
-      if (song && !song.noCopyright) onPlaySongs(song, queue.length > 0 ? queue : [song])
+      if (!song) {
+        setActionError('QQ 音乐没有返回可播放的歌曲信息')
+        return
+      }
+      if (song.noCopyright) {
+        setActionError('这首歌曲当前不可播放')
+        return
+      }
+      onPlaySongs(song, queue.length > 0 ? queue : [song])
       return
     }
     if (action.type === 'open-playlist') {
@@ -571,7 +685,11 @@ export default function QQExplorePage({
       return
     }
     if (action.type === 'open-album') {
-      onOpenAlbum?.(action.albumId, 'qq')
+      if (!onOpenAlbum) {
+        setActionError('当前页面暂不支持打开 QQ 音乐专辑')
+        return
+      }
+      onOpenAlbum(action.albumId, 'qq')
       return
     }
     if (action.type === 'open-chart') {
@@ -586,14 +704,17 @@ export default function QQExplorePage({
     if (action.type === 'open-section') {
       if (action.section === 'charts') onOpenCharts()
       else if (action.section === 'playlists') onOpenPlaylists()
+      else if (action.section === 'mvs') onOpenMVs()
       return
     }
     if (action.type === 'open-external') {
       const bridge = window.electronAPI
       if (bridge?.openExternal) await bridge.openExternal(action.url)
       else window.open(action.url, '_blank', 'noopener,noreferrer')
+      return
     }
-  }, [onOpenAlbum, onOpenChart, onOpenCharts, onOpenPlaylist, onOpenPlaylists, onPlaySongs])
+    setActionError('该内容只能在 QQ 音乐客户端中打开')
+  }, [onOpenAlbum, onOpenChart, onOpenCharts, onOpenMVs, onOpenPlaylist, onOpenPlaylists, onPlaySongs])
 
   if (!loggedIn) {
     return (
@@ -623,10 +744,13 @@ export default function QQExplorePage({
           <h2 className="mt-2 text-2xl font-semibold md:text-3xl">{entryModule?.title || `${username || 'QQ 音乐用户'}，今日为你推荐`}</h2>
           {showDescription && <p className="mt-2 text-sm text-white/42">内容直接来自当前账号的手机客户端推荐流。</p>}
         </div>
-        <button type="button" onClick={() => void refreshFeed()} disabled={state.refreshing || Boolean(state.refreshingModuleId) || state.loadingMore} className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.05] px-4 text-sm text-white/65 transition hover:bg-white/[0.1] disabled:opacity-50">
+        <div className="flex items-center gap-2">
+          {entries.some(entry => entry.kind === 'radar') && <button type="button" onClick={() => { const radar = entries.find(entry => entry.kind === 'radar'); if (radar) void executeCard(radar.card, entryModule) }} disabled={Boolean(actionLoading)} className="flex h-10 items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/[0.08] px-4 text-sm text-emerald-100/80 transition hover:bg-emerald-300/[0.16] disabled:opacity-50"><Sparkles className="h-4 w-4" />进入刷歌模式</button>}
+          <button type="button" onClick={() => void refreshFeed()} disabled={state.refreshing || Boolean(state.refreshingModuleId) || state.loadingMore} className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.05] px-4 text-sm text-white/65 transition hover:bg-white/[0.1] disabled:opacity-50">
           <RefreshCw className={`h-4 w-4 ${state.refreshing ? 'animate-spin' : ''}`} />
           刷新推荐
-        </button>
+          </button>
+        </div>
       </div>
 
       {(state.error || actionError) && (
@@ -636,48 +760,68 @@ export default function QQExplorePage({
       )}
 
       {entries.length > 0 && (
-        <section aria-label="QQ 音乐快捷入口">
-          <HorizontalShelf ariaLabel="QQ 音乐快捷入口" edgeControls="hover" className="-mx-5" viewportClassName="gap-4" itemClassName="w-[250px] sm:w-[270px] xl:w-[290px]">
-            {entries.map(card => {
-              const kind = topCardKind(card)
+        <section aria-label="QQ 音乐快捷入口" className="relative">
+          <HorizontalShelf ariaLabel="QQ 音乐快捷入口" edgeControls="hover" className="-mx-5" viewportClassName="gap-[26px]" itemClassName="w-[250px] sm:w-[270px] xl:w-[290px]">
+            {entries.map(({ card, kind }) => {
               const daily = kind === 'daily' ? snapshot?.daily30 : null
-              const entrySong = kind === 'guess' ? guessSong : daily?.songs[0]
-              const entryCover = card.coverUrl || entrySong?.album.picUrl || daily?.coverUrl
-              const loading = actionLoading === (card.feedKey || card.id) || (kind === 'guess' && guessLoading)
-              const layerPictures = [card.layerElementPic0, card.layerElementPic1, card.layerElementPic2].filter(Boolean)
+              const entrySong = kind === 'guess' ? guessSong : daily?.songs[0] || card.songs[0]
+              const entryCover = kind === 'guess'
+                ? guessSong?.album.picUrl || card.coverUrl
+                : card.coverUrl || entrySong?.album.picUrl || daily?.coverUrl
+              const loading = actionLoading === (card.feedKey || card.id) || (kind === 'guess' && guessLoading && !guessSong)
+              const cardTitle = kind === 'guess' ? 'For You' : kind === 'daily' ? 'Daily 30' : ENTRY_LABELS[card.title] || card.layerTitle || card.title
+              const cardLabel = ENTRY_SUBLABELS[kind]
+              const cardSubtitle = entrySong
+                ? `${entrySong.name} - ${entrySong.artists.map(artist => artist.name).join('/')}`
+                : card.subtitle || (kind === 'daily' ? '今天更新' : '')
+              const cardTone = kind === 'daily' ? 'bg-[#98a9ed]' : kind === 'top-fav' ? 'bg-[#f19a9d]' : 'bg-[#58bfd5]'
               return (
-                <button
+                <div
                   key={card.feedKey || card.id}
-                  type="button"
-                  onClick={() => void executeCard(card, entryModule)}
-                  className="group relative aspect-[1.5/1] w-full overflow-hidden rounded-lg border border-white/[0.09] bg-white/[0.05] text-left"
+                  role="group"
+                  aria-label={`${cardLabel}${entrySong ? `：${entrySong.name}` : ''}`}
+                  className={`group relative aspect-square w-full overflow-hidden rounded-lg border border-white/[0.09] ${cardTone} text-left`}
                 >
-                  <span className="absolute inset-0 bg-white/[0.035]" />
-                  {kind === 'guess' && layerPictures.length === 0 && <span className="absolute inset-0 bg-[linear-gradient(135deg,#bc1f25_0%,#7f1017_60%,#23080b_100%)]" />}
-                  {entryCover && <QQImage src={entryCover} className="absolute right-[5%] top-[8%] h-[58%] w-[54%] rounded-md object-contain transition duration-500 group-hover:scale-[1.02]" />}
-                  {layerPictures.map((picture, index) => <QQImage key={`${picture}-${index}`} src={picture} className="pointer-events-none absolute inset-0 h-full w-full object-contain" fallbackClassName="hidden" />)}
-                  {card.layerTitle && <span className="pointer-events-none absolute left-5 top-5 max-w-[45%] text-3xl font-semibold leading-none text-white">{card.layerTitle}</span>}
-                  {card.layerClassifyTitle && <span className="pointer-events-none absolute left-5 top-[4.25rem] max-w-[45%] truncate text-xs font-medium text-white/68">{card.layerClassifyTitle}</span>}
-                  {!card.layerTitle && kind === 'guess' && <span className="pointer-events-none absolute left-5 top-5 whitespace-pre-line text-4xl font-semibold leading-[0.9] text-white">{'For\nYou'}</span>}
-                  {!ENTRY_LABELS[card.title] && !entryCover && layerPictures.length === 0 && <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-5xl font-semibold text-white/12">{card.title.slice(0, 2)}</span>}
-                  {card.layerUrl && <QQImage src={card.layerUrl} className="pointer-events-none absolute inset-0 h-full w-full object-contain" fallbackClassName="hidden" />}
-                  <span className="absolute inset-0 bg-[linear-gradient(0deg,rgba(5,8,12,0.9),rgba(5,8,12,0.02)_72%)]" />
-                  <span className="relative flex h-full flex-col p-5">
-                    {card.reason && <span className="w-fit max-w-[70%] truncate rounded bg-white/14 px-2 py-1 text-[10px] font-medium text-white/82 backdrop-blur">{card.reason}</span>}
-                    <span className="mt-auto flex items-end justify-between gap-3">
-                      <span className="min-w-0">
-                        <span className="block text-sm font-semibold text-white">{card.title}</span>
-                        <span className="mt-1 block truncate text-xs text-white/62">{kind === 'guess' && guessError ? guessError : card.subtitle || (entrySong ? `${entrySong.name}-${entrySong.artists.map(artist => artist.name).join('/')}` : guessLoading ? '正在获取推荐歌曲' : '为你准备推荐歌曲')}</span>
-                      </span>
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-black">
-                        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : card.action.type === 'open-preferences' || card.action.type === 'unsupported' ? <ChevronRight className="h-4 w-4" /> : <Play className="h-4 w-4 fill-current" />}
-                      </span>
-                    </span>
+                  <button
+                    type="button"
+                    aria-label={`打开${cardLabel}`}
+                    onClick={() => {
+                      if (kind === 'daily' && daily?.songs.length) {
+                        const playable = daily.songs.filter(song => !song.noCopyright)
+                        if (playable[0]) onPlayDaily30(playable[0], playable)
+                        return
+                      }
+                      void executeCard(card, entryModule)
+                    }}
+                    className="absolute inset-0 z-0 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+                  />
+                  {entryCover && <QQImage src={entryCover} className="pointer-events-none absolute right-[4.3%] top-[4.3%] h-[54%] w-[52%] rounded-md object-contain transition duration-500 group-hover:scale-[1.02]" role="hero" priority="critical" lazy={false} fit="contain" />}
+                  <span className="pointer-events-none absolute left-[4.3%] top-[5%] z-10 w-[38%] max-w-[38%] whitespace-pre-line break-words text-[2rem] font-semibold leading-[0.9] text-white sm:text-[2.15rem]">{cardTitle}</span>
+                  <span className="pointer-events-none absolute bottom-[8%] left-[4.3%] z-10 max-w-[72%] min-w-0">
+                    <span className="block truncate text-sm font-semibold text-white">{cardLabel}</span>
+                    <span className="mt-1 block truncate text-xs text-white/85">{kind === 'guess' && guessError ? guessError : cardSubtitle || (kind === 'guess' && guessLoading ? '正在获取推荐歌曲' : kind === 'daily' ? '今天更新' : '')}</span>
                   </span>
-                </button>
+                  <button
+                    type="button"
+                    aria-label={`播放${cardLabel}`}
+                    onClick={event => {
+                      event.stopPropagation()
+                      if (kind === 'daily' && daily?.songs.length) {
+                        const playable = daily.songs.filter(song => !song.noCopyright)
+                        if (playable[0]) onPlayDaily30(playable[0], playable)
+                        return
+                      }
+                      void executeCard(card, entryModule)
+                    }}
+                    className="absolute bottom-[8%] right-[4.3%] z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white text-black shadow-lg"
+                  >
+                    {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4 fill-current" />}
+                  </button>
+                </div>
               )
             })}
           </HorizontalShelf>
+          <div aria-hidden="true" className="pointer-events-none absolute right-0 top-0 z-20 h-full w-12 bg-gradient-to-r from-transparent via-black/[0.03] to-black/25 backdrop-blur-[2px] [mask-image:linear-gradient(to_right,transparent,black)]" />
         </section>
       )}
 
@@ -732,7 +876,7 @@ export default function QQExplorePage({
                     <div key={`${module.instanceId}-songs-${columnIndex}`} className="grid h-[216px] grid-rows-3">
                     {column.map(card => {
                       const resolvedSong = cardSong(card)
-                      const noCopyright = Boolean(resolvedSong.noCopyright)
+                      const noCopyright = Boolean(resolvedSong?.noCopyright)
                       return (
                         <div
                         key={card.feedKey || card.id}
@@ -744,13 +888,12 @@ export default function QQExplorePage({
                         onKeyDown={event => { if (!noCopyright && (event.key === 'Enter' || event.key === ' ')) void executeCard(card, module) }}
                         className={`group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-2.5 text-left ${noCopyright ? 'cursor-not-allowed opacity-45' : 'cursor-pointer'}`}
                       >
-                        <span className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover" /></span>
-                        <span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className="truncate text-sm font-medium text-white/88">{card.title}</span><SongStateBadges song={resolvedSong} entitlement={entitlement} /></span><span className="mt-1 block truncate text-xs text-white/40">{card.subtitle || card.reason}</span>{card.badges.length > 0 && <span className="mt-1 flex gap-1 overflow-hidden">{card.badges.slice(0, 2).map(label => <span key={label} className="shrink-0 rounded bg-white/[0.06] px-1 text-[10px] text-white/45">{label}</span>)}</span>}</span>
-                        <button type="button" disabled={!favoritesReady || favoritePending.has(String(resolvedSong.mid || resolvedSong.id || card.id))} onClick={event => void toggleFavorite(event, card, module)} className="flex shrink-0 items-center gap-1 text-xs text-white/42 hover:text-rose-300 disabled:opacity-45" aria-label={isSongFavorite(cardSong(card), card) ? `取消喜欢${card.title}` : `喜欢${card.title}`}>
-                          <FavoriteCountIcon count={(favoriteCountOverrides.get(String(resolvedSong.mid || resolvedSong.id || card.id)) ?? card.favoriteCount) || undefined} active={isSongFavorite(cardSong(card), card)} loading={favoritePending.has(String(resolvedSong.mid || resolvedSong.id || card.id))} />
+                        <span className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover" role="row" priority="visible" /></span>
+                        <span className="min-w-0 flex-1"><span className="flex items-center gap-1.5"><span className="truncate text-sm font-medium text-white/88">{card.title}</span>{resolvedSong && <SongStateBadges song={resolvedSong} entitlement={entitlement} />}</span><span className="mt-1 block truncate text-xs text-white/40">{card.subtitle || card.reason}</span>{card.badges.length > 0 && <span className="mt-1 flex gap-1 overflow-hidden">{card.badges.slice(0, 2).map(label => <span key={label} className="shrink-0 rounded bg-white/[0.06] px-1 text-[10px] text-white/45">{label}</span>)}</span>}</span>
+                        <button type="button" disabled={!favoritesReady || favoritePending.has(cardFavoriteKey(card))} onClick={event => void toggleFavorite(event, card, module)} className="flex shrink-0 items-center gap-1 text-xs text-white/42 hover:text-rose-300 disabled:opacity-45" aria-label={isSongFavorite(resolvedSong, card) ? `取消喜欢${card.title}` : `喜欢${card.title}`}>
+                          <FavoriteCountIcon count={(favoriteCountOverrides.get(cardFavoriteKey(card)) ?? card.favoriteCount) || undefined} active={isSongFavorite(resolvedSong, card)} loading={favoritePending.has(cardFavoriteKey(card))} />
                         </button>
-                        {card.commentCount && onViewComments && <button type="button" onClick={event => { event.preventDefault(); event.stopPropagation(); onViewComments(resolvedSong) }} className="flex shrink-0 items-center gap-1 text-[11px] text-white/35 hover:text-white" aria-label={`查看${card.title}评论`}><MessageCircle className="h-3.5 w-3.5" />{card.commentCount}</button>}
-                        {card.feedbackToken && <button type="button" onClick={event => { event.preventDefault(); event.stopPropagation(); void openFeedback(card, module) }} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-white/25 opacity-0 hover:bg-white/[0.08] hover:text-white group-hover:opacity-100" aria-label={`不感兴趣或调整${card.title}推荐`}><MoreHorizontal className="h-4 w-4" /></button>}
+                        {resolvedSong && card.commentCount && onViewComments && <button type="button" onClick={event => { event.preventDefault(); event.stopPropagation(); onViewComments(resolvedSong) }} className="flex shrink-0 items-center gap-1 text-[11px] text-white/35 hover:text-white" aria-label={`查看${card.title}评论`}><MessageCircle className="h-3.5 w-3.5" />{card.commentCount}</button>}
                         </div>
                       )
                     })}
@@ -763,7 +906,7 @@ export default function QQExplorePage({
                 <HorizontalShelf ariaLabel={`${module.title || '推荐'}歌单`} edgeControls="hover" className="-mx-5" itemClassName="w-48">
                   {playlistCards.map(card => (
                     <button key={card.feedKey || card.id} type="button" onClick={() => void executeCard(card, module)} className="group w-full text-left">
-                      <span className="relative block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" /><span className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-black opacity-0 transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
+                      <span className="relative block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /><span className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-black opacity-0 transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
                       <span className="mt-2 block line-clamp-2 text-sm font-medium">{card.title || '专属歌单'}</span>
                       {(card.reason || card.subtitle || card.content) && <span className="mt-1 block line-clamp-2 text-xs text-white/38">{card.reason || card.subtitle || card.content}</span>}
                       <span className="mt-1 block">{card.favoriteCount && <FavoriteCountIcon count={card.favoriteCount} />}{card.badges.length > 0 && <span className="ml-1 inline-flex gap-2 align-top text-[11px] text-white/35">{card.badges.slice(0, 2).map(label => <span key={label}>{label}</span>)}</span>}</span>
@@ -778,7 +921,7 @@ export default function QQExplorePage({
                     const unsupported = card.action.type === 'unsupported'
                     return (
                     <button key={card.feedKey || card.id} type="button" disabled={unsupported} title={unsupported ? `QQ 客户端专属内容 · ${card.type}:${card.subtype}:${card.style}:${card.jumpType}` : undefined} onClick={() => void executeCard(card, module)} className="flex min-h-20 items-center gap-3 rounded-lg border border-white/[0.07] bg-white/[0.035] p-3 text-left disabled:cursor-not-allowed disabled:opacity-60">
-                      {card.coverUrl && <QQImage src={card.coverUrl} className="h-14 w-14 rounded-md object-cover" />}
+                      {card.coverUrl && <QQImage src={card.coverUrl} className="h-14 w-14 rounded-md object-cover" role="compact" priority="visible" />}
                       <span className="min-w-0 flex-1"><span className="block line-clamp-2 text-sm font-medium">{card.title || '推荐内容'}</span>{(card.content || card.reason || card.subtitle) && <span className="mt-1 block line-clamp-2 text-xs text-white/38">{card.content || card.reason || card.subtitle}</span>}<span className="mt-1 flex flex-wrap gap-1">{card.badges.filter(label => !/^https?:/i.test(label)).map(label => <span key={label} className="text-[11px] text-white/35">{label}</span>)}{unsupported && <span className="text-[11px] text-amber-200/55">QQ 客户端专属</span>}</span></span>
                       {!unsupported && <ChevronRight className="h-4 w-4 text-white/25" />}
                     </button>
@@ -813,15 +956,15 @@ export default function QQExplorePage({
                 {shelf.title && !isFocus && <div className="mb-4 flex items-center gap-2"><Disc3 className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">{shelf.title}</h3></div>}
                 {isFocus ? (
                   <HorizontalShelf ariaLabel="QQ 音乐焦点图" edgeControls="hover" className="-mx-5" itemClassName="w-[76%] max-w-[760px]">
-                    {shelf.cards.map(card => <button key={`${card.id}-${card.title}`} type="button" disabled={card.action.type === 'unsupported'} onClick={() => void executeMusicHallCard(card, shelf)} className="group relative aspect-[2.25/1] w-full overflow-hidden rounded-lg bg-white/[0.05] text-left disabled:opacity-60"><QQImage src={card.coverUrl} className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-[1.02]" /><span className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" /><span className="absolute inset-x-0 bottom-0 p-5 text-base font-semibold">{card.title}</span></button>)}
+                    {shelf.cards.map(card => <button key={`${card.id}-${card.title}`} type="button" disabled={card.action.type === 'unsupported'} onClick={() => void executeMusicHallCard(card, shelf)} className="group relative aspect-[2.25/1] w-full overflow-hidden rounded-lg bg-white/[0.05] text-left disabled:opacity-60"><QQImage src={card.coverUrl} className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-[1.02]" role="hero" priority="visible" /><span className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" /><span className="absolute inset-x-0 bottom-0 p-5 text-base font-semibold">{card.title}</span></button>)}
                   </HorizontalShelf>
                 ) : isSongShelf ? (
                   <HorizontalShelf ariaLabel={`${shelf.title}歌曲`} edgeControls="hover" className="-mx-5" itemClassName="w-[min(82vw,28rem)] md:w-[27rem]">
-                    {groupIntoRows(shelf.cards).map((column, columnIndex) => <div key={`${shelf.id}-${columnIndex}`} className="grid h-[216px] grid-rows-3">{column.map(card => <button key={card.id} type="button" disabled={card.action.type === 'unsupported'} onClick={() => void executeMusicHallCard(card, shelf)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-2.5 text-left"><QQImage src={card.coverUrl} className="h-14 w-14 shrink-0 rounded-md object-cover" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{card.title}</span><span className="mt-1 block truncate text-xs text-white/38">{card.subtitle}</span></span><Play className="h-4 w-4 shrink-0 text-white/25 group-hover:text-white" /></button>)}</div>)}
+                    {groupIntoRows(shelf.cards).map((column, columnIndex) => <div key={`${shelf.id}-${columnIndex}`} className="grid h-[216px] grid-rows-3">{column.map(card => <button key={card.id} type="button" disabled={card.action.type === 'unsupported'} onClick={() => void executeMusicHallCard(card, shelf)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-2.5 text-left"><QQImage src={card.coverUrl} className="h-14 w-14 shrink-0 rounded-md object-cover" role="row" priority="visible" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{card.title}</span><span className="mt-1 block truncate text-xs text-white/38">{cleanQQSubtitle(card.subtitle)}</span></span><Play className="h-4 w-4 shrink-0 text-white/25 group-hover:text-white" /></button>)}</div>)}
                   </HorizontalShelf>
                 ) : (
                   <HorizontalShelf ariaLabel={`${shelf.title}内容`} edgeControls="hover" className="-mx-5" itemClassName="w-[min(82vw,28rem)] max-w-[220px]">
-                    {shelf.cards.map(card => <button key={`${card.id}-${card.title}`} type="button" disabled={card.action.type === 'unsupported'} onClick={() => void executeMusicHallCard(card, shelf)} className="group w-full text-left disabled:opacity-45"><span className="relative block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" />{card.action.type !== 'unsupported' && <span className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-black opacity-0 transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span>}</span><span className="mt-2 block line-clamp-2 text-sm font-medium">{card.title}</span>{card.subtitle && <span className="mt-1 block truncate text-xs text-white/38">{card.subtitle}</span>}</button>)}
+                    {shelf.cards.map(card => <button key={`${card.id}-${card.title}`} type="button" disabled={card.action.type === 'unsupported'} title={card.action.type === 'unsupported' ? '该专区需要在 QQ 音乐客户端打开' : undefined} onClick={() => void executeMusicHallCard(card, shelf)} className="group w-full text-left disabled:cursor-not-allowed disabled:opacity-55"><span className="relative block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.03]" role="card" priority="visible" />{card.action.type !== 'unsupported' && <span className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-black opacity-0 transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span>}</span><span className="mt-2 block line-clamp-2 text-sm font-medium">{card.title}</span>{card.subtitle && <span className="mt-1 block truncate text-xs text-white/38">{cleanQQSubtitle(card.subtitle)}</span>}</button>)}
                   </HorizontalShelf>
                 )}
               </section>
@@ -833,19 +976,19 @@ export default function QQExplorePage({
       {publicContent && (
         <div className="space-y-12 border-t border-white/[0.08] pt-10" aria-label="QQ 音乐公共内容">
           {skillPlaylists.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Sparkles className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">AI 推荐歌单</h3><span className="text-xs text-white/35">QQ Music Skills</span></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{skillPlaylists.slice(0, 10).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={playlist.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs" style={{ color: accent }}>AI 推荐</span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Sparkles className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">AI 推荐歌单</h3><span className="text-xs text-white/35">QQ Music Skills</span></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{skillPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={playlist.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs" style={{ color: accent }}>AI 推荐</span></button>)}</div></section>
           )}
           {communityPlaylists.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Headphones className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">推荐歌单</h3></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{communityPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><img src={playlist.coverUrl} alt="" className="h-full w-full object-cover transition duration-500 group-hover:scale-105" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs text-white/35">{playlist.creator || 'QQ 音乐'}</span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Headphones className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">推荐歌单</h3></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{communityPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><CachedImage src={playlist.coverUrl} alt="" className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs text-white/35">{playlist.creator || 'QQ 音乐'}</span></button>)}</div></section>
           )}
           {publicContent.charts.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Trophy className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">排行榜</h3></div><button type="button" onClick={onOpenCharts} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{publicContent.charts.slice(0, 6).map(chart => <button key={chart.id} type="button" onClick={() => onOpenChart(chart)} className="group flex min-h-36 overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.04] text-left"><img src={chart.coverUrl} alt="" className="aspect-square w-36 shrink-0 object-cover" /><span className="min-w-0 flex-1 p-4"><span className="block truncate font-semibold">{chart.name}</span><span className="mt-2 block space-y-1">{chart.songs.slice(0, 3).map((song, index) => <span key={`${song.mid || song.id}-${index}`} className="block truncate text-xs text-white/45">{index + 1}. {song.name} · {song.artist}</span>)}</span></span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Trophy className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">排行榜</h3></div><button type="button" onClick={onOpenCharts} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{publicContent.charts.slice(0, 6).map(chart => <button key={chart.id} type="button" onClick={() => onOpenChart(chart)} className="group flex min-h-36 overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.04] text-left"><CachedImage src={chart.coverUrl} alt="" className="aspect-square w-36 shrink-0 object-cover" role="card" priority="visible" /><span className="min-w-0 flex-1 p-4"><span className="block truncate font-semibold">{chart.name}</span><span className="mt-2 block space-y-1">{chart.songs.slice(0, 3).map((song, index) => <span key={`${song.mid || song.id}-${index}`} className="block truncate text-xs text-white/45">{index + 1}. {song.name} · {song.artist}</span>)}</span></span></button>)}</div></section>
           )}
           {publicContent.newSongs.length > 0 && (
-            <section><div className="mb-4 flex items-center gap-2"><Disc3 className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">新歌推荐</h3></div><div className="grid gap-x-7 md:grid-cols-2 xl:grid-cols-3">{publicContent.newSongs.slice(0, 18).map(song => <button key={`${song.mid || song.id}-${song.name}`} type="button" onClick={() => onPlaySongs(song, publicContent.newSongs)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-3 text-left"><img src={song.album.picUrl} alt="" className="h-14 w-14 rounded-md object-cover" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{song.name}</span><span className="mt-1 block truncate text-xs text-white/38">{song.artists.map(artist => artist.name).join(' / ')}</span></span><Play className="h-4 w-4 text-white/25 transition group-hover:text-white" /></button>)}</div></section>
+            <section><div className="mb-4 flex items-center gap-2"><Disc3 className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">新歌推荐</h3></div><div className="grid gap-x-7 md:grid-cols-2 xl:grid-cols-3">{publicContent.newSongs.slice(0, 18).map(song => <button key={`${song.mid || song.id}-${song.name}`} type="button" onClick={() => onPlaySongs(song, publicContent.newSongs)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-3 text-left"><CachedImage src={song.album.picUrl} alt="" className="h-14 w-14 rounded-md object-cover" role="row" priority="visible" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{song.name}</span><span className="mt-1 block truncate text-xs text-white/38">{song.artists.map(artist => artist.name).join(' / ')}</span></span><Play className="h-4 w-4 text-white/25 transition group-hover:text-white" /></button>)}</div></section>
           )}
           {publicContent.channels.length > 0 && (
-            <section><div className="mb-4 flex items-center gap-2"><Radio className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">电台频道</h3></div><div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{publicContent.channels.slice(0, 12).map(channel => <button key={channel.id} type="button" onClick={() => onOpenChannel(channel)} className="group relative aspect-square overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.035] text-left"><img src={channel.coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-105" /><span className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-transparent" /><span className="absolute inset-x-0 bottom-0 p-3"><span className="block line-clamp-2 text-sm font-medium">{channel.name}</span><span className="mt-1 block truncate text-xs text-white/45">{channel.group}</span></span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center gap-2"><Radio className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">电台频道</h3></div><div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{publicContent.channels.slice(0, 12).map(channel => <button key={channel.id} type="button" onClick={() => onOpenChannel(channel)} className="group relative aspect-square overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.035] text-left"><CachedImage src={channel.coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /><span className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-transparent" /><span className="absolute inset-x-0 bottom-0 p-3"><span className="block line-clamp-2 text-sm font-medium">{channel.name}</span><span className="mt-1 block truncate text-xs text-white/45">{channel.group}</span></span></button>)}</div></section>
           )}
         </div>
       )}
@@ -861,11 +1004,29 @@ export default function QQExplorePage({
           <div className="max-h-[82vh] w-full max-w-2xl overflow-hidden rounded-lg border border-white/[0.1] bg-[#111418] shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-5"><div><h3 className="text-xl font-semibold">自定义推荐</h3><p className="mt-1 text-xs text-white/42">偏好会同步到当前 QQ 音乐账号</p></div><button type="button" disabled={preferencesLoading} onClick={() => setPreferencesOpen(false)} className="h-9 px-3 text-sm text-white/48 hover:text-white">取消</button></div>
             <div className="max-h-[58vh] overflow-y-auto p-6">
-              {preferencesLoading && preferences.length === 0 ? <div className="flex min-h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div> : preferencesError ? <p className="rounded-lg bg-rose-300/[0.08] p-4 text-sm text-rose-100/80">{preferencesError}</p> : <div className="grid gap-3 sm:grid-cols-2">{preferences.map(item => <label key={item.id} className="flex cursor-pointer items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.035] p-3"><img src={item.coverUrl} alt="" loading="lazy" decoding="async" draggable={false} className="h-12 w-12 rounded-md object-cover" /><span className="min-w-0 flex-1 truncate text-sm">{item.title}</span><input type="checkbox" checked={item.selected} onChange={event => setPreferences(current => current.map(value => value.id === item.id ? { ...value, selected: event.target.checked } : value))} className="h-4 w-4 accent-emerald-400" /></label>)}</div>}
+              {preferencesLoading && preferences.length === 0 ? <div className="flex min-h-40 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div> : preferencesError ? <p className="rounded-lg bg-rose-300/[0.08] p-4 text-sm text-rose-100/80">{preferencesError}</p> : <div className="grid gap-3 sm:grid-cols-2">{preferences.map(item => <label key={item.id} className="flex cursor-pointer items-center gap-3 rounded-lg border border-white/[0.08] bg-white/[0.035] p-3"><CachedImage src={item.coverUrl} alt="" className="h-12 w-12 rounded-md object-cover" role="compact" priority="visible" /><span className="min-w-0 flex-1 truncate text-sm">{item.title}</span><input type="checkbox" checked={item.selected} onChange={event => setPreferences(current => current.map(value => value.id === item.id ? { ...value, selected: event.target.checked } : value))} className="h-4 w-4 accent-emerald-400" /></label>)}</div>}
             </div>
             <div className="flex justify-end border-t border-white/[0.08] px-6 py-4"><button type="button" disabled={preferencesLoading || preferences.length === 0} onClick={() => void savePreferences()} className="flex h-10 items-center gap-2 rounded-full px-5 text-sm font-semibold text-[#061018] disabled:opacity-45" style={{ background: accent }}>{preferencesLoading && <Loader2 className="h-4 w-4 animate-spin" />}保存到 QQ 音乐</button></div>
           </div>
         </div>
+      )}
+
+      {radarPlayer && (
+        <QQRadarPlayer
+          songs={radarPlayer.songs}
+          continuation={radarPlayer.continuation}
+          playing={isPlaying && Boolean(currentSong && radarPlayer.songs.some(song => String(song.mid || song.id) === String(currentSong.mid || currentSong.id)))}
+          onClose={() => setRadarPlayer(null)}
+          onPlaySong={(song, songs, continuation) => {
+            setRadarPlayer(previous => previous ? { ...previous, songs } : previous)
+            onPlaySongs(song, songs, true, continuation)
+          }}
+          onTogglePlay={onPlayPause}
+          onRequestMore={async continuation => {
+            const result = await fetchQQRadarSongs({ page: continuation.page + 1, reqType: continuation.reqType, entranceSongs: continuation.entranceSongs })
+            return { songs: result.songs, page: result.page, hasMore: result.hasMore }
+          }}
+        />
       )}
 
       {playingMV && <VideoPlayer mvId={playingMV.id} mvName={playingMV.name} platform="qq" onClose={() => setPlayingMV(null)} />}
