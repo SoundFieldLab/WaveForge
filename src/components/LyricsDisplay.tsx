@@ -872,13 +872,20 @@ export default memo(function LyricsDisplay({
   const clampModernManualY = (y: number): number => {
     const wrap = springWrapRef.current
     if (!wrap || displayLyricsData.length === 0) return y
-    const cur = wrap.querySelector(`[data-index="${currentIndex}"]`) as HTMLElement | null
+    const cur = wrap.querySelector(`[data-index="${resolveModernAnchorIndex()}"]`) as HTMLElement | null
     const first = wrap.querySelector('[data-index="0"]') as HTMLElement | null
     const last = wrap.querySelector(`[data-index="${displayLyricsData.length - 1}"]`) as HTMLElement | null
     if (!cur || !first || !last) return y
-    const curCenter = cur.offsetTop + cur.offsetHeight / 2
-    const minY = first.offsetTop + first.offsetHeight / 2 - curCenter
-    const maxY = last.offsetTop + last.offsetHeight / 2 - curCenter
+    // 相对轨道顶部的布局中心：两次 rect 相减天然抵消 translateY，无需读弹簧值。
+    // （旧实现用 offsetTop，offsetParent 并非轨道 → 限位区间算错，能把歌词滚出空白。）
+    const wrapRect = wrap.getBoundingClientRect()
+    const centerInTrack = (el: HTMLElement) => {
+      const rect = el.getBoundingClientRect()
+      return rect.top + rect.height / 2 - wrapRect.top
+    }
+    const curCenter = centerInTrack(cur)
+    const minY = centerInTrack(first) - curCenter
+    const maxY = centerInTrack(last) - curCenter
     return clamp(y, Math.min(minY, maxY), Math.max(minY, maxY))
   }
   const handleModernWheel = (e: React.WheelEvent) => {
@@ -1240,6 +1247,15 @@ export default memo(function LyricsDisplay({
     effectiveWordByWordEffectMode,
   ])
 
+  // 弹簧滚动的焦点锚点：当前行若是生成的间奏行（无文本、只显示三点/波形），
+  // 焦点锚到下一句歌词，避免焦点线上没有任何可见歌词（表现为"当前句不知跑哪去了"）。
+  const resolveModernAnchorIndex = (): number => {
+    const line = displayLyricsData[currentIndex]
+    if (!line?.isGeneratedInterlude) return currentIndex
+    const next = displayLyricsData[currentIndex + 1]
+    return next?.text?.trim() ? currentIndex + 1 : currentIndex
+  }
+
   // 崭新模式：弹簧 transform 驱动滚动（零布局跳动）
   useEffect(() => {
     if (!isModernScroll) return
@@ -1248,12 +1264,19 @@ export default memo(function LyricsDisplay({
     const measure = () => {
       const track = springWrapRef.current
       if (!track) return
-      const el = track.querySelector(`[data-index="${currentIndex}"]`) as HTMLElement | null
+      const el = track.querySelector(`[data-index="${resolveModernAnchorIndex()}"]`) as HTMLElement | null
       if (!el) return
-      const focalY = container.clientHeight * 0.36
-      if (focalY <= 0) return  // 容器尚未完成布局，待 ResizeObserver 触发真实尺寸
-      const relTop = el.offsetTop
-      const target = focalY - (relTop + el.offsetHeight / 2) - modernManualY
+      const containerRect = container.getBoundingClientRect()
+      if (containerRect.height <= 0) return  // 容器尚未完成布局，待 ResizeObserver 触发真实尺寸
+      // 用 rect 反推「行中心相对容器内容顶部的布局坐标」：rect 已含当前 translateY，
+      // 减去 springY 当前值即得不受变换影响的真实布局位置。
+      // 旧实现用 el.offsetTop：行容器的 offsetParent 并非轨道元素、间奏行高度还为 0，
+      // 算出的目标值会把整份歌词推离焦点线（表现为"滚动时当前句跑出视野"）。
+      const trackRect = track.getBoundingClientRect()
+      const elRect = el.getBoundingClientRect()
+      const layoutCenter = (trackRect.top - containerRect.top) - springY.get()
+        + (elRect.top + elRect.height / 2 - trackRect.top)
+      const target = containerRect.height * 0.36 - layoutCenter - modernManualY
       if (prefersReducedMotion) springY.jump(target)
       else springY.set(target)
     }
