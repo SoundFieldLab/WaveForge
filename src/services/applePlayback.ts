@@ -726,10 +726,26 @@ export function createAppleHlsConfig(
       }
       if (payload && typeof payload.status === 'number' && payload.status !== 0) {
         recordAppleAcceptanceEvent('license-failure')
-        forwardToMainLog(`[ApplePlayback] license 响应被拒 status=${payload.status}`)
+        // 诊断：电台（ra.xxx）没有 songId，adamId 会退回 playParams.id / stationId。
+        // Apple 的 license 服务通常要求数字 adamId，若这里打出的是 ra.xxx 即定位到根因。
+        const diagAdamId = stream.licenseAdamId || stream.songId || '-'
+        forwardToMainLog(`[ApplePlayback] license 响应被拒 status=${payload.status} adamId=${diagAdamId} live=${stream.live === true}`)
         // -1021 = CDM 身份类被 Apple 拒绝（Electron 经典 L3 CDM）：进入冷却，
         // 后续 Apple 歌曲跳过 CENC 空转直接走载体（10 分钟后自动重试）
         if (payload.status === -1021) markCencRejected()
+        // -1001 = Apple 授权被拒（实测：登录会话凭据放置过久后出现，网页会话 Cookie 是
+        // license 接口的必要条件）。与 -1021 一样进入冷却，避免在"重试→再失败"之间空转，
+        // 并给出可操作提示——原先该状态码没有任何处理，只抛错重试。
+        if (payload.status === -1001) {
+          markCencRejected()
+          if (typeof window !== 'undefined') {
+            try {
+              window.dispatchEvent(new CustomEvent('app-toast', {
+                detail: { message: 'Apple Music 授权被拒（多为登录会话过期）：请在设置里重新登录 Apple Music 后重试', type: 'error' },
+              }))
+            } catch { /* 忽略 */ }
+          }
+        }
         // -1002（failureType 2002）= Apple 账号会话过期：可感知提示引导重新登录，而非静默回退
         if (payload.status === -1002 && typeof window !== 'undefined') {
           try {
