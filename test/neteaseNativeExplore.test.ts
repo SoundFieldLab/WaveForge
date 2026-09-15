@@ -1,15 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeNeteaseSongs } from '../src/features/neteaseExplore/api'
-import { normalizeNeteaseBlock, normalizeNeteaseDailyPodcast, normalizeNeteaseFlow, normalizeNeteaseHome } from '../src/features/neteaseExplore/model'
+import { dedupeNeteaseResources, normalizeNeteaseBlock, normalizeNeteaseDailyPodcast, normalizeNeteaseFlow, normalizeNeteaseHome } from '../src/features/neteaseExplore/model'
 import {
   RED_COUNT_BATCH_LIMIT,
   arrayResponseData,
+  authenticatedProfile,
   formatRedCountBatch,
   isAccountScopedCookie,
   parseRedCountIds,
   redCountFromBody,
   registerNeteaseNativeExploreRoutes,
   responseBody,
+  sessionReason,
 } from '../server/netease-native-explore.mjs'
 
 // test/neteaseNativeExplore.test.ts
@@ -79,7 +81,7 @@ describe('NetEase native recommendation feed', () => {
     ].map((value, index) => normalizeNeteaseBlock({ blockCode: `B${index}`, showType: 'UNKNOWN', creatives: [value] }, index).resources[0])
 
     expect(resources.map(resource => resource.action.type)).toEqual([
-      'playlist', 'album', 'program', 'radio', 'mv', 'comments', 'podcast-section',
+      'playlist', 'album', 'program', 'radio', 'mv', 'comments', 'podcast-mine',
     ])
   })
 
@@ -147,6 +149,71 @@ describe('NetEase native recommendation feed', () => {
     expect(songs[0]).toMatchObject({ id: 101, platform: 'netease', duration: 1200 })
     expect(songs[0].album.picUrl).toBe('https://cover')
     expect(songs[1]).toMatchObject({ id: 102, name: 'Heart song', duration: 2300 })
+  })
+
+  it('accepts a valid profile from either account endpoint and rejects mismatches', () => {
+    expect(authenticatedProfile(
+      { code: 200, data: { profile: { userId: 42, nickname: 'Status' } } },
+      { code: 301 },
+    )).toMatchObject({ userId: '42', nickname: 'Status' })
+    expect(authenticatedProfile(
+      { code: 200 },
+      { code: 200, data: { account: { profile: { id: 42, nickname: 'Account', avatarUrl: 'http://avatar' } } } },
+    )).toEqual({ userId: '42', nickname: 'Account', avatarUrl: 'https://avatar' })
+    expect(authenticatedProfile(
+      { data: { profile: { userId: 42 } } },
+      { profile: { userId: 43 } },
+    )).toBeNull()
+    expect(sessionReason('MUSIC_U=token', { profile: { userId: 42 } }, { profile: { userId: 43 } }, null)).toBe('profile-mismatch')
+  })
+
+  it('merges native roots, keeps deep artwork, and deduplicates entities by stable id', () => {
+    const block = normalizeNeteaseBlock({
+      creatives: [{ resourceId: '7', resourceType: 'song', action: 'orpheus://song/7?source=a', songData: { id: 7, name: 'Same song', ar: [], al: {} } }],
+      dslData: { nested: { resourceId: '7', resourceType: 'song', action: 'orpheus://song/7?source=b', songData: { id: 7, name: 'Same song', ar: [], al: {} } } },
+      crossPlatformConfig: { dslContent: { tile: { resourceId: '9', resourceType: 'playlist', action: 'orpheus://playlist/9', mainTitle: { title: 'Deep list' }, resourceExtInfo: { coverImageUrl: 'http://deep-cover' } } } },
+    }, 0)
+
+    expect(block.resources).toHaveLength(2)
+    expect(block.resources.find(resource => resource.id === '9')).toMatchObject({ title: 'Deep list', coverUrl: 'https://deep-cover' })
+    expect(dedupeNeteaseResources([...block.resources, block.resources[0]])).toHaveLength(2)
+  })
+
+  it('deduplicates initial flow and song API batches by entity id', () => {
+    const resource = (action: string) => ({ resourceId: '8', resourceType: 'song', action, songData: { id: 8, name: 'One', ar: [], al: {} } })
+    expect(normalizeNeteaseFlow({ data: { resources: [resource('orpheus://song/8?a=1'), resource('orpheus://song/8?a=2')] } }).resources).toHaveLength(1)
+    expect(normalizeNeteaseSongs([{ id: 8, name: 'One', ar: [], al: {} }, { id: 8, name: 'One again', ar: [], al: {} }])).toHaveLength(1)
+  })
+
+  it('extracts nested artwork objects and preserves artist and scene section semantics', () => {
+    const block = normalizeNeteaseBlock({
+      blockCode: 'ARTIST_HOT',
+      showType: 'HOMEPAGE_ARTIST_HOT',
+      uiElement: { mainTitle: { title: 'LiSA等艺人热门金曲' } },
+      resources: [{
+        resourceId: 'artist-song-1',
+        resourceType: 'song',
+        mainTitle: { title: '听·LiSA热门精选|ADAMAS (TV Size)' },
+        uiElement: { image: { image: { imageUrl: 'http://lisa-cover' } } },
+        songData: { id: 399, name: 'ADAMAS', ar: [{ name: 'LiSA' }], al: { picUrl: 'http://album-cover' } },
+      }],
+    }, 0)
+    expect(block.title).toBe('LiSA等艺人热门金曲')
+    expect(block.resources[0]).toMatchObject({ title: '听·LiSA热门精选|ADAMAS (TV Size)', coverUrl: 'https://lisa-cover' })
+  })
+
+  it('inherits parent shortcut artwork and labels into resourceInfoList children', () => {
+    const block = normalizeNeteaseBlock({
+      showType: 'DRAGON_BALL',
+      creatives: [{
+        creativeId: 'shortcut-parent',
+        mainTitle: { title: '漫游' },
+        subTitle: { title: '多样频道无限畅听' },
+        coverImageUrl: 'http://roam-cover',
+        resourceInfoList: [{ resourceId: 'roam-1', resourceType: 'radio', action: 'orpheus://rnpage?component=roam' }],
+      }],
+    }, 0)
+    expect(block.resources[0]).toMatchObject({ title: '漫游', subtitle: '多样频道无限畅听', coverUrl: 'https://roam-cover' })
   })
 
   it('normalizes a program mainSong using the shared song contract', () => {

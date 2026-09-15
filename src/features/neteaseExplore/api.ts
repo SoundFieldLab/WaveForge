@@ -16,6 +16,25 @@ async function request(path: string, params: Record<string, string | undefined>,
   return data
 }
 
+export interface NeteaseSessionStatus {
+  authenticated: boolean | null
+  profile: { userId: string; nickname: string; avatarUrl: string } | null
+  reason: string
+}
+
+export async function fetchNeteaseSessionStatus(signal?: AbortSignal): Promise<NeteaseSessionStatus> {
+  const payload = await request('/session-status', { cookie: getExploreCookie('netease') }, signal)
+  return {
+    authenticated: typeof payload?.authenticated === 'boolean' ? payload.authenticated : null,
+    profile: payload?.profile?.userId ? {
+      userId: String(payload.profile.userId),
+      nickname: String(payload.profile.nickname || ''),
+      avatarUrl: String(payload.profile.avatarUrl || ''),
+    } : null,
+    reason: String(payload?.reason || ''),
+  }
+}
+
 export async function fetchNeteaseNativeHome(
   refresh = false,
   signal?: AbortSignal,
@@ -51,7 +70,7 @@ export function normalizeNeteaseSongs(payload: any): Song[] {
     ? payload
     : payload?.data?.dailySongs || payload?.data?.songs || payload?.dailySongs || payload?.songs || payload?.data || []
   if (!Array.isArray(candidates)) return []
-  return candidates.map((value: any) => {
+  const songs = candidates.map((value: any) => {
     const track = value?.songInfo || value?.song || value?.simpleSong || value
     const album = track?.al || track?.album || {}
     const artists = track?.ar || track?.artists || []
@@ -68,6 +87,12 @@ export function normalizeNeteaseSongs(payload: any): Song[] {
       noCopyright: Number(track?.privilege?.st) < 0,
     }
   }).filter((song: Song) => song.id && song.name)
+  const seen = new Set<number>()
+  return songs.filter((song: Song) => {
+    if (seen.has(song.id)) return false
+    seen.add(song.id)
+    return true
+  })
 }
 
 export async function fetchNeteaseDailySongs(signal?: AbortSignal): Promise<Song[]> {
@@ -106,12 +131,34 @@ export async function fetchNeteaseDailyStyleSongs(categoryId: string, tagId: str
   return normalizeNeteaseSongs(payload?.data?.dailySongs || [])
 }
 
-export async function fetchNeteaseRoam(signal?: AbortSignal): Promise<Song[]> {
-  return normalizeNeteaseSongs(await request('/roam', { cookie: getExploreCookie('netease'), mode: 'DEFAULT', limit: '30' }, signal))
+export interface NeteaseRoamOptions {
+  mode?: string
+  subMode?: string
+  limit?: number
+  entranceType?: string
+  unplaySongIds?: Array<string | number>
+  openAidj?: boolean
+  aidjReqTimes?: number
 }
 
-export async function fetchNeteaseHeartMode(songId: number, playlistId: string, signal?: AbortSignal): Promise<Song[]> {
-  return normalizeNeteaseSongs(await request('/heart-mode', { cookie: getExploreCookie('netease'), songId: String(songId), playlistId, startMusicId: String(songId), type: 'fromPlayOne', count: '30' }, signal))
+export async function fetchNeteaseRoam(signal?: AbortSignal, options: NeteaseRoamOptions = {}): Promise<Song[]> {
+  const unplaySongIds = [...new Set((options.unplaySongIds || []).map(String).filter(id => /^\d+$/.test(id)))].slice(-100)
+  return normalizeNeteaseSongs(await request('/roam', {
+    cookie: getExploreCookie('netease'), mode: options.mode || 'DEFAULT', subMode: options.subMode,
+    limit: String(Math.max(1, Math.min(50, options.limit || 30))), entranceType: options.entranceType,
+    unplaySongIds: unplaySongIds.length ? JSON.stringify(unplaySongIds) : undefined,
+    openAidj: options.openAidj ? '1' : undefined,
+    aidjReqTimes: options.aidjReqTimes == null ? undefined : String(Math.max(0, options.aidjReqTimes)),
+  }, signal))
+}
+
+export interface NeteaseHeartModeOptions { count?: number; type?: string; extJson?: string }
+
+export async function fetchNeteaseHeartMode(songId: number, playlistId: string, signal?: AbortSignal, options: NeteaseHeartModeOptions = {}): Promise<Song[]> {
+  return normalizeNeteaseSongs(await request('/heart-mode', {
+    cookie: getExploreCookie('netease'), songId: String(songId), playlistId, startMusicId: String(songId),
+    type: options.type || 'fromPlayOne', count: String(Math.max(1, Math.min(50, options.count || 30))), extJson: options.extJson || '{}',
+  }, signal))
 }
 
 export async function fetchNeteaseProgramSong(programId: string, signal?: AbortSignal): Promise<Song | null> {
@@ -161,4 +208,25 @@ export async function fetchNeteasePodcastHome(signal?: AbortSignal): Promise<Net
   const payload = await request('/podcast-home', { cookie: getExploreCookie('netease') }, signal)
   const data = payload?.data || {}
   return normalizeNeteaseHome({ ...payload, data: { ...data, blocks: data.blockVOS || [] } })
+}
+
+/** 歌曲详情：新歌新碟等卡片只给 song id 时用它补齐播放信息 */
+export async function fetchNeteaseSongDetail(ids: Array<string | number>, signal?: AbortSignal): Promise<Song[]> {
+  const list = [...new Set(ids.map(String).filter(id => /^\d+$/.test(id)))].slice(0, 20)
+  if (list.length === 0) return []
+  return normalizeNeteaseSongs(await request('/song-detail', { cookie: getExploreCookie('netease'), ids: list.join(',') }, signal))
+}
+
+/** 相似歌曲：种子来自推荐页卡片自带的 sourceId 列表（无需当前播放） */
+export async function fetchNeteaseSimilarSongs(seedIds: Array<string | number>, signal?: AbortSignal): Promise<Song[]> {
+  const ids = [...new Set(seedIds.map(String).filter(id => /^\d+$/.test(id)))].slice(0, 3)
+  if (ids.length === 0) return []
+  return normalizeNeteaseSongs(await request('/similar-songs', { cookie: getExploreCookie('netease'), ids: ids.join(',') }, signal))
+}
+
+/** 相似艺人：种子艺人 id 来自推荐页卡片，取其热门歌曲 */
+export async function fetchNeteaseArtistRadio(artistIds: Array<string | number>, signal?: AbortSignal): Promise<Song[]> {
+  const ids = [...new Set(artistIds.map(String).filter(id => /^\d+$/.test(id)))].slice(0, 3)
+  if (ids.length === 0) return []
+  return normalizeNeteaseSongs(await request('/artist-radio', { cookie: getExploreCookie('netease'), ids: ids.join(',') }, signal))
 }

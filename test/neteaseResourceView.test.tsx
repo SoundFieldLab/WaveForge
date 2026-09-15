@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { NeteaseNativeBlockView, formatNeteaseCount, groupSongResources, SongRestrictionBadges, type ResourceCallbacks } from '../src/features/neteaseExplore/NeteaseResourceView'
+import { NeteaseNativeBlockView, classifyNeteaseBlock, formatNeteaseCount, groupSongResources, SongRestrictionBadges, type ResourceCallbacks } from '../src/features/neteaseExplore/NeteaseResourceView'
 import type { NeteaseNativeResource } from '../src/features/neteaseExplore/model'
 
 function songResource(id: number, favorite = false): NeteaseNativeResource {
@@ -18,6 +18,7 @@ function callbacks(overrides: Partial<ResourceCallbacks> = {}): ResourceCallback
     isFavoritePending: () => false,
     onToggleFavorite: vi.fn(),
     favoriteCount: resource => resource.favoriteCount,
+    entitlement: 'free',
     ...overrides,
   }
 }
@@ -28,6 +29,13 @@ describe('NeteaseResourceView', () => {
     expect(groupSongResources(resources).map(group => group.length)).toEqual([3, 3, 1])
     expect(formatNeteaseCount(12000)).toBe('1.2万+')
     expect(formatNeteaseCount(120000000)).toBe('1.2亿+')
+  })
+
+  it('selects native layouts for the sampled artist and scene sections', () => {
+    expect(classifyNeteaseBlock({ blockCode: 'ARTIST_HOT', showType: 'HOMEPAGE_ARTIST_HOT', title: 'LiSA等艺人热门金曲', subtitle: '' })).toBe('cover-shelf')
+    expect(classifyNeteaseBlock({ blockCode: 'ARTIST_RCMD', showType: 'HOMEPAGE_ARTIST_RCMD', title: '从你喜欢的艺人开始漫游', subtitle: '' })).toBe('cover-shelf')
+    expect(classifyNeteaseBlock({ blockCode: 'STYLE', showType: 'HOMEPAGE_BLOCK_STYLE_RCMD', title: '猜你喜欢的日文好歌', subtitle: '' })).toBe('songs')
+    expect(classifyNeteaseBlock({ blockCode: 'SCENE', showType: 'HOMEPAGE_SCENE_PLAYLIST', title: '场景歌单', subtitle: '' })).toBe('cover-shelf')
   })
 
   it('plays from the whole row while heart clicks stay isolated and show seeded state', () => {

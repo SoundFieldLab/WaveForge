@@ -20,6 +20,7 @@ import {
   type NeteaseJourneyOverview,
   type NeteaseJourneySong,
 } from '../services/neteaseMusicJourney'
+import CachedImage from './CachedImage'
 
 type JourneyTab = 'rank' | 'report' | 'preference' | 'archive'
 
@@ -170,7 +171,7 @@ function SongList({
         >
           <span className="w-7 shrink-0 text-center text-xs font-semibold text-white/30">{song.rank || index + 1}</span>
           <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-xl bg-white/[0.06]">
-            {song.album.picUrl ? <img src={song.album.picUrl} alt="" className="h-full w-full object-cover" loading="lazy" /> : <Music2 className="m-3 h-5 w-5 text-white/30" />}
+            {song.album.picUrl ? <CachedImage src={song.album.picUrl} alt="" className="h-full w-full object-cover" role="row" size={64} priority="visible" /> : <Music2 className="m-3 h-5 w-5 text-white/30" />}
             <span className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition group-hover:opacity-100"><Play className="h-4 w-4 fill-current" /></span>
           </div>
           <div className="min-w-0 flex-1">
