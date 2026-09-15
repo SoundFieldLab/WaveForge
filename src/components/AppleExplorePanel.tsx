@@ -2412,7 +2412,7 @@ export function AppleExplorePanel({
       >
         {/* 动态封面头部。圆角必须放在视频最近的可裁剪祖先上并独立层叠上下文：
             合成中的 <video> 会逃逸祖先的 border-radius 裁剪（直角 bug）。 */}
-        <div className="relative h-56 w-full overflow-hidden rounded-t-[28px] isolate">
+        <div className="relative h-72 w-full overflow-hidden rounded-t-[28px] isolate">
           <DynamicCover item={stationDetail.station} className="h-full w-full object-cover" />
           <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(12,16,23,1)_0%,rgba(12,16,23,0.25)_60%,transparent_100%)]" />
           <button
