@@ -119,7 +119,7 @@ describe('歌词风格样式', () => {
 })
 
 describe('逐字填充（连续光带）', () => {
-  const fillMasks = (style: 'soft' | 'modern', currentTime: number) => {
+  const spanMasks = (style: 'soft' | 'modern', currentTime: number) => {
     const { container } = renderLyrics(style, currentTime)
     const masks = Array.from(container.querySelectorAll('span'))
       .map(node => (node as HTMLElement).style.webkitMaskImage || (node as HTMLElement).style.maskImage || '')
@@ -128,19 +128,37 @@ describe('逐字填充（连续光带）', () => {
     return masks
   }
 
-  it('摩登与柔和都用连续光带遮罩填充（不是按词硬边擦亮）', () => {
+  it('柔和：当前行用 span 级羽化填充层推进', () => {
     // currentTime 落在第一行第一个词的演唱区间内 → 出现从左推进的填充层
-    for (const style of ['soft', 'modern'] as const) {
-      expect(fillMasks(style, 0.3).length).toBeGreaterThan(0)
-    }
+    expect(spanMasks('soft', 0.3).length).toBeGreaterThan(0)
   })
 
-  it('摩登的光带比柔和更窄（柔和=大面积柔光扩散）', () => {
-    const softMask = fillMasks('soft', 0.3)[0]
-    const modernMask = fillMasks('modern', 0.3)[0]
-    expect(softMask).toBeTruthy()
-    expect(modernMask).toBeTruthy()
-    expect(softMask).not.toBe(modernMask)
+  it('摩登：当前行使用整行光带遮罩容器（AMLL 两档 alpha + em 羽化）', () => {
+    const { container } = renderLyrics('modern', 0.3)
+    // jsdom 会丢弃含 calc() / 斜杠 alpha 的 mask 值，这里以 mask-repeat 标记定位遮罩容器；
+    // 渐变字符串本身的契约由 test/amllEmphasize.test.ts 的 buildLineBandMask 用例覆盖。
+    const maskHost = Array.from(container.querySelectorAll('span'))
+      .find(node => (node.getAttribute('style') || '').includes('mask-repeat'))
+    expect(maskHost).toBeTruthy()
+    // 遮罩容器必须是行内元素（<p> 内不能出现块级 <div>）
+    expect(maskHost?.tagName).toBe('SPAN')
+    cleanup()
+  })
+
+  it('摩登：遮罩挂在行内元素上（不产生 <p> 内的块级嵌套）', () => {
+    const { container } = renderLyrics('modern', 0.3)
+    const paragraph = container.querySelector('p')
+    expect(paragraph?.querySelector('div')).toBeNull()
+    cleanup()
+  })
+
+  it('摩登：长音字出现白色辉光（AM 版强调，而非柔和的彩色 sustainGlow）', () => {
+    // 第二行 lineStart=2000，currentTime=3.6 → currentMs=1400，落在 ' now'（1000ms 长音）的强调区间
+    const { container } = renderLyrics('modern', 3.6)
+    const glows = Array.from(container.querySelectorAll('span'))
+      .map(node => (node as HTMLElement).style.textShadow || '')
+      .filter(value => value.includes('rgba(255, 255, 255,'))
+    expect(glows.length).toBeGreaterThan(0)
   })
 })
 

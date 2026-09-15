@@ -5,6 +5,16 @@ import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
 import { normalizeSequentialWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
 import {
+  buildLineBandMask,
+  charEmphasizeDelay,
+  charFloatYEm,
+  CHAR_FLOAT_LEAD_MS,
+  computeEmphasizeParams,
+  computeSungRatio,
+  emphasizeCharFrame,
+  shouldEmphasizeWord,
+} from '../utils/amllEmphasize'
+import {
   LYRIC_FILL_EFFECT_MODE,
   LYRIC_STYLE_MODE_EVENT,
   readLyricStyleMode,
@@ -689,6 +699,10 @@ export default memo(function LyricsDisplay({
   // 摩登（AMLL 风格）行视觉：整行随弹簧平移，行自身只做 scale/blur/opacity——
   // 不含行级 y 位移（旧实现让行在 upcoming→current→played 切换时上下跳 2~3px）。
   const isAmllLyricMotion = isModernScroll && !isDesktopLayout
+  /** 摩登的逐字行渲染（AMLL 光带 + 长音强调），替代柔和的 susainGlow 路径 */
+  const isAmllFill = isAmllLyricMotion && effectiveWordByWordEnabled
+  /** plus-lighter 混合：复刻 AM"白但非纯白"（白字与背景加法混合染上背景色）；浅色主题会过曝，故只用于深色 */
+  const usePlusLighterBlend = isAmllFill && !isLightTheme
   /** 需要按"焦点行视觉模型"渲染的行（Apple 逐字覆盖或摩登风格） */
   const useLineMotionModel = isAppleLineMode || isAmllLyricMotion
   const containerRef = useRef<HTMLDivElement>(null)
@@ -1440,6 +1454,89 @@ export default memo(function LyricsDisplay({
     // 只移除汉字后面的假名注音括号，不移除普通括号；匹配模式：一个或多个汉字后跟括号内的假名
     return text.replace(/([\u4e00-\u9fff]+)\s*[（]([\u3040-\u309f\u30a0-\u30ff]+)[）]/g, '$1')
   }
+  /**
+   * 摩登风格逐字行（AMLL 实现）：
+   *  - 整行一条光带遮罩：两档 alpha（已唱 1 / 未唱 0.4）+ 边界羽化，光带随已唱宽度推进；
+   *  - 长音字强调：CJK 唱满 1s（或 1s 且 2~7 字母）的词触发白色辉光 + 字级缩放 + 推挤 + 上浮 + 错落；
+   *  - 不使用柔和风格的 sustainGlow（那是"拖音即染色发光"的另一套逻辑）。
+   */
+  const renderAmllLine = (
+    lyric: LyricLine,
+    wordsWithIndex: Array<{ word: LyricWord; originalIndex: number }>,
+    playbackTime: number,
+  ) => {
+    const lineStartMs = lyric.time * 1000
+    // 与柔和/旧 Apple 路径一致的 200ms 节拍延迟，让填充跟随演唱而非提前
+    const currentMs = Math.max(0, (playbackTime + lyricOffset) * 1000 - lineStartMs - 200)
+    const words = wordsWithIndex.map(item => item.word)
+    const maskImage = buildLineBandMask(computeSungRatio(words, currentMs))
+    const lastWordIndex = wordsWithIndex.length - 1
+
+    return (
+      // 用 span 而非 div：这是 <p> 内部（div 会触发浏览器自动拆标签，破坏行布局）。
+      // inline-block + width:100% 让遮罩按整行盒子计算。
+      <span
+        className="relative"
+        style={{
+          display: 'inline-block',
+          width: '100%',
+          WebkitMaskImage: maskImage,
+          maskImage,
+          WebkitMaskRepeat: 'no-repeat',
+          maskRepeat: 'no-repeat',
+        }}
+      >
+        {wordsWithIndex.map(({ word, originalIndex }, wordIndex) => {
+          const text = word.word || ''
+          if (!text) return null
+          if (!text.trim()) {
+            return <span key={`amll-space-${originalIndex}`} style={{ whiteSpace: 'pre' }}>{text}</span>
+          }
+          if (!effectiveLyricGlow || !shouldEmphasizeWord(word)) {
+            return (
+              <span key={`amll-w-${originalIndex}`} style={{ color: activeLyricColor, whiteSpace: 'pre' }}>
+                {text}
+              </span>
+            )
+          }
+          const chars = Array.from(text)
+          const params = computeEmphasizeParams(
+            word.duration,
+            word.startTime,
+            chars.length,
+            wordIndex === lastWordIndex,
+          )
+          return (
+            <span
+              key={`amll-w-${originalIndex}`}
+              style={{ color: activeLyricColor, whiteSpace: 'pre', display: 'inline-block' }}
+            >
+              {chars.map((char, charIndex) => {
+                const delay = charEmphasizeDelay(params, charIndex)
+                const frame = emphasizeCharFrame(params, charIndex, chars.length, currentMs - delay)
+                const floatY = charFloatYEm(params, currentMs - (delay - CHAR_FLOAT_LEAD_MS))
+                return (
+                  <span
+                    key={`amll-c-${originalIndex}-${charIndex}`}
+                    style={{
+                      display: 'inline-block',
+                      transform: `scale(${frame.scale.toFixed(4)}) translate(${frame.offsetXEm.toFixed(4)}em, ${(frame.offsetYEm + floatY).toFixed(4)}em)`,
+                      textShadow: frame.glowAlpha > 0.01
+                        ? `0 0 ${frame.glowEm.toFixed(3)}em rgba(255, 255, 255, ${frame.glowAlpha.toFixed(3)})`
+                        : undefined,
+                    }}
+                  >
+                    {char}
+                  </span>
+                )
+              })}
+            </span>
+          )
+        })}
+      </span>
+    )
+  }
+
   // 优化的逐字渲染
   const renderLyricLine = (
     preparedLyric: PreparedLyricLine,
@@ -1449,6 +1546,10 @@ export default memo(function LyricsDisplay({
     playbackTime = currentTime
   ) => {
     const { lyric, wordsWithIndex, sustainProfiles } = preparedLyric
+    // 摩登：整行走 AMLL 光带 + 长音强调（与柔和的 sustainGlow 路径完全分开）
+    if (isAmllFill && isCurrent && lyric.words && lyric.words.length > 0) {
+      return renderAmllLine(lyric, wordsWithIndex, playbackTime)
+    }
     if (effectiveWordByWordEnabled && isCurrent && lyric.words && lyric.words.length > 0) {
       // 计算相对于行开始的当前时间（毫秒）
       const lineStartTime = lyric.time * 1000
@@ -2273,9 +2374,13 @@ export default memo(function LyricsDisplay({
         onWheel={handleWheel}
         onMouseEnter={handleContainerMouseEnter}
         onMouseLeave={handleContainerMouseLeave}
-        style={isModernScroll ? undefined : {
-          WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
-          maskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+        style={{
+          ...(isModernScroll ? {} : {
+            WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+            maskImage: 'linear-gradient(to bottom, transparent 0%, black 12%, black 88%, transparent 100%)',
+          }),
+          // 摩登：复刻 AM 的"白但非纯白"——整层加法混合，白字与封面背景相加而染上背景色
+          ...(usePlusLighterBlend ? { mixBlendMode: 'plus-lighter' as const } : {}),
         }}
       >
       {/* 歌词滚动容器：过渡切歌时前一曲淡出快（0.18s）、后一曲淡入慢（0.5s），避免叠字难看 */}
