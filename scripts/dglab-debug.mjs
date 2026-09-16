@@ -87,7 +87,9 @@ async function main() {
     process.stdout.write('调试后端未在预期时间内就绪，仍继续启动前端（请检查上方后端输出）。\n')
   }
   launch('前端', process.execPath, [path.join('node_modules', 'vite', 'bin', 'vite.js'), '--config', 'debug-minimal/vite.config.ts'])
-  process.stdout.write('\n  调试平台地址：http://127.0.0.1:3100\n  按 Ctrl+C 停止\n\n')
+  process.stdout.write('\n  调试平台地址：http://127.0.0.1:3100\n')
+  process.stdout.write('  真机接入：在页面「控制台」里用手机 DG-Lab App 扫二维码（需同一 WiFi）\n')
+  process.stdout.write('  按 Ctrl+C 停止\n\n')
 }
 
 void main()

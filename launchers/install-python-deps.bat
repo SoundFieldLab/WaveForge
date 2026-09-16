@@ -1,7 +1,7 @@
 @echo off
 setlocal
 chcp 65001 >nul
-set "PROJECT_ROOT=%~dp0"
+set "PROJECT_ROOT=%~dp0..\"
 pushd "%PROJECT_ROOT%" >nul
 echo ========================================
 echo WaveForge Python 依赖安装脚本

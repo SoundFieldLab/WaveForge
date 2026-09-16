@@ -114,12 +114,6 @@ export default function Harness() {
 
   useEffect(() => { void loadTracks() }, [loadTracks])
 
-  // 自动接入虚拟设备：省掉每次刷新都要手点「接入」。
-  // 后端启动时也会连一次，这里是页面刷新后的一次幂等补连。
-  useEffect(() => {
-    void fetch(`${API}/api/debug/device/connect`, { method: 'POST' }).catch(() => undefined)
-  }, [])
-
   const current = useMemo(() => tracks.find(t => t.id === trackId) ?? null, [tracks, trackId])
   const trackUrl = current ? `${API}/api/debug/music/${encodeURIComponent(current.id)}` : undefined
 
@@ -136,18 +130,9 @@ export default function Harness() {
 
   useEffect(() => { engine.setVolume(volume) }, [volume, engine])
 
-  /* ------------------------------ 虚拟设备 ------------------------------ */
+  /* ------------------------------ 中继控制 ------------------------------ */
 
-  const connectDevice = useCallback(async () => {
-    setDeviceBusy(true)
-    try { await fetch(`${API}/api/debug/device/connect`, { method: 'POST' }) } finally { setDeviceBusy(false) }
-  }, [])
-
-  const disconnectDevice = useCallback(async () => {
-    setDeviceBusy(true)
-    try { await fetch(`${API}/api/debug/device/disconnect`, { method: 'POST' }) } finally { setDeviceBusy(false) }
-  }, [])
-
+  // 重启中继：真机连接会被掐断，需要在手机 App 上重新扫码。
   const restartRelay = useCallback(async () => {
     setDeviceBusy(true)
     try {
@@ -157,9 +142,6 @@ export default function Harness() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'restart', settings: { ...settings, port: 31082 } }),
       })
-      // 中继重启会掐断设备连接：稍等再让虚拟设备回连
-      await new Promise(r => setTimeout(r, 700))
-      await fetch(`${API}/api/debug/device/connect`, { method: 'POST' })
     } finally { setDeviceBusy(false) }
   }, [])
 
@@ -362,21 +344,17 @@ export default function Harness() {
                     </p>
                   )}
 
-                  <div className="flex flex-wrap gap-2 pt-1 border-t border-white/[0.07]">
-                    <button type="button" onClick={() => void connectDevice()} disabled={deviceBusy}
-                      className="px-2.5 py-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 text-[10px] text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-40 transition-colors">
-                      接入虚拟设备
-                    </button>
-                    <button type="button" onClick={() => void disconnectDevice()} disabled={deviceBusy}
-                      className="px-2.5 py-1 rounded-md border border-white/15 text-[10px] text-white/70 hover:bg-white/10 disabled:opacity-40 transition-colors">
-                      断开
-                    </button>
+                  <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-white/[0.07]">
                     <button type="button" onClick={() => void restartRelay()} disabled={deviceBusy}
-                      className="px-2.5 py-1 rounded-md border border-white/15 text-[10px] text-white/70 hover:bg-white/10 disabled:opacity-40 transition-colors">
+                      className="px-2.5 py-1 rounded-md border border-white/15 text-[10px] text-white/70 hover:bg-white/10 disabled:opacity-40 transition-colors"
+                      title="重启中继（端口 31082）。真机连接会被断开，需要重新扫码。">
                       <span className="inline-flex items-center gap-1">
                         {deviceBusy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Radio className="w-3 h-3" />}重启中继
                       </span>
                     </button>
+                    <span className="text-[10px] text-white/35 leading-relaxed">
+                      真机连接：在「控制台」里用手机 App 扫二维码
+                    </span>
                   </div>
                 </div>
               )}

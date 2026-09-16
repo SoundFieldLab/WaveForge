@@ -51,34 +51,36 @@ card=simple: increase hourly forecast readability
 |---|---|
 | Page | `debug-minimal/index.html` |
 | Local URL | `http://127.0.0.1:3100` |
-| Start command | `npm run dglab:debug:all` (backend + frontend), or `dglab:debug` / `dglab:debug:ui` separately |
+| Start command | `npm run dglab:debug:all`, or `launchers/start-dglab-debug.bat`, or `dglab:debug` / `dglab:debug:ui` separately |
 | Source entry | `debug-minimal/src/main.tsx` |
 | Docs | `debug-minimal/README.md` |
-| Backend | `debug-minimal/server/index.cjs` (real relay on 31082 / API 3101) + `server/virtual-device.cjs` |
+| Backend | `debug-minimal/server/index.cjs` (real relay on 31082 / API 3101) + `server/frame-tap.cjs` |
 | Type check | `npm run dglab:debug:typecheck` |
 | Production status | Development-only. Not in electron-builder `files` nor Vite inputs; committed to the repo for shared debugging. |
 
 ### Purpose
 
-Debug the DG-LAB (coyote) plugin without hardware and without restarting the packaged app. It reuses the production plugin code directly, so results transfer:
+Debug the DG-LAB (coyote) plugin with a **real device** and without restarting the packaged app. It reuses the production plugin code directly, so results transfer:
 
 - `@` resolves to the repo `src/`, so the console/widget UI being edited here is the same file the app ships.
 - `server/dglab-relay.cjs` is `require`d in-process, so the mapping engine under test is the shipping engine.
-- A virtual coyote device completes the official V3/V4 handshake and decodes every downstream frame (strength / pulse / clear), so the full music → waveform chain is observable with no phone.
+- The phone connects by scanning the console QR code; `frame-tap.cjs` passively records every frame the relay sends to that real device (no virtual device, no relay changes), so the observed waveform is exactly what the phone received.
 
 ### Feedback Format
 
 Report waveform issues against the observed frames:
 
 ```text
-style=stereo: A/B should diverge more on this track (currently 42 vs 47)
+style=stereo: A/B should diverge more on this track (currently 47 vs 41)
 style=heartbeat: pulse envelope decays too fast after the first frame
-pulse: freq stays near 99 — check rtFreqMap influence
+pulse: freq stays near 100 — check rtFreqMap influence
 ```
 
 ### Safety Rules
 
 - Do not copy plugin logic into this folder. Reuse `src/` and `server/dglab-relay.cjs` via alias/`require`; a second copy will drift and invalidate the debug results.
+- Do not reintroduce a simulated device. Real-device observation is the point; a fake device hides exactly the hardware-specific problems (real caps, handshake timing, dropped frames) this platform exists to find.
+- Keep the frame tap passive: only wrap `send` for recording, never alter or delay what the relay sends to the device.
 - Stay on ports 3100 / 3101 / 31082. Do not reuse 3000 / 3001 / 30082 — the platform must run alongside the real app.
 - Do not add this folder to electron-builder `files` or Vite `rollupOptions.input`.
 - Keeping test music out of the repo is preferred; point `DGLAB_DEBUG_MUSIC_DIR` at a local folder instead of committing audio.

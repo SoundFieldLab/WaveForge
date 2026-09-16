@@ -1,10 +1,12 @@
 /**
- * 设备观测台：显示「中继实际下发给设备的东西」。
+ * 真机观测台：显示「中继实际下发给真机的东西」。
  *
  * 这是调试平台最核心的一块——波形好不好，最终只看两件事：
  *   1) 强度轨迹：A/B 通道随时间如何起伏（音乐动态有没有跟出来）；
  *   2) 脉冲波形帧：beat 触发时下发的 freq/strength 序列（波形形状对不对）。
- * 两者都直接来自虚拟设备解码到的原始帧，未经任何美化，因此可用来验收映射效果。
+ *
+ * 数据来自 frame-tap 旁听「中继 → 真机」的下发帧，未经任何美化，
+ * 因此就是手机真正收到的内容，可直接用来验收映射效果。
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -13,13 +15,11 @@ import { Activity, RotateCw } from 'lucide-react'
 const API = 'http://127.0.0.1:3101'
 
 interface DeviceState {
-  version: string
-  connected: boolean
-  connecting: boolean
-  lastError: string | null
-  counters: { strength: number; pulse: number; clear: number; pulseFrames: number }
-  effective: { A: number; B: number }
-  softLimit: { A: number; B: number }
+  /** 中继当前协议与真机绑定信息（由 frame-tap 读取中继内部状态）。 */
+  version: string | null
+  appId: string | null
+  remoteBound: boolean
+  counters: { strength: number; pulse: number; clear: number; pulseFrames: number; heartbeat: number; other: number }
   seq: number
   eventCount: number
 }
@@ -263,25 +263,30 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
         </div>
       )}
 
-      {/* 设备状态 */}
+      {/* 真机状态 */}
       <div className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
         <div className="flex items-center gap-2 mb-1.5">
           <Activity className="w-3.5 h-3.5 text-white/60" />
-          <span className="text-[11px] font-bold text-white/85">虚拟设备</span>
-          <span className={`ml-auto flex items-center gap-1 text-[10px] ${device?.connected ? 'text-emerald-300' : 'text-white/40'}`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${device?.connected ? 'bg-emerald-400' : 'bg-white/30'}`} />
-            {device?.connected ? '已接入' : device?.connecting ? '连接中' : '未接入'}
+          <span className="text-[11px] font-bold text-white/85">真机连接</span>
+          <span className={`ml-auto flex items-center gap-1 text-[10px] ${device?.remoteBound ? 'text-emerald-300' : 'text-amber-300/80'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${device?.remoteBound ? 'bg-emerald-400' : 'bg-amber-400/70'}`} />
+            {device?.remoteBound ? '真机已绑定' : '等待扫码'}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
           <Field label="协议" value={(device?.version ?? '-').toUpperCase()} />
-          <Field label="软上限" value={device ? `${device.softLimit.A}/${device.softLimit.B}` : '-'} />
-          <Field label="设备当前强度" value={device ? `${device.effective.A} / ${device.effective.B}` : '-'} />
-          <Field label="帧序号" value={String(device?.seq ?? 0)} />
-          <Field label="收到强度帧" value={String(device?.counters.strength ?? 0)} />
-          <Field label="收到脉冲" value={`${device?.counters.pulse ?? 0}（${device?.counters.pulseFrames ?? 0}帧）`} />
+          <Field label="App" value={device?.appId ? `${device.appId.slice(0, 8)}…` : '-'} />
+          <Field label="下发强度帧" value={String(device?.counters.strength ?? 0)} />
+          <Field label="下发脉冲" value={`${device?.counters.pulse ?? 0}（${device?.counters.pulseFrames ?? 0}帧）`} />
+          <Field label="归零指令" value={String(device?.counters.clear ?? 0)} />
+          <Field label="心跳" value={String(device?.counters.heartbeat ?? 0)} />
         </div>
-        {device?.lastError && <p className="text-[10px] text-red-300/80 mt-1">{device.lastError}</p>}
+        {!device?.remoteBound && (
+          <p className="text-[10px] text-amber-300/70 leading-relaxed mt-1.5">
+            用手机 DG-Lab App 扫「控制台」里的二维码连入。手机需与电脑在同一 WiFi；
+            连接前不会有任何波形下发数据。
+          </p>
+        )}
       </div>
 
       {/* 引擎状态 */}
@@ -306,7 +311,7 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
       <div className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[11px] font-bold text-white/85">强度轨迹</span>
-          <span className="text-[10px] text-white/35">A/B 通道（设备实收）</span>
+          <span className="text-[10px] text-white/35">A/B 通道（真机实收）</span>
           <button
             type="button" onClick={() => void clearObservations()}
             className="ml-auto p-1 rounded hover:bg-white/10 text-white/45 hover:text-white/80 transition-colors"
@@ -350,7 +355,7 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
               {ev.note && <span className="text-white/40 truncate">{ev.note}</span>}
             </div>
           ))}
-          {!events.length && <p className="text-white/35 px-1">暂无下发帧——检查「插件已启用 + 虚拟设备已接入 + 音乐在播」。</p>}
+          {!events.length && <p className="text-white/35 px-1">暂无下发帧——检查「插件已启用 + 真机已扫码绑定 + 音乐在播」。</p>}
         </div>
       </div>
     </div>

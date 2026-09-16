@@ -23,9 +23,13 @@ npm run test:license     # 设备授权自测 (scripts/test-device-license.cjs)
 npm run sync:sponsors    # 从爱发电 API 刷新 src/data/afdianSponsors.generated.json
 npm run version:patch|minor|major|pre  # 版本号更迭 (scripts/bump-version.mjs, 自动 commit/tag/push)
 npm run version:dry      # 预览版本更迭 (不落地)
-start-full.bat           # One-click: Python beat (3002) + loudness (3003) + compensation (3004) + app
-test-python-service.bat  # Health-check Python service on port 3002
+launchers/start-full.bat          # One-click: Python beat (3002) + loudness (3003) + compensation (3004) + app
+launchers/test-python-service.bat # Health-check Python service on port 3002
+launchers/start-dglab-debug.bat   # DG-LAB 调试平台（真机测试；前端 3100 / API 3101 / 中继 31082）
 ```
+
+启动脚本统一放在 `launchers/`（因此脚本内 `PROJECT_ROOT=%~dp0..\` 回退一级到项目根）；
+一次性探针脚本在 `scripts/probes/`。
 
 注意：`prebuild` 钩子会在每次 `build`/`build:electron` 前自动运行 `sync:sponsors --optional`（需 `WaveForge-Afdian.env` 爱发电密钥文件，缺失时 `--optional` 软失败，不影响构建）。
 
@@ -38,9 +42,9 @@ Before creating or using a standalone debug webpage, read [`DEBUG_PAGES.md`](./D
 - **Weather Lab**: run the existing `npm run dev`, then open `http://127.0.0.1:3000/weather-debug.html`. Use it to compare all Apple weather scenes and desktop `full`/`simple` cards with local mock data. Do not add `weather-debug.html` to production Vite inputs.
 
 
-**响度测量服务**：`python-beat-service/loudness_server.py`（独立于节拍服务，**端口 3003**，`/lufs` 端点返回 ITU-R BS.1770 积分响度）。响度归一化（调音室开关）按曲目调用它；该服务未运行/失败时归一化自动回退原声，不影响播放。启动入口：dev 模式 `dev-electron.mjs` 自动拉起；打包版 `main.cjs` startLocalBackend() 用嵌入式 Python spawn；手动 `start-full.bat` 同起。
+**响度测量服务**：`python-beat-service/loudness_server.py`（独立于节拍服务，**端口 3003**，`/lufs` 端点返回 ITU-R BS.1770 积分响度）。响度归一化（调音室开关）按曲目调用它；该服务未运行/失败时归一化自动回退原声，不影响播放。启动入口：dev 模式 `dev-electron.mjs` 自动拉起；打包版 `main.cjs` startLocalBackend() 用嵌入式 Python spawn；手动 `launchers/start-full.bat` 同起。
 
-**频响补偿设计服务**：`python-beat-service/compensation_server.py`（独立于节拍/响度服务，**端口 3004**，`/compensation` 端点）。按简化等响度模型（ISO 226 理论 + 音量→SPL 线性映射，非逐点查表）把目标补偿曲线离散为多段 Biquad 滤波器参数（lowshelf / peaking / highshelf）：auto 模式 = LowShelf(120Hz, Q0.707, 0-12dB) + HighShelf(12000Hz, Q0.707, 0-6dB)，增益按系统音量线性（低频系数 0.35、高频 0.15，100%→0/0、50%→约+5/+2、10%→约+9/+4），只提升不衰减、中频保持 0dB；preset 模式 = 6 预设（监听平直/低频补偿/人声突出/温暖/通透/夜间温和，低频 shelf + 0-2 温和中频 peaking + 高频 shelf）；custom 模式 = 5 独立频段 peaking（±8dB）。前端 `src/services/audio-effects-v2/compensationService.ts` 调 `http://localhost:3004/compensation`，用 Web Audio BiquadFilterNode 构建补偿链。启动入口与 3003 相同：dev 模式 `dev-electron.mjs` 自动拉起；打包版 `main.cjs` startLocalBackend() 用嵌入式 Python spawn；手动 `start-full.bat` 同起。服务未运行/失败时引擎回退到内置近似补偿，不影响播放。
+**频响补偿设计服务**：`python-beat-service/compensation_server.py`（独立于节拍/响度服务，**端口 3004**，`/compensation` 端点）。按简化等响度模型（ISO 226 理论 + 音量→SPL 线性映射，非逐点查表）把目标补偿曲线离散为多段 Biquad 滤波器参数（lowshelf / peaking / highshelf）：auto 模式 = LowShelf(120Hz, Q0.707, 0-12dB) + HighShelf(12000Hz, Q0.707, 0-6dB)，增益按系统音量线性（低频系数 0.35、高频 0.15，100%→0/0、50%→约+5/+2、10%→约+9/+4），只提升不衰减、中频保持 0dB；preset 模式 = 6 预设（监听平直/低频补偿/人声突出/温暖/通透/夜间温和，低频 shelf + 0-2 温和中频 peaking + 高频 shelf）；custom 模式 = 5 独立频段 peaking（±8dB）。前端 `src/services/audio-effects-v2/compensationService.ts` 调 `http://localhost:3004/compensation`，用 Web Audio BiquadFilterNode 构建补偿链。启动入口与 3003 相同：dev 模式 `dev-electron.mjs` 自动拉起；打包版 `main.cjs` startLocalBackend() 用嵌入式 Python spawn；手动 `launchers/start-full.bat` 同起。服务未运行/失败时引擎回退到内置近似补偿，不影响播放。
 
 **打包规则（electron-builder）**：`python-beat-service/packages/`（102MB 离线 wheels）**必须排除出打包**（package.json `build.files` 中的 `!python-beat-service/packages/**/*`）——打包版直接用嵌入式 Python（`resources/python-embed/`，依赖已预装）spawn 运行 `beat_analyzer.py`，从不执行 pip 安装；wheels 仅服务源码分发/开发环境的离线安装。若嵌入式运行时升级或依赖缺失需要重装，重新生成 wheel 集而不是改打包配置。
 
@@ -92,7 +96,7 @@ WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探�
 - **汽水音乐平台（Soda/Qishui）**：从独立项目 `temp/SodaMusic_Qishui_Code` 移植的第三音源（字节系汽水音乐），**仍在适配中**。后端：`server/qishui-api.mjs`（`registerSodaRoutes(app)`，全部 `/api/soda/*` 路由 + `sodaRequestCookie` 请求级 cookie 约定）、`server/qishui-audio-decryptor.mjs`（加密音频解密代理）；登录：`desktop/qishui-auth-v6.cjs` + `desktop/main.cjs` 汽水登录窗 + `src/components/SodaLoginPanel.tsx`；前端：`src/services/sodaService.ts`、`platforms.ts` 里 `MusicPlatform` 含 `'soda'`。**登出全链清理**走 IPC `soda-clear-login`（preload `clearSodaLogin`：清 auth 分区 + 凭据文件会话字段）；TV/非 Electron 端支持手动粘贴 Cookie 登录（SodaLoginPanel 折叠区）。**移植来源快照在 `temp/`（只读参考，勿 import、勿运行）**：`temp/SodaMusic_Qishui_Code`（原项目全量代码，对照适配缺口用）、`temp/hypersoundengine`（HSE UI 设计参考稿）、`temp/waveforge-engine-v3`（引擎独立仓副本）。改汽水业务前先对照 temp 原版实现核对上游接口细节。
 - `desktop/main.cjs` 还含 **QQ音乐 QMK API Key 领取窗口**（`QMK_OFFICIAL_KEY_URL` y.qq.com；独立 session partition `waveforge-qq-skill-key`，每次打开前清空避免复用登录态）——编辑时保留隔离分区与导航守卫逻辑。
 - `scripts/` — dev 启动器（`dev-electron.mjs`、`start-api.mjs`、debug/hidden VBS）、`bundle-python.mjs`（重建嵌入式 Python）、`build-android-assets.mjs` / `fetch-nodejs-mobile.mjs` / `publish-release.mjs`（Android 与发布）、`sync-afdian-sponsors.mjs`、`test-device-license.cjs`。
-- `python-beat-service/` — Flask beat analysis (port 3002) for Smart AutoMix; app degrades to Fixed Crossfade when down. `loudness_server.py`（port 3003）为独立响度测量服务（`/lufs`，响度归一化用）；`compensation_server.py`（port 3004）为独立频响补偿设计服务（`/compensation`，ISO 226 简化等响度模型 + 场景预设 + 自定义频段 → 多段 Biquad 参数）。三服务完全解耦、三入口（dev-electron.mjs / main.cjs / start-full.bat）同模式拉起。三服务均已做性能优化：beat 缓存清理 60s 节流、loudness 分段积分向量化 + 测量磁盘缓存（256MB/30 天）、线程并发（threaded=True）。
+- `python-beat-service/` — Flask beat analysis (port 3002) for Smart AutoMix; app degrades to Fixed Crossfade when down. `loudness_server.py`（port 3003）为独立响度测量服务（`/lufs`，响度归一化用）；`compensation_server.py`（port 3004）为独立频响补偿设计服务（`/compensation`，ISO 226 简化等响度模型 + 场景预设 + 自定义频段 → 多段 Biquad 参数）。三服务完全解耦、三入口（dev-electron.mjs / main.cjs / launchers/start-full.bat）同模式拉起。三服务均已做性能优化：beat 缓存清理 60s 节流、loudness 分段积分向量化 + 测量磁盘缓存（256MB/30 天）、线程并发（threaded=True）。
 - **Git repo** (has history — use `git log`/`git blame`; rollback via `git reset`). 根目录 `/data/`、`/cache/`、`/logs/`、`/dist/`、`/release/` 是被忽略的运行时产物（规则已锚定根目录，含义见下方 Conventions 的 .gitignore 约定）。
 
 ## Workspace and repository roots

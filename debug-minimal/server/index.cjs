@@ -1,5 +1,5 @@
 /**
- * DG-LAB 最小化调试后端。
+ * DG-LAB 最小化调试后端（真机测试用）。
  *
  * 设计原则：**不复制插件逻辑，只换宿主**。
  * 中继/映射引擎直接 require 主仓库的 server/dglab-relay.cjs（同一份代码），
@@ -8,9 +8,13 @@
  * 端口刻意与主程序错开，可与 WaveForge 同时运行、互不干扰：
  *   调试前端  3100（vite dev）
  *   调试 API  3101（本文件）
- *   调试中继  31082（WS，虚拟/真机设备接入）
+ *   调试中继  31082（WS，**真实手机 App 扫码接入**）
  *
- * 与主程序的唯一差别：默认端口写死 31082、默认开开发者详细日志、附带虚拟设备。
+ * 波形观测不走「虚拟设备」，而是用 frame-tap 旁听中继 → 真机的 socket：
+ * 真机扫码后，它下发的每一帧都会被抄录一份给调试界面，真机行为不受任何影响。
+ * 这样看到的波形就是手机真正收到的波形，而不是某条自造回环的输出。
+ *
+ * 与主程序的差别：默认端口 31082、默认开开发者详细日志。
  */
 
 const http = require('http')
@@ -20,7 +24,7 @@ const path = require('path')
 const express = require('express')
 
 const { createDGLabRelay } = require('../../server/dglab-relay.cjs')
-const { createVirtualDevice } = require('./virtual-device.cjs')
+const { createFrameTap } = require('./frame-tap.cjs')
 
 const API_PORT = Number(process.env.DGLAB_DEBUG_API_PORT) || 3101
 const RELAY_PORT = Number(process.env.DGLAB_DEBUG_RELAY_PORT) || 31082
@@ -127,26 +131,14 @@ app.use((req, res, next) => {
 // 真实中继的 HTTP 路由（/api/dglab/status | /control | /qr）
 relay.registerHttp(app)
 
-/* ---------------------------------- 虚拟设备 ---------------------------------- */
+/* ---------------------------------- 真机帧观测 ---------------------------------- */
 
-let device = null
-
-function ensureVirtualDevice() {
-  const version = relay._internal.settings.version
-  // 切换 V3/V4 后旧设备仍连着旧协议：丢弃并按新协议重建，避免连不上还以为引擎坏了。
-  if (device && device.getState().version !== version) {
-    try { device.disconnect() } catch { /* ignore */ }
-    device = null
-  }
-  if (device) return device
-  device = createVirtualDevice({
-    port: RELAY_PORT,
-    version,
-    getClientId: () => relay._internal.clientId,
-    log: () => {},
-  })
-  return device
-}
+/**
+ * 旁听中继 → 真机的下发帧（不改中继代码、不影响真机）。
+ * 真机连接由用户扫码建立；这里只负责把下发的帧抄一份给调试界面。
+ */
+const tap = createFrameTap({ getRelay: () => relay, pollMs: 250 })
+tap.start()
 
 /* ---------------------------------- 调试 API ---------------------------------- */
 
@@ -197,45 +189,25 @@ app.get('/api/debug/state', (req, res) => {
       settings: relay._internal.settings,
     },
     engine: readEngine(),
-    device: device ? device.getState() : null,
+    device: tap.getState(),
     musicDirs: resolveMusicDirs(),
   })
 })
 
-app.post('/api/debug/device/connect', (req, res) => {
-  const d = ensureVirtualDevice()
-  res.json({ ok: true, result: d.connect(), device: d.getState() })
-})
-
-app.post('/api/debug/device/disconnect', (req, res) => {
-  if (!device) {
-    res.json({ ok: true, result: { ok: true }, device: null })
-    return
-  }
-  res.json({ ok: true, result: device.disconnect(), device: device.getState() })
-})
-
 app.post('/api/debug/device/clear', (req, res) => {
-  res.json(device ? device.clear() : { ok: true })
-})
-
-app.post('/api/debug/device/limit', (req, res) => {
-  const d = ensureVirtualDevice()
-  const body = req.body || {}
-  res.json({ ok: true, ...d.setReportedLimit(body), device: d.getState() })
+  res.json(tap.clear())
 })
 
 app.get('/api/debug/events', (req, res) => {
   const since = Number(req.query.since) || 0
-  const d = device
   res.json({
     ok: true,
     since,
-    seq: d ? d.getState().seq : 0,
-    events: d ? d.getEvents(since) : [],
-    // 脉冲单独给：前端要按帧画「设备真实波形」
-    pulses: d ? d.getPulses(Math.max(0, since - 50)) : [],
-    device: d ? d.getState() : null,
+    seq: tap.getState().seq,
+    events: tap.getEvents(since),
+    // 脉冲单独给：前端要按帧画「真机真实收到的波形」
+    pulses: tap.getPulses(Math.max(0, since - 50)),
+    device: tap.getState(),
     engine: readEngine(),
   })
 })
@@ -302,14 +274,18 @@ const server = http.createServer(app)
 
 server.listen(API_PORT, '127.0.0.1', () => {
   const tracks = listMusic()
+  const ips = relay.getStatus().lanIps || []
   console.log('')
-  console.log('  DG-LAB 最小化调试平台')
+  console.log('  DG-LAB 最小化调试平台（真机测试）')
   console.log(`  ├─ 调试 API     http://127.0.0.1:${API_PORT}`)
   console.log(`  ├─ 调试中继     ws://0.0.0.0:${RELAY_PORT}（${relay._internal.settings.version}）`)
+  console.log(`  ├─ 局域网地址   ${ips.join(', ') || '未检测到（真机需与电脑同网段）'}`)
   console.log(`  ├─ 音乐目录     ${resolveMusicDirs().join(' | ') || '（未找到，可用 DGLAB_DEBUG_MUSIC_DIR 指定）'}`)
   console.log(`  └─ 已发现曲目   ${tracks.length} 首${tracks.length ? `：${tracks.map(t => t.file).join('、')}` : ''}`)
   console.log('')
-  console.log('  提示：浏览器打开 http://127.0.0.1:3100 ；虚拟设备默认自动连入中继。')
+  console.log('  真机接入：浏览器打开 http://127.0.0.1:3100 ，')
+  console.log('            在 DG-LAB 控制台里用手机 App 扫二维码（App 与电脑需同一 WiFi）。')
+  console.log('            扫码成功后的每一帧下发都会被自动旁听并显示在「设备」页。')
   console.log('')
 })
 
@@ -324,16 +300,14 @@ console.log = (...args) => {
   originalLog(...args)
 }
 
-// 自动启动中继 + 虚拟设备，省掉「手点一遍」的重复劳动
+// 自动启动中继，省掉「手点一遍」的重复劳动。
+// 设备侧不再自动接入——请用手机 DG-Lab App 扫控制台里的二维码连真机。
 setTimeout(() => {
   relay.start()
-  const d = ensureVirtualDevice()
-  // 等中继 listen 完成再连设备
-  setTimeout(() => d.connect(), 300)
 }, 200)
 
 function shutdown() {
-  try { device?.disconnect() } catch { /* ignore */ }
+  try { tap.stop() } catch { /* ignore */ }
   try { relay.stop() } catch { /* ignore */ }
   try { server.close() } catch { /* ignore */ }
   process.exit(0)

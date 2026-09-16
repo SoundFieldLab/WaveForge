@@ -78,7 +78,7 @@
       "local-server.mjs",
       "requirements.txt",
       "THIRD_PARTY_NOTICES.md",
-      "install-python-deps.bat",
+      "launchers/install-python-deps.bat",
       "package.json",
       "logo.png",
       "build/**/*"

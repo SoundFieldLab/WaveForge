@@ -37,7 +37,7 @@
 | 3003 | Python 响度测量服务（Flask，loudness_server.py，`/lufs`） |
 | 3004 | Python 频响补偿设计服务（Flask，compensation_server.py，`/compensation`） |
 
-> ⚠️ 历史文档中 5001 均为过时信息；`test-python-service.bat` 已修正为 3002。响度服务 3003、频响补偿服务 3004 均独立于节拍服务：dev 由 `dev-electron.mjs` 拉起、打包版由 `main.cjs` startLocalBackend() 拉起、手动可用 `start-full.bat`。
+> ⚠️ 历史文档中 5001 均为过时信息；`launchers/test-python-service.bat` 已修正为 3002。响度服务 3003、频响补偿服务 3004 均独立于节拍服务：dev 由 `dev-electron.mjs` 拉起、打包版由 `main.cjs` startLocalBackend() 拉起、手动可用 `launchers/start-full.bat`。
 
 ## 4. 已知问题 / 踩坑记录
 
@@ -95,7 +95,7 @@
 - 2026-08-14：**音效模块全面升级** —— 可叠加模型 + 快照式场景方案（覆盖/保存确认）、混响类型切换、动态压缩、夜间模式、频响补偿（与 EQ 互斥）、响度归一化（独立 loudness_server.py 端口 3003）、导出 WAV 与实时链共享 `buildEffectChain`（修漂移）；调音室 UI 改版（场景区 + 独立开关）；单测 111→119
 - 2026-08-15：**十项需求修复（用户反馈驱动）** —— ①频响补偿开关触发设计（此前 enabled 变化不重新设计 → 100% 音量回退增益为 0、开关无效）；②夜间模式重设计：tanh 波形整形（谐波炸音）→ 动态压缩 + 高频衰减（深夜语义）；③音效与频响补偿互斥（开补偿关全部 7 音效）；④三入口拉起 3003/3004；⑤重低音场景关闭全景声厅；⑥调音室「恢复默认」+「清空均衡器」按钮；⑦场景 EQ 统一专业 10 段（含 heavy-bass/flat）；⑧3D 环绕开启时展开子设置横条（速度/近远/角度）、关闭自动收缩；⑨v2 效果卡片改 v1 式「使用/已启用」大按钮；⑩gapless 方案弹窗（`GaplessModeToast.tsx`，右上角 top-16 right-6，显示直接拼接/60ms 淡入淡出/albumGapless 交叉淡化）；另：设置关于页新增开发者 IceFire_Icer；服务就绪弹窗（3003/3004 health 检测）
 - 2026-08-14：**音效引擎 v1/v2 双版本** —— 本地增强版定为 v2（`src/services/audio-effects-v2/` + `MixingStudioV2.tsx`），远程原版恢复为 v1（`src/services/audioEffects/` + `MixingStudio.tsx`，默认）；`audioEngineVersion.ts` 记录选择（localStorage）；调音室头部 v1/v2 切换 → 热切换（暂停→换链→恢复）或冷切换（未就绪时下次启动生效），右上角 2s 切换弹窗；两引擎 dispose 全断 masterGain + 摘 soundtouch/limiter 防并联打架；响度归一化/频响补偿按 v2 路由
-- 2026-08-14：**频响补偿升级** —— 新增独立服务 `compensation_server.py`（端口 3004，`/compensation` 端点）：目标曲线 = ISO 226 等响度自适应（按系统音量）+ 场景预设（flat/bass/vocal/warm/bright/night）+ 自定义频段，离散为多段 Biquad 链（lowshelf/peaking/highshelf）；前端 `compensationService.ts` 调 3004 并按 mode+preset+volume 档位缓存，服务不可用回退内置近似；三启动入口（dev-electron.mjs / main.cjs / start-full.bat）同 3003 模式拉起；**算法重写（081401/081402 方法论）**——修复旧实现 ISO 226 数据表错误（全频段 ±12dB 钳制）与多 peaking 级联过冲（1kHz 被拉到 +5dB），改为简化等响度公式（音量→SPL 线性映射）+ shelf 结构（LowShelf 120Hz / HighShelf 12000Hz，防中频污染），数值验证 1kHz 级联响应 0.00dB；与响度归一化（3003）互斥/解耦
+- 2026-08-14：**频响补偿升级** —— 新增独立服务 `compensation_server.py`（端口 3004，`/compensation` 端点）：目标曲线 = ISO 226 等响度自适应（按系统音量）+ 场景预设（flat/bass/vocal/warm/bright/night）+ 自定义频段，离散为多段 Biquad 链（lowshelf/peaking/highshelf）；前端 `compensationService.ts` 调 3004 并按 mode+preset+volume 档位缓存，服务不可用回退内置近似；三启动入口（dev-electron.mjs / main.cjs / launchers/start-full.bat）同 3003 模式拉起；**算法重写（081401/081402 方法论）**——修复旧实现 ISO 226 数据表错误（全频段 ±12dB 钳制）与多 peaking 级联过冲（1kHz 被拉到 +5dB），改为简化等响度公式（音量→SPL 线性映射）+ shelf 结构（LowShelf 120Hz / HighShelf 12000Hz，防中频污染），数值验证 1kHz 级联响应 0.00dB；与响度归一化（3003）互斥/解耦
 - 2026-08-14：**遥控器 / SongDetail / 模式切换重构 / QQ 音乐修复（远程会话）** —— 合并为提交 `3c2fc6a`：
   - **遥控器**（新增 `desktop/remote-server.cjs`、`desktop/remote-ui.html`、`src/components/RemoteControlModal.tsx`、`RemoteControlSettingsModal.tsx`、`RemoteCursor.tsx`）—— 手机扫码 → 局域网 WebSocket 控制 + 虚拟鼠标 overlay（合成点击/右键/hover、6s 自动隐藏）。
     - 改 `desktop/main.cjs`：遥控 IPC（start/stop/get-status/get-settings/update-settings）+ 控制桥 + 光标事件 + 快照补 `volume`/`muted`；
@@ -172,7 +172,7 @@
 ```bash
 # 开发
 npm run dev:electron          # 完整开发环境
-test-python-service.bat       # 检查节拍服务 3002
+launchers/test-python-service.bat  # 检查节拍服务 3002
 
 # 验证
 npm run lint                  # 类型检查

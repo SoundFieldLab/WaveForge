@@ -11,7 +11,7 @@ npm run dev:electron           # 一键启动：Vite(3000) + API(3001) + Electro
 
 开发命令必须在已确认的 WaveForge 项目根运行。团队允许工作目录本身就是项目根，也允许多项目/AI 工作目录下的 `WaveForge/` 子目录才是项目根；外部自动化应先验证 `package.json`、`scripts/dev-electron.mjs`、`desktop/main.cjs`，再使用 `npm --prefix "<项目根>" run dev:electron`。不要把机器专属绝对路径写入脚本或文档。
 
-- **高级功能（Smart AutoMix 节拍匹配）**：项目已内置 Python 3.13 运行时（`resources/python-embed/`），直接可用；启动 `start-full.bat` 或先运行 `python-beat-service/start.bat` 启动节拍服务（端口 **3002**）。
+- **高级功能（Smart AutoMix 节拍匹配）**：项目已内置 Python 3.13 运行时（`resources/python-embed/`），直接可用；启动 `launchers/start-full.bat` 或先运行 `python-beat-service/start.bat` 启动节拍服务（端口 **3002**）。
 - 节拍服务未启动时，应用自动降级为 Fixed Crossfade，不影响基础播放。
 
 ## 核心功能
@@ -79,7 +79,7 @@ npm run version:patch|minor|major  # 版本号更迭（自动 commit/tag/push）
 npm run bundle-python   # 重建嵌入式 Python 运行时（3.13.15）
 npm run test:license    # 设备授权自测
 npm run sync:sponsors   # 刷新爱发电赞助名单（构建前会自动以可选模式运行）
-test-python-service.bat # 检测节拍服务（3002）
+launchers/test-python-service.bat  # 检测节拍服务（3002）
 ```
 
 `npm run dev:electron` 启动前会快速验证开发 ECS 的 production streaming VMP；签名仍有效时不会重签。只有首次配置、重装或升级 Electron 后才会请求一次 EVS 签名，前端热更新与普通 `npm run build` 不生成 EXE、也不触发签名。开启应用级开发者模式后，可在“开发者选项”查看 VMP 剩余有效天数；剩余不超过 180 天时界面会提示安排续签。
