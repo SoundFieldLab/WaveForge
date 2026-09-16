@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DG-LAB 最小化调试平台</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #08080b; color: #e5e7eb; }
+      body { overflow-y: auto; }
+    </style>
+    <script>
+      // 必须在模块加载前注入：DGLabClient 在**模块求值期**就会读这两个值
+      // （DEFAULT_DGLAB_SETTINGS.port 与 API base），晚了就只能拿到主程序默认端口。
+      //
+      // 端口与主程序错开，两个前端可同时开启；且调试页与主程序不同源 →
+      // localStorage 天然隔离，调试改设置不会污染主程序的插件配置。
+      window.__DGLAB_DEBUG__ = {
+        apiBase: 'http://127.0.0.1:3101/api/dglab',
+        relayPort: 31082,
+        apiPort: 3101,
+        frontendPort: 3100,
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "waveforge-dglab-debug-minimal",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DG-LAB 插件最小化调试平台（仅开发用，不随软件打包）",
+  "scripts": {
+    "dev": "vite",
+    "dev:server": "node server/index.cjs",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  }
+}

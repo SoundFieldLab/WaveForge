@@ -45,6 +45,45 @@ card=simple: increase hourly forecast readability
 - Keep this page outside production build inputs. It is a visual validation tool, not a customer-facing route.
 - When adding another independent debug page, add a separate section in this registry with its URL, command, scope, source files, production status, and API/network constraints.
 
+## DG-LAB Minimal Debug Platform
+
+| Field | Value |
+|---|---|
+| Page | `debug-minimal/index.html` |
+| Local URL | `http://127.0.0.1:3100` |
+| Start command | `npm run dglab:debug:all` (backend + frontend), or `dglab:debug` / `dglab:debug:ui` separately |
+| Source entry | `debug-minimal/src/main.tsx` |
+| Docs | `debug-minimal/README.md` |
+| Backend | `debug-minimal/server/index.cjs` (real relay on 31082 / API 3101) + `server/virtual-device.cjs` |
+| Type check | `npm run dglab:debug:typecheck` |
+| Production status | Development-only. Not in electron-builder `files` nor Vite inputs; committed to the repo for shared debugging. |
+
+### Purpose
+
+Debug the DG-LAB (coyote) plugin without hardware and without restarting the packaged app. It reuses the production plugin code directly, so results transfer:
+
+- `@` resolves to the repo `src/`, so the console/widget UI being edited here is the same file the app ships.
+- `server/dglab-relay.cjs` is `require`d in-process, so the mapping engine under test is the shipping engine.
+- A virtual coyote device completes the official V3/V4 handshake and decodes every downstream frame (strength / pulse / clear), so the full music → waveform chain is observable with no phone.
+
+### Feedback Format
+
+Report waveform issues against the observed frames:
+
+```text
+style=stereo: A/B should diverge more on this track (currently 42 vs 47)
+style=heartbeat: pulse envelope decays too fast after the first frame
+pulse: freq stays near 99 — check rtFreqMap influence
+```
+
+### Safety Rules
+
+- Do not copy plugin logic into this folder. Reuse `src/` and `server/dglab-relay.cjs` via alias/`require`; a second copy will drift and invalidate the debug results.
+- Stay on ports 3100 / 3101 / 31082. Do not reuse 3000 / 3001 / 30082 — the platform must run alongside the real app.
+- Do not add this folder to electron-builder `files` or Vite `rollupOptions.input`.
+- Keeping test music out of the repo is preferred; point `DGLAB_DEBUG_MUSIC_DIR` at a local folder instead of committing audio.
+- `installDevBridgeRafFallback` and `window.__dglabDebug` are debug-only affordances; keep them out of production plugin code.
+
 ## Adding A New Debug Page
 
 1. Create a root `*-debug.html` entry and a dedicated `src/<feature>-debug/` folder.

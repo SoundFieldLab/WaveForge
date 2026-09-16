@@ -1,0 +1,63 @@
+/*
+ * 调试平台样式：Tailwind v4 + DG-LAB 组件真正依赖的少量自定义类。
+ *
+ * 刻意不 import 主程序的 src/index.css —— 它给 html/body/#root 设了
+ * overflow:hidden 与全局 user-select:none，会把调试页锁死成一屏不可滚动、
+ * 文本不可选中。这里只补齐 DG-LAB UI 用到的规则，保持调试页可用性。
+ */
+
+@import 'tailwindcss' source(none);
+@source '../index.html';
+@source '../src/**/*.{ts,tsx}';
+@source '../../src/components/DGLab*.tsx';
+@source '../../src/components/Dglab*.tsx';
+
+/* 插件系统：脉冲动画（PluginShortcuts 等处使用） */
+@keyframes dglabPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* 调试日志等容器允许复制文本（覆盖主程序的全局 user-select: none） */
+.plugin-log-select,
+.plugin-log-select * {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
+.plugin-center-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.plugin-center-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+.plugin-center-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); }
+.plugin-center-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 数字输入隐藏上下箭头（DG_LAB 端口手输） */
+input[type='number'].no-spinner::-webkit-outer-spin-button,
+input[type='number'].no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type='number'].no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+:root {
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+}
+
+html, body {
+  background: #08080b;
+  color: #e5e7eb;
+  margin: 0;
+}
+
+/* 调试页自身可滚动（与主程序的锁屏式布局相反） */
+body { overflow-y: auto; }
+
+/* 细滚动条，避免调试面板里出现粗白条 */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.16); border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.28); }
+*::-webkit-scrollbar-track { background: transparent; }
