@@ -556,7 +556,23 @@ export async function resolveAppleRadioStream(
     : 'unknown'
   lastNativeFailReason = ''
   const playAssetId = safePlayParams.id ? String(safePlayParams.id) : stationId
-  const licenseAdamId = String(asset?.adamId || asset?.songId || asset?.contentId || playAssetId)
+  // 电台的 id 是 `ra.<数字>` 形式（playParams.id 与 stationId 都是），而 Apple 的 license
+  // 服务要数字 adamId：实测直接把 `ra.xxxx` 传进 license 请求会被拒（status=-1001,
+  // 日志 `adamId=ra.6804822499 live=true`）。这里取 ra. 之后的数字部分。
+  const numericAdamId = (value?: string): string => (
+    value && /^ra\.\d+$/i.test(value) ? value.replace(/^ra\./i, '') : ''
+  )
+  const licenseAdamId = String(
+    asset?.adamId
+    || asset?.songId
+    || asset?.contentId
+    || numericAdamId(playAssetId)
+    || numericAdamId(stationId)
+    || playAssetId
+  )
+  forwardToMainLog(
+    `[ApplePlayback] 电台 license adamId 取值: asset.adamId=${asset?.adamId ?? '-'} songId=${asset?.songId ?? '-'} contentId=${asset?.contentId ?? '-'} playParams.id=${safePlayParams.id ?? '-'} station=${stationId} → ${licenseAdamId}`,
+  )
   forwardToMainLog(`[ApplePlayback] 电台 HLS 就绪: timeline=${timeline} keys=${asset?.keyServerUrl ? 'yes' : 'no'}`)
   return {
     url: resolved,
