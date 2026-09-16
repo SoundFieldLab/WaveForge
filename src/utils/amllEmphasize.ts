@@ -184,16 +184,34 @@ export const generateFadeGradient = (width: number): readonly [gradient: string,
 }
 
 /**
- * 整行光带遮罩：光带位于"已唱宽度占比"处，边界羽化 ≈ 0.32em（= 字高 × 0.5 / 2 的近似）。
- * 说明：AMLL 逐词各自一条 mask-position 关键帧（按像素宽度累计）；这里用整行一条遮罩 +
- * 字符数加权的进度，视觉等效（光带在词边界对齐、边界同样羽化）且无需测量 DOM 宽度。
+ * 单个词的光带遮罩：光带按**该词在整句中的演唱进度**定位。
+ *
+ * 为什么必须逐词：CSS 的 mask 按元素的坐标轴计算，若把一条渐变铺在整行容器上，
+ * 换行后的每一行都会各自出现"左亮右暗"，视觉上成了两条光带（用户实测反馈）。
+ * 逐词各自带遮罩后，进度天然按阅读顺序推进（第一行唱完才轮到第二行）。
  */
-export const buildLineBandMask = (
-  sungRatio: number,
-  fadeEm = 0.32,
-): string => {
-  const position = Math.min(100, Math.max(0, sungRatio * 100))
-  return `linear-gradient(to right, rgb(0 0 0 / ${AMLL_BRIGHT_MASK_ALPHA}) calc(${position.toFixed(2)}% - ${fadeEm}em), rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) calc(${position.toFixed(2)}% + ${fadeEm}em))`
+export const bandMaskForProgress = (localProgress: number, fadePercent = 8): string => {
+  const position = Math.min(100, Math.max(0, localProgress * 100))
+  const start = Math.min(100, Math.max(0, position - fadePercent))
+  const end = Math.min(100, Math.max(0, position + fadePercent))
+  return `linear-gradient(to right, rgb(0 0 0 / ${AMLL_BRIGHT_MASK_ALPHA}) ${start.toFixed(2)}%, rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) ${end.toFixed(2)}%)`
+}
+
+/** 各词在整句中的字符区间（用于把整句进度换算成每个词的局部进度） */
+export const computeWordRanges = (
+  words: ReadonlyArray<{ word: string }>,
+): Array<{ start: number; end: number; chars: number }> => {
+  const counts = words.map(word => {
+    const text = (word.word || '').trim()
+    return text ? Math.max(1, Array.from(text).length) : 0
+  })
+  const total = counts.reduce((sum, value) => sum + value, 0)
+  let accumulated = 0
+  return counts.map(chars => {
+    const start = total > 0 ? accumulated / total : 0
+    accumulated += chars
+    return { start, end: total > 0 ? accumulated / total : 0, chars }
+  })
 }
 
 /** 按"字符数加权"统计整行已唱比例（0~1）：完全唱过的词计满，正在唱的词按时间比例 */

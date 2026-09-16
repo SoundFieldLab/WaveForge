@@ -5,12 +5,13 @@ import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
 import { normalizeSequentialWordTiming, prepareLyricWords } from '../utils/lyricWordTiming'
 import { getAgentTintColor, getAppleMusicSettings } from '../services/appleMusic'
 import {
-  buildLineBandMask,
+  bandMaskForProgress,
   charEmphasizeDelay,
   charFloatYEm,
   CHAR_FLOAT_LEAD_MS,
   computeEmphasizeParams,
   computeSungRatio,
+  computeWordRanges,
   emphasizeCharFrame,
   shouldEmphasizeWord,
 } from '../utils/amllEmphasize'
@@ -1436,7 +1437,9 @@ export default memo(function LyricsDisplay({
   }
   /**
    * 摩登风格逐字行（AMLL 实现）：
-   *  - 整行一条光带遮罩：两档 alpha（已唱 1 / 未唱 0.4）+ 边界羽化，光带随已唱宽度推进；
+   *  - 逐词光带遮罩：每个词按它在整句中的字符区间换算局部进度，遮罩随进度推进。
+   *    （不能把一条渐变铺在整行容器上：CSS mask 按元素坐标轴计算，换行后每行都会各自
+   *      左亮右暗，看起来变成两条光带——用户实测反馈的正是这个问题。）
    *  - 长音字强调：CJK 唱满 1s（或 1s 且 2~7 字母）的词触发白色辉光 + 字级缩放 + 推挤 + 上浮 + 错落；
    *  - 不使用柔和风格的 sustainGlow（那是"拖音即染色发光"的另一套逻辑）。
    */
@@ -1449,32 +1452,36 @@ export default memo(function LyricsDisplay({
     // 与柔和/旧 Apple 路径一致的 200ms 节拍延迟，让填充跟随演唱而非提前
     const currentMs = Math.max(0, (playbackTime + lyricOffset) * 1000 - lineStartMs - 200)
     const words = wordsWithIndex.map(item => item.word)
-    const maskImage = buildLineBandMask(computeSungRatio(words, currentMs))
+    const sungRatio = computeSungRatio(words, currentMs)
+    const wordRanges = computeWordRanges(words)
     const lastWordIndex = wordsWithIndex.length - 1
 
     return (
-      // 用 span 而非 div：这是 <p> 内部（div 会触发浏览器自动拆标签，破坏行布局）。
-      // inline-block + width:100% 让遮罩按整行盒子计算。
-      <span
-        className="relative"
-        style={{
-          display: 'inline-block',
-          width: '100%',
-          WebkitMaskImage: maskImage,
-          maskImage,
-          WebkitMaskRepeat: 'no-repeat',
-          maskRepeat: 'no-repeat',
-        }}
-      >
+      <span className="relative" style={{ display: 'inline-block', width: '100%' }}>
         {wordsWithIndex.map(({ word, originalIndex }, wordIndex) => {
           const text = word.word || ''
           if (!text) return null
           if (!text.trim()) {
             return <span key={`amll-space-${originalIndex}`} style={{ whiteSpace: 'pre' }}>{text}</span>
           }
+          // 该词在整句中的局部进度：整句进度落在词区间之前 → 全暗，之后 → 全亮
+          const range = wordRanges[wordIndex]
+          const localProgress = range && range.chars > 0
+            ? Math.min(1, Math.max(0, (sungRatio - range.start) / Math.max(1e-6, range.end - range.start)))
+            : 1
+          const maskImage = bandMaskForProgress(localProgress)
+          const wordMaskStyle = {
+            WebkitMaskImage: maskImage,
+            maskImage,
+            WebkitMaskRepeat: 'no-repeat',
+            maskRepeat: 'no-repeat',
+          }
           if (!effectiveLyricGlow || !shouldEmphasizeWord(word)) {
             return (
-              <span key={`amll-w-${originalIndex}`} style={{ color: activeLyricColor, whiteSpace: 'pre' }}>
+              <span
+                key={`amll-w-${originalIndex}`}
+                style={{ color: activeLyricColor, whiteSpace: 'pre', ...wordMaskStyle }}
+              >
                 {text}
               </span>
             )
@@ -1489,7 +1496,7 @@ export default memo(function LyricsDisplay({
           return (
             <span
               key={`amll-w-${originalIndex}`}
-              style={{ color: activeLyricColor, whiteSpace: 'pre', display: 'inline-block' }}
+              style={{ color: activeLyricColor, whiteSpace: 'pre', display: 'inline-block', ...wordMaskStyle }}
             >
               {chars.map((char, charIndex) => {
                 const delay = charEmphasizeDelay(params, charIndex)

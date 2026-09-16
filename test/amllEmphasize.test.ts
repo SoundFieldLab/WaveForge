@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   AMLL_DARK_MASK_ALPHA,
-  buildLineBandMask,
+  bandMaskForProgress,
   charEmphasizeDelay,
   charFloatYEm,
   computeEmphasizeParams,
   computeSungRatio,
+  computeWordRanges,
   emphasizeCharFrame,
   emphasizeEasing,
   generateFadeGradient,
@@ -98,12 +99,28 @@ describe('逐字光带', () => {
     expect(totalAspect).toBeCloseTo(2.5, 5)
   })
 
-  it('整行遮罩随已唱比例推进，且带 em 羽化边界', () => {
-    const early = buildLineBandMask(0.1)
-    const late = buildLineBandMask(0.8)
-    expect(early).toContain('10.00%')
-    expect(late).toContain('80.00%')
-    expect(early).toContain('em)')
+  it('逐词遮罩随局部进度推进（换行时按阅读顺序，不再各行独立填充）', () => {
+    const early = bandMaskForProgress(0.1)
+    const late = bandMaskForProgress(0.8)
+    expect(early).not.toBe(late)
+    // 光带位置随进度右移：相位 10% 时亮区止于 2%，相位 80% 时止于 72%
+    expect(early).toContain('2.00%')
+    expect(late).toContain('72.00%')
+    expect(early).toContain(`rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA})`)
+    // 进度 0 整词暗档、进度 1 整词亮档
+    expect(bandMaskForProgress(0)).toContain('rgb(0 0 0 / 1) 0.00%')
+    expect(bandMaskForProgress(1)).toContain('100.00%')
+  })
+
+  it('词区间按字符数累计：首词从 0 起、末词到 1（换行不影响阅读顺序）', () => {
+    const ranges = computeWordRanges([{ word: 'ab' }, { word: 'cd' }, { word: 'ef' }])
+    expect(ranges[0].start).toBeCloseTo(0, 5)
+    expect(ranges[0].end).toBeCloseTo(1 / 3, 5)
+    expect(ranges[2].end).toBeCloseTo(1, 5)
+    // 空白词不占进度
+    const withSpace = computeWordRanges([{ word: 'ab' }, { word: ' ' }, { word: 'cd' }])
+    expect(withSpace[1].chars).toBe(0)
+    expect(withSpace[1].start).toBeCloseTo(withSpace[1].end, 5)
   })
 
   it('已唱比例：全未唱 0、全唱完 1、半唱居中', () => {
