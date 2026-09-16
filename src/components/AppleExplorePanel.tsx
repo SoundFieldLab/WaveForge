@@ -1988,6 +1988,39 @@ export function AppleExplorePanel({
     // 城市排行榜在接口里同样带 room 引用，但官网该区块不渲染链接，故按可观察行为显式排除。
     const showEntry = Boolean(onOpen)
       || (Boolean(section) && title !== '城市排行榜' && Boolean(section?.roomId || section?.multiRoomId))
+    const openEntry = () => {
+      if (onOpen) { onOpen(); return }
+      if (section?.roomId) void openLayer('room', section.roomId, title)
+      else if (section?.multiRoomId) void openLayer('multiroom', section.multiRoomId, title)
+    }
+    // 官网页样式（实测 music.apple.com 首页）：可点区块的标题区是「40×40 小方图 +
+    // 双行文字（上行小字标签、下行主标题）+ 紧贴标题的内联 chevron」，整块是一个按钮。
+    // 这里用区块首项的封面充当那块小图；没有封面时退回原有单行标题 + 圆形按钮。
+    const coverUrl = section?.items?.find(item => item.artworkUrl)?.artworkUrl
+    if (showEntry && coverUrl) {
+      return (
+        <div className="flex items-center gap-3 border-b border-white/[0.08] pb-3">
+          <img
+            src={coverUrl}
+            alt=""
+            loading="lazy"
+            className="h-10 w-10 shrink-0 rounded-md border border-white/12 object-cover"
+          />
+          <button
+            type="button"
+            aria-label={entryLabel || `打开${title}`}
+            onClick={openEntry}
+            className="group flex min-w-0 flex-col items-start text-left"
+          >
+            {subtitle && <p className="max-w-full min-w-0 truncate text-xs text-white/45">{subtitle}</p>}
+            <span className="flex min-w-0 items-center gap-0.5">
+              <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{title}</h3>
+              <ChevronRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-0.5 group-hover:text-white" />
+            </span>
+          </button>
+        </div>
+      )
+    }
     return (
     <div className="flex items-center gap-1.5 border-b border-white/[0.08] pb-2.5">
       {/* 箭头紧贴标题文字（官网样式），不是推到行尾。 */}
@@ -1996,11 +2029,7 @@ export function AppleExplorePanel({
         <button
           type="button"
           aria-label={entryLabel || `打开${title}`}
-          onClick={() => {
-            if (onOpen) { onOpen(); return }
-            if (section?.roomId) void openLayer('room', section.roomId, title)
-            else if (section?.multiRoomId) void openLayer('multiroom', section.multiRoomId, title)
-          }}
+          onClick={openEntry}
           className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-white/45 transition hover:bg-white/[0.08] hover:text-white"
         >
           <ChevronRight className="h-4 w-4" />
