@@ -10,9 +10,37 @@
 import { useSyncExternalStore } from 'react'
 import type { AudioAnalyzerStore } from '../../hooks/useAudioAnalyzer'
 
-const DGLAB_API = 'http://localhost:3001/api/dglab'
+const DEFAULT_API_BASE = 'http://localhost:3001/api/dglab'
 const SETTINGS_KEY = 'wf_dglab_settings'
 const DEFAULT_PORT = 30082
+
+/**
+ * 调试中继地址：默认指向主程序的本地服务。
+ *
+ * 最小化调试平台（debug-minimal/）在宿主页面注入
+ * `window.__DGLAB_DEBUG__ = { apiBase: 'http://127.0.0.1:3101/api/dglab' }`
+ * 即可让同一份客户端代码连到独立端口的调试后端，主程序行为不受影响。
+ */
+function dglabApiBase(): string {
+  try {
+    const override = (globalThis as { __DGLAB_DEBUG__?: { apiBase?: string } }).__DGLAB_DEBUG__?.apiBase
+    if (typeof override === 'string' && override) return override.replace(/\/+$/, '')
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_API_BASE
+}
+
+/** 中继默认端口：调试平台可覆盖（避免与主程序的 30082 抢占）。 */
+function dglabDefaultPort(): number {
+  try {
+    const override = (globalThis as { __DGLAB_DEBUG__?: { relayPort?: number } }).__DGLAB_DEBUG__?.relayPort
+    if (typeof override === 'number' && Number.isFinite(override) && override > 0) return override
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_PORT
+}
 
 export type FeelStyleId = 'stereo' | 'heartbeat' | 'breath' | 'wave' | 'tap' | 'ride' | 'rumble' | 'stock'
 export type StepPreset = 'strong' | 'medium' | 'weak' | 'custom'
@@ -67,7 +95,7 @@ export interface DGLabSettings {
 
 export const DEFAULT_DGLAB_SETTINGS: DGLabSettings = {
   version: 'v3',
-  port: DEFAULT_PORT,
+  port: dglabDefaultPort(),
   address: '',
   qrSchema: 'a',
   feelStyle: 'stereo',
@@ -152,7 +180,7 @@ const EMPTY_STATUS: DGLabStatus = {
   running: false,
   state: 'unavailable',
   version: 'v3',
-  port: DEFAULT_PORT,
+  port: dglabDefaultPort(),
   lanIps: [],
   ips: [],
   devMode: false,
@@ -372,10 +400,32 @@ function createClient() {
   }
 
   let controlToken = ''
+  /**
+   * 激活代次 + 控制指令串行队列。
+   *
+   * 为什么需要：activate() 内部有 await（探测状态 → 需要时 restart → connect），
+   * 而 deactivate() 会立即下发 stop。快速「停用→启用」（React StrictMode 的双挂载、
+   * 或用户连点开关）会让 stop 落在新一次激活的探测之后：
+   *   新版 activate 探测到 old relay 仍在跑 → 认为无需 restart → 只 connect；
+   *   随后排队的 stop 才生效 → 中继被停掉，插件看起来「启用成功但没有波形」。
+   *
+   * 两条措施一起用：
+   *   1) 代次校验：过期的异步激活在 await 之后直接放弃，不再发指令；
+   *   2) 控制指令串行：stop/restart 严格按发生顺序执行，杜绝交错。
+   */
+  let activationGen = 0
+  let controlQueue: Promise<unknown> = Promise.resolve()
+  const enqueueControl = <T,>(task: () => Promise<T>): Promise<T> => {
+    const run = controlQueue.then(task, task)
+    // 队列自身吞掉异常，避免一次失败卡死后续所有控制指令
+    controlQueue = run.catch(() => undefined)
+    return run
+  }
+
   const fetchStatus = async () => {
     const seq = ++fetchSeq
     try {
-      const res = await fetch(`${DGLAB_API}/status`, { signal: AbortSignal.timeout(2500) })
+      const res = await fetch(`${dglabApiBase()}/status`, { signal: AbortSignal.timeout(2500) })
       const json = await res.json()
       if (typeof json.controlToken === 'string') controlToken = json.controlToken
       if (seq !== fetchSeq) return json
@@ -750,7 +800,7 @@ function createClient() {
   /** 中继控制：启动/停止/重启监听（可附带设置同步；devMode 为运行时透传字段）。 */
   const control = async (action: 'start' | 'stop' | 'restart', settings?: Partial<DGLabSettings> & { devMode?: boolean }) => {
     try {
-      await fetch(`${DGLAB_API}/control`, {
+      await fetch(`${dglabApiBase()}/control`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, ...(settings ? { settings } : {}) }),
@@ -774,23 +824,40 @@ function createClient() {
     },
     activate: () => {
       active = true
-      void (async () => {
+      const gen = ++activationGen
+      /**
+       * 整段激活流程都排进控制队列，而不是只把 restart 排进去。
+       *
+       * 否则会出现这样的交错（StrictMode 双挂载 / 快速连点开关时必然发生）：
+       *   [队列] stop（来自上一次 deactivate）尚未执行
+       *   [激活] fetchStatus 看到中继「还在跑」→ 判定无需 restart → 只 connect
+       *   [队列] stop 这才执行 → 中继被停掉
+       * 结果：插件显示已启用，但中继空闲、没有任何波形下发。
+       *
+       * 排队后顺序变为 stop →（状态已停）→ 判定需要 restart → 重启 → connect，
+       * 与用户实际操作顺序一致。队列内部直接调用 control()，不再二次入队（避免自锁）。
+       */
+      void enqueueControl(async () => {
+        if (gen !== activationGen || !active) return
         const settings = loadDGLabSettings()
         const status = await fetchStatus()
-        // 中继未运行或端口/版本与设置不符 → 以当前设置重启
+        if (gen !== activationGen || !active) return
         const needStart = !status?.running || Number(status.port) !== settings.port || status.version !== settings.version
         if (needStart) {
           await control('restart', { port: settings.port, version: settings.version, address: settings.address, devMode: isDeveloperMode() })
+          if (gen !== activationGen || !active) return
         }
         connect()
-      })()
+      })
       ensureStream()
     },
     deactivate: () => {
       active = false
+      // 作废进行中的激活，避免它的 restart/connect 覆盖本次停用
+      activationGen += 1
       disconnect()
       ensureStream()
-      void control('stop')
+      void enqueueControl(() => control('stop'))
     },
     isActive: () => active,
     ensureStream,
@@ -818,7 +885,7 @@ function createClient() {
     /** 生成二维码 dataURL（Node 侧 qrcode）。 */
     getQR: async (content: string): Promise<string | null> => {
       try {
-        const res = await fetch(`${DGLAB_API}/qr`, {
+        const res = await fetch(`${dglabApiBase()}/qr`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content }),

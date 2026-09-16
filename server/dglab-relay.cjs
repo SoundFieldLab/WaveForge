@@ -258,6 +258,10 @@ function createDGLabRelay() {
       lanIps: all.map(i => i.address),
       ips: all,
       devMode: Boolean(state.settings.devMode),
+      // urlV3/urlV4 必须随状态下发：渲染端 DGLabClient 读 status.urlV3 展示连接地址，
+      // 控制台「复制地址」与二维码都依赖它；缺了这两项地址栏会一直是空字符串。
+      urlV3,
+      urlV4,
       qrV3: state.settings.version === 'v3' ? QR_V3(urlV3) : null,
       qrV4: state.settings.version === 'v4' ? QR_V4(urlV4) : null,
       qrGenerated: false,
