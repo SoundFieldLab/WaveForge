@@ -1688,6 +1688,7 @@ export function appleStationToSong(station: AppleWebItem, _stream?: AppleNativeS
       timeline,
       showName: station.showName,
       description: station.description,
+      stationHash: station.stationHash,
       airTime: station.airTime,
       artworkUrl: station.artworkUrl,
       motionArtworkUrl: station.motionArtworkUrl,

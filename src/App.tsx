@@ -31,7 +31,7 @@ import { useAppleDynamicCover } from './hooks/useAppleDynamicCover'
 import { FOLIA_STYLES } from './vendor/folia/stylesMeta'
 import { useAudioPulseStore, type AudioPulseStore } from './hooks/useAudioPulse'
 import { useAutoHideCursor } from './hooks/useAutoHideCursor'
-import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, LyricLine } from './services/musicApi'
+import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine } from './services/musicApi'
 import { recordAppleRecentPlaybackFallback } from './services/appleRecentPlayback'
 import type { MusicPlatform } from './services/platforms'
 import { getPlatformCapabilities, isPlatformVisible, platformLabel } from './services/platforms'
@@ -59,10 +59,15 @@ import { scheduleBackgroundPrefetch } from './services/backgroundPrefetch'
 import { getResolvedArtworkUrl, preloadArtwork } from './services/artworkLoader'
 import { getDesktopSpectrumConsumerCount, subscribeDesktopSpectrumConsumers } from './services/desktopSpectrum'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Sparkles, Image as ImageIcon } from 'lucide-react'
+import { Settings, Sparkles, Image as ImageIcon, Radio } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
 import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
+import { canonicalTrackKey, type ResonancePlatformBadge, type ResonanceTrack } from './features/resonance/model'
+import { getResonanceSession } from './features/resonance/session'
+import { resolveLocalTrack, type ResonanceLocalTrack } from './features/resonance/matcher'
+import { readResonanceEntryMode, rememberResonanceEntryMode } from './features/resonance/settings'
+import { RESONANCE_PUSH_EVENT, setResonanceSuspended, songToResonanceTrack } from './features/resonance/push'
 import { createSongOwnedHandoff, readSongOwnedHandoff, type SongOwnedHandoff } from './services/watchHandoff'
 import { songKeyOf as bilibiliSongKeyOf } from './services/bilibiliApi'
 import type { PlaybackOrigin, ViewMode } from './types/playbackNavigation'
@@ -71,6 +76,8 @@ const loadHomeView = () => import('./components/HomeView')
 const loadExploreView = () => import('./components/ExploreView')
 const loadDesktopView = () => import('./components/DesktopView')
 const loadTraditionalView = () => import('./components/TraditionalView')
+// 共振（多人一起听）：独立模式，房间状态由 src/features/resonance 的单例承载
+const loadResonanceView = () => import('./features/resonance/ResonanceView')
 // 模式切换过渡动画时长：最短 3s（高性能机秒切也不一闪而过）；最长 12s 兜底（防止加载异常卡死界面）
 const MODE_TRANSITION_MIN_MS = 3000
 const MODE_TRANSITION_MAX_MS = 12000
@@ -79,6 +86,7 @@ const LazyHomeView = lazy(loadHomeView)
 const LazyExploreView = lazy(loadExploreView)
 const LazyDesktopView = lazy(loadDesktopView)
 const LazyTraditionalView = lazy(loadTraditionalView)
+const LazyResonanceView = lazy(loadResonanceView)
 const loadSearchPanel = () => import('./components/SearchPanel')
 const loadUpNextNotification = () => import('./components/UpNextNotification')
 const LazySearchPanel = lazy(loadSearchPanel)
@@ -648,11 +656,21 @@ function App() {
   // 视图模式状态（探索 / 简约 / 桌面）
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem('viewMode')
-    const mode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' ? saved : 'minimal'
+    let mode: ViewMode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' || saved === 'resonance' ? saved : 'minimal'
+    // 上次是「共振」时不要一头扎进共振：回到进共振之前的那个模式，
+    // 免得用户关客户端时正好在共振里，下次启动还得手动切出来。
+    if (mode === 'resonance') {
+      const previous = readResonanceEntryMode()
+      if (previous === 'explore' || previous === 'minimal' || previous === 'traditional' || previous === 'desktop') mode = previous
+      else mode = 'minimal'
+    }
     // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面
     return isTv() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
   })
   const viewModeChangeRevisionRef = useRef(0)
+  // 房间还在时切模式的「挂起 / 退出」询问；bypass 用于让用户选完之后放行同一次切换
+  const [resonanceExitPrompt, setResonanceExitPrompt] = useState<{ next: ViewMode } | null>(null)
+  const resonanceModeSwitchBypassRef = useRef(false)
   // 桌面融合穿透：桌面模式空区域鼠标穿透到真实桌面（退出 kiosk + 组件区可交互）
   const [desktopFusionEnabled, setDesktopFusionEnabled] = useState(() => localStorage.getItem('desktopFusionEnabled') === 'true')
   // 开启融合需重建窗口（会中断播放/重载界面），先弹应用内确认框（参考删除歌单弹窗）
@@ -692,7 +710,7 @@ function App() {
   }, [desktopFusionEnabled, viewMode])
   // 模式切换过渡动画：全屏覆盖掩盖新模式挂载卡顿。to=目标模式，ready=目标内容已就绪，
   // 收起条件 = ready 且 时长 ≥ 最短 3s（慢机 5~10s 加载期间动画无限循环，不会"断片"）。
-  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop'; startedAt: number; ready: boolean } | null>(null)
+  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'; startedAt: number; ready: boolean } | null>(null)
   const modeTransitionRef = useRef(modeTransition)
   modeTransitionRef.current = modeTransition
   const viewModeRef = useRef<ViewMode>(viewMode)
@@ -771,7 +789,7 @@ function App() {
         : viewMode === 'traditional'
           ? loadTraditionalView
           : loadHomeView
-    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView]
+    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView, loadResonanceView]
       .filter(loader => loader !== currentViewLoader)
 
     void currentViewLoader()
@@ -1819,6 +1837,8 @@ function App() {
   const [sodaEntitlement, setSodaEntitlement] = useState<EntitlementTier>(() => (
     (localStorage.getItem('soda_entitlement') as EntitlementTier | null) || 'unknown'
   ))
+
+
   const platformEntitlements = useMemo(() => createPlatformEntitlements({
     netease: entitlementTierFromVip(neteaseVip),
     qq: entitlementTierFromVip(qqVip),
@@ -1827,6 +1847,25 @@ function App() {
     kugou: 'unknown',
     soda: sodaLoggedIn ? sodaEntitlement : 'unknown',
   }), [neteaseVip, qqVip, sodaEntitlement, sodaLoggedIn, spotifyEntitlement, spotifyLoggedIn])
+  // 共振：本机各平台的登录与会员档位 / 账号标识（房间内只展示徽章，不外发账号）
+  const resonancePlatforms = useMemo(() => [
+    { platform: 'netease' as MusicPlatform, loggedIn: neteaseLoggedIn, tier: platformEntitlements.netease },
+    { platform: 'qq' as MusicPlatform, loggedIn: qqLoggedIn, tier: platformEntitlements.qq },
+    { platform: 'apple' as MusicPlatform, loggedIn: appleLoggedIn, tier: platformEntitlements.apple },
+    { platform: 'spotify' as MusicPlatform, loggedIn: spotifyLoggedIn, tier: platformEntitlements.spotify },
+    { platform: 'kugou' as MusicPlatform, loggedIn: kugouLoggedIn, tier: platformEntitlements.kugou },
+    { platform: 'soda' as MusicPlatform, loggedIn: sodaLoggedIn, tier: platformEntitlements.soda },
+  ], [appleLoggedIn, kugouLoggedIn, neteaseLoggedIn, platformEntitlements, qqLoggedIn, sodaLoggedIn, spotifyLoggedIn])
+  const resonanceUserIds = useMemo(() => ({
+    netease: neteaseUserId,
+    qq: qqUserId,
+    kugou: kugouUserId,
+  } as Partial<Record<MusicPlatform, string>>), [kugouUserId, neteaseUserId, qqUserId])
+  const resonanceUsernames = useMemo(() => ({
+    netease: neteaseUsername,
+    qq: qqUsername,
+    kugou: kugouUsername,
+  } as Partial<Record<MusicPlatform, string>>), [kugouUsername, neteaseUsername, qqUsername])
   const [loginRestoreComplete, setLoginRestoreComplete] = useState(false)
   // 登录态发生变化后通知首页、个人中心等依赖平台账号的视图刷新。
   const [authRevision, setAuthRevision] = useState(0)
@@ -2986,9 +3025,17 @@ function App() {
   
   // 监听视图模式变化
   useEffect(() => {
-    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop') => {
+    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance') => {
       // TV 效能档无桌面模式：遥控器/远程/恢复路径都不会进入桌面（模式卡片也已隐藏）
       if (isTv() && isPerfModeEfficiency() && mode === 'desktop') mode = 'minimal'
+      // 记下「进共振之前是什么模式」：下次启动停在共振也能回到原来的模式
+      if (mode === 'resonance') {
+        rememberResonanceEntryMode(viewModeRef.current)
+        // 回到共振模式 = 结束挂起：房间重新驱动本机播放
+        const session = getResonanceSession()
+        session.setSuspended(false)
+        setResonanceSuspended(false)
+      }
       setViewMode(mode)
       setEnteredFromMode(mode)
       // 壁纸监控按需启停（桌面模式 + 联动开启才启动）
@@ -3009,7 +3056,7 @@ function App() {
     }
 
     // 壁纸监控按需启停：仅「桌面模式 + 壁纸联动开启」时启动，其余模式停止（避免持续 powershell 查询拖慢性能）
-    const syncWallpaperWatcher = (mode?: 'explore' | 'minimal' | 'traditional' | 'desktop') => {
+    const syncWallpaperWatcher = (mode?: ViewMode) => {
       const inDesktop = (mode ?? viewModeRef.current) === 'desktop'
       const syncOn = localStorage.getItem('wallpaperSyncEnabled') === 'true'
       window.electron?.wallpaper?.setWallpaperWatcherEnabled?.(Boolean(inDesktop && syncOn))
@@ -3019,20 +3066,36 @@ function App() {
     syncWallpaperWatcher(viewMode)
 
     const handleViewModeChange = (e: Event) => {
-      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop'
+      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+      // 房间里还有人 + 要切去别的模式 → 先问「挂起还是退出」，不能一声不响把房间丢了
+      // （bypass 由弹窗按钮设置：用户已经选过了，直接放行同一次切换）
+      const resonanceRoom = getResonanceSession().getSnapshot()
+      if (
+        !resonanceModeSwitchBypassRef.current
+        && mode !== 'resonance'
+        && viewModeRef.current === 'resonance'
+        && resonanceRoom.room
+        && resonanceRoom.live
+      ) {
+        setResonanceExitPrompt({ next: mode })
+        return
+      }
+      resonanceModeSwitchBypassRef.current = false
       const revision = ++viewModeChangeRevisionRef.current
       // 模式切换过渡动画：若尚未为同一目标显示，则立即显示（点击即盖住，覆盖加载卡顿；
       // 已显示则保留原有 startedAt，不重置最短时长）
       if (mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
         setModeTransition({ to: mode, startedAt: performance.now(), ready: false })
       }
-      const loadTarget = mode === 'explore'
-        ? loadExploreView
-        : mode === 'desktop'
-          ? loadDesktopView
-          : mode === 'traditional'
-            ? loadTraditionalView
-            : loadHomeView
+      const loadTarget = mode === 'resonance'
+        ? loadResonanceView
+        : mode === 'explore'
+          ? loadExploreView
+          : mode === 'desktop'
+            ? loadDesktopView
+            : mode === 'traditional'
+              ? loadTraditionalView
+              : loadHomeView
 
       // Keep the current mode painted until the destination chunk is ready, then let the
       // two prepared roots crossfade. React.lazy must never expose the black app base here.
@@ -3067,7 +3130,7 @@ function App() {
     // 再经 viewModeChanged 真正切换——动画从头盖到尾，来源内容不会以展开态残留成顶部占位
     const handleTransitionStart = (e: Event) => {
       const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop'
-      if (!['explore', 'minimal', 'traditional', 'desktop'].includes(mode)) return
+      if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance'].includes(mode)) return
       if (mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
         setModeTransition({ to: mode, startedAt: performance.now(), ready: false })
       }
@@ -4593,7 +4656,12 @@ function App() {
           }
           ;(window as any).electron?.log?.(`[AppleRadio] station detail resolved: hasPlayParams=${Boolean(radioPlayParams)}`)
         }
-        appleHlsStream = await resolveAppleRadioStream(radioDescriptor.stationId, radioPlayParams).catch(error => {
+        appleHlsStream = await resolveAppleRadioStream(
+          radioDescriptor.stationId,
+          radioPlayParams
+            ? { ...radioPlayParams, ...(radioDescriptor.stationHash ? { stationHash: radioDescriptor.stationHash } : {}) }
+            : radioDescriptor.stationHash ? { stationHash: radioDescriptor.stationHash } : undefined,
+        ).catch(error => {
           setAppleRadioError(error instanceof Error ? error.message : 'Apple Music 电台取流失败')
           return null
         })
@@ -5392,6 +5460,72 @@ function App() {
 
   // ===== 桌面播放器：独立置顶小窗口的状态桥接 =====
   const isPlayingRef = useRef(isPlaying)
+  // ── 共振（多人一起听）的播放适配与跨平台解析 ─────────────────────────────
+  // 房间只同步「哪首歌、播到哪一秒」；本机用自己的账号与音源播放，绝不共享会员。
+  // 本机解析不了 → 静音跟随（不加载、不出声），并把原因交给共振界面提示。
+  /** 已解析过的曲目缓存：同一首不重复搜索/取流（房间内最多 200 条） */
+  const resonanceResolvedRef = useRef<Map<string, ResonanceLocalTrack>>(new Map())
+  const resolveResonanceTrackCached = useCallback(async (track: ResonanceTrack) => {
+    const cached = resonanceResolvedRef.current.get(track.key)
+    if (cached) return cached
+    const resolved = await resolveLocalTrack(track, resonancePlatforms)
+    resonanceResolvedRef.current.set(track.key, resolved)
+    if (resonanceResolvedRef.current.size > 200) {
+      const oldest = resonanceResolvedRef.current.keys().next().value
+      if (oldest) resonanceResolvedRef.current.delete(oldest)
+    }
+    return resolved
+  }, [resonancePlatforms])
+  /** 房间曲目 → 本机可播版本（供共振界面显示「你能播/你播不了」） */
+  const resolveResonanceTrack = useCallback(async (track: ResonanceTrack) => (
+    resolveResonanceTrackCached(track)
+  ), [resolveResonanceTrackCached])
+  /** 共振播放适配器：读本机播放 / 对齐房主权威进度 / 解析本机可播性 */
+  const createResonanceAdapter = useCallback((hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ({
+    readLocal: () => {
+      const song = currentSong
+      if (!song) return null
+      return {
+        trackKey: canonicalTrackKey({ title: song.name, artists: (song.artists || []).map(artist => artist.name) }),
+        positionMs: Math.max(0, Math.round((audioPlayer.playbackTimeStore.getSnapshot().currentTime || 0) * 1000)),
+        playing: Boolean(isPlaying),
+      }
+    },
+    apply: (playback: { trackKey: string; positionMs: number; playing: boolean }, hard: boolean) => {
+      void (async () => {
+        const room = getResonanceSession().getSnapshot()
+        // 房间被挂起（房主切去别的模式）：谁都不跟着动，各自听自己的
+        if (room.suspended) return
+        const track = room.queue.items.find(item => item.key === playback.trackKey)
+        if (!track) return
+        const resolved = await resolveResonanceTrackCached(track)
+        if (!resolved.playable || !resolved.song) {
+          // 静音跟随：不加载也不出声，避免「假装在听」，原因由共振界面显示
+          hooks.onUnplayable(track, resolved)
+          return
+        }
+        const sameSong = Boolean(currentSong && isSameSong(currentSong, resolved.song))
+        if (!sameSong) {
+          // 走既有播放入口（ref 稳定引用）：换歌 + 交给统一播放链
+          handleSongSelectRef.current(resolved.song, [resolved.song])
+          return
+        }
+        const audio = audioPlayerRef.current
+        const target = Math.max(0, playback.positionMs / 1000)
+        const drift = Math.abs((audioPlayer.playbackTimeStore.getSnapshot().currentTime || 0) - target)
+        // 硬同步（换歌 / 暂停切换 / 房主拖进度）立即对齐；软同步只在漂移超过 0.6s 时纠偏
+        if (hard || drift > 0.6) audio.seek(target)
+        if (playback.playing !== Boolean(isPlaying)) audio.togglePlay()
+      })()
+    },
+    setQueue: () => {
+      // 房间队列由共振界面展示；本机播放完全由房主权威状态驱动，不改写 App 播放列表（避免队列语义打架）
+    },
+    canPlay: async (track: ResonanceTrack) => {
+      const resolved = await resolveResonanceTrackCached(track)
+      return { playable: resolved.playable, tier: resolved.tier, reason: resolved.reason }
+    },
+  }), [audioPlayer, currentSong, isPlaying, resolveResonanceTrackCached])
   isPlayingRef.current = isPlaying
   const lastMediaControlRef = useRef<{ group: string; time: number } | null>(null)
   // 遥控器音量/静音状态
@@ -5507,13 +5641,13 @@ function App() {
     } else if (action === 'desktop-lyrics') {
       void window.electron?.desktopLyrics?.setEnabled?.(!desktopLyricsWindowEnabled)
     } else if (action === 'mode-switch') {
-      const order = ['explore', 'minimal', 'traditional', 'desktop']
+      const order = ['explore', 'minimal', 'traditional', 'desktop', 'resonance']
       const idx = order.indexOf(viewMode)
       const next = order[(idx + 1) % order.length]
       window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: next }))
     } else if (action === 'set-mode') {
       const mode = String(payload)
-      if (['explore', 'minimal', 'traditional', 'desktop'].includes(mode)) {
+      if (['explore', 'minimal', 'traditional', 'desktop', 'resonance'].includes(mode)) {
         window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))
       }
     } else if (action === 'set-lyric-mode') {
@@ -5902,6 +6036,34 @@ function App() {
     window.addEventListener('waveforge:show-similar-songs', handler)
     return () => window.removeEventListener('waveforge:show-similar-songs', handler)
   }, [])
+
+  // 共振挂起时，全局右键菜单多一项「推送至共振（一起听）」→ 这里把歌交给房间。
+  // 房主当场决定：能加就设成下一曲，不能加就挂进预排队。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const song = (event as CustomEvent).detail as Song | undefined
+      if (!song?.name) return
+      const session = getResonanceSession()
+      const result = session.pushTrack(songToResonanceTrack(song))
+      if (!result.ok) {
+        addToast(`没能推送到共振房间：${result.reason === 'no-room' ? '房间已经不在了' : result.reason || '未知原因'}`, 'error')
+        return
+      }
+      const mine = session.getSnapshot().role === 'host'
+      if (mine) {
+        addToast(
+          result.mode === 'pending'
+            ? `《${song.name}》已预排进共振房间，等你的加歌资格放开`
+            : `《${song.name}》已设为共振房间的下一曲`,
+          'success',
+        )
+      } else {
+        addToast(`《${song.name}》已推送到共振房间，房主会按房间规则排进队列`, 'success')
+      }
+    }
+    window.addEventListener(RESONANCE_PUSH_EVENT, handler)
+    return () => window.removeEventListener(RESONANCE_PUSH_EVENT, handler)
+  }, [addToast])
 
   useEffect(() => {
     window.electron?.desktopPlayer?.pushState({ accentColor: coverPalette[0] || dominantColor })
@@ -7353,6 +7515,65 @@ function App() {
         onClose={() => setShowFusionConfirm(false)}
         onConfirm={() => void confirmEnableFusion()}
       />
+
+      {/* 共振房间里切模式：问一句「挂起还是退出」，别一声不响把房间丢了 */}
+      {resonanceExitPrompt && (
+        <div className="fixed inset-0 z-[420] flex items-center justify-center bg-black/70 p-6 backdrop-blur-xl" role="dialog" aria-modal="true" aria-label="要离开共振房间吗">
+          <div className="w-[min(460px,92vw)] overflow-hidden rounded-[26px] border border-white/12 bg-[#0d1220]/97 p-6 text-white shadow-[0_30px_90px_rgba(0,0,0,.65)]">
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-[#ff5a70]/18 text-[#ff8b9a]"><Radio className="h-5 w-5" /></span>
+              <div>
+                <h3 className="text-base font-semibold">还在一起听房间里</h3>
+                <p className="mt-0.5 text-xs text-white/50">切到别的模式前，先决定这个房间怎么处理</p>
+              </div>
+            </div>
+            <div className="mt-5 space-y-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const session = getResonanceSession()
+                  session.setSuspended(true)
+                  setResonanceSuspended(true)
+                  const next = resonanceExitPrompt.next
+                  setResonanceExitPrompt(null)
+                  resonanceModeSwitchBypassRef.current = true
+                  window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: next }))
+                  addToast('共振已挂起：房间还在，右键歌曲可以「推送至共振」', 'info')
+                }}
+                className="w-full rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10"
+              >
+                <span className="block text-sm font-medium">挂起共振</span>
+                <span className="mt-0.5 block text-[11px] text-white/45">房间保留（成员还在），你在别的模式里可以右键把歌推回房间</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const session = getResonanceSession()
+                  const wasHost = session.getSnapshot().role === 'host'
+                  session.dissolve()
+                  setResonanceSuspended(false)
+                  const next = resonanceExitPrompt.next
+                  setResonanceExitPrompt(null)
+                  resonanceModeSwitchBypassRef.current = true
+                  window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: next }))
+                  addToast(wasHost ? '房间已解散' : '已退出房间', 'info')
+                }}
+                className="w-full rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10"
+              >
+                <span className="block text-sm font-medium">退出共振</span>
+                <span className="mt-0.5 block text-[11px] text-white/45">房主退出即解散房间；成员退出只离开自己</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setResonanceExitPrompt(null)}
+                className="w-full rounded-2xl px-4 py-2.5 text-center text-sm text-white/60 transition hover:bg-white/6"
+              >
+                留在这里（取消）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* 全局更新提示（任何视图模式可见；分客户端显示） */}
       <UpdatePrompt playerTheme={playerTheme} />
@@ -7553,6 +7774,39 @@ function App() {
               onExitDesktopMode={viewCallbacks.onExitDesktopMode}
               onRemoteClick={viewCallbacks.onRemoteClick}
               onOpenDeviceControl={viewCallbacks.onOpenDeviceControl}
+            />
+          </motion.div>
+        )}
+        {renderedMode === 'resonance' && (
+          <motion.div
+            key="resonance-mode"
+            initial={{ opacity: 0, y: 26, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 1.012 }}
+            transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute inset-0 h-full w-full"
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
+          >
+            {/* 共振：房间状态在会话单例里，模式切换不会丢房间；播放由房主权威状态驱动 */}
+            <LazyResonanceView
+              playerTheme={playerTheme}
+              platforms={resonancePlatforms}
+              identityCandidates={[
+                // 只把「确实登录了 + 有账号名」的平台当身份候选：
+                // 登出后 localStorage 里的旧昵称不该继续冒充可用身份
+                ...(neteaseLoggedIn ? [{ platform: 'netease' as MusicPlatform, nickname: neteaseUsername || '', avatarUrl: neteaseAvatar || '' }] : []),
+                ...(qqLoggedIn ? [{ platform: 'qq' as MusicPlatform, nickname: qqUsername || '', avatarUrl: qqAvatar || '' }] : []),
+                ...(appleLoggedIn ? [{ platform: 'apple' as MusicPlatform, nickname: appleUsername || '', avatarUrl: appleAvatar || '' }] : []),
+                ...(spotifyLoggedIn ? [{ platform: 'spotify' as MusicPlatform, nickname: spotifyUsername || '', avatarUrl: spotifyAvatar || '' }] : []),
+                ...(kugouLoggedIn ? [{ platform: 'kugou' as MusicPlatform, nickname: kugouUsername || '', avatarUrl: kugouAvatar || '' }] : []),
+                ...(sodaLoggedIn ? [{ platform: 'soda' as MusicPlatform, nickname: sodaUsername || '', avatarUrl: sodaAvatar || '' }] : []),
+              ]}
+              userIds={resonanceUserIds}
+              usernames={resonanceUsernames}
+              createAdapter={createResonanceAdapter}
+              resolveTrack={resolveResonanceTrack}
+              nowPlaying={{ song: currentSong, positionMs: currentTime, playing: isPlaying }}
+              onExitMode={() => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'explore' }))}
             />
           </motion.div>
         )}

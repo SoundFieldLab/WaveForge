@@ -529,7 +529,13 @@ export async function resolveAppleRadioStream(
     return null
   }
 
-  const params: Record<string, string> = { keyFormat: 'web' }
+  const params: Record<string, string> = {
+    format: 'stream',
+    hasDrm: 'true',
+    mediaType: '0',
+    streamingKind: '1',
+    keyFormat: 'web',
+  }
   const safePlayParams = sanitizeAppleRadioPlayParams(playParams)
   for (const [key, value] of Object.entries(safePlayParams)) params[key] = String(value)
   if (!params.id) params.id = stationId

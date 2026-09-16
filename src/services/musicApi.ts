@@ -178,6 +178,8 @@ export interface Song {
     motionArtworkUrl?: string
     motionPosterUrl?: string
     heroArtworkUrl?: string
+    /** 电台取流所需的 stationHash（来自 Apple playParams，不能在 Song 转换时丢失）。 */
+    stationHash?: string
     /** 旧会话兼容字段；新建队列不再持久化 stream。 */
     stream?: import('./applePlayback').AppleNativeStream
   }
