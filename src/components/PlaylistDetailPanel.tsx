@@ -1,13 +1,14 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Music, Play, Clock, Crown, Heart, Info, Radio } from 'lucide-react'
+import { ChevronDown, Music, Play, Clock, Crown, Heart, Infinity as InfinityIcon, Info, Radio } from 'lucide-react'
 import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, isSameSong } from '../services/musicApi'
 import { getPlatformCapabilities } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
-import { useState, useRef, useEffect, useCallback, useMemo, memo, type UIEvent } from 'react'
+import { Fragment, useState, useRef, useEffect, useCallback, useMemo, memo, type UIEvent } from 'react'
 import CachedImage from './CachedImage'
 import AnimatedArtworkCover from './AnimatedArtworkCover'
 import { fetchApplePlaylistMotion } from '../services/appleWebService'
+import { APPLE_AUTOPLAY_CHANGED_EVENT, persistAppleAutoplayEnabled, readAppleAutoplayEnabled } from '../services/appleAutoplaySettings'
 import { preloadArtwork } from '../services/artworkLoader'
 import SongContextMenu from './SongContextMenu'
 import ScrollToTop from './ScrollToTop'
@@ -21,6 +22,26 @@ const DETAIL_CARD_HEIGHT = 56
 const DETAIL_OVERSCAN = 8
 const ARTWORK_PREFETCH_INITIAL = 80
 const ARTWORK_PREFETCH_STEP = 80
+
+// 玻璃遮罩的 backdrop-filter 由 motion 驱动（而非 style/state）：
+// AnimatePresence 会冻结退出中子树的 props，关闭时父组件重渲染改不到它们，
+// 只有 motion 自己的 animate/exit 能落到 DOM 上。停稳后再上模糊（入场时面板在
+// 屏幕下方，此时置 0 不可见，不会闪），退场立刻清零——退场就只剩 transform。
+const GLASS_REST = 'blur(80px) saturate(180%)'
+const GLASS_CLEAR = 'blur(0px) saturate(180%)'
+const GLASS_LAYER_MOTION = {
+  initial: { backdropFilter: GLASS_CLEAR, WebkitBackdropFilter: GLASS_CLEAR },
+  animate: { backdropFilter: GLASS_REST, WebkitBackdropFilter: GLASS_REST },
+  exit: {
+    backdropFilter: GLASS_CLEAR,
+    WebkitBackdropFilter: GLASS_CLEAR,
+    transition: { duration: 0 },
+  },
+  transition: {
+    backdropFilter: { delay: 0.36, duration: 0.12, ease: 'easeOut' },
+    WebkitBackdropFilter: { delay: 0.36, duration: 0.12, ease: 'easeOut' },
+  },
+} as const
 const ARTWORK_PREFETCH_TRIGGER = 24
 const ARTWORK_PREFETCH_BATCH = 8
 const ARTWORK_PREFETCH_CONCURRENCY = 3
@@ -52,6 +73,12 @@ interface PlaylistDetailPanelProps {
   error?: string
   onRetry?: () => void
   onClose: () => void
+  /**
+   * 退场动画真正播放完毕时回调。调用方应在此之后才释放歌单数据/卸载面板——
+   * 关闭时立即卸载会让内部 AnimatePresence 的 exit 永远不执行（面板直接消失、
+   * 封面与动态封面同帧销毁），这正是关闭掉帧与封面闪烁的成因。
+   */
+  onExitComplete?: () => void
   onSongSelect: (song: Song, playlist: Song[]) => void
   neteaseVip?: boolean
   qqVip?: boolean
@@ -60,6 +87,8 @@ interface PlaylistDetailPanelProps {
   currentUserId?: string | number
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
+  /** 歌单创建者主页（歌单的下一级入口） */
+  onOpenUserProfile?: (userId: string, nickname?: string) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void
   onAddToPlaylist?: (song: Song, playlistId: string) => void
@@ -82,12 +111,14 @@ function PlaylistDetailPanel({
   error = '',
   onRetry,
   onClose,
+  onExitComplete,
   onSongSelect,
   neteaseVip = false,
   qqVip = false,
   currentPlatform = 'netease',
   onOpenArtist,
   onOpenAlbum,
+  onOpenUserProfile,
   onPlayNext,
   onAddToFavorites,
   onAddToPlaylist,
@@ -104,6 +135,23 @@ function PlaylistDetailPanel({
   const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
   const [heightVh, setHeightVh] = useState(80) // 从80vh开始，最大90vh
   const [subscribing, setSubscribing] = useState(false)
+  // 退场阶段：show 已置 false，但退场动画还在播。期间冻结一切会触发布局/重排的
+  // show 派生重置（高度回弹 80vh、可视窗口归零→整列表重渲染），并把昂贵的
+  // 60px 封面模糊与 80px backdrop-filter 摘掉——退场只走 transform/opacity，
+  // 否则 Chromium 每帧都要为移动中的元素重算 backdrop 快照，就是关闭卡顿的来源。
+  const [exiting, setExiting] = useState(false)
+  // 派生自 props 的"上一帧 show"：show 由 true 变 false 即进入退场。
+  // 渲染期同步（React 官方的"依据 props 调整 state"写法）保证与 show 同一帧生效，
+  // 放到 effect 里会晚一帧——那一帧里下面的重置 effect 已经把高度/可视窗口清掉了。
+  const [prevShow, setPrevShow] = useState(show)
+  if (show !== prevShow) {
+    setPrevShow(show)
+    setExiting(!show)
+  }
+  // 面板（含退场动画）仍在屏幕上：用来门控"关闭时别急着重置"的副作用
+  const mounted = show || exiting
+  // Apple「自动连播」开关（官方 stations/continuous 机制；开启后 Apple 队列临近播完自动接类似音乐）
+  const [appleAutoplayOn, setAppleAutoplayOn] = useState(() => readAppleAutoplayEnabled())
   const [collected, setCollected] = useState(Boolean(playlist?.isCollected))
   const [smartLoading, setSmartLoading] = useState(false)
 
@@ -119,6 +167,30 @@ function PlaylistDetailPanel({
     }).catch(() => { if (!cancelled) setAppleMotion(null) })
     return () => { cancelled = true }
   }, [appleMotionId])
+
+  // 背景封面快照：CSS background-image 的 URL 一变，浏览器在解码完成前该层是空的
+  // （A 歌单切 B 歌单时会闪一帧无背景）。这里保留"上一张已解码的 URL"，等新图解码完成
+  // 再替换，切换歌单期间背景始终有画面。首张开面板时同步生效，不引入额外等待。
+  const requestedBgUrl = playlist?.coverImgUrl ? getProxiedImageUrl(playlist.coverImgUrl, 1024) : ''
+  const [bgUrl, setBgUrl] = useState(requestedBgUrl)
+  useEffect(() => {
+    if (!requestedBgUrl) {
+      setBgUrl('')
+      return
+    }
+    if (requestedBgUrl === bgUrl) return
+    // 已缓存/已在解码器里的图会在下一帧立刻可用，无需等待 load
+    let cancelled = false
+    const img = new Image()
+    const apply = () => { if (!cancelled) setBgUrl(requestedBgUrl) }
+    img.onload = apply
+    img.onerror = apply
+    img.src = requestedBgUrl
+    if (img.complete) apply()
+    return () => { cancelled = true }
+    // bgUrl 刻意不进依赖：它是本 effect 的输出，进来会导致每次替换后再跑一遍
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestedBgUrl])
 
   // 网易云智能播放（playmode/intelligence）：按当前歌单/歌曲生成智能续播列表。
   // 接口返回"分组"结构（每组 { id, songs: [曲目] }），必须展开各组 songs 再映射，
@@ -328,17 +400,21 @@ function PlaylistDetailPanel({
   }, [show])
 
   useEffect(() => {
-    if (!show) {
+    // 退场期间不重置可视窗口。AnimatePresence 退场时渲染的是缓存的元素快照，
+    // 这里改 state 不会传到退场中的那棵树，但会白白触发一次本组件重渲染 +
+    // visibleSongs 重算（空切片）。冻结到真正卸载再做，省掉退场帧上的无用工作。
+    if (!mounted) {
       setViewport({ scrollTop: 0, height: 0 })
       return
     }
+    if (!show) return
     const container = scrollContainerRef.current
     if (!container) return
     commitViewport(container.scrollTop, container.clientHeight)
     const observer = new ResizeObserver(() => commitViewport(container.scrollTop, container.clientHeight))
     observer.observe(container)
     return () => observer.disconnect()
-  }, [commitViewport, show])
+  }, [commitViewport, mounted, show])
 
   useEffect(() => () => {
     if (viewportFrameRef.current !== null) window.cancelAnimationFrame(viewportFrameRef.current)
@@ -347,11 +423,11 @@ function PlaylistDetailPanel({
   
   // 重置状态
   useEffect(() => {
-    if (!show) {
-      setHeightVh(80)
-      setShowPlaylistInfo(false)
-    }
-  }, [show])
+    // 同上，只在真正卸载后重置：退场帧上做这些只是无用的重渲染
+    if (mounted) return
+    setHeightVh(80)
+    setShowPlaylistInfo(false)
+  }, [mounted])
   
   // 封面只按用户可能访问的窗口渐进预取：首段 80 首，接近边界时再追加 80 首。
   // 预取只写 artwork 缓存，不缓存歌单数据；共享 preloadArtwork 会合并可见行与后台请求。
@@ -411,9 +487,18 @@ function PlaylistDetailPanel({
   }
 
   return (
-    <AnimatePresence>
+    // ⚠️ 这里的每个直接子节点都必须有稳定 key。AnimatePresence 靠 key 跟踪"哪些子节点
+    // 还在场"；此前面板子树是一个无名 Fragment、另外三个弹窗也是无 key 条件节点，
+    // 于是它无法建立 presence 记录，关闭时直接同帧卸载——内部的 exit 全部失效
+    // （面板"瞬间消失"而非下滑退场）。这也是 React "two children with the same key" 警告的来源。
+    <AnimatePresence
+      onExitComplete={() => {
+        setExiting(false)
+        onExitComplete?.()
+      }}
+    >
       {show && (
-        <>
+        <Fragment key="playlist-detail-surface">
           {/* 背景遮罩 */}
           <motion.div
             initial={{ opacity: 0 }}
@@ -469,28 +554,31 @@ function PlaylistDetailPanel({
               }}
             >
               {/* 封面背景 - 液态玻璃效果 */}
-              {playlist?.coverImgUrl ? (
+              {bgUrl ? (
                 <div className="absolute inset-0 z-0" style={{ borderTopLeftRadius: '32px', borderTopRightRadius: '32px' }}>
-                  {/* 模糊的封面背景 - 使用代理URL */}
+                  {/* 模糊的封面背景 - 使用代理URL。filter 保持常挂：它是固定尺寸图层上
+                      一次性光栅化，合成器可直接复用纹理，不随动画逐帧重算。 */}
                   <div 
                     className="absolute inset-0"
                     style={{
-                      backgroundImage: `url(${getProxiedImageUrl(playlist.coverImgUrl, 1024)})`,
+                      backgroundImage: `url(${bgUrl})`,
                       backgroundSize: 'cover',
                       backgroundPosition: 'center',
                       filter: playerTheme === 'dark' ? 'blur(60px) brightness(0.8)' : 'blur(60px) brightness(1.05)',
                       transform: 'scale(1.2)',
                     }}
                   />
-                  {/* 液态玻璃遮罩 - 多层渐变 */}
-                  <div 
+                  {/* 液态玻璃遮罩 - 多层渐变。
+                      backdrop-filter 采样元素背后画面，元素一动就要逐帧重算快照；
+                      故动画期间保持 0，停稳后才上 blur（见 GLASS_LAYER_MOTION）。
+                      渐变底色常驻，视觉上只是"模糊稍晚到位"，不会露底。 */}
+                  <motion.div 
+                    {...GLASS_LAYER_MOTION}
                     className="absolute inset-0"
                     style={{
                       background: playerTheme === 'dark'
                         ? 'linear-gradient(135deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.75) 50%, rgba(0,0,0,0.8) 100%)'
                         : 'linear-gradient(135deg, rgba(252,252,250,0.82) 0%, rgba(246,246,244,0.74) 50%, rgba(250,250,248,0.8) 100%)',
-                      backdropFilter: 'blur(80px) saturate(180%)',
-                      WebkitBackdropFilter: 'blur(80px) saturate(180%)',
                     }}
                   />
                   {/* 光泽效果 */}
@@ -511,15 +599,16 @@ function PlaylistDetailPanel({
                 </div>
               ) : (
                 // 没有封面时的默认背景
-                <div className="absolute inset-0 z-0" style={{
-                  background: playerTheme === 'dark'
-                    ? 'linear-gradient(135deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.75) 50%, rgba(0,0,0,0.8) 100%)'
-                    : 'linear-gradient(135deg, rgba(252,252,250,0.82) 0%, rgba(246,246,244,0.74) 50%, rgba(250,250,248,0.8) 100%)',
-                  backdropFilter: 'blur(80px) saturate(180%)',
-                  WebkitBackdropFilter: 'blur(80px) saturate(180%)',
-                  borderTopLeftRadius: '32px',
-                  borderTopRightRadius: '32px'
-                }} />
+                <motion.div
+                  {...GLASS_LAYER_MOTION}
+                  className="absolute inset-0 z-0"
+                  style={{
+                    background: playerTheme === 'dark'
+                      ? 'linear-gradient(135deg, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.75) 50%, rgba(0,0,0,0.8) 100%)'
+                      : 'linear-gradient(135deg, rgba(252,252,250,0.82) 0%, rgba(246,246,244,0.74) 50%, rgba(250,250,248,0.8) 100%)',
+                    borderTopLeftRadius: '32px',
+                    borderTopRightRadius: '32px'
+                  }} />
               )}
               
               {/* 内容层 - 相对定位在背景之上 */}
@@ -552,6 +641,9 @@ function PlaylistDetailPanel({
                         role="card"
                         size={256}
                         priority="critical"
+                        // 保留上一张封面做交叉淡入：切换歌单（同面板换 playlist）时
+                        // 不会先空一拍再出图
+                        retainPrevious
                         fallback={
                           <div className="w-full h-full flex items-center justify-center">
                             <Music className={`w-8 h-8 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} />
@@ -568,6 +660,10 @@ function PlaylistDetailPanel({
                         videoUrl={appleMotion.video}
                         posterUrl={appleMotion.poster}
                         staticCoverUrl={playlist.coverImgUrl}
+                        // 不在退场时传 active=false：AnimatePresence 会冻结退场子树的 props，
+                        // 这个变化根本落不到子组件上（实测 pause() 不会被调用）。媒体回收统一
+                        // 交给退场结束后的卸载——届时组件真正 unmount，HLS 才 destroy。
+                        fadeInOnReady
                         className="absolute inset-0 h-full w-full"
                       />
                     )}
@@ -595,6 +691,27 @@ function PlaylistDetailPanel({
                           总时长 {totalDurationMinutes} 分钟
                         </span>
                       )}
+                      {/* 创建者：歌单的下一级入口（点开作者主页）。
+                          旧实现里 creator 只是 prop 契约，从未渲染，歌单无法走到作者层。 */}
+                      {(() => {
+                        const creator = playlist.creator as { userId?: number | string; nickname?: string } | undefined
+                        const creatorId = creator?.userId ? String(creator.userId) : ''
+                        if (!creator?.nickname) return null
+                        if (!creatorId || !onOpenUserProfile) return <span>by {creator.nickname}</span>
+                        return (
+                          <button
+                            type="button"
+                            onClick={event => {
+                              event.stopPropagation()
+                              onOpenUserProfile(creatorId, creator.nickname)
+                            }}
+                            className="cursor-pointer transition-colors hover:text-pink-400 hover:underline"
+                            title={`查看作者 ${creator.nickname}`}
+                          >
+                            by {creator.nickname}
+                          </button>
+                        )
+                      })()}
                     </div>
 
                     {/* 官方歌单介绍（Apple/网易云等均提供；此前只藏在「详情」弹窗里，这里按官网做法直接显示摘要） */}
@@ -653,6 +770,26 @@ function PlaylistDetailPanel({
                         >
                           <Radio className={`w-3.5 h-3.5 ${smartLoading ? 'animate-pulse' : ''}`} />
                           智能播放
+                        </motion.button>
+                      )}
+                      {/* 自动连播：仅 Apple（官方 stations/continuous 机制，队列临近播完自动接"类似音乐"） */}
+                      {(playlist.platform === 'apple' || currentPlatform === 'apple') && songs.length > 0 && (
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.95 }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            const next = !appleAutoplayOn
+                            persistAppleAutoplayEnabled(next)
+                            setAppleAutoplayOn(next)
+                          }}
+                          aria-pressed={appleAutoplayOn}
+                          title={appleAutoplayOn ? '自动连播已开启：播完队列后自动接上类似音乐' : '自动连播已关闭'}
+                          className={`px-4 py-1.5 rounded-full font-medium transition-all flex items-center gap-1.5 text-sm ${appleAutoplayOn ? '' : playerTheme === 'dark' ? 'border border-white/20 text-white/80 hover:bg-white/10' : 'border border-black/15 text-black/70 hover:bg-black/10'}`}
+                          style={appleAutoplayOn ? { backgroundColor: `${accentColor}22`, color: accentColor, border: `1px solid ${accentColor}55` } : undefined}
+                        >
+                          <InfinityIcon className={`w-3.5 h-3.5 ${appleAutoplayOn ? '' : 'opacity-70'}`} />
+                          自动连播
                         </motion.button>
                       )}
                       {/* 自建歌单/我喜欢/已收藏的歌单不显示收藏按钮（只有别人的歌单可收藏） */}
@@ -862,13 +999,46 @@ function PlaylistDetailPanel({
                                 ? playerTheme === 'dark' ? 'text-pink-300/70' : 'text-pink-600/70'
                                 : playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'
                             }`}>
-                              {song.artists?.map((a: any) => a.name).join(', ')}
+                              {song.artists?.map((a: any, artistIndex: number) => {
+                                const artistId = a?.id ? String(a.id) : ''
+                                const clickable = Boolean(artistId && onOpenArtist)
+                                return (
+                                  <span key={`${artistId}-${artistIndex}`}>
+                                    {artistIndex > 0 && ', '}
+                                    {clickable ? (
+                                      <button
+                                        type="button"
+                                        onClick={event => {
+                                          event.stopPropagation()
+                                          onOpenArtist?.(artistId, (song.platform || currentPlatform) as MusicPlatform)
+                                        }}
+                                        className="cursor-pointer transition-colors hover:text-pink-400 hover:underline"
+                                        title={`查看歌手 ${a.name}`}
+                                      >
+                                        {a.name}
+                                      </button>
+                                    ) : a.name}
+                                  </span>
+                                )
+                              })}
                             </div>
                           </div>
 
                           {/* 专辑 */}
                           <div className={`hidden md:block text-xs truncate max-w-[200px] ${playerTheme === 'dark' ? 'text-white/40' : 'text-black/40'}`}>
-                            {song.album?.name || '-'}
+                            {song.album?.id && onOpenAlbum ? (
+                              <button
+                                type="button"
+                                onClick={event => {
+                                  event.stopPropagation()
+                                  onOpenAlbum?.(String(song.album.id), (song.platform || currentPlatform) as MusicPlatform)
+                                }}
+                                className="max-w-full cursor-pointer truncate transition-colors hover:text-pink-400 hover:underline"
+                                title={`查看专辑 ${song.album.name}`}
+                              >
+                                {song.album.name || '-'}
+                              </button>
+                            ) : (song.album?.name || '-')}
                           </div>
 
                           {/* 时长 */}
@@ -909,11 +1079,12 @@ function PlaylistDetailPanel({
             />
             </div> {/* 结束包装容器 */}
           </motion.div>
-        </>
+        </Fragment>
       )}
       
       {playlist && getPlatformCapabilities(playlist.platform || currentPlatform).comments && (
         <CommentModal
+          key="playlist-detail-comments"
           isOpen={showPlaylistInfo}
           onClose={() => setShowPlaylistInfo(false)}
           song={null}
@@ -925,6 +1096,7 @@ function PlaylistDetailPanel({
       {/* 右键菜单 */}
       {contextMenu.song && (
         <SongContextMenu
+          key="playlist-detail-context-menu"
           show={contextMenu.show}
           x={contextMenu.x}
           y={contextMenu.y}
@@ -987,6 +1159,7 @@ function PlaylistDetailPanel({
       )}
 
       <DeleteSongModal
+        key="playlist-detail-delete-confirm"
         show={Boolean(pendingRemoval)}
         songName={pendingRemoval?.song.name || ''}
         fromFavorites={Boolean(pendingRemoval?.fromFavorites)}

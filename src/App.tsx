@@ -756,9 +756,17 @@ function App() {
   const [songDetailSong, setSongDetailSong] = useState<Song | null>(null)
   const [showSimilarSongs, setShowSimilarSongs] = useState(false)
   const [similarSongsSource, setSimilarSongsSource] = useState<Song | null>(null)
-  // 歌曲详情「也爱歌单」应用内打开
+  // 歌曲详情「也爱歌单」应用内打开。
+  // 数据（detailPlaylist）与可见性（detailPlaylistOpen）刻意分开：关闭只把可见性置 false，
+  // 让面板退场动画跑完（期间数据/封面/动态 HLS 全程冻结），退场结束后才清空数据。
+  // 此前关闭是同帧 setDetailPlaylist(null)，面板与封面一起卸载 → 内部 AnimatePresence 的
+  // exit 从不执行（表现为"关不掉/直接消失"），且 60px 封面模糊与 80px backdrop 模糊
+  // 在同一帧被销毁重排，就是关闭掉帧与封面闪烁的来源。
   const [detailPlaylist, setDetailPlaylist] = useState<{ playlist: any; songs: Song[] } | null>(null)
+  const [detailPlaylistOpen, setDetailPlaylistOpen] = useState(false)
   const [detailPlaylistLoading, setDetailPlaylistLoading] = useState(false)
+  // 退场回调在动画完成时执行，需要读"此刻"是否又打开了面板，故用 ref 同步可见性
+  const detailPlaylistOpenRef = useRef(false)
   // 音效引擎版本（v1 远程原版 / v2 本地增强版 / v3 纯 TS DSP 内核），默认 v1；切换见 switchAudioEngine
   const [audioEngineVersion, setAudioEngineVersionState] = useState<AudioEngineVersion>(() => getAudioEngineVersion(getAvailableEngineIds()))
   // 引擎导出进行中状态（由 adapter.onExportingChange 事件驱动，供调音室导出按钮禁用/文案）
@@ -3661,6 +3669,32 @@ function App() {
     stack.push(entry)
   }
 
+  // 用户主动关闭（关闭按钮/点遮罩/下拉/TV 返回）：只置可见性为 false，让退场动画跑完；
+  // 数据、封面与动态封面 HLS 在退场期间保持不动，退场结束后由 onExitComplete 统一释放。
+  const closeDetailPlaylist = useCallback(() => {
+    setDetailPlaylistOpen(false)
+  }, [])
+
+  // 跨弹窗导航关闭（打开艺人/专辑/歌曲详情/相似歌曲、选歌切播放页）：数据即刻释放。
+  // 这些场景新弹窗层级低于面板（艺人 z-70 / 歌曲详情与相似歌曲 z-85，面板 z-95），
+  // 若让面板播完退场动画，新弹窗会先被盖住约 300ms，属于行为回退。
+  const closeDetailPlaylistImmediate = useCallback(() => {
+    setDetailPlaylistOpen(false)
+    setDetailPlaylist(null)
+  }, [])
+
+  // 退场结束回调：用户若在退场期间又打开了（同一或另一歌单），保留数据避免闪空。
+  const handleDetailPlaylistExitComplete = useCallback(() => {
+    if (detailPlaylistOpenRef.current) return
+    setDetailPlaylist(null)
+  }, [])
+
+  // 退场结束时读取"当前是否仍可见"。用 ref 而非 state 闭包：回调在退场动画完成时才执行，
+  // 闭包里的 state 会是调用时的旧值。
+  useEffect(() => {
+    detailPlaylistOpenRef.current = detailPlaylistOpen
+  }, [detailPlaylistOpen])
+
   // 歌曲详情「也爱歌单」→ 应用内打开歌单详情
   const handleOpenPlaylistFromDetail = async (playlistId: string, platform: MusicPlatform) => {
     setDetailPlaylistLoading(true)
@@ -3668,8 +3702,9 @@ function App() {
       const data = await getPlaylistDetail(playlistId, platform)
       const songs = data?.songs || data?.songlist || data?.playlist?.tracks || data?.tracks || []
       setDetailPlaylist({ playlist: data?.playlist || { id: playlistId, platform, name: '歌单' }, songs })
+      setDetailPlaylistOpen(true)
     } catch {
-      setDetailPlaylist(null)
+      closeDetailPlaylistImmediate()
       addToast('歌单加载失败，请稍后重试', 'error')
     } finally {
       setDetailPlaylistLoading(false)
@@ -3823,8 +3858,9 @@ function App() {
 
   // 打开艺人详情
   const handleOpenArtist = (artistId: string, platform: MusicPlatform) => {
-    // 歌单详情面板(z-95)高于艺人弹窗(z-70)：从面板内"查看歌手"时先关面板，避免新弹窗被盖住
-    setDetailPlaylist(null)
+    // 歌单详情面板(z-95)高于艺人弹窗(z-70)：从面板内"查看歌手"时先关面板，避免新弹窗被盖住。
+    // 这里必须立即释放数据（不能等退场动画），否则新艺人弹窗会被仍在退场的面板压住约 300ms。
+    closeDetailPlaylistImmediate()
     // 先关闭弹窗（不触发导航栈弹出）
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
@@ -3852,8 +3888,8 @@ function App() {
 
   // 打开专辑详情
   const handleOpenAlbum = (albumId: string, platform: MusicPlatform) => {
-    // 歌单详情面板(z-95)低于专辑弹窗(z-300)可见，但为统一"离开面板"语义，同样先关闭
-    setDetailPlaylist(null)
+    // 歌单详情面板(z-95)低于专辑弹窗(z-300)可见，但为统一"离开面板"语义，同样立即关闭
+    closeDetailPlaylistImmediate()
     const hadAlbum = showAlbumDetail && selectedAlbumId
     const hadArtist = showArtistDetail && selectedArtistId
     const hadSong = showSongDetail && songDetailSong
@@ -6195,7 +6231,7 @@ function App() {
         // 叠开会被盖住成为"隐形弹窗"（同 handleViewComments 的"彻底关闭"语义）
         dismissAlbumDetail()
         dismissArtistDetail()
-        setDetailPlaylist(null)
+        closeDetailPlaylistImmediate()
         setSongDetailSong(song)
         setShowSongDetail(true)
       }
@@ -6212,7 +6248,7 @@ function App() {
         // 同上：相似歌曲面板(z-85)会被专辑/歌单详情盖住，先彻底关闭底层弹窗
         dismissAlbumDetail()
         dismissArtistDetail()
-        setDetailPlaylist(null)
+        closeDetailPlaylistImmediate()
         setSimilarSongsSource(song)
         setShowSimilarSongs(true)
       }
@@ -7627,18 +7663,18 @@ function App() {
         {detailPlaylist && (
           <Suspense fallback={null}>
             <LazyPlaylistDetailPanel
-              key={detailPlaylist.playlist.id || 'playlist-detail'}
-              show
+              show={detailPlaylistOpen}
               overlayZ={95}
               playerTheme={playerTheme}
               playlist={detailPlaylist.playlist}
               songs={detailPlaylist.songs}
               loading={detailPlaylistLoading}
-              onClose={() => setDetailPlaylist(null)}
+              onClose={closeDetailPlaylist}
+              onExitComplete={handleDetailPlaylistExitComplete}
               onSongSelect={(song, songs) => {
                 // 选歌后关闭歌单详情面板（避免盖在播放页上），并记录歌单来源，
                 // home 返回时经 HomeView 恢复同一歌单并自动定位当前歌曲
-                setDetailPlaylist(null)
+                closeDetailPlaylistImmediate()
                 void handleSongSelect(song, songs, {
                   surface: 'home-playlist',
                   playlist: detailPlaylist.playlist,
