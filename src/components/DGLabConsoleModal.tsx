@@ -44,8 +44,10 @@ const PANEL = 'rgba(255,255,255,0.045)'
 const BORDER = 'rgba(255,255,255,0.08)'
 
 const STYLE_OPTIONS: { value: FeelStyleId; label: string; desc: string }[] = [
-  { value: 'stock', label: '原厂', desc: '复刻官方实时' },
+  { value: 'split', label: '分频', desc: 'A低频 B高频' },
+  { value: 'symmetric', label: '对称', desc: '两腿相同' },
   { value: 'stereo', label: '立体声', desc: '左右声像' },
+  { value: 'stock', label: '原厂', desc: '复刻官方实时' },
   { value: 'heartbeat', label: '心跳', desc: '咚-哒律动' },
   { value: 'breath', label: '呼吸', desc: '缓起伏交替' },
   { value: 'wave', label: '潮汐', desc: '波浪横滚' },

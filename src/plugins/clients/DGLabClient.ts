@@ -42,7 +42,7 @@ function dglabDefaultPort(): number {
   return DEFAULT_PORT
 }
 
-export type FeelStyleId = 'stereo' | 'heartbeat' | 'breath' | 'wave' | 'tap' | 'ride' | 'rumble' | 'stock'
+export type FeelStyleId = 'stereo' | 'split' | 'symmetric' | 'heartbeat' | 'breath' | 'wave' | 'tap' | 'ride' | 'rumble' | 'stock'
 export type StepPreset = 'strong' | 'medium' | 'weak' | 'custom'
 export type RampPreset = 'fast' | 'medium' | 'slow'
 

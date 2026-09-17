@@ -483,13 +483,43 @@ const sendV3Pulse = (channel, frames) => {
         if (accent > 0.3) pushEvent(engineState.eventsB, accent, 0.15 * 30)
         A = clamp(A * 0.75 + eventsLevel(engineState.eventsA) * 0.55, 0, 1)
         B = clamp(B * 0.75 + eventsLevel(engineState.eventsB) * 0.55, 0, 1)
-        // 通道比保持：归一化到 max=1，保住左右对比度，上限对两通道等比缩放
-        const m = Math.max(A, B)
-        if (m > 0.001) {
-          A /= m
-          B /= m
-        }
+        // 不做 max 归一化：那会把「相对形状」当成「绝对电平」，强制某一路恒为满格，
+        // 输出因此长期贴上沿（实测中位数==最大值==caps），既失去动态也失去「上限」的意义。
+        // 绝对大小交给下游 glide（映射到上限内）与钳位处理。
         return { A, B }
+      },
+    },
+    split: {
+      id: 'split',
+      label: '分频',
+      desc: 'A=低频、B=高频，中频两边打底——左腿感受鼓点、右腿感受细节，两腿体感差异最明显',
+      render: (ctx) => {
+        const { bass, mid, high, beat, accent } = ctx
+        // 中频按固定权重给两边打底：保证任何歌段（尤其纯人声段）两腿都有持续波形，
+        // 不会出现「一路完全没感觉」。
+        const bed = mid * 0.5
+        let A = clamp(bass * 1.0 + bed, 0, 1)
+        let B = clamp(high * 1.0 + bed, 0, 1)
+        // 打击层也按频段归属：鼓点（beat）给低频侧，瞬态（accent）给高频侧
+        if (beat > 0.3) pushEvent(engineState.eventsA, beat, 0.18 * 30)
+        if (accent > 0.3) pushEvent(engineState.eventsB, accent, 0.15 * 30)
+        A = clamp(A * 0.8 + eventsLevel(engineState.eventsA) * 0.5, 0, 1)
+        B = clamp(B * 0.8 + eventsLevel(engineState.eventsB) * 0.5, 0, 1)
+        return { A, B }
+      },
+    },
+    symmetric: {
+      id: 'symmetric',
+      label: '对称',
+      desc: '两通道完全相同的全频段波形——左右腿体感一致，适合只想要「整体跟着歌动」',
+      render: (ctx) => {
+        const { bass, mid, high, beat } = ctx
+        // 全频段直接合成一路波形：低频给主体、中频给厚度、高频给细节
+        const e = clamp(bass * 0.5 + mid * 0.35 + high * 0.2, 0, 1)
+        if (beat > 0.3) pushEvent(engineState.eventsA, beat, 0.18 * 30)
+        const v = clamp(e * 0.8 + eventsLevel(engineState.eventsA) * 0.5, 0, 1)
+        // A/B 共用同一份信号（不分开、不做左右区分）
+        return { A: v, B: v }
       },
     },
     heartbeat: {
@@ -673,12 +703,17 @@ const sendV3Pulse = (channel, frames) => {
     const norm = (v) => clamp((v ?? 0) * agcGain, 0, 1.2)
 
     // 观察能量包络（驱动持续振动层与实时波形频率）
-    // 原厂自适应 = 自动量程：相对「近期峰值基线」（强段→1.0 贴近上限、安静回落快），其余风格沿用窗口归一
+    // 原厂自适应 = 自动量程：相对「近期响度基线」归一（强段逼近上限、安静段回落）
+    //
+    // 参照量用**慢速均值**而非「近期峰值」：峰值参照在持续段落里比值恒为 1
+    // （obsE/envPeak === 1 会一直成立），导致输出长期钉死在上限（实测贴顶率 87%）。
+    // 用均值参照后，持续段落在 0.5 附近起伏，只有明显高于近期平均的段落才冲顶，
+    // 同时保留原厂「相对量程自适应」的语义。
     let envSrc
     let envDecay
     if (s.feelStyle === 'stock' && s.rtMode === 'auto') {
-      engineState.envPeak = Math.max(obsE, engineState.envPeak * 0.99)
-      envSrc = (s.rtGain ?? 1) * clamp(obsE / Math.max(engineState.envPeak, 0.05), 0, 1.2)
+      engineState.envPeak += (obsE - engineState.envPeak) * 0.02
+      envSrc = (s.rtGain ?? 1) * 0.55 * clamp(obsE / Math.max(engineState.envPeak, 0.03), 0, 2.2)
       envDecay = 0.25
     } else {
       envSrc = norm(obsE)
@@ -737,17 +772,23 @@ const sendV3Pulse = (channel, frames) => {
     const decay = (0.25 + s.smoothing * 0.32) / sp
     const tier = STEP_PRESETS[s.stepPreset] != null ? STEP_PRESETS[s.stepPreset] : Math.max(0, s.stepLimit ?? STEP_PRESETS[DEFAULT_STEP_PRESET])
     const step = Math.max(0, tier * sp)
-    const glide = (ch, raw) => {
+    // 通道上限（硬顶）：先算出来，供 glide 作为映射量程。
+    // glide 的目标是「上限内的绝对强度」——音乐轻则低、重则高，上限只是天花板。
+    // （此前固定按 *200 映射再在下游钳到 cap，导致超过 cap 的部分被截平，
+    //   实测表现就是输出长期钉死在上限值，失去动态。）
+    const aCapNow = Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
+    const bCapNow = Math.min(s.caps.B ?? 60, state.softLimit?.B ?? 200)
+    const glide = (ch, raw, cap) => {
       const c = engineState[ch]
-      const target = clamp(raw * 200, 0, 200)
+      const target = clamp(raw * cap, 0, cap)
       c.target = target
       const alpha = target >= c.current ? attack : decay
       let delta = (target - c.current) * alpha
       if (step > 0) delta = clamp(delta, -step, step)
-      c.current = clamp(c.current + delta, 0, 200)
+      c.current = clamp(c.current + delta, 0, cap)
     }
-    glide('A', curve(rawA))
-    glide('B', curve(rawB))
+    glide('A', curve(rawA), aCapNow)
+    glide('B', curve(rawB), bCapNow)
 
     // 恢复淡入（续播/输出启用）：0→1 线性
     let rampGain = 1
@@ -768,29 +809,37 @@ const sendV3Pulse = (channel, frames) => {
     let dutyTaper = 1
     if (duty > 0.7) dutyTaper = duty > 0.75 ? 0.1 : 1 - ((duty - 0.7) / 0.05) * 0.3
 
-    // 通道上限（硬上限，用户设定就该可达）+ 上限预算动态化：
-    // 轻段巡航≈45% 上限，强段/大能量自动逼近 100% 上限（用户开 200 强段就能到 200）
-    const aCap = Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
-    const bCap = Math.min(s.caps.B ?? 60, state.softLimit?.B ?? 200)
-    const rawAmp = engineState.A.current * rampGain * dutyTaper
-    const rawBmp = engineState.B.current * rampGain * dutyTaper
-    const budgetCeilA = Math.max(0.3, 0.45 + 0.55 * engineState.energyEnv) * aCap
-    const budgetCeilB = Math.max(0.3, 0.45 + 0.55 * engineState.energyEnv) * bCap
+    // ===== 输出：caps 只是「硬顶」，不参与缩放 =====
+    // 用户设定的是「最多能到多少」，不是「巡航目标」。实际强度完全由频谱映射决定：
+    // 音乐轻就低、音乐重就高，只有超过上限才截断。
+    //
+    // 此前这里把 caps 当作「预算天花板」去乘（budgetCeil = (0.45 + 0.55*env) * cap），
+    // 叠加 stereo 风格的 max 归一化，导致输出长期盯死在上限
+    // （实测 A 通道 中位数 == 最大值 == caps），既没有动态、「上限」也失去意义。
+    //
+    // 保留的两项仍然必要：
+    //   rampGain —— 恢复淡入（续播/启用时给身体适应，不能突跳）
+    //   dutyTaper —— 抗疲劳守卫（30s 窗口内高强占比过高时自动收敛）
+    const aCap = aCapNow
+    const bCap = bCapNow
+    const guardA = rampGain * dutyTaper
+    const guardB = rampGain * dutyTaper
     let outA
     let outB
     if (isStock) {
-      // 原厂直通：强度 = 自适应相对能量 × 动态预算上限（强段贴近用户上限，无风格整形/曲线）；
-      // 恢复淡入 + 抗疲劳守卫与其余风格一致（恢复从 0 缓升）
-      outA = clamp(Math.round(budgetCeilA * clamp01Local(engineState.energyEnv) * rampGain * dutyTaper), 0, aCap)
-      outB = clamp(Math.round(budgetCeilB * clamp01Local(engineState.energyEnv * 0.92) * rampGain * dutyTaper), 0, bCap)
-      if (overall < 0.008) { outA = 0; outB = 0 }
+      // 原厂：以自适应相对能量直接驱动，上限只做钳位
+      outA = clamp(Math.round(aCap * clamp01Local(engineState.energyEnv)), 0, aCap)
+      outB = clamp(Math.round(bCap * clamp01Local(engineState.energyEnv * 0.92)), 0, bCap)
     } else {
-      // 预算按对等比缩放（钳位前计算，保住左右/风格对比）
-      const budgetScale = Math.min(1, budgetCeilA / Math.max(rawAmp, 1), budgetCeilB / Math.max(rawBmp, 1))
-      outA = clamp(rawAmp * budgetScale, 0, aCap)
-      outB = clamp(rawBmp * budgetScale, 0, bCap)
+      // 其余风格：A/B.current 已由 glide 按频谱映射并缩放到 0-200 量纲
+      outA = clamp(Math.round(engineState.A.current), 0, aCap)
+      outB = clamp(Math.round(engineState.B.current), 0, bCap)
     }
-    return { A: Math.round(outA), B: Math.round(outB), beat, accent }
+    outA = Math.round(outA * guardA)
+    outB = Math.round(outB * guardB)
+    // 真静音（≈无声音）才归零；轻柔乐句由持续层兜住
+    if (overall < 0.008) { outA = 0; outB = 0 }
+    return { A: clamp(outA, 0, aCap), B: clamp(outB, 0, bCap), beat, accent }
   }
 
   const runEngine = (audio) => {
@@ -819,10 +868,26 @@ const sendV3Pulse = (channel, frames) => {
       const carrier = clamp((STYLE_CARRIER[state.settings.feelStyle] ?? 35) + (audio.high ?? 0) * 60 + engineState.speed * 8, 20, 150)
       // 「原厂」风格：节拍触发段用官方 M2 扫掠模板（1:1 复刻官方实时打击段）
       const pulseId = state.settings.feelStyle === 'stock' ? 'dglab-sweep' : null
-      const frames = resolvePulseFrames(out.beat, carrier, pulseId)
+      const capA = Math.min(state.settings.caps?.A ?? 60, state.softLimit?.A ?? 200)
+      const capB = Math.min(state.settings.caps?.B ?? 60, state.softLimit?.B ?? 200)
+      // 分频风格：A 走低频、B 走高频——脉冲载频也跟着分开，
+      // 否则两条腿虽然强度不同、波形频率却一样，「分频」在体感上就不成立。
+      const isSplit = state.settings.feelStyle === 'split'
+      // 以用户设定的「基础频率」为基准做分频偏移（不丢弃用户设置）：
+      // A 降到低频侧、B 提到高频侧，两腿的波形频率就有实际区分，
+      // 而不是强度不同、频率却一样。
+      const baseFreq = state.settings.waveFreq ?? carrier
+      const carrierA = isSplit ? clamp(baseFreq * 0.5, 1, 40) : carrier
+      const carrierB = isSplit ? clamp(baseFreq * 2.5, 40, 180) : carrier
+      const frames = resolvePulseFrames(out.beat, carrierA, pulseId, capA, isSplit ? carrierA : null)
       if (frames.length) {
-        // A 通道：主脉冲；B 通道：同拍回声（0.55 强度，让 B 也有波形与体感，不再只有强度）
-        const framesB = frames.map(f => ({ ...f, strength: Math.round(f.strength * 0.55) })).filter(f => f.strength > 1)
+        // B 通道脉冲强度：按它自己映射出的电平相对 A 的比例缩放（频谱驱动），
+        // 而不是固定 0.55——固定系数会让轻轻的部分被压到量表底部，看起来「B 只有一小截」。
+        // 下限 0.5 保证 B 始终有可感知的波形，不会整段消失。
+        const scaleB = clamp(out.A > 0 ? out.B / out.A : 1, 0.5, 1)
+        const framesB = resolvePulseFrames(out.beat, carrierB, pulseId, capB, isSplit ? carrierB : null)
+          .map(f => ({ ...f, strength: Math.round(f.strength * scaleB) }))
+          .filter(f => f.strength > 1)
         if (state.settings.version === 'v3') {
           sendV3Pulse('A', frames)
           if (framesB.length) sendV3Pulse('B', framesB)
@@ -890,21 +955,38 @@ const sendV3Pulse = (channel, frames) => {
     log(`续播：按恢复档(${state.settings.rampPreset ?? DEFAULT_RAMP_PRESET})从 0 缓慢恢复`)
   }
 
-  /** 解析节拍脉冲帧：统一短促衰减包络（≤6 帧），强度按 beat 缩放并钳到通道上限。 */
-  const resolvePulseFrames = (beat, carrierFreq = 20, overrideId = null) => {
+  /**
+   * 解析节拍脉冲帧：≤6 帧，强度按 beat 缩放并钳到通道上限。
+   * cap 由调用方按通道传入（A/B 上限可以不同，此前写死用 A 的上限）。
+   *
+   * 关于衰减包络：只有当模板本身「不是」攻击-衰减形时才补一条衰减包络。
+   * 官方 M2 扫掠（dglab-sweep）自带完整包络（0→100→20，峰值在中段），
+   * 若再乘一条 [1,0.6,...,0.09] 递减包络，两者相乘会把峰值那一帧压掉
+   * （实测峰值 100 → 14），波形塌成「就那么一点点」。
+   */
+  const resolvePulseFrames = (beat, carrierFreq = 20, overrideId = null, capOverride = null, baseFreqOverride = null) => {
     const s = state.settings
     let frames = s.waveFrames
-    if (!frames || !frames.length) {
+    const usingCustomFrames = Boolean(frames && frames.length)
+    if (!usingCustomFrames) {
       const id = overrideId || (s.waveId === 'continuous' ? 'beat' : s.waveId) || 'beat'
-      frames = generateBuiltinWave(id, { freq: s.waveFreq ?? carrierFreq, strength: s.waveStrength })
+      // 基础频率：默认取用户滑块值；调用方传入覆盖值时优先（分频风格 A/B 用不同基准）
+      frames = generateBuiltinWave(id, { freq: baseFreqOverride ?? s.waveFreq ?? carrierFreq, strength: s.waveStrength })
     }
     const env = [1, 0.6, 0.38, 0.24, 0.15, 0.09]
-    const cap = Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
+    const cap = capOverride ?? Math.min(s.caps.A ?? 60, state.softLimit?.A ?? 200)
     const scale = 0.5 + Math.min(1, beat) * 0.5
+    // 自带包络的模板（官方扫掠）与用户导入波形都原样保形，只做整体缩放；
+    // 内置 beat 这类「等强/衰减模板」才补衰减包络。
+    const selfEnveloped = usingCustomFrames || overrideId === 'dglab-sweep'
     return frames.slice(0, 6).map((f, i) => ({
       ...f,
       freq: clamp(Number(f.freq) || carrierFreq, 0, 255),
-      strength: clamp(Math.round((Number(f.strength) || 0) * scale * (env[i] ?? 0.25)), 0, Math.min(cap, 200)),
+      strength: clamp(
+        Math.round((Number(f.strength) || 0) * scale * (selfEnveloped ? 1 : (env[i] ?? 0.25))),
+        0,
+        Math.min(cap, 200),
+      ),
     })).filter(f => f.strength > 1)
   }
 
