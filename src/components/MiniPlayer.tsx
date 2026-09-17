@@ -15,6 +15,17 @@ interface MiniPlayerProps {
   currentLyric: string
   hasLyrics?: boolean
   live?: boolean
+  /**
+   * 不可跳过上一曲/下一曲（Apple 电台、播客节目）。
+   * 电台没有「相邻曲目」的概念，播客是单集内容；这些场景下官网/原生客户端
+   * 不显示切歌按钮，避免点出一个语义不明的队列跳转。
+   */
+  hideSkipControls?: boolean
+  /**
+   * 无歌词时替代「暂无歌词」显示的文案（电台名 / 播客名）。
+   * 未提供时回退到「暂无歌词」。
+   */
+  lyricsPlaceholder?: string
   accentColor?: string
   onPlayPause: () => void
   onNext: () => void
@@ -101,6 +112,8 @@ export default function MiniPlayer({
   currentLyric,
   hasLyrics = true,
   live = false,
+  hideSkipControls = false,
+  lyricsPlaceholder,
   accentColor = '#3b82f6',
   onPlayPause,
   onNext,
@@ -254,7 +267,9 @@ export default function MiniPlayer({
                           </div>
                         ) : (
                           <div className="text-[13px] font-medium text-white/75 truncate">
-                            {live ? '正在直播' : currentLyric || (hasLyrics ? '' : '暂无歌词')}
+                            {/* 无歌词时优先显示调用方给的文案（电台名 / 播客名），
+                                比通用的「暂无歌词」更能说明在放什么；直播标识由下方进度区的徽标承担。 */}
+                            {currentLyric || (hasLyrics ? '' : (lyricsPlaceholder || (live ? '正在直播' : '暂无歌词')))}
                           </div>
                         )}
                       </motion.div>
@@ -282,13 +297,13 @@ export default function MiniPlayer({
                   </div>
                   )}
 
-                  {/* 播放控制按钮 */}
+                  {/* 播放控制按钮：电台/播客没有「上一曲/下一曲」语义，按 hideSkipControls 隐藏 */}
                   <div className="mt-auto flex items-center gap-1">
-                    {!live && <button onClick={onPrevious} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="上一曲"><SkipBack className="h-3.5 w-3.5" fill="currentColor" /></button>}
+                    {!live && !hideSkipControls && <button onClick={onPrevious} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="上一曲"><SkipBack className="h-3.5 w-3.5" fill="currentColor" /></button>}
                     <button onClick={onPlayPause} className="rounded-full p-2 text-white shadow-lg" style={{ backgroundColor: extractedColor }} aria-label={isPlaying ? '暂停' : '播放'}>
                       {isPlaying ? <Pause className="h-3.5 w-3.5" fill="currentColor" /> : <Play className="h-3.5 w-3.5" fill="currentColor" />}
                     </button>
-                    {!live && <button onClick={onNext} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="下一曲"><SkipForward className="h-3.5 w-3.5" fill="currentColor" /></button>}
+                    {!live && !hideSkipControls && <button onClick={onNext} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="下一曲"><SkipForward className="h-3.5 w-3.5" fill="currentColor" /></button>}
                     
                     {/* 音量控制 */}
                     <button 

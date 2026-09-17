@@ -21,7 +21,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import {
-  Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Home, Info, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
+  Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Home, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
 } from 'lucide-react'
 import type { SongSelectHandler } from '../types/playbackNavigation'
 import type { Song } from '../services/musicApi'
@@ -31,7 +31,6 @@ import {
   addApplePlaylistToLibrary,
   addAppleAlbumToLibrary,
   addAppleSongToLibrary,
-  addAppleStationToLibrary,
   removeApplePlaylistFromLibrary,
   removeAppleResourceFromLibrary,
   appleStationToSong,
@@ -47,6 +46,7 @@ import {
   fetchApplePostDetail,
   fetchAppleRadioPage,
   fetchAppleRadioShowDetail,
+  fetchAppleRecommendationContents,
   fetchAppleRoomPage,
   fetchAppleStationDetail,
   fetchLibraryAlbumTracksForPlay,
@@ -64,9 +64,11 @@ import {
 import { getAppleLovedSongIds, removeAppleSongFromLibrary, type AppleLibraryAlbum } from '../services/appleCatalog'
 import { applyFavoriteMutation } from '../services/favoriteStatusService'
 import { useTvBack } from '../tv/tvCore'
-import AppleSearchBrowse from './AppleSearchBrowse'
+import BrowseCategoriesLanding from './AppleSearchBrowse'
+import AppleMusicSearchPage from './AppleMusicSearchPage'
 import AppleVideoModal from './AppleVideoModal'
 import { HorizontalShelf } from './apple-explore/HorizontalShelf'
+import { resolveAppleCardMeta } from './apple-explore/cardMeta'
 import CachedImage from './CachedImage'
 import AnimatedArtworkCover from './AnimatedArtworkCover'
 
@@ -99,11 +101,24 @@ const MotionSuspendContext = createContext(false)
 /** 动态封面（web powerswoosh 同款）：HLS 流 → hls.js 播放；失败/无则静态帧/静态图 */
 function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; className?: string; iconClassName?: string }) {
   const suspended = useContext(MotionSuspendContext)
+  // suspended 只暂停/恢复已有 video（经 ref 读取），不进初始化 effect 依赖：
+  // 否则播放页覆盖探索页、切歌局部刷新等每次挂起都会销毁重建 HLS，
+  // 表现为"封面闪一下、动态封面从头播放"。
+  const suspendedRef = useRef(suspended)
   const [videoFailed, setVideoFailed] = useState(false)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const motionHls = item.motionArtworkUrl
+
   useEffect(() => {
-    if (!motionHls || videoFailed || suspended) return
+    suspendedRef.current = suspended
+    const video = videoRef.current
+    if (!video) return
+    if (suspended || document.hidden) video.pause()
+    else void video.play().catch(() => undefined)
+  }, [suspended])
+
+  useEffect(() => {
+    if (!motionHls || videoFailed) return
     let hls: { destroy: () => void; __visibilityCleanup?: () => void } | null = null
     let cancelled = false
     ;(async () => {
@@ -116,13 +131,13 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
         inst.loadSource(motionHls)
         inst.attachMedia(videoRef.current)
         inst.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (cancelled || document.hidden || suspended) return
+          if (cancelled || document.hidden || suspendedRef.current) return
           void videoRef.current?.play().catch(() => undefined)
         })
         const onVisibilityChange = () => {
           const video = videoRef.current
           if (!video) return
-          if (document.hidden || suspended) video.pause()
+          if (document.hidden || suspendedRef.current) video.pause()
           else void video.play().catch(() => undefined)
         }
         document.addEventListener('visibilitychange', onVisibilityChange)
@@ -140,7 +155,7 @@ function DynamicCover({ item, className, iconClassName }: { item: AppleWebItem; 
       try { hls?.__visibilityCleanup?.() } catch { /* 忽略 */ }
       try { hls?.destroy() } catch { /* 忽略 */ }
     }
-  }, [motionHls, videoFailed, suspended])
+  }, [motionHls, videoFailed])
 
   if (motionHls && !videoFailed) {
     return (
@@ -373,7 +388,7 @@ const TABS: Array<{ id: AmTab; label: string; icon: typeof Sparkles }> = [
   { id: 'home', label: '主页', icon: Sparkles },
   { id: 'browse', label: '新发现', icon: Compass },
   { id: 'radio', label: '广播', icon: Radio },
-  { id: 'categories', label: '分类', icon: LayoutGrid },
+  { id: 'categories', label: '分类搜索', icon: LayoutGrid },
   { id: 'charts', label: '排行榜', icon: Trophy },
   { id: 'library', label: '资料库', icon: Library },
 ]
@@ -581,8 +596,6 @@ export function AppleExplorePanel({
       } else if (item.type === 'playlists' && catalogId) {
         saved.add(catalogId)
         if (item.libraryId) libraryIds.set(catalogId, item.libraryId)
-      } else if (item.type === 'stations' && catalogId) {
-        saved.add(`st:${catalogId}`)
       }
     }
     setSavedPlaylists(saved)
@@ -640,7 +653,7 @@ export function AppleExplorePanel({
     if (refreshSignal === undefined || refreshSignal === refreshSignalRef.current) return
     refreshSignalRef.current = refreshSignal
     if (tab === 'categories') {
-      // 分类页：重挂载 AppleSearchBrowse 触发重新拉取
+      // 分类页：重挂载搜索页触发重新拉取
       setCategoriesVersion(v => v + 1)
     } else {
       void loadTab(tab, true)
@@ -883,6 +896,42 @@ export function AppleExplorePanel({
     }])
   }, [readScroll])
 
+  /** 主頁区块的「查看全部」二级页（官网标题旁 `>` 进入）：取组级 contents 再按 room 规则渲染。 */
+  const openRecommendationContents = useCallback((section: AppleWebSection) => {
+    if (!section.contentsPath) return
+    scrollByLevelRef.current[currentLevelKeyRef.current] = readScroll()
+    pendingScrollRef.current = 0
+    const id = `contents-${section.id}`
+    setLayers(prev => [...prev, {
+      kind: 'section',
+      id,
+      name: section.title || '全部',
+      page: null,
+      loading: true,
+    }])
+    void fetchAppleRecommendationContents(section.contentsPath).then(sections => {
+      setLayers(prev => {
+        const last = prev[prev.length - 1]
+        if (!last || last.id !== id) return prev
+        return [...prev.slice(0, -1), {
+          ...last,
+          loading: false,
+          page: { sections, hero: null, personalized: false, sourceLabel: sections.length > 0 ? '' : '暂无可展示的内容' },
+        }]
+      })
+    }).catch(() => {
+      setLayers(prev => {
+        const last = prev[prev.length - 1]
+        if (!last || last.id !== id) return prev
+        return [...prev.slice(0, -1), {
+          ...last,
+          loading: false,
+          page: { sections: [], hero: null, personalized: false, sourceLabel: '加载失败' },
+        }]
+      })
+    })
+  }, [readScroll])
+
   /** 跳到指定深度（0 = 新发现根层级），并恢复该层此前的滚动位置。 */
   const goToDepth = useCallback((depth: number) => {
     setLayers(prev => {
@@ -1022,40 +1071,6 @@ export function AppleExplorePanel({
     }
   }, [appleLoggedIn, catalogLibraryIds, libraryMutations, loadTab, savedPlaylists])
 
-  const saveStation = useCallback(async (item: AppleWebItem) => {
-    if (!appleLoggedIn) {
-      onLoginClick()
-      return
-    }
-    if (!item.playId || libraryMutations.has(`station:${item.playId}`)) return
-    const key = `st:${item.playId}`
-    const isSaved = savedPlaylists.has(key)
-    setLibraryMutations(previous => new Set(previous).add(`station:${item.playId}`))
-    try {
-      const ok = isSaved
-        ? await removeAppleResourceFromLibrary('stations', item.playId, item.libraryId)
-        : await addAppleStationToLibrary(item.playId)
-      if (!ok) throw new Error(isSaved ? '从资料库移除电台失败，请刷新后重试' : '加入资料库失败，请重试')
-      setSavedPlaylists(prev => {
-        const next = new Set(prev)
-        if (isSaved) next.delete(key)
-        else next.add(key)
-        return next
-      })
-      window.dispatchEvent(new CustomEvent('playlist-content-changed', {
-        detail: { platform: 'apple', type: isSaved ? 'remove' : 'library-add', stationId: item.playId },
-      }))
-    } catch (error) {
-      window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: error instanceof Error ? error.message : '电台资料库操作失败', type: 'error' } }))
-    } finally {
-      setLibraryMutations(previous => {
-        const next = new Set(previous)
-        next.delete(`station:${item.playId}`)
-        return next
-      })
-    }
-  }, [appleLoggedIn, libraryMutations, onLoginClick, savedPlaylists])
-
   const openExternal = useCallback((url?: string) => {
     if (!url) return
     const bridge = (window as any).electron
@@ -1133,6 +1148,19 @@ export function AppleExplorePanel({
    *  其余保持「图在上、文字在下」样式。 */
   const FeaturedCard = ({ item, items, portrait = false, textFirst = false, overlayMeta = false }: { item: AppleWebItem; items: AppleWebItem[]; portrait?: boolean; textFirst?: boolean; overlayMeta?: boolean }) => {
     const isPlaylist = item.type === 'playlists'
+    // 官网卡片叠「一行小标签 + 一行标题(可带 E 标) + 简介」，且重复文案只显示一次。
+    // 归一逻辑（含去重与兜底规则）见 apple-explore/cardMeta.ts 的注释。
+    const cardMeta = resolveAppleCardMeta(item)
+    const { label: cardLabel, title: cardTitle, subtitle: cardSubtitle, description: cardDescription, detail: cardDetail, explicit } = cardMeta
+    const explicitBadge = explicit ? (
+      <span
+        aria-label="露骨内容"
+        title="露骨内容"
+        className="ml-1.5 inline-flex h-[15px] w-[15px] shrink-0 translate-y-[1px] items-center justify-center rounded-[3px] bg-white/85 text-[10px] font-bold leading-none text-black"
+      >
+        E
+      </span>
+    ) : null
     const meta = (
       <>
         {item.badge && textFirst && (
@@ -1140,8 +1168,22 @@ export function AppleExplorePanel({
             {item.badge}
           </span>
         )}
-        <p className={`truncate leading-tight ${textFirst ? 'text-sm font-semibold' : 'text-sm font-medium'}`}>{item.name}</p>
-        <p className="mt-0.5 truncate text-xs text-white/40">{item.curatorName || item.artistName || item.subtitle || 'Apple Music'}</p>
+        {cardLabel && textFirst && (
+          <p className="mb-0.5 truncate text-[11px] leading-tight text-white/45">{cardLabel}</p>
+        )}
+        {cardTitle && (
+          <p className={`truncate leading-tight ${textFirst ? 'text-sm font-semibold' : 'text-sm font-medium'}`}>
+            {cardTitle}
+            {explicitBadge}
+          </p>
+        )}
+        {cardSubtitle && (
+          <p className="mt-0.5 truncate text-xs text-white/40">{cardSubtitle}</p>
+        )}
+        {/* 第三行与副标题不同时才补（专辑副标题=艺人名时会与它同文，去重后不重复显示）。 */}
+        {!overlayMeta && cardDetail && cardDetail !== cardSubtitle && (
+          <p className="mt-0.5 truncate text-xs text-white/40">{cardDetail}</p>
+        )}
       </>
     )
     return (
@@ -1159,10 +1201,20 @@ export function AppleExplorePanel({
       >
         {textFirst && <div className="mb-2 min-w-0 px-0.5">{meta}</div>}
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
+          {/* 图片比例按官网实测校准：
+              · portrait（主页「专属精选推荐」竖卡）：官网实测 407×542 = 3:4；
+                原 125/181(≈0.69) 比官网窄高 8.6%，是"卡片比例不对"的直接原因。
+              · 其余宽卡：官网实测 540×310(≈1.742)、460×264(≈1.742)；
+                原 16/10(1.6) 偏矮，会裁掉更多画面。
+              另外：编辑图已把标题烤进画面（artworkHasTitle）时**只出静态图**。
+              这类歌单的动态封面是另一套构图（无 Apple Music 字标、无标题），
+              自动播放会把它盖在静态图上，表现为"封面和官网不一样、字标消失"。 */}
           {item.bannerUrl && !item.motionArtworkUrl ? (
-            <img src={item.bannerUrl} alt={item.name} loading="lazy" className={`${portrait ? 'aspect-[125/181]' : 'aspect-[16/10]'} w-full object-cover`} />
+            <img src={item.bannerUrl} alt={item.name} loading="lazy" className={`${portrait ? 'aspect-[3/4]' : 'aspect-[540/310]'} w-full object-cover`} />
+          ) : item.artworkHasTitle && item.artworkUrl ? (
+            <AppleExploreImage src={item.artworkUrl} alt={item.name} className={`${portrait ? 'aspect-[3/4]' : 'aspect-[540/310]'} w-full`} role="card" />
           ) : (
-            <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[125/181]' : 'aspect-[16/10]'} w-full`} />
+            <MotionArtworkCover item={item} storefront={storefront} className={`${portrait ? 'aspect-[3/4]' : 'aspect-[540/310]'} w-full`} />
           )}
           {!textFirst && item.badge && (
             <span className="absolute left-3 top-3 z-10 rounded-md bg-black/55 px-2 py-1 text-[11px] font-medium text-white/90 backdrop-blur-md">
@@ -1172,18 +1224,30 @@ export function AppleExplorePanel({
           {/* 描述叠加层（web 卡片同款：底部渐变 + 编辑描述）；overlayMeta 时名称/副标题/简介合并内嵌 */}
           {overlayMeta ? (
             <div className="absolute inset-x-0 bottom-0 z-10 bg-[linear-gradient(0deg,rgba(4,6,10,0.9)_0%,rgba(4,6,10,0.42)_58%,transparent_100%)] px-3.5 pb-3 pt-10">
-              <p className="truncate text-sm font-semibold leading-tight">{item.name}</p>
-              <p className="mt-0.5 truncate text-xs text-white/55">{item.curatorName || item.artistName || item.subtitle || 'Apple Music'}</p>
-              {item.description && (
-                <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-white/70">{item.description}</p>
+              {/* 官网此货架为「小标签（下一首/最新发行/专属推荐）+ 标题(带 E 标) + 第三行」，
+                  第三行随类型取值（歌单=曲目艺人串、专辑=艺人、电台=编辑简介），
+                  各行的重复文案只显示一次（见 apple-explore/cardMeta.ts 注释）。 */}
+              {cardLabel && (
+                <p className="truncate text-[11px] leading-tight text-white/50">{cardLabel}</p>
+              )}
+              {cardTitle && (
+                <p className="mt-0.5 truncate text-sm font-semibold leading-tight">
+                  {cardTitle}
+                  {explicitBadge}
+                </p>
+              )}
+              {(cardDetail || cardDescription) && (
+                <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-white/70">
+                  {cardDetail || cardDescription}
+                </p>
               )}
             </div>
           ) : (
-            item.description && (
+            cardDescription && (
               <>
                 <div className="absolute inset-x-0 bottom-0 h-2/3 bg-[linear-gradient(0deg,rgba(6,9,14,0.88)_0%,rgba(6,9,14,0.4)_55%,transparent_100%)]" />
                 <p className="absolute inset-x-0 bottom-0 z-10 line-clamp-2 px-3.5 pb-3 text-xs leading-relaxed text-white/75">
-                  {item.description}
+                  {cardDescription}
                 </p>
               </>
             )
@@ -1217,8 +1281,8 @@ export function AppleExplorePanel({
       >
         {section.bannerUrl || item?.motionArtworkUrl || item?.artworkUrl ? (
           <div className="absolute inset-0">
-            {section.bannerUrl && <img src={section.bannerUrl} alt={section.title} loading="lazy" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-[1.02]" />}
-            {item?.bannerUrl && !section.bannerUrl && <img src={item.bannerUrl} alt={item.name} loading="lazy" className="absolute inset-0 h-full w-full object-cover transition duration-700 group-hover:scale-[1.02]" />}
+            {section.bannerUrl && <img src={section.bannerUrl} alt={section.title} loading="lazy" className="absolute inset-0 h-full w-full object-cover" />}
+            {item?.bannerUrl && !section.bannerUrl && <img src={item.bannerUrl} alt={item.name} loading="lazy" className="absolute inset-0 h-full w-full object-cover" />}
             {item?.motionArtworkUrl && <MotionArtworkCover item={item} storefront={storefront} className="absolute inset-0 h-full w-full" />}
             {!section.bannerUrl && !item?.bannerUrl && !item?.motionArtworkUrl && item?.artworkUrl && <MotionArtworkCover item={item} storefront={storefront} className="h-full w-full" />}
           </div>
@@ -1226,10 +1290,12 @@ export function AppleExplorePanel({
           <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(250,45,72,0.25),rgba(10,10,14,0.9))]" />
         )}
         <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(6,9,14,0.88)_5%,rgba(6,9,14,0.25)_55%,rgba(6,9,14,0.05)_100%)]" />
+        {/* 文字区（官网广播页「推荐单集」同款）：全部**左下角**竖排，自上而下为
+            ① 区块/推荐标签（如「推荐单集」）② 标题（如「NCT 127」）③ 描述小字
+            （如「出道 10 周年初心回归…」）。
+            此前描述小字被渲染在卡片**顶部**（section.tag 在 justify-end 之外先出现），
+            与官网的位置相反；这里统一收进左下角的同一列。 */}
         <div className="relative flex min-h-[220px] flex-col justify-end p-5 md:p-7">
-          {section.tag && (
-            <p className="mb-2 line-clamp-1 text-xs font-medium text-white/60">{section.tag}</p>
-          )}
           <div className="flex items-end justify-between gap-4">
             <div className="min-w-0">
               {section.title && (
@@ -1238,7 +1304,10 @@ export function AppleExplorePanel({
                 </span>
               )}
               <h3 className="truncate text-xl font-semibold md:text-2xl">{item?.name || section.title}</h3>
-              {item?.subtitle && <p className="mt-1 truncate text-sm text-white/55">{item.subtitle}</p>}
+              {section.tag && (
+                <p className="mt-1 line-clamp-1 text-xs font-medium text-white/60">{section.tag}</p>
+              )}
+              {!section.tag && item?.subtitle && <p className="mt-1 truncate text-sm text-white/55">{item.subtitle}</p>}
             </div>
             {item?.playId && item.type !== 'artists' && (
               <span
@@ -1261,14 +1330,17 @@ export function AppleExplorePanel({
     )
   }
 
-  /** 电台方卡（web 新近内容/热门电台：方图 + 名称 + 「…」） */
+  /** 电台方卡（web 新近内容/热门电台：方图 + 名称 + 「…」）
+   *  官网电台卡没有播放/详情/加入资料库按钮：点击卡片打开电台详情抽屉，播放走抽屉内的按钮。
+   *  （此前中央播放按钮会打开电台播放页、ⓘ 也开抽屉，两个入口弹两种窗，逻辑冲突；
+   *  且 Apple 的 /v1/me/library 不支持收藏 stations，"+"按钮永远失败。） */
   const StationCard = ({ item }: { item: AppleWebItem }) => {
-    const isSaved = savedPlaylists.has(`st:${item.playId}`)
     return (
       <motion.div
         whileHover={{ y: -3 }}
         data-tv-focus
-        className="group min-w-0 text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
+        className="group min-w-0 cursor-pointer text-left outline-none focus-visible:ring-2 focus-visible:ring-[#fa2d48]"
+        onClick={() => void openStation(item)}
       >
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
           {item.motionArtworkUrl || item.artworkUrl ? (
@@ -1281,34 +1353,6 @@ export function AppleExplorePanel({
           {item.isLive && (
             <span className="absolute left-2.5 top-2.5 rounded-md bg-[#fa2d48] px-1.5 py-0.5 text-[10px] font-semibold text-white">直播中</span>
           )}
-          <button
-            type="button"
-            aria-label={isSaved ? '从资料库移除' : '加入资料库'}
-            disabled={libraryMutations.has(`station:${item.playId}`)}
-            onClick={(event) => { event.stopPropagation(); void saveStation(item) }}
-            className="absolute right-2 top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-black/55 text-white/85 opacity-0 backdrop-blur-md transition group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 [@media(hover:none)]:opacity-100 disabled:cursor-wait disabled:opacity-50"
-          >
-            {isSaved ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          </button>
-          {/* 中央播放按钮 */}
-          <button
-            type="button"
-            aria-label={`播放${item.name}`}
-            onClick={() => void playStation(item)}
-            className="absolute left-1/2 top-1/2 z-10 flex h-12 w-12 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full text-[#0a0f14] opacity-0 [@media(hover:none)]:opacity-100 shadow-xl transition group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
-            style={{ background: accentColor }}
-          >
-            <Play className="h-5 w-5 fill-current" />
-          </button>
-          {/* 详情按钮：电台详情抽屉（保存/浏览器打开） */}
-          <button
-            type="button"
-            aria-label="电台详情"
-            onClick={(event) => { event.stopPropagation(); void openStation(item) }}
-            className="absolute bottom-2 right-2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-black/45 text-white/80 opacity-0 [@media(hover:none)]:opacity-100 backdrop-blur-md transition hover:bg-black/65 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
-          >
-            <Info className="h-4 w-4" />
-          </button>
         </div>
         <div className="mt-2 px-0.5">
           <p className="truncate text-[13px] font-medium leading-tight">{item.name}</p>
@@ -1632,9 +1676,12 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            {/* 实测官网方形货架：卡片 172×172、每行 7 个，compact 1 行 / expanded 2 行。 */}
+            {/* 实测官网方形货架：卡片随货架槽位铺满（一屏约 5~6 张）。
+                注意 RowCard 必须传 fluid：否则卡片保留自身的固定宽度
+                （w-[148px] sm:w-[164px] lg:w-[176px]），比货架分配的槽位窄一大截，
+                表现为卡片之间出现 70px 以上的空隙（用户实测反馈"歌与歌之间空太多"）。 */}
             <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
-              {section.items.map(item => <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />)}
+              {section.items.map(item => <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />)}
             </HorizontalShelf>
           </section>
         )
@@ -1679,7 +1726,11 @@ export function AppleExplorePanel({
         )
       case 'station-grid': {
         // 实测官网两种电台形态（由 displayStyle 决定）：
-        // - expanded：97×97 封面 + 右侧文字的「行卡」，每列 2 行，单元格约占内容宽 32%（一屏约 3 列）
+        // - expanded：97×97 封面 + 右侧文字的「横卡」，每列 2 行。
+        //   官网实测 ul 是 `grid-auto-flow: column` + 固定 403.5px 列宽 + gap 24/20，
+        //   一屏约 2.9 列（内容宽 1167px）→ 也就是「每列 2 行、一屏 5~6 张卡」的观感。
+        //   我们按容器宽比例换成 ~2.8 分之一列宽（一屏 2.8 列 ≈ 官网 403.5/1167 = 0.346），
+        //   这样宽屏下也能保持"露下一列一部分"的暗示。
         // - compact ：204×204 方形卡（封面+下方文字），约占内容宽 17.5%（一屏约 5~6 个）
         const isExpanded = section.displayStyle === 'expanded'
         if (isExpanded) {
@@ -1690,7 +1741,7 @@ export function AppleExplorePanel({
               <HorizontalShelf
                 edgeControls="hover"
                 ariaLabel={section.title}
-                itemClassName="w-[calc((100%-3rem)/3.1)] shrink-0"
+                itemClassName="w-[calc((100%-2rem)/2.8)] min-w-[300px] shrink-0"
               >
                 {columns.map((column, columnIndex) => (
                   <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-3">
@@ -1782,9 +1833,17 @@ export function AppleExplorePanel({
       case 'home-featured':
         return (
           <section key={section.id} className="space-y-3">
-            <SectionTitle title="专属精选推荐" subtitle={section.subtitle} />
-            {/* 官网主页该货架：卡片固定 250×362（一行 4-5 张），名称/简介内嵌卡片底部渐变。 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[min(250px,58vw)] shrink-0">
+            {/* 标题取接口值：kind=home-featured 的组不止「专属精选推荐」一个，
+                「专属推荐歌单」「音乐回忆：你的热门音乐」同属这一规格。
+                此前写死标题会把它们全渲染成「专属精选推荐」，与官网不符。 */}
+            <SectionTitle title={section.title || '专属精选推荐'} subtitle={section.subtitle} section={section} />
+            {/* 官网主页该货架的卡片随容器宽度缩放：实测官网卡 407px、货架可见宽 2134px
+                （约一屏 5.2 张）。本面板货架实测约 1483px，按同比例只有约 283px，
+                在并排对比时明显比官网小一圈；这里改为**一屏 4 张**（约 359px），
+                比原来放大一档、又不至于像官网那样大，并设 360px 上限
+                （官网卡 407px）保证超宽窗口下不会超过官网尺寸。
+                比例仍为官网实测的 3:4（407×542 = 0.751）。 */}
+            <HorizontalShelf edgeControls="hover" ariaLabel="专属精选推荐" itemClassName="w-[calc((100%-3rem)/4)] min-w-[250px] max-w-[360px] shrink-0">
               {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} portrait overlayMeta />)}
             </HorizontalShelf>
           </section>
@@ -1815,6 +1874,14 @@ export function AppleExplorePanel({
         )
       case 'grid': {
         const songsOnly = section.items.length > 0 && section.items.every(item => item.type === 'songs')
+        // 同一 kind='grid' 下混着三种内容形态，官网给它们的卡片规格各不相同，
+        // 不能共用一个 itemClassName（此前共用导致"卡片大小不一样"）。按内容类型隔离：
+        //   · stations → 方卡（电台封面是方图）
+        //   · radio-shows → 横卡（节目/单集）
+        //   · music-videos / uploaded-videos / posts → 16:9 视频卡（「艺人分享」）
+        const allStations = section.items.length > 0 && section.items.every(item => item.type === 'stations')
+        const allVideo = section.items.length > 0 && section.items.every(item =>
+          item.type === 'music-videos' || item.type === 'uploaded-videos' || item.type === 'posts')
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
@@ -1825,13 +1892,25 @@ export function AppleExplorePanel({
                 ))}
               </div>
             ) : (
-              <HorizontalShelf edgeControls="hover" ariaLabel={section.title}>
+              <HorizontalShelf
+                edgeControls="hover"
+                ariaLabel={section.title}
+                itemClassName={
+                  allStations
+                    // 方卡：一屏约 6 张（官网 172×172 方形货架）
+                    ? 'w-[calc((100%-5rem)/6)] min-w-[132px] shrink-0'
+                    : allVideo
+                      // 16:9 视频卡：一屏约 4 张（官网「艺人分享」行）
+                      ? 'w-[calc((100%-3rem)/4)] min-w-[200px] shrink-0'
+                      : 'w-[calc((100%-4rem)/4.5)] min-w-[190px] shrink-0'
+                }
+              >
                 {section.items.map(item => (
                   item.type === 'stations'
-                    ? <div className="w-[148px] sm:w-[164px] lg:w-[176px]"><StationCard key={`${section.id}-${item.type}-${item.id}`} item={item} /></div>
+                    ? <StationCard key={`${section.id}-${item.type}-${item.id}`} item={item} />
                     : item.type === 'radio-shows'
-                      ? <div className="w-[min(78vw,320px)] sm:w-[300px]"><ShowCard key={`${section.id}-${item.type}-${item.id}`} item={item} /></div>
-                      : <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />
+                      ? <ShowCard key={`${section.id}-${item.type}-${item.id}`} item={item} />
+                      : <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />
                 ))}
               </HorizontalShelf>
             )}
@@ -1883,7 +1962,7 @@ export function AppleExplorePanel({
               <SectionTitle title={section.title} subtitle={`${section.items.length} 项`} />
               <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
                 {section.items.map(item => (
-                  <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />
+                  <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />
                 ))}
               </HorizontalShelf>
             </section>
@@ -1984,20 +2063,38 @@ export function AppleExplorePanel({
     entryLabel?: string
   }) => {
     if (!title) return null
-    // 区块标题的 `>` 入口来自实测的 room / multiroom 引用，不按标题拼 URL。
+    // 区块标题的 `>` 入口有三个来源，均为实测：
+    //  1) room / multiroom 引用（新发现/广播的编辑区块）
+    //  2) onOpen（资料库分区的铺开页）
+    //  3) hasSeeAll（主页推荐组，如「最近播放」→ 组级 contents 二级页）
     // 城市排行榜在接口里同样带 room 引用，但官网该区块不渲染链接，故按可观察行为显式排除。
     const showEntry = Boolean(onOpen)
       || (Boolean(section) && title !== '城市排行榜' && Boolean(section?.roomId || section?.multiRoomId))
+      || Boolean(section?.hasSeeAll && section?.contentsPath)
     const openEntry = () => {
       if (onOpen) { onOpen(); return }
       if (section?.roomId) void openLayer('room', section.roomId, title)
       else if (section?.multiRoomId) void openLayer('multiroom', section.multiRoomId, title)
+      else if (section?.hasSeeAll && section?.contentsPath) openRecommendationContents(section)
     }
-    // 官网页样式（实测 music.apple.com 首页）：可点区块的标题区是「40×40 小方图 +
-    // 双行文字（上行小字标签、下行主标题）+ 紧贴标题的内联 chevron」，整块是一个按钮。
-    // 这里用区块首项的封面充当那块小图；没有封面时退回原有单行标题 + 圆形按钮。
-    const coverUrl = section?.items?.find(item => item.artworkUrl)?.artworkUrl
-    if (showEntry && coverUrl) {
+    // 官网页样式（实测 music.apple.com 首页）：可点区块的标题是「内联 chevron 紧贴标题」。
+    // 「更多相似作品」这类标题在接口里额外带 contentIds（标题引用的资源），官网会在标题左侧
+    // 放一张该资源的小方图，标题同时改用去掉资源名后的短名（titleWithoutName）。
+    const displayTitle = section?.titleCoverUrl && section.titleWithoutName
+      ? section.titleWithoutName
+      : title
+    const coverUrl = section?.titleCoverUrl || section?.items?.find(item => item.artworkUrl)?.artworkUrl
+    // 标题小图只在「标题自带引用资源」时出现；普通 room 区块沿用旧样式，避免全站标题都长出方图。
+    const showTitleCover = Boolean(section?.titleCoverUrl && coverUrl)
+    // 标题引用的资源（如「更多相似作品」指向的那张专辑）：点标题即打开它，与官网一致。
+    const titleSeedItem = section?.titleContentIds?.length
+      ? section.items.find(item => section.titleContentIds!.includes(String(item.playId || item.id)))
+      : undefined
+    const openTitle = () => {
+      if (titleSeedItem) { activateItem(titleSeedItem, [titleSeedItem]); return }
+      openEntry()
+    }
+    if (showTitleCover && coverUrl) {
       return (
         <div className="flex items-center gap-3 border-b border-white/[0.08] pb-3">
           <img
@@ -2008,32 +2105,31 @@ export function AppleExplorePanel({
           />
           <button
             type="button"
-            aria-label={entryLabel || `打开${title}`}
-            onClick={openEntry}
-            className="group flex min-w-0 flex-col items-start text-left"
+            aria-label={entryLabel || `打开${displayTitle}`}
+            onClick={openTitle}
+            className="group flex min-w-0 items-center gap-0.5 text-left"
           >
-            {subtitle && <p className="max-w-full min-w-0 truncate text-xs text-white/45">{subtitle}</p>}
-            <span className="flex min-w-0 items-center gap-0.5">
-              <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{title}</h3>
-              <ChevronRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-0.5 group-hover:text-white" />
-            </span>
+            <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{displayTitle}</h3>
+            <ChevronRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-0.5 group-hover:text-white" />
           </button>
         </div>
       )
     }
     return (
     <div className="flex items-center gap-1.5 border-b border-white/[0.08] pb-2.5">
-      {/* 箭头紧贴标题文字（官网样式），不是推到行尾。 */}
-      <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{title}</h3>
-      {showEntry && (
+      {/* 箭头紧贴标题文字（官网样式），不是推到行尾；可点标题整块也是按钮。 */}
+      {showEntry ? (
         <button
           type="button"
-          aria-label={entryLabel || `打开${title}`}
+          aria-label={entryLabel || `打开${displayTitle}`}
           onClick={openEntry}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-white/45 transition hover:bg-white/[0.08] hover:text-white"
+          className="group flex min-w-0 items-center gap-0.5 text-left"
         >
-          <ChevronRight className="h-4 w-4" />
+          <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{displayTitle}</h3>
+          <ChevronRight className="h-4 w-4 shrink-0 text-white/45 transition group-hover:translate-x-0.5 group-hover:text-white" />
         </button>
+      ) : (
+        <h3 className="min-w-0 truncate text-lg font-semibold tracking-tight">{displayTitle}</h3>
       )}
       {subtitle && <p className="ml-1 min-w-0 truncate text-xs text-white/42">{subtitle}</p>}
     </div>
@@ -2512,14 +2608,6 @@ export function AppleExplorePanel({
             >
               <Play className="h-4 w-4 fill-current" /> 播放电台
             </button>
-            <button
-              type="button"
-              disabled={!appleLoggedIn || libraryMutations.has(`station:${stationDetail.station.playId}`)}
-              onClick={() => void saveStation(stationDetail.station)}
-              className={`flex flex-1 items-center justify-center gap-2 rounded-full border border-white/[0.12] bg-white/[0.06] py-3 text-sm font-semibold ${appleLoggedIn && !savedPlaylists.has(`st:${stationDetail.station.playId}`) ? 'text-white/80 hover:bg-white/[0.1]' : 'opacity-40'}`}
-            >
-              {savedPlaylists.has(`st:${stationDetail.station.playId}`) ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />} {savedPlaylists.has(`st:${stationDetail.station.playId}`) ? '已加入资料库' : '加入资料库'}
-            </button>
             {stationDetail.station.url && (
               <button
                 type="button"
@@ -2697,8 +2785,10 @@ export function AppleExplorePanel({
         </div>
       )}
       {tab === 'categories' ? (
-        /* 分类（web /search 类别浏览同款：curator 网格 → 点击进入 curator 详情） */
-        <AppleSearchBrowse
+        /* 搜索（1:1 复刻 music.apple.com/cn/search）：
+           搜索框 + 「Apple Music / 你的资料库」范围切换 + 分区结果（最佳结果/艺人/专辑/歌曲/播放列表）。
+           无关键词时展示落地视图——沿用原来的「类别浏览」curator 网格。 */
+        <AppleMusicSearchPage
           key={categoriesVersion}
           playerTheme={playerTheme}
           storefront={storefront}
@@ -2716,6 +2806,26 @@ export function AppleExplorePanel({
               trackCount: playlist.trackCount,
             })
           }
+          renderLanding={() => (
+            <BrowseCategoriesLanding
+              playerTheme={playerTheme}
+              storefront={storefront}
+              onSongSelect={onSongSelect}
+              playbackOrigin={appleOrigin({ category: true })}
+              onOpenItem={activateItem}
+              onOpenPlaylist={(playlist) =>
+                openPlaylistPanel({
+                  id: playlist.id,
+                  playId: playlist.id,
+                  type: 'playlists',
+                  name: playlist.name,
+                  artworkUrl: playlist.coverImgUrl,
+                  curatorName: playlist.creator,
+                  trackCount: playlist.trackCount,
+                })
+              }
+            />
+          )}
         />
       ) : currentLoading && !currentPage ? (
         skeleton
@@ -2725,9 +2835,19 @@ export function AppleExplorePanel({
             {currentPage.fallbackReason && (
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-amber-200/15 bg-amber-200/[0.06] px-4 py-3 text-sm text-amber-50/75">
                 <span>{currentPage.fallbackReason}</span>
-                {currentPage.requiresLogin && (
+                {/* 登录失效 → 重新登录；订阅失效 → 去官网续订（重新登录不会恢复订阅） */}
+                {currentPage.subscriptionExpired ? (
+                  <a
+                    href="https://music.apple.com/cn/subscribe"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="shrink-0 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-black"
+                  >
+                    前往续订
+                  </a>
+                ) : currentPage.requiresLogin ? (
                   <button type="button" onClick={onLoginClick} className="shrink-0 rounded-full bg-white px-3.5 py-1.5 text-xs font-semibold text-black">重新登录</button>
-                )}
+                ) : null}
               </div>
             )}
             {/* 页面主视觉大卡（web powerswoosh：动态封面优先） */}
@@ -2737,7 +2857,7 @@ export function AppleExplorePanel({
                   <DynamicCover item={currentPage.hero} className="h-full w-full object-cover" />
                   <div className="absolute inset-0 bg-[linear-gradient(0deg,rgba(6,9,14,0.9)_8%,rgba(6,9,14,0.25)_58%,rgba(6,9,14,0.08)_100%)]" />
                 </div>
-                <div className="relative flex min-h-[280px] flex-col justify-end p-6 md:p-9">
+                <div className="relative flex min-h-[320px] flex-col justify-end p-6 md:p-10">
                   <div className="mb-auto flex items-center gap-2 text-xs font-medium text-white/65">
                     <Sparkles className="h-4 w-4" style={{ color: accentColor }} />
                     Apple Music · {tab === 'radio' ? '广播精选' : tab === 'browse' ? '新发现' : '专属推荐'}
@@ -2746,7 +2866,7 @@ export function AppleExplorePanel({
                     <AppleExploreImage
                       src={currentPage.hero.heroArtworkUrl || currentPage.hero.artworkUrl || ''}
                       alt=""
-                      className="mb-4 h-24 w-24 rounded-2xl shadow-lg md:h-28 md:w-28"
+                      className="mb-4 h-28 w-28 rounded-2xl shadow-lg md:h-32 md:w-32"
                       role="hero"
                       priority="critical"
                       lazy={false}

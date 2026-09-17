@@ -1,6 +1,21 @@
+/**
+ * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
+ * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
+ */
+/**
+ * 播客节目播放页（网易云播客单集）。
+ *
+ * 为什么要独立页面：播客不是歌曲——没有歌词、没有 MV、没有「上一首/下一首」的专辑语义，
+ * 也不该套用歌词页那套悬浮控件（主页/翻译/罗马音/MV 背景）。此前播客被归一到
+ * 「纯音乐」分支，结果是 AlbumCoverPlayer 拿不到可用封面时只剩一块 "No Cover" 黑板，
+ * 观感像坏掉（用户实测反馈）。
+ *
+ * 与 AppleRadioNowPlayingPage 的关系：两者都是「非歌曲」播放页，布局刻意保持同族
+ * （方形封面 + 标题/所属节目 + 播放键 + 音效 + 设置 + 音量），但数据来源与语义各自独立：
+ * 电台有 直播/节目回放 时间轴与电台简介，播客只有单集标题与所属播客名。
+ */
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import Hls from 'hls.js'
-import { ArrowLeft, AudioLines, Pause, Play, Radio, RotateCw, Volume2 } from 'lucide-react'
+import { ArrowLeft, AudioLines, Mic2, Pause, Play, Volume2 } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import CachedImage from './CachedImage'
@@ -13,52 +28,37 @@ type Props = {
   duration: number
   volume: number
   playerTheme: 'light' | 'dark'
-  status?: 'connecting' | 'playing' | 'reconnecting' | 'error'
-  error?: string
-  /** 连续时间源：App 层 currentTime 是按展示键节流的（歌词页专用），电台页需要逐秒走动 */
   playbackTimeStore?: PlaybackTimeStore
   onBack: () => void
   onPlayPause: () => void
   onSeek: (time: number) => void
   onVolumeChange: (volume: number) => void
-  onRetry: () => void
-  /** 调音室（音效）：与普通歌词页共用同一入口，但按钮位置由电台页自行排布 */
   onOpenSoundEffects?: (anchorRect?: DOMRect) => void
 }
 
 const fallbackSnapshotValue = { currentTime: 0, duration: 0, isPlaying: false }
-// useSyncExternalStore 要求 getSnapshot 返回稳定引用，否则无限重渲染
 const fallbackSnapshot = () => fallbackSnapshotValue
 const fallbackSubscribe = () => () => undefined
 
-export default function AppleRadioNowPlayingPage({
+export default function PodcastNowPlayingPage({
   song,
   isPlaying,
   currentTime,
   duration,
   volume,
   playerTheme,
-  status = 'playing',
-  error,
   playbackTimeStore,
   onBack,
   onPlayPause,
   onSeek,
   onVolumeChange,
-  onRetry,
   onOpenSoundEffects,
 }: Props) {
-  const radio = song.appleRadio
-  const motionRef = useRef<HTMLVideoElement | null>(null)
-  const [motionFailed, setMotionFailed] = useState(false)
-  const [motionEnabled] = useState(() => !(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false))
-  const motionUrl = radio?.motionArtworkUrl
-  const poster = radio?.motionPosterUrl || radio?.heroArtworkUrl || radio?.artworkUrl || song.album.picUrl
-  const timeline = radio?.timeline || 'unknown'
-  const isLive = timeline !== 'vod'
   const isDark = playerTheme === 'dark'
+  // 节目所属播客名：服务端把节目放队列时写进了 album.name；没有就退到艺人数组
+  const showName = song.album?.name?.trim() || song.artists.map(artist => artist.name).join(', ')
+  const cover = song.album?.picUrl || ''
 
-  // 连续时间：直接订阅 playbackTimeStore（含回退到 App 层节流值）
   const timeSnapshot = useSyncExternalStore(
     playbackTimeStore?.subscribe ?? fallbackSubscribe,
     playbackTimeStore?.getSnapshot ?? fallbackSnapshot,
@@ -68,11 +68,9 @@ export default function AppleRadioNowPlayingPage({
     ? timeSnapshot.duration
     : (Number.isFinite(duration) && duration > 0 ? duration : (song.duration > 0 ? song.duration / 1000 : 0))
 
-  // 音量弹出层：点击展开（向右弹出），指针离开控件 3 秒后收起，停留期间保持展开
   const [volumeOpen, setVolumeOpen] = useState(false)
   const volumeCloseTimer = useRef<number | null>(null)
   const volumeWrapRef = useRef<HTMLDivElement | null>(null)
-
   const clearVolumeCloseTimer = () => {
     if (volumeCloseTimer.current) window.clearTimeout(volumeCloseTimer.current)
     volumeCloseTimer.current = null
@@ -81,13 +79,7 @@ export default function AppleRadioNowPlayingPage({
     clearVolumeCloseTimer()
     volumeCloseTimer.current = window.setTimeout(() => setVolumeOpen(false), delay)
   }
-  const handleVolumeInput = (event: React.ChangeEvent<HTMLInputElement>) => {
-    onVolumeChange(Number(event.target.value))
-    clearVolumeCloseTimer()
-  }
-
   useEffect(() => () => clearVolumeCloseTimer(), [])
-
   useEffect(() => {
     if (!volumeOpen) return
     const onPointerDown = (event: PointerEvent) => {
@@ -97,13 +89,11 @@ export default function AppleRadioNowPlayingPage({
     return () => document.removeEventListener('pointerdown', onPointerDown)
   }, [volumeOpen])
 
-  // 进度条拖拽：拖拽期间以指针比例显示（不受播放时钟回推影响）
   const [scrubRatio, setScrubRatio] = useState<number | null>(null)
   const progressRef = useRef<HTMLDivElement | null>(null)
   const displayTime = scrubRatio !== null
     ? scrubRatio * liveDuration
     : Math.min(Math.max(liveTime, 0), liveDuration || liveTime)
-
   const seekFromClientX = (clientX: number) => {
     const rect = progressRef.current?.getBoundingClientRect()
     if (!rect || rect.width <= 0 || liveDuration <= 0) return
@@ -112,92 +102,53 @@ export default function AppleRadioNowPlayingPage({
     onSeek(ratio * liveDuration)
   }
 
-  useEffect(() => {
-    const video = motionRef.current
-    if (!video || !motionUrl || !motionEnabled || motionFailed || !Hls.isSupported()) return
-    const hls = new Hls({ autoStartLoad: true, capLevelToPlayerSize: true, maxBufferLength: 8, backBufferLength: 0 })
-    hls.loadSource(motionUrl)
-    hls.attachMedia(video)
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { if (!document.hidden) void video.play().catch(() => undefined) })
-    hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) setMotionFailed(true) })
-    const onVisibilityChange = () => {
-      if (document.hidden) video.pause()
-      else void video.play().catch(() => undefined)
-    }
-    document.addEventListener('visibilitychange', onVisibilityChange)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisibilityChange)
-      hls.destroy()
-    }
-  }, [motionEnabled, motionFailed, motionUrl])
-
-  const statusLabel = status === 'connecting'
-    ? '正在连接'
-    : status === 'reconnecting'
-      ? '正在重新连接'
-      : status === 'error'
-        ? '播放中断'
-        : isLive ? '直播' : '节目回放'
-
   return (
-    <div className={`relative flex h-full min-h-0 w-full flex-col overflow-hidden ${isDark ? 'bg-[#08090d] text-white' : 'bg-[#f5f5f7] text-black'}`} data-apple-radio-player>
-      {poster && (
+    <div className={`relative flex h-full min-h-0 w-full flex-col overflow-hidden ${isDark ? 'bg-[#08090d] text-white' : 'bg-[#f5f5f7] text-black'}`} data-podcast-player>
+      {cover && (
         <img
-          src={poster}
+          src={cover}
           alt=""
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-45 blur-3xl"
+          className="pointer-events-none absolute inset-0 h-full w-full scale-110 object-cover opacity-40 blur-3xl"
           onError={event => { (event.currentTarget as HTMLImageElement).style.display = 'none' }}
         />
       )}
-      <div className={`absolute inset-0 ${isDark ? 'bg-black/45' : 'bg-white/70'}`} />
+      <div className={`absolute inset-0 ${isDark ? 'bg-black/50' : 'bg-white/70'}`} />
 
       <header className="relative z-10 flex h-20 shrink-0 items-center justify-between px-5 md:px-10">
-        <button type="button" onClick={onBack} className={`flex h-10 w-10 items-center justify-center rounded-full ${isDark ? 'bg-white/10 hover:bg-white/16' : 'bg-black/8 hover:bg-black/12'}`} aria-label="返回 Apple Music 广播">
+        {/* 返回：回主页（与电台页一致；右上角不再重复放主页按钮） */}
+        <button type="button" onClick={onBack} className={`flex h-10 w-10 items-center justify-center rounded-full ${isDark ? 'bg-white/10 hover:bg-white/16' : 'bg-black/8 hover:bg-black/12'}`} aria-label="返回">
           <ArrowLeft className="h-5 w-5" />
         </button>
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase text-[#fa2d48]"><Radio className="h-4 w-4" />Apple Music 广播</div>
+        <div className="flex items-center gap-2 text-xs font-semibold uppercase text-[#fa2d48]"><Mic2 className="h-4 w-4" />播客</div>
         <div className="h-10 w-10" />
       </header>
 
       <main className="relative z-10 grid min-h-0 flex-1 items-center gap-8 overflow-y-auto px-6 pb-24 pt-3 md:grid-cols-[minmax(280px,520px)_minmax(280px,560px)] md:justify-center md:px-12">
         <div className="mx-auto w-full max-w-[520px]">
           <div className="relative aspect-square overflow-hidden rounded-2xl bg-white/5 shadow-2xl">
-            {motionUrl && motionEnabled && !motionFailed ? (
-              <video ref={motionRef} muted loop playsInline poster={poster || undefined} className="h-full w-full object-cover" />
-            ) : poster ? (
-              <CachedImage src={poster} alt={song.name} className="h-full w-full" role="hero" priority="critical" lazy={false} />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center"><Radio className="h-24 w-24 opacity-25" /></div>
-            )}
+            {cover
+              ? <CachedImage src={cover} alt={song.name} className="h-full w-full" role="hero" priority="critical" lazy={false} />
+              : <div className="flex h-full w-full items-center justify-center"><Mic2 className="h-24 w-24 opacity-25" /></div>}
           </div>
         </div>
 
         <section className="min-w-0 text-center md:text-left">
           <div className="mb-4 flex justify-center md:justify-start">
-            <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold ${status === 'error' ? 'bg-red-500/15 text-red-300' : 'bg-[#fa2d48]/15 text-[#ff6b7f]'}`}>
-              <span className={`h-2 w-2 rounded-full ${status === 'error' ? 'bg-red-400' : 'bg-[#fa2d48]'}`} />{statusLabel}
+            <span className="inline-flex items-center gap-2 rounded-full bg-[#fa2d48]/15 px-3 py-1.5 text-xs font-semibold text-[#ff6b7f]">
+              <span className="h-2 w-2 rounded-full bg-[#fa2d48]" />单集节目
             </span>
           </div>
+          {/* 节目名 + 所属播客名：播客没有歌词，这两行就是它全部的可读信息 */}
           <h1 className="text-3xl font-bold leading-tight md:text-5xl">{song.name}</h1>
-          <p className={`mt-3 text-base md:text-lg ${isDark ? 'text-white/62' : 'text-black/58'}`}>{radio?.showName || song.artists.map(artist => artist.name).join(', ')}</p>
-          {radio?.description && <p className={`mx-auto mt-5 max-w-xl text-sm leading-7 md:mx-0 ${isDark ? 'text-white/48' : 'text-black/48'}`}>{radio.description}</p>}
-          {radio?.airTime?.start && <p className={`mt-3 text-xs ${isDark ? 'text-white/35' : 'text-black/35'}`}>{new Date(radio.airTime.start).toLocaleString('zh-CN')}</p>}
+          {showName && <p className={`mt-3 text-base md:text-lg ${isDark ? 'text-white/62' : 'text-black/58'}`}>{showName}</p>}
 
-          {status === 'error' && (
-            <div className="mt-6">
-              <p className="text-sm text-red-300/85">{error || 'Apple Music 电台播放失败'}</p>
-              <button type="button" onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-black"><RotateCw className="h-4 w-4" />重新连接</button>
-            </div>
-          )}
-
-          {/* 进度条：细条自绘（无滑块圆点），点击/拖拽跳转；直播窗口内由浏览器钳制 */}
           {liveDuration > 0 && (
             <div className="mt-8">
               <div
                 ref={progressRef}
                 role="slider"
-                aria-label={isLive ? '直播进度' : '节目进度'}
+                aria-label="节目进度"
                 aria-valuemin={0}
                 aria-valuemax={Math.round(liveDuration)}
                 aria-valuenow={Math.round(displayTime)}
@@ -227,10 +178,9 @@ export default function AppleRadioNowPlayingPage({
           )}
 
           <div className="mt-8 flex items-center justify-center gap-3 md:justify-start">
-            <button type="button" onClick={onPlayPause} disabled={status === 'connecting' || status === 'reconnecting'} className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-black shadow-xl disabled:opacity-45" aria-label={isPlaying ? '暂停电台' : '播放电台'}>
+            <button type="button" onClick={onPlayPause} className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-black shadow-xl" aria-label={isPlaying ? '暂停' : '播放'}>
               {isPlaying ? <Pause className="h-6 w-6 fill-current" /> : <Play className="ml-0.5 h-6 w-6 fill-current" />}
             </button>
-            {/* 音效（调音室）：与普通歌词页同一入口，但排在音量左侧、由电台页自己排布 */}
             {onOpenSoundEffects && (
               <button
                 type="button"
@@ -242,18 +192,16 @@ export default function AppleRadioNowPlayingPage({
                 <AudioLines className="h-5 w-5 opacity-55" />
               </button>
             )}
-            {/* 设置：电台页专属入口（QuickSettings 面板本身按 isPureMusic 收敛掉歌词相关项） */}
+            {/* 设置：播客页专属入口（isPureMusic 让面板收敛掉歌词/MV 相关项） */}
             <QuickSettings
               playerTheme={playerTheme}
               isPureMusic
-              expandUp={false}
               triggerClassName={`flex h-10 w-10 items-center justify-center rounded-full ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/8'}`}
               triggerWidth={40}
               triggerHeight={40}
               triggerIconSize={20}
               triggerIconColor={isDark ? 'rgba(255,255,255,0.55)' : 'rgba(0,0,0,0.55)'}
             />
-            {/* 音量：低频操作，点击向右弹出滑杆；指针离开控件 3 秒自动收起，停留期间保持展开 */}
             <div
               ref={volumeWrapRef}
               className="relative flex items-center"
@@ -262,11 +210,8 @@ export default function AppleRadioNowPlayingPage({
             >
               <button
                 type="button"
-                onClick={() => {
-                  clearVolumeCloseTimer()
-                  setVolumeOpen(open => !open)
-                }}
-                aria-label="电台音量"
+                onClick={() => { clearVolumeCloseTimer(); setVolumeOpen(open => !open) }}
+                aria-label="音量"
                 aria-expanded={volumeOpen}
                 className={`flex h-10 w-10 items-center justify-center rounded-full ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/8'}`}
               >
@@ -275,13 +220,13 @@ export default function AppleRadioNowPlayingPage({
               {volumeOpen && (
                 <div className={`absolute left-full top-1/2 z-10 ml-3 flex -translate-y-1/2 items-center gap-3 rounded-full px-4 py-2.5 shadow-xl ${isDark ? 'bg-[#1b1d24]/95' : 'bg-white/95'}`}>
                   <input
-                    aria-label="电台音量"
+                    aria-label="音量"
                     type="range"
                     min={0}
                     max={1}
                     step={0.01}
                     value={volume}
-                    onChange={handleVolumeInput}
+                    onChange={event => { onVolumeChange(Number(event.target.value)); clearVolumeCloseTimer() }}
                     className="w-36 accent-[#fa2d48]"
                   />
                   <span className={`w-9 text-right text-xs tabular-nums ${isDark ? 'text-white/55' : 'text-black/55'}`}>{Math.round(volume * 100)}%</span>

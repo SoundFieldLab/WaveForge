@@ -21,6 +21,15 @@ interface DesktopMiniPlayerProps {
   onEnterPlayer?: () => void
   accentColor?: string
   currentLyric?: string
+  /**
+   * 无歌词时的替代文案（电台名 / 播客名）。
+   * 桌面迷你播放器原先在无歌词时这一行直接不渲染，观感上像"少了点信息"。
+   */
+  lyricsPlaceholder?: string
+  /**
+   * 隐藏上一曲/下一曲（Apple 电台、播客单集没有相邻曲目语义）。
+   */
+  hideSkipControls?: boolean
   underOverlay?: boolean
 }
 
@@ -37,6 +46,8 @@ function DesktopMiniPlayer({
   onEnterPlayer,
   accentColor = '#8b5cf6',
   currentLyric = '',
+  lyricsPlaceholder = '',
+  hideSkipControls = false,
   underOverlay = false,
 }: DesktopMiniPlayerProps) {
   if (!currentSong) return null
@@ -111,20 +122,21 @@ function DesktopMiniPlayer({
               {currentSong.artists?.map((a: any) => a.name).join(', ')}
             </p>
             {live && <p className="mt-1 text-xs font-semibold text-[#fa2d48]">正在直播</p>}
-            {/* 当前歌词 */}
-            {!live && currentLyric && (
+            {/* 当前歌词；无歌词且是电台/播客时显示其名称（而不是留空） */}
+            {!live && (currentLyric || lyricsPlaceholder) && (
               <p className="text-white/50 text-xs truncate mt-1 italic">
-                {currentLyric}
+                {currentLyric || lyricsPlaceholder}
               </p>
             )}
           </div>
 
           {/* 控制按钮 */}
           <div className="flex items-center gap-2 min-[1360px]:gap-3">
-            {/* 上一曲 */}
-            {!live && <motion.button
+            {/* 上一曲（电台/播客隐藏） */}
+            {!live && !hideSkipControls && <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.95 }}
+              aria-label="上一首"
               onClick={(e) => {
                 e.stopPropagation()
                 onPrevious()
@@ -138,6 +150,7 @@ function DesktopMiniPlayer({
             <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.95 }}
+              aria-label={isPlaying ? '暂停' : '播放'}
               onClick={(e) => {
                 e.stopPropagation()
                 onPlayPause()
@@ -154,10 +167,11 @@ function DesktopMiniPlayer({
               )}
             </motion.button>
 
-            {/* 下一曲 */}
-            {!live && <motion.button
+            {/* 下一曲（电台/播客隐藏） */}
+            {!live && !hideSkipControls && <motion.button
               whileHover={{ scale: 1.1 }}
               whileTap={{ scale: 0.95 }}
+              aria-label="下一首"
               onClick={(e) => {
                 e.stopPropagation()
                 onNext()

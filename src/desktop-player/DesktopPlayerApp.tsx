@@ -345,9 +345,11 @@ function LyricLineView({ state, showTranslation, showRomaji, compact = false }: 
   }, [state.playing, state.lyric?.line, state.lyric?.words?.length])
   const interpolatedProgress = getInterpolatedDesktopProgress(realtime, state.playing)
   const lyric = state.lyric
-  if (!lyric) return <div className={`dp-lyric${compact ? ' compact' : ''}`}>&nbsp;</div>
+  // 无歌词时显示电台名/播客名（`lyricsPlaceholder`），比留空更有意义
+  const emptyLyric = state.lyricsPlaceholder?.trim() || ''
+  if (!lyric) return <div className={`dp-lyric${compact ? ' compact' : ''}`}>{emptyLyric || <>&nbsp;</>}</div>
   if (lyric.isInterlude) return <div className={`dp-lyric${compact ? ' compact' : ''}`}><InterludeDots state={state} progress={interpolatedProgress} /></div>
-  if (!lyric.line) return <div className={`dp-lyric${compact ? ' compact' : ''}`}>&nbsp;</div>
+  if (!lyric.line) return <div className={`dp-lyric${compact ? ' compact' : ''}`}>{emptyLyric || <>&nbsp;</>}</div>
   const elapsedMs = (interpolatedProgress - lyric.lineStart) * 1000
 
   const signature = [
@@ -424,9 +426,11 @@ function ControlPanel({ state, title, artists, showTranslation, setShowTranslati
     <div className="dp-panel-content">
       <div className="dp-panel-heading"><strong>{title}</strong><span>{state.live ? '正在直播' : artists || '未知歌手'}</span></div>
       <div className="dp-transport">
-        {!state.live ? <button className="dp-ctrl-btn" aria-label="上一曲" onClick={() => sendControl('prev')}><PrevIcon /></button> : null}
+        {/* 电台/播客（nonSkippable）没有相邻曲目：只保留播放/暂停，
+            与迷你播放器、任务栏缩略图的隐藏规则保持一致 */}
+        {!state.live && !state.nonSkippable ? <button className="dp-ctrl-btn" aria-label="上一曲" onClick={() => sendControl('prev')}><PrevIcon /></button> : null}
         <button className="dp-ctrl-btn primary" aria-label={state.live ? '播放或暂停直播' : '播放或暂停'} onClick={() => sendControl('toggle')}>{state.playing ? <PauseIcon /> : <PlayIcon />}</button>
-        {!state.live ? <button className="dp-ctrl-btn" aria-label="下一曲" onClick={() => sendControl('next')}><NextIcon /></button> : null}
+        {!state.live && !state.nonSkippable ? <button className="dp-ctrl-btn" aria-label="下一曲" onClick={() => sendControl('next')}><NextIcon /></button> : null}
       </div>
       <div className="dp-tool-row">
         {hasTranslation ? <ToolButton title="显示翻译" active={showTranslation} onClick={() => setShowTranslation(!showTranslation)}><TranslateIcon /></ToolButton> : null}

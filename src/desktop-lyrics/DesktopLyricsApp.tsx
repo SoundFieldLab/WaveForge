@@ -382,7 +382,8 @@ export default function DesktopLyricsApp() {
   // 已唱歌词始终使用高对比月白色，主题色仅用于未唱部分和辉光。
   const filledColor = '#ffffff'
   const lyric = state.lyric
-  const currentText = lyric?.line?.trim() || state.song?.name || 'WaveForge 澜音工坊'
+  // 无歌词时优先显示电台名/播客名（比退到歌名更贴合"这是什么内容"）
+  const currentText = lyric?.line?.trim() || state.lyricsPlaceholder?.trim() || state.song?.name || 'WaveForge 澜音工坊'
   const translation = settings.translationEnabled && state.hasTranslation ? lyric?.translation?.trim() || '' : ''
   const romaji = settings.romajiEnabled && state.hasRomaji ? lyric?.romaji?.trim() || '' : ''
   const next = lyric?.nextLine?.trim() || ''
@@ -449,9 +450,10 @@ export default function DesktopLyricsApp() {
       )}
 
       <div className="dl-toolbar" onPointerDown={event => event.stopPropagation()}>
-        <button title="上一首" onClick={() => bridge()?.sendControl('prev')}><SkipBack /></button>
+        {/* 直播与电台/播客没有相邻曲目：隐藏切歌（此前桌面歌词窗漏了这道判断） */}
+        {!state.live && !state.nonSkippable && <button title="上一首" onClick={() => bridge()?.sendControl('prev')}><SkipBack /></button>}
         <button title={state.playing ? '暂停' : '播放'} onClick={() => bridge()?.sendControl('toggle')}>{state.playing ? <Pause /> : <Play />}</button>
-        <button title="下一首" onClick={() => bridge()?.sendControl('next')}><SkipForward /></button>
+        {!state.live && !state.nonSkippable && <button title="下一首" onClick={() => bridge()?.sendControl('next')}><SkipForward /></button>}
         <span className="dl-divider" />
         <button title="减小字体" onClick={() => update({ fontSize: settings.fontSize - 4 })}><Minus /></button>
         <button title="增大字体" onClick={() => update({ fontSize: settings.fontSize + 4 })}><Plus /></button>

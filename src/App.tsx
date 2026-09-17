@@ -40,7 +40,9 @@ import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './servic
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
 import { resolvePlayableSong, setAppleSongLoved, getLastAppleMutationResult, addAppleTracksToPlaylist, getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleHotSongs, appleLibraryTrackToSong, appleSongToSong, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
 import { ensureBridgeRunning, checkBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
-import { getAppleRadioFailReason, isAppleNativeStreamEnabled, isAppleEmeCapable, releaseAppleNativeStream, resolveAppleNativeStream, resolveAppleRadioStream, type AppleNativeStream } from './services/applePlayback'
+import { getAppleRadioFailReason, isAppleNativeStreamEnabled, isAppleEmeCapable, isAppleTrackRadioStation, releaseAppleNativeStream, resolveAppleNativeStream, resolveAppleRadioStream, type AppleNativeStream } from './services/applePlayback'
+import { APPLE_AUTOPLAY_CHANGED_EVENT, readAppleAutoplayEnabled } from './services/appleAutoplaySettings'
+import { createAppleAutoplayStation, fetchAppleAutoplayTracks } from './services/appleWebService'
 import { decideAppleRadioFailure, getAppleRadioReconnectKey } from './services/appleRadioReconnect'
 import { fetchAppleRadioPage, fetchAppleStationDetail, appleStationToSong } from './services/appleWebService'
 import { getAppleAcceptanceSnapshot, installAppleEmeAcceptanceInstrumentation, resetAppleAcceptanceSnapshot } from './services/appleAcceptanceDiagnostics'
@@ -131,6 +133,8 @@ const loadPvLyricsPage = () => import('./components/pvLyrics/PvLyricsPage')
 const loadModengPlayer = () => import('./components/ModengPlayerPage')
 const loadAppleRadioNowPlayingPage = () => import('./components/AppleRadioNowPlayingPage')
 const LazyAppleRadioNowPlayingPage = lazy(loadAppleRadioNowPlayingPage)
+const loadPodcastNowPlayingPage = () => import('./components/PodcastNowPlayingPage')
+const LazyPodcastNowPlayingPage = lazy(loadPodcastNowPlayingPage)
 const loadBilibiliMvPlayer = () => import('./components/BilibiliMvPlayer')
 const loadBilibiliMvBackground = () => import('./components/BilibiliMvBackground')
 const LazyModernAudioVisualizer = lazy(loadModernAudioVisualizer)
@@ -1086,6 +1090,15 @@ function App() {
   // 搜索到 MV 不等于视频已经出画面；在 canplay 前保留封面兜底，避免播放页黑屏或透出上一页。
   const [mvBackgroundReady, setMvBackgroundReady] = useState(false)
 
+  // Apple「自动连播」（官方 stations/continuous 协议，∞ 开关在 Apple 播放列表面板）
+  const [appleAutoplayEnabled, setAppleAutoplayEnabled] = useState(() => readAppleAutoplayEnabled())
+  const appleAutoplayRef = useRef<{ seedKey: string; stationId?: string; disabled?: boolean }>({ seedKey: '' })
+  useEffect(() => {
+    const handler = (event: Event) => setAppleAutoplayEnabled(Boolean((event as CustomEvent<boolean>).detail))
+    window.addEventListener(APPLE_AUTOPLAY_CHANGED_EVENT, handler)
+    return () => window.removeEventListener(APPLE_AUTOPLAY_CHANGED_EVENT, handler)
+  }, [])
+
   // OOBE：默认不启用，仅由 设置→高级 卡片通过事件手动触发（计数器作 key，可重复触发）
   const [oobeOpenCount, setOobeOpenCount] = useState(0)
 
@@ -1359,8 +1372,16 @@ function App() {
   // 播客节目没有歌词、也没有 MV 背景：自动使用纯音乐播放页并隐藏 MV 入口
   const podcastPlayback = Boolean(currentSong?.isPodcast)
   const pureMusicPlayback = isPureMusic || podcastPlayback
+  /**
+   * 电台/播客都不该有 MV 背景：它们不是「歌曲」，没有可匹配的 MV。
+   * 这个判断必须与下面 MV 图层的挂载条件（`!isAppleRadioPlayback && !podcastPlayback`）
+   * **完全一致**——此前这里漏了 isAppleRadioPlayback，于是开着 MV 背景时进电台：
+   * 歌词页按「MV 已激活」把自己透明掉（等 MV 出画面），可 MV 图层根本没挂载，
+   * 结果整屏全黑（用户实测反馈）。关掉 MV 背景开关就正常，正是这个不一致导致的。
+   */
+  const mvBackgroundSuppressed = isAppleRadioPlayback || podcastPlayback
   // 只有视频已经真正出画面时才让歌词页面透明；搜索/拉流/canplay 前继续显示封面兜底。
-  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback && mvBackgroundReady && !podcastPlayback
+  const mvBackgroundActive = Boolean(currentSong) && lyricDisplayMode !== 'video' && mvBackgroundEnabled && !mvBackgroundFallback && mvBackgroundReady && !mvBackgroundSuppressed
   // Apple Music 动态封面（图层叠加式）：未开启/无动态封面/查询失败时为 null，封面永远回退平台静态图
   const appleDynamicCover = useAppleDynamicCover({
     title: isAppleRadioPlayback ? '' : currentSong?.name || '',
@@ -1490,6 +1511,22 @@ function App() {
     }
     return ''
   }, [watchLyricUnverified, lyricTimelineTime, lyricOffset, lyrics, currentSong, currentSongArtists])
+  /**
+   * 迷你播放器无歌词时的占位文案。
+   * - Apple 电台：电台/节目名（`appleRadio.showName`）
+   * - 曲目型电台队列：队列曲目不带 appleRadio，但电台名已回填进 `album.name`
+   * - 播客：节目所属播客名（服务端写入 `album.name`）
+   * 其余由迷你播放器回退到「暂无歌词」。
+   */
+  const currentMiniLyricsPlaceholder = useMemo(() => {
+    if (currentSong?.appleRadio) {
+      return currentSong.appleRadio.showName?.trim() || currentSong?.name || ''
+    }
+    if (currentSong?.isPodcast || currentSong?.isRadioQueue) {
+      return currentSong?.album?.name?.trim() || currentSong?.name || ''
+    }
+    return ''
+  }, [currentSong])
   const currentLyricIndex = useMemo(() => {
     const adjustedTime = lyricTimelineTime + 0.5 + lyricOffset
     if (lyrics.length === 0 || adjustedTime < lyrics[0].time) return -1
@@ -1844,11 +1881,14 @@ function App() {
   const platformEntitlements = useMemo(() => createPlatformEntitlements({
     netease: entitlementTierFromVip(neteaseVip),
     qq: entitlementTierFromVip(qqVip),
-    apple: 'unknown',
+    // Apple Music 是订阅制：能登录就说明订阅有效（目录曲都能放），没登录才算 unknown。
+    // 之前这里恒为 'unknown'，会把已登录的 Apple 当成「没会员」，加歌面板会给每首 Apple 曲标「需要 VIP」。
+    apple: appleLoggedIn ? 'vip' : 'unknown',
     spotify: spotifyLoggedIn ? spotifyEntitlement : 'unknown',
+    // 酷狗没有可用的会员档位来源：保持 unknown = 「不预设，实测取流」（提前判 free 会把付费曲直接误杀）
     kugou: 'unknown',
     soda: sodaLoggedIn ? sodaEntitlement : 'unknown',
-  }), [neteaseVip, qqVip, sodaEntitlement, sodaLoggedIn, spotifyEntitlement, spotifyLoggedIn])
+  }), [appleLoggedIn, neteaseVip, qqVip, sodaEntitlement, sodaLoggedIn, spotifyEntitlement, spotifyLoggedIn])
   // 共振：本机各平台的登录与会员档位 / 账号标识（房间内只展示徽章，不外发账号）
   const resonancePlatforms = useMemo(() => [
     { platform: 'netease' as MusicPlatform, loggedIn: neteaseLoggedIn, tier: platformEntitlements.netease },
@@ -4295,7 +4335,15 @@ function App() {
 
   useEffect(() => {
     const continuation = infiniteExploreContinuationRef.current
-    if (playbackOriginRef.current.continuation !== 'explore-infinite') {
+    // Apple「自动连播」：与探索页无限推荐共用续载框架（临近队尾时补曲），但走官方
+    // stations/continuous 协议（用队列末尾歌曲作种子创建连续电台，next-tracks 取曲）。
+    const appleAutoplayActive = appleAutoplayEnabled
+      && playMode === 'sequential'
+      && playlist.length > 0
+      && playlist[0]?.platform === 'apple'
+      && currentIndex >= 0
+      && !playlist[currentIndex]?.appleRadio
+    if (playbackOriginRef.current.continuation !== 'explore-infinite' && !appleAutoplayActive) {
       continuation.loading = false
       continuation.lastQueueLength = 0
       continuation.batch = 1
@@ -4303,7 +4351,7 @@ function App() {
       return
     }
 
-    if (playlist.length === 0 || currentIndex < 0 || playlist.length - currentIndex > 6) return
+    if (playlist.length === 0 || currentIndex < 0 || playlist.length - currentIndex > (appleAutoplayActive ? 2 : 6)) return
     if (continuation.loading || continuation.lastQueueLength === playlist.length) return
 
     continuation.loading = true
@@ -4322,12 +4370,31 @@ function App() {
         ? fetchNeteaseRoam(undefined, { unplaySongIds: excludedSongKeys })
         : continuationPlatform === 'qq' && qqRadarContinuation?.mode === 'radar'
           ? fetchQQRadarSongs({ page: qqRadarContinuation.page + 1, reqType: qqRadarContinuation.reqType, entranceSongs: qqRadarContinuation.entranceSongs }).then(result => result.songs)
-          : fetchExploreRecommendationBatch(continuationPlatform, requestedBatch, excludedSongKeys)
+          : appleAutoplayActive
+            ? (async () => {
+                // 种子=队列末尾 3 首的 Apple 目录 id；同一播放上下文复用同一连续电台
+                // （next-tracks 是游标式接口，连调返回不同曲目），换播放列表后重建。
+                if (appleAutoplayRef.current.disabled) throw new Error('Apple 自动连播已停用（此前创建失败）')
+                const queue = playlistRef.current
+                const seedKey = getSongKey(queue[0] || playlist[0])
+                if (appleAutoplayRef.current.seedKey !== seedKey || !appleAutoplayRef.current.stationId) {
+                  const seeds = queue.slice(-3)
+                    .map(song => String(song.appleId || ''))
+                    .filter(id => /^\d+$/.test(id))
+                  const station = await createAppleAutoplayStation(seeds)
+                  if (!station) throw new Error('Apple 自动连播电台创建失败（未登录或种子无效）')
+                  appleAutoplayRef.current = { seedKey, stationId: station.id }
+                }
+                const autoplayStationId = appleAutoplayRef.current.stationId
+                if (!autoplayStationId) throw new Error('Apple 自动连播电台不可用')
+                return fetchAppleAutoplayTracks(autoplayStationId, 5)
+              })()
+            : fetchExploreRecommendationBatch(continuationPlatform, requestedBatch, excludedSongKeys)
     // 请求发起时的加载修订号：若用户等待期间手动换歌，只追加队列，不自动抢播。
     const loadRevisionAtRequest = songLoadRevisionRef.current
     void continuationRequest
       .then(songs => {
-        if (playbackOriginRef.current.continuation !== 'explore-infinite') return
+        if (!appleAutoplayActive && playbackOriginRef.current.continuation !== 'explore-infinite') return
         const currentQueue = playlistRef.current
         const seen = new Set(currentQueue.map(getSongKey))
         const additions = songs
@@ -4363,8 +4430,9 @@ function App() {
         setCurrentIndex(currentIndexInNewQueue)
         window.setTimeout(() => {
           preloadUpcomingSongs(currentIndexInNewQueue, nextRevision, playMode, nextQueue)
-          // 仅当等待期间没有新加载（用户没手动选歌）且仍在无限推荐上下文时才自动续播
-          if (shouldAdvance && songLoadRevisionRef.current === loadRevisionAtRequest && playbackOriginRef.current.continuation === 'explore-infinite') {
+          // 仅当等待期间没有新加载（用户没手动选歌）且仍在续播上下文时才自动续播
+          if (shouldAdvance && songLoadRevisionRef.current === loadRevisionAtRequest
+            && (playbackOriginRef.current.continuation === 'explore-infinite' || appleAutoplayActive)) {
             const nextIndex = trimmedQueue.length
             currentIndexRef.current = nextIndex
             setCurrentIndex(nextIndex)
@@ -4374,13 +4442,15 @@ function App() {
       })
       .catch(error => {
         continuation.lastQueueLength = 0
+        // 连播电台创建失败后放弃该上下文的自动连播（避免每次到队尾都重试失败请求）
+        if (appleAutoplayActive) appleAutoplayRef.current = { seedKey: appleAutoplayRef.current.seedKey, stationId: undefined, disabled: true }
         window.setTimeout(() => setContinuationRetry(value => value + 1), 1200)
-        console.warn(`[${continuationPlatform === 'qq' ? 'QQ猜你喜欢' : '网易云无限推荐'}] 下一批加载失败:`, error)
+        console.warn(`[${appleAutoplayActive ? 'Apple自动连播' : continuationPlatform === 'qq' ? 'QQ猜你喜欢' : '网易云无限推荐'}] 下一批加载失败:`, error)
       })
       .finally(() => {
         continuation.loading = false
       })
-  }, [currentIndex, playlist.length, playMode, continuationRetry, bumpQueueRevision, preloadUpcomingSongs])
+  }, [currentIndex, playlist.length, playMode, continuationRetry, bumpQueueRevision, preloadUpcomingSongs, appleAutoplayEnabled, currentSong?.platform, currentSong?.appleRadio])
 
   const handleSmartReorder = async () => {
     const fixedPrefixLength = currentIndex >= 0 ? currentIndex + 1 : 0
@@ -4660,17 +4730,29 @@ function App() {
         setAppleRadioStatus('connecting')
         setAppleRadioError('')
         let radioPlayParams = radioDescriptor.playParams
-        if (!radioPlayParams || Object.keys(radioPlayParams).length === 0) {
+        // 补取电台详情的条件：playParams 缺失，**或**缺 stationHash。
+        // 官方 play/assets 请求实测总是携带 stationHash
+        // （format=stream&hasDrm=true&id=ra.xxx&kind=radioStation&mediaType=0&stationHash=…&streamingKind=1&keyFormat=web）。
+        // 列表接口给的 playParams 常常只有 id/kind、没有 stationHash；若只按「playParams 是否为空」
+        // 决定要不要补取，就会带着不完整的参数去请求 → Apple 返回 404（而后被泛化成"地区限制"文案）。
+        const playParamsIncomplete = !radioPlayParams
+          || Object.keys(radioPlayParams).length === 0
+          || !radioPlayParams.stationHash
+        if (playParamsIncomplete) {
           const stationDetail = await fetchAppleStationDetail(
             radioDescriptor.stationId,
             radioDescriptor.storefront || normalizedSong.appleStorefront,
           ).catch(() => null)
           if (!isLatestLoad()) return
           if (stationDetail?.playParams) {
-            radioPlayParams = stationDetail.playParams
-            radioDescriptor.playParams = stationDetail.playParams
+            // 合并而非替换：列表侧已有的键（如列表特有的 seed）不能被详情响应抹掉
+            radioPlayParams = { ...(radioPlayParams || {}), ...stationDetail.playParams }
+            radioDescriptor.playParams = radioPlayParams
           }
-          ;(window as any).electron?.log?.(`[AppleRadio] station detail resolved: hasPlayParams=${Boolean(radioPlayParams)}`)
+          if (!radioDescriptor.stationHash && stationDetail?.stationHash) {
+            radioDescriptor.stationHash = stationDetail.stationHash
+          }
+          ;(window as any).electron?.log?.(`[AppleRadio] station detail resolved: hasPlayParams=${Boolean(radioPlayParams)} hasStationHash=${Boolean(radioDescriptor.stationHash)}`)
         }
         appleHlsStream = await resolveAppleRadioStream(
           radioDescriptor.stationId,
@@ -4683,6 +4765,34 @@ function App() {
         })
         if (!isLatestLoad()) return
         if (!appleHlsStream) {
+          // 曲目型电台（playParams.format==='tracks'，如「风格电台」里的「K-Pop 电台」）：
+          // 它本来就没有直播流（play/assets 实测恒 404），曲目来自
+          // POST /v1/me/stations/next-tracks/{id}。这里取一批曲目当作队列播第一首，
+          // 后续由既有的 Apple 自动连播（next-tracks 游标）继续补曲。
+          if (isAppleTrackRadioStation(radioPlayParams) || /曲目型电台/.test(getAppleRadioFailReason())) {
+            // 传电台名：队列曲目会把它写进 album.name，迷你播放器/桌面歌词在无歌词时显示它
+            // （此前不传，界面上退化成「暂无歌词」，用户实测反馈"播放电台应该用电台名"）
+            const radioSongs = await fetchAppleAutoplayTracks(
+              radioDescriptor.stationId,
+              10,
+              normalizedSong.name || normalizedSong.album?.name || '',
+            ).catch(() => [])
+            if (!isLatestLoad()) return
+            if (radioSongs.length > 0) {
+              debugLog(`📻 [PlaySong] 曲目型电台：取到 ${radioSongs.length} 首，按队列播放`)
+              // 队列里是普通目录歌曲（不再带 appleRadio），播放页按普通歌曲渲染；
+              // 但仍要把电台状态收干净，否则会停在 'connecting' 留下一直转圈的假象。
+              appleRadioReconnectKeyRef.current = ''
+              setAppleRadioError('')
+              setAppleRadioStatus('playing')
+              const first = radioSongs[0]
+              const queue = radioSongs
+              setPlaylist(queue)
+              setCurrentIndex(0)
+              await loadAndPlaySong(first, 0, queue)
+              return
+            }
+          }
           // 电台不启用 WebView2 二次登录：原生 HLS/EME 失败时直接报告真实原因，
           // 不把用户带到另一个需要重新登录的播放窗口。
           setAppleRadioError(getAppleRadioFailReason())
@@ -5091,12 +5201,17 @@ function App() {
   // 下一曲
   const handleNext = () => {
     if (playlist.length === 0 || currentSong?.appleRadio) return
+    const appleAutoplayHold = appleAutoplayEnabled
+      && playMode === 'sequential'
+      && playlist.length > 0
+      && playlist[0]?.platform === 'apple'
+      && !currentSong?.appleRadio
     if (
-      playbackOriginRef.current.continuation === 'explore-infinite' &&
+      (playbackOriginRef.current.continuation === 'explore-infinite' || appleAutoplayHold) &&
       playMode === 'sequential' &&
       currentIndex >= playlist.length - 1
     ) {
-      // 无限推荐正在续载时停留在当前曲，避免队尾瞬间回绕到第一首。
+      // 无限推荐/自动连播正在续载时停留在当前曲，避免队尾瞬间回绕到第一首。
       infiniteExploreContinuationRef.current.advancePending = true
       infiniteExploreContinuationRef.current.lastQueueLength = 0
       setContinuationRetry(value => value + 1)
@@ -6015,8 +6130,11 @@ function App() {
         ? Math.max(0, Number(currentSong.duration) / 1000)
         : 0,
       live: isLive || currentAppleRadio?.timeline === 'live',
+      // 电台/播客没有相邻曲目语义：独立播放窗隐藏上一曲/下一曲
+      nonSkippable: isAppleRadioPlayback || podcastPlayback,
+      lyricsPlaceholder: currentMiniLyricsPlaceholder,
     })
-  }, [currentSong, currentAppleRadio?.timeline, isAppleRadioPlayback, isLive])
+  }, [currentSong, currentAppleRadio?.timeline, isAppleRadioPlayback, podcastPlayback, isLive, currentMiniLyricsPlaceholder])
 
   useEffect(() => {
     window.electron?.desktopPlayer?.pushState({
@@ -7993,7 +8111,8 @@ function App() {
             playerTheme={playerTheme}
           />
         )}
-        {currentSong && !isAppleRadioPlayback && !podcastPlayback && (
+        {/* 电台/播客不挂 MV 图层（与 mvBackgroundActive 同一判断，避免"歌词页透明等 MV"的黑屏） */}
+        {currentSong && !mvBackgroundSuppressed && (
           <LazyBilibiliMvBackground
             songTitle={currentSong.name}
             songArtists={currentSongArtists}
@@ -8014,10 +8133,16 @@ function App() {
             getTransitionTargetTimeSeconds={getMvTransitionTargetTimeSeconds}
             playerTheme={playerTheme}
             upcomingSongs={watchUpcomingSongs}
-            enabled={mvBackgroundEnabled && !podcastPlayback}
-            // 看歌模式：常驻挂载但隐藏（display:none + 暂停），保留已缓冲的视频——
-            // 切回歌词模式直接续播同一视频，不再重新搜索/拉流（与看歌复用同一数据源）
-            hidden={lyricDisplayMode === 'video'}
+            enabled={mvBackgroundEnabled && !mvBackgroundSuppressed}
+            // 「被外部表面完全遮挡」时隐藏 + 暂停（display:none + pause），但**保留**已缓冲的视频
+            // 与搜索/staged 状态：恢复时直接续播同一视频，不重新搜索/拉流，并由组件内的
+            // returningFromHidden 分支做一次硬同步到音频位置——这正是「看歌↔歌词页来回切能无缝
+            // 接上、且 MV 实时对准」所依赖的机制。
+            //   · lyricDisplayMode === 'video'：看歌表面接管
+            //   · showHome：简约首页接管。首页根节点是 .home-view-root（background:#09090b 不透明）
+            //     且 MV 层在其下方，此时 MV 完全不可见却仍在全速解码 1080P——纯浪费。
+            //     用同一个 hidden 通道而不是另造机制，才能保住「切回来无缝 + 实时对准」。
+            hidden={lyricDisplayMode === 'video' || showHome}
             lyrics={lyrics}
             blur={mvBackgroundBlur}
             transitionToTrack={transitionToTrack}
@@ -8312,8 +8437,12 @@ function App() {
               />
               {/* 沉浸模式控制按钮 - 右上角（看歌正常播放时由播放器内部控件接管；
                   真正无视频/失败时经 MaybePortal 恢复全局入口；
-                  摩登模式改用自身左下角页脚控件，全局入口不渲染）。 */}
-              {((lyricDisplayMode !== 'video' && lyricDisplayMode !== 'modeng') || watchSearchFailed) && (
+                  摩登模式改用自身左下角页脚控件，全局入口不渲染）。
+                  电台/播客各自的播放页是独立设计（自带返回、播放、音量、设置），
+                  这里不再叠加歌词页的悬浮控件——否则会出现「右上角主页/设置/音效」
+                  这类与电台页重复且语义不符的入口。 */}
+              {((lyricDisplayMode !== 'video' && lyricDisplayMode !== 'modeng') || watchSearchFailed)
+                && !isAppleRadioPlayback && !podcastPlayback && !appleRadioSurfaceLocked && (
               <MaybePortal active={lyricDisplayMode === 'video'}>
                 <LazyImmersiveControls
                   coverColor={playbackCoverColor}
@@ -8332,8 +8461,8 @@ function App() {
                 onRomanToggle={handleRomanToggle}
                 romanEnabled={romanEnabled}
                 hasRoman={lyricDisplayMode !== 'video' ? hasRoman : false}
-                onMvBackgroundToggle={podcastPlayback ? undefined : handleMvBackgroundToggle}
-                mvBackgroundEnabled={mvBackgroundEnabled && !podcastPlayback}
+                onMvBackgroundToggle={podcastPlayback || isAppleRadioPlayback || appleRadioSurfaceLocked ? undefined : handleMvBackgroundToggle}
+                mvBackgroundEnabled={mvBackgroundEnabled && !podcastPlayback && !isAppleRadioPlayback && !appleRadioSurfaceLocked}
                 playerTheme={playerTheme}
                 isPureMusic={pureMusicPlayback}
                 stemControl={currentSong?.platform !== 'apple' ? playerStemControl : undefined}
@@ -8648,6 +8777,7 @@ function App() {
                   playerTheme={playerTheme}
                   status={appleRadioStatus}
                   error={appleRadioError}
+                  playbackTimeStore={audioPlayer.playbackTimeStore}
                   onBack={handlePlayerHome}
                   onPlayPause={handlePlayPause}
                   onSeek={audioPlayer.seek}
@@ -8656,9 +8786,45 @@ function App() {
                     const target = (isAppleRadioPlayback ? currentSong : pendingAppleRadioSong)
                     if (target) void loadAndPlaySong(target, 0, [target])
                   }}
+                  onOpenSoundEffects={(anchorRect) => {
+                    if (anchorRect) {
+                      mixingStudioAnchorRef.current = { x: anchorRect.x, y: anchorRect.y, width: anchorRect.width, height: anchorRect.height }
+                    }
+                    setShowMixingStudio(true)
+                  }}
                 />
               </motion.div>
-            ) : (isPureMusic && lyricDisplayMode !== 'modeng') || podcastPlayback ? (
+            ) : podcastPlayback ? (
+              /* 播客单集：独立播放页（不是歌曲，没有歌词/MV/专辑语义）。
+                  此前被归一到下面的「纯音乐」分支，封面取不到时只剩 No Cover 黑板。 */
+              <motion.div
+                key="podcast-player"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 z-20"
+              >
+                <LazyPodcastNowPlayingPage
+                  song={currentSong}
+                  isPlaying={isPlaying}
+                  currentTime={currentTime}
+                  duration={duration}
+                  volume={volume}
+                  playerTheme={playerTheme}
+                  playbackTimeStore={audioPlayer.playbackTimeStore}
+                  onBack={handlePlayerHome}
+                  onPlayPause={handlePlayPause}
+                  onSeek={audioPlayer.seek}
+                  onVolumeChange={handleVolumeChange}
+                  onOpenSoundEffects={(anchorRect) => {
+                    if (anchorRect) {
+                      mixingStudioAnchorRef.current = { x: anchorRect.x, y: anchorRect.y, width: anchorRect.width, height: anchorRect.height }
+                    }
+                    setShowMixingStudio(true)
+                  }}
+                />
+              </motion.div>
+            ) : (isPureMusic && lyricDisplayMode !== 'modeng') ? (
               /* 纯音乐愭椂灞呬腑显示 */
               <motion.div
                 key="no-lyrics-player"
@@ -9174,6 +9340,10 @@ function App() {
           currentLyric={currentMiniLyric}
           hasLyrics={lyrics.length > 0}
           live={isLive || currentAppleRadio?.timeline === 'live'}
+          // 电台（含曲目型电台）与播客都没有「相邻曲目」语义：隐藏切歌按钮，
+          // 无歌词时改显示电台名 / 播客名（比「暂无歌词」更能说明在放什么）。
+          hideSkipControls={isAppleRadioPlayback || podcastPlayback}
+          lyricsPlaceholder={currentMiniLyricsPlaceholder}
           accentColor={playbackCoverColor}
           onPlayPause={handlePlayPause}
           onNext={handleNext}

@@ -189,6 +189,12 @@ export interface Song {
   noCopyright?: boolean // 是否无版权
   /** 播客节目（网易云电台节目等）：没有歌词与 MV 背景，播放页自动使用纯音乐样式 */
   isPodcast?: boolean
+  /**
+   * 曲目型电台（Apple format=tracks）队列里的曲目。
+   * 这些是普通目录歌曲、不带 appleRadio，但界面归属仍是该电台：
+   * 无歌词时显示电台名而不是「暂无歌词」。
+   */
+  isRadioQueue?: boolean
   commentCount?: number
   fee?: number // 付费类型（网易云）0免费 1VIP 4付费专辑 8低音质免费
   /** 融合搜索中，同一首歌可用的所有平台版本（第一项为当前优选版本） */
@@ -318,6 +324,13 @@ export interface Album {
 export interface SearchSuggestion {
   keyword: string
   type: 'song' | 'artist' | 'album' // 搜索类型
+  /** Apple 联想专用：副标题（官网显示「歌曲 · 孙燕姿」） */
+  subtitle?: string
+  /** Apple 联想专用：可直接打开的资源封面 */
+  artworkUrl?: string
+  /** Apple 联想专用：topResults 的资源类型/id（点击直接进入该资源） */
+  appleType?: string
+  appleId?: string
 }
 
 export interface SearchResult {

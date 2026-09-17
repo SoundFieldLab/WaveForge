@@ -3927,7 +3927,7 @@ function SettingsPanel({
                       <div className="flex items-center justify-between gap-4">
                         <div>
                           <div className={`${textPrimary} font-medium mb-1`}>Apple Music 动态封面</div>
-                          <div className={`${textSecondary} text-sm`}>播放页优先显示 Apple editorialVideo；不可用时自动回退静态封面</div>
+                          <div className={`${textSecondary} text-sm`}>任何平台的歌曲，若 Apple Music 有动态封面则自动渐变叠加显示；没有或加载失败时保持平台原封面（不闪空白、不替换封面）</div>
                         </div>
                         <label className="relative inline-flex shrink-0 cursor-pointer">
                           <input

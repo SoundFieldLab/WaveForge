@@ -23,6 +23,7 @@
  */
 import { appleApiRequest } from './appleApiBridge'
 import { getAppleCredentials } from './appleAuth'
+import { describeAppleApiFailure, hasRecentAppleSubscriptionFailure } from './appleApiErrors'
 import {
   getAppleEditorialPlaylists,
   getAppleHotSongs,
@@ -103,6 +104,10 @@ export interface AppleWebItem {
   editorialLabel?: string
   /** Apple presentation card 的说明文案。 */
   editorialTagline?: string
+  /** 歌单的曲目艺人串（官方卡片小字就是这一行，而非编辑简介）。 */
+  artistNames?: string
+  /** hero 竖卡的编辑图是否已把标题烤进画面（superHeroTall.imageTraits=hasTitle）。 */
+  artworkHasTitle?: boolean
   /** 元素自带宽幅横幅图（[320]/[394] 编辑元素） */
   bannerUrl?: string
   // ── 电台字段 ──
@@ -183,6 +188,16 @@ export interface AppleWebSection {
   displayStyle?: string
   /** [404] 纯文本区块正文（HTML）。 */
   bodyHtml?: string
+  /** 组自带「查看全部」入口（官方 title 旁 `>` → /contents，如「最近播放」）。 */
+  hasSeeAll?: boolean
+  /** 去掉资源名后的标题（官方小标题用它，如「更多相似作品」）。 */
+  titleWithoutName?: string
+  /** 标题里引用的资源 id（官方用它给区块标题配小封面，如 Dua Lipa 那张）。 */
+  titleContentIds?: string[]
+  /** 区块标题旁的小方图（源自 titleContentIds 指向的资源封面）。 */
+  titleCoverUrl?: string
+  /** 组级 contents 接口路径；有它才能打开二级「查看全部」页。 */
+  contentsPath?: string
 }
 
 export interface AppleWebPage {
@@ -197,6 +212,11 @@ export interface AppleWebPage {
   fallbackReason?: string
   /** 当前失败是否需要用户重新登录 Apple Music。 */
   requiresLogin?: boolean
+  /**
+   * 失败原因是 Apple Music 订阅失效（服务端 40015「权限不足」）。
+   * 与 requiresLogin 区分：重新登录不会恢复，需要续订。
+   */
+  subscriptionExpired?: boolean
 }
 
 /** 兼容旧引用 */
@@ -270,8 +290,36 @@ function getStorefront(): string {
 
 const art = (attributes: any, size = 420): string => toHighResArtwork(attributes?.artwork?.url || '', size)
 
+/** 按目标显示框请求 mzstatic 图：保留源模板的裁切/格式后缀（sr/bb/cc），只换尺寸。
+ *  与 toHighResArtwork 的区别是**不强制方形**——hero 竖卡的编辑图本就是 3:4。 */
+const artworkAtSize = (url: string, width: number, height: number): string => {
+  if (!url) return ''
+  if (url.includes('{w}') || url.includes('{h}')) {
+    return url
+      .replace(/\{w\}/g, String(width))
+      .replace(/\{h\}/g, String(height))
+      .replace(/\{c\}/g, 'cc')
+      .replace(/\{f\}/g, 'jpg')
+  }
+  return url.replace(/(\d+)x(\d+)(bb|cc|sr)/i, `${width}x${height}$3`)
+}
+
 /** 编辑元素宽幅横幅（4320×1080 源，取 1600 宽） */
-const bannerArt = (attributes: any, size = 1600): string => toHighResArtwork(attributes?.artwork?.url || '', size)
+/** 横幅图按显示容器的宽高比请求：官方 radio banner 即 300x172sr（≈16:9 同比例）。
+ *  若按方图请求（1600x1600sr）再 object-cover 进 16:9 容器，会二次放大，
+ *  表现为与官网相比"图片缩放不一致、过度裁切"。 */
+const bannerArtAt = (attributes: any, width: number, height: number): string => {
+  const url = attributes?.artwork?.url || ''
+  if (!url) return ''
+  if (url.includes('{w}') || url.includes('{h}')) {
+    return url
+      .replace(/\{w\}/g, String(width))
+      .replace(/\{h\}/g, String(height))
+      .replace(/\{c\}/g, 'cc')
+      .replace(/\{f\}/g, 'jpg')
+  }
+  return url.replace(/(\d+)x(\d+)(bb|cc|sr)/, `${width}x${height}$3`)
+}
 
 function catalogIdOf(resource: any): string {
   const catalog = resource?.relationships?.catalog?.data?.[0]?.id
@@ -320,6 +368,19 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
   const displayName = safeName
   const motion = extractMotionArtwork(resource, 600, displayKind)
   const playParamsFields = sanitizeAppleRadioPlayParams(playParams)
+  // 方形封面资源（歌曲/专辑/MV）以普通 artwork 为准：官方网页的卡片网格也用普通
+  // 方图；editorialArtwork 的 superHeroTall/staticDetailTall 是英雄位设计合成图
+  // （封面在上、底部拉伸模糊带），拿来做方卡会呈现"封面被裁 + 底部模糊条"。
+  // 英雄位货架（官方同样用竖版合成图）与其余常缺普通图的类型维持编辑图优先。
+  const isHeroShelf = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
+  const preferPlainArtwork = !isHeroShelf && (type === 'songs' || type === 'albums' || type === 'music-videos')
+  // 官方 hero 竖卡的小字是「曲目艺人串」（如 kessoku band、羽沢珈琲店にようこそ♪…），
+  // 不是编辑简介。该字段是 playlists 的 artistNames（extend[playlists]=artistNames）。
+  const playlistArtistNames = type === 'playlists'
+    ? (Array.isArray(attributes.artistNames) ? attributes.artistNames.join('、') : displayString(attributes.artistNames))
+    : ''
+  // superHeroTall 带 imageTraits=['hasTitle'] 表示标题已烤进画面（官方也只在这种图上叠字）。
+  const heroTallTraits = attributes.editorialArtwork?.superHeroTall?.imageTraits
   return {
     id: String(resource.id || ''),
     playId: preferredId || catalogIdOf(resource),
@@ -331,7 +392,9 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
         : type === 'curators' ? (attributes.shortName || safeName || 'Apple Music')
           : attributes.radioShowName || displayString(notes?.short) || attributes.editorialNotes?.short,
     description: displayString(notes?.tagline) || displayString(notes?.short) || attributes.description?.short || attributes.description?.standard || attributes.editorialNotes?.short || attributes.editorialNotes?.standard,
-    artworkUrl: presentation.artworkUrl || art(attributes),
+    artworkUrl: preferPlainArtwork
+      ? (art(attributes) || presentation.artworkUrl)
+      : (presentation.artworkUrl || art(attributes)),
     motionArtworkUrl: motion.video,
     motionPosterUrl: motion.poster,
     heroArtworkUrl: extractHeroArtwork(resource, 1200, displayKind),
@@ -347,6 +410,8 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
     url: attributes.url,
     editorialLabel: displayString(notes?.name) || displayString(presentation.card?.title) || undefined,
     editorialTagline: displayString(notes?.tagline) || displayString(notes?.short) || undefined,
+    artistNames: playlistArtistNames || undefined,
+    artworkHasTitle: Array.isArray(heroTallTraits) && heroTallTraits.includes('hasTitle'),
     stationHash: playParams.stationHash,
     isLive: attributes.isLive,
     airTime: attributes.airTime ? { start: attributes.airTime.start, end: attributes.airTime.end } : undefined,
@@ -416,20 +481,39 @@ function extractEditorialPresentation(resource: any, displayKind?: string): { ca
       : []
   const card = cards.find((candidate: any) => candidate?.display?.kind === displayKind || candidate?.kind === displayKind) || cards[0]
   const notes = card?.plainEditorialNotes || attributes.plainEditorialNotes || attributes.editorialNotes
-  const artworkUrl = extractEditorialArtworkUrl(card?.editorialArtwork || attributes.editorialArtwork, displayKind, 600)
+  const isHeroShelf = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
+  const artworkUrl = extractEditorialArtworkUrl(
+    card?.editorialArtwork || attributes.editorialArtwork,
+    displayKind,
+    isHeroShelf ? HERO_SHELF_ART_WIDTH : 600,
+    isHeroShelf ? HERO_SHELF_ART_HEIGHT : undefined,
+  )
   return { card, notes, artworkUrl }
 }
 
-function extractEditorialArtworkUrl(editorialArtwork: any, displayKind?: string, size = 1200): string | undefined {
+/** hero 竖卡（MusicNotesHeroShelf）显示框实测 407×542 = 3:4；编辑图 superHeroTall 本身也是
+ *  3:4（1680×2240）。若按方图请求（600x600）会居中裁掉上下两端——官方卡片顶部那颗
+ *  Apple Music 字标与画面的构图都会被切掉，这正是"专属推荐歌单封面和官网不一样"的原因。 */
+const HERO_SHELF_ART_WIDTH = 600
+const HERO_SHELF_ART_HEIGHT = 800
+
+function extractEditorialArtworkUrl(editorialArtwork: any, displayKind?: string, size = 1200, height?: number): string | undefined {
   if (!editorialArtwork || typeof editorialArtwork !== 'object') return undefined
-  const preferred = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
+  const isHeroShelf = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
+  const preferred = isHeroShelf
     ? ['superHeroTall', 'subscriptionHero', 'staticDetailTall', 'superHeroWide', 'subscriptionCover', 'staticDetailSquare']
     : ['staticDetailSquare', 'subscriptionCover', 'staticDetailTall', 'superHeroWide', 'superHeroTall', 'subscriptionHero']
   const candidates = [editorialArtwork, ...preferred.map(key => editorialArtwork?.[key]), ...Object.values(editorialArtwork)]
   for (const candidate of candidates) {
     const url = typeof candidate === 'string' ? candidate : candidate?.url
     if (typeof url !== 'string' || !url) continue
-    const resolved = toHighResArtwork(url, size)
+    // 只有 3:4 的 superHeroTall 按竖版请求；staticDetailSquare 等方图仍按方形请求，
+    // 否则会把方图拉伸/裁切成竖版，反而失真。
+    const node = typeof candidate === 'string' ? null : candidate
+    const nodeAspect = node?.width && node?.height ? node.height / node.width : 0
+    const resolved = height && nodeAspect > 1.2
+      ? artworkAtSize(url, size, height)
+      : toHighResArtwork(url, size)
     if (/^https?:\/\//.test(resolved)) return resolved
   }
   return undefined
@@ -481,11 +565,8 @@ async function gemsRequest(
   })
   if (!result.ok) {
     forwardToMainLog(`[AppleWeb] 请求失败 status=${result.status} path=${path.split('?')[0]} error=${String(result.error || '').slice(0, 120)}`)
-    const message = result.status === 401 || result.status === 403
-      ? 'Apple Music 登录会话已过期'
-      : result.status === 0
-        ? '无法连接 Apple Music'
-        : `Apple Music 请求失败（HTTP ${result.status}）`
+    // 统一解读：订阅失效（40015）必须说清楚，否则会被上层误报成"推荐未返回"
+    const message = describeAppleApiFailure(result.status, result.data)
     lastGemsFailure = { status: result.status, message }
     return null
   }
@@ -625,7 +706,7 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
           item.badge = attributes.designBadge || undefined
           item.tag = attributes.designTag || undefined
           item.bannerUrl = attributes.artwork?.url
-            ? bannerArt(attributes)
+            ? bannerArtAt(attributes, 750, 469)
             : extractEditorialArtworkUrl(attributes.editorialArtwork, attributes.display?.kind, 1200)
           pendingCards.push(item)
         }
@@ -637,7 +718,7 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
         ? itemize(content, itemType)
         : null
       const bannerUrl = attributes.artwork?.url
-        ? bannerArt(attributes)
+        ? bannerArtAt(attributes, 1200, 688)
         : extractEditorialArtworkUrl(attributes.editorialArtwork, attributes.display?.kind, 1600)
       if (item || bannerUrl) {
         flushCards()
@@ -671,13 +752,21 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
         const roomReference = relations.room?.data?.[0]
         sections.push({
           id: `${kind === '327' ? 'tracks' : 'grid'}-${element.id || sections.length}`,
+          // 内容形态决定卡片规格。此前非 music 页一律硬编码 'grid'，于是广播页的
+          // 「新近内容」「艺人接管麦克风」这类电台货架拿不到 station-grid，
+          // 也就永远走不到按 displayStyle='expanded' 渲染的「97×97 + 右侧文字」两行横卡，
+          // 结果把官网的两行锁排渲染成了单行大方卡（用户实测对比反馈）。
+          // 现在按实际条目类型判断，music 页的原有特例保持不变。
           kind: pageName === 'music'
             ? (items.every(item => item.type === 'songs') ? 'song-grid'
               : items.every(item => item.type === 'rooms') ? 'explore-links'
                 : items.every(item => item.type === 'stations' || item.type === 'radio-shows') ? 'station-grid'
                   : items.some(item => item.type === 'music-videos' || item.type === 'posts') ? 'video-shelf'
                     : 'album-shelf')
-            : 'grid',
+            : (items.every(item => item.type === 'stations' || item.type === 'radio-shows') ? 'station-grid'
+              : items.every(item => item.type === 'songs') ? 'song-grid'
+                : items.some(item => item.type === 'music-videos' || item.type === 'posts') ? 'video-shelf'
+                  : 'grid'),
           displayKind: String(attributes.display?.kind || ''),
           title: displayString(attributes.name) || displayString(attributes.title) || '精选',
           items: items,
@@ -726,12 +815,18 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
       // 322 是 24 条风格链接行；实测官网在探索页不渲染它，故只解析不产出区块（避免与官网不一致）。
     } else if (kind === '385') {
       const shows: AppleWebItem[] = []
-      ;(relations.children?.data || []).forEach((show: any) => {
+      ;(relations.children?.data || []).forEach((childRef: any) => {
+        // 子元素在响应里是**未展开引用**（只有 {id,type}），完整属性在 resources 里。
+        // 必须经 resolveResource 展开，否则 show.attributes 恒为空、name 取不到 →
+        // 整个「艺人主持节目 / Apple Music 电台主持人」分区被静默丢弃（实测两者都不显示）。
+        // 对照 316/317/320/326 等分支都已展开，385 此前漏了这一步。
+        const show = resolveResource(childRef)
         const showAttrs = show?.attributes || {}
         const name = displayString(showAttrs.designTag) || displayString(showAttrs.name)
         if (!name) return
 
         const stationResource = (show?.relationships?.contents?.data || [])
+          .map((resource: any) => resolveResource(resource))
           .find((resource: any) => normalizeContentType(String(resource?.type || '')) === 'stations')
         const station = stationResource ? itemize(stationResource, 'stations') : null
         const rawUrl = typeof showAttrs.link?.url === 'string'
@@ -754,7 +849,7 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
           type: station || linkedStationId ? 'stations' : 'radio-shows',
           name,
           tag: displayString(showAttrs.designTag) || undefined,
-          bannerUrl: showAttrs.artwork?.url ? bannerArt(showAttrs) : station?.bannerUrl,
+          bannerUrl: showAttrs.artwork?.url ? bannerArtAt(showAttrs, 960, 540) : station?.bannerUrl,
           url: rawUrl || station?.url,
         })
       })
@@ -901,6 +996,11 @@ async function fetchHomeListenNow(): Promise<{ sections: AppleWebSection[]; hero
   const collectGroupItems = (group: any, displayKind?: string): AppleWebItem[] => {
     const collected: AppleWebItem[] = []
     const relations = group?.relationships || {}
+    // 内容引用 → 该条目在组里的推荐理由（官方卡片的小标签就是它）。
+    // 实测 专属精选推荐：{ id, type, meta: { reason: { stringForDisplay: '最新发行' } } }，
+    // 对应官网卡片上那行「最新发行 / 专属推荐 / …参与的作品」；其标题/简介里都没有这段文字，
+    // 只解析 notes 就永远拿不到 → 卡片缺小标签。
+    const reasonByRef = new Map<string, string>()
     const refs: any[] = []
     const seen = new Set<string>()
     const appendRefs = (value: unknown) => {
@@ -917,6 +1017,8 @@ async function fetchHomeListenNow(): Promise<{ sections: AppleWebSection[]; hero
       if (Array.isArray(obj.resources)) appendRefs(obj.resources)
       if (obj.id && obj.type) {
         const refKey = `${obj.type}:${obj.id}`
+        const reason = displayString(obj.meta?.reason) || displayString(obj.meta?.reason?.stringForDisplay)
+        if (reason && !reasonByRef.has(refKey)) reasonByRef.set(refKey, reason)
         if (!seen.has(refKey)) {
           seen.add(refKey)
           refs.push(obj)
@@ -965,17 +1067,41 @@ async function fetchHomeListenNow(): Promise<{ sections: AppleWebSection[]; hero
       const type = normalizeContentType(rawType) || normalizeContentType(String(resource?.type || ''))
       if (!type || !resource?.attributes) return
       const item = itemize(resource, type, undefined, displayKind)
-      if (item) collected.push(item)
+      if (!item) return
+      // 组内推荐理由优先当卡片小标签：官网此货架的标签就是 reason（如「最新发行」「专属推荐」），
+      // 而不是资源自带的编辑名（歌单的 notes.name 常与标题同文，被去重后标签整行消失）。
+      const reason = reasonByRef.get(`${rawType}:${String(ref?.id || '')}`)
+        || reasonByRef.get(`${String(resource?.type || '')}:${String(resource?.id || '')}`)
+      if (reason) item.editorialLabel = reason
+      collected.push(item)
     })
     return collected
   }
 
+  /** 标题引用的资源（官方给区块标题配的小方图，如「更多相似作品」旁的 Dua Lipa 封面）。 */
+  const titleCoverUrl = (contentIds: unknown): string | undefined => {
+    if (!Array.isArray(contentIds)) return undefined
+    for (const raw of contentIds) {
+      const id = String(raw || '')
+      if (!id) continue
+      for (const type of ['albums', 'playlists', 'stations', 'artists', 'songs', 'music-videos']) {
+        const resource: any = findResource(id, type)
+        if (resource?.attributes) {
+          const cover = art(resource.attributes) || extractEditorialArtworkUrl(resource.attributes.editorialArtwork, undefined, 200)
+          if (cover) return cover
+        }
+      }
+    }
+    return undefined
+  }
+
   groups.forEach((group: any, index: number) => {
-    const title = displayString(group?.attributes?.stringForDisplay) || displayString(group?.attributes?.title) || (index === 0 ? '专属推荐' : '为你推荐')
-    const displayKind = String(group?.attributes?.display?.kind || '')
+    const groupAttributes = group?.attributes || {}
+    const title = displayString(groupAttributes.stringForDisplay) || displayString(groupAttributes.title) || (index === 0 ? '专属推荐' : '为你推荐')
+    const displayKind = String(groupAttributes.display?.kind || '')
     const items = collectGroupItems(group, displayKind)
     if (items.length === 0) return
-    const groupKind = String(group?.attributes?.kind || '')
+    const groupKind = String(groupAttributes.kind || '')
     // 实测官网按 display.kind 决定卡片规格：MusicNotesHeroShelf / MusicSuperHeroShelf 是大卡
     // （如「专属精选推荐」「专属推荐歌单」「音乐回忆」），MusicCoverShelf 等是普通卡。
     const isHeroShelf = displayKind === 'MusicNotesHeroShelf' || displayKind === 'MusicSuperHeroShelf'
@@ -984,12 +1110,27 @@ async function fetchHomeListenNow(): Promise<{ sections: AppleWebSection[]; hero
       : groupKind === 'recently-played'
         ? 'row'
         : 'row'
+    const groupId = String(group?.id || '')
+    // 记录组 kind：下面的 extras 用它判断接口是否已给出「最近播放」，
+    // 避免再挂一个 RSS 版「最近播放」造成同页两个同名区块。
+    if (groupKind) groupKinds.add(groupKind)
     sections.push({
       id: `listen-now-${index}`,
       kind: sectionKind,
       title,
       displayKind,
       items: items.slice(0, 40),
+      // 官网此货架标题旁有 `>`（hasSeeAll=true → 打开组级 contents 二级页）。
+      hasSeeAll: Boolean(groupAttributes.hasSeeAll),
+      // 去掉资源名后的标题：官网标题栏显示的是「更多相似作品」，而不是「更多类似《…》的作品」。
+      titleWithoutName: displayString(groupAttributes.titleWithoutName) || undefined,
+      titleContentIds: Array.isArray(groupAttributes.title?.contentIds)
+        ? groupAttributes.title.contentIds.map((value: unknown) => String(value))
+        : undefined,
+      titleCoverUrl: titleCoverUrl(groupAttributes.title?.contentIds),
+      contentsPath: groupId
+        ? `/v1/me/recommendations/${encodeURIComponent(groupId)}/contents?l=zh-Hans-CN&name=listen-now&platform=web&timezone=%2B08%3A00`
+        : undefined,
     })
   })
   const extras = await (async () => {
@@ -1074,6 +1215,42 @@ async function fetchHomeFallback(storefront: string): Promise<AppleWebSection[]>
   return sections
 }
 
+/**
+ * 组级「查看全部」二级页（官网主页区块标题旁 `>` 进入，如「最近播放」）。
+ *
+ * 端点：`/v1/me/recommendations/{groupId}/contents`。
+ * 必须带 `platform=web`（缺了报 400 "A single platform must be supplied"）
+ * 与 `timezone`（缺了报 400 "Timezone offset must be supplied"）；
+ * 实测 `offset` 返回 404、`limit[results]` 被忽略，故一次取回全部。
+ * 响应里 data[] 只是引用，完整对象在 resources[type][id]，需先合并再解析。
+ */
+export async function fetchAppleRecommendationContents(contentsPath: string): Promise<AppleWebSection[]> {
+  if (!contentsPath) return []
+  const data = await gemsRequest(contentsPath, { mediaUserToken: true })
+  if (!data) return []
+  const resolveResource = createEditorialResourceResolver(data)
+  const refs: any[] = Array.isArray(data.data) ? data.data : []
+  const items: AppleWebItem[] = []
+  for (const ref of refs) {
+    const resource = resolveResource(ref)
+    const type = normalizeContentType(String(ref?.type || '')) || normalizeContentType(String(resource?.type || ''))
+    if (!type || !resource?.attributes) continue
+    const item = itemize(resource, type)
+    if (!item) continue
+    const reason = displayString(ref?.meta?.reason)
+    if (reason) item.editorialLabel = reason
+    items.push(item)
+  }
+  if (items.length === 0) return []
+  // 二级页按内容类型决定卡片规格（与 room 页同规则）；混合内容走通用货架。
+  return [{
+    id: 'recommendation-contents',
+    kind: sectionKindForItems(items),
+    title: '',
+    items,
+  }]
+}
+
 /** 主页入口：有 mediaUserToken 一律先打 listen-now（绝不走 RSS 拖挂），无 token 才 RSS 兜底 */
 export async function fetchAppleHomePage(storefront?: string): Promise<AppleWebPage> {
   const sf = storefront || getStorefront()
@@ -1086,7 +1263,19 @@ export async function fetchAppleHomePage(storefront?: string): Promise<AppleWebP
       return { sections: result.sections, hero: result.hero, personalized: true, sourceLabel: 'Apple Music · 主页' }
     }
     const fallbackSections = await fetchHomeFallback(sf)
-    const failure = result.failure || { status: 200, message: 'Apple Music 暂未返回可展示的个性化推荐' }
+    /**
+     * 失败原因优先级：
+     * 1) 接口明确报错 → 用 lastGemsFailure 里已解读好的可读文案（含订阅失效 40015）
+     * 2) 接口 200 但内容为空 —— 订阅到期时 Apple 正是这样返回（不报错、但没有个性化数据）。
+     *    此时若已知订阅失效（其它接口报过 40015），就把原因说成订阅，
+     *    而不是笼统的"推荐未返回"（那会把订阅问题说成服务问题，把人带偏）。
+     * 3) 其它情况回退到通用文案。
+     */
+    const subscriptionExpired = hasRecentAppleSubscriptionFailure()
+    const failure = result.failure
+      || (subscriptionExpired
+        ? { status: 200, message: 'Apple Music 订阅已失效，个性化推荐暂不可用' }
+        : { status: 200, message: 'Apple Music 暂未返回可展示的个性化推荐' })
     return {
       sections: fallbackSections,
       hero: null,
@@ -1094,6 +1283,7 @@ export async function fetchAppleHomePage(storefront?: string): Promise<AppleWebP
       sourceLabel: fallbackSections.length > 0 ? 'Apple Music · 公开推荐' : 'Apple Music · 暂无内容',
       fallbackReason: `${failure.message}，已显示公开内容`,
       requiresLogin: failure.status === 401 || failure.status === 403,
+      subscriptionExpired,
     }
   }
   forwardToMainLog('[AppleWeb] home: 无 mediaUserToken → RSS 兜底')
@@ -1783,6 +1973,79 @@ export async function addAppleStationToLibrary(stationId: string): Promise<boole
     timeoutMs: 10000,
   })
   return result.ok
+}
+
+// ─────────────────────────── 自动连播（官方 stations/continuous 协议） ───────────────────────────
+// 与官网/原生客户端的 ∞ 自动连播同款：用队列末尾歌曲作种子创建官方连续电台
+// （实测返回 ra.cp-<seedId>），再通过 next-tracks 持续取"类似音乐"补进队列。
+
+export interface AppleAutoplayStation {
+  id: string
+  name?: string
+}
+
+export async function createAppleAutoplayStation(seedSongIds: string[]): Promise<AppleAutoplayStation | null> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken || !credentials.mediaUserToken) return null
+  const seeds = seedSongIds.filter(id => /^\d+$/.test(String(id))).slice(-5)
+  if (seeds.length === 0) return null
+  const result = await appleApiRequest(
+    '/v1/me/stations/continuous?limit%5Bresults%3Atracks%5D=5',
+    {
+      method: 'POST',
+      developerToken: credentials.developerToken,
+      mediaUserToken: credentials.mediaUserToken,
+      body: { data: seeds.map(id => ({ id, type: 'songs' })) },
+      timeoutMs: 12000,
+    },
+  )
+  if (!result.ok) return null
+  const station = result.data?.results?.station || result.data?.station
+  if (!station?.id) return null
+  return { id: String(station.id), name: station.attributes?.name }
+}
+
+/**
+ * 从连续电台取下一批"类似音乐"（next-tracks 是游标式的，连调返回不同曲目）。
+ *
+ * `stationName`：曲目型电台（format=tracks）没有直播流，只能把曲目当普通队列播，
+ * 队列里的歌**不带 appleRadio**，于是迷你播放器/桌面歌词会把它当普通歌曲
+ * （显示「暂无歌词」、封面看起来没跟着电台走）。把电台名回填到 `album.name`，
+ * 并打上 `isRadioQueue`，让这些曲目在界面上仍归属该电台。
+ */
+export async function fetchAppleAutoplayTracks(
+  stationId: string,
+  limit = 5,
+  stationName?: string,
+): Promise<Song[]> {
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken || !credentials.mediaUserToken) return []
+  const result = await appleApiRequest(
+    `/v1/me/stations/next-tracks/${encodeURIComponent(stationId)}?limit=${limit}`,
+    {
+      method: 'POST',
+      developerToken: credentials.developerToken,
+      mediaUserToken: credentials.mediaUserToken,
+      timeoutMs: 12000,
+    },
+  )
+  if (!result.ok) return []
+  const tracks: any[] = Array.isArray(result.data?.data) ? result.data.data : []
+  const storefront = getStorefront()
+  return tracks
+    .filter(track => /^\d+$/.test(String(track?.id || '')))
+    .map(track => {
+      try {
+        const song = appleSongToSong(track, storefront)
+        // 电台名回填：迷你播放器无歌词时显示它（否则退化成「暂无歌词」）
+        if (stationName) song.album = { ...song.album, name: stationName }
+        song.isRadioQueue = true
+        return song
+      } catch {
+        return null
+      }
+    })
+    .filter((song): song is Song => Boolean(song))
 }
 
 // ─────────────────────────── 资料库写操作（歌曲/专辑/视频） ───────────────────────────

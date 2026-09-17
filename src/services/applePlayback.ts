@@ -353,6 +353,10 @@ export async function resolveAppleNativeStream(songId: string): Promise<AppleNat
   }
 
   const item = await fetchWebPlayback(songId, credentials.developerToken, credentials.mediaUserToken)
+  // 取流失败时 fetchWebPlayback 已写入精确原因（如 "webPlayback HTTP 404/403"）。
+  // 这里必须直接返回，否则会继续走到下面「无 CENC 清单」的文案，把真实原因盖掉，
+  // 用户会以为是自己环境/地区的问题而不是这次请求本身失败了。
+  if (item === null) return null
   const licenseAdamId = item && item.songId ? String(item.songId) : songId
   const hasKeys = Boolean(item && (item['hls-key-cert-url'] || item['hls-key-server-url'] || item['widevine-cert-url']))
 
@@ -438,6 +442,18 @@ export function sanitizeAppleRadioPlayParams(value: unknown): AppleRadioPlayPara
 }
 
 const APPLE_PLAY_ASSETS_URL = 'https://amp-api.music.apple.com/v1/play/assets'
+
+/** 曲目串流型电台的失败原因文案（供调用方判定「该走曲目队列而非 HLS」）。 */
+export const TRACK_RADIO_REASON = '该电台是曲目型电台（format=tracks），不提供直播流，需按曲目队列播放'
+
+/**
+ * 是否为「曲目串流型」电台（playParams.format === 'tracks'）。
+ * 这类电台没有直播流，曲目要从 POST /v1/me/stations/next-tracks/{id} 取。
+ */
+export function isAppleTrackRadioStation(playParams?: AppleRadioPlayParams): boolean {
+  const safe = sanitizeAppleRadioPlayParams(playParams)
+  return typeof safe.format === 'string' && safe.format.toLowerCase() === 'tracks'
+}
 
 async function runPlayAssetsRequest(
   query: string,
@@ -529,20 +545,48 @@ export async function resolveAppleRadioStream(
     return null
   }
 
-  const params: Record<string, string> = {
+  // 电台分两类，**走完全不同的端点**（真实登录态实测，storefront=cn）：
+  //
+  //   format="stream"（如「The K-Pop Special」）→ 直播/单向流
+  //       play/assets 返回 itsliveradio.apple.com 的 HLS 主清单 + Widevine keyServer
+  //   format="tracks"（如「风格电台」里的「K-Pop 电台」）→ 曲目型电台
+  //       play/assets **恒 404**（实测 A/B/C/D 四种参数组合全 404，与 stationHash、
+  //       streamingKind、format 是否覆写都无关）；其曲目来自
+  //       POST /v1/me/stations/next-tracks/{id} → 200，返回普通目录歌曲 id。
+  //
+  // 另外「曲目型」还有一个特征：/v1/me/stations/next-tracks/{stream型} 返回 0 首，
+  // 而 tracks 型返回 5 首——两者恰好互补，可据此区分而无需依赖 format 字段。
+  //
+  // 因此这里对曲目型电台直接返回 null 并给出可读原因：它不该走 HLS，调用方应改用
+  // fetchAppleAutoplayTracks 把曲目填进队列（见 App 的电台播放分支）。
+  const safePlayParams0 = sanitizeAppleRadioPlayParams(playParams)
+  const declaredFormat = typeof safePlayParams0.format === 'string' ? safePlayParams0.format : ''
+  if (declaredFormat === 'tracks') {
+    setNativeFailReason(TRACK_RADIO_REASON)
+    return null
+  }
+
+  // 走到这里只剩直播流（含 playParams 缺失 format 的兼容路径）。
+  const defaultParams: Record<string, string> = {
     format: 'stream',
     hasDrm: 'true',
     mediaType: '0',
     streamingKind: '1',
     keyFormat: 'web',
   }
-  const safePlayParams = sanitizeAppleRadioPlayParams(playParams)
+  const params: Record<string, string> = defaultParams
+  const safePlayParams = safePlayParams0
   for (const [key, value] of Object.entries(safePlayParams)) params[key] = String(value)
   if (!params.id) params.id = stationId
   if (!params.kind) params.kind = 'radioStation'
   const query = new URLSearchParams(params).toString()
 
   const data = await fetchPlayAssets(query, credentials.developerToken, credentials.mediaUserToken)
+  // fetchPlayAssets 失败时已经写入了**精确**原因（如 "play/assets HTTP 404"）并返回 null。
+  // 这里必须立刻返回：否则会继续走到下面那句泛化文案，把精确原因覆盖成
+  // 「订阅态异常 / 地区限制 / 电台不可用」——用户看到的"地区问题"就是这么来的，
+  // 而真实原因是 404（电台不存在于该 storefront / playParams 不对），与地区无关。
+  if (data === null) return null
   const assets: any[] = Array.isArray(data?.results?.assets) ? data.results.assets : []
   const candidates = assets.filter(asset => typeof (asset?.url || asset?.URL) === 'string')
   const asset = candidates.find(asset => {
@@ -562,29 +606,28 @@ export async function resolveAppleRadioStream(
     : 'unknown'
   lastNativeFailReason = ''
   const playAssetId = safePlayParams.id ? String(safePlayParams.id) : stationId
-  // 电台的 id 是 `ra.<数字>` 形式（playParams.id 与 stationId 都是），而 Apple 的 license
-  // 服务要数字 adamId：实测直接把 `ra.xxxx` 传进 license 请求会被拒（status=-1001,
-  // 日志 `adamId=ra.6804822499 live=true`）。这里取 ra. 之后的数字部分。
-  const numericAdamId = (value?: string): string => (
-    value && /^ra\.\d+$/i.test(value) ? value.replace(/^ra\./i, '') : ''
-  )
+  // MusicKit JS 的 WebPlaybackLicenseManager（官方 bundle 逆向，2026-09）：license body 的
+  // adamId = catalogId ?? "-1"，而电台条目的 catalogId 就是 playParams.id 全串（"ra.xxx"，
+  // 含前缀）。电台 license 的端点也不是 MZPlay 的 acquireWebPlaybackLicense，而是
+  // play/assets 返回的 keyServerUrl（linear.tv.apple.com/v1/radio/streaming-key-delivery）。
+  // 端点发错或把 "ra.xxx" 剥成纯数字都会被 Apple 拒绝（HTTP 200 + {"status":-1001}）。
   const licenseAdamId = String(
     asset?.adamId
     || asset?.songId
     || asset?.contentId
-    || numericAdamId(playAssetId)
-    || numericAdamId(stationId)
     || playAssetId
+    || stationId
   )
+  const radioKeyServerUrl = typeof (asset?.keyServerUrl || asset?.['hls-key-server-url']) === 'string'
+    ? String(asset.keyServerUrl || asset['hls-key-server-url']) : undefined
   forwardToMainLog(
-    `[ApplePlayback] 电台 license adamId 取值: asset.adamId=${asset?.adamId ?? '-'} songId=${asset?.songId ?? '-'} contentId=${asset?.contentId ?? '-'} playParams.id=${safePlayParams.id ?? '-'} station=${stationId} → ${licenseAdamId}`,
+    `[ApplePlayback] 电台 license 端点=${radioKeyServerUrl || '-'} adamId=${licenseAdamId}`,
   )
-  forwardToMainLog(`[ApplePlayback] 电台 HLS 就绪: timeline=${timeline} keys=${asset?.keyServerUrl ? 'yes' : 'no'}`)
+  forwardToMainLog(`[ApplePlayback] 电台 HLS 就绪: timeline=${timeline} keys=${radioKeyServerUrl ? 'yes' : 'no'}`)
   return {
     url: resolved,
     masterUrl: resolved,
-    hlsKeyServerUrl: typeof (asset?.keyServerUrl || asset?.['hls-key-server-url']) === 'string'
-      ? String(asset.keyServerUrl || asset['hls-key-server-url']) : undefined,
+    hlsKeyServerUrl: radioKeyServerUrl,
     widevineCertUrl: typeof (asset?.widevineKeyCertificateUrl || asset?.['widevine-cert-url']) === 'string'
       ? String(asset.widevineKeyCertificateUrl || asset['widevine-cert-url']) : undefined,
     licenseAdamId,
@@ -697,9 +740,16 @@ export function createAppleHlsConfig(
     licenseXhrSetup: (xhr: XMLHttpRequest, url: string, keyContext: any, licenseChallenge: Uint8Array) => {
       recordAppleAcceptanceEvent('license-request')
       // 桌面端经本地 API 服务器代理（补 music.apple.com Origin/Referer；渲染进程直连时
-      // Apple license 服务做来源校验，返回 200 + 无 license 的错误 JSON）
+      // Apple license 服务做来源校验，返回 200 + 无 license 的错误 JSON）。
+      // Apple 的 license 端点按资产类型不同（普通歌曲=MZPlay 网页授权；电台=
+      // play/assets 下发的 linear.tv.apple.com key-delivery），代理按 ?target 转发。
       const desktop = typeof window !== 'undefined' && Boolean((window as any).electron)
-      const endpoint = desktop ? 'http://localhost:3001/api/apple/license' : (stream.hlsKeyServerUrl || url)
+      const appleLicenseEndpoint = stream.hlsKeyServerUrl && /^https:\/\/([A-Za-z0-9-]+\.)*apple\.com\//.test(stream.hlsKeyServerUrl)
+        ? stream.hlsKeyServerUrl
+        : ''
+      const endpoint = desktop
+        ? `http://localhost:3001/api/apple/license${appleLicenseEndpoint ? `?target=${encodeURIComponent(appleLicenseEndpoint)}` : ''}`
+        : (appleLicenseEndpoint || stream.hlsKeyServerUrl || url)
       if (!xhr.readyState) xhr.open('POST', endpoint, true)
       xhr.setRequestHeader('Content-Type', 'application/json')
       xhr.setRequestHeader('Accept', 'application/json')

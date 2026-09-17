@@ -391,13 +391,21 @@ function DesktopView({
   // 计算当前歌词
   const currentMiniLyric = useMemo(() => {
     const adjustedTime = currentTime + 0.5 + lyricOffset
-    for (let index = lyrics.length - 1; index >= 0; index--) {
+    for (let index = lyrics.length - 1; index >= 0; index -= 1) {
       if (lyrics[index].time <= adjustedTime) {
         return lyrics[index].text
       }
     }
     return ''
   }, [currentTime, lyricOffset, lyrics])
+
+  // 电台/播客：没有相邻曲目语义（隐藏切歌按钮），且无歌词时显示其名称
+  const miniSkipHidden = Boolean(currentSong?.appleRadio || currentSong?.isPodcast)
+  const miniLyricsPlaceholder = useMemo(() => {
+    if (currentSong?.appleRadio) return currentSong.appleRadio.showName?.trim() || currentSong.name || ''
+    if (currentSong?.isPodcast) return currentSong.album?.name?.trim() || currentSong.name || ''
+    return ''
+  }, [currentSong])
 
   useEffect(() => {
     const handleCustomizationChange = (event: Event) => {
@@ -2799,6 +2807,8 @@ function DesktopView({
             cardBlurAmount={cardBlurAmount}
             accentColor={desktopAccentColor}
             currentLyric={currentMiniLyric}
+            lyricsPlaceholder={miniLyricsPlaceholder}
+            hideSkipControls={miniSkipHidden}
             underOverlay={desktopOverlayOpen}
             onEnterPlayer={() => {
               console.log('🎵 [DesktopView] 迷你播放器被点击，切换到简约模式')

@@ -15,6 +15,7 @@ import type { MusicPlatform } from './platforms'
 import { searchAppleTracks, toHighResArtwork } from './appleMusic'
 import { AMP_API, getAppleCredentials, forwardToBackend } from './appleAuth'
 import { appleApiRequest } from './appleApiBridge'
+import { describeAppleApiFailure } from './appleApiErrors'
 
 export interface AppleCatalogSong {
   id: string
@@ -281,11 +282,8 @@ const appleMeFetch = async (path: string, strict = false): Promise<any | null> =
       forwardToBackend(`${path} HTTP ${result.status}`)
     }
     if (strict) {
-      const message = result.status === 401 || result.status === 403
-        ? 'Apple Music 登录或订阅状态无效，请重新登录'
-        : result.status === 0
-          ? 'Apple Music 网络连接失败，请重试'
-          : `Apple Music 请求失败（HTTP ${result.status}）`
+      // 统一解读：订阅失效（40015）与登录失效都走这里，给出可操作文案
+      const message = describeAppleApiFailure(result.status, result.data)
       throw Object.assign(new Error(message), { status: result.status })
     }
     return null
@@ -770,13 +768,8 @@ const appleCatalogFetch = async (path: string, timeoutMs = 8000, strict = false)
     forwardToBackend(`[AppleCatalog] 目录请求失败: ${path} HTTP ${result.status}${detail ? `：${detail}` : ''}`)
     if (result.status === 0) console.warn('[AppleCatalog] 目录请求网络错误:', path, result.error)
     if (strict) {
-      const message = result.status === 401 || result.status === 403
-        ? 'Apple Music 目录授权失败，请重新登录'
-        : result.status === 0
-          ? 'Apple Music 网络连接失败，请重试'
-          : detail
-            ? `Apple Music 目录请求失败（HTTP ${result.status}）：${detail}`
-            : `Apple Music 目录请求失败（HTTP ${result.status}）`
+      // 统一解读：订阅失效（40015）会说清是订阅问题，不再混进"授权失败/重新登录"
+      const message = describeAppleApiFailure(result.status, result.data)
       throw Object.assign(new Error(message), { status: result.status })
     }
     return null
@@ -1230,7 +1223,15 @@ export async function addAppleSongToLibrary(songId: string): Promise<boolean> {
   return appleMeMutate('/v1/me/library', 'POST', { data: [{ id: songId, type: 'songs' }] })
 }
 
-/** 设置 Apple Music 目录歌曲的“喜爱”状态；网页 favorites 为主，ratings 为兼容回退。 */
+/**
+ * 设置 Apple Music 目录歌曲的「喜爱」状态。
+ *
+ * 实测（真实登录态）：favorites 是**读写不对称**的端点——
+ *   POST   /v1/me/favorites?ids[songs]=X  → 202（生效，ratings 值变 1）
+ *   DELETE /v1/me/favorites?ids[songs]=X  → 204（生效，值变 0）
+ *   但 GET 同路径 → 404 "Path Not Found"（没有读取端点，读取见 getAppleFavoriteSongIds）。
+ * 所以写入仍以 favorites 为主，非 404/405 的失败才回退 ratings PUT/DELETE。
+ */
 export async function setAppleSongLoved(songId: string, loved: boolean): Promise<boolean> {
   if (!songId) return false
   const favoritePath = `/v1/me/favorites?ids[songs]=${encodeURIComponent(songId)}`
@@ -1243,25 +1244,51 @@ export async function setAppleSongLoved(songId: string, loved: boolean): Promise
     : appleMeMutate(ratingPath, 'DELETE')
 }
 
-/** 读取 favorites 歌曲集合；null 表示端点不可用，空数组表示成功但没有收藏。 */
+/**
+ * 「喜爱歌曲」在 Apple 服务端**不是** favorites 端点，而是一个普通资料库歌单。
+ *
+ * 实测（真实登录态，storefront=cn，/v1/me/* 走主进程 appleApi 代理）：
+ *   /v1/me/favorites            → 404 {"title":"Path Not Found","code":"40401"}
+ *   /v1/me/favorites/songs      → 404 同上
+ *   /v1/me/favorites?ids[songs] → 404 同上
+ *   /v1/me/ratings/songs?ids=…  → 200（存在，但只接受显式 ids，不是浏览型接口）
+ *   /v1/me/library/playlists    → 200，其中 id=p.xxx 且 name=「喜爱歌曲」
+ *   /v1/me/library/playlists/{p.xxx}/tracks → 200 返回曲目
+ * 同一时刻同一凭据下只有 favorites 系列是 404，故与账号/订阅/地区无关——该路径不存在。
+ * 官网侧栏的「喜爱歌曲」也正是这个资料库歌单。
+ *
+ * 因此这里改为：在资料库歌单里按名称找「喜爱歌曲」，再走既有的资料库歌单曲目接口读取。
+ * 找不到时返回 null（表示不可用），与旧签名一致，调用方无需改动。
+ */
+const APPLE_FAVORITES_PLAYLIST_NAMES = ['喜爱歌曲', 'Loved Songs', 'Love', 'Favorites', '喜欢的歌曲']
+
+async function findAppleFavoritesPlaylistId(): Promise<string | null> {
+  try {
+    const playlists = await getAppleLibraryPlaylists(200)
+    // 优先精确名匹配（本地化名或英文名）
+    for (const name of APPLE_FAVORITES_PLAYLIST_NAMES) {
+      const hit = playlists.find(playlist => playlist.name === name)
+      if (hit) return String(hit.id)
+    }
+    // 兜底：名称里含「喜爱 / Loved / Favorite」的收藏类歌单
+    const loose = playlists.find(playlist => /喜爱|loved|favorite/i.test(playlist.name || ''))
+    return loose ? String(loose.id) : null
+  } catch {
+    return null
+  }
+}
+
+/** 读取「喜爱歌曲」的目录曲目 id；null 表示不可用，空数组表示成功但没有收藏。 */
 export async function getAppleFavoriteSongIds(limit = 5000): Promise<string[] | null> {
   const target = Math.max(1, limit)
-  const ids = new Set<string>()
-  const seenPages = new Set<string>()
-  let next: string | null = `/v1/me/favorites/songs?limit=${Math.min(100, target)}`
-  for (let page = 0; next && ids.size < target && page < 100; page += 1) {
-    if (seenPages.has(next)) break
-    seenPages.add(next)
-    const data = await appleMeFetch(next)
-    if (!data) return null
-    for (const item of Array.isArray(data.data) ? data.data : []) {
-      const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
-      if (id) ids.add(String(id))
-      if (ids.size >= target) break
-    }
-    next = toAppleApiPath(data.next)
-  }
-  return [...ids]
+  const playlistId = await findAppleFavoritesPlaylistId()
+  if (!playlistId) return null
+  const tracks = await getApplePlaylistTracks(playlistId, target)
+  if (tracks.length === 0) return []
+  const ids = tracks
+    .map(track => String(track.catalogId || '').trim())
+    .filter(id => /^\d+$/.test(id))
+  return [...new Set(ids)]
 }
 
 /** 读取 favorites 对应的完整目录歌曲，保持 favorites 返回顺序。 */
@@ -1294,11 +1321,11 @@ export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleC
   return ids.map(id => songsById.get(id)).filter((song): song is AppleCatalogSong => Boolean(song?.name))
 }
 
-/** 批量读取 Apple Music favorites；旧服务不支持状态接口时回退 ratings。
- *  实测部分账号/商店该端点直接 404，此时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
+/** 批量读取 Apple Music「喜爱」状态（ratings value===1）。
+ *  说明：favorites 系列路径（/v1/me/favorites[/songs]）实测恒为 404 "Path Not Found"，
+ *  与账号/地区/订阅无关，故不再尝试；ratings 是唯一可用来源。
+ *  ratings 也不可用时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
 let favoritesEndpointsUnavailable = false
-/** favorites 端点在本账号/商店不存在（404/405）：后续批次直接走 ratings，不再每次白跑一次失败请求。 */
-let favoritesEndpointMissing = false
 
 export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
   const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
@@ -1306,24 +1333,13 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
   const loved = new Set<string>()
   for (let index = 0; index < ids.length; index += 100) {
     const batch = ids.slice(index, index + 100)
-    if (!favoritesEndpointMissing) {
-      const favoriteData = await appleMeFetch(`/v1/me/favorites?ids[songs]=${encodeURIComponent(batch.join(','))}`)
-      const favoriteItems = Array.isArray(favoriteData?.data) ? favoriteData.data : null
-      if (favoriteItems) {
-        for (const item of favoriteItems) {
-          const id = item?.relationships?.resource?.data?.[0]?.id || item?.id
-          if (id) loved.add(String(id))
-        }
-        continue
-      }
-      // 端点不存在才记住；网络抖动/超时保持原样，下一次仍会尝试 favorites。
-      const favoriteStatus = getLastAppleMeFetchStatus()
-      if (favoriteStatus === 404 || favoriteStatus === 405) favoritesEndpointMissing = true
-    }
+    // 直接用 ratings：favorites 系列路径实测恒为 404（"Path Not Found"，同一凭据下
+    // ratings/records 均为 200），没有任何账号能走通，先试一次只是每批白跑一个失败请求
+    // 并往日志刷 404。ratings/songs 的 value===1 即「喜爱」。
     const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
     const ratingItems = Array.isArray(ratingData?.data) ? ratingData.data : null
     if (!ratingItems) {
-      // favorites 与 ratings 都不可用 → 本次会话不再重试。
+      // 连 ratings 都不可用 → 本次会话不再重试。
       favoritesEndpointsUnavailable = true
       return [...loved]
     }
@@ -1490,6 +1506,254 @@ export interface AppleSearchV1Result {
 }
 
 /**
+ * 官网搜索页的分区模型（music.apple.com/cn/search 实测顺序）：
+ * 最佳结果 → 艺人 → 专辑 → 歌曲 → 播放列表。
+ *
+ * 官网每区是**独立 shelf**（横向滚动、每区自己的「更多」），最佳结果是 3 列横卡网格。
+ * 这里保留原始资源形态（不塌缩成 Song/Album），因为各区的卡片样式差异很大：
+ * 艺人要圆卡、专辑/歌单要方卡、歌曲要行卡、最佳结果要「60×60 封面 + 播放按钮」横卡。
+ */
+export interface AppleSearchSectionItem {
+  id: string
+  type: 'songs' | 'albums' | 'artists' | 'playlists' | 'music-videos' | 'stations'
+  name: string
+  /** 副标题：歌曲/专辑=艺人名，歌单=策展人，艺人=「艺人」 */
+  subtitle?: string
+  artworkUrl?: string
+  /** 悬停播放用的目录 id（艺人没有） */
+  playId?: string
+  /** 歌曲时长（毫秒） */
+  durationMs?: number
+  trackCount?: number
+  /** 该条目是否已在资料库里（relate=library 回填） */
+  inLibrary?: boolean
+  /** 是否露骨内容 */
+  contentRating?: string
+  /** 站内跳转链接（艺人/专辑/歌单） */
+  url?: string
+}
+
+export interface AppleSearchSection {
+  /** 稳定 id（供 React key 与测试） */
+  id: 'top' | 'artists' | 'albums' | 'songs' | 'playlists' | 'music-videos'
+  title: string
+  items: AppleSearchSectionItem[]
+}
+
+export interface AppleSearchPageResult {
+  sections: AppleSearchSection[]
+  errorStatus?: number
+}
+
+const SEARCH_SECTION_TITLES: Record<AppleSearchSection['id'], string> = {
+  top: '最佳结果',
+  artists: '艺人',
+  albums: '专辑',
+  songs: '歌曲',
+  playlists: '播放列表',
+  'music-videos': '音乐视频',
+}
+
+const SEARCH_TYPE_TO_SECTION: Record<string, AppleSearchSection['id']> = {
+  artists: 'artists',
+  albums: 'albums',
+  songs: 'songs',
+  playlists: 'playlists',
+  'music-videos': 'music-videos',
+}
+
+/**
+ * 官网搜索页数据（含分区）。
+ *
+ * 与 searchAppleCatalogV1 的区别：
+ * - 带 `format[resources]=map`：响应里 `results[type].data` 只是 `{id,type}` 引用，
+ *   完整 attributes 在 `resources[type][id]`。不合并就拿不到 name/artwork
+ *   （searchAppleCatalogV1 直接读 `results[x].data[].attributes`，故那边只能拿到空字段）。
+ * - **每个类型单独请求，而不是一次带多个 types**：实测（collage，cn 商店）在同一个请求里
+ *   混多个 types 会静默丢类型——`types=songs,albums,artists,playlists,music-videos` 只回
+ *   songs/albums/artists（playlists / music-videos 直接消失），而单类型请求能完整返回
+ *   artists 21 / albums 21 / songs 21 / playlists 14 / music-videos 8，与官网逐区计数一致。
+ *   因此这里并行发 5 个单类型请求再合并。
+ * - 按官网顺序产出分区，并额外做「最佳结果」：官网最佳结果是**跨类型的混排**
+ *   （歌曲 + 专辑 + 艺人），取各区前几条交错，而不是单独一次请求。
+ */
+export async function searchAppleCatalogSections(
+  keywords: string,
+  storefront = 'cn',
+  limit = 21,
+): Promise<AppleSearchPageResult> {
+  const term = keywords.trim()
+  if (!term) return { sections: [] }
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken) return { sections: [], errorStatus: -1 }
+  const bounded = Math.min(50, Math.max(1, limit))
+  const searchOne = async (type: string): Promise<{ type: string; items: AppleSearchSectionItem[] }> => {
+    const url = `/v1/catalog/${encodeURIComponent(storefront)}/search?term=${encodeURIComponent(term)}`
+      + `&types=${type}`
+      + `&limit=${bounded}`
+      + '&l=zh-Hans-CN&platform=web'
+      + '&format[resources]=map'
+      + (type === 'songs' ? '&include[songs]=artists' : '')
+      + (type === 'albums' ? '&include[albums]=artists' : '')
+      + (type === 'music-videos' ? '&include[music-videos]=artists' : '')
+    const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 15000 })
+    if (!result.ok) return { type, items: [] }
+    // 引用 → 完整资源合并（attributes 在 resources 里，必须先合并）
+    const resources: Record<string, Record<string, any>> = {}
+    for (const [bucketType, bucket] of Object.entries(result.data?.resources || {})) {
+      if (bucket && typeof bucket === 'object' && !Array.isArray(bucket)) {
+        resources[bucketType] = bucket as Record<string, any>
+      }
+    }
+    const refs: any[] = result.data?.results?.[type]?.data || []
+    const items: AppleSearchSectionItem[] = []
+    for (const ref of refs) {
+      const full = resources[String(ref?.type || type)]?.[String(ref?.id || '')]
+      if (!full?.attributes) continue
+      const attributes = { ...full.attributes, ...(ref.attributes || {}) }
+      const section = SEARCH_TYPE_TO_SECTION[type]
+      if (!section) continue
+      const name = String(attributes.name || '').trim()
+      if (!name) continue
+      const id = String(full.id || ref.id || '')
+      items.push({
+        id,
+        type: section === 'music-videos' ? 'music-videos' : (type as AppleSearchSectionItem['type']),
+        name,
+        subtitle: type === 'artists'
+          ? '艺人'
+          : String(attributes.artistName || attributes.curatorName || attributes.albumName || '').trim() || undefined,
+        artworkUrl: attributes.artwork?.url ? toHighResArtwork(attributes.artwork.url) : undefined,
+        // 艺人不可「播放」，其余都能用目录 id 直接播
+        playId: type === 'artists' ? undefined : id,
+        durationMs: attributes.durationInMillis || undefined,
+        trackCount: attributes.trackCount ?? attributes.playlistTrackCount ?? undefined,
+        contentRating: attributes.contentRating,
+        // 音乐视频时长在 attributes 里也是 durationInMillis，封面用 artwork
+        url: attributes.url,
+      })
+    }
+    return { type, items }
+  }
+
+  const settled = await Promise.all(
+    (['artists', 'albums', 'songs', 'playlists', 'music-videos'] as const).map(type => searchOne(type)),
+  )
+  const bySection = new Map<AppleSearchSection['id'], AppleSearchSectionItem[]>()
+  for (const { type, items } of settled) {
+    const section = SEARCH_TYPE_TO_SECTION[type]
+    if (section && items.length > 0) bySection.set(section, items)
+  }
+
+  // 最佳结果：官网是跨类型混排（歌曲/专辑/艺人交错），取各区前几条并按官网观感排序。
+  const topItems: AppleSearchSectionItem[] = []
+  const songsTop = bySection.get('songs') || []
+  const albumsTop = bySection.get('albums') || []
+  const artistsTop = bySection.get('artists') || []
+  // 官网实测最佳结果顺序：歌曲、专辑、艺人、专辑…（前 6 条最常见是 3 歌 + 2 专辑 + 1 艺人）
+  const mixed = [...songsTop.slice(0, 2), ...albumsTop.slice(0, 2), ...artistsTop.slice(0, 1), ...songsTop.slice(2, 4)]
+  for (const item of mixed) {
+    if (topItems.length >= 6) break
+    if (!topItems.some(existing => existing.id === item.id && existing.type === item.type)) topItems.push(item)
+  }
+
+  const order: Array<AppleSearchSection['id']> = ['top', 'artists', 'albums', 'songs', 'playlists', 'music-videos']
+  const sections: AppleSearchSection[] = []
+  for (const id of order) {
+    const items = id === 'top' ? topItems : (bySection.get(id) || [])
+    if (items.length === 0) continue
+    sections.push({ id, title: SEARCH_SECTION_TITLES[id], items })
+  }
+  return { sections }
+}
+
+/**
+ * 「在资料库中搜索」（官网搜索页右上角第二档范围）。
+ *
+ * 实测 `/v1/me/library/search` 虽返回 200，但 `results` 恒为空对象——
+ * 官网自己的资料库范围在无命中时也显示「没有搜索结果」（已在调试浏览器中确认），
+ * 所以这里改为**拉取资料库再本地过滤**：这样用户搜自己收藏的内容能真正命中，
+ * 与官网「搜资料库」的语义一致且更有用。
+ */
+export async function searchAppleLibrarySections(
+  keywords: string,
+  limit = 40,
+): Promise<AppleSearchPageResult> {
+  const term = keywords.trim().toLocaleLowerCase()
+  if (!term) return { sections: [] }
+  const credentials = getAppleCredentials()
+  if (!credentials.developerToken || !credentials.mediaUserToken) return { sections: [], errorStatus: -1 }
+  const match = (value?: string) => Boolean(value && value.toLocaleLowerCase().includes(term))
+  const [songs, albums, artists, playlists] = await Promise.all([
+    getAppleLibrarySongs(400).catch(() => []),
+    getAppleLibraryAlbums(300).catch(() => []),
+    getAppleLibraryArtists(300).catch(() => []),
+    getAppleLibraryPlaylists(200).catch(() => []),
+  ])
+
+  const sections: AppleSearchSection[] = []
+  const artistItems: AppleSearchSectionItem[] = artists
+    .filter(entry => match(entry.name))
+    .slice(0, limit)
+    .map(entry => ({
+      id: entry.catalogId || entry.id,
+      type: 'artists' as const,
+      name: entry.name,
+      subtitle: '艺人',
+      artworkUrl: entry.artworkUrl,
+    }))
+  const albumItems: AppleSearchSectionItem[] = albums
+    .filter(entry => match(entry.name) || match(entry.artistName))
+    .slice(0, limit)
+    .map(entry => ({
+      id: entry.catalogId || entry.id,
+      type: 'albums' as const,
+      name: entry.name,
+      subtitle: entry.artistName,
+      artworkUrl: entry.artworkUrl,
+      playId: entry.catalogId || entry.id,
+      trackCount: entry.trackCount,
+    }))
+  const songItems: AppleSearchSectionItem[] = songs
+    .filter(entry => match(entry.name) || match(entry.artistName) || match(entry.albumName))
+    .slice(0, limit)
+    .map(entry => ({
+      id: entry.catalogId || entry.id,
+      type: 'songs' as const,
+      name: entry.name,
+      subtitle: entry.artistName,
+      artworkUrl: entry.artworkUrl,
+      playId: entry.catalogId || entry.id,
+      durationMs: entry.durationMs,
+    }))
+  const playlistItems: AppleSearchSectionItem[] = playlists
+    .filter(entry => match(entry.name) || match(entry.curatorName))
+    .slice(0, limit)
+    .map(entry => ({
+      id: entry.catalogId || entry.id,
+      type: 'playlists' as const,
+      name: entry.name,
+      subtitle: entry.curatorName,
+      artworkUrl: entry.artworkUrl,
+      playId: entry.catalogId || entry.id,
+      trackCount: entry.trackCount,
+    }))
+
+  // 最佳结果：资料库范围同样取跨类型混排（与目录范围保持一致的观感）
+  const topItems: AppleSearchSectionItem[] = []
+  for (const item of [...songItems.slice(0, 3), ...albumItems.slice(0, 2), ...artistItems.slice(0, 1)]) {
+    if (topItems.length >= 6) break
+    if (!topItems.some(existing => existing.id === item.id && existing.type === item.type)) topItems.push(item)
+  }
+  if (topItems.length > 0) sections.push({ id: 'top', title: SEARCH_SECTION_TITLES.top, items: topItems })
+  if (artistItems.length > 0) sections.push({ id: 'artists', title: SEARCH_SECTION_TITLES.artists, items: artistItems })
+  if (albumItems.length > 0) sections.push({ id: 'albums', title: SEARCH_SECTION_TITLES.albums, items: albumItems })
+  if (songItems.length > 0) sections.push({ id: 'songs', title: SEARCH_SECTION_TITLES.songs, items: songItems })
+  if (playlistItems.length > 0) sections.push({ id: 'playlists', title: SEARCH_SECTION_TITLES.playlists, items: playlistItems })
+  return { sections }
+}
+
+/**
  * amp-api 目录搜索（music.apple.com 搜索框同款接口）：
  * GET /v1/catalog/{storefront}/search?term=...&types=songs,albums,artists,playlists
  * 需 Developer Token；未配置 token 时返回空（调用方回退 iTunes Search）。
@@ -1558,23 +1822,79 @@ export async function searchAppleCatalogV1(
 }
 
 /**
- * amp-api 搜索建议（web 播放器输入联想同款）：
- * GET /v1/catalog/{storefront}/search/suggestions?term=...&types=...
- * 返回建议词列表；未配置 token 时返回空。
+ * amp-api 搜索联想（music.apple.com 搜索框同款）。
+ *
+ * 请求形状来自官网实测抓包（amp-api-edge /v1/catalog/{sf}/search/suggestions）：
+ * `kinds=terms,topResults` + `limit[results:terms]` / `limit[results:topResults]`。
+ * **`kinds` 是必填**：缺了会直接 400（"One or more kinds must be specified"），
+ * 此前只发 types=… 导致联想接口恒失败、联想词永远为空。
+ *
+ * 响应是 `results.suggestions[]`，每项按 kind 分两类：
+ * - `terms`：纯搜索词（attributes.terms 是另一种旧形态，官网当前不用）
+ * - `topResults`：可直接点开的歌曲/专辑等（content.attributes 带封面与艺人）
  */
-export async function getAppleSearchSuggestions(keywords: string, storefront = 'cn'): Promise<string[]> {
-  if (!keywords.trim()) return []
+export interface AppleSearchSuggestionItem {
+  kind: 'terms' | 'topResults'
+  /** terms：建议词；topResults：该资源的显示名 */
+  term: string
+  /** topResults：资源类型与 id（点击可直接打开/播放） */
+  type?: string
+  id?: string
+  /** topResults：副标题（官网显示「歌曲 · 孙燕姿」） */
+  subtitle?: string
+  artworkUrl?: string
+}
+
+export async function getAppleSearchSuggestionItems(
+  keywords: string,
+  storefront = 'cn',
+): Promise<AppleSearchSuggestionItem[]> {
+  const term = keywords.trim()
+  if (!term) return []
   const credentials = getAppleCredentials()
   if (!credentials.developerToken) return []
-  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search/suggestions?term=${encodeURIComponent(keywords.trim())}&types=songs,albums,artists,playlists`
+  const url = `/v1/catalog/${encodeURIComponent(storefront)}/search/suggestions`
+    + `?term=${encodeURIComponent(term)}`
+    + '&kinds=terms,topResults'
+    + '&types=songs,albums,artists,playlists'
+    + '&limit%5Bresults%3Aterms%5D=5&limit%5Bresults%3AtopResults%5D=10'
+    + '&platform=web&l=zh-Hans-CN'
   const result = await appleApiRequest(url, { developerToken: credentials.developerToken, timeoutMs: 8000 })
   if (!result.ok) return []
-  const item: any = Array.isArray(result.data?.data) ? result.data.data[0] : null
-  const terms: unknown = item?.attributes?.terms
-  if (Array.isArray(terms)) {
-    return terms.filter((term): term is string => typeof term === 'string' && term.trim().length > 0) as string[]
+  const raw = result.data?.results?.suggestions
+  if (!Array.isArray(raw)) return []
+  const items: AppleSearchSuggestionItem[] = []
+  for (const entry of raw) {
+    const kind = String(entry?.kind || '')
+    if (kind === 'terms') {
+      const text = String(entry?.displayTerm || entry?.searchTerm || '').trim()
+      if (text) items.push({ kind: 'terms', term: text })
+      continue
+    }
+    if (kind !== 'topResults') continue
+    const content = entry?.content
+    const attributes = content?.attributes || {}
+    const name = String(attributes.name || '').trim()
+    if (!name || !content?.id) continue
+    const type = String(content.type || '')
+    // 官网副标题形如「歌曲 · 孙燕姿」；专辑用 artistName，歌单/电台用 curatorName。
+    const owner = String(attributes.artistName || attributes.curatorName || attributes.albumArtistName || '').trim()
+    items.push({
+      kind: 'topResults',
+      term: name,
+      type,
+      id: String(content.id),
+      subtitle: owner || undefined,
+      artworkUrl: attributes.artwork?.url ? toHighResArtwork(attributes.artwork.url) : undefined,
+    })
   }
-  return []
+  return items
+}
+
+/** 兼容旧调用：只取建议词。 */
+export async function getAppleSearchSuggestions(keywords: string, storefront = 'cn'): Promise<string[]> {
+  const items = await getAppleSearchSuggestionItems(keywords, storefront)
+  return items.filter(item => item.kind === 'terms').map(item => item.term)
 }
 
 /** 目录歌单摘要（打开搜索到的 AM 歌单时展示头部） */

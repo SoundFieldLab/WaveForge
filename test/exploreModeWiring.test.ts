@@ -37,8 +37,10 @@ describe('Explore mode wiring regressions', () => {
     expect(component('../App.tsx')).toContain('const hasValidSongId = radioDescriptor || appleHlsStream')
     expect(source).toContain('<motion.div\n        whileHover={{ y: -3 }}')
     expect(source).toContain('aria-label={`播放${item.name}`}')
-    expect(source).toContain("aria-label={isSaved ? '从资料库移除' : '加入资料库'}")
-    expect(source).toContain('disabled={libraryMutations.has(`station:${item.playId}`)}')
+    // 电台卡不再带「加入资料库」按钮：实测官网电台卡没有该按钮（点击开详情抽屉，
+    // 收藏走抽屉内的入口），因此这里断言它确实已移除，而不是留着无用的收藏控件。
+    expect(source).not.toContain("aria-label={isSaved ? '从资料库移除' : '加入资料库'}")
+    expect(source).not.toContain('disabled={libraryMutations.has(`station:${item.playId}`)}')
     expect(service('appleWebService.ts')).toContain('fields[stations]=name,url,artwork,editorialArtwork,editorialVideo,editorialNotes,playParams,isLive,airTime')
     expect(source).not.toContain('<motion.button\n        type="button"\n        whileHover={{ y: -3 }}\n        data-tv-focus\n        aria-label={`播放${item.name}`}')
     expect(source).toContain("onClick={(event) => { event.stopPropagation(); openSongMenu(event, item, items) }}")
@@ -74,6 +76,23 @@ describe('Explore mode wiring regressions', () => {
     expect(modal).toContain('onClose={onClose}')
   })
 
+  // Apple 卡片与官网对齐的三处实测差异（视觉回归很容易再犯，故锁在源码接线层）：
+  //  ① 竖版卡比例：官网实测 407×542 = 3:4；原 aspect-[125/181](≈0.69) 比官网窄高 8.6%。
+  //  ② 宽卡比例：官网实测 540×310 ≈ 1.742；原 16/10(1.6) 偏矮、裁掉更多画面。
+  //  ③ 卡内小标签与 E 标必须真的被渲染（此前数据取到了却没人用）。
+  it('keeps Apple featured cards on the measured official aspect ratios', () => {
+    const panel = component('AppleExplorePanel.tsx')
+    // 去掉注释行再断言，避免把说明文字里的「原 125/181」当成仍在使用的类名
+    const code = panel.split('\n').filter(line => !line.trim().startsWith('*') && !line.trim().startsWith('/*') && !line.trim().startsWith('//')).join('\n')
+    expect(code).toContain("portrait ? 'aspect-[3/4]' : 'aspect-[540/310]'")
+    expect(code).not.toContain('aspect-[125/181]')
+    expect(code).not.toContain('aspect-[16/10]')
+    // 卡内小标签（官网「下一首」）与 E 标都要走归一后的值
+    expect(code).toContain('resolveAppleCardMeta')
+    expect(code).toContain('{cardLabel &&')
+    expect(code).toContain('{explicitBadge}')
+  })
+
   it('opens the player from Explore with an opaque first frame and waits for the MV frame', () => {
     const source = component('../App.tsx')
     const background = component('BilibiliMvBackground.tsx')
@@ -84,6 +103,21 @@ describe('Explore mode wiring regressions', () => {
     expect(source).toContain('onReadyChange={setMvBackgroundReady}')
     expect(background).toContain('onReadyChange?: (ready: boolean) => void')
     expect(background).toContain("setPaintedSlots(prev => prev[slot] ? prev : { ...prev, [slot]: true })")
+  })
+
+  // MV 背景层在首页/看歌盖住它时仍常驻挂载。这里锁死「被遮挡就交给同一个 hidden 通道」：
+  // 只有复用 hidden（暂停 + 保留缓冲 + 返回时按音频时钟硬同步），才能同时满足
+  // ① 不在不可见时白解码 1080P；② 看歌↔歌词页来回切无缝接上且 MV 实时对准。
+  // 若把 showHome 从这里去掉 → MV 会在首页背后持续解码（性能回归）；
+  // 若改成卸载而非 hidden → 切回来要重新搜索拉流（体验回归）。
+  it('treats a covering surface as the same temporary cover as watch mode for the MV layer', () => {
+    const source = component('../App.tsx').replace(/\r\n/g, '\n')
+    expect(source).toContain("hidden={lyricDisplayMode === 'video' || showHome}")
+    // 电台/播客统一走 mvBackgroundSuppressed（= isAppleRadioPlayback || podcastPlayback）：
+    // MV 图层挂载与此开关必须同源，否则会出现"歌词页透明等 MV、MV 却没挂载"的黑屏。
+    expect(source).toContain('const mvBackgroundSuppressed = isAppleRadioPlayback || podcastPlayback')
+    expect(source).toContain('enabled={mvBackgroundEnabled && !mvBackgroundSuppressed}')
+    expect(source).toContain('{currentSong && !mvBackgroundSuppressed && (')
   })
 
   it('keeps Apple radio retries scoped to the active station', () => {

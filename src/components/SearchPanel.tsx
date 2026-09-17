@@ -13,7 +13,7 @@ import ScrollToCurrentSong from './ScrollToCurrentSong'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import SongContextMenu from './SongContextMenu'
 import { getUserPlaylists } from '../services/playlistService'
-import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestions, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
+import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestionItems, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
 import { getAppleCredentials } from '../services/appleAuth'
 import { parseStoredArray } from '../utils/storage'
 
@@ -52,6 +52,17 @@ const SEARCH_HISTORY_KEY_KUGOU = 'waveforge_search_history_kugou'
 const SEARCH_HISTORY_KEY_SODA = 'waveforge_search_history_soda'
 const SEARCH_HISTORY_KEY_FUSED = 'waveforge_search_history_fused'
 const MAX_HISTORY = 5
+
+// Apple 联想 topResults 的类型中文名（官网副标题形如「歌曲 · 孙燕姿」）
+const APPLE_SUGGEST_TYPE_LABEL: Record<string, string> = {
+  songs: '歌曲',
+  albums: '专辑',
+  artists: '艺人',
+  playlists: '歌单',
+  stations: '电台',
+  'music-videos': '音乐视频',
+}
+
 // 搜索结果缓存上限：每次搜索缓存完整结果集（约 100 首歌对象），面板是常驻单例，
 // 不加上限会导致 Map 无限增长（内存泄漏）。超出上限时按 LRU 淘汰最旧的 cacheKey。
 const SEARCH_CACHE_MAX = 10
@@ -527,10 +538,20 @@ export default function SearchPanel({
           : platform === 'qq'
             ? await buildQqQuickSuggestions(keyword.trim())
             : platform === 'apple'
-              // Apple：amp-api search/suggestions（web 播放器同款联想，需 Developer Token）
-              ? (await getAppleSearchSuggestions(keyword.trim(), localStorage.getItem('appleStorefront') || 'cn'))
+              // Apple：amp-api search/suggestions（web 播放器同款联想，需 Developer Token）。
+              // 官网联想为「建议词 + 可点开的 topResults（带封面/艺人）」两类，这里一并保留。
+              ? (await getAppleSearchSuggestionItems(keyword.trim(), localStorage.getItem('appleStorefront') || 'cn'))
                   .slice(0, 8)
-                  .map(term => ({ keyword: term }))
+                  .map(item => ({
+                    keyword: item.term,
+                    type: 'song' as const,
+                    subtitle: item.kind === 'topResults'
+                      ? [APPLE_SUGGEST_TYPE_LABEL[item.type || ''] || '', item.subtitle].filter(Boolean).join(' · ')
+                      : undefined,
+                    artworkUrl: item.artworkUrl,
+                    appleType: item.type,
+                    appleId: item.id,
+                  }))
               : await searchSuggest(keyword.trim(), platform)
         if (!active) return
         console.log('📝 搜索建议结果:', result)
@@ -1337,28 +1358,39 @@ export default function SearchPanel({
                     border: playerTheme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.08)',
                   }}
                 >
-                  {suggestions.map((suggestion, index) => {
-                    // 暂时都显示为搜索图标，因为后端suggest接口不返回准确的类型
-                    const Icon = Search
-                    
-                    return (
-                      <div
-                        key={index}
-                        onMouseDown={(e) => {
-                          e.preventDefault() // 防止输入框失焦
-                          handleSuggestionClick(suggestion)
-                        }}
-                        className={`flex items-center px-4 py-3 cursor-pointer transition-colors border-b border-white/5 last:border-b-0 ${
-                          index === selectedIndex
-                            ? `bg-white/10 ${textPrimary}`
-                            : `hover:bg-white/5 ${textPrimary}/80`
-                        }`}
-                      >
-                        <Icon className={`w-4 h-4 mr-2 flex-shrink-0 ${textPrimary}/40`} />
-                        <span className={`${textPrimary} truncate`}>{suggestion.keyword}</span>
-                      </div>
-                    )
-                  })}
+                  {suggestions.map((suggestion, index) => (
+                    <div
+                      key={`${suggestion.keyword}-${index}`}
+                      onMouseDown={(e) => {
+                        e.preventDefault() // 防止输入框失焦
+                        handleSuggestionClick(suggestion)
+                      }}
+                      className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-colors border-b border-white/5 last:border-b-0 ${
+                        index === selectedIndex
+                          ? `bg-white/10 ${textPrimary}`
+                          : `hover:bg-white/5 ${textPrimary}/80`
+                      }`}
+                    >
+                      {/* 官网联想：建议词显示放大镜，topResults（歌曲/专辑等）显示封面并带「类型 · 艺人」副标题 */}
+                      {suggestion.artworkUrl ? (
+                        <CachedImage
+                          src={suggestion.artworkUrl}
+                          alt=""
+                          className="h-8 w-8 shrink-0 rounded"
+                          platform={platform === 'apple' ? 'apple' : undefined}
+                          role="compact"
+                        />
+                      ) : (
+                        <Search className={`w-4 h-4 ml-2 mr-1 flex-shrink-0 ${textPrimary}/40`} />
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span className={`block truncate ${textPrimary}`}>{suggestion.keyword}</span>
+                        {suggestion.subtitle && (
+                          <span className={`block truncate text-xs ${textPrimary}/45`}>{suggestion.subtitle}</span>
+                        )}
+                      </span>
+                    </div>
+                  ))}
                 </motion.div>
               )}
             </div>

@@ -273,7 +273,7 @@ export function HorizontalShelf({
           if (event.key === 'ArrowLeft') { event.preventDefault(); scrollPage(-1) }
           if (event.key === 'ArrowRight') { event.preventDefault(); scrollPage(1) }
         }}
-        className={`wf-no-scrollbar flex gap-4 overflow-x-auto overscroll-x-contain pt-2 pb-2 select-none ${isDragging ? 'cursor-grabbing' : 'cursor-grab'} ${viewportClassName}`}
+        className={`wf-no-scrollbar flex gap-4 overflow-x-auto overscroll-x-contain pt-2 pb-2 select-none ${isDragging ? 'cursor-grabbing' : ''} ${viewportClassName}`}
         style={{ touchAction: 'pan-y pinch-zoom', ...peekStyle, ...edgeMaskStyle }}
       >
         {Children.map(children, child => (

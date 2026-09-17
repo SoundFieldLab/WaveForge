@@ -757,6 +757,9 @@ const desktopPlayerState = {
   lyric: null, // { line, translation, words, lineStart }
   playing: false,
   live: false,
+  // 电台/播客：无「相邻曲目」语义 → 独立播放窗隐藏切歌按钮；无歌词时显示其名称
+  nonSkippable: false,
+  lyricsPlaceholder: '',
   spectrum: [0, 0, 0, 0, 0],
   accentColor: '',
   playlist: [],
@@ -1419,12 +1422,19 @@ ipcMain.on('desktop-player:state-update', (_event, partial) => {
       changed.playing = next
     }
   }
-  for (const key of ['hasTranslation', 'hasRomaji', 'live']) {
+  for (const key of ['hasTranslation', 'hasRomaji', 'live', 'nonSkippable']) {
     if (partial[key] === undefined) continue
     const next = partial[key] === true
     if (desktopPlayerState[key] !== next) {
       desktopPlayerState[key] = next
       changed[key] = next
+    }
+  }
+  if (partial.lyricsPlaceholder !== undefined) {
+    const next = String(partial.lyricsPlaceholder || '')
+    if (desktopPlayerState.lyricsPlaceholder !== next) {
+      desktopPlayerState.lyricsPlaceholder = next
+      changed.lyricsPlaceholder = next
     }
   }
   if (partial.accentColor !== undefined) {
@@ -1672,6 +1682,8 @@ function safeSendToWindow(targetWindow, channel, ...args) {
 // Media Session，防止同一动作重复触发）。
 function dispatchPlayerControl(action, payload) {
   if (desktopPlayerState.live === true && (action === 'prev' || action === 'next' || action === 'seek')) return
+  // 电台/播客：媒体键的切歌同样不派发（没有相邻曲目），但保留播放/暂停
+  if (desktopPlayerState.nonSkippable === true && (action === 'prev' || action === 'next')) return
   safeSendToWindow(mainWindow, 'global-media-key', action, payload)
 }
 
@@ -1749,21 +1761,21 @@ function updateThumbarButtons() {
   const icons = getThumbarIcons()
   if (icons.play.isEmpty() || icons.pause.isEmpty()) return
   const playing = desktopPlayerState.playing === true
+  const toggleButton = {
+    tooltip: playing ? '暂停' : '播放',
+    icon: playing ? icons.pause : icons.play,
+    click: () => dispatchPlayerControl('toggle'),
+  }
   const buttons = desktopPlayerState.live === true
-    ? [{
-        tooltip: playing ? '暂停直播' : '播放直播',
-        icon: playing ? icons.pause : icons.play,
-        click: () => dispatchPlayerControl('toggle'),
-      }]
-    : [
-        { tooltip: '上一首', icon: icons.prev, click: () => dispatchPlayerControl('prev') },
-        {
-          tooltip: playing ? '暂停' : '播放',
-          icon: playing ? icons.pause : icons.play,
-          click: () => dispatchPlayerControl('toggle'),
-        },
-        { tooltip: '下一首', icon: icons.next, click: () => dispatchPlayerControl('next') },
-      ]
+    ? [{ ...toggleButton, tooltip: playing ? '暂停直播' : '播放直播' }]
+    // 电台/播客（nonSkippable）没有相邻曲目：任务栏缩略图只留播放/暂停
+    : desktopPlayerState.nonSkippable === true
+      ? [toggleButton]
+      : [
+          { tooltip: '上一首', icon: icons.prev, click: () => dispatchPlayerControl('prev') },
+          toggleButton,
+          { tooltip: '下一首', icon: icons.next, click: () => dispatchPlayerControl('next') },
+        ]
   try {
     mainWindow.setThumbarButtons(buttons)
   } catch {

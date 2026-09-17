@@ -690,7 +690,7 @@ export interface ElectronAPI {
       partial: Partial<
         Pick<
           DesktopPlayerSnapshot,
-          'song' | 'lyric' | 'playing' | 'live' | 'spectrum' | 'accentColor' | 'playlist' | 'currentIndex' | 'progress' | 'duration' | 'hasTranslation' | 'hasRomaji' | 'volume' | 'muted' | 'page'
+          'song' | 'lyric' | 'playing' | 'live' | 'nonSkippable' | 'lyricsPlaceholder' | 'spectrum' | 'accentColor' | 'playlist' | 'currentIndex' | 'progress' | 'duration' | 'hasTranslation' | 'hasRomaji' | 'volume' | 'muted' | 'page'
         >
       >
     ) => void
@@ -913,6 +913,10 @@ export interface DesktopPlayerSnapshot {
   lyric: DesktopPlayerLyric | null
   playing: boolean
   live: boolean
+  /** 当前是 Apple 电台或网易云播客单集：无相邻曲目语义 → 独立播放窗隐藏切歌按钮 */
+  nonSkippable?: boolean
+  /** 无歌词时的替代文案（电台名 / 播客名） */
+  lyricsPlaceholder?: string
   spectrum: number[]
   enabled: boolean
   form: 'card' | 'bar'

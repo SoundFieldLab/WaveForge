@@ -24,12 +24,14 @@ const API_ENDPOINT = 'http://localhost:3001/api/apple/animated-cover'
 const CACHE_MAX = 50
 const cache = new Map<string, AppleDynamicCoverData | null>()
 
-/** 动态封面总开关（与 Apple Music 歌词设置相互独立，默认关闭） */
+/** 动态封面总开关（与 Apple Music 歌词设置相互独立，默认开启；设置里可关闭）。
+ *  行为规范：任何平台的歌曲，若 Apple Music 有动态封面则自动渐变叠加；
+ *  没有则保持平台原封面——永不替换封面 URL、不闪空白（服务端仅在有真动态 HLS 时返回 cover）。 */
 export function isAppleDynamicCoverEnabled(): boolean {
   try {
-    return localStorage.getItem('appleDynamicCoverEnabled') === 'true'
+    return localStorage.getItem('appleDynamicCoverEnabled') !== 'false'
   } catch {
-    return false
+    return true
   }
 }
 

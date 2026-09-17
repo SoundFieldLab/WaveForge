@@ -132,16 +132,98 @@ describe('Apple catalog mutations', () => {
     }
   })
 
+  /**
+   * 回归：联想接口**必须带 kinds**。
+   *
+   * 官网抓包实测 amp-api-edge `/v1/catalog/{sf}/search/suggestions` 用
+   * `kinds=terms,topResults`；此前只发 types=…，服务端直接 400
+   *（"One or more kinds must be specified"），联想词永远为空。
+   */
+  it('联想请求带 kinds=terms,topResults（缺了会 400，联想永远为空）', async () => {
+    apiRequest.mockResolvedValue({ ok: true, status: 200, data: { results: { suggestions: [] } } })
+    await catalog.getAppleSearchSuggestionItems('我', 'cn')
+    expect(apiRequest).toHaveBeenCalledTimes(1)
+    const [path] = apiRequest.mock.calls[0]
+    expect(path).toContain('kinds=terms,topResults')
+  })
+
+  it('解析联想响应：terms 取建议词、topResults 带类型/资源 id/封面', async () => {
+    apiRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: {
+        results: {
+          suggestions: [
+            { kind: 'terms', searchTerm: '我不难过', displayTerm: '我不难过' },
+            { kind: 'terms', searchTerm: '我好想你', displayTerm: '我好想你' },
+            {
+              kind: 'topResults',
+              content: {
+                id: '255921025',
+                type: 'songs',
+                attributes: {
+                  name: '我不难过',
+                  artistName: '孙燕姿',
+                  artwork: { url: 'https://is1-ssl.mzstatic.com/image/thumb/x/{w}x{h}bb.jpg' },
+                },
+              },
+            },
+          ],
+        },
+      },
+    })
+
+    const items = await catalog.getAppleSearchSuggestionItems('我', 'cn')
+    expect(items).toHaveLength(3)
+    expect(items[0]).toEqual({ kind: 'terms', term: '我不难过' })
+    expect(items[2]).toMatchObject({
+      kind: 'topResults',
+      term: '我不难过',
+      type: 'songs',
+      id: '255921025',
+      subtitle: '孙燕姿',
+    })
+    // 封面走 toHighResArtwork（见上方 mock，替换为 300x300）
+    expect(items[2].artworkUrl).toContain('300x300')
+  })
+
+  it('兼容旧调用只返回建议词（不含 topResults）', async () => {
+    apiRequest.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: {
+        results: {
+          suggestions: [
+            { kind: 'terms', displayTerm: '关键词一' },
+            { kind: 'topResults', content: { id: '1', type: 'songs', attributes: { name: '某歌' } } },
+          ],
+        },
+      },
+    })
+    await expect(catalog.getAppleSearchSuggestions('x', 'cn')).resolves.toEqual(['关键词一'])
+  })
+
+  // 「喜爱歌曲」读取已改为走资料库歌单（实测 favorites 读取端点恒 404，
+  // 详见 appleFavoriteSongsRead.test.ts 的说明）。此用例保留原有意图：
+  // 顺序保持、目录资源解析、storefront 归属正确。
   it('loads favorite songs as ordered catalog resources with storefront identity', async () => {
     apiRequest
+      // 1) 资料库歌单列表：找到「喜爱歌曲」
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        data: { data: [{ id: 'p.LOVED', type: 'library-playlists', attributes: { name: '喜爱歌曲' } }] },
+      })
+      // 2) 该歌单的曲目（顺序即喜爱顺序）
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
         data: { data: [
-          { id: 'fav.1', relationships: { resource: { data: [{ id: '102', type: 'songs' }] } } },
-          { id: 'fav.2', relationships: { resource: { data: [{ id: '101', type: 'songs' }] } } },
+          { id: 'i.1', type: 'library-songs', attributes: { name: 'Second' }, relationships: { catalog: { data: [{ id: '102', type: 'songs' }] } } },
+          { id: 'i.2', type: 'library-songs', attributes: { name: 'First' }, relationships: { catalog: { data: [{ id: '101', type: 'songs' }] } } },
         ] },
       })
+      // 3) 目录补全
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -155,7 +237,8 @@ describe('Apple catalog mutations', () => {
 
     expect(songs.map(song => song.id)).toEqual(['102', '101'])
     expect(songs.every(song => song.storefront === 'jp')).toBe(true)
-    expect(apiRequest.mock.calls[1][0]).toContain('/v1/catalog/jp/songs?ids=102%2C101')
+    const catalogCall = apiRequest.mock.calls.find(call => String(call[0]).includes('/v1/catalog/jp/songs?ids='))
+    expect(catalogCall?.[0]).toContain('/v1/catalog/jp/songs?ids=102%2C101')
   })
 
   it('preserves catalog artist and album relationships for library tracks', async () => {
@@ -311,23 +394,28 @@ describe('Apple catalog pagination', () => {
     await expect(catalog.getAppleFavoriteSongIds()).resolves.toBeNull()
   })
 
-  it('reads favorite songs across pages and deduplicates ids', async () => {
+  // 「喜爱歌曲」现走资料库歌单的 tracks 接口（该接口自身分页由 fetchAppleMePages 处理）。
+  // 此用例保留原有意图：跨批去重，且只回传数字目录 id。
+  it('reads favorite songs from the liked playlist and deduplicates ids', async () => {
     apiRequest
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        data: {
-          data: [{ id: '101' }, { id: '102' }],
-          next: '/v1/me/favorites/songs?offset=2',
-        },
+        data: { data: [{ id: 'p.LOVED', type: 'library-playlists', attributes: { name: '喜爱歌曲' } }] },
       })
       .mockResolvedValueOnce({
         ok: true,
         status: 200,
-        data: { data: [{ id: '102' }, { id: '103' }] },
+        data: { data: [
+          { id: 'i.1', attributes: { name: 'A' }, relationships: { catalog: { data: [{ id: '101', type: 'songs' }] } } },
+          { id: 'i.2', attributes: { name: 'B' }, relationships: { catalog: { data: [{ id: '102', type: 'songs' }] } } },
+          // 同曲重复 + 非数字 id（应被丢弃）
+          { id: 'i.3', attributes: { name: 'A2' }, relationships: { catalog: { data: [{ id: '102', type: 'songs' }] } } },
+          { id: 'i.4', attributes: { name: 'Local' }, relationships: { catalog: { data: [] } } },
+        ] },
       })
 
-    await expect(catalog.getAppleFavoriteSongIds()).resolves.toEqual(['101', '102', '103'])
+    await expect(catalog.getAppleFavoriteSongIds()).resolves.toEqual(['101', '102'])
   })
 })
 

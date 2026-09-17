@@ -25,6 +25,10 @@ import type { Song } from '../services/musicApi'
 import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 
+/**
+ * 搜索页的「无关键词」落地视图（类别浏览）。
+ * 作为 AppleMusicSearchPage 的 renderLanding 内容：官网 /cn/search 不带 term 时展示的就是这个网格。
+ */
 interface AppleSearchBrowseProps {
   playerTheme?: 'light' | 'dark'
   storefront?: string
@@ -36,7 +40,7 @@ interface AppleSearchBrowseProps {
   onOpenPlaylist?: (playlist: { id: string; name: string; coverImgUrl: string; trackCount: number; creator: string; platform: 'apple' }) => void
 }
 
-export default function AppleSearchBrowse({ playerTheme = 'dark', storefront, onSongSelect, playbackOrigin, onOpenItem, onOpenPlaylist }: AppleSearchBrowseProps) {
+export default function BrowseCategoriesLanding({ playerTheme = 'dark', storefront, onSongSelect, playbackOrigin, onOpenItem, onOpenPlaylist }: AppleSearchBrowseProps) {
   const [curators, setCurators] = useState<AppleWebItem[]>([])
   const [loading, setLoading] = useState(true)
   const [landingError, setLandingError] = useState('')

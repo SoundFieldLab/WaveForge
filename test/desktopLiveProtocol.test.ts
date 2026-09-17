@@ -24,6 +24,7 @@ describe('desktop live playback protocol', () => {
     expect(widget).toContain("if (state.live) return; barAction('prev')(e)")
     expect(widget).toContain("if (state.live) return; e.stopPropagation()")
     expect(desktopPlayer).toContain("state.live ? '正在直播'")
-    expect(desktopPlayer).toContain("!state.live ? <button className=\"dp-ctrl-btn\" aria-label=\"上一曲\"")
+    // 直播与电台/播客（nonSkippable）都隐藏切歌：断言两者都在判断里
+    expect(desktopPlayer).toContain('!state.live && !state.nonSkippable ? <button className="dp-ctrl-btn" aria-label="上一曲"')
   })
 })
