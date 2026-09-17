@@ -87,3 +87,9 @@ LyricsBlossom-re/
 LyricsBlossom-windows/
 逆向成果/
 automix相关论文/
+
+# 调试平台构建产物（可重建，不入库）
+debug-minimal/dist/
+
+# 本地临时探针脚本（.tmp-*.mjs 等，不入库）
+.tmp-*
