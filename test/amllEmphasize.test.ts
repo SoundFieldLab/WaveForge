@@ -106,10 +106,35 @@ describe('逐字光带', () => {
     // 光带位置随进度右移：相位 10% 时亮区止于 2%，相位 80% 时止于 72%
     expect(early).toContain('2.00%')
     expect(late).toContain('72.00%')
-    expect(early).toContain(`rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA})`)
     // 进度 0 整词暗档、进度 1 整词亮档
-    expect(bandMaskForProgress(0)).toContain('rgb(0 0 0 / 1) 0.00%')
-    expect(bandMaskForProgress(1)).toContain('100.00%')
+    expect(bandMaskForProgress(0)).toBe(`linear-gradient(to right, rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) 0%, rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) 100%)`)
+    expect(bandMaskForProgress(1)).toBe('linear-gradient(to right, rgb(0 0 0 / 1) 0%, rgb(0 0 0 / 1) 100%)')
+  })
+
+  /**
+   * 回归：进度为 0 时**不允许**出现任何亮档。
+   *
+   * 旧实现只写两个色标（`亮 start%, 暗 end%`），CSS 会把首个色标向左延伸，
+   * 于是进度 0 时渐变最左侧仍是满亮——表现为"还没到填充时间，词首那个字已经亮了一点"。
+   * 渐变必须写满四个色标才能让 0 进度整词恒为暗档。
+   */
+  it('进度为 0 时整词全暗（首字不提前点亮）', () => {
+    expect(bandMaskForProgress(0)).not.toContain('rgb(0 0 0 / 1)')
+  })
+
+  it('进度推进时亮区从 0 起、暗区收在 100% 之前（羽化只在前沿）', () => {
+    const mask = bandMaskForProgress(0.5)
+    expect(mask).toContain('rgb(0 0 0 / 1) 0%')
+    expect(mask).toContain('rgb(0 0 0 / 1) 42.00%')
+    expect(mask).toContain(`rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) 50.00%`)
+    expect(mask.trim().endsWith('100%)')).toBe(true)
+  })
+
+  it('进度极小（0.001）时亮区宽度也极小（首字不会明显提前亮）', () => {
+    const mask = bandMaskForProgress(0.001)
+    // 亮区止于 0.0008*100≈0.08% → 格式化为 0.08%，肉眼不可见
+    expect(mask).toContain('rgb(0 0 0 / 1) 0.00%')
+    expect(mask).toContain('rgb(0 0 0 / 0.4) 0.10%')
   })
 
   it('词区间按字符数累计：首词从 0 起、末词到 1（换行不影响阅读顺序）', () => {
@@ -131,5 +156,28 @@ describe('逐字光带', () => {
     expect(computeSungRatio(words, -100)).toBe(0)
     expect(computeSungRatio(words, 5000)).toBe(1)
     expect(computeSungRatio(words, 1500)).toBeCloseTo(0.75, 5)
+  })
+
+  /**
+   * 回归：空白词的权重必须与 computeWordRanges 一致（都按 0 计）。
+   * 若这里把空白词算作 1 个字符，整句进度会快于实际演唱，
+   * 表现为每句刚开头就有"已经唱了一点"的提前填充。
+   */
+  it('空白词不计权重（与词区间算法一致）', () => {
+    const withSpace = [
+      { word: 'ab', startTime: 0, duration: 1000 },
+      { word: '   ', startTime: 1000, duration: 100 },
+      { word: 'cd', startTime: 1100, duration: 1000 },
+    ]
+    // 只唱完第一个词（2 字 / 可见共 4 字）→ 0.5；空白词若算 1 字会变成约 0.4
+    expect(computeSungRatio(withSpace, 1000)).toBeCloseTo(0.5, 5)
+  })
+
+  it('零时长可见词不瞬间计满（等下一词推进）', () => {
+    const words = [
+      { word: 'ab', startTime: 0, duration: 0 },
+      { word: 'cd', startTime: 0, duration: 1000 },
+    ]
+    expect(computeSungRatio(words, 0)).toBe(0)
   })
 })

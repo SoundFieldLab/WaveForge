@@ -189,12 +189,24 @@ export const generateFadeGradient = (width: number): readonly [gradient: string,
  * 为什么必须逐词：CSS 的 mask 按元素的坐标轴计算，若把一条渐变铺在整行容器上，
  * 换行后的每一行都会各自出现"左亮右暗"，视觉上成了两条光带（用户实测反馈）。
  * 逐词各自带遮罩后，进度天然按阅读顺序推进（第一行唱完才轮到第二行）。
+ *
+ * 渐变必须写满四个色标（亮 0% → 亮 rampStart% → 暗 head% → 暗 100%）：
+ * 只写「亮 start%、暗 end%」两个色标时，CSS 会把首个色标向右**也**延伸（即 0~start 恒为亮档），
+ * 于是进度 0 的第一个词的左缘就已经是满亮——这就是"没到填充时间，首字却亮了一点点"的原因。
+ * 四个色标让进度 0 时整词恒为暗档、进度 1 时整词恒为亮档，羽化只出现在推进中的前沿。
  */
 export const bandMaskForProgress = (localProgress: number, fadePercent = 8): string => {
-  const position = Math.min(100, Math.max(0, localProgress * 100))
-  const start = Math.min(100, Math.max(0, position - fadePercent))
-  const end = Math.min(100, Math.max(0, position + fadePercent))
-  return `linear-gradient(to right, rgb(0 0 0 / ${AMLL_BRIGHT_MASK_ALPHA}) ${start.toFixed(2)}%, rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA}) ${end.toFixed(2)}%)`
+  const progress = Math.min(1, Math.max(0, localProgress))
+  const bright = `rgb(0 0 0 / ${AMLL_BRIGHT_MASK_ALPHA})`
+  const dark = `rgb(0 0 0 / ${AMLL_DARK_MASK_ALPHA})`
+  // 两端直接给出纯色档，避免端点仍带一段羽化（进度 0 不应有亮区、进度 1 不应有暗尾）
+  if (progress <= 0) return `linear-gradient(to right, ${dark} 0%, ${dark} 100%)`
+  if (progress >= 1) return `linear-gradient(to right, ${bright} 0%, ${bright} 100%)`
+  const head = progress * 100
+  // 羽化整段落在前沿**之后**（head-fade → head），保证已唱区始终是满亮、
+  // 未唱区始终是暗档，且 head=0 时亮区宽度为 0。
+  const rampStart = Math.max(0, head - fadePercent)
+  return `linear-gradient(to right, ${bright} 0%, ${bright} ${rampStart.toFixed(2)}%, ${dark} ${head.toFixed(2)}%, ${dark} 100%)`
 }
 
 /** 各词在整句中的字符区间（用于把整句进度换算成每个词的局部进度） */
@@ -214,7 +226,13 @@ export const computeWordRanges = (
   })
 }
 
-/** 按"字符数加权"统计整行已唱比例（0~1）：完全唱过的词计满，正在唱的词按时间比例 */
+/**
+ * 按"字符数加权"统计整行已唱比例（0~1）：完全唱过的词计满，正在唱的词按时间比例。
+ *
+ * 空白词的权重必须与 computeWordRanges 保持一致（都是 0）：若这里把空白词算作 1 个字符、
+ * 而词区间那边算 0，两条曲线就不同步——整句进度会略快于实际演唱，表现为每句刚开头
+ * 就有"已经唱了一点"的提前填充（用户实测反馈的正是这个观感）。
+ */
 export const computeSungRatio = (
   words: ReadonlyArray<{ word: string; startTime: number; duration: number }>,
   currentMs: number,
@@ -222,9 +240,14 @@ export const computeSungRatio = (
   let sung = 0
   let total = 0
   for (const word of words) {
-    const chars = Math.max(1, Array.from((word.word || '').trim()).length)
+    const text = (word.word || '').trim()
+    if (!text) continue
+    const chars = Math.max(1, Array.from(text).length)
     total += chars
-    const progress = clamp01((currentMs - word.startTime) / Math.max(1, word.duration))
+    // 时长为 0 的可见词（异常数据）不能瞬间计满：按未唱处理，等下一词推进。
+    const progress = word.duration > 0
+      ? clamp01((currentMs - word.startTime) / word.duration)
+      : 0
     sung += chars * progress
   }
   return total > 0 ? sung / total : 0

@@ -873,7 +873,11 @@ export default memo(function LyricsDisplay({
     const el = container?.querySelector(`[data-index="${index}"]`) as HTMLElement | null
     if (!container || !el) return
 
-    container.scrollTo({ top: getCenteredScrollTop(container, el), behavior })
+    // 用户要求减少动效时不做平滑滚动（尊重 prefers-reduced-motion）。
+    container.scrollTo({
+      top: getCenteredScrollTop(container, el),
+      behavior: behavior === 'smooth' && prefersReducedMotion ? 'auto' : behavior,
+    })
   }
 
   const scheduleScrollLineToCenter = (index: number, behavior: ScrollBehavior = 'smooth') => {
@@ -1223,6 +1227,10 @@ export default memo(function LyricsDisplay({
     }
   }, [
     currentIndex,
+    // 风格切换（摩登 → 柔和）时必须重跑：容器从「overflow-hidden + 弹簧位移」切回
+    // 原生滚动，滚动位置需要立刻对齐当前句，否则会停在顶部、
+    // 直到下一句激活才由 currentIndex 变化把它带下去（用户实测反馈）。
+    isModernScroll,
     isManualScrolling,
     effectiveLyricSize,
     romanEnabled,
@@ -1232,6 +1240,13 @@ export default memo(function LyricsDisplay({
     effectiveWordByWordEffectMode,
   ])
 
+  // 切回柔和风格时清掉弹簧残留位移：springY 是摩登专用的 transform，
+  // 若不清零会把原生滚动的歌词整块顶偏（表现为"没有滚到当前播放的歌词上"）。
+  useEffect(() => {
+    if (isModernScroll) return
+    springY.jump(0)
+  }, [isModernScroll, springY])
+
   useEffect(() => {
     if (isModernScroll || isManualScrolling || currentIndex < 0 || typeof ResizeObserver === 'undefined') return
 
@@ -1240,17 +1255,25 @@ export default memo(function LyricsDisplay({
     if (!container || !el) return
 
     let frame: number | null = null
+    let settleTimer: number | null = null
     const recenter = () => {
       if (frame !== null) cancelAnimationFrame(frame)
-      frame = requestAnimationFrame(() => scrollLineToCenter(currentIndex, 'auto'))
+      // 尺寸变化时行高会变，需要重新居中；但**必须用平滑滚动**：
+      // 这里若用 'auto' 会在 currentIndex 变化的同一帧执行，
+      // 比上面 effect 的 smooth 滚动更早落地，于是把过渡动画直接顶掉——
+      // 表现就是"柔和风格滚动没有任何动画"（用户实测反馈）。
+      frame = requestAnimationFrame(() => scrollLineToCenter(currentIndex, 'smooth'))
     }
     const observer = new ResizeObserver(recenter)
     observer.observe(container)
     observer.observe(el)
-    recenter()
+    // 布局稳定后再补一次：新行挂载瞬间高度未定，过早测量会把位置算偏；
+    // 延迟执行同样走 smooth，避免变成硬跳。
+    settleTimer = window.setTimeout(recenter, 260)
 
     return () => {
       if (frame !== null) cancelAnimationFrame(frame)
+      if (settleTimer !== null) window.clearTimeout(settleTimer)
       observer.disconnect()
     }
   }, [
@@ -2391,10 +2414,12 @@ export default memo(function LyricsDisplay({
             paddingBottom: '0',
           }}
         >
-        {/* 崭新模式：弹簧 transform 轨道（替代原生 scroll，零布局跳动） */}
+        {/* 崭新模式：弹簧 transform 轨道（替代原生 scroll，零布局跳动）。
+            柔和风格下不加任何 transform/will-change：容器走原生滚动，
+            残留的 translateY 或 will-change 会干扰滚动位置的测量。 */}
         <motion.div
           ref={springWrapRef}
-          style={{ y: springY, willChange: 'transform' }}
+          style={isModernScroll ? { y: springY, willChange: 'transform' } : undefined}
           className="w-full"
         >
         <div
@@ -2439,7 +2464,6 @@ export default memo(function LyricsDisplay({
           
           const lyricKey = `lyric-${globalIndex}-${lyric.time ?? 'notime'}`
           const crowdedCurrentLine = isCurrent && isCrowdedLyricLine(lyric.text, effectiveLyricSize)
-          const skiaY = lineTiming.upcomingProgress > 0 ? 5 * (1 - lineTiming.upcomingProgress) : 0
           const timingBlur = backgroundEffect === 'immersive'
             ? 0
             : isCurrent
@@ -2468,9 +2492,9 @@ export default memo(function LyricsDisplay({
             : isCurrent ? `${effectiveLyricSize}rem` : `${effectiveLyricSize * 0.63}rem`
           const lineFontWeight = isModernScroll ? 600 : (useLineMotionModel ? 500 : (isCurrent ? 700 : 400))
           const lineOpacity = useLineMotionModel ? appleLineMotion.opacity : opacityValue
-          // 摩登：行级 y 恒为 0——行切换的上下位移完全交给弹簧平移，
-          // 不再叠加 upcoming/played 的 ±2~3px 位移（用户反馈"正在播放→已播放完毕会上下动一下"）。
-          const lineY = isAmllLyricMotion ? 0 : skiaY
+          // 行级 y 恒为 0：行切换的上下位移交给滚动容器，行自身不再叠加
+          // upcoming/played 的 ±2~5px 位移（用户反馈"正在播放→已播放完毕会上下动一下"）。
+          const lineY = 0
           const lineScale = useLineMotionModel
             ? appleLineMotion.scale
             : isModernScroll ? (isCurrent ? 1 : distanceFromCurrent >= 2 ? 0.74 : 0.80) : undefined
@@ -2600,9 +2624,11 @@ export default memo(function LyricsDisplay({
                 initial={false}
                 animate={{
                   scale: useLineMotionModel ? 1 : (isCurrent ? 1.006 : 1),
-                  // 摩登/Apple 行视觉：行内不做 y 位移。原实现在"刚唱完"（releaseProgress>0）
-                  // 时给整行 -3px 上移，叠加行级 motion.y 就是用户看到的"唱完上下动一下"。
-                  y: useLineMotionModel ? 0 : (isCurrent ? 0 : lineTiming.releaseProgress > 0 ? -3 * lineTiming.releaseProgress : 0),
+                  // 行级 y 恒为 0：原实现在"刚唱完"（releaseProgress>0）时给整行 -3px 上移，
+                  // 0.72s 后再硬落回 0，就是用户看到的"唱完上下动一下"。
+                  // 该位移摩登风格早已移除（见 c8de553），柔和风格这里一并废弃——
+                  // 行切换的观感只由滚动容器负责。
+                  y: 0,
                 }}
                 transition={{
                   scale: isBlinking 
