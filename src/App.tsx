@@ -88,7 +88,8 @@ const loadOobeGuide = () => import('./components/oobe/OobeGuide')
 const LazyOobeGuide = lazy(loadOobeGuide)
 // ────────────────────────────────────────────────────────────────
 // OOBE 1（第一层引导：主题选择 / 隐私条款 / 免责声明）
-// 默认不自动启用（避免打扰首次使用）。仅在 设置 → 高级 → "打开 OOBE 引导" 卡片手动触发（forceOpen）。
+// 仅由 设置→高级 卡片手动触发（或首次启动 (!completedLocal && !fileFlagDone)）显示；
+// 软件启动不会自动弹出 OOBE。
 // 未来 AI 接力：OOBE 2 = 功能介绍引导，在 OobeGuide 的 welcome 步骤前插入步骤即可。
 // ────────────────────────────────────────────────────────────────
 const OOBE_ENABLED = false

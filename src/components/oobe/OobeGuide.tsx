@@ -30,28 +30,23 @@ type OobeStep = 'theme' | 'privacyIntro' | 'privacy' | 'disclaimerIntro' | 'disc
 
 interface OobeGuideProps {
   playerTheme?: 'light' | 'dark'
-  /** App 侧常量 OOBE_ENABLED：暂时未实装时传 false，未来置 true 启用首次自动弹出 */
+  /** 是否启用 OOBE（由 App 侧传入，正常为 false；true 时软件启动即显示） */
   enabled?: boolean
   /** 强制打开（设置里"重新查看引导"触发） */
   forceOpen?: boolean
   onComplete?: () => void
 }
 
-// ⚠⚠ 测试快捷入口（用户测试完成后删除或改为 false）：
-// 打开软件直接进入"用户须知与免责声明"页，跳过主题选择/隐私/引导动画步骤
-// 当前 false：从主题选择开始完整流程测试
-const OOBE_TEST_JUMP_TO_DISCLAIMER = false
+// 独立大字显示动画时长：稍微调快，但仍保证能看完完整句子
+// 10~11 字 → 约 2s 阅读 + 1.2s 思考 + 0.8s 渐入渐出 ≈ 4s
+const PRIVACY_INTRO_LINE_MS = 4000
+// 18~20 字 → 约 3.2s 阅读 + 1.2s 思考 + 0.8s 渐入渐出 ≈ 5.5s
+const DISCLAIMER_INTRO_LINE_MS = 5500
 
-// 每行时长：正常中文阅读约 4 字/秒（认真阅读），读完留 2 秒思考，再加渐入渐出
-// 10~11 字 → 约 2.6s 阅读 + 2s 思考 + 1.2s 渐入渐出 ≈ 5.8s
-const PRIVACY_INTRO_LINE_MS = 5800
-// 18~20 字 → 约 4.8s 阅读 + 2s 思考 + 1.2s 渐入渐出 ≈ 8s
-const DISCLAIMER_INTRO_LINE_MS = 8000
-
-// 每条免责声明的停留时长（秒）：长段 8s / 短段 5s
-const DISCLAIMER_HOLDS_S: number[] = [8, 8, 8, 8, 5, 5, 8, 5, 8, 8, 8, 5, 8, 8, 5]
-// 每条渐现动画时长
-const ITEM_FADE_MS = 2000
+// 每条免责声明的停留时长（秒）：长段 1.3s / 短段 0.8s（提速：原长 8s / 短 5s 偏慢）
+const DISCLAIMER_HOLDS_S: number[] = [1.3, 1.3, 1.3, 1.3, 0.8, 0.8, 1.3, 0.8, 1.3, 1.3, 1.3, 0.8, 1.3, 1.3, 0.8]
+// 每条渐现动画时长（缩短至 600ms，避免渐现拖慢整体节奏）
+const ITEM_FADE_MS = 600
 
 // 背景上浮气泡（大小 / 水平位置 / 延时 / 周期 / 透明度）
 const OOBE_BUBBLES: Array<{ size: number; left: string; delay: number; duration: number; opacity: number }> = [
@@ -76,7 +71,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   const privacyIntroLines = [t('privacyIntro1'), t('privacyIntro2')]
   const disclaimerIntroLines = [t('disclaimerIntro1'), t('disclaimerIntro2')]
   const disclaimerItems = Array.from({ length: 15 }, (_, index) => t(`disclaimerItem${index + 1}` as OobeStringKey))
-  const [step, setStep] = useState<OobeStep>(OOBE_TEST_JUMP_TO_DISCLAIMER ? 'disclaimer' : 'theme')
+  const [step, setStep] = useState<OobeStep>('theme')
   const [showFinal, setShowFinal] = useState(false)
   const [countdown, setCountdown] = useState(0)
   const [introIndex, setIntroIndex] = useState(0)
@@ -88,7 +83,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   })
   const listRef = useRef<HTMLDivElement>(null)
 
-  // 是否显示：forceOpen 优先；否则首次启动（enabled && 未完成）。
+  // 是否显示：forceOpen 优先；否则仅首次启动（!completedLocal && !fileFlagDone）才显示。
   // 完成判定 = localStorage 标记 **或** 程序目录 flag 文件（electronAPI.oobe.getFlag）
   // ——双重保险：localStorage 被清/损坏时，flag 文件仍能识别已完成，跳过引导。
   const [completedLocal] = useState(() => {
@@ -101,7 +96,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
       void bridge.oobe.getFlag().then((done: boolean) => setFileFlagDone(!!done)).catch(() => setFileFlagDone(false))
     }
   }, [])
-  const show = forceOpen || (enabled && !completedLocal && !fileFlagDone)
+  const show = forceOpen || enabled || (!completedLocal && !fileFlagDone)
 
   // 倒计时
   useEffect(() => {
@@ -113,11 +108,11 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   // 进入各步骤时重置倒计时 / 逐条揭示
   useEffect(() => {
     if (step === 'privacy') {
-      setCountdown(10)
+      setCountdown(3)
     } else if (step === 'disclaimer') {
       setCountdown(0)
       setRevealCount(0)
-      // 第一条快速出现（避免长时间空白），之后每条：渐现 → 停留（长 8s / 短 5s）→ 下一条
+      // 第一条快速出现（避免长时间空白），之后每条：渐现 → 停留（长 1.5s / 短 1s）→ 下一条
       const timers: number[] = []
       let elapsed = 400
       for (let i = 0; i < disclaimerItems.length; i++) {
@@ -131,10 +126,10 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step])
 
-  // 逐条显示完毕后启动 8s 倒计时
+  // 逐条显示完毕后启动 2s 倒计时（同意按钮可点击前的等待）
   useEffect(() => {
     if (step === 'disclaimer' && revealCount >= disclaimerItems.length && countdown <= 0) {
-      setCountdown(8)
+      setCountdown(2)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [revealCount, step])
@@ -535,7 +530,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
                         data-item={index}
                         initial={false}
                         animate={{ opacity: index < revealCount ? 1 : 0 }}
-                        transition={{ duration: 1.8, ease: 'easeInOut' }}
+                        transition={{ duration: ITEM_FADE_MS / 1000, ease: 'easeInOut' }}
                         className="flex items-start gap-3 text-[15px] leading-relaxed"
                       >
                         <span
@@ -583,7 +578,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
                       </button>
                     </div>
                     <button
-                      onClick={() => { setShowFinal(true); setCountdown(10) }}
+                      onClick={() => { setShowFinal(true) }}
                       disabled={!allRevealed || countdown > 0}
                       className={`px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
                         !allRevealed || countdown > 0 ? 'opacity-45 cursor-not-allowed' : 'hover:brightness-110 active:scale-[0.98]'
@@ -637,13 +632,10 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
                 </button>
                 <button
                   onClick={() => { setShowFinal(false); setStep('welcome') }}
-                  disabled={countdown > 0}
-                  className={`px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
-                    countdown > 0 ? 'opacity-45 cursor-not-allowed' : 'hover:brightness-110 active:scale-[0.98]'
-                  }`}
-                  style={{ backgroundColor: accentColor, boxShadow: countdown > 0 ? undefined : `0 8px 24px ${accentColor}33` }}
+                  className={`px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all hover:brightness-110 active:scale-[0.98]`}
+                  style={{ backgroundColor: accentColor, boxShadow: `0 8px 24px ${accentColor}33` }}
                 >
-                  {countdownLabel(t('confirmTpl'), countdown)}
+                  {countdownLabel(t('confirmTpl'), 0)}
                 </button>
               </div>
             </motion.div>
