@@ -6430,6 +6430,16 @@ function normalizeNeteaseExploreSong(input, fallback = {}) {
 
   if (!numericId || !(track.name || fallback.name)) return null
 
+  // 播客节目识别：这一类歌单（声音与播客 / 播客分类）里装的是节目，不是单曲。
+  // 前端据此把播放页切到「纯音乐」（播客没有歌词/MV，也不该显示 MV 入口），
+  // 并让迷你播放器把「暂无歌词」换成节目所属电台名、隐藏上一曲/下一曲。
+  // 不标记的话，这些路径进来的节目会被当成普通歌曲（此前正是这个缺口）。
+  const isPodcast = Boolean(
+    fallback.isPodcast
+    || input?.radio || input?.program || input?.djProgram
+    || track.radio,
+  )
+
   return {
     id: numericId,
     name: track.name || fallback.name || '未知歌曲',
@@ -6441,14 +6451,18 @@ function normalizeNeteaseExploreSong(input, fallback = {}) {
       : [{ name: fallback.artist || '未知歌手' }],
     album: {
       id: Number(album.id) || undefined,
-      name: album.name || fallback.album || '',
+      // 播客节目的「专辑名」用节目所属电台名填充：迷你播放器/桌面歌词在无歌词时
+      // 就显示它（比「暂无歌词」或单集标题更能说明这是哪个播客的内容）。
+      name: fallback.albumName || album.name || fallback.album || '',
       picUrl: album.picUrl || album.blurPicUrl || input?.picUrl || fallback.coverUrl || ''
     },
     duration: Number(track.dt || track.duration || 0),
     platform: 'netease',
     vip: Number(track.fee) === 1,
     fee: Number(track.fee) || 0,
-    noCopyright: Number(track.privilege?.st) < 0
+    noCopyright: Number(track.privilege?.st) < 0,
+    // 播客节目：播放页用于切「纯音乐 + 隐藏 MV」，迷你播放器用于显示电台名并隐藏切歌
+    isPodcast: isPodcast || undefined,
   }
 }
 
@@ -8386,7 +8400,11 @@ app.get('/api/explore/radio', async (req, res) => {
       const programs = radio.programs || []
       const songs = programs
         .map(program => normalizeNeteaseExploreSong(program.mainSong || program.mainTrack || program.song, {
-          coverUrl: program.coverUrl || program.blurCoverUrl || req.query.coverUrl || ''
+          coverUrl: program.coverUrl || program.blurCoverUrl || req.query.coverUrl || '',
+          // 该端点返回的就是播客节目列表：显式标记，让前端走播客播放形态
+          isPodcast: true,
+          // 节目名作为「专辑」显示，迷你播放器无歌词时用它当占位文案
+          albumName: program.radio?.name || radio?.radio?.name || '',
         }))
         .filter(Boolean)
       return res.json({
@@ -10886,6 +10904,83 @@ app.get('/api/netease/dj/catelist', async (req, res) => {
   }
 })
 
+// 网易云电台详情（有声书/电台二级页：名称、DJ、简介、节目数、标签）
+app.get('/api/netease/dj/detail', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ error: '请提供电台ID' })
+    if (!NeteaseAPI || !NeteaseAPI.dj_detail) return res.status(500).json({ error: 'API 未初始化' })
+    const result = await callNeteaseAPIWithRetry(NeteaseAPI.dj_detail, { rid: String(id) })
+    const body = result.body || result
+    const radio = body?.data || body?.djRadio || null
+    if (!radio) return res.status(502).json({ error: body?.msg || '电台详情获取失败', code: body?.code })
+    res.json({
+      radio: {
+        id: String(radio.id || id),
+        name: String(radio.name || ''),
+        desc: String(radio.desc || ''),
+        coverUrl: String(radio.picUrl || radio.blurPicUrl || '').replace(/^http:/, 'https:'),
+        programCount: Number(radio.programCount || 0),
+        subCount: Number(radio.subCount || 0),
+        shareCount: Number(radio.shareCount || 0),
+        category: String(radio.category || ''),
+        secondCategory: String(radio.secondCategory || ''),
+        tags: Array.isArray(radio.tags) ? radio.tags : [],
+        createTime: Number(radio.createTime || 0),
+        dj: radio.dj ? {
+          userId: String(radio.dj.userId || ''),
+          nickname: String(radio.dj.nickname || ''),
+          avatarUrl: String(radio.dj.avatarUrl || '').replace(/^http:/, 'https:'),
+          signature: String(radio.dj.signature || ''),
+        } : null,
+      },
+    })
+  } catch (error) {
+    console.error('[网易云电台详情] 获取失败:', error)
+    res.status(502).json({ error: error.message })
+  }
+})
+
+// 网易云播客节目详情（单集二级页：标题、简介、电台、时长、互动数）
+app.get('/api/netease/dj/program/detail', async (req, res) => {
+  try {
+    const { id } = req.query
+    if (!id) return res.status(400).json({ error: '请提供节目ID' })
+    if (!NeteaseAPI || !NeteaseAPI.dj_program_detail) return res.status(500).json({ error: 'API 未初始化' })
+    const result = await callNeteaseAPIWithRetry(NeteaseAPI.dj_program_detail, { id: String(id) })
+    const body = result.body || result
+    const program = body?.program || null
+    if (!program) return res.status(502).json({ error: body?.msg || '节目详情获取失败', code: body?.code })
+    const mainSong = program.mainSong || program.mainTrack || {}
+    res.json({
+      program: {
+        id: String(program.id || id),
+        name: String(program.name || mainSong.name || ''),
+        desc: String(program.description || ''),
+        coverUrl: String(program.coverUrl || program.blurCoverUrl || mainSong.album?.picUrl || '').replace(/^http:/, 'https:'),
+        duration: Number(program.duration || mainSong.dt || 0),
+        createTime: Number(program.createTime || 0),
+        listenerCount: Number(program.listenerCount || 0),
+        commentCount: Number(program.commentCount || 0) || undefined,
+        shareCount: Number(program.shareCount || 0),
+        likedCount: Number(program.likedCount || 0),
+        songId: mainSong.id ? Number(mainSong.id) : undefined,
+        serialNum: Number(program.serialNum || 0) || undefined,
+        radio: program.radio ? {
+          id: String(program.radio.id || ''),
+          name: String(program.radio.name || ''),
+          coverUrl: String(program.radio.picUrl || '').replace(/^http:/, 'https:'),
+          programCount: Number(program.radio.programCount || 0),
+        } : null,
+        dj: program.dj ? { userId: String(program.dj.userId || ''), nickname: String(program.dj.nickname || '') } : null,
+      },
+    })
+  } catch (error) {
+    console.error('[网易云节目详情] 获取失败:', error)
+    res.status(502).json({ error: error.message })
+  }
+})
+
 // 网易云电台热门
 app.get('/api/netease/dj/hot', async (req, res) => {
   try {
@@ -11573,6 +11668,22 @@ function readAppleWebCookieHeader() {
   }
 }
 app.post('/api/apple/license', async (req, res) => {
+  // Apple 的 license 端点按资产类型不同：普通歌曲走 MZPlay 网页授权；电台是
+  // play/assets 下发的 linear.tv.apple.com key-delivery（MusicKit JS 的
+  // WebPlaybackLicenseManager 同样按 keyServerUrl 原样 POST）。渲染端通过
+  // ?target= 传入完整端点，这里仅允许 https + *.apple.com，其余回落默认。
+  let targetUrl = APPLE_LICENSE_URL
+  try {
+    const requested = new URL(req.url, 'http://localhost').searchParams.get('target')
+    if (requested) {
+      const parsed = new URL(requested)
+      if (parsed.protocol === 'https:' && /(^|\.)apple\.com$/.test(parsed.hostname)) {
+        targetUrl = requested
+      } else {
+        console.warn(`[Apple License 代理] 拒绝非 Apple 目标: ${String(requested).slice(0, 160)}`)
+      }
+    }
+  } catch { /* 解析失败保持默认端点 */ }
   const headers = {
     Accept: 'application/json',
     'Content-Type': 'application/json',
@@ -11592,7 +11703,7 @@ app.post('/api/apple/license', async (req, res) => {
   try {
     const response = await axios({
       method: 'POST',
-      url: APPLE_LICENSE_URL,
+      url: targetUrl,
       timeout: 20000,
       headers,
       data: req.body || undefined,
@@ -11600,7 +11711,7 @@ app.post('/api/apple/license', async (req, res) => {
       validateStatus: () => true,
     })
     const text = String(response.data || '')
-    console.log(`[Apple License 代理] HTTP ${response.status} len=${text.length}${text.length < 200 ? ' body=' + text : ''}${cookieHeader ? ' cookie=yes' : ' cookie=NO'}`)
+    console.log(`[Apple License 代理] HTTP ${response.status} len=${text.length}${text.length < 200 ? ' body=' + text : ''}${cookieHeader ? ' cookie=yes' : ' cookie=NO'} target=${new URL(targetUrl).host}`)
     res.status(response.status)
     res.type('application/json').send(text)
   } catch (error) {

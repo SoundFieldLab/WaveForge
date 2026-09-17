@@ -1,11 +1,11 @@
-import { Ban, ChevronRight, Crown, Disc3, ExternalLink, Film, Heart, MessageSquareText, Play, Radio, UserRound } from 'lucide-react'
+import { Ban, ChevronRight, Crown, Disc3, ExternalLink, Film, Heart, Info, MessageSquareText, Play, Radio, UserRound } from 'lucide-react'
 import { HorizontalShelf } from '../../components/apple-explore/HorizontalShelf'
 import CachedImage from '../../components/CachedImage'
 import type { ExplorePlaylist } from '../../services/exploreApi'
 import type { Song } from '../../services/musicApi'
 import { getSongRequiredTier, shouldShowEntitlementBadge, type EntitlementTier } from '../../utils/musicEntitlements'
 import type { NeteaseNativeBlock, NeteaseNativeResource } from './model'
-import { neteaseResourceArtwork } from './model'
+import { neteaseBlockMoreTarget, neteaseResourceArtwork } from './model'
 
 export interface ResourceCallbacks {
   onExecute: (resource: NeteaseNativeResource, queue: NeteaseNativeResource[]) => void
@@ -18,6 +18,8 @@ export interface ResourceCallbacks {
   entitlement: EntitlementTier
   /** 区块标题右侧的「更多」入口；由调用方决定跳转到哪个发现频道 */
   onBlockMore?: (block: NeteaseNativeBlock) => void
+  /** 电台/播客节目的二级详情（App 点卡是直接播放，详情另给一个入口，不影响原行为） */
+  onOpenResourceDetail?: (resource: NeteaseNativeResource) => void
 }
 
 const CARD_FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--explore-accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0d1118]'
@@ -76,12 +78,35 @@ function resourceKindLabel(resource: NeteaseNativeResource) {
   }
 }
 
+/** 歌曲卡上的推荐理由 / 角标（App 在歌名下方显示「超76%人播放」「十万红心」「VIP」等）。 */
+function ResourceMetaChips({ resource }: { resource: NeteaseNativeResource }) {
+  const badge = resource.badge
+  const reason = resource.reason
+  if (!badge && !reason) return null
+  const badgeTone = /^(VIP|SQ|Hi-?Res)$/i.test(badge || '')
+    ? 'border-amber-300/35 text-amber-200/85'
+    : 'border-white/15 text-white/50'
+  return (
+    <span className="flex shrink-0 items-center gap-1">
+      {badge && <span className={`rounded border px-1 text-[10px] leading-4 ${badgeTone}`}>{badge}</span>}
+      {reason && <span className="rounded bg-[#ff4d67]/12 px-1 text-[10px] leading-4 text-[#ff8b9c]">{reason}</span>}
+    </span>
+  )
+}
+
 function ResourceImage({ resource, className = '' }: { resource: NeteaseNativeResource; className?: string }) {
   const imageUrl = neteaseResourceArtwork(resource)
   const fallback = <span className="flex h-full w-full items-center justify-center bg-[linear-gradient(145deg,#2c3441,#171c25)]"><Disc3 className="h-6 w-6 text-white/28" /></span>
   return (
     <span className={`relative block overflow-hidden bg-white/[0.06] ${className}`}>
       {imageUrl ? <CachedImage src={imageUrl} alt="" platform="netease" retainPrevious lazy className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.025]" fallback={fallback} /> : fallback}
+      {resource.coverLabel && resource.coverLabel.length > 0 && (
+        <span className="pointer-events-none absolute left-1.5 top-1.5 flex flex-col items-start gap-0.5">
+          {resource.coverLabel.map(label => (
+            <span key={label} className="rounded-[3px] bg-black/58 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-white/92">{label}</span>
+          ))}
+        </span>
+      )}
     </span>
   )
 }
@@ -111,7 +136,10 @@ function SongRow({ resource, resources, songs, callbacks }: { resource: NeteaseN
       <ResourceImage resource={resource} className="h-14 w-14 shrink-0 rounded-md" />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sm font-medium text-white/86">{resource.title}</span>
-        <span className="mt-1 block truncate text-xs text-white/40">{resource.subtitle || resourceKindLabel(resource)}</span>
+        <span className="mt-1 flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 truncate text-xs text-white/40">{resource.subtitle || resourceKindLabel(resource)}</span>
+          <ResourceMetaChips resource={resource} />
+        </span>
       </span>
       <SongRestrictionBadges song={song} entitlement={callbacks.entitlement} />
       <button
@@ -154,6 +182,10 @@ function CoverShelf({ resources, callbacks, title }: { resources: NeteaseNativeR
     <HorizontalShelf ariaLabel={`${title || '推荐内容'}封面`} itemClassName="w-44 md:w-48">
       {resources.map((resource, index) => {
         const Icon = actionIcon(resource)
+        // 电台/播客节目在 App 里点卡是「直接播放」，没有详情层。这里额外给一个「详情」入口，
+        // 保留原播放行为不变。注意卡片本身是 <button>，嵌套 button 是非法 HTML，故用 span+role。
+        const detailKind = resource.action.type === 'radio' ? 'radio' : resource.action.type === 'program' ? 'program' : ''
+        const hasDetail = Boolean(detailKind && callbacks.onOpenResourceDetail)
         return (
           <button
             key={`${resource.action.type}-${resource.id}-${index}`}
@@ -170,6 +202,30 @@ function CoverShelf({ resources, callbacks, title }: { resources: NeteaseNativeR
             <span className="relative block">
               <ResourceImage resource={resource} className="aspect-square rounded-md" />
               {resource.action.type !== 'none' && <span className="absolute bottom-3 right-3 flex h-9 w-9 translate-y-1 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition group-hover:translate-y-0 group-hover:opacity-100"><Icon className="h-4 w-4" /></span>}
+              {hasDetail && (
+                <span
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`查看${resource.title}详情`}
+                  title="查看详情"
+                  onPointerDown={event => event.stopPropagation()}
+                  onClick={event => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    callbacks.onOpenResourceDetail?.(resource)
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      callbacks.onOpenResourceDetail?.(resource)
+                    }
+                  }}
+                  className={`absolute left-2 top-2 flex h-7 items-center gap-1 rounded-full bg-black/62 px-2 text-[11px] text-white/85 opacity-0 backdrop-blur transition group-hover:opacity-100 focus-visible:opacity-100 ${CARD_FOCUS}`}
+                >
+                  <Info className="h-3 w-3" />详情
+                </span>
+              )}
             </span>
             <span className="mt-2 flex min-w-0 items-start gap-1.5"><span className="min-w-0 flex-1 line-clamp-2 text-sm font-medium leading-snug text-white/86">{resource.title}</span>{resource.song && <SongRestrictionBadges song={resource.song} entitlement={callbacks.entitlement} />}</span>
             <span className="mt-1 block truncate text-xs text-white/38">{resource.subtitle || resourceKindLabel(resource)}</span>
@@ -201,15 +257,29 @@ function MixedGrid({ resources, callbacks }: { resources: NeteaseNativeResource[
   )
 }
 
+/** 区块布局判定。**有资源时以实际内容为准**：服务端模板名会骗人——
+ *  例如 `PAGE_RECOMMEND_NEW_SONG_AND_ALBUM`（每周新热趋势）名字里带 NEW_SONG，
+ *  但 12 条资源全是歌单；旧逻辑按名字判成 songs，交给 SongShelf 后渲染出 0 张卡。
+ *  没有资源可看时（旧 homepage 协议的纯语义调用）退回按区块语义判断。
+ *  语义串**只用区块自身字段**，不含资源标题，避免误命中。 */
 export function classifyNeteaseBlock(block: Pick<NeteaseNativeBlock, 'blockCode' | 'showType' | 'title' | 'subtitle'> & { resources?: NeteaseNativeResource[] }): 'songs' | 'cover-shelf' | 'mixed' {
-  const semantic = `${block.blockCode} ${block.showType} ${block.title} ${block.subtitle} ${(block.resources || []).map(resource => `${resource.title} ${resource.subtitle}`).join(' ')}`.toUpperCase()
+  const resources = block.resources || []
+  const songCount = resources.filter(resource => resource.song).length
+  const shelfCount = resources.filter(resource => ['playlist', 'album', 'radio', 'program', 'artist', 'user', 'mv'].includes(resource.action.type)).length
+  if (resources.length > 0) {
+    if (songCount === 0 && shelfCount > 0) return 'cover-shelf'
+    if (shelfCount === 0 && songCount > 0) return 'songs'
+  }
+  const semantic = `${block.blockCode} ${block.showType} ${block.title} ${block.subtitle}`.toUpperCase()
   if (/SONGLIST|PLAYABLE_RESOURCE|SINGLE_SONG|NEW_SONG|VIP_SONG|STYLE_RCMD|SONG_RCMD/.test(semantic)) return 'songs'
   if (/ARTIST_HOT|ARTIST_RCMD|SCENE|MOOD|PERSONAL|MOVIE|PODCAST|PLAYLIST|TOPLIST|VOICE|ALBUM|DRAGON|RADAR/.test(semantic)) return 'cover-shelf'
   return 'mixed'
 }
 
 export function NeteaseNativeBlockView({ block, callbacks }: { block: NeteaseNativeBlock; callbacks: ResourceCallbacks }) {
-  const semantic = `${block.blockCode} ${block.showType} ${block.title} ${block.subtitle} ${block.resources.map(resource => `${resource.title} ${resource.subtitle}`).join(' ')}`
+  // 注意：标题兜底语义串**只用区块自身字段**，不能带资源标题——否则块内某张卡的标题
+  // 会让整块改名（实测「每周新热趋势」块内有「影视热歌趋势…影视原声」→ 整块显示成「影视原声」）。
+  const semantic = `${block.blockCode} ${block.showType} ${block.title} ${block.subtitle}`
   const title = block.title || block.subtitle || (/LISA|艺人热门|热门金曲/.test(semantic) ? '艺人热门金曲' : /喜欢的艺人|艺人开始漫游/.test(semantic) ? '从你喜欢的艺人开始漫游' : /场景歌单|场景/.test(semantic) ? '场景歌单' : /心情氛围|心情/.test(semantic) ? '心情氛围' : /专属推荐歌单|年代专属|国语专属|嘻哈说唱专属/.test(semantic) ? '你的专属推荐歌单' : /影视原声|动漫影视/.test(semantic) ? '影视原声' : /喜欢的音乐听播客/.test(semantic) ? '从你喜欢的音乐听播客' : ({
     HOMEPAGE_BLOCK_PLAYLIST_RCMD: '推荐歌单',
     HOMEPAGE_SLIDE_PLAYLIST: '推荐歌单',
@@ -237,7 +307,8 @@ export function NeteaseNativeBlockView({ block, callbacks }: { block: NeteaseNat
   const useSongs = layout === 'songs' || (layout === 'mixed' && songCount >= Math.max(2, block.resources.length / 2))
   const useShelf = block.layout !== 'grid' && (layout === 'cover-shelf' || (layout === 'mixed' && shelfCount >= Math.max(1, block.resources.length / 2)))
   if (block.resources.length === 0) return null
-  const more = callbacks.onBlockMore && title ? callbacks.onBlockMore : undefined
+  // 只有确实有站内落点时才显示「更多」，避免出现点了没反应的按钮
+  const more = callbacks.onBlockMore && title && neteaseBlockMoreTarget(block) ? callbacks.onBlockMore : undefined
   return <section data-block-code={block.blockCode} data-show-type={block.showType}>{title && <div className="mb-4 flex min-w-0 items-center gap-3"><h3 className="truncate text-xl font-semibold text-white/86">{title}</h3>{block.subtitle && block.subtitle !== title && <span className="truncate text-xs text-white/35">{block.subtitle}</span>}<span className="flex-1" />{more && <button type="button" onClick={() => more(block)} className="flex h-8 shrink-0 items-center gap-1 rounded-full border border-white/[0.1] px-3 text-xs text-white/55 transition hover:bg-white/[0.08] hover:text-white/90">更多<ChevronRight className="h-3.5 w-3.5" /></button>}</div>}{useSongs ? <SongShelf resources={block.resources} callbacks={callbacks} title={title} /> : useShelf ? <CoverShelf resources={block.resources} callbacks={callbacks} title={title} /> : <MixedGrid resources={block.resources} callbacks={callbacks} />}</section>
 }
 

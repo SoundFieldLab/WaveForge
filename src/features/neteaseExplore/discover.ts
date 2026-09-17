@@ -41,13 +41,22 @@ function pageIdFromUrl(url: string): string {
   }
 }
 
-export async function fetchNeteaseLinkPage(pageCode: NeteaseLinkPageCode, cursor = '0', refresh = false, signal?: AbortSignal, order?: string[]) {
+export async function fetchNeteaseLinkPage(
+  pageCode: NeteaseLinkPageCode,
+  cursor = '0',
+  refresh = false,
+  signal?: AbortSignal,
+  order?: string[],
+  /** 本会话已展示的区块（App 翻页时回传；服务端据此推进，缺失会拿到不一致的区块） */
+  loadedPositionCodes?: string[],
+) {
   return request('/link-page', {
     cookie: getExploreCookie('netease'),
     pageCode,
     cursor,
     refresh: refresh ? '1' : undefined,
     order: order && order.length > 0 ? JSON.stringify(order) : undefined,
+    loaded: loadedPositionCodes && loadedPositionCodes.length > 0 ? JSON.stringify(loadedPositionCodes) : undefined,
   }, signal)
 }
 

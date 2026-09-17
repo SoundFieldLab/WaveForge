@@ -44,6 +44,14 @@ export interface NeteaseNativeResource {
   isFavorite?: boolean
   song?: Song
   playlist?: ExplorePlaylist
+  /** 推荐理由徽标，如「超76%人播放」「十万红心」「昨日上万播放」 */
+  reason?: string
+  /** 资源角标，如 VIP / SQ / Hi-Res */
+  badge?: string
+  /** 单曲卡自带的整栏播放队列（App 点一张卡播整栏） */
+  playQueue?: { ids: string[]; start: number }
+  /** 封面左上角的角标文字，如雷达歌单的 ['私人','雷达'] / ['云村','高分雷达']（App 逐行显示） */
+  coverLabel?: string[]
   raw: Record<string, any>
 }
 
@@ -55,6 +63,8 @@ export interface NeteaseNativeBlock {
   showType: string
   title: string
   subtitle: string
+  /** 区块标题右侧「更多」的目标（服务端 showMore.action 原样带下来，优先于按 blockCode 猜的频道） */
+  moreActionUrl?: string
   resources: NeteaseNativeResource[]
   raw: Record<string, any>
 }
@@ -144,6 +154,13 @@ function firstImage(...values: any[]): string {
 function songOf(value: any): Song | undefined {
   const source = value?.songData || value?.song || value?.mainSong || value?.resourceExtInfo?.songData || value?.resourceExtInfo?.song || value?.creativeExtInfoVO?.songData || value?.creativeExtInfoVO?.song || value?.creativeExtInfoVO?.djProgram?.mainSong
   if (!source) return undefined
+  // 播客节目（djProgram/radio）出来的音频没有歌词与 MV：打标后播放页自动纯音乐样式
+  const isPodcastSong = Boolean(
+    source === value?.creativeExtInfoVO?.djProgram?.mainSong
+    || source === value?.resourceExtInfo?.djProgram?.mainSong
+    || value?.djProgram || value?.radio || source?.radio
+    || value?.resourceExtInfo?.djProgram || value?.creativeExtInfoVO?.djProgram,
+  )
   const track = source?.simpleSong || source
   const id = Number(track?.id || 0)
   if (!id || !track?.name) return undefined
@@ -160,7 +177,70 @@ function songOf(value: any): Song | undefined {
     vip: Number(track.fee) === 1,
     requiredTier: Number(track.fee) === 1 ? 'vip' : 'free',
     noCopyright: Number(track.privilege?.st) < 0,
+    isPodcast: isPodcastSong || undefined,
     commentCount: Number(track.commentCount || value?.resourceInteractInfo?.commentCount || 0) || undefined,
+  }
+}
+
+/** 字段可能是对象，也可能是 JSON 字符串（App 对部分模板把 playBtn/clickAction 序列化成字符串下发） */
+function objectOf(value: any): any {
+  if (!value) return undefined
+  if (typeof value === 'object') return value
+  if (typeof value !== 'string') return undefined
+  const text = value.trim()
+  if (!text.startsWith('{') && !text.startsWith('[')) return undefined
+  try { return JSON.parse(text) } catch { return undefined }
+}
+
+/** 「根据你喜爱的歌曲推荐」这类区块的单曲卡不带内嵌 song 对象，也常常没有 action/orpheus：
+ *  播放信息只落在 playBtn.playAction.songIds 与 clickAction.msg.params.songIds 里（整栏队列）。
+ *  这里把队列抽出来，供 actionOf 生成可播放动作。 */
+export function playQueueOf(value: any): string[] {
+  const playBtn = objectOf(value?.playBtn) || objectOf(value?.playBtnData)
+  const clickAction = objectOf(value?.clickAction)
+  const candidates = [
+    playBtn?.playAction?.songIds,
+    objectOf(playBtn?.playAction)?.songIds,
+    clickAction?.msg?.params?.songIds,
+    objectOf(value?.action)?.msg?.params?.songIds,
+    Array.isArray(playBtn?.songIds) ? playBtn.songIds : undefined,
+  ]
+  for (const list of candidates) {
+    if (Array.isArray(list) && list.length > 0) {
+      const ids = list.map((item: any) => String(item)).filter((item: string) => /^\d+$/.test(item))
+      if (ids.length > 0) return ids
+    }
+  }
+  return []
+}
+
+/** 单曲卡的播放起始下标（App 按点击项在该栏中的位置起播） */
+function playStartIndexOf(value: any): number {
+  const playBtn = objectOf(value?.playBtn) || objectOf(value?.playBtnData)
+  const clickAction = objectOf(value?.clickAction)
+  const raw = playBtn?.playAction?.songIndex ?? objectOf(playBtn?.playAction)?.songIndex ?? clickAction?.msg?.params?.songIndex
+  const index = Number(raw)
+  return Number.isInteger(index) && index >= 0 ? index : 0
+}
+
+/** 只有标题/歌手/封面 + 播放队列、没有内嵌 song 对象的卡片，用卡片自身字段拼一个最小 Song，
+ *  让 SongRow 能渲染、收藏能工作、播放页有名字与封面。 */
+function songFromCardFields(value: any, resourceId: string): Song | undefined {
+  const id = Number(resourceId)
+  const name = textOf(value?.title) || textOf(value?.songName)
+  if (!id || !name) return undefined
+  const artistName = textOf(value?.artistName) || textOf(value?.subTitle) || textOf(value?.artist)
+  return {
+    id,
+    name,
+    artists: artistName ? artistName.split(/\s*\/\s*|\s*、\s*/).filter(Boolean).map(artist => ({ name: artist })) : [],
+    album: { name: '', picUrl: imageOf(value?.coverUrl) || imageOf(value?.coverImg) || imageOf(value?.uiElement?.image) || imageOf(value) },
+    duration: Number(value?.duration || value?.dt || 0),
+    platform: 'netease',
+    fee: Number(value?.fee || 0),
+    vip: Number(value?.fee) === 1,
+    requiredTier: Number(value?.fee) === 1 ? 'vip' : 'free',
+    noCopyright: false,
   }
 }
 
@@ -189,6 +269,15 @@ function recursiveCandidates(value: any, output: Record<string, any>[], seen: Se
   const isProgramObject = Boolean(value.id && value.mainSong && value.radio)
   const isCreative = value.creativeId != null
   const isResource = value.resourceId != null
+  // 模块的 header 节点（`{showMore:true, action, title}`）只是分区标题，不是卡片。
+  // 它自带 action+title，会被下面的 isActionResource 当成资源产出，渲染成一张灰色空卡
+  // （实测「听精品有声书」12 本有声书上面多出一张同名空卡）。
+  // 只认「带 showMore 标志、无任何图片、也没有子资源列表」的纯标题节点，避免误伤区块容器/快捷卡。
+  const isModuleHeader = value.showMore === true
+    && value.resourceId == null && value.creativeId == null
+    && !hasEmbeddedSong && !hasNestedResources
+    && !value.uiElement && !value.imageUrl && !value.coverUrl && !value.coverImg && !value.image
+  if (isModuleHeader) return
   const isActionResource = Boolean(value.action || value.orpheus || value.targetUrl || value.uiElement?.button?.action)
     && Boolean(value.uiElement || value.mainTitle || value.coverImageUrl || value.imageUrl || value.purePictureUrl || value.coverImg || value.coverImgUrl || value.title)
   // 创意卡自身带 uiElement 图片与 action；其 resources 只是同一条内容的补充字段。
@@ -245,7 +334,14 @@ function numericIdFromAction(action: string, kind: string): string {
   if (direct?.[1]) return direct[1]
   try {
     const parsed = new URL(action)
-    return parsed.searchParams.get('id') || parsed.searchParams.get(`${kind}Id`) || ''
+    const specific = parsed.searchParams.get(`${kind}Id`)
+    if (specific) return specific
+    // 裸 id 只在路径段匹配该 kind 时才采用：`orpheus://nm/voicelist/detail?id=123` 属于 voicelist，
+    // 不能因为带个 id 就被当成 playlist（实测「听精品有声书」的有声书卡片正是被这样误判）。
+    const id = parsed.searchParams.get('id') || ''
+    if (!id) return ''
+    const path = `${parsed.hostname}${parsed.pathname}`.toLowerCase()
+    return path.includes(kind.toLowerCase()) ? id : ''
   } catch {
     return ''
   }
@@ -326,8 +422,13 @@ function actionOf(value: any, type: string, id: string, actionUrl: string, title
   // 播客固定入口（App 内 RN 页 → 站内原生页面）
   if (/component=rn-podcast-my|rn-podcast-my\b/i.test(actionUrl)) return { type: 'podcast-mine' }
   if (/nm\/voice\/category|component=rn-podcast-category|component=rn-podcast-rank/i.test(actionUrl)) return { type: 'podcast-categories' }
-  // 小程序入口（助眠解压 / 广播电台等）没有可直接打开的 H5，落到站内「全部分类」按名字找
-  if (/orpheus:\/\/miniProgram/i.test(actionUrl)) return { type: 'podcast-categories' }
+  // 小程序入口（广播电台等）：带 fallbackURL 的用站内网页面板直接打开真实页面
+  // （实测「广播」的电台卡带 mp.music.163.com 的 H5），没有 H5 的才落到站内「全部分类」按名字找。
+  if (/orpheus:\/\/miniProgram/i.test(actionUrl)) {
+    const miniWebUrl = safeWebUrl(actionUrl)
+    if (miniWebUrl) return { type: 'web', url: miniWebUrl }
+    return { type: 'podcast-categories' }
+  }
   // 推荐页「相似歌曲 / 相似艺人」走 play/similarFM，种子来自卡片自带 sourceId，不依赖当前播放
   if (/play\/similarFM/i.test(actionUrl)) {
     const { seeds, isArtist } = parseSimilarFmSeeds(actionUrl)
@@ -403,18 +504,31 @@ function actionOf(value: any, type: string, id: string, actionUrl: string, title
 export function normalizeNeteaseResource(value: Record<string, any>, index: number): NeteaseNativeResource | null {
   const ui = value.uiElement || value.resourceUiElement || {}
   const ext = value.resourceExtInfo || value.creativeExtInfoVO || value.extInfo || {}
-  const song = songOf(value)
+  // 「根据你喜爱的歌曲推荐」「VIP专属好歌」这类单曲卡没有内嵌 song 对象，只有卡片自带字段 +
+  // playBtn/clickAction 里的播放队列；用卡片字段补一个最小 Song，否则整块会因无可用动作被丢弃。
+  const queue = playQueueOf(value)
+  const song = songOf(value) || (queue.length > 0 ? songFromCardFields(value, String(value.resourceId ?? value.id ?? queue[0])) : undefined)
   const type = String(value.resourceType || value.creativeType || (song ? 'song' : '')).toLowerCase()
   const actionUrl = String(value.action || value.orpheus || value.targetUrl || ui?.button?.action || '')
   const actionResourceId = actionUrl.match(/(?:playlist|album|song|mv|artist|user|program)(?:\/|\?|:)(?:id=)?(\d+)/i)?.[1] || ''
   const id = String(value.resourceId ?? value.creativeId ?? value.programId ?? value.id ?? song?.id ?? actionResourceId ?? '')
   const title = textOf(ui.mainTitle) || textOf(value.mainTitle) || textOf(value) || song?.name || ''
   const subtitle = textOf(ui.subTitle) || textOf(value.subTitle) || textOf(ext?.artist) || song?.artists.map(artist => artist.name).join(' / ') || ''
+  // 组卡（榜单/创意组）自身常无封面：回退首个子资源封面，避免出现无图灰卡（实测「音乐播客榜」）
+  const nestedCover = [
+    ...(Array.isArray(value.resources) ? value.resources : []),
+    ...(Array.isArray(value.resourceInfoList) ? value.resourceInfoList : []),
+  ].find((item: any) => item && (item.uiElement?.image || item.coverImageUrl || item.resourceExtInfo?.djProgram?.coverUrl))
   const coverUrl = firstImage(
     ui.image,
     ui.backgroundImage,
     value.coverImageUrl,
     value.imageUrl,
+    value.coverUrl,
+    value.coverImg,
+    nestedCover?.uiElement?.image,
+    nestedCover?.coverImageUrl,
+    nestedCover?.resourceExtInfo?.djProgram?.coverUrl,
     value,
     value.resourceExtInfo?.coverImageUrl,
     value.creativeExtInfoVO?.coverImageUrl,
@@ -455,8 +569,21 @@ export function normalizeNeteaseResource(value: Record<string, any>, index: numb
     isFavorite: isSongFavorite,
     song,
     playlist: action.type === 'playlist' ? action.playlist : undefined,
+    // 单曲卡右上角的推荐理由徽标（「超76%人播放」「十万红心」「VIP」等）与搜索/榜单角标
+    reason: textOf(value.recReason) || textOf(value.reasonText) || textOf(value.tagText),
+    badge: textOf(value.tag) || textOf(value.tagText),
+    /** playBtn/clickAction 自带的整栏播放队列（含起始下标），单曲卡用它连播整栏 */
+    playQueue: queue.length > 0 ? { ids: queue, start: Math.min(playStartIndexOf(value), queue.length - 1) } : undefined,
+    coverLabel: coverLabelOf(value),
     raw: value,
   }
+}
+
+/** 封面左上角的角标：雷达歌单每张卡带 `resourceExtInfo.coverText`，实测为 ['私人','雷达'] 这类 1~2 行短词。 */
+function coverLabelOf(value: any): string[] | undefined {
+  const raw = value?.resourceExtInfo?.coverText ?? value?.coverText ?? value?.creativeExtInfoVO?.coverText
+  const list = (Array.isArray(raw) ? raw : [raw]).map((item: any) => String(item ?? '').trim()).filter(Boolean)
+  return list.length > 0 ? list.slice(0, 2) : undefined
 }
 
 export function neteaseResourceArtwork(resource: NeteaseNativeResource): string {
@@ -493,14 +620,105 @@ export function filterNeteaseActionable(resources: NeteaseNativeResource[]): Net
   })
 }
 
+/** 同一内容的所有形态键：播客节目会同时以 voice 卡、djProgram 对象、mainSong 出现，
+ *  只按主键去重会漏掉（实测「音乐播客榜」每条节目渲染两次），按别名并集去重。 */
+function neteaseResourceAliases(resource: NeteaseNativeResource): string[] {
+  const aliases = new Set<string>([neteaseResourceKey(resource)])
+  if (resource.song?.id) aliases.add(String.raw`song:${resource.song.id}`)
+  const action = resource.action
+  if (action.type === 'program' && 'id' in action && action.id) aliases.add(String.raw`program:${action.id}`)
+  if (resource.id && /^[0-9]+$/.test(resource.id)) aliases.add(String.raw`${resource.type}:${resource.id}`)
+  return [...aliases]
+}
 export function dedupeNeteaseResources(resources: NeteaseNativeResource[]): NeteaseNativeResource[] {
   const seen = new Set<string>()
   return resources.filter(resource => {
-    const key = neteaseResourceKey(resource)
-    if (seen.has(key)) return false
-    seen.add(key)
+    const aliases = neteaseResourceAliases(resource)
+    if (aliases.some(key => seen.has(key))) return false
+    aliases.forEach(key => seen.add(key))
     return true
   })
+}
+
+/** Link Platform 的分区标题散落在 dslData 的多层模板节点里，位置随模板而变。实测 9.5.90 有五种：
+ *  `dslData.blockResource.title`、`dslData.<模块key>.blockResource.title`、`dslData.<模块key>.header.title`、
+ *  `dslData.<模块key>.title`、`dslData.<模块key>.blockTitle`（另有 dslData.data.title / dslData.header.title）。
+ *  只在「模板节点自身」找标题——不下钻 items/resources，避免把卡片标题当成区块标题。 */
+function blockTitleFromDsl(dslData: any): string {
+  if (!dslData || typeof dslData !== 'object') return ''
+  const own = (node: any): string => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return ''
+    // 模板节点里承载标题的子对象，按优先级取第一个非空
+    for (const key of ['blockResource', 'header', 'commonTitle', 'track']) {
+      const nested = node[key]
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const text = textOf(nested)
+        if (text.trim()) return text.trim()
+      }
+    }
+    for (const key of ['blockTitle', 'title']) {
+      const text = typeof node[key] === 'string' ? node[key] : textOf(node[key])
+      if (text.trim()) return text.trim()
+    }
+    return ''
+  }
+  // dslData 自身可能直接挂 blockResource / header / data
+  const top = own(dslData)
+  if (top) return top
+  if (dslData.data && typeof dslData.data === 'object') {
+    const text = own(dslData.data)
+    if (text) return text
+  }
+  // 否则遍历各模板节点（key 形如 home_xxx_module_yyy），取第一个带标题的
+  for (const [key, node] of Object.entries(dslData)) {
+    if (key === 'dslShowTitle' || key === 'code' || key === 'responseFrom') continue
+    const text = own(node)
+    if (text) return text
+  }
+  return ''
+}
+
+/** 区块级「更多」入口的目标：服务端把它挂在带 showMore 的模板节点上（如排行榜块 → 发现-音乐-排行榜）。 */
+function blockMoreActionOf(value: any): string {
+  const roots = [value?.dslData, value?.nativeData, value?.crossPlatformConfig?.dslContent]
+  const found: string[] = []
+  const walk = (node: any, depth: number) => {
+    if (found.length > 0 || !node || typeof node !== 'object' || depth > 8) return
+    if (Array.isArray(node)) { node.forEach(item => walk(item, depth + 1)); return }
+    if (node.showMore === true && typeof node.action === 'string' && node.action.trim()) {
+      found.push(node.action.trim())
+      return
+    }
+    for (const child of Object.values(node)) walk(child, depth + 1)
+  }
+  roots.forEach(root => walk(root, 0))
+  return found[0] || ''
+}
+
+export type NeteaseBlockMoreTarget =
+  | { kind: 'discover'; tab: 'music' | 'podcast'; channelCode?: string }
+  | { kind: 'artist'; artistId: string }
+
+/** 解析区块「更多」的站内落点。优先用服务端 showMore 动作，其次按 blockCode 语义推断。
+ *  返回 null 表示该块没有更多入口（此时不渲染「更多」按钮，避免点了没反应）。 */
+export function neteaseBlockMoreTarget(block: Pick<NeteaseNativeBlock, 'blockCode' | 'moreActionUrl'>): NeteaseBlockMoreTarget | null {
+  const url = block.moreActionUrl || ''
+  if (url) {
+    // 排行榜的落点在 subParams 里：...exploreTabCode=music&subParams={"tabCode":"chart"}，
+    // 必须比 exploreTabCode=music 先判，否则会被当成「精选」。
+    if (/tabCode["':=\s]*chart/i.test(url) || /rn-ranklist-homepage/i.test(url)) return { kind: 'discover', tab: 'music', channelCode: 'chart' }
+    if (/tabCode["':=\s]*vip/i.test(url)) return { kind: 'discover', tab: 'music', channelCode: 'vip' }
+    if (/exploreTabCode=podcast|component=rn-podcast-rank/i.test(url)) return { kind: 'discover', tab: 'podcast' }
+    if (/exploreTabCode=(music|feature)/i.test(url)) return { kind: 'discover', tab: 'music', channelCode: 'feature' }
+    const artistId = url.match(/nm\/artist\/home\?id=(\d+)/i)?.[1]
+    if (artistId) return { kind: 'artist', artistId }
+  }
+  const code = String(block.blockCode || '').toUpperCase()
+  if (/PODCAST|VOICE|AUDIO_BOOK|BROADCAST|FM_CHANNEL/.test(code)) return { kind: 'discover', tab: 'podcast' }
+  if (/RANK|TOPLIST/.test(code)) return { kind: 'discover', tab: 'music', channelCode: 'chart' }
+  if (/NEW_SONG|NEW_ALBUM|NEWSONG/.test(code)) return { kind: 'discover', tab: 'music', channelCode: 'feature' }
+  if (/PLAYLIST|SHEET|STYLE|SCENE|COMBINATION|RADAR|CLOUD_VILLAGE|MIXED_ARTIST|QUALITY_SONG_LIST|TREASURE/.test(code)) return { kind: 'discover', tab: 'music', channelCode: 'playlist' }
+  return null
 }
 
 export function normalizeNeteaseBlock(value: Record<string, any>, index: number): NeteaseNativeBlock {
@@ -545,7 +763,9 @@ export function normalizeNeteaseBlock(value: Record<string, any>, index: number)
       value.dslData?.data?.title,
       value.nativeData?.title,
       value.dslData?.header,
+      blockTitleFromDsl(value.dslData),
     ),    subtitle: firstText(ui.subTitle, value.subTitle, value.blockSubTitle, value.description),
+    moreActionUrl: blockMoreActionOf(value),
     resources,
     raw: value,
   }
@@ -615,10 +835,14 @@ export function normalizeNeteaseFlow(payload: any): NeteaseNativeFlow {
 }
 
 // 用户明确不要的模块：精品有声书、听书整条链路
+/**
+ * 真正需要排除的 positionCode。
+ * 注意：「听精品有声书」(PAGE_RECOMMEND_PODCAST_AUDIO_BOOK) 与「广播」(PAGE_RECOMMEND_BROADCAST)
+ * 是 App 推荐页**真实存在**的分区（实测 ADB 走查第 10 / 14 屏可见），内容也拿得到
+ * （有声书 = 12 个 djradio 可站内打开；广播 = 电台 + 分类卡），因此**不再排除**。
+ * 这里只留确实不接入的听书 Tab 页面。
+ */
 export const NETEASE_EXCLUDED_POSITIONS = new Set([
-  'PAGE_RECOMMEND_PODCAST_AUDIO_BOOK',
-  'PAGE_RECOMMEND_BROADCAST',
-  'PAGE_DISCOVERY_AUDIO_BOOK',
   'INFINITE_PODCAST_HOMEPAGE_VOICEBOOK_TAB',
 ])
 

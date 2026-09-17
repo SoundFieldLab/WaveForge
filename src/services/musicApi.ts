@@ -4085,6 +4085,32 @@ export async function getUserPlaylistList(uid: string): Promise<any> {
   }
 }
 
+/** 网易云电台/有声书详情（二级页：DJ、简介、节目数、标签） */
+export async function getNeteaseRadioDetail(radioId: string): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/netease/dj/detail?id=${encodeURIComponent(radioId)}`)
+    const data = await response.json()
+    if (!response.ok) throw new Error(data?.error || '获取电台详情失败')
+    return data?.radio || null
+  } catch (error) {
+    console.error('电台详情获取失败:', error)
+    return null
+  }
+}
+
+/** 网易云播客节目详情（二级页：标题、简介、所属电台、时长、互动数） */
+export async function getNeteaseProgramDetail(programId: string): Promise<any> {
+  try {
+    const response = await fetch(`${API_BASE}/netease/dj/program/detail?id=${encodeURIComponent(programId)}`)
+    const data = await response.json()
+    if (!response.ok) throw new Error(data?.error || '获取节目详情失败')
+    return data?.program || null
+  } catch (error) {
+    console.error('节目详情获取失败:', error)
+    return null
+  }
+}
+
 /** QQ 关注用户列表（music.concern.RelationList/GetFollowList） */
 export async function getQQFollows(options: { cookie?: string; start?: number; num?: number } = {}): Promise<any> {
   try {

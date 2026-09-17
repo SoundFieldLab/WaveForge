@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import zlib from 'node:zlib'
 
 // server/netease-native-explore.mjs
 
@@ -142,6 +143,58 @@ async function callPrivate(getNeteaseApi, uri, data, cookie, crypto = 'weapi') {
   if (!api?.api) throw new Error('网易云 API 尚未初始化')
   const result = await api.api({ uri, data, crypto, cookie: String(cookie || '') })
   return responseBody(result)
+}
+
+const EAPI_HOSTS = ['https://interface3.music.163.com', 'https://interface.music.163.com']
+const EAPI_KEY = Buffer.from('e82ckenh8dichen8')
+
+/**
+ * 直连 eapi（不经 @neteasecloudmusicapienhanced 的 request 层）。
+ *
+ * 为什么需要它：该库的 eapi 分支有两个缺陷，会让「推荐页」这类靠服务端画像下发的接口丢内容——
+ *   1. `headers['x-aeapi'] = true` 被注释掉了（util/request.js），而服务端对 eapi 响应默认 gzip；
+ *      库因此走「非压缩」解密分支，gzip 数据解出来是坏的（实测报 Malformed UTF-8 data，
+ *      或悄悄少给区块：手机端本该 5 块的首页只回 4 块，缺 RADAR/SHORTCUT）。
+ *   2. `data.header = header` 会用库内置的 PC 设备头覆盖调用方传入的 header。
+ * 自建解密可按 gzip 魔数自适应，并且完全掌控 header 与请求体。
+ */
+export async function callEapiRaw(uri, data, cookie) {
+  const text = JSON.stringify(data)
+  const digest = crypto.createHash('md5').update(`nobody${uri}use${text}md5forencrypt`).digest('hex')
+  const plain = Buffer.from(`${uri}-36cd479b6b5-${text}-36cd479b6b5-${digest}`, 'utf-8')
+  const cipher = crypto.createCipheriv('aes-128-ecb', EAPI_KEY, null)
+  cipher.setAutoPadding(true)
+  const params = Buffer.concat([cipher.update(plain), cipher.final()]).toString('hex').toUpperCase()
+
+  let lastError = null
+  for (const host of EAPI_HOSTS) {
+    try {
+      const response = await withTimeout(
+        fetch(`${host}/eapi/${uri.replace(/^\/eapi\//, '').replace(/^\/api\//, '')}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: String(cookie || '') },
+          body: new URLSearchParams({ params }).toString(),
+        }),
+        20_000,
+        '网易云 eapi 请求超时',
+      )
+      const raw = Buffer.from(await response.arrayBuffer())
+      if (raw.length === 0) throw new Error('网易云返回空响应')
+      const decipher = crypto.createDecipheriv('aes-128-ecb', EAPI_KEY, null)
+      decipher.setAutoPadding(false)
+      let out = Buffer.concat([decipher.update(raw), decipher.final()])
+      const pad = out[out.length - 1]
+      if (pad >= 1 && pad <= 16) out = out.subarray(0, out.length - pad)
+      // 服务端按需 gzip：按魔数判断，不赌它压没压
+      let body = out
+      if (out[0] === 0x1f && out[1] === 0x8b) body = zlib.gunzipSync(out)
+      const parsed = JSON.parse(body.toString('utf-8').replace(/[\u0000-\u0008]+$/, ''))
+      return responseBody(parsed)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error('网易云 eapi 请求失败')
 }
 
 function withTimeout(promise, timeoutMs, message) {
@@ -414,6 +467,31 @@ export function registerNeteaseNativeExploreRoutes(app, { getNeteaseApi }) {
     }
   })
 
+  // 批量节目详情：播客栏位整列入队（单次上限 12 条，单项失败不影响其余）
+  app.get('/api/netease/native/program-songs', async (req, res) => {
+    try {
+      const ids = String(req.query.ids || '').split(',').map(item => item.trim()).filter(item => /^\d+$/.test(item)).slice(0, 12)
+      if (!ids.length) return res.json({ code: 200, programs: [] })
+      const api = getNeteaseApi()
+      if (!api?.dj_program_detail) return res.status(503).json({ code: 503, error: '网易云节目接口未初始化' })
+      const cookie = String(req.query.cookie || '')
+      const programs = await Promise.all(ids.map(async id => {
+        try {
+          const result = await api.dj_program_detail({ id, cookie })
+          const body = responseBody(result)
+          const program = body?.program || body?.data?.program || body?.data || body || null
+          return program ? { id, program } : null
+        } catch {
+          return null
+        }
+      }))
+      res.setHeader('Cache-Control', 'private, max-age=120')
+      res.json({ code: 200, programs, nativeProtocol: 'netease-android-9.5.81' })
+    } catch (error) {
+      res.status(502).json({ code: 502, error: error?.message || '网易云节目批量加载失败' })
+    }
+  })
+
   app.get('/api/netease/native/daily-podcast', async (req, res) => {
     try {
       const body = await callPrivate(getNeteaseApi, DAILY_PODCAST_PATH, {
@@ -476,12 +554,26 @@ export function registerNeteaseNativeExploreRoutes(app, { getNeteaseApi }) {
         pageCode,
         cursor: /^\d+$/.test(cursor) ? Number(cursor) : cursor,
         isFirstScreen: (!cursor || cursor === '0') ? 'true' : 'false',
+        pageStyleType: 'noCutBlock',
         refresh: refresh ? 'true' : 'false',
         header: '{}',
         e_r: true,
       }
       if (orderString) data.blockCodeOrderList = orderString
-      const body = await callPrivate(getNeteaseApi, LINK_PAGE_PATH, data, cookie, 'eapi')
+      // App 每次翻页都会回传本会话已展示过的区块（实测 9.5.90 形状：["PAGE_RECOMMEND_GREETING",...]），
+      // 服务端据此推进/去重；缺这个字段会导致翻页拿到的区块与 App 不一致。
+      const loadedPositionCodes = String(req.query.loaded || '')
+      if (loadedPositionCodes) {
+        try {
+          const parsed = JSON.parse(loadedPositionCodes)
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            data.loadedPositionCodes = JSON.stringify(parsed.map(String))
+          }
+        } catch { /* 非法 JSON 就忽略，退化为不带该字段 */ }
+      }
+      // 直连 eapi：库的 eapi 分支漏了 x-aeapi（服务端会 gzip）且会用 PC 头覆盖 header，
+      // 导致推荐页少给区块（手机端首页应有 5 块，经库只回 4 块、缺 RADAR/SHORTCUT）。
+      const body = await callEapiRaw(LINK_PAGE_PATH, data, cookie)
       const payload = { ...body, nativeProtocol: 'netease-android-9.5.90', accountScoped: isAccountScopedCookie(cookie) }
       if (Number(body.code) === 200 && cursor === '0') linkPageCache.set(cacheKey, payload)
       res.setHeader('Cache-Control', 'private, no-store')

@@ -83,9 +83,11 @@ describe('normalizeNeteaseLinkPage', () => {
     if (block!.resources[0].action.type === 'playlist') expect(block!.resources[0].action.playlist.id).toBe('7829959298')
   })
 
-  it('过滤听精品有声书等排除模块', () => {
-    expect(page.blocks.some(block => block.blockCode === 'PAGE_RECOMMEND_PODCAST_AUDIO_BOOK')).toBe(false)
-    expect(isNeteaseExcludedPosition('PAGE_RECOMMEND_PODCAST_AUDIO_BOOK')).toBe(true)
+  it('保留听精品有声书与广播（App 推荐页真实存在），只排除听书 Tab', () => {
+    // 实测 ADB 走查：App 推荐页第 10 屏有「听精品有声书」、第 14 屏有「广播」，内容也拿得到，
+    // 所以这两块不排除，需要在页面上正常渲染。
+    expect(isNeteaseExcludedPosition('PAGE_RECOMMEND_PODCAST_AUDIO_BOOK')).toBe(false)
+    expect(isNeteaseExcludedPosition('PAGE_RECOMMEND_BROADCAST')).toBe(false)
     expect(isNeteaseExcludedPosition('INFINITE_PODCAST_HOMEPAGE_VOICEBOOK_TAB')).toBe(true)
   })
 

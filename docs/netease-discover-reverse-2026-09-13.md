@@ -297,3 +297,36 @@ App 里不是「权益套餐列表」，而是：
 修法：`MVExploreModal` 增加 `directPlay`，为真时只渲染播放器；乐流的 `onOpenMV` 置为 true，
 `onOpenMVs`（主动打开专区）置为 false。实测：点击乐流 MV 卡片后直接出现 `<video>` 且
 `paused === false`，DOM 中没有专区搜索框。
+
+## 心动模式 / 播客 修复 2026-09-16
+
+### 心动模式不要求正在播放（实机 ADB 验证）
+用 ADB 在网易云 9.5.90 上直接点首页「心动模式」：**不要求正在播放**，点击即进入播放页开播，
+顶栏显示「我喜欢的音乐」——锚点是红心歌单里的歌，接口为 `playmode/intelligence/list`。
+
+我们此前写成 `if (!likedPlaylist || !neteaseCurrentSong) throw new Error('请先播放一首网易云歌曲…')`，
+所以没在播放时点它只会报错。修法：没有当前播放时，先取「我喜欢的音乐」歌单的第一首做锚点
+（`fetchExplorePlaylist(likedPlaylist)`），再请求心动模式；返回列表不含锚点歌时把它补到队首。
+
+### 播客播放页：自动纯音乐样式、不显示 MV 入口
+播客节目没有歌词也没有 MV，但此前会照常搜 B 站 MV 并按歌词页渲染。修法：
+- 数据源打标：`songOf`（djProgram/radio 来源）与 `fetchNeteaseProgramSong` / `fetchNeteaseProgramSongs`
+  统一写 `Song.isPodcast`。
+- `App.tsx`：`podcastPlayback = Boolean(currentSong?.isPodcast)`，`pureMusicPlayback = isPureMusic || podcastPlayback`；
+  播客直接走纯音乐播放页（不看 lyricDisplayMode），并且 `mvBackgroundActive` 加 `!podcastPlayback`、
+  不挂 MV 背景层、`onMvBackgroundToggle` 传 undefined（ImmersiveControls 本来就按回调有无隐藏 MV 按钮）。
+  实测：播客播放页无 `<video>`、无「MV 背景」按钮、无歌词样式切换入口。
+
+### 播客栏位整列入队
+App 里点播客栏（如「发现更多精彩」）中的一集，应把整栏节目加入播放列表。修法：
+- 新增后端 `/api/netease/native/program-songs?ids=`（最多 12 条，单项失败不影响其余）。
+- `executeResource` 的 `program` 分支：以点击项 + 同栏其余节目（去重）组成队列。
+  实测「发现更多精彩」9 张卡全部入队（播放列表面板显示 9 首歌曲）。
+
+### 音乐播客榜重复与无封面
+- 重复：榜单创意卡没有 `creativeId`，不会走创意合并，于是被当作普通卡片输出；同时每个节目的
+  `resourceExtInfo.djProgram` 又被递归推入一次，节目因此渲染两遍。修法：`dedupeNeteaseResources`
+  改为**按形态别名并集去重**（`voice:<节目id>` / `program:<节目id>` / `song:<主轨id>` 命中即视为同一内容）。
+  实测榜单 21 张卡无重复。
+- 无封面：榜单创意卡自身没有图片（只有标题与 `rnpage` 按钮），修法：`normalizeNeteaseResource`
+  在自身无图时回退首个子资源的封面。实测「二次元榜 / 音乐播客榜 / 亲子榜」三张榜单卡都有封面。

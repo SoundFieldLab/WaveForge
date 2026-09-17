@@ -172,7 +172,30 @@ export async function fetchNeteaseProgramSong(programId: string, signal?: AbortS
     album: { ...songs[0].album, name: String(program?.radio?.name || songs[0].album.name), picUrl: String(program?.coverUrl || program?.blurCoverUrl || songs[0].album.picUrl).replace(/^http:/, 'https:') },
     duration: Number(program?.duration || songs[0].duration || 0),
     commentCount: Number(program?.commentCount || songs[0].commentCount || 0) || undefined,
+    isPodcast: true,
   }
+}
+
+/** 批量拉取播客节目音频（播客栏位整列入队用，单次上限 12 条） */
+export async function fetchNeteaseProgramSongs(programIds: string[], signal?: AbortSignal): Promise<Song[]> {
+  const ids = [...new Set(programIds.map(String).filter(id => /^\d+$/.test(id)))].slice(0, 12)
+  if (!ids.length) return []
+  const payload = await request('/program-songs', { cookie: getExploreCookie('netease'), ids: ids.join(',') }, signal)
+  const programs: any[] = Array.isArray(payload?.programs) ? payload.programs : []
+  return programs.filter(Boolean).map((entry: any) => {
+    const program = entry?.program || {}
+    const songs = normalizeNeteaseSongs([program?.mainSong || program?.mainTrack].filter(Boolean))
+    const song = songs[0]
+    if (!song) return null
+    return {
+      ...song,
+      name: String(program?.name || song.name),
+      album: { ...song.album, name: String(program?.radio?.name || song.album.name), picUrl: String(program?.coverUrl || program?.blurCoverUrl || song.album.picUrl).replace(/^http:/, 'https:') },
+      duration: Number(program?.duration || song.duration || 0),
+      commentCount: Number(program?.commentCount || song.commentCount || 0) || undefined,
+      isPodcast: true,
+    } as Song
+  }).filter((song): song is Song => Boolean(song))
 }
 
 export async function fetchNeteaseDailyPodcast(signal?: AbortSignal): Promise<any[]> {

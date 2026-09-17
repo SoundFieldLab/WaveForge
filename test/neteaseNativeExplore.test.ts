@@ -17,6 +17,44 @@ import {
 // test/neteaseNativeExplore.test.ts
 
 describe('NetEase native recommendation feed', () => {
+  it('renders podcast chart creatives once with a cover and no djProgram duplicates', () => {
+    const episode = (id: number, songId: number, cover: string) => ({
+      resourceType: 'voice',
+      resourceId: String(id),
+      action: `orpheus://program/${id}`,
+      uiElement: { mainTitle: { title: `节目${id}` }, image: { imageUrl: cover } },
+      resourceExtInfo: { djProgram: { id, mainSong: { id: songId, name: `节目${id}`, dt: 1000 }, radio: { id: 9, name: '电台' }, coverUrl: cover } },
+    })
+    const block = normalizeNeteaseBlock({
+      blockCode: 'FINITE_CHARTS_BLOCK',
+      showType: 'VOICE_RANK',
+      uiElement: { mainTitle: { title: '音乐播客榜' } },
+      creatives: [{
+        creativeType: 'VOICE_RANK_CHART',
+        uiElement: { mainTitle: { title: '二次元榜' }, button: { action: 'orpheus://rnpage?component=rn-podcast-rank&categoryId=3001', actionType: 'https' } },
+        resources: [episode(1, 101, 'http://cover/1'), episode(2, 102, 'http://cover/2')],
+      }],
+    }, 0)
+    const titles = block.resources.map(resource => resource.title)
+    expect(titles.filter(title => title === '节目1')).toHaveLength(1)
+    expect(titles.filter(title => title === '节目2')).toHaveLength(1)
+    const chartCard = block.resources.find(resource => resource.title === '二次元榜')
+    expect(chartCard?.coverUrl).toBe('https://cover/1')
+  })
+
+  it('marks podcast-derived songs so the player can force the pure-music page', () => {
+    const block = normalizeNeteaseBlock({
+      blockCode: 'PODCAST_BLOCK',
+      showType: 'PODCAST',
+      creatives: [{
+        creativeType: 'PODCAST',
+        creativeExtInfoVO: { djProgram: { id: 5, mainSong: { id: 500, name: '节目', dt: 1000 }, radio: { id: 9, name: '电台' } } },
+      }],
+    }, 0)
+    const podcastSong = block.resources.find(resource => resource.song)
+    expect(podcastSong?.song?.isPodcast).toBe(true)
+  })
+
   it('normalizes native song and playlist resources without losing raw blocks', () => {
     const home = normalizeNeteaseHome({
       accountScoped: true,
@@ -298,5 +336,34 @@ describe('NetEase native recommendation feed', () => {
       expect.objectContaining({ uri: '/api/song/red/count', data: { songId: '2' }, crypto: 'weapi' }),
     ]))
     expect(response.body).toMatchObject({ counts: { 1: 10 }, errors: { 2: 'upstream failed' } })
+  })
+})
+
+describe('推荐页 link page 必须走自建 eapi（绕过库的两个缺陷）', () => {
+  const buildApp = () => {
+    const routes = new Map<string, Function>()
+    const libraryCalls: string[] = []
+    const app = { get: (path: string, handler: Function) => routes.set(path, handler) }
+    const api = { api: async (request: any) => { libraryCalls.push(request.uri); return { body: { code: 200, data: { blocks: [] } } } } }
+    registerNeteaseNativeExploreRoutes(app, { getNeteaseApi: () => api })
+    return { routes, libraryCalls }
+  }
+
+  it('link-page 不再经过库的 api.api()', async () => {
+    const { routes, libraryCalls } = buildApp()
+    const handler = routes.get('/api/netease/native/link-page')
+    expect(handler).toBeDefined()
+
+    const response: { statusCode: number; body?: unknown } = { statusCode: 200 }
+    const res = {
+      status(code: number) { response.statusCode = code; return this },
+      setHeader() { return this },
+      json(body: unknown) { response.body = body; return body },
+    }
+    // 没有 cookie / 网络时必然失败，但关键断言是「没有调用库」——
+    // 库的 eapi 分支漏了 x-aeapi（服务端会 gzip）并用 PC 头覆盖 header，
+    // 会让推荐页少给区块（手机端首页应有 5 块，经库只回 4 块）。
+    await handler?.({ query: { pageCode: 'HOME_RECOMMEND_PAGE', cursor: '0' } }, res)
+    expect(libraryCalls).toEqual([])
   })
 })

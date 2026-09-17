@@ -3,7 +3,8 @@ import { AlertCircle, ChevronRight, Compass, Disc3, Headphones, HeartPulse, Load
 import { HorizontalShelf } from '../../components/apple-explore/HorizontalShelf'
 import CachedImage from '../../components/CachedImage'
 import type { Song } from '../../services/musicApi'
-import { getUserDetail } from '../../services/musicApi'
+import { getUserDetail, getUserPlaylistList } from '../../services/musicApi'
+import { fetchExplorePlaylist } from '../../services/exploreApi'
 import type { ExploreChannel, ExplorePayload, ExplorePlaylist } from '../../services/exploreApi'
 import { applyFavoriteMutation, getFavoriteSongIdentifiers, invalidateFavoriteIdentifiers, loadFavoriteIdentifiers } from '../../services/favoriteStatusService'
 import {
@@ -14,6 +15,7 @@ import {
   fetchNeteaseNativeHome,
   fetchNeteasePodcastHome,
   fetchNeteaseProgramSong,
+  fetchNeteaseProgramSongs,
   fetchNeteaseRedCounts,
   fetchNeteaseRoam,
   fetchNeteaseSessionStatus,
@@ -25,6 +27,7 @@ import {
 import {
   normalizeNeteaseResource,
   normalizeNeteaseShortcuts,
+  neteaseBlockMoreTarget,
   neteaseResourceArtwork,
   neteaseResourceKey,
   neteaseShortcutKind,
@@ -38,6 +41,7 @@ import { normalizeNeteaseLinkPage } from './model'
 import NeteaseDiscoverView from './NeteaseDiscoverView'
 import NeteaseWebPanel, { type NeteaseWebTarget } from './NeteaseWebPanel'
 import NeteaseDailyRecommendPanel from './NeteaseDailyRecommendPanel'
+import NeteaseRadioDetailPanel, { type NeteaseRadioDetailTarget } from './NeteaseRadioDetailPanel'
 import { NeteaseFlowGrid, NeteaseNativeBlockView, SongRestrictionBadges } from './NeteaseResourceView'
 import type { EntitlementTier } from '../../utils/musicEntitlements'
 
@@ -163,6 +167,10 @@ export default function NeteaseExplorePage({
   const [similar, setSimilar] = useState<SimilarPanelState | null>(null)
   const [profile, setProfile] = useState<any | null>(null)
   const [profileLoading, setProfileLoading] = useState(false)
+  /** 用户主页的歌单（二级入口）；null=加载中，[]=确实没有 */
+  const [profilePlaylists, setProfilePlaylists] = useState<any[] | null>(null)
+  /** 电台/播客节目详情（二级入口） */
+  const [radioDetail, setRadioDetail] = useState<NeteaseRadioDetailTarget | null>(null)
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set())
   const [favoritesReady, setFavoritesReady] = useState(false)
   const [favoriteRefreshRevision, setFavoriteRefreshRevision] = useState(0)
@@ -344,9 +352,29 @@ export default function NeteaseExplorePage({
     source: playlist.isLike ? 'netease-liked' : 'netease-account',
   })).filter((playlist: ExplorePlaylist) => playlist.id), [accountPlaylists])
   const likedPlaylist = normalizedAccountPlaylists.find(playlist => playlist.source === 'netease-liked' || /我喜欢/.test(playlist.name)) || null
+
   const radarPlaylist = home?.blocks.flatMap(block => block.resources).find(resource => neteaseShortcutKind(resource) === 'radar')?.playlist
     || normalizedAccountPlaylists.find(playlist => /雷达/.test(playlist.name)) || null
   const neteaseCurrentSong = currentSong && (currentSong.platform || 'netease') === 'netease' ? currentSong : null
+  // App 实机语义（9.5.90 ADB 验证）：心动模式不要求正在播放——顶栏显示「我喜欢的音乐」，
+  // 以红心歌单里的歌为锚点进入 intelligence 列表；正在播放网易云歌曲时才用当前歌做锚点。
+  const startHeartMode = useCallback(async () => {
+    if (!likedPlaylist) throw new Error('未找到「我喜欢的音乐」歌单，请先登录网易云')
+    const seedSong = neteaseCurrentSong?.id ? neteaseCurrentSong : null
+    let queue: Song[]
+    if (seedSong) {
+      queue = await fetchNeteaseHeartMode(Number(seedSong.id), likedPlaylist.id)
+    } else {
+      const liked = await fetchExplorePlaylist(likedPlaylist)
+      const first = liked.songs[0]
+      if (!first) throw new Error('「我喜欢的音乐」还没有歌曲，先收藏几首吧')
+      const songs = await fetchNeteaseHeartMode(Number(first.id), likedPlaylist.id)
+      // App 以锚点歌开场：返回列表不含锚点时补到队首
+      queue = songs.some(song => String(song.id) === String(first.id)) ? songs : [first, ...songs]
+    }
+    if (!queue.length) throw new Error('心动模式暂无歌曲')
+    onPlaySongs(queue[0], queue, true, { mode: 'heart-mode', playlistId: likedPlaylist.id })
+  }, [likedPlaylist, neteaseCurrentSong, onPlaySongs])
   const dragonBlock = home?.blocks.find(block => block.showType.toUpperCase() === 'DRAGON_BALL' || block.blockCode.toUpperCase() === 'DRAGON_BALL' || /DRAGON.?BALL/.test(`${block.blockCode} ${block.showType}`.toUpperCase()))
   const allHomeResources = home?.blocks.flatMap(block => block.resources) || []
   const shortcutSourceResources = [
@@ -419,10 +447,15 @@ export default function NeteaseExplorePage({
 
   const openUser = async (id: string) => {
     setProfileLoading(true)
+    setProfilePlaylists(null)
     try {
       const result = await getUserDetail(id)
       if (!result?.profile) throw new Error('用户资料加载失败')
       setProfile(result)
+      // 用户主页的歌单是二级入口：并行拉取，失败不阻断资料展示
+      void getUserPlaylistList(id)
+        .then(list => setProfilePlaylists(Array.isArray(list?.playlist) ? list.playlist : []))
+        .catch(() => setProfilePlaylists([]))
     } catch (error) {
       setHomeError(error instanceof Error ? error.message : '用户资料加载失败')
     } finally { setProfileLoading(false) }
@@ -432,7 +465,20 @@ export default function NeteaseExplorePage({
     const action = resource.action
     const queueSongs = queue.map(item => item.song).filter((song): song is Song => Boolean(song))
     switch (action.type) {
-      case 'song': onPlaySongs(action.song, queueSongs.length ? queueSongs : [action.song]); return
+      case 'song': {
+        // 单曲卡自带整栏播放队列（实测「根据你喜爱的歌曲推荐」的 clickAction/playBtn 里
+        // 带着该栏 18 首完整队列）：App 点一张卡播整栏，这里按队列拉详情后从点击项起播。
+        const playQueue = resource.playQueue
+        if (playQueue && playQueue.ids.length > 1) {
+          const songs = await fetchNeteaseSongDetail(playQueue.ids)
+          if (songs.length > 0) {
+            const start = Math.min(playQueue.start, songs.length - 1)
+            onPlaySongs(songs[start], songs, true)
+            return
+          }
+        }
+        onPlaySongs(action.song, queueSongs.length ? queueSongs : [action.song]); return
+      }
       case 'comments': onViewComments?.(action.song); return
       case 'playlist': onOpenPlaylist(action.playlist, action.autoplay); return
       case 'album': onOpenAlbum?.(action.id); return
@@ -440,7 +486,12 @@ export default function NeteaseExplorePage({
       case 'program': {
         const song = await fetchNeteaseProgramSong(action.id)
         if (!song) throw new Error('节目暂时无法播放')
-        onPlaySongs(song, [song])
+        // App 语义（实机验证）：播客栏位点一集，整栏节目按展示顺序进播放列表
+        const siblingIds = queue
+          .filter(item => item !== resource && item.action.type === 'program' && item.action.id && item.action.id !== action.id)
+          .map(item => (item.action as { id: string }).id)
+        const siblings = siblingIds.length ? await fetchNeteaseProgramSongs(siblingIds) : []
+        onPlaySongs(song, [song, ...siblings])
         return
       }
       case 'artist': onOpenArtist?.(action.id); return
@@ -491,10 +542,7 @@ export default function NeteaseExplorePage({
           return
         }
         if (/心动/.test(text)) {
-          if (!likedPlaylist || !neteaseCurrentSong) throw new Error('请先播放一首网易云歌曲再开启心动模式')
-          const songs = await fetchNeteaseHeartMode(neteaseCurrentSong.id, likedPlaylist.id)
-          if (!songs.length) throw new Error('心动模式暂无歌曲')
-          onPlaySongs(songs[0], songs, true, { mode: 'heart-mode', playlistId: likedPlaylist.id })
+          await startHeartMode()
           return
         }
         if (/漫游|私人/.test(text)) {
@@ -538,7 +586,7 @@ export default function NeteaseExplorePage({
       }
       case 'none': setHomeError(`${resource.title} 暂不支持在 WaveForge 内打开`)
     }
-  }, [likedPlaylist, neteaseCurrentSong, onOpenAlbum, onOpenArtist, onOpenChannel, onOpenMV, onOpenPlaylist, onPlaySongs, onViewComments, roamPlayedIds])
+  }, [likedPlaylist, neteaseCurrentSong, onOpenAlbum, onOpenArtist, onOpenChannel, onOpenMV, onOpenPlaylist, onPlaySongs, onViewComments, roamPlayedIds, startHeartMode])
 
   const isSongFavorite = useCallback((resource: NeteaseNativeResource) => {
     const song = resource.song
@@ -604,14 +652,20 @@ export default function NeteaseExplorePage({
     onToggleFavorite: (event: React.MouseEvent, resource: NeteaseNativeResource) => { void toggleFavorite(event, resource) },
     favoriteCount: (resource: NeteaseNativeResource) => resource.song ? redCounts.get(String(resource.song.id)) ?? resource.favoriteCount : resource.favoriteCount,
     entitlement,
+    onOpenResourceDetail: (resource: NeteaseNativeResource) => {
+      const kind = resource.action.type === 'radio' ? 'radio' : resource.action.type === 'program' ? 'program' : ''
+      if (!kind) return
+      setRadioDetail({ kind, id: String(resource.id), title: resource.title, coverUrl: resource.coverUrl })
+    },
     onBlockMore: (block: NeteaseNativeBlock) => {
-      const target = discoverTargetForBlock(block.blockCode)
+      const target = neteaseBlockMoreTarget(block)
       if (!target) return
+      if (target.kind === 'artist') { onOpenArtist?.(target.artistId); return }
       setActiveTab('discover')
       setDiscoverTab(target.tab)
-      setDiscoverJump(previous => ({ ...target, token: (previous?.token || 0) + 1 }))
+      setDiscoverJump(previous => ({ tab: target.tab, channelCode: target.channelCode, token: (previous?.token || 0) + 1 }))
     },
-  }), [entitlement, executeResource, favoritePending, isSongFavorite, onPlaylistContextMenu, onSongContextMenu, redCounts, toggleFavorite])
+  }), [entitlement, executeResource, favoritePending, isSongFavorite, onOpenArtist, onPlaylistContextMenu, onSongContextMenu, redCounts, toggleFavorite])
 
   // 发现页不显示「更多」（App 里发现页区块没有更多入口）
   const discoverCallbacks = useMemo(() => ({ ...callbacks, onBlockMore: undefined }), [callbacks])
@@ -643,8 +697,15 @@ export default function NeteaseExplorePage({
     if (!linkHome?.hasMore || !linkHome.cursor || loadingMoreLink) return
     setLoadingMoreLink(true)
     try {
-      // 翻页必须回传上一页 blockCodeOrderList（服务端要求）
-      const payload = await fetchNeteaseLinkPage('HOME_RECOMMEND_PAGE', linkHome.cursor, false, undefined, linkHome.blockCodeOrderList)
+      // 翻页必须回传上一页 blockCodeOrderList（服务端要求），并带上已展示区块（与 App 行为一致）
+      const payload = await fetchNeteaseLinkPage(
+        'HOME_RECOMMEND_PAGE',
+        linkHome.cursor,
+        false,
+        undefined,
+        linkHome.blockCodeOrderList,
+        linkHome.blocks.map(block => block.blockCode).filter(Boolean),
+      )
       const next = normalizeNeteaseLinkPage(payload)
       const seen = new Set(linkHome.blocks.map(block => block.blockCode))
       const additions = next.blocks.filter(block => {
@@ -665,8 +726,68 @@ export default function NeteaseExplorePage({
     } finally { setLoadingMoreLink(false) }
   }
 
-  const loadMoreFlow = async () => {
-    if (!flow?.hasMore || flowLoading) return
+  /** App 是无限滚动：每屏到底就自动续拉下一页。这里在后台把剩余页补满，
+   *  否则用户只能看到第 1 页的 4~5 个区块，而 App 实际有 19+ 个。
+   *  串行拉取以免打乱服务端要求的 blockCodeOrderList 链；失败静默，保留「加载更多」按钮兜底。 */
+  const linkAutoFillActiveRef = useRef(false)
+  const linkAutoFillCancelledRef = useRef(false)
+  useEffect(() => {
+    if (linkAutoFillActiveRef.current) return
+    if (!linkHome?.hasMore || !linkHome.cursor || linkHome.blocks.length === 0) return
+    linkAutoFillActiveRef.current = true
+    void (async () => {
+      let current = linkHome
+      try {
+        for (let page = 0; page < 12; page += 1) {
+          if (linkAutoFillCancelledRef.current || !current.hasMore || !current.cursor) break
+          const payload = await fetchNeteaseLinkPage(
+            'HOME_RECOMMEND_PAGE',
+            current.cursor,
+            false,
+            undefined,
+            current.blockCodeOrderList,
+            current.blocks.map(block => block.blockCode).filter(Boolean),
+          )
+          if (linkAutoFillCancelledRef.current) break
+          const next = normalizeNeteaseLinkPage(payload)
+          const seen = new Set(current.blocks.map(block => block.blockCode))
+          const additions = next.blocks.filter(block => {
+            if (seen.has(block.blockCode)) return false
+            seen.add(block.blockCode)
+            return true
+          })
+          const merged: NeteaseNativeHome = {
+            ...current,
+            cursor: next.cursor || current.cursor,
+            hasMore: next.hasMore,
+            blockCodeOrderList: next.blockCodeOrderList.length ? next.blockCodeOrderList : current.blockCodeOrderList,
+            blocks: [...current.blocks, ...additions],
+            rawBlocks: [...current.rawBlocks, ...next.rawBlocks],
+          }
+          // 服务端没有再推进就停止，避免空转
+          if (additions.length === 0 && String(next.cursor) === String(current.cursor)) {
+            setLinkHome({ ...merged, hasMore: false })
+            break
+          }
+          current = merged
+          setLinkHome(merged)
+        }
+      } catch {
+        /* 静默：保留「加载更多推荐」按钮兜底 */
+      } finally {
+        linkAutoFillActiveRef.current = false
+      }
+    })()
+    // 注意：这里**不能**在 cleanup 里取消循环——每拉一页都会 setLinkHome 触发本 effect 重跑，
+    // cleanup 会立刻把循环掐断（实测只加载到第 2 页共 12 个区块就停）。
+    // 用 activeRef 做单飞 + 组件卸载时才置 cancelled，保证整条链跑完。
+  }, [linkHome])
+
+  // 组件真正卸载时才终止续拉；切换账号时重新允许（新账号的 linkHome 会被置空后重拉）
+  useEffect(() => () => { linkAutoFillCancelledRef.current = true }, [])
+  useEffect(() => { linkAutoFillCancelledRef.current = false }, [accountKey])
+
+  const loadMoreFlow = async () => {    if (!flow?.hasMore || flowLoading) return
     setFlowLoading(true)
     try {
       const seen = new Set(flow.resources.map(neteaseResourceKey))
@@ -744,12 +865,12 @@ export default function NeteaseExplorePage({
 
   const entryCards = useMemo(() => [
     { title: '每日推荐', subtitle: '今日限定好歌推荐', icon: Sparkles, enabled: verifiedAccount, run: () => requireLogin() && void runEntry('每日推荐', async () => { const songs = await fetchNeteaseDailySongs(); if (!songs.length) throw new Error('今日暂无推荐'); setDailySongs(songs) }) },
-    { title: '心动模式', subtitle: '红心歌曲和相似推荐', icon: HeartPulse, enabled: verifiedAccount, run: () => requireLogin() && void runEntry('心动模式', async () => { if (!likedPlaylist || !neteaseCurrentSong) throw new Error('请先播放一首网易云歌曲再开启心动模式'); const songs = await fetchNeteaseHeartMode(neteaseCurrentSong.id, likedPlaylist.id); if (!songs.length) throw new Error('心动模式暂无歌曲'); onPlaySongs(songs[0], songs, true, { mode: 'heart-mode', playlistId: likedPlaylist.id }) }) },
+    { title: '心动模式', subtitle: '红心歌曲和相似推荐', icon: HeartPulse, enabled: verifiedAccount, run: () => requireLogin() && void runEntry('心动模式', startHeartMode) },
     { title: '雷达歌单', subtitle: '反复聆听你爱的歌', icon: Trophy, enabled: verifiedAccount && Boolean(radarPlaylist), run: () => requireLogin() && radarPlaylist && onOpenPlaylist(radarPlaylist, true) },
     { title: '漫游', subtitle: '多样频道无限畅听', icon: Radio, enabled: verifiedAccount, run: () => requireLogin() && void runEntry('私人漫游', async () => { const songs = await fetchNeteaseRoam(undefined, { unplaySongIds: roamPlayedIds }); if (!songs.length) throw new Error('私人漫游暂无歌曲'); setRoamPlayedIds(previous => [...new Set([...previous, ...songs.map(song => String(song.id))])].slice(-100)); onPlaySongs(songs[0], songs, true, { mode: 'roam' }) }) },
     { title: '相似歌曲', subtitle: '从你喜欢的歌听起', icon: Disc3, enabled: true, run: () => void runEntry('相似歌曲', playSimilarSongs) },
     { title: '相似艺人', subtitle: '从你喜欢的艺人听起', icon: UserRoundSearch, enabled: true, run: () => void runEntry('相似艺人', playSimilarArtists) },
-  ], [likedPlaylist, neteaseCurrentSong, onOpenPlaylist, onPlaySongs, openSimilar, playSimilarArtists, playSimilarSongs, radarPlaylist, requireLogin, roamPlayedIds, runEntry, verifiedAccount])
+  ], [likedPlaylist, neteaseCurrentSong, onOpenPlaylist, onPlaySongs, openSimilar, playSimilarArtists, playSimilarSongs, radarPlaylist, requireLogin, startHeartMode, roamPlayedIds, runEntry, verifiedAccount])
 
   const orderedEntryCards = useMemo(() => entryCards, [entryCards])
 
@@ -879,11 +1000,18 @@ export default function NeteaseExplorePage({
 
       {webTarget && <NeteaseWebPanel target={webTarget} onClose={() => setWebTarget(null)} />}
 
+      {radioDetail && <NeteaseRadioDetailPanel
+        target={radioDetail}
+        onClose={() => setRadioDetail(null)}
+        onOpenRadio={(radioId, name) => setRadioDetail({ kind: 'radio', id: radioId, title: name })}
+        onOpenUser={(userId) => { setRadioDetail(null); void openUser(userId) }}
+      />}
+
       {dailySongs && <NeteaseDailyRecommendPanel initialSongs={dailySongs} entitlement={entitlement} onClose={() => setDailySongs(null)} onPlaySongs={(song, songs) => onPlaySongs(song, songs)} onSongContextMenu={(event, song, songs) => onSongContextMenu(event, song, songs)} />}
 
       {similar && <div className="fixed inset-0 z-[175] flex items-center justify-center bg-black/65 p-5 backdrop-blur-xl" onClick={() => setSimilar(null)}><div className="flex max-h-[86vh] w-full max-w-5xl flex-col overflow-hidden rounded-md border border-white/[0.1] bg-[#0d1118] text-white" onClick={event => event.stopPropagation()}><div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4"><div><h3 className="font-semibold">相似推荐</h3><p className="mt-1 text-xs text-white/38">基于当前歌曲，同时获取歌曲、歌单和用户</p></div><button type="button" onClick={() => setSimilar(null)} aria-label="关闭相似推荐"><X className="h-5 w-5" /></button></div><div className="overflow-y-auto p-5">{similar.loading ? <div className="flex min-h-64 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div> : similar.error ? <p className="text-sm text-rose-200">{similar.error}</p> : <div className="space-y-8">{similar.songs.length > 0 && <section><h4 className="mb-3 font-medium">相似歌曲</h4><div className="grid gap-2 md:grid-cols-2">{similar.songs.map((song, index) => <button key={song.id} type="button" onClick={() => onPlaySongs(song, similar.songs, true)} onContextMenu={event => onSongContextMenu(event, song, similar.songs, true)} className="flex items-center gap-3 rounded-md p-2 text-left hover:bg-white/[0.06]"><CachedImage src={song.album.picUrl} alt="" className="h-12 w-12 rounded-md" role="row" priority={index < 3 ? 'visible' : undefined} /><span className="min-w-0"><span className="block truncate text-sm">{song.name}</span><span className="block truncate text-xs text-white/38">{song.artists.map(artist => artist.name).join(' / ')}</span></span><SongRestrictionBadges song={song} entitlement={entitlement} /></button>)}</div></section>}{similar.playlists.length > 0 && <section><h4 className="mb-3 font-medium">相关歌单</h4><div className="grid grid-cols-2 gap-3 md:grid-cols-4">{similar.playlists.map(item => <button key={item.id} type="button" onClick={() => onOpenPlaylist(item)} className="text-left"><CachedImage src={item.coverUrl} alt="" className="aspect-square w-full rounded-md" role="card" /><span className="mt-2 block line-clamp-2 text-sm">{item.name}</span></button>)}</div></section>}{similar.users.length > 0 && <section><h4 className="mb-3 font-medium">相似用户</h4><div className="grid gap-3 md:grid-cols-3">{similar.users.map(user => <button key={user.id} type="button" onClick={() => void openUser(user.id)} className="flex items-center gap-3 rounded-md border border-white/[0.07] p-3 text-left"><CachedImage src={user.avatarUrl} alt="" className="h-12 w-12 rounded-full" role="compact" /><span className="min-w-0"><span className="block truncate text-sm">{user.name}</span><span className="block truncate text-xs text-white/38">{user.signature}</span></span></button>)}</div></section>}{similar.songs.length === 0 && similar.playlists.length === 0 && similar.users.length === 0 && <p className="py-16 text-center text-sm text-white/45">当前歌曲暂无相似推荐</p>}</div>}</div></div></div>}
 
-      {(profile || profileLoading) && <div className="fixed inset-0 z-[180] flex items-center justify-center bg-black/65 p-5 backdrop-blur-xl" onClick={() => setProfile(null)}><div className="w-full max-w-md rounded-md border border-white/[0.1] bg-[#0d1118] p-6 text-white" onClick={event => event.stopPropagation()}>{profileLoading ? <div className="flex min-h-48 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div> : <><div className="flex items-start justify-between"><div className="flex min-w-0 items-center gap-4"><CachedImage src={profile.profile.avatarUrl} alt="" className="h-16 w-16 rounded-full" role="hero" priority="visible" /><div className="min-w-0"><h3 className="truncate text-lg font-semibold">{profile.profile.nickname}</h3><p className="mt-1 text-xs text-white/38">Lv.{profile.level || 0} · {profile.profile.follows || 0} 关注 · {profile.profile.followeds || 0} 粉丝</p></div></div><button type="button" onClick={() => setProfile(null)} aria-label="关闭用户资料"><X className="h-5 w-5" /></button></div><p className="mt-5 whitespace-pre-wrap text-sm leading-relaxed text-white/55">{profile.profile.signature || '这个用户还没有填写个人介绍。'}</p></>}</div></div>}
+      {(profile || profileLoading) && <div className="fixed inset-0 z-[180] flex items-center justify-center bg-black/65 p-5 backdrop-blur-xl" onClick={() => setProfile(null)}><div className="flex max-h-[86vh] w-full max-w-2xl flex-col overflow-hidden rounded-md border border-white/[0.1] bg-[#0d1118] text-white" onClick={event => event.stopPropagation()}>{profileLoading ? <div className="flex min-h-48 items-center justify-center"><Loader2 className="h-6 w-6 animate-spin" /></div> : <><div className="p-6 pb-4"><div className="flex items-start justify-between"><div className="flex min-w-0 items-center gap-4"><CachedImage src={profile.profile.avatarUrl} alt="" className="h-16 w-16 rounded-full" role="hero" priority="visible" /><div className="min-w-0"><h3 className="truncate text-lg font-semibold">{profile.profile.nickname}</h3><p className="mt-1 text-xs text-white/38">Lv.{profile.level || 0} · {profile.profile.follows || 0} 关注 · {profile.profile.followeds || 0} 粉丝</p></div></div><button type="button" onClick={() => setProfile(null)} aria-label="关闭用户资料"><X className="h-5 w-5" /></button></div><p className="mt-5 whitespace-pre-wrap text-sm leading-relaxed text-white/55">{profile.profile.signature || '这个用户还没有填写个人介绍。'}</p></div>{profilePlaylists === null ? <div className="flex min-h-24 items-center justify-center border-t border-white/[0.07]"><Loader2 className="h-5 w-5 animate-spin text-white/40" /></div> : profilePlaylists.length > 0 ? <div className="overflow-y-auto border-t border-white/[0.07] p-6 pt-5"><h4 className="mb-3 flex items-center gap-2 text-sm font-medium text-white/70">TA 的歌单<span className="text-xs font-normal text-white/35">{profilePlaylists.length}</span></h4><div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">{profilePlaylists.slice(0, 24).map((item: any) => <button key={String(item.id)} type="button" onClick={() => { setProfile(null); onOpenPlaylist({ id: String(item.id), name: String(item.name || '歌单'), coverUrl: String(item.coverImgUrl || item.picUrl || '').replace(/^http:/, 'https:'), description: String(item.description || ''), playCount: Number(item.playCount || 0) || undefined, trackCount: Number(item.trackCount || 0) || undefined, creator: item.creator?.nickname, platform: 'netease' as const, source: 'netease-user-profile' }) }} className="text-left"><CachedImage src={String(item.coverImgUrl || item.picUrl || '').replace(/^http:/, 'https:')} alt="" className="aspect-square w-full rounded-md" role="card" /><span className="mt-2 line-clamp-2 text-xs leading-snug text-white/80">{item.name}</span></button>)}</div></div> : <p className="border-t border-white/[0.07] px-6 py-4 text-xs text-white/38">TA 还没有公开歌单</p>}</>}</div></div>}
     </div>
   )
 }
