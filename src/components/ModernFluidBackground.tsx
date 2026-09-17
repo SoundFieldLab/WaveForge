@@ -127,6 +127,8 @@ export default memo(function ModernFluidBackground({
   const isPlayingRef = useRef(isPlaying)
   const paletteRef = useRef<RgbTriplet[]>(normalizePalette([...DEFAULT_FLUID_PALETTE]))
   const darkRef = useRef(playerTheme === 'dark' ? 1 : 0)
+  // 渲染循环的启动入口（循环在空闲收敛后自行停帧，需要外部事件唤醒）
+  const startRef = useRef<(() => void) | null>(null)
 
   isPlayingRef.current = isPlaying
   darkRef.current = playerTheme === 'dark' ? 1 : 0
@@ -142,6 +144,17 @@ export default memo(function ModernFluidBackground({
   }, [coverUrl])
 
   paletteRef.current = normalizePalette(palette)
+
+  // 循环在「暂停且调色板已收敛」时会停帧；恢复播放或换色后需要重新唤醒。
+  // playerTheme 也在此列：停帧后 dark uniform 不再刷新，主题切换必须重画一次。
+  useEffect(() => {
+    if (!isPlaying) return
+    startRef.current?.()
+  }, [isPlaying])
+
+  useEffect(() => {
+    startRef.current?.()
+  }, [palette, playerTheme])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -211,6 +224,9 @@ export default memo(function ModernFluidBackground({
         canvas.width = width
         canvas.height = height
         context.viewport(0, 0, width, height)
+        // 改 canvas.width/height 会清空绘制缓冲；若循环此刻停在「暂停且已收敛」状态，
+        // 不唤醒就会留一个空白背景。唤醒一次重画当前帧（暂停时 elapsed 不推进，画面不变）。
+        startRef.current?.()
       }
     }
     resize()
@@ -222,24 +238,44 @@ export default memo(function ModernFluidBackground({
     let elapsed = 0
     let lastFrame = 0
     let rafId: number | null = null
+    let running = false
     let lastDark = -1
     const IDLE_FRAME_MS = 1000 / Math.max(1, idleFps)
+    // 收敛判定：三个通道差值都小于此阈值即视为调色板已稳定（远低于 8bit 可辨步长）
+    const PALETTE_EPSILON = 0.002
 
     const render = (now: number) => {
-      rafId = requestAnimationFrame(render)
+      // 窗口隐藏：直接停帧（Electron 关闭 backgroundThrottling 后 rAF 后台仍全速跑，
+      // 这块是全屏 FBM 片元着色器，必须主动停），可见时由 visibilitychange 重启。
+      if (document.visibilityState === 'hidden') {
+        rafId = null
+        running = false
+        return
+      }
       const playing = isPlayingRef.current
       const minFrameMs = playing ? 0 : IDLE_FRAME_MS
-      const delta = lastFrame > 0 ? Math.min(100, now - lastFrame) : 16.7
-      if (delta < minFrameMs) return
+      // lastFrame === 0 表示循环刚起步：必须先画一帧建立画面，不能受空闲帧率门槛拦截。
+      // （否则暂停状态下起步 delta 恒为 16.7 < 83ms，循环会一直空转且永不绘制，
+      //   画布停在上一次的空白/旧帧上。）
+      const firstFrame = lastFrame === 0
+      const delta = firstFrame ? 16.7 : Math.min(100, now - lastFrame)
+      if (!firstFrame && delta < minFrameMs) {
+        rafId = requestAnimationFrame(render)
+        return
+      }
       lastFrame = now
       // 暂停时时间不推进：画面停在当前帧，不空转
       if (playing) elapsed += delta / 1000
 
       const target = paletteRef.current
+      let converged = true
       for (let i = 0; i < current.length; i += 1) {
         const to = target[i] || target[0]
         for (let channel = 0; channel < 3; channel += 1) {
-          current[i][channel] += (to[channel] - current[i][channel]) * 0.05
+          const diff = to[channel] - current[i][channel]
+          // 判定用插值前的差值；本帧只走 5%，即便刚好卡在阈值上也只会多画一帧
+          if (Math.abs(diff) > PALETTE_EPSILON) converged = false
+          current[i][channel] += diff * 0.05
         }
       }
 
@@ -255,12 +291,46 @@ export default memo(function ModernFluidBackground({
         if (location) context.uniform3f(location, color[0], color[1], color[2])
       })
       context.drawArrays(context.TRIANGLES, 0, 3)
+
+      // 播放中持续绘制；暂停后画到调色板收敛即停帧（画面停在当前帧）。
+      // 恢复播放 / 换封面 / 窗口重新可见时经 start() 重启。
+      if (playing || !converged) {
+        rafId = requestAnimationFrame(render)
+      } else {
+        rafId = null
+        running = false
+      }
     }
 
-    rafId = requestAnimationFrame(render)
+    const start = () => {
+      if (running || rafId !== null) return
+      if (document.visibilityState === 'hidden') return
+      running = true
+      lastFrame = 0
+      rafId = requestAnimationFrame(render)
+    }
+    startRef.current = start
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        if (rafId !== null) cancelAnimationFrame(rafId)
+        rafId = null
+        running = false
+      } else {
+        start()
+      }
+    }
+    document.addEventListener('visibilitychange', handleVisibility)
+
+    // 统一经 start() 起步：它带 running/可见性守卫，避免与并发的 start() 双开 rAF
+    start()
 
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibility)
+      startRef.current = null
       if (rafId !== null) cancelAnimationFrame(rafId)
+      rafId = null
+      running = false
       observer?.disconnect()
       context.deleteBuffer(buffer)
       context.deleteProgram(program)

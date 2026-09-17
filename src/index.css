@@ -1618,3 +1618,18 @@ input[type='number'].no-spinner {
 @media (prefers-reduced-motion: reduce) {
   .wf-privacy-wave { animation: none; }
 }
+
+/* ── 保活隐藏面冻结（性能）────────────────────────────────────────────────
+   App 里几个大视图在播放页打开后仍保持挂载（visibility:hidden 保活），
+   目的是保留其内部状态与滚动位置，避免返回时重建。但 visibility:hidden
+   只阻止绘制，**不会**停止 CSS 动画：隐藏面里的无限动画仍会在合成线程上
+   持续运行、每帧参与合成，纯属浪费（PC 版默认全开动效，尤其明显）。
+
+   这里用 animation-play-state: paused 而不是 animation: none —— 前者只是
+   暂停，动画进度得以保留，返回该视图时从原处继续，不会出现元素跳回起点。
+   `*` 覆盖子树内所有元素，作为「漏网组件」的兜底（各组件自身的 rAF 循环
+   需由组件按 suspended 自行停帧，CSS 管不到）。 */
+[data-wf-suspended] *,
+[data-wf-suspended] {
+  animation-play-state: paused !important;
+}

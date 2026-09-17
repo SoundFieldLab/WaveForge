@@ -169,9 +169,25 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
         let smoothedBeatSpeed = 0;
         let previousBeatEnergy = 0;
         let latentOnsetPulse = 0;
+        // 暂停且各平滑量已收敛时，每帧写出的 style/uniform 与上一帧完全相同。
+        // 此时只保留 rAF 心跳（开销近乎为零）并跳过 DOM/shader 写入，避免空转重绘；
+        // 不彻底停帧是为了让恢复播放能自然继续——paused 是 ref，停帧后没有重启入口。
+        const convergedWhilePaused = (isPaused: boolean) =>
+            isPaused
+            && smoothedPower < 0.0005
+            && smoothedBass < 0.0005
+            && smoothedMid < 0.0005
+            && smoothedBeatSpeed < 0.0005
+            && latentOnsetPulse < 0.0005;
 
         // Keep audio-rate changes inside the shader/DOM layer so React only rerenders on palette changes.
         const updateAudioResponse = () => {
+            // 窗口隐藏时停帧（Electron 关闭 backgroundThrottling 后 rAF 后台仍全速跑）；
+            // 重新可见由 visibilitychange 唤醒。
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+                animationFrame = 0;
+                return;
+            }
             const isPaused = pausedRef.current;
             const targetPower = isPaused ? 0 : normalizeAudio(audioPower.get());
             const targetBass = isPaused ? 0 : normalizeAudio(audioBands.bass.get());
@@ -213,6 +229,14 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                 beatSpeedTarget > smoothedBeatSpeed ? 0.42 : 0.14,
             );
 
+            // 暂停且已收敛：本帧要写出的 style/uniform 与上一帧实质相同（差值 < 0.0005，
+            // 换算到 scale ` 只有 1e-5 量级，不可辨），跳过 DOM/shader 写入省掉每帧重绘。
+            // 保留 rAF 心跳而非停帧：paused 是 ref，停帧后没有重启入口。
+            if (convergedWhilePaused(isPaused)) {
+                animationFrame = requestAnimationFrame(updateAudioResponse);
+                return;
+            }
+
             const currentDitheringMount = ditheringRef.current?.paperShaderMount;
             const currentMeshMount = meshRef.current?.paperShaderMount;
 
@@ -250,8 +274,22 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
             animationFrame = requestAnimationFrame(updateAudioResponse);
         };
 
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                // 隐藏时立刻停帧（见 updateAudioResponse 内的可见性门控）
+                if (animationFrame) cancelAnimationFrame(animationFrame);
+                animationFrame = 0;
+            } else if (!animationFrame) {
+                animationFrame = requestAnimationFrame(updateAudioResponse);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
         animationFrame = requestAnimationFrame(updateAudioResponse);
-        return () => cancelAnimationFrame(animationFrame);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+            cancelAnimationFrame(animationFrame);
+        };
     }, [audioBands, audioPower, showMesh, staticMode, tuning]);
 
     return (

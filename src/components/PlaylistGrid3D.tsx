@@ -345,9 +345,17 @@ export default function PlaylistGrid3D({
       return
     }
 
-    const handleScroll = () => {
+    // 滚动事件在高分轮/触控板上比帧率更密，每次都 setState 会把一帧内的多次事件
+    // 变成多次 React 渲染。合并到一个 rAF（与 ScrollToTop/CommentModal 一致的做法）：
+    // 每帧最多提交一次，滚动位置取容器当前值，最终位置与逐次提交完全相同。
+    let frame: number | null = null
+    const commit = () => {
+      frame = null
       setScrollTop(container.scrollTop)
-      debugLog(`📜 [PlaylistGrid3D] 滚动事件触发，当前位置: ${container.scrollTop}px`)
+    }
+    const handleScroll = () => {
+      if (frame !== null) return
+      frame = window.requestAnimationFrame(commit)
     }
 
     debugLog('✅ [PlaylistGrid3D] 已添加滚动监听')
@@ -355,6 +363,10 @@ export default function PlaylistGrid3D({
     return () => {
       debugLog('🗑️ [PlaylistGrid3D] 移除滚动监听')
       container.removeEventListener('scroll', handleScroll)
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame)
+        frame = null
+      }
     }
   }, [containerElement])
 

@@ -254,7 +254,11 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
     setIsSearchMode(false)
   }
 
-  const mvListForPlayer: any[] = playingMV ? [playingMV] : []
+  // 播放器要拿到整个浏览列表才能自动下一首。原来只传 [playingMV]，VideoPlayer 的 auto-next
+  // 永远找不到下一项（浏览模式下手动点播后不会接着播）。directPlay（乐流直达）没有列表，保持单曲。
+  const mvListForPlayer: any[] = directPlay
+    ? (playingMV ? [playingMV] : [])
+    : (mvs.length > 0 ? mvs : (playingMV ? [playingMV] : []))
 
   if (directPlay) {
     return (

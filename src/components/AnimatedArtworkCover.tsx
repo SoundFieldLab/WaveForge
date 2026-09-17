@@ -15,6 +15,12 @@ interface AnimatedArtworkCoverProps {
   style?: React.CSSProperties
   onError?: () => void
   objectFit?: 'cover' | 'contain'
+  /**
+   * 等真正有画面可播时再淡入（默认关闭，保持既有调用方行为）。
+   * 关闭时该层是"就绪即显"，在动态封面晚到/切换歌单的场景会硬闪一下；
+   * 歌单详情面板需要平滑过渡，故显式开启。
+   */
+  fadeInOnReady?: boolean
 }
 
 const isHlsSource = (source: string) => /\.m3u8(?:$|[?#])/i.test(source)
@@ -28,9 +34,12 @@ export default function AnimatedArtworkCover({
   style,
   onError,
   objectFit = 'cover',
+  fadeInOnReady = false,
 }: AnimatedArtworkCoverProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [failed, setFailed] = useState(false)
+  // 有了可显示的画面（首帧解码完成或开始播放）才淡入：避免视频元素一挂上就显黑框。
+  const [ready, setReady] = useState(false)
   const activeRef = useRef(active)
   // onError 用 ref 持有：调用方常传内联箭头函数，若进依赖数组会导致
   // 父组件每次重渲染都销毁重建 HLS 引擎（封面闪烁、播放永远卡在首帧）。
@@ -53,6 +62,7 @@ export default function AnimatedArtworkCover({
 
   useEffect(() => {
     setFailed(false)
+    setReady(false)
     const video = videoRef.current
     if (!video || !videoUrl) return
 
@@ -105,18 +115,25 @@ export default function AnimatedArtworkCover({
   }, [videoUrl])
 
   if (!videoUrl || failed) return null
+  const fading = fadeInOnReady && !ready
   return (
     <video
       ref={videoRef}
       key={videoUrl}
       className={className}
-      style={{ ...style, objectFit }}
+      style={{
+        ...style,
+        objectFit,
+        ...(fadeInOnReady ? { opacity: fading ? 0 : 1, transition: 'opacity 0.32s ease-out' } : null),
+      }}
       poster={posterUrl || staticCoverUrl || undefined}
       muted
       loop
       playsInline
       preload="auto"
       disablePictureInPicture
+      onLoadedData={() => setReady(true)}
+      onPlaying={() => setReady(true)}
       onError={() => {
         console.warn('[AppleMotion] 动态封面失败 stage=video-element')
         setFailed(true)

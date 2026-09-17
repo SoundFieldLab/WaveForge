@@ -50,8 +50,15 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
     if (!ctx) return
     const dpr = window.devicePixelRatio || 1
 
+    // 尺寸缓存：resize() 会写 canvas.width/height 与 style，本身已作废布局；
+    // 若每帧再 getBoundingClientRect 就会强制同步重排。ResizeObserver 回调是尺寸的
+    // 唯一真源，缓存宽度/高度供每帧读取（弹幕层宽高只随窗口/布局变化，不随播放变化）。
+    let cachedWidth = 0
+    let cachedHeight = 0
     const resize = () => {
       const rect = parent.getBoundingClientRect()
+      cachedWidth = rect.width
+      cachedHeight = rect.height
       canvas.width = Math.max(1, Math.floor(rect.width * dpr))
       canvas.height = Math.max(1, Math.floor(rect.height * dpr))
       canvas.style.width = `${rect.width}px`
@@ -66,8 +73,8 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
     const shieldWords = settings.shieldKeywords.split(/[,，\s]+/).filter(Boolean)
     const filtered = items.filter((it) => !shieldWords.some((k) => it.text.includes(k)))
 
-    const cssWidth = () => parent.getBoundingClientRect().width
-    const cssHeight = () => parent.getBoundingClientRect().height
+    const cssWidth = () => cachedWidth || parent.getBoundingClientRect().width
+    const cssHeight = () => cachedHeight || parent.getBoundingClientRect().height
     const fontSizeAt = () => Math.max(12, Math.min(36, settings.fontSize * (cssWidth() / 1920)))
     const laneCountAt = () => {
       const h = cssHeight()

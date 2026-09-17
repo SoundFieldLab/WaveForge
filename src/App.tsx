@@ -4209,9 +4209,23 @@ function App() {
       // Lyrics and artwork begin together with audio preparation. The upcoming
       // player image is decoded before transition state starts using it.
       void ensureSongLyrics(song, cacheKey)
-      void preloadArtwork(song.album?.picUrl || '', {
-        role: position === 0 ? 'background' : 'player',
-        priority: position === 0 ? 'critical' : 'visible',
+      // 封面必须按「播放页封面用的那一档清晰度」预热，否则切歌后仍要现下载。
+      // 缓存键与代理 URL 都带清晰度（`artwork:v1:{platform}:{rendition}:{source}`）：
+      // 背景层要 background(128)，播放页封面走 getProxiedImageUrl 的默认 size=500→512 桶。
+      // 此前 position 0 只预热 background，切歌后封面 <img> 得重新拉 512 图；下载期间
+      // 浏览器继续显示上一首已解码的位图（不会闪空），表现就是"背景已换成新歌、
+      // 封面还停在上一首 3~4 秒"。
+      // 这里显式传 size:500（而不是 role）以与 displayCoverUrl 完全同一档，
+      // 不受 devicePixelRatio 影响——URL 一致才能真正命中 HTTP 缓存。
+      const coverSource = song.album?.picUrl || ''
+      const isImmediateNext = position === 0
+      void preloadArtwork(coverSource, {
+        role: 'background',
+        priority: isImmediateNext ? 'critical' : 'deferred',
+      }).catch(() => undefined)
+      void preloadArtwork(coverSource, {
+        size: 500,
+        priority: isImmediateNext ? 'critical' : 'visible',
       }).catch(() => undefined)
 
       // Apple 原生播放只为第一首确定的 next 预取 CENC stream，限制为 active + standby 两个会话。
@@ -6697,23 +6711,41 @@ function App() {
 
   // Apple Music 登录态：token 保存在 localStorage（AppleLoginPanel 写入），
   // 这里只同步 React 状态并广播 auth 事件，让首页/个人中心等模块感知变化。
-  const handleAppleLogin = (user: AppleUserInfo | null) => {
-    refreshAppleAuth(user)
-    setAuthRevision(previous => previous + 1)
-    window.dispatchEvent(new CustomEvent('waveforge-auth-changed', {
-      detail: { platform: 'apple', userId: '' }
-    }))
-    if (user) addToast('Apple Music 登录成功', 'success')
+  //
+  // 这两个回调会作为 props 传给常驻挂载的 HomeView / DesktopView / SettingsPanel（均为 memo）。
+  // 若每次渲染重建引用就会击穿这三棵巨型子树的 memo——App 每次因播放进度/过渡重渲染时
+  // 都连带重渲染。故按本文件既有做法（viewCallbacks / profileLogoutRef）：实现体放 ref
+  // 每次渲染刷新（闭包始终最新），对外只暴露引用稳定的 useCallback。
+  const appleAuthHandlersRef = useRef({
+    login: (_user: AppleUserInfo | null) => {},
+    logout: () => {},
+  })
+  appleAuthHandlersRef.current = {
+    login: (user: AppleUserInfo | null) => {
+      refreshAppleAuth(user)
+      setAuthRevision(previous => previous + 1)
+      window.dispatchEvent(new CustomEvent('waveforge-auth-changed', {
+        detail: { platform: 'apple', userId: '' }
+      }))
+      if (user) addToast('Apple Music 登录成功', 'success')
+    },
+    logout: () => {
+      void window.electron?.appleLogout?.().catch(() => undefined)
+      clearAppleLogin()
+      refreshAppleAuth(null)
+      setAuthRevision(previous => previous + 1)
+      window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'apple' } }))
+      addToast('Apple Music 已退出登录', 'info')
+    },
   }
-
-  const handleAppleLogout = () => {
-    void window.electron?.appleLogout?.().catch(() => undefined)
-    clearAppleLogin()
-    refreshAppleAuth(null)
-    setAuthRevision(previous => previous + 1)
-    window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'apple' } }))
-    addToast('Apple Music 已退出登录', 'info')
-  }
+  const handleAppleLogin = useCallback(
+    (user: AppleUserInfo | null) => appleAuthHandlersRef.current.login(user),
+    [],
+  )
+  const handleAppleLogout = useCallback(
+    () => appleAuthHandlersRef.current.logout(),
+    [],
+  )
 
   // Spotify OAuth 授权结果（主进程回调）：持久化 token + 同步登录态
   useEffect(() => {
@@ -7872,6 +7904,7 @@ function App() {
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-full w-full"
             style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: exploreKeptAlive ? 1 : 2, visibility: exploreKeptAlive ? 'hidden' : 'visible' }}
+            data-wf-suspended={exploreKeptAlive ? '' : undefined}
           >
             <LazyExploreView
               motionSuspended={exploreKeptAlive}
@@ -8043,6 +8076,7 @@ function App() {
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-full w-full"
             style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: traditionalKeptAlive ? 1 : 2, visibility: traditionalKeptAlive ? 'hidden' : 'visible' }}
+            data-wf-suspended={traditionalKeptAlive ? '' : undefined}
           >
             <LazyTraditionalView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -8108,6 +8142,7 @@ function App() {
               onAddToPlaylist={viewCallbacks.onAddToPlaylist}
               onViewComments={viewCallbacks.onViewComments}
               onCopyInfo={viewCallbacks.onCopyInfo}
+              suspended={traditionalKeptAlive}
             />
           </motion.div>
         )}
@@ -8380,6 +8415,7 @@ function App() {
               }}
               className="absolute inset-0"
               style={{ willChange: 'transform, opacity, filter', visibility: minimalHomeKeptAlive ? 'hidden' : 'visible', zIndex: 0 }}
+              data-wf-suspended={minimalHomeKeptAlive ? '' : undefined}
             >
             <LazyHomeView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -8438,6 +8474,7 @@ function App() {
               accentColor={playbackCoverColor}
               currentSong={currentSong}
               playerTheme={playerTheme}
+              suspended={minimalHomeKeptAlive}
             />
             </motion.div>
           )}

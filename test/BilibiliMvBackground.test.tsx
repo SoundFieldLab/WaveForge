@@ -400,6 +400,31 @@ describe('BilibiliMvBackground regressions', () => {
     expect(loadSpy).not.toHaveBeenCalled()
   })
 
+  // 首页/其它表面盖住 MV 时复用同一个 hidden 通道（不另造机制），因此这里锁死两点：
+  //   ① 遮挡期间不重新拉流、不丢缓冲（否则切回来会重新搜索 + 黑屏等待）；
+  //   ② 取消遮挡后按音频时钟硬同步（"实时对准"），而不是从隐藏前的位置继续播。
+  it('keeps the buffered MV while covered by another surface and re-syncs to the audio clock on return', async () => {
+    const audio = new Audio()
+    Object.defineProperty(audio, 'currentTime', { configurable: true, value: 42, writable: true })
+    vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('current-bvid'))
+    const view = render(<BilibiliMvBackground {...baseProps(audio)} isPlaying />)
+    await waitFor(() => expect(view.container.querySelector('video')?.getAttribute('src')).toBe('http://stream/cache/video'))
+    const video = view.container.querySelector('video')!
+    setMediaState(video, { readyState: 4, duration: 180, currentTime: 5 })
+    const loadSpy = vi.mocked(HTMLMediaElement.prototype.load)
+    loadSpy.mockClear()
+
+    // 被首页盖住：与看歌同样的语义——只是临时遮挡
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying hidden />)
+    expect(video.getAttribute('src')).toBe('http://stream/cache/video')
+    expect(loadSpy).not.toHaveBeenCalled()
+
+    // 取消遮挡：硬同步到音频位置（42s % 180s = 42s），而不是接着 5s 播
+    view.rerender(<BilibiliMvBackground {...baseProps(audio)} isPlaying hidden={false} />)
+    await waitFor(() => expect(video.currentTime).toBe(42))
+    expect(video.getAttribute('src')).toBe('http://stream/cache/video')
+  })
+
   it('resumes a buffered MV when returning from watch mode while audio is playing', async () => {
     const audio = new Audio()
     vi.mocked(bili.findBestBilibiliMv).mockResolvedValue(autoResult('current-bvid'))

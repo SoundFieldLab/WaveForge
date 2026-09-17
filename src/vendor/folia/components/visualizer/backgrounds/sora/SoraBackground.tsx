@@ -144,6 +144,12 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
     let lastTimestamp = performance.now();
 
     const render = (now: number) => {
+      // 窗口隐藏时停帧：Electron 关闭 backgroundThrottling 后 rAF 在后台仍全速跑，
+      // 星野是纯装饰层，隐藏时无绘制价值；重新可见由 visibilitychange 唤醒。
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        animationRef.current = null;
+        return;
+      }
       if (!pausedRef.current) {
         const delta = (now - lastTimestamp) / 1000;
         timeRef.current += delta;
@@ -180,7 +186,20 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
 
     animationRef.current = requestAnimationFrame(render);
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (animationRef.current) cancelAnimationFrame(animationRef.current);
+        animationRef.current = null;
+      } else if (animationRef.current === null) {
+        // 恢复可见：重置时间基准，避免把隐藏期间的时间一次性补进来导致星野瞬移
+        lastTimestamp = performance.now();
+        animationRef.current = requestAnimationFrame(render);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
       }

@@ -49,7 +49,12 @@ export default function ModernAudioVisualizer({
   }, [isPlaying])
 
   useEffect(() => {
-    const applyPulse = () => {
+    // 与 App.tsx 的 pulse 写入同样的节流（32ms/30fps）：pulseStore 由音频分析驱动、
+    // 可到 120fps，而这里每次写入都会重设 canvas.style.filter（整块画布重新栅格化）。
+    // 脉冲是缓慢呼吸效果，30fps 视觉无差。
+    // 采用「首帧立即 + 尾帧补一次」而不是简单丢弃：脉冲停止时 store 会发布一次
+    // 归零快照，若被丢弃会留下非零亮度/缩放，所以区间末尾必须再落一次最新值。
+    const write = () => {
       const surface = pulseSurfaceRef.current
       const glow = pulseGlowRef.current
       const canvas = canvasRef.current
@@ -62,9 +67,32 @@ export default function ModernAudioVisualizer({
       glow.style.opacity = String(Math.min(0.62, restlessPulse * 0.48))
       glow.style.transform = `translate3d(0, 0, 0) scale(${1 + restlessPulse * 0.04})`
     }
+    const PULSE_MIN_INTERVAL_MS = 32
+    let lastAppliedAt = 0
+    let trailingTimer: number | null = null
+    const applyPulse = () => {
+      const now = performance.now()
+      const elapsed = now - lastAppliedAt
+      if (lastAppliedAt !== 0 && elapsed < PULSE_MIN_INTERVAL_MS) {
+        if (trailingTimer === null) {
+          trailingTimer = window.setTimeout(() => {
+            trailingTimer = null
+            lastAppliedAt = performance.now()
+            write()
+          }, PULSE_MIN_INTERVAL_MS - elapsed)
+        }
+        return
+      }
+      lastAppliedAt = now
+      write()
+    }
 
     applyPulse()
-    return pulseStore.subscribe(applyPulse)
+    const unsubscribe = pulseStore.subscribe(applyPulse)
+    return () => {
+      unsubscribe()
+      if (trailingTimer !== null) window.clearTimeout(trailingTimer)
+    }
   }, [pulseStore])
 
   useEffect(() => {

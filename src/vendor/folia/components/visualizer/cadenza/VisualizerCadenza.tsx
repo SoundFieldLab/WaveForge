@@ -1291,6 +1291,9 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
     const preparedStateCacheRef = useRef<Map<string, PreparedState>>(new Map());
     const preparedStateCacheContextKeyRef = useRef<string>('');
     const lastFrameTimeRef = useRef<number | null>(null);
+    // paused 经 ref 读取：draw 循环的 effect 依赖里没有 paused，直接闭包取值会读到旧值
+    const pausedRef = useRef(props.paused ?? false);
+    pausedRef.current = props.paused ?? false;
 
     const {
         activeLine,
@@ -1424,12 +1427,24 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
         // WaveForge 性能适配：高刷屏（120/240Hz）上限 60fps——每帧 canvas 栅格化 + DOM 覆写
         // 成本高，歌词动画 60fps 肉眼无差；dt 按真实帧间隔计算，跳帧不影响运动正确性。
         let lastGateAt = 0;
+        // 暂停时降帧到 12fps：暂停后 currentTime 冻结、audioPower 衰减到 0、缓动状态收敛，
+        // 画面实质静止，没有每帧重栅格化的价值；但不能彻底停帧——audioPower 为 0 的过程
+        // 和 animatedState 收敛仍需继续绘制。12fps 足以走完收敛，肉眼与静止无异。
+        const PAUSED_FRAME_MS = 1000 / 12;
         const textContext = textCanvas.getContext('2d');
         if (!textContext) return;
 
         const draw = () => {
             const now = performance.now();
-            if (lastGateAt !== 0 && now - lastGateAt < 1000 / 60) {
+            // 窗口隐藏时停帧：Electron 关闭 backgroundThrottling 后 rAF 后台仍全速跑，
+            // 而这里每帧都在重栅格化 canvas，隐藏时必须停（与其它可视化一致）。
+            if (document.visibilityState === 'hidden') {
+                frameId = 0;
+                lastGateAt = 0;
+                return;
+            }
+            const frameBudget = pausedRef.current ? PAUSED_FRAME_MS : 1000 / 60;
+            if (lastGateAt !== 0 && now - lastGateAt < frameBudget) {
                 frameId = window.requestAnimationFrame(draw);
                 return;
             }
@@ -1657,8 +1672,20 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
             frameId = window.requestAnimationFrame(draw);
         };
 
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                if (frameId) window.cancelAnimationFrame(frameId);
+                frameId = 0;
+            } else if (!frameId) {
+                lastGateAt = 0;
+                frameId = window.requestAnimationFrame(draw);
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+
         draw();
         return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
             window.cancelAnimationFrame(frameId);
             lastFrameTimeRef.current = null;
             clearOverlayWordNodes(overlayNodesRef.current);

@@ -93,6 +93,7 @@ interface HomeViewProps {
   currentSong?: Song | null
   playerTheme?: 'light' | 'dark'
   authRevision?: number
+  suspended?: boolean
 }
 
 type ChartType = 'new' | 'hot' | 'rising'
@@ -278,7 +279,11 @@ function HomeView({
   accentColor = '#3B82F6',
   currentSong = null,
   playerTheme = 'dark',
-  authRevision = 0
+  authRevision = 0,
+  /** 首页被播放页覆盖时仍保持挂载（visibility:hidden 保活），此时停掉昂贵的无限动画：
+   *  visibility:hidden 不会阻止 framer-motion 的 rAF 写入，背景渐变（每帧全屏重绘）
+   *  与 5 个 blur(80px) 光晕会持续跑合成，纯属浪费。与 ExploreView 的 suspended 同义。 */
+  suspended = false
 }: HomeViewProps) {
   const [leftChartType, setLeftChartType] = useState<ChartType>('new')
   const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'selectedPlatform'))
@@ -543,7 +548,8 @@ function HomeView({
   const tvChevronFloat = !isTvModeActive() || perfMode === 'enhanced'
   // 昂贵的动态背景（渐变 + 光晕）：性能模式仅约束 TV（效能/普通降为静态省 CPU/内存）；
   // PC 上始终全开（PC 的 perfMode 默认 normal，但不受 TV 性能档约束）。
-  const showHeavyVisuals = !isTvModeActive() || perfMode === 'enhanced'
+  // suspended（首页被播放页覆盖时保活）时同样降为静态：不可见，动画纯属浪费。
+  const showHeavyVisuals = (!isTvModeActive() || perfMode === 'enhanced') && !suspended
   const topBarActive = (tvMode && !remoteCursorMode) || isTopHovered
   const bottomBarActive = (tvMode && !remoteCursorMode) || isBottomBarHovered
   const [showUpArrowHint, setShowUpArrowHint] = useState(false)

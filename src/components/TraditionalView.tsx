@@ -23,7 +23,7 @@ import { createPlaylist, deletePlaylist, getUserPlaylists, invalidateUserPlaylis
 import { createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getLastAppleMutationResult, getAppleCatalogPlaylistTracks, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs, getApplePlaylistTracks, getAppleRecentPlayed, appleLibraryTrackToSong, appleSongToSong, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
 import { sodaMediaToSong } from '../services/sodaService'
 import { fetchSpotifyLiked, fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spotifyService'
-import { useAudioAnalyzerSnapshot, type AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
+import type { AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS } from './ModeSelectionPanel'
@@ -149,6 +149,9 @@ interface TraditionalViewProps {
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
+  /** 被播放页覆盖（visibility:hidden 保活）时为 true：停掉隐藏面的持续绘制。
+   *  document.visibilityState 拦不住这种情况——窗口可见，只是这块面被藏了。 */
+  suspended?: boolean
 }
 
 const PLATFORM_ACCENTS: Record<MusicPlatform, string> = {
@@ -247,24 +250,34 @@ const TraditionalSpectrum = memo(function TraditionalSpectrum({
   isPlaying,
   songTheme,
   isDark,
+  suspended = false,
 }: {
   analyzerStore: AudioAnalyzerStore
   isPlaying: boolean
   songTheme: string
   isDark: boolean
+  suspended?: boolean
 }) {
-  const { spectrum } = useAudioAnalyzerSnapshot(analyzerStore)
+  // 频谱数据不经过 React：canvas 在自己的 rAF 里直接读 analyzerStore.getSnapshot()。
+  // 但必须保留一个订阅者——useAudioAnalyzer 在「无订阅者」时会自动停帧（见
+  // shouldRunAudioAnalyzer），退订会让分析器停跑、频谱冻结。所以用 no-op 订阅占位
+  // （与 useAudioPulse 的做法一致），既维持分析器运行，又不再以 30Hz 触发 React 重渲染。
+  useEffect(() => analyzerStore.subscribe(() => {}), [analyzerStore])
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const latestSpectrumRef = useRef<Float32Array>(new Float32Array(24))
   const playingRef = useRef(isPlaying)
+  const suspendedRef = useRef(suspended)
   const levelsRef = useRef<Float32Array>(new Float32Array(24))
+  // 冻结后需要外部唤醒（suspended 从 true 变 false 时）
+  const resumeRef = useRef<(() => void) | null>(null)
 
-  useEffect(() => {
-    latestSpectrumRef.current = Float32Array.from(spectrum)
-  }, [spectrum])
   useEffect(() => {
     playingRef.current = isPlaying
   }, [isPlaying])
+  // 冻结/解冻：隐藏面停止绘制，重新可见时经 resumeRef 唤醒
+  useEffect(() => {
+    suspendedRef.current = suspended
+    if (!suspended) resumeRef.current?.()
+  }, [suspended])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -297,13 +310,15 @@ const TraditionalSpectrum = memo(function TraditionalSpectrum({
     }
     const draw = (now: number) => {
       if (disposed) return
-      if (hidden) { frame = 0; return }
+      // 冻结（本面被播放页覆盖）或窗口隐藏：停帧。这里不能只依赖 document.visibilityState——
+      // 保活时窗口是可见的，只是这块面被 visibility:hidden 藏了，必须由 suspended 告知。
+      if (hidden || suspendedRef.current) { frame = 0; return }
       const frameBudget = reducedMotion ? 250 : 1000 / 60
       if (now - lastDraw < frameBudget) { frame = requestAnimationFrame(draw); return }
       lastDraw = now
       const delta = Math.min(80, Math.max(0, now - (lastTime || now)))
       lastTime = now
-      const target = latestSpectrumRef.current
+      const target = analyzerStore.getSnapshot().spectrum
       const levels = levelsRef.current
       const count = levels.length
       for (let index = 0; index < count; index += 1) {
@@ -353,8 +368,10 @@ const TraditionalSpectrum = memo(function TraditionalSpectrum({
       else frame = 0
     }
     const resumeDraw = () => {
-      if (!disposed && !hidden && frame === 0) frame = requestAnimationFrame(draw)
+      if (!disposed && !hidden && !suspendedRef.current && frame === 0) frame = requestAnimationFrame(draw)
     }
+    // 暴露给 suspended 变化的 effect：解冻时重新起跳（冻结路径在 draw 内自行停帧）
+    resumeRef.current = resumeDraw
     const onVisibilityChange = () => {
       hidden = document.visibilityState === 'hidden'
       if (!hidden) resumeDraw()
@@ -369,6 +386,7 @@ const TraditionalSpectrum = memo(function TraditionalSpectrum({
     frame = requestAnimationFrame(draw)
     return () => {
       disposed = true
+      resumeRef.current = null
       if (frame) cancelAnimationFrame(frame)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       motionMedia?.removeEventListener?.('change', onMotionChange)
@@ -507,6 +525,10 @@ function TraditionalView({
   liked = false, onToggleFavorite, playMode = 'sequential', onPlayModeChange, onOpenMixingStudio,
   neteaseVip = false, qqVip = false,
   onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onCopyInfo,
+  /** 本视图被播放页覆盖（visibility:hidden 保活）时为 true：停掉隐藏面的持续绘制。
+   *  document.visibilityState 拦不住这种情况——窗口可见，只是这块面被藏了，
+   *  所以必须由 App 显式告知（与 ExploreView/HomeView 的 suspended 同义）。 */
+  suspended = false,
 }: TraditionalViewProps) {
   const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'traditionalPlatform'))
   const canUseRecent = getPlatformCapabilities(platform).recentPlayed
@@ -1296,7 +1318,7 @@ function TraditionalView({
                     <span className="min-w-0 flex-1"><span className="block truncate text-[15px] font-medium">{currentSong.name}</span><span className={`mt-1.5 block truncate text-xs ${muted}`}>{currentSong.artists?.map(a => a.name).join(' / ')}</span><span className={`mt-1 block truncate text-[10px] ${muted}`}>{currentSong.album?.name || '未知专辑'}</span></span>
                   </button>
                   {preferences.showWaveform && (
-                    <TraditionalSpectrum analyzerStore={analyzerStore} isPlaying={isPlaying} songTheme={songTheme} isDark={isDark} />
+                    <TraditionalSpectrum analyzerStore={analyzerStore} isPlaying={isPlaying} songTheme={songTheme} isDark={isDark} suspended={suspended} />
                   )}
                   {live ? (
                     <div className="mt-3 flex items-center gap-2 text-xs font-semibold text-[#fa2d48]"><span className="h-2 w-2 rounded-full bg-[#fa2d48]" />正在直播</div>

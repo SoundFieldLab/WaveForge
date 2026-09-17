@@ -1164,13 +1164,12 @@ export default function ModengPlayerPage({
       }
 
       // —— 4. 进度条 / 时间标签 ——
+      //   注意：这几行写的是进度条（左栏）的样式，而第 5 段要读歌词列（右栏）的真实几何。
+      //   写样式会作废布局缓存，紧接着读 rect 就强制同步重排（每帧一次，120fps 下开销可观）。
+      //   进度条是绝对定位、且在另一列，它的宽度不影响歌词行几何，所以把这两组写操作
+      //   挪到第 5 段之后：先读后写，读数与原先完全一致，且不再触发强制重排。
       const dur = durationRef.current
       const clampedNow = Math.min(t, dur > 0 ? dur : t)
-      if (progressFillRef.current) {
-        progressFillRef.current.style.width = dur > 0 ? `${clamp01(clampedNow / dur) * 100}%` : '0%'
-      }
-      if (elapsedRef.current) elapsedRef.current.textContent = formatTime(clampedNow)
-      if (remainRef.current) remainRef.current.textContent = `-${formatTime(Math.max(0, dur - clampedNow))}`
 
       // —— 5. 整列滚动 scrollSpring（AMLL）：当前行居中，rAF 唯一驱动 translateY ——
       //   translateY 为正 = 内容下移；为负 = 内容上移。
@@ -1229,6 +1228,13 @@ export default function ModengPlayerPage({
         }
         wrapEl.style.transform = `translateY(${scrollPosRef.current.toFixed(2)}px)`
       }
+
+      // —— 5.5 进度条 / 时间标签（见第 4 段注释：挪到几何读取之后，避免每帧强制重排）——
+      if (progressFillRef.current) {
+        progressFillRef.current.style.width = dur > 0 ? `${clamp01(clampedNow / dur) * 100}%` : '0%'
+      }
+      if (elapsedRef.current) elapsedRef.current.textContent = formatTime(clampedNow)
+      if (remainRef.current) remainRef.current.textContent = `-${formatTime(Math.max(0, dur - clampedNow))}`
     }
 
     const tick = (wall: number) => {

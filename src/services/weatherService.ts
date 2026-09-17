@@ -1,5 +1,4 @@
 import type { DesktopCustomizationSettings } from './desktopCustomization'
-import { searchChinaAreas } from './locationHierarchy'
 
 export interface WeatherLocation {
   name: string
@@ -305,6 +304,21 @@ const searchRemoteWeatherLocations = async (keyword: string): Promise<WeatherLoc
   return results
 }
 
+// locationHierarchy 静态引入会把 country-state-city 的 country/state 字典
+// （约 555KB JSON）和 china-area-data（约 203KB）拖进首屏 chunk。这里改为按需加载：
+// 整条引用链是 weatherService ← backgroundPrefetch ← App，只在登录恢复后的后台预热里
+// 触发，首屏并不需要它。缓存 Promise，失败时置空以便下次重试。
+let chinaAreaSearchModule: Promise<typeof import('./locationHierarchy')> | null = null
+const loadChinaAreaSearch = () => {
+  if (!chinaAreaSearchModule) {
+    chinaAreaSearchModule = import('./locationHierarchy').catch(() => {
+      chinaAreaSearchModule = null
+      return null as unknown as typeof import('./locationHierarchy')
+    })
+  }
+  return chinaAreaSearchModule
+}
+
 export const searchWeatherLocations = async (
   query: string,
   signal?: AbortSignal,
@@ -312,7 +326,9 @@ export const searchWeatherLocations = async (
   const keyword = query.trim()
   if (keyword.length < 2) return []
 
-  const localResults: WeatherLocationSearchResult[] = searchChinaAreas(keyword).map(area => ({
+  // 本地中国行政区匹配（数据懒加载）；加载失败则直接走远端地理编码。
+  const hierarchy = await loadChinaAreaSearch()
+  const localResults: WeatherLocationSearchResult[] = (hierarchy?.searchChinaAreas(keyword) ?? []).map(area => ({
     id: `china:${area.districtCode || area.cityCode || area.provinceCode}`,
     label: makeLocationSearchLabel('中国', area.province, area.city, area.district, area.district || area.city || area.province),
     name: area.district || area.city || area.province,
