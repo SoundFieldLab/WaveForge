@@ -656,6 +656,13 @@ export default function DGLabConsoleModal() {
               >
                 <BookOpen className="w-3.5 h-3.5" />说明
               </button>
+              <button
+                onClick={() => window.dispatchEvent(new CustomEvent('waveforge:dglab-oobe-open'))}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-amber-200/80 hover:bg-amber-200/15 transition-colors"
+                title="连接引导：一步步演示手机如何连上当前插件"
+              >
+                <QrCode className="w-3.5 h-3.5" />连接引导
+              </button>
               <span className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium border"
                 style={{ color: badge.color, borderColor: `${badge.color}44`, background: `${badge.color}14` }}>
                 <span className="w-1.5 h-1.5 rounded-full" style={{ background: badge.color, boxShadow: status.state === 'bound' ? `0 0 8px ${badge.color}` : 'none' }} />
