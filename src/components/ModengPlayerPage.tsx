@@ -93,7 +93,7 @@ interface ModengPlayerPageProps {
   animatedCoverUrl?: string | null
   animatedCoverPoster?: string | null
   trackId?: string | number
-  /** 翻译/罗马音显示：仅用作摩登模式首次加载时的默认值；实际切换由组件内部 waveforge_modeng_* 状态独立管理（与其他歌词模式隔离） */
+  /** 翻译/罗马音显示：传入时作为受控状态；未传入时使用摩登模式本地持久化状态 */
   translationEnabled?: boolean
   romanEnabled?: boolean
   /** 当前歌曲是否含有翻译/罗马音：按钮无内容时置灰禁用 */
@@ -376,11 +376,13 @@ export default function ModengPlayerPage({
     }
   })
   const toggleTranslation = () => {
-    setTranslationEnabled(prev => {
-      const next = !prev
-      try { localStorage.setItem(MODENG_TRANSLATION_ENABLED_KEY, JSON.stringify(next)) } catch { /* noop */ }
-      return next
-    })
+    if (translationEnabledProp === undefined) {
+      setTranslationEnabled(prev => {
+        const next = !prev
+        try { localStorage.setItem(MODENG_TRANSLATION_ENABLED_KEY, JSON.stringify(next)) } catch { /* noop */ }
+        return next
+      })
+    }
     onTranslationToggle?.()
   }
 
@@ -395,13 +397,20 @@ export default function ModengPlayerPage({
     }
   })
   const toggleRoman = () => {
-    setRomanEnabled(prev => {
-      const next = !prev
-      try { localStorage.setItem(MODENG_ROMAN_ENABLED_KEY, JSON.stringify(next)) } catch { /* noop */ }
-      return next
-    })
+    if (romanEnabledProp === undefined) {
+      setRomanEnabled(prev => {
+        const next = !prev
+        try { localStorage.setItem(MODENG_ROMAN_ENABLED_KEY, JSON.stringify(next)) } catch { /* noop */ }
+        return next
+      })
+    }
     onRomanToggle?.()
   }
+
+  const effectiveTranslationEnabled = translationEnabledProp ?? translationEnabled
+  const effectiveRomanEnabled = romanEnabledProp ?? romanEnabled
+  const resolvedHasTranslation = hasTranslation ?? lyrics.some(line => Boolean(line.translation?.trim()))
+  const resolvedHasRoman = hasRoman ?? lyrics.some(line => Boolean(line.roman?.trim()) || Boolean(line.romanWords?.length))
 
   // 摩登模式"左右交替歌词"开关：独立 key + 自定义事件（由快捷设置面板切换，隔离其它模式）。
   //   开启后按歌曲结构左右对齐：对唱按 agent 分工、普通歌按分段(句间隔大)奇数段右对齐/偶数段左对齐。
@@ -1923,19 +1932,19 @@ export default function ModengPlayerPage({
               <button
                 type="button"
                 aria-label="翻译"
-                aria-pressed={translationEnabled && Boolean(hasTranslation)}
-                disabled={!hasTranslation}
+                aria-pressed={effectiveTranslationEnabled && Boolean(resolvedHasTranslation)}
+                disabled={!resolvedHasTranslation}
                 onClick={e => {
                   e.stopPropagation()
                   toggleTranslation()
                 }}
-                title={hasTranslation ? (translationEnabled ? '关闭翻译' : '显示翻译') : '当前歌曲暂无翻译'}
+                title={resolvedHasTranslation ? (effectiveTranslationEnabled ? '关闭翻译' : '显示翻译') : '当前歌曲暂无翻译'}
                 className="modeng-btn modeng-btn-chip flex items-center justify-center rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{
                   width: 28 * s,
                   height: 28 * s,
-                  background: translationEnabled && hasTranslation ? c.barFill : c.chip,
-                  color: translationEnabled && hasTranslation ? (dark ? '#ffffff' : '#1c1c1e') : c.sub,
+                  background: effectiveTranslationEnabled && resolvedHasTranslation ? c.barFill : c.chip,
+                  color: effectiveTranslationEnabled && resolvedHasTranslation ? (dark ? '#ffffff' : '#1c1c1e') : c.sub,
                   zIndex: 4,
                   pointerEvents: 'auto',
                 }}
@@ -1946,19 +1955,19 @@ export default function ModengPlayerPage({
               <button
                 type="button"
                 aria-label="罗马音"
-                aria-pressed={romanEnabled && Boolean(hasRoman)}
-                disabled={!hasRoman}
+                aria-pressed={effectiveRomanEnabled && Boolean(resolvedHasRoman)}
+                disabled={!resolvedHasRoman}
                 onClick={e => {
                   e.stopPropagation()
                   toggleRoman()
                 }}
-                title={hasRoman ? (romanEnabled ? '关闭罗马音' : '显示罗马音') : '当前歌曲暂无罗马音'}
+                title={resolvedHasRoman ? (effectiveRomanEnabled ? '关闭罗马音' : '显示罗马音') : '当前歌曲暂无罗马音'}
                 className="modeng-btn modeng-btn-chip flex items-center justify-center rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
                 style={{
                   width: 28 * s,
                   height: 28 * s,
-                  background: romanEnabled && hasRoman ? c.barFill : c.chip,
-                  color: romanEnabled && hasRoman ? (dark ? '#ffffff' : '#1c1c1e') : c.sub,
+                  background: effectiveRomanEnabled && resolvedHasRoman ? c.barFill : c.chip,
+                  color: effectiveRomanEnabled && resolvedHasRoman ? (dark ? '#ffffff' : '#1c1c1e') : c.sub,
                   zIndex: 4,
                   pointerEvents: 'auto',
                 }}
@@ -2137,8 +2146,9 @@ export default function ModengPlayerPage({
                     }}
                   >
                     {/* 罗马音行（逐字或整行）：显示在主歌词上方，淡色与行距离同步 */}
-                    {romanEnabled && Boolean(line.roman || line.romanWords?.length) ? (
+                    {effectiveRomanEnabled && Boolean(line.roman || line.romanWords?.length) ? (
                       <div
+                        data-testid={isCurrent ? 'modeng-roman' : undefined}
                         style={{
                           fontSize: (isCurrent ? 20 : 16) * s,
                           fontWeight: isCurrent ? 500 : 400,
@@ -2250,8 +2260,9 @@ export default function ModengPlayerPage({
                       </div>
                     ) : null}
                     {/* 翻译行：显示在主歌词下方，淡色与行距离同步；仅当前行稍亮强调 */}
-                    {translationEnabled && line.translation?.trim() ? (
+                    {effectiveTranslationEnabled && line.translation?.trim() ? (
                       <div
+                        data-testid={isCurrent ? 'modeng-translation' : undefined}
                         style={{
                           fontSize: (isCurrent ? 20 : 16) * s,
                           fontWeight: isCurrent ? 500 : 400,
