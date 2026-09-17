@@ -22,6 +22,9 @@ const manifest: PluginManifest = {
   iconColor: '#FFE89C',
   requireNotice: true,
   notice: {
+    // 这两句是 DG-LAB 专属的：插件中心已按插件渲染，不再把所有插件的须知都套上成人向警示
+    caution: '此内容涉及成人向设备，请谨慎阅读：',
+    disclaimer: '本插件仅供娱乐，一切风险与后果需自行承担。',
     entry: [
       '此插件是为部分特定人群准备，如果您不知道此功能是什么就不用了解。',
       '未满 18 周岁禁止进入与了解此插件。',

@@ -9,10 +9,22 @@
 /** 插件来源：内置（随应用发布，不可卸载）或导入（用户安装，可卸载）。 */
 export type PluginSource = 'builtin' | 'imported'
 
-/** 使用须知：entry 为「首次查看详情」弹窗文案，consent 为「首次开启功能」确认文案。 */
+/**
+ * 使用须知：entry 为「首次查看详情」弹窗文案，consent 为「首次开启功能」确认文案。
+ *
+ * 弹窗顶部提示语与底部免责声明**按插件给**：DG_LAB 那种成人向设备需要显眼的警示，
+ * 而共振这类功能需要的是一段安全/隐私承诺。以前这里写死成 DG_LAB 的文案，
+ * 结果共振的须知弹窗上写着「此内容涉及成人向设备」。
+ */
 export interface PluginNotice {
   entry: string[]
   consent: string[]
+  /** 顶部提示语（缺省：无）。例如「此内容涉及成人向设备，请谨慎阅读：」 */
+  caution?: string
+  /** 底部免责声明（缺省：无）。例如「本插件仅供娱乐，一切风险与后果需自行承担。」 */
+  disclaimer?: string
+  /** 确认按钮文案（缺省「我已知晓」） */
+  confirmLabel?: string
 }
 
 export interface PluginManifest {

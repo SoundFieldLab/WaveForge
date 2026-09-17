@@ -50,6 +50,13 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
   const [engine, setEngine] = useState<EngineState | null>(null)
   const [events, setEvents] = useState<EventRow[]>([])
   const [error, setError] = useState<string | null>(null)
+  /** App 回传的实时强度/上限（来自中继 softLimit/deviceStrength）。 */
+  const [appLimit, setAppLimit] = useState<{
+    softLimit: { A: number; B: number } | null
+    deviceStrength: { A: number; B: number } | null
+  }>({ softLimit: null, deviceStrength: null })
+  /** 用户设定上限（中继设置里的 caps），用于对比「设定 vs App 允许」。 */
+  const [userCaps, setUserCaps] = useState<{ A: number; B: number } | null>(null)
 
   const seqRef = useRef(0)
   /** 强度轨迹环形缓冲（画 A/B 两条线）。 */
@@ -72,6 +79,10 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
         setError(null)
         if (json.device) setDevice(json.device)
         if (json.engine) setEngine(json.engine)
+        if (json.appLimit) {
+          setAppLimit({ softLimit: json.appLimit.softLimit ?? null, deviceStrength: json.appLimit.deviceStrength ?? null })
+          setUserCaps(json.appLimit.userCaps ?? null)
+        }
 
         const incoming: EventRow[] = Array.isArray(json.events) ? json.events : []
         if (incoming.length) {
@@ -285,6 +296,41 @@ export default function DeviceMonitor({ api = API }: { api?: string }) {
           <p className="text-[10px] text-amber-300/70 leading-relaxed mt-1.5">
             用手机 DG-Lab App 扫「控制台」里的二维码连入。手机需与电脑在同一 WiFi；
             连接前不会有任何波形下发数据。
+          </p>
+        )}
+      </div>
+
+      {/* App 实时上限（理解体感的关键）*/}
+      <div className="rounded-lg border border-white/10 bg-white/[0.03] p-2">
+        <div className="flex items-center gap-2 mb-1.5">
+          <span className="text-[11px] font-bold text-white/85">App 实时上限</span>
+          <span className="text-[10px] text-white/35">V3 强度回传</span>
+          <span className={`ml-auto text-[10px] ${appLimit.softLimit ? 'text-emerald-300/90' : 'text-amber-300/80'}`}>
+            {appLimit.softLimit ? '已回传' : '未回传'}
+          </span>
+        </div>
+        {appLimit.softLimit ? (
+          <>
+            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+              <Field label="App 允许上限" value={`A ${appLimit.softLimit.A} · B ${appLimit.softLimit.B}`} />
+              <Field label="设备当前强度" value={appLimit.deviceStrength ? `A ${appLimit.deviceStrength.A} · B ${appLimit.deviceStrength.B}` : '-'} />
+              <Field label="我方设定上限" value={userCaps ? `A ${userCaps.A} · B ${userCaps.B}` : '-'} />
+              <Field
+                label="实际生效上限"
+                value={userCaps
+                  ? `A ${Math.min(userCaps.A, appLimit.softLimit.A)} · B ${Math.min(userCaps.B, appLimit.softLimit.B)}`
+                  : '-'}
+              />
+            </div>
+            <p className="text-[10px] text-white/40 leading-relaxed mt-1.5">
+              实际生效 = min(我方设定, App 允许)。App 上限会按它的「增加速率」设置逐秒爬升——
+              刚连上时可能只有个位数，此时下发再大也会被钳住，体感自然很弱。
+            </p>
+          </>
+        ) : (
+          <p className="text-[10px] text-amber-300/70 leading-relaxed">
+            尚未收到 App 的强度回传。App 在「通道强度或上限变化」时才会主动上报；
+            刚连上时可以先在 App 里动一下强度滚轮，或等上限爬升触发一次上报。
           </p>
         )}
       </div>

@@ -22,7 +22,8 @@ export default function PluginNoticeModal({ open, pluginId, kind, onResolve, pla
   const dark = playerTheme === 'dark'
   const [countdown, setCountdown] = useState(3)
   const manifest = getPluginManifest(pluginId)
-  const lines = kind === 'view' ? manifest?.notice?.entry : manifest?.notice?.consent
+  const notice = manifest?.notice
+  const lines = kind === 'view' ? notice?.entry : notice?.consent
 
   useTvBack(() => {
     if (open) {
@@ -77,9 +78,12 @@ export default function PluginNoticeModal({ open, pluginId, kind, onResolve, pla
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-5">
-            <p className={`text-[13px] mb-4 ${dark ? 'text-amber-300/80' : 'text-amber-700'}`}>
-              此内容涉及成人向设备，请谨慎阅读：
-            </p>
+            {/* 顶部提示与底部免责声明都由插件自己给：不是每个插件都需要「成人向」警示 */}
+            {notice?.caution && (
+              <p className={`text-[13px] mb-4 ${dark ? 'text-amber-300/80' : 'text-amber-700'}`}>
+                {notice.caution}
+              </p>
+            )}
             <ul className="space-y-2.5">
               {(lines ?? ['请仔细阅读并确认后再继续。']).map((line, index) => (
                 <li key={index} className={`flex gap-2 text-sm leading-relaxed ${dark ? 'text-white/75' : 'text-black/70'}`}>
@@ -88,9 +92,11 @@ export default function PluginNoticeModal({ open, pluginId, kind, onResolve, pla
                 </li>
               ))}
             </ul>
-            <div className={`mt-5 rounded-xl px-4 py-3 text-xs leading-relaxed ${dark ? 'bg-amber-400/10 text-amber-200/80 border border-amber-400/20' : 'bg-amber-100 text-amber-800 border border-amber-300'}`}>
-              本插件仅供娱乐，一切风险与后果需自行承担。
-            </div>
+            {notice?.disclaimer && (
+              <div className={`mt-5 rounded-xl px-4 py-3 text-xs leading-relaxed ${dark ? 'bg-amber-400/10 text-amber-200/80 border border-amber-400/20' : 'bg-amber-100 text-amber-800 border border-amber-300'}`}>
+                {notice.disclaimer}
+              </div>
+            )}
           </div>
 
           <div className={`flex items-center justify-end gap-3 px-6 py-4 border-t ${dark ? 'border-zinc-800' : 'border-gray-200'}`}>
@@ -109,7 +115,7 @@ export default function PluginNoticeModal({ open, pluginId, kind, onResolve, pla
                 boxShadow: countdown > 0 ? 'none' : '0 8px 24px rgba(240,180,41,0.35)',
               }}
             >
-              {countdown > 0 ? `我已知晓（${countdown}）` : '我已知晓'}
+              {countdown > 0 ? `我已知晓（${countdown}）` : (notice?.confirmLabel || '我已知晓')}
             </button>
           </div>
         </motion.div>

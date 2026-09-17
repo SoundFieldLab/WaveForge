@@ -209,6 +209,18 @@ app.get('/api/debug/events', (req, res) => {
     pulses: tap.getPulses(Math.max(0, since - 50)),
     device: tap.getState(),
     engine: readEngine(),
+    /**
+     * App 回传的实时上限（V3「强度回传」：strength-A+B+上限A+上限B）。
+     *
+     * 这是理解体感的关键数据：App 侧上限会按「增加速率」设置逐秒爬升，
+     * 中继以 min(用户设定, App 上限) 作钳位。若 App 上限还很低，
+     * 我们就算发 70 也只能落到 6 —— 调试时必须能看见这个值。
+     */
+    appLimit: {
+      softLimit: relay.getStatus().softLimit,
+      deviceStrength: relay.getStatus().deviceStrength,
+      userCaps: relay._internal.settings.caps ?? null,
+    },
   })
 })
 

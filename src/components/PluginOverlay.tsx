@@ -5,7 +5,7 @@
  * - 启动「启用状态 → 生命周期回调」桥接（导入插件的 onEnable/onDisable）。
  */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import '../plugins/DGLabPlugin'
 import '../plugins/ChromaPlugin'
 import '../plugins/SignalRgbPlugin'
@@ -27,6 +27,7 @@ import ChromaConsoleModal from './ChromaConsoleModal'
 import SignalRgbConsoleModal from './SignalRgbConsoleModal'
 import DGLabWidget from './DGLabWidget'
 import DglabSystemCaptureBridge from './DglabSystemCaptureBridge'
+import DglabOobeGuide from './oobe/DglabOobeGuide'
 
 // 启用状态 → 生命周期桥接：监听 wf_plugins 变更，按需调用 onEnable/onDisable
 function useRuntimeBridge() {
@@ -118,9 +119,32 @@ function useRuntimeBridge() {
   }, [])
 }
 
+const DGLAB_OOBE_FLAG = 'waveforge:dglab-oobe-shown'
+
 export default function PluginOverlay() {
   const host = usePluginHostState()
   useRuntimeBridge()
+  const [showOobe, setShowOobe] = useState(false)
+
+  // 首次启用 DG-LAB 后自动弹一次连接引导；之后可经控制台「连接引导」按钮再次打开。
+  useEffect(() => {
+    const flag = (() => { try { return localStorage.getItem(DGLAB_OOBE_FLAG) === '1' } catch { return false } })()
+    if (!flag && host.dglabConsoleOpen) {
+      setShowOobe(true)
+    }
+  }, [host.dglabConsoleOpen])
+
+  // 控制台「连接引导」按钮派发事件打开；关闭时写标记（仅首次自动弹一次）。
+  useEffect(() => {
+    const open = () => setShowOobe(true)
+    window.addEventListener('waveforge:dglab-oobe-open', open)
+    return () => window.removeEventListener('waveforge:dglab-oobe-open', open)
+  }, [])
+
+  const handleOobeDone = () => {
+    setShowOobe(false)
+    try { localStorage.setItem(DGLAB_OOBE_FLAG, '1') } catch { /* ignore */ }
+  }
 
   return (
     <>
@@ -143,6 +167,15 @@ export default function PluginOverlay() {
       <DGLabWidget />
       {/* 整机监听全局桥（监听系统扬声器；失败自动回退 + 监听中浮标） */}
       <DglabSystemCaptureBridge />
+
+      {/* DG-LAB 连接引导（OOBE）：用手机截图逐步演示如何连上插件 */}
+      {showOobe && (
+        <DglabOobeGuide
+          closable
+          onComplete={handleOobeDone}
+          onSkip={handleOobeDone}
+        />
+      )}
     </>
   )
 }

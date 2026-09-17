@@ -1159,19 +1159,31 @@ const sendV3Pulse = (channel, frames) => {
       } else if (msg.type === 'msg' || typeof msg.type === 'number' || msg.type === 'clientMsg') {
         const text = String(msg.message ?? '')
         verboseLog(`V3 消息帧 type=${msg.type} message=${text.slice(0, 120)}`)
-        // App 反馈（PyDGLab-WS parse_strength_data 同款格式）：
-        //   strength-<当前A>+<当前B>+<上限A>+<上限B> → 更新软上限与设备当前强度
+        // App 强度回传（官方 socket 文档「强度回传」）：
+        //   strength-<当前A>+<当前B>+<上限A>+<上限B>
+        // 官方文档：APP 通道强度或上限变化时自动上报。第 3/4 字段即 App 当前软上限，
+        // 它会随 App 的「增加速率」设置逐秒爬升，所以必须持续更新、不能只取一次。
+        //
+        // 注意分隔符不可假设：官方 TS SDK 用 "+"，官方 Python SDK 用 "-"，
+        // 官方演示前端干脆用 /\d+/g 全取数字。这里同样只抽数字，最大兼容。
         if (text.startsWith('strength-')) {
-          const parts = text.split('-')[1]?.split('+').map(Number)
-          if (parts && parts.length >= 4 && parts.every(Number.isFinite)) {
-            const [a, b, aLimit, bLimit] = parts
+          const nums = (text.match(/\d+/g) || []).map(Number)
+          if (nums.length >= 4) {
+            const [a, b, aLimit, bLimit] = nums
+            const changed = !state.softLimit || state.softLimit.A !== aLimit || state.softLimit.B !== bLimit
             state.softLimit = { A: aLimit, B: bLimit }
             state.deviceStrength = { A: a, B: b }
-            log(`V3 App 反馈：设备强度 A=${a} B=${b}，软上限 A=${aLimit} B=${bLimit}（已作为钳位依据）`)
+            // 无条件记日志（不受 devMode 影响）：这是判断「App 上限爬到多少」的唯一信息源，
+            // 之前走 verboseLog，用户关掉开发者模式后完全看不到，误判为「拿不到上限」。
+            // 上限爬升期间帧率高，仅在变化时记录，避免刷屏。
+            if (changed) log(`V3 App 回传：当前强度 A=${a} B=${b}，App 上限 A=${aLimit} B=${bLimit}（已作为钳位依据）`)
             broadcastStatus()
+          } else {
+            log(`V3 App 强度回传格式异常，已忽略：${text.slice(0, 80)}`)
           }
         } else if (text.startsWith('feedback-')) {
-          verboseLog(`V3 App 按钮反馈：${text}`)
+          // 按钮反馈是用户操作的直接证据，取消 devMode 门控
+          log(`V3 App 按钮反馈：${text}`)
         }
         // 兼容带 props.softLimit 的扩展反馈
         if (msg.props?.softLimit && typeof msg.props.softLimit === 'object') {

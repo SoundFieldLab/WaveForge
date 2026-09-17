@@ -23,9 +23,11 @@ import {
 // 这条链路由 PluginOverlay 的 useRuntimeBridge 驱动。单独渲染 DGLabConsoleModal
 // 只会画出 UI，插件永远不会激活（引擎不跑、没有波形下发）。
 import PluginOverlay from '@/components/PluginOverlay'
+import DglabOobeGuide from '@/components/oobe/DglabOobeGuide'
 import { openDGLabConsole, usePluginHostState } from '@/services/pluginStore'
 import { loadDGLabSettings } from '@/plugins/clients/DGLabClient'
 import { useDebugAudioEngine } from './useDebugAudioEngine'
+import { showToast } from '@/plugins/toggle'
 import DeviceMonitor from './DeviceMonitor'
 import RelayActivity from './RelayActivity'
 
@@ -67,6 +69,7 @@ export default function Harness() {
   const [tab, setTab] = useState<HudTab>('music')
   const [collapsed, setCollapsed] = useState(false)
   const [pos, setPos] = useState({ x: 16, y: 72 })
+  const [showOobe, setShowOobe] = useState(false)
   const dragRef = useRef<{ dx: number; dy: number } | null>(null)
 
   const onDragStart = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -229,6 +232,14 @@ export default function Harness() {
             </button>
             <button
               type="button"
+              onClick={() => setShowOobe(true)}
+              className="px-1.5 py-0.5 rounded text-[10px] text-amber-200/80 hover:bg-white/10 transition-colors"
+              title="DG-LAB 连接引导（OOBE 动画）"
+            >
+              连接引导
+            </button>
+            <button
+              type="button"
               onClick={() => setCollapsed(c => !c)}
               className="p-0.5 rounded text-white/50 hover:bg-white/10 hover:text-white transition-colors"
               title={collapsed ? '展开' : '折叠'}
@@ -369,6 +380,15 @@ export default function Harness() {
       {/* 主程序真实插件宿主：控制台 / 悬浮小组件 / 整机监听浮标 +
           启用状态 → 生命周期桥接（这条桥才会真正 activate 插件） */}
       <PluginOverlay />
+
+      {/* DG-LAB 连接引导（OOBE）：用手机截图逐步演示如何连上插件；点「连接引导」打开。 */}
+      {showOobe && (
+        <DglabOobeGuide
+          closable
+          onComplete={() => { setShowOobe(false); showToast('连接引导已完成', 'success') }}
+          onSkip={() => setShowOobe(false)}
+        />
+      )}
 
       {/* 调试平台自有音源 */}
       <audio ref={audioRef} crossOrigin="anonymous" preload="metadata" className="hidden" />

@@ -622,13 +622,16 @@ function createClient() {
   const sendSettings = () => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     const settings = loadDGLabSettings()
+    // 注意：payload 不含 devMode。它不属于 DG-LAB 设置，且本渲染端的 localStorage
+    // 未必有该键（如调试平台 3100 端口是独立 origin）——随常规同步下发会把中继
+    // 已开启的详细日志打回 false。devMode 只经两条显式路径写入：activate 的
+    // restart 参数、下方 developerModeChanged 的单独补丁。
     const payload: Record<string, unknown> = {
       version: settings.version,
       port: settings.port,
       address: settings.address,
       qrSchema: settings.qrSchema,
       feelStyle: settings.feelStyle,
-      devMode: isDeveloperMode(),
       sensitivity: settings.sensitivity,
       smoothing: settings.smoothing,
       stepPreset: settings.stepPreset,
@@ -811,9 +814,11 @@ function createClient() {
     }
   }
 
-  // 开发者模式切换 → 中继 devMode 详细日志即时生效
+  // 开发者模式切换 → 只下发 devMode 补丁（完整设置走 sendSettings，但那里不含 devMode）
   window.addEventListener('developerModeChanged', () => {
-    if (active) sendSettings()
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ t: 'settings', settings: { devMode: isDeveloperMode() } }))
+    }
   })
 
   return {

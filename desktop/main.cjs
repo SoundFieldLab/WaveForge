@@ -7514,26 +7514,108 @@ function finishPythonServiceRequest(details) {
 const { promisify } = require('util')
 const execFileAsync = promisify(execFile)
 const BACKEND_PORTS = [3001, 3002, 3003, 3004, 18790]
-async function sweepBackendOrphans(reason) {
-  for (const port of BACKEND_PORTS) {
-    try {
-      const ps = [
-        '$c = Get-NetTCPConnection -LocalPort ' + port + ' -State Listen -ErrorAction SilentlyContinue',
-        'foreach ($x in $c) {',
-        '  $pp = Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue',
-        '  if ($pp -and ($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*" -or $pp.ProcessName -like "python*")) { Write-Output $x.OwningProcess }',
-        '}',
-      ].join('; ')
-      const out = await execFileAsync('powershell', ['-NoProfile', '-Command', ps], { timeout: 12000 })
-      const pids = String(out.stdout || '').split(/[^0-9]+/).map(v => parseInt(v, 10)).filter(v => v > 0)
-      for (const pid of pids) {
-        try {
-          await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 8000 })
-          console.log('[LocalAPI] 清扫残留子进程 pid=' + pid + ' (port=' + port + ', reason=' + reason + ')')
-        } catch { /* 已退出则忽略 */ }
-      }
-    } catch { /* 清扫失败不阻塞启动 */ }
+
+// 端口占用者必须同时命中的“自家进程”特征——避免误杀用户自己的 node/python 服务。
+// 注意 ProcessName 是进程映像名（不含 .exe），Path 是完整路径。
+const ORPHAN_OWNER_PS_FILTER =
+  '($pp.Path -like "*win-unpacked*" -or $pp.Path -like "*resources\\python-embed*" -or $pp.ProcessName -like "WaveForge*" -or $pp.ProcessName -like "python*")'
+
+/**
+ * 用 netstat 一次性列出 BACKEND_PORTS 上所有 LISTENING 的 pid。
+ * netstat 是原生工具：全表查询约 25ms，而逐端口 Get-NetTCPConnection 每次约 1.5s（CIM 查询）。
+ * 返回 [{ port, pid }]；失败返回 null 以便调用方回退。
+ */
+async function listBackendPortListeners() {
+  let stdout = ''
+  try {
+    const result = await execFileAsync('netstat', ['-ano', '-p', 'TCP'], { timeout: 10000, maxBuffer: 16 * 1024 * 1024 })
+    stdout = String(result.stdout || '')
+  } catch (error) {
+    // netstat 非 0 退出时 stdout 仍可能有效（例如存在 v6 条目时的告警），尽量取用
+    stdout = String(error?.stdout || '')
+    if (!stdout) return null
   }
+  const found = []
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.trim().match(/^TCP\S*\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/)
+    if (!match) continue
+    const port = parseInt(match[1], 10)
+    if (!BACKEND_PORTS.includes(port)) continue
+    const pid = parseInt(match[2], 10)
+    if (pid > 0) found.push({ port, pid })
+  }
+  return found
+}
+
+/** 用单次 powershell 进程核验一批 pid 是否属于本应用（netstat 只给 pid，不给可执行路径）。 */
+async function filterOrphanOwnedPids(pairs) {
+  if (pairs.length === 0) return []
+  const byPid = new Map()
+  for (const { port, pid } of pairs) if (!byPid.has(pid)) byPid.set(pid, port)
+  // 读取无权访问的进程（如以管理员身份运行的残留 python）时 $pp.Path 可能产生非终止错误
+  // 并把退出码变成 1，从而丢掉其它 pid 的有效结果；末行 exit 0 保证输出不被吞掉。
+  const script = [...byPid.keys()].map(pid =>
+    `$pp = Get-Process -Id ${pid} -ErrorAction SilentlyContinue; if ($pp -and ${ORPHAN_OWNER_PS_FILTER}) { Write-Output ${pid} }`
+  ).join('; ') + '; exit 0'
+  let stdout = ''
+  try {
+    const out = await execFileAsync('powershell', ['-NoProfile', '-Command', script], { timeout: 12000 })
+    stdout = String(out.stdout || '')
+  } catch (error) {
+    stdout = String(error?.stdout || '')
+  }
+  const owned = []
+  for (const token of stdout.split(/[^0-9]+/)) {
+    const pid = parseInt(token, 10)
+    if (pid > 0 && byPid.has(pid)) owned.push({ pid, port: byPid.get(pid) })
+  }
+  return owned
+}
+
+/** 回退路径：netstat 不可用时，仍用一次 powershell 进程完成“找端口 + 核验”。 */
+async function sweepBackendOrphansViaPowershell() {
+  // 末行 exit 0 是必须的：某个端口没有监听者时 Get-NetTCPConnection 会产生非终止错误，
+  // powershell 因此以退出码 1 结束；合并成单次调用后，这会把**其它端口**已经查到的结果
+  // 一起丢掉（execFileAsync 抛错）。逐个端口时每个都单独执行才不会有这个问题。
+  const script = BACKEND_PORTS.map(port => [
+    `$c = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue`,
+    'foreach ($x in $c) {',
+    '  $pp = Get-Process -Id $x.OwningProcess -ErrorAction SilentlyContinue',
+    `  if ($pp -and ${ORPHAN_OWNER_PS_FILTER}) { Write-Output ("${port} " + $x.OwningProcess) }`,
+    '}',
+  ].join('; ')).join('; ') + '; exit 0'
+  let stdout = ''
+  try {
+    const out = await execFileAsync('powershell', ['-NoProfile', '-Command', script], { timeout: 30000 })
+    stdout = String(out.stdout || '')
+  } catch (error) {
+    // 退出码非 0 但 stdout 可能仍然有效，尽量取用（例如错误被写进 stderr 的情况）
+    stdout = String(error?.stdout || '')
+    if (!stdout) return []
+  }
+  const pairs = []
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/)
+    if (match) pairs.push({ port: parseInt(match[1], 10), pid: parseInt(match[2], 10) })
+  }
+  return pairs
+}
+
+async function sweepBackendOrphans(reason) {
+  try {
+    // 常见情况：没有残留监听者 → netstat 约 25ms 直接返回，不启动 powershell。
+    // 原实现无论有无残留都串行跑 5 次 powershell（实测 7.3s），且这段在 createWindow() 之前 await。
+    const listeners = await listBackendPortListeners()
+    const orphans = listeners
+      ? await filterOrphanOwnedPids(listeners)
+      : await sweepBackendOrphansViaPowershell()
+    for (const { pid, port } of orphans) {
+      try {
+        await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F'], { timeout: 8000 })
+        console.log('[LocalAPI] 清扫残留子进程 pid=' + pid + ' (port=' + port + ', reason=' + reason + ')')
+      } catch { /* 已退出则忽略 */ }
+    }
+  } catch { /* 清扫失败不阻塞启动 */ }
 }
 
 async function waitForLocalApiReady(timeoutMs = 2500) {
