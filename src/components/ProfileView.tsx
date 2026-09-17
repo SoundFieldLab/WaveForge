@@ -525,6 +525,8 @@ interface ProfileViewProps {
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
+  /** 直接打开某个用户的主页（歌单创建者等二级入口）；设置后进入即压栈到该用户 */
+  initialUserTarget?: { platform: 'netease' | 'qq'; userId: string; nickname?: string } | null
 }
 
 function ProfileView({ 
@@ -547,7 +549,8 @@ function ProfileView({
   onRemoveFromFavorites,
   onAddToPlaylist,
   onViewComments,
-  onCopyInfo
+  onCopyInfo,
+  initialUserTarget
 }: ProfileViewProps) {
   const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(initialPlatform)
 
@@ -1605,6 +1608,18 @@ function ProfileView({
     })
     return () => { cancelled = true }
   }, [activeTab, qqSocialType, platform, activeUserId, viewTarget, cookie])
+
+  // 由外部（歌单创建者等二级入口）指定要直接打开的他人主页：进入即压栈
+  useEffect(() => {
+    if (!initialUserTarget?.userId) return
+    setViewStack([{
+      platform: initialUserTarget.platform,
+      userId: String(initialUserTarget.userId),
+      nickname: initialUserTarget.nickname,
+      returnTab: 'created',
+    }])
+    setActiveTab('created')
+  }, [initialUserTarget?.platform, initialUserTarget?.userId, initialUserTarget?.nickname])
 
   // 打开用户个人中心（push 进导航栈，进入后默认看歌单概览）
   const openUserProfile = (targetPlatform: 'netease' | 'qq', targetUserId: string, nickname?: string, avatarUrl?: string, signature?: string) => {

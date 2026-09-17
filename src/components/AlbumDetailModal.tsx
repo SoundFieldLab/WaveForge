@@ -1,7 +1,7 @@
-import { memo, useState, useEffect, useRef } from 'react'
+import { memo, useState, useEffect, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Play, Music, Info, Loader, Heart } from 'lucide-react'
-import { getAlbumDetail, getAlbumSongs, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong } from '../services/musicApi'
+import { X, Play, Music, Info, Loader, Heart, Disc3 } from 'lucide-react'
+import { getAlbumDetail, getAlbumSongs, getArtistAlbums, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong } from '../services/musicApi'
 import { fetchSodaAlbumTracks, collectSodaAlbum } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleAlbumDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
@@ -34,7 +34,7 @@ interface AlbumDetailModalProps {
   onCopyInfo?: (song: Song) => void
 }
 
-type TabType = 'songs' | 'info'
+type TabType = 'songs' | 'info' | 'more'
 
 // 汽水平台约定：外部把「专辑名」当作 albumId 字符串传入（汽水无独立专辑 ID 体系）。
 // 名字可能经 URL 编码传递；解码失败（非法 % 序列）时回退原文，避免弹窗崩溃
@@ -68,6 +68,7 @@ function AlbumDetailModal({
   onAddToPlaylist,
   onViewComments,
   onOpenArtist,
+  onOpenAlbum,
   onCopyInfo
 }: AlbumDetailModalProps) {
   // TV 遥控器 BACK：关闭专辑详情弹窗
@@ -92,6 +93,29 @@ function AlbumDetailModal({
   })
   const [subscribed, setSubscribed] = useState(false)
   const [subscribing, setSubscribing] = useState(false)
+  // 同歌手其他专辑（专辑的下一级入口）
+  const [artistAlbums, setArtistAlbums] = useState<Album[]>([])
+  const [artistAlbumsLoading, setArtistAlbumsLoading] = useState(false)
+
+  /** 专辑所属歌手 id：优先取 album.artist，其次取首曲的 ar[0] */
+  const albumArtistId = useMemo(() => {
+    const direct = typeof album?.artist === 'object' && album?.artist?.id ? String(album.artist.id) : ''
+    if (direct) return direct
+    const fromSong = songs.find(s => s.artists?.length)?.artists?.[0]?.id
+    return fromSong ? String(fromSong) : ''
+  }, [album, songs])
+
+  // 切到「更多专辑」时才拉取，避免每次打开专辑都多发一次请求
+  useEffect(() => {
+    if (activeTab !== 'more' || !albumArtistId || artistAlbums.length > 0) return
+    let cancelled = false
+    setArtistAlbumsLoading(true)
+    void getArtistAlbums(albumArtistId, platform, 30)
+      .then(list => { if (!cancelled) setArtistAlbums((list || []).filter(item => String(item.id) !== String(album?.id))) })
+      .catch(() => { if (!cancelled) setArtistAlbums([]) })
+      .finally(() => { if (!cancelled) setArtistAlbumsLoading(false) })
+    return () => { cancelled = true }
+  }, [activeTab, albumArtistId, artistAlbums.length, platform, album?.id])
   
   const handleSubscribe = async () => {
     if (subscribing || !album) return
@@ -415,7 +439,21 @@ function AlbumDetailModal({
                   
                   <div className={`${textSecondary} space-y-1 mb-3`}>
                     <p className="text-sm truncate">
-                      {typeof album.artist === 'string' ? album.artist : album.artist?.name || '未知艺人'}
+                      {(() => {
+                        const artistName = typeof album.artist === 'string' ? album.artist : album.artist?.name || '未知艺人'
+                        const artistId = typeof album.artist === 'object' && album.artist?.id ? String(album.artist.id) : ''
+                        if (!artistId || !onOpenArtist) return artistName
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => onOpenArtist(artistId, platform)}
+                            className="cursor-pointer transition-colors hover:text-pink-400 hover:underline"
+                            title={`查看歌手 ${artistName}`}
+                          >
+                            {artistName}
+                          </button>
+                        )
+                      })()}
                     </p>
                     {album.publishTime && (
                       <p className="text-sm">{formatDate(album.publishTime)}</p>
@@ -506,6 +544,27 @@ function AlbumDetailModal({
                   />
                 )}
               </button>
+              {/* 同歌手其他专辑：专辑的下一级入口（点击进入另一张专辑） */}
+              {onOpenAlbum && albumArtistId && (
+                <button
+                  onClick={() => setActiveTab('more')}
+                  className={`pb-3 px-3 font-medium transition-all relative text-sm ${
+                    activeTab === 'more'
+                      ? `${textPrimary}`
+                      : `${textSecondary} hover:${textPrimary}`
+                  }`}
+                >
+                  <Disc3 className="w-4 h-4 inline mr-1.5" />
+                  更多专辑
+                  {activeTab === 'more' && (
+                    <motion.div
+                      layoutId="activeTabAlbum"
+                      className="absolute bottom-0 left-0 right-0 h-0.5"
+                      style={{ backgroundColor: readableAccentColor }}
+                    />
+                  )}
+                </button>
+              )}
             </div>
             {/* 歌曲数量显示 */}
             <div className={`${textSecondary} text-sm pb-3 pr-3`}>
@@ -652,6 +711,34 @@ function AlbumDetailModal({
                     <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
                       <Music className="w-16 h-16 mb-4 opacity-20" />
                       <p>暂无歌曲</p>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'more' && (
+                <div className={`${textPrimary} space-y-6`}>
+                  <h3 className="text-xl font-bold mb-3">同歌手其他专辑</h3>
+                  {artistAlbumsLoading ? (
+                    <div className="flex min-h-32 items-center justify-center"><Loader className="w-6 h-6 animate-spin opacity-60" /></div>
+                  ) : artistAlbums.length === 0 ? (
+                    <p className={`${textSecondary} text-sm`}>暂无其他专辑</p>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                      {artistAlbums.map(item => (
+                        <button
+                          key={String(item.id)}
+                          type="button"
+                          onClick={() => onOpenAlbum?.(String(item.id), platform)}
+                          className="text-left group"
+                        >
+                          <span className="relative block aspect-square overflow-hidden rounded-md">
+                            <CachedImage src={coverImageUrl(platform, item.picUrl)} alt="" className="h-full w-full object-cover transition group-hover:scale-[1.03]" role="card" />
+                          </span>
+                          <span className={`mt-2 line-clamp-2 text-sm ${textPrimary}`}>{item.name}</span>
+                          {item.publishTime ? <span className={`mt-0.5 block text-xs ${textSecondary}`}>{String(item.publishTime).slice(0, 10)}</span> : null}
+                        </button>
+                      ))}
                     </div>
                   )}
                 </div>

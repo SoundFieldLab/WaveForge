@@ -846,6 +846,8 @@ function App() {
   const [showProfile, setShowProfile] = useState(false)
   const [profileInitialPlatform, setProfileInitialPlatform] = useState<MusicPlatform>('netease')
   const [profileInitialTab, setProfileInitialTab] = useState<'created' | 'subscribed' | 'detail' | 'recent'>('created')
+  /** 非空时表示要直接打开某个用户的主页（而非自己），由歌单创建者等入口设置 */
+  const [profileUserTarget, setProfileUserTarget] = useState<{ platform: 'netease' | 'qq'; userId: string; nickname?: string } | null>(null)
 
   const [showHome, setShowHome] = useState(true) // 控制简约模式首页显示
   const [showSharedPlayer, setShowSharedPlayer] = useState(false)
@@ -3845,6 +3847,11 @@ function App() {
         setRestorePlaybackOrigin(null)
         setEnteredFromMode('explore')
         setShowSharedPlayer(true)
+        // 必须同时收起首页：播放页表面只在 {currentSong && !showHome} 分支里渲染，
+        // 少了这一句用户点歌后会停在首页（只剩 mini 播放器），与设置项
+        // 「直接进入播放页」的语义不符。另两条设 showSharedPlayer(true) 的路径
+        // （电台浮层 / onOpenPlayer）都是配对 setShowHome(false) 的，这里原先漏了。
+        setShowHome(false)
       }
     } else if (!playsInPlace) {
       await playbackSurfaceReady
@@ -7329,6 +7336,16 @@ function App() {
     return () => window.clearInterval(timer)
   }, [pendingGpuChange, revertGpuChange])
 
+  /** 打开任意用户主页（歌单创建者等二级入口）：复用 ProfileView 的他人主页视图 */
+  const handleOpenUserProfile = useCallback((platform: MusicPlatform, userId: string, nickname?: string) => {
+    if (!userId) return
+    if (platform !== 'netease' && platform !== 'qq') return
+    setProfileInitialPlatform(platform)
+    setProfileInitialTab('created')
+    setProfileUserTarget({ platform, userId: String(userId), nickname })
+    setShowProfile(true)
+  }, [])
+
   // ===== 三视图稳定回调（latest-ref 模式）=====
   // HomeView/ExploreView/DesktopView 已包 React.memo；播放中 App 约 1Hz 重渲染时，
   // 若这些函数 props 每次新建会击穿 memo 导致整棵视图子树反复重渲染。
@@ -7368,6 +7385,7 @@ function App() {
     onOpenDeviceControl: () => void
     onSettingsClick: () => void
     onProfileClick: (platform: MusicPlatform, initialTab?: 'created' | 'subscribed' | 'detail' | 'recent') => void
+    onOpenUserProfile: (platform: MusicPlatform, userId: string, nickname?: string) => void
     onOpenPlayer: (origin?: PlaybackOrigin) => void
     onExitDesktopMode: () => void
     onToggleFavorite: () => void
@@ -7385,6 +7403,7 @@ function App() {
     onAddToPlaylist: handleAddToPlaylist,
     onViewComments: handleViewComments,
     onCopyInfo: handleCopyInfo,
+    onOpenUserProfile: handleOpenUserProfile,
     onPrevious: handlePrevious,
     onNext: handleNext,
     onPlayPause: handlePlayPause,
@@ -7492,6 +7511,7 @@ function App() {
       onOpenDeviceControl: () => setShowDeviceControl(true),
       onSettingsClick: () => latest.current.onSettingsClick(),
       onProfileClick: (platform, initialTab) => latest.current.onProfileClick(platform, initialTab),
+      onOpenUserProfile: (platform, userId, nickname) => latest.current.onOpenUserProfile(platform, userId, nickname),
       onOpenPlayer: (origin) => latest.current.onOpenPlayer(origin),
       onExitDesktopMode: () => latest.current.onExitDesktopMode(),
       onToggleFavorite: () => latest.current.onToggleFavorite(),
@@ -7551,7 +7571,7 @@ function App() {
   const profileLogoutRef = useRef<(platform: MusicPlatform) => void>(() => undefined)
   const smartReorderRef = useRef<() => void>(() => undefined)
   const playlistSongSelectRef = useRef<(index: number) => void>(() => undefined)
-  closeProfileRef.current = () => setShowProfile(false)
+  closeProfileRef.current = () => { setShowProfile(false); setProfileUserTarget(null) }
   closeAlbumDetailRef.current = () => closeAlbumDetail()
   closePlaylistRef.current = () => setShowPlaylist(false)
   profileSwitchPlatformRef.current = () => {
@@ -7946,6 +7966,7 @@ function App() {
               sodaAvatar={sodaAvatar}
               onLoginClick={handleMinimalLogin}
               onProfileClick={handleViewProfileClick}
+              onOpenUserProfile={viewCallbacks.onOpenUserProfile}
               onSearchClick={viewCallbacks.onSearchClick}
               onRemoteClick={viewCallbacks.onRemoteClick}
               onPlayPause={viewCallbacks.onPlayPause}
@@ -8463,6 +8484,7 @@ function App() {
               onOpenDeviceControl={viewCallbacks.onOpenDeviceControl}
               onSettingsClick={viewCallbacks.onSettingsClick}
               onProfileClick={viewCallbacks.onProfileClick}
+              onOpenUserProfile={viewCallbacks.onOpenUserProfile}
               onOpenArtist={viewCallbacks.onOpenArtist}
               onOpenAlbum={viewCallbacks.onOpenAlbum}
               onPlayNext={viewCallbacks.onPlayNext}
@@ -9665,6 +9687,7 @@ function App() {
             onAddToPlaylist={viewCallbacks.onAddToPlaylist}
             onViewComments={viewCallbacks.onViewComments}
             onCopyInfo={viewCallbacks.onCopyInfo}
+            initialUserTarget={profileUserTarget}
             />
           )}
       </Suspense>

@@ -83,7 +83,7 @@ const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
 const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
 const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
-type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
+type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
 // v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
@@ -151,6 +151,8 @@ interface ExploreViewProps {
   sodaAvatar?: string
   onLoginClick: (platform: ExplorePlatform) => void
   onProfileClick: (platform: ExplorePlatform) => void
+  /** 打开任意用户的主页（歌单创建者等二级入口）；复用 App 既有的用户页 */
+  onOpenUserProfile?: (platform: ExplorePlatform, userId: string, nickname?: string) => void
   onSearchClick: () => void
   onRemoteClick: () => void
   onPlayPause: () => void
@@ -542,6 +544,7 @@ function ExploreView({
   sodaAvatar,
   onLoginClick,
   onProfileClick,
+  onOpenUserProfile,
   onSearchClick,
   onRemoteClick,
   onPlayPause,
@@ -2303,6 +2306,7 @@ function ExploreView({
         currentPlatform={detail?.playlist.platform || platform}
         onOpenArtist={onOpenArtist}
         onOpenAlbum={onOpenAlbum}
+        onOpenUserProfile={onOpenUserProfile ? (userId, nickname) => onOpenUserProfile(platform, userId, nickname) : undefined}
         onPlayNext={onPlayNext}
         onAddToFavorites={onAddToFavorites}
         onRemoveFromFavorites={onRemoveFromFavorites}
@@ -2450,6 +2454,14 @@ function ExploreView({
         artist={currentSong?.artists.map(artist => artist.name).join(', ') || ''}
         currentLyric={currentLyric}
         hasLyrics={Boolean(currentLyric)}
+        live={currentSong?.appleRadio?.timeline === 'live'}
+        // 电台/播客：没有「相邻曲目」语义 → 隐藏切歌；无歌词时显示电台名/播客名
+        hideSkipControls={Boolean(currentSong?.appleRadio || currentSong?.isPodcast)}
+        lyricsPlaceholder={currentSong?.appleRadio
+          ? (currentSong.appleRadio.showName?.trim() || currentSong.name || '')
+          : currentSong?.isPodcast
+            ? (currentSong.album?.name?.trim() || currentSong.name || '')
+            : ''}
         accentColor={accentColor}
         onPlayPause={onPlayPause}
         onNext={onNext}

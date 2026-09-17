@@ -83,6 +83,7 @@ interface HomeViewProps {
   onSettingsClick: () => void
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
+  onOpenUserProfile?: (platform: MusicPlatform, userId: string, nickname?: string) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void
   onRemoveFromFavorites?: (song: Song) => boolean | Promise<boolean>
@@ -270,6 +271,7 @@ function HomeView({
   onSettingsClick,
   onOpenArtist,
   onOpenAlbum,
+  onOpenUserProfile,
   onPlayNext,
   onAddToFavorites,
   onRemoveFromFavorites,
@@ -3189,6 +3191,11 @@ function HomeView({
         currentUserId={selectedPlaylist?.platform === 'qq' ? qqUserId : neteaseUserId}
         onOpenArtist={onOpenArtist}
         onOpenAlbum={onOpenAlbum}
+        onOpenUserProfile={
+          onOpenUserProfile
+            ? (userId, nickname) => onOpenUserProfile((selectedPlaylist?.platform || platform) as MusicPlatform, String(userId), nickname)
+            : undefined
+        }
         onPlayNext={onPlayNext}
         onAddToFavorites={onAddToFavorites}
         onRemoveFromFavorites={
