@@ -396,6 +396,23 @@ contextBridge.exposeInMainWorld('electron', {
     },
   },
 
+  // 共振（多人一起听）：局域网房间中转。只转发端到端加密信封，主进程不解析内容。
+  resonance: {
+    start: (config) => ipcRenderer.invoke('resonance:start', config),
+    stop: () => ipcRenderer.invoke('resonance:stop'),
+    getStatus: () => ipcRenderer.invoke('resonance:status'),
+    send: (payload) => ipcRenderer.invoke('resonance:send', payload),
+    kick: (peerId) => ipcRenderer.invoke('resonance:kick', peerId),
+    buildInvite: (address) => ipcRenderer.invoke('resonance:invite', address),
+    updateCode: (code) => ipcRenderer.invoke('resonance:update-code', code),
+    scanLan: () => ipcRenderer.invoke('resonance:scan-lan'),
+    onEvent: (callback) => {
+      const listener = (_event, payload) => callback(payload)
+      ipcRenderer.on('resonance:event', listener)
+      return () => ipcRenderer.removeListener('resonance:event', listener)
+    },
+  },
+
   // AirPlay 投送端：发现局域网 AirPlay 设备并推送本地播放的音频（默认关闭，由设置开关启用）
   airplay: {
     setEnabled: (enabled) => ipcRenderer.invoke('airplay:set-enabled', enabled),

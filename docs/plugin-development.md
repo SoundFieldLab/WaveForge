@@ -195,3 +195,14 @@ interface PluginContext {
 - **安全安装**：Effect 仅在用户于控制台明确确认后写入 SignalRGB 最新版本的 `Effects/Dynamic` 目录。更新和卸载必须校验 WaveForge sidecar 与 SHA-256；无法证明所有权时拒绝覆盖或删除。
 - **版本迁移**：SignalRGB 的 `app-*` 目录会随更新变化。检测到 Effect 仅存在于旧版本目录时，提示用户重新确认安装并重启 SignalRGB。
 - **能力边界**：Local API 不公开物理设备型号、LED 拓扑和电量，SignalRGB 控制台不得伪造这些数据。
+
+## 附录：共振（一起听）插件架构契约
+
+- **零服务器**：房间不经过任何我们的服务端。局域网下房主的主进程内置 WS 中转（`desktop/resonance-hub.cjs`），成员用原生 WebSocket 直连；星型拓扑（15 人 = 房主 14 条连接），成员之间不直连、也不能互发。
+- **端到端加密**：房间密钥由邀请串里的种子经 HKDF 派生（`src/features/resonance/crypto.ts`，XChaCha20-Poly1305 + 单调 `seq` 防重放）。中转只转发密文，拿不到种子。房主在技术上能解密（同群聊主持人），用 4 表情房间指纹当面核对。
+- **音频永不外发**：只同步「放哪首歌、播到第几秒、在播/暂停」。每个人用自己的账号在自己的平台解析可播放版本，任何音源 URL、Cookie、账号都不进房间消息。**不得**新增绕过会员校验的路径。
+- **身份与可见范围**：房间内可见的只有昵称、头像与「已登录平台 / 会员档位」徽章；`showBadges` 关掉后连徽章都不上报。成员在房间里改名走 `session.setIdentity()` → 房主用 `updateMemberProfile()` 更新名册（席位与入房时间不变）。
+- **中转生命周期**：`create()` 必须先 `await releaseRelay()` 再 `start()`（`close()` 返回 Promise，因为 `stop` 是异步 IPC）。中转自身也做兜底：**没有房主连接且没有成员**的空房间允许被新房顶掉，有人在听时仍拒绝，避免把正在听的人无声踢掉。
+- **权威与配额**：房主是唯一权威（`term` 防双权威）。`partyQuota` 是每人在 Party 模式下**整场累计**的加歌上限，`quota` 是「我推荐」每轮上限；成员加歌一律由房主校验，成员本地只做灰显提示。
+- **大队列不卡**：状态广播只带游标起 50 首的窗口，完整队列按 `queue-page` 分页取；加歌面板首屏渲染 300 行 + 按需放量。
+- **平台相关返回形状**：歌单详情用 `src/utils/playlistSongs.ts` 的 `playlistDetailSongs()` 统一收口——netease/QQ 返回原始字段（`playlist.tracks` / `songlist`），其余平台返回已归一化的 `tracks`。**不要**在新代码里只读 `data.songs`。
