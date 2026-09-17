@@ -1,9 +1,10 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal } from 'lucide-react'
+import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio } from 'lucide-react'
 import { Song, getProxiedImageUrl } from '../services/musicApi'
 import { getPlatformCapabilities, getPlatformCookie, getPlatformFavoriteLabels, platformLabel } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
-import { useEffect, useLayoutEffect, useState, useRef } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useSyncExternalStore } from 'react'
+import { isResonanceSuspended, RESONANCE_PUSH_EVENT, RESONANCE_PUSH_LABEL, subscribeResonanceSuspend } from '../features/resonance/push'
 import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 import {
@@ -477,6 +478,9 @@ export default function SongContextMenu({
   const favoriteActionIsRemove = favoriteStatus ?? hideFavoriteAction
   const favoriteStatusLoading = favoriteStatus === null && Boolean(favoriteUserId)
 
+  // 共振是否处于挂起态（人在别的模式但房间还活着）→ 决定要不要多一项「推送至共振」
+  const resonanceSuspended = useSyncExternalStore(subscribeResonanceSuspend, isResonanceSuspended, () => false)
+
   const menuItems = [
     {
       label: '播放',
@@ -579,6 +583,16 @@ export default function SongContextMenu({
       icon: User,
       onClick: () => {
         onViewArtist?.(song)
+        onClose()
+      }
+    }] : []),
+    // 只有共振被挂起（人在别的模式、房间还活着）时才多这一项：
+    // 直接派发全局事件，由 App 交给共振会话决定「设为下一曲」还是「预排队」。
+    ...(resonanceSuspended ? [{
+      label: RESONANCE_PUSH_LABEL,
+      icon: Radio,
+      onClick: () => {
+        window.dispatchEvent(new CustomEvent(RESONANCE_PUSH_EVENT, { detail: song }))
         onClose()
       }
     }] : []),

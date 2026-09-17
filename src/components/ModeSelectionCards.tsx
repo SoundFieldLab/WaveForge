@@ -1,6 +1,6 @@
 ﻿import { motion } from 'framer-motion'
 
-export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
+export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
 
 interface ModeSelectionCardsProps {
   currentMode: ModeSelectionMode
@@ -19,6 +19,7 @@ const MODE_OPTIONS: ReadonlyArray<{
   { mode: 'minimal', label: '简约', description: '三栏布局 · 沉浸聆听' },
   { mode: 'traditional', label: '传统', description: '经典布局 · 推荐与歌词' },
   { mode: 'desktop', label: '桌面', description: '沉浸歌词 · 桌面组件' },
+  { mode: 'resonance', label: '共振', description: '朋友一起听 · 各自会员音源' },
 ]
 
 function ExploreMiniature({ accentRgb }: { accentRgb: string }) {
@@ -127,6 +128,7 @@ function ModeMiniature({ mode, exploreAccentRgb }: { mode: ModeSelectionMode; ex
   if (mode === 'explore') return <ExploreMiniature accentRgb={exploreAccentRgb} />
   if (mode === 'minimal') return <MinimalMiniature />
   if (mode === 'traditional') return <TraditionalMiniature />
+  if (mode === 'resonance') return <ResonanceMiniature />
   return <DesktopMiniature />
 }
 
@@ -140,6 +142,32 @@ function TraditionalMiniature() {
       <span className="absolute left-[31%] right-[25%] top-9 h-12 rounded-lg bg-gradient-to-br from-amber-200/30 via-rose-300/20 to-blue-300/20" />
       <span className="absolute left-[31%] right-[25%] bottom-4 grid grid-cols-4 gap-1"><i className="aspect-square rounded bg-white/15" /><i className="aspect-square rounded bg-pink-200/25" /><i className="aspect-square rounded bg-blue-200/20" /><i className="aspect-square rounded bg-white/10" /></span>
       <span className="absolute right-2 top-9 bottom-3 w-[19%] rounded-lg border border-white/10 bg-black/20" />
+    </span>
+  )
+}
+
+/**
+ * 共振：同心环 + 环上的成员头像点，和「一起听房间」的意象对应。
+ * 之前它落到 DesktopMiniature 上，跟桌面模式的卡片长得一模一样（用户反馈「图标没区分」）。
+ */
+function ResonanceMiniature() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_38%,rgba(255,90,112,0.34),transparent_46%),radial-gradient(circle_at_88%_84%,rgba(124,196,255,0.26),transparent_42%),linear-gradient(145deg,#2a1220_0%,#151021_56%,#08070f_100%)]"
+    >
+      {/* 同心环 */}
+      <span className="absolute left-1/2 top-[46px] h-[68px] w-[68px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-pink-300/45" />
+      <span className="absolute left-1/2 top-[46px] h-[46px] w-[46px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-pink-200/30" />
+      <span className="absolute left-1/2 top-[46px] h-[24px] w-[24px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/25 bg-white/[0.08]" />
+      {/* 环上的成员点：四个人在一个房间里 */}
+      <span className="absolute left-[52px] top-[26px] h-2.5 w-2.5 rounded-full border border-white/40 bg-pink-300/70" />
+      <span className="absolute left-[104px] top-[26px] h-2.5 w-2.5 rounded-full border border-white/40 bg-blue-300/70" />
+      <span className="absolute left-[44px] top-[58px] h-2.5 w-2.5 rounded-full border border-white/40 bg-amber-200/70" />
+      <span className="absolute left-[112px] top-[58px] h-2.5 w-2.5 rounded-full border border-white/40 bg-violet-300/70" />
+      {/* 连线：星型拓扑（房主居中，成员连过来） */}
+      <span className="absolute left-1/2 top-[46px] h-[1px] w-[38px] -translate-y-1/2 origin-left rotate-[155deg] bg-pink-200/35" />
+      <span className="absolute left-1/2 top-[46px] h-[1px] w-[38px] -translate-y-1/2 origin-left rotate-[25deg] bg-blue-200/35" />
     </span>
   )
 }

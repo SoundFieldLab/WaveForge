@@ -10,9 +10,9 @@
 
 import { useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Compass, House, Monitor, PanelsTopLeft } from 'lucide-react'
+import { Compass, House, Monitor, PanelsTopLeft, Radio } from 'lucide-react'
 
-export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
+export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
 
 interface ModeTransitionOverlayProps {
   mode: TransitionMode | null
@@ -24,6 +24,7 @@ const MODE_META: Record<TransitionMode, { label: string; hint: string }> = {
   minimal: { label: '简约', hint: '正在整理你的音乐' },
   traditional: { label: '传统', hint: '正在铺开你的音乐馆' },
   desktop: { label: '桌面', hint: '正在铺开工作台' },
+  resonance: { label: '共振', hint: '正在接入一起听房间' },
 }
 
 const PARTICLE_COUNT = 16
@@ -143,6 +144,8 @@ export default function ModeTransitionOverlay({ mode, theme = 'dark' }: ModeTran
                 {mode === 'minimal' && <House size={52} strokeWidth={1.6} style={{ color: accent }} />}
                 {mode === 'traditional' && <PanelsTopLeft size={52} strokeWidth={1.6} style={{ color: accent }} />}
                 {mode === 'desktop' && <Monitor size={52} strokeWidth={1.6} style={{ color: accent }} />}
+                {/* 共振：同心环图标（与侧栏入口、房间头图同一套视觉），此前这一档没有图标会留一个空环 */}
+                {mode === 'resonance' && <Radio size={52} strokeWidth={1.6} style={{ color: accent }} />}
               </motion.div>
             </div>
 

@@ -7,7 +7,7 @@
  */
 
 import { motion } from 'framer-motion'
-import { Blocks, Lightbulb, RadioTower, Zap } from 'lucide-react'
+import { Blocks, Lightbulb, Radio, RadioTower, Zap } from 'lucide-react'
 import { openChromaConsole, openDGLabConsole, openPluginCenter, openPluginConsole } from '../services/pluginStore'
 import { isPluginEnabled } from '../services/pluginStore'
 import { useDGLabStatus } from '../plugins/clients/DGLabClient'
@@ -65,12 +65,14 @@ function SignalRgbStatusDot({ show }: { show: boolean }) {
 const dglabEnabled = () => isPluginEnabled('dglab')
 const chromaEnabled = () => isPluginEnabled('chroma')
 const signalRgbEnabled = () => isPluginEnabled('signalrgb')
+const resonanceEnabled = () => isPluginEnabled('resonance')
 const openSignalRgbConsole = () => openPluginConsole('signalrgb')
 
 export default function PluginShortcuts({ variant, playerTheme = 'dark' }: PluginShortcutsProps) {
   const showDglab = dglabEnabled()
   const showChroma = chromaEnabled()
   const showSignalRgb = signalRgbEnabled()
+  const showResonance = resonanceEnabled()
 
   const pillCls = `relative p-2 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`
   const pillIcon = `w-4 h-4 ${playerTheme === 'dark' ? 'text-white/70' : 'text-black/60'}`
@@ -107,6 +109,18 @@ export default function PluginShortcuts({ variant, playerTheme = 'dark' }: Plugi
           >
             <Zap className="w-5 h-5" />
             <DGLabStatusDot show />
+          </motion.button>
+        )}
+        {showResonance && (
+          <motion.button
+            whileHover={{ scale: 1.1 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'resonance' }))}
+            title="共振 · 一起听"
+            aria-label="打开共振（一起听）"
+            className="relative rounded-full bg-gradient-to-r from-[#ff5a70]/90 to-[#ff8b6a]/90 p-3 text-white shadow-lg ring-1 ring-[#ff9aa8]/50 transition-all"
+          >
+            <Radio className="w-5 h-5" />
           </motion.button>
         )}
         <motion.button

@@ -712,6 +712,19 @@ export interface ElectronAPI {
     onCursor: (callback: (command: RemoteCursorCommand) => void) => () => void
     onClientsChange: (callback: (status: RemoteStatus) => void) => () => void
   }
+  /** 共振（多人一起听）：局域网房间中转，只转发端到端加密信封，主进程不解析内容 */
+  resonance?: {
+    start: (config: { roomId: string; code?: string; maxMembers?: number; port?: number }) => Promise<ResonanceHubStatus & { error?: string }>
+    stop: () => Promise<ResonanceHubStatus>
+    getStatus: () => Promise<ResonanceHubStatus>
+    send: (payload: { envelope: unknown; to?: string }) => Promise<number>
+    kick: (peerId: string) => Promise<boolean>
+    buildInvite: (address?: string) => Promise<string>
+    updateCode: (code: string) => Promise<boolean>
+    /** 扫描同网段正在监听共振中转的主机（只读 /discover，不含房间号与房间码） */
+    scanLan: () => Promise<Array<{ address: string; name: string; memberCount: number; open: boolean }>>
+    onEvent: (callback: (event: { type: string; peerId?: string; memberCount?: number; roomId?: string; env?: unknown }) => void) => () => void
+  }
   airplay: {
     setEnabled: (enabled: boolean) => Promise<AirplayStatus>
     listDevices: () => Promise<AirplayDeviceInfo[]>
@@ -865,6 +878,21 @@ export interface RemoteStatus {
   maxClients: number
   clients: RemoteClientInfo[]
   ips: RemoteLanAddress[]
+  error?: string
+}
+
+/** 共振局域网中转状态（房主侧） */
+export interface ResonanceHubStatus {
+  running: boolean
+  port: number
+  roomId: string
+  /** 6 位数字房间码；只有房主知道，用于邀请 */
+  code: string
+  maxMembers: number
+  memberCount: number
+  createdAt: number
+  ips: RemoteLanAddress[]
+  isHost: boolean
   error?: string
 }
 

@@ -1040,7 +1040,9 @@ function App() {
   
   // 添加Toast的辅助函数（timer 收进 Set，卸载时统一清理，防 HMR/重挂载后对已卸载组件 setState）
   const toastTimersRef = useRef<Set<number>>(new Set())
-  const addToast = (message: string, type: 'success' | 'error' | 'info', accentColor?: string, duration = 4000) => {
+  // 引用稳定性：addToast 被 RESONANCE_PUSH_EVENT 监听 effect 列为依赖，若每次渲染重建
+  // 就会反复退订/重订 window 监听。函数体只用到 ref 与 setState，依赖为空即可。
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info', accentColor?: string, duration = 4000) => {
     const id = toastIdRef.current++
     setToasts(prev => [...prev, { id, message, type, accentColor }])
     const timer = window.setTimeout(() => {
@@ -1048,7 +1050,7 @@ function App() {
       setToasts(prev => prev.filter(t => t.id !== id))
     }, duration)
     toastTimersRef.current.add(timer)
-  }
+  }, [])
 
   useEffect(() => () => {
     if (playModeToastTimerRef.current !== null) window.clearTimeout(playModeToastTimerRef.current)
@@ -3037,6 +3039,8 @@ function App() {
         setResonanceSuspended(false)
       }
       setViewMode(mode)
+      // 共振不作为启动后的持久目标；离开后记录普通模式，下次启动回到它
+      if (mode !== 'resonance') localStorage.setItem('viewMode', mode)
       setEnteredFromMode(mode)
       // 壁纸监控按需启停（桌面模式 + 联动开启才启动）
       syncWallpaperWatcher(mode)
@@ -3067,6 +3071,12 @@ function App() {
 
     const handleViewModeChange = (e: Event) => {
       const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+      // 共振是插件功能：插件没启用时不该能进这个模式（按钮/卡片/遥控器/注入事件都得拦住）。
+      // 插件中心里已经有「启用」开关，这里做最后一道闸，避免绕过界面直接切进去。
+      if (mode === 'resonance' && !isPluginEnabled('resonance')) {
+        addToast('「共振 · 一起听」插件未启用，请先在插件中心打开', 'info')
+        return
+      }
       // 房间里还有人 + 要切去别的模式 → 先问「挂起还是退出」，不能一声不响把房间丢了
       // （bypass 由弹窗按钮设置：用户已经选过了，直接放行同一次切换）
       const resonanceRoom = getResonanceSession().getSnapshot()
@@ -3077,6 +3087,9 @@ function App() {
         && resonanceRoom.room
         && resonanceRoom.live
       ) {
+        // 模式卡片在派发前已经播了过渡动画：既然这次切换被拦下来询问，先把动画收掉，
+        // 否则弹窗背后会挂着一个最长 12s 的粒子过渡
+        setModeTransition(null)
         setResonanceExitPrompt({ next: mode })
         return
       }
@@ -3719,7 +3732,10 @@ function App() {
     setCurrentIndex(selectedIndex)
 
     const originMode = inferredOrigin.mode || viewMode
-    const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore')
+    // 共振房内的换歌由房主权威状态驱动（见 resonanceAdapter.apply）。共振模式必须原地切歌：
+    // 若走到下面的 setViewMode('minimal')，成员会被踢出共振界面、并且把持久化的
+    // viewMode 覆写成 minimal——与 docs/resonance-design.md「共振页内不切走播放页」相悖。
+    const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore' || originMode === 'resonance')
     // 电台从探索页点播：探索页（含电台弹窗）保持挂载，播放页以覆盖层打开，返回时原样呈现弹窗
     const exploreRadioOverlay = isRadioSelection && originMode === 'explore'
     setEnteredFromMode(originMode)
@@ -5480,6 +5496,50 @@ function App() {
   const resolveResonanceTrack = useCallback(async (track: ResonanceTrack) => (
     resolveResonanceTrackCached(track)
   ), [resolveResonanceTrackCached])
+
+  /**
+   * 预热房间里的下一首：与其它模式的「下一首预载」同一套内容（歌词 + 封面 + 音频地址）。
+   *
+   * 共振的播放权威在房主手里，本机不知道什么时候会换歌；等 `apply` 收到新 trackKey 才开拉，
+   * 会比其它模式慢一拍（尤其是首次播放同一首歌）。这里在已知队列时提前把下一首备好。
+   * 只做「解析 + 取流 + 预取封面/歌词」，不写 App 播放列表、不改播放状态。
+   */
+  const resonancePreloadedRef = useRef<Set<string>>(new Set())
+  const preloadResonanceTrack = useCallback((track?: ResonanceTrack) => {
+    if (!track?.key) return
+    if (resonancePreloadedRef.current.has(track.key)) return
+    resonancePreloadedRef.current.add(track.key)
+    void (async () => {
+      try {
+        const resolved = await resolveResonanceTrackCached(track)
+        if (!resolved.playable || !resolved.song) return
+        const song = resolved.song
+        const cacheKey = getSongKey(song)
+        // 歌词：与控制当前曲目同一入口，命中缓存则不重复请求
+        void ensureSongLyrics(song, cacheKey)
+        // 封面：按播放页角色的优先级预取，切过去时不会有空窗
+        void preloadArtwork(song.album?.picUrl, { role: 'player', priority: 'visible' })
+        // 音频地址：写进 App 的统一预载缓存（切歌时 loadAndPlaySong 直接命中，省一次往返）
+        const source = {
+          songId: resolved.platform === 'qq' ? (song.mid || song.id) : song.id,
+          platform: resolved.platform || song.platform || 'netease',
+        }
+        const url = await getSongUrl(source.songId, source.platform).catch(() => null)
+        if (!url || url === 'SONG_UNAVAILABLE') return
+        const latest = preloadCacheRef.current.get(cacheKey)
+        preloadCacheRef.current.set(cacheKey, {
+          url,
+          lyrics: latest?.lyrics || [],
+          timestamp: Date.now(),
+          urlTimestamp: Date.now(),
+          lyricsTimestamp: latest?.lyricsTimestamp,
+          lyricsLoaded: latest?.lyricsLoaded,
+          lyricsPromise: latest?.lyricsPromise,
+        })
+      } catch { /* 预热失败不影响播放：真到那首歌时还会正常解析 */ }
+    })()
+  }, [resolveResonanceTrackCached])
+
   /** 共振播放适配器：读本机播放 / 对齐房主权威进度 / 解析本机可播性 */
   const createResonanceAdapter = useCallback((hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ({
     readLocal: () => {
@@ -5508,6 +5568,9 @@ function App() {
         if (!sameSong) {
           // 走既有播放入口（ref 稳定引用）：换歌 + 交给统一播放链
           handleSongSelectRef.current(resolved.song, [resolved.song])
+          // 换歌后顺带把房间里的下一首也预热掉（与其它模式的下一首预载同一套：歌词 + 封面 + 音频地址）
+          const index = room.queue.items.findIndex(item => item.key === playback.trackKey)
+          if (index >= 0) preloadResonanceTrack(room.queue.items[index + 1])
           return
         }
         const audio = audioPlayerRef.current
@@ -5518,14 +5581,17 @@ function App() {
         if (playback.playing !== Boolean(isPlaying)) audio.togglePlay()
       })()
     },
-    setQueue: () => {
-      // 房间队列由共振界面展示；本机播放完全由房主权威状态驱动，不改写 App 播放列表（避免队列语义打架）
+    setQueue: (tracks: ResonanceTrack[], startIndex: number) => {
+      // 房间队列由共振界面展示；本机播放完全由房主权威状态驱动，不改写 App 播放列表（避免队列语义打架）。
+      // 但要**预热下一首**：房间里换歌是房主说了算，如果不提前把下一首的歌词/封面/音频地址取好，
+      // 轮到它的时候才现拉，会比其它模式明显慢半拍。
+      preloadResonanceTrack(tracks[startIndex + 1])
     },
     canPlay: async (track: ResonanceTrack) => {
       const resolved = await resolveResonanceTrackCached(track)
       return { playable: resolved.playable, tier: resolved.tier, reason: resolved.reason }
     },
-  }), [audioPlayer, currentSong, isPlaying, resolveResonanceTrackCached])
+  }), [audioPlayer, currentSong, isPlaying, resolveResonanceTrackCached, preloadResonanceTrack])
   isPlayingRef.current = isPlaying
   const lastMediaControlRef = useRef<{ group: string; time: number } | null>(null)
   // 遥控器音量/静音状态
@@ -7565,7 +7631,11 @@ function App() {
               </button>
               <button
                 type="button"
-                onClick={() => setResonanceExitPrompt(null)}
+                onClick={() => {
+                  // 模式选择组件通常会先写 localStorage 再派发事件；取消时要把「共振仍在」写回去
+                  localStorage.setItem('viewMode', 'resonance')
+                  setResonanceExitPrompt(null)
+                }}
                 className="w-full rounded-2xl px-4 py-2.5 text-center text-sm text-white/60 transition hover:bg-white/6"
               >
                 留在这里（取消）
@@ -7806,7 +7876,7 @@ function App() {
               createAdapter={createResonanceAdapter}
               resolveTrack={resolveResonanceTrack}
               nowPlaying={{ song: currentSong, positionMs: currentTime, playing: isPlaying }}
-              onExitMode={() => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'explore' }))}
+              onSelectMode={mode => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))}
             />
           </motion.div>
         )}

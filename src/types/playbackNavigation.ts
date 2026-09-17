@@ -1,6 +1,6 @@
 import type { Song } from '../services/musicApi'
 
-export type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop'
+export type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
 
 export type PlaybackSurface =
   | 'mode-root'

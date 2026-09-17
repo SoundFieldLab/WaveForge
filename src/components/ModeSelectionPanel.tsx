@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom'
 import { Settings } from 'lucide-react'
 import ModeSelectionCards, { type ModeSelectionMode } from './ModeSelectionCards'
 import { useTvBack } from '../tv/tvCore'
+import { isPluginEnabled } from '../services/pluginStore'
 
 export const MODE_SELECTION_PANEL_HEIGHT = 210
 // 切换模式前先让面板和被下移的当前界面完整收回。
@@ -17,12 +18,13 @@ const MODE_VISIBILITY_KEY = 'waveforge_visible_modes'
 // 已见模式记录：识别"保存的可见列表早于新模式上线"的情况——
 // 否则旧列表（如 8/22 传统模式上线前保存的）会让新增模式永远不可见
 const MODE_KNOWN_KEY = 'waveforge_known_modes'
-const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'traditional', 'desktop']
+const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'traditional', 'desktop', 'resonance']
 const MODE_NAMES: Record<ModeSelectionMode, string> = {
   explore: '探索',
   minimal: '简约',
   traditional: '传统',
   desktop: '桌面',
+  resonance: '共振',
 }
 
 function parseKnownModes(value: string | null): ModeSelectionMode[] {
@@ -120,13 +122,16 @@ export default function ModeSelectionPanel({
     return () => window.removeEventListener('waveforge-modes-visibility-changed', handleVisibilityChanged)
   }, [])
 
-  // 当前所在模式始终保留在可见列表里
+  // 当前所在模式始终保留在可见列表里；
+  // 另外「共振」是插件功能——插件没启用时不该出现在模式选择里（与侧栏入口同一条规则）。
   const ensureMinimalVisible = (modes: ModeSelectionMode[]): ModeSelectionMode[] =>
     modes.includes('minimal') ? modes : ['minimal', ...modes]
+  const gatedModes = (visibleModes.includes(currentMode) ? visibleModes : [...visibleModes, currentMode])
+    .filter(mode => mode !== 'resonance' || isPluginEnabled('resonance'))
   const effectiveVisibleModes = ensureMinimalVisible(
-    visibleModes.includes(currentMode)
-      ? visibleModes
-      : [...visibleModes, currentMode]
+    gatedModes.includes(currentMode)
+      ? gatedModes
+      : [...gatedModes, currentMode]
   )
 
   const toggleModeVisibility = (mode: ModeSelectionMode) => {
@@ -162,14 +167,18 @@ export default function ModeSelectionPanel({
         ? `radial-gradient(circle at 50% -32%, rgba(${exploreAccentRgb},0.14), transparent 58%), linear-gradient(135deg, #f0f6f3, #eef1f4)`
       : currentMode === 'traditional'
         ? 'radial-gradient(circle at 50% -32%, rgba(236,72,153,0.14), transparent 58%), linear-gradient(135deg, #f8f2f2, #eef2f7)'
-        : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.14), transparent 58%), linear-gradient(135deg, #f0f4f9, #eef0f4)'
+        : currentMode === 'resonance'
+          ? 'radial-gradient(circle at 50% -32%, rgba(255,90,112,0.16), transparent 58%), linear-gradient(135deg, #f9f1f4, #eff1f6)'
+          : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.14), transparent 58%), linear-gradient(135deg, #f0f4f9, #eef0f4)'
     : currentMode === 'minimal'
       ? 'radial-gradient(circle at 50% -32%, rgba(168,85,247,0.34), transparent 58%), linear-gradient(135deg, rgb(20,13,34), rgb(6,7,14))'
       : currentMode === 'explore'
         ? `radial-gradient(circle at 50% -32%, rgba(${exploreAccentRgb},0.34), transparent 58%), linear-gradient(135deg, rgb(7,24,27), rgb(5,8,15))`
       : currentMode === 'traditional'
         ? 'radial-gradient(circle at 50% -32%, rgba(236,72,153,0.34), transparent 58%), linear-gradient(135deg, rgb(37,21,34), rgb(7,10,18))'
-        : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.34), transparent 58%), linear-gradient(135deg, rgb(9,22,42), rgb(5,7,14))'
+        : currentMode === 'resonance'
+          ? 'radial-gradient(circle at 50% -32%, rgba(255,90,112,0.34), transparent 58%), linear-gradient(135deg, rgb(38,17,26), rgb(8,7,14))'
+          : 'radial-gradient(circle at 50% -32%, rgba(59,130,246,0.34), transparent 58%), linear-gradient(135deg, rgb(9,22,42), rgb(5,7,14))'
 
   return createPortal(
     <motion.div

@@ -29,7 +29,13 @@ describe('mode integration wiring', () => {
     const app = source('App.tsx')
     const explore = source('components/ExploreView.tsx')
     const settingsPanel = source('components/ExploreSettingsPanel.tsx')
-    expect(app).toContain("const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore')")
+    // 原地切歌的模式集合：探索/传统/共振都要保持当前视图挂载（共振换歌由房主权威状态驱动，
+    // 若在此被切到 minimal，成员会被踢出共振界面）。断言「意图」而不是整行字面量，
+    // 避免以后新增原地模式时必须同步改写这行断言。
+    expect(app).toContain('const playsInPlace = !isRadioSelection && (')
+    expect(app).toContain("originMode === 'traditional'")
+    expect(app).toContain("originMode === 'explore'")
+    expect(app).toContain("originMode === 'resonance'")
     expect(app).toContain("const exploreRadioOverlay = isRadioSelection && originMode === 'explore'")
     expect(app).toContain("if (viewMode !== 'minimal' && !playsInPlace && !exploreRadioOverlay)")
     expect(app).toContain("if (originMode === 'explore')")

@@ -355,6 +355,7 @@ const automixLog = require('./automix-log.cjs')
 const { ConfigManager } = require('./config-manager.cjs')
 const deviceLicense = require('./device-license.cjs')
 const { createRemoteServer, getLanIPv4Addresses } = require('./remote-server.cjs')
+const { createResonanceHub, DEFAULT_PORT: RESONANCE_DEFAULT_PORT } = require('./resonance-hub.cjs')
 const { setupAirplayIpc } = require('./airplay/airplay-ipc.cjs')
 const { setupChromaIpc } = require('./chroma-ipc.cjs')
 const { setupSignalRgbIpc } = require('./signalrgb-ipc.cjs')
@@ -2304,6 +2305,8 @@ ipcMain.handle('taskbar-widget:update-settings', (_event, partial) => {
 
 // ===== 遥控器：局域网 Web 服务 + 虚拟鼠标桥接 =====
 let remoteServer = null
+// 共振房间中转：仅房主进程内运行；只做密文转发，不解析内容
+let resonanceHub = null
 const remoteSettings = { theme: 'dark', topRightAction: 'song', gestures: { doubleTap: true, swipe: true, twoFinger: true, twoFingerTap: true } }
 
 function remoteSettingsPath() {
@@ -2397,6 +2400,102 @@ ipcMain.handle('remote:update-settings', (_event, partial) => {
   if (remoteServer) remoteServer.pushConfig()
   return getRemoteSettings()
 })
+
+// ── 共振（多人一起听）：局域网房间中转 ──
+function ensureResonanceHub() {
+  if (resonanceHub) return resonanceHub
+  resonanceHub = createResonanceHub({
+    getComputerName: () => os.hostname(),
+    getLanIps: () => getLanIPv4Addresses(),
+    // 房间中转的所有事件（含成员发来的加密信封）原样转给渲染进程；主进程不解析内容
+    onEvent: (event) => {
+      if (!event || !event.type) return
+      safeSendToWindow(mainWindow, 'resonance:event', event)
+    },
+  })
+  return resonanceHub
+}
+
+ipcMain.handle('resonance:start', guardTrustedIpc('privileged', async (_event, config) => {
+  const hub = ensureResonanceHub()
+  try {
+    return await hub.start({
+      roomId: String((config && config.roomId) || ''),
+      code: config && config.code ? String(config.code) : undefined,
+      maxMembers: Number(config && config.maxMembers) || undefined,
+      port: Number(config && config.port) || RESONANCE_DEFAULT_PORT,
+    })
+  } catch (error) {
+    return { running: false, error: error && error.message ? error.message : String(error) }
+  }
+}))
+
+ipcMain.handle('resonance:stop', guardTrustedIpc('privileged', () => (
+  resonanceHub ? resonanceHub.stop() : { running: false }
+)))
+
+ipcMain.handle('resonance:status', guardTrustedIpc('privileged', () => (
+  resonanceHub ? resonanceHub.status() : { running: false, port: RESONANCE_DEFAULT_PORT, roomId: '', code: '', memberCount: 0, ips: getLanIPv4Addresses() }
+)))
+
+ipcMain.handle('resonance:send', guardTrustedIpc('privileged', (_event, payload) => {
+  if (!resonanceHub || !payload || typeof payload !== 'object') return 0
+  const envelope = payload.envelope
+  if (!envelope || typeof envelope !== 'object') return 0
+  // to: 'all' | 'others:<peerId>' | '<peerId>'（'others:' 由中转按「广播但排除该成员」处理）
+  // 注意 broadcast 的第二个参数就是「排除某个 peerId」，hub 并没有 broadcastExcept 方法——
+  // 原先调它必然抛 TypeError（成员之间聊天因此完全发不出去，且是未处理的 promise 拒绝）。
+  const target = String(payload.to || 'all')
+  if (target === 'all') return resonanceHub.broadcast(envelope)
+  if (target.startsWith('others:')) return resonanceHub.broadcast(envelope, String(target.slice(7)))
+  return resonanceHub.sendTo(target, envelope) ? 1 : 0
+}))
+
+ipcMain.handle('resonance:kick', guardTrustedIpc('privileged', (_event, peerId) => (
+  resonanceHub ? resonanceHub.kick(String(peerId || '')) : false
+)))
+
+ipcMain.handle('resonance:invite', guardTrustedIpc('privileged', (_event, address) => (
+  resonanceHub ? resonanceHub.buildInvite(address ? String(address) : undefined) : ''
+)))
+
+ipcMain.handle('resonance:update-code', guardTrustedIpc('privileged', (_event, code) => (
+  resonanceHub ? resonanceHub.updateCode(String(code || '')) : false
+)))
+
+/** 局域网扫描：找出同网段开着共振中转的主机（只读 /discover，匿名信息） */
+ipcMain.handle('resonance:scan-lan', guardTrustedIpc('privileged', async () => {
+  const interfaces = getLanIPv4Addresses()
+  const targets = []
+  for (const iface of interfaces) {
+    const parts = String(iface.address).split('.')
+    if (parts.length !== 4) continue
+    const prefix = parts.slice(0, 3).join('.')
+    for (let host = 2; host <= 254; host += 1) targets.push(`${prefix}.${host}`)
+  }
+  const uniqueTargets = [...new Set(targets)].slice(0, 512)
+  const found = []
+  const probe = async (host) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 700)
+    try {
+      const response = await fetch(`http://${host}:${RESONANCE_DEFAULT_PORT}/discover`, { signal: controller.signal })
+      if (!response.ok) return
+      const body = await response.json()
+      if (body && body.service === 'waveforge-resonance') {
+        found.push({ address: host, name: String(body.name || ''), memberCount: Number(body.memberCount) || 0, open: body.open === true })
+      }
+    } catch { /* 未响应即视为无服务 */ } finally {
+      clearTimeout(timer)
+    }
+  }
+  const concurrency = 48
+  for (let index = 0; index < uniqueTargets.length; index += concurrency) {
+    await Promise.all(uniqueTargets.slice(index, index + concurrency).map(probe))
+  }
+  return found
+}))
+
 
 function getWindowsSystemLocation() {
   const script = `

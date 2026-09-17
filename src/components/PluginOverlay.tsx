@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react'
 import '../plugins/DGLabPlugin'
 import '../plugins/ChromaPlugin'
 import '../plugins/SignalRgbPlugin'
+import '../plugins/ResonancePlugin'
 import { getAllPluginManifests, getPluginRuntime, buildPluginContext } from '../plugins/registry'
 import { getGlobalAudioAnalyzerStore } from '../plugins/clients/DGLabClient'
 import {
