@@ -228,7 +228,6 @@ export default function PlayerControls({
   const volumeCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [isProgressBarExpanded, setIsProgressBarExpanded] = useState(false)
   const [shortcutSettings, setShortcutSettings] = useState(loadPlaybackShortcutSettings)
-  const [settingsAccentColor, setSettingsAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const [seekFeedback, setSeekFeedback] = useState<{
     direction: 'forward' | 'backward'
     seconds: number
@@ -257,14 +256,9 @@ export default function PlayerControls({
       const detail = (event as CustomEvent<PlaybackShortcutSettings>).detail
       setShortcutSettings(detail || loadPlaybackShortcutSettings())
     }
-    const handleAccentColorChange = (event: Event) => {
-      setSettingsAccentColor((event as CustomEvent<string>).detail || localStorage.getItem('accentColor') || '#3B82F6')
-    }
     window.addEventListener(PLAYBACK_SHORTCUT_SETTINGS_EVENT, handleSettingsChange)
-    window.addEventListener('accentColorChanged', handleAccentColorChange)
     return () => {
       window.removeEventListener(PLAYBACK_SHORTCUT_SETTINGS_EVENT, handleSettingsChange)
-      window.removeEventListener('accentColorChanged', handleAccentColorChange)
     }
   }, [])
 
@@ -535,7 +529,7 @@ export default function PlayerControls({
             boxShadow: playerTheme === 'dark' ? '0 12px 34px rgba(0,0,0,0.32)' : '0 12px 34px rgba(0,0,0,0.14)',
           }}
         >
-          <div className="flex items-center justify-center gap-2 text-sm font-bold tracking-wide" style={{ color: settingsAccentColor }}>
+          <div className="flex items-center justify-center gap-2 text-sm font-bold tracking-wide" style={{ color: accentColor }}>
             <span>{seekFeedback.direction === 'forward' ? '▶▶' : '◀◀'}</span>
             <span>{seekFeedback.direction === 'forward' ? '+' : '-'}{seekFeedback.seconds}s</span>
           </div>

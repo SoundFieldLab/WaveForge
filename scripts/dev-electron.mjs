@@ -29,7 +29,7 @@ const logStartup = message => {
 
 const projectRoot = resolve(__dirname, '..')
 const require = createRequire(import.meta.url)
-const { selectWaveForgeUserData } = require('../desktop/user-data-profile.cjs')
+const { prepareWaveForgeUserData } = require('../desktop/user-data-profile.cjs')
 const viteConfigFile = resolve(projectRoot, 'vite.config.ts')
 const distDir = resolve(projectRoot, 'dist')
 
@@ -51,11 +51,18 @@ const localServiceToken = process.env.WAVEFORGE_LOCAL_TOKEN || randomBytes(32).t
 const appDataRoot = process.platform === 'win32'
   ? resolve(process.env.APPDATA || resolve(homedir(), 'AppData/Roaming'))
   : resolve(process.env.XDG_CONFIG_HOME || resolve(homedir(), '.config'))
-const userDataRoot = selectWaveForgeUserData({
+const profilePreparation = prepareWaveForgeUserData({
   appDataRoot,
   isPackaged: false,
   overridePath: process.env.WAVEFORGE_USER_DATA,
+  platform: process.platform,
 })
+const userDataRoot = profilePreparation.userDataPath
+if (profilePreparation.status === 'migrated') {
+  console.log(`[Profile] 已将旧 Electron 数据迁移到 ${userDataRoot}`)
+} else if (profilePreparation.status === 'profile-active') {
+  console.warn('[Profile] WaveForge profile 正在使用，迁移延期到相关进程退出后的下次启动')
+}
 let pythonCacheRoot = resolve(userDataRoot, 'cache')
 try {
   const configured = JSON.parse(readFileSync(resolve(userDataRoot, 'config.json'), 'utf8'))?.cachePath

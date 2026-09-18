@@ -93,3 +93,6 @@ debug-minimal/dist/
 
 # 本地临时探针脚本（.tmp-*.mjs 等，不入库）
 .tmp-*
+
+# 登录状态调试产物
+test-login-status.txt

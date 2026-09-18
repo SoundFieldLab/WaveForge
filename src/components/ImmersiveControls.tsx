@@ -2,11 +2,12 @@ import { motion } from 'framer-motion'
 import { AudioLines, Captions, ChevronDown, Film, Home, Languages } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import QuickSettings from './QuickSettings'
+import StemMixerPopover, { type TrackStemControlModel } from './StemMixerPopover'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 
 interface ImmersiveControlsProps {
-  /** 播放页封面主色（预留，目前未参与按钮渲染） */
-  coverColor?: string
+  /** 播放页封面主色 */
+  coverColor: string
   /** 布局变体：left = 沉浸模式专属——按钮列移到左上角，顶部带可收起的向下箭头；不传 = 传统右上角布局 */
   variant?: 'default' | 'left'
   onHomeClick: () => void
@@ -24,12 +25,12 @@ interface ImmersiveControlsProps {
   isPureMusic?: boolean // 新增：是否为纯音乐
   /** 隐藏右上角 Home 按钮（摩登模式改用自身左下角页脚的 Home，避免重复） */
   hideHome?: boolean
-  /** 人声/伴奏分离控制句柄（App 侧未提交功能预留，当前布局暂未消费） */
-  stemControl?: unknown
+  /** 人声/伴奏分离控制句柄 */
+  stemControl?: TrackStemControlModel
 }
 
 export default function ImmersiveControls({
-  coverColor: _coverColor,
+  coverColor,
   variant = 'default',
   onHomeClick,
   onOpenMixingStudio,
@@ -44,6 +45,7 @@ export default function ImmersiveControls({
   playerTheme = 'dark',
   isPureMusic = false, // 默认非纯音乐
   hideHome = false,
+  stemControl,
 }: ImmersiveControlsProps) {
   const [isVisible, setIsVisible] = useState(true)
   const [isHovered, setIsHovered] = useState(false)
@@ -63,24 +65,6 @@ export default function ImmersiveControls({
   const hideX = leftLayout ? -60 : 60
   const featureHideX = leftLayout ? -44 : 44
   const hoverShiftX = leftLayout ? 3 : -3
-
-  const [accentColor, setAccentColor] = useState(() => {
-    const saved = localStorage.getItem('accentColor')
-    return saved || '#3B82F6'
-  })
-  
-  // 监听主题色变化
-  useEffect(() => {
-    const handleAccentColorChange = (e: CustomEvent) => {
-      setAccentColor(e.detail)
-    }
-    
-    window.addEventListener('accentColorChanged', handleAccentColorChange as EventListener)
-    
-    return () => {
-      window.removeEventListener('accentColorChanged', handleAccentColorChange as EventListener)
-    }
-  }, [])
 
   useEffect(() => {
     // 进入播放页默认显示，3 秒无操作整组渐隐（含箭头本身）；鼠标靠近（hover）立即唤醒，离开后再计 3 秒。
@@ -105,6 +89,7 @@ export default function ImmersiveControls({
 
   const showMvButton = typeof onMvBackgroundToggle === 'function'
   const featureButtonCount = (hasTranslation ? 1 : 0) + (hasRoman ? 1 : 0) + (showMvButton ? 1 : 0) // MV 背景按钮常驻
+  const stemRowCount = stemControl ? 1 : 0
   const rowRem = tvCompact ? 3.2 : 4 // 每个按钮行占位高度（rem），TV 紧凑更小
   // 左上角布局：箭头独占第一行，其余按钮整体下移一行
   const rowOffsetRem = leftLayout ? rowRem : 0
@@ -116,8 +101,9 @@ export default function ImmersiveControls({
   const romanButtonTop = shiftTop(hasTranslation ? `${(tvCompact ? 6.4 : 8)}rem` : `${(tvCompact ? 3.2 : 4)}rem`)
   // MV 背景按钮：紧跟翻译/罗马音功能行的下一行
   const mvButtonTop = shiftTop(`${(tvCompact ? 3.2 : 4) + (featureButtonCount - 1) * rowRem}rem`)
-  const quickSettingsTop = shiftTop(`${(tvCompact ? 3.2 : 4) + featureButtonCount * rowRem}rem`)
-  const mixingStudioTop = shiftTop(`${(tvCompact ? 6.4 : 8) + featureButtonCount * rowRem}rem`)
+  const stemButtonTop = shiftTop(`${(tvCompact ? 3.2 : 4) + featureButtonCount * rowRem}rem`)
+  const quickSettingsTop = shiftTop(`${(tvCompact ? 3.2 : 4) + (featureButtonCount + stemRowCount) * rowRem}rem`)
+  const mixingStudioTop = shiftTop(`${(tvCompact ? 6.4 : 8) + (featureButtonCount + stemRowCount) * rowRem}rem`)
   const btnPad = tvCompact ? 'p-2.5' : 'p-3' // 按钮内边距
   const iconCls = tvCompact ? 'w-5 h-5' : 'w-6 h-6' // 图标尺寸
   const featureButtonTransition = {
@@ -149,17 +135,17 @@ export default function ImmersiveControls({
       ? { boxShadow: unifiedGlassShadow }
       : {
           backgroundColor: enabled
-            ? accentColor
+            ? coverColor
             : playerTheme === 'dark'
               ? 'rgba(0,0,0,0.4)'
               : 'rgba(255,255,255,0.5)',
           borderColor: enabled
-            ? `${accentColor}66`
+            ? `${coverColor}66`
             : playerTheme === 'dark'
               ? 'rgba(255,255,255,0.2)'
               : 'rgba(0,0,0,0.2)',
           boxShadow: enabled
-            ? `0 0 20px ${accentColor}40, inset 0 1px 1px rgba(255,255,255,0.3)`
+            ? `0 0 20px ${coverColor}40, inset 0 1px 1px rgba(255,255,255,0.3)`
             : '0 4px 12px rgba(0,0,0,0.15)',
         }
   const featureIconColor = (enabled: boolean) =>
@@ -178,8 +164,8 @@ export default function ImmersiveControls({
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       style={leftLayout
-        ? { width: tvCompact ? '52px' : '60px', height: collapsed ? (tvCompact ? '56px' : '64px') : (tvCompact ? `${158 + featureButtonCount * 38 + rowOffsetRem * 16}px` : `${214 + featureButtonCount * 50 + rowOffsetRem * 16}px`) }
-        : { width: tvCompact ? '104px' : '120px', height: tvCompact ? `${158 + featureButtonCount * 38}px` : `${214 + featureButtonCount * 50}px` }}
+        ? { width: tvCompact ? '52px' : '60px', height: collapsed ? (tvCompact ? '56px' : '64px') : (tvCompact ? `${158 + (featureButtonCount + stemRowCount) * 38 + rowOffsetRem * 16}px` : `${214 + (featureButtonCount + stemRowCount) * 50 + rowOffsetRem * 16}px`) }
+        : { width: tvCompact ? '104px' : '120px', height: tvCompact ? `${158 + (featureButtonCount + stemRowCount) * 38}px` : `${214 + (featureButtonCount + stemRowCount) * 50}px` }}
     >
       {/* 鼠标靠近感应区（隐形，仅左上角布局）：比按钮列大一圈，靠近即唤醒整组按钮 */}
       {leftLayout && (
@@ -369,6 +355,31 @@ export default function ImmersiveControls({
           }}
         />
       </motion.button>
+      )}
+
+      {/* 快速设置按钮 */}
+      {stemControl && (
+        <motion.div
+          initial={{ x: featureHideX, opacity: 0, scale: 0.96, filter: 'blur(6px)' }}
+          animate={{
+            x: buttonsVisible ? 0 : featureHideX,
+            opacity: buttonsVisible ? 1 : 0,
+            scale: buttonsVisible ? 1 : 0.96,
+            filter: buttonsVisible ? 'blur(0px)' : 'blur(6px)',
+          }}
+          transition={featureButtonTransition}
+          className={`absolute ${sideCls}`}
+          style={{ top: stemButtonTop }}
+        >
+          <StemMixerPopover
+            control={stemControl}
+            accentColor={coverColor}
+            theme={playerTheme}
+            variant="immersive"
+            placement={leftLayout ? 'right' : 'left'}
+            size={tvCompact ? 'compact' : 'default'}
+          />
+        </motion.div>
       )}
 
       {/* 快速设置按钮 */}

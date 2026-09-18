@@ -24,7 +24,7 @@ interface StemMixerPopoverProps {
   accentColor: string
   theme: 'light' | 'dark'
   variant?: 'compact' | 'immersive'
-  placement?: 'above' | 'left'
+  placement?: 'above' | 'left' | 'right'
   size?: 'default' | 'compact'
 }
 
@@ -112,11 +112,11 @@ export function StemMixerPopover({
         {open && (
           <motion.div
             data-testid="stem-mixer-popover"
-            initial={reducedMotion ? { opacity: 0 } : placement === 'left' ? { opacity: 0, x: 8, scale: 0.96 } : { opacity: 0, y: 8, scale: 0.96 }}
+            initial={reducedMotion ? { opacity: 0 } : placement === 'above' ? { opacity: 0, y: 8, scale: 0.96 } : { opacity: 0, x: placement === 'left' ? 8 : -8, scale: 0.96 }}
             animate={{ opacity: 1, x: 0, y: 0, scale: 1 }}
-            exit={reducedMotion ? { opacity: 0 } : placement === 'left' ? { opacity: 0, x: 8, scale: 0.96 } : { opacity: 0, y: 8, scale: 0.96 }}
+            exit={reducedMotion ? { opacity: 0 } : placement === 'above' ? { opacity: 0, y: 8, scale: 0.96 } : { opacity: 0, x: placement === 'left' ? 8 : -8, scale: 0.96 }}
             transition={{ duration: reducedMotion ? 0.1 : 0.18 }}
-            className={`absolute z-[190] w-[300px] rounded-2xl border p-3 shadow-2xl ${placement === 'left' ? 'right-full top-1/2 mr-3 -translate-y-1/2' : 'bottom-full right-0 mb-3'}`}
+            className={`absolute z-[190] w-[300px] rounded-2xl border p-3 shadow-2xl ${placement === 'left' ? 'right-full top-1/2 mr-3 -translate-y-1/2' : placement === 'right' ? 'left-full top-1/2 ml-3 -translate-y-1/2' : 'bottom-full right-0 mb-3'}`}
             style={{ background: surface, color: text, borderColor: dark ? 'rgba(255,255,255,.14)' : 'rgba(0,0,0,.12)', backdropFilter: 'blur(36px) saturate(170%)' }}
           >
             <style>{`
