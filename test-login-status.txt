@@ -1,0 +1,7 @@
+﻿// 测试脚本：在浏览器控制台执行
+console.log('=== QQ音乐登录状态检测 ===');
+console.log('QQ已登录:', localStorage.getItem('qq_logged_in'));
+console.log('QQ用户ID:', localStorage.getItem('qq_user_id'));
+console.log('QQ用户名:', localStorage.getItem('qq_username'));
+console.log('网易云已登录:', localStorage.getItem('netease_logged_in'));
+console.log('网易云用户ID:', localStorage.getItem('netease_user_id'));
