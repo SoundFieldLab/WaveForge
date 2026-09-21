@@ -150,6 +150,32 @@ describe('scoreCandidate（候选打分）', () => {
     expect(far.score).toBeLessThan(close.score)
   })
 
+  it('电影作品名出现在主题曲前缀时不误判为另一首歌', () => {
+    const hanabiCtx: MatchContext = { songTitle: '打上花火', artists: ['Daoko', '米津玄師'], songDuration: 286 }
+    const candidate = scoreCandidate(video({
+      title: '【𝟒𝐊 𝐇𝐢𝐑𝐞𝐬】《烟花》主题曲 打上花火-米津玄師、DAOKO(中日歌词)',
+      duration: 286,
+      play: 394000,
+      author: '三桂花鱼',
+      mid: 351098096,
+    }), hanabiCtx)
+    expect(candidate.score).not.toBe(-Infinity)
+    expect(candidate.signals.hasArtist).toBe(true)
+    expect(candidate.score).toBeGreaterThan(200)
+  })
+
+  it('上传者信誉权重：三桂花鱼提升，JLRS-LeoFM 降低，且不影响其他账号', () => {
+    const hanabiCtx: MatchContext = { songTitle: '打上花火', artists: ['Daoko', '米津玄師'], songDuration: 286 }
+    const base = video({ title: '打上花火 MV', duration: 286, play: 100_000 })
+    const preferred = scoreCandidate({ ...base, author: '三桂花鱼', mid: 351098096 }, hanabiCtx)
+    const preferredByMid = scoreCandidate({ ...base, author: '账号改名', mid: 351098096 }, hanabiCtx)
+    const jlrs = scoreCandidate({ ...base, author: 'JLRS-LeoFM' }, hanabiCtx)
+    const normal = scoreCandidate({ ...base, author: '普通音乐账号' }, hanabiCtx)
+    expect(preferred.score - normal.score).toBe(45)
+    expect(preferredByMid.score).toBe(preferred.score)
+    expect(normal.score - jlrs.score).toBe(45)
+  })
+
   it('相对时长：10 分钟的长歌，±60 秒仍算贴近（比例而非绝对差）', () => {
     const longCtx: MatchContext = { songTitle: '长歌', artists: ['歌手'], songDuration: 600 }
     const near = scoreCandidate(video({ title: '歌手 长歌 MV', duration: 660 }), longCtx)
@@ -604,6 +630,10 @@ describe('偏好加权（preferenceAdjustment）', () => {
 })
 
 describe('buildQueries（关键词构建）', () => {
+  it('打上花火会优先追加可信上传者查询', () => {
+    const queries = buildQueries({ songTitle: '打上花火', artists: ['Daoko', '米津玄師'], songDuration: 286 })
+    expect(queries[0]).toBe('打上花火 三桂花鱼')
+  })
   it('auto 均衡：歌名+歌手 / 仅歌名 / 歌名+MV', () => {
     expect(buildQueries(ctx)).toEqual(['稻香 周杰伦', '稻香', '稻香 MV'])
   })

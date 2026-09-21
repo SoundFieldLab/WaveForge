@@ -1088,6 +1088,30 @@ const QUALITY_COMMUNITY_KEYWORDS = [
   '汉化组', '字幕组', 'Project_SEKAI资讯站', 'pjsk', 'sekaiofficial',
 ]
 
+interface UploaderWeightProfile {
+  /** B 站作者展示名或规范化后的别名；MID 优先于展示名。 */
+  names: readonly string[]
+  mid?: number
+  /** 仅这些歌曲/艺人/IP上下文会追加“歌名 + 上传者”搜索；不限制账号权重。 */
+  queryScopes?: readonly string[]
+  score: number
+  queryScore?: number
+}
+
+const UPLOADER_WEIGHT_PROFILES: readonly UploaderWeightProfile[] = [
+  {
+    names: ['三桂花鱼'],
+    mid: 351098096,
+    queryScopes: ['打上花火'],
+    score: 45,
+    queryScore: 2,
+  },
+  {
+    names: ['JLRS-LeoFM', 'JRS-LeoFM'],
+    score: -45,
+  },
+]
+
 interface ScopedOfficialSource {
   mid: number
   scopes?: string[]
@@ -1109,6 +1133,22 @@ const VERIFIED_OFFICIAL_SOURCES: ScopedOfficialSource[] = [
   { mid: 26040194, scopes: ['稲葉曇', 'inabakumori'] },
   { mid: 400813602, scopes: ['yoasobi', 'ayase'] },
 ]
+
+function uploaderWeightProfile(video: Pick<BilibiliVideo, 'author' | 'mid'>): UploaderWeightProfile | null {
+  const authorNorm = normalizeText(video.author)
+  return UPLOADER_WEIGHT_PROFILES.find((profile) => (
+    (profile.mid != null && video.mid === profile.mid)
+      || profile.names.some((name) => authorNorm === normalizeText(name))
+  )) || null
+}
+
+function uploaderQueries(song: MatchContext, artists: ResolvedArtistNames): string[] {
+  const context = normalizeText([song.songTitle, song.franchise || '', ...artists.raw, ...artists.aliases].join(' '))
+  return UPLOADER_WEIGHT_PROFILES
+    .filter((profile) => profile.queryScore && profile.queryScopes?.some((scope) => context.includes(normalizeText(scope))))
+    .sort((a, b) => (b.queryScore || 0) - (a.queryScore || 0))
+    .map((profile) => `${cleanSongTitle(song.songTitle)} ${profile.names[0]}`)
+}
 
 function matchesVerifiedOfficialSource(video: BilibiliVideo, ctx: MatchContext, artists: ResolvedArtistNames): boolean {
   if (!video.mid) return false
@@ -1330,6 +1370,7 @@ export interface ScoreCandidateOptions {
   ccVerification?: CCVerification
 }
 
+
 export function scoreCandidate(
   video: BilibiliVideo,
   ctx: MatchContext,
@@ -1404,7 +1445,9 @@ export function scoreCandidate(
   const targetAppearsBeforeQuote = firstQuotedIndex > 0
     && songTitleVariants.some((variant) => normalizeText(rawVideoTitle.slice(0, firstQuotedIndex)).includes(variant))
   const quotedTitleNorms = quotedTitles.map((match) => normalizeText(match[1])).filter(Boolean)
-  if (quotedTitleNorms.length && !targetAppearsBeforeQuote
+  const hasWorkContext = firstQuotedIndex >= 0
+    && /^\s*(?:主题曲|主題曲|主题歌|主題歌|插曲|片尾曲|片头曲|片尾歌|片头歌|ed\b|op\b|主题音乐|主題音樂)/i.test(rawVideoTitle.slice(firstQuotedIndex + quotedTitles[0][0].length))
+  if (quotedTitleNorms.length && !targetAppearsBeforeQuote && !hasWorkContext
     && !quotedTitleNorms.some((quoted) => songTitleVariants.some((variant) => quoted.includes(variant)))) {
     score -= 85
   }
@@ -1651,6 +1694,8 @@ export function scoreCandidate(
 
   // 官方频道与精品社区来源
   if (signals.officialChannel) score += 25
+  const uploaderWeight = uploaderWeightProfile(video)
+  if (uploaderWeight) score += uploaderWeight.score
   if (QUALITY_COMMUNITY_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))) score += 15
 
   // 复审增强：B 站原始认证值为 -1 未认证、0 个人、1 机构。
@@ -1723,7 +1768,7 @@ export function shouldAutoPlay(candidate: CandidateScore, strictness: AutoPlaySt
 // ===== 按歌缓存 + 手动选择记忆 + 黑名单 =====
 
 const MATCH_CACHE_TTL = 24 * 60 * 60 * 1000
-const MATCH_SCORE_VERSION = 'v6-audited-identity'
+const MATCH_SCORE_VERSION = 'v7-trusted-uploaders'
 /** 匹配缓存 LRU 上限（防止长时间会话无界增长） */
 const MATCH_CACHE_MAX = 60
 const matchCache = new Map<string, { at: number; result: BilibiliMatchResult }>()
@@ -1918,6 +1963,8 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   if (template === 'title-mv') return [`${title} MV`]
 
   const queries: string[] = []
+  // 可信上传者查询优先执行，避免基础查询累计到候选上限后漏掉高信誉账号。
+  for (const query of uploaderQueries(song, resolvedArtists)) queries.push(query)
   // 1. 原文标题 + 全部歌手（首选；日韩等原文标题直接搜原文，中文仅作辅助）
   if (artist) queries.push(`${title} ${artist}`.trim())
   const franchiseNames = resolveFranchiseNames(song.franchise)
@@ -1935,6 +1982,8 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   }
   // 别名查询放在歌手主查询之后、仅标题之前
   for (const aq of artistVariants) queries.push(aq)
+  // 可信上传者查询已在基础查询前置，这里不重复追加。
+
   // 3. 仅原文标题
   if (!queries.includes(title)) queries.push(title)
   // 4. 标题 + MV

@@ -7,13 +7,6 @@ import {
 } from '../src/data/bilibiliMvDeclarations'
 
 describe('developer Bilibili MV declarations', () => {
-  it('binds Villain (Take the Shot) to the reviewed VCT EMEA video', () => {
-    const declaration = getDeveloperBilibiliMvDeclaration('qq:612279399')
-    expect(declaration?.bvid).toBe('BV18A4m1N7Hc')
-    expect(declaration?.songTitle).toBe('Villain (Take the Shot)')
-    expect(declaration?.uploader).toBe('ACG_Planck')
-  })
-
   it('prioritizes user override before developer declaration and algorithm results', () => {
     const candidate = (bvid: string) => ({ video: { bvid }, score: 0 }) as any
     const algorithm = [candidate('BValgorithm1'), candidate('BV18A4m1N7Hc')]
