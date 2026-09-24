@@ -2,7 +2,7 @@
 // - 所有内容（搜索/音乐库/歌单/歌手/专辑/评论/个人中心）都在中间栏直接展示，不用弹窗；
 // - 平台切换为可拖拽药丸（与简约模式一致）；模式切换走全局顶部下拉条；
 // - 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部，可滚动）。
-import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, startTransition, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
@@ -22,7 +22,7 @@ import { fetchExploreHome, fetchExplorePlaylist, fetchExploreChart, type Explore
 import { createPlaylist, deletePlaylist, getUserPlaylists, invalidateUserPlaylistsCache, removeSongFromPlaylist, subscribePlaylist, updatePlaylist } from '../services/playlistService'
 import { createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getLastAppleMutationResult, getAppleCatalogPlaylistTracks, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs, getApplePlaylistTracks, getAppleRecentPlayed, appleLibraryTrackToSong, appleSongToSong, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
 import { sodaMediaToSong } from '../services/sodaService'
-import { fetchSpotifyLiked, fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spotifyService'
+import { fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spotifyService'
 import type { AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
@@ -398,7 +398,6 @@ const TraditionalSpectrum = memo(function TraditionalSpectrum({
 })
 
 const JAPANESE_KANA_RE = /[\u3040-\u30ff\u31f0-\u31ff]/g
-const LATIN_RE = /[A-Za-z]/g
 const isJapaneseLyric = (line: LyricLine | null, text: string) => {
   const metadata = String((line as (LyricLine & { language?: string; lang?: string }) | null)?.language || (line as (LyricLine & { language?: string; lang?: string }) | null)?.lang || line?.alternateTexts?.[0]?.language || line?.alternateTexts?.[0]?.lang || '').toLowerCase()
   if (/^(ja|jp)(-|$)|japanese|日本語/.test(metadata)) return true
@@ -547,7 +546,7 @@ function TraditionalView({
   useEffect(() => {
     const onPlatformChanged = (event: Event) => {
       const next = (event as CustomEvent<MusicPlatform>).detail
-      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+      if (next && getVisiblePlatforms().includes(next)) startTransition(() => setPlatform(next))
     }
     window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
     return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
@@ -602,11 +601,11 @@ function TraditionalView({
   // 常驻小元素（模式下拉 chevron）的无限浮动：TV 非增强档静态化（JS 动画，tv.css 杀不掉）
   const tvChevronFloat = !tvMode || isPerfModeEnhanced()
   const cyclePlatform = (dir: 1 | -1) => {
-    setPlatform(prev => {
+    startTransition(() => setPlatform(prev => {
       const idx = Math.max(0, visiblePlatforms.indexOf(prev))
       const next = (idx + dir + visiblePlatforms.length) % visiblePlatforms.length
       return visiblePlatforms[next] ?? prev
-    })
+    }))
   }
   const platformKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'ArrowLeft') { e.preventDefault(); cyclePlatform(-1) }
@@ -1047,7 +1046,18 @@ function TraditionalView({
 
   const recommendationSongs = useMemo(() => {
     const list = [...(payload?.dailySongs || []), ...(payload?.radioSongs || []), ...(payload?.newSongs || [])]
-    return list.filter((song, index, arr) => arr.findIndex(other => songKey(other) === songKey(song)) === index).slice(0, 12)
+    // 单次遍历去重：此处原为 `arr.findIndex(...) === index`，对数百首的合并列表是
+    // O(n²)（且每首歌都要重算一次 songKey）。Set 方案保留「首次出现优先」的语义与顺序。
+    const seen = new Set<string>()
+    const unique: Song[] = []
+    for (const song of list) {
+      const key = songKey(song)
+      if (seen.has(key)) continue
+      seen.add(key)
+      unique.push(song)
+      if (unique.length >= 12) break
+    }
+    return unique
   }, [payload])
   const heroSongs = recommendationSongs.slice(0, 4)
   const minePlaylists = userPlaylists.filter(item => !item.isLike && !item.isCollected && !item.subscribed)
@@ -1104,7 +1114,7 @@ function TraditionalView({
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId)
     platformStripX.stop()
     animate(platformStripX, (1 - platformIdxRef.current) * PLATFORM_SLOT, { duration: 0.36, ease: [0.22, 1, 0.36, 1] })
-    if (!wasDrag && pressedKey && pressedKey !== platform) setPlatform(pressedKey)
+    if (!wasDrag && pressedKey && pressedKey !== platform) startTransition(() => setPlatform(pressedKey))
   }
 
   // 背景：独立背景层（模糊只作用于背景），内容层在其上
@@ -1146,7 +1156,7 @@ function TraditionalView({
               const active = platform === key
               return (
                 <motion.button
-                  key={key} type="button" data-platform={key} onClick={() => setPlatform(key)}
+                  key={key} type="button" data-platform={key} onClick={() => startTransition(() => setPlatform(key))}
                   className="relative z-10 flex h-9 w-20 flex-shrink-0 items-center justify-center gap-1.5 text-xs font-medium transition-colors"
                   style={{ color: active ? (isDark ? '#fff' : '#1a1a1a') : isDark ? 'rgba(255,255,255,.45)' : 'rgba(15,23,42,.4)' }}
                 >

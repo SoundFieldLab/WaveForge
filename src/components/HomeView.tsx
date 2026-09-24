@@ -1,10 +1,10 @@
-import { memo, useState, useEffect, useRef } from 'react'
+import { memo, startTransition, useState, useEffect, useRef } from 'react'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
-import { Play, Music, TrendingUp, Flame, Clock, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
+import { Play, Music, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
 import { Song, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
@@ -287,7 +287,6 @@ function HomeView({
    *  与 5 个 blur(80px) 光晕会持续跑合成，纯属浪费。与 ExploreView 的 suspended 同义。 */
   suspended = false
 }: HomeViewProps) {
-  const [leftChartType, setLeftChartType] = useState<ChartType>('new')
   const [platform, setPlatform] = useState<MusicPlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'selectedPlatform'))
   // 平台变化（药丸点击/拖动/被隐藏回退）即持久化；其他挂载视图通过事件同步
   useEffect(() => {
@@ -296,7 +295,7 @@ function HomeView({
   useEffect(() => {
     const onPlatformChanged = (event: Event) => {
       const next = (event as CustomEvent<MusicPlatform>).detail
-      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+      if (next && getVisiblePlatforms().includes(next)) startTransition(() => setPlatform(next))
     }
     window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
     return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
@@ -316,7 +315,7 @@ function HomeView({
     // 当前平台被隐藏时切换到第一个可见平台
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
-      setPlatform(next)
+      startTransition(() => setPlatform(next))
       syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
@@ -370,19 +369,17 @@ function HomeView({
     platformStripX.stop()
     animate(platformStripX, (1 - platformIdxRef.current) * PLATFORM_SLOT, { duration: 0.36, ease: [0.22, 1, 0.36, 1] })
     // 未拖动：解析按下的药丸直接切换（pointer capture 会拦截原生 click）
-    if (!wasDrag && pressedKey && pressedKey !== platform) setPlatform(pressedKey)
+    if (!wasDrag && pressedKey && pressedKey !== platform) startTransition(() => setPlatform(pressedKey))
   }
 
   const [hideHomeAccountId, setHideHomeAccountId] = useState(() => localStorage.getItem('hideHomeAccountId') === 'true')
   const [recentPlaybackSummary, setRecentPlaybackSummary] = useState<{ covers: string[]; count: number }>({ covers: [], count: 0 })
-  const [chartSongs, setChartSongs] = useState<Song[]>([])
   const initialPlaylistUserId = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : ''
   const [userPlaylists, setUserPlaylists] = useState<any[]>(() => (
     initialPlaylistUserId
       ? getCachedUserPlaylists(platform, initialPlaylistUserId) || []
       : []
   ))
-  const [loading, setLoading] = useState(true)
   const [playlistLoading, setPlaylistLoading] = useState(false)
   // 平台切换器操作提示：15 秒后渐隐
   const [switcherHintVisible, setSwitcherHintVisible] = useState(true)
@@ -416,7 +413,7 @@ function HomeView({
     return saved ? sanitizeHomeModules(saved, 'qq') : getDefaultHomeModules('qq', qqLoggedIn)
   })
 
-  const [appleModules, setAppleModules] = useState<HomeModuleType[]>(() => {
+  const [appleModules] = useState<HomeModuleType[]>(() => {
     const saved = localStorage.getItem('homeModules_apple')
     return saved ? sanitizeHomeModules(saved, 'apple') : getDefaultHomeModules('apple', appleLoggedIn || false)
   })
@@ -525,7 +522,6 @@ function HomeView({
   
   // 主题面板状态
   const [showThemePanel, setShowThemePanel] = useState(false)
-  const [themePanelSettled, setThemePanelSettled] = useState(false)
   const [isTopHovered, setIsTopHovered] = useState(false)
   // TV 遥控器模式无鼠标：顶部/底部悬浮栏视为恒 hover，控件常驻可聚焦；
   // 手机遥控器连上（光标模式）时恢复真实 hover，与 PC 一致。
@@ -535,11 +531,11 @@ function HomeView({
   const pillTvAdjust = tvMode && !remoteCursorMode
   const platformLabel = { netease: '网易云', qq: 'QQ音乐', apple: 'Apple', spotify: 'Spotify', kugou: '酷狗', soda: '汽水' } as Record<MusicPlatform, string>
   const cyclePlatform = (dir: 1 | -1) => {
-    setPlatform(prev => {
+    startTransition(() => setPlatform(prev => {
       const idx = Math.max(0, visiblePlatforms.indexOf(prev))
       const next = (idx + dir + visiblePlatforms.length) % visiblePlatforms.length
       return visiblePlatforms[next] ?? prev
-    })
+    }))
   }
   const platformKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === 'ArrowLeft') { e.preventDefault(); cyclePlatform(-1) }
@@ -558,7 +554,6 @@ function HomeView({
 
   useEffect(() => {
     const closeForModeSwitch = () => {
-      setThemePanelSettled(false)
       setShowThemePanel(false)
       setShowUpArrowHint(false)
     }
@@ -1869,29 +1864,6 @@ function HomeView({
   }
   
 
-  const loadChartSongs = async () => {
-    setLoading(true)
-    try {
-      const payload = await fetchExploreHome(platform)
-      let songs: Song[] = []
-      if (leftChartType === 'new') {
-        songs = payload.newSongs
-      } else {
-        const pattern = leftChartType === 'rising'
-          ? /飙升|上升|趋势/
-          : /热歌|流行指数|热门/
-        const chart = payload.charts.find(item => pattern.test(item.name)) ||
-          payload.charts[leftChartType === 'rising' ? 1 : 0]
-        if (chart) songs = (await fetchExploreChart(chart)).songs
-      }
-      setChartSongs(songs.slice(0, 30))
-    } catch (error) {
-      console.error('加载首页榜单失败:', error)
-      setChartSongs([])
-    } finally {
-      setLoading(false)
-    }
-  }
 
 
   const loadUserPlaylists = async (forceRefresh = false) => {
@@ -2029,21 +2001,7 @@ function HomeView({
     void loadModuleData(currentModule, controller.signal, true)
   }
 
-  const getChartIcon = (type: ChartType) => {
-    switch (type) {
-      case 'new': return <Clock className="w-4 h-4" />
-      case 'hot': return <Flame className="w-4 h-4" />
-      case 'rising': return <TrendingUp className="w-4 h-4" />
-    }
-  }
 
-  const getChartName = (type: ChartType) => {
-    switch (type) {
-      case 'new': return '新歌榜'
-      case 'hot': return '热歌榜'
-      case 'rising': return '飙升榜'
-    }
-  }
 
   const isLoggedIn = platform === 'netease' ? neteaseLoggedIn : platform === 'qq' ? qqLoggedIn : platform === 'apple' ? (appleLoggedIn || false) : platform === 'spotify' ? (spotifyLoggedIn || false) : platform === 'kugou' ? (kugouLoggedIn || false) : (sodaLoggedIn || false)
   const username = platform === 'netease' ? neteaseUsername : platform === 'qq' ? qqUsername : platform === 'apple' ? (appleUsername || '') : platform === 'spotify' ? (spotifyUsername || '') : platform === 'kugou' ? (kugouUsername || '') : (sodaUsername || '')
@@ -2375,7 +2333,6 @@ function HomeView({
         onMouseLeave={() => setIsTopHovered(false)}
         onClick={() => {
           if (!showThemePanel) {
-            setThemePanelSettled(false)
             setShowThemePanel(true)
             setShowUpArrowHint(false)
           }
@@ -2389,7 +2346,6 @@ function HomeView({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               onClick={() => {
-                setThemePanelSettled(false)
                 setShowThemePanel(true)
                 setShowUpArrowHint(false)
               }}
@@ -2424,11 +2380,9 @@ function HomeView({
           <ModeSelectionPanel
             currentMode="minimal"
             onClose={() => {
-              setThemePanelSettled(false)
               setShowThemePanel(false)
             }}
             onSelect={(mode) => {
-              setThemePanelSettled(false)
               setShowThemePanel(false)
               setShowUpArrowHint(false)
               // 立即显示过渡动画；面板收起/内容复位后再切换，避免来源内容以展开态残留成顶部占位
@@ -3005,7 +2959,7 @@ function HomeView({
                       key={key}
                       type="button"
                       data-platform={key}
-                      onClick={() => setPlatform(key)}
+                      onClick={() => startTransition(() => setPlatform(key))}
                       className={`flex-shrink-0 w-[80px] py-2 text-sm font-semibold relative z-10 flex items-center justify-center gap-1.5 transition-colors ${
                         active
                           ? playerTheme === 'dark' ? 'text-white' : 'text-black/90'

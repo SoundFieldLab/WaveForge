@@ -3,7 +3,7 @@ import { parseStoredBoolean } from './utils/storage'
 import { isTv, isTvModeActive, isDesktop } from './platform'
 import { useTvBack } from './tv/tvCore'
 import { isPerfModeEfficiency } from './tv/perfMode'
-import { lazy, memo, Suspense, useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore, type ComponentProps, type ReactNode } from 'react'
+import { lazy, memo, Suspense, startTransition, useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore, type ComponentProps, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import AlbumCoverPlayer from './components/AlbumCoverPlayer'
 import LyricsDisplay from './components/LyricsDisplay'
@@ -4741,8 +4741,16 @@ function App() {
   }, [commitPreparedSong])
   // 加载并播放歌曲
   const loadAndPlaySong = async (song: Song, songIndex?: number, playlistOverride?: Song[]) => {
-    const loadRevision = ++songLoadRevisionRef.current
-    const isLatestLoad = () => loadRevision === songLoadRevisionRef.current
+    // App 的渲染树巨大，播放页挂载/切歌 = 整树重建（"进入播放页瞬间卡一下"的根因）。
+    // React 19 异步 transition：让整个加载流程内（含 await 之后的各 setState）以低优先级、
+    // 可分片的方式渲染，点击/切歌这一帧不再被巨型 commit 阻塞；音频引擎独立于 React
+    // 调度，无时序影响，快速连切时也只合并提交最新一首。
+    return new Promise<void>(resolve => {
+      startTransition(async () => {
+        try {
+          const loadRevision = songLoadRevisionRef.current + 1
+          songLoadRevisionRef.current = loadRevision
+          const isLatestLoad = () => loadRevision === songLoadRevisionRef.current
     const actualPlaylist = playlistOverride || playlist
     debugLog('🎵 [PlaySong] loadAndPlaySong 被调用')
     debugLog('   歌曲:', song.name)
@@ -5241,6 +5249,11 @@ function App() {
       console.error('加载歌曲失败:', error)
       alert('加载歌曲失败')
     }
+        } finally {
+          resolve() // 无论是成功、提前 return 还是报错，都确保调用方 await 能继续
+        }
+      })
+    })
   }
 
   // 上一曲

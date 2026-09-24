@@ -2,7 +2,7 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { lazy, memo, Suspense, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -15,7 +15,6 @@ import {
   Crown,
   Disc3,
   Film,
-  Globe,
   Headphones,
   Loader2,
   LogIn,
@@ -88,7 +87,22 @@ const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
 // v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
 // 是无 appleId 的旧结构（id=榜单排名），按天缓存会让坏数据在当天内一直生效。
-const EXPLORE_CACHE_KEY = 'exploreHomeCache-v3'
+// v4：单 blob → 按平台分键。原实现把全部平台 payload 合成一个大 JSON 每次整块
+// JSON.stringify + setItem（数 MB 同步主线程开销，平台切换/首载均受影响）；
+// 分键后每次写只序列化当前平台一条。
+const EXPLORE_CACHE_KEY_PREFIX = 'exploreHomeCache-v4:'
+// v4 之前的单 blob 键：分键后不再被读写，但会以数 MB 的体积长期占着 localStorage 配额，
+// 首次读取时一次性清掉（只在启动早期执行一次，不参与滚动/平台切换的热路径）。
+const LEGACY_EXPLORE_CACHE_KEYS = ['exploreHomeCache', 'exploreHomeCache-v2', 'exploreHomeCache-v3']
+let legacyExploreCachePurged = false
+const purgeLegacyExploreCache = () => {
+  if (legacyExploreCachePurged) return
+  legacyExploreCachePurged = true
+  for (const key of LEGACY_EXPLORE_CACHE_KEYS) {
+    try { localStorage.removeItem(key) } catch { /* localStorage 不可用时忽略 */ }
+  }
+}
+const EXPLORE_PLATFORMS: ExplorePlatform[] = ['netease', 'qq', 'apple', 'spotify', 'kugou', 'soda']
 const EXPLORE_SESSION_REFRESH_PREFIX = 'exploreHomeRefreshed:'
 
 /** 探索页平台元信息：名称 / 页签短名 / 主题色 / 主题色 RGB */
@@ -191,13 +205,6 @@ const formatCount = (value?: number) => {
   return String(count)
 }
 
-const formatReleaseDate = (value?: number | string) => {
-  if (!value) return '新鲜发行'
-  if (typeof value === 'string') return value
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '新鲜发行'
-  return `${date.getMonth() + 1}月${date.getDate()}日`
-}
 
 const getGreeting = () => {
   const hour = new Date().getHours()
@@ -227,14 +234,22 @@ const Cover = memo(function Cover({ src, alt, className = '', iconClassName = 'w
   )
 })
 
-interface ExploreBannerItem {
-  imageUrl: string
-  url: string
-  title: string
-}
-
 // 封面墙背景：用歌曲封面拼成的动态海报墙（电影封面墙效果）。
 // 封面平铺 + 缓慢漂移 + 模糊遮罩，让前景内容清晰可读。
+
+// PC 端性能档位（extreme/high/standard/lite，主进程 PERF_TIER_PRESETS 持久化）懒缓存：
+// 首次画封面墙时读一次主进程档位，之后同步读取，不重复走 IPC。
+// 未读到（浏览器/非 Electron）时按最大档处理，保证不改变现有行为。
+let pcPerfTierLoaded = false
+let pcPerfTier: 'extreme' | 'high' | 'standard' | 'lite' | null = null
+function ensurePcPerfTier() {
+  if (pcPerfTierLoaded) return
+  pcPerfTierLoaded = true
+  void window.electron?.system?.getGpuSettings?.()
+    .then(result => { pcPerfTier = result?.performanceTier ?? null })
+    .catch(() => {})
+}
+
 function CoverWallBackground({
   covers,
   style,
@@ -249,9 +264,12 @@ function CoverWallBackground({
   accentRgb: string
 }) {
   const tvMode = useTvMode()
+  ensurePcPerfTier()
   // TV 上封面墙漂移 = 全屏 backdrop-filter 每帧对移动封面重模糊（弱 GPU 帧率杀手）；
   // 非增强档停掉漂移、保留静态封面墙；桌面/增强档行为不变。
-  const driftAnimated = animated && (!tvMode || isPerfModeEnhanced())
+  // PC 端补充按性能档位降级：精简档（lite）停漂移但保留静态封面墙 + 模糊遮罩——
+  // 内容静止后 backdrop-filter 不再逐帧重采样，视觉主体（封面墙 + 毛玻璃）完全不变。
+  const driftAnimated = animated && (tvMode ? isPerfModeEnhanced() : pcPerfTier !== 'lite')
   const urls = useMemo(() => {
     const unique = Array.from(new Set(covers.filter(Boolean)))
     // 扩充到足够铺满背景的封面数
@@ -311,61 +329,6 @@ function CoverWallBackground({
     </div>
   )
 }
-// 独立 memo 组件：Banner 每 5 秒自动轮播时只重渲染本组件，
-// 不再带动整个探索页（含所有推荐列表）重渲染。
-const ExploreBanner = memo(function ExploreBanner({
-  banners,
-  onBannerClick,
-}: {
-  banners: ExploreBannerItem[]
-  onBannerClick: (banner: ExploreBannerItem) => void
-}) {
-  const [bannerIndex, setBannerIndex] = useState(0)
-
-  useEffect(() => {
-    if (banners.length <= 1) return
-    const timer = setInterval(() => setBannerIndex(i => (i + 1) % banners.length), 5000)
-    return () => clearInterval(timer)
-  }, [banners.length])
-
-  if (banners.length === 0) return null
-
-  const current = banners[bannerIndex]
-  return (
-    <div className="relative mb-6 h-36 md:h-48 overflow-hidden rounded-[24px] border border-white/[0.08] bg-white/[0.045]">
-      <AnimatePresence initial={false}>
-        <motion.div
-          key={bannerIndex}
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.5 }}
-          className="absolute inset-0 cursor-pointer"
-          onClick={() => onBannerClick(current)}
-        >
-          <img src={current.imageUrl} alt={current.title} className="w-full h-full object-cover" />
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 to-transparent p-3">
-            <p className="text-white/90 text-sm font-medium truncate">{current.title}</p>
-          </div>
-        </motion.div>
-      </AnimatePresence>
-      {banners.length > 1 && (
-        <div className="absolute bottom-2 right-3 flex gap-1.5">
-          {banners.map((_, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={(e) => { e.stopPropagation(); setBannerIndex(i) }}
-              className={`h-1.5 rounded-full transition-all ${i === bannerIndex ? 'w-5 bg-white' : 'w-1.5 bg-white/40'}`}
-              aria-label={`Banner ${i + 1}`}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-})
-
 function SectionHeading({
   icon,
   title,
@@ -455,19 +418,24 @@ const getExploreAccountKey = (platform: ExplorePlatform) => {
 }
 
 const readExploreCacheEntries = (): Partial<Record<ExplorePlatform, ExploreCacheEntry>> => {
-  try {
-    const cached = JSON.parse(localStorage.getItem(EXPLORE_CACHE_KEY) || '{}')
-    return cached && typeof cached === 'object' ? cached : {}
-  } catch {
-    return {}
-  }
+  purgeLegacyExploreCache()
+  const result: Partial<Record<ExplorePlatform, ExploreCacheEntry>> = {}
+  EXPLORE_PLATFORMS.forEach(platform => {
+    try {
+      const entry = JSON.parse(localStorage.getItem(`${EXPLORE_CACHE_KEY_PREFIX}${platform}`) || 'null')
+      if (entry && typeof entry === 'object') result[platform] = entry as ExploreCacheEntry
+    } catch {
+      // 单平台缓存损坏时跳过，其余平台不受影响
+    }
+  })
+  return result
 }
 
 const readExploreCache = (): Partial<Record<ExplorePlatform, ExplorePayload>> => {
   const entries = readExploreCacheEntries()
   const today = getExploreDateKey()
   const result: Partial<Record<ExplorePlatform, ExplorePayload>> = {}
-  ;(['netease', 'qq', 'apple', 'spotify', 'kugou', 'soda'] as ExplorePlatform[]).forEach(platform => {
+  EXPLORE_PLATFORMS.forEach(platform => {
     const entry = entries[platform]
     if (
       entry?.payload &&
@@ -481,15 +449,11 @@ const readExploreCache = (): Partial<Record<ExplorePlatform, ExplorePayload>> =>
 }
 
 const writeExploreCache = (platform: ExplorePlatform, payload: ExplorePayload) => {
-  const next = {
-    ...readExploreCacheEntries(),
-    [platform]: {
-      accountKey: getExploreAccountKey(platform),
-      dateKey: getExploreDateKey(),
-      payload
-    }
-  }
-  localStorage.setItem(EXPLORE_CACHE_KEY, JSON.stringify(next))
+  localStorage.setItem(`${EXPLORE_CACHE_KEY_PREFIX}${platform}`, JSON.stringify({
+    accountKey: getExploreAccountKey(platform),
+    dateKey: getExploreDateKey(),
+    payload
+  }))
 }
 
 // 迷你播放器包装：内部订阅播放时间（4Hz），ExploreView 本体不再因 currentTime prop 每秒重渲染
@@ -578,7 +542,11 @@ function ExploreView({
   useEffect(() => {
     const onPlatformChanged = (event: Event) => {
       const next = (event as CustomEvent<ExplorePlatform>).detail
-      if (next && getVisiblePlatforms().includes(next)) setPlatform(next)
+      if (next && getVisiblePlatforms().includes(next)) {
+        // 平台切换会重建整棵探索页树（数百张封面/区块），用 transition 让其渲染
+        // 分片进行、不再阻塞点击这一帧（实测切换帧达 ~1s/掉帧到 14FPS）。
+        startTransition(() => setPlatform(next))
+      }
     }
     window.addEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
     return () => window.removeEventListener(PLATFORM_CHANGED_EVENT, onPlatformChanged)
@@ -587,7 +555,7 @@ function ExploreView({
     // 当前平台被隐藏时切换到第一个可见平台
     if (platform && !visiblePlatforms.includes(platform)) {
       const next = visiblePlatforms[0] || 'netease'
-      setPlatform(next)
+      startTransition(() => setPlatform(next))
       syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
@@ -610,14 +578,9 @@ function ExploreView({
   const detailCleanupTimerRef = useRef<number | null>(null)
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   // Apple 探索国家/地区切换（缺省取账号 storefront）
-  const [appleCountry, setAppleCountry] = useState(() => (
+  const [appleCountry] = useState(() => (
     localStorage.getItem('appleExploreCountry') || (appleStorefront && APPLE_EXPLORE_COUNTRIES.some(item => item.code === appleStorefront) ? appleStorefront : 'cn')
   ))
-  const changeAppleCountry = (country: string) => {
-    localStorage.setItem('appleExploreCountry', country)
-    setAppleCountry(country)
-    void loadExplore(undefined, true)
-  }
   const [songContextMenu, setSongContextMenu] = useState<{
     show: boolean
     x: number
@@ -637,37 +600,6 @@ function ExploreView({
   // 来自探索页的 MV 卡片时直接播放；只有点「MV 专区」才展示专区列表
   const [mvDirectPlay, setMvDirectPlay] = useState(false)
   const [fmLoading, setFmLoading] = useState(false)
-
-  // 处理 Banner 点击（解析网易云 url 打开歌单/歌曲）
-  // useCallback 稳定引用：供 ExploreBanner memo 比较，避免父级每次重渲染传入新函数。
-  const handleBannerClick = useCallback((banner: ExploreBannerItem) => {
-    const url = banner.url || ''
-    const playlistMatch = url.match(/playlist\?id=(\d+)/)
-    const songMatch = url.match(/song\?id=(\d+)/)
-    if (playlistMatch) {
-      detailControllerRef.current?.abort()
-      const controller = new AbortController()
-      detailControllerRef.current = controller
-      const requestId = ++detailRequestRef.current
-      setDetailLoading(true)
-      setDetailError('')
-      void fetchExplorePlaylist({ id: playlistMatch[1], platform: 'netease' } as ExplorePlaylist).then((detail) => {
-        if (requestId !== detailRequestRef.current || controller.signal.aborted) return
-        if (!detail) throw new Error('歌单加载失败')
-        setDetail(detail)
-        setDetailOpen(true)
-      }).catch(error => {
-        if (requestId !== detailRequestRef.current || controller.signal.aborted) return
-        setDetailError(error instanceof Error ? error.message : '歌单加载失败')
-      }).finally(() => {
-        if (requestId === detailRequestRef.current) setDetailLoading(false)
-      })
-    } else if (songMatch) {
-      void fetchExploreHome('netease').then(() => {
-        window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: '打开歌曲详情请使用搜索', type: 'info' } }))
-      })
-    }
-  }, [])
 
   // 关闭探索歌单详情覆盖层（选歌播放/点关闭共用，保证不残留叠在播放页上）
   const closeExploreDetail = useCallback(() => {
@@ -773,6 +705,12 @@ function ExploreView({
   ]), [])
   const [moreSection, setMoreSection] = useState<ExploreSectionId | null>(null)
   const exploreScrollRef = useRef<HTMLDivElement>(null)
+  // 吸顶栏滚动降级：sticky 毛玻璃在滚动时每帧对背后内容重采样，成本集中在滚动期。
+  // 滚动中临时关掉 backdrop-filter（底色还在，视觉几乎无感），停止 120ms 后恢复，
+  // 最终视觉完全不变。直接改 DOM style，避免滚动中 setState 触发探索页整树重渲染。
+  const exploreHeaderRef = useRef<HTMLElement>(null)
+  const headerBlurTimerRef = useRef(0)
+  useEffect(() => () => window.clearTimeout(headerBlurTimerRef.current), [])
   useTvBack(() => {
     if (globalModal) { setGlobalModal(null); return true }
     if (settingsOpen) { setSettingsOpen(false); return true }
@@ -894,7 +832,6 @@ function ExploreView({
         return
       }
       let active = true
-      const shouldForceRefresh = authRevision !== playlistAuthRevisionRef.current
       playlistAuthRevisionRef.current = authRevision
       void getAppleLibraryPlaylists(100)
         .then(playlists => {
@@ -1466,11 +1403,21 @@ function ExploreView({
       <div
         ref={exploreScrollRef}
         className="relative h-full overflow-y-auto overscroll-contain explore-scrollbar"
+        onScroll={() => {
+          // 滚动中临时关吸顶栏 backdrop-filter（见 exploreHeaderRef 注释），停止 120ms 恢复
+          const header = exploreHeaderRef.current
+          if (header) header.style.backdropFilter = 'none'
+          window.clearTimeout(headerBlurTimerRef.current)
+          headerBlurTimerRef.current = window.setTimeout(() => {
+            const el = exploreHeaderRef.current
+            if (el) el.style.backdropFilter = ''
+          }, 120)
+        }}
         onDragStart={event => {
           if (event.target instanceof HTMLImageElement) event.preventDefault()
         }}
       >
-        <header className="sticky top-0 z-30 border-b border-white/[0.07] bg-[#090d14]/72 backdrop-blur-2xl">
+        <header ref={exploreHeaderRef} className="sticky top-0 z-30 border-b border-white/[0.07] bg-[#090d14]/72 backdrop-blur-2xl">
           <div className="mx-auto flex max-w-[1680px] items-center gap-4 px-5 pb-2 pt-8 md:px-8 lg:px-10">
             <div className="flex min-w-0 items-center gap-3">
               <img
@@ -1490,7 +1437,7 @@ function ExploreView({
                 <button
                   key={item}
                   type="button"
-                  onClick={() => setPlatform(item)}
+                  onClick={() => startTransition(() => setPlatform(item))}
                   className="relative rounded-xl px-3.5 py-2 text-sm font-medium transition md:px-5"
                   style={{ color: item === platform ? '#081017' : 'rgba(255,255,255,0.5)' }}
                 >
