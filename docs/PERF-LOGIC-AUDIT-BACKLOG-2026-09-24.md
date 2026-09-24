@@ -52,18 +52,18 @@
 
 | 状态 | 项 | 位置 | 症状 | 建议修法 | 验证 |
 |---|---|---|---|---|---|
-| TODO | 用户主页请求竞态 | `src/components/ProfileView.tsx:1819`（`fetchUserData`）、`:1120`（`handlePlaylistClick`） | 连开两个用户主页 / 连点两个歌单，**旧响应覆盖新数据**（显示"别人的资料 + 上一人的歌单"），loading 提前关闭 | 照抄同文件 `recentRequestRef`（`:584/:1363-1449`）的 revision 守卫：函数入口自增 seq，每个 `await` 之后的 setState 前比对 | 给 `/api/netease/user/detail` 加 3s 延迟，快速点用户 A→B |
-| PARTIAL (ca4dfcb) | 假登录真校验 | `src/App.tsx:6698`（netease）、`:6755`（QQ）；`local-server.mjs:8720` | cookie 失效也显示"已登录"，后续静默失败 | **需先定策略**：建议「启动时后台校验一次，仅当上游明确返回未登录才清态并提示；网络错误不动」——直接判未登录会让网络抖动时正常登录失败 | 用一条过期 cookie 启动，应提示"登录已过期" |
+| DONE (609ad41) | 用户主页请求竞态 | `src/components/ProfileView.tsx:1819`（`fetchUserData`）、`:1120`（`handlePlaylistClick`） | 连开两个用户主页 / 连点两个歌单，**旧响应覆盖新数据**（显示"别人的资料 + 上一人的歌单"），loading 提前关闭 | 照抄同文件 `recentRequestRef`（`:584/:1363-1449`）的 revision 守卫：函数入口自增 seq，每个 `await` 之后的 setState 前比对 | 给 `/api/netease/user/detail` 加 3s 延迟，快速点用户 A→B |
+| DONE (020b8e4，改为「失效即提示」而非自动登出) | 假登录真校验 | `src/App.tsx:6698`（netease）、`:6755`（QQ）；`local-server.mjs:8720` | cookie 失效也显示"已登录"，后续静默失败 | **需先定策略**：建议「启动时后台校验一次，仅当上游明确返回未登录才清态并提示；网络错误不动」——直接判未登录会让网络抖动时正常登录失败 | 用一条过期 cookie 启动，应提示"登录已过期" |
 | TODO | 明文凭据 | `local-server.mjs:116-150`（`~/.waveforge/qq-cookie.txt`）、各平台 localStorage | 凭据明文落盘 | 安全策略决定：系统凭据库 / 至少文件权限收紧 | — |
 
 ### P1 — 越权与安全边界
 
 | 状态 | 项 | 位置 | 症状 | 建议修法 |
 |---|---|---|---|---|
-| TODO | DG-LAB 中继无鉴权 | `server/dglab-relay.cjs:1425-1429` | `POST /api/dglab/control` 无鉴权、`GET /status` 返回 `controlToken` → **本机任意进程可接管设备** | `/control` 校验令牌；`/status` 不回令牌（令牌只经主进程 IPC 给渲染层） |
-| TODO | 灯光类 IPC 无来源校验 | `desktop/chroma-ipc.cjs:524-548`、`desktop/signalrgb-ipc.cjs:18-42` | 既无 `guardTrustedIpc` 也无 `event.sender` 判定（同仓其他 privileged 通道都有），`signalrgb:uninstall-effect` 还会删写文件 | 统一套 `guardTrustedIpc('privileged')` |
+| DONE (94c8421) | DG-LAB 中继无鉴权 | `server/dglab-relay.cjs:1425-1429` | `POST /api/dglab/control` 无鉴权、`GET /status` 返回 `controlToken` → **本机任意进程可接管设备** | `/control` 校验令牌；`/status` 不回令牌（令牌只经主进程 IPC 给渲染层） |
+| DONE (61a8b48) | 灯光类 IPC 无来源校验 | `desktop/chroma-ipc.cjs:524-548`、`desktop/signalrgb-ipc.cjs:18-42` | 既无 `guardTrustedIpc` 也无 `event.sender` 判定（同仓其他 privileged 通道都有），`signalrgb:uninstall-effect` 还会删写文件 | 统一套 `guardTrustedIpc('privileged')` |
 | PARTIAL (218d92b) | 一起听越权与健壮性 | `src/features/resonance/session.ts:1170`（chat 昵称回退）、`:380-396`（closed 分支）、`transport.ts:215-243`（`close()` 不清 pending） | 名册外 peer 仍可发言并冒名；成员断网不重连且定时器/`pending` 无界增长 | chat 在 `memberNicknameOf` 为空时丢弃；closed 分支 `stopTimers()` + `transport=null`；`close()` 清 `pending` |
-| TODO | 酷狗歌单界面入口 | `PlaybackRadialMenu`（`SongContextMenu.tsx:519` 已隐藏，径向菜单未隐藏） | 酷狗"取消喜欢"服务端只回执不落库 → **假成功** | `likeKugouSong(false)` 明确返回不支持，并隐藏入口 |
+| PARTIAL (7948d52，客户端已判不支持，径向菜单入口未隐藏) | 酷狗歌单界面入口 | `PlaybackRadialMenu`（`SongContextMenu.tsx:519` 已隐藏，径向菜单未隐藏） | 酷狗"取消喜欢"服务端只回执不落库 → **假成功** | `likeKugouSong(false)` 明确返回不支持，并隐藏入口 |
 
 ### P2 — 明显的功能错误（小改动）
 
@@ -72,31 +72,31 @@
 | DONE (0fdb139) | QQ「喜欢的音乐」按名字误判 | `src/services/playlistService.ts:112` | 自建歌单名以「喜欢的音乐」结尾会被**改名、计入"我喜欢"计数、无法编辑** | 只认 `dirId==='201'` 或服务端 `specialType`，删掉 `endsWith` 猜测（netease 侧 `:321` 同理） |
 | DONE (0fdb139) | Spotify 私密歌单被建成公开 | `src/services/playlistService.ts:1131` | 勾选「私密」无效 | 统一 privacy 取值域，Spotify 分支接受 `'10'/'private'` |
 | DONE (0fdb139) | HomeView 归属误判 | `src/components/HomeView.tsx:3347` | 汽水/Spotify 用户**自己的歌单没有编辑/删除入口** | 改用文件内已有的 `getPlaylistOwnerUserId(platform)` + `isPlaylistOwner` |
-| TODO | TraditionalView 归属兜底过宽 | `src/components/TraditionalView.tsx:1657` | 他人歌单出现编辑/删除入口 | 按 `item.platform` 传对应 userId，去掉无平台兜底放行 |
+| DONE (94c8421) | TraditionalView 归属兜底过宽 | `src/components/TraditionalView.tsx:1657` | 他人歌单出现编辑/删除入口 | 按 `item.platform` 传对应 userId，去掉无平台兜底放行 |
 | DONE (0fdb139) | 删歌不校验业务码 | `src/services/playlistService.ts:1102`、`TraditionalView.tsx:924` | HTTP 200 + 业务失败也报「已从歌单移除」 | 补 `code/result` 校验（与 `addSongToPlaylist:1019` 一致） |
-| PARTIAL (5570354) | 渲染期裸 JSON.parse | `src/components/DesktopView.tsx:501`、`LyricsDisplay.tsx:664/1057` | 键被写坏 → **整树白屏**（根 ErrorBoundary 只能鼠标重载） | 改用现成的 `parseStoredBoolean`/`parseStoredArray`（同文件别处已在用） |
+| DONE (94c8421) | 渲染期裸 JSON.parse | `src/components/DesktopView.tsx:501`、`LyricsDisplay.tsx:664/1057` | 键被写坏 → **整树白屏**（根 ErrorBoundary 只能鼠标重载） | 改用现成的 `parseStoredBoolean`/`parseStoredArray`（同文件别处已在用） |
 | DONE (0fdb139) | 缓存弹窗卡死 | `src/components/CacheClearModal.tsx:242-318` | `refreshStats()` 抛错则 `busyTarget` 永不复位 → 所有按钮禁用直到重启 | `setBusyTarget(null)` 放进 `finally` |
 | DONE (5570354) | 日出日落 0 点 | `src/services/weatherTime.ts:53` | 只有日期的 `sunrise/sunset` 被当 00:00 → 昼夜/天空体错乱 | 格式不符返回 `null` 而非 `0` |
-| PARTIAL (0fdb139) | 详情两栏全空 | `src/components/SongDetailModal.tsx:103`、`ProfileView.tsx:720`、`TraditionalView.tsx:951` | `Promise.all` 任一失败即丢全部结果、无提示 | 改 `Promise.allSettled` 并给出错误态 |
-| TODO | 剩余返回链缺口 | `DesktopWidgetZone.tsx:232` 组件详情层 | TV BACK 退应用 | 补 `useTvBack`（注意先确认它的打开状态字段名） |
-| TODO | OK 键双触发 | `src/tv/tvCore.ts:570-586` + 6 处 `activateWithKeyboard`（AppleSearchBrowse/AppleExplorePanel/AppleMusicSearchPage/TraditionalView 等） | 焦点在 `data-tv-focus` div 上按 OK **动作执行两次** | `activate()` 里 `stopPropagation()`，或各处理器加 `if (event.defaultPrevented) return` |
-| TODO | 手机遥控 BACK 链路不通 | `src/App.tsx:5945-5954` | 遥控 BACK 不调 `dispatchTvBack()` → 模式选择/软键盘关不掉，反而关播放页 | `action==='back'` 先 `if (dispatchTvBack()) return` |
-| TODO | TV 焦点域漏监听 | `src/tv/tvCore.ts:800-838` | 运行时才加 `data-tv-scope` 的面板（`ExploreView.tsx:2199`）焦点永远收不进去 | MutationObserver 加 `attributes:true, attributeFilter:['data-tv-scope']` |
-| TODO | TV 首启效能档失效 | `src/tv/perfMode.ts:17` | `deviceMemory<3` 分支是死代码（模块求值时 `tv-mode` 类还没打上） | `initPerfMode()` 里在平台类打好后重算 |
-| TODO | 焦点不回退 | `src/tv/tvCore.ts:816-828` | 嵌套弹窗关闭后焦点丢失，下一次按键跳到域内第一个候选 | 卸载前记录域内上一个焦点元素并在域变化时恢复 |
-| TODO | 切模式遮罩挡住遥控 | `src/components/ModeTransitionOverlay.tsx:66` | 3–12 秒内所有候选被 `elementFromPoint` 判为不可命中 | 遮罩根节点加 `data-tv-skip` + `pointer-events-none`（并让 BACK 可取消过渡） |
+| DONE (94c8421) | 详情两栏全空 | `src/components/SongDetailModal.tsx:103`、`ProfileView.tsx:720`、`TraditionalView.tsx:951` | `Promise.all` 任一失败即丢全部结果、无提示 | 改 `Promise.allSettled` 并给出错误态 |
+| DONE (7948d52) | 剩余返回链缺口 | `DesktopWidgetZone.tsx:232` 组件详情层 | TV BACK 退应用 | 补 `useTvBack`（注意先确认它的打开状态字段名） |
+| DONE (7948d52) | OK 键双触发 | `src/tv/tvCore.ts:570-586` + 6 处 `activateWithKeyboard`（AppleSearchBrowse/AppleExplorePanel/AppleMusicSearchPage/TraditionalView 等） | 焦点在 `data-tv-focus` div 上按 OK **动作执行两次** | `activate()` 里 `stopPropagation()`，或各处理器加 `if (event.defaultPrevented) return` |
+| DONE (7948d52) | 手机遥控 BACK 链路不通 | `src/App.tsx:5945-5954` | 遥控 BACK 不调 `dispatchTvBack()` → 模式选择/软键盘关不掉，反而关播放页 | `action==='back'` 先 `if (dispatchTvBack()) return` |
+| DONE (7948d52) | TV 焦点域漏监听 | `src/tv/tvCore.ts:800-838` | 运行时才加 `data-tv-scope` 的面板（`ExploreView.tsx:2199`）焦点永远收不进去 | MutationObserver 加 `attributes:true, attributeFilter:['data-tv-scope']` |
+| DONE (7948d52) | TV 首启效能档失效 | `src/tv/perfMode.ts:17` | `deviceMemory<3` 分支是死代码（模块求值时 `tv-mode` 类还没打上） | `initPerfMode()` 里在平台类打好后重算 |
+| DONE (7948d52) | 焦点不回退 | `src/tv/tvCore.ts:816-828` | 嵌套弹窗关闭后焦点丢失，下一次按键跳到域内第一个候选 | 卸载前记录域内上一个焦点元素并在域变化时恢复 |
+| DONE (7948d52) | 切模式遮罩挡住遥控 | `src/components/ModeTransitionOverlay.tsx:66` | 3–12 秒内所有候选被 `elementFromPoint` 判为不可命中 | 遮罩根节点加 `data-tv-skip` + `pointer-events-none`（并让 BACK 可取消过渡） |
 
 ### P3 — 播放逻辑（症状明确、改动中等）
 
 | 状态 | 项 | 位置 | 症状 |
 |---|---|---|---|
-| TODO | 删除已预载的下一首 | `src/App.tsx:6671`（未 `cancelTransition`）+ `:4697`（`commitPreparedSong` 找不到目标时静默 return） | 引擎仍切到被删除的歌，UI/歌词停在上一条 → 音频与 UI 永久错位 |
-| TODO | 重复曲目定位 | `src/App.tsx:3819` | 队列里同曲重复时点第二条播第一条；key 未命中被 `Math.max(0,-1)` **兜成第一首别的歌** |
-| TODO | 连点丢步 | `src/App.tsx:5310` | `handleNext/handlePrevious` 用 state 而非 `currentIndexRef` → 快速连点只前进一首 |
-| TODO | 房间内「下一首」语义不一 | `src/App.tsx:5289` | 播放器按钮不推进房间队列（媒体键/遥控走 `hostNext()`），会把成员拉回 0:00 |
-| TODO | 「下一首播放」顺序反转 | `src/App.tsx:3994` | 连点两次顺序反了、且不重新预载 |
-| TODO | 拖进度条时换歌 | `src/components/PlayerControls.tsx:449` | 松手把**新歌** seek 到旧歌比例位置 |
-| TODO | 网易喜欢无幂等 | `src/App.tsx:4053-4076` | 连点使「我喜欢」计数虚增（服务端未补 `unchanged`、前端无 in-flight 守卫） |
+| DONE (d873956) | 删除已预载的下一首 | `src/App.tsx:6671`（未 `cancelTransition`）+ `:4697`（`commitPreparedSong` 找不到目标时静默 return） | 引擎仍切到被删除的歌，UI/歌词停在上一条 → 音频与 UI 永久错位 |
+| DONE (d873956) | 重复曲目定位 | `src/App.tsx:3819` | 队列里同曲重复时点第二条播第一条；key 未命中被 `Math.max(0,-1)` **兜成第一首别的歌** |
+| DONE (d873956) | 连点丢步 | `src/App.tsx:5310` | `handleNext/handlePrevious` 用 state 而非 `currentIndexRef` → 快速连点只前进一首 |
+| DONE (d873956) | 房间内「下一首」语义不一 | `src/App.tsx:5289` | 播放器按钮不推进房间队列（媒体键/遥控走 `hostNext()`），会把成员拉回 0:00 |
+| DONE (d873956) | 「下一首播放」顺序反转 | `src/App.tsx:3994` | 连点两次顺序反了、且不重新预载 |
+| DONE (d873956) | 拖进度条时换歌 | `src/components/PlayerControls.tsx:449` | 松手把**新歌** seek 到旧歌比例位置 |
+| DONE (94c8421) | 网易喜欢无幂等 | `src/App.tsx:4053-4076` | 连点使「我喜欢」计数虚增（服务端未补 `unchanged`、前端无 in-flight 守卫） |
 
 ### P4 — 产品行为（需先定预期，不要盲改）
 
@@ -167,3 +167,29 @@
 - 已修：§3 中 8 条改为 `DONE`、4 条改为 `PARTIAL`（各自剩余部分写在表内「建议修法」里）。
 - **灯光类 IPC 加固有前置条件，别盲改**：`desktop/chroma-ipc.cjs:548` 与 `desktop/signalrgb-ipc.cjs:40` 都是在 `Object.entries(handlers)` 循环里统一注册的；要加 `guardTrustedIpc` 必须先把守卫（`desktop/trusted-ipc.cjs` 的 `createTrustedIpcGuard` 产物，目前在 main.cjs 内构造）通过 options 传进这两个模块，**并且先确认哪些窗口会合法发送这些通道**（桌面播放器窗/歌词窗可能也要发 Chroma 帧）——一加守卫就会把插件功能直接打断。
 - 同样属于「不能机械改」的还有两条：`ProfileView` 竞态（要在 3600 行文件里给每个 `await` 后的 setState 加 revision 守卫，半套比没有更危险）、假登录真校验（需先定「校验接口不可达时怎么办」的策略）。
+
+## 9. 第三轮收尾进度（2026-09-24 全部可修项已落地）
+
+本轮把 §3 里所有「可安全修」的条目全部做完，只剩 2 项按性质保留：
+
+- `TODO` 明文凭据（`local-server.mjs` 的 QQ cookie 落盘 + 各平台凭据存 localStorage）：属于安全策略选择（是否引入系统凭据库/加密），需要你定方向。
+- `PARTIAL` 酷狗「取消喜欢」的界面入口：客户端已改为明确判不支持（不再假成功），但播放页径向菜单里的入口还没隐藏。
+
+### 本轮提交（在 §2 的 23 个之外）
+| 提交 | 内容 |
+|---|---|
+| 7948d52 | TV/遥控 7 条（返回链覆盖到剩余弹层、OK 双触发、手机遥控 BACK、焦点域 attributes、焦点回退、效能档、过渡遮罩）+ 一起听 3 条（断线清理、pending 清空、chat 名册校验）+ 酷狗取消喜欢判不支持 |
+| d873956 | 播放逻辑 5 条（队列删除后引擎仍切已删曲、连点丢步、房间内切歌、重复曲目定位、拖动中换歌） |
+| f657b6e | 对齐过渡渲染缓存上限测试（此前只跑子集，遗漏了旧上限断言） |
+| 609ad41 | ProfileView 两处竞态守卫（旧响应覆盖新数据） |
+| 94c8421 | DG-LAB `/control` 令牌校验 + 歌单归属/详情加载/歌词设置解析 4 处 |
+| 020b8e4 | 启动核验登录凭据失效（只提示不自动登出）、MV 短于歌曲提示、更新文案对齐真实时机 |
+| 61a8b48 | 灯光类 IPC 统一加来源校验 |
+
+### 本轮的教训（同类问题）
+1. **改了常量/上限类的东西必须跑全量测试**：`f657b6e` 修的就是「收紧缓存上限时只跑了子集测试」。
+2. **`sed` 做代码替换要盯住引号与正则元字符**：本轮先后踩到「替换文本里的引号被写成 `.`」（产出语法错误，被 tsc 抓住）与「`\d` 被 shell 吃掉」（会让日出日落恒为 null，被校验发现）。凡是多行或含引号的替换，改用编辑器式精确替换更稳。
+3. **「半套守卫」比没有守卫更危险**：ProfileView 竞态最初被我判为不能半做，最后用「函数入口自增序号 + 该函数内所有写入包一层 guard」的方式一次做完整。
+
+### 仍未做的（属 §5 已评估不修，或需要真机/产品决策）
+性能长尾见 §5；产品行为类：MV 短于歌曲时是否该「重播」而非切歌（现仅提示）、更新管理「稍后」在下次启动即退出重启的行为（现仅文案对齐）、`TraditionalView` 同一份 5000 首被三处各自拉取（性能 + 数据流）、桌面听歌统计每 10s 全量写 localStorage。
