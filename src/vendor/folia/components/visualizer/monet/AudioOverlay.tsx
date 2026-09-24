@@ -176,6 +176,8 @@ const AudioOverlay: React.FC<AudioOverlayProps> = ({
         let frameId = 0;
         let canvasWidth = 0;
         let canvasHeight = 0;
+        let spectrumGradient: CanvasGradient | null = null;
+        let spectrumGradientKey = '';
 
         const resizeCanvas = () => {
             const rect = canvas.getBoundingClientRect();
@@ -211,10 +213,17 @@ const AudioOverlay: React.FC<AudioOverlayProps> = ({
             const energy = Math.min(1, Math.max(0.08, audioPower.get() / 255));
             const primaryInk = colorWithAlpha(theme.primaryColor, 0.94);
             const softInk = colorWithAlpha(theme.primaryColor, 0.72);
-            const gradient = context.createLinearGradient(0, 0, width, 0);
-            gradient.addColorStop(0, softInk);
-            gradient.addColorStop(0.5, primaryInk);
-            gradient.addColorStop(1, softInk);
+            // 渐变每帧重建没必要：按 (宽度, 主题主色) 缓存复用
+            // （Canvas 渐变在填充时才应用当前变换矩阵，复用与逐帧新建等价）
+            const gradientKey = `${width}|${theme.primaryColor}`;
+            if (!spectrumGradient || gradientKey !== spectrumGradientKey) {
+                spectrumGradient = context.createLinearGradient(0, 0, width, 0);
+                spectrumGradient.addColorStop(0, softInk);
+                spectrumGradient.addColorStop(0.5, primaryInk);
+                spectrumGradient.addColorStop(1, softInk);
+                spectrumGradientKey = gradientKey;
+            }
+            const gradient = spectrumGradient;
             context.fillStyle = gradient;
             context.strokeStyle = gradient;
             context.lineWidth = 1.5;

@@ -276,6 +276,20 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
 
         let animationFrameId: number;
 
+        // 画布尺寸缓存：原先每帧读 canvas.offsetWidth/offsetHeight，会强制 style/layout 重算；
+        // 尺寸只在容器变化时改变，改由 ResizeObserver 测量并跟随（observe 时会先报一次当前尺寸）。
+        let viewWidth = 0;
+        let viewHeight = 0;
+        let viewDpr = 1;
+        const measure = () => {
+            viewWidth = canvas.offsetWidth;
+            viewHeight = canvas.offsetHeight;
+            viewDpr = window.devicePixelRatio || 1;
+        };
+        measure();
+        const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+        sizeObserver?.observe(canvas);
+
         const render = (timestamp: number) => {
             // 窗口隐藏时不重绘、只保留 rAF 链：整块表盘每帧全量重绘（数百条 arc/文字 + 每帧
             // createRadialGradient），而 Electron 主窗口 backgroundThrottling=false 时后台不会自动停帧。
@@ -325,9 +339,9 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
             // Gears remain stationary while a line is being sung, and ratchet ONLY when lyrics switch
             const currentGearAngle = escapementAngleMotionValue.get();
 
-            const width = canvas.offsetWidth;
-            const height = canvas.offsetHeight;
-            const dpr = window.devicePixelRatio || 1;
+            const width = viewWidth;
+            const height = viewHeight;
+            const dpr = viewDpr;
             const pixelWidth = Math.round(width * dpr);
             const pixelHeight = Math.round(height * dpr);
 
@@ -774,6 +788,7 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
         animationFrameId = window.requestAnimationFrame(render);
 
         return () => {
+            sizeObserver?.disconnect();
             if (animationFrameId) {
                 window.cancelAnimationFrame(animationFrameId);
             }

@@ -1499,10 +1499,13 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
             textContext.lineJoin = 'round';
             textContext.lineCap = 'round';
 
-            const placements = [...preparedState.placements].sort((a, b) => {
-                const order = { waiting: 0, passed: 1, active: 2 } as const;
-                return order[getWordStatus(time, lineTiming, a.word)] - order[getWordStatus(time, lineTiming, b.word)];
-            });
+            // 排序键每帧只算一次：原先每个比较都要比两次 getWordStatus 并新建一个 order 对象
+            // （n log n 次比较）。Array.sort 稳定、同一元素的状态在同帧内不变 → 排序结果与原先一致。
+            const wordStatusOrder = { waiting: 0, passed: 1, active: 2 } as const;
+            const placements = [...preparedState.placements]
+                .map(placement => ({ placement, order: wordStatusOrder[getWordStatus(time, lineTiming, placement.word)] }))
+                .sort((a, b) => a.order - b.order)
+                .map(entry => entry.placement);
             const placementIds = new Set(placements.map(placement => placement.id));
             const overlayNodes = overlayNodesRef.current;
             const usedOverlayIds = new Set<string>();
