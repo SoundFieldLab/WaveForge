@@ -102,9 +102,39 @@ describe('共振设置读写', () => {
     for (const id of [
       'resonanceNicknameSource', 'resonanceShowAvatars', 'resonancePartyQuota',
       'resonanceBackground', 'resonanceBackgroundBlur', 'resonanceBackgroundDim', 'resonanceAccent',
+      // 这几项此前只在模式内可改，与设置面板「同样出现在设置→网络」的说法不符
+      'resonanceDefaultMode', 'resonanceQuota', 'resonancePort',
     ]) {
       expect(ids, `设置中心缺少 ${id}`).toContain(id)
     }
+  })
+
+  it('镜像读侧把平台 id 归一成 platform（否则镜像里两档都不高亮）', async () => {
+    const { GLOBAL_SETTINGS_GROUPS } = await import('../src/services/globalSettingsRegistry')
+    const entry = GLOBAL_SETTINGS_GROUPS.flatMap(group => group.entries).find(item => item.id === 'resonanceNicknameSource')!
+    // 在房间里选了 QQ（存的是平台 id），镜像只提供 platform/custom 两档 → 必须读成 platform
+    localStorage.setItem(RESONANCE_SETTING_KEYS.nicknameSource, 'qq')
+    expect(entry.read()).toBe('platform')
+    localStorage.setItem(RESONANCE_SETTING_KEYS.nicknameSource, 'custom')
+    expect(entry.read()).toBe('custom')
+  })
+
+  it('镜像写侧对 partyQuota / pushLimit 做白名单校验（不产生界面显示不出的值）', async () => {
+    const { GLOBAL_SETTINGS_GROUPS } = await import('../src/services/globalSettingsRegistry')
+    const entries = GLOBAL_SETTINGS_GROUPS.flatMap(group => group.entries)
+    const partyQuota = entries.find(item => item.id === 'resonancePartyQuota')!
+    // 合法档位照写（8 是模式内设置面板提供的档位，镜像必须也认）
+    partyQuota.write!('8')
+    expect(readResonanceSettings().partyQuota).toBe(8)
+    // 非法值不写入，避免出现「设了 7、读回 3」的错位
+    partyQuota.write!('7')
+    expect(readResonanceSettings().partyQuota).toBe(8)
+
+    const pushLimit = entries.find(item => item.id === 'resonancePushLimit')!
+    pushLimit.write!('500')
+    expect(readResonanceSettings().pushLimit).toBe(500)
+    pushLimit.write!('300')
+    expect(readResonanceSettings().pushLimit).toBe(500)
   })
 })
 

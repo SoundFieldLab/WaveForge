@@ -237,3 +237,80 @@ test('共振中转：成员发送超大帧不会崩掉宿主进程（协议错�
   await later.joined()
   assert.equal(status.port > 0, true)
 })
+
+test('共振中转：半开连接（不回 pong）会被心跳清掉并释放席位', async (t) => {
+  // 短心跳便于测试；生产默认 30s
+  const { hub, status, connect } = await setup(t, { roomId: 'room-heartbeat', code: '777888', maxMembers: 3 }, { heartbeatIntervalMs: 60 })
+
+  const host = connect({ room: 'room-heartbeat', code: '777888', role: 'host' })
+  await host.joined()
+
+  // 「僵尸」成员：完成握手进房，但屏蔽自动 pong 应答，模拟对端已消失、TCP 却没发 FIN 的半开连接
+  const zombie = new WebSocket(`ws://127.0.0.1:${status.port}/ws?room=room-heartbeat&code=777888`)
+  await new Promise((resolve, reject) => {
+    zombie.on('open', resolve)
+    zombie.on('error', reject)
+  })
+  await wait(100)
+  assert.equal(hub.status().memberCount, 1, '僵尸成员已占一个席位')
+
+  // 屏蔽 ws 客户端默认的自动 pong 应答，模拟「对端已消失、TCP 却没发 FIN」的半开连接
+  // （ws 在 receiver 上挂了 'ping' 监听来自动回 pong，必须摘掉那个监听才真的不应答）
+  zombie._receiver.removeAllListeners('ping')
+
+  // 等两轮心跳：第一轮标记 alive=false，第二轮 terminate
+  await wait(400)
+  assert.equal(hub.status().memberCount, 0, '半开连接必须被心跳回收，否则 14 个僵尸就能堵死 15 席房间')
+})
+
+test('共振中转：房主断开时席位数清空', async (t) => {
+  const { hub, connect } = await setup(t, { roomId: 'room-leave', code: '222333' }, {})
+
+  const host = connect({ room: 'room-leave', code: '222333', role: 'host' })
+  await host.joined()
+  const a = connect({ room: 'room-leave', code: '222333' })
+  await a.joined()
+  const b = connect({ room: 'room-leave', code: '222333' })
+  await b.joined()
+  assert.equal(hub.status().memberCount, 2)
+
+  host.ws.close()
+  await wait(500)
+
+  assert.equal(hub.status().memberCount, 0, '房主断开后席位应清空（成员已被通知并断开）')
+  assert.equal(hub.status().running, true, '中转本身仍在运行（房间状态保留由渲染进程决定）')
+})
+
+test('共振中转：关闭「允许局域网发现」后 /discover 返回 404', async (t) => {
+  const { hub, status, connect } = await setup(t, { roomId: 'room-hidden', code: '321654', discoverable: false })
+
+  const discover = async () => {
+    const response = await fetch(`http://127.0.0.1:${status.port}/discover`)
+    return response.status
+  }
+
+  // 关掉发现权：匿名探测拿不到服务信息（设置项承诺「别人扫不到你的房间」）
+  assert.equal(await discover(), 404)
+  // /health 仍可用：这是本机自检，不属于「被发现」
+  const health = await fetch(`http://127.0.0.1:${status.port}/health`)
+  assert.equal(health.status, 200)
+
+  // 房间本身仍可正常使用（只是不能被扫到）
+  const host = connect({ room: 'room-hidden', code: '321654', role: 'host' })
+  const ready = await host.joined()
+  assert.equal(ready.t, 'host-ready')
+  assert.equal(hub.status().running, true)
+})
+
+test('共振中转：默认允许发现时 /discover 正常返回', async (t) => {
+  const { status } = await setup(t, { roomId: 'room-open', code: '112233' })
+  const response = await fetch(`http://127.0.0.1:${status.port}/discover`)
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.service, 'waveforge-resonance')
+  assert.equal(body.open, true)
+  // 仍然不泄露房间号与房间码
+  const text = JSON.stringify(body)
+  assert.equal(text.includes('room-open'), false)
+  assert.equal(text.includes('112233'), false)
+})

@@ -2441,6 +2441,8 @@ ipcMain.handle('resonance:start', guardTrustedIpc('privileged', async (_event, c
       code: config && config.code ? String(config.code) : undefined,
       maxMembers: Number(config && config.maxMembers) || undefined,
       port: Number(config && config.port) || RESONANCE_DEFAULT_PORT,
+      // 设置项「允许局域网发现」关掉时，/discover 返回 404（别人扫不到这个房间）
+      discoverable: !(config && config.discoverable === false),
     })
   } catch (error) {
     return { running: false, error: error && error.message ? error.message : String(error) }

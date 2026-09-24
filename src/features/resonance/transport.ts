@@ -100,6 +100,8 @@ export function createLanHostTransport(options: {
   port?: number
   selfPeerId: string
   bridge?: NonNullable<Window['electron']>['resonance']
+  /** 是否允许局域网发现（关闭时中转 /discover 返回 404） */
+  discoverable?: boolean
 }): ResonanceTransport & { startResult: () => { port: number; code: string; running: boolean } | null } {
   const bridge = options.bridge
   const envelopes = new EventBus<{ envelope: ResonanceEnvelope; from: string }>()
@@ -119,6 +121,7 @@ export function createLanHostTransport(options: {
         code: options.code,
         maxMembers: options.maxMembers,
         port: options.port,
+        discoverable: options.discoverable !== false,
       })
       if (!status || status.running !== true) throw new Error(status?.error || '房间中转启动失败')
       startInfo = { port: status.port, code: status.code, running: true }

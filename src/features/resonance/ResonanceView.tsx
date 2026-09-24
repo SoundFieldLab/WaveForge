@@ -11,13 +11,14 @@ import ModeSelectionPanel from '../../components/ModeSelectionPanel'
 import { remainingAddQuota, type ResonancePlatformBadge, type ResonanceTrack } from './model'
 import { getResonanceSession, type ResonancePlaybackAdapter, type ResonanceSessionSnapshot } from './session'
 import { unplayableText, type ResonanceLocalTrack } from './matcher'
-import { readResonanceSettings, RESONANCE_SETTINGS_EVENT, setResonanceSetting, type ResonanceSettings } from './settings'
+import { readResonanceEntryMode, readResonanceSettings, RESONANCE_SETTINGS_EVENT, setResonanceSetting, type ResonanceSettings } from './settings'
 import ResonanceNotice, { acknowledgeNoticeForever, hasAcknowledgedNotice } from './ResonanceNotice'
 import ResonanceBackground from './ResonanceBackground'
 import ResonanceLobby, { type ResonanceIdentityOption } from './ResonanceLobby'
 import ResonanceRoom from './ResonanceRoom'
 import ResonanceAddPanel from './ResonanceAddPanel'
 import ResonanceSettingsModal from './ResonanceSettingsModal'
+import { useTvMode, useRemoteCursorMode } from '../../tv/tvCore'
 
 export interface ResonanceViewProps {
   playerTheme?: 'dark' | 'light'
@@ -28,7 +29,6 @@ export interface ResonanceViewProps {
   userIds: Partial<Record<MusicPlatform, string>>
   usernames: Partial<Record<MusicPlatform, string>>
   createAdapter: (hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ResonancePlaybackAdapter
-  resolveTrack: (track: ResonanceTrack) => Promise<ResonanceLocalTrack>
   nowPlaying: { song: Song | null; positionMs: number; playing: boolean } | null
   /** 切成别的模式（交给 App 的拦截器：房间在时会先问「挂起 / 退出」） */
   onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance') => void
@@ -48,12 +48,9 @@ function modeLabel(mode: string): string {
 
 /** 进入共振前的模式：左下的「返回 X」按钮回到它（没记过就回探索） */
 function readEntryMode(): string {
-  try {
-    const value = localStorage.getItem('waveforge:resonance-entry-mode') || ''
-    return MODE_LABEL[value] ? value : 'explore'
-  } catch {
-    return 'explore'
-  }
+  // 走 settings.ts 的统一读取（它还会把 'resonance' 过滤掉），别自己硬编码 localStorage 键
+  const value = readResonanceEntryMode()
+  return MODE_LABEL[value] ? value : 'explore'
 }
 
 function useSessionSnapshot(): ResonanceSessionSnapshot {
@@ -64,7 +61,7 @@ function useSessionSnapshot(): ResonanceSessionSnapshot {
 export default function ResonanceView(props: ResonanceViewProps) {
   const {
     playerTheme = 'dark', platforms, identityCandidates, userIds, usernames,
-    createAdapter, resolveTrack, nowPlaying, onSelectMode,
+    createAdapter, nowPlaying, onSelectMode,
   } = props
   const session = getResonanceSession()
   const snapshot = useSessionSnapshot()
@@ -80,9 +77,13 @@ export default function ResonanceView(props: ResonanceViewProps) {
   const entryMode = useMemo(() => readEntryMode(), [modePanelOpen])
   const [unplayableByKey, setUnplayableByKey] = useState<Record<string, string>>({})
   const [arrivingHint, setArrivingHint] = useState<string | null>(null)
-  const adapterRef = useRef<ResonancePlaybackAdapter | null>(null)
   const peerIdRef = useRef(globalThis.crypto.randomUUID())
   const joinedAtRef = useRef(Date.now())
+  // TV 遥控器没有鼠标：顶部模式下拉视为常驻（与 ExploreView/HomeView 同策略），
+  // 否则纯遥控器用户打不开模式选择，只能靠左下角「返回 X」。
+  const tvMode = useTvMode()
+  const remoteCursorMode = useRemoteCursorMode()
+  const modeTriggerActive = (tvMode && !remoteCursorMode) || modeTriggerHovered
 
   useEffect(() => {
     const sync = () => setSettings(readResonanceSettings())
@@ -97,26 +98,32 @@ export default function ResonanceView(props: ResonanceViewProps) {
         if (result.reason === 'no-platform') session.notifyUnplayable(track.key, 'no-platform', unplayableText(result))
       },
     })
-    adapterRef.current = adapter
     session.setAdapter(adapter)
     return () => {
       session.setAdapter(null)
-      adapterRef.current = null
     }
   }, [createAdapter, session])
+
+  // 供 arrivingHint 查标题：成员侧 items 每次通知都是新数组，不能进 effect 依赖（否则定时器被不断重置）
+  const queueItemsRef = useRef(snapshot.queue.items)
+  queueItemsRef.current = snapshot.queue.items
 
   useEffect(() => {
     if (snapshot.role !== 'member' || !snapshot.live || !snapshot.room?.playback?.playing) {
       setArrivingHint(null)
       return
     }
+    // 依赖只放「正在续接的曲目 key」等真正变化的值；
+    // 不依赖 snapshot.queue.items —— 房主每 2s 广播状态、成员侧每次都生成新数组，
+    // 那会让这个 effect 每 2s 重跑并重置 2.5s 的清除定时器，「正在续接」提示永远不消失。
     const trackKey = snapshot.room.playback.trackKey
-    const track = snapshot.queue.items.find(item => item.key === trackKey)
+    if (!trackKey) { setArrivingHint(null); return }
+    const track = queueItemsRef.current.find(item => item.key === trackKey)
     if (!track) return
     setArrivingHint(`正在续接《${track.title}》`)
     const timer = window.setTimeout(() => setArrivingHint(null), 2500)
     return () => window.clearTimeout(timer)
-  }, [snapshot.live, snapshot.queue.items, snapshot.role, snapshot.room?.playback?.playing, snapshot.room?.playback?.trackKey])
+  }, [snapshot.live, snapshot.role, snapshot.room?.playback?.playing, snapshot.room?.playback?.trackKey])
 
   /** 身份候选：平台昵称（已登录才有）+ 自定义；默认取平台昵称 */
   const identityOptions = useMemo<ResonanceIdentityOption[]>(() => {
@@ -137,6 +144,14 @@ export default function ResonanceView(props: ResonanceViewProps) {
   const activeIdentity = (() => {
     const bySource = identityOptions.find(option => option.key === settings.nicknameSource)
     if (bySource) return bySource
+    // 'platform' 是默认值（也是设置镜像写入的值），但它不是任何一个选项的 key——
+    // 选项 key 是真实平台 id + 'custom'。这里把它解析成「第一个可用的平台昵称」；
+    // 不这样做的话 'platform' 会命中不到任何选项，直接回落到「自定义」，
+    // 而自定义默认是空名 → 首次进入共振（或从设置中心镜像写入后）建房/入房被自己拦住。
+    if (settings.nicknameSource === 'platform') {
+      const firstPlatform = identityOptions.find(option => option.key !== 'custom')
+      if (firstPlatform) return firstPlatform
+    }
     // 选中的平台当前不可用（没登录/没昵称）时退回自定义，而不是悄悄换成别的平台：
     // 换成列表里第一个平台会让用户以为「点了它自己跳回网易云」。
     return identityOptions.find(option => option.key === 'custom')
@@ -223,7 +238,8 @@ export default function ResonanceView(props: ResonanceViewProps) {
     if (snapshot.role === 'host') {
       const result = session.hostAddTracks(tracks, true)
       if (!result.ok) return { ok: false as const, reason: result.reason }
-      const added = (result.truncated ? tracks.length - result.truncated : tracks.length)
+      // 用 session 回报的真实入队条数：队列上限/配额/重复曲目都会让实际加入数少于传入数
+      const added = result.added ?? tracks.length
       return { ok: true as const, added, truncated: result.truncated }
     }
     session.requestAddTracks(tracks)
@@ -235,8 +251,12 @@ export default function ResonanceView(props: ResonanceViewProps) {
   const remainingQuota = useMemo(() => {
     if (!room || !snapshot.role) return Number.POSITIVE_INFINITY
     const peerId = session.getIdentity()?.peerId || peerIdRef.current
-    return remainingAddQuota(room, peerId)
-  }, [room, session, snapshot.role])
+    // 房主本地有完整队列，直接算；成员只有窗口，用房主下发的权威值（-1 表示不限）
+    if (snapshot.role === 'host') return remainingAddQuota(room, peerId)
+    const authoritative = snapshot.remainingQuotaByPeer[peerId]
+    if (authoritative === undefined) return remainingAddQuota(room, peerId)
+    return authoritative < 0 ? Number.POSITIVE_INFINITY : authoritative
+  }, [room, session, snapshot.role, snapshot.remainingQuotaByPeer])
   const allowBulkPush = Boolean(room && room.mode === 'shared-playlist' && room.hostId === (session.getIdentity()?.peerId || peerIdRef.current))
 
   const nowPlayingView = nowPlaying?.song
@@ -282,7 +302,7 @@ export default function ResonanceView(props: ResonanceViewProps) {
           onMouseEnter={() => setModeTriggerHovered(true)}
           onMouseLeave={() => setModeTriggerHovered(false)}
         >
-          {modeTriggerHovered && !modePanelOpen && (
+          {modeTriggerActive && !modePanelOpen && (
             <button
               type="button"
               aria-label="打开模式选择"
@@ -347,12 +367,13 @@ export default function ResonanceView(props: ResonanceViewProps) {
                   onGrantControl={peerId => session.grantControl(peerId)}
                   onRevokeControl={() => session.revokeControl()}
                   onRequestControl={() => session.requestControl()}
+                  onDismissControlRequest={peerId => session.dismissControlRequest(peerId)}
                   onKick={peerId => session.hostKick(peerId)}
                   onToggleAvatars={enabled => setResonanceSetting('showAvatars', enabled)}
                   onPromotePending={trackKey => session.hostPromotePending(trackKey)}
                   onDismissPending={trackKey => session.hostDismissPending(trackKey)}
                   onToggleMemberControl={enabled => session.setMemberControlEnabled(enabled)}
-                  onLoadMoreQueue={() => session.loadQueuePage(snapshot.queue.items.length)}
+                  onLoadMoreQueue={() => session.loadMoreQueue()}
                   onOpenAdd={() => setAddOpen(true)}
                   onLeave={() => session.leave()}
                   onDissolve={() => session.dissolve()}

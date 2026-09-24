@@ -714,7 +714,7 @@ export interface ElectronAPI {
   }
   /** 共振（多人一起听）：局域网房间中转，只转发端到端加密信封，主进程不解析内容 */
   resonance?: {
-    start: (config: { roomId: string; code?: string; maxMembers?: number; port?: number }) => Promise<ResonanceHubStatus & { error?: string }>
+    start: (config: { roomId: string; code?: string; maxMembers?: number; port?: number; discoverable?: boolean }) => Promise<ResonanceHubStatus & { error?: string }>
     stop: () => Promise<ResonanceHubStatus>
     getStatus: () => Promise<ResonanceHubStatus>
     send: (payload: { envelope: unknown; to?: string }) => Promise<number>

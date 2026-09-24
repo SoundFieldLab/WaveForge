@@ -8200,7 +8200,6 @@ function App() {
               userIds={resonanceUserIds}
               usernames={resonanceUsernames}
               createAdapter={createResonanceAdapter}
-              resolveTrack={resolveResonanceTrack}
               nowPlaying={{ song: currentSong, positionMs: currentTime, playing: isPlaying }}
               onSelectMode={mode => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))}
             />

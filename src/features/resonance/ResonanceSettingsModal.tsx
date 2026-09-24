@@ -10,6 +10,7 @@ import { platformLabel, type MusicPlatform } from '../../services/platforms'
 import {
   RESONANCE_MAX_MEMBERS,
   RESONANCE_MODE_LABEL,
+  RESONANCE_PARTY_QUOTA_CHOICES,
   RESONANCE_PARTY_QUOTA_RANGE,
   RESONANCE_PUSH_LIMIT_CHOICES,
   RESONANCE_QUOTA_RANGE,
@@ -270,7 +271,7 @@ export default function ResonanceSettingsModal(props: ResonanceSettingsModalProp
             <Segmented
               accent={accent} chip={chip} sub={sub}
               value={settings.partyQuota}
-              options={[1, 2, 3, 5, 8, 10].map(value => ({ value, label: `${value}` }))}
+              options={[...RESONANCE_PARTY_QUOTA_CHOICES].map(value => ({ value, label: `${value}` }))}
               onChange={value => update('partyQuota', Number(value))}
               ariaLabel="Party 每人可加歌数"
             />

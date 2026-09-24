@@ -18,6 +18,13 @@ const MAX_MESSAGE_BYTES = 64 * 1024
 const CONNECTION_RATE_WINDOW_MS = 10 * 1000
 const CONNECTION_RATE_LIMIT = 12
 const DEFAULT_MAX_MEMBERS = 15
+/**
+ * WebSocket 心跳间隔：每 30s ping 一次，上一轮没回 pong 的连接直接 terminate。
+ * 没有心跳时，半开 TCP（成员掉网、拔网线、休眠——对端不会发 FIN）永远不触发 'close'，
+ * 席位就永久占着不释放。房间只有 15 席（房主占 1），14 个僵尸连接足以让房间再也进不来人，
+ * 而且房主自己看不到任何异常。心跳让中转能自愈。
+ */
+const HEARTBEAT_INTERVAL_MS = 30 * 1000
 
 function normalizeIp(addr) {
   if (!addr) return ''
@@ -50,11 +57,40 @@ function createResonanceHub(options = {}) {
   let room = null        // { roomId, code, maxMembers, createdAt }
   let hostSocket = null
   let hostPeerId = null
-  const members = new Map() // peerId => { ws, ip, joinedAt }
+  let heartbeatTimer = null
+  const members = new Map() // peerId => { ws, ip, joinedAt, alive }
   const connectionAttempts = new Map() // ip => timestamps
 
   const emit = (event) => {
     try { options.onEvent && options.onEvent(event) } catch { /* 事件回调失败不影响服务 */ }
+  }
+
+  /** 心跳：清掉对端已消失（半开）的连接，避免席位被永久占用 */
+  function startHeartbeat() {
+    if (heartbeatTimer) return
+    // 间隔可通过 options 覆盖（测试用短间隔），默认 30s
+    const intervalMs = Math.max(20, Number(options.heartbeatIntervalMs) || HEARTBEAT_INTERVAL_MS)
+    heartbeatTimer = setInterval(() => {
+      for (const ws of [hostSocket, ...[...members.values()].map(member => member.ws)]) {
+        if (!ws) continue
+        // 上一轮 ping 没有回 pong → 对端已经不存在（掉网/休眠，TCP 没有 FIN）
+        if (ws.__wfAlive === false) { terminate(ws); continue }
+        ws.__wfAlive = false
+        try { ws.ping() } catch { terminate(ws) }
+      }
+    }, intervalMs)
+    if (heartbeatTimer.unref) heartbeatTimer.unref()
+  }
+
+  function stopHeartbeat() {
+    if (!heartbeatTimer) return
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+
+  /** 硬断连接：触发 ws 自身的 'close'，席位回收走同一条路径 */
+  function terminate(ws) {
+    try { ws.terminate() } catch { /* 已经关了 */ }
   }
 
   function isConnectionRateLimited(ip) {
@@ -153,6 +189,13 @@ function createResonanceHub(options = {}) {
         }
         // 匿名发现：仅服务信息与当前在线人数，不含房间号与房间码
         if (url.pathname === '/discover') {
+          // 关掉「允许局域网发现」后要真的不可发现：返回 404，
+          // 否则设置项承诺的「别人扫不到你的房间」是假的（此前该设置只影响本机主动扫描）。
+          if (room && room.discoverable === false) {
+            res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+            res.end('404 Not Found')
+            return
+          }
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
           res.end(JSON.stringify({
             service: SERVICE_NAME,
@@ -175,13 +218,12 @@ function createResonanceHub(options = {}) {
         // 每个连接都必须挂 'error' 监听：ws 在协议错误（超 maxPayload 的帧、非法分片、
         // 解压失败等）时会 emit('error')，而 EventEmitter 上无监听者的 'error' 会抛成
         // uncaughtException，直接杀掉 Electron 主进程——即房间内任一成员发一个 64KB+
-        // 的帧就能崩掉房主的整个应用（已实测复现）。这里吞掉即可：坏连接由 ws.close 收尾。
-        // 每个连接都必须挂 'error' 监听：ws 在协议错误（超 maxPayload 的帧、非法分片、
-        // 解压失败等）时会 emit('error')，而 EventEmitter 上无监听者的 'error' 会抛成
-        // uncaughtException，直接杀掉 Electron 主进程——即房间内任一成员发一个 64KB+
         // 的帧就能崩掉房主的整个应用（已实测复现；回归测试见 resonanceHub.test.cjs）。
         // 这里吞掉即可：坏连接由 ws 自身的 close 流程收尾。
         ws.on('error', () => {})
+
+        // 心跳回包：标记这个连接还活着（下一轮心跳据此判断是否需要 terminate）
+        ws.on('pong', () => { ws.__wfAlive = true })
         let url = null
         try { url = new URL(req.url, 'http://localhost') } catch { /* ignore */ }
         const ip = normalizeIp(ws._socket && ws._socket.remoteAddress)
@@ -207,6 +249,8 @@ function createResonanceHub(options = {}) {
           }
           hostPeerId = crypto.randomUUID()
           hostSocket = ws
+          // 心跳活着标记：与成员连接一样显式初始化，别依赖 undefined !== false 的巧合
+          ws.__wfAlive = true
           send(ws, { t: 'host-ready', peerId: hostPeerId, roomId: room.roomId, memberCount: members.size })
           emit({ type: 'host-connected', peerId: hostPeerId })
         } else {
@@ -217,6 +261,7 @@ function createResonanceHub(options = {}) {
           }
           const peerId = crypto.randomUUID()
           members.set(peerId, { ws, ip, joinedAt: Date.now() })
+          ws.__wfAlive = true
           send(ws, { t: 'joined', peerId, roomId: room.roomId, memberCount: members.size })
           send(hostSocket, { t: 'peer-joined', peerId, memberCount: members.size })
           emit({ type: 'peer-joined', peerId, memberCount: members.size })
@@ -248,10 +293,13 @@ function createResonanceHub(options = {}) {
             hostSocket = null
             emit({ type: 'host-disconnected' })
             // 房主断开即房间不可用：通知并断开所有成员
-            for (const [peerId, member] of members) {
+            let remaining = members.size
+            for (const [peerId, member] of [...members]) {
               send(member.ws, { t: 'host-left' })
               try { member.ws.close(4010, 'Host left') } catch { /* ignore */ }
-              emit({ type: 'peer-left', peerId, memberCount: Math.max(0, members.size - 1) })
+              remaining -= 1
+              // 逐个递减：原先用常量 members.size - 1，多成员时每条事件都报同一个数
+              emit({ type: 'peer-left', peerId, memberCount: Math.max(0, remaining) })
             }
             members.clear()
             return
@@ -266,6 +314,8 @@ function createResonanceHub(options = {}) {
 
       server.on('error', (error) => {
         running = false
+        // 已在监听之后才出错（如底层 socket 异常）时也要停掉心跳，否则会一直 ping 一个死掉的 server
+        stopHeartbeat()
         reject(error)
       })
       server.listen(port, '0.0.0.0', () => {
@@ -273,7 +323,9 @@ function createResonanceHub(options = {}) {
         // port 传 0 时由系统分配：回读真实端口，状态与邀请串都用它
         const address = server.address()
         if (address && typeof address === 'object' && address.port) port = address.port
-        room = { roomId, code, maxMembers, createdAt: Date.now() }
+        // discoverable=false 时 /discover 返回 404（对应设置项「允许局域网发现」关闭）
+        room = { roomId, code, maxMembers, createdAt: Date.now(), discoverable: config.discoverable !== false }
+        startHeartbeat()
         resolve(status())
       })
     })
@@ -287,6 +339,7 @@ function createResonanceHub(options = {}) {
   }
 
   function stop() {
+    stopHeartbeat()
     for (const [, member] of members) {
       try { member.ws.close(4011, 'Room closed') } catch { /* ignore */ }
     }

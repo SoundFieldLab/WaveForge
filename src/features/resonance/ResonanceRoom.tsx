@@ -40,6 +40,8 @@ export interface ResonanceRoomProps {
   onGrantControl: (peerId: string) => void
   onRevokeControl: () => void
   onRequestControl: () => void
+  /** 房主：忽略某人的控制申请 */
+  onDismissControlRequest: (peerId: string) => void
   onKick: (peerId: string) => void
   /** 切换「显示成员头像与平台昵称」（开关直接生效，不是打开设置） */
   onToggleAvatars: (enabled: boolean) => void
@@ -75,7 +77,7 @@ function formatClock(ms: number): string {
 export default function ResonanceRoom(props: ResonanceRoomProps) {
   const {
     playerTheme = 'dark', accent, settings, snapshot, selfPeerId, remainingQuota, onSendChat, onVoteSkip,
-    onForceSkip, onNext, onRemoveTrack, onMoveToNext, onGrantControl, onRevokeControl, onRequestControl,
+    onForceSkip, onNext, onRemoveTrack, onMoveToNext, onGrantControl, onRevokeControl, onRequestControl, onDismissControlRequest,
     onKick, onToggleAvatars, onPromotePending, onDismissPending, onToggleMemberControl, onLoadMoreQueue, onOpenAdd, onLeave, onDissolve,
     playingLocal, unplayableText, arrivingHint, nowPlaying,
   } = props
@@ -83,6 +85,9 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
   const room = snapshot.room
   const [chatInput, setChatInput] = useState('')
   const [queueScroll, setQueueScroll] = useState(0)
+  /** 队列滚动容器的高度：窗口高度决定渲染多少行（写死行数会让高窗口的尾部永远滚不到） */
+  const [queueViewportHeight, setQueueViewportHeight] = useState(VISIBLE_ROWS * ROW_HEIGHT)
+  const queueScrollRef = useRef<HTMLDivElement>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [copied, setCopied] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
@@ -96,18 +101,42 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ block: 'end' }) }, [snapshot.chat.length])
 
+  // 观察队列可视区高度：窗口化必须按「实际能显示多少行」渲染，
+  // 固定 12 行时，可视区高于 12 行的窗口底部永远是一片空白（最后几行在任何滚动位置都取不到）。
+  useEffect(() => {
+    const element = queueScrollRef.current
+    if (!element || typeof ResizeObserver === 'undefined') return
+    const apply = () => {
+      const height = element.clientHeight
+      if (height > 0) setQueueViewportHeight(height)
+    }
+    apply()
+    const observer = new ResizeObserver(apply)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [room])
+
   const members = useMemo(() => [...(room?.members || [])].sort((left, right) => left.seat - right.seat), [room?.members])
   const queue = snapshot.queue.items
+  // 成员侧队列是「从房主当前曲目起的窗口」，全局起点是 queue.offset（房主可能已经播到第 N 首）；
+  // 已载入条数要按全局算，否则滚动加载会在窗口偏移非 0 的房间里重复拉同一段。
+  const loadedCount = Math.max(0, (snapshot.queue.offset || 0) + queue.length)
   const voteTarget = room?.vote?.target ?? null
   const voteCount = room?.vote?.by.length ?? 0
   const threshold = Math.max(1, Math.ceil((snapshot.summary?.online || 1) * 0.8))
+  /**
+   * 投票按钮的目标：已经有投票在进行时**加入它**，而不是另起一个。
+   * `castSkipVote` 在 target 不同时会丢弃已有的票重新计数，所以通用按钮若恒传 null，
+   * 别人发起的定向投票会被第二个人一点就清零。
+   */
+  const joinOrStartVote = useCallback(() => onVoteSkip(voteTarget), [onVoteSkip, voteTarget])
 
   const onQueueScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget
     setQueueScroll(element.scrollTop)
     const nearEnd = element.scrollTop + element.clientHeight >= element.scrollHeight - ROW_HEIGHT * 2
-    if (nearEnd && queue.length < (snapshot.queue.total || 0)) onLoadMoreQueue()
-  }, [onLoadMoreQueue, queue.length, snapshot.queue.total])
+    if (nearEnd && loadedCount < (snapshot.queue.total || 0)) onLoadMoreQueue()
+  }, [onLoadMoreQueue, loadedCount, snapshot.queue.total])
 
   const copy = useCallback(async (text: string, label: string) => {
     try {
@@ -119,8 +148,12 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
     }
   }, [])
 
-  const firstRow = Math.max(0, Math.floor(queueScroll / ROW_HEIGHT) - 2)
-  const visibleTracks = queue.slice(firstRow, firstRow + VISIBLE_ROWS + 4)
+  // 窗口化：按可视区实际高度算出要渲染多少行，上下各多留 OVERSCAN 行做缓冲。
+  // 固定行数（原来是写死的 12 行）在 1440p 等大窗口下会让列表尾部永远滚不到。
+  const OVERSCAN_ROWS = 2
+  const visibleRowCount = Math.max(VISIBLE_ROWS, Math.ceil(queueViewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2)
+  const firstRow = Math.max(0, Math.floor(queueScroll / ROW_HEIGHT) - OVERSCAN_ROWS)
+  const visibleTracks = queue.slice(firstRow, firstRow + visibleRowCount)
 
   if (!room) return null
   const roomCode = snapshot.invite.match(/#(\d{6})\./)?.[1] || '——'
@@ -161,7 +194,9 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
                   </span>
                 </span>
                 {isHost && !isSelf && (
-                  <span className="hidden shrink-0 items-center gap-1 group-hover:flex">
+                  // 用「透明 + hover/focus 显示」而不是 hidden：display:none 会让按钮不可聚焦，
+                  // 键盘与 TV 遥控器就永远点不到「授权 / 移出」。[@media(hover:none)] 让无鼠标设备直接常显。
+                  <span className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
                     <button type="button" onClick={() => onGrantControl(member.peerId)} className="rounded-lg px-1.5 py-1 text-xs" style={{ background: chip }} title="允许他控制播放 5 分钟">授权</button>
                     <button type="button" onClick={() => onKick(member.peerId)} className="rounded-lg px-1.5 py-1 text-xs" style={{ background: 'rgba(255,150,80,0.2)' }} title="移出房间">移出</button>
                   </span>
@@ -218,6 +253,21 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
               </span>
             </div>
           )}
+          {/* 房主：有人申请控制播放 → 一键允许（此前申请只进状态、界面上没有任何出口） */}
+          {isHost && snapshot.controlRequests.length > 0 && (
+            <div className="space-y-1.5 rounded-xl px-2 py-2" style={{ background: 'rgba(255,200,90,0.14)' }}>
+              <div className="text-[11px] font-medium" style={{ color: '#ffd98a' }}>有人申请控制播放</div>
+              {snapshot.controlRequests.map(requestPeerId => (
+                <div key={requestPeerId} className="flex items-center justify-between gap-2">
+                  <span className="truncate text-xs">{room.members.find(item => item.peerId === requestPeerId)?.nickname || '成员'}</span>
+                  <span className="flex shrink-0 items-center gap-1">
+                    <button type="button" onClick={() => onGrantControl(requestPeerId)} className="rounded-lg px-1.5 py-1 text-xs text-white" style={{ background: accent }} title="允许他控制播放 5 分钟">允许 5 分钟</button>
+                    <button type="button" onClick={() => onDismissControlRequest(requestPeerId)} className="rounded-lg px-1.5 py-1 text-xs" style={{ background: chip }} title="忽略这条申请">忽略</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </section>
 
@@ -260,7 +310,7 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
               {!playingLocal && nowPlaying && (
                 <p className="mt-2 flex flex-wrap items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs" style={{ background: 'rgba(255,150,80,0.16)', color: '#ffcf9a' }}>
                   <VolumeX className="h-3.5 w-3.5" />已静音跟随{unplayableText ? ` · ${unplayableText}` : ''}
-                  <button type="button" onClick={() => onVoteSkip(null)} className="underline">发起跳过投票</button>
+                  <button type="button" onClick={joinOrStartVote} className="underline">发起跳过投票</button>
                 </p>
               )}
 
@@ -275,7 +325,7 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
               )}
 
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button type="button" onClick={() => onVoteSkip(null)} className="flex h-9 items-center gap-1.5 rounded-full px-3 text-xs" style={{ background: chip }} title="跳过此曲（当前在线人数 8 成同意）" aria-label="跳过此曲">
+                <button type="button" onClick={joinOrStartVote} className="flex h-9 items-center gap-1.5 rounded-full px-3 text-xs" style={{ background: chip }} title="跳过此曲（当前在线人数 8 成同意）" aria-label="跳过此曲">
                   <Vote className="h-3.5 w-3.5" />投票跳过
                 </button>
                 {snapshot.canControl ? (
@@ -304,7 +354,7 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
         <div className="flex min-h-0 flex-1 flex-col rounded-[20px] border p-5" style={{ borderColor: border, background: panel, backdropFilter: 'blur(18px)' }}>
           <header className="mb-2 flex items-center gap-2">
             <h3 className="text-sm font-semibold">播放队列</h3>
-            <span className="text-xs" style={{ color: sub }}>{snapshot.queue.total} 首{queue.length < snapshot.queue.total ? `（已载入 ${queue.length}）` : ''}</span>
+            <span className="text-xs" style={{ color: sub }}>{snapshot.queue.total} 首{loadedCount < snapshot.queue.total ? `（已载入 ${loadedCount}）` : ''}</span>
             {(isHost || room.mode !== 'shared-playlist') && (
               <button
                 type="button"
@@ -351,7 +401,7 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
               </div>
             </div>
           )}
-          <div className="wf-no-scrollbar min-h-0 flex-1 overflow-y-auto pr-1" onScroll={onQueueScroll} data-queue-scroll>
+          <div ref={queueScrollRef} className="wf-no-scrollbar min-h-0 flex-1 overflow-y-auto pr-1" onScroll={onQueueScroll} data-queue-scroll>
             {queue.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-3 py-10 text-center">
                 <Radio className="h-8 w-8" style={{ color: sub }} />
@@ -362,13 +412,15 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
                 <div style={{ transform: `translateY(${firstRow * ROW_HEIGHT}px)` }}>
                   {visibleTracks.map((item, index) => {
                     const absoluteIndex = firstRow + index
+                    // 行号按**全局队列位置**显示（窗口起点是房主当前曲目，不是队列头部）
+                    const globalIndex = (snapshot.queue.offset || 0) + absoluteIndex
                     const isCurrent = room.playback?.trackKey === item.key
                     const requester = room.members.find(member => member.peerId === item.requestedBy)
                     const canRemove = isHost || item.requestedBy === selfPeerId
                     return (
                       <QueueRow
                         key={`${item.key}-${absoluteIndex}`}
-                        index={absoluteIndex + 1}
+                        index={globalIndex + 1}
                         track={item}
                         current={isCurrent}
                         requesterName={requester?.nickname || ''}
@@ -576,7 +628,8 @@ function QueueRow(props: {
           {(track.artists || []).join(' / ')}{requesterName ? ` · 来自 ${requesterName}` : ''}
         </span>
       </span>
-      <span className="hidden shrink-0 items-center gap-1 group-hover:flex">
+      {/* 透明而非 hidden：display:none 不可聚焦，键盘/TV 就点不到行操作（见上方成员行的同款处理） */}
+      <span className="flex shrink-0 items-center gap-1 opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100">
         <button type="button" onClick={onMoveNext} className="rounded-lg px-1.5 py-1" style={{ background: chip }} title="下一首播放" aria-label="下一首播放"><SkipForward className="h-3.5 w-3.5 rotate-[-90deg]" /></button>
         {canRemove && <button type="button" onClick={onRemove} className="rounded-lg px-1.5 py-1" style={{ background: 'rgba(255,150,80,0.18)' }} title="从队列移除" aria-label="从队列移除"><Trash2 className="h-3.5 w-3.5" /></button>}
       </span>

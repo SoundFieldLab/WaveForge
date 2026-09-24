@@ -15,6 +15,7 @@ import { platformLabel, type MusicPlatform } from '../../services/platforms'
 import {
   RESONANCE_MAX_MEMBERS,
   RESONANCE_MODE_LABEL,
+  RESONANCE_PARTY_QUOTA_CHOICES,
   RESONANCE_QUOTA_RANGE,
   clampQuota,
   type ResonanceMode,
@@ -254,7 +255,7 @@ export default function ResonanceLobby(props: ResonanceLobbyProps) {
                     <div className="mt-2 flex items-center gap-2 rounded-xl px-3 py-2" style={{ background: chip }}>
                       <span className="whitespace-nowrap text-xs" style={{ color: sub }}>每人可加</span>
                       {segment(
-                        [1, 2, 3, 5].map(value => ({ value, label: `${value} 首` })),
+                        [...RESONANCE_PARTY_QUOTA_CHOICES].map(value => ({ value, label: `${value} 首` })),
                         partyQuota,
                         setPartyQuota,
                         '每人可加歌曲数',
