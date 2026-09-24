@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'url'
 import { dirname, join, extname, resolve, sep } from 'path'
 import { readdir, stat, readFile } from 'fs/promises'
-import { existsSync, createReadStream, mkdirSync, readFileSync, writeFileSync } from 'fs'
+import { existsSync, createReadStream, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { Readable } from 'stream'
 import dns from 'node:dns'
 import os from 'node:os'
@@ -34,7 +34,7 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 import { registerSodaAudioProxy } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
 import { registerImageProxyRoutes } from './server/image-proxy.mjs'
-import { isAuthorizedLocalRequest } from './server/local-service-auth.mjs'
+import { isAuthorizedLocalRequest, LOCAL_SERVICE_HEADER } from './server/local-service-auth.mjs'
 import { LOCAL_API_PROTOCOL_VERSION, LOCAL_API_SERVICE } from './server/local-api-health.mjs'
 import { registerNeteaseNativeExploreRoutes } from './server/netease-native-explore.mjs'
 import dglabRelayModule from './server/dglab-relay.cjs'
@@ -792,6 +792,17 @@ const QQ_HEADERS = {
 const QQ_PLAYLIST_DETAIL_CACHE_TTL = 5 * 60 * 1000
 const QQ_PLAYLIST_DETAIL_CACHE_MAX = 50
 const qqPlaylistDetailCache = new Map()
+
+function setQQPlaylistDetailCache(cacheKey, value) {
+  if (qqPlaylistDetailCache.size >= QQ_PLAYLIST_DETAIL_CACHE_MAX) {
+    const oldestKey = qqPlaylistDetailCache.keys().next().value
+    if (oldestKey !== undefined) qqPlaylistDetailCache.delete(oldestKey)
+  }
+  qqPlaylistDetailCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + QQ_PLAYLIST_DETAIL_CACHE_TTL,
+  })
+}
 const QQ_FEEDBACK_CONTEXT_TTL = 30 * 60 * 1000
 const QQ_FEEDBACK_CONTEXT_MAX = 1200
 const qqFeedbackContexts = new Map()
@@ -880,6 +891,9 @@ async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
     legacyData?.songlist?.length &&
     (!legacyData.songnum || legacyData.songlist.length >= Number(legacyData.songnum))
   ) {
+    // 旧接口拿到完整歌单时也要入缓存：调用方会用批量循环探测 song_cnt，
+    // 不缓存会让每次请求都对上游重复拉取整份歌单。
+    setQQPlaylistDetailCache(cacheKey, legacyData)
     return legacyData
   }
 
@@ -958,14 +972,7 @@ async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
     songnum: totalSongCount || uniqueSongs.length,
     total_song_num: totalSongCount || uniqueSongs.length
   }
-  if (qqPlaylistDetailCache.size >= QQ_PLAYLIST_DETAIL_CACHE_MAX) {
-    const oldestKey = qqPlaylistDetailCache.keys().next().value
-    if (oldestKey !== undefined) qqPlaylistDetailCache.delete(oldestKey)
-  }
-  qqPlaylistDetailCache.set(cacheKey, {
-    value: result,
-    expiresAt: Date.now() + QQ_PLAYLIST_DETAIL_CACHE_TTL
-  })
+  setQQPlaylistDetailCache(cacheKey, result)
   return result
 }
 
@@ -1074,7 +1081,7 @@ app.use((req, res, next) => {
     return res.status(426).json({ error: 'WebSocket 不在此服务，请连接遥控器服务的 /ws' })
   }
   const origin = req.headers.origin
-  const suppliedLocalToken = req.headers['x-waveforge-local-token']
+  const suppliedLocalToken = req.headers[LOCAL_SERVICE_HEADER]
   const tokenAuthorized = isAuthorizedLocalRequest({
     configuredToken: LOCAL_SERVICE_TOKEN,
     suppliedToken: suppliedLocalToken,
@@ -1451,7 +1458,28 @@ app.get('/api/audio', async (req, res) => {
 })
 
 // 两个历史入口共用同一图片代理底层，保留路径与 url 查询参数兼容性。
-registerImageProxyRoutes(app)
+// 保留返回值：其内存 LRU 需要能被前端「清理缓存」显式清空（该缓存有 128MB 上限，
+// 只靠 6 小时 TTL 自然过期会让设置在清理后仍看到旧封面）。
+const imageProxy = registerImageProxyRoutes(app)
+
+// 图片代理缓存清理/统计（供设置页「清理缓存」调用）
+app.post('/api/cache/image/clear', (req, res) => {
+  try {
+    imageProxy.cache.clear()
+    res.json({ success: true, cleared: true })
+  } catch (error) {
+    console.error('[ImageProxy] 清理缓存失败:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+app.get('/api/cache/image/stats', (req, res) => {
+  try {
+    res.json({ success: true, stats: imageProxy.cache.stats() })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
 
 // 动态导入网易云音乐 API
 let NeteaseAPI = null
@@ -1594,12 +1622,6 @@ app.get('/api/netease/search', async (req, res) => {
       throw lastError
     }
     
-    // 记录搜索结果数量
-    if (type === '100') {
-    } else if (type === '10') {
-    } else if (type === '1') {
-    }
-    
     // 网易云搜索API返回的album.picId会被JavaScript截断
     // 只获取前30个专辑封面，其余的由前端按需加载
     if (result.body?.result?.songs) {
@@ -1612,6 +1634,12 @@ app.get('/api/netease/search', async (req, res) => {
       for (let i = 0; i < firstBatch.length; i += batchSize) {
         const batch = firstBatch.slice(i, i + batchSize)
         await Promise.all(batch.map(async (albumId) => {
+          // 同一专辑会被反复搜索命中，命中缓存可跳过 100ms 等待与上游请求。
+          const cachedCover = getCachedNeteaseAlbumCover(albumId)
+          if (cachedCover) {
+            albumDetails[albumId] = cachedCover
+            return
+          }
           try {
             await new Promise(resolve => setTimeout(resolve, 100)) // 每个请求前等待100ms
             const albumRes = await NeteaseAPI.album({
@@ -1619,6 +1647,7 @@ app.get('/api/netease/search', async (req, res) => {
             })
             if (albumRes.body?.album?.picUrl) {
               albumDetails[albumId] = albumRes.body.album.picUrl
+              cacheNeteaseAlbumCover(albumId, albumRes.body.album.picUrl)
             }
           } catch (err) {
             if (devMode) console.error(`✗ 获取专辑 ${albumId} 详情失败:`, err.message)
@@ -1731,16 +1760,33 @@ app.get('/api/netease/albums/covers', async (req, res) => {
     
     if (isDev) console.log(`批量获取 ${albumIds.length} 个专辑封面`)
     
-    // 串行获取，每次间隔300ms，避免被限流
-    for (const albumId of albumIds) {
-      try {
-        await new Promise(resolve => setTimeout(resolve, 300)) // 延迟300ms
-        const albumRes = await NeteaseAPI.album({ id: albumId })
-        if (albumRes.body?.album?.picUrl) {
-          albumCovers[albumId] = albumRes.body.album.picUrl
+    // 分批并发获取（与 /api/netease/search 的专辑补齐同款 3 路分批）：
+    // 此前是「每个专辑 sleep 300ms 再串行请求」，30 个未缓存专辑要 9 秒以上纯等待；
+    // 保留批次间限流延迟以维持上游 QPS 约束，但同一批内并发。
+    const batchSize = 3
+    for (let i = 0; i < albumIds.length; i += batchSize) {
+      const batch = albumIds.slice(i, i + batchSize)
+      await Promise.all(batch.map(async (albumId) => {
+        // 命中缓存的专辑直接返回、不再请求上游（也不占延迟）。
+        const cachedCover = getCachedNeteaseAlbumCover(albumId)
+        if (cachedCover) {
+          albumCovers[albumId] = cachedCover
+          return
         }
-      } catch (err) {
-        if (isDev) console.error(`获取专辑 ${albumId} 封面失败:`, err.message)
+        try {
+          await new Promise(resolve => setTimeout(resolve, 100)) // 每个请求前等待100ms
+          const albumRes = await NeteaseAPI.album({ id: albumId })
+          if (albumRes.body?.album?.picUrl) {
+            albumCovers[albumId] = albumRes.body.album.picUrl
+            cacheNeteaseAlbumCover(albumId, albumRes.body.album.picUrl)
+          }
+        } catch (err) {
+          if (isDev) console.error(`获取专辑 ${albumId} 封面失败:`, err.message)
+        }
+      }))
+      // 批次之间延迟 200ms（末批不再等待）
+      if (i + batchSize < albumIds.length) {
+        await new Promise(resolve => setTimeout(resolve, 200))
       }
     }
     
@@ -2656,10 +2702,12 @@ app.get('/api/netease/playlist/detail', async (req, res) => {
 
         // 检查结果是否有效
         if (Array.isArray(songs)) {
-          // 元数据（播放次数/创建者/标签）：best-effort 补一次 playlist_detail，失败不影响歌曲列表
+          // 元数据（播放次数/创建者/标签）：best-effort 补一次 playlist_detail，失败不影响歌曲列表。
+          // 走同一个短缓存 —— fetchNeteasePlaylistTracks 刚刚已经拉过这份响应（只为取 trackIds），
+          // 这里命中缓存即可，避免对同一歌单重复拉取整份 JSON。
           let meta = null
           try {
-            meta = (await NeteaseAPI.playlist_detail({ id }))?.body?.playlist || null
+            meta = (await getNeteasePlaylistDetailCached(id, cookie))?.body?.playlist || null
           } catch (metaError) {
             console.warn('[歌单详情API] 元数据获取失败（不影响歌曲）:', metaError?.message)
           }
@@ -2921,7 +2969,10 @@ function qqNormalizeSongFromTrack(track, mid, fallback = {}) {
     album: {
       id: track?.album?.id || track?.albumid || fallback.album?.id || fallback.albumid,
       mid: track?.album?.mid || track?.albummid || fallback.album?.mid || fallback.albummid,
-      name: track?.album?.name || fallback.album?.name || fallback.albumname || fallback.album || '',
+      // fallback 是已映射好的歌曲对象，其 album 字段是对象而非字符串；
+      // 若直接回落到 fallback.album 会把对象塞进 album.name，前端渲染时整棵结果树崩溃。
+      name: track?.album?.name || fallback.album?.name || fallback.albumname
+        || (typeof fallback.album === 'string' ? fallback.album : '') || '',
       picUrl: coverUrl
     },
     albumpic: coverUrl,
@@ -5789,6 +5840,22 @@ app.get('/api/qq/song/detail', async (req, res) => {
   }
 })
 
+// QQ 歌词解密结果缓存（见 /api/qq/lyric 注释）：key = songMid，
+// 值形如 { lrc, qrc, trans, roma }，与接口响应体一致。
+const QQ_LYRIC_CACHE_TTL = 30 * 60 * 1000
+const QQ_LYRIC_CACHE_MAX = 300
+const qqLyricCache = new Map()
+
+function setQQLyricCache(key, value) {
+  if (!key) return
+  qqLyricCache.set(key, { value, expiresAt: Date.now() + QQ_LYRIC_CACHE_TTL })
+  while (qqLyricCache.size > QQ_LYRIC_CACHE_MAX) {
+    const oldestKey = qqLyricCache.keys().next().value
+    if (oldestKey === undefined) break
+    qqLyricCache.delete(oldestKey)
+  }
+}
+
 app.get('/api/qq/lyric', async (req, res) => {
   try {
     const { id, mid, cookie } = req.query
@@ -5797,6 +5864,25 @@ app.get('/api/qq/lyric', async (req, res) => {
     }
 
     const songMid = mid || id
+
+    // 歌词结果进程级缓存：解密链路（DES 逐块 + zlib inflate）是纯同步 CPU 工作，
+    // 每首歌最多 4 次调用（qrc/lyric/trans/roma），且歌词在同一次会话里反复请求
+    //（切歌回来、歌词面板重开、桌面歌词窗等）。不缓存会让单线程事件循环被反复
+    // 阻塞，连带卡住音频/图片流式转发。按「账号指纹 + songMid」缓存 30 分钟，上限 300 条。
+    // 必须带账号维度：登录态会影响歌词接口返回（VIP 歌词），否则会把某账号的结果
+    // 回给另一个账号。沿用 qqHash33 的账号指纹口径（与 qqFeedbackContexts 一致）。
+    const lyricAccountKey = cookie ? qqHash33(cookie).toString(36) : 'guest'
+    const lyricCacheKey = songMid ? `${lyricAccountKey}:${String(songMid).trim()}` : ''
+    if (lyricCacheKey) {
+      const cachedLyric = qqLyricCache.get(lyricCacheKey)
+      if (cachedLyric && cachedLyric.expiresAt > Date.now()) {
+        qqLyricCache.delete(lyricCacheKey)
+        qqLyricCache.set(lyricCacheKey, cachedLyric)
+        return res.json(cachedLyric.value)
+      }
+      if (cachedLyric) qqLyricCache.delete(lyricCacheKey)
+    }
+
     console.log(`[QQ音乐歌词] Cookie: ${cookie ? `已提供 (长度:${cookie.length})` : '未提供'}`)
     
     // 方法1: 使用musicu API (Mineradio的主要方法，支持qrc、roma等)
@@ -5928,12 +6014,14 @@ app.get('/api/qq/lyric', async (req, res) => {
       if (officialRoman) romanText = officialRoman
       // 如果官方已有完整歌词，直接返回（优化速度）
       if (lyricText && transText && romanText) {
-        res.json({ 
+        const payload = {
           lrc: { lyric: lyricText },
           qrc: { lyric: qrcText },
           trans: { lyric: transText },
           roma: { lyric: romanText }
-        })
+        }
+        setQQLyricCache(lyricCacheKey, payload)
+        res.json(payload)
         return
       }
     } catch (e) {
@@ -6034,16 +6122,15 @@ app.get('/api/qq/lyric', async (req, res) => {
     }
     
 
-    if (transText) {
-    } else {
-    }
-    
-    res.json({ 
+    const finalPayload = {
       lrc: { lyric: lyricText },
       qrc: { lyric: qrcText },
       trans: { lyric: transText },
       roma: { lyric: romanText }
-    })
+    }
+    // 仅在拿到非空歌词时缓存，避免把上游临时失败的结果固化 30 分钟
+    if (lyricText) setQQLyricCache(lyricCacheKey, finalPayload)
+    res.json(finalPayload)
   } catch (error) {
     console.error('[QQ音乐歌词] ❌ 获取错误:', error)
     res.status(500).json({ error: error.message, lrc: { lyric: '' }, qrc: { lyric: '' }, trans: { lyric: '' }, roma: { lyric: '' } })
@@ -6082,34 +6169,6 @@ app.get('/api/qq/top', async (req, res) => {
         song_list: []
       }
     })
-  }
-})
-
-// QQ音乐新歌推荐API（使用正确的new/songs接口）
-app.get('/api/qq/new/songs', async (req, res) => {
-  try {
-    const devMode = req.query.devMode === 'true'
-    // 使用 new/songs API（不需要登录）
-    // type: 0=最新, 1=内地, 2=港台, 3=欧美, 4=韩国, 5=日本
-    const newSongsResult = await qqMusicApi.api('new/songs', { 
-      type: 0 // 获取最新歌曲
-    })
-    
-    if (newSongsResult && newSongsResult.result === 100 && newSongsResult.data && newSongsResult.data.list) {
-      const songs = newSongsResult.data.list
-      res.json({
-        result: 100,
-        data: {
-          songlist: songs
-        }
-      })
-    } else {
-      if (devMode) console.warn('[QQ新歌] 新歌列表为空')
-      res.json({ result: 100, data: { songlist: [] } })
-    }
-  } catch (error) {
-    console.error('[QQ新歌] 错误:', error.message || error)
-    res.status(200).json({ result: 100, data: { songlist: [] } })
   }
 })
 
@@ -6453,7 +6512,8 @@ function normalizeNeteaseExploreSong(input, fallback = {}) {
       id: Number(album.id) || undefined,
       // 播客节目的「专辑名」用节目所属电台名填充：迷你播放器/桌面歌词在无歌词时
       // 就显示它（比「暂无歌词」或单集标题更能说明这是哪个播客的内容）。
-      name: fallback.albumName || album.name || fallback.album || '',
+      name: fallback.albumName || album.name
+        || (typeof fallback.album === 'string' ? fallback.album : '') || '',
       picUrl: album.picUrl || album.blurPicUrl || input?.picUrl || fallback.coverUrl || ''
     },
     duration: Number(track.dt || track.duration || 0),
@@ -6472,25 +6532,28 @@ function normalizeQQExploreSong(input, fallback = {}) {
     : input
   const track = normalizedInput?.songInfo || normalizedInput?.song || normalizedInput || {}
   const mid = String(
-    track.mid || track.songmid || track.songMid || track.song_mid || fallback.mid || ''
+    track.mid || track.MID || track.Mid || track.songmid || track.songMid || track.song_mid || fallback.mid || ''
   ).trim()
-  const rawId = track.id || track.songid || track.songId || fallback.id || 0
+  const rawId = track.id || track.ID || track.songid || track.songId || fallback.id || 0
   const numericId = Number(rawId) || Number.parseInt(String(rawId).replace(/\D/g, ''), 10) || 0
-  const rawArtists = track.singer || track.singers || track.artists || []
-  const artists = Array.isArray(rawArtists)
-    ? rawArtists.map(artist => ({
-        id: Number(artist.id || artist.singerid) || undefined,
-        mid: artist.mid || artist.singermid || artist.singerMid || undefined,
-        name: artist.name || artist.title || artist.singerName || '未知歌手'
-      }))
-    : []
-  const album = track.album || {}
-  const albumMid = album.mid || album.pmid || track.albummid || track.albumMid || fallback.albumMid || ''
+  const rawArtists = track.singer || track.singers || track.artists || track.artist || []
+  const artistNameFallback = track.singerName || track.singername || track.SingerName || track.artistName || fallback.artist || ''
+  const artistList = Array.isArray(rawArtists) ? rawArtists : rawArtists ? [rawArtists] : []
+  const artists = artistList.map(artist => {
+    const value = typeof artist === 'string' ? { name: artist } : artist || {}
+    return {
+      id: Number(value.id || value.singerid) || undefined,
+      mid: value.mid || value.MID || value.singermid || value.singerMid || undefined,
+      name: value.name || value.title || value.singerName || value.SingerName || artistNameFallback || '未知歌手'
+    }
+  })
+  const album = track.album || track.albumInfo || {}
+  const albumMid = album.mid || album.MID || album.pmid || track.albummid || track.albumMid || track.albumMID || track.album_mid || track.album_pic_mid || fallback.albumMid || ''
   const coverUrl = normalizeQQImageUrl(
-    track.cover || track.picUrl || track.picurl || track.albumpic || track.albumPic ||
-    album.picUrl || album.picurl || album.cover || album.coverUrl || fallback.coverUrl
+    track.cover || track.Cover || track.picUrl || track.picurl || track.album_pic_url || track.albumpic || track.albumPic || track.albumCover ||
+    album.picUrl || album.picurl || album.cover || album.coverUrl || album.url || fallback.coverUrl
   ) || (albumMid ? qqAlbumCover(String(albumMid).replace(/_\d+$/, ''), 500) : '')
-  const name = track.name || track.title || track.songname || track.songName || fallback.name || ''
+  const name = track.name || track.Name || track.title || track.songname || track.songName || fallback.name || ''
 
   if (!name || (!mid && !numericId)) return null
 
@@ -6507,14 +6570,15 @@ function normalizeQQExploreSong(input, fallback = {}) {
     artists: artists.length > 0
       ? artists
       : [{
-          mid: track.singerMid || fallback.singerMid || undefined,
-          name: track.singerName || fallback.artist || '未知歌手'
+          mid: track.singerMid || track.singermid || fallback.singerMid || undefined,
+          name: artistNameFallback || '未知歌手'
         }],
     album: {
-      id: Number(album.id || track.albumid) || undefined,
+      id: Number(album.id || track.albumid || track.album_id) || undefined,
       mid: albumMid || undefined,
       pmid: album.pmid || undefined,
-      name: album.name || album.title || track.albumname || fallback.album || '',
+      name: album.name || album.Name || album.title || track.albumname || track.album_name
+        || (typeof fallback.album === 'string' ? fallback.album : '') || '',
       picUrl: coverUrl
     },
     duration: Number(track.interval || fallback.interval || 0) * 1000 || Number(track.duration || 0),
@@ -7767,6 +7831,42 @@ async function fetchNeteasePlaylistTrackPage(id, cookie = '', offset = 0, limit 
   }
 }
 
+// 网易云歌单详情响应短缓存：fetchNeteasePlaylistTracks 内部用它取 trackIds，
+// 调用方（/api/netease/playlist/detail）随后又要同一份响应的元数据
+//（name/coverImgUrl/playCount/creator 等），此前会把整份 playlist_detail 拉两遍
+//（大型歌单每次都是几百 KB 的 JSON + 上游一次往返）。按账号指纹 + 歌单 id 共享一份。
+const NETEASE_PLAYLIST_DETAIL_CACHE_TTL = 5 * 60 * 1000
+const NETEASE_PLAYLIST_DETAIL_CACHE_MAX = 60
+const neteasePlaylistDetailCache = new Map()
+
+async function getNeteasePlaylistDetailCached(id, cookie = '') {
+  const accountKey = cookie ? qqHash33(String(cookie)).toString(36) : 'guest'
+  const key = `${accountKey}:${String(id)}`
+  const hit = neteasePlaylistDetailCache.get(key)
+  if (hit && hit.expiresAt > Date.now()) {
+    neteasePlaylistDetailCache.delete(key)
+    neteasePlaylistDetailCache.set(key, hit)
+    return hit.value
+  }
+  if (hit) neteasePlaylistDetailCache.delete(key)
+  const result = await NeteaseAPI.playlist_detail({
+    id: String(id),
+    s: 0,
+    cookie: String(cookie || '')
+  })
+  // 只缓存真正拿到歌单体的成功响应：路由侧带重试循环，把失败响应固化 5 分钟
+  // 会让重试直接命中空结果。（失败会抛异常，本函数自然不写入。）
+  if (result?.body?.playlist) {
+    neteasePlaylistDetailCache.set(key, { value: result, expiresAt: Date.now() + NETEASE_PLAYLIST_DETAIL_CACHE_TTL })
+    while (neteasePlaylistDetailCache.size > NETEASE_PLAYLIST_DETAIL_CACHE_MAX) {
+      const oldestKey = neteasePlaylistDetailCache.keys().next().value
+      if (oldestKey === undefined) break
+      neteasePlaylistDetailCache.delete(oldestKey)
+    }
+  }
+  return result
+}
+
 async function fetchNeteasePlaylistTracks(id, cookie = '', maxTracks = 10000) {
   const pageSize = 500
   const tracks = []
@@ -7776,11 +7876,7 @@ async function fetchNeteasePlaylistTracks(id, cookie = '', maxTracks = 10000) {
   // playlist_track_all 偶尔只返回歌单开头的一小部分歌曲，却仍然是成功响应。
   // 先读取完整 trackIds，再分批查询歌曲详情，才能区分“609 首歌单”和“只返回 6 首”。
   try {
-    const detailResult = await NeteaseAPI.playlist_detail({
-      id: String(id),
-      s: 0,
-      cookie: String(cookie || '')
-    })
+    const detailResult = await getNeteasePlaylistDetailCached(id, cookie)
     const orderedIds = (detailResult?.body?.playlist?.trackIds || [])
       .map(item => String(item?.id || ''))
       .filter(Boolean)
@@ -11657,13 +11753,27 @@ app.delete('/api/apple/amp', proxyAppleAmpApi)
 const APPLE_LICENSE_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/acquireWebPlaybackLicense'
 // Apple 网页会话 Cookie（登录时由 main 进程落盘）：license 接口校验网页会话，
 // 仅凭 media-user-token 会被拒（-1002 session ended）
+//
+// 该函数在每次 /api/apple/license 请求上都会被调用，而 license 是每首 Apple 歌曲
+// 播放时的必经路径；readFileSync + JSON.parse 是同步阻塞调用，会卡住事件循环。
+// 文件只在登录/登出时才变，因此按 mtime+size 缓存，文件一变立即失效。
+let appleWebCookieCache = { mtimeMs: -1, size: -1, value: '' }
 function readAppleWebCookieHeader() {
   try {
     const base = process.env.WAVEFORGE_USERDATA
       || join(process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming'), 'Electron')
-    const data = JSON.parse(readFileSync(join(base, 'apple-web-cookies.json'), 'utf8'))
-    return typeof data?.cookie === 'string' && data.cookie ? data.cookie : ''
+    const cookiePath = join(base, 'apple-web-cookies.json')
+    const stat = statSync(cookiePath)
+    if (stat.mtimeMs === appleWebCookieCache.mtimeMs && stat.size === appleWebCookieCache.size) {
+      return appleWebCookieCache.value
+    }
+    const data = JSON.parse(readFileSync(cookiePath, 'utf8'))
+    const value = typeof data?.cookie === 'string' && data.cookie ? data.cookie : ''
+    appleWebCookieCache = { mtimeMs: stat.mtimeMs, size: stat.size, value }
+    return value
   } catch {
+    // 文件不存在/解析失败：清空缓存，避免残留上一次登录的 Cookie
+    appleWebCookieCache = { mtimeMs: -1, size: -1, value: '' }
     return ''
   }
 }
