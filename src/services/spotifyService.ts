@@ -43,7 +43,20 @@ export function isSpotifyLoggedIn(): boolean {
  *   已撤销/失效，会话确定死亡（不是网络抖动）
  * - 'failed'：网络错误或其他 5xx——瞬时问题，不应判定会话失效
  */
+// 进行中的 token 刷新（单飞）：见 refreshSpotifyToken
+let refreshInFlight: Promise<'ok' | 'rejected' | 'failed'> | null = null
+
 async function refreshSpotifyToken(): Promise<'ok' | 'rejected' | 'failed'> {
+  // token 过期瞬间可能有多个并发请求各自收到 401：原先每个都会 POST 一次 token 端点，
+  // 而 Spotify 对该端点限流严格。用 in-flight Promise 让它们复用同一次刷新。
+  if (refreshInFlight) return refreshInFlight
+  const run = refreshSpotifyTokenOnce()
+  refreshInFlight = run
+  void run.finally(() => { if (refreshInFlight === run) refreshInFlight = null })
+  return run
+}
+
+async function refreshSpotifyTokenOnce(): Promise<'ok' | 'rejected' | 'failed'> {
   const refreshToken = getSpotifyRefreshToken()
   if (!refreshToken) return 'failed'
   try {

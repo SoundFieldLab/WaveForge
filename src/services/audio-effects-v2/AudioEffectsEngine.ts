@@ -98,6 +98,8 @@ export const REVERB_TYPES: Array<{ value: ReverbType; label: string; hint: strin
 ]
 
 const SETTINGS_KEY = 'waveforge:audio-effects-settings'
+// 设置落盘/广播的合并窗口：拖动滑杆时每次 input 事件都会走到 saveSettings
+const SETTINGS_SAVE_DEBOUNCE_MS = 150
 const MY_SCENES_KEY = 'waveforge:my-scenes'
 
 // 频响补偿的滑条与低音量阈值：系统音量低于该值提示用户开启补偿
@@ -748,6 +750,9 @@ export class AudioEffectsEngine {
   // 避免拖动滑杆等热路径每次都重分配数 MB 脉冲缓冲区并引发可闻咔哒声
   private lastIrKey = ''
 
+  // 设置持久化防抖句柄（拖滑杆时 updateSettings 每秒可触发约 60 次）
+  private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null
+
   // 均衡器 / 频响补偿（二选一插入 voiceMatrix → presenceMatrix 之间）
   private eqFilters: BiquadFilterNode[] = []
   private compFilters: BiquadFilterNode[] = []
@@ -788,7 +793,20 @@ export class AudioEffectsEngine {
     return BUILTIN_SCENES
   }
 
+  /**
+   * 设置变更后的落盘与广播。拖动滑杆时 updateSettings 每秒可触发约 60 次，每次都同步写
+   * 全量设置 JSON 并派发事件（订阅者随之重渲染）纯属浪费；合并到 150ms 一次（尾触发保证
+   * 最终一致）。内存里的 this.settings 仍是即时更新的，音频参数不受影响。
+   */
   private saveSettings(): void {
+    if (this.settingsSaveTimer !== null) clearTimeout(this.settingsSaveTimer)
+    this.settingsSaveTimer = setTimeout(() => {
+      this.settingsSaveTimer = null
+      this.persistSettings()
+    }, SETTINGS_SAVE_DEBOUNCE_MS)
+  }
+
+  private persistSettings(): void {
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(this.settings))
     } catch {

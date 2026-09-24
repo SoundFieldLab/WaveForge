@@ -1053,7 +1053,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     const canvas = ambientCanvasRef.current
     const video = videoRef.current
     if (!canvas || !video) return
-    let raf = 0
+    // 泛光是低频氛围：150ms 一帧（约 6-7fps）足够。原实现按显示刷新率自续 rAF、每帧先续帧再 return，
+    // 等于空闲期仍 60 次回调/秒（对齐 useAudioAnalyzer 的 scheduleNext 做法改为定时器）。
+    const AMBIENT_FRAME_MS = 150
+    let timer = 0
     let lastDraw = 0
     let drawCount = 0
     let drawFails = 0
@@ -1069,7 +1072,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     if (!offCtx) return // 离屏上下文不可得（极罕见）：放弃氛围
     let extMinX = 0, extMinY = 0, extMaxX = 1, extMaxY = 1
     const draw = () => {
-      raf = requestAnimationFrame(draw)
+      timer = window.setTimeout(draw, AMBIENT_FRAME_MS)
       // 兜底捕获视频宽高比：loadedmetadata 事件偶发不可靠，绘制循环里持续检查
       if (videoAspect === null && video.videoWidth > 0 && video.videoHeight > 0) {
         setVideoAspect(video.videoWidth / video.videoHeight)
@@ -1083,7 +1086,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       }
       if (video.readyState < 2 || video.paused) return
       // 150ms 节流（约 6-7fps）：泛光是低频氛围，不需要跟随高刷面板逐帧读取视频像素。
-      if (now - lastDraw < 150) return
+      if (now - lastDraw < AMBIENT_FRAME_MS) return
       lastDraw = now
       // 降采样 1/12：模糊半径掩盖细节，省 GPU/内存（用户要求只算周围一圈，顺便更省）
       const scaleFactor = 12
@@ -1157,8 +1160,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         try { ctx.drawImage(video, 0, 0, dw, dh); drawCount += 1 } catch { /* 忽略 */ }
       }
     }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
+    timer = window.setTimeout(draw, AMBIENT_FRAME_MS)
+    return () => window.clearTimeout(timer)
   }, [ambientMode, videoUrl, videoAspect, surfaceVisible])
 
   // 卸载清理
