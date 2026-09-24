@@ -49,7 +49,7 @@ import packageInfo from '../../package.json'
 import { getVersionDisplay } from '../services/versionInfo'
 import { VERSION_HISTORY } from '../services/versionHistory'
 import { getDebugPanelVisible, setDebugPanelVisible } from '../tv/debugStore'
-import { setTvFocus } from '../tv/tvCore'
+import { setTvFocus, useTvBack } from '../tv/tvCore'
 import { isTvModeActive, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale } from '../platform'
 import {
   loadPlaybackShortcutSettings,
@@ -223,6 +223,14 @@ function SettingsPanel({
   const bgCard = playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'
   const borderColor = playerTheme === 'dark' ? 'border-white/10' : 'border-black/10'
   const hoverBg = playerTheme === 'dark' ? 'hover:bg-white/5' : 'hover:bg-black/5'
+
+  // TV 遥控：BACK 关闭设置面板。此前面板没有任何返回处理，未消费的 BACK 会落到原生
+  // handleBackDefault → 直接退出应用（设置页是首页底栏的常进入口）。
+  useTvBack(() => {
+    if (!show) return false
+    onClose()
+    return true
+  }, [show, onClose])
 
   // 隐藏平台（账号区块）：默认全部显示，用户可隐藏不常用的平台
   const [hiddenPlatforms, setHiddenPlatforms] = useState<MusicPlatform[]>(() => getHiddenPlatforms())
@@ -1236,6 +1244,9 @@ function SettingsPanel({
   }
   
   const handleUpNextSecondsChange = (seconds: number) => {
+    // 清空输入框会传进 NaN，而 Math.min/max 会把 NaN 一路传播（localStorage 里存成 "NaN"，
+    // 镜像设置再读到就回落默认值，用户所见与所存不一致）。
+    if (!Number.isFinite(seconds)) return
     const newSeconds = Math.max(5, Math.min(30, seconds))
     setUpNextSeconds(newSeconds)
     localStorage.setItem('upNextSeconds', newSeconds.toString())
@@ -1856,6 +1867,8 @@ function SettingsPanel({
   }
   
   const handleCrossfadeDurationChange = (duration: number) => {
+    // 同上：非有限值直接忽略，避免把 NaN 写进 localStorage
+    if (!Number.isFinite(duration)) return
     const newDuration = Math.max(1, Math.min(12, duration))
     setCrossfadeDuration(newDuration)
     localStorage.setItem('crossfadeDuration', newDuration.toString())

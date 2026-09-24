@@ -346,6 +346,9 @@ export default function PlayerControls({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // TV 遥控：方向键导航由 tvCore 在捕获阶段处理并 preventDefault；这里必须让路，
+      // 否则切焦点会顺带 seek/改音量（播放页/歌曲详情里尤其明显）。长按连发也不该重复触发。
+      if (e.defaultPrevented || e.repeat) return
       const target = e.target instanceof HTMLElement ? e.target : null
       const isEditable = Boolean(target?.closest('input, textarea, select, button, [contenteditable="true"]'))
       const settings = shortcutSettingsRef.current

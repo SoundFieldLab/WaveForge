@@ -736,12 +736,13 @@ const resolveManualLocation = async (
   settings: DesktopCustomizationSettings,
   signal?: AbortSignal,
 ): Promise<WeatherLocation> => {
-  const targetName = (settings.weatherDistrict || settings.weatherCity || settings.weatherProvince).trim()
+  // 三个字段都可能为空/undefined（手动定位但未选地区），直接 .trim() 会抛 TypeError 让天气加载失败
+  const targetName = String(settings.weatherDistrict || settings.weatherCity || settings.weatherProvince || '').trim()
   if (settings.weatherLatitude !== null && settings.weatherLongitude !== null
     && isValidCoordinate(Number(settings.weatherLatitude), Number(settings.weatherLongitude)) && targetName) {
-    const province = settings.weatherProvince.trim()
-    const city = settings.weatherCity.trim()
-    const district = settings.weatherDistrict.trim()
+    const province = String(settings.weatherProvince ?? '').trim()
+    const city = String(settings.weatherCity ?? '').trim()
+    const district = String(settings.weatherDistrict ?? '').trim()
     return {
       name: district || city || province || targetName,
       province, city, district,

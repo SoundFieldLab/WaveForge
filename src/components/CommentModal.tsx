@@ -10,6 +10,7 @@ import DeleteCommentModal from './DeleteCommentModal'
 import CachedImage from './CachedImage'
 import { getResolvedArtworkUrl } from '../services/artworkLoader'
 import { debugLog, isVerboseLogEnabled } from '../utils/debugLog'
+import { useTvBack } from '../tv/tvCore'
 
 interface PlaylistCommentResource {
   id: number | string
@@ -458,6 +459,13 @@ function CommentVirtualRow({ index, style, ...data }: RowComponentProps<CommentR
 }
 
 export default function CommentModal({ isOpen, onClose, song = null, playlist = null, resourceType = 'song' }: CommentModalProps) {
+  // TV 遥控：BACK 应关闭本弹窗。此前没有任何返回处理，未消费的 BACK 会落到原生的
+  // handleBackDefault → 第一次按 BACK 就把应用退掉（非播放页场景）。
+  useTvBack(() => {
+    if (!isOpen) return false
+    onClose()
+    return true
+  }, [isOpen, onClose])
   const isPlaylistResource = resourceType === 'playlist'
   const resourcePlatform = isPlaylistResource ? (playlist?.platform || 'netease') : (song?.platform || 'netease')
   // QQ 评论接口的 topid 使用数字 songid，不是歌曲 MID。

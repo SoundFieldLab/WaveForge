@@ -855,6 +855,9 @@ export function isQueuePlaceholder(track?: ResonanceTrack | null): boolean {
 export function canControlPlayback(state: ResonanceRoomState, peerId: string, now: number): boolean {
   if (state.closed) return false
   if (peerId === state.hostId) return true
+  // 先确认对方仍在名册里：被移出/已退房的 peer 若因中继竞态（kick 未送达、hub 重启）仍连着
+  // socket，原本会因 memberControl 继续享有控制权，能改全房播放进度。
+  if (!state.members.some(member => member.peerId === peerId)) return false
   if (state.controllerId === peerId && now < state.controllerUntil) return true
   return state.memberControl
 }
