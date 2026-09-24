@@ -244,6 +244,9 @@ export interface TransitionPlan {
   /** AI 长混音专用：混音尾段 target 内容相对原曲的播放速度比（<1 慢 / >1 快）。
    *  handoff 时 deck 以此 playbackRate 起步，overlap 窗口内渐回 1.0（post-settle） */
   mixSpeedRatio?: number
+  /** 渲染器返回的过渡缓冲真实时长（秒）。动画窗口用它替代写死的模型窗口常量，
+   *  模型换档时前端不再静默错位。仅渲染完成后由 TransitionRenderer 回填。 */
+  renderedDuration?: number
 }
 
 export interface RenderedTransition {

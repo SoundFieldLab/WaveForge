@@ -85,6 +85,8 @@ const loadResonanceView = () => import('./features/resonance/ResonanceView')
 const MODE_TRANSITION_MIN_MS = 3000
 const MODE_TRANSITION_MAX_MS = 12000
 const PLAYBACK_NEUTRAL_COLOR = '#6b7280'
+// 过渡进度在 App 侧的粗量化节流基准（见 setTransitionProgress 调用处）
+let lastTransitionProgressThrottle = 0
 const LazyHomeView = lazy(loadHomeView)
 const LazyExploreView = lazy(loadExploreView)
 const LazyDesktopView = lazy(loadDesktopView)
@@ -2323,13 +2325,21 @@ function App() {
     
     // 更新过渡进度
     if (state.transitionProgress !== undefined) {
-      setTransitionProgress(previousProgress => {
-        const shouldHoldCompletedFrame = state.transitioning === false
-          && state.transitionState === 'committed'
-          && state.transitionProgress === 0
-          && previousProgress > 0
-        return shouldHoldCompletedFrame ? previousProgress : state.transitionProgress!
-      })
+      // 过渡期间发布侧以 30fps 推送进度；这里若每帧 setState，会把整个 App 树拉到
+      // 30fps reconcile（几百 KB 组件树，即便子树有 memo 仍有高频 diff 开销）。
+      // 再粗量化到 ~10fps：进度条/过渡遮罩显示无感知差异，仅"到达 1 / 过渡结束"强制落定最终帧。
+      const nowMs = performance.now()
+      if (state.transitionProgress >= 1 || state.transitioning === false
+        || nowMs - lastTransitionProgressThrottle >= 100) {
+        setTransitionProgress(previousProgress => {
+          const shouldHoldCompletedFrame = state.transitioning === false
+            && state.transitionState === 'committed'
+            && state.transitionProgress === 0
+            && previousProgress > 0
+          return shouldHoldCompletedFrame ? previousProgress : state.transitionProgress!
+        })
+        lastTransitionProgressThrottle = nowMs
+      }
     }
     
     // 更新过渡轨道信息
@@ -8413,7 +8423,10 @@ function App() {
             transitionFromUrl={transitionFromTrack?.coverUrl}
             transitionToUrl={transitionToTrack?.coverUrl}
             isTransitioning={isVisualTransitioning}
-            transitionProgress={transitionProgress}
+            // 与 MV 背景共用 overlayProgress：它是从动画窗口起点重新归一化的 0→1，
+            // 窗口开启瞬间恰好为 0，不会把过渡中段的进度硬跳上去。裸 transitionProgress
+            // 的原点是音频过渡起点，窗口晚开时会一次性跳到 (dur-lead)/dur（AI 路径达 0.67）。
+            transitionProgress={overlayProgress}
             pulseStore={audioPulseStore}
             backgroundEffect={backgroundEffect}
             backgroundBlur={backgroundBlur}
@@ -9159,7 +9172,8 @@ function App() {
                       dominantColor={dominantColor}
                       trackId={currentSong.id || currentSong.mid}
                       isTransitioning={isVisualTransitioning}
-                      transitionProgress={transitionProgress}
+                      // 与封面背景/MV 同源：overlayProgress 从动画窗口起点归一化，无跳变
+                      transitionProgress={overlayProgress}
                       transitionFromTrack={transitionFromTrack}
                       transitionToTrack={transitionToTrack}
                       pulseStore={audioPulseStore}
@@ -9466,7 +9480,8 @@ function App() {
                       dominantColor={dominantColor}
                       trackId={currentSong.id || currentSong.mid}
                       isTransitioning={isVisualTransitioning}
-                      transitionProgress={transitionProgress}
+                      // 与封面背景/MV 同源：overlayProgress 从动画窗口起点归一化，无跳变
+                      transitionProgress={overlayProgress}
                       transitionFromTrack={transitionFromTrack}
                       transitionToTrack={transitionToTrack}
                       pulseStore={audioPulseStore}
@@ -9476,11 +9491,11 @@ function App() {
 
                     {/* 歌曲信息 - 过渡时双层淡入淡出 */}
                     <div className="relative min-h-[5.25rem] w-full max-w-xl space-y-2 px-4 text-center">
-                      {isVisualTransitioning && transitionProgress > 0 && transitionFromTrack && transitionToTrack ? (
+                      {isVisualTransitioning && overlayProgress > 0 && transitionFromTrack && transitionToTrack ? (
                         // 过渡模式：双层叠加
                         <>
                           {/* 底层：旧歌曲信息 */}
-                          <div className="absolute inset-0" style={{ opacity: 1 - transitionProgress }}>
+                          <div className="absolute inset-0" style={{ opacity: 1 - overlayProgress }}>
                             <h1 className={`text-3xl font-bold ${playerTheme === 'dark' ? 'text-white drop-shadow-lg' : 'text-black/90'}`}>
                               {transitionFromTrack.title}
                             </h1>
@@ -9489,7 +9504,7 @@ function App() {
                             </p>
                           </div>
                           {/* 顶层：新歌曲信息 */}
-                          <div className="relative" style={{ opacity: transitionProgress }}>
+                          <div className="relative" style={{ opacity: overlayProgress }}>
                             <h1 className={`text-3xl font-bold ${playerTheme === 'dark' ? 'text-white drop-shadow-lg' : 'text-black/90'}`}>
                               {transitionToTrack.title}
                             </h1>

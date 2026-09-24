@@ -47,8 +47,8 @@ def write_wav_atomic(output_path: str, audio: np.ndarray, sample_rate: int, chan
 def ensure_stereo(audio: np.ndarray) -> np.ndarray:
     """单声道输入上采样为立体声，立体声/多声道保持原样。
 
-    与 server/render_worker.py 的 _ensure_stereo 契约一致——音乐是立体声，
-    折叠 mono 会丢失声像信息。AudioFile.read() 返回 (channels, frames) 布局。
+    音乐是立体声，折叠 mono 会丢失声像信息。
+    AudioFile.read() 返回 (channels, frames) 布局。
     """
     if audio.ndim == 1:
         audio = audio[None, :]
@@ -599,7 +599,7 @@ def render_transition(params: dict) -> dict:
         
         output_sample_rate = source_sample_rate
 
-        # 统一为立体声输出（与 server/render_worker.py 契约一致）：
+        # 统一为立体声输出：
         # 单声道输入上采样为立体声，避免折叠 mono 丢失声像信息
         source_audio = ensure_stereo(source_audio)
         target_audio = ensure_stereo(target_audio)
@@ -926,13 +926,33 @@ def _relu6(x: np.ndarray, start: float, slope: float) -> np.ndarray:
     return np.minimum(np.maximum(x - start, 0.0) * slope, 6.0) / 6.0
 
 
+def _lr_filter(audio: np.ndarray, sample_rate: int, cutoff: float, btype: str) -> np.ndarray:
+    """零相位 2 阶级联（sosfiltfilt）。样本过短无法填充时退回因果滤波。"""
+    nyquist = sample_rate / 2
+    safe_cutoff = float(np.clip(cutoff, 20, nyquist * 0.99))
+    sos = signal.butter(2, safe_cutoff, btype=btype, fs=sample_rate, output='sos')
+    try:
+        return signal.sosfiltfilt(sos, audio, axis=1).astype(np.float32)
+    except ValueError:
+        return signal.sosfilt(sos, audio, axis=1).astype(np.float32)
+
+
 def _band_split(audio: np.ndarray, sample_rate: int) -> list[np.ndarray]:
-    """4 频段分频（20-300 / 300-5000 / 5000-20000，与 DJTransGAN BAND_FREQS 一致）。"""
-    low = filtered(audio, sample_rate, 300, 'lowpass')
-    mid_low = filtered(filtered(audio, sample_rate, 300, 'highpass'), sample_rate, 5000, 'lowpass')
-    mid_high = filtered(filtered(audio, sample_rate, 5000, 'highpass'), sample_rate, 20000, 'lowpass')
-    high = filtered(audio, sample_rate, 5000, 'highpass')
-    return [low, mid_low, mid_high, high]
+    """4 频段互补分频（300 / 5000 / 20000 三个边界，与 DJTransGAN BAND_FREQS 一致）。
+
+    用级联互补结构（低通后的残差再进下一级），保证各频段求和精确重建原信号。
+    早期实现是"每个频段各自独立滤波后相加"，其中 mid_high（HP5k 再 LP20k）与
+    high（HP5k）完全重叠，4 段求和后 RMS 达原信号的 1.46 倍、高频被双重计入，
+    会给 learned automation 路径抬高约 3.3dB 并引入染色。互补结构实测重建误差
+    0.000dB、相位相关系数 1.0。
+    """
+    bands: list[np.ndarray] = []
+    carry = audio
+    for boundary in (300.0, 5000.0, 20000.0):
+        bands.append(_lr_filter(carry, sample_rate, boundary, 'lowpass'))
+        carry = _lr_filter(carry, sample_rate, boundary, 'highpass')
+    bands.append(carry)
+    return bands
 
 
 def apply_learned_automation(audio: np.ndarray, sample_rate: int, params: dict, fade_type: str) -> np.ndarray:

@@ -370,6 +370,8 @@ export class TransitionRenderer {
       targetResumeTime?: number
       transitionStart?: number
       mixSpeedRatio?: number
+      /** 渲染缓冲真实时长（秒）；AI 长混音为模型窗口，DSP 为过渡窗口 */
+      duration?: number
       backend?: 'folia-htdemucs' | 'folia-unavailable' | 'djtransgan' | 'v2-dsp'
       beatProvider?: 'beat_this' | 'fallback'
       error?: string
@@ -377,15 +379,40 @@ export class TransitionRenderer {
     // overlap 窗口（秒）：>0 时缓冲尾段渐出，目标 deck 提前 overlap 秒淡入/提前缓冲，
     // 消除 handoff 时 seek 到 resume 的网络缓冲等待（流媒体）造成的界面切换断开。
     let aiOverlapSeconds = 0
+    // DJTransGAN 学到的推子/EQ 曲线复用到 v2 短过渡（8~32 拍）：
+    // 模型输出是闭式参数式曲线，可在任意长度重建，无需 60s 混音窗口、不渲染音频。
+    // 仅当用户开启 DJ、引擎可用、且最终走 full-mix DSP 时注入——folia 路径由 stem
+    // choreography 自己拥有过渡，注入会被 worker 忽略（render_worker.py 的 folia 分支）。
+    const attachLearnedAutomation = async (): Promise<void> => {
+      if (plan.v2?.aiMix !== true || !djAvailable) return
+      if (renderPlan.v2?.automation) return
+      if (renderPlan.v2?.backend === 'folia-htdemucs' || renderPlan.v2?.stemArtifacts) return
+      const fetchAutomation = renderBridge.aiMixAutomation
+      if (typeof fetchAutomation !== 'function') return
+      try {
+        const automation = await fetchAutomation(renderPlan, sourceRenderPath, targetRenderPath)
+        if (!automation?.success || !Array.isArray(automation.params) || automation.params.length !== 2) {
+          debugLog('[TransitionRenderer] Learned automation unavailable; using rule-based curves:', automation?.error)
+          return
+        }
+        renderPlan = { ...renderPlan, v2: { ...renderPlan.v2, automation: automation.params } }
+        debugLog('[TransitionRenderer] DJTransGAN learned fader/EQ automation applied to v2 short transition')
+      } catch (error) {
+        debugLog('[TransitionRenderer] Learned automation failed; using rule-based curves:', error)
+      }
+    }
     // Stem IPC / worker may reject instead of returning success=false. Collapse both shapes into the
     // same fallback: retry once with the original full-mix v2 plan, never degrade straight to crossfade.
     const renderDsp = async () => {
+      await attachLearnedAutomation()
       try {
         return await renderBridge.transition(renderPlan, sourceRenderPath, targetRenderPath)
       } catch (error) {
         if (!renderPlan.v2?.stemArtifacts) throw error
         debugLog('[TransitionRenderer] Folia render IPC failed; retrying v2 DSP:', error)
         renderPlan = buildDspFallbackPlan(`Folia renderer failed: ${error instanceof Error ? error.message : String(error)}`)
+        // 降级后的 full-mix 计划可重新尝试注入学习式曲线
+        await attachLearnedAutomation()
         return renderBridge.transition(renderPlan, sourceRenderPath, targetRenderPath)
       }
     }
@@ -440,7 +467,8 @@ export class TransitionRenderer {
       const foliaError = result?.error || 'Folia stem renderer returned an invalid result'
       debugLog('[TransitionRenderer] Folia render failed; using explicit v2 DSP fallback:', foliaError)
       renderPlan = buildDspFallbackPlan(`Folia renderer failed: ${foliaError}`)
-      result = await renderBridge.transition(renderPlan, sourceRenderPath, targetRenderPath)
+      // 经 renderDsp 以便 full-mix 回退同样注入学习式曲线
+      result = await renderDsp()
       aiOverlapSeconds = result?.success && result.stretchApplied ? 1.5 : 0
     }
     // Legacy stem-aware v2 plans still retain their own compatibility fallback.
@@ -473,6 +501,10 @@ export class TransitionRenderer {
         targetEndTime: result.targetResumeTime,
         ...(aiOverlapSeconds > 0 ? { overlapSeconds: aiOverlapSeconds } : {}),
         ...(aiMixSpeedRatio > 0 ? { mixSpeedRatio: aiMixSpeedRatio } : {}),
+        // 缓冲真实时长：动画窗口用它替代写死的模型窗口常量（AI 路径原为 60）
+        ...(typeof result.duration === 'number' && Number.isFinite(result.duration) && result.duration > 0
+          ? { renderedDuration: result.duration }
+          : {}),
       }
       : renderPlan
 

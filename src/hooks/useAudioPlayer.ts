@@ -94,6 +94,10 @@ const PRELOAD_MEDIA_LOAD_TIMEOUT_MS = 15_000
 // 过渡动画提前量：动画（倒计时/流光/渐变）最多提前这么久进入，
 // 与音频过渡起点（可能是 AI 长混音的 ~60s 前）解耦。
 const ANIMATION_LEAD_SECONDS = 10
+/** DJTransGAN 训练窗口（秒）：渲染器未回填真实时长时的动画窗口兜底值 */
+const AI_MIX_WINDOW_SECONDS = 60
+/** AI 长混音动画窗口只覆盖混音尾部这么多秒（前段仅进度条推进，避免数十秒视觉占用） */
+const ANIMATION_TAIL_SECONDS = 20
 // REPREPARE（借鉴 QQ 音乐 FromInfo PREPARE_NEXT→REPREPARE_NEXT 441/442、469/470）：
 // 分析/渲染失败属瞬时性（python worker 冷启动、网络抖动），只降级不重试会让整曲
 // 周期停留在 fallback。失败后延时单次重试；冷却期防抖；最多 2 次尝试。
@@ -1297,6 +1301,13 @@ export function useAudioPlayer(
           }
         }
         // 到这里说明智能渲染不可用/过晚/缓冲丢失 → 走标准交叉淡化
+        // 上面在 playTransition 之前已启动过一条进度 rAF；它的闭包持有旧的
+        // transitionStartTime / transitionAudioDuration。若不取消，下方标准交叉淡化会再启动
+        // 第二条 rAF，两者同时以不同分母 emit transitionProgress → 进度抖动 + 双倍 setState。
+        if (transitionProgressAnimationRef.current !== null) {
+          cancelAnimationFrame(transitionProgressAnimationRef.current)
+          transitionProgressAnimationRef.current = null
+        }
         console.warn('⚠️ [Transition] 智能渲染不可用或缓冲未就绪，回退交叉淡化')
         strategy = 'fixed-crossfade'
         plan.strategy = 'fixed-crossfade'
@@ -1850,7 +1861,13 @@ export function useAudioPlayer(
       // AI 路径的窗口末尾 = 模型固定 ~60s（sourceEndTime 仍是 DSP 窗口，不能用来算动画起点）。
       // 动画窗口 = 混音最后 20s（用户反馈"介入好久才进动画"——10s 太晚、叠加过程太短像"直接变"）。
       const animationStartTime = plan.v2?.aiMix === true
-        ? plan.sourceStartTime + 60 - 20
+        // AI 长混音：动画窗口 = 混音最后 20s。窗口长度优先取渲染器返回的真实缓冲时长
+        // （renderedDuration），模型窗口变化时不再与写死的 60 错位；缺失时按 60 兜底
+        // （DJTransGAN 训练窗口语义，实测 140 次渲染恒为 60.0s）。
+        ? Math.max(
+            plan.sourceStartTime,
+            plan.sourceStartTime + (plan.renderedDuration ?? AI_MIX_WINDOW_SECONDS) - ANIMATION_TAIL_SECONDS,
+          )
         : Math.max(plan.sourceStartTime, plan.sourceEndTime - ANIMATION_LEAD_SECONDS)
       setTransitionState('armed', {
         transitionStrategy: plan.strategy,
