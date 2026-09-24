@@ -138,6 +138,7 @@ export function useAudioAnalyzer(
       const getBins = external.getBins
       const updateInterval = 1000 / 30
       let animationFrame = 0
+      let frameTimer: number | null = null
       let lastUpdateTime = 0
       let disposed = false
       const smoothedSpectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
@@ -151,6 +152,23 @@ export function useAudioAnalyzer(
           cancelAnimationFrame(animationFrame)
           animationFrame = 0
         }
+        if (frameTimer !== null) {
+          window.clearTimeout(frameTimer)
+          frameTimer = null
+        }
+      }
+
+      // 以 ~30Hz setTimeout 对齐下一帧：数据本就按 30Hz 节流（观感不变），
+      // 空闲期 rAF 回调从"全刷新率"降到 ~30Hz；无可见/后台消费者或窗口隐藏时停帧。
+      const scheduleNext = () => {
+        if (disposed || animationFrame || frameTimer !== null) return
+        if (!shouldRunAudioAnalyzer(document.visibilityState, store.hasListeners(), store.hasBackgroundConsumers())) return
+        frameTimer = window.setTimeout(() => {
+          frameTimer = null
+          if (disposed || animationFrame) return
+          if (!shouldRunAudioAnalyzer(document.visibilityState, store.hasListeners(), store.hasBackgroundConsumers())) return
+          animationFrame = requestAnimationFrame(analyze)
+        }, 30)
       }
 
       /** 对数 bin（0..1）在 [f0,f1] 频段上的能量：均值+RMS+峰值混合（与本地管线同口径） */
@@ -242,7 +260,7 @@ export function useAudioAnalyzer(
           })
         }
         if (shouldRunAudioAnalyzer(document.visibilityState, store.hasListeners(), store.hasBackgroundConsumers())) {
-          animationFrame = requestAnimationFrame(analyze)
+          scheduleNext()
         }
       }
 
@@ -277,6 +295,7 @@ export function useAudioAnalyzer(
     const rightData = rightAnalyser ? new Uint8Array(rightAnalyser.frequencyBinCount) : null
     const updateInterval = 1000 / 30
     let animationFrame = 0
+    let frameTimer: number | null = null
     let lastUpdateTime = 0
     let disposed = false
 
@@ -286,6 +305,25 @@ export function useAudioAnalyzer(
         cancelAnimationFrame(animationFrame)
         animationFrame = 0
       }
+      if (frameTimer !== null) {
+        window.clearTimeout(frameTimer)
+        frameTimer = null
+      }
+    }
+
+    // 以 ~30Hz 的 setTimeout 对齐下一帧（替代此前"每个显示帧都自续 rAF"）。
+    // 数据处理在 analyze 内本就以 30Hz 节流，观感帧率不变；空闲期 rAF 回调
+    // 从"全刷新率"降到 ~30Hz。窗口隐藏且无后台消费者时不续帧：页面不可见时
+    // 必无可视消费者，恢复可见后数据立即刷新，无观感差异。视觉零变化。
+    const scheduleNext = () => {
+      if (disposed || animationFrame || frameTimer !== null) return
+      if (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) return
+      frameTimer = window.setTimeout(() => {
+        frameTimer = null
+        if (disposed || animationFrame) return
+        if (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) return
+        animationFrame = requestAnimationFrame(analyze)
+      }, 30)
     }
     let bassBaseline = 0
     let overallBaseline = 0
@@ -455,9 +493,11 @@ export function useAudioAnalyzer(
           right: chRight,
         })
       }
-      // 仅在有订阅者且窗口可见时续帧（无消费者 = 无脉冲组件挂载，如桌面模式/首页）
-      if (store.hasListeners() && (document.visibilityState === 'visible' || store.hasBackgroundConsumers())) {
-        animationFrame = requestAnimationFrame(analyze)
+      // 有订阅者或后台消费者才续帧；30Hz 节拍由 scheduleNext 对齐（观感不变，
+      // 只消除空闲期"全刷新率 rAF 空转"。播放/暂停不卡数据：数据更新仍在
+      // analyze 内按 30Hz 处理，此处仅省去未到间隔时的空转回调与空发布）
+      if (store.hasListeners() || store.hasBackgroundConsumers()) {
+        scheduleNext()
       }
     }
 

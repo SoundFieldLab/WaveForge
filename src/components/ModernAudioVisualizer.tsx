@@ -1,4 +1,4 @@
-﻿import { motion } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { useEffect, useMemo, useRef } from 'react'
 import { type AudioPulseStore } from '../hooks/useAudioPulse'
 
@@ -121,8 +121,11 @@ export default function ModernAudioVisualizer({
     }
     const size = { width: 0, height: 0 }
     let animationFrame = 0
+    let resumeTimer: number | null = null
     let lastSample = 0
     let disposed = false
+    // 是否有需要持续绘制的内容：播放中为 true；暂停后条柱衰减归零即为 false（定格末帧）
+    let keepRunning = false
     // 渐变对象只依赖画布宽度与配色（配色在 effect 生命周期内不变），按宽度缓存；避免每帧新建 CanvasGradient 造成持续分配
     let cachedBarGradientWidth = -1
     let cachedBarGradient: CanvasGradient | null = null
@@ -142,13 +145,27 @@ export default function ModernAudioVisualizer({
     resizeObserver.observe(canvas)
     resize()
 
+    // 以 ~30Hz 节拍调度下一帧。昂贵绘制仍严格 30fps（观感与改前一致）：空闲期不再
+    // "每个显示帧都自续 rAF"，而是间以 setTimeout(≈33ms) 对齐绘制周期，把 idle 时的
+    // 全刷新率 rAF 洪流收敛为 ~30Hz。暂停/隐藏时停帧并停在末帧，恢复可见/恢复播放时
+    // 立即补一帧，不会黑屏。仅尺寸变化（ResizeObserver）才重设 canvas 尺寸，非逐帧。
+    const scheduleNext = () => {
+      if (disposed || animationFrame || resumeTimer !== null) return
+      resumeTimer = window.setTimeout(() => {
+        resumeTimer = null
+        if (disposed || document.visibilityState === 'hidden') return
+        animationFrame = requestAnimationFrame(draw)
+      }, 1000 / 30)
+    }
+
     const draw = (now: number) => {
+      animationFrame = 0
       if (disposed) return
       // 窗口隐藏时停帧：Electron backgroundThrottling 关闭后 rAF 在后台仍全速执行，
       // 避免隐藏播放时 30fps canvas 空转（与 useAudioAnalyzer 的可见性门控一致）
       if (document.visibilityState === 'hidden') return
       if (now - lastSample < 1000 / 30) {
-        animationFrame = requestAnimationFrame(draw)
+        scheduleNext()
         return
       }
       lastSample = now
@@ -296,13 +313,24 @@ export default function ModernAudioVisualizer({
       context.fillRect(0, Math.floor(height / 2), width, 1)
       context.globalAlpha = 1
       const hasVisibleMotion = playingRef.current || maximumLevel > 0
-      if (hasVisibleMotion && document.visibilityState === 'visible') animationFrame = requestAnimationFrame(draw)
+      keepRunning = hasVisibleMotion && document.visibilityState === 'visible'
+      // 播放 / 条柱衰减中才继续 30Hz 绘制；暂停且衰减归零、或页面不可见时停帧（停留末帧）
+      if (keepRunning) scheduleNext()
     }
 
     const onVisibilityChange = () => {
-      // 窗口恢复可见时若此前已停帧，则重启循环
-      if (document.visibilityState === 'visible' && !disposed && animationFrame === 0) {
-        animationFrame = requestAnimationFrame(draw)
+      if (disposed) return
+      if (document.visibilityState === 'visible') {
+        // 取消待执行的 30Hz 定时器，恢复可见立即补一帧（末帧画面保留，不黑屏）
+        if (resumeTimer !== null) {
+          window.clearTimeout(resumeTimer)
+          resumeTimer = null
+        }
+        if (animationFrame === 0) animationFrame = requestAnimationFrame(draw)
+      } else if (resumeTimer !== null) {
+        // 隐藏时取消待调度帧，避免后台继续空转
+        window.clearTimeout(resumeTimer)
+        resumeTimer = null
       }
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
@@ -310,6 +338,7 @@ export default function ModernAudioVisualizer({
     return () => {
       disposed = true
       cancelAnimationFrame(animationFrame)
+      if (resumeTimer !== null) window.clearTimeout(resumeTimer)
       document.removeEventListener('visibilitychange', onVisibilityChange)
       resizeObserver.disconnect()
     }

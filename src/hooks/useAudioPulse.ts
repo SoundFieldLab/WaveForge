@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { AudioAnalyzerStore } from './useAudioAnalyzer'
 
 export type AudioPulseMode = 'dynamic' | 'soft' | 'restless'
@@ -116,6 +116,10 @@ export function useAudioPulseStore(
     const update = (now: number) => {
       frame = 0
       if (disposed) return
+      // 窗口隐藏必须停帧（Electron 关闭 backgroundThrottling 后 rAF 后台仍全速）：
+      // 直接返回而不续帧 = 盘停在当前末帧，恢复可见由 handleVisibilityChange→start()
+      // 立即补一帧，无黑屏。播放期频率/效果完全不变，仅省去隐藏期的空转。
+      if (document.visibilityState === 'hidden') return
       // 限 120fps：不更新 previousTime，被跳过的间隔并入下一帧的 delta
       if (now - previousTime < FRAME_MIN_INTERVAL_MS) {
         frame = requestAnimationFrame(update)
