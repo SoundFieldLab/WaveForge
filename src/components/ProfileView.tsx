@@ -585,6 +585,11 @@ function ProfileView({
     revision: 0,
     controller: null,
   })
+  // 竞态守卫用的请求序号：连续打开两个用户主页 / 快速连点两个歌单时，
+  // 慢响应的写入必须被丢弃（否则会显示成「别人的资料 + 上一人的歌单」、
+  // 或把 B 的曲目覆盖成 A 的）。见 fetchUserData / handlePlaylistClick 里的 guard。
+  const userDataSeqRef = useRef(0)
+  const playlistClickSeqRef = useRef(0)
   // 社交（关注/粉丝）状态 —— 仅网易云
   const [socialType, setSocialType] = useState<'follows' | 'followeds' | 'events' | 'messages'>('follows')
   const [socialItems, setSocialItems] = useState<{ userId: string; nickname: string; avatarUrl: string; signature: string; isFollow: boolean }[]>([])
@@ -1118,11 +1123,20 @@ function ProfileView({
 
   // 点击歌单，获取歌单详情并显示面板
   const handlePlaylistClick = async (playlist: any) => {
-    setManagementPlaylist(playlist)
-    setSelectedPlaylist(playlist)
-    setShowPlaylistDetail(true)
-    setLoadingPlaylistSongs(true)
-    setPlaylistSongs([])
+    // 竞态守卫：连点两个歌单（或上一个请求特别慢）时，旧响应不许覆盖新歌单的内容与选中态。
+    const seq = ++playlistClickSeqRef.current
+    const stale = () => playlistClickSeqRef.current !== seq
+    const guard = <T,>(setter: (value: T) => void) => (value: T) => { if (!stale()) setter(value) }
+    const commitManagementPlaylist = guard(setManagementPlaylist)
+    const commitSelectedPlaylist = guard(setSelectedPlaylist)
+    const commitShowPlaylistDetail = guard(setShowPlaylistDetail)
+    const commitPlaylistSongs = guard(setPlaylistSongs)
+    const commitLoadingPlaylistSongs = guard(setLoadingPlaylistSongs)
+    commitManagementPlaylist(playlist)
+    commitSelectedPlaylist(playlist)
+    commitShowPlaylistDetail(true)
+    commitLoadingPlaylistSongs(true)
+    commitPlaylistSongs([])
     
     try {
       let response, data
@@ -1130,15 +1144,15 @@ function ProfileView({
       // Apple：合成集合直接使用已加载歌曲；真实目录/资料库歌单走对应 API。
       if (platform === 'apple') {
         if (playlist.id === APPLE_FAVORITES_ID) {
-          setSelectedPlaylist({ ...playlist, platform: 'apple' })
-          setManagementPlaylist({ ...playlist, platform: 'apple' })
-          setPlaylistSongs(appleFavoriteSongs)
+          commitSelectedPlaylist({ ...playlist, platform: 'apple' })
+          commitManagementPlaylist({ ...playlist, platform: 'apple' })
+          commitPlaylistSongs(appleFavoriteSongs)
           return
         }
         if (playlist.id === APPLE_LIBRARY_ID) {
-          setSelectedPlaylist({ ...playlist, platform: 'apple' })
-          setManagementPlaylist({ ...playlist, platform: 'apple' })
-          setPlaylistSongs(appleLibrarySongs)
+          commitSelectedPlaylist({ ...playlist, platform: 'apple' })
+          commitManagementPlaylist({ ...playlist, platform: 'apple' })
+          commitPlaylistSongs(appleLibrarySongs)
           return
         }
         const storefront = localStorage.getItem('appleStorefront') || 'cn'
@@ -1149,9 +1163,9 @@ function ProfileView({
         const songs = playlistId.startsWith('pl.')
           ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
           : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
-        setSelectedPlaylist({ ...playlist, platform: 'apple' })
-        setManagementPlaylist({ ...playlist, platform: 'apple' })
-        setPlaylistSongs(songs)
+        commitSelectedPlaylist({ ...playlist, platform: 'apple' })
+        commitManagementPlaylist({ ...playlist, platform: 'apple' })
+        commitPlaylistSongs(songs)
         return
       }
       
@@ -1161,9 +1175,9 @@ function ProfileView({
         const tracks = isLiked
           ? await fetchSpotifyLiked(50)
           : await fetchSpotifyPlaylist(String(playlist.id || ''), 50)
-        setSelectedPlaylist({ ...playlist, platform: 'spotify' })
-        setManagementPlaylist({ ...playlist, platform: 'spotify' })
-        setPlaylistSongs(tracks.map(track => spotifyTrackToSong(track)))
+        commitSelectedPlaylist({ ...playlist, platform: 'spotify' })
+        commitManagementPlaylist({ ...playlist, platform: 'spotify' })
+        commitPlaylistSongs(tracks.map(track => spotifyTrackToSong(track)))
         return
       }
 
@@ -1171,9 +1185,9 @@ function ProfileView({
       if (platform === 'soda') {
         const data = await getPlaylistDetail(String(playlist.id || ''), 'soda')
         const detailed = { ...playlist, ...data?.playlist, platform: 'soda', isCollected: playlist.isCollected }
-        setSelectedPlaylist(detailed)
-        setManagementPlaylist(detailed)
-        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        commitSelectedPlaylist(detailed)
+        commitManagementPlaylist(detailed)
+        commitPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
         return
       }
 
@@ -1182,9 +1196,9 @@ function ProfileView({
       if (platform === 'kugou') {
         const data = await getPlaylistDetail(String(playlist.id || ''), 'kugou')
         const detailed = { ...playlist, ...data?.playlist, platform: 'kugou', isCollected: playlist.isCollected }
-        setSelectedPlaylist(detailed)
-        setManagementPlaylist(detailed)
-        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        commitSelectedPlaylist(detailed)
+        commitManagementPlaylist(detailed)
+        commitPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
         return
       }
       
@@ -1194,8 +1208,8 @@ function ProfileView({
         if (!response.ok || data.error) throw new Error(data.error || '读取网易云歌单失败')
         if (data.playlist) {
           const detailedPlaylist = { ...playlist, ...data.playlist, platform: 'netease' }
-          setSelectedPlaylist(detailedPlaylist)
-          setManagementPlaylist(detailedPlaylist)
+          commitSelectedPlaylist(detailedPlaylist)
+          commitManagementPlaylist(detailedPlaylist)
         }
         
         if (data.playlist && data.playlist.tracks) {
@@ -1208,7 +1222,7 @@ function ProfileView({
             platform: 'netease'
           }))
           
-          setPlaylistSongs(songs)
+          commitPlaylistSongs(songs)
         }
       } else if (platform === 'qq') {
         console.log('📤 正在获取QQ音乐歌单详情，ID:', playlist.id)
@@ -1229,8 +1243,8 @@ function ProfileView({
             isCollected: playlist.isCollected,
             platform: 'qq' as const
           }
-          setSelectedPlaylist(detailedPlaylist)
-          setManagementPlaylist(detailedPlaylist)
+          commitSelectedPlaylist(detailedPlaylist)
+          commitManagementPlaylist(detailedPlaylist)
         }
         
         // QQ音乐歌单详情直接返回songlist字段
@@ -1249,7 +1263,7 @@ function ProfileView({
           }))
           
           console.log('✅ 解析到', songs.length, '首歌曲')
-          setPlaylistSongs(songs)
+          commitPlaylistSongs(songs)
         } else if (data.data && data.data.songlist) {
           // 备用：检查是否在data.songlist里
           const songs: Song[] = data.data.songlist.map((track: any) => ({
@@ -1266,7 +1280,7 @@ function ProfileView({
           }))
           
           console.log('✅ 解析到', songs.length, '首歌曲')
-          setPlaylistSongs(songs)
+          commitPlaylistSongs(songs)
         } else {
           console.warn('⚠️ 未找到songlist字段')
         }
@@ -1274,7 +1288,7 @@ function ProfileView({
     } catch (error) {
       console.error('❌ 获取歌单详情失败:', error)
     } finally {
-      setLoadingPlaylistSongs(false)
+      commitLoadingPlaylistSongs(false)
     }
   }
 
@@ -1817,14 +1831,24 @@ function ProfileView({
   }
 
   const fetchUserData = async (targetPlatform?: MusicPlatform) => {
-    setLoading(true)
+    // 竞态守卫：连续打开两个用户主页（或平台切换）时，先发起的慢请求返回后不许再写状态——
+    // 原先会在 await 之后直接 setState，表现为「显示成别人的资料 + 上一人的歌单」，
+    // 并提前把 loading 关掉（界面停在半成品且无任何报错）。
+    const seq = ++userDataSeqRef.current
+    const stale = () => userDataSeqRef.current !== seq
+    const guard = <T,>(setter: (value: T) => void) => (value: T) => { if (!stale()) setter(value) }
+    const commitUserDetail = guard(setUserDetail)
+    const commitCreatedPlaylists = guard(setCreatedPlaylists)
+    const commitSubscribedPlaylists = guard(setSubscribedPlaylists)
+    const commitLoading = guard(setLoading)
+    commitLoading(true)
     const platform = targetPlatform || (viewTarget?.platform || currentPlatform)
     const uid = activeUserId
 
     if (platform === 'apple') {
       // Apple：账号资料 + 资料库歌单 + 音乐库歌曲（amp-api，走 token 登录）
       const state = getAppleAuthState()
-      setUserDetail({
+      commitUserDetail({
         nickname: state.name || 'Apple Music 用户',
         avatarUrl: state.avatarUrl || '',
         userId: '', // Apple 无数字 ID，用户 ID 由 Apple ID 邮箱承担（见下方 email 卡片）
@@ -1847,9 +1871,9 @@ function ProfileView({
         icons: state.icons,
       })
       if (!state.loggedIn) {
-        setCreatedPlaylists([])
-        setSubscribedPlaylists([])
-        setLoading(false)
+        commitCreatedPlaylists([])
+        commitSubscribedPlaylists([])
+        commitLoading(false)
         return
       }
       const [playlistsRes, libraryRes, favoritesRes] = await Promise.allSettled([
@@ -1869,13 +1893,13 @@ function ProfileView({
           platform: 'apple' as const,
           isLike: false,
         }))
-        setCreatedPlaylists(mappedPlaylists)
+        commitCreatedPlaylists(mappedPlaylists)
       }
       if (favoritesRes.status === 'fulfilled') {
         const favoriteSongs = favoritesRes.value.map(track => appleSongToSong(track))
-        setAppleFavoriteSongs(favoriteSongs)
+        if (!stale()) setAppleFavoriteSongs(favoriteSongs)
         if (favoriteSongs.length > 0) {
-          setCreatedPlaylists(previous => [{
+          commitCreatedPlaylists(previous => [{
             id: APPLE_FAVORITES_ID,
             name: `${getAppleAuthState().name || 'Apple Music 用户'} 的喜爱歌曲`,
             coverImgUrl: favoriteSongs[0]?.album.picUrl || '',
@@ -1888,10 +1912,10 @@ function ProfileView({
       }
       if (libraryRes.status === 'fulfilled') {
         const librarySongs = libraryRes.value.map(track => appleLibraryTrackToSong(track))
-        setAppleLibrarySongs(librarySongs)
+        if (!stale()) setAppleLibrarySongs(librarySongs)
         // 「我的音乐库」= 全部收藏歌曲，以伪歌单置于歌单列表顶部（非喜爱，不打爱心）
         if (librarySongs.length > 0) {
-          setCreatedPlaylists(previous => [
+          commitCreatedPlaylists(previous => [
             {
               id: APPLE_LIBRARY_ID,
               name: '我的音乐库',
@@ -1904,8 +1928,8 @@ function ProfileView({
           ])
         }
       }
-      setSubscribedPlaylists([])
-      setLoading(false)
+      commitSubscribedPlaylists([])
+      commitLoading(false)
       return
     }
 
@@ -1927,8 +1951,8 @@ function ProfileView({
           }))
           const created = playlists.filter((playlist) => playlist.userId?.toString() === uid.toString())
           const subscribed = playlists.filter((playlist) => playlist.userId?.toString() !== uid.toString())
-          setCreatedPlaylists(created)
-          setSubscribedPlaylists(subscribed)
+          commitCreatedPlaylists(created)
+          commitSubscribedPlaylists(subscribed)
         }
 
         // 获取用户详情
@@ -1936,7 +1960,7 @@ function ProfileView({
         const detailData = await detailRes.json()
         
         if (detailData.profile) {
-          setUserDetail({
+          commitUserDetail({
             nickname: detailData.profile.nickname,
             avatarUrl: detailData.profile.avatarUrl,
             userId: detailData.profile.userId?.toString(),
@@ -1964,15 +1988,15 @@ function ProfileView({
     } else if (platform === 'qq') {
       // 查看他人（QQ）：EncUin 打码无法查歌单/详情，使用列表传入的资料
       if (viewTarget) {
-        setUserDetail({
+        commitUserDetail({
           nickname: viewTarget.nickname || '未知用户',
           avatarUrl: viewTarget.avatarUrl || '',
           userId: viewTarget.userId,
           signature: viewTarget.signature || '',
         })
-        setCreatedPlaylists([])
-        setSubscribedPlaylists([])
-        setLoading(false)
+        commitCreatedPlaylists([])
+        commitSubscribedPlaylists([])
+        commitLoading(false)
         return
       }
       try {
@@ -1990,14 +2014,14 @@ function ProfileView({
         // user/collect/songlist 单独读取，再按 isCollected 分栏。
         const qqDisplayName = getQQUserDisplayName(detailData, userId)
         const playlists = await getUserPlaylists('qq', userId, qqDisplayName)
-        setCreatedPlaylists(playlists.filter((playlist: Playlist) => !playlist.isCollected))
-        setSubscribedPlaylists(playlists.filter((playlist: Playlist) => Boolean(playlist.isCollected)))
+        commitCreatedPlaylists(playlists.filter((playlist: Playlist) => !playlist.isCollected))
+        commitSubscribedPlaylists(playlists.filter((playlist: Playlist) => Boolean(playlist.isCollected)))
         
         if (detailData.creator) {
           // 设置用户详情
           const isVip = detectQQMusicVip(detailData)
           
-          setUserDetail({
+          commitUserDetail({
             nickname: qqDisplayName,
             avatarUrl: detailData.creator.headpic || detailData.creator.avatarUrl || '',
             userId: userId,
@@ -2017,7 +2041,7 @@ function ProfileView({
         }
       } catch (error) {
         console.error('❌ 获取QQ音乐用户数据失败:', error)
-        setUserDetail({
+        commitUserDetail({
           nickname: 'QQ音乐用户',
           avatarUrl: '',
           userId: userId
@@ -2028,15 +2052,15 @@ function ProfileView({
       const username = localStorage.getItem('spotify_username') || ''
       const avatar = localStorage.getItem('spotify_avatar') || ''
       const spotifyUid = localStorage.getItem('spotify_user_id') || ''
-      setUserDetail({
+      commitUserDetail({
         nickname: username || 'Spotify 用户',
         avatarUrl: avatar || '',
         userId: spotifyUid,
       })
       if (!getPlatformCookie('spotify')) {
-        setCreatedPlaylists([])
-        setSubscribedPlaylists([])
-        setLoading(false)
+        commitCreatedPlaylists([])
+        commitSubscribedPlaylists([])
+        commitLoading(false)
         return
       }
       const playlists: Playlist[] = []
@@ -2070,14 +2094,14 @@ function ProfileView({
       } catch (error) {
         console.error('获取 Spotify 用户数据失败:', error)
       }
-      setCreatedPlaylists(playlists)
-      setSubscribedPlaylists([])
+      commitCreatedPlaylists(playlists)
+      commitSubscribedPlaylists([])
     } else if (platform === 'kugou') {
       // 酷狗：本地登录态资料 + 用户歌单（经代理读取）
       const username = localStorage.getItem('kugou_username') || ''
       const avatar = localStorage.getItem('kugou_avatar') || ''
       const kugouUid = localStorage.getItem('kugou_user_id') || ''
-      setUserDetail({
+      commitUserDetail({
         nickname: username || '酷狗音乐用户',
         avatarUrl: avatar || '',
         userId: kugouUid,
@@ -2099,14 +2123,14 @@ function ProfileView({
       } catch (error) {
         console.error('获取酷狗用户歌单失败:', error)
       }
-      setCreatedPlaylists(playlists)
-      setSubscribedPlaylists([])
+      commitCreatedPlaylists(playlists)
+      commitSubscribedPlaylists([])
     } else if (platform === 'soda') {
       // 汽水：本地登录态资料（登录时已落盘）；歌单经 /api/soda/user/playlists 读取
       const username = localStorage.getItem('soda_username') || ''
       const avatar = localStorage.getItem('soda_avatar') || ''
       const sodaUid = localStorage.getItem('soda_user_id') || ''
-      setUserDetail({
+      commitUserDetail({
         nickname: username || '汽水音乐用户',
         avatarUrl: avatar || '',
         userId: sodaUid,
@@ -2122,8 +2146,8 @@ function ProfileView({
         const loggedIn = isSodaLoggedIn()
         setSodaLoggedIn(loggedIn)
         if (!loggedIn) {
-          setCreatedPlaylists([])
-          setSubscribedPlaylists([])
+          commitCreatedPlaylists([])
+          commitSubscribedPlaylists([])
         } else {
           const list = await fetchSodaUserPlaylists()
           for (const item of list) {
@@ -2146,17 +2170,17 @@ function ProfileView({
               })
             }
           }
-          setCreatedPlaylists(createdPlaylists)
-          setSubscribedPlaylists(subscribedPlaylists)
+          commitCreatedPlaylists(createdPlaylists)
+          commitSubscribedPlaylists(subscribedPlaylists)
         }
       } catch (error) {
         console.error('获取汽水用户歌单失败:', error)
-        setCreatedPlaylists([])
-        setSubscribedPlaylists([])
+        commitCreatedPlaylists([])
+        commitSubscribedPlaylists([])
       }
     }
 
-    setLoading(false)
+    commitLoading(false)
   }
 
   // ===== 稳定回调（供列表行 memo 比较，latest-ref 模式）=====
