@@ -302,7 +302,31 @@ const toAppleApiPath = (next: unknown): string | null => {
   }
 }
 
+/**
+ * 资料库整体读取（歌单 / 歌曲 / MV / 专辑 / 艺人，单次数百到 5000 首）会被多个视图重复拉取
+ * ——传统模式的侧栏、打开歌单、刷新各拉一次。这里按「strict|limit|path」做 5 秒 TTL 缓存，
+ * 兜住同一轮操作里的重复调用；**任何写操作（appleMeMutate）都会立即清空缓存**，
+ * 所以不会出现「编辑完还看到旧列表」；TTL 短到即使漏掉某条写入路径，最长也只影响 5 秒。
+ */
+const APPLE_LIBRARY_CACHE_TTL_MS = 5000
+// 只缓存「大 limit」的整库读取（5000 首级别）——那才是唯一值得去重的成本。
+// 小/中 limit 的读路径（包括「喜爱歌曲」要做的歌单查找）必须保持实时：
+// 它们可能在一次操作里被重复调用而数据已被外部改变，缓存会导致读到过期列表
+//（test/appleFavoriteSongsRead 与 appleCatalogMutations 就是这么暴露出来的）。
+const APPLE_LIBRARY_CACHE_MIN_LIMIT = 3000
+const appleLibraryCache = new Map<string, { at: number; value: { items: any[]; included: any[] } }>()
+
 async function fetchAppleMePages(path: string, requestedLimit: number, strict = false): Promise<{ items: any[]; included: any[] }> {
+  if (requestedLimit < APPLE_LIBRARY_CACHE_MIN_LIMIT) return fetchAppleMePagesUncached(path, requestedLimit, strict)
+  const cacheKey = `${strict ? '1' : '0'}|${requestedLimit}|${path}`
+  const cached = appleLibraryCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < APPLE_LIBRARY_CACHE_TTL_MS) return cached.value
+  const value = await fetchAppleMePagesUncached(path, requestedLimit, strict)
+  appleLibraryCache.set(cacheKey, { at: Date.now(), value })
+  return value
+}
+
+async function fetchAppleMePagesUncached(path: string, requestedLimit: number, strict = false): Promise<{ items: any[]; included: any[] }> {
   const target = Math.max(1, requestedLimit)
   const items: any[] = []
   const included: any[] = []
@@ -1129,6 +1153,8 @@ const appleMeMutateResult = async (path: string, method: AppleMutationMethod, bo
 
 const appleMeMutate = async (path: string, method: AppleMutationMethod, body?: unknown): Promise<boolean> => {
   lastAppleMutationResult = await appleMeMutateResult(path, method, body)
+  // 写操作后立即失效资料库读取缓存：否则刚增删/改名的歌单在 5 秒内仍会显示旧数据
+  appleLibraryCache.clear()
   return lastAppleMutationResult.ok
 }
 
