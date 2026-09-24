@@ -23,7 +23,7 @@ import {
 import { getWeatherLabel, getWeatherLocationAddress, getWeatherLocationName, getAqiDescriptor, getAqiLabel, getCloudCoverLabel, getDewPointLabel, WeatherSnapshot, type WeatherHour } from '../services/weatherService'
 import { moonInfoAt } from '../services/moonPhase'
 import type { HazardSnapshot } from '../services/hazardService'
-import WeatherHazardsPanel, { type WeatherHazardTab } from './WeatherHazardsPanel'
+import WeatherHazardsPanel from './WeatherHazardsPanel'
 import WeatherMapExperience from './WeatherMapExperience'
 import MoonPhaseExperience, { MoonDisc } from './MoonPhaseExperience'
 import WeatherCardDetailOverlay, { type WeatherCardKind } from './WeatherCardDetail'
@@ -32,6 +32,7 @@ import { IconSunrise, IconSunset } from './AppleWeatherIcon'
 import { WeatherGlyph, getWeatherVisualTheme, WeatherAtmosphere, WeatherRainGlass, isRainySceneKind, getUvLabel, getWindDirection, WindCompass, WeatherSkyTip, type WeatherDetailsTab } from './weatherVisualTheme'
 import { computeSkyBodies } from '../services/moonPhase'
 import { createAppleWeatherSceneModel } from './weatherScene/weatherSceneModel'
+import { formatDateInTimezone } from '../services/weatherTime'
 import HourlyForecastRainGlass from './weatherScene/HourlyForecastRainGlass'
 import WeatherDayDetail from './WeatherDayDetail'
 
@@ -408,7 +409,7 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                     <div className="mt-1 text-[22px] font-medium">{getWeatherLabel(weather.current.weatherCode)}</div>
                     <div className="mt-2 flex items-center gap-1.5 text-xs text-white/45">
                       <Clock3 className="h-3.5 w-3.5" />
-                      {loading ? '正在更新天气…' : `更新于 ${new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(weather.updatedAt)}`}
+                      {loading ? '正在更新天气…' : `更新于 ${formatDateInTimezone(new Date(weather.updatedAt), weather.timezone, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })}`}
                     </div>
                     <div className="mt-5">{tabBar}</div>
                   </div>

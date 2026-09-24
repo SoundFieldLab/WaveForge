@@ -536,7 +536,9 @@ export const getCachedWeather = (settings: DesktopCustomizationSettings, allowSt
     const raw = localStorage.getItem(getWeatherCacheKey(settings))
     if (!raw) return null
     const snapshot = JSON.parse(raw) as WeatherSnapshot
-    if (!allowStale && Date.now() - snapshot.updatedAt > WEATHER_CACHE_MAX_AGE) return null
+    const updatedAt = Number(snapshot.updatedAt)
+    if (!Number.isFinite(updatedAt)) return null
+    if (!allowStale && Date.now() - updatedAt > WEATHER_CACHE_MAX_AGE) return null
     const location = normalizeLocationParts(snapshot.location as Partial<WeatherLocation>) as WeatherLocation
     if (settings.weatherLocationMode === 'auto' && location.name === '当前位置' && !location.province && !location.city && !location.district) return null
     return { ...snapshot, location }
