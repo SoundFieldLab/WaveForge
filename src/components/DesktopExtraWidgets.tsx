@@ -36,6 +36,42 @@ import {
   useDesktopExploreHome,
 } from './DesktopExploreWidgets'
 import CachedImage from './CachedImage'
+import { createTtlCache } from '../utils/ttlCache'
+
+/**
+ * 桌面小组件的短 TTL 结果缓存（仅内存，不落盘）。
+ * 「喜爱歌曲」与「每日推荐」之前每次重挂载都会先清空再请求：这里按平台/账号键存一份结果，
+ * 重进时先铺上、请求照常后台校准。账号相关数据在 waveforge-auth-changed 时清空。
+ */
+const DESKTOP_RECOMMENDATION_CACHE_MAX = 6
+const desktopRecommendationCache = new Map<string, { songs: Song[]; batch: number }>()
+const desktopFavoriteSongsCache = createTtlCache<Song[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 8 })
+const desktopFavoriteSongsPending = new Map<string, Promise<Song[]>>()
+
+function loadCachedFavoriteSongs(key: string, loader: () => Promise<Song[]>): Promise<Song[]> {
+  const cached = desktopFavoriteSongsCache.get(key)
+  if (cached) return Promise.resolve(cached)
+  const pending = desktopFavoriteSongsPending.get(key)
+  if (pending) return pending
+  // 同一个 key 的并发请求合并成一次：playlists 数组换引用会重跑 effect，不该重发请求。
+  const request = loader().then(songs => {
+    // 空结果（未登录/接口异常）不入缓存
+    if (songs.length > 0) desktopFavoriteSongsCache.set(key, songs)
+    return songs
+  }).finally(() => {
+    if (desktopFavoriteSongsPending.get(key) === request) desktopFavoriteSongsPending.delete(key)
+  })
+  desktopFavoriteSongsPending.set(key, request)
+  return request
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    desktopRecommendationCache.clear()
+    desktopFavoriteSongsCache.clear()
+    desktopFavoriteSongsPending.clear()
+  })
+}
 
 export interface DesktopWidgetPlaylist {
   id: string | number
@@ -244,9 +280,9 @@ function useActivity(kind: DesktopWidgetType, platform: MusicPlatform) {
   return activity
 }
 function useRecommendations(platform: MusicPlatform, enabled: boolean) {
-  const [songs, setSongs] = useState<Song[]>([])
+  const [songs, setSongs] = useState<Song[]>(() => desktopRecommendationCache.get(platform)?.songs ?? [])
   const [loading, setLoading] = useState(false)
-  const [batch, setBatch] = useState(1)
+  const [batch, setBatch] = useState(() => desktopRecommendationCache.get(platform)?.batch ?? 1)
   const generationRef = useRef(0)
   const requestInFlight = useRef(false)
   const controllerRef = useRef<AbortController | null>(null)
@@ -262,10 +298,18 @@ function useRecommendations(platform: MusicPlatform, enabled: boolean) {
       if (next) {
         const nextBatch = batch + 1
         const nextSongs = await fetchExploreRecommendationBatch(platform, nextBatch, songs.map(getDesktopSongKey), controller.signal)
-        if (!controller.signal.aborted && generation === generationRef.current) { setSongs(nextSongs); setBatch(nextBatch) }
+        if (!controller.signal.aborted && generation === generationRef.current) {
+          if (nextSongs.length > 0) desktopRecommendationCache.set(platform, { songs: nextSongs, batch: nextBatch })
+          setSongs(nextSongs)
+          setBatch(nextBatch)
+        }
       } else {
         const home = await fetchExploreHome(platform, controller.signal)
-        if (!controller.signal.aborted && generation === generationRef.current) setSongs(home.dailySongs.length ? home.dailySongs : home.radioSongs.length ? home.radioSongs : home.newSongs)
+        if (!controller.signal.aborted && generation === generationRef.current) {
+          const picked = home.dailySongs.length ? home.dailySongs : home.radioSongs.length ? home.radioSongs : home.newSongs
+          if (picked.length > 0) desktopRecommendationCache.set(platform, { songs: picked, batch: 1 })
+          setSongs(picked)
+        }
       }
     } catch (error) {
       if ((error as Error).name !== 'AbortError') console.warn('[DesktopWidgets] 推荐加载失败', error)
@@ -279,8 +323,10 @@ function useRecommendations(platform: MusicPlatform, enabled: boolean) {
     generationRef.current += 1
     controllerRef.current?.abort()
     requestInFlight.current = false
-    setSongs([])
-    setBatch(1)
+    // 同一平台已有结果就保留（不再清空后重拉），平台变了才回落到空。
+    const cached = desktopRecommendationCache.get(platform)
+    setSongs(cached?.songs ?? [])
+    setBatch(cached?.batch ?? 1)
     if (!enabled) return
     void refresh(false)
     return () => controllerRef.current?.abort()
@@ -297,12 +343,14 @@ function Heatmap({ days, weeks, accentColor }: { days: Record<string, { listened
   return <div className="grid grid-flow-col grid-rows-7 gap-1.5">{cells.map(cell => { const strength = Math.min(1, cell.seconds / 7200); return <div key={cell.key} title={`${cell.key} · ${formatMinutes(cell.seconds)}`} className="aspect-square rounded-[4px] border border-white/5" style={{ background: cell.seconds ? `${accentColor}${Math.round(45 + strength * 190).toString(16).padStart(2, '0')}` : 'rgba(255,255,255,.045)' }} /> })}</div>
 }
 
-function Spectrum({ accentColor, style, large = false }: { accentColor: string; style: 'bars' | 'wave'; large?: boolean }) {
+function Spectrum({ accentColor, style, large = false, suspended = false }: { accentColor: string; style: 'bars' | 'wave'; large?: boolean; suspended?: boolean }) {
   const [values, setValues] = useState<number[]>([.05, .08, .06, .1, .05])
   const pendingValuesRef = useRef<number[] | null>(null)
   const frameRef = useRef<number | null>(null)
 
   useEffect(() => {
+    // 桌面视图被别的模式隐藏时不要订阅频谱：每帧都会推数据 + 重渲染一次，看不见纯浪费。
+    if (suspended) return
     const unregister = registerDesktopSpectrumConsumer()
     const update = (event: Event) => {
       pendingValuesRef.current = (event as CustomEvent<number[]>).detail
@@ -319,7 +367,7 @@ function Spectrum({ accentColor, style, large = false }: { accentColor: string; 
       window.removeEventListener('desktopSpectrumChanged', update)
       if (frameRef.current !== null) window.cancelAnimationFrame(frameRef.current)
     }
-  }, [])
+  }, [suspended])
 
   const expanded = useMemo(() => {
     const targetCount = large ? 44 : 18
@@ -390,7 +438,7 @@ function LyricExcerpt({ context, accentColor }: { context: DesktopMusicWidgetCon
   </button>
 }
 
-function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context, onOverlayOpenChange }: { type: DesktopWidgetType; cardBlurAmount: number; accentColor: string; context: DesktopMusicWidgetContext; onOverlayOpenChange?: (open: boolean) => void }) {
+function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context, onOverlayOpenChange, suspended = false }: { type: DesktopWidgetType; cardBlurAmount: number; accentColor: string; context: DesktopMusicWidgetContext; onOverlayOpenChange?: (open: boolean) => void; suspended?: boolean }) {
   const [open, setOpen] = useState(false)
   const { preferences, update } = usePreferences()
   const activity = useActivity(type, context.platform)
@@ -403,6 +451,8 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
   const chartDetail = useDesktopChartDetail()
   const [favoriteSongs, setFavoriteSongs] = useState<Song[]>([])
   const [favoritesLoading, setFavoritesLoading] = useState(false)
+  // 上一次请求的「喜爱歌曲」归属键，用来区分「同一条列表重挂载」与「换平台/换账号」。
+  const favoriteSongsKeyRef = useRef('')
   const [system, setSystem] = useState<SystemSnapshot | null>(null)
   const [artistFeed, setArtistFeed] = useState<Song[]>([])
   const [launcherDraft, setLauncherDraft] = useState({ label: '', target: '', kind: 'app' as LauncherItem['kind'] })
@@ -420,23 +470,34 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
 
   useEffect(() => {
     if (type !== 'favoriteSongs') return
+    const liked = context.playlists.find(playlist => playlist.isLike)
+    // 键跟着「喜爱歌曲」这条列表本身走：platform + 该列表 id（Apple 无 id，用固定键）。
+    const ownerKey = context.platform === 'apple' ? 'apple:favorites' : `${context.platform}:${liked ? String(liked.id) : 'unknown'}`
+    const ownerChanged = favoriteSongsKeyRef.current !== ownerKey
+    favoriteSongsKeyRef.current = ownerKey
+    const cachedSongs = desktopFavoriteSongsCache.get(ownerKey)
+    if (cachedSongs) {
+      setFavoriteSongs(cachedSongs)
+      setFavoritesLoading(false)
+    } else {
+      // 换平台/账号时先清空，别让上一个来源的喜爱歌曲留在卡片上；同键重挂载则保持现状。
+      if (ownerChanged) setFavoriteSongs([])
+      setFavoritesLoading(true)
+    }
     let active = true
-    setFavoritesLoading(true)
-    const request: Promise<Song[]> = context.platform === 'apple'
-      ? getAppleFavoriteSongs(5000).then(tracks => tracks.map(track => appleSongToSong(track)))
-      : (() => {
-        const liked = context.playlists.find(playlist => playlist.isLike)
-        if (!liked) return Promise.resolve([])
-        return context.platform === 'netease'
-          ? getNeteasePlaylistTrackPage(liked.id, 0, 120).then(page => normalizePlaylistSongs({ playlist: { tracks: page.tracks } }, context.platform))
-          : getPlaylistDetail(String(liked.id), context.platform).then(data => normalizePlaylistSongs(data, context.platform))
-      })()
-    request.then(songs => { if (active) setFavoriteSongs(songs) }).catch(() => { if (active) setFavoriteSongs([]) }).finally(() => { if (active) setFavoritesLoading(false) })
+    const request: Promise<Song[]> = loadCachedFavoriteSongs(ownerKey, () =>
+      context.platform === 'apple'
+        ? getAppleFavoriteSongs(5000).then(tracks => tracks.map(track => appleSongToSong(track)))
+        : context.platform === 'netease'
+          ? (liked ? getNeteasePlaylistTrackPage(liked.id, 0, 120).then(page => normalizePlaylistSongs({ playlist: { tracks: page.tracks } }, context.platform)) : Promise.resolve([]))
+          : (liked ? getPlaylistDetail(String(liked.id), context.platform).then(data => normalizePlaylistSongs(data, context.platform)) : Promise.resolve([])))
+    request.then(songs => { if (active) setFavoriteSongs(songs) }).catch(() => { if (active && !cachedSongs) setFavoriteSongs([]) }).finally(() => { if (active) setFavoritesLoading(false) })
     return () => { active = false }
   }, [context.platform, context.playlists, type])
 
   useEffect(() => {
-    if (type !== 'systemStatus') return
+    // 被别的模式隐藏时停掉系统状态轮询（默认每 3s 一次 IPC）：人在别的模式里看不到。
+    if (type !== 'systemStatus' || suspended) return
     let timer: number | null = null
     let disposed = false
     const intervalMs = Math.max(1, preferences.systemRefreshSeconds) * 1000
@@ -467,7 +528,7 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
       if (timer !== null) window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [preferences.systemRefreshSeconds, type])
+  }, [preferences.systemRefreshSeconds, type, suspended])
 
   const upcoming = context.queue.slice(Math.max(0, context.currentIndex), Math.max(0, context.currentIndex) + count)
   const recent = activity.history.slice(0, count)
@@ -560,8 +621,8 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
     details = <><div className="mb-4 rounded-2xl border border-white/8 bg-white/[.035] p-4 text-xs leading-5 text-white/42">优先展示近期常听歌手的新歌；平台暂未返回匹配结果时，以最新发行补充。</div><SongList songs={artistFeed} onPlay={song => play(song, artistFeed)} /><div className="mt-5 text-sm font-medium">常听歌手</div><div className="mt-2 grid grid-cols-2 gap-2">{topArtists.slice(0, 12).map(artist => <button key={`${artist.platform}:${artist.id || artist.name}`} type="button" disabled={!artist.id} onClick={() => artist.id && context.onOpenArtist?.(String(artist.id), artist.platform)} className="flex items-center gap-2 rounded-2xl border border-white/8 bg-white/[.035] p-3 text-left disabled:opacity-50"><Radio className="h-4 w-4" style={{ color: accentColor }} /><span className="truncate text-xs">{artist.name}</span></button>)}</div></>
     settings = <SettingCount value={count} onChange={setCount} />
   } else if (type === 'spectrum') {
-    card = <><Header type={type} accentColor={accentColor} trailing={<span className="text-[10px] text-white/35">{context.isPlaying ? 'LIVE' : 'PAUSED'}</span>} /><Spectrum accentColor={accentColor} style={preferences.spectrumStyle} /></>
-    details = <div className="flex h-full flex-col justify-center rounded-3xl border border-white/8 bg-black/20 p-5"><Spectrum large accentColor={accentColor} style={preferences.spectrumStyle} /><div className="mt-5 text-center"><div className="text-lg font-medium">{context.currentSong?.name || '等待播放'}</div><div className="mt-1 text-xs text-white/38">{context.currentSong ? artistsText(context.currentSong) : '播放歌曲后显示实时频谱'}</div></div></div>
+    card = <><Header type={type} accentColor={accentColor} trailing={<span className="text-[10px] text-white/35">{context.isPlaying ? 'LIVE' : 'PAUSED'}</span>} /><Spectrum accentColor={accentColor} style={preferences.spectrumStyle} suspended={suspended} /></>
+    details = <div className="flex h-full flex-col justify-center rounded-3xl border border-white/8 bg-black/20 p-5"><Spectrum large accentColor={accentColor} style={preferences.spectrumStyle} suspended={suspended} /><div className="mt-5 text-center"><div className="text-lg font-medium">{context.currentSong?.name || '等待播放'}</div><div className="mt-1 text-xs text-white/38">{context.currentSong ? artistsText(context.currentSong) : '播放歌曲后显示实时频谱'}</div></div></div>
     settings = <SelectSetting label="频谱样式" value={preferences.spectrumStyle} onChange={value => update({ spectrumStyle: value as 'bars' | 'wave' })} options={[['bars','能量柱'],['wave','细波形']]} />
   } else if (type === 'quickLauncher') {
     card = <><Header type={type} accentColor={accentColor} /><div className="mt-3 grid grid-cols-4 gap-2">{preferences.launcherItems.slice(0, 4).map(item => <button key={item.id} type="button" onClick={event => { event.stopPropagation(); launch(item) }} title={item.label} className="flex aspect-square items-center justify-center rounded-2xl bg-white/[.06] text-white/70 hover:bg-white/12">{item.kind === 'url' ? <ExternalLink className="h-5 w-5" /> : item.kind === 'folder' ? <FolderOpen className="h-5 w-5" /> : <AppWindow className="h-5 w-5" />}</button>)}{!preferences.launcherItems.length && <button type="button" onClick={event => { event.stopPropagation(); openModal() }} className="flex aspect-square items-center justify-center rounded-2xl border border-dashed border-white/15 text-white/35"><Plus className="h-5 w-5" /></button>}</div></>
@@ -581,10 +642,10 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
   return <><Shell cardBlurAmount={cardBlurAmount} accentColor={accentColor} onClick={openModal}><div className="p-4">{card}</div></Shell><Modal open={open} type={type} accentColor={accentColor} onClose={closeModal} settings={settings}>{details}</Modal></>
 }
 
-export default function DesktopExtraWidget({ type, cardBlurAmount, accentColor, context, onOverlayOpenChange }: { type: DesktopWidgetType; cardBlurAmount: number; accentColor: string; context: DesktopMusicWidgetContext; onOverlayOpenChange?: (open: boolean) => void }) {
+export default function DesktopExtraWidget({ type, cardBlurAmount, accentColor, context, onOverlayOpenChange, suspended = false }: { type: DesktopWidgetType; cardBlurAmount: number; accentColor: string; context: DesktopMusicWidgetContext; onOverlayOpenChange?: (open: boolean) => void; suspended?: boolean }) {
   if (type === 'playbackProgress') return <PlaybackProgress context={context} accentColor={accentColor} />
   if (type === 'lyricExcerpt') return <LyricExcerpt context={context} accentColor={accentColor} />
-  return <DesktopExtraWidgetContent type={type} cardBlurAmount={cardBlurAmount} accentColor={accentColor} context={context} onOverlayOpenChange={onOverlayOpenChange} />
+  return <DesktopExtraWidgetContent type={type} cardBlurAmount={cardBlurAmount} accentColor={accentColor} context={context} onOverlayOpenChange={onOverlayOpenChange} suspended={suspended} />
 }
 
 function Empty({ text }: { text: string }) { return <div className="py-5 text-center text-xs text-white/30">{text}</div> }

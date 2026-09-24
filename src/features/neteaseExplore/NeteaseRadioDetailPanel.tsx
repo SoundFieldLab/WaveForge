@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Clock, Disc3, Headphones, Loader2, MessageSquareText, Play, Radio, Share2, UserRound, X } from 'lucide-react'
 import CachedImage from '../../components/CachedImage'
-import { getNeteaseProgramDetail, getNeteaseRadioDetail } from '../../services/musicApi'
+import { fetchNeteaseProgramDetail, fetchNeteaseRadioDetail } from './api'
 
 // src/features/neteaseExplore/NeteaseRadioDetailPanel.tsx
 // 电台 / 播客节目的二级详情页。
@@ -54,19 +54,24 @@ export default function NeteaseRadioDetailPanel({ target, onClose, onPlay, onOpe
   const [data, setData] = useState<any | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // 面板现在保持挂载（冻结）：同一 kind:id 已经有数据时直接复用，不再重新请求。
+  // 只在成功时记录 key，失败保留重试路径。
+  const loadedKeyRef = useRef('')
 
   useEffect(() => {
+    const key = `${target.kind}:${target.id}`
+    if (loadedKeyRef.current === key) return
     let cancelled = false
     setLoading(true)
     setError('')
     setData(null)
     const task = target.kind === 'radio'
-      ? getNeteaseRadioDetail(target.id)
-      : getNeteaseProgramDetail(target.id)
+      ? fetchNeteaseRadioDetail(target.id)
+      : fetchNeteaseProgramDetail(target.id)
     void task.then(result => {
       if (cancelled) return
       if (!result) setError(target.kind === 'radio' ? '电台详情加载失败' : '节目详情加载失败')
-      else setData(result)
+      else { loadedKeyRef.current = key; setData(result) }
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [target.kind, target.id])

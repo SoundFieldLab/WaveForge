@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowLeft, Loader2, Radio } from 'lucide-react'
 import type { NeteaseNativeBlock, NeteaseNativeResource } from './model'
 import { NeteaseNativeBlockView, type ResourceCallbacks } from './NeteaseResourceView'
@@ -6,7 +6,6 @@ import {
   fetchNeteaseMyPodcasts,
   fetchNeteasePodcastCategories,
   fetchNeteasePodcastCategoryRadios,
-  normalizeNeteaseRadioResources,
   type NeteasePodcastCategory,
 } from './discover'
 
@@ -37,22 +36,26 @@ export default function NeteasePodcastPages({ view, accountUserId, callbacks, on
   const [radios, setRadios] = useState<NeteaseNativeResource[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  // 同一视图已经加载过就直接复用（页面重新挂载/来回进入时不重拉）；失败时保留重试路径。
+  const loadedKeyRef = useRef('')
 
   const load = useCallback(async (signal: AbortSignal) => {
+    const key = view.kind === 'category' ? `category:${view.id}` : view.kind === 'mine' ? `mine:${accountUserId || ''}` : 'categories'
+    if (loadedKeyRef.current === key) { setLoading(false); setError(''); return }
     setLoading(true)
     setError('')
     try {
       if (view.kind === 'categories') {
         const list = await fetchNeteasePodcastCategories(signal)
-        if (!signal.aborted) setCategories(list)
+        if (!signal.aborted) { setCategories(list); if (list.length > 0) loadedKeyRef.current = key }
       } else if (view.kind === 'category') {
-        const payload = await fetchNeteasePodcastCategoryRadios(view.id, 0, 18, signal)
-        if (!signal.aborted) setRadios(normalizeNeteaseRadioResources(payload))
+        const list = await fetchNeteasePodcastCategoryRadios(view.id, 0, 18, signal)
+        if (!signal.aborted) { setRadios(list); if (list.length > 0) loadedKeyRef.current = key }
       } else {
         if (!accountUserId) { setError('登录后可查看我的播客'); setRadios([]); }
         else {
-          const payload = await fetchNeteaseMyPodcasts(accountUserId, 0, 30, signal)
-          if (!signal.aborted) setRadios(normalizeNeteaseRadioResources(payload))
+          const list = await fetchNeteaseMyPodcasts(accountUserId, 0, 30, signal)
+          if (!signal.aborted) { setRadios(list); if (list.length > 0) loadedKeyRef.current = key }
         }
       }
     } catch (err) {

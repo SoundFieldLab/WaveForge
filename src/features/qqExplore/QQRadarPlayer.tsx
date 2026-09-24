@@ -15,6 +15,8 @@ type QQRadarPlayerProps = {
   initialIndex?: number
   continuation: QQRadarContinuation
   playing: boolean
+  /** 被父级隐藏（冻结）时为 true：停止自动补批等后台动作 */
+  suspended?: boolean
   onClose: () => void
   onPlaySong: (song: Song, songs: Song[], continuation: QQRadarContinuation) => void
   onRequestMore: (continuation: QQRadarContinuation) => Promise<{ songs: Song[]; page: number; hasMore?: boolean }>
@@ -27,7 +29,7 @@ function songKey(song: Song) {
   return String(song.mid || song.id || `${song.name}:${song.artists.map(artist => artist.name).join('/')}`)
 }
 
-export default function QQRadarPlayer({ songs: initialSongs, initialIndex = 0, continuation: initialContinuation, playing, onClose, onPlaySong, onRequestMore, onTogglePlay }: QQRadarPlayerProps) {
+export default function QQRadarPlayer({ songs: initialSongs, initialIndex = 0, continuation: initialContinuation, playing, suspended = false, onClose, onPlaySong, onRequestMore, onTogglePlay }: QQRadarPlayerProps) {
   const [songs, setSongs] = useState(initialSongs)
   const [index, setIndex] = useState(Math.min(Math.max(initialIndex, 0), Math.max(0, initialSongs.length - 1)))
   const [continuation, setContinuation] = useState(initialContinuation)
@@ -48,6 +50,8 @@ export default function QQRadarPlayer({ songs: initialSongs, initialIndex = 0, c
   }
 
   useEffect(() => {
+    // 被父级隐藏（冻结）时不要继续后台补批：看不见，且父级重渲染会让本 effect 重跑。
+    if (suspended) return
     if (index < songs.length - 5 || loadingMore || !continuation || !hasMore) return
     if (requestRef.current) return
     requestRef.current = true
@@ -73,7 +77,7 @@ export default function QQRadarPlayer({ songs: initialSongs, initialIndex = 0, c
       requestRef.current = false
       setLoadingMore(false)
     })
-  }, [continuation, hasMore, index, loadingMore, onRequestMore])
+  }, [continuation, hasMore, index, loadingMore, onRequestMore, suspended])
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     pointerRef.current = { id: event.pointerId, startY: event.clientY, moved: false }

@@ -676,6 +676,13 @@ function App() {
     return isTv() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
   })
   const viewModeChangeRevisionRef = useRef(0)
+  // 已访问过的模式：切走只隐藏、不卸载（与「播放页覆盖时不卸载」同一套做法）。
+  // 卸载再挂载会把已加载内容、滚动位置、打开中的弹窗全部丢掉，切回来等于重新请求一遍数据；
+  // 只保留真正访问过的模式，冷启动不会把其它模式的请求一起打出去。
+  const [visitedModes, setVisitedModes] = useState<Set<ViewMode>>(() => new Set([viewMode]))
+  if (!visitedModes.has(viewMode)) setVisitedModes(previous => new Set(previous).add(viewMode))
+  const visitedModesRef = useRef(visitedModes)
+  visitedModesRef.current = visitedModes
   // 房间还在时切模式的「挂起 / 退出」询问；bypass 用于让用户选完之后放行同一次切换
   const [resonanceExitPrompt, setResonanceExitPrompt] = useState<{ next: ViewMode } | null>(null)
   const resonanceModeSwitchBypassRef = useRef(false)
@@ -3171,9 +3178,12 @@ function App() {
       }
       resonanceModeSwitchBypassRef.current = false
       const revision = ++viewModeChangeRevisionRef.current
+      // 目标模式本次会话已经挂载过：内容已经就绪，不需要再用「加载遮罩」盖住（那个遮罩最短 3s，
+      // 等于白等），直接切过去；首次访问的模式仍走完整过渡动画。
+      const warmTarget = visitedModesRef.current.has(mode)
       // 模式切换过渡动画：若尚未为同一目标显示，则立即显示（点击即盖住，覆盖加载卡顿；
       // 已显示则保留原有 startedAt，不重置最短时长）
-      if (mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
+      if (!warmTarget && mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
         setModeTransition({ to: mode, startedAt: performance.now(), ready: false })
       }
       const loadTarget = mode === 'resonance'
@@ -3220,7 +3230,8 @@ function App() {
     const handleTransitionStart = (e: Event) => {
       const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop'
       if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance'].includes(mode)) return
-      if (mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
+      // 已挂载过的目标模式不再盖遮罩（同上：内容已就绪，遮罩只会让人白等）
+      if (!visitedModesRef.current.has(mode) && mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
         setModeTransition({ to: mode, startedAt: performance.now(), ready: false })
       }
     }
@@ -7708,6 +7719,8 @@ function App() {
       }
       setProfileInitialPlatform(platform)
       setProfileInitialTab(initialTab)
+      // 从自己的入口打开：清掉上次遗留的「他人主页」目标，避免冻结恢复后仍停在别人主页
+      setProfileUserTarget(null)
       setShowProfile(true)
     },
     onOpenPlayer: (origin) => {
@@ -7798,6 +7811,7 @@ function App() {
     if (platform === 'apple') { setShowAppleLogin(true); return }
     setProfileInitialPlatform(platform)
     setProfileInitialTab('created')
+    setProfileUserTarget(null)
     setShowProfile(true)
   }, [])
 
@@ -7901,6 +7915,44 @@ function App() {
   const enteringPlayerFromExplore = isPlaybackPage && enteredFromMode === 'explore'
   const mixingStudioAudio = showMixingStudio ? audioPlayer.getAudioElement() : null
 
+  // 「挂起」= 已挂载但当前不显示（用户切到了别的模式）。与上面的 keptAlive 区别：
+  // keptAlive 是播放页覆盖在本模式之上，zIndex 仍是 1；挂起是彻底切走，只隐藏、保留状态。
+  // resonance 不参与：它是插件式的房间模式，进出走自己的挂起/退出流程，保持原行为。
+  const parkedExplore = visitedModes.has('explore') && renderedMode !== 'explore' && !exploreKeptAlive
+  const parkedTraditional = visitedModes.has('traditional') && renderedMode !== 'traditional' && !traditionalKeptAlive
+  const parkedMinimal = visitedModes.has('minimal') && renderedMode !== 'minimal'
+  const parkedDesktop = visitedModes.has('desktop') && renderedMode !== 'desktop'
+  // 暂停重活（光晕/封面墙漂移/频谱绘制）：不可见时这些合成纯属浪费算力。
+  const exploreSuspended = exploreKeptAlive || parkedExplore
+  const traditionalSuspended = traditionalKeptAlive || parkedTraditional
+  const homeSuspended = minimalHomeKeptAlive || parkedMinimal
+
+  // ── 详情弹窗 / 个人中心「冻结」────────────────────────────────────────────
+  // 关闭时不再卸载、只把 suspended 传给被冻结的组件（组件内部隐藏自身），重开同一 id 时
+  // 组件实例与内部 state（页签、分页、列表）原样保留，不会重建 DOM、不会重放加载动画、
+  // 不会重发请求；id 真正变化时才换 key 重新挂载（该情况本就该重新取数）。
+  // 与 mode-view freeze 同款思路（见上方 parkedExplore/parkedMinimal）。
+  const [frozenArtistDetail, setFrozenArtistDetail] = useState<{ id: string | number; platform: MusicPlatform } | null>(null)
+  if (showArtistDetail && selectedArtistId && (!frozenArtistDetail || frozenArtistDetail.id !== selectedArtistId || frozenArtistDetail.platform !== selectedArtistPlatform)) {
+    setFrozenArtistDetail({ id: selectedArtistId, platform: selectedArtistPlatform })
+  }
+  const [frozenAlbumDetail, setFrozenAlbumDetail] = useState<{ id: string | number; platform: MusicPlatform } | null>(null)
+  if (showAlbumDetail && selectedAlbumId && (!frozenAlbumDetail || frozenAlbumDetail.id !== selectedAlbumId || frozenAlbumDetail.platform !== selectedAlbumPlatform)) {
+    setFrozenAlbumDetail({ id: selectedAlbumId, platform: selectedAlbumPlatform })
+  }
+  const [frozenSongDetail, setFrozenSongDetail] = useState<Song | null>(null)
+  if (showSongDetail && songDetailSong && (!frozenSongDetail || getSongKey(frozenSongDetail) !== getSongKey(songDetailSong))) {
+    setFrozenSongDetail(songDetailSong)
+  }
+  const [frozenSimilarSongs, setFrozenSimilarSongs] = useState<Song | null>(null)
+  if (showSimilarSongs && similarSongsSource && (!frozenSimilarSongs || getSongKey(frozenSimilarSongs) !== getSongKey(similarSongsSource))) {
+    setFrozenSimilarSongs(similarSongsSource)
+  }
+  const [commentModalFrozen, setCommentModalFrozen] = useState(false)
+  if (showCommentModal && !commentModalFrozen) setCommentModalFrozen(true)
+  const [profileFrozen, setProfileFrozen] = useState(false)
+  if (showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && !profileFrozen) setProfileFrozen(true)
+
   return (
     <>
       {/* 自定义窗口标题栏 */}
@@ -7945,11 +7997,12 @@ function App() {
             />
           </Suspense>
         )}
-        {showSongDetail && songDetailSong && (
+        {frozenSongDetail && (
           <Suspense fallback={null}>
             <LazySongDetailModal
-              key={getSongKey(songDetailSong)}
-              song={songDetailSong}
+              key={getSongKey(frozenSongDetail)}
+              song={frozenSongDetail}
+              suspended={!showSongDetail}
               onClose={closeSongDetail}
               playerTheme={playerTheme}
               onPlayNow={viewCallbacks.onSongSelect}
@@ -7963,10 +8016,11 @@ function App() {
             />
           </Suspense>
         )}
-        {showSimilarSongs && similarSongsSource && (
+        {frozenSimilarSongs && (
           <SimilarSongsPanel
-            key={getSongKey(similarSongsSource)}
-            song={similarSongsSource}
+            key={getSongKey(frozenSimilarSongs)}
+            song={frozenSimilarSongs}
+            suspended={!showSimilarSongs}
             onClose={closeSimilarSongs}
             onPlayNow={viewCallbacks.onSongSelect}
             onPlayNext={viewCallbacks.onPlayNext}
@@ -8238,7 +8292,7 @@ function App() {
       
       <Suspense fallback={null}><AnimatePresence initial={false} mode="sync" presenceAffectsLayout={false}>
         {/* 桌面模式 */}
-        {(renderedMode === 'explore' || exploreKeptAlive) && (
+        {(renderedMode === 'explore' || exploreSuspended) && (
           <motion.div
             key="explore-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -8246,12 +8300,12 @@ function App() {
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 h-full w-full"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: exploreKeptAlive ? 1 : 2, visibility: exploreKeptAlive ? 'hidden' : 'visible' }}
-            data-wf-suspended={exploreKeptAlive ? '' : undefined}
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: exploreSuspended ? 1 : 2, visibility: exploreSuspended ? 'hidden' : 'visible' }}
+            data-wf-suspended={exploreSuspended ? '' : undefined}
           >
             <LazyExploreView
-              motionSuspended={exploreKeptAlive}
-              suspended={exploreKeptAlive}
+              motionSuspended={exploreSuspended}
+              suspended={exploreSuspended}
               onSongSelect={viewCallbacks.onSongSelect}
               restorePlaybackOrigin={restorePlaybackOrigin}
               currentSong={currentSong}
@@ -8310,7 +8364,7 @@ function App() {
 
           </motion.div>
         )}
-        {renderedMode === 'desktop' && (
+        {(renderedMode === 'desktop' || parkedDesktop) && (
           <motion.div
             key="desktop-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
@@ -8318,7 +8372,8 @@ function App() {
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 w-full h-full"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: 2 }}
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: parkedDesktop ? 1 : 2, visibility: parkedDesktop ? 'hidden' : 'visible' }}
+            data-wf-suspended={parkedDesktop ? '' : undefined}
           >
             <LazyDesktopView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -8327,6 +8382,7 @@ function App() {
               isPlaying={isPlaying}
               playbackTimeStore={audioPlayer.playbackTimeStore}
               desktopFusionEnabled={desktopFusionEnabled}
+              suspended={parkedDesktop}
               onDesktopFusionChange={handleDesktopFusionChange}
               authRevision={authRevision}
               duration={duration}
@@ -8410,16 +8466,16 @@ function App() {
             />
           </motion.div>
         )}
-        {(renderedMode === 'traditional' || traditionalKeptAlive) && (
+        {(renderedMode === 'traditional' || traditionalSuspended) && (
           <motion.div
             key="traditional-mode"
             initial={{ opacity: 0, y: 26, scale: 0.985 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -18, scale: 1.012 }}
             transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute inset-0 h-full w-full"
-            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: traditionalKeptAlive ? 1 : 2, visibility: traditionalKeptAlive ? 'hidden' : 'visible' }}
-            data-wf-suspended={traditionalKeptAlive ? '' : undefined}
+            className="absolute inset-0 w-full h-full"
+            style={{ willChange: 'transform, opacity', backfaceVisibility: 'hidden', zIndex: traditionalSuspended ? 1 : 2, visibility: traditionalSuspended ? 'hidden' : 'visible' }}
+            data-wf-suspended={traditionalSuspended ? '' : undefined}
           >
             <LazyTraditionalView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -8485,11 +8541,11 @@ function App() {
               onAddToPlaylist={viewCallbacks.onAddToPlaylist}
               onViewComments={viewCallbacks.onViewComments}
               onCopyInfo={viewCallbacks.onCopyInfo}
-              suspended={traditionalKeptAlive}
+              suspended={traditionalSuspended}
             />
           </motion.div>
         )}
-        {(renderedMode === 'minimal' || exploreKeptAlive) && (
+        {(renderedMode === 'minimal' || exploreKeptAlive || parkedMinimal) && (
           /* 简约模式 */
           <motion.div
             key="minimal-mode"
@@ -8747,7 +8803,7 @@ function App() {
               AnimatePresence 保留退出节点：冷启动首次播放时 Chromium 偶发把首页
               合成快照永久留在播放页上。直接替换节点可以确保首页当帧卸载；新页面
               自身的 initial/animate 仍提供完整入场过渡。 */}
-          {(!currentSong || showHome || minimalHomeKeptAlive) && (
+          {(!currentSong || showHome || minimalHomeKeptAlive || parkedMinimal) && (
             /* 有歌词时使用两列布局，左侧封面右侧歌词 */
             <motion.div
               key="minimal-home-surface"
@@ -8760,8 +8816,8 @@ function App() {
                 filter: { duration: 0.38, ease: [0.22, 1, 0.36, 1] },
               }}
               className="absolute inset-0"
-              style={{ willChange: 'transform, opacity, filter', visibility: minimalHomeKeptAlive ? 'hidden' : 'visible', zIndex: 0 }}
-              data-wf-suspended={minimalHomeKeptAlive ? '' : undefined}
+              style={{ willChange: 'transform, opacity, filter', visibility: homeSuspended ? 'hidden' : 'visible', zIndex: 0 }}
+              data-wf-suspended={homeSuspended ? '' : undefined}
             >
             <LazyHomeView
               onSongSelect={viewCallbacks.onSongSelect}
@@ -8821,7 +8877,7 @@ function App() {
               accentColor={playbackCoverColor}
               currentSong={currentSong}
               playerTheme={playerTheme}
-              suspended={minimalHomeKeptAlive}
+              suspended={homeSuspended}
             />
             </motion.div>
           )}
@@ -9921,11 +9977,12 @@ function App() {
           不用 AnimatePresence 包裹：整屏 backdrop-filter 退出节点会被卡住不卸载，
           普通条件渲染保证选歌后艺人弹窗当帧移除。 */}
       <Suspense fallback={null}>
-          {showArtistDetail && selectedArtistId && (
+          {frozenArtistDetail && (
             <LazyArtistDetailModal
-            key={'artist-' + selectedArtistId}
-            artistId={selectedArtistId}
-            platform={selectedArtistPlatform}
+            key={'artist-' + frozenArtistDetail.id}
+            artistId={frozenArtistDetail.id}
+            platform={frozenArtistDetail.platform}
+            suspended={!showArtistDetail}
             onClose={closeArtistDetail}
             onSongSelect={handleArtistDetailSongSelect}
             initialAlbumId={selectedArtistAlbumId}
@@ -9951,12 +10008,13 @@ function App() {
       </Suspense>
 
       <Suspense fallback={null}>
-          {showAlbumDetail && selectedAlbumId && (
+          {frozenAlbumDetail && (
             <LazyAlbumDetailModal
-            key={'album-' + selectedAlbumId}
-            albumId={selectedAlbumId}
-            platform={selectedAlbumPlatform}
-            storefront={selectedAlbumPlatform === 'apple' ? appleStorefront : undefined}
+            key={'album-' + frozenAlbumDetail.id}
+            albumId={frozenAlbumDetail.id}
+            platform={frozenAlbumDetail.platform}
+            suspended={!showAlbumDetail}
+            storefront={frozenAlbumDetail.platform === 'apple' ? appleStorefront : undefined}
             onClose={stableDialogCallbacks.closeAlbumDetail}
             onSongSelect={handleAlbumDetailSongSelect}
             accentColor={playbackCoverColor}
@@ -9978,9 +10036,9 @@ function App() {
 
       <Suspense fallback={null}>
         <AnimatePresence>
-          {showCommentModal && (
+          {commentModalFrozen && (
             <LazyCommentModal
-              isOpen={true}
+              isOpen={showCommentModal}
               onClose={closeCommentModal}
               song={selectedCommentSong}
             />
@@ -9993,8 +10051,9 @@ function App() {
           backdrop-filter，退出节点在播放页挂载时会被 Chromium/framer-motion 卡住不卸载
           → 最近播放等弹窗选歌后残留盖在播放页上；普通条件渲染关闭即当帧卸载。 */}
       <Suspense fallback={null}>
-          {showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && (
+          {profileFrozen && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && (
             <LazyProfileView
+            suspended={!showProfile}
             initialPlatform={profileInitialPlatform}
             initialTab={profileInitialTab}
             canSwitchPlatform={[neteaseLoggedIn, qqLoggedIn, appleLoggedIn, sodaLoggedIn].filter(Boolean).length >= 2}

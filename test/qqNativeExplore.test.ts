@@ -171,7 +171,10 @@ describe('QQ native Explore contracts', () => {
     const controller = read('src/features/qqExplore/useQQExploreController.ts')
     const page = read('src/features/qqExplore/QQExplorePage.tsx')
     const server = read('local-server.mjs')
-    expect(view).toContain("{platform === 'qq' ? (\n            <QQExplorePage")
+    // QQ 仍是独立页面，只是改成「首次访问后保持挂载、切走只隐藏」（不再卸载重挂 → 不重新加载）
+    expect(view).toContain("{visitedPlatforms.has('qq') && (")
+    expect(view).toContain("className={platform === 'qq' ? 'contents' : 'hidden'}")
+    expect(view).toContain('            <QQExplorePage')
     expect(view).not.toContain('<QQNativeExploreContent')
     expect(controller).toContain('const LOAD_MORE_BATCHES = 5')
     expect(controller).toContain('batch < LOAD_MORE_BATCHES')
@@ -184,6 +187,8 @@ describe('QQ native Explore contracts', () => {
     expect(page).toContain('previousOverride')
     expect(page).toContain('result === false')
     expect(page).toContain('favoritePendingRef.current.has(key)')
+    // 只有 QQ 客户端能打开的卡片（unsupported）整类过滤掉，不再占位让人白点；标记文案仅防御性保留
+    expect(page).toContain('!isUnopenableQQCard(card)')
     expect(page).toContain('QQ 客户端专属')
     expect(server).toContain('logQQUnsupportedCardSummary')
     expect(page).toContain('favoriteOwnerRef.current = owner')
@@ -226,7 +231,8 @@ describe('QQ native Explore contracts', () => {
     expect(page).toContain('fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 1)')
     expect(page).toContain('fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 30)')
     expect(page).toContain('guessSongs.length > 0 ? guessSongs')
-    expect(page).toContain('[authRevision, guessRefreshRevision, loggedIn]')
+    // 猜你喜欢随登录态/账号/刷新批次变化重取（account 加入后语义不变，只更严格）
+    expect(page).toContain('[account, authRevision, guessRefreshRevision, loggedIn]')
     expect(page).not.toContain('[authRevision, loggedIn, snapshot?.generatedAt]')
     expect(server).toContain('Math.max(0, batch - 1 + attempt)')
     expect(page).toContain("if (card.subtype === 510 && card.style === 202) return 'daily'")
@@ -241,7 +247,8 @@ describe('QQ native Explore contracts', () => {
     expect(page).toContain("entrySong.artists.map(artist => artist.name).join('/')")
     expect(page).toContain("else if (action.section === 'mvs') onOpenMVs()")
     expect(page).toContain('skillPlaylists.slice(0, 12)')
-    expect(page).toContain('cards: module.cards.filter(card => !isQQStarLightCard(card))')
+    // 星光卡与「只有 QQ 客户端能打开」的卡片都在模块级过滤掉（后者不再占位显示）
+    expect(page).toContain('cards: module.cards.filter(card => !isQQStarLightCard(card) && !isUnopenableQQCard(card))')
     expect(page).not.toContain('card.songs[0] || {')
     expect(page).toContain('aspect-square w-full overflow-hidden')
     expect(page).toContain('isHiddenQQRecommendationModule')

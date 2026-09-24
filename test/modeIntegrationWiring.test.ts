@@ -22,7 +22,10 @@ describe('mode integration wiring', () => {
     expect(app).toContain('调音室是全模式共享弹层')
     // 探索页进入播放页：探索页保持挂载（覆盖层模式），返回不重载
     expect(app).toContain("const exploreKeptAlive = isPlaybackPage && enteredFromMode === 'explore' && viewMode === 'explore'")
-    expect(app).toContain('motionSuspended={exploreKeptAlive}')
+    // 跨模式切换同样不卸载：已访问过的模式只隐藏（parked），切回不重新请求、不重建 DOM
+    expect(app).toContain("const parkedExplore = visitedModes.has('explore')")
+    expect(app).toContain('const exploreSuspended = exploreKeptAlive || parkedExplore')
+    expect(app).toContain('motionSuspended={exploreSuspended}')
   })
 
   it('keeps Explore song selection in place with its mini player', () => {

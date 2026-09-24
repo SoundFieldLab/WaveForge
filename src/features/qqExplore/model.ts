@@ -156,6 +156,11 @@ export function isQQStarLightCard(card: QQExploreCard): boolean {
   return /星光卡|典藏星光|星光典藏/i.test(text)
 }
 
+/** 只有 QQ 客户端能打开的卡片（`unsupported`）：网页端点不开，不如不显示——占位只会让人白点一次。 */
+export function isUnopenableQQCard(card: QQExploreCard): boolean {
+  return card.action.type === 'unsupported'
+}
+
 export function qqCardPlaylist(card: QQExploreCard): ExplorePlaylist | null {
   if (card.action.type !== 'open-playlist') return null
   return {

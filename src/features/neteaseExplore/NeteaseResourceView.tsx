@@ -100,11 +100,11 @@ function ResourceImage({ resource, className = '' }: { resource: NeteaseNativeRe
   return (
     <span className={`relative block overflow-hidden bg-white/[0.06] ${className}`}>
       {imageUrl ? <CachedImage src={imageUrl} alt="" platform="netease" retainPrevious lazy className="h-full w-full object-cover transition duration-500 group-hover:scale-[1.025]" fallback={fallback} /> : fallback}
+      {/* 角标实测是 ['私人','雷达'] / ['云村','高分雷达'] 这类被服务端拆成两段的短词：
+          拼成一行一个底色展示，两行两个底色会被看成两个独立标签。 */}
       {resource.coverLabel && resource.coverLabel.length > 0 && (
-        <span className="pointer-events-none absolute left-1.5 top-1.5 flex flex-col items-start gap-0.5">
-          {resource.coverLabel.map(label => (
-            <span key={label} className="rounded-[3px] bg-black/58 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-white/92">{label}</span>
-          ))}
+        <span className="pointer-events-none absolute left-1.5 top-1.5 max-w-[calc(100%-0.75rem)] truncate rounded-[3px] bg-black/58 px-1.5 py-0.5 text-[10px] font-medium leading-4 text-white/92">
+          {resource.coverLabel.join('')}
         </span>
       )}
     </span>
@@ -239,7 +239,7 @@ function CoverShelf({ resources, callbacks, title }: { resources: NeteaseNativeR
 function MixedGrid({ resources, callbacks }: { resources: NeteaseNativeResource[]; callbacks: ResourceCallbacks }) {
   const songs = resources.map(resource => resource.song).filter((song): song is Song => Boolean(song))
   return (
-    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 min-[1900px]:grid-cols-5">
       {resources.map((resource, index) => {
         const Icon = actionIcon(resource)
         return (

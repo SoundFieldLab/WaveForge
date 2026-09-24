@@ -10,7 +10,23 @@ import DeleteCommentModal from './DeleteCommentModal'
 import CachedImage from './CachedImage'
 import { getResolvedArtworkUrl } from '../services/artworkLoader'
 import { debugLog, isVerboseLogEnabled } from '../utils/debugLog'
+import { createTtlCache } from '../utils/ttlCache'
 import { useTvBack } from '../tv/tvCore'
+
+// 评论分页短 TTL 缓存：按 `平台:资源ID:排序` 存已加载的评论 + 游标/页码。
+// 反复开关同一首评论时直接回填，既不重发请求也不清空列表（避免「已加载的评论闪一下又重来」）。
+// 只用内存、不落盘；空结果与错误不入缓存；登录态变化时清空。
+interface CachedCommentPage {
+  comments: Comment[]
+  hot: Comment[]
+  page: number
+  hasMore: boolean
+  cursor: string
+}
+const commentPageCache = createTtlCache<CachedCommentPage>({ ttlMs: 3 * 60 * 1000, maxEntries: 24 })
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => commentPageCache.clear())
+}
 
 interface PlaylistCommentResource {
   id: number | string
@@ -494,6 +510,8 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const loadCommentsRef = useRef<(reset?: boolean) => Promise<void>>(async () => {})
   // 竞态防护：热/最新切换或快速换资源时递增序号，晚到的旧请求落地前校验、过期直接丢弃
   const commentsRequestSeqRef = useRef(0)
+  // 上次已加载的资源键（平台:资源ID:排序）：用于区分「换资源要清空」与「同资源重校验保留旧列表」
+  const lastLoadedResourceRef = useRef('')
   // rAF 合并滚动续页检查：滚动事件高频触发，这里只在下一帧执行一次判定
   const scrollCheckFrameRef = useRef<number | null>(null)
   const handleScroll = useCallback(() => {
@@ -611,19 +629,50 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   // 模拟当前用户信息
 
   // 汽水未登录：输入框置灰并提示登录，评论列表仍可浏览
-  const sodaInputLocked = resourcePlatform === 'soda' && !isLoggedIn
-  // 汽水评论接口暂不提供点赞/回复/删除能力，行内操作按钮退化为静态展示
+  const sodaInputLocked = resourcePlatform === 'soda' && !isLoggedIn  // 汽水评论接口暂不提供点赞/回复/删除能力，行内操作按钮退化为静态展示
   const sodaRowsStatic = resourcePlatform === 'soda'
+
+  // 评论变更（发表/删除/刷新）后清缓存：只对「重新打开」做秒回，不把用户主动刷新也短路。
+  const commentRefreshKeyRef = useRef(0)
+
+  // 关闭时重置一次性 UI 状态：组件被 App 冻结（不卸载），否则删除确认框/展开的回复会跨次重开残留。
+  useEffect(() => {
+    if (isOpen) return
+    setPendingDeleteComment(null)
+    setShowCommentInput(false)
+    setReplyingTo(null)
+    setExpandedReplies(new Set())
+  }, [isOpen])
 
   useEffect(() => {
     if (isOpen && resourceId) {
+      const cacheKey = `${resourcePlatform}:${resourceId}:${viewMode}`
+      if (commentRefreshKey !== commentRefreshKeyRef.current) {
+        commentRefreshKeyRef.current = commentRefreshKey
+        commentPageCache.clear()
+      }
+      // 每次打开都收起输入框/回复态（与旧的「打开即重置」一致；命中缓存也不能跳过）
+      setShowCommentInput(false)
+      setNewComment('')
+      setReplyingTo(null)
+      // 命中缓存：回填已加载的评论/页码/游标，不发请求、不清空（不闪白）。
+      const cached = commentPageCache.get(cacheKey)
+      if (cached && cached.comments.length) {
+        lastLoadedResourceRef.current = cacheKey
+        setAllComments(cached.comments)
+        setHotComments(cached.hot)
+        setCurrentPage(cached.page)
+        setHasMoreComments(cached.hasMore)
+        setCursor(cached.cursor)
+        setLoading(false)
+        setIsLoadingMore(false)
+        setError(null)
+        return
+      }
       setCurrentPage(0)
       setHasMoreComments(true)
       setCursor('-1') // 重置cursor
       sodaCursorRef.current = undefined // 重置汽水评论游标
-      setShowCommentInput(false) // 关闭评论输入框
-      setNewComment('') // 清空评论内容
-      setReplyingTo(null) // 清空回复状态
       loadComments(true)
     }
   }, [isOpen, resourceId, viewMode, userCookie, commentRefreshKey])
@@ -651,13 +700,25 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
     
     if (reset) {
       setLoading(true)
-      setAllComments([])
+      // 只在「换资源/换排序」时清空；同一资源重校验（登录态刷新、主动刷新）保留旧列表，避免闪白。
+      const resourceKey = `${resourcePlatform}:${resourceId}:${viewMode}`
+      if (lastLoadedResourceRef.current !== resourceKey) {
+        lastLoadedResourceRef.current = resourceKey
+        setAllComments([])
+        setHotComments([])
+      }
       setCurrentPage(0)
     } else {
       setIsLoadingMore(true)
     }
     
     setError(null)
+    
+    const cacheKey = `${resourcePlatform}:${resourceId}:${viewMode}`
+    // 本次加载产出的热评/游标/hasMore，供成功后写回缓存（用局部变量，避免读到过期 state）
+    let nextHot: Comment[] | null = null
+    let nextCursor: string | null = null
+    let hasMoreAfter: boolean | null = null
     
     try {
       const platform = resourcePlatform
@@ -676,6 +737,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
         sodaCursorRef.current = page.cursor ?? undefined
         const sodaComments = mapSodaComments(page.comments)
         // 汽水无独立热评接口，清空防止上一资源残留
+        nextHot = []
         setHotComments([])
         if (sodaComments.length === 0 && reset) {
           setAllComments([])
@@ -693,8 +755,18 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
           })
         }
         // 「加载更多」按钮显隐由 hasMore 控制
+        hasMoreAfter = page.hasMore
         setHasMoreComments(page.hasMore)
         setCurrentPage(pageToLoad)
+        // 写回缓存：以「已加载的全部评论」为快照，重开直接回填
+        {
+          const existing = commentPageCache.get(cacheKey)
+          const base = reset || !existing ? (reset ? sodaComments : []) : existing.comments
+          const merged = new Map(base.map(comment => [comment.commentId, comment]))
+          if (!reset) sodaComments.forEach(comment => merged.set(comment.commentId, comment))
+          const snapshot = Array.from(merged.values())
+          if (snapshot.length) commentPageCache.set(cacheKey, { comments: snapshot, hot: [], page: pageToLoad, hasMore: page.hasMore, cursor: '-1' })
+        }
         return
       }
       
@@ -735,7 +807,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
           
           // 网易云热评（精彩评论）单独展示
           if (data.data?.hotComments && Array.isArray(data.data.hotComments)) {
-            setHotComments(data.data.hotComments.map((c: any) => ({
+            nextHot = data.data.hotComments.map((c: any) => ({
               commentId: c.commentId,
               content: c.content,
               user: {
@@ -748,17 +820,20 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
               rootCommentId: c.beReplied?.[0]?.beRepliedCommentId,
               replyCount: 0,
               replies: []
-            })).filter(Boolean))
+            })).filter(Boolean)
+            setHotComments(nextHot ?? [])
           }
           
           // 保存cursor用于下次加载（仅最新评论需要）
           if (viewMode === 'latest' && data.data?.cursor) {
-            setCursor(String(data.data.cursor))
+            nextCursor = String(data.data.cursor)
+            setCursor(nextCursor)
           }
           
           // 检查是否还有更多评论
           const hasMore = data.data?.hasMore || false
           if (!hasMore) {
+            hasMoreAfter = false
             setHasMoreComments(false)
           }
           
@@ -856,16 +931,20 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
             if (data.data?.hotComments && data.data.hotComments.length > 0) {
               const hotRaw = data.data.hotComments
               const hotMapped = Array.isArray(hotRaw) ? mapQQComments(hotRaw) : []
+              nextHot = hotMapped
               setHotComments(hotMapped)
             } else {
+              nextHot = []
               setHotComments([])
             }
           } else {
+            nextHot = []
             setHotComments([])
           }
           
           // 设置hasMore
-          setHasMoreComments(data.data.hasMore || false)
+          hasMoreAfter = Boolean(data.data.hasMore)
+          setHasMoreComments(Boolean(data.data.hasMore))
         } else {
           debugLog('[QQ音乐评论] 无效的响应数据')
         }
@@ -882,8 +961,18 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
       
       // 更新评论列表
       if (reset) {
-        setAllComments(viewMode === 'latest' ? [...comments].sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time)) : comments)
+        const finalComments = viewMode === 'latest' ? [...comments].sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time)) : comments
+        setAllComments(finalComments)
         window.requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }))
+        if (finalComments.length) {
+          commentPageCache.set(cacheKey, {
+            comments: finalComments,
+            hot: nextHot ?? [],
+            page: pageToLoad,
+            hasMore: hasMoreAfter !== null ? hasMoreAfter : true,
+            cursor: nextCursor ?? '-1',
+          })
+        }
       } else {
         setAllComments(prev => {
           const merged = new Map(prev.map(comment => [comment.commentId, comment]))
@@ -891,6 +980,19 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
           const next = Array.from(merged.values())
           return viewMode === 'latest' ? next.sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time)) : next
         })
+        // 续页也同步进缓存（仅当已有首屏缓存），重开时能恢复已加载的多页
+        const existing = commentPageCache.get(cacheKey)
+        if (existing) {
+          const merged = new Map(existing.comments.map(comment => [comment.commentId, comment]))
+          comments.forEach(comment => merged.set(comment.commentId, comment))
+          commentPageCache.set(cacheKey, {
+            ...existing,
+            comments: Array.from(merged.values()),
+            page: pageToLoad,
+            hasMore: hasMoreAfter !== null ? hasMoreAfter : existing.hasMore,
+            cursor: nextCursor ?? existing.cursor,
+          })
+        }
       }
       
       setCurrentPage(pageToLoad)

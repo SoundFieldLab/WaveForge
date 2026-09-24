@@ -1,5 +1,6 @@
 import { getApiBase } from '../../services/apiConfig'
 import { getExploreCookie } from '../../services/exploreApi'
+import { createTtlCache } from '../../utils/ttlCache'
 import {
   dedupeNeteaseResources,
   filterNeteaseAdResources,
@@ -13,6 +14,28 @@ import {
 // 发现页（音乐 / 播客）数据源，接口来自 9.5.90 实机抓包，详见 docs/netease-discover-reverse-2026-09-13.md
 
 const API_BASE = `${getApiBase()}/netease/native`
+
+// 只读数据短 TTL 缓存：频道页/二级页会被反复打开（返回再进、切页签、层级返回时外层 div 会按 navKey 重挂），
+// 命中即不再发网络请求。只存成功且非空的结果、不落盘；账号态数据在登录态变化时清空。
+const linkPageCache = createTtlCache<any>({ ttlMs: 5 * 60 * 1000, maxEntries: 8 })
+const cubePagePayloadCache = createTtlCache<any>({ ttlMs: 5 * 60 * 1000, maxEntries: 20 })
+const filledCubePageCache = createTtlCache<NeteaseCubePage>({ ttlMs: 10 * 60 * 1000, maxEntries: 20 })
+const podcastCategoriesCache = createTtlCache<NeteasePodcastCategory[]>({ ttlMs: 10 * 60 * 1000, maxEntries: 4 })
+const podcastCategoryRadiosCache = createTtlCache<NeteaseNativeResource[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 30 })
+const myPodcastsCache = createTtlCache<NeteaseNativeResource[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 8 })
+
+/** 登录态变化后调用：账号态的频道/播客缓存一并作废。 */
+export const clearNeteaseDiscoverCaches = () => {
+  linkPageCache.clear()
+  cubePagePayloadCache.clear()
+  filledCubePageCache.clear()
+  podcastCategoriesCache.clear()
+  podcastCategoryRadiosCache.clear()
+  myPodcastsCache.clear()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', clearNeteaseDiscoverCaches)
+}
 
 export type NeteaseLinkPageCode = 'HOME_RECOMMEND_PAGE' | 'HOME_DISCOVERY_PAGE'
 
@@ -50,7 +73,14 @@ export async function fetchNeteaseLinkPage(
   /** 本会话已展示的区块（App 翻页时回传；服务端据此推进，缺失会拿到不一致的区块） */
   loadedPositionCodes?: string[],
 ) {
-  return request('/link-page', {
+  // 只有「第一页 + 无翻页链参数」这种冷启动形态可复用：续拉强依赖 order/loaded 链，缓存会拿到不一致的区块。
+  // refresh=true（用户主动刷新）时跳过读取但会覆盖写入，保证刷新后短 TTL 内拿到的也是新数据。
+  const cacheKey = !order?.length && !loadedPositionCodes?.length ? `${pageCode}:${cursor}` : ''
+  if (cacheKey && !refresh) {
+    const cached = linkPageCache.get(cacheKey)
+    if (cached) return cached
+  }
+  const payload = await request('/link-page', {
     cookie: getExploreCookie('netease'),
     pageCode,
     cursor,
@@ -58,6 +88,9 @@ export async function fetchNeteaseLinkPage(
     order: order && order.length > 0 ? JSON.stringify(order) : undefined,
     loaded: loadedPositionCodes && loadedPositionCodes.length > 0 ? JSON.stringify(loadedPositionCodes) : undefined,
   }, signal)
+  // 空结果不缓存，避免把一次失败或「确实没内容」钉死
+  if (cacheKey && Array.isArray(payload?.data?.blocks) && payload.data.blocks.length > 0) linkPageCache.set(cacheKey, payload)
+  return payload
 }
 
 export async function fetchNeteaseMusicChannels(signal?: AbortSignal): Promise<NeteaseMusicChannel[]> {
@@ -74,8 +107,24 @@ export async function fetchNeteaseMusicChannels(signal?: AbortSignal): Promise<N
     .filter((channel: NeteaseMusicChannel) => channel.code && channel.title)
 }
 
-export async function fetchNeteaseCubePage(pageId: string, signal?: AbortSignal) {
-  return request('/cube-page', { cookie: getExploreCookie('netease'), pageId }, signal)
+export async function fetchNeteaseCubePage(pageId: string, signal?: AbortSignal, refresh = false) {
+  if (!refresh) {
+    const cached = cubePagePayloadCache.get(pageId)
+    if (cached) return cached
+  }
+  const payload = await request('/cube-page', { cookie: getExploreCookie('netease'), pageId }, signal)
+  // 空页不缓存
+  if (payload?.data?.pageProtocol?.pages?.length) cubePagePayloadCache.set(pageId, payload)
+  return payload
+}
+
+/** cube 页（含封面回填）的完整加载：同一 pageId 在 TTL 内复用，反复开关页面不再重复请求。 */
+export async function loadNeteaseCubePage(pageId: string, signal?: AbortSignal): Promise<NeteaseCubePage> {
+  const cached = filledCubePageCache.get(pageId)
+  if (cached) return cached
+  const page = await fillNeteaseCubeCovers(normalizeNeteaseCubePage(await fetchNeteaseCubePage(pageId, signal)), signal)
+  if (page.tabs.length > 0 || page.blocks.length > 0) filledCubePageCache.set(pageId, page)
+  return page
 }
 
 /** 批量补歌单详情（封面/标题/播放量）。曲风页里很多卡片只下发 id。 */
@@ -167,9 +216,12 @@ export async function fetchNeteasePodcastInfinite(cursor = '', refresh = false, 
 export interface NeteasePodcastCategory { id: string; name: string; children: Array<{ id: string; name: string; description: string }> }
 
 export async function fetchNeteasePodcastCategories(signal?: AbortSignal): Promise<NeteasePodcastCategory[]> {
+  // 分类是固定配置，缓存命中即可，不必每次进页面都拉
+  const cached = podcastCategoriesCache.get('all')
+  if (cached) return cached
   const payload = await request('/podcast-categories', { cookie: getExploreCookie('netease') }, signal)
   const list = Array.isArray(payload?.data) ? payload.data : []
-  return list.map((item: any) => ({
+  const categories = list.map((item: any) => ({
     id: String(item?.id || ''),
     name: String(item?.name || ''),
     children: (Array.isArray(item?.secondCategoryList) ? item.secondCategoryList : []).map((child: any) => ({
@@ -178,10 +230,18 @@ export async function fetchNeteasePodcastCategories(signal?: AbortSignal): Promi
       description: String(child?.description || ''),
     })).filter((child: { id: string }) => child.id),
   })).filter((category: NeteasePodcastCategory) => category.id && category.name)
+  if (categories.length > 0) podcastCategoriesCache.set('all', categories)
+  return categories
 }
 
-export async function fetchNeteasePodcastCategoryRadios(categoryId: string, offset = 0, limit = 18, signal?: AbortSignal) {
-  return request('/podcast-category-radios', { cookie: getExploreCookie('netease'), categoryId, offset: String(offset), limit: String(limit) }, signal)
+/** 分类电台 → 统一资源（带短 TTL 缓存，分类页来回进不再重复请求） */
+export async function fetchNeteasePodcastCategoryRadios(categoryId: string, offset = 0, limit = 18, signal?: AbortSignal): Promise<NeteaseNativeResource[]> {
+  const key = `${categoryId}:${offset}:${limit}`
+  const cached = podcastCategoryRadiosCache.get(key)
+  if (cached) return cached
+  const resources = normalizeNeteaseRadioResources(await request('/podcast-category-radios', { cookie: getExploreCookie('netease'), categoryId, offset: String(offset), limit: String(limit) }, signal))
+  if (resources.length > 0) podcastCategoryRadiosCache.set(key, resources)
+  return resources
 }
 
 export interface NeteaseVipPage {
@@ -214,8 +274,14 @@ export async function fetchNeteaseVipPage(refresh = false, signal?: AbortSignal)
   }
 }
 
-export async function fetchNeteaseMyPodcasts(userId: string, offset = 0, limit = 30, signal?: AbortSignal) {
-  return request('/my-podcasts', { cookie: getExploreCookie('netease'), userId, offset: String(offset), limit: String(limit) }, signal)
+/** 我的播客（账号态）→ 统一资源（带短 TTL 缓存，登录态变化时整体清空） */
+export async function fetchNeteaseMyPodcasts(userId: string, offset = 0, limit = 30, signal?: AbortSignal): Promise<NeteaseNativeResource[]> {
+  const key = `${userId}:${offset}:${limit}`
+  const cached = myPodcastsCache.get(key)
+  if (cached) return cached
+  const resources = normalizeNeteaseRadioResources(await request('/my-podcasts', { cookie: getExploreCookie('netease'), userId, offset: String(offset), limit: String(limit) }, signal))
+  if (resources.length > 0) myPodcastsCache.set(key, resources)
+  return resources
 }
 
 /** 电台列表（djradio/hot、get/byuser）→ 统一资源 */

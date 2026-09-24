@@ -31,6 +31,39 @@ import { fetchSpotifyMyPlaylists, fetchSpotifyLiked, fetchSpotifyPlaylist, spoti
 import { detectQQMusicVip } from '../utils/musicEntitlements'
 import { isAccountFieldsMasked, setAccountFieldsMasked, isPersonalStationProtected, setPersonalStationProtected, getCachedPersonalStation, PERSONAL_STATION_MASK } from '../utils/applePrivacy'
 import { fetchApplePersonalStation } from '../services/appleWebService'
+import { createTtlCache } from '../utils/ttlCache'
+
+// ===== 个人中心模块级短 TTL 缓存 =====
+// ProfileView 现由 App 冻结（关闭只隐藏、不卸载），但切页签 / 切平台 / 进出他人主页仍会
+// 触发重新取数。这里按 `平台:用户ID`（或用户ID:分栏）缓存各分栏结果，重开同一用户直接命中，
+// 避免「明明加载过又整屏转圈」。只用内存、不落盘；登录态变化时整体清空，防止读到上一账号的数据。
+const PROFILE_CACHE_TTL = 5 * 60 * 1000
+const profileUserDetailCache = createTtlCache<UserDetail>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 12 })
+const profileQqDetailCache = createTtlCache<any>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 12 })
+const profileRecentCache = createTtlCache<RecentPlaybackItem[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 24 })
+const profileSocialCache = createTtlCache<{ items?: any[]; events?: any[]; notices?: any[]; comments?: any[] }>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 32 })
+const profileQqSocialCache = createTtlCache<any[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 16 })
+const profileCollectionsCache = createTtlCache<{ albums: any[]; artists: any[]; mvs: any[] }>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 12 })
+const profileRankCache = createTtlCache<Song[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 16 })
+const profileCloudCache = createTtlCache<any[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 8 })
+const profileQqFavCache = createTtlCache<any[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 8 })
+const profileSodaLikedCache = createTtlCache<Song[]>({ ttlMs: PROFILE_CACHE_TTL, maxEntries: 8 })
+
+const clearProfileDataCaches = () => {
+  profileUserDetailCache.clear()
+  profileQqDetailCache.clear()
+  profileRecentCache.clear()
+  profileSocialCache.clear()
+  profileQqSocialCache.clear()
+  profileCollectionsCache.clear()
+  profileRankCache.clear()
+  profileCloudCache.clear()
+  profileQqFavCache.clear()
+  profileSodaLikedCache.clear()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', clearProfileDataCaches)
+}
 
 interface Playlist {
   id: string | number
@@ -527,6 +560,8 @@ interface ProfileViewProps {
   onCopyInfo?: (song: Song) => void
   /** 直接打开某个用户的主页（歌单创建者等二级入口）；设置后进入即压栈到该用户 */
   initialUserTarget?: { platform: 'netease' | 'qq'; userId: string; nickname?: string } | null
+  /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。为 true 时暂停监听/后台刷新。 */
+  suspended?: boolean
 }
 
 function ProfileView({ 
@@ -550,7 +585,8 @@ function ProfileView({
   onAddToPlaylist,
   onViewComments,
   onCopyInfo,
-  initialUserTarget
+  initialUserTarget,
+  suspended = false
 }: ProfileViewProps) {
   const [currentPlatform, setCurrentPlatform] = useState<MusicPlatform>(initialPlatform)
 
@@ -1388,10 +1424,26 @@ function ProfileView({
     recentRequestRef.current = { revision, controller }
     const requestPlatform = currentPlatform
     const requestCookie = cookie
+    const recentCacheKey = `${requestPlatform}:${activeUserId}:${type}`
+    // 命中缓存直接回填：不转圈、不清空、不发请求。空结果/错误不入缓存（见下方 set 处的守卫）。
+    const cachedRecent = profileRecentCache.get(recentCacheKey)
+    if (cachedRecent && cachedRecent.length) {
+      recentRequestRef.current = { revision, controller: null }
+      setRecentLoading(false)
+      setRecentError('')
+      setRecentNotice('')
+      setRecentItems(cachedRecent)
+      return
+    }
+    // 不再 setRecentItems([])：保留上一次内容，刷新期间不闪空
+    const commitRecent = (items: RecentPlaybackItem[]) => {
+      if (recentRequestRef.current.revision !== revision) return
+      setRecentItems(items)
+      if (items.length) profileRecentCache.set(recentCacheKey, items)
+    }
     setRecentLoading(true)
     setRecentError('')
     setRecentNotice('')
-    setRecentItems([])
     try {
       // Apple：最近播放走 amp-api（需登录 token）
       if (currentPlatform === 'apple') {
@@ -1407,6 +1459,7 @@ function ProfileView({
           song: appleSongToSong(track),
         }))
         setRecentItems(recentItems)
+        if (recentItems.length) profileRecentCache.set(recentCacheKey, recentItems)
         void Promise.allSettled(
           recentItems.slice(0, 8).map(item => preloadArtwork(item.coverUrl, {
             role: 'card',
@@ -1420,7 +1473,7 @@ function ProfileView({
       if (currentPlatform === 'spotify') {
         const liked = await fetchSpotifyLiked(50)
         if (recentRequestRef.current.revision !== revision) return
-        setRecentItems(liked.map((track, index) => ({
+        commitRecent(liked.map((track, index) => ({
           id: track.id || String(index),
           type: 'song' as const,
           name: track.name || '未知歌曲',
@@ -1450,7 +1503,7 @@ function ProfileView({
         if (recentRequestRef.current.revision !== revision) return
         if (!response.ok || payload?.error) throw new Error(payload?.error || '最近播放加载失败')
         const rows: any[] = Array.isArray(payload?.songs) ? payload.songs : []
-        setRecentItems(rows.map((raw, index) => ({
+        commitRecent(rows.map((raw, index) => ({
           id: String(raw?.id ?? index),
           type: 'song' as const,
           name: String(raw?.name || '未知歌曲'),
@@ -1469,7 +1522,7 @@ function ProfileView({
       if (requestPlatform === 'netease' && type === 'song') {
         const result = await fetchNeteaseRecentSongs(requestCookie, 100)
         if (recentRequestRef.current.revision !== revision) return
-        setRecentItems(result.songs.map((song, index) => ({
+        commitRecent(result.songs.map((song, index) => ({
           id: String(song.id ?? index),
           type: 'song' as const,
           name: song.name,
@@ -1496,7 +1549,7 @@ function ProfileView({
       const normalizedItems = requestPlatform === 'qq'
         ? normalizeQQRecentItems(payload)
         : normalizeRecentItems(payload, requestType)
-      setRecentItems(normalizedItems)
+      commitRecent(normalizedItems)
     } catch (error) {
       if ((error as Error)?.name === 'AbortError' || recentRequestRef.current.revision !== revision) return
       setRecentItems([])
@@ -1541,9 +1594,18 @@ function ProfileView({
         setSocialLoading(false)
         return
       }
+      const eventsKey = `${activeUserId}:events`
+      const cachedEvents = profileSocialCache.get(eventsKey)
+      if (cachedEvents?.events) {
+        setSocialEvents(cachedEvents.events)
+        setSocialLoading(false)
+        return
+      }
       getNeteaseFollowingEvents({ cookie }).then((data) => {
         if (cancelled) return
-        setSocialEvents(Array.isArray(data?.events) ? data.events : [])
+        const events = Array.isArray(data?.events) ? data.events : []
+        setSocialEvents(events)
+        if (events.length) profileSocialCache.set(eventsKey, { events })
         setSocialLoading(false)
       }).catch(() => {
         if (cancelled) return
@@ -1560,13 +1622,24 @@ function ProfileView({
         setSocialLoading(false)
         return
       }
+      const messagesKey = `${activeUserId}:messages`
+      const cachedMessages = profileSocialCache.get(messagesKey)
+      if (cachedMessages?.notices || cachedMessages?.comments) {
+        setSocialNotices(cachedMessages.notices || [])
+        setSocialComments(cachedMessages.comments || [])
+        setSocialLoading(false)
+        return
+      }
       void Promise.all([
         getNeteaseNotices({ cookie }),
         getNeteaseCommentMessages(userId, { cookie }),
       ]).then(([noticesData, commentsData]) => {
         if (cancelled) return
-        setSocialNotices(Array.isArray(noticesData?.notices) ? noticesData.notices : [])
-        setSocialComments(Array.isArray(commentsData?.comments) ? commentsData.comments : [])
+        const notices = Array.isArray(noticesData?.notices) ? noticesData.notices : []
+        const comments = Array.isArray(commentsData?.comments) ? commentsData.comments : []
+        setSocialNotices(notices)
+        setSocialComments(comments)
+        if (notices.length || comments.length) profileSocialCache.set(messagesKey, { notices, comments })
         setSocialLoading(false)
       }).catch(() => {
         if (cancelled) return
@@ -1575,20 +1648,29 @@ function ProfileView({
       })
       return () => { cancelled = true }
     }
+    const socialKey = `${activeUserId}:${socialType}`
+    const cachedSocial = profileSocialCache.get(socialKey)
+    if (cachedSocial?.items) {
+      setSocialItems(cachedSocial.items)
+      setSocialLoading(false)
+      return
+    }
     const task = socialType === 'follows'
       ? getUserFollows(activeUserId, { cookie })
       : getUserFolloweds(activeUserId, { cookie })
     task.then((data) => {
       if (cancelled) return
       const raw = socialType === 'follows' ? data?.follow : data?.followeds
-      setSocialItems(Array.isArray(raw) ? raw.map((u: any) => ({
+      const items = Array.isArray(raw) ? raw.map((u: any) => ({
         userId: String(u.userId || u.id || ''),
         nickname: u.nickname || '未知用户',
         avatarUrl: u.avatarUrl || '',
         signature: u.signature || '',
         // 关注列表都是已关注；粉丝列表看 mutual（是否互关）
         isFollow: socialType === 'follows' ? true : Boolean(u.mutual),
-      })) : [])
+      })) : []
+      setSocialItems(items)
+      if (items.length) profileSocialCache.set(socialKey, { items })
       setSocialLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1604,6 +1686,13 @@ function ProfileView({
     let cancelled = false
     setQqSocialLoading(true)
     setQqSocialError('')
+    const qqSocialKey = `${activeUserId}:${qqSocialType}`
+    const cachedQqSocial = profileQqSocialCache.get(qqSocialKey)
+    if (cachedQqSocial) {
+      setQqSocialItems(cachedQqSocial)
+      setQqSocialLoading(false)
+      return
+    }
     const task = viewTarget
       ? getQQUserProfile(activeUserId).then((data) => ({
           data: { list: qqSocialType === 'follows' ? data?.data?.follows : data?.data?.fans },
@@ -1612,7 +1701,7 @@ function ProfileView({
     task.then((data) => {
       if (cancelled) return
       const list = data?.data?.list || []
-      setQqSocialItems(Array.isArray(list) ? list.map((u: any) => ({
+      const items = Array.isArray(list) ? list.map((u: any) => ({
         encUin: u.EncUin || u.encUin || '',
         mid: u.MID || u.mid || '',
         name: u.Name || u.name || '未知用户',
@@ -1620,7 +1709,9 @@ function ProfileView({
         avatarUrl: u.AvatarUrl || u.avatarUrl || '',
         isFollow: Boolean(u.IsFollow || u.isFollow),
         isSelf: Boolean(u.OtherInfo?.IsSelf || u.isSelf),
-      })) : [])
+      })) : []
+      setQqSocialItems(items)
+      if (items.length) profileQqSocialCache.set(qqSocialKey, items)
       setQqSocialLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1642,6 +1733,15 @@ function ProfileView({
     setActiveTab('created')
   }, [initialUserTarget?.platform, initialUserTarget?.userId, initialUserTarget?.nickname])
 
+  // 从隐藏切回可见（打开）时：外部未指定他人主页就回到自己的主页。
+  // ProfileView 被 App 冻结后实例不卸载，二级导航栈会跨「关闭-重开」保留；这里对齐旧
+  // 「每次打开即全新挂载」的语义（自己的入口 → 自己主页），同时保留分栏数据/缓存不重取。
+  useEffect(() => {
+    if (suspended) return
+    if (!initialUserTarget?.userId) setViewStack([])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suspended])
+
   // 打开用户个人中心（push 进导航栈，进入后默认看歌单概览）
   const openUserProfile = (targetPlatform: 'netease' | 'qq', targetUserId: string, nickname?: string, avatarUrl?: string, signature?: string) => {
     setViewStack(prev => [...prev, { platform: targetPlatform, userId: targetUserId, nickname, avatarUrl, signature, returnTab: activeTab }])
@@ -1652,11 +1752,20 @@ function ProfileView({
   useEffect(() => {
     if (activeTab !== 'cloud' || platform !== 'netease' || viewTarget) return
     let cancelled = false
+    const cloudKey = `${activeUserId}:cloud`
+    const cachedCloud = profileCloudCache.get(cloudKey)
+    if (cachedCloud) {
+      setCloudSongs(cachedCloud)
+      setCloudLoading(false)
+      return
+    }
     setCloudLoading(true)
     setCloudError('')
     getNeteaseCloudSongs({ cookie }).then((data) => {
       if (cancelled) return
-      setCloudSongs(Array.isArray(data?.data) ? data.data : [])
+      const songs = Array.isArray(data?.data) ? data.data : []
+      setCloudSongs(songs)
+      if (songs.length) profileCloudCache.set(cloudKey, songs)
       setCloudLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1670,10 +1779,19 @@ function ProfileView({
   useEffect(() => {
     if (activeTab !== 'favs' || platform !== 'qq' || !viewTarget) return
     let cancelled = false
+    const qqFavKey = `${activeUserId}:qqfav`
+    const cachedQqFav = profileQqFavCache.get(qqFavKey)
+    if (cachedQqFav) {
+      setQqFavItems(cachedQqFav)
+      setQqFavLoading(false)
+      return
+    }
     setQqFavLoading(true)
     getQQUserFavs(activeUserId, 1).then((data) => {
       if (cancelled) return
-      setQqFavItems(Array.isArray(data?.data?.list) ? data.data.list : [])
+      const list = Array.isArray(data?.data?.list) ? data.data.list : []
+      setQqFavItems(list)
+      if (list.length) profileQqFavCache.set(qqFavKey, list)
       setQqFavLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1689,13 +1807,22 @@ function ProfileView({
     if (activeTab !== 'favs' || currentPlatform !== 'soda' || viewTarget) return
     if (!getPlatformCookie('soda')) return
     let cancelled = false
+    const sodaLikedKey = `${currentPlatform}:sodaliked`
+    const cachedSodaLiked = profileSodaLikedCache.get(sodaLikedKey)
+    if (cachedSodaLiked) {
+      setSodaLikedSongs(cachedSodaLiked)
+      setSodaLikedLoading(false)
+      return
+    }
     setSodaLikedLoading(true)
     setSodaLikedError('')
     void (async () => {
       try {
         const data = await getPlaylistDetail('qishui-liked', 'soda')
         if (cancelled) return
-        setSodaLikedSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        const songs = Array.isArray(data?.tracks) ? data.tracks : []
+        setSodaLikedSongs(songs)
+        if (songs.length) profileSodaLikedCache.set(sodaLikedKey, songs)
       } catch (error) {
         if (cancelled) return
         setSodaLikedSongs([])
@@ -1711,15 +1838,28 @@ function ProfileView({
   useEffect(() => {
     if (activeTab !== 'collections' || viewTarget) return
     let cancelled = false
+    const collectionsKey = `${platform}:${activeUserId}:collections`
+    const cachedCollections = profileCollectionsCache.get(collectionsKey)
+    if (cachedCollections) {
+      setCollectedAlbums(cachedCollections.albums)
+      setCollectedArtists(cachedCollections.artists)
+      setCollectedMvs(cachedCollections.mvs)
+      setCollectionsLoading(false)
+      return
+    }
     setCollectionsLoading(true)
     const task = platform === 'netease'
       ? Promise.all([getSubscribedAlbums('netease', { cookie }), getSubscribedArtists('netease', { cookie }), getNeteaseMvSublist({ cookie })])
       : Promise.all([getQQSubscribedAlbums({ cookie }), getQQSubscribedArtists({ cookie })])
     void task.then(([albumsData, artistsData, mvsData]) => {
       if (cancelled) return
-      setCollectedAlbums(Array.isArray(albumsData?.data?.list) ? albumsData.data.list : Array.isArray(albumsData?.data) ? albumsData.data : [])
-      setCollectedArtists(Array.isArray(artistsData?.data?.list) ? artistsData.data.list : Array.isArray(artistsData?.data) ? artistsData.data : [])
-      if (platform === 'netease') setCollectedMvs(Array.isArray(mvsData) ? mvsData : [])
+      const albums = Array.isArray(albumsData?.data?.list) ? albumsData.data.list : Array.isArray(albumsData?.data) ? albumsData.data : []
+      const artists = Array.isArray(artistsData?.data?.list) ? artistsData.data.list : Array.isArray(artistsData?.data) ? artistsData.data : []
+      const mvs = platform === 'netease' && Array.isArray(mvsData) ? mvsData : []
+      setCollectedAlbums(albums)
+      setCollectedArtists(artists)
+      if (platform === 'netease') setCollectedMvs(mvs)
+      if (albums.length || artists.length || mvs.length) profileCollectionsCache.set(collectionsKey, { albums, artists, mvs })
       setCollectionsLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1745,6 +1885,17 @@ function ProfileView({
     setActiveTab('social')
   }
 
+  // 冻结（关闭）时收起一次性浮层：组件不卸载，否则右键菜单/新建·编辑·删除歌单弹窗会跨次重开残留。
+  useEffect(() => {
+    if (!suspended) return
+    setPlaylistContextMenu({ show: false, x: 0, y: 0, playlist: null })
+    setRecentSongContextMenu({ show: false, x: 0, y: 0, song: null, songs: [] })
+    setShowCreatePlaylist(false)
+    setShowEditPlaylist(false)
+    setShowDeletePlaylist(false)
+    setManagementPlaylist(null)
+  }, [suspended])
+
   // 听歌排行数据获取 —— 仅网易云（需要登录，只能查自己）
   useEffect(() => {
     if (activeTab !== 'rank' || currentPlatform !== 'netease') return
@@ -1753,12 +1904,19 @@ function ProfileView({
       return
     }
     let cancelled = false
+    const rankKey = `${activeUserId}:rank:${rankType}`
+    const cachedRank = profileRankCache.get(rankKey)
+    if (cachedRank) {
+      setRankItems(cachedRank)
+      setRankLoading(false)
+      return
+    }
     setRankLoading(true)
     setRankError('')
     getUserRecordRank(userId, rankType, { cookie }).then((data) => {
       if (cancelled) return
       const raw = rankType === 1 ? data?.weekData : data?.allData
-      setRankItems(Array.isArray(raw) ? raw.map((item: any) => {
+      const items = Array.isArray(raw) ? raw.map((item: any) => {
         // 兼容扁平结构 {id,name,ar,al} 与嵌套结构 {song:{...}}（部分网易云接口版本返回嵌套）
         const track = (item && typeof item === 'object' && item.song && typeof item.song === 'object')
           ? item.song
@@ -1778,7 +1936,9 @@ function ProfileView({
           playCount: track.playCount ?? item.playCount ?? 0,
           platform: 'netease'
         } as Song
-      }) : [])
+      }) : []
+      setRankItems(items)
+      if (items.length) profileRankCache.set(rankKey, items)
       setRankLoading(false)
     }).catch(() => {
       if (cancelled) return
@@ -1797,6 +1957,8 @@ function ProfileView({
   }, [initialPlatform])
 
   useEffect(() => {
+    // 冻结（隐藏）期间不监听歌单内容变化：PROFILE 已不可见，无需跟随刷新。
+    if (suspended) return
     const handlePlaylistContentChanged = (event: Event) => {
       const detail = (event as CustomEvent<{
         platform?: MusicPlatform
@@ -1824,7 +1986,7 @@ function ProfileView({
 
     window.addEventListener('playlist-content-changed', handlePlaylistContentChanged)
     return () => window.removeEventListener('playlist-content-changed', handlePlaylistContentChanged)
-  }, [currentPlatform])
+  }, [currentPlatform, suspended])
 
   // 切换平台（查看他人时锁定目标平台，禁止切换）
   const handlePlatformSwitch = () => {
@@ -1943,52 +2105,46 @@ function ProfileView({
 
     if (platform === 'netease') {
       try {
-        // 获取用户歌单（查看他人时展示对方的歌单/我喜欢）
-        const playlistRes = await fetch(`http://localhost:3001/api/netease/user/playlist?uid=${uid}&cookie=${encodeURIComponent(cookie)}`)
-        const playlistData = await playlistRes.json()
-        
-        if (playlistData.playlist) {
-          const playlists: Playlist[] = playlistData.playlist.map((playlist: any) => ({
-            ...playlist,
-            id: playlist.id?.toString(),
-            name: playlist.name || '未命名歌单',
-            trackCount: Number(playlist.trackCount ?? playlist.trackNumber ?? 0),
-            platform: 'netease',
-            isLike: playlist.specialType === 5 || playlist.name === '我喜欢的音乐',
-            isCollected: playlist.userId?.toString() !== uid.toString()
-          }))
-          const created = playlists.filter((playlist) => playlist.userId?.toString() === uid.toString())
-          const subscribed = playlists.filter((playlist) => playlist.userId?.toString() !== uid.toString())
-          commitCreatedPlaylists(created)
-          commitSubscribedPlaylists(subscribed)
-        }
+        // 用户歌单：走 playlistService.getUserPlaylists（已有内存 + IndexedDB 缓存），
+        // 不再用裸 fetch 绕过缓存、每次打开个人中心都重发一遍同样的请求。
+        const playlists = await getUserPlaylists('netease', uid) as Playlist[]
+        commitCreatedPlaylists(playlists.filter((playlist) => !playlist.isCollected))
+        commitSubscribedPlaylists(playlists.filter((playlist) => Boolean(playlist.isCollected)))
 
-        // 获取用户详情
-        const detailRes = await fetch(`http://localhost:3001/api/netease/user/detail?uid=${uid}`)
-        const detailData = await detailRes.json()
-        
-        if (detailData.profile) {
-          commitUserDetail({
-            nickname: detailData.profile.nickname,
-            avatarUrl: detailData.profile.avatarUrl,
-            userId: detailData.profile.userId?.toString(),
-            signature: detailData.profile.signature,
-            vipType: detailData.profile.vipType,
-            city: detailData.profile.city,
-            birthday: detailData.profile.birthday,
-            followeds: detailData.profile.followeds,
-            follows: detailData.profile.follows,
-            playlistCount: detailData.profile.playlistCount,
-            level: detailData.level,
-            // 网易云特有数据
-            eventCount: detailData.profile.eventCount,
-            newFollows: detailData.profile.newFollows,
-            listenSongs: detailData.listenSongs,
-            createTime: detailData.profile.createTime,
-            gender: detailData.profile.gender,
-            province: detailData.profile.province,
-            backgroundUrl: detailData.profile.backgroundUrl
-          })
+        // 用户详情：按 `平台:用户ID` 短 TTL 缓存，重开同一用户资料页不再重复请求
+        const detailCacheKey = `netease:${uid}`
+        const cachedDetail = profileUserDetailCache.get(detailCacheKey)
+        if (cachedDetail) {
+          commitUserDetail(cachedDetail)
+        } else {
+          const detailRes = await fetch(`http://localhost:3001/api/netease/user/detail?uid=${uid}`)
+          const detailData = await detailRes.json()
+
+          if (detailData.profile) {
+            const detail: UserDetail = {
+              nickname: detailData.profile.nickname,
+              avatarUrl: detailData.profile.avatarUrl,
+              userId: detailData.profile.userId?.toString(),
+              signature: detailData.profile.signature,
+              vipType: detailData.profile.vipType,
+              city: detailData.profile.city,
+              birthday: detailData.profile.birthday,
+              followeds: detailData.profile.followeds,
+              follows: detailData.profile.follows,
+              playlistCount: detailData.profile.playlistCount,
+              level: detailData.level,
+              // 网易云特有数据
+              eventCount: detailData.profile.eventCount,
+              newFollows: detailData.profile.newFollows,
+              listenSongs: detailData.listenSongs,
+              createTime: detailData.profile.createTime,
+              gender: detailData.profile.gender,
+              province: detailData.profile.province,
+              backgroundUrl: detailData.profile.backgroundUrl
+            }
+            commitUserDetail(detail)
+            profileUserDetailCache.set(detailCacheKey, detail)
+          }
         }
       } catch (error) {
         console.error('获取网易云用户数据失败:', error)
@@ -2010,9 +2166,14 @@ function ProfileView({
       try {
         console.log('📤 正在获取QQ音乐用户数据...')
         
-        // 获取用户详情（包含歌单）
-        const detailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${userId}&cookie=${encodeURIComponent(cookie)}`)
-        const detailData = await detailRes.json()
+        // 获取用户详情（包含歌单）：按 `qq:userId` 短 TTL 缓存，重开同一主页不再重复请求
+        const qqDetailCacheKey = `qq:${userId}`
+        let detailData: any = profileQqDetailCache.get(qqDetailCacheKey)
+        if (!detailData) {
+          const detailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${userId}&cookie=${encodeURIComponent(cookie)}`)
+          detailData = await detailRes.json()
+          if (detailData && !detailData.error) profileQqDetailCache.set(qqDetailCacheKey, detailData)
+        }
         
         console.log('📥 QQ音乐用户详情:', detailData)
         console.log('📥 detailData.creator:', detailData.creator)
@@ -2279,7 +2440,11 @@ function ProfileView({
   }, [])
 
   return (
-    <div className="profile-overlay-root fixed inset-0 w-full h-full overflow-hidden z-50">
+    <div
+      className="profile-overlay-root fixed inset-0 w-full h-full overflow-hidden z-50"
+      aria-hidden={suspended || undefined}
+      style={suspended ? { visibility: 'hidden', pointerEvents: 'none' } : undefined}
+    >
       {/* ???????????????????????? */}
       <div
         className="profile-glass-mask absolute inset-0 cursor-pointer"
@@ -2295,7 +2460,7 @@ function ProfileView({
       <div className="relative z-10 w-full h-full flex items-center justify-center p-6" onClick={() => (viewStack.length > 0 ? clearView() : onClose())}>
                              <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
+          animate={suspended ? { opacity: 0, scale: 0.98 } : { opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
           transition={{ duration: 0.18 }}
           className="profile-glass-panel relative w-full h-full max-w-7xl max-h-[90vh] flex flex-col overflow-hidden rounded-[32px]"

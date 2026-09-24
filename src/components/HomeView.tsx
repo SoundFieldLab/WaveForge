@@ -478,10 +478,12 @@ function HomeView({
   const activeModules = platform === 'netease' ? neteaseModules : platform === 'qq' ? qqModules : platform === 'apple' ? appleModules : platform === 'spotify' ? spotifyModules : platform === 'kugou' ? kugouModules : sodaModules
   // 各平台登录身份：模块会话缓存按 HOME_MODULE_BY_ID[moduleId].platform 取对应平台身份，
   // Apple 模块为 storefront 级内容（无账号维度），固定匿名归属
+  // Apple 不能按匿名归属：登录态下 apple_playlists 模块会合并账号个性化推荐，
+  // 用 guest 键会让切换账号/登出后的同一天内读到上一个账号的推荐。
   const homeModuleIdentities: Partial<Record<MusicPlatform, HomeModuleIdentity>> = {
     netease: { loggedIn: neteaseLoggedIn, userId: neteaseUserId },
     qq: { loggedIn: qqLoggedIn, userId: qqUserId },
-    apple: { loggedIn: false },
+    apple: { loggedIn: appleLoggedIn || false },
     spotify: { loggedIn: spotifyLoggedIn, userId: spotifyUserId },
     kugou: { loggedIn: kugouLoggedIn, userId: kugouUserId },
     soda: { loggedIn: sodaLoggedIn, userId: sodaUserId },
@@ -1495,7 +1497,15 @@ function HomeView({
         }
         return
       }
-      if (detail.type !== 'like') return
+      if (detail.type !== 'like') {
+        // 加歌/删歌/建单/改名等变更：服务层已让用户歌单缓存失效，这里强制重读，
+        // 否则简约模式侧栏要等到下次登录态变化才会更新。
+        void loadUserPlaylists(true)
+        if (platform === 'apple' && selectedPlaylist && detail.playlistId && String(selectedPlaylist.id) === String(detail.playlistId)) {
+          void handlePlaylistClick(selectedPlaylist)
+        }
+        return
+      }
 
       const patchLikedPlaylist = (playlist: any) => playlist?.isLike
         ? {

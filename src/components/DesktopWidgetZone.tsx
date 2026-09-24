@@ -58,6 +58,8 @@ interface DesktopWidgetZoneProps {
   onOverlayOpenChange?: (open: boolean) => void
   layerState?: 'base' | 'active' | 'behind'
   musicContext: DesktopMusicWidgetContext
+  /** 桌面视图被别的模式隐藏（保活）：停掉天气/灾害等后台刷新 */
+  suspended?: boolean
 }
 
 function WidgetShell({
@@ -281,11 +283,13 @@ function CalendarWidget({ cardBlurAmount, accentColor, onOverlayOpenChange }: { 
   )
 }
 
-function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenChange }: {
+function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenChange, suspended = false }: {
   settings: DesktopCustomizationSettings
   cardBlurAmount: number
   accentColor: string
   onOverlayOpenChange?: (open: boolean) => void
+  /** 桌面视图被别的模式隐藏（保活）：停掉天气/灾害的后台刷新 */
+  suspended?: boolean
 }) {
   const [weather, setWeather] = useState<WeatherSnapshot | null>(() => getCachedWeather(settings, true))
   const [loading, setLoading] = useState(false)
@@ -356,7 +360,9 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
     }
     const startTimer = () => {
       stopTimer()
-      if (document.visibilityState !== 'visible') return
+      // 桌面视图被别的模式隐藏时（suspended）不要继续刷新天气：
+      // 窗口本身还是 visible，visibilityState 判断不出来，会一直在后台发请求。
+      if (document.visibilityState !== 'visible' || suspended) return
       void refreshWeather(true)
       timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
     }
@@ -374,7 +380,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
       document.removeEventListener('visibilitychange', onVisibilityChange)
       requestControllerRef.current?.abort()
     }
-  }, [refreshWeather, weatherIdentity])
+  }, [refreshWeather, weatherIdentity, suspended])
 
   const refreshHazards = useCallback(async (force = false) => {
     hazardControllerRef.current?.abort()
@@ -399,12 +405,12 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
   }, [])
 
   useEffect(() => {
-    if (!weather) return
+    if (!weather || suspended) return
     let disposed = false
     let idleHandle: number | null = null
     let fallbackTimer: number | null = null
     const load = () => {
-      if (!disposed && document.visibilityState === 'visible') void refreshHazards(false)
+      if (!disposed && !suspended && document.visibilityState === 'visible') void refreshHazards(false)
     }
     const idleWindow = window as Window & {
       requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number
@@ -428,7 +434,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
       document.removeEventListener('visibilitychange', onVisibilityChange)
       hazardControllerRef.current?.abort()
     }
-  }, [refreshHazards, weather?.location.latitude, weather?.location.longitude])
+  }, [refreshHazards, weather?.location.latitude, weather?.location.longitude, suspended])
 
   const weatherTheme = useMemo(
     () => weather ? getWeatherVisualTheme(weather.current.weatherCode, weather.current.isDay) : null,
@@ -634,7 +640,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
   )
 }
 
-function DesktopWidgetZone({ side, settings, cardBlurAmount, accentColor, onOverlayOpenChange, layerState = 'base', musicContext }: DesktopWidgetZoneProps) {
+function DesktopWidgetZone({ side, settings, cardBlurAmount, accentColor, onOverlayOpenChange, layerState = 'base', musicContext, suspended = false }: DesktopWidgetZoneProps) {
   const widgets = useMemo(() => settings[side], [settings, side])
   const zoneRef = useRef<HTMLDivElement>(null)
   const baseHeightRef = useRef(0)
@@ -694,14 +700,14 @@ function DesktopWidgetZone({ side, settings, cardBlurAmount, accentColor, onOver
 
   const renderWidget = (widget: DesktopWidgetType) => {
     if (widget === 'datetime') return <DateTimeWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} replaceTimeDuringFocus={replaceTimeDuringFocus} />
-    if (widget === 'weather') return <WeatherWidget key={widget} settings={settings} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
+    if (widget === 'weather') return <WeatherWidget key={widget} settings={settings} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} suspended={suspended} />
     if (widget === 'dayProgress') return <DayProgressWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
     if (widget === 'calendar') return <CalendarWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
     if (widget === 'notes') return <NotesWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
     if (widget === 'memo') return <MemoWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
     if (widget === 'habits') return <HabitsWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
     if (widget === 'countdown') return <CountdownWidget key={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} onOverlayOpenChange={onOverlayOpenChange} />
-    return <DesktopExtraWidget key={widget} type={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} context={musicContext} onOverlayOpenChange={onOverlayOpenChange} />
+    return <DesktopExtraWidget key={widget} type={widget} cardBlurAmount={cardBlurAmount} accentColor={accentColor} context={musicContext} onOverlayOpenChange={onOverlayOpenChange} suspended={suspended} />
   }
 
   return (

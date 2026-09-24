@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import type { NeteaseNativeBlock } from './model'
 import { NeteaseNativeBlockView, type ResourceCallbacks } from './NeteaseResourceView'
-import { fetchNeteaseCubePage, fillNeteaseCubeCovers, normalizeNeteaseCubePage, type NeteaseCubeTab } from './discover'
+import { loadNeteaseCubePage, type NeteaseCubeTab } from './discover'
 
 // src/features/neteaseExplore/NeteaseCubePageView.tsx
 // 站内渲染单个 cube 页（如「宝藏音乐人」这类 rnpage?component=cube-renderer-rn&page=xxx 入口），
@@ -28,7 +28,7 @@ export default function NeteaseCubePageView({ pageId, title, callbacks, onBack }
     setError('')
     void (async () => {
       try {
-        const page = await fillNeteaseCubeCovers(normalizeNeteaseCubePage(await fetchNeteaseCubePage(pageId, controller.signal)), controller.signal)
+        const page = await loadNeteaseCubePage(pageId, controller.signal)
         if (controller.signal.aborted) return
         setTabs(page.tabs)
         setBlocks(page.blocks)

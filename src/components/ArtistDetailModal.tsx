@@ -415,6 +415,8 @@ interface ArtistDetailModalProps {
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onCopyInfo?: (song: Song) => void
   onVideoPlaybackStart?: () => void
+  /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。隐藏时不消费返回键、不渲染 MV 视频。 */
+  suspended?: boolean
 }
 
 export default function ArtistDetailModal({
@@ -438,7 +440,8 @@ export default function ArtistDetailModal({
   onViewComments,
   onOpenArtist,
   onCopyInfo,
-  onVideoPlaybackStart
+  onVideoPlaybackStart,
+  suspended = false
 }: ArtistDetailModalProps) {
   const [artist, setArtist] = useState<Artist | null>(null)
   const [hotSongs, setHotSongs] = useState<Song[]>([])
@@ -461,13 +464,16 @@ export default function ArtistDetailModal({
   const [appleMvItem, setAppleMvItem] = useState<AppleWebItem | null>(null)
   // 子视频优先消费返回键，避免关闭父艺人页。
   useTvBack(() => {
+    // 冻结隐藏时不消费返回键，交给上层弹窗/页面处理
+    if (suspended) return false
     if (appleMvItem) {
       setAppleMvItem(null)
       return true
     }
     onClose()
     return true
-  }, [appleMvItem, onClose])
+  }, [appleMvItem, onClose, suspended])
+
   const [userPlaylists, setUserPlaylists] = useState<any[]>([])
   // 选歌播放：退出动画零时长，弹窗当帧卸载。整屏 backdrop-filter 退出节点在播放页
   // 同时挂载时会被 Chromium 保留为残留合成层（首页同款故障），退出动画越久越易触发。
@@ -500,6 +506,16 @@ export default function ArtistDetailModal({
       allSongsScrollRef.current = allSongsOuterRef.current
     }
   }, [activeTab, allSongs.length])
+
+  // 冻结隐藏时收起子弹窗（MV 视频 / 嵌套专辑）与右键菜单：状态被冻结保留，
+  // 若不重置，重开同一艺人会自动重放视频、或带着上次的子弹窗重新出现。
+  useEffect(() => {
+    if (!suspended) return
+    setSelectedMV(null)
+    setAppleMvItem(null)
+    setSelectedAlbum(null)
+    setContextMenu({ show: false, x: 0, y: 0, song: null, sourceSongs: [] })
+  }, [suspended])
   
   const textPrimary = playerTheme === 'dark' ? 'text-white' : 'text-black'
   const textSecondary = playerTheme === 'dark' ? 'text-white/60' : 'text-black/60'
@@ -1068,6 +1084,9 @@ export default function ArtistDetailModal({
 
   // 使用艺人头像作为背景
   const backgroundImage = artist?.picUrl || ''
+
+  // 冻结隐藏时不渲染 DOM：避免隐藏弹窗被 TV 焦点/点击命中，MV 视频也随卸载停止播放。
+  if (suspended) return null
 
   return (
     <>

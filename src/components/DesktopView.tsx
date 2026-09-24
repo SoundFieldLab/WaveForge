@@ -27,7 +27,7 @@ import { getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleFavoriteSongs, 
 import { sodaMediaToSong } from '../services/sodaService'
 import { mergeAppleRecentPlayback } from '../services/appleRecentPlayback'
 import { desktopWallpaperManager, DesktopLiveWallpaperSource, toWallpaperUrl } from '../services/desktopWallpaperManager'
-import { deletePlaylist, getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks, subscribePlaylist, updatePlaylist } from '../services/playlistService'
+import { deletePlaylist, getCachedUserPlaylists, getPlaylistDetail, getUserPlaylists, removeSongFromPlaylist, streamNeteasePlaylistTracks, subscribePlaylist, updatePlaylist } from '../services/playlistService'
 import { useColorThief } from '../hooks/useColorThief'
 import {
   DESKTOP_CUSTOMIZATION_EVENT,
@@ -126,6 +126,9 @@ interface DesktopViewProps {
   onRemoteClick: () => void
   /** 播放设备控制（音频输出设备 / AirPlay 投送）弹窗 */
   onOpenDeviceControl: () => void
+  /** 保活但不可见（用户切到别的模式了）：暂停窗口级副作用（融合穿透的 mousemove 判定），
+   *  否则隐藏的桌面视图会把别的模式的点击判定成「透明区」而穿透掉。 */
+  suspended?: boolean
 }
 
 interface Playlist {
@@ -165,6 +168,55 @@ const qqRecentSongHashId = (mid: string): number => {
     hash = (hash * 31 + mid.charCodeAt(i)) | 0
   }
   return Math.abs(hash) || 1
+}
+
+/**
+ * 桌面模式内部的「上次结果」镜像（仅内存，不落盘）。
+ * 目的只有一个：重进桌面 / 切回同一平台时先把已知内容铺上，而不是「清空 → 骨架 → 再出现」。
+ * 所有条目在账号/登录态变化（waveforge-auth-changed）时清空，避免读到上一个账号的数据。
+ */
+const DESKTOP_RECENT_CACHE_MAX = 6
+const DESKTOP_PLAYLIST_SONGS_CACHE_MAX = 8
+const desktopRecentSongsCache = new Map<string, { songs: Song[]; covers: string[] }>()
+const desktopPlaylistSongsCache = new Map<string, Song[]>()
+
+function readPlaylistSongsCache(key: string): Song[] | undefined {
+  const hit = desktopPlaylistSongsCache.get(key)
+  if (!hit) return undefined
+  // 重新插入维护「最近使用在下」的淘汰顺序
+  desktopPlaylistSongsCache.delete(key)
+  desktopPlaylistSongsCache.set(key, hit)
+  return hit
+}
+
+function writePlaylistSongsCache(key: string, songs: Song[]): void {
+  // 空结果（接口异常 / 未登录兜底）不入缓存，否则重开会一直渲染一个空歌单
+  if (!key || songs.length === 0) return
+  desktopPlaylistSongsCache.delete(key)
+  desktopPlaylistSongsCache.set(key, songs)
+  while (desktopPlaylistSongsCache.size > DESKTOP_PLAYLIST_SONGS_CACHE_MAX) {
+    const oldest = desktopPlaylistSongsCache.keys().next().value
+    if (oldest === undefined) break
+    desktopPlaylistSongsCache.delete(oldest)
+  }
+}
+
+function writeRecentSongsCache(key: string, songs: Song[], covers: string[]): void {
+  if (!key || songs.length === 0) return
+  desktopRecentSongsCache.delete(key)
+  desktopRecentSongsCache.set(key, { songs, covers })
+  while (desktopRecentSongsCache.size > DESKTOP_RECENT_CACHE_MAX) {
+    const oldest = desktopRecentSongsCache.keys().next().value
+    if (oldest === undefined) break
+    desktopRecentSongsCache.delete(oldest)
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    desktopRecentSongsCache.clear()
+    desktopPlaylistSongsCache.clear()
+  })
 }
 
 function DesktopView({
@@ -224,12 +276,17 @@ function DesktopView({
   onExitDesktopMode,
   onRemoteClick,
   onOpenDeviceControl,
+  suspended = false,
 }: DesktopViewProps) {
   const fallbackPlaybackSnapshot = useMemo(() => ({
     currentTime: currentTimeProp,
     duration,
     isPlaying,
   }), [currentTimeProp, duration, isPlaying])
+  // 「当前是否被别的模式隐藏」的实时值：effect 的清理函数要在卸载那一刻读它，
+  // 不能只看闭包里那次渲染的值。
+  const suspendedRef = useRef(suspended)
+  suspendedRef.current = suspended
   const [desktopPlaybackStore] = useState<PlaybackTimeStore>(() => playbackTimeStore || createPlaybackTimeStore(fallbackPlaybackSnapshot))
   const activePlaybackStore = playbackTimeStore || desktopPlaybackStore
   const playbackSnapshot = useSyncExternalStore(
@@ -532,10 +589,11 @@ function DesktopView({
 
     // Chromium may keep decoding a looping wallpaper while the window is hidden.
     // Pause the media pipeline off-screen and resume the same animation on return.
+    // 被别的模式隐藏（suspended）时同样要停：窗口本身还是 visible，这个循环视频会一直解码。
     const syncVideoPlayback = () => {
       const video = videoRef.current
       if (!video) return
-      if (document.visibilityState !== 'visible' || focusTimer.timer.status === 'ringing') {
+      if (document.visibilityState !== 'visible' || suspended || focusTimer.timer.status === 'ringing') {
         video.pause()
         return
       }
@@ -545,7 +603,7 @@ function DesktopView({
     syncVideoPlayback()
     document.addEventListener('visibilitychange', syncVideoPlayback)
     return () => document.removeEventListener('visibilitychange', syncVideoPlayback)
-  }, [desktopVideoUrl, focusTimer.timer.status])
+  }, [desktopVideoUrl, focusTimer.timer.status, suspended])
 
   useEffect(() => {
     if (focusTimer.timer.status !== 'ringing') {
@@ -809,7 +867,8 @@ function DesktopView({
       wallpaperRotationTimerRef.current = null
     }
     if (
-      !wallpaperRotation.enabled
+      suspended
+      || !wallpaperRotation.enabled
       || wallpaperRotation.selectedWallpaperIds.length < 2
       || wallpaperSyncEnabled
     ) return
@@ -827,12 +886,23 @@ function DesktopView({
     }
   }, [
     rotateWallpaperEngine,
+    suspended,
     wallpaperRotation.enabled,
     wallpaperRotation.intervalMinutes,
     wallpaperRotation.mode,
     wallpaperRotation.selectedWallpaperIds.join('|'),
     wallpaperSyncEnabled,
   ])
+
+  // 被别的模式隐藏时停掉桌面自动换壁纸：它每次触发都会去取随机图（真实网络请求），
+  // 人在别的模式里根本看不到，纯浪费。回到桌面模式再恢复。
+  useEffect(() => {
+    if (suspended) {
+      desktopWallpaperManager.stopAutoSwitch()
+      return
+    }
+    desktopWallpaperManager.startAutoSwitch()
+  }, [suspended])
 
   // 跳到下一个支持的壁纸（当视频格式不支持时）
   const skipToNextWallpaper = () => {
@@ -901,10 +971,27 @@ function DesktopView({
       return
     }
 
+    const mapPlaylists = (data: any[]) => data.map((p: any) => ({
+      ...p,
+      id: p.id,
+      name: p.name,
+      coverImgUrl: p.coverImgUrl || p.coverUrl || '',
+      trackCount: p.trackCount ?? p.tracksTotal ?? 0,
+      platform: currentPlatform,
+      userId: p.userId,
+      owner: p.owner,
+      ownedByMe: p.ownedByMe,
+    }))
+    // 内存里已有当前平台/账号的歌单（playlistService 的会话缓存）：先铺上再静默刷新。
+    // Apple 列表由本组件自行拼装、不走 getUserPlaylists，因此不参与这个种子。
+    const seededPlaylists = currentPlatform === 'apple' ? undefined : getCachedUserPlaylists(currentPlatform, activeUserId)
+
     const loadPlaylists = async () => {
-      setLoading(true)
-      setPlaylistListError(null)
-      setPlaylists([])
+      if (!seededPlaylists?.length) {
+        setLoading(true)
+        setPlaylistListError(null)
+        setPlaylists([])
+      }
 
       try {
         if (currentPlatform === 'apple') {
@@ -984,27 +1071,19 @@ function DesktopView({
               : undefined
         const data = await getUserPlaylists(currentPlatform, activeUserId, username)
         if (!isCurrentRequest()) return
-        setPlaylists(data.map((p: any) => ({
-          ...p,
-          id: p.id,
-          name: p.name,
-          coverImgUrl: p.coverImgUrl || p.coverUrl || '',
-          trackCount: p.trackCount ?? p.tracksTotal ?? 0,
-          platform: currentPlatform,
-          userId: p.userId,
-          owner: p.owner,
-          ownedByMe: p.ownedByMe,
-        })))
+        setPlaylists(mapPlaylists(data))
       } catch (error) {
         if (!isCurrentRequest()) return
         console.error('加载歌单失败:', error)
-        setPlaylists([])
+        // 已经有会话缓存铺着时就保留它，别因为一次瞬时失败把列表清空
+        if (!seededPlaylists?.length) setPlaylists([])
         setPlaylistListError(error instanceof Error ? error.message : '歌单加载失败，请重试')
       } finally {
         if (isCurrentRequest()) setLoading(false)
       }
     }
 
+    if (seededPlaylists?.length) setPlaylists(mapPlaylists(seededPlaylists))
     void loadPlaylists()
     return () => {
       if (playlistListRequestRef.current === requestId) playlistListRequestRef.current += 1
@@ -1039,11 +1118,27 @@ function DesktopView({
 
     const controller = new AbortController()
     recentLoadControllerRef.current = controller
-    // 切换平台或登录态变化时先清空旧数据，避免新平台加载完成前显示上一平台的最近播放。
-    setRecentSongs([])
-    setRecentCovers([])
-    recentSongsRef.current = []
-    recentCoversRef.current = []
+    // 同一平台/账号已有结果：先铺上再后台刷新，避免「清空 → 重排」的闪动。
+    // 换平台/换账号时 key 不同，仍然清零，避免显示上一个来源的最近播放。
+    const recentOwnerKey = currentPlatform === 'netease' ? neteaseUserId
+      : currentPlatform === 'qq' ? qqUserId
+        : currentPlatform === 'spotify' ? spotifyUserId
+          : currentPlatform === 'soda' ? sodaUserId
+            : currentPlatform === 'apple' ? (appleUsername || 'apple')
+              : ''
+    const recentCacheKey = `${currentPlatform}:${recentOwnerKey || 'session'}`
+    const cachedRecent = desktopRecentSongsCache.get(recentCacheKey)
+    const commitRecent = (songs: Song[], covers: string[]) => {
+      setRecentSongs(songs)
+      setRecentCovers(covers)
+      recentSongsRef.current = songs
+      recentCoversRef.current = covers
+      writeRecentSongsCache(recentCacheKey, songs, covers)
+    }
+    setRecentSongs(cachedRecent?.songs ?? [])
+    setRecentCovers(cachedRecent?.covers ?? [])
+    recentSongsRef.current = cachedRecent?.songs ?? []
+    recentCoversRef.current = cachedRecent?.covers ?? []
 
     const loadRecent = async () => {
       try {
@@ -1057,10 +1152,7 @@ function DesktopView({
           }
           const songs = mergeAppleRecentPlayback(remoteSongs)
           if (controller.signal.aborted) return
-          setRecentSongs(songs)
-          setRecentCovers(songs.map(song => song.album.picUrl || '').filter(Boolean))
-          recentSongsRef.current = songs
-          recentCoversRef.current = songs.map(song => song.album.picUrl || '').filter(Boolean)
+          commitRecent(songs, songs.map(song => song.album.picUrl || '').filter(Boolean))
           return
         }
         if (currentPlatform === 'spotify') {
@@ -1069,10 +1161,7 @@ function DesktopView({
           const songs = tracks.map(spotifyTrackToSong)
           if (controller.signal.aborted) return
           const covers = songs.map(song => song.album.picUrl || '').filter(Boolean).slice(0, 4)
-          setRecentSongs(songs)
-          setRecentCovers(covers)
-          recentSongsRef.current = songs
-          recentCoversRef.current = covers
+          commitRecent(songs, covers)
           return
         }
         if (currentPlatform === 'soda') {
@@ -1086,10 +1175,7 @@ function DesktopView({
           const songs: Song[] = (Array.isArray(payload?.songs) ? payload.songs : []).map(sodaMediaToSong).filter((song: Song) => Boolean(song.mid))
           if (controller.signal.aborted) return
           const covers = songs.map(song => song.album.picUrl || '').filter(Boolean).slice(0, 4)
-          setRecentSongs(songs)
-          setRecentCovers(covers)
-          recentSongsRef.current = songs
-          recentCoversRef.current = covers
+          commitRecent(songs, covers)
           return
         }
         const cookie = currentPlatform === 'qq'
@@ -1172,18 +1258,17 @@ function DesktopView({
             fee: songSource?.fee,
           }
         }).filter((song: Song | null): song is Song => Boolean(song && song.name !== '未知歌曲'))
-        setRecentSongs(songs)
-        recentSongsRef.current = songs
         const covers = songs.map(song => song.album.picUrl).filter(url => typeof url === 'string' && url.length > 0).slice(0, 4)
-        setRecentCovers(covers)
-        recentCoversRef.current = covers
+        commitRecent(songs, covers)
       } catch (error) {
         if ((error as Error)?.name === 'AbortError') return
         console.error('❌ [DesktopView] 加载最近播放失败:', error)
-        setRecentSongs([])
-        setRecentCovers([])
-        recentSongsRef.current = []
-        recentCoversRef.current = []
+        if (!cachedRecent) {
+          setRecentSongs([])
+          setRecentCovers([])
+          recentSongsRef.current = []
+          recentCoversRef.current = []
+        }
       } finally {
         if (recentLoadControllerRef.current === controller) {
           recentLoadControllerRef.current = null
@@ -1193,6 +1278,8 @@ function DesktopView({
 
     void loadRecent()
     const handleReported = (event: Event) => {
+      // 被别的模式隐藏时不跟着每首歌重拉一次「最近播放」：看不到，且每次都是一次真实网络请求。
+      if (suspendedRef.current) return
       const platform = (event as CustomEvent<{ platform?: MusicPlatform }>).detail?.platform
       if (!platform || platform === currentPlatform) void loadRecent()
     }
@@ -1621,6 +1708,7 @@ function DesktopView({
       }
       setShowDeletePlaylist(false)
       setPlaylistContextMenu({ show: false, x: 0, y: 0, playlist: null })
+      desktopPlaylistSongsCache.delete(`${targetPlatform}:${String(playlist.id)}`)
       if (selectedPlaylist && String(selectedPlaylist.id) === String(playlist.id)) closePlaylistDetail()
       notifyPlaylistChange(targetPlatform, String(playlist.id))
       showToastNotification('歌单已删除', 'success')
@@ -1656,10 +1744,13 @@ function DesktopView({
     }
     const playlistLoadController = new AbortController()
     playlistLoadControllerRef.current = playlistLoadController
+    // 这个歌单刚看过（本组件的小 LRU）：先把已知曲目铺上，请求照常在后台做，不再先清空再等。
+    const songCacheKey = `${playlistPlatform}:${String(playlist.id)}`
+    const cachedSongs = readPlaylistSongsCache(songCacheKey)
     setSelectedPlaylist(playlist)
     setShowPlaylistDetail(true)
-    setLoadingPlaylistSongs(true)
-    setPlaylistSongs([])
+    setLoadingPlaylistSongs(!cachedSongs)
+    setPlaylistSongs(cachedSongs ?? [])
     
     // 清除隐藏定时器，保持歌单栏显示
     if (hideCarouselTimerRef.current) {
@@ -1676,12 +1767,14 @@ function DesktopView({
           const songs = (await getAppleFavoriteSongs(5000, storefront)).map(track => appleSongToSong(track, storefront))
           if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
           setPlaylistSongs(songs)
+          writePlaylistSongsCache(songCacheKey, songs)
           return
         }
         if (playlistId === APPLE_LIBRARY_ID) {
           const songs = (await getAppleLibrarySongs(500)).map(appleLibraryTrackToSong)
           if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
           setPlaylistSongs(songs)
+          writePlaylistSongsCache(songCacheKey, songs)
           return
         }
         const tracks = playlistId.startsWith('pl.')
@@ -1692,6 +1785,7 @@ function DesktopView({
           ? tracks.map(track => appleSongToSong(track as Parameters<typeof appleSongToSong>[0], storefront))
           : tracks.map(track => appleLibraryTrackToSong(track as Parameters<typeof appleLibraryTrackToSong>[0]))
         setPlaylistSongs(songs)
+        writePlaylistSongsCache(songCacheKey, songs)
       } else if (playlistPlatform === 'netease') {
         await streamNeteasePlaylistTracks(playlist.id, {
           signal: playlistLoadController.signal,
@@ -1715,7 +1809,11 @@ function DesktopView({
               const seen = new Set(current.map(song => String(song.id)))
               return [...current, ...pageSongs.filter(song => !seen.has(String(song.id)))]
             })
-            if (firstPage) setLoadingPlaylistSongs(false)
+            // 记住首页：重开同一歌单先渲染这 120 首，全量随后补齐（只为消除空白闪动）。
+            if (firstPage) {
+              writePlaylistSongsCache(songCacheKey, pageSongs)
+              setLoadingPlaylistSongs(false)
+            }
           },
         })
       } else if (playlistPlatform === 'qq') {
@@ -1745,13 +1843,16 @@ function DesktopView({
         }))
         console.log(`✅ [DesktopView] 设置了 ${songs.length} 首歌曲到 playlistSongs`)
         setPlaylistSongs(songs)
+        writePlaylistSongsCache(songCacheKey, songs)
         }
       } else if (playlistPlatform === 'spotify' || playlistPlatform === 'soda' || playlistPlatform === 'kugou') {
         const data = await getPlaylistDetail(String(playlist.id || ''), playlistPlatform)
         if (playlistLoadController.signal.aborted || playlistLoadControllerRef.current !== playlistLoadController) return
         const detailed = { ...playlist, ...data?.playlist, platform: playlistPlatform, isCollected: playlist.isCollected }
         setSelectedPlaylist(previous => previous ? { ...previous, ...detailed } : detailed)
-        setPlaylistSongs(Array.isArray(data?.tracks) ? data.tracks : [])
+        const tracks: Song[] = Array.isArray(data?.tracks) ? data.tracks : []
+        setPlaylistSongs(tracks)
+        writePlaylistSongsCache(songCacheKey, tracks)
       }
     } catch (error) {
       if ((error as Error).name !== 'AbortError' && playlistLoadControllerRef.current === playlistLoadController) {
@@ -1772,6 +1873,16 @@ function DesktopView({
 
   const removeSongFromVisiblePlaylist = (song: Song) => {
     setPlaylistSongs(previous => previous.filter(item => !isSameSong(item, song)))
+    // 同步小 LRU：否则重开这个歌单时被移除的歌会在缓存里「复活」。
+    if (selectedPlaylist) {
+      const cacheKey = `${selectedPlaylist.platform || currentPlatform}:${String(selectedPlaylist.id)}`
+      const cached = desktopPlaylistSongsCache.get(cacheKey)
+      if (cached) {
+        const remaining = cached.filter(item => !isSameSong(item, song))
+        if (remaining.length > 0) writePlaylistSongsCache(cacheKey, remaining)
+        else desktopPlaylistSongsCache.delete(cacheKey)
+      }
+    }
     setSelectedPlaylist(previous => previous ? {
       ...previous,
       trackCount: Math.max(0, Number(previous.trackCount || 0) - 1),
@@ -2018,9 +2129,11 @@ function DesktopView({
     document.addEventListener('mousemove', onMouseMove)
     return () => {
       document.removeEventListener('mousemove', onMouseMove)
-      window.electron?.desktopFusion?.setInteractive(false)
+      // 被别的模式隐藏时不能把整窗改成穿透：那会让新模式什么都点不动
+      //（App 在非桌面模式下强制整窗可交互，这里必须让位）。清理时按「当前」suspended 判断。
+      if (!suspendedRef.current) window.electron?.desktopFusion?.setInteractive(false)
     }
-  }, [desktopFusionEnabled, desktopOverlayOpen])
+  }, [desktopFusionEnabled, desktopOverlayOpen, suspended])
 
   const widgetHandlersRef = useRef({
     onVolumeChange,
@@ -2210,6 +2323,7 @@ function DesktopView({
 
       <DesktopWidgetZone
         side="left"
+        suspended={suspended}
         settings={desktopCustomization}
         cardBlurAmount={cardBlurAmount}
         accentColor={desktopAccentColor}
@@ -2219,6 +2333,7 @@ function DesktopView({
       />
       <DesktopWidgetZone
         side="right"
+        suspended={suspended}
         settings={desktopCustomization}
         cardBlurAmount={cardBlurAmount}
         accentColor={desktopAccentColor}

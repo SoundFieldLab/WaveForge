@@ -9,6 +9,7 @@ import { getPlatformCapabilities, platformLabel } from '../services/platforms'
 import SongContextMenu from './SongContextMenu'
 import CachedImage from './CachedImage'
 import type { PlaybackOrigin } from '../types/playbackNavigation'
+import { createTtlCache } from '../utils/ttlCache'
 
 const formatDuration = (milliseconds = 0) => {
   const seconds = Math.max(0, Math.round(milliseconds / 1000))
@@ -17,6 +18,13 @@ const formatDuration = (milliseconds = 0) => {
 const songKey = (song: Song) => `${song.platform}:${song.id || song.mid || song.name}`
 const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
 
+// 「平台 + 分栏 + 关键词」结果的本会话缓存：同一搜索反复进入/切分栏不该重打接口。
+// 只存成功且非空的结果，登录态变化时清空（歌单结果的归属/收藏态可能变化），不落盘。
+const searchResultsCache = createTtlCache<{ songs?: Song[]; artists?: any[]; albums?: any[]; playlists?: any[] }>({ ttlMs: 2 * 60 * 1000, maxEntries: 40 })
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => searchResultsCache.clear())
+}
+
 type SearchTab = 'songs' | 'artists' | 'albums' | 'playlists'
 
 interface TraditionalSearchProps {
@@ -24,6 +32,8 @@ interface TraditionalSearchProps {
   accent: string
   isDark: boolean
   currentSong: Song | null
+  /** 传统视图保活（冻结）时：false = 本页被隐藏，不自动重搜、不抢焦点 */
+  active?: boolean
   onBack: () => void
   onSongSelect: (song: Song, songs: Song[], origin: PlaybackOrigin) => void
   onOpenPlaylist: (playlist: any) => void
@@ -44,7 +54,7 @@ const TAB_LABELS: Array<[SearchTab, string]> = [
 const supportsPlaylistSearch = (platform: MusicPlatform) => getPlatformCapabilities(platform).searchPlaylists
 
 function TraditionalSearch({
-  platform, accent, isDark, currentSong, onSongSelect, onOpenPlaylist,
+  platform, accent, isDark, active = true, currentSong, onSongSelect, onOpenPlaylist,
   onOpenArtist, onOpenAlbum, onPlayNext, onAddToFavorites, onRemoveFromFavorites,
   onAddToPlaylist, onViewComments, onCopyInfo, userPlaylists = [],
 }: TraditionalSearchProps) {
@@ -87,6 +97,20 @@ function TraditionalSearch({
     const trimmed = query.trim()
     if (!trimmed) return
     pushHistory(trimmed)
+    const cacheKey = `${platform}:${targetTab}:${trimmed}`
+    const cached = searchResultsCache.get(cacheKey)
+    if (cached) {
+      // 本会话刚搜过同样的「平台+分栏+关键词」：直接复用，不再打接口
+      requestIdRef.current += 1
+      setSearched(true)
+      setLoading(false)
+      setError('')
+      if (targetTab === 'songs') setSongs(cached.songs || [])
+      else if (targetTab === 'artists') setArtists(cached.artists || [])
+      else if (targetTab === 'albums') setAlbums(cached.albums || [])
+      else setPlaylists(cached.playlists || [])
+      return
+    }
     const requestId = ++requestIdRef.current
     setLoading(true)
     setSearched(true)
@@ -95,20 +119,29 @@ function TraditionalSearch({
       if (targetTab === 'songs') {
         const result = await searchSongs(trimmed, 30, platform)
         if (requestId !== requestIdRef.current) return
-        setSongs(result.songs || [])
+        const list = result.songs || []
+        setSongs(list)
+        // 失败/空结果不缓存，下次仍会重新请求
+        if (list.length > 0) searchResultsCache.set(cacheKey, { songs: list })
       } else if (targetTab === 'artists') {
         const result = await searchArtists(trimmed, platform)
         if (requestId !== requestIdRef.current) return
-        setArtists(result || [])
+        const list = result || []
+        setArtists(list)
+        if (list.length > 0) searchResultsCache.set(cacheKey, { artists: list })
       } else if (targetTab === 'albums') {
         const result = await searchAlbums(trimmed, platform)
         if (requestId !== requestIdRef.current) return
-        setAlbums(result || [])
+        const list = result || []
+        setAlbums(list)
+        if (list.length > 0) searchResultsCache.set(cacheKey, { albums: list })
       } else {
         const data = await searchPlaylists(trimmed, platform)
         if (requestId !== requestIdRef.current) return
         if (data.unsupported) throw new Error(`${platformLabel(platform)}暂不支持歌单搜索`)
-        setPlaylists(data.playlists || [])
+        const list = data.playlists || []
+        setPlaylists(list)
+        if (list.length > 0) searchResultsCache.set(cacheKey, { playlists: list })
       }
     } catch (error) {
       if (requestId === requestIdRef.current) {
@@ -131,20 +164,23 @@ function TraditionalSearch({
       setError('')
       return
     }
-    if (tab !== 'songs') return
+    // 被冻结（隐藏）时不自动重搜：重新可见时 active 变化会让本 effect 再跑
+    if (!active || tab !== 'songs') return
     debounceRef.current = window.setTimeout(() => {
       debounceRef.current = null
       void runSearch(trimmed, 'songs')
     }, 320)
     return () => { if (debounceRef.current !== null) window.clearTimeout(debounceRef.current) }
-  }, [keyword, tab, runSearch])
+  }, [keyword, tab, runSearch, active])
 
-  useEffect(() => { inputRef.current?.focus() }, [])
+  // 重新可见时聚焦输入框（与原先「每次进入搜索页自动聚焦」的体感一致）
+  useEffect(() => { if (active) inputRef.current?.focus() }, [active])
   useEffect(() => {
     if (previousTabRef.current === tab) return
+    if (!active) return
     previousTabRef.current = tab
     if (tab !== 'songs' && keyword.trim()) void runSearch(keyword, tab)
-  }, [tab, keyword, runSearch])
+  }, [tab, keyword, runSearch, active])
 
   useEffect(() => {
     if (tab === 'playlists' && !supportsPlaylistSearch(platform)) setTab('songs')
@@ -360,5 +396,8 @@ function EmptyHint({ keyword }: { keyword: string }) {
     </div>
   )
 }
+
+/** 清空搜索结果缓存（测试用；生产路径由登录态变化事件清空）。 */
+export const clearTraditionalSearchCache = () => searchResultsCache.clear()
 
 export default memo(TraditionalSearch)

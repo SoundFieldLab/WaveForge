@@ -3,7 +3,16 @@ import { motion } from 'framer-motion'
 import { X, Music, Play, ListPlus } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getSimilarSongs, getProxiedImageUrl } from '../services/musicApi'
+import { createTtlCache } from '../utils/ttlCache'
 import { useTvBack } from '../tv/tvCore'
+
+// 相似歌曲短 TTL 缓存：同一首歌反复开关面板不再重发请求 / 重放加载态。
+// 空结果与错误不入缓存（否则「确实没有」会被钉死）。仅内存、不落盘；登录态变化时清空。
+const similarSongsCache = createTtlCache<Song[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 30 })
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => similarSongsCache.clear())
+}
+const similarCacheKey = (song: Song) => `${song.platform || 'netease'}:${song.mid ?? song.id}`
 
 interface SimilarSongsPanelProps {
   song: Song
@@ -11,17 +20,21 @@ interface SimilarSongsPanelProps {
   onPlayNow?: (song: Song) => void
   onPlayNext?: (song: Song) => void
   playerTheme: 'dark' | 'light'
+  /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。隐藏时不可聚焦、不可点击。 */
+  suspended?: boolean
 }
 
-function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }: SimilarSongsPanelProps) {
-  // TV 遥控器 BACK：关闭相似歌曲面板
+function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme, suspended = false }: SimilarSongsPanelProps) {
+  // TV 遥控器 BACK：关闭相似歌曲面板（冻结隐藏时不消费返回键，交给上层）
   useTvBack(() => {
+    if (suspended) return false
     onClose()
     return true
-  }, [onClose])
+  }, [onClose, suspended])
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
-  const [songs, setSongs] = useState<Song[]>([])
-  const [loading, setLoading] = useState(true)
+  const cachedInitialSongs = similarSongsCache.get(similarCacheKey(song))
+  const [songs, setSongs] = useState<Song[]>(() => cachedInitialSongs || [])
+  const [loading, setLoading] = useState(() => !cachedInitialSongs?.length)
 
   useEffect(() => {
     const handleAccent = (e: Event) => {
@@ -34,6 +47,14 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
 
   useEffect(() => {
     let cancelled = false
+    // 命中缓存：直接展示，不发请求、不转圈。
+    const cacheKey = similarCacheKey(song)
+    const cached = similarSongsCache.get(cacheKey)
+    if (cached?.length) {
+      setSongs(cached)
+      setLoading(false)
+      return () => { cancelled = true }
+    }
     const fetchSimilar = async () => {
       // Apple 无相似歌曲接口（入口已按能力表隐藏，此处兜底）
       if (song.platform === 'apple') return
@@ -56,7 +77,7 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
               merged.push(candidate)
               if (merged.length >= 30) break
             }
-            if (!cancelled && merged.length) setSongs(merged)
+            if (!cancelled && merged.length) { setSongs(merged); similarSongsCache.set(cacheKey, merged) }
           } catch { /* ignore */ }
           if (!cancelled) setLoading(false)
         }
@@ -82,7 +103,7 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
               merged.push(candidate)
               if (merged.length >= 30) break
             }
-            if (!cancelled && merged.length) setSongs(merged)
+            if (!cancelled && merged.length) { setSongs(merged); similarSongsCache.set(cacheKey, merged) }
           } catch { /* ignore */ }
           if (!cancelled) setLoading(false)
         }
@@ -114,7 +135,7 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
               platform: song.platform
             } as Song
           })
-          if (!cancelled) setSongs(normalized)
+          if (!cancelled) { setSongs(normalized); if (normalized.length) similarSongsCache.set(cacheKey, normalized) }
         }
       } catch { /* ignore */ }
       if (!cancelled) setLoading(false)
@@ -122,6 +143,8 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
     fetchSimilar()
     return () => { cancelled = true }
   }, [song])
+
+  if (suspended) return null
 
   return (
     <motion.div

@@ -12,9 +12,28 @@ import QQMusicJourney from '../../components/QQMusicJourney'
 import { fetchQQGuessYouLikeBatch, getExploreCookie } from '../../services/exploreApi'
 import { applyFavoriteMutation, getFavoriteSongIdentifiers, getFavoriteUserId, loadFavoriteIdentifiers } from '../../services/favoriteStatusService'
 import { fetchQQExploreFeedbackOptions, fetchQQExplorePreferences, fetchQQRadarSongs, resolveQQExploreSong, resolveQQExploreSongs, saveQQExplorePreferences, submitQQExploreFeedback, type QQExploreFeedbackOption, type QQExplorePreferenceItem } from './api'
-import { qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, isQQStarLightCard, isHiddenQQMusicHallShelf, type QQExploreCard, type QQExploreModule, type QQMusicHallCard, type QQMusicHallShelf } from './model'
+import { qqCardPlaylist, qqModuleIdentity, qqModuleInstanceIdentity, isQQStarLightCard, isUnopenableQQCard, isHiddenQQMusicHallShelf, type QQExploreCard, type QQExploreModule, type QQMusicHallCard, type QQMusicHallShelf } from './model'
 import QQRadarPlayer, { type QQRadarContinuation } from './QQRadarPlayer'
 import { qqExploreAccountKey, useQQExploreController } from './useQQExploreController'
+import { createTtlCache } from '../../utils/ttlCache'
+
+// 视图被隐藏/重挂载（切模式再回来）时不要重复请求：猜你喜欢批量、推荐偏好、反馈选项都是
+// 只读且短时间不会变的账号数据，按账号/卡片 token 存一份短 TTL 结果即可。
+const guessYouLikeCache = createTtlCache<{ preview: Song | null; songs: Song[] }>({ ttlMs: 3 * 60 * 1000, maxEntries: 6 })
+const preferencesCache = createTtlCache<{ items: QQExplorePreferenceItem[]; initial: Map<string, boolean> }>({ ttlMs: 5 * 60 * 1000, maxEntries: 4 })
+const feedbackOptionsCache = createTtlCache<QQExploreFeedbackOption[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 24 })
+// 红心标识在 favoriteStatusService 里已有账号级缓存；这里额外记住「上次加载完成的账号 + 结果」，
+// 让重挂载时先铺上已知状态，而不是先清空再等一次异步（红心会闪一下）。
+const favoriteSnapshotByOwner = new Map<string, Set<string>>()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    guessYouLikeCache.clear()
+    preferencesCache.clear()
+    feedbackOptionsCache.clear()
+    favoriteSnapshotByOwner.clear()
+  })
+}
 
 interface QQExplorePageProps {
   loggedIn: boolean
@@ -70,7 +89,13 @@ function cleanQQSubtitle(value?: string) {
   return (value || '').replace(/^\s*[_\-—·•]+\s*/, '').trim()
 }
 
+// 明确不需要的整栏：按栏目标题命中即隐藏。标题是服务端下发的栏目名（如「热门节目，听点不一样的 🎧」），
+// 校验标题而不是卡面文案，避免某张卡刚好叫同名时把有用栏目一起误伤。
+const HIDDEN_QQ_RECOMMENDATION_TITLES = ['热门节目', '听点不一样的'] as const
+
 function isHiddenQQRecommendationModule(module: QQExploreModule) {
+  const title = module.title || ''
+  if (HIDDEN_QQ_RECOMMENDATION_TITLES.some(label => title.includes(label))) return true
   const text = `${module.title} ${module.cards.map(card => `${card.title} ${card.subtitle || ''} ${card.reason || ''}`).join(' ')}`
   return /直播|编辑甄选/.test(text)
 }
@@ -261,7 +286,11 @@ export default function QQExplorePage({
   const [guessRefreshRevision] = useState(0)
   const [playingMV, setPlayingMV] = useState<{ id: string; name: string } | null>(null)
   const [radarPlayer, setRadarPlayer] = useState<{ songs: Song[]; continuation: QQRadarContinuation } | null>(null)
+  // 刷歌播放器开过一次就保持挂载，只切显示/隐藏：关掉再开不该丢掉已加载的队列与进度。
+  const [radarPlayerOpen, setRadarPlayerOpen] = useState(false)
   const [preferencesOpen, setPreferencesOpen] = useState(false)
+  // 偏好弹窗同样常驻挂载：保留用户未保存的勾选草稿，避免每次打开都重发请求并重置勾选。
+  const [preferencesMounted, setPreferencesMounted] = useState(false)
   const [preferences, setPreferences] = useState<QQExplorePreferenceItem[]>([])
   const [initialPreferences, setInitialPreferences] = useState<Map<string, boolean>>(new Map())
   const [preferencesLoading, setPreferencesLoading] = useState(false)
@@ -285,13 +314,20 @@ export default function QQExplorePage({
   const contentModules = useMemo(
     () => (snapshot?.feed.modules || []).filter(module => !isEntryModule(module) && !isHiddenQQRecommendationModule(module) && !closedShelves.has(qqModuleInstanceIdentity(module))).map(module => ({
       ...module,
-      cards: module.cards.filter(card => !isQQStarLightCard(card)),
+      cards: module.cards.filter(card => !isQQStarLightCard(card) && !isUnopenableQQCard(card)),
     })).filter(module => module.cards.length > 0),
     [closedShelves, snapshot?.feed.modules],
   )
 
   useEffect(() => {
     try { setClosedShelves(new Set(JSON.parse(localStorage.getItem(closedShelfStorageKey(account)) || '[]'))) } catch { setClosedShelves(new Set()) }
+  }, [account])
+
+  useEffect(() => {
+    // 切账号：丢掉上一个账号的偏好草稿，别让 openPreferences 的「保留草稿」命中错误的账号。
+    setPreferences([])
+    setInitialPreferences(new Map())
+    setPreferencesError('')
   }, [account])
 
   const closeModule = useCallback((module: QQExploreModule) => {
@@ -322,13 +358,25 @@ export default function QQExplorePage({
     }
     const previousKey = guessSong ? String(guessSong.mid || guessSong.id) : ''
     const batch = ++guessBatch.current
+    const guessCacheKey = `${account}:${batch}:${previousKey}`
+    const cachedGuess = guessYouLikeCache.get(guessCacheKey)
+    if (cachedGuess) {
+      // 同账号同批次已经取过：重挂载/重入直接复用，两连请求（1 首 + 30 首）不再重发。
+      setGuessSongs(cachedGuess.songs)
+      setGuessSong(current => current || cachedGuess.preview || cachedGuess.songs[0] || null)
+      setGuessLoading(false)
+      setGuessError('')
+      return
+    }
     setGuessLoading(!guessSong)
     setGuessError('')
     const abortController = new AbortController()
     const exclude = previousKey ? [previousKey] : []
+    let previewSong: Song | null = null
 
     void fetchQQGuessYouLikeBatch(batch, exclude, abortController.signal, 1).then(preview => {
       if (requestId !== guessGeneration.current || abortController.signal.aborted) return
+      previewSong = preview[0] || null
       if (preview[0]) {
         setGuessSong(preview[0])
         setGuessLoading(false)
@@ -338,6 +386,7 @@ export default function QQExplorePage({
       if (!songs || requestId !== guessGeneration.current || abortController.signal.aborted) return
       setGuessSongs(songs)
       if (!guessSong && songs[0]) setGuessSong(songs[0])
+      if (songs.length > 0) guessYouLikeCache.set(guessCacheKey, { preview: previewSong, songs })
     }).catch(error => {
       const message = error instanceof Error ? error.message : String(error || '')
       const cancelled = abortController.signal.aborted || error instanceof DOMException && error.name === 'AbortError' || /aborted without reason/i.test(message)
@@ -349,21 +398,25 @@ export default function QQExplorePage({
       guessGeneration.current += 1
       abortController.abort()
     }
-  }, [authRevision, guessRefreshRevision, loggedIn])
+  }, [account, authRevision, guessRefreshRevision, loggedIn])
 
   useEffect(() => {
     const owner = loggedIn && favoriteUserId ? `qq:${favoriteUserId}` : ''
     favoriteOwnerRef.current = owner
-    setFavoriteIds(new Set())
+    const knownIds = owner ? favoriteSnapshotByOwner.get(owner) : undefined
     setFavoriteOverrides(new Map())
     setFavoritePending(new Set())
     setFavoriteCountOverrides(new Map())
     favoritePendingRef.current.clear()
+    // 同账号已经加载过：先用上次结果铺上（心形不闪空），但先不放行点击——
+    // 等这次 loadFavoriteIdentifiers 校准回来再放开，避免拿上一份快照去算「喜欢/取消喜欢」。
+    setFavoriteIds(knownIds ? new Set(knownIds) : new Set())
     setFavoritesReady(false)
     if (!owner || !favoriteUserId) return
     let cancelled = false
     void loadFavoriteIdentifiers('qq', favoriteUserId).then(ids => {
       if (!cancelled && favoriteOwnerRef.current === owner) {
+        favoriteSnapshotByOwner.set(owner, new Set(ids))
         setFavoriteIds(new Set(ids))
         setFavoritesReady(true)
       }
@@ -523,11 +576,18 @@ export default function QQExplorePage({
     if (!card.feedbackToken) return
     setFeedbackCard(card)
     setFeedbackModule(module)
-    setFeedbackOptions([])
     setFeedbackError('')
+    const cachedOptions = feedbackOptionsCache.get(card.feedbackToken)
+    if (cachedOptions?.length) {
+      setFeedbackOptions(cachedOptions)
+      setFeedbackLoading(false)
+      return
+    }
+    setFeedbackOptions([])
     setFeedbackLoading(true)
     try {
       const result = await fetchQQExploreFeedbackOptions(card.feedbackToken)
+      if (result.options.length > 0) feedbackOptionsCache.set(card.feedbackToken, result.options)
       setFeedbackOptions(result.options)
     } catch (error) {
       setFeedbackError(error instanceof Error ? error.message : '反馈选项加载失败')
@@ -553,18 +613,34 @@ export default function QQExplorePage({
 
   const openPreferences = useCallback(async () => {
     setPreferencesOpen(true)
+    setPreferencesMounted(true)
+    // 已经打开过且状态还在（未保存的勾选是草稿）：保留草稿，不再重发偏好请求。
+    if (preferences.length > 0) {
+      setPreferencesError('')
+      return
+    }
+    const cachedPreferences = preferencesCache.get(account)
+    if (cachedPreferences) {
+      setPreferences(cachedPreferences.items)
+      setInitialPreferences(cachedPreferences.initial)
+      setPreferencesError('')
+      setPreferencesLoading(false)
+      return
+    }
     setPreferencesLoading(true)
     setPreferencesError('')
     try {
       const result = await fetchQQExplorePreferences()
+      const initial = new Map(result.items.map(item => [item.id, item.selected]))
       setPreferences(result.items)
-      setInitialPreferences(new Map(result.items.map(item => [item.id, item.selected])))
+      setInitialPreferences(initial)
+      if (result.items.length > 0) preferencesCache.set(account, { items: result.items, initial })
     } catch (error) {
       setPreferencesError(error instanceof Error ? error.message : '推荐偏好加载失败')
     } finally {
       setPreferencesLoading(false)
     }
-  }, [])
+  }, [account, preferences.length])
 
   useEffect(() => {
     const handleOpenPreferences = () => { void openPreferences() }
@@ -597,6 +673,10 @@ export default function QQExplorePage({
     setPreferencesError('')
     try {
       await saveQQExplorePreferences(changed)
+      // 服务端已接受当前勾选：把草稿转成新的基线并刷新缓存，重开弹窗不会回到旧的勾选状态。
+      const savedInitial = new Map(preferences.map(item => [item.id, item.selected]))
+      setInitialPreferences(savedInitial)
+      preferencesCache.set(account, { items: preferences, initial: savedInitial })
       setPreferencesOpen(false)
       await refreshFeed()
     } catch (error) {
@@ -604,7 +684,7 @@ export default function QQExplorePage({
     } finally {
       setPreferencesLoading(false)
     }
-  }, [initialPreferences, preferences, refreshFeed])
+  }, [account, initialPreferences, preferences, refreshFeed])
 
   const executeCard = useCallback(async (card: QQExploreCard, module?: QQExploreModule) => {
     if (actionLoading) return
@@ -628,6 +708,7 @@ export default function QQExplorePage({
         if (result.songs[0]) {
           const continuation: QQRadarContinuation = { mode: 'radar', page: result.page, reqType: card.action.reqType, entranceSongs: card.action.entranceSongs }
           setRadarPlayer({ songs: result.songs, continuation })
+          setRadarPlayerOpen(true)
           onPlaySongs(result.songs[0], result.songs, true, continuation)
         }
         return
@@ -860,7 +941,7 @@ export default function QQExplorePage({
               {moduleError && <p className="mb-3 text-xs text-rose-200/75">{moduleError}</p>}
 
               {flowCards.length > 0 && (
-                <div ref={module.id === '315' ? flowAnchorRef : undefined} className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+                <div ref={module.id === '315' ? flowAnchorRef : undefined} className="grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 min-[1900px]:grid-cols-6">
                   {flowCards.map((card, cardIndex) => (
                     <div key={card.feedKey || card.id} className="wf-qq-card-enter" style={{ animationDelay: `${Math.min(cardIndex, 12) * 24}ms` }}>
                     <FlowCard
@@ -927,7 +1008,7 @@ export default function QQExplorePage({
               )}
 
               {otherCards.length > 0 && (
-                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3 min-[1900px]:grid-cols-4">
                   {otherCards.map(card => {
                     const unsupported = card.action.type === 'unsupported'
                     return (
@@ -987,19 +1068,19 @@ export default function QQExplorePage({
       {publicContent && (
         <div className="space-y-12 border-t border-white/[0.08] pt-10" aria-label="QQ 音乐公共内容">
           {skillPlaylists.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Sparkles className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">AI 推荐歌单</h3><span className="text-xs text-white/35">QQ Music Skills</span></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">{skillPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={playlist.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs" style={{ color: accent }}>AI 推荐</span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Sparkles className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">AI 推荐歌单</h3><span className="text-xs text-white/35">QQ Music Skills</span></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 min-[1900px]:grid-cols-6">{skillPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={playlist.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs" style={{ color: accent }}>AI 推荐</span></button>)}</div></section>
           )}
           {communityPlaylists.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Headphones className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">推荐歌单</h3></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{communityPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><CachedImage src={playlist.coverUrl} alt="" className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs text-white/35">{playlist.creator || 'QQ 音乐'}</span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Headphones className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">推荐歌单</h3></div><button type="button" onClick={onOpenPlaylists} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 min-[1900px]:grid-cols-7">{communityPlaylists.slice(0, 12).map(playlist => <button key={playlist.id} type="button" onClick={() => onOpenPlaylist(playlist)} className="group min-w-0 text-left"><span className="block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><CachedImage src={playlist.coverUrl} alt="" className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /></span><span className="mt-2 block line-clamp-2 text-sm font-medium">{playlist.name}</span><span className="mt-1 block text-xs text-white/35">{playlist.creator || 'QQ 音乐'}</span></button>)}</div></section>
           )}
           {publicContent.charts.length > 0 && (
-            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Trophy className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">排行榜</h3></div><button type="button" onClick={onOpenCharts} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{publicContent.charts.slice(0, 6).map(chart => <button key={chart.id} type="button" onClick={() => onOpenChart(chart)} className="group flex min-h-36 overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.04] text-left"><CachedImage src={chart.coverUrl} alt="" className="aspect-square w-36 shrink-0 object-cover" role="card" priority="visible" /><span className="min-w-0 flex-1 p-4"><span className="block truncate font-semibold">{chart.name}</span><span className="mt-2 block space-y-1">{chart.songs.slice(0, 3).map((song, index) => <span key={`${song.mid || song.id}-${index}`} className="block truncate text-xs text-white/45">{index + 1}. {song.name} · {song.artist}</span>)}</span></span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center justify-between gap-3"><div className="flex items-center gap-2"><Trophy className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">排行榜</h3></div><button type="button" onClick={onOpenCharts} className="text-sm text-white/45 hover:text-white">查看全部</button></div><div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 min-[1900px]:grid-cols-4">{publicContent.charts.slice(0, 6).map(chart => <button key={chart.id} type="button" onClick={() => onOpenChart(chart)} className="group flex min-h-36 overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.04] text-left"><CachedImage src={chart.coverUrl} alt="" className="aspect-square w-36 shrink-0 object-cover" role="card" priority="visible" /><span className="min-w-0 flex-1 p-4"><span className="block truncate font-semibold">{chart.name}</span><span className="mt-2 block space-y-1">{chart.songs.slice(0, 3).map((song, index) => <span key={`${song.mid || song.id}-${index}`} className="block truncate text-xs text-white/45">{index + 1}. {song.name} · {song.artist}</span>)}</span></span></button>)}</div></section>
           )}
           {publicContent.newSongs.length > 0 && (
-            <section><div className="mb-4 flex items-center gap-2"><Disc3 className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">新歌推荐</h3></div><div className="grid gap-x-7 md:grid-cols-2 xl:grid-cols-3">{publicContent.newSongs.slice(0, 18).map(song => <button key={`${song.mid || song.id}-${song.name}`} type="button" onClick={() => onPlaySongs(song, publicContent.newSongs)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-3 text-left"><CachedImage src={song.album.picUrl} alt="" className="h-14 w-14 rounded-md object-cover" role="row" priority="visible" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{song.name}</span><span className="mt-1 block truncate text-xs text-white/38">{song.artists.map(artist => artist.name).join(' / ')}</span></span><Play className="h-4 w-4 text-white/25 transition group-hover:text-white" /></button>)}</div></section>
+            <section><div className="mb-4 flex items-center gap-2"><Disc3 className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">新歌推荐</h3></div><div className="grid gap-x-7 md:grid-cols-2 xl:grid-cols-3 min-[1900px]:grid-cols-4">{publicContent.newSongs.slice(0, 18).map(song => <button key={`${song.mid || song.id}-${song.name}`} type="button" onClick={() => onPlaySongs(song, publicContent.newSongs)} className="group flex min-w-0 items-center gap-3 border-b border-white/[0.055] py-3 text-left"><CachedImage src={song.album.picUrl} alt="" className="h-14 w-14 rounded-md object-cover" role="row" priority="visible" /><span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{song.name}</span><span className="mt-1 block truncate text-xs text-white/38">{song.artists.map(artist => artist.name).join(' / ')}</span></span><Play className="h-4 w-4 text-white/25 transition group-hover:text-white" /></button>)}</div></section>
           )}
           {publicContent.channels.length > 0 && (
-            <section><div className="mb-4 flex items-center gap-2"><Radio className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">电台频道</h3></div><div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">{publicContent.channels.slice(0, 12).map(channel => <button key={channel.id} type="button" onClick={() => onOpenChannel(channel)} className="group relative aspect-square overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.035] text-left"><CachedImage src={channel.coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /><span className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-transparent" /><span className="absolute inset-x-0 bottom-0 p-3"><span className="block line-clamp-2 text-sm font-medium">{channel.name}</span><span className="mt-1 block truncate text-xs text-white/45">{channel.group}</span></span></button>)}</div></section>
+            <section><div className="mb-4 flex items-center gap-2"><Radio className="h-5 w-5" style={{ color: accent }} /><h3 className="text-xl font-semibold">电台频道</h3></div><div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 min-[1900px]:grid-cols-7">{publicContent.channels.slice(0, 12).map(channel => <button key={channel.id} type="button" onClick={() => onOpenChannel(channel)} className="group relative aspect-square overflow-hidden rounded-lg border border-white/[0.07] bg-white/[0.035] text-left"><CachedImage src={channel.coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /><span className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/10 to-transparent" /><span className="absolute inset-x-0 bottom-0 p-3"><span className="block line-clamp-2 text-sm font-medium">{channel.name}</span><span className="mt-1 block truncate text-xs text-white/45">{channel.group}</span></span></button>)}</div></section>
           )}
         </div>
       )}
@@ -1010,7 +1091,8 @@ export default function QQExplorePage({
         </div>
       )}
 
-      {preferencesOpen && (
+      {preferencesMounted && (
+        <div className={preferencesOpen ? 'contents' : 'hidden'}>
         <div className="fixed inset-0 z-[260] flex items-center justify-center bg-black/65 p-5 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label="自定义推荐偏好" onMouseDown={event => { if (event.target === event.currentTarget && !preferencesLoading) setPreferencesOpen(false) }}>
           <div className="max-h-[82vh] w-full max-w-2xl overflow-hidden rounded-lg border border-white/[0.1] bg-[#111418] shadow-2xl">
             <div className="flex items-center justify-between border-b border-white/[0.08] px-6 py-5"><div><h3 className="text-xl font-semibold">自定义推荐</h3><p className="mt-1 text-xs text-white/42">偏好会同步到当前 QQ 音乐账号</p></div><button type="button" disabled={preferencesLoading} onClick={() => setPreferencesOpen(false)} className="h-9 px-3 text-sm text-white/48 hover:text-white">取消</button></div>
@@ -1020,24 +1102,30 @@ export default function QQExplorePage({
             <div className="flex justify-end border-t border-white/[0.08] px-6 py-4"><button type="button" disabled={preferencesLoading || preferences.length === 0} onClick={() => void savePreferences()} className="flex h-10 items-center gap-2 rounded-full px-5 text-sm font-semibold text-[#061018] disabled:opacity-45" style={{ background: accent }}>{preferencesLoading && <Loader2 className="h-4 w-4 animate-spin" />}保存到 QQ 音乐</button></div>
           </div>
         </div>
+        </div>
       )}
 
       {radarPlayer && (
-        <QQRadarPlayer
-          songs={radarPlayer.songs}
-          continuation={radarPlayer.continuation}
-          playing={isPlaying && Boolean(currentSong && radarPlayer.songs.some(song => String(song.mid || song.id) === String(currentSong.mid || currentSong.id)))}
-          onClose={() => setRadarPlayer(null)}
-          onPlaySong={(song, songs, continuation) => {
-            setRadarPlayer(previous => previous ? { ...previous, songs } : previous)
-            onPlaySongs(song, songs, true, continuation)
-          }}
-          onTogglePlay={onPlayPause}
-          onRequestMore={async continuation => {
-            const result = await fetchQQRadarSongs({ page: continuation.page + 1, reqType: continuation.reqType, entranceSongs: continuation.entranceSongs })
-            return { songs: result.songs, page: result.page, hasMore: result.hasMore }
-          }}
-        />
+        // 常驻挂载 + display 切换：关掉再进入不会丢掉已加载队列/进度。
+        // 刷歌播放器不持有 HLS/视频，音频仍走全局播放引擎，冻结是安全的。
+        <div className={radarPlayerOpen ? 'contents' : 'hidden'}>
+          <QQRadarPlayer
+            songs={radarPlayer.songs}
+            continuation={radarPlayer.continuation}
+            playing={radarPlayerOpen && isPlaying && Boolean(currentSong && radarPlayer.songs.some(song => String(song.mid || song.id) === String(currentSong.mid || currentSong.id)))}
+            suspended={!radarPlayerOpen}
+            onClose={() => setRadarPlayerOpen(false)}
+            onPlaySong={(song, songs, continuation) => {
+              setRadarPlayer(previous => previous ? { ...previous, songs } : previous)
+              onPlaySongs(song, songs, true, continuation)
+            }}
+            onTogglePlay={onPlayPause}
+            onRequestMore={async continuation => {
+              const result = await fetchQQRadarSongs({ page: continuation.page + 1, reqType: continuation.reqType, entranceSongs: continuation.entranceSongs })
+              return { songs: result.songs, page: result.page, hasMore: result.hasMore }
+            }}
+          />
+        </div>
       )}
 
       {playingMV && <VideoPlayer mvId={playingMV.id} mvName={playingMV.name} platform="qq" onClose={() => setPlayingMV(null)} />}

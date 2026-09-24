@@ -49,20 +49,28 @@ function TraditionalArtistDetail({
   const [loadRevision, setLoadRevision] = useState(0)
   const [menu, setMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const allPageRef = useRef(0)
+  // 已加载过的「平台:歌手:revision」：同一 key 重跑（保活下 StrictMode 双跑、重放）时
+  // 不再清空已有内容，避免「清空 → 闪骨架 → 再填回来」。请求本身走服务层短 TTL，不重复打网。
+  const loadedKeyRef = useRef('')
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
 
 
   useEffect(() => {
     if (!artistId) return
+    const key = `${platform}:${artistId}:${loadRevision}`
+    const sameKey = loadedKeyRef.current === key
+    loadedKeyRef.current = key
     let cancelled = false
     setLoading(true)
     setError('')
-    setArtist(null)
-    setHotSongs([])
-    setAllSongs([])
-    setAlbums([])
-    setTab('hot')
-    allPageRef.current = 0
+    if (!sameKey) {
+      setArtist(null)
+      setHotSongs([])
+      setAllSongs([])
+      setAlbums([])
+      setTab('hot')
+      allPageRef.current = 0
+    }
     void Promise.allSettled([
       getArtistDetail(artistId, platform),
       getArtistTopSongs(artistId, platform),
@@ -109,7 +117,7 @@ function TraditionalArtistDetail({
         <div className="min-w-0"><div className="text-sm font-medium">歌手详情</div><div className={`truncate text-xs ${muted}`}>{platformLabel(platform)}</div></div>
       </header>
       <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
-              {loading && tab !== 'all' ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载歌手...</div> : error ? (
+              {loading && !artist ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载歌手...</div> : error ? (
                 <div className={`flex h-72 flex-col items-center justify-center gap-3 text-sm ${muted}`}>
                   <span>{error}</span>
                   <button type="button" onClick={() => setLoadRevision(value => value + 1)} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accent }}>重试</button>

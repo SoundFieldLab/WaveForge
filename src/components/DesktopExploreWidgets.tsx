@@ -11,8 +11,45 @@ import {
 import type { MusicPlatform } from '../services/platforms'
 import CachedImage from './CachedImage'
 
+/**
+ * 桌面探索小组件自己的「上次结果」镜像（仅内存，不落盘）。
+ * fetchExploreHome / fetchExploreChart 在服务层已有 TTL 缓存，但组件此前会在切平台时先
+ * setData(null) / setSongs([])，于是即便请求命中缓存也会先闪一下空白。这里保存每个 key 的
+ * 上一次成功结果，重进/切回时直接铺上，请求照常在后台校准。
+ * 都是账号相关数据：waveforge-auth-changed 时整体清空。
+ */
+const DESKTOP_EXPLORE_HOME_CACHE_MAX = 6
+const DESKTOP_CHART_SONGS_CACHE_MAX = 12
+const desktopExploreHomeCache = new Map<string, ExplorePayload>()
+const desktopChartSongsCache = new Map<string, Song[]>()
+
+function hasExploreHomeContent(payload: ExplorePayload): boolean {
+  return payload.newSongs.length > 0
+    || payload.charts.length > 0
+    || payload.albums.length > 0
+    || payload.dailySongs.length > 0
+    || payload.radioSongs.length > 0
+}
+
+function writeBoundedCache<T>(cache: Map<string, T>, key: string, value: T, max: number): void {
+  cache.delete(key)
+  cache.set(key, value)
+  while (cache.size > max) {
+    const oldest = cache.keys().next().value
+    if (oldest === undefined) break
+    cache.delete(oldest)
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    desktopExploreHomeCache.clear()
+    desktopChartSongsCache.clear()
+  })
+}
+
 export function useDesktopExploreHome(platform: MusicPlatform, enabled: boolean) {
-  const [data, setData] = useState<ExplorePayload | null>(null)
+  const [data, setData] = useState<ExplorePayload | null>(() => desktopExploreHomeCache.get(platform) ?? null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const generationRef = useRef(0)
@@ -28,7 +65,10 @@ export function useDesktopExploreHome(platform: MusicPlatform, enabled: boolean)
     setError('')
     try {
       const payload = await fetchExploreHome(platform, controller.signal, { forceRefresh })
-      if (!controller.signal.aborted && generation === generationRef.current) setData(payload)
+      if (!controller.signal.aborted && generation === generationRef.current) {
+        if (hasExploreHomeContent(payload)) writeBoundedCache(desktopExploreHomeCache, platform, payload, DESKTOP_EXPLORE_HOME_CACHE_MAX)
+        setData(payload)
+      }
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError' && generation === generationRef.current) {
         setError((cause as Error).message || '当前平台内容暂时不可用')
@@ -42,7 +82,8 @@ export function useDesktopExploreHome(platform: MusicPlatform, enabled: boolean)
   useEffect(() => {
     generationRef.current += 1
     controllerRef.current?.abort()
-    setData(null)
+    // 同平台已有结果就保留（不再先清空），平台变了才回落到空。
+    setData(desktopExploreHomeCache.get(platform) ?? null)
     setError('')
     setLoading(false)
     if (!enabled) return
@@ -81,13 +122,19 @@ export function useDesktopChartDetail() {
     controllerRef.current?.abort()
     const controller = new AbortController()
     controllerRef.current = controller
+    // 同一个榜单刚看过：先铺上已有曲目（不再清空），详情请求在后台照常进行。
+    const cacheKey = `${next.platform || ''}:${String(next.id)}`
+    const cachedSongs = desktopChartSongsCache.get(cacheKey)
     setChart(next)
-    setSongs([])
-    setLoading(true)
+    setSongs(cachedSongs ?? [])
+    setLoading(!cachedSongs)
     setError('')
     try {
       const detail = await fetchExploreChart(next, controller.signal)
-      if (!controller.signal.aborted) setSongs(detail.songs)
+      if (!controller.signal.aborted) {
+        if (detail.songs.length > 0) writeBoundedCache(desktopChartSongsCache, cacheKey, detail.songs, DESKTOP_CHART_SONGS_CACHE_MAX)
+        setSongs(detail.songs)
+      }
     } catch (cause) {
       if ((cause as Error).name !== 'AbortError') setError((cause as Error).message || '榜单详情暂时不可用')
     } finally {

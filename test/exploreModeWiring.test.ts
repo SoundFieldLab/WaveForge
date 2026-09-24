@@ -18,7 +18,8 @@ describe('Explore mode wiring regressions', () => {
     const source = component('AppleExplorePanel.tsx').replace(/\r\n/g, '\n')
     expect(source).toContain('++pageRequestRef.current[target]')
     expect(source).toContain('pageRequestRef.current[target] !== requestId')
-    expect(source).toContain("if (appleLoggedIn) void loadTab('library')")
+    // 登录后预取资料库：写法从独立 effect 折进了账号上下文 effect，意图不变（登录态下预取 library）
+    expect(source).toContain("if (appleLoggedIn && tab !== 'library') void loadTab('library', true)")
     expect(source).toContain('removeApplePlaylistFromLibrary(libraryId)')
     expect(source).toContain('removeAppleSongFromLibrary(item.playId)')
     expect(source).toContain('if (!item.libraryId) continue')
@@ -60,7 +61,8 @@ describe('Explore mode wiring regressions', () => {
     expect(source).toContain('if (!appleLoggedIn) {\n      onLoginClick()')
     expect(component('ExploreView.tsx')).toContain('error={detailError}')
     expect(component('ExploreView.tsx')).toContain('onRetry={() => detailRetryRef.current?.()}')
-    expect(component('../App.tsx')).toContain("storefront={selectedAlbumPlatform === 'apple' ? appleStorefront : undefined}")
+    // Apple 专辑要拿到账号商店：详情弹窗改为常驻（冻结）后，来源变成冻结快照里的平台，语义不变
+    expect(component('../App.tsx')).toContain("storefront={frozenAlbumDetail.platform === 'apple' ? appleStorefront : undefined}")
     expect(source).toContain('setArtistDrawer(null); void openAlbumDrawer(album)')
     expect(source).toContain('{stationDetail.station.url && (')
     expect(source).toContain('storefront={storefront}')

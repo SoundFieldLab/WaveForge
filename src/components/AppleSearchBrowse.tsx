@@ -36,9 +36,11 @@ interface AppleSearchBrowseProps {
   onOpenItem?: (item: AppleWebItem, items: AppleWebItem[]) => void
   /** 打开歌单详情（全局面板） */
   onOpenPlaylist?: (playlist: { id: string; name: string; coverImgUrl: string; trackCount: number; creator: string; platform: 'apple' }) => void
+  /** 该页当前不可见（宿主把它隐藏保留、或正在展示更深层级）：不再消费 BACK 键。 */
+  suspended?: boolean
 }
 
-export default function BrowseCategoriesLanding({ playerTheme = 'dark', storefront, onSongSelect, playbackOrigin, onOpenItem, onOpenPlaylist }: AppleSearchBrowseProps) {
+export default function BrowseCategoriesLanding({ playerTheme = 'dark', storefront, onSongSelect, playbackOrigin, onOpenItem, onOpenPlaylist, suspended = false }: AppleSearchBrowseProps) {
   const [curators, setCurators] = useState<AppleWebItem[]>([])
   const [loading, setLoading] = useState(true)
   const [landingError, setLandingError] = useState('')
@@ -99,10 +101,13 @@ export default function BrowseCategoriesLanding({ playerTheme = 'dark', storefro
   }, [])
 
   useTvBack(() => {
+    // 分类页被宿主隐藏（切到别的页签）时不再消费 BACK：否则会把别的页面上的返回键吃掉，
+    // 去关闭一个用户看不到的分类详情。
+    if (suspended) return false
     if (!curatorPage && !curatorLoading && !curatorError) return false
     closeCurator()
     return true
-  }, [closeCurator, curatorError, curatorLoading, curatorPage])
+  }, [closeCurator, curatorError, curatorLoading, curatorPage, suspended])
 
 
   const openPlaylist = (item: AppleWebItem) => {

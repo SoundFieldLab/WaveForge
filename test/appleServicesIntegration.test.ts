@@ -44,6 +44,7 @@ vi.mock('../src/services/indexedDBCache', () => ({
     getCachedPlaylist: vi.fn(),
     cachePlaylist: vi.fn(),
     invalidatePlaylist: vi.fn(),
+    clearPlaylistsForPlatform: vi.fn().mockResolvedValue(undefined),
   },
 }))
 

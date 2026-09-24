@@ -32,6 +32,8 @@ interface AlbumDetailModalProps {
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onCopyInfo?: (song: Song) => void
+  /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。隐藏时不消费返回键、不重建 DOM。 */
+  suspended?: boolean
 }
 
 type TabType = 'songs' | 'info' | 'more'
@@ -69,13 +71,15 @@ function AlbumDetailModal({
   onViewComments,
   onOpenArtist,
   onOpenAlbum,
-  onCopyInfo
+  onCopyInfo,
+  suspended = false
 }: AlbumDetailModalProps) {
-  // TV 遥控器 BACK：关闭专辑详情弹窗
+  // TV 遥控器 BACK：关闭专辑详情弹窗（冻结隐藏时不消费返回键，交给上层）
   useTvBack(() => {
+    if (suspended) return false
     onClose()
     return true
-  }, [onClose])
+  }, [onClose, suspended])
   const [album, setAlbum] = useState<Album | null>(null)
   const [songs, setSongs] = useState<Song[]>([])
   const [loading, setLoading] = useState(true)
@@ -116,6 +120,12 @@ function AlbumDetailModal({
       .finally(() => { if (!cancelled) setArtistAlbumsLoading(false) })
     return () => { cancelled = true }
   }, [activeTab, albumArtistId, artistAlbums.length, platform, album?.id])
+
+  // 冻结隐藏时收起右键菜单：组件被 App 冻结（不卸载），否则重开时菜单会残留在旧坐标。
+  useEffect(() => {
+    if (!suspended) return
+    setContextMenu({ show: false, x: 0, y: 0, song: null })
+  }, [suspended])
   
   const handleSubscribe = async () => {
     if (subscribing || !album) return
@@ -321,6 +331,9 @@ function AlbumDetailModal({
       onClose()
     }
   }
+
+  // 冻结隐藏时不渲染 DOM：避免隐藏弹窗被 TV 焦点/点击命中。
+  if (suspended) return null
 
   return (
     <>

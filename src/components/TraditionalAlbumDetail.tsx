@@ -1,5 +1,5 @@
 // 传统模式独立专辑详情：不复用全局 AlbumDetailModal，数据走同一服务，渲染用传统设计语言。
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { ArrowLeft, Clock3, Disc3, Play } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getAlbumDetail, getAlbumSongs, getProxiedImageUrl } from '../services/musicApi'
@@ -43,16 +43,24 @@ function TraditionalAlbumDetail({
   const [error, setError] = useState('')
   const [loadRevision, setLoadRevision] = useState(0)
   const [menu, setMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
+  // 已加载过的「平台:专辑:revision」：同一 key 重跑（保活下 StrictMode 双跑、重放）时
+  // 不再清空已有内容，避免「清空 → 闪骨架 → 再填回来」。请求本身走服务层短 TTL，不重复打网。
+  const loadedKeyRef = useRef('')
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
 
 
   useEffect(() => {
     if (!albumId) return
+    const key = `${platform}:${albumId}:${loadRevision}`
+    const sameKey = loadedKeyRef.current === key
+    loadedKeyRef.current = key
     let cancelled = false
     setLoading(true)
     setError('')
-    setAlbum(null)
-    setSongs([])
+    if (!sameKey) {
+      setAlbum(null)
+      setSongs([])
+    }
     void Promise.allSettled([
       getAlbumDetail(albumId, platform),
       getAlbumSongs(albumId, platform),
@@ -78,7 +86,7 @@ function TraditionalAlbumDetail({
         <div className="min-w-0"><div className="text-sm font-medium">专辑详情</div><div className={`truncate text-xs ${muted}`}>{platformLabel(platform)}</div></div>
       </header>
       <main className="min-h-0 flex-1 overflow-y-auto px-6 py-6 lg:px-10">
-              {loading ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载专辑...</div> : error ? (
+              {loading && !album ? <div className={`flex h-72 items-center justify-center text-sm ${muted}`}>正在加载专辑...</div> : error ? (
                 <div className={`flex h-72 flex-col items-center justify-center gap-3 text-sm ${muted}`}>
                   <span>{error}</span>
                   <button type="button" onClick={() => setLoadRevision(value => value + 1)} className="rounded-full px-4 py-2 text-xs text-white" style={{ background: accent }}>重试</button>

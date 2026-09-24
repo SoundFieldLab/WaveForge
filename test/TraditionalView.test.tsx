@@ -50,7 +50,10 @@ vi.mock('../src/services/desktopSpectrum', () => ({
 
 import { fetchExploreHome, fetchExploreChart } from '../src/services/exploreApi'
 import TraditionalView from '../src/components/TraditionalView'
-import TraditionalSearch from '../src/components/TraditionalSearch'
+import TraditionalSearch, { clearTraditionalSearchCache } from '../src/components/TraditionalSearch'
+
+/** 页面「冻结」后不再卸载、只隐藏：用 aria-hidden 祖先判断「已经离开这一页」。 */
+const isHiddenPane = (el: Element | null) => Boolean(el && el.closest('[aria-hidden="true"]'))
 import TraditionalComments from '../src/components/TraditionalComments'
 import TraditionalAlbumDetail from '../src/components/TraditionalAlbumDetail'
 import TraditionalPlaylistDetail from '../src/components/TraditionalPlaylistDetail'
@@ -159,6 +162,8 @@ describe('传统模式 TraditionalView', () => {
     vi.clearAllMocks()
     vi.mocked(fetchExploreChart).mockReset()
     vi.mocked(fetchExploreHome).mockResolvedValue(cannedHomePayload as any)
+    // 搜索结果缓存是模块级的（本会话复用），测试之间要清掉，否则断言「打了几次接口」会被上一次的结果命中。
+    clearTraditionalSearchCache()
   })
   afterEach(() => cleanup())
 
@@ -216,10 +221,11 @@ describe('传统模式 TraditionalView', () => {
     await waitFor(() => expect(screen.getByPlaceholderText(/搜索 网易云/)).toBeTruthy())
     fireEvent.click(back)
     await waitFor(() => expect(screen.getByRole('button', { name: '搜索' })).toBeTruthy())
-    expect(screen.queryByPlaceholderText(/搜索 网易云/)).toBeNull()
+    // 搜索页被冻结保留（不卸载），但已经隐藏、不再可见/可交互
+    expect(isHiddenPane(screen.getByPlaceholderText(/搜索 网易云/))).toBe(true)
     // 前进回到搜索页
     fireEvent.click(screen.getByLabelText('前进'))
-    await waitFor(() => expect(screen.getByPlaceholderText(/搜索 网易云/)).toBeTruthy())
+    await waitFor(() => expect(isHiddenPane(screen.getByPlaceholderText(/搜索 网易云/))).toBe(false))
   })
 
   it('平台药丸在右上角（头部仍渲染平台标签）', async () => {
@@ -306,7 +312,8 @@ describe('传统模式 TraditionalView', () => {
     render(<TraditionalView {...baseProps} restorePlaybackOrigin={{ revision: 1, mode: 'traditional', surface: 'traditional-search', platform: 'netease' }} />)
     await waitFor(() => expect(screen.getByPlaceholderText(/搜索 网易云/)).toBeTruthy())
     expect(dispatchTvBack()).toBe(true)
-    await waitFor(() => expect(screen.queryByPlaceholderText(/搜索 网易云/)).toBeNull())
+    // 冻结语义：搜索页保留在 DOM 但已隐藏
+    await waitFor(() => expect(isHiddenPane(screen.getByPlaceholderText(/搜索 网易云/))).toBe(true))
   })
 
   it('旧偏好中的关闭推荐不再隐藏排行榜和推荐歌单', async () => {

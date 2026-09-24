@@ -7,6 +7,7 @@ import { getProxiedImageUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCookie, platformLabel } from '../services/platforms'
 import { fetchSodaComments, type SodaComment } from '../services/sodaService'
+import { createTtlCache } from '../utils/ttlCache'
 
 interface CommentItem {
   commentId: string
@@ -100,6 +101,11 @@ interface TraditionalCommentsProps {
 
 type CommentView = 'hot' | 'latest'
 
+// 评论首页（重置页）的本会话缓存：同一首歌反复进入、热门↔最新来回切不该重打接口。
+// 只存成功且非空的结果，不落盘；分页游标一并存，缓存命中后「加载更多」仍能续上。
+type CommentsPage = { comments: CommentItem[]; hotComments: CommentItem[]; hasMore: boolean; cursor?: string }
+const commentsCache = createTtlCache<CommentsPage>({ ttlMs: 60 * 1000, maxEntries: 12 })
+
 function TraditionalComments({ song, accent, isDark, onClose }: TraditionalCommentsProps) {
   const [view, setView] = useState<CommentView>('hot')
   const [comments, setComments] = useState<CommentItem[]>([])
@@ -110,18 +116,20 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
   const offsetRef = useRef(0)
   const pageRef = useRef(0)
   const requestRef = useRef(0)
+  const loadedKeyRef = useRef('')
   // 汽水评论游标：soda 接口为游标分页（与上方页码分页不同），组件内部自行维护
   const sodaCursorRef = useRef<string | undefined>(undefined)
 
   const platform = (song?.platform || 'netease') as MusicPlatform
+  // 汽水的 Song.id 是截断数值，真实曲目 id 保存在 mid
+  const songId = platform === 'soda' ? String(song?.mid || song?.id || '') : String(song?.id || song?.mid || '')
+  const cacheKey = `${platform}:${songId}:${view}`
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
 
 
   const load = useCallback(async (reset: boolean) => {
     if (!song) return
     const requestId = ++requestRef.current
-    // 汽水的 Song.id 是截断数值，真实曲目 id 保存在 mid
-    const songId = platform === 'soda' ? String(song.mid || song.id || '') : (song.id || song.mid || '')
     setError('')
     if (reset) setLoading(true)
     try {
@@ -164,6 +172,10 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
         setHotComments(hot)
         offsetRef.current = 30
         pageRef.current = 1
+        // 只缓存成功且非空的首页结果（空/失败不缓存，下次仍会重试）
+        if (list.length > 0 || hot.length > 0) {
+          commentsCache.set(cacheKey, { comments: list, hotComments: hot, hasMore: effectiveMore, cursor: sodaCursorRef.current })
+        }
       } else {
         setComments(prev => {
           const merged = new Map(prev.map(item => [item.commentId, item]))
@@ -179,16 +191,36 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
     } finally {
       if (requestId === requestRef.current) setLoading(false)
     }
-  }, [song, platform, view])
+  }, [song, platform, view, cacheKey])
 
   useEffect(() => {
+    if (!song) return
     offsetRef.current = 0
     pageRef.current = 0
     sodaCursorRef.current = undefined
-    setComments([])
-    setHotComments([])
+    const cached = commentsCache.get(cacheKey)
+    if (cached) {
+      // 本会话刚看过同一首歌的同一视图：直接复用，不再打接口
+      loadedKeyRef.current = cacheKey
+      offsetRef.current = 30
+      pageRef.current = 1
+      sodaCursorRef.current = cached.cursor
+      setComments(cached.comments)
+      setHotComments(cached.hotComments)
+      setHasMore(cached.hasMore)
+      setError('')
+      setLoading(false)
+      return
+    }
+    // 同 key 重跑（保活下的重放等）保留已有列表，不先清空；换了歌/视图才清空
+    if (loadedKeyRef.current !== cacheKey) {
+      setComments([])
+      setHotComments([])
+      setHasMore(false)
+    }
+    loadedKeyRef.current = cacheKey
     void load(true)
-  }, [song, view, load])
+  }, [song, view, cacheKey, load])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose() }

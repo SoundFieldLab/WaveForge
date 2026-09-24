@@ -5,9 +5,27 @@ import type { Song } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getLyrics, getNeteaseSongWiki, getQQSongPlaylist, getProxiedImageUrl, getQQListenAlso, getQQLikeAlso, getNeteaseSimiSong, getNeteaseRelatedPlaylist, getNeteaseSongBlog } from '../services/musicApi'
 import { fetchAppleSongDetail, type AppleSongDetail } from '../services/appleWebService'
+import { createTtlCache } from '../utils/ttlCache'
 import LyricModal from './LyricModal'
 import VideoPlayer from './VideoPlayer'
 import { useTvBack } from '../tv/tvCore'
+
+// 歌曲详情附加载荷（详情字段 / 相似推荐 / 百科 / 发现页数据）短 TTL 缓存：
+// 同一首歌反复打开详情弹窗不再重发请求。歌词本身已由 getLyrics 缓存，这里只管其它只读载荷。
+// 只用内存、不落盘；空结果与错误不入缓存。
+const songPayloadCache = createTtlCache<any>({ ttlMs: 5 * 60 * 1000, maxEntries: 40 })
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => songPayloadCache.clear())
+}
+/** 带缓存的 JSON 拉取：命中即返回，只缓存成功（非 error）响应。 */
+const cachedJsonFetch = async (key: string, url: string): Promise<any> => {
+  const hit = songPayloadCache.get(key)
+  if (hit) return hit
+  const response = await fetch(url)
+  const data = await response.json()
+  if (data && !data.error) songPayloadCache.set(key, data)
+  return data
+}
 
 /** Apple audioTraits → 音质标签（web 歌曲页同款徽标） */
 const APPLE_TRAIT_LABELS: Array<{ trait: string; label: string }> = [
@@ -34,6 +52,8 @@ interface SongDetailModalProps {
   onOpenAlbum?: (albumId: string, platform: 'apple') => void
   /** 打开出演艺人详情 */
   onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。隐藏时不消费返回键、不渲染视频。 */
+  suspended?: boolean
 }
 
 function formatDuration(ms: number): string {
@@ -59,12 +79,13 @@ const NETBASE_FEE_LABELS: Record<number, string> = {
   8: '免费（低音质）',
 }
 
-function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum, onOpenArtist }: SongDetailModalProps) {
-  // TV 遥控器 BACK：关闭歌曲详情弹窗
+function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum, onOpenArtist, suspended = false }: SongDetailModalProps) {
+  // TV 遥控器 BACK：关闭歌曲详情弹窗（冻结隐藏时不消费返回键，交给上层）
   useTvBack(() => {
+    if (suspended) return false
     onClose()
     return true
-  }, [onClose])
+  }, [onClose, suspended])
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const [extra, setExtra] = useState<{ publishTime?: number; mvId?: number; fee?: number; quality?: string; qualityLevels?: { key: string; label: string; br: number }[]; albumExtra?: { company?: string; subType?: string; type?: string }; publishDate?: string; bpm?: number; genreText?: string; languageText?: string; mvVid?: string } | null>(null)
   // MV 播放
@@ -100,25 +121,35 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   useEffect(() => {
     if (song.platform !== 'netease') return
     let cancelled = false
+    const recoKey = `reco:netease:${song.id}`
+    const cachedReco = songPayloadCache.get(recoKey)
+    if (cachedReco) {
+      setNeteaseSimi(cachedReco.simi)
+      setNeteaseRelated(cachedReco.related)
+      return
+    }
     // 两个接口互不依赖：任一失败不该让两栏都变空（原来的 Promise.all + 空 catch 会让用户以为「没有推荐」）
     void Promise.allSettled([getNeteaseSimiSong(song.id, 10), getNeteaseRelatedPlaylist(song.id)]).then(([simiResult, relatedResult]) => {
       if (cancelled) return
       const simiData = simiResult.status === 'fulfilled' ? simiResult.value : []
       const relatedData = relatedResult.status === 'fulfilled' ? relatedResult.value : []
-      setNeteaseSimi(Array.isArray(simiData) ? simiData.map((s: any) => ({
+      const simi = Array.isArray(simiData) ? simiData.map((s: any) => ({
         id: s.id,
         name: s.name || '',
         artists: Array.isArray(s.artists) ? s.artists.map((a: any) => ({ name: a.name })) : [],
         album: s.album ? { name: s.album.name, picUrl: s.album.picUrl || s.album.pic || '' } : { name: '', picUrl: '' },
         duration: s.duration || s.dt || 0,
         platform: 'netease' as const
-      })).filter((s: Song) => s.id) : [])
-      setNeteaseRelated(Array.isArray(relatedData) ? relatedData.map((p: any) => ({
+      })).filter((s: Song) => s.id) : []
+      const related = Array.isArray(relatedData) ? relatedData.map((p: any) => ({
         id: String(p.id || ''),
         name: p.name || '',
         coverImgUrl: p.coverImgUrl || p.picUrl || '',
         trackCount: Number(p.trackCount || 0),
-      })).filter((p: any) => p.id) : [])
+      })).filter((p: any) => p.id) : []
+      setNeteaseSimi(simi)
+      setNeteaseRelated(related)
+      if (simi.length || related.length) songPayloadCache.set(recoKey, { simi, related })
     }).catch(() => {})
     return () => { cancelled = true }
   }, [song.id, song.platform])
@@ -129,6 +160,12 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
     let cancelled = false
     const albumId = song.album?.id
     if (!albumId) return
+    const blogKey = `blog:${albumId}`
+    const cachedBlogs = songPayloadCache.get(blogKey)
+    if (cachedBlogs) {
+      setNeteaseBlogs(cachedBlogs)
+      return
+    }
     void getNeteaseSongBlog(albumId).then((data) => {
       if (cancelled || !data) return
       const list = data?.data?.blogList || data?.data?.list || data?.data?.blogs || []
@@ -139,7 +176,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
         author: b.nickname || b.creator?.nickname || (b.userId ? String(b.userId) : ''),
         time: b.createTime || b.publishTime || b.time || 0,
       }))
-      if (!cancelled) setNeteaseBlogs(blogs)
+      if (!cancelled && blogs.length) { setNeteaseBlogs(blogs); songPayloadCache.set(blogKey, blogs) }
     }).catch(() => {})
     return () => { cancelled = true }
   }, [song.id, song.platform, song.album?.id])
@@ -166,13 +203,24 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   useEffect(() => {
     if (song.platform !== 'qq') return
     let cancelled = false
-    setAlsoLoading(true)
     const songid = String(song.id || '')
     const singermid = song.artists?.[0]?.mid
+    const qqRecoKey = `qqreco:${songid}`
+    const cachedQqReco = songPayloadCache.get(qqRecoKey)
+    if (cachedQqReco) {
+      setListenAlso(cachedQqReco.listen)
+      setLikeAlso(cachedQqReco.like)
+      setAlsoLoading(false)
+      return
+    }
+    setAlsoLoading(true)
     void Promise.all([getQQListenAlso(songid, singermid), getQQLikeAlso(songid)]).then(([listenData, likeData]) => {
       if (cancelled) return
-      setListenAlso(Array.isArray(listenData) ? listenData : [])
-      setLikeAlso(Array.isArray(likeData) ? likeData : [])
+      const listen = Array.isArray(listenData) ? listenData : []
+      const like = Array.isArray(likeData) ? likeData : []
+      setListenAlso(listen)
+      setLikeAlso(like)
+      if (listen.length || like.length) songPayloadCache.set(qqRecoKey, { listen, like })
       setAlsoLoading(false)
     }).catch(() => { if (!cancelled) setAlsoLoading(false) })
     return () => { cancelled = true }
@@ -187,6 +235,13 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
     return () => window.removeEventListener('accentColorChanged', handleAccent)
   }, [])
 
+  // 冻结隐藏时收起 MV / 歌词弹窗：状态被冻结保留，若不重置，重开同一首歌会自动重放视频。
+  useEffect(() => {
+    if (!suspended) return
+    setShowMV(false)
+    setShowLyric(false)
+  }, [suspended])
+
   // 拉取两平台支持的歌曲详情补充字段（发行时间 / MV / 付费类型 / 音质）
   useEffect(() => {
     let cancelled = false
@@ -199,8 +254,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
         }
         if (song.platform === 'qq') {
           const mid = String(song.mid || song.id)
-          const res = await fetch(`http://localhost:3001/api/qq/song/detail?mid=${encodeURIComponent(mid)}`)
-          const data = await res.json()
+          const data = await cachedJsonFetch(`qdetail:qq:${mid}`, `http://localhost:3001/api/qq/song/detail?mid=${encodeURIComponent(mid)}`)
           if (!cancelled && data?.song) {
             setExtra({
               publishTime: data.song.publishTime || data.song.album?.publishTime,
@@ -231,8 +285,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
           }
           if (!cancelled) setLyricsLoading(false)
         } else {
-          const res = await fetch(`http://localhost:3001/api/netease/song/detail?ids=${encodeURIComponent(String(song.id))}`)
-          const data = await res.json()
+          const data = await cachedJsonFetch(`qdetail:netease:${song.id}`, `http://localhost:3001/api/netease/song/detail?ids=${encodeURIComponent(String(song.id))}`)
           const detail = data?.songs?.[0]
           if (!cancelled && detail) {
             const quality = detail.hr ? 'Hi-Res 无损'
@@ -268,18 +321,29 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   useEffect(() => {
     let cancelled = false
     if (song.platform === 'netease') {
+      const wikiKey = `wiki:netease:${song.id}`
+      const cachedWiki = songPayloadCache.get(wikiKey)
+      if (cachedWiki) { setWiki(cachedWiki); return }
       void getNeteaseSongWiki(song.id).then((summary) => {
-        if (!cancelled && summary) setWiki(String(summary).slice(0, 300))
+        if (cancelled || !summary) return
+        const text = String(summary).slice(0, 300)
+        setWiki(text)
+        if (text) songPayloadCache.set(wikiKey, text)
       })
     } else if (song.platform === 'qq' && song.mid) {
+      const wikiKey = `wiki:qq:${song.mid}`
+      const cachedPlaylists = songPayloadCache.get(wikiKey)
+      if (cachedPlaylists) { setSongPlaylists(cachedPlaylists); return }
       void getQQSongPlaylist(String(song.mid)).then((data) => {
         if (cancelled || !data) return
         const list = data?.list || data?.songList || []
-        setSongPlaylists(Array.isArray(list) ? list.slice(0, 5).map((p: any) => ({
+        const playlists = Array.isArray(list) ? list.slice(0, 5).map((p: any) => ({
           id: String(p.dissid || p.tid || ''),
           name: p.dissname || p.name || '未知歌单',
           coverUrl: p.imgurl || p.picUrl || '',
-        })) : [])
+        })) : []
+        setSongPlaylists(playlists)
+        if (playlists.length) songPayloadCache.set(wikiKey, playlists)
       })
     }
     return () => { cancelled = true }
@@ -305,6 +369,9 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
       <span className={`flex-1 min-w-0 text-sm ${textPrimary} truncate text-right ${mono ? 'tabular-nums' : ''}`}>{value}</span>
     </div>
   )
+
+  // 冻结隐藏时不渲染 DOM：避免隐藏弹窗被 TV 焦点/点击命中，也让 MV 视频随卸载停止。
+  if (suspended) return null
 
   return (
     <motion.div

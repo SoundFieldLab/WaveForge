@@ -628,6 +628,9 @@ function neteaseResourceAliases(resource: NeteaseNativeResource): string[] {
   const action = resource.action
   if (action.type === 'program' && 'id' in action && action.id) aliases.add(String.raw`program:${action.id}`)
   if (resource.id && /^[0-9]+$/.test(resource.id)) aliases.add(String.raw`${resource.type}:${resource.id}`)
+  // 同封面的非歌曲卡视为同一内容：实测「音乐播客榜」里榜单卡与榜内节目同图不同名（主键不同），
+  // 会出现两连张。歌曲列表不按封面去重——同专辑多首歌共用封面是正常内容。
+  if (!resource.song && resource.coverUrl) aliases.add(String.raw`cover:${resource.coverUrl}`)
   return [...aliases]
 }
 export function dedupeNeteaseResources(resources: NeteaseNativeResource[]): NeteaseNativeResource[] {

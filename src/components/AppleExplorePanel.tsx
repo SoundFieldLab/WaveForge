@@ -18,7 +18,7 @@
  *
  * 地区：固定使用账号商店（个性化内容绑定账号 storefront），无地区切换。
  */
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { motion } from 'framer-motion'
 import {
   Check, ChevronRight, Compass, Disc3, ExternalLink, Heart, Home, LayoutGrid, Library, ListMusic, Loader2, LogIn, MoreHorizontal, Play, Plus, Radio, Sparkles, Trophy, UserRound, X,
@@ -34,6 +34,7 @@ import {
   removeAppleResourceFromLibrary,
   appleStationToSong,
   appleWebItemToSong,
+  clearAppleExplorePageCaches,
   fetchAppleBrowsePage,
   fetchAppleChartsPage,
   fetchAppleCuratorPage,
@@ -326,6 +327,8 @@ interface AppleExplorePanelProps {
   restorePlaybackOrigin?: (import('../types/playbackNavigation').PlaybackOrigin & { revision: number }) | null
   /** 探索页「刷新」按钮信号（变化时强制重载当前页签；AM 无「换一批」，刷新入口上移到探索页顶栏） */
   refreshSignal?: number
+  /** 回传「新歌精选」区块封面，供 ExploreView 拼「封面墙」背景 */
+  onArtworkCovers?: (covers: string[]) => void
 }
 
 const PAGE_FETCHERS: Record<Exclude<AmTab, 'categories'>, (storefront: string) => Promise<AppleWebPage>> = {
@@ -372,13 +375,16 @@ export function AppleExplorePanel({
   onSongContextMenu,
   restorePlaybackOrigin,
   refreshSignal,
+  onArtworkCovers,
   motionSuspended = false,
 }: AppleExplorePanelProps) {
   const storefront = defaultStorefront || 'cn'
   const [tab, setTab] = useState<AmTab>('home')
   const [pages, setPages] = useState<Partial<Record<AmTab, AppleWebPage>>>({})
-  /** 分类页重挂载信号（刷新用） */
+  /** 分类页重挂载信号（仅用户显式刷新用；账号/商店变化不再重挂载，见下方重置 effect） */
   const [categoriesVersion, setCategoriesVersion] = useState(0)
+  /** 分类页访问过一次后保持挂载（隐藏不卸载）：返回该页签不重取落地页、不丢搜索状态。 */
+  const [categoriesVisited, setCategoriesVisited] = useState(false)
   // 注意：初始必须全 false。loadTab 有「loading[target] 为 true 则跳过」的防重入保护，
   // 若 home 初始为 true，挂载时的 loadTab('home') 会直接 return，主页永远卡在骨架屏。
   const [loading, setLoading] = useState<Record<AmTab, boolean>>({ home: false, browse: false, radio: false, categories: false, charts: false, library: false })
@@ -436,6 +442,29 @@ export function AppleExplorePanel({
   }, [findScroller])
   const pageContextRef = useRef(`${appleLoggedIn}:${storefront}`)
   const pageRequestRef = useRef<Record<Exclude<AmTab, 'categories'>, number>>({ home: 0, browse: 0, radio: 0, charts: 0, library: 0 })
+  /** 上一次的账号/商店上下文：只有真的变了才清缓存并重载（否则会把已加载页面白清一遍）。 */
+  const lastAccountContextRef = useRef<{ loggedIn: boolean; storefront: string } | null>(null)
+
+  /**
+   * 抽屉数据备忘：服务层已有短 TTL 缓存，这里再留一份「已解析结果」——重新打开同一个抽屉时
+   * 立即有内容，不再出现「先空（0 首/加载中）后满」的闪烁，也省掉一次等待。
+   * 账号/商店变化时随页面缓存一起清空。
+   */
+  const drawerMemoRef = useRef({
+    albumTracks: new Map<string, Song[]>(),
+    artistAlbums: new Map<string, AppleWebItem[]>(),
+    stations: new Map<string, AppleWebItem>(),
+    radioShows: new Map<string, AppleRadioShowDetail>(),
+    posts: new Map<string, ApplePostDetail>(),
+  })
+  const clearDrawerMemo = useCallback(() => {
+    const memo = drawerMemoRef.current
+    memo.albumTracks.clear()
+    memo.artistAlbums.clear()
+    memo.stations.clear()
+    memo.radioShows.clear()
+    memo.posts.clear()
+  }, [])
 
   const isDark = playerTheme === 'dark'
   const cardBg = isDark ? 'bg-white/[0.05]' : 'bg-black/[0.04]'
@@ -461,15 +490,32 @@ export function AppleExplorePanel({
   }, [pages, loading, storefront])
 
   useEffect(() => {
+    const previous = lastAccountContextRef.current
+    const storefrontChanged = !previous || previous.storefront !== storefront
+    const loginChanged = !previous || previous.loggedIn !== appleLoggedIn
+    lastAccountContextRef.current = { loggedIn: appleLoggedIn, storefront }
+    // 账号没变、商店没变 → 什么都没失效，保持已加载的页面原样（此前无条件清空并强制重载，
+    // 会把每个页签的缓存页面都丢掉，表现为"切回去又从头加载一遍"）。
+    if (!storefrontChanged && !loginChanged) return
     pageContextRef.current = `${appleLoggedIn}:${storefront}`
     for (const target of ['home', 'browse', 'radio', 'charts', 'library'] as const) pageRequestRef.current[target] += 1
-    setPages({})
+    // 只清真正受这次变化影响的页面：
+    // - 商店变化：目录内容/封面语言全变 → 所有页签都失效，重取；
+    // - 仅登录态变化：账号相关内容（主页/广播/资料库）失效，公开页签（新发现/排行榜）保留。
+    setPages(prev => {
+      if (storefrontChanged) return {}
+      const next = { ...prev }
+      delete next.home
+      delete next.radio
+      delete next.library
+      return next
+    })
     setErrors({})
+    // 以下状态全部来自 /v1/me/*（账号相关），账号或商店变化后必须清掉。
     setSavedPlaylists(new Set())
     setCatalogLibraryIds(new Map())
     setLibraryMutations(new Set())
     setLoading({ home: false, browse: false, radio: false, categories: false, charts: false, library: false })
-    setCategoriesVersion(version => version + 1)
     setAlbumDrawer(null)
     setArtistDrawer(null)
     setStationDetail(null)
@@ -478,16 +524,24 @@ export function AppleExplorePanel({
     setVideoItem(null)
     setPostDetail(null)
     setLayers([])
-    if (tab !== 'categories') void loadTab(tab, true)
+    clearDrawerMemo()
+    // 分类页重挂载只服务于商店变化（搜索落地/分类是 storefront 相关的）；
+    // 仅登录态变化不动它，避免白清一次已加载的落地页（用户显式刷新仍走 refreshSignal）。
+    if (storefrontChanged) setCategoriesVersion(version => version + 1)
+    // 当前页签的页面被清掉了才重载；页面仍在（如登录态变化时停留的新发现/排行榜）不重载。
+    const currentTabCleared = storefrontChanged || tab === 'home' || tab === 'radio' || tab === 'library'
+    if (tab !== 'categories' && currentTabCleared) void loadTab(tab, true)
+    // 资料库是账号内容：登录态变化后（含首次登录）预取一次。
+    if (appleLoggedIn && tab !== 'library') void loadTab('library', true)
   }, [appleLoggedIn, storefront]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (tab === 'categories' && !categoriesVisited) setCategoriesVisited(true)
+  }, [tab, categoriesVisited])
 
   useEffect(() => {
     if (tab !== 'home' && tab !== 'categories') void loadTab(tab)
   }, [tab, loadTab])
-
-  useEffect(() => {
-    if (appleLoggedIn) void loadTab('library')
-  }, [appleLoggedIn, loadTab])
 
   useEffect(() => {
     const libraryPage = pages.library
@@ -559,7 +613,8 @@ export function AppleExplorePanel({
     if (refreshSignal === undefined || refreshSignal === refreshSignalRef.current) return
     refreshSignalRef.current = refreshSignal
     if (tab === 'categories') {
-      // 分类页：重挂载搜索页触发重新拉取
+      // 分类页：先清掉短 TTL 缓存再重挂载搜索页，否则会命中缓存、看起来"刷新没反应"。
+      clearAppleExplorePageCaches()
       setCategoriesVersion(v => v + 1)
     } else {
       void loadTab(tab, true)
@@ -569,6 +624,21 @@ export function AppleExplorePanel({
   const currentPage = pages[tab]
   const currentLoading = loading[tab]
   const currentError = errors[tab]
+  /** 分类页挂载条件：当前就在分类页（首次进入）或此前访问过（保持挂载）。 */
+  const categoriesMounted = categoriesVisited || tab === 'categories'
+
+  // 封面墙封面源：Apple 用「新歌精选」区块的歌曲封面。面板各页签的数据都留在 pages 里，
+  // 只要任意已加载页含该区块即可用（不依赖用户当前停在哪个页签）；区块缺失时退回第一个歌曲网格。
+  const artworkCovers = useMemo(() => {
+    const sections = Object.values(pages).flatMap(page => page?.sections || [])
+    const picks = sections.find(section => section.title?.includes('新歌精选'))
+      ?? sections.find(section => section.kind === 'song-grid')
+    return Array.from(new Set((picks?.items || []).map(item => item.artworkUrl).filter((value): value is string => Boolean(value)))).slice(0, 48)
+  }, [pages])
+
+  useEffect(() => {
+    onArtworkCovers?.(artworkCovers)
+  }, [artworkCovers, onArtworkCovers])
 
   // ── 动作 ──
 
@@ -649,8 +719,13 @@ export function AppleExplorePanel({
   /** 库专辑 → 曲目抽屉（/v1/me/library/albums/{id}/tracks） */
   const openAlbumDrawer = useCallback(async (item: AppleWebItem) => {
     if (!item.libraryId) return
-    setAlbumDrawer({ album: item, tracks: [], loadingTracks: true })
+    // 命中上次的解析结果就直接铺满，不先清空再等网络（避免「0 首 → 有」的闪烁）。
+    const memo = drawerMemoRef.current.albumTracks
+    const cached = memo.get(item.libraryId)
+    setAlbumDrawer({ album: item, tracks: cached || [], loadingTracks: !cached })
+    if (cached) return
     const tracks = await fetchLibraryAlbumTracksForPlay(item.libraryId).catch(() => [])
+    if (tracks.length > 0) memo.set(item.libraryId, tracks)
     setAlbumDrawer(prev => prev && prev.album.id === item.id
       ? { album: prev.album, tracks, loadingTracks: false }
       : prev)
@@ -659,7 +734,10 @@ export function AppleExplorePanel({
   /** 库艺人 → 专辑列表抽屉（/v1/me/library/artists/{id}/albums） */
   const openArtistDrawer = useCallback(async (item: AppleWebItem) => {
     if (!item.libraryId) return
-    setArtistDrawer({ artist: item, albums: [], loading: true })
+    const memo = drawerMemoRef.current.artistAlbums
+    const cached = memo.get(item.libraryId)
+    setArtistDrawer({ artist: item, albums: cached || [], loading: !cached })
+    if (cached) return
     const albums = await fetchLibraryArtistAlbumsForDrawer(item.libraryId).catch(() => [])
     const albumItems: AppleWebItem[] = albums.map((album: AppleLibraryAlbum) => ({
       id: album.id,
@@ -675,6 +753,7 @@ export function AppleExplorePanel({
       releaseDate: album.releaseDate,
       trackCount: album.trackCount,
     }))
+    if (albumItems.length > 0) memo.set(item.libraryId, albumItems)
     setArtistDrawer(prev => prev && prev.artist.id === item.id
       ? { artist: prev.artist, albums: albumItems, loading: false }
       : prev)
@@ -684,8 +763,12 @@ export function AppleExplorePanel({
   const openRadioShow = useCallback(async (item: AppleWebItem) => {
     const showId = item.playId || item.id
     if (!showId) return
-    setRadioShowDetail({ item, detail: null, loading: true })
+    const memo = drawerMemoRef.current.radioShows
+    const cached = memo.get(showId)
+    setRadioShowDetail({ item, detail: cached || null, loading: !cached })
+    if (cached) return
     const detail = await fetchAppleRadioShowDetail(showId, storefront).catch(() => null)
+    if (detail) memo.set(showId, detail)
     setRadioShowDetail(prev => prev && prev.item.id === item.id
       ? { item: detail?.show || prev.item, detail, loading: false }
       : prev)
@@ -695,8 +778,13 @@ export function AppleExplorePanel({
   const openStation = useCallback(async (item: AppleWebItem) => {
     const stationId = item.playId || item.id
     if (!stationId) return
-    setStationDetail({ station: item, loading: true })
+    const memo = drawerMemoRef.current.stations
+    const cached = memo.get(stationId)
+    // 未命中时先用卡片自带信息铺底（抽屉立刻有封面/标题，不空白）。
+    setStationDetail({ station: cached || item, loading: !cached })
+    if (cached) return
     const detail = await fetchAppleStationDetail(stationId, storefront).catch(() => null)
+    if (detail) memo.set(stationId, detail)
     setStationDetail(prev => prev && prev.station.id === item.id
       ? { station: detail || prev.station, loading: false }
       : prev)
@@ -737,8 +825,12 @@ export function AppleExplorePanel({
   /** 帖子详情（艺人分享 /post/…）：尽力取详情，失败用卡片信息兜底 */
   const openPost = useCallback(async (item: AppleWebItem) => {
     if (!item.id) return
-    setPostDetail({ item, detail: null, loading: true })
+    const memo = drawerMemoRef.current.posts
+    const cached = memo.get(item.id)
+    setPostDetail({ item, detail: cached || null, loading: !cached })
+    if (cached) return
     const detail = await fetchApplePostDetail(item.id, storefront).catch(() => null)
+    if (detail) memo.set(item.id, detail)
     setPostDetail(prev => prev && prev.item.id === item.id
       ? { item: prev.item, detail: detail || prev.detail, loading: false }
       : prev)
@@ -1103,7 +1195,11 @@ export function AppleExplorePanel({
           activateItem(item, items)
         }}
       >
-        {textFirst && <div className="mb-2 min-w-0 px-0.5">{meta}</div>}
+        {textFirst && (
+          /* 固定文字区高度：hero 卡片的文字行数不一（有无 label/detail），不固定的话
+             图片起始高度参差不齐，整行看起来不齐平。 */
+          <div className="mb-2 h-[84px] min-w-0 overflow-hidden px-0.5">{meta}</div>
+        )}
         <div className="relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.04]">
           {/* 图片比例按官网实测校准：
               · portrait（主页「专属精选推荐」竖卡）：官网实测 407×542 = 3:4；
@@ -1524,7 +1620,7 @@ export function AppleExplorePanel({
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title || '精品推荐'} subtitle={section.subtitle} section={section} />
             {/* 实测官网精品推荐：卡片 540×310、一屏 2 张并露出第三张约 45px，横向滚动；全部条目来自首次响应。 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title || '精品推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title || '精品推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] max-w-[620px] shrink-0">
               {section.items.map(item => (
                 <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} textFirst />
               ))}
@@ -1559,7 +1655,7 @@ export function AppleExplorePanel({
             <HorizontalShelf
               edgeControls="hover"
               ariaLabel={section.title}
-              itemClassName="w-[calc((100%-4rem)/4.4)] shrink-0"
+              itemClassName="w-[calc((100%-4rem)/4.4)] max-w-[360px] shrink-0"
             >
               {chunkBy(section.items, 4).map((column, columnIndex) => (
                 <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-0.5">
@@ -1583,7 +1679,7 @@ export function AppleExplorePanel({
                 注意 RowCard 必须传 fluid：否则卡片保留自身的固定宽度
                 （w-[148px] sm:w-[164px] lg:w-[176px]），比货架分配的槽位窄一大截，
                 表现为卡片之间出现 70px 以上的空隙（用户实测反馈"歌与歌之间空太多"）。 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] max-w-[280px] shrink-0">
               {section.items.map(item => <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />)}
             </HorizontalShelf>
           </section>
@@ -1644,7 +1740,7 @@ export function AppleExplorePanel({
               <HorizontalShelf
                 edgeControls="hover"
                 ariaLabel={section.title}
-                itemClassName="w-[calc((100%-2rem)/2.8)] min-w-[300px] shrink-0"
+                itemClassName="w-[calc((100%-2rem)/2.8)] min-w-[300px] max-w-[480px] shrink-0"
               >
                 {columns.map((column, columnIndex) => (
                   <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-3">
@@ -1676,7 +1772,7 @@ export function AppleExplorePanel({
             <HorizontalShelf
               edgeControls="hover"
               ariaLabel={section.title}
-              itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0"
+              itemClassName="w-[calc((100%-4rem)/5.6)] max-w-[280px] shrink-0"
             >
               {section.items.map(item => (
                 <button
@@ -1700,7 +1796,7 @@ export function AppleExplorePanel({
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
             {/* 实测官网视频货架：卡片 220×124（16:9）、每行 6 个。 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] max-w-[340px] shrink-0">
               {section.items.map(item => <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} />)}
             </HorizontalShelf>
           </section>
@@ -1755,7 +1851,7 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-1rem)/2.2)] max-w-[620px] shrink-0">
               {section.items.map(item => <FeaturedCard key={`${section.id}-${item.id}`} item={item} items={section.items} />)}
             </HorizontalShelf>
           </section>
@@ -1770,7 +1866,7 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/4.5)] max-w-[340px] shrink-0">
               {section.items.map(item => <ShowCard key={`${section.id}-${item.id}`} item={item} />)}
             </HorizontalShelf>
           </section>
@@ -1863,7 +1959,7 @@ export function AppleExplorePanel({
           return (
             <section key={section.id} className="space-y-3">
               <SectionTitle title={section.title} subtitle={`${section.items.length} 项`} />
-              <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+              <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] max-w-[280px] shrink-0">
                 {section.items.map(item => (
                   <RowCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={section.items} fluid />
                 ))}
@@ -1918,7 +2014,7 @@ export function AppleExplorePanel({
               <HorizontalShelf
                 edgeControls="hover"
                 ariaLabel={section.title}
-                itemClassName="w-[calc((100%-4rem)/5.5)] shrink-0"
+                itemClassName="w-[calc((100%-4rem)/5.5)] max-w-[280px] shrink-0"
               >
                 {columns.map((column, columnIndex) => (
                   <div key={`${section.id}-col-${columnIndex}`} className="flex w-full flex-col gap-4">
@@ -1946,7 +2042,7 @@ export function AppleExplorePanel({
         return (
           <section key={section.id} className="space-y-3">
             <SectionTitle title={section.title} subtitle={section.subtitle} section={section} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={section.title} itemClassName="w-[calc((100%-4rem)/5.6)] max-w-[280px] shrink-0">
               {section.items.map(item => <RowCard key={`${section.id}-${item.id}`} item={item} items={section.items} fluid />)}
               {section.items.length === 0 && (
                 <div className="w-full px-4 py-6 text-sm text-white/36">暂无内容</div>
@@ -2080,7 +2176,7 @@ export function AppleExplorePanel({
         nodes.push(
           <section key={`${section.id}-hero-shelf`} className="space-y-3">
             {/* 实测官网精品推荐：卡片 540×310、文字在上、一屏 2 张并露出第三张约 45px，横向滚动。 */}
-            <HorizontalShelf edgeControls="hover" ariaLabel="精品推荐" itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel="精品推荐" itemClassName="w-[calc((100%-1rem)/2.2)] max-w-[620px] shrink-0">
               {heroItems.map(item => (
                 <FeaturedCard key={`${section.id}-${item.type}-${item.id}`} item={item} items={heroItems} textFirst />
               ))}
@@ -2098,7 +2194,7 @@ export function AppleExplorePanel({
         nodes.push(
           <section key={`${banners[0].id}-banner-shelf`} className="space-y-3">
             <SectionTitle title={banners[0].title || (tab === 'browse' ? '精品推荐' : '推荐')} />
-            <HorizontalShelf edgeControls="hover" ariaLabel={tab === 'browse' ? '精品推荐' : '推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] shrink-0">
+            <HorizontalShelf edgeControls="hover" ariaLabel={tab === 'browse' ? '精品推荐' : '推荐'} itemClassName="w-[calc((100%-1rem)/2.2)] max-w-[620px] shrink-0">
               {banners.map(banner => <BannerCard key={banner.id} section={banner} />)}
             </HorizontalShelf>
           </section>,
@@ -2687,7 +2783,10 @@ export function AppleExplorePanel({
           </button>
         </div>
       )}
-      {tab === 'categories' ? (
+      {/* 分类页：访问过一次后就保持挂载（不显示时只 hidden，不卸载）——
+          返回该页签不再重挂载、不重取落地页、不丢搜索状态；hidden 子树不参与布局与焦点。 */}
+      <div className={tab === 'categories' ? '' : 'hidden'}>
+      {categoriesMounted && (
         /* 搜索（1:1 复刻 music.apple.com/cn/search）：
            搜索框 + 「Apple Music / 你的资料库」范围切换 + 分区结果（最佳结果/艺人/专辑/歌曲/播放列表）。
            无关键词时展示落地视图——沿用原来的「类别浏览」curator 网格。 */
@@ -2727,10 +2826,13 @@ export function AppleExplorePanel({
                   trackCount: playlist.trackCount,
                 })
               }
+              suspended={tab !== 'categories'}
             />
           )}
         />
-      ) : currentLoading && !currentPage ? (
+      )}
+      </div>
+      {tab !== 'categories' && (currentLoading && !currentPage ? (
         skeleton
       ) : currentPage ? (
         <>
@@ -2814,7 +2916,7 @@ export function AppleExplorePanel({
             <span>来源：{currentPage.sourceLabel}</span>
           </footer>
         </>
-      ) : null}
+      ) : null)}
       </>)}
       {albumDrawerEl}
       {artistDrawerEl}

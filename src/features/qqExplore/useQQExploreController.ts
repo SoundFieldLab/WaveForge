@@ -67,12 +67,32 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
       setState({ snapshot: null, initialLoading: false, refreshing: false, refreshingModuleId: '', moduleErrors: {}, loadingMore: false, loadingMoreProgress: 0, error: '', paginationError: '' })
       return
     }
+    const cached = readCache(userId)
+    // 快照还新鲜：直接用快照渲染，不再打一次 bootstrap。视图被隐藏/重挂载（切模式再回来、
+    // StrictMode 双执行、authRevision 抖动）时这是最主要的重复请求来源；手动刷新走 refreshFeed。
+    if (!force && cached && Date.now() - cached.generatedAt < FEED_STALE_MS) {
+      generation.current += 1
+      controller.current?.abort()
+      contextualController.current?.abort()
+      setState(previous => ({
+        ...previous,
+        snapshot: previous.snapshot || cached,
+        initialLoading: false,
+        refreshing: false,
+        refreshingModuleId: '',
+        moduleErrors: {},
+        loadingMore: false,
+        loadingMoreProgress: 0,
+        error: '',
+        paginationError: '',
+      }))
+      return
+    }
     const id = ++generation.current
     controller.current?.abort()
     contextualController.current?.abort()
     const abortController = new AbortController()
     controller.current = abortController
-    const cached = readCache(userId)
     setState(previous => ({
       ...previous,
       snapshot: previous.snapshot || cached,

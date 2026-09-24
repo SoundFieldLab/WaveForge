@@ -39,6 +39,7 @@ import PlaylistContextMenu from './PlaylistContextMenu'
 import { MirroredGlobalSettings, PlatformOrderEditor, makeSkin } from './MirroredGlobalSettings'
 import { GLOBAL_SETTINGS_GROUPS, isEntryVisible, useGlobalSettings, type GlobalSettingsGroupId, type MirrorActionId } from '../services/globalSettingsRegistry'
 import { preloadOnIdle } from '../utils/lazyPreload'
+import { createTtlCache } from '../utils/ttlCache'
 import { resolveReadableForegroundColor } from '../services/foliaReadableColor'
 import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
@@ -169,6 +170,9 @@ const formatTime = (value: number) => {
   const total = Math.max(0, Math.floor(value || 0))
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`
 }
+// 冻结（隐藏但保活）的页面用它当返回/关闭回调：子页面在 window 上监听 Escape，
+// 多个保活实例并存时隐藏面不能也响应，否则一次 Escape 会连续后退多步。
+const noop = () => {}
 
 // 进度条行包装：内部订阅播放时间（4Hz），传统视图本体不再因 currentTime 每秒重渲染。
 // 纯进度条（无圆点滑块）：点击/拖动轨道任意位置 seek。
@@ -500,7 +504,7 @@ const TraditionalVerticalLyrics = memo(function TraditionalVerticalLyrics({
 })
 
 // 传统模式中间栏页面：一切内容都在中间栏展示，不复用全局弹窗
-type TraditionalPage =
+type TraditionalPageFields =
   | { name: 'home' }
   | { name: 'search' }
   | { name: 'library' }
@@ -511,6 +515,9 @@ type TraditionalPage =
   | { name: 'comments'; song: Song }
   | { name: 'artist'; id: string; platform: MusicPlatform }
   | { name: 'album'; id: string; platform: MusicPlatform }
+// 历史条目：每条一个稳定 pageId，对应一个常驻挂载的「冻结」页面，
+// 不同条目绝不会共用同一个挂载实例（即使内容恰好相同）。
+type TraditionalPage = TraditionalPageFields & { pageId: number }
 
 function TraditionalView({
   onSongSelect, restorePlaybackOrigin, currentSong, queue, isPlaying, live = false, playbackTimeStore, duration, lyrics, volume, playerTheme, dominantColor, analyzerStore, onOpenPlayer,
@@ -555,6 +562,9 @@ function TraditionalView({
   // 空闲时预热设置弹窗 chunk
   useEffect(() => warmSettingsChunks(), [])
   const [payload, setPayload] = useState<ExplorePayload | null>(null)
+  // 供 effect 判断「旧 payload 是不是另一个平台的」，避免闭包旧值
+  const payloadRef = useRef(payload)
+  payloadRef.current = payload
   const [loading, setLoading] = useState(true)
   const [homeError, setHomeError] = useState('')
   const homeRequestRef = useRef(0)
@@ -644,11 +654,20 @@ function TraditionalView({
     window.addEventListener('desktopLyricsEnabledChanged', sync)
     return () => { active = false; window.removeEventListener('desktopLyricsEnabledChanged', sync) }
   }, [])
-  const [history, setHistory] = useState<TraditionalPage[]>([{ name: 'home' }])
+  // 页面「冻结」：每条历史记录分配一个稳定 pageId，对应一个常驻挂载实例（见 main 内的 map）。
+  // 同一个历史槽位被原地替换（openPlaylist 的 replaceCurrent）时沿用旧 id。
+  const pageIdRef = useRef(1)
+  const [history, setHistory] = useState<TraditionalPage[]>(() => [{ name: 'home', pageId: 0 }])
   const [historyIndex, setHistoryIndex] = useState(0)
   const historyIndexRef = useRef(0)
   historyIndexRef.current = historyIndex
-  const currentPage = history[historyIndex] || history[0] || { name: 'home' }
+  // openPlaylist 需要读当前槽位已有条目的 pageId，但不该因 history 变化而重建
+  const historyRef = useRef(history)
+  historyRef.current = history
+  const currentPage = history[historyIndex] || history[0] || { name: 'home', pageId: 0 }
+  // 给「只依赖 revision」的 effect 读当前页用，避免闭包拿到旧值
+  const currentPageRef = useRef(currentPage)
+  currentPageRef.current = currentPage
   const currentPlaybackOrigin = useMemo<PlaybackOrigin>(() => {
     const base = { mode: 'traditional' as const, platform }
     if (currentPage.name === 'search') return { ...base, surface: 'traditional-search' }
@@ -662,10 +681,11 @@ function TraditionalView({
   const mainRef = useRef<HTMLElement>(null)
 
   // 页面历史导航：左上角 后退/前进 箭头
-  const navigate = useCallback((next: TraditionalPage) => {
+  const navigate = useCallback((next: TraditionalPageFields) => {
+    const entry: TraditionalPage = { ...next, pageId: pageIdRef.current++ }
     setHistory(prev => {
       const trimmed = prev.slice(0, historyIndexRef.current + 1)
-      return [...trimmed, next]
+      return [...trimmed, entry]
     })
     setHistoryIndex(prev => prev + 1)
     mainRef.current?.scrollTo({ top: 0 })
@@ -730,7 +750,10 @@ function TraditionalView({
   }, [platform])
 
   useEffect(() => {
-    setPayload(null)
+    // 只有平台变了才清空（旧平台的数据不能留在新平台下面）。同平台重跑（登录态刷新等）
+    // 保留旧内容，由 fetchExploreHome 的内存缓存/后台刷新覆盖——否则每次都要先看一遍骨架。
+    if (payloadRef.current && payloadRef.current.platform !== platform) setPayload(null)
+    setLoading(payloadRef.current?.platform !== platform)
     void loadHome()
     syncPlatformAcrossViews(platform)
     return () => { homeRequestRef.current += 1 }
@@ -822,12 +845,15 @@ function TraditionalView({
     playlistAbortRef.current = controller
     const requestId = ++playlistRequestRef.current
     const targetHistoryIndex = replaceCurrent ? historyIndexRef.current : historyIndexRef.current + 1
+    // 原地替换时沿用该槽位已有的 pageId（保活实例不变，只换 props）；
+    // 新建条目由 navigate 分配新 id。
+    const replacePageId = replaceCurrent ? (historyRef.current[targetHistoryIndex]?.pageId ?? pageIdRef.current++) : 0
     setPlaylistLoading(true)
     setPlaylistError('')
     if (replaceCurrent) {
       setHistory(prev => {
         const next = [...prev]
-        next[targetHistoryIndex] = { name: 'playlist', playlist: playlist || null, songs: [] }
+        next[targetHistoryIndex] = { name: 'playlist', playlist: playlist || null, songs: [], pageId: replacePageId }
         return next
       })
     } else {
@@ -838,7 +864,7 @@ function TraditionalView({
       setHistory(prev => {
         const next = [...prev]
         const target = next[targetHistoryIndex]
-        if (target?.name === 'playlist') next[targetHistoryIndex] = { name: 'playlist', playlist: nextPlaylist, songs }
+        if (target?.name === 'playlist') next[targetHistoryIndex] = { ...target, playlist: nextPlaylist, songs }
         return next
       })
     }
@@ -874,12 +900,36 @@ function TraditionalView({
     const originPlatform = restorePlaybackOrigin.platform || platform
     if (originPlatform !== platform) setPlatform(originPlatform)
     if (restorePlaybackOrigin.surface === 'traditional-playlist' && restorePlaybackOrigin.playlist) {
-      void openPlaylist({ ...(restorePlaybackOrigin.playlist as ExplorePlaylist), platform: originPlatform })
-    } else if (restorePlaybackOrigin.surface === 'traditional-search') navigate({ name: 'search' })
-    else if (restorePlaybackOrigin.surface === 'traditional-recent') navigate({ name: 'recent' })
-    else if (restorePlaybackOrigin.surface === 'traditional-library') navigate({ name: 'library' })
-    else if (restorePlaybackOrigin.surface === 'traditional-album' && restorePlaybackOrigin.albumId) navigate({ name: 'album', id: String(restorePlaybackOrigin.albumId), platform: originPlatform })
-    else if (restorePlaybackOrigin.surface === 'traditional-artist' && restorePlaybackOrigin.artistId) navigate({ name: 'artist', id: String(restorePlaybackOrigin.artistId), platform: originPlatform })
+      const origin = restorePlaybackOrigin.playlist as ExplorePlaylist
+      const page = currentPageRef.current
+      const pageId = String((page as { playlist?: { id?: string | number; dirId?: string | number } }).playlist?.id
+        ?? (page as { playlist?: { dirId?: string | number } }).playlist?.dirId ?? '')
+      const originId = String((origin as { id?: string | number; dirId?: string | number }).id
+        ?? (origin as { dirId?: string | number }).dirId ?? '')
+      // 播放页就是在这个歌单上打开的：传统视图一直挂着（保活），页面和曲目都还在，
+      // 不能再 push 一份重复页面 + 重新拉整张歌单。
+      if (page.name === 'playlist' && originId && pageId === originId) return
+      // 换了歌单：原地替换当前页，避免历史里留一份上一个歌单。
+      void openPlaylist({ ...origin, platform: originPlatform }, true)
+    } else if (restorePlaybackOrigin.surface === 'traditional-search') {
+      // 传统视图被播放页覆盖时一直挂着（保活）：当前页就是它，不必再 push 一份重复页面。
+      // 否则会挂载一个新的空搜索页——关键词与结果全丢，就是肉眼可见的「重新加载」。
+      if (currentPageRef.current.name !== 'search') navigate({ name: 'search' })
+    } else if (restorePlaybackOrigin.surface === 'traditional-recent') {
+      if (currentPageRef.current.name !== 'recent') navigate({ name: 'recent' })
+    } else if (restorePlaybackOrigin.surface === 'traditional-library') {
+      if (currentPageRef.current.name !== 'library') navigate({ name: 'library' })
+    } else if (restorePlaybackOrigin.surface === 'traditional-album' && restorePlaybackOrigin.albumId) {
+      const page = currentPageRef.current
+      if (!(page.name === 'album' && page.id === String(restorePlaybackOrigin.albumId) && page.platform === originPlatform)) {
+        navigate({ name: 'album', id: String(restorePlaybackOrigin.albumId), platform: originPlatform })
+      }
+    } else if (restorePlaybackOrigin.surface === 'traditional-artist' && restorePlaybackOrigin.artistId) {
+      const page = currentPageRef.current
+      if (!(page.name === 'artist' && page.id === String(restorePlaybackOrigin.artistId) && page.platform === originPlatform)) {
+        navigate({ name: 'artist', id: String(restorePlaybackOrigin.artistId), platform: originPlatform })
+      }
+    }
   }, [restorePlaybackOrigin?.revision])
 
   useEffect(() => {
@@ -1133,6 +1183,49 @@ function TraditionalView({
     ? { background: bgBase, filter: `blur(${bgBlur}px)`, transform: 'scale(1.06)' }
     : { background: bgBase }
 
+  // 单页渲染。active=false 的页面只被隐藏但仍挂载，返回/关闭一律传 no-op：
+  // 子页面在 window 上监听 Escape，隐藏面若也调 goBack，一次 Escape 会连续后退多步。
+  const renderPage = (page: TraditionalPage, active: boolean) => {
+    const onBack = active ? goBack : noop
+    const onClose = active ? goBack : noop
+    if (page.name === 'search') {
+      return <TraditionalSearch platform={platform} accent={accent} isDark={isDark} active={active} currentSong={currentSong} onBack={onBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
+    }
+    if (page.name === 'recent') {
+      return <TraditionalRecent platform={platform} accent={accent} isDark={isDark} active={active} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={onBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
+    }
+    if (page.name === 'settings') {
+      return <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />
+    }
+    if (page.name === 'library') {
+      return <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={onBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
+    }
+    if (page.name === 'profile') {
+      return <TraditionalProfile platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} selfUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} targetUserId={page.userId} targetNickname={page.nickname} targetAvatar={page.avatarUrl} userPlaylists={userPlaylists} onBack={onBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onOpenUserProfile={(userId, nickname, avatarUrl) => navigate({ name: 'profile', userId, nickname, avatarUrl })} onOpenArtist={openArtistDetail} onLoginClick={() => onLoginClick(platform)} />
+    }
+    if (page.name === 'playlist') {
+      return <TraditionalPlaylistDetail playlist={page.playlist} songs={page.songs} loading={playlistLoading} error={playlistError} onRetry={() => void openPlaylist(page.playlist, true)} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={onClose} isOwner={ownsPlaylist(page.playlist)} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform, playlist: page.playlist, songs })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={ownsPlaylist(page.playlist) && getPlatformCapabilities((page.playlist?.platform || platform) as MusicPlatform).removeTracksFromPlaylist ? handleRemoveFromCurrentPlaylist : undefined} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} ownUserName={loggedIn ? username : ''} ownUserAvatar={avatar} ownUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} onOpenUserProfile={(targetPlatform, userId, nickname, avatarUrl) => { if (targetPlatform === platform) navigate({ name: 'profile', userId, nickname, avatarUrl }) }} />
+    }
+    if (page.name === 'comments') {
+      return <TraditionalComments song={page.song} accent={accent} isDark={isDark} onClose={onClose} />
+    }
+    if (page.name === 'artist') {
+      return <TraditionalArtistDetail artistId={page.id} platform={page.platform} accent={accent} isDark={isDark} currentSong={currentSong} onClose={onClose} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onOpenAlbum={openAlbumDetail} userPlaylists={userPlaylists} />
+    }
+    if (page.name === 'album') {
+      return <TraditionalAlbumDetail albumId={page.id} platform={page.platform} accent={accent} isDark={isDark} currentSong={currentSong} onClose={onClose} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onOpenArtist={openArtistDetail} userPlaylists={userPlaylists} />
+    }
+    return (
+      <HomeContent
+        platform={platform} accent={accent} isDark={isDark} muted={muted} surface={surface}
+        loading={loading} error={homeError} onRetry={() => { void loadHome() }} loggedIn={loggedIn} username={username} payload={payload}
+        recommendationSongs={recommendationSongs} heroSongs={heroSongs} preferences={preferences}
+        onSongSelect={(song, songs, origin) => onSongSelect(song, songs, origin)}
+        onSongMenu={setSongMenu} onPlaylistMenu={setPlaylistMenu} onOpenPlaylist={openPlaylist}
+      />
+    )
+  }
+
   return (
     <div className={`relative h-full overflow-hidden ${text}`}>
       {/* 背景层：可独立模糊/暗化，不影响前景内容 */}
@@ -1278,33 +1371,17 @@ function TraditionalView({
 
         {/* 中间栏：内容展示区（首页/搜索/音乐库/歌单/歌手/专辑/评论/个人中心） */}
         <main ref={mainRef} className="min-h-0 overflow-y-auto px-5 py-6 lg:px-8">
-          {currentPage.name === 'search' ? (
-            <TraditionalSearch platform={platform} accent={accent} isDark={isDark} currentSong={currentSong} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
-          ) : currentPage.name === 'recent' ? (
-            <TraditionalRecent platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
-          ) : currentPage.name === 'settings' ? (
-            <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />
-          ) : currentPage.name === 'library' ? (
-            <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={goBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} />
-          ) : currentPage.name === 'profile' ? (
-            <TraditionalProfile platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} selfUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} targetUserId={currentPage.userId} targetNickname={currentPage.nickname} targetAvatar={currentPage.avatarUrl} userPlaylists={userPlaylists} onBack={goBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onOpenUserProfile={(userId, nickname, avatarUrl) => navigate({ name: 'profile', userId, nickname, avatarUrl })} onOpenArtist={openArtistDetail} onLoginClick={() => onLoginClick(platform)} />
-          ) : currentPage.name === 'playlist' ? (
-            <TraditionalPlaylistDetail playlist={currentPage.playlist} songs={currentPage.songs} loading={playlistLoading} error={playlistError} onRetry={() => void openPlaylist(currentPage.playlist, true)} currentSong={currentSong} playerTheme={playerTheme} accentColor={accent} onClose={goBack} isOwner={ownsPlaylist(currentPage.playlist)} onSongSelect={(song, songs) => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: song.platform || platform, playlist: currentPage.playlist, songs })} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={ownsPlaylist(currentPage.playlist) && getPlatformCapabilities((currentPage.playlist?.platform || platform) as MusicPlatform).removeTracksFromPlaylist ? handleRemoveFromCurrentPlaylist : undefined} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} ownUserName={loggedIn ? username : ''} ownUserAvatar={avatar} ownUserId={platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''} onOpenUserProfile={(targetPlatform, userId, nickname, avatarUrl) => { if (targetPlatform === platform) navigate({ name: 'profile', userId, nickname, avatarUrl }) }} />
-          ) : currentPage.name === 'comments' ? (
-            <TraditionalComments song={currentPage.song} accent={accent} isDark={isDark} onClose={goBack} />
-          ) : currentPage.name === 'artist' ? (
-            <TraditionalArtistDetail artistId={currentPage.id} platform={currentPage.platform} accent={accent} isDark={isDark} currentSong={currentSong} onClose={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onOpenAlbum={openAlbumDetail} userPlaylists={userPlaylists} />
-          ) : currentPage.name === 'album' ? (
-            <TraditionalAlbumDetail albumId={currentPage.id} platform={currentPage.platform} accent={accent} isDark={isDark} currentSong={currentSong} onClose={goBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onOpenArtist={openArtistDetail} userPlaylists={userPlaylists} />
-          ) : (
-            <HomeContent
-              platform={platform} accent={accent} isDark={isDark} muted={muted} surface={surface}
-              loading={loading} error={homeError} onRetry={() => { void loadHome() }} loggedIn={loggedIn} username={username} payload={payload}
-              recommendationSongs={recommendationSongs} heroSongs={heroSongs} preferences={preferences}
-              onSongSelect={(song, songs, origin) => onSongSelect(song, songs, origin)}
-              onSongMenu={setSongMenu} onPlaylistMenu={setPlaylistMenu} onOpenPlaylist={openPlaylist}
-            />
-          )}
+          {history.map((page, index) => {
+            const active = index === historyIndex
+            // 页面「冻结」：访问过的历史页面保持挂载，切走只隐藏、不卸载（与探索页同款）。
+            // display:none 的子树不参与布局与绘制、也拿不到焦点；页面自己的页签/分页/滚动
+            // 位置、已解码封面全部保留，返回时不再重新请求、也不再闪一次骨架。
+            return (
+              <div key={page.pageId} className={active ? 'contents' : 'hidden'} aria-hidden={!active}>
+                {renderPage(page, active)}
+              </div>
+            )
+          })}
         </main>
 
         {/* 右栏：资料卡 + 正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部可滚动） */}
@@ -1798,27 +1875,50 @@ const getRecentRows = (payload: any): any[] => {
   return candidates.find(Array.isArray) || []
 }
 
+// 最近播放列表的本会话缓存：返回上一页再进来不该重打一遍 /api/{qq,netease,soda}/record/recent/song
+// （这条链路没有服务层缓存）。只存成功且非空的结果，登录态变化时清空，不落盘。
+const traditionalRecentCache = createTtlCache<Song[]>({ ttlMs: 60 * 1000, maxEntries: 8 })
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => traditionalRecentCache.clear())
+}
+
 // 最近播放页：中间栏展示各平台最近播放记录（与简约/桌面模式同源接口）
-function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, authRevision, onSongSelect, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onViewComments, onOpenArtist, onOpenAlbum, onCopyInfo, onLoginClick, userPlaylists }: {
-  platform: MusicPlatform; accent: string; isDark: boolean; loggedIn: boolean; currentSong: Song | null; authRevision?: number; onBack: () => void; onSongSelect: (song: Song, songs: Song[], origin: PlaybackOrigin) => void; onPlayNext?: (song: Song) => void; onAddToFavorites?: (song: Song) => void; onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>; onAddToPlaylist?: (song: Song, playlistId: string) => void; onViewComments?: (song: Song) => void; onOpenArtist?: (artistId: string, platform: MusicPlatform) => void; onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void; onCopyInfo?: (song: Song) => void; onLoginClick: () => void; userPlaylists?: any[];
+function TraditionalRecent({ platform, accent, isDark, active, loggedIn, currentSong, authRevision, onSongSelect, onPlayNext, onAddToFavorites, onRemoveFromFavorites, onAddToPlaylist, onViewComments, onOpenArtist, onOpenAlbum, onCopyInfo, onLoginClick, userPlaylists }: {
+  platform: MusicPlatform; accent: string; isDark: boolean; active: boolean; loggedIn: boolean; currentSong: Song | null; authRevision?: number; onBack: () => void; onSongSelect: (song: Song, songs: Song[], origin: PlaybackOrigin) => void; onPlayNext?: (song: Song) => void; onAddToFavorites?: (song: Song) => void; onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>; onAddToPlaylist?: (song: Song, playlistId: string) => void; onViewComments?: (song: Song) => void; onOpenArtist?: (artistId: string, platform: MusicPlatform) => void; onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void; onCopyInfo?: (song: Song) => void; onLoginClick: () => void; userPlaylists?: any[];
 }) {
   const [loading, setLoading] = useState(true)
   const [songs, setSongs] = useState<Song[]>([])
   const [error, setError] = useState('')
   const [songMenu, setSongMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
   const requestIdRef = useRef(0)
+  const loadedKeyRef = useRef('')
   const muted = isDark ? 'text-white/50' : 'text-slate-500'
   const surface = isDark ? 'bg-white/[0.055] border-white/10' : 'bg-white/75 border-black/10'
 
   useEffect(() => {
+    // 隐藏的保活页面不发请求；重新可见时 active 变化会让本 effect 再跑一次
+    if (!active) return
+    const cached = traditionalRecentCache.get(platform)
+    if (cached) {
+      // 同一平台本会话刚拉过：直接复用，不再打接口
+      loadedKeyRef.current = platform
+      setSongs(cached)
+      setError('')
+      setLoading(false)
+      return
+    }
     const requestId = ++requestIdRef.current
+    // 同平台重跑（登录态刷新等）保留旧列表；换了平台才清空
+    if (loadedKeyRef.current !== platform) setSongs([])
     setLoading(true)
     setError('')
-    setSongs([])
     const cookie = getPlatformCookie(platform)
     const finish = (list: Song[], message = '') => {
       if (requestId !== requestIdRef.current) return
+      loadedKeyRef.current = platform
       setSongs(list)
+      // 失败/空结果不缓存（kugou 的不支持、未登录等空列表下次仍会重新尝试语义）
+      if (list.length > 0) traditionalRecentCache.set(platform, list)
       setError(message)
       setLoading(false)
     }
@@ -1872,7 +1972,7 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
         }
       })
       .catch((err: unknown) => finish([], err instanceof Error ? err.message : '最近播放加载失败，请重试'))
-  }, [platform, authRevision])
+  }, [platform, authRevision, active])
 
   const activeSong = (song: Song) => currentSong && songKey(song) === songKey(currentSong)
 
@@ -1888,7 +1988,7 @@ function TraditionalRecent({ platform, accent, isDark, loggedIn, currentSong, au
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {loading ? (
+        {loading && songs.length === 0 ? (
           <div className="space-y-2">{Array.from({ length: 8 }, (_, index) => <div key={index} className="h-14 animate-pulse rounded-2xl bg-white/10" />)}</div>
         ) : !loggedIn ? (
           <div className={`flex h-56 flex-col items-center justify-center gap-3 rounded-3xl border ${surface}`}>
