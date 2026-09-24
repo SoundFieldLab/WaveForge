@@ -250,6 +250,20 @@ function ensurePcPerfTier() {
     .catch(() => {})
 }
 
+// 封面墙两种样式的铺排参数：
+// - tiled（紧贴）：随机大小（2~4 列 × 2~3 行）的无缝拼贴，铺满整个背景；
+// - sparse（稀疏）：小封面 + 留缝，数量更多，观感更轻。
+const WALL_LAYOUT = {
+  tiled: { columns: 12, rows: 6, gap: 0, minSpan: 2, maxSpan: 4, covers: 72 },
+  sparse: { columns: 10, rows: 6, gap: 16, minSpan: 1, maxSpan: 1, covers: 64 },
+} as const
+
+/** 稳定的伪随机数：同一张封面每次渲染都得到同样的「大小」，不会来回跳。 */
+function coverRandom(seed: number, salt: number): number {
+  const value = Math.sin(seed * 12.9898 + salt * 78.233) * 43758.5453
+  return value - Math.floor(value)
+}
+
 function CoverWallBackground({
   covers,
   style,
@@ -258,7 +272,7 @@ function CoverWallBackground({
   accentRgb,
 }: {
   covers: string[]
-  style: 'tilted' | 'grid'
+  style: 'tiled' | 'sparse'
   animated: boolean
   blurPx: number
   accentRgb: string
@@ -270,48 +284,59 @@ function CoverWallBackground({
   // PC 端补充按性能档位降级：精简档（lite）停漂移但保留静态封面墙 + 模糊遮罩——
   // 内容静止后 backdrop-filter 不再逐帧重采样，视觉主体（封面墙 + 毛玻璃）完全不变。
   const driftAnimated = animated && (tvMode ? isPerfModeEnhanced() : pcPerfTier !== 'lite')
-  const urls = useMemo(() => {
+  const layout = WALL_LAYOUT[style]
+  const tiles = useMemo(() => {
     const unique = Array.from(new Set(covers.filter(Boolean)))
     // 扩充到足够铺满背景的封面数
     const list: string[] = []
     let i = 0
-    while (list.length < 28 && unique.length > 0) {
+    while (list.length < layout.covers && unique.length > 0) {
       list.push(unique[i % unique.length])
       i += 1
     }
-    return list
-  }, [covers])
+    return list.map((url, index) => {
+      // 紧贴样式：每张随机大小（稀疏样式恒为 1×1 的小封面）
+      const spanX = layout.minSpan === layout.maxSpan
+        ? layout.minSpan
+        : layout.minSpan + Math.floor(coverRandom(index, 1) * (layout.maxSpan - layout.minSpan + 1))
+      const spanY = layout.minSpan === layout.maxSpan
+        ? layout.minSpan
+        : layout.minSpan + Math.floor(coverRandom(index, 2) * (layout.maxSpan - layout.minSpan + 1))
+      return { url, spanX, spanY, key: `${index}-${url.slice(-24)}` }
+    })
+  }, [covers, layout])
 
   const blurValue = `blur(${blurPx}px)`
-  const tiltValues = [-5, -3, 0, 3, 5, -2, 2, 4, -4, 1]
 
-  if (urls.length === 0) return null
+  if (tiles.length === 0) return null
 
   return (
     <div className="pointer-events-none absolute inset-0 overflow-hidden">
-      {/* 封面墙主体：网格排列，动画时缓慢平移 */}
+      {/* 封面墙主体：dense 流自动填缝，动画时缓慢平移 */}
       <div
-        className="absolute inset-[-20%]"
+        className="absolute inset-[-12%]"
         style={{
           animation: driftAnimated ? 'coverWallDrift 90s linear infinite' : undefined,
           display: 'grid',
-          gridTemplateColumns: 'repeat(7, 1fr)',
+          gridTemplateColumns: `repeat(${layout.columns}, 1fr)`,
           gridAutoRows: 'minmax(0, 1fr)',
-          gap: style === 'grid' ? 10 : 14,
-          transform: style === 'tilted' ? 'rotate(2deg) scale(1.06)' : undefined,
+          gridAutoFlow: 'dense',
+          gap: layout.gap,
         }}
       >
-        {urls.map((url, index) => (
+        {tiles.map(tile => (
           <div
-            key={`${url}-${index}`}
-            className="overflow-hidden rounded-2xl"
+            key={tile.key}
+            className="overflow-hidden"
             style={{
-              transform: style === 'tilted' ? `rotate(${tiltValues[index % tiltValues.length]}deg)` : undefined,
-              boxShadow: '0 4px 18px rgba(0,0,0,0.35)',
-              border: '1px solid rgba(255,255,255,0.08)',
+              gridColumn: `span ${tile.spanX}`,
+              gridRow: `span ${tile.spanY}`,
+              boxShadow: style === 'sparse' ? '0 4px 18px rgba(0,0,0,0.35)' : undefined,
+              border: style === 'sparse' ? '1px solid rgba(255,255,255,0.08)' : undefined,
+              borderRadius: style === 'sparse' ? 16 : undefined,
             }}
           >
-            <CachedImage src={url} alt="" className="h-full w-full object-cover" draggable={false} lazy role="background" priority="deferred" />
+            <CachedImage src={tile.url} alt="" className="h-full w-full object-cover" draggable={false} lazy role="background" priority="deferred" />
           </div>
         ))}
       </div>
@@ -381,7 +406,7 @@ function ExploreSkeleton() {
       {Array.from({ length: 3 }).map((_, section) => (
         <div key={section}>
           <div className="mb-4 h-7 w-32 animate-pulse rounded-lg bg-white/[0.08]" />
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6 min-[1900px]:grid-cols-7">
             {Array.from({ length: 6 }).map((_, index) => (
               <div key={index} className="aspect-square animate-pulse rounded-3xl bg-white/[0.06]" />
             ))}
@@ -407,8 +432,13 @@ const fingerprintExploreCredential = (value: string) => {
 }
 
 const getExploreAccountKey = (platform: ExplorePlatform) => {
-  // Apple 无 cookie/用户，按商店区分缓存
-  if (platform === 'apple') return `apple:${localStorage.getItem('appleStorefront') || 'cn'}`
+  // Apple 的缓存里有账号个性化内容（每日推荐派生的封面墙等）：登录态要进键，
+  // 否则同一天内切换 Apple 账号会读到上一个账号的数据。
+  if (platform === 'apple') {
+    // 与 appleMusic.ts 的登录判定同源：有 media user token 即登录态
+    const signedIn = Boolean(localStorage.getItem('appleMediaUserToken'))
+    return `apple:${localStorage.getItem('appleStorefront') || 'cn'}:${signedIn ? 'signed-in' : 'guest'}`
+  }
   const userIdKey = platform === 'qq' ? 'qq_user_id' : platform === 'netease' ? 'netease_user_id' : `${platform}_user_id`
   const userId = localStorage.getItem(userIdKey) || ''
   const cookie = getExploreCookie(platform)
@@ -449,11 +479,58 @@ const readExploreCache = (): Partial<Record<ExplorePlatform, ExplorePayload>> =>
 }
 
 const writeExploreCache = (platform: ExplorePlatform, payload: ExplorePayload) => {
-  localStorage.setItem(`${EXPLORE_CACHE_KEY_PREFIX}${platform}`, JSON.stringify({
-    accountKey: getExploreAccountKey(platform),
-    dateKey: getExploreDateKey(),
-    payload
-  }))
+  // payload 可达数百 KB～MB 级：配额满时 setItem 会抛 QuotaExceededError，
+  // 不能让它把整次「加载成功」变成一条错误横幅（请求成功了却不渲染）。放弃落盘即可。
+  try {
+    localStorage.setItem(`${EXPLORE_CACHE_KEY_PREFIX}${platform}`, JSON.stringify({
+      accountKey: getExploreAccountKey(platform),
+      dateKey: getExploreDateKey(),
+      payload
+    }))
+  } catch {
+    // 写不进去只影响下次冷启动占位，不影响本次展示
+  }
+}
+
+/**
+ * 封面墙封面的缓存。
+ * Apple / 网易云原生页的封面来自它们各自的即时请求（网易云不请求聚合首页、Apple 只加载页签数据），
+ * 不落盘的话每次切回该平台、每次重启客户端都要等一轮请求，背景先空着再突然出现。
+ * 这里按平台 + 账号 + 当天缓存一批封面，先占位、数据回来再覆盖。
+ */
+const COVER_WALL_CACHE_PREFIX = 'exploreCoverWallCovers-v1:'
+
+/** 有独立原生页面的平台；其余平台共用下面那套聚合首页。 */
+const DEDICATED_PLATFORMS: ReadonlySet<ExplorePlatform> = new Set(['qq', 'netease', 'apple'])
+
+const readCoverWallCache = (platform: ExplorePlatform): string[] => {
+  try {
+    const entry = JSON.parse(localStorage.getItem(`${COVER_WALL_CACHE_PREFIX}${platform}`) || 'null')
+    if (
+      entry?.dateKey === getExploreDateKey() &&
+      entry?.accountKey === getExploreAccountKey(platform) &&
+      Array.isArray(entry.covers)
+    ) {
+      return entry.covers.filter((value: unknown): value is string => typeof value === 'string')
+    }
+  } catch {
+    // 缓存损坏时当作没有，不影响本次加载
+  }
+  return []
+}
+
+const writeCoverWallCache = (platform: ExplorePlatform, covers: string[]) => {
+  // 空列表不覆盖已有缓存：刚挂载时原生页还没数据，写空会把上次的封面抹掉。
+  if (covers.length === 0) return
+  try {
+    localStorage.setItem(`${COVER_WALL_CACHE_PREFIX}${platform}`, JSON.stringify({
+      accountKey: getExploreAccountKey(platform),
+      dateKey: getExploreDateKey(),
+      covers,
+    }))
+  } catch {
+    // 配额不足等写入失败只影响下次占位，不影响本次展示
+  }
 }
 
 // 迷你播放器包装：内部订阅播放时间（4Hz），ExploreView 本体不再因 currentTime prop 每秒重渲染
@@ -528,6 +605,11 @@ function ExploreView({
   motionSuspended = false,
 }: ExploreViewProps) {
   const [platform, setPlatform] = useState<ExplorePlatform>(() => readSyncedPlatform(getVisiblePlatforms(), 'explorePlatform'))
+  // 平台面板「冻结」：首次访问后一直保持挂载，切走只隐藏、不卸载。
+  // 卸载再挂载会把已加载的区块、滚动位置、已解码封面全部丢掉，切回来等于重新加载一遍；
+  // 只在用户真正访问过的平台上挂载，避免冷启动就把 6 个平台的请求全打出去。
+  const [visitedPlatforms, setVisitedPlatforms] = useState<Set<ExplorePlatform>>(() => new Set([platform]))
+  if (!visitedPlatforms.has(platform)) setVisitedPlatforms(previous => new Set(previous).add(platform))
   // 可见平台（设置中可隐藏不常用的平台 / 调整顺序）
   const [visiblePlatforms, setVisiblePlatforms] = useState<ExplorePlatform[]>(() => getVisiblePlatforms())
   useEffect(() => {
@@ -766,6 +848,25 @@ function ExploreView({
   const accentRgb = platformMeta.accentRgb
   const platformPreferences = preferences[platform]
 
+  // 原生探索页（网易云 / Apple）回传的封面墙封面源，按平台分桶：
+  // 平台面板保持挂载后，后台平台的刷新也会回传，不能让它盖掉当前平台的封面。
+  // 冷启动/首次访问先用当天的落盘缓存占位（有内存数据时以内存为准，避免被空缓存覆盖）。
+  const [artworkCoversByPlatform, setArtworkCoversByPlatform] = useState<Partial<Record<ExplorePlatform, string[]>>>({})
+  useEffect(() => {
+    setArtworkCoversByPlatform(previous => (
+      previous[platform]?.length ? previous : { ...previous, [platform]: readCoverWallCache(platform) }
+    ))
+  }, [platform, authRevision])
+  // 内容不变时保持原引用，否则回传 → setState → 重渲染 → 再回传会自激循环。
+  const handleArtworkCovers = useCallback((coverPlatform: ExplorePlatform, covers: string[]) => {
+    setArtworkCoversByPlatform(previous => {
+      const current = previous[coverPlatform] || []
+      if (current.length === covers.length && current.every((value, index) => value === covers[index])) return previous
+      return { ...previous, [coverPlatform]: covers }
+    })
+    writeCoverWallCache(coverPlatform, covers)
+  }, [])
+
   const themeStyle = {
     '--explore-accent': accent,
     '--explore-accent-rgb': accentRgb,
@@ -906,6 +1007,13 @@ function ExploreView({
     if (payload.radioSongs.length > 0) return payload.radioSongs
     return payload.newSongs
   }, [payload, platform])
+
+  // 封面墙封面：歌曲封面优先；网易云原生页不发聚合首页请求（payload 恒为空），
+  // 用原生页回传的封面兜底，否则网易云下选了「封面墙」也只会显示渐变。
+  const coverWallCovers = useMemo(() => {
+    const songCovers = heroSongs.map(song => song.album?.picUrl || '').filter(Boolean)
+    return songCovers.length > 0 ? songCovers : (artworkCoversByPlatform[platform] || [])
+  }, [heroSongs, artworkCoversByPlatform, platform])
 
   const rotateItems = useCallback(<T,>(items: T[], offset: number) => {
     if (items.length < 2) return items
@@ -1156,7 +1264,7 @@ function ExploreView({
     if (moreSection === 'discover' || moreSection === 'newSongs') {
       const songs = moreSection === 'discover' ? discoverSongs : payload.newSongs
       return (
-        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3 min-[1900px]:grid-cols-4">
           {songs.map((song, index) => (
             <button
               key={`${song.platform}-${song.mid || song.id}-${index}`}
@@ -1182,7 +1290,7 @@ function ExploreView({
 
     if (moreSection === 'playlists') {
       return (
-        <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6 min-[1900px]:grid-cols-7 min-[2400px]:grid-cols-8">
           {payload.playlists.map((playlist, index) => (
             <button
               key={`${playlist.platform}-${playlist.id}-${index}`}
@@ -1268,7 +1376,7 @@ function ExploreView({
     }
 
     return (
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6 min-[1900px]:grid-cols-7 min-[2400px]:grid-cols-8">
         {payload.channels.map((channel, index) => (
           <button
             key={`${channel.platform}-${channel.id}-${index}`}
@@ -1309,7 +1417,7 @@ function ExploreView({
       style={themeStyle}
     >
       <div
-        className={`pointer-events-none absolute inset-0 ${platformPreferences.backgroundIntensity === 'vivid' ? 'opacity-90' : 'opacity-55'}`}
+        className={`pointer-events-none absolute inset-0 ${preferences.background.intensity === 'vivid' ? 'opacity-90' : 'opacity-55'}`}
         style={{
           background: playerTheme === 'light'
             ? (platform === 'qq'
@@ -1321,15 +1429,15 @@ function ExploreView({
         }}
       />
       {/* 封面墙背景（从每日推荐/猜你喜欢的歌曲封面生成） */}
-      {platformPreferences.backgroundMode === 'coverWall' && heroSongs.length > 0 && (
+      {preferences.background.mode === 'coverWall' && coverWallCovers.length > 0 && (
         <CoverWallBackground
-          covers={heroSongs.map(song => song.album?.picUrl || '')}
-          style={platformPreferences.coverWallStyle}
-          animated={platformPreferences.coverWallAnimated && !suspended}
+          covers={coverWallCovers}
+          style={preferences.background.coverWallStyle}
+          animated={preferences.background.coverWallAnimated && !suspended}
           blurPx={suspended ? 0 : (
-            platformPreferences.coverWallBlur === 'custom'
-              ? platformPreferences.coverWallBlurCustom
-              : ({ soft: 18, medium: 32, strong: 56 } as const)[platformPreferences.coverWallBlur]
+            preferences.background.coverWallBlur === 'custom'
+              ? preferences.background.coverWallBlurCustom
+              : ({ soft: 18, medium: 32, strong: 56 } as const)[preferences.background.coverWallBlur]
           )}
           accentRgb={accentRgb}
         />
@@ -1418,7 +1526,7 @@ function ExploreView({
         }}
       >
         <header ref={exploreHeaderRef} className="sticky top-0 z-30 border-b border-white/[0.07] bg-[#090d14]/72 backdrop-blur-2xl">
-          <div className="mx-auto flex max-w-[1680px] items-center gap-4 px-5 pb-2 pt-8 md:px-8 lg:px-10">
+          <div className="flex items-center gap-4 px-5 pb-2 pt-8 md:px-8 lg:px-10 min-[1900px]:px-12 min-[2400px]:px-16">
             <div className="flex min-w-0 items-center gap-3">
               <img
                 src={appLogoUrl}
@@ -1437,7 +1545,11 @@ function ExploreView({
                 <button
                   key={item}
                   type="button"
-                  onClick={() => startTransition(() => setPlatform(item))}
+                  onClick={() => {
+                    // 立刻落盘：点完马上关客户端也要恢复到这个平台，不能等 effect 里那次同步。
+                    syncPlatformAcrossViews(item)
+                    startTransition(() => setPlatform(item))
+                  }}
                   className="relative rounded-xl px-3.5 py-2 text-sm font-medium transition md:px-5"
                   style={{ color: item === platform ? '#081017' : 'rgba(255,255,255,0.5)' }}
                 >
@@ -1530,7 +1642,7 @@ function ExploreView({
         </header>
 
         <main
-          className="mx-auto max-w-[1680px] px-5 pb-8 pt-7 md:px-8 lg:px-10"
+          className="px-5 pb-8 pt-7 md:px-8 lg:px-10 min-[1900px]:px-12 min-[2400px]:px-16"
           onDragStartCapture={event => {
             if (event.target instanceof HTMLImageElement) event.preventDefault()
           }}
@@ -1599,7 +1711,8 @@ function ExploreView({
             )}
           </AnimatePresence>
 
-          {platform === 'qq' ? (
+          {visitedPlatforms.has('qq') && (
+            <div className={platform === 'qq' ? 'contents' : 'hidden'} aria-hidden={platform !== 'qq'}>
             <QQExplorePage
               loggedIn={qqLoggedIn}
               username={qqUsername}
@@ -1637,7 +1750,10 @@ function ExploreView({
               onAddToFavorites={onAddToFavorites}
               onRemoveFromFavorites={onRemoveFromFavorites}
             />
-          ) : platform === 'netease' ? (
+            </div>
+          )}
+          {visitedPlatforms.has('netease') && (
+            <div className={platform === 'netease' ? 'contents' : 'hidden'} aria-hidden={platform !== 'netease'}>
             <NeteaseExplorePage
               loggedIn={neteaseLoggedIn}
               username={neteaseUsername}
@@ -1649,6 +1765,7 @@ function ExploreView({
               currentSong={currentSong}
               publicContent={payload}
               accountPlaylists={userPlaylists}
+              onArtworkCovers={covers => handleArtworkCovers('netease', covers)}
               onRequestFallback={() => { void loadExplore(undefined, true, true) }}
               onLogin={() => onLoginClick('netease')}
               onPlaySongs={(song, songs, continuous, neteaseContinuation) => playExploreCollection(song, songs, continuous, neteaseContinuation)}
@@ -1667,15 +1784,19 @@ function ExploreView({
               onAddToFavorites={onAddToFavorites}
               onRemoveFromFavorites={onRemoveFromFavorites}
             />
-          ) : platform === 'apple' ? (
+            </div>
+          )}
+          {visitedPlatforms.has('apple') && (
+            <div className={platform === 'apple' ? 'contents' : 'hidden'} aria-hidden={platform !== 'apple'}>
             <AppleExplorePanel
-              motionSuspended={motionSuspended}
+              motionSuspended={motionSuspended || platform !== 'apple'}
               appleLoggedIn={appleLoggedIn}
               appleUsername={appleUsername}
               appleAvatar={appleAvatar}
               defaultStorefront={appleStorefront}
               accentColor={accent}
               accentRgb={accentRgb}
+              onArtworkCovers={covers => handleArtworkCovers('apple', covers)}
               playerTheme={playerTheme}
               onSongSelect={onSongSelect}
               onLoginClick={() => onLoginClick('apple')}
@@ -1687,7 +1808,11 @@ function ExploreView({
               restorePlaybackOrigin={restorePlaybackOrigin}
               refreshSignal={appleRefreshSignal}
             />
-          ) : (
+            </div>
+          )}
+          {/* Spotify / 酷狗 / 汽水共用这套聚合首页：数据按平台存在 dataByPlatform 里，
+              切回不重新请求，只是重建一次 DOM。 */}
+          {!DEDICATED_PLATFORMS.has(platform) && (
           <>
           {loading && !payload ? (
             <ExploreSkeleton />
@@ -1803,7 +1928,7 @@ function ExploreView({
                   subtitle={showSectionDescriptions ? (payload.personalized ? '口味推荐与平台趋势的交集' : '热门口碑与编辑推荐') : undefined}
                   action={<MoreButton label="为你发现" onClick={() => setMoreSection('discover')} />}
                 />
-                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 min-[1900px]:grid-cols-5">
                   {[
                     {
                       // 汽水登录态下后端返回个性化日推（payload.personalized），
@@ -1901,7 +2026,7 @@ function ExploreView({
                   subtitle={showSectionDescriptions ? '从情绪、场景、曲风与近期偏好展开' : undefined}
                   action={<MoreButton label="推荐歌单" onClick={() => setMoreSection('playlists')} />}
                 />
-                <div className={`grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 ${compactCards ? 'xl:grid-cols-8' : 'xl:grid-cols-6'}`}>
+                <div className={`grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 ${compactCards ? 'xl:grid-cols-8 min-[2400px]:grid-cols-9' : 'xl:grid-cols-6 min-[1900px]:grid-cols-7 min-[2400px]:grid-cols-8'}`}>
                   {rotatedPlaylists.slice(0, expandedHome ? 18 : 12).map((playlist, index) => (
                     <motion.div
                       key={`${playlist.platform}-${playlist.id}-${index}`}
@@ -1954,7 +2079,7 @@ function ExploreView({
                   subtitle={showSectionDescriptions ? '热门、飙升、新歌与地区趋势集中查看' : undefined}
                   action={<MoreButton label="排行榜" onClick={() => setMoreSection('charts')} />}
                 />
-                <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3 min-[1900px]:grid-cols-4">
                   {payload.charts
                     .slice(0, expandedHome ? 12 : (typeof window !== 'undefined' && window.innerWidth >= 1536 ? 3 : 2) * 4)
                     .map((chart, chartIndex) => (
@@ -2057,7 +2182,7 @@ function ExploreView({
                   title="新碟上架"
                   subtitle={showSectionDescriptions ? '最新专辑与单曲，听见正在发生的音乐' : undefined}
                 />
-                <div className={`grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 ${compactCards ? 'xl:grid-cols-8' : 'xl:grid-cols-6'}`}>
+                <div className={`grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 md:grid-cols-4 ${compactCards ? 'xl:grid-cols-8 min-[2400px]:grid-cols-9' : 'xl:grid-cols-6 min-[1900px]:grid-cols-7 min-[2400px]:grid-cols-8'}`}>
                   {payload.albums.slice(0, expandedHome ? 12 : 8).map((album, index) => (
                     <motion.div
                       key={`${album.platform}-${album.mid || album.id}-${index}`}
@@ -2087,7 +2212,7 @@ function ExploreView({
                   subtitle={showSectionDescriptions ? '音乐之外，也听见有趣的人和故事' : undefined}
                   action={<MoreButton label="声音与播客" onClick={() => setMoreSection('channels')} />}
                 />
-                <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 ${compactCards ? 'xl:grid-cols-8' : 'xl:grid-cols-6'}`}>
+                <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 ${compactCards ? 'xl:grid-cols-8 min-[2400px]:grid-cols-9' : 'xl:grid-cols-6 min-[1900px]:grid-cols-7 min-[2400px]:grid-cols-8'}`}>
                   {payload.channels.slice(0, expandedHome ? 18 : 12).map((channel, index) => (
                     <motion.button
                       key={`${channel.platform}-${channel.id}-${index}`}
@@ -2189,7 +2314,7 @@ function ExploreView({
                 </button>
               </div>
               <div className="explore-scrollbar flex-1 overflow-y-auto px-5 py-6 md:px-8 lg:px-10">
-                <div className="mx-auto max-w-[1680px]">{renderMoreContent()}</div>
+                <div>{renderMoreContent()}</div>
               </div>
             </div>
           </motion.div>

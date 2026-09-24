@@ -22,19 +22,14 @@ export type ExploreDensity = 'comfortable' | 'compact'
 export type ExploreContentAmount = 'curated' | 'expanded'
 export type ExploreBackgroundIntensity = 'calm' | 'vivid'
 export type ExploreBackgroundMode = 'gradient' | 'coverWall'
-export type ExploreCoverWallStyle = 'tilted' | 'grid'
+export type ExploreCoverWallStyle = 'tiled' | 'sparse'
 export type ExploreCardOpacity = 'solid' | 'frosted' | 'glass' | 'custom'
 
-export interface ExplorePlatformPreferences {
-  order: ExploreSectionId[]
-  hidden: ExploreSectionId[]
-  density: ExploreDensity
-  contentAmount: ExploreContentAmount
-  showDescriptions: boolean
-  backgroundIntensity: ExploreBackgroundIntensity
-  // 背景模式：gradient=渐变 / coverWall=歌曲封面墙
-  backgroundMode: ExploreBackgroundMode
-  // 封面墙样式：tilted=错落倾斜 / grid=规整网格
+/** 探索页背景：全页共用一份，不再按平台各自设置。 */
+export interface ExploreBackgroundPrefs {
+  // gradient=平台主题色渐变 / coverWall=歌曲封面墙
+  mode: ExploreBackgroundMode
+  // 封面墙样式：tiled=紧贴（随机大小无缝铺满）/ sparse=稀疏（小封面多张留缝）
   coverWallStyle: ExploreCoverWallStyle
   // 封面墙动画（缓慢漂移）开关
   coverWallAnimated: boolean
@@ -42,6 +37,16 @@ export interface ExplorePlatformPreferences {
   coverWallBlur: 'soft' | 'medium' | 'strong' | 'custom'
   // 封面墙自定义模糊像素（0-80），coverWallBlur === 'custom' 时生效
   coverWallBlurCustom: number
+  // 渐变模式的氛围强度（封面墙模式不适用）
+  intensity: ExploreBackgroundIntensity
+}
+
+export interface ExplorePlatformPreferences {
+  order: ExploreSectionId[]
+  hidden: ExploreSectionId[]
+  density: ExploreDensity
+  contentAmount: ExploreContentAmount
+  showDescriptions: boolean
   // 卡片玻璃化程度（custom=自定义，用 cardOpacityCustom 的百分比）
   cardOpacity: ExploreCardOpacity
   // 卡片自定义不透明度（0-100），cardOpacity === 'custom' 时生效
@@ -61,6 +66,8 @@ export interface ExplorePreferences {
   soda: ExplorePlatformPreferences
   /** 点击歌曲后的导航行为：false=留在探索页（默认），true=直接进入播放页 */
   openPlayerOnSongSelect: boolean
+  /** 探索页背景（全平台共用） */
+  background: ExploreBackgroundPrefs
 }
 
 export const EXPLORE_SECTION_LABELS: Record<ExploreSectionId, string> = {
@@ -90,16 +97,19 @@ const DEFAULT_PLATFORM_PREFS = {
   density: 'comfortable' as const,
   contentAmount: 'curated' as const,
   showDescriptions: true,
-  backgroundIntensity: 'vivid' as const,
-  backgroundMode: 'gradient' as const,
-  coverWallStyle: 'tilted' as const,
-  coverWallAnimated: true,
-  coverWallBlur: 'medium' as const,
-  coverWallBlurCustom: 40,
   cardOpacity: 'frosted' as const,
   cardOpacityCustom: 40,
   showRankNumbers: true,
   enhancedApi: true,
+}
+
+export const DEFAULT_EXPLORE_BACKGROUND: ExploreBackgroundPrefs = {
+  mode: 'gradient',
+  coverWallStyle: 'tiled',
+  coverWallAnimated: true,
+  coverWallBlur: 'medium',
+  coverWallBlurCustom: 40,
+  intensity: 'vivid',
 }
 
 export const createDefaultExplorePreferences = (): ExplorePreferences => {
@@ -112,12 +122,54 @@ export const createDefaultExplorePreferences = (): ExplorePreferences => {
     }
   }
   all.openPlayerOnSongSelect = false
+  all.background = { ...DEFAULT_EXPLORE_BACKGROUND }
   return all
 }
 
 export function normalizeExplorePreferences(input: unknown): ExplorePreferences {
   const defaults = createDefaultExplorePreferences()
-  const raw = input && typeof input === 'object' ? input as Partial<Record<ExplorePlatform, Partial<ExplorePlatformPreferences>>> : {}
+  // 旧版偏好里背景字段挂在每个平台下（已迁出），用宽松类型读取以便迁移
+  type LegacySource = Partial<ExplorePlatformPreferences> & {
+    backgroundMode?: unknown
+    coverWallStyle?: unknown
+    coverWallAnimated?: unknown
+    coverWallBlur?: unknown
+    coverWallBlurCustom?: unknown
+    backgroundIntensity?: unknown
+  }
+  const raw = input && typeof input === 'object'
+    ? input as Partial<Record<ExplorePlatform, LegacySource>> & { background?: Partial<ExploreBackgroundPrefs> }
+    : {}
+  const platformSources = (Object.keys(PLATFORM_ORDER) as ExplorePlatform[]).map(platform => (raw[platform] || {}) as LegacySource)
+
+  // ── 探索页背景（全平台共用）──────────────────────────────
+  // 优先读已迁移的全局配置；否则从旧版「按平台」配置迁移：
+  // 取第一个选了封面墙的平台作为背景模式与样式（tilted→tiled / grid→sparse）。
+  const rawBackground = raw.background || {}
+  const legacyBackground = platformSources.find(source => source.backgroundMode === 'coverWall')
+  const legacyStyle = legacyBackground?.coverWallStyle === 'grid' ? 'sparse' : 'tiled'
+  const legacyIntensity = platformSources.find(source => source.backgroundIntensity === 'calm') ? 'calm' : 'vivid'
+  defaults.background = {
+    mode: rawBackground.mode === 'coverWall' || rawBackground.mode === 'gradient'
+      ? rawBackground.mode
+      : legacyBackground ? 'coverWall' : DEFAULT_EXPLORE_BACKGROUND.mode,
+    coverWallStyle: rawBackground.coverWallStyle === 'sparse' || rawBackground.coverWallStyle === 'tiled'
+      ? rawBackground.coverWallStyle
+      : legacyBackground ? legacyStyle : DEFAULT_EXPLORE_BACKGROUND.coverWallStyle,
+    coverWallAnimated: rawBackground.coverWallAnimated !== undefined
+      ? rawBackground.coverWallAnimated !== false
+      : legacyBackground ? legacyBackground.coverWallAnimated !== false : true,
+    coverWallBlur: rawBackground.coverWallBlur === 'soft' || rawBackground.coverWallBlur === 'strong' || rawBackground.coverWallBlur === 'custom' || rawBackground.coverWallBlur === 'medium'
+      ? rawBackground.coverWallBlur
+      : typeof legacyBackground?.coverWallBlur === 'string' &&
+          ['soft', 'medium', 'strong', 'custom'].includes(legacyBackground.coverWallBlur)
+        ? legacyBackground.coverWallBlur as ExploreBackgroundPrefs['coverWallBlur']
+        : DEFAULT_EXPLORE_BACKGROUND.coverWallBlur,
+    coverWallBlurCustom: Math.max(0, Math.min(80, Number(rawBackground.coverWallBlurCustom ?? legacyBackground?.coverWallBlurCustom) || 40)),
+    intensity: rawBackground.intensity === 'calm' || rawBackground.intensity === 'vivid'
+      ? rawBackground.intensity
+      : legacyBackground ? legacyIntensity : DEFAULT_EXPLORE_BACKGROUND.intensity,
+  }
 
   for (const platform of Object.keys(PLATFORM_ORDER) as ExplorePlatform[]) {
     const source = raw[platform] || {}
@@ -142,15 +194,6 @@ export function normalizeExplorePreferences(input: unknown): ExplorePreferences 
       density: source.density === 'compact' ? 'compact' : 'comfortable',
       contentAmount: source.contentAmount === 'expanded' ? 'expanded' : 'curated',
       showDescriptions: source.showDescriptions !== false,
-      backgroundIntensity: source.backgroundIntensity === 'calm' ? 'calm' : 'vivid',
-      backgroundMode: source.backgroundMode === 'coverWall' ? 'coverWall' : 'gradient',
-      coverWallStyle: source.coverWallStyle === 'grid' ? 'grid' : 'tilted',
-      coverWallAnimated: source.coverWallAnimated !== false,
-      coverWallBlur:
-        source.coverWallBlur === 'soft' || source.coverWallBlur === 'strong' || source.coverWallBlur === 'custom'
-          ? source.coverWallBlur
-          : 'medium',
-      coverWallBlurCustom: Math.max(0, Math.min(80, Number(source.coverWallBlurCustom) || 40)),
       cardOpacity:
         source.cardOpacity === 'solid' || source.cardOpacity === 'glass' || source.cardOpacity === 'custom'
           ? source.cardOpacity
@@ -215,6 +258,12 @@ export default function ExploreSettingsPanel({
 
   const updateCurrent = (patch: Partial<ExplorePlatformPreferences>) => {
     onChange({ ...preferences, [platform]: { ...current, ...patch } })
+  }
+
+  // 探索页背景是全平台共用的：直接改顶层 background 块
+  const background = preferences.background
+  const updateBackground = (patch: Partial<ExploreBackgroundPrefs>) => {
+    onChange({ ...preferences, background: { ...background, ...patch } })
   }
 
   const moveSection = (section: ExploreSectionId, direction: -1 | 1) => {
@@ -326,49 +375,49 @@ export default function ExploreSettingsPanel({
               </section>
 
               <section className="mb-7 space-y-4">
-                <h3 className={`text-sm font-semibold ${textPrimary}`}>背景与氛围</h3>
+                <h3 className={`text-sm font-semibold ${textPrimary}`}>背景与氛围<span className={`ml-2 text-[11px] font-normal ${textMuted}`}>探索页全局 · 所有平台共用</span></h3>
                 <SettingChoice
                   label="背景模式"
                   description="渐变=当前平台主题色；封面墙=用每日推荐/猜你喜欢的歌曲封面拼成动态海报墙。"
-                  value={current.backgroundMode}
+                  value={background.mode}
                   options={[['gradient', '渐变'], ['coverWall', '封面墙']]}
                   accent={accent}
                   isDark={isDark}
-                  onChange={value => updateCurrent({ backgroundMode: value as ExploreBackgroundMode })}
+                  onChange={value => updateBackground({ mode: value as ExploreBackgroundMode })}
                 />
-                {current.backgroundMode === 'coverWall' && (
+                {background.mode === 'coverWall' && (
                   <>
                     <SettingChoice
                       label="封面墙样式"
-                      description="错落倾斜更像实体海报墙；规整网格更清爽。"
-                      value={current.coverWallStyle}
-                      options={[['tilted', '错落倾斜'], ['grid', '规整网格']]}
+                      description="紧贴=大小错落的无缝拼贴铺满全背景；稀疏=小封面留缝、更清爽。"
+                      value={background.coverWallStyle}
+                      options={[['tiled', '紧贴'], ['sparse', '稀疏']]}
                       accent={accent}
                       isDark={isDark}
-                      onChange={value => updateCurrent({ coverWallStyle: value as ExploreCoverWallStyle })}
+                      onChange={value => updateBackground({ coverWallStyle: value as ExploreCoverWallStyle })}
                     />
                     <SettingChoice
                       label="封面墙模糊"
                       description="遮罩越强，前景内容越清晰；选择「自定义」可精确调节像素。"
-                      value={current.coverWallBlur}
+                      value={background.coverWallBlur}
                       options={[['soft', '轻微'], ['medium', '适中'], ['strong', '强烈'], ['custom', '自定义']]}
                       accent={accent}
                       isDark={isDark}
-                      onChange={value => updateCurrent({ coverWallBlur: value as 'soft' | 'medium' | 'strong' | 'custom' })}
+                      onChange={value => updateBackground({ coverWallBlur: value as 'soft' | 'medium' | 'strong' | 'custom' })}
                     >
-                      {current.coverWallBlur === 'custom' && (
+                      {background.coverWallBlur === 'custom' && (
                         <div className={`mt-3 flex items-center gap-3 rounded-2xl border p-3 ${borderSoft}`}>
                           <input
                             type="range"
                             min={0}
                             max={80}
-                            value={current.coverWallBlurCustom}
-                            onChange={e => updateCurrent({ coverWallBlurCustom: Number(e.target.value) })}
+                            value={background.coverWallBlurCustom}
+                            onChange={e => updateBackground({ coverWallBlurCustom: Number(e.target.value) })}
                             className="flex-1 accent-[#4fc3f7]"
                             aria-label="封面墙自定义模糊"
                           />
                           <span className={`w-12 shrink-0 text-right text-xs font-semibold ${textPrimary}`}>
-                            {current.coverWallBlurCustom}px
+                            {background.coverWallBlurCustom}px
                           </span>
                         </div>
                       )}
@@ -376,22 +425,22 @@ export default function ExploreSettingsPanel({
                     <ToggleRow
                       label="封面墙动画"
                       description="封面缓慢漂移，营造呼吸感。"
-                      checked={current.coverWallAnimated}
+                      checked={background.coverWallAnimated}
                       accent={accent}
                       isDark={isDark}
-                      onChange={value => updateCurrent({ coverWallAnimated: value })}
+                      onChange={value => updateBackground({ coverWallAnimated: value })}
                     />
                   </>
                 )}
-                {current.backgroundMode !== 'coverWall' && (
+                {background.mode !== 'coverWall' && (
                   <SettingChoice
                     label="背景氛围"
                     description="控制平台主题色在背景中的强度（封面墙模式使用封面墙背景，无需此选项）。"
-                    value={current.backgroundIntensity}
+                    value={background.intensity}
                     options={[['calm', '柔和'], ['vivid', '鲜明']]}
                     accent={accent}
                     isDark={isDark}
-                    onChange={value => updateCurrent({ backgroundIntensity: value as ExploreBackgroundIntensity })}
+                    onChange={value => updateBackground({ intensity: value as ExploreBackgroundIntensity })}
                   />
                 )}
               </section>
