@@ -1197,9 +1197,12 @@ function SettingsPanel({
   })
 
   // 视频播放完毕行为设置
-  const [videoEndBehavior, setVideoEndBehavior] = useState<'next' | 'close' | 'replay'>(() => {
+  const [videoEndBehavior, setVideoEndBehavior] = useState<'next' | 'replay' | 'hold'>(() => {
     const saved = localStorage.getItem('videoEndBehavior')
-    return (saved as 'next' | 'close' | 'replay') || 'close'
+    // 旧版本这里用的是 'close'（不在 canonical VideoEndBehavior 里）→ 归一到 'hold'；
+    // 无值时用 'next'，与播放器（bilibiliApi 的 DEFAULT 设置）和看歌设置的实际默认保持一致。
+    if (saved === 'close') return 'hold'
+    return saved === 'next' || saved === 'replay' || saved === 'hold' ? saved : 'next'
   })
 
   // 监听开发者模式变化，实现跨组件同步
@@ -1489,13 +1492,13 @@ function SettingsPanel({
   }
   
   // 视频播放完毕行为设置
-  const handleVideoEndBehaviorChange = (behavior: 'next' | 'close' | 'replay') => {
+  const handleVideoEndBehaviorChange = (behavior: 'next' | 'replay' | 'hold') => {
     setVideoEndBehavior(behavior)
     localStorage.setItem('videoEndBehavior', behavior)
     window.dispatchEvent(new CustomEvent('videoEndBehaviorChanged', { detail: behavior }))
     
     const messages = {
-      close: '视频播放完毕后将显示重播按钮',
+      hold: '视频播放完毕后将显示重播按钮',
       replay: '视频播放完毕后将自动重播',
       next: '视频播放完毕后将自动续播下一个'
     }
@@ -3317,15 +3320,15 @@ function SettingsPanel({
                       {/* 视频结束行为选项 */}
                       <div className="space-y-3">
                         <button
-                          onClick={() => handleVideoEndBehaviorChange('close')}
+                          onClick={() => handleVideoEndBehaviorChange('hold')}
                           className={`w-full p-4 rounded-lg border-2 transition-all text-left ${
-                            videoEndBehavior === 'close'
+                            videoEndBehavior === 'hold'
                               ? 'border-current'
                               : 'border-transparent'
                           }`}
                           style={{
-                            borderColor: videoEndBehavior === 'close' ? accentColor : 'transparent',
-                            backgroundColor: videoEndBehavior === 'close' 
+                            borderColor: videoEndBehavior === 'hold' ? accentColor : 'transparent',
+                            backgroundColor: videoEndBehavior === 'hold' 
                               ? `${accentColor}20`
                               : playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)'
                           }}
@@ -3337,7 +3340,7 @@ function SettingsPanel({
                               </svg>
                             </div>
                             <div>
-                              <div className={`${textPrimary} font-medium`}>不重播</div>
+                              <div className={`${textPrimary} font-medium`}>停在末帧</div>
                               <div className={`${textSecondary} text-sm mt-1`}>
                                 播放完毕后显示重播按钮
                               </div>

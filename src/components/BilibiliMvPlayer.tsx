@@ -1698,7 +1698,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       const noticeKey = `${songKey}:${activeVideo?.video?.bvid ?? ''}`
       if (videoSeconds > 0 && songDuration > 0 && videoSeconds + 30 < songDuration && shortMvNoticedRef.current !== noticeKey) {
         shortMvNoticedRef.current = noticeKey
-        showToast('这支 MV 比歌曲短（剪辑片段），已按当前设置切到下一首；可在「看歌设置」改为「重播」或「停留末帧」')
+        showToast('这支 MV 比歌曲短（剪辑片段），已按当前设置切到下一首；可在「看歌设置」改为「重播」或「停在末帧」')
       }
       reportVideoActive(false)
       onNext()

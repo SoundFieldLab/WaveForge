@@ -201,3 +201,9 @@
 - **已确认的缓解（本来就成立）**：日志只打 cookie 长度/字段名，不打值（已核查 `local-server.mjs` 与 `desktop/*.cjs` 的相关日志）；跨站网页读不到 `/status` 之类的本机接口（CORS）。
 - **零风险建议（不改代码）**：不要把 `~/.waveforge` 与 Electron userData 放进云同步/备份；共用电脑上用完「登出」。
 - **顺带发现**：本机存在 `~/.waveforge/qq-cookie-web.txt`，而仓库里**既没有写入者也没有读取者**（旧版本残留）——可手工删除，代码无需改动。
+
+### 顺带修：`videoEndBehavior` 取值体系不一致（由「MV 短于歌曲是指哪一层」的提问引出）
+
+- **现象**：播放器与 `bilibiliApi.ts` 的 canonical 取值是 `'next' | 'replay' | 'hold'`（默认 `'next'`），而 `SettingsPanel` 与镜像设置用的是 `'next' | 'close' | 'replay'` 且**默认 `'close'`**，并写入**同一个** localStorage 键 `videoEndBehavior`。播放器对 `'close'` 只会落到 `else` 分支（= 停在末帧）。
+- **后果**：普通设置里默认高亮「不重播」，而播放器实际在做「自动续播下一首」——界面与行为不符；反向也一样（在看歌设置里选了「停在末帧」，普通设置里会显示成别的选项）。
+- **修复**：统一到 canonical 取值——读时 `'close'` → `'hold'`、写时拒绝再产生 `'close'`、无值时默认 `'next'`（与播放器一致）；第三个选项文案两处统一为「停在末帧」；事件派发也改为传归一后的值。

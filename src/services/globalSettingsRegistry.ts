@@ -541,15 +541,17 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         control: {
           kind: 'choice',
           options: [
-            { value: 'close', label: '不重播', hint: '显示重播按钮' },
+            { value: 'hold', label: '停在末帧', hint: '显示重播按钮' },
             { value: 'replay', label: '自动重播', hint: '自动回到开头' },
             { value: 'next', label: '自动续播', hint: '播放下一个视频' },
           ],
         },
-        read: () => readStr('videoEndBehavior', 'close'),
+        read: () => { const raw = readStr('videoEndBehavior', 'next'); return raw === 'close' ? 'hold' : raw },
         write: (value) => {
-          localStorage.setItem('videoEndBehavior', String(value))
-          window.dispatchEvent(new CustomEvent('videoEndBehaviorChanged', { detail: value }))
+          // 只写 canonical 取值，避免继续产生 'close'（播放器只认 next/replay/hold）
+          const normalized = value === 'hold' || value === 'replay' || value === 'next' ? value : value === 'close' ? 'hold' : 'next'
+          localStorage.setItem('videoEndBehavior', normalized)
+          window.dispatchEvent(new CustomEvent('videoEndBehaviorChanged', { detail: normalized }))
           notifyGlobalSettingChanged()
         },
       },
