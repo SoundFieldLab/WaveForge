@@ -128,7 +128,9 @@ function normalizeCachedQQPlaylistNames(playlists: any[], username?: string): an
 function isQQLikedPlaylist(item: any): boolean {
   const name = String(item?.diss_name || item?.title || item?.dissname || '').trim()
   const dirId = String(item?.dirid ?? item?.dirId ?? '')
-  return dirId === '201' || name === '我喜欢' || name === '我喜欢的音乐' || name.endsWith('喜欢的音乐')
+  // 只认 dirId 与官方显示名：原先还有 name.endsWith('喜欢的音乐') 的猜测，会把用户自建的
+  // 「跑步时喜欢的音乐」误判成系统「我喜欢」——它会被强制改名、计入喜欢计数、且无法编辑。
+  return dirId === '201' || name === '我喜欢' || name === '我喜欢的音乐'
 }
 
 /**
@@ -1129,6 +1131,14 @@ export async function removeSongFromPlaylist(
   })
   
   const data = await response.json()
+  // 服务端可能用 HTTP 200 + 业务失败码返回（无权限/歌单不存在/曲目不在歌单里）：只校验 !response.ok
+  // 会让调用方弹出「已从歌单移除」的假成功。与 addSongToPlaylist 同样校验业务码。
+  if (platform === 'netease' && Number(data?.code) !== 200) {
+    throw new Error(data?.error || data?.message || data?.msg || '网易云音乐移除歌曲失败')
+  }
+  if (platform === 'qq' && data?.result != null && Number(data.result) !== 100) {
+    throw new Error(data?.errMsg || data?.message || 'QQ 音乐移除歌曲失败')
+  }
   if (!response.ok) {
     throw new Error(data.error || data.message || `从歌单删除歌曲失败（HTTP ${response.status}）`)
   }
@@ -1160,7 +1170,7 @@ export async function createPlaylist(
   // Spotify：官方 API 前端直连
   if (platform === 'spotify') {
     const { createSpotifyPlaylist } = await import('./spotifyService')
-    const id = await createSpotifyPlaylist(name, options.type === 'NORMAL' ? '' : '', options.privacy === '1' ? false : true)
+    const id = await createSpotifyPlaylist(name, options.type === 'NORMAL' ? '' : '', (options.privacy === '1' || options.privacy === '10' || options.privacy === 'private') ? false : true)
     if (!id) throw new Error('Spotify 创建歌单失败（token 失效或网络异常）')
     invalidateUserPlaylistsCache(platform, '')
     return { id, result: 200, platform: 'spotify' }

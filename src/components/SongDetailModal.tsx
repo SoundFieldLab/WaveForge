@@ -100,8 +100,11 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   useEffect(() => {
     if (song.platform !== 'netease') return
     let cancelled = false
-    void Promise.all([getNeteaseSimiSong(song.id, 10), getNeteaseRelatedPlaylist(song.id)]).then(([simiData, relatedData]) => {
+    // 两个接口互不依赖：任一失败不该让两栏都变空（原来的 Promise.all + 空 catch 会让用户以为「没有推荐」）
+    void Promise.allSettled([getNeteaseSimiSong(song.id, 10), getNeteaseRelatedPlaylist(song.id)]).then(([simiResult, relatedResult]) => {
       if (cancelled) return
+      const simiData = simiResult.status === 'fulfilled' ? simiResult.value : []
+      const relatedData = relatedResult.status === 'fulfilled' ? relatedResult.value : []
       setNeteaseSimi(Array.isArray(simiData) ? simiData.map((s: any) => ({
         id: s.id,
         name: s.name || '',

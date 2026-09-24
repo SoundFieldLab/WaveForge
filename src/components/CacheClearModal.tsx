@@ -177,7 +177,8 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     setFailedTargets(previous => previous.filter(item => item !== target))
     try {
       await action()
-      await refreshStats()
+      // 统计刷新失败不应卡住弹窗：busyTarget 的复位在函数末尾，异常会跳过它导致所有按钮永久禁用
+      try { await refreshStats() } catch { /* 忽略统计失败 */ }
       showToastMessage(success)
     } catch (error) {
       console.error(`缓存清理失败 [${target}]:`, error)
@@ -305,7 +306,8 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
           if (!renderResult.success || !stemResult.success || !trackStemResult.success) throw new Error('过渡或分轨缓存清理失败')
         })
       }
-      await refreshStats()
+      // 统计刷新失败不应卡住弹窗：busyTarget 的复位在函数末尾，异常会跳过它导致所有按钮永久禁用
+      try { await refreshStats() } catch { /* 忽略统计失败 */ }
       setFailedTargets(failed)
       showToastMessage(failed.length ? `部分缓存清理失败：${failed.join('、')}，可重试` : '所有缓存清理成功')
       setClearAllConfirm(false)

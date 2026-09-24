@@ -3344,7 +3344,7 @@ function HomeView({
         }}
         onSubscribe={handleSubscribePlaylist}
         onShare={handleSharePlaylist}
-        isOwner={platform === 'apple' ? true : playlistContextMenu.playlist?.userId?.toString() === (platform === 'netease' ? neteaseUserId : qqUserId)}
+        isOwner={platform === 'apple' ? true : Boolean(playlistContextMenu.playlist?.ownedByMe) || playlistContextMenu.playlist?.userId?.toString() === getPlaylistOwnerUserId(platform)}
         isSubscribed={isSubscribed}
         isSpecialPlaylist={Boolean(playlistContextMenu.playlist?.isLike)}
         canEdit={platform === 'netease' || platform === 'apple'}
