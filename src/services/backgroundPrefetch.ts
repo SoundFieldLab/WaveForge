@@ -256,7 +256,19 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
 
     await runJobs(priorityJobs)
     await runJobs(secondaryJobs)
-    await runJobs([neteaseArtwork, qqArtwork, appleArtwork, sodaArtwork, applePlaylist, sodaPlaylist].filter((job): job is PrefetchJob => Boolean(job)))
+    // 网易/QQ 只预取「当前三个视图真正指向的那个核心平台」：此前两个都登录时会把另一侧也
+    // 全量预取（约 40 张封面 + 一次 /explore），与首屏封面加载、登录校验抢带宽；另一侧等
+    // 用户切过去时再按需加载。Apple / 汽水是各视图内的次级来源，保持原有行为不动。
+    const activeCorePlatforms = new Set([minimalPlatform, explorePlatform, desktopPlatform].filter(Boolean))
+    const artworkJobs = [
+      activeCorePlatforms.has('netease') ? neteaseArtwork : null,
+      activeCorePlatforms.has('qq') ? qqArtwork : null,
+      appleArtwork,
+      sodaArtwork,
+      applePlaylist,
+      sodaPlaylist,
+    ].filter((job): job is PrefetchJob => Boolean(job))
+    await runJobs(artworkJobs)
     rememberCompleted(identity)
   })()
 

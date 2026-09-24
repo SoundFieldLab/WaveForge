@@ -404,7 +404,9 @@ export function getProxiedAudioUrl(originalUrl: string): string {
   try {
     const input = new URL(originalUrl)
     const proxy = new URL(`${API_BASE}/audio`)
-    if (input.origin === proxy.origin && input.pathname === proxy.pathname) return originalUrl
+    // 本机 API 的 URL（例如 /api/soda/audio）不该再套一层代理：原先只放行 pathname 恰为 /audio 的情况，
+    // 汽水音频会被包成 /api/audio?url=.../api/soda/audio，白多一次全量内存转发。
+    if (input.origin === proxy.origin) return originalUrl
   } catch {
     return originalUrl
   }
