@@ -66,9 +66,25 @@ function cacheUserPlaylists(key: string, playlists: any[]): void {
 
 function getPlatformCookie(platform: MusicPlatform, explicitCookie?: string): string {
   if (explicitCookie) return explicitCookie
-  return platform === 'qq'
-    ? localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
-    : localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+  // 缓存键必须跟着「该平台自己的凭据」走。原实现只认 qq/netease，其余平台一律取网易云
+  // cookie 指纹，于是 Spotify / 汽水 / 酷狗 / Apple 换号后缓存键完全不变 —— 切号后可能直接
+  // 命中上一个账号的歌单（串号）。取不到凭据时返回空，键退化为平台级，只是不再跨账号复用。
+  const readCredential = (...keys: string[]): string => {
+    for (const key of keys) {
+      const value = localStorage.getItem(key)
+      if (value) return value
+    }
+    return ''
+  }
+  switch (platform) {
+    case 'qq': return readCredential('qq_cookie', 'qqCookie')
+    case 'netease': return readCredential('netease_cookie', 'neteaseCookie')
+    case 'spotify': return readCredential('spotify_user_id', 'spotify_access_token')
+    case 'kugou': return readCredential('kugou_user_id', 'kugou_cookie')
+    case 'soda': return readCredential('soda_user_id', 'soda_cookie')
+    case 'apple': return readCredential('apple_account_id', 'apple_music_user_token')
+    default: return ''
+  }
 }
 
 function normalizeQQCover(value?: string): string {
@@ -192,6 +208,20 @@ function invalidatePlatformPlaylistCaches(platform: MusicPlatform): void {
   for (const key of [...userPlaylistsPending.keys()]) {
     if (key.startsWith(`${USER_PLAYLIST_CACHE_VERSION}:${platform}:`)) userPlaylistsPending.delete(key)
   }
+  // 只清内存不够：紧随其后的刷新会从 IndexedDB 读回旧列表（TTL 1h）并写回内存，
+  // 表现为「删掉的歌单又回来 / 新建的不出现 / 改名回退」。持久层一并失效。
+  void Promise.resolve(indexedDBCache.clearPlaylists())
+    .catch(error => console.warn('失效歌单持久缓存失败:', error))
+}
+
+// 登出 / 切号：所有平台的歌单缓存都不再可信（缓存键里的账号凭据可能已变或已被清），
+// 统一清掉内存与持久层，避免读到上一个账号的歌单。
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    clearUserPlaylistsMemoryCache()
+    void Promise.resolve(indexedDBCache.clearPlaylists())
+      .catch(() => undefined)
+  })
 }
 
 export function clearUserPlaylistsMemoryCache(): void {

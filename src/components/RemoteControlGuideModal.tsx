@@ -4,6 +4,7 @@
  * 当前讲解的按键高亮 + 底部说明，支持自动播放与手动切换（适配遥控器方向键导航）。
  */
 import { useEffect, useRef, useState } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, ChevronLeft, ChevronRight, Play, Pause, Home as HomeIcon, ArrowLeft, RotateCcw, Search, Volume2, VolumeX, SkipBack, SkipForward, CirclePause, Menu as MenuIcon, CornerDownLeft } from 'lucide-react'
 
@@ -34,6 +35,8 @@ const KEYS: RemoteKey[] = [
 const ACTIVE_COLOR = '#4fc3f7'
 
 export default function RemoteControlGuideModal({ onClose, playerTheme = 'dark' }: RemoteControlGuideModalProps) {
+  // TV 遥控：BACK 关闭本弹窗（同上，遥控配对引导是 TV 场景的高频入口）
+  useTvBack(() => { onClose(); return true }, [onClose])
   const [current, setCurrent] = useState(0)
   const [playing, setPlaying] = useState(true)
   const timerRef = useRef<number | null>(null)

@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { useTvBack } from '../tv/tvCore'
 import { Check, Copy, Disc3, Heart, Info, ListMusic, MessageCircle, Minus, Plus, Repeat2, RotateCcw, Search, UserRound, X } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
@@ -52,6 +53,12 @@ const ICONS: Record<PlaybackRadialActionId, LucideIcon> = {
 }
 
 export default function PlaybackRadialMenuCustomizeModal({ show, onClose, playerTheme = 'dark', accentColor = '#3B82F6', platform = 'netease' }: Props) {
+  // TV 遥控：BACK 关闭本弹窗
+  useTvBack(() => {
+    if (!show) return false
+    onClose()
+    return true
+  }, [show, onClose])
   const [selected, setSelected] = useState<PlaybackRadialActionId[]>(() => getPlaybackRadialActions())
   const [drag, setDrag] = useState<DragSession | null>(null)
   const wheelRef = useRef<HTMLDivElement>(null)

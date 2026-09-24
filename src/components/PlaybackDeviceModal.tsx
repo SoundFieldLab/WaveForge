@@ -3,6 +3,7 @@
  * 风格与设置弹窗统一：暗色毛玻璃 + motion 动效。
  */
 import { useState, useEffect, useCallback } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, RefreshCw, Speaker, Loader2 } from 'lucide-react'
 import type { AirplayStatus } from '../electron'
@@ -25,6 +26,12 @@ interface PlaybackDeviceModalProps {
 }
 
 export default function PlaybackDeviceModal({ show, onClose, playerTheme = 'dark' }: PlaybackDeviceModalProps) {
+  // TV 遥控：BACK 关闭本弹窗
+  useTvBack(() => {
+    if (!show) return false
+    onClose()
+    return true
+  }, [show, onClose])
   const dark = playerTheme !== 'light'
   const textPrimary = dark ? 'text-white' : 'text-black/85'
   const textSecondary = dark ? 'text-white/55' : 'text-black/55'

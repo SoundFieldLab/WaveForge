@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import { motion, AnimatePresence } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
 import { X, Unplug, Loader2, MonitorSmartphone, ChevronDown, Check, Wifi, Copy, Plus, Smartphone } from 'lucide-react'
@@ -11,6 +12,8 @@ interface RemoteControlModalProps {
 }
 
 export default function RemoteControlModal({ onClose, playerTheme }: RemoteControlModalProps) {
+  // TV 遥控：BACK 关闭本弹窗（此前无返回处理，未消费的 BACK 会落到原生 handleBackDefault → 退出应用）
+  useTvBack(() => { onClose(); return true }, [onClose])
   const dark = playerTheme === 'dark'
   const [status, setStatus] = useState<RemoteStatus>({ running: false, port: 25567, token: '', clientCount: 0, maxClients: 5, clients: [], ips: [] })
   const [, setSettings] = useState<RemoteSettings>({ theme: 'dark', topRightAction: 'song', gestures: { doubleTap: true, swipe: true, twoFinger: true, twoFingerTap: true } })

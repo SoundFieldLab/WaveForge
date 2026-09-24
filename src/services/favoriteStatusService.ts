@@ -74,6 +74,16 @@ export function invalidateFavoriteIdentifiers(platform: FavoritePlatform, userId
   for (const key of pendingOwnerMutations.keys()) if (key.startsWith(prefix)) pendingOwnerMutations.delete(key)
 }
 
+// 登出 / 切号：清掉全部平台的喜欢标识缓存。缓存键里带账号（缺失时还会回退到共享常量键），
+// 不清就会在切号后把上一个账号的红心状态当作当前账号的。
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    favoriteIdsCache.clear()
+    pendingLoads.clear()
+    pendingOwnerMutations.clear()
+  })
+}
+
 export function loadFavoriteIdentifiers(
   platform: FavoritePlatform,
   userId: string,

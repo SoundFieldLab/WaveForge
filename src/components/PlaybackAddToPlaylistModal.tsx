@@ -1,4 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
+import { useTvBack } from '../tv/tvCore'
 import { Check, ListMusic, LoaderCircle, Music2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { Song } from '../services/musicApi'
@@ -31,6 +32,12 @@ function getOwners(): PlaylistOwnershipContext {
 }
 
 export default function PlaybackAddToPlaylistModal({ show, song, playlists, loading, accentColor, playerTheme = 'dark', onClose, onAdd }: Props) {
+  // TV 遥控：BACK 关闭本弹窗
+  useTvBack(() => {
+    if (!show) return false
+    onClose()
+    return true
+  }, [show, onClose])
   const [addingId, setAddingId] = useState<string | null>(null)
   const platform = (song.platform || 'netease') as MusicPlatform
   const isDark = playerTheme === 'dark'

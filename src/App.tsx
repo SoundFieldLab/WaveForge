@@ -1476,6 +1476,16 @@ function App() {
     return false
   }, [])
 
+  // 共振房间「挂起/退出」询问框：BACK 应关掉询问（留在房间），否则未消费的 BACK 会直接退出应用。
+  // deps 让它在提示出现时重新注册，从而优先于 App 里那条常驻兜底处理器。
+  const resonanceExitPromptRef = useRef(resonanceExitPrompt)
+  resonanceExitPromptRef.current = resonanceExitPrompt
+  useTvBack(() => {
+    if (!resonanceExitPromptRef.current) return false
+    setResonanceExitPrompt(null)
+    return true
+  }, [resonanceExitPrompt])
+
   const playlistKeys = useMemo(() => playlist.map(getSongKey), [playlist])
   // 看歌预加载：即将播放的后 2 首歌（预匹配评分高的 B 站视频）
   const watchUpcomingSongs = useMemo(() => {
@@ -6722,7 +6732,9 @@ function App() {
     }
     setAuthRevision(previous => previous + 1)
     // 记录登录有效期（网易云 cookie 官方约 30 天）
-    recordLogin('netease')
+    // 只在交互式登录时记录有效期：启动恢复也走这个函数，若每次都刷新 expiresAt，
+    // 「登录已过期」提示将永远不触发（showToastMessage=false 即启动恢复路径）
+    if (showToastMessage) recordLogin('netease')
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', {
       detail: {
         platform: 'netease',
@@ -6814,7 +6826,8 @@ function App() {
         }
         setAuthRevision(previous => previous + 1)
         // 记录登录有效期（QQ 音乐 cookie 官方约 30 天）
-        recordLogin('qq')
+        // 同上：启动恢复不刷新有效期，否则过期提醒永不出现
+        if (showToastMessage) recordLogin('qq')
         window.dispatchEvent(new CustomEvent('waveforge-auth-changed', {
           detail: { platform: 'qq', userId: uin }
         }))
