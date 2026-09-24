@@ -17,12 +17,19 @@
  * 全程尽力而为，任何失败都静默吞掉，不影响主流程。
  */
 
-import {
-  DIORAMA_PARTICLE_VERTEX_SHADER,
-  DIORAMA_PARTICLE_FRAGMENT_SHADER,
-} from '../vendor/folia/components/visualizer/diorama/dioramaParticleShaders'
-
 type ShaderPair = { vert: string; frag: string }
+
+// 引擎 shader 语料按需加载：dioramaParticleShaders 会经 dioramaParticleModel 引入整个 three.js，
+// 而本模块被 App.tsx 静态 import —— 静态引入会把 three 拉进主入口 chunk（真正用 three 的 folia
+// 可视化本身是懒加载的）。预热本来就在空闲期执行，这里改成运行时动态 import。
+const loadEngineShaderPairs = async (): Promise<ShaderPair[]> => {
+  try {
+    const mod = await import('../vendor/folia/components/visualizer/diorama/dioramaParticleShaders')
+    return [{ vert: mod.DIORAMA_PARTICLE_VERTEX_SHADER, frag: mod.DIORAMA_PARTICLE_FRAGMENT_SHADER }]
+  } catch {
+    return []
+  }
+}
 
 const FULLSCREEN_VERT = `#version 300 es
 in vec2 aPosition;
@@ -33,14 +40,6 @@ void main() {
 }`
 
 const CORPUS: ShaderPair[] = [
-  {
-    // 0. ⭐ 真实引擎 shader：folia diorama 粒子（three ShaderMaterial 提交给 GL 的源码与
-    //    本字符串逐字一致 → GpuDiskCache 直接命中，等价于播放页那一下的预编译）。
-    //    注意该系 shader 使用 GLSL1（attribute/varying、无 #version），与 WebGL2 上下文兼容
-    //    无版本 shader 的语义一致，可安全裸编译。
-    vert: DIORAMA_PARTICLE_VERTEX_SHADER,
-    frag: DIORAMA_PARTICLE_FRAGMENT_SHADER,
-  },
   {
     // A. 软点光粒子（≈ diorama 软点粒子：core 不透明盘 + glow 叠加光晕）
     vert: `#version 300 es
@@ -211,7 +210,10 @@ export function runShaderWarmup(force = false): void {
   if (warmed && !force) return
   warmed = true
 
-  const doWarm = () => {
+  const doWarm = async () => {
+    // 引擎 shader 优先（源码与 three ShaderMaterial 提交给 GL 的逐字一致 → GpuDiskCache 直接命中，
+    // 等价于进入播放页那一下的预编译）；动态加载失败时只用兜底语料。
+    const corpus = [...(await loadEngineShaderPairs()), ...CORPUS]
     const canvas = document.createElement('canvas')
     canvas.width = 8
     canvas.height = 8
@@ -227,7 +229,7 @@ export function runShaderWarmup(force = false): void {
       }) as WebGL2RenderingContext | null
       if (!gl) return
       const compiled: WebGLProgram[] = []
-      for (const pair of CORPUS) {
+      for (const pair of corpus) {
         const program = compileProgram(gl, pair)
         if (program) {
           // 触发一次 draw 前完整状态绑定，确保 uniform 布局/UBO 缓存也走一遍
@@ -250,7 +252,7 @@ export function runShaderWarmup(force = false): void {
   const schedule = () => {
     if (document.visibilityState === 'visible') {
       // 首帧之后空闲执行，避免抢启动关键路径；GPU 编译 + 合成器预热一并触发
-      const runAll = () => { doWarm(); try { prewarmCssFx() } catch { /* 尽力而为 */ } }
+      const runAll = () => { void doWarm(); try { prewarmCssFx() } catch { /* 尽力而为 */ } }
       if (typeof requestIdleCallback === 'function') {
         requestIdleCallback(() => window.setTimeout(runAll, 300), { timeout: 3000 })
       } else {
