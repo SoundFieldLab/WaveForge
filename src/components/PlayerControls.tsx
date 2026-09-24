@@ -212,6 +212,12 @@ export default function PlayerControls({
   // 手机遥控器连上时恢复 PC 式 hover 展开布局。
   const tvCompact = tvMode && !remoteCursorMode
   const [dragValue, setDragValue] = useState(0)
+  // 拖动进度条期间歌曲自动切换：复位拖动状态，否则松手时会拿旧曲目的比例去 seek 新曲目。
+  //（以 duration 变化作为换歌信号：同一首曲目内时长不会变。）
+  useEffect(() => {
+    setIsDragging(false)
+    setDragValue(0)
+  }, [duration])
   const [showVolumeSlider, setShowVolumeSlider] = useState(false)
   // DG-LAB 波形输出启禁（仅连接后显示，最右侧按钮）
   const dglabStatus = useDGLabStatus()

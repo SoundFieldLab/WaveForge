@@ -3740,7 +3740,7 @@ function App() {
   }
 
   // 处理歌曲选择
-  const handleSongSelect = async (song: Song, playlistFromSource?: Song[], origin?: PlaybackOrigin) => {
+  const handleSongSelect = async (song: Song, playlistFromSource?: Song[], origin?: PlaybackOrigin, sourceIndex?: number) => {
     // 同步关闭所有覆盖层/详情弹窗（在任何 await 之前）：点歌即切播放页，防止
     // 艺人/专辑/歌单详情弹窗残留盖在播放页上面无法关闭
     // （含整屏 backdrop-filter 的弹窗：退出节点在播放页挂载时会被卡住不卸载）
@@ -3826,7 +3826,16 @@ function App() {
       : playlist.some(item => getSongKey(item) === getSongKey(normalizedSong))
         ? playlist
         : [...playlist, normalizedSong]
-    const selectedIndex = Math.max(0, nextPlaylist.findIndex(item => getSongKey(item) === getSongKey(normalizedSong)))
+    // 调用方知道点击项索引时优先用它：队列里同一首歌出现多次时 findIndex 只认第一条，
+    // 会出现「点第二条播第一条」。两边都拿不到时退回最后一项（该分支里它正是刚追加的那首），
+    // 不再用 Math.max(0, ...) 静默改播列表第一首。
+    const foundIndex = nextPlaylist.findIndex(item => getSongKey(item) === getSongKey(normalizedSong))
+    const selectedIndex = typeof sourceIndex === 'number' && sourceIndex >= 0 && sourceIndex < nextPlaylist.length
+      && getSongKey(nextPlaylist[sourceIndex]) === getSongKey(normalizedSong)
+      ? sourceIndex
+      : foundIndex >= 0
+        ? foundIndex
+        : Math.max(0, nextPlaylist.length - 1)
 
     audioPlayer.cancelTransition('explicit song selection', false)
     bumpQueueRevision()
@@ -3986,31 +3995,32 @@ function App() {
   }
 
   // 下一首播放
+  // 「下一首播放」的插入游标：连点两次时第二首会插到第一首前面（顺序反了），
+  // 因为每次都算 currentIndex + 1。这里记住上一首插到哪，当前曲目变了就重置。
+  const playNextCursorRef = useRef<{ base: number; at: number }>({ base: -1, at: 0 })
   const handlePlayNext = (song: Song) => {
     audioPlayer.cancelTransition('play-next queue changed', false)
     bumpQueueRevision()
+    if (playNextCursorRef.current.base !== currentIndexRef.current) {
+      playNextCursorRef.current = { base: currentIndexRef.current, at: currentIndexRef.current + 1 }
+    }
+    const insertAt = playNextCursorRef.current.at
+    const prependInstead = currentIndexRef.current < 0
     setPlaylist(prev => {
-      // 如果是当前播放的歌曲
-      if (prev.length === 0) {
-        // 添加到播放列表并播放
-        currentIndexRef.current = 0
-        setCurrentIndex(0)
-        return [song]
-      }
-      
-      // 如果是收藏的歌曲
-      if (currentIndex >= 0) {
-        const newPlaylist = [...prev]
-        newPlaylist.splice(currentIndex + 1, 0, song)
-        return newPlaylist
-      } else {
-        // 如果是当前播放的歌曲，但不播放
-        currentIndexRef.current = 0
-        setCurrentIndex(0)
-        return [song, ...prev]
-      }
+      if (prev.length === 0) return [song]
+      if (prependInstead) return [song, ...prev]
+      const at = Math.max(0, Math.min(insertAt, prev.length))
+      const newPlaylist = [...prev]
+      newPlaylist.splice(at, 0, song)
+      return newPlaylist
     })
-    
+    playNextCursorRef.current = { base: currentIndexRef.current, at: insertAt + 1 }
+    // 索引类副作用移出 setState updater：updater 必须是纯函数（StrictMode/并发下可能被重放）
+    if (playlist.length === 0 || prependInstead) {
+      currentIndexRef.current = 0
+      setCurrentIndex(0)
+    }
+
     // 显示全局消息提示
     addToast('已添加至下一首播放', 'success')
   }
@@ -5268,12 +5278,15 @@ function App() {
   // 上一曲
   const handlePrevious = () => {
     if (playlist.length === 0 || currentSong?.appleRadio) return
+    // 共振房间里没有「上一曲」语义（队列由房主向前推进）：与媒体键/遥控器的处理保持一致。
+    // 房间里本机列表被压成单曲，走本机逻辑只会在那一首上回绕。
+    if (isResonanceHost()) return
     audioPlayer.cancelTransition('manual previous', false)
     audioPlayer.resetGaplessIntegration() // 清理预加载的音频
     bumpQueueRevision()
     
     // 如果当前有歌曲正在播放且播放列表不为空
-    const newIndex = currentIndex > 0 ? currentIndex - 1 : playlist.length - 1
+    const newIndex = currentIndexRef.current > 0 ? currentIndexRef.current - 1 : playlist.length - 1
     if (gaplessEnabled && playlist[newIndex]) {
       setIsTransitioning(true)
       
@@ -5297,6 +5310,12 @@ function App() {
   // 下一曲
   const handleNext = () => {
     if (playlist.length === 0 || currentSong?.appleRadio) return
+    // 房间里点「下一首」必须推进房间队列：媒体键与遥控器已走 hostNext()，而播放器上的按钮此前
+    // 没有这个分支，会走本机逻辑在「被压成单曲」的列表上回绕，还会把全体成员拉回 0:00。
+    if (isResonanceHost()) {
+      getResonanceSession().hostNext()
+      return
+    }
     const appleAutoplayHold = appleAutoplayEnabled
       && playMode === 'sequential'
       && playlist.length > 0
@@ -5305,7 +5324,7 @@ function App() {
     if (
       (playbackOriginRef.current.continuation === 'explore-infinite' || appleAutoplayHold) &&
       playMode === 'sequential' &&
-      currentIndex >= playlist.length - 1
+      currentIndexRef.current >= playlist.length - 1
     ) {
       // 无限推荐/自动连播正在续载时停留在当前曲，避免队尾瞬间回绕到第一首。
       infiniteExploreContinuationRef.current.advancePending = true
@@ -5317,7 +5336,7 @@ function App() {
     audioPlayer.resetGaplessIntegration() // 清理预加载的音频
     bumpQueueRevision()
     
-    const newIndex = deterministicNextIndex ?? (currentIndex < playlist.length - 1 ? currentIndex + 1 : 0)
+    const newIndex = deterministicNextIndex ?? (currentIndexRef.current < playlist.length - 1 ? currentIndexRef.current + 1 : 0)
     
     // 如果当前有歌曲正在播放且播放列表不为空
     if (gaplessEnabled && playlist[newIndex]) {
@@ -5906,7 +5925,7 @@ function App() {
     } else if (action === 'select-index') {
       const index = Number(payload)
       const target = playlistRef.current[index]
-      if (target) void handleSongSelectRef.current(target, playlistRef.current)
+      if (target) void handleSongSelectRef.current(target, playlistRef.current, undefined, index)
     } else if (action === 'seek') {
       if (lyricDisplayMode === 'video' && watchPlayerRef.current) {
         watchPlayerRef.current.seekTo(Number(payload) || 0)
@@ -6683,6 +6702,11 @@ function App() {
 
   const handleDesktopQueueRemove = useCallback((index: number) => {
     if (index < 0 || index === currentIndexRef.current || index >= playlist.length) return
+    // 删掉的是「后面还没播的」曲目时必须取消在途/已预载的过渡：引擎可能已把被删的那首作为
+    // 下一首预载，交叉淡化时仍会切过去，而 UI/歌词停在刚播完的那首（音频与界面永久错位）。
+    if (index > currentIndexRef.current) {
+      audioPlayerRef.current?.cancelTransition('queue item removed', false)
+    }
     const next = playlist.filter((_, itemIndex) => itemIndex !== index)
     playlistRef.current = next
     if (index < currentIndexRef.current) {
