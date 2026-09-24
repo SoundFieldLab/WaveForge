@@ -99,10 +99,13 @@ export function useDesktopChartDetail() {
   return { chart, songs, loading, error, selectChart }
 }
 
+// 日期 formatter 提到模块级复用：此前每张专辑卡渲染都 new 一次 Intl.DateTimeFormat
+const PUBLISH_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' })
+
 const formatPublishDate = (value: ExploreAlbum['publishTime']) => {
   if (!value) return '发行日期待更新'
   const date = new Date(typeof value === 'number' ? value : value)
-  return Number.isNaN(date.getTime()) ? String(value) : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' }).format(date)
+  return Number.isNaN(date.getTime()) ? String(value) : PUBLISH_DATE_FORMATTER.format(date)
 }
 
 export function DesktopAlbumsView({ albums, compact, onOpen }: { albums: ExploreAlbum[]; compact: boolean; onOpen: (album: ExploreAlbum) => void }) {

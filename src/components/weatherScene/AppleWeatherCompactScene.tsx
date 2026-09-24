@@ -123,6 +123,12 @@ export default function AppleWeatherCompactScene({ scene, active = true, reduced
     const snow = particles(snowCount, 'snow')
     const stars = particles(starCount, 'star')
 
+    // 背景与压暗用的两个线性渐变只跟画布尺寸/配色有关，resize 时建一次即可；
+    // 原先放在 render 里每帧 new 两个 CanvasGradient（30fps ≈ 60 个/秒）。
+    const palette = COMPACT_PALETTES[scene.isDay ? 'day' : 'night'][scene.kind]
+    let skyGradient!: CanvasGradient
+    let shadeGradient!: CanvasGradient
+
     const resize = () => {
       const rect = canvas.getBoundingClientRect()
       width = Math.max(1, rect.width)
@@ -137,17 +143,20 @@ export default function AppleWeatherCompactScene({ scene, active = true, reduced
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'medium'
+      skyGradient = ctx.createLinearGradient(0, 0, width, height)
+      skyGradient.addColorStop(0, palette[0])
+      skyGradient.addColorStop(0.56, palette[1])
+      skyGradient.addColorStop(1, palette[2])
+      shadeGradient = ctx.createLinearGradient(0, 0, 0, height)
+      shadeGradient.addColorStop(0, 'rgba(255,255,255,0.035)')
+      shadeGradient.addColorStop(0.62, 'rgba(0,0,0,0)')
+      shadeGradient.addColorStop(1, 'rgba(0,8,18,0.24)')
     }
 
     const render = (images: Map<string, HTMLImageElement>, now: number) => {
-      const palette = COMPACT_PALETTES[scene.isDay ? 'day' : 'night'][scene.kind]
-      const gradient = ctx.createLinearGradient(0, 0, width, height)
-      gradient.addColorStop(0, palette[0])
-      gradient.addColorStop(0.56, palette[1])
-      gradient.addColorStop(1, palette[2])
       ctx.globalCompositeOperation = 'source-over'
       ctx.globalAlpha = 1
-      ctx.fillStyle = gradient
+      ctx.fillStyle = skyGradient
       ctx.fillRect(0, 0, width, height)
       const t = reducedMotion ? 48 : now / 1000
       const image = (name: string) => images.get(name)
@@ -259,11 +268,7 @@ export default function AppleWeatherCompactScene({ scene, active = true, reduced
 
       ctx.globalCompositeOperation = 'source-over'
       ctx.globalAlpha = 1
-      const shade = ctx.createLinearGradient(0, 0, 0, height)
-      shade.addColorStop(0, 'rgba(255,255,255,0.035)')
-      shade.addColorStop(0.62, 'rgba(0,0,0,0)')
-      shade.addColorStop(1, 'rgba(0,8,18,0.24)')
-      ctx.fillStyle = shade
+      ctx.fillStyle = shadeGradient
       ctx.fillRect(0, 0, width, height)
     }
 
@@ -307,7 +312,12 @@ export default function AppleWeatherCompactScene({ scene, active = true, reduced
     }).catch(() => onUnavailable?.())
 
     let cleanup = () => undefined
-    const visibility = () => document.hidden ? stop() : undefined
+    // 隐藏时停帧；回到前台要主动重启——tick 自身命中 document.hidden 后就不再续帧，
+    // 只靠 IntersectionObserver 恰好触发会让雨雪动画看起来「冻住」。
+    const visibility = () => {
+      if (document.hidden) stop()
+      else startLoopRef.current?.()
+    }
     document.addEventListener('visibilitychange', visibility)
     return () => {
       disposed = true

@@ -62,10 +62,11 @@ const isHourDaylight = (time: string, weather: WeatherSnapshot) => {
   if (!day?.sunrise || !day?.sunset) return weather.current.isDay
   return time >= day.sunrise && time < day.sunset
 }
+const WEEKDAY_FORMATTER = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' })
 const formatWeekday = (value: string, index: number) => {
   if (index === 0) return '今天'
   const date = new Date(`${value}T12:00:00`)
-  return new Intl.DateTimeFormat('zh-CN', { weekday: 'short' }).format(date)
+  return WEEKDAY_FORMATTER.format(date)
 }
 
 type HourlyItem = { kind: 'hour'; hour: WeatherHour; index: number } | { kind: 'sun'; rise: boolean; time: string; label: string }

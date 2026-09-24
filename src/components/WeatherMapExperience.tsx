@@ -735,17 +735,31 @@ class WeatherIsobarLayer extends L.Layer {
 const formatCoordinate = (value: number, positive: string, negative: string) =>
   `${Math.abs(value).toFixed(2)}°${value >= 0 ? positive : negative}`
 
+// 时间轴播放时 updateTimelineDom 每帧都要格式化时间（约 60 次/秒），formatter 按 timeZone 缓存复用；
+// 原先每帧 new 一个 Intl.DateTimeFormat——构造本身比 format 还贵。
+const mapTimeFormatters = new Map<string, Intl.DateTimeFormat>()
+const invalidMapTimeZones = new Set<string>()
+const getMapTimeFormatter = (timezone?: string): Intl.DateTimeFormat => {
+  const key = timezone || ''
+  const cached = mapTimeFormatters.get(key)
+  if (cached) return cached
+  const options: Intl.DateTimeFormatOptions = {
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }
+  const formatter = new Intl.DateTimeFormat('zh-CN', timezone ? { ...options, timeZone: timezone } : options)
+  mapTimeFormatters.set(key, formatter)
+  return formatter
+}
+
 const formatMapTime = (hourOffset: number, timezone?: string) => {
   const target = new Date(Date.now() + hourOffset * 60 * 60 * 1000)
+  if (timezone && invalidMapTimeZones.has(timezone)) return getMapTimeFormatter(undefined).format(target)
   try {
-    return new Intl.DateTimeFormat('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
-      hour12: false, timeZone: timezone || undefined,
-    }).format(target)
+    return getMapTimeFormatter(timezone).format(target)
   } catch {
-    return new Intl.DateTimeFormat('zh-CN', {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-    }).format(target)
+    // 无效 timeZone 等：记下来并退回不带时区的 formatter（同样走缓存），避免每帧重复抛错
+    if (timezone) invalidMapTimeZones.add(timezone)
+    return getMapTimeFormatter(undefined).format(target)
   }
 }
 
