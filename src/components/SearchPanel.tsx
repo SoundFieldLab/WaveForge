@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, type MouseEvent as ReactMouseEvent } from 'react'
+﻿import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Search, X, Music, History, Clock, User, Disc, Sparkles, TrendingUp, ListMusic } from 'lucide-react'
+import { Search, X, Music, History, Clock, User, Disc, Sparkles, TrendingUp, ListMusic, ArrowUpRight, Play } from 'lucide-react'
 import { searchSongs, searchSuggest, searchArtists, searchAlbums, searchQuick, searchPlaylists, Song, Artist, Album, SearchSuggestion, getProxiedImageUrl, loadAlbumCovers, resolveSongAlbumIdentifier, searchHot } from '../services/musicApi'
 import { mergeFusedSearchResults, type FusedSearchIntent, type MusicPlatform } from '../services/fusedSearch'
-import { isPlatformVisible, platformLabel } from '../services/platforms'
+import { isPlatformVisible, platformLabel, PLATFORM_VISUAL_METADATA } from '../services/platforms'
 import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 import ArtistDetailModal from './ArtistDetailModal'
@@ -16,6 +16,7 @@ import { getUserPlaylists } from '../services/playlistService'
 import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestionItems, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
 import { getAppleCredentials } from '../services/appleAuth'
 import { parseStoredArray } from '../utils/storage'
+import { debugLog } from '../utils/debugLog'
 
 interface SearchPanelProps {
   onSongSelect: SongSelectHandler
@@ -66,6 +67,12 @@ const APPLE_SUGGEST_TYPE_LABEL: Record<string, string> = {
 // 搜索结果缓存上限：每次搜索缓存完整结果集（约 100 首歌对象），面板是常驻单例，
 // 不加上限会导致 Map 无限增长（内存泄漏）。超出上限时按 LRU 淘汰最旧的 cacheKey。
 const SEARCH_CACHE_MAX = 10
+
+// 每页结果数：行高压缩到 48px 左右后单屏可见约 8-10 行，
+// 首屏 40 条 + 触底自动续载，既保证「一屏看到足够多」，
+// 又不至于一次渲染上百行封面（CachedImage 会瞬时排队）。
+const SEARCH_PAGE_SIZE = 40
+
 type SearchPlatform = MusicPlatform | 'fused'
 
 const entityId = (entity: Artist | Album): string => String(entity.appleId || entity.mid || entity.id)
@@ -94,13 +101,6 @@ const withSearchTimeout = <T,>(promise: Promise<T>, timeoutMs = 5_000): Promise<
   )
 })
 
-/** QQ 接口返回的歌单/专辑名含 HTML 实体（如 &#32; = 空格、&amp; = &），渲染前解码 */
-function decodeHtmlEntities(text: string): string {
-  if (!text || text.indexOf('&') === -1) return text
-  const el = document.createElement('textarea')
-  el.innerHTML = text
-  return el.value
-}
 
 /**
  * 向 LRU Map 写入并维护上限：set 时更新访问顺序（先删后插），
@@ -140,10 +140,7 @@ export default function SearchPanel({
   onCopyInfo,
   onRestoreConsumed
 }: SearchPanelProps) {
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
-  console.log('🔍 SearchPanel 渲染')
-  console.log('  playerTheme:', playerTheme)
-  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+  debugLog('🔍 SearchPanel 渲染', playerTheme)
   
   // 根据主题生成颜色类名
   const textPrimary = playerTheme === 'dark' ? 'text-white' : 'text-black'
@@ -152,6 +149,37 @@ export default function SearchPanel({
   const bgCard = playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'
   const borderColor = playerTheme === 'dark' ? 'border-white/10' : 'border-black/10'
   const hoverBg = playerTheme === 'dark' ? 'hover:bg-white/5' : 'hover:bg-black/5'
+  // 宽屏卡片悬停：描边高光 + 轻微上浮 + 投影，替代只变背景色的「看不出来」反馈
+  const hoverRing = playerTheme === 'dark' ? 'hover:ring-white/15' : 'hover:ring-black/10'
+  const hoverLift = playerTheme === 'dark'
+    ? 'hover:shadow-[0_12px_32px_-14px_rgba(0,0,0,0.75)]'
+    : 'hover:shadow-[0_12px_32px_-14px_rgba(0,0,0,0.28)]'
+  // 结果卡片网格：按容器可用宽度自动决定列数（宽屏铺满、窄屏自动降到 2-3 列）。
+  // 最小宽度从 152px 提到 200px：超宽弹窗下不再被切成十几个拇指盖大小的小卡，
+  // 单卡封面与标题恢复到一眼可读的尺寸（原先 152px 偏小，14 列太碎）。
+  const cardGridStyle = { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 200px), 1fr))' }
+  // 融合搜索的艺人与专辑是「小横条」，最小宽度更大才能保证文字不被压扁
+  const entityGridStyle = { gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 280px), 1fr))' }
+
+  // 紧凑筛选 chip：选中态用品牌色实底，未选中态玻璃底。
+  // 去掉旧的 backdrop-blur-xl + shadow-lg（7 个按钮各自触发一次模糊合成），
+  // 同时把按钮高度从 py-3 压到 py-1.5，把纵向空间让给结果列表。
+  const platformChipClass = (isActive: boolean, activeClass: string) =>
+    `px-3 py-1.5 rounded-lg text-[13px] font-medium transition-colors flex items-center gap-1.5 flex-shrink-0 ${
+      isActive
+        ? `${activeClass} text-white`
+        : playerTheme === 'dark'
+          ? 'bg-white/5 text-white/55 hover:bg-white/10 hover:text-white'
+          : 'bg-black/5 text-black/55 hover:bg-black/10 hover:text-black'
+    }`
+  const typeChipClass = (isActive: boolean, activeClass: string) =>
+    `px-2.5 py-1.5 rounded-lg text-[13px] font-medium transition-colors flex items-center gap-1 flex-shrink-0 disabled:opacity-50 ${
+      isActive
+        ? `${activeClass} text-white`
+        : playerTheme === 'dark'
+          ? 'text-white/55 hover:bg-white/10 hover:text-white'
+          : 'text-black/55 hover:bg-black/10 hover:text-black'
+    }`
   
   const [keyword, setKeyword] = useState(() => {
     const saved = sessionStorage.getItem('waveforge_search_keyword')
@@ -166,6 +194,23 @@ export default function SearchPanel({
     return parseStoredArray<Song>(saved)
   })
   const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([])
+
+  // 融合结果按平台计数：此前在渲染体内做 4 次 filter().length（每次都全量遍历上百首），
+  // 而本组件未 memo 且每次击键都会重渲染。一次遍历算完。
+  const platformCounts = useMemo(() => {
+    let qq = 0
+    let netease = 0
+    let apple = 0
+    let other = 0
+    for (const song of allResults) {
+      const name = song.platform || 'netease'
+      if (name === 'qq') qq += 1
+      else if (name === 'netease') netease += 1
+      else if (name === 'apple') apple += 1
+      else other += 1
+    }
+    return { qq, netease, apple, other }
+  }, [allResults])
 
   // QQ 快速联想（smartbox）：结构化返回歌手/歌曲/专辑
   const buildQqQuickSuggestions = async (keyword: string): Promise<SearchSuggestion[]> => {
@@ -201,9 +246,8 @@ export default function SearchPanel({
   const [selectedIndex, setSelectedIndex] = useState(-1) // 键盘选择的索引
   const [displayCount, setDisplayCount] = useState(() => {
     const saved = sessionStorage.getItem('waveforge_search_display_count')
-    return saved ? parseInt(saved) : 20
+    return saved ? Math.max(SEARCH_PAGE_SIZE, parseInt(saved) || SEARCH_PAGE_SIZE) : SEARCH_PAGE_SIZE
   })
-  const [isInputFocused, setIsInputFocused] = useState(false) // 输入框是否聚焦
   const scrollContainerRef = useRef<HTMLDivElement>(null) // 滚动容器引用
   const searchRequestRef = useRef(0)
   // 搜索结果缓存 per platform，避免切换平台后重新搜索
@@ -424,6 +468,7 @@ export default function SearchPanel({
   }, [platform])
 
   // 保存搜索状态到 sessionStorage（会话内记忆）
+  // 轻量标量键：随输入/翻页变化，写入成本可忽略。
   useEffect(() => {
     sessionStorage.setItem('waveforge_search_keyword', keyword)
     sessionStorage.setItem('waveforge_search_searched', searched.toString())
@@ -431,7 +476,11 @@ export default function SearchPanel({
     sessionStorage.setItem('waveforge_search_type', searchType)
     sessionStorage.setItem('waveforge_search_display_count', displayCount.toString())
     sessionStorage.setItem('waveforge_search_fusion_intent', fusionIntent)
-    
+  }, [keyword, searched, platform, searchType, displayCount, fusionIntent])
+
+  // 结果数组单独持久化：融合搜索下一次可含上百首 × 多平台，逐键序列化开销大，
+  // 只在数组本身变化时写入（每个键各自 last-write-wins，与合并写入等价）。
+  useEffect(() => {
     if (allResults.length > 0) {
       sessionStorage.setItem('waveforge_search_all_results', JSON.stringify(allResults))
     }
@@ -444,7 +493,7 @@ export default function SearchPanel({
     if (albumResults.length > 0) {
       sessionStorage.setItem('waveforge_search_album_results', JSON.stringify(albumResults))
     }
-  }, [keyword, searched, platform, searchType, displayCount, allResults, displayedResults, artistResults, albumResults, fusionIntent])
+  }, [allResults, displayedResults, artistResults, albumResults])
 
   // 保存搜索历史
   const saveSearchHistory = (query: string) => {
@@ -525,7 +574,7 @@ export default function SearchPanel({
       }
       
       try {
-        console.log('🔍 正在获取搜索建议:', keyword.trim(), platform)
+        debugLog('🔍 正在获取搜索建议:', keyword.trim(), platform)
         const result = platform === 'fused'
           ? (await Promise.allSettled([
               searchSuggest(keyword.trim(), 'netease'),
@@ -554,7 +603,7 @@ export default function SearchPanel({
                   }))
               : await searchSuggest(keyword.trim(), platform)
         if (!active) return
-        console.log('📝 搜索建议结果:', result)
+        debugLog('📝 搜索建议结果:', result)
         setSuggestions(result)
         setShowSuggestions(result.length > 0)
         setSelectedIndex(-1)
@@ -579,7 +628,10 @@ export default function SearchPanel({
     setSearched(true)
     setShowSuggestions(false)
     setSelectedIndex(-1)
-    setDisplayCount(20) // 重置显示数量
+    setDisplayCount(SEARCH_PAGE_SIZE) // 重置显示数量
+    // 新一轮搜索回到顶部，否则沿用上一轮滚动位置会直接触发触底续载
+    lastAutoLoadRef.current = 0
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0
     
     const storefrontKey = platform === 'apple' || platform === 'fused'
       ? localStorage.getItem('appleStorefront') || 'cn'
@@ -590,7 +642,7 @@ export default function SearchPanel({
       setArtistResults(cached.artistResults)
       setAlbumResults(cached.albumResults)
       setAllResults(cached.allResults)
-      setDisplayedResults(cached.allResults.slice(0, 20))
+      setDisplayedResults(cached.allResults.slice(0, SEARCH_PAGE_SIZE))
       setPlaylistResults(cached.playlistResults || [])
       setFusionUnavailablePlatforms(cached.unavailable)
       setFusionIntent(cached.intent)
@@ -653,7 +705,7 @@ export default function SearchPanel({
         setArtistResults(fused.artists)
         setAlbumResults(fused.albums)
         setAllResults(fused.songs)
-        setDisplayedResults(fused.songs.slice(0, 20))
+        setDisplayedResults(fused.songs.slice(0, SEARCH_PAGE_SIZE))
         // 缓存结果（LRU，超出上限自动淘汰最旧条目）
         setLruCache(searchCacheRef.current, cacheKey, {
           allResults: fused.songs, artistResults: fused.artists, albumResults: fused.albums, playlistResults: [],
@@ -672,7 +724,7 @@ export default function SearchPanel({
               const songs = await searchAppleSongsAsSongs(finalKeyword, storefront, 50)
               if (requestId !== searchRequestRef.current) return
               setAllResults(songs)
-              setDisplayedResults(songs.slice(0, 20))
+              setDisplayedResults(songs.slice(0, SEARCH_PAGE_SIZE))
             } else if (searchType === 'artist') {
               const artists = await searchAppleCatalogArtists(finalKeyword, storefront)
               if (requestId !== searchRequestRef.current) return
@@ -711,7 +763,7 @@ export default function SearchPanel({
             platform: 'apple' as const,
           }))
           setAllResults(songs)
-          setDisplayedResults(songs.slice(0, 20))
+          setDisplayedResults(songs.slice(0, SEARCH_PAGE_SIZE))
           setArtistResults(artists)
           setAlbumResults(albums)
           setPlaylistResults(playlists)
@@ -723,7 +775,7 @@ export default function SearchPanel({
           const songs = await searchAppleSongsAsSongs(finalKeyword, storefront, 50)
           if (requestId !== searchRequestRef.current) return
           setAllResults(songs)
-          setDisplayedResults(songs.slice(0, 20))
+          setDisplayedResults(songs.slice(0, SEARCH_PAGE_SIZE))
         } else if (searchType === 'artist') {
           const artists = await searchAppleCatalogArtists(finalKeyword, storefront)
           if (requestId !== searchRequestRef.current) return
@@ -752,24 +804,24 @@ export default function SearchPanel({
       } else if (searchType === 'song') {
         const songResult = await searchSongs(finalKeyword, 100, platform)
         if (requestId !== searchRequestRef.current) return
-        console.log('🔍 搜索结果:', { songs: songResult.songs.length })
+        debugLog('🔍 搜索结果:', { songs: songResult.songs.length })
         setAllResults(songResult.songs)
-        setDisplayedResults(songResult.songs.slice(0, 20))
+        setDisplayedResults(songResult.songs.slice(0, SEARCH_PAGE_SIZE))
       } else if (searchType === 'artist') {
         const artists = await searchArtists(finalKeyword, platform)
         if (requestId !== searchRequestRef.current) return
-        console.log('🔍 艺人搜索结果:', { artists: artists.length })
+        debugLog('🔍 艺人搜索结果:', { artists: artists.length })
         setArtistResults(artists)
       } else if (searchType === 'album') {
-        console.log('🔍 开始搜索专辑:', finalKeyword, 'platform:', platform)
+        debugLog('🔍 开始搜索专辑:', finalKeyword, 'platform:', platform)
         const albums = await searchAlbums(finalKeyword, platform)
         if (requestId !== searchRequestRef.current) return
-        console.log('🔍 专辑搜索结果:', { albums: albums.length, data: albums })
-        console.log('🔍 第一个专辑数据:', albums[0])
+        debugLog('🔍 专辑搜索结果:', { albums: albums.length, data: albums })
+        debugLog('🔍 第一个专辑数据:', albums[0])
         setAlbumResults(albums)
-        console.log('🔍 专辑结果已设置，调用 setAlbumResults，长度:', albums.length)
+        debugLog('🔍 专辑结果已设置，调用 setAlbumResults，长度:', albums.length)
       } else if (searchType === 'playlist') {
-        console.log('🔍 开始搜索歌单:', finalKeyword, 'platform:', platform)
+        debugLog('🔍 开始搜索歌单:', finalKeyword, 'platform:', platform)
         const data = await searchPlaylists(finalKeyword, platform)
         if (requestId !== searchRequestRef.current) return
         setPlaylistResults(data.playlists)
@@ -781,7 +833,7 @@ export default function SearchPanel({
         setSearchError(error instanceof Error ? error.message : '搜索失败，请稍后重试')
       }
     } finally {
-      console.log('🔍 搜索完成，设置 loading = false')
+      debugLog('🔍 搜索完成，设置 loading = false')
       if (requestId === searchRequestRef.current) setLoading(false)
     }
   }
@@ -793,9 +845,10 @@ export default function SearchPanel({
 
   // 加载更多结果
   const handleLoadMore = async () => {
+    if (loadingMore) return
     setLoadingMore(true)
     try {
-      const newCount = displayCount + 20
+      const newCount = displayCount + SEARCH_PAGE_SIZE
       const newSongs = allResults.slice(displayCount, newCount)
       
       // 如果是网易云，需要加载这批歌曲的封面
@@ -821,6 +874,20 @@ export default function SearchPanel({
     }
   }
 
+  // 触底自动续载：距底部 320px 内即预取下一页，替代原先的手动「加载更多」按钮。
+  // 用 ref 记录上一次触发时的结果长度，避免滚动过程中重复调度同一批。
+  const lastAutoLoadRef = useRef(0)
+  const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget
+    if (loading || loadingMore) return
+    if (displayedResults.length >= allResults.length) return
+    if (allResults.length === 0) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 320) return
+    if (lastAutoLoadRef.current === displayedResults.length) return
+    lastAutoLoadRef.current = displayedResults.length
+    void handleLoadMore()
+  }
+
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       if (selectedIndex >= 0 && selectedIndex < suggestions.length) {
@@ -841,8 +908,16 @@ export default function SearchPanel({
         setSelectedIndex(prev => (prev - 1 + suggestions.length) % suggestions.length)
       }
     } else if (e.key === 'Escape') {
-      setShowSuggestions(false)
-      setSelectedIndex(-1)
+      // Esc 逐级后退：先收联想词 → 再清空已输入关键词 → 最后才关闭整个面板
+      if (showSuggestions || suggestions.length > 0) {
+        setShowSuggestions(false)
+        setSelectedIndex(-1)
+      } else if (keyword) {
+        setKeyword('')
+        setSelectedIndex(-1)
+      } else {
+        onClose()
+      }
     }
   }
 
@@ -860,6 +935,25 @@ export default function SearchPanel({
     const mins = Math.floor(seconds / 60)
     const secs = seconds % 60
     return `${mins}:${secs.toString().padStart(2, '0')}`
+  }
+
+  // 后端各平台归一化偶尔会把对象/数组塞进本应是字符串的字段（如 album.name），
+  // 直接渲染会触发「Objects are not valid as a React child」并让整棵结果树崩溃。
+  // 这里统一收敛为纯字符串，脏数据只退化文案，不再炸渲染树。
+  const songText = (value: unknown, fallback = ''): string => {
+    if (typeof value === 'string') return value || fallback
+    if (typeof value === 'number') return String(value)
+    const nested = (value as { name?: unknown } | null | undefined)?.name
+    if (typeof nested === 'string' && nested) return nested
+    return fallback
+  }
+
+  const songArtists = (song: Song): string => {
+    if (!Array.isArray(song.artists)) return '未知艺人'
+    const names = song.artists
+      .map(artist => songText(artist, ''))
+      .filter(name => name.length > 0)
+    return names.length > 0 ? names.join(', ') : '未知艺人'
   }
 
   const entitlementLabel = (sourcePlatform: MusicPlatform) => {
@@ -882,30 +976,37 @@ export default function SearchPanel({
       (song.fusedSources || [{ platform: preferredPlatform }]).map(source => source.platform),
     ))
     const preferredVip = preferredPlatform === 'qq' ? qqVip : neteaseVip
+    const meta = PLATFORM_VISUAL_METADATA[preferredPlatform]
     return (
-      <div className="flex items-center gap-1.5 flex-shrink-0">
-        <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${
-          preferredPlatform === 'qq'
-            ? 'bg-green-500/15 text-green-300 border-green-400/20'
-            : 'bg-red-500/15 text-red-300 border-red-400/20'
-        }`}>
-          首选 {platformLabel(preferredPlatform)}{preferredVip ? ' · VIP' : ''}
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {/* 首选平台用品牌色小方块，避免「首选 QQ音乐 · VIP」这类长文案把行撑高 */}
+        <span
+          className="px-1.5 py-px rounded text-[10px] font-semibold leading-4"
+          style={{ backgroundColor: meta?.background, color: meta?.color }}
+          title={`首选 ${platformLabel(preferredPlatform)}${preferredVip ? ' · 会员可完好播放' : ''}`}
+        >
+          {meta?.shortLabel || platformLabel(preferredPlatform)}
+          {preferredVip && <span className="ml-0.5 opacity-80">VIP</span>}
         </span>
-        {sources.length > 1 && <span className={`${textTertiary} text-[11px]`}>{sources.length} 个平台</span>}
+        {sources.length > 1 && (
+          <span className={`${textTertiary} text-[10px] leading-4`} title={`共 ${sources.length} 个平台有此曲目`}>
+            +{sources.length - 1}
+          </span>
+        )}
       </div>
     )
   }
 
   const renderFusedEntitySections = () => (
-    <div className="space-y-4 mb-4">
+    <div className="space-y-2.5 mb-2">
       {artistResults.length > 0 && (
         <section>
-          <div className="flex items-center gap-2 mb-2">
-            <User className={`w-4 h-4 ${textSecondary}`} />
-            <h3 className={`${textPrimary} font-semibold`}>相关艺人</h3>
-            <span className={`${textTertiary} text-xs`}>智能命中 {artistResults.length} 位 · 最多 6 位</span>
+          <div className="flex items-center gap-2 mb-1.5 px-1">
+            <User className={`w-3.5 h-3.5 ${textTertiary}`} />
+            <span className={`${textPrimary} text-[13px] font-medium`}>相关艺人</span>
+            <span className={`${textTertiary} text-xs`}>{artistResults.length} 位 · 最多 6 位</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="grid gap-2" style={entityGridStyle}>
             {artistResults.map(artist => {
               const sourcePlatform: MusicPlatform = artist.platform || 'netease'
               return (
@@ -914,17 +1015,17 @@ export default function SearchPanel({
                   key={`fused-artist-${artist.platform}-${entityId(artist)}`}
                   whileHover={{ y: -1 }}
                   onClick={() => setSelectedArtist(artist)}
-                  className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2 transition-colors ${hoverBg} min-w-0`}
+                  className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2.5 transition-colors ${hoverBg} min-w-0`}
                 >
                   <div className="w-10 h-10 rounded-full overflow-hidden bg-white/5 flex-shrink-0">
                     {artist.picUrl ? (
-                      <CachedImage src={getProxiedImageUrl(artist.picUrl)} alt={artist.name} className="w-full h-full object-cover" />
+                      <CachedImage src={getProxiedImageUrl(artist.picUrl)} alt={artist.name} className="w-full h-full object-cover" role="compact" size={128} priority="visible" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center"><User className={`w-5 h-5 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} /></div>
                     )}
                   </div>
-                  <div className={`${textPrimary} text-sm font-medium truncate flex-1 min-w-0`}>{artist.name}</div>
-                  <span className={`text-[11px] flex-shrink-0 ${sourcePlatform === 'qq' ? 'text-green-300/80' : 'text-red-300/80'}`}>
+                  <div className={`${textPrimary} text-[13px] font-medium truncate flex-1 min-w-0`}>{songText(artist.name, '未知艺人')}</div>
+                  <span className={`text-[11px] leading-4 flex-shrink-0 ${sourcePlatform === 'qq' ? 'text-green-300/80' : 'text-red-300/80'}`}>
                     {platformLabel(sourcePlatform)}
                   </span>
                 </motion.button>
@@ -936,32 +1037,32 @@ export default function SearchPanel({
 
       {albumResults.length > 0 && (
         <section>
-          <div className="flex items-center gap-2 mb-2">
-            <Disc className={`w-4 h-4 ${textSecondary}`} />
-            <h3 className={`${textPrimary} font-semibold`}>相关专辑</h3>
-            <span className={`${textTertiary} text-xs`}>智能命中 {albumResults.length} 张 · 最多 6 张</span>
+          <div className="flex items-center gap-2 mb-1.5 px-1">
+            <Disc className={`w-3.5 h-3.5 ${textTertiary}`} />
+            <span className={`${textPrimary} text-[13px] font-medium`}>相关专辑</span>
+            <span className={`${textTertiary} text-xs`}>{albumResults.length} 张 · 最多 6 张</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="grid gap-2" style={entityGridStyle}>
             {albumResults.map(album => (
               <motion.button
                 type="button"
                 key={`fused-album-${album.platform}-${entityId(album)}`}
                 whileHover={{ y: -1 }}
                 onClick={() => setSelectedAlbum(album)}
-                className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2 transition-colors ${hoverBg} min-w-0`}
+                className={`${bgCard} border ${borderColor} rounded-lg p-2 text-left flex items-center gap-2.5 transition-colors ${hoverBg} min-w-0`}
               >
                 <div className="w-10 h-10 rounded-md overflow-hidden bg-white/5 flex-shrink-0">
                   {album.picUrl ? (
-                    <CachedImage src={getProxiedImageUrl(album.picUrl)} alt={album.name} className="w-full h-full object-cover" />
+                    <CachedImage src={getProxiedImageUrl(album.picUrl)} alt={album.name} className="w-full h-full object-cover" role="compact" size={128} priority="visible" />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center"><Disc className={`w-5 h-5 ${playerTheme === 'dark' ? 'text-white/20' : 'text-black/20'}`} /></div>
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className={`${textPrimary} text-sm font-medium truncate`}>{album.name}</div>
-                  <div className={`${textSecondary} text-xs truncate`}>{album.artist?.name || '未知艺人'}</div>
+                  <div className={`${textPrimary} text-[13px] font-medium truncate`}>{songText(album.name, '未知专辑')}</div>
+                  <div className={`${textTertiary} text-[11px] leading-4 truncate`}>{songText(album.artist?.name, '') || '未知艺人'}</div>
                 </div>
-                <span className={`${textTertiary} text-[11px] flex-shrink-0 max-w-20 text-right leading-4`}>
+                <span className={`${textTertiary} text-[10px] leading-4 flex-shrink-0 max-w-16 text-right`}>
                   {platformText(album.sourcePlatforms || [album.platform || 'netease'])}
                 </span>
               </motion.button>
@@ -979,14 +1080,14 @@ export default function SearchPanel({
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={instantClose ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0 }}
-      className="fixed inset-0 z-[60] flex items-center justify-center p-8"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-6"
       style={{
         backdropFilter: 'blur(2px)',
         WebkitBackdropFilter: 'blur(2px)',
         backgroundColor: playerTheme === 'dark' ? 'rgba(0, 0, 0, 0.28)' : 'rgba(255, 255, 255, 0.35)',
       }}
       onClick={(e) => {
-        console.log('🖱️ SearchPanel 背景被点击，准备关闭')
+        debugLog('🖱️ SearchPanel 背景被点击，准备关闭')
         onClose()
       }}
     >
@@ -995,13 +1096,13 @@ export default function SearchPanel({
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.9, opacity: 0 }}
         onClick={(e) => {
-          console.log('🖱️ SearchPanel 内容区域被点击，阻止冒泡')
+          debugLog('🖱️ SearchPanel 内容区域被点击，阻止冒泡')
           e.stopPropagation()
         }}
-        className="rounded-3xl shadow-2xl w-full max-w-5xl max-h-[85vh] flex flex-col overflow-hidden relative"
+        className="rounded-2xl shadow-2xl w-full max-w-[min(1800px,94vw)] h-[86vh] max-h-[calc(100vh-3rem)] flex flex-col overflow-hidden relative"
       >
         {/* 液态玻璃背景层 */}
-        <div className="absolute inset-0 rounded-3xl overflow-hidden">
+        <div className="absolute inset-0 rounded-2xl overflow-hidden">
           {/* 主背景 */}
           <div
             className="absolute inset-0"
@@ -1027,7 +1128,7 @@ export default function SearchPanel({
 
           {/* 边框高光 */}
           <div
-            className="absolute inset-0 rounded-3xl"
+            className="absolute inset-0 rounded-2xl"
             style={{
               border: playerTheme === 'dark' ? '1px solid rgba(255,255,255,0.15)' : '1px solid rgba(0,0,0,0.1)',
               boxShadow: playerTheme === 'dark' ? 'inset 0 1px 1px rgba(255,255,255,0.1)' : 'inset 0 1px 1px rgba(255,255,255,0.8)',
@@ -1036,193 +1137,95 @@ export default function SearchPanel({
           />
         </div>
 
-        {/* Content area：flex-1 + min-h-0 —— 弹窗是 max-h（高度不定），h-full 会解析成内容自然高度
-            导致超出被裁且无滚动条；弹性填充才能让下方结果区的 overflow-y-auto 正确滚动 */}
+        {/* Content area：弹窗高度固定，内容区弹性填充 + min-h-0，
+            保证下方结果区的 overflow-y-auto 能正确滚动 */}
         <div className="relative z-10 flex flex-col flex-1 min-h-0">
         {/* 头部 */}
-        <div className={`p-6 border-b ${borderColor} flex-shrink-0`}>
-          <div className="flex items-center justify-between mb-4">
-            <h2 className={`text-2xl font-bold ${textPrimary}`}>搜索音乐</h2>
+        <div className={`px-5 sm:px-6 pt-4 pb-3 border-b ${borderColor} flex-shrink-0`}>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className={`text-lg font-semibold ${textPrimary}`}>搜索音乐</h2>
             <button
               onClick={onClose}
-              className={`p-2 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
+              className={`p-1.5 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
             >
-              <X className={`w-6 h-6 ${textPrimary}/60`} />
+              <X className={`w-5 h-5 ${textPrimary}/60`} />
             </button>
           </div>
 
-          {/* 平台切换 */}
-          <div className="flex flex-wrap items-start gap-2 mb-4">
+          {/* 平台切换 + 类型筛选：同一行内 flex-wrap，窄窗口自动换行 */}
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               onClick={() => setPlatform('fused')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg flex items-center gap-2 ${
-                platform === 'fused'
-                  ? 'bg-gradient-to-r from-violet-600/95 to-blue-600/95 text-white shadow-violet-500/20'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
+              className={platformChipClass(platform === 'fused', 'bg-gradient-to-r from-violet-600 to-blue-600')}
+              title="融合搜索：自动识别艺人、专辑与歌曲"
             >
-              <Sparkles className="w-4 h-4" />
+              <Sparkles className="w-3.5 h-3.5" />
               融合搜索
             </button>
             {isPlatformVisible('netease') && (
-            <button
-              onClick={() => setPlatform('netease')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'netease'
-                  ? 'bg-red-600/90 text-white hover:bg-red-600'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              网易云音乐
-            </button>
+              <button onClick={() => setPlatform('netease')} className={platformChipClass(platform === 'netease', 'bg-red-600')}>
+                网易云音乐
+              </button>
             )}
             {isPlatformVisible('qq') && (
-            <button
-              onClick={() => setPlatform('qq')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'qq'
-                  ? 'bg-green-600/90 text-white hover:bg-green-600'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              QQ音乐
-            </button>
+              <button onClick={() => setPlatform('qq')} className={platformChipClass(platform === 'qq', 'bg-green-600')}>
+                QQ音乐
+              </button>
             )}
             {isPlatformVisible('apple') && (
-            <button
-              onClick={() => setPlatform('apple')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'apple'
-                  ? 'bg-pink-600/90 text-white hover:bg-pink-600'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              Apple Music
-            </button>
+              <button onClick={() => setPlatform('apple')} className={platformChipClass(platform === 'apple', 'bg-pink-600')}>
+                Apple Music
+              </button>
             )}
             {isPlatformVisible('spotify') && (
-            <button
-              onClick={() => setPlatform('spotify')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'spotify'
-                  ? 'bg-emerald-500/90 text-white hover:bg-emerald-500'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              Spotify
-            </button>
+              <button onClick={() => setPlatform('spotify')} className={platformChipClass(platform === 'spotify', 'bg-emerald-500')}>
+                Spotify
+              </button>
             )}
             {isPlatformVisible('kugou') && (
-            <button
-              onClick={() => setPlatform('kugou')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'kugou'
-                  ? 'bg-orange-500/90 text-white hover:bg-orange-500'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              酷狗音乐
-            </button>
+              <button onClick={() => setPlatform('kugou')} className={platformChipClass(platform === 'kugou', 'bg-orange-500')}>
+                酷狗音乐
+              </button>
             )}
             {isPlatformVisible('soda') && (
-            <button
-              onClick={() => setPlatform('soda')}
-              className={`px-6 py-3 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg ${
-                platform === 'soda'
-                  ? 'bg-sky-500/90 text-white hover:bg-sky-500'
-                  : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-              }`}
-            >
-              汽水音乐
-            </button>
+              <button onClick={() => setPlatform('soda')} className={platformChipClass(platform === 'soda', 'bg-sky-500')}>
+                汽水音乐
+              </button>
             )}
-            <div className="flex-1 min-w-4" />
-            {isFused ? (
-              <div className={`px-4 py-2 rounded-2xl bg-violet-500/10 border border-violet-400/20 text-xs leading-5 ${playerTheme === 'dark' ? 'text-violet-200/80' : 'text-violet-700/80'}`}>
-                自动识别艺人、专辑与歌曲<br />
-                QQ：{entitlementLabel('qq')} · 网易云：{entitlementLabel('netease')}
-              </div>
-            ) : <div className="flex flex-col gap-2">
-              {/* 搜艺人和搜专辑按钮 */}
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleSearchByType('artist')}
-                  disabled={loading}
-                  className={`px-4 py-2 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg disabled:opacity-50 ${
-                    searchType === 'artist'
-                      ? 'bg-purple-600/90 text-white hover:bg-purple-600'
-                      : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-                  }`}
-                >
-                  <User className="w-4 h-4 inline-block mr-1" />
+
+            {!isFused && (
+              <>
+                <div className={`w-px h-4 mx-1 ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`} />
+                <button onClick={() => handleSearchByType('artist')} disabled={loading} className={typeChipClass(searchType === 'artist', 'bg-purple-600')}>
+                  <User className="w-3.5 h-3.5" />
                   搜艺人
                 </button>
-                <button
-                  onClick={() => handleSearchByType('album')}
-                  disabled={loading}
-                  className={`px-4 py-2 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg disabled:opacity-50 ${
-                    searchType === 'album'
-                      ? 'bg-blue-600/90 text-white hover:bg-blue-600'
-                      : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-                  }`}
-                >
-                  <Disc className="w-4 h-4 inline-block mr-1" />
+                <button onClick={() => handleSearchByType('album')} disabled={loading} className={typeChipClass(searchType === 'album', 'bg-blue-600')}>
+                  <Disc className="w-3.5 h-3.5" />
                   搜专辑
                 </button>
-                <button
-                  onClick={() => handleSearchByType('song')}
-                  disabled={loading}
-                  className={`px-4 py-2 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg disabled:opacity-50 ${
-                    searchType === 'song'
-                      ? 'bg-green-600/90 text-white hover:bg-green-600'
-                      : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-                  }`}
-                >
-                  <Music className="w-4 h-4 inline-block mr-1" />
+                <button onClick={() => handleSearchByType('song')} disabled={loading} className={typeChipClass(searchType === 'song', 'bg-green-600')}>
+                  <Music className="w-3.5 h-3.5" />
                   搜歌曲
                 </button>
-                <button
-                  onClick={() => handleSearchByType('playlist')}
-                  disabled={loading}
-                  className={`px-4 py-2 rounded-2xl text-sm font-medium transition-all backdrop-blur-xl shadow-lg disabled:opacity-50 ${
-                    searchType === 'playlist'
-                      ? 'bg-amber-600/90 text-white hover:bg-amber-600'
-                      : playerTheme === 'dark'
-                    ? 'bg-white/10 text-white/60 hover:bg-white/20 hover:text-white'
-                    : 'bg-black/10 text-black/60 hover:bg-black/15 hover:text-black'
-                  }`}
-                >
-                  <ListMusic className="w-4 h-4 inline-block mr-1" />
+                <button onClick={() => handleSearchByType('playlist')} disabled={loading} className={typeChipClass(searchType === 'playlist', 'bg-amber-600')}>
+                  <ListMusic className="w-3.5 h-3.5" />
                   搜歌单
                 </button>
-              </div>
-            </div>}
+              </>
+            )}
+
+            {isFused && (
+              <span className={`ml-auto text-[11px] leading-4 ${playerTheme === 'dark' ? 'text-violet-200/60' : 'text-violet-700/60'}`}>
+                自动识别艺人、专辑与歌曲 · QQ：{entitlementLabel('qq')} · 网易云：{entitlementLabel('netease')}
+              </span>
+            )}
           </div>
 
           {/* 搜索框 */}
-          <div className="flex gap-3 relative flex-shrink-0">
+          <div className="flex gap-2 relative flex-shrink-0 mt-3">
             <div className="flex-1 relative">
-              <Search className={`absolute left-4 top-1/2 transform -translate-y-1/2 w-5 h-5 ${textPrimary}/40`} />
+              <Search className={`absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 ${textPrimary}/40`} />
               <input
                 type="text"
                 value={keyword}
@@ -1231,14 +1234,13 @@ export default function SearchPanel({
                   // 输入时重置searched状态，以便重新显示搜索建议
                   setSearched(false)
                 }}
-                onFocus={() => setIsInputFocused(true)}
-                onBlur={() => {
-                  // 延迟关闭，以便点击事件能够触发
-                  setTimeout(() => setIsInputFocused(false), 200)
-                }}
                 onKeyDown={handleKeyPress}
-                placeholder="搜索歌曲、艺术家..."
-                className={`w-full ${bgCard} border ${borderColor} rounded-xl pl-12 pr-12 py-3 ${textPrimary} ${playerTheme === 'dark' ? 'placeholder-white/40 focus:border-white/30' : 'placeholder-black/35 focus:border-black/30'} focus:outline-none transition-colors`}
+                placeholder={platform === 'fused' ? '搜索歌曲、艺人、专辑…（融合全部平台）'
+                  : searchType === 'artist' ? `在${platformLabel(platform)}搜索艺人…`
+                    : searchType === 'album' ? `在${platformLabel(platform)}搜索专辑…`
+                      : searchType === 'playlist' ? `在${platformLabel(platform)}搜索歌单…`
+                        : `在${platformLabel(platform)}搜索歌曲…`}
+                className={`w-full ${bgCard} border ${borderColor} rounded-lg pl-9 pr-9 py-2 text-sm ${textPrimary} ${playerTheme === 'dark' ? 'placeholder-white/40 focus:border-white/30' : 'placeholder-black/35 focus:border-black/30'} focus:outline-none transition-colors`}
                 autoFocus
               />
               {/* 清空按钮 */}
@@ -1254,88 +1256,10 @@ export default function SearchPanel({
                   setPlaylistResults([])
                   setSearchError('')
                   }}
-                  className={`absolute right-4 top-1/2 transform -translate-y-1/2 p-1 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
+                  className={`absolute right-3 top-1/2 transform -translate-y-1/2 p-1 rounded-full transition-colors ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}
                 >
-                  <X className={`w-4 h-4 ${textPrimary}/40 hover:${textPrimary}/60`} />
+                  <X className={`w-3.5 h-3.5 ${textPrimary}/40 hover:${textPrimary}/60`} />
                 </button>
-              )}
-              
-              {/* 搜索热词 + 搜索历史（合并显示） */}
-              {isInputFocused && !searched && keyword.trim() === '' && (hotSearch.length > 0 || searchHistory.length > 0) && (
-                <motion.div
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="absolute top-full left-0 right-0 mt-2 rounded-xl overflow-hidden z-10 shadow-2xl"
-                  style={{
-                    background: playerTheme === 'dark'
-                      ? 'linear-gradient(135deg, rgba(20,20,30,0.92) 0%, rgba(0,0,0,0.95) 100%)'
-                      : 'linear-gradient(135deg, rgba(250,250,248,0.94) 0%, rgba(244,244,242,0.96) 100%)',
-                    backdropFilter: 'blur(20px) saturate(150%)',
-                    WebkitBackdropFilter: 'blur(20px) saturate(150%)',
-                    border: playerTheme === 'dark' ? '1px solid rgba(255,255,255,0.1)' : '1px solid rgba(0,0,0,0.08)',
-                  }}
-                >
-                  <div className={`flex ${platform === 'fused' ? '' : ''}`}>
-                    {/* 搜索热词列 */}
-                    {hotSearch.length > 0 && (
-                      <div className={`${platform === 'fused' ? 'w-1/2' : 'w-1/2'} border-r ${playerTheme === 'dark' ? 'border-white/5' : 'border-black/5'}`}>
-                        <div className={`flex items-center gap-2 px-4 py-2 border-b ${playerTheme === 'dark' ? 'border-white/5' : 'border-black/5'}`}>
-                          <TrendingUp className={`w-4 h-4 ${textPrimary}/60`} />
-                          <span className={`${textPrimary}/60 text-sm`}>
-                            {platform === 'fused' ? '热门搜索' : '搜索热词'}
-                          </span>
-                        </div>
-                        <div className="flex flex-wrap gap-2 px-4 py-3">
-                          {hotSearch.map((item: any, i: number) => {
-                            const word = item.first || item.k || item.word || item.keyword || item.hotWord || item.query || item.sKey || ''
-                            return word ? (
-                              <button
-                                key={i}
-                                onClick={() => {
-                                  setKeyword(word)
-                                  handleSearch(word)
-                                }}
-                                className={`px-3 py-1.5 rounded-full text-sm transition-colors ${
-                                  i < 3 ? 'font-semibold' : ''
-                                } ${playerTheme === 'dark' ? 'bg-white/10 hover:bg-white/20 text-white/80' : 'bg-black/8 hover:bg-black/15 text-black/80'}`}
-                                style={i < 3 ? { backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.12)', fontWeight: 600 } : {}}
-                              >
-                                {word}
-                              </button>
-                            ) : null
-                          })}
-                        </div>
-                      </div>
-                    )}
-                    {/* 搜索历史列 */}
-                    {searchHistory.length > 0 && (
-                      <div className={`${hotSearch.length > 0 ? 'w-1/2' : 'w-full'}`}>
-                        <div className={`flex items-center justify-between px-4 py-2 border-b ${playerTheme === 'dark' ? 'border-white/5' : 'border-black/5'}`}>
-                          <div className={`flex items-center gap-2 ${textPrimary}/60 text-sm`}>
-                            <Clock className="w-4 h-4" />
-                            <span>搜索历史</span>
-                          </div>
-                          <button onClick={clearSearchHistory} className={`${textPrimary}/40 hover:${textPrimary}/60 text-xs transition-colors`}>
-                            清空
-                          </button>
-                        </div>
-                        {searchHistory.map((item, index) => (
-                          <div
-                            key={index}
-                            onClick={() => {
-                              setKeyword(item)
-                              handleSearch(item)
-                            }}
-                            className={`flex items-center px-4 py-3 cursor-pointer transition-colors border-b ${playerTheme === 'dark' ? 'border-white/5' : 'border-black/5'} last:border-b-0 hover:${bgCard} ${textPrimary}/80 hover:${textPrimary}`}
-                          >
-                            <History className={`w-4 h-4 mr-2 flex-shrink-0 ${textPrimary}/40`} />
-                            <span>{item}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </motion.div>
               )}
               
               {/* 搜索建议下拉框 */}
@@ -1346,7 +1270,7 @@ export default function SearchPanel({
                   onMouseDown={(e) => e.preventDefault()} // 防止输入框失焦
                   className="absolute top-full left-0 right-0 mt-2 rounded-xl z-10 shadow-2xl scrollbar-thin"
                   style={{
-                    maxHeight: '288px', // 6个建议 * 48px高度 = 288px
+                    maxHeight: '312px', // 约 6 条建议（每条约 52px）即出现内滚动
                     overflowY: 'auto',
                     scrollbarWidth: 'thin',
                     scrollbarColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.2) transparent' : 'rgba(0,0,0,0.25) transparent',
@@ -1365,10 +1289,12 @@ export default function SearchPanel({
                         e.preventDefault() // 防止输入框失焦
                         handleSuggestionClick(suggestion)
                       }}
-                      className={`flex items-center gap-2 px-4 py-3 cursor-pointer transition-colors border-b border-white/5 last:border-b-0 ${
+                      className={`flex items-center gap-2.5 px-3 py-2 cursor-pointer transition-colors border-b last:border-b-0 ${
+                        playerTheme === 'dark' ? 'border-white/5' : 'border-black/5'
+                      } ${
                         index === selectedIndex
-                          ? `bg-white/10 ${textPrimary}`
-                          : `hover:bg-white/5 ${textPrimary}/80`
+                          ? `${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/8'} ${textPrimary}`
+                          : `${playerTheme === 'dark' ? 'hover:bg-white/5' : 'hover:bg-black/5'} ${textPrimary}/80`
                       }`}
                     >
                       {/* 官网联想：建议词显示放大镜，topResults（歌曲/专辑等）显示封面并带「类型 · 艺人」副标题 */}
@@ -1376,17 +1302,17 @@ export default function SearchPanel({
                         <CachedImage
                           src={suggestion.artworkUrl}
                           alt=""
-                          className="h-8 w-8 shrink-0 rounded"
+                          className="h-7 w-7 shrink-0 rounded"
                           platform={platform === 'apple' ? 'apple' : undefined}
                           role="compact"
                         />
                       ) : (
-                        <Search className={`w-4 h-4 ml-2 mr-1 flex-shrink-0 ${textPrimary}/40`} />
+                        <Search className={`w-3.5 h-3.5 ml-1.5 mr-0.5 flex-shrink-0 ${textPrimary}/40`} />
                       )}
                       <span className="min-w-0 flex-1">
-                        <span className={`block truncate ${textPrimary}`}>{suggestion.keyword}</span>
+                        <span className={`block truncate text-sm ${textPrimary}`}>{suggestion.keyword}</span>
                         {suggestion.subtitle && (
-                          <span className={`block truncate text-xs ${textPrimary}/45`}>{suggestion.subtitle}</span>
+                          <span className={`block truncate text-xs ${textTertiary}`}>{suggestion.subtitle}</span>
                         )}
                       </span>
                     </div>
@@ -1399,17 +1325,22 @@ export default function SearchPanel({
             <button
               onClick={() => handleSearch()}
               disabled={loading}
-              className="px-6 py-3 bg-white text-black rounded-xl font-medium hover:bg-white/90 transition-colors disabled:opacity-50"
+              className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 flex-shrink-0 ${
+                playerTheme === 'dark'
+                  ? 'bg-white text-black hover:bg-white/90'
+                  : 'bg-black text-white hover:bg-black/85'
+              }`}
             >
               {loading ? '搜索中..' : '搜索'}
             </button>
           </div>
         </div>
 
-        {/* 搜索结果：flex-1 + min-h-0 允许收缩到弹窗剩余高度，自身滚动（避免 h-full 解析成内容高度导致无滚动条） */}
+        {/* 搜索结果：始终 flex-1 + min-h-0，独占滚动区 */}
         <div
           ref={scrollContainerRef}
-          className="flex-1 px-6 pb-6 pt-2 min-h-0 overflow-y-auto"
+          onScroll={handleScroll}
+          className="flex-1 min-h-0 overflow-y-auto px-5 sm:px-6 pb-5 pt-3"
           style={{
             scrollbarWidth: 'thin',
             scrollbarColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.3) transparent' : 'rgba(0,0,0,0.3) transparent'
@@ -1427,18 +1358,18 @@ export default function SearchPanel({
             </div>
           )}
           {loading ? (
-            <div className="flex flex-col items-center justify-center py-20">
+            <div className="flex flex-col items-center justify-center py-16">
               {/* 加载动画 */}
               <motion.div
-                className="relative w-16 h-16 mb-4"
+                className="relative w-12 h-12 mb-3"
                 animate={{ rotate: 360 }}
                 transition={{ duration: 2, repeat: Infinity, ease: 'linear' }}
               >
-                <div className="absolute inset-0 border-4 border-white/10 rounded-full" />
-                <div className="absolute inset-0 border-4 border-transparent border-t-white/60 rounded-full" />
+                <div className="absolute inset-0 border-[3px] border-white/10 rounded-full" />
+                <div className="absolute inset-0 border-[3px] border-transparent border-t-white/60 rounded-full" />
               </motion.div>
               <motion.div 
-                className={`${textPrimary}/60`}
+                className={`${textPrimary}/60 text-sm`}
                 animate={{ opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 1.5, repeat: Infinity }}
               >
@@ -1446,21 +1377,24 @@ export default function SearchPanel({
               </motion.div>
             </div>
           ) : !isFused && searchType === 'artist' && artistResults.length > 0 ? (
-            // 艺人搜索结果
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-              {artistResults.map((artist, index) => (
+            // 艺人搜索结果：窄卡 + 更高列数，一屏铺满更多命中
+            <div className="grid gap-3" style={cardGridStyle}>
+            {artistResults.map((artist, index) => {
+                return (
                 <motion.div
                   key={`artist-${index}`}
-                  whileHover={{ scale: 1.02 }}
                   onClick={() => setSelectedArtist(artist)}
-                  className={`${bgCard} rounded-xl p-4 cursor-pointer transition-all hover:shadow-lg border ${borderColor}`}
+                  className={`group ${bgCard} rounded-xl p-3 cursor-pointer transition-all duration-200 border ${borderColor} ring-0 hover:ring-1 ${hoverRing} ${hoverBg} ${hoverLift}`}
                 >
-                  <div className="aspect-square rounded-lg overflow-hidden mb-3">
+                  <div className={`relative aspect-square rounded-lg overflow-hidden mb-2 ${playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'}`}>
                     {artist.picUrl ? (
                       <CachedImage 
                         src={getProxiedImageUrl(artist.picUrl)} 
                         alt={artist.name}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.06]"
+                        role="compact"
+                        size={256}
+                        priority="visible"
                         fallback={
                           <div className="w-full h-full flex items-center justify-center bg-white/5">
                             <User className={`w-12 h-12 ${textPrimary}/20`} />
@@ -1472,26 +1406,32 @@ export default function SearchPanel({
                         <User className={`w-12 h-12 ${textPrimary}/20`} />
                       </div>
                     )}
+                    {/* 悬停浮层：右下角打开指示，与歌单/专辑卡片统一的交互语言 */}
+                    <div className="pointer-events-none absolute inset-0 flex items-end justify-end bg-gradient-to-t from-black/45 via-transparent to-transparent p-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/90 text-black shadow-lg">
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
                   </div>
-                  <h3 className={`${textPrimary} font-medium truncate`}>{artist.name}</h3>
-                  <div className={`${textSecondary} text-sm mt-1 space-x-3`}>
+                  <h3 className={`${textPrimary} text-[15px] font-medium truncate`}>{songText(artist.name, '未知艺人')}</h3>
+                  <div className={`${textTertiary} text-[13px] mt-0.5 space-x-2 truncate`}>
                     {artist.musicSize !== undefined && (
-                      <span>单曲: {artist.musicSize}</span>
+                      <span>{artist.musicSize} 首</span>
                     )}
                     {artist.albumSize !== undefined && (
-                      <span>专辑: {artist.albumSize}</span>
+                      <span>{artist.albumSize} 专辑</span>
                     )}
                   </div>
                 </motion.div>
-              ))}
-            </div>
+                )
+              })}
+          </div>
           ) : !isFused && searchType === 'playlist' && playlistResults.length > 0 ? (
-            // 歌单搜索结果
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            // 歌单搜索结果：与艺人/歌曲一致的自适应高密度网格
+            <div className="grid gap-3" style={cardGridStyle}>
               {playlistResults.map((playlist, index) => (
-                <motion.div
+                <div
                   key={`playlist-${index}`}
-                  whileHover={{ scale: 1.02 }}
                   onClick={() => {
                     if (playlist.id) {
                       if (onOpenPlaylist) {
@@ -1504,41 +1444,52 @@ export default function SearchPanel({
                       }
                     }
                   }}
-                  className={`${bgCard} rounded-xl p-4 cursor-pointer transition-all hover:shadow-lg border ${borderColor}`}
+                  className={`group ${bgCard} rounded-xl p-3 cursor-pointer transition-all duration-200 border ${borderColor} ring-0 hover:ring-1 ${hoverRing} ${hoverBg} ${hoverLift}`}
                 >
-                  <div className="aspect-square rounded-lg overflow-hidden mb-3">
+                  <div className={`relative aspect-square rounded-lg overflow-hidden mb-2 ${playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'}`}>
                     {playlist.coverImgUrl ? (
                       <CachedImage
                         src={getProxiedImageUrl(playlist.coverImgUrl)}
                         alt={playlist.name}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.06]"
+                        role="compact"
+                        size={256}
+                        priority="visible"
                         fallback={<div className="w-full h-full flex items-center justify-center bg-white/5"><ListMusic className={`w-12 h-12 ${textPrimary}/20`} /></div>}
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center bg-white/5"><ListMusic className={`w-12 h-12 ${textPrimary}/20`} /></div>
                     )}
+                    {/* 悬停浮层：右下角打开指示，点明「整卡可点」 */}
+                    <div className="pointer-events-none absolute inset-0 flex items-end justify-end bg-gradient-to-t from-black/45 via-transparent to-transparent p-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/90 text-black shadow-lg">
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
                   </div>
-                  <h3 className={`${textPrimary} font-medium truncate`}>{playlist.name}</h3>
-                  <p className={`${textSecondary} text-sm mt-1 truncate`}>{playlist.creator || `${playlist.trackCount || 0} 首`}</p>
-                </motion.div>
+                  <h3 className={`${textPrimary} text-[15px] font-medium truncate`}>{songText(playlist.name, '未命名歌单')}</h3>
+                  <p className={`${textTertiary} text-[13px] mt-0.5 truncate`}>{songText(playlist.creator, '') || `${playlist.trackCount || 0} 首`}</p>
+                </div>
               ))}
             </div>
           ) : !isFused && searchType === 'album' && albumResults.length > 0 ? (
-            // 专辑搜索结果
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            // 专辑搜索结果：与艺人/歌单一致的自适应高密度网格
+            <div className="grid gap-3" style={cardGridStyle}>
               {albumResults.map((album, index) => (
-                <motion.div
+                <div
                   key={`album-${index}`}
-                  whileHover={{ scale: 1.02 }}
                   onClick={() => setSelectedAlbum(album)}
-                  className={`${bgCard} rounded-xl p-4 cursor-pointer transition-all hover:shadow-lg border ${borderColor}`}
+                  className={`group ${bgCard} rounded-xl p-3 cursor-pointer transition-all duration-200 border ${borderColor} ring-0 hover:ring-1 ${hoverRing} ${hoverBg} ${hoverLift}`}
                 >
-                  <div className="aspect-square rounded-lg overflow-hidden mb-3">
+                  <div className={`relative aspect-square rounded-lg overflow-hidden mb-2 ${playerTheme === 'dark' ? 'bg-white/5' : 'bg-black/5'}`}>
                     {album.picUrl ? (
                       <CachedImage 
                         src={getProxiedImageUrl(album.picUrl)} 
                         alt={album.name}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-[1.06]"
+                        role="compact"
+                        size={256}
+                        priority="visible"
                         fallback={
                           <div className="w-full h-full flex items-center justify-center bg-white/5">
                             <Disc className={`w-12 h-12 ${textPrimary}/20`} />
@@ -1550,39 +1501,48 @@ export default function SearchPanel({
                         <Disc className={`w-12 h-12 ${textPrimary}/20`} />
                       </div>
                     )}
+                    {/* 悬停浮层：右下角打开指示，统一下方卡片交互语言 */}
+                    <div className="pointer-events-none absolute inset-0 flex items-end justify-end bg-gradient-to-t from-black/45 via-transparent to-transparent p-1.5 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/90 text-black shadow-lg">
+                        <ArrowUpRight className="h-3.5 w-3.5" />
+                      </span>
+                    </div>
                   </div>
-                  <h3 className={`${textPrimary} font-medium truncate`}>{album.name}</h3>
-                  <p className={`${textSecondary} text-sm mt-1 truncate`}>{album.artist?.name || '未知艺人'}</p>
-                </motion.div>
+                  <h3 className={`${textPrimary} text-[15px] font-medium truncate`}>{songText(album.name, '未知专辑')}</h3>
+                  <p className={`${textTertiary} text-[13px] mt-0.5 truncate`}>{songText(album.artist?.name, '') || '未知艺人'}</p>
+                </div>
               ))}
             </div>
           ) : displayedResults.length > 0 ? (
-            <div className="space-y-4">
+            <div className="space-y-2">
               {isFused && (
                 <>
-                  <div className={`flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl ${bgCard} border ${borderColor}`}>
-                    <div className="flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-violet-300" />
-                      <span className={`${textPrimary} text-sm font-medium`}>已合并并去除跨平台重复内容</span>
-                    </div>
-                    <div className={`${textTertiary} text-xs`}>
+                  <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 rounded-lg ${bgCard} border ${borderColor}`}>
+                    <span className="flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-violet-300" />
+                      <span className={`${textPrimary} text-xs font-medium`}>融合搜索 · 已跨平台去重</span>
+                    </span>
+                    <span className={`${textTertiary} text-xs`}>
                       {qqVip ? 'QQ音乐 VIP 优先' : neteaseVip ? '网易云音乐 VIP 优先' : '匹配度与可播放性优先'}
-                    </div>
+                    </span>
+                    <span className="ml-auto flex items-center gap-2 text-[11px] leading-4">
+                      <span className="text-green-400/70">QQ {platformCounts.qq}</span>
+                      <span className="text-red-400/70">网易云 {platformCounts.netease}</span>
+                      <span className="text-pink-400/70">Apple {platformCounts.apple}</span>
+                      {platformCounts.other > 0 && <span className="text-emerald-400/70">其他 {platformCounts.other}</span>}
+                    </span>
                   </div>
                   {renderFusedEntitySections()}
-                  <div className="flex items-center gap-2">
-                    <Music className={`w-4 h-4 ${textSecondary}`} />
-                    <h3 className={`${textPrimary} font-semibold`}>歌曲</h3>
-                    <span className={`${textTertiary} text-xs`}>{allResults.length} 首融合结果</span>
-                    <span className="text-[11px] text-green-300/70">QQ {allResults.filter(song => song.platform === 'qq').length}</span>
-                    <span className="text-[11px] text-red-300/70">网易云 {allResults.filter(song => (song.platform || 'netease') === 'netease').length}</span>
-                    <span className="text-[11px] text-pink-300/70">Apple {allResults.filter(song => song.platform === 'apple').length}</span>
-                    <span className="text-[11px] text-emerald-300/70">其他 {allResults.filter(song => !['qq', 'netease', 'apple'].includes(song.platform || 'netease')).length}</span>
+                  <div className={`flex items-center gap-2 px-1 pt-1`}>
+                    <Music className={`w-3.5 h-3.5 ${textTertiary}`} />
+                    <span className={`${textPrimary} text-[13px] font-medium`}>歌曲</span>
+                    <span className={`${textTertiary} text-xs`}>{allResults.length} 首</span>
                   </div>
                 </>
               )}
-              {/* 歌曲列表 */}
-              <div className="space-y-2">
+              {/* 歌曲列表：宽屏最多两列。之前 2xl 强上三列，单行被压成细长条，
+                  封面与文字都显小；两列 + 更大的行高更符合「歌曲条目」的阅读节奏 */}
+              <div className="grid grid-cols-1 gap-x-3 gap-y-1 xl:grid-cols-2">
                 {displayedResults.map((song, index) => {
                   const isCurrentSong = isSameSong(song, currentSong)
                   return (
@@ -1590,7 +1550,6 @@ export default function SearchPanel({
                   key={`search-result-${song.platform}-${song.mid || song.id}-${index}`}
                   data-song-index={index}
                   data-song-id={song.id || song.mid}
-                  whileHover={{ scale: 1.01 }}
                   onContextMenu={(event) => openSongContextMenu(event, song)}
                   onClick={() => {
                     const songPlatform: MusicPlatform = song.platform || 'netease'
@@ -1598,31 +1557,43 @@ export default function SearchPanel({
                     onSongSelect(song, allResults, { surface: 'search', platform: songPlatform, searchMode: platform })
                     onClose()
                   }}
-                  className={`flex items-center gap-4 p-4 rounded-xl cursor-pointer transition-colors group ${
+                  className={`flex min-w-0 items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer transition-all duration-200 group border ${
                     isCurrentSong 
-                      ? 'bg-blue-500/20 border border-blue-500/50' 
-                      : `hover:${bgCard}`
+                      ? 'bg-blue-500/20 border-blue-500/50' 
+                      : `border-transparent ${hoverBg} hover:ring-1 ${hoverRing}`
                   }`}
                 >
+                  {/* 序号：非当前播放项在悬停时切换为播放图标，明确「点击即播放」 */}
+                  <div className="w-6 flex-shrink-0 flex items-center justify-center">
+                    {isCurrentSong ? (
+                      <span className="text-[13px] font-semibold tabular-nums text-blue-400">{index + 1}</span>
+                    ) : (
+                      <>
+                        <span className={`text-[13px] tabular-nums group-hover:hidden ${textTertiary}`}>{index + 1}</span>
+                        <Play className={`hidden h-4 w-4 group-hover:block ${textPrimary}`} />
+                      </>
+                    )}
+                  </div>
+
                   {/* 封面 */}
-                  <div className={`w-14 h-14 rounded-lg overflow-hidden ${bgCard} flex-shrink-0`}>
+                  <div className={`w-12 h-12 rounded-md overflow-hidden ${bgCard} flex-shrink-0`}>
                     {song.album?.picUrl ? (
                       <CachedImage 
                         src={getProxiedImageUrl(song.album.picUrl)} 
-                        alt={song.name} 
+                        alt={songText(song.name, '歌曲封面')} 
                         className="w-full h-full object-cover"
                         role="compact"
                         size={128}
                         priority="visible"
                         fallback={
                           <div className="w-full h-full flex items-center justify-center">
-                            <Music className={`w-6 h-6 ${textPrimary}/20`} />
+                            <Music className={`w-5 h-5 ${textPrimary}/20`} />
                           </div>
                         }
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
-                        <Music className={`w-6 h-6 ${textPrimary}/20`} />
+                        <Music className={`w-5 h-5 ${textPrimary}/20`} />
                       </div>
                     )}
                   </div>
@@ -1630,53 +1601,59 @@ export default function SearchPanel({
                   {/* 信息 */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
-                      <h3 className={`font-medium truncate ${
+                      <h3 className={`font-medium truncate text-[15px] ${
                         isCurrentSong 
                           ? 'text-blue-400' 
                           : `${textPrimary} group-hover:${textPrimary}/90`
                       }`}>
-                        {song.name}
+                        {songText(song.name, '未知歌曲')}
                       </h3>
                       {/* VIP标识 - 只有当歌曲需要VIP且用户不是VIP时才显示 */}
                       {song.vip && !isVipForPlatform(song.platform) && (
-                        <span className="flex-shrink-0 px-2 py-0.5 text-xs font-bold rounded border border-yellow-500 text-yellow-500">
+                        <span className="flex-shrink-0 px-1.5 py-px text-[10px] font-bold rounded border border-yellow-500 text-yellow-500 leading-4">
                           VIP
                         </span>
                       )}
                       {/* 无版权标识 */}
                       {song.noCopyright && (
-                        <span className={`flex-shrink-0 px-2 py-0.5 text-xs font-medium rounded bg-gray-600/80 ${textPrimary}/80`}>
+                        <span className={`flex-shrink-0 px-1.5 py-px text-[10px] font-medium rounded bg-gray-600/80 ${textPrimary}/80 leading-4`}>
                           无版权
                         </span>
                       )}
                       {isFused && renderSongSourceChoice(song)}
                     </div>
-                    <p className={`text-sm truncate ${
+                    <p className={`text-[13px] truncate ${
                       isCurrentSong 
                         ? 'text-blue-300' 
                         : `${textPrimary}/50`
                     }`}>
-                      {Array.isArray(song.artists) ? song.artists.map(a => a.name).join(', ') : '未知艺人'}
+                      {songArtists(song)}
+                      {songText(song.album?.name, '') && (
+                        <span className={`${textPrimary}/30`}> · {songText(song.album?.name, '')}</span>
+                      )}
                     </p>
                   </div>
 
                   {/* 时长 */}
-                  <div className={`${textPrimary}/40 text-sm`}>
+                  <div className={`${textPrimary}/40 text-[13px] tabular-nums flex-shrink-0`}>
                     {formatDuration(song.duration)}
                   </div>
                 </motion.div>
                 )})}
                 
-                {/* 加载更多按钮 */}
+                {/* 触底自动续载的兜底提示（滚动到底仍未触发时也可点击） */}
                 {displayedResults.length < allResults.length && (
-                  <div className="flex justify-center pt-4">
-                    <button
-                      onClick={handleLoadMore}
-                      disabled={loadingMore}
-                      className={`px-6 py-3 bg-white/10 ${textPrimary} rounded-xl font-medium hover:bg-white/15 transition-colors disabled:opacity-50`}
-                    >
-                      {loadingMore ? '加载中..' : `加载更多 (还有 ${allResults.length - displayedResults.length} 首)`}
-                    </button>
+                  <div className={`col-span-full flex items-center justify-center gap-2 py-3 ${textTertiary} text-xs`}>
+                    {loadingMore ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-current/30 border-t-current rounded-full animate-spin" />
+                        加载中…
+                      </>
+                    ) : (
+                      <button type="button" onClick={() => void handleLoadMore()} className="hover:underline">
+                        加载更多（还有 {allResults.length - displayedResults.length} 首）
+                      </button>
+                    )}
                   </div>
                 )}
               </div>
@@ -1690,33 +1667,117 @@ export default function SearchPanel({
               </div>
             </div>
           ) : searched ? (
-            <div className={`flex flex-col items-center justify-center py-12 ${textPrimary}/40`}>
+            <div className={`flex flex-col items-center justify-center py-14 ${textPrimary}/40`}>
               {isFused ? (
                 <>
-                  <Sparkles className="w-16 h-16 mb-4 opacity-20" />
-                  <p>两个平台都没有找到相关内容</p>
+                  <Sparkles className="w-12 h-12 mb-3 opacity-20" />
+                  <p className="text-sm">所有平台都没有找到「{keyword.trim()}」</p>
+                  <p className={`${textTertiary} text-xs mt-1`}>换个关键词，或试试单平台搜索</p>
                 </>
               ) : searchType === 'artist' ? (
                 <>
-                  <User className="w-16 h-16 mb-4 opacity-20" />
-                  <p>没有找到相关艺人</p>
+                  <User className="w-12 h-12 mb-3 opacity-20" />
+                  <p className="text-sm">没有找到相关艺人</p>
+                  <p className={`${textTertiary} text-xs mt-1`}>「{keyword.trim()}」无匹配结果</p>
                 </>
               ) : searchType === 'album' ? (
                 <>
-                  <Disc className="w-16 h-16 mb-4 opacity-20" />
-                  <p>没有找到相关专辑</p>
+                  <Disc className="w-12 h-12 mb-3 opacity-20" />
+                  <p className="text-sm">没有找到相关专辑</p>
+                  <p className={`${textTertiary} text-xs mt-1`}>「{keyword.trim()}」无匹配结果</p>
+                </>
+              ) : searchType === 'playlist' ? (
+                <>
+                  <ListMusic className="w-12 h-12 mb-3 opacity-20" />
+                  <p className="text-sm">没有找到相关歌单</p>
+                  <p className={`${textTertiary} text-xs mt-1`}>「{keyword.trim()}」无匹配结果</p>
                 </>
               ) : (
                 <>
-                  <Music className="w-16 h-16 mb-4 opacity-20" />
-                  <p>没有找到相关歌曲</p>
+                  <Music className="w-12 h-12 mb-3 opacity-20" />
+                  <p className="text-sm">没有找到相关歌曲</p>
+                  <p className={`${textTertiary} text-xs mt-1`}>「{keyword.trim()}」无匹配结果</p>
                 </>
               )}
             </div>
+          ) : keyword.trim() === '' && (hotSearch.length > 0 || searchHistory.length > 0) ? (
+            /* 未搜索且输入为空时的发现区：热词 + 历史以内嵌双栏铺满宽屏，
+               替代原先挂在输入框下方的窄浮层（宽屏下会被拉成细长条） */
+            <div className="grid gap-x-6 gap-y-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
+              {/* 热门搜索 */}
+              <section className="min-w-0">
+                <div className="mb-3 flex items-center gap-2">
+                  <TrendingUp className={`w-4 h-4 ${textSecondary}`} />
+                  <h3 className={`${textPrimary} text-sm font-medium`}>
+                    {platform === 'fused' ? '热门搜索' : '搜索热词'}
+                  </h3>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {hotSearch.map((item: any, i: number) => {
+                    const word = item.first || item.k || item.word || item.keyword || item.hotWord || item.query || item.sKey || ''
+                    if (!word) return null
+                    return (
+                      <button
+                        key={`hot-${i}`}
+                        onClick={() => {
+                          setKeyword(word)
+                          void handleSearch(word)
+                        }}
+                        className={`rounded-full px-3 py-1.5 text-sm transition-colors ${
+                          i < 3 ? 'font-semibold' : ''
+                        } ${playerTheme === 'dark'
+                          ? 'bg-white/8 hover:bg-white/16 text-white/80'
+                          : 'bg-black/6 hover:bg-black/12 text-black/75'}`}
+                      >
+                        {word}
+                      </button>
+                    )
+                  })}
+                </div>
+              </section>
+
+              {/* 搜索历史 */}
+              <section className="min-w-0">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Clock className={`w-4 h-4 ${textSecondary}`} />
+                    <h3 className={`${textPrimary} text-sm font-medium`}>搜索历史</h3>
+                  </div>
+                  {searchHistory.length > 0 && (
+                    <button
+                      onClick={clearSearchHistory}
+                      className={`${textTertiary} hover:${textPrimary} text-xs transition-colors`}
+                    >
+                      清空
+                    </button>
+                  )}
+                </div>
+                {searchHistory.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {searchHistory.map((item, index) => (
+                      <button
+                        key={`history-${index}`}
+                        onClick={() => {
+                          setKeyword(item)
+                          void handleSearch(item)
+                        }}
+                        className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm transition-colors ${textPrimary}/80 hover:${textPrimary} ${hoverBg}`}
+                      >
+                        <History className={`w-3.5 h-3.5 flex-shrink-0 ${textTertiary}`} />
+                        <span className="truncate">{item}</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className={`${textTertiary} text-xs`}>暂无搜索历史</p>
+                )}
+              </section>
+            </div>
           ) : (
-            <div className={`flex flex-col items-center justify-center py-12 ${textPrimary}/40`}>
-              <Search className="w-16 h-16 mb-4 opacity-20" />
-              <p>搜索你喜欢的音乐</p>
+            <div className={`flex flex-col items-center justify-center py-16 ${textPrimary}/40`}>
+              <Search className="w-12 h-12 mb-3 opacity-20" />
+              <p className="text-sm">搜索你喜欢的音乐</p>
+              <p className={`${textTertiary} text-xs mt-1`}>支持歌曲 / 艺人 / 专辑 / 歌单，回车即可搜索</p>
             </div>
           )}
           {/* 滚动辅助按钮 */}
