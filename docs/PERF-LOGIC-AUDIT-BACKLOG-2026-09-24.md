@@ -53,7 +53,7 @@
 | 状态 | 项 | 位置 | 症状 | 建议修法 | 验证 |
 |---|---|---|---|---|---|
 | TODO | 用户主页请求竞态 | `src/components/ProfileView.tsx:1819`（`fetchUserData`）、`:1120`（`handlePlaylistClick`） | 连开两个用户主页 / 连点两个歌单，**旧响应覆盖新数据**（显示"别人的资料 + 上一人的歌单"），loading 提前关闭 | 照抄同文件 `recentRequestRef`（`:584/:1363-1449`）的 revision 守卫：函数入口自增 seq，每个 `await` 之后的 setState 前比对 | 给 `/api/netease/user/detail` 加 3s 延迟，快速点用户 A→B |
-| TODO | 假登录真校验 | `src/App.tsx:6698`（netease）、`:6755`（QQ）；`local-server.mjs:8720` | cookie 失效也显示"已登录"，后续静默失败 | **需先定策略**：建议「启动时后台校验一次，仅当上游明确返回未登录才清态并提示；网络错误不动」——直接判未登录会让网络抖动时正常登录失败 | 用一条过期 cookie 启动，应提示"登录已过期" |
+| PARTIAL (ca4dfcb) | 假登录真校验 | `src/App.tsx:6698`（netease）、`:6755`（QQ）；`local-server.mjs:8720` | cookie 失效也显示"已登录"，后续静默失败 | **需先定策略**：建议「启动时后台校验一次，仅当上游明确返回未登录才清态并提示；网络错误不动」——直接判未登录会让网络抖动时正常登录失败 | 用一条过期 cookie 启动，应提示"登录已过期" |
 | TODO | 明文凭据 | `local-server.mjs:116-150`（`~/.waveforge/qq-cookie.txt`）、各平台 localStorage | 凭据明文落盘 | 安全策略决定：系统凭据库 / 至少文件权限收紧 | — |
 
 ### P1 — 越权与安全边界
@@ -62,22 +62,22 @@
 |---|---|---|---|---|
 | TODO | DG-LAB 中继无鉴权 | `server/dglab-relay.cjs:1425-1429` | `POST /api/dglab/control` 无鉴权、`GET /status` 返回 `controlToken` → **本机任意进程可接管设备** | `/control` 校验令牌；`/status` 不回令牌（令牌只经主进程 IPC 给渲染层） |
 | TODO | 灯光类 IPC 无来源校验 | `desktop/chroma-ipc.cjs:524-548`、`desktop/signalrgb-ipc.cjs:18-42` | 既无 `guardTrustedIpc` 也无 `event.sender` 判定（同仓其他 privileged 通道都有），`signalrgb:uninstall-effect` 还会删写文件 | 统一套 `guardTrustedIpc('privileged')` |
-| TODO | 一起听越权与健壮性 | `src/features/resonance/session.ts:1170`（chat 昵称回退）、`:380-396`（closed 分支）、`transport.ts:215-243`（`close()` 不清 pending） | 名册外 peer 仍可发言并冒名；成员断网不重连且定时器/`pending` 无界增长 | chat 在 `memberNicknameOf` 为空时丢弃；closed 分支 `stopTimers()` + `transport=null`；`close()` 清 `pending` |
+| PARTIAL (218d92b) | 一起听越权与健壮性 | `src/features/resonance/session.ts:1170`（chat 昵称回退）、`:380-396`（closed 分支）、`transport.ts:215-243`（`close()` 不清 pending） | 名册外 peer 仍可发言并冒名；成员断网不重连且定时器/`pending` 无界增长 | chat 在 `memberNicknameOf` 为空时丢弃；closed 分支 `stopTimers()` + `transport=null`；`close()` 清 `pending` |
 | TODO | 酷狗歌单界面入口 | `PlaybackRadialMenu`（`SongContextMenu.tsx:519` 已隐藏，径向菜单未隐藏） | 酷狗"取消喜欢"服务端只回执不落库 → **假成功** | `likeKugouSong(false)` 明确返回不支持，并隐藏入口 |
 
 ### P2 — 明显的功能错误（小改动）
 
 | 状态 | 项 | 位置 | 症状 | 建议修法 |
 |---|---|---|---|---|
-| TODO | QQ「喜欢的音乐」按名字误判 | `src/services/playlistService.ts:112` | 自建歌单名以「喜欢的音乐」结尾会被**改名、计入"我喜欢"计数、无法编辑** | 只认 `dirId==='201'` 或服务端 `specialType`，删掉 `endsWith` 猜测（netease 侧 `:321` 同理） |
-| TODO | Spotify 私密歌单被建成公开 | `src/services/playlistService.ts:1131` | 勾选「私密」无效 | 统一 privacy 取值域，Spotify 分支接受 `'10'/'private'` |
-| TODO | HomeView 归属误判 | `src/components/HomeView.tsx:3347` | 汽水/Spotify 用户**自己的歌单没有编辑/删除入口** | 改用文件内已有的 `getPlaylistOwnerUserId(platform)` + `isPlaylistOwner` |
+| DONE (0fdb139) | QQ「喜欢的音乐」按名字误判 | `src/services/playlistService.ts:112` | 自建歌单名以「喜欢的音乐」结尾会被**改名、计入"我喜欢"计数、无法编辑** | 只认 `dirId==='201'` 或服务端 `specialType`，删掉 `endsWith` 猜测（netease 侧 `:321` 同理） |
+| DONE (0fdb139) | Spotify 私密歌单被建成公开 | `src/services/playlistService.ts:1131` | 勾选「私密」无效 | 统一 privacy 取值域，Spotify 分支接受 `'10'/'private'` |
+| DONE (0fdb139) | HomeView 归属误判 | `src/components/HomeView.tsx:3347` | 汽水/Spotify 用户**自己的歌单没有编辑/删除入口** | 改用文件内已有的 `getPlaylistOwnerUserId(platform)` + `isPlaylistOwner` |
 | TODO | TraditionalView 归属兜底过宽 | `src/components/TraditionalView.tsx:1657` | 他人歌单出现编辑/删除入口 | 按 `item.platform` 传对应 userId，去掉无平台兜底放行 |
-| TODO | 删歌不校验业务码 | `src/services/playlistService.ts:1102`、`TraditionalView.tsx:924` | HTTP 200 + 业务失败也报「已从歌单移除」 | 补 `code/result` 校验（与 `addSongToPlaylist:1019` 一致） |
-| TODO | 渲染期裸 JSON.parse | `src/components/DesktopView.tsx:501`、`LyricsDisplay.tsx:664/1057` | 键被写坏 → **整树白屏**（根 ErrorBoundary 只能鼠标重载） | 改用现成的 `parseStoredBoolean`/`parseStoredArray`（同文件别处已在用） |
-| TODO | 缓存弹窗卡死 | `src/components/CacheClearModal.tsx:242-318` | `refreshStats()` 抛错则 `busyTarget` 永不复位 → 所有按钮禁用直到重启 | `setBusyTarget(null)` 放进 `finally` |
-| TODO | 日出日落 0 点 | `src/services/weatherTime.ts:53` | 只有日期的 `sunrise/sunset` 被当 00:00 → 昼夜/天空体错乱 | 格式不符返回 `null` 而非 `0` |
-| TODO | 详情两栏全空 | `src/components/SongDetailModal.tsx:103`、`ProfileView.tsx:720`、`TraditionalView.tsx:951` | `Promise.all` 任一失败即丢全部结果、无提示 | 改 `Promise.allSettled` 并给出错误态 |
+| DONE (0fdb139) | 删歌不校验业务码 | `src/services/playlistService.ts:1102`、`TraditionalView.tsx:924` | HTTP 200 + 业务失败也报「已从歌单移除」 | 补 `code/result` 校验（与 `addSongToPlaylist:1019` 一致） |
+| PARTIAL (5570354) | 渲染期裸 JSON.parse | `src/components/DesktopView.tsx:501`、`LyricsDisplay.tsx:664/1057` | 键被写坏 → **整树白屏**（根 ErrorBoundary 只能鼠标重载） | 改用现成的 `parseStoredBoolean`/`parseStoredArray`（同文件别处已在用） |
+| DONE (0fdb139) | 缓存弹窗卡死 | `src/components/CacheClearModal.tsx:242-318` | `refreshStats()` 抛错则 `busyTarget` 永不复位 → 所有按钮禁用直到重启 | `setBusyTarget(null)` 放进 `finally` |
+| DONE (5570354) | 日出日落 0 点 | `src/services/weatherTime.ts:53` | 只有日期的 `sunrise/sunset` 被当 00:00 → 昼夜/天空体错乱 | 格式不符返回 `null` 而非 `0` |
+| PARTIAL (0fdb139) | 详情两栏全空 | `src/components/SongDetailModal.tsx:103`、`ProfileView.tsx:720`、`TraditionalView.tsx:951` | `Promise.all` 任一失败即丢全部结果、无提示 | 改 `Promise.allSettled` 并给出错误态 |
 | TODO | 剩余返回链缺口 | `DesktopWidgetZone.tsx:232` 组件详情层 | TV BACK 退应用 | 补 `useTvBack`（注意先确认它的打开状态字段名） |
 | TODO | OK 键双触发 | `src/tv/tvCore.ts:570-586` + 6 处 `activateWithKeyboard`（AppleSearchBrowse/AppleExplorePanel/AppleMusicSearchPage/TraditionalView 等） | 焦点在 `data-tv-focus` div 上按 OK **动作执行两次** | `activate()` 里 `stopPropagation()`，或各处理器加 `if (event.defaultPrevented) return` |
 | TODO | 手机遥控 BACK 链路不通 | `src/App.tsx:5945-5954` | 遥控 BACK 不调 `dispatchTvBack()` → 模式选择/软键盘关不掉，反而关播放页 | `action==='back'` 先 `if (dispatchTvBack()) return` |
@@ -161,3 +161,9 @@
 - 每修完一条：把 §3 表格里的状态改成 `DONE (<commit>)`，**不要删除行**——它们是"已调研过"的证据。
 - 提交信息沿用本仓库风格（中文 conventional commits，正文写清症状/原因/取舍），便于 `git log` 代替文档。
 - 改完必须过 `npx tsc --noEmit` + `npx vite build` + `npm run test:desktop`；涉及共振/音效/缓存时再跑对应 vitest。
+
+## 8. 续作进度备注（2026-09-24 第二轮）
+
+- 已修：§3 中 8 条改为 `DONE`、4 条改为 `PARTIAL`（各自剩余部分写在表内「建议修法」里）。
+- **灯光类 IPC 加固有前置条件，别盲改**：`desktop/chroma-ipc.cjs:548` 与 `desktop/signalrgb-ipc.cjs:40` 都是在 `Object.entries(handlers)` 循环里统一注册的；要加 `guardTrustedIpc` 必须先把守卫（`desktop/trusted-ipc.cjs` 的 `createTrustedIpcGuard` 产物，目前在 main.cjs 内构造）通过 options 传进这两个模块，**并且先确认哪些窗口会合法发送这些通道**（桌面播放器窗/歌词窗可能也要发 Chroma 帧）——一加守卫就会把插件功能直接打断。
+- 同样属于「不能机械改」的还有两条：`ProfileView` 竞态（要在 3600 行文件里给每个 `await` 后的 setState 加 revision 守卫，半套比没有更危险）、假登录真校验（需先定「校验接口不可达时怎么办」的策略）。
