@@ -3,8 +3,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Trash2, FolderOpen, ListMusic, AlertCircle, HardDrive, Clock, Check, Image as ImageIcon } from 'lucide-react'
 import { cacheManager } from '../services/cacheManager'
 import { indexedDBCache } from '../services/indexedDBCache'
-import { clearArtworkMemoryCache } from '../services/artworkLoader'
+import { clearArtworkMemoryCache, clearBackendImageCache } from '../services/artworkLoader'
 import { clearUserPlaylistsMemoryCache } from '../services/playlistService'
+import { clearCoverPaletteCache } from '../utils/coverPalette'
+import { clearAllMvMatchCache } from '../services/bilibiliApi'
+import { clearDesktopMusicActivity } from '../services/desktopMusicActivity'
 import GlobalToast from './GlobalToast'
 import { useTvBack } from '../tv/tvCore'
 import { isDesktop } from '../platform'
@@ -189,6 +192,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     cacheManager.clearCovers()
     clearArtworkMemoryCache()
     await indexedDBCache.clearCovers()
+    await clearBackendImageCache()
   }, '封面缓存清理成功')
 
   const handleClearPlaylists = async () => runTarget('歌单列表', async () => {
@@ -256,6 +260,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       cacheManager.clearAll()
       clearArtworkMemoryCache()
       clearUserPlaylistsMemoryCache()
+      clearCoverPaletteCache()
       window.dispatchEvent(new Event('waveforge:lyrics-cache-cleared'))
       const clearTarget = async (target: string, action: () => Promise<unknown>) => {
         try {
@@ -265,8 +270,19 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
           console.error(`缓存清理失败 [${target}]:`, error)
         }
       }
+      // 先前未接入「清理所有缓存」的几类本地缓存：MV 匹配覆盖/黑名单、桌面收听统计
+      await clearTarget('MV 匹配', () => { clearAllMvMatchCache(); return Promise.resolve() })
+      await clearTarget('收听统计', () => { clearDesktopMusicActivity(); return Promise.resolve() })
       await clearTarget('IndexedDB', () => indexedDBCache.clearAll())
+      await clearTarget('后端图片代理', () => clearBackendImageCache())
       await clearTarget('歌曲信息', () => cacheManager.clearMetadata())
+      // GPU 着色/合成缓存（ShaderCache + GPUCache）：新后端从干净状态重建
+      if (window.electron?.system?.clearGpuCache) {
+        await clearTarget('GPU 着色', async () => {
+          const result = await window.electron!.system!.clearGpuCache()
+          if (!result.success) throw new Error('GPU 着色缓存清理失败')
+        })
+      }
       if (window.electron?.audioDownload) {
         await clearTarget('音频', async () => {
           const result = await window.electron!.audioDownload!.clearCache()
@@ -301,14 +317,6 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     }
   }
   
-  const handleChangeCacheDir = () => {
-    const newDir = prompt('请输入缓存目录路径：', cacheDir)
-    if (newDir && newDir.trim()) {
-      cacheManager.setCacheDirectory(newDir.trim())
-      setCacheDir(newDir.trim())
-      alert('缓存目录已更新！')
-    }
-  }
   
   const handleAutoClearSettingsChange = (newSettings: typeof autoClearSettings) => {
     setAutoClearSettings(newSettings)

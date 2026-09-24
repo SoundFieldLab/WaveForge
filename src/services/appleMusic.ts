@@ -502,6 +502,8 @@ export function convertAppleTTMLToLyrics(
 // ─────────────────────────── 曲目匹配缓存 ───────────────────────────
 
 const appleMatchCache = new Map<string, AppleTrackMatch | null>()
+/** 匹配结果按「标题|艺人」永久累积（每首播放过的歌一条），加 FIFO 上限防长会话无界增长。 */
+const APPLE_MATCH_CACHE_MAX = 200
 const matchCacheKey = (title: string, artist: string) => `${normalizeTitle(title)}|${normalizeTitle(artist)}`
 
 export function getCachedAppleMatch(title: string, artist: string): AppleTrackMatch | null | undefined {
@@ -519,6 +521,10 @@ export async function resolveAppleTrack(
   if (appleMatchCache.has(key)) return appleMatchCache.get(key) ?? null
   const match = await matchAppleTrack(title, artist, durationMs)
   appleMatchCache.set(key, match)
+  if (appleMatchCache.size > APPLE_MATCH_CACHE_MAX) {
+    const oldestKey = appleMatchCache.keys().next().value
+    if (typeof oldestKey === 'string') appleMatchCache.delete(oldestKey)
+  }
   return match
 }
 

@@ -54,7 +54,6 @@ interface AutoClearSettings {
 
 class CacheManager {
   private cacheDir: string
-  private readonly CACHE_VERSION = '1.0'
   private readonly AUTO_CLEAR_SETTINGS_KEY = 'autoClearSettings'
   private readonly LAST_CLEAR_TIME_KEY = 'lastClearTime'
   private readonly PENDING_CLOSE_CLEAR_KEY = 'pendingCloseCacheClear'
@@ -62,8 +61,20 @@ class CacheManager {
   constructor() {
     // 默认缓存目录
     this.cacheDir = localStorage.getItem('cacheDirectory') || this.getDefaultCacheDir()
-    
-    void this.initializeCleanup().catch(error => console.error('自动缓存清理失败:', error))
+
+    // 启动清理延后到空闲时段：initializeCleanup 会 await indexedDBCache.cleanupExpired()，
+    // 那是三个 object store 的强制全量游标扫描（covers/playlists/lyrics）。本单例在模块
+    // 加载时就被 new 出来（App.tsx 顶层 import），原先会在首帧前占用主线程与 IndexedDB。
+    // 清理属于后台维护、不参与首屏渲染，改到 idle 再跑。
+    const runCleanup = () => {
+      void this.initializeCleanup().catch(error => console.error('自动缓存清理失败:', error))
+    }
+    // requestIdleCallback 在 Safari/部分 WebView 缺失，退化到定时器
+    const idle = (window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+    }).requestIdleCallback
+    if (typeof idle === 'function') idle(runCleanup, { timeout: 5000 })
+    else window.setTimeout(runCleanup, 2000)
   }
 
   private async initializeCleanup(): Promise<void> {
@@ -391,31 +402,6 @@ class CacheManager {
     console.log('✅ 已清理所有缓存')
   }
   
-  /**
-   * 清理旧的封面缓存
-   */
-  private cleanOldCovers(count: number) {
-    const covers: Array<{ key: string, timestamp: number }> = []
-    
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i)
-      if (!key || !key.startsWith('cover_')) continue
-      
-      const value = localStorage.getItem(key)
-      if (!value) continue
-      
-      try {
-        const cacheItem: CacheItem = JSON.parse(value)
-        covers.push({ key, timestamp: cacheItem.timestamp })
-      } catch {}
-    }
-    
-    // 按时间排序，删除最旧的
-    covers.sort((a, b) => a.timestamp - b.timestamp)
-    covers.slice(0, count).forEach(item => {
-      localStorage.removeItem(item.key)
-    })
-  }
   
   /**
    * 使用 LRU 策略清理封面缓存

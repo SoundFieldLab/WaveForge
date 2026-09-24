@@ -108,6 +108,19 @@ const SAMPLE_SIZE = 32
 const paletteCache = new Map<string, string[]>()
 const palettePending = new Map<string, Promise<string[]>>()
 
+/** 调色板缓存上限：条目是小型字符串数组，但模块级单例按 URL 永久累积（每首歌一条）。 */
+const PALETTE_CACHE_MAX = 120
+
+/** 写入并做 FIFO 淘汰（Map 保持插入顺序，首个 key 即最旧）。 */
+function setPaletteCache(url: string, palette: string[]): void {
+  paletteCache.set(url, palette)
+  while (paletteCache.size > PALETTE_CACHE_MAX) {
+    const oldestKey = paletteCache.keys().next().value
+    if (typeof oldestKey !== 'string') break
+    paletteCache.delete(oldestKey)
+  }
+}
+
 /**
  * 从封面图 URL 取调色板（同源/已代理的 URL 才能读像素）。
  * 结果按 URL 缓存；失败返回默认板，不抛错。
@@ -136,12 +149,12 @@ export const extractCoverPalette = async (url: string): Promise<string[]> => {
       context.drawImage(image, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE)
       const { data } = context.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE)
       const palette = paletteFromPixels(data, PALETTE_SIZE, 1)
-      paletteCache.set(url, palette)
+      setPaletteCache(url, palette)
       return palette
     } catch {
       // 跨域污染/加载失败：退回默认板并缓存，避免反复重试
       const fallback = [...DEFAULT_FLUID_PALETTE]
-      paletteCache.set(url, fallback)
+      setPaletteCache(url, fallback)
       return fallback
     } finally {
       palettePending.delete(url)
