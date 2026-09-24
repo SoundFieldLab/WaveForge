@@ -233,15 +233,19 @@ export default function PlaylistGrid3D({
     // 立即更新
     updateSize()
     
-    // 延迟更新，确保 DOM 完全渲染
-    setTimeout(updateSize, 100)
-    setTimeout(updateSize, 300)
+    // 延迟更新，确保 DOM 完全渲染（句柄留存：此前这两个 setTimeout 未清理，
+    // 组件在 300ms 内卸载/containerElement 变化时会对已卸载组件 setState）
+    const delayedTimers = [
+      window.setTimeout(updateSize, 100),
+      window.setTimeout(updateSize, 300),
+    ]
     
     const resizeObserver = new ResizeObserver(updateSize)
     resizeObserver.observe(containerElement)
     window.addEventListener('resize', updateSize)
     
     return () => {
+      for (const timer of delayedTimers) window.clearTimeout(timer)
       resizeObserver.disconnect()
       window.removeEventListener('resize', updateSize)
     }
