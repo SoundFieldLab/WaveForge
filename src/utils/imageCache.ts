@@ -49,9 +49,13 @@ class ImageCacheManager {
       proxyUrl,
       loadedAt: Date.now()
     })
+    // 超限淘汰：必须与 get()/clear() 一样调用 releaseEntry，否则被淘汰的 blob: 条目
+    // 不会 revokeObjectURL —— 底层 Blob（解码后的封面，通常数百 KB）会一直驻留到
+    // 页面销毁，长时间浏览会持续累积。
     while (this.cache.size > this.maxEntries) {
       const oldestKey = this.cache.keys().next().value
       if (typeof oldestKey !== 'string') break
+      releaseEntry(this.cache.get(oldestKey))
       this.cache.delete(oldestKey)
     }
   }

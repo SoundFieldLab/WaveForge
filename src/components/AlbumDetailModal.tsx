@@ -1,5 +1,5 @@
 import { memo, useState, useEffect, useMemo, useRef } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import { X, Play, Music, Info, Loader, Heart, Disc3 } from 'lucide-react'
 import { getAlbumDetail, getAlbumSongs, getArtistAlbums, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong } from '../services/musicApi'
 import { fetchSodaAlbumTracks, collectSodaAlbum } from '../services/sodaService'
@@ -418,6 +418,9 @@ function AlbumDetailModal({
                       src={coverImageUrl(platform, album.picUrl)}
                       alt={album.name}
                       className="w-full h-full object-cover"
+                      role="compact"
+                      size={256}
+                      priority="visible"
                       fallback={
                         <div className="w-full h-full flex items-center justify-center">
                           <Music className={`w-10 h-10 ${textPrimary}/20`} />
@@ -641,6 +644,9 @@ function AlbumDetailModal({
                             src={coverImageUrl(platform, song.album.picUrl)} 
                             alt={song.name} 
                             className="w-full h-full object-cover"
+                            role="row"
+                            size={64}
+                            priority="visible"
                             fallback={
                               <div className="w-full h-full flex items-center justify-center">
                                 <Music className={`w-5 h-5 ${textPrimary}/20`} />

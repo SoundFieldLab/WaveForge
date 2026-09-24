@@ -4,6 +4,31 @@ import { getArtworkEpoch, getArtworkCacheKey, getResolvedArtworkUrl, preloadArtw
 import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 import type { MusicPlatform } from '../services/platforms'
 
+// 模块级共享懒加载 observer：大列表（最近播放/歌单/探索封面墙）里数百张封面
+// 若各自 new IntersectionObserver，滚动时每个 observer 都要参与交叉计算，是典型卡顿源。
+// 收敛为单一 observer，所有懒加载封面注册到同一个实例，视觉效果完全不变。
+// 延迟到首次真正需要时才创建：某些运行时（Electron 早期启动、测试环境注入 polyfill）
+// 会在本模块加载之后才提供 IntersectionObserver，若在模块顶层直接判定会永久丢失懒加载能力。
+const lazyObserverCallbacks = new WeakMap<Element, () => void>()
+let sharedLazyObserver: IntersectionObserver | null = null
+
+function getSharedLazyObserver(): IntersectionObserver | null {
+  if (sharedLazyObserver) return sharedLazyObserver
+  if (typeof IntersectionObserver === 'undefined') return null
+  sharedLazyObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) {
+        const callback = lazyObserverCallbacks.get(entry.target)
+        if (callback) {
+          lazyObserverCallbacks.delete(entry.target)
+          callback()
+        }
+      }
+    }
+  }, { rootMargin: '160px', threshold: 0.01 })
+  return sharedLazyObserver
+}
+
 interface CachedImageProps {
   src: string
   alt: string
@@ -44,8 +69,12 @@ function CachedImage({
     () => src?.trim() ? getResolvedArtworkUrl(src, { role, size, platform }) : '',
     [platform, role, size, src],
   )
+  // 缓存键必须由「解析后的地址」推导：preloadArtwork 收到的是 normalizedSrc，
+  // 它内部同样按解析后地址算键。若这里用原始 src 算，两次推导出的 rendition 不同
+  // （原始 src 可能未带/带有旧尺寸参数，解析后才是本次真正下载的档位），
+  // 键永远对不上 → 同步命中内存缓存的快路径失效，重挂载时先闪占位符再补图。
   const cacheKey = useMemo(
-    () => src?.trim() ? getArtworkCacheKey(src, { role, size, platform }) || normalizedSrc : '',
+    () => src?.trim() ? getArtworkCacheKey(normalizedSrc, { role, size, platform }) || normalizedSrc : '',
     [normalizedSrc, platform, role, size, src],
   )
   const cached = cacheKey ? imageCache.get(cacheKey) : null
@@ -65,24 +94,25 @@ function CachedImage({
   const wrapperPositionClass = /(?:^|\s)(?:absolute|fixed|sticky|static)(?:\s|$)/.test(className || '') ? '' : 'relative'
 
   useEffect(() => {
-    if (!lazy || (cacheKey && imageCache.get(cacheKey)) || typeof IntersectionObserver === 'undefined') {
+    const observer = getSharedLazyObserver()
+    if (!lazy || (cacheKey && imageCache.get(cacheKey)) || !observer) {
       setIsVisible(true)
       return
     }
     const element = containerRef.current
     if (!element) return
-    const observer = new IntersectionObserver(entries => {
-      if (entries.some(entry => entry.isIntersecting)) {
-        setIsVisible(true)
-        observer.disconnect()
-      }
-    }, { rootMargin: '160px', threshold: 0.01 })
+    let active = true
+    const reveal = () => { if (active) setIsVisible(true) }
+    // 走共享 observer：只注册监听 + 回调，不重复创建 observer 实例
+    lazyObserverCallbacks.set(element, reveal)
     observer.observe(element)
     // Electron/WebView 在复杂滚动容器或窗口刚恢复时可能不派发 intersection；
     // 不能让封面永久停留在占位符，超时后退化为主动加载。
-    const fallbackTimer = window.setTimeout(() => setIsVisible(true), 800)
+    const fallbackTimer = window.setTimeout(reveal, 800)
     return () => {
-      observer.disconnect()
+      active = false
+      lazyObserverCallbacks.delete(element)
+      observer.unobserve(element)
       window.clearTimeout(fallbackTimer)
     }
   }, [lazy, normalizedSrc, cacheKey])

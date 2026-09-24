@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback, memo, type CSSProperties, type ReactElement } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, Heart, UserPlus, UserCheck } from 'lucide-react'
+import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, UserPlus, UserCheck } from 'lucide-react'
 import { List, type ListImperativeAPI, type RowComponentProps } from 'react-window'
 import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed, isSameSong } from '../services/musicApi'
 import { fetchSodaArtistSongs } from '../services/sodaService'
@@ -100,6 +100,9 @@ const ArtistSongRow = memo(function ArtistSongRow({
             src={song.album.picUrl}
             alt={song.name}
             className="w-full h-full object-cover"
+            role="row"
+            size={64}
+            priority="visible"
             fallback={
               <div className="w-full h-full flex items-center justify-center">
                 <Music className={`w-4 h-4 ${textPrimary}/20`} />
@@ -263,6 +266,9 @@ const ArtistAlbumCard = memo(function ArtistAlbumCard({ album, playerTheme, onOp
             src={album.picUrl}
             alt={album.name}
             className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+            role="card"
+            size={256}
+            priority="visible"
             fallback={
               <div className="w-full h-full flex items-center justify-center">
                 <Disc className={`w-16 h-16 ${textPrimary}/20`} />
@@ -326,6 +332,9 @@ const ArtistMvCard = memo(function ArtistMvCard({ mv, index, playerTheme, onOpen
             src={mv.imgurl16v9 || mv.imgurl}
             alt={mv.name}
             className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+            role="card"
+            size={256}
+            priority="visible"
             fallback={
               <div className="w-full h-full flex items-center justify-center">
                 <Video className={`w-12 h-12 ${textPrimary}/20`} />
@@ -548,14 +557,21 @@ export default function ArtistDetailModal({
     return () => { cancelled = true }
   }, [artist, platform])
 
-  // 判断是否是当前播放的歌曲
-  const isCurrentSong = (song: Song) => isSameSong(currentSong, song)
+  // 判断是否是当前播放的歌曲（稳定引用，供列表行复用）
+  const isCurrentSong = useCallback((song: Song) => isSameSong(currentSong, song), [currentSong])
 
-  // 查找当前播放歌曲在热门歌曲列表中的索引
-  const currentHotSongIndex = hotSongs.findIndex(song => isCurrentSong(song))
-  
-  // 查找当前播放歌曲在全部歌曲列表中的索引
-  const currentAllSongIndex = allSongs.findIndex(song => isCurrentSong(song))
+  // 查找当前播放歌曲在热门/全部歌曲列表中的索引。
+  // 全部歌曲按 200 首/页无限累加，且 isSameSong 会做多次字段强制转换比较；
+  // 放在渲染体内会让每次滚动分页（setAllSongs）都全表扫描两遍，故 memo 化。
+  const currentHotSongIndex = useMemo(
+    () => hotSongs.findIndex(song => isSameSong(currentSong, song)),
+    [hotSongs, currentSong],
+  )
+
+  const currentAllSongIndex = useMemo(
+    () => allSongs.findIndex(song => isSameSong(currentSong, song)),
+    [allSongs, currentSong],
+  )
 
   const handleContextMenu = (e: React.MouseEvent, song: Song, sourceSongs: Song[]) => {
     e.preventDefault()
@@ -1166,6 +1182,9 @@ export default function ArtistDetailModal({
                       src={artistImageUrl(artist.picUrl)}
                       alt={artist.name}
                       className="w-full h-full object-cover"
+                      role="compact"
+                      size={256}
+                      priority="visible"
                       fallback={
                         <div className="w-full h-full flex items-center justify-center">
                           <Music className={`w-10 h-10 ${textPrimary}/20`} />

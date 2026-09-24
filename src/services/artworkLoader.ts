@@ -1,5 +1,6 @@
 import { imageCache } from '../utils/imageCache'
 import { indexedDBCache } from './indexedDBCache'
+import { getApiBase } from './apiConfig'
 import { resolveArtworkUrl, unwrapArtworkSource, getArtworkRoleSize, getArtworkSizeBucket, type ArtworkPriority, type ResolveArtworkOptions } from './artwork'
 
 import type { MusicPlatform } from './platforms'
@@ -93,7 +94,9 @@ export function getArtworkCacheKey(input: string, options: ArtworkLoadOptions = 
   let detected: string | null = null
   try {
     const host = new URL(source).hostname
-    if (/(^|\.)music\.126\.net$/i.test(host)) detected = 'netease'
+    // 主机识别口径必须与 artwork.ts 的 resizeArtworkSource 一致（含 music.163.com），
+    // 否则 music.163.com 的封面会被正确改尺寸、却在缓存键里落成 unknown 命名空间。
+    if (/(^|\.)(music\.126\.net|music\.163\.com)$/i.test(host)) detected = 'netease'
     else if (/(^|\.)(y\.gtimg\.cn|qqmusic\.qq\.com)$/i.test(host)) detected = 'qq'
     else if (/(^|\.)(mzstatic\.com|apple\.com)$/i.test(host)) detected = 'apple'
     else if (/(^|\.)(kugou\.com|kgimg\.com)$/i.test(host)) detected = 'kugou'
@@ -105,6 +108,26 @@ export function getArtworkCacheKey(input: string, options: ArtworkLoadOptions = 
   return `artwork:v1:${platform}:${rendition}:${source}`
 }
 
+/**
+ * 取色器（useColorThief/extractDominantColor）专用的持久化键。
+ *
+ * 取色路径拿到的是播放页封面地址 `currentTrack.coverUrl`，而它已经是
+ * `resolveArtworkUrl(raw, { size: 500 })` 包装过的代理 URL。若直接拿该 URL 当
+ * IndexedDB 键，会和 artworkLoader 按「原始地址」写的 `artwork:v1:...` 键分裂成
+ * 两条记录：同一张封面在 500 条 / 256MB 的封面配额里占两份，且取色还要为它
+ * 额外下载一遍（artworkLoader 已下载过一次）。
+ *
+ * 这里先归一化回原始地址、按同一 rendition 档位推导键，两种入口因此收敛到同一条记录。
+ * 档位取 512（播放页封面档），与 CachedImage(role="player", size={512}) 一致。
+ */
+const COLOR_THIEF_ARTWORK_OPTIONS = { role: 'player', size: 512 } as const
+
+export function getColorThiefArtworkKey(input: string): string | null {
+  const resolved = resolveArtworkUrl(input, COLOR_THIEF_ARTWORK_OPTIONS)
+  if (!resolved) return null
+  return getArtworkCacheKey(resolved, COLOR_THIEF_ARTWORK_OPTIONS)
+}
+
 export function getResolvedArtworkUrl(src: string, options: ResolveArtworkOptions = {}): string {
   return resolveArtworkUrl(src, options) || src
 }
@@ -113,7 +136,12 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
   const url = getResolvedArtworkUrl(src, options)
   const sourceUrl = unwrapArtworkSource(src)
   if (!url) return Promise.reject(new Error('Artwork URL is empty'))
-  const cacheKey = getArtworkCacheKey(src, options)
+  // 键必须按「解析后的地址」推导，不能按入参 src：
+  // 调用方传入的既可能是原始地址（App 预加载），也可能是已代理的显示地址
+  // （CachedImage 传 normalizedSrc），两者指向同一张图。只有先归一到解析结果，
+  // 才能让预加载、渲染、取色三条路径命中同一条缓存记录；
+  // 对已解析地址重复解析是幂等的（unwrapArtworkSource 会剥掉包装）。
+  const cacheKey = getArtworkCacheKey(url, options)
   const memoryKey = cacheKey || url
   const cached = imageCache.get(memoryKey)
   if (cached) return Promise.resolve(cached)
@@ -205,6 +233,22 @@ export function clearArtworkMemoryCache(): void {
   failedLoads.clear()
   imageCache.clear()
   publishArtworkEpoch()
+}
+
+/**
+ * 清空后端（3001）图片代理进程内的 LRU 缓存。
+ *
+ * 该缓存有 128MB 上限、6 小时 TTL，此前没有任何前端清理入口——用户在设置里
+ * 「清理所有缓存」后，代理仍会直接回放旧封面。失败时静默降级：清理属于尽力而为，
+ * 缓存会按 TTL 自行过期，不该因此让整个清理流程报错。
+ */
+export async function clearBackendImageCache(): Promise<void> {
+  try {
+    const response = await fetch(`${getApiBase()}/cache/image/clear`, { method: 'POST' })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  } catch {
+    // 后端未运行/旧版本时忽略：本地缓存已清，代理缓存会随 TTL 过期
+  }
 }
 
 if (typeof window !== 'undefined') {

@@ -17,6 +17,7 @@ vi.mock('../src/services/artworkLoader', () => ({
 
 class SilentIntersectionObserver {
   observe = vi.fn()
+  unobserve = vi.fn()
   disconnect = vi.fn()
   constructor(_callback: IntersectionObserverCallback, _options?: IntersectionObserverInit) {}
 }

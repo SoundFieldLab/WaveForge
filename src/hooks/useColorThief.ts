@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { indexedDBCache } from '../services/indexedDBCache'
+import { getColorThiefArtworkKey } from '../services/artworkLoader'
 
 interface ColorPalette {
   dominantColor: string | null
@@ -21,17 +22,22 @@ interface CoverSource {
  * 返回的 isObjectUrl 为 true 时，调用方使用完毕后必须 revokeObjectURL。
  */
 async function loadCoverAsObjectUrl(imageUrl: string): Promise<CoverSource> {
-  try {
-    const cachedBlob = await indexedDBCache.getCoverBlob(imageUrl)
-    if (cachedBlob) return { url: URL.createObjectURL(cachedBlob), isObjectUrl: true }
-  } catch {
-    // 缓存读取失败时直接走代理下载
+  // 优先读 artworkLoader 写入的那条记录（同一张封面共用一份持久化缓存，
+  // 命中时无需再下载）。取色传入的多是已代理的显示地址，故先归一到统一键。
+  const coverKey = getColorThiefArtworkKey(imageUrl) || imageUrl
+  for (const key of coverKey === imageUrl ? [imageUrl] : [coverKey, imageUrl]) {
+    try {
+      const cachedBlob = await indexedDBCache.getCoverBlob(key)
+      if (cachedBlob) return { url: URL.createObjectURL(cachedBlob), isObjectUrl: true }
+    } catch {
+      // 缓存读取失败时继续尝试下一个键 / 直接走代理下载
+    }
   }
   try {
     const response = await fetch(imageUrl)
     if (!response.ok) return { url: imageUrl, isObjectUrl: false }
     const blob = await response.blob()
-    await indexedDBCache.cacheCover(imageUrl, blob)
+    await indexedDBCache.cacheCover(coverKey, blob)
     return { url: URL.createObjectURL(blob), isObjectUrl: true }
   } catch {
     return { url: imageUrl, isObjectUrl: false }

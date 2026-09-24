@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { getArtworkRoleSize, getArtworkSizeBucket, resizeArtworkSource, resolveArtworkUrl, unwrapArtworkSource } from '../src/services/artwork'
-import { getArtworkCacheKey } from '../src/services/artworkLoader'
+import { getArtworkCacheKey, getColorThiefArtworkKey } from '../src/services/artworkLoader'
 
 describe('artwork resolver', () => {
   it('uses stable rendition buckets for displayed slot sizes', () => {
@@ -62,5 +62,66 @@ describe('artwork resolver', () => {
       .toContain('/256x256bb.jpg')
     const signed = 'https://cdn.example.com/image.jpg?signature=a%2Bb&expires=1'
     expect(resizeArtworkSource(signed, 64)).toBe(signed)
+  })
+
+  /**
+   * 回归：CachedImage 必须在「解析后的地址」上推导缓存键。
+   *
+   * CachedImage 把 normalizedSrc（解析后）交给 preloadArtwork，后者按解析后地址算键。
+   * 若组件改用原始 src 算键，两次推导的 rendition 不同——网易云原图常带旧尺寸
+   * （如 param=300y300，本次要 512），原始 src 的键会落在 512 档之外，
+   * 于是 imageCache 永远查不中，重挂载时先渲染占位符再异步补图。
+   */
+  it('缓存键按解析后地址推导（与 preloadArtwork 一致）', () => {
+    const withOldSize = 'https://p1.music.126.net/cover.jpg?param=300y300'
+    const plain = 'https://p1.music.126.net/cover.jpg'
+    for (const source of [withOldSize, plain]) {
+      const resolved = resolveArtworkUrl(source, { role: 'player', size: 512 })
+      expect(getArtworkCacheKey(resolved, { role: 'player', size: 512 }))
+        .toBe(getArtworkCacheKey(resolveArtworkUrl(source, { role: 'player', size: 512 }), { role: 'player', size: 512 }))
+      // 原始 src 与解析后地址的键确实不同 —— 这正是必须用解析后地址的原因
+      expect(getArtworkCacheKey(source, { role: 'player', size: 512 }))
+        .not.toBe(getArtworkCacheKey(resolved, { role: 'player', size: 512 }))
+    }
+  })
+
+  /** 解析后地址已经是代理包装，重复解析必须幂等，否则每次渲染都会生成新键。 */
+  it('对已包装的代理地址重复解析保持幂等', () => {
+    const source = 'https://p1.music.126.net/cover.jpg?param=300y300'
+    const once = resolveArtworkUrl(source, { role: 'player', size: 512 })
+    const twice = resolveArtworkUrl(once, { role: 'player', size: 512 })
+    expect(twice).toBe(once)
+    expect(getArtworkCacheKey(once, { role: 'player', size: 512 }))
+      .toBe(getArtworkCacheKey(twice, { role: 'player', size: 512 }))
+  })
+
+  /**
+   * 全链路收敛回归：预加载 / 渲染 / 取色三条路径必须命中同一条缓存记录。
+   *
+   * 三者拿到的入参形态不同——App 预加载拿原始地址、CachedImage 拿解析后地址、
+   * 取色拿的是已代理的 displayCoverUrl。此前 preloadArtwork 按「入参 src」算键、
+   * CachedImage 也按原始 src 算键，同一张封面会派生出多个键：
+   * 预加载的图无法被渲染复用（切歌后仍要现下载），取色还要再下载一遍。
+   */
+  it('预加载 / 渲染 / 取色收敛到同一缓存键', () => {
+    const cases = [
+      'https://p1.music.126.net/abc==/cover.jpg',
+      'https://p1.music.126.net/abc==/cover.jpg?param=300y300',
+      'https://y.gtimg.cn/music/photo_new/T002R300x300M000abc.jpg',
+      'https://is1-ssl.mzstatic.com/image/thumb/{w}x{h}bb.jpg',
+    ]
+    for (const raw of cases) {
+      // App.tsx 预热：preloadArtwork(raw, { size: 500 }) 内部按键来源
+      const preload = getArtworkCacheKey(resolveArtworkUrl(raw, { size: 500 }), { size: 500 })
+      // CachedImage(role="player", size={512})
+      const rendered = getArtworkCacheKey(
+        resolveArtworkUrl(raw, { role: 'player', size: 512 }),
+        { role: 'player', size: 512 },
+      )
+      // 取色：入参是 displayCoverUrl = resolveArtworkUrl(raw, { size: 500 })
+      const colorThief = getColorThiefArtworkKey(resolveArtworkUrl(raw, { size: 500 }))
+      expect(rendered).toBe(preload)
+      expect(colorThief).toBe(preload)
+    }
   })
 })
