@@ -750,6 +750,11 @@ export class AudioEffectsEngine {
   // 避免拖动滑杆等热路径每次都重分配数 MB 脉冲缓冲区并引发可闻咔哒声
   private lastIrKey = ''
 
+  // EQ/补偿链的「结构指纹」：只关心有哪些滤波器（开关/模式/段集合/补偿设计），不关心参数值。
+  // 只有结构变化才值得拆建整条链；拖 EQ 滑杆每秒触发约 60 次 updateSettings，
+  // 每次都 disconnect + createBiquad + 重连纯属浪费（还会引入可闻的相位/咔哒）。
+  private lastEqStructureKey = ''
+
   // 设置持久化防抖句柄（拖滑杆时 updateSettings 每秒可触发约 60 次）
   private settingsSaveTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -1067,6 +1072,8 @@ export class AudioEffectsEngine {
       }
       // 按当前设计（或内置近似）重建补偿段并应用增益；补偿此时必然仍启用
       if (this.settings.effects.loudnessCompensation.enabled && this.context && this.chain) {
+        // 新设计到达 = 段集合可能变了 → 强制重建（并刷新结构指纹）
+        this.lastEqStructureKey = this.eqStructureKey()
         this.rebuildEq()
         this.applyCompensationGains()
       }
@@ -1075,6 +1082,7 @@ export class AudioEffectsEngine {
       this.compDesign = null
       this.compDesignFailedAt = Date.now()
       if (this.settings.effects.loudnessCompensation.enabled && this.context && this.chain) {
+        this.lastEqStructureKey = this.eqStructureKey()
         this.rebuildEq()
         this.applyCompensationGains()
       }
@@ -1310,7 +1318,14 @@ export class AudioEffectsEngine {
     this.applyPitchSettings()
 
     // 均衡器 / 频响补偿（二选一）
-    this.rebuildEq()
+    const eqKey = this.eqStructureKey()
+    if (eqKey === this.lastEqStructureKey) {
+      // 结构未变 → 只更新参数（拖滑杆的高频路径），避免每秒 60 次拆建整条滤波器链
+      this.applyEqParamsNow()
+    } else {
+      this.lastEqStructureKey = eqKey
+      this.rebuildEq()
+    }
 
     // 响度归一化增益：开启时完全由 setNormalizationGain 按曲目 LUFS 控制，
     // 这里不再重复写入——原实现对开启分支把目标重设为「当前瞬时值」，
@@ -1318,6 +1333,53 @@ export class AudioEffectsEngine {
     // 仅关闭时平滑回落到原声（1）。
     if (this.normGain && !this.settings.normalizationEnabled) {
       this.normGain.gain.setTargetAtTime(1, t, 0.02)
+    }
+  }
+
+  /** EQ/补偿链的结构指纹：只关心「有哪些滤波器」，参数变化不影响它 */
+  private eqStructureKey(): string {
+    const { eq, effects } = this.settings
+    if (effects.loudnessCompensation.enabled) {
+      const segments = this.compDesign && this.compDesign.segments.length > 0
+        ? this.compDesign.segments
+        : BUILTIN_COMP_SEGMENTS
+      return `comp:${segments.map(segment => `${segment.type}@${Number(segment.frequency).toFixed(1)}`).join('|')}`
+    }
+    if (!eq.enabled) return 'off'
+    if (eq.mode === 'simple') return `simple:${SIMPLE_EQ_BANDS.length}`
+    return `pro:${eq.proBands.map(band => Number(band.frequency).toFixed(1)).join('|')}`
+  }
+
+  /**
+   * 结构未变时只更新滤波器参数（拖滑杆走的就是这条路径）。
+   * 用 setTargetAtTime 平滑到目标值（tau=10ms），避免直接赋值带来的拉链噪声。
+   */
+  private applyEqParamsNow(): void {
+    if (!this.context) return
+    const t = this.context.currentTime
+    const { eq, effects } = this.settings
+    if (effects.loudnessCompensation.enabled) {
+      this.applyCompensationGains()
+      return
+    }
+    if (!eq.enabled) return
+    const bands = eq.mode === 'simple'
+      ? SIMPLE_EQ_BANDS.map((band, index) => ({ frequency: band.frequency, gain: eq.simpleBands[index] || 0, q: 1.0 }))
+      : eq.proBands
+    if (bands.length !== this.eqFilters.length) {
+      // 段数与链不符（例如链条刚重建过）→ 退回完整重建，避免把值写到已断开的节点上
+      this.rebuildEq()
+      this.lastEqStructureKey = this.eqStructureKey()
+      return
+    }
+    for (let index = 0; index < bands.length; index += 1) {
+      const filter = this.eqFilters[index]
+      const band = bands[index]
+      try {
+        filter.frequency.setTargetAtTime(band.frequency, t, 0.01)
+        filter.gain.setTargetAtTime(band.gain, t, 0.01)
+        filter.Q.setTargetAtTime(band.q, t, 0.01)
+      } catch { /* 节点可能已被断开 */ }
     }
   }
 
