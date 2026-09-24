@@ -58,6 +58,10 @@ export default function ModeTransitionOverlay({ mode, theme = 'dark' }: ModeTran
       {mode && meta && (
         <motion.div
           key="mode-transition"
+          // 过渡遮罩盖住全屏：不加 data-tv-skip 时 tvCore 的 elementFromPoint 命中判定会把
+          // 所有底层候选都判为不可命中，3–12 秒的过渡期间遥控完全失灵。标记后焦点导航忽略它
+          //（鼠标点击/触摸仍被遮罩挡住，交互语义不变）。
+          data-tv-skip=""
           // 首帧即不透明：任何模式内容都不能透过过渡动画露出来（此前从 opacity:0 淡入，
           // 新模式挂载快的机器会在动画半透明阶段露出目标页面）
           initial={{ opacity: 1 }}

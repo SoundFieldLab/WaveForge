@@ -85,7 +85,12 @@ export function applyPerfModeClasses(): void {
 
 /** 启动时调用（main.tsx）：应用模式类。 */
 export function initPerfMode(): void {
+  // 模块求值期读到的档位早于 platform.ts 给 <html> 打 tv-mode 类，于是 autoDefault() 里
+  // 「按 deviceMemory 自动进效能档」的分支永远走不到（TV 首启不会进 efficiency，缓存上限也偏松）。
+  // 平台类就绪后重新求值一次；用户显式存过档位时 readStored() 会原样返回。
+  mode = readStored()
   applyPerfModeClasses()
+  emit()
 }
 
 /**

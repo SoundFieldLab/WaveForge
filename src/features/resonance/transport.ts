@@ -238,6 +238,9 @@ export function createLanMemberTransport(options: {
     close() {
       envelopes.clear()
       peers.clear()
+      // 未发出的队列要一起清：断线后反复 send 再 close 会让它无界增长，
+      // 而且下一次 onEnvelope 订阅时会把陈旧的排队消息一次性回放给新订阅者。
+      pending.length = 0
       try { socket?.close() } catch { /* ignore */ }
       socket = null
     },

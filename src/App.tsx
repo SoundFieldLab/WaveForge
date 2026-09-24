@@ -1,7 +1,7 @@
 import { debugLog, isTransitionDebugEnabled } from './utils/debugLog'
 import { parseStoredBoolean } from './utils/storage'
 import { isTv, isTvModeActive, isDesktop } from './platform'
-import { useTvBack } from './tv/tvCore'
+import { dispatchTvBack, useTvBack } from './tv/tvCore'
 import { isPerfModeEfficiency } from './tv/perfMode'
 import { lazy, memo, Suspense, startTransition, useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore, type ComponentProps, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
@@ -5953,6 +5953,9 @@ function App() {
       setShowSearch(false)
       setShowProfile(false)
     } else if (action === 'back') {
+      // 先让各弹窗/面板注册的 useTvBack 消费：手机遥控的 BACK 此前走的是另一条链路，
+      // 完全绕过 dispatchTvBack —— 模式选择面板、软键盘、各弹窗都关不掉，反而把播放页/主页关了。
+      if (dispatchTvBack()) return
       if (showSongDetail) setShowSongDetail(false)
       else if (showRemote) setShowRemote(false)
       else if (showMixingStudio) setShowMixingStudio(false)

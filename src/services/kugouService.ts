@@ -538,6 +538,10 @@ export async function getKugouLyrics(hash: string, extra: { albumAudioId?: numbe
 
 /** 酷狗喜欢歌曲（H5 签名网关；like=false 目前仅返回支持标记，真实移除待网关适配） */
 export async function likeKugouSong(song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }>; album?: { id?: string | number } }, like: boolean): Promise<boolean> {
+  // 酷狗没有「取消喜欢」的轻接口：服务端对 like=false 只回一个 result:100 的回执（不落库），
+  // 前端据此会把「已从喜欢歌单移除」当成功显示，实际重启后歌曲还在。这里直接判为不支持，
+  // 让调用方走失败分支（入口本身也应在能力表里隐藏）。
+  if (!like) return false
   const cookie = getPlatformCookie('kugou')
   if (!cookie) return false
   try {

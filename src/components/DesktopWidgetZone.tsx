@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, lazy, Suspense } from 'react'
+import { useTvBack } from '../tv/tvCore'
 import type { KeyboardEvent, ReactNode } from 'react'
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
 import {
@@ -193,6 +194,13 @@ function DayProgressWidget({ cardBlurAmount, accentColor, onOverlayOpenChange }:
   const startOfNextMonth = new Date(now.getFullYear(), now.getMonth() + 1, 1)
   const monthProgress = Math.min(100, Math.max(0, ((now.getTime() - startOfMonth.getTime()) / (startOfNextMonth.getTime() - startOfMonth.getTime())) * 100))
   const closeDetails = () => { setShowDetails(false); onOverlayOpenChange?.(false) }
+  // TV 遥控：BACK 关闭组件详情层。此前只有背景 onMouseDown 与 Escape，遥控 BACK 未消费会
+  // 落到原生 handleBackDefault → 直接退出应用。
+  useTvBack(() => {
+    if (!showDetails) return false
+    closeDetails()
+    return true
+  }, [showDetails])
   const progressItems = [
     { label: '今天', value: dayProgress, detail: `剩余 ${Math.floor((24 * 60 - now.getHours() * 60 - now.getMinutes()) / 60)} 小时 ${(24 * 60 - now.getHours() * 60 - now.getMinutes()) % 60} 分钟` },
     { label: '本周', value: weekProgress, detail: `第 ${Math.ceil((now.getDate() + new Date(now.getFullYear(), now.getMonth(), 1).getDay()) / 7)} 周` },

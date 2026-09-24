@@ -382,6 +382,11 @@ export class ResonanceSession {
         // 与房主的连接断了（房主关窗/掉线/被踢）：房间不再可用。
         // 必须把 room 清掉——上层据此判断「房间结束了」，用来还原本机播放列表等；
         // 已经给出更具体的原因（如房主解散）时不要用泛化文案覆盖。
+        // 同时停掉心跳/重试定时器并丢弃 transport：否则定时器会继续按 2s/5s 发 ping，
+        // 而 send() 在 socket 非 OPEN 时只会把消息压进 pending（无界增长）。界面此时已提示
+        // 「连接已断开」，用户需要重新加入，保留旧连接对象没有意义。
+        this.stopTimers()
+        this.transport = null
         this.snapshot = {
           ...this.snapshot,
           status: 'closed',
@@ -1173,7 +1178,9 @@ export class ResonanceSession {
         // 昵称一律取房间名册里的**权威值**（按中转分配的 fromPeerId 查，那个 id 无法伪造）。
         // 不能采信 payload.nickname：它是发送方自报的，任何人都能冒用他人（含房主）的名义发言，
         // 而房主转发时又保留这个昵称，伪造内容会扩散给全房间。
-        const nickname = this.memberNicknameOf(fromPeerId) || String(payload?.nickname || '听众')
+        // 名册查不到说明发送者已不在房间里（被移出/已退房但 socket 仍在）：直接丢弃。
+        const nickname = this.memberNicknameOf(fromPeerId)
+        if (!nickname) return
         this.pushChat({ peerId: fromPeerId, nickname, text, at: Date.now(), self: false })
         // 房主把消息转给「除发送者外」的成员，并保留原作者昵称（成员不会看到自己的话被回声，
         // 也不会看到自己的话变成房主说的）

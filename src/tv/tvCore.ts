@@ -304,6 +304,10 @@ function candidates(from: HTMLElement | null = null, dir: Direction | null = nul
 
 // ---------------- 焦点状态与焦点环 ----------------
 let focusedEl: HTMLElement | null = null
+// 最近聚焦过的元素（新在前），上限收束：面板被卸载后（例如弹窗里再弹一层又关闭）
+// 用它把焦点还原到同域内上一个元素，而不是退化成「域内第一个候选」。
+const focusTrail: HTMLElement[] = []
+const MAX_FOCUS_TRAIL = 40
 const focusListeners = new Set<() => void>()
 
 export function getFocusedElement(): HTMLElement | null {
@@ -410,6 +414,10 @@ export function setTvFocus(el: HTMLElement | null): void {
   focusedEl?.classList.remove('tv-focused')
   focusedEl = el
   if (el) {
+    const seen = focusTrail.indexOf(el)
+    if (seen >= 0) focusTrail.splice(seen, 1)
+    focusTrail.unshift(el)
+    if (focusTrail.length > MAX_FOCUS_TRAIL) focusTrail.length = MAX_FOCUS_TRAIL
     el.classList.add('tv-focused')
     if (!keyboardActive) {
       try {
@@ -726,6 +734,9 @@ function handleKeyDown(e: KeyboardEvent): void {
       case 23:
       case 66:
         e.preventDefault()
+        // 阻止继续传播到 React 根监听器：activate() 内部已 click() 过一次，组件里
+        // 「Enter 触发动作」的 handler 会因同一次按键再执行一遍（同一操作做两遍）。
+        e.stopPropagation()
         activate()
         return
       case 4:
@@ -766,6 +777,9 @@ function handleKeyDown(e: KeyboardEvent): void {
     case 23: // KEYCODE_DPAD_CENTER
     case 66: // KEYCODE_ENTER
       e.preventDefault()
+      // 同上：activate() 会 click() 一次，若事件继续冒泡到 React 根监听器，
+      // 组件内基于 key === 'Enter' 的处理器会再触发一次动作。
+      e.stopPropagation()
       activate()
       return
     case 8: // Backspace（PC 模拟 TV 的 BACK）
@@ -802,6 +816,21 @@ function setupScopeObserver(): void {
     let changed = false
     let focusedRemoved = false
     for (const m of mutations) {
+      // 运行时才加上/摘掉 data-tv-scope 的面板（如 <div data-tv-scope={open ? '' : undefined}>）：
+      // 这类节点本身常驻，只听 childList 会永远收不到这个域，焦点也收不进去。
+      if (m.type === 'attributes' && m.target instanceof HTMLElement) {
+        const target = m.target
+        const isScope = target.matches('[data-tv-scope]')
+        const at = scopes.indexOf(target)
+        if (isScope && at < 0) {
+          scopes.push(target)
+          changed = true
+        } else if (!isScope && at >= 0) {
+          scopes.splice(at, 1)
+          changed = true
+        }
+        continue
+      }
       for (const node of m.addedNodes) {
         if (!(node instanceof HTMLElement)) continue
         if (node.matches('[data-tv-scope]')) {
@@ -825,7 +854,16 @@ function setupScopeObserver(): void {
         }
       }
     }
-    if (focusedRemoved) updateRing()
+    if (focusedRemoved) {
+      // 从聚焦轨迹里找「同域内仍存活」的上一个元素并恢复（弹窗里再弹一层又关闭的场景），
+      // 找不到才退回原来的「只隐藏焦点环」，此时下一次按键会落到域内第一个候选。
+      const scope = currentScope()
+      const restored = focusTrail.find(el => (
+        el.isConnected && (scope instanceof HTMLElement ? scope.contains(el) : true)
+      ))
+      if (restored) setTvFocus(restored)
+      else updateRing()
+    }
     if (changed) {
       // 新面板打开：若当前焦点不在新域内，收拢到新域
       const scope = currentScope()
@@ -834,7 +872,7 @@ function setupScopeObserver(): void {
       }
     }
   })
-  scopeObserver.observe(document.body, { childList: true, subtree: true })
+  scopeObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-tv-scope'] })
 }
 
 // 初始时收录已存在的域
