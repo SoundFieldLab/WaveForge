@@ -20,6 +20,11 @@ const MAX_PLAYLIST_BYTES = () => limits().playlistBytes
 const MAX_LYRICS = () => limits().lyricCount
 const MAX_LYRICS_BYTES = () => limits().lyricBytes
 
+// 读命中不再每次回写整条记录：封面 Blob 与歌单/专辑 JSON 可达数百 KB，把读操作变成写事务
+// 是纯粹的写放大（整条序列化 + 磁盘写）。改为每 N 次访问落一次盘，淘汰策略不要求精确 LRU。
+const READ_ACCESS_PERSIST_EVERY = 8
+const dataReadAccessCounts = new Map<string, number>()
+
 interface CoverCacheItem {
   url: string
   data: Blob
@@ -132,8 +137,10 @@ class IndexedDBCache {
     }
     item.lastAccess = Date.now()
     item.accessCount = (item.accessCount || 0) + 1
-    const updateStore = await this.store(COVER_STORE, 'readwrite')
-    await this.request(updateStore.put(item))
+    if (item.accessCount % READ_ACCESS_PERSIST_EVERY === 0) {
+      const updateStore = await this.store(COVER_STORE, 'readwrite')
+      await this.request(updateStore.put(item))
+    }
     return item.data
   }
 
@@ -186,7 +193,7 @@ class IndexedDBCache {
   private async getData<T>(storeName: string, id: string, platform: MusicPlatform, ttl: number): Promise<T | null> {
     id = id.trim()
     if (!id) return null
-    const store = await this.store(storeName, 'readwrite')
+    const store = await this.store(storeName, 'readonly')
     const key = `${platform}_${id}`
     const item = await this.request(store.get(key)) as DataCacheItem | undefined
     if (!item) return null
@@ -196,8 +203,12 @@ class IndexedDBCache {
       return null
     }
     item.lastAccess = Date.now()
-    const updateStore = await this.store(storeName, 'readwrite')
-    await this.request(updateStore.put(item))
+    const accessCount = (dataReadAccessCounts.get(key) || 0) + 1
+    dataReadAccessCounts.set(key, accessCount)
+    if (accessCount % READ_ACCESS_PERSIST_EVERY === 0) {
+      const updateStore = await this.store(storeName, 'readwrite')
+      await this.request(updateStore.put(item))
+    }
     return item.data as T
   }
 
