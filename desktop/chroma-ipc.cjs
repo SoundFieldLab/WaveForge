@@ -509,7 +509,7 @@ class ChromaRestService {
   }
 }
 
-function setupChromaIpc({ ipcMain, getMainWindow, baseUrl, fetchImpl, timers, discoverDevices, repairBasePath, inspectAppList, launchRepair } = {}) {
+function setupChromaIpc({ ipcMain, getMainWindow, baseUrl, fetchImpl, timers, discoverDevices, repairBasePath, inspectAppList, launchRepair, guardTrustedIpc } = {}) {
   if (!ipcMain) throw new TypeError('setupChromaIpc requires ipcMain')
   let mock = null
   if (process.env.WAVEFORGE_CHROMA_MOCK === '1') {
@@ -545,9 +545,12 @@ function setupChromaIpc({ ipcMain, getMainWindow, baseUrl, fetchImpl, timers, di
     'chroma:repair-app-list': () => service.launchAppListRepair(),
     'chroma:set-device-enabled': (_event, device, enabled) => service.setDeviceEnabled(device, enabled),
   }
-  for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, handler)
+  // 统一套来源校验：这些通道会操作设备/写文件，此前既无 guardTrustedIpc 也无 event.sender 判定。
+  // 未提供守卫时保持原行为（调试宿主仍可直接调用 setup）。
+  const guard = (handler) => (typeof guardTrustedIpc === 'function' ? guardTrustedIpc('privileged', handler) : handler)
+  for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, guard(handler))
   const frameListener = (_event, payload) => { service.submitFrame(payload) }
-  ipcMain.on('chroma:frame', frameListener)
+  ipcMain.on('chroma:frame', guard(frameListener))
 
   return {
     service,

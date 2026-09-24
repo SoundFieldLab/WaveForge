@@ -8114,13 +8114,13 @@ app.whenReady().then(async () => {
   }
   // Razer Chroma：本地 REST 会话、设备探测与高频灯效帧。
   try {
-    chromaControllerHandle = setupChromaIpc({ ipcMain, getMainWindow: () => mainWindow, repairBasePath: app.getPath('userData') })
+    chromaControllerHandle = setupChromaIpc({ ipcMain, getMainWindow: () => mainWindow, repairBasePath: app.getPath("userData"), guardTrustedIpc })
   } catch (error) {
     console.error('[Chroma] 初始化失败:', error instanceof Error ? error.message : error)
   }
   // SignalRGB：Effect 安装、Local API 与 Canvas Event 桥。
   try {
-    signalRgbControllerHandle = setupSignalRgbIpc({ ipcMain, getMainWindow: () => mainWindow, shell })
+    signalRgbControllerHandle = setupSignalRgbIpc({ ipcMain, getMainWindow: () => mainWindow, shell, guardTrustedIpc })
   } catch (error) {
     console.error('[SignalRGB] 初始化失败:', error instanceof Error ? error.message : error)
   }

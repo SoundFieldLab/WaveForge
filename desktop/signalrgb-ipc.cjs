@@ -3,7 +3,7 @@
 const { SignalRgbEffectManager } = require('./signalrgb-effect-manager.cjs')
 
 function setupSignalRgbIpc(options = {}) {
-  const { ipcMain, getMainWindow, shell } = options
+  const { ipcMain, getMainWindow, shell, guardTrustedIpc } = options
   if (!ipcMain) throw new TypeError('setupSignalRgbIpc requires ipcMain')
 
   const manager = options.manager || new SignalRgbEffectManager({
@@ -37,7 +37,9 @@ function setupSignalRgbIpc(options = {}) {
     },
   }
 
-  for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, handler)
+  // 同上：灯光效果通道会写/删文件，统一套来源校验；未提供守卫时保持原行为
+  const guard = (handler) => (typeof guardTrustedIpc === 'function' ? guardTrustedIpc('privileged', handler) : handler)
+  for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, guard(handler))
   return {
     manager,
     dispose() {
