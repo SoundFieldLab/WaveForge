@@ -51,6 +51,9 @@ export function zonedDateFromLocalString(value: string, timeZone?: string): Date
 }
 
 export const localMinutesFromWeatherTime = (value: string) => {
+  // 上游只给日期（"2026-09-24"）时 slice(11,13) 得空串，而 Number('') === 0 且通过 isFinite，
+  // 会让日出日落被当成 00:00（昼夜与天空体位置全错）。先要求长度够到 HH:MM 再解析。
+  if (typeof value !== 'string' || value.length < 16) return null
   const hour = Number(value.slice(11, 13))
   const minute = Number(value.slice(14, 16))
   return Number.isFinite(hour) && Number.isFinite(minute) ? hour * 60 + minute : null

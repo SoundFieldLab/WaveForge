@@ -500,7 +500,8 @@ function DesktopView({
   // 视频音量控制
   const [videoMuted, setVideoMuted] = useState(() => {
     const saved = localStorage.getItem('desktopVideoMuted')
-    return saved !== null ? JSON.parse(saved) : true // 默认静音
+    // 渲染期裸 JSON.parse 无 try：键被写坏会让整棵桌面树抛错（只剩根 ErrorBoundary 的全屏兜底）
+    return parseStoredBoolean(saved, true) // 默认静音
   })
   const videoRef = useRef<HTMLVideoElement>(null)
   const desktopVideoUrl = desktopLiveWallpaper?.sourceType === 'video'
