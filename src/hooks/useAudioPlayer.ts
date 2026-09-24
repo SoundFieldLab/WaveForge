@@ -1043,6 +1043,10 @@ export function useAudioPlayer(
               (plan?.sourceStartTime || 0) + playbackOffset + progress * transitionAudioDuration,
               syntheticCap,
             )
+            // 这条 rAF 循环是 30fps 节流，直接发未量化的合成时间会让订阅 playbackTimeStore 的
+            // 大组件（歌词页 / 播放控制条）跟着 30fps 重渲染，而 AI 长混音过渡可持续 8–60s。
+            // 与 handleTimeUpdate 的稳态路径一致量化到 ~250ms；进度条与歌词各自有插值，视觉无变化。
+            const publishTime = Math.round(syntheticTime * 4) / 4
 
             const targetSpan = Math.max(0, (plan?.targetEndTime || 0) - (plan?.targetStartTime || 0))
             const transitionTargetTime = (plan?.targetStartTime || 0) + progress * targetSpan
@@ -1070,7 +1074,7 @@ export function useAudioPlayer(
                 transitionDuration: transitionAudioDuration,
                 transitionTargetTime,
                 visualSwitchCommit: visualCommit,
-                currentTime: syntheticTime,
+                currentTime: publishTime,
               })
               // 一次性关键事件不节流，但刷新节流基准避免紧随其后的普通帧重复发
               transitionProgressEmitTimeRef.current = performance.now()
@@ -1082,7 +1086,7 @@ export function useAudioPlayer(
                   transitionProgress: progress,
                   transitionDuration: transitionAudioDuration,
                   transitionTargetTime,
-                  currentTime: syntheticTime,
+                  currentTime: publishTime,
                 })
                 transitionProgressEmitTimeRef.current = now
               }
