@@ -3642,6 +3642,12 @@ const QQ_SONG_DETAIL_CONCURRENCY = 6
 let qqSongDetailActive = 0
 const qqSongDetailWaiters = []
 
+// 曲目对象是纯 JSON 结构，深拷贝用 JSON 往返而不是 structuredClone：
+// 本文件也会跑在设备端（TV/Android）可能更老的 Node 上。
+const cloneSongDetail = (value) => {
+  try { return JSON.parse(JSON.stringify(value)) } catch { return value }
+}
+
 async function withQQSongDetailSlot(task) {
   if (qqSongDetailActive >= QQ_SONG_DETAIL_CONCURRENCY) {
     await new Promise(resolve => qqSongDetailWaiters.push(resolve))
@@ -3660,11 +3666,14 @@ async function qqSongDetail(mid, fallback = {}, devMode = false) {
   if (!mid) return fallback
   const cacheKey = String(mid)
   const cached = qqSongDetailCache.get(cacheKey)
-  if (cached && Date.now() - cached.at < QQ_SONG_DETAIL_TTL) return { ...cached.value }
+  // 深拷贝返回：缓存的曲目对象里 artists/album 是嵌套结构，浅拷贝会让调用方与缓存共享它们，
+  // 任一侧原地改动都会污染后续请求。
+  if (cached && Date.now() - cached.at < QQ_SONG_DETAIL_TTL) return cloneSongDetail(cached.value)
   const value = await withQQSongDetailSlot(() => qqSongDetailUncached(cacheKey, fallback, devMode))
-  // 只在真拿到带封面的曲目信息时入缓存：纯 fallback 回落的空壳缓存下来会让后续请求也拿不到数据
+  // 只在真拿到带封面的曲目信息时入缓存：纯 fallback 回落的空壳缓存下来会让后续请求也拿不到数据。
+  // 存的是当前 value 的深拷贝，避免调用方后续原地修改把缓存写脏。
   if (value && (value.albumpic || value.album?.picUrl)) {
-    qqSongDetailCache.set(cacheKey, { at: Date.now(), value })
+    qqSongDetailCache.set(cacheKey, { at: Date.now(), value: cloneSongDetail(value) })
     if (qqSongDetailCache.size > QQ_SONG_DETAIL_CACHE_MAX) {
       const oldestKey = qqSongDetailCache.keys().next().value
       if (typeof oldestKey === 'string') qqSongDetailCache.delete(oldestKey)

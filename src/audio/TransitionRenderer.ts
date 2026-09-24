@@ -71,11 +71,11 @@ export class TransitionRenderer {
   private activeSource: AudioBufferSourceNode | null = null
   private cacheCleanupTimer: ReturnType<typeof setInterval> | null = null
   private cacheBytes = 0
-  // 渲染缓存常驻的是解码后的 PCM：AI 长混音 60s 立体声 48kHz 单条约 23MB，
-  // 原先上限 10 条 / 128MB 意味着峰值可到百 MB 级驻留（多数条目再也不会被命中，
-  // 过渡本身是一次性的）。这里收紧到「当前过渡 + 预渲染的下一首 + 一条余量」。
-  private readonly MAX_CACHE_SIZE = 3
-  private readonly MAX_CACHE_BYTES = 48 * 1024 * 1024
+  // 渲染缓存常驻的是解码后的 PCM：AI 长混音 60s 立体声 48kHz 单条约 23MB，原先 10 条 / 128MB
+  // 意味着峰值可到百 MB 级驻留（多数条目再也不会被命中，过渡本身是一次性的）。
+  // 收紧到 5 条 / 64MB：够放「当前过渡 + 预渲染的下一首 + 余量」，也保留同时预渲染多条时的余热。
+  private readonly MAX_CACHE_SIZE = 5
+  private readonly MAX_CACHE_BYTES = 64 * 1024 * 1024
   private readonly CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
   constructor(audioContext: AudioContext, masterGain?: GainNode) {

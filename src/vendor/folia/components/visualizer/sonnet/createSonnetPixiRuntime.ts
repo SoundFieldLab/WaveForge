@@ -761,7 +761,9 @@ export class SonnetPixiRuntime {
         if (paused) {
             this.app.stop();
             this.renderOnce();
-        } else {
+        } else if (typeof document === 'undefined' || !document.hidden) {
+            // 窗口隐藏时不启动 ticker（否则后台满帧渲染，要等下一次 visibilitychange 才停）；
+            // handleVisibility 会在回到前台时按 paused 状态决定是否启动。
             this.app.start();
         }
     }
