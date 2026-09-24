@@ -106,6 +106,10 @@ function stringifyArg(a: unknown): string {
 let consoleCaptured = false
 
 /** override console.* 捕获前端日志（仍转发原 console）。幂等。 */
+const pad2 = (value: number) => (value < 10 ? `0${value}` : `${value}`)
+/** 轻量 HH:MM:SS（形状与原先 toLocaleTimeString('zh-CN', { hour12: false }) 一致，成本低一个数量级） */
+const formatLogTime = (date = new Date()) => `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
+
 export function captureFrontendConsole(): void {
   if (consoleCaptured) return
   consoleCaptured = true
@@ -117,8 +121,12 @@ export function captureFrontendConsole(): void {
     debug: console.debug.bind(console),
   }
   const push = (level: LogLine['level'], args: unknown[]) => {
+    // 每条日志都要做时间格式化 + 参数序列化 + 数组裁剪 + 通知订阅者（进而触发 DebugPanels 重渲染）。
+    // 开发者模式关闭时（PC 默认）直接跳过：console.log 在应用里很频繁，这套开销纯属浪费。
+    // 用 debugMode 的实时值判断，运行中打开开发者模式即可开始捕获。
+    if (!debugMode) return
     frontendLogs.push({
-      time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
+      time: formatLogTime(),
       level,
       text: args.map(stringifyArg).join(' '),
     })
