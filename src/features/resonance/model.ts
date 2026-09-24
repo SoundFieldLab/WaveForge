@@ -22,6 +22,12 @@ export const RESONANCE_SKIP_RATIO = 0.8
  */
 export const RESONANCE_PARTY_QUOTA_DEFAULT = 3
 export const RESONANCE_PARTY_QUOTA_RANGE = [1, 10] as const
+/**
+ * Party 模式下可选的「每人整场可加歌数」档位。
+ * 必须只有一份：大厅、共振设置面板、设置中心镜像共用一个常量，
+ * 否则出现「在设置面板选了 8、镜像里显示 3、大厅分段控件没有任何一档高亮」这种自相矛盾。
+ */
+export const RESONANCE_PARTY_QUOTA_CHOICES = [1, 2, 3, 5, 8, 10] as const
 
 /** 队列长度上限，防止无界增长 */
 export const RESONANCE_MAX_QUEUE = 300
@@ -348,7 +354,11 @@ export function leaveRoom(state: ResonanceRoomState, peerId: string): LeaveOutco
   if (remaining.length === 0) {
     return { kind: 'closed', state: { ...state, members: refreshNameConflicts(remaining), closed: { reason: 'empty' }, seq: state.seq + 1 }, reason: 'empty' }
   }
-  const stateWithout = { ...state, members: refreshNameConflicts(remaining), seq: state.seq + 1 }
+  // 离开的人要从投票名单里划掉：
+  // 阈值按「当前在线人数」算，把走掉的人的票留在 by 里，会让剩下的人被一个已经不在房间的人代表通过。
+  const stillHere = state.vote ? state.vote.by.filter(voter => voter !== peerId) : null
+  const vote = stillHere && state.vote && stillHere.length > 0 ? { ...state.vote, by: stillHere } : null
+  const stateWithout = { ...state, members: refreshNameConflicts(remaining), seq: state.seq + 1, vote }
   if (peerId !== state.hostId) return { kind: 'left', state: stateWithout }
   if (state.mode === 'shared-playlist') {
     return { kind: 'closed', state: { ...stateWithout, closed: { reason: 'host-left' } }, reason: 'host-left' }
@@ -685,7 +695,8 @@ export function applyPlayback(
 /** 推进到队列下一首（房主权威调用） */
 export function advanceQueue(state: ResonanceRoomState): ResonanceRoomState {
   const next = state.cursor + 1
-  if (next >= state.queue.length) return { ...state, cursor: state.queue.length > 0 ? -1 : state.cursor, seq: state.seq + 1 }
+  // 队列放到底也清投票：否则最后一首上发起的票会永远留在房间里（下次播放时莫名「已过半」）
+  if (next >= state.queue.length) return { ...state, cursor: state.queue.length > 0 ? -1 : state.cursor, seq: state.seq + 1, vote: null }
   return { ...state, cursor: next, seq: state.seq + 1, vote: null }
 }
 
@@ -816,6 +827,30 @@ export function queuePageOf(state: ResonanceRoomState, offset: number, limit = R
   return state.queue.slice(start, start + Math.max(1, Math.min(RESONANCE_QUEUE_WINDOW, limit)))
 }
 
+/**
+ * 成员侧队列视图里的「还没拉到」占位行。
+ * 成员的队列是「窗口 + 分页」拼起来的，缺口处用占位行占住下标，
+ * 免得后面的曲目整体前移、行号与真实位置错位。
+ * 占位行不是真歌（不能解析、不能预热、不能播放），消费方要用 isQueuePlaceholder 过滤掉。
+ */
+export const RESONANCE_QUEUE_PLACEHOLDER_PREFIX = '__queue-gap-'
+
+export function queuePlaceholderAt(globalIndex: number): ResonanceTrack {
+  return {
+    key: `${RESONANCE_QUEUE_PLACEHOLDER_PREFIX}${globalIndex}`,
+    title: '加载中…',
+    artists: [],
+    durationMs: 0,
+    sources: [],
+    requestedBy: '',
+    seq: -1,
+  }
+}
+
+export function isQueuePlaceholder(track?: ResonanceTrack | null): boolean {
+  return Boolean(track?.key && track.key.startsWith(RESONANCE_QUEUE_PLACEHOLDER_PREFIX))
+}
+
 /** 控制权：房主或获得临时授权的成员可以控制播放 */
 export function canControlPlayback(state: ResonanceRoomState, peerId: string, now: number): boolean {
   if (state.closed) return false
@@ -870,10 +905,25 @@ export interface ResonanceStateWire {
   queue: ResonanceTrack[]
   queueTotal: number
   queueOffset: number
+  /**
+   * 各成员「还能加几首」与「当前轮次轮到谁」。
+   *
+   * 必须由房主算好下发：成员本地只有队列窗口（从房主 cursor 起的 50 首），
+   * 拿窗口算 `tracksAddedByPeer` / `currentTurnPeerId` 会少算已播过的部分，
+   * 界面就会显示错误的额度、以及在「我推荐」模式下把人家的轮次判错。
+   */
+  remainingQuotaByPeer: Record<string, number>
+  turnPeerId: string | null
 }
 
 export function serializeRoomState(state: ResonanceRoomState): ResonanceStateWire {
   const summary = queueSummaryOf(state)
+  // 无穷大（共享歌单房主的整单推送）不能进制 JSON，用 -1 表示「不限」
+  const remainingQuotaByPeer: Record<string, number> = {}
+  for (const member of state.members) {
+    const value = remainingAddQuota(state, member.peerId)
+    remainingQuotaByPeer[member.peerId] = Number.isFinite(value) ? value : -1
+  }
   return {
     roomId: state.roomId,
     createdAt: state.createdAt,
@@ -897,6 +947,8 @@ export function serializeRoomState(state: ResonanceRoomState): ResonanceStateWir
     queue: summary.window,
     queueTotal: summary.total,
     queueOffset: summary.windowOffset,
+    remainingQuotaByPeer,
+    turnPeerId: currentTurnPeerId(state),
   }
 }
 

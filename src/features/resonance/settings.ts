@@ -175,6 +175,28 @@ export function setResonanceSetting<K extends keyof ResonanceSettings>(key: K, v
 }
 
 /**
+ * 房间内才会用到的两个设置读取（会话层用）。
+ * 放在这里而不是在 session.ts 里直接写字符串键：键名一旦调整，
+ * 散落各处的硬编码会静默失配（读不到就回落默认值，不会报错）。
+ */
+export function readResonanceJoinBehavior(): 'resume' | 'next' {
+  try {
+    return localStorage.getItem(RESONANCE_SETTING_KEYS.joinBehavior) === 'next' ? 'next' : 'resume'
+  } catch {
+    return RESONANCE_SETTINGS_DEFAULTS.joinBehavior
+  }
+}
+
+export function readResonancePushLimit(): number {
+  try {
+    const raw = Number(localStorage.getItem(RESONANCE_SETTING_KEYS.pushLimit))
+    return RESONANCE_PUSH_LIMIT_CHOICES.includes(raw as 100 | 200 | 500) ? raw : RESONANCE_PUSH_LIMIT_DEFAULT
+  } catch {
+    return RESONANCE_PUSH_LIMIT_DEFAULT
+  }
+}
+
+/**
  * 记下「进共振之前是什么模式」。
  *
  * 这样即使用户在共振模式里关掉客户端（或崩了），下次启动也不会一头扎进共振——

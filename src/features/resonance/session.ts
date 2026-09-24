@@ -13,6 +13,9 @@ import {
   advanceQueue,
   applyPlayback,
   canonicalTrackKey,
+  isQueuePlaceholder,
+  queuePlaceholderAt,
+  remainingAddQuota,
   castSkipVote,
   clampQuota,
   clearVote,
@@ -40,8 +43,7 @@ import {
   moveTrackNext,
   serializeRoomState,
   deserializeRoomState,
-  RESONANCE_PUSH_LIMIT_CHOICES,
-  RESONANCE_PUSH_LIMIT_DEFAULT,
+  RESONANCE_QUEUE_WINDOW,
   type ResonanceStateWire,
   type ResonanceIdentity,
   type ResonanceMode,
@@ -67,6 +69,7 @@ import {
   pickInviteHost,
   type ResonanceTransport,
 } from './transport'
+import { readResonanceJoinBehavior, readResonancePushLimit, readResonanceSettings } from './settings'
 
 export type ResonanceStatus = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed' | 'error'
 
@@ -105,6 +108,13 @@ export interface ResonanceSessionSnapshot {
   canControl: boolean
   /** 房主视角：正在申请控制播放的成员 */
   controlRequests: string[]
+  /**
+   * 各成员「还能加几首」（房主下发；-1 = 不限）。成员本地只有队列窗口，算不准自己/别人的额度。
+   * 房主自己按本机完整队列算，这里是同步镜像，UI 优先用它。
+   */
+  remainingQuotaByPeer: Record<string, number>
+  /** 「我推荐」模式当前轮到谁（房主下发；成员按窗口算会算错） */
+  turnPeerId: string | null
 }
 
 /** 播放适配器：由 App 注入，会话不直接依赖播放器实现 */
@@ -127,13 +137,19 @@ const HEARTBEAT_MS = 2000
 // 后台窗口的定时器会被 Electron 节流，在线判定放宽到 30s；真正断线由中转的 peer-left 兜底
 const OFFLINE_AFTER_MS = 30_000
 const PLAYBACK_PUSH_MS = 2000
+/** 队列分页请求的在途超时：超过就允许重发（限流丢包/房主卡顿时不至于永久卡页） */
+const QUEUE_PAGE_TIMEOUT_MS = 5000
+/** 「入房行为 = 等下一首」的判定门槛：房主已播过这么久才算「从中间接入」，值得跳过 */
+const JOIN_SKIP_MIN_POSITION_MS = 3000
+/** 控制申请的最短重发间隔：避免连点把房主待办刷满 */
+const CONTROL_REQUEST_COOLDOWN_MS = 30_000
 const CLOCK_PING_MS = 5000
 const CHAT_LIMIT = 200
 
 type EnvelopeKind =
   | 'hello' | 'welcome' | 'state' | 'queue-request' | 'queue-page' | 'queue-remove' | 'queue-move'
   | 'chat' | 'playback' | 'vote' | 'force-skip' | 'cannot-play' | 'leave' | 'dissolve'
-  | 'control-request' | 'control-grant' | 'control-revoke' | 'ping' | 'pong'
+  | 'control-request' | 'control-grant' | 'control-revoke' | 'next-request' | 'ping' | 'pong'
 
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
@@ -150,7 +166,8 @@ export class ResonanceSession {
   private snapshot: ResonanceSessionSnapshot = {
     status: 'idle', role: null, error: '', room: null, invite: '', fingerprint: '', chat: [],
     summary: null, clock: { offsetMs: 0, rttMs: 0 }, unplayable: {}, myTurn: false, live: false,
-    queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [], suspended: false,
+    queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [],
+    remainingQuotaByPeer: {}, turnPeerId: null, suspended: false,
   }
   private roomKey = ''
   /** 房间号：加密信封的 AAD 与中转校验都依赖它，成员在收到房主状态前就必须已知 */
@@ -164,16 +181,38 @@ export class ResonanceSession {
   private nextAnchorKey: string | null = null
   /** 成员侧：房主队列的总数与窗口偏移（用于 UI 显示与分页） */
   private queueMeta = { total: 0, offset: 0 }
-  /** 成员侧：已按需拉取的队列分页缓存（offset -> items） */
+  /** 成员侧：已按需拉取的队列分页缓存（全局偏移 -> items） */
   private queuePages = new Map<number, ResonanceTrack[]>()
+  /** 成员侧：已发出、还没收到回包的 queue-page 偏移 → 发出时间（防止滚动时对同一页重复请求） */
+  private pendingQueueRequests = new Map<number, number>()
+  /** 成员侧：上一次收到的窗口（绝对偏移 + 曲目 key 列表），用于判断房主是否增删了队列 */
+  private queueWindowOffset = 0
+  private queueWindowTotal = 0
+  private queueWindowKeys: string[] = []
   /** 已经上报过「无法播放」的曲目：同一首只报一次，避免状态→检查→上报→状态的风暴 */
   private reportedUnplayable = new Set<string>()
   /** 已经检查过可播性的曲目（含能播的）：同一首不重复解析/取流 */
   private checkedPlayable = new Set<string>()
+  /**
+   * 成员「入房行为 = 等下一首」：
+   * pendingJoinSkip = 入房后还在等第一条权威播放状态（此时还不知道该跳过哪首）；
+   * skipFirstApplyTrackKey = 已经认定「这首不跟」，等房主换歌后这一段等待自动结束。
+   */
+  private pendingJoinSkip = false
+  private skipFirstApplyTrackKey: string | null = null
   /** 出站限流窗口（毫秒级防风暴兜底） */
   private outboundWindow: number[] = []
   private timers: number[] = []
   private lastPlaybackPushAt = 0
+  /**
+   * 房主刚主动切歌时期望本机跟上的曲目 key。
+   * 房主点「下一首」后本机要现加载新歌，这段窗口内 readLocal 还返回上一首；
+   * 用它压过本机读数，避免 cursor 被反推回去。
+   * 生命周期：本机真的放到它、或 cursor 已经不是它了 → 清空（刻意不用超时，见 pushPlayback）。
+   */
+  private hostExpectedTrackKey: string | null = null
+  /** 本机上次发出「申请控制播放」的时间（防连点刷屏） */
+  private controlRequestedAt = 0
 
   setAdapter(adapter: ResonancePlaybackAdapter | null): void {
     this.adapter = adapter
@@ -272,6 +311,8 @@ export class ResonanceSession {
         port: candidate,
         selfPeerId: peerId,
         bridge: this.options.bridge,
+        // 设置项「允许局域网发现」：关掉后中转的 /discover 返回 404，别人扫不到这个房间
+        discoverable: readResonanceSettings().lanDiscovery,
       })
       try {
         await attempt.connect()
@@ -338,8 +379,19 @@ export class ResonanceSession {
     transport.onEnvelope((envelope, from) => this.handleEnvelope(envelope, from))
     transport.onPeerEvent(event => {
       if (event.type === 'closed') {
-        // 已经给出更具体的原因（如房主解散）时不要用泛化文案覆盖
-        this.update({ status: 'closed', live: false, error: this.snapshot.error || '与房主的连接已断开' })
+        // 与房主的连接断了（房主关窗/掉线/被踢）：房间不再可用。
+        // 必须把 room 清掉——上层据此判断「房间结束了」，用来还原本机播放列表等；
+        // 已经给出更具体的原因（如房主解散）时不要用泛化文案覆盖。
+        this.snapshot = {
+          ...this.snapshot,
+          status: 'closed',
+          live: false,
+          room: null,
+          summary: null,
+          myTurn: false,
+          error: this.snapshot.error || '与房主的连接已断开',
+        }
+        this.notify()
       }
     })
     try {
@@ -359,7 +411,16 @@ export class ResonanceSession {
     await this.refreshFingerprint()
     this.update({ status: 'connected', live: true })
     this.sendIdentity()
+    // 入房行为（设置项）：'next' = 不打断本机正在听的东西，等房主换下一首再开始跟随。
+    // 此刻还没收到房主状态，不知道「正在放哪首」，所以只挂一个待决标记；
+    // 第一条权威播放状态到达时再把它的 trackKey 记为「要跳过的这首」（见 playback 分支）。
+    this.pendingJoinSkip = this.readJoinBehavior() === 'next'
     this.startTimers()
+  }
+
+  /** 入房行为设置（'resume' = 续接当前进度，'next' = 等下一首）。读不到就当续接 */
+  private readJoinBehavior(): 'resume' | 'next' {
+    return readResonanceJoinBehavior()
   }
 
   /** 房主：解散房间 */
@@ -395,15 +456,24 @@ export class ResonanceSession {
     this.sendSeq = 0
     this.queueMeta = { total: 0, offset: 0 }
     this.queuePages.clear()
+    this.pendingQueueRequests.clear()
+    this.queueWindowOffset = 0
+    this.queueWindowTotal = 0
+    this.queueWindowKeys = []
     this.reportedUnplayable.clear()
     this.checkedPlayable.clear()
+    this.pendingJoinSkip = false
+    this.skipFirstApplyTrackKey = null
+    this.hostExpectedTrackKey = null
+    this.controlRequestedAt = 0
     this.outboundWindow = []
     // 注意：不要清空订阅者——创建/加入时都会 reset，而界面组件在房间生命周期内一直挂着，
     // 清掉会让「加入成功后界面不刷新」（数据已到位但 React 不再收到通知）。
     this.snapshot = {
       status: 'idle', role: null, error: '', room: null, invite: '', fingerprint: '', chat: [],
       summary: null, clock: { offsetMs: 0, rttMs: 0 }, unplayable: {}, myTurn: false, live: false,
-      queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [], suspended: false,
+      queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [],
+      remainingQuotaByPeer: {}, turnPeerId: null, suspended: false,
     }
     this.notify()
   }
@@ -411,16 +481,15 @@ export class ResonanceSession {
   // ── 房主权威操作 ────────────────────────────────────────────────────────────
   /** 单次推送上限（设置项，默认 200） */
   pushLimit(): number {
-    try {
-      const raw = Number(localStorage.getItem('waveforge:resonance-push-limit'))
-      return RESONANCE_PUSH_LIMIT_CHOICES.includes(raw as 100 | 200 | 500) ? raw : RESONANCE_PUSH_LIMIT_DEFAULT
-    } catch {
-      return RESONANCE_PUSH_LIMIT_DEFAULT
-    }
+    return readResonancePushLimit()
   }
 
-  /** 房主：推歌（共享歌单整单推送用 playlistPush） */
-  hostAddTracks(tracks: Array<Omit<ResonanceTrack, 'key' | 'seq' | 'requestedBy'>>, playlistPush = false): { ok: boolean; reason?: string; truncated?: number } {
+  /**
+   * 房主：推歌（共享歌单整单推送用 playlistPush）。
+   * `added` 是**真正入队**的条数：`addTracks` 还会因为队列上限（300）、配额、以及「队列里已有同一首」而少加，
+   * 所以不能拿「传入条数 − truncated」当结果去告诉用户（那会把 10 首说成 200 首）。
+   */
+  hostAddTracks(tracks: Array<Omit<ResonanceTrack, 'key' | 'seq' | 'requestedBy'>>, playlistPush = false): { ok: boolean; reason?: string; truncated?: number; added?: number } {
     const state = this.snapshot.room
     const peerId = this.identity?.peerId
     if (!state || !peerId) return { ok: false, reason: 'no-room' }
@@ -432,7 +501,7 @@ export class ResonanceSession {
     if (!result.ok) return { ok: false, reason: result.reason }
     this.commit(result.state)
     this.flushPending()
-    return { ok: true, truncated }
+    return { ok: true, truncated, added: result.added.length }
   }
 
   /**
@@ -532,15 +601,31 @@ export class ResonanceSession {
     return this.suspended
   }
 
-  /** 房主：下一首 */
+  /**
+   * 房主 / 获授权控制者：下一首。
+   * 房间的权威只有房主一个：获授权（或房主放开了成员控制）的成员点「下一首」时，
+   * 只向房主**发请求**，由房主推进队列并广播——否则该成员只会推进自己那份「窗口」副本，
+   * 界面上闪一下就被下一次状态广播拽回去，而且谁也不会真的换歌。
+   */
   hostNext(): void {
     const state = this.snapshot.room
     const peerId = this.identity?.peerId
     if (!state || !peerId) return
     if (!canControlPlayback(state, peerId, Date.now())) return
+    if (state.hostId !== peerId) {
+      this.broadcast({ kind: 'next-request', payload: {} })
+      return
+    }
     const advanced = advanceQueue(state)
     this.nextAnchorKey = advanced.cursor >= 0 ? advanced.queue[advanced.cursor]?.key || null : null
     this.commit(advanced)
+    // 房主本机也必须真的切到这首歌（否则 pushPlayback 会按本机读数把 cursor 反推回去）
+    const target = advanced.cursor >= 0 ? advanced.queue[advanced.cursor] : null
+    // 记住「期望本机跟上的曲目」：本机加载新歌期间 pushPlayback 用它压过 readLocal 的旧读数
+    this.hostExpectedTrackKey = target?.key || null
+    if (target) this.adapter?.apply({ trackKey: target.key, positionMs: 0, playing: true }, true)
+    // 立刻把新曲目播报给房间：pushPlayback 现在以房间 cursor 为曲目权威（不再读本机可能还没切换的播放器），
+    // 所以这里不会再把自己刚推进的 cursor 拽回去，而且成员能马上看到换歌。
     this.pushPlayback(true)
     // 换歌往往意味着轮次/额度松动了，顺手放行够格的预排
     this.flushPending()
@@ -584,11 +669,41 @@ export class ResonanceSession {
     const local = adapter.readLocal()
     if (!local) return
     this.lastPlaybackPushAt = at
-    const trackKey = local.trackKey || (state.cursor >= 0 ? state.queue[state.cursor]?.key || null : null)
+    const cursorTrackKey = state.cursor >= 0 ? state.queue[state.cursor]?.key || null : null
+    // 期望曲目的生命周期（刻意**不用超时**）：
+    // - 本机真的放到它 → 达成，清掉（之后按本机读数走）；
+    // - cursor 已经不是它了（又切了一首）→ 过期，清掉。
+    // 不用超时的原因：房主点「下一首」后本机若加载慢/加载失败，正确行为是「房间就该放这首」，
+    // 一旦超时回落本机旧读数，反而会把 cursor 拽回上一首、把成员拉回去。
+    if (this.hostExpectedTrackKey
+      && (local.trackKey === this.hostExpectedTrackKey || this.hostExpectedTrackKey !== cursorTrackKey)) {
+      this.hostExpectedTrackKey = null
+    }
+    // 曲目选择（按优先级）：
+    // 1. hostExpectedTrackKey：房主刚主动切歌，本机还在加载新歌（readLocal 仍返回上一首）。
+    //    这段时间必须以它为准，否则 applyPlayback 会按本机读数把刚推进的 cursor 反推回去；
+    // 2. 本机在放房间队列里的歌 → 用它：房主选/换队列里的歌，房间跟着走；
+    // 3. 房间已有当前曲目（cursor>=0）→ 保持它：房主在放队列之外的私歌，房间原地保持；
+    // 4. 房间还没开始 → 用本机正在放的歌，房间据此起播。
+    const localInQueue = Boolean(local.trackKey) && state.queue.some(track => track.key === local.trackKey)
+    const trackKey = this.hostExpectedTrackKey
+      || (localInQueue ? local.trackKey : cursorTrackKey)
+      || local.trackKey
+      || null
+    // 位置只在「本机正是在放要上报的这一首」时才有意义。
+    // trackKey 为空（房间还没起播、本机也拿不到 key）时无从比对，直接沿用本机读数。
+    const localMatchesRoom = !trackKey || local.trackKey === trackKey
     const previous = state.playback
+    // 房间曲目没变、但本机已经不在放它了（房主切去听队列之外的私歌）：**什么都不推**，
+    // 让房间保持上一次已知状态，成员各自按它外推。
+    // 若硬推上一次的位置又带 playing=true，那条状态自相矛盾（位置冻结却在播），
+    // 成员每次心跳都会算出漂移并硬 seek 回去；推 0 更会把人拉回开头。
+    if (!localMatchesRoom && previous?.trackKey === trackKey) return
     const playback: ResonancePlayback = {
       trackKey,
-      positionMs: Math.max(0, Math.round(local.positionMs || 0)),
+      // 换歌时本机还没加载出新曲目，位置按 0 上报（新曲目从头开始）；
+      // 只有「本机正是在放这一首」时位置才有意义。
+      positionMs: localMatchesRoom ? Math.max(0, Math.round(local.positionMs || 0)) : 0,
       playing: Boolean(local.playing),
       atHostClock: Date.now(),
       term: state.term,
@@ -604,9 +719,12 @@ export class ResonanceSession {
     this.broadcast({ kind: 'queue-request', payload: { tracks, position: options.position || 'append' } })
   }
 
-  /** 任一成员：拉取队列分页（房主本地切片；成员向房主请求） */
-  loadQueuePage(offset: number, limit = 50): void {
-    const start = Math.max(0, Math.floor(offset / limit) * limit)
+  /** 成员：拉取队列分页（房主本地切片；成员向房主请求） */
+  loadQueuePage(offset: number, limit = RESONANCE_QUEUE_WINDOW): void {
+    // 成员侧队列是「从房主当前曲目起的窗口 + 依次向后拉的分页」，
+    // 窗口的全局起点是房主 cursor（可能不是 50 的整数倍），所以这里**不能**把偏移对齐到 50 的倍数，
+    // 否则首屏偏移 40 的房间会被拉成偏移 0，把窗口内容整段覆盖掉。
+    const start = Math.max(0, Math.floor(Number(offset) || 0))
     if (this.snapshot.role === 'host') {
       const room = this.snapshot.room
       if (!room) return
@@ -615,7 +733,31 @@ export class ResonanceSession {
       this.notify()
       return
     }
+    // 同一页在途时不重复请求；但超过 5s 没回包（出站限流丢包、房主卡顿）就允许重试，
+    // 否则那一页会被永久卡住，队列停在「加载中…」占位行上再也拉不下来。
+    const requestedAt = this.pendingQueueRequests.get(start)
+    if (requestedAt !== undefined && Date.now() - requestedAt < QUEUE_PAGE_TIMEOUT_MS) return
+    this.pendingQueueRequests.set(start, Date.now())
     this.broadcast({ kind: 'queue-page', payload: { offset: start, limit } })
+  }
+
+  /**
+   * 成员：加载「已载入内容之后」的下一页。
+   * UI 只关心「还有没有更多」，不该自己算全局偏移——窗口起点是房主 cursor，
+   * 由会话层给出正确偏移（旧实现让 UI 传 `items.length`，窗口偏移非 0 时会错位）。
+   * 若视图中间存在缺口（上一次请求丢包留下的占位行），优先补缺口，避免它永远空着。
+   */
+  loadMoreQueue(limit = RESONANCE_QUEUE_WINDOW): void {
+    if (this.snapshot.role === 'host') return
+    const view = this.memberQueueView(this.snapshot.room)
+    if (view.items.length === 0) return
+    const gapIndex = view.items.findIndex(isQueuePlaceholder)
+    if (gapIndex >= 0) {
+      this.loadQueuePage(view.offset + gapIndex, limit)
+      return
+    }
+    if (view.offset + view.items.length >= this.queueMeta.total) return
+    this.loadQueuePage(view.offset + view.items.length, limit)
   }
 
   /** 移除队列曲目（房主任意；成员仅自己点的） */
@@ -664,7 +806,11 @@ export class ResonanceSession {
     const peerId = this.identity?.peerId
     if (!room || !peerId) return
     const next = grantControl(room, peerId, targetPeerId, Date.now(), durationMs)
-    if (next) this.commit(next)
+    if (next) {
+      this.commit(next)
+      // 授权即视为处理了这条申请，从待办里划掉
+      this.dismissControlRequest(targetPeerId)
+    }
   }
 
   /** 房主：收回控制权 */
@@ -676,10 +822,24 @@ export class ResonanceSession {
     if (next) this.commit(next)
   }
 
+  /** 房主：忽略某人的控制申请（不清除房间控制权，只从待办列表里划掉） */
+  dismissControlRequest(peerId: string): void {
+    if (this.snapshot.role !== 'host') return
+    if (!this.snapshot.controlRequests.includes(peerId)) return
+    this.update({ controlRequests: this.snapshot.controlRequests.filter(id => id !== peerId) })
+  }
+
   /** 成员：申请控制播放（房主会收到一条申请） */
   requestControl(): void {
     if (this.snapshot.role !== 'member') return
+    // 防重复申请：已经申请过、或已经有控制权就不再发
+    if (this.snapshot.canControl) return
+    if (this.controlRequestedAt && Date.now() - this.controlRequestedAt < CONTROL_REQUEST_COOLDOWN_MS) return
+    this.controlRequestedAt = Date.now()
     this.broadcast({ kind: 'control-request', payload: {} })
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: '已向房主申请控制播放', type: 'info' } }))
+    }
   }
 
   /** 本机解析不了某首歌：记录并在房间里声明（房主界面据此提示，成员据此显示静音跟随） */
@@ -740,32 +900,81 @@ export class ResonanceSession {
   private viewOf(room: ResonanceRoomState) {
     const peerId = this.identity?.peerId || ''
     const isHost = this.snapshot.role === 'host'
+    // 房主：本地有完整队列，直接算；成员：只有窗口，用房主下发的权威额度/轮次
+    const remainingQuotaByPeer = isHost
+      ? Object.fromEntries(room.members.map(member => {
+        const value = remainingAddQuota(room, member.peerId)
+        return [member.peerId, Number.isFinite(value) ? value : -1]
+      }))
+      : this.snapshot.remainingQuotaByPeer
+    const turnPeerId = isHost ? currentTurnPeerId(room) : this.snapshot.turnPeerId
     return {
       room,
       summary: roomSummary(room, Date.now()),
-      myTurn: this.computeMyTurn(room),
+      myTurn: room.mode === 'round-robin' && Boolean(peerId) && turnPeerId === peerId,
       queue: isHost
         ? { items: room.queue, offset: 0, total: room.queue.length }
-        : { items: this.memberQueueItems(), offset: 0, total: this.queueMeta.total },
+        : this.memberQueueView(room),
       canControl: canControlPlayback(room, peerId, Date.now()),
+      remainingQuotaByPeer,
+      turnPeerId,
       suspended: Boolean(room.suspended),
     }
   }
 
-  /** 成员侧队列视图：窗口 + 已拉取分页，按偏移拼起来（缺口用空位留给 UI 继续拉） */
-  private memberQueueItems(): ResonanceTrack[] {
-    const items = [...this.snapshot.queue?.items || []]
-    if (items.length === 0 && this.snapshot.room) items.push(...this.snapshot.room.queue)
-    const offsets = [...this.queuePages.keys()].sort((a, b) => a - b)
-    for (const offset of offsets) {
-      const page = this.queuePages.get(offset) || []
+  /**
+   * 成员侧队列视图：窗口 + 已拉取分页，按**全局偏移**拼起来。
+   * 传入 room 而不是读 this.snapshot.room：调用点（state 分支）已经拿到新状态，
+   * 读快照会慢一帧，导致窗口起点/行号/「已载入」在每次切歌时闪一下错位。
+   */
+  private memberQueueView(room: ResonanceRoomState | null): { items: ResonanceTrack[]; offset: number; total: number } {
+    const windowOffset = this.queueMeta.offset
+    const windowItems = room?.queue || []
+    const items: ResonanceTrack[] = []
+    // 窗口不一定从 0 开始（房主可能已经播到第 N 首），窗口内容按下标对应全局位置写入
+    const writeAt = (globalOffset: number, page: ResonanceTrack[]) => {
+      // 低于当前窗口的分页已经被窗口取代（或队列被增删过），直接丢弃，不写负下标
+      if (globalOffset < windowOffset) return
       for (let index = 0; index < page.length; index += 1) {
-        const target = offset + index
-        if (target < items.length) items[target] = page[index]
-        else items.push(page[index])
+        items[globalOffset - windowOffset + index] = page[index]
       }
     }
-    return items
+    writeAt(windowOffset, windowItems)
+    for (const offset of [...this.queuePages.keys()].sort((a, b) => a - b)) {
+      writeAt(offset, this.queuePages.get(offset) || [])
+    }
+    // 缺口（undefined）用占位行占住下标，避免后面的曲目整体前移、与真实位置错位
+    for (let index = 0; index < items.length; index += 1) {
+      if (!items[index]) items[index] = queuePlaceholderAt(windowOffset + index)
+    }
+    return { items, offset: windowOffset, total: this.queueMeta.total }
+  }
+
+  /**
+   * 房主队列被增删后，成员按绝对偏移缓存的分页会整体错位（甚至出现房里已不存在的幽灵行），
+   * 必须作废重拉。判据：总数变了，或窗口在绝对坐标上的重叠部分对不上。
+   * 只移动 cursor（切歌）不改变绝对位置，因此不会误清缓存。
+   */
+  private revalidateQueuePages(offset: number, items: ResonanceTrack[], total: number): void {
+    const sameTotal = total === this.queueWindowTotal
+    let shifted = false
+    if (sameTotal && this.queueWindowKeys.length > 0 && items.length > 0) {
+      const start = Math.max(offset, this.queueWindowOffset)
+      const end = Math.min(offset + items.length, this.queueWindowOffset + this.queueWindowKeys.length)
+      for (let absolute = start; absolute < end; absolute += 1) {
+        if (this.queueWindowKeys[absolute - this.queueWindowOffset] !== items[absolute - offset]?.key) {
+          shifted = true
+          break
+        }
+      }
+    }
+    if (!sameTotal || shifted) {
+      this.queuePages.clear()
+      this.pendingQueueRequests.clear()
+    }
+    this.queueWindowTotal = total
+    this.queueWindowOffset = offset
+    this.queueWindowKeys = items.map(item => item.key)
   }
 
   /** 房主：提交新状态并广播 */
@@ -773,15 +982,16 @@ export class ResonanceSession {
     this.snapshot = { ...this.snapshot, ...this.viewOf(state) }
     this.notify()
     this.broadcastState()
-    const current = state.cursor >= 0 ? state.queue[state.cursor] : null
     this.adapter?.setQueue(state.queue, Math.max(0, state.cursor))
-    void current
   }
 
-  private computeMyTurn(state: ResonanceRoomState): boolean {
-    const peerId = this.identity?.peerId
-    if (!peerId || state.mode !== 'round-robin') return false
-    return currentTurnPeerId(state) === peerId
+  /**
+   * 按 peerId 查房间名册里的昵称（权威值）。
+   * 用于任何「显示某成员说了什么/做了什么」的地方——发送方自报的昵称可以被伪造成别人。
+   */
+  private memberNicknameOf(peerId: string): string {
+    const member = this.snapshot.room?.members.find(item => item.peerId === peerId)
+    return member?.nickname || ''
   }
 
   private broadcastState(): void {
@@ -866,12 +1076,43 @@ export class ResonanceSession {
       }
       case 'state':
       case 'playback': {
+        // 房主也会收到「获授权控制者」下发的播放状态：那就是新的权威，
+        // 房主必须①更新房间状态 ②让自己本机跟上 ③转发给其他成员。
+        // 其余来自成员的状态消息一律丢弃（房间权威只有房主一个）。
+        if (isHost && kind === 'playback') {
+          const room = this.snapshot.room
+          if (!room || !canControlPlayback(room, fromPeerId, Date.now())) return
+          const incoming = payload as ResonancePlayback
+          // 时间戳用**房主自己的时钟**重新盖章：控制者的 atHostClock 是他本机的时间，
+          // 直接转发会让成员按错误的基准外推进度（房主时钟才是全房间的基准）。
+          const restamped: ResonancePlayback = { ...incoming, atHostClock: Date.now() }
+          const appliedByHost = applyPlayback(room, restamped, fromPeerId)
+          if (!appliedByHost.ok) return
+          this.patchRoom(() => appliedByHost.state)
+          // 房主本机跟着控制者：否则房主自己会停在旧曲目，下一次 pushPlayback 又把 cursor 拽回去
+          const position = this.projectPosition(restamped)
+          this.adapter?.apply(
+            { trackKey: restamped.trackKey || '', positionMs: position, playing: restamped.playing },
+            appliedByHost.hard,
+          )
+          // 转发给全体成员（含发送者自己，让他的界面与权威状态对齐）
+          this.broadcast({ kind: 'playback', payload: restamped })
+          return
+        }
         if (isHost) return
         if (kind === 'state') {
           const wire = payload as ResonanceStateWire
           if (!wire || wire.roomId !== this.roomId) return
           const next = deserializeRoomState(wire)
+          // 先按新窗口校正分页缓存（房主增删过队列就作废重拉），再更新 queueMeta 供视图拼装
+          this.revalidateQueuePages(wire.queueOffset, next.queue, wire.queueTotal)
           this.queueMeta = { total: wire.queueTotal, offset: wire.queueOffset }
+          // 成员侧只有窗口，额度/轮次必须用房主下发的权威值（见 ResonanceStateWire 注释）
+          this.snapshot = {
+            ...this.snapshot,
+            remainingQuotaByPeer: wire.remainingQuotaByPeer || {},
+            turnPeerId: wire.turnPeerId ?? null,
+          }
           const previous = this.snapshot.room
           const previousTrack = previous?.playback?.trackKey ?? null
           const nextTrack = next.playback?.trackKey ?? null
@@ -890,6 +1131,20 @@ export class ResonanceSession {
         const applied = applyPlayback(local, playback, fromPeerId)
         if (!applied.ok) return
         this.patchRoom(() => applied.state)
+        // 「入房行为 = 等下一首」：只有「房主已经放到这首的中间」才跳过——
+        // 那才是会打断成员正在听的东西的情形。位置门槛与播放态无关：
+        // 房主暂停在中间同样是「同一首的中间」，成员跟过去也只会听到一段静音。
+        // 房主还没起播（位置≈0）则照常跟随，不算打断。
+        if (this.pendingJoinSkip) {
+          this.pendingJoinSkip = false
+          const midSong = Boolean(playback.trackKey) && playback.positionMs > JOIN_SKIP_MIN_POSITION_MS
+          if (midSong) {
+            this.skipFirstApplyTrackKey = playback.trackKey
+            return
+          }
+        }
+        if (this.skipFirstApplyTrackKey && playback.trackKey === this.skipFirstApplyTrackKey) return
+        this.skipFirstApplyTrackKey = null
         const position = this.projectPosition(playback)
         this.adapter?.apply({ trackKey: playback.trackKey || '', positionMs: position, playing: playback.playing }, applied.hard)
         // 房主换了曲目 → 本机判断能否播放（能播就正常跟，不能播就静音跟随并上报一次）
@@ -915,7 +1170,10 @@ export class ResonanceSession {
       case 'chat': {
         const text = String(payload?.text || '').slice(0, 500)
         if (!text) return
-        const nickname = String(payload?.nickname || '听众')
+        // 昵称一律取房间名册里的**权威值**（按中转分配的 fromPeerId 查，那个 id 无法伪造）。
+        // 不能采信 payload.nickname：它是发送方自报的，任何人都能冒用他人（含房主）的名义发言，
+        // 而房主转发时又保留这个昵称，伪造内容会扩散给全房间。
+        const nickname = this.memberNicknameOf(fromPeerId) || String(payload?.nickname || '听众')
         this.pushChat({ peerId: fromPeerId, nickname, text, at: Date.now(), self: false })
         // 房主把消息转给「除发送者外」的成员，并保留原作者昵称（成员不会看到自己的话被回声，
         // 也不会看到自己的话变成房主说的）
@@ -929,7 +1187,7 @@ export class ResonanceSession {
         if (isHost) {
           const state = this.snapshot.room
           if (!state) return
-          const result = castSkipVote(state, this.memberPeerOf(fromPeerId), target)
+          const result = castSkipVote(state, fromPeerId, target)
           if (!result.ok) return
           this.commit(result.state)
           if (result.passed) this.hostNext()
@@ -947,6 +1205,7 @@ export class ResonanceSession {
           return
         }
         const items = Array.isArray(payload?.items) ? payload.items : []
+        this.pendingQueueRequests.delete(offset)
         this.queuePages.set(offset, items)
         if (this.snapshot.room) {
           this.snapshot = { ...this.snapshot, ...this.viewOf(this.snapshot.room) }
@@ -970,6 +1229,17 @@ export class ResonanceSession {
         if (!room) return
         const result = moveTrackNext(room, fromPeerId, String(payload?.trackKey || ''))
         if (result.ok) this.commit(result.state)
+        return
+      }
+      case 'next-request': {
+        if (!isHost) return
+        const room = this.snapshot.room
+        // 只接受有控制权的成员（获授权 / 房主放开了成员控制）——canControlPlayback 就是这条判据
+        if (!room || !canControlPlayback(room, fromPeerId, Date.now())) return
+        const advanced = advanceQueue(room)
+        this.commit(advanced)
+        this.pushPlayback(true)
+        this.flushPending()
         return
       }
       case 'control-request': {
@@ -1049,25 +1319,16 @@ export class ResonanceSession {
   }
 
   /**
-   * 成员身份归一：房间成员表里可能同时存在「中转 id」与「会话 id」两种身份。
-   * 只要其中一个在成员表里，就视作同一成员（兼容成员身份采纳前后到达的消息）。
+   * 把房主上报的进度换算成本机此刻应播到的位置。
+   *
+   * `atHostClock` 是房主的 `Date.now()`，本机时钟未必与房主一致（两台机器的墙钟差可能达数百毫秒到数秒），
+   * 因此要用 ping/pong 估出的 `offsetMs`（= 房主时钟 − 本机时钟）把它先换算到本机时间轴：
+   *   elapsed = 本机现在 − (房主上报时刻 + (本机时钟 − 房主时钟)) = Date.now() − atHostClock + offsetMs
+   * 早期这里写成了 `offsetMs * 0`（等于没有校准），墙钟差超过 0.6s 时会持续触发纠偏 seek。
    */
-  private memberPeerOf(candidate: string): string {
-    const room = this.snapshot.room
-    if (!room) return candidate
-    if (room.members.some(member => member.peerId === candidate)) return candidate
-    return candidate
-  }
-
-  /** 成员的权威来源：房间状态里的 hostId */
-  private authorityPeerId(): string {
-    return this.snapshot.room?.hostId || this.transport?.hostPeerId || ''
-  }
-
-  /** 把房主上报的进度换算成本机此刻应播到的位置 */
   projectPosition(playback: ResonancePlayback): number {
     if (!playback.playing) return playback.positionMs
-    const elapsed = Date.now() - playback.atHostClock + this.snapshot.clock.offsetMs * 0
+    const elapsed = Date.now() - playback.atHostClock + this.snapshot.clock.offsetMs
     return Math.max(0, playback.positionMs + Math.max(0, elapsed))
   }
 
@@ -1152,6 +1413,20 @@ export class ResonanceSession {
 }
 
 let singleton: ResonanceSession | null = null
+/** 单例被创建/销毁时的通知（供 App 重新订阅：插件禁用会销毁单例，旧订阅会永久失效） */
+const sessionLifecycleListeners = new Set<() => void>()
+
+function notifySessionLifecycle(): void {
+  for (const listener of [...sessionLifecycleListeners]) {
+    try { listener() } catch { /* 单个订阅者异常不影响其它 */ }
+  }
+}
+
+/** 订阅「会话单例被替换/销毁」：App 的播放列表还原订阅要跟着重新挂到新实例上 */
+export function subscribeResonanceSessionLifecycle(listener: () => void): () => void {
+  sessionLifecycleListeners.add(listener)
+  return () => { sessionLifecycleListeners.delete(listener) }
+}
 
 /** 调试用：在控制台/自动化里查看房间状态与握手细节（只读） */
 function exposeDebugHandle(session: ResonanceSession): void {
@@ -1165,6 +1440,7 @@ export function getResonanceSession(options: SessionOptions = {}): ResonanceSess
     const bridge = options.bridge || (typeof window !== 'undefined' ? window.electron?.resonance : undefined)
     singleton = new ResonanceSession({ bridge })
     exposeDebugHandle(singleton)
+    notifySessionLifecycle()
   }
   exposeDebugHandle(singleton)
   return singleton
@@ -1173,6 +1449,7 @@ export function getResonanceSession(options: SessionOptions = {}): ResonanceSess
 export function clearResonanceSession(): void {
   singleton?.reset()
   singleton = null
+  notifySessionLifecycle()
 }
 
 export { canonicalTrackKey, clampQuota, clearVote, RESONANCE_MAX_MEMBERS }

@@ -394,6 +394,27 @@ describe('共振房间模型', () => {
       const advanced = advanceQueue({ ...state, cursor: 0 })
       expect(advanced.cursor).toBe(-1)
     })
+
+    it('队列放到底也会清空跳过投票（不留残留票）', () => {
+      let state = room('party')
+      const seeded = addTracks(state, 'host', [track('A', ['x'])], 10)
+      state = seeded.ok ? seeded.state : state
+      const voted = castSkipVote({ ...state, cursor: 0 }, 'host', 'a|x')
+      expect(voted.ok && voted.state.vote).toBeTruthy()
+      const advanced = advanceQueue({ ...(voted.ok ? voted.state : state), cursor: 0 })
+      expect(advanced.vote).toBeNull()
+    })
+
+    it('成员退出时把他的票从投票名单里划掉（阈值按在线人数算）', () => {
+      let state = room('party')
+      const joined = joinRoom(state, identity('b', '乙'), 20)
+      state = joined.ok ? joined.state : state
+      const voted = castSkipVote(state, 'b', 'k1')
+      expect(voted.ok && voted.state.vote?.by).toEqual(['b'])
+      const outcome = leaveRoom(voted.ok ? voted.state : state, 'b')
+      // 走掉的人不该继续代表剩下的人投票
+      expect(outcome.state.vote).toBeNull()
+    })
   })
 
   describe('状态上报', () => {

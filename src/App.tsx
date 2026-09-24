@@ -65,8 +65,8 @@ import { Settings, Sparkles, Image as ImageIcon, Radio } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
 import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
-import { canonicalTrackKey, type ResonancePlatformBadge, type ResonanceTrack } from './features/resonance/model'
-import { getResonanceSession } from './features/resonance/session'
+import { canonicalTrackKey, isQueuePlaceholder, type ResonancePlatformBadge, type ResonanceTrack } from './features/resonance/model'
+import { getResonanceSession, subscribeResonanceSessionLifecycle } from './features/resonance/session'
 import { resolveLocalTrack, type ResonanceLocalTrack } from './features/resonance/matcher'
 import { readResonanceEntryMode, rememberResonanceEntryMode } from './features/resonance/settings'
 import { RESONANCE_PUSH_EVENT, setResonanceSuspended, songToResonanceTrack } from './features/resonance/push'
@@ -2509,6 +2509,11 @@ function App() {
         audioPlayer.seek(0)
         // audioPlayer 可能在 togglePlay 之前的 play 方法中已经切换了播放状态
         audioPlayer.togglePlay()
+      } else if (isResonanceHost()) {
+        // 房主在共振房间里：一首自然放完要推进**房间队列**，不能走本机 handleNext。
+        // 房间内本机播放列表被压成单曲（见 resonanceAdapter.apply），走 handleNext 只会
+        // 在那一首上回绕，房间 cursor 永远不动，成员会被反复拉回开头。
+        getResonanceSession().hostNext()
       } else {
         // 防止在歌曲变化时快速连续调用导致竞态条件
         handleNextRef.current()
@@ -5665,10 +5670,6 @@ function App() {
     }
     return resolved
   }, [resonancePlatforms])
-  /** 房间曲目 → 本机可播版本（供共振界面显示「你能播/你播不了」） */
-  const resolveResonanceTrack = useCallback(async (track: ResonanceTrack) => (
-    resolveResonanceTrackCached(track)
-  ), [resolveResonanceTrackCached])
 
   /**
    * 预热房间里的下一首：与其它模式的「下一首预载」同一套内容（歌词 + 封面 + 音频地址）。
@@ -5680,6 +5681,8 @@ function App() {
   const resonancePreloadedRef = useRef<Set<string>>(new Set())
   const preloadResonanceTrack = useCallback((track?: ResonanceTrack) => {
     if (!track?.key) return
+    // 成员队列里「还没拉到的空位」是占位行，不是真歌：解析/预热它只会白跑一次搜索
+    if (isQueuePlaceholder(track)) return
     if (resonancePreloadedRef.current.has(track.key)) return
     resonancePreloadedRef.current.add(track.key)
     void (async () => {
@@ -5713,6 +5716,44 @@ function App() {
     })()
   }, [resolveResonanceTrackCached])
 
+  /**
+   * 共振换歌会把本机播放列表覆写成「这一首」（见下方 apply 的 handleSongSelect 调用）。
+   * 这是房间语义决定的（队列由房主权威驱动，不该和本机私有列表打架），但**退出房间后必须还原**，
+   * 否则用户的播放列表就只剩房间里最后一首，丢掉了他原来的正在播放/待播内容。
+   * 这里在第一次被共振改写前存一份快照，房间结束时还回去。
+   *
+   * 还原前会确认「本机播放列表还是共振最后写进去的那一份」，用来兜住两种真实情形：
+   * 挂起期间用户在别的模式里听了自己的歌、或退出前刚在房间里换过歌——那些内容不该被旧快照盖掉。
+   * 注意：房间内本机列表本就由房间权威接管（用户自己选的歌下一次广播就会被覆盖），
+   * 所以退出时回到进房前的状态是预期行为，不属于「丢掉用户操作」。
+   */
+  const resonancePlaylistBackupRef = useRef<{ playlist: Song[]; currentIndex: number } | null>(null)
+  const resonanceManagedPlaylistRef = useRef<Song[] | null>(null)
+  const restoreResonancePlaylist = useCallback(() => {
+    const backup = resonancePlaylistBackupRef.current
+    const managed = resonanceManagedPlaylistRef.current
+    resonancePlaylistBackupRef.current = null
+    resonanceManagedPlaylistRef.current = null
+    if (!backup) return
+    // 列表已不是共振写进去的那一份（用户在挂起期间或退出前放了自己的歌）→ 尊重用户当前内容，不动
+    const current = playlistRef.current
+    const untouched = Boolean(managed)
+      && current.length === managed!.length
+      && current.every((song, index) => getSongKey(song) === getSongKey(managed![index]))
+    if (!untouched) return
+    setPlaylist(backup.playlist)
+    setCurrentIndex(backup.currentIndex)
+    playlistRef.current = backup.playlist
+    currentIndexRef.current = backup.currentIndex
+    bumpQueueRevision()
+    // 界面（currentSong 由 playlist/currentIndex 派生）已经回到老歌，引擎也得跟上，
+    // 否则会出现「控件显示 A、实际在放房间那首 B」的不一致。
+    const restored = backup.playlist[backup.currentIndex]
+    if (restored) void loadAndPlaySongRef.current(restored, backup.currentIndex, backup.playlist)
+  }, [bumpQueueRevision])
+  const loadAndPlaySongRef = useRef(loadAndPlaySong)
+  loadAndPlaySongRef.current = loadAndPlaySong
+
   /** 共振播放适配器：读本机播放 / 对齐房主权威进度 / 解析本机可播性 */
   const createResonanceAdapter = useCallback((hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ({
     readLocal: () => {
@@ -5733,14 +5774,33 @@ function App() {
         if (!track) return
         const resolved = await resolveResonanceTrackCached(track)
         if (!resolved.playable || !resolved.song) {
-          // 静音跟随：不加载也不出声，避免「假装在听」，原因由共振界面显示
+          // 静音跟随：本机播不了这首（没会员/没版权/没登录），不加载也不出声，
+          // 但必须**把本机正在响的那一首停掉**——房间已经换歌，用户这边上一首还在放，
+          // 与界面上的「已静音跟随 · 原因」自相矛盾（设计 §12 明确否定这种割裂）。
+          // 判定一律看「音频元素此刻是否真的在响」，不看 React 状态（apply 是异步的，状态可能过期）；
+          // 在响就走播放器自己的 togglePlay 暂停（它会一并取消在途过渡、清理 gapless 备用轨、
+          // 挂起音频上下文），而不是裸 pause 留下半截过渡。反之什么都不做，避免把已停的东西重新起播。
+          const unplayableAudio = audioPlayerRef.current
+          if (unplayableAudio?.isExternalPlaybackActive?.()) {
+            // 外部播放源（WebView2/AirPlay）：本机元素恒为 paused，需要显式停掉播放面
+            unplayableAudio.disableExternalPlayback()
+          } else {
+            const engineEl = unplayableAudio?.getAudioElement?.()
+            if (engineEl && !engineEl.paused) unplayableAudio?.togglePlay()
+          }
           hooks.onUnplayable(track, resolved)
           return
         }
         const sameSong = Boolean(currentSong && isSameSong(currentSong, resolved.song))
         if (!sameSong) {
+          // 第一次被共振改写播放列表前先留一份备份，退出房间时还原（房间队列语义不受影响）
+          if (!resonancePlaylistBackupRef.current) {
+            resonancePlaylistBackupRef.current = { playlist: [...playlistRef.current], currentIndex: currentIndexRef.current }
+          }
           // 走既有播放入口（ref 稳定引用）：换歌 + 交给统一播放链
           handleSongSelectRef.current(resolved.song, [resolved.song])
+          // 记下共振写进本机的这一份：还原时据此判断「用户有没有自己动过播放列表」
+          resonanceManagedPlaylistRef.current = [resolved.song]
           // 换歌后顺带把房间里的下一首也预热掉（与其它模式的下一首预载同一套：歌词 + 封面 + 音频地址）
           const index = room.queue.items.findIndex(item => item.key === playback.trackKey)
           if (index >= 0) preloadResonanceTrack(room.queue.items[index + 1])
@@ -5751,7 +5811,8 @@ function App() {
         const drift = Math.abs((audioPlayer.playbackTimeStore.getSnapshot().currentTime || 0) - target)
         // 硬同步（换歌 / 暂停切换 / 房主拖进度）立即对齐；软同步只在漂移超过 0.6s 时纠偏
         if (hard || drift > 0.6) audio.seek(target)
-        if (playback.playing !== Boolean(isPlaying)) audio.togglePlay()
+        // 用 ref 读播放态：apply 是异步的（上面 await 过解析），闭包里的 isPlaying 可能已过期
+        if (playback.playing !== Boolean(isPlayingRef.current)) audio.togglePlay()
       })()
     },
     setQueue: (tracks: ResonanceTrack[], startIndex: number) => {
@@ -5766,6 +5827,16 @@ function App() {
     },
   }), [audioPlayer, currentSong, isPlaying, resolveResonanceTrackCached, preloadResonanceTrack])
   isPlayingRef.current = isPlaying
+  /**
+   * 本机是否是「正在驱动房间的房主」。
+   * 用在自然放完（ended）的分支里：房主在房间里时，切歌必须推进房间队列而不是本机单曲列表。
+   * 挂起的房间不算（房主在听自己的歌，本机行为保持不变）。
+   */
+  const isResonanceHost = useCallback(() => {
+    const snapshot = getResonanceSession().getSnapshot()
+    return snapshot.role === 'host' && snapshot.live && Boolean(snapshot.room) && !snapshot.room?.suspended
+  }, [])
+
   const lastMediaControlRef = useRef<{ group: string; time: number } | null>(null)
   // 遥控器音量/静音状态
   const mutedRef = useRef(false)
@@ -5791,9 +5862,14 @@ function App() {
       else if (action === 'pause' && currentlyPlaying) audioPlayer.togglePlay()
       else if (action === 'toggle') audioPlayer.togglePlay()
     } else if (action === 'next') {
-      handleNext()
+      // 共振房间内：切歌必须推进房间队列。
+      // 房间里本机列表被压成单曲，走 handleNext 只会在那一首上回绕（还会把全体成员硬拉回 0:00），
+      // 所以遥控器/媒体键的「下一曲」要和界面上的「下一首」按钮走同一条路径。
+      if (isResonanceHost()) getResonanceSession().hostNext()
+      else handleNext()
     } else if (action === 'prev') {
-      handlePrevious()
+      // 房间里的「上一曲」没有对应语义（队列由房主向前推进），不做本机回绕
+      if (!isResonanceHost()) handlePrevious()
     } else if (action === 'select-index') {
       const index = Number(payload)
       const target = playlistRef.current[index]
@@ -6306,6 +6382,47 @@ function App() {
     window.addEventListener(RESONANCE_PUSH_EVENT, handler)
     return () => window.removeEventListener(RESONANCE_PUSH_EVENT, handler)
   }, [addToast])
+
+  /**
+   * 播放/暂停、换歌时**立即**把权威状态推给房间。
+   *
+   * session 里那条 2s 心跳只是兜底；设计 §6 承诺「播放/暂停/seek 是硬同步（立即对齐）」，
+   * 但此前 App 侧一处都没调用 pushPlayback，实际同步延迟就等于心跳周期（最坏 2s）。
+   * 房主与「获授权控制播放的成员」都要推：canControl 已经在 session 内校验，
+   * 没有控制权时它会自己 return。
+   */
+  useEffect(() => {
+    const session = getResonanceSession()
+    const snapshot = session.getSnapshot()
+    if (snapshot.role !== 'host' && !snapshot.canControl) return
+    session.pushPlayback(true)
+  }, [isPlaying, currentSong])
+
+  // 共振房间结束（主动退出 / 解散 / 被移出 / 房主离开）后，把被共振覆写的本机播放列表还原回去。
+  // 房间内「退出房间」按钮直接调 session.leave()，不经过 App，所以这里订阅会话状态统一收口。
+  // 也要跟着「单例被替换」重新订阅：插件被禁用会 clearResonanceSession() 销毁单例，
+  // 旧订阅此后永远不会再收到通知，还原就再也不会触发（本机播放列表会永远停在房间那首）。
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null
+    let hadRoom = false
+    const attach = () => {
+      unsubscribe?.()
+      const session = getResonanceSession()
+      hadRoom = Boolean(session.getSnapshot().room)
+      unsubscribe = session.subscribe(() => {
+        const snapshot = session.getSnapshot()
+        const hasRoom = Boolean(snapshot.room)
+        if (hadRoom && !hasRoom) restoreResonancePlaylist()
+        hadRoom = hasRoom
+      })
+    }
+    attach()
+    const offLifecycle = subscribeResonanceSessionLifecycle(attach)
+    return () => {
+      offLifecycle()
+      unsubscribe?.()
+    }
+  }, [restoreResonancePlaylist])
 
   useEffect(() => {
     window.electron?.desktopPlayer?.pushState({ accentColor: coverPalette[0] || dominantColor })
