@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Check, X } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
@@ -51,15 +51,59 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
     return () => window.removeEventListener('accentColorChanged', handleAccentColorChange)
   }, [])
   
-  const handleBlurChange = (value: number) => {
-    console.log('[BlurAdjustModal] 模糊度改变:', value)
-    setBlurAmount(value)
-    // 实时更新
+  // 拖动滑块时每步都做「同步 localStorage 写 + 全局事件」代价很高：
+  // 事件监听方（HomeView / DesktopView）会 setState，而 cardBlurAmount 又驱动
+  // backdrop-filter: blur() —— 首页最多上百张卡片会跟着重算样式。输入设备一帧可派发
+  // 多个 change，这里用 rAF 合并成每帧最多一次提交（与 PlaylistDetailPanel 的滚动
+  // 处理同款做法）；localStorage 只在松手/保存时落盘（其他组件仅在挂载时读取它）。
+  const pendingBlurRef = useRef<number | null>(null)
+  const blurFrameRef = useRef<number | null>(null)
+
+  const commitBlur = useCallback((value: number) => {
     localStorage.setItem('cardBlurAmount', value.toString())
-    const event = new CustomEvent('cardBlurAmountChanged', { detail: value })
-    console.log('[BlurAdjustModal] 触发事件:', event)
-    window.dispatchEvent(event)
-  }
+    window.dispatchEvent(new CustomEvent('cardBlurAmountChanged', { detail: value }))
+  }, [])
+
+  const handleBlurChange = useCallback((value: number) => {
+    setBlurAmount(value)
+    pendingBlurRef.current = value
+    if (blurFrameRef.current !== null) return
+    blurFrameRef.current = window.requestAnimationFrame(() => {
+      blurFrameRef.current = null
+      const pending = pendingBlurRef.current
+      if (pending === null) return
+      pendingBlurRef.current = null
+      // 每帧最多一次同步落盘 + 事件派发（原来每个 change 事件都做一遍）；
+      // 落盘与派发必须成对，否则「拖动后直接关闭」会丢掉 localStorage 值。
+      commitBlur(pending)
+    })
+  }, [commitBlur])
+
+  // 以指定值立即提交（丢弃尚未执行的帧）：用于保存/取消这类「必须立刻确定最终值」的路径。
+  // 必须先取消帧并清空 pending，否则同一帧稍后还会再派发一次拖动的中间值覆盖它。
+  const commitBlurNow = useCallback((value: number) => {
+    if (blurFrameRef.current !== null) {
+      window.cancelAnimationFrame(blurFrameRef.current)
+      blurFrameRef.current = null
+    }
+    pendingBlurRef.current = null
+    commitBlur(value)
+  }, [commitBlur])
+
+  // 卸载时提交最后一次待处理值（落盘 + 派发，保持与拖动路径一致）：否则 rAF 被取消，
+  // localStorage 与监听方会停在上一个已派发的中间值上。
+  useEffect(() => () => {
+    if (blurFrameRef.current !== null) {
+      window.cancelAnimationFrame(blurFrameRef.current)
+      blurFrameRef.current = null
+    }
+    const pending = pendingBlurRef.current
+    pendingBlurRef.current = null
+    if (pending !== null) {
+      localStorage.setItem('cardBlurAmount', pending.toString())
+      window.dispatchEvent(new CustomEvent('cardBlurAmountChanged', { detail: pending }))
+    }
+  }, [])
   
   const handleSliderMouseMove = (e: React.MouseEvent<HTMLInputElement>) => {
     if (isDragging) {
@@ -84,8 +128,8 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
   }
   
   const handleSave = () => {
-    localStorage.setItem('cardBlurAmount', blurAmount.toString())
-    window.dispatchEvent(new CustomEvent('cardBlurAmountChanged', { detail: blurAmount }))
+    // 以当前滑块值立即落盘（同步派发事件，在 onClose 之前生效）
+    commitBlurNow(blurAmount)
     onClose()
     // 保存后重新打开设置面板
     setTimeout(() => {
@@ -94,8 +138,8 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
   }
   
   const handleCancel = () => {
-    // 恢复到初始值
-    handleBlurChange(initialBlurAmount)
+    // 恢复到初始值：必须同步提交，否则紧接着的 onClose 卸载会让 rAF 丢失
+    commitBlurNow(initialBlurAmount)
     onClose()
     // 取消后也重新打开设置面板
     setTimeout(() => {
