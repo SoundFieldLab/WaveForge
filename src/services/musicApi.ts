@@ -1224,29 +1224,6 @@ function parseQQKanaLyric(lrcText: string, qrcText: string): LyricLine[] {
 }
 
 // 解析普通歌词
-/**
- * 网易云新版歌词接口可能返回 JSON 行格式：{"t":16000,"c":[{"tx":"文本"}]}
- * （t = 毫秒；无 t 的行是未同步纯文本，跳过）。旧接口返回标准 LRC。
- */
-function parseNeteaseJsonLyric(lyricText: string): LyricLine[] {
-  const result: LyricLine[] = []
-  for (const line of lyricText.split('\n')) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith('{')) continue
-    try {
-      const obj = JSON.parse(trimmed)
-      const timeMs = obj?.t
-      if (typeof timeMs !== 'number' || !Number.isFinite(timeMs)) continue
-      const text = Array.isArray(obj?.c)
-        ? obj.c.map((chunk: any) => (chunk && typeof chunk.tx === 'string' ? chunk.tx : '')).join('')
-        : ''
-      if (text.trim()) result.push({ time: timeMs / 1000, text: text.trim() })
-    } catch {
-      // 非 JSON 行忽略
-    }
-  }
-  return result.sort((a, b) => a.time - b.time)
-}
 
 function parseLyric(lyricText: string): LyricLine[] {
   if (!lyricText) return []
@@ -2579,7 +2556,9 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
         id: data.albumID,
         mid: data.albumMID,
         name: data.albumName,
-        picUrl: `https://y.gtimg.cn/music/photo_new/T002R800x800M000${id}.jpg`,
+        // 优先用响应里的 albumMID（权威值），缺失才回退请求参数；
+        // 空 mid 会拼出 `...M000.jpg` 这种畸形地址（上游 404 占位图）。
+        picUrl: (data.albumMID || id) ? `https://y.gtimg.cn/music/photo_new/T002R800x800M000${data.albumMID || id}.jpg` : '',
         artist: { name: data.singer_name, mid: data.singer_mid },
         publishTime: data.pub_time,
         description: data.desc,
@@ -2639,7 +2618,7 @@ export async function getAlbumSongs(id: number | string, platform: MusicPlatform
           id: data.albumID,
           mid: data.albumMID || String(id),
           name: data.albumName,
-          picUrl: `https://y.gtimg.cn/music/photo_new/T002R300x300M000${id}.jpg`
+          picUrl: (data.albumMID || id) ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${data.albumMID || id}.jpg` : ''
         },
         duration: item.interval * 1000,
         platform: 'qq' as const,
@@ -2814,7 +2793,8 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
         id: item.albumID,
         mid: item.albumMID,
         name: item.albumName,
-        picUrl: `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.albumMID}.jpg`,
+        // albumMID 缺失时不要拼 `...M000.jpg`（404 占位图），退回空串交给占位符渲染
+        picUrl: item.albumMID ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.albumMID}.jpg` : '',
         artist: { name: item.singer_name, mid: item.singer_mid },
         publishTime: item.pub_time,
         size: item.song_count,
@@ -3578,30 +3558,6 @@ export async function getUserFolloweds(uid: string, options: { cookie?: string; 
   } catch (error) {
     console.error('粉丝列表获取失败:', error)
     return null
-  }
-}
-
-/** 网易云首页 Banner */
-export async function getNeteaseBanner(): Promise<any> {
-  try {
-    const response = await fetch(`${API_BASE}/netease/banner`)
-    const data = await response.json()
-    return data?.banners || []
-  } catch (error) {
-    console.error('Banner获取失败:', error)
-    return []
-  }
-}
-
-/** QQ 首页 Banner */
-export async function getQQBanner(): Promise<any> {
-  try {
-    const response = await fetch(`${API_BASE}/qq/banner`)
-    const data = await response.json()
-    return data?.banners || []
-  } catch (error) {
-    console.error('QQ Banner获取失败:', error)
-    return []
   }
 }
 
