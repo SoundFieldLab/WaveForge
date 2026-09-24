@@ -2982,6 +2982,24 @@ function toMediaUrl(filePath) {
   return `waveforge-media://local/${encodeURIComponent(resolved)}`
 }
 
+// 媒体协议请求（视频壁纸/音频的 range 分片）在播放中可达数十次/秒，逐次 existsSync + statSync
+// 属于主进程同步盘 IO。加一层短 TTL 判定缓存：命中即跳过两次系统调用，未命中才真正 stat。
+const mediaFileCheckCache = new Map()
+const MEDIA_FILE_CHECK_TTL_MS = 5000
+function isServableMediaFile(filePath) {
+  const now = Date.now()
+  const cached = mediaFileCheckCache.get(filePath)
+  if (cached && now - cached.at < MEDIA_FILE_CHECK_TTL_MS) return cached.ok
+  let ok = false
+  try { ok = fs.existsSync(filePath) && fs.statSync(filePath).isFile() } catch { ok = false }
+  mediaFileCheckCache.set(filePath, { at: now, ok })
+  if (mediaFileCheckCache.size > 128) {
+    const oldest = mediaFileCheckCache.keys().next().value
+    if (typeof oldest === 'string') mediaFileCheckCache.delete(oldest)
+  }
+  return ok
+}
+
 function registerMediaProtocol() {
   protocol.registerFileProtocol('waveforge-media', (request, callback) => {
     try {
@@ -2989,7 +3007,7 @@ function registerMediaProtocol() {
       const encodedPath = url.pathname.replace(/^\/+/, '')
       const filePath = path.resolve(decodeURIComponent(encodedPath))
 
-      if (!filePath || !allowedMediaFiles.has(filePath) || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+      if (!filePath || !allowedMediaFiles.has(filePath) || !isServableMediaFile(filePath)) {
         callback({ error: -6 })
         return
       }
@@ -4391,7 +4409,7 @@ ipcMain.handle('hse-write-scene-seed', async (_e, content) => {
 // HSE 离线导出落盘：把调音室渲染好的 MP3 直写到用户桌面。
 // 文件名由渲染层给（<歌曲名>-Modified.mp3），这里再做一次非法字符兜底清洗与
 // 重名自动 (2) 序号，绝不覆盖用户已存在的文件。300MB 上限防误传巨型数据。
-ipcMain.handle('hse-save-rendered-audio', (_e, data, fileName) => {
+ipcMain.handle('hse-save-rendered-audio', async (_e, data, fileName) => {
   try {
     const buf = Buffer.from(data)
     if (!buf.length) return { ok: false, error: '导出内容为空' }
@@ -4407,7 +4425,7 @@ ipcMain.handle('hse-save-rendered-audio', (_e, data, fileName) => {
       target = path.join(dir, `${stem} (${n})${ext}`)
       n += 1
     }
-    fs.writeFileSync(target, buf)
+    await fs.promises.writeFile(target, buf)
     console.log('🎵 [HSE] 渲染音频已保存:', target, `(${(buf.length / 1024 / 1024).toFixed(1)}MB)`)
     return { ok: true, path: target }
   } catch (err) {
@@ -8203,7 +8221,18 @@ app.whenReady().then(async () => {
   // 保存渲染进程转码后的 WAV（Chromium decodeAudioData → 16bit PCM），供 Python
   // 渲染/AI worker 读取（libsndfile 只认 wav/flac/ogg/mp3，m4a/aac/opus 必须转码）。
   // 已存在同 key 的 WAV 直接复用，同一首歌只转码一次。
-  ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', (_event, trackKey, wavArrayBuffer) => {
+  // 大 buffer 哈希分块进行：一次 update(最大 512MB) 会把主进程阻塞 1–2s（期间所有 IPC/窗口
+// 交互停摆），分块之间 setImmediate 让出事件循环；哈希结果与一次性 update 完全一致。
+async function hashBufferChunked(buf, chunkBytes = 8 * 1024 * 1024) {
+  const hash = crypto.createHash('sha256')
+  for (let offset = 0; offset < buf.length; offset += chunkBytes) {
+    hash.update(buf.subarray(offset, Math.min(offset + chunkBytes, buf.length)))
+    if (offset + chunkBytes < buf.length) await new Promise(resolve => setImmediate(resolve))
+  }
+  return hash.digest('hex').slice(0, 16)
+}
+
+ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_event, trackKey, wavArrayBuffer) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload || !analysisRuntime.audioDownload.tempRoot) {
       throw new Error('Audio download service not initialized')
     }
@@ -8216,7 +8245,7 @@ app.whenReady().then(async () => {
       || buf.toString('ascii', 8, 12) !== 'WAVE') {
       throw new Error('Invalid WAV payload')
     }
-    const contentHash = crypto.createHash('sha256').update(buf).digest('hex').slice(0, 16)
+    const contentHash = await hashBufferChunked(buf)
     const safeName = `${trackKey.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 100)}-${contentHash}.wav`
     const target = path.join(analysisRuntime.audioDownload.tempRoot, safeName)
     if (fs.existsSync(target)) {
@@ -8229,7 +8258,7 @@ app.whenReady().then(async () => {
     }
     const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`
     try {
-      fs.writeFileSync(temp, buf, { flag: 'wx' })
+      await fs.promises.writeFile(temp, buf, { flag: 'wx' })
       fs.renameSync(temp, target)
       if (!analysisRuntime.audioDownload.isInsideTempRoot(target)) {
         fs.rmSync(target, { force: true })
