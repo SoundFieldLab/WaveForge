@@ -26,7 +26,6 @@ interface AlbumCoverPlayerProps {
 
 // memo 包装：transitionProgress 变化时仍会重渲染（过渡动画依赖），
 // 但父级因 currentTime/toast 等其他状态重渲染且本组件 props 未变时可跳过。
-// 注意 AnimatePresence 被 import 但未在 JSX 中使用，保留以维持原引用。
 function AlbumCoverPlayer({ 
   coverUrl, 
   isPlaying, 

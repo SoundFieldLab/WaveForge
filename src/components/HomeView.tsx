@@ -97,8 +97,6 @@ interface HomeViewProps {
   suspended?: boolean
 }
 
-type ChartType = 'new' | 'hot' | 'rising'
-
 interface HomeModuleSessionSnapshot {
   songs: Song[]
   playlists: any[]
