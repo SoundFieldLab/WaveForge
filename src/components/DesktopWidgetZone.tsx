@@ -95,22 +95,36 @@ function WidgetShell({
   )
 }
 
-function DateTimeWidget({ cardBlurAmount, accentColor, onOverlayOpenChange, focusOnly = false, replaceTimeDuringFocus = false }: { cardBlurAmount: number; accentColor: string; onOverlayOpenChange?: (open: boolean) => void; focusOnly?: boolean; replaceTimeDuringFocus?: boolean }) {
-  const [now, setNow] = useState(() => new Date())
-  const [showTimeCenter, setShowTimeCenter] = useState(false)
-  const [timeCenterTab, setTimeCenterTab] = useState<'world' | 'focus'>('world')
-  const { timer: focusTimer, remainingMs, pause, resume, stop } = useDesktopFocusTimer()
+// 每秒 tick 一次，格式化器构造开销大，提到模块级复用（同 DesktopTimeCenter 的做法）。
+const DATE_WITH_WEEKDAY_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  month: 'long',
+  day: 'numeric',
+  weekday: 'long',
+})
 
+// 常驻时钟文本：独立持有秒级定时器，每秒仅重渲染时间子块。
+// 此前 interval 挂在 DateTimeWidget 主组件上，每秒 setNow 会让整个桌面部件树
+// （WidgetShell/日期/专注态）跟着每秒 reconcile；拆出后主树不再受影响。
+function ClockTimeText() {
+  const [now, setNow] = useState(() => new Date())
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 1000)
     return () => window.clearInterval(timer)
   }, [])
+  return (
+    <div>
+      <div className="text-[3.35rem] font-semibold leading-none tracking-[-0.05em] tabular-nums drop-shadow-xl">
+        {now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}
+      </div>
+      <div className="mt-3 text-sm font-medium tracking-[0.16em] text-white/65">{DATE_WITH_WEEKDAY_FORMATTER.format(now)}</div>
+    </div>
+  )
+}
 
-  const dateText = new Intl.DateTimeFormat('zh-CN', {
-    month: 'long',
-    day: 'numeric',
-    weekday: 'long',
-  }).format(now)
+function DateTimeWidget({ cardBlurAmount, accentColor, onOverlayOpenChange, focusOnly = false, replaceTimeDuringFocus = false }: { cardBlurAmount: number; accentColor: string; onOverlayOpenChange?: (open: boolean) => void; focusOnly?: boolean; replaceTimeDuringFocus?: boolean }) {
+  const [showTimeCenter, setShowTimeCenter] = useState(false)
+  const [timeCenterTab, setTimeCenterTab] = useState<'world' | 'focus'>('world')
+  const { timer: focusTimer, remainingMs, pause, resume, stop } = useDesktopFocusTimer()
 
   const focusActive = focusTimer.status === 'running' || focusTimer.status === 'paused'
   const openTimeCenter = (tab: 'world' | 'focus') => {
@@ -126,12 +140,7 @@ function DateTimeWidget({ cardBlurAmount, accentColor, onOverlayOpenChange, focu
       <div className="w-full space-y-2.5">
         {!focusOnly && !(focusActive && replaceTimeDuringFocus) && <button type="button" onClick={() => openTimeCenter('world')} className="block w-full text-left outline-none transition-transform hover:scale-[1.018] focus-visible:ring-2 focus-visible:ring-white/70 active:scale-[0.99]" aria-label="打开时间、日历与世界时钟">
           <WidgetShell cardBlurAmount={cardBlurAmount} accentColor={accentColor} className="px-5 py-4">
-            <div>
-              <div className="text-[3.35rem] font-semibold leading-none tracking-[-0.05em] tabular-nums drop-shadow-xl">
-                {now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}
-              </div>
-              <div className="mt-3 text-sm font-medium tracking-[0.16em] text-white/65">{dateText}</div>
-            </div>
+            <ClockTimeText />
           </WidgetShell>
         </button>}
 
@@ -279,6 +288,8 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
   const [hazardLoading, setHazardLoading] = useState(false)
   const [hazardTransportError, setHazardTransportError] = useState('')
   const requestControllerRef = useRef<AbortController | null>(null)
+  const settingsRef = useRef(settings)
+  settingsRef.current = settings
   const hazardControllerRef = useRef<AbortController | null>(null)
   const weatherIdentity = `${settings.weatherLocationMode}:${settings.weatherLocationMode === 'manual'
     ? [settings.weatherCountryCode, settings.weatherProvinceCode, settings.weatherCityCode, settings.weatherDistrictCode || settings.weatherDistrict, settings.weatherLatitude, settings.weatherLongitude]
@@ -288,7 +299,8 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
     : 'current-ip'}`
 
   const refreshWeather = useCallback(async (force = false) => {
-    const cached = getCachedWeather(settings)
+    const currentSettings = settingsRef.current
+    const cached = getCachedWeather(currentSettings)
     if (cached && !force) {
       setWeather(cached)
       setError('')
@@ -305,14 +317,15 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
       controller.abort()
     }, 20_000)
     try {
-      const snapshot = await ensureWeatherSnapshot(settings, { forceRefresh: force, signal: controller.signal })
+      const snapshot = await ensureWeatherSnapshot(currentSettings, { forceRefresh: force, signal: controller.signal })
+      if (controller.signal.aborted) return
       setWeather(snapshot)
       setError('')
     } catch (fetchError) {
-      if (timedOut) {
-        setError('天气刷新超时，请检查网络后重试')
-      } else if ((fetchError as Error).name !== 'AbortError') {
-        setError((fetchError as Error).message || '暂时无法获取天气')
+      if (timedOut || (fetchError as Error).name !== 'AbortError') {
+        const fallback = getCachedWeather(currentSettings, true)
+        if (fallback) setWeather(fallback)
+        setError(timedOut ? '天气刷新超时，请检查网络后重试' : ((fetchError as Error).message || '暂时无法获取天气'))
       }
     } finally {
       window.clearTimeout(timeout)
@@ -321,7 +334,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
         setLoading(false)
       }
     }
-  }, [settings, weatherIdentity])
+  }, [])
 
   useEffect(() => {
     const staleCache = getCachedWeather(settings, true)
@@ -336,7 +349,7 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
     const startTimer = () => {
       stopTimer()
       if (document.visibilityState !== 'visible') return
-      void refreshWeather(false)
+      void refreshWeather(true)
       timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
     }
     const onVisibilityChange = () => {

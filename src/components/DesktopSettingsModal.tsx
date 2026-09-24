@@ -4,7 +4,7 @@
  */
 import { useState, useRef, useEffect, useMemo, lazy, Suspense } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Image, Monitor, Upload, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CheckCircle2, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Music2, TrendingUp, Disc3, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered, Settings2 } from 'lucide-react'
+import { X, Image, Monitor, Trash2, Video, Check, RotateCcw, RefreshCw, ImageIcon, ChevronRight, ArrowLeft, Clock, LayoutDashboard, CloudSun, LocateFixed, MapPin, Captions, Sparkles, Hourglass, CalendarDays, CalendarClock, ListTodo, NotebookPen, Target, History, WandSparkles, ListMusic, Heart, Library, BarChart3, CalendarRange, Radio, AudioLines, Music2, TrendingUp, Disc3, Rocket, Cpu, Volume2, Timer, Shuffle, ListOrdered, Settings2 } from 'lucide-react'
 import { desktopWallpaperManager, DesktopWallpaperFile, DesktopWallpaperMode, DesktopWallpaperPlayMode, RandomImageSource, DesktopWallpaperSwitchMode } from '../services/desktopWallpaperManager'
 import {
   DESKTOP_CUSTOMIZATION_EVENT,
@@ -130,14 +130,13 @@ export default function DesktopSettingsModal({
   const [showCustomInterval, setShowCustomInterval] = useState(false)
   const [randomImageSource, setRandomImageSource] = useState<RandomImageSource>('bing')
   const [customApiUrl, setCustomApiUrl] = useState('')
-  const [showCustomUrlInput, setShowCustomUrlInput] = useState(false)
   const [currentWallpaperIndex, setCurrentWallpaperIndex] = useState(0)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string>('')
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Wallpaper Engine 手动选择的壁纸
-  const [selectedWallpaperEngineId, setSelectedWallpaperEngineId] = useState<string | null>(() => {
+  const [selectedWallpaperEngineId] = useState<string | null>(() => {
     const saved = localStorage.getItem('selectedWallpaperEngineId')
     return saved || null
   })
@@ -149,33 +148,20 @@ export default function DesktopSettingsModal({
   })
   
   // GPU 加速设置
-  const [gpuAcceleration, setGpuAcceleration] = useState(() => {
-    const saved = localStorage.getItem('gpuAcceleration')
-    return saved !== null ? JSON.parse(saved) : false
-  })
 
   // 启动时从主进程同步真实 GPU 加速状态，避免与设置面板不一致
   useEffect(() => {
     let cancelled = false
     void window.electron?.system.getGpuSettings().then(result => {
       if (cancelled) return
-      setGpuAcceleration(result.enabled)
       localStorage.setItem('gpuAcceleration', JSON.stringify(result.enabled))
     }).catch(() => {})
     return () => { cancelled = true }
   }, [])
   
   // 歌词组件模式设置
-  const [lyricsComponentMode, setLyricsComponentMode] = useState<'virtualized' | 'standard'>(() => {
-    const saved = localStorage.getItem('lyricsComponentMode')
-    return (saved as 'virtualized' | 'standard') || 'virtualized'
-  })
 
   // 开发者模式
-  const [developerMode, setDeveloperMode] = useState(() => {
-    const saved = localStorage.getItem('developerMode')
-    return saved !== null ? JSON.parse(saved) : false
-  })
 
   // 全屏模式设置
   const [fullscreenMode, setFullscreenMode] = useState<'kiosk' | 'normal'>(() => {
@@ -184,23 +170,14 @@ export default function DesktopSettingsModal({
   })
 
   // 背景模糊度设置 (0-20)
-  const [backgroundBlur, setBackgroundBlur] = useState(() => {
-    const saved = localStorage.getItem('desktopBackgroundBlur')
-    return saved !== null ? parseInt(saved) : 0
-  })
 
   // 背景暗化度设置 (0-70)，默认保持原始壁纸亮度
-  const [backgroundDim, setBackgroundDim] = useState(() => {
-    const saved = localStorage.getItem('desktopBackgroundDim')
-    return saved !== null ? parseInt(saved) : 0
-  })
 
   // 监听开发者模式变化，实现跨组件同步
   useEffect(() => {
     const handleDeveloperModeChange = (e: Event) => {
       const customEvent = e as CustomEvent
       const enabled = customEvent.detail
-      setDeveloperMode(enabled)
     }
 
     window.addEventListener('developerModeChanged', handleDeveloperModeChange)
@@ -217,8 +194,6 @@ export default function DesktopSettingsModal({
       loadWallpaperData()
       const next = loadDesktopCustomization()
       setDesktopCustomization(next)
-      setBackgroundBlur(next.backgroundBlur)
-      setBackgroundDim(next.backgroundDim)
     }
   }, [show])
 
@@ -226,8 +201,6 @@ export default function DesktopSettingsModal({
     const handleCustomizationChange = (event: Event) => {
       const next = (event as CustomEvent<DesktopCustomizationSettings>).detail || loadDesktopCustomization()
       setDesktopCustomization(next)
-      setBackgroundBlur(next.backgroundBlur)
-      setBackgroundDim(next.backgroundDim)
     }
     window.addEventListener(DESKTOP_CUSTOMIZATION_EVENT, handleCustomizationChange)
     return () => window.removeEventListener(DESKTOP_CUSTOMIZATION_EVENT, handleCustomizationChange)
@@ -398,9 +371,7 @@ export default function DesktopSettingsModal({
   const handleRandomImageSourceChange = (source: RandomImageSource) => {
     setRandomImageSource(source)
     if (source === 'custom') {
-      setShowCustomUrlInput(true)
     } else {
-      setShowCustomUrlInput(false)
     }
     // 切换到随机 API 模式，并记录用户选择了随机 API
     desktopWallpaperManager.saveSettings({ 
@@ -418,7 +389,6 @@ export default function DesktopSettingsModal({
       mode: 'random-api',
       lastWallpaperSource: 'random-api'
     })
-    setShowCustomUrlInput(false)
     window.dispatchEvent(new Event('desktopWallpaperChanged'))
   }
 
@@ -494,49 +464,10 @@ export default function DesktopSettingsModal({
   }
   
   // GPU 加速开关处理（与主进程同步，重启后生效）
-  const handleGpuAccelerationToggle = async (enabled: boolean) => {
-    try {
-      const result = await window.electron?.system.setHardwareAcceleration(enabled)
-      if (!result?.success) throw new Error('主进程未保存设置')
-      setGpuAcceleration(result.enabled)
-      localStorage.setItem('gpuAcceleration', JSON.stringify(result.enabled))
-      window.dispatchEvent(new CustomEvent('gpuAccelerationChanged', { detail: result.enabled }))
-      const message = result.enabled ? 'GPU加速已打开，重启软件以生效' : 'GPU加速已关闭，重启软件以生效'
-      window.dispatchEvent(new CustomEvent('showToast', { 
-        detail: { message, type: 'info' }
-      }))
-    } catch (error) {
-      console.error('保存 GPU 加速设置失败:', error)
-      window.dispatchEvent(new CustomEvent('showToast', { 
-        detail: { message: 'GPU 加速设置保存失败', type: 'error' }
-      }))
-    }
-  }
   
   // 歌词组件模式切换处理
-  const handleLyricsComponentModeChange = (mode: 'virtualized' | 'standard') => {
-    setLyricsComponentMode(mode)
-    localStorage.setItem('lyricsComponentMode', mode)
-    window.dispatchEvent(new CustomEvent('lyricsComponentModeChanged', { detail: mode }))
-  }
 
   // 开发者模式切换处理
-  const handleDeveloperModeToggle = (enabled: boolean) => {
-    setDeveloperMode(enabled)
-    localStorage.setItem('developerMode', JSON.stringify(enabled))
-    window.dispatchEvent(new CustomEvent('developerModeChanged', { detail: enabled }))
-    
-    // 通知 Electron 后端
-    if (window.electron?.developerMode) {
-      window.electron.developerMode.set(enabled).catch((err: Error) => {
-        console.error('Failed to set developer mode:', err)
-      })
-    }
-    
-    window.dispatchEvent(new CustomEvent('showToast', { 
-      detail: { message: enabled ? '开发者模式已启用' : '开发者模式已禁用', type: 'info' }
-    }))
-  }
 
   // 全屏模式切换处理
   const handleFullscreenModeChange = async (mode: 'kiosk' | 'normal') => {
@@ -564,15 +495,7 @@ export default function DesktopSettingsModal({
   }
 
   // 背景模糊度切换处理
-  const handleBackgroundBlurChange = (blur: number) => {
-    setBackgroundBlur(blur)
-    updateDesktopCustomization({ ...desktopCustomization, backgroundBlur: blur })
-  }
 
-  const handleBackgroundDimChange = (dim: number) => {
-    setBackgroundDim(dim)
-    updateDesktopCustomization({ ...desktopCustomization, backgroundDim: dim })
-  }
 
   return (
     <AnimatePresence>

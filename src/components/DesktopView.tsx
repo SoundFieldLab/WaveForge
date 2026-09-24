@@ -7,7 +7,7 @@ import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } f
 import { useTvMode, useRemoteCursorMode, useTvBack } from '../tv/tvCore'
 import { lazy, Suspense, memo, useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { ChevronDown, Search, Settings, X, Play, Clock, Volume2, VolumeX, LogIn, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
+import { ChevronDown, Search, Settings, Play, Clock, Volume2, VolumeX, Captions, Heart, MonitorSmartphone, Speaker } from 'lucide-react'
 import PluginShortcuts from './PluginShortcuts'
 import PlaylistCarousel3D from './PlaylistCarousel3D'
 import PlaylistContextMenu from './PlaylistContextMenu'
@@ -292,14 +292,12 @@ function DesktopView({
   // 最近播放（桌面模式仅展示歌曲，数据与简约模式同源）
   const [recentSongs, setRecentSongs] = useState<Song[]>([])
   const [recentCovers, setRecentCovers] = useState<string[]>([])
-  const [recentLoading, setRecentLoading] = useState(false)
   const recentSongsRef = useRef<Song[]>([])
   const recentCoversRef = useRef<string[]>([])
   const recentLoadControllerRef = useRef<AbortController | null>(null)
   const recentLoadSignatureRef = useRef('')  
   // UI状态
   const [showThemePanel, setShowThemePanel] = useState(false)
-  const [themePanelSettled, setThemePanelSettled] = useState(false)
   const [isTopHovered, setIsTopHovered] = useState(false)
   const [showUpArrowHint, setShowUpArrowHint] = useState(false)
   // TV 无鼠标：顶部/底部悬浮控件视为恒 hover（控件常驻可聚焦）；
@@ -308,7 +306,6 @@ function DesktopView({
 
   useEffect(() => {
     const closeForModeSwitch = () => {
-      setThemePanelSettled(false)
       setShowThemePanel(false)
       setShowUpArrowHint(false)
     }
@@ -470,7 +467,6 @@ function DesktopView({
   // 桌面壁纸状态 - 使用新的壁纸管理器
   const [desktopWallpaper, setDesktopWallpaper] = useState<string | null>(null)
   const [desktopLiveWallpaper, setDesktopLiveWallpaper] = useState<DesktopLiveWallpaperSource | null>(null)
-  const [wallpaperKey, setWallpaperKey] = useState(0) // 用于触发切换动画
   const wallpaperSourceRef = useRef('')
   
   // Wallpaper Engine 同步状态
@@ -507,7 +503,6 @@ function DesktopView({
     return saved !== null ? JSON.parse(saved) : true // 默认静音
   })
   const videoRef = useRef<HTMLVideoElement>(null)
-  const [videoUnsupported, setVideoUnsupported] = useState(false)
   const desktopVideoUrl = desktopLiveWallpaper?.sourceType === 'video'
     ? desktopLiveWallpaper.url
     : null
@@ -657,7 +652,6 @@ function DesktopView({
         const cachedWallpapers = cachedWallpapersStr ? JSON.parse(cachedWallpapersStr) : []
         
         // 对比变化（比较壁纸 ID）
-        const newCount = data.wallpapers.length
         const oldCount = cachedWallpapers.length
         
         if (oldCount > 0) {
@@ -743,7 +737,6 @@ function DesktopView({
 
       // 手动和自动轮换共用同一应用通道。
       desktopWallpaperManager.saveSettings({ lastWallpaperSource: 'wallpaper-engine-manual' })
-      setVideoUnsupported(false)
 
       if (wallpaper.type === 'video') {
         const mediaUrl = `http://localhost:3001/api/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`
@@ -767,7 +760,6 @@ function DesktopView({
         throw new Error('Wallpaper has no playable media')
       }
 
-      setWallpaperKey(key => key + 1)
       showToastNotification(
         source === 'rotation' ? `已自动切换壁纸：${wallpaper.title}` : `已应用壁纸：${wallpaper.title}`,
         'success',
@@ -1041,7 +1033,6 @@ function DesktopView({
       setRecentCovers([])
       recentSongsRef.current = []
       recentCoversRef.current = []
-      setRecentLoading(false)
       return
     }
 
@@ -1052,7 +1043,6 @@ function DesktopView({
     setRecentCovers([])
     recentSongsRef.current = []
     recentCoversRef.current = []
-    setRecentLoading(true)
 
     const loadRecent = async () => {
       try {
@@ -1196,7 +1186,6 @@ function DesktopView({
       } finally {
         if (recentLoadControllerRef.current === controller) {
           recentLoadControllerRef.current = null
-          setRecentLoading(false)
         }
       }
     }
@@ -1356,9 +1345,6 @@ function DesktopView({
         setDesktopLiveWallpaper(null)
         setDesktopWallpaper(null)
       }
-      
-      // 更新key以触发切换动画
-      setWallpaperKey(prev => prev + 1)
     }
     
     // 组件挂载时强制重新加载壁纸，确保显示正确的壁纸设置
@@ -1402,7 +1388,6 @@ function DesktopView({
             wallpaperSourceRef.current = nextSignature
             setDesktopLiveWallpaper(null)
             setDesktopWallpaper(nextWallpaper)
-            setWallpaperKey(prev => prev + 1)
           }
           return
         }
@@ -1451,7 +1436,6 @@ function DesktopView({
           wallpaperSourceRef.current = nextSignature
           setDesktopLiveWallpaper(null)
           setDesktopWallpaper(toWallpaperUrl(nextWallpaper))
-          setWallpaperKey(prev => prev + 1)
         }
       })
       : undefined
@@ -1519,7 +1503,6 @@ function DesktopView({
       return true
     }
     if (showThemePanel) {
-      setThemePanelSettled(false)
       setShowThemePanel(false)
       return true
     }
@@ -1998,18 +1981,39 @@ function DesktopView({
       }
       return false
     }
+    // 同一状态不重复过 IPC：鼠标在透明区/卡片上持续移动时，25 次/秒的重发没有意义。
+    let lastInteractive: boolean | null = null
+    const applyInteractive = (next: boolean) => {
+      if (next === lastInteractive) return
+      lastInteractive = next
+      window.electron?.desktopFusion?.setInteractive(next)
+    }
+    // 判定节流 + 元素级缓存：elementFromPoint 与祖先链 getComputedStyle 都是同步强制样式
+    // 计算，mousemove 高频时逐次执行是卡顿源。判定收敛到 10Hz，同一元素 150ms 内复用
+    // 结果（只缓存「交互」命中，透明区判定不缓存延迟），交互行为完全不变。
+    let lastHit = 0
+    const interactiveCache = new WeakMap<HTMLElement, { interactive: boolean; at: number }>()
     const onMouseMove = (event: MouseEvent) => {
       const now = Date.now()
       if (now - lastSend < 40) return // 节流 IPC
       lastSend = now
       if (desktopOverlayOpen) {
-        window.electron?.desktopFusion?.setInteractive(true)
+        applyInteractive(true)
         return
       }
+      if (now - lastHit < 100) return // 节流命中检测（elementFromPoint + 样式遍历）
+      lastHit = now
       const target = document.elementFromPoint(event.clientX, event.clientY) as Element | null
-      window.electron?.desktopFusion?.setInteractive(isInteractiveElement(target))
+      const cached = target instanceof HTMLElement ? interactiveCache.get(target) : undefined
+      if (cached && now - cached.at < 150) {
+        applyInteractive(cached.interactive)
+        return
+      }
+      const interactive = isInteractiveElement(target)
+      if (target instanceof HTMLElement) interactiveCache.set(target, { interactive, at: now })
+      applyInteractive(interactive)
     }
-    window.electron?.desktopFusion?.setInteractive(desktopOverlayOpen) // 初始态：弹层开则整窗交互，否则穿透等 mousemove
+    applyInteractive(desktopOverlayOpen) // 初始态：弹层开则整窗交互，否则穿透等 mousemove
     document.addEventListener('mousemove', onMouseMove)
     return () => {
       document.removeEventListener('mousemove', onMouseMove)
@@ -2123,7 +2127,6 @@ function DesktopView({
                       videoHeight: video.videoHeight,
                       readyState: video.readyState
                     })
-                    setVideoUnsupported(true)
                     showToastNotification('该视频格式不受设备支持 (H.265)，正在切换到下一个壁纸...', 'warning')
                     // 延迟 1 秒后切换到下一个壁纸
                     scheduleTransientTimer(() => {
@@ -2135,12 +2138,10 @@ function DesktopView({
                       videoHeight: video.videoHeight,
                       duration: video.duration
                     })
-                    setVideoUnsupported(false)
                   }
                 }}
                 onError={(e) => {
                   console.error('[DesktopView] 视频加载错误:', e)
-                  setVideoUnsupported(true)
                   showToastNotification('视频加载失败，正在切换到下一个壁纸...', 'error')
                   scheduleTransientTimer(() => {
                     skipToNextWallpaper()
@@ -2297,7 +2298,6 @@ function DesktopView({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               onClick={() => {
-                setThemePanelSettled(false)
                 setShowThemePanel(true)
                 setShowUpArrowHint(false)
               }}
@@ -2323,11 +2323,9 @@ function DesktopView({
           <ModeSelectionPanel
             currentMode="desktop"
             onClose={() => {
-              setThemePanelSettled(false)
               setShowThemePanel(false)
             }}
             onSelect={(mode) => {
-              setThemePanelSettled(false)
               setShowThemePanel(false)
               setShowUpArrowHint(false)
               // 立即显示过渡动画；面板收起/内容复位后再切换，避免来源内容以展开态残留成顶部占位

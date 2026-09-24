@@ -6,6 +6,13 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { BellRing, RotateCcw } from 'lucide-react'
 
+// 每秒 tick 一次，格式化器提到模块级复用。
+const ALARM_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  month: 'long',
+  day: 'numeric',
+  weekday: 'long',
+})
+
 interface DesktopFocusAlarmOverlayProps {
   open: boolean
   accentColor: string
@@ -44,7 +51,7 @@ export default function DesktopFocusAlarmOverlay({ open, accentColor, onStop, on
             <div className="mt-7 text-sm font-medium uppercase tracking-[0.32em] text-white/45">{title}</div>
             {detail && <div className="mt-3 text-sm text-white/35">{detail}</div>}
             <div className="mt-5 text-[clamp(5rem,13vw,11rem)] font-semibold leading-none tracking-[-0.075em] tabular-nums drop-shadow-2xl">{now.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}</div>
-            <div className="mt-5 text-base tracking-[0.16em] text-white/52">{new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(now)}</div>
+            <div className="mt-5 text-base tracking-[0.16em] text-white/52">{ALARM_DATE_FORMATTER.format(now)}</div>
             <button type="button" onClick={onRepeat} className="mt-10 flex items-center gap-2 rounded-full border border-white/12 bg-white/[0.055] px-6 py-3 text-sm text-white/72 backdrop-blur-xl transition hover:bg-white/10"><RotateCcw className="h-4 w-4" />重复计时</button>
 
             <div className="relative mt-8 h-16 w-[min(390px,80vw)] overflow-hidden rounded-full border border-white/12 bg-white/[0.06] p-1.5 shadow-[inset_0_2px_18px_rgba(0,0,0,.35)] backdrop-blur-xl">

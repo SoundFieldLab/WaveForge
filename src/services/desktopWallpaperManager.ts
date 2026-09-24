@@ -127,7 +127,6 @@ class DesktopWallpaperManager {
     lastWallpaperSource: 'none' // 默认没有选择
   }
   private switchTimer: number | null = null
-  private currentRandomImageUrl: string | null = null
 
   constructor() {
     this.loadFromStorage()
@@ -399,8 +398,6 @@ class DesktopWallpaperManager {
 
   async switchToNext() {
     if (this.settings.mode === 'random-api') {
-      // 随机API模式，触发重新获取
-      this.currentRandomImageUrl = null
       window.dispatchEvent(new Event('desktopWallpaperChanged'))
       return
     }

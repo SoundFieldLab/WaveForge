@@ -16,7 +16,6 @@ import {
   Pause,
   Play,
   Plus,
-  RotateCcw,
   Search,
   TimerReset,
   Trash2,
@@ -85,15 +84,41 @@ const PRECISE_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
   day: 'numeric',
   weekday: 'long',
 })
+const SELECTED_DATE_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+  year: 'numeric',
+  month: 'long',
+  weekday: 'long',
+})
+
+// 时区格式化器按 timeZone 缓存：世界时钟每秒刷新，逐城市重建 Intl 实例开销明显。
+// 取数字段用 en-GB，展示用 zh-CN，各自一份缓存以保持原有输出不变。
+const zonedPartsFormatters = new Map<string, Intl.DateTimeFormat>()
+const zonedDisplayFormatters = new Map<string, Intl.DateTimeFormat>()
+
+const getMemoizedFormatter = (
+  cache: Map<string, Intl.DateTimeFormat>,
+  timeZone: string,
+  locale: string,
+) => {
+  let formatter = cache.get(timeZone)
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, {
+      timeZone,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    })
+    cache.set(timeZone, formatter)
+  }
+  return formatter
+}
+
+const getZonedFormatter = (timeZone: string) => getMemoizedFormatter(zonedPartsFormatters, timeZone, 'en-GB')
+const getZonedDisplayFormatter = (timeZone: string) => getMemoizedFormatter(zonedDisplayFormatters, timeZone, 'zh-CN')
 
 const getZonedParts = (date: Date, timeZone: string) => {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).formatToParts(date)
+  const parts = getZonedFormatter(timeZone).formatToParts(date)
   const number = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find(part => part.type === type)?.value || 0)
   return { hour: number('hour') % 24, minute: number('minute'), second: number('second') }
 }
@@ -290,7 +315,7 @@ function MonthCalendar({ accentColor }: { accentColor: string }) {
       <aside className="flex flex-col rounded-[26px] border border-white/10 bg-white/[0.045] p-5">
         <div className="text-sm text-white/42">选中日期</div>
         <div className="mt-3 text-5xl font-semibold tracking-[-0.06em] text-white">{selectedDate.getDate()}</div>
-        <div className="mt-2 text-sm text-white/72">{new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', weekday: 'long' }).format(selectedDate)}</div>
+        <div className="mt-2 text-sm text-white/72">{SELECTED_DATE_FORMATTER.format(selectedDate)}</div>
         <div className="mt-2 text-xs text-white/40">农历 {getLunarDateLabel(selectedDate)}</div>
         <div className="my-5 h-px bg-white/10" />
         <div className="text-xs font-medium uppercase tracking-[0.18em] text-white/35">节日与纪念日</div>
@@ -375,7 +400,7 @@ function WorldClock({ accentColor, now }: { accentColor: string; now: Date }) {
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2"><div className="truncate font-semibold text-white">{city.name}</div><button type="button" aria-label={`移除${city.name}`} onClick={() => updateSelection(selectedIds.filter(id => id !== city.id))} className="flex h-7 w-7 items-center justify-center rounded-full text-white/0 transition group-hover:bg-white/10 group-hover:text-white/55"><Trash2 className="h-3.5 w-3.5" /></button></div>
               <div className="mt-1 text-xs text-white/38">{city.country}</div>
-              <div className="mt-2 text-xl font-semibold tabular-nums text-white/85">{new Intl.DateTimeFormat('zh-CN', { timeZone: city.timeZone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(now)}</div>
+              <div className="mt-2 text-xl font-semibold tabular-nums text-white/85">{getZonedDisplayFormatter(city.timeZone).format(now)}</div>
             </div>
           </div>
         ))}

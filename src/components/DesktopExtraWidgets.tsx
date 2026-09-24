@@ -8,8 +8,8 @@ import {
   Activity, AppWindow, AudioLines, CalendarRange, ChartNoAxesColumnIncreasing, Check, ChevronRight,
   ArrowDown, ArrowUp,
   Clock3, Cpu, ExternalLink, FolderOpen, Gauge, HardDrive, Heart, History, Library, ListMusic,
-  LoaderCircle, MemoryStick, Music2, Pause, Play, Plus, Radio, RefreshCw, Rocket, Settings2,
-  SkipForward, Speaker, Trash2, Volume1, Volume2, VolumeX, WandSparkles, X,
+  LoaderCircle, MemoryStick, Music2, Play, Plus, Radio, RefreshCw, Rocket, Settings2,
+  Speaker, Trash2, Volume2, VolumeX, WandSparkles, X,
 } from 'lucide-react'
 import type { DesktopWidgetType } from '../services/desktopCustomization'
 import type { MusicPlatform } from '../services/platforms'

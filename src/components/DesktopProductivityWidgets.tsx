@@ -7,7 +7,6 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   CalendarClock,
   CalendarDays,
-  Check,
   CheckCircle2,
   Circle,
   ChevronLeft,
