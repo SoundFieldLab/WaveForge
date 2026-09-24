@@ -36,7 +36,7 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
   const [mode, setMode] = useState<WallpaperMode>('single')
   const [switchMode, setSwitchMode] = useState<WallpaperSwitchMode>('manual')
   const [intervalMinutes, setIntervalMinutes] = useState(30)
-  const [currentIndex, setCurrentIndex] = useState(0)
+  const [currentWallpaperId, setCurrentWallpaperId] = useState('')
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string>('')
   // TV：手机扫码上传壁纸
@@ -67,13 +67,16 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
 
   const loadData = async () => {
     const files = await wallpaperManager.getWallpapers()
+    // 选中标记按 id 走：列表会跳过读不出来的记录，settings.currentIndex 是库内下标，
+    // 直接当显示下标用会错位。这里问当前实际生效的那张，标记和主页背景始终一致。
+    const current = await wallpaperManager.getCurrentWallpaper()
     const settings = wallpaperManager.getSettings()
     
     setWallpapers(files)
     setMode(settings.mode)
     setSwitchMode(settings.switchMode)
     setIntervalMinutes(settings.intervalMinutes)
-    setCurrentIndex(settings.currentIndex)
+    setCurrentWallpaperId(current?.id || '')
   }
 
   // TV：手机扫码上传壁纸（手机浏览器 → 设备 25567 → 设备存储 → 这里拉回导入 IndexedDB）
@@ -174,9 +177,8 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
     await loadData()
   }
 
-  const handleSelectWallpaper = async (index: number) => {
-    await wallpaperManager.setCurrentWallpaper(index)
-    setCurrentIndex(index)
+  const handleSelectWallpaper = async (id: string) => {
+    if (await wallpaperManager.setCurrentWallpaperById(id)) setCurrentWallpaperId(id)
   }
 
   const handleSaveSettings = async () => {
@@ -261,16 +263,16 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
 
                   <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                     {/* 已上传的文件 */}
-                    {wallpapers.map((wallpaper, index) => (
+                    {wallpapers.map(wallpaper => (
                       <div
                         key={wallpaper.id}
                         className={`relative ${bgCard} rounded-xl overflow-hidden border-2 transition-all cursor-pointer ${
-                          currentIndex === index 
+                          currentWallpaperId === wallpaper.id 
                             ? `border-[${accentColor}]` 
                             : borderColor
                         }`}
-                        style={currentIndex === index ? { borderColor: accentColor } : {}}
-                        onClick={() => handleSelectWallpaper(index)}
+                        style={currentWallpaperId === wallpaper.id ? { borderColor: accentColor } : {}}
+                        onClick={() => void handleSelectWallpaper(wallpaper.id)}
                       >
                         {/* 预览 */}
                         <div className="aspect-video bg-black/20 relative">
@@ -290,7 +292,7 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
                           )}
                           
                           {/* 选中标记 */}
-                          {currentIndex === index && (
+                          {currentWallpaperId === wallpaper.id && (
                             <div 
                               className="absolute top-2 right-2 w-6 h-6 rounded-full flex items-center justify-center"
                               style={{ backgroundColor: accentColor }}

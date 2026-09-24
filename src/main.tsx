@@ -37,15 +37,24 @@ try {
   // 忽略
 }
 
-// 渲染端 console.error 转发到后端日志（preload 可用时），捕获真实错误
+// 渲染端 console.error 转发到后端日志（preload 可用时），捕获真实错误。
+// Error / DOMException 的 name、message、stack 都是不可枚举属性（DOMException 还在原型上），
+// JSON.stringify 只会得到 "{}"，必须单独取名字和消息，否则日志里只剩一个空对象、查不出原因。
+function describeConsoleArg(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value instanceof Error) {
+    const frame = value.stack?.split('\n')[1]?.trim()
+    return frame ? `${value.name}: ${value.message} @ ${frame}` : `${value.name}: ${value.message}`
+  }
+  try { return JSON.stringify(value) } catch { return String(value) }
+}
+
 const origConsoleError = console.error
 console.error = (...args: unknown[]) => {
   try { origConsoleError(...args) } catch { /* ignore */ }
   try {
     const w = window as unknown as { electron?: { automixLog?: (s: string, m: string) => Promise<unknown> } }
-    const text = args.map(a => {
-      try { return typeof a === 'string' ? a : JSON.stringify(a) } catch { return String(a) }
-    }).join(' ').slice(0, 400)
+    const text = args.map(describeConsoleArg).join(' ').slice(0, 400)
     w.electron?.automixLog?.('renderer-error', text)?.catch?.(() => undefined)
   } catch { /* ignore */ }
 }

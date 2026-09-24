@@ -6,6 +6,7 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const {
+  DEV_ORIGIN_BLOB_DIRECTORY,
   DEV_ORIGIN_DIRECTORY,
   MIGRATION_BACKUP,
   MIGRATION_MARKER,
@@ -58,6 +59,23 @@ test('migrates legacy login storage into the stable profile and keeps the source
   assert.equal(fs.existsSync(path.join(legacy, 'Local Storage', 'leveldb', '000003.ldb')), true)
   assert.equal(JSON.parse(fs.readFileSync(path.join(stable, 'config.json'), 'utf8')).cachePath, path.join(stable, 'cache'))
   assert.equal(fs.existsSync(path.join(stable, MIGRATION_MARKER)), true)
+})
+
+test('migrates the IndexedDB blob directory together with the leveldb index', (t) => {
+  const root = fixture(t)
+  const legacy = markedLegacy(root)
+  const stable = path.join(root, 'WaveForge 澜音工坊')
+  // 大值（歌曲封面、壁纸）的真实数据写在 .blob 目录里，索引只存引用。
+  // 只搬索引会让这些记录全部变成 NotReadableError（数据文件丢失、不可恢复）。
+  write(legacy, path.join('IndexedDB', DEV_ORIGIN_BLOB_DIRECTORY, '2', '00', '3'), 'wallpaper-payload')
+
+  const result = prepareWaveForgeUserData({ appDataRoot: root, isPackaged: false, platform: 'win32' })
+
+  assert.equal(result.status, 'migrated')
+  assert.equal(
+    fs.readFileSync(path.join(stable, 'IndexedDB', DEV_ORIGIN_BLOB_DIRECTORY, '2', '00', '3'), 'utf8'),
+    'wallpaper-payload',
+  )
 })
 
 test('backs up conflicting stable data before restoring the legacy profile', (t) => {

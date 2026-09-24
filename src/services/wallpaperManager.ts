@@ -109,24 +109,19 @@ class WallpaperManager {
 
   async getWallpapers(): Promise<WallpaperFile[]> {
     try {
-      const db = await this.ensureDB()
-      return new Promise((resolve, reject) => {
-        const transaction = db.transaction([this.STORE_NAME], 'readonly')
-        const objectStore = transaction.objectStore(this.STORE_NAME)
-        const request = objectStore.getAll()
-        
-        request.onsuccess = () => {
-          const wallpapers = request.result || []
-          // 按上传时间排序
-          wallpapers.sort((a, b) => a.uploadTime - b.uploadTime)
-          resolve(wallpapers)
+      // 逐条按 id 读：单条记录的数据文件丢失（NotReadableError）不该让整张列表读不出来，
+      // 否则壁纸弹窗一直打不开、坏记录也删不掉。
+      const keys = await this.getWallpaperKeys()
+      const wallpapers: WallpaperFile[] = []
+      for (const key of keys) {
+        try {
+          const wallpaper = await this.getWallpaperByKey(key)
+          if (wallpaper) wallpapers.push(wallpaper)
+        } catch (error) {
+          console.error(`❌ 跳过无法读取的壁纸 ${String(key)}:`, error)
         }
-        
-        request.onerror = () => {
-          console.error('❌ 获取壁纸失败:', request.error)
-          reject(request.error)
-        }
-      })
+      }
+      return wallpapers
     } catch (error) {
       console.error('❌ 获取壁纸失败:', error)
       return []
@@ -305,9 +300,19 @@ class WallpaperManager {
       const settings = this.getSettings()
       if (keys.length === 0) return null
 
-      // Load exactly one payload instead of cloning all base64 wallpapers.
-      const index = Math.min(Math.max(0, settings.currentIndex), keys.length - 1)
-      return await this.getWallpaperByKey(keys[index])
+      // 当前这张读不出来（数据文件丢失等）时顺延到后面可读的一张：
+      // 否则用户会一直停在默认背景上，看不到任何已上传的壁纸。
+      const start = Math.min(Math.max(0, settings.currentIndex), keys.length - 1)
+      for (let offset = 0; offset < keys.length; offset += 1) {
+        const index = (start + offset) % keys.length
+        try {
+          const wallpaper = await this.getWallpaperByKey(keys[index])
+          if (wallpaper) return wallpaper
+        } catch (error) {
+          console.error(`❌ 壁纸 #${index} 数据不可读，改用下一张:`, error)
+        }
+      }
+      return null
     } catch (error) {
       console.error('❌ 获取当前壁纸失败:', error)
       return null
@@ -350,6 +355,18 @@ class WallpaperManager {
     this.saveSettings(settings)
     
     window.dispatchEvent(new Event('wallpaperChanged'))
+  }
+
+  /**
+   * 按记录 id 设置当前壁纸
+   * 弹窗列表会跳过读不出来的记录，显示用的下标和库内下标不再一一对应，因此按 id 定位。
+   */
+  async setCurrentWallpaperById(id: string): Promise<boolean> {
+    const wallpaperKeys = await this.getWallpaperKeys()
+    const index = wallpaperKeys.findIndex(key => String(key) === id)
+    if (index < 0) return false
+    await this.setCurrentWallpaper(index)
+    return true
   }
 
   /**

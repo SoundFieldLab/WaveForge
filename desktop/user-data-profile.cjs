@@ -11,6 +11,9 @@ const MIGRATION_MARKER = `.waveforge-profile-migration-v${MIGRATION_VERSION}.jso
 const MIGRATION_LOCK = `.waveforge-profile-migration-v${MIGRATION_VERSION}.lock`
 const MIGRATION_BACKUP = `.waveforge-profile-migration-v${MIGRATION_VERSION}-backup`
 const DEV_ORIGIN_DIRECTORY = 'http_127.0.0.1_3000.indexeddb.leveldb'
+// IndexedDB 的大值（歌曲封面、壁纸等）不存在 .leveldb 索引里，而是写在同级的 .blob 目录。
+// 只搬索引会让所有 blob 记录变成 NotReadableError（数据文件丢失、不可恢复），必须一起搬。
+const DEV_ORIGIN_BLOB_DIRECTORY = 'http_127.0.0.1_3000.indexeddb.blob'
 
 const PRODUCT_FILES = [
   'config.json',
@@ -34,6 +37,7 @@ const PRODUCT_FILES = [
 const PROFILE_GROUPS = [
   'Local Storage/leveldb',
   `IndexedDB/${DEV_ORIGIN_DIRECTORY}`,
+  `IndexedDB/${DEV_ORIGIN_BLOB_DIRECTORY}`,
   'Partitions/mineradio-qishui-auth-v6',
   'apple-bridge-profile',
 ]
@@ -231,6 +235,7 @@ function prepareWaveForgeUserData(options) {
 }
 
 module.exports = {
+  DEV_ORIGIN_BLOB_DIRECTORY,
   DEV_ORIGIN_DIRECTORY,
   MIGRATION_BACKUP,
   MIGRATION_MARKER,
