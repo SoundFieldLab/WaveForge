@@ -143,7 +143,7 @@ export interface QQExploreState {
   paginationError: string
 }
 
-const HIDDEN_QQ_MUSIC_HALL_LABELS = ['热门节目', '听书', '数字专辑', '明星空降', '墙裂推荐', '直播', '编辑甄选'] as const
+const HIDDEN_QQ_MUSIC_HALL_LABELS = ['热门节目', '听点不一样的', '听书', '数字专辑', '明星空降', '墙裂推荐', '直播', '编辑甄选'] as const
 
 export function isHiddenQQMusicHallShelf(shelf: QQMusicHallShelf): boolean {
   if (!shelf.cards.length || !shelf.title.trim()) return false
@@ -152,7 +152,6 @@ export function isHiddenQQMusicHallShelf(shelf: QQMusicHallShelf): boolean {
 }
 
 export function isQQStarLightCard(card: QQExploreCard): boolean {
-  if (card.type !== 217 || card.action.type !== 'unsupported') return false
   const text = [card.title, card.subtitle, card.reason, card.content, ...card.badges].join(' ')
   return /星光卡|典藏星光|星光典藏/i.test(text)
 }

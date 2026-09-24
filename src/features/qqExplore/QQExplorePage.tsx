@@ -243,6 +243,7 @@ export default function QQExplorePage({
   const previousLoadingMore = useRef(false)
   const { state, refreshFeed, refreshModule, appendFromCard, replaceWithSimilar, loadMore } = useQQExploreController(loggedIn, userId, authRevision)
   const [actionLoading, setActionLoading] = useState('')
+  const [privateFmLoading, setPrivateFmLoading] = useState(false)
   const [actionError, setActionError] = useState('')
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(new Set())
   const [favoritesReady, setFavoritesReady] = useState(false)
@@ -257,7 +258,7 @@ export default function QQExplorePage({
   const [guessError, setGuessError] = useState('')
   const guessBatch = useRef(0)
   const guessGeneration = useRef(0)
-  const [guessRefreshRevision, setGuessRefreshRevision] = useState(0)
+  const [guessRefreshRevision] = useState(0)
   const [playingMV, setPlayingMV] = useState<{ id: string; name: string } | null>(null)
   const [radarPlayer, setRadarPlayer] = useState<{ songs: Song[]; continuation: QQRadarContinuation } | null>(null)
   const [preferencesOpen, setPreferencesOpen] = useState(false)
@@ -616,8 +617,10 @@ export default function QQExplorePage({
         return
       }
       if (card.action.type === 'play-radio') {
+        setPrivateFmLoading(true)
         const songs = guessSongs.length > 0 ? guessSongs : await fetchQQGuessYouLikeBatch(1, [], undefined, 30)
         if (songs[0]) onPlaySongs(songs[0], songs, true)
+        else setActionError('私人 FM 暂时没有返回可播放歌曲')
         return
       }
       if (card.action.type === 'play-radar') {
@@ -660,6 +663,7 @@ export default function QQExplorePage({
     } catch (error) {
       setActionError(error instanceof Error ? error.message : '推荐内容暂时无法打开')
     } finally {
+      setPrivateFmLoading(false)
       setActionLoading('')
     }
   }, [actionLoading, appendFromCard, guessSongs, onOpenPlaylist, onOpenSearch, onPlaySongs, openPreferences, resolveCards])
@@ -756,6 +760,13 @@ export default function QQExplorePage({
       {(state.error || actionError) && (
         <div className="flex items-center gap-3 rounded-lg border border-rose-300/15 bg-rose-300/[0.08] px-4 py-3 text-sm text-rose-100/80">
           <AlertCircle className="h-4 w-4" />{actionError || state.error}
+        </div>
+      )}
+
+      {privateFmLoading && (
+        <div className="pointer-events-none fixed bottom-7 left-1/2 z-[200] flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/[0.1] bg-black/65 px-4 py-2 text-xs text-white/75 shadow-xl backdrop-blur-xl">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          正在启动私人 FM…
         </div>
       )}
 

@@ -51,12 +51,14 @@ describe('QQ native Explore contracts', () => {
     expect(isHiddenQQMusicHallShelf({ id: '2', title: '推荐歌单', style: 0, nicheStyle: 0, serverOrder: 1, cards: [card() as any] })).toBe(false)
     expect(isHiddenQQMusicHallShelf({ id: '3', title: '直播精选', style: 0, nicheStyle: 0, serverOrder: 2, cards: [card() as any] })).toBe(true)
     expect(isHiddenQQMusicHallShelf({ id: '4', title: '编辑甄选', style: 0, nicheStyle: 0, serverOrder: 3, cards: [card() as any] })).toBe(true)
+    expect(isHiddenQQMusicHallShelf({ id: '5', title: '热门节目，听点不一样的', style: 0, nicheStyle: 0, serverOrder: 4, cards: [card() as any] })).toBe(true)
   })
 
-  it('filters only unsupported star-light cards from the recommendation feed', () => {
+  it('filters star-light cards from the recommendation feed regardless of changing card metadata', () => {
     expect(isQQStarLightCard(card({ type: 217, action: { type: 'unsupported' }, title: '典藏星光卡即刻拥有' }))).toBe(true)
     expect(isQQStarLightCard(card({ type: 217, action: { type: 'unsupported' }, title: '普通权益卡' }))).toBe(false)
     expect(isQQStarLightCard(card({ type: 500, title: '星光推荐' }))).toBe(false)
+    expect(isQQStarLightCard(card({ type: 500, title: '典藏星光卡' }))).toBe(true)
   })
 
   it('converts server-driven playlist cards without guessing an id', () => {
@@ -313,6 +315,11 @@ describe('QQ native Explore contracts', () => {
     expect(controller).toContain('abortController.signal.aborted || requestGeneration !== generation.current')
     expect(server).toContain("app.all('/api/explore/qq/radio/next'")
     expect(server).toContain('const input = { ...req.query, ...(req.body || {}) }')
+    expect(server).toContain('track.singername || track.SingerName')
+    expect(server).toContain('track.album_pic_mid')
+    const page = read('src/features/qqExplore/QQExplorePage.tsx')
+    expect(page).toContain("setPrivateFmLoading(true)")
+    expect(page).toContain('正在启动私人 FM')
   })
 
   it('degrades unsupported append shelves without surfacing a playback error', () => {

@@ -265,17 +265,19 @@ const normalizeNeteaseSong = (input: any): Song | null => {
 
 const normalizeQQSong = (input: any): Song | null => {
   const track = input?.songInfo || input?.song || input || {}
-  const mid = String(track.mid || track.songmid || track.songMid || '').trim()
-  const id = Number(track.id || track.songid || track.songId || 0)
+  const mid = String(track.mid || track.MID || track.Mid || track.songmid || track.songMid || track.song_mid || '').trim()
+  const id = Number(track.id || track.ID || track.songid || track.songId || 0)
   const album = track.album || track.albumInfo || {}
-  const albumMid = album.mid || album.pmid || album.albumMid || album.albumMID ||
-    track.albummid || track.albumMid || track.albumMID || track.album_mid || ''
-  const rawArtists = track.singer || track.singers || track.artists || []
-  const name = track.name || track.title || track.songname || track.songName || ''
+  const albumMid = album.mid || album.MID || album.pmid || album.albumMid || album.albumMID ||
+    track.albummid || track.albumMid || track.albumMID || track.album_mid || track.album_pic_mid || ''
+  const rawArtists = track.singer || track.singers || track.artists || track.artist || []
+  const artistNameFallback = track.singerName || track.singername || track.SingerName || track.artistName || '未知歌手'
+  const artistList = Array.isArray(rawArtists) ? rawArtists : rawArtists ? [rawArtists] : []
+  const name = track.name || track.Name || track.title || track.songname || track.songName || ''
   if (!name || (!mid && !id)) return null
 
-  const coverUrl = track.cover || track.picUrl || track.picurl || track.albumpic || track.albumPic ||
-    track.albumCover || album.picUrl || album.picurl || album.cover || album.coverUrl || (
+  const coverUrl = track.cover || track.Cover || track.picUrl || track.picurl || track.album_pic_url || track.albumpic || track.albumPic ||
+    track.albumCover || album.picUrl || album.picurl || album.cover || album.coverUrl || album.url || (
     albumMid ? `https://y.gtimg.cn/music/photo_new/T002R500x500M000${String(albumMid).replace(/_\d+$/, '')}.jpg` : ''
   )
 
@@ -283,16 +285,19 @@ const normalizeQQSong = (input: any): Song | null => {
     id,
     mid: mid || undefined,
     name,
-    artists: (rawArtists.length ? rawArtists : [{ name: track.singerName || '未知歌手' }]).map((artist: any) => ({
-      id: Number(artist.id || artist.singerid) || undefined,
-      mid: artist.mid || artist.singermid || artist.singerMid || undefined,
-      name: artist.name || artist.title || artist.singerName || '未知歌手'
-    })),
+    artists: (artistList.length ? artistList : [{ name: artistNameFallback }]).map((artist: any) => {
+      const value = typeof artist === 'string' ? { name: artist } : artist || {}
+      return {
+        id: Number(value.id || value.singerid) || undefined,
+        mid: value.mid || value.MID || value.singermid || value.singerMid || undefined,
+        name: value.name || value.title || value.singerName || value.SingerName || artistNameFallback
+      }
+    }),
     album: {
-      id: Number(album.id || track.albumid) || undefined,
+      id: Number(album.id || track.albumid || track.album_id) || undefined,
       mid: albumMid || undefined,
       pmid: album.pmid || undefined,
-      name: album.name || album.title || track.albumname || '',
+      name: album.name || album.Name || album.title || track.albumname || track.album_name || '',
       picUrl: coverUrl
     },
     duration: Number(track.interval || 0) * 1000 || Number(track.duration || 0),
@@ -428,7 +433,7 @@ export async function fetchExploreHome(
   }
   // Spotify：官方 Web API（需登录 token；未登录返回空 payload，区块自动隐藏）
   if (platform === 'spotify') {
-    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists, fetchSpotifyCharts, spotifyTrackToSong } = await import('./spotifyService')
+    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists, fetchSpotifyCharts } = await import('./spotifyService')
     const [releasesRes, playlistsRes, chartsRes] = await Promise.allSettled([
       fetchSpotifyNewReleases(30),
       fetchSpotifyFeaturedPlaylists(24),
