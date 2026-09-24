@@ -43,13 +43,26 @@ const dayKey = (date = new Date()) => {
 }
 const platformDayKey = (platform: MusicPlatform, date: string) => `${platform}:${date}`
 
+/** days 保留窗口：热力图最多展示 40 周，这里留出远超 UI 需求的余量再裁掉更早的日记录，
+ *  避免「每个平台每天一条、永不清理」的长会话增长（history 已有 200 条上限，days 此前没有）。 */
+const DAYS_RETENTION = 400
+
+function pruneDays(days: Record<string, DesktopDailyListening>): Record<string, DesktopDailyListening> {
+  const entries = Object.entries(days)
+  if (entries.length <= DAYS_RETENTION) return days
+  // 按日期字符串排序（YYYY-MM-DD 可直接字典序比较），保留最近的 DAYS_RETENTION 条
+  return Object.fromEntries(
+    entries.sort((a, b) => String(a[1]?.date || '').localeCompare(String(b[1]?.date || ''))).slice(-DAYS_RETENTION),
+  )
+}
+
 export function loadDesktopMusicActivity(): DesktopMusicActivity {
   try {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') as Partial<DesktopMusicActivity> | null
     if (!parsed) return emptyActivity()
     return {
       history: Array.isArray(parsed.history) ? parsed.history.slice(0, 200) : [],
-      days: parsed.days && typeof parsed.days === 'object' ? parsed.days : {},
+      days: parsed.days && typeof parsed.days === 'object' ? pruneDays(parsed.days) : {},
       lastSongKey: typeof parsed.lastSongKey === 'string' ? parsed.lastSongKey : '',
       lastStartedAt: Number(parsed.lastStartedAt) || 0,
     }

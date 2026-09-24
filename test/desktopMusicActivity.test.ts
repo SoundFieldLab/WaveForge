@@ -68,3 +68,38 @@ describe('desktop music activity platform isolation', () => {
     expect(getDesktopActivityForPlatform(activity, 'netease').days).toEqual({})
   })
 })
+
+describe('desktop music activity days retention', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('prunes the oldest day buckets beyond the retention window', () => {
+    // 造 500 天记录（历史只保留 200、days 此前无上限）
+    const days: Record<string, { date: string; platform: string; listenedSeconds: number; songStarts: number }> = {}
+    for (let i = 0; i < 500; i += 1) {
+      const d = new Date(Date.UTC(2024, 0, 1) + i * 86400000)
+      const key = d.toISOString().slice(0, 10)
+      days[`netease:${key}`] = { date: key, platform: 'netease', listenedSeconds: i, songStarts: 1 }
+    }
+    localStorage.setItem('desktopMusicActivityV1', JSON.stringify({
+      history: [], days, lastSongKey: '', lastStartedAt: 0,
+    }))
+
+    const activity = loadDesktopMusicActivity()
+    const kept = Object.keys(activity.days)
+    expect(kept).toHaveLength(400)
+    // 最新的保留
+    expect(kept).toContain('netease:2025-05-14')
+    // 最旧的被裁掉
+    expect(kept).not.toContain('netease:2024-01-01')
+  })
+
+  it('leaves small day maps untouched', () => {
+    localStorage.setItem('desktopMusicActivityV1', JSON.stringify({
+      history: [],
+      days: { 'netease:2026-09-20': { date: '2026-09-20', platform: 'netease', listenedSeconds: 60, songStarts: 1 } },
+      lastSongKey: '', lastStartedAt: 0,
+    }))
+    const activity = loadDesktopMusicActivity()
+    expect(Object.keys(activity.days)).toEqual(['netease:2026-09-20'])
+  })
+})
