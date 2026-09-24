@@ -22,11 +22,6 @@ export function isTvMode(): boolean {
   return tvMode
 }
 
-function setTvMode(v: boolean): void {
-  if (tvMode === v) return
-  tvMode = v
-  tvListeners.forEach((fn) => fn())
-}
 
 function subscribeTvMode(cb: () => void): () => void {
   tvListeners.add(cb)

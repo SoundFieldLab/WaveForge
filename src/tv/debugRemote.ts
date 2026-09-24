@@ -122,31 +122,42 @@ function reportFrontendLogs(): void {
   }
 }
 
-export function installDebugRemote(): void {
+export function installDebugRemote(): () => void {
   // TV 调试（:3008）仅在 Android/TV 端启用（PC 端 3002/3008 是其它服务，禁用避免 404/连接噪音）
-  if (!isAndroid()) return
+  if (!isAndroid()) return () => undefined
   const sync = () => {
     const enabled = isDebugMode()
     syncBackend(enabled)
     if (enabled) connectWs()
     else closeWs()
   }
-  window.addEventListener('developerModeChanged', sync)
-  window.addEventListener('error', (e) => {
+  const onWindowError = (e: ErrorEvent) => {
     reportFrontendError({
       source: 'window.onerror',
       message: e.message,
       stack: e.error instanceof Error ? e.error.stack : undefined,
       url: typeof e.filename === 'string' ? `${e.filename}:${e.lineno}:${e.colno}` : undefined,
     })
-  })
-  window.addEventListener('unhandledrejection', (e) => {
+  }
+  const onUnhandledRejection = (e: PromiseRejectionEvent) => {
     reportFrontendError({
       source: 'unhandledrejection',
       message: e.reason instanceof Error ? e.reason.message : String(e.reason),
       stack: e.reason instanceof Error ? e.reason.stack : undefined,
     })
-  })
-  setInterval(reportFrontendLogs, 2000)
+  }
+  window.addEventListener('developerModeChanged', sync)
+  window.addEventListener('error', onWindowError)
+  window.addEventListener('unhandledrejection', onUnhandledRejection)
+  // 定时器句柄必须留存：此前只 setInterval 且丢弃返回值，运行期无法停止上报轮询。
+  const reportTimer = window.setInterval(reportFrontendLogs, 2000)
   sync() // 初始同步（开发者模式默认关 → 不启调试服务）
+
+  return () => {
+    window.removeEventListener('developerModeChanged', sync)
+    window.removeEventListener('error', onWindowError)
+    window.removeEventListener('unhandledrejection', onUnhandledRejection)
+    window.clearInterval(reportTimer)
+    closeWs()
+  }
 }
