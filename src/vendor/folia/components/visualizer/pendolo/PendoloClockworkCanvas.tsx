@@ -277,6 +277,12 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
         let animationFrameId: number;
 
         const render = (timestamp: number) => {
+            // 窗口隐藏时不重绘、只保留 rAF 链：整块表盘每帧全量重绘（数百条 arc/文字 + 每帧
+            // createRadialGradient），而 Electron 主窗口 backgroundThrottling=false 时后台不会自动停帧。
+            if (document.hidden) {
+                animationFrameId = window.requestAnimationFrame(render);
+                return;
+            }
             const p = propsRef.current;
             if (p.showGearDecor === 'none' && !p.showCenterGradient && !p.showCover) return;
 

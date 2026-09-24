@@ -302,7 +302,9 @@ const AudioOverlay: React.FC<AudioOverlayProps> = ({
         }
 
         const loop = () => {
-            draw();
+            // 窗口隐藏时跳过重绘、只保留 rAF 链（回前台自动继续）：Electron 主窗口设了
+            // backgroundThrottling=false，rAF 不会被浏览器暂停，逐帧渐变/锚点重建会在后台空跑。
+            if (!document.hidden) draw();
             frameId = window.requestAnimationFrame(loop);
         };
 

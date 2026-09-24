@@ -103,6 +103,11 @@ function SemanticPreview({ settings, active }: { settings: SignalRgbSettings; ac
     let frame = 0;
     let animation = 0;
     const draw = () => {
+      // 窗口隐藏时只保留 rAF 链、不重绘（主窗口 backgroundThrottling=false，后台不会自动停帧）
+      if (document.hidden) {
+        animation = requestAnimationFrame(draw);
+        return;
+      }
       const ratio = Math.min(2, window.devicePixelRatio || 1);
       const width = Math.max(1, Math.floor(canvas.clientWidth * ratio));
       const height = Math.max(1, Math.floor(canvas.clientHeight * ratio));

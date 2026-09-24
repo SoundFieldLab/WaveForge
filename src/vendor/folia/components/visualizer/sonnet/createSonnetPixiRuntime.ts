@@ -167,8 +167,19 @@ export class SonnetPixiRuntime {
         });
         this.resizeObserver.observe(this.options.host);
         this.renderOnce();
-        if (!this.options.paused) this.app.start();
+        if (typeof document !== 'undefined') document.addEventListener('visibilitychange', this.handleVisibility);
+        // 窗口已隐藏时不启动（例如在后台创建）：Electron 主窗口 backgroundThrottling=false，
+        // ticker 一旦启动就会在后台继续满帧渲染。
+        if (!this.options.paused && (typeof document === 'undefined' || !document.hidden)) this.app.start();
     }
+
+    // 窗口隐藏时停 ticker、回到前台恢复：主窗口 backgroundThrottling=false 时 ticker/rAF
+    // 不会被浏览器暂停，整场景 + 模糊/故障滤镜会在后台继续满帧提交 WebGL。
+    private handleVisibility = () => {
+        if (this.destroyed) return;
+        if (document.hidden) this.app.stop();
+        else if (!this.options.paused) this.app.start();
+    };
 
     private resizeToHost() {
         if (this.destroyed) return false;
@@ -762,6 +773,7 @@ export class SonnetPixiRuntime {
         sonnetDebugState.paragraphIndex = -1;
         this.resizeObserver?.disconnect();
         this.resizeObserver = null;
+        if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', this.handleVisibility);
         this.app.stop();
         this.app.ticker.remove(this.renderFrame);
         this.clearScenes();

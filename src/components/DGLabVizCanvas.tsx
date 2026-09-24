@@ -48,6 +48,11 @@ export default function DGLabVizCanvas({ status, height = 190, mode = 'envelope'
 
     const draw = () => {
       raf = 0
+      // 窗口隐藏时只保留 rAF 链、不重绘（主窗口 backgroundThrottling=false，后台不会自动停帧）
+      if (document.hidden) {
+        raf = requestAnimationFrame(draw)
+        return
+      }
       const cw = canvas.clientWidth || 320
       const ch = canvas.clientHeight || height
       const targetW = Math.round(cw * dpr)

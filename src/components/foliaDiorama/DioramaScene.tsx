@@ -290,6 +290,8 @@ const ActiveLineText: React.FC<{
 
     // 径向柔光纹理（共享工具生成），乘上主题色即成为活动行背后的舞台光晕
     const auraTexture = useMemo(() => makeAuraTexture(256), []);
+    // 纹理由本组件独占（工厂每次新建、无缓存），而本组件随歌词行重挂载 —— 不释放会每行泄漏显存
+    useEffect(() => () => { auraTexture.dispose() }, [auraTexture]);
 
     useFrame((_, delta) => {
         const group = groupRef.current;
@@ -696,6 +698,7 @@ const FormationParticles: React.FC<{ shapes: DioramaShapePlacement[]; pulseStore
     const camera = useThree(state => state.camera);
     const palette = useMemo(() => buildFormationPalette(accentColor), [accentColor]);
     const spriteTexture = useMemo(() => makeStarSpriteTexture(64), []);
+    useEffect(() => () => { spriteTexture.dispose() }, [spriteTexture]);
 
     const { geometry, anchor } = useMemo(() => {
         const data = buildFormationParticleData(shapes);
@@ -1239,6 +1242,8 @@ const FloorMist: React.FC<{ accentColor: string }> = ({ accentColor }) => {
         tex.minFilter = THREE.LinearFilter;
         return tex;
     }, [accentColor]);
+    // 纹理随 accentColor 重建、由本组件独占，替换或卸载时释放旧纹理
+    useEffect(() => () => { texture.dispose() }, [texture]);
     useFrame(() => {
         const group = groupRef.current;
         if (!group) return;
@@ -1267,6 +1272,7 @@ const ProgressOrb: React.FC<{ sequencer: SequencerState; globalIndex: number; cu
     const matRef = useRef<THREE.MeshBasicMaterial>(null);
     const camera = useThree(state => state.camera);
     const spriteTexture = useMemo(() => makeAuraTexture(128), []);
+    useEffect(() => () => { spriteTexture.dispose() }, [spriteTexture]);
 
     useFrame(() => {
         const orb = orbRef.current;
@@ -1415,6 +1421,7 @@ const StarShell: React.FC = () => {
     const groupRef = useRef<THREE.Group>(null);
     const camera = useThree(state => state.camera);
     const spriteTexture = useMemo(() => makeStarSpriteTexture(64), []);
+    useEffect(() => () => { spriteTexture.dispose() }, [spriteTexture]);
     const clouds = useMemo(() => {
         const build = (count: number, radiusSeed: number, magFloor: number, magRange: number) => {
             const positions = new Float32Array(count * 3);
@@ -1547,6 +1554,7 @@ const StarRiver: React.FC<{ count?: number; pulseStore: AudioPulseStore; flightA
     const groupRef = useRef<THREE.Group>(null);
     const camera = useThree(state => state.camera);
     const spriteTexture = useMemo(() => makeStarSpriteTexture(64), []);
+    useEffect(() => () => { spriteTexture.dispose() }, [spriteTexture]);
 
     const { geometry, material } = useMemo(() => {
         const positions = new Float32Array(count * 3);

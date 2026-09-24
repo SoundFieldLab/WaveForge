@@ -2142,6 +2142,13 @@ const VisualizerFume: React.FC<VisualizerProps> = (props) => {
 
         const draw = () => {
             const now = performance.now();
+            // 窗口隐藏（最小化/切到后台）时只保留 rAF 链、不做任何绘制：Electron 主窗口设了
+            // backgroundThrottling=false，rAF 不会被浏览器暂停，整篇布局重绘 + shadowBlur 辉光
+            // 会在后台继续满帧跑。这里不停止链而是空转，回到前台即可自动继续绘制。
+            if (document.hidden) {
+                if (!paused) frameId = window.requestAnimationFrame(draw);
+                return;
+            }
             if (lastGateAt && now - lastGateAt < 1000 / 60) {
                 if (!paused) frameId = window.requestAnimationFrame(draw);
                 return;
