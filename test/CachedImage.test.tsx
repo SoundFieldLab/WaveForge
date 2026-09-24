@@ -27,6 +27,7 @@ afterEach(() => {
   vi.clearAllMocks()
   vi.useRealTimers()
   delete (globalThis as { IntersectionObserver?: unknown }).IntersectionObserver
+  delete (Element.prototype as { checkVisibility?: unknown }).checkVisibility
 })
 
 describe('CachedImage loading fallback', () => {
@@ -48,6 +49,32 @@ describe('CachedImage loading fallback', () => {
       'http://localhost:3001/cover?url=cover',
       expect.objectContaining({ priority: 'visible' }),
     )
+  })
+
+  it('holds far-off-screen covers back so the visible ones keep the connections', async () => {
+    // jsdom 没有布局：给出 checkVisibility 与可量矩形，模拟真实浏览器
+    ;(Element.prototype as unknown as { checkVisibility?: () => boolean }).checkVisibility = () => true
+    const rectSpy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 4000, top: 4000, bottom: 4064, left: 0, right: 64, width: 64, height: 64, toJSON: () => ({}),
+    } as DOMRect)
+
+    render(<CachedImage src="https://cdn.example.test/far.jpg" alt="远端封面" />)
+
+    // 兜底超时连着几轮都不该放行：远端封面抢带宽会把可见封面挤到十几秒后
+    await act(async () => {
+      vi.advanceTimersByTime(2400)
+    })
+    expect(preloadArtwork).not.toHaveBeenCalled()
+
+    // 滚到视口附近后放行
+    rectSpy.mockReturnValue({
+      x: 0, y: 100, top: 100, bottom: 164, left: 0, right: 64, width: 64, height: 64, toJSON: () => ({}),
+    } as DOMRect)
+    await act(async () => {
+      vi.advanceTimersByTime(800)
+    })
+    expect(preloadArtwork).toHaveBeenCalled()
+    rectSpy.mockRestore()
   })
 
   it('keeps the caller positioning wrapper and applies contain to the image when requested', async () => {

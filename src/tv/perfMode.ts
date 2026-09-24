@@ -113,7 +113,9 @@ export function getCacheLimits(): CacheLimits {
   const MB = 1024 * 1024
   if (!isTvModeActive()) {
     return {
-      coverCount: 500, coverBytes: 2 * 1024 * MB, singleImage: 10 * MB,
+      // 封面条数要装得下一张大歌单 + 多个页面的常用封面：500 会在两张大歌单之间
+      // 来回全量互删互写（抖动），热封面被挤掉后又要重新回源。硬约束是 idbCoverBytes。
+      coverCount: 2000, coverBytes: 2 * 1024 * MB, singleImage: 10 * MB,
       idbCoverBytes: 256 * MB, playlistCount: 100, playlistBytes: 50 * MB,
       lyricCount: 1000, lyricBytes: 128 * MB,
     }

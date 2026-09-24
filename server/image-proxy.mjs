@@ -178,6 +178,29 @@ async function fetchImage(rawUrl, { fetchImpl, lookup, signal, maxRedirects, max
   throw new ImageProxyError(502, 'Too many image redirects')
 }
 
+/** 上游偶发限流（QQ 图床实测会回 429/503）：这些状态值得等一拍重试一次，把「封面失败」变成「慢一点」。 */
+const UPSTREAM_RETRY_STATUSES = new Set([429, 500, 502, 503, 504])
+const UPSTREAM_RETRY_DELAY_MS = 500
+
+async function fetchImageWithRetry(url, options) {
+  try {
+    return await fetchImage(url, options)
+  } catch (error) {
+    const status = error instanceof ImageProxyError ? error.status : 0
+    const signal = options.signal
+    if (signal?.aborted || !UPSTREAM_RETRY_STATUSES.has(status)) throw error
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, UPSTREAM_RETRY_DELAY_MS)
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer)
+        resolve()
+      }, { once: true })
+    })
+    if (signal?.aborted) throw error
+    return await fetchImage(url, options)
+  }
+}
+
 function etagMatches(header, etag) {
   if (typeof header !== 'string') return false
   return header.split(',').some(value => {
@@ -186,10 +209,16 @@ function etagMatches(header, etag) {
   })
 }
 
-/** Apple mzstatic 图床：URL 含不可变内容 UUID，可声明长期不可变缓存。 */
+/**
+ * 内容寻址的图床：URL 里带图片 id / 尺寸参数，同一 URL 的内容不会变，
+ * 可以让浏览器长期缓存（此前只有 mzstatic 享受，其余图床仅 1h，导致反复 304/回源）。
+ * netease（param=NxN）/ QQ（T002R 尺寸）/ kugou（{size}）都由渲染端改写尺寸，URL 即内容版本。
+ */
+const IMMUTABLE_ARTWORK_HOST_PATTERN = /(^|\.)(mzstatic\.com|music\.126\.net|y\.gtimg\.cn|kgimg\.com|kugou\.com)$/i
+
 function isImmutableArtworkHost(url) {
   try {
-    return /(^|\.)mzstatic\.com$/i.test(new URL(url).hostname)
+    return IMMUTABLE_ARTWORK_HOST_PATTERN.test(new URL(url).hostname)
   } catch {
     return false
   }
@@ -233,7 +262,7 @@ export function createImageProxy(options = {}) {
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), timeoutMs)
         try {
-          const entry = await fetchImage(key, { fetchImpl, lookup, signal: controller.signal, maxRedirects, maxBytes })
+          const entry = await fetchImageWithRetry(key, { fetchImpl, lookup, signal: controller.signal, maxRedirects, maxBytes })
           if (entry.buffer.length <= maxCacheItemBytes) cache.set(key, entry, entry.buffer.length)
           return entry
         } finally {

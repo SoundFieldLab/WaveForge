@@ -17,7 +17,9 @@ class ImageCacheManager {
   // 图床 URL 是内容寻址（内容变即换 URL），条目无需按时间过期，只做容量淘汰，
   // 避免会话内反复重取导致封面闪烁与请求浪费。
   private maxAge = 1000 * 60 * 60 * 24 * 30
-  private readonly maxEntries = 800
+  // 条目可能是 blob: URL（解码后的封面常驻内存，通常数十到数百 KB），条数上限
+  // 决定渲染进程的 Blob 常驻内存；800 条 ≈ 40-160MB，收敛到 400。
+  private readonly maxEntries = 400
   // cleanup() 是 O(n) 全表扫描（上限 800 条），而 set() 会随每次新封面加载被调用；
   // 图床 URL 内容寻址、条目几乎不会自然过期，逐次全扫收益极低，改为每 64 次写入摊销一次。
   private readonly cleanupEveryWrites = 64
@@ -37,6 +39,10 @@ class ImageCacheManager {
       return null
     }
 
+    // 真 LRU：命中即重插到队尾，避免长列表滚动把正在用的封面（播放页/首页大图）
+    // 按插入序挤掉，导致重挂载时闪占位符。
+    this.cache.delete(originalUrl)
+    this.cache.set(originalUrl, entry)
     return entry.proxyUrl
   }
 

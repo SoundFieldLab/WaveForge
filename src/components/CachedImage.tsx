@@ -29,6 +29,33 @@ function getSharedLazyObserver(): IntersectionObserver | null {
   return sharedLazyObserver
 }
 
+/** 懒加载兜底：多久之后检查一次、检查几轮、多远才算「离视口不远」。 */
+const LAZY_FALLBACK_DELAY_MS = 800
+const LAZY_FALLBACK_MAX_ATTEMPTS = 6
+const LAZY_FALLBACK_VIEWPORT_MARGIN = 1.2
+
+/**
+ * 元素是否在视口附近（横竖都算），用于兜底加载的判断。
+ * 不可见（display:none 的冻结面板、visibility:hidden 的保活面板）一律按「不在视口」处理，
+ * 等真正显示出来由 observer 触发，避免看不见的内容也去抢带宽。
+ */
+function isNearViewport(element: Element): boolean {
+  const check = (element as Element & { checkVisibility?: (options?: { visibilityProperty?: boolean }) => boolean }).checkVisibility
+  if (typeof check === 'function') {
+    if (!check.call(element, { visibilityProperty: true })) return false
+  } else if (element.getClientRects().length === 0) {
+    // 没有 checkVisibility 且量不到盒模型：拿不到布局信息（无布局环境）时判不了远近，
+    // 交给兜底放行，保住「observer 不派发也能加载」这条安全网。
+    return true
+  }
+  const rect = element.getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) return false
+  const marginX = window.innerWidth * LAZY_FALLBACK_VIEWPORT_MARGIN
+  const marginY = window.innerHeight * LAZY_FALLBACK_VIEWPORT_MARGIN
+  return rect.bottom > -marginY && rect.top < window.innerHeight + marginY
+    && rect.right > -marginX && rect.left < window.innerWidth + marginX
+}
+
 interface CachedImageProps {
   src: string
   alt: string
@@ -108,7 +135,26 @@ function CachedImage({
     observer.observe(element)
     // Electron/WebView 在复杂滚动容器或窗口刚恢复时可能不派发 intersection；
     // 不能让封面永久停留在占位符，超时后退化为主动加载。
-    const fallbackTimer = window.setTimeout(reveal, 800)
+    //
+    // 但不能「到点就把整页封面一起放出去」：一次上百张会占满同源连接（浏览器每源 6 条），
+    // 用户在看的那些封面只能排在后面——实测探索页 QQ 封面因此要等十几秒。
+    // 所以兜底只在「元素确实在视口附近」时立刻加载；远端元素继续等 observer（滚动到附近会触发），
+    // 最多重试若干轮后仍会强制放行，保证 observer 真坏了的极端环境下不会永远停在占位符。
+    let fallbackAttempts = 0
+    let fallbackTimer = 0
+    const armFallback = () => {
+      fallbackTimer = window.setTimeout(() => {
+        if (!active) return
+        const node = containerRef.current
+        if (node && fallbackAttempts < LAZY_FALLBACK_MAX_ATTEMPTS && !isNearViewport(node)) {
+          fallbackAttempts += 1
+          armFallback()
+          return
+        }
+        reveal()
+      }, LAZY_FALLBACK_DELAY_MS)
+    }
+    armFallback()
     return () => {
       active = false
       lazyObserverCallbacks.delete(element)
@@ -144,8 +190,16 @@ function CachedImage({
       setImageSrc(normalizedSrc)
       setPreviousImageSrc('')
     } else if (imageSrc) {
+      // 已有旧封面：保持旧图，等新图解码完成后交叉淡入。
       setPreviousImageSrc(imageSrc)
       setFadeIn(false)
+    } else {
+      // 冷加载没有任何可保留的旧图：同样先把 <img> 指到代理地址。
+      // 之前这里刻意等 loader 全链（IDB→下载→解码）完成才首绘，导致 QQ/网易云/Apple
+      // 这类 retainPrevious 页面冷启动时盯着占位符十几秒。
+      // loader 命中 blob 时会做一次同像素的淡入替换，视觉不变。
+      setImageSrc(normalizedSrc)
+      setPreviousImageSrc('')
     }
     setLoading(true)
     setError(false)
