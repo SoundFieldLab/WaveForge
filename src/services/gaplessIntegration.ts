@@ -40,7 +40,6 @@ export interface GaplessIntegrationOptions {
 
 export class GaplessIntegration {
   private albumGapless: AlbumGaplessService
-  private currentToken: number = 0
   private transitionProgressFrame = 0
 
   constructor(private options: GaplessIntegrationOptions) {
@@ -147,7 +146,6 @@ export class GaplessIntegration {
       return { success: false, mode: 'disabled' }
     }
 
-    this.currentToken = ctx.token
 
     // 检查是否是同专辑（且启用了专辑融合）
     const queue = this.options.getPlayQueue()

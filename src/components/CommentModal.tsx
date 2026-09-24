@@ -9,6 +9,7 @@ import ScrollToTop from './ScrollToTop'
 import DeleteCommentModal from './DeleteCommentModal'
 import CachedImage from './CachedImage'
 import { getResolvedArtworkUrl } from '../services/artworkLoader'
+import { debugLog, isVerboseLogEnabled } from '../utils/debugLog'
 
 interface PlaylistCommentResource {
   id: number | string
@@ -519,14 +520,12 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   const [pendingDeleteComment, setPendingDeleteComment] = useState<Comment | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('hot')
-  const [showAllHot, setShowAllHot] = useState(false)
   const [newComment, setNewComment] = useState('')
   const [replyingTo, setReplyingTo] = useState<{ commentId: string, username: string } | null>(null)
   const [expandedReplies, setExpandedReplies] = useState<Set<string>>(new Set())
   const [showCommentInput, setShowCommentInput] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const scrollSentinelRef = useRef<HTMLDivElement>(null)
   
   // 分页相关状态
   const [currentPage, setCurrentPage] = useState(0)
@@ -602,10 +601,6 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
   }, [currentUserId])
   
   // 模拟当前用户信息
-  const currentUser = {
-    nickname: '我',
-    avatarUrl: 'http://localhost:3001/api/proxy-image?url=' + encodeURIComponent('https://p1.music.126.net/VnZiScyynLG7atLIZ2YPkw==/18686200114669622.jpg')
-  }
 
   // 汽水未登录：输入框置灰并提示登录，评论列表仍可浏览
   const sodaInputLocked = resourcePlatform === 'soda' && !isLoggedIn
@@ -712,7 +707,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
         endpoint = `http://localhost:3001/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageToLoad}&pagesize=${limit}&type=${viewMode}&biztype=${qqCommentBizType}&cookie=${encodeURIComponent(userCookie)}`
       }
       
-      console.log(`[评论加载] 平台: ${platform}, 歌曲ID: ${songId}, 页码: ${pageToLoad}`)
+      debugLog(`[评论加载] 平台: ${platform}, 歌曲ID: ${songId}, 页码: ${pageToLoad}`)
       
       const response = await fetch(endpoint)
       if (!response.ok) {
@@ -828,11 +823,13 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
         }
       } else {
         // QQ音乐
-        console.log('[QQ音乐评论] 原始数据:', JSON.stringify(data, null, 2))
+        // 整页评论 JSON（含 beReplied/user）可达数百 KB，pretty-print 只在详细日志开启时执行，
+        // 否则每次加载评论都会在主线程同步序列化一遍。
+        if (isVerboseLogEnabled()) console.log('[QQ音乐评论] 原始数据:', JSON.stringify(data, null, 2))
         
         if (data.result === 0 && data.data) {
           const rawComments = data.data.comments || []
-          console.log('[QQ音乐评论] 评论数组:', rawComments)
+          debugLog('[QQ音乐评论] 评论数组:', rawComments)
           
           if (rawComments.length > 0) {
             // QQ 的 middlecommentcontent 是回复数组，并非独立的扁平评论项。
@@ -843,7 +840,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
               comments.sort((a, b) => commentTimeValue(b.time) - commentTimeValue(a.time))
             }
             
-            console.log('[QQ音乐评论] 处理后的评论:', comments)
+            debugLog('[QQ音乐评论] 处理后的评论:', comments)
           }
           
           // QQ 评论：热评模式下 hotComments 是精选热评，comments 是全部评论；最新模式下 hotComments 是附带的热评
@@ -862,7 +859,7 @@ export default function CommentModal({ isOpen, onClose, song = null, playlist = 
           // 设置hasMore
           setHasMoreComments(data.data.hasMore || false)
         } else {
-          console.log('[QQ音乐评论] 无效的响应数据')
+          debugLog('[QQ音乐评论] 无效的响应数据')
         }
       }
       

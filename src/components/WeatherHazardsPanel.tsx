@@ -23,7 +23,6 @@ import {
   getEarthquakeLocationRisk,
   getNearbyEarthquakes,
   getTyphoonLocationRisk,
-  type EarthquakeEvent,
   type EarthquakeLocationRisk,
   type HazardRiskLevel,
   type HazardSnapshot,

@@ -644,7 +644,6 @@ export default function SongContextMenu({
   const isDark = playerTheme === 'dark'
   const menuBg = isDark ? 'from-gray-900 to-gray-800' : 'from-gray-50 to-gray-200'
   const coverOverlay = isDark ? 'bg-black/60' : 'bg-white/50'
-  const borderColor = isDark ? 'border-white/10' : 'border-black/10'
   const hoverBg = isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'
   const separatorColor = isDark ? 'bg-white/10' : 'bg-black/10'
   const textPrimary = isDark ? 'text-white/90' : 'text-black/85'

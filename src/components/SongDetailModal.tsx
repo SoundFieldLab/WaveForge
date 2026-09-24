@@ -73,7 +73,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   const [qqInfo, setQqInfo] = useState<any>(null)
   const [credits, setCredits] = useState<string[]>([])
   const [lyrics, setLyrics] = useState<{ time: number; text: string }[]>([])
-  const [lyricsLoading, setLyricsLoading] = useState(false)
+  const [, setLyricsLoading] = useState(false)
   // 网易云歌曲百科 / QQ 所在歌单
   const [wiki, setWiki] = useState<string>('')
   const [songPlaylists, setSongPlaylists] = useState<{ id: string; name: string; coverUrl: string }[]>([])

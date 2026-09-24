@@ -3,10 +3,6 @@ import { Edit3, Trash2, Star, StarOff, Share2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useTvBack } from '../tv/tvCore'
 
-/** 与 SongContextMenu.showMenuToast 一致的全局 toast 通道 */
-const showMenuToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
-  window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type } }))
-}
 
 interface PlaylistContextMenuProps {
   show: boolean

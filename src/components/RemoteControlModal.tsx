@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { QRCodeSVG } from 'qrcode.react'
-import { X, Link2, Unplug, Loader2, MonitorSmartphone, ChevronDown, Check, Wifi, Copy, Plus, Smartphone } from 'lucide-react'
+import { X, Unplug, Loader2, MonitorSmartphone, ChevronDown, Check, Wifi, Copy, Plus, Smartphone } from 'lucide-react'
 import type { RemoteSettings, RemoteStatus } from '../electron'
 import { isAndroid } from '../platform'
 
@@ -13,7 +13,7 @@ interface RemoteControlModalProps {
 export default function RemoteControlModal({ onClose, playerTheme }: RemoteControlModalProps) {
   const dark = playerTheme === 'dark'
   const [status, setStatus] = useState<RemoteStatus>({ running: false, port: 25567, token: '', clientCount: 0, maxClients: 5, clients: [], ips: [] })
-  const [settings, setSettings] = useState<RemoteSettings>({ theme: 'dark', topRightAction: 'song', gestures: { doubleTap: true, swipe: true, twoFinger: true, twoFingerTap: true } })
+  const [, setSettings] = useState<RemoteSettings>({ theme: 'dark', topRightAction: 'song', gestures: { doubleTap: true, swipe: true, twoFinger: true, twoFingerTap: true } })
   const [starting, setStarting] = useState(true)
   const [error, setError] = useState('')
   const [selectedIp, setSelectedIp] = useState('')

@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { CheckCircle, AlertCircle, Info, X, Check } from 'lucide-react'
+import { AlertCircle, X, Check } from 'lucide-react'
 
 interface GlobalToastProps {
   show: boolean

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { X, Music, Copy, ScrollText, Languages, Mic2 } from 'lucide-react'
+import { X, Copy, ScrollText, Languages, Mic2 } from 'lucide-react'
 import { getProxiedImageUrl } from '../services/musicApi'
 import { useTvBack } from '../tv/tvCore'
 
@@ -12,9 +12,6 @@ interface LyricModalProps {
   onClose: () => void
 }
 
-const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
-  window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type } }))
-}
 
 export default function LyricModal({ songName, artistName, coverUrl, lyrics, onClose }: LyricModalProps) {
   // TV 遥控器 BACK：关闭歌词详情弹窗
@@ -22,7 +19,7 @@ export default function LyricModal({ songName, artistName, coverUrl, lyrics, onC
     onClose()
     return true
   }, [onClose])
-  const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
+  const [accentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const [showTrans, setShowTrans] = useState(false)
   const [showRoman, setShowRoman] = useState(false)
   // 歌词弹窗内的复制提示（避免被全局 toast 层级遮挡）

@@ -1,12 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import L, { type Coords, type DoneCallback, type GridLayerOptions, type LatLng, type Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import {
-  Activity,
-  AirVent,
-  Aperture,
   ChevronRight,
   CircleDotDashed,
   Cloud,
@@ -17,7 +14,6 @@ import {
   Flame,
   Gauge,
   Layers3,
-  LocateFixed,
   Map as MapIcon,
   Minus,
   MountainSnow,
@@ -26,7 +22,6 @@ import {
   Plus,
   Radar,
   RefreshCw,
-  Snowflake,
   Sparkles,
   Sun,
   Thermometer,

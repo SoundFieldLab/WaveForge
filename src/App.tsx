@@ -1297,7 +1297,6 @@ function App() {
   const transitionDebugRef = useRef<TransitionDebugInfo | null>(null)
   transitionDebugRef.current = transitionDebug
   const [transitionFallbackReason, setTransitionFallbackReason] = useState<string | undefined>()
-  const [isLyricsTransitioning, setIsLyricsTransitioning] = useState(false) // 歌词过渡状态（不影响UI）
   const [transitionProgress, setTransitionProgress] = useState(0) // 过渡进度 0-1
   // 过渡缓冲时长（秒）：叠加动画窗口（最后 4 秒）按此映射 progress
   const [transitionDuration, setTransitionDuration] = useState(0)
@@ -9236,7 +9235,7 @@ function App() {
                 <motion.div
                   key="immersive-lyrics-player"
                   initial={{ opacity: 0, filter: 'blur(10px)' }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, filter: 'blur(0px)' }}
+                  animate={{ opacity: 1, filter: 'blur(0px)' }}
                   exit={{ opacity: 0, filter: 'blur(10px)' }}
                   transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
                   className="flex-1 w-full min-h-0 flex flex-col items-center justify-center px-10 pt-20 pb-28"
@@ -9305,7 +9304,7 @@ function App() {
                 <motion.div
                   key="multidimensional-lyrics-player"
                   initial={{ opacity: 0, scale: 1.02 }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.99 }}
                   transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
                   className="flex-1 w-full min-h-0"
@@ -9325,7 +9324,7 @@ function App() {
                     translationEnabled={translationEnabled}
                     romanEnabled={romanEnabled}
                     isTransitioning={isVisualTransitioning}
-                    active={!isLyricsTransitioning}
+                    active
                     onSeek={audioPlayer.seek}
                     mvBackgroundActive={mvBackgroundActive}
                   />
@@ -9334,7 +9333,7 @@ function App() {
                 <motion.div
                   key="folia-lyrics-player"
                   initial={{ opacity: 0, scale: 1.02 }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.99 }}
                   transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
                   className="flex-1 w-full min-h-0"
@@ -9359,14 +9358,14 @@ function App() {
                     foliaStyle={foliaStyle}
                     foliaBackgroundEnabled={foliaBackgroundEnabled}
                     mvBackgroundActive={mvBackgroundActive}
-                    active={!isLyricsTransitioning}
+                    active
                   />
                 </motion.div>
               ) : lyricDisplayMode === 'glorious' ? (
                 <motion.div
                   key="glorious-lyrics-player"
                   initial={{ opacity: 0, scale: 1.04 }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.98 }}
                   transition={{ duration: 0.58, ease: [0.16, 1, 0.3, 1] }}
                   className="flex-1 w-full min-h-0"
@@ -9393,7 +9392,7 @@ function App() {
                 <motion.div
                   key="modeng-lyrics-player"
                   initial={{ opacity: 0, scale: 1.02 }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.99 }}
                   transition={{ duration: 0.45, ease: [0.42, 0, 0.58, 1] }}
                   className="flex-1 w-full min-h-0 relative"
@@ -9448,7 +9447,7 @@ function App() {
                 <motion.div
                   key="pv-lyrics-player"
                   initial={{ opacity: 0, scale: 1.02 }}
-                  animate={{ opacity: isLyricsTransitioning ? 0 : 1, scale: 1 }}
+                  animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.99 }}
                   transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
                   className="flex-1 w-full min-h-0 relative"

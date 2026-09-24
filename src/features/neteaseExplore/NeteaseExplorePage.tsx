@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertCircle, ChevronRight, Compass, Disc3, Headphones, HeartPulse, Loader2, LogIn, Mic2, Music2, Play, Radio, RefreshCw, Sparkles, Trophy, UserRoundSearch, Waves, X } from 'lucide-react'
-import { HorizontalShelf } from '../../components/apple-explore/HorizontalShelf'
 import CachedImage from '../../components/CachedImage'
 import type { Song } from '../../services/musicApi'
 import { getUserDetail, getUserPlaylistList } from '../../services/musicApi'
@@ -376,7 +375,6 @@ export default function NeteaseExplorePage({
     onPlaySongs(queue[0], queue, true, { mode: 'heart-mode', playlistId: likedPlaylist.id })
   }, [likedPlaylist, neteaseCurrentSong, onPlaySongs])
   const dragonBlock = home?.blocks.find(block => block.showType.toUpperCase() === 'DRAGON_BALL' || block.blockCode.toUpperCase() === 'DRAGON_BALL' || /DRAGON.?BALL/.test(`${block.blockCode} ${block.showType}`.toUpperCase()))
-  const allHomeResources = home?.blocks.flatMap(block => block.resources) || []
   const shortcutSourceResources = [
     ...linkShortcuts,
     ...(dragonBlock?.resources || home?.blocks.find(block => block.resources.some(resource => neteaseShortcutKind(resource) !== null))?.resources || []),
@@ -397,16 +395,6 @@ export default function NeteaseExplorePage({
     '相似歌曲': 'similar',
     '相似艺人': 'similar-user',
   }
-  const isShortcutResource = (resource: NeteaseNativeResource, title?: string) => {
-    const semanticTitle = `${resource.title} ${resource.purePicName} ${resource.subtitle} ${resource.actionUrl}`.trim()
-    const expectedKind = title ? shortcutKindByTitle[title] : undefined
-    if (expectedKind && neteaseShortcutKind(resource) === expectedKind) return true
-    if (!title && Object.values(shortcutKindByTitle).includes(neteaseShortcutKind(resource))) return true
-    const expectedSubtitle = title ? shortcutLabels[title] : ''
-    return Boolean(title && (resource.title.trim() === title || (expectedSubtitle && resource.subtitle.trim() === expectedSubtitle)) && semanticTitle)
-  }
-  const shortcutResources = shortcutSourceResources.filter(resource => isShortcutResource(resource))
-  const shortcutResourceIds = new Set(shortcutResources.map(resource => `${resource.type}:${resource.id}`))
   // 推荐页主内容优先使用 Link Platform 下发的真实区块；旧协议仅作降级
   const linkContentBlocks = (linkHome?.blocks || []).filter(block => !/GREETING|DAILY_RECOMMEND/.test((block.blockCode || '').toUpperCase()))
   const legacyContentBlocks = (home?.blocks || []).filter(block => block !== dragonBlock)

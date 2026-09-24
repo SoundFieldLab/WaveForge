@@ -97,7 +97,10 @@ describe('mode integration wiring', () => {
   it('preserves Apple Explore nested playback state', () => {
     const panel = source('components/AppleExplorePanel.tsx')
     expect(panel).toContain("surface: 'explore-apple'")
-    expect(panel).toContain('room: { id: roomDetail.id, name: roomDetail.name }')
+    // room 归属来自「嵌套层级栈」的栈顶（room/grouping/multiroom/curator 可任意互相进入，
+    // 旧实现是单一 roomDetail，重构后泛化为有序栈）。这里断言输出契约：
+    // 只有 room 类型的活动层才写入 room: { id, name }，且取值来自该层自身。
+    expect(panel).toContain("activeLayer.kind === 'room' ? { room: { id: activeLayer.id, name: activeLayer.name } }")
     expect(panel).toContain('postItem: postDetail.item')
     expect(panel).toContain('chart: chartDetail')
     expect(panel).toContain("drawerType: 'station'")

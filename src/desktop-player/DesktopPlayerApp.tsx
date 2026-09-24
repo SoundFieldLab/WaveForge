@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import type { DesktopPlayerSnapshot, DesktopPlayerControlAction, DesktopPlayerBridgeAPI } from '../electron'
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'

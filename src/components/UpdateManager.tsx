@@ -13,7 +13,7 @@
  *   确认重启（稍后/立即更新）→ 更新成功（稍后重启/立即重启）→ 重启后新版本 + 更新日志。
  *   「稍后」的更新会持久化，退出应用时自动应用，下次启动即为新版本。
  */
-import React, { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Download, RefreshCw, CheckCircle2, AlertTriangle, Rocket } from 'lucide-react'
 import { fetchUpdateManifest, compareVersions } from '../services/updateConstants'
@@ -58,7 +58,7 @@ export default function UpdateManager() {
   const [view, setView] = useState<View>('idle')
   const [info, setInfo] = useState<UpdateInfo | null>(null)
   const [percent, setPercent] = useState(0)
-  const [autoCheck, setAutoCheck] = useState(() => parseStoredBoolean(localStorage.getItem('autoCheckUpdate'), true))
+  const [autoCheck] = useState(() => parseStoredBoolean(localStorage.getItem('autoCheckUpdate'), true))
   const busyRef = useRef(false)
 
   const toast = (message: string, type: 'info' | 'error' | 'success' = 'info', duration = 4000) => {

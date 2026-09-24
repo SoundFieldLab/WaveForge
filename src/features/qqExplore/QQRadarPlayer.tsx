@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
-import { ChevronDown, ChevronLeft, ChevronRight, ListMusic, MoreHorizontal, Pause, Play, SlidersHorizontal, X } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, ListMusic, MoreHorizontal, Pause, Play, SlidersHorizontal } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
 import CachedImage from '../../components/CachedImage'
 

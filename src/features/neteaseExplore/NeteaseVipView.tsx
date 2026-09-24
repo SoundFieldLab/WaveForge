@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Crown, Play } from 'lucide-react'
-import type { ExplorePlaylist } from '../../services/exploreApi'
-import type { Song } from '../../services/musicApi'
+import { Crown } from 'lucide-react'
 import type { NeteaseVipPage } from './discover'
 import { normalizeNeteaseSongs } from './api'
 import type { NeteaseNativeResource } from './model'

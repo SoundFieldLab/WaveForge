@@ -10,7 +10,6 @@ import {
   Activity,
   AlertTriangle,
   BookOpen,
-  CheckCircle2,
   Crown,
   ExternalLink,
   FileCode2,

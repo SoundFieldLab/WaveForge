@@ -6,7 +6,6 @@ import {
   CalendarDays,
   ChevronRight,
   KeyRound,
-  ListMusic,
   Loader2,
   ShieldCheck,
   Sparkles,

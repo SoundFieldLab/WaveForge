@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, ChevronDown, ChevronUp, Compass, Headphones, Loader2, Music2, RefreshCw } from 'lucide-react'
+import { AlertCircle, ChevronDown, ChevronUp, Compass, Headphones, Loader2, RefreshCw } from 'lucide-react'
 import type { NeteaseNativeBlock, NeteaseNativeResource } from './model'
 import { normalizeNeteaseLinkPage, normalizeNeteaseResource } from './model'
 import type { Song } from '../../services/musicApi'
@@ -8,25 +8,20 @@ import {
   fetchNeteaseCubePage,
   fetchNeteaseLinkPage,
   fetchNeteaseMusicChannels,
-  fetchNeteaseMyPodcasts,
   fetchNeteasePlaylistSquare,
-  fetchNeteasePodcastCategories,
-  fetchNeteasePodcastCategoryRadios,
   fetchNeteasePodcastInfinite,
   fetchNeteaseVipPage,
   fetchNeteaseToplist,
   fillNeteaseCubeCovers,
   normalizeNeteaseCubePage,
   normalizeNeteasePodcastHome,
-  normalizeNeteaseRadioResources,
   normalizeNeteaseSquareBlocks,
   normalizeNeteaseToplistBlocks,
   type NeteaseCubeTab,
   type NeteaseMusicChannel,
-  type NeteasePodcastCategory,
   type NeteaseVipPage,
 } from './discover'
-import { fetchNeteaseRoam, normalizeNeteaseSongs } from './api'
+import { fetchNeteaseRoam } from './api'
 import NeteasePodcastPages, { type NeteasePodcastView } from './NeteasePodcastPages'
 import NeteaseCubePageView from './NeteaseCubePageView'
 import NeteaseVipView from './NeteaseVipView'

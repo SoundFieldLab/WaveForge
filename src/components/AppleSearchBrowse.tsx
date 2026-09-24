@@ -18,10 +18,8 @@ import {
   appleWebItemToSong,
   type AppleCuratorPage,
   type AppleWebItem,
-  type AppleWebSection,
 } from '../services/appleWebService'
 import type { SongSelectHandler } from '../types/playbackNavigation'
-import type { Song } from '../services/musicApi'
 import { useTvBack } from '../tv/tvCore'
 import CachedImage from './CachedImage'
 
@@ -106,12 +104,6 @@ export default function BrowseCategoriesLanding({ playerTheme = 'dark', storefro
     return true
   }, [closeCurator, curatorError, curatorLoading, curatorPage])
 
-  const playSectionSongs = (section: AppleWebSection) => {
-    const songs = section.items
-      .filter(item => item.type === 'songs' && item.playId)
-      .map(item => appleWebItemToSong(item, storefront))
-    if (songs.length > 0) onSongSelect(songs[0], songs, playbackOrigin)
-  }
 
   const openPlaylist = (item: AppleWebItem) => {
     if (onOpenPlaylist) {

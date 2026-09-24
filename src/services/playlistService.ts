@@ -5,7 +5,7 @@ import { platformLabel } from './platforms'
  */
 
 import { indexedDBCache } from './indexedDBCache'
-import { getAppleLibraryPlaylists, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, getAppleFavoriteSongIds, appleSongToSong, appleLibraryTrackToSong, APPLE_LIBRARY_ID_PATTERN } from './appleCatalog'
+import { getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, getAppleFavoriteSongIds, appleSongToSong, appleLibraryTrackToSong, APPLE_LIBRARY_ID_PATTERN } from './appleCatalog'
 import { getAppleCredentials } from './appleAuth'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
 
@@ -1106,27 +1106,6 @@ export async function removeSongFromPlaylist(
   return data
 }
 
-/**
- * 手动刷新歌单（用于用户主动刷新）
- */
-export async function refreshPlaylist(
-  playlistId: string,
-  platform: MusicPlatform
-): Promise<any> {
-  console.log(`🔄 手动刷新歌单: ${playlistId}`)
-  return getPlaylistDetail(playlistId, platform, { forceRefresh: true })
-}
-
-/**
- * 手动刷新我喜欢的音乐
- */
-export async function refreshLikedSongs(
-  userId: string,
-  platform: MusicPlatform
-): Promise<any> {
-  console.log('🔄 手动刷新我喜欢的音乐')
-  return getLikedSongs(userId, platform, { forceRefresh: true })
-}
 /**
  * 创建歌单
  */

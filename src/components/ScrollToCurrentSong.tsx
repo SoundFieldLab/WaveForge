@@ -51,7 +51,7 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
   const resolvedContainerRef = containerRef ?? scrollContainerRef
   const resolvedTheme = theme ?? playerTheme ?? 'dark'
   const resolvedSongIndex = currentSongIndex ?? (currentSongId == null ? -1 : 0)
-  const [showButton, setShowButton] = useState(false)
+  const [showButton] = useState(false)
 
   const scrollToCurrentSong = () => {
     const container = resolvedContainerRef?.current

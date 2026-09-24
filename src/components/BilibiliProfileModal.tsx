@@ -45,7 +45,6 @@ interface BilibiliProfileModalProps {
 
 type ProfileTab = 'fav' | 'history' | 'uploads' | 'following'
 
-const BILI_PINK = '#FB7299'
 const PAGE_SIZE = 20
 
 function formatCount(n: number): string {
@@ -86,7 +85,7 @@ export default function BilibiliProfileModal({ initialMid, onClose, playerTheme 
 
   const [user, setUser] = useState<BilibiliSpaceUser | null>(null)
   const [userLoading, setUserLoading] = useState(true)
-  const [userError, setUserError] = useState('')
+  const [, setUserError] = useState('')
   const [tab, setTab] = useState<ProfileTab>('fav')
   const [uploadCount, setUploadCount] = useState(0)
 

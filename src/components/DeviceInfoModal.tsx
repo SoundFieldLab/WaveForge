@@ -7,7 +7,7 @@
 import { useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTvBack } from '../tv/tvCore'
-import { X, Cpu, MemoryStick, HardDrive, MonitorSmartphone, Gauge } from 'lucide-react'
+import { X, Gauge } from 'lucide-react'
 import { getPerfMode, setPerfMode, type PerfMode } from '../tv/perfMode'
 
 interface DeviceInfo {
@@ -67,7 +67,6 @@ export default function DeviceInfoModal({ show, onClose, playerTheme = 'dark' }:
   const textPrimary = isDark ? 'text-white' : 'text-black'
   const textSecondary = isDark ? 'text-white/60' : 'text-black/60'
   const textTertiary = isDark ? 'text-white/40' : 'text-black/40'
-  const bgCard = isDark ? 'bg-white/5' : 'bg-black/5'
   const borderColor = isDark ? 'border-white/10' : 'border-black/10'
   const accent = localStorage.getItem('accentColor') || '#3B82F6'
 

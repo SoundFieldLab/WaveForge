@@ -227,7 +227,6 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
         console.log(`[Apple登录] 用户拒绝展示账户信息，使用账单姓名：${realName || 'Apple Music 用户'}`)
       }
       try {
-        const cookies = (result as any).cookies
         const allCookies = (result as any).allCookies
         // buy.itunes 账号接口需要完整会话 cookie（过滤后的 itunes 子集会 401）
         if (allCookies && !accountInfo.name) {

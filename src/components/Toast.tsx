@@ -1,6 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Check, X, Info, AlertCircle } from 'lucide-react'
-import { useEffect } from 'react'
+import { Check, X, AlertCircle } from 'lucide-react'
 
 export type ToastType = 'success' | 'error' | 'info' | 'warning'
 

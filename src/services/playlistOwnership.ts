@@ -16,7 +16,6 @@ export function isSpecialPlaylist(playlist: any): boolean {
 export function isPlaylistOwner(playlist: any, context: PlaylistOwnershipContext = {}): boolean {
   if (!playlist || isSpecialPlaylist(playlist) || playlist.isCollected || playlist.subscribed) return false
   const platform = (playlist.platform || 'netease') as MusicPlatform
-  const id = String(playlist.id || playlist.dirId || '')
   if (platform === 'apple') return playlist.ownedByMe === true
   if (playlist.ownedByMe === true) return true
   if (platform === 'spotify') return Boolean(playlist.owner && context.spotifyUserId && String(playlist.owner) === String(context.spotifyUserId))

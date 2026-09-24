@@ -2,7 +2,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, Lock, Globe, ImagePlus } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { preparePlaylistCover } from '../utils/playlistCover'
-import { getProxiedImageUrl } from '../services/musicApi'
 import { useTvBack } from '../tv/tvCore'
 
 interface CreatePlaylistModalProps {

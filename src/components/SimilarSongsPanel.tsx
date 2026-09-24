@@ -3,7 +3,6 @@ import { motion } from 'framer-motion'
 import { X, Music, Play, ListPlus } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getSimilarSongs, getProxiedImageUrl } from '../services/musicApi'
-import SongContextMenu from './SongContextMenu'
 import { useTvBack } from '../tv/tvCore'
 
 interface SimilarSongsPanelProps {
@@ -20,13 +19,9 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme }
     onClose()
     return true
   }, [onClose])
-  const dark = playerTheme === 'dark'
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
   const [songs, setSongs] = useState<Song[]>([])
   const [loading, setLoading] = useState(true)
-  const [contextMenu, setContextMenu] = useState<{ show: boolean; x: number; y: number; song: Song | null }>({ show: false, x: 0, y: 0, song: null })
-  const textPrimary = dark ? 'text-white' : 'text-black'
-  const textSecondary = dark ? 'text-white/60' : 'text-black/60'
 
   useEffect(() => {
     const handleAccent = (e: Event) => {

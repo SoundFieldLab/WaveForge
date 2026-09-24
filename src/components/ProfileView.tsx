@@ -663,7 +663,6 @@ function ProfileView({
   // 活动用户 ID（查看他人时为目标用户，否则为自己）
   const activeUserId = viewTarget?.userId || userId
   // 查看他人时禁用歌单写操作与平台切换
-  const isViewingOther = Boolean(viewTarget)
   
   // 根据主题色生成渐变色（accentColor 为稳定 prop，避免每次渲染重复计算）
   const generateGradientColors = useCallback((baseColor: string) => {

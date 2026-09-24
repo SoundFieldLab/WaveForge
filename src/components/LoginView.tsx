@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useRef, Suspense, lazy } from 'react'
+import { useState, useEffect, useRef, Suspense, lazy } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Music, RefreshCw, Copy, Check, ExternalLink } from 'lucide-react'
+import { X, Music, RefreshCw, ExternalLink } from 'lucide-react'
 import type { MusicPlatform } from '../services/platforms'
 import { isTvModeActive } from '../platform'
 import { isPerfModeEnhanced } from '../tv/perfMode'

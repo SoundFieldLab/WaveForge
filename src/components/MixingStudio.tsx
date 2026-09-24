@@ -7,7 +7,6 @@ import {
   type DeepPartial,
   type EqMode,
   SIMPLE_EQ_BANDS,
-  PRO_EQ_FREQUENCIES,
 } from '../services/audioEffects/AudioEffectsEngine'
 
 interface MixingStudioProps {

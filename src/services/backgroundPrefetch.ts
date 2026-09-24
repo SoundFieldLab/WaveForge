@@ -195,7 +195,6 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
   }
   const minimalPlatform = readCorePlatform('selectedPlatform')
   const explorePlatform = readCorePlatform('explorePlatform')
-  const traditionalPlatform = readCorePlatform('traditionalPlatform') || minimalPlatform
   const desktopPlatform = readCorePlatform('desktopModePlatform')
   const neteasePlaylist = createPlaylistJob('netease', context.neteaseLoggedIn)
   const qqPlaylist = createPlaylistJob('qq', context.qqLoggedIn)

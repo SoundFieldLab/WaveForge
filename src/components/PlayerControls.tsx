@@ -226,7 +226,7 @@ export default function PlayerControls({
   const volumeOpenedAtRef = useRef(0)
   /** 音量滑条延迟关闭定时器：离开大药丸先给鼠标留出移到小药丸的时间，小药丸 hover 会取消 */
   const volumeCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const [isProgressBarExpanded, setIsProgressBarExpanded] = useState(false)
+  const [, setIsProgressBarExpanded] = useState(false)
   const [shortcutSettings, setShortcutSettings] = useState(loadPlaybackShortcutSettings)
   const [seekFeedback, setSeekFeedback] = useState<{
     direction: 'forward' | 'backward'
@@ -458,21 +458,7 @@ export default function PlayerControls({
     onSeek(value)
   }
 
-  const handleProgressMouseEnter = () => {
-    if (progressHideTimerRef.current) {
-      clearTimeout(progressHideTimerRef.current)
-      progressHideTimerRef.current = null
-    }
-    setIsProgressBarExpanded(true)
-  }
 
-  const handleProgressMouseLeave = () => {
-    if (isDragging) return
-    progressHideTimerRef.current = setTimeout(() => {
-      setIsProgressBarExpanded(false)
-      progressHideTimerRef.current = null
-    }, 300)
-  }
 
   const handlePlayerMouseLeave = () => {
     setIsHovered(false)
@@ -551,7 +537,6 @@ export default function PlayerControls({
   // transitionStartTime 为 null（普通交叉淡化/gapless）时视为始终在窗口内（v1 行为不变）。
   const inAnimationWindow = transitionStartTime === null || currentTime >= transitionStartTime
   // 检查是否即将过渡：动画窗口内（automix 动画起点）或歌曲自然结束前 5 秒
-  const isNearTransition = (isTransitioning && inAnimationWindow) || (duration - currentTime <= 5 && duration - currentTime > 0)
   // 过渡指示：动画窗口内 = AutoMix Enhanced（金色）；介入中（running 未到动画窗口）= AutoMix 正在介入（白色）
   const inTransitionAnimation = isTransitioning && inAnimationWindow
   const showTransitionBadge = inTransitionAnimation || enhancedAutoMixActive
@@ -561,7 +546,6 @@ export default function PlayerControls({
     : (enhancedAutoMixActive ? 'AutoMix 正在介入' : '')
   
   // 进度条发光强度
-  const glowIntensity = isNearTransition ? 1.5 : 1
 
   // ---- 进度条 UI（正常模式和沉浸展开共用） ----
   const renderProgressContent = (sliderWidthClass: string, containerClassName: string = '') => (

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Check, ChevronRight, Crown, Headphones, Music2, X } from 'lucide-react'
+import { Check, Crown, Headphones, Music2, X } from 'lucide-react'
 import {
   loadAudioQualitySettings,
   saveAudioQualitySettings,

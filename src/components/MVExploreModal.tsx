@@ -105,7 +105,6 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
   // 搜索状态
   const [searchKeyword, setSearchKeyword] = useState('')
   const [isSearchMode, setIsSearchMode] = useState(false)
-  const [searchLoading, setSearchLoading] = useState(false)
   // 上次 effect 生效时的搜索词——用于区分「输入框打字」与「提交搜索」，
   // 避免浏览模式下每次击键都触发列表重载（重新请求 + 列表闪空白）
   const prevSearchKeywordRef = useRef(searchKeyword)

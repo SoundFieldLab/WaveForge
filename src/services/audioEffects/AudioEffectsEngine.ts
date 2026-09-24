@@ -229,7 +229,6 @@ export class AudioEffectsEngine {
   private attachSeq = 0
 
   private input: GainNode | null = null
-  private output: GainNode | null = null
 
   // 变调/变速（SoundTouch AudioWorklet，异步注册）
   private soundtouchNode: SoundTouchNode | null = null
@@ -326,7 +325,6 @@ export class AudioEffectsEngine {
     input.gain.value = 1
     output.gain.value = 1
     this.input = input
-    this.output = output
 
     // 人声/伴奏比例 M/S 矩阵
     this.voiceMatrix = createMsMatrix(context)
@@ -492,7 +490,6 @@ export class AudioEffectsEngine {
     this.limiter = null
     this.context = null
     this.input = null
-    this.output = null
     this.masterGain = null
     this.analyser = null
   }
@@ -501,7 +498,7 @@ export class AudioEffectsEngine {
   private rebuildFromSettings(): void {
     if (!this.context) return
     const t = this.context.currentTime
-    const { effects, eq, pitch } = this.settings
+    const { effects, pitch } = this.settings
 
     // 人声/伴奏比例：center=人声(中)，side=伴奏(侧)
     if (this.voiceMatrix) {

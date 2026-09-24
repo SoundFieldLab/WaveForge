@@ -14,11 +14,10 @@
  * 二维码走真实插件链路（client.getQR），扫码成功检测用 useDGLabStatus().state==='bound'。
  * 与现有 OOBE1（OobeGuide）解耦：本组件只讲连接，未来可挂进 OOBE2 功能引导或独立复用。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { ArrowLeft, ArrowRight, Check, QrCode, Smartphone, Wifi, X } from 'lucide-react'
-import { useDGLabStatus, getDGLabClient, loadDGLabSettings, saveDGLabSettings, type DGLabSettings } from '@/plugins/clients/DGLabClient'
-import { showToast } from '@/plugins/toggle'
+import { useDGLabStatus, getDGLabClient, saveDGLabSettings, type DGLabSettings } from '@/plugins/clients/DGLabClient'
 import homeImg from '@/assets/oobe-dglab/app-home.webp'
 import connectingImg from '@/assets/oobe-dglab/app-connecting.webp'
 import socketPageImg from '@/assets/oobe-dglab/app-socket-page.webp'
@@ -29,7 +28,6 @@ import connectedImg from '@/assets/oobe-dglab/app-connected.webp'
 import './dglabOobe.css'
 
 const GOLD = '#FFE89C'
-const GOLD_DEEP = '#d9bd6e'
 const SCAN = '#22d3ee'
 const SLIDER = '#fb923c'
 

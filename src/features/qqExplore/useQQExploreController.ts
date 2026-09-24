@@ -61,10 +61,6 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
   const controller = useRef<AbortController | null>(null)
   const contextualController = useRef<AbortController | null>(null)
 
-  const applySnapshot = useCallback((snapshot: QQExploreSnapshot) => {
-    writeCache(userId, snapshot)
-    setState(previous => ({ ...previous, snapshot, initialLoading: false, refreshing: false, error: '' }))
-  }, [userId])
 
   const loadInitial = useCallback(async (force = false) => {
     if (!loggedIn) {
@@ -132,7 +128,6 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
     controller.current = abortController
     setState(previous => ({ ...previous, refreshing: true, loadingMore: false, loadingMoreProgress: 0, error: '', paginationError: '' }))
     try {
-      const modules = current.feed.modules
       const feed = await fetchQQExploreFeed(
         { page: 1, shelfCount: 0 },
         [],

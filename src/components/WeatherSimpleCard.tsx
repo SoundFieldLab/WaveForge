@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Navigation } from 'lucide-react'
-import { getWeatherLabel, getWeatherLocationName, type WeatherSnapshot } from '../services/weatherService'
+import { getWeatherLabel, type WeatherSnapshot } from '../services/weatherService'
 import { getWeatherVisualTheme, WeatherGlyph, type WeatherSceneKind } from './weatherVisualTheme'
 import { IconSunrise, IconSunset } from './AppleWeatherIcon'
 import { localMinutesFromWeatherTime } from '../services/weatherTime'
@@ -9,7 +9,6 @@ import { localMinutesFromWeatherTime } from '../services/weatherTime'
 // 左上城市+大温度，右上图标+天气+高低温，底部一排逐小时（含日出/日落槽位），
 // 背景为按天气×时段的纯色渐变（晴夜深蓝 / 雨天灰 / 朝阳晚霞粉紫）。
 
-const WEEKDAY_CACHE = new Intl.DateTimeFormat('zh-CN', { weekday: 'short' })
 
 interface WeatherSimpleCardProps {
   weather: WeatherSnapshot
@@ -55,7 +54,7 @@ export function WeatherSimpleCard({ weather, locationLabel, appleSceneReady = fa
     const day0 = weather.daily[0]
     const minutesNow = localMinutesFromWeatherTime(weather.current.time) ?? 0
     if (day0?.sunrise && day0?.sunset) {
-      const [sh, sm] = day0.sunrise.slice(11, 16).split(':').map(Number)
+      const [sh] = day0.sunrise.slice(11, 16).split(':').map(Number)
       const [eh, em] = day0.sunset.slice(11, 16).split(':').map(Number)
       if (Number.isFinite(sh) && Number.isFinite(eh)) {
         if (minutesNow >= sh && minutesNow - sh <= 90) return 'dawn'

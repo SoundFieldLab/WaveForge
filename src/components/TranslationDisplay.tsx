@@ -1,5 +1,4 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { useEffect, useState } from 'react'
 
 interface TranslationDisplayProps {
   translation: string

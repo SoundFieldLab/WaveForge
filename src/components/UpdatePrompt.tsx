@@ -16,7 +16,6 @@ import packageInfo from '../../package.json'
 import {
   fetchUpdateManifest,
   compareVersions,
-  withDownloadProxies,
   GITEE_RELEASES_URL,
   type UpdateManifest,
 } from '../services/updateConstants'
@@ -43,7 +42,7 @@ function readJSON(key: string): { version?: string; notes?: string } | null {
 export default function UpdatePrompt({ playerTheme = 'dark' }: UpdatePromptProps) {
   const isDark = playerTheme === 'dark'
   const [manifest, setManifest] = useState<UpdateManifest | null>(null)
-  const [checking, setChecking] = useState(false)
+  const [, setChecking] = useState(false)
   const [cardVisible, setCardVisible] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [successInfo, setSuccessInfo] = useState<{ version: string; notes: string } | null>(null)

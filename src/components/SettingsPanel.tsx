@@ -257,10 +257,6 @@ function SettingsPanel({
     return () => window.removeEventListener(PLATFORM_ORDER_EVENT, sync)
   }, [])
   
-  const [wordByWordLyrics, setWordByWordLyrics] = useState(() => {
-    const saved = localStorage.getItem('wordByWordLyrics')
-    return parseStoredBoolean(saved, true)
-  })
   const [upNextEnabled, setUpNextEnabled] = useState(() => {
     const saved = localStorage.getItem('upNextEnabled')
     return parseStoredBoolean(saved, true)
@@ -275,10 +271,6 @@ function SettingsPanel({
     return saved !== null ? parseInt(saved) : 10
   })
   
-  const [translationEnabled, setTranslationEnabled] = useState(() => {
-    const saved = localStorage.getItem('translationEnabled')
-    return parseStoredBoolean(saved, false)
-  })
   const [translationPosition, setTranslationPosition] = useState<'traditional' | 'bottom-right'>(() => {
     const saved = localStorage.getItem('translationPosition')
     return (saved as 'traditional' | 'bottom-right') || 'traditional'
@@ -1229,12 +1221,6 @@ function SettingsPanel({
   ]
 
   // 保存逐字歌词设置
-  const handleWordByWordToggle = (enabled: boolean) => {
-    setWordByWordLyrics(enabled)
-    localStorage.setItem('wordByWordLyrics', JSON.stringify(enabled))
-    // 触发自定义事件，通知其他组件
-    window.dispatchEvent(new Event('wordByWordLyricsChanged'))
-  }
 
   // 保存即将播放提示设置
   const handleUpNextToggle = (enabled: boolean) => {
@@ -1257,17 +1243,7 @@ function SettingsPanel({
   }
 
   // 保存翻译设置
-  const handleTranslationToggle = (enabled: boolean) => {
-    setTranslationEnabled(enabled)
-    localStorage.setItem('translationEnabled', JSON.stringify(enabled))
-    window.dispatchEvent(new Event('translationSettingsChanged'))
-  }
 
-  const handleTranslationPositionChange = (position: 'traditional' | 'bottom-right') => {
-    setTranslationPosition(position)
-    localStorage.setItem('translationPosition', position)
-    window.dispatchEvent(new Event('translationSettingsChanged'))
-  }
   
   // 保存主题色设置
   const handleAccentColorChange = (color: string) => {

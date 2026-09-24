@@ -8,7 +8,6 @@ import {
 
 const STEMS = ['vocals', 'drums', 'bass', 'other'] as const
 
-type StemName = typeof STEMS[number]
 
 function toEvidence(samples: StemEvidenceSample[] | undefined): StemEvidence {
   const safe = Array.isArray(samples) ? samples : []

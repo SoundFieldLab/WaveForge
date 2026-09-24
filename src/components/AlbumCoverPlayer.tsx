@@ -1,4 +1,4 @@
-﻿import { motion, AnimatePresence } from 'framer-motion'
+﻿import { motion } from 'framer-motion'
 import CachedImage from './CachedImage'
 import AnimatedArtworkCover from './AnimatedArtworkCover'
 import { memo, useState, useEffect, useRef } from 'react'

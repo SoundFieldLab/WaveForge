@@ -734,7 +734,6 @@ export class AudioEffectsEngine {
   private analyser: AnalyserNode | null = null
 
   private input: GainNode | null = null
-  private output: GainNode | null = null
 
   // 响度归一化增益（per-song，由播放器按歌曲 LUFS 设置）
   private normGain: GainNode | null = null
@@ -1111,7 +1110,6 @@ export class AudioEffectsEngine {
     const chain = buildEffectChain(context, this.settings)
     this.chain = chain
     this.input = chain.input
-    this.output = chain.output
     // IR 已由 buildEffectChain 按当前设置生成，先记录指纹，避免随后 rebuildFromSettings 重复重建
     this.lastIrKey = `${this.settings.effects.hall.type}|${this.settings.effects.hall.preDelay}|${this.settings.effects.hall.decay}`
 
@@ -1185,7 +1183,6 @@ export class AudioEffectsEngine {
     }
     this.context = null
     this.input = null
-    this.output = null
     this.masterGain = null
     this.analyser = null
     this.normGain = null
@@ -1215,7 +1212,7 @@ export class AudioEffectsEngine {
   private rebuildFromSettings(): void {
     if (!this.context || !this.chain) return
     const t = this.context.currentTime
-    const { effects, eq, pitch } = this.settings
+    const { effects, pitch } = this.settings
 
     // 人声/伴奏比例：center=人声(中)，side=伴奏(侧)
     const voiceMatrix = this.chain.voiceMatrix

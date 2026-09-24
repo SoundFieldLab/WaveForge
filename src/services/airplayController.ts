@@ -61,7 +61,6 @@ export class AirplayController {
   private lastTrackKey = ''
   private lastProgressSentAt = 0
   private captureActive = false
-  private lastEnabledValue: boolean | null = null
   /** 诊断统计：已推送 PCM 块数 */
   private sentChunks = 0
   private lastCaptureDiagAt = 0
@@ -206,7 +205,6 @@ export class AirplayController {
 
   async setEnabled(enabled: boolean): Promise<void> {
     writeStored(STORAGE_KEYS.enabled, enabled)
-    this.lastEnabledValue = enabled
     const bridge = (window as any).electron?.airplay
     if (!bridge) return
     // 主进程侧：默认不开启设备发现（mDNS），开启开关后才开始浏览；关闭则停止并断开
@@ -224,7 +222,6 @@ export class AirplayController {
     writeStored(STORAGE_KEYS.deviceId, deviceId)
     writeStored(STORAGE_KEYS.mode, mode)
     writeStored(STORAGE_KEYS.enabled, true)
-    this.lastEnabledValue = true
     // 同步记忆的投送音量作为本次连接的初始音量（下次连接不用再手动调）
     void bridge.setVolume(this.getVolume())
     // 记录连接前/断开后应恢复的设备音量（断开与异常退出后都会恢复）

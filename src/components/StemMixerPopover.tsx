@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion'
-import { AudioLines, Drum, MicVocal, Music2, RotateCcw, SlidersHorizontal, Waves } from 'lucide-react'
+import { AudioLines, Drum, MicVocal, Music2, RotateCcw, Waves } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { TrackStemGains, TrackStemName } from '../audio/trackStemMixer'
 

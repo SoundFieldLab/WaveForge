@@ -152,14 +152,6 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
   }
 
   // 静音切换
-  const toggleMute = (e?: React.MouseEvent) => {
-    if (e) {
-      e.stopPropagation() // 阻止事件冒泡
-    }
-    if (!videoRef.current) return
-    videoRef.current.muted = !isMuted
-    setIsMuted(!isMuted)
-  }
 
   // 显示/隐藏音量滑块
   const toggleVolumeSlider = (e: React.MouseEvent) => {

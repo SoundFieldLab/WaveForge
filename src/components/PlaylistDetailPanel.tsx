@@ -8,7 +8,7 @@ import { Fragment, useState, useRef, useEffect, useCallback, useMemo, memo, type
 import CachedImage from './CachedImage'
 import AnimatedArtworkCover from './AnimatedArtworkCover'
 import { fetchApplePlaylistMotion } from '../services/appleWebService'
-import { APPLE_AUTOPLAY_CHANGED_EVENT, persistAppleAutoplayEnabled, readAppleAutoplayEnabled } from '../services/appleAutoplaySettings'
+import { persistAppleAutoplayEnabled, readAppleAutoplayEnabled } from '../services/appleAutoplaySettings'
 import { preloadArtwork } from '../services/artworkLoader'
 import SongContextMenu from './SongContextMenu'
 import ScrollToTop from './ScrollToTop'

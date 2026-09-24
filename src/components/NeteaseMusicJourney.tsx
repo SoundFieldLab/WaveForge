@@ -58,15 +58,6 @@ const LABELS: Record<string, string> = {
 
 const TIME_KEYS = new Set(['listenTime', 'totalListenTime', 'playTime', 'duration', 'totalTime'])
 
-function unwrap(value: any): any {
-  let current = value
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) break
-    if (current.data && typeof current.data === 'object') current = current.data
-    else break
-  }
-  return current || {}
-}
 
 function findNumber(value: any, keys: string[]): number | null {
   if (!value || typeof value !== 'object') return null

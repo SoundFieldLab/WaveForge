@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { WeatherHazardTab } from './WeatherHazardsPanel'
 import { AppleWeatherIcon } from './AppleWeatherIcon'
-import { azimuthDirection, computeSkyBodies, type SkyBodies } from '../services/moonPhase'
+import { azimuthDirection, type SkyBodies } from '../services/moonPhase'
 // 真实摄影素材（版权与来源见 src/assets/weather/CREDITS.md）
 import moonUrl from '../assets/weather/moon.webp'
 import skyDayUrl from '../assets/weather/sky-day.jpg'

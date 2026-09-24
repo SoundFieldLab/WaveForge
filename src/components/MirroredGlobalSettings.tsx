@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Reorder } from 'framer-motion'
 import { Check, ChevronRight, Eye, EyeOff, GripVertical, Loader2, Music, RefreshCw } from 'lucide-react'
-import FontPicker, { DEFAULT_FONT_LABEL, BUNDLED_FONTS, RECOMMENDED_FONTS } from './FontPicker'
+import FontPicker from './FontPicker'
 import VmpStatusCard from './VmpStatusCard'
 import {
   GLOBAL_SETTINGS_GROUPS,
@@ -100,15 +100,6 @@ function PanelSwitch({ checked, accent, dark }: { checked: boolean; accent: stri
 
 // ─────────────────────────── 行渲染 ───────────────────────────
 
-/** 字体族名 → 展示名（与 FontPicker 的标签保持一致） */
-function fontLabel(family: string): string {
-  const name = (family || '').trim()
-  if (!name) return DEFAULT_FONT_LABEL
-  const bundled = BUNDLED_FONTS.find(f => f.value === name)
-  if (bundled) return bundled.label
-  const recommended = RECOMMENDED_FONTS.find(f => f.value === name)
-  return recommended ? recommended.label : name
-}
 
 type RowProps = {
   entry: GlobalSettingEntry

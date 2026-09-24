@@ -763,21 +763,18 @@ function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: 
     ? Math.min(190, Math.max(55, input.bpmHint))
     : null
   let grid: { beats: number[]; downbeats: number[] }
-  let reportedBpm: number
   let confidence: number
   let gridEnvelopePeak: number | undefined
   let gridEnvelopeOffset: number | undefined
   if (beatPattern) {
     const found = findBeatPatternGrid(onset, frameRate, beatPattern, duration, beatWeights, frameRms, input.rmsEnvelopeHint)
     grid = { beats: found.beats, downbeats: found.downbeats }
-    reportedBpm = hintBpm ?? tempo.bpm
     confidence = found.confidence
     gridEnvelopePeak = found.envelopePeak
     gridEnvelopeOffset = found.envelopeOffset
   } else {
     const gridPeriod = hintBpm ? 60 / hintBpm : tempo.period
     grid = buildBeatGrid(onset, frameRate, gridPeriod, duration)
-    reportedBpm = hintBpm ?? tempo.bpm
     confidence = hintBpm
       ? gridOnsetConfidence(onset, frameRate, grid.beats)
       : clamp01(tempo.confidence * (grid.downbeats.length >= 4 ? 1 : 0.5))

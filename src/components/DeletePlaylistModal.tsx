@@ -26,7 +26,7 @@ export default function DeletePlaylistModal({
     }
     return false
   }, [show, onClose])
-  const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
+  const [, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
 
   useEffect(() => {
     const handleAccent = (e: Event) => {

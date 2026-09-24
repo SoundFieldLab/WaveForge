@@ -14,7 +14,6 @@ import SongContextMenu from './SongContextMenu'
 import PlaybackAddToPlaylistModal from './PlaybackAddToPlaylistModal'
 import PlaybackRadialWheel from './PlaybackRadialWheel'
 
-type RadialDirection = 'up' | 'down' | 'left' | 'right' | 'up-left' | 'up-right' | 'down-left' | 'down-right'
 
 interface PlaybackRadialMenuProps {
   song: Song
@@ -38,7 +37,6 @@ interface PlaybackRadialMenuProps {
 
 const LONG_PRESS_MS = 500
 const DIRECTION_THRESHOLD = 38
-const DIRECTIONS: RadialDirection[] = ['up', 'up-right', 'right', 'down-right', 'down', 'down-left', 'left', 'up-left']
 
 const ACTION_ICONS: Record<PlaybackRadialActionId, LucideIcon> = {
   'play-next': Repeat2,

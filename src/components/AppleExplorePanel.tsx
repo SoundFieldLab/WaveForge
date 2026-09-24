@@ -25,7 +25,6 @@ import {
 } from 'lucide-react'
 import type { SongSelectHandler } from '../types/playbackNavigation'
 import type { Song } from '../services/musicApi'
-import type { AppleNativeStream } from '../services/applePlayback'
 import {
   addAppleMusicVideoToLibrary,
   addApplePlaylistToLibrary,
@@ -216,97 +215,6 @@ function loadResourceMotion(resourceType: 'playlists' | 'albums' | 'stations', r
   return task
 }
 
-/**
- * 歌单卡封面：静态图打底 + hover 时拉取 editorialVideo 动态封面并播放（web 同款交互）。
- * 鼠标移出暂停（不销毁，再次 hover 直接续播）。
- */
-function MotionPlaylistCover({ item, storefront, className, iconClassName }: {
-  item: AppleWebItem
-  storefront: string
-  className?: string
-  iconClassName?: string
-}) {
-    const [motion, setMotion] = useState<{ video?: string; poster?: string } | null | undefined>(
-    () => {
-      const key = `${storefront}:playlists:${item.playId}`
-      return motionCache.has(key) ? motionCache.get(key) ?? null : undefined
-    },
-  )
-  const [videoFailed, setVideoFailed] = useState(false)
-  const videoRef = useRef<HTMLVideoElement | null>(null)
-  const hlsRef = useRef<{ destroy: () => void } | null>(null)
-
-  const start = useCallback(async () => {
-    if (motion === null || videoFailed) return
-    let videoUrl = motion?.video
-    if (!videoUrl) {
-      const loaded = await loadResourceMotion('playlists', item.playId, storefront)
-      setMotion(loaded)
-      if (!loaded) return
-      videoUrl = loaded.video
-    }
-    if (!videoUrl) return
-    const video = videoRef.current
-    if (!video) return
-    if (!hlsRef.current) {
-      try {
-        const { default: Hls } = await import('hls.js')
-        if (!Hls.isSupported()) { setVideoFailed(true); return }
-        const inst = new Hls({ autoStartLoad: false, capLevelToPlayerSize: true, maxBufferLength: 10, backBufferLength: 0 })
-        hlsRef.current = inst
-        inst.on(Hls.Events.MANIFEST_PARSED, () => { void videoRef.current?.play().catch(() => undefined) })
-        inst.on(Hls.Events.ERROR, (_e: unknown, data: { fatal?: boolean }) => {
-          if (data?.fatal) setVideoFailed(true)
-        })
-        inst.loadSource(videoUrl)
-        inst.attachMedia(video)
-      } catch {
-        setVideoFailed(true)
-      }
-    } else {
-      void video.play().catch(() => undefined)
-    }
-  }, [motion, videoFailed, item.playId, storefront])
-
-  const pause = useCallback(() => {
-    videoRef.current?.pause()
-  }, [])
-
-  useEffect(() => () => {
-    try { hlsRef.current?.destroy() } catch { /* 忽略 */ }
-  }, [])
-
-  const showVideo = motion !== null && motion !== undefined && !videoFailed
-  return (
-    <div
-      className={`relative overflow-hidden ${className || ''}`}
-      onMouseEnter={() => { void start() }}
-      onMouseLeave={pause}
-    >
-      <img
-        src={motion?.poster || item.artworkUrl || ''}
-        alt={item.name}
-        loading="lazy"
-        className="h-full w-full object-cover"
-      />
-      {showVideo && (
-        <video
-          ref={videoRef}
-          muted
-          loop
-          playsInline
-          preload="none"
-          className="absolute inset-0 h-full w-full object-cover"
-        />
-      )}
-      {!item.artworkUrl && (
-        <div className="absolute inset-0 flex items-center justify-center bg-white/[0.06]">
-          <MusicGlyph className={iconClassName || 'h-7 w-7 opacity-40'} />
-        </div>
-      )}
-    </div>
-  )
-}
 
 const isMotionResourceType = (type: AppleWebItem['type']): type is 'playlists' | 'albums' | 'stations' => type === 'playlists' || type === 'albums' || type === 'stations'
 
@@ -531,8 +439,6 @@ export function AppleExplorePanel({
 
   const isDark = playerTheme === 'dark'
   const cardBg = isDark ? 'bg-white/[0.05]' : 'bg-black/[0.04]'
-  const cardBorder = isDark ? 'border-white/[0.09]' : 'border-black/[0.08]'
-  const nativeLight = playerTheme === 'light'
 
   const loadTab = useCallback(async (target: Exclude<AmTab, 'categories'>, force = false) => {
     if (!force && (pages[target] || loading[target])) return
@@ -880,7 +786,6 @@ export function AppleExplorePanel({
     }
   }, [storefront])
 
-  const popLayer = useCallback(() => setLayers(prev => prev.slice(0, -1)), [])
 
   /** 资料库区块的二级铺开页：把该区块的全部条目以换行网格展开（不取数）。 */
   const openSectionSpread = useCallback((section: AppleWebSection) => {
@@ -1147,7 +1052,6 @@ export function AppleExplorePanel({
    *  `overlayMeta` 用于主页「专属精选推荐」（官网同款：名称/副标题/简介内嵌卡片底部渐变）；
    *  其余保持「图在上、文字在下」样式。 */
   const FeaturedCard = ({ item, items, portrait = false, textFirst = false, overlayMeta = false }: { item: AppleWebItem; items: AppleWebItem[]; portrait?: boolean; textFirst?: boolean; overlayMeta?: boolean }) => {
-    const isPlaylist = item.type === 'playlists'
     // 官网卡片叠「一行小标签 + 一行标题(可带 E 标) + 简介」，且重复文案只显示一次。
     // 归一逻辑（含去重与兜底规则）见 apple-explore/cardMeta.ts 的注释。
     const cardMeta = resolveAppleCardMeta(item)
@@ -1595,7 +1499,6 @@ export function AppleExplorePanel({
 
   const renderSection = (section: AppleWebSection, context: SectionContext = 'default') => {
     const isRoom = context === 'room'
-    const useShelf = context === 'browse' || context === 'room'
     // 实测官网 room 页（如「每周热门 100 首」）条目是**换行网格**（204px × 5 列、不横向滚动、无翻页），
     // 不是单行货架；歌曲 room 仍走表格（song-grid + isRoom 分支）。
     if (section.layoutType === 'room-grid' && section.kind !== 'song-grid') {

@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, ChevronLeft, ChevronRight, Play, Pause, Power, Home as HomeIcon, ArrowLeft, RotateCcw, Search, Volume2, VolumeX, SkipBack, SkipForward, CirclePause, Menu as MenuIcon, CornerDownLeft } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, Play, Pause, Home as HomeIcon, ArrowLeft, RotateCcw, Search, Volume2, VolumeX, SkipBack, SkipForward, CirclePause, Menu as MenuIcon, CornerDownLeft } from 'lucide-react'
 
 interface RemoteControlGuideModalProps {
   onClose: () => void

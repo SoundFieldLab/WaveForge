@@ -11,15 +11,6 @@ interface AppleWeatherCompactSceneProps {
   onUnavailable?: () => void
 }
 
-interface CompactParticle {
-  x: number
-  y: number
-  size: number
-  speed: number
-  drift: number
-  phase: number
-  alpha: number
-}
 
 const COMPACT_PALETTES = {
   day: {
