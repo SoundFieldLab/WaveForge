@@ -62,7 +62,7 @@
 |---|---|---|---|---|
 | DONE (94c8421) | DG-LAB 中继无鉴权 | `server/dglab-relay.cjs:1425-1429` | `POST /api/dglab/control` 无鉴权、`GET /status` 返回 `controlToken` → **本机任意进程可接管设备** | `/control` 校验令牌；`/status` 不回令牌（令牌只经主进程 IPC 给渲染层） |
 | DONE (61a8b48) | 灯光类 IPC 无来源校验 | `desktop/chroma-ipc.cjs:524-548`、`desktop/signalrgb-ipc.cjs:18-42` | 既无 `guardTrustedIpc` 也无 `event.sender` 判定（同仓其他 privileged 通道都有），`signalrgb:uninstall-effect` 还会删写文件 | 统一套 `guardTrustedIpc('privileged')` |
-| PARTIAL (218d92b) | 一起听越权与健壮性 | `src/features/resonance/session.ts:1170`（chat 昵称回退）、`:380-396`（closed 分支）、`transport.ts:215-243`（`close()` 不清 pending） | 名册外 peer 仍可发言并冒名；成员断网不重连且定时器/`pending` 无界增长 | chat 在 `memberNicknameOf` 为空时丢弃；closed 分支 `stopTimers()` + `transport=null`；`close()` 清 `pending` |
+| DONE (7948d52) | 一起听越权与健壮性 | `src/features/resonance/session.ts:1170`（chat 昵称回退）、`:380-396`（closed 分支）、`transport.ts:215-243`（`close()` 不清 pending） | 名册外 peer 仍可发言并冒名；成员断网不重连且定时器/`pending` 无界增长 | chat 在 `memberNicknameOf` 为空时丢弃；closed 分支 `stopTimers()` + `transport=null`；`close()` 清 `pending` |
 | PARTIAL (7948d52，客户端已判不支持，径向菜单入口未隐藏) | 酷狗歌单界面入口 | `PlaybackRadialMenu`（`SongContextMenu.tsx:519` 已隐藏，径向菜单未隐藏） | 酷狗"取消喜欢"服务端只回执不落库 → **假成功** | `likeKugouSong(false)` 明确返回不支持，并隐藏入口 |
 
 ### P2 — 明显的功能错误（小改动）
