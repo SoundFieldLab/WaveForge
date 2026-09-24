@@ -20,10 +20,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Gift, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic } from 'lucide-react'
+import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic } from 'lucide-react'
 import LoginButton from './LoginButton'
 import type { AppleUserInfo } from '../services/appleAuth'
-import type { StemModelProgress } from '../electron'
+import type { StemModelProgress, RenderBackend } from '../electron'
 import {
   MUSIC_PLATFORMS,
   PLATFORM_LABELS,
@@ -1079,6 +1079,18 @@ function SettingsPanel({
     gpus: Array<{ deviceString: string; vendorString: string; active: boolean; kind: 'discrete' | 'integrated' | 'unknown' }>
   } | null>(null)
   const [gpuPreference, setGpuPreference] = useState<'auto' | 'discrete' | 'integrated'>('auto')
+  const [renderBackend, setRenderBackend] = useState<RenderBackend>('auto')
+  const [highPerformanceMode, setHighPerformanceMode] = useState(false)
+  const [performanceTier, setPerformanceTier] = useState<'extreme' | 'high' | 'standard' | 'lite' | null>(null)
+  // GPU 详细信息：懒加载探针（展开时创建临时 WebGL 上下文读取 ANGLE 真实渲染器）
+  const [showGpuDetail, setShowGpuDetail] = useState(false)
+  const [gpuDetail, setGpuDetail] = useState<{
+    vendor: string | null
+    renderer: string | null
+    version: string | null
+    glslVersion: string | null
+    effectiveBackend: 'd3d11' | 'vulkan' | 'gl' | 'metal' | 'unknown'
+  } | null>(null)
 
   // 全局高刷：显示器信息 + 开关 + 可选档位（null = 跟随显示器最高）
   const [highRefreshEnabled, setHighRefreshEnabled] = useState(false)
@@ -1137,6 +1149,9 @@ function SettingsPanel({
       if (cancelled) return
       setGpuAcceleration(result.enabled)
       setGpuPreference(result.gpuPreference || 'discrete')
+      setRenderBackend(result.renderBackend || 'auto')
+      setHighPerformanceMode(result.highPerformanceMode === true)
+      setPerformanceTier(result.performanceTier ?? null)
       setGpuStatus({
         actualEnabled: result.actualEnabled,
         featureStatus: result.featureStatus,
@@ -1300,6 +1315,137 @@ function SettingsPanel({
       window.dispatchEvent(new CustomEvent('showToast', {
         detail: { message: '显卡偏好设置保存失败', type: 'error' }
       }))
+    }
+  }
+
+  const RENDER_BACKEND_LABELS: Record<RenderBackend, string> = {
+    auto: '自动',
+    d3d11: 'D3D11',
+    vulkan: 'Vulkan',
+    gl: 'OpenGL',
+  }
+
+  // 性能模式挡位详情：与主进程 PERF_TIER_PRESETS 保持一致
+  const PERF_TIER_OPTIONS = [
+    { key: 'extreme', label: '极致性能', desc: '禁用垂直同步 + 解除帧率上限、强制独显、全局高刷。功耗最高，极端动效可轻微撕裂。' },
+    { key: 'high', label: '高性能', desc: '强制独显、全局高刷；保留垂直同步，无撕裂风险。' },
+    { key: 'standard', label: '标准', desc: '系统默认配置，性能与功耗均衡，推荐日常使用。' },
+    { key: 'lite', label: '精简', desc: '优先核显、关闭全局高刷，省电低负载。' },
+  ] as const
+
+  const handlePerformanceTierChange = async (tier: 'extreme' | 'high' | 'standard' | 'lite') => {
+    try {
+      const result = await window.electron?.system.setPerformanceTier(tier)
+      if (!result?.success) throw new Error('主进程未保存设置')
+      setPerformanceTier(result.performanceTier)
+      const selected = PERF_TIER_OPTIONS.find(option => option.key === result.performanceTier)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: `已切换性能模式为「${selected?.label ?? '标准'}」，重启软件后完整生效`, type: 'info' }
+      }))
+    } catch (error) {
+      console.error('保存性能模式失败:', error)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: '性能模式设置保存失败', type: 'error' }
+      }))
+    }
+  }
+
+  const handleHighPerformanceModeChange = async (enabled: boolean) => {
+    try {
+      const result = await window.electron?.system.setHighPerformanceMode(enabled)
+      if (!result?.success) throw new Error('主进程未保存设置')
+      setHighPerformanceMode(result.highPerformanceMode)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: result.highPerformanceMode ? '已开启高性能模式，重启软件后生效' : '已关闭高性能模式，重启软件后生效', type: 'info' }
+      }))
+    } catch (error) {
+      console.error('保存高性能模式设置失败:', error)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: '高性能模式设置保存失败', type: 'error' }
+      }))
+    }
+  }
+
+  const handleRenderBackendChange = async (backend: RenderBackend) => {
+    try {
+      const result = await window.electron?.system.setRenderBackend(backend)
+      if (!result?.success) throw new Error('主进程未保存设置')
+      setRenderBackend(result.renderBackend)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: `已切换渲染后端为 ${RENDER_BACKEND_LABELS[result.renderBackend]}，重启软件后生效`, type: 'info' }
+      }))
+    } catch (error) {
+      console.error('保存渲染后端设置失败:', error)
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: '渲染后端设置保存失败', type: 'error' }
+      }))
+    }
+  }
+
+  // 展开「详细信息」时探测：临时 WebGL 上下文读 ANGLE 真实渲染器与 GLSL 版本（懒加载，只探一次）
+  const probeGpuDetail = useCallback(() => {
+    setGpuDetail(prev => {
+      if (prev) return prev
+      let canvas: HTMLCanvasElement | null = null
+      let gl: WebGLRenderingContext | WebGL2RenderingContext | null = null
+      try {
+        canvas = document.createElement('canvas')
+        canvas.width = 1
+        canvas.height = 1
+        canvas.style.display = 'none'
+        gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as WebGLRenderingContext | null
+        if (!gl) {
+          return { vendor: null, renderer: null, version: null, glslVersion: null, effectiveBackend: 'unknown' }
+        }
+        const ext = gl.getExtension('WEBGL_debug_renderer_info')
+        const rawRenderer = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : String((gl.getParameter(gl.RENDERER) as string) || '')
+        const upper = rawRenderer.toUpperCase()
+        const effectiveBackend: 'd3d11' | 'vulkan' | 'gl' | 'metal' | 'unknown' = upper.includes('DIRECT3D') || upper.includes('D3D11') || upper.includes('D3D9')
+          ? 'd3d11'
+          : upper.includes('VULKAN')
+            ? 'vulkan'
+            : upper.includes('OPENGL') || upper.includes('GL ES')
+              ? 'gl'
+              : upper.includes('METAL')
+                ? 'metal'
+                : 'unknown'
+        return {
+          vendor: ext ? String(gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) ?? '') : null,
+          renderer: rawRenderer || null,
+          version: String((gl.getParameter(gl.VERSION) as string) ?? ''),
+          glslVersion: String((gl.getParameter(gl.SHADING_LANGUAGE_VERSION) as string) ?? ''),
+          effectiveBackend,
+        }
+      } catch {
+        return { vendor: null, renderer: null, version: null, glslVersion: null, effectiveBackend: 'unknown' }
+      } finally {
+        try { gl?.getExtension('WEBGL_lose_context')?.loseContext() } catch {}
+        canvas?.remove()
+      }
+    })
+  }, [])
+
+  // GPU 详细信息展示辅助
+  const EFFECTIVE_BACKEND_LABEL: Record<string, string> = { d3d11: 'D3D11', vulkan: 'Vulkan', gl: 'OpenGL', metal: 'Metal', unknown: '未知' }
+  const FEATURE_DETAIL_ROWS: Array<{ key: string; label: string }> = [
+    { key: 'webgl', label: 'WebGL' },
+    { key: 'webgl2', label: 'WebGL2' },
+    { key: 'gpu_compositing', label: 'GPU 合成' },
+    { key: 'video_decode', label: '视频硬解' },
+    { key: 'vulkan', label: 'Vulkan' },
+    { key: 'd3d11', label: 'D3D11' },
+    { key: 'opengl', label: 'OpenGL' },
+    { key: 'rasterization', label: '栅格化' },
+  ]
+  const formatFeatureValue = (value?: string) => {
+    if (!value) return '—'
+    switch (value) {
+      case 'enabled': case 'enabled_on': case 'enabled_force': return '已启用'
+      case 'disabled': case 'disabled_off': return '已禁用'
+      case 'unavailable_off': case 'unavailable': return '不可用'
+      case 'software': return '软件渲染'
+      case 'failed': case 'blocklisted': return '异常'
+      default: return value
     }
   }
 
@@ -4119,10 +4265,78 @@ function SettingsPanel({
                           <>
                             <div>建议保持开启。动态壁纸、歌词动画和界面合成依赖 GPU；关闭后界面可能明显卡顿。仅建议在显卡驱动兼容故障时关闭，重启后生效。</div>
                             {gpuStatus && (
-                              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
-                                <span>{gpuStatus.actualEnabled ? '当前已启用 GPU 合成' : '当前使用软件渲染'}</span>
-                                {gpuStatus.gpu && <span>{gpuStatus.gpu.deviceString || gpuStatus.gpu.vendorString || '已检测显卡'}{gpuStatus.gpu.driverVersion ? ` | 驱动 ${gpuStatus.gpu.driverVersion}` : ''}</span>}
-                                {gpuStatus.actualEnabled !== gpuAcceleration && <span className="text-amber-400">当前设置尚未生效，请重启软件</span>}
+                              <div className="mt-2">
+                                <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                  <span>{gpuStatus.actualEnabled ? '当前已启用 GPU 合成' : '当前使用软件渲染'}</span>
+                                  <span>设置后端：{RENDER_BACKEND_LABELS[renderBackend]}</span>
+                                  {gpuDetail?.effectiveBackend && gpuDetail.effectiveBackend !== 'unknown' && (
+                                    <span>本次生效：{EFFECTIVE_BACKEND_LABEL[gpuDetail.effectiveBackend]}</span>
+                                  )}
+                                  {gpuDetail && renderBackend !== 'auto' && gpuDetail.effectiveBackend !== 'unknown' && renderBackend !== gpuDetail.effectiveBackend && (
+                                    <span className="text-amber-400">新设置重启后生效</span>
+                                  )}
+                                  {gpuStatus.actualEnabled !== gpuAcceleration && <span className="text-amber-400">当前设置尚未生效，请重启软件</span>}
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => { setShowGpuDetail(v => !v); if (!gpuDetail) probeGpuDetail() }}
+                                  className="mt-2 inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] transition-colors hover:opacity-80"
+                                >
+                                  <ChevronRight className={`h-3.5 w-3.5 transition-transform ${showGpuDetail ? 'rotate-90' : ''}`} />
+                                  详细信息
+                                </button>
+                                {showGpuDetail && (
+                                  <div className="mt-2 space-y-1 leading-relaxed">
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1">
+                                      <span className="inline-flex items-baseline gap-x-1.5">
+                                        <span className="opacity-60">显卡</span>
+                                        <span className="max-w-[340px] truncate align-baseline">{gpuStatus.gpu?.deviceString || gpuStatus.gpu?.vendorString || '未知'}</span>
+                                      </span>
+                                      {gpuStatus.gpu?.driverVersion && (
+                                        <span className="inline-flex items-baseline gap-x-1.5">
+                                          <span className="opacity-60">驱动版本</span>
+                                          <span className="align-baseline">{gpuStatus.gpu.driverVersion}</span>
+                                        </span>
+                                      )}
+                                      <span className="inline-flex items-baseline gap-x-1.5">
+                                        <span className="opacity-60">ANGLE 渲染器</span>
+                                        <span className="max-w-[360px] truncate align-baseline font-mono text-[10.5px]">
+                                          {gpuDetail ? (gpuDetail.renderer || '不可读取') : '展开时读取…'}
+                                        </span>
+                                      </span>
+                                      <span className="inline-flex items-baseline gap-x-1.5">
+                                        <span className="opacity-60">WebGL 版本</span>
+                                        <span className="align-baseline">{gpuDetail ? (gpuDetail.version || '不可读取') : '展开时读取…'}</span>
+                                      </span>
+                                      <span className="inline-flex items-baseline gap-x-1.5">
+                                        <span className="opacity-60">GLSL 版本</span>
+                                        <span className="align-baseline">{gpuDetail ? (gpuDetail.glslVersion || '不可读取') : '展开时读取…'}</span>
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-white/5 pt-1">
+                                      {FEATURE_DETAIL_ROWS.map(row => {
+                                        const v = gpuStatus.featureStatus?.[row.key]
+                                        const happy = v === 'enabled' || v === 'enabled_on' || v === 'enabled_force'
+                                        const bad = v === 'disabled' || v === 'disabled_off' || v === 'failed' || v === 'blocklisted'
+                                        return (
+                                          <span key={row.key} className="inline-flex items-center gap-1.5">
+                                            <span className="opacity-60">{row.label}</span>
+                                            {v
+                                              ? <span className={happy ? 'text-emerald-400' : bad ? 'text-rose-400' : v === 'software' ? 'text-amber-400' : 'opacity-60'}>{formatFeatureValue(v)}</span>
+                                              : <span className="opacity-40">—</span>}
+                                          </span>
+                                        )
+                                      })}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            {gpuStatus?.gpu?.vendorString?.toLowerCase().includes('nvidia') && (
+                              <div className="mt-2 border-t border-white/10 pt-2 text-xs leading-relaxed">
+                                <div className="font-medium mb-0.5">检测到 NVIDIA 显卡 · 建议</div>
+                                <div>1. 保持驱动为最新 <span className="opacity-70">Game Ready / Studio 驱动</span>，并在 <span className="opacity-70">NVIDIA 控制面板 → 管理 3D 设置</span> 中为 WaveForge 选择「<span className="opacity-70">高性能 NVIDIA 处理器</span>」；</div>
+                                <div>2. 动效卡顿时可尝试上方「显卡选择」切为「独立显卡」，或在「渲染后端」切换 Vulkan / OpenGL（NVIDIA 驱动与 D3D11 冲突时）。</div>
                               </div>
                             )}
                           </>
@@ -4191,6 +4405,66 @@ function SettingsPanel({
                       </div>
                       <div className={`${textTertiary} text-xs mt-3 p-3 rounded-lg`} style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
                         默认使用独立显卡以获得最佳动画流畅度；笔记本想省电或独显驱动异常时可切换为核显或自动。切换后需重启软件生效。
+                      </div>
+                    </div>
+
+                    {/* 渲染后端：Chromium ANGLE 图形 API（WebGL / 合成层所用的图形后端） */}
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-4`} data-tv-hide="desktop">
+                      <div className="mb-3">
+                        <div className={`${textPrimary} font-medium mb-1`}>性能模式</div>
+                        <div className={`${textSecondary} text-sm`}>一个挡位统管「显卡偏好 / 垂直同步 / 全局高刷」，切换后重启生效。想精细微调可继续用下方单项开关</div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {PERF_TIER_OPTIONS.map(option => (
+                          <button
+                            key={option.key}
+                            type="button"
+                            onClick={() => void handlePerformanceTierChange(option.key)}
+                            className={`rounded-xl border p-3 text-left transition-all ${performanceTier === option.key ? 'border-transparent' : `${borderColor} hover:bg-white/5`}`}
+                            style={performanceTier === option.key ? { backgroundColor: accentColor } : { backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' }}
+                          >
+                            <div className={`text-sm font-semibold ${performanceTier === option.key ? 'text-white' : textPrimary}`}>{option.label}</div>
+                            <div className={`mt-1 text-xs leading-relaxed ${performanceTier === option.key ? 'text-white/75' : textTertiary}`}>{option.desc}</div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className={`${bgCard} rounded-xl p-4 border ${borderColor} mb-4`} data-tv-hide="desktop">
+                      <div className="mb-3">
+                        <div className={`${textPrimary} font-medium mb-1`}>渲染后端</div>
+                        <div className={`${textSecondary} text-sm`}>WebGL 与界面合成所用的图形 API（切换后重启生效）。建议保持自动（D3D11）</div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {(Object.keys(RENDER_BACKEND_LABELS) as RenderBackend[]).map(backend => (
+                          <button
+                            key={backend}
+                            type="button"
+                            onClick={() => void handleRenderBackendChange(backend)}
+                            className={`rounded-lg border px-3 py-2 text-sm transition-all ${renderBackend === backend ? 'border-transparent text-white' : `${borderColor} ${textSecondary}`}`}
+                            style={renderBackend === backend ? { backgroundColor: accentColor } : { backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.04)' }}
+                          >
+                            {RENDER_BACKEND_LABELS[backend]}
+                          </button>
+                        ))}
+                      </div>
+                      <div className={`${textTertiary} text-xs mt-3 p-3 rounded-lg`} style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
+                        自动 = 系统默认（D3D11）。NVIDIA 显卡（如 RTX 4070S）建议保持 D3D11：视频硬解走 D3D11，Vulkan 下每帧视频帧需跨后端拷贝，MV 场景反而更卡；仅当 D3D11 驱动异常时再用 Vulkan / OpenGL 诊断。
+                      </div>
+                      <div className="flex items-start justify-between gap-3 mt-3 pt-3" style={{ borderTop: playerTheme === 'dark' ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(0,0,0,0.08)' }}>
+                        <div>
+                          <div className={`${textPrimary} font-medium mb-1`}>高性能模式（实验）</div>
+                          <div className={`${textSecondary} text-sm`}>禁用垂直同步并解除帧率上限，渲染帧跑满显示器实际刷新率、操作更跟手；功耗上升，极端动效可能轻微撕裂。需重启生效。</div>
+                        </div>
+                        <label className="relative inline-flex items-center cursor-pointer shrink-0 mt-1">
+                          <input
+                            type="checkbox"
+                            checked={highPerformanceMode}
+                            onChange={(e) => void handleHighPerformanceModeChange(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className={`w-11 h-6 ${playerTheme === 'dark' ? 'bg-white/20' : 'bg-black/20'} rounded-full peer peer-checked:after:translate-x-full after:bg-white after:shadow-[0_1px_3px_rgba(0,0,0,0.35)] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:rounded-full after:h-5 after:w-5 after:transition-all`} style={{ backgroundColor: highPerformanceMode ? accentColor : '' }}></div>
+                        </label>
                       </div>
                     </div>
 

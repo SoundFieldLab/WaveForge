@@ -26,6 +26,7 @@ import ModeTransitionOverlay from './components/ModeTransitionOverlay'
 import { extractDominantColor, useColorThief } from './hooks/useColorThief'
 import { useAudioPlayer, type AudioGraphHandle } from './hooks/useAudioPlayer'
 import { airplayController } from './services/airplayController'
+import { runShaderWarmup } from './services/shaderWarmup'
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer'
 import { useAppleDynamicCover } from './hooks/useAppleDynamicCover'
 import { FOLIA_STYLES } from './vendor/folia/stylesMeta'
@@ -61,7 +62,7 @@ import { scheduleBackgroundPrefetch } from './services/backgroundPrefetch'
 import { getResolvedArtworkUrl, preloadArtwork } from './services/artworkLoader'
 import { getDesktopSpectrumConsumerCount, subscribeDesktopSpectrumConsumers } from './services/desktopSpectrum'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Settings, Sparkles, Image as ImageIcon, Radio } from 'lucide-react'
+import { Settings, Sparkles, Check, Image as ImageIcon, Radio } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
 import type { TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
 import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
@@ -7408,9 +7409,12 @@ function App() {
 
 
   // ===== GPU 设置变更确认：用户修改显卡/关闭 GPU 加速后重启需确认，否则自动回退到安全默认值 =====
-  const [pendingGpuChange, setPendingGpuChange] = useState<{ type: 'preference' | 'acceleration' } | null>(null)
-  const [gpuConfirmCountdown, setGpuConfirmCountdown] = useState(15)
-  const gpuCountdownRef = useRef(15)
+  const [pendingGpuChange, setPendingGpuChange] = useState<{ type: 'preference' | 'acceleration' | 'backend'; fromTier?: boolean } | null>(null)
+  const [gpuConfirmCountdown, setGpuConfirmCountdown] = useState(30)
+  const gpuCountdownRef = useRef(30)
+  // 渲染后端切换后的「渲染器预热」：重启进入先预编译着色管线（可跳过），完成后才展示 30s 体验确认横幅
+  const [gpuPreheatDone, setGpuPreheatDone] = useState(false)
+  const [gpuPreheatProgress, setGpuPreheatProgress] = useState(0)
 
   const confirmGpuChange = useCallback(async () => {
     try {
@@ -7438,10 +7442,45 @@ function App() {
     return () => { cancelled = true }
   }, [])
 
+  // 启动后空闲预热 GPU 着色管线（游戏式 shader 预编译）：首次进入可视化场景不再卡编译
+  useEffect(() => {
+    runShaderWarmup()
+  }, [])
+
+  // 渲染后端切换后的「渲染器预热」：置顶遮罩预编译着色管线（可跳过）。
+  // 预热完成 / 点击跳过后才放行下方 30s 倒计时确认横幅，让用户在真实后端下体验后决定去留，
+  // 而不是一重启就被确认横幅打断、立刻改动设置。
+  useEffect(() => {
+    if (pendingGpuChange?.type !== 'backend') {
+      setGpuPreheatDone(false)
+      setGpuPreheatProgress(0)
+      return
+    }
+    const PREHEAT_MIN_MS = 2600
+    let cancelled = false
+    const t0 = performance.now()
+    const tick = () => {
+      if (cancelled) return
+      setGpuPreheatProgress(Math.min(100, ((performance.now() - t0) / PREHEAT_MIN_MS) * 100))
+      requestAnimationFrame(tick)
+    }
+    requestAnimationFrame(tick)
+    // 强制重跑预热（传 force 跳过 warmed 守卫，编译进入空闲序执行）
+    window.setTimeout(() => runShaderWarmup(true), 0)
+    const guard = window.setTimeout(() => {
+      if (cancelled) return
+      setGpuPreheatDone(true)
+    }, PREHEAT_MIN_MS)
+    return () => {
+      cancelled = true
+      window.clearTimeout(guard)
+    }
+  }, [pendingGpuChange])
+
   useEffect(() => {
     if (!pendingGpuChange) return
-    gpuCountdownRef.current = 15
-    setGpuConfirmCountdown(15)
+    gpuCountdownRef.current = 30
+    setGpuConfirmCountdown(30)
     const timer = window.setInterval(() => {
       gpuCountdownRef.current -= 1
       if (gpuCountdownRef.current <= 0) {
@@ -7452,7 +7491,7 @@ function App() {
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [pendingGpuChange, revertGpuChange])
+  }, [pendingGpuChange, revertGpuChange, gpuPreheatDone])
 
   /** 打开任意用户主页（歌单创建者等二级入口）：复用 ProfileView 的他人主页视图 */
   const handleOpenUserProfile = useCallback((platform: MusicPlatform, userId: string, nickname?: string) => {
@@ -7869,14 +7908,76 @@ function App() {
         )}
       </AnimatePresence>
 
-      {/* GPU 设置变更确认横幅 */}
-      {pendingGpuChange && (
+      {/* 渲染器预热遮罩：切换渲染后端重启后常驻此界面。
+          阶段一：预编译着色管线（可跳过）；阶段二：预热完成后在同一界面接 30s 体验倒计时，
+          用户实测后端流畅度后决定「保留」或「回退到上次模式」。确认/回退/超时才关闭。 */}
+      {pendingGpuChange?.type === 'backend' && (
+        <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/85 backdrop-blur-xl" role="dialog" aria-modal="true" aria-label="渲染器预热">
+          <div className="w-[min(440px,88vw)] rounded-[26px] border border-white/12 bg-[#0d1220]/97 p-7 text-center shadow-[0_30px_90px_rgba(0,0,0,.65)]">
+            {!gpuPreheatDone ? (
+              <>
+                <div className="relative mx-auto flex h-14 w-14 items-center justify-center">
+                  <div className="absolute inset-0 rounded-full border-2 border-white/10"></div>
+                  <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-white/80"></div>
+                  <Sparkles className="h-5 w-5 text-white/80" />
+                </div>
+                <h3 className="mt-4 text-base font-semibold text-white">渲染器预热中</h3>
+                <p className="mt-1.5 text-xs leading-relaxed text-white/50">
+                  正在预编译 WebGL 着色器管线，首次进入动效场景将不再卡顿（约 2 秒）
+                </p>
+                <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full transition-[width] duration-150" style={{ width: `${gpuPreheatProgress}%`, backgroundColor: '#ff5a70' }}></div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setGpuPreheatDone(true)}
+                  className="mt-5 rounded-lg border border-white/12 bg-white/6 px-4 py-2 text-xs font-medium text-white/70 transition hover:bg-white/10 hover:text-white"
+                >
+                  跳过预热，立即体验
+                </button>
+              </>
+            ) : (
+              <>
+                <div className="relative mx-auto flex h-14 w-14 items-center justify-center">
+                  <div className="absolute inset-0 rounded-full border-2 border-[#ff5a70]/30"></div>
+                  <Check className="h-6 w-6 text-[#ff5a70]" />
+                </div>
+                <h3 className="mt-4 text-base font-semibold text-white">渲染器预热完成</h3>
+                <p className="mt-1.5 text-xs leading-relaxed text-white/50">
+                  当前生效后端：Vulkan。NVIDIA 下 Vulkan 的视频硬解需跨后端拷贝，
+                  持续帧率通常低于 D3D11（系统默认）。接下来进入 30 秒体验期：
+                  满意点「保留」；不满意点「回退」，立即恢复为上次模式（D3D11 / 自动）。
+                </p>
+                <div className="mt-5 flex items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => void confirmGpuChange()}
+                    className="rounded-lg bg-[#ff5a70] px-5 py-2 text-sm font-semibold text-white transition hover:brightness-110"
+                  >
+                    保留此渲染后端
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void revertGpuChange()}
+                    className="rounded-lg border border-white/12 bg-white/6 px-5 py-2 text-sm font-medium text-white/70 transition hover:bg-white/10 hover:text-white"
+                  >
+                    回退到上次模式（{gpuConfirmCountdown}）
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* GPU 设置变更确认横幅（渲染后端类型已并入上方预热遮罩，不走横幅） */}
+      {pendingGpuChange && pendingGpuChange.type !== 'backend' && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-[99999] w-[min(92vw,560px)] pointer-events-auto">
           <div className={`rounded-xl border p-4 shadow-2xl ${playerTheme === 'dark' ? 'bg-[#0b1220]/95 border-red-500/40' : 'bg-white/95 border-red-500/40'}`}>
             <div className={`text-sm font-medium leading-relaxed ${playerTheme === 'dark' ? 'text-white' : 'text-gray-900'}`}>
               {pendingGpuChange.type === 'preference'
-                ? '您在此前修改过 GPU 加速设备，若无异常请点击确认，否则将在 15 秒后自动恢复为系统默认显卡'
-                : '您在此前关闭了 GPU 加速，若无异常请点击确认，否则将在 15 秒后自动打开 GPU 加速'}
+                ? '您在此前修改过 GPU 加速设备，若无异常请点击确认，否则将在 30 秒后自动恢复为系统默认显卡'
+                : '您在此前关闭了 GPU 加速，若无异常请点击确认，否则将在 30 秒后自动打开 GPU 加速'}
             </div>
             <div className="mt-3 flex items-center gap-3">
               <button

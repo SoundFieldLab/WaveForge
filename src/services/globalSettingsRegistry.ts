@@ -17,7 +17,8 @@
  */
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
 import { parseStoredBoolean } from '../utils/storage'
-import { readResonanceSettings, setResonanceSetting } from '../features/resonance/settings'
+import { readResonanceSettings, setResonanceSetting, type ResonanceSettings } from '../features/resonance/settings'
+import { RESONANCE_PARTY_QUOTA_CHOICES, RESONANCE_PUSH_LIMIT_CHOICES } from '../features/resonance/model'
 import {
   loadPlaybackShortcutSettings,
   savePlaybackShortcutSettings,
@@ -119,7 +120,7 @@ interface DesktopBridgeCache {
   desktopLyrics: DesktopLyricsSettings
   desktopPlayer: { enabled: boolean; form: 'card' | 'bar' }
   taskbarWidget: TaskbarWidgetSettings
-  gpu: { acceleration: boolean; preference: 'auto' | 'discrete' | 'integrated' }
+  gpu: { acceleration: boolean; preference: 'auto' | 'discrete' | 'integrated'; backend: 'auto' | 'd3d11' | 'vulkan' | 'gl' }
   highRefresh: { enabled: boolean; hz: number | null }
   proxy: { enabled: boolean; scanning: boolean; target: string | null }
 }
@@ -136,7 +137,7 @@ const desktopCache: DesktopBridgeCache = {
   taskbarWidget: {
     enabled: false, position: 'right', width: 340, mode: 'normal', darken: false, darkenLevel: 0.5, hideControls: false,
   },
-  gpu: { acceleration: readBool('gpuAcceleration', true), preference: 'auto' },
+  gpu: { acceleration: readBool('gpuAcceleration', true), preference: 'auto', backend: 'auto' },
   highRefresh: { enabled: false, hz: null },
   proxy: { enabled: false, scanning: false, target: null },
 }
@@ -171,7 +172,7 @@ export function ensureDesktopBridgeSettings(): void {
       if (getGpuSettings) {
         jobs.push(Promise.resolve(getGpuSettings()).then((r: any) => {
           if (r) {
-            desktopCache.gpu = { acceleration: Boolean(r.enabled), preference: r.gpuPreference || 'auto' }
+            desktopCache.gpu = { acceleration: Boolean(r.enabled), preference: r.gpuPreference || 'auto', backend: r.renderBackend || 'auto' }
             localStorage.setItem('gpuAcceleration', JSON.stringify(Boolean(r.enabled)))
           }
         }).catch(() => undefined))
@@ -1001,6 +1002,34 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         available: () => hasSystemBridge() && typeof electron()?.system?.setGpuPreference === 'function',
       },
       {
+        id: 'renderBackend',
+        label: '渲染后端',
+        description: 'WebGL 与界面合成所用图形 API，NVIDIA 驱动冲突时可切换，重启生效',
+        control: {
+          kind: 'choice',
+          options: [
+            { value: 'auto', label: '自动（默认 D3D11）' },
+            { value: 'd3d11', label: 'D3D11' },
+            { value: 'vulkan', label: 'Vulkan（诊断）' },
+            { value: 'gl', label: 'OpenGL' },
+          ],
+        },
+        read: () => desktopCache.gpu.backend,
+        write: (value) => {
+          void electron()?.system?.setRenderBackend?.(value)
+            .then((result: any) => {
+              if (result?.success) {
+                desktopCache.gpu.backend = result.renderBackend || 'auto'
+                const labels: Record<string, string> = { auto: '自动', d3d11: 'D3D11', vulkan: 'Vulkan', gl: 'OpenGL' }
+                toast(`已切换渲染后端为 ${labels[result.renderBackend]}，重启软件后生效`, 'info')
+              }
+              notifyGlobalSettingChanged()
+            })
+            .catch(() => notifyGlobalSettingChanged())
+        },
+        available: () => hasSystemBridge() && typeof electron()?.system?.setRenderBackend === 'function',
+      },
+      {
         id: 'highRefreshEnabled',
         label: '全局高刷',
         description: '解除渲染帧率限制，跟随显示器最高刷新率',
@@ -1098,11 +1127,36 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
       // 与共振模式内的设置面板同键同事件（waveforge:resonance-*），改哪边都生效。
       {
         id: 'resonanceNickname',
-        label: '共振 · 房间昵称',
-        description: '在共振房间里显示的名字（仅房间成员可见）',
-        control: { kind: 'choice', options: [{ value: '', label: '听众（默认）' }] },
+        label: '共振 · 房间昵称（自定义）',
+        // 空昵称不是「听众」：共振大厅明确要求自定义身份必须填名字（留空会拦住创建/加入），
+        // 所以这里不能写成「听众（默认）」去暗示一个不存在的兜底值。
+        description: '只在「房间昵称来源 = 自定义」时使用；留空则必须在共振大厅里现填一个',
+        control: { kind: 'choice', options: [{ value: '', label: '（未设置）' }] },
         read: () => readResonanceSettings().nickname || '',
         write: (value) => setResonanceSetting('nickname', String(value ?? '').slice(0, 16)),
+      },
+      {
+        id: 'resonanceDefaultMode',
+        label: '共振 · 默认房间模式',
+        description: '在大厅创建房间时的预选模式',
+        control: {
+          kind: 'choice',
+          options: [
+            { value: 'party', label: 'Party' },
+            { value: 'shared-playlist', label: '共享歌单' },
+            { value: 'round-robin', label: '我推荐' },
+          ],
+        },
+        read: () => readResonanceSettings().defaultMode,
+        write: (value) => setResonanceSetting('defaultMode', (value === 'shared-playlist' || value === 'round-robin' ? value : 'party') as ResonanceSettings['defaultMode']),
+      },
+      {
+        id: 'resonanceQuota',
+        label: '共振 · 我推荐每人每轮可加',
+        description: '「我推荐」模式下每人每轮能推荐几首（1–3）',
+        control: { kind: 'choice', options: [{ value: '1', label: '1 首' }, { value: '2', label: '2 首' }, { value: '3', label: '3 首' }] },
+        read: () => String(readResonanceSettings().quota),
+        write: (value) => setResonanceSetting('quota', Math.min(3, Math.max(1, Number(value) || 2))),
       },
       {
         id: 'resonancePushLimit',
@@ -1110,7 +1164,12 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         description: '整单推送时截断到这里，避免几千首的大歌单把房间卡住',
         control: { kind: 'choice', options: [{ value: '100', label: '100 首' }, { value: '200', label: '200 首' }, { value: '500', label: '500 首' }] },
         read: () => String(readResonanceSettings().pushLimit),
-        write: (value) => setResonanceSetting('pushLimit', Number(value) || 200),
+        // 必须按 100/200/500 白名单校验：写进 300 时 readResonanceSettings 会静默回落 200，
+        // 界面就会出现「设了 300、显示 200」的错位
+        write: (value) => {
+          const limit = Number(value)
+          if ((RESONANCE_PUSH_LIMIT_CHOICES as readonly number[]).includes(limit)) setResonanceSetting('pushLimit', limit)
+        },
       },
       {
         id: 'resonanceJoinBehavior',
@@ -1153,6 +1212,17 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         write: (value) => setResonanceSetting('maxMembers', Math.min(15, Math.max(2, Number(value) || 15))),
       },
       {
+        id: 'resonancePort',
+        label: '共振 · 中转端口',
+        description: '房主创建房间时监听的本机端口（被占用会从它起自动顺延）',
+        control: { kind: 'slider', min: 1024, max: 65535, step: 1 },
+        read: () => readResonanceSettings().port,
+        write: (value) => {
+          const port = Number(value)
+          if (Number.isFinite(port) && port >= 1024 && port <= 65535) setResonanceSetting('port', Math.round(port))
+        },
+      },
+      {
         id: 'resonanceNicknameSource',
         label: '共振 · 房间昵称来源',
         description: '默认用你在某个平台的昵称，不在房间里现编一个名字',
@@ -1163,7 +1233,10 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
             { value: 'custom', label: '自定义（用上面那条）' },
           ],
         },
-        read: () => readResonanceSettings().nicknameSource,
+        // 真实存储值可能是某个平台 id（'netease'/'qq'…，在共振大厅里选的就是它）。
+        // 镜像里只提供「跟随平台昵称 / 自定义」两档，所以读侧要把平台 id 归一到 'platform'，
+        // 否则从镜像打开时两档都不高亮（看起来像设置丢了）。
+        read: () => (readResonanceSettings().nicknameSource === 'custom' ? 'custom' : 'platform'),
         write: (value) => setResonanceSetting('nicknameSource', value === 'custom' ? 'custom' : 'platform'),
       },
       {
@@ -1178,9 +1251,14 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         id: 'resonancePartyQuota',
         label: '共振 · Party 每人可加',
         description: 'Party 模式下每个人整场能加进队列的歌数（共享歌单模式不受此限制）',
-        control: { kind: 'choice', options: [{ value: '1', label: '1 首' }, { value: '2', label: '2 首' }, { value: '3', label: '3 首' }, { value: '5', label: '5 首' }] },
+        control: { kind: 'choice', options: RESONANCE_PARTY_QUOTA_CHOICES.map(value => ({ value: String(value), label: `${value} 首` })) },
         read: () => String(readResonanceSettings().partyQuota),
-        write: (value) => setResonanceSetting('partyQuota', [1, 2, 3, 5].includes(Number(value)) ? Number(value) : 3),
+        // 非法值直接忽略（不写、不回落默认）：整份控件只会给出白名单内的值，
+        // 用默认值覆盖会让「当前值」无端变化（测试与用户都会看到莫名的 3）
+        write: (value) => {
+          const quota = Number(value)
+          if ((RESONANCE_PARTY_QUOTA_CHOICES as readonly number[]).includes(quota)) setResonanceSetting('partyQuota', quota)
+        },
       },
       {
         id: 'resonanceBackground',
@@ -1314,8 +1392,10 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
   },
 ]
 
-export function getGroup(groupId: GlobalSettingsGroupId): GlobalSettingsGroup | undefined {
-  return GLOBAL_SETTINGS_GROUPS.find(group => group.id === groupId)
+/** 镜像设置按 id 索引一次，避免每行渲染都对全部条目线性扫描。 */
+const GLOBAL_SETTINGS_ENTRY_INDEX = new Map<string, GlobalSettingEntry>()
+for (const group of GLOBAL_SETTINGS_GROUPS) {
+  for (const entry of group.entries) GLOBAL_SETTINGS_ENTRY_INDEX.set(entry.id, entry)
 }
 
 /** 条目在当前环境下是否可见（available + visibleIf 都满足） */
@@ -1372,17 +1452,12 @@ export function useGlobalSettings() {
   return useMemo(() => ({
     version,
     getValue: (entryId: string): SettingValue | undefined => {
-      for (const group of GLOBAL_SETTINGS_GROUPS) {
-        const entry = group.entries.find(item => item.id === entryId)
-        if (entry) return entry.read()
-      }
-      return undefined
+      const entry = GLOBAL_SETTINGS_ENTRY_INDEX.get(entryId)
+      return entry ? entry.read() : undefined
     },
     setValue: (entryId: string, value: SettingValue) => {
-      for (const group of GLOBAL_SETTINGS_GROUPS) {
-        const entry = group.entries.find(item => item.id === entryId)
-        if (entry?.write) { entry.write(value); return }
-      }
+      const entry = GLOBAL_SETTINGS_ENTRY_INDEX.get(entryId)
+      if (entry?.write) entry.write(value)
     },
     runAction: (actionId: MirrorActionId) => {
       if (actionId === 'check-update') checkForUpdate()

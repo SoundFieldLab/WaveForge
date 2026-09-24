@@ -85,20 +85,27 @@ const HIGH_REFRESH_MIN_HZ = 30
 const HIGH_REFRESH_MAX_HZ = 360
 
 function readPerformanceSettings() {
-  const defaults = { hardwareAcceleration: true, gpuPreference: 'auto', pendingGpuChange: null, highRefreshRate: false, highRefreshHz: null }
+  const defaults = { hardwareAcceleration: true, gpuPreference: 'auto', renderBackend: 'auto', pendingGpuChange: null, highRefreshRate: false, highRefreshHz: null, highPerformanceMode: false, performanceTier: null }
   try {
     const parsed = JSON.parse(fs.readFileSync(performanceSettingsPath, 'utf8'))
     const gpuPreference = ['auto', 'discrete', 'integrated'].includes(parsed?.gpuPreference)
       ? parsed.gpuPreference
       : defaults.gpuPreference
+    // 渲染后端：Chromium ANGLE 的图形 API 选择，NVIDIA 驱动异常时可切换
+    const renderBackend = ['auto', 'd3d11', 'vulkan', 'gl'].includes(parsed?.renderBackend)
+      ? parsed.renderBackend
+      : defaults.renderBackend
     const pending = parsed?.pendingGpuChange
     const savedHz = Number(parsed?.highRefreshHz)
     return {
       hardwareAcceleration: parsed?.hardwareAcceleration !== false,
       gpuPreference,
-      pendingGpuChange: (pending && (pending.type === 'preference' || pending.type === 'acceleration')) ? pending : null,
+      renderBackend,
+      pendingGpuChange: (pending && (pending.type === 'preference' || pending.type === 'acceleration' || pending.type === 'backend')) ? pending : null,
       highRefreshRate: parsed?.highRefreshRate === true,
       highRefreshHz: Number.isInteger(savedHz) && savedHz >= 30 && savedHz <= HIGH_REFRESH_MAX_HZ ? savedHz : null,
+      highPerformanceMode: parsed?.highPerformanceMode === true,
+      performanceTier: ['extreme', 'high', 'standard', 'lite'].includes(parsed?.performanceTier) ? parsed.performanceTier : null,
     }
   } catch {
     return { ...defaults }
@@ -120,14 +127,37 @@ const performanceSettings = readPerformanceSettings()
 // Media Foundation Widevine CDM 实验已移除：castLabs 官方确认该 Windows L1 路径仅为历史实验，
 // 已在近期 Chromium/ECS 中废弃且不支持 VMP。Apple 原生 CENC 应使用 ECS 默认 Browser CDM (L3)，
 // 并单独验证生产 EVS/VMP 签名；不要再注入 ExternalClearKeyForTesting/media_foundation_cdm_path。
-// 全局高刷：用户手动选了具体档位时，启动即用 --force-frame-rate 强制 Chromium 帧率
-// （比运行时 setFrameRate 更可靠；「跟随显示器最高」档在 app ready 后按显示器实时应用）
-if (performanceSettings.highRefreshRate === true && performanceSettings.highRefreshHz) {
-  try { app.commandLine.appendSwitch('force-frame-rate', String(performanceSettings.highRefreshHz)) } catch { /* 忽略 */ }
-}
+// 全局高刷：不通过启动 --force-frame-rate 硬锁帧率，统一走 app ready 后的运行时
+// webContents.setFrameRate（跟随所在显示器实时贴合，见 applyHighRefreshRate）。
+// 原因是 --force-frame-rate 是全局强开关，优先级高于 per-window setFrameRate，
+// 用户运行时切换档位/跟随显示器后启动开关仍锁死旧帧率，白白拉高 GPU 占用。
+// 「跟随显示器最高」档在 app ready 后按显示器实时应用。
 // 软件合成标记：GPU 合成器禁用时置 true（app ready 后由 getGPUFeatureStatus 判定）。
 // createWindow 据此动态调整 splash 最短可见时间（软件合成下内容层提交慢）。
 let gpuCompositingDisabled = false
+// 性能模式挡位：一个挡位统管三个底层开关（显卡偏好 / 高性能模式 / 全局高刷）。
+// 渲染后端不随挡位变动（保持 auto = D3D11 最优）。可再被下方手动开关覆盖。
+const PERF_TIER_PRESETS = {
+  extreme: { gpuPreference: 'discrete', highPerformanceMode: true, highRefreshRate: true },
+  high: { gpuPreference: 'discrete', highPerformanceMode: false, highRefreshRate: true },
+  standard: { gpuPreference: 'auto', highPerformanceMode: false, highRefreshRate: false },
+  lite: { gpuPreference: 'integrated', highPerformanceMode: false, highRefreshRate: false },
+}
+// 挡位只在「用户选择时」应用一次（见 set-performance-tier），启动时以磁盘上的三个开关为准。
+// 早期实现会在每次启动时用挡位预设覆盖 gpuPreference/highPerformanceMode/highRefreshRate，
+// 于是用户之后手动改的开关（比如关掉全局高刷、把显卡偏好切回自动）会在下次启动被静默改回，
+// 而 set-gpu-preference('auto') 已经把 pendingGpuChange 清空、连回滚提示都没有。
+// 手动开关覆盖挡位预设置后把挡位标记清掉：UI 显示为「自定义」，不再宣称一个已不生效的挡位。
+function clearTierIfPresetDiverged() {
+  const tier = performanceSettings.performanceTier
+  if (!tier) return
+  const preset = PERF_TIER_PRESETS[tier]
+  const same = Boolean(preset)
+    && performanceSettings.gpuPreference === preset.gpuPreference
+    && performanceSettings.highPerformanceMode === preset.highPerformanceMode
+    && performanceSettings.highRefreshRate === preset.highRefreshRate
+  if (!same) performanceSettings.performanceTier = null
+}
 if (!performanceSettings.hardwareAcceleration) {
   app.disableHardwareAcceleration()
 } else if (performanceSettings.gpuPreference === 'discrete') {
@@ -136,6 +166,20 @@ if (!performanceSettings.hardwareAcceleration) {
 } else if (performanceSettings.gpuPreference === 'integrated') {
   // 强制使用核显/集成显卡（低功耗 GPU）
   app.commandLine.appendSwitch('force_low_power_gpu')
+}
+// 渲染后端：Chromium ANGLE 图形 API 选择。默认 D3D11；NVIDIA 驱动异常/帧节奏异常时
+// 可切 Vulkan（--use-angle=vulkan，高刷帧节奏与 WebGL 吞吐更稳）或用 gl 兜底。
+if (['d3d11', 'vulkan', 'gl'].includes(performanceSettings.renderBackend)) {
+  try { app.commandLine.appendSwitch('use-angle', performanceSettings.renderBackend) } catch { /* 忽略 */ }
+}
+// 高性能模式（实验）：禁用垂直同步 + 解除帧率上限。渲染不再被 vsync 排队拖住，
+// 帧能跑满显示器实际刷新率、操作更跟手；代价是功耗上升，极端动画可能轻微撕裂。
+// 仅 D3D11 下有收益，默认关闭，开启需重启生效。
+if (performanceSettings.highPerformanceMode) {
+  try {
+    app.commandLine.appendSwitch('disable-vsync')
+    app.commandLine.appendSwitch('disable-frame-rate-limit')
+  } catch { /* 忽略 */ }
 }
 
 // ── Widevine CDM 引导（Apple Music 原生音源：HLS 流走 EME 解密的钥匙）────────
@@ -6847,6 +6891,7 @@ function classifyGpuKind(device) {
 ipcMain.handle('get-gpu-settings', () => ({
   enabled: performanceSettings.hardwareAcceleration,
   gpuPreference: performanceSettings.gpuPreference,
+  renderBackend: performanceSettings.renderBackend,
   pendingGpuChange: performanceSettings.pendingGpuChange,
 }))
 
@@ -6883,7 +6928,10 @@ ipcMain.handle('get-hardware-acceleration', async () => {
   return {
     enabled: performanceSettings.hardwareAcceleration,
     gpuPreference: performanceSettings.gpuPreference,
+    renderBackend: performanceSettings.renderBackend,
     pendingGpuChange: performanceSettings.pendingGpuChange,
+    highPerformanceMode: performanceSettings.highPerformanceMode,
+    performanceTier: performanceSettings.performanceTier,
     actualEnabled: app.isHardwareAccelerationEnabled(),
     featureStatus: app.getGPUFeatureStatus(),
     gpu: activeGpu ? {
@@ -6912,9 +6960,68 @@ ipcMain.handle('set-gpu-preference', (_event, preference) => {
   performanceSettings.gpuPreference = next
   // 切换到强制显卡（独显/核显）属于风险操作，重启后需要用户确认；自动为安全默认
   performanceSettings.pendingGpuChange = next === 'auto' ? null : { type: 'preference' }
+  clearTierIfPresetDiverged()
   writePerformanceSettings(performanceSettings)
   return { success: true, gpuPreference: next, requiresRestart: true }
 })
+
+// 渲染后端：Chromium ANGLE 图形 API（auto/d3d11/vulkan/gl），重启后生效
+ipcMain.handle('set-render-backend', (_event, backend) => {
+  const next = ['auto', 'd3d11', 'vulkan', 'gl'].includes(backend) ? backend : 'auto'
+  performanceSettings.renderBackend = next
+  // 切换渲染后端属于风险操作（个别后端可能与显卡驱动/视频解码不兼容），重启后需用户确认
+  performanceSettings.pendingGpuChange = next === 'auto' ? null : { type: 'backend' }
+  writePerformanceSettings(performanceSettings)
+  return { success: true, renderBackend: next, requiresRestart: true }
+})
+
+// 高性能模式（实验）：禁用 vsync + 解除帧率上限，需重启生效（非风险类设置，无需体验确认）
+ipcMain.handle('set-high-performance-mode', (_event, enabled) => {
+  performanceSettings.highPerformanceMode = enabled === true
+  clearTierIfPresetDiverged()
+  writePerformanceSettings(performanceSettings)
+  return { success: true, highPerformanceMode: performanceSettings.highPerformanceMode, requiresRestart: true }
+})
+
+// 性能模式挡位：一键统管显卡偏好 / 高性能模式 / 全局高刷（重启生效）
+ipcMain.handle('set-performance-tier', (_event, tier) => {
+  const preset = PERF_TIER_PRESETS[tier]
+  performanceSettings.performanceTier = preset ? tier : null
+  if (preset) {
+    performanceSettings.gpuPreference = preset.gpuPreference
+    performanceSettings.highPerformanceMode = preset.highPerformanceMode
+    performanceSettings.highRefreshRate = preset.highRefreshRate
+    // 挡位里含「强制独显/核显」时和手动改显卡偏好是同一类风险操作：
+    // 必须登记 pendingGpuChange，否则重启后不弹确认横幅、卡死也无法自动回退。
+    performanceSettings.pendingGpuChange = preset.gpuPreference === 'auto'
+      ? null
+      : { type: 'preference', fromTier: true }
+  }
+  writePerformanceSettings(performanceSettings)
+  return { success: true, performanceTier: performanceSettings.performanceTier, requiresRestart: true }
+})
+
+// 清理 GPU 着色缓存：Chromium 把翻译后的 shader 写进 userData/ShaderCache（GL 缓存）与
+// GPUCache（GPU 进程磁盘缓存）。切换渲染后端后旧缓存可能属于不同后端，用户手动
+// 「清除所有缓存」时一并清空，让新后端从干净状态重建（含着色器预编译 WM offer）
+ipcMain.handle('gpu:clear-cache', guardTrustedIpc('privileged', async () => {
+  const removed = []
+  const targets = ['ShaderCache', 'GPUCache']
+  for (const name of targets) {
+    const dir = path.join(app.getPath('userData'), name)
+    try {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true })
+        removed.push(name)
+      }
+    } catch (error) {
+      removed.push(`${name}(失败)`)
+      console.error(`清理 GPU 缓存失败 [${name}]:`, error?.message || error)
+    }
+  }
+  try { await session.defaultSession.clearCache() } catch (error) { console.error('清空 Chromium session 缓存失败:', error?.message || error) }
+  return { success: true, removed }
+}))
 
 // 用户确认新的 GPU 设置可用（保留当前设置，清除待确认标记）
 ipcMain.handle('confirm-gpu-change', () => {
@@ -6923,20 +7030,39 @@ ipcMain.handle('confirm-gpu-change', () => {
   return { success: true }
 })
 
-// 用户未确认 / 点击取消：回退到安全默认值（独显 / 开启 GPU 加速）
+// 用户未确认 / 点击取消：回退到安全默认值（独显 / 渲染后端自动 / 开启 GPU 加速）
 ipcMain.handle('revert-gpu-change', () => {
   const pending = performanceSettings.pendingGpuChange
+  let highRefreshChanged = false
   if (pending?.type === 'acceleration') {
     performanceSettings.hardwareAcceleration = true
   } else if (pending?.type === 'preference') {
     performanceSettings.gpuPreference = 'auto'
+    // 挡位一键改过显卡偏好：回退时把整个挡位一起退回安全默认。
+    // 只回滚 gpuPreference 会留下「挡位已不成立、高性能模式与全局高刷却仍开着」的中间态，
+    // 而这三项都是挡位替用户打开的，用户并没有单独确认过。
+    if (pending.fromTier) {
+      performanceSettings.performanceTier = null
+      performanceSettings.highPerformanceMode = false
+      if (performanceSettings.highRefreshRate) highRefreshChanged = true
+      performanceSettings.highRefreshRate = false
+    }
+  } else if (pending?.type === 'backend') {
+    performanceSettings.renderBackend = 'auto'
   }
   performanceSettings.pendingGpuChange = null
   writePerformanceSettings(performanceSettings)
+  // 全局高刷是唯一运行时立即生效的项（其余需重启），回退后要同步把帧率降回下限
+  if (highRefreshChanged) {
+    applyHighRefreshRate()
+    rebindHighRefreshRate()
+  }
   return {
     success: true,
     hardwareAcceleration: performanceSettings.hardwareAcceleration,
     gpuPreference: performanceSettings.gpuPreference,
+    renderBackend: performanceSettings.renderBackend,
+    performanceTier: performanceSettings.performanceTier,
   }
 })
 
@@ -7026,6 +7152,7 @@ ipcMain.handle('display:set-high-refresh', (_event, enabled, hz) => {
   performanceSettings.highRefreshHz = Number.isInteger(savedHz) && savedHz >= HIGH_REFRESH_MIN_HZ && savedHz <= HIGH_REFRESH_MAX_HZ
     ? savedHz
     : null
+  clearTierIfPresetDiverged()
   writePerformanceSettings(performanceSettings)
   applyHighRefreshRate()
   rebindHighRefreshRate()

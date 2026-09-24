@@ -1,4 +1,4 @@
-﻿const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer } = require('electron')
 
 // 向渲染进程暴露经过限制的安全 API。
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -36,6 +36,10 @@ contextBridge.exposeInMainWorld('electron', {
     getHardwareAcceleration: () => ipcRenderer.invoke('get-hardware-acceleration'),
     setHardwareAcceleration: (enabled) => ipcRenderer.invoke('set-hardware-acceleration', enabled),
     setGpuPreference: (preference) => ipcRenderer.invoke('set-gpu-preference', preference),
+    setRenderBackend: (backend) => ipcRenderer.invoke('set-render-backend', backend),
+    setHighPerformanceMode: (enabled) => ipcRenderer.invoke('set-high-performance-mode', enabled),
+    setPerformanceTier: (tier) => ipcRenderer.invoke('set-performance-tier', tier),
+    clearGpuCache: () => ipcRenderer.invoke('gpu:clear-cache'),
     confirmGpuChange: () => ipcRenderer.invoke('confirm-gpu-change'),
     revertGpuChange: () => ipcRenderer.invoke('revert-gpu-change'),
   },

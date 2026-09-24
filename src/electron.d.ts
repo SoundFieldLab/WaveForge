@@ -1,4 +1,4 @@
-﻿import type { TrackAnalysis, TransitionPlan, RenderedTransition } from './audio/types'
+import type { TrackAnalysis, TransitionPlan, RenderedTransition } from './audio/types'
 
 export interface StemEvidenceSample {
   time: number
@@ -144,10 +144,16 @@ export type DeviceRedeemResult =
   | { success: true; message: string; storage: 'registry' | 'file'; grant: DeviceLicenseGrant; grants: DeviceLicenseGrant[] }
   | { success: false; error: string }
 
+export type RenderBackend = 'auto' | 'd3d11' | 'vulkan' | 'gl'
+
 export interface HardwareAccelerationStatus {
   enabled: boolean
   gpuPreference: 'auto' | 'discrete' | 'integrated'
-  pendingGpuChange: { type: 'preference' | 'acceleration' } | null
+  renderBackend: RenderBackend
+  // fromTier：该待确认项由「性能模式挡位」一键设置触发，回退时整个挡位一起退回安全默认
+  pendingGpuChange: { type: 'preference' | 'acceleration' | 'backend'; fromTier?: boolean } | null
+  highPerformanceMode: boolean
+  performanceTier: 'extreme' | 'high' | 'standard' | 'lite' | null
   actualEnabled: boolean
   featureStatus: Record<string, string>
   gpu: {
@@ -338,12 +344,16 @@ export interface ElectronAPI {
       source?: string
       error?: string
     }>
-    getGpuSettings: () => Promise<Pick<HardwareAccelerationStatus, 'enabled' | 'gpuPreference' | 'pendingGpuChange'>>
+    getGpuSettings: () => Promise<Pick<HardwareAccelerationStatus, 'enabled' | 'gpuPreference' | 'renderBackend' | 'pendingGpuChange' | 'highPerformanceMode' | 'performanceTier'>>
     getHardwareAcceleration: () => Promise<HardwareAccelerationStatus>
     setHardwareAcceleration: (enabled: boolean) => Promise<{ success: boolean; enabled: boolean; requiresRestart: boolean }>
     setGpuPreference: (preference: 'auto' | 'discrete' | 'integrated') => Promise<{ success: boolean; gpuPreference: 'auto' | 'discrete' | 'integrated'; requiresRestart: boolean }>
+    setRenderBackend: (backend: RenderBackend) => Promise<{ success: boolean; renderBackend: RenderBackend; requiresRestart: boolean }>
+    setHighPerformanceMode: (enabled: boolean) => Promise<{ success: boolean; highPerformanceMode: boolean; requiresRestart: boolean }>
+    setPerformanceTier: (tier: 'extreme' | 'high' | 'standard' | 'lite') => Promise<{ success: boolean; performanceTier: 'extreme' | 'high' | 'standard' | 'lite' | null; requiresRestart: boolean }>
+    clearGpuCache: () => Promise<{ success: boolean; removed: string[] }>
     confirmGpuChange: () => Promise<{ success: boolean }>
-    revertGpuChange: () => Promise<{ success: boolean; hardwareAcceleration: boolean; gpuPreference: 'auto' | 'discrete' | 'integrated' }>
+    revertGpuChange: () => Promise<{ success: boolean; hardwareAcceleration: boolean; gpuPreference: 'auto' | 'discrete' | 'integrated'; renderBackend: RenderBackend; performanceTier: 'extreme' | 'high' | 'standard' | 'lite' | null }>
   }
   /** 全局高刷：显示器信息与全局渲染帧率控制（跟随所在显示器，最高 360Hz） */
   display: {
