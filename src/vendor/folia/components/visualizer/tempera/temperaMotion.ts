@@ -69,10 +69,16 @@ const RELEASE_TRACKING = 0.055;
 // Resolves one glyph's entrance plus the post-sung tracking release that keeps a finished
 // line alive without breaking its layout.
 // `motion` is the tuning/theme-scaled amount; 0 pins glyphs to their layout position.
+//
+// An optional `out` target lets the render loop reuse one frame object across all the glyphs
+// in a shot. Each glyph's values are computed identically and consumed synchronously before the
+// next glyph runs, so reusing the buffer changes nothing the eye can see - it only removes one
+// 11-field object allocation per glyph per frame.
 export const resolveTemperaGlyphMotion = (
     glyph: TemperaGlyphMotionInput,
     time: number,
     motion: number,
+    out?: TemperaGlyphMotionFrame,
 ): TemperaGlyphMotionFrame => {
     const window = Math.max(glyph.settleTime - glyph.startTime, 0.08);
     const linear = clamp01((time - glyph.startTime) / window);
@@ -116,18 +122,18 @@ export const resolveTemperaGlyphMotion = (
     // inverting it, so `glyphMotion: 0` pins every style to its layout position.
     const amount = clamp01(motion);
     const swell = emphasis * CURRENT_EMPHASIS * amount;
-    return {
-        visible: time >= glyph.startTime,
-        alpha,
-        x: entrance.x * motion + driftX,
-        y: entrance.y * motion + driftY,
-        rotation: glyph.rotation + entrance.rotation * motion,
-        scaleX: entrance.scaleX + (1 - entrance.scaleX) * (1 - amount) + swell,
-        scaleY: entrance.scaleY + (1 - entrance.scaleY) * (1 - amount) + swell,
-        echoX: entrance.x * motion,
-        echoY: entrance.y * motion,
-        echoAlpha: entrance.echo * (1 - easeTemperaEnter(reveal)) * ECHO_ALPHA * amount,
-    };
+    const frame = out ?? ({} as TemperaGlyphMotionFrame);
+    frame.visible = time >= glyph.startTime;
+    frame.alpha = alpha;
+    frame.x = entrance.x * motion + driftX;
+    frame.y = entrance.y * motion + driftY;
+    frame.rotation = glyph.rotation + entrance.rotation * motion;
+    frame.scaleX = entrance.scaleX + (1 - entrance.scaleX) * (1 - amount) + swell;
+    frame.scaleY = entrance.scaleY + (1 - entrance.scaleY) * (1 - amount) + swell;
+    frame.echoX = entrance.x * motion;
+    frame.echoY = entrance.y * motion;
+    frame.echoAlpha = entrance.echo * (1 - easeTemperaEnter(reveal)) * ECHO_ALPHA * amount;
+    return frame;
 };
 
 /**

@@ -398,8 +398,21 @@ const RingLine: React.FC<RingLineProps> = ({
     const charRefs = useRef<(HTMLSpanElement | null)[]>([]);
     const previousTimeRef = useRef(currentTime.get());
     const holdResetFrameRef = useRef(false);
+    // Hyper-refresh guard: remember the last style values each character was given,
+    // so a 60Hz change event only touches the span when an actual value changed.
+    // Writing the identical string back is pure waste (each assignment forces a style
+    // recalculation pass for that node) and, once a character reaches its completed
+    // state, its position/colour/glow are recomputed but often unchanged frame-to-frame.
+    // Visually identical: we skip the style.setX assignment only when the new value
+    // equals the previous one, so the rendered result is byte-for-byte the same.
+    const lastCharStylesRef = useRef<({ transform?: string; opacity?: string; filter?: string; color?: string; textShadow?: string } | null)[]>([]);
 
     useLayoutEffect(() => {
+        // Each run corresponds to a freshly rendered line whose spans are brand-new DOM
+        // nodes. Drop any styles cached by a previous line so the first pass of this handler
+        // writes to every span (their inline styles default to empty), matching the original
+        // unconditional-write behaviour exactly.
+        lastCharStylesRef.current = [];
         const handler = (latestTime: number) => {
             if (shouldHoldCladdaghFrameForPlaybackReset(previousTimeRef.current, latestTime, centerLineIndex)) {
                 holdResetFrameRef.current = true;
@@ -606,9 +619,22 @@ const RingLine: React.FC<RingLineProps> = ({
                 const blur = 8.0 * (1 - D) * (1 - 0.5 * F);
                 const tiltAngle = clamp(tangentAngle * (0.4 + 0.6 * D), -38, 38);
 
-                el.style.transform = `translate3d(calc(-50% + ${x.toFixed(1)}px), calc(-50% + ${y.toFixed(1)}px), 0px) rotate(${tiltAngle.toFixed(2)}deg) scale(${scale.toFixed(3)})`;
-                el.style.opacity = finalOpacity.toFixed(3);
-                el.style.filter = blur < 0.2 ? 'none' : `blur(${blur.toFixed(2)}px)`;
+                // Commit-by-diff: only assign when the computed string actually changed.
+                // During a sung/highlighted line the per-char position continues to drift
+                // (wordOffset/power chase) so transform is frequently fresh — but opacity,
+                // color and, once a char is completed, textShadow stabilise and don't need
+                // rewriting at 60Hz. Comparing before writing keeps the on('change') handler
+                // allocation-free and only touches DOM that genuinely differs. Rendering is
+                // identical because equal strings are never assigned.
+                const cache = lastCharStylesRef.current;
+                let slot = cache[i];
+                const nextTransform = `translate3d(calc(-50% + ${x.toFixed(1)}px), calc(-50% + ${y.toFixed(1)}px), 0px) rotate(${tiltAngle.toFixed(2)}deg) scale(${scale.toFixed(3)})`;
+                const nextOpacity = finalOpacity.toFixed(3);
+                const nextFilter = blur < 0.2 ? 'none' : `blur(${blur.toFixed(2)}px)`;
+                if (!slot) { slot = cache[i] = {}; }
+                if (slot.transform !== nextTransform) { slot.transform = nextTransform; el.style.transform = nextTransform; }
+                if (slot.opacity !== nextOpacity) { slot.opacity = nextOpacity; el.style.opacity = nextOpacity; }
+                if (slot.filter !== nextFilter) { slot.filter = nextFilter; el.style.filter = nextFilter; }
 
                 // Update text color and text shadow (glow) progressively based on character playback status
                 let charProgress = 0;
@@ -649,7 +675,8 @@ const RingLine: React.FC<RingLineProps> = ({
 
                 const currentGlowRadius = baseGlow * (1.0 + flashPop);
 
-                el.style.color = targetColor;
+                const nextColor = targetColor;
+                if (slot.color !== nextColor) { slot.color = nextColor; el.style.color = nextColor; }
 
                 // Calculate a smooth fade-out factor so the shadow doesn't abruptly pop when it hits the 0.5px threshold.
                 // At radius 2.5+, it's 1.0 (full original intensity). At 0.5, it's 0.0 (completely transparent).
@@ -666,13 +693,15 @@ const RingLine: React.FC<RingLineProps> = ({
                         const innerGlowColor = mixColors(targetColor, theme.primaryColor || '#ffffff', 0.65, shadowFade);
                         
                         // Restored exact multiplier ratios from Image 1 (0.35, 1.0, 1.6)
-                        el.style.textShadow = `0 0 ${(currentGlowRadius * 0.35).toFixed(1)}px ${innerGlowColor}, 0 0 ${currentGlowRadius.toFixed(1)}px ${fadedTargetColor}, 0 0 ${(currentGlowRadius * 1.6).toFixed(1)}px ${fadedTargetColor}`;
+                        const nextShadow = `0 0 ${(currentGlowRadius * 0.35).toFixed(1)}px ${innerGlowColor}, 0 0 ${currentGlowRadius.toFixed(1)}px ${fadedTargetColor}, 0 0 ${(currentGlowRadius * 1.6).toFixed(1)}px ${fadedTargetColor}`;
+                        if (slot.textShadow !== nextShadow) { slot.textShadow = nextShadow; el.style.textShadow = nextShadow; }
                     } else {
                         // Restored exact multiplier ratio from Image 1
-                        el.style.textShadow = `0 0 ${currentGlowRadius.toFixed(1)}px ${fadedTargetColor}`;
+                        const nextShadow = `0 0 ${currentGlowRadius.toFixed(1)}px ${fadedTargetColor}`;
+                        if (slot.textShadow !== nextShadow) { slot.textShadow = nextShadow; el.style.textShadow = nextShadow; }
                     }
                 } else {
-                    el.style.textShadow = 'none';
+                    if (slot.textShadow !== 'none') { slot.textShadow = 'none'; el.style.textShadow = 'none'; }
                 }
             }
         };
@@ -786,6 +815,14 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
         let frameId = 0;
 
         const updateColors = () => {
+            // While paused the axis-line beat pulse must freeze. `paused` is in the deps
+            // array so flipping it tears down this loop and restarts it on resume — here we
+            // simply avoid re-arming the next frame (the final paused frame is left in place,
+            // giving the "freeze on pause" look identical to before when power was forced to 0).
+            if (paused) {
+                cancelAnimationFrame(frameId);
+                return;
+            }
             const bassPower = paused ? 0 : normalizePower(smoothedBass.get());
             const vocalPower = paused ? 0 : normalizePower(smoothedVocal.get());
             const fromColor = theme.primaryColor || '#ffffff';

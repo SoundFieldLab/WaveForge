@@ -383,6 +383,15 @@ const TiltLine: React.FC<{
     if (charScaleMvs.current.length !== graphemes.length) {
         charScaleMvs.current = graphemes.map(() => motionValue(1));
     }
+    // Mirrors charScaleMvs with the last value we actually wrote, so that a 60Hz
+    // on('change') tick only calls mvs[i].set() when the target really moved.
+    // set()ing an unchanged number is wasted work (it re-notifies the subscribing
+    // motion.span and forces a transform compare each frame). Skipping identical
+    // writes is visually identical because the rendered value is unchanged.
+    const charScaleTargets = useRef<number[]>([]);
+    if (charScaleTargets.current.length !== graphemes.length) {
+        charScaleTargets.current = new Array<number>(graphemes.length).fill(NaN);
+    }
 
     const charIndexMap = useMemo(() => {
         let idx = 0;
@@ -400,26 +409,32 @@ const TiltLine: React.FC<{
             if (!visible) return;
             const mvs = charScaleMvs.current;
             if (mvs.length !== graphemes.length) return;
+            const targets = charScaleTargets.current;
+            // Helpers: only write when the target moved since the last tick. Note a NaN
+            // seed forces the first write, keeping behaviour identical to the original
+            // (every char was set() unconditionally once per on('change') tick before).
             if (!charTimings || charTimings.length === 0) {
-                for (let i = 0; i < mvs.length; i++) mvs[i].set(1);
+                for (let i = 0; i < mvs.length; i++) {
+                    if (targets[i] !== 1) { targets[i] = 1; mvs[i].set(1); }
+                }
                 return;
             }
 
             for (let ti = 0; ti < graphemes.length; ti++) {
                 const seg = graphemes[ti];
                 if (/^\s+$/.test(seg.segment)) {
-                    mvs[ti].set(1);
+                    if (targets[ti] !== 1) { targets[ti] = 1; mvs[ti].set(1); }
                     continue;
                 }
                 const ci = charIndexMap[ti];
                 const charTiming = charTimings[ci];
                 if (!charTiming) {
-                    mvs[ti].set(1);
+                    if (targets[ti] !== 1) { targets[ti] = 1; mvs[ti].set(1); }
                     continue;
                 }
                 const intensity = getCharPulseIntensity(latest, charTiming);
-
-                mvs[ti].set(1 + intensity * (segment.isTilt ? 0.18 : 0.15));
+                const target = 1 + intensity * (segment.isTilt ? 0.18 : 0.15);
+                if (targets[ti] !== target) { targets[ti] = target; mvs[ti].set(target); }
             }
         };
         const unsubscribe = currentTime.on('change', handler);

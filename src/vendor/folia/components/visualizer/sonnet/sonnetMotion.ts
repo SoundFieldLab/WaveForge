@@ -116,6 +116,13 @@ const SONNET_CAMERA_SMOOTHING_SAMPLES = [
     { offset: 1, weight: 1 },
 ] as const;
 
+// Reusable scratch for the 5 smoothing samples. This helper is only ever called from the single
+// sonnet render loop (never re-entrant), so a shared buffer is safe and avoids 5 per-frame
+// object allocations. Sampling order and weights are unchanged, so output is pixel-identical.
+const SONNET_CAMERA_SAMPLE_POINTS: SonnetCameraFocusPoint[] = new Array(
+    SONNET_CAMERA_SMOOTHING_SAMPLES.length,
+);
+
 // Applies deterministic edge-preserving temporal smoothing without tying camera motion to frame rate.
 export const resolveSonnetSmoothedCameraFocus = (
     time: number,
@@ -132,25 +139,36 @@ export const resolveSonnetSmoothedCameraFocus = (
         return sampleFocus(Math.min(safeEnd, Math.max(safeStart, time)));
     }
 
-    const samples = SONNET_CAMERA_SMOOTHING_SAMPLES.map(({ offset, weight }) => {
+    // In-place first pass: keep the same per-sample ordering as the old map() so the weighted
+    // blend below produces an identical focus point, but no intermediate array is allocated.
+    for (let i = 0; i < SONNET_CAMERA_SMOOTHING_SAMPLES.length; i++) {
+        const offset = SONNET_CAMERA_SMOOTHING_SAMPLES[i].offset;
         const sampleTime = Math.min(safeEnd, Math.max(safeStart, time + offset * radius));
-        return { point: sampleFocus(sampleTime), weight };
-    });
-    const center = samples[2].point;
+        SONNET_CAMERA_SAMPLE_POINTS[i] = sampleFocus(sampleTime);
+    }
+    const center = SONNET_CAMERA_SAMPLE_POINTS[2];
     const maxDistanceSquared = Math.max(0, maxBlendDistance) ** 2;
     let x = 0;
     let y = 0;
     let totalWeight = 0;
-    samples.forEach(({ point, weight }) => {
+    for (let i = 0; i < SONNET_CAMERA_SMOOTHING_SAMPLES.length; i++) {
+        const weight = SONNET_CAMERA_SMOOTHING_SAMPLES[i].weight;
+        const point = SONNET_CAMERA_SAMPLE_POINTS[i];
         const distanceSquared = (point.x - center.x) ** 2 + (point.y - center.y) ** 2;
         // Preserve intentional composition jumps instead of averaging two distant focal points.
-        if (distanceSquared > maxDistanceSquared) return;
+        if (distanceSquared > maxDistanceSquared) continue;
         x += point.x * weight;
         y += point.y * weight;
         totalWeight += weight;
-    });
+    }
     return { x: x / totalWeight, y: y / totalWeight };
 };
+
+// Reusable scratch for focus weights. Called only from the single sonnet render loop (never
+// re-entrant), so sharing one buffer avoids reallocating the intermediate log-weights array on
+// every sample. Math and output array are identical; each call still returns a fresh array so
+// callers may retain it.
+const SONNET_FOCUS_WEIGHT_SCRATCH: number[] = [];
 
 // Produces stable normalized focus weights, including silent gaps and the tail after the final glyph.
 export const resolveSonnetFocusWeights = (
@@ -160,7 +178,12 @@ export const resolveSonnetFocusWeights = (
 ) => {
     if (ranges.length === 0) return [];
     const safeSigma = Math.max(0.001, sigma);
-    const logWeights = ranges.map(range => {
+    const twoSigmaSquared = 2 * safeSigma * safeSigma;
+    const scratch = SONNET_FOCUS_WEIGHT_SCRATCH;
+    if (scratch.length < ranges.length) scratch.length = ranges.length;
+    let maxLogWeight = Number.NEGATIVE_INFINITY;
+    for (let i = 0; i < ranges.length; i++) {
+        const range = ranges[i];
         const startTime = Math.min(range.startTime, range.endTime);
         const endTime = Math.max(range.startTime, range.endTime);
         const distance = time < startTime
@@ -168,12 +191,21 @@ export const resolveSonnetFocusWeights = (
             : time > endTime
                 ? time - endTime
                 : 0;
-        return -(distance * distance) / (2 * safeSigma * safeSigma);
-    });
-    const maxLogWeight = Math.max(...logWeights);
-    const weights = logWeights.map(weight => Math.exp(weight - maxLogWeight));
-    const totalWeight = weights.reduce((total, weight) => total + weight, 0);
-    return weights.map(weight => weight / totalWeight);
+        const logWeight = -(distance * distance) / twoSigmaSquared;
+        scratch[i] = logWeight;
+        if (logWeight > maxLogWeight) maxLogWeight = logWeight;
+    }
+    const weights = new Array(ranges.length);
+    let totalWeight = 0;
+    for (let i = 0; i < ranges.length; i++) {
+        const weight = Math.exp(scratch[i] - maxLogWeight);
+        weights[i] = weight;
+        totalWeight += weight;
+    }
+    for (let i = 0; i < ranges.length; i++) {
+        weights[i] = weights[i] / totalWeight;
+    }
+    return weights;
 };
 
 // PV 风格镜头路径：ExpoOut 快速入场、中段近匀速漂移（速度永不为 0）、末段柔和收尾让速给转场。

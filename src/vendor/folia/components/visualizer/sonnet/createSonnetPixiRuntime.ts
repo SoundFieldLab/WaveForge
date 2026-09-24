@@ -24,6 +24,7 @@ import {
     resolveSonnetShotTransitionFrame,
 } from './sonnetTransitions';
 import { buildSonnetScene, type SceneView, type ShotView } from './sonnetSceneBuilder';
+import type { SegmentView } from './sonnetTextViewBuilder';
 import { isSonnetEmphasisRole } from './sonnetTypographyLayout';
 import { getSonnetTexturePool } from './sonnetTexturePool';
 import {
@@ -80,6 +81,36 @@ export class SonnetPixiRuntime {
     private overlayContainer!: import('pixi.js').Container;
     private outroBlurFilter: import('pixi.js').BlurFilter | null = null;
     private outroBlurScene: SceneView | null = null;
+
+    // Per-shot focus/tracking facts that depend only on static scene data (segments, glyph
+    // timings, shot bounds). They are recomputed on every frame via filter()/map()/Math.max and
+    // never change during playback, so cache them once per shot. WeakMap keys let destroyed
+    // shots be collected automatically. Visual output is unchanged because the cached values
+    // are byte-identical to the original per-frame recomputation.
+    private readonly shotFocusCache = new WeakMap<ShotView, {
+        track: SegmentView[];
+        revealDoneTime: number;
+        focusRanges: { startTime: number; endTime: number }[];
+    }>();
+
+    private getShotFocusCache(view: ShotView) {
+        const cached = this.shotFocusCache.get(view);
+        if (cached) return cached;
+        let track = view.segments.filter(s => s.role !== 'decoration' && s.trackingGlyphs.length > 0);
+        if (track.length === 0) {
+            track = view.segments.filter(s => s.trackingGlyphs.length > 0);
+        }
+        const revealDoneTime = track.length > 0
+            ? Math.max(...track.map(segment => segment.trackingGlyphs.at(-1)?.startTime ?? view.shot.endTime))
+            : view.shot.endTime;
+        const focusRanges = track.map(segment => ({
+            startTime: segment.trackingGlyphs[0]?.startTime ?? view.shot.startTime,
+            endTime: segment.trackingGlyphs.at(-1)?.startTime ?? view.shot.endTime,
+        }));
+        const entry = { track, revealDoneTime, focusRanges };
+        this.shotFocusCache.set(view, entry);
+        return entry;
+    }
 
     private constructor(
         private readonly pixi: PixiModule,
@@ -368,16 +399,15 @@ export class SonnetPixiRuntime {
 
         const shake = resolveTimelineShake(time, shakeIntensity);
 
-        let trackSegments = view.segments.filter(s => s.role !== 'decoration' && s.trackingGlyphs.length > 0);
-        if (trackSegments.length === 0) {
-            trackSegments = view.segments.filter(s => s.trackingGlyphs.length > 0);
-        }
+        // Tracking/decoration segment selection, focus ranges and reveal time are static per shot;
+        // reuse the one-time cache instead of re-filtering and re-mapping on every frame. Same
+        // values, so the breathing float and camera focus math produce identical results.
+        const shotFocus = this.getShotFocusCache(view);
+        const trackSegments = shotFocus.track;
 
         // Layer a deterministic breathing float once the lyric reveal completes, so the
         // frame never goes fully static while the shot holds or drifts through a gap.
-        const revealDoneTime = trackSegments.length > 0
-            ? Math.max(...trackSegments.map(segment => segment.trackingGlyphs.at(-1)?.startTime ?? view.shot.endTime))
-            : view.shot.endTime;
+        const revealDoneTime = shotFocus.revealDoneTime;
         const breathWeight = resolveSonnetBreathWeight(time, revealDoneTime);
         if (breathWeight > 0) {
             const breathPhase = (hashSonnetSeed(view.shot.id) % 1024) / 1024 * Math.PI * 2;
@@ -392,10 +422,7 @@ export class SonnetPixiRuntime {
         let currentFocusY = view.basePivotY;
 
         if (trackSegments.length > 0) {
-            const focusRanges = trackSegments.map(segment => ({
-                startTime: segment.trackingGlyphs[0]?.startTime ?? view.shot.startTime,
-                endTime: segment.trackingGlyphs.at(-1)?.startTime ?? view.shot.endTime,
-            }));
+            const focusRanges = shotFocus.focusRanges;
             const resolveFocusAtTime = (focusTime: number) => {
                 let focusX = 0;
                 let focusY = 0;

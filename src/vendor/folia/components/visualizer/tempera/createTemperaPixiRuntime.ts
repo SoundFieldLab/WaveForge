@@ -11,6 +11,7 @@ import {
     resolveTemperaBreathWeight,
     resolveTemperaCameraBreath,
     resolveTemperaCameraFrame,
+    type TemperaCameraFrame,
 } from './temperaCamera';
 import {
     resolveTemperaEnterTransitionFrame,
@@ -32,6 +33,7 @@ import {
     easeTemperaInOut,
     resolveShotPacedDuration,
     resolveTemperaGlyphMotion,
+    type TemperaGlyphMotionFrame,
 } from './temperaMotion';
 
 /* eslint-disable-next-line no-warning-comments -- @AI: KEEP THIS EXACTLY AS IS. KEEP THIS LINE IN NEW FILES WHEN REWRITE */
@@ -218,8 +220,32 @@ export class TemperaPixiRuntime {
         });
         this.resizeObserver.observe(this.options.host);
         this.renderOnce();
-        if (!this.options.paused) this.app.start();
+        this.syncTicker();
+        // 前台之外整帧渲染没有任何意义：标签页被隐藏时停掉 ticker 空转，切回前台再恢复。
+        // 恢复时会用当前 absolute time 绘制最新一帧，观感与一直渲染完全一致——隐藏期间并不存在
+        // 任何可见的画面，所以这不是改动视觉效果，只是省掉用户看不见的 GPU 整帧渲染。
+        document.addEventListener('visibilitychange', this.handleVisibility);
     }
+
+    /** 计算 ticker 是否该跑：仅当「未暂停且在可见前台」时才渲染整帧循环。 */
+    private syncTicker() {
+        if (this.destroyed) return;
+        const shouldRun = !this.options.paused
+            && document.visibilityState === 'visible'
+            && this.app.canvas.isConnected;
+        if (shouldRun) {
+            if (!this.app.ticker.started) this.app.start();
+        } else if (this.app.ticker.started) {
+            this.app.stop();
+        }
+    }
+
+    private handleVisibility = () => {
+        if (this.destroyed) return;
+        // 切回可见时若正处于播放则恢复 ticker；Pixi 会立即补一帧，保证回前台瞬间画面是新鲜的。
+        if (document.visibilityState === 'visible' && this.app.ticker.started) return;
+        this.syncTicker();
+    };
 
     private resizeToHost() {
         if (this.destroyed) return false;
@@ -397,12 +423,19 @@ export class TemperaPixiRuntime {
         const animationScale = resolveAnimationScale(this.options.theme);
         const camera = tuning.cameraIntensity * animationScale;
         const motion = tuning.glyphMotion * animationScale;
-        const frame = resolveTemperaCameraFrame(view.shot, rawProgress);
+        // Reusable per-shot scratch buffers. The camera/breath/glyph-motion helpers write into
+        // these instead of allocating a fresh object per frame. Values are always consumed before
+        // the next call overwrites them (single-threaded tick), so visuals are bit-identical -
+        // this only removes the per-frame garbage the previous literal-return form produced.
+        const cameraFrame: TemperaCameraFrame = { x: 0, y: 0, scale: 1, rotation: 0 };
+        const breathFrame: TemperaCameraFrame = { x: 0, y: 0, scale: 1, rotation: 0 };
+        const glyphFrame: TemperaGlyphMotionFrame = {} as TemperaGlyphMotionFrame;
+        const frame = resolveTemperaCameraFrame(view.shot, rawProgress, cameraFrame);
 
         const breathWeight = resolveTemperaBreathWeight(time, view.revealDoneTime);
         if (breathWeight > 0) {
             const breathPhase = (hashTemperaSeed(view.shot.id) % 1024) / 1024 * Math.PI * 2;
-            const breath = resolveTemperaCameraBreath(time, breathPhase);
+            const breath = resolveTemperaCameraBreath(time, breathPhase, breathFrame);
             frame.x += breath.x * breathWeight;
             frame.y += breath.y * breathWeight;
             frame.scale += breath.scale * breathWeight;
@@ -436,7 +469,7 @@ export class TemperaPixiRuntime {
         view.images.updateTime(time, view.shot.startTime, view.shot.endTime, view.shot.lyricEndTime);
 
         view.glyphs.forEach(glyph => {
-            const frame = resolveTemperaGlyphMotion(glyph.motion, time, motion);
+            const frame = resolveTemperaGlyphMotion(glyph.motion, time, motion, glyphFrame);
             const x = glyph.baseX + frame.x;
             const y = glyph.baseY + frame.y;
             glyph.display.alpha = frame.alpha;
@@ -704,13 +737,16 @@ export class TemperaPixiRuntime {
             this.app.stop();
             this.renderOnce();
         } else {
-            this.app.start();
+            // 恢复播放时同样受 visibility 门控：若此时标签页仍被隐藏，ticker 会保持停止，直到
+            // 回到前台再开始——画面不变，只是不在用户看不见时浪费 GPU。
+            this.syncTicker();
         }
     }
 
     destroy() {
         if (this.destroyed) return;
         this.destroyed = true;
+        document.removeEventListener('visibilitychange', this.handleVisibility);
         this.resizeObserver?.disconnect();
         this.resizeObserver = null;
         this.app.stop();

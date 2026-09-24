@@ -25,19 +25,27 @@ export interface TemperaCameraFrame {
 
 // Resolves the shot camera path at a progress; progress may exceed 1 slightly during
 // inter-line gaps so the frame keeps drifting instead of freezing.
-export const resolveTemperaCameraFrame = (shot: TemperaShot, progress: number): TemperaCameraFrame => {
+//
+// An optional `out` target lets the hot render loop reuse one frame object instead of
+// allocating one every tick. Every value is still computed identically, so reusing the buffer
+// does not change the resulting camera motion at all - it only removes the per-frame garbage.
+export const resolveTemperaCameraFrame = (
+    shot: TemperaShot,
+    progress: number,
+    out?: TemperaCameraFrame,
+): TemperaCameraFrame => {
     const clamped = clamp01(progress);
     // Blend constant velocity into the ease so the middle of the shot never stalls.
     const eased = clamped * 0.5 + easeInOut(clamped) * 0.5;
     const overshoot = Math.max(0, progress - 1) * 0.35;
     const amount = eased + overshoot;
     const { camera: start, cameraEnd: end } = shot;
-    return {
-        x: lerp(start.x, end.x, amount),
-        y: lerp(start.y, end.y, amount),
-        scale: lerp(start.zoom, end.zoom, amount),
-        rotation: lerp(start.rotation, end.rotation, amount),
-    };
+    const frame = out ?? ({} as TemperaCameraFrame);
+    frame.x = lerp(start.x, end.x, amount);
+    frame.y = lerp(start.y, end.y, amount);
+    frame.scale = lerp(start.zoom, end.zoom, amount);
+    frame.rotation = lerp(start.rotation, end.rotation, amount);
+    return frame;
 };
 
 export const TEMPERA_CAMERA_BREATH_MAX_OFFSET = 0.006;
@@ -46,16 +54,19 @@ export const TEMPERA_CAMERA_BREATH_MAX_ROTATION = 0.0015;
 
 // Deterministic hand-held breathing float: layered incommensurate sines keep the drift
 // organic, and absolute-time evaluation keeps direct seeks identical to playback.
-export const resolveTemperaCameraBreath = (time: number, phase = 0): TemperaCameraFrame => {
+//
+// The optional `out` buffer is reused by the render loop each tick. Same math, no allocation;
+// reusing it cannot change the float the frame produces.
+export const resolveTemperaCameraBreath = (time: number, phase = 0, out?: TemperaCameraFrame): TemperaCameraFrame => {
     const tau = time * Math.PI * 2;
-    return {
-        x: (Math.sin(tau * 0.13 + phase) * 0.65 + Math.sin(tau * 0.31 + phase * 1.7) * 0.35)
-            * TEMPERA_CAMERA_BREATH_MAX_OFFSET,
-        y: (Math.cos(tau * 0.11 + phase * 2.3) * 0.65 + Math.sin(tau * 0.29 + phase * 0.9) * 0.35)
-            * TEMPERA_CAMERA_BREATH_MAX_OFFSET,
-        scale: Math.sin(tau * 0.09 + phase * 1.3) * TEMPERA_CAMERA_BREATH_MAX_SCALE,
-        rotation: Math.sin(tau * 0.07 + phase * 2.9) * TEMPERA_CAMERA_BREATH_MAX_ROTATION,
-    };
+    const frame = out ?? ({} as TemperaCameraFrame);
+    frame.x = (Math.sin(tau * 0.13 + phase) * 0.65 + Math.sin(tau * 0.31 + phase * 1.7) * 0.35)
+        * TEMPERA_CAMERA_BREATH_MAX_OFFSET;
+    frame.y = (Math.cos(tau * 0.11 + phase * 2.3) * 0.65 + Math.sin(tau * 0.29 + phase * 0.9) * 0.35)
+        * TEMPERA_CAMERA_BREATH_MAX_OFFSET;
+    frame.scale = Math.sin(tau * 0.09 + phase * 1.3) * TEMPERA_CAMERA_BREATH_MAX_SCALE;
+    frame.rotation = Math.sin(tau * 0.07 + phase * 2.9) * TEMPERA_CAMERA_BREATH_MAX_ROTATION;
+    return frame;
 };
 
 // Ramps the breathing float in after the lyric reveal completes so it never pops in mid-line.
