@@ -1998,6 +1998,9 @@ app.get('/api/netease/song/url', async (req, res) => {
     const fallbackEnabled = req.query.fallback === 'true'
     const qualityPreference = normalizeAudioQualityPreference(req.query.quality)
     const isVip = req.query.vip === 'true'
+    // 点播取流的耗时打点：候选是串行尝试的，只有拿到真实分布才能判断「要不要改成并行探测」——
+    // 并行会让「慢但可用」的高音质档被低档抢先成功（音质取舍），需要数据支撑再决定。
+    const urlStartedAt = Date.now()
     if (!id) return res.status(400).json({ error: '\u8bf7\u63d0\u4f9b\u6b4c\u66f2ID' })
 
     if (!NeteaseAPI || !NeteaseAPI.song_url_v1) {
@@ -2030,6 +2033,7 @@ app.get('/api/netease/song/url', async (req, res) => {
             const item = result.body?.data?.[0]
             if (item?.url) {
               actualQuality = item.level || level
+              console.log(`[Netease URL] 命中 level=${actualQuality} 耗时 ${Date.now() - urlStartedAt}ms（候选 ${candidateIndex + 1}/${candidates.length}）`)
               return res.json({
                 ...result.body,
                 fallback: false,
@@ -2044,7 +2048,9 @@ app.get('/api/netease/song/url', async (req, res) => {
         } catch (error) {
           lastError = error
           console.warn('[Netease URL] quality ' + level + ' attempt ' + (attempt + 1) + ' failed:', error.message)
-          if (attempt + 1 < attempts && officialDeadlineAt - Date.now() > 500) {
+          // 重试前先确认剩余预算够一次尝试（单次上限 4500ms）：预算不足时直接放弃重试，
+          // 否则会把整个 deadline 耗在这一个候选上，用户要等更久才轮到下一个候选
+          if (attempt + 1 < attempts && officialDeadlineAt - Date.now() > 1500) {
             await new Promise(resolve => setTimeout(resolve, 150))
           }
         }
