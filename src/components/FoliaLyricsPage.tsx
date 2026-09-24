@@ -169,6 +169,10 @@ export function FoliaLyricsPage({
       anchorWall = performance.now()
       playing = snapshot.isPlaying
       currentTime.set(anchorTime + timeOffset)
+      // 暂停时 tick 会把 raf 归零；恢复播放时若时钟未在跑，需确定性重启
+      if (playing && active && document.visibilityState === 'visible' && raf === 0) {
+        raf = requestAnimationFrame(tick)
+      }
     }
     const tick = (now: number) => {
       if (lastFrame && now - lastFrame < FRAME_MIN_INTERVAL_MS) {
@@ -218,8 +222,16 @@ export function FoliaLyricsPage({
   }), [bassBand, lowMidBand, midBand, vocalBand, trebleBand, spectrumBand])
   useEffect(() => {
     if (!analyzerStore || !active) return
+    // 频谱快照是视觉调用的源头之一：分析器按音频帧率高频推送，
+    // 若逐一 set() 会把 7 个 MotionValue 以 60-120Hz 扇出给所有可视化器的
+    // change 订阅（逐字符 DOM 写 + 布局）。限 30Hz 推送在视觉上无感知差异，
+    // 却能把这条风暴直接减半以上；播放暂停时整体停推，避免静默空转。
+    let lastPushWall = 0
     const update = () => {
+      const now = performance.now()
       const snapshot = analyzerStore.getSnapshot()
+      if (now - lastPushWall < 1000 / 30) return
+      lastPushWall = now
       const scaled = scaleAnalyzerSnapshotForFolia(snapshot)
       audioPower.set(scaled.overall)
       bassBand.set(scaled.bass)

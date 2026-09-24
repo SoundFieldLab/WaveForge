@@ -282,6 +282,16 @@ export default function FoliaDioramaLyrics({
             camera={{ fov: 55, near: 0.1, far: 140, position: [0, 0.6, 9] }}
             gl={{ powerPreference: 'high-performance', alpha: false }}
             className="h-full w-full"
+            onCreated={(state) => {
+              // 引擎实例级懒预热：R3F 场景就位后把真实编译产物写入 GpuDiskCache，
+              // 下次启动/重进播放页直接命中（对 ShaderMaterial 裸预热已是逐字一致，这里再兜底
+              // 覆盖 R3F 其余内置材质的注入形态）。塞进 setTimeout 等子树挂完，失败静默。
+              window.setTimeout(() => {
+                try {
+                  void state.gl.compileAsync(state.scene, state.camera)
+                } catch { /* 尽力而为 */ }
+              }, 400)
+            }}
           >
             <DioramaScene
               currentTime={currentTime}
