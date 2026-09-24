@@ -509,6 +509,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   showVolumeSliderRef.current = showVolumeSlider
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [showReplay, setShowReplay] = useState(false)
+  // MV 短于歌曲时的提示去重（按「视频 + 歌曲」记一次，避免同一支 MV 反复弹提示）
+  const shortMvNoticedRef = useRef('')
   const [showPicker, setShowPicker] = useState(false)
   const [pickerTypeFilter, setPickerTypeFilter] = useState<'all' | CandidateType>('all')
   const [manualKeyword, setManualKeyword] = useState('')
@@ -1690,6 +1692,14 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     const behavior = settingsRef.current.videoEndBehavior
     // 歌曲放完按设置正常切下一曲（B 站功能弹窗开着也切，保持弹幕/评论跟随当前视频）
     if (behavior === 'next') {
+      // MV 明显短于歌曲（TV size / 剪辑片段）时，「视频结束即切歌」会把歌腰斩。
+      // 这里不改变用户设置的行为，只把原因和改法讲清楚，避免被当成播放器故障。
+      const videoSeconds = videoRef.current?.duration || activeVideo?.video?.duration || 0
+      const noticeKey = `${songKey}:${activeVideo?.video?.bvid ?? ''}`
+      if (videoSeconds > 0 && songDuration > 0 && videoSeconds + 30 < songDuration && shortMvNoticedRef.current !== noticeKey) {
+        shortMvNoticedRef.current = noticeKey
+        showToast('这支 MV 比歌曲短（剪辑片段），已按当前设置切到下一首；可在「看歌设置」改为「重播」或「停留末帧」')
+      }
       reportVideoActive(false)
       onNext()
     } else if (behavior === 'replay') {

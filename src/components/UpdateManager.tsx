@@ -253,7 +253,7 @@ export default function UpdateManager() {
                 <div className="flex-1 min-w-0">
                   <h3 className="text-base font-semibold text-white">{viewTitle(view)}</h3>
                   <p className="text-white/55 text-xs mt-0.5">
-                    {view === 'changelog' ? `已更新至 ${getVersionDisplay(info?.version || '')}` : view === 'applied' ? '热更新已完成文件替换' : `WaveForge ${packageInfo.version} → ${getVersionDisplay(info?.version || '')}`}
+                    {view === 'changelog' ? `已更新至 ${getVersionDisplay(info?.version || '')}` : view === 'applied' ? '更新包已就绪，退出应用后完成文件替换（下次启动即为新版本）' : `WaveForge ${packageInfo.version} → ${getVersionDisplay(info?.version || '')}`}
                   </p>
                 </div>
                 {canCloseBackdrop && (

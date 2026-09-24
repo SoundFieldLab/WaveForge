@@ -7417,6 +7417,23 @@ function App() {
   // 监听喜欢状态变化
   useEffect(() => {
     const restoreLoginState = async () => {
+      // cookie 可能早于 30 天有效期就被撤销，而恢复到这一步只会「显示已登录」并把后续请求
+      // 变成静默失败。这里在启动后**后台核验一次**，仅在明确判定未登录时提示用户重新登录；
+      // 接口异常/网络失败一律按「未知」处理、不动登录态。刻意不做自动登出——误判的代价
+      //（正常用户被踢出去）高于收益，所以只提示。
+      const warnedCredentialPlatforms = new Set<string>()
+      const warnIfCredentialInvalid = async (url: string, isInvalid: (body: any) => boolean, label: string) => {
+        try {
+          const response = await fetch(url)
+          if (!response.ok) return
+          const body = await response.json().catch(() => null)
+          if (!body || !isInvalid(body) || warnedCredentialPlatforms.has(label)) return
+          warnedCredentialPlatforms.add(label)
+          addToast(`${label}登录信息可能已失效，请到设置中重新登录`, 'error')
+        } catch {
+          // 网络异常：按未知处理，不改登录态
+        }
+      }
       try {
         const neteaseCookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie')
         if (neteaseCookie) {
@@ -7426,6 +7443,24 @@ function App() {
         const qqCookie = localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie')
         if (qqCookie) {
           await handleQQLogin(qqCookie, false)
+        }
+
+        // 核验放在恢复之后异步进行（不阻塞界面）；判定信号与登录路径一致：
+        // 网易云 account/profile 双空、QQ 没有 creator。
+        if (neteaseCookie) {
+          void warnIfCredentialInvalid(
+            `http://localhost:3001/api/netease/user/account?cookie=${encodeURIComponent(neteaseCookie)}`,
+            body => body.account == null && body.profile == null,
+            '网易云音乐',
+          )
+        }
+        const qqUserId = localStorage.getItem('qq_user_id')
+        if (qqCookie && qqUserId) {
+          void warnIfCredentialInvalid(
+            `http://localhost:3001/api/qq/user/detail?id=${encodeURIComponent(qqUserId)}&cookie=${encodeURIComponent(qqCookie)}`,
+            body => !body.creator,
+            'QQ 音乐',
+          )
         }
       } finally {
         setLoginRestoreComplete(true)
