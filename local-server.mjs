@@ -2111,6 +2111,12 @@ app.get('/api/netease/song/url', async (req, res) => {
   }
 })
 
+// 网易歌词缓存：原先每次展示都重打上游（失败时还会走最多 5 次指数退避重试，累计约 9s sleep），
+// 而 QQ 歌词早已有 30min 缓存。这里加一层同样粒度的 id 维缓存，只缓存成功结果。
+const neteaseLyricCache = new Map()
+const NETEASE_LYRIC_TTL = 30 * 60 * 1000
+const NETEASE_LYRIC_CACHE_MAX = 300
+
 app.get('/api/netease/lyric', async (req, res) => {
   try {
     const { id } = req.query
@@ -2120,6 +2126,11 @@ app.get('/api/netease/lyric', async (req, res) => {
 
     if (!NeteaseAPI || !NeteaseAPI.lyric_new) {
       return res.status(500).json({ error: 'API 未初始化' })
+    }
+
+    const cachedLyric = neteaseLyricCache.get(String(id))
+    if (cachedLyric && Date.now() - cachedLyric.at < NETEASE_LYRIC_TTL) {
+      return res.json(cachedLyric.body)
     }
 
     // 增强重试机制：更多次数，更长超时，指数退避
@@ -2135,6 +2146,11 @@ app.get('/api/netease/lyric', async (req, res) => {
         
         // 检查结果是否有效
         if (result && result.body) {
+          neteaseLyricCache.set(String(id), { at: Date.now(), body: result.body })
+          if (neteaseLyricCache.size > NETEASE_LYRIC_CACHE_MAX) {
+            const oldestKey = neteaseLyricCache.keys().next().value
+            if (typeof oldestKey === 'string') neteaseLyricCache.delete(oldestKey)
+          }
           return res.json(result.body)
         }
       } catch (error) {
@@ -2773,8 +2789,12 @@ app.get('/api/netease/song/detail', async (req, res) => {
     const body = result.body || result
     const song = body.songs?.[0]
     if (song) {
+      // 音质等级与专辑扩展两块互不依赖：先把两个请求都发出去，再依次 await，
+      // 省掉一次串行往返（错误处理与串行版本一致，各自独立 try/catch）。
+      const qualityPromise = NeteaseAPI.song_music_detail({ id: String(song.id) })
+      const albumPromise = NeteaseAPI.album({ id: String(song.al?.id || '') })
       try {
-        const qualityRes = await NeteaseAPI.song_music_detail({ id: String(song.id) })
+        const qualityRes = await qualityPromise
         const qd = qualityRes.body?.data || {}
         const qualityLevels = []
         const pushLevel = (key, label, br) => {
@@ -2795,7 +2815,7 @@ app.get('/api/netease/song/detail', async (req, res) => {
         console.warn('[网易云音质详情] 获取失败:', qualityError?.message || qualityError)
       }
       try {
-        const albumRes = await NeteaseAPI.album({ id: String(song.al?.id || '') })
+        const albumRes = await albumPromise
         const alb = albumRes.body?.album || {}
         if (alb.id) {
           song.albumExtra = {
