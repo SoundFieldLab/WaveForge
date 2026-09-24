@@ -83,8 +83,14 @@ function pruneCache(map, ttl, maxEntries) {
     if (now - entry.createdAt > ttl) map.delete(key)
   }
   if (map.size > maxEntries) {
-    const oldest = [...map.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)
-    for (const [key] of oldest.slice(0, map.size - maxEntries)) map.delete(key)
+    // Map 保持插入顺序 → 首个 key 即最旧条目，逐出到限额为止即可。
+    // 此前每次调用都对全表展开 + 排序（streamCache 上限 512），而本函数在
+    // 每个视频分段请求（seek/换段）上都会执行。
+    while (map.size > maxEntries) {
+      const oldestKey = map.keys().next().value
+      if (oldestKey === undefined) break
+      map.delete(oldestKey)
+    }
   }
 }
 

@@ -75,8 +75,9 @@ function createTtlCache(maxEntries, defaultTtlMs) {
     set(key, value, ttlMs) {
       store.set(key, { at: Date.now(), ttl: ttlMs || defaultTtlMs, value })
       if (store.size > maxEntries) {
-        const oldest = [...store.entries()].sort((a, b) => a[1].at - b[1].at)[0]
-        if (oldest) store.delete(oldest[0])
+        // Map 保持插入顺序，首个 key 即最旧条目；无需每次写入都对全表排序。
+        const oldestKey = store.keys().next().value
+        if (oldestKey !== undefined) store.delete(oldestKey)
       }
     },
     clear() {
