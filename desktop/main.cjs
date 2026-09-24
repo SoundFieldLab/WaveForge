@@ -83,6 +83,10 @@ const shortcutSettingsPath = path.join(app.getPath('userData'), 'shortcut-settin
 // 全局高刷：渲染帧率可选档位范围（跟随所在显示器刷新率，最高 360Hz）
 const HIGH_REFRESH_MIN_HZ = 30
 const HIGH_REFRESH_MAX_HZ = 360
+// 关闭全局高刷时把窗口帧率设回的基准值（= Chromium 默认档位，跟随显示器 vsync 的常见值）。
+// 注意不要复用 HIGH_REFRESH_MIN_HZ：它只是「自定义帧率」允许的下限，拿它当关闭后的目标
+// 会把窗口帧率压到 30fps，歌曲切换/歌词滚动等动效明显发涩。
+const FRAME_RATE_BASELINE_HZ = 60
 
 function readPerformanceSettings() {
   const defaults = { hardwareAcceleration: true, gpuPreference: 'auto', renderBackend: 'auto', pendingGpuChange: null, highRefreshRate: false, highRefreshHz: null, highPerformanceMode: false, performanceTier: null }
@@ -6877,9 +6881,10 @@ function applyHighRefreshRate() {
   const enabled = performanceSettings.highRefreshRate === true
   const displayHz = getWindowDisplayFrequency(mainWindow)
   // 开启：默认跟随所在显示器最高刷新率；用户手动选档时取其与显示器最高中的较小值
+  // 关闭：回到 60Hz 基准（而不是压到更低），避免关掉高刷反而让界面变卡
   const targetHz = enabled
     ? (performanceSettings.highRefreshHz ? Math.min(performanceSettings.highRefreshHz, displayHz) : displayHz)
-    : HIGH_REFRESH_MIN_HZ
+    : FRAME_RATE_BASELINE_HZ
   const targets = [mainWindow, desktopPlayerWindow, desktopLyricsWindow, taskbarWidgetWindow]
   for (const win of targets) {
     try {
