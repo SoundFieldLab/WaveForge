@@ -18,6 +18,13 @@ import { getPlatformCookie } from './platforms'
 
 const KG_API = 'http://localhost:3001/api/kugou'
 
+// 酷狗请求统一加超时：这些调用原本只带 cache: 'no-store'、没有 AbortSignal，
+// 上游挂起时前端会无限转圈（同仓库汽水 10s、Apple 5-6s、B站 12s 都有上限）。
+// 取值需大于本地网关最坏耗时（kugou-gateway 三层候选各 12s），故用 30s 兜底而非 10s。
+const KG_REQUEST_TIMEOUT_MS = 30_000
+const kgFetch = (url: string, init?: RequestInit): Promise<Response> =>
+  fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(KG_REQUEST_TIMEOUT_MS), ...init })
+
 export interface KugouTrack {
   hash: string
   songName: string
@@ -94,7 +101,7 @@ function trackFromHash(hash: string, filename: string, extra?: Partial<KugouTrac
 /** 搜索酷狗歌曲（公开接口，经代理） */
 export async function searchKugouSongs(keyword: string, limit = 30): Promise<KugouTrack[]> {
   try {
-    const resp = await fetch(`${KG_API}/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const list = await resp.json()
     if (!Array.isArray(list)) return []
@@ -119,7 +126,7 @@ export async function searchKugouSongs(keyword: string, limit = 30): Promise<Kug
 /** 酷狗榜单分类列表 */
 export async function fetchKugouRankList(): Promise<KugouRank[]> {
   try {
-    const resp = await fetch(`${KG_API}/rank/list`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/rank/list`, { cache: 'no-store' })
     if (!resp.ok) return []
     const ranks = await resp.json()
     return Array.isArray(ranks) ? ranks : []
@@ -132,7 +139,7 @@ export async function fetchKugouRankList(): Promise<KugouRank[]> {
 /** 酷狗榜单歌曲（TOP500=8888，飙升=6666，网络新歌榜=5990 等） */
 export async function fetchKugouRankInfo(rankid = '8888', limit = 30): Promise<KugouTrack[]> {
   try {
-    const resp = await fetch(`${KG_API}/rank/info?rankid=${rankid}&pagesize=${limit}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/rank/info?rankid=${rankid}&pagesize=${limit}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     if (!Array.isArray(json.songs)) return []
@@ -155,7 +162,7 @@ export async function fetchKugouRankInfo(rankid = '8888', limit = 30): Promise<K
 /** 酷狗推荐歌单列表（m.kugou.com/plist/index，真实歌单） */
 export async function fetchKugouPlaylists(limit = 24): Promise<KugouPlaylist[]> {
   try {
-    const resp = await fetch(`${KG_API}/playlist/list?pagesize=${limit}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/playlist/list?pagesize=${limit}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const playlists = await resp.json()
     return Array.isArray(playlists) ? playlists.map((item: any) => ({
@@ -175,7 +182,7 @@ export async function fetchKugouPlaylists(limit = 24): Promise<KugouPlaylist[]> 
 /** 酷狗歌单详情（含歌曲列表） */
 export async function fetchKugouPlaylistDetail(specialid: string, limit = 50): Promise<KugouTrack[]> {
   try {
-    const resp = await fetch(`${KG_API}/playlist/detail?specialid=${specialid}&pagesize=${limit}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/playlist/detail?specialid=${specialid}&pagesize=${limit}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     if (!Array.isArray(json.songs)) return []
@@ -210,7 +217,7 @@ export async function fetchKugouUserInfo(cookie?: string): Promise<KugouUserInfo
     } catch { /* 桥失败回退代理 */ }
   }
   try {
-    const resp = await fetch(`${KG_API}/user/info?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/user/info?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
     if (!resp.ok) return null
     const json = await resp.json()
     if (!json || json.error || (!json.nickname && !json.user_id)) return null
@@ -226,7 +233,7 @@ export async function fetchKugouUserPlaylists(cookie?: string): Promise<KugouPla
   const kgCookie = cookie || getPlatformCookie('kugou')
   if (!kgCookie) return []
   try {
-    const resp = await fetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
     if (resp.ok) {
       const playlists = await resp.json()
       if (Array.isArray(playlists)) {
@@ -273,7 +280,7 @@ export async function fetchKugouUserPlaylistTracks(listid: string, page = 1, pag
   try {
     for (let p = Math.max(1, page); p <= 20; p += 1) {
       const query = new URLSearchParams({ listid, page: String(p), pagesize: String(pagesize), cookie: kgCookie })
-      const resp = await fetch(`${KG_API}/user/playlist/tracks?${query.toString()}`, { cache: 'no-store' })
+      const resp = await kgFetch(`${KG_API}/user/playlist/tracks?${query.toString()}`, { cache: 'no-store' })
       if (!resp.ok) break
       const json = await resp.json()
       if (!Array.isArray(json.songs)) break
@@ -350,7 +357,7 @@ export interface KugouSinger {
 /** 酷狗新专辑列表（mobilecdn /api/v3/album/list，公开目录接口） */
 export async function fetchKugouAlbumList(page = 1, pagesize = 24): Promise<KugouAlbum[]> {
   try {
-    const resp = await fetch(`${KG_API}/album/list?page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/album/list?page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     if (!Array.isArray(json.albums)) return []
@@ -372,7 +379,7 @@ export async function fetchKugouAlbumList(page = 1, pagesize = 24): Promise<Kugo
 /** 酷狗专辑详情（album/info + album/song） */
 export async function fetchKugouAlbumDetail(albumid: string): Promise<KugouAlbumDetail | null> {
   try {
-    const resp = await fetch(`${KG_API}/album/detail?albumid=${encodeURIComponent(albumid)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/album/detail?albumid=${encodeURIComponent(albumid)}`, { cache: 'no-store' })
     if (!resp.ok) return null
     const json = await resp.json()
     const album = json?.album
@@ -410,7 +417,7 @@ export async function fetchKugouAlbumDetail(albumid: string): Promise<KugouAlbum
 /** 酷狗歌手详情（mobilecdn /api/v3/singer/info） */
 export async function fetchKugouSingerDetail(singerid: string): Promise<KugouSinger | null> {
   try {
-    const resp = await fetch(`${KG_API}/singer/detail?singerid=${encodeURIComponent(singerid)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/singer/detail?singerid=${encodeURIComponent(singerid)}`, { cache: 'no-store' })
     if (!resp.ok) return null
     const s = (await resp.json())?.singer
     if (!s || !s.singername) return null
@@ -432,7 +439,7 @@ export async function fetchKugouSingerDetail(singerid: string): Promise<KugouSin
 /** 酷狗歌手热门歌曲（singer/song；封面由服务端经歌手专辑映射补全） */
 export async function fetchKugouSingerSongs(singerid: string, page = 1, pagesize = 50): Promise<KugouTrack[]> {
   try {
-    const resp = await fetch(`${KG_API}/singer/song?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/singer/song?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     if (!Array.isArray(json.songs)) return []
@@ -456,7 +463,7 @@ export async function fetchKugouSingerSongs(singerid: string, page = 1, pagesize
 /** 酷狗歌手专辑列表（singer/album） */
 export async function fetchKugouSingerAlbums(singerid: string, page = 1, pagesize = 100): Promise<KugouAlbum[]> {
   try {
-    const resp = await fetch(`${KG_API}/singer/album?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/singer/album?singerid=${encodeURIComponent(singerid)}&page=${page}&pagesize=${pagesize}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     if (!Array.isArray(json.albums)) return []
@@ -485,7 +492,7 @@ export async function getKugouSongUrl(hash: string, extra: { albumId?: string; a
     if (extra.albumId) query.set('albumId', extra.albumId)
     if (extra.albumAudioId) query.set('album_audio_id', String(extra.albumAudioId))
     if (cookie) query.set('cookie', cookie)
-    const resp = await fetch(`${KG_API}/song/url?${query.toString()}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/song/url?${query.toString()}`, { cache: 'no-store' })
     if (!resp.ok) return null
     const json = await resp.json()
     if (!json?.url) return null
@@ -503,7 +510,7 @@ export async function getKugouLyrics(hash: string, extra: { albumAudioId?: numbe
     const query = new URLSearchParams({ hash })
     if (extra.albumAudioId) query.set('album_audio_id', String(extra.albumAudioId))
     if (extra.duration) query.set('duration', String(extra.duration))
-    const resp = await fetch(`${KG_API}/lyric?${query.toString()}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/lyric?${query.toString()}`, { cache: 'no-store' })
     if (!resp.ok) return []
     const json = await resp.json()
     const lrc = json?.lyric || ''
@@ -534,7 +541,7 @@ export async function likeKugouSong(song: { hash?: string; mid?: string; name?: 
   const cookie = getPlatformCookie('kugou')
   if (!cookie) return false
   try {
-    const resp = await fetch(`${KG_API}/like`, {
+    const resp = await kgFetch(`${KG_API}/like`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ like, song: { hash: song.hash || song.mid, name: song.name, artists: song.artists }, cookie }),
@@ -553,7 +560,7 @@ export async function addKugouSongToPlaylist(listId: string, song: { hash?: stri
   const cookie = getPlatformCookie('kugou')
   if (!cookie) return false
   try {
-    const resp = await fetch(`${KG_API}/playlist/tracks`, {
+    const resp = await kgFetch(`${KG_API}/playlist/tracks`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ op: 'add', pid: listId, song: { hash: song.hash || song.mid, name: song.name, artists: song.artists }, cookie }),

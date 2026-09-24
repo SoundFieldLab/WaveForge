@@ -78,6 +78,19 @@ class CacheManager {
   }
 
   private async initializeCleanup(): Promise<void> {
+    // 清掉旧版 localStorage 封面/歌单缓存：cacheCover / cachePlaylist 这一层已无任何调用者
+    //（现走 indexedDBCache），但历史遗留的 cover_* / playlist_* 条目会一直占着 localStorage
+    // 配额（浏览器约 5MB），且没有任何路径会清理它们。这里一次性扫掉。
+    try {
+      const staleKeys: string[] = []
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i)
+        if (key && (key.startsWith('cover_') || key.startsWith('playlist_'))) staleKeys.push(key)
+      }
+      for (const key of staleKeys) localStorage.removeItem(key)
+    } catch {
+      // 忽略：localStorage 不可用时不做清理
+    }
     await indexedDBCache.cleanupExpired()
     const settings = this.getAutoClearSettings()
     if (localStorage.getItem(this.PENDING_CLOSE_CLEAR_KEY) === 'true' && settings.enabled) {
@@ -328,8 +341,10 @@ class CacheManager {
       if (!value) continue
       
       try {
-        const cacheItem: CacheItem = JSON.parse(value)
-        const size = cacheItem.size || new Blob([value]).size
+        // 体积按字符串长度估算（UTF-16 约 2 字节/字符），且只对 error_logs 真解析：
+        // 原先对每个键都 JSON.parse，会把搜索结果、探索快照等无关大 JSON 也整份解析一遍。
+        const cacheItem: CacheItem | null = key === 'error_logs' ? JSON.parse(value) : null
+        const size = value.length * 2
         
         let recognized = true
         if (key.startsWith('cover_')) {
@@ -339,7 +354,7 @@ class CacheManager {
           stats.playlistCount++
           stats.playlistSize += size
         } else if (key === 'error_logs') {
-          stats.errorLogCount = cacheItem.data?.length || 0
+          stats.errorLogCount = cacheItem?.data?.length || 0
           stats.errorLogSize += size
         } else recognized = false
 
