@@ -28,6 +28,21 @@ export interface HazardWeatherLayerGrid {
 
 const CACHE_TTL = 5 * 60 * 1000
 const layerCache = new Map<string, HazardWeatherLayerGrid>()
+const LAYER_CACHE_MAX_ENTRIES = 24
+
+// key 由地图视口的 bounds 推导：用户平移/缩放会不断产生新 key，无上限时旧格网数据会常驻到
+// 进程结束。写入时顺带剔除过期项，再按 Map 插入序淘汰最旧的。
+function pruneLayerCache(): void {
+  const now = Date.now()
+  for (const [cacheKey, grid] of layerCache) {
+    if (now - grid.updatedAt >= CACHE_TTL) layerCache.delete(cacheKey)
+  }
+  while (layerCache.size > LAYER_CACHE_MAX_ENTRIES) {
+    const oldestKey = layerCache.keys().next().value
+    if (typeof oldestKey !== 'string') break
+    layerCache.delete(oldestKey)
+  }
+}
 
 const roundedKey = (bounds: HazardWeatherLayerBounds, options: HazardWeatherLayerOptions) => [
   bounds.minLongitude,
@@ -110,5 +125,6 @@ export async function fetchHazardWeatherLayer(
     samples,
   }
   layerCache.set(key, result)
+  pruneLayerCache()
   return result
 }

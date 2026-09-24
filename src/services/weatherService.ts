@@ -127,6 +127,21 @@ const weatherSnapshotPending = new Map<string, Promise<WeatherSnapshot>>()
 const WEATHER_CACHE_MAX_AGE = 15 * 60 * 1000
 const LOCATION_SEARCH_CACHE_MAX_AGE = 5 * 60 * 1000
 const locationSearchCache = new Map<string, { expiresAt: number; results: WeatherLocationSearchResult[] }>()
+const LOCATION_SEARCH_CACHE_MAX_ENTRIES = 50
+
+// 缓存原先无上限：每个新地名的搜索都会留下一条常驻条目（会话内单调增长）。
+// 写入时顺带清掉过期项，再按 Map 插入序淘汰最旧的，控制内存占用。
+function pruneLocationSearchCache(): void {
+  const now = Date.now()
+  for (const [key, entry] of locationSearchCache) {
+    if (entry.expiresAt <= now) locationSearchCache.delete(key)
+  }
+  while (locationSearchCache.size > LOCATION_SEARCH_CACHE_MAX_ENTRIES) {
+    const oldestKey = locationSearchCache.keys().next().value
+    if (typeof oldestKey !== 'string') break
+    locationSearchCache.delete(oldestKey)
+  }
+}
 const locationSearchPending = new Map<string, Promise<WeatherLocationSearchResult[]>>()
 
 export const WEATHER_LABELS: Record<number, string> = {
@@ -362,6 +377,7 @@ export const searchWeatherLocations = async (
     return true
   }).slice(0, 12)
   locationSearchCache.set(cacheKey, { expiresAt: Date.now() + LOCATION_SEARCH_CACHE_MAX_AGE, results: uniqueResults })
+  pruneLocationSearchCache()
   return uniqueResults
 }
 

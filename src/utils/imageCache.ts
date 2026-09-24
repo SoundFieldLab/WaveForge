@@ -18,6 +18,10 @@ class ImageCacheManager {
   // 避免会话内反复重取导致封面闪烁与请求浪费。
   private maxAge = 1000 * 60 * 60 * 24 * 30
   private readonly maxEntries = 800
+  // cleanup() 是 O(n) 全表扫描（上限 800 条），而 set() 会随每次新封面加载被调用；
+  // 图床 URL 内容寻址、条目几乎不会自然过期，逐次全扫收益极低，改为每 64 次写入摊销一次。
+  private readonly cleanupEveryWrites = 64
+  private writesSinceCleanup = 0
 
   /**
    * 获取缓存的图片 URL
@@ -41,7 +45,11 @@ class ImageCacheManager {
    */
   set(originalUrl: string, proxyUrl: string): void {
     if (!originalUrl || !proxyUrl) return
-    this.cleanup()
+    this.writesSinceCleanup += 1
+    if (this.writesSinceCleanup >= this.cleanupEveryWrites) {
+      this.writesSinceCleanup = 0
+      this.cleanup()
+    }
     const previous = this.cache.get(originalUrl)
     this.cache.delete(originalUrl)
     if (previous?.proxyUrl !== proxyUrl) releaseEntry(previous)

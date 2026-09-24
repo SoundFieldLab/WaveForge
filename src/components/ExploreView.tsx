@@ -559,11 +559,11 @@ function ExploreView({
       syncPlatformAcrossViews(next)
     }
   }, [visiblePlatforms, platform])
-  const [dataByPlatform, setDataByPlatform] = useState<Partial<Record<ExplorePlatform, ExplorePayload>>>(() => readExploreCache())
-  const [loading, setLoading] = useState(() => {
-    const cached = readExploreCache()
-    return !cached[platform]
-  })
+  // 首帧只解析一次探索缓存：下面两块 state 初始化都要读它，而 readExploreCache 会对每个平台
+  // 逐个 JSON.parse（单平台 payload 可达上百 KB），重复读等于白解析一遍。
+  const [initialExploreCache] = useState(readExploreCache)
+  const [dataByPlatform, setDataByPlatform] = useState<Partial<Record<ExplorePlatform, ExplorePayload>>>(initialExploreCache)
+  const [loading, setLoading] = useState(() => !initialExploreCache[platform])
   const [error, setError] = useState('')
   const [refreshKey, setRefreshKey] = useState(0)
   const authRevisionRef = useRef(authRevision)
