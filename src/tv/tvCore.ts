@@ -11,6 +11,7 @@
  * 键码兼容两套：DOM 标准箭头键（37-40）与 Android TV 遥控器键码（19-22 上下左右、23/66 确定）。
  */
 import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { debugLog, isVerboseLogEnabled } from '../utils/debugLog'
 
 // ---------------- tv-mode 状态（React 可订阅） ----------------
 let tvMode =
@@ -422,16 +423,20 @@ export function setTvFocus(el: HTMLElement | null): void {
     ;(card || el).scrollIntoView({ block: 'nearest', inline: 'nearest' })
   }
   focusListeners.forEach((fn) => fn())
-  // 诊断：焦点移动日志（配合局域网调试台定位遥控导航问题）
-  try {
-    if (el) {
-      const label = (el.getAttribute('aria-label') || el.textContent || el.className || '').toString().slice(0, 20)
-      console.log(`[FOCUS] ${label}`)
-    } else {
-      console.log('[FOCUS] null')
+  // 诊断：焦点移动日志（配合局域网调试台定位遥控导航问题）。
+  // 受详细日志开关门控（默认静默）：遥控器每次按键都会走到这里，日志连同参数序列化
+  // 会持续占用主线程与调试台内存；需要时 localStorage.setItem('waveforge:verbose-log','1') 重启开启。
+  if (isVerboseLogEnabled()) {
+    try {
+      if (el) {
+        const label = (el.getAttribute('aria-label') || el.textContent || el.className || '').toString().slice(0, 20)
+        debugLog(`[FOCUS] ${label}`)
+      } else {
+        debugLog('[FOCUS] null')
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
   updateRing()
   markRingActive()
@@ -461,22 +466,26 @@ type Direction = 'up' | 'down' | 'left' | 'right'
 
 function bestNeighbor(current: HTMLElement, dir: Direction): HTMLElement | null {
   const list = candidates(current, dir)
-  // 诊断：打印候选摘要（文本/是否裁剪/是否同容器），配合调试台定位导航问题
-  try {
-    const curLabel = (current.textContent || current.getAttribute('aria-label') || current.className || '').toString().replace(/\s+/g, ' ').slice(0, 14)
-    const curSp = scrollParentOf(current)
-    const diag = list
-      .filter((el) => el !== current)
-      .slice(0, 10)
-      .map((el) => {
-        const l = (el.textContent || el.getAttribute('aria-label') || el.className || '').toString().replace(/\s+/g, ' ').slice(0, 10)
-        const same = scrollParentOf(el) === curSp
-        return `${l}[${isClippedByScroll(el) ? '裁' : '显'}${same ? '同' : '异'}]`
-      })
-      .join(' ')
-    console.log(`[NAV] ${dir} from=${curLabel} cand=${list.length} → ${diag}`)
-  } catch {
-    // ignore
+  // 诊断：打印候选摘要（文本/是否裁剪/是否同容器），配合调试台定位导航问题。
+  // 整块受详细日志开关门控：diag 会对每个候选调 scrollParentOf / isClippedByScroll
+  //（内部是 getComputedStyle + 祖先链遍历），遥控器每按一次方向键就白算一遍。
+  if (isVerboseLogEnabled()) {
+    try {
+      const curLabel = (current.textContent || current.getAttribute('aria-label') || current.className || '').toString().replace(/\s+/g, ' ').slice(0, 14)
+      const curSp = scrollParentOf(current)
+      const diag = list
+        .filter((el) => el !== current)
+        .slice(0, 10)
+        .map((el) => {
+          const l = (el.textContent || el.getAttribute('aria-label') || el.className || '').toString().replace(/\s+/g, ' ').slice(0, 10)
+          const same = scrollParentOf(el) === curSp
+          return `${l}[${isClippedByScroll(el) ? '裁' : '显'}${same ? '同' : '异'}]`
+        })
+        .join(' ')
+      debugLog(`[NAV] ${dir} from=${curLabel} cand=${list.length} → ${diag}`)
+    } catch {
+      // ignore
+    }
   }
   const cur = focusRectOf(current)
   const cx = cur.left + cur.width / 2
@@ -515,16 +524,18 @@ function bestNeighbor(current: HTMLElement, dir: Direction): HTMLElement | null 
       best = el
     }
   }
-  // 诊断：选中项
-  try {
-    if (best) {
-      const bl = (best.textContent || best.getAttribute('aria-label') || best.className || '').toString().replace(/\s+/g, ' ').slice(0, 16)
-      console.log(`[NAV] → 选中: ${bl}`)
-    } else {
-      console.log(`[NAV] → 无候选`)
+  // 诊断：选中项（同样受详细日志开关门控）
+  if (isVerboseLogEnabled()) {
+    try {
+      if (best) {
+        const bl = (best.textContent || best.getAttribute('aria-label') || best.className || '').toString().replace(/\s+/g, ' ').slice(0, 16)
+        debugLog(`[NAV] → 选中: ${bl}`)
+      } else {
+        debugLog(`[NAV] → 无候选`)
+      }
+    } catch {
+      // ignore
     }
-  } catch {
-    // ignore
   }
   return best
 }
