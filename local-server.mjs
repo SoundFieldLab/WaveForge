@@ -3630,7 +3630,50 @@ async function qqMusicSearch(keywords, limit = 30, devMode = false) {
   }
 }
 
+// QQ 歌曲详情：每首要走最多 2 次串行 MusicU 往返，而搜索（整页最多 30 首）、探索、电台会对
+// 整页歌曲用 Promise.all 并发调用它（无并发上限）—— 单次搜索最多放大成 60 次上游请求，
+// 容易被上游限流。这里统一加 mid 维 TTL 缓存 + 并发闸门，调用点无需改动。
+// 注：曲目信息是曲库元数据（标题/封面/时长），与登录账号无关，故 key 只用 mid；
+// 命中返回浅拷贝，避免调用方改动缓存对象。
+const qqSongDetailCache = new Map()
+const QQ_SONG_DETAIL_TTL = 30 * 60 * 1000
+const QQ_SONG_DETAIL_CACHE_MAX = 400
+const QQ_SONG_DETAIL_CONCURRENCY = 6
+let qqSongDetailActive = 0
+const qqSongDetailWaiters = []
+
+async function withQQSongDetailSlot(task) {
+  if (qqSongDetailActive >= QQ_SONG_DETAIL_CONCURRENCY) {
+    await new Promise(resolve => qqSongDetailWaiters.push(resolve))
+  }
+  qqSongDetailActive += 1
+  try {
+    return await task()
+  } finally {
+    qqSongDetailActive -= 1
+    const next = qqSongDetailWaiters.shift()
+    if (next) next()
+  }
+}
+
 async function qqSongDetail(mid, fallback = {}, devMode = false) {
+  if (!mid) return fallback
+  const cacheKey = String(mid)
+  const cached = qqSongDetailCache.get(cacheKey)
+  if (cached && Date.now() - cached.at < QQ_SONG_DETAIL_TTL) return { ...cached.value }
+  const value = await withQQSongDetailSlot(() => qqSongDetailUncached(cacheKey, fallback, devMode))
+  // 只在真拿到带封面的曲目信息时入缓存：纯 fallback 回落的空壳缓存下来会让后续请求也拿不到数据
+  if (value && (value.albumpic || value.album?.picUrl)) {
+    qqSongDetailCache.set(cacheKey, { at: Date.now(), value })
+    if (qqSongDetailCache.size > QQ_SONG_DETAIL_CACHE_MAX) {
+      const oldestKey = qqSongDetailCache.keys().next().value
+      if (typeof oldestKey === 'string') qqSongDetailCache.delete(oldestKey)
+    }
+  }
+  return value
+}
+
+async function qqSongDetailUncached(mid, fallback = {}, devMode = false) {
   if (!mid) return fallback
   
   try {
