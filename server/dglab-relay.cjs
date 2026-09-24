@@ -1427,6 +1427,16 @@ const sendV3Pulse = (channel, frames) => {
       res.json({ ok: true, ...status, controlToken: state.controlToken })
     })
     app.post('/api/dglab/control', (req, res) => {
+      // 与本机控制 WS 相同的令牌校验：/control 会启停中继、改设置，此前完全无鉴权 ——
+      // 任意本机程序、以及浏览器网页发起的跨站简单请求（POST 无需预检）都能调用。
+      // 令牌经 /status 获取，而跨站 JS 受 CORS 限制读不到它，因此这一层足以挡住网页向量。
+      const suppliedToken = String(req.get('x-dglab-control-token') || (req.body && req.body.token) || '')
+      const expected = Buffer.from(state.controlToken)
+      const supplied = Buffer.from(suppliedToken)
+      if (expected.length !== supplied.length || !crypto.timingSafeEqual(expected, supplied)) {
+        res.status(403).json({ error: 'invalid control token' })
+        return
+      }
       const { action, settings } = req.body || {}
       if (action === 'start') {
         if (settings) state.settings = { ...state.settings, ...settings }

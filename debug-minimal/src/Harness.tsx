@@ -140,9 +140,12 @@ export default function Harness() {
     setDeviceBusy(true)
     try {
       const settings = loadDGLabSettings()
+      // 中继的 /control 需要控制令牌（见 server/dglab-relay.cjs）：先从 /status 取
+      const statusJson = await fetch(`${API}/api/dglab/status`).then(r => r.json()).catch(() => null)
+      const controlToken = typeof statusJson?.controlToken === 'string' ? statusJson.controlToken : ''
       await fetch(`${API}/api/dglab/control`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-dglab-control-token': controlToken },
         body: JSON.stringify({ action: 'restart', settings: { ...settings, port: 31082 } }),
       })
     } finally { setDeviceBusy(false) }

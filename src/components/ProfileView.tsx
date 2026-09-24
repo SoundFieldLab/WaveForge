@@ -722,10 +722,18 @@ function ProfileView({
     if (platform === 'apple') {
       setLoading(true)
       try {
-        const [raw, favoriteTracks] = await Promise.all([
+        // 两个接口互不依赖：任一失败不该让整个列表刷新失败（原先 Promise.all 会让面板整体空白，
+        // 而且这里没有 catch，异常会变成未处理的 promise rejection）。
+        const [rawRes, favoriteRes] = await Promise.allSettled([
           getAppleLibraryPlaylists(200),
           getAppleFavoriteSongs(5000),
         ])
+        if (rawRes.status === 'rejected' && favoriteRes.status === 'rejected') {
+          showPlaylistToast('歌单列表加载失败，请稍后重试', 'error')
+          return
+        }
+        const raw = rawRes.status === 'fulfilled' ? rawRes.value : []
+        const favoriteTracks = favoriteRes.status === 'fulfilled' ? favoriteRes.value : []
         const enriched = await enrichApplePlaylistTrackCounts(raw)
         const mapped = enriched.map(playlist => ({
           id: String(playlist.id),

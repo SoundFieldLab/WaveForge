@@ -949,11 +949,15 @@ function TraditionalView({
   }, [platform])
 
   const refreshApplePlaylists = useCallback(async () => {
-    const [playlists, tracks, favoriteTracks] = await Promise.all([
+    // 三个接口互不依赖：任一失败不该让整个列表刷新失败（原先 Promise.all 会让面板整体空白）。
+    const [playlistsRes, tracksRes, favoriteRes] = await Promise.allSettled([
       getAppleLibraryPlaylists(200),
       getAppleLibrarySongs(500),
       getAppleFavoriteSongs(5000),
     ])
+    const playlists = playlistsRes.status === 'fulfilled' ? playlistsRes.value : []
+    const tracks = tracksRes.status === 'fulfilled' ? tracksRes.value : []
+    const favoriteTracks = favoriteRes.status === 'fulfilled' ? favoriteRes.value : []
     const librarySongs = tracks.map(appleLibraryTrackToSong)
     const favoriteSongs = favoriteTracks.map(track => appleSongToSong(track))
     setUserPlaylists([
@@ -1654,7 +1658,16 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
     }
   }
 
-  const ownCreated = userPlaylists.filter(item => isPlaylistOwner(item, { neteaseUserId: selfUserId, qqUserId: selfUserId }) || (!item.isLike && !item.isCollected && !item.subscribed))
+  // 归属判定：selfUserId 是「当前平台」的账号 id，用它同时当网易云与 QQ 的键会让两边都不准；
+  // 而兜底分支（未标记收藏/订阅即视为自己创建）此前对网易云/QQ 也生效，会把他人歌单放行成
+  // 「我创建的」（进而出现编辑/删除入口）。这里把兜底限定在 apple/酷狗/汽水——那三个平台的
+  // 列表本身就是「我的」，没有可比的 userId。
+  const ownCreated = userPlaylists.filter(item => {
+    if (isPlaylistOwner(item, { neteaseUserId: selfUserId, qqUserId: selfUserId })) return true
+    const itemPlatform = item?.platform || platform
+    return itemPlatform !== 'netease' && itemPlatform !== 'qq'
+      && !item.isLike && !item.isCollected && !item.subscribed
+  })
   const otherCreated = (otherPlaylists || []).filter(item => !item.isLike)
   const createdPlaylists = isSelf ? ownCreated : otherCreated
   const likedPlaylist = (isSelf ? userPlaylists : (otherPlaylists || [])).find(item => item.isLike)

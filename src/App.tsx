@@ -7376,9 +7376,16 @@ function App() {
       .finally(() => setPlaybackContextPlaylistsLoading(false))
   }
 
+  const favoriteMutationInFlightRef = useRef<Set<string>>(new Set())
   const handlePlaybackToggleFavorite = (song: Song, liked: boolean) => {
-    if (liked) void handleRemoveFromFavorites(song)
-    else void handleAddToFavorites(song)
+    // 连点会重复提交：网易云的服务端不返回 unchanged、前端也没有请求中防抖，本地「我喜欢」
+    // 计数会被加多次。同一首歌的收藏操作在途时忽略后续点击。
+    const key = getSongKey(song)
+    if (favoriteMutationInFlightRef.current.has(key)) return
+    favoriteMutationInFlightRef.current.add(key)
+    const done = () => { favoriteMutationInFlightRef.current.delete(key) }
+    if (liked) void handleRemoveFromFavorites(song).then(done, done)
+    else void handleAddToFavorites(song).then(done, done)
   }
 
   const handlePlaybackViewArtist = (song: Song) => {

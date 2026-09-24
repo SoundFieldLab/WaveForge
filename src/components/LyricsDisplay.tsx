@@ -1,4 +1,5 @@
 import { motion, AnimatePresence, useReducedMotion, useSpring } from 'framer-motion'
+import { parseStoredBoolean } from '../utils/storage'
 import { EMPTY_AUDIO_PULSE_STORE, type AudioPulseStore } from '../hooks/useAudioPulse'
 import { memo, useEffect, useLayoutEffect, useMemo, useState, useRef, useSyncExternalStore, type ReactNode } from 'react'
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
@@ -663,15 +664,16 @@ export default memo(function LyricsDisplay({
   const [jumpTargetIndex, setJumpTargetIndex] = useState<number | null>(null)
   const [wordByWordEnabled, setWordByWordEnabled] = useState(() => {
     const saved = localStorage.getItem('wordByWordLyrics')
-    return saved !== null ? JSON.parse(saved) : true
+    return parseStoredBoolean(saved, true)
   })
   const [lyricSize, setLyricSize] = useState(() => {
     const saved = localStorage.getItem('lyricSize')
-    return saved ? parseFloat(saved) : 2.8
+    const size = parseFloat(saved || '')
+    return Number.isFinite(size) ? size : 2.8
   })
   const [lyricGlow, setLyricGlow] = useState(() => {
     const saved = localStorage.getItem('lyricGlow')
-    return saved !== null ? JSON.parse(saved) : true
+    return parseStoredBoolean(saved, true)
   })
   const [lyricOffset, setLyricOffset] = useState(() => {
     const saved = localStorage.getItem('lyricOffset')
@@ -1057,7 +1059,7 @@ export default memo(function LyricsDisplay({
   useEffect(() => {
     const handleStorageChange = () => {
       const saved = localStorage.getItem('wordByWordLyrics')
-      setWordByWordEnabled(saved !== null ? JSON.parse(saved) : true)
+      setWordByWordEnabled(parseStoredBoolean(saved, true))
     }
     
     const handleLyricSizeChange = (e: Event) => {
@@ -1067,7 +1069,7 @@ export default memo(function LyricsDisplay({
     
     const handleLyricGlowChange = () => {
       const saved = localStorage.getItem('lyricGlow')
-      setLyricGlow(saved !== null ? JSON.parse(saved) : true)
+      setLyricGlow(parseStoredBoolean(saved, true))
     }
 
     const handleLyricStyleModeChange = (e: Event) => {

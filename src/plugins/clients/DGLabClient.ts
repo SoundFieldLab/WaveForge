@@ -803,9 +803,11 @@ function createClient() {
   /** 中继控制：启动/停止/重启监听（可附带设置同步；devMode 为运行时透传字段）。 */
   const control = async (action: 'start' | 'stop' | 'restart', settings?: Partial<DGLabSettings> & { devMode?: boolean }) => {
     try {
+      // /control 现在要求控制令牌（与 WS 控制通道同源校验）：没令牌时先取一次
+      if (!controlToken) await fetchStatus()
       await fetch(`${dglabApiBase()}/control`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-dglab-control-token': controlToken },
         body: JSON.stringify({ action, ...(settings ? { settings } : {}) }),
       })
       void fetchStatus()
