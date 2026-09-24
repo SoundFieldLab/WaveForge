@@ -13,7 +13,6 @@ import {
   CHROMA_DEVICE_TYPES,
   type ChromaAudioData,
   type ChromaBackgroundEffect,
-  type ChromaDeviceType,
   type ChromaDirection,
   type ChromaFrames,
   type ChromaRenderOptions,
@@ -22,7 +21,6 @@ import {
   type ChromaStyleEngine,
   type ChromaThemeId,
   type KeyboardChromaSettings,
-  type PeripheralChromaSettings,
 } from "./chromaTypes";
 
 export interface ChromaThemeInfo {
@@ -801,128 +799,7 @@ function keyboardForeground(
   return { color: theme(0.5), coverage: 0.45 + audio.overall * 0.55 };
 }
 
-function keyboardFrame(
-  settings: KeyboardChromaSettings,
-  audio: NormalizedAudio,
-  now: number,
-  config: ChromaSettings,
-): Uint32Array {
-  const { rows, columns } = CHROMA_DEVICE_METADATA.keyboard;
-  const output = new Uint32Array(rows * columns);
-  const beatFlash = settings.beatFlash
-    ? clamp(audio.beat * 0.7 + audio.accent * 0.3) * 0.65
-    : 0;
-  const intensity = clamp(settings.intensity ?? 1, 0, 2);
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      const position = frequencyPosition(
-        column,
-        columns,
-        settings.direction,
-        config.spectrumMirrored === true,
-      );
-      const foreground = keyboardForeground(
-        settings,
-        audio,
-        row,
-        column,
-        now,
-        config.size,
-        config.spectrumMirrored === true,
-        config.colorRotationSpeed,
-      );
-      foreground.coverage = clamp(foreground.coverage * intensity);
-      const background = backgroundSample(
-        config.backgroundEffect,
-        settings,
-        position,
-        row / (rows - 1),
-        audio,
-        now,
-        config.backgroundBrightness,
-        config.reactiveBackground,
-      );
-      output[row * columns + column] = packBgr(
-        composeSample(background, foreground, beatFlash),
-        config.brightness,
-      );
-    }
-  }
-  return output;
-}
 
-function peripheralFrame(
-  device: Exclude<ChromaDeviceType, "keyboard">,
-  settings: PeripheralChromaSettings,
-  audio: NormalizedAudio,
-  now: number,
-  config: ChromaSettings,
-): Uint32Array {
-  const { rows, columns } = CHROMA_DEVICE_METADATA[device];
-  const output = new Uint32Array(rows * columns);
-  const beatFlash = settings.beatFlash
-    ? clamp(audio.beat * 0.6 + audio.accent * 0.4) * 0.65
-    : 0;
-  const direction = settings.direction ?? "ltr";
-  const deviceIntensity = clamp(settings.intensity ?? 1, 0, 2);
-  for (let index = 0; index < output.length; index += 1) {
-    const row = Math.floor(index / columns);
-    const column = index % columns;
-    const position = frequencyPosition(
-      column,
-      columns,
-      direction,
-      config.spectrumMirrored === true,
-    );
-    let colorPosition = position;
-    let coverage: number;
-    if (settings.style === "spectrum") {
-      const energy = visualScale(groupedEnergy(audio.spectrum, position, 1), config.size);
-      coverage = device === "keypad"
-        ? clamp(energy * rows - (rows - 1 - row))
-        : energy;
-    } else if (settings.style === "wave") {
-      colorPosition = wrap(
-        position + (now / 1800) * Math.max(0.1, config.colorRotationSpeed),
-      );
-      coverage =
-        (0.2 +
-          0.8 * (0.5 + 0.5 * Math.sin(position * Math.PI * 3 - now / 170))) *
-        (0.35 + audio.overall * 0.65);
-    } else if (settings.style === "pulse") {
-      coverage = clamp(
-        audio.overall * 0.55 + audio.beat * 0.75 + audio.flux * 0.35,
-      );
-      colorPosition = wrap(position + audio.bass * 0.25);
-    } else if (settings.style === "breath") {
-      coverage =
-        (0.12 + 0.88 * (0.5 + 0.5 * Math.sin(now / 760))) *
-        (0.5 + audio.mid * 0.5);
-    } else {
-      coverage = 0.5 + audio.overall * 0.5;
-      colorPosition = 0.5;
-    }
-    const foreground = {
-      color: sampleTheme(settings.theme, colorPosition, settings.customColors),
-      coverage: clamp(coverage * deviceIntensity),
-    };
-    const background = backgroundSample(
-      config.backgroundEffect,
-      settings,
-      position,
-      rows <= 1 ? 0 : row / (rows - 1),
-      audio,
-      now,
-      config.backgroundBrightness,
-      config.reactiveBackground,
-    );
-    output[index] = packBgr(
-      composeSample(background, foreground, beatFlash),
-      config.brightness,
-    );
-  }
-  return output;
-}
 
 function idleFrames(
   settings: ChromaSettings,
