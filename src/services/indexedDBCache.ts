@@ -290,6 +290,21 @@ class IndexedDBCache {
   clearCovers(): Promise<void> { return this.clearStore(COVER_STORE) }
   clearPlaylists(): Promise<void> { return this.clearStore(PLAYLIST_STORE) }
   clearLyrics(): Promise<void> { return this.clearStore(LYRICS_STORE) }
+  /** 只清某一平台的歌单缓存：键形如 `${platform}_${id}`，按前缀游标删除。 */
+  async clearPlaylistsForPlatform(platform: MusicPlatform): Promise<void> {
+    const store = await this.store(PLAYLIST_STORE, 'readwrite')
+    const prefix = `${platform}_`
+    await new Promise<void>((resolve, reject) => {
+      const request = store.openCursor()
+      request.onsuccess = () => {
+        const cursor = request.result
+        if (!cursor) { resolve(); return }
+        if (String(cursor.key).startsWith(prefix)) cursor.delete()
+        cursor.continue()
+      }
+      request.onerror = () => reject(request.error)
+    })
+  }
   async clearAll(): Promise<void> {
     await Promise.all([this.clearCovers(), this.clearPlaylists(), this.clearLyrics(), this.clearStore(METADATA_STORE)])
     this.lastEnforceLimitAt = {}

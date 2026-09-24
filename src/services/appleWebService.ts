@@ -47,6 +47,7 @@ import { toHighResArtwork } from './appleMusic'
 import { sanitizeAppleRadioPlayParams, type AppleNativeStream, type AppleRadioPlayParams } from './applePlayback'
 import { cachePersonalStation, isPersonalStationId, protectStationName } from '../utils/applePrivacy'
 import { parseTTML } from '../utils/ttmlParser'
+import { createTtlCache } from '../utils/ttlCache'
 import type { Song } from './musicApi'
 
 /** 转发诊断到主进程控制台（无 UI） */
@@ -276,6 +277,53 @@ export function resolveExploreTarget(rawUrl: string | undefined): AppleExploreTa
 
   if (/^https?:/i.test(raw)) return { kind: 'external', url: raw }
   return null
+}
+
+// ────────────────── 短 TTL 缓存（重复打开同一层级页 / 抽屉时复用，避免重发同样的请求） ──────────────────
+// 场景：层级页（room/grouping/multiroom/curator）、组级 contents 二级页、搜索落地与各类抽屉，
+// 都会被反复打开（返回再进、切页签、从播放页回退）。这里按 `kind:id:storefront` 存一份短 TTL
+// 结果：只内存、不落盘，账号/商店变化（waveforge-auth-changed）或用户显式刷新时 clear。
+// 只缓存「成功且有内容」的结果——失败/空结果不缓存，避免把一次故障钉死成"永远没有内容"。
+const APPLE_WEB_CACHE_TTL_MS = 5 * 60 * 1000
+
+const appleRoomPageCache = createTtlCache<AppleWebPage>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleGroupingPageCache = createTtlCache<AppleWebPage>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleMultiRoomPageCache = createTtlCache<AppleWebPage>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleCuratorPageCache = createTtlCache<AppleCuratorPage>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleRecommendationContentsCache = createTtlCache<AppleWebSection[]>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 60 })
+const applePostDetailCache = createTtlCache<ApplePostDetail>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleStationDetailCache = createTtlCache<AppleWebItem>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 60 })
+const appleRadioShowDetailCache = createTtlCache<AppleRadioShowDetail>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleSearchLandingCache = createTtlCache<AppleWebPage>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 16 })
+// 库资源（账号相关）：同样短 TTL，登录态变化时与其它缓存一起清空。
+const appleLibraryAlbumTracksCache = createTtlCache<Song[]>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+const appleLibraryArtistAlbumsCache = createTtlCache<AppleLibraryAlbum[]>({ ttlMs: APPLE_WEB_CACHE_TTL_MS, maxEntries: 40 })
+
+/** 清空全部探索页缓存（登录态/账号变化自动调用；用户显式刷新时也可调用）。 */
+export function clearAppleExplorePageCaches(): void {
+  appleRoomPageCache.clear()
+  appleGroupingPageCache.clear()
+  appleMultiRoomPageCache.clear()
+  appleCuratorPageCache.clear()
+  appleRecommendationContentsCache.clear()
+  applePostDetailCache.clear()
+  appleStationDetailCache.clear()
+  appleRadioShowDetailCache.clear()
+  appleSearchLandingCache.clear()
+  appleLibraryAlbumTracksCache.clear()
+  appleLibraryArtistAlbumsCache.clear()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', clearAppleExplorePageCaches)
+  // Apple 资料库变更（加歌/删歌/建歌单）→ 库曲目/艺人专辑的 5 分钟缓存立刻失效，
+  // 否则改完之后 5 分钟内重开库专辑/艺人页还是旧曲目表。
+  window.addEventListener('playlist-content-changed', (event) => {
+    const detail = (event as CustomEvent<{ platform?: string }>).detail
+    if (!detail?.platform || detail.platform === 'apple') {
+      appleLibraryAlbumTracksCache.clear()
+      appleLibraryArtistAlbumsCache.clear()
+    }
+  })
 }
 
 // ─────────────────────────── 工具 ───────────────────────────
@@ -1226,6 +1274,8 @@ async function fetchHomeFallback(storefront: string): Promise<AppleWebSection[]>
  */
 export async function fetchAppleRecommendationContents(contentsPath: string): Promise<AppleWebSection[]> {
   if (!contentsPath) return []
+  const cached = appleRecommendationContentsCache.get(contentsPath)
+  if (cached) return cached
   const data = await gemsRequest(contentsPath, { mediaUserToken: true })
   if (!data) return []
   const resolveResource = createEditorialResourceResolver(data)
@@ -1243,12 +1293,14 @@ export async function fetchAppleRecommendationContents(contentsPath: string): Pr
   }
   if (items.length === 0) return []
   // 二级页按内容类型决定卡片规格（与 room 页同规则）；混合内容走通用货架。
-  return [{
+  const sections: AppleWebSection[] = [{
     id: 'recommendation-contents',
     kind: sectionKindForItems(items),
     title: '',
     items,
   }]
+  appleRecommendationContentsCache.set(contentsPath, sections)
+  return sections
 }
 
 /** 主页入口：有 mediaUserToken 一律先打 listen-now（绝不走 RSS 拖挂），无 token 才 RSS 兜底 */
@@ -1458,6 +1510,9 @@ export async function fetchApplePersonalStation(): Promise<{ id: string; name: s
  */
 export async function fetchAppleSearchLanding(storefront?: string): Promise<AppleWebPage> {
   const sf = storefront || getStorefront()
+  const cacheKey = `search-landing:${sf}`
+  const cached = appleSearchLandingCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     // 实测：必须带 format[resources]=map，否则响应只有 data/meta、没有 resources，条目引用无法解析。
     `/v1/recommendations/${encodeURIComponent(sf)}?name=search-landing&platform=web&omit[resource]=autos`
@@ -1498,12 +1553,14 @@ export async function fetchAppleSearchLanding(storefront?: string): Promise<Appl
   if (items.length === 0) {
     return { sections: [], hero: null, personalized: false, sourceLabel: '类别浏览暂无数据' }
   }
-  return {
+  const page: AppleWebPage = {
     sections: [{ id: 'search-curators', kind: 'curators', title: '类别浏览', items }],
     hero: null,
     personalized: false,
     sourceLabel: 'apple-api search-landing',
   }
+  appleSearchLandingCache.set(cacheKey, page)
+  return page
 }
 
 export interface AppleCuratorPage {
@@ -1523,6 +1580,9 @@ export interface AppleCuratorPage {
 export async function fetchAppleCuratorPage(curatorId: string, storefront?: string): Promise<AppleCuratorPage | null> {
   if (!curatorId) return null
   const sf = storefront || getStorefront()
+  const cacheKey = `curator:${curatorId}:${sf}`
+  const cached = appleCuratorPageCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/catalog/${encodeURIComponent(sf)}?ids[curators]=${encodeURIComponent(curatorId)}&ids[apple-curators]=${encodeURIComponent(curatorId)}`
     + '&art[url]=f'
@@ -1567,7 +1627,9 @@ export async function fetchAppleCuratorPage(curatorId: string, storefront?: stri
   const tab = resolveResource(pickTab(grouping))
   const childReferences = tab?.relationships?.children?.data || grouping?.relationships?.children?.data || []
   const sections = parseEditorialSections(childReferences.map(resolveResource), 0, 'music', resolveResource)
-  return { curator, sections, playlists, playlistCount: attributes.playlistCount }
+  const page: AppleCuratorPage = { curator, sections, playlists, playlistCount: attributes.playlistCount }
+  appleCuratorPageCache.set(cacheKey, page)
+  return page
 }
 
 export interface AppleRadioShowDetail {
@@ -1579,6 +1641,9 @@ export interface AppleRadioShowDetail {
 export async function fetchAppleRadioShowDetail(showId: string, storefront?: string): Promise<AppleRadioShowDetail | null> {
   if (!showId) return null
   const sf = storefront || getStorefront()
+  const cacheKey = `radio-show:${showId}:${sf}`
+  const cached = appleRadioShowDetailCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/catalog/${encodeURIComponent(sf)}/radio-shows/${encodeURIComponent(showId)}?include=episodes,stations&extend=editorialArtwork,editorialVideo`,
   )
@@ -1598,7 +1663,9 @@ export async function fetchAppleRadioShowDetail(showId: string, storefront?: str
     const mapped = itemize(item, type)
     if (mapped && !episodes.some(existing => existing.id === mapped.id)) episodes.push(mapped)
   }
-  return { show, episodes }
+  const detail: AppleRadioShowDetail = { show, episodes }
+  appleRadioShowDetailCache.set(cacheKey, detail)
+  return detail
 }
 
 // ─────────────────────────── 歌曲详情（web /song/… 同款） ───────────────────────────
@@ -1723,6 +1790,9 @@ export async function fetchApplePlaylistMotion(
 export async function fetchAppleStationDetail(stationId: string, storefront?: string): Promise<AppleWebItem | null> {
   if (!stationId) return null
   const sf = storefront || getStorefront()
+  const cacheKey = `station:${stationId}:${sf}`
+  const cached = appleStationDetailCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/catalog/${encodeURIComponent(sf)}/stations/${encodeURIComponent(stationId)}?extend=editorialVideo,editorialArtwork&include=radio-show&fields[stations]=name,url,artwork,editorialArtwork,editorialVideo,editorialNotes,playParams,isLive,airTime`,
   )
@@ -1732,6 +1802,9 @@ export async function fetchAppleStationDetail(stationId: string, storefront?: st
   if (!item) return null
   const show = resource.relationships?.radioShow?.data?.[0]
   if (show?.attributes?.name && !item.showName) item.showName = show.attributes.name
+  // 详情里的 playParams/stationHash 由上层用于取流；它们是电台的固定描述（不随时间轮换），
+  // 短 TTL 缓存可接受（流地址本身仍每次由 /v1/play/assets 重新换取，不进缓存）。
+  appleStationDetailCache.set(cacheKey, item)
   return item
 }
 
@@ -1828,13 +1901,23 @@ export async function fetchAppleLibraryPage(_storefront?: string): Promise<Apple
 
 /** 库专辑曲目 → 可播放 Song（catalogId 优先，走统一播放链路） */
 export async function fetchLibraryAlbumTracksForPlay(albumId: string): Promise<Song[]> {
+  if (!albumId) return []
+  const cached = appleLibraryAlbumTracksCache.get(albumId)
+  if (cached) return cached
   const tracks = await getAppleLibraryAlbumTracks(albumId)
-  return tracks.map(track => appleLibraryTrackToSong(track))
+  const songs = tracks.map(track => appleLibraryTrackToSong(track))
+  if (songs.length > 0) appleLibraryAlbumTracksCache.set(albumId, songs)
+  return songs
 }
 
 /** 库艺人在资料库内的专辑（艺人抽屉用） */
 export async function fetchLibraryArtistAlbumsForDrawer(artistId: string): Promise<AppleLibraryAlbum[]> {
-  return getAppleLibraryArtistAlbums(artistId)
+  if (!artistId) return []
+  const cached = appleLibraryArtistAlbumsCache.get(artistId)
+  if (cached) return cached
+  const albums = await getAppleLibraryArtistAlbums(artistId)
+  if (albums.length > 0) appleLibraryArtistAlbumsCache.set(artistId, albums)
+  return albums
 }
 
 // ─────────────────────────── 播放与收藏动作 ───────────────────────────
@@ -2162,6 +2245,9 @@ export async function fetchAppleChartsPage(storefront?: string): Promise<AppleWe
 export async function fetchAppleRoomPage(roomId: string, storefront?: string): Promise<AppleWebPage> {
   const sf = storefront || getStorefront()
   if (!roomId) return { sections: [], hero: null, personalized: false, sourceLabel: 'room 参数缺失' }
+  const cacheKey = `room:${roomId}:${sf}`
+  const cached = appleRoomPageCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/editorial/${encodeURIComponent(sf)}/rooms/${encodeURIComponent(roomId)}`
     + '?art%5Burl%5D=c%2Cf'
@@ -2208,12 +2294,14 @@ export async function fetchAppleRoomPage(roomId: string, storefront?: string): P
       displayStyle: 'expanded',
     }]
     : []
-  return {
+  const page: AppleWebPage = {
     sections,
     hero: null,
     personalized: false,
     sourceLabel: `apple-api room(${title})`,
   }
+  if (page.sections.length > 0) appleRoomPageCache.set(cacheKey, page)
+  return page
 }
 
 /**
@@ -2223,6 +2311,9 @@ export async function fetchAppleRoomPage(roomId: string, storefront?: string): P
 export async function fetchAppleGroupingPage(groupingId: string, storefront?: string): Promise<AppleWebPage> {
   const sf = storefront || getStorefront()
   if (!groupingId) return { sections: [], hero: null, personalized: false, sourceLabel: 'grouping 参数缺失' }
+  const cacheKey = `grouping:${groupingId}:${sf}`
+  const cached = appleGroupingPageCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/editorial/${encodeURIComponent(sf)}/groupings/${encodeURIComponent(groupingId)}`
     + '?art%5Burl%5D=c%2Cf'
@@ -2237,7 +2328,9 @@ export async function fetchAppleGroupingPage(groupingId: string, storefront?: st
     + '&omit%5Bresource%3Aartists%5D=autos'
     + '&platform=web&relate%5Bsongs%5D=albums&tabs=subscriber',
   )
-  return editorialDocumentToPage(data, 'grouping')
+  const page = editorialDocumentToPage(data, 'grouping')
+  if (page.sections.length > 0) appleGroupingPageCache.set(cacheKey, page)
+  return page
 }
 
 /**
@@ -2247,6 +2340,9 @@ export async function fetchAppleGroupingPage(groupingId: string, storefront?: st
 export async function fetchAppleMultiRoomPage(multiRoomId: string, storefront?: string): Promise<AppleWebPage> {
   const sf = storefront || getStorefront()
   if (!multiRoomId) return { sections: [], hero: null, personalized: false, sourceLabel: 'multiroom 参数缺失' }
+  const cacheKey = `multiroom:${multiRoomId}:${sf}`
+  const cached = appleMultiRoomPageCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/editorial/${encodeURIComponent(sf)}/multirooms/${encodeURIComponent(multiRoomId)}`
     + '?art%5Burl%5D=c%2Cf'
@@ -2257,7 +2353,9 @@ export async function fetchAppleMultiRoomPage(multiRoomId: string, storefront?: 
     + '&omit%5Bresource%3Aartists%5D=autos'
     + '&platform=web&relate%5Bsongs%5D=albums',
   )
-  return editorialDocumentToPage(data, 'multiroom')
+  const page = editorialDocumentToPage(data, 'multiroom')
+  if (page.sections.length > 0) appleMultiRoomPageCache.set(cacheKey, page)
+  return page
 }
 
 /** 把 groupings/groupings{id}/multirooms 这类"编辑文档"解析为页面（共享解析路径）。 */
@@ -2297,6 +2395,9 @@ export interface ApplePostDetail {
 export async function fetchApplePostDetail(postId: string, storefront?: string): Promise<ApplePostDetail | null> {
   if (!postId) return null
   const sf = storefront || getStorefront()
+  const cacheKey = `post:${postId}:${sf}`
+  const cached = applePostDetailCache.get(cacheKey)
+  if (cached) return cached
   const data = await gemsRequest(
     `/v1/catalog/${encodeURIComponent(sf)}/posts/${encodeURIComponent(postId)}`
     + '?include=artists,songs,albums,music-videos,playlists&extend=plainEditorialNotes',
@@ -2311,7 +2412,7 @@ export async function fetchApplePostDetail(postId: string, storefront?: string):
       if (item) media.push(item)
     })
   })
-  return {
+  const detail: ApplePostDetail = {
     id: String(resource.id),
     name: attributes.name,
     artistName: attributes.artistName || attributes.curatorName,
@@ -2319,4 +2420,6 @@ export async function fetchApplePostDetail(postId: string, storefront?: string):
     body: attributes.body || attributes.plainEditorialNotes?.standard || attributes.description?.standard,
     media,
   }
+  applePostDetailCache.set(cacheKey, detail)
+  return detail
 }

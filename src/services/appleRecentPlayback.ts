@@ -5,6 +5,14 @@ const MAX_ITEMS = 100
 
 const appleSongIdentity = (song: Song) => String(song.appleId || song.appleLibraryId || song.mid || song.id || '')
 
+// 换 Apple 账号 / 登出时清掉本地「最近播放」回退：这份 localStorage 没有账号维度，
+// 不清的话账号 B 会看到账号 A 听过的歌（远端最近播放会与它合并展示）。
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => {
+    try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+  })
+}
+
 const normalizeStoredSong = (value: unknown): Song | null => {
   if (!value || typeof value !== 'object') return null
   const song = value as Song

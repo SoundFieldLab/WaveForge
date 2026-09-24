@@ -2,6 +2,7 @@ import type { MusicPlatform } from './platforms'
 import type { EntitlementTier } from '../utils/musicEntitlements'
 import { getApiBase } from './apiConfig'
 import { resolveArtworkUrl } from './artwork'
+import { createTtlCache } from '../utils/ttlCache'
 const API_BASE = getApiBase()
 
 import { parseTTML } from '../utils/ttmlParser'
@@ -36,6 +37,26 @@ const songUrlRefreshPending = new Map<string, Promise<string | null>>()
 const songUrlRefreshUntil = new Map<string, number>()
 const songUrlInvalidationVersions = new Map<string, number>()
 let songUrlCacheGeneration = 0
+
+// 艺人/专辑详情：详情面板来回开关（从播放页回退、切页签）时同一份数据会被反复请求。
+// 短 TTL + 不缓存空结果，避免把一次失败或「确实没有」也钉死。
+const artistDetailCache = createTtlCache<Artist>({ ttlMs: 5 * 60 * 1000, maxEntries: 32 })
+const artistTopSongsCache = createTtlCache<Song[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 32 })
+const albumDetailCache = createTtlCache<Album>({ ttlMs: 5 * 60 * 1000, maxEntries: 32 })
+const albumSongsCache = createTtlCache<Song[]>({ ttlMs: 5 * 60 * 1000, maxEntries: 32 })
+// 搜索热词：按平台固定下发，搜索面板每次打开都请求一次纯属浪费
+const hotSearchCache = createTtlCache<any>({ ttlMs: 10 * 60 * 1000, maxEntries: 8 })
+
+/** 登录态变化后调用：清掉详情缓存，避免显示上一个账号的收藏/订阅状态。 */
+export const clearArtistAlbumDetailCache = () => {
+  artistDetailCache.clear()
+  artistTopSongsCache.clear()
+  albumDetailCache.clear()
+  albumSongsCache.clear()
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', clearArtistAlbumDetailCache)
+}
 
 export const clearSongUrlCache = () => {
   songUrlCacheGeneration += 1
@@ -2260,7 +2281,17 @@ export async function loadAlbumCovers(songs: Song[]): Promise<Song[]> {
 }
 
 // 获取歌手详情
+/** 艺人详情：TTL 内复用，面板重新打开不再重发请求。 */
 export async function getArtistDetail(id: number | string, platform: MusicPlatform = 'netease'): Promise<Artist | null> {
+  const key = `${platform}:${id}`
+  const cached = artistDetailCache.get(key)
+  if (cached) return cached
+  const detail = await getArtistDetailUncached(id, platform)
+  if (detail) artistDetailCache.set(key, detail)
+  return detail
+}
+
+async function getArtistDetailUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Artist | null> {
   try {
     if (platform === 'apple') {
       const { getAppleArtistDetail, getAppleCatalogArtist } = await import('./appleCatalog')
@@ -2403,7 +2434,17 @@ export async function getArtistDetail(id: number | string, platform: MusicPlatfo
 }
 
 // 获取歌手热门歌曲
+/** 艺人热门歌曲：与详情同 TTL，避免详情页切回来重新拉一遍。 */
 export async function getArtistTopSongs(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
+  const key = `${platform}:${id}`
+  const cached = artistTopSongsCache.get(key)
+  if (cached) return cached
+  const songs = await getArtistTopSongsUncached(id, platform)
+  if (songs.length > 0) artistTopSongsCache.set(key, songs)
+  return songs
+}
+
+async function getArtistTopSongsUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
   try {
     if (platform === 'apple') {
       const { getAppleArtistDetail, appleSongToSong } = await import('./appleCatalog')
@@ -2485,7 +2526,17 @@ export async function getArtistTopSongs(id: number | string, platform: MusicPlat
 }
 
 // 获取专辑详情
+/** 专辑详情：TTL 内复用。 */
 export async function getAlbumDetail(id: number | string, platform: MusicPlatform = 'netease'): Promise<Album | null> {
+  const key = `${platform}:${id}`
+  const cached = albumDetailCache.get(key)
+  if (cached) return cached
+  const detail = await getAlbumDetailUncached(id, platform)
+  if (detail) albumDetailCache.set(key, detail)
+  return detail
+}
+
+async function getAlbumDetailUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Album | null> {
   try {
     if (platform === 'apple') {
       const { getAppleAlbumDetail } = await import('./appleCatalog')
@@ -2591,7 +2642,17 @@ export async function getAlbumDetail(id: number | string, platform: MusicPlatfor
 }
 
 // 获取专辑歌曲列表
+/** 专辑曲目：TTL 内复用，避免专辑页返回再进重新拉一遍。 */
 export async function getAlbumSongs(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
+  const key = `${platform}:${id}`
+  const cached = albumSongsCache.get(key)
+  if (cached) return cached
+  const songs = await getAlbumSongsUncached(id, platform)
+  if (songs.length > 0) albumSongsCache.set(key, songs)
+  return songs
+}
+
+async function getAlbumSongsUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
   try {
     if (platform === 'apple') {
       const { getAppleAlbumDetail, appleSongToSong } = await import('./appleCatalog')
@@ -3086,11 +3147,19 @@ export async function subscribePlaylist(
 // ══════════════════════════════════════════════════════════════
 
 /** 获取搜索热词 */
+/**
+ * 搜索热词。
+ * 搜索面板每次打开都会调它（首页/传统模式/桌面模式的搜索入口共用），而热词是按平台固定下发的，
+ * 短时间内反复请求没有意义，这里缓存 10 分钟。
+ */
 export async function searchHot(platform: MusicPlatform = 'netease'): Promise<any> {
+  const cached = hotSearchCache.get(platform)
+  if (cached) return cached
   try {
     const response = await fetch(`${API_BASE}/${platform}/search/hot`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取搜索热词失败')
+    hotSearchCache.set(platform, data)
     return data
   } catch (error) {
     console.error('搜索热词获取失败:', error)

@@ -4,6 +4,7 @@ import { getApiBase } from './apiConfig'
 import type { Song } from './musicApi'
 import { getQQMusicSkillHeaders } from './qqMusicSkills'
 import { fetchAppleExplorePayload } from './appleExploreService'
+import { createTtlCache } from '../utils/ttlCache'
 import {
   appleSongToSong,
   getAppleCatalogPlaylistTracks,
@@ -14,9 +15,17 @@ const EXPLORE_MEMORY_CACHE_TTL = 9 * 60 * 1000
 
 const exploreHomeMemoryCache = new Map<string, { payload: ExplorePayload; expiresAt: number }>()
 const exploreHomePending = new Map<string, Promise<ExplorePayload>>()
+// 歌单/榜单详情：面板来回开关时同一份数据会被反复请求（传统模式、桌面组件、探索页详情都在用）。
+const exploreDetailCache = createTtlCache<ExploreDetail>({ ttlMs: 5 * 60 * 1000, maxEntries: 40 })
 // 任一平台登录态变化（含汽水扫码成功）→ 失效探索页内存缓存，个性化数据立即可见
 if (typeof window !== 'undefined') {
-  window.addEventListener('waveforge-auth-changed', () => { exploreHomeMemoryCache.clear() })
+  window.addEventListener('waveforge-auth-changed', () => {
+    exploreHomeMemoryCache.clear()
+    exploreDetailCache.clear()
+  })
+  // 歌单内容变化（加/删歌、收藏、删除歌单）→ 歌单/榜单详情缓存立刻失效。
+  // 传统模式等会把「用户自己的歌单」也走这条缓存，不清的话重开详情最长 5 分钟还是旧曲目。
+  window.addEventListener('playlist-content-changed', () => { exploreDetailCache.clear() })
 }
 
 export type ExplorePlatform = MusicPlatform
@@ -810,7 +819,17 @@ export async function fetchExploreRecommendationBatch(
     .filter((song: Song | null): song is Song => Boolean(song))
 }
 
+/** 歌单详情：同一份歌单在 TTL 内重复打开直接复用缓存（不重复请求）。 */
 export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: AbortSignal): Promise<ExploreDetail> {
+  const key = `playlist:${playlist.platform}:${playlist.id}`
+  const cached = exploreDetailCache.get(key)
+  if (cached) return cached
+  const detail = await fetchExplorePlaylistUncached(playlist, signal)
+  if (!signal?.aborted) exploreDetailCache.set(key, detail)
+  return detail
+}
+
+async function fetchExplorePlaylistUncached(playlist: ExplorePlaylist, signal?: AbortSignal): Promise<ExploreDetail> {
   // Apple 编辑/热门歌单：amp-api catalog 曲目（需 dev token；无 token 返回空歌单）
   if (playlist.platform === 'apple') {
     const storefront = localStorage.getItem('appleStorefront') || 'cn'
@@ -951,7 +970,17 @@ export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: A
   }
 }
 
+/** 榜单详情：同 TTL 内复用，探索页/传统模式/桌面组件共用同一份。 */
 export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSignal): Promise<ExploreDetail> {
+  const key = `chart:${chart.platform}:${chart.id}`
+  const cached = exploreDetailCache.get(key)
+  if (cached) return cached
+  const detail = await fetchExploreChartUncached(chart, signal)
+  if (!signal?.aborted) exploreDetailCache.set(key, detail)
+  return detail
+}
+
+async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSignal): Promise<ExploreDetail> {
   // Apple：榜单数据客户端已带（charts 携带歌曲列表），无需服务端
   if (chart.platform === 'apple') {
     const songs: Song[] = chart.songs.map(song => ({

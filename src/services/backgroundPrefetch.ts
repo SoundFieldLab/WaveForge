@@ -25,6 +25,8 @@ interface PrefetchJob {
 const PREFETCH_COOLDOWN = 5 * 60 * 1000
 const JOB_TIMEOUT = 20_000
 const MAX_ARTWORK_PER_PLATFORM = 40
+/** 备用（非当前）核心平台的封面预取张数：够铺满首屏即可，避免与当前平台的加载抢带宽。 */
+const MAX_ALTERNATE_ARTWORK = 16
 const MAX_COMPLETED_ENTRIES = 32
 const completedAt = new Map<string, number>()
 const pending = new Map<string, Promise<void>>()
@@ -177,6 +179,23 @@ const createArtworkJob = (platform: MusicPlatform, loggedIn: boolean): PrefetchJ
   }
 }
 
+/**
+ * 备用核心平台的封面预取：让「切到另一个平台」不用一张张等 300~500ms 的冷加载。
+ * 只烘前 MAX_ALTERNATE_ARTWORK 张，且排在当前平台预取之后执行（runJobs 串行），
+ * 避免重演此前「两侧全量预取与首屏封面加载抢带宽」的问题。
+ */
+const createAlternateArtworkJob = (platform: MusicPlatform, loggedIn: boolean): PrefetchJob | null => {
+  if (!loggedIn) return null
+  return {
+    label: `${platform}备用封面预取`,
+    run: async () => {
+      const payload = await prefetchExploreHome(platform)
+      await prefetchArtworkBatch(platform, collectPrefetchArtwork(payload).slice(0, MAX_ALTERNATE_ARTWORK))
+      return payload
+    },
+  }
+}
+
 const createWeatherJob = (): PrefetchJob | null => {
   const settings = getConfiguredWeather()
   if (!settings) return null
@@ -260,6 +279,15 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
     // 全量预取（约 40 张封面 + 一次 /explore），与首屏封面加载、登录校验抢带宽；另一侧等
     // 用户切过去时再按需加载。Apple / 汽水是各视图内的次级来源，保持原有行为不动。
     const activeCorePlatforms = new Set([minimalPlatform, explorePlatform, desktopPlatform].filter(Boolean))
+    // 探索页里用户切平台很频繁：另一个核心平台的封面只在后台补 16 张（放在最后执行），
+    // 换来「切过去就有图」；不登录/不是网易云・QQ 时为 null，行为与改动前一致。
+    const alternateExploreArtwork = context.viewMode === 'explore' && explorePlatform
+      ? explorePlatform === 'qq'
+        ? createAlternateArtworkJob('netease', context.neteaseLoggedIn)
+        : explorePlatform === 'netease'
+          ? createAlternateArtworkJob('qq', context.qqLoggedIn)
+          : null
+      : null
     const artworkJobs = [
       activeCorePlatforms.has('netease') ? neteaseArtwork : null,
       activeCorePlatforms.has('qq') ? qqArtwork : null,
@@ -267,6 +295,7 @@ async function runBackgroundPrefetch(context: BackgroundPrefetchContext): Promis
       sodaArtwork,
       applePlaylist,
       sodaPlaylist,
+      alternateExploreArtwork,
     ].filter((job): job is PrefetchJob => Boolean(job))
     await runJobs(artworkJobs)
     rememberCompleted(identity)

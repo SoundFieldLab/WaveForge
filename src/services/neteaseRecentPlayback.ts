@@ -9,6 +9,12 @@ const RECENT_CACHE_TTL_MS = 30_000
 const recentCache = new Map<string, { value: NeteaseRecentSongResult; expiresAt: number }>()
 const pendingRequests = new Map<string, Promise<NeteaseRecentSongResult>>()
 
+// 缓存键含原始 cookie（换号即换键，不会串号），但旧账号的条目会一直留着；
+// 登录态变化时清一次，既释放也避免语义上的残留。
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', () => recentCache.clear())
+}
+
 function getRecentRows(payload: any): any[] {
   const candidates = [
     payload?.data?.list,

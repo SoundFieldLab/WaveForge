@@ -16,6 +16,7 @@ import { searchAppleTracks, toHighResArtwork } from './appleMusic'
 import { AMP_API, getAppleCredentials, forwardToBackend } from './appleAuth'
 import { appleApiRequest } from './appleApiBridge'
 import { describeAppleApiFailure } from './appleApiErrors'
+import { createTtlCache } from '../utils/ttlCache'
 
 export interface AppleCatalogSong {
   id: string
@@ -1261,13 +1262,20 @@ export async function addAppleSongToLibrary(songId: string): Promise<boolean> {
 export async function setAppleSongLoved(songId: string, loved: boolean): Promise<boolean> {
   if (!songId) return false
   const favoritePath = `/v1/me/favorites?ids[songs]=${encodeURIComponent(songId)}`
-  if (await appleMeMutate(favoritePath, loved ? 'POST' : 'DELETE')) return true
+  const favoriteOk = await appleMeMutate(favoritePath, loved ? 'POST' : 'DELETE')
+  if (favoriteOk) {
+    // 刚变更过「喜爱」→ 立刻失效短 TTL 缓存，避免随后读到旧红心状态。
+    clearAppleLovedIdsCache()
+    return true
+  }
   const favoriteFailure = getLastAppleMutationResult()
   if (favoriteFailure.status !== 404 && favoriteFailure.status !== 405) return false
   const ratingPath = `/v1/me/ratings/songs/${encodeURIComponent(songId)}`
-  return loved
-    ? appleMeMutate(ratingPath, 'PUT', { type: 'ratings', attributes: { value: 1 } })
-    : appleMeMutate(ratingPath, 'DELETE')
+  const ratingOk = loved
+    ? await appleMeMutate(ratingPath, 'PUT', { type: 'ratings', attributes: { value: 1 } })
+    : await appleMeMutate(ratingPath, 'DELETE')
+  if (ratingOk) clearAppleLovedIdsCache()
+  return ratingOk
 }
 
 /**
@@ -1353,9 +1361,42 @@ export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleC
  *  ratings 也不可用时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
 let favoritesEndpointsUnavailable = false
 
+/**
+ * 「喜爱」状态短 TTL 缓存：探索页每次 pages 变化、播放页切歌、右键菜单都会带一批 id 来问一次，
+ * 而切页签/开合面板时 id 批次常常不变——不缓存就会反复问同一批。
+ * 键 = storefront + id 批次指纹（id 排序后哈希），保持调用方无感。
+ * 任何 Apple 收藏变更（本机 like/unlike、资料库增删）或登录态变化都会立刻清空，
+ * 避免把刚点亮的红心读成旧状态。
+ */
+const APPLE_LOVED_IDS_CACHE_TTL_MS = 5 * 60 * 1000
+const appleLovedIdsCache = createTtlCache<string[]>({ ttlMs: APPLE_LOVED_IDS_CACHE_TTL_MS, maxEntries: 64 })
+
+const fingerprintIds = (ids: string[]): string => {
+  let hash = 2166136261
+  const joined = [...ids].sort().join(',')
+  for (let index = 0; index < joined.length; index += 1) {
+    hash ^= joined.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(36)
+}
+
+const clearAppleLovedIdsCache = (): void => { appleLovedIdsCache.clear() }
+if (typeof window !== 'undefined') {
+  window.addEventListener('waveforge-auth-changed', clearAppleLovedIdsCache)
+  // 收藏/资料库变更（含「喜爱歌曲」歌单被改写）→ 立刻失效，避免读到旧红心状态。
+  window.addEventListener('playlist-content-changed', (event: Event) => {
+    const detail = (event as CustomEvent<{ platform?: string }>).detail
+    if (!detail || detail.platform === 'apple') clearAppleLovedIdsCache()
+  })
+}
+
 export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
   const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
   if (ids.length === 0 || favoritesEndpointsUnavailable) return []
+  const cacheKey = `${getAppleCredentials().storefront || 'cn'}:${fingerprintIds(ids)}`
+  const cached = appleLovedIdsCache.get(cacheKey)
+  if (cached) return cached
   const loved = new Set<string>()
   for (let index = 0; index < ids.length; index += 100) {
     const batch = ids.slice(index, index + 100)
@@ -1365,7 +1406,7 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
     const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
     const ratingItems = Array.isArray(ratingData?.data) ? ratingData.data : null
     if (!ratingItems) {
-      // 连 ratings 都不可用 → 本次会话不再重试。
+      // 连 ratings 都不可用 → 本次会话不再重试（也不缓存：失败绝不落缓存）。
       favoritesEndpointsUnavailable = true
       return [...loved]
     }
@@ -1373,7 +1414,10 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
       if (Number(item?.attributes?.value) === 1 && item?.id) loved.add(String(item.id))
     }
   }
-  return [...loved]
+  const result = [...loved]
+  // 请求成功即缓存（空数组也是有效答案：「这批里没有喜爱的」），失败路径已提前返回。
+  appleLovedIdsCache.set(cacheKey, result)
+  return result
 }
 
 /** 根据目录歌曲 ID 找到对应的资料库歌曲 ID。 */

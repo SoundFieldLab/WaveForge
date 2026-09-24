@@ -176,11 +176,17 @@ export function invalidateUserPlaylistsCache(
   platform: MusicPlatform,
   userId: string
 ): void {
-  const ownerKey = normalizePlaylistOwnerKey(platform, userId)
-  if (!ownerKey) return
-  const key = getUserPlaylistsCacheKey(platform, ownerKey)
-  userPlaylistsCache.delete(key)
-  void Promise.resolve(indexedDBCache.invalidatePlaylist(key, platform))
+  // 按平台前缀清理，而不是只删单个键：调用方传入的 userId 形态不一（真实 id / 空 →
+  // session 键），Spotify/汽水两种形态的键并存，只删一种会漏掉另一种，表现为
+  // 「加了歌/建了歌单，另一处侧栏不更新」。
+  const prefix = `${USER_PLAYLIST_CACHE_VERSION}:${platform}:`
+  for (const key of [...userPlaylistsCache.keys()]) {
+    if (key.startsWith(prefix)) userPlaylistsCache.delete(key)
+  }
+  for (const key of [...userPlaylistsPending.keys()]) {
+    if (key.startsWith(prefix)) userPlaylistsPending.delete(key)
+  }
+  void Promise.resolve(indexedDBCache.clearPlaylistsForPlatform(platform))
     .catch(error => console.warn('使持久化歌单缓存失效失败:', error))
 }
 
@@ -1058,7 +1064,10 @@ export async function addSongToPlaylist(
   if (platform === 'qq' && Number(data.result) !== 100) {
     throw new Error(data.error || data.message || data.msg || `QQ 音乐添加歌曲失败（result ${data.result ?? 'unknown'}）`)
   }
-  
+
+  // 加歌成功：歌单的曲目数变了，用户歌单缓存（内存 + IndexedDB）必须失效，
+  // 否则各视图侧栏显示旧计数、重启后 1 小时内仍是旧值。
+  invalidateUserPlaylistsCache(platform, userId)
   return data
 }
 
@@ -1142,7 +1151,9 @@ export async function removeSongFromPlaylist(
   if (!response.ok) {
     throw new Error(data.error || data.message || `从歌单删除歌曲失败（HTTP ${response.status}）`)
   }
-  
+
+  // 删歌成功：同加歌，用户歌单缓存必须失效（否则「已从歌单移除」后详情/侧栏还是旧的）。
+  invalidateUserPlaylistsCache(platform, userId)
   return data
 }
 
@@ -1334,7 +1345,11 @@ export async function updatePlaylistCover(
     })
   })
 
-  return response.json()
+  const data = await response.json()
+  // 封面改成功：用户歌单列表里的封面字段也变了，缓存必须失效，
+  // 否则各视图侧栏长期显示旧封面（原本这个函数完全没有失效逻辑）。
+  if (response.ok) invalidatePlatformPlaylistCaches('netease')
+  return data
 }
 
 /**
