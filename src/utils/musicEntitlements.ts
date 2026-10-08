@@ -87,6 +87,22 @@ const firstDefined = (source: any, keys: string[]) => {
 }
 
 /**
+ * QQ 音乐的超级会员（Super VIP，比绿钻更高一级）识别：只有 lvinfo 里出现 svip 徽章
+ * （实测形如 `svip7.png`）或显式 superVip/svip 字段才算，绝不把绿钻当超级会员。
+ * 两者权益不同：绿钻=SQ 无损/HQ 192k，超级会员才有 杜比全景声 / 臻品母带4.0 / 臻品音质2.0。
+ */
+export const detectQQMusicSvip = (payload: any): boolean => {
+  const candidates = [payload?.creator, payload?.data?.creator, payload?.data, payload].filter(Boolean)
+  if (candidates.some(candidate => isActiveFlag(firstDefined(candidate, ['superVip', 'super_vip', 'svip', 'isSvip', 'is_svip'])))) return true
+  const membershipLists = candidates.flatMap(candidate => [candidate?.lvinfo, candidate?.svipInfo, candidate?.svip_info]).filter(Array.isArray)
+  return membershipLists.some(list => list.some((membership: any) => {
+    const description = [membership?.iconurl, membership?.iconUrl, membership?.name, membership?.title, membership?.text, membership?.desc]
+      .filter(Boolean).join(' ')
+    return /svip|super\s*vip|超级会员/i.test(description)
+  }))
+}
+
+/**
  * QQ 音乐的用户详情接口存在多套返回结构。这里同时识别显式会员字段、
  * 绿钻等级字段和 lvinfo 徽章，避免只认 `svip` 图标导致普通绿钻被漏判。
  */

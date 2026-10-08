@@ -18,7 +18,8 @@ const API_BASE = 'http://localhost:3001/api'
 const userPlaylistsCache = new Map<string, any[]>()
 const userPlaylistsPending = new Map<string, Promise<any[]>>()
 const MAX_USER_PLAYLIST_CACHE_ENTRIES = 16
-const USER_PLAYLIST_CACHE_VERSION = 'v5-like-username'
+// 版本号变更会让内存 + IndexedDB 两层歌单缓存一起失效：v6 = 酷狗概念版歌单补齐真实名称/封面
+const USER_PLAYLIST_CACHE_VERSION = 'v6-kugou-concept-cover'
 let cacheGeneration = 0
 // 持久层失效是异步的，而紧随其后的 getUserPlaylists 会从 IndexedDB 读回尚未删除的
 // 旧列表（TTL 1h）并写回内存，表现为「删掉的歌单又回来 / 新建的不出现 / 改名回退」。
@@ -567,11 +568,15 @@ export async function getUserPlaylists(
 
     let playlists = await withPlaylistTimeout(fetchUserPlaylists(platform, userId, username))
     // QQ 偶发返回空或缺「我喜欢」（disslist 缺 dirid=201 + 服务端兜底失败）：
-    // 单次重试，避免启动时把异常结果直接缓存成常态
+    // 有界重试（0.6s/1.5s/3s）——启动瞬间的偶发空结果不该让左栏一直空着等用户手动点一次
     if (platform === 'qq' && !isCacheableUserPlaylists(platform, playlists)) {
-      await new Promise<void>(resolve => window.setTimeout(resolve, 600))
-      const retried = await withPlaylistTimeout(fetchUserPlaylists(platform, userId, username)).catch(() => undefined)
-      if (retried && isCacheableUserPlaylists(platform, retried)) playlists = retried
+      for (const delay of [600, 1500, 3000]) {
+        await new Promise<void>(resolve => window.setTimeout(resolve, delay))
+        const retried = await withPlaylistTimeout(fetchUserPlaylists(platform, userId, username)).catch(() => undefined)
+        if (!retried) continue
+        playlists = retried
+        if (isCacheableUserPlaylists(platform, retried)) break
+      }
     }
     const normalizedPlaylists = platform === 'qq' ? normalizeCachedQQPlaylistNames(playlists, username) : playlists
     if (!options.skipCache && requestGeneration === cacheGeneration && playlists && isCacheableUserPlaylists(platform, playlists)) {
@@ -622,18 +627,32 @@ export async function getPlaylistDetail(
       privileges: { 1: true, 0: true },
     }
   }
-  // 酷狗：本地代理歌单详情（尽力而为，失败返回空）。
-  // 用户自建歌单/「我喜欢」的 id 是网关 listid，m.kugou.com 公开详情拿不到曲目——
-  // 公开详情为空时回退 H5 签名网关的用户歌单曲目接口（需登录 cookie）。
+  // 酷狗：概念版扫码凭据优先（用户自建歌单/「我喜欢」只有概念版接口拿得到曲目）；
+  // 没有概念版凭据时退回公开详情（m.kugou.com）+ 网页网关曲目接口。
+  // 歌单名/封面单独取（fetchKugouPlaylistInfo），此前这里写死成「酷狗歌单」导致所有歌单同名。
   if (platform === 'kugou') {
-    const { fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, kugouTrackToSong } = await import('./kugouService')
-    let tracks = await fetchKugouPlaylistDetail(playlistId)
+    const {
+      fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, fetchKugouPlaylistInfo,
+      hasKugouConceptCredential, kugouTrackToSong,
+    } = await import('./kugouService')
+    const concept = hasKugouConceptCredential()
+    const info = await fetchKugouPlaylistInfo(playlistId).catch(() => null)
+    let tracks = concept ? [] : await fetchKugouPlaylistDetail(playlistId)
     if (tracks.length === 0) {
       tracks = await fetchKugouUserPlaylistTracks(playlistId)
     }
+    const songs = tracks.map(kugouTrackToSong)
     return {
-      playlist: { id: playlistId, name: '酷狗歌单' },
-      tracks: tracks.map(t => kugouTrackToSong(t)),
+      playlist: {
+        id: playlistId,
+        name: info?.name || '酷狗歌单',
+        // 无自定义封面（「我喜欢」「默认收藏」）用首曲封面兜底
+        coverImgUrl: info?.coverUrl || songs[0]?.album?.picUrl || '',
+        trackCount: songs.length,
+        ...(info?.creator ? { creator: { nickname: info.creator } } : {}),
+        platform: 'kugou',
+      },
+      tracks: songs,
       privileges: { 1: true, 0: true },
     }
   }
@@ -865,51 +884,11 @@ export async function getLikedSongs(
     }
     return { ids: [...ids] }
   }
-  // 酷狗：「喜欢」= 用户云歌单中的默认"我喜欢"列表。经本地代理的 H5 签名网关读取：
-  // /api/kugou/user/playlist 拿列表 → /api/kugou/user/playlist/tracks 按 listid 分页拉曲目 hash。
-  // 标识为 hash；搜索路径的 FileHash 常为大写而网关返回小写——两种大小写都入集合以便命中。
+  // 酷狗：「喜欢」= 用户云歌单中的默认"我喜欢"列表。
+  // 概念版扫码凭据优先（走概念版通道），网页 cookie 兜底——两条通道统一由 kugouService 处理。
   if (platform === 'kugou') {
-    const kgCookie = localStorage.getItem('kugou_cookie') || ''
-    if (!kgCookie) return { ids: [] }
-    const KG_API = 'http://localhost:3001/api/kugou'
-    let favListId = ''
-    try {
-      const listResp = await fetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
-      if (listResp.ok) {
-        const playlists = await listResp.json()
-        if (Array.isArray(playlists)) {
-          // 与服务端 kugouLikeCheckHashes 同一匹配规则：按名字找"我喜欢"，找不到退第一个
-          const fav = playlists.find((p: any) => /我喜欢|默认歌单/.test(String(p?.name || ''))) || playlists[0]
-          favListId = String(fav?.specialid || '')
-        }
-      }
-    } catch (error) {
-      console.warn('[LikedSongs] 酷狗用户歌单获取失败:', error)
-    }
-    const ids = new Set<string>()
-    if (favListId) {
-      for (let page = 1; page <= 20; page += 1) {
-        try {
-          const resp = await fetch(
-            `${KG_API}/user/playlist/tracks?listid=${encodeURIComponent(favListId)}&page=${page}&pagesize=50&cookie=${encodeURIComponent(kgCookie)}`,
-            { cache: 'no-store' },
-          )
-          if (!resp.ok) break
-          const json = await resp.json()
-          const songs = Array.isArray(json?.songs) ? json.songs : []
-          songs.forEach((item: any) => {
-            const hash = String(item?.hash || '').trim()
-            if (!hash) return
-            ids.add(hash)
-            ids.add(hash.toLowerCase())
-          })
-          if (songs.length < 50) break
-        } catch {
-          break
-        }
-      }
-    }
-    return { ids: [...ids] }
+    const { fetchKugouLikedHashes } = await import('./kugouService')
+    return { ids: await fetchKugouLikedHashes() }
   }
   const cookie = getPlatformCookie(platform)
   const url = platform === 'netease'
@@ -1147,8 +1126,15 @@ export async function removeSongFromPlaylist(
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持从歌单移除歌曲：上游未提供移除歌曲的接口')
   }
-  // 酷狗：网关无删除歌曲端点（/api/kugou/playlist/tracks 非 add 直接 400），诚实报错而非误打 QQ 删除接口
+  // 酷狗：概念版扫码凭据支持按 fileid 移除；网页通道无删除端点，诚实报错而非误打 QQ 删除接口
   if (platform === 'kugou') {
+    const { hasKugouConceptCredential, removeKugouSongFromPlaylist } = await import('./kugouService')
+    if (hasKugouConceptCredential()) {
+      const ok = await removeKugouSongFromPlaylist(playlistId, String(songId))
+      if (!ok) throw new Error('酷狗歌单移除失败')
+      invalidateUserPlaylistsCache(platform, userId)
+      return { result: 200, platform: 'kugou' }
+    }
     throw new Error('酷狗音乐暂不支持从歌单移除歌曲：上游未提供移除歌曲的接口')
   }
 
@@ -1216,14 +1202,22 @@ export async function createPlaylist(
     invalidateUserPlaylistsCache(platform, '')
     return { id, result: 200, platform: 'spotify' }
   }
-  // 汽水：上游不存在创建歌单端点（已核实），抛出明确错误由调用方 toast 提示（不 crash）
+  // 汽水：客户端 CreatePlaylist → POST /luna/pc/me/playlist。
+  // （旧注释写「上游不存在创建歌单端点（已核实）」是误判：客户端 IDL 里明确有这个接口。）
   if (platform === 'soda') {
-    throw new Error('汽水音乐暂不支持创建歌单：上游未提供创建歌单的接口')
+    const { createSodaPlaylist } = await import('./sodaService')
+    const created = await createSodaPlaylist(name, options.privacy === 'private' || options.privacy === '1')
+    if (!created) throw new Error('汽水音乐创建歌单失败（登录态失效或上游受限）')
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('soda_user_id') || '')
+    return { id: created.id, result: 200, platform: 'soda' }
   }
-  // 酷狗：无创建歌单网关（platforms.ts 能力表即 false）；诚实拦截，
-  // 否则会按下方默认分支误打网易创建接口、在错误平台落地一个真歌单
+  // 酷狗：概念版凭据支持新建（/cloudlist.service/v5/add_list type=0）；未登录由服务层明确报错
   if (platform === 'kugou') {
-    throw new Error('酷狗音乐暂不支持创建歌单：上游未提供创建歌单的接口')
+    const { createKugouUserPlaylist } = await import('./kugouService')
+    const result = await createKugouUserPlaylist(name, options.privacy === '1' || options.privacy === '10' || options.privacy === 'private')
+    if (!result.success) throw new Error(result.error || '酷狗音乐创建歌单失败')
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('kugou_user_id') || '')
+    return { id: result.id, listid: result.listid, result: 200, platform: 'kugou' }
   }
 
   const cookie = getPlatformCookie(platform, options.cookie)
@@ -1266,9 +1260,14 @@ export async function deletePlaylist(
     invalidateUserPlaylistsCache(platform, '')
     return { result: 200, platform: 'apple' }
   }
-  // 汽水：上游不存在删除歌单端点（已核实），抛出明确错误由调用方 toast 提示（不 crash）
+  // 汽水：客户端 MDeletePlaylists → POST /luna/pc/me/playlist/delete
+  // （旧注释写「上游不存在删除歌单端点（已核实）」同样是误判。）
   if (platform === 'soda') {
-    throw new Error('汽水音乐暂不支持删除歌单：上游未提供删除歌单的接口')
+    const { deleteSodaPlaylist } = await import('./sodaService')
+    const ok = await deleteSodaPlaylist(playlistId)
+    if (!ok) throw new Error('汽水音乐删除歌单失败（登录态失效或不是本人歌单）')
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('soda_user_id') || '')
+    return { result: 200, platform: 'soda' }
   }
   // Spotify Web API 无删除歌单接口；酷狗无删除网关。均诚实拦截，
   // 避免落入下方默认分支误打网易/QQ 删除接口
@@ -1327,6 +1326,11 @@ export async function updatePlaylist(
   // 汽水：暂不支持修改歌单信息，明确报错由调用方 toast 提示（不 crash）
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持修改歌单信息')
+  }
+  // 酷狗：概念版上游未提供重命名/改简介端点（能力表 updatePlaylist=false，入口置灰）；
+  // 这里也拦截，避免落入下方默认分支误打网易更新接口
+  if (platform === 'kugou') {
+    throw new Error('酷狗音乐暂不支持重命名歌单：上游未提供修改歌单信息的接口')
   }
   const cookie = options.cookie || localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
   const url = 'http://localhost:3001/api/netease/playlist/update'
@@ -1391,6 +1395,12 @@ export async function subscribePlaylist(
   platform: MusicPlatform = 'netease',
   options: {
     cookie?: string
+    /** 酷狗收藏必需：歌单归属与概念版 collection id（来自 ExplorePlaylist.conceptId 等） */
+    name?: string
+    conceptId?: string
+    ownerUserId?: string
+    listid?: string
+    gid?: string
   } = {}
 ): Promise<any> {
   console.log(`收藏/取消收藏歌单: ${playlistId}`)
@@ -1415,10 +1425,20 @@ export async function subscribePlaylist(
     return { result: 200, platform: 'soda' }
   }
 
-  // 酷狗：无收藏他人歌单的网关（platforms.ts 能力表即 false）；诚实拦截，
-  // 否则会按下方默认分支误打网易收藏接口
+  // 酷狗：概念版凭据支持收藏（add_list type=1）/取消收藏（/v2/delete_list）。
+  // 收藏要求歌单归属（ownerUserId+listid，来自 global_collection_id）；公开 specialid 无法收藏。
   if (platform === 'kugou') {
-    throw new Error('酷狗音乐暂不支持收藏歌单：上游未提供收藏歌单的接口')
+    const { collectKugouPlaylist } = await import('./kugouService')
+    const result = await collectKugouPlaylist(playlistId, subscribe, {
+      name: options.name,
+      ownerUserId: options.ownerUserId,
+      listid: options.listid,
+      gid: options.gid || options.conceptId,
+    })
+    if (!result.success) throw new Error(result.error || (subscribe ? '酷狗音乐收藏歌单失败' : '酷狗音乐取消收藏失败'))
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('kugou_user_id') || '')
+    // result:0 兼容 PlaylistDetailPanel 的「result 只认 0/100」成功判定；code:200 兼容 ExploreView
+    return { result: 0, code: 200, platform: 'kugou', listid: result.listid }
   }
 
   const cookie = getPlatformCookie(platform, options.cookie)

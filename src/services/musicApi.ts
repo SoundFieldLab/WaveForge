@@ -18,6 +18,7 @@ import { selectTimingVerifiedLines } from '../utils/lyricTimingBorrow'
 import {
   AUDIO_QUALITY_SETTINGS_EVENT,
   getAudioQualityRequest,
+  resolvedQualityDisplayName,
 } from './audioQualitySettings'
 import { getAppleMusicLyrics, isAppleMusicConfigured } from './appleMusic'
 
@@ -34,6 +35,53 @@ const isYrcTimestampFragment = (value: string) => {
 const getPlatformCookie = (platform: MusicPlatform, explicitCookie?: string) => explicitCookie || getStoredPlatformCookie(platform)
 
 const SONG_URL_CACHE_TTL = 5 * 60 * 1000
+
+/**
+ * QQ 超级会员专享档（杜比全景声 / 臻品母带4.0 / 臻品音质2.0）被上游拒绝时的提示。
+ * 同一首歌同一档只提示一次：切歌/切档反复触发会把播放页刷屏。
+ * 服务端此时已回落常规档位并正常返回 url，所以这里只需要如实告知用户为什么没听到那一档。
+ */
+const qqSvipNoticeShown = new Set<string>()
+function notifyQqSvipTierRequired(songId: string | number, preference: string): void {
+  const labels: Record<string, string> = { dolby: '杜比全景声（Atmos）', master: '臻品母带4.0', atmos2: '臻品音质2.0' }
+  const label = labels[preference]
+  if (!label) return
+  const key = `${preference}:${String(songId)}`
+  if (qqSvipNoticeShown.has(key)) return
+  qqSvipNoticeShown.add(key)
+  if (qqSvipNoticeShown.size > 80) qqSvipNoticeShown.clear()
+  try {
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: `「${label}」是 QQ 音乐超级会员专享，当前账号无该权益，已自动切到可用最高音质`, type: 'info' },
+    }))
+  } catch { /* 非浏览器环境忽略 */ }
+}
+/**
+ * 网易云会员专享档（SVIP 三档 / VIP 三档）没取到时的提示：与 QQ 侧同款「一次一歌一档」。
+ * 只在用户明确选定了会员档时提示——'auto' 是系统自己选档，逐曲弹提示会把播放页刷屏。
+ * 服务端此时已回落到可用档并正常返回 url，这里只如实说明为什么没听到选的那一档。
+ */
+const neteaseTierNoticeShown = new Set<string>()
+function notifyNeteaseTierUnavailable(songId: string | number, preference: string, actualQuality?: string | null): void {
+  const svipLabels: Record<string, string> = { sky: '沉浸环绕声（Surround Audio）', jymaster: '超清母带（Master）', vivid: '臻音全景声（Audio Vivid）' }
+  const vipLabels: Record<string, string> = { jyeffect: '高清臻音（Spatial Audio）', lossless: '无损（FLAC）', 'hi-res': 'Hi-Res 无损（192k）' }
+  const label = svipLabels[preference] || vipLabels[preference]
+  if (!label) return
+  const key = `${preference}:${String(songId)}`
+  if (neteaseTierNoticeShown.has(key)) return
+  neteaseTierNoticeShown.add(key)
+  if (neteaseTierNoticeShown.size > 80) neteaseTierNoticeShown.clear()
+  const tierName = svipLabels[preference] ? '超级会员' : 'VIP'
+  const actualLabel = actualQuality ? resolvedQualityDisplayName('netease', String(actualQuality)) : ''
+  try {
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: {
+        message: `未取到「${label}」（网易云音乐${tierName}专享）${actualLabel ? `，已自动切到「${actualLabel}」` : '，已自动切到可用最高音质'}`,
+        type: 'info',
+      },
+    }))
+  } catch { /* 非浏览器环境忽略 */ }
+}
 const SONG_URL_NEGATIVE_CACHE_TTL = 25 * 1000
 // 上游签名 URL 的真实有效期（网易云 data[0].expi，单位秒）可能明显短于 5 分钟。
 // 把已失效的签名当成有效缓存命中，会白白吃一次播放失败再走 invalidate/恢复流程，
@@ -175,9 +223,7 @@ const buildSongUrlCacheKey = (id: number | string, platform: MusicPlatform) => {
   const cookie = platform === 'qq'
     ? (localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || '')
     : (localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')
-  const crossPlatformFallback = platform === 'netease'
-    ? (localStorage.getItem('crossPlatformFallbackEnabled') ?? 'false')
-    : 'not-applicable'
+  const crossPlatformFallback = localStorage.getItem('crossPlatformFallbackEnabled') ?? 'false'
   const { preference, isVip } = getAudioQualityRequest(platform)
   return `${platform}:${id}:${preference}:${isVip ? 'vip' : 'free'}:${fingerprint(cookie)}:${crossPlatformFallback}`
 }
@@ -224,7 +270,7 @@ export interface Song {
   mid?: string // QQ音乐需要mid
   songType?: number // QQ MusicU 写操作必须使用歌曲真实类型，不能固定为 0
   name: string
-  artists: { id?: number; name: string; mid?: string; appleId?: string }[]
+  artists: { id?: number; name: string; mid?: string; appleId?: string; avatarUrl?: string }[]
   album: {
     id?: number // 网易云专辑ID，用于懒加载封面
     name: string
@@ -273,6 +319,8 @@ export interface Song {
    */
   isRadioQueue?: boolean
   commentCount?: number
+  /** 酷狗概念版 album_audio_id / mixsongid：评论与「最近播放」上报必须用它（hash 无法替代） */
+  kugouMixSongId?: number
   fee?: number // 付费类型（网易云）0免费 1VIP 4付费专辑 8低音质免费
   /** 融合搜索中，同一首歌可用的所有平台版本（第一项为当前优选版本） */
   fusedSources?: Array<{
@@ -283,6 +331,13 @@ export interface Song {
     vip?: boolean
     noCopyright?: boolean
   }>
+  /**
+   * 补源音源覆盖（音质与供源平台绑定，身份与进入平台绑定）：
+   * 歌曲身份仍是原平台（platform/艺人/专辑/收藏全跟进入平台），
+   * 但音频实际由 override.platform 供源（取流/音质请求按它发，id 用 override.id）。
+   * 补源链路（App.loadAndPlaySong 三处）写入；getSongUrl 据此分流。
+   */
+  audioSourceOverride?: { platform: MusicPlatform; id: string }
 }
 
 /**
@@ -531,7 +586,11 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
           name: song.name || '',
           artists: song.artists || [],
           album: {
-            name: song.album?.name || song.album || '',
+            // album 可能是对象（部分结果如电台/其他版本 name 为空串）：此时必须取空串，
+            // 不能回落到整个 album 对象——否则渲染 {song.album.name} 会抛 React #31
+            // 「Objects are not valid as a React child」，搜索页整页崩掉（2026-10-07 实测：
+            // 30 条结果里 7 条是这种空名专辑，任何含它们的搜索都会白屏）。
+            name: (typeof song.album === 'object' && song.album !== null ? song.album.name : song.album) || '',
             picUrl: song.album?.picUrl || song.cover || ''
           },
           duration: song.duration || 0,
@@ -842,9 +901,16 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
 
 // 获取歌曲播放URL（支持平台）。attemptLimit：缓存代际失效后的重入上限——
 // auth/音质事件短窗口内连续 clear 会让每层重入再次过期，无上限会形成请求风暴
-export async function getSongUrl(id: number | string, platform: MusicPlatform = 'netease', attemptLimit = 2): Promise<string | null> {
+export async function getSongUrl(id: number | string, platform: MusicPlatform = 'netease', attemptLimit = 2, song?: Song | null): Promise<string | null> {
   ensureSongUrlListenersRegistered()
   if (!String(id).trim()) return null
+  // 补源分流（音质与供源平台绑定）：调用方传的是歌曲身份平台（进入平台），若该曲带
+  // audioSourceOverride（补源借了别的平台音频），实际取流按供源平台发——否则汽水补 QQ 音源
+  // 这类请求会拿「汽水的音质偏好」去请求 QQ，档位口径整个错位。
+  const override = song?.audioSourceOverride || (id as { audioSourceOverride?: { platform: MusicPlatform; id: string } })?.audioSourceOverride
+  if (override && override.platform && String(override.id || '').trim()) {
+    return getSongUrl(override.id, override.platform, attemptLimit)
+  }
   const cacheKey = buildSongUrlCacheKey(id, platform)
   const now = Date.now()
   const cached = songUrlCache.get(cacheKey)
@@ -931,6 +997,14 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
           else if (platform === 'netease' && data?.data?.[0]?.level) setLastResolvedQuality(platform, String(data.data[0].level), id)
         } catch { /* 记录失败不影响播放 */ }
       }
+      // 超级会员专享档被上游拒绝（服务端已自动回落到可用最高音质）：如实提示一次
+      if (platform === 'qq' && data?.restrictedTier === 'svip') notifyQqSvipTierRequired(id, getAudioQualityRequest('qq').preference)
+      // 网易云会员档同理：官方链路返回的 requestedQuality ≠ actualQuality 即证明该档没取到
+      // （fallback 跨平台音源一路 level='fallback'，不是降档证据，必须排除）
+      if (platform === 'netease' && url && !data.fallback && data.requestedQuality && data.actualQuality
+        && data.requestedQuality !== data.actualQuality) {
+        notifyNeteaseTierUnavailable(id, getAudioQualityRequest('netease').preference, String(data.actualQuality))
+      }
       cacheSongUrl(cacheKey, url, url ? readTtlMs(data) : undefined)
       return url
     } catch (error) {
@@ -964,13 +1038,19 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
  * （standard|high|lossless|hires；auto → 缺省旧行为，后端在会员闸门内就近选档）。
  * 导出签名与返回类型保持不变（App.tsx 换源提示文案在用）；请求失败统一降级 { url: null }，不向调用方抛错。
  */
-export async function getSodaPlaybackInfo(id: number | string): Promise<{
+export async function getSodaPlaybackInfo(id: number | string, song?: Song | null): Promise<{
   url: string | null
   requiredTier?: 'free' | 'vip' | 'svip'
   vipLabel?: string
   reason?: string
 }> {
   if (!String(id).trim()) return { url: null }
+  // 补源分流同 getSongUrl：song 带补源覆盖时按供源平台发（借 QQ/网易音频就别用汽水偏好）
+  const override = song?.audioSourceOverride
+  if (override && String(override.id || '').trim()) {
+    if (override.platform === 'soda') id = override.id
+    else return getSongUrl(override.id, override.platform).then(url => ({ url }))
+  }
   const { preference } = getAudioQualityRequest('soda')
   const { getSodaPlaybackInfo: fetchSodaPlaybackInfo, mapSodaQualityParam } = await import('./sodaService')
   return fetchSodaPlaybackInfo(String(id), mapSodaQualityParam(preference))
@@ -2519,16 +2599,16 @@ export async function loadAlbumCovers(songs: Song[]): Promise<Song[]> {
 
 // 获取歌手详情
 /** 艺人详情：TTL 内复用，面板重新打开不再重发请求。 */
-export async function getArtistDetail(id: number | string, platform: MusicPlatform = 'netease'): Promise<Artist | null> {
+export async function getArtistDetail(id: number | string, platform: MusicPlatform = 'netease', nameHint = ''): Promise<Artist | null> {
   const key = `${platform}:${id}`
   const cached = artistDetailCache.get(key)
   if (cached) return cached
-  const detail = await getArtistDetailUncached(id, platform)
+  const detail = await getArtistDetailUncached(id, platform, nameHint)
   if (detail) artistDetailCache.set(key, detail)
   return detail
 }
 
-async function getArtistDetailUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Artist | null> {
+async function getArtistDetailUncached(id: number | string, platform: MusicPlatform = 'netease', nameHint = ''): Promise<Artist | null> {
   try {
     if (platform === 'apple') {
       const { getAppleArtistDetail, getAppleCatalogArtist } = await import('./appleCatalog')
@@ -2587,7 +2667,27 @@ async function getArtistDetailUncached(id: number | string, platform: MusicPlatf
     // 登录态上游带头像才透传，游客模式基本缺失 → 保持可选）。该端点失败/未命中时回退单曲探测，
     // 仅用于兜底构造名字与首曲封面 picUrl（首曲封面是借用的歌曲封面，调用方明确不把它当艺人头像渲染）。
     if (platform === 'soda') {
-      const name = String(id)
+      const rawId = String(id)
+      // 真实艺人（曲目透传的 artist_id，纯数字）→ /artist/detail：
+      // 头像/简介/职业/国籍/热门歌曲/热门专辑一次拿齐，不再走「按名搜索猜头像」。
+      if (/^\d{10,25}$/.test(rawId.trim())) {
+        const { fetchSodaArtistDetail } = await import('./sodaService')
+        const detail = await fetchSodaArtistDetail(rawId.trim())
+        if (detail) {
+          return {
+            id: 0,
+            mid: detail.id,
+            name: detail.name,
+            picUrl: detail.avatarUrl || '',
+            musicSize: detail.trackCount,
+            albumSize: detail.albumCount,
+            description: detail.intro || '',
+            platform: 'soda' as const,
+            ...(detail.avatarUrl ? { avatarUrl: detail.avatarUrl } : {}),
+          }
+        }
+      }
+      const name = rawId
       const { fetchSodaSearchArtists, fetchSodaArtistSongs } = await import('./sodaService')
       const derived = await fetchSodaSearchArtists(name, 1)
       const matched = derived.find(item => item.name === name) || derived[0]
@@ -2614,7 +2714,8 @@ async function getArtistDetailUncached(id: number | string, platform: MusicPlatf
       }
     }
     if (platform === 'qq') {
-      const response = await fetchT(`${API_BASE}/qq/artist?mid=${id}`)
+      // nameHint：纯数字 id（singer_id）反查真 mid 的按名采信用
+      const response = await fetchT(`${API_BASE}/qq/artist?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}`)
       const data = await response.json()
       debugLog(`[前端-歌手详情] 📊 QQ音乐返回数据keys:`, Object.keys(data))
       // 网关把上游错误包成 {error:...}：不校验就构造出 name:undefined 的壳对象并被写进详情缓存，
@@ -2678,16 +2779,16 @@ async function getArtistDetailUncached(id: number | string, platform: MusicPlatf
 
 // 获取歌手热门歌曲
 /** 艺人热门歌曲：与详情同 TTL，避免详情页切回来重新拉一遍。 */
-export async function getArtistTopSongs(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
+export async function getArtistTopSongs(id: number | string, platform: MusicPlatform = 'netease', nameHint = ''): Promise<Song[]> {
   const key = `${platform}:${id}`
   const cached = artistTopSongsCache.get(key)
   if (cached) return cached
-  const songs = await getArtistTopSongsUncached(id, platform)
+  const songs = await getArtistTopSongsUncached(id, platform, nameHint)
   if (songs.length > 0) artistTopSongsCache.set(key, songs)
   return songs
 }
 
-async function getArtistTopSongsUncached(id: number | string, platform: MusicPlatform = 'netease'): Promise<Song[]> {
+async function getArtistTopSongsUncached(id: number | string, platform: MusicPlatform = 'netease', nameHint = ''): Promise<Song[]> {
   try {
     if (platform === 'apple') {
       const { getAppleArtistDetail, appleSongToSong } = await import('./appleCatalog')
@@ -2707,11 +2808,18 @@ async function getArtistTopSongsUncached(id: number | string, platform: MusicPla
       return tracks.map(kugouTrackToSong)
     }
     if (platform === 'soda') {
+      // 真实艺人：/artist/tracks（最热排序）真数据；伪艺人（名字）保持按名检索降级
+      const rawId = String(id)
+      if (/^\d{10,25}$/.test(rawId.trim())) {
+        const { fetchSodaArtistTracks } = await import('./sodaService')
+        const page = await fetchSodaArtistTracks(rawId.trim(), { count: 50, sortType: 0 })
+        if (page.tracks.length) return page.tracks
+      }
       const { fetchSodaArtistSongs } = await import('./sodaService')
-      return fetchSodaArtistSongs(String(id), 50)
+      return fetchSodaArtistSongs(rawId, 50)
     }
     if (platform === 'qq') {
-      const response = await fetchT(`${API_BASE}/qq/artist/songs?mid=${id}`)
+      const response = await fetchT(`${API_BASE}/qq/artist/songs?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}`)
       const data = await response.json()
       debugLog('📊 [getArtistTopSongs] QQ音乐返回数据keys:', Object.keys(data))
       
@@ -2971,7 +3079,7 @@ async function getAlbumSongsUncached(id: number | string, platform: MusicPlatfor
 }
 
 // 获取歌手全部歌曲（分页加载）
-export async function getArtistAllSongs(id: number | string, platform: MusicPlatform = 'netease', offset: number = 0, limit: number = 40): Promise<{ songs: Song[], total: number }> {
+export async function getArtistAllSongs(id: number | string, platform: MusicPlatform = 'netease', offset: number = 0, limit: number = 40, nameHint = ''): Promise<{ songs: Song[], total: number }> {
   try {
     if (platform === 'apple') {
       const songs = await getArtistTopSongs(id, 'apple')
@@ -2989,7 +3097,7 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
       return { songs: songs.slice(offset, offset + limit), total: songs.length }
     }
     if (platform === 'qq') {
-      const response = await fetchT(`${API_BASE}/qq/artist/songs?mid=${id}&limit=${limit}&offset=${offset}`)
+      const response = await fetchT(`${API_BASE}/qq/artist/songs?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}&limit=${limit}&offset=${offset}`)
       const data = await response.json()
       const songs = (data.songs || []).map((item: any) => ({
         id: item.id,
@@ -3043,7 +3151,7 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
 }
 
 // 获取歌手专辑列表
-export async function getArtistAlbums(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0): Promise<Album[]> {
+export async function getArtistAlbums(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0, nameHint = ''): Promise<Album[]> {
   try {
     if (platform === 'apple') {
       const { getAppleCatalogArtistAlbums } = await import('./appleCatalog')
@@ -3087,6 +3195,28 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
     // （clusterSodaAlbumsFromSongs：专辑名+封面键、cap 12）。派生集合非全量专辑库
     // （上限受热门歌曲窗口约束），无数据时调用方（ArtistDetailModal 专辑 tab）展示诚实空态。
     if (platform === 'soda') {
+      // 真实艺人：/artist/albums 真专辑（封面/公司/发行时间/收藏数），带分页；
+      // 伪艺人（名字）保持「歌曲聚类出专辑」的派生降级。
+      const rawId = String(id)
+      if (/^\d{10,25}$/.test(rawId.trim())) {
+        const { fetchSodaArtistAlbums } = await import('./sodaService')
+        // getArtistAlbums 的分页语义是 offset/limit；游标接口按「第几页×页长」换算：
+        // 上游 next_cursor 是下一页起点（已取条数），直接把它当 offset 用即可。
+        let cursor = offset > 0 ? String(offset) : undefined
+        const page = await fetchSodaArtistAlbums(rawId.trim(), cursor, Math.max(limit, 20))
+        if (page.albums.length) {
+          return page.albums.map(item => ({
+            id: Number(item.id.slice(0, 15)) || 0,
+            mid: item.id, // 真实专辑 id，/album/tracks 按 id 精确命中
+            name: item.name,
+            picUrl: item.coverUrl || '',
+            artist: { name: item.artist || '' },
+            publishTime: item.releaseDate ? item.releaseDate * 1000 : undefined,
+            size: item.trackCount,
+            platform: 'soda' as const,
+          }))
+        }
+      }
       const { fetchSodaArtistSongs, clusterSodaAlbumsFromSongs } = await import('./sodaService')
       const songs = await fetchSodaArtistSongs(String(id), 50)
       const derived = clusterSodaAlbumsFromSongs(songs, 12)
@@ -3102,7 +3232,7 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
     }
     if (platform === 'qq') {
       const page = Math.floor(offset / limit) + 1
-      const response = await fetchT(`${API_BASE}/qq/artist/albums?mid=${id}&page=${page}&pageSize=${limit}`)
+      const response = await fetchT(`${API_BASE}/qq/artist/albums?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}&page=${page}&pageSize=${limit}`)
       const data = await response.json()
       return (data.albumList || []).map((item: any) => ({
         id: item.albumID,
@@ -3135,11 +3265,11 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
 }
 
 // 获取歌手MV列表
-export async function getArtistMVs(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0): Promise<any[]> {
+export async function getArtistMVs(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0, nameHint = ''): Promise<any[]> {
   try {
     if (platform === 'qq') {
       const page = Math.floor(offset / limit) + 1
-      const response = await fetchT(`${API_BASE}/qq/artist/mvs?mid=${id}&page=${page}&pageSize=${limit}`)
+      const response = await fetchT(`${API_BASE}/qq/artist/mvs?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}&page=${page}&pageSize=${limit}`)
       const data = await response.json()
       return (data.mvList || []).map((item: any) => ({
         id: item.vid,
@@ -3564,7 +3694,7 @@ export async function subscribeArtist(
   id: string,
   subscribe: boolean = true,
   platform: MusicPlatform = 'netease',
-  options: { cookie?: string } = {}
+  options: { cookie?: string; name?: string } = {}
 ): Promise<any> {
   try {
     // Spotify：官方 API 关注/取关艺人（id 为 Spotify artist id）
@@ -3576,9 +3706,10 @@ export async function subscribeArtist(
     }
     const cookie = getPlatformCookie(platform, options.cookie)
     const body: Record<string, any> = { id, subscribe, t: subscribe ? '1' : '2', cookie }
-    // QQ 的歌手关注使用 mid 字段而非 id
+    // QQ 的歌手关注使用 mid 字段而非 id（name 提示：纯数字 id 反查真 mid 用）
     if (platform === 'qq') {
       body.mid = id
+      if (options.name) body.name = options.name
       delete body.id
     }
     const response = await fetchT(`${API_BASE}/${platform}/artist/subscribe`, {

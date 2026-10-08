@@ -75,6 +75,10 @@ export interface ExplorePlaylist {
   source?: 'personalized' | 'community' | 'qqmusic-skills' | string
   /** 酷狗歌单列表内嵌的部分歌曲（hash + filename），详情接口不可用时兜底 */
   embeddedSongs?: Array<{ hash: string; filename: string }>
+  /** 酷狗 concept 概念版 global_collection_id：有概念版凭据时优先用它取曲目 */
+  conceptId?: string
+  /** 酷狗分类歌单自带的标签（分类板块的筛选依据；其它平台为空） */
+  tags?: string[]
 }
 
 export interface ExploreChartSong {
@@ -161,6 +165,45 @@ export interface QQNativeExploreFeed {
   modules: QQNativeExploreModule[]
 }
 
+/** 酷狗探索页扩展板块（客户端组装）：乐库/歌单分类/频道/每日推荐。
+ *  每个子项单独带 error，UI 按板块显示「空态 + 原因」，不让单个上游失败拖垮整个探索页。 */
+export interface KugouExploreTagGroup {
+  id: string
+  name: string
+  tags: Array<{ id: string; name: string }>
+}
+
+export interface KugouExplorePayload {
+  /** 每日推荐（概念版 /concept/daily） */
+  dailySongs: Song[]
+  dailyDate?: string
+  dailyError?: string
+  /** 新歌速递（概念版 /concept/newsongs，乐库板块用） */
+  newSongs: Array<{ song: Song; publishDate?: string }>
+  newSongsError?: string
+  /** 频道（概念版 /concept/channels；上游对无订阅账号返回空） */
+  channels: ExploreChannel[]
+  channelError?: string
+  /** 歌单分类标签树（概念版 /concept/playlist/tags） */
+  tagGroups: KugouExploreTagGroup[]
+  tagError?: string
+  /** 分类歌单推荐池（概念版 /concept/playlist/by-tag，带标签与播放量） */
+  tagPlaylists: ExplorePlaylist[]
+  tagPlaylistsHasNext: boolean
+  tagPlaylistsError?: string
+  /** 乐库首页（概念版 /concept/yueku）：官方乐库页的新歌/专辑/榜单/推荐歌单 */
+  yueku: {
+    headlineCoverUrl?: string
+    newAlbums: ExploreAlbum[]
+    ranks: Array<{ rankid: string; rankname: string; coverUrl: string; playCount?: number }>
+    recommendPlaylists: ExplorePlaylist[]
+  } | null
+  yuekuError?: string
+  /** 歌手目录（概念版 /concept/singers） */
+  singers: Array<{ singerid: string; singername: string; coverUrl?: string; fansCount?: number; heat?: number }>
+  singersError?: string
+}
+
 export interface ExplorePayload {
   code: number
   platform: ExplorePlatform
@@ -174,6 +217,8 @@ export interface ExplorePayload {
   albums: ExploreAlbum[]
   channels: ExploreChannel[]
   qqNative?: QQNativeExploreFeed | null
+  /** 仅 kugou：官方五板块（乐库/歌单/频道/分类）所需的扩展数据 */
+  kugou?: KugouExplorePayload | null
   meta: {
     source: string
     recommendationSource?: 'qq-guess-you-like' | 'qqmusic-skills-radio' | 'qq-daily' | 'public' | string
@@ -423,18 +468,110 @@ export async function fetchExploreHome(
       publishTime: item.publishtime || '',
       platform: 'kugou' as const,
     }))
+    // ── 官方五板块（乐库/歌单/频道/分类/每日推荐）所需的扩展数据 ──
+    // 全部走概念版目录接口（游客设备凭据即可），逐项 allSettled：单个上游失败只影响它自己的板块。
+    const {
+      fetchKugouDailyRecommend,
+      fetchKugouChannels,
+      fetchKugouPlaylistTags,
+      fetchKugouPlaylistsByTag,
+      fetchKugouYueku,
+      fetchKugouSingerList,
+      fetchKugouNewSongs,
+    } = await import('./kugouService')
+    const tagPlaylistToExplore = (item: { specialid: string; globalSpecialId?: string; name: string; coverUrl: string; playCount?: number; trackCount?: number; creator?: string; intro?: string; tags: string[] }): ExplorePlaylist => ({
+      id: item.specialid,
+      conceptId: item.globalSpecialId,
+      name: item.name,
+      coverUrl: item.coverUrl,
+      playCount: item.playCount,
+      trackCount: item.trackCount,
+      creator: item.creator,
+      description: item.intro,
+      // 分类筛选依据（分类板块的标签芯片 ↔ 歌单标签）
+      tags: item.tags,
+      platform: 'kugou',
+      source: 'kugou-tag-playlist',
+    })
+    const [dailyRes, channelsRes, tagsRes, tagPlaylistsRes, yuekuRes, singersRes, newSongsRes] = await Promise.allSettled([
+      fetchKugouDailyRecommend(),
+      fetchKugouChannels(1, 30),
+      fetchKugouPlaylistTags(),
+      fetchKugouPlaylistsByTag(0, 1, 100),
+      fetchKugouYueku(),
+      fetchKugouSingerList(40),
+      fetchKugouNewSongs(21608, 1, 30),
+    ])
+    const daily: Awaited<ReturnType<typeof fetchKugouDailyRecommend>> = dailyRes.status === 'fulfilled' ? dailyRes.value : { songs: [] }
+    const channelResult: Awaited<ReturnType<typeof fetchKugouChannels>> = channelsRes.status === 'fulfilled' ? channelsRes.value : { channels: [] }
+    const tagResult: Awaited<ReturnType<typeof fetchKugouPlaylistTags>> = tagsRes.status === 'fulfilled' ? tagsRes.value : { groups: [] }
+    const tagPlaylistResult: Awaited<ReturnType<typeof fetchKugouPlaylistsByTag>> = tagPlaylistsRes.status === 'fulfilled' ? tagPlaylistsRes.value : { playlists: [], hasNext: false }
+    const yuekuResult: Awaited<ReturnType<typeof fetchKugouYueku>> = yuekuRes.status === 'fulfilled' ? yuekuRes.value : { yueku: null }
+    const singerResult: Awaited<ReturnType<typeof fetchKugouSingerList>> = singersRes.status === 'fulfilled' ? singersRes.value : { singers: [] }
+    const newSongResult: Awaited<ReturnType<typeof fetchKugouNewSongs>> = newSongsRes.status === 'fulfilled' ? newSongsRes.value : { songs: [] }
+    const kugou: KugouExplorePayload = {
+      dailySongs: daily.songs.map(kugouTrackToSong),
+      dailyDate: daily.date,
+      dailyError: daily.songs.length === 0 ? '每日推荐暂无返回（上游限流或接口不可用）' : undefined,
+      newSongs: newSongResult.songs.map(item => ({
+        song: kugouTrackToSong(item.track),
+        publishDate: item.publishDate,
+      })),
+      newSongsError: newSongResult.songs.length === 0 ? newSongResult.error || '新歌速递暂无返回' : undefined,
+      channels: channelResult.channels.map(channel => ({
+        id: channel.id,
+        name: channel.name,
+        group: channel.group || '频道',
+        description: channel.description,
+        coverUrl: channel.coverUrl || '',
+        playCount: channel.playCount,
+        platform: 'kugou',
+        source: 'kugou-channel',
+        song: null,
+      })),
+      channelError: channelResult.channels.length === 0 ? channelResult.error || '当前账号没有订阅频道' : undefined,
+      tagGroups: tagResult.groups,
+      tagError: tagResult.groups.length === 0 ? tagResult.error || '分类标签暂无返回' : undefined,
+      tagPlaylists: tagPlaylistResult.playlists.map(tagPlaylistToExplore),
+      tagPlaylistsHasNext: tagPlaylistResult.hasNext,
+      tagPlaylistsError: tagPlaylistResult.playlists.length === 0 ? tagPlaylistResult.error || '分类歌单暂无返回' : undefined,
+      yueku: yuekuResult.yueku
+        ? {
+          headlineCoverUrl: yuekuResult.yueku.headline?.coverUrl,
+          newAlbums: yuekuResult.yueku.newAlbums.map(item => ({
+            id: Number(item.albumid) || 0,
+            mid: item.albumid,
+            name: item.albumname,
+            artist: item.singername,
+            coverUrl: item.imgurl || '',
+            publishTime: item.publishtime || '',
+            platform: 'kugou' as const,
+          })),
+          ranks: yuekuResult.yueku.ranks,
+          recommendPlaylists: yuekuResult.yueku.recommendPlaylists.map(tagPlaylistToExplore),
+        }
+        : null,
+      yuekuError: !yuekuResult.yueku ? yuekuResult.error || '乐库数据暂无返回' : undefined,
+      // 上游按分组返回（每组 hotsize 个）会合出上千条：只保留前 48 位热门歌手，
+      // 避免探索页缓存把整棵歌手目录写进 localStorage
+      singers: singerResult.singers.slice(0, 48),
+      singersError: singerResult.singers.length === 0 ? singerResult.error || '歌手目录暂无返回' : undefined,
+    }
+    const dailySongs = kugou.dailySongs.length > 0 ? kugou.dailySongs : hotTracks.map(kugouTrackToSong)
     const payload: ExplorePayload = {
       code: 0,
       platform: 'kugou',
       officialEnhanced: false,
-      personalized: false,
-      dailySongs: hotTracks.map(kugouTrackToSong),
+      // 日推来自概念版账号通道（有数据即代表个性化内容可用）
+      personalized: kugou.dailySongs.length > 0,
+      dailySongs,
       radioSongs: [],
       newSongs: (rankSongs[1]?.length ? rankSongs[1] : hotTracks).map(kugouTrackToSong),
       playlists,
       charts,
       albums,
       channels: [],
+      kugou,
       meta: { source: 'kugou-mobile-api', updatedAt: Date.now() },
     }
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
@@ -740,31 +877,65 @@ export async function fetchQQNativeFeedPage(
   }
 }
 
-export async function fetchQQGuessYouLikeBatch(
+/** 电台批次（QQ 猜你喜欢/随心听）：songs + 服务端随批次下发的卡面文案。 */
+export interface QQGuessYouLikeBatch {
+  songs: Song[]
+  /** 电台名（猜你喜欢）与逐曲推荐语（模板带 `{br}` 换行标记），首页大卡文案就来自这里。 */
+  radio: { name: string; reasons: Array<{ mid: string; reason: string; template: string }> } | null
+}
+
+export async function fetchQQGuessYouLikeBatchWithMeta(
   batch: number,
   excludeSongKeys: string[] = [],
   signal?: AbortSignal,
-  count = 30,
-): Promise<Song[]> {
+  options: { count?: number; fast?: boolean } = {},
+): Promise<QQGuessYouLikeBatch> {
   const cookie = getExploreCookie('qq')
   if (cookie) await syncQQExploreCookie(cookie, signal)
+  const count = Math.max(1, Math.min(60, Math.floor(options.count ?? 30)))
   const response = await fetch(`${API_BASES[0]}/explore/qq/radio/next`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(await getQQMusicSkillHeaders()) },
     body: JSON.stringify({
       cookie,
       batch: Math.max(1, Math.floor(batch)),
-      count: Math.max(1, Math.min(60, Math.floor(count))),
+      count,
       exclude: excludeSongKeys.slice(-300),
+      // fast：官方首屏语义——只打一次上游（约 1.3s 拿到 5 首）就先开播，后续靠队列持续追加
+      ...(options.fast ? { fast: 1 } : {}),
     }),
     signal,
     cache: 'no-store',
   })
   const data = await ensureOk(response)
-  const songs = Array.isArray(data.songs) ? data.songs : []
-  return songs
+  const rawSongs = Array.isArray(data.songs) ? data.songs : []
+  const songs = rawSongs
     .map((song: any) => normalizeQQSong(song))
     .filter((song: Song | null): song is Song => Boolean(song))
+  const radio = data?.radio && typeof data.radio === 'object'
+    ? {
+      name: String(data.radio.name || '猜你喜欢'),
+      reasons: Array.isArray(data.radio.reasons)
+        ? data.radio.reasons.map((item: any) => ({
+          mid: String(item?.mid || ''),
+          reason: String(item?.reason || ''),
+          template: String(item?.template || ''),
+        })).filter((item: { mid: string }) => item.mid)
+        : [],
+    }
+    : null
+  return { songs, radio }
+}
+
+export async function fetchQQGuessYouLikeBatch(
+  batch: number,
+  excludeSongKeys: string[] = [],
+  signal?: AbortSignal,
+  count = 30,
+  fast = false,
+): Promise<Song[]> {
+  const { songs } = await fetchQQGuessYouLikeBatchWithMeta(batch, excludeSongKeys, signal, { count, fast })
+  return songs
 }
 
 // 汽水无限续播游标状态（模块级单例）：batch<=1 视为新会话重置；到底后停止续拉（重试不再打网络）。
@@ -777,7 +948,9 @@ export async function fetchExploreRecommendationBatch(
   platform: ExplorePlatform,
   batch: number,
   excludeSongKeys: string[] = [],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  // fast：QQ 猜你喜欢/随心听的「先给 5 首就播」语义（只打一次上游 ≈0.9s），队列续载也走它
+  options: { count?: number; fast?: boolean } = {},
 ): Promise<Song[]> {
   // Apple/Spotify/酷狗 无连续电台接口
   if (platform === 'apple' || platform === 'spotify' || platform === 'kugou') return []
@@ -804,7 +977,7 @@ export async function fetchExploreRecommendationBatch(
   }
   const cookie = getExploreCookie(platform)
   if (platform === 'qq') {
-    return fetchQQGuessYouLikeBatch(batch, excludeSongKeys, signal)
+    return fetchQQGuessYouLikeBatch(batch, excludeSongKeys, signal, options.count ?? 30, options.fast)
   }
 
   const data = await fetchExploreJson('/explore/netease/recommendations/next', {
@@ -821,7 +994,8 @@ export async function fetchExploreRecommendationBatch(
 
 /** 歌单详情：同一份歌单在 TTL 内重复打开直接复用缓存（不重复请求）。 */
 export async function fetchExplorePlaylist(playlist: ExplorePlaylist, signal?: AbortSignal): Promise<ExploreDetail> {
-  const key = `playlist:${playlist.platform}:${playlist.id}`
+  // source 与榜单同理进键：skills 来源与原生来源同 id 但内容不同，混用会串数据。
+  const key = `playlist:${playlist.platform}:${playlist.id}:${playlist.source || ''}`
   const cached = exploreDetailCache.get(key)
   if (cached) return cached
   const detail = await fetchExplorePlaylistUncached(playlist, signal)
@@ -868,13 +1042,17 @@ async function fetchExplorePlaylistUncached(playlist: ExplorePlaylist, signal?: 
       songs,
     }
   }
-  // 酷狗歌单：优先真实歌单详情接口；用户自建歌单（id 为网关 listid）公开详情拿不到，
-  // 回退 H5 签名网关用户歌单曲目接口；最后用列表内嵌歌曲兜底
+  // 酷狗歌单：概念版凭据优先（用户自建歌单/「我喜欢」只有概念版接口拿得到曲目）；
+  // 否则退回公开详情；再不行用列表内嵌歌曲兜底。无自定义封面时用首曲封面。
   if (playlist.platform === 'kugou') {
-    const { fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, kugouTrackToSong } = await import('./kugouService')
-    let tracks = await fetchKugouPlaylistDetail(playlist.id).catch(() => [] as Awaited<ReturnType<typeof fetchKugouPlaylistDetail>>)
+    const { fetchKugouPlaylistDetail, fetchKugouUserPlaylistTracks, hasKugouConceptCredential, kugouTrackToSong } = await import('./kugouService')
+    // 概念版歌单曲目接口认 global_collection_id（分类歌单两者都带，可能不同）
+    const conceptTracksId = playlist.conceptId || playlist.id
+    let tracks = hasKugouConceptCredential()
+      ? []
+      : await fetchKugouPlaylistDetail(playlist.id).catch(() => [] as Awaited<ReturnType<typeof fetchKugouPlaylistDetail>>)
     if (tracks.length === 0) {
-      tracks = await fetchKugouUserPlaylistTracks(playlist.id)
+      tracks = await fetchKugouUserPlaylistTracks(conceptTracksId)
     }
     if (tracks.length === 0 && playlist.embeddedSongs?.length) {
       const { parseKugouEmbeddedSongs } = await import('./kugouService')
@@ -887,7 +1065,7 @@ async function fetchExplorePlaylistUncached(playlist: ExplorePlaylist, signal?: 
         creator: typeof playlist.creator === 'string' ? { nickname: playlist.creator } : playlist.creator,
         id: playlist.id,
         name: playlist.name,
-        coverImgUrl: playlist.coverUrl,
+        coverImgUrl: playlist.coverUrl || songs[0]?.album?.picUrl || '',
         trackCount: songs.length || playlist.trackCount || 0,
         description: playlist.description || '',
         platform: 'kugou',
@@ -971,16 +1149,20 @@ async function fetchExplorePlaylistUncached(playlist: ExplorePlaylist, signal?: 
 }
 
 /** 榜单详情：同 TTL 内复用，探索页/传统模式/桌面组件共用同一份。 */
-export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSignal): Promise<ExploreDetail> {
-  const key = `chart:${chart.platform}:${chart.id}`
+export async function fetchExploreChart(chart: ExploreChart, signal?: AbortSignal, period = ""): Promise<ExploreDetail> {
+  // period：榜单周期（周榜 2026_39 / 日榜 2026-10-06）。不同周期是不同内容，缓存键必须带上。
+  // source 也必须进键：探索模式的 skills 榜单（source='qqmusic-skills'，上游 trackList 不带专辑封面）
+  // 与原生榜单（source='community'）同 id 但内容不同。旧键不含 source，谁先打开谁把详情写进缓存——
+  // 传统模式接着点同一个榜单会命中无封面那份，整页封面占位且不发请求（2026-10-07 用户实测根因）。
+  const key = `chart:${chart.platform}:${chart.id}:${chart.source || ''}:${period}`
   const cached = exploreDetailCache.get(key)
   if (cached) return cached
-  const detail = await fetchExploreChartUncached(chart, signal)
+  const detail = await fetchExploreChartUncached(chart, signal, period)
   if (!signal?.aborted) exploreDetailCache.set(key, detail)
   return detail
 }
 
-async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSignal): Promise<ExploreDetail> {
+async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSignal, period = ""): Promise<ExploreDetail> {
   // Apple：榜单数据客户端已带（charts 携带歌曲列表），无需服务端
   if (chart.platform === 'apple') {
     const songs: Song[] = chart.songs.map(song => ({
@@ -1086,7 +1268,8 @@ async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSign
         coverUrl: chart.coverUrl,
         description: chart.description,
         source: chart.source,
-        cookie
+        cookie,
+        ...(period ? { period } : {})
       }, signal) as ExploreDetail
       lastResult = result
       if (Array.isArray(result.songs) && result.songs.length > 0) return result
@@ -1130,4 +1313,62 @@ export async function fetchExploreChannel(channel: ExploreChannel, signal?: Abor
     }
   }
   return detail
+}
+
+// ─────────────────────── 酷狗分类歌单（分页 + 客户端标签筛选）───────────────────────
+// 上游 special_recommend 不支持按 tag 查询（tagids 实测无效）：这里按页拉推荐池，
+// 再按歌单自带的 tags 过滤。同一 (tag,page) 结果做短缓存，避免「换标签」来回打网络。
+const kugouTagPlaylistCache = new Map<string, { playlists: ExplorePlaylist[]; hasNext: boolean; expiresAt: number }>()
+const KUGOU_TAG_PLAYLIST_TTL = 5 * 60 * 1000
+const KUGOU_TAG_PLAYLIST_MAX_PAGES = 3
+
+function mapKugouTagPlaylist(item: { specialid: string; globalSpecialId?: string; name: string; coverUrl: string; playCount?: number; trackCount?: number; creator?: string; intro?: string; tags: string[] }): ExplorePlaylist {
+  return {
+    id: item.specialid,
+    conceptId: item.globalSpecialId,
+    name: item.name,
+    coverUrl: item.coverUrl,
+    playCount: item.playCount,
+    trackCount: item.trackCount,
+    creator: item.creator,
+    description: item.intro,
+    // 上游标签（分类筛选依据）：其它平台不写该字段，仅酷狗分类板块读取
+    tags: item.tags,
+    platform: 'kugou',
+    source: 'kugou-tag-playlist',
+  }
+}
+
+/** 酷狗分类歌单：tag=null 表示全部（官方"推荐"档），hasNext 供继续翻页 */
+export async function fetchKugouTagPlaylists(
+  tag: string | null,
+  page = 1,
+  signal?: AbortSignal,
+): Promise<{ playlists: ExplorePlaylist[]; hasNext: boolean }> {
+  const cacheKey = `kugou-tag:${tag || '*'}:${page}`
+  const cached = kugouTagPlaylistCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) return { playlists: cached.playlists, hasNext: cached.hasNext }
+  const { fetchKugouPlaylistsByTag } = await import('./kugouService')
+  const result = await fetchKugouPlaylistsByTag(0, Math.max(1, page), 100)
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+  const mapped = result.playlists.map(mapKugouTagPlaylist)
+  let value = {
+    playlists: tag ? mapped.filter(playlist => playlist.tags?.includes(tag)) : mapped,
+    hasNext: result.hasNext,
+  }
+  // 单页只有约 35 条且标签分布稀疏：本页没命中标签时继续翻页补齐（最多 3 页），
+  // 否则多数标签会显示空网格，而用户其实还有下一页可看。
+  let cursor = Math.max(1, page)
+  while (tag && value.playlists.length === 0 && value.hasNext && cursor < KUGOU_TAG_PLAYLIST_MAX_PAGES) {
+    cursor += 1
+    const next = await fetchKugouPlaylistsByTag(0, cursor, 100)
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    const nextMapped = next.playlists.map(mapKugouTagPlaylist)
+    value = {
+      playlists: nextMapped.filter(playlist => playlist.tags?.includes(tag)),
+      hasNext: next.hasNext,
+    }
+  }
+  kugouTagPlaylistCache.set(cacheKey, { ...value, expiresAt: Date.now() + KUGOU_TAG_PLAYLIST_TTL })
+  return value
 }

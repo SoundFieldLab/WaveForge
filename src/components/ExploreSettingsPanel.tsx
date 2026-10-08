@@ -17,7 +17,19 @@ import type { ExplorePlatform } from '../services/exploreApi'
 import { MirroredGlobalSettings, makeSkin } from './MirroredGlobalSettings'
 import type { MirrorActionId } from '../services/globalSettingsRegistry'
 
-export type ExploreSectionId = 'discover' | 'journey' | 'playlists' | 'charts' | 'newSongs' | 'albums' | 'channels'
+export type ExploreSectionId =
+  | 'discover'
+  | 'journey'
+  | 'playlists'
+  | 'charts'
+  | 'newSongs'
+  | 'albums'
+  | 'channels'
+  | 'kugouLibrary'
+  | 'kugouPlaylistTags'
+  | 'kugouCategories'
+  | 'kugouLongaudio'
+  | 'kugouYouth'
 export type ExploreDensity = 'comfortable' | 'compact'
 export type ExploreContentAmount = 'curated' | 'expanded'
 export type ExploreBackgroundIntensity = 'calm' | 'vivid'
@@ -74,6 +86,7 @@ export interface ExplorePreferences {
   background: ExploreBackgroundPrefs
 }
 
+// 标签表覆盖全量 ExploreSectionId（含已下线的 kugouYouth，供旧偏好回显时不过滤崩溃）
 export const EXPLORE_SECTION_LABELS: Record<ExploreSectionId, string> = {
   discover: '为你发现',
   journey: '音乐旅程',
@@ -82,18 +95,46 @@ export const EXPLORE_SECTION_LABELS: Record<ExploreSectionId, string> = {
   newSongs: '最新音乐',
   albums: '新碟上架',
   channels: '声音与频道',
+  kugouLibrary: '乐库（新歌/专辑/歌手）',
+  kugouPlaylistTags: '歌单（分类标签）',
+  kugouCategories: '分类（专区与标签）',
+  kugouLongaudio: '听书（有声小说/评书/助眠）',
+  kugouYouth: '刷歌（已下线）',
+}
+
+/** 酷狗板块所属的一级分区（音乐 / 听书）：设置面板给酷狗行加分区徽标，
+ *  让用户知道关掉这个板块会连带影响哪个分区（分区在没有任何可见板块时整块消失）。 */
+const KUGOU_ZONE_OF_SECTION: Partial<Record<ExploreSectionId, string>> = {
+  discover: '音乐',
+  kugouLibrary: '音乐',
+  kugouPlaylistTags: '音乐',
+  channels: '音乐',
+  kugouCategories: '音乐',
+  kugouLongaudio: '听书',
 }
 
 const BASE_ORDER: ExploreSectionId[] = ['discover', 'journey', 'playlists', 'charts', 'newSongs', 'channels']
 const APPLE_ORDER: ExploreSectionId[] = ['discover', 'playlists', 'charts', 'newSongs', 'albums']
 const THIRD_PARTY_ORDER: ExploreSectionId[] = ['discover', 'playlists', 'charts', 'newSongs', 'albums']
+// 酷狗按一级分区排版：音乐（推荐 → 乐库 → 歌单 → 频道 → 分类）→ 听书。
+// 通用聚合板块（推荐歌单/排行榜/最新音乐/新碟）已由酷狗五板块覆盖，不再出现在酷狗列表里，
+// 旧偏好里的这些 id 会在 normalizeExplorePreferences 时按此表过滤掉。
+// 「刷歌」(kugouYouth) 已按产品决策下线，不进排序表。
+const KUGOU_ORDER: ExploreSectionId[] = [
+  'discover',
+  'kugouLibrary',
+  'kugouPlaylistTags',
+  'channels',
+  'kugouCategories',
+  'kugouLongaudio',
+]
 const PLATFORM_ORDER: Record<ExplorePlatform, ExploreSectionId[]> = {
   netease: BASE_ORDER,
   qq: BASE_ORDER,
   // Apple 与网易云/QQ 共享探索 UI，按能力表提供可用区块（无旅程/频道）
   apple: APPLE_ORDER,
   spotify: THIRD_PARTY_ORDER,
-  kugou: THIRD_PARTY_ORDER,
+  kugou: KUGOU_ORDER,
   soda: THIRD_PARTY_ORDER,
 }
 
@@ -375,6 +416,14 @@ export default function ExploreSettingsPanel({
                       <div key={section} className={`flex items-center gap-3 rounded-2xl border p-3 transition ${visible ? `${borderSoft} ${rowBg}` : `${borderFaint} ${rowBgFaint} opacity-55`}`}>
                         <span className={`flex h-8 w-8 items-center justify-center rounded-xl text-xs ${chipBg} ${textMuted}`}>{index + 1}</span>
                         <span className={`min-w-0 flex-1 text-sm font-medium ${textPrimary}`}>{sectionLabel(section)}</span>
+                        {platform === 'kugou' && KUGOU_ZONE_OF_SECTION[section] && (
+                          <span
+                            className="shrink-0 rounded-full border px-2 py-0.5 text-[10px]"
+                            style={{ borderColor: `${accent}55`, color: accent }}
+                          >
+                            {KUGOU_ZONE_OF_SECTION[section]}
+                          </span>
+                        )}
                         <button type="button" onClick={() => moveSection(section, -1)} disabled={index === 0} className={`rounded-lg p-1.5 transition ${textMuted} ${hoverBg} ${hoverTextStrong} disabled:opacity-20`} aria-label={`上移${sectionLabel(section)}`}>
                           <ArrowUp className="h-4 w-4" />
                         </button>

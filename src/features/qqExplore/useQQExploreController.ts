@@ -7,6 +7,11 @@ const CACHE_PREFIX = 'waveforge:qq-explore:v5:'
 const FEED_STALE_MS = 10 * 60 * 1000
 const LOAD_MORE_BATCHES = 5
 
+// 本次渲染进程生命周期内已为该账号打过一次 bootstrap。快照新鲜时的「跳过请求」优化只对同一
+// 会话内的重挂载生效；应用冷启动后的首次挂载仍会后台刷新一次——否则上一次运行留下的旧货架
+// 会被原样展示最长 10 分钟（2026-10-07 用户实测：首页整段少了「你的歌单宝藏库」）。
+let sessionBootstrappedKey = ''
+
 function fingerprint(value: string) {
   let hash = 2166136261
   for (let index = 0; index < value.length; index += 1) {
@@ -68,9 +73,12 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
       return
     }
     const cached = readCache(userId)
-    // 快照还新鲜：直接用快照渲染，不再打一次 bootstrap。视图被隐藏/重挂载（切模式再回来、
-    // StrictMode 双执行、authRevision 抖动）时这是最主要的重复请求来源；手动刷新走 refreshFeed。
-    if (!force && cached && Date.now() - cached.generatedAt < FEED_STALE_MS) {
+    const sessionKey = cacheKey(userId)
+    // 快照还新鲜且本会话已经打过一次 bootstrap：直接用快照渲染，不再打第二次。视图被隐藏/重挂载
+    // （切模式再回来、StrictMode 双执行、authRevision 抖动）时这是最主要的重复请求来源；
+    // 手动刷新走 refreshFeed。冷启动后的首次挂载不在跳过之列（sessionBootstrappedKey 尚未置位）：
+    // 快照照常先渲染不白屏，但下面会静默刷新一次，避免旧快照的货架组合被展示到 10 分钟。
+    if (!force && cached && Date.now() - cached.generatedAt < FEED_STALE_MS && sessionBootstrappedKey === sessionKey) {
       generation.current += 1
       controller.current?.abort()
       contextualController.current?.abort()
@@ -88,6 +96,9 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
       }))
       return
     }
+    // 走到这里说明要进行一次真实刷新：标记本会话已打过（同一会话的重挂载从此走上面的快照直出），
+    // 失败时在 catch 里回滚标记，让下次挂载还能重试。
+    sessionBootstrappedKey = sessionKey
     const id = ++generation.current
     controller.current?.abort()
     contextualController.current?.abort()
@@ -152,6 +163,7 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
         setState(previous => ({ ...previous, initialLoading: false, refreshing: false }))
         return
       }
+      sessionBootstrappedKey = ''
       setState(previous => ({ ...previous, initialLoading: false, refreshing: false, error: error instanceof Error ? error.message : 'QQ 推荐加载失败' }))
     }
   }, [loggedIn, userId])

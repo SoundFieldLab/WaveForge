@@ -203,7 +203,8 @@ function FavoriteCountIcon({ count, active = false, loading = false }: { count?:
 }
 
 function FlowFavoriteCount({ count, active }: { count?: string; active: boolean }) {
-  return <span className={`wf-qq-flow-favorite ${active ? 'wf-qq-flow-favorite-active' : ''}`} aria-label={count ? `收藏 ${count}` : '收藏'}><Heart strokeWidth={1.7} className={active ? 'fill-rose-400 text-rose-400' : 'text-white/55'} /><span>{count}</span></span>
+  // 保留组件签名以免外部引用失效；歌单/合辑类卡片不再画爱心（歌单不是歌曲），只留纯文字计数。
+  return count ? <span className="text-[11px] text-white/35" aria-label={`收藏 ${count}`}>{count}人收藏</span> : null
 }
 
 function adjustFavoriteCount(value: string, delta: number) {
@@ -237,7 +238,7 @@ function FlowCard({ card, entitlement, loading, favoritesReady, favoritePending,
   return (
     <button type="button" disabled={unavailable} onClick={onClick} onContextMenu={event => primarySong && onSongContextMenu(event, primarySong)} className="group relative w-full min-w-0 overflow-hidden rounded-lg border border-white/[0.08] bg-white/[0.045] text-left disabled:cursor-not-allowed disabled:opacity-50">
       <span className="relative block">{card.coverUrl && <QQImage src={card.coverUrl} className="aspect-[4/3] w-full object-contain transition duration-500 group-hover:scale-[1.015]" role="card" priority="visible" />}{card.typeTag && <span className="absolute left-2 top-2 max-w-[70%] truncate rounded bg-black/48 px-2 py-1 text-[10px] font-medium text-white">{card.typeTag}</span>}<span className="absolute bottom-2 right-2 flex h-8 w-8 items-center justify-center rounded-full bg-white text-black opacity-0 shadow-lg transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
-      <span className="block p-3"><span className="flex items-center gap-1.5"><span className="block min-w-0 truncate text-[13px] font-medium">{card.title}</span>{primarySong && <SongStateBadges song={primarySong} entitlement={entitlement} />}</span>{(card.reason || card.subtitle || card.content) && <span className="mt-1 block line-clamp-2 text-[11px] text-white/40">{card.reason || card.subtitle || card.content}</span>}<span className="mt-2 flex min-h-7 items-end gap-2"><span className="flex min-w-0 flex-1 flex-wrap gap-1">{(card.lowerTags.length > 0 ? card.lowerTags.map(tag => tag.tag) : card.countContent ? [card.countContent] : card.badges).slice(0, 3).map(label => <span key={label} className="max-w-full truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/48">{label}</span>)}</span><FlowFavoriteCount count={card.favoriteCount} active={card.isFavorite} /></span></span>
+      <span className="block p-3"><span className="flex items-center gap-1.5"><span className="block min-w-0 truncate text-[13px] font-medium">{card.title}</span>{primarySong && <SongStateBadges song={primarySong} entitlement={entitlement} />}</span>{(card.reason || card.subtitle || card.content) && <span className="mt-1 block line-clamp-2 text-[11px] text-white/40">{card.reason || card.subtitle || card.content}</span>}<span className="mt-2 flex min-h-7 items-end gap-2"><span className="flex min-w-0 flex-1 flex-wrap gap-1">{(card.lowerTags.length > 0 ? card.lowerTags.map(tag => tag.tag) : card.countContent ? [card.countContent] : card.badges).slice(0, 3).map(label => <span key={label} className="max-w-full truncate rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/48">{label}</span>)}</span>{card.favoriteCount ? <span className="shrink-0 text-[11px] text-white/35">{card.favoriteCount}人收藏</span> : null}</span></span>
       {loading && <span className="absolute inset-0 flex items-center justify-center bg-black/35"><Loader2 className="h-5 w-5 animate-spin" /></span>}
     </button>
   )
@@ -1128,7 +1129,7 @@ export default function QQExplorePage({
                       <span className="relative block aspect-square overflow-hidden rounded-lg bg-white/[0.05]"><QQImage src={card.coverUrl} className="h-full w-full object-cover transition duration-500 group-hover:scale-105" role="card" priority="visible" /><span className="absolute bottom-3 right-3 flex h-9 w-9 items-center justify-center rounded-full bg-white text-black opacity-0 transition group-hover:opacity-100"><Play className="h-3.5 w-3.5 fill-current" /></span></span>
                       <span className="mt-2 block line-clamp-2 text-sm font-medium">{card.title || '专属歌单'}</span>
                       {(card.reason || card.subtitle || card.content) && <span className="mt-1 block line-clamp-2 text-xs text-white/38">{card.reason || card.subtitle || card.content}</span>}
-                      <span className="mt-1 block">{card.favoriteCount && <FavoriteCountIcon count={card.favoriteCount} />}{card.badges.length > 0 && <span className="ml-1 inline-flex gap-2 align-top text-[11px] text-white/35">{card.badges.slice(0, 2).map(label => <span key={label}>{label}</span>)}</span>}</span>
+                      <span className="mt-1 block">{card.favoriteCount ? <span className="text-[11px] text-white/35">{card.favoriteCount}人收藏</span> : null}{card.badges.length > 0 && <span className="ml-1 inline-flex gap-2 align-top text-[11px] text-white/35">{card.badges.slice(0, 2).map(label => <span key={label}>{label}</span>)}</span>}</span>
                     </button>
                   ))}
                 </HorizontalShelf>

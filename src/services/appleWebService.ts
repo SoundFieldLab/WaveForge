@@ -403,6 +403,28 @@ function normalizeContentType(type: string): AppleWebItemType | null {
   return CONTENT_TYPES.includes(type) ? type as AppleWebItemType : null
 }
 
+/** 源图宽高比 < 0.6（明显横图，如电台的 4320×1080 合成图）时按 16:9 取图：
+ *  强制方裁（600×600 cc）会把烤在画面里的字标/标题裁掉（实测「国语流行电台」大卡的字被裁没）。 */
+const WIDE_SOURCE_ASPECT = 0.6
+
+const artworkUrlForCard = (attributes: any, size = 960): string => {
+  const url = attributes?.artwork?.url || ''
+  if (!url) return ''
+  const width = Number(attributes?.artwork?.width || 0)
+  const height = Number(attributes?.artwork?.height || 0)
+  const aspect = width > 0 && height > 0 ? height / width : 0
+  // 只有带 {c}（居中裁切位）的模板会被方裁；bb 模板本身保持比例不受影响。
+  // 注意 {w}x{h}{c} 与纯 {c} 两种形态都要接住：国语流行电台的模板是
+  // `…png/{w}x{h}{c}`（artworkAtSize 可替换），而部分宽图是 `…png/600x600cc`（数字已被填）。
+  const hasCropSlot = url.includes('{c}') || /\d+x\d+cc/i.test(url)
+  if (aspect > 0 && aspect < WIDE_SOURCE_ASPECT && hasCropSlot) {
+    // 先把数字形态还原成模板，再按 16:9 请求（960×540），避免居中方裁把字标裁掉
+    const templated = url.replace(/\d+x\d+(cc|bb|sr)/i, '{w}x{h}$1')
+    return artworkAtSize(templated, size, Math.round(size * 9 / 16))
+  }
+  return toHighResArtwork(url, size)
+}
+
 function itemize(resource: any, type: AppleWebItemType, preferredId?: string, displayKind?: string): AppleWebItem | null {
   const attributes = resource?.attributes || {}
   const presentation = extractEditorialPresentation(resource, displayKind)
@@ -442,7 +464,7 @@ function itemize(resource: any, type: AppleWebItemType, preferredId?: string, di
     description: displayString(notes?.tagline) || displayString(notes?.short) || attributes.description?.short || attributes.description?.standard || attributes.editorialNotes?.short || attributes.editorialNotes?.standard,
     artworkUrl: preferPlainArtwork
       ? (art(attributes) || presentation.artworkUrl)
-      : (presentation.artworkUrl || art(attributes)),
+      : (presentation.artworkUrl || artworkUrlForCard(attributes)),
     motionArtworkUrl: motion.video,
     motionPosterUrl: motion.poster,
     heroArtworkUrl: extractHeroArtwork(resource, 1200, displayKind),
@@ -559,10 +581,15 @@ function extractEditorialArtworkUrl(editorialArtwork: any, displayKind?: string,
     // 否则会把方图拉伸/裁切成竖版，反而失真。
     const node = typeof candidate === 'string' ? null : candidate
     const nodeAspect = node?.width && node?.height ? node.height / node.width : 0
-    const resolved = height && nodeAspect > 1.2
-      ? artworkAtSize(url, size, height)
-      : toHighResArtwork(url, size)
-    if (/^https?:\/\//.test(resolved)) return resolved
+    if (height && nodeAspect > 1.2) {
+      return artworkAtSize(url, size, height)
+    }
+    // 宽幅源图（电台的 4320×1080 合成图，字标/标题烤在画面里）按 16:9 请求，
+    // 方裁（600×600cc）会把构图裁掉（实测「国语流行电台」大卡的字被裁没）。
+    if (nodeAspect > 0 && nodeAspect < WIDE_SOURCE_ASPECT) {
+      return artworkAtSize(url, Math.max(size, 960), Math.round(Math.max(size, 960) * 9 / 16))
+    }
+    return toHighResArtwork(url, size)
   }
   return undefined
 }
@@ -890,6 +917,12 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
           linkedStationId = ''
         }
 
+        // 394 元素**自己带封面**（4320×1080 宽幅合成图，{w}x{h}{c} 模板）——节目卡显示的就是它。
+        // contents 里的 stations/radio-shows 常不带图（实测「电台主持人/艺人主持节目」整排无封面
+        // 就是因为只看 contents）。优先 394 自带图，回落 station 的普通封面。
+        const elementArtwork = showAttrs.artwork?.url
+          ? artworkAtSize(showAttrs.artwork.url, 960, 540)
+          : ''
         shows.push({
           ...(station || {}),
           id: station?.id || String(show.id || ''),
@@ -897,6 +930,8 @@ function parseEditorialSections(elements: any[], depth = 0, pageName = 'browse',
           type: station || linkedStationId ? 'stations' : 'radio-shows',
           name,
           tag: displayString(showAttrs.designTag) || undefined,
+          // 节目卡是 16:9 宽卡（客户端/官网同款）：封面按 960×540 取图，避免方裁把构图裁没
+          artworkUrl: elementArtwork || station?.artworkUrl || undefined,
           bannerUrl: showAttrs.artwork?.url ? bannerArtAt(showAttrs, 960, 540) : station?.bannerUrl,
           url: rawUrl || station?.url,
         })

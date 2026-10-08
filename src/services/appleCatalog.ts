@@ -172,20 +172,21 @@ export async function findPlayableAppleSong(track: {
   name: string
   artistName: string
   durationMs?: number
-}): Promise<Song | null> {
+}, options?: { sources?: MusicPlatform[] }): Promise<Song | null> {
   const normalizedTitle = normalizeMatch(track.name)
   const normalizedArtist = normalizeMatch(track.artistName)
   if (!normalizedTitle) return null
 
-  const [neteaseRes, qqRes] = await Promise.allSettled([
-    searchSongs(track.name, 15, 'netease'),
-    searchSongs(track.name, 15, 'qq'),
-  ])
+  // 搜索源可指定：默认网易云 + QQ；QQ 曲目补源时会换成网易云 + 酷狗
+  const sources = options?.sources?.length ? options.sources : (['netease', 'qq'] as MusicPlatform[])
+  const results = await Promise.allSettled(sources.map(source => searchSongs(track.name, 15, source)))
 
   // 载体平台 VIP 状态：非 VIP 时给 VIP 候选降权，优先选可完整播放的免费版本（避免 30 秒试听）
   const isCarrierVip = (platform: MusicPlatform) => {
-    if (platform === 'apple') return false
-    return localStorage.getItem(platform === 'netease' ? 'netease_vip' : 'qq_vip') === 'true'
+    if (platform === 'netease') return localStorage.getItem('netease_vip') === 'true'
+    if (platform === 'qq') return localStorage.getItem('qq_vip') === 'true'
+    if (platform === 'kugou') return localStorage.getItem('kugou_vip') === 'true'
+    return false
   }
 
   let best: Song | null = null
@@ -213,7 +214,7 @@ export async function findPlayableAppleSong(track: {
     }
   }
 
-  ;[neteaseRes, qqRes].forEach(result => {
+  results.forEach(result => {
     if (result.status !== 'fulfilled') return
     const songs = result.value?.songs
     if (Array.isArray(songs)) songs.forEach(consider)
@@ -248,14 +249,33 @@ export interface AppleLibraryTrack {
   albumName?: string
   artworkUrl?: string
   durationMs?: number
+  /** 流派（客户端资料库「歌曲」表的「类型」列；/me/library/songs 的 genreNames[0]） */
+  genreName?: string
+  /** 该账号的播放次数（客户端「播放次数」列；resource 带 playCount 时才有） */
+  playCount?: number
+  /** 加入资料库时间（客户端「最近添加」排序依据；resource 带 dateAdded 时才有） */
+  dateAdded?: number
 }
 
 /** 最近一次 me 请求的 HTTP 状态（0 = 网络错误）。用于把"端点不存在（404/405）"与
  *  "暂时性失败（网络抖动/超时）"区分开——前者应记住不再重试，后者不该降级。 */
 let lastAppleMeFetchStatus = 0
+/** 最近一次 me 请求失败的可读原因（成功时清空）。
+ *
+ *  为什么需要：`appleMeFetch` 非 strict 分支会把失败**静默降级成空列表**，
+ *  调用方只看到「拿到 0 条」——资料库页此前因此把「订阅失效（40015）」显示成
+ *  「空空如也」，用户无法判断是没数据还是没权限。现在失败原因会经
+ *  `describeAppleApiFailure` 统一解读（并顺带记录订阅失效证据）后留在这里，
+ *  页面据此渲染「订阅已失效 + 前往续订」而不是空态。 */
+let lastAppleMeFailureMessage = ''
 
 export function getLastAppleMeFetchStatus(): number {
   return lastAppleMeFetchStatus
+}
+
+/** 最近一次 me 请求的失败原因（无失败时为空串）。 */
+export function getLastAppleMeFailureMessage(): string {
+  return lastAppleMeFailureMessage
 }
 
 /** 带登录凭据的 amp-api「me」请求（需要 Developer Token + Media-User-Token） */
@@ -275,6 +295,8 @@ const appleMeFetch = async (path: string, strict = false): Promise<any | null> =
   })
   lastAppleMeFetchStatus = result.status
   if (!result.ok) {
+    // 统一解读失败原因并留档（非 strict 也会记录：调用方按「空列表 + 失败原因」渲染准确状态）
+    lastAppleMeFailureMessage = describeAppleApiFailure(result.status, result.data)
     if (result.status === 401 || result.status === 403) {
       forwardToBackend(`${path} HTTP ${result.status}：资料库无权限（token 失效或账号无 Apple Music 订阅）`)
     } else if (result.status === 0) {
@@ -284,11 +306,11 @@ const appleMeFetch = async (path: string, strict = false): Promise<any | null> =
     }
     if (strict) {
       // 统一解读：订阅失效（40015）与登录失效都走这里，给出可操作文案
-      const message = describeAppleApiFailure(result.status, result.data)
-      throw Object.assign(new Error(message), { status: result.status })
+      throw Object.assign(new Error(lastAppleMeFailureMessage), { status: result.status })
     }
     return null
   }
+  lastAppleMeFailureMessage = ''
   return result.data
 }
 
@@ -386,6 +408,12 @@ const mapAppleLibraryTrack = (item: any, includedById: Map<string, any>): AppleL
   const catalogRef = item?.relationships?.catalog?.data?.[0]
   const catalog = catalogRef?.id ? includedById.get(`${catalogRef.type || 'songs'}:${catalogRef.id}`) : null
   const catalogResource = catalog || catalogRef || {}
+  // 类型 / 播放次数 / 添加日期：客户端资料库「歌曲」表的三列。Apple 只在对应 resource 里
+  // 带这些字段时才读（缺就留空，界面按数据决定是否显示该列，不编造）。
+  const genreNames = Array.isArray(item?.attributes?.genreNames) ? item.attributes.genreNames
+    : Array.isArray(catalogResource?.attributes?.genreNames) ? catalogResource.attributes.genreNames : []
+  const playCount = Number(item?.attributes?.playCount ?? catalogResource?.attributes?.playCount)
+  const dateAdded = Date.parse(String(item?.attributes?.dateAdded || catalogResource?.attributes?.dateAdded || ''))
   return {
     id: String(item.id),
     catalogId: catalogRef?.id ? String(catalogRef.id) : undefined,
@@ -400,6 +428,9 @@ const mapAppleLibraryTrack = (item: any, includedById: Map<string, any>): AppleL
     albumName: item.attributes.albumName || catalogResource?.attributes?.albumName || undefined,
     artworkUrl: toHighResArtwork(item.attributes.artwork?.url || catalogResource?.attributes?.artwork?.url || ''),
     durationMs: item.attributes.durationInMillis || catalogResource?.attributes?.durationInMillis,
+    genreName: genreNames[0] || undefined,
+    playCount: Number.isFinite(playCount) ? playCount : undefined,
+    dateAdded: Number.isFinite(dateAdded) ? dateAdded : undefined,
   }
 }
 
@@ -668,7 +699,7 @@ export interface AppleCatalogPlaylist {
 /** Apple 编辑精选 / 热门歌单（RSS most-played playlists，免 token） */
 export async function getAppleEditorialPlaylists(country = 'cn', limit = 20): Promise<AppleCatalogPlaylist[]> {
   const items = await rssGet(country, `music/most-played/${Math.min(50, Math.max(1, limit))}/playlists.json`)
-  return items
+  const mapped = items
     .map((item: any): AppleCatalogPlaylist => ({
       id: String(item.id ?? ''),
       name: item.name ?? '',
@@ -677,6 +708,35 @@ export async function getAppleEditorialPlaylists(country = 'cn', limit = 20): Pr
       curatorName: item.curatorName ?? item.author?.name ?? undefined,
     }))
     .filter(playlist => playlist.name && playlist.id)
+  // RSS 的 artworkUrl100 对**部分歌单只有低清母版**（实拍：探索页主页「编辑精选歌单」里抖音热歌榜等封面发虚，
+  // 而同一歌单在「新发现」是清晰的）——新发现走目录接口，拿到的是 {w}x{h} 模板。
+  // 这里按 id 批量查一次目录，优先用目录的名称/策划/封面（模板 URL 会被 artwork 解析按需换尺寸）。
+  const ids = mapped.map(playlist => playlist.id).filter(id => /^pl\./.test(id))
+  if (ids.length === 0) return mapped
+  try {
+    const data = await appleCatalogFetch(
+      // 注意：该端点与 ids 同用时**不接受 limit 参数**（实测 400 `Limit may not be supplied on this request`）
+      `/v1/catalog/${encodeURIComponent(country)}/playlists?ids=${encodeURIComponent(ids.join(','))}`,
+      10000,
+    )
+    const byId = new Map<string, any>((Array.isArray(data?.data) ? data.data : []).map((item: any) => [String(item?.id ?? ''), item]))
+    if (byId.size === 0) return mapped
+    return mapped.map(playlist => {
+      const hit = byId.get(playlist.id)
+      const attributes = hit?.attributes
+      if (!attributes) return playlist
+      const artwork = typeof attributes.artwork?.url === 'string' ? attributes.artwork.url : ''
+      return {
+        ...playlist,
+        name: attributes.name || playlist.name,
+        curatorName: attributes.curatorName || playlist.curatorName,
+        artworkUrl: artwork || playlist.artworkUrl,
+        trackCount: attributes.trackCount ?? playlist.trackCount,
+      }
+    })
+  } catch {
+    return mapped
+  }
 }
 
 /** 最新/热门歌曲（iTunes RSS topsongs，免 token、CORS 全开） */
@@ -1519,6 +1579,8 @@ export function appleLibraryTrackToSong(track: AppleLibraryTrack): Song {
     },
     duration: track.durationMs || 0,
     platform: 'apple',
+    // 客户端资料库「歌曲」表的播放次数列：只在 resource 真带这个字段时透传
+    playCount: track.playCount,
     vip: false,
   }
 }
@@ -1550,13 +1612,18 @@ export async function resolveAppleLibraryCatalogId(libraryId: string): Promise<s
 export async function resolvePlayableSong(song: Song): Promise<Song | null> {
   if (!song) return null
   const platform = song.platform || 'netease'
-  if (platform === 'netease' || platform === 'qq') return song
+  // 网易云的补源由服务端解灰承担（入参是网易云歌曲 id），不在这里做同名匹配
+  if (platform === 'netease') return song
   const artistName = (song.artists || []).map(artist => artist.name).filter(Boolean).join(' ')
-  return findPlayableAppleSong({
+  // 载体搜索源排除自身平台；QQ 曲目此前完全没有补源，这里补上（网易云 + 酷狗）
+  const sources = (platform === 'qq' ? ['netease', 'kugou'] : ['netease', 'qq']) as MusicPlatform[]
+  const matched = await findPlayableAppleSong({
     name: song.name,
     artistName: artistName || song.name,
     durationMs: song.duration || undefined,
-  })
+  }, { sources })
+  // QQ 保持旧语义：没有可播载体时原样返回，由调用方决定提示
+  return matched ?? (platform === 'qq' ? song : null)
 }
 
 /** 目录搜索 → Song[]（SearchPanel 的 Apple 搜索用） */

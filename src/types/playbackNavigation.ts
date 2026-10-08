@@ -23,6 +23,8 @@ export type PlaybackSurface =
   | 'traditional-library'
   | 'traditional-album'
   | 'traditional-artist'
+  /** 汽水听歌模式：场景电台 / 探索卡片起的播（用于「切出看歌」后回到听歌模式页） */
+  | 'soda-scene'
 
 export interface PlaybackOrigin {
   mode?: ViewMode

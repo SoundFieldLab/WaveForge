@@ -1445,8 +1445,8 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
     entries: [
       {
         id: 'crossPlatformFallbackEnabled',
-        label: '网易云可用性增强',
-        description: '灰色歌曲自动跨平台匹配音源（可能存在版权风险）',
+        label: '平台可用性增强',
+        description: '官方未返回播放链接时跨平台匹配音源（可能存在版权风险）',
         control: { kind: 'toggle' },
         read: () => readBool('crossPlatformFallbackEnabled', false),
         write: (value) => { writeBool('crossPlatformFallbackEnabled', Boolean(value)); notifyGlobalSettingChanged() },

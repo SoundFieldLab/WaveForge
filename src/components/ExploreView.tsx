@@ -8,6 +8,7 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEnhanced } from '../tv/perfMode'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
+import { accountTierBadgeClass, getAccountTierBadge } from '../services/accountTier'
 import {
   AlertCircle,
   ArrowLeft,
@@ -76,6 +77,8 @@ import { preloadOnIdle } from '../utils/lazyPreload'
 import ScrollToTop from './ScrollToTop'
 import QQExplorePage from '../features/qqExplore/QQExplorePage'
 import NeteaseExplorePage from '../features/neteaseExplore/NeteaseExplorePage'
+import KugouExplorePage from '../features/kugouExplore/KugouExplorePage'
+import SodaExplorePage from '../features/traditionalPc/SodaExplorePage'
 import { shouldShowEntitlementBadge, type PlatformEntitlements } from '../utils/musicEntitlements'
 import CachedImage from './CachedImage'
 import { FrozenScope } from './frozenScope'
@@ -179,7 +182,7 @@ interface ExploreViewProps {
   onSeek: (time: number) => void
   onVolumeChange: (volume: number) => void
   onOpenPlayer: () => void
-  onOpenArtist?: (artistId: string, platform: ExplorePlatform) => void
+  onOpenArtist?: (artistId: string, platform: ExplorePlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: ExplorePlatform) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void | Promise<boolean>
@@ -555,7 +558,11 @@ const readExploreCache = (): Partial<Record<ExplorePlatform, ExplorePayload>> =>
 const COVER_WALL_CACHE_PREFIX = 'exploreCoverWallCovers-v1:'
 
 /** 有独立原生页面的平台；其余平台共用下面那套聚合首页。 */
-const DEDICATED_PLATFORMS: ReadonlySet<ExplorePlatform> = new Set(['qq', 'netease', 'apple'])
+// 有「专属探索页」的平台：这些平台不渲染下面的聚合首页（hero + 通用板块），
+// 而是各自挂自己的探索页组件（Apple→AppleExplorePanel，酷狗→KugouExplorePage，汽水→SodaExplorePage）。
+// 汽水于 2026-10-08 加入：它的探索页承载**手机端**内容（模式探索/为你推荐/适合「听」的视频/歌单广场），
+// 不再共用通用聚合模板。
+const DEDICATED_PLATFORMS: ReadonlySet<ExplorePlatform> = new Set(['qq', 'netease', 'apple', 'soda'])
 
 // —— 大对象缓存迁移（localStorage 配额问题）：聚合 payload / 封面墙列表可达数百 KB~MB，
 // 全部改写 IndexedDB（largeObjectCache），localStorage 只保留旧数据兼容读取，写入时逐键释放配额。
@@ -927,6 +934,8 @@ function ExploreView({
   }, [])
 
   const payload = dataByPlatform[platform]
+  /** 通用探索板块：汽水与酷狗各自有专属探索页，通用瀑布对它们整体让位 */
+  const genericExploreSections = platform !== 'kugou' && platform !== 'soda'
   const loggedIn = platform === 'qq' ? qqLoggedIn
     : platform === 'apple' ? appleLoggedIn
     : platform === 'spotify' ? spotifyLoggedIn
@@ -1231,7 +1240,17 @@ function ExploreView({
       case 'albums':
         return (payload?.albums.length || 0) > 0
       case 'channels':
-        return (payload?.channels.length || 0) > 0
+        // 酷狗频道上游对未订阅账号返回空列表：此时仍要显示板块（空态说明），其余平台保持原行为
+        return platform === 'kugou' ? Boolean(payload?.kugou) : (payload?.channels.length || 0) > 0
+      // 酷狗官方页签板块：数据在 payload.kugou 里，为空也要显示板块自己的空态/错误态
+      case 'kugouLibrary':
+      case 'kugouPlaylistTags':
+      case 'kugouCategories':
+        return Boolean(payload?.kugou)
+      // 听书板块自取数据（/concept/longaudio/daily，不走 payload），空态由板块自己渲染
+      case 'kugouLongaudio':
+        return platform === 'kugou'
+      // 「刷歌」(kugouYouth) 已下线：能力表不再包含该板块，这里恒 false 兜底旧偏好
       default:
         return true
     }
@@ -1769,7 +1788,15 @@ function ExploreView({
                   </span>
                 )}
                 <span className="hidden max-w-24 truncate xl:inline">{loggedIn ? displayName : '登录'}</span>
-                {vip && <Crown className="hidden h-3.5 w-3.5 text-amber-300 xl:block" />}
+                {vip && (
+                  <>
+                    <Crown className="hidden h-3.5 w-3.5 text-amber-300 xl:block" />
+                    {/* 会员级别区分：超级会员单独标注（探索模式账号区） */}
+                    <span className={`hidden rounded px-1 text-[9px] leading-[14px] xl:inline ${accountTierBadgeClass(getAccountTierBadge(platform)?.tone || 'vip')}`}>
+                      {getAccountTierBadge(platform)?.label || 'VIP'}
+                    </span>
+                  </>
+                )}
               </button>
             </div>
           </div>
@@ -1781,7 +1808,9 @@ function ExploreView({
             if (event.target instanceof HTMLImageElement) event.preventDefault()
           }}
         >
-          {platform !== 'qq' && platform !== 'netease' && (
+          {/* 旧版通用探索头（问候语 + 歌单栏）。汽水已有专属探索页 SodaExplorePage，
+              这里对汽水让位，否则会出现「两套头 + 两套歌单」重复渲染。 */}
+          {platform !== 'qq' && platform !== 'netease' && platform !== 'soda' && (
           <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
             <div>
               <div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-white/36">
@@ -1952,6 +1981,25 @@ function ExploreView({
             </FrozenScope.Provider>
             </div>
           )}
+          {/* 汽水探索页：承载**手机端**的探索内容（模式探索/为你推荐/适合「听」的视频/歌单广场/我的音乐），
+              版式按桌面宽屏独立设计，不用通用瀑布模板。已剔除广告类板块（福利/活动中心/会员任务）。 */}
+          {platform === 'soda' && (
+          <SodaExplorePage
+            accent={accent}
+            isDark={playerTheme === 'dark'}
+            active={!suspended}
+            loggedIn={loggedIn}
+            username={username}
+            currentSong={currentSong}
+            isPlaying={isPlaying}
+            onPlaySongs={(song, songs) => playExploreCollection(song, songs)}
+            onOpenPlaylist={playlist => void handlePlaylist(playlist)}
+            onOpenSearch={onSearchClick}
+            onLoginClick={() => onProfileClick('soda')}
+            authRevision={authRevision}
+          />
+          )}
+
           {/* Spotify / 酷狗 / 汽水共用这套聚合首页：数据按平台存在 dataByPlatform 里，
               切回不重新请求，只是重建一次 DOM。 */}
           {!DEDICATED_PLATFORMS.has(platform) && (
@@ -2062,7 +2110,40 @@ function ExploreView({
               </section>
 
               <div className="flex flex-col gap-12">
-              {sectionVisible('discover') && (
+              {/* 酷狗探索页一级分区（音乐 / 听书 / 刷歌，含独立听书播放器与刷歌全屏页）：
+                  只在 kugou 下挂载；内部不再铺通用板块瀑布。其余平台走各自原路径，一个像素都不变 */}
+              {platform === 'kugou' && (
+              <KugouExplorePage
+                payload={payload}
+                accent={accent}
+                accentRgb={accentRgb}
+                compactCards={compactCards}
+                showDescriptions={showSectionDescriptions}
+                expandedHome={expandedHome}
+                exploreCardBg={exploreCardBg}
+                showSubtitles={showSectionDescriptions}
+                sectionStyle={sectionStyle}
+                sectionVisible={sectionVisible}
+                onPlaySongs={(song, songs, continuous) => playExploreCollection(song, songs, continuous)}
+                onSongSelect={onSongSelect}
+                onOpenPlaylist={(playlist, autoplay) => void handlePlaylist(playlist, autoplay)}
+                onOpenAlbum={onOpenAlbum}
+                onOpenArtist={onOpenArtist}
+                onSongContextMenu={(event, song, songs) => openSongContextMenu(event, song, songs)}
+                onOpenMoreSection={setMoreSection}
+                onOpenSearch={query => {
+                  if (query) {
+                    sessionStorage.setItem('waveforge_search_keyword', query)
+                    sessionStorage.setItem('waveforge_search_platform', 'kugou')
+                    sessionStorage.setItem('waveforge_search_searched', 'false')
+                  }
+                  onSearchClick()
+                }}
+                onRetry={() => setRefreshKey(key => key + 1)}
+              />
+              )}
+
+              {sectionVisible('discover') && genericExploreSections && (
               <section style={sectionStyle('discover')}>
                 <SectionHeading
                   icon={<Sparkles className="h-5 w-5" />}
@@ -2073,17 +2154,10 @@ function ExploreView({
                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 min-[1900px]:grid-cols-5">
                   {[
                     {
-                      // 汽水登录态下后端返回个性化日推（payload.personalized），
-                      // 标题体现「汽水·每日推荐」；未登录为公开热歌回退，文案如实标注
-                      label: payload.dailySongs.length
-                        ? (platform === 'soda' && payload.personalized ? '汽水·每日推荐' : '每日推荐')
-                        : '今日热选',
-                      title: payload.dailySongs.length
-                        ? (platform === 'soda' && !payload.personalized ? '汽水实时热门歌曲' : '只属于你的每日歌单')
-                        : '今天大家都在听',
-                      copy: payload.dailySongs.length
-                        ? (platform === 'soda' && !payload.personalized ? '登录汽水音乐后升级为个性化日推' : '根据近期口味持续更新')
-                        : '无需登录，也能发现好音乐',
+                      // 汽水已有专属探索页（SodaExplorePage），不走这里的通用板块；下面保留纯通用文案。
+                      label: payload.dailySongs.length ? '每日推荐' : '今日热选',
+                      title: payload.dailySongs.length ? '只属于你的每日歌单' : '今天大家都在听',
+                      copy: payload.dailySongs.length ? '根据近期口味持续更新' : '无需登录，也能发现好音乐',
                       icon: Sparkles,
                       cover: payload.dailySongs[1]?.album.picUrl || payload.newSongs[0]?.album.picUrl,
                       songs: payload.dailySongs.length ? payload.dailySongs : payload.newSongs,
@@ -2160,7 +2234,8 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('playlists') && (
+              {/* 酷狗已把通用聚合板块收进「音乐」分区（KugouExplorePage），这里对酷狗让位 */}
+              {sectionVisible('playlists') && genericExploreSections && (
               <section style={sectionStyle('playlists')}>
                 <SectionHeading
                   icon={<Headphones className="h-5 w-5" />}
@@ -2213,7 +2288,7 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('charts') && (
+              {sectionVisible('charts') && genericExploreSections && (
               <section style={sectionStyle('charts')}>
                 <SectionHeading
                   icon={<Trophy className="h-5 w-5" />}
@@ -2280,7 +2355,7 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('newSongs') && (
+              {sectionVisible('newSongs') && genericExploreSections && (
               <section style={sectionStyle('newSongs')}>
                 <SectionHeading
                   icon={<Music2 className="h-5 w-5" />}
@@ -2317,7 +2392,7 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('albums') && (
+              {sectionVisible('albums') && genericExploreSections && (
               <section style={sectionStyle('albums')}>
                 <SectionHeading
                   icon={<Disc3 className="h-5 w-5" />}
@@ -2346,7 +2421,8 @@ function ExploreView({
               </section>
               )}
 
-              {sectionVisible('channels') && (
+              {/* 酷狗频道由 KugouExploreSections 单独渲染（含未订阅空态），不走这里的通用播客卡片 */}
+              {sectionVisible('channels') && genericExploreSections && (
               <section style={sectionStyle('channels')}>
                 <SectionHeading
                   icon={<Radio className="h-5 w-5" />}
@@ -2550,7 +2626,12 @@ function ExploreView({
             // 按歌单归属平台分发：汽水歌单走 subscribePlaylist 的汽水分支（collection 收藏/取消），
             // 其余平台沿用原路径；歌单缺平台标记时回退当前探索平台（网易云等行为不变）
             const targetPlatform = playlist.platform || platform
-            void subscribePlaylist(key, subscribe, targetPlatform).then(result => {
+            // 酷狗收藏需要歌单归属（global_collection_id 里的 uid/listid），随歌单卡片一起传入；
+            // 其它平台忽略这些附加 meta，行为不变
+            void subscribePlaylist(key, subscribe, targetPlatform, {
+              name: String((playlist as { name?: string }).name || ''),
+              conceptId: String((playlist as { conceptId?: string }).conceptId || ''),
+            }).then(result => {
               const success = result?.code === 200 || result?.result === 200 || result?.data?.code === 200
               if (!success) throw new Error(result?.message || result?.error || '歌单收藏操作失败')
               window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: subscribe ? '已收藏歌单' : '已取消收藏', type: 'success' } }))
@@ -2570,7 +2651,9 @@ function ExploreView({
           canDelete={false}
           canSubscribe={(playlist.platform === 'soda'
             ? sodaLoggedIn
-            : neteaseLoggedIn && Boolean(neteaseUserId))
+            : playlist.platform === 'kugou'
+              ? kugouLoggedIn
+              : neteaseLoggedIn && Boolean(neteaseUserId))
             && !isPlaylistOwner(playlist, { neteaseUserId })}
           canShare
         />
@@ -2632,7 +2715,7 @@ function ExploreView({
             }
             const artist = song.artists[0]
             const identifier = song.platform === 'qq' ? artist?.mid || artist?.id : artist?.id
-            if (identifier) onOpenArtist?.(String(identifier), menuPlatform)
+            if (identifier) onOpenArtist?.(String(identifier), menuPlatform, artist?.name || '')
           }}
           onCopyInfo={onCopyInfo}
           onDislike={handleDislike}
