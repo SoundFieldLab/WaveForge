@@ -36,6 +36,7 @@ import {
   WATCH_SETTINGS_EVENT,
   resolveBiliPic,
   formatBiliTime,
+  decodeBiliTitle,
   type MatchContext,
   type CandidateScore,
   type CandidateType,
@@ -47,6 +48,7 @@ import type { TransitionVisualStore } from '../audio/transitionVisualStore'
 import {
   ensureMvAlignment,
   getMvAlignmentFor,
+  probeCandidateIdentities,
   prewarmMvBeatAnalysis,
   MIN_ALIGNMENT_CONFIDENCE,
 } from '../services/mvAlignment'
@@ -902,6 +904,8 @@ export default memo(function BilibiliMvBackground({
           signal: controller.signal,
           // CC 字幕验证：同步取已加载歌词（含翻译），没加载就不等——命中缓存后零网络升级
           lyricsProvider: () => flattenLyricLinesForMatch(lyricsRef.current),
+          // 候选同一性复核：用当前歌音频包络否决"分数相近但选了另一版录音"的候选（与对齐共用解码缓存）
+          identityProbe: (candidates) => probeCandidateIdentities(candidates, getAudioRef.current()?.src || '', controller.signal),
         })
         if (!isCurrentSearch()) return
         const svBgLog = (msg: string) => { void window.electron?.automixLog?.('MvAlign', msg)?.catch?.(() => undefined) }
@@ -1768,7 +1772,7 @@ export default memo(function BilibiliMvBackground({
                     </span>
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-xs font-medium" style={{ color: dark ? '#fff' : '#000' }}>{c.video.title}</div>
+                    <div className="truncate text-xs font-medium" style={{ color: dark ? '#fff' : '#000' }}>{decodeBiliTitle(c.video.title)}</div>
                     <div className="mt-0.5 flex items-center gap-2 truncate text-[10px]" style={{ color: dark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)' }}>
                       <span className="truncate">{c.video.author}</span>
                       <span className="flex shrink-0 items-center gap-0.5"><Clock className="h-2.5 w-2.5" />{formatBiliTime(c.video.duration)}</span>
