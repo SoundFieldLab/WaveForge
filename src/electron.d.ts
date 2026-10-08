@@ -408,11 +408,17 @@ export interface ElectronAPI {
     openLauncherTarget: (target: string, kind: 'app' | 'folder' | 'url') => Promise<{ success: boolean; error?: string }>
   }
   openQQLoginWindow: () => Promise<{ success: boolean; cookie?: string; error?: string }>
+  /** QQ 音乐扫码登录（应用内二维码；channel: 'qq'=手机QQ扫 / 'wx'=微信扫 / 'qqmusic'=QQ音乐App扫） */
+  qqQrLoginStart: (channel?: 'qq' | 'wx' | 'qqmusic') => Promise<{ success: boolean; image?: string; error?: string }>
+  qqQrLoginPoll: () => Promise<{ status: 'waiting' | 'scanned' | 'expired' | 'success' | 'error' | 'cancelled'; cookie?: string; message?: string }>
+  qqQrLoginCancel: () => Promise<{ success: boolean }>
   openQQSkillKeyWindow: () => Promise<{ success: boolean; apiKey?: string; error?: string }>
   /** Apple Music 网页一键登录：内置窗口登录 Apple ID，自动抓取 media-user-token 与 Developer Token */
   appleLogin: () => Promise<{ success: boolean; mediaUserToken?: string; developerToken?: string; name?: string; email?: string; realName?: string; avatar?: string; billingAddress?: string; country?: string; paymentType?: string; accountBalance?: string; birthday?: string; language?: string; twoFactor?: string; trustedDevices?: string; passwordUpdated?: string; notificationEmail?: string; signInWithApple?: string; devices?: Array<{ name: string; model: string; icon?: string }>; icons?: Record<string, string>; error?: string }>
   /** Apple Music 登出：关闭登录窗口并清除专用网页会话与落盘 Cookie */
   appleLogout?: () => Promise<{ success: boolean; error?: string }>
+  /** Apple Music 订阅购买窗口（与客户端一致：打开 finance-app.itunes.apple.com/subscribe 的站内窗口） */
+  appleSubscribe?: () => Promise<{ success: boolean; error?: string }>
   /** 从 Apple 网页前端资源获取可用的 Developer Token（免密钥，约 70 天有效） */
   appleFetchDevToken: () => Promise<{ success: boolean; token?: string; expiresAt?: number; error?: string }>
   /** Apple 播放面 bridge（WebView2 原生源）：主进程拉起 apple_bridge.py（幂等） */

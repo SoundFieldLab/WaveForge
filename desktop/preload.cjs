@@ -282,6 +282,11 @@ contextBridge.exposeInMainWorld('electron', {
   
   // QQ 音乐登录
   openQQLoginWindow: () => ipcRenderer.invoke('open-qq-login-window'),
+  // QQ 音乐扫码登录（应用内出示二维码，主进程完成；
+  // channel: 'qq'=手机QQ扫 / 'wx'=微信扫 / 'qqmusic'=QQ音乐 App 扫，与网页登录二选一）
+  qqQrLoginStart: (channel) => ipcRenderer.invoke('qq-qr-login-start', ['qq', 'wx', 'qqmusic'].includes(channel + '') ? channel + '' : 'qq'),
+  qqQrLoginPoll: () => ipcRenderer.invoke('qq-qr-login-poll'),
+  qqQrLoginCancel: () => ipcRenderer.invoke('qq-qr-login-cancel'),
   // 酷狗音乐登录（Electron 弹窗扫码，抓 kg_token/KuGoo）
   openKugouLoginWindow: () => ipcRenderer.invoke('open-kugou-login-window'),
   clearKugouSession: () => ipcRenderer.invoke('kugou-clear-session'),
@@ -332,6 +337,8 @@ contextBridge.exposeInMainWorld('electron', {
   appleLogin: () => ipcRenderer.invoke('apple-login'),
   // Apple Music 登出：关闭登录窗口并清除专用网页会话与落盘 Cookie
   appleLogout: () => ipcRenderer.invoke('apple-logout'),
+  // Apple Music 订阅购买窗口（与客户端一致：站内窗口打开 Apple 商店订阅页）
+  appleSubscribe: () => ipcRenderer.invoke('apple-subscribe'),
   // 从 Apple 网页前端资源获取可用的 Developer Token（免密钥，约 70 天有效）
   appleFetchDevToken: () => ipcRenderer.invoke('apple-fetch-dev-token'),
   // amp-api 代理：渲染进程浏览器直连会被 CORS 拦截，改由主进程请求

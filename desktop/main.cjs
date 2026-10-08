@@ -2265,29 +2265,87 @@ function broadcastTaskbarWidgetSettings() {
 
 // 系统托盘（通知区域）左缘测量：Windows 下查询 TrayNotifyWnd 的物理像素矩形。
 // 右侧定位需要「紧贴托盘外侧」，固定留白在托盘宽度变化时会叠进托盘，故按真实托盘位置计算。
-let taskbarTrayCache = null // { left, right } 物理像素
+let taskbarTrayCache = null // { left, right, displayId } 物理像素 + 测量时所在显示器
 let taskbarTrayCacheAt = 0
 let taskbarTrayRequest = null
 const TASKBAR_TRAY_CACHE_MS = 30000
-// 托盘不可测时靠右贴齐：留 12px 边距
+// 托盘从未测出来时的兜底：靠右贴齐留 4% 屏宽
 const TASKBAR_TRAY_FALLBACK_RATIO = 0.04
+/**
+ * 上一帧量到的任务栏厚度（DIP）。
+ * 任务栏自动隐藏时 workArea === bounds，四边差全为 0，此时旧实现会掉进「贴屏幕底部、高 40」
+ * 的兜底分支——控件就浮在桌面底边上而不是任务栏里。留着上一帧的厚度可以让它留在原带内。
+ */
+let taskbarLastBandHeight = 0
+
+/**
+ * 找真正承载任务栏的那块显示器。
+ *
+ * 旧实现全程写死 `screen.getPrimaryDisplay()`：多显示器且任务栏被挪到副屏时，
+ * 控件会被摆到主屏的「伪任务栏带」上（主屏根本没有任务栏）——这是位置错位的主因之一。
+ *
+ * 判定优先级：
+ *   1) workArea 与 bounds 四边有差异的那块屏（任务栏正常显示时最可靠）；
+ *   2) 任务栏窗口（Shell_TrayWnd）自己落在哪块屏 —— 任务栏自动隐藏时 workArea 无差异，
+ *      只能靠这个；旧实现这里退回「光标所在屏」，结果控件会跟着鼠标跑到另一块屏上；
+ *   3) 主屏兜底。
+ */
+function getTaskbarHostDisplay() {
+  const { screen } = require('electron')
+  try {
+    const displays = screen.getAllDisplays()
+    const withBand = displays.find(display => {
+      const b = display.bounds
+      const w = display.workArea
+      return w.x !== b.x || w.y !== b.y || w.width !== b.width || w.height !== b.height
+    })
+    if (withBand) return withBand
+    const taskbarRect = taskbarWindowRectCache
+    if (taskbarRect) {
+      const center = screen.screenToDipPoint({
+        x: Math.round((taskbarRect.left + taskbarRect.right) / 2),
+        y: Math.round((taskbarRect.top + taskbarRect.bottom) / 2),
+      })
+      if (center) return screen.getDisplayNearestPoint(center)
+    }
+    return screen.getPrimaryDisplay()
+  } catch {
+    return screen.getPrimaryDisplay()
+  }
+}
+
+let taskbarWindowRectCache = null // { left, top, right, bottom } 物理像素
 
 function fetchTaskbarTrayRectPhysical() {
   if (taskbarTrayRequest) return taskbarTrayRequest
   const script = [
     `Add-Type -TypeDefinition 'using System;using System.Runtime.InteropServices;public class T{[DllImport("user32.dll")]public static extern IntPtr FindWindow(string c,string t);[DllImport("user32.dll")]public static extern IntPtr FindWindowEx(IntPtr p,IntPtr c,string cn,string tn);[DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out R r);public struct R{public int L,T,Rt,B;}}'`,
     `$t=[T]::FindWindow('Shell_TrayWnd',$null)`,
+    // 任务栏本体矩形：任务栏自动隐藏时只有它能指出「任务栏在哪块屏」
+    `$tr=New-Object T+R;[T]::GetWindowRect($t,[ref]$tr)|Out-Null`,
     `$n=[T]::FindWindowEx($t,[IntPtr]::Zero,'TrayNotifyWnd',$null)`,
-    `if($n -eq [IntPtr]::Zero){'none'}else{$r=New-Object T+R;[T]::GetWindowRect($n,[ref]$r)|Out-Null;"$($r.L),$($r.Rt)"}`,
+    `if($n -eq [IntPtr]::Zero){"$($tr.L),$($tr.T),$($tr.Rt),$($tr.B),none"}else{$r=New-Object T+R;[T]::GetWindowRect($n,[ref]$r)|Out-Null;"$($tr.L),$($tr.T),$($tr.Rt),$($tr.B),$($r.L),$($r.Rt)"}`,
   ].join(';')
   taskbarTrayRequest = new Promise(resolve => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 3000 }, (error, stdout) => {
       taskbarTrayRequest = null
       if (error) return resolve(null)
       const lines = String(stdout || '').trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean)
-      const match = (lines[lines.length - 1] || '').match(/^(-?\d+),(-?\d+)$/)
-      if (!match) return resolve(null)
-      const rect = { left: Number(match[1]), right: Number(match[2]) }
+      const parts = (lines[lines.length - 1] || '').split(',').map(part => part.trim())
+      if (parts.length < 5) return resolve(null)
+      taskbarWindowRectCache = {
+        left: Number(parts[0]),
+        top: Number(parts[1]),
+        right: Number(parts[2]),
+        bottom: Number(parts[3]),
+      }
+      if (parts[4] === 'none') {
+        // 任务栏本体测到了、托盘没测到（纯净任务栏/被精简）：保留旧托盘缓存，别把它清掉
+        resolve(taskbarTrayCache || null)
+        return
+      }
+      const host = getTaskbarHostDisplay()
+      const rect = { left: Number(parts[4]), right: Number(parts[5]), displayId: host && host.id }
       taskbarTrayCache = rect
       taskbarTrayCacheAt = Date.now()
       resolve(rect)
@@ -2296,18 +2354,34 @@ function fetchTaskbarTrayRectPhysical() {
   return taskbarTrayRequest
 }
 
-function getTaskbarTrayLeftDip() {
-  if (taskbarTrayCache && Date.now() - taskbarTrayCacheAt < TASKBAR_TRAY_CACHE_MS) {
-    const { screen } = require('electron')
-    const scale = screen.getPrimaryDisplay().scaleFactor || 1
-    return Math.round(taskbarTrayCache.left / scale)
-  }
-  return null
+function isTaskbarTrayStale() {
+  return !taskbarTrayCache || Date.now() - taskbarTrayCacheAt >= TASKBAR_TRAY_CACHE_MS
 }
 
-/** 托盘缓存失效时后台刷新，完成后重新贴边（托盘图标增减导致宽度变化也能跟上） */
+/**
+ * 托盘左缘（DIP）。
+ *
+ * 关键修复：**过期不再返回 null**。旧实现在缓存过 30s 后返回 null，调用方随即掉进
+ * 「右边留 4% 屏宽」的兜底公式——而那个 x 与「紧贴托盘左侧」差着好几百像素，
+ * 于是控件每过 30 秒就跳到另一个位置，直到某个设置/显示器事件顺带触发重测才复位。
+ * 这就是用户看到的「有时候位置错位」。
+ * 现在：有历史测量就一直用它定位（后台异步刷新），只有「从未测到过」才走兜底。
+ */
+function getTaskbarTrayLeftDip() {
+  if (!taskbarTrayCache) return null
+  const { screen } = require('electron')
+  const host = getTaskbarHostDisplay()
+  // 显示器换了（含 DPI 不同）→ 缓存作废；物理→DIP 必须用任务栏所在屏的缩放比，
+  // 旧实现用主屏缩放比，副屏 DPI 不同时横向位置会整体偏掉。
+  if (taskbarTrayCache.displayId !== undefined && host && taskbarTrayCache.displayId !== host.id) return null
+  const scale = (host && host.scaleFactor) || 1
+  return Math.round(taskbarTrayCache.left / scale)
+}
+
+/** 托盘位置过期时后台重测；测完重新贴边（托盘图标增减导致宽度变化也能跟上） */
 function refreshTaskbarTray() {
-  if (getTaskbarTrayLeftDip() !== null) return Promise.resolve(taskbarTrayCache)
+  if (!isTaskbarTrayStale()) return Promise.resolve(taskbarTrayCache)
+  // 用 fetch 内部在飞的 Promise 去重，避免同一轮里重复起 powershell
   return fetchTaskbarTrayRectPhysical().then(rect => {
     if (rect) dockTaskbarWidgetWindow()
     return rect
@@ -2316,7 +2390,8 @@ function refreshTaskbarTray() {
 
 function getTaskbarWidgetPosition() {
   const { screen } = require('electron')
-  const display = screen.getPrimaryDisplay()
+  // 用真正带任务栏的那块屏（旧实现写死主屏，多屏时直接错到另一块屏上）
+  const display = getTaskbarHostDisplay()
   const bounds = display.bounds // 含任务栏的完整屏幕区域
   const workArea = display.workArea
   const width = taskbarWidgetSettings.width
@@ -2339,22 +2414,29 @@ function getTaskbarWidgetPosition() {
 
   if (taskbarBottom > 0) {
     // 底部任务栏（Windows 11 默认）
+    taskbarLastBandHeight = taskbarBottom
     return { x: horizontalX, y: Math.round(bounds.y + bounds.height - taskbarBottom), width, height: taskbarBottom }
   }
   if (taskbarTop > 0) {
     // 顶部任务栏
+    taskbarLastBandHeight = taskbarTop
     return { x: horizontalX, y: Math.round(bounds.y), width, height: taskbarTop }
   }
   if (taskbarLeft > 0) {
     // 左侧任务栏：竖条贴左缘（内容仍按横向布局，长度取用户宽度）
+    taskbarLastBandHeight = taskbarLeft
     return { x: Math.round(bounds.x), y: Math.round(bounds.y + (bounds.height - width) / 2), width: taskbarLeft, height: width }
   }
   if (taskbarRight > 0) {
     // 右侧任务栏：竖条贴右缘
+    taskbarLastBandHeight = taskbarRight
     return { x: Math.round(bounds.x + bounds.width - taskbarRight), y: Math.round(bounds.y + (bounds.height - width) / 2), width: taskbarRight, height: width }
   }
-  // 无任务栏/自动隐藏：贴底部
-  return { x: Math.round(bounds.x + (bounds.width - width) / 2), y: Math.round(bounds.y + bounds.height - 40), width, height: 40 }
+  // 任务栏自动隐藏 / 被全屏遮挡：workArea === bounds，四边差全为 0。
+  // 旧实现固定贴「屏幕底部、高 40」，控件就浮在桌面底边上（用户看到的另一种错位）。
+  // 现在沿用上一帧量到的任务栏厚度，让它留在原本那条带里；完全没量到过才退回 40。
+  const bandHeight = taskbarLastBandHeight > 0 ? taskbarLastBandHeight : 40
+  return { x: horizontalX, y: Math.round(bounds.y + bounds.height - bandHeight), width, height: bandHeight }
 }
 
 function dockTaskbarWidgetWindow() {
@@ -2455,6 +2537,10 @@ function updateTaskbarWidget() {
   }
   bindTaskbarDisplayMetrics()
   bindTaskbarThemeSync()
+  // 托盘左缘是有 TTL 的测量值：过期就后台重测并在测完后重新贴边。
+  // 旧实现只在设置/显示器事件里刷新，平时没人管——托盘图标增减后控件会一直歪着，
+  // 必须借这条每秒都会跑的推送路径自愈。
+  if (isTaskbarTrayStale()) void refreshTaskbarTray()
   const hasSong = Boolean(desktopPlayerState.song?.name)
   // 开启时始终显示（冷启动无歌时显示品牌名），关闭/用户手动关闭才隐藏
   if (!taskbarWidgetSettings.enabled || taskbarWidgetClosedByUser) {
@@ -2666,7 +2752,13 @@ ipcMain.handle('taskbar-widget:update-settings', (_event, partial) => {
   loadTaskbarWidgetSettings()
   taskbarWidgetSettings = sanitizeTaskbarWidgetSettings(partial || {}, taskbarWidgetSettings)
   saveTaskbarWidgetSettings()
-  dockTaskbarWidgetWindow()
+  // 窗口尚未创建时 dock 是空操作（内部 early-return）。若这次设置把 enabled 打开了，
+  // 必须走 updateTaskbarWidget 才会真正建窗——否则「改设置打开」会静默不生效。
+  if (taskbarWidgetSettings.enabled && !taskbarWidgetClosedByUser) {
+    updateTaskbarWidget()
+  } else {
+    dockTaskbarWidgetWindow()
+  }
   broadcastTaskbarWidgetSettings()
   return getTaskbarWidgetSettings()
 })
@@ -5223,6 +5315,343 @@ ipcMain.handle('hse-save-rendered-audio', guardTrustedIpc('privileged', async (_
 }))
 
 
+// ── QQ 音乐扫码登录（双通道，主进程完成）──
+// 通道 qq：ptlogin2 二维码（手机 QQ 扫）→ 确认后回跳落 y.qq.com 会话 cookie
+// 通道 wx：微信开放平台 qrconnect（微信扫）→ 确认后带 code 回跳 y.qq.com 落 cookie
+// （Folia 的 qq 通道走 MQTT、wx 通道就是下面这套 web OAuth；这里 qq 通道改用同终点的 ptlogin2 流程）
+const QQ_QR_APPID = '716027609'
+const QQ_QR_DAID = '383'
+const QQ_QR_3RD_AID = '100497308'
+const QQ_QR_XLOGIN_URL = `https://xui.ptlogin2.qq.com/cgi-bin/xlogin?appid=${QQ_QR_APPID}&daid=${QQ_QR_DAID}&style=33&hide_title_bar=1&hide_border=1&target=self&s_url=${encodeURIComponent('https://y.qq.com')}&pt_3rd_aid=${QQ_QR_3RD_AID}`
+const WX_QR_APP_ID = 'wx48db31d50e334801'
+const WX_QR_REDIRECT_URI = 'https://y.qq.com/portal/wx_redirect.html?login_type=2&surl=https://y.qq.com/'
+const WX_QR_STYLE_HREF = 'https://y.qq.com/mediastyle/music_v17/src/css/popup_wechat.css#wechat_redirect'
+const WX_QR_POLL_BUDGET_MS = 1400 // 微信长轮询会挂住连接，用超时预算把它切成短轮询
+
+let qqQrSession = null // { channel, qrsig, ptqrtoken, wxUuid, lastCode, status, finishing, cancelled }
+let qqQrHiddenWindow = null
+// QQ 音乐 App 扫码通道（MQTT 推送 + musicu 换凭据）：实例惰性创建，cancel/重开时清理
+let qqMusicQrLogin = null
+
+/** QQ ptlogin2 的 hash33（qrsig → ptqrtoken） */
+function qqQrHash33(input) {
+  let acc = 0
+  const text = String(input || '')
+  for (let i = 0; i < text.length; i += 1) {
+    acc += (acc << 5) + text.charCodeAt(i)
+  }
+  return 2147483647 & acc
+}
+
+/** 从 net.request 响应头里取指定 Set-Cookie 的值（headers['set-cookie'] 可能是数组或单值） */
+function qqQrExtractSetCookie(headers, name) {
+  const raw = headers && (headers['set-cookie'] || headers['Set-Cookie'])
+  const list = Array.isArray(raw) ? raw : (raw ? [raw] : [])
+  for (const entry of list) {
+    const first = String(entry).split(';', 1)[0]
+    const idx = first.indexOf('=')
+    if (idx > 0 && first.slice(0, idx).trim() === name) return first.slice(idx + 1).trim()
+  }
+  return ''
+}
+
+/** 带会话 Cookie 罐的 GET（Electron net.request）。
+ *  注意：不要设置 Referer —— Chromium 网络层会以 invalid referrer 拦掉 ptlogin2 的请求
+ *  （ERR_BLOCKED_BY_CLIENT），ptqrshow/ptqrlogin 本身允许无 Referer。 */
+function qqQrNetGet(url, targetSession, extraHeaders) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    try {
+      const request = net.request({ method: 'GET', url, session: targetSession })
+      request.setHeader('User-Agent', REAL_CHROME_UA)
+      Object.entries(extraHeaders || {}).forEach(([k, v]) => request.setHeader(k, v))
+      request.on('response', (response) => {
+        const chunks = []
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        response.on('end', () => {
+          if (settled) return
+          settled = true
+          resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks) })
+        })
+      })
+      request.on('error', (error) => {
+        if (settled) return
+        settled = true
+        reject(error)
+      })
+      request.end()
+    } catch (error) {
+      reject(error)
+    }
+  })
+}
+
+/** 带超时预算的 GET：微信长轮询会挂住连接，到点主动 abort 当成「暂无变化」 */
+function qqQrNetGetTextWithBudget(url, targetSession, budgetMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    try {
+      const request = net.request({ method: 'GET', url, session: targetSession })
+      request.setHeader('User-Agent', REAL_CHROME_UA)
+      request.setHeader('Accept', '*/*')
+      const chunks = []
+      const timer = setTimeout(() => { if (!settled) { settled = true; try { request.abort() } catch { /* 忽略 */ } resolve(Buffer.concat(chunks).toString('utf8')) } }, budgetMs)
+      request.on('response', (response) => {
+        response.on('data', chunk => chunks.push(Buffer.from(chunk)))
+        response.on('end', () => { if (settled) return; settled = true; clearTimeout(timer); resolve(Buffer.concat(chunks).toString('utf8')) })
+      })
+      request.on('error', (error) => { if (settled) { return } settled = true; clearTimeout(timer); reject(error) })
+      request.end()
+    } catch (error) { reject(error) }
+  })
+}
+function destroyQqQrHiddenWindow() {
+  if (qqQrHiddenWindow && !qqQrHiddenWindow.isDestroyed()) qqQrHiddenWindow.destroy()
+  qqQrHiddenWindow = null
+}
+
+/** 读取 .qq.com 会话里的登录 cookie 串（与网页登录窗口同一判定） */
+async function readQqSessionCookie(targetSession) {
+  const cookies = await targetSession.cookies.get({ domain: '.qq.com' })
+  const hasUserId = cookies.some(c => c.name === 'uin' || c.name === 'wxuin')
+  const hasMusicKey = cookies.some(c => c.name === 'qm_keyst' || c.name === 'qqmusic_key')
+  if (!hasUserId || !hasMusicKey) return ''
+  return cookies.map(c => `${c.name}=${c.value}`).join('; ')
+}
+
+/** 扫码成功后：隐藏窗口打开回跳 URL，等待 y.qq.com 会话 cookie 落盘 */
+async function finishQqQrLogin(session_, redirectUrl) {
+  destroyQqQrHiddenWindow()
+  const win = new BrowserWindow({
+    show: false,
+    width: 480,
+    height: 640,
+    webPreferences: { contextIsolation: true, nodeIntegration: false, session: session_ },
+  })
+  qqQrHiddenWindow = win
+  const targetSession = win.webContents.session
+  win.webContents.setUserAgent(REAL_CHROME_UA)
+  try { await win.loadURL(redirectUrl) } catch { /* 回跳失败也给 cookie 轮询机会 */ }
+  const deadline = Date.now() + 20000
+  while (Date.now() < deadline) {
+    if (!qqQrSession || qqQrSession.cancelled) return ''
+    const cookie = await readQqSessionCookie(targetSession)
+    if (cookie) return cookie
+    await new Promise(resolve => setTimeout(resolve, 800))
+  }
+  return ''
+}
+
+ipcMain.handle('qq-qr-login-start', async (_event, channel) => {
+  const useWx = channel === 'wx'
+  const useQqMusic = channel === 'qqmusic'
+  try {
+    const ses = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.session : session.defaultSession
+    qqQrSession = { channel: useQqMusic ? 'qqmusic' : (useWx ? 'wx' : 'qq'), qrsig: '', ptqrtoken: 0, wxUuid: '', lastCode: '', status: 'waiting', finishing: false, cancelled: false }
+    qqQrHiddenWindow = null
+
+    if (useQqMusic) {
+      // ── QQ 音乐 App 扫描通道（musicu CreateQRCode + MQTT 推送，见 desktop/qqMusicQrLogin.cjs）──
+      try { qqMusicQrLogin?.cancel() } catch { /* 忽略旧实例 */ }
+      const { createQqMusicQrLogin } = require('./qqMusicQrLogin.cjs')
+      qqMusicQrLogin = createQqMusicQrLogin({
+        statePath: path.join(app.getPath('userData'), 'qq-music-device.json'),
+      })
+      const result = await qqMusicQrLogin.start()
+      if (!result?.image) return { success: false, error: 'QQ音乐二维码获取失败，请重试' }
+      console.log('✓[QQ扫码][qqmusic] 二维码就绪 expiresIn=' + Math.round((result.expiresInMs || 0) / 1000) + 's')
+      return { success: true, image: result.image }
+    }
+
+    if (useWx) {
+      // ── 微信扫描通道（open.weixin.qq.com qrconnect）──
+      const connectUrl = new URL('https://open.weixin.qq.com/connect/qrconnect')
+      Object.entries({
+        appid: WX_QR_APP_ID,
+        redirect_uri: WX_QR_REDIRECT_URI,
+        response_type: 'code',
+        scope: 'snsapi_login',
+        state: 'STATE',
+        href: WX_QR_STYLE_HREF,
+      }).forEach(([k, v]) => connectUrl.searchParams.set(k, v))
+      const page = await qqQrNetGet(connectUrl.toString(), ses, { Accept: 'text/html,application/xhtml+xml' })
+      const html = page.body ? page.body.toString('utf8') : ''
+      const uuid = (html.match(/uuid=(.+?)"/) || [])[1] || ''
+      if (!uuid) {
+        console.warn('❌[QQ扫码][wx] qrconnect 未取到 uuid（页面长度 ' + html.length + '）')
+        return { success: false, error: '微信二维码获取失败，请重试' }
+      }
+      const img = await qqQrNetGet('https://open.weixin.qq.com/connect/qrcode/' + uuid, ses, { Accept: 'image/avif,image/webp,image/png,image/jpeg,image/*,*/*' })
+      const magic = img.body && img.body.length > 8 ? img.body.slice(0, 3).toString('hex') : ''
+      const mime = magic === 'ffd8ff' ? 'image/jpeg' : magic.startsWith('89504e') ? 'image/png' : ''
+      if (!mime) {
+        console.warn('❌[QQ扫码][wx] 二维码图片格式异常:', magic)
+        return { success: false, error: '微信二维码返回异常内容' }
+      }
+      qqQrSession.wxUuid = uuid
+      console.log('✓[QQ扫码][wx] 二维码就绪 uuid=' + uuid.slice(0, 8) + '…')
+      return { success: true, image: 'data:' + mime + ';base64,' + img.body.toString('base64') }
+    }
+
+    // ── QQ 扫描通道（ptlogin2）──
+    // 1) 种 ptlogin 会话 cookie（含 pt_login_sig）
+    await qqQrNetGet(QQ_QR_XLOGIN_URL, ses, { Accept: 'text/html,application/xhtml+xml' }).catch(() => null)
+    // 2) 拉二维码 PNG；偶发失败重试一次
+    const qrShowUrl = 'https://ssl.ptlogin2.qq.com/ptqrshow?appid=' + QQ_QR_APPID + '&e=2&l=M&s=3&d=72&v=4&t=' + Math.random() + '&daid=' + QQ_QR_DAID + '&pt_3rd_aid=' + QQ_QR_3RD_AID
+    let show = null
+    let lastError = ''
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        show = await qqQrNetGet(qrShowUrl, ses, { Accept: 'image/avif,image/webp,image/png,image/*,*/*' })
+        const isPng = show.body && show.body.length > 100 && show.body[1] === 0x50 && show.body[2] === 0x4e && show.body[3] === 0x47
+        if (isPng) break
+        lastError = '二维码接口返回异常内容'
+        show = null
+      } catch (error) {
+        lastError = error?.message || '网络请求失败'
+        show = null
+      }
+    }
+    if (!show) return { success: false, error: '二维码获取失败（' + (lastError || 'ptlogin 无响应') + '），请稍后重试或改用网页登录' }
+    // qrsig 优先从本次响应的 Set-Cookie 解析（Cookie 罐落盘是异步的），读不到再轮询 Cookie 罐
+    let qrsig = qqQrExtractSetCookie(show.headers, 'qrsig')
+    for (let attempt = 0; !qrsig && attempt < 5; attempt += 1) {
+      const fromJar = (await ses.cookies.get({ name: 'qrsig' })).find(c => c.value) || null
+      if (fromJar) { qrsig = fromJar.value; break }
+      await new Promise(resolve => setTimeout(resolve, 300))
+    }
+    if (!qrsig) return { success: false, error: '二维码会话建立失败（缺少 qrsig），请重试' }
+    qqQrSession.qrsig = qrsig
+    qqQrSession.ptqrtoken = qqQrHash33(qrsig)
+    console.log('✓[QQ扫码][qq] 二维码就绪 ptqrtoken=' + qqQrSession.ptqrtoken)
+    return { success: true, image: 'data:image/png;base64,' + show.body.toString('base64') }
+  } catch (error) {
+    console.error('❌[QQ扫码] 初始化失败:', error)
+    return { success: false, error: error?.message || 'QQ 扫码初始化失败' }
+  }
+})
+
+ipcMain.handle('qq-qr-login-poll', async () => {
+  try {
+    if (!qqQrSession || qqQrSession.cancelled) return { status: 'cancelled' }
+    if (qqQrSession.status === 'success') return { status: 'success' }
+    const ses = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.session : session.defaultSession
+
+    // ── QQ 音乐 App 通道：状态由 MQTT 推送驱动，这里只取模块的当前状态 ──
+    if (qqQrSession.channel === 'qqmusic') {
+      if (!qqMusicQrLogin) return { status: 'error', message: 'QQ音乐扫码会话已失效，请刷新二维码' }
+      const result = await qqMusicQrLogin.poll()
+      if (result?.status === 'success' && result.cookie) {
+        qqQrSession.status = 'success'
+        console.log('✓[QQ扫码][qqmusic] 登录成功，cookie 长度 ' + String(result.cookie).length)
+      } else if (result?.status === 'expired') {
+        qqQrSession.status = 'expired'
+      }
+      return result || { status: 'waiting' }
+    }
+
+    // ── 微信通道轮询（长轮询会挂住连接，用 AbortController 切成短轮询）──
+    if (qqQrSession.channel === 'wx') {
+      const url = 'https://lp.open.weixin.qq.com/connect/l/qrconnect?uuid=' + encodeURIComponent(qqQrSession.wxUuid) + '&_=' + Date.now()
+      let text = ''
+      try {
+        text = await qqQrNetGetTextWithBudget(url, ses, WX_QR_POLL_BUDGET_MS)
+      } catch {
+        return { status: 'waiting' }
+      }
+      const match = text.match(/window\.wx_errcode=(\d+);window\.wx_code='([^']*)'/)
+      if (!match) return { status: 'waiting' }
+      const errcode = Number(match[1])
+      const code = match[2] || ''
+      if (qqQrSession.lastCode !== String(errcode)) {
+        qqQrSession.lastCode = String(errcode)
+        console.log('[QQ扫码][wx] 状态 ' + errcode + (code ? ' code=' + code.slice(0, 6) + '…' : ''))
+      }
+      if (errcode === 402) { qqQrSession.status = 'expired'; return { status: 'expired', message: '二维码已过期，请刷新' } }
+      if (errcode === 403) { qqQrSession.status = 'error'; return { status: 'error', message: '已在微信侧取消登录' } }
+      if (errcode === 404) { qqQrSession.status = 'scanned'; return { status: 'scanned', message: '已扫码，请在微信里确认' } }
+      if (errcode === 405 && code) {
+        if (qqQrSession.finishing) return { status: 'scanned', message: '正在完成登录…' }
+        qqQrSession.finishing = true
+        const redirect = WX_QR_REDIRECT_URI + '&code=' + encodeURIComponent(code) + '&state=STATE'
+        const cookie = await finishQqQrLogin(ses, redirect)
+        if (!cookie) {
+          qqQrSession.finishing = false
+          console.warn('❌[QQ扫码][wx] 回跳后未拿到 y.qq.com 会话 cookie')
+          return { status: 'error', message: '登录回跳未拿到 Cookie，请重试或改用网页登录' }
+        }
+        qqQrSession.status = 'success'
+        destroyQqQrHiddenWindow()
+        console.log('✓[QQ扫码][wx] 登录成功，cookie 长度 ' + cookie.length)
+        return { status: 'success', cookie }
+      }
+      return { status: 'waiting' }
+    }
+
+    // ── QQ 通道轮询（ptlogin2）──
+    const loginSig = (await ses.cookies.get({ name: 'pt_login_sig' })).find(c => c.value)
+    const url = 'https://ssl.ptlogin2.qq.com/ptqrlogin?u1=' + encodeURIComponent('https://graph.qq.com/oauth2.0/login_jump')
+      + '&ptqrtoken=' + qqQrSession.ptqrtoken + '&ptredirect=0&h=1&t=1&g=1&from_ui=1&ptlang=2052'
+      + '&action=0-0-' + Date.now() + '&js_ver=20102616&js_type=1'
+      + '&login_sig=' + encodeURIComponent(loginSig ? loginSig.value : '')
+      + '&pt_uistyle=40&aid=' + QQ_QR_APPID + '&daid=' + QQ_QR_DAID + '&pt_3rd_aid=' + QQ_QR_3RD_AID + '&has_onekey=1'
+    const resp = await qqQrNetGet(url, ses, { Accept: '*/*', Cookie: 'qrsig=' + qqQrSession.qrsig })
+    const text = resp.body ? resp.body.toString('utf8') : ''
+    // ptuiCB 的字段数在不同状态下会变（6 或 7 个），按引号整体切分最稳
+    const quoted = text.match(/'[^']*'/g) || []
+    const fields = quoted.map(part => part.slice(1, -1))
+    const code = fields[0] || ''
+    const redirectUrl = fields[2] || ''
+    const message = fields[4] || ''
+    if (qqQrSession.lastCode !== code) {
+      qqQrSession.lastCode = code
+      console.log('[QQ扫码][qq] 状态码 ' + (code || '?') + ' ' + (message || '') + (redirectUrl ? ' url=' + redirectUrl.slice(0, 60) + '…' : ''))
+    }
+    if (!fields.length) {
+      console.warn('❌[QQ扫码][qq] 无法解析轮询响应:', text.slice(0, 160))
+      return { status: 'waiting' }
+    }
+    if (code === '65') { qqQrSession.status = 'expired'; return { status: 'expired', message: '二维码已过期，请刷新' } }
+    if (code === '67') { qqQrSession.status = 'scanned'; return { status: 'scanned', message: '已扫码，请在手机上确认' } }
+    if (code === '66') { qqQrSession.status = 'waiting'; return { status: 'waiting' } }
+    if (code === '0') {
+      if (!redirectUrl) {
+        console.warn('❌[QQ扫码][qq] 状态 0 但未返回回跳 URL:', text.slice(0, 200))
+        return { status: 'error', message: '登录确认成功但未拿到回跳地址，请重试或改用网页登录' }
+      }
+      if (qqQrSession.finishing) return { status: 'scanned', message: '正在完成登录…' }
+      qqQrSession.finishing = true
+      const cookie = await finishQqQrLogin(ses, redirectUrl)
+      if (!cookie) {
+        qqQrSession.finishing = false
+        console.warn('❌[QQ扫码][qq] 回跳后未拿到 y.qq.com 会话 cookie')
+        return { status: 'error', message: '登录回跳未拿到 Cookie，请重试或改用网页登录' }
+      }
+      qqQrSession.status = 'success'
+      destroyQqQrHiddenWindow()
+      console.log('✓[QQ扫码][qq] 登录成功，cookie 长度 ' + cookie.length)
+      return { status: 'success', cookie }
+    }
+    // 其他码（1 登录失败 / 2 取消 / 3 / 4 等）按错误上报，附上游文案
+    return { status: 'error', message: message || ('扫码登录失败（' + code + '）') }
+  } catch (error) {
+    console.error('❌[QQ扫码] 轮询失败:', error)
+    return { status: 'waiting' }
+  }
+})
+ipcMain.handle('qq-qr-login-cancel', async () => {
+  try {
+    if (qqQrSession) qqQrSession.cancelled = true
+    destroyQqQrHiddenWindow()
+    try { qqMusicQrLogin?.cancel() } catch { /* 忽略 */ }
+    qqMusicQrLogin = null
+    qqQrSession = null
+    return { success: true }
+  } catch {
+    return { success: false }
+  }
+})
+
 // 监听打开 QQ 登录窗口的请求
 ipcMain.handle('open-qq-login-window', async () => {
   try {
@@ -6869,6 +7298,72 @@ ipcMain.handle('apple-login', guardTrustedIpc('privileged', async () => {
     return result
   } catch (err) {
     console.error('❌[Apple登录] 打开登录窗口失败:', err)
+    return { success: false, error: err.message }
+  }
+}))
+
+// ── Apple Music 订阅购买窗口 ────────────────────────────────────────────────
+// 与官方客户端一致：客户端点「订阅」打开的是 Apple 商店订阅页
+// （finance-app.itunes.apple.com/subscribe——客户端 WebView2 会话缓存里该 URL 与
+//  buy.itunes getSubscriptionOffersSrv 的请求记录都在，2026-10-08 取证）。
+// 站内窗口只允许 apple.com 域内跳转（登录/支付流程都在其中），其余域名一律外开系统浏览器；
+// 主窗口守卫不放宽（本窗口与各平台登录窗同属「外部站点流程窗」，不走 guardAgainstExternalNavigation）。
+const APPLE_SUBSCRIBE_URL = 'https://finance-app.itunes.apple.com/subscribe'
+const APPLE_SUBSCRIBE_PARTITION = 'waveforge-apple-subscribe'
+let appleSubscribeWindow = null
+
+function createAppleSubscribeWindow() {
+  if (appleSubscribeWindow && !appleSubscribeWindow.isDestroyed()) {
+    if (appleSubscribeWindow.isMinimized()) appleSubscribeWindow.restore()
+    appleSubscribeWindow.show()
+    appleSubscribeWindow.focus()
+    return { success: true }
+  }
+  const iconPath = path.join(__dirname, '..', 'build', 'icon.ico')
+  appleSubscribeWindow = new BrowserWindow({
+    width: 1080,
+    height: 840,
+    minWidth: 900,
+    minHeight: 640,
+    parent: mainWindow,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#f5f5f7',
+    title: 'WaveForge 澜音工坊 - Apple Music 订阅',
+    icon: fs.existsSync(iconPath) ? iconPath : undefined,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      partition: APPLE_SUBSCRIBE_PARTITION,
+    },
+  })
+  // Apple 站点对 Electron UA 有兼容问题，与 Apple 登录窗口一致伪装普通 Chrome
+  appleSubscribeWindow.webContents.setUserAgent(APPLE_SAFARI_UA)
+  appleSubscribeWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isAppleLoginAllowedDomain(url)) {
+      event.preventDefault()
+      if (/^https?:\/\//i.test(String(url || ''))) void shell.openExternal(String(url)).catch(() => {})
+    }
+  })
+  appleSubscribeWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // 支付/条款等 window.open 一律外开浏览器，避免产生不受控的无引用窗口
+    if (/^https?:\/\//i.test(String(url || ''))) void shell.openExternal(String(url)).catch(() => {})
+    return { action: 'deny' }
+  })
+  appleSubscribeWindow.once('ready-to-show', () => {
+    if (appleSubscribeWindow && !appleSubscribeWindow.isDestroyed()) appleSubscribeWindow.show()
+  })
+  appleSubscribeWindow.on('closed', () => { appleSubscribeWindow = null })
+  void appleSubscribeWindow.loadURL(APPLE_SUBSCRIBE_URL)
+  console.log('[Apple订阅] 已打开购买窗口:', APPLE_SUBSCRIBE_URL)
+  return { success: true }
+}
+
+ipcMain.handle('apple-subscribe', guardTrustedIpc('privileged', async () => {
+  try {
+    return createAppleSubscribeWindow()
+  } catch (err) {
+    console.error('❌[Apple订阅] 打开购买窗口失败:', err)
     return { success: false, error: err.message }
   }
 }))

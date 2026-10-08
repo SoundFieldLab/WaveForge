@@ -9,8 +9,8 @@
 
   #root {
     position: absolute; left: 0; right: 0; bottom: 0; top: 0;
-    display: flex; align-items: center; padding: 0 8px; gap: 8px;
-    color: #fff; font-size: var(--fs, 13px);
+    display: flex; align-items: center; padding: 0 10px; gap: 8px;
+    color: #fff; font-size: var(--fs, 11px);
     background: var(--scrim, transparent);
     transition: opacity 0.15s;
   }
@@ -18,10 +18,10 @@
   body.idle #root { opacity: 0.5; }
 
   .cover {
-    width: 40px; height: 40px; min-width: 40px; border-radius: 10px; flex-shrink: 0;
+    width: 28px; height: 28px; min-width: 28px; border-radius: 7px; flex-shrink: 0;
     background: rgba(127,127,127,0.18); overflow: hidden;
   }
-  .cover img { width: 100%; height: 100%; border-radius: 10px; object-fit: cover; }
+  .cover img { width: 100%; height: 100%; border-radius: 7px; object-fit: cover; }
   .cover .placeholder { width: 55%; height: 55%; color: inherit; opacity: 0.55; }
 
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
@@ -35,12 +35,12 @@
     100% { transform: translateX(calc(-100% + 100%)); }
   }
   .line-primary {
-    font-size: calc(var(--fs, 13px) * 1.22); font-weight: 700;
+    font-size: calc(var(--fs, 11px) * 1.22); font-weight: 700;
     color: inherit; line-height: 1.3;
   }
-  body.pure .line-primary { font-size: calc(var(--fs, 13px) * 1.5); text-align: center; }
+  body.pure .line-primary { font-size: calc(var(--fs, 11px) * 1.5); text-align: center; }
   .line-secondary {
-    font-size: calc(var(--fs, 13px) * 0.82); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-size: calc(var(--fs, 11px) * 0.82); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     color: inherit; opacity: 0.55; line-height: 1.25;
   }
   body.pure .line-secondary { display: none; }
@@ -60,13 +60,13 @@
   body.pure .controls { display: none; }
   body.hide-ctl .controls { display: none; }
   .ctl {
-    width: 30px; height: 30px; min-width: 30px; border: none; border-radius: 50%; cursor: pointer;
+    width: 26px; height: 26px; min-width: 26px; border: none; border-radius: 50%; cursor: pointer;
     background: transparent; color: inherit; display: flex; align-items: center; justify-content: center;
     opacity: 0.85; transition: background 0.12s, opacity 0.12s, transform 0.08s;
   }
   .ctl:hover { background: rgba(127,127,127,0.22); opacity: 1; }
   .ctl:active { transform: scale(0.9); }
-  .ctl.play { width: 34px; height: 34px; min-width: 34px; background: var(--accent); color: #fff; box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 45%, transparent); opacity: 1; }
+  .ctl.play { width: 30px; height: 30px; min-width: 30px; background: var(--accent); color: #fff; box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 45%, transparent); opacity: 1; }
   body.live #prev, body.live #next, body.live #progress { display: none; }
   body.live #controls { justify-content: center; }
   .ctl svg { width: 55%; height: 55%; }
@@ -264,7 +264,7 @@
     updateCover(hasSong ? state.cover : '', state.coverRevision)
     if (!hasSong) {
       const primary = $('linePrimary'); primary.textContent = ''; const span = document.createElement('span')
-      span.textContent = 'WaveForge 音澜工坊'; span.style.background = 'linear-gradient(90deg, #FB7299, #7c6cff, #49d6e8, #FB7299)'; span.style.backgroundClip = 'text'; span.style.webkitBackgroundClip = 'text'; span.style.webkitTextFillColor = 'transparent'; span.style.backgroundSize = '300% 100%'; span.style.animation = 'brand-shimmer 3s linear infinite'; primary.appendChild(span)
+      span.textContent = 'WaveForge 澜音工坊'; span.style.background = 'linear-gradient(90deg, #FB7299, #7c6cff, #49d6e8, #FB7299)'; span.style.backgroundClip = 'text'; span.style.webkitBackgroundClip = 'text'; span.style.webkitTextFillColor = 'transparent'; span.style.backgroundSize = '300% 100%'; span.style.animation = 'brand-shimmer 3s linear infinite'; primary.appendChild(span)
       if (!document.getElementById('brand-keyframes')) { const s = document.createElement('style'); s.id = 'brand-keyframes'; s.textContent = '@keyframes brand-shimmer { 0% { background-position: 0% 50% } 100% { background-position: 300% 50% } }'; document.head.appendChild(s) }
       $('lineSecondary').textContent = ''; $('fill').style.width = '0%'; return
     }
