@@ -6,6 +6,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { Album, Song } from '../../services/musicApi'
 import { getAlbumDetail, getAlbumSongs } from '../../services/musicApi'
+import type { MusicPlatform } from '../../services/platforms'
 import {
   PcDetailHeader, PcEmpty, PcGhostButton, PcPrimaryButton, PcSongTable,
   pcTheme, type PcSkin, type PcTone,
@@ -15,7 +16,8 @@ import type { PcActions } from './types'
 export interface PcAlbumDetailProps {
   /** 专辑 id（QQ 实际按专辑 mid 查询，由上层归一化后传入） */
   id: string
-  platform: 'qq' | 'netease'
+  /** 数据来源平台：酷狗走 kugouService 的 mobilecdn 专辑通道（musicApi 内部已分流） */
+  platform: MusicPlatform
   chrome: { tone: PcTone; skin: PcSkin; accent: string }
   actions: PcActions
   /** 隐藏保活页为 false：跳过取数 */

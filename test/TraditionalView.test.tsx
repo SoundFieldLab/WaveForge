@@ -209,10 +209,10 @@ describe('传统模式 TraditionalView', () => {
   })
   afterEach(() => cleanup())
 
-  it('渲染首页（发现）：平台药丸、左栏搜索入口、网易云推荐页快捷卡', async () => {
+  it('渲染首页（发现）：平台药丸、顶栏搜索入口、网易云推荐页快捷卡', async () => {
     render(<TraditionalView {...baseProps} />)
     expect(screen.getByText('网易云')).toBeTruthy()
-    expect(screen.getByRole('button', { name: '搜索' })).toBeTruthy()
+    expect(screen.getByTestId('traditional-top-search')).toBeTruthy()
     // 网易云 PC 推荐页：官方 7 张快捷卡（接口不可用时用本地兜底标题，结构必须在）
     await waitFor(() => expect(screen.getByText('每日推荐')).toBeTruthy(), { timeout: 4000 })
     expect(screen.getByText('私人漫游')).toBeTruthy()
@@ -224,17 +224,25 @@ describe('传统模式 TraditionalView', () => {
     render(<TraditionalView {...baseProps} />)
     // 复刻推荐页自含原生数据链路：聚合 payload 失败不影响客户端结构渲染
     await waitFor(() => expect(screen.getByText('每日推荐')).toBeTruthy(), { timeout: 4000 })
-    expect(fetchExploreHome).toHaveBeenCalled()
+    // 聚合 payload 自「加载优化」起在首屏后延迟 ~2.5s 才拉（冷启动让出关键路径）；这里等它真实
+    // 发起并失败后页面仍照常渲染。必须在用例内消费掉这次 once-rejection，否则残留队列会污染
+    // 后续用例的 fetchExploreHome 调用（全量跑时曾因此连锁失败）。
+    await waitFor(() => expect(fetchExploreHome).toHaveBeenCalled(), { timeout: 6000 })
+    expect(screen.getByText('每日推荐')).toBeTruthy()
   })
 
   it('点击搜索按钮进入独立搜索页（中间栏）', async () => {
     render(<TraditionalView {...baseProps} />)
-    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    // 顶栏全局搜索框：输入关键词回车进入搜索页（2026-10-08 起搜索框常驻顶栏，不再有搜索按钮）
+    fireEvent.change(screen.getByLabelText('搜索歌手、歌曲或专辑'), { target: { value: '周杰伦' } })
+    fireEvent.submit(screen.getByTestId('traditional-top-search'))
     await waitFor(() => expect(screen.getByPlaceholderText(/在网易云音乐中搜索/)).toBeTruthy())
   })
 
-  it('非复刻平台（Apple）音乐库页仍显示个性化推荐', async () => {
-    localStorage.setItem('waveforge:platform', 'apple')
+  it('非复刻平台（Spotify）音乐库页仍显示个性化推荐', async () => {
+    // Apple 自 2026-10-08 起也走客户端复刻左栏/页面（见 test/ApplePcTraditional.test.tsx），
+    // 这里改用仍走通用左栏的 Spotify 验证「非复刻平台保留原生音乐库页」。
+    localStorage.setItem('waveforge:platform', 'spotify')
     render(<TraditionalView {...baseProps} />)
     fireEvent.click(await screen.findByRole('button', { name: '音乐库' }))
     await waitFor(() => expect(screen.getByText(/专属音乐库|量身推荐|热门音乐推荐/)).toBeTruthy())
@@ -254,11 +262,12 @@ describe('传统模式 TraditionalView', () => {
     // 初始在首页：后退禁用
     const back = screen.getByLabelText('后退')
     expect((back as HTMLButtonElement).disabled).toBe(true)
-    // 进入搜索页 → 后退可用
-    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    // 顶栏搜索框搜一下 → 进入搜索页 → 后退可用
+    fireEvent.change(screen.getByLabelText('搜索歌手、歌曲或专辑'), { target: { value: '周杰伦' } })
+    fireEvent.submit(screen.getByTestId('traditional-top-search'))
     await waitFor(() => expect(screen.getByPlaceholderText(/在网易云音乐中搜索/)).toBeTruthy())
     fireEvent.click(back)
-    await waitFor(() => expect(screen.getByRole('button', { name: '搜索' })).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId('traditional-top-search')).toBeTruthy())
     // 搜索页被冻结保留（不卸载），但已经隐藏、不再可见/可交互
     expect(isHiddenPane(screen.getByPlaceholderText(/在网易云音乐中搜索/))).toBe(true)
     // 前进回到搜索页
@@ -457,19 +466,22 @@ describe('传统模式 TraditionalView', () => {
   it('歌曲信息使用 onOpenPlayer 打开播放器并保留当前传统页面来源', async () => {
     const onOpenPlayer = vi.fn()
     render(<TraditionalView {...baseProps} currentSong={playingSong} queue={[playingSong]} onOpenPlayer={onOpenPlayer} />)
-    fireEvent.click(screen.getByRole('button', { name: '搜索' }))
+    fireEvent.change(screen.getByLabelText('搜索歌手、歌曲或专辑'), { target: { value: '周杰伦' } })
+    fireEvent.submit(screen.getByTestId('traditional-top-search'))
     await waitFor(() => expect(screen.getByPlaceholderText(/在网易云音乐中搜索/)).toBeTruthy())
     fireEvent.click(screen.getAllByTitle('进入播放页')[0])
     expect(onOpenPlayer).toHaveBeenCalledWith({ mode: 'traditional', surface: 'traditional-search', platform: 'netease' })
   })
 
-  it('右栏队列切歌保留当前传统页面来源', async () => {
+  it('右栏队列切歌保留当前传统页面来源（Apple 客户端资料库页）', async () => {
     const onSongSelect = vi.fn()
     const queuedSong = { ...playingSong, id: 89, name: '队列下一首' }
     localStorage.setItem('waveforge:platform', 'apple')
     render(<TraditionalView {...baseProps} currentSong={playingSong} queue={[playingSong, queuedSong]} onSongSelect={onSongSelect} />)
-    fireEvent.click(await screen.findByRole('button', { name: '音乐库' }))
-    await waitFor(() => expect(screen.getByText(/专属音乐库|量身推荐|热门音乐推荐/)).toBeTruthy())
+    // Apple 现在用客户端复刻左栏：资料库 › 歌曲
+    const sidebar = await screen.findByTestId('apple-pc-sidebar')
+    fireEvent.click(within(sidebar).getByText('歌曲'))
+    await waitFor(() => expect(screen.getByText(/登录 Apple Music 后可查看「歌曲」/)).toBeTruthy())
     fireEvent.click(screen.getByRole('button', { name: /队列下一首/ }))
     expect(onSongSelect).toHaveBeenCalledWith(queuedSong, [playingSong, queuedSong], { mode: 'traditional', surface: 'traditional-library', platform: 'apple' })
   })
@@ -515,8 +527,10 @@ describe('传统模式 TraditionalView', () => {
   it('QQ 平台首页按客户端原生推荐流渲染 Hero 卡（不是聚合数据）', async () => {
     render(<TraditionalView {...baseProps} />)
     fireEvent.click(screen.getByText('QQ音乐'))
-    // 主推大卡 + 彩色功能卡都来自 QQ 客户端自己的推荐流
-    await waitFor(() => expect(screen.getByText('猜你喜欢')).toBeTruthy(), { timeout: 4000 })
+    // 主推大卡 + 彩色功能卡都来自 QQ 客户端自己的推荐流。
+    // 卡面大字与卡下栏目标签都会出现「猜你喜欢」（官方卡下同样是「猜你喜欢-沉浸刷歌」），
+    // 因此这里断言「至少出现一次」而不是唯一匹配。
+    await waitFor(() => expect(screen.getAllByText('猜你喜欢').length).toBeGreaterThan(0), { timeout: 4000 })
     // 标签用 feed 自带的官方名（layerTitle），说明行用真实副标题 + 歌单中文名
     expect(screen.getByText('Daily 30')).toBeTruthy()
     expect(screen.getByText(/イエナイ-花村想太/)).toBeTruthy()

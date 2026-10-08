@@ -10,7 +10,10 @@ describe('platform capability contracts', () => {
     expect(getPlatformCapabilities('apple')).toMatchObject({ searchPlaylists: true, updatePlaylist: true, deletePlaylist: true, subscribePlaylist: false, removeTracksFromPlaylist: true })
     expect(getPlatformCapabilities('spotify')).toMatchObject({ searchPlaylists: true, updatePlaylist: true, deletePlaylist: false, sharePlaylist: true, removeTracksFromPlaylist: true })
     expect(getPlatformCapabilities('kugou')).toMatchObject({ searchPlaylists: false, createPlaylist: false, removeTracksFromPlaylist: false })
-    expect(getPlatformCapabilities('soda')).toMatchObject({ searchPlaylists: false, createPlaylist: false, removeTracksFromPlaylist: false, recentPlayed: true })
+    // 汽水：createPlaylist / deletePlaylist 于 2026-10-08 由「上游无此端点」的旧判断修正为可用。
+    // 依据是客户端 IDL（CreatePlaylist → /luna/pc/me/playlist、MDeletePlaylists → .../playlist/delete），
+    // 且已实测建删闭环成功（创建拿到真实 id、删除后列表无残留）。
+    expect(getPlatformCapabilities('soda')).toMatchObject({ searchPlaylists: false, createPlaylist: true, deletePlaylist: true, removeTracksFromPlaylist: false, recentPlayed: true })
   })
 
   it('preserves Spotify artist and album identifiers in Song mappings', () => {

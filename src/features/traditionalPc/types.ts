@@ -24,10 +24,18 @@ export interface PcPlaylistMenuPayload {
   playlist: any | null
 }
 
+/** 播放上下文（可选第 4 参，与既有 index 参数兼容）：
+ *  - continuous：播放中自动续推荐（猜你喜欢/刷歌的「先 5 首就播 + 持续推荐」语义，客户端同款）；
+ *  - radar：刷歌模式的雷达续页参数（下一页页码/类型/入口种子）。 */
+export interface PcPlayOptions {
+  continuous?: boolean
+  radar?: { page: number; reqType: number; entranceSongs: number[] }
+}
+
 /** 页面共用的跨页动作。 */
 export interface PcActions {
-  /** 播放歌曲：songs 是所在列表（播放队列），index 为点击位置。 */
-  onPlaySongs: (song: Song, songs: Song[], index?: number) => void
+  /** 播放歌曲：songs 是所在列表（播放队列），index 为点击位置，options 为续播上下文。 */
+  onPlaySongs: (song: Song, songs: Song[], index?: number, options?: PcPlayOptions) => void
   onSongMenu: (payload: PcSongMenuPayload) => void
   onOpenPlaylist: (playlist: any) => void
   onPlaylistMenu?: (payload: PcPlaylistMenuPayload) => void
@@ -62,6 +70,8 @@ export interface PcActions {
 export type PcNavTarget =
   | { kind: 'qq'; page: 'home' | 'hall' | 'liked' | 'recent' | 'search' | 'profile' | 'settings'; keyword?: string; detail?: string }
   | { kind: 'netease'; page: 'home' | 'featured' | 'podcast' | 'roam' | 'follow' | 'liked' | 'recent' | 'mypodcast' | 'collect' | 'cloud' | 'search' | 'profile' | 'settings'; keyword?: string; detail?: string }
+  /** Apple Music 客户端复刻页（radio/added/artists/albums/songs/playlists/favorites + home/search/profile/settings）。 */
+  | { kind: 'apple'; page: 'home' | 'search' | 'profile' | 'settings' | 'radio' | 'added' | 'artists' | 'albums' | 'songs' | 'playlists' | 'favorites'; keyword?: string; detail?: string }
 
 /** 账号上下文。 */
 export interface PcAccount {

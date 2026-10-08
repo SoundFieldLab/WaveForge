@@ -10,14 +10,110 @@ import type { Song } from '../../services/musicApi'
 import { isSameSong } from '../../services/musicApi'
 import { getPlatformCapabilities, platformLabel, type MusicPlatform } from '../../services/platforms'
 import { subscribePlaylist } from '../../services/playlistService'
+import { getApiBase } from '../../services/apiConfig'
+import { fetchExploreChart } from '../../services/exploreApi'
 import {
-  PcDetailHeader, PcGhostButton, PcNoticeBar, PcPrimaryButton, PcSongTable, PcTabs, PcTableSearch,
+  PcCover, PcDetailHeader, PcGhostButton, PcNoticeBar, PcPrimaryButton, PcSongTable, PcTabs, PcTableSearch,
   PcEmpty, pcTheme, type PcSkin, type PcTone,
 } from './pcKit'
 import PcComments from './PcComments'
 import type { PcActions, PcAccount } from './types'
 
 const PAGE_SIZE = 200
+
+/** 收藏者行（网易云 /netease/playlist/subscribers）。 */
+interface SubscriberItem {
+  userId: number
+  nickname: string
+  avatarUrl: string
+  signature: string
+}
+
+/** 歌单收藏者面板（官方「收藏者」页签：头像网格 + 昵称/签名，分页加载，点进对方主页）。 */
+function PlaylistSubscribers({ playlistId, chrome, actions }: {
+  playlistId: string
+  chrome: { tone: PcTone; skin: PcSkin; accent: string }
+  actions: PcActions
+}) {
+  const theme = pcTheme(chrome.tone)
+  const accent = chrome.accent
+  const [items, setItems] = useState<SubscriberItem[]>([])
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async (offset: number, replace: boolean) => {
+    if (replace) setLoading(true)
+    else setLoadingMore(true)
+    try {
+      const response = await fetch(`${getApiBase()}/netease/playlist/subscribers?id=${encodeURIComponent(playlistId)}&limit=30&offset=${offset}`, { cache: 'no-store' })
+      const data = await response.json()
+      if (!response.ok || data?.error) throw new Error(data?.error || `收藏者加载失败 (${response.status})`)
+      const list: SubscriberItem[] = Array.isArray(data?.subscribers) ? data.subscribers : []
+      setItems(previous => {
+        if (replace) return list
+        const seen = new Set(previous.map(item => item.userId))
+        return [...previous, ...list.filter(item => !seen.has(item.userId))]
+      })
+      setHasMore(Boolean(data?.hasMore) && list.length > 0)
+      setError('')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '收藏者加载失败')
+      if (replace) setItems([])
+      setHasMore(false)
+    } finally {
+      if (replace) setLoading(false)
+      else setLoadingMore(false)
+    }
+  }, [playlistId])
+
+  useEffect(() => {
+    if (!playlistId) return
+    void load(0, true)
+  }, [playlistId, load])
+
+  if (!playlistId) return <PcEmpty theme={theme} title="歌单信息不完整" />
+
+  return (
+    <div>
+      {error && !items.length ? (
+        <PcEmpty theme={theme} title="收藏者加载失败" description={error} />
+      ) : items.length ? (
+        <>
+          <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-3 xl:grid-cols-4">
+            {items.map(user => (
+              <button
+                key={`subscriber:${user.userId}`}
+                type="button"
+                onClick={() => actions.onOpenUserProfile?.(String(user.userId), user.nickname, user.avatarUrl)}
+                className={`flex items-center gap-3 rounded-md px-2 py-2 text-left transition ${theme.hover}`}
+              >
+                <PcCover src={user.avatarUrl} alt={user.nickname} className="h-10 w-10 shrink-0" rounded="rounded-full" />
+                <span className="min-w-0 flex-1">
+                  <span className={`block truncate text-[13px] ${theme.text}`}>{user.nickname}</span>
+                  {user.signature ? <span className={`mt-[2px] block truncate text-[12px] ${theme.faint}`}>{user.signature}</span> : null}
+                </span>
+              </button>
+            ))}
+          </div>
+          {hasMore && (
+            <div className="flex justify-center pt-4">
+              <PcGhostButton
+                theme={theme}
+                label={loadingMore ? '正在加载…' : '加载更多'}
+                onClick={() => { void load(items.length, false) }}
+                disabled={loadingMore}
+              />
+            </div>
+          )}
+        </>
+      ) : (
+        <PcEmpty theme={theme} title={loading ? '正在加载收藏者…' : '还没有收藏者'} description={loading ? undefined : '收藏这个歌单的用户会出现在这里'} />
+      )}
+    </div>
+  )
+}
 
 type PlaylistLike = {
   id: number | string
@@ -53,7 +149,7 @@ export interface PcPlaylistDetailProps {
 }
 
 function PcPlaylistDetail({
-  playlist, songs, loading, error = '', onRetry, chrome, actions, account, isOwner = false, onSubscribeToggle,
+  playlist, songs: propSongs, loading, error = '', onRetry, chrome, actions, account, isOwner = false, onSubscribeToggle,
 }: PcPlaylistDetailProps) {
   const theme = pcTheme(chrome.tone)
   const skin = chrome.skin
@@ -63,6 +159,47 @@ function PcPlaylistDetail({
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE)
   const [noticeHidden, setNoticeHidden] = useState(false)
   const sentinelRef = useRef<HTMLDivElement>(null)
+  // 「榜单页」周期选择器（官方榜单页标题旁的 年份 / 第 N 周）：周期变了这里自己重取该期榜单，
+  // 并用取回的歌替换页面上那批（propSongs 是进入页面时的当期快照）。
+  const isChartPage = Boolean((playlist as { isChart?: boolean } | null)?.isChart)
+  const [chartPeriod, setChartPeriod] = useState('')
+  const [chartPeriodYears, setChartPeriodYears] = useState<Array<{ year: number; periods: number[] }>>([])
+  const [chartPeriodSongs, setChartPeriodSongs] = useState<Song[]>([])
+  const [chartPeriodBusy, setChartPeriodBusy] = useState(false)
+  const chartPeriodId = isChartPage ? String((playlist as { id?: string | number } | null)?.id || '') : ''
+  useEffect(() => {
+    if (!chartPeriodId) return
+    let cancelled = false
+    void fetch(getApiBase() + '/qq/chart/periods?id=' + encodeURIComponent(chartPeriodId), { cache: 'no-store' })
+      .then(response => response.json())
+      .then(payload => {
+        if (cancelled) return
+        setChartPeriodYears(Array.isArray(payload?.years) ? payload.years : [])
+        setChartPeriod(previous => previous || String(payload?.current || ''))
+        setChartPeriodSongs([])
+      })
+      .catch(() => { if (!cancelled) { setChartPeriodYears([]); setChartPeriod('') } })
+    return () => { cancelled = true }
+  }, [chartPeriodId])
+  const switchChartPeriod = useCallback((next: string) => {
+    if (!next) return
+    setChartPeriod(next)
+    setChartPeriodBusy(true)
+    const chartLike = {
+      id: chartPeriodId,
+      name: String((playlist as { name?: string } | null)?.name || 'QQ 音乐榜单'),
+      coverUrl: '',
+      description: '',
+      platform: (playlist?.platform || (skin === 'qq' ? 'qq' : 'netease')) as MusicPlatform,
+      songs: [],
+    } as unknown as Parameters<typeof fetchExploreChart>[0]
+    void fetchExploreChart(chartLike, undefined, next)
+      .then(detail => { if (Array.isArray(detail?.songs) && detail.songs.length) setChartPeriodSongs(detail.songs) })
+      .catch(() => {})
+      .finally(() => setChartPeriodBusy(false))
+  }, [chartPeriodId, playlist, skin])
+  // 周期选完就把 songs 换成那一期（下游逻辑一行不用改）
+  const songs = chartPeriodSongs.length ? chartPeriodSongs : propSongs
 
   useEffect(() => { setTab('songs'); setVisibleCount(PAGE_SIZE) }, [playlist?.id, skin])
 
@@ -114,11 +251,17 @@ function PcPlaylistDetail({
     (playlist?.tags || []).length ? (playlist?.tags || []).map(tag => `#${tag}`).join(' ') : '',
   ].filter(Boolean).join(' · ')
 
+  // 榜单页（playlist.isChart）：官方榜单页没有「评论」页签，也不显示榜单接口没有的专辑列，
+  // 所以这里按榜单口径收窄页签与表格列（不摆空列/假页签）。
+  const isChart = Boolean((playlist as { isChart?: boolean } | null)?.isChart)
   // 歌单级评论两平台都有接口（网易云 type=2、QQ biztype=3，见 PcComments），
-  // 挂「评论」页签内嵌只读评论面板；「收藏者」没有数据源，仍不渲染假页签。
+  // 挂「评论」页签内嵌只读评论面板；「收藏者」是网易云专属（/api/playlist/subscribers 分页）。
+  const playlistId = String(playlist?.id || (playlist as { dirId?: string | number } | null)?.dirId || '')
+  const canShowSubscribers = platform === 'netease' && !isChart && /^\d+$/.test(playlistId)
   const tabItems = [
     { key: 'songs', label: '歌曲', count: trackCount },
-    { key: 'comments', label: '评论' },
+    ...(isChart ? [] : [{ key: 'comments', label: '评论' }]),
+    ...(canShowSubscribers ? [{ key: 'subscribers', label: '收藏者' }] : []),
   ]
 
   return (
@@ -132,7 +275,26 @@ function PcPlaylistDetail({
         description={description}
         meta={meta}
         creator={creatorName ? { name: creatorName, avatar: creatorAvatar } : undefined}
-        titleExtra={undefined}
+        titleExtra={isChartPage && chartPeriodYears.length ? (
+          <span className="inline-flex items-center gap-2">
+            <select
+              value={chartPeriod}
+              onChange={event => switchChartPeriod(event.target.value)}
+              disabled={chartPeriodBusy}
+              aria-label="选择榜单周期"
+              className="rounded-md border border-black/10 bg-black/[0.04] px-2 py-1 text-[12px] dark:border-white/15 dark:bg-white/[0.08]"
+            >
+              {chartPeriodYears.map(group => (
+                <optgroup key={group.year} label={String(group.year)}>
+                  {group.periods.map(period => (
+                    <option key={String(group.year) + "_" + String(period)} value={String(group.year) + "_" + String(period)}>{"第 " + String(period) + " 周"}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            {chartPeriodBusy ? <span className="text-[12px] opacity-60">切换中…</span> : null}
+          </span>
+        ) : undefined}
         actions={(
           <>
             <PcPrimaryButton label="播放" accent={accent} onClick={playAll} disabled={!songs.length} />
@@ -183,7 +345,14 @@ function PcPlaylistDetail({
             theme={theme}
             accent={accent}
             loading={loading && !songs.length}
-            columns={{ index: true, like: true, album: true, duration: true }}
+            // 榜单页按数据决定列：榜单接口本来就带专辑/时长（实测美国公告牌 108 都有），有就显示、
+            // 没有才不摆空列；榜单页也不挂评论页签（官方榜单页没有）。
+            columns={{
+              index: true,
+              like: true,
+              album: isChart ? filtered.some(song => Boolean(song.album?.name)) : true,
+              duration: isChart ? filtered.some(song => Boolean(song.duration)) : true,
+            }}
             playingKey={actions.currentSongKey}
             isPlaying={actions.isPlaying}
             onPlay={(song, index) => actions.onPlaySongs(song, filtered, index)}
@@ -207,11 +376,15 @@ function PcPlaylistDetail({
       {tab === 'comments' && playlist ? (
         <PcComments
           platform={platform}
-          resourceId={String(playlist.id || (playlist as { dirId?: string | number }).dirId || '')}
+          resourceId={playlistId}
           resourceIdKind="playlist"
           chrome={chrome}
           actions={actions}
         />
+      ) : null}
+
+      {tab === 'subscribers' && canShowSubscribers ? (
+        <PlaylistSubscribers playlistId={playlistId} chrome={chrome} actions={actions} />
       ) : null}
     </div>
   )

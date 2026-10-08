@@ -41,7 +41,7 @@ interface TraditionalPlaylistDetailProps {
   accentColor: string
   onClose: () => void
   onSongSelect: (song: Song, songs: Song[]) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void
@@ -260,7 +260,7 @@ function TraditionalPlaylistDetail({
                             const artist = song.artists?.[0]
                             const artistId = artist?.appleId || artist?.mid || artist?.id
                             return artistId && onOpenArtist ? (
-                              <button type="button" onClick={event => { event.stopPropagation(); onOpenArtist(String(artistId), song.platform || platform) }} className={`block max-w-full truncate text-xs hover:underline ${muted}`}>{song.artists?.map(item => item.name).join(' / ')}</button>
+                              <button type="button" onClick={event => { event.stopPropagation(); onOpenArtist(String(artistId), song.platform || platform, artist?.name || '') }} className={`block max-w-full truncate text-xs hover:underline ${muted}`}>{song.artists?.map(item => item.name).join(' / ')}</button>
                             ) : <span className={`block truncate text-xs ${muted}`}>{song.artists?.map(item => item.name).join(' / ')}</span>
                           })()}
                         </span>
@@ -277,7 +277,7 @@ function TraditionalPlaylistDetail({
         </>
       )}
     </main>
-    <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, songs)} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={onRemoveFromPlaylist ? song => { void onRemoveFromPlaylist(song, playlistId) } : canRemoveAppleTracks ? song => { void removeAppleTrack(song) } : undefined} currentPlaylistId={playlistId} onViewComments={onViewComments} onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} onViewArtist={song => { const artist = song.artists?.[0]; const artistId = artist?.appleId || artist?.mid || artist?.id; if (artistId) onOpenArtist?.(String(artistId), song.platform || platform) }} onCopyInfo={onCopyInfo} onShare={onShare} userPlaylists={userPlaylists} platform={platform} playerTheme={playerTheme} />
+    <SongContextMenu show={menu.show} x={menu.x} y={menu.y} song={menu.song} onClose={() => setMenu({ show: false, x: 0, y: 0, song: null })} onPlayNow={song => onSongSelect(song, songs)} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onRemoveFromPlaylist={onRemoveFromPlaylist ? song => { void onRemoveFromPlaylist(song, playlistId) } : canRemoveAppleTracks ? song => { void removeAppleTrack(song) } : undefined} currentPlaylistId={playlistId} onViewComments={onViewComments} onViewAlbum={song => { const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} onViewArtist={song => { const artist = song.artists?.[0]; const artistId = artist?.appleId || artist?.mid || artist?.id; if (artistId) onOpenArtist?.(String(artistId), song.platform || platform, artist?.name || '') }} onCopyInfo={onCopyInfo} onShare={onShare} userPlaylists={userPlaylists} platform={platform} playerTheme={playerTheme} />
   </div>
 }
 

@@ -1,20 +1,20 @@
 // 网易云音乐 PC 客户端「精选」页复刻（传统模式中栏）。
 //
-// 顶部是横排频道文字页签（选中加粗 + 强调色，不是胶囊），右侧「更多∨」列出音乐风格分类；
-// 子页分工：精选 = 官方歌单大卡 + 最新音乐三列 + 排行榜；歌单广场/曲风频道 = 分类 + 封面墙分页；
-// 排行榜 = 榜单卡；歌手 = 地区/性别分类 + 歌手列表；VIP = 会员等级与权益。
+// 顶部是横排频道文字页签（选中加粗 + 强调色，不是胶囊），「更多」是独立频道页（官方「更多∨」
+// 的全分类视图）；子页分工：精选 = 官方歌单大卡 + 最新音乐三列 + 排行榜；歌单广场/分类 = 分类 +
+// 封面墙分页；排行榜 = 榜单卡；歌手 = 地区/性别分类 + 歌手列表。VIP 会员页按产品决策移除（2026-10-08）。
 // 数据全部走已有接口；某一路没有数据时只降级该区块（空态），不挡其它区块。
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { ChevronDown, Loader2, Play, UserRound } from 'lucide-react'
+import { ChevronDown, ChevronLeft, ChevronRight, Loader2, Play, UserRound } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
+import { fetchNeteaseSongDetail } from '../neteaseExplore/api'
 import { getApiBase } from '../../services/apiConfig'
-import { normalizeNeteaseSongs } from '../neteaseExplore/api'
 import {
-  fetchNeteasePlaylistSquare, fetchNeteaseToplist, fetchNeteaseVipPage, normalizeNeteaseSquareBlocks, normalizeNeteaseToplistBlocks,
+  fetchNeteaseLinkPage, fetchNeteasePlaylistSquare, fetchNeteaseToplist, normalizeNeteaseSquareBlocks, normalizeNeteaseToplistBlocks,
 } from '../neteaseExplore/discover'
 import { neteaseResourceArtwork, type NeteaseNativeBlock, type NeteaseNativeResource } from '../neteaseExplore/model'
 import {
-  PcCardGrid, PcChips, PcCountBadge, PcCover, PcEmpty, PcGhostButton, PcSectionTitle, PcSongBadges, PcSongTable,
+  PcCardGrid, PcChips, PcCountBadge, PcCover, PcEmpty, PcGhostButton, PcSectionTitle, PcSongBadges,
   pcSongArtwork, pcSongKey, pcTheme, type PcCardItem, type PcTheme, type PcTone,
 } from './pcKit'
 import type { PcAccount, PcActions } from './types'
@@ -31,17 +31,18 @@ export interface NeteasePcPageProps {
   initialChannel?: string
 }
 
-type ChannelKey = 'featured' | 'square' | 'charts' | 'artist' | 'vip' | 'classic' | 'western' | 'cantonese' | 'drive' | 'global'
+type ChannelKey = 'featured' | 'square' | 'categories' | 'charts' | 'artist' | 'classic' | 'western' | 'cantonese' | 'drive' | 'global'
 
 interface ChannelDef { key: ChannelKey; label: string; category?: string }
 
-// 官方频道顺序；曲风类频道没有独立数据源，直接复用歌单广场的分类查询
+// 官方频道顺序；曲风类频道没有独立数据源，直接复用歌单广场的分类查询。
+// 「更多」是独立频道（客户端「更多∨」展开的全分类视图），不再是页内下拉。
 const CHANNELS: ChannelDef[] = [
   { key: 'featured', label: '精选' },
   { key: 'square', label: '歌单广场' },
   { key: 'charts', label: '排行榜' },
   { key: 'artist', label: '歌手' },
-  { key: 'vip', label: 'VIP' },
+  { key: 'categories', label: '更多' },
   { key: 'classic', label: '经典', category: '经典' },
   { key: 'western', label: '欧美', category: '欧美' },
   { key: 'cantonese', label: '粤语', category: '粤语' },
@@ -129,6 +130,149 @@ function chartOf(resource: NeteaseNativeResource) {
  * 精选子页
  * ------------------------------------------------------------------ */
 
+/**
+ * 官方精选（发现-音乐）首屏 banner 轮播：Link Platform `PAGE_DISCOVERY_BANNER` 块
+ * nativeData.banners[]（bannerId/pic/imgUrls/targetType/targetId/url/typeTitle）。
+ * 全部是站内 orpheus 协议（song/playlist/album）或新碟/新歌推广位，无外链广告；
+ * targetType: 1006=按 url orpheus 协议解析（song/playlist/album）。
+ */
+function DiscoveryBannerCarousel({ theme, accent, actions, active }: {
+  theme: PcTheme
+  accent: string
+  actions: PcActions
+  active: boolean
+}) {
+  const [banners, setBanners] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [index, setIndex] = useState(0)
+  const [hover, setHover] = useState(false)
+
+  useEffect(() => {
+    if (!active) return
+    const controller = new AbortController()
+    setLoading(true)
+    fetchNeteaseLinkPage('HOME_DISCOVERY_PAGE', '0', false, controller.signal)
+      .then(payload => {
+        if (controller.signal.aborted) return
+        const block = (Array.isArray(payload?.data?.blocks) ? payload.data.blocks : [])
+          .find((block: any) => String(block?.positionCode || '') === 'PAGE_DISCOVERY_BANNER')
+        const list = Array.isArray(block?.nativeData?.banners) ? block.nativeData.banners : []
+        setBanners(list.filter((banner: any) => banner?.pic || banner?.imgUrls?.[0]))
+      })
+      .catch(() => { if (!controller.signal.aborted) setBanners([]) })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
+    return () => controller.abort()
+  }, [active])
+
+  // 自动轮播：6s 一张，悬停暂停（官方 PC 行为）
+  useEffect(() => {
+    if (!active || hover || banners.length <= 1) return
+    const timer = window.setInterval(() => setIndex(value => (value + 1) % banners.length), 6000)
+    return () => window.clearInterval(timer)
+  }, [active, hover, banners.length])
+
+  // orpheus 协议 → 站内动作（song 播放 / playlist 歌单页 / album 专辑页）
+  const openBanner = useCallback((banner: any) => {
+    const url = String(banner?.url || '')
+    const songMatch = url.match(/^orpheus:\/\/(?:nm\/)?song\/(\d+)/i)
+    if (songMatch) {
+      void fetchNeteaseSongDetail([songMatch[1]])
+        .then(([song]) => { if (song) actions.onPlaySongs(song, [song], 0) })
+        .catch(() => undefined)
+      return
+    }
+    const playlistMatch = url.match(/^orpheus:\/\/(?:nm\/)?playlist\/(\d+)/i)
+    if (playlistMatch) {
+      actions.onOpenPlaylist({
+        id: playlistMatch[1],
+        name: String(banner?.typeTitle || '歌单'),
+        coverUrl: String(banner?.pic || ''),
+        platform: 'netease',
+        source: 'netease-discovery-banner',
+      })
+      return
+    }
+    const albumMatch = url.match(/^orpheus:\/\/(?:nm\/)?album\/(\d+)/i)
+    if (albumMatch) { actions.onOpenAlbum?.(albumMatch[1], 'netease'); return }
+  }, [actions])
+
+  if (loading) {
+    return <span className={`mb-8 block aspect-[13/5] w-full animate-pulse rounded-lg ${theme.surface}`} />
+  }
+  if (banners.length === 0) return null
+
+  const current = banners[Math.min(index, banners.length - 1)]
+  const cover = String(current?.pic || current?.imgUrls?.[0] || '').replace(/^http:/, 'https:')
+  const label = String(current?.typeTitle || '')
+
+  return (
+    <section
+      className="mb-8"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      {/* 官方同款大图轮播（约 2.6:1）：整图可点击打开；底部渐变角标 + 圆点指示器 + 悬停切换箭头 */}
+      <div className="relative overflow-hidden rounded-lg">
+        <button
+          type="button"
+          aria-label={label ? `打开 ${label}` : '打开精选内容'}
+          onClick={() => openBanner(current)}
+          className="group block w-full cursor-pointer text-left"
+        >
+          <PcCover
+            src={cover}
+            alt={label || '精选推荐'}
+            eager
+            className="aspect-[13/5] w-full"
+            rounded="rounded-lg"
+            overlay={label ? (
+              <span className="absolute inset-x-0 bottom-0 flex items-end justify-between bg-gradient-to-t from-black/70 to-transparent px-4 pb-3 pt-10">
+                <span className="truncate text-[13px] font-medium text-white/95">{label}</span>
+              </span>
+            ) : undefined}
+          />
+        </button>
+        {/* 圆点指示器（客户端同款右下角） */}
+        {banners.length > 1 && (
+          <div className="absolute bottom-3 right-4 z-10 flex items-center gap-1.5">
+            {banners.map((banner, dot) => (
+              <button
+                key={`banner-dot:${banner?.bannerId || dot}`}
+                type="button"
+                aria-label={`第 ${dot + 1} 张`}
+                onClick={() => setIndex(dot)}
+                className="h-1.5 rounded-full transition-all"
+                style={{ width: dot === index ? 16 : 6, background: dot === index ? accent : 'rgba(255,255,255,.55)' }}
+              />
+            ))}
+          </div>
+        )}
+        {/* 左右切换箭头（悬停出现） */}
+        {banners.length > 1 && hover && (
+          <>
+            <button
+              type="button"
+              aria-label="上一张"
+              onClick={() => setIndex(value => (value - 1 + banners.length) % banners.length)}
+              className="absolute left-3 top-1/2 z-10 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60"
+            >
+              <ChevronLeft className="h-5 w-5" />
+            </button>
+            <button
+              type="button"
+              aria-label="下一张"
+              onClick={() => setIndex(value => (value + 1) % banners.length)}
+              className="absolute right-3 top-1/2 z-10 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full bg-black/40 text-white backdrop-blur-sm transition hover:bg-black/60"
+            >
+              <ChevronRight className="h-5 w-5" />
+            </button>
+          </>
+        )}
+      </div>
+    </section>
+  )
+}
+
 function FeaturedPanel({ theme, accent, actions, active, onOpenChannel }: {
   theme: PcTheme
   accent: string
@@ -198,6 +342,9 @@ function FeaturedPanel({ theme, accent, actions, active, onOpenChannel }: {
 
   return (
     <div className="space-y-8">
+      {/* 官方精选首屏 banner 轮播（发现-音乐同位） */}
+      <DiscoveryBannerCarousel theme={theme} accent={accent} actions={actions} active={active} />
+
       {/* 官方歌单：一行 6 张大卡（封面中央大字标题 + 底部深色说明条） */}
       <section>
         <PcSectionTitle title="官方歌单" more="更多" onMore={() => onOpenChannel('square')} theme={theme} />
@@ -635,75 +782,72 @@ function ArtistPanel({ theme, accent, actions, active }: { theme: PcTheme; accen
 }
 
 /* ------------------------------------------------------------------ *
- * VIP 子页
+ * 全部分类子页（「更多」频道）：官方「更多∨」展开的分类全集，独立成页
  * ------------------------------------------------------------------ */
 
-function VipPanel({ theme, accent, actions, active }: { theme: PcTheme; accent: string; actions: PcActions; active: boolean }) {
-  const [data, setData] = useState<Awaited<ReturnType<typeof fetchNeteaseVipPage>> | null>(null)
-  const [loading, setLoading] = useState(true)
+/** 官方分类页的大分组顺序（catlist 的 hot 分类就是这几类，按热歌单广场一级标签组织）。 */
+const CATEGORY_GROUPS: Array<{ title: string; pattern: RegExp; fallback: string[] }> = [
+  { title: '语种', pattern: /^(华语|欧美|日语|韩语|粤语|小语种|方言)$/, fallback: ['华语', '欧美', '日语', '韩语', '粤语', '小语种'] },
+  { title: '风格', pattern: /^(流行|摇滚|民谣|电子|舞曲|说唱|金属|爵士|R&B|古典|轻音乐|世界音乐|蓝调|拉丁|雷鬼|乡村|民谣\/乡村)$/, fallback: ['流行', '摇滚', '民谣', '电子', '舞曲', '说唱', '爵士', '古典', '轻音乐', 'R&B'] },
+  { title: '场景 / 心境', pattern: /(学习|工作|睡前|清晨|夜晚|驾车|运动|旅行|散步|咖啡馆|雨天|治愈|放松|伤感|怀旧|快乐|安静|思念|浪漫|助眠)/, fallback: ['学习', '工作', '睡前', '驾车', '运动', '旅行', '雨天', '治愈', '伤感', '怀旧'] },
+  { title: '主题', pattern: /(影视|游戏|动漫|二次元|ACG|儿歌|胎教|校园|毕业|婚礼|军旅|戏曲|综艺|圣诞|新年)/, fallback: ['影视原声', '游戏', '动漫', '二次元', '儿歌', '校园', '婚礼', '戏曲'] },
+]
 
-  useEffect(() => {
-    if (!active) return
-    const controller = new AbortController()
-    setLoading(true)
-    fetchNeteaseVipPage(false, controller.signal)
-      .then(page => { if (!controller.signal.aborted) setData(page) })
-      .catch(() => { if (!controller.signal.aborted) setData(null) })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
-  }, [active])
-
-  if (loading) return <div className="flex min-h-40 items-center justify-center"><Loader2 className={`h-6 w-6 animate-spin ${theme.faint}`} /></div>
-  if (!data || (!data.card.level && data.privileges.length === 0 && data.songs.length === 0)) {
-    return <PcEmpty theme={theme} title="暂未获取到 VIP 内容" description="登录网易云会员账号后可见会员等级与权益" />
-  }
-
-  const songs = normalizeNeteaseSongs({ data: data.songs })
+function CategoriesPanel({ theme, accent, actions, active, categories, category, onCategory }: {
+  theme: PcTheme
+  accent: string
+  actions: PcActions
+  active: boolean
+  categories: string[]
+  category: string
+  onCategory: (next: string) => void
+}) {
+  // 服务端拿不到分类时用固定兜底分组，保证「更多」页永远有内容
+  const groups = useMemo(() => {
+    if (categories.length <= 1) {
+      return CATEGORY_GROUPS.map(group => ({ title: group.title, items: group.fallback.filter(item => item !== '全部') }))
+    }
+    const names = categories.filter(name => name !== '全部')
+    const used = new Set<string>()
+    const out: Array<{ title: string; items: string[] }> = []
+    for (const group of CATEGORY_GROUPS) {
+      const items = names.filter(name => {
+        if (used.has(name) || !group.pattern.test(name)) return false
+        used.add(name)
+        return true
+      })
+      if (items.length > 0) out.push({ title: group.title, items })
+    }
+    const rest = names.filter(name => !used.has(name))
+    if (rest.length > 0) out.push({ title: '其它', items: rest })
+    return out
+  }, [categories])
 
   return (
-    <div className="space-y-6">
-      <section className={`flex items-center gap-4 rounded-lg p-4 ${theme.surface}`}>
-        <PcCover src={data.card.levelImage} alt="会员等级" className="h-20 w-20 shrink-0" rounded="rounded-lg" />
-        <div className="min-w-0">
-          <h2 className={`text-[18px] font-semibold ${theme.text}`}>{data.level.levelTitle || '黑胶 VIP'}</h2>
-          <p className={`mt-1 text-[12px] ${theme.subtle}`}>
-            {data.level.nextLevelTitle ? `距离 ${data.level.nextLevelTitle} 还需 ${Math.max(0, data.level.nextLevelGrowthPoint - data.level.growthPoint)} 成长值` : '已是最高等级'}
-          </p>
-          <p className={`mt-1 text-[12px] ${theme.faint}`}>成长值 {data.level.growthPoint}</p>
-        </div>
-      </section>
-
-      {data.privileges.length > 0 && (
-        <section>
-          <PcSectionTitle title="会员权益" theme={theme} />
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-            {data.privileges.map(privilege => (
-              <div key={`privilege:${privilege.title}`} className={`flex items-center gap-2 rounded-lg px-3 py-2 ${theme.surface}`}>
-                <PcCover src={privilege.icon} alt={privilege.title} className="h-7 w-7 shrink-0" rounded="rounded-full" />
-                <span className={`min-w-0 truncate text-[12px] ${theme.text}`}>{privilege.title}</span>
-              </div>
-            ))}
+    <div className="space-y-5">
+      <p className={`text-[12px] ${theme.subtle}`}>选择一个分类进入对应歌单墙</p>
+      {groups.map(group => (
+        <section key={group.title}>
+          <PcSectionTitle title={group.title} theme={theme} />
+          <div className="flex flex-wrap gap-2">
+            {group.items.map(name => {
+              const selected = name === category
+              return (
+                <button
+                  key={`category:${name}`}
+                  type="button"
+                  onClick={() => { onCategory(name); actions.onNavigate({ kind: 'netease', page: 'featured', detail: 'square' }) }}
+                  className={`rounded-full px-3.5 py-1.5 text-[13px] transition ${selected ? 'font-medium text-white' : theme.chipIdle}`}
+                  style={selected ? { background: accent } : undefined}
+                >
+                  {name}
+                </button>
+              )
+            })}
           </div>
         </section>
-      )}
-
-      {songs.length > 0 && (
-        <section>
-          <PcSectionTitle title="VIP 专属好歌" theme={theme} />
-          <PcSongTable
-            songs={songs}
-            skin="netease"
-            theme={theme}
-            accent={accent}
-            playingKey={actions.currentSongKey}
-            isPlaying={actions.isPlaying}
-            likedKeys={actions.likedKeys}
-            onPlay={(song, index) => actions.onPlaySongs(song, songs, index)}
-            onMenu={(event, song) => actions.onSongMenu({ show: true, x: event.clientX, y: event.clientY, song })}
-            onToggleLike={actions.onToggleLike}
-          />
-        </section>
-      )}
+      ))}
+      {active && null}
     </div>
   )
 }
@@ -718,14 +862,13 @@ function NeteasePcFeatured({ chrome, account, actions, active = true, initialCha
   const [channel, setChannel] = useState<ChannelKey>(() => (CHANNELS.some(item => item.key === initialChannel) ? initialChannel as ChannelKey : 'featured'))
   const [squareCategory, setSquareCategory] = useState('全部')
   const [categories, setCategories] = useState<string[]>(FALLBACK_CATEGORIES)
-  const [moreOpen, setMoreOpen] = useState(false)
 
   // 入口指定频道（如「私人雷达」兜底跳排行榜）
   useEffect(() => {
     if (initialChannel && CHANNELS.some(item => item.key === initialChannel)) setChannel(initialChannel as ChannelKey)
   }, [initialChannel])
 
-  // 风格分类（公开接口）：只用于「更多」下拉与歌单广场分类条，拿不到就用固定分类
+  // 分类全集（公开接口）：全部分类页与歌单广场分类条共用，拿不到就用固定分类
   useEffect(() => {
     if (!active) return
     const controller = new AbortController()
@@ -749,7 +892,7 @@ function NeteasePcFeatured({ chrome, account, actions, active = true, initialCha
 
   return (
     <div className="pb-6">
-      {/* 频道页签：横排文字 + 选中加粗（官方 PC「精选」页顶部） */}
+      {/* 频道页签：横排文字 + 选中加粗（官方 PC「精选」页顶部）。「更多」是独立频道页。 */}
       <div className="mb-6 flex items-center gap-6">
         <div className="flex min-w-0 flex-1 items-center gap-6 overflow-x-auto">
           {CHANNELS.map(item => {
@@ -758,7 +901,7 @@ function NeteasePcFeatured({ chrome, account, actions, active = true, initialCha
               <button
                 key={`channel:${item.key}`}
                 type="button"
-                onClick={() => { setChannel(item.key); setMoreOpen(false) }}
+                onClick={() => setChannel(item.key)}
                 className={`shrink-0 whitespace-nowrap pb-1 text-[15px] transition ${selected ? 'font-semibold' : theme.tabIdle}`}
                 style={selected ? { color: accent } : undefined}
               >
@@ -766,37 +909,6 @@ function NeteasePcFeatured({ chrome, account, actions, active = true, initialCha
               </button>
             )
           })}
-        </div>
-        {/* 更多∨：风格分类下拉（直接跳到歌单广场对应分类）；放在滚动容器外，避免下拉被裁切 */}
-        <div className="relative shrink-0">
-          <button
-            type="button"
-            onClick={() => setMoreOpen(open => !open)}
-            className={`flex items-center gap-0.5 whitespace-nowrap pb-1 text-[15px] transition ${moreOpen ? 'font-semibold' : theme.tabIdle}`}
-            style={moreOpen ? { color: accent } : undefined}
-            aria-expanded={moreOpen}
-          >
-            更多<ChevronDown className="h-4 w-4" />
-          </button>
-          {moreOpen && (
-            <>
-              <button type="button" aria-label="关闭分类菜单" className="fixed inset-0 z-40 cursor-default" onClick={() => setMoreOpen(false)} />
-              <div className={`absolute right-0 top-full z-50 mt-2 w-[420px] max-w-[70vw] rounded-lg border p-3 shadow-2xl ${theme.divider} ${theme.tone === 'dark' ? 'bg-[#1b1b1f]' : 'bg-white'}`}>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {categories.filter(name => name !== '全部').slice(0, 24).map(name => (
-                    <button
-                      key={`more:${name}`}
-                      type="button"
-                      onClick={() => { setSquareCategory(name); setChannel('square'); setMoreOpen(false) }}
-                      className={`truncate rounded-md px-2 py-1.5 text-[12px] transition ${theme.subtle} ${theme.hover}`}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </>
-          )}
         </div>
       </div>
 
@@ -809,11 +921,16 @@ function NeteasePcFeatured({ chrome, account, actions, active = true, initialCha
         />
       )}
 
+      {channel === 'categories' && (
+        <CategoriesPanel
+          theme={theme} accent={accent} actions={actions} active={active}
+          categories={categories} category={squareCategory} onCategory={setSquareCategory}
+        />
+      )}
+
       {channel === 'charts' && <ChartsPanel theme={theme} accent={accent} actions={actions} active={active} />}
 
       {channel === 'artist' && <ArtistPanel theme={theme} accent={accent} actions={actions} active={active} />}
-
-      {channel === 'vip' && <VipPanel theme={theme} accent={accent} actions={actions} active={active} />}
 
       {/* 经典/欧美/粤语/驾车/全球：官方是独立曲风页，这里用同名分类的歌单广场结果，保证点了有内容 */}
       {activeDef?.category && (

@@ -3,8 +3,9 @@
 // 两个页面共用同一套骨架：大标题 → 下划线页签（带真实计数）→ 播放操作条 + 右端搜索
 // → 歌曲表格或封面网格（最近播放多一列「播放时间」）。所以用组件 + kind 收敛，避免两份页面样式漂移。
 //
-// 数据诚实性：本地扫描/下载/已购/试听记录、有声节目、视频是产品决策上永久不支持的能力
-// （上游也没有可用的数据源），对应入口、页签、操作条按钮已删除，不留空壳，绝不伪造数据。
+// 数据诚实性：「视频」= 收藏的 MV（music.musicasset.MVFavRead.getMyFavMV，2026-10-07 接入真实数据，
+// 与客户端 喜欢→视频 同一数据源）；「有声节目」与本地扫描/下载/已购/试听记录依旧无公开数据源
+// （对应页面按官方结构如实空态，见 QQPcExtras.tsx），绝不伪造数据。
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Search } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
@@ -15,7 +16,7 @@ import { getUserPlaylists } from '../../services/playlistService'
 import { getPlatformCookie } from '../../services/platforms'
 import { getApiBase } from '../../services/apiConfig'
 import {
-  PcCardGrid, PcEmpty, PcIconButton, PcListFooter, PcPageTitle, PcPrimaryButton, PcSongTable,
+  PcCardGrid, PcCover, PcEmpty, PcIconButton, PcListFooter, PcPageTitle, PcPrimaryButton, PcSongTable,
   PcTabs, pcSongKey, pcTheme, type PcSkin, type PcTabItem, type PcTone,
 } from './pcKit'
 import type { PcActions, PcAccount } from './types'
@@ -45,10 +46,13 @@ const PAGE_TITLES: Record<QQPcCollectionKind, string> = {
 }
 
 const TAB_DEFS: Record<QQPcCollectionKind, PcTabItem[]> = {
+  // 官方喜欢页页签（客户端实测）：歌曲 / 歌单 / 专辑 / 有声节目 / 视频。
   liked: [
     { key: 'songs', label: '歌曲' },
     { key: 'playlists', label: '歌单' },
     { key: 'albums', label: '专辑' },
+    { key: 'podcasts', label: '有声节目' },
+    { key: 'mvs', label: '视频' },
   ],
   recent: [{ key: 'songs', label: '歌曲' }],
 }
@@ -60,6 +64,8 @@ const TOOLBAR_KINDS: QQPcCollectionKind[] = ['liked', 'recent']
 const likedCollectionCache = new Map<string, { songs: CollectionSong[]; playlists: any[] }>()
 const recentSongsCache = new Map<string, CollectionSong[]>()
 const collectedAlbumsCache = new Map<string, any[]>()
+/** 收藏 MV（喜欢→视频 页签）；条目结构与 /api/qq/fav/mv 返回一致。 */
+const likedMvsCache = new Map<string, Array<{ vid: string; name: string; singer: string; coverUrl: string; duration: number; playCount: number }>>()
 
 const FALLBACK_ACTIONS: PcActions = {
   onPlaySongs: () => {},
@@ -108,8 +114,12 @@ function QQPcCollection({
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [albumsState, setAlbumsState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
+  /** 喜欢→视频 页签：收藏的 MV（官方同源模块 MVFavRead.getMyFavMV）。 */
+  const [mvs, setMvs] = useState<Array<{ vid: string; name: string; singer: string; coverUrl: string; duration: number; playCount: number }>>([])
+  const [mvsState, setMvsState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const requestRef = useRef(0)
   const albumsRequestRef = useRef('')
+  const mvsRequestRef = useRef('')
   // 回调放 ref：父层传内联箭头函数时，不会因为依赖变化把 effect 打成死循环
   const likedChangeRef = useRef(onLikedChange)
   useEffect(() => { likedChangeRef.current = onLikedChange }, [onLikedChange])
@@ -120,6 +130,7 @@ function QQPcCollection({
   const likedCacheKey = `liked:${userId}:${authRevision}`
   const recentCacheKey = `recent:${userId}:${authRevision}`
   const albumsCacheKey = `albums:${userId}:${authRevision}`
+  const mvsCacheKey = `liked-mvs:${userId}:${authRevision}`
 
   /**
    * 把「喜欢标识 → 歌曲键」回传父层（红心列口径）。
@@ -298,6 +309,44 @@ function QQPcCollection({
     return () => { cancelled = true }
   }, [active, kind, tab, loggedIn, albumsCacheKey])
 
+  /* ── 收藏 MV（喜欢→视频 页签）：官方同源模块，进入页签才请求，本会话缓存 ── */
+  useEffect(() => {
+    if (!active || kind !== 'liked' || tab !== 'mvs' || !loggedIn) return
+    const cached = likedMvsCache.get(mvsCacheKey)
+    if (cached) {
+      setMvs(cached)
+      setMvsState('ready')
+      return
+    }
+    if (mvsRequestRef.current === mvsCacheKey) return
+    mvsRequestRef.current = mvsCacheKey
+    let cancelled = false
+    setMvsState('loading')
+    const cookie = getPlatformCookie('qq')
+    fetch(`${getApiBase()}/qq/fav/mv`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cookie }),
+      cache: 'no-store',
+    })
+      .then(response => response.json().catch(() => null))
+      .then(payload => {
+        if (cancelled) return
+        const list = Array.isArray(payload?.list) ? payload.list : []
+        likedMvsCache.set(mvsCacheKey, list)
+        setMvs(list)
+        setMvsState('ready')
+      })
+      .catch(() => {
+        if (cancelled) return
+        // 失败不留请求锁：切走再回来允许重试
+        mvsRequestRef.current = ''
+        setMvs([])
+        setMvsState('error')
+      })
+    return () => { cancelled = true }
+  }, [active, kind, tab, loggedIn, mvsCacheKey])
+
   /* ── 表格数据与回调 ── */
 
   // 本地算出的喜欢键 + 父层 likedKeys：喜欢页的红心必须与自己的列表一致
@@ -321,11 +370,14 @@ function QQPcCollection({
         songs: songs.length || undefined,
         playlists: playlists.length || undefined,
         albums: albums.length || undefined,
+        // 官方喜欢页「有声节目0」照实显示 0（该通道无数据源，恒空态）
+        podcasts: 0,
+        mvs: mvs.length || undefined,
       }
     }
     if (kind === 'recent') return { songs: songs.length || undefined }
     return {}
-  }, [kind, songs.length, playlists.length, albums.length])
+  }, [kind, songs.length, playlists.length, albums.length, mvs.length])
 
   const tabs = useMemo(() => tabDefs.map(item => {
     const count = tabCounts[item.key]
@@ -459,6 +511,41 @@ function QQPcCollection({
             />
           )
         )
+      )}
+
+      {kind === 'liked' && tab === 'mvs' && (
+        !loggedIn ? loginEmpty : (
+          mvsState === 'loading' ? (
+            <div className={`py-16 text-center text-[13px] ${theme.faint}`}>正在加载…</div>
+          ) : mvs.length ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+              {mvs.map(mv => (
+                <button
+                  key={`mv:${mv.vid}`}
+                  type="button"
+                  onClick={() => act.onOpenMv?.(mv.vid, 'qq')}
+                  className="group min-w-0 text-left"
+                  title={mv.name}
+                >
+                  <PcCover src={mv.coverUrl} alt={mv.name} className="aspect-video w-full" rounded="rounded-lg" />
+                  <span className={`mt-2 line-clamp-2 text-[13px] leading-snug ${theme.text}`}>{mv.name}</span>
+                  {mv.singer ? <span className={`mt-0.5 block truncate text-[11px] ${theme.faint}`}>{mv.singer}</span> : null}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <PcEmpty
+              theme={theme}
+              title="暂无收藏视频"
+              description={mvsState === 'error' ? '收藏视频加载失败，稍后重试' : '在 MV 页点收藏后会出现在这里'}
+            />
+          )
+        )
+      )}
+
+      {/* 有声节目：官方同页签同样是空的（该账号 0 条）；通道无数据源，如实空态 */}
+      {kind === 'liked' && tab === 'podcasts' && (
+        !loggedIn ? loginEmpty : <PcEmpty theme={theme} title="暂无声节目" description="有声节目收藏暂无可用数据源" />
       )}
 
       {kind === 'recent' && tab === 'songs' && (

@@ -7,14 +7,15 @@
 // 首次进入以客户端的 Selections 为初值，之后本机增删记在 localStorage。
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import {
-  ChevronDown, Clock, Compass, Heart, Home, Laptop2, Minus, Music2, Plus,
-  Search as SearchIcon, Settings as SettingsIcon, SlidersHorizontal, Sparkles, User,
+  ChevronDown, ChevronLeft, ChevronRight, Clock, Compass, Download, Heart, Home, Laptop2, ListMusic, Minus, Music2, Plus,
+  Search as SearchIcon, Settings as SettingsIcon, ShoppingBag, SlidersHorizontal, Sparkles, User,
 } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
 import { PcCover, pcTheme, type PcTone } from './pcKit'
 import { entryLinkParam, fetchQQPcEntryPoint, type QQPcEntryItem, type QQPcEntryPoint } from './qqPcEntryPoint'
+import { accountTierBadgeClass, getAccountTierBadge } from '../../services/accountTier'
 
-export type QQPcNavKey = 'home' | 'hall' | 'liked' | 'recent' | 'search' | 'profile' | 'settings'
+export type QQPcNavKey = 'home' | 'hall' | 'liked' | 'recent' | 'local' | 'purchased' | 'trial' | 'search' | 'profile' | 'settings'
 
 /** 功能位：直接存客户端条目关键字段（与 Selections 同构），便于离线保存与四态图标。 */
 export interface QQPcTile {
@@ -31,6 +32,8 @@ export interface QQPcTile {
 }
 
 const TILES_KEY = 'waveforge:traditional-qq-tiles:v2'
+/** 与官方「已选功能位」对齐的一次性标记：老版本只落了本机条目（如「刷歌」），格子和客户端对不上。 */
+const TILES_SYNC_KEY = 'waveforge:traditional-qq-tiles:selections-synced:v1'
 
 function toTile(item: QQPcEntryItem): QQPcTile {
   return {
@@ -61,17 +64,28 @@ const FIXED_TILES: Array<{ key: QQPcNavKey; label: string; Icon: typeof Home }> 
   { key: 'hall', label: '乐馆', Icon: Compass },
 ]
 
+/** 二级导航（展开栏与折叠轨道共用一份清单，避免两处顺序漂移） */
+const SIDEBAR_NAV_ITEMS: Array<{ key: QQPcNavKey; label: string; Icon: typeof Home }> = [
+  // 官方顺序（客户端实测）：最近播放 → 本地和下载 → 已购音乐 → 试听列表 → 喜欢。
+  { key: 'recent', label: '最近播放', Icon: Clock },
+  { key: 'local', label: '本地和下载', Icon: Download },
+  { key: 'purchased', label: '已购音乐', Icon: ShoppingBag },
+  { key: 'trial', label: '试听列表', Icon: ListMusic },
+  { key: 'liked', label: '喜欢', Icon: Heart },
+]
+
 /** 条目图标四态里挑当前皮肤/选中态该用的那张（客户端就是四张图）。 */
 function tileIcon(tile: QQPcTile, dark: boolean, selected = false): string | undefined {
   if (selected) return dark ? (tile.iconDarkSelectedUrl || tile.iconSelectedUrl) : (tile.iconSelectedUrl || tile.iconDarkSelectedUrl)
   return dark ? (tile.iconDarkUrl || tile.iconUrl) : (tile.iconUrl || tile.iconDarkUrl)
 }
 
-/** 官方条目类型 → 本软件落点（链接里带 singermid / playlist id 时优先按链接走）。 */
-const SUBTYPE_ROUTE: Record<number, 'hall' | 'mv' | 'charts'> = {
-  10011: 'mv',      // 视频
-  10012: 'hall',    // 频道
-  10015: 'charts',  // 飙升榜
+/** 官方条目类型 → 本软件落点（链接里带 singermid / playlist id 时优先按链接走）。
+ *  视频/频道/榜单都落到乐馆的对应页签（客户端这三个功能位就是打开对应页面）。 */
+const SUBTYPE_TAB: Record<number, 'charts' | 'videos' | 'channels'> = {
+  10011: 'videos',    // 视频（客户端落 mv/recommend 视频推荐页）
+  10012: 'channels',  // 频道
+  10015: 'charts',    // 飙升榜（客户端打开榜单详情；这里落榜单页签）
 }
 /** 官方歌单与听书热播榜同为 10013，只能靠标题/链接区分 */
 const isOfficialSonglist = (item: { title: string; link: string }) => item.title.includes('官方歌单') || item.link.includes('category_detail')
@@ -90,7 +104,7 @@ export interface QQPcSidebarProps {
   onPlaylistTab: (tab: 'mine' | 'collected') => void
   onOpenPlaylist: (playlist: any) => void
   onPlaylistMenu: (menu: { show: boolean; x: number; y: number; playlist: any | null }) => void
-  onNavigate: (key: QQPcNavKey) => void
+  onNavigate: (key: QQPcNavKey, detail?: string) => void
   onOpenMv: () => void
   onPlayRadio: () => void
   onOpenArtist: (artistId: string) => void
@@ -104,6 +118,9 @@ export interface QQPcSidebarProps {
   onToggleCreate: () => void
   onLoginClick: () => void
   onToggleMode: () => void
+  /** 折叠成 56px 图标轨道（官方客户端左下角左箭头的行为） */
+  collapsed?: boolean
+  onToggleCollapse?: () => void
   playlistScrollRef: RefObject<HTMLDivElement | null>
 }
 
@@ -111,7 +128,8 @@ function QQPcSidebar({
   tone, accent, loggedIn, username, avatar, vip = false, currentKey, counts, playlists, playlistTab, onPlaylistTab,
   onOpenPlaylist, onPlaylistMenu, onNavigate, onOpenMv, onPlayRadio, onOpenArtist, onPlaySongs,
   creatingPlaylist, newPlaylistName, onNewPlaylistName, onConfirmCreate,
-  onCancelCreate, creatingBusy, onToggleCreate, onLoginClick, onToggleMode, playlistScrollRef,
+  onCancelCreate, creatingBusy, onToggleCreate, onLoginClick, onToggleMode, collapsed = false, onToggleCollapse,
+  playlistScrollRef,
 }: QQPcSidebarProps) {
   const theme = pcTheme(tone)
   const dark = tone === 'dark'
@@ -134,7 +152,19 @@ function QQPcSidebar({
         if (cancelled) return
         setEntry(data)
         setEntryError('')
-        setTiles(prev => (prev === null ? data.selections.map(toTile).slice(0, data.maxSelect) : prev))
+        setTiles(prev => {
+          const seeded = data.selections.map(toTile).slice(0, data.maxSelect)
+          if (prev === null) return seeded
+          // 一次性与官方「已选功能位」对齐：早期版本落盘时可能没同步过官方 Selections，
+          // 表现为左栏格子比客户端少一截（客户端已选：常听歌手/频道/视频/飙升榜/官方歌单）。
+          // 只在从未对齐过时合并一次，之后完全尊重用户自己的增删。
+          try {
+            if (localStorage.getItem(TILES_SYNC_KEY)) return prev
+            localStorage.setItem(TILES_SYNC_KEY, '1')
+          } catch { return prev }
+          const keys = new Set(prev.map(tile => tile.key))
+          return [...prev, ...seeded.filter(tile => !keys.has(tile.key))].slice(0, data.maxSelect)
+        })
       })
       .catch(error => { if (!cancelled) setEntryError(error instanceof Error ? error.message : '功能位加载失败') })
     return () => { cancelled = true }
@@ -174,6 +204,9 @@ function QQPcSidebar({
 
   /** 点击分发：先看链接里的真实目标（歌手 mid / 歌单 id），再按条目类型兜底。 */
   const runEntry = useCallback((item: QQPcTile) => {
+    // 本机功能位「刷歌」：起播推荐流（客户端这里进雷达/刷歌队列）。此前漏接线，点击只会弹
+    // 「暂不支持」——onPlayRadio 定义了却从未被用（2026-10-07 全量走查发现）。
+    if (item.key === 'local:radio') { onPlayRadio(); return }
     if (item.itemType === 1002 || item.link.includes('singer_detail')) {
       const mid = entryLinkParam(item as unknown as QQPcEntryItem, 'singermid')
       if (mid) { onOpenArtist(mid); return }
@@ -182,28 +215,71 @@ function QQPcSidebar({
       const id = entryLinkParam(item as unknown as QQPcEntryItem, 'id')
       if (id) { onOpenPlaylist({ id, name: item.title, platform: 'qq', source: 'qq-pc-entry' }); return }
     }
-    const route = SUBTYPE_ROUTE[item.itemSubType]
-    if (route === 'mv') { onOpenMv(); return }
-    if (route === 'charts') { onNavigate('hall'); return }
-    if (isOfficialSonglist(item)) { onNavigate('hall'); return }
-    if (route === 'hall') { onNavigate('hall'); return }
+    const tab = SUBTYPE_TAB[item.itemSubType]
+    if (tab) { onNavigate('hall', tab); return }
+    if (isOfficialSonglist(item)) { onNavigate('hall', 'playlists'); return }
     // 听书 / AI 唱 / 数字专辑等没有数据源的条目：明确告知，而不是点了没反应（与面板底部说明一致）
     window.dispatchEvent(new CustomEvent('showToast', {
       detail: { message: `「${item.title}」暂不支持在 WaveForge 内打开`, type: 'info' },
     }))
-  }, [onNavigate, onOpenArtist, onOpenMv, onOpenPlaylist])
+  }, [onNavigate, onOpenArtist, onOpenPlaylist, onPlayRadio])
 
   // 可添加条目：只留真实落点的官方条目 + 本软件自己的「刷歌」（客户端把它当本地功能，官方入口接口里没有）
   const addable = useMemo<QQPcTile[]>(() => {
     const features = (entry?.features ?? [])
-      .filter(item => isOfficialSonglist(item) || Boolean(SUBTYPE_ROUTE[item.itemSubType]))
+      .filter(item => isOfficialSonglist(item) || Boolean(SUBTYPE_TAB[item.itemSubType]))
       .map(toTile)
     return [...features, { key: 'local:radio', title: '刷歌', itemType: 1001, itemSubType: 0, link: '' }]
   }, [entry])
 
+  // 折叠态：只留图标轨道（账号 / 功能位 / 二级导航 / 底部工具 + 右箭头展开）
+  if (collapsed) {
+    return (
+      <aside className={`relative hidden min-h-0 flex-col items-center gap-1 overflow-y-auto border-r py-4 lg:flex ${dark ? 'border-white/10' : 'border-black/[0.07]'}`}>
+        <button type="button" onClick={() => (loggedIn ? onNavigate('profile') : onLoginClick())} title={loggedIn ? (username || '我的账户') : '登录'} className="mb-1 h-9 w-9 shrink-0 overflow-hidden rounded-full">
+          {avatar
+            ? <PcCover src={avatar} alt="" className="h-9 w-9" rounded="rounded-full" eager />
+            : <span className={`flex h-9 w-9 items-center justify-center rounded-full ${iconBox}`}><User className="h-4 w-4" /></span>}
+        </button>
+        {FIXED_TILES.map(({ key, label, Icon }) => (
+          <button key={key} type="button" title={label} aria-label={label} onClick={() => onNavigate(key)} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${currentKey === key ? activePill : `${iconBox} hover:opacity-80`}`}>
+            <Icon className="h-[18px] w-[18px]" style={currentKey === key ? { color: accent } : undefined} />
+          </button>
+        ))}
+        {tileList.map(tile => {
+          const icon = tileIcon(tile, dark)
+          return (
+            <button key={tile.key} type="button" title={tile.title} aria-label={tile.title} onClick={() => runEntry(tile)} className={`flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-xl ${iconBox}`}>
+              {icon
+                ? <img src={icon} alt="" className="h-[20px] w-[20px] object-contain" loading="lazy" referrerPolicy="no-referrer" />
+                : tile.cover
+                  ? <PcCover src={tile.cover} alt="" className="h-5 w-5" rounded={tile.itemType === 1002 ? 'rounded-full' : 'rounded-md'} />
+                  : <Music2 className="h-[18px] w-[18px]" />}
+            </button>
+          )
+        })}
+        <span className={`my-1 h-px w-7 shrink-0 ${dark ? 'bg-white/12' : 'bg-black/10'}`} />
+        {SIDEBAR_NAV_ITEMS.map(({ key, label, Icon }) => (
+          <button key={key} type="button" title={label} aria-label={label} onClick={() => onNavigate(key)} className={`flex h-8 w-9 shrink-0 items-center justify-center rounded-xl transition ${currentKey === key ? activePill : `${idleText} hover:opacity-80`}`}>
+            <Icon className="h-4 w-4" style={currentKey === key ? { color: accent } : undefined} />
+          </button>
+        ))}
+        <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pt-2">
+          <button type="button" onClick={onToggleCollapse} title="展开左栏" aria-label="展开左栏" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><ChevronRight className="h-4 w-4" /></button>
+          <button type="button" onClick={() => onNavigate('search')} title="搜索" aria-label="搜索" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SearchIcon className="h-4 w-4" /></button>
+          <button type="button" onClick={() => onNavigate('settings')} title="设置" aria-label="设置" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SettingsIcon className="h-4 w-4" /></button>
+          <button type="button" onClick={onToggleMode} title="切换界面模式" aria-label="切换界面模式" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><Laptop2 className="h-4 w-4" /></button>
+        </div>
+      </aside>
+    )
+  }
+
   return (
     <aside className={`relative hidden min-h-0 flex-col lg:flex ${dark ? 'border-white/10' : 'border-black/[0.07]'} border-r`}>
-      <div className="shrink-0 px-4 pt-5">
+      {/* 整栏滚动（对齐官方客户端）：账号区/功能位/导航/歌单共用一个滚动容器，底部工具行固定。
+          滚动位置仍按 自建/收藏 页签分别记忆（沿用 playlistScrollRef / data-testid 供既有测试使用）。 */}
+      <div ref={playlistScrollRef} data-testid="traditional-playlist-scroll" className="min-h-0 flex-1 overflow-y-auto">
+      <div className="px-4 pt-5">
         <button type="button" onClick={() => (loggedIn ? onNavigate('profile') : onLoginClick())} className="flex w-full items-center gap-2.5 text-left">
           {avatar
             ? <PcCover src={avatar} alt={`${username || '用户'}头像`} className="h-9 w-9 shrink-0" rounded="rounded-full" eager />
@@ -211,9 +287,16 @@ function QQPcSidebar({
           <span className="min-w-0 flex-1">
             <span className={`block truncate text-[14px] font-medium ${theme.text}`}>{loggedIn ? (username || '我的账户') : '未登录'}</span>
             <span className="mt-0.5 flex items-center gap-1">
-              {vip
-                ? <span className="rounded-[3px] bg-gradient-to-r from-amber-400 to-yellow-500 px-1 text-[10px] leading-[14px] text-white">VIP</span>
-                : <span className={`text-[11px] ${theme.faint}`}>{loggedIn ? '普通用户' : '点击登录'}</span>}
+              {(() => {
+                // 会员级别区分：超级会员 > 绿钻 VIP（写死 VIP 会让超级会员用户看到错的等级）
+                const tierBadge = loggedIn ? getAccountTierBadge('qq', vip) : null
+                if (!tierBadge) return <span className={`text-[11px] ${theme.faint}`}>{loggedIn ? '普通用户' : '点击登录'}</span>
+                return (
+                  <span className={`rounded-[3px] px-1 text-[10px] leading-[14px] ${accountTierBadgeClass(tierBadge.tone)}`}>
+                    {tierBadge.label}
+                  </span>
+                )
+              })()}
             </span>
           </span>
           <ChevronDown className={`h-4 w-4 shrink-0 ${theme.faint}`} />
@@ -272,6 +355,96 @@ function QQPcSidebar({
             </button>
           )}
         </div>
+      </div>
+
+      <nav className="mt-5 shrink-0 space-y-0.5 px-3">
+        {([
+          // 后三页的数据通道现状见 QQPcExtras.tsx 头部注释（试听列表与官方同为空的空态；
+          // 已购/本地下载通道未接入，页面按官方结构如实空态——入口不再缺失）。
+          ...SIDEBAR_NAV_ITEMS.map(item => ({ ...item, count: item.key === 'recent' ? counts.recent : item.key === 'liked' ? counts.liked : undefined })),
+        ]).map(({ key, label, Icon, count }) => {
+          const active = currentKey === key
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onNavigate(key)}
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-[9px] text-[13px] transition ${active ? `${activePill} font-medium` : `${idleText} ${dark ? 'hover:bg-white/[0.06]' : 'hover:bg-black/[0.035]'}`}`}
+              style={active ? { color: accent } : undefined}
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-left">{label}{typeof count === 'number' && count > 0 ? `:${count}` : ''}</span>
+            </button>
+          )
+        })}
+      </nav>
+
+      <div className="mt-6 flex shrink-0 items-center gap-2 px-4">
+        <button
+          type="button"
+          onClick={() => onPlaylistTab('mine')}
+          className={`text-[13px] transition ${playlistTab === 'mine' ? 'font-medium' : idleText}`}
+          style={playlistTab === 'mine' ? { color: theme.tone === 'dark' ? '#fff' : '#111' } : undefined}
+        >
+          自建歌单
+        </button>
+        <span className={`text-[12px] ${theme.faint}`}>|</span>
+        <button
+          type="button"
+          onClick={() => onPlaylistTab('collected')}
+          className={`text-[13px] transition ${playlistTab === 'collected' ? 'font-medium' : idleText}`}
+          style={playlistTab === 'collected' ? { color: theme.tone === 'dark' ? '#fff' : '#111' } : undefined}
+        >
+          收藏歌单
+        </button>
+        <button type="button" onClick={onToggleCreate} className={`ml-auto rounded p-1 ${theme.faint} hover:opacity-80`} aria-label="新建歌单"><Plus className="h-3.5 w-3.5" /></button>
+      </div>
+
+      {creatingPlaylist && (
+        <div className="mt-2 shrink-0 px-3">
+          <input
+            autoFocus
+            value={newPlaylistName}
+            onChange={event => onNewPlaylistName(event.target.value)}
+            onKeyDown={event => {
+              if (event.key === 'Enter') void onConfirmCreate()
+              if (event.key === 'Escape') onCancelCreate()
+            }}
+            placeholder="歌单名称"
+            className={`h-8 w-full rounded-lg border bg-transparent px-2 text-[12px] outline-none ${dark ? 'border-white/20' : 'border-black/15'} ${theme.text}`}
+          />
+          <div className="mt-1.5 flex items-center gap-2">
+            <button type="button" disabled={creatingBusy || !newPlaylistName.trim()} onClick={() => void onConfirmCreate()} className="rounded-md px-2.5 py-1 text-[12px] text-white disabled:opacity-40" style={{ background: accent }}>创建</button>
+            <button type="button" onClick={onCancelCreate} className={`rounded-md px-2 py-1 text-[12px] ${theme.faint}`}>取消</button>
+          </div>
+        </div>
+      )}
+
+        <div className="mt-2 space-y-0.5 px-3 pb-4">
+        {playlists.map((playlist: any) => (
+          <button
+            key={`${playlist.platform || 'qq'}:${playlist.id || playlist.dirId}`}
+            type="button"
+            onClick={() => onOpenPlaylist(playlist)}
+            onContextMenu={event => { event.preventDefault(); onPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }}
+            className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-[6px] text-left transition ${dark ? 'hover:bg-white/[0.06]' : 'hover:bg-black/[0.04]'}`}
+          >
+            <PcCover
+              src={playlist.coverImgUrl || playlist.coverUrl}
+              alt={`${playlist.name}封面`}
+              className="h-9 w-9 shrink-0"
+              rounded="rounded-md"
+            />
+            <span className={`min-w-0 flex-1 truncate text-[12px] ${theme.text}`}>{playlist.name}</span>
+          </button>
+        ))}
+        {playlists.length === 0 && (
+          <p className={`px-2 py-4 text-center text-[11px] ${theme.faint}`}>
+            {playlistTab === 'mine' ? '还没有创建歌单，点 + 新建' : '还没有收藏歌单'}
+          </p>
+        )}
+      </div>
+
       </div>
 
       {panelOpen && (
@@ -375,95 +548,9 @@ function QQPcSidebar({
         </div>
       )}
 
-      <nav className="mt-5 shrink-0 space-y-0.5 px-3">
-        {([
-          { key: 'liked' as const, label: '喜欢', Icon: Heart, count: counts.liked },
-          { key: 'recent' as const, label: '最近播放', Icon: Clock, count: counts.recent },
-        ]).map(({ key, label, Icon, count }) => {
-          const active = currentKey === key
-          return (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onNavigate(key)}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-[9px] text-[13px] transition ${active ? `${activePill} font-medium` : `${idleText} ${dark ? 'hover:bg-white/[0.06]' : 'hover:bg-black/[0.035]'}`}`}
-              style={active ? { color: accent } : undefined}
-            >
-              <Icon className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-left">{label}{typeof count === 'number' && count > 0 ? `:${count}` : ''}</span>
-            </button>
-          )
-        })}
-      </nav>
-
-      <div className="mt-6 flex shrink-0 items-center gap-2 px-4">
-        <button
-          type="button"
-          onClick={() => onPlaylistTab('mine')}
-          className={`text-[13px] transition ${playlistTab === 'mine' ? 'font-medium' : idleText}`}
-          style={playlistTab === 'mine' ? { color: theme.tone === 'dark' ? '#fff' : '#111' } : undefined}
-        >
-          自建歌单
-        </button>
-        <span className={`text-[12px] ${theme.faint}`}>|</span>
-        <button
-          type="button"
-          onClick={() => onPlaylistTab('collected')}
-          className={`text-[13px] transition ${playlistTab === 'collected' ? 'font-medium' : idleText}`}
-          style={playlistTab === 'collected' ? { color: theme.tone === 'dark' ? '#fff' : '#111' } : undefined}
-        >
-          收藏歌单
-        </button>
-        <button type="button" onClick={onToggleCreate} className={`ml-auto rounded p-1 ${theme.faint} hover:opacity-80`} aria-label="新建歌单"><Plus className="h-3.5 w-3.5" /></button>
-      </div>
-
-      {creatingPlaylist && (
-        <div className="mt-2 shrink-0 px-3">
-          <input
-            autoFocus
-            value={newPlaylistName}
-            onChange={event => onNewPlaylistName(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') void onConfirmCreate()
-              if (event.key === 'Escape') onCancelCreate()
-            }}
-            placeholder="歌单名称"
-            className={`h-8 w-full rounded-lg border bg-transparent px-2 text-[12px] outline-none ${dark ? 'border-white/20' : 'border-black/15'} ${theme.text}`}
-          />
-          <div className="mt-1.5 flex items-center gap-2">
-            <button type="button" disabled={creatingBusy || !newPlaylistName.trim()} onClick={() => void onConfirmCreate()} className="rounded-md px-2.5 py-1 text-[12px] text-white disabled:opacity-40" style={{ background: accent }}>创建</button>
-            <button type="button" onClick={onCancelCreate} className={`rounded-md px-2 py-1 text-[12px] ${theme.faint}`}>取消</button>
-          </div>
-        </div>
-      )}
-
-      <div ref={playlistScrollRef} data-testid="traditional-playlist-scroll" className="mt-2 min-h-0 flex-1 space-y-0.5 overflow-y-auto px-3 pb-2">
-        {playlists.map((playlist: any) => (
-          <button
-            key={`${playlist.platform || 'qq'}:${playlist.id || playlist.dirId}`}
-            type="button"
-            onClick={() => onOpenPlaylist(playlist)}
-            onContextMenu={event => { event.preventDefault(); onPlaylistMenu({ show: true, x: event.clientX, y: event.clientY, playlist }) }}
-            className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-[6px] text-left transition ${dark ? 'hover:bg-white/[0.06]' : 'hover:bg-black/[0.04]'}`}
-          >
-            <PcCover
-              src={playlist.coverImgUrl || playlist.coverUrl}
-              alt={`${playlist.name}封面`}
-              className="h-9 w-9 shrink-0"
-              rounded="rounded-md"
-            />
-            <span className={`min-w-0 flex-1 truncate text-[12px] ${theme.text}`}>{playlist.name}</span>
-          </button>
-        ))}
-        {playlists.length === 0 && (
-          <p className={`px-2 py-4 text-center text-[11px] ${theme.faint}`}>
-            {playlistTab === 'mine' ? '还没有创建歌单，点 + 新建' : '还没有收藏歌单'}
-          </p>
-        )}
-      </div>
-
       <div className={`flex shrink-0 items-center gap-1 border-t px-3 py-2.5 ${theme.divider}`}>
-        <button type="button" onClick={() => onNavigate('search')} title="搜索" aria-label="搜索" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SearchIcon className="h-4 w-4" /></button>
+        {/* 左下角：折叠左栏（官方客户端是左箭头，不是搜索；搜索已上移到顶栏） */}
+        <button type="button" onClick={onToggleCollapse} title="折叠左栏" aria-label="折叠左栏" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><ChevronLeft className="h-4 w-4" /></button>
         <button type="button" onClick={() => onNavigate('settings')} title="设置" aria-label="设置" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SettingsIcon className="h-4 w-4" /></button>
         <button type="button" onClick={() => onNavigate('profile')} title="个人中心" aria-label="个人中心" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><User className="h-4 w-4" /></button>
         <button type="button" onClick={onToggleMode} title="切换界面模式" aria-label="切换界面模式" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><Laptop2 className="h-4 w-4" /></button>

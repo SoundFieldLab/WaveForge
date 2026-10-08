@@ -15,8 +15,10 @@ import type { Song } from '../../services/musicApi'
 import type { MusicPlatform } from '../../services/platforms'
 
 export type PcTone = 'light' | 'dark'
-/** 平台风格：决定表格列、角标形态与强调色语义（QQ 绿 / 网易云红由 accent 传入覆盖）。 */
-export type PcSkin = 'qq' | 'netease'
+/** 平台风格：决定表格列、角标形态与强调色语义（QQ 绿 / 网易云红 / 酷狗橙由 accent 传入覆盖）。
+ *  kugou 复用 netease 的默认分支，仅靠 accent 与数据源区分（酷狗客户端二级页与网易云同构）；
+ *  apple = Apple Music 客户端复刻（红色强调、客户端圆角、不摆 QQ/网易云的角标）。 */
+export type PcSkin = 'qq' | 'netease' | 'kugou' | 'apple'
 
 /* ------------------------------------------------------------------ *
  * 工具
@@ -341,6 +343,8 @@ export const PC_DEFAULT_COLUMNS: PcSongTableColumns = { index: true, like: true,
 
 /** 行内角标：QQ 的 VIP / 试听 / MV，网易云的 独家 / 超清母带 / VIP / 试听 / MV。 */
 export function PcSongBadges({ song, skin }: { song: Song; skin: PcSkin }) {
+  // Apple Music 客户端列表不带 VIP/试听/独家角标（音质标识另行处理），这里整体不渲染。
+  if (skin === 'apple') return null
   const badges: Array<{ label: string; color: string; border?: boolean }> = []
   const vip = Boolean(song.vip || song.requiredTier)
   if (skin === 'qq') {
@@ -654,7 +658,8 @@ export interface PcDetailHeaderProps {
  * QQ 与网易云在此处几乎一致，只有封面尺寸与圆角差异（QQ 12px 圆角、网易云 8px）。
  */
 export function PcDetailHeader({ coverUrl, title, titleExtra, description, creator, meta, actions, theme, skin, playCount }: PcDetailHeaderProps) {
-  const coverSize = skin === 'qq' ? 'h-[184px] w-[184px]' : 'h-[190px] w-[190px]'
+  // Apple Music 客户端的专辑/歌单头图更大、圆角 10px（QQ 184/12px，网易云 190/8px）
+  const coverSize = skin === 'qq' ? 'h-[184px] w-[184px]' : skin === 'apple' ? 'h-[200px] w-[200px]' : 'h-[190px] w-[190px]'
   return (
     <div className="mb-5 flex gap-6">
       <PcCover

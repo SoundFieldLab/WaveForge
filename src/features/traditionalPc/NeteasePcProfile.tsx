@@ -13,7 +13,7 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Crown, User } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
-import { getUserDetail, getUserPlaylistList } from '../../services/musicApi'
+import { getUserDetail, getUserPlaylistList, getUserRecordRank } from '../../services/musicApi'
 import { fetchExplorePlaylist } from '../../services/exploreApi'
 import { getUserPlaylists } from '../../services/playlistService'
 import {
@@ -75,8 +75,13 @@ function NeteasePcProfile({
   const [listsState, setListsState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [profileMeta, setProfileMeta] = useState<{ nickname?: string; avatar?: string; signature?: string; vip?: boolean }>({})
   const [counts, setCounts] = useState<{ events?: number; follows?: number; followeds?: number }>({})
+  // 听歌排行（官方个人主页的「听歌排行」区块：周榜/累计 两档）
+  const [rankRange, setRankRange] = useState<'week' | 'all'>('week')
+  const [rankSongs, setRankSongs] = useState<Array<{ id: number; name: string; artist: string; coverUrl: string; playCount: number }>>([])
+  const [rankState, setRankState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const listsKeyRef = useRef('')
   const metaKeyRef = useRef('')
+  const rankKeyRef = useRef('')
 
   /* ── 头部：昵称 / 头像 / 签名 / 动态·关注·粉丝 ── */
   const metaKey = `${targetUid}:${authRevision}`
@@ -173,6 +178,47 @@ function NeteasePcProfile({
     }
   }, [active, loggedIn, targetUid, account?.username, profileUserId, listsKey])
 
+  /* ── 听歌排行（仅自己的主页：官方接口是账号态数据）── */
+  const rankKey = `${targetUid}:${rankRange}:${authRevision}:${reload}`
+  useEffect(() => {
+    if (!active || profileUserId || !loggedIn || !targetUid) {
+      if (!profileUserId) setRankState(previous => (previous === 'idle' ? previous : 'idle'))
+      return
+    }
+    if (rankKeyRef.current === rankKey) return
+    rankKeyRef.current = rankKey
+    let cancelled = false
+    setRankState('loading')
+    void (async () => {
+      try {
+        const data = await getUserRecordRank(targetUid, rankRange === 'week' ? 1 : 0)
+        if (cancelled) return
+        const raw = rankRange === 'week' ? data?.weekData : data?.allData
+        const list = (Array.isArray(raw) ? raw : []).map((item: any) => {
+          const track = item?.song && typeof item.song === 'object' ? item.song : item
+          const artists = Array.isArray(track?.ar) ? track.ar : Array.isArray(track?.artists) ? track.artists : []
+          return {
+            id: Number(track?.id ?? item?.id ?? 0),
+            name: String(track?.name || ''),
+            artist: artists.map((artist: any) => artist?.name).filter(Boolean).join(' / '),
+            coverUrl: String(track?.al?.picUrl || track?.al?.pic || track?.album?.picUrl || '').replace(/^http:/, 'https:'),
+            playCount: Number(track?.playCount ?? item?.playCount ?? 0),
+          }
+        }).filter((song: { id: number; name: string }) => song.id && song.name)
+        setRankSongs(list)
+        setRankState('ready')
+      } catch {
+        if (cancelled) return
+        setRankSongs([])
+        setRankState('error')
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (rankKeyRef.current === rankKey) rankKeyRef.current = ''
+    }
+  }, [active, loggedIn, targetUid, profileUserId, rankRange, rankKey, authRevision, reload])
+
   /* ── 表格数据 ── */
 
   // 本地过滤（官方表头右侧的搜索框就是过滤当前列表，不重新请求）
@@ -199,7 +245,9 @@ function NeteasePcProfile({
     { key: 'liked', label: '我喜欢的音乐', count: songs.length || undefined },
     { key: 'created', label: '创建的歌单', count: createdPlaylists.length || undefined },
     { key: 'subscribed', label: '收藏的歌单', count: subscribedPlaylists.length || undefined },
-  ]), [songs.length, createdPlaylists.length, subscribedPlaylists.length])
+    // 听歌排行是账号态数据，看别人的主页不提供（官方同款语义）
+    ...(!profileUserId ? [{ key: 'rank', label: '听歌排行' } as PcTabItem] : []),
+  ]), [songs.length, createdPlaylists.length, subscribedPlaylists.length, profileUserId])
 
   // 未登录且没有可看的公开主页时才拦成登录态（看别人不需要登录）
   if (!loggedIn && !profileUserId) {
@@ -347,6 +395,73 @@ function NeteasePcProfile({
             action={listsState === 'error' ? <PcGhostButton label="重新加载" theme={theme} onClick={() => setReload(value => value + 1)} /> : undefined}
           />
         )
+      ) : tab === 'rank' ? (
+        /* ── 听歌排行：官方个人主页同款（周榜/累计 + 播放次数列）── */
+        <>
+          <div className="mb-3 flex items-center gap-2">
+            {([['week', '最近一周'], ['all', '所有时间']] as const).map(([key, label]) => (
+              <button
+                key={`rank-range:${key}`}
+                type="button"
+                onClick={() => setRankRange(key)}
+                className={`rounded-full px-3.5 py-1.5 text-[12px] transition ${rankRange === key ? 'font-medium text-white' : theme.chipIdle}`}
+                style={rankRange === key ? { background: accent } : undefined}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {rankState === 'loading' && !rankSongs.length ? (
+            <div className={`py-16 text-center text-[13px] ${theme.faint}`}>正在加载听歌排行…</div>
+          ) : rankState === 'error' && !rankSongs.length ? (
+            <PcEmpty
+              theme={theme}
+              title="听歌排行加载失败"
+              description="需要登录网易云音乐并已有播放记录"
+              action={<PcGhostButton label="重新加载" theme={theme} onClick={() => setReload(value => value + 1)} />}
+            />
+          ) : rankSongs.length ? (
+            <>
+              <PcSongTable
+                songs={rankSongs.map(song => ({
+                  id: song.id,
+                  name: song.name,
+                  artists: [{ name: song.artist || '未知歌手' }],
+                  album: { name: '', picUrl: song.coverUrl },
+                  duration: 0,
+                  platform: 'netease' as const,
+                }))}
+                skin="netease"
+                theme={theme}
+                accent={accent}
+                columns={{ index: true, like: false, album: false, duration: false }}
+                playingKey={act.currentSongKey}
+                isPlaying={act.isPlaying}
+                onPlay={(song, index) => act.onPlaySongs(song, rankSongs.map(item => ({
+                  id: item.id,
+                  name: item.name,
+                  artists: [{ name: item.artist || '未知歌手' }],
+                  album: { name: '', picUrl: item.coverUrl },
+                  duration: 0,
+                  platform: 'netease' as const,
+                })), index)}
+                onMenu={(event, song) => {
+                  event.preventDefault()
+                  act.onSongMenu({ show: true, x: event.clientX, y: event.clientY, song })
+                }}
+                empty={<PcEmpty theme={theme} title="暂无听歌数据" />}
+                rowActions={(song) => {
+                  const rank = rankSongs.find(item => item.id === song.id)
+                  if (!rank?.playCount) return null
+                  return <span className={`text-[11px] ${theme.faint}`}>播放 {rank.playCount.toLocaleString()} 次</span>
+                }}
+              />
+              <PcListFooter theme={theme} label={`共 ${rankSongs.length} 首 · 数据来自网易云账号「听歌排行」`} />
+            </>
+          ) : (
+            <PcEmpty theme={theme} title="暂无听歌数据" description="播放几首歌曲后这里会统计出你的排行" />
+          )}
+        </>
       ) : (
         listsState === 'loading' && !subscribedPlaylists.length ? (
           <div className={`py-16 text-center text-[13px] ${theme.faint}`}>正在加载…</div>

@@ -16,6 +16,10 @@ interface CommentItem {
   time: number | string // 毫秒时间戳或现成显示文本（汽水评论两者皆有可能）
   likedCount: number
   replyCount: number
+  /** 置顶（汽水 comment.featured） */
+  pinned?: boolean
+  /** IP 归属地（汽水 comment.ip_label） */
+  ipLabel?: string
 }
 
 const API_BASE = 'http://localhost:3001'
@@ -75,7 +79,7 @@ function normalizeQQ(raw: any): CommentItem | null {
   }
 }
 
-/** 汽水评论 → 组件展示结构（简版：列表+分页，无点赞/回复交互，与该组件其它平台能力对齐） */
+/** 汽水评论 → 组件展示结构（时间/点赞/置顶/归属地/回复数对齐客户端 comment 实体） */
 function normalizeSoda(raw: SodaComment): CommentItem | null {
   const content = String(raw.content || '')
   if (!content || !raw.id) return null
@@ -84,11 +88,17 @@ function normalizeSoda(raw: SodaComment): CommentItem | null {
     content,
     user: {
       nickname: String(raw.user?.name || '匿名用户'),
-      avatarUrl: String(raw.user?.avatarUrl || '')
+      avatarUrl: String(raw.user?.avatarUrl || ''),
+      userId: raw.user?.userId ? String(raw.user.userId) : undefined
     },
     time: raw.time,
     likedCount: Number(raw.likes || 0),
-    replyCount: Array.isArray(raw.replies) ? raw.replies.length : 0
+    // 客户端列表页的回复数来自 count_reply（正文另拉）；内嵌 replies 时以实际条数为准
+    replyCount: Array.isArray(raw.replies) && raw.replies.length
+      ? raw.replies.length
+      : Number(raw.replyCount || 0),
+    pinned: raw.pinned === true ? true : undefined,
+    ipLabel: raw.ipLabel ? String(raw.ipLabel) : undefined
   }
 }
 
@@ -302,8 +312,12 @@ function CommentRow({ comment, accent, isDark }: { comment: CommentItem; accent:
       )}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {comment.pinned && (
+            <span className="shrink-0 rounded bg-rose-500/15 px-1 text-[10px] font-medium text-rose-500">置顶</span>
+          )}
           <span className="truncate text-xs font-medium">{comment.user.nickname}</span>
           <span className={`shrink-0 text-[10px] ${muted}`}>{formatTime(comment.time)}</span>
+          {comment.ipLabel && <span className={`shrink-0 text-[10px] ${muted}`}>{comment.ipLabel}</span>}
         </div>
         <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-6">{comment.content}</p>
         <div className={`mt-1.5 flex items-center gap-3 text-[10px] ${muted}`}>

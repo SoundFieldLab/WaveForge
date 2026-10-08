@@ -50,13 +50,13 @@ describe('歌单详情的三级入口（左键可点）', () => {
     const onOpenArtist = vi.fn()
     renderPanel({ onOpenArtist })
 
-    // 两个歌手各自可点
+    // 两个歌手各自可点（回调第三参带歌手名，供 QQ 纯数字 id 反查真 mid 用）
     const first = screen.getByRole('button', { name: '女王蜂' })
     fireEvent.click(first)
-    expect(onOpenArtist).toHaveBeenCalledWith('22492', 'netease')
+    expect(onOpenArtist).toHaveBeenCalledWith('22492', 'netease', '女王蜂')
 
     fireEvent.click(screen.getByRole('button', { name: '合作歌手' }))
-    expect(onOpenArtist).toHaveBeenLastCalledWith('510882', 'netease')
+    expect(onOpenArtist).toHaveBeenLastCalledWith('510882', 'netease', '合作歌手')
   })
 
   it('点专辑名打开专辑页', () => {

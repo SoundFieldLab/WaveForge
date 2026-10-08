@@ -29,7 +29,27 @@ import EmbeddedExploreErrorBoundary from './EmbeddedExploreErrorBoundary'
 
 // 传统模式 PC 客户端风格首页（逆向官方 PC 布局；探索模式才用 App 风格页面）
 const LazyQQPcHome = lazy(() => import('../features/traditionalPc/QQPcHome'))
+const LazyQQPcExtras = lazy(() => import('../features/traditionalPc/QQPcExtras'))
 const LazyNeteasePcHome = lazy(() => import('../features/traditionalPc/NeteasePcHome'))
+// 传统模式酷狗客户端复刻：整套外壳（左导航 + 内容区 + 右侧播放列表 + 底部播放条）自带，
+// 内部页签（推荐/乐库/歌单/频道/分类）由外壳自己切；听书复用 kugouLongaudio 的独立播放器。
+const LazyKugouPcShell = lazy(() => import('../features/traditionalPc/KugouPcShell'))
+// 汽水音乐客户端复刻：只替换「左栏 + 中间内容区」，右侧第三栏（正在播放/播放列表/同步歌词）继续用本文件既有实现
+const LazySodaPcSidebar = lazy(() => import('../features/traditionalPc/SodaPcSidebar'))
+const LazySodaPcPlayerFeed = lazy(() => import('../features/traditionalPc/SodaPcPlayerFeed'))
+const LazySodaPcSceneMode = lazy(() => import('../features/traditionalPc/SodaPcSceneMode'))
+import type { SodaPcNavKey } from '../features/traditionalPc/SodaPcShared'
+import type { PlaybackSurface } from '../types/playbackNavigation'
+import type { SodaDiscoverMixItem, SodaSceneMode } from '../services/sodaService'
+// Apple Music 客户端复刻（2026-10-08 用户要求）：左栏 + 中栏照官方 Windows 客户端复刻，
+// 右侧第三栏继续用本文件既有实现（客户端顶栏的播放控件不复刻）。
+const LazyApplePcHome = lazy(() => import('../features/traditionalPc/ApplePcHome'))
+const LazyApplePcRadio = lazy(() => import('../features/traditionalPc/ApplePcRadio'))
+const LazyApplePcLibrary = lazy(() => import('../features/traditionalPc/ApplePcLibrary'))
+const LazyApplePcPlaylists = lazy(() => import('../features/traditionalPc/ApplePcPlaylists'))
+const LazyApplePcSearch = lazy(() => import('../features/traditionalPc/ApplePcSearch'))
+import ApplePcSidebar, { type ApplePcNavKey } from '../features/traditionalPc/ApplePcSidebar'
+import { applePcTheme } from '../features/traditionalPc/applePcKit'
 // PC 客户端复刻（QQ/网易云）：平台化左栏 + 中栏列表页与二级页
 // PC 客户端复刻（QQ/网易云）：平台化左栏 + 中栏列表页与二级页。
 // 左栏是首屏骨架的一部分（跟着首页一起出现），保持同步导入避免切平台时先空一帧；
@@ -55,8 +75,9 @@ const LazyPcSearch = lazy(() => import('../features/traditionalPc/PcSearch'))
 const LazyMVExploreModal = lazy(() => import('./MVExploreModal'))
 import { createPlaylist, deletePlaylist, getUserPlaylists, getLikedSongs, invalidateUserPlaylistsCache, removeSongFromPlaylist, subscribePlaylist, updatePlaylist } from '../services/playlistService'
 import { getApiBase } from '../services/apiConfig'
-import { createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getLastAppleMutationResult, getAppleCatalogPlaylistTracks, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs, getApplePlaylistTracks, getAppleRecentPlayed, appleLibraryTrackToSong, appleSongToSong, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
-import { sodaMediaToSong } from '../services/sodaService'
+import { createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getLastAppleMutationResult, getAppleCatalogPlaylistTracks, getAppleFavoriteSongIds, getAppleFavoriteSongs, getAppleLibraryPlaylists, getAppleLibrarySongs, getApplePlaylistTracks, getAppleRecentPlayed, appleLibraryTrackToSong, appleSongToSong, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../services/appleCatalog'
+import { fetchSodaFeed, fetchSodaPlaylistTracks, fetchSodaRadioTracks, fetchSodaSceneTracks, sodaMediaToSong } from '../services/sodaService'
+import { isCrossFilled, CROSS_FILL_EVENT } from '../services/crossFillRegistry'
 import { fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spotifyService'
 import type { AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -557,11 +578,16 @@ type TraditionalPageFields =
   | { name: 'explore-more'; kind: 'playlists' | 'charts' }
   // PC 客户端复刻页：page 取值按当前平台解释（见 PC_PAGE_IDS）
   | { name: 'pc'; page: PcPageId; keyword?: string; detail?: string }
-/** PC 复刻页标识：QQ 与网易云各用其中一部分，未知组合降级为空态。 */
+/** PC 复刻页标识：QQ 与网易云各用其中一部分，Apple 用 radio/added/artists/albums/songs/playlists/favorites，未知组合降级为空态。 */
 type PcPageId =
-  | 'home' | 'hall' | 'liked' | 'recent'
+  | 'home' | 'hall' | 'liked' | 'recent' | 'local' | 'purchased' | 'trial'
   | 'featured' | 'podcast' | 'roam' | 'follow' | 'mypodcast' | 'collect' | 'cloud'
   | 'search'
+  // Apple Music 客户端复刻页（侧栏：广播 / 资料库·最近添加·艺人·专辑·歌曲 / 播放列表·所有播放列表·喜爱歌曲）
+  | 'radio' | 'added' | 'artists' | 'albums' | 'songs' | 'playlists' | 'favorites'
+  // 汽水听歌模式（场景电台）。PcPageId 是多平台共用的联合类型，其它平台不会导航到这里，
+  // 万一导航到会落到各自的「该页面暂未提供」空态。
+  | 'scene'
 // 历史条目：每条一个稳定 pageId，对应一个常驻挂载的「冻结」页面，
 // 不同条目绝不会共用同一个挂载实例（即使内容恰好相同）。
 type TraditionalPage = TraditionalPageFields & { pageId: number }
@@ -633,6 +659,9 @@ function TraditionalView({
   const [favoriteRevision, setFavoriteRevision] = useState(0)
   // QQ 音乐库页（喜欢/最近播放）回传的已喜欢歌曲键：QQLikedPanel 表格红心列的兜底口径
   const [qqLikedKeys, setQqLikedKeys] = useState<Set<string>>(() => new Set())
+  // Apple 客户端复刻页的 ★ 状态：Apple 的「喜爱」= 资料库收藏列表（catalog id），
+  // favoriteStatusService 只覆盖 QQ/网易云，这里单独预取一次并在收藏操作后随 favoriteRevision 刷新。
+  const [appleLovedKeys, setAppleLovedKeys] = useState<Set<string>>(() => new Set())
 
   // PC 复刻页的红心状态：favoriteStatusService 是「拉一次 + 本地增量」的缓存，没有事件总线，
   // 所以这里主动预取一次并在完成后 bump 版本号让表格重算；登出/切号由 authRevision 触发。
@@ -647,10 +676,39 @@ function TraditionalView({
     return () => { cancelled = true }
   }, [platform, authRevision, neteaseUserId, qqUserId])
 
+  // Apple 客户端复刻页的 ★ 集合：账号自己的「喜爱歌曲」目录 id 列表（资料库收藏）。
+  // 登出/换号/收藏操作（favoriteRevision）后重新拉一次；失败保持旧集合（不显示假红心）。
+  useEffect(() => {
+    if (platform !== 'apple' || !appleLoggedIn) { setAppleLovedKeys(new Set()); return }
+    let cancelled = false
+    void getAppleFavoriteSongIds(5000)
+      .then(ids => { if (!cancelled && ids) setAppleLovedKeys(new Set(ids)) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [platform, appleLoggedIn, authRevision, favoriteRevision])
+
   // PC 左栏计数挪到 loggedIn 之后（见下方 usePcSidebarCounts），避免依赖数组读取未初始化的 const
   const [playlistMenu, setPlaylistMenu] = useState<{ show: boolean; x: number; y: number; playlist: any | null }>({ show: false, x: 0, y: 0, playlist: null })
   const [playlistSubscribed, setPlaylistSubscribed] = useState(false)
   const [showModePanel, setShowModePanel] = useState(false)
+  // QQ 左栏折叠（官方客户端左下角左箭头的行为）：收成 56px 图标轨道，状态持久化
+  const [qqSidebarCollapsed, setQqSidebarCollapsed] = useState(() => localStorage.getItem('waveforge:traditional-qq-sidebar-collapsed') === '1')
+  const toggleQqSidebarCollapsed = useCallback(() => {
+    setQqSidebarCollapsed(previous => {
+      const next = !previous
+      try { localStorage.setItem('waveforge:traditional-qq-sidebar-collapsed', next ? '1' : '0') } catch { /* 忽略 */ }
+      return next
+    })
+  }, [])
+  // 网易云左栏折叠（与 QQ 同款：左下角按钮把左栏收成 56px 图标轨道，搜索已上移到顶栏）
+  const [neteaseSidebarCollapsed, setNeteaseSidebarCollapsed] = useState(() => localStorage.getItem('waveforge:traditional-netease-sidebar-collapsed') === '1')
+  const toggleNeteaseSidebarCollapsed = useCallback(() => {
+    setNeteaseSidebarCollapsed(previous => {
+      const next = !previous
+      try { localStorage.setItem('waveforge:traditional-netease-sidebar-collapsed', next ? '1' : '0') } catch { /* 忽略 */ }
+      return next
+    })
+  }, [])
   // 官方左栏默认停在「收藏歌单」（QQ 平台）；其它平台沿用原来的「我的歌单」默认
   const [playlistTab, setPlaylistTab] = useState<'mine' | 'collected'>(() => (readSyncedPlatform(getVisiblePlatforms(), 'traditionalPlatform') === 'qq' ? 'collected' : 'mine'))
   const playlistScrollRef = useRef<HTMLDivElement>(null)
@@ -753,6 +811,11 @@ function TraditionalView({
         || currentPage.page === 'mypodcast' || currentPage.page === 'collect' || currentPage.page === 'cloud') {
         return { ...base, surface: 'traditional-library' }
       }
+      // Apple Music 客户端复刻页：资料库/播放列表归到音乐库来源；广播留在 mode-root
+      if (currentPage.page === 'added' || currentPage.page === 'artists' || currentPage.page === 'albums'
+        || currentPage.page === 'songs' || currentPage.page === 'playlists' || currentPage.page === 'favorites') {
+        return { ...base, surface: 'traditional-library' }
+      }
     }
     if (currentPage.name === 'playlist') return { ...base, surface: 'traditional-playlist', playlist: currentPage.playlist, songs: currentPage.songs }
     if (currentPage.name === 'artist') return { ...base, surface: 'traditional-artist', platform: currentPage.platform, artistId: currentPage.id }
@@ -782,6 +845,16 @@ function TraditionalView({
     setHistoryIndex(historyIndexRef.current + 1)
     mainRef.current?.scrollTo({ top: 0 })
   }, [history.length])
+
+  // 顶栏全局搜索框（图4红框位置）：全部传统页共用一个样式，提交进搜索页
+  const [topSearchDraft, setTopSearchDraft] = useState('')
+  const [topSearchFocused, setTopSearchFocused] = useState(false)
+  const submitTopSearch = useCallback((event?: { preventDefault: () => void }) => {
+    event?.preventDefault()
+    const keyword = topSearchDraft.trim()
+    if (!keyword) return
+    navigate({ name: 'search', keyword })
+  }, [navigate, topSearchDraft])
 
   useTvBack(() => {
     if (showModePanel) {
@@ -867,11 +940,20 @@ function TraditionalView({
     }
   }, [platform])
 
+  const payloadFirstLoadRef = useRef(true)
   useEffect(() => {
     // 只有平台变了才清空（旧平台的数据不能留在新平台下面）。同平台重跑（登录态刷新等）
     // 保留旧内容，由 fetchExploreHome 的内存缓存/后台刷新覆盖——否则每次都要先看一遍骨架。
     if (payloadRef.current && payloadRef.current.platform !== platform) setPayload(null)
     setLoading(payloadRef.current?.platform !== platform)
+    // 冷启动首挂载把聚合 payload 推迟到首屏之后（实测该聚合冷启动 7.6s，且仅作宝藏库兜底 /
+    // 被乐馆排行目录复用——乐馆进入时会自己按需拉并复用同一份内存缓存）；平台切换立即加载。
+    if (payloadFirstLoadRef.current) {
+      payloadFirstLoadRef.current = false
+      const timer = window.setTimeout(() => { void loadHome() }, 2500)
+      syncPlatformAcrossViews(platform)
+      return () => { window.clearTimeout(timer); homeRequestRef.current += 1 }
+    }
     void loadHome()
     syncPlatformAcrossViews(platform)
     return () => { homeRequestRef.current += 1 }
@@ -901,8 +983,27 @@ function TraditionalView({
       return () => { cancelled = true }
     }
     if (!id && !name) { setUserPlaylists([]); return }
-    void getUserPlaylists(platform, id || '', name || undefined).then(items => { if (!cancelled) setUserPlaylists(items || []) }).catch(() => { if (!cancelled) setUserPlaylists([]) })
-    return () => { cancelled = true }
+    // QQ 首屏偶发空列表（上游瞬时失败 / 凭据刚落地的竞态）：短时间内自行补拉两次，
+    // 不要求用户切页签/来回点一次才出现（2026-10-07 用户实测反馈）。
+    const healTimers: number[] = []
+    const scheduleQQHeal = () => {
+      if (platform !== 'qq') return
+      for (const delay of [2500, 6000]) {
+        healTimers.push(window.setTimeout(() => {
+          if (cancelled) return
+          void getUserPlaylists(platform, id || '', name || undefined, { forceRefresh: true })
+            .then(retried => { if (!cancelled && retried?.length) setUserPlaylists(retried) })
+            .catch(() => undefined)
+        }, delay))
+      }
+    }
+    void getUserPlaylists(platform, id || '', name || undefined)
+      .then(items => {
+        if (!cancelled) setUserPlaylists(items || [])
+        if (!items || items.length === 0) scheduleQQHeal()
+      })
+      .catch(() => { if (!cancelled) setUserPlaylists([]); scheduleQQHeal() })
+    return () => { cancelled = true; healTimers.forEach(timer => window.clearTimeout(timer)) }
   }, [platform, neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId, username, authRevision, appleLoggedIn])
 
   useEffect(() => {
@@ -1019,7 +1120,7 @@ function TraditionalView({
   // 回填按 navigate 返回的 pageId 精确匹配——同 id 榜单快速开两次也不会错填。
   const openChartPage = useCallback(async (chart: ExploreChart, autoplay = false) => {
     const preview = chart.songs.map(s => chartPreviewToSong(chart, s))
-    const pagePlaylist = { id: chart.id, dirId: chart.id, name: chart.name, coverUrl: chart.coverUrl, platform: chart.platform }
+    const pagePlaylist = { id: chart.id, dirId: chart.id, name: chart.name, coverUrl: chart.coverUrl, platform: chart.platform, isChart: true }
     const newPageId = navigate({ name: 'playlist', playlist: pagePlaylist, songs: preview })
     if (autoplay && chart.platform !== 'netease' && preview[0] && (preview[0].mid || preview[0].id)) {
       onSongSelect(preview[0], preview, { mode: 'traditional', surface: 'traditional-playlist', platform: chart.platform, playlist: pagePlaylist, songs: preview })
@@ -1154,13 +1255,45 @@ function TraditionalView({
     return () => window.removeEventListener('playlist-content-changed', refreshOpenPlaylist)
   }, [currentPage, goBack, openPlaylist, platform])
 
-  const openArtistDetail = useCallback((artistId: string, targetPlatform: MusicPlatform) => {
+  const openArtistDetail = useCallback((artistId: string, targetPlatform: MusicPlatform, _artistName?: string) => {
     if (artistId) navigate({ name: 'artist', id: String(artistId), platform: targetPlatform })
   }, [navigate])
   const openAlbumDetail = useCallback((albumId: string, targetPlatform: MusicPlatform) => {
     if (albumId) navigate({ name: 'album', id: String(albumId), platform: targetPlatform })
   }, [navigate])
-  const openCommentsFor = useCallback((song: Song) => { if (song) navigate({ name: 'comments', song }) }, [navigate])
+  /**
+   * 「喜欢 / 评论」这类账号级操作必须落在**当前选中的平台**上，而不是音源实际来自的平台。
+   * 场景：当前平台是汽水、播的却是 QQ 音源时，点心心要加到汽水的「我喜欢的音乐」。
+   * 做法：先在当前平台按歌名/歌手/时长找同款（复用既有的跨平台匹配器，门槛 60 分），
+   * 找不到就如实提示用户，绝不静默去操作音源平台的账号数据。
+   */
+  const resolveForCurrentPlatform = useCallback(async (song: Song): Promise<Song | null> => {
+    if (!song) return null
+    const sourcePlatform = (song.platform || 'netease') as MusicPlatform
+    if (sourcePlatform === platform) return song
+    const artistName = (song.artists || []).map(artist => artist.name).filter(Boolean).join(' ')
+    try {
+      const { findPlayableAppleSong } = await import('../services/appleCatalog')
+      const matched = await findPlayableAppleSong(
+        { name: song.name, artistName: artistName || song.name, durationMs: song.duration || undefined },
+        { sources: [platform] },
+      )
+      return matched || null
+    } catch {
+      return null
+    }
+  }, [platform])
+  const notifyPlatformMissing = useCallback((song: Song, action: string) => {
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: `${platformLabel(platform)}没有找到《${song.name}》，无法${action}`, type: 'info' },
+    }))
+  }, [platform])
+  const openCommentsFor = useCallback(async (song: Song) => {
+    if (!song) return
+    const target = await resolveForCurrentPlatform(song)
+    if (!target) { notifyPlatformMissing(song, '查看评论'); return }
+    navigate({ name: 'comments', song: target })
+  }, [navigate, resolveForCurrentPlatform, notifyPlatformMissing])
 
   const ownsPlaylist = useCallback((playlist: any): boolean => isPlaylistOwner(playlist, { neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId }), [kugouUserId, neteaseUserId, qqUserId, sodaUserId, spotifyUserId])
 
@@ -1395,8 +1528,28 @@ function TraditionalView({
   // 页面只拿这份 actions，播放/右键菜单/跳转全部回到传统模式既有链路，避免页面各自造播放。
   const pcSkin = platform === 'qq' ? 'qq' as const : 'netease' as const
   const isPcPlatform = platform === 'qq' || platform === 'netease'
+  /** 酷狗：客户端复刻外壳自带左导航/右侧播放列表/底部播放条，传统模式的通用三栏对它整体让位 */
+  const isKugouPc = platform === 'kugou'
+  /** 汽水：只换左栏与中间内容区，右侧第三栏保留（产品要求） */
+  const isSodaPc = platform === 'soda'
+  /** Apple：只换左栏与中间内容区（官方 Windows 客户端复刻），右侧第三栏保留（用户要求：
+   *  客户端顶栏的播放控件不复刻，播放控件用本软件第三栏）。 */
+  const isApplePc = platform === 'apple'
+  // 通用左栏的显隐单独走 useMemo：直接写 `!isPcPlatform && !isKugouPc` 会让 TS 把 platform
+  // 收窄成「非 kugou」，本文件里其它 kugou 分支（含刷歌入口）会被误报 TS2367
+  const showGenericSidebar = useMemo(
+    () => !isPcPlatform && platform !== 'kugou' && platform !== 'soda' && platform !== 'apple',
+    [isPcPlatform, platform],
+  )
   const pcChromeQQ = useMemo(() => ({ tone: (isDark ? 'dark' : 'light') as 'dark' | 'light', skin: 'qq' as const, accent: '#31C27C' }), [isDark])
   const pcChromeNetease = useMemo(() => ({ tone: (isDark ? 'dark' : 'light') as 'dark' | 'light', skin: 'netease' as const, accent: '#EC4141' }), [isDark])
+  const pcChromeKugou = useMemo(() => ({ tone: (isDark ? 'dark' : 'light') as 'dark' | 'light', skin: 'kugou' as const, accent: PLATFORM_ACCENTS.kugou }), [isDark])
+  const pcChromeApple = useMemo(() => ({ tone: (isDark ? 'dark' : 'light') as 'dark' | 'light', skin: 'apple' as const, accent: '#fa233b' }), [isDark])
+  // 二级页（歌手/专辑）按「条目所属平台」取皮肤：QQ 绿 / 网易云红 / 酷狗橙 / Apple 红，不跟当前模式的平台走
+  const pcChromeFor = useCallback(
+    (target: MusicPlatform) => (target === 'qq' ? pcChromeQQ : target === 'kugou' ? pcChromeKugou : target === 'apple' ? pcChromeApple : pcChromeNetease),
+    [pcChromeQQ, pcChromeKugou, pcChromeApple, pcChromeNetease],
+  )
   const pcChrome = platform === 'qq' ? pcChromeQQ : pcChromeNetease
   /** 当前平台账号 id（在 platform 被收窄的分支里也能安全取用，避免 TS2367 误报） */
   const selfPlatformUserId = platform === 'netease' ? (neteaseUserId || '') : platform === 'qq' ? (qqUserId || '') : ''
@@ -1407,6 +1560,20 @@ function TraditionalView({
     userId: (platform === 'qq' ? qqUserId : neteaseUserId) || '',
     vip: platform === 'qq' ? qqVip : neteaseVip,
   }), [loggedIn, username, avatar, platform, qqUserId, neteaseUserId, qqVip, neteaseVip])
+  // 酷狗账号：用户 id 用概念版 userid（歌单写操作与「我喜欢」定位都按它判定归属）
+  const pcAccountKugou = useMemo(() => ({
+    loggedIn: kugouLoggedIn,
+    username: kugouUsername,
+    avatar: kugouAvatar,
+    userId: kugouUserId || '',
+  }), [kugouLoggedIn, kugouUsername, kugouAvatar, kugouUserId])
+  /** 汽水账号（左栏底部与音乐库判断用） */
+  const pcAccountSoda = useMemo(() => ({
+    loggedIn: sodaLoggedIn,
+    username: sodaUsername,
+    avatar: sodaAvatar,
+    userId: sodaUserId || '',
+  }), [sodaLoggedIn, sodaUsername, sodaAvatar, sodaUserId])
   const navigatePcTarget = useCallback((target: PcNavTarget) => {
     if (target.kind === 'qq') {
       if (target.page === 'home') { navigate({ name: 'home' }); return }
@@ -1414,6 +1581,14 @@ function TraditionalView({
       if (target.page === 'settings') { navigate({ name: 'settings' }); return }
       if (target.page === 'search') { navigate({ name: 'pc', page: 'search', keyword: target.keyword }); return }
       navigate({ name: 'pc', page: target.page, detail: target.detail })
+      return
+    }
+    if (target.kind === 'apple') {
+      // Apple 客户端复刻页：home 走首页，其余客户端概念页直接落 pc 页（含 search）
+      if (target.page === 'home') { navigate({ name: 'home' }); return }
+      if (target.page === 'profile') { navigate({ name: 'profile' }); return }
+      if (target.page === 'settings') { navigate({ name: 'settings' }); return }
+      navigate({ name: 'pc', page: target.page, keyword: target.keyword, detail: target.detail })
       return
     }
     if (target.page === 'home') { navigate({ name: 'home' }); return }
@@ -1425,12 +1600,15 @@ function TraditionalView({
   // 左栏「刷歌」功能位 = 猜你喜欢电台：拉一批歌曲直接播放（与首页/探索页同一接口）
   const playQqRadio = useCallback(async () => {
     try {
-      const songs = await fetchExploreRecommendationBatch('qq', 0, [])
+      // 先播为首：fast 批只打一次上游（≈1.2s）拿到 5 首就开播，队列靠 explore-infinite
+      // 续播在播放中自动追加（客户端同语义：共 5 首 + 持续推荐歌曲）。
+      // 旧实现非 fast 串行拉 30 首 ≈6–10s，点击后要等很久才出声（2026-10-07 优化）。
+      const songs = await fetchExploreRecommendationBatch('qq', 0, [], undefined, { count: 5, fast: true })
       if (!songs.length) {
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '猜你喜欢暂时没有返回歌曲', type: 'info' } }))
         return
       }
-      onSongSelect(songs[0], songs, { mode: 'traditional', surface: 'mode-root', platform: 'qq', songs })
+      onSongSelect(songs[0], songs, { mode: 'traditional', surface: 'mode-root', platform: 'qq', songs, continuation: 'explore-infinite' })
     } catch {
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '刷歌失败，请稍后再试', type: 'info' } }))
     }
@@ -1447,20 +1625,37 @@ function TraditionalView({
     window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '歌单链接已复制', type: 'success' } }))
   }, [platform])
 
-  const handleToggleLike = useCallback((song: Song, next: boolean) => {
-    if (next) onAddToFavorites?.(song)
-    else void onRemoveFromFavorites?.(song)
+  const handleToggleLike = useCallback(async (song: Song, next: boolean) => {
+    // 红心作用于「当前选中平台」的账号数据（见 resolveForCurrentPlatform 的说明）
+    const target = await resolveForCurrentPlatform(song)
+    if (!target) {
+      notifyPlatformMissing(song, next ? '添加到我喜欢的音乐' : '取消喜欢')
+      return
+    }
+    if (next) onAddToFavorites?.(target)
+    else void onRemoveFromFavorites?.(target)
     setFavoriteRevision(revision => revision + 1)
-  }, [onAddToFavorites, onRemoveFromFavorites])
+  }, [onAddToFavorites, onRemoveFromFavorites, resolveForCurrentPlatform, notifyPlatformMissing])
 
   const pcActions = useMemo<PcActions>(() => ({
-    onPlaySongs: (song, songs) => {
-      onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-playlist', platform: (song.platform || platform) as MusicPlatform, songs })
+    onPlaySongs: (song, songs, _index, options) => {
+      onSongSelect(song, songs, {
+        mode: 'traditional',
+        surface: 'traditional-playlist',
+        platform: (song.platform || platform) as MusicPlatform,
+        songs,
+        // 猜你喜欢/刷歌：播放中自动续推荐（客户端「先 5 首就播 + 持续推荐」语义）。
+        ...(options?.continuous ? { continuation: 'explore-infinite' as const } : {}),
+        // 刷歌模式走雷达续页（与探索模式的 playExploreCollection 同款接线）。
+        ...(options?.radar
+          ? { qqRadarContinuation: { mode: 'radar' as const, page: options.radar.page, reqType: options.radar.reqType, entranceSongs: options.radar.entranceSongs } }
+          : {}),
+      })
     },
     onSongMenu: payload => setSongMenu(payload),
     onOpenPlaylist: playlist => { void openPlaylist(playlist) },
     onPlaylistMenu: payload => setPlaylistMenu(payload),
-    onOpenArtist: (artistId, targetPlatform) => openArtistDetail(artistId, targetPlatform),
+    onOpenArtist: (artistId: string, targetPlatform: MusicPlatform) => openArtistDetail(artistId, targetPlatform),
     onOpenAlbum: (albumId, targetPlatform) => openAlbumDetail(albumId, targetPlatform),
     onOpenChart: (chart, autoplay) => { void openChartPage(chart, autoplay) },
     onOpenComments: song => openCommentsFor(song),
@@ -1471,12 +1666,15 @@ function TraditionalView({
     onSharePlaylist: handleSharePlaylist,
     onNavigate: navigatePcTarget,
     onLogin: () => onLoginClick(platform),
-    onToggleLike: handleToggleLike,
-    isLiked: song => peekSongFavoriteStatus(song, platform, getFavoriteUserId(platform)) ?? false,
+    onToggleLike: (song, next) => { void handleToggleLike(song, next) },
+    // Apple 的「喜爱」判定走资料库收藏列表（favoriteStatusService 只覆盖 QQ/网易云）
+    isLiked: song => platform === 'apple'
+      ? Boolean(song.appleId && appleLovedKeys.has(String(song.appleId)))
+      : (peekSongFavoriteStatus(song, platform, getFavoriteUserId(platform)) ?? false),
     currentSongKey: currentSong ? pcSongKey(currentSong) : '',
     isPlaying,
     likedKeys: platform === 'qq' ? qqLikedKeys : undefined,
-  }), [onSongSelect, platform, openPlaylist, openArtistDetail, openAlbumDetail, openChartPage, openCommentsFor, handleSharePlaylist, navigatePcTarget, onLoginClick, handleToggleLike, currentSong, isPlaying, favoriteRevision, qqLikedKeys])
+  }), [onSongSelect, platform, openPlaylist, openArtistDetail, openAlbumDetail, openChartPage, openCommentsFor, handleSharePlaylist, navigatePcTarget, onLoginClick, handleToggleLike, currentSong, isPlaying, favoriteRevision, qqLikedKeys, appleLovedKeys])
 
   const pcPageFallback = <div className={`py-20 text-center text-sm ${muted}`}>正在加载客户端页面…</div>
 
@@ -1494,13 +1692,237 @@ function TraditionalView({
   }, [currentPage])
 
   // 左栏导航：把左栏项翻译成传统模式的历史栈页面（QQ 与网易云共用一套 key，含义由平台决定）
-  const navigatePcSidebar = useCallback((key: string) => {
+  // detail：功能位/入口卡带下来的二级落点（乐馆的页签 key，如 channels/videos/charts/playlists）。
+  const navigatePcSidebar = useCallback((key: string, detail?: string) => {
     if (key === 'home') { navigate({ name: 'home' }); return }
     if (key === 'profile') { navigate({ name: 'profile' }); return }
     if (key === 'settings') { navigate({ name: 'settings' }); return }
     // 其余 key 与 PcPageId 同名（hall/liked/recent/featured/podcast/roam/follow/mypodcast/collect/cloud/search）
-    navigate({ name: 'pc', page: key as PcPageId })
+    navigate({ name: 'pc', page: key as PcPageId, detail })
   }, [navigate])
+
+  // ── 汽水音乐客户端左栏 ──────────────────────────────────────────────
+  // 当前高亮项：由当前页面反推（客户端同一时刻只有一个选中态）
+  const sodaNavKey = useMemo<SodaPcNavKey | ''>(() => {
+    const page = currentPage
+    if (page.name === 'home') return 'feed'
+    if (page.name === 'recent') return 'history'
+    if (page.name === 'search') return 'search'
+    if (page.name === 'profile') return 'profile'
+    if (page.name === 'settings') return 'settings'
+    if (page.name === 'pc' && page.page === 'scene') return 'scene'
+    return ''
+  }, [currentPage])
+  // 听歌模式的数据通道已接通（FeedMode / DiscoverView / FeedSongTab 都不在风控名单里），
+  // 所以不再有「暂不支持」的入口。
+  const sodaUnsupportedKeys = useMemo(() => new Set<SodaPcNavKey>(), [])
+  // 后端会下发「我喜欢的音乐 / 历史播放」这类虚拟歌单（id 固定）。客户端左栏里它们各有专属入口，
+  // 不能再混进「创建的歌单」列表重复出现。
+  const sodaVirtualPlaylistIds = useMemo(() => new Set(['qishui-liked', 'qishui-recent', 'qishui-feed']), [])
+  const sodaMinePlaylists = useMemo(
+    () => minePlaylists.filter((item: any) => !sodaVirtualPlaylistIds.has(String(item?.id ?? ''))),
+    [minePlaylists, sodaVirtualPlaylistIds],
+  )
+  const sodaCollectedPlaylists = useMemo(
+    () => collectedPlaylists.filter((item: any) => !sodaVirtualPlaylistIds.has(String(item?.id ?? ''))),
+    [collectedPlaylists, sodaVirtualPlaylistIds],
+  )
+  // 汽水「推荐」页（客户端默认落地页 /player-feed）：没有在播时先拉推荐流再起播，
+  // 播放/收藏/评论一律走既有链路（onSongSelect / onToggleFavorite / openCommentsFor）。
+  const [sodaFeedLoading, setSodaFeedLoading] = useState(false)
+  const startSodaFeed = useCallback(async () => {
+    if (sodaFeedLoading) return
+    setSodaFeedLoading(true)
+    try {
+      const feed = await fetchSodaFeed(30)
+      const songs = feed.songs || []
+      if (!songs.length) {
+        window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '推荐流暂时没有返回歌曲', type: 'info' } }))
+        return
+      }
+      onSongSelect(songs[0], songs, {
+        mode: 'traditional',
+        surface: 'mode-root',
+        platform: 'soda',
+        songs,
+        continuation: 'explore-infinite',
+      })
+    } catch {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '推荐流加载失败，请稍后再试', type: 'info' } }))
+    } finally {
+      setSodaFeedLoading(false)
+    }
+  }, [onSongSelect, sodaFeedLoading])
+
+  const navigateSodaSidebar = useCallback((key: SodaPcNavKey) => {
+    if (key === 'feed') {
+      // 客户端语义：左栏「推荐」永远回到汽水推荐流（/player-feed）。
+      // 当前放的是别的平台的歌时，光切页会把用户留在那首歌上（推荐页也不显示它），
+      // 所以此时直接起播汽水推荐流——点「推荐」就一定能听到汽水的推荐。
+      if (currentSong && (currentSong.platform || '') !== 'soda') {
+        void startSodaFeed()
+        return
+      }
+      navigate({ name: 'home' })
+      return
+    }
+    if (key === 'scene') { navigate({ name: 'pc', page: 'scene' }); return }
+    if (key === 'liked' || key === 'douyin') {
+      const target = key === 'liked'
+        ? userPlaylists.find((item: any) => item.isLike || Number(item.type) === 1)
+        : userPlaylists.find((item: any) => Number(item.type) === 4 || /抖音/.test(String(item.name || '')))
+      if (target) { void openPlaylist(target); return }
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: key === 'liked' ? '登录后可查看我喜欢的音乐' : '没有找到抖音收藏的音乐歌单', type: 'info' },
+      }))
+      return
+    }
+    if (key === 'history') { navigate({ name: 'recent' }); return }
+    if (key === 'search') { navigate({ name: 'search' }); return }
+    if (key === 'profile') { navigate({ name: 'profile' }); return }
+    if (key === 'settings') { navigate({ name: 'settings' }); return }
+  }, [navigate, openPlaylist, userPlaylists, currentSong, startSodaFeed])
+
+  // ── Apple Music 客户端左栏（官方 Windows 客户端复刻）────────────────────
+  // 侧栏项 → 传统模式历史栈页面；「主页」= 首页，其余客户端概念页走 pc 页分发。
+  const appleNavKey = useMemo<ApplePcNavKey | ''>(() => {
+    const page = currentPage
+    if (page.name === 'home') return 'home'
+    if (page.name === 'pc') {
+      if (page.page === 'radio' || page.page === 'added' || page.page === 'artists' || page.page === 'albums'
+        || page.page === 'songs' || page.page === 'playlists' || page.page === 'favorites') {
+        return page.page
+      }
+    }
+    return ''
+  }, [currentPage])
+  const navigateAppleSidebar = useCallback((key: ApplePcNavKey) => {
+    if (key === 'home') { navigate({ name: 'home' }); return }
+    navigate({ name: 'pc', page: key })
+  }, [navigate])
+  /** 资料库刷新信号（侧栏 资料库 › 更多 › 重新载入资料库）：页码变化让资料库页重取一次 */
+  const [appleLibraryRevision, setAppleLibraryRevision] = useState(0)
+  /** Apple 商店（storefront）：账号登录时写入，目录请求与购买窗口都按它走 */
+  const appleStorefront = useMemo(() => localStorage.getItem('appleStorefront') || 'cn', [authRevision, platform])
+  const appleAccount = useMemo(() => ({
+    loggedIn: appleLoggedIn,
+    username: appleUsername,
+    avatar: appleAvatar,
+    userId: '',
+  }), [appleLoggedIn, appleUsername, appleAvatar])
+
+  const sodaFeedCount = useMemo(
+    () => (payload?.charts || []).reduce((sum, chart: any) => sum + (chart.songs?.length || 0), 0) || 0,
+    [payload],
+  )
+  // ── 汽水听歌模式（场景电台）──────────────────────────────────────
+  // 当前正在播的场景/电台：用于左栏高亮以外的卡片态（声波图标）
+  const [sodaActiveScene, setSodaActiveScene] = useState('')
+  const [sodaActiveResourceId, setSodaActiveResourceId] = useState('')
+  const startSodaSongs = useCallback((songs: Song[], surface: PlaybackSurface) => {
+    if (!songs.length) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '这个场景暂时没有拉到歌曲', type: 'info' } }))
+      return
+    }
+    onSongSelect(songs[0], songs, {
+      mode: 'traditional',
+      surface,
+      platform: 'soda',
+      songs,
+      continuation: 'explore-infinite',
+    })
+  }, [onSongSelect])
+  const playSodaScene = useCallback(async (mode: SodaSceneMode) => {
+    setSodaActiveScene(mode.subQueueType)
+    setSodaActiveResourceId('')
+    try {
+      const result = await fetchSodaSceneTracks({
+        sceneModeId: mode.sceneModeId,
+        preferenceMode: mode.preferenceMode,
+        limit: 20,
+      })
+      // 客户端选定场景后会弹一次「已为你开启XXX」
+      if (mode.cutoverToast) {
+        window.dispatchEvent(new CustomEvent('showToast', { detail: { message: mode.cutoverToast, type: 'success' } }))
+      }
+      startSodaSongs(result.songs, 'soda-scene')
+    } catch {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '场景加载失败，请稍后再试', type: 'info' } }))
+    }
+  }, [startSodaSongs])
+  const openSodaDiscoverItem = useCallback(async (item: SodaDiscoverMixItem) => {
+    setSodaActiveResourceId(item.resourceId)
+    setSodaActiveScene('')
+    try {
+      if (item.type === 'radio') {
+        const result = await fetchSodaRadioTracks(item.resourceId, { link: item.link })
+        startSodaSongs(result.songs, 'soda-scene')
+      } else {
+        const result = await fetchSodaPlaylistTracks(item.resourceId, 0, 50)
+        startSodaSongs(result.tracks || [], 'soda-scene')
+      }
+    } catch {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '该场景加载失败，请稍后再试', type: 'info' } }))
+    }
+  }, [startSodaSongs])
+  const renderSodaPcScene = () => (
+    <EmbeddedExploreErrorBoundary label="汽水听歌模式">
+      <Suspense fallback={pcPageFallback}>
+        <LazySodaPcSceneMode
+          tone={(isDark ? 'dark' : 'light') as 'dark' | 'light'}
+          accent={PLATFORM_ACCENTS.soda}
+          loggedIn={sodaLoggedIn}
+          activeSubQueueType={sodaActiveScene}
+          activeResourceId={sodaActiveResourceId}
+          isPlaying={isPlaying}
+          onPlayScene={mode => { void playSodaScene(mode) }}
+          onToggleScenePlayback={onPlayPause}
+          onOpenDiscoverItem={item => { void openSodaDiscoverItem(item) }}
+          onLoginClick={() => onLoginClick('soda')}
+        />
+      </Suspense>
+    </EmbeddedExploreErrorBoundary>
+  )
+  /** 汽水「推荐」页是整幅铺满的内容区（客户端同款），这页不吃通用内边距与滚动容器 */
+  const isSodaFeedPage = isSodaPc && currentPage.name === 'home'
+  /** Apple 客户端复刻页（主页/广播/资料库/播放列表）自带版式内边距，不吃通用内边距 */
+  const isAppleBleedPage = isApplePc && (currentPage.name === 'home' || currentPage.name === 'search' || currentPage.name === 'pc')
+  /**
+   * 汽水推荐页只服务**汽水自己的歌**（客户端语义：/player-feed 永远属于汽水推荐流）。
+   * 在别的平台放歌时切到汽水，若把全局 currentSong 原样显示，用户就「卡在」别平台的歌上、
+   * 点「推荐」进不了汽水推荐——所以非汽水歌在这里按「未在播」处理（占位 + 播放入口）。
+   * 背景/主题色同理只认汽水歌的专辑主色。
+   *
+   * 「补源」的歌**仍然算汽水的歌**（用户实测 2026-10-08）：从汽水入口点推荐、放的是汽水
+   * 推荐队列里的曲目，只是音源因会员/版权被补成了别的平台——歌本身还是汽水的歌，
+   * 推荐页应继续显示它（歌词照常）。只有 platform 本身不是 soda（在别的平台放歌切过来）
+   * 才落回占位。
+   */
+  const sodaOwnSong = currentSong && (currentSong.platform || 'soda') === 'soda' ? currentSong : null
+  const renderSodaPcFeed = () => (
+    <EmbeddedExploreErrorBoundary label="汽水音乐推荐页">
+      <Suspense fallback={pcPageFallback}>
+        <LazySodaPcPlayerFeed
+          tone={(isDark ? 'dark' : 'light') as 'dark' | 'light'}
+          accent={PLATFORM_ACCENTS.soda}
+          dominantColor={sodaOwnSong ? dominantColor || undefined : undefined}
+          song={sodaOwnSong}
+          isPlaying={sodaOwnSong ? isPlaying : false}
+          liked={liked}
+          onToggleFavorite={() => { if (sodaOwnSong) void handleToggleLike(sodaOwnSong, !liked) }}
+          lyrics={sodaOwnSong ? lyrics : []}
+          playbackTimeStore={playbackTimeStore}
+          onOpenComments={song => openCommentsFor(song)}
+          onOpenArtist={artistId => openArtistDetail(artistId, 'soda')}
+          onPlayPause={onPlayPause}
+          onSeek={onSeek}
+          onStartFeed={() => { void startSodaFeed() }}
+          feedLoading={sodaFeedLoading}
+          feedCount={sodaFeedCount}
+        />
+      </Suspense>
+    </EmbeddedExploreErrorBoundary>
+  )
 
   const renderPcPage = (pageId: PcPageId, active: boolean, keyword?: string, detail?: string) => {
     const wrap = (node: ReactNode, label: string) => (
@@ -1511,10 +1933,14 @@ function TraditionalView({
     if (platform === 'qq') {
       if (pageId === 'home') return wrap(<LazyQQPcHome payload={payload} chrome={pcChromeQQ} account={pcAccount} actions={pcActions} />, 'QQ 音乐推荐页')
       if (pageId === 'search') return wrap(<LazyPcSearch initialKeyword={keyword} platform="qq" chrome={pcChromeQQ} account={pcAccount} actions={pcActions} active={active} />, 'QQ 音乐搜索')
-      if (pageId === 'hall') return wrap(<LazyQQPcHall chrome={pcChromeQQ} account={pcAccount} actions={pcActions} active={active} />, 'QQ 音乐乐馆')
+      if (pageId === 'hall') return wrap(<LazyQQPcHall chrome={pcChromeQQ} account={pcAccount} actions={pcActions} active={active} initialTab={detail as 'recommend' | 'charts' | 'artists' | 'playlists' | 'videos' | 'channels' | undefined} />, 'QQ 音乐乐馆')
       if (pageId === 'liked' || pageId === 'recent') {
         // 红心键集只认「喜欢」页回传：最近播放页的曲目天然不是喜欢口径，两页都写会互相覆盖
         return wrap(<LazyQQPcCollection kind={pageId} chrome={pcChromeQQ} account={pcAccount} actions={pcActions} authRevision={authRevision} active={active} onLikedChange={pageId === 'liked' ? setQqLikedKeys : undefined} />, 'QQ 音乐音乐库')
+      }
+      if (pageId === 'local' || pageId === 'purchased' || pageId === 'trial') {
+        // 本地和下载 / 已购音乐 / 试听列表：官方侧栏同样有的三页（数据通道现状见 QQPcExtras 头注）
+        return wrap(<LazyQQPcExtras page={pageId} chrome={pcChromeQQ} account={pcAccount} actions={pcActions} />, pageId === 'local' ? 'QQ 音乐本地和下载' : pageId === 'purchased' ? 'QQ 音乐已购音乐' : 'QQ 音乐试听列表')
       }
       return wrap(<PcEmpty theme={pcTheme(pcChromeQQ.tone)} title="该页面暂未提供" />, 'QQ 音乐')
     }
@@ -1530,8 +1956,72 @@ function TraditionalView({
       }
       return wrap(<PcEmpty theme={pcTheme(pcChromeNetease.tone)} title="该页面暂未提供" />, '网易云')
     }
+    if (platform === 'apple') {
+      // Apple Music 客户端复刻页：主页（含未订阅时的订阅广告）/ 广播 / 资料库 / 播放列表。
+      // 数据与探索页 Apple Music 同一批接口；播放/右键菜单/跳转仍回到本文件的 pcActions 链路。
+      if (pageId === 'home') {
+        return wrap(<LazyApplePcHome tone={pcChromeApple.tone} accent={pcChromeApple.accent} loggedIn={appleLoggedIn} username={appleUsername} avatar={appleAvatar} storefront={appleStorefront} actions={pcActions} active={active} currentSong={currentSong} isPlaying={isPlaying} suspended={suspended} playbackOrigin={currentPlaybackOrigin} onLoginClick={() => onLoginClick('apple')} />, 'Apple Music 主页')
+      }
+      if (pageId === 'radio') {
+        return wrap(<LazyApplePcRadio tone={pcChromeApple.tone} accent={pcChromeApple.accent} storefront={appleStorefront} actions={pcActions} active={active} currentSong={currentSong} isPlaying={isPlaying} motionSuspended={suspended} loggedIn={appleLoggedIn} username={appleUsername} playbackOrigin={currentPlaybackOrigin} onLoginClick={() => onLoginClick('apple')} />, 'Apple Music 广播')
+      }
+      if (pageId === 'added' || pageId === 'artists' || pageId === 'albums' || pageId === 'songs') {
+        return wrap(<LazyApplePcLibrary kind={pageId} tone={pcChromeApple.tone} accent={pcChromeApple.accent} loggedIn={appleLoggedIn} actions={pcActions} active={active} currentSong={currentSong} isPlaying={isPlaying} onLoginClick={() => onLoginClick('apple')} refreshSignal={appleLibraryRevision} storefront={appleStorefront} suspended={suspended} />, 'Apple Music 资料库')
+      }
+      if (pageId === 'playlists' || pageId === 'favorites') {
+        return wrap(<LazyApplePcPlaylists kind={pageId} tone={pcChromeApple.tone} accent={pcChromeApple.accent} loggedIn={appleLoggedIn} actions={pcActions} active={active} currentSong={currentSong} isPlaying={isPlaying} onLoginClick={() => onLoginClick('apple')} refreshSignal={appleLibraryRevision} favoriteRevision={favoriteRevision} storefront={appleStorefront} suspended={suspended} />, 'Apple Music 播放列表')
+      }
+      if (pageId === 'search') {
+        // 与官方一致：点搜索框先到「类别浏览」（apple-curators 网格），输入关键词才出结果——
+        // 直接复用探索模式那套 AppleMusicSearchPage + BrowseCategoriesLanding。
+        return wrap(
+          <LazyApplePcSearch
+            tone={pcChromeApple.tone}
+            accent={pcChromeApple.accent}
+            storefront={appleStorefront}
+            actions={pcActions}
+            active={active}
+            suspended={suspended}
+            initialKeyword={keyword}
+            playbackOrigin={currentPlaybackOrigin}
+          />,
+          'Apple Music 搜索',
+        )
+      }
+      return wrap(<PcEmpty theme={pcTheme(pcChromeApple.tone)} title="该页面暂未提供" />, 'Apple Music')
+    }
     return <PcEmpty theme={pcTheme(pcChromeQQ.tone)} title="该平台暂未提供客户端复刻页" />
   }
+
+  // 酷狗：客户端复刻外壳（左导航 + 内容区 + 右侧播放列表 + 底部播放条一体）。
+  // 播放/右键菜单/喜欢/跳转全部走上面的 pcActions，外壳不自造播放链路。
+  const renderKugouPc = (active: boolean) => (
+    <EmbeddedExploreErrorBoundary label="酷狗音乐客户端">
+      <Suspense fallback={pcPageFallback}>
+        <LazyKugouPcShell
+          chrome={pcChromeKugou}
+          account={pcAccountKugou}
+          actions={pcActions}
+          payload={payload}
+          authRevision={authRevision}
+          active={active}
+          currentSong={currentSong}
+          queue={queue}
+          isPlaying={isPlaying}
+          liked={liked}
+          onPlayPause={onPlayPause}
+          onNext={onNext}
+          onPrevious={onPrevious}
+          onToggleFavorite={onToggleFavorite}
+          onOpenMixingStudio={onOpenMixingStudio}
+          onOpenComments={song => openCommentsFor(song)}
+          onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+          onLoginClick={() => onLoginClick('kugou')}
+          onReloadData={() => { void loadHome() }}
+        />
+      </Suspense>
+    </EmbeddedExploreErrorBoundary>
+  )
 
   const renderPage = (page: TraditionalPage, active: boolean) => {
     const onBack = active ? goBack : noop
@@ -1541,10 +2031,19 @@ function TraditionalView({
     // 「非 QQ/网易云」，后面的平台判断会全部变成 TS2367 误报。
     if (page.name === 'home') {
       if (platform === 'qq' || platform === 'netease') return renderPcPage('home', active)
+      // Apple：客户端复刻首页（未订阅时就是客户端的订阅广告页）
+      if (platform === 'apple') return renderPcPage('home', active)
+      // 酷狗：整套客户端复刻外壳（唯一挂载点，内部导航自管，不占历史栈）
+      if (platform === 'kugou') return renderKugouPc(active)
+      // 汽水：客户端默认页是「推荐」整页播放器（/player-feed），不是仪表盘式首页
+      if (platform === 'soda') return renderSodaPcFeed()
     }
-    // PC 复刻页（QQ/网易云）：所有客户端概念页走这里
+    // PC 复刻页（QQ/网易云/Apple）：所有客户端概念页走这里
     if (page.name === 'pc') {
-      if (platform === 'qq' || platform === 'netease') return renderPcPage(page.page, active, page.keyword, page.detail)
+      if (platform === 'qq' || platform === 'netease' || platform === 'apple') return renderPcPage(page.page, active, page.keyword, page.detail)
+      if (platform === 'kugou') return renderKugouPc(active)
+      // 汽水听歌模式页
+      if (platform === 'soda' && page.page === 'scene') return renderSodaPcScene()
       // 其它平台没有客户端复刻页：让「搜索」这类通用入口回落到原生传统页
       if (page.page === 'search') {
         return <TraditionalSearch initialKeyword={page.keyword} platform={platform} accent={accent} isDark={isDark} active={active} currentSong={currentSong} onBack={onBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onShare={handleShareSong} userPlaylists={userPlaylists} />
@@ -1552,8 +2051,8 @@ function TraditionalView({
       return <PcEmpty theme={pcTheme(isDark ? 'dark' : 'light')} title="该平台暂未提供客户端复刻页" description="切换到 QQ 音乐 / 网易云 体验客户端复刻界面" />
     }
     if (page.name === 'search') {
-      // PC 平台下搜索统一走客户端风搜索页（左栏搜索入口/歌单页搜索框都指向这里）
-      if (platform === 'qq' || platform === 'netease') return renderPcPage('search', active, page.keyword)
+      // PC 平台下搜索统一走客户端风搜索页（左栏搜索入口/歌单页搜索框都指向这里；Apple 走客户端复刻搜索页）
+      if (platform === 'qq' || platform === 'netease' || platform === 'apple') return renderPcPage('search', active, page.keyword)
       return <TraditionalSearch initialKeyword={page.keyword} platform={platform} accent={accent} isDark={isDark} active={active} currentSong={currentSong} onBack={onBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onShare={handleShareSong} userPlaylists={userPlaylists} />
     }
     if (page.name === 'explore-more') {
@@ -1594,8 +2093,9 @@ function TraditionalView({
       return <TraditionalProfile platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} avatar={avatar} selfUserId={selfPlatformUserId} targetUserId={page.userId} targetNickname={page.nickname} targetAvatar={page.avatarUrl} userPlaylists={userPlaylists} onBack={onBack} onOpenPlaylist={openPlaylist} onOpenLiked={openLikedSongs} onOpenUserProfile={(userId, nickname, avatarUrl) => navigate({ name: 'profile', userId, nickname, avatarUrl })} onOpenArtist={openArtistDetail} onLoginClick={() => onLoginClick(platform)} />
     }
     if (page.name === 'playlist') {
-      // PC 平台：歌单详情按客户端排版（大封面头部 + 页签 + 表格）；右键菜单仍是我们的完整菜单
-      if (platform === 'qq' || platform === 'netease') {
+      // PC 平台：歌单详情按客户端排版（大封面头部 + 页签 + 表格）；右键菜单仍是我们的完整菜单。
+      // Apple 同样走客户端复刻版（apple 皮肤 = 红色强调 + 客户端封面圆角）。
+      if (platform === 'qq' || platform === 'netease' || platform === 'apple') {
         return (
           <EmbeddedExploreErrorBoundary label="歌单详情">
             <Suspense fallback={pcPageFallback}>
@@ -1605,9 +2105,9 @@ function TraditionalView({
                 loading={playlistLoading}
                 error={playlistError}
                 onRetry={() => void openPlaylist(page.playlist, true)}
-                chrome={pcChrome}
+                chrome={platform === 'apple' ? pcChromeApple : pcChrome}
                 actions={pcActions}
-                account={pcAccount}
+                account={platform === 'apple' ? appleAccount : pcAccount}
                 isOwner={ownsPlaylist(page.playlist)}
                 onSubscribeToggle={() => setPlaylistSubscribed(true)}
               />
@@ -1631,12 +2131,14 @@ function TraditionalView({
       return <TraditionalComments song={page.song} accent={accent} isDark={isDark} onClose={onClose} />
     }
     if (page.name === 'artist') {
-      // PC 平台：歌手详情换客户端复刻版（热门歌曲/专辑/MV 页签）；其它平台仍走通用页
-      if (page.platform === 'qq' || page.platform === 'netease') {
+      // PC 平台：歌手详情换客户端复刻版（热门歌曲/专辑/MV 页签）；酷狗/Apple 同样走复刻版。
+      // 汽水也走复刻版（2026-10-08）：真实艺人接口接通后有头像/简介/专辑，
+      // 旧的 TraditionalArtistDetail（按名搜索伪艺人）只保留给其它平台兜底。
+      if (page.platform === 'qq' || page.platform === 'netease' || page.platform === 'kugou' || page.platform === 'apple' || page.platform === 'soda') {
         return (
           <EmbeddedExploreErrorBoundary label="歌手详情">
             <Suspense fallback={pcPageFallback}>
-              <LazyPcArtistDetail id={page.id} platform={page.platform} chrome={page.platform === 'qq' ? pcChromeQQ : pcChromeNetease} actions={pcActions} active={active} />
+              <LazyPcArtistDetail id={page.id} platform={page.platform} chrome={pcChromeFor(page.platform)} actions={pcActions} active={active} />
             </Suspense>
           </EmbeddedExploreErrorBoundary>
         )
@@ -1644,12 +2146,12 @@ function TraditionalView({
       return <TraditionalArtistDetail artistId={page.id} platform={page.platform} accent={accent} isDark={isDark} currentSong={currentSong} onClose={onClose} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} onShare={handleShareSong} onOpenAlbum={openAlbumDetail} userPlaylists={userPlaylists} />
     }
     if (page.name === 'album') {
-      // PC 平台：专辑详情换客户端复刻版（大封面头部 + 曲目表）；其它平台仍走通用页
-      if (page.platform === 'qq' || page.platform === 'netease') {
+      // PC 平台：专辑详情换客户端复刻版（大封面头部 + 曲目表）；酷狗/Apple 同样走复刻版
+      if (page.platform === 'qq' || page.platform === 'netease' || page.platform === 'kugou' || page.platform === 'apple') {
         return (
           <EmbeddedExploreErrorBoundary label="专辑详情">
             <Suspense fallback={pcPageFallback}>
-              <LazyPcAlbumDetail id={page.id} platform={page.platform} chrome={page.platform === 'qq' ? pcChromeQQ : pcChromeNetease} actions={pcActions} active={active} />
+              <LazyPcAlbumDetail id={page.id} platform={page.platform} chrome={pcChromeFor(page.platform)} actions={pcActions} active={active} />
             </Suspense>
           </EmbeddedExploreErrorBoundary>
         )
@@ -1719,7 +2221,33 @@ function TraditionalView({
           <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} aria-label="打开个人中心" className="rounded-xl p-2 hover:bg-white/10"><Music2 className="h-4 w-4" /></button>
           <button type="button" onClick={() => navigate({ name: 'settings' })} aria-label="打开设置" className="rounded-xl p-2 hover:bg-white/10"><Settings className="h-4 w-4" /></button>
         </div>
-        <div className="min-w-0 flex-1" />
+        {/* 中间：顶栏全局搜索框（图4红框位置，全部传统页共用同一样式；提交进搜索页） */}
+        <form onSubmit={submitTopSearch} className="flex min-w-0 flex-1 items-center px-4" role="search" data-testid="traditional-top-search">
+          <div
+            className="flex items-center transition-[background,border-color] duration-75"
+            style={{
+              width: 300,
+              height: 32,
+              borderRadius: 10,
+              background: isDark ? 'rgba(255,255,255,.10)' : 'rgba(15,23,42,.06)',
+              border: `1px solid ${topSearchFocused ? (isDark ? 'rgba(255,255,255,.7)' : 'rgba(15,23,42,.5)') : 'transparent'}`,
+            }}
+          >
+            <span className="relative flex h-full flex-1 items-center">
+              <Search className="pointer-events-none absolute left-2.5 h-4 w-4" style={{ color: isDark ? 'rgba(255,255,255,.8)' : 'rgba(15,23,42,.6)' }} />
+              <input
+                value={topSearchDraft}
+                onChange={event => setTopSearchDraft(event.target.value)}
+                onFocus={() => setTopSearchFocused(true)}
+                onBlur={() => setTopSearchFocused(false)}
+                placeholder={`搜索 ${platformShortName(platform)} 音乐`}
+                aria-label="搜索歌手、歌曲或专辑"
+                className="h-full w-full bg-transparent text-[13px] outline-none"
+                style={{ paddingLeft: 32, paddingRight: 12, color: isDark ? 'rgba(255,255,255,.9)' : 'rgba(15,23,42,.9)' }}
+              />
+            </span>
+          </div>
+        </form>
         {/* 右上角：Logo + 软件名（品牌标识，非交互；个人中心入口在右栏资料卡，避免与右上角隐藏窗口按钮抢点击） */}
         <div className="flex shrink-0 items-center gap-2">
           <img src={new URL('../../logo.png', import.meta.url).href} alt="WaveForge" className="h-9 w-9 rounded-xl object-cover" />
@@ -1765,7 +2293,7 @@ function TraditionalView({
         </AnimatePresence>
       </div>
 
-      <div className={`traditional-layout relative z-10 grid h-[calc(100%_-_5rem)] min-h-0 grid-cols-1 lg:grid-cols-[clamp(168px,14vw,196px)_minmax(0,1fr)] ${currentSong ? 'pb-16 min-[1180px]:pb-0' : ''}`}>
+      <div className={`traditional-layout relative z-10 grid h-[calc(100%_-_5rem)] min-h-0 grid-cols-1 lg:grid-cols-[clamp(168px,14vw,196px)_minmax(0,1fr)] ${isKugouPc ? 'kugou-pc-layout' : ''} ${isApplePc ? 'apple-pc-layout' : ''} ${platform === 'qq' && qqSidebarCollapsed ? 'qq-sidebar-collapsed' : ''} ${platform === 'netease' && neteaseSidebarCollapsed ? 'netease-sidebar-collapsed' : ''} ${currentSong ? 'pb-16 min-[1180px]:pb-0' : ''}`}>
         {/* 左栏：QQ/网易云平台用官方 PC 客户端复刻左栏，其余平台沿用本软件导航栏 */}
         {isPcPlatform && (
           <Suspense fallback={<div className={`hidden lg:block ${isDark ? 'bg-white/[0.02]' : 'bg-black/[0.015]'}`} />}>
@@ -1798,6 +2326,8 @@ function TraditionalView({
                 onToggleCreate={() => { if (!loggedIn) { onLoginClick('qq'); return } setCreatingPlaylist(value => !value) }}
                 onLoginClick={() => onLoginClick('qq')}
                 onToggleMode={() => setShowModePanel(true)}
+                collapsed={qqSidebarCollapsed}
+                onToggleCollapse={toggleQqSidebarCollapsed}
                 playlistScrollRef={playlistScrollRef}
               />
             ) : (
@@ -1826,12 +2356,58 @@ function TraditionalView({
                 onLoginClick={() => onLoginClick('netease')}
                 onToggleMode={() => setShowModePanel(true)}
                 createdScrollRef={playlistScrollRef}
+                collapsed={neteaseSidebarCollapsed}
+                onToggleCollapse={toggleNeteaseSidebarCollapsed}
               />
             )}
           </Suspense>
         )}
-        {/* 左栏（通用）：导航 + 我的歌单 / 收藏歌单 */}
-        {!isPcPlatform && (
+        {/* 左栏（Apple Music 客户端复刻）：搜索框 + 主页/广播 + 资料库分组 + 播放列表分组 + 底部账号。
+            只替换左栏与中间内容区，右侧第三栏（正在播放/播放列表/同步歌词）仍由本文件下方渲染。 */}
+        {isApplePc && (
+          <ApplePcSidebar
+            tone={pcChromeApple.tone}
+            loggedIn={appleLoggedIn}
+            username={appleUsername}
+            avatar={appleAvatar}
+            currentKey={appleNavKey}
+            onNavigate={navigateAppleSidebar}
+            onSearch={keyword => navigate({ name: 'search', keyword })}
+            onAccountClick={() => onLoginClick('apple')}
+            onRefreshLibrary={() => { setAppleLibraryRevision(value => value + 1); window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '正在重新载入 Apple Music 资料库', type: 'info' } })) }}
+            onCreatePlaylist={() => { if (!appleLoggedIn) { onLoginClick('apple'); return } void handleCreatePlaylist() }}
+          />
+        )}
+        {/* 左栏（汽水）：客户端风格左导航（推荐/听歌模式/我的音乐/创建的歌单）。
+            只替换左栏，右侧第三栏仍由本文件下方渲染。 */}
+        {isSodaPc && (
+          <Suspense fallback={null}>
+            <LazySodaPcSidebar
+              tone={(isDark ? 'dark' : 'light') as 'dark' | 'light'}
+              accent={PLATFORM_ACCENTS.soda}
+              currentKey={sodaNavKey}
+              onNavigate={navigateSodaSidebar}
+              unsupportedKeys={sodaUnsupportedKeys}
+              likedPlaylist={userPlaylists.find((item: any) => item.isLike || Number(item.type) === 1)}
+              douyinPlaylist={userPlaylists.find((item: any) => Number(item.type) === 4 || /抖音/.test(String(item.name || '')))}
+              onOpenPlaylist={playlist => { void openPlaylist(playlist) }}
+              onPlaylistMenu={menu => { setPlaylistSubscribed(Boolean(menu.playlist?.isCollected || menu.playlist?.subscribed)); setPlaylistMenu(menu) }}
+              minePlaylists={sodaMinePlaylists}
+              playlistsLoading={playlistLoading}
+              canCreatePlaylist={getPlatformCapabilities('soda').createPlaylist}
+              creatingPlaylist={creatingPlaylist}
+              newPlaylistName={newPlaylistName}
+              onNewPlaylistName={setNewPlaylistName}
+              onToggleCreate={() => { if (!sodaLoggedIn) { onLoginClick('soda'); return } setCreatingPlaylist(value => !value) }}
+              onConfirmCreate={() => void handleCreatePlaylist()}
+              onCancelCreate={() => { setCreatingPlaylist(false); setNewPlaylistName('') }}
+              creatingBusy={creatingPlaylistBusy}
+              playlistScrollRef={playlistScrollRef}
+            />
+          </Suspense>
+        )}
+        {/* 左栏（通用）：导航 + 我的歌单 / 收藏歌单。酷狗用自带左栏的客户端外壳，这里整体让位 */}
+        {showGenericSidebar && (
         <aside className={`hidden min-h-0 flex-col border-r px-3 py-5 lg:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
           <nav className="space-y-1">
             <button type="button" onClick={() => navigate({ name: 'home' })} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-sm" style={{ background: currentPage.name === 'home' ? `${accent}2e` : undefined, color: currentPage.name === 'home' ? accent : undefined }}><Home className="h-4 w-4" />发现</button>
@@ -1877,8 +2453,11 @@ function TraditionalView({
         )}
 
         {/* 中间栏：内容展示区（首页/搜索/音乐库/歌单/歌手/专辑/评论/个人中心）。
-            explore-scrollbar 类是嵌入的探索页（QQExplorePage/NeteaseDiscoverView）滚动恢复的定位锚点。 */}
-        <main ref={mainRef} className="explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8">
+            explore-scrollbar 类是嵌入的探索页（QQExplorePage/NeteaseDiscoverView）滚动恢复的定位锚点。
+            Apple 客户端复刻页自带 40px 内边距与内容底色（客户端版式），这里不再叠通用内边距。 */}
+        {/* 酷狗：外壳（含自带左栏）占前两列（左栏+内容），统一右栏独占第三列；
+            其它平台 main 只占内容列 */}
+        <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden lg:col-span-2' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
           {history.map((page, index) => {
             const active = index === historyIndex
             // 页面「冻结」：访问过的历史页面保持挂载，切走只隐藏、不卸载（与探索页同款）。
@@ -1893,9 +2472,10 @@ function TraditionalView({
         </main>
 
         {/* 右栏：正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部可滚动）。
-            QQ/网易云的账号资料卡已在左栏顶部出现，这里不再重复渲染（避免同一屏两处账号区）。 */}
+            QQ/网易云的账号资料卡已在左栏顶部出现，这里不再重复渲染（避免同一屏两处账号区）。
+            酷狗同样使用这份右栏（本软件特色）：外壳不再自绘底栏/右栏。 */}
         <aside className={`hidden min-h-0 flex-col overflow-hidden border-l min-[1180px]:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
-          <div className={`shrink-0 px-4 pt-4 ${isPcPlatform ? 'hidden' : ''}`}>
+          <div className={`shrink-0 px-4 pt-4 ${isPcPlatform || isApplePc || isKugouPc ? 'hidden' : ''}`}>
             <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-white/10 ${surface}`}>
               {avatar ? <CachedImage src={avatar} alt={`${loggedIn ? username || '用户' : '游客'}头像`} className="h-10 w-10 rounded-full object-cover" role="compact" priority="visible" fallback={<div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>} /> : <div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>}
               <span className="min-w-0" title={loggedIn ? username || '我的账户' : '游客模式'}><span className="block truncate text-sm font-medium">{loggedIn ? username || '我的账户' : '游客模式'}</span><span className={`mt-0.5 block text-xs ${muted}`}>{loggedIn ? `${platformLabel(platform)} · 个人音乐库` : '登录后同步收藏与歌单'}</span></span>
@@ -1995,6 +2575,7 @@ function TraditionalView({
         </aside>
       </div>
 
+      {/* 窄屏浮动播放条（酷狗不再有自绘底栏，同样需要它兜底） */}
       {currentSong && (
         <div className={`absolute inset-x-3 bottom-3 z-30 flex items-center gap-3 rounded-2xl border px-3 py-2 shadow-2xl backdrop-blur-xl min-[1180px]:hidden ${surface}`}>
           {coverOf(currentSong) ? <CachedImage src={coverOf(currentSong)} alt={`${currentSong.name} 封面`} className="h-10 w-10 rounded-lg object-cover" role="player" priority="critical" lazy={false} /> : <div className="flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: `color-mix(in srgb, ${songTheme} 13%, transparent)` }}><Music2 className="h-4 w-4" /></div>}
@@ -2032,6 +2613,7 @@ function TraditionalView({
       <EditPlaylistModal show={showEditPlaylist} onClose={() => setShowEditPlaylist(false)} onSubmit={data => { void handleEditPlaylist(data) }} playlist={playlistMenu.playlist} loading={playlistMutationBusy} />
       <DeletePlaylistModal show={showDeletePlaylist} onClose={() => setShowDeletePlaylist(false)} onConfirm={() => { void handleDeletePlaylist() }} playlistName={playlistMenu.playlist?.name || ''} loading={playlistMutationBusy} />
       <AudioQualitySettingsModal show={showQuality} onClose={() => setShowQuality(false)} playerTheme={playerTheme} neteaseVip={neteaseVip} qqVip={qqVip} neteaseLoggedIn={neteaseLoggedIn} qqLoggedIn={qqLoggedIn} />
+      {/* 酷狗刷歌全屏竖滑页已随「刷歌」下线移除（入口/上游动态流均不再提供） */}
       <style>{`
         .traditional-scroll { scrollbar-width: thin; scrollbar-color: ${isDark ? 'rgba(255,255,255,.28) transparent' : 'rgba(15,23,42,.25) transparent'}; }
         .traditional-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -2044,6 +2626,33 @@ function TraditionalView({
         @media (min-width: 1180px) and (max-height: 760px) {
           .traditional-now-playing { max-height: 58%; overflow-y: auto; }
         }
+        /* Apple Music 客户端左栏固定 290px（客户端实测），其余两栏沿用本软件比例 */
+        @media (min-width: 1024px) and (max-width: 1179px) {
+          .traditional-layout.apple-pc-layout { grid-template-columns: 290px minmax(0, 1fr); }
+        }
+        @media (min-width: 1180px) {
+          .traditional-layout.apple-pc-layout { grid-template-columns: 290px minmax(520px, 1fr) clamp(276px, 23vw, 320px); }
+        }
+        .apple-pc-scroll { scrollbar-width: thin; scrollbar-color: ${isDark ? 'rgba(255,255,255,.28) transparent' : 'rgba(15,23,42,.25) transparent'}; }
+        .apple-pc-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+        .apple-pc-scroll::-webkit-scrollbar-thumb { background: ${isDark ? 'rgba(255,255,255,.28)' : 'rgba(15,23,42,.25)'}; border-radius: 999px; }
+        .apple-pc-scroll::-webkit-scrollbar-track { background: transparent; }
+        .apple-pc-scroll-x { scrollbar-width: none; }
+        .apple-pc-scroll-x::-webkit-scrollbar { height: 0; }
+        /* QQ 左栏折叠（官方客户端左下角箭头）：左栏收成 56px 图标轨道，其余两栏不变 */
+        .traditional-layout.qq-sidebar-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
+        @media (min-width: 1180px) {
+          .traditional-layout.qq-sidebar-collapsed { grid-template-columns: 56px minmax(520px, 1fr) clamp(276px, 23vw, 320px); }
+        }
+        /* 网易云左栏折叠（与 QQ 同款：左下角箭头收成 56px 图标轨道） */
+        .traditional-layout.netease-sidebar-collapsed { grid-template-columns: 56px minmax(0, 1fr); }
+        @media (min-width: 1180px) {
+          .traditional-layout.netease-sidebar-collapsed { grid-template-columns: 56px minmax(520px, 1fr) clamp(276px, 23vw, 320px); }
+        }
+        .kugou-pc-scroll { scrollbar-width: thin; scrollbar-color: ${isDark ? 'rgba(255,255,255,.28) transparent' : 'rgba(15,23,42,.25) transparent'}; }
+        .kugou-pc-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+        .kugou-pc-scroll::-webkit-scrollbar-thumb { background: ${isDark ? 'rgba(255,255,255,.28)' : 'rgba(15,23,42,.25)'}; border-radius: 999px; }
+        .kugou-pc-scroll::-webkit-scrollbar-track { background: transparent; }
       `}</style>
     </div>
   )
@@ -2511,7 +3120,9 @@ function TraditionalRecent({ platform, accent, isDark, active, loggedIn, current
       <div className="mb-5 flex items-end justify-between">
         <div>
           <h1 className="text-xl font-semibold">最近播放</h1>
-          <p className={`mt-1 text-xs ${muted}`}>{platformLabel(platform)} · {songs.length > 0 ? `${songs.length} 首` : '按播放时间倒序'}</p>
+          {/* 这里原来写「汽水音乐 · 17 首」——平台名在左栏已经有选中态了，重复一遍纯噪音；
+              改成只报条数 + 排序说明（产品要求）。 */}
+          <p className={`mt-1 text-xs ${muted}`}>{songs.length > 0 ? `共 ${songs.length} 首 · 按播放时间倒序` : '按播放时间倒序'}</p>
         </div>
         {songs.length > 0 && (
           <button type="button" onClick={() => songs[0] && onSongSelect(songs[0], songs, { mode: 'traditional', surface: 'traditional-recent', platform })} className="flex items-center gap-2 rounded-full px-4 py-2 text-xs font-medium text-white" style={{ background: accent }}><Play className="h-3.5 w-3.5" />播放全部</button>
@@ -2533,6 +3144,14 @@ function TraditionalRecent({ platform, accent, isDark, active, loggedIn, current
           </div>
         ) : (
           <div className={`overflow-hidden rounded-2xl border ${surface}`}>
+            {/* 表头：客户端历史播放列表同款（歌名/歌手 · 专辑 · 时长），
+                没有它一整列数字浮在半空里很难读 */}
+            <div className={`hidden grid-cols-[36px_minmax(0,2.4fr)_minmax(120px,1fr)_56px] items-center gap-3 border-b px-4 py-2 text-[11px] sm:grid ${muted} ${isDark ? 'border-white/[.08]' : 'border-black/[.06]'}`}>
+              <span className="text-center">#</span>
+              <span>歌名 / 歌手</span>
+              <span>专辑</span>
+              <span className="text-right">时长</span>
+            </div>
             {songs.map((song, index) => {
               const active = activeSong(song)
               return (
@@ -2543,7 +3162,7 @@ function TraditionalRecent({ platform, accent, isDark, active, loggedIn, current
                   onClick={() => onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform })}
                   onContextMenu={event => { event.preventDefault(); setSongMenu({ show: true, x: event.clientX, y: event.clientY, song }) }}
                   onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onSongSelect(song, songs, { mode: 'traditional', surface: 'traditional-recent', platform: song.platform || platform }) } }}
-                  className={`group grid cursor-pointer grid-cols-[36px_minmax(0,1fr)_minmax(100px,.6fr)_56px] items-center gap-3 border-b px-4 py-2.5 transition last:border-b-0 ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
+                  className={`group grid cursor-pointer grid-cols-[36px_minmax(0,2.4fr)_minmax(120px,1fr)_56px] items-center gap-3 border-b px-4 py-2.5 transition last:border-b-0 ${active ? (isDark ? 'bg-white/10' : 'bg-pink-50') : isDark ? 'hover:bg-white/[.055]' : 'hover:bg-slate-50'}`}
                 >
                   <span className="flex justify-center text-xs" style={{ color: active ? accent : undefined }}>
                     {active ? <Music2 className="h-3.5 w-3.5" style={{ color: accent }} /> : <span className={muted}>{index + 1}</span>}

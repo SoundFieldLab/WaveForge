@@ -24,7 +24,7 @@ interface TraditionalLibraryProps {
   onBack: () => void
   onSongSelect: (song: Song, songs: Song[], origin: PlaybackOrigin) => void
   onOpenPlaylist: (playlist: any) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void

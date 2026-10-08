@@ -18,6 +18,7 @@ import {
   PcTableSearch, PcTabs, pcSongKey, pcTheme, type PcTabItem,
 } from './pcKit'
 import type { PcAccount, PcActions } from './types'
+import { accountTierBadgeClass, getAccountTierBadge } from '../../services/accountTier'
 
 export interface QQPcProfileProps {
   chrome: { tone: 'light' | 'dark'; skin: 'qq'; accent: string }
@@ -210,12 +211,17 @@ function QQPcProfile({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h1 className={`truncate text-[24px] font-semibold leading-tight ${theme.text}`}>{account.username || 'QQ 音乐用户'}</h1>
-            {account.vip ? (
-              <span className="flex shrink-0 items-center gap-0.5 rounded-[4px] bg-gradient-to-r from-amber-400 to-yellow-500 px-1.5 text-[11px] font-medium leading-[17px] text-white">
-                <Crown className="h-3 w-3" />
-                VIP
-              </span>
-            ) : null}
+            {(() => {
+              // 会员级别区分：超级会员（杜比/臻品母带/臻品音质门槛）与绿钻 VIP 分开标注
+              const tierBadge = getAccountTierBadge('qq', account.vip)
+              if (!tierBadge) return null
+              return (
+                <span className={`flex shrink-0 items-center gap-0.5 rounded-[4px] px-1.5 text-[11px] font-medium leading-[17px] ${accountTierBadgeClass(tierBadge.tone)}`}>
+                  <Crown className="h-3 w-3" />
+                  {tierBadge.label}
+                </span>
+              )
+            })()}
           </div>
           {/* 两个数字都拿不到时整段不渲染（不写死 0） */}
           {shownFans !== undefined || shownFollows !== undefined ? (

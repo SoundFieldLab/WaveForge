@@ -8,6 +8,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Album, Artist, Song } from '../../services/musicApi'
 import { getArtistAlbums, getArtistDetail, getArtistMVs, getArtistTopSongs } from '../../services/musicApi'
+import type { MusicPlatform } from '../../services/platforms'
 import {
   pcCount, PcCardGrid, PcDetailHeader, PcEmpty, PcGhostButton, PcPrimaryButton, PcSongTable, PcTabs,
   pcTheme, type PcSkin, type PcTone,
@@ -17,7 +18,8 @@ import type { PcActions } from './types'
 export interface PcArtistDetailProps {
   /** 歌手 id（QQ 实际按歌手 mid 查询，由上层归一化后传入） */
   id: string
-  platform: 'qq' | 'netease'
+  /** 数据来源平台：酷狗走 kugouService 的 mobilecdn 歌手通道（musicApi 内部已分流） */
+  platform: MusicPlatform
   chrome: { tone: PcTone; skin: PcSkin; accent: string }
   actions: PcActions
   /** 隐藏保活页为 false：跳过取数 */
@@ -192,7 +194,8 @@ function PcArtistDetail({ id, platform, chrome, actions, active }: PcArtistDetai
             title: mv.name,
             subtitle: mvYearOf(mv.publishTime),
             playCount: mv.playCount,
-            onClick: () => actions.onOpenMv?.(mv.id, platform),
+            // MV 弹窗链路只认 QQ/网易云（酷狗 MV 能力为 false，上游也没有歌手 MV 接口，这里不会有点击）
+            onClick: () => { if (platform === 'qq' || platform === 'netease') actions.onOpenMv?.(mv.id, platform) },
           }))}
           theme={theme}
           accent={accent}

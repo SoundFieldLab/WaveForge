@@ -3,10 +3,12 @@
 // 我的收藏/我的音乐云盘 + 收起）→ 创建的歌单 N / 收藏的歌单 N + 歌单列表。
 // 没有数据源的入口（下载管理 / 本地音乐）按产品决策永久不做——直接不渲染。
 // 当前项 = 实心红底白字药丸（官方同款）；底部保留本软件的设置/模式入口。
+// 左下角 = 折叠按钮（官方客户端是左箭头；搜索已上移到顶栏，图4红框位置）。
+// 折叠态 = 56px 图标轨道（导航 + 我的 + 底部工具 + 右箭头展开），与 QQ 左栏同款。
 import { memo, type RefObject } from 'react'
 import {
-  ChevronDown, ChevronUp, Clock, Compass, HardDrive, Heart, Home, ListMusic, Mail,
-  Mic2, Pencil, Plus, Radio, Search as SearchIcon, Settings as SettingsIcon, SlidersHorizontal, Star, User,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock, Compass, HardDrive, Heart, Home, ListMusic, Mail,
+  Mic2, Plus, Radio, Settings as SettingsIcon, SlidersHorizontal, Star, User,
 } from 'lucide-react'
 import { PcCover, pcTheme, type PcTone } from './pcKit'
 
@@ -40,13 +42,16 @@ export interface NeteasePcSidebarProps {
   onLoginClick: () => void
   onToggleMode: () => void
   createdScrollRef: RefObject<HTMLDivElement | null>
+  /** 折叠成 56px 图标轨道（官方客户端左下角左箭头的行为） */
+  collapsed?: boolean
+  onToggleCollapse?: () => void
 }
 
 function NeteasePcSidebar({
   tone, accent, loggedIn, username, avatar, currentKey, counts, createdPlaylists, collectedPlaylists,
   myExpanded, onToggleMy, onOpenPlaylist, onPlaylistMenu, onNavigate, creatingPlaylist, newPlaylistName,
   onNewPlaylistName, onConfirmCreate, onCancelCreate, creatingBusy, onToggleCreate, onLoginClick, onToggleMode,
-  createdScrollRef,
+  createdScrollRef, collapsed = false, onToggleCollapse,
 }: NeteasePcSidebarProps) {
   const theme = pcTheme(tone)
   const dark = tone === 'dark'
@@ -85,6 +90,33 @@ function NeteasePcSidebar({
     </button>
   )
 
+  // 折叠态：56px 图标轨道（品牌位 / 主导航 / 我的 / 底部工具 + 右箭头展开），与 QQ 左栏同款
+  if (collapsed) {
+    return (
+      <aside className={`hidden min-h-0 flex-col items-center gap-1 overflow-y-auto border-r py-4 lg:flex ${theme.divider}`}>
+        <button type="button" onClick={() => (loggedIn ? onNavigate('profile') : onLoginClick())} title={loggedIn ? (username || '我的账户') : '登录'} className="mb-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-full" style={{ background: accent }}>
+          <MusicNoteGlyph />
+        </button>
+        {topNav.map(({ key, label, Icon }) => (
+          <button key={key} type="button" title={label} aria-label={label} onClick={() => onNavigate(key)} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${currentKey === key ? 'font-medium' : `${idleText} hover:opacity-80`}`} style={currentKey === key ? activeStyle : undefined}>
+            <Icon className="h-[18px] w-[18px]" />
+          </button>
+        ))}
+        <span className={`my-1 h-px w-7 shrink-0 ${dark ? 'bg-white/12' : 'bg-black/10'}`} />
+        {myItems.map(({ key, label, Icon }) => (
+          <button key={key} type="button" title={label} aria-label={label} onClick={() => onNavigate(key)} className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${currentKey === key ? 'font-medium' : `${idleText} hover:opacity-80`}`} style={currentKey === key ? activeStyle : undefined}>
+            <Icon className="h-4 w-4" />
+          </button>
+        ))}
+        <div className="mt-auto flex shrink-0 flex-col items-center gap-1 pt-2">
+          <button type="button" onClick={onToggleCollapse} title="展开左栏" aria-label="展开左栏" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><ChevronRight className="h-4 w-4" /></button>
+          <button type="button" onClick={() => onNavigate('settings')} title="设置" aria-label="设置" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SettingsIcon className="h-4 w-4" /></button>
+          <button type="button" onClick={onToggleMode} title="切换界面模式" aria-label="切换界面模式" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SlidersHorizontal className="h-4 w-4" /></button>
+        </div>
+      </aside>
+    )
+  }
+
   return (
     <aside className={`hidden min-h-0 flex-col lg:flex ${theme.divider} border-r`}>
       {/* 品牌头 + 账号 */}
@@ -122,10 +154,9 @@ function NeteasePcSidebar({
           })}
         </nav>
 
-        {/* 我的 */}
-        <div className="mt-5 flex items-center justify-between px-3">
+        {/* 我的（官方标题旁无操作位，右侧的编辑按钮已按产品决策移除） */}
+        <div className="mt-5 px-3">
           <span className={`text-[12px] ${theme.faint}`}>我的</span>
-          <Pencil className={`h-3 w-3 ${theme.faint}`} />
         </div>
         {myExpanded && (
           <nav className="mt-1 space-y-0.5">
@@ -198,12 +229,12 @@ function NeteasePcSidebar({
         )}
       </div>
 
-      {/* 底部工具行 */}
+      {/* 底部工具行：左下角 = 折叠左栏（官方客户端是左箭头，不是搜索；搜索已上移到顶栏） */}
       <div className={`flex shrink-0 items-center gap-1 border-t px-3 py-2.5 ${theme.divider}`}>
-        <button type="button" onClick={() => onNavigate('search')} title="搜索" aria-label="搜索" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${hoverBg}`}><SearchIcon className="h-4 w-4" /></button>
-        <button type="button" onClick={() => onNavigate('settings')} title="设置" aria-label="设置" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${hoverBg}`}><SettingsIcon className="h-4 w-4" /></button>
-        <button type="button" onClick={() => onNavigate('profile')} title="个人中心" aria-label="个人中心" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${hoverBg}`}><User className="h-4 w-4" /></button>
-        <button type="button" onClick={onToggleMode} title="切换界面模式" aria-label="切换界面模式" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${hoverBg}`}><SlidersHorizontal className="h-4 w-4" /></button>
+        <button type="button" onClick={onToggleCollapse} title="折叠左栏" aria-label="折叠左栏" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><ChevronLeft className="h-4 w-4" /></button>
+        <button type="button" onClick={() => onNavigate('settings')} title="设置" aria-label="设置" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SettingsIcon className="h-4 w-4" /></button>
+        <button type="button" onClick={() => onNavigate('profile')} title="个人中心" aria-label="个人中心" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><User className="h-4 w-4" /></button>
+        <button type="button" onClick={onToggleMode} title="切换界面模式" aria-label="切换界面模式" className={`flex h-8 w-8 items-center justify-center rounded-lg ${theme.subtle} ${dark ? 'hover:bg-white/[0.08]' : 'hover:bg-black/[0.05]'}`}><SlidersHorizontal className="h-4 w-4" /></button>
       </div>
     </aside>
   )
