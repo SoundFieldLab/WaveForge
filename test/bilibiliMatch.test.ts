@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
+  applyDurationConsistencyPreference,
+  applyIdentityVeto,
+  applyOfficialTierPreference,
+  isContentCredible,
   normalizeText,
   cleanSongTitle,
   scoreCandidate,
@@ -126,6 +130,140 @@ describe('classifyCandidateType（候选类型识别）', () => {
   })
 })
 
+describe('applyDurationConsistencyPreference（版本一致性优选）', () => {
+  const cand = (bvid: string, score: number, duration: number, type = 'other') => ({ video: { bvid, duration }, score, type })
+
+  it('合集/长版压过等长正片 → 改选等长（ばかじゃないのに：389s 286.8 压过官方 MV 256s 283.6）', () => {
+    const ordered = [cand('compilation', 286.8, 389), cand('officialMv', 283.6, 256, 'official')]
+    const out = applyDurationConsistencyPreference(ordered, 256)
+    expect(out[0].video.bvid).toBe('officialMv')
+  })
+
+  it('口径已一致 → 原样返回（不干扰已正确的选择）', () => {
+    const ordered = [cand('best', 300, 258), cand('other', 290, 256)]
+    expect(applyDurationConsistencyPreference(ordered, 256)).toBe(ordered)
+  })
+
+  it('instrumental 不参与（リテラチュア 实测：99s 长笛独奏谱不算同版本）', () => {
+    const ordered = [cand('longFull', 199.2, 478), cand('fluteSolo', 169.7, 99, 'instrumental')]
+    expect(applyDurationConsistencyPreference(ordered, 92)).toBe(ordered)
+  })
+
+  it('等长候选掉出 30 分带 → 不动；在带内才改选（ステラ：556s 合集 vs 官方 326s）', () => {
+    const ordered = [cand('compilation', 336.3, 556), cand('officialMv', 300, 326, 'official')]
+    expect(applyDurationConsistencyPreference(ordered, 326)).toBe(ordered)
+    const inBand = [cand('compilation', 336.3, 556), cand('officialMv', 318.3, 326, 'official')]
+    expect(applyDurationConsistencyPreference(inBand, 326)[0].video.bvid).toBe('officialMv')
+  })
+})
+
+describe('applyIdentityVeto（同源档位优选）', () => {
+  const cand = (bvid: string, score: number) => ({ video: { bvid } as any, score, type: 'other' as const })
+
+  it('所选明显不同源 → 改选同源档位里评分最高者（SAKURA リグレット 0.264 → 0.822/0.934 中分数高的）', () => {
+    const ordered = [cand('picked', 253.9), cand('sameA', 233.7), cand('sameB', 222.1)]
+    const vetoed = applyIdentityVeto(ordered, new Map([['picked', 0.264], ['sameA', 0.822], ['sameB', 0.934]]))
+    expect(vetoed[0].video.bvid).toBe('sameA') // 档内按分数：sameA 233.7 > sameB 222.1
+  })
+
+  it('所选已同源（≥0.8）→ 不动（ヒビカセ live 0.689 低于档位，但同源档内有 0.87 的搬运 → 会改选）', () => {
+    // 0.689 < 0.8：按规则改选同源档内评分最高者
+    const ordered = [cand('live', 249.3), cand('subbed', 249), cand('mv4k', 247.6)]
+    const vetoed = applyIdentityVeto(ordered, new Map([['live', 0.689], ['subbed', 0.703], ['mv4k', 0.759]]))
+    expect(vetoed[0].video.bvid).toBe('live') // 三条都 <0.8 → 无同源档 → 保持
+  })
+
+  it('真 MV 与静态搬运都同源 → 保持分数序（送り狼：官方 0.869 与静态 0.985 同在档内 → 官方保留）', () => {
+    const ordered = [cand('official', 284.7), cand('staticHiRes', 207.2)]
+    const vetoed = applyIdentityVeto(ordered, new Map([['official', 0.869], ['staticHiRes', 0.985]]))
+    expect(vetoed).toBe(ordered)
+  })
+
+  it('纯人声轨/剪辑版被同源候选替换（Манекены 0.367 → 0.922）', () => {
+    const ordered = [cand('vocalStem', 201), cand('sameSource', 199.1)]
+    const vetoed = applyIdentityVeto(ordered, new Map([['vocalStem', 0.367], ['sameSource', 0.922]]))
+    expect(vetoed[0].video.bvid).toBe('sameSource')
+  })
+
+  it('缺探针数据/单候选/无同源档 → 原样返回', () => {
+    const ordered = [cand('a', 100), cand('b', 90)]
+    expect(applyIdentityVeto(ordered, new Map())).toBe(ordered)
+    expect(applyIdentityVeto(ordered, new Map([['b', 0.5]]))).toBe(ordered) // 无 ≥0.8 同源档
+    expect(applyIdentityVeto(ordered, new Map([['a', 0.3], ['b', 0.4]]))).toBe(ordered)
+    expect(applyIdentityVeto([cand('a', 100)], new Map([['a', 0.5]]))).toEqual([cand('a', 100)])
+  })
+})
+
+describe('applyOfficialTierPreference（同源档位内官号优选）', () => {
+  const cand = (bvid: string, score: number, upMatch = false) => ({
+    video: { bvid } as any, score, type: 'other' as const, signals: { uploaderMatchesArtist: upMatch },
+  })
+
+  it('所选同源但非官号，池内有同源官号（峰差 ≤0.08）→ 改选官号（炎 0.969 中日字幕 → LiSA_OFFiCiAL 0.927）', () => {
+    const ordered = [cand('subbed', 275.6), cand('lisaOfficial', 249.9, true)]
+    const out = applyOfficialTierPreference(ordered, new Map([['subbed', 0.969], ['lisaOfficial', 0.927]]))
+    expect(out[0].video.bvid).toBe('lisaOfficial')
+  })
+
+  it('官号峰明显更低（不眠之夜 官号练习室 0.803 vs 所选 0.982）→ 容差内不改选，对齐优先', () => {
+    const ordered = [cand('reupload', 270.6), cand('official', 259.6, true)]
+    const out = applyOfficialTierPreference(ordered, new Map([['reupload', 0.982], ['official', 0.803]]))
+    expect(out).toBe(ordered)
+  })
+
+  it('所选已是官号 → 不动；多个官号 → 取评分最高（Fire Again 0.865→无畏契约 0.941）', () => {
+    const already = [cand('official', 293.6, true), cand('other', 280)]
+    expect(applyOfficialTierPreference(already, new Map([['official', 0.865], ['other', 0.941]]))).toBe(already)
+    const multi = [cand('fan', 293.6), cand('officialLow', 200, true), cand('officialHigh', 250, true)]
+    const out = applyOfficialTierPreference(multi, new Map([['fan', 0.865], ['officialLow', 0.941], ['officialHigh', 0.9]]))
+    expect(out[0].video.bvid).toBe('officialHigh') // 0.9 ≥ 0.865-0.08 且评分更高
+  })
+
+  it('所不同源（峰 <0.8）→ 不接管（留给同源否决与 0.5 兜底）', () => {
+    const ordered = [cand('cover', 300), cand('official', 250, true)]
+    expect(applyOfficialTierPreference(ordered, new Map([['cover', 0.4], ['official', 0.95]]))).toBe(ordered)
+  })
+
+  it('无探针/官号峰低于档位 → 原样返回', () => {
+    const ordered = [cand('a', 300), cand('b', 250, true)]
+    expect(applyOfficialTierPreference(ordered, new Map())).toBe(ordered)
+    expect(applyOfficialTierPreference(ordered, new Map([['a', 0.9], ['b', 0.5]]))).toBe(ordered)
+  })
+})
+
+describe('isContentCredible（音源不同源时"照播 vs 回退"的内容可信度）', () => {
+  const cand = (over: any = {}) => ({
+    type: 'other' as const,
+    officialVerifyType: -1,
+    signals: { negativeHit: false, hasArtist: false, nearDuration: false, uploaderMatchesArtist: false, officialChannel: false, ...over.signals },
+    ...over,
+  })
+
+  it('官号/歌手本人/机构认证 → 可信（源不同也照播：Wildfire 0.37、前前前世 movie ver. 0.30）', () => {
+    expect(isContentCredible(cand({ signals: { uploaderMatchesArtist: true } }))).toBe(true)
+    expect(isContentCredible(cand({ signals: { officialChannel: true } }))).toBe(true)
+    expect(isContentCredible(cand({ officialVerifyType: 1 }))).toBe(true)
+    expect(isContentCredible(cand({ type: 'official', signals: { hasArtist: true } }))).toBe(true)
+  })
+
+  it('认证账号 + 时长贴近 → 可信（游戏官号：崩铁《Wildfire》verified=0、音源与平台不同版）', () => {
+    expect(isContentCredible(cand({ officialVerifyType: 0, signals: { nearDuration: true } }))).toBe(true)
+    // 未认证账号不算（实测回退清单 44 首全部 verified=-1：直播录音/游戏录像/整活视频）
+    expect(isContentCredible(cand({ officialVerifyType: -1, signals: { hasArtist: true, nearDuration: true } }))).toBe(false)
+  })
+
+  it('负向类型 → 不可信（osu!mania 打歌 0.31、镜音翻唱 0.17、赛车试玩 0.23、直播录音 0.12）', () => {
+    expect(isContentCredible(cand({ type: 'cover', signals: { hasArtist: true, nearDuration: true } }))).toBe(false)
+    expect(isContentCredible(cand({ type: 'instrumental', signals: { uploaderMatchesArtist: true } }))).toBe(false)
+    expect(isContentCredible(cand({ signals: { negativeHit: true, hasArtist: true, nearDuration: true } }))).toBe(false)
+  })
+
+  it('无据来源（歌名碰瓷/错歌：既非官号也无歌手命中）→ 不可信', () => {
+    expect(isContentCredible(cand({ signals: { hasArtist: false, nearDuration: true } }))).toBe(false)
+    expect(isContentCredible(cand({ signals: { hasArtist: true, nearDuration: false } }))).toBe(false)
+  })
+})
+
 describe('scoreCandidate（候选打分）', () => {
   it('硬淘汰：歌名未完整出现在标题 → 无关视频，直接 -Infinity', () => {
     const wrong = scoreCandidate(video({ title: '【官方MV】晴天 - 周杰伦', duration: 269 }), ctx)
@@ -176,6 +314,24 @@ describe('scoreCandidate（候选打分）', () => {
     expect(official.signals.hasArtist).toBe(true)
     expect(official.type).toBe('official')
     expect(shouldAutoPlay(official)).toBe(true)
+  })
+
+  it('本人频道 + 实名认证 → 压过中日字幕搬运（Vaundy《カーニバル》实测 292.2 vs 293.1）', () => {
+    const carnivalCtx: MatchContext = { songTitle: 'カーニバル', artists: ['Vaundy'], songDuration: 203, platform: 'qq', id: 1, album: 'replica' }
+    const official = scoreCandidate(
+      video({ bvid: 'BV1VNLu6RExN', title: 'カーニバル(狂欢节) / Vaundy ：MUSIC VIDEO', duration: 211, play: 16_254, author: 'Vaundy' }),
+      carnivalCtx,
+      { rank: 0, officialVerifyType: 0 },
+    )
+    const reupload = scoreCandidate(
+      video({ bvid: 'BV1oc411X74G', title: '【中日字幕】Vaundy 新曲「カーニバル(狂欢节)」完整版【日剧「火烧御手洗家」主题歌】正式音源', duration: 203, play: 38_603, author: '百億_光年' }),
+      carnivalCtx,
+      { rank: 2, officialVerifyType: -1 },
+    )
+    expect(official.signals.uploaderMatchesArtist).toBe(true)
+    expect(reupload.signals.uploaderMatchesArtist).toBe(false)
+    // 字幕对背景 MV 是冗余项（应用自带歌词），权威来源优先
+    expect(official.score).toBeGreaterThan(reupload.score)
   })
 
   it('私藏馆类高播放搬运：无官方信号 → 播放加权推高分数（15172e1 行为，实测接受自动播放）', () => {
@@ -366,7 +522,7 @@ describe('scoreCandidate（候选打分）', () => {
       ctx,
       { officialVerifyType: -1 },
     )
-    expect(artistOfficial.score - noVerify.score).toBe(25) // +15 个人认证 +10 官号认证叠加
+    expect(artistOfficial.score - noVerify.score).toBe(35) // +15 个人认证 +20 官号认证叠加（原 +10，见 カーニバル 回归）
   })
 
   it('跨书写系统官号：ZUTOMAYO 官方 MV 压过粉丝字幕版（标题/UP主用英文名与中文名）', () => {
@@ -1139,9 +1295,11 @@ describe('CC 验证接线（shouldAutoPlay strong 收紧 + 缓存命中零网络
 
   it('缓存命中后拿到歌词：零网络重扫升级（mismatch 把无关视频拉下最佳）', () => {
     const sbCtx: MatchContext = { songTitle: '稻香', artists: ['周杰伦'], songDuration: 223 }
-    // 「一滴泪」型：标题完美 + 人工 CC，无歌词时按 unverified 缩水档仍险胜低播放正片
+    // 「一滴泪」型：标题完美 + 人工 CC，无歌词时按 unverified 缩水档仍险胜低播放正片。
+    // 注：标题不用"直播切片"——2026-10 起「直播」已是负向标记（会提前重罚，属另一条防线）；
+    // 这里要测的是 CC 复审接线本身。
     const junk = scoreCandidate(
-      video({ bvid: 'BVjunk', title: '周杰伦 稻香（直播切片）', duration: 223, play: 27_700, author: '捷王中王' }),
+      video({ bvid: 'BVjunk', title: '周杰伦 稻香（饭制剪辑版）', duration: 223, play: 27_700, author: '捷王中王' }),
       sbCtx,
       { rank: 0, manualZhSubtitle: true, ccVerification: 'unverified' },
     )

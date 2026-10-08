@@ -21,6 +21,8 @@
 import type { LyricLine } from './musicApi'
 import type { TrackAnalysis } from '../audio/types'
 import {
+  getBilibiliPlayUrl,
+  bilibiliStreamUrl,
   getBilibiliSubtitles,
   getBilibiliSubtitleJson,
   pickBestSubtitle,
@@ -28,7 +30,7 @@ import {
   getBilibiliWatchSettings,
   type BilibiliSubtitleLine,
 } from './bilibiliApi'
-import { autoMixAnalysisService, decodeAudioUrl, computeFrameEnvelope, detectLiveMusicEntry, envelopeOffsetOf, ENVELOPE_PROMINENCE_MIN } from './autoMixAnalysisService'
+import { autoMixAnalysisService, decodeAudioUrl, computeFrameEnvelope, detectLiveMusicEntry, detectLiveMusicEntryAt, detectMusicStart, envelopeOffsetOf, ENVELOPE_PROMINENCE_MIN } from './autoMixAnalysisService'
 
 export interface MvAlignment {
   /** MV 视频时间 - 歌曲音频时间的偏移（秒）：歌曲位置 s 对应视频位置 s + offsetSeconds */
@@ -367,14 +369,139 @@ export async function ensureMvAlignment(input: MvAlignmentInput, signal?: AbortS
 }
 
 /**
- * 现场/翻唱/伴奏 MV 的前奏补偿：不同录音无法做节拍对齐，但可以对齐"开篇/开唱位置"。
- * 双锚策略：
+ * 音乐入口锚（多探测器共识）：现场版补偿里"视频音乐入口 − 歌曲音乐入口"是最可靠的入口锚。
+ * 数据集实测（97 组真实配对 / 72 组强参考 peak≥0.7 / 290 负样本，脚本见仓库 .tmp-kg-align/）：
+ *  - 必须**同种探测器两侧同用**：p60/p60 ≤2s 命中 79%，混用（abs/p60）仅 18%——不同探测器的
+ *    偏差方向不同，混用不会抵消；
+ *  - 单探测器对比：p60/p60 79% > p35/p35 74% > abs/abs 42%（abs 常无命中，放弃率 43%）；
+ *  - 三候选（p60/p60、p35/p35、abs/abs）取 2s 一致簇的中位作共识，否则退回 p60/p60：
+ *    ≤2s 81% / ≤4s 86%，且能救回"p60 迟到"的素材——ヒビカセ 武道馆现场 p60 锚 −18.8s（错），
+ *    p35/abs 一致落在 +6.9s（= 全曲包络互相关真值）。
+ * 返 null 表示无可用锚。
+ */
+export function pickMusicAnchor(candidates: Array<number | null>, preferred: number | null): number | null {
+  const inRange = candidates.filter((v): v is number => v != null && Number.isFinite(v) && Math.abs(v) <= 15)
+  let best: number[] = []
+  for (const v of inRange) {
+    const cluster = inRange.filter((x) => Math.abs(x - v) <= 2)
+    if (cluster.length > best.length) best = cluster
+  }
+  if (best.length >= 2) return best.slice().sort((a, b) => a - b)[Math.floor(best.length / 2)]
+  if (preferred != null && Number.isFinite(preferred) && Math.abs(preferred) <= 15) return preferred
+  return inRange[0] ?? null
+}
+
+/**
+ * 现场版补偿的锚点选择（纯函数，便于单测）。优先级（按数据集实测精度排）：
+ *  1. 包络互相关（envelope）：全曲响度结构证据，过闸门（buildEnvelopeAlignment）即最可信；
+ *  2. 音乐入口（music）：见 pickMusicAnchor —— 72 组强参考上 ≤2s 81%；
+ *  3. 首句歌词（vocals）：offset = MV 音乐入口 − 歌曲首句歌词。**实测最差**（≤2s 仅 8~29%）：
+ *     它的前提是"现场歌声≈其音乐入口"，可视频在前奏里往往还有一整段器乐（本曲 ≈15s），
+ *     于是系统性偏差≈歌曲前奏长度。保留为最后兜底（音乐入口不可用时）。
+ * 全部不可用返回 null（调用方自由播放）。
+ */
+export function pickLiveCompensationAnchor(args: {
+  /** buildEnvelopeAlignment 过闸门后的包络对齐结果（未过闸门/未计算为 null） */
+  envelope: MvAlignment | null
+  /** 歌曲首句歌词时间（秒）；无歌词/坏数据为 null */
+  firstVocal: number | null
+  /** MV 侧音乐/歌声入口（p60，首选单探测器） */
+  mvMusicStart: number
+  /** 音乐入口锚候选 = mvEntry − songEntry（不同探测器对各算一个；p60 那个作为 preferred 传） */
+  musicAnchors: Array<number | null>
+}): { alignment: MvAlignment; anchor: '包络' | '音乐入口' | '歌词' } | null {
+  if (args.envelope) return { alignment: args.envelope, anchor: '包络' }
+  const preferred = args.musicAnchors[0] ?? null
+  const music = pickMusicAnchor(args.musicAnchors, preferred)
+  if (music != null) {
+    return { alignment: { offsetSeconds: music, confidence: 0.55, method: 'live-vocal' }, anchor: '音乐入口' }
+  }
+  if (args.firstVocal != null) {
+    const offsetA = args.mvMusicStart - args.firstVocal
+    if (Math.abs(offsetA) <= 15) {
+      return { alignment: { offsetSeconds: offsetA, confidence: 0.55, method: 'live-vocal' }, anchor: '歌词' }
+    }
+  }
+  return null
+}
+
+/** 歌曲侧包络缓存（按 URL）：对齐与「候选同一性复核」共用同一次解码，避免重复下载+解码整曲。 */
+const songEnvelopeCache = new Map<string, { frameRms: number[]; frameRate: number }>()
+const songEnvelopeInFlight = new Map<string, Promise<{ frameRms: number[]; frameRate: number } | null>>()
+
+/** 取歌曲音频的帧 RMS 包络（50fps，与 MV 侧同口径）；失败返回 null（调用方降级）。 */
+export async function getSongEnvelope(songUrl: string, signal?: AbortSignal): Promise<{ frameRms: number[]; frameRate: number } | null> {
+  if (!songUrl || !(songUrl.startsWith('http') || songUrl.startsWith('blob:'))) return null
+  const cached = songEnvelopeCache.get(songUrl)
+  if (cached) return cached
+  const existing = songEnvelopeInFlight.get(songUrl)
+  if (existing) return existing
+  const promise = (async () => {
+    try {
+      const { buffer } = await decodeAudioUrl(songUrl, signal)
+      const envelope = computeFrameEnvelope(buffer)
+      // 上限 8 条：一次会话里通常只有当前曲 + 预载下一曲
+      if (songEnvelopeCache.size >= 8) {
+        const oldest = songEnvelopeCache.keys().next().value
+        if (oldest) songEnvelopeCache.delete(oldest)
+      }
+      songEnvelopeCache.set(songUrl, envelope)
+      return envelope
+    } catch {
+      return null
+    } finally {
+      songEnvelopeInFlight.delete(songUrl)
+    }
+  })()
+  songEnvelopeInFlight.set(songUrl, promise)
+  return promise
+}
+
+/**
+ * 候选同一性探针（供匹配层注入使用）：对给定候选各取一次低码率音频，算与当前歌曲包络的
+ * 相关峰（bvid → peak）——即"该视频与正在播放的录音是否同源可对齐"。任一条失败跳过；
+ * 整体无结果时由调用方退回纯元数据排序。放在这里（而非匹配层）是为了让 bilibiliApi
+ * 保持无音频依赖：匹配层只注入这个函数。
+ */
+export async function probeCandidateIdentities(
+  candidates: ReadonlyArray<{ video: { bvid: string }; cid?: number }>,
+  songUrl: string,
+  signal?: AbortSignal,
+): Promise<Map<string, number>> {
+  const peaks = new Map<string, number>()
+  const songEnvelope = await getSongEnvelope(songUrl, signal)
+  if (!songEnvelope) return peaks
+  for (const candidate of candidates) {
+    if (signal?.aborted) break
+    const cid = candidate.cid || 0
+    if (!cid) continue
+    try {
+      const playInfo = await getBilibiliPlayUrl(candidate.video.bvid, cid, 64, signal)
+      if (playInfo.code !== 0 || !playInfo.cacheKey) continue
+      const decoded = await decodeAudioUrl(bilibiliStreamUrl(playInfo.cacheKey, 'audio'), signal)
+      const mvEnvelope = computeFrameEnvelope(decoded.buffer)
+      const corr = envelopeOffsetOf(mvEnvelope.frameRms, songEnvelope.frameRms, songEnvelope.frameRate)
+      peaks.set(candidate.video.bvid, corr.peak)
+    } catch {
+      // 单条失败跳过：探针是 best-effort
+    }
+  }
+  return peaks
+}
+
+/**
+ * 现场/翻唱/伴奏 MV 的前奏补偿：不同录音无法做节拍**网格**对齐，但可以对齐"开篇/开唱位置"。
+ * 三锚策略（选择逻辑见 pickLiveCompensationAnchor）：
+ *  - 包络互相关（envelope）：offset = 全曲响度结构互相关峰。同一首歌的现场录音响度结构
+ *    仍逐段对应，峰过闸门（peak≥0.6、突出度≥0.05）时最可信——实测 ヒビカセ 武道馆现场
+ *    +6.9s/peak0.69/prom0.10，与两侧入口差（+6.8s）一致；入口锚在该曲因"现场器乐前奏
+ *    比录音室长"而偏 3s 以上。未过闸门（不同编曲/混剪）退回入口锚。
  *  - 首句歌词锚（vocals）：offset = MV 音乐入口 − 歌曲首句歌词时间。适合现场版
  *    （现场版歌声≈其音乐入口，《宮》实测 +1.4s）。歌词缺失/坏数据时不可用。
  *  - 音乐入口锚（music）：offset = MV 音乐入口 − 歌曲音乐入口。适合忠实翻唱
  *    （双方前奏长度相近，入口对齐即开篇对齐）。rainy tone 原曲前奏 24.6s、首句歌词
  *    24.94s——若用 vocals 锚会算出 −24s 超限被弃；music 锚 ≈ 0 正确。
- * 前者更精确（对准开唱），后者兜底（对准开篇）；均超限（>15s，结构完全不同）放弃。
+ * 入口锚超限（>15s，结构完全不同）放弃。
  */
 async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSignal): Promise<MvAlignment | null> {
   if (!input.videoUrl?.startsWith('http')) {
@@ -391,46 +518,55 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
     try {
       const { buffer } = await decodeAudioUrl(input.videoUrl!, signal)
       const { frameRms, frameRate } = computeFrameEnvelope(buffer)
-      // 现场版动态压缩，绝对电平阈值（detectMusicStart）不稳定（实测同曲 12kHz 22.4s /
-      // 22050Hz 55.4s）→ 用 60 分位+持续判定的入口检测（两种采样率一致）
-      const mvMusicStart = detectLiveMusicEntry(frameRms, frameRate)
+      // 音乐入口三对探测器（p60/p35/abs）；音乐锚需"同种探测器两侧同用"（混用偏差不抵消），
+      // 单探测器优劣与共识规则见 pickMusicAnchor 的实测注释。
+      const mvEntryP60 = detectLiveMusicEntry(frameRms, frameRate)
+      const mvEntryP35 = detectLiveMusicEntryAt(frameRms, frameRate, 0.35)
+      const mvEntryAbs = detectMusicStart(frameRms, frameRate)
+
+      // 歌曲侧包络：锚 C 与锚 B 共用一次解码（与「候选同一性复核」也共享缓存）
+      const songEnv = input.songUrl ? await getSongEnvelope(input.songUrl, signal) : null
+
+      // 锚 C（首选）：全曲包络互相关。现场/翻唱与音源虽是两条录音、节拍网格不可用，
+      // 但同一首歌的**响度结构**仍逐段对应：相关峰过闸（buildEnvelopeAlignment：
+      // peak≥0.6 且突出度≥0.05）即"结构对得上"，直接取该偏移。实测 ヒビカセ 武道馆现场
+      // （qq:7420896 × BV1Lwz6YGEa6）：offset=+6.9s peak=0.69 prominence=0.10 → conf=0.69。
+      // 闸门标定（97 组真实配对 / 290 负样本）：现规则通过 78% 真实配对、负样本 0 误通过；
+      // 放宽到 peak≥0.55 且 prom≥0.03 可到 81%/0 误通过，但 0.55~0.6 段无法验证正确性，暂不放宽。
+      let envelopeResult: MvAlignment | null = null
+      if (songEnv) {
+        const corr = envelopeOffsetOf(frameRms, songEnv.frameRms, songEnv.frameRate)
+        envelopeResult = buildEnvelopeAlignment(corr.offset, corr.peak, corr.prominence)
+        mvLog(`现场版包络互相关：${input.bvid} offset=${corr.offset.toFixed(2)}s peak=${corr.peak.toFixed(2)} prominence=${corr.prominence.toFixed(2)} → ${envelopeResult ? `采用 conf=${envelopeResult.confidence.toFixed(2)}` : '未过闸门'}`)
+      }
 
       // 锚 A：首句歌词时间（录音室版歌声起始）
       const firstVocal = firstLyricTime(input.lyrics)
-      const offsetA = firstVocal != null ? mvMusicStart - firstVocal : null
 
-      // 锚 B：歌曲自身音乐入口（歌词缺失/不被 A 采纳时的兜底）
-      // 与 MV 侧同用 detectLiveMusicEntry（60 分位+持续判定）——绝对阈值 detectMusicStart
-      // 会把开口就先唱/极简前奏的歌误测成很晚的响段（实测 Done for Me 报 34.1s 超限被弃）
-      let offsetB: number | null = null
-      if (input.songUrl?.startsWith('http')) {
-        try {
-          const songDecoded = await decodeAudioUrl(input.songUrl, signal)
-          const songEnv = computeFrameEnvelope(songDecoded.buffer)
-          const songMusicStart = detectLiveMusicEntry(songEnv.frameRms, songEnv.frameRate)
-          if (Number.isFinite(songMusicStart)) offsetB = mvMusicStart - songMusicStart
-        } catch (error) {
-          mvLog(`歌曲音乐入口检测失败：${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
+      // 锚 B：音乐入口锚候选。三对探测器各算一次（同种探测器两侧同用——混用不抵消偏差，实测差 4 倍）：
+      //   p60/p60（单探测器最优）｜p35/p35｜abs/abs；共识判定见 pickMusicAnchor。
+      const songEntry = (fn: (rms: number[], rate: number) => number) => (songEnv ? fn(songEnv.frameRms, songEnv.frameRate) : 0)
+      const anchorOf = (mvEntry: number, songEntryValue: number) => (mvEntry > 0 && songEntryValue > 0 ? mvEntry - songEntryValue : null)
+      const musicAnchors = [
+        anchorOf(mvEntryP60, songEntry(detectLiveMusicEntry)),
+        anchorOf(mvEntryP35, songEntry((rms, rate) => detectLiveMusicEntryAt(rms, rate, 0.35))),
+        anchorOf(mvEntryAbs, songEntry(detectMusicStart)),
+      ]
 
-      // 首选 vocals 锚（精确对准开唱）；超限或缺失则用 music 锚（对准开篇）
-      let offset: number
-      let anchorLabel: string
-      if (firstVocal != null && Math.abs(offsetA!) <= 15) {
-        offset = offsetA!
-        anchorLabel = '歌词'
-      } else if (offsetB != null && Math.abs(offsetB) <= 15) {
-        offset = offsetB
-        anchorLabel = '音乐入口'
-      } else {
-        mvLog(`现场版补偿放弃：${input.bvid} 无可用锚（vocals=${firstVocal != null ? offsetA!.toFixed(1) : '无'} music=${offsetB != null ? offsetB.toFixed(1) : '无'}，自由播放）`)
+      // 锚点优先级：包络互相关 > 音乐入口（多探测器共识）> 首句歌词
+      const picked = pickLiveCompensationAnchor({ envelope: envelopeResult, firstVocal, mvMusicStart: mvEntryP60, musicAnchors })
+      if (!picked) {
+        const offsetA = firstVocal != null ? mvEntryP60 - firstVocal : null
+        mvLog(`现场版补偿放弃：${input.bvid} 无可用锚（vocals=${offsetA != null ? offsetA.toFixed(1) : '无'} music=${JSON.stringify(musicAnchors.map((v) => (v == null ? null : Math.round(v * 10) / 10)))}，自由播放）`)
         return null
       }
-      mvLog(`现场版检测：${input.bvid} buffer=${buffer.duration.toFixed(1)}s 音乐入口=${mvMusicStart.toFixed(2)}s 首句歌词=${firstVocal != null ? firstVocal.toFixed(2) : '无'} 歌曲入口=${offsetB != null ? (mvMusicStart - offsetB).toFixed(2) : '无'} → offset=${offset}s（锚=${anchorLabel}）`)
-      mvLog(`现场版声乐补偿：${input.bvid} ${input.candidateType} → offset=${offset}s conf=0.55`)
-      const result: MvAlignment = { offsetSeconds: offset, confidence: 0.55, method: 'live-vocal' }
+      const result = picked.alignment
+      if (picked.anchor !== '包络') {
+        mvLog(`现场版检测：${input.bvid} buffer=${buffer.duration.toFixed(1)}s 入口 p60=${mvEntryP60.toFixed(2)} p35=${mvEntryP35.toFixed(2)} abs=${mvEntryAbs.toFixed(2)}｜首句歌词=${firstVocal != null ? firstVocal.toFixed(2) : '无'} → offset=${result.offsetSeconds}s（锚=${picked.anchor}，候选 ${JSON.stringify(musicAnchors.map((v) => (v == null ? null : Math.round(v * 10) / 10)))}）`)
+      }
+      mvLog(`现场版声乐补偿：${input.bvid} ${input.candidateType} → offset=${result.offsetSeconds}s conf=${result.confidence.toFixed(2)} method=${result.method}`)
       memoryCache.set(key, { ...result, candidateType: input.candidateType })
+      negativeCache.delete(key)
       persist()
       return result
     } catch (error) {
@@ -446,6 +582,17 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
   }
 }
 
+/** 歌词文件里的元数据/署名行标记（词曲编录混…）。必须同时覆盖日文/繁体写法：
+ *  QQ 日文歌词常用「作詞：」，只列简体「作词」会让署名行被当成首句歌词——
+ *  现场版补偿的「首句歌词锚」随之算错（实测 ヒビカセ：`作詞：れをる`@9.39s 被判成
+ *  首句 → 锚 +22.6s 超限放弃；真实首句 @28.19s 时锚为 +3.8s，可用）。
+ *  末尾的 `(?:[・·、,，/／&＆+＋] 标记)*` 覆盖「作詞・作曲：」这类叠写署名。 */
+const LYRIC_CREDIT_MARKER = '(?:词|詞|曲|编曲|編曲|作词|作詞|作曲|演唱|唱|歌手|专辑|專輯|制作|製作|混音|母带|母帶|录音|錄音|作|编|編|监制|監製|訳詞|译词|lyrics|composed|arranged|music|produced|words|by|ti|ar|al|offset)'
+const LYRIC_CREDIT_LINE_RE = new RegExp(
+  `^${LYRIC_CREDIT_MARKER}(?:\\s*[・·、,，/／&＆+＋]\\s*${LYRIC_CREDIT_MARKER})*\\s*[:：]`,
+  'i',
+)
+
 /** 取本地歌词里第一条有文本的歌词行时间（秒）；无歌词/纯伴奏返回 null */
 export function firstLyricTime(lyrics?: LyricLine[]): number | null {
   if (!Array.isArray(lyrics)) return null
@@ -455,9 +602,9 @@ export function firstLyricTime(lyrics?: LyricLine[]): number | null {
     const t = line.time ?? 0
     if (t < 0) continue
     const text = String(line.text).trim()
-    // 跳过元数据/署名行：词/曲/编曲等（「词：Vaundy」）；以及开头的"歌名 - 歌手"标题行
-    // （歌词正文极少在 2s 内出现带连字符的行，实测首句被 [00:00.8]宮 - Vaundy 抢先）
-    if (/^(词|曲|编曲|作词|作曲|演唱|唱|歌手|专辑|制作|混音|母带|录音|作|编|监制|by|ti|ar|al|offset)\s*[:：]/i.test(text)) continue
+    // 跳过元数据/署名行：词/曲/编曲等（「词：Vaundy」「作詞：れをる」）；以及开头的
+    // "歌名 - 歌手"标题行（歌词正文极少在 2s 内出现带连字符的行，实测首句被 [00:00.8]宮 - Vaundy 抢先）
+    if (LYRIC_CREDIT_LINE_RE.test(text)) continue
     if (t < 2 && /^.{1,40}[-—–]\s*.{1,40}$/.test(text)) continue
     // 0.5s 内的行几乎都是元数据/翻译/词级时间残留（网易云 JSON 行 t=0 的「作词: …」），
     // 真实首句歌词几乎不会这么早——跳过可避免首句被抢（实测取到 0.02s → 补偿偏移超限被弃）

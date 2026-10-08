@@ -70,6 +70,9 @@ export interface BilibiliPlayInfo {
   durlCount: number
   hasDolby?: boolean
   hasFlac?: boolean
+  /** 请求了 flac/dolby 增强轨但该视频没有 → 服务端回落为标准音轨（值为请求的轨道名）。
+   *  前端据此提示"该视频没有该音轨"，而不是静默切换失败。 */
+  audioTrackFallback?: string
   error?: string
 }
 
@@ -180,6 +183,8 @@ export interface CandidateScore {
   /** 复审用的评分时长（多 P 视频为选中分 P 时长；重扫需还原同一评分口径） */
   effectiveDuration?: number
   type: CandidateType
+  /** 内容可信但与歌曲音源明显不同源（包络峰 < 0.5）：播出时画面可能未对齐 */
+  identityUnverified?: boolean
 }
 
 /** CC 字幕内容与歌词的比对结论：
@@ -203,6 +208,8 @@ export interface BilibiliMatchResult {
   ccUnverifiedWithoutLyrics?: boolean
   /** 时长共识校正值（detectSongDurationConsensus 产物）；歌词重扫沿用同一基准保证排序一致 */
   songDurationOverride?: number
+  /** 内容可信但与歌曲音源明显不同源（包络峰 < 0.5）仍选择播出：画面可能未对齐（上层可提示/降级） */
+  identityUnverified?: boolean
 }
 
 // ===== 看歌设置 =====
@@ -407,8 +414,37 @@ async function fetchJsonLoose<T = unknown>(url: string, init?: RequestInit): Pro
   }
 }
 
-export function searchBilibiliVideos(keyword: string, page = 1, signal?: AbortSignal): Promise<{ code: number; results: BilibiliVideo[] }> {
-  return fetchJson(`${BILI_API_BASE}/search?keyword=${encodeURIComponent(keyword)}&page=${page}`, { signal })
+/** B 站接口返回标题的 HTML 实体解码（搜索接口把引号/与号转义成 &#x27; / &amp; 等）。
+ *  服务端（server/bilibili-api.mjs 的 decodeBiliText）已解一遍；这里兜底旧版服务端/其它构建，
+ *  单遍替换——已解码文本不含实体，无副作用。 */
+export function decodeBiliTitle(input: string): string {
+  const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+  return String(input || '').replace(/&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);/g, (match, body: string) => {
+    if (body[0] === '#') {
+      const hex = body[1] === 'x' || body[1] === 'X'
+      const code = Number.parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10)
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match
+      try {
+        return String.fromCodePoint(code)
+      } catch {
+        return match
+      }
+    }
+    return named[body.toLowerCase()] ?? match
+  })
+}
+
+export async function searchBilibiliVideos(keyword: string, page = 1, signal?: AbortSignal): Promise<{ code: number; results: BilibiliVideo[] }> {
+  const data = await fetchJson<{ code: number; results: BilibiliVideo[] }>(
+    `${BILI_API_BASE}/search?keyword=${encodeURIComponent(keyword)}&page=${page}`,
+    { signal },
+  )
+  if (Array.isArray(data?.results)) {
+    for (const item of data.results) {
+      if (item && typeof item.title === 'string') item.title = decodeBiliTitle(item.title)
+    }
+  }
+  return data
 }
 
 export function getBilibiliView(bvid: string, signal?: AbortSignal): Promise<{ code: number; data: BilibiliViewData }> {
@@ -966,6 +1002,14 @@ const NEGATIVE_MARKERS = [
   '详解', '空耳', '音译', '谐音', '跟唱', '学会', '速成', '翻调', '翻填',
   // 音游成绩单形态（Project SEKAI 等谱面/成绩投稿）：不是歌曲正片
   'all perfect', 'full combo',
+  // 音游名（游玩录像常带曲名+游戏名，无"手元/谱面"等词）：喵斯快跑实测 星と僕らと→[mdmc]游玩
+  // 录像 209.6 分入选；osu!/maimai/Arcaea 等同理。gameplay/playthrough 已有。
+  '喵斯', 'musedash', 'muse dash', 'mdmc', 'osu!', 'osu_mania', 'osumania', 'arcaea', 'maimai', 'phigros', 'lanota', 'voez', 'deemo', 'cytus',
+  // 游戏录像/试玩/直播/演奏视奏（2026-10 大规模审核补充）：内容不是歌曲正片。
+  // 实测漏网：チルノ→「【osu!mania】…」打歌录像 0.31、Late night drift→「…试玩~」赛车游戏
+  // 0.23、Favorite Girl→「…tik tok直播时…录屏」0.12、Clair de lune→「大提琴视奏…」0.44。
+  // osu!mania 规范化为 osumania，用无标点词条稳定命中。
+  'osumania', 'osu mania', '试玩', '实况', '直播', '录屏', '视奏', '打歌', '打谱', '录像',
   // 统一按标题规范化口径比较：带空格/全角的词条（dance cover、sky studio…）原来直接与
   // 去空格的 titleNorm 比对，永远命不中（漏网标记），这里先规范化再参与匹配。
 ].map((m) => normalizeText(m))
@@ -1107,6 +1151,13 @@ const ARTIST_ALIASES: Record<string, string[]> = {
   あいみょん: ['Aimyon', '爱缪'],
   Aimyon: ['あいみょん', '爱缪'],
   爱缪: ['あいみょん', 'Aimyon'],
+  // 实测（92 首歌匹配审计）：あたらよ 的 B 站官号显示名是罗马字 atarayo_official，
+  // 平台歌手字段是日文「あたらよ」→ uploaderMatchesName 认不出官号，官方 MV
+  // （《夏霞》262.9、《また夏を追う》256.0）被中日字幕搬运（267.1/265.5）压过。
+  // 「可惜夜」是搬运/官方标题里常用的中文名（【あたらよ / 可惜夜】），一并互认。
+  あたらよ: ['atarayo', 'Atarayo', '可惜夜'],
+  atarayo: ['あたらよ', '可惜夜'],
+  可惜夜: ['あたらよ', 'atarayo'],
   ヨルシカ: ['Yorushika'],
   Yorushika: ['ヨルシカ'],
   Ado: ['アド'],
@@ -2044,7 +2095,11 @@ export function scoreCandidate(
 
   // 复审增强：B 站原始认证值为 -1 未认证、0 个人、1 机构。
   score += verificationScore(officialVerifyType)
-  if (signals.uploaderMatchesArtist && officialVerifyType >= 0) score += 10
+  // 「本人频道 + B 站实名认证」= 该录音的权威来源：+20 保证它压过带字幕/高画质的搬运。
+  // 原为 +10：实测 Vaundy《カーニバル》——本人频道（Vaundy，个人认证）292.2 输给
+  // 中日字幕搬运 293.1（差 0.9 分）；字幕对背景 MV 是冗余项（应用自带歌词），
+  // 权威来源应优先（97 组配对/92 首歌的匹配审计，见 .tmp-kg-align/）。
+  if (signals.uploaderMatchesArtist && officialVerifyType >= 0) score += 20
   // 机构认证与上下文官号/艺人别名相互印证，优先于仅标题干净的转载。
   if (officialVerifyType === 1 && (signals.officialChannel || signals.uploaderMatchesArtist)) score += 10
   // CC 字幕权重（分档）：内容与歌词比对后 match 足额 / unverified 缩水 / mismatch 反罚。
@@ -2289,7 +2344,9 @@ export function getLocalMvMarks(): LocalMvMark[] {
   try {
     const raw = localStorage.getItem(LOCAL_MV_MARKS_KEY)
     const parsed = raw ? (JSON.parse(raw) as LocalMvMark[]) : []
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    // 旧版本保存的标题带搜索接口的 HTML 实体（&#x27; 等）：读取时统一解码，列表展示不再出转义串
+    return parsed.map((m) => (m && typeof m.videoTitle === 'string' ? { ...m, videoTitle: decodeBiliTitle(m.videoTitle) } : m))
   } catch {
     return []
   }
@@ -2665,6 +2722,134 @@ async function reviewCandidates(
 }
 
 /**
+ * 版本一致性优选（纯函数，便于单测）：所选候选的时长与歌曲明显不符（比值 <0.75 或 >1.3）时，
+ * 在分数带内（默认 30 分）改选「等长候选」（比值 ∈[0.85, 1.15]）里评分最高者。
+ *
+ * 背景（149 首实测）：20 首所选的时长口径与歌曲不符——多是"官方合集/单曲专辑/长版 MV/切片"
+ * 压过等长的同版本投稿（ばかじゃないのに：389s 字幕版 286.8 压过官方 MV 256s 283.6；
+ * ステラ：556s 单曲合集 336.3 压过官方 2DMV 326s 318.3；Ditto：side B 277s 压过 190s 正片）。
+ * 其中 8 首在分数带内存在等长候选（= 同一剪辑），本规则改选它们。
+ * 排除 instrumental：长笛/钢琴等演奏投稿时长常与歌曲一致，但不是同一录音
+ * （实测 リテラチュア 92s 歌 → 99s 长笛独奏谱会被误选）。身份核验（identityProbe）若可用会进一步兜底。
+ */
+export function applyDurationConsistencyPreference<T extends { video: { bvid: string; duration: number }; score: number; type: string }>(
+  ordered: T[],
+  songDuration: number,
+  options?: { scoreBand?: number; ratioLow?: number; ratioHigh?: number },
+): T[] {
+  if (ordered.length < 2 || !(songDuration > 0)) return ordered
+  const scoreBand = options?.scoreBand ?? 30
+  const ratioLow = options?.ratioLow ?? 0.85
+  const ratioHigh = options?.ratioHigh ?? 1.15
+  const best = ordered[0]
+  const bestRatio = (best.video.duration || 0) / songDuration
+  if (bestRatio >= 0.75 && bestRatio <= 1.3) return ordered // 口径已一致
+  const candidates = ordered.slice(1).filter((c) => {
+    if (c.score < best.score - scoreBand) return false
+    if (c.type === 'instrumental') return false
+    const ratio = (c.video.duration || 0) / songDuration
+    return ratio >= ratioLow && ratio <= ratioHigh
+  })
+  if (!candidates.length) return ordered
+  const promoted = candidates.reduce((a, b) => (b.score > a.score ? b : a))
+  identityLog(`版本一致性优选：${best.video.bvid}(dur=${best.video.duration} ratio=${bestRatio.toFixed(2)} score=${Math.round(best.score)}) → ${promoted.video.bvid}(dur=${promoted.video.duration} score=${Math.round(promoted.score)})`)
+  return [promoted, ...ordered.filter((c) => c !== promoted)]
+}
+
+/** 匹配阶段日志（与 MvAlign 同名 tag，便于和后台日志一起 grep） */
+const identityLog = (msg: string): void => {
+  // eslint-disable-next-line no-console
+  console.log('[MvAlign]', msg)
+  if (typeof window === 'undefined') return
+  void (window as unknown as { electron?: { automixLog?: (tag: string, msg: string) => Promise<void> } })
+    .electron?.automixLog?.('MvAlign', msg)?.catch?.(() => undefined)
+}
+
+/**
+ * 候选音频同一性否决（纯函数，便于单测）：「同源档位」优先——所选候选与歌曲明显不同源时，
+ * 改选池内**同源候选**（峰 ≥ tier，默认 0.8）中评分最高者；档内仍按分数排序。
+ *
+ * 背景（207 首歌 / 700+ 条候选包络的人工审核实测）：匹配与对齐是绑定的——选了另一版录音
+ * （不同编曲/母带/人声轨/剪辑版）的视频，包络相关峰会明显偏低（<0.75），背景永远对不齐。
+ * 审核发现 26/149 首属这种"所选不同源而池内有同源候选"（Vocaloid 神っぽいな 0.756→0.96、
+ * KING 0.669→0.965、游戏 Never Fade Away 0.324→0.916、同人 Bad Apple 0.349→0.982、
+ * 古典 Con Te Partirò 0.557→0.97、人声轨 Манекены 0.367→0.922 等）。
+ * 关键设计：**档内按分数**——"真 MV vs 静态无损搬运"若都同源（送り狼官方 0.869 / 静态 0.985）
+ * 则保持分数序、官方不被换掉；只有所选明显不同源时才让同源档位上位。
+ * 代价：被改选的候选可能分数较低（落到 confirm 态）——但两个界面在 confirm 下**仍会播放**
+ * 最高分候选（只是多给一个候选列表），不会没画面。
+ */
+export function applyIdentityVeto<T extends { video: { bvid: string }; score: number }>(
+  ordered: T[],
+  peaks: Map<string, number>,
+  options?: { tier?: number },
+): T[] {
+  if (ordered.length < 2 || peaks.size === 0) return ordered
+  const tier = options?.tier ?? 0.8
+  const best = ordered[0]
+  const bestPeak = peaks.get(best.video.bvid)
+  if (bestPeak == null || bestPeak >= tier) return ordered
+  const sameSource = ordered.slice(1).filter((c) => {
+    const peak = peaks.get(c.video.bvid)
+    return peak != null && peak >= tier
+  })
+  if (!sameSource.length) return ordered
+  const promoter = sameSource.reduce((a, b) => (b.score > a.score ? b : a))
+  identityLog(`同一性否决（同源档位）：${best.video.bvid}(peak=${bestPeak.toFixed(2)} score=${Math.round(best.score)}) → ${promoter.video.bvid}(peak=${(peaks.get(promoter.video.bvid) ?? 0).toFixed(2)} score=${Math.round(promoter.score)})`)
+  return [promoter, ...ordered.filter((c) => c !== promoter)]
+}
+
+/**
+ * 内容可信度（纯函数）：与歌曲音源明显不同源时，判断这条视频"内容上是不是这首歌的正片"，
+ * 决定"照播但可能未对齐"还是"正常回退"。用户口径：官号/正片即使与平台曲目母带不同，
+ * 也得给画面；翻唱/伴奏/教学/音游录像/试玩实况等负向类型，以及来源无据的（既非官号、
+ * 标题也没同时命中歌名与歌手）才回退。
+ */
+export function isContentCredible(candidate: Pick<CandidateScore, 'type' | 'signals' | 'officialVerifyType'>): boolean {
+  if (candidate.signals.negativeHit || candidate.type === 'cover' || candidate.type === 'instrumental') return false
+  if (candidate.signals.uploaderMatchesArtist || candidate.signals.officialChannel || candidate.officialVerifyType === 1) return true
+  // 官方标记 + 标题含歌手（正规官方搬运）
+  if (candidate.type === 'official' && candidate.signals.hasArtist) return true
+  // 认证账号（≥个人认证）+ 时长贴近：游戏官号常是个人认证且标题不含作曲者名
+  // （实测 Wildfire 0.37 verified=0 nearDur=true —— 崩铁官号；而回退清单里 44 首全部
+  //  verified=-1：TikTok 直播录音、OW2 BUG 录像 627 播放、蛋仔料理视频等，精确分开）
+  return candidate.officialVerifyType >= 0 && candidate.signals.nearDuration
+}
+
+/**
+ * 同源档位内的官号优选（纯函数，便于单测）：所选与歌曲同源（峰 ≥ tier），但上传者不是歌手本人/
+ * 官方账号，而池内存在**同为同源、峰不低太多**（默认容差 0.08）的官号候选时，改选其中评分最高者。
+ *
+ * 依据（351 首真实曲库离线复算 + 封面人工审核）：8 首「官号未被选」案例全部命中真官号
+ * （炎→LiSA_OFFiCIAAL、昔涟→张韶涵、廻廻奇譚→Eve_official、喜劇→星野源官方 0.391→0.984、
+ * Fire Again→无畏契约、心月辞·长相望→苏诗丁、LONE SURVIVOR→三角洲行动），其中 7 首官号与
+ * 所选同源且峰差 ≤0.08。反例：不眠之夜 官号上传是"练习室"版（峰 0.803，比所选无损搬运
+ * 0.982 低 0.18）——按容差不改选，保持对齐优先（用户口径：背景与歌曲本体对齐是第一优先）。
+ * 仅在所选已同源时生效：不同源交由同源档位否决与 0.5 兜底处理。
+ */
+export function applyOfficialTierPreference<T extends {
+  video: { bvid: string }
+  score: number
+  signals: { uploaderMatchesArtist: boolean }
+}>(ordered: T[], peaks: Map<string, number>, options?: { tier?: number; peakTolerance?: number }): T[] {
+  if (ordered.length < 2 || peaks.size === 0) return ordered
+  const tier = options?.tier ?? 0.8
+  const tolerance = options?.peakTolerance ?? 0.08
+  const best = ordered[0]
+  const bestPeak = peaks.get(best.video.bvid)
+  if (bestPeak == null || bestPeak < tier || best.signals.uploaderMatchesArtist) return ordered
+  const alternatives = ordered.slice(1).filter((c) => {
+    if (!c.signals.uploaderMatchesArtist) return false
+    const peak = peaks.get(c.video.bvid)
+    return peak != null && peak >= tier && peak >= bestPeak - tolerance
+  })
+  if (!alternatives.length) return ordered
+  const promoter = alternatives.reduce((a, b) => (b.score > a.score ? b : a))
+  identityLog(`官号档位优选：${best.video.bvid}(peak=${bestPeak.toFixed(2)} score=${Math.round(best.score)}) → ${promoter.video.bvid}(peak=${(peaks.get(promoter.video.bvid) ?? 0).toFixed(2)} score=${Math.round(promoter.score)})`)
+  return [promoter, ...ordered.filter((c) => c !== promoter)]
+}
+
+/**
  * 时长共识校正（平台元数据时长错误防御）：QQ 等平台报的 songDuration 偶有严重错误
  * （ばかじゃないのに 平台报 122s，实际约 256s），会让时长贴近分全面失真——正确的官方 MV
  * 反而被 -35 重罚。若搜索结果中 ≥3 个「歌名+歌手/上传者双命中」的视频时长聚集在 ±10% 内、
@@ -2769,6 +2954,8 @@ export async function findBestBilibiliMv(
     /** 同步取当前歌歌词（含翻译，flattenLyricLinesForMatch 产物）。仅用于 CC 字幕内容验证：
      *  匹配时已加载就传入（验证 +25/-20 分档），没加载就返回空（unverified 缩水档）——绝不为此等待网络。 */
     lyricsProvider?: () => string | null | undefined
+    /** 候选同一性探针（注入式：由调用方提供音频解码/取流能力，返回 bvid → 与当前歌包络的相关峰）。*/
+    identityProbe?: (candidates: CandidateScore[]) => Promise<Map<string, number>>
   },
 ): Promise<BilibiliMatchResult> {
   const settings = { ...DEFAULT_WATCH_SETTINGS, ...(opts?.settings || getBilibiliWatchSettings()) }
@@ -2807,7 +2994,7 @@ export async function findBestBilibiliMv(
     }
     return cached.result
   }
-  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider, opts?.useDeveloperDeclarations !== false, sessionPickBvid)
+  const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider, opts?.useDeveloperDeclarations !== false, sessionPickBvid, opts?.identityProbe)
   matchCache.set(cacheKey, { at: Date.now(), result })
   pruneMatchCache()
   return result
@@ -2821,6 +3008,7 @@ async function findBestBilibiliMvUncached(
   lyricsProvider?: () => string | null | undefined,
   useDeveloperDeclarations = true,
   sessionPickBvid: string | null = null,
+  identityProbe?: (candidates: CandidateScore[]) => Promise<Map<string, number>>,
 ): Promise<BilibiliMatchResult> {
   // override/黑名单按歌曲存储键读写（与缓存键分离：不含设置指纹）
   const songKey = songKeyOf(song)
@@ -2941,6 +3129,31 @@ async function findBestBilibiliMvUncached(
   candidates = await reviewCandidates(candidates, song, settings.matchPreference, signal, lyricsText, durationOverride)
   candidates = dedupeCandidates(candidates).sort(compareCandidates)
 
+  // 3.5 候选音频同一性复核（可选，best-effort）：取头部若干候选各算一次「与正在播放歌曲的包络相关峰」，
+  // 所选与歌曲明显不同源时改选同源档位里评分最高者（档内仍按分数，见 applyIdentityVeto 注释）。
+  // 探针覆盖头部 6 条（同源候选可能分数偏低——如 ステラ 的官方 2DMV 在前 6 之外也不会被漏掉太多），
+  // 每条一次低码率取流+解码；任何失败（无 provider / 取流失败 / 解码不可用）都保持原顺序。
+  let identityPeaks: Map<string, number> | null = null
+  if (identityProbe && candidates.length >= 2) {
+    try {
+      const probed = candidates.slice(0, 6)
+      identityPeaks = await identityProbe(probed)
+      if (identityPeaks.size >= 2) {
+        const vetoed = applyIdentityVeto(candidates, identityPeaks)
+        if (vetoed !== candidates) candidates = vetoed
+        // 同源档位内官号优选（否决之后再跑：对齐优先，其次官号）
+        const officialFirst = applyOfficialTierPreference(candidates, identityPeaks)
+        if (officialFirst !== candidates) candidates = officialFirst
+      }
+    } catch {
+      // 探针失败不阻断匹配：退回纯元数据排序
+    }
+  }
+
+  // 3.6 版本一致性优选（元数据规则，无网络）：所选时长口径与歌曲明显不符时，
+  // 改选分数带内的等长同版本候选（官方合集/长版 MV/切片 常压过等长正片）。
+  candidates = applyDurationConsistencyPreference(candidates, song.songDuration)
+
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
   let fallbackChain = prioritizeExplicitCandidates(candidates, rememberedOverride, developerDeclaration)
   const best = fallbackChain[0]
@@ -2949,8 +3162,42 @@ async function findBestBilibiliMvUncached(
     if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
     return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }
+  // 3.7 同源性兜底（2026-10 修订，用户口径：背景不能因为对不齐就不给画面）：
+  //   所选与歌曲**明显不同源**（包络峰 < 0.5）时按内容可信度二分，不再一律判无匹配：
+  //     · 内容可信（上传者=歌手本人/官方号、机构认证、官方标记，或"歌名+歌手双命中且时长贴近"
+  //       且非负向类型）→ **仍然播出**，标记 identityUnverified：交给对齐层走音乐入口锚/自由播放，
+  //       画面可能未对齐但不至于没有 MV；
+  //     · 内容可疑（翻唱/伴奏/教学/音游录像/试玩实况/另一首歌）→ 维持原判，正常回退（跨平台 → 封面）。
+  //   实测样本：崩铁《Wildfire》0.37、绝区零《Come Alive》0.34、RADWIMPS《前前前世 movie ver.》0.30
+  //   都是"官号但音源不是平台那一版"——它们现在照播；osu!mania 打歌 0.31、镜音翻唱 0.17、
+  //   赛车游戏试玩 0.23、TikTok 直播录音 0.12 因内容不可信仍回退。
+  const bestIdentity = identityPeaks?.get(best.video.bvid) ?? null
+  const identityUnverified = bestIdentity != null && bestIdentity < 0.5
+  if (identityUnverified && !isContentCredible(best)) {
+    // 可信救援（2026-10，用户口径："对不齐也得给画面，不给就失去意义了"）：
+    // 所选不可信（音游录像/试玩/未认证整活）时，在候选池里找一条**内容可信且包络峰 ≥0.3**
+    // 的正片兜底（≥0.3 = 至少结构上有相似度，防"同名不同歌"被救援进来：实测 City→
+    // JENNIE《Seoul City》官方 MV 峰 0.20 被排除），找不到才判无匹配。
+    // 实测救回 绝区零《Come Alive 0.34》、Ave Mujica《黒のバースデイ 0.36》、寂静岭《Promise 0.35》。
+    const rescue = candidates.find((c) => c !== best && isContentCredible(c) && (identityPeaks?.get(c.video.bvid) ?? -1) >= 0.3)
+    if (!rescue) {
+      identityLog(`同源性兜底：${best.video.bvid} peak=${bestIdentity.toFixed(2)} < 0.5 且池内无可信正片（峰≥0.3）→ 视为无匹配，正常回退`)
+      return finish({ status: 'none', candidates: topCandidates, fallbackChain })
+    }
+    identityLog(`可信救援：${best.video.bvid}(不可信) → ${rescue.video.bvid}(peak=${(identityPeaks?.get(rescue.video.bvid) ?? -1).toFixed(2)} score=${Math.round(rescue.score)})，照播`)
+    fallbackChain = [rescue, ...fallbackChain.filter((c) => c !== rescue)]
+    return finish({
+      status: settings.forceAutoPlayHighest || shouldAutoPlay(rescue, settings.autoPlayStrictness) ? 'auto' : 'confirm',
+      best: { ...rescue, identityUnverified: true },
+      candidates: fallbackChain.slice(0, TOP_CONFIRM_COUNT),
+      fallbackChain,
+    })
+  }
+  if (identityUnverified) {
+    identityLog(`同源性兜底：${best.video.bvid} peak=${bestIdentity.toFixed(2)} < 0.5 但内容可信 → 仍然播出（画面可能未对齐）`)
+  }
   if (settings.forceAutoPlayHighest || shouldAutoPlay(best, settings.autoPlayStrictness)) {
-    return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
+    return finish({ status: 'auto', best: { ...best, identityUnverified }, candidates: topCandidates, fallbackChain })
   }
   return finish({ status: 'confirm', candidates: topCandidates, fallbackChain })
 }

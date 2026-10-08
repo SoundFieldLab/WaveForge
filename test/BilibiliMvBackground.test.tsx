@@ -29,6 +29,7 @@ vi.mock('../src/services/bilibiliApi', () => ({
   WATCH_SETTINGS_EVENT: 'bilibili-settings-changed',
   resolveBiliPic: vi.fn((url: string) => url),
   formatBiliTime: vi.fn(() => '3:00'),
+  decodeBiliTitle: vi.fn((title: string) => title),
 }))
 
 vi.mock('../src/services/mvAlignment', () => ({

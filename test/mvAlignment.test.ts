@@ -8,11 +8,14 @@ import {
   getMvAlignmentFor,
   MIN_ALIGNMENT_CONFIDENCE,
   mvAlignmentInputSignature,
+  pickLiveCompensationAnchor,
+  pickMusicAnchor,
   resetMvAlignmentCachesForTests,
   shouldRejectAlignmentFor,
 } from '../src/services/mvAlignment'
 import { autoMixAnalysisService } from '../src/services/autoMixAnalysisService'
 import * as autoMixModule from '../src/services/autoMixAnalysisService'
+import { detectLiveMusicEntry, detectMusicStart } from '../src/services/autoMixAnalysisService'
 import { buildEnvelopeAlignment } from '../src/services/mvAlignment'
 import * as bilibiliApi from '../src/services/bilibiliApi'
 import type { LyricLine } from '../src/services/musicApi'
@@ -342,6 +345,31 @@ describe('envelope alignment gate（包络峰突出度闸门，Одна 回归�
     expect(buildEnvelopeAlignment(result.offset, result.peak, result.prominence)).toBeNull()
   })
 
+  it('真实偏移不落在 0.1s 网格上（0.16s）：仍能找到真峰（回归：取样降采样把峰腰斩到 0.485）', () => {
+    // 真实数据实测：ラグトレイン 官方 PV 与平台曲目同一母带、偏移 0.16s，
+    // 旧实现（每 5 帧取样降采样 + 0.25s 网格 + 半帧精化 NaN）只得 0.485@1.8s，
+    // 被同一性规则误判"不同源"。这里用音符级起伏包络复现该偏移。
+    const song = irregularEnvelope(1500)
+    const mv = song.map((value, i) => (i >= 8 ? song[i - 8] : 0.05)) // 0.16s @50fps
+    const result = autoMixModule.envelopeOffsetOf(mv, song, 50)
+    expect(result.peak).toBeGreaterThanOrEqual(0.9)
+    expect(Math.abs(result.offset - 0.16)).toBeLessThanOrEqual(0.02)
+    expect(result.prominence).toBeGreaterThanOrEqual(autoMixModule.ENVELOPE_PROMINENCE_MIN)
+  })
+
+  it('非网格偏移 + 不同内容 → 峰仍低（抗混叠不会把不相关内容拉高）', () => {
+    const song = irregularEnvelope(1500)
+    // 独立噪声包络（不同种子、无共享脉冲结构）＝"另一条不相关的音频"
+    const other: number[] = []
+    let state = 0x9e3779b9
+    for (let i = 0; i < 1500; i += 1) {
+      state = (state * 1103515245 + 12345) >>> 0
+      other.push(0.05 + ((state % 1000) / 1000) * 0.2)
+    }
+    const result = autoMixModule.envelopeOffsetOf(other, song, 50)
+    expect(result.peak).toBeLessThan(0.8)
+  })
+
   it('buildEnvelopeAlignment 分级：双门槛 + 置信度随证据伸缩', () => {
     // 峰值不足
     expect(buildEnvelopeAlignment(1, 0.55, 0.3)).toBeNull()
@@ -447,6 +475,76 @@ describe('firstLyricTime', () => {
     ]
 
     expect(firstLyricTime(lyrics)).toBeCloseTo(24.94, 2)
+  })
+
+  it('跳过日文/繁体署名行（ヒビカセ 回归：作詞 不在旧白名单里被当成首句）', () => {
+    const lyrics = [
+      lyric(0, 'ヒビカセ - Reol'),
+      lyric(9.39, '作詞：れをる'),
+      lyric(18.79, '作曲：ギガP'),
+      lyric(28.19, '真夜中に告ぐ 音の警告'),
+    ]
+
+    // 旧实现只认简体「作词」→ 返回 9.39（现场版补偿的歌词锚因此 +22.6s 超限放弃）
+    expect(firstLyricTime(lyrics)).toBeCloseTo(28.19, 2)
+  })
+
+  it('跳过「作詞・作曲：」叠写署名与英文署名行', () => {
+    const lyrics = [
+      lyric(1, '作詞・作曲：ギガP'),
+      lyric(2, 'Lyrics: Reol'),
+      lyric(3, '編曲：ギガP'),
+      lyric(15.5, '本当の歌詞はここから'),
+    ]
+
+    expect(firstLyricTime(lyrics)).toBeCloseTo(15.5, 2)
+  })
+})
+
+describe('pickLiveCompensationAnchor（包络 > 音乐入口 > 歌词）', () => {
+  const envelope = { offsetSeconds: 6.9, confidence: 0.69, method: 'envelope' as const, prominence: 0.1 }
+
+  it('包络互相关过闸门时优先于入口锚', () => {
+    const picked = pickLiveCompensationAnchor({ envelope, firstVocal: 28.19, mvMusicStart: 19.84, musicAnchors: [6.88, 6.82, 6.8] })
+    expect(picked?.anchor).toBe('包络')
+    expect(picked?.alignment.offsetSeconds).toBeCloseTo(6.9, 2)
+  })
+
+  it('无包络时优先音乐入口锚（多探测器共识，ヒビカセ：p60 −18.8 迟到，p35/abs 一致 +6.9）', () => {
+    const picked = pickLiveCompensationAnchor({ envelope: null, firstVocal: 28.19, mvMusicStart: 19.84, musicAnchors: [-18.8, 6.88, 6.82] })
+    expect(picked?.anchor).toBe('音乐入口')
+    expect(picked?.alignment.offsetSeconds).toBeGreaterThan(6.5)
+    expect(picked?.alignment.offsetSeconds).toBeLessThan(7)
+    expect(picked?.alignment.method).toBe('live-vocal')
+  })
+
+  it('音乐入口锚不可用 → 退回歌词锚（实测最差，仅兜底）', () => {
+    const picked = pickLiveCompensationAnchor({ envelope: null, firstVocal: 28.19, mvMusicStart: 31.98, musicAnchors: [null, null, null] })
+    expect(picked?.anchor).toBe('歌词')
+    expect(picked?.alignment.offsetSeconds).toBeCloseTo(3.79, 2)
+  })
+
+  it('全部锚点不可用/超限 → null（自由播放）', () => {
+    expect(pickLiveCompensationAnchor({ envelope: null, firstVocal: null, mvMusicStart: 32, musicAnchors: [null] })).toBeNull()
+    expect(pickLiveCompensationAnchor({ envelope: null, firstVocal: 5, mvMusicStart: 60, musicAnchors: [30] })).toBeNull()
+  })
+})
+
+describe('pickMusicAnchor（音乐入口锚：多探测器共识）', () => {
+  it('多数一致 → 取一致簇（ヒビカセ：p60 −18.8 超限被弃，p35/abs 一致落在 +6.9）', () => {
+    const picked = pickMusicAnchor([-18.8, 6.88, 6.82], -18.8)
+    expect(picked).not.toBeNull()
+    expect(picked!).toBeGreaterThan(6.5)
+    expect(picked!).toBeLessThan(7)
+  })
+
+  it('无一致簇 → 退回首选（p60）', () => {
+    expect(pickMusicAnchor([-10, 5, null], -10)).toBeCloseTo(-10, 5)
+  })
+
+  it('首选超限 → 用其它在范围内的候选；全空 → null', () => {
+    expect(pickMusicAnchor([-30, null, 7], -30)).toBeCloseTo(7, 5)
+    expect(pickMusicAnchor([null, null, null], null)).toBeNull()
   })
 })
 

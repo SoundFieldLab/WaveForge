@@ -268,12 +268,18 @@ function gridOnsetConfidence(onset: number[], frameRate: number, beats: number[]
  * 晚 ~10s ≈ 2 句歌词：前摇实为 15-18s 而强帧法找 27s）。
  * 阈值取 max(底噪×4, 峰值×5%)；底噪用 5% 分位数（排除安静前奏污染）。
  */
-export function detectMusicStart(rms: number[], frameRate: number): number {
+/**
+ * detectMusicStart 的内核：命中返回入口秒数，**未命中返回 null**。
+ * 区分"入口就在 0s"（返回 0）与"整轨都没有持续段落超过阈值"（null）——
+ * 多探测器取最早者（detectRobustMusicEntry）必须能分辨这两者，
+ * 否则未命中被当成 0s 入口，会把入口锚拉偏。
+ */
+function detectMusicStartCore(rms: number[], frameRate: number): number | null {
   const n = rms.length
-  if (n < frameRate * 2) return 0
+  if (n < frameRate * 2) return null
   let maxV = 0
   for (const v of rms) if (v > maxV) maxV = v
-  if (maxV <= 1e-6) return 0
+  if (maxV <= 1e-6) return null
   const sorted = [...rms].sort((a, b) => a - b)
   const floor = sorted[Math.min(n - 1, Math.floor(n * 0.05))]
   const threshold = Math.max(floor * 4, maxV * 0.05)
@@ -299,23 +305,32 @@ export function detectMusicStart(rms: number[], frameRate: number): number {
     sum -= rms[i]
     if (i + win < n) sum += rms[i + win]
   }
-  return 0
+  return null
+}
+
+export function detectMusicStart(rms: number[], frameRate: number): number {
+  return detectMusicStartCore(rms, frameRate) ?? 0
 }
 
 /**
  * 现场/翻唱 MV 的"音乐/歌声入口"检测（live 前奏补偿专用）。
  * detectMusicStart 用绝对电平阈值（floor×4），对动态压缩的现场版不稳定（实测同一现场版
- * 在 12kHz 与 22050Hz 解码下分别得到 22.4s 与 55.4s）。这里用全局 60 分位 + 持续判定：
- * 首个 ≥1s 的 RMS 均值超 60 分位、且其后 6s 内 ≥3 个 1s 窗口同样超阈值——对短促的人群/
- * 掌声爆发免疫，且在两种采样率下结果一致（实测 20.9s / 21.8s ≈ 真实音乐入口）。
+ * 在 12kHz 与 22050Hz 解码下分别得到 22.4s 与 55.4s）。这里用全局分位 + 持续判定：
+ * 首个 ≥1s 的 RMS 均值超分位阈值、且其后 6s 内 ≥3 个 1s 窗口同样超阈值——对短促的人群/
+ * 掌声爆发免疫，且在两种采样率下结果一致（实测 p60 在 20.9s / 21.8s ≈ 真实音乐入口）。
  */
-export function detectLiveMusicEntry(rms: number[], frameRate: number): number {
+export function detectLiveMusicEntryAt(rms: number[], frameRate: number, percentile: number): number {
+  return detectLiveMusicEntryCore(rms, frameRate, percentile) ?? 0
+}
+
+/** detectLiveMusicEntryAt 的内核：未命中返回 null（见 detectMusicStartCore 的说明） */
+function detectLiveMusicEntryCore(rms: number[], frameRate: number, percentile: number): number | null {
   const n = rms.length
-  if (n < frameRate * 2) return 0
+  if (n < frameRate * 2) return null
   const sorted = [...rms].sort((a, b) => a - b)
-  const threshold = sorted[Math.min(n - 1, Math.floor(n * 0.6))]
+  const threshold = sorted[Math.min(n - 1, Math.max(0, Math.floor(n * percentile)))]
   const win = Math.max(1, Math.round(frameRate))
-  if (threshold <= 1e-6) return 0
+  if (threshold <= 1e-6) return null
   for (let i = 0; i + win <= n; i++) {
     let sum = 0
     for (let k = i; k < i + win; k++) sum += rms[k]
@@ -330,7 +345,12 @@ export function detectLiveMusicEntry(rms: number[], frameRate: number): number {
     }
     if (above >= 3 && total >= 3) return i / frameRate
   }
-  return 0
+  return null
+}
+
+/** p60 分位版（原实现，保留给既有调用/回归） */
+export function detectLiveMusicEntry(rms: number[], frameRate: number): number {
+  return detectLiveMusicEntryAt(rms, frameRate, 0.6)
 }
 
 /** 旧版 onset 强帧法（无 RMS 数据时的兜底） */
@@ -536,66 +556,87 @@ export const ENVELOPE_PROMINENCE_MIN = 0.05
 /**
  * 包络互相关求偏移（歌曲 RMS 包络提示存在时）：MV 与歌曲同源 → 两者的 RMS 包络一致，
  * 相差一个偏移。皮尔逊相关对幅度不敏感，安静前奏/节拍混叠下最鲁棒（onset 相关在
- * 安静前奏区噪声大，实测 rainy tone 偏移晚 ~10s）。先降采样到 10fps，粗扫 0.25s + 精化。
+ * 安静前奏区噪声大，实测 rainy tone 偏移晚 ~10s）。
+ *
+ * 三级搜索（粗→细），2026-10 大规模实测修正：
+ *  - 粗层 10fps **盒平均**（抗混叠）。帧 RMS 在 20ms 尺度有音节级起伏，直接每 5 帧取样
+ *    会把起伏混叠进 10fps 序列，相关峰窄到 ±40ms；真实偏移（容器/编码常见 ±0.1~0.3s）
+ *    不落在 0.1s 网格上时峰被腰斩——实测ラグトレイン 官方 PV 真值 0.965@0.16s 只得 0.485，
+ *    被同一性规则误判"不同源"而改选搬运。盒平均 = 100ms 低通，峰宽回到 ~±0.1s。
+ *  - 粗层网格必须**整数帧**且步长 1 帧（旧实现步长 2.5 帧 + 半帧精化：`mv[1.5]` 为
+ *    undefined → NaN → 精化形同虚设，0.25s 网格漏掉大量真实偏移）。
+ *  - 末级在**原始帧率**上 ±0.1s 逐帧精化，**peark 也在此级测**（"同源程度"要在真实
+ *    偏移处量）；prominence 仍用 10fps 网格口径（偏移唯一性、抗噪）。
  */
 export function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: number): { offset: number; peak: number; prominence: number } {
   const step = Math.max(1, Math.round(frameRate / 10))
-  const song: number[] = []
-  for (let i = 0; i < songRms.length; i += step) song.push(songRms[i])
-  const mv: number[] = []
-  for (let i = 0; i < mvRms.length; i += step) mv.push(mvRms[i])
-  const pearson = (deltaFrames: number): number => {
-    const a: number[] = []
-    const b: number[] = []
-    for (let i = 0; i < song.length; i += 1) {
-      const j = i + deltaFrames
-      if (j < 0 || j >= mv.length) continue
-      a.push(song[i])
-      b.push(mv[j])
+  // 盒平均降采样（抗混叠）
+  const decimate = (src: number[]): number[] => {
+    if (step === 1) return src.slice()
+    const out: number[] = []
+    for (let i = 0; i < src.length; i += step) {
+      let sum = 0
+      const end = Math.min(src.length, i + step)
+      for (let k = i; k < end; k += 1) sum += src[k]
+      out.push(sum / (end - i))
     }
-    const n = a.length
+    return out
+  }
+  const song = decimate(songRms)
+  const mv = decimate(mvRms)
+  /** 零分配皮尔逊：a[i] 与 b[i+deltaFrames] 的重叠段 */
+  const corrAt = (a: number[], b: number[], deltaFrames: number): number => {
+    const bStart = Math.max(0, deltaFrames)
+    const aStart = Math.max(0, -deltaFrames)
+    const n = Math.min(a.length - aStart, b.length - bStart)
     if (n < 64) return -1
     let ma = 0
     let mb = 0
-    for (let k = 0; k < n; k += 1) { ma += a[k]; mb += b[k] }
+    for (let k = 0; k < n; k += 1) { ma += a[aStart + k]; mb += b[bStart + k] }
     ma /= n
     mb /= n
     let num = 0
     let da = 0
     let db = 0
     for (let k = 0; k < n; k += 1) {
-      const x = a[k] - ma
-      const y = b[k] - mb
+      const x = a[aStart + k] - ma
+      const y = b[bStart + k] - mb
       num += x * y
       da += x * x
       db += y * y
     }
     return da * db > 0 ? num / Math.sqrt(da * db) : -1
   }
-  const coarse = Math.round(2.5) // 0.25s @10fps
+  const pearson = (deltaFrames: number): number => corrAt(song, mv, deltaFrames)
   const minF = Math.round(-45 * 10)
   const maxF = Math.round(45 * 10)
   let bestF = 0
   let bestS = -1
-  for (let f = minF; f <= maxF; f += coarse) {
+  for (let f = minF; f <= maxF; f += 1) { // 10fps 全网格（0.1s 步长，整数帧）
     const s = pearson(f)
     if (s > bestS) { bestS = s; bestF = f }
-  }
-  for (let d = -coarse; d <= coarse; d += 1) {
-    const s = pearson(bestF + d)
-    if (s > bestS) { bestS = s; bestF = bestF + d }
   }
   // 峰突出度：主峰 − ±2s 外次峰。phonk 等重复结构的相关曲线平坦、多个局部峰几乎
   // 等高，绝对峰值再高也不代表 argmax 唯一（实测 Одна 偏移错 ~4-5s ≈ 一句歌词、
   // 5АМ 转载视频被弱峰假偏移带偏）——调用方以 prominence 门槛裁决偏移可信度。
   const PROMINENCE_WINDOW_F = 20 // ±2s @10fps
   let runnerUp = -1
-  for (let f = minF; f <= maxF; f += coarse) {
+  for (let f = minF; f <= maxF; f += 1) {
     if (Math.abs(f - bestF) <= PROMINENCE_WINDOW_F) continue
     const s = pearson(f)
     if (s > runnerUp) runnerUp = s
   }
-  return { offset: bestF / 10, peak: bestS, prominence: bestS - runnerUp }
+  // 末级：原始帧率 ±0.1s 逐帧精化，并在该处测 peak（同源程度）
+  const rawPearson = (deltaFrames: number): number => corrAt(songRms, mvRms, deltaFrames)
+  const baseFrame = Math.round(bestF * step)
+  let refinedFrame = baseFrame
+  let refinedScore = rawPearson(baseFrame)
+  const span = Math.max(1, Math.round(frameRate * 0.1))
+  for (let d = -span; d <= span; d += 1) {
+    const s = rawPearson(baseFrame + d)
+    if (s > refinedScore) { refinedScore = s; refinedFrame = baseFrame + d }
+  }
+  return { offset: refinedFrame / frameRate, peak: Math.max(bestS, refinedScore), prominence: bestS - runnerUp }
 }
 
 function detectSilence(frameRms: number[], frameDuration: number, duration: number) {
