@@ -41,8 +41,8 @@ interface SodaSong {
   name?: string
   /** 主艺人（单个字符串） */
   artist?: string
-  /** 艺人列表（字符串或 {name} 对象均可） */
-  artists?: Array<string | { name?: string }>
+  /** 艺人列表（字符串或 {id,name} 对象均可；id 为汽水原始 id，字符串形态保留精度） */
+  artists?: Array<string | { id?: string | number; name?: string; avatarUrl?: string }>
   album?: string
   albumId?: string | number
   coverUrl?: string
@@ -54,6 +54,10 @@ interface SodaSong {
   bitrateKbps?: number
   quality?: string
   format?: string
+  /** 限免凭证（客户端 LimitedFreeInfo 原样整份；仅列表/推荐流条目上有） */
+  limitedFreeInfo?: Record<string, unknown>
+  /** 是否当前限免（后端按 limited_free===true 判定后置位） */
+  limitedFree?: boolean
 }
 
 /** 汽水用户资料（GET /status 返回的 profile 字段） */
@@ -96,12 +100,22 @@ export interface SodaPlaylistSummary {
   isLikedLike?: boolean
   /** 是否已收藏（他人歌单场景） */
   collected?: boolean
+  /**
+   * 客户端歌单类型（Sidebar.vue 同口径）：1=我喜欢的音乐，4=抖音收藏的音乐，
+   * 2/3/11=创建的歌单。0 表示未分类/虚拟歌单。
+   */
+  type?: number
 }
 
 /** 评论作者 */
 export interface SodaCommentUser {
   name: string
   avatarUrl?: string
+  userId?: string
+  /** 客户端评论头像旁的会员角标（user.vip_stage：vip / svip） */
+  vip?: 'vip' | 'svip'
+  /** 客户端音乐人标识（user_artist_info.user_artist_type 非 0） */
+  artistType?: number
 }
 
 /**
@@ -116,6 +130,14 @@ export interface SodaComment {
   likes?: number
   time: string | number
   replies?: SodaComment[]
+  /** 置顶（客户端 comment.featured） */
+  pinned?: boolean
+  /** 评论者 IP 归属地（客户端 comment.ip_label） */
+  ipLabel?: string
+  /** 回复条数（客户端 comment.count_reply）；回复正文需另拉 /comment/replies */
+  replyCount?: number
+  /** 我是否点过赞（客户端 comment.user_digged） */
+  liked?: boolean
 }
 
 /** 榜单组元信息（fetchSodaCharts 返回项 = 本类型 + songs: Song[]） */
@@ -144,6 +166,27 @@ export interface SodaPlaybackInfo {
   vipLabel?: string
   /** 不可播原因（后端给出的中文说明，可能缺省；401 登录态缺失约定为 'login_required'） */
   reason?: string
+  /** 版权/权益视图（后端按客户端口径给出，UI 据此显示「限免」「VIP」角标与横幅） */
+  entitlement?: SodaEntitlement
+}
+
+/**
+ * 版权/权益视图，口径与客户端 useCurrentPlayableCommercialInfo 一致：
+ *  - 普通曲：onlyVipPlayable=false，正常整曲
+ *  - 限免曲：onlyVipPlayable=true + limitedFree=true + preview=false → 整曲，角标「限免」
+ *  - 试听曲：onlyVipPlayable=true + preview=true → 只有 60s，角标「VIP」
+ */
+export interface SodaEntitlement {
+  onlyVipPlayable: boolean
+  /** 本次请求带上了限免凭证（且服务端认账） */
+  limitedFree: boolean
+  /** 上游给的是试听流（video_model_type===2 或流时长明显短于整曲） */
+  preview: boolean
+  videoModelType?: number
+  /** 限免凭证到期时间（秒）；0 = 未知 */
+  limitedFreeExpireAt?: number
+  /** 到点后的拦截方式：vip / only_sell */
+  interceptType?: string
 }
 
 /** 搜索联想条目（GET /search/suggest 返回项；type 为候选类别，失败/未命中后端恒 200 + 空数组） */
@@ -234,6 +277,41 @@ export function isSodaLoggedIn(): boolean {
   return Boolean(cookie && /sessionid|sid_guard|uid_tt|passport/i.test(cookie))
 }
 
+/**
+ * 限免凭证登记表（曲目 id → 上游下发的 limited_free_info 整份对象）。
+ *
+ * 为什么放这里而不是塞进通用 Song 类型：凭证是汽水独有的、且只在「列表/推荐流条目」上有
+ * （track_v2 那侧返回 null）。要在通用的播放链路里把它带回 track_v2，用一张按曲目 id 索引的
+ * 登记表最省事，也不污染跨平台的 Song 结构。
+ *
+ * 关键约束：必须**整份**回传。sign v2.0 覆盖整个对象且与曲目绑定——裁剪字段、改 expire_time、
+ * 拿别的曲目的 sign 复用，服务端一律不认（已实测）。
+ */
+const limitedFreeRegistry = new Map<string, Record<string, unknown>>()
+
+/** 列表/推荐流映射时顺手登记（只在 limited_free===true 时登记，避免把付费曲当限免） */
+export function rememberSodaLimitedFree(trackId: string, info: unknown): void {
+  const id = String(trackId || '')
+  if (!id || !info || typeof info !== 'object' || Array.isArray(info)) return
+  const record = info as Record<string, unknown>
+  if (record.limited_free !== true) return
+  const expireAt = Number(record.expire_time) || 0
+  // 凭证带 expire_time（秒）：过期就别留在表里，免得拿一份服务端已不认的凭证反复空跑
+  if (expireAt > 0 && expireAt * 1000 < Date.now()) {
+    limitedFreeRegistry.delete(id)
+    return
+  }
+  if (limitedFreeRegistry.size > 500) {
+    const oldest = limitedFreeRegistry.keys().next().value
+    if (oldest) limitedFreeRegistry.delete(oldest)
+  }
+  limitedFreeRegistry.set(id, record)
+}
+
+export function getSodaLimitedFree(trackId: string): Record<string, unknown> | undefined {
+  return limitedFreeRegistry.get(String(trackId || ''))
+}
+
 /** 组装带 cookie 的查询串（cookie 经 query 参数传递；空值字段自动跳过） */
 function buildQuery(params: Record<string, string | number | undefined>, explicitCookie?: string): string {
   const search = new URLSearchParams()
@@ -307,12 +385,32 @@ export function sodaMediaToSong(s: SodaSong): Song {
     : s?.artist
       ? [String(s.artist)]
       : []
+  // 汽水 id 超出 JS 安全整数：数值 id 沿用 Song.id 的 15 位截断约定，原始串进 mid（精确、可回传上游）
+  const artistRefs = rawArtists.length
+    ? rawArtists.map(item => {
+        if (typeof item === 'string') return { id: undefined, mid: undefined, name: item }
+        const rawId = item?.id != null ? String(item.id) : ''
+        return {
+          id: rawId ? Number(rawId.slice(0, 15)) || undefined : undefined,
+          mid: rawId || undefined,
+          name: String(item?.name || ''),
+          // 歌手头像：后端已从 `url_avatar` 取到，这里必须带上——否则歌曲详情与多歌手选择器
+          // 只能靠「再搜一次同名歌手」去猜头像，拿不到就退化成首字占位。
+          ...(item?.avatarUrl ? { avatarUrl: String(item.avatarUrl) } : {}),
+        }
+      }).filter(item => item.name)
+    : artistNames.map(name => ({ id: undefined, mid: undefined, name }))
+  const rawAlbumId = s?.albumId != null ? String(s.albumId) : ''
+  // 限免凭证先登记再转 Song：播放链路拿到的只有通用 Song，凭证得靠 trackId 回查
+  if (s?.limitedFreeInfo) rememberSodaLimitedFree(mid, s.limitedFreeInfo)
   return {
     id: Number(mid.slice(0, 15)) || 0,
     mid,
     name: String(s?.name || '未知歌曲'),
-    artists: artistNames.map(name => ({ name })),
+    artists: artistRefs,
     album: {
+      id: rawAlbumId ? Number(rawAlbumId.slice(0, 15)) || undefined : undefined,
+      mid: rawAlbumId || undefined,
       name: String(s?.album || ''),
       picUrl: String(s?.coverUrl || ''),
     },
@@ -611,12 +709,13 @@ export async function fetchSodaSearchAlbums(keywords: string, limit = 10): Promi
 export async function fetchSodaFeed(
   limit = 30,
   cursor?: string,
-): Promise<{ name?: string; songs: Song[]; nextCursor?: string; hasMore?: boolean }> {
+): Promise<{ name?: string; songs: Song[]; nextCursor?: string; hasMore?: boolean; cursorless?: boolean }> {
   const data = await sodaGet<{
     name?: string
     songs?: SodaSong[]
     nextCursor?: string | number
     hasMore?: boolean
+    cursorless?: boolean
   }>('/feed', { limit, cursor: cursor || undefined })
   return {
     name: data?.name ? String(data.name) : undefined,
@@ -626,11 +725,116 @@ export async function fetchSodaFeed(
         ? String(data.nextCursor)
         : undefined,
     hasMore: typeof data?.hasMore === 'boolean' ? data.hasMore : undefined,
+    cursorless: Boolean(data?.cursorless),
   }
 }
 
-/** 每日推荐（未登录时后端返回公开推荐，personalized=false） */
-export async function fetchSodaDaily(): Promise<{ songs: Song[]; personalized: boolean }> {
+// ────────────────────────────── 听歌模式（场景电台）──────────────────────────────
+
+/** 场景卡片（服务端 FeedMode 的前 6 个 + 客户端内置的熟悉/新鲜模式） */
+export interface SodaSceneMode {
+  text: string
+  /** 0 = 客户端内置项（熟悉/新鲜），用 preferenceMode 拉流 */
+  sceneModeId: number
+  subQueueType: string
+  /** 仅内置项有：'familiar' | 'fresh' */
+  preferenceMode?: string
+  iconUrl?: string
+  cutoverToast?: string
+}
+
+/** 场景列表（GET /feed-mode；客户端是「每天 5 点后首次进入才刷新」，这里交给服务端 10 分钟 TTL） */
+export async function fetchSodaFeedModes(): Promise<{ title: string; modes: SodaSceneMode[] }> {
+  const data = await sodaGet<{ title?: string; modes?: SodaSceneMode[] }>('/feed-mode')
+  return {
+    title: data?.title ? String(data.title) : '场景音乐',
+    modes: Array.isArray(data?.modes)
+      ? data.modes.map(mode => ({
+          text: String(mode?.text || ''),
+          sceneModeId: Number(mode?.sceneModeId) || 0,
+          subQueueType: String(mode?.subQueueType || ''),
+          preferenceMode: mode?.preferenceMode ? String(mode.preferenceMode) : undefined,
+          iconUrl: mode?.iconUrl ? String(mode.iconUrl) : undefined,
+          cutoverToast: mode?.cutoverToast ? String(mode.cutoverToast) : undefined,
+        })).filter(mode => mode.text)
+      : [],
+  }
+}
+
+/** 「探索更多新模式」卡片（DiscoverView / DiscoverMix） */
+export interface SodaDiscoverMixItem {
+  innerBlockId: string
+  type: 'playlist' | 'radio'
+  resourceId: string
+  title: string
+  desc: string
+  coverUrl: string
+  backgroundColor: string
+  link: string
+  sceneName: string
+}
+
+export async function fetchSodaDiscoverMix(
+  opts: { cursor?: string; exposure?: string[] } = {},
+): Promise<{ items: SodaDiscoverMixItem[]; hasMore: boolean }> {
+  const data = await sodaGet<{ items?: SodaDiscoverMixItem[]; hasMore?: boolean }>('/discover/mix', {
+    cursor: opts.cursor || undefined,
+    exposure: opts.exposure && opts.exposure.length ? opts.exposure.join(',') : undefined,
+  })
+  return {
+    items: Array.isArray(data?.items)
+      ? data.items.map(item => ({
+          innerBlockId: String(item?.innerBlockId || ''),
+          type: item?.type === 'radio' ? 'radio' as const : 'playlist' as const,
+          resourceId: String(item?.resourceId || ''),
+          title: String(item?.title || ''),
+          desc: String(item?.desc || ''),
+          coverUrl: String(item?.coverUrl || ''),
+          backgroundColor: String(item?.backgroundColor || ''),
+          link: String(item?.link || ''),
+          sceneName: String(item?.sceneName || ''),
+        })).filter(item => item.resourceId)
+      : [],
+    hasMore: data?.hasMore !== false,
+  }
+}
+
+/**
+ * 场景电台拉歌（客户端 FeedSongTab + feed_preference）。
+ * 上游响应里**没有游标**（客户端把 has_more 当恒真），翻页靠回传已听过的曲目 id，
+ * 这里用 playedIds 表达同一语义。
+ */
+export async function fetchSodaSceneTracks(
+  opts: { sceneModeId?: number; preferenceMode?: string; limit?: number; playedIds?: string[]; name?: string } = {},
+): Promise<{ songs: Song[]; hasMore: boolean }> {
+  const data = await sodaGet<{ songs?: SodaSong[]; hasMore?: boolean }>('/feed', {
+    limit: opts.limit ?? 20,
+    sceneModeId: opts.sceneModeId || undefined,
+    preferenceMode: opts.preferenceMode || undefined,
+    playedIds: opts.playedIds && opts.playedIds.length ? opts.playedIds.join(',') : undefined,
+    name: opts.name || undefined,
+  })
+  return { songs: mapSodaSongs(data?.songs), hasMore: data?.hasMore !== false }
+}
+
+/** 电台拉歌（探索卡片 type=radio；客户端 FeedRadioTracks） */export async function fetchSodaRadioTracks(
+  radioId: string,
+  opts: { cursor?: string; link?: string } = {},
+): Promise<{ songs: Song[]; nextCursor?: string; hasMore: boolean }> {
+  if (!radioId) return { songs: [], hasMore: false }
+  const data = await sodaGet<{ songs?: SodaSong[]; nextCursor?: string; hasMore?: boolean }>('/radio/tracks', {
+    id: radioId,
+    cursor: opts.cursor || undefined,
+    link: opts.link || undefined,
+  })
+  return {
+    songs: mapSodaSongs(data?.songs),
+    nextCursor: data?.nextCursor ? String(data.nextCursor) : undefined,
+    hasMore: Boolean(data?.hasMore),
+  }
+}
+
+/** 每日推荐（未登录时后端返回公开推荐，personalized=false） */export async function fetchSodaDaily(): Promise<{ songs: Song[]; personalized: boolean }> {
   const data = await sodaGet<{ songs?: SodaSong[]; personalized?: boolean }>('/daily')
   return {
     songs: mapSodaSongs(data?.songs),
@@ -667,6 +871,7 @@ export async function fetchSodaUserPlaylists(): Promise<SodaPlaylistSummary[]> {
       trackCount?: number
       isLikedLike?: boolean
       collected?: boolean
+      type?: number
     }>
   }>('/user/playlists')
   if (!Array.isArray(data?.playlists)) return []
@@ -679,6 +884,7 @@ export async function fetchSodaUserPlaylists(): Promise<SodaPlaylistSummary[]> {
       trackCount: typeof p.trackCount === 'number' ? p.trackCount : undefined,
       isLikedLike: Boolean(p.isLikedLike),
       collected: p.collected === undefined ? undefined : Boolean(p.collected),
+      type: Number(p.type) || 0,
     }))
 }
 
@@ -727,6 +933,31 @@ export async function addSodaSongToPlaylist(pid: string, song: Song): Promise<bo
 export async function collectSodaPlaylist(id: string, collected: boolean): Promise<boolean> {
   if (!id) return false
   const data = await sodaPost<{ success?: boolean }>('/playlist/collect', { id, collected })
+  return Boolean(data?.success)
+}
+
+/**
+ * 创建歌单（客户端 CreatePlaylist → POST /luna/pc/me/playlist）。
+ * 成功返回新歌单 id；失败返回 null（调用方 toast）。
+ */
+export async function createSodaPlaylist(
+  name: string,
+  isPrivate = false,
+): Promise<{ id: string; name: string } | null> {
+  const trimmed = String(name || '').trim()
+  if (!trimmed) return null
+  const data = await sodaPost<{ success?: boolean; id?: string; name?: string }>('/playlist/create', {
+    name: trimmed,
+    isPrivate,
+  })
+  if (!data?.success) return null
+  return { id: String(data.id || ''), name: String(data.name || trimmed) }
+}
+
+/** 删除歌单（客户端 MDeletePlaylists → POST /luna/pc/me/playlist/delete） */
+export async function deleteSodaPlaylist(id: string): Promise<boolean> {
+  if (!id) return false
+  const data = await sodaPost<{ success?: boolean }>('/playlist/delete', { id })
   return Boolean(data?.success)
 }
 
@@ -779,18 +1010,69 @@ export async function reportSodaPlay(id: string): Promise<void> {
 
 function mapSodaComment(raw: any): SodaComment {
   const replies = Array.isArray(raw?.replies) ? raw.replies.map(mapSodaComment) : undefined
+  const vip = raw?.user?.vip === 'svip' ? 'svip' : raw?.user?.vip === 'vip' ? 'vip' : undefined
   return {
     id: String(raw?.id ?? ''),
     user: {
       name: String(raw?.user?.name ?? ''),
       avatarUrl: raw?.user?.avatarUrl ? String(raw.user.avatarUrl) : undefined,
+      userId: raw?.user?.userId ? String(raw.user.userId) : undefined,
+      vip,
+      artistType: Number(raw?.user?.artistType) || undefined,
     },
     content: String(raw?.content ?? ''),
     likes: typeof raw?.likes === 'number' ? raw.likes : Number(raw?.likes || 0),
     // time 可能是格式化字符串或 ms 时间戳，原样透传由 UI 判断展示
     time: typeof raw?.time === 'number' || typeof raw?.time === 'string' ? raw.time : '',
     replies: replies && replies.length ? replies : undefined,
+    pinned: raw?.pinned === true ? true : undefined,
+    ipLabel: raw?.ipLabel ? String(raw.ipLabel) : undefined,
+    replyCount: Number(raw?.replyCount) || undefined,
+    liked: raw?.liked === true ? true : undefined,
   }
+}
+
+/**
+ * 评论回复列表（客户端 ListReplies → GET /luna/pc/comments/{id}/replies）。
+ * 客户端列表页不内嵌回复正文，点开某条回复才拉这个接口。
+ */
+export async function fetchSodaCommentReplies(
+  commentId: string,
+  cursor?: string,
+  limit = 20,
+): Promise<{ replies: SodaComment[]; cursor?: string; hasMore: boolean; total: number }> {
+  if (!commentId) return { replies: [], hasMore: false, total: 0 }
+  const data = await sodaGet<{
+    replies?: unknown[]
+    cursor?: string | number
+    nextCursor?: string | number
+    hasMore?: boolean
+    total?: number
+  }>('/comment/replies', { commentId, limit, cursor })
+  const replies = Array.isArray(data?.replies) ? data.replies.map(mapSodaComment) : []
+  const nextCursor = data?.nextCursor ?? data?.cursor
+  return {
+    replies,
+    cursor: nextCursor !== undefined && nextCursor !== null ? String(nextCursor) : undefined,
+    hasMore: Boolean(data?.hasMore),
+    total: Number(data?.total) || replies.length,
+  }
+}
+
+/** 评论点赞/取消（客户端 CommentAction → POST /luna/pc/comments/action） */
+export async function setSodaCommentLiked(
+  commentId: string,
+  liked: boolean,
+  opts?: { replyId?: string; groupId?: string },
+): Promise<boolean> {
+  if (!commentId) return false
+  const data = await sodaPost<{ success?: boolean }>('/comment/action', {
+    commentId,
+    liked,
+    replyId: opts?.replyId || '',
+    groupId: opts?.groupId || '',
+  })
+  return Boolean(data?.success)
 }
 
 /**
@@ -815,12 +1097,65 @@ export async function fetchSodaComments(
   }
 }
 
-/** 发表评论（成功返回 true；失败静默 false） */
-export async function createSodaComment(id: string, text: string): Promise<boolean> {
+/** 发表评论（成功返回 true；失败静默 false） */export async function createSodaComment(id: string, text: string): Promise<boolean> {
   const content = text.trim()
   if (!id || !content) return false
   const data = await sodaPost<{ success?: boolean }>('/song/comments', { id, content })
   return Boolean(data?.success)
+}
+
+/** 媒体统计（客户端 GetMediaStats：播放/收藏/评论/分享数） */
+export interface SodaMediaStats {
+  countCollected: number
+  countComment: number
+  countShared: number
+  countPlayed: number
+  countMarked: number
+}
+
+export async function fetchSodaMediaStats(
+  id: string,
+  type = 'track',
+): Promise<SodaMediaStats | null> {
+  if (!id) return null
+  const data = await sodaGet<{ stats?: Partial<SodaMediaStats> }>('/media/stats', { id, type })
+  const stats = data?.stats
+  if (!stats) return null
+  return {
+    countCollected: Number(stats.countCollected) || 0,
+    countComment: Number(stats.countComment) || 0,
+    countShared: Number(stats.countShared) || 0,
+    countPlayed: Number(stats.countPlayed) || 0,
+    countMarked: Number(stats.countMarked) || 0,
+  }
+}
+
+/** 曲目详情：收藏态 + 统计 + 歌词（客户端 GetTrack → POST /luna/track + includes） */
+export interface SodaTrackDetail {
+  id: string
+  isCollected: boolean
+  stats: SodaMediaStats
+  lyric?: string
+  tlyric?: string
+}
+
+export async function fetchSodaTrackDetail(id: string): Promise<SodaTrackDetail | null> {
+  if (!id) return null
+  const data = await sodaGet<SodaTrackDetail>('/track/detail', { id })
+  if (!data || !data.id) return null
+  return {
+    id: String(data.id),
+    isCollected: Boolean(data.isCollected),
+    stats: {
+      countCollected: Number(data.stats?.countCollected) || 0,
+      countComment: Number(data.stats?.countComment) || 0,
+      countShared: Number(data.stats?.countShared) || 0,
+      countPlayed: Number(data.stats?.countPlayed) || 0,
+      countMarked: Number(data.stats?.countMarked) || 0,
+    },
+    lyric: data.lyric ? String(data.lyric) : undefined,
+    tlyric: data.tlyric ? String(data.tlyric) : undefined,
+  }
 }
 
 // ────────────────────────────── 歌词 ──────────────────────────────
@@ -932,8 +1267,41 @@ export async function getSodaTranslation(id: string): Promise<Record<number, str
  */
 async function requestSodaPlaybackInfo(id: string, quality?: string): Promise<SodaPlaybackInfo> {
   if (!id) return { url: null }
-  const params: Record<string, string | number | undefined> = { id }
   const requested = String(quality || '').trim()
+  // 限免曲：把列表带下来的凭证整份回传，track_v2 才会把 29s 试听流换成整曲。
+  // 契约里 limited_free_param 只在 body 白名单，所以带凭证时必须走 POST。
+  const limitedFreeParam = getSodaLimitedFree(id)
+  if (limitedFreeParam) {
+    try {
+      const data = await sodaPost<{
+        url?: string
+        playable?: boolean
+        requiredTier?: 'free' | 'vip' | 'svip'
+        vipLabel?: string
+        membership?: SodaMembership
+        reason?: string
+        entitlement?: SodaEntitlement
+      }>('/song/url', {
+        id,
+        ...(requested ? { quality: requested } : {}),
+        limitedFreeParam,
+      })
+      if (!data) return { url: null }
+      const url = data.url ? String(data.url) : ''
+      const playable = url !== '' && data.playable !== false
+      const vipLabel = data.vipLabel || data.membership?.vipLabel
+      return {
+        url: playable ? url : null,
+        requiredTier: data.requiredTier,
+        vipLabel: vipLabel ? String(vipLabel) : undefined,
+        reason: data.reason ? String(data.reason) : undefined,
+        entitlement: data.entitlement,
+      }
+    } catch (e) {
+      debugLog('[汽水] POST /song/url（限免）请求失败，回退 GET:', e)
+    }
+  }
+  const params: Record<string, string | number | undefined> = { id }
   if (requested) params.quality = requested
   try {
     const query = buildQuery(params)
@@ -953,6 +1321,7 @@ async function requestSodaPlaybackInfo(id: string, quality?: string): Promise<So
       vipLabel?: string
       membership?: SodaMembership
       reason?: string
+      entitlement?: SodaEntitlement
     }
     const url = data?.url ? String(data.url) : ''
     const playable = url !== '' && data?.playable !== false
@@ -963,6 +1332,7 @@ async function requestSodaPlaybackInfo(id: string, quality?: string): Promise<So
       requiredTier: data?.requiredTier,
       vipLabel: vipLabel ? String(vipLabel) : undefined,
       reason: data?.reason ? String(data.reason) : undefined,
+      entitlement: data?.entitlement,
     }
   } catch (e) {
     console.warn('[汽水] GET /song/url 请求失败:', e)
@@ -1216,5 +1586,241 @@ export function douyinMusicToSong(item: DouyinMusicItem): Song {
     fee: 0,
     songType: 1,
     fusedSources: [],
+  }
+}
+
+// ───────────────────── 探索页（手机端内容，桌面版编排）─────────────────────
+
+/** 探索页卡片（来自「为你推荐，每天来点新模式」等板块） */
+export interface SodaExploreCard {
+  innerBlockId: string
+  type: 'playlist' | 'radio'
+  resourceId: string
+  title: string
+  desc: string
+  coverUrl: string
+  backgroundColor: string
+  link: string
+  sceneName: string
+}
+
+export interface SodaExploreSection {
+  title: string
+  type: string
+  columnSize: number
+  rowSize: number
+  cards: SodaExploreCard[]
+}
+
+/** 探索页正文板块（后端 /discover：手机端发现页的卡片网格） */
+export async function fetchSodaExploreSections(): Promise<SodaExploreSection[]> {
+  const data = await sodaGet<{ sections?: SodaExploreSection[] }>('/discover')
+  if (!Array.isArray(data?.sections)) return []
+  return data.sections.map(section => ({
+    title: String(section?.title || ''),
+    type: String(section?.type || ''),
+    columnSize: Number(section?.columnSize) || 0,
+    rowSize: Number(section?.rowSize) || 0,
+    cards: Array.isArray(section?.cards)
+      ? section.cards.map(card => ({
+          innerBlockId: String(card?.innerBlockId || ''),
+          type: card?.type === 'radio' ? 'radio' as const : 'playlist' as const,
+          resourceId: String(card?.resourceId || ''),
+          title: String(card?.title || ''),
+          desc: String(card?.desc || ''),
+          coverUrl: String(card?.coverUrl || ''),
+          backgroundColor: String(card?.backgroundColor || ''),
+          link: String(card?.link || ''),
+          sceneName: String(card?.sceneName || ''),
+        })).filter(card => card.resourceId)
+      : [],
+  })).filter(section => section.cards.length > 0)
+}
+
+/** 歌单广场卡片 */
+export interface SodaSquarePlaylist {
+  id: string
+  title: string
+  desc: string
+  coverUrl: string
+  trackCount: number
+  collectCount: number
+  visibleCount: number
+  creator: string
+}
+
+export async function fetchSodaPlaylistSquare(
+  categoryId?: string,
+): Promise<{ categories: Array<{ id: string; name: string }>; items: SodaSquarePlaylist[] }> {
+  const data = await sodaGet<{ categories?: Array<{ id?: string; name?: string }>; items?: SodaSquarePlaylist[] }>(
+    '/playlist-square',
+    { categoryId: categoryId || undefined },
+  )
+  return {
+    categories: Array.isArray(data?.categories)
+      ? data.categories.map(item => ({ id: String(item?.id || ''), name: String(item?.name || '') })).filter(item => item.name)
+      : [],
+    items: Array.isArray(data?.items)
+      ? data.items.map(item => ({
+          id: String(item?.id || ''),
+          title: String(item?.title || ''),
+          desc: String(item?.desc || ''),
+          coverUrl: String(item?.coverUrl || ''),
+          trackCount: Number(item?.trackCount) || 0,
+          collectCount: Number(item?.collectCount) || 0,
+          visibleCount: Number(item?.visibleCount) || 0,
+          creator: String(item?.creator || ''),
+        })).filter(item => item.id)
+      : [],
+  }
+}
+
+/** 「适合『听』的视频」卡片（手机端听抖音内容） */
+export interface SodaListenVideo {
+  id: string
+  type: string
+  title: string
+  coverUrl: string
+  durationMs: number
+  authorName: string
+  authorAvatarUrl: string
+  playCount: number
+  diggCount: number
+}
+
+export async function fetchSodaListenVideos(count = 12): Promise<SodaListenVideo[]> {
+  const data = await sodaGet<{ items?: SodaListenVideo[] }>('/listen-video', { count })
+  if (!Array.isArray(data?.items)) return []
+  return data.items.map(item => ({
+    id: String(item?.id || ''),
+    type: String(item?.type || ''),
+    title: String(item?.title || ''),
+    coverUrl: String(item?.coverUrl || ''),
+    durationMs: Number(item?.durationMs) || 0,
+    authorName: String(item?.authorName || ''),
+    authorAvatarUrl: String(item?.authorAvatarUrl || ''),
+    playCount: Number(item?.playCount) || 0,
+    diggCount: Number(item?.diggCount) || 0,
+  })).filter(item => item.id)
+}
+
+/** 全部场景模式（探索页「模式探索」整张网格；与听歌模式的「常用模式前 6 个」同一数据源） */
+export async function fetchSodaAllSceneModes(): Promise<SodaSceneMode[]> {
+  const data = await sodaGet<{ modes?: SodaSceneMode[] }>('/feed-mode', { full: 1 })
+  if (!Array.isArray(data?.modes)) return []
+  return data.modes
+    .filter(mode => !mode.preferenceMode && mode.text)
+    .map(mode => ({
+      text: String(mode.text),
+      sceneModeId: Number(mode.sceneModeId) || 0,
+      subQueueType: String(mode.subQueueType || ''),
+      iconUrl: mode.iconUrl ? String(mode.iconUrl) : undefined,
+      cutoverToast: mode.cutoverToast ? String(mode.cutoverToast) : undefined,
+    }))
+    .filter(mode => mode.sceneModeId || mode.subQueueType)
+}
+
+/** 最近播放（探索页「历史播放」入口直接起播用；后端 /recent 复用媒体库聚合） */
+export async function fetchSodaRecentSongs(limit = 50): Promise<Song[]> {
+  const data = await sodaGet<{ songs?: SodaSong[]; media?: SodaSong[] }>('/recent', { limit })
+  return mapSodaSongs(data?.songs || data?.media)
+}
+
+// ─────────────────── 真实艺人页（详情 / 专辑 / 全部歌曲）───────────────────
+
+/** 艺人详情（含头像 / 简介 / 职业 / 国籍 / 热门歌曲 / 热门专辑） */
+export interface SodaArtistDetail {
+  id: string
+  name: string
+  fullName?: string
+  avatarUrl?: string
+  albumCount: number
+  trackCount: number
+  collectCount: number
+  collected: boolean
+  userArtistType: number
+  /** 「歌手详情」正文 */
+  intro?: string
+  occupations: string[]
+  nationality?: string
+  hotTracks: Song[]
+  hotAlbums: SodaArtistAlbum[]
+  hasMoreTracks: boolean
+  hasMoreAlbums: boolean
+}
+
+export interface SodaArtistAlbum {
+  id: string
+  name: string
+  coverUrl?: string
+  artist?: string
+  company?: string
+  trackCount: number
+  releaseDate: number
+  collectCount: number
+  collected?: boolean
+  platform: 'soda'
+}
+
+export async function fetchSodaArtistDetail(artistId: string): Promise<SodaArtistDetail | null> {
+  const id = String(artistId || '').trim()
+  if (!id) return null
+  const data = await sodaGet<any>('/artist/detail', { id })
+  if (!data || !data.id) return null
+  return {
+    id: String(data.id),
+    name: String(data.name || ''),
+    fullName: data.fullName ? String(data.fullName) : undefined,
+    avatarUrl: data.avatarUrl ? String(data.avatarUrl) : undefined,
+    albumCount: Number(data.albumCount) || 0,
+    trackCount: Number(data.trackCount) || 0,
+    collectCount: Number(data.collectCount) || 0,
+    collected: Boolean(data.collected),
+    userArtistType: Number(data.userArtistType) || 0,
+    intro: data.intro ? String(data.intro) : undefined,
+    occupations: Array.isArray(data.occupations) ? data.occupations.map((x: unknown) => String(x)) : [],
+    nationality: data.nationality ? String(data.nationality) : undefined,
+    hotTracks: mapSodaSongs(data.hotTracks),
+    hotAlbums: Array.isArray(data.hotAlbums) ? data.hotAlbums : [],
+    hasMoreTracks: Boolean(data.hasMoreTracks),
+    hasMoreAlbums: Boolean(data.hasMoreAlbums),
+  }
+}
+
+/** 艺人专辑（游标分页） */
+export async function fetchSodaArtistAlbums(
+  artistId: string,
+  cursor?: string,
+  count = 20,
+): Promise<{ albums: SodaArtistAlbum[]; nextCursor?: string; hasMore: boolean }> {
+  const id = String(artistId || '').trim()
+  if (!id) return { albums: [], hasMore: false }
+  const data = await sodaGet<{ albums?: SodaArtistAlbum[]; nextCursor?: string; hasMore?: boolean }>('/artist/albums', {
+    id, cursor: cursor || undefined, count,
+  })
+  return {
+    albums: Array.isArray(data?.albums) ? data.albums : [],
+    nextCursor: data?.nextCursor ? String(data.nextCursor) : undefined,
+    hasMore: Boolean(data?.hasMore),
+  }
+}
+
+/** 艺人全部歌曲（sortType：0 最热 / 1 发行时间 / 2 收藏数，与客户端 ArtistTrackSortType 一致） */
+export async function fetchSodaArtistTracks(
+  artistId: string,
+  opts: { cursor?: string; count?: number; sortType?: number } = {},
+): Promise<{ tracks: Song[]; nextCursor?: string; hasMore: boolean }> {
+  const id = String(artistId || '').trim()
+  if (!id) return { tracks: [], hasMore: false }
+  const data = await sodaGet<{ tracks?: SodaSong[]; nextCursor?: string; hasMore?: boolean }>('/artist/tracks', {
+    id,
+    cursor: opts.cursor || undefined,
+    count: opts.count ?? 30,
+    sortType: opts.sortType ?? 0,
+  })
+  return {
+    tracks: mapSodaSongs(data?.tracks),
+    nextCursor: data?.nextCursor ? String(data.nextCursor) : undefined,
+    hasMore: Boolean(data?.hasMore),
   }
 }
