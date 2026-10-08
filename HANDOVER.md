@@ -224,3 +224,518 @@ git log --oneline             # 查看历史；git reset --hard <sha> 回退
 ## 9. 汽水音乐探索模式补齐·首批（2026-09-14，现有端点全接线）
 
 四写代理并行（文件所有权互斥）完成探索模式汽水功能补齐：探索页**无限续播**（feed 游标透传 + fetchExploreRecommendationBatch soda 分支）、推荐歌单含收藏歌单、新碟区块派生聚合、搜索建议/歌手 tab/专辑 tab 派生端点（`/api/soda/search/suggest|artists|albums`）、**个人主页解锁 soda**（ProfileView 创建/收藏歌单分栏+最近播放+我喜欢 tab）、艺人页增 专辑/全部歌曲 tab+头像、专辑页加歌菜单恢复、歌单右键收藏按平台分发、音质弹窗汽水 5 档（quality 选档，会员闸门内就近落档）。死代码 getSodaSongUrl 删除、getSodaPlaybackInfo 双实现收敛。新增 `test/sodaDerivedExplore.test.ts` 17 用例。细节与残留项见 `docs/汽水业务审计-20260826.md` §八。**门禁**：tsc 零错；vitest 的 5 个失败（ImmersiveControls/modeIntegrationWiring/mvAlignment/specialLyricsRendering）经 HEAD 干净工作树对照实锤为既有失败，与本轮无关。**下轮大项**（MV/电台/歌单 CRUD 等需端点发现后实现）亦记录在该节。
+
+## 10. 传统模式 QQ 首页 / 乐馆对齐官方客户端（2026-10-06）
+
+**首页（`QQPcHome` + 新增 `qqHomeSections.tsx`）**
+- 首屏卡行改成官方版式：**一张两格宽的猜你喜欢大卡 + 四张一格彩色功能卡，整行等高**；大卡左边两行推荐语 + 绿色播放圆钮、右边当前推荐曲封面；所有卡下方统一两行小字（「歌曲 - 歌手」/ 栏目标签）。此前大卡比其它卡高一截、卡行不齐。
+- **猜你喜欢预取**：首页挂载即后台拉一批电台 99 歌曲（按账号隔离 + 5 分钟 TTL，`prefetchQQGuessYouLike`），点击直接用缓存开播；此前每次现拉电台 + 再解析歌曲 URL，实测要 6~7 秒才出声。
+- 补齐**推荐流其余货架**：bootstrap 只返回第一页，拿到 cursor 后再串行补两页 feed（`fetchQQExploreFeed`，服务端 `v_cache/v_uniq` 去重），按卡片 style 分行渲染——208 单曲卡 = 官方三列歌曲架（9 首/架，`PcSongShelf`，点击/播放全部时一次性补 36 首详情，悬停预取），301/302/304 = 封面卡网格。听书/节目/直播/星光（5122/1700/1100/217/85）整块不渲染。
+- 实测拿到真实 feed：`Hi <昵称> 今日为你推荐` / `从你的红心歌曲开始探索` / `听「X」也会喜欢` / `听「Y」的也在听` / `「昵称」的专属乐流`（301+302+304 混合）——与官方客户端首屏模块一一对应。
+
+**乐馆（`QQPcHall`）**
+- 页签对齐官方：**精选 / 排行 / 歌手 / 分类歌单 / 视频 / 频道**（官方还有数字专辑 / 音质专区 / 边听边玩，网关没有数据源，按既有口径不做）。
+- 精选：新增官方三张一屏轮播（`/api/qq/banner`，6 秒自动翻页，点击开 H5）+ 原有 musicHall 货架。
+- 排行：按官方分组（巅峰榜 / 地区榜 / 特色榜 / 全球榜）分节；带前三首的榜单渲染成**富榜单卡**（封面 + 榜名 + 前三首 + 播放量），其余为封面卡。
+- 歌手：`/api/qq/singer/category` 提供地区 / 性别 / 字母三级筛选胶囊（二级菜单）+ 圆形头像网格 + 加载更多。
+- 分类歌单：分类胶囊（保留分组行）+「精选歌单」标题 + 歌单网格 + 加载更多。
+- 视频：`/api/qq/mv/category`（类型 / 地区筛选）+ `/api/qq/mv/list` MV 网格（16:9 封面 + 播放量 + 标题 + 歌手），点击走全局 MV 弹窗。
+- 频道：**官方音乐电台广场**。新增后端 `GET /api/qq/radio/channels`（读官方网页版 `https://y.qq.com/n/ryqq_v2/radio` 的 SSR 数据 `window.__INITIAL_DATA__.radio_list`，10 个分类 / 118 个频道位，无登录可用，10 分钟缓存）与 `GET /api/qq/radio/songs?id=`（`mb_track_radio_svr/get_radio_track`，需登录 cookie，与猜你喜欢同一电台接口）。页面按分类胶囊（二级）+ 圆形频道位（三级：点击直接开播该频道）渲染。
+
+**验证**：`npx tsc --noEmit` 0 错；`vitest run` 221 文件 / 2184 用例全过（`test/TraditionalView.test.tsx` 里 Hero 卡断言改为 `getAllByText`——卡面大字与卡下栏目标签都会出现「猜你喜欢」，与官方卡下「猜你喜欢-沉浸刷歌」同构）。界面用无头 Chrome + 真实账号（cookie 注入 localStorage、`waveforge:apiBase` 指向本地后端）逐页截图核对（首页首屏/滚动各节、乐馆六个页签、频道两个二级分类），产物在 `D:\opencode\shots\`。
+**排查工具**：`.tmp-zoom/qqctl.py` + `tour*.py`（对官方客户端做**零干扰**后台取证：PostMessage 点击/滚轮 + PrintWindow 截图，不抢焦点、不动光标），截图在 `D:\opencode\.tmp-zoom\ref\`。
+
+## 11. 传统模式验收标准 + 乐馆二次补齐（2026-10-07）
+
+**验收标准（用户明确要求，已同步进 AGENTS.md 的「传统模式「官方 PC 客户端复刻」」小节）**：官方客户端长什么样，传统模式就得是什么样；**功能要齐全、不许猜、不许编，界面上出现的每个东西点下去都要有真实行为**。数据拿不到时的正确做法是先把接口逆向出来；确实没有网关数据源的，明确报备不做，不许用假数据顶上。
+
+**本轮补齐（乐馆）**
+- **数字专辑页签**：后端 `qqMusicHallAction` 新增 style 83 映射——数字专辑卡的专辑 mid 藏在封面 URL（`T002R800x800M000<mid>_1.jpg`）里，反解后返回 `open-album`（新增 `qqAlbumMidFromCover`）。前端新增 `albums` 页签，渲染 musicHall「数字专辑」货架的封面卡，点击进本地专辑详情页（实测 TANGENT/004WxXLs0ZCYBc 返回 13 首可播曲目）。官方该页的「立即购买」是站内支付流程，本软件不模拟（不编价格、不做死按钮）。
+- **视频页二级页签**：官方是「推荐 / 排行榜 / 视频库」。本页实现 **推荐**（musicHall「精选视频」货架，8 张卡全部带 mvId，点开即用全局 MV 播放器播）与 **视频库**（`mv/category` 类型+地区筛选 + `mv/list` 网格 + 分页）；**排行榜**没做——上线前实测 `MV榜`（topId 201）在 `/api/explore/chart` 上是 502，只有标题没有 MV id，做出来就是死链。
+- **排行页签**：目录里过滤掉纯 MV 榜（同上原因），保证列表里每一个榜单卡点开都有内容。
+- **仍未实现（网关无数据源，未编内容）**：音质专区、边听边玩——都是客户端专有页。已扫 `GetHomePage` 的 `ShelfId` 1~99 / 100~150 / 151~220 共 220 个货架 id，没有任何货架对应这两页；音乐馆里只有「更多」货架的文字入口（杜比全景声专区/臻品母带专区），既无 id 也无封面。要补只能抓客户端明文流量（需在其信任库里装代理证书）或反编译客户端私有模块。
+
+**验证**：`tsc --noEmit` 零错；新增 `test/QQPcHall.test.tsx`（4 用例：数字专辑卡点击分发 / 视频推荐+视频库 / 排行过滤 MV 榜 / 未登录空态）；全量 `vitest run` 2187 过（`test/resonanceSession.test.ts` 有 1 例在并行跑时因 WebSocket 时序偶发失败，单跑 17/17 过，与本轮改动无关）；接口层实测：`/api/explore/qq/native/bootstrap` 的数字专辑卡已带 `open-album` 与真实 mid、精选视频货架 8 卡全 `open-mv`、`/api/qq/album?mid=004WxXLs0ZCYBc` 正常返回。
+**待办**：登录态下的逐页视觉核对（数字专辑/视频推荐需要登录 cookie，用户机器上 3001 端口被其 dev 实例以令牌保护占用，无头验证要在其重启 dev 环境后进行）。
+
+## 12. 反编译客户端私有模块 + 乐馆口径收敛（2026-10-07 下半场）
+
+**反编译手段（可复用）**：官方 PC 客户端的私有协议模块名以明文存在 `D:\QQMusic\QQMusic_Protocol.dll` 里——用
+`node .tmp-zoom/extract-modules.mjs <dll> <关键字…>`（脚本扫可打印 ASCII 串并打印命中串的邻域）就能同时拿到
+**模块名 + 方法名**。本轮据此拿到 38 个模块，关键三条：
+- `musicToplist.ToplistInfoServer` / `GetDetail`（榜单；`topId=201` = 巅峰榜.MV，条目带 `vid`）
+- `music.vip.ExcSoundBenefitSvr`（`GetVIPStartButton` / `StartTrial`）→ **音质专区是 VIP 试用/权益页**
+- `music.gameCenter.MiniGameSvr`（`ListRecentlyMiniGames` / `ClickMiniGame`）→ **边听边玩是小游戏**
+其余可用线索：`video.VideoLogicServer`（GetMVStreamInfo/GetMvUrls）、`music.video.VideoData`、`music.stream.MvUrlProxy`。
+
+**口径收敛（用户 2026-10-07 决定，已写进 AGENTS.md，禁止回加）**
+- **数字专辑整页移除**：官方是付费商城（立即购买/支持），不做购买类内容。前端 `albums` 页签、后端 style 83 → open-album 映射、专辑 mid 反解工具、相关测试全部删除；musicHall 的「数字专辑」货架继续由 `isHiddenQQMusicHallShelf` 隐藏。
+- **音质专区不做**：反编译证实是 VIP 试用页（`StartTrial`），与「不做购买」同口径。
+- **边听边玩不做**：用户明确「游戏模块不要」。
+
+**视频深挖（本轮实现）**
+- 后端新增 `GET /api/qq/mv/chart?id=201&num=30`：走 `musicToplist.ToplistInfoServer/GetDetail`（PC/客户端同模块），返回榜单头图/简介/更新时间/收听量 + 条目（名次、`vid`、标题、歌手），封面按 `T015R640x360M101<vid>.jpg` 规律拼（与 mv/list 的 picurl 规律一致）；10 分钟缓存。实测 20 条与官方客户端逐条一致（异想天开/肖战 #1、宋雨琦 #2、田小娟 #3、少管我/周深 #4）。
+- 前端视频页补回**三个二级页签**：推荐（榜单入口卡 + 精选视频货架 + 最新 + 热门）、排行榜（榜单头图 + 名次列表，点击播 MV）、视频库（类型/地区 + 网格 + 分页）。
+- **已知缺口（未编）**：官方排行榜的地区子榜（内地/港台/欧美/韩国/日本）——`GetDetail` 不吃 area/region/subId，扫 topId 195~215 只有 201 有数据，故只做总榜。
+
+**验证**：`tsc --noEmit` 零错；`test/QQPcHall.test.tsx` 4 用例（视频推荐+视频库、视频排行榜点击播 MV、排行过滤 MV 榜、数字专辑页签已移除）全过；接口层实测 mv/chart 返回 20 条带 vid 的条目。
+
+## 13. 首页 Hero 行对齐官方（2026-10-07 晚，用户实测反馈「数据不一样」）
+
+**根因**：官方 PC 客户端那一行彩色功能卡 = **服务器返回顺序的前 4 张 `style 202` 卡**；旧实现只筛 `type === 500`，
+于是把 `202/900/991` 的雷达卡（客户端界面名「刷歌模式」，feed 里 title 是「雷达模式」）漏掉，第 5 张「歌手漫游」被顶上来。
+实测同一账号同一时刻的 feed：`每日30首(510) → 雷达模式(991) → 百万收藏(513) → 新歌推荐(513) → 歌手漫游(513)`，
+官方展示的正是前四张。**修复**：`QQPcHome` 取 `style === 202` 的前 4 张；`featureLabel` 对 subtype 991 给出
+「刷歌模式」标签与说明行（与左栏「刷歌」同一功能）；点击仍走 `play-radar`（`music.recommend.TrackRelationServer.GetRadarSong`）。
+新增 `test/QQPcHome.test.tsx` 两条用例锁死这条规则（含「点刷歌模式卡会起播雷达歌曲」）。
+
+**反编译补充（QQMusic_Protocol.dll 里的模块/方法串）**：`music.recommend.TrackRelationServer.GetRadarSong`（刷歌）、
+`music.stream.MvUrlProxy.GetHotMV`（热门 MV）、`music.recommend.RecommendWidget.GetPCCommonEntryPoint`（PC 入口位）、
+`music.musichallAlbum.AlbumSongList.GetAlbumSongList`、`music.musicasset.*`（歌单/最近播放/MV 收藏读写）、
+`music.prepushHotFile.HotFile.GetSonglist`。PC 首页 feed 的**请求参数**在这些二进制里没有明文，未能据此复刻请求环境。
+
+**仍未与官方一致（诚实记录，未编数据）**
+1. **「你的歌单宝藏库」**：我们用 `/api/qq/songlist/list?id=10000000&sort=5`（歌单广场「推荐」分类，实测**加不加登录 cookie 返回完全相同**、非个性化）；官方那份是另一路数据源（内容不同），未定位到接口。
+2. **猜你喜欢卡面显示的曲子**：官方是服务端挑的那首（截图里 夜深了/KiiKii），我们显示的是预取的电台 99 首曲——电台本身会随时间/会话轮换，两者会不一致。
+3. 剩余差异要"一模一样"只能抓客户端真实请求：官方客户端走 HTTPS 且日志/网页缓存里都没有该响应，需要在系统信任库装代理证书（属系统级改动，等用户点头再做）。
+
+## 14. 数据源深挖第二轮：文案 / 精选 / 榜单周期（2026-10-07 深夜）
+
+**猜你喜欢卡面文案的真源**：`mb_track_radio_svr/get_radio_track`（电台 99）返回的 `extras[i]` 与首屏 tracks 一一对应，含
+`reason`（"根据你的听歌口味推荐"）与 `rectag.RecReasonTemplate`（"不忍心关掉音乐，{br}就这样在枕上流浪。"——`{br}` 是客户端换行标记）。
+服务端 `/api/explore/qq/radio/next` 现在随批次下发 `radio: { name, reasons[] }`，首页大卡第一行直接用服务端模板，第二行用客户端兜底文案。
+**顺带解决「猜你喜欢慢」**：上游一次只给 5 首，旧实现为凑 30 首串行打 6 次（≈6s）；新增 `fast` 模式（只打一次上游 ≈0.92s 拿 5 首就开播，
+与官方"先 5 首 + 持续推荐"同语义），并加 60s 批次缓存（二次请求 0.003s）。fast 模式不掺公开兜底内容。
+
+**乐馆精选补齐（图3 差异）**
+- 顶部首发 banner：`GET /api/qq/hall/banners` → `GetHomePage` 显式取 `ShelfId: [115,116,1]`（默认响应里没有这三个货架；
+  实测 115 首条 = G.E.M.邓紫棋《自由的你》，与官方精选页第一张 banner 对得上）。前端按官方三张一屏轮播渲染，可播的带「立即播放」。
+- 「官方歌单」货架：`GET /api/qq/hall/official-playlists` → `playlist.HotRecommendServer/get_hot_recommend`
+  （实测与官方精选页「官方歌单」逐条一致：90后回忆|MP3时代的流行歌曲 / 甜系rap|你与星河皆可收藏 / 效率加倍…）。
+  官方顺序是「banner → 官方歌单 → 其它货架」，前端照此排版。
+
+**榜单周期切换（图5）**：`GET /api/qq/chart/periods?id=` 返回 `{ current, years: [{ year, periods: [周...] }] }`
+（上游 `GetDetail` 的 `history`；美国公告牌 108 = 2026 第 39 周，MV 榜/热歌榜 history 为空 → 不显示选择器）。
+`/api/explore/chart` 接受 `period`（周榜 2026_39 / 日榜 2026-10-06）并透传给库的 top 路由；榜单页标题旁加年份/周下拉，切换即重取该期。
+榜单页同时改成**按数据决定列**（榜单接口本来就带专辑/时长，实测 108 都有——之前空列是渲染问题），并去掉评论页签。
+
+**仍未定位（诚实记录）**：① 首页「你的歌单宝藏库」与「歌单遨游指南」、乐馆精选里的个性化歌单货架（木力口 / 未来 Bass / 混沌武士 / 东方…）
+是同一个**个性化歌单源**，已排除公共歌单广场（加不加 cookie 都一样）、`HotRecommendServer`（编辑推荐那批）、推荐流 1~5 页；
+从客户端反编译的 38 个模块里也还没有明确对应的（候选 `music.prepushHotFile.HotFile.GetSonglist` 待试）。② 视频「推荐」页顶部 banner：
+模块 `music.stream.MvUrlProxy/GetHotMV` 存在但参数未知（返回 rsps: null），需要抓包或继续试参数。
+
+## 15. 抓包现状与一键接管脚本（2026-10-07 凌晨，AI 自行操作）
+
+**结论**：QQ 音乐的 **MusicU 接口与音频流走自研网络栈直连 IP，完全绕过系统代理**——已用「装 mitmproxy CA + 系统代理 + 杀掉客户端重启强制重连」三步验证过（客户端重启后仍正常登录；代理期间共抓到 206 个 host，含腾讯 `y.gtimg.cn`/`wup.browser.qq.com` 与抖音系，证明证书与代理链路本身可用，唯独 `u.y.qq.com` 不出现）。客户端自带的代理设置（`QQMusic_Protocol.dll` 里有 `ProxyServer` 字符串）藏在加密配置里，UI 里没定位到入口。
+
+**能抓到的唯一现成路径**：**Reqable 的「增强模式」**（驱动级重定向，专治不认系统代理的客户端）。Reqable 配置 `%APPDATA%/Reqable/config/capture_config` 里 `enhancedMode: false`，但 `D:\Reqable` 下没有任何驱动文件、也没装驱动服务，**开启必然要装驱动 → 需要一次管理员授权（UAC）**，非管理员会话点不了。
+
+**一键接管（增强模式开好后执行）**：`node D:\opencode\.tmp-zoom\mine-capture.mjs`
+- ① 用零干扰点击器驱动客户端刷新首页/乐馆/视频（触发真实请求）
+- ② 扫 Reqable 落盘的明文 body（`%APPDATA%/Reqable/capture/*.reqable`，确认是**未压缩 JSON**），抽出所有 MusicU `module/method/param` 与含 `v_shelf/v_hot/v_playlist` 的响应
+- ③ 输出 `D:\opencode\.tmp-zoom\mined\modules.json` + 关键响应副本，重点找个性化歌单（宝藏库/歌单遨游指南）与视频 banner（`GetHotMV` 参数）两个数据源
+
+**另一条不需要管理员的思路（未完成）**：APK 反编译。已解出 20+ 个 dex（236MB）扫模块名，挖到 `music.individuation.Recommend`（个性化推荐）与 `AiTabSettingCtrl`；dex 里没有方法名，试了 7 个候选方法名全是 40000（模块/方法不存在），纯猜无效——拿到抓包里的真实方法名即可复用。
+
+**已完成的替代进展**（同日）：猜你喜欢 fast 路径（0.92s / 5 首）+ 卡面文案取自电台 `extras`；乐馆精选首发 banner（ShelfId 115/116/1）+ 官方歌单（HotRecommendServer）；榜单周期选择器（`/api/qq/chart/periods` + `period` 透传）；歌手风格筛选项；专属乐流两列流；QQ 电台续载改 fast（5 首 ≈0.9s）。**仍缺**：宝藏库/歌单遨游指南的个性化歌单源、视频推荐页 banner、播放列表面板「持续推荐歌曲」入口（纯 UI）。
+
+## 16. 【重大突破】官方"推荐/乐馆"是 H5 页面，数据源与复刻路径已定位（2026-10-07 凌晨）
+
+**抓包彻底打通**（客户端自带「设置 → 网络设置 → HTTP代理」填 `127.0.0.1:8080` → 重启客户端；PC 接口是 `*.y.qq.com/cgi-bin/musics.fcg`，body 明文 JSON）。抓包插件：`D:\opencode\.tmp-zoom\pc_capture2.py`（落 body + **完整请求头**），存档 `capture2/`、`capture3/`。
+
+**根因**：传统模式一直用手机环境（`ct:11/cv:20080008/platform:android`）请求，官方 PC 推荐页实际是 **H5（webview）页面**：
+- 页面地址 `https://i2.y.qq.com/n3/wk_v20/entry/index/recommend`（origin `https://i2.y.qq.com`，UA 是 Chrome/53 老内核），
+- 接口 `https://u6.y.qq.com/cgi-bin/musics.fcg?_=<ts>&sign=zzc…`，`comm = {ct:20, cv:2241, platform:"wk_v17", uid, uin:0, g_tk:5381}`，请求体用 **`req_1`/`req_0` 数字键**（不是模块名当键）。
+- **原生（ct:19）请求全部不带 sign**（87/87），只有 H5 的请求带 `sign=zzc…`——所以复刻 H5 调用的唯一门槛是**实现这个 sign**（算法就在那个公开 H5 页面的 JS 里，不需要抓包/管理员）。
+
+**同一账号，PC H5 环境下的推荐流（已抓到原文，`capture3/0036_…_res.txt` 的 `req_1`）就是官方那套**：
+- Hero 行 5 张卡：`猜你喜欢-沉浸刷歌 / 每日30首 / 百万收藏 / 新歌推荐 / 杜比专区`（**没有**雷达模式、**没有**歌手漫游——与手机环境那套完全不同，这就是"数据对不上"的根因）；
+- 第二个货架 = **个性化歌单**（用户截图里的"你的歌单宝藏库 / 歌单遨游指南"）：`"主打高端局"FUNK热门燃曲 / PHONK·低重音暴力美學 / 致幻Phonk / 百首东方经典：同人乐中绽放的幻想盛宴 / 《鸣潮》致新世界音乐会歌单 / 美到窒息的轻音乐`；
+- 第三个货架 `Latest` = 36 首新歌；第四个 `大家都在听` = 36 首；第五个是有声剧（按既有口径排除）。
+
+**下一步（不需要用户配合）**：
+1. 拉 `https://i2.y.qq.com/n3/wk_v20/entry/index/recommend` 的 JS，扒出 `sign=zzc…` 的签名函数（QQ 音乐 web 经典签名：参数字典序拼接 + 固定 key + hash33/base36），在后端实现；
+2. 后端加 `pcH5` 模式：`musics.fcg` + `ct:20/cv:2241/platform:wk_v17` + `sign` + 请求头（UA/Referer/Origin 照抄 capture3）+ 数字键请求体；
+3. 传统模式 PC 页面的推荐流/货架改走它 → 官方卡组与个性化歌单货架会顺着现有渲染逻辑自动出来；
+4. 视频 banner（`GetHotMV`）与榜单周期用同样方式（从 capture3 里找对应 H5 调用）；队列「持续推荐歌曲」入口是纯 UI。
+`local-server.mjs` 里已按 `options.pcEnv` 预留了 PC comm 开关（默认仍是稳定的手机环境，可随时切换）。
+
+## 17. 乐馆/视频已切到 PC 环境；推荐页只剩「H5 签名」一道门（2026-10-07 凌晨收尾）
+
+**已落地（本提交）**：
+- `fetchQQNativeMusicHall` 与 `/api/qq/hall/banners` 改用 **PC 环境**（`{ pcEnv: true }`：ct19/cv2241/tmeAppID=qqmusic/_channelid=20/patch=118，原生调用**不需要签名**）。
+  实测 bootstrap 的 musicHall 变成官方 PC 乐馆那套货架：**焦点图(7) / 快捷入口(21) / 编辑甄选(8) / 新歌(12) / 新碟(3) / 数字专辑(3) / 排行榜(4) / 音乐人(2) / 分类专区(18) / 精选视频(10)**；
+  banner 路由优先取「焦点图」（首发新碟/新歌，实测 自由的你-G.E.M.邓紫棋 / 以我之见-谭维维 / 醒时歌-周传雄…）。
+- 前端 `QQPcHall` 把「焦点图」从普通货架里排除（它是顶部 banner 行），避免重复渲染。
+- 视频页「推荐」用的 musicHall 精选视频货架、频道、榜单周期、MV 榜都按同一 PC 环境口径工作。
+
+**仍差最后一道门：首页「推荐」流（宝藏库/歌单遨游指南/幸运好歌）**
+- 官方 PC 的推荐页是 **H5 页面** `https://i2.y.qq.com/n3/wk_v20/entry/index/recommend`，接口
+  `https://u6.y.qq.com/cgi-bin/musics.fcg?_=<ts>&sign=zzc…`，`comm={ct:20,cv:2241,platform:"wk_v17",uid,uin:0,g_tk:5381}`，请求体用 `req_0/req_1` 数字键。
+- **`sign` 与请求体强绑定**（实测：同 sign 换 body 立刻 2000；同 sign 同 body 可复用、不随分钟过期）。
+- 签名函数**不在**首页所加载的 index/runtime/vendors/tencent-sdk/spd-base/unisdk 里（都已下载排查），应在懒加载 chunk 中——下一步：用无头浏览器加载该 H5 并记录全部 chunk 请求（CDP Network），或直接在该页面里调用它的请求模块拿 sign 做对照，再实现签名算法。
+- 一旦实现签名，后端加 `pcH5` 模式（musics.fcg + ct20/wk_v17 + sign + 照抄 capture3 的请求头）即可拿到官方那套 Hero 卡与个性化歌单货架；前端渲染逻辑无需改动（已具备货架/卡片/两列流/歌曲架能力）。
+- 抓包存档：`D:\opencode\.tmp-zoom\capture2|3\`（带完整请求头的明文）；插件 `pc_capture2.py`。
+**机器状态**：客户端「网络设置」里的代理仍指向 127.0.0.1:8080（mitmdump 还在跑，用户可自行清空）；mitmproxy CA 在用户级 Root（`certutil -user -delstore Root mitmproxy` 可删）。
+
+## 18. 推荐页签名函数的最终结论（2026-10-07 收尾）
+
+签名函数定位完成：官方 H5 的 **webpack 模块 488**（在 `y.qq.com/n3/wk_v20/entry/vendors.chunk.*.js` 同级依赖 `tencent-sdk.chunk.*.js` 里），
+请求层代码在 `common~INTEL_SONG~...chunk.*.js`：
+```js
+s.url = addParam({_: Date.now()}, s.url)
+s.needSign && s.url.includes('musicu.fcg') && (s.url = s.url.replace('musicu.fcg', 'musics.fcg'))
+if (s.url.includes('musics.fcg')) { const f = (await import(/* chunk 488 */)).default; const m = f(s.data /* POST 的 JSON 字符串 */); s.url = addParam({sign: m}, s.url) }
+```
+模块 488 是**纯 JS 的混淆 VM**（内部常量 1732584193/4023233417/2562383102/3285377520 = SHA-1 初值，1518500249/1859775393/1894007588 = SHA-1 轮常量 → 签名 = SHA1 系），
+执行时把函数挂到 `u._getSecuritySign` 再取回（`u` 来自 `r(205)`）。
+**已能在 Node 里跑起来**（`D:\opencode\.tmp-zoom\extract-signer.mjs`，返回 `zzc…` 格式正确），但与抓包真值不吻合 → 证明它还依赖未识别的环境输入（`r(205)` 那个对象的内容 / 页面级种子 / uid 等）。
+**下一步两条路**：
+① 对比页面里 `r(205)` 的真实返回（在无头浏览器里 `__webpack_require__(205)` 或从 VM 入口断点拿输入），补全后再实现纯 JS 签名；
+② 或者在传统模式「推荐」页直接内嵌官方 H5（`i2.y.qq.com/n3/wk_v20/entry/index/recommend` + 用户 web cookie + wk_v17 UA）——它自带正确环境与签名，内容与官方逐像素一致。
+
+**推荐页最终方案（2026-10-07 决定并落地）**：官方 PC 客户端的「推荐」页本身就是 H5（`i2.y.qq.com/n3/wk_v20/entry/index/recommend`），
+所以在传统模式推荐页加「复刻版 / 官方页面」切换（`localStorage: waveforge:qq-home-view`，默认复刻版）：
+切到官方页面时复用既有 `src/features/neteaseExplore/NeteaseWebPanel.tsx`（Electron 下 `<webview>` 不受 X-Frame-Options 限制，
+浏览器调试退回 iframe，保留"在浏览器打开"兜底）内嵌那个官方页面 —— 数据/排版/签名全部与官方客户端同源，
+因此首页的「你的歌单宝藏库 / 歌单遨游指南 / 幸运好歌」等个性化内容在官方页面视图下即为官方原文，
+同时我们自己的复刻版（PC 环境货架 + 官方歌单 + Hero 行 + 两列流）保留为默认视图与降级路径。
+
+## 19. 签名函数验证结果（收尾，2026-10-07）
+
+**已确证**：用 `Page.addScriptToEvaluateOnNewDocument` 预注入 `Object.defineProperty(window,'_getSecuritySign',{set(v){window.__sigFn=v}})` 陷阱，
+可从活的官方 H5 页面拿到签名函数本体；**它与我从 `tencent-sdk.chunk` 抽出的 Node 版本输出逐字节一致**（同输入同输出，无状态、不随页面/时间变化）。
+→ 签名算法已到手，缺的只是「推荐流那条调用传给它的输入形态」：9 种候选（原 body / 重序列化 / 对象 / 带 `_` / 拼时间戳…）都未复现抓包真值，
+说明页面里另有一层包装对入参做了变换。验证脚本：`D:\opencode\.tmp-zoom\{trap-sign,cmp-sign,brute-sign,verify3,verify4}.mjs`。
+**下一步（一步到位）**：同一次注入里同时挂「签名函数陷阱 + XHR/fetch 钩子」，让页面自己发一条 **code=0** 的 feed 请求，拿到
+`{完整 body, 该请求的 sign, code}` 三件套 → 用已到手的函数对同 body 求值即知输入变换规则 → 后端加 `pcH5` 模式（musics.fcg + ct20/wk_v17 + sign + 抄 capture3 请求头）→ 官方 Hero 卡与个性化歌单货架由我们自己的界面渲染。
+（本轮最后一次尝试里，无头页面的请求拦截回归为 0 条——注入的钩子影响了页面自身脚本，需把钩子改为「先等页面跑完再挂」或改用 `Network.requestWillBeSent`+`Network.getRequestPostData` 从协议层取 body，避免污染页面。）
+
+## 20. 【最终解锁】签名之谜 + pcH5 推荐流 + 视频 banner（2026-10-07 收官）
+
+**签名谜底（§17–§19 的「一道门」正式关闭）**。上一轮追的 H5 webpack 模块 488（`tencent-sdk.chunk` 里的
+`_getSecuritySign`）确实是页面在用的签名函数（活体 headless 复捕：`f(body)` 与页面 URL 里的 sign 逐字节一致），
+**但它对 wk_v17 客户端请求是死路**：headless 里页面自己发的请求照样 code 2000，把活体 body 换任何环境参数重签也一样——
+服务端对 musics.fcg 校验的是另一套 zzc 算法。而那套算法**项目里早就有了**：`@jixun/qmweb-sign`（npm 依赖，
+`local-server.mjs:65` 已 import，写请求/评论接口在用）。同一条 body，模块 488 与 qmweb-sign 输出不同，
+qmweb-sign 的服务端接受。capture3 存档样本对不上纯属意外：落盘的 `_req.txt` 与线上字节不一致（真实 body+原 sign 重放 code=0）。
+实证脚本：`.tmp-zoom/{capture-live,verify-live-sign,replay-check,matrix-sign,use-qmweb-sign}.mjs`。
+
+**pcH5 模式已落地**（`local-server.mjs`）：
+- 新增 `requestQQPcH5Module()`：`GET u6.y.qq.com/cgi-bin/musics.fcg` + `comm{ct:20, cv:2241, platform:'wk_v17', uin:0, g_tk:5381}`
+  + `zzcSign(body)` + `data` 查询参数（免 ag-1），UA Chrome/53+QBCore、Referer `i2.y.qq.com/n3/wk_v20/entry/index/recommend`。
+  uid 留空即可，服务端按 Cookie(qm_keyst) 识别账号下发个性化内容。
+- `fetchQQNativeRecommendFeed` 切 pcH5 优先、失败回退 pcEnv。翻页规则（实测）：page1 `direction:0`；
+  page≥2 `direction:1` 且 **v_cache/v_uniq/s_num 一律传空**（带客户端回传值反而 500020），每页都出新货架。
+- 官方数据流：page1 = Hero(301「Hi {nick} 今日为你推荐」：猜你喜欢-沉浸刷歌/每日30首/刷歌模式/百万收藏/新歌推荐/杜比专区)
+  + 你的歌单宝藏库/补给站(271) + 播客(272) + 精选好歌(207)；page2+ = 歌单遨游指南(205) + 惊喜好歌(207)。
+  **§14 一直没定位的「宝藏库/歌单遨游指南」个性化源就是 271/205 货架**——随本方案一并补上。
+- wk_v17 的卡 style 字典与客户端档位不同（Hero 卡 6/7/15），pcH5 分支里按 subtype 重映射回
+  201(主推大卡)/202(彩色功能卡)，前端 Hero 行渲染逻辑零改动（QQPcHome/QQExplorePage 通用）。
+- 前端两处小适配：①「你的歌单宝藏库」兜底块在 feed 带 271 货架时不再渲染（避免双份）；
+  隐藏标签补「随时随地/停不下来」（272 播客货架的轮换标题）。
+- 验证：bootstrap 1.1s 返回 pcH5 源六模块 + daily30 30 首；feed page2 返回 205+207；tsc 零错；全量 2291 用例全过。
+
+**视频「推荐」页顶部 banner 已接**：官方那排首发 MV 资讯轮播 = `GetHomePage` 显式取 **ShelfId 127「精选视频」**
+（默认响应不含，与乐馆 115/116 同套路；扫 ShelfId 脚本 `.tmp-zoom/sweep-hall-shelfids.mjs`）。
+新增 `GET /api/qq/video/banners`，前端视频推荐页顶部三张一屏 6s 轮播（复用乐馆 banner 版式），点击直接进全局 MV 播放器。
+反编译的 `music.stream.MvUrlProxy/GetHotMV` 模块存在但参数仍未破解（恒 `rsps:null`，pcH5/android 双通道 15 种参数矩阵均不通）——
+用同一官方数据源的货架实现同一版面，参数谜题留档即可。
+
+**收尾状态**：mitmdump 已停、8080 无监听；系统代理 ProxyEnable=0（客户端无独立代理残留，走系统代理已断）；
+**mitmproxy CA 还在用户 Root 存储**——Windows 对 ProtectedRoots 的删除强制弹 GUI 确认（certutil/-f/PowerShell X509Store 三路实测都挂起），
+无法静默移除。想彻底撤销请在终端跑 `certutil -user -delstore Root mitmproxy` 并在弹窗点「是」。
+
+**验证入口**：`WAVEFORGE_LOCAL_TOKEN= PORT=3012 node local-server.mjs`；
+`POST /api/explore/qq/native/bootstrap`（feed.source 应为 `qq-pch5-recommend-feed`）、
+`POST /api/explore/qq/native/feed {"page":2}`、`GET /api/qq/video/banners`。
+活体抓包脚本（CDP 协议层被动，无页面注入）：`.tmp-zoom/{capture-live,capture-video,diag-mv-page}.mjs`（端口 9445–9447）。
+
+## 21. 用户验收回归修复（2026-10-07 下午，本轮三处）
+
+用户实测对比官方客户端发现两处问题，连同「视频 banner」的最终验证一起收口：
+
+**① 榜单详情整列无封面（乐馆→排行榜→点进榜单）**。根因是一串组合拳，全部修掉：
+- 服务端 `/api/explore/qq` 聚合在**配了 `QQMUSIC_API_KEY`（应用有、裸跑 local-server 没有）**时，
+  榜单目录标成 `source:'qqmusic-skills'`（officialCharts 先于 community 合并）→ 详情页走 skills 分支；
+- skills 的 `/charts/detail` trackList 是简略歌曲对象（连 albumMid 都没有），归一化后 100 首全无封面/时长；
+- 前端 `exploreDetailCache` 的键 `chart:platform:id:period` **不含 source**，谁先打开谁污染缓存——
+  传统模式点同一个榜单命中 skills 那份无封面数据且**不再发请求**（这就是"点进去没封面"的全貌）。
+修复：`local-server.mjs` 的 skills 榜单分支照 `playlist/detail` 的既有做法逐首 `qqSongDetail` 补全
+（`mid` 命中缓存+并发限流，实测 100/100 有封面）；`exploreApi.ts` 榜单/歌单缓存键补 `source`。
+验证：应用里点开流行指数榜 = 100 行 100 封面（修复前 0/100）。
+
+**② 首页有时整段少「你的歌单宝藏库/私荐歌单」（271 货架时有时无）**。
+`isHiddenQQHomeModule` 的标签检查把**卡片标题**也扫进去了：271 轮换出的歌单卡偶尔有一张名字带
+「有声/直播/节目」等词，整块货架被误杀（探针实录 `bootstrap:301,271,272,207 → render:272,207`）。
+修复（`qqHomeSections.tsx`）：标签只扫**栏目名**；新增「没有一张能用卡的货架整块隐藏」规则
+（cards≥3 且全部 action=unsupported）——272 播客货架标题再怎么轮换都能被稳定隐藏，271 永不误杀。
+
+**③ 视频页 banner 验证**：三张首发 MV 资讯轮播正常（余宇涵/Taylor Swift/周深 + MV 角标，点开进 MV 播放器），
+`/api/qq/video/banners` 每屏三张、dots 切换；此前的实现已被构建并上线验证。
+
+**操作要点（重要）**：应用跑的是 `dist/` 构建产物（3000 是静态服务）+ 独立 `local-server.mjs`（3001）。
+**前端改动必须 `npm run build` 后重载页面；后端改动必须重启 3001 服务**（本轮已代跑：build 完成，
+3001 已用原 token/userData 重启并验证 `/health` 200）。若应用整体重启，dev-electron 会按自己的
+启动流程重新拉起后端与构建，无需手工干预。
+
+**验证基线**：tsc 零错；全量 2291 用例通过；应用内实测——首页（Hero 六卡 + 个性歌单货架 + 歌单遨游指南）、
+榜单详情（100/100 封面）、视频 banner（3 卡轮播）全部正常。相关脚本：
+`.tmp-zoom/{capture-response,check-hidden-misfire,verify-fix-all,verify-scroll-covers,check-video-dom}.mjs`。
+
+## 22. 全量走查回归（2026-10-07 傍晚，用户要求「全部点一遍对比客户端」）
+
+**本轮修掉的真 bug（都是走查点出来的）**：
+
+1. **搜索页整页崩溃（React #31）**：`searchSongs` 的 QQ 归一化里 `name: song.album?.name || song.album || ''`，
+   当 album 是对象但 name 为空串（实测 `夜に駆ける` 30 条结果里 7 条是这种空名专辑，如电台/其他版本）时，
+   name 落成**整个 album 对象**；表格渲染 `{song.album.name}` 直接抛 React #31，搜索页白屏。
+   修复：`src/services/musicApi.ts:534` 对象场景取空串，绝不回落对象。
+
+2. **「刷歌」功能位是死的**：侧栏 `runEntry` 从来没接线 `local:radio`（`onPlayRadio` 定义了却从未使用），
+   点击只弹「暂不支持」。修复：`runEntry` 增加 `local:radio → onPlayRadio()`（起播猜你喜欢 30 首队列，
+   实测约 6–10 秒出播放器——非 fast 模式，等待属正常）。
+
+3. **功能位格子与客户端对不上**：官方入口接口返回 5 个已选功能位（АДЛИН 常听歌手 / 频道 / 视频 /
+   飙升榜 / 官方歌单），但本地 localStorage 只在**首次**落盘时同步 Selections，老数据只有「刷歌」——
+   格子比客户端少一截。修复：`QQPcSidebar` 加一次性对齐（`TILES_SYNC_KEY`，只在从未对齐过时合并
+   官方 Selections，之后尊重用户增删）；并把 频道/视频/飙升榜/官方歌单 四个功能位接到乐馆对应页签
+   （`navigatePcSidebar(key, detail)` → `QQPcHall initialTab`）。
+   实测：格子 = 推荐/乐馆/刷歌/АДЛИН/频道/视频/飙升榜/官方歌单（8 格，与客户端同构），落点全部正确。
+
+4. **构建更新后旧页面点开子页「渲染出错」**：重建 dist 后哈希分包被替换，已打开的旧页面 lazy 加载
+   `QQPcCollection-<旧哈希>.js` 拿到 HTML 报错，而传统模式的内层 `EmbeddedExploreErrorBoundary` 只给
+   「重试」按钮（必然复败）。修复：内层边界与根级边界同款处理——chunk 类错误整页自动重载一次
+   （sessionStorage 打标防循环）。**注意：每次 `npm run build` 后旧窗口需重载一次页面（Ctrl+R）**。
+
+**「本地和下载 / 已购音乐 / 试听列表」结论（回答用户「功能全部集齐」）**：
+- 三者是早前记档的**产品决策「永久不支持」**能力（`features/traditionalPc/types.ts:60` 注释，酷狗侧栏也标「暂不支持」）。
+- 本轮复核了可行性：客户端 `QQMusic_Protocol.dll` 全量模块串里**没有**购买/试听列表模块（只有
+  `music.musicasset.DownLoadHistroyRead` 下载历史）；skills API 白名单里也没有对应端点；
+  盲测 12 组候选模块名全部 404/无权。已购/试听很可能走 H5 商城接口或纯本地记录；
+  本地和下载需要本地扫描 + 下载链路（本软件无下载器）。
+- 要拿真数据只有一条路：重开客户端抓包链路（客户端设置→网络设置→HTTP代理→127.0.0.1:8080→重启客户端
+  + mitmdump），点击这两个页面抓模块名。本轮已试：客户端代理当前未生效（抓包 0 条），
+  重开需动客户端设置，等用户点头再做。
+
+**验证基线**：tsc 零错；全量用例通过；应用实测——搜索（30 行正常）、刷歌（起播 30 首）、
+8 个功能位落点、乐馆六页签、视频 banner、榜单 100/100 封面、首页货架稳定。走查脚本：
+`.tmp-zoom/{audit3-walk,verify-tiles,audit5-final,verify-search-fix,retest-radio}.mjs`。
+
+## 23. 客户端逐页对照 · 收官补齐（2026-10-07 晚，用户要求「全部检查/要一样」）
+
+**逐页对照方法**：客户端用 `wf_client_shot2.py`/`.tmp-zoom/bgclick.py`（后台单击+PrintWindow 截图）逐页点，
+WaveForge 用 CDP（端口 9223）逐页开，两边截图逐块比对。客户端侧栏/乐馆页签坐标已测准（图标格：
+首页 (67,92)/乐馆 (174,94)；乐馆页签行 y=157：精选 552/排行 612/歌手 671/分类歌单 741/数字专辑 816/
+音质专区 892/边听边玩 1000/视频 1068/频道 1135；侧栏：最近播放 (95,392)/本地和下载 (95,441)/
+已购音乐 (95,491)/试听列表 (95,541)/喜欢 (95,590)）。
+
+**本轮补齐（全部已实测）**：
+1. **喜欢页页签对齐官方**：官方为 歌曲/歌单/专辑/有声节目/视频；我们补上后两个。
+   「视频」= **收藏的 MV**，接的是真实客户端模块 `music.musicasset.MVFavRead.getMyFavMV`
+   （新端点 `POST /api/qq/fav/mv`；该账号 6 条，与客户端「视频6」逐条一致，点击进全局 MV 播放器）。
+   「有声节目」客户端同样为 0 条，落同款空态（无公开数据源，如实标注）。页签行为
+   `歌曲865 | 歌单58 | 专辑 | 有声节目0 | 视频6`。
+2. **侧栏三入口补齐 + 官方顺序**：最近播放 → 本地和下载 → 已购音乐 → 试听列表 → 喜欢
+   （此前缺后三项且喜欢在前）。三个新页（`QQPcExtras.tsx` + `PcPageId`/侧栏接线）：
+   - 试听列表：官方空态逐字对齐（唱片图标 + 「没有试听记录」+「去音乐馆逛逛」，该账号此刻同样为空）；
+   - 已购音乐：官方结构（数字专辑/单曲页签）+ 如实空态（购买记录走 QQ 商城通道，全二进制扫描
+     无该模块、skills 无端点、网页版需未持有的 web 登录态——通道未接入已明示，不编数据）；
+   - 本地和下载：官方结构（本地歌曲/下载歌曲/下载视频/正在下载四页签）+ 如实空态
+     （本软件无下载链路与本地扫描，与网易云/酷狗侧同一产品口径）。
+3. **「刷歌」功能位接线**（此前 onPlayRadio 定义了但从未被调用，点击只弹「暂不支持」）→
+   现在点击起播猜你喜欢 30 首队列（非 fast 模式约 6–10 秒出播放器，属正常耗时）。
+4. **功能位对齐官方 Selections**：官方接口 5 个已选（АДЛИН 常听歌手/频道/视频/飙升榜/官方歌单）
+   一次性合并进本地功能位（`TILES_SYNC_KEY` 防重复），共 8 格与客户端同构；四个入口先按链接
+   走真实目标（歌手页/乐馆页签），不影响用户自行增删。
+5. **搜索页崩溃修复**（React #31：空名专辑对象被当文本渲染，30 条结果里 7 条触发）——
+   `musicApi.ts` 归一化对象场景取空串。
+6. **构建后旧页面自愈**：`EmbeddedExploreErrorBoundary` 对 chunk 加载失败整页自动重载一次
+   （与根级边界同口径）；此后每次 `npm run build` 后旧窗口最多自动刷一次。
+
+**客户端侧已核对但为「按决策不做」的项**（与官方不同是产品决策，非 bug）：
+数字专辑商城 / 音质专区（VIP 试用页）/ 边听边玩（小游戏）/ 有声节目 / 直播 / 星光 / 游戏中心。
+
+**验证基线**：tsc 零错；全量用例通过；应用实测——喜欢（5 页签全通、6 张收藏 MV）、
+三个新页面、8 功能位落点、刷歌起播、搜索 30 行、乐馆六页签、视频 banner、榜单 100/100 封面。
+
+## 24. 数据级终验（2026-10-07 晚，「要一样」的逐条核对结果）
+
+**本轮双端逐条核对（客户端截图 vs 应用内实测）**：
+
+| 项 | 客户端 | WaveForge | 结论 |
+|---|---|---|---|
+| 侧栏 最近播放 | 2499 | **2499**（本轮修复，原 500） | ✅ 一致 |
+| 侧栏 喜欢 | 865 | 865 | ✅ |
+| 喜欢页签 | 歌曲865/歌单58/专辑4/有声节目0/视频6 | 歌曲865/歌单58/专辑4/有声节目0/视频6 | ✅ 逐项一致 |
+| 收藏 MV 内容 | 6 条（Broken Sky/Heartbeats/No Vacancy…） | 同 6 条 | ✅ 同源同内容 |
+| 最近播放首行 | Never Leave / TAKE YOUR NESS / Late night drift / Заберу / Cloud 9 | 完全相同 | ✅ 逐条一致（旧截图差异是 1 小时内新增播放，实时快照对上） |
+| 功能位 | 首页/乐馆/АДЛИН/频道/视频/飙升榜/官方歌单(+加入口) | 推荐/乐馆/刷歌/АДЛИН/频道/视频/飙升榜/官方歌单 | ✅（多一个本机「刷歌」） |
+| 试听列表 | 空（没有试听记录） | 同款空态 | ✅ |
+| 本地和下载 | 本地2/下载2/视频0/下载中0（客户端自扫） | 结构同款，空态+说明 | ⚠️ 数据通道不可得（见 §22/23） |
+| 已购音乐 | 数字专辑4/单曲0 | 结构同款，空态+说明 | ⚠️ 同上 |
+
+**最近播放 500→2499 根因与修复**：`fetchQQRecentSongs` 请求没带 `requestCnt`，上游只回 ~500 条；
+客户端（capture2 原文）是 `{requestCnt:2500, type:2, updateTime:0}`。补齐后 total=2499 与客户端完全一致。
+
+**「臻品母带」角标的最终判定（不实现，防伪造）**：客户端喜欢/最近播放每行都带琥珀色「臻品母带」标签。
+实测两组曲目的 file 档位：ラタムニカ（无任何无损）、Заберу / Cloud 9（仅 320kbps）**也照样带标** →
+它不是逐曲音质数据（CgiGetTrackInfo 的 size_hires/size_ape 与标签无对应关系），而是客户端「播放品质偏好」
+的统一指示标记。规则未实证前不复制该标签——避免给用户显示"将以此品质播放"的虚假声明。
+（数据源就绪：`CgiGetTrackInfo` 可批量取 `file.size_hires/size_ape/size_flac/dts/dolby`，
+若日后要做"真实音质角标"（SQ/臻品音质按档位），用它即可。）
+
+**操作状态**：应用已由本会话用 `npm run dev:electron` 重新拉起（渲染 3000 / 本地服务 3001 / 调试 9223），
+3001 上跑的就是当前源码（含全部修复）。验证脚本：`.tmp-zoom/{final-data-check,verify-badge-rule,badge-rule-2,trace-liked-fields}.mjs`。
+
+## 25. 加载性能优化（2026-10-07 深夜，用户反馈「点了要过一会才出来」）
+
+**先量后改**（客户端 3012 端点冷热耗时 + CDP 实测点击→出内容/起播）：
+
+| 链路 | 优化前 | 优化后 | 手段 |
+|---|---|---|---|
+| 刷歌（侧栏功能位） | 6–10s 起播 | **1.5s** | playQqRadio 改 fast 批（5 首≈1.2s）先播 + `continuation:'explore-infinite'`（播放中自动续推荐，客户端「5 首 + 持续推荐歌曲」同语义） |
+| 猜你喜欢（主推大卡） | 命中缓存秒开、未命中要等 | 缓存直出 + 续播 | 同上：runCard play-radio 带 continuous；缓存已有预取（挂载即 fast 预取 8 首） |
+| 刷歌模式卡（雷达） | 单批后队列不再增长 | 队列自动续页 | play-radar 带 `radar`（page=服务端待取页）→ App 续播分支按雷达页自动追加 |
+| 喜欢页首开 | **6.5s** | **1.8s**（二次 94ms） | 服务端歌单详情：首屏分页失败重试一次（旧实现首个请求偶发返回空、前端要多等一个重试周期）+ 分页并行度 4→6 |
+| 喜欢页/任意歌单（二次冷启动） | 每次冷启动都重拉 6s+ | **秒开**（磁盘缓存 24h） | 歌单详情加磁盘二级缓存（`<userdata>/cache/qq-playlist-detail/`）：命中即回 + 后台静默刷新；喜欢/加歌/收藏等写操作成功即失效两级缓存 |
+| 首页后续货架（听「x」也在听/歌单遨游指南） | 串行两轮分页 | **并行一发** | QQPcHome loadRest 改 Promise.all 拉 page2+page3（服务端按 page 独立取数） |
+| 传统模式聚合 payload | 冷启动 7.6s 且挂在首屏路径 | 首屏后 3.1s 才发 | 首挂载延迟 2.5s 再拉（仅作宝藏库兜底/乐馆目录复用，乐馆进入时按需拉并复用同一内存缓存）；平台切换仍立即拉 |
+| 同键并发 | 首页/乐馆/详情同时拉同一歌单打多轮上游 | 合并为一轮 | fetchQQPlaylistDetail 增加 pending 合并 |
+
+**实测基线**（应用重启后 CDP 计时）：首页 Hero 1.08s 出现、后续货架再 0.6s、刷歌 1.5s 起播、
+喜欢页冷 1.8s / 热 94ms、启动关键路径请求 250ms 起跑、payload 聚合 3.1s（后台）。
+验证脚本：`.tmp-zoom/{measure-loads,measure-optimized,debug-radio2,check-payload-delay}.mjs`。
+
+## 26. 传统模式 Apple Music 客户端复刻（2026-10-08，用户要求「做成跟客户端一样的 UI」）
+
+**需求**：传统模式的 Apple 平台照 Apple Music Windows 客户端做 UI + 数据；**顶栏播放控件不复刻**（用户明确「用我们第三栏的」），右侧第三栏（正在播放/播放列表/同步歌词）保持本软件实现；未订阅（未登录，或登录但会员过期）时主页要搬客户端的**订阅广告**，点击与客户端一样打开**购买窗口**。
+
+**取证（决定 UI 细节的依据）**：
+- 客户端就装在本机（`AppleInc.AppleMusicWin`，WinUI 3 + 内容层 WebView2）。用 UIA 零干扰读出侧栏结构/尺寸：侧栏宽 290px、搜索框 272×32（#fbfbfb 底 + #e5e5e5 描边）、导航行高 36/行距 4、顶级图标 x=13 + 文字 x=47、子项再缩进 31px、「资料库/播放列表」是可折叠分组标题（右侧 更多/新建 + 折叠箭头）、底部账号行。截图实测配色：窗口/侧栏 #f3f3f3、内容 #eeeeee、表格行 #f9f9f9（隔行 #f3f3f3）、分隔线 #e5e5e5、主文字 #252525、次级 #7a7a7a、选中胶囊 #eaeaea、品牌红 #fa233b。
+- 资料库「歌曲」页截图：工具条（居中小标题 + 右侧 过滤/显示选项）+ 表格列 **标题 / 时长 / 艺人 / 专辑 / 类型 / ★ / 播放次数**，行高 40、隔行、行悬停出「⋯」、表头可排序（实测 艺人 列有升序箭头）。
+- 广播页（用户提供截图）：大标题「广播」+ 一排大电台卡（500×324，**标题在卡上方**：电台名 + 「Apple Music 电台」）+「风格电台 ›」方卡货架（一排 6 张）。
+- 订阅广告文案：从客户端 i18n 词典（WebView2 缓存文件）里取到 Apple 官方本地化串，直接使用不改写：`FUSE.Upsell.Generic.Headline.FreeTrial` =「尽是你爱听的音乐。」、`FUSE.Upsell.Generic.Body.FreeTrial` =「加入 Apple Music，播放和下载数千万首歌曲…」、`FUSE.Upsell.SignUpOptimization.Generic.Trial.CTA` =「免费试用」。
+- 购买窗口地址：客户端 WebView2 会话缓存里查到 `finance-app.itunes.apple.com/subscribe`（含 `buy.itunes getSubscriptionOffersSrv` 请求记录）→ 站内窗口直接开这个地址，与客户端同源同流程。
+- 客户端内容页在**会员过期态下自身报「发生未知错误」**（主页/广播都拉不到数据），所以「订阅广告长什么样」按官方文案 + 客户端视觉语言实现；截图核对时也用未登录态验证。
+
+**改动**：
+- 新增 `src/features/traditionalPc/ApplePcSidebar.tsx`（客户端左栏）/ `applePcKit.tsx`（客户端基件 + 歌曲表 + 货架/卡片/空态）/ `ApplePcHome.tsx`（主页：未订阅=订阅广告；已订阅=个性化货架）/ `ApplePcRadio.tsx`（广播）/ `ApplePcLibrary.tsx`（最近添加·艺人·专辑·歌曲）/ `ApplePcPlaylists.tsx`（所有播放列表·喜爱歌曲）；`src/services/appleSubscribe.ts`（购买入口）。
+- `TraditionalView.tsx`：`isApplePc` 分支（左栏替换、左栏宽度 290、内容区不吃通用内边距、右栏账号卡隐藏）、`ApplePcNavKey` 导航、`PcPageId` 增 `radio/added/artists/albums/songs/playlists/favorites`、`PcNavTarget` 增 apple 变体、来源语义（资料库/播放列表 → `traditional-library`）、`appleLovedKeys`（Apple ★ 判定，随 `favoriteRevision` 刷新）、`pcChromeApple`。
+- `pcKit.tsx`：`PcSkin` 增 `'apple'`（无 QQ/网易云角标、详情头图 200px），歌单/专辑/歌手详情页对 Apple 复用 PC 复刻版。
+- `appleCatalog.ts`：`AppleLibraryTrack` 增 `genreName/playCount/dateAdded`，`mapAppleLibraryTrack` 从 resource 透传（缺则界面不显示该列，不编数据）；`appleLibraryTrackToSong` 透传 `playCount`。
+- `desktop/main.cjs` + `preload.cjs` + `src/electron.d.ts`：新增 IPC `apple-subscribe`（1080×840 站内窗口，Chrome UA，仅放行 apple.com 域内跳转、window.open 外开浏览器），主窗口守卫不放宽。
+
+**验证**：`npx tsc --noEmit` 0 错；`npx vitest run` 243 文件 / 2334 用例全过（新增 `test/ApplePcTraditional.test.tsx` 4 用例：左栏结构 / 订阅广告 + 购买窗口桥 / 广播版式 / 歌曲表列与过滤；`test/TraditionalView.test.tsx` 里两条 Apple 断言改为「Apple 现在也走复刻页」——非复刻平台改用 Spotify，来源语义用 Apple 客户端资料库页）。界面用临时 Vite(3105) + 无头 Chrome(CDP 9225) 逐页截图核对（浅色 + 深色、空态 + 注入 amp-api 桩的有数据版式），产物 `D:\opencode\apple-*.png`；脚本 `.tmp-appleshots.mjs` / `.tmp-appleshots-data.mjs`。
+**未做/待确认**：客户端「类型/播放次数/添加日期」三列依赖 `/me/library/songs` 真带这些字段（客户端界面有这三列，推测一致）；订阅广告页的像素级版式无法与客户端逐像素比对（客户端内容页在会员过期态自身报错），如需更贴可让用户补一张客户端主页截图。
+
+## 27. Apple 资料库「没会员就没数据」的边界摸清 + 状态修正（2026-10-08 下半场，用户追问「数据呢」）
+
+**用户诉求**：登录但会员过期时，AM 客户端仍显示账号内容（资料库→艺人：Aimer / Dua Lipa / Hoshimachi Suisei / Macklemore / TOGENASHI TOGEARI / Umamusume: Pretty Derby / Yusuke Tanaka & TOGENASHI TOGEARI，艺人页含专辑与曲目），要求传统页补上数据；并明确「探索页已验证、和客户端基本一致」的东西可以直接用。
+
+**实测结论（拿用户账号的真实令牌直接打 Apple 接口，evidence）**：
+- `/v1/me/library/{artists,songs,albums,playlists}`、`/v1/me/recent/played/tracks` 全部 **HTTP 400 `code 40015`**：`Insufficient Privileges — User's subscription tier does not have access to privilege: CloudLibrary / ListeningHistory`。→ **会员过期后，Apple 的「账号资料库」类接口对 Web 侧（media-user-token）是硬拒绝**，换参数（platform/locale/是否带 include）都不行。
+- 公开内容不受影响：`editorial/{sf}/groupings?name=radio|browse`、`catalog/{sf}/charts` 均 200 → 探索页的「广播/新发现/排行榜」和传统页广播页能拿到真实内容。
+- 客户端的资料库来自**另一条通路**：客户端包里的 `AMPLibraryAgent.exe` 用的是 iTunes **iCloud Library（DAAP / MZDaap）**，服务地址由 `https://init.itunes.apple.com/bag.xml?ix=6` 的 `library-daap`（database-name「iCloud Library」）/`iap-daap`（`pd.itunes.apple.com/WebObjects/MZPurchaseDaap.woa/iap`）下发，登录态是**客户端级 Apple ID 认证**（AppleMediaServicesKit + DSID/guid；`https://radio.itunes.apple.com/libraryauth/token` 明确要求 `dsid and guid`）。我们登录窗抓到的是 **Web 会话**（media-user-token + itunes 网域 cookie；`buy.itunes…accountSummary` 对该 cookie 返回 `AccountSummaryLoginRequired`），**不具备 CloudLibrary 权限，也没有 DSID**——所以客户端能看、我们看不了。要在本软件里补上这块，只能另做「客户端级 Apple ID 登录 + DAAP 协议」，属独立项目（可行性未验证）。
+- 客户端本地库落盘在 `%USERPROFILE%\Music\Apple Music\Apple Music Library.musiclibrary\Library.musicdb`，但**不是 SQLite**（`file is not a database`，私有格式），读不了也不该作为产品数据源。
+
+**改动（不再把权限问题显示成「空空如也」）**：
+- `appleCatalog.ts`：`appleMeFetch` 非 strict 分支也走 `describeAppleApiFailure` 并把结论留在 `lastAppleMeFailureMessage`（新导出 `getLastAppleMeFailureMessage()`，成功清空）；订阅失效证据同时被 `hasRecentAppleSubscriptionFailure()` 记录。
+- `applePcKit.tsx` 新增 `ApplePcSubscriptionNotice`（标题「Apple Music 订阅已失效」+ **客户端官方说明**「当你的会员资格暂停后，你的 Apple Music 歌曲和播放列表将保留在资料库中，但不能播放或修改。续订后本页会自动恢复。」+ 服务层给出的具体原因 + 「免费试用」→ 站内购买窗口 + 「重试」；另加 `ApplePcGhostButton`）。
+- `ApplePcLibrary.tsx`（最近添加/艺人/专辑/歌曲）与 `ApplePcPlaylists.tsx`（所有播放列表/喜爱歌曲）：**空结果 + 有失败原因**时渲染上述续订态；无失败原因时维持普通空态。
+- 测试：`test/ApplePcTraditional.test.tsx` 增 1 例（订阅失效 → 续订态 + 「免费试用」调购买桥；注意 `TraditionalView` 平台侧栏也会拉 `getAppleLibrarySongs`，用例里要改 mock 实现而不是 Once）。全量 `vitest run` 241 文件 / 2337 用例全过，`tsc --noEmit` 0 错。
+
+**真机实测（用户正在运行的应用，CDP 9223，跑完已切回原平台 soda）**：传统模式 Apple 广播页**有真实内容**（推荐单集「ROSÉ and Lizzy McAlpine / Apple Music 电台」大卡 + 「现在就听」国语/粤语流行电台方卡，Apple 官方渐变封面）；歌曲/艺人/所有播放列表/喜爱歌曲页显示上述「订阅已失效」态（含 Apple 原话与续订按钮）。截图：`D:\opencode\apple-live-*.png`（真机）、`apple-light6-*.png`（有数据版式）、`apple-light7-ad.png`（订阅广告）。
+取证/验证脚本：`.tmp-appleprobe.mjs`（公开端点与 `/me` 端点矩阵探测）、`.tmp-appleprobe2.mjs`、`.tmp-appleprobe3.mjs`（逐个 `/me/*` 端点可用性）、`.tmp-appletrue.mjs`（种子真实凭据的端到端验证）、`.tmp-applelivedrive.mjs`（真机逐页截图 + 恢复平台）、`.tmp-appleexplorecheck.mjs`（真机切探索模式对照 Apple 探索页各页签，跑完恢复 viewMode）。
+
+### 27.1 补充实测（2026-10-08 深夜，用户追问「探索页有数据、你这就没了」）
+
+**用服务层在 Node 里直连 amp-api（绕过本机 3001 的令牌门）跑真实账号，得到干净结论**：
+
+| 页面/数据 | 实测结果 |
+|---|---|
+| 主页 `fetchAppleHomePage` | `subscriptionExpired=true` + **2 个公开兜底货架**（今日热选 30 首、编辑精选歌单 16 个），fallbackReason =「Apple Music 订阅已失效，个性化推荐暂不可用，已显示公开内容」 |
+| 广播 `fetchAppleRadioPage` | **13 个货架全有数据**：推荐单集 / 现在就听 / 新近内容(20) / 艺人接管麦克风(10) / 电台主持人(5) / 艺人主持节目(10) / 艺人分享(20) / 热门电台(12) / 风格电台(14) / **最近收听的电台(11，账号数据！)** / 探索更多(9) |
+| 资料库 `fetchAppleLibraryPage` | **0 货架、且没有 fallbackReason**（各 library 调用静默返回空）——探索页「资料库」页签在无会员时本来就是空的 |
+| `/v1/me/library/*`（含 `recently-added`）| 全部 400 / 40015 CloudLibrary；`/v1/me/recent/played` 40015 ListeningHistory；`/v1/me/recent/radio-stations` **200 ✓**；`/v1/me/account` **200 ✓** |
+
+**真机对照**（用户应用内截图）：探索页 Apple「广播」页签有数据（推荐单集 + 现在就听 + 新近内容）＝ 传统页广播页同一份数据 ✓；探索页「主页」= 兜底文案 + 骨架（RSS 兜底货架加载慢/失败，应用内同样如此）；客户端「最近添加/艺人」有内容＝它走客户端级 iCloud 资料库通道（见上），Web 侧拿不到。
+
+**改动**：
+- `ApplePcHome`：订阅失效但**有公开兜底货架**时，订阅广告收成一张**卡片**（图标 + 标题 + 说明 + 免费试用）放在页首，下面照常渲染兜底货架 + `fallbackReason` 提示条；没有任何兜底内容时仍是整页订阅广告。未登录仍整页广告。
+- 诊断注意：在**应用内浏览器路径**下探测会先打到本机 3001（有令牌门）→ 403「登录已过期」，那是假的失败；要判断 Apple 真实返回，用 `window.electron.appleApi`（主进程 IPC）或直连 amp-api（`amp-api.music.apple.com`）——`.tmp-appleprobe3.mjs` / `.tmp-appletrue.mjs` 就是这么做的。
+
+### 27.2 「客户端同级登录 + DAAP」可行性验证：**不可行**（2026-10-08，用户点选方案 ② 后执行）
+
+**验证步骤（全部只读，未改系统设置/未安装证书）**：
+1. **客户端二进制的协议线索**（`.tmp-appledaap-strings.py`，扫 `AMPLibraryAgent.exe` / `AMP.Services.dll` / `AppleMediaServicesKit.dll`）：
+   - `MZDaap` 只以「服务操作名数组」出现在 bag 解析表里（`defaultDaap` / `databases` / `items` / `containers` / `edit` / `update` / `cloudArtworkInfo` / `cloudLyricsInfo` …），**二进制里没有任何 DAAP 主机/路径字面量** → 地址是运行时按账号解析的。
+   - 认证头是 **AMS（Apple Media Services）签名家族**：`X-Apple-ActionSignature`、`X-Apple-FPDISignature`、`X-Apple-MD*` / `X-Apple-AMD*`（`X-Apple-MD-M`/`-S`/`-Data`/`-Action`）、`X-Apple-ADSID`、`X-Apple-Client-Application`、`X-Apple-Store-Front`、`X-Apple-Cuid`、`X-Apple-Issuing-Process` / `X-Apple-Requesting-Process`。这些签名由 Apple 自己的客户端代码 + **FairPlay 设备身份（FPDI）** 生成。
+   - DAAP 属性名表（`album-added-date`、`album-liked-state`、`song-*` …）证实客户端就是标准 DAAP 元数据字典。
+2. **bag 里找不到 iCloud 资料库的 DAAP 地址**：`init.itunes.apple.com/bag.xml?ix=6` 只给了 *购买* DAAP（`pd.itunes.apple.com/WebObjects/MZPurchaseDaap.woa/iap|purchase`）；`library-daap` 只有 database-id/name（iCloud Library）与轮询频率，**没有 base-url**（对照：`iap-daap`/`purchase-daap` 都有）→ iCloud 资料库的地址只在**账号个性化 bag** 里，而个性化的前提正是第 1 条那套 AMS 认证。
+3. **用我们已有的会话实测 DAAP**：拿用户 Web 会话 cookie 打 `pd.itunes.apple.com` / `p14-buy.itunes.apple.com`（客户端缓存里出现过的商店分片主机）的 `/WebObjects/MZDaap.woa/wa/{databases,defaultDaap}` → 全部 **404**（主机/路径都不存在）；`p57-itunes.apple.com`、`p14-itunes.apple.com` 直接 DNS 不存在。
+4. **官方第三条路也关闭**：Apple 对第三方的 MusicKit/amp-api 就是我们在用的 Web 接口，`/v1/me/library/*` 对失效订阅一律 40015 —— 「无订阅读资料库」是 **Apple 客户端专属能力**，官方 API 不提供。
+
+**结论与理由**：
+- 想复刻，必须做到：① 账号个性化 bag（需 AMS 认证）② 每次请求带 Apple 签名的 `X-Apple-MD*/AMD*/ActionSignature/FPDISignature`（需 Apple 的客户端密钥 + FairPlay 设备身份）③ 或者退到旧版 iTunes 密码登录拿 `passwordToken`/DSID 再**猜** DAAP 主机与路径（第 3 步已证明 404，没有可猜的目标）。
+- ① 和 ② 属于**冒充 Apple 自家客户端 / 绕过 Apple 的认证签名**；③ 要在我们 UI 里**收集用户的 Apple ID 密码**（当前设计刻意不接触密码，走 Apple 网页登录），且 2FA 与地址发现都不可控。
+- 因此**不做**（与 27.1 里"不复用客户端凭据库"是同一类边界）。资料库在无会员时的正确形态就是现有的「准确原因 + 免费试用/续订」；续订后各页自动恢复（渲染链路已用数据验证）。
+
+### 27.3 传统模式 Apple 复刻页补上**动态封面**（2026-10-08 深夜，用户问「为什么传统里没动态封面」）
+
+**做法（复用探索页那套，不另写一份）**：把 `AppleExplorePanel.tsx` 里的动态封面实现**逐行抽出**到 `src/components/apple-explore/MotionArtwork.tsx`（`MotionSuspendContext` / `DynamicCover` / `motionCache`+`loadResourceMotion` / `isMotionResourceType` / `MotionArtworkCover`），探索页改为 import（行为不变，抽出的都是原注释原逻辑）；`applePcKit.tsx` 新增 `ApplePcMotionSpec` + `motionSpecOf(item, storefront)`，`ApplePcCover` 增 `motion` 参数（静态封面打底 + `MotionArtworkCover` 动画层，同一套三档可见性 400/150/1200 与负缓存）。接入：主页货架卡与 hero、广播页货架卡、资料库「专辑」网格、播放列表「所有播放列表」网格；首页/广播/资料库/播放列表四个页面都包在 `MotionSuspendContext.Provider`（`suspended` 时暂停取流并回收媒体，`TraditionalView` 已把 `suspended` 传进来）。
+
+**实测结论（服务层直连 + 真机 DOM 双层验证）**：
+- **专辑/歌单有动态封面** ✓：`fetchAppleResourceMotion('playlists'|'albums', id)` 对目录资源返回真实 HLS（如 `pl.2a0a202d…` → `mvod.itunes.apple.com/…/P1094156679_default.m3u8`）；editorial 页的歌单条目本来就带 `motionArtworkUrl`。
+- **电台（stations）没有** ✗，且与探索页**一致**：① `fetchAppleResourceMotion`/`fetchApplePlaylistMotion` 内部有 `APPLE_LIBRARY_ID_PATTERN = /^(i|l|p|ra)\./` 早退，而**目录电台 id 也是 `ra.`** 前缀（实测 `ra.991169024` 等）→ 被整类挡掉；② 即使绕过，editorial 广播页返回的 station 条目 `motionArtworkUrl` 为空、`/v1/catalog/{sf}/stations/{id}?extend=editorialVideo` 也基本无动态图。**要改就得同时动服务层前缀规则 + 探索页**，本轮不动（保持两边一致）。
+- 传统页真机/等价环境 DOM 实测：注入真实 HLS 后「资料库-专辑」6 张卡各有一个 `<video>`，视口内的 3 个 `readyState=4`、`paused=false`、`currentTime` 持续推进（视口外的保持 0/暂停＝可见性调度生效）。截图 `D:\opencode\apple-motion-verify-albums.png`；验证脚本 `.tmp-appleshots-data.mjs`（它的 fetch 桩已能返回 `editorialVideo` 动态封面响应）。
+- ⚠️ **在用户当前（无会员）状态下传统页看不到动画**：资料库被 40015 拒、主页兜底货架在应用内加载不出来 → 没有专辑/歌单卡可动。续订后资料库的专辑/歌单卡会自动带动画封面。
+
+**验证**：`tsc --noEmit` 0 错；`test/ApplePcTraditional.test.tsx`(6) + `test/TraditionalView.test.tsx`(35) 全过；全量 `vitest run` 2360 例中仅 2 例失败，且都在 `test/audioQualitySettings.test.ts`（QQ 音质档位 `atmos2`/`detectQQMusicSvip`）——该文件 02:36 仍在被并行改动、源码里尚无 `detectQQMusicSvip`，与本轮改动无关。
+
+### 27.4 用户反馈两处（2026-10-08 深夜）：兜底歌单封面低清 + 搜索框要进「类别浏览」
+
+**① 探索页主页「编辑精选歌单」部分封面发虚（新发现里同一歌单是清晰的）**
+- 成因：主页兜底走 RSS（`getAppleEditorialPlaylists` → `music/most-played/N/playlists.json` 的 `artworkUrl100`，**部分歌单母版就是低清**），新发现走目录/编辑接口（`{w}x{h}` 模板，清晰）。
+- 修法（`appleCatalog.getAppleEditorialPlaylists`）：RSS 结果按 `pl.` id **批量补一次目录**——`/v1/catalog/{sf}/playlists?ids=<逗号分隔>`，优先用目录的 `name/curatorName/artwork.url(模板)/trackCount`，失败/缺项回落 RSS 值。**坑：该端点与 `ids` 同用时不允许带 `limit`**（实测 400 `Limit may not be supplied on this request`）。实测目录返回 `…/thumb/…png/{w}x{h}SC.DN01.jpg?l=zh-Hans` 模板 ✓（artwork 解析会按卡片尺寸换分辨率）。
+- 这一条同时惠及传统模式 Apple 主页（同一 `fetchHomeFallback` → 编辑精选歌单货架）。
+
+**② 点搜索框应先进「类别浏览」（客户端与官网都是这样）**
+- 新增 `src/features/traditionalPc/ApplePcSearch.tsx`：客户端版式（大标题「搜索」+ 40px 内边距）里**直接复用探索模式的两个组件**——`AppleMusicSearchPage`（搜索框 + Apple Music/你的资料库 范围切换 + 结果分区）+ `BrowseCategoriesLanding`（无关键词时的 apple-curators 类别浏览网格），播放/跳转全部回到 `pcActions`（歌单→`onOpenPlaylist`、专辑→`onOpenAlbum`、艺人→`onOpenArtist`、电台直接开播、行内右键→全局歌曲菜单）。
+- 接线：`TraditionalView` 懒加载 `LazyApplePcSearch`；`renderPcPage('search')` 在 Apple 下换成它（`renderPage` 的 `search` 分支对 apple 也走 `renderPcPage`）；Apple 的搜索页也归入「自带版式页面」（不吃通用内边距）。
+- 顺带确认：`fetchAppleSearchLanding`（`/v1/recommendations/{sf}?name=search-landing&format[resources]=map`）在**无会员**账号下正常返回 **48 个类别**（含封面）——类别浏览不依赖订阅。
+- 验证：`test/ApplePcTraditional.test.tsx` 增 1 例（侧栏搜索 → 复刻搜索页 → 类别浏览网格）；真机实测（临时切 Apple → 点侧栏搜索 → 类别浏览 48 类真实封面 → 切回原平台）截图 `D:\opencodepple-live-search.png`。
+
+### 27.5 用户反馈「广播页封面全破 + 排版塌」（2026-10-08 深夜）
+
+**排查结论：封面地址与链路没问题，破图来自「非应用窗口」访问。**
+- 本机封面代理 `GET /api/cover?url=…` **要求 `X-WaveForge-Local-Token`**（`local-server.mjs` 全局守卫：缺头一律 403 `Unauthorized local service request`），令牌只由 Electron 主进程的 `onBeforeSendHeaders`（trusted 窗口集合）注入。实测同一张 mzstatic 图：**应用窗口内 200 / image/jpeg / 127900B**；浏览器（含调试浏览器 3105）与 curl 均 **403**。→ 在浏览器里打开本 UI 时，所有 CDN 封面都会破（文字/版式正常），与用户截图完全一致；应用窗口内封面是好的（探索页正常即此原因）。
+- 同时修掉两个真实缺陷（用户"排版什么都没做吗"的观感来源）：
+  1. **尺寸类挂错元素**：`ApplePcCover` 的 `aspect-*`/`w-full` 之前挂在图片上，图片一失败卡片就塌成一条 alt 文本 → 现在尺寸类挂在最外层容器，图片层 `absolute inset-0 h-full w-full`（保客户端 500×324 大卡 / 方形卡版式，加载中/失败都不变）。
+  2. **失败态留破图**：`CachedImage` 在 `retainPrevious` 模式下失败时不清 `imageSrc`，`fallback` 分支永远走不到 → 浏览器的「破图 + alt 文本」一直挂在页面上。现在失败且当前地址就是刚失败的代理地址时清空（有旧图仍保留），fallback 接管；`MotionArtworkCover` 的静态层也补了中性占位（探索页同受益）。
+- 新增 `test/ApplePcCover.test.tsx`（4 例：尺寸类在外层 / 失败走占位且移除破图 img / 电台货架 500×324 / 网格方形保形）；
+
+### 27.6 广播页「雷霆大图」：大卡改为等分容器宽度（2026-10-08 深夜，用户第二轮反馈）
+
+- 问题：`ApplePcStationShelf` 用**固定像素宽**（500/420px）模拟客户端的 500×324 大卡。客户端是 1904px 窗口、内容区 1522px → 3 张 500px ≈ **每张 1/3 内容区**；我们中栏只有 ~1250px（左栏 290 + 右栏 276~320），固定 500px 一下变成"一屏 1~2 张的雷霆大图"。
+- 修法：`ApplePcStationShelf` 从「固定宽横向货架」改为**响应式网格**（默认 3 列：`grid-cols-1 sm:grid-cols-2 xl:grid-cols-3`，卡宽 = 列宽、比例仍 500/324），推荐单集/节目卡走 `columns={2}`（宽幅两列）；`cardWidth` 参数移除。调用方（主页货架、广播页）同步更新。
+- 验证：`test/ApplePcCover.test.tsx` 的电台卡用例改为断言「网格 + `xl:grid-cols-3` + 无 `overflow-x-auto` + 无固定像素宽 + 卡片保留 500/324 比例」；
+
+### 27.7 广播/主页改为**直接嵌入探索面板**（2026-10-08 深夜，用户：「不能直接把探索页的布局搬到中间一栏吗，非要自己做」）
+
+- 做法：`AppleExplorePanel` 新增两个开关——`initialTab?: AmTab`（初始页签）与 `chrome?: 'full' | 'none'`（`none` 时隐藏面板自己的页签条 + 商店 chip，导航交给传统模式左栏）。传统模式的 **广播页** = `ApplePcTitle('广播') + <AppleExplorePanel initialTab="radio" chrome="none" …/>`；**主页** = 订阅广告（未登录整页 / 订阅失效页首卡片）+ `<AppleExplorePanel initialTab="home" chrome="none" …/>`。播放/右键菜单回 `pcActions`，歌单/专辑/艺人详情走传统模式既有页面（`onOpenPlaylistPanel`/`onOpenAlbum`/`onOpenArtistPanel` 三个回调）。
+- 结果：传统页与探索页的卡片、货架、抽屉、动态封面**完全同一份实现**，不再有「两边长得不一样、各自优化」的问题。
+- 随之删除自绘的 `ApplePcStationShelf` / `ApplePcCardShelf` / `ApplePcSectionTitle` / `motionSpecOf` / `appleSongKey`（`applePcKit` 只保留封面/网格/表格/空态/按钮/订阅提示等仍被资料库与播放列表页使用的基件），`test/ApplePcCover.test.tsx` 同步去掉电台货架用例。
+- 测试提示：页面按需懒加载，全量跑（并行 240+ 文件）时首次动态 import 会超过 testing-library 默认 1s 等待——`test/ApplePcTraditional.test.tsx` 已 `configure({ asyncUtilTimeout: 5000 })`（单跑通过、全量偶发失败就是这个原因）。
+- 验证：`tsc` 0 错；全量 `vitest` **244 文件 / 2376 用例全过**；验证环境实测传统广播页渲染出面板内容（「电台精选 / Apple Music 官方频道与电台 + 电台卡货架」，页签条已隐藏）截图 `D:\opencodepple-panel-radio.png`；dist 已重建。
+
+### 27.8 广播页封面两处修正（2026-10-08 下午，用户：「裁切有问题吧/电台主持人这种封面就没了」）
+
+**结论先行：两个都不是会员问题**（编辑内容不依赖订阅；同一账号的探索页/传统页同源取数，会员态只影响 `/me/library`）。实测接口后定位到两处取图缺陷：
+
+1. **「现在就听」大卡标题被裁**：这类电台的封面是 **4320×1080 宽幅合成图**（`{w}x{h}{c}` 或已展开的 `600x600cc`，字标/标题烤在画面里）。此前 `itemize` 走 `extractEditorialArtworkUrl`→`toHighResArtwork` 强制 **600×600 居中方裁**，把字裁掉了（官网按宽卡比例取图）。
+   修法：`extractEditorialArtworkUrl` 与新的 `artworkUrlForCard` 对**源图宽高比 < 0.6 的横图**改按 **16:9（960×540）** 请求；数字形态（`600x600cc`）先还原成 `{w}x{h}` 模板再替换。
+2. **「Apple Music 电台主持人 / 艺人主持节目」整排无封面**：这两区是 `[385] 容器 → [394] 节目卡` 结构，**394 元素自己带 4320×1080 的 artwork**，而 contents 里的 radio-shows 不带图；此前 385 分支只看 contents → 整排空。修法：385 分支优先用 394 自带图（`artworkAtSize(showAttrs.artwork, 960, 540)`），回落 station 普通封面。
+
+**验证**：服务层探针实测 URL 已变为 `…/960x540cc.jpg`（主持人/艺人主持节目两区每条都有图），两张样图直连 200（48KB / 199KB image/jpeg）；`tsc`（排除并行改动的 ExploreView/musicApi）0 错；Apple 相关测试 49 例全过；dist 已重建。
+**环境噪音**（与本轮无关，均因并行改动）：全量 vitest 有 10 例失败全部集中在酷狗（`KugouExplorePage` 「刷歌」分区已被并行下线、测试仍断言三区；`kugouExploreIsolation`/`kugouYouthFeed` 的源码文本断言对不上新源码）；`tsc` 在 `ExploreView.tsx`（accountTierBadge*）与 `musicApi.ts`（soda url 类型）的报错同样是并行在途代码。验证环境（stub harness 喂 6 个电台）截图 `D:\opencodepple-layout-radio.png` 实测 **每行 3 张、每张约内容区 1/3**，标签在卡上方，与客户端一致。`tsc` 排除并行改动的 `ExploreView.tsx` 后 0 错；Apple 相关测试 11 例全过；dist 已重建。`tsc` 0 错；全量 `vitest` 2370 例中仅 1 例失败——`test/kugouExploreIsolation.test.ts` 是对 `ExploreView.tsx` 源码文本的断言，而该文件 03:15 正被并行改动（断言字符串已不在源码里），与本轮无关。dist 已重建。
