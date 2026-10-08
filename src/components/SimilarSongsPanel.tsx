@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { X, Music, Play, ListPlus } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getSimilarSongs, getProxiedImageUrl } from '../services/musicApi'
+import { platformLabel } from '../services/platforms'
 import { createTtlCache } from '../utils/ttlCache'
 import { useTvBack } from '../tv/tvCore'
 import { createPortal } from 'react-dom'
@@ -142,25 +143,16 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme, 
         void fetchSimilarSoda()
         return
       }
-      // 酷狗：无相似歌曲接口，用「同歌手热门 + TOP500 榜单」组合做相关探索
+      // 酷狗：官方客户端的「相似歌曲」本身就是弹窗列表——直接走客户端同源接口
+      // （标准版 /v3/album_audio/related，入参是 mixsongid）。此前用「同歌手热门 + TOP500」
+      // 拼凑，既不是官方相似度、也不是客户端行为。
       if (song.platform === 'kugou') {
         const fetchSimilarKugou = async () => {
           try {
             const kugou = await import('../services/kugouService')
-            const singerId = String(song.artists?.[0]?.id || '')
-            const [singerSongs, rankSongs] = await Promise.all([
-              singerId ? kugou.fetchKugouSingerSongs(singerId, 1, 30) : Promise.resolve([] as any[]),
-              kugou.fetchKugouRankInfo('8888', 30).catch(() => [] as any[]),
-            ])
-            const seen = new Set([String(song.mid || song.id)])
-            const merged: Song[] = []
-            for (const candidate of [...singerSongs.map(kugou.kugouTrackToSong), ...rankSongs.map(kugou.kugouTrackToSong)]) {
-              const key = String(candidate.mid || candidate.id)
-              if (!key || seen.has(key)) continue
-              seen.add(key)
-              merged.push(candidate)
-              if (merged.length >= 30) break
-            }
+            const tracks = await kugou.fetchKugouSimilarSongs(song as { kugouMixSongId?: number }, { pagesize: 30 })
+            const merged = tracks.map(kugou.kugouTrackToSong)
+              .filter(candidate => String(candidate.mid || candidate.id) !== String(song.mid || song.id))
             if (!cancelled && merged.length) { setSongs(merged); similarSongsCache.set(cacheKey, merged) }
           } catch { /* ignore */ }
           if (!cancelled) setLoading(false)
@@ -234,7 +226,8 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme, 
                 </div>
                 <div>
                   <h2 className="text-base font-semibold text-white">相似歌曲</h2>
-                  <div className="text-white/50 text-[11px] -mt-0.5">{song.platform === 'qq' ? 'QQ音乐' : '网易云音乐'}</div>
+                  {/* 平台署名按歌曲实际平台走：以前只有 QQ/网易云两分支，酷狗会被错标成网易云 */}
+                  <div className="text-white/50 text-[11px] -mt-0.5">{platformLabel(song.platform || 'netease')}</div>
                 </div>
               </div>
               <button onClick={onClose} className="p-2 rounded-full transition-colors hover:bg-white/15">

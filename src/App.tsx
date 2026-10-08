@@ -90,6 +90,7 @@ import { autoMixAnalysisService } from './services/autoMixAnalysisService'
 import { getAudioEngineVersion, setAudioEngineVersion, type AudioEngineVersion } from './services/audioEngineVersion'
 import { getEngineAdapter, getAvailableEngines, getAvailableEngineIds, type IAudioEngineAdapter } from './services/audio-engine'
 import { sequenceTracksHam2, type SequencingEntry } from './services/playlistSequencing'
+import { resolveArtistIdentifier, resolveViewArtistIntent } from './services/playbackArtist'
 import { likeSong, addSongToPlaylist, getUserPlaylists, updateCachedUserPlaylists, getPlaylistDetail } from './services/playlistService'
 import { fetchExploreRecommendationBatch } from './services/exploreApi'
 import { fetchNeteaseHeartMode, fetchNeteaseRoam } from './features/neteaseExplore/api'
@@ -168,6 +169,7 @@ const loadPlaylistPanel = () => import('./components/PlaylistPanel')
 const loadLoginView = () => import('./components/LoginView')
 const loadProfileView = () => import('./components/ProfileView')
 const loadArtistDetailModal = () => import('./components/ArtistDetailModal')
+const loadArtistPickerModal = () => import('./components/ArtistPickerModal')
 const loadAlbumDetailModal = () => import('./components/AlbumDetailModal')
 const loadCommentModal = () => import('./components/CommentModal')
 const LazyPlaylistPanel = lazy(loadPlaylistPanel)
@@ -176,6 +178,7 @@ const LazyPlaylistDetailPanel = lazy(loadPlaylistDetailPanel)
 const LazyLoginView = lazy(loadLoginView)
 const LazyProfileView = lazy(loadProfileView)
 const LazyArtistDetailModal = lazy(loadArtistDetailModal)
+const LazyArtistPickerModal = lazy(loadArtistPickerModal)
 const LazyAlbumDetailModal = lazy(loadAlbumDetailModal)
 const LazyCommentModal = lazy(loadCommentModal)
 const loadModernAudioVisualizer = () => import('./components/ModernAudioVisualizer')
@@ -238,6 +241,7 @@ import { isPluginEnabled, PLUGIN_STATE_EVENT } from './services/pluginStore'
 import { hasEnabledAudioPlugin } from './plugins/registry'
 import {
   createPlatformEntitlements,
+  detectQQMusicSvip,
   detectQQMusicVip,
   entitlementTierFromSodaMembership,
   entitlementTierFromSpotifyProduct,
@@ -1201,8 +1205,12 @@ function App() {
   
   // 艺人和专辑详情弹窗状态
   const [showArtistDetail, setShowArtistDetail] = useState(false)
+  // 多歌手「查看歌手」选择器：{ song } 有值时弹出（背景用该曲封面）
+  const [artistPicker, setArtistPicker] = useState<{ show: boolean; song: Song | null }>({ show: false, song: null })
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null)
   const [selectedArtistPlatform, setSelectedArtistPlatform] = useState<MusicPlatform>('netease')
+  // 歌手名提示：QQ 纯数字 singer_id 反查真 mid 时按名采信（handleOpenArtist 记录）
+  const [selectedArtistName, setSelectedArtistName] = useState('')
   const [showAlbumDetail, setShowAlbumDetail] = useState(false)
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null)
   const [selectedAlbumPlatform, setSelectedAlbumPlatform] = useState<MusicPlatform>('netease')
@@ -2237,13 +2245,32 @@ function App() {
     const cached = preloadCacheRef.current.get(cacheKey)
     const cachedUrlTimestamp = cached?.urlTimestamp ?? (cached?.url ? cached.timestamp : undefined)
 
-    const platform = song.platform || 'netease'
+    // 跨平台补源（平台可用性增强）：汽水等平台的歌实际用别的平台音源出声时，
+    // 歌词也要**跟着音源平台走**——网易云源带翻译、逐字等各自的质量特征，
+    // 按原平台取词会丢掉这些（实测：Fire Again 补网易云源，原汽水路径无翻译，网易云 tlyric 存在）。
+    // 登记表里有 from 平台 + carrierId（实际音源歌曲 id），直接拿来取词。
+    let lyricPlatformOverride: MusicPlatform | null = null
+    let lyricIdOverride: string | number | null = null
+    if (song.platform === 'soda') {
+      try {
+        const reg = JSON.parse(localStorage.getItem('wf_cross_filled_tracks') || '{}')
+        const info = reg[`soda:${song.mid || song.id}`]
+        if (info && info.from && info.carrierId) {
+          lyricPlatformOverride = info.from as MusicPlatform
+          lyricIdOverride = String(info.carrierId)
+        }
+      } catch { /* 登记表读不到就按原平台走 */ }
+    }
+
+    const platform = lyricPlatformOverride || (song.platform || 'netease') as MusicPlatform
     // 汽水的 item_id 是超长数字串，Number 化会截断失配；Apple 必须优先使用 catalog appleId。
-    const rawSongId = platform === 'apple'
-      ? (song.appleId || song.id)
-      : (platform === 'qq' || platform === 'soda' || platform === 'kugou')
-        ? (song.mid || song.id)
-        : song.id
+    const rawSongId = lyricIdOverride != null
+      ? lyricIdOverride
+      : platform === 'apple'
+        ? (song.appleId || song.id)
+        : (platform === 'qq' || platform === 'soda' || platform === 'kugou')
+          ? (song.mid || song.id)
+          : song.id
     const resolveLyricsSongId = async (): Promise<string | number> => {
       const value = String(rawSongId || '')
       if (platform === 'apple' && APPLE_LIBRARY_ID_PATTERN.test(value)) {
@@ -2269,6 +2296,9 @@ function App() {
     //     合并管线的改动都要随手升这个版本号**，否则等于没改。
     // 来源策略进入 key：切语言、登录态、第三方/自适应/主源后不会继续读取旧结果。
     const lyricsPolicyKey = [
+      // 跨平台补源换轨进入 key：同一首歌补源前后取词平台不同（汽水源无翻译、网易云源有），
+      // 不进 key 会命中补源前缓存的无翻译旧结果，修复对已缓存歌曲完全不可见。
+      lyricPlatformOverride ? `xf-${lyricPlatformOverride}` : 'non-xf',
       platform === 'apple' ? (localStorage.getItem('appleMusicEnabled') || 'default') : 'non-apple',
       platform === 'apple' ? (localStorage.getItem('appleLyricLang') || 'zh-hans-cn') : '-',
       platform === 'apple' ? (getAppleAuthState().loggedIn ? 'logged-in' : 'logged-out') : '-',
@@ -2294,7 +2324,7 @@ function App() {
           lyricsSongId,
       platform,
       song.name,
-      song.artists.map(artist => artist.name).join(', '),
+      song.artists.map(artist => artist.name).filter(Boolean).join(', '),
       song.duration,
       (progressLyrics, source, hasWordByWord) => {
         if (lyricsCacheGeneration !== lyricsCacheGenerationRef.current) return
@@ -3482,6 +3512,12 @@ function App() {
         let normalizedSong = normalizeSongCover(song)
       // 本地听歌记录：「听歌报告」数据源（每次实际开播记一条，90 秒内同曲去重）
       recordListen(normalizedSong)
+      // 酷狗：无缝切换同样是一次开播，与普通播放路径一致上报最近播放（失败静默）
+      if ((normalizedSong.platform || 'netease') === 'kugou') {
+        void import('./services/kugouService')
+          .then(m => m.uploadKugouPlayRecord(normalizedSong))
+          .catch(() => undefined)
+      }
         if ((normalizedSong.platform || 'netease') === 'qq' && !normalizedSong.album?.picUrl) {
           normalizedSong = await loadQQSongDetail(normalizedSong)
         }
@@ -4845,7 +4881,7 @@ function App() {
   }
 
   // 打开艺人详情
-  const handleOpenArtist = (artistId: string, platform: MusicPlatform) => {
+  const handleOpenArtist = (artistId: string, platform: MusicPlatform, artistName = '') => {
     // 歌单详情面板(z-95)高于艺人弹窗(z-70)：从面板内"查看歌手"时先关面板，避免新弹窗被盖住。
     // 这里必须立即释放数据（不能等退场动画），否则新艺人弹窗会被仍在退场的面板压住约 300ms。
     closeDetailPlaylistImmediate()
@@ -4869,6 +4905,7 @@ function App() {
     if (prevSong) pushNavigation(prevSong)
     setSelectedArtistId(artistId)
     setSelectedArtistPlatform(platform)
+    setSelectedArtistName(String(artistName || ''))
     setSelectedArtistAlbumId(undefined)
     setSelectedArtistTab('hotSongs')
     setShowArtistDetail(true)
@@ -5476,7 +5513,15 @@ function App() {
                 if (!autoplayStationId) throw new Error('Apple 自动连播电台不可用')
                 return fetchAppleAutoplayTracks(autoplayStationId, 5)
               })()
-            : fetchExploreRecommendationBatch(continuationPlatform, requestedBatch, excludedSongKeys)
+            // QQ 电台（猜你喜欢/随心听）：一次补 5 首走 fast 路径（≈0.9s），续拉很快；
+            // 官方播放列表里就是「共 5 首 + 持续推荐歌曲」这个语义。
+            : fetchExploreRecommendationBatch(
+              continuationPlatform,
+              requestedBatch,
+              excludedSongKeys,
+              undefined,
+              continuationPlatform === 'qq' ? { count: 5, fast: true } : {},
+            )
     // 请求发起时的加载修订号：若用户等待期间手动换歌，只追加队列，不自动抢播。
     const loadRevisionAtRequest = songLoadRevisionRef.current
     void continuationRequest
@@ -5570,13 +5615,20 @@ function App() {
       // Apple：队列条目需先解析载体歌曲取真实音频 URL，避免用 Apple ID 打网易云接口
       const playable = platform === 'apple' ? await resolvePlayableSong(song) : song
       if (!playable) return null
-      const resolvedPlatform = playable.platform || 'netease'
+      // 音质与供源平台绑定：Apple 曲目预载走载体平台（身份仍是 Apple）；其它平台按 override 分流
+      const carrierSong: Song = platform === 'apple' && playable !== song
+        ? { ...song, audioSourceOverride: { platform: (playable.platform || 'netease') as MusicPlatform, id: String(playable.platform === 'qq' ? (playable.mid || playable.id) : playable.id) } }
+        : song
+      const override = carrierSong.audioSourceOverride
+      const resolvedPlatform = override?.platform || (playable.platform || 'netease')
       const cached = preloadCacheRef.current.get(trackKey)
       const cachedUrlIsFresh = Boolean(
         cached?.url
         && Date.now() - (cached.urlTimestamp ?? cached.timestamp) < 5 * 60 * 1000
       )
-      const songId = (resolvedPlatform === 'qq' || resolvedPlatform === 'soda' || resolvedPlatform === 'kugou') ? (playable.mid || playable.id) : playable.id
+      const songId = override
+        ? override.id
+        : (resolvedPlatform === 'qq' || resolvedPlatform === 'soda' || resolvedPlatform === 'kugou') ? (playable.mid || playable.id) : playable.id
       const audioUrlGeneration = audioUrlCacheGenerationRef.current
       const url = cachedUrlIsFresh ? cached!.url : await getSongUrl(songId, resolvedPlatform)
       if (!url || url === 'SONG_UNAVAILABLE') return null
@@ -6021,7 +6073,12 @@ function App() {
           }, 2000)
           return
         }
-        audioSong = resolved
+        // 身份不换：apple/spotify 曲目借网易云/QQ 载体出声，但歌曲仍是原平台身份
+        // （platform/歌词/艺人/专辑/收藏不动）；audioSourceOverride 告诉取流层用载体。
+        audioSong = {
+          ...normalizedSong,
+          audioSourceOverride: { platform: resolved.platform || 'netease', id: String(resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id) },
+        }
       }
       if ((normalizedSong.platform || 'netease') === 'qq' && !normalizedSong.album?.picUrl) {
         normalizedSong = await loadQQSongDetail(normalizedSong)
@@ -6083,7 +6140,8 @@ function App() {
         if (platform === 'soda') {
           // 汽水：改调结构化播放详情（替代裸 getSongUrl 直取 URL），不可播时带上
           // requiredTier/vipLabel/reason 供换源提示文案；请求口径与 getSongUrl 汽水分支一致
-          const playbackInfo = await getSodaPlaybackInfo(songId)
+          // （传 audioSong 让补源覆盖生效：汽水歌借 QQ/网易音频时按供源平台发请求）
+          const playbackInfo = await getSodaPlaybackInfo(songId, audioSong)
           url = playbackInfo.url
           if (!url) {
             sodaUnavailableInfo = {
@@ -6093,7 +6151,7 @@ function App() {
             }
           }
         } else {
-          url = await getSongUrl(songId, platform)
+          url = await getSongUrl(songId, platform, 2, audioSong)
         }
         if (!isLatestLoad()) return
         if (url && url !== 'SONG_UNAVAILABLE') {
@@ -6131,29 +6189,105 @@ function App() {
           .then(m => m.reportSodaPlay(String(normalizedSong.mid || normalizedSong.id)))
           .catch(() => undefined)
       }
+      // 酷狗：原生音源解析成功后上报「最近播放」（mxid=Song.kugouMixSongId，缺失时服务端按 hash 反查）。
+      // 上报失败静默；降级到其它平台载体时此分支不会命中（url 为空先走补源）。
+      if (platform === 'kugou' && url) {
+        void import('./services/kugouService')
+          .then(m => m.uploadKugouPlayRecord(normalizedSong))
+          .catch(() => undefined)
+      }
       
       if (!url && !useWebView2) {
-        // 酷狗/汽水：原生播放失败（付费/版权/未登录）→ 尝试网易云/QQ 同款匹配播放
-        if (normalizedSong.platform === 'kugou' || normalizedSong.platform === 'soda') {
+        // 跨平台可用性增强（设置开关「平台可用性增强」）：原生播放失败（付费/版权/未登录）→ 尝试同名匹配播放。
+        // 此前酷狗/汽水无论开关如何都会匹配、QQ 完全不匹配，与设置文案不符；现在统一受开关控制。
+        const fallbackEnabled = parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)
+        const fallbackPlatforms = ['kugou', 'soda', 'qq']
+        if (fallbackEnabled && fallbackPlatforms.includes(normalizedSong.platform || 'netease')) {
           // 汽水源不可播：先弹一次性可感知提示（标注「汽水·」前缀，避免用户误以为播的是网易云版本），
           // 再走既有同名匹配兜底；netease/qq 兜底流程本身不变
           if (normalizedSong.platform === 'soda') {
             addToast(buildSodaSourceSwitchToast(normalizedSong, sodaUnavailableInfo), 'error')
           }
+          const sourceSong = normalizedSong
+          // 后端控制台留痕用：说清「原平台为什么播不了」，否则日志里只有一个「补源失败」看不出所以然。
+          // 会员档位判定与 buildSodaSourceSwitchToast 保持同一口径——'free' 不是「需要会员」，
+          // 不能拼成「汽水需 FREE」这种废话。
+          const fillTier: 'SVIP' | 'VIP' | '' =
+            sodaUnavailableInfo?.requiredTier === 'svip'
+              ? 'SVIP'
+              : sodaUnavailableInfo?.requiredTier === 'vip'
+                ? 'VIP'
+                : /svip/i.test(String(sodaUnavailableInfo?.vipLabel || ''))
+                  ? 'SVIP'
+                  : /^vip/i.test(String(sodaUnavailableInfo?.vipLabel || ''))
+                    ? 'VIP'
+                    : ''
+          const fillReason = normalizedSong.platform === 'soda'
+            ? (fillTier
+              ? `汽水需 ${fillTier}`
+              : SODA_UNAVAILABLE_REASON_TEXT[String(sodaUnavailableInfo?.reason || '')] || '汽水音源暂时无法解析')
+            : normalizedSong.platform === 'kugou'
+              ? '酷狗付费/版权受限'
+              : 'QQ 音乐付费/版权受限'
+          const fillTrackInfo = {
+            title: String(normalizedSong.name || ''),
+            artist: normalizedSong.artists?.map(a => a.name).filter(Boolean).join(' / ') || '',
+            reason: fillReason,
+          }
           const resolved = await resolvePlayableSong(normalizedSong)
           if (resolved && resolved.platform !== normalizedSong.platform) {
             const carrierUrl = await getSongUrl(resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id, resolved.platform)
             if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE') {
-              normalizedSong = resolved
+              // 登记补源：歌单行尾显示「补」，让用户知道播的不是原平台音源；
+              // 同时把「从哪个平台补的」打到后端控制台（【平台可用性增强】）
+              void import('./services/crossFillRegistry')
+                .then(m => {
+                  m.recordCrossFill(sourceSong, resolved.platform as MusicPlatform, String(resolved.mid || resolved.id || ''))
+                  m.reportCrossPlatformFill({
+                    from: (sourceSong.platform || 'netease') as MusicPlatform,
+                    to: resolved.platform as MusicPlatform,
+                    ...fillTrackInfo,
+                    success: true,
+                  })
+                })
+                .catch(() => undefined)
+              // 身份不换（用户口径）：歌曲仍是原平台身份——歌词/艺人/专辑/加歌单全跟进入平台，
+              // 只借载体平台的音频。载体平台+id 走 audioSourceOverride 传递（取流按供源平台发），
+              // 并登记进 crossFillRegistry（音质菜单跨会话也能对上供源平台）。
+              normalizedSong = {
+                ...normalizedSong,
+                audioSourceOverride: { platform: resolved.platform as MusicPlatform, id: String(resolved.mid || resolved.id || '') },
+              }
               url = carrierUrl
             }
           }
           if (!url) {
-            addToast(normalizedSong.platform === 'kugou'
-              ? '该歌曲为酷狗付费/版权受限曲目，且未找到可播放版本'
-              : '该歌曲为汽水 VIP/版权受限曲目，且未找到可播放版本', 'error')
+            void import('./services/crossFillRegistry')
+              .then(m => m.reportCrossPlatformFill({
+                from: (sourceSong.platform || 'netease') as MusicPlatform,
+                ...fillTrackInfo,
+                success: false,
+              }))
+              .catch(() => undefined)
+            addToast(
+              normalizedSong.platform === 'kugou'
+                ? '该歌曲为酷狗付费/版权受限曲目，且未找到可播放版本'
+                : normalizedSong.platform === 'soda'
+                  ? '该歌曲为汽水 VIP/版权受限曲目，且未找到可播放版本'
+                  : '该歌曲为 QQ 音乐付费/版权受限曲目，且未找到可播放版本',
+              'error',
+            )
             return
           }
+        } else if (normalizedSong.platform === 'kugou' || normalizedSong.platform === 'soda') {
+          // 开关关闭：如实提示并给出开启入口，不再静默跨平台补源
+          addToast(
+            normalizedSong.platform === 'kugou'
+              ? '该歌曲为酷狗付费/版权受限曲目，可在设置中开启「平台可用性增强」尝试跨平台补源'
+              : '该歌曲为汽水 VIP/版权受限曲目，可在设置中开启「平台可用性增强」尝试跨平台补源',
+            'error',
+          )
+          return
         } else {
           console.error('获取歌曲URL返回空')
           console.error('  可能原因:')
@@ -6236,14 +6370,19 @@ function App() {
           }
 
           // WebView2 也不可用时回退网易云/QQ 载体（避免把用户晾在 0:00）。
-          const resolved = await resolvePlayableSong(normalizedSong)
-          if (resolved && isLatestLoad()) {
-            const carrierId = resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
-            const carrierUrl = await getSongUrl(carrierId, resolved.platform || 'netease')
-            if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE' && isLatestLoad()) {
-              normalizedSong = resolved
-              url = carrierUrl
-              setCurrentTrack(createTrackFromSong(normalizedSong, url))
+              const resolved = await resolvePlayableSong(normalizedSong)
+              if (resolved && isLatestLoad()) {
+                const carrierId = resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
+                const carrierUrl = await getSongUrl(carrierId, resolved.platform || 'netease')
+                if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE' && isLatestLoad()) {
+                  // 身份不换：HLS 失败回落载体时同样保留原平台身份（Apple 仍是 Apple），
+                  // 只借载体音频；详情/收藏/歌单操作继续按 Apple 平台走。
+                  normalizedSong = {
+                    ...normalizedSong,
+                    audioSourceOverride: { platform: resolved.platform || 'netease', id: String(carrierId || '') },
+                  }
+                  url = carrierUrl
+                  setCurrentTrack(createTrackFromSong(normalizedSong, url))
               songLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics || songLyrics
               const carrierDeckUrl = getProxiedAudioUrl(url)
               started = await audioPlayer.loadAndPlay(carrierDeckUrl, volume, buildDeckMetadata(normalizedSong, carrierDeckUrl, songIndex, {
@@ -7112,7 +7251,7 @@ function App() {
           addToast('当前歌曲缺少歌手信息', 'error')
           return
         }
-        handleOpenArtist(String(artistId), platform)
+        handleOpenArtist(String(artistId), platform, artist?.name || '')
       } else if (action === 'show-song') {
         setSongDetailSong(current)
         setShowSongDetail(true)
@@ -8037,6 +8176,9 @@ function App() {
           const username = getQQUserDisplayName(userDetailData, uin)
           const avatar = user.headpic || user.avatarUrl || user.avatar || ''
           const isVip = detectQQMusicVip(userDetailData)
+          // 超级会员（比绿钻高一级）：杜比全景声/臻品母带4.0/臻品音质2.0 的门槛，单独落盘供音质弹层标注
+          const isSvip = detectQQMusicSvip(userDetailData)
+          localStorage.setItem('qq_svip', isSvip ? 'true' : 'false')
           
           setQQUsername(username)
           setQQAvatar(avatar)
@@ -8072,7 +8214,11 @@ function App() {
       }
     } catch (error) {
       console.error('❌ QQ音乐登录失败:', error)
-      // 添加到喜欢失败
+      // 启动时的静默恢复（showToastMessage=false）失败**不得**清登录态：
+      // 同步后端 cookie 是尽力而为的一步（后端重启/瞬时超时都会失败），
+      // 一次瞬时失败就把 qq_cookie / qq_user_id 抹掉 = 用户被莫名踢出登录，
+      // 左栏歌单与推荐卡随之消失（2026-10-07 实测复现）。保留本地凭据，等后续请求自愈。
+      if (!showToastMessage) return
       setQQUsername('QQ音乐用户')
       setQQAvatar('')
       setQQUserId('')
@@ -8404,6 +8550,12 @@ function App() {
           }).catch(() => { /* 忽略 */ })
         )
       }
+      // 扫码登录面板已把 userid/头像直接落盘（概念版通道没有网页 getinfo）——这里同步进 React state，
+      // 否则个人中心要重启应用（重新读 localStorage）才显示昵称/头像/ID
+      const syncedUserId = localStorage.getItem('kugou_user_id') || ''
+      const syncedAvatar = localStorage.getItem('kugou_avatar') || ''
+      if (syncedUserId) setKugouUserId(syncedUserId)
+      if (syncedAvatar) setKugouAvatar(syncedAvatar)
     }
     setAuthRevision(previous => previous + 1)
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'kugou' } }))
@@ -8414,6 +8566,8 @@ function App() {
     localStorage.removeItem('kugou_username')
     localStorage.removeItem('kugou_avatar')
     localStorage.removeItem('kugou_user_id')
+    // 概念版扫码凭据（kugou_concept_credential）一并清除，避免「退出后仍按扫码通道请求」
+    void import('./services/kugouService').then(m => m.clearKugouConceptCredential()).catch(() => {})
     setKugouLoggedIn(false)
     setKugouUsername('')
     setKugouAvatar('')
@@ -8597,18 +8751,35 @@ function App() {
     else void handleAddToFavorites(song).then(done, done)
   }
 
-  const handlePlaybackViewArtist = (song: Song) => {
+  /** 各平台的歌手标识字段不同：汽水用名字当伪 id、QQ 用 mid、Apple 用 appleId，其余用数字 id。 */
+  const resolvePlaybackArtistId = (platform: MusicPlatform, artist?: { id?: number | string; mid?: string; appleId?: string; name?: string }): string =>
+    resolveArtistIdentifier(platform, artist)
+
+  /** 打开播放中歌曲的第 index 位歌手（播放页右键 / 径向菜单 / 多歌手选择器共用）。 */
+  const openPlaybackArtistAt = (song: Song, index: number) => {
     const platform = (song.platform || 'netease') as MusicPlatform
-    const artist = song.artists?.[0]
-    // 汽水无艺人 ID，约定传歌手名（伪艺人页按名字检索热门曲目，与 TV 遥控器/右键菜单一致）
-    const artistId = platform === 'soda' ? (artist?.name || artist?.id)
-      : platform === 'apple' ? (artist?.appleId || artist?.id)
-        : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
+    const artist = song.artists?.[index]
+    const artistId = resolvePlaybackArtistId(platform, artist)
     if (!artistId) {
       addToast('当前歌曲缺少歌手信息', 'error')
       return
     }
-    handleOpenArtist(String(artistId), platform)
+    handleOpenArtist(artistId, platform, artist?.name || '')
+  }
+
+  const handlePlaybackViewArtist = (song: Song) => {
+    const intent = resolveViewArtistIntent(song.artists)
+    if (intent.kind === 'none') {
+      addToast('当前歌曲缺少歌手信息', 'error')
+      return
+    }
+    // 单歌手直接进歌手页；多歌手先弹出选择器（背景是当前歌曲封面）让用户挑，
+    // 不再默认取第一个——多歌手曲目里其余歌手原来根本没法从播放页进（用户实测反馈）。
+    if (intent.kind === 'direct') {
+      openPlaybackArtistAt(song, intent.index)
+      return
+    }
+    setArtistPicker({ show: true, song })
   }
 
   const handlePlaybackViewAlbum = (song: Song) => {
@@ -9212,9 +9383,9 @@ function App() {
   // 组件实例与内部 state（页签、分页、列表）原样保留，不会重建 DOM、不会重放加载动画、
   // 不会重发请求；id 真正变化时才换 key 重新挂载（该情况本就该重新取数）。
   // 与 mode-view freeze 同款思路（见上方 parkedExplore/parkedMinimal）。
-  const [frozenArtistDetail, setFrozenArtistDetail] = useState<{ id: string | number; platform: MusicPlatform } | null>(null)
+  const [frozenArtistDetail, setFrozenArtistDetail] = useState<{ id: string | number; platform: MusicPlatform; name: string } | null>(null)
   if (showArtistDetail && selectedArtistId && (!frozenArtistDetail || frozenArtistDetail.id !== selectedArtistId || frozenArtistDetail.platform !== selectedArtistPlatform)) {
-    setFrozenArtistDetail({ id: selectedArtistId, platform: selectedArtistPlatform })
+    setFrozenArtistDetail({ id: selectedArtistId, platform: selectedArtistPlatform, name: selectedArtistName })
   }
   const [frozenAlbumDetail, setFrozenAlbumDetail] = useState<{ id: string | number; platform: MusicPlatform } | null>(null)
   if (showAlbumDetail && selectedAlbumId && (!frozenAlbumDetail || frozenAlbumDetail.id !== selectedAlbumId || frozenAlbumDetail.platform !== selectedAlbumPlatform)) {
@@ -11473,11 +11644,27 @@ function App() {
           不用 AnimatePresence 包裹：整屏 backdrop-filter 退出节点会被卡住不卸载，
           普通条件渲染保证选歌后艺人弹窗当帧移除。 */}
       <Suspense fallback={null}>
+        {artistPicker.show && artistPicker.song ? (
+          <LazyArtistPickerModal
+            show={artistPicker.show}
+            song={artistPicker.song}
+            accent={playbackCoverColor}
+            onSelect={index => {
+              const target = artistPicker.song
+              setArtistPicker({ show: false, song: null })
+              if (target) openPlaybackArtistAt(target, index)
+            }}
+            onClose={() => setArtistPicker({ show: false, song: null })}
+          />
+        ) : null}
+      </Suspense>
+      <Suspense fallback={null}>
           {frozenArtistDetail && (
             <LazyArtistDetailModal
             key={'artist-' + frozenArtistDetail.id}
             artistId={frozenArtistDetail.id}
             platform={frozenArtistDetail.platform}
+            artistName={frozenArtistDetail.name}
             suspended={!showArtistDetail}
             onClose={closeArtistDetail}
             onSongSelect={handleArtistDetailSongSelect}

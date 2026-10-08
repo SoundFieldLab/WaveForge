@@ -1,10 +1,11 @@
-import { memo, startTransition, useState, useEffect, useRef } from 'react'
+import { memo, startTransition, useState, useEffect, useRef, lazy, Suspense } from 'react'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
 import { Play, Music, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
+import { accountTierBadgeClass, getAccountTierBadge } from '../services/accountTier'
 import { Song, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities, getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
@@ -34,6 +35,13 @@ import {
   sanitizeHomeModules,
   type HomeModuleType,
 } from '../services/homeModules'
+import type { KugouMinimalTab } from '../features/kugouMinimal/KugouMinimalCenter'
+
+// 酷狗专属区块（听书 / 个人中心 / 最近播放 / 收藏）：懒加载，默认模式 chunk 不为酷狗服务层背体积；
+// 只有切到 kugou 平台才下载/渲染（平台隔离）
+const loadKugouMinimalSuite = () => import('../features/kugouMinimal/KugouMinimalSuite')
+const LazyKugouMinimalSuite = lazy(loadKugouMinimalSuite)
+const LazyKugouLongaudioQuickButton = lazy(() => loadKugouMinimalSuite().then(module => ({ default: module.KugouLongaudioQuickButton })))
 
 interface HomeViewProps {
   onSongSelect: SongSelectHandler
@@ -83,7 +91,7 @@ interface HomeViewProps {
   /** 播放设备控制（音频输出设备 / AirPlay 投送）弹窗 */
   onOpenDeviceControl: () => void
   onSettingsClick: () => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onOpenUserProfile?: (platform: MusicPlatform, userId: string, nickname?: string) => void
   onPlayNext?: (song: Song) => void
@@ -374,6 +382,12 @@ function HomeView({
 
   const [hideHomeAccountId, setHideHomeAccountId] = useState(() => localStorage.getItem('hideHomeAccountId') === 'true')
   const [recentPlaybackSummary, setRecentPlaybackSummary] = useState<{ covers: string[]; count: number }>({ covers: [], count: 0 })
+  // 酷狗个人中心浮层当前页签（null = 关闭）：首页卡片与「个人中心」按钮都指向同一浮层
+  const [kugouCenterTab, setKugouCenterTab] = useState<KugouMinimalTab | null>(null)
+  // 离开酷狗平台时收起浮层：否则切回来会因为残留页签状态自动重开（浮层随平台分支卸载，但 state 还在）
+  useEffect(() => {
+    if (platform !== 'kugou') setKugouCenterTab(null)
+  }, [platform])
   const initialPlaylistUserId = platform === 'netease' ? neteaseUserId : platform === 'qq' ? qqUserId : ''
   const [userPlaylists, setUserPlaylists] = useState<any[]>(() => (
     initialPlaylistUserId
@@ -2050,9 +2064,18 @@ function HomeView({
     const controller = new AbortController()
     const loadSummary = async () => {
       try {
-        // 新三平台中 Spotify/酷狗无最近播放汇总，置空展示；汽水走本地只读聚合路由填充
-        if (platform === 'spotify' || platform === 'kugou') {
+        // Spotify 无最近播放汇总，置空展示；汽水走本地只读聚合路由填充
+        if (platform === 'spotify') {
           setRecentPlaybackSummary({ covers: [], count: 0 })
+          return
+        }
+        // 酷狗：概念版真实播放历史 /playhistory/v1/get_songs（动态 import，默认 chunk 不带酷狗服务层）
+        if (platform === 'kugou') {
+          const { fetchKugouPlayRecords } = await import('../services/kugouService')
+          const result = await fetchKugouPlayRecords()
+          if (controller.signal.aborted) return
+          const covers = result.records.map(record => record.track.coverUrl || '').filter(Boolean).slice(0, 4)
+          setRecentPlaybackSummary({ covers, count: result.records.length })
           return
         }
         // 汽水：/api/soda/recent 复用后端账号库聚合缓存（recently-played-media），
@@ -3001,12 +3024,12 @@ function HomeView({
             <div className={`mt-2 text-center text-[10px] tracking-wide transition-opacity duration-1000 ${switcherHintVisible ? 'opacity-100' : 'opacity-0'} ${playerTheme === 'dark' ? 'text-white/25' : 'text-black/25'}`}>{pillTvAdjust ? '左右键切换平台' : '左右拖动切换平台'}</div>
           </div>
 
-          {/* 已播歌曲汇总卡：网易/QQ/Apple 原生记录 + 汽水（/api/soda/recent 聚合），酷狗/Spotify 无数据不展示 */}
-          {isLoggedIn && (platform === 'netease' || platform === 'qq' || platform === 'apple' || platform === 'soda') && (
+          {/* 已播歌曲汇总卡：网易/QQ/Apple 原生记录 + 汽水（/api/soda/recent 聚合）+ 酷狗（playhistory 概念版），Spotify 无数据不展示 */}
+          {isLoggedIn && (platform === 'netease' || platform === 'qq' || platform === 'apple' || platform === 'soda' || platform === 'kugou') && (
             <div className="px-6 pt-5">
               <motion.button
                 type="button"
-                onClick={() => onProfileClick(platform, 'recent')}
+                onClick={() => platform === 'kugou' ? setKugouCenterTab('recent') : onProfileClick(platform, 'recent')}
                 whileHover={{ scale: 1.015, y: -2 }}
                 whileTap={{ scale: 0.99 }}
                 className="home-recent-card group relative w-full overflow-hidden rounded-2xl text-left"
@@ -3045,6 +3068,33 @@ function HomeView({
             </div>
           )}
 
+          {/* 酷狗专属区块（听书入口 + 我喜欢/收藏歌单 + 个人中心浮层）：仅 kugou 平台挂载 */}
+          {platform === 'kugou' && (
+            <Suspense fallback={null}>
+              <LazyKugouMinimalSuite
+                loggedIn={isLoggedIn}
+                username={username}
+                avatar={avatar}
+                userId={userId}
+                theme={playerTheme}
+                openTab={kugouCenterTab}
+                onOpenTab={setKugouCenterTab}
+                suspended={suspended}
+                onLoginClick={handlePlatformLoginClick}
+                onPlaySongs={(songs, index) => {
+                  setKugouCenterTab(null)
+                  if (songs[index]) onSongSelect(songs[index], songs)
+                }}
+                onOpenPlaylist={(playlist) => {
+                  setKugouCenterTab(null)
+                  void handlePlaylistClick(playlist)
+                }}
+                onAddToFavorites={onAddToFavorites}
+                onRemoveFromFavorites={onRemoveFromFavorites}
+              />
+            </Suspense>
+          )}
+
           <div className="flex-1 flex flex-col items-center justify-center p-6">
             {!isLoggedIn ? (
               <div className="text-center">
@@ -3071,7 +3121,16 @@ function HomeView({
                   <h3 className={`text-xl font-bold ${isVip ? 'text-yellow-400' : playerTheme === 'dark' ? 'text-white' : 'text-black/85'}`}>
                     {username}
                   </h3>
-                  {isVip && <Crown className="w-5 h-5 text-yellow-400" />}
+                  {(() => {
+                    // 会员级别区分：超级会员 > 绿钻 VIP（简约/桌面模式的账号卡）
+                    const tierBadge = getAccountTierBadge(platform, isVip)
+                    if (!tierBadge) return null
+                    return (
+                      <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${accountTierBadgeClass(tierBadge.tone)}`}>
+                        <Crown className="w-3 h-3" />{tierBadge.label}
+                      </span>
+                    )
+                  })()}
                 </div>
 
                 {/* 账号ID */}
@@ -3090,6 +3149,8 @@ function HomeView({
                 <div className="space-y-3 w-full px-4">
                   <button
                     onClick={() => {
+                      // 酷狗没有 ProfileView 分支：打开本平台自己的个人中心浮层（歌单页签对齐 ProfileView 默认页）
+                      if (platform === 'kugou') { setKugouCenterTab('playlists'); return }
                       onProfileClick(platform, 'created')
                     }}
                     className="relative w-full px-6 py-3 text-white rounded-full font-medium transition-all flex items-center justify-center gap-2 overflow-hidden group"
@@ -3279,6 +3340,13 @@ function HomeView({
                   <Search className="w-5 h-5" />
                 </motion.button>
 
+                {/* 听书快捷入口（仅酷狗：独立听书通道不在主播放器里，其它平台无此能力） */}
+                {platform === 'kugou' && (
+                  <Suspense fallback={null}>
+                    <LazyKugouLongaudioQuickButton />
+                  </Suspense>
+                )}
+
                 {/* Settings button */}
                 <motion.button
                   whileHover={{ scale: 1.1 }}
@@ -3345,7 +3413,7 @@ function HomeView({
           const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
             : songPlatform === 'qq' ? (artist?.mid || artist?.id)
               : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : artist?.id
-          if (onOpenArtist && artistId) onOpenArtist(String(artistId), songPlatform)
+          if (onOpenArtist && artistId) onOpenArtist(String(artistId), songPlatform, artist?.name || '')
           setContextMenuVisible(false)
         }}
         onCopyInfo={(song) => {

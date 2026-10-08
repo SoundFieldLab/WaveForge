@@ -17,6 +17,8 @@ import ScrollToCurrentSong from './ScrollToCurrentSong'
 import CommentModal from './CommentModal'
 import DeleteSongModal from './DeleteSongModal'
 import { useTvBack } from '../tv/tvCore'
+import { isCrossFilled, useCrossFillVersion } from '../services/crossFillRegistry'
+import { PLATFORM_LABELS } from '../services/platforms'
 
 const DETAIL_ROW_HEIGHT = 60
 const DETAIL_CARD_HEIGHT = 56
@@ -86,7 +88,7 @@ interface PlaylistDetailPanelProps {
   currentPlatform?: MusicPlatform
   /** 当前登录用户 ID：用于判断歌单是否本人（自建歌单/我喜欢不显示收藏按钮） */
   currentUserId?: string | number
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   /** 歌单创建者主页（歌单的下一级入口） */
   onOpenUserProfile?: (userId: string, nickname?: string) => void
@@ -134,6 +136,8 @@ function PlaylistDetailPanel({
   currentUserId,
 }: PlaylistDetailPanelProps) {
   const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
+  // 订阅跨平台补源登记：曲目行尾的「补」标要跟着播放链路实时出现
+  const crossFillVersion = useCrossFillVersion()
   const [heightVh, setHeightVh] = useState(80) // 从80vh开始，最大90vh
   const [subscribing, setSubscribing] = useState(false)
   // 退场阶段：show 已置 false，但退场动画还在播。期间冻结一切会触发布局/重排的
@@ -254,7 +258,11 @@ function PlaylistDetailPanel({
     try {
       const next = !collected
       const platform = playlist.platform || currentPlatform
-      const result = await subscribePlaylist(String(playlist.id), next, platform)
+      // 酷狗收藏需要歌单归属（ExplorePlaylist.conceptId = global_collection_id）；其它平台忽略附加 meta
+      const result = await subscribePlaylist(String(playlist.id), next, platform, {
+        name: String(playlist.name || ''),
+        conceptId: String((playlist as { conceptId?: string }).conceptId || ''),
+      })
       // 后端成功响应可能带 message（如 QQ 的「已收藏歌单」），不能把 message 当错误
       if (result && (result.error || result.errMsg)) {
         throw new Error(result.error || result.errMsg)
@@ -1102,6 +1110,20 @@ function PlaylistDetailPanel({
                               {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
                                 <Crown className="w-3.5 h-3.5 text-yellow-400 flex-shrink-0" />
                               )}
+                              {/* 跨平台补源标记：该曲目实际播放的是别的平台的音源 */}
+                              {(() => {
+                                void crossFillVersion
+                                const filled = isCrossFilled(song)
+                                if (!filled) return null
+                                return (
+                                  <span
+                                    title={`本曲由 ${PLATFORM_LABELS[filled.from] || filled.from} 补源播放`}
+                                    className="flex-shrink-0 rounded px-1 py-px text-[10px] leading-4 font-medium bg-amber-500/20 text-amber-500"
+                                  >
+                                    补
+                                  </span>
+                                )
+                              })()}
                             </div>
                             <div className={`text-xs truncate ${
                               isCurrentSong
@@ -1109,7 +1131,10 @@ function PlaylistDetailPanel({
                                 : playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'
                             }`}>
                               {song.artists?.map((a: any, artistIndex: number) => {
-                                const artistId = a?.id ? String(a.id) : ''
+                                // 标识取值与右键「查看歌手」同一口径（appleId/mid/id 三段回落）：
+                                // 此前只取数字 id，QQ 歌单歌手往往只有 mid（singer 数组不带 singer_id），
+                                // 行内点名字开出来的是「未知歌手」，右键却正常（用户实测）。
+                                const artistId = a?.appleId || a?.mid || (a?.id ? String(a.id) : '')
                                 const clickable = Boolean(artistId && onOpenArtist)
                                 return (
                                   <span key={`${artistId}-${artistIndex}`}>
@@ -1119,7 +1144,7 @@ function PlaylistDetailPanel({
                                         type="button"
                                         onClick={event => {
                                           event.stopPropagation()
-                                          onOpenArtist?.(artistId, (song.platform || currentPlatform) as MusicPlatform)
+                                          onOpenArtist?.(artistId, (song.platform || currentPlatform) as MusicPlatform, a?.name || '')
                                         }}
                                         className="cursor-pointer transition-colors hover:text-pink-400 hover:underline"
                                         title={`查看歌手 ${a.name}`}
@@ -1255,7 +1280,7 @@ function PlaylistDetailPanel({
             const songPlatform = song.platform || currentPlatform
             const artist = song.artists?.[0]
             const artistId = artist?.appleId || artist?.mid || artist?.id
-            if (artistId) onOpenArtist?.(String(artistId), songPlatform)
+            if (artistId) onOpenArtist?.(String(artistId), songPlatform, artist?.name || '')
             setContextMenu({ show: false, x: 0, y: 0, song: null })
           }}
           onCopyInfo={(song) => {

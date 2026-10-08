@@ -1,16 +1,23 @@
 import { useState, useEffect, useRef, Suspense, lazy } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Music, RefreshCw, ExternalLink } from 'lucide-react'
+import { X, Music, RefreshCw, ExternalLink, QrCode, Globe } from 'lucide-react'
 import type { MusicPlatform } from '../services/platforms'
 import { isTvModeActive } from '../platform'
-import { isPerfModeEnhanced } from '../tv/perfMode'
 import { useTvBack } from '../tv/tvCore'
 import GlobalToast from './GlobalToast'
+import LoginBackdrop from './LoginBackdrop'
 
 // 新平台登录面板（组件外声明，避免条件内 lazy 造成重挂载）
 const KugouLoginPanel = lazy(() => import('./KugouLoginPanel').then(m => ({ default: m.default })))
 const SpotifyLoginPanel = lazy(() => import('./SpotifyLoginPanel').then(m => ({ default: m.default })))
 const SodaLoginPanel = lazy(() => import('./SodaLoginPanel').then(m => ({ default: m.default })))
+
+/** QQ 扫码登录的三个通道（与 Folia 对齐：手机 QQ / 微信；QQ 音乐 App 是额外补的第三通道） */
+const QQ_QR_CHANNELS = [
+  { key: 'qq', label: '手机 QQ 扫码', title: '手机 QQ 扫码登录', hint: '打开手机 QQ 扫一扫，扫描下方二维码' },
+  { key: 'wx', label: '微信扫码', title: '微信扫码登录', hint: '打开微信扫一扫，扫描下方二维码' },
+  { key: 'qqmusic', label: 'QQ音乐扫码', title: 'QQ音乐扫码登录', hint: '打开 QQ 音乐 App 扫一扫，扫描下方二维码' },
+] as const
 
 interface LoginViewProps {
   platform: MusicPlatform
@@ -26,8 +33,6 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
   const pollTimerRef = useRef<number | null>(null)
   const requestControllerRef = useRef<AbortController | null>(null)
   const pollControllerRef = useRef<AbortController | null>(null)
-  // TV 弱 GPU：装饰性光晕（40vw 大圆 filter:blur(80px) + 12s 无限动画）非增强档静态化
-  const glowAnimated = !isTvModeActive() || isPerfModeEnhanced()
   // TV BACK：关闭登录页（此前未注册，TV 上按 BACK 会穿透到原生层直接退出应用）
   useTvBack(() => {
     if (!isTvModeActive()) return false
@@ -44,6 +49,13 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
   const [qqError, setQQError] = useState('')
   const [showCopiedToast, setShowCopiedToast] = useState(false)
   const [qqManualMode, setQQManualMode] = useState(false) // QQ 手动模式
+  // QQ 扫码登录（应用内二维码，与网页登录二选一；主进程走 ptlogin2 协议）
+  const [qqQrMode, setQqQrMode] = useState(false)
+  const [qqQrImage, setQqQrImage] = useState('')
+  const [qqQrChannel, setQqQrChannel] = useState<'qq' | 'wx' | 'qqmusic'>('qq')
+  const [qqQrStatus, setQqQrStatus] = useState<'idle' | 'waiting' | 'scanned' | 'expired' | 'error'>('idle')
+  const [qqQrMessage, setQqQrMessage] = useState('')
+  const qqQrTimerRef = useRef<number | null>(null)
   // 应用内扫码登录（TV）回调的最新引用，供事件监听使用（在函数定义后赋值）
   const handleQQLoginWithCookieRef = useRef<(cookie: string) => Promise<void>>(async () => {})
 
@@ -205,6 +217,9 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
       generationRef.current += 1
       clearPolling()
       clearWebsiteTimers()
+      if (qqQrTimerRef.current !== null) window.clearTimeout(qqQrTimerRef.current)
+      qqQrTimerRef.current = null
+      try { window.electron?.qqQrLoginCancel?.() } catch { /* 忽略 */ }
       requestControllerRef.current?.abort()
       requestControllerRef.current = null
     }
@@ -232,6 +247,70 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
 
   const handleRefresh = () => {
     void generateQRCode()
+  }
+
+  // ── QQ 扫码登录（应用内二维码；主进程 ptlogin2 协议，与网页登录二选一）──
+  const stopQqQrPolling = () => {
+    if (qqQrTimerRef.current !== null) window.clearTimeout(qqQrTimerRef.current)
+    qqQrTimerRef.current = null
+  }
+
+  const cancelQqQr = () => {
+    stopQqQrPolling()
+    try { window.electron?.qqQrLoginCancel?.() } catch { /* 忽略 */ }
+    setQqQrMode(false)
+    setQqQrImage('')
+    setQqQrStatus('idle')
+    setQqQrMessage('')
+  }
+
+  const pollQqQr = async () => {
+    const electron = window.electron
+    if (!electron?.qqQrLoginPoll || !mountedRef.current) return
+    try {
+      const result = await electron.qqQrLoginPoll()
+      if (!mountedRef.current) return
+      if (result.status === 'success' && result.cookie) {
+        stopQqQrPolling()
+        setQqQrStatus('idle')
+        setQqQrMessage('')
+        await handleQQLoginWithCookie(result.cookie)
+        return
+      }
+      if (result.status === 'expired') { setQqQrStatus('expired'); setQqQrMessage(result.message || '二维码已过期，请刷新'); return }
+      if (result.status === 'error') { setQqQrStatus('error'); setQqQrMessage(result.message || '扫码登录失败，请重试'); return }
+      if (result.status === 'cancelled') return
+      setQqQrStatus(result.status === 'scanned' ? 'scanned' : 'waiting')
+      setQqQrMessage(result.message || '')
+      qqQrTimerRef.current = window.setTimeout(() => { void pollQqQr() }, 1500)
+    } catch {
+      if (mountedRef.current) qqQrTimerRef.current = window.setTimeout(() => { void pollQqQr() }, 2500)
+    }
+  }
+
+  const startQqQrLogin = async (channel: 'qq' | 'wx' | 'qqmusic' = qqQrChannel) => {
+    const electron = window.electron
+    if (!electron?.qqQrLoginStart) { setQQManualMode(true); return }
+    setQqQrMode(true)
+    setQqQrChannel(channel)
+    setQqQrImage('')
+    setQqQrMessage('')
+    setQqQrStatus('waiting')
+    setQQError('')
+    try {
+      const result = await electron.qqQrLoginStart(channel)
+      if (!mountedRef.current) return
+      if (!result.success || !result.image) {
+        setQqQrStatus('error')
+        setQqQrMessage(result.error || '二维码生成失败，请重试')
+        return
+      }
+      setQqQrImage(result.image)
+      stopQqQrPolling()
+      qqQrTimerRef.current = window.setTimeout(() => { void pollQqQr() }, 1200)
+    } catch {
+      if (mountedRef.current) { setQqQrStatus('error'); setQqQrMessage('QQ 扫码初始化失败') }
+    }
   }
 
   const handleQQLoginWithCookie = async (cookie: string) => {
@@ -315,38 +394,8 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
   return (
     <>
       <div className="fixed inset-0 w-full h-full overflow-hidden z-50" data-tv-scope>
-        {/* 动态背景 */}
-      <motion.div 
-        className="absolute inset-0"
-        animate={{
-          background: [
-            'linear-gradient(135deg, #2d1b3d 0%, #1a0f2e 50%, #0a0a0a 100%)',
-            'linear-gradient(135deg, #3d1b2d 0%, #2e0f1a 50%, #0a0a0a 100%)',
-            'linear-gradient(135deg, #2d1b3d 0%, #1a0f2e 50%, #0a0a0a 100%)',
-          ]
-        }}
-        transition={{
-          duration: 10,
-          repeat: Infinity,
-          ease: "easeInOut"
-        }}
-      />
-      
-      {/* 动态光晕 */}
-      <motion.div
-        className="absolute w-[40vw] h-[40vw] max-w-[500px] max-h-[500px] rounded-full"
-        style={{
-          background: 'radial-gradient(circle, rgba(255, 105, 180, 0.5) 0%, transparent 70%)',
-          filter: glowAnimated ? 'blur(80px)' : 'blur(20px)',
-          top: '20%',
-          left: '15%',
-        }}
-        animate={glowAnimated ? { scale: [1, 1.3, 1], x: [0, 60, 0], y: [0, 40, 0] } : { scale: 1, x: 0, y: 0 }}
-        transition={glowAnimated ? { duration: 12, repeat: Infinity, ease: 'easeInOut' } : { duration: 0 }}
-      />
-      
-      {/* 遮罩 */}
-      <div className="absolute inset-0 bg-black/20" />
+        {/* 动态背景（与酷狗/汽水等独立登录弹窗共用，保证风格统一） */}
+        <LoginBackdrop />
 
       {/* 内容区 */}
       <div className="relative z-10 w-full h-full flex items-center justify-center p-6">
@@ -454,6 +503,78 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                     <div className="w-16 h-16 border-4 border-green-500/30 border-t-green-500 rounded-full animate-spin mb-4"></div>
                     <p className="text-white/60 text-sm">正在等待登录...</p>
                   </div>
+                ) : qqQrMode ? (
+                  // 应用内扫码登录（ptlogin2，主进程完成）
+                  <>
+                    <div className="text-center">
+                      <h3 className="text-xl font-medium text-white">{(QQ_QR_CHANNELS.find(c => c.key === qqQrChannel) || QQ_QR_CHANNELS[0]).title}</h3>
+                      <p className="text-white/50 text-sm mt-1.5">{(QQ_QR_CHANNELS.find(c => c.key === qqQrChannel) || QQ_QR_CHANNELS[0]).hint}</p>
+                    </div>
+
+                    {/* 扫码通道切换 */}
+                    <div className="flex bg-white/5 rounded-full p-1 mt-4">
+                      {QQ_QR_CHANNELS.map(c => (
+                        <button
+                          key={c.key}
+                          onClick={() => void startQqQrLogin(c.key)}
+                          className={`flex-1 py-2 rounded-full text-[13px] whitespace-nowrap transition-all ${qqQrChannel === c.key ? 'bg-green-600 text-white shadow' : 'text-white/50 hover:text-white/80'}`}
+                        >
+                          {c.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex justify-center py-1">
+                      <div className="relative w-64 h-64 p-4 bg-white rounded-2xl">
+                        {qqQrImage ? (
+                          <img src={qqQrImage} alt="QQ 登录二维码" className="w-full h-full object-contain rounded-lg" />
+                        ) : qqQrStatus === 'error' ? (
+                          <div className="w-full h-full flex flex-col items-center justify-center gap-2 rounded-lg bg-black/5 text-black/60 px-4">
+                            <RefreshCw className="w-7 h-7" />
+                            <span className="text-xs text-center leading-relaxed">{qqQrMessage || '二维码获取失败'}</span>
+                          </div>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <div className="w-8 h-8 border-[3px] border-black/10 border-t-black/50 rounded-full animate-spin" />
+                          </div>
+                        )}
+                        {qqQrImage && qqQrStatus === 'expired' && (
+                          <button
+                            onClick={() => void startQqQrLogin()}
+                            className="absolute inset-4 rounded-lg bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-2 text-white text-sm"
+                          >
+                            <RefreshCw className="w-6 h-6" />
+                            已过期，点击刷新
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {qqQrStatus !== 'expired' && qqQrStatus !== 'error' && (
+                      <div className="flex items-center justify-center gap-2 text-sm">
+                        <span className={`w-1.5 h-1.5 rounded-full ${qqQrStatus === 'scanned' ? 'bg-blue-400 animate-pulse' : 'bg-green-400 animate-pulse'}`} />
+                        <span className={qqQrStatus === 'scanned' ? 'text-blue-400' : 'text-white/60'}>
+                          {qqQrMessage || (qqQrStatus === 'scanned' ? '已扫码，请在手机上确认' : '等待扫码…')}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="flex gap-3 pt-1">
+                      <button
+                        onClick={cancelQqQr}
+                        className="flex-1 px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium transition-colors"
+                      >
+                        返回
+                      </button>
+                      <button
+                        onClick={() => void startQqQrLogin()}
+                        className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors inline-flex items-center justify-center gap-2"
+                      >
+                        <RefreshCw className="w-4 h-4" />
+                        刷新二维码
+                      </button>
+                    </div>
+                  </>
                 ) : !qqManualMode ? (
                   // 自动登录模式
                   <>
@@ -464,7 +585,7 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                         <p className="text-white/60 text-sm">
                           {(window as any).WaveForgeNative?.openQQLogin
                             ? '请在电视屏幕上使用手机 QQ 扫码登录，登录成功后自动返回'
-                            : '弹出窗口后请选择立即登录，登录成功后本窗口将自动关闭'}
+                            : '用手机 QQ 扫码，或在弹出窗口中登录'}
                         </p>
                       </div>
                     </div>
@@ -489,16 +610,25 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                     </div>
 
                     <div className="flex gap-3 pt-2">
+                      {window.electron?.qqQrLoginStart && (
+                        <button
+                          onClick={() => void startQqQrLogin()}
+                          className="flex-1 min-w-0 px-4 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium text-sm whitespace-nowrap transition-colors inline-flex items-center justify-center gap-2"
+                        >
+                          <QrCode className="w-4 h-4 shrink-0" />
+                          扫码登录
+                        </button>
+                      )}
                       <button
                         onClick={handleQQAutoLogin}
-                        className="flex-1 px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-full font-medium transition-colors inline-flex items-center justify-center gap-2"
+                        className={`${window.electron?.qqQrLoginStart ? 'flex-1 min-w-0' : 'flex-1'} px-4 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium text-sm whitespace-nowrap transition-colors inline-flex items-center justify-center gap-2`}
                       >
-                        <ExternalLink className="w-4 h-4" />
-                        {(window as any).WaveForgeNative?.openQQLogin ? '手机扫码登录' : '打开登录窗口'}
+                        <Globe className="w-4 h-4 shrink-0" />
+                        {(window as any).WaveForgeNative?.openQQLogin ? '手机扫码登录' : '网页登录'}
                       </button>
                       <button
                         onClick={onCancel}
-                        className="flex-1 px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-medium transition-colors"
+                        className="px-5 py-3 bg-white/5 hover:bg-white/10 text-white/70 rounded-full font-medium text-sm whitespace-nowrap transition-colors"
                       >
                         取消
                       </button>

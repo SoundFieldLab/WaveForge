@@ -29,7 +29,7 @@ interface AlbumDetailModalProps {
   onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onCopyInfo?: (song: Song) => void
   /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。隐藏时不消费返回键、不重建 DOM。 */
@@ -457,12 +457,17 @@ function AlbumDetailModal({
                     <p className="text-sm truncate">
                       {(() => {
                         const artistName = typeof album.artist === 'string' ? album.artist : album.artist?.name || '未知艺人'
-                        const artistId = typeof album.artist === 'object' && album.artist?.id ? String(album.artist.id) : ''
+                        // 标识三段回落（与歌单详情行内同口径）：QQ 专辑的 artist 只带 mid（singer_mid），
+                        // 只取 .id 会让专辑页歌手名永远不可点。
+                        const artistObj = typeof album.artist === 'object' ? album.artist : undefined
+                        const artistId = platform === 'apple'
+                          ? String(artistObj?.appleId || artistObj?.id || '')
+                          : String(artistObj?.mid || artistObj?.id || '')
                         if (!artistId || !onOpenArtist) return artistName
                         return (
                           <button
                             type="button"
-                            onClick={() => onOpenArtist(artistId, platform)}
+                            onClick={() => onOpenArtist(artistId, platform, artistName)}
                             className="cursor-pointer transition-colors hover:text-pink-400 hover:underline"
                             title={`查看歌手 ${artistName}`}
                           >
@@ -872,7 +877,7 @@ function AlbumDetailModal({
             ? artist?.name
             : platform === 'apple' ? (artist?.appleId || artist?.id)
               : platform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
-          if (targetId) onOpenArtist(String(targetId), platform)
+          if (targetId) onOpenArtist(String(targetId), platform, artist?.name || '')
         } : undefined}
         onCopyInfo={onCopyInfo}
         userPlaylists={userPlaylists}

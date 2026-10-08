@@ -58,6 +58,13 @@ body {
   -webkit-user-select: none;
 }
 
+/* 全局禁用图片原生拖拽：Electron 里拖封面会把图片拖出窗口（拖到桌面/拖成文件）。
+   任何组件都不得依赖 img 的默认 draggable 行为（需要拖拽排序的编辑器用 div 自己实现）。 */
+img {
+  -webkit-user-drag: none;
+  user-drag: none;
+}
+
 /* 允许输入框和可编辑区域选择文本 */
 input, textarea, [contenteditable="true"] {
   user-select: text;
@@ -1646,4 +1653,10 @@ input[type='number'].no-spinner {
 [data-wf-suspended] *,
 [data-wf-suspended] {
   animation-play-state: paused !important;
+}
+
+/* 汽水音乐「推荐」页歌词列：客户端把滚动条藏掉（LyricsView.vue 的 .scroller::-webkit-scrollbar）。
+   内联的 scrollbar-width 只管 Firefox，Chromium 得靠这条伪元素规则。 */
+.soda-lyrics-scroller::-webkit-scrollbar {
+  display: none;
 }

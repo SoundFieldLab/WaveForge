@@ -5,6 +5,7 @@ import type { Song } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getLyrics, getNeteaseSongWikiRows, getQQSongPlaylist, getProxiedImageUrl, getQQListenAlso, getQQLikeAlso, getNeteaseSimiSong, getNeteaseRelatedPlaylist, getNeteaseSongBlog, type NeteaseWikiRow } from '../services/musicApi'
 import { fetchAppleSongDetail, type AppleSongDetail } from '../services/appleWebService'
+import { fetchKugouSongDetail, type KugouSongDetail } from '../services/kugouService'
 import { createTtlCache } from '../utils/ttlCache'
 import LyricModal from './LyricModal'
 import VideoPlayer from './VideoPlayer'
@@ -51,7 +52,7 @@ interface SongDetailModalProps {
   /** 打开专辑详情（Apple「更多作品」用） */
   onOpenAlbum?: (albumId: string, platform: 'apple') => void
   /** 打开出演艺人详情 */
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   /** 跨平台「查看歌手」（播放页右键菜单同款：由 App 按平台解析艺人 ID） */
   onViewArtistSong?: (song: Song) => void
   /** 跨平台「查看专辑」（播放页右键菜单同款） */
@@ -96,6 +97,8 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   const [showMV, setShowMV] = useState(false)
   // QQ 歌曲详情的板块数据
   const [qqInfo, setQqInfo] = useState<any>(null)
+  // 酷狗歌曲详情（/kmr/v2/audio：词曲/专辑/发行时间/语种/风格，官方弹窗同源）
+  const [kugouDetail, setKugouDetail] = useState<KugouSongDetail | null>(null)
   const [credits, setCredits] = useState<string[]>([])
   const [lyrics, setLyrics] = useState<{ time: number; text: string }[]>([])
   const [, setLyricsLoading] = useState(false)
@@ -250,11 +253,26 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
   // 拉取两平台支持的歌曲详情补充字段（发行时间 / MV / 付费类型 / 音质）
   useEffect(() => {
     let cancelled = false
+    setKugouDetail(null)
     const fetchDetail = async () => {
       try {
         // Apple：详情（含歌词）走上方 fetchAppleSongDetail 专用链路（web 歌曲页 1:1）
         if (song.platform === 'apple') {
           setLyricsLoading(false)
+          return
+        }
+        // 酷狗：/kmr/v2/audio 官方「歌曲详情」弹窗同源（词曲/专辑/发行时间/语种/风格）
+        if (song.platform === 'kugou') {
+          setLyricsLoading(false)
+          const detail = await fetchKugouSongDetail(song as { kugouMixSongId?: number })
+          if (!cancelled && detail) {
+            setKugouDetail(detail)
+            setExtra({
+              publishDate: detail.publishDate || detail.album.publishDate || undefined,
+              genreText: detail.genres.slice(0, 3).join(' / ') || undefined,
+              languageText: detail.language || undefined,
+            })
+          }
           return
         }
         if (song.platform === 'qq') {
@@ -534,7 +552,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
                           <button
                             key={artist.id}
                             type="button"
-                            onClick={() => onOpenArtist?.(String(artist.playId || artist.id), 'apple')}
+                            onClick={() => onOpenArtist?.(String(artist.playId || artist.id), 'apple', artist.name || '')}
                             className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-white/[0.08]"
                           >
                             {artist.artworkUrl ? (
@@ -771,6 +789,34 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
                       <p className={`${textPrimary} text-sm leading-relaxed`}>{qqInfo.intro.content[0].value}</p>
                     </div>
                   )}
+                </div>
+              )}
+
+              {/* 酷狗歌曲详情（官方 App 弹窗同源：歌手（含国籍/生日）/专辑/发行时间/语种/风格） */}
+              {song.platform === 'kugou' && kugouDetail && (
+                <div>
+                  <div className="flex items-center gap-2 mb-2.5">
+                    <ListMusic className="w-4 h-4" style={{ color: accentColor }} />
+                    <h4 className={`text-sm font-semibold ${textPrimary}`}>歌曲信息</h4>
+                  </div>
+                  <div className="space-y-2">
+                    {kugouDetail.singers.map((singer, i) => (
+                      <div key={`${singer.id}-${i}`} className="flex items-center gap-3 rounded-xl px-3 py-2.5" style={{ background: 'rgba(255,255,255,0.05)' }}>
+                        {singer.avatar
+                          ? <img src={getProxiedImageUrl(singer.avatar, 100)} alt="" className="h-8 w-8 shrink-0 rounded-full object-cover" />
+                          : <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-xs" style={{ background: `${accentColor}26`, color: accentColor }}>{singer.name.slice(0, 1)}</span>}
+                        <span className={`${textSecondary} text-sm shrink-0`}>{i === 0 ? '歌手' : ''}</span>
+                        <span className={`flex-1 min-w-0 text-right text-sm ${textPrimary} truncate`}>
+                          {singer.name}
+                          {singer.country && <span className={`${textSecondary} ml-1.5 text-xs`}>· {singer.country}</span>}
+                        </span>
+                      </div>
+                    ))}
+                    {kugouDetail.album.name && infoRow(<Disc3 className="w-4 h-4" />, '专辑', `${kugouDetail.album.name}${kugouDetail.album.publishDate ? `（${kugouDetail.album.publishDate.slice(0, 4)}）` : ''}`)}
+                    {kugouDetail.publishDate && infoRow(<Calendar className="w-4 h-4" />, '发行时间', kugouDetail.publishDate)}
+                    {kugouDetail.language && infoRow(<Mic2 className="w-4 h-4" />, '语种', kugouDetail.language)}
+                    {kugouDetail.genres.length > 0 && infoRow(<Music className="w-4 h-4" />, '风格', kugouDetail.genres.slice(0, 4).join(' / '))}
+                  </div>
                 </div>
               )}
 

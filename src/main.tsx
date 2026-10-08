@@ -25,6 +25,12 @@ initPlatformUI()
 installElectronShim()
 // 全局禁用原生 title 悬浮气泡（用户要求：样式与播放器视觉不符）
 installNativeTooltipSuppressor()
+// 全局兜底禁用图片原生拖拽：index.css 的 -webkit-user-drag 已覆盖常规场景，
+// 这里再挡一层 dragstart（含运行时插入的非 React 节点），避免封面被拖出窗口。
+document.addEventListener('dragstart', event => {
+  const target = event.target as Element | null
+  if (target && typeof target.closest === 'function' && target.closest('img')) event.preventDefault()
+}, true)
 
 // ── AutoMix 桥自检（诊断用）：确认 window.electron 真实可用性 ──
 // 若 preload 未加载，isDesktop() 会误判为 web 并装桩（render 抛"仅桌面版可用"、

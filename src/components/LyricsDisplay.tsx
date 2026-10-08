@@ -1352,10 +1352,21 @@ export default memo(function LyricsDisplay({
     }
   }, [])
 
+  // 行切换判定：粗快照（currentTime prop，约 4Hz）只做兜底；主路径走平滑时钟的 rAF
+  // 推进值（同下方逐字/间奏的 30fps 时钟），否则行切换在快照间隔内可迟到 ~250ms——
+  // single 模式（modern 歌词页）表现为"上一句淡出后下一句迟迟不进"（用户实测的滚动/切换卡顿）。
+  const smoothCurrentTime = useSyncExternalStore(
+    smoothTimeStoreRef.current.subscribe,
+    smoothTimeStoreRef.current.getSnapshot,
+    smoothTimeStoreRef.current.getSnapshot,
+  )
+  // 平滑时钟只在播放中推进；暂停时停在外推值上会和真实进度漂移，暂停瞬间回读粗快照
+  const effectiveLineSwitchTime = isPlaying ? smoothCurrentTime : currentTime
+
   useEffect(() => {
     if (displayLyricsData.length === 0) return
-    const adjustedTime = currentTime + LYRIC_TIMING_LEAD_SECONDS + lyricOffset
-    
+    const adjustedTime = effectiveLineSwitchTime + LYRIC_TIMING_LEAD_SECONDS + lyricOffset
+
     // 前奏期（第一句歌词还没到）：保持第一句显示而不是空白——
     // 长前奏（宫 21s 前奏）时歌词区必须可见，否则前奏期间一片空白
     if (adjustedTime < displayLyricsData[0].time) {
@@ -1368,11 +1379,11 @@ export default memo(function LyricsDisplay({
       }
       return
     }
-    
+
     for (let i = displayLyricsData.length - 1; i >= 0; i--) {
       if (adjustedTime >= displayLyricsData[i].time) {
         const activeLine = displayLyricsData[i]
-        const realPlaybackTime = currentTime + lyricOffset
+        const realPlaybackTime = effectiveLineSwitchTime + lyricOffset
         const shouldPreselectNextLine = activeLine.isGeneratedInterlude
           && activeLine.interludeEndTime !== undefined
           && realPlaybackTime >= activeLine.interludeEndTime
@@ -1390,7 +1401,7 @@ export default memo(function LyricsDisplay({
         break
       }
     }
-  }, [currentTime, displayLyricsData, currentIndex, onCurrentTranslationChange, lyricOffset])
+  }, [effectiveLineSwitchTime, displayLyricsData, currentIndex, onCurrentTranslationChange, lyricOffset])
 
   // Automatically scroll to the active lyric
   useEffect(() => {

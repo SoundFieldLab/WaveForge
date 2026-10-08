@@ -6,6 +6,7 @@ import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, Loader2, QrCode, ChevronDown, ChevronUp } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
+import LoginBackdrop from './LoginBackdrop'
 
 interface SodaLoginPanelProps {
   onClose: () => void
@@ -103,19 +104,30 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 z-50 flex items-center justify-center p-8"
+        className="fixed inset-0 w-full h-full overflow-hidden z-50"
         data-tv-scope
         onClick={onClose}
       >
+        <LoginBackdrop />
+        <div className="relative z-10 w-full h-full flex items-center justify-center p-6">
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="bg-black/90 backdrop-blur-xl rounded-3xl shadow-2xl w-full max-w-2xl p-8 border border-white/10"
+          className="relative w-full max-w-2xl"
+          style={{
+            background: 'rgba(0, 0, 0, 0.4)',
+            backdropFilter: 'blur(40px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(40px) saturate(180%)',
+            borderRadius: '24px',
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+            boxShadow: '0 8px 32px 0 rgba(0, 0, 0, 0.37)',
+            padding: '32px',
+          }}
         >
           {/* 头部 */}
-          <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center justify-between pb-4 mb-6 border-b border-white/10">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg" style={{ backgroundColor: accent }}>
                 <Music className="w-6 h-6 text-white" />
@@ -236,6 +248,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
             )}
           </div>
         </motion.div>
+        </div>
       </motion.div>
     </AnimatePresence>
   )

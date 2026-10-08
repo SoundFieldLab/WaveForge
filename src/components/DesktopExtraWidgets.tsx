@@ -99,7 +99,7 @@ export interface DesktopMusicWidgetContext {
   onRemoveQueueItem: (index: number) => void
   onMoveQueueItem: (from: number, to: number) => void
   onPlaylistSelect: (playlist: DesktopWidgetPlaylist) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   /** 歌曲行右键（宿主负责打开 SongContextMenu；未传则小组件歌曲行不响应右键） */
   onSongContextMenu?: (event: React.MouseEvent, song: Song, songs: Song[]) => void

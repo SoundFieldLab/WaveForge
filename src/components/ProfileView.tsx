@@ -1,7 +1,7 @@
 import { getQQUserDisplayName } from '../utils/qqUser'
 import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
-import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Eye, EyeOff, ShieldCheck, ChevronDown, ChevronUp } from 'lucide-react'
+import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Eye, EyeOff, ShieldCheck, ChevronDown, ChevronUp, Cloud, ShoppingBag } from 'lucide-react'
 import { Song, isSameSong, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import CachedImage from './CachedImage'
@@ -25,6 +25,7 @@ import { getPlatformCapabilities, getPlatformCookie, platformLabel } from '../se
 import { buildPlaylistShareUrl } from '../services/playlistShare'
 import { getAppleAuthState } from '../services/appleAuth'
 import { PlatformPillCarousel } from './PlatformSwitcher'
+import { KugouCloudPanel, KugouPurchasedPanel } from '../features/kugouExplore/KugouPersonalSections'
 import { getPlatformRemainingDays } from '../services/loginExpiry'
 import { getAppleLibraryPlaylists, getAppleFavoriteSongs, getAppleRecentPlayed, appleLibraryTrackToSong, createApplePlaylist, deleteApplePlaylist, updateApplePlaylist, getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleLibrarySongs, appleSongToSong, getLastAppleMutationResult, removeAppleTracksFromPlaylist, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID, enrichApplePlaylistTrackCounts } from '../services/appleCatalog'
 import { preloadArtwork } from '../services/artworkLoader'
@@ -134,7 +135,7 @@ interface UserDetail {
   listenLevel?: string    // 听歌等级图标
 }
 
-type ProfileTab = 'created' | 'subscribed' | 'detail' | 'recent' | 'social' | 'rank' | 'favs' | 'collections' | 'cloud'
+type ProfileTab = 'created' | 'subscribed' | 'detail' | 'recent' | 'social' | 'rank' | 'favs' | 'collections' | 'cloud' | 'purchased'
 type RecentPlaybackType = 'song' | 'playlist' | 'album' | 'dj' | 'voice'
 
 // 汽水虚拟歌单 id（后端 server/qishui-api.mjs 的 SODA_WEB_LIKED/RECENT/FEED_PLAYLIST_ID 约定，
@@ -540,7 +541,7 @@ interface ProfileViewProps {
   onLogout: (platform: MusicPlatform) => void  // 退出登录回调
   currentSong?: Song | null
   playerTheme?: 'light' | 'dark'
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onPlayNext?: (song: Song) => void
   onAddToFavorites?: (song: Song) => void
@@ -1506,9 +1507,25 @@ function ProfileView({
         })))
         return
       }
-      // 酷狗：暂无最近播放接口，返回空（不报错）
+      // 酷狗：真正的最近播放（概念版 /playhistory/v1/get_songs）；未登录给中性提示而非报错
       if (currentPlatform === 'kugou') {
-        setRecentItems([])
+        const { fetchKugouPlayRecords, hasKugouConceptCredential, kugouTrackToSong } = await import('../services/kugouService')
+        if (!hasKugouConceptCredential()) {
+          setRecentNotice('未登录酷狗音乐（概念版扫码），登录后可查看最近播放')
+          setRecentItems([])
+          return
+        }
+        const { records } = await fetchKugouPlayRecords()
+        if (recentRequestRef.current.revision !== revision) return
+        commitRecent(records.map((record, index) => ({
+          id: String(record.mxid || record.track.hash || index),
+          type: 'song' as const,
+          name: record.track.songName || '未知歌曲',
+          subtitle: record.track.singerName || '酷狗音乐',
+          coverUrl: record.track.coverUrl || '',
+          playTime: (record.ot || 0) * 1000,
+          song: kugouTrackToSong(record.track),
+        })))
         return
       }
       if (requestPlatform === 'netease' && type === 'song') {
@@ -2242,25 +2259,29 @@ function ProfileView({
         avatarUrl: avatar || '',
         userId: kugouUid,
       })
-      const playlists: Playlist[] = []
+      // 概念版歌单列表带 isMine（自建 vs 收藏）：分栏展示，「收藏的歌单」才能取消收藏
+      const createdPlaylists: Playlist[] = []
+      const subscribedPlaylists: Playlist[] = []
       try {
         const { fetchKugouUserPlaylists } = await import('../services/kugouService')
         const list = await fetchKugouUserPlaylists()
         for (const item of list) {
-          playlists.push({
+          const card: Playlist = {
             id: item.specialid,
             name: item.name || '未命名歌单',
             coverImgUrl: item.coverUrl || '',
             trackCount: item.songcount || 0,
             playCount: item.playcount || 0,
             platform: 'kugou',
-          })
+          }
+          if (item.isMine === false) subscribedPlaylists.push({ ...card, isCollected: true })
+          else createdPlaylists.push(card)
         }
       } catch (error) {
         console.error('获取酷狗用户歌单失败:', error)
       }
-      commitCreatedPlaylists(playlists)
-      commitSubscribedPlaylists([])
+      commitCreatedPlaylists(createdPlaylists)
+      commitSubscribedPlaylists(subscribedPlaylists)
     } else if (platform === 'soda') {
       // 汽水：本地登录态资料（登录时已落盘）；歌单经 /api/soda/user/playlists 读取
       const username = localStorage.getItem('soda_username') || ''
@@ -2372,7 +2393,7 @@ function ProfileView({
     openAlbum: onOpenAlbum,
     openQqSocialProfile: (user: QqSocialUserItem) => {
       if (user.mid) {
-        if (onOpenArtist) onOpenArtist(user.mid, 'qq')
+        if (onOpenArtist) onOpenArtist(user.mid, 'qq', user.name || '')
         else if (user.encUin) openUserProfile('qq', user.encUin, user.name, user.avatarUrl)
       } else if (user.encUin) {
         openUserProfile('qq', user.encUin, user.name, user.avatarUrl)
@@ -2388,7 +2409,7 @@ function ProfileView({
     openAlbum: onOpenAlbum,
     openQqSocialProfile: (user: QqSocialUserItem) => {
       if (user.mid) {
-        if (onOpenArtist) onOpenArtist(user.mid, 'qq')
+        if (onOpenArtist) onOpenArtist(user.mid, 'qq', user.name || '')
         else if (user.encUin) openUserProfile('qq', user.encUin, user.name, user.avatarUrl)
       } else if (user.encUin) {
         openUserProfile('qq', user.encUin, user.name, user.avatarUrl)
@@ -2554,6 +2575,31 @@ function ProfileView({
               <Heart className="w-5 h-5" />
               {viewTarget && platform === 'qq' ? '收藏的歌单' : `收藏的歌单 (${subscribedPlaylists.length})`}
             </button>
+            )}
+            {/* 酷狗官方客户端「我的」：音乐云盘 / 已购音乐（仅自己的主页，其它平台不受影响） */}
+            {!viewTarget && currentPlatform === 'kugou' && (
+              <button
+                onClick={() => setActiveTab('cloud')}
+                className={`relative flex-1 px-6 py-4 text-center font-medium transition-all flex items-center justify-center gap-2 ${
+                  activeTab === 'cloud' ? 'text-white bg-white/10' : 'text-white/60 hover:text-white hover:bg-white/5'
+                }`}
+                style={activeTab === 'cloud' ? { borderBottom: `2px solid ${accentColor}` } : {}}
+              >
+                <Cloud className="w-5 h-5" />
+                音乐云盘
+              </button>
+            )}
+            {!viewTarget && currentPlatform === 'kugou' && (
+              <button
+                onClick={() => setActiveTab('purchased')}
+                className={`relative flex-1 px-6 py-4 text-center font-medium transition-all flex items-center justify-center gap-2 ${
+                  activeTab === 'purchased' ? 'text-white bg-white/10' : 'text-white/60 hover:text-white hover:bg-white/5'
+                }`}
+                style={activeTab === 'purchased' ? { borderBottom: `2px solid ${accentColor}` } : {}}
+              >
+                <ShoppingBag className="w-5 h-5" />
+                已购音乐
+              </button>
             )}
             {!viewTarget && (
             <button
@@ -2774,7 +2820,19 @@ function ProfileView({
                       </div>
                     )}
                   </div>
-                )}                {activeTab === 'social' && platform === 'netease' && (
+                )}
+                {/* 酷狗个人中心扩展：音乐云盘 / 已购音乐（仅当前平台为酷狗且看自己主页时渲染） */}
+                {activeTab === 'cloud' && currentPlatform === 'kugou' && !viewTarget && (
+                  <div className="space-y-5">
+                    <KugouCloudPanel onSongSelect={stableSongSelect} accentColor={accentColor} />
+                  </div>
+                )}
+                {activeTab === 'purchased' && currentPlatform === 'kugou' && !viewTarget && (
+                  <div className="space-y-5">
+                    <KugouPurchasedPanel onSongSelect={stableSongSelect} onOpenAlbum={stableOpenAlbum} accentColor={accentColor} />
+                  </div>
+                )}
+                {activeTab === 'social' && platform === 'netease' && (
                   <div className="space-y-5">
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <h3 className="text-xl font-semibold text-white">{socialType === 'events' ? '关注动态' : socialType === 'messages' ? '我的消息' : '社交关系'}</h3>
@@ -3045,7 +3103,7 @@ function ProfileView({
                               const cover = artist.picUrl || artist.pic || artist.singerpic || ''
                               return (
                                 <div key={`${artistId || index}-${index}`} className="rounded-xl p-4 transition-all cursor-pointer flex items-center gap-3" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
-                                  onClick={() => { if (artistId && onOpenArtist) onOpenArtist(String(artistId), platform) }} title="点击打开歌手">
+                                  onClick={() => { if (artistId && onOpenArtist) onOpenArtist(String(artistId), platform, artistName) }} title="点击打开歌手">
                                   <div className="w-12 h-12 rounded-full overflow-hidden shrink-0" style={{ background: 'rgba(255,255,255,0.1)' }}>
                                     {cover ? <CachedImage src={cover} alt={artistName} className="w-full h-full object-cover" role="compact" priority="visible" /> : <Music className="w-6 h-6 m-auto mt-3 text-white/30" />}
                                   </div>
@@ -3668,7 +3726,7 @@ function ProfileView({
             const artist = song.artists?.[0]
             const artistId = songPlatform === 'qq' ? (artist?.mid || artist?.id)
               : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : artist?.id
-            if (artistId) onOpenArtist(String(artistId), songPlatform)
+            if (artistId) onOpenArtist(String(artistId), songPlatform, artist?.name || '')
           } : undefined}
           onCopyInfo={onCopyInfo}
           userPlaylists={[...createdPlaylists, ...subscribedPlaylists]}

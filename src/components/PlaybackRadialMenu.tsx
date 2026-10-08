@@ -178,7 +178,11 @@ export default function PlaybackRadialMenu({
         else if (action === 'artist') actionsRef.current.onViewArtist(currentSong)
         else if (action === 'copy-info') actionsRef.current.onCopyInfo(currentSong)
         else if (action === 'details') window.dispatchEvent(new CustomEvent('waveforge:show-song-detail', { detail: currentSong }))
-        else if (action === 'similar') window.dispatchEvent(new CustomEvent('waveforge:play-similar-song', { detail: currentSong }))
+        // 酷狗客户端的相似歌曲是弹窗列表（其余平台沿用网易云灯泡式直接切歌）
+        else if (action === 'similar') window.dispatchEvent(new CustomEvent(
+          (currentSong.platform || 'netease') === 'kugou' ? 'waveforge:show-similar-songs' : 'waveforge:play-similar-song',
+          { detail: currentSong },
+        ))
         else if (action === 'add-to-playlist') {
           contextMenuOpenRef.current?.()
           setShowPlaylistPicker(true)
@@ -197,6 +201,11 @@ export default function PlaybackRadialMenu({
       // 此时 event.target 已不在播放页内，只按目标判断就会漏过并闪出系统菜单（用户实测）。
       if (trackingRef.current || Date.now() < contextMenuSuppressUntilRef.current) {
         event.preventDefault()
+        // 只 preventDefault 挡不住 React 的合成 onContextMenu：Windows 在 mouseup 之后补发的
+        // 这一次 contextmenu 会落在「轮盘动作刚打开的新界面」上（例如歌手详情里的歌曲行），
+        // 于是右键菜单跟着自己弹出来（用户实测：长按轮盘选「查看歌手」后菜单自现）。
+        // 捕获阶段 stopPropagation 把这次残留事件整个吃掉。
+        event.stopPropagation()
         return
       }
       if (!isPlaybackPageTarget(event.target)) return

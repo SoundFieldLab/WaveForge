@@ -4,6 +4,22 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Song } from '../services/musicApi'
 import { platformLabel, type MusicPlatform } from '../services/platforms'
 import { createSodaComment, fetchSodaComments, isSodaLoggedIn, type SodaComment } from '../services/sodaService'
+import {
+  fetchKugouComments,
+  fetchKugouCommentFloor,
+  fetchKugouLatestComments,
+  fetchKugouHotComments,
+  fetchKugouHotWordComments,
+  fetchKugouClassifyComments,
+  sendKugouComment,
+  replyKugouComment,
+  likeKugouCommentItem,
+  getKugouConceptCredential,
+  hasKugouConceptCredential,
+  type KugouComment,
+  type KugouHotWord,
+  type KugouCommentClassify,
+} from '../services/kugouService'
 import { ThumbsUp, MessageCircle, Trash2, Send, ChevronDown, X, Gauge, Image as ImageIcon, Copy, Smile, Loader2, Settings2 } from 'lucide-react'
 import ScrollToTop from './ScrollToTop'
 import DeleteCommentModal from './DeleteCommentModal'
@@ -109,6 +125,8 @@ interface Comment {
   vipIcon?: string
   /** 精选热评（弹幕气泡高亮用） */
   hot?: boolean
+  /** 酷狗楼层评论所需的 special_child_id（hot_replylist 的 childrenid） */
+  kugouSpecialChildId?: string
 }
 
 /** 评论弹窗页签：总览=弹幕幕布；推荐（QQ 为精彩评论）/ 最热评论 / 最新评论为列表 */
@@ -265,6 +283,28 @@ function mapSodaComments(rawComments: SodaComment[]): Comment[] {
     .filter(item => item.commentId && item.content)
 }
 
+/** 酷狗评论（/mcomment/v1/cmtlist 族）→ 组件内部结构；addtime 是秒，统一换算成毫秒 */
+function mapKugouComment(item: KugouComment, mixSongId: number, index: number): Comment {
+  return {
+    commentId: String(item.id || `kugou-${mixSongId}-${item.addtime}-${index}`),
+    content: String(item.content || ''),
+    user: {
+      nickname: String(item.userName || '酷狗用户'),
+      avatarUrl: String(item.userPic || ''),
+      userId: item.userId,
+    },
+    time: (Number(item.addtime) || 0) * 1000,
+    likedCount: Number(item.likeCount) || 0,
+    replyCount: Number(item.replyCount) || 0,
+    replies: [],
+    isLiked: Boolean(item.hasLiked),
+    isOwn: false,
+    contentPicUrl: item.picUrl || null,
+    ipLocation: item.location || undefined,
+    kugouSpecialChildId: item.specialChildId || undefined,
+  }
+}
+
 /** QQ 评论正文净化：[em]eXXXX[/em] 内联表情码当前无法渲染原图，剥掉标记保留文字 */
 function stripQQEmotionMarks(text: string): string {
   return String(text || '')
@@ -330,11 +370,15 @@ type CommentRowData = {
   accent: string
   /** 精彩评论页签：前三条加排名徽章 */
   showRank: boolean
+  /** 酷狗删除上游未生效 → 行内删除按钮置灰 */
+  deleteDisabled: boolean
   onLike: (comment: Comment) => void
   onReply: (target: ReplyTarget) => void
   onDelete: (comment: Comment) => void
   onToggleReplies: (comment: Comment) => void
   onOpenUser?: (comment: Comment) => void
+  /** 点评论缩略图看原图（弹窗内 lightbox；酷狗/QQ 都带图） */
+  onPreviewImage: (url: string) => void
   isLoadingMore: boolean
   onLoadMore: () => void
 }
@@ -353,6 +397,8 @@ interface CommentItemProps {
   isLoggedIn: boolean
   canInteract: boolean
   canDelete: boolean
+  /** 酷狗删除实测未生效：按钮置灰并说明（不隐藏，如实呈现能力边界） */
+  deleteDisabled?: boolean
   isDark: boolean
   accent: string
   onLike: (comment: Comment) => void
@@ -360,13 +406,15 @@ interface CommentItemProps {
   onDelete: (comment: Comment) => void
   onToggleReplies: (comment: Comment) => void
   onOpenUser?: (comment: Comment) => void
+  /** 点评论缩略图看原图（弹窗内 lightbox；酷狗/QQ 都带图） */
+  onPreviewImage: (url: string) => void
 }
 
 // 独立 memo 组件：点赞/删除/展开回复时只有目标评论的对象引用变化，
 // 其余行的 comment prop 引用不变，可跳过重渲染（避免整表重建）。
 const CommentItem = memo(function CommentItem({
-  comment, index, rank, showRank, expanded, isLoggedIn, canInteract, canDelete,
-  isDark, accent, onLike, onReply, onDelete, onToggleReplies, onOpenUser,
+  comment, index, rank, showRank, expanded, isLoggedIn, canInteract, canDelete, deleteDisabled,
+  isDark, accent, onLike, onReply, onDelete, onToggleReplies, onOpenUser, onPreviewImage,
 }: CommentItemProps) {
   const shouldAnimate = index < COMMENT_ANIMATE_LIMIT
   const visibleReplies = expanded ? comment.replies : comment.replies?.slice(0, 1)
@@ -471,20 +519,30 @@ const CommentItem = memo(function CommentItem({
           {/* 图片评论：网易云直接给图，QQ 网页接口只留 [图片] 标记（做占位说明） */}
           {comment.contentPicUrl && (
             <div className="mt-2">
-              <CachedImage
-                src={comment.contentPicUrl}
-                alt="评论图片"
-                className="max-h-[320px] w-auto max-w-full rounded-xl border object-cover"
-                role="row"
-                size={640}
-                priority="visible"
-                fit="contain"
-                fallback={
-                  <div className={`flex h-24 w-36 items-center justify-center rounded-xl text-[11px] ${isDark ? 'bg-white/6 text-white/40' : 'bg-black/4 text-black/40'}`}>
-                    图片加载失败
-                  </div>
-                }
-              />
+              {/* 桌面端缩略图：限制在 220×160 的方框内（contain，不裁切内容），点开看原图。
+                  此前用 max-h-320 + 全宽包裹层，宽图会被拉到整行宽、单条评论撑满整屏。 */}
+              <button
+                type="button"
+                onClick={() => onPreviewImage(comment.contentPicUrl!)}
+                title="点击查看大图"
+                className="block max-w-full cursor-zoom-in rounded-xl transition-opacity hover:opacity-90"
+              >
+                <CachedImage
+                  src={comment.contentPicUrl}
+                  alt="评论图片"
+                  className={`h-[160px] w-[220px] max-w-full rounded-xl border ${isDark ? 'bg-white/5' : 'bg-black/4'}`}
+                  role="row"
+                  size={480}
+                  priority="visible"
+                  fit="contain"
+                  fallback={
+                    <div className={`flex h-[160px] w-[220px] flex-col items-center justify-center gap-1 rounded-xl text-[11px] ${isDark ? 'bg-white/6 text-white/40' : 'bg-black/4 text-black/40'}`}>
+                      <ImageIcon className="h-4 w-4" />
+                      图片加载失败
+                    </div>
+                  }
+                />
+              </button>
             </div>
           )}
           {!comment.contentPicUrl && comment.hasImage && (
@@ -546,10 +604,12 @@ const CommentItem = memo(function CommentItem({
             {canDelete && isLoggedIn && canInteract && (
               <button
                 type="button"
-                onClick={() => onDelete(comment)}
+                onClick={() => { if (!deleteDisabled) onDelete(comment) }}
+                disabled={deleteDisabled}
+                title={deleteDisabled ? '酷狗评论删除上游未生效（接口受理但列表不移除）' : undefined}
                 className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs transition-colors ${
                   isDark ? 'text-white/55 hover:bg-white/10 hover:text-red-300' : 'text-black/50 hover:bg-black/5 hover:text-red-500'
-                }`}
+                } disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent`}
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 <span>删除</span>
@@ -628,6 +688,7 @@ function CommentVirtualRow({ index, style, ...data }: RowComponentProps<CommentR
           isLoggedIn={data.isLoggedIn}
           canInteract={data.canInteract}
           canDelete={Boolean(comment.isOwn || (data.currentUserId && comment.user.userId === data.currentUserId))}
+          deleteDisabled={data.deleteDisabled}
           isDark={data.isDark}
           accent={data.accent}
           onLike={data.onLike}
@@ -635,6 +696,7 @@ function CommentVirtualRow({ index, style, ...data }: RowComponentProps<CommentR
           onDelete={data.onDelete}
           onToggleReplies={data.onToggleReplies}
           onOpenUser={data.onOpenUser}
+          onPreviewImage={data.onPreviewImage}
         />
       </div>
     )
@@ -724,9 +786,14 @@ export default memo(function CommentModal({
   const resourcePlatform = isPlaylistResource ? (playlist?.platform || 'netease') : (song?.platform || 'netease')
   // QQ 评论接口的 topid 使用数字 songid，不是歌曲 MID。
   // 汽水的 Song.id 是截断数值，真实曲目 id 保存在 mid —— 评论资源 id 对汽水改用 mid。
+  // 酷狗评论接口只认 mixsongid（album_audio_id），拿不到时退回 hash 由服务层给出明确错误。
   const resourceId = isPlaylistResource
     ? playlist?.id
-    : (resourcePlatform === 'soda' ? String(song?.mid || song?.id || '') : song?.id)
+    : (resourcePlatform === 'soda'
+      ? String(song?.mid || song?.id || '')
+      : resourcePlatform === 'kugou'
+        ? String(song?.kugouMixSongId || song?.mid || song?.id || '')
+        : song?.id)
   const commentType = isPlaylistResource ? 2 : 0
   const qqCommentBizType = isPlaylistResource ? 3 : 1
   const resourceCoverUrl = isPlaylistResource ? (playlist?.coverImgUrl || '') : (song?.album?.picUrl || '')
@@ -797,6 +864,8 @@ export default memo(function CommentModal({
   const [commentRefreshKey, setCommentRefreshKey] = useState(0)
   const [pendingDeleteComment, setPendingDeleteComment] = useState<Comment | null>(null)
   const [deleteLoading, setDeleteLoading] = useState(false)
+  /** 评论图片预览（点缩略图看原图；酷狗/QQ 的带图评论共用） */
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
   const [newComment, setNewComment] = useState('')
   const [replyingTo, setReplyingTo] = useState<ReplyTarget | null>(null)
   const [expandedReplies, setExpandedReplies] = useState<Set<string>>(new Set())
@@ -810,6 +879,16 @@ export default memo(function CommentModal({
   const [cursor, setCursor] = useState<string>('-1') // 网易云时间排序首屏使用 -1，后续使用服务端 cursor
   // 汽水评论游标：soda 接口为游标分页（与上方页码分页不同），组件内部自行维护
   const sodaCursorRef = useRef<string | undefined>(undefined)
+
+  // 酷狗评论上下文：歌曲级 specialId（点赞/最热榜必传，cmtlist 的 childrenid）+ 热词 chips + 选中热词。
+  // cmtlist/getCommentWithLike 都会带回 childrenid，任何一次列表加载都能续上，不额外发探测请求。
+  const kugouSpecialIdRef = useRef('')
+  const [kugouHotWords, setKugouHotWords] = useState<KugouHotWord[]>([])
+  const [kugouActiveWord, setKugouActiveWord] = useState('')
+  // 分类标签（客户端第一排「歌曲相关 / 有图 / …」，来自 cmtlist 的 classify_list）与选中项；
+  // 点选后走 cmt_classify_list（与热词筛选互斥）
+  const [kugouClassify, setKugouClassify] = useState<KugouCommentClassify[]>([])
+  const [kugouActiveClassify, setKugouActiveClassify] = useState('')
 
   // 获取登录状态和cookie
   const [isLoggedIn, setIsLoggedIn] = useState(false)
@@ -862,6 +941,11 @@ export default memo(function CommentModal({
         setUserCookie('')
         setIsLoggedIn(isSodaLoggedIn())
         setCurrentUserId('')
+      } else if (resourcePlatform === 'kugou') {
+        // 酷狗：发表/点赞/回复走概念版扫码凭据；评论列表游客设备也可读
+        setUserCookie('')
+        setIsLoggedIn(hasKugouConceptCredential())
+        setCurrentUserId(getKugouConceptCredential()?.userid || '')
       }
     }
 
@@ -876,13 +960,17 @@ export default memo(function CommentModal({
     setMyPostedComments(previous => previous.map(markOwn))
   }, [currentUserId])
 
-  // 汽水评论接口暂不提供点赞/回复/删除能力：行内操作退化为静态展示
-  const sodaRowsStatic = resourcePlatform === 'soda'
-  const canInteract = !sodaRowsStatic
-  const composerLocked = !isLoggedIn
-  const composerPlaceholder = composerLocked
-    ? (resourcePlatform === 'soda' ? '登录汽水音乐后参与评论' : '登录后参与评论')
-    : (isPlaylistResource ? '发表歌单评价…' : '说点什么…')
+  // 汽水评论接口暂不提供点赞/回复/删除能力：行内操作退化为静态展示（酷狗已实测全通，见 kugouService）
+  const rowsStatic = resourcePlatform === 'soda'
+  const canInteract = !rowsStatic
+  // 酷狗歌单评论上游未提供（仅单曲评论）：发表框锁定并注明原因
+  const kugouComposerLocked = resourcePlatform === 'kugou' && isPlaylistResource
+  const composerLocked = !isLoggedIn || kugouComposerLocked
+  const composerPlaceholder = kugouComposerLocked
+    ? '酷狗歌单评论暂未提供（仅支持单曲评论）'
+    : composerLocked
+      ? (resourcePlatform === 'soda' ? '登录汽水音乐后参与评论' : resourcePlatform === 'kugou' ? '扫码登录酷狗后参与评论' : '登录后参与评论')
+      : (isPlaylistResource ? '发表歌单评价…' : '说点什么…')
 
   // 评论变更（发表/删除/刷新）后清缓存：只对「重新打开」做秒回，不把用户主动刷新也短路。
   const commentRefreshKeyRef = useRef(0)
@@ -896,24 +984,32 @@ export default memo(function CommentModal({
   }, [isOpen])
 
   // 每次打开（或换资源）都从「总览」进场：弹幕幕布是这个弹窗的主界面。
+  // 酷狗例外：客户端只有 推荐/最热/最新 三个大类、没有总览，进场直接落在「推荐」。
   // 只依赖 isOpen/resourceId，不依赖 tab 派生出的 loadMode，避免自我触发加载循环。
   useEffect(() => {
     if (!isOpen) return
-    setTab('overview')
+    setTab(resourcePlatform === 'kugou' ? 'recommend' : 'overview')
     // 换歌后自己刚发的那几条弹幕不再属于当前资源
     setMyPostedComments([])
     setShareCount(0)
     setShowEmojiPanel(false)
+    // 酷狗上下文跟随资源：specialId/热词/分类是歌曲级数据，换歌必须清掉
+    kugouSpecialIdRef.current = ''
+    setKugouHotWords([])
+    setKugouActiveWord('')
+    setKugouClassify([])
+    setKugouActiveClassify('')
   }, [isOpen, resourceId])
 
   // 页签 → 请求排序模式的映射：
   // - 网易云「推荐」用独立的推荐排序（sortType 99）；「最热」是热度排序（2）
   // - QQ 没有独立的推荐排序（逆向结论：cmd=8 最新附带精选热评、cmd=6/9 热度排序），
   //   「推荐」直接展示精选热评集合，与「最热」共用同一个请求（cmd=6），不重复发请求
-  // - 「总览」进场时按「最热」加载，让精彩评论先进弹幕池
+  // - 酷狗三种排序实测走不同端点：推荐=cmtlist（混合序）、最热=H5 topliked（点赞量降序）、
+  //   最新=web getCommentWithLike（最新优先+官方置顶热评）；「总览」进场按「最热」加载
   const loadMode: LoadMode = tab === 'latest'
     ? 'latest'
-    : tab === 'recommend' && resourcePlatform === 'netease'
+    : tab === 'recommend' && (resourcePlatform === 'netease' || resourcePlatform === 'kugou')
       ? 'recommend'
       : 'hot'
 
@@ -922,7 +1018,8 @@ export default memo(function CommentModal({
       // 页签/资源/排序变化即失效所有在途请求：缓存命中分支不发新请求也不 bump seq，
       // 若不在此处递增，旧页签的晚到响应会被误判为「新鲜」覆盖缓存回填的视图
       commentsRequestSeqRef.current += 1
-      const cacheKey = `${resourcePlatform}:${resourceId}:${loadMode}`
+      // 酷狗热词筛选也参与缓存键（同一首歌不同热词的结果集互不覆盖）
+      const cacheKey = `${resourcePlatform}:${resourceId}:${loadMode}${resourcePlatform === 'kugou' ? (kugouActiveWord ? `:w:${kugouActiveWord}` : kugouActiveClassify ? `:c:${kugouActiveClassify}` : '') : ''}`
       if (commentRefreshKey !== commentRefreshKeyRef.current) {
         commentRefreshKeyRef.current = commentRefreshKey
         commentPageCache.clear()
@@ -951,7 +1048,7 @@ export default memo(function CommentModal({
       loadComments(true)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, resourceId, loadMode, userCookie, commentRefreshKey])
+  }, [isOpen, resourceId, loadMode, userCookie, commentRefreshKey, kugouActiveWord, kugouActiveClassify])
 
   // 同步加载更多 refs
   useEffect(() => {
@@ -977,7 +1074,7 @@ export default memo(function CommentModal({
     if (reset) {
       setLoading(true)
       // 只在「换资源/换排序」时清空；同一资源重校验（登录态刷新、主动刷新）保留旧列表，避免闪白。
-      const resourceKey = `${resourcePlatform}:${resourceId}:${loadMode}`
+      const resourceKey = `${resourcePlatform}:${resourceId}:${loadMode}${resourcePlatform === 'kugou' ? (kugouActiveWord ? `:w:${kugouActiveWord}` : kugouActiveClassify ? `:c:${kugouActiveClassify}` : '') : ''}`
       if (lastLoadedResourceRef.current !== resourceKey) {
         lastLoadedResourceRef.current = resourceKey
         setAllComments([])
@@ -990,7 +1087,7 @@ export default memo(function CommentModal({
 
     setError(null)
 
-    const cacheKey = `${resourcePlatform}:${resourceId}:${loadMode}`
+    const cacheKey = `${resourcePlatform}:${resourceId}:${loadMode}${resourcePlatform === 'kugou' ? (kugouActiveWord ? `:w:${kugouActiveWord}` : kugouActiveClassify ? `:c:${kugouActiveClassify}` : '') : ''}`
     // 本次加载产出的热评/游标/hasMore，供成功后写回缓存（用局部变量，避免读到过期 state）
     let nextHot: Comment[] | null = null
     let nextCursor: string | null = null
@@ -1043,6 +1140,131 @@ export default memo(function CommentModal({
           const snapshot = Array.from(merged.values())
           if (snapshot.length) commentPageCache.set(cacheKey, { comments: snapshot, hot: [], page: pageToLoad, hasMore: page.hasMore, cursor: '-1' })
         }
+        return
+      }
+
+      // ── 酷狗：全功能评论（发表/点赞/回复/删除见 handle* 分支；三种排序实测端点不同）──
+      // 推荐 = /mcomment/v1/cmtlist（默认混合序）；最热 = H5 /r/v1/rank/topliked（点赞量降序）；
+      // 最新 = web commentsv2/getCommentWithLike（最新优先+官方置顶热评）。cmtlist 的 sort/order
+      // 参数实测全部无效，无法用单端点出三种排序；热词筛选走 /mcomment/v1/get_hot_word。
+      if (platform === 'kugou') {
+        if (isPlaylistResource) {
+          setAllComments([])
+          setHotComments([])
+          setHasMoreComments(false)
+          setError('酷狗歌单评论上游未提供（仅支持单曲评论）')
+          return
+        }
+        const mixSongId = Number(songId)
+        if (!Number.isFinite(mixSongId) || mixSongId <= 0) {
+          setAllComments([])
+          setHotComments([])
+          setHasMoreComments(false)
+          setError('该曲目缺少酷狗 mixsongid，评论暂不可用（请从酷狗曲库重新打开该曲）')
+          return
+        }
+
+        // 任何一次列表加载都会带回歌曲级 childrenid + 热词，这里统一续上下文
+        const rememberContext = (childrenId: string, hotWords?: KugouHotWord[], classify?: KugouCommentClassify[]) => {
+          if (childrenId) kugouSpecialIdRef.current = childrenId
+          if (hotWords && hotWords.length) setKugouHotWords(hotWords)
+          if (classify && classify.length) setKugouClassify(classify)
+        }
+        const myUserId = getKugouConceptCredential()?.userid || ''
+        const mapRows = (rows: KugouComment[]) => rows.map((item, index) => {
+          const mapped = mapKugouComment(item, mixSongId, index)
+          return myUserId && mapped.user.userId === myUserId ? { ...mapped, isOwn: true } : mapped
+        })
+        // 三种排序/热词筛选共用的落库逻辑（合并去重 + 缓存回写）
+        const applyPage = (mapped: Comment[], total: number, hasMore: boolean, hot: Comment[] | null = null) => {
+          if (total > 0) setTotalComments(total)
+          nextHot = hot
+          setHotComments(hot ?? [])
+          hasMoreAfter = hasMore
+          setHasMoreComments(hasMore)
+          if (reset) {
+            setAllComments(mapped)
+            window.requestAnimationFrame(() => scrollContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' }))
+          } else {
+            setAllComments(prev => {
+              const merged = new Map(prev.map(comment => [comment.commentId, comment]))
+              mapped.forEach(comment => merged.set(comment.commentId, comment))
+              return Array.from(merged.values())
+            })
+          }
+          setCurrentPage(pageToLoad)
+          if (mapped.length) {
+            const existing = commentPageCache.get(cacheKey)
+            const base = reset || !existing ? (reset ? mapped : []) : existing.comments
+            const merged = new Map(base.map(comment => [comment.commentId, comment]))
+            if (!reset) mapped.forEach(comment => merged.set(comment.commentId, comment))
+            commentPageCache.set(cacheKey, { comments: Array.from(merged.values()), hot: hot ?? [], page: pageToLoad, hasMore, cursor: '-1' })
+          }
+        }
+
+        // 热词筛选：结果集小（热词出现次数），直接整页替换、不缓存（重查代价低）
+        if (kugouActiveWord) {
+          const wordPage = await fetchKugouHotWordComments(mixSongId, kugouActiveWord, pageToLoad + 1, limit)
+          if (isStaleRequest()) return
+          if (wordPage.error) throw new Error(wordPage.error)
+          applyPage(mapRows(wordPage.comments), wordPage.total, wordPage.comments.length >= limit)
+          return
+        }
+
+        // 分类筛选（客户端第一排标签「歌曲相关 / 有图 / …」）：type_id 走 cmt_classify_list，
+        // 与热词筛选互斥；结果集是被筛过的子集，直接整页替换、不写缓存（重查代价低）
+        if (kugouActiveClassify) {
+          const classifyPage = await fetchKugouClassifyComments(mixSongId, kugouActiveClassify, pageToLoad + 1, limit)
+          if (isStaleRequest()) return
+          if (classifyPage.error) throw new Error(classifyPage.error)
+          applyPage(mapRows(classifyPage.comments), classifyPage.total, classifyPage.comments.length >= limit)
+          return
+        }
+
+        if (loadMode === 'latest') {
+          const latest = await fetchKugouLatestComments(mixSongId, pageToLoad + 1, limit)
+          if (isStaleRequest()) return
+          if (latest.error) throw new Error(latest.error)
+          rememberContext(latest.childrenId)
+          // 分类标签行是客户端弹窗的常驻 UI：latest 端点不带 classify_list，
+          // 还没拿到时用一页 cmtlist 探一次（与最热分支同款，代价 1 个 page=1&pagesize=1 请求）
+          if (!kugouClassify.length) {
+            const probe = await fetchKugouComments(mixSongId, 1, 1)
+            if (isStaleRequest()) return
+            rememberContext(probe.childrenId, probe.hotWords, probe.classify)
+          }
+          applyPage(mapRows(latest.comments), latest.total, latest.comments.length >= limit)
+          return
+        }
+
+        if (loadMode === 'hot') {
+          // 最热榜要歌曲级 specialId：列表上下文还没建立时先按推荐序探一页（顺带拿热词/分类 chips）
+          let specialId = kugouSpecialIdRef.current
+          if (!specialId || !kugouClassify.length) {
+            const probe = await fetchKugouComments(mixSongId, 1, 1)
+            if (isStaleRequest()) return
+            rememberContext(probe.childrenId, probe.hotWords, probe.classify)
+            specialId = specialId || probe.childrenId
+          }
+          if (!specialId) {
+            // 无 specialId（实测=无评论曲目）：展示空态而不是报错
+            applyPage([], 0, false)
+            return
+          }
+          const hot = await fetchKugouHotComments(mixSongId, specialId, pageToLoad + 1, limit)
+          if (isStaleRequest()) return
+          if (hot.error) throw new Error(hot.error)
+          applyPage(mapRows(hot.comments), hot.total, hot.comments.length >= limit)
+          return
+        }
+
+        // 推荐序（默认）：cmtlist，也是热词/分类 chips 的来源
+        const pageData = await fetchKugouComments(mixSongId, pageToLoad + 1, limit)
+        if (isStaleRequest()) return
+        if (pageData.error) throw new Error(pageData.error)
+        rememberContext(pageData.childrenId, pageData.hotWords, pageData.classify)
+        const hasMore = pageData.maxPage > 0 ? pageToLoad + 1 < pageData.maxPage : pageData.comments.length >= limit
+        applyPage(mapRows(pageData.comments), pageData.total, hasMore)
         return
       }
 
@@ -1450,7 +1672,26 @@ export default memo(function CommentModal({
     try {
       const platform = resourcePlatform
 
-      if (platform === 'netease') {
+      if (platform === 'kugou') {
+        // 酷狗点赞：mlike handlelike 是 toggle，传期望态让服务端不符时自动补翻一次；
+        // specialId 优先取评论自带的 special_child_id，兜底用歌曲级 childrenid（实测同值）
+        const specialId = findComment(commentId)?.kugouSpecialChildId || kugouSpecialIdRef.current
+        if (!specialId) {
+          setActionError('评论信息不完整，无法点赞')
+          return
+        }
+        const result = await likeKugouCommentItem(commentId, specialId, newLikeState)
+        if (!result.success) {
+          setActionError('点赞操作失败：' + (result.error || '未知错误'))
+          return
+        }
+        const finalLiked = result.isLiked ?? newLikeState
+        patchComment(commentId, (comment) => ({
+          ...comment,
+          isLiked: finalLiked,
+          likedCount: Math.max(0, comment.likedCount + (finalLiked ? 1 : -1)),
+        }))
+      } else if (platform === 'netease') {
         const response = await fetch('http://localhost:3001/api/netease/comment/like', {
           method: 'POST',
           headers: {
@@ -1509,6 +1750,10 @@ export default memo(function CommentModal({
     setActionSuccess(null)
     try {
       const platform = resourcePlatform
+
+      // 酷狗删除实测（2026-10-07）：commentsv2/delcomment 恒回 status=1（受理）但评论不会从
+      // 列表移除（同设备身份发表+删除、15 分钟后仍可见，count 不回落）→ 删除按钮置灰（见 rowProps
+      // 的 deleteDisabled），不走这个 handler；service 层 deleteKugouCommentItem 保留供后续跟进。
 
       if (platform === 'netease') {
         // 调用网易云API删除评论
@@ -1639,6 +1884,17 @@ export default memo(function CommentModal({
         return
       }
 
+      if (platform === 'kugou') {
+        // 酷狗发表：commentsv3/add（需概念版扫码登录；频控 60062 时如实透出上游提示）
+        const result = await sendKugouComment(Number(resourceId), content)
+        if (!result.success) {
+          setActionError('评论发布失败：' + (result.error || '未知错误'))
+          return
+        }
+        finishCommentMutation('评论发表成功', content)
+        return
+      }
+
       if (platform === 'netease') {
         // 调用网易云API发布评论
         const response = await fetch('http://localhost:3001/api/netease/comment/add', {
@@ -1707,6 +1963,21 @@ export default memo(function CommentModal({
     setIsSubmitting(true)
     try {
       const platform = resourcePlatform
+
+      if (platform === 'kugou') {
+        // 酷狗回复：commentsv2/reply，tid=被回复对象 id、pid=所属顶级评论 id（回复顶级评论传 0）
+        const result = await replyKugouComment(Number(resourceId), {
+          commentId: replyTarget.commentId,
+          pid: replyTarget.rootId || '0',
+          content: newComment,
+        })
+        if (!result.success) {
+          setActionError('回复发布失败：' + (result.error || '未知错误'))
+          return
+        }
+        finishCommentMutation('回复发表成功')
+        return
+      }
 
       if (platform === 'netease') {
         // 调用网易云API回复评论
@@ -1816,6 +2087,33 @@ export default memo(function CommentModal({
         setActionError(error instanceof Error ? error.message : '加载回复失败，请重试')
         return
       }
+    }
+
+    // 酷狗：楼层走 /mcomment/v1/hot_replylist（childrenid = special_child_id；上游缺它返回 20006）
+    if (resourcePlatform === 'kugou') {
+      const specialId = comment.kugouSpecialChildId
+      if (!specialId || (comment.replies?.length || 0) >= comment.replyCount) return
+      try {
+        const items = await fetchKugouCommentFloor({
+          mixSongId: Number(resourceId) || undefined,
+          specialId,
+          // tid 必须是评论 id（实测：缺 tid → 10002；传 special_id → 60102）
+          tid: comment.commentId,
+          page: 1,
+          pagesize: Math.min(Math.max(comment.replyCount, 1), 50),
+        })
+        const replies: Reply[] = items.map((item, index) => ({
+          replyId: String(item.id || `kugou-floor-${comment.commentId}-${index}`),
+          content: item.content,
+          user: { nickname: item.userName, avatarUrl: item.userPic, userId: item.userId },
+          time: (Number(item.addtime) || 0) * 1000,
+        }))
+        if (!replies.length) return
+        patchComment(comment.commentId, item => ({ ...item, replies }))
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : '加载回复失败，请重试')
+      }
+      return
     }
 
     if (resourcePlatform !== 'netease' || (comment.replies?.length || 0) >= comment.replyCount) return
@@ -1989,16 +2287,21 @@ export default memo(function CommentModal({
     ? `${tabBase} font-medium`
     : `${tabBase} ${isDark ? 'text-white/55 hover:bg-white/8 hover:text-white/85' : 'text-black/50 hover:bg-black/5 hover:text-black/75'}`
 
-  // 页签定义：总览（弹幕幕布）为所有平台常驻；推荐页签网易云/QQ 提供（QQ 的推荐即精彩评论）；
-  // 汽水无推荐排序，保持 总览/最热/最新
-  const showRecommendTab = resourcePlatform === 'netease' || resourcePlatform === 'qq'
+  // 页签定义：**酷狗按客户端只有三个大类「推荐 / 最热 / 最新」**（没有弹幕总览页签，
+  // 进弹窗即列表 + 标签带）；其余平台保持 总览（弹幕幕布）常驻。
+  // 推荐页签网易云/QQ/酷狗提供（酷狗推荐=cmtlist 混合序）；汽水无推荐排序，保持 总览/最热/最新。
+  const isKugouComments = resourcePlatform === 'kugou'
+  const showRecommendTab = resourcePlatform === 'netease' || resourcePlatform === 'qq' || isKugouComments
   const tabs: { key: CommentTab; label: string; badge?: number }[] = [
-    { key: 'overview', label: '总览', badge: totalComments > 0 ? Number(totalComments) : danmakuPool.length },
+    // 酷狗不提供弹幕总览页签（客户端没有这一层）
+    ...(isKugouComments
+      ? []
+      : [{ key: 'overview' as CommentTab, label: '总览', badge: totalComments > 0 ? Number(totalComments) : danmakuPool.length }]),
     ...(showRecommendTab
       ? [{ key: 'recommend' as CommentTab, label: '推荐', badge: resourcePlatform === 'qq' ? hotComments.length : undefined }]
       : []),
-    { key: 'hot', label: isPlaylistResource ? '热门评价' : '最热评论' },
-    { key: 'latest', label: isPlaylistResource ? '最新评价' : '最新评论' },
+    { key: 'hot', label: isPlaylistResource ? '热门评价' : (isKugouComments ? '最热' : '最热评论') },
+    { key: 'latest', label: isPlaylistResource ? '最新评价' : (isKugouComments ? '最新' : '最新评论') },
   ]
 
   const listBody = () => {
@@ -2045,34 +2348,88 @@ export default memo(function CommentModal({
         </div>
       )
     }
+    // 酷狗标签 chips：客户端是**同一条流式换行**的标签带——先是分类标签
+    // （全部 · 歌曲相关 / 有图 / …，来自 cmtlist 的 classify_list），紧接着热词
+    // （来自 hot_word_list），整体 flex-wrap 自然折行。此前分成两条带边框的行，
+    // 只有单个热词时会出现「宝藏」独占一行的观感（用户反馈）。
+    const showKugouTagChips = resourcePlatform === 'kugou' && !isPlaylistResource && (kugouClassify.length > 0 || kugouHotWords.length > 0)
+    const kugouTagChips = showKugouTagChips ? (
+      <div className={`flex shrink-0 flex-wrap items-center gap-1.5 border-b px-6 py-2.5 ${divider}`}>
+        <button
+          type="button"
+          onClick={() => { setKugouActiveClassify(''); setKugouActiveWord('') }}
+          className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${chipClass}`}
+          style={!kugouActiveClassify && !kugouActiveWord ? { background: `${accent}26`, color: accent, borderColor: accent } : undefined}
+        >
+          全部{totalComments > 0 ? ` · ${totalComments}` : ''}
+        </button>
+        {kugouClassify.map(item => (
+          <button
+            key={`classify-${item.id}`}
+            type="button"
+            onClick={() => {
+              setKugouActiveWord('')
+              setKugouActiveClassify(current => (current === item.id ? '' : item.id))
+            }}
+            className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${chipClass}`}
+            style={kugouActiveClassify === item.id ? { background: `${accent}26`, color: accent, borderColor: accent } : undefined}
+          >
+            {item.name}
+            {item.count > 0 ? ` · ${item.count}` : ''}
+          </button>
+        ))}
+        {kugouHotWords.map(item => (
+          <button
+            key={`word-${item.word}`}
+            type="button"
+            onClick={() => {
+              setKugouActiveClassify('')
+              setKugouActiveWord(current => (current === item.word ? '' : item.word))
+            }}
+            className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${chipClass}`}
+            style={kugouActiveWord === item.word ? { background: `${accent}26`, color: accent, borderColor: accent } : undefined}
+          >
+            {item.word}
+            {item.count > 0 ? ` · ${item.count}` : ''}
+          </button>
+        ))}
+      </div>
+    ) : null
     return (
-      <List<CommentRowData>
-        listRef={commentListRef}
-        className="custom-scrollbar"
-        style={{ height: '100%', width: '100%' }}
-        onScroll={handleScroll}
-        rowCount={commentRows.length}
-        rowHeight={dynamicRowHeight}
-        overscanCount={6}
-        rowComponent={CommentVirtualRow}
-        rowProps={{
-          rows: commentRows,
-          expandedReplies,
-          isLoggedIn,
-          canInteract,
-          currentUserId,
-          isDark,
-          accent,
-          showRank: showRankForTab,
-          onLike: handleRowLike,
-          onReply: handleRowReply,
-          onDelete: handleRowDelete,
-          onToggleReplies: handleRowToggleReplies,
-          onOpenUser: handleRowOpenUser,
-          isLoadingMore,
-          onLoadMore: handleRowLoadMore,
-        }}
-      />
+      <div className="flex h-full flex-col">
+        {kugouTagChips}
+        <div className="min-h-0 flex-1">
+          <List<CommentRowData>
+            listRef={commentListRef}
+            className="custom-scrollbar"
+            style={{ height: '100%', width: '100%' }}
+            onScroll={handleScroll}
+            rowCount={commentRows.length}
+            rowHeight={dynamicRowHeight}
+            overscanCount={6}
+            rowComponent={CommentVirtualRow}
+            rowProps={{
+              rows: commentRows,
+              expandedReplies,
+              isLoggedIn,
+              canInteract,
+              currentUserId,
+              isDark,
+              accent,
+              showRank: showRankForTab,
+              deleteDisabled: resourcePlatform === 'kugou',
+              onLike: handleRowLike,
+              onReply: handleRowReply,
+              onDelete: handleRowDelete,
+              onToggleReplies: handleRowToggleReplies,
+              onOpenUser: handleRowOpenUser,
+              onPreviewImage: setPreviewImage,
+              isLoadingMore,
+              onLoadMore: handleRowLoadMore,
+            }}
+          />
+        </div>
+      </div>
     )
   }
 
@@ -2215,8 +2572,9 @@ export default memo(function CommentModal({
                 </div>
               )}
 
-              {/* 热评速览：堆叠卡组（最热 3 条），点一下直接去弹幕幕布 */}
-              {hotComments[0] && !isPlaylistResource && (
+              {/* 热评速览：堆叠卡组（最热 3 条），点一下直接去弹幕幕布。
+                  酷狗没有总览页签 → 不渲染这组跳转卡（点了没有去处）。 */}
+              {hotComments[0] && !isPlaylistResource && resourcePlatform !== 'kugou' && (
                 <div className="mt-4">
                   <button
                     type="button"
@@ -2336,7 +2694,11 @@ export default memo(function CommentModal({
                       </button>
                     </>
                   )}
-                  {composerLocked ? '登录后可参与评论' : 'Enter 发送 · Shift+Enter 换行'}
+                  {composerLocked
+                    ? (resourcePlatform === 'kugou'
+                      ? (isLoggedIn ? '酷狗歌单评论暂未提供（仅支持单曲评论）' : '扫码登录酷狗后可发表/点赞/回复')
+                      : '登录后可参与评论')
+                    : 'Enter 发送 · Shift+Enter 换行'}
                 </span>
                 <button
                   type="button"
@@ -2516,7 +2878,14 @@ export default memo(function CommentModal({
                   canInteract={canInteract}
                   onLike={(comment) => void handleLike(comment)}
                   onReply={(comment) => beginReply({ commentId: comment.commentId, username: comment.user.nickname })}
-                  onDelete={(comment) => setPendingDeleteComment(comment as Comment)}
+                  onDelete={(comment) => {
+                    if (resourcePlatform === 'kugou') {
+                      // 酷狗删除实测：接口受理但列表不移除 → 不弹确认框，如实说明
+                      setActionError('酷狗评论删除上游未生效（接口受理但列表不移除），暂不提供')
+                      return
+                    }
+                    setPendingDeleteComment(comment as Comment)
+                  }}
                 />
               ) : (
                 <div ref={(el) => { commentOuterRef.current = el }} className="h-full">
@@ -2538,6 +2907,38 @@ export default memo(function CommentModal({
           if (pendingDeleteComment) void handleDelete(pendingDeleteComment)
         }}
       />
+
+      {/* 评论图片预览：缩略图点开后按原图比例铺满可视区（不超过 92vw×88vh），
+          点背景/右上角关闭。z 值高于评论弹窗本体与用户资料弹窗。 */}
+      <AnimatePresence>
+        {previewImage && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[130] flex items-center justify-center bg-black/88 p-6"
+            onClick={() => setPreviewImage(null)}
+            role="dialog"
+            aria-label="评论图片预览"
+          >
+            <button
+              type="button"
+              onClick={() => setPreviewImage(null)}
+              aria-label="关闭图片预览"
+              className="absolute right-5 top-5 rounded-full bg-white/10 p-2 text-white/80 transition hover:bg-white/20 hover:text-white"
+            >
+              <X className="h-5 w-5" />
+            </button>
+            <img
+              src={previewImage}
+              alt="评论图片"
+              draggable={false}
+              className="max-h-[88vh] max-w-[92vw] rounded-lg object-contain shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* 回到顶部按钮 - 相对于评论弹窗定位 */}
       {tab !== 'overview' && (

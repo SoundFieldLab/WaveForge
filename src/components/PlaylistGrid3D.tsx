@@ -27,7 +27,7 @@ interface PlaylistGrid3DProps {
   onRemoveFromPlaylist?: (song: Song) => void | Promise<unknown>
   onViewComments?: (song: Song) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onCopyInfo?: (song: Song) => void
   userPlaylists?: any[]
   currentPlaylistId?: string
@@ -570,7 +570,7 @@ export default function PlaylistGrid3D({
             const artistId = songPlatform === 'soda' ? (artist?.name || artist?.id)
               : songPlatform === 'apple' ? (artist?.appleId || artist?.id)
                 : songPlatform === 'qq' ? (artist?.mid || artist?.id) : artist?.id
-            if (artistId) onOpenArtist(String(artistId), songPlatform)
+            if (artistId) onOpenArtist(String(artistId), songPlatform, artist?.name || '')
             closeContextMenu()
           } : undefined}
           onCopyInfo={onCopyInfo ? (song) => {

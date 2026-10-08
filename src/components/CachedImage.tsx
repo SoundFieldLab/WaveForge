@@ -92,7 +92,8 @@ function CachedImage({
   fallback,
   onError,
   onLoad,
-  draggable,
+  // 默认不可拖拽：封面在 Electron 里被拖出窗口是原生 image drag 行为（全局 CSS 也兜底禁用）
+  draggable = false,
   lazy = true,
   role = 'card',
   size,
@@ -240,7 +241,9 @@ function CachedImage({
       }
     }).catch(() => {
       if (requestRef.current !== requestKey) return
-      if (!retainPrevious) setImageSrc('')
+      // retainPrevious 只在「另有旧封面可继续显示」时保留当前图；仍指着刚失败的代理地址时清掉，
+      // 让 fallback/占位符接管——否则浏览器的「破图 + alt 文本」会一直挂在页面上（fallback 分支永远走不到）。
+      setImageSrc(current => (retainPrevious && current && current !== normalizedSrc ? current : ''))
       setError(true)
       setLoading(false)
     })
@@ -248,7 +251,7 @@ function CachedImage({
 
   const handleError = (event: React.SyntheticEvent<HTMLImageElement, Event>) => {
     setError(true)
-    if (!retainPrevious) setImageSrc('')
+    setImageSrc(current => (retainPrevious && current && current !== normalizedSrc ? current : ''))
     onError?.(event)
   }
 

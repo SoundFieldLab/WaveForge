@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio, X , Lightbulb, Share2} from 'lucide-react'
+import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio, X , Lightbulb, Share2, Link2} from 'lucide-react'
 import { Song, getProxiedImageUrl } from '../services/musicApi'
 import { getAddablePlaylists, getPlaylistMutationId } from '../services/addablePlaylists'
 import { readPlaylistOwnersFromStorage } from '../services/playlistOwnership'
@@ -18,7 +18,7 @@ import {
 } from '../services/favoriteStatusService'
 import { getAppleLovedSongIds } from '../services/appleCatalog'
 import { addSodaSongToPlaylist, checkSodaLiked, isSodaLoggedIn, setSodaTrackLiked } from '../services/sodaService'
-import { addKugouSongToPlaylist, likeKugouSong } from '../services/kugouService'
+import { addKugouSongToPlaylist, buildKugouSongLink, likeKugouSong } from '../services/kugouService'
 import { loadQQDislikeIds, peekQQDislike, subscribeQQDislike, toggleQQDislike } from '../features/qqExplore/qqDislike'
 
 /** 宿主一次性绑定给其它界面的右键菜单回调包（显隐/位置/song 由菜单自己管）。 */
@@ -384,15 +384,6 @@ export default function SongContextMenu({
   // 菜单未选中歌曲时的空渲染守卫：必须在所有 hooks 之后（下方还有 useSyncExternalStore/useState），
   // 否则 TraditionalView 这种「组件常驻挂载、song 后到」的宿主会在首次右键时
   // 触发 hooks 数量变化（Rendered more hooks than during the previous render）而崩溃整棵渲染树。
-  // 获取评论数显示文本
-  const getCommentCountText = () => {
-    if (!song) return ''
-    const count = (song as Song & { commentCount?: number }).commentCount || 0
-    if (count > 1000) {
-      return '999+'
-    }
-    return count > 0 ? count.toString() : ''
-  }
 
   // 获取歌曲封面URL
   const getCoverUrl = () => {
@@ -406,7 +397,7 @@ export default function SongContextMenu({
   const currentUserId = platform === 'apple' ? '' : (localStorage.getItem(getUserStorageKey(platform)) || '')
   // 第三方平台（spotify/kugou/soda）操作拦截：未登录提示先登录；
   // 已登录 spotify 走官方收藏/加歌接口，soda 走 sodaService（喜欢/加歌），
-  // kugou 走 H5 网关（喜欢/加歌为真实能力；「取消喜欢」上游无移除端点，在按钮层隐藏）
+  // kugou 走概念版通道（喜欢/取消喜欢/加歌均为真实写入；网页 cookie 通道由能力位隐藏取消项）
   const handleThirdPartyAction = (action: 'like' | 'unlike' | 'playlist', playlistId?: string): boolean => {
     const p = resolvedPlatform
     // 本函数只在下方 `if (!song) return null` 守卫之后被菜单项调用；这里补窄化兜底
@@ -468,16 +459,15 @@ export default function SongContextMenu({
       return true
     }
     if (p === 'kugou') {
-      // 酷狗：喜欢=H5 网关加入默认「我喜欢」歌单（真实写入），加歌=/v6/add_song（真实）。
-      // 取消喜欢上游无移除端点（服务端对 like=false 只回执不落库），入口已在按钮层隐藏，
-      // 这里兜底给出准确提示而不是假装成功。
+      // 酷狗：喜欢=概念版加入默认「我喜欢」歌单；取消=按 fileid 从「我喜欢」移除
+      //（kugouService 会先查 hash→fileid 映射）。加歌=/v6/add_song。
       const kugouHash = String(song.mid || '')
       if (action === 'playlist' && playlistId) {
         void addKugouSongToPlaylist(playlistId, { hash: kugouHash }).then(ok => {
           showMenuToast(ok ? '已添加到酷狗歌单' : '添加到酷狗歌单失败', ok ? 'success' : 'error')
         })
       } else if (action === 'like') {
-        void likeKugouSong({ hash: kugouHash }, true).then(ok => {
+        void likeKugouSong({ hash: kugouHash, name: song.name }, true).then(ok => {
           if (ok) {
             setFavoriteStatus(true)
             applyFavoriteMutation({ platform: 'kugou', type: 'like', songId: song.id, songMid: song.mid })
@@ -485,7 +475,13 @@ export default function SongContextMenu({
           showMenuToast(ok ? '已加入酷狗喜欢' : '喜欢失败，请检查登录状态', ok ? 'success' : 'error')
         })
       } else {
-        showMenuToast('酷狗音乐暂不支持取消喜欢：上游未提供移除歌曲的接口', 'info')
+        void likeKugouSong({ hash: kugouHash, name: song.name }, false).then(ok => {
+          if (ok) {
+            setFavoriteStatus(false)
+            applyFavoriteMutation({ platform: 'kugou', type: 'unlike', songId: song.id, songMid: song.mid })
+          }
+          showMenuToast(ok ? '已从酷狗喜欢中移除' : '取消喜欢失败，请检查登录状态', ok ? 'success' : 'error')
+        })
       }
       return true
     }
@@ -578,8 +574,8 @@ export default function SongContextMenu({
         onClose()
       }
     }] : []),
-    // 「取消喜欢」按能力位决定（酷狗上游无移除端点）：与播放页径向菜单共用
-    // capabilities.unlikeSong，避免两处入口一个隐藏一个假成功（2026-09-27 审计）
+    // 「取消喜欢」按能力位决定（酷狗概念版按 fileid 可移除，网页 cookie 通道不可）：
+    // 与播放页径向菜单共用 capabilities.unlikeSong，避免两处入口一个隐藏一个假成功
     ...(!favoriteStatusLoading && favoriteActionIsRemove && onRemoveFromFavorites
       && getPlatformCapabilities(resolvedPlatform).unlikeSong ? [{
       label: favoriteLabels.remove,
@@ -628,7 +624,9 @@ export default function SongContextMenu({
       danger: true
     }] : []),
     ...(onViewComments && getPlatformCapabilities(resolvedPlatform).comments ? [{
-      label: `查看评论${getCommentCountText() ? ` (${getCommentCountText()})` : ''}`,
+      // 菜单项不带评论数：各平台评论数口径不一致（酷狗要单独拉接口、网易云/QQ 只有部分资源带），
+      // 数字反而不稳；评论总数在评论弹窗里展示。
+      label: '查看评论',
       icon: MessageSquare,
       onClick: () => {
         onViewComments(song)
@@ -715,8 +713,14 @@ export default function SongContextMenu({
       label: '相似歌曲',
       icon: Lightbulb,
       onClick: () => {
-        // 网易云客户端灯泡同款：直接取相似歌曲插播并切换播放
-        window.dispatchEvent(new CustomEvent('waveforge:play-similar-song', { detail: song }))
+        // 各平台原生行为不同：
+        // - 网易云：客户端灯泡直接切到相似歌曲（插播），不打断当前播放
+        // - 酷狗：官方客户端是**弹窗列表**（相似度排序的相似歌曲窗），不能套网易云那套
+        // - 其余平台：同样是弹窗列表
+        window.dispatchEvent(new CustomEvent(
+          resolvedPlatform === 'kugou' ? 'waveforge:show-similar-songs' : 'waveforge:play-similar-song',
+          { detail: song },
+        ))
         onClose()
       }
     }] : []),
@@ -733,6 +737,24 @@ export default function SongContextMenu({
       icon: Share2,
       onClick: () => {
         onShare(song)
+        onClose()
+      }
+    }] : []),
+    // 酷狗专属：官方客户端右键的「复制链接」。
+    // 不做「下载」（产品口径：本软件无下载功能），菜单里不留下载入口。
+    ...(resolvedPlatform === 'kugou' ? [{
+      label: '复制链接',
+      icon: Link2,
+      onClick: () => {
+        const link = buildKugouSongLink(song)
+        if (!link) {
+          showMenuToast('缺少歌曲 hash，无法生成酷狗链接', 'error')
+          onClose()
+          return
+        }
+        void navigator.clipboard?.writeText(link)
+          .then(() => showMenuToast('已复制酷狗歌曲链接', 'success'))
+          .catch(() => showMenuToast('复制失败，请手动复制', 'error'))
         onClose()
       }
     }] : [])

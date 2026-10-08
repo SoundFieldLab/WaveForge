@@ -119,7 +119,7 @@ interface DesktopViewProps {
   onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onCopyInfo?: (song: Song) => void
   

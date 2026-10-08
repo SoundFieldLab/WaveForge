@@ -11,8 +11,10 @@ import {
 import {
   AUDIO_QUALITY_SETTINGS_EVENT,
   getPlatformQualityPreference,
+  getPlatformSvipState,
   getPlatformVipState,
   getQualityOptions,
+  getQualityTier,
   isVipOnlyResolvedQuality,
   loadAudioQualitySettings,
   resolvedQualityDisplayName,
@@ -22,6 +24,7 @@ import {
   type QualityOptionValue,
 } from '../services/audioQualitySettings'
 import { getLastResolvedQuality } from '../services/musicApi'
+import { getCrossFillSource, useCrossFillVersion } from '../services/crossFillRegistry'
 import type { MusicPlatform } from '../services/platforms'
 import { getApiBase } from '../services/apiConfig'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -318,6 +321,8 @@ type QualityMenuEntry = {
   /** null = 平台报告该档存在、但当前取流管线暂未支持 */
   value: QualityOptionValue | null
   requiresVip?: boolean
+  /** 会员档位：vip=绿钻，svip=超级会员（与官方客户端两级标注一致） */
+  tier?: 'vip' | 'svip'
 }
 
 /** QQ 歌曲详情 qualityLevels 的 size_* 键 → 我们已实现的取流档位（AAC 前缀映射已实测校准）。 */
@@ -328,6 +333,10 @@ const QQ_QUALITY_LEVEL_TO_PREFERENCE: Record<string, QualityOptionValue> = {
   size_128mp3: 'standard',
   size_96aac: '96aac',
   size_48aac: '48aac',
+  // 超级会员高端档：官方逐曲档位（独立音轨，文件名前缀见服务端 QQ_PREMIUM_TIERS）
+  size_dolby: 'dolby',
+  size_master: 'master',
+  size_atmos2: 'atmos2',
 }
 
 /** 服务端「实际解析档」原始值 → 本曲 qualityLevels 的 size_* 键：元数据偶发漏档
@@ -340,10 +349,17 @@ const QQ_RESOLVED_RAW_TO_LEVEL_KEY: Record<string, string> = {
   '96aac': 'size_96aac',
   m4a: 'size_96aac',
   '48aac': 'size_48aac',
+  dolby: 'size_dolby',
+  master: 'size_master',
+  atmos2: 'size_atmos2',
 }
 
+/** 已有取流实现的逐曲档位（列表只显示这些）：SQ/HQ/标准/流畅/省流 + 臻品母带4.0。
+ *  Hi-Res / 杜比全景声 / 臻品音质2.0 / NAC 暂未打通，按"支持啥显示啥"的原则不列。 */
+const QQ_IMPLEMENTED_LEVEL_KEYS = new Set(['size_master', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_48aac'])
+
 /** 本曲档位列表的码率序（高→低），与服务端 sort 一致（NAC 76k 位于 96k 与 48k 之间）。 */
-const QQ_LEVEL_SIZE_ORDER = ['size_hires', 'size_dolby', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_nac', 'size_48aac']
+const QQ_LEVEL_SIZE_ORDER = ['size_master', 'size_atmos2', 'size_hires', 'size_dolby', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_nac', 'size_48aac']
 
 /** QQ 本曲可用音质（qualityLevels）的模块级缓存：切歌即预取，弹层打开时直接命中，
  *  不再出现「先显示通用档位列表、拉到本曲详情后再换成本曲列表」的闪现。 */
@@ -391,6 +407,14 @@ function QualityQuickSwitch({
   const [menuOpen, setMenuOpen] = useState(false)
   const [songLevels, setSongLevels] = useState<QualityLevelEntry[] | null>(null)
   const [levelsLoading, setLevelsLoading] = useState(false)
+  // 补源分流（音质与供源平台绑定）：这首歌若正由其它平台供源（补源），音质档位/偏好按
+  // 供源平台读——汽水歌借 QQ 音源时，弹层展示和保存的都是 QQ 的档位表。
+  useCrossFillVersion()
+  const crossFillSource = getCrossFillSource({ platform, id: songId })
+  const qualityPlatform: MusicPlatform = crossFillSource?.platform || platform
+  const qualitySongId: string | number | undefined = crossFillSource?.carrierId
+    ? (qualityPlatform === 'qq' && crossFillSource.carrierId.length === 14 ? crossFillSource.carrierId : crossFillSource.carrierId)
+    : songId
   useEffect(() => {
     const handleAudioQualityChange = () => forceQualityRefresh(value => value + 1)
     window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, handleAudioQualityChange)
@@ -406,12 +430,12 @@ function QualityQuickSwitch({
 
   // 本曲音质：切歌时预取（不等弹层打开），弹层打开时同步读缓存 → 不再闪现通用列表。
   useEffect(() => {
-    if (platform !== 'qq' || songId == null) {
+    if (qualityPlatform !== 'qq' || qualitySongId == null) {
       setSongLevels(null)
       setLevelsLoading(false)
       return
     }
-    const key = String(songId)
+    const key = String(qualitySongId)
     const cached = qqSongLevelsCache.get(key)
     if (cached && Date.now() - cached.at < QQ_SONG_LEVELS_TTL) {
       setSongLevels(cached.levels)
@@ -420,7 +444,7 @@ function QualityQuickSwitch({
     }
     const controller = new AbortController()
     setLevelsLoading(true)
-    void fetchQQSongLevels(songId, controller.signal)
+    void fetchQQSongLevels(qualitySongId, controller.signal)
       .then(levels => {
         if (controller.signal.aborted) return
         qqSongLevelsCache.set(key, { levels, at: Date.now() })
@@ -442,42 +466,44 @@ function QualityQuickSwitch({
   }, [platform, songId])
 
   const isDark = playerTheme === 'dark'
-  const options = getQualityOptions(platform)
-  const preference = getPlatformQualityPreference(platform)
+  const options = getQualityOptions(qualityPlatform)
+  const preference = getPlatformQualityPreference(qualityPlatform)
   const current = options.find(option => option.value === preference) ?? options[0]
   // QQ 本曲档位在途：先只出「自动」+ 读取提示，避免拿通用列表顶上后又切换（用户看到的"闪一下"）。
-  const qqLevelsPending = platform === 'qq' && songId != null && !songLevels && levelsLoading
+  const qqLevelsPending = qualityPlatform === 'qq' && qualitySongId != null && !songLevels && levelsLoading
 
   // 会员检测：读各平台登录链路维护的会员状态（qq_vip / netease_vip / soda_entitlement，
   // 登录与启动恢复时刷新，auth 事件驱动重渲染）——会员档一律金字，非会员才加皇冠。
-  const isVipUser = getPlatformVipState(platform)
+  // 供源平台的会员状态才是这根弹层该用的（借 QQ 音源就看 QQ 权益）。
+  const isVipUser = getPlatformVipState(qualityPlatform)
+  const isSvipUser = getPlatformSvipState(qualityPlatform)
 
   // 「自动（…）」括号与徽标显示当前实际档位短名：取本曲最近一次播放链接解析回的真实档位
   // （按歌曲记录，无记录则回落偏好档短名）。此前按平台记录，换歌后会残留上一首的档位。
-  const resolvedQuality = getLastResolvedQuality(platform, songId)
-  const autoLabel = resolvedQuality ? `自动（${resolvedQualityShortLabel(platform, resolvedQuality)}）` : '自动'
+  const resolvedQuality = getLastResolvedQuality(qualityPlatform, qualitySongId)
+  const autoLabel = resolvedQuality ? `自动（${resolvedQualityShortLabel(qualityPlatform, resolvedQuality)}）` : '自动'
   // 实际在播的是会员档（如 SQ）→「自动」行按会员样式渲染（金字；非会员加皇冠）
-  const autoRequiresVip = resolvedQuality ? isVipOnlyResolvedQuality(platform, resolvedQuality) : false
+  const autoRequiresVip = resolvedQuality ? isVipOnlyResolvedQuality(qualityPlatform, resolvedQuality) : false
   // 徽标口径对齐 QQ 官方 bar：显示实际在播档位短名（手动档回落时也如实反映），无记录时显示偏好档
   const badgeLabel = resolvedQuality
-    ? resolvedQualityShortLabel(platform, resolvedQuality)
+    ? resolvedQualityShortLabel(qualityPlatform, resolvedQuality)
     : current.shortLabel
 
   // 本曲列表 + 两类补挂：①实际在播档（元数据偶发漏档，服务端已按 vkey 事实解析）；
   // ②手动偏好档（跨曲持久，服务端自动回落到本曲可播的最近一档，选中态不能丢）。
   // 均按码率序插回，保证列表顺序稳定。
-  const resolvedLevelKey = platform === 'qq' && resolvedQuality
+  const resolvedLevelKey = qualityPlatform === 'qq' && resolvedQuality
     ? QQ_RESOLVED_RAW_TO_LEVEL_KEY[resolvedQuality]
     : undefined
   const resolvedPreferenceValue = resolvedLevelKey
     ? QQ_QUALITY_LEVEL_TO_PREFERENCE[resolvedLevelKey]
     : undefined
-  const songLevelEntries: QualityMenuEntry[] | null = songLevels && platform === 'qq'
+  const songLevelEntries: QualityMenuEntry[] | null = songLevels && qualityPlatform === 'qq'
     ? (() => {
         const levels = [...songLevels]
         if (resolvedLevelKey && resolvedPreferenceValue && resolvedQuality
           && !levels.some(level => level.key === resolvedLevelKey)) {
-          levels.push({ key: resolvedLevelKey, label: resolvedQualityDisplayName(platform, resolvedQuality) })
+          levels.push({ key: resolvedLevelKey, label: resolvedQualityDisplayName(qualityPlatform, resolvedQuality) })
         }
         const preferredLevelKey = preference !== 'auto' ? QQ_PREFERENCE_TO_LEVEL_KEY[preference] : undefined
         if (preferredLevelKey && !levels.some(level => level.key === preferredLevelKey)) {
@@ -489,35 +515,81 @@ function QualityQuickSwitch({
           const ib = QQ_LEVEL_SIZE_ORDER.indexOf(b.key)
           return (ia < 0 ? QQ_LEVEL_SIZE_ORDER.length : ia) - (ib < 0 ? QQ_LEVEL_SIZE_ORDER.length : ib)
         })
-        return levels.map(level => {
-          const value = QQ_QUALITY_LEVEL_TO_PREFERENCE[level.key] ?? null
-          return { key: level.key, label: level.label, value, requiresVip: value === 'lossless' || value === '192aac' }
-        })
+        return levels
+          // 只列「我们有取流实现」的档位：Hi-Res / 杜比全景声 / 臻品音质2.0 / NAC 目前取不到流，
+          // 列出来只会变成"点了没反应/提示不支持"（用户明确要求：支持啥显示啥，不支持就别列）。
+          .filter(level => QQ_IMPLEMENTED_LEVEL_KEYS.has(level.key))
+          .map(level => {
+            const value = QQ_QUALITY_LEVEL_TO_PREFERENCE[level.key] ?? null
+            const tier = value ? getQualityTier('qq', value) : undefined
+            return { key: level.key, label: level.label, value, requiresVip: Boolean(tier), tier }
+          })
       })()
     : null
 
   // 手动档在本曲回落（如选了 SQ 但本曲只出到 320）→ 列表底部一行说明实际在播档
   const manualFallbackName = preference !== 'auto' && resolvedQuality && resolvedPreferenceValue !== preference
-    ? resolvedQualityDisplayName(platform, resolvedQuality)
+    ? resolvedQualityDisplayName(qualityPlatform, resolvedQuality)
     : null
 
   const entries: QualityMenuEntry[] = songLevelEntries
     ? [
-        { key: 'auto', label: autoLabel, value: 'auto', requiresVip: autoRequiresVip },
+        { key: 'auto', label: autoLabel, value: 'auto', requiresVip: autoRequiresVip, tier: autoRequiresVip ? 'vip' : undefined },
         ...songLevelEntries,
       ]
     : qqLevelsPending
-    ? [{ key: 'auto', label: autoLabel, value: 'auto', requiresVip: autoRequiresVip }]
+    ? [{ key: 'auto', label: autoLabel, value: 'auto', requiresVip: autoRequiresVip, tier: autoRequiresVip ? 'vip' : undefined }]
     : options.map(option => ({
         key: String(option.value),
         label: option.value === 'auto' ? autoLabel : option.label,
         value: option.value,
         requiresVip: option.requiresVip || (option.value === 'auto' && autoRequiresVip),
+        tier: option.tier || (option.value === 'auto' && autoRequiresVip ? 'vip' : undefined),
       }))
 
+  // 超级会员档独立成一栏（对齐官方面板：顶部「超级会员独家尊享」+ 下方常规档位列表），
+  // 且只列本曲真的支持、且我们取得到流的档位
+  const premiumEntries = entries.filter(entry => entry.tier === 'svip' && entry.value !== null)
+  const standardEntries = entries.filter(entry => entry.tier !== 'svip' && entry.value !== null)
+
   const select = (value: QualityOptionValue) => {
-    saveAudioQualitySettings({ [platform]: value } as Partial<AudioQualitySettings>)
+    // 保存到供源平台：借 QQ 音源时改的是 QQ 的偏好，下次取流才真正用得上
+    saveAudioQualitySettings({ [qualityPlatform]: value } as Partial<AudioQualitySettings>)
     setMenuOpen(false)
+  }
+
+  /** 音质行：会员档金字 + 官方口径的两级标注（VIP / 超级会员），只渲染有取流实现的档位。 */
+  const renderQualityRow = (entry: QualityMenuEntry, premium: boolean) => {
+    if (entry.value == null) return null
+    const selected = entry.value === preference
+    return (
+      <button
+        key={entry.key}
+        type="button"
+        onClick={() => select(entry.value as QualityOptionValue)}
+        className={`w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors ${
+          selected
+            ? /* 选中态 = hover 同款高亮（常驻），主题色叠加在深色菜单上不可见，用户已确认弃用 */
+              isDark ? 'bg-white/10 text-white/85' : 'bg-black/10 text-black/80'
+            : isDark ? 'text-white/85 hover:bg-white/10' : 'text-black/80 hover:bg-black/10'
+        }`}
+      >
+        <span className={`flex-1 truncate ${premium ? 'font-medium' : ''}`} style={entry.requiresVip ? { color: '#fbbf24' } : undefined}>
+          {entry.label}
+        </span>
+        {/* 官方客户端口径：绿钻档标「VIP」，超级会员档标「超级会员」（都配金皇冠）；
+            当前账号已有该级别时不再重复提示 */}
+        {entry.tier === 'svip' ? (
+          <span className="flex flex-shrink-0 items-center gap-0.5 text-[10px] font-medium text-amber-400">
+            {!isSvipUser && <Crown className="h-3 w-3" />}超级会员
+          </span>
+        ) : entry.tier === 'vip' ? (
+          <span className="flex flex-shrink-0 items-center gap-0.5 text-[10px] font-medium text-amber-400">
+            {!isVipUser && <Crown className="h-3 w-3" />}VIP
+          </span>
+        ) : null}
+      </button>
+    )
   }
 
   return (
@@ -529,7 +601,7 @@ function QualityQuickSwitch({
         className={`${compact ? 'px-1.5 py-1' : 'px-2 py-1'} flex items-center justify-center rounded-full transition-colors ${
           playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'
         }`}
-        title={`播放音质：${resolvedQuality ? resolvedQualityDisplayName(platform, resolvedQuality) : current.label}（点击切换）`}
+        title={`播放音质：${resolvedQuality ? resolvedQualityDisplayName(qualityPlatform, resolvedQuality) : current.label}（点击切换）`}
       >
         {/* 只显示文字（省位置）：按钮紧贴文案，不做固定宽度——用户反馈长胶囊太占位置 */}
         <span className={`text-center text-[11px] font-medium leading-none ${playerTheme === 'dark' ? 'text-white/85' : 'text-black/75'}`}>
@@ -558,41 +630,19 @@ function QualityQuickSwitch({
               <div className={`px-2.5 py-1 text-center text-[10px] ${isDark ? 'text-white/40' : 'text-black/40'}`}>
                 播放音质
               </div>
-              {entries.map(entry => {
-                const unsupported = entry.value === null
-                const selected = !unsupported && entry.value === preference
-                return (
-                  <button
-                    key={entry.key}
-                    type="button"
-                    disabled={unsupported}
-                    onClick={() => { if (entry.value) select(entry.value) }}
-                    className={`w-full flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[12px] transition-colors disabled:cursor-not-allowed ${
-                      unsupported
-                        ? 'opacity-45'
-                        : selected
-                        ? /* 选中态 = hover 同款高亮（常驻），主题色叠加在深色菜单上不可见，用户已确认弃用 */
-                          isDark ? 'bg-white/10 text-white/85' : 'bg-black/10 text-black/80'
-                        : isDark ? 'text-white/85 hover:bg-white/10' : 'text-black/80 hover:bg-black/10'
-                    }`}
-                  >
-                    {/* 会员档文字金色（皇冠只在非会员账号显示——VIP 用户不需要被反复提醒） */}
-                    <span
-                      className="flex-1 truncate"
-                      style={entry.requiresVip ? { color: '#fbbf24' } : undefined}
-                    >
-                      {entry.label}
-                    </span>
-                    {unsupported && (
-                      <span className={`flex-shrink-0 text-[10px] ${isDark ? 'text-white/35' : 'text-black/35'}`}>暂未支持</span>
-                    )}
-                    {entry.requiresVip && !isVipUser && <Crown className="w-3 h-3 text-amber-400 flex-shrink-0" />}
-                  </button>
-                )
-              })}
+              {premiumEntries.length > 0 && (
+                <>
+                  <div className={`px-2.5 pb-1 pt-0.5 text-[10px] font-medium ${isDark ? 'text-amber-300/80' : 'text-amber-600/90'}`}>
+                    超级会员独家尊享
+                  </div>
+                  {premiumEntries.map(entry => renderQualityRow(entry, true))}
+                  <div className={`mx-2 my-1 ${isDark ? 'h-px bg-white/10' : 'h-px bg-black/10'}`} />
+                </>
+              )}
+              {standardEntries.map(entry => renderQualityRow(entry, false))}
               {manualFallbackName && (
                 <div className={`flex items-center px-2.5 py-1.5 text-[11px] ${isDark ? 'text-white/45' : 'text-black/45'}`}>
-                  <span className="truncate">本曲无此档，已按 {manualFallbackName} 播放</span>
+                  <span className="truncate">实际在播：{manualFallbackName}</span>
                 </div>
               )}
               {qqLevelsPending && (

@@ -116,12 +116,16 @@ type DeviceState = { status: 'idle' | 'loading' | 'ready' | 'error'; deviceId: s
 /** 各平台音质档位的官方名称（设置页汇总行按平台取值，避免 QQ 的档位名套到网易云上）。 */
 const QUALITY_LABELS_BY_PLATFORM: Record<string, Partial<Record<AudioQualityPreference | 'aac' | 'hi-res-lossless' | 'atmos', string>>> = {
   qq: {
-    auto: '自动最高', standard: '标准（128k）', high: 'HQ 高品（320k）', lossless: 'SQ 无损（1024k）',
-    '192aac': 'HQ 高品（192k）', '96aac': '流畅（96k）', '48aac': '省流（48k）',
-    'very-high': '超高品质', 'hi-res': 'Hi-Res',
+    auto: '自动最高', standard: '标准（128k）', high: 'HQ 高品（320k）', lossless: 'SQ 无损（1024k）·VIP',
+    '192aac': 'HQ 高品（192k）·VIP', '96aac': '流畅（96k）', '48aac': '省流（48k）',
+    // 与官方客户端口径一致：绿钻档标 VIP，超级会员专享三档单独标注
+    dolby: '杜比全景声（Atmos）·超级会员', master: '臻品母带4.0·超级会员', atmos2: '臻品音质2.0·超级会员',
+    'very-high': '超高品质', 'hi-res': 'Hi-Res·超级会员',
   },
   netease: {
-    auto: '自动最高', standard: '标准（128k）', high: '极高（320k）', lossless: '无损（FLAC）', 'hi-res': 'Hi-Res 无损（192k）', 'very-high': '较高（192k）',
+    auto: '自动最高', standard: '标准（128k）', high: '极高（320k）·VIP', lossless: '无损（SQ）·VIP', 'hi-res': 'Hi-Res 无损·VIP', 'very-high': '较高（192k）',
+    jyeffect: '高清臻音（Spatial Audio）·VIP', sky: '沉浸环绕声（Surround Audio）·超级会员',
+    jymaster: '超清母带（Master）·超级会员', vivid: '臻音全景声（Audio Vivid）·超级会员',
   },
   apple: {
     auto: '自动', aac: 'AAC（256k）', lossless: '无损（ALAC）', 'hi-res-lossless': '高解析度无损（24bit 192k）', atmos: '杜比全景声（Atmos）',
@@ -832,7 +836,7 @@ function SettingsPanel({
     localStorage.setItem('crossPlatformFallbackEnabled', JSON.stringify(true))
     setShowFallbackDisclaimer(false)
     window.dispatchEvent(new CustomEvent('showToast', {
-      detail: { message: '已开启灰色歌曲跨平台补全', type: 'success' },
+      detail: { message: '已开启平台可用性增强', type: 'success' },
     }))
   }
 
@@ -4395,11 +4399,11 @@ function SettingsPanel({
                     )}
                   </div>
 
-                  {/* 网易云不可用歌曲补全 */}
+                  {/* 平台不可用歌曲补全（网易云走服务端解灰，酷狗/汽水/QQ 走同名匹配） */}
                   <div>
-                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>网易云可用性增强</h3>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>平台可用性增强</h3>
                     <p className={`${textSecondary} text-sm mb-6`}>
-                      当网易云官方没有返回播放链接时，可尝试从其他公开音乐源匹配同一首歌
+                      当平台官方没有返回播放链接时，可尝试从其他公开音乐源匹配同一首歌（网易云 / 酷狗 / 汽水 / QQ 均适用）
                     </p>
 
                     <div className={`${bgCard} rounded-xl p-4 border ${borderColor}`}>
@@ -4410,7 +4414,7 @@ function SettingsPanel({
                             <span className="text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: `${accentColor}20`, color: accentColor }}>Enhanced</span>
                           </div>
                           <div className={`${textSecondary} text-sm`}>
-                            仅补全免费但受版权或地区影响的歌曲；VIP 与付费专辑不会绕过平台权限
+                            只播放目标平台当前可播放的版本；不会绕过任何平台的 VIP / 付费权限
                           </div>
                         </div>
                         <label className="relative inline-flex flex-shrink-0 items-center cursor-pointer">
@@ -6098,7 +6102,7 @@ function SettingsPanel({
                 <section>
                   <h3 className={`text-base font-semibold ${textPrimary} mb-2`}>开启前请仔细阅读</h3>
                   <p>
-                    "灰色歌曲跨平台补全"会在网易云音乐官方未返回播放链接时，从其他公开音乐源匹配并播放同一首歌。开启该功能即表示您已知悉并同意以下内容：
+                    "灰色歌曲跨平台补全"会在平台官方未返回播放链接时，从其他公开音乐源匹配并播放同一首歌。开启该功能即表示您已知悉并同意以下内容：
                   </p>
                 </section>
                 <ul className={`list-disc pl-5 space-y-1.5`}>

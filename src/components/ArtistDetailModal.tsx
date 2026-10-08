@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, UserPlus, UserCheck } from 'lucide-react'
 import { List, type ListImperativeAPI, type RowComponentProps } from 'react-window'
 import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed, isSameSong } from '../services/musicApi'
-import { fetchSodaArtistSongs } from '../services/sodaService'
+import { fetchSodaArtistSongs, type SodaArtistDetail } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleArtistDetail, getAppleCatalogArtist, getAppleCatalogArtistAlbums, getAppleCatalogArtistMusicVideos, getAppleCatalogRelatedArtists, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
 import CachedImage from './CachedImage'
@@ -50,6 +50,13 @@ const decodeSodaName = (raw: string): string => {
     return raw
   }
 }
+
+/**
+ * 汽水 artistId 判定：纯数字串 = 真实艺人 id（曲目 artists[].mid 透传的，走 /artist/detail
+ * 等真实接口，有头像/简介/专辑）；否则是旧约定的「歌手名」（伪艺人，按名检索）。
+ * 两条路并存，旧入口不受影响。
+ */
+const isSodaArtistId = (raw: string): boolean => /^\d{10,25}$/.test(String(raw || '').trim())
 
 interface ArtistSongRowProps {
   song: Song
@@ -409,6 +416,8 @@ const ArtistMvCard = memo(function ArtistMvCard({ mv, index, playerTheme, onOpen
 interface ArtistDetailModalProps {
   artistId: string | number
   platform: MusicPlatform
+  /** 歌手名提示：QQ 纯数字 singer_id 反查真 mid 时按名搜索采信用（可选） */
+  artistName?: string
   onClose: () => void
   onSongSelect?: (song: Song, playlist?: Song[]) => void
   playerTheme?: 'light' | 'dark'
@@ -425,7 +434,7 @@ interface ArtistDetailModalProps {
   onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   onCopyInfo?: (song: Song) => void
   onVideoPlaybackStart?: () => void
@@ -436,6 +445,7 @@ interface ArtistDetailModalProps {
 export default function ArtistDetailModal({
   artistId,
   platform,
+  artistName,
   onClose,
   onSongSelect,
   playerTheme = 'dark',
@@ -459,6 +469,11 @@ export default function ArtistDetailModal({
 }: ArtistDetailModalProps) {
   const [artist, setArtist] = useState<Artist | null>(null)
   const [hotSongs, setHotSongs] = useState<Song[]>([])
+  // 汽水真实艺人的完整详情（头像/简介/职业/国籍/热门专辑）。ref 而非 state：
+  // 只有「歌手详情」按钮和「专辑」tab 读它，不需要驱动渲染。
+  const sodaArtistDetailRef = useRef<SodaArtistDetail | null>(null)
+  // 汽水真实艺人「全部歌曲」的游标表：offset → nextCursor（上游是游标分页而非 offset 分页）
+  const sodaCursorByOffsetRef = useRef<Map<number, string>>(new Map())
   const [allSongs, setAllSongs] = useState<Song[]>([])
   const [allSongsOffset, setAllSongsOffset] = useState(0) // 全部歌曲的偏移量
   const [allSongsHasMore, setAllSongsHasMore] = useState(true) // 是否还有更多歌曲
@@ -559,7 +574,7 @@ export default function ArtistDetailModal({
     setFollowError('')
     try {
       const id = platform === 'qq' ? String(artist.mid || artist.id) : String(artist.id)
-      await subscribeArtist(id, !following, platform)
+      await subscribeArtist(id, !following, platform, { name: artist.name || '' })
       setFollowing(!following)
     } catch (error) {
       // 静默失败会让用户以为点按无效（QQ 关注接口仅支持部分登录方式）
@@ -727,11 +742,24 @@ export default function ArtistDetailModal({
         setLoading(false)
         return
       }
-      // 汽水音乐：逆向无艺人详情接口——外部把「歌手名」当 artistId 传入，直接以名字构造头部；
-      // 热门歌曲走 fetchSodaArtistSongs（服务内部降级不抛错，失败/无结果返回空数组
-      // → 复用「暂无热门歌曲」空态文案）。getArtistDetail 的汽水分支为并行补齐的头像通道：
-      // 尽力而为并行取一次，若其结果带 avatarUrl 可选字段则渲染真头像，否则保持首字占位
+      // 汽水音乐：优先走真实艺人（曲目透传的 artist_id，纯数字）→ /artist/detail 一次拿齐
+      // 头像 / 歌手详情（简介·职业·国籍）/ 热门歌曲 / 热门专辑；
+      // 旧入口传的是「歌手名」（伪艺人），保持按名检索的降级路径不变。
       if (platform === 'soda') {
+        const rawId = String(artistId)
+        if (isSodaArtistId(rawId)) {
+          try {
+            const { fetchSodaArtistDetail } = await import('../services/sodaService')
+            const detail = await fetchSodaArtistDetail(rawId)
+            if (detail) {
+              setArtist({ id: 0, name: detail.name, picUrl: detail.avatarUrl || '', platform: 'soda' })
+              setHotSongs(detail.hotTracks)
+              // 歌手详情/专辑留给「歌手详情」按钮与「专辑」tab 直接消费（sodaArtistDetailRef）
+              sodaArtistDetailRef.current = detail
+              return
+            }
+          } catch { /* 落回伪艺人路径 */ }
+        }
         const name = decodeSodaName(String(artistId))
         const [songsResult, detailResult] = await Promise.allSettled([
           fetchSodaArtistSongs(name, 50),
@@ -749,8 +777,8 @@ export default function ArtistDetailModal({
         return
       }
       const [artistData, songsData] = await Promise.all([
-        getArtistDetail(artistId, platform),
-        getArtistTopSongs(artistId, platform)
+        getArtistDetail(artistId, platform, artistName || ''),
+        getArtistTopSongs(artistId, platform, artistName || '')
       ])
       console.log('🎵 [ArtistDetailModal] 加载艺人数据完成')
       console.log('  艺人信息:', artistData)
@@ -803,11 +831,25 @@ export default function ArtistDetailModal({
       let hasMore = false
       
       if (platform === 'soda') {
-        // 汽水：按「歌手名」搜索拼接分页（getArtistAllSongs 内部 offset 截取），
-        // 结果为搜索派生的热门集合（非全量曲库），数据到达即按通用队列渲染
-        const page = await getArtistAllSongs(decodeSodaName(String(artistId)), 'soda', offset, limit)
-        formattedSongs = page.songs
-        total = page.total
+        // 真实艺人：/artist/tracks 真分页（sort_type=0 最热），不再是「按名搜索的派生集合」
+        if (isSodaArtistId(String(artistId))) {
+          try {
+            const { fetchSodaArtistTracks } = await import('../services/sodaService')
+            const page = await fetchSodaArtistTracks(String(artistId), { cursor: offset ? sodaCursorByOffsetRef.current.get(offset) : '', count: limit, sortType: 0 })
+            formattedSongs = page.tracks
+            total = page.tracks.length // 上游没有 total，按「本页条数」驱动通用加载语义
+            sodaCursorByOffsetRef.current.set(offset + limit, page.nextCursor || '')
+            hasMore = page.hasMore && !!page.nextCursor
+          } catch { /* 落回伪艺人路径 */ }
+        }
+        if (!formattedSongs.length) {
+          // 伪艺人降级：按「歌手名」搜索拼接分页（getArtistAllSongs 内部 offset 截取），
+          // 结果为搜索派生的热门集合（非全量曲库），数据到达即按通用队列渲染
+          const page = await getArtistAllSongs(decodeSodaName(String(artistId)), 'soda', offset, limit)
+          formattedSongs = page.songs
+          total = page.total
+          hasMore = page.songs.length >= limit
+        }
       } else if (platform === 'netease') {
         // 网易云音乐：调用全部歌曲接口
         const response = await fetch(`http://localhost:3001/api/netease/artist/songs?id=${artistId}&limit=${limit}&offset=${offset}`)
@@ -848,8 +890,8 @@ export default function ArtistDetailModal({
           noCopyright: item.privilege?.st < 0 || item.privilege?.playMaxbr === 0
         }))
       } else {
-        // QQ音乐：调用后端API，传入offset和limit（使用mid参数）
-        const response = await fetch(`http://localhost:3001/api/qq/artist/songs?mid=${artistId}&limit=${limit}`)
+        // QQ音乐：调用后端API，传入offset和limit（使用mid参数；带歌手名提示供纯数字 id 反查真 mid）
+        const response = await fetch(`http://localhost:3001/api/qq/artist/songs?mid=${encodeURIComponent(String(artistId))}&name=${encodeURIComponent(artistName || '')}&limit=${limit}`)
         const data = await response.json()
         const newSongs = data.songs || []
         total = data.total || 0
@@ -884,10 +926,11 @@ export default function ArtistDetailModal({
       
       // 检查是否还有更多歌曲
       if (platform === 'soda') {
-        // 汽水：服务层 total 是「已取回条数」而非真实总数，QQ 式 currentTotal<total
-        // 在整页返回时会误判为已取尽；改用整页启发式——本页取满 limit 视为可能还有更多，
-        // 不足一页即已取尽（空页续拉一次后自然收敛为 false，无死循环）
-        setAllSongsHasMore(formattedSongs.length >= limit)
+        // 真实艺人：游标分页——下一页的 cursor 已在拉本页时按 offset 记进 sodaCursorByOffsetRef；
+        // 记录存在且非空 = 还有更多。伪艺人保持原来的整页启发式。
+        const nextCursor = sodaCursorByOffsetRef.current.get(allSongsOffset + formattedSongs.length)
+        const usingRealArtist = isSodaArtistId(String(artistId)) && sodaCursorByOffsetRef.current.size > 0
+        setAllSongsHasMore(usingRealArtist ? Boolean(nextCursor) : formattedSongs.length >= limit)
       } else if (platform === 'netease') {
         setAllSongsHasMore(hasMore)
       } else {
@@ -926,10 +969,37 @@ export default function ArtistDetailModal({
         return
       }
 
-      // 汽水：专辑列表为按名搜索的派生实现（getArtistAlbums 汽水分支，数据由并行代理补齐；
-      // 未就绪时返回空数组 → 走「暂无专辑」诚实空态，数据到达后 tab 内即亮）。
-      // 派生实现无分页语义——单次拉取即可，避免通用翻页循环把同一份派生结果重复拼接
+      // 汽水：真实艺人直接用 /artist/albums（详情请求已带回 hotAlbums，但这里走分页接口拿全量）；
+      // 伪艺人保持按名搜索的派生实现（单次拉取，无分页语义）
       if (platform === 'soda') {
+        if (isSodaArtistId(String(artistId))) {
+          try {
+            const { fetchSodaArtistAlbums } = await import('../services/sodaService')
+            const first = await fetchSodaArtistAlbums(String(artistId), undefined, 50)
+            const all = [...first.albums]
+            let cursor = first.nextCursor
+            // 专辑通常一两页就拿完，循环保护上限 5 页
+            for (let i = 0; i < 5 && cursor && first.hasMore; i += 1) {
+              const next = await fetchSodaArtistAlbums(String(artistId), cursor, 50)
+              all.push(...next.albums)
+              cursor = next.nextCursor
+              if (!next.hasMore) break
+            }
+            setAlbums(all.map(a => ({
+              // 汽水 album id 是长数字串：Album.id 按 15 位截断转数字防溢出（与酷狗同一口径），完整 id 保留在 mid
+              id: Number(a.id.slice(0, 15)) || 0,
+              mid: a.id,
+              name: a.name,
+              picUrl: a.coverUrl || '',
+              artist: { name: a.artist || '' },
+              publishTime: a.releaseDate ? a.releaseDate * 1000 : undefined,
+              size: a.trackCount,
+              platform: 'soda' as const,
+            } as Album)))
+            setLoadingAlbums(false)
+            return
+          } catch { /* 落回伪艺人路径 */ }
+        }
         const albumsData = await getArtistAlbums(decodeSodaName(String(artistId)), 'soda')
         setAlbums(albumsData)
         return
@@ -942,7 +1012,7 @@ export default function ArtistDetailModal({
       let hasMore = true
       
       while (hasMore) {
-        const albumsData = await getArtistAlbums(artistId, platform, pageSize, page * pageSize)
+        const albumsData = await getArtistAlbums(artistId, platform, pageSize, page * pageSize, artistName || '')
         console.log(`📀 [ArtistDetailModal] 第${page + 1}页专辑数据:`, albumsData.length)
         
         if (albumsData.length > 0) {
@@ -1001,7 +1071,7 @@ export default function ArtistDetailModal({
       let hasMore = true
       
       while (hasMore) {
-        const mvsData = await getArtistMVs(artistId, platform, pageSize, page * pageSize)
+        const mvsData = await getArtistMVs(artistId, platform, pageSize, page * pageSize, artistName || '')
         console.log(`🎬 [ArtistDetailModal] 第${page + 1}页MV数据:`, mvsData.length)
         
         if (mvsData.length > 0) {
@@ -1673,7 +1743,7 @@ export default function ArtistDetailModal({
                           onClick={() => {
                             if (onOpenArtist) {
                               const id = platform === 'qq' ? String(saMid || saId) : String(saId)
-                              onOpenArtist(id, platform)
+                              onOpenArtist(id, platform, sa.name || '')
                             }
                           }}
                           className="group flex flex-col items-center gap-3 rounded-2xl p-4 transition-colors hover:bg-white/10"
@@ -1702,6 +1772,33 @@ export default function ArtistDetailModal({
             {/* 详情 */}
             {activeTab === 'info' && artist && (
               <div className={`${textPrimary} space-y-6`}>
+                {/* 汽水真实艺人：简介 / 职业 / 国籍（来自 /artist/detail 的 artist_profile） */}
+                {platform === 'soda' && (sodaArtistDetailRef.current?.intro || sodaArtistDetailRef.current?.occupations.length) && (
+                  <div className="space-y-6">
+                    <div>
+                      <h3 className="text-xl font-bold mb-3">艺人简介</h3>
+                      <p className={`${textSecondary} leading-relaxed whitespace-pre-wrap`}>
+                        {sodaArtistDetailRef.current?.intro}
+                      </p>
+                    </div>
+                    <div>
+                      <h3 className="text-xl font-bold mb-3">基本资料</h3>
+                      <div className={`${bgCard} rounded-xl p-4 space-y-2.5`}>
+                        {(sodaArtistDetailRef.current?.nationality ? [{ key: '国籍', value: sodaArtistDetailRef.current.nationality }] : []).concat(
+                          (sodaArtistDetailRef.current?.occupations.length ? [{ key: '职业', value: sodaArtistDetailRef.current.occupations.join('、') }] : []),
+                          [{ key: '歌曲数', value: String(sodaArtistDetailRef.current?.trackCount ?? 0) }],
+                          [{ key: '专辑数', value: String(sodaArtistDetailRef.current?.albumCount ?? 0) }],
+                        ).map((info, index) => (
+                          <div key={index} className="flex">
+                            <span className={`${textSecondary} w-24 flex-shrink-0`}>{info.key}：</span>
+                            <span className={`${textPrimary} flex-1`}>{info.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* 简要描述 */}
                 {(artist.description || artist.briefDesc) && (
                   <div>
@@ -1771,7 +1868,7 @@ export default function ArtistDetailModal({
                             onClick={() => {
                               if (onOpenArtist) {
                                 const id = platform === 'qq' ? String(saMid || saId) : String(saId)
-                                onOpenArtist(id, platform)
+                                onOpenArtist(id, platform, sa.name || '')
                               }
                             }}
                             className="flex flex-col items-center gap-1.5 p-2 rounded-xl transition-colors hover:bg-white/10"
@@ -1940,7 +2037,7 @@ export default function ArtistDetailModal({
             const targetId = platform === 'soda'
               ? targetArtist?.name
               : platform === 'qq' ? (targetArtist?.mid || targetArtist?.id) : targetArtist?.id
-            if (targetId) onOpenArtist(String(targetId), platform)
+            if (targetId) onOpenArtist(String(targetId), platform, targetArtist?.name || '')
           } : undefined}
           onCopyInfo={onCopyInfo}
           userPlaylists={userPlaylists}
