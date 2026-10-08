@@ -36,6 +36,33 @@ const MIXIN_KEY_ENC_TAB = [
   36, 20, 34, 44, 52,
 ]
 
+/**
+ * B 站搜索接口标题清洗：接口返回的标题是 HTML 片段——既带高亮标签（<em class="keyword">），
+ * 也把引号/与号等转成了实体（&#x27; / &amp; / &quot;）。旧实现只剥标签，实体原样进了 UI
+ * （实测：「Live at &#x27;No title&#x27;」在歌曲信息卡/左上角标题里直接显示成转义串）。
+ * 单遍解码：数字/十六进制/常见命名实体一次替换，避免 &amp;lt; 这类被二次解码。
+ * 顺序：先解实体再剥标签（&lt;script&gt; 这类编码标签也一并剥掉）。
+ */
+function decodeBiliText(input) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+  return String(input || '')
+    .replace(/&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z]+);/g, (match, body) => {
+      if (body[0] === '#') {
+        const hex = body[1] === 'x' || body[1] === 'X'
+        const code = Number.parseInt(body.slice(hex ? 2 : 1), hex ? 16 : 10)
+        if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match
+        try {
+          return String.fromCodePoint(code)
+        } catch {
+          return match
+        }
+      }
+      return named[body.toLowerCase()] ?? match
+    })
+    .replace(/\u00a0/g, ' ')
+    .replace(/<[^>]*>/g, '')
+}
+
 // ===== 全局状态（单进程） =====
 
 /** B 站登录态（SESSDATA 等）——登录/显式设置接口更新，读取路由只读 */
@@ -266,7 +293,7 @@ export function registerBilibiliRoutes(app) {
         .map((item) => ({
           bvid: item.bvid || '',
           aid: item.aid || 0,
-          title: String(item.title || '').replace(/<[^>]*>/g, ''),
+          title: decodeBiliText(item.title),
           duration: parseSearchDuration(item.duration),
           play: item.play || 0,
           danmaku: item.danmaku || 0,
@@ -395,6 +422,13 @@ export function registerBilibiliRoutes(app) {
       pruneCache(streamCache, STREAM_CACHE_TTL, STREAM_CACHE_MAX_ENTRIES)
       // 大会员专享：接受的画质整体 < 480p 视为受限（前端据此跳过该候选）
       const vipLimited = acceptQuality.length > 0 && acceptQuality.every((q) => q <= 32)
+      // dash.dolby / dash.flac 在没有对应音轨时依然存在（对象里 audio:null / 无 baseUrl）：
+      // 必须检查实际音轨内容，否则每个视频都会被判成"有杜比/Hi-Res"，前端会显示一个
+      // 点了没反应的音效开关（用户实测：普通视频也出现「杜比音效」徽章）。
+      const hasDolbyTrack = Boolean(data.dash?.dolby?.baseUrl)
+        || (Array.isArray(data.dash?.dolby?.audio) && data.dash.dolby.audio.some((t) => t?.baseUrl))
+      const hasFlacTrack = Boolean(data.dash?.flac?.baseUrl)
+        || (Array.isArray(data.dash?.flac?.audio) && data.dash.flac.audio.some((t) => t?.baseUrl))
       res.json({
         code: 0,
         quality: video.id,
@@ -402,8 +436,12 @@ export function registerBilibiliRoutes(app) {
         vipLimited,
         cacheKey,
         durlCount: 2,
-        hasDolby: Boolean(data.dash?.dolby),
-        hasFlac: Boolean(data.dash?.flac),
+        hasDolby: hasDolbyTrack,
+        hasFlac: hasFlacTrack,
+        // 用户请求了增强轨但该视频没有 → 明确回落，前端据此提示而不是静默"没反应"
+        audioTrackFallback: (audioTrack === 'flac' && !hasFlacTrack) || (audioTrack === 'dolby' && !hasDolbyTrack)
+          ? audioTrack
+          : undefined,
       })
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '获取播放地址失败' })
