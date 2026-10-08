@@ -12,6 +12,20 @@ export type AudioQualityPreference =
   | '192aac'
   | '96aac'
   | '48aac'
+  // 网易云专属档（9.5.x 官方面板口径，见「当前歌曲音质」面板）：
+  //   超级会员：sky 沉浸环绕声（Surround Audio 5.1）/ jymaster 超清母带（Master 192kHz·24bit）
+  //            / vivid 臻音全景声（Audio Vivid 7.1）；VIP：jyeffect 高清臻音（Spatial Audio 96kHz·24bit）
+  | 'jyeffect'
+  | 'sky'
+  | 'jymaster'
+  | 'vivid'
+  // QQ 超级会员专享高端档（独立音轨，需超级会员）：
+  //   dolby  杜比全景声   D004{档位mid}.mp4
+  //   master 臻品母带4.0  AI00{档位mid}.flac
+  //   atmos2 臻品音质2.0  Q000{档位mid}.flac
+  | 'dolby'
+  | 'master'
+  | 'atmos2'
 
 export type AppleAudioQualityPreference =
   | 'auto'
@@ -51,10 +65,19 @@ const QUALITY_VALUES: AudioQualityPreference[] = [
   '192aac',
   '96aac',
   '48aac',
+  'dolby',
+  'master',
+  'atmos2',
+  'jyeffect',
+  'sky',
+  'jymaster',
+  'vivid',
 ]
 
-/** QQ 专属 AAC 档：只有 qq 平台允许持久化，其余平台读到/写入时回落默认。 */
-const QQ_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['192aac', '96aac', '48aac']
+/** QQ 专属档（AAC 三档 + 杜比全景声）：只有 qq 平台允许持久化，其余平台读到/写入时回落默认。 */
+const QQ_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['192aac', '96aac', '48aac', 'dolby', 'master', 'atmos2']
+/** 网易云专属档（沉浸环绕声/超清母带/臻音全景声/高清臻音）：只有 netease 平台允许持久化。 */
+const NETEASE_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['jyeffect', 'sky', 'jymaster', 'vivid']
 
 const APPLE_QUALITY_VALUES: AppleAudioQualityPreference[] = [
   'auto',
@@ -77,15 +100,24 @@ export function loadAudioQualitySettings(): AudioQualitySettings {
 
   try {
     const parsed = JSON.parse(localStorage.getItem(AUDIO_QUALITY_SETTINGS_KEY) || '{}') as Partial<AudioQualitySettings>
-    // QQ 专属 AAC 档读到其它平台（历史脏数据/人工改写）时回落默认，避免非 QQ 平台带着无效档位请求
+    // 平台专属档读到其它平台（历史脏数据/人工改写）时回落默认，避免带着无效档位请求：
+    //   QQ 专属（AAC 三档 + 杜比/臻品母带/臻品音质）不给别的平台；
+    //   网易云专属（沉浸环绕声/超清母带/臻音全景声/高清臻音）只给网易云。
+    const readForNetease = (value: unknown): AudioQualityPreference => (
+      isQualityPreference(value) && !(QQ_ONLY_QUALITY_VALUES as string[]).includes(value) ? value : 'auto'
+    )
     const readShared = (value: unknown): AudioQualityPreference => (
-      isQualityPreference(value) && !(QQ_ONLY_QUALITY_VALUES as string[]).includes(value)
+      isQualityPreference(value)
+      && !(QQ_ONLY_QUALITY_VALUES as string[]).includes(value)
+      && !(NETEASE_ONLY_QUALITY_VALUES as string[]).includes(value)
         ? value
         : 'auto'
     )
     return {
-      netease: readShared(parsed.netease),
-      qq: isQualityPreference(parsed.qq) ? parsed.qq : DEFAULT_AUDIO_QUALITY_SETTINGS.qq,
+      netease: readForNetease(parsed.netease),
+      qq: isQualityPreference(parsed.qq) && !(NETEASE_ONLY_QUALITY_VALUES as string[]).includes(parsed.qq)
+        ? parsed.qq
+        : DEFAULT_AUDIO_QUALITY_SETTINGS.qq,
       spotify: readShared(parsed.spotify),
       kugou: readShared(parsed.kugou),
       soda: readShared(parsed.soda),
@@ -101,12 +133,18 @@ export function saveAudioQualitySettings(patch: Partial<AudioQualitySettings>): 
     ...loadAudioQualitySettings(),
     ...patch,
   }
-  const resetShared = (value: AudioQualityPreference): AudioQualityPreference => (
+  const resetForNetease = (value: AudioQualityPreference): AudioQualityPreference => (
     (QQ_ONLY_QUALITY_VALUES as string[]).includes(value) ? 'auto' : value
   )
+  const resetShared = (value: AudioQualityPreference): AudioQualityPreference => (
+    (QQ_ONLY_QUALITY_VALUES as string[]).includes(value) || (NETEASE_ONLY_QUALITY_VALUES as string[]).includes(value)
+      ? 'auto'
+      : value
+  )
   if (!isQualityPreference(next.netease)) next.netease = DEFAULT_AUDIO_QUALITY_SETTINGS.netease
-  else next.netease = resetShared(next.netease)
+  else next.netease = resetForNetease(next.netease)
   if (!isQualityPreference(next.qq)) next.qq = DEFAULT_AUDIO_QUALITY_SETTINGS.qq
+  else if ((NETEASE_ONLY_QUALITY_VALUES as string[]).includes(next.qq)) next.qq = DEFAULT_AUDIO_QUALITY_SETTINGS.qq
   if (!isQualityPreference(next.spotify)) next.spotify = DEFAULT_AUDIO_QUALITY_SETTINGS.spotify
   else next.spotify = resetShared(next.spotify)
   if (!isQualityPreference(next.kugou)) next.kugou = DEFAULT_AUDIO_QUALITY_SETTINGS.kugou
@@ -163,30 +201,63 @@ export interface QualityOption {
   label: string
   shortLabel: string
   description: string
+  /** 需要会员（金色显示 + 非会员加皇冠）。与 tier 同源，保留以兼容存量调用方。 */
   requiresVip?: boolean
+  /**
+   * 会员档位（与 QQ 官方客户端一致的两级标注）：
+   *   'vip'  = 绿钻（豪华绿钻）：SQ 无损 / HQ 高品(192k AAC) / 网易云无损等
+   *   'svip' = 超级会员：杜比全景声 / 臻品母带4.0 / 臻品音质2.0 / Hi-Res 等
+   * 未设置 = 免费档（标准 / 流畅 / 省流 / 320k HQ）。
+   */
+  tier?: 'vip' | 'svip'
   disabled?: boolean
 }
 
 const NETEASE_OPTIONS: QualityOption[] = [
-  // 档位名对齐网易云官方（标准/极高/无损/Hi-Res），括号标注标称码率；无损类码率随曲目浮动标容器
+  // 档位名与官方 9.5.x「当前歌曲音质」面板逐条对齐（含超级会员三档与 VIP 三档的徽章区分）
   { value: 'auto', label: '自动最高音质', shortLabel: '自动', description: '按当前账号权限和歌曲可用性，自动选到账号可用的最高音质' },
+  { value: 'sky', label: '沉浸环绕声（Surround Audio）', shortLabel: '环绕声', description: '环绕音感，最高 5.1 声道', requiresVip: true, tier: 'svip' },
+  { value: 'jymaster', label: '超清母带（Master）', shortLabel: '母带', description: '极致细节，192kHz/24bit', requiresVip: true, tier: 'svip' },
+  { value: 'vivid', label: '臻音全景声（Audio Vivid）', shortLabel: '全景声', description: '沉浸三维空间音频，最高 7.1 声道', requiresVip: true, tier: 'svip' },
+  { value: 'jyeffect', label: '高清臻音（Spatial Audio）', shortLabel: '臻音', description: '高频细节还原与清新沉浸感，96kHz/24bit', requiresVip: true, tier: 'vip' },
   { value: 'standard', label: '标准（128k）', shortLabel: '标准', description: '兼容性最好，流量占用较低' },
   { value: 'high', label: '极高（320k）', shortLabel: '极高', description: '网易云 exhigh，320 kbps' },
-  { value: 'lossless', label: '无损（FLAC）', shortLabel: '无损', description: 'FLAC 无损，码率随曲目浮动（约 1024k）', requiresVip: true },
-  { value: 'hi-res', label: 'Hi-Res 无损（192k）', shortLabel: 'Hi-Res', description: '高解析度无损（24bit/192k）', requiresVip: true },
+  { value: 'lossless', label: '无损（FLAC）', shortLabel: '无损', description: 'FLAC 无损，码率随曲目浮动（约 1024k）', requiresVip: true, tier: 'vip' },
+  { value: 'hi-res', label: 'Hi-Res 无损（192k）', shortLabel: 'Hi-Res', description: '高解析度无损（24bit/192k）', requiresVip: true, tier: 'vip' },
 ]
 
 const QQ_OPTIONS: QualityOption[] = [
   { value: 'auto', label: '自动最高音质', shortLabel: '自动', description: '按当前账号权限和歌曲可用性，自动选到账号可用的最高音质' },
   // 档位名对齐 QQ 音乐官方（SQ 无损 / HQ 高品 / 标准 / 流畅 / 省流），括号标注标称码率；
   // 192k/96k/48k AAC 是逐曲文件级档位，官方不单列名称，按所属官方档归类
-  { value: 'lossless', label: 'SQ 无损（1024k）', shortLabel: 'SQ', description: 'FLAC 无损（官方 SQ 档），码率随曲目浮动（约 1024k）', requiresVip: true },
+  { value: 'lossless', label: 'SQ 无损（1024k）', shortLabel: 'SQ', description: 'FLAC 无损（官方 SQ 档），码率随曲目浮动（约 1024k）', requiresVip: true, tier: 'vip' },
   { value: 'high', label: 'HQ 高品（320k）', shortLabel: 'HQ', description: '320 kbps MP3（官方 HQ 档）' },
-  { value: '192aac', label: 'HQ 高品（192k）', shortLabel: 'HQ', description: '192 kbps AAC（同属官方 HQ 档）', requiresVip: true },
+  { value: '192aac', label: 'HQ 高品（192k）', shortLabel: 'HQ', description: '192 kbps AAC（同属官方 HQ 档）', requiresVip: true, tier: 'vip' },
   { value: 'standard', label: '标准（128k）', shortLabel: '标准', description: '128 kbps MP3（官方标准品质）' },
   { value: '96aac', label: '流畅（96k）', shortLabel: '流畅', description: '96 kbps AAC 省流档（官方流畅音质）' },
   { value: '48aac', label: '省流（48k）', shortLabel: '省流', description: '48 kbps AAC 省流档（官方低品质）' },
+  // 杜比全景声：本曲元数据带 size_dolby 才在逐曲菜单出现（见 PlayerControls 的 qualityLevels 映射）
+  { value: 'dolby', label: '杜比全景声（Atmos）', shortLabel: '杜比', description: '杜比全景声独立音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
+  { value: 'master', label: '臻品母带4.0', shortLabel: '母带', description: '臻品母带音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
+  { value: 'atmos2', label: '臻品音质2.0', shortLabel: '臻品', description: '臻品音质/全景声音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
 ]
+
+/**
+ * 档位的会员级别（与 QQ 官方客户端的两级标注一致）：
+ *   'vip'  绿钻：「VIP」金字 + 皇冠
+ *   'svip' 超级会员：「超级会员」金字 + 皇冠
+ *   undefined 免费档，不标任何会员信息。
+ * QQ 侧口径（2026-10-08 对齐官方客户端）：
+ *   SQ 无损 / HQ 高品(192k AAC) → VIP；杜比全景声 / 臻品母带4.0 / 臻品音质2.0 / Hi-Res → 超级会员。
+ */
+export function getQualityTier(platform: MusicPlatform, value: QualityOptionValue): 'vip' | 'svip' | undefined {
+  const options = platform === 'apple' ? APPLE_OPTIONS : platform === 'qq' ? QQ_OPTIONS : platform === 'netease' ? NETEASE_OPTIONS : GENERIC_OPTIONS
+  const hit = options.find(option => option.value === value)
+  if (hit?.tier) return hit.tier
+  if (!hit?.requiresVip) return undefined
+  // 兜底：只声明了 requiresVip 的老选项按绿钻渲染（不夸大成超级会员）
+  return 'vip'
+}
 
 /** 新平台音质选项（自身直源受限时走网易云/QQ 载体音质） */
 const GENERIC_OPTIONS: QualityOption[] = [
@@ -257,6 +328,12 @@ export function resolvedQualityDisplayName(platform: MusicPlatform, value: strin
         return '流畅（96k）'
       case '48aac':
         return '省流（48k）'
+      case 'dolby':
+        return '杜比全景声（Atmos）'
+      case 'master':
+        return '臻品母带4.0'
+      case 'atmos2':
+        return '臻品音质2.0'
       default:
         return value
     }
@@ -274,11 +351,13 @@ export function resolvedQualityDisplayName(platform: MusicPlatform, value: strin
       case 'hires':
         return 'Hi-Res 无损（192k）'
       case 'jyeffect':
-        return '高清臻音'
+        return '高清臻音（Spatial Audio）'
       case 'sky':
-        return '沉浸环绕声'
+        return '沉浸环绕声（Surround Audio）'
       case 'jymaster':
-        return '超清母带'
+        return '超清母带（Master）'
+      case 'vivid':
+        return '臻音全景声（Audio Vivid）'
       case 'dolby':
         return '杜比全景声'
       default:
@@ -307,6 +386,12 @@ export function resolvedQualityShortLabel(platform: MusicPlatform, value: string
         return '流畅'
       case '48aac':
         return '省流'
+      case 'dolby':
+        return '杜比'
+      case 'master':
+        return '母带'
+      case 'atmos2':
+        return '臻品'
       default:
         return '自动'
     }
@@ -338,12 +423,27 @@ export function resolvedQualityShortLabel(platform: MusicPlatform, value: string
   return '自动'
 }
 
+/**
+ * 当前账号是否 超级会员（目前只有 QQ 有这一级；登录链路把识别结果落到 `qq_svip`）。
+ * 用于音质弹层区分「VIP（绿钻）」与「超级会员」两种标注。
+ */
+export function getPlatformSvipState(platform: MusicPlatform): boolean {
+  try {
+    return localStorage.getItem(`${platform}_svip`) === 'true'
+  } catch {
+    return false
+  }
+}
+
 /** 实际在播档是否属于会员专享档（决定「自动（…）」行是否按会员档渲染：金字 / 非会员加皇冠）。 */
 export function isVipOnlyResolvedQuality(platform: MusicPlatform, value: string): boolean {
-  if (platform === 'qq') return value === 'flac' || value === 'ape' || value === '192aac'
+  if (platform === 'qq') {
+    return value === 'flac' || value === 'ape' || value === '192aac'
+      || value === 'dolby' || value === 'master' || value === 'atmos2'
+  }
   if (platform === 'netease') {
     return value === 'lossless' || value === 'hires' || value === 'jyeffect'
-      || value === 'sky' || value === 'jymaster' || value === 'dolby'
+      || value === 'sky' || value === 'jymaster' || value === 'vivid' || value === 'dolby'
   }
   return false
 }

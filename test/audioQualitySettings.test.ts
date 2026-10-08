@@ -4,8 +4,10 @@ import {
   AUDIO_QUALITY_SETTINGS_EVENT,
   DEFAULT_AUDIO_QUALITY_SETTINGS,
   getAudioQualityPreference,
+  getPlatformSvipState,
   getPlatformVipState,
   getQualityOptions,
+  getQualityTier,
   isVipOnlyResolvedQuality,
   loadAudioQualitySettings,
   resolvedQualityDisplayName,
@@ -13,6 +15,8 @@ import {
   saveAudioQualitySettings,
 } from '../src/services/audioQualitySettings'
 import { getLastResolvedQuality, getSongUrl } from '../src/services/musicApi'
+import { detectQQMusicSvip } from '../src/utils/musicEntitlements'
+import { accountTierBadgeClass, getAccountTierBadge } from '../src/services/accountTier'
 
 describe('audioQualitySettings Apple preference', () => {
   beforeEach(() => localStorage.clear())
@@ -157,5 +161,173 @@ describe('platform vip state detection', () => {
     expect(getPlatformVipState('soda')).toBe(false)
     localStorage.setItem('soda_entitlement', 'unknown')
     expect(getPlatformVipState('soda')).toBe(false)
+  })
+})
+
+describe('QQ 杜比全景声档位', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('杜比出现在 QQ 音质选项里，并标注需会员', () => {
+    const options = getQualityOptions('qq')
+    const dolby = options.find(option => option.value === 'dolby')
+    expect(dolby).toBeTruthy()
+    expect(dolby?.label).toContain('杜比全景声')
+    expect(dolby?.requiresVip).toBe(true)
+  })
+
+  it('杜比是 QQ 专属档：能写入 qq、不污染其它平台', () => {
+    saveAudioQualitySettings({ qq: 'dolby' })
+    expect(getAudioQualityPreference('qq')).toBe('dolby')
+    // 其它平台读到该值一律回落（持久化层按平台白名单归一）
+    saveAudioQualitySettings({ netease: 'dolby' as never })
+    expect(getAudioQualityPreference('netease')).not.toBe('dolby')
+  })
+
+  it('档位显示名与会员档判定按官方口径', () => {
+    expect(resolvedQualityDisplayName('qq', 'dolby')).toBe('杜比全景声（Atmos）')
+    expect(resolvedQualityShortLabel('qq', 'dolby')).toBe('杜比')
+    expect(isVipOnlyResolvedQuality('qq', 'dolby')).toBe(true)
+  })
+})
+
+describe('QQ 超级会员专享高端档（杜比 / 臻品母带 / 臻品音质）', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('三档都在 QQ 音质选项里并标注需会员', () => {
+    const options = getQualityOptions('qq')
+    for (const [value, keyword] of [['dolby', '杜比全景声'], ['master', '臻品母带'], ['atmos2', '臻品音质']] as const) {
+      const option = options.find(item => item.value === value)
+      expect(option, value).toBeTruthy()
+      expect(option?.label).toContain(keyword)
+      expect(option?.requiresVip).toBe(true)
+    }
+  })
+
+  it('三档都是 QQ 专属：能写进 qq，写到其它平台会回落', () => {
+    saveAudioQualitySettings({ qq: 'master' })
+    expect(getAudioQualityPreference('qq')).toBe('master')
+    saveAudioQualitySettings({ qq: 'atmos2' })
+    expect(getAudioQualityPreference('qq')).toBe('atmos2')
+    saveAudioQualitySettings({ netease: 'master' as never })
+    expect(getAudioQualityPreference('netease')).not.toBe('master')
+  })
+
+  it('显示名 / 短标签 / 会员档判定齐全', () => {
+    expect(resolvedQualityDisplayName('qq', 'master')).toBe('臻品母带4.0')
+    expect(resolvedQualityDisplayName('qq', 'atmos2')).toBe('臻品音质2.0')
+    expect(resolvedQualityShortLabel('qq', 'master')).toBe('母带')
+    expect(resolvedQualityShortLabel('qq', 'atmos2')).toBe('臻品')
+    expect(isVipOnlyResolvedQuality('qq', 'master')).toBe(true)
+    expect(isVipOnlyResolvedQuality('qq', 'atmos2')).toBe(true)
+  })
+})
+
+describe('档位会员级别标注（VIP=绿钻 / 超级会员）', () => {
+  it('QQ：SQ 无损与 HQ 192k 标 VIP；杜比/母带/臻品标超级会员', () => {
+    expect(getQualityTier('qq', 'lossless')).toBe('vip')
+    expect(getQualityTier('qq', '192aac')).toBe('vip')
+    expect(getQualityTier('qq', 'dolby')).toBe('svip')
+    expect(getQualityTier('qq', 'master')).toBe('svip')
+    expect(getQualityTier('qq', 'atmos2')).toBe('svip')
+    // 注：QQ 的 Hi-Res 档没有独立选项（逐曲列表标"暂未支持"、无取流实现），不做断言
+  })
+
+  it('QQ：免费档不标会员', () => {
+    expect(getQualityTier('qq', 'standard')).toBeUndefined()
+    expect(getQualityTier('qq', 'high')).toBeUndefined()
+    expect(getQualityTier('qq', '96aac')).toBeUndefined()
+    expect(getQualityTier('qq', '48aac')).toBeUndefined()
+  })
+
+  it('超级会员状态按平台读取（qq_svip 落盘）', () => {
+    localStorage.clear()
+    expect(getPlatformSvipState('qq')).toBe(false)
+    localStorage.setItem('qq_svip', 'true')
+    expect(getPlatformSvipState('qq')).toBe(true)
+  })
+})
+
+describe('QQ 超级会员识别（不把绿钻当超级会员）', () => {
+  it('lvinfo 出现 svip 徽章才算超级会员', () => {
+    expect(detectQQMusicSvip({ creator: { lvinfo: [{ iconurl: 'https://y.gtimg.cn/music/icon/v1/h5/svip7.png' }] } })).toBe(true)
+    expect(detectQQMusicSvip({ creator: { lvinfo: [{ iconurl: 'https://y.gtimg.cn/music/icon/h5/sui7.png' }] } })).toBe(false)
+    expect(detectQQMusicSvip({ creator: { nick: 'x' } })).toBe(false)
+  })
+})
+
+describe('账号会员级别徽章（各模式账号区共用）', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('超级会员优先于绿钻 VIP；都没有则无徽章', () => {
+    expect(getAccountTierBadge('qq')).toBeNull()
+    localStorage.setItem('qq_vip', 'true')
+    expect(getAccountTierBadge('qq')).toEqual({ label: 'VIP', tone: 'vip' })
+    localStorage.setItem('qq_svip', 'true')
+    expect(getAccountTierBadge('qq')).toEqual({ label: '超级会员', tone: 'svip' })
+  })
+
+  it('调用方已有 vip 布尔值时以 svip 状态优先', () => {
+    expect(getAccountTierBadge('qq', true)).toEqual({ label: 'VIP', tone: 'vip' })
+    localStorage.setItem('qq_svip', 'true')
+    expect(getAccountTierBadge('qq', true)).toEqual({ label: '超级会员', tone: 'svip' })
+  })
+
+  it('超级会员与 VIP 用不同底色（视觉可区分）', () => {
+    expect(accountTierBadgeClass('svip')).not.toBe(accountTierBadgeClass('vip'))
+  })
+})
+
+describe('网易云 9.5.x 音质面板口径（SVIP 三档 + VIP 三档）', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('超级会员三档：沉浸环绕声 / 超清母带 / 臻音全景声', () => {
+    const options = getQualityOptions('netease')
+    for (const [value, keyword] of [['sky', '沉浸环绕声'], ['jymaster', '超清母带'], ['vivid', '臻音全景声']] as const) {
+      const option = options.find(item => item.value === value)
+      expect(option, value).toBeTruthy()
+      expect(option?.label).toContain(keyword)
+      expect(getQualityTier('netease', value)).toBe('svip')
+    }
+  })
+
+  it('VIP 档：高清臻音 / 无损 / Hi-Res（极高与标准为免费档）', () => {
+    for (const value of ['jyeffect', 'lossless', 'hi-res'] as const) {
+      expect(getQualityTier('netease', value), value).toBe('vip')
+    }
+    expect(getQualityTier('netease', 'high')).toBeUndefined()
+    expect(getQualityTier('netease', 'standard')).toBeUndefined()
+  })
+
+  it('网易云专属档不给其它平台（持久化层白名单）', () => {
+    saveAudioQualitySettings({ netease: 'jymaster' })
+    expect(getAudioQualityPreference('netease')).toBe('jymaster')
+    saveAudioQualitySettings({ spotify: 'jymaster' as never })
+    expect(getAudioQualityPreference('spotify')).not.toBe('jymaster')
+    saveAudioQualitySettings({ qq: 'sky' as never })
+    expect(getAudioQualityPreference('qq')).not.toBe('sky')
+  })
+
+  it('显示名按官方面板用词', () => {
+    expect(resolvedQualityDisplayName('netease', 'sky')).toBe('沉浸环绕声（Surround Audio）')
+    expect(resolvedQualityDisplayName('netease', 'jymaster')).toBe('超清母带（Master）')
+    expect(resolvedQualityDisplayName('netease', 'vivid')).toBe('臻音全景声（Audio Vivid）')
+    expect(resolvedQualityDisplayName('netease', 'jyeffect')).toBe('高清臻音（Spatial Audio）')
+  })
+})
+
+describe('自动档与超级会员档的边界（用户口径：自动=普通VIP最高）', () => {
+  beforeEach(() => localStorage.clear())
+
+  it('网易云手动选 SVIP 档仍然成立（super vip 三档还在选项表里）', () => {
+    const values = getQualityOptions('netease').map(option => option.value)
+    expect(values).toContain('sky')
+    expect(values).toContain('jymaster')
+    expect(values).toContain('vivid')
+  })
+
+  it('auto 档在选项表里各平台都有（自动=账号可用最高由服务端定档）', () => {
+    for (const platform of ['netease', 'qq', 'soda'] as const) {
+      expect(getQualityOptions(platform)[0]?.value).toBe('auto')
+    }
   })
 })

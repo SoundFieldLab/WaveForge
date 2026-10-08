@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Check, Crown, Headphones, Music2, X } from 'lucide-react'
+import { getAccountTierBadge } from '../services/accountTier'
 import {
   getQualityOptions,
   loadAudioQualitySettings,
@@ -139,10 +140,23 @@ export default function AudioQualitySettingsModal({
           </div>
           <div>
             <h3 className={`${textPrimary} font-semibold`}>{title}</h3>
-            <p className={`${textTertiary} text-xs mt-0.5`}>{isVip ? '已识别为会员，可使用会员音质' : '非会员，将自动限制为账号可用最高音质'}</p>
+            <p className={`${textTertiary} text-xs mt-0.5`}>
+              {getAccountTierBadge(platform, isVip)
+                ? `${getAccountTierBadge(platform, isVip)?.label}：杜比全景声 / 臻品母带4.0 / 臻品音质2.0 按账号权益取流`
+                : '非会员，将自动限制为账号可用最高音质'}
+            </p>
           </div>
         </div>
-        {isVip && <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs text-amber-300 bg-amber-400/10"><Crown className="w-3 h-3" />VIP</span>}
+        {(() => {
+          // 会员级别区分：超级会员（杜比/臻品母带/臻品音质的门槛）与绿钻 VIP 分开标注
+          const tierBadge = getAccountTierBadge(platform, isVip)
+          if (!tierBadge) return null
+          return (
+            <span className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs text-amber-300 bg-amber-400/10">
+              <Crown className="w-3 h-3" />{tierBadge.label}
+            </span>
+          )
+        })()}
       </div>
       <div className="space-y-2">
         {options.map(option => (
