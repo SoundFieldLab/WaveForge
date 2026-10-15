@@ -27,7 +27,9 @@ export function getModeTransitionStyle(): ModeTransitionStyle {
 
 export function setModeTransitionStyle(style: ModeTransitionStyle): void {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(STYLE_KEY, style)
+  try {
+    localStorage.setItem(STYLE_KEY, style)
+  } catch { /* 配额满忽略 */ }
   window.dispatchEvent(new CustomEvent<ModeTransitionStyle>(MODE_TRANSITION_STYLE_EVENT, { detail: style }))
   // 通知镜像设置界面重读注册表（与其他全局设置同一通道）
   import('./globalSettingsRegistry').then(({ notifyGlobalSettingChanged }) => notifyGlobalSettingChanged()).catch(() => undefined)
@@ -40,7 +42,9 @@ export function isModeTransitionSoundEnabled(): boolean {
 
 export function setModeTransitionSoundEnabled(enabled: boolean): void {
   if (typeof localStorage === 'undefined') return
-  localStorage.setItem(SOUND_KEY, JSON.stringify(enabled))
+  try {
+    localStorage.setItem(SOUND_KEY, JSON.stringify(enabled))
+  } catch { /* 配额满忽略 */ }
   window.dispatchEvent(new CustomEvent<boolean>(MODE_TRANSITION_SOUND_EVENT, { detail: enabled }))
   import('./globalSettingsRegistry').then(({ notifyGlobalSettingChanged }) => notifyGlobalSettingChanged()).catch(() => undefined)
 }

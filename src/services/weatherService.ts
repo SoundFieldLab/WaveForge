@@ -109,6 +109,10 @@ export interface WeatherDay {
   uvIndexMax: number
   sunrise: string
   sunset: string
+  /** 当日总日照时长（秒，Open-Meteo daylight_duration）；
+   *  sunshine_duration 是直达日照（无云遮挡），晨昏蒙影等衍生值由 UI 侧从日出/日落推算 */
+  daylightDuration?: number
+  sunshineDuration?: number
 }
 
 export interface WeatherSnapshot {
@@ -261,7 +265,7 @@ const searchRemoteWeatherLocations = async (keyword: string): Promise<WeatherLoc
   openMeteoUrl.searchParams.set('language', 'zh')
   openMeteoUrl.searchParams.set('format', 'json')
   try {
-    const response = await fetch(openMeteoUrl.toString(), { headers: { Accept: 'application/json' } })
+    const response = await fetch(openMeteoUrl.toString(), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) })
     if (response.ok) {
       const data = await response.json()
       const results: WeatherLocationSearchResult[] = []
@@ -293,7 +297,7 @@ const searchRemoteWeatherLocations = async (keyword: string): Promise<WeatherLoc
   nominatimUrl.searchParams.set('limit', '10')
   nominatimUrl.searchParams.set('addressdetails', '1')
   nominatimUrl.searchParams.set('accept-language', 'zh-CN')
-  const response = await fetch(nominatimUrl.toString(), { headers: { Accept: 'application/json' } })
+  const response = await fetch(nominatimUrl.toString(), { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10_000) })
   if (!response.ok) return []
   const data = await response.json()
   const results: WeatherLocationSearchResult[] = []
@@ -957,6 +961,7 @@ export async function fetchWeatherSnapshot(
     'weather_code', 'temperature_2m_max', 'temperature_2m_min', 'apparent_temperature_max',
     'apparent_temperature_min', 'precipitation_probability_max', 'precipitation_sum',
     'wind_speed_10m_max', 'wind_gusts_10m_max', 'uv_index_max', 'sunrise', 'sunset',
+    'daylight_duration', 'sunshine_duration',
   ].join(',')
   const forecastUrl = new URL('https://api.open-meteo.com/v1/forecast')
   forecastUrl.searchParams.set('latitude', String(location.latitude))
@@ -1048,6 +1053,8 @@ export async function fetchWeatherSnapshot(
     uvIndexMax: toNumber(data.daily.uv_index_max?.[index]),
     sunrise: data.daily.sunrise?.[index] || '',
     sunset: data.daily.sunset?.[index] || '',
+    daylightDuration: toNumber(data.daily.daylight_duration?.[index]),
+    sunshineDuration: toNumber(data.daily.sunshine_duration?.[index]),
   }))
 
   const currentHourIndex = Math.max(0, hourly.findIndex(hour => hour.time >= current.time))
@@ -1063,7 +1070,11 @@ export async function fetchWeatherSnapshot(
     updatedAt: Date.now(),
   }
 
-  localStorage.setItem(getWeatherCacheKey(settings), JSON.stringify(snapshot))
+  try {
+    localStorage.setItem(getWeatherCacheKey(settings), JSON.stringify(snapshot))
+  } catch {
+    // 配额满（10 天 hourly 快照较大）：放弃缓存，本次快照照常返回
+  }
   return snapshot
 }
 

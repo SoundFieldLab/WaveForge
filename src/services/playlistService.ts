@@ -8,6 +8,7 @@ import { indexedDBCache } from './indexedDBCache'
 import { getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleCatalogPlaylistSummary, getAppleFavoriteSongIds, appleSongToSong, appleLibraryTrackToSong, APPLE_LIBRARY_ID_PATTERN } from './appleCatalog'
 import { getAppleCredentials } from './appleAuth'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
+import { getSecureToken } from './secureTokenStore'
 
 export interface PlaylistOptions {
   forceRefresh?: boolean
@@ -89,20 +90,43 @@ function getPlatformCookie(platform: MusicPlatform, explicitCookie?: string): st
   // 缓存键必须跟着「该平台自己的凭据」走。原实现只认 qq/netease，其余平台一律取网易云
   // cookie 指纹，于是 Spotify / 汽水 / 酷狗 / Apple 换号后缓存键完全不变 —— 切号后可能直接
   // 命中上一个账号的歌单（串号）。取不到凭据时返回空，键退化为平台级，只是不再跨账号复用。
-  const readCredential = (...keys: string[]): string => {
+  //
+  // cookie/token 类凭据走 secureTokenStore（与 platforms.getPlatformCookie 同源）：
+  // 此前直读 localStorage，凭据迁移进加密存储后明文副本被删 → 指纹恒空（防切号串号的
+  // 缓存键防御失效）、写操作以空 cookie 发出。user_id 类标识仍存 localStorage（写入点
+  // 在 App.tsx 登录流程），未迁移。
+  const readSecure = (...keys: string[]): string => {
     for (const key of keys) {
-      const value = localStorage.getItem(key)
+      const value = getSecureToken(key)
       if (value) return value
     }
     return ''
   }
+  const readLocal = (...keys: string[]): string => {
+    for (const key of keys) {
+      try {
+        const value = localStorage.getItem(key)
+        if (value) return value
+      } catch { /* ignore */ }
+    }
+    return ''
+  }
   switch (platform) {
-    case 'qq': return readCredential('qq_cookie', 'qqCookie')
-    case 'netease': return readCredential('netease_cookie', 'neteaseCookie')
-    case 'spotify': return readCredential('spotify_user_id', 'spotify_access_token')
-    case 'kugou': return readCredential('kugou_user_id', 'kugou_cookie')
-    case 'soda': return readCredential('soda_user_id', 'soda_cookie')
-    case 'apple': return readCredential('apple_account_id', 'apple_music_user_token')
+    case 'qq': return readSecure('qq_cookie', 'qqCookie')
+    case 'netease': return readSecure('netease_cookie', 'neteaseCookie')
+    case 'spotify': return readLocal('spotify_user_id', 'spotify_access_token') || readSecure('spotify_access_token')
+    case 'kugou': return readLocal('kugou_user_id', 'kugou_cookie') || readSecure('kugou_cookie')
+    case 'soda': return readLocal('soda_user_id', 'soda_cookie') || readSecure('soda_token')
+    case 'apple': {
+      // 无独立 user_id 键：用 MUT 哈希作指纹（与 favoriteStatusService.getFavoriteUserId 同口径）
+      const mut = getAppleCredentials().mediaUserToken
+      if (!mut) return ''
+      try {
+        return `apple-${Math.abs([...mut].reduce((hash, ch) => ((hash << 5) - hash + ch.charCodeAt(0)) | 0, 0))}`
+      } catch {
+        return 'apple-session'
+      }
+    }
     default: return ''
   }
 }
@@ -360,12 +384,12 @@ async function fetchUserPlaylists(
   
   // 获取 cookie（如果有）
   const cookie = platform === 'qq' 
-    ? localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
-    : localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+    ? getSecureToken('qq_cookie') || getSecureToken('qqCookie') || ''
+    : getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
   const firstArray = (...values: any[]) => values.find(value => Array.isArray(value)) || []
   
   if (platform === 'netease') {
-    const url = `http://localhost:3001/api/netease/user/playlist?uid=${userId}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
+    const url = `http://localhost:3001/api/netease/user/playlist?uid=${userId}${cookie ? `` : ''}`
     const response = await fetchWithTimeout(url)
     if (!response.ok) {
       throw new Error(`获取网易云歌单失败（HTTP ${response.status}）`)
@@ -392,7 +416,7 @@ async function fetchUserPlaylists(
     // 1. 获取自建歌单
     try {
       const devMode = localStorage.getItem('developerMode') === 'true'
-      const url = `http://localhost:3001/api/qq/user/playlist?id=${userId}&cookie=${encodeURIComponent(cookie)}&devMode=${devMode}`
+      const url = `http://localhost:3001/api/qq/user/playlist?id=${userId}&devMode=${devMode}`
       const response = await fetchWithTimeout(url)
       const createdData = await response.json()
       
@@ -429,7 +453,7 @@ async function fetchUserPlaylists(
     // 2. 获取收藏歌单
     try {
       const devMode = localStorage.getItem('developerMode') === 'true'
-      const url = `http://localhost:3001/api/qq/user/collect?id=${userId}&cookie=${encodeURIComponent(cookie)}&devMode=${devMode}`
+      const url = `http://localhost:3001/api/qq/user/collect?id=${userId}&devMode=${devMode}`
       const response = await fetchWithTimeout(url)
       const collectedData = await response.json()
       
@@ -484,7 +508,7 @@ async function fetchUserPlaylists(
       // “我喜欢”是 dirId=201 的系统歌单，QQ 返回的歌单封面是默认爱心图。
       // 按该歌单当前排序读取第一首歌曲，并用其歌曲/专辑封面替换默认图。
       try {
-        const likedListUrl = `${API_BASE}/qq/likelist?uid=${encodeURIComponent(userId)}&playlistId=${encodeURIComponent(likePlaylist.id || '')}&cookie=${encodeURIComponent(cookie)}`
+        const likedListUrl = `${API_BASE}/qq/likelist?uid=${encodeURIComponent(userId)}&playlistId=${encodeURIComponent(likePlaylist.id || '')}`
         const likedListRes = await fetchWithTimeout(likedListUrl)
         if (!likedListRes.ok) throw new Error(`HTTP ${likedListRes.status}`)
         const likedListData = await likedListRes.json()
@@ -496,7 +520,7 @@ async function fetchUserPlaylists(
         const firstMid = Array.isArray(likedListData.mids) ? likedListData.mids.find(Boolean) : ''
         if (!normalizedCover && firstMid) {
           const songDetailRes = await fetchWithTimeout(
-            `${API_BASE}/qq/song/detail?mid=${encodeURIComponent(firstMid)}&cookie=${encodeURIComponent(cookie)}`
+            `${API_BASE}/qq/song/detail?mid=${encodeURIComponent(firstMid)}`
           )
           if (!songDetailRes.ok) throw new Error(`HTTP ${songDetailRes.status}`)
           const songDetailData = await songDetailRes.json()
@@ -531,7 +555,8 @@ export async function getUserPlaylists(
   options: PlaylistOptions = {}
 ): Promise<any[]> {
   // Spotify、Apple、汽水均由平台凭据驱动，不依赖传统 userId。
-  if (platform !== 'spotify' && platform !== 'apple' && platform !== 'soda' && !userId.trim()) return []
+  // 酷狗概念版通道由凭据驱动（token+userid 在 credential 里），不需要外部传 userId
+  if (platform !== 'spotify' && platform !== 'apple' && platform !== 'soda' && platform !== 'kugou' && !userId.trim()) return []
   const cacheKey = getUserPlaylistsCacheKey(platform, userId)
   const bypassCache = options.forceRefresh || options.skipCache
   const requestGeneration = cacheGeneration
@@ -729,8 +754,8 @@ export async function getPlaylistDetail(
     }
   }
   const url = platform === 'netease'
-    ? `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlistId)}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
-    : `http://localhost:3001/api/qq/playlist/detail?id=${playlistId}&devMode=${devMode}&cookie=${encodeURIComponent(localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || '')}`
+    ? `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlistId)}`
+    : `http://localhost:3001/api/qq/playlist/detail?id=${playlistId}&devMode=${devMode}`
   
   const maxRetries = 3
   const retryDelay = 1000 // 1秒
@@ -784,7 +809,7 @@ export async function getNeteasePlaylistTrackPage(
   signal?: AbortSignal
 ): Promise<NeteasePlaylistTrackPage> {
   const cookie = getPlatformCookie('netease')
-  const url = `${API_BASE}/netease/playlist/detail?id=${encodeURIComponent(String(playlistId))}&offset=${Math.max(0, offset)}&limit=${Math.max(1, Math.min(limit, 500))}&cookie=${encodeURIComponent(cookie)}`
+  const url = `${API_BASE}/netease/playlist/detail?id=${encodeURIComponent(String(playlistId))}&offset=${Math.max(0, offset)}&limit=${Math.max(1, Math.min(limit, 500))}`
   const response = await fetch(url, { signal })
   const data = await response.json()
   if (!response.ok || data.error || !data.playlist) {
@@ -892,8 +917,8 @@ export async function getLikedSongs(
   }
   const cookie = getPlatformCookie(platform)
   const url = platform === 'netease'
-    ? `${API_BASE}/netease/likelist?uid=${encodeURIComponent(userId)}&cookie=${encodeURIComponent(cookie)}`
-    : `${API_BASE}/qq/likelist?uid=${encodeURIComponent(userId)}&cookie=${encodeURIComponent(cookie)}`
+    ? `${API_BASE}/netease/likelist?uid=${encodeURIComponent(userId)}`
+    : `${API_BASE}/qq/likelist?uid=${encodeURIComponent(userId)}`
   
   const maxRetries = 3
   const retryDelay = 1000
@@ -964,9 +989,16 @@ export async function likeSong(
     invalidateUserPlaylistsCache(platform, userId)
     return { result: 100, platform: 'soda' }
   }
+  // Apple：ratings 通道不经过本函数（App 层特判走 setAppleSongLoved）。
+  // 服务层拦截：能力表 likeSong=true，但本地服务并无 /api/apple/like 路由——
+  // 新调用点按能力表契约调用会得到 404，不如在这里给明确错误。
+  if (platform === 'apple') {
+    throw new Error('Apple 喜爱请使用 ratings 通道（setAppleSongLoved）')
+  }
 
   const response = await fetch(`${API_BASE}/${platform}/like`, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: songId,
@@ -1006,6 +1038,11 @@ export async function addSongToPlaylist(
   console.log(`➕ 添加歌曲 ${songId} 到歌单 ${playlistId}`)
 
   if (platform === 'apple') {
+    // 伪歌单 id（__apple_library__/__apple_favorites__ 是 UI 虚拟入口，非真实歌单）：
+    // APPLE_LIBRARY_ID_PATTERN 不匹配它们，会拼出非法 library 请求 → 明确报错
+    if (/^__apple_/.test(playlistId)) {
+      throw new Error('该列表为虚拟入口，不支持直接添加歌曲')
+    }
     const { addAppleTracksToPlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
     const trackId = options.songMid || songId
     const ok = await addAppleTracksToPlaylist(playlistId, [trackId])
@@ -1052,6 +1089,7 @@ export async function addSongToPlaylist(
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       op: 'add',
@@ -1105,6 +1143,10 @@ export async function removeSongFromPlaylist(
   console.log(`➖ 从歌单 ${playlistId} 删除歌曲 ${songId}`)
 
   if (platform === 'apple') {
+    // 同 addSongToPlaylist：伪歌单 id 明确报错
+    if (/^__apple_/.test(playlistId)) {
+      throw new Error('该列表为虚拟入口，不支持直接移除歌曲')
+    }
     const { removeAppleTracksFromPlaylist, getLastAppleMutationResult } = await import('./appleCatalog')
     const trackId = options.songMid || songId
     const ok = await removeAppleTracksFromPlaylist(playlistId, [trackId])
@@ -1144,6 +1186,7 @@ export async function removeSongFromPlaylist(
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       op: 'del',
@@ -1227,6 +1270,7 @@ export async function createPlaylist(
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       name: name,
@@ -1282,6 +1326,7 @@ export async function deletePlaylist(
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: playlistId,
@@ -1332,11 +1377,17 @@ export async function updatePlaylist(
   if (platform === 'kugou') {
     throw new Error('酷狗音乐暂不支持重命名歌单：上游未提供修改歌单信息的接口')
   }
-  const cookie = options.cookie || localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+  // QQ：能力表 updatePlaylist=false（上游无改单端点），与 kugou/soda 同款服务层自查——
+  // 否则会拿着网易云 cookie 打 /api/netease/playlist/update 去改一个 QQ 歌单 id
+  if (platform === 'qq') {
+    throw new Error('QQ 音乐暂不支持修改歌单信息')
+  }
+  const cookie = options.cookie || getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
   const url = 'http://localhost:3001/api/netease/playlist/update'
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: playlistId,
@@ -1365,9 +1416,10 @@ export async function updatePlaylistCover(
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持修改歌单封面')
   }
-  const cookie = options.cookie || localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+  const cookie = options.cookie || getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
   const response = await fetch('http://localhost:3001/api/netease/playlist/cover', {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       id: playlistId,
@@ -1448,6 +1500,7 @@ export async function subscribePlaylist(
   
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       t: subscribe ? '1' : '2',

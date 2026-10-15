@@ -67,7 +67,11 @@ export async function largeCacheGet<T>(key: string): Promise<T | null> {
       request.onsuccess = () => resolve(request.result)
       request.onerror = () => reject(request.error)
     })
-    if (!item) return null
+    if (!item) {
+      // IDB 无此键：补一次 localStorage 兜底。set 在 IDB 写失败（磁盘满/隐私模式）
+      // 时降级写 localStorage；不兜底的话那次数据在 IDB 恢复后永远读不到。
+      return safeLocalGet<T>(key)
+    }
     if (item.expiresAt && Date.now() > item.expiresAt) {
       void largeCacheDelete(key)
       return null
@@ -131,10 +135,13 @@ async function sweepLargeCache(db: IDBDatabase): Promise<void> {
   const now = Date.now()
   if (now - lastSweepAt < SWEEP_INTERVAL_MS) return
   lastSweepAt = now
-  const entries = await new Promise<Array<{ key: IDBValidKey; savedAt: number }>>((resolve, reject) => {
+  // 过期条目统一收集后用独立 readwrite 事务删除：此前在 readonly 事务的游标里
+  // cursor.delete() 会同步抛 ReadOnlyError（回调内异常逃逸 → Promise 永不落定，
+  // 该次 largeCacheSet 永久挂起）。收集/删除分离后单游标只读，写删除原子完成。
+  const entries = await new Promise<Array<{ key: IDBValidKey; savedAt: number; expired: boolean }>>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readonly')
     const request = tx.objectStore(STORE).openCursor()
-    const found: Array<{ key: IDBValidKey; savedAt: number }> = []
+    const found: Array<{ key: IDBValidKey; savedAt: number; expired: boolean }> = []
     request.onsuccess = () => {
       const cursor = request.result
       if (!cursor) {
@@ -142,22 +149,26 @@ async function sweepLargeCache(db: IDBDatabase): Promise<void> {
         return
       }
       const value = cursor.value as { savedAt?: number; expiresAt?: number } | undefined
-      if (value?.expiresAt && now > value.expiresAt) cursor.delete()
-      else found.push({ key: cursor.primaryKey, savedAt: Number(value?.savedAt) || 0 })
+      const expired = Boolean(value?.expiresAt && now > value.expiresAt)
+      if (!expired) found.push({ key: cursor.primaryKey, savedAt: Number(value?.savedAt) || 0, expired })
       cursor.continue()
     }
     request.onerror = () => reject(request.error)
-  })
-  if (entries.length <= MAX_ENTRIES) return
-  entries.sort((a, b) => a.savedAt - b.savedAt)
-  const doomed = entries.slice(0, entries.length - MAX_ENTRIES)
+  }).catch(() => []) // 扫描失败按"无需回收"处理，绝不影响本次写入
+  const doomed: Array<{ key: IDBValidKey; savedAt: number }> = entries.filter(entry => entry.expired)
+  if (doomed.length > MAX_ENTRIES || entries.length - doomed.length > MAX_ENTRIES) {
+    const alive = entries.filter(entry => !entry.expired)
+    alive.sort((a, b) => a.savedAt - b.savedAt)
+    for (const entry of alive.slice(0, Math.max(0, alive.length - MAX_ENTRIES))) doomed.push(entry)
+  }
+  if (doomed.length === 0) return
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE, 'readwrite')
     for (const entry of doomed) tx.objectStore(STORE).delete(entry.key)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
     tx.onabort = () => reject(tx.error)
-  })
+  }).catch(() => undefined) // 删除失败静默：下次 sweep 重试
 }
 
 /**

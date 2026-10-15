@@ -1,4 +1,5 @@
 import type { MusicPlatform } from './platforms'
+import { getSecureToken } from './secureTokenStore'
 import type { Song } from './musicApi'
 import { getLikedSongs } from './playlistService'
 
@@ -23,7 +24,7 @@ const stableCredentialKey = (value: string): string => {
 
 export function getFavoriteUserId(platform: FavoritePlatform): string {
   if (platform === 'apple') {
-    const token = localStorage.getItem('appleMediaUserToken') || ''
+    const token = getSecureToken('appleMediaUserToken') || ''
     return token ? `apple-${stableCredentialKey(token)}` : ''
   }
   if (platform === 'qq') return localStorage.getItem('qq_user_id') || ''
@@ -34,11 +35,11 @@ export function getFavoriteUserId(platform: FavoritePlatform): string {
   // 喜欢缓存也跨平台互染。
   if (platform === 'kugou') {
     return localStorage.getItem('kugou_user_id')
-      || (localStorage.getItem('kugou_cookie') ? 'kugou-user' : '')
+      || (getSecureToken('kugou_cookie') ? 'kugou-user' : '')
   }
   if (platform === 'spotify') {
     return localStorage.getItem('spotify_user_id')
-      || (localStorage.getItem('spotify_access_token') ? 'spotify-user' : '')
+      || (getSecureToken('spotify_access_token') ? 'spotify-user' : '')
   }
   return localStorage.getItem('netease_user_id') || ''
 }

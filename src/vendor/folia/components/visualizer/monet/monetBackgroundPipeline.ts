@@ -6,6 +6,9 @@ import type { MonetBackgroundImage, MonetBackgroundTuning, Theme } from '../../.
 const MONET_BACKGROUND_WIDTH = 1920;
 const MONET_BACKGROUND_HEIGHT = 1080;
 const monetBackgroundCache = new Map<string, Promise<string | null>>();
+// FIFO 上限：每条是 1920×1080 JPEG dataURL（0.92 质量 ≈ 数百 KB），key 含完整
+// theme+tuning——每首歌封面/主题色变化都会新增一条，长听歌会话不设限会持续爬内存。
+const MONET_BACKGROUND_CACHE_MAX = 6;
 
 interface BuildMonetBackgroundOptions {
     coverUrl?: string | null;
@@ -357,5 +360,10 @@ export const resolveMonetBackgroundDataUrl = (options: BuildMonetBackgroundOptio
 
     const next = buildMonetBackgroundDataUrl(options).catch(() => null);
     monetBackgroundCache.set(cacheKey, next);
+    while (monetBackgroundCache.size > MONET_BACKGROUND_CACHE_MAX) {
+        const oldestKey = monetBackgroundCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        monetBackgroundCache.delete(oldestKey);
+    }
     return next;
 };

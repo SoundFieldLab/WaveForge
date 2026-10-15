@@ -12,7 +12,7 @@ import { getApiBase } from './apiConfig'
  */
 async function postCacheClear(path: string): Promise<void> {
   try {
-    const response = await fetch(`${getApiBase()}${path}`, { method: 'POST' })
+    const response = await fetch(`${getApiBase()}${path}`, { method: 'POST', signal: AbortSignal.timeout(120_000) })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
   } catch {
     // 后端未运行 / 旧版本没有该路由时忽略：本地缓存已清，服务端缓存会随 TTL 过期

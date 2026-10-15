@@ -16,7 +16,7 @@
  * 仍由各自的偏好存储管理；简约模式专属的"自定义首页显示内容"也不镜像。
  */
 import { useEffect, useMemo, useSyncExternalStore } from 'react'
-import { isTvModeActive } from '../platform'
+import { isTvModeActive, isAndroid } from '../platform'
 import { parseStoredBoolean } from '../utils/storage'
 import { readResonanceSettings, setResonanceSetting, type ResonanceSettings } from '../features/resonance/settings'
 import { RESONANCE_PARTY_QUOTA_CHOICES, RESONANCE_PUSH_LIMIT_CHOICES } from '../features/resonance/model'
@@ -111,7 +111,12 @@ const readNum = (key: string, fallback: number) => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-const writeBool = (key: string, value: boolean) => localStorage.setItem(key, JSON.stringify(value))
+// 配额满静默放弃（布尔镜像丢失只影响 UI 状态同步，不该炸调用方）
+const writeBool = (key: string, value: boolean) => {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch { /* ignore */ }
+}
 
 // ─────────────────────────── Electron 依赖设置的内存缓存 ───────────────────────────
 // 桌面歌词/桌面播放器/任务栏/Wallpaper 等设置真身在主进程，读数是异步的。
@@ -323,6 +328,11 @@ const checkForUpdate = () => {
       if (nativeBridge?.checkForUpdates) {
         nativeBridge.checkForUpdates()
         toast('已开始检查，如有新版本将弹出提示', 'info')
+        return
+      }
+      // Android 真机但原生桥缺失：清单产物是 Windows 包，TV 用户无法安装，引导走浏览器下载页
+      if (isAndroid()) {
+        toast('当前环境不可用应用内更新，请到 releases 页面下载最新 APK', 'error')
         return
       }
       const { UPDATE_MANIFEST_URLS, withDownloadProxies } = await import('./updateConstants')
@@ -641,6 +651,45 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
         available: notTv,
       },
       {
+        id: 'autoMixMinDuration',
+        label: '智能混音最短时长',
+        description: '短于该时长的歌曲不做智能混音（与最大时长成对，滑杆自动互限）',
+        control: { kind: 'slider', min: 1, max: 19, step: 1, unit: '秒' },
+        read: () => {
+          const min = readNum('autoMixMinDuration', 2)
+          // 面板写入时保证 max-1 > min：这里读取时同样钳制，避免旧数据出现 min >= max
+          return Math.min(min, Math.max(1, readNum('autoMixMaxDuration', 12) - 1))
+        },
+        write: (value) => {
+          const max = readNum('autoMixMaxDuration', 12)
+          const next = Math.max(1, Math.min(max - 1, Number(value) || 1))
+          localStorage.setItem('autoMixMinDuration', next.toString())
+          window.dispatchEvent(new Event('autoMixSettingsChanged'))
+          notifyGlobalSettingChanged()
+        },
+        visibleIf: () => readBool('autoMixEnabled', false),
+        available: notTv,
+      },
+      {
+        id: 'autoMixMaxDuration',
+        label: '智能混音最长时长',
+        description: '长于该时长的歌曲不做智能混音（与最短时长成对，滑杆自动互限）',
+        control: { kind: 'slider', min: 2, max: 20, step: 1, unit: '秒' },
+        read: () => {
+          const max = readNum('autoMixMaxDuration', 12)
+          return Math.max(max, readNum('autoMixMinDuration', 2) + 1)
+        },
+        write: (value) => {
+          const min = readNum('autoMixMinDuration', 2)
+          const next = Math.max(min + 1, Math.min(20, Number(value) || 20))
+          localStorage.setItem('autoMixMaxDuration', next.toString())
+          window.dispatchEvent(new Event('autoMixSettingsChanged'))
+          notifyGlobalSettingChanged()
+        },
+        visibleIf: () => readBool('autoMixEnabled', false),
+        available: notTv,
+      },
+      {
         id: 'videoEndBehavior',
         label: '视频播放完毕行为',
         description: 'MV 播放结束后的动作',
@@ -873,7 +922,7 @@ export const GLOBAL_SETTINGS_GROUPS: GlobalSettingsGroup[] = [
           window.dispatchEvent(new CustomEvent('upNextSecondsChanged', { detail: seconds }))
           notifyGlobalSettingChanged()
         },
-        visibleIf: () => readBool('showUpNextOutsidePlayer', false),
+        visibleIf: () => readBool('upNextEnabled', true),
       },
     ],
   },

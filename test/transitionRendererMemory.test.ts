@@ -112,20 +112,20 @@ describe('TransitionRenderer 渲染产物缓存内存安全', () => {
     vi.useRealTimers()
   })
 
-  it('缓存条目数上限（5）：超限逐出最旧，字节计数同步', () => {
+  it('缓存条目数上限（3）：超限逐出最旧，字节计数同步', () => {
     const rendererAny = renderer as unknown as { addToCache: (p: TransitionPlan, b: AudioBuffer) => void; getCacheSize: () => number }
     for (let i = 0; i < 12; i += 1) {
       const buffer = makeFakeAudioBuffer(44100) // 1s stereo ≈ 352KB
       rendererAny.addToCache(makePlan(`plan-${i}`, 0), buffer)
     }
-    expect(renderer.getCacheSize()).toBe(5)
-    // 最旧的 7 条（plan-0 … plan-6）已被逐出
+    expect(renderer.getCacheSize()).toBe(3)
+    // 最旧的 9 条（plan-0 … plan-8）已被逐出
     expect(renderer.getRendered('plan-0')).toBeNull()
-    expect(renderer.getRendered('plan-6')).toBeNull()
+    expect(renderer.getRendered('plan-8')).toBeNull()
     expect(renderer.getRendered('plan-11')).not.toBeNull()
   })
 
-  it('缓存总字节上限（64MB）：单条超限不缓存，累计超限逐出', () => {
+  it('缓存总字节上限（48MB）：单条超限不缓存，累计超限逐出', () => {
     const rendererAny = renderer as unknown as { addToCache: (p: TransitionPlan, b: AudioBuffer) => void }
     // 每条 40MB 立体声 buffer（~8 分钟时长等价）
     const big = makeFakeAudioBuffer(40 * 1024 * 1024 / 2 / 4, 2, 44100)
@@ -133,7 +133,7 @@ describe('TransitionRenderer 渲染产物缓存内存安全', () => {
     rendererAny.addToCache(makePlan('huge-2', 0), big)
     rendererAny.addToCache(makePlan('huge-3', 0), big)
     rendererAny.addToCache(makePlan('huge-4', 0), big)
-    // 单条 40MB，两条就超过 64MB 上限：每次加入都会先逐出最旧的一条，最终只剩最后一条
+    // 单条 40MB，两条就超过 48MB 上限：每次加入都会先逐出最旧的一条，最终只剩最后一条
     expect(renderer.getCacheSize()).toBe(1)
     expect(renderer.getRendered('huge-1')).toBeNull()
     expect(renderer.getRendered('huge-4')).not.toBeNull()

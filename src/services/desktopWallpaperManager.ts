@@ -204,6 +204,14 @@ class DesktopWallpaperManager {
     }
 
     try {
+      // 非桌面环境（TV/浏览器）禁止 dataURL 回退：base64 写 localStorage 超配额后
+      // setItem 静默失败，之后所有 localStorage 写入（viewMode、登录凭据等）全部丢失，
+      // 症状是"设置总是丢"。TV 壁纸走扫码上传（存设备存储，WallpaperCustomizeModal
+      // 的 TV 导入链），不经过本方法；真有文件上传需求时提示走上传入口。
+      if (!(window as any).electron?.wallpaper) {
+        return { success: false, error: '当前环境不支持上传本地壁纸：TV 请使用「扫码上传壁纸」，桌面版直接可用' }
+      }
+
       const dataUrl = await this.fileToDataUrl(file)
       const base: DesktopWallpaperFile = {
         id: `desktop_wp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,

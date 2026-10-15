@@ -54,8 +54,26 @@ export interface IndexedDBCacheStats {
   metadataSize: number
 }
 
+/** 快速体积估算：递归累加字符串长度（缓存主体是 URL/文本，UTF-8 下 ASCII 每字符 1 字节）。
+ *  此前 JSON.stringify 整棵对象只为测尺寸——歌单列表 MB 级时每次缓存写都多一趟全量
+ *  序列化 + 一份中间大字符串。本估算仅用于容量上限判断（超限拒写/淘汰排序），不要求精确。 */
 function serializedSize(value: unknown): number {
-  return new Blob([JSON.stringify(value)]).size
+  if (value === null || value === undefined) return 0
+  if (typeof value === 'string') return value.length
+  if (typeof value === 'number' || typeof value === 'boolean') return 8
+  if (Array.isArray(value)) {
+    let total = 2
+    for (const item of value) total += serializedSize(item) + 1
+    return total
+  }
+  if (typeof value === 'object') {
+    let total = 2
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      total += key.length + serializedSize((value as Record<string, unknown>)[key]) + 2
+    }
+    return total
+  }
+  return String(value).length
 }
 
 class IndexedDBCache {
@@ -148,6 +166,14 @@ class IndexedDBCache {
       await this.request(updateStore.put(item))
     }
     return item.data
+  }
+
+  /** 删除单条封面缓存（blob 损坏时由 artworkLoader 调用，让下次加载重新持久化）。 */
+  async deleteCover(url: string): Promise<void> {
+    url = url.trim()
+    if (!url) return
+    const store = await this.store(COVER_STORE, 'readwrite')
+    await this.request(store.delete(url))
   }
 
   async getCachedCover(url: string): Promise<string | null> {

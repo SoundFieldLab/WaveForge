@@ -734,9 +734,9 @@ export class AlbumGaplessService {
     }
   }
 
-  clearPreload(reason: string): void {
+  clearPreload(reason: string, skipMedia?: HTMLAudioElement): void {
     this.state.serial++
-    
+
     if (this.state.monitorTimer) {
       clearInterval(this.state.monitorTimer)
       this.state.monitorTimer = 0
@@ -755,12 +755,16 @@ export class AlbumGaplessService {
         preload.fadeResolve(false)
       }
 
-      try {
-        preload.media.pause()
-        preload.media.removeAttribute('src')
-        preload.media.load()
-      } catch (e) {
-        console.warn('[AlbumGapless] 清理失败', e)
+      // skipMedia：该 deck 正在被接管（reset(preserveAudio) 语义），卸载会让
+      // 接管方的 canplay 等待期（最长 12s）全程静音 —— 只摘出 state，不动媒体。
+      if (preload.media !== skipMedia) {
+        try {
+          preload.media.pause()
+          preload.media.removeAttribute('src')
+          preload.media.load()
+        } catch (e) {
+          console.warn('[AlbumGapless] 清理失败', e)
+        }
       }
     }
 

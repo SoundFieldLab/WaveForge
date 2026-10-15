@@ -49,7 +49,9 @@ export function savePlaybackShortcutSettings(
   next.seekForwardSeconds = clampSeekSeconds(next.seekForwardSeconds, 5)
   next.seekBackwardSeconds = clampSeekSeconds(next.seekBackwardSeconds, 5)
 
-  localStorage.setItem(PLAYBACK_SHORTCUT_SETTINGS_KEY, JSON.stringify(next))
+  try {
+    localStorage.setItem(PLAYBACK_SHORTCUT_SETTINGS_KEY, JSON.stringify(next))
+  } catch { /* 配额满忽略 */ }
   window.dispatchEvent(new CustomEvent<PlaybackShortcutSettings>(PLAYBACK_SHORTCUT_SETTINGS_EVENT, {
     detail: next,
   }))

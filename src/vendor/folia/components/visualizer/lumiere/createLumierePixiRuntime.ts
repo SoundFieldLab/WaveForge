@@ -159,6 +159,9 @@ export class LumierePixiRuntime {
 
     private install() {
         this.resizeToHost(true);
+        // WaveForge 性能适配（与 tempera/sonnet 对齐）：高刷屏 ticker 上限 60fps，
+        // 前台之外整帧渲染没有任何意义——隐藏时停 ticker，恢复时同步当前时间补一帧。
+        this.app.ticker.maxFPS = 60;
         this.app.ticker.add(this.renderFrame);
         this.resizeObserver = new ResizeObserver(() => {
             if (this.destroyed || !this.resizeToHost(false)) return;
@@ -166,8 +169,27 @@ export class LumierePixiRuntime {
         });
         this.resizeObserver.observe(this.options.host);
         this.renderOnce();
-        if (!this.options.paused) this.app.start();
+        this.syncTicker();
+        document.addEventListener('visibilitychange', this.handleVisibility);
     }
+
+    /** 计算 ticker 是否该跑：仅当「未暂停且在可见前台」时才渲染整帧循环。 */
+    private syncTicker() {
+        if (this.destroyed) return;
+        const shouldRun = !this.options.paused
+            && document.visibilityState === 'visible'
+            && this.options.host.isConnected;
+        if (shouldRun) {
+            if (!this.app.ticker.started) this.app.start();
+        } else if (this.app.ticker.started) {
+            this.app.stop();
+        }
+    }
+
+    private handleVisibility = () => {
+        this.syncTicker();
+        if (document.visibilityState === 'visible' && !this.options.paused) this.renderOnce();
+    };
 
     /** 尺寸没变返回 false。渲染器立刻跟上，场景（尺寸烘焙在里面）防抖重建。 */
     private resizeToHost(immediate: boolean) {
@@ -460,13 +482,14 @@ export class LumierePixiRuntime {
             this.app.stop();
             this.renderOnce();
         } else {
-            this.app.start();
+            this.syncTicker();
         }
     }
 
     destroy() {
         if (this.destroyed) return;
         this.destroyed = true;
+        document.removeEventListener('visibilitychange', this.handleVisibility);
         // 先放掉等交接的人，否则 pixiRuntimeHost 的 drain 循环会一直停在这个 promise 上。
         this.songSwap.settle(false);
         if (this.rebuildTimer !== null) clearTimeout(this.rebuildTimer);

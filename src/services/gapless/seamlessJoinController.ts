@@ -100,7 +100,21 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
     try {
       deps.setDeckGain(deps.getStandbyGain(), standbyAudio, 0)
       standbyAudio.currentTime = 0
+      // play() 的 promise 在媒体管线卡死时可能既不 resolve 也不 reject —— 不加硬超时的话
+      // warmupInFlight 永久卡 true，重入门控让本曲边的预热静默失效。
+      let playSettled = false
+      const playTimeout = window.setTimeout(() => {
+        if (playSettled || !warmupInFlight) return
+        playSettled = true
+        warmupInFlight = false
+        warmupDone = false
+        try { standbyAudio.pause() } catch { /* 元素可能已被释放 */ }
+        debugLog('⚠️ [Gapless] 预热 play() 超时未返回，放弃预热（回退实时缓冲判定）')
+      }, GAPLESS_SEAMLESS_WARMUP_TIMEOUT_MS)
       void standbyAudio.play().then(() => {
+        if (playSettled) return  // 硬超时已放弃本次预热，忽略迟到的 resolve
+        playSettled = true
+        window.clearTimeout(playTimeout)
         // 播放中推进缓冲；每 250ms 查一次前 10s 是否已缓冲
         let pollCount = 0
         const poll = () => {
@@ -127,6 +141,9 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
         }
         warmupPollTimer = window.setTimeout(poll, GAPLESS_SEAMLESS_WARMUP_POLL_MS)
       }).catch(() => {
+        window.clearTimeout(playTimeout)
+        if (playSettled) return
+        playSettled = true
         // 预启动被拦截/失败：放弃预热，剩余 1s 的判定会走备选淡入淡出
         warmupInFlight = false
         warmupDone = false
@@ -284,14 +301,29 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
           }
           standby.currentTime = 0
           await waitForSeek(standby)
-          if (standby.paused) return  // 拼接前被并发操作暂停，放弃
+          if (standby.paused) {
+            // 拼接前被并发操作暂停：ended 已被本方法消费（调用方直接 return），
+            // 静默放弃会让 UI 停在播放态且无任何音频——必须回退备选过渡。
+            console.warn('⚠️ [Gapless] 首选拼接执行前 standby 被暂停，回退备选淡入淡出')
+            deps.startGaplessTransition()
+            return
+          }
           if (joinGeneration !== generation
             || deps.getRevision() !== scheduledRevision
             || deps.getActiveAudio() !== scheduledSource
             || deps.getStandbyAudio() !== standby
             || (standby.currentSrc || standby.src) !== scheduledStandbySrc
             || !deps.isGaplessEnabled()
-            || deps.isTransitionRunning()) return
+            || deps.isTransitionRunning()) {
+            // 同上：本方法已消费 ended，任何放弃路径都必须给出过渡或结束态，
+            // 否则播放停滞。revision/切歌类失效交给取消方接管（它们已清场），
+            // 仅对"无并发取消"的守卫失败回退备选。
+            if (deps.getActiveAudio() === scheduledSource && deps.getRevision() === scheduledRevision) {
+              console.warn('⚠️ [Gapless] 首选拼接守卫失败（无并发切歌），回退备选淡入淡出')
+              deps.startGaplessTransition()
+            }
+            return
+          }
           // 复用 commitTransition：先置 running-transition 通过状态校验，
           // 由它完成增益切换/翻转/transitionCommit（React 18 自动批处理，
           // 两次状态更新合并为一次渲染，无过渡动画闪烁）。
@@ -301,6 +333,14 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
             transitionStrategy: 'gapless',
           })
           deps.commitTransition('gapless', standby.currentTime, deps.getRevision())
+          // commitTransition 有多个静默守卫分支（执行版本不匹配 / 缺目标音频或元数据），
+          // 被拦时不抛错也不回退，而这条路径没有设置看门狗截止 —— 状态若停在
+          // running-transition，timeupdate 被抑制，UI 时钟/歌词会一直冻结到用户 seek。
+          // 提交后状态仍是 running-transition 即视为提交未落地，回退备选淡入淡出。
+          if (deps.isTransitionRunning()) {
+            console.warn('⚠️ [Gapless] 首选拼接提交未落地（守卫拦截），回退备选淡入淡出')
+            deps.startGaplessTransition()
+          }
         } catch (error) {
           console.warn('⚠️ [Gapless] 首选拼接失败，回退备选淡入淡出:', error)
           deps.startGaplessTransition()
@@ -329,6 +369,11 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
     warmupDone = false
     clearPrerollPoll()
     clearWarmupPoll()
+    // boundaryScheduled 也必须复位：切歌路径（cancelScheduledTransition）裸 clearTimeout
+    // 共享的 transitionTimerRef 后调用本方法，若不复位，卡在 true 的标志会让下一首歌的
+    // scheduleBoundary 直接 return —— 手动切歌后的下一首专辑歌丢一次无缝拼接。
+    // timer 本体已由调用方清理，这里只同步状态；cancelBoundaryTimer 语义（清 timer）保持独立。
+    boundaryScheduled = false
   }
 
   return {

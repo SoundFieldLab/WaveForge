@@ -66,7 +66,9 @@ export const saveWallpaperEngineRotationSettings = (
     mode: settings.mode === 'random' ? 'random' : 'sequential',
     selectedWallpaperIds,
   }
-  localStorage.setItem(WALLPAPER_ENGINE_ROTATION_STORAGE_KEY, JSON.stringify(normalized))
+  try {
+    localStorage.setItem(WALLPAPER_ENGINE_ROTATION_STORAGE_KEY, JSON.stringify(normalized))
+  } catch { /* 配额满忽略 */ }
   window.dispatchEvent(new CustomEvent<WallpaperEngineRotationSettings>(WALLPAPER_ENGINE_ROTATION_EVENT, { detail: normalized }))
   return normalized
 }

@@ -1,3 +1,4 @@
+import { getSecureToken } from './secureTokenStore'
 /**
  * 音乐平台抽象层（第三平台：Apple Music）
  *
@@ -479,18 +480,19 @@ export function setPlatformHidden(platform: MusicPlatform, hidden: boolean): voi
   const nextHidden = [...current]
   // 至少保留一个平台
   if (MUSIC_PLATFORMS.every(item => nextHidden.includes(item))) return
-  localStorage.setItem(HIDDEN_PLATFORMS_KEY, JSON.stringify(nextHidden))
+  try {
+    localStorage.setItem(HIDDEN_PLATFORMS_KEY, JSON.stringify(nextHidden))
+  } catch { /* 配额满忽略 */ }
   window.dispatchEvent(new CustomEvent(PLATFORM_VISIBILITY_EVENT, { detail: { hidden: nextHidden } }))
 }
 
-/** 平台 cookie/token（spotify 走 OAuth token，apple 走 Developer Token + Media-User-Token） */
+/** 平台 cookie/token（spotify 走 OAuth token，apple 走 Developer Token + Media-User-Token）。
+ *  全部凭据经 secureTokenStore（加密存储 + localStorage 回退），不再直读 localStorage 明文。 */
 export function getPlatformCookie(platform: MusicPlatform): string {
-  if (platform === 'qq') {
-    return localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
-  }
   if (platform === 'apple') return ''
-  if (platform === 'spotify') return localStorage.getItem('spotify_access_token') || ''
-  if (platform === 'kugou') return localStorage.getItem('kugou_cookie') || ''
-  if (platform === 'soda') return localStorage.getItem('soda_token') || ''
-  return localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+  if (platform === 'qq') return getSecureToken('qq_cookie') || getSecureToken('qqCookie') || ''
+  if (platform === 'spotify') return getSecureToken('spotify_access_token') || ''
+  if (platform === 'kugou') return getSecureToken('kugou_cookie') || ''
+  if (platform === 'soda') return getSecureToken('soda_token') || ''
+  return getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
 }

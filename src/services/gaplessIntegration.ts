@@ -228,7 +228,9 @@ export class GaplessIntegration {
   }
 
   reset(preserveAudio?: HTMLAudioElement): void {
-    this.albumGapless.clearPreload('reset')
+    // preserveAudio：外部 deck 正被接管（useAudioPlayer 传入 externalAudio），
+    // 清 preload 时跳过它，否则接管等待期会全程静音
+    this.albumGapless.clearPreload('reset', preserveAudio)
     this.cancelVisualTransition()
     this.options.setOutputGain(this.options.getTargetVolume())
   }

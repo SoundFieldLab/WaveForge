@@ -80,7 +80,12 @@ export function getDesktopActivityForPlatform(activity: DesktopMusicActivity, pl
 }
 
 function save(activity: DesktopMusicActivity) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(activity))
+  // 被 10s 听书计时定时器反复调用：配额满时裸 setItem 会每帧抛异常并静默断掉收听统计
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(activity))
+  } catch {
+    // 配额满/隐私模式：放弃本次持久化，事件照常派发（内存态仍是最新）
+  }
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(DESKTOP_MUSIC_ACTIVITY_EVENT, { detail: activity }))
   return activity
 }

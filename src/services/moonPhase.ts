@@ -139,10 +139,26 @@ export interface MoonRiseSet {
   set: string | null
 }
 
+/** 求指定时区下「当天本地 0 点」的真实 UTC 瞬间。
+ *  旧实现 Date.UTC(本地年月日) 把本地 0 点当 UTC 0 点，非 UTC 时区下 24h 搜索窗
+ *  整体平移（UTC+8 实际扫 08:00→次日 08:00），凌晨月落会被划出窗口。 */
+function localMidnightUtc(year: number, month: number, day: number, timeZone: string): Date {
+  // 先假设 0 点即 UTC，再用量测出的该时区偏移回推一次（两次迭代收敛，DST 也覆盖）
+  let guess = new Date(Date.UTC(year, month - 1, day))
+  for (let i = 0; i < 2; i += 1) {
+    const parts = localDateParts(guess, timeZone)
+    const asUtc = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second)
+    const offsetMs = asUtc - guess.getTime()
+    guess = new Date(Date.UTC(year, month - 1, day) - offsetMs)
+  }
+  return guess
+}
+
 /** 取当地"今天"的月出月落（以本地 0 点为界往前凑 25 小时窗口，容忍跨日） */
 export function moonRiseSet(date: Date, lat: number, lon: number, timeZone?: string): MoonRiseSet {
-  const localParts = localDateParts(date, timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone)
-  const local = new Date(Date.UTC(localParts.year, localParts.month - 1, localParts.day))
+  const tz = timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone
+  const localParts = localDateParts(date, tz)
+  const local = localMidnightUtc(localParts.year, localParts.month, localParts.day, tz)
   const jd0 = toJD(local)
   const fmt = (jd: number | null): string | null => {
     if (jd === null) return null

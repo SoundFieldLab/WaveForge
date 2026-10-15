@@ -36,12 +36,21 @@ const chineseCalendar = new Intl.DateTimeFormat('zh-CN-u-ca-chinese', {
   day: 'numeric',
 })
 
+// ICU 月份命名随版本/环境有别名差异：现代输出「正月/腊月/冬月」，旧引擎可能输出
+// 「十一月/十二月」。统一映射到 LUNAR_FESTIVALS 的键口径（正/五/七/八/九/腊）。
+const LUNAR_MONTH_ALIASES: Record<string, string> = {
+  '十一': '冬',
+  '十二': '腊',
+}
+
 const getLunarParts = (date: Date) => {
   const parts = chineseCalendar.formatToParts(date)
-  const month = parts.find(part => part.type === 'month')?.value.replace('月', '') || ''
+  const raw = parts.find(part => part.type === 'month')?.value.replace('月', '') || ''
   const day = Number(parts.find(part => part.type === 'day')?.value || 0)
-  const leap = month.includes('闰')
-  return { month: month.replace('闰', ''), day, leap }
+  const leap = raw.includes('闰')
+  const stripped = raw.replace('闰', '')
+  const month = LUNAR_MONTH_ALIASES[stripped] || stripped
+  return { month, day, leap }
 }
 
 const isNthWeekday = (date: Date, weekday: number, occurrence: number) => {

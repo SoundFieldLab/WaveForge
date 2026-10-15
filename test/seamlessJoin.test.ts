@@ -314,3 +314,26 @@ describe('GaplessIntegration（同专辑判定与方案分流）', () => {
     expect(result.mode).toBe('disabled')
   })
 })
+
+describe('SeamlessJoinController · 切歌后的边界调度复位（回归）', () => {
+  it('边界调度挂起时 reset：下一首歌的 scheduleBoundary 不得被 boundaryScheduled 卡死', () => {
+    vi.useFakeTimers()
+    const deps = makeDeps()
+    const controller = createSeamlessJoinController(deps)
+    // 歌 A：边界调度已挂起（boundaryScheduled = true，timer 在外部由调用方清理）
+    const activeA = makeFakeAudio()
+    deps.getActiveAudio = () => activeA
+    deps.getStandbyAudio = () => makeFakeAudio()
+    controller.scheduleBoundary({ active: activeA, remaining: 0.8, albumPlayback: true })
+    // 用户在边界前手动切歌：useAudioPlayer 的 cancelScheduledTransition 裸 clearTimeout
+    // （transitionTimerRef 直接置 null，不经过 cancelBoundaryTimer）+ controller.reset()。
+    deps.setBoundaryTimer(null)
+    controller.reset()
+    // 歌 B：同专辑下一首，remaining ≤1s → scheduleBoundary 必须重新武装首选拼接
+    const activeB = makeFakeAudio()
+    deps.getActiveAudio = () => activeB
+    controller.scheduleBoundary({ active: activeB, remaining: 0.8, albumPlayback: true })
+    expect(deps.getBoundaryTimer()).not.toBeNull()
+    controller.cancelBoundaryTimer()
+  })
+})

@@ -61,6 +61,9 @@ export class AirplayController {
   private lastTrackKey = ''
   private lastProgressSentAt = 0
   private captureActive = false
+  /** 采集代次：stop 期间 start 尚未 resolve（addModule pending）时，迟到的 handle
+   *  不得复活采集——否则暂停状态下继续推 PCM，dispose 恰逢 pending 时 worklet 永久存活 */
+  private captureGeneration = 0
   /** 诊断统计：已推送 PCM 块数 */
   private sentChunks = 0
   private lastCaptureDiagAt = 0
@@ -351,6 +354,9 @@ export class AirplayController {
 
   private ensureCapture(): void {
     if (this.captureActive) return
+    // addModule pending 期间重入时，递增代次让上一个在途 start 的迟到 handle 走回收
+    // 分支（否则两个采集并行、第一个 handle 被覆盖泄漏）
+    this.captureGeneration += 1
     if (!this.captureContext || !this.captureSourceNode) {
       this.diag(`采集暂不可用：音频图未就绪（context:${Boolean(this.captureContext)} source:${Boolean(this.captureSourceNode)}）`)
       return
@@ -358,10 +364,17 @@ export class AirplayController {
     const bridge = (window as any).electron?.airplay
     if (!bridge) return
     const context = this.captureContext
+    const generation = this.captureGeneration
     this.diag(`启动音频采集（sampleRate ${context.sampleRate}）…`)
     void startAirplayCapture(context, this.captureSourceNode, (chunk, sampleRate) => {
       this.pushPcm(chunk, sampleRate)
     }).then((handle) => {
+      if (generation !== this.captureGeneration) {
+        // start 期间发生过 stop（或 dispose）：迟到的 handle 立即回收，不复活采集
+        handle.stop()
+        this.diag("音频采集启动完成，但采集已被停止——已回收迟到的 handle")
+        return
+      }
       this.captureHandle = handle
       this.captureActive = true
       this.diag('音频采集已启动')
@@ -372,6 +385,7 @@ export class AirplayController {
   }
 
   private stopCapture(): void {
+    this.captureGeneration += 1
     if (this.captureHandle) {
       this.captureHandle.stop()
       this.captureHandle = null

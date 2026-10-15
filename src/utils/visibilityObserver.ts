@@ -20,8 +20,10 @@ export interface VisibilityHandlers {
   onExit?: () => void
 }
 
-interface RegistryEntry extends VisibilityHandlers {
+interface RegistryEntry {
   inside: boolean
+  /** 同一元素在同一 margin 下可能有多个注册方（各自独立注销，互不牵连） */
+  handlersList: VisibilityHandlers[]
 }
 
 interface Registry {
@@ -44,8 +46,10 @@ function getRegistry(rootMargin: string): Registry | null {
         const next = entry.isIntersecting
         if (next === record.inside) continue
         record.inside = next
-        if (next) record.onEnter?.()
-        else record.onExit?.()
+        for (const handlers of record.handlersList) {
+          if (next) handlers.onEnter?.()
+          else handlers.onExit?.()
+        }
       }
     },
     { rootMargin, threshold: 0 },
@@ -63,11 +67,28 @@ function getRegistry(rootMargin: string): Registry | null {
 export function observeVisibility(element: Element, rootMargin: string, handlers: VisibilityHandlers): () => void {
   const registry = getRegistry(rootMargin)
   if (!registry) return () => undefined
-  registry.entries.set(element, { ...handlers, inside: false })
-  registry.observer.observe(element)
+  // 同一元素二次注册时追加而不是覆盖：注销只移除自己那份 handlers，
+  // 最后一个注销才真正 unobserve（旧实现会让先注销的一方杀死后注册方的回调）。
+  let entry = registry.entries.get(element)
+  if (!entry) {
+    entry = { inside: false, handlersList: [] }
+    registry.entries.set(element, entry)
+    registry.observer.observe(element)
+  }
+  // 晚到方对齐 entry 当前可见态：元素已在视口内时补发一次 onEnter，避免
+  // ① 晚到方收不到初始进入 ② 下一次离开翻转时给从未进入的它误发 onExit
+  const record = { ...handlers, inside: entry.inside }
+  entry.handlersList.push(record)
+  if (entry.inside) handlers.onEnter?.()
   return () => {
-    registry.entries.delete(element)
-    registry.observer.unobserve(element)
+    const list = entry?.handlersList
+    if (!list) return
+    const idx = list.indexOf(record)
+    if (idx >= 0) list.splice(idx, 1)
+    if (list.length === 0) {
+      registry.entries.delete(element)
+      registry.observer.unobserve(element)
+    }
   }
 }
 

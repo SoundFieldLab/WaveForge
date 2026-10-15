@@ -132,13 +132,20 @@ class WallpaperManager {
    * 获取壁纸设置
    */
   getSettings(): WallpaperSettings {
-    const saved = localStorage.getItem(this.SETTINGS_KEY)
-    return saved ? JSON.parse(saved) : {
+    const fallback: WallpaperSettings = {
       mode: 'single' as WallpaperMode,
       switchMode: 'manual' as WallpaperSwitchMode,
       intervalMinutes: 30,
       currentIndex: 0,
       lastSwitchTime: Date.now()
+    }
+    const saved = localStorage.getItem(this.SETTINGS_KEY)
+    if (!saved) return fallback
+    try {
+      return JSON.parse(saved)
+    } catch {
+      // 键被截断/损坏时回落默认值，别让弹窗渲染路径直接抛 SyntaxError
+      return fallback
     }
   }
 
@@ -146,7 +153,9 @@ class WallpaperManager {
    * 保存壁纸设置
    */
   saveSettings(settings: WallpaperSettings) {
-    localStorage.setItem(this.SETTINGS_KEY, JSON.stringify(settings))
+    try {
+      localStorage.setItem(this.SETTINGS_KEY, JSON.stringify(settings))
+    } catch { /* 配额满忽略 */ }
     console.log('✅ 壁纸设置已保存:', settings)
     
     // 重新启动定时器

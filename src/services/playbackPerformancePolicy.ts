@@ -29,6 +29,14 @@ export function resolveDioramaRenderQuality({
   if (mvBackgroundActive) {
     return { dpr: [1, 1.25] as [number, number], postFx: false, lightweightScene: true }
   }
+  // 高分屏（物理高度 >1440，如 4K）封顶 dpr 上限到 1.5：全屏 Canvas + UnrealBloom
+  // 在 4K×dpr2 下 ≈3300 万像素/帧 × bloom 多 pass，是中端 GPU 上唯一可能打满 GPU
+  // 预算的单项。画面密度损失在整屏 3D 场景下不可感知（与 ModernFluidBackground 的
+  // 960×540 硬封顶同一思路，只是 Diorama 是主视觉故留更高上限）。
+  const physicalHeight = typeof window !== 'undefined' ? (window.screen?.height || 0) * (window.devicePixelRatio || 1) : 0
+  if (physicalHeight > 1440) {
+    return { dpr: [1, 1.5] as [number, number], postFx: true, lightweightScene: false }
+  }
   return { dpr: [1, 2] as [number, number], postFx: true, lightweightScene: false }
 }
 

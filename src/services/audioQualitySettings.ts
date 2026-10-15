@@ -95,13 +95,31 @@ const isAppleQualityPreference = (value: unknown): value is AppleAudioQualityPre
   typeof value === 'string' && APPLE_QUALITY_VALUES.includes(value as AppleAudioQualityPreference)
 )
 
+// 模块级解析缓存：loadAudioQualitySettings 被 PlayerControls 的音质快捷切换渲染体
+// （随 currentTime 高频重渲染）与 musicApi 取流路径反复调用，每次 JSON.parse 纯浪费。
+// 缓存带原始字符串指纹（长度+首尾样本）：localStorage 被同窗口直接 setItem（测试/
+// 迁移代码）后指纹必然变化 → 自动失效，无需依赖事件；跨窗口走 storage 事件同样兜底。
+let audioQualitySettingsCache: AudioQualitySettings | null = null
+let audioQualitySettingsFingerprint = ''
+
+function fingerprintOf(raw: string): string {
+  if (raw.length <= 32) return raw
+  return `${raw.length}:${raw.slice(0, 16)}:${raw.slice(-16)}`
+}
+
 export function loadAudioQualitySettings(): AudioQualitySettings {
   if (typeof localStorage === 'undefined') return { ...DEFAULT_AUDIO_QUALITY_SETTINGS }
 
+  const raw = localStorage.getItem(AUDIO_QUALITY_SETTINGS_KEY) || ''
+  const fingerprint = fingerprintOf(raw)
+  if (audioQualitySettingsCache && fingerprint === audioQualitySettingsFingerprint) {
+    return audioQualitySettingsCache
+  }
+
   try {
-    const parsed = JSON.parse(localStorage.getItem(AUDIO_QUALITY_SETTINGS_KEY) || '{}') as Partial<AudioQualitySettings>
+    const parsed = JSON.parse(raw || '{}') as Partial<AudioQualitySettings>
     // 平台专属档读到其它平台（历史脏数据/人工改写）时回落默认，避免带着无效档位请求：
-    //   QQ 专属（AAC 三档 + 杜比/臻品母带/臻品音质）不给别的平台；
+    //   QQ 专属（AAC 三档 + 杜比/臻品母带/臻音音质）不给别的平台；
     //   网易云专属（沉浸环绕声/超清母带/臻音全景声/高清臻音）只给网易云。
     const readForNetease = (value: unknown): AudioQualityPreference => (
       isQualityPreference(value) && !(QQ_ONLY_QUALITY_VALUES as string[]).includes(value) ? value : 'auto'
@@ -113,7 +131,8 @@ export function loadAudioQualitySettings(): AudioQualitySettings {
         ? value
         : 'auto'
     )
-    return {
+    audioQualitySettingsFingerprint = fingerprint
+    return audioQualitySettingsCache = {
       netease: readForNetease(parsed.netease),
       qq: isQualityPreference(parsed.qq) && !(NETEASE_ONLY_QUALITY_VALUES as string[]).includes(parsed.qq)
         ? parsed.qq
@@ -124,7 +143,8 @@ export function loadAudioQualitySettings(): AudioQualitySettings {
       apple: isAppleQualityPreference(parsed.apple) ? parsed.apple : DEFAULT_AUDIO_QUALITY_SETTINGS.apple,
     }
   } catch {
-    return { ...DEFAULT_AUDIO_QUALITY_SETTINGS }
+    audioQualitySettingsFingerprint = fingerprint
+    return audioQualitySettingsCache = { ...DEFAULT_AUDIO_QUALITY_SETTINGS }
   }
 }
 
@@ -154,10 +174,22 @@ export function saveAudioQualitySettings(patch: Partial<AudioQualitySettings>): 
   if (!isAppleQualityPreference(next.apple)) next.apple = DEFAULT_AUDIO_QUALITY_SETTINGS.apple
 
   if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(AUDIO_QUALITY_SETTINGS_KEY, JSON.stringify(next))
+    try {
+      localStorage.setItem(AUDIO_QUALITY_SETTINGS_KEY, JSON.stringify(next))
+    } catch { /* 配额满：放弃持久化，内存态与指纹仍更新 */ }
+    audioQualitySettingsCache = next
+    audioQualitySettingsFingerprint = fingerprintOf(JSON.stringify(next))
     window.dispatchEvent(new CustomEvent(AUDIO_QUALITY_SETTINGS_EVENT, { detail: next }))
   }
   return next
+}
+
+// 本窗口之外改动该 key（如其它窗口）时失效缓存；同窗口 setItem 不触发 storage 事件，
+// 由指纹比对兜底。typeof window 存在但非标准环境（测试 stub 无 addEventListener）时跳过。
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === AUDIO_QUALITY_SETTINGS_KEY) audioQualitySettingsCache = null
+  })
 }
 
 export function getAudioQualityPreference(platform: MusicPlatform): AudioQualityPreference | AppleAudioQualityPreference {

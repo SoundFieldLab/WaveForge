@@ -78,6 +78,12 @@ function dayStart(ts: number): number {
   return d.getTime()
 }
 
+/** 登出/换账号时清空听歌日志（本地统计数据，与平台无关但按账号语义展示） */
+export function clearListeningLog(): void {
+  try {
+    localStorage.removeItem(STORE_KEY)
+  } catch { /* ignore */ }
+}
 export function getListeningStats(range: 'week' | 'month'): ListeningStats {
   const entries = loadEntries()
   const days = range === 'week' ? 7 : 30

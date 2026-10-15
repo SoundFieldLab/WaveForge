@@ -116,7 +116,9 @@ class CacheManager {
    */
   setCacheDirectory(dir: string) {
     this.cacheDir = dir
-    localStorage.setItem('cacheDirectory', dir)
+    try {
+      localStorage.setItem('cacheDirectory', dir)
+    } catch { /* 配额满忽略 */ }
   }
   
   /**
@@ -133,15 +135,16 @@ class CacheManager {
     userId = userId.trim()
     if (!userId) throw new Error('缓存用户 ID 不能为空')
     const key = `playlist_${platform}_${userId}`
+    // 序列化一次：data 直接存字符串（size 用字符长度估算，省去整份歌单的 Blob 二次序列化+编码计算）
     const data = JSON.stringify(playlists)
-    const size = new Blob([data]).size
-    
+    const size = data.length
+
     const cacheItem: CacheItem = {
-      data: playlists,
+      data,
       timestamp: Date.now(),
       size
     }
-    
+
     localStorage.setItem(key, JSON.stringify(cacheItem))
     console.log(`✅ 已缓存歌单列表: ${platform} ${userId}, 大小: ${this.formatSize(size)}`)
   }
@@ -169,7 +172,8 @@ class CacheManager {
       }
       
       console.log(`✅ 从缓存加载歌单列表: ${platform} ${userId}（缓存${Math.round(age / 60000)}分钟前）`)
-      return cacheItem.data
+      // data 存的是已序列化字符串（见 cachePlaylist），这里只需一次 parse 还原数组
+      return typeof cacheItem.data === 'string' ? JSON.parse(cacheItem.data) : cacheItem.data
     } catch (error) {
       console.error('解析缓存失败:', error)
       return null
@@ -274,46 +278,55 @@ class CacheManager {
   
   /**
    * 记录错误日志
+   * 必须吞掉自身异常：本方法被 window.onerror / unhandledrejection 全局处理器调用，
+   * setItem 在配额满时抛 QuotaExceededError → 新的 unhandledrejection → 再调本方法
+   * → 无界自激循环（CPU 拉满 + 控制台刷屏）。
    */
   async logError(error: any) {
-    const key = 'error_logs'
-    const logs = this.getErrorLogs()
-    
-    const errorLog = {
-      message: error?.message || String(error),
-      stack: error?.stack,
-      timestamp: Date.now(),
-      url: window.location.href
+    try {
+      const key = 'error_logs'
+      const logs = this.getErrorLogs()
+
+      const errorLog = {
+        message: error?.message || String(error),
+        stack: error?.stack,
+        timestamp: Date.now(),
+        url: window.location.href
+      }
+
+      logs.push(errorLog)
+
+      // 只保留最近100条
+      if (logs.length > 100) {
+        logs.splice(0, logs.length - 100)
+      }
+
+      const data = JSON.stringify(logs)
+      const size = data.length
+
+      const cacheItem: CacheItem = {
+        data,
+        timestamp: Date.now(),
+        size
+      }
+
+      localStorage.setItem(key, JSON.stringify(cacheItem))
+    } catch {
+      // 配额满/序列化失败：错误日志写入失败本身不再抛出（见上），静默丢弃本条
     }
-    
-    logs.push(errorLog)
-    
-    // 只保留最近100条
-    if (logs.length > 100) {
-      logs.splice(0, logs.length - 100)
-    }
-    
-    const data = JSON.stringify(logs)
-    const size = new Blob([data]).size
-    
-    const cacheItem: CacheItem = {
-      data: logs,
-      timestamp: Date.now(),
-      size
-    }
-    
-    localStorage.setItem(key, JSON.stringify(cacheItem))
   }
-  
+
   /**
    * 获取错误日志
    */
   getErrorLogs(): any[] {
     const cached = localStorage.getItem('error_logs')
     if (!cached) return []
-    
+
     try {
       const cacheItem: CacheItem = JSON.parse(cached)
+      // data 存的是已序列化字符串（见 cacheErrorLog），这里 parse 还原数组
+      if (typeof cacheItem.data === 'string') return JSON.parse(cacheItem.data) || []
       return cacheItem.data || []
     } catch {
       return []
@@ -355,7 +368,14 @@ class CacheManager {
           stats.playlistCount++
           stats.playlistSize += size
         } else if (key === 'error_logs') {
-          stats.errorLogCount = cacheItem?.data?.length || 0
+          // data 存的是序列化字符串（见 logError）：length 是字符数不是条数，
+          // 解析数组取真实条数（展示用，解析失败退回 0）
+          try {
+            const arr = typeof cacheItem?.data === 'string' ? JSON.parse(cacheItem.data) : cacheItem?.data
+            stats.errorLogCount = Array.isArray(arr) ? arr.length : 0
+          } catch {
+            stats.errorLogCount = 0
+          }
           stats.errorLogSize += size
         } else recognized = false
 
@@ -600,7 +620,13 @@ class CacheManager {
       days: Math.max(1, Math.min(365, Number(settings.days) || 14)),
       targets: { ...settings.targets },
     }
-    localStorage.setItem(this.AUTO_CLEAR_SETTINGS_KEY, JSON.stringify(normalized))
+    try {
+      localStorage.setItem(this.AUTO_CLEAR_SETTINGS_KEY, JSON.stringify(normalized))
+    } catch (error) {
+      // 配额满：本文件其他写点均静默降级，这里同步处理避免把 QuotaExceededError 抛进设置面板
+      console.warn('自动清理设置保存失败（存储配额不足）:', error)
+      return
+    }
     console.log('✅ 自动清理设置已保存:', normalized)
   }
   
