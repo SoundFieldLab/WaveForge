@@ -186,7 +186,7 @@ function BigCard({
   )
 }
 
-export function KugouDiscoverBoard(props: KugouBoardProps) {
+export function KugouRecommendBoard(props: KugouBoardProps) {
   const { payload, accent, accentRgb, showSubtitles, onPlaySongs, onOpenPlaylist, onOpenMoreSection } = props
   const kugou = payload.kugou
   const dailySongs = kugou?.dailySongs.length ? kugou.dailySongs : payload.dailySongs

@@ -84,6 +84,8 @@ export function KugouCloudPanel({ theme, accent, actions, showHeader = true }: {
       const result = await fetchKugouUserCloud(1, 100)
       setSongs(result.songs)
       setError(result.error && result.songs.length === 0 ? result.error : '')
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '加载失败')
     } finally {
       setLoading(false)
     }
@@ -161,6 +163,8 @@ export function KugouPurchasedPanel({ theme, accent, actions, showHeader = true 
       setAlbums(albumResult.albums)
       // 只有两个通道同时失败才当错误：任一有内容就照常渲染
       setError(songResult.error && albumResult.error ? (songResult.error || albumResult.error) : '')
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '加载失败')
     } finally {
       setLoading(false)
     }

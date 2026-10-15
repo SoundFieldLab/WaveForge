@@ -25,8 +25,17 @@ interface RecentRow {
   playedAt: number
 }
 
-/** 集合页缓存：切走再回来不重打接口（登录态变化时由 authRevision 失效）。 */
+/** 集合页缓存：切走再回来不重打接口（登录态变化时由 authRevision 失效）。
+ *  键含 authRevision：写入前清同主键旧 revision，防反复登录累积。 */
+const RECENT_CACHE_KEY_SPLIT = 1 // 键=`${userId}:${authRevision}`，主键取第一段 userId
 const recentCache = new Map<string, { rows: RecentRow[]; bp: string; hasMore: boolean }>()
+function evictOldRevisions(key: string) {
+  const parts = key.split(':')
+  const prefix = parts.slice(0, RECENT_CACHE_KEY_SPLIT).join(':')
+  for (const existing of recentCache.keys()) {
+    if (existing !== key && existing.startsWith(prefix + ':')) recentCache.delete(existing)
+  }
+}
 
 function KugouPcRecent({ ctx, authRevision = 0 }: KugouPcRecentProps) {
   const theme = ctx.theme
@@ -63,6 +72,7 @@ function KugouPcRecent({ ctx, authRevision = 0 }: KugouPcRecentProps) {
           playCount: record.pc,
           playedAt: record.ot,
         }))
+        evictOldRevisions(cacheKey)
         recentCache.set(cacheKey, { rows: next, bp: result.bp, hasMore: result.hasMore })
         setRows(next)
         setBp(result.bp)
@@ -91,6 +101,7 @@ function KugouPcRecent({ ctx, authRevision = 0 }: KugouPcRecentProps) {
       setRows(prev => {
         const seen = new Set(prev.map(row => row.song.mid || String(row.song.id)))
         const merged = [...prev, ...next.filter(row => !seen.has(row.song.mid || String(row.song.id)))]
+        evictOldRevisions(cacheKey)
         recentCache.set(cacheKey, { rows: merged, bp: result.bp, hasMore: result.hasMore })
         return merged
       })
@@ -134,9 +145,13 @@ function KugouPcRecent({ ctx, authRevision = 0 }: KugouPcRecentProps) {
         >
           <Play className="h-3.5 w-3.5 fill-current" /> 播放
         </button>
-        <PcIconButton theme={theme} title="加入播放列表" onClick={() => { if (songs[0]) ctx.actions.onPlaySongs(songs[0], songs, 0) }}>
-          <ListPlus className="h-4 w-4" />
-        </PcIconButton>
+        {/* 「加入播放列表」= 插入下一首播放（不打断当前队列）。此前 onClick 与左侧「播放」
+            完全同一行为，用户想追加却把当前队列顶掉了。宿主未接入 onPlayNext 时隐藏。 */}
+        {ctx.actions.onPlayNext ? (
+          <PcIconButton theme={theme} title="加入播放列表" onClick={() => { if (songs[0]) ctx.actions.onPlayNext?.(songs[0]) }}>
+            <ListPlus className="h-4 w-4" />
+          </PcIconButton>
+        ) : null}
         <span className={`ml-auto text-[12px] ${theme.faint}`}>官方的歌单/视频/频道页签在上游没有对应播放历史接口，这里只提供单曲</span>
       </div>
 

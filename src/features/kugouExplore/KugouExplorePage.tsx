@@ -2,7 +2,9 @@
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  *
- * 探索页-酷狗一级分区外壳：**音乐 / 听书**（归属酷狗，不是通用板块瀑布）。
+ * 探索页-酷狗一级分区外壳：**发现 / 音乐 / 听书**（归属酷狗，不是通用板块瀑布）。
+ * 「发现」= 酷狗概念版「发现」tab 的真机复刻（红心Radio + pxy 卡片流 + 曲风盲盒 + 频道推荐，
+ *  见 KugouDiscoverBoard）；「音乐」分区收纳官方五板块（推荐/乐库/歌单/频道/分类）；
  * 「刷歌」分区已按产品决策下线（上游 /youth 动态流对本账号恒空，入口无内容）。
  * 做法规格对齐 QQ 探索页的「推荐 / 乐馆」与网易云探索页的「推荐 / 发现」：
  * 顶部一行分区页签，非激活分区保持挂载（display:none）——切回来不重新请求、
@@ -10,6 +12,7 @@
  *
  * 分区切换用酷狗品牌色 #FF7A00：激活项是品牌色实心胶囊，未激活为半透明底。
  * 分区显隐不新造偏好位，直接从板块显隐推导：
+ *   发现 = kugouDiscover（独立板块位）；
  *   音乐 = 五个子板块（推荐/乐库/歌单/频道/分类）任一可见；
  *   听书 = kugouLongaudio。
  * 因此设置面板里隐藏某个板块后，其所属分区在没有可见子板块时自动消失。
@@ -17,14 +20,16 @@
  * 平台隔离：只在 ExploreView 的 platform === 'kugou' 分支挂载。
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
-import { BookAudio, Music2 } from 'lucide-react'
+import { BookAudio, Compass, Music2 } from 'lucide-react'
 import type { ExplorePayload } from '../../services/exploreApi'
 import type { ExploreSectionId } from '../../components/ExploreSettingsPanel'
-import KugouExploreSections, { KugouDiscoverBoard, type KugouExploreHandlers } from './KugouExploreSections'
+import KugouExploreSections, { KugouRecommendBoard, type KugouExploreHandlers } from './KugouExploreSections'
+import KugouDiscoverBoard from './KugouDiscoverBoard'
 import KugouLongaudioBoard from '../kugouLongaudio/KugouLongaudioBoard'
 import KugouLongaudioOverlay from '../kugouLongaudio/KugouLongaudioOverlay'
+import { kugouDiscoverSongToTrack, kugouTrackToSong } from '../../services/kugouService'
 
-export type KugouExploreZoneId = 'music' | 'longaudio'
+export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio'
 
 /** 「音乐」分区收纳的五个子板块（对应官方客户端页签：推荐 / 乐库 / 歌单 / 频道 / 分类） */
 const KUGOU_MUSIC_SECTIONS: readonly ExploreSectionId[] = [
@@ -44,15 +49,20 @@ export interface KugouExplorePageProps extends KugouExploreHandlers {
   expandedHome: boolean
   exploreCardBg: string
   showSubtitles: boolean
+  loggedIn?: boolean
+  onOpenChannelPanel?: (channel: { id: string; name: string }) => void
+  /** 发现页歌曲行红心切换（酷狗概念版喜欢通道） */
+  onToggleLike?: (song: import('../../services/kugouService').KugouDiscoverSong, next: boolean) => void
   sectionStyle: (section: ExploreSectionId) => CSSProperties
   sectionVisible: (section: ExploreSectionId) => boolean
 }
 
 export default function KugouExplorePage(props: KugouExplorePageProps) {
-  const { accent, accentRgb, sectionVisible } = props
-  const [requestedZone, setRequestedZone] = useState<KugouExploreZoneId>('music')
+  const { accent, accentRgb, sectionVisible, loggedIn = false } = props
+  const [requestedZone, setRequestedZone] = useState<KugouExploreZoneId>('discover')
 
   const zones: Array<{ id: KugouExploreZoneId; label: string; hint: string; icon: ReactNode }> = []
+  zones.push({ id: 'discover', label: '发现', hint: '红心Radio · 私人推荐 · 曲风盲盒 · 频道（酷狗概念版同源）', icon: <Compass className="h-4 w-4" /> })
   if (KUGOU_MUSIC_SECTIONS.some(section => sectionVisible(section))) {
     zones.push({ id: 'music', label: '音乐', hint: '推荐 · 乐库 · 歌单 · 频道 · 分类', icon: <Music2 className="h-4 w-4" /> })
   }
@@ -65,7 +75,7 @@ export default function KugouExplorePage(props: KugouExplorePageProps) {
   const availableZones = zones.map(zone => zone.id)
   const activeZone: KugouExploreZoneId = availableZones.includes(requestedZone)
     ? requestedZone
-    : (availableZones[0] ?? 'music')
+    : (availableZones[0] ?? 'discover')
   const activeMeta = zones.find(zone => zone.id === activeZone)
   // 没有任何可用分区（用户在设置里把酷狗板块全关了）时不渲染空面板
   const paneClass = (zone: KugouExploreZoneId) => (zones.length > 0 && activeZone === zone ? 'contents' : 'hidden')
@@ -105,10 +115,39 @@ export default function KugouExplorePage(props: KugouExplorePageProps) {
         </div>
       )}
 
+      {/* 发现分区：酷狗概念版「发现」tab 的完整复刻（数据/交互/层级对齐真机） */}
+      <div className={paneClass('discover')} aria-hidden={activeZone !== 'discover'} data-kugou-zone="discover">
+        <KugouDiscoverBoard
+          accent={props.accent}
+          accentRgb={props.accentRgb}
+          exploreCardBg={props.exploreCardBg}
+          loggedIn={loggedIn}
+          onPlayTracks={(tracks, startIndex) => {
+            // KugouTrack[] → Song：kugouTrackToSong 与文件顶部同一服务模块的静态导入
+            const songs = tracks.map(kugouTrackToSong).filter(song => song.mid || song.kugouMixSongId)
+            const start = Math.max(0, startIndex || 0)
+            if (songs[start]) props.onPlaySongs(songs[start], songs, true)
+            else if (songs[0]) props.onPlaySongs(songs[0], songs, true)
+          }}
+          onOpenChannel={props.onOpenChannelPanel}
+          onOpenSearch={props.onOpenSearch}
+          onToggleLike={props.onToggleLike}
+          onSongContextMenu={(event, song, songs) => {
+            // KugouDiscoverSong → Song：与 onPlayTracks 同一套映射（singerId 供「查看歌手」跳转）
+            const toSong = (s: typeof song) => kugouTrackToSong({
+              hash: s.hash || '', songName: s.songName, singerName: s.singerName,
+              singerId: s.singerId, albumId: s.albumId, albumAudioId: s.albumAudioId,
+              mixSongId: s.mixSongId, coverUrl: s.coverUrl, duration: s.duration,
+            })
+            props.onSongContextMenu(event, toSong(song), songs.map(toSong))
+          }}
+        />
+      </div>
+
       {/* 音乐分区：收纳官方五板块（板块顺序仍按用户在设置里的排序，用 flex order 生效） */}
       <div className={paneClass('music')} aria-hidden={activeZone !== 'music'} data-kugou-zone="music">
         <div className="flex flex-col gap-12">
-          <KugouDiscoverBoard
+          <KugouRecommendBoard
             payload={props.payload}
             accent={props.accent}
             accentRgb={props.accentRgb}

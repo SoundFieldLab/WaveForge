@@ -9,7 +9,7 @@
  * 主播放队列与过渡策略。这里只用自己的 HTMLAudioElement，主音乐在起播前通过
  * waveforge:pause-main-playback 事件优雅暂停；退出时也绝不回写主播放器状态。
  */
-import { useCallback, useEffect, useSyncExternalStore } from 'react'
+import {  useCallback, useEffect, useSyncExternalStore, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'framer-motion'
 import {
@@ -24,6 +24,7 @@ import {
   RefreshCw,
   SkipBack,
   SkipForward,
+  Timer,
   X,
 } from 'lucide-react'
 import CachedImage from '../../components/CachedImage'
@@ -107,6 +108,57 @@ function LongaudioLibrary({ onOpenAlbum }: { onOpenAlbum: (albumId: string, auto
             </motion.div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+/** 定时关闭按钮（App 同款听书场景）：15/30/60/90 分钟，到点自动暂停 */
+function SleepTimerButton({ remainMs }: { remainMs: number | null }) {
+  const [open, setOpen] = useState(false)
+  const active = remainMs !== null
+  const fmt = (ms: number) => {
+    const totalMin = Math.ceil(ms / 60000)
+    const h = Math.floor(totalMin / 60)
+    const m = totalMin % 60
+    return h > 0 ? `${h}时${m}分` : `${m}分钟`
+  }
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(value => !value)}
+        className={`flex h-[42px] items-center justify-center gap-1.5 rounded-full border px-3.5 text-xs transition ${active ? 'border-transparent text-[#081017]' : 'border-white/[0.1] bg-white/[0.055] text-white/62 hover:bg-white/[0.1] hover:text-white'}`}
+        style={active ? { background: ACCENT } : undefined}
+        aria-label="定时关闭"
+        title={active ? `剩余 ${fmt(remainMs!)}` : '定时关闭'}
+      >
+        <Timer className="h-4 w-4" />
+        {active && <span className="font-semibold">{fmt(remainMs!)}</span>}
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute bottom-12 right-0 z-50 w-40 overflow-hidden rounded-2xl border border-white/[0.1] bg-[#10161f] py-1.5 shadow-2xl">
+            <p className="px-4 pb-1.5 pt-1 text-[11px] text-white/35">定时关闭</p>
+            {[15, 30, 60, 90, 0].map(minutes => (
+              <button
+                key={minutes}
+                type="button"
+                onClick={() => {
+                  kugouLongaudioStore.setSleepTimer(minutes > 0 ? minutes : null)
+                  setOpen(false)
+                }}
+                className={`flex w-full items-center justify-between px-4 py-2 text-left text-xs transition hover:bg-white/[0.06] ${active && minutes === 0 ? 'text-[#F87AA0]' : 'text-white/70 hover:text-white'}`}
+              >
+                {minutes > 0 ? `${minutes} 分钟` : '关闭定时'}
+                {active && ((minutes === 0) || (remainMs !== null && Math.ceil(remainMs / 60000) <= minutes && Math.ceil(remainMs / 60000) > (minutes === 15 ? 0 : minutes - 15))) && (
+                  <span className="text-[10px]" style={{ color: ACCENT }}>进行中</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </div>
   )
@@ -243,6 +295,7 @@ export default function KugouLongaudioOverlay() {
                 {player.status === 'playing' ? <Pause className="h-4 w-4 fill-current" /> : <Play className="h-4 w-4 fill-current" />}
                 {player.status === 'playing' ? '暂停' : player.currentIndex >= 0 ? '继续收听' : '从头播放'}
               </button>
+              <SleepTimerButton remainMs={player.sleepTimerRemainMs} />
             </div>
             <p className="mt-3 flex items-center gap-1.5 text-[11px] leading-relaxed text-white/30">
               <AlertCircle className="h-3.5 w-3.5 shrink-0" />

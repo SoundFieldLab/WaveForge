@@ -16,6 +16,8 @@
 import type { Song, LyricLine } from './musicApi'
 import { getPlatformCookie } from './platforms'
 import { getApiBase } from './apiConfig'
+import { cookieHeaders } from '../services/cookieRequest'
+import { getSecureToken, setSecureToken, removeSecureToken } from './secureTokenStore'
 
 // 统一走 apiConfig：用户设置远程网关（waveforge:apiBase）后仍打 localhost 会拿不到登录态
 const KG_API = `${getApiBase()}/kugou`
@@ -48,7 +50,8 @@ const KUGOU_CONCEPT_KEY = 'kugou_concept_credential'
 
 export function getKugouConceptCredential(): KugouConceptCredential | null {
   try {
-    const raw = localStorage.getItem(KUGOU_CONCEPT_KEY)
+    // 双通道读：secureTokenStore（加密落盘副本，重启后可用）优先，回退 localStorage 明文
+    const raw = getSecureToken(KUGOU_CONCEPT_KEY) || localStorage.getItem(KUGOU_CONCEPT_KEY)
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!parsed || !parsed.token || !parsed.userid) return null
@@ -59,15 +62,19 @@ export function getKugouConceptCredential(): KugouConceptCredential | null {
 }
 
 export function saveKugouConceptCredential(credential: KugouConceptCredential): void {
+  const serialized = JSON.stringify(credential)
   try {
-    localStorage.setItem(KUGOU_CONCEPT_KEY, JSON.stringify(credential))
+    localStorage.setItem(KUGOU_CONCEPT_KEY, serialized)
   } catch { /* 忽略存储失败 */ }
+  // 加密副本：桌面版重启后 localStorage 即使被清理也能恢复（与 qq_cookie 同一套安全存储）
+  setSecureToken(KUGOU_CONCEPT_KEY, serialized)
 }
 
 export function clearKugouConceptCredential(): void {
   try {
     localStorage.removeItem(KUGOU_CONCEPT_KEY)
   } catch { /* 忽略 */ }
+  removeSecureToken(KUGOU_CONCEPT_KEY)
 }
 
 /** 概念版通道可用性（扫码登录成功后为 true） */
@@ -352,7 +359,7 @@ export async function fetchKugouUserInfo(cookie?: string): Promise<KugouUserInfo
     } catch { /* 桥失败回退代理 */ }
   }
   try {
-    const resp = await kgFetch(`${KG_API}/user/info?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/user/info`, { headers: cookieHeaders(kgCookie), cache: 'no-store' })
     if (!resp.ok) return null
     const json = await resp.json()
     if (!json || json.error || (!json.nickname && !json.user_id)) return null
@@ -388,7 +395,7 @@ export async function fetchKugouUserPlaylists(cookie?: string): Promise<KugouPla
   const kgCookie = cookie || getPlatformCookie('kugou')
   if (!kgCookie) return []
   try {
-    const resp = await kgFetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`, { cache: 'no-store' })
+    const resp = await kgFetch(`${KG_API}/user/playlist`, { headers: cookieHeaders(kgCookie), cache: 'no-store' })
     if (resp.ok) {
       const playlists = await resp.json()
       if (Array.isArray(playlists)) {
@@ -1039,10 +1046,10 @@ export async function fetchKugouLikedHashes(): Promise<string[]> {
     }
     return [...ids]
   }
-  const kgCookie = getPlatformCookie('kugou') || localStorage.getItem('kugou_cookie') || ''
+  const kgCookie = getPlatformCookie('kugou') || getSecureToken('kugou_cookie') || ''
   if (!kgCookie) return []
   try {
-    const listResp = await kgFetch(`${KG_API}/user/playlist?cookie=${encodeURIComponent(kgCookie)}`)
+    const listResp = await kgFetch(`${KG_API}/user/playlist`)
     if (!listResp.ok) return []
     const playlists = await listResp.json()
     if (!Array.isArray(playlists)) return []
@@ -1051,7 +1058,7 @@ export async function fetchKugouLikedHashes(): Promise<string[]> {
     if (!favListId) return []
     const ids = new Set<string>()
     for (let page = 1; page <= 20; page += 1) {
-      const resp = await kgFetch(`${KG_API}/user/playlist/tracks?listid=${encodeURIComponent(favListId)}&page=${page}&pagesize=50&cookie=${encodeURIComponent(kgCookie)}`)
+      const resp = await kgFetch(`${KG_API}/user/playlist/tracks?listid=${encodeURIComponent(favListId)}&page=${page}&pagesize=50`)
       if (!resp.ok) break
       const json = await resp.json()
       const songs = Array.isArray(json?.songs) ? json.songs : []
@@ -2632,5 +2639,333 @@ export async function reportKugouYouthListen(mixsongid: number): Promise<boolean
     return Boolean(json?.success)
   } catch {
     return false
+  }
+}
+
+// ═══════════════ 发现页（概念版「发现」tab）═══════════════
+// 端点与结构来自真机抓包（D:\opencode\kgd\kg_modules_sample.json，2026-10-15）。
+// card/v1/pxy 聚合由网关还原成 {responses:[{module, body}]}，这里只做字段映射。
+
+/** 发现页歌曲卡（各 y_song_module / y_tag / y_hot 共用结构） */
+export interface KugouDiscoverSong {
+  songName: string
+  singerName: string
+  coverUrl: string
+  duration?: number
+  mixSongId?: number
+  albumAudioId?: number
+  albumId?: string
+  hash?: string
+  /** 歌手 id（authors[].author_id，查看歌手跳转用） */
+  singerId?: string
+  /** 推荐人昵称（app 里「xx 推荐」） */
+  recommender?: string
+  /** 推荐语 */
+  recInfo?: string
+  /** 来源频道名（如「绘画空间~」） */
+  channelName?: string
+  /** 推荐人头像 */
+  userPic?: string
+  isAi?: boolean
+}
+
+/** 曲风盲盒 tag 卡 */
+export interface KugouDiscoverStyleTag {
+  labelId?: string
+  labelName: string
+  labelDesc?: string
+  labelColor?: string
+  coverUrl: string
+  topCoverUrl?: string
+  songs: KugouDiscoverSong[]
+}
+
+/** 频道推荐卡 */
+export interface KugouDiscoverChannel {
+  userid?: string
+  name: string
+  pic: string
+  coverUrl: string
+  intro?: string
+  subscribeCount?: number
+  songCount?: number
+  globalCollectionId?: string
+  members?: Array<{ nickName: string; userPic: string; title?: string; level?: number }>
+}
+
+/** 概念实验室运营卡（官方为 H5 活动入口；WaveForge 不落地，仅保留类型占位） */
+export interface KugouDiscoverLabCard {
+  name: string
+  showImg: string
+  url?: string
+}
+
+/** 红心 Radio 曲目 */
+export interface KugouHeartRadioSong {
+  songName: string
+  singerName: string
+  coverUrl: string
+  hash: string
+  albumId?: string
+  duration?: number
+  recDesc?: string
+  mixSongId?: number
+  albumAudioId?: number
+}
+
+/** song_list 单条 → KugouDiscoverSong（pxy 各模块共用字段面） */
+function mapDiscoverSong(raw: any): KugouDiscoverSong | null {
+  if (!raw) return null
+  const name = String(raw.ori_audio_name || raw.songname || raw.audio_name || '').trim()
+  if (!name) return null
+  const trans = raw.trans_param || {}
+  const cover = resolveKugouCover(String(raw.cover_pic || raw.pic || trans.union_cover || raw.album_info?.sizable_cover || ''))
+  const timelen = Number(raw.audio_info?.timelength || raw.timelength || 0) || 0
+  return {
+    songName: name,
+    singerName: String(raw.author_name || (raw.authors || []).map((a: any) => a.author_name).join('、') || ''),
+    singerId: String((raw.authors || [])[0]?.author_id || '') || undefined,
+    coverUrl: cover,
+    duration: timelen > 0 ? Math.round(timelen / 1000) : undefined,
+    mixSongId: Number(raw.mixsongid || raw.album_audio_id || 0) || undefined,
+    albumAudioId: Number(raw.album_audio_id || 0) || undefined,
+    albumId: String(raw.album_info?.album_id || raw.album_id || '') || undefined,
+    hash: String(raw.hash || raw.audio_info?.hash || '').toLowerCase() || undefined,
+    recommender: raw.nick_name ? String(raw.nick_name) : undefined,
+    recInfo: raw.rec_info ? String(raw.rec_info) : undefined,
+    channelName: raw.channel_name ? String(raw.channel_name) : undefined,
+    userPic: raw.user_pic ? resolveKugouCover(String(raw.user_pic)) : undefined,
+    isAi: Number(raw.is_ai) === 1,
+  }
+}
+
+/** pxy 响应里的 card_info（标题等） */
+export interface KugouDiscoverCardInfo {
+  cardId?: number
+  cardTitle?: string
+  labelName?: string
+  labelDesc?: string
+  labelColor?: string
+  coverPic?: string
+  startDay?: string
+  endDay?: string
+  songName?: string
+  displayStyle?: number
+}
+
+export interface KugouDiscoverSection {
+  module: string
+  cardId?: number
+  cardTitle?: string
+  info: KugouDiscoverCardInfo
+  songs: KugouDiscoverSong[]
+  styleTags: KugouDiscoverStyleTag[]
+  channels: KugouDiscoverChannel[]
+  labCards: KugouDiscoverLabCard[]
+}
+
+function mapDiscoverSection(module: string, body: any): KugouDiscoverSection {
+  const data = body?.data || {}
+  const ci = data.card_info || {}
+  const info: KugouDiscoverCardInfo = {
+    cardId: Number(ci.card_id) || undefined,
+    cardTitle: ci.card_title ? String(ci.card_title) : undefined,
+    labelName: ci.label_name ? String(ci.label_name) : undefined,
+    labelDesc: ci.label_desc ? String(ci.label_desc) : undefined,
+    labelColor: ci.label_color ? String(ci.label_color) : undefined,
+    coverPic: ci.cover_pic ? resolveKugouCover(String(ci.cover_pic)) : undefined,
+    startDay: ci.start_day ? String(ci.start_day) : undefined,
+    endDay: ci.end_day ? String(ci.end_day) : undefined,
+    songName: ci.song_name ? String(ci.song_name) : undefined,
+    displayStyle: Number(ci.display_style) || undefined,
+  }
+  const songs = Array.isArray(data.song_list)
+    ? data.song_list.map(mapDiscoverSong).filter((s: KugouDiscoverSong | null): s is KugouDiscoverSong => Boolean(s))
+    : []
+  const styleTags = Array.isArray(data.tag_list)
+    ? data.tag_list.map((t: any) => ({
+        labelId: t.label_id != null ? String(t.label_id) : undefined,
+        labelName: String(t.label_name || ''),
+        labelDesc: t.label_desc ? String(t.label_desc) : undefined,
+        labelColor: t.label_color ? String(t.label_color) : undefined,
+        coverUrl: resolveKugouCover(String(t.cover_pic || '')),
+        topCoverUrl: t.top_cover_pic ? resolveKugouCover(String(t.top_cover_pic)) : undefined,
+        songs: (Array.isArray(t.song_list) ? t.song_list : []).map(mapDiscoverSong).filter((s: KugouDiscoverSong | null): s is KugouDiscoverSong => Boolean(s)),
+      })).filter((t: KugouDiscoverStyleTag) => t.labelName)
+    : []
+  const channels = Array.isArray(data.list) && module === 'y_channel'
+    ? data.list.map((c: any) => ({
+        userid: c.userid != null ? String(c.userid) : undefined,
+        name: String(c.name || ''),
+        pic: resolveKugouCover(String(c.pic || c.channel_cover || '')),
+        coverUrl: resolveKugouCover(String(c.channel_cover || c.pic || '')),
+        intro: c.intro ? String(c.intro) : undefined,
+        subscribeCount: Number(c.subscribe_count) || 0,
+        songCount: Number(c.song_count || c.fid_count) || 0,
+        globalCollectionId: c.global_collection_id ? String(c.global_collection_id) : undefined,
+        members: Array.isArray(c.member_list)
+          ? c.member_list.slice(0, 4).map((m: any) => ({
+              nickName: String(m.nick_name || ''),
+              userPic: resolveKugouCover(String(m.user_pic || '')),
+              title: m.title ? String(m.title) : undefined,
+              level: Number(m.level) || undefined,
+            }))
+          : undefined,
+      })).filter((c: KugouDiscoverChannel) => c.name)
+    : []
+  const labCards = module === 'y_lab' && Array.isArray(data.list)
+    ? data.list.map((c: any) => ({
+        name: String(c.name || ''),
+        showImg: resolveKugouCover(String(c.show_img || '')),
+        url: c.url ? String(c.url) : undefined,
+      }))
+    : []
+  return {
+    module,
+    cardId: info.cardId,
+    cardTitle: info.cardTitle,
+    info,
+    songs,
+    styleTags,
+    channels,
+    labCards,
+  }
+}
+
+/** 拉取发现页卡片流（page 递增）。返回按官方顺序排列的板块列表（广告板块 y_lab 已剔除）。 */
+export async function fetchKugouDiscoverSections(page = 1): Promise<KugouDiscoverSection[]> {
+  const credential = getKugouConceptCredential()
+  const body = credential
+    ? { credential, page }
+    : { page }
+  const json = await kgConceptPost('discover/cards', body)
+  const responses = Array.isArray(json?.responses) ? json.responses : []
+  return responses
+    .map((r: any) => mapDiscoverSection(String(r.module || ''), r.body))
+    .filter((s: KugouDiscoverSection) => {
+      // 去广告：概念实验室（邀请好友/组队领VIP/下载券）不落地
+      if (s.module === 'y_lab') return false
+      return true
+    })
+}
+/** 红心 Radio（顶部播放卡）。未登录返回空列表（UI 显示引导）。flush=1 为换一批。 */
+export async function fetchKugouHeartRadioSongs(size = 10, flush = false): Promise<{ songs: KugouHeartRadioSong[]; error?: string }> {
+  const credential = getKugouConceptCredential()
+  if (!credential) return { songs: [], error: '登录酷狗概念版后可用' }
+  try {
+    const json = await kgConceptPost('discover/radio', { credential, size, flush: flush ? 1 : 0 })
+    const rows = Array.isArray(json?.data?.song_list) ? json.data.song_list : []
+    const songs = rows.map((raw: any) => {
+      const trans = raw.relate_goods?.[0]?.trans_param || {}
+      return {
+        songName: String(raw.songname || ''),
+        singerName: String((raw.singerinfo || []).map((s: any) => s.name).join('、') || ''),
+        coverUrl: resolveKugouCover(String(trans.union_cover || raw.cover || '')),
+        hash: String(raw.hash || '').toLowerCase(),
+        albumId: raw.album_id ? String(raw.album_id) : undefined,
+        duration: Number(raw.time_length) || undefined,
+        recDesc: raw.rec_song_info?.rec_desc ? String(raw.rec_song_info.rec_desc) : undefined,
+        albumAudioId: Number(raw.relate_goods?.[0]?.album_audio_id || 0) || undefined,
+      } as KugouHeartRadioSong
+    }).filter((s: KugouHeartRadioSong) => s.songName && s.hash)
+    return { songs }
+  } catch (e) {
+    return { songs: [], error: e instanceof Error ? e.message : '红心Radio获取失败' }
+  }
+}
+
+/** 频道页签（周榜/次元/AI/放松/私藏/学习/国风/流行） */
+export interface KugouChannelTab { tabId: number; tabName: string; dataType: string }
+
+export async function fetchKugouDiscoverChannelTabs(): Promise<KugouChannelTab[]> {
+  const credential = getKugouConceptCredential()
+  const json = await kgConceptPost('discover/channel-tabs', credential ? { credential } : {})
+  const rows = Array.isArray(json?.data?.list) ? json.data.list : []
+  return rows.map((t: any) => ({
+    tabId: Number(t.tab_id) || 0,
+    tabName: String(t.tab_name || ''),
+    dataType: String(t.data_type || ''),
+  })).filter((t: KugouChannelTab) => t.tabName)
+}
+
+/** 频道瀑布流（45/页）。label=页签筛选（空=推荐） */
+export interface KugouWaterfallChannel {
+  name: string
+  pic: string
+  coverUrl: string
+  intro?: string
+  subscribeCount?: number
+  songCount?: number
+  globalCollectionId?: string
+  tags?: Array<{ name: string; color?: string }>
+  members?: Array<{ nickName: string; userPic: string; title?: string }>
+  isAi?: boolean
+}
+
+function mapWaterfallChannel(c: any): KugouWaterfallChannel | null {
+  const name = String(c.name || '').trim()
+  if (!name) return null
+  return {
+    name,
+    pic: resolveKugouCover(String(c.pic || c.channel_cover || '')),
+    coverUrl: resolveKugouCover(String(c.channel_cover || c.pic || '')),
+    intro: c.intro ? String(c.intro) : undefined,
+    subscribeCount: Number(c.subscribe_count) || 0,
+    songCount: Number(c.song_count || c.fid_count) || 0,
+    globalCollectionId: c.global_collection_id ? String(c.global_collection_id) : undefined,
+    tags: Array.isArray(c.tags)
+      ? c.tags.map((t: any) => ({ name: String(t.tag_name || ''), color: t.tag_color ? String(t.tag_color) : undefined })).filter((t: { name: string }) => t.name)
+      : undefined,
+    members: Array.isArray(c.member_list)
+      ? c.member_list.slice(0, 4).map((m: any) => ({
+          nickName: String(m.nick_name || ''),
+          userPic: resolveKugouCover(String(m.user_pic || '')),
+          title: m.title ? String(m.title) : undefined,
+        }))
+      : undefined,
+    isAi: Number(c.is_ai) === 1,
+  }
+}
+
+export async function fetchKugouDiscoverWaterfall(biIndex = 0, label = ''): Promise<{ channels: KugouWaterfallChannel[]; isEnd: boolean; total?: number }> {
+  const credential = getKugouConceptCredential()
+  const json = await kgConceptPost('discover/channel-waterfall', { credential, bi_index: biIndex, label })
+  const data = json?.data || {}
+  const rows = Array.isArray(data.list) ? data.list : []
+  return {
+    channels: rows.map(mapWaterfallChannel).filter((c: KugouWaterfallChannel | null): c is KugouWaterfallChannel => Boolean(c)),
+    isEnd: Boolean(data.is_end),
+    total: Number(data.total) || undefined,
+  }
+}
+
+/** 曲风盲盒换一批（随机心动） */
+export async function fetchKugouDiscoverBlindbox(): Promise<KugouDiscoverStyleTag[]> {
+  const credential = getKugouConceptCredential()
+  const json = await kgConceptPost('discover/blindbox', credential ? { credential } : {})
+  const rows = Array.isArray(json?.data?.tag_list) ? json.data.tag_list : []
+  return rows.map((t: any) => ({
+    labelId: t.label_id != null ? String(t.label_id) : undefined,
+    labelName: String(t.label_name || ''),
+    labelDesc: t.label_desc ? String(t.label_desc) : undefined,
+    labelColor: t.label_color ? String(t.label_color) : undefined,
+    coverUrl: resolveKugouCover(String(t.cover_pic || '')),
+    topCoverUrl: t.top_cover_pic ? resolveKugouCover(String(t.top_cover_pic)) : undefined,
+    songs: (Array.isArray(t.song_list) ? t.song_list : []).map(mapDiscoverSong).filter((s: KugouDiscoverSong | null): s is KugouDiscoverSong => Boolean(s)),
+  })).filter((t: KugouDiscoverStyleTag) => t.labelName)
+}
+
+/** 发现页歌曲 → 主播放器 KugouTrack（hash/mixsongid 齐全，可直接播放） */
+export function kugouDiscoverSongToTrack(song: KugouDiscoverSong): KugouTrack {
+  return {
+    hash: song.hash || '',
+    songName: song.songName,
+    singerName: song.singerName,
+    singerId: song.singerId,
+    albumId: song.albumId,
+    albumAudioId: song.albumAudioId,
+    mixSongId: song.mixSongId,
+    coverUrl: song.coverUrl,
+    duration: song.duration,
   }
 }

@@ -281,21 +281,22 @@ function KugouPcChannelDetail({ ctx, ipId, onBack, onOpenChannel }: KugouPcChann
         </div>
       ) : null}
 
-      {/* 视频（官方同款卡片；点击走全局 MV 播放器，若宿主未提供则仅展示） */}
+      {/* 视频页签：官方同款卡片**仅展示**。酷狗频道视频（video_id）没有可用的播放链路——
+          全局 MV 播放器只支持 netease/qq，传对象给 onOpenMv 会拼出非法请求（点开即「加载 MV
+          失败」），外链目标站也未提供。按验收标准「没有数据源的能力不留可点入口」，
+          等接入酷狗视频播放链路后再恢复点击。 */}
       {tab === 'videos' ? (
         <div className="grid grid-cols-2 gap-4 pt-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {videos.map(video => (
-            <button
+            <div
               key={video.id}
-              type="button"
-              onClick={() => (ctx.actions as any).onOpenMv?.(video)}
               className="group min-w-0 text-left"
               title={video.name}
             >
               <PcCover src={video.coverUrl} alt={video.name} className="aspect-video w-full transition group-hover:-translate-y-0.5" rounded="rounded-lg" />
               <p className={`mt-2 line-clamp-2 text-[13px] ${theme.text}`}>{video.name}</p>
               <p className={`mt-0.5 text-[11px] ${theme.faint}`}>{video.singer}{video.duration ? ` · ${kugouDuration(video.duration)}` : ''}</p>
-            </button>
+            </div>
           ))}
           {videos.length === 0 ? <p className={`col-span-full py-10 text-center text-[12px] ${theme.faint}`}>加载中…</p> : null}
         </div>

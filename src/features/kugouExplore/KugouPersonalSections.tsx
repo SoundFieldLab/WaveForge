@@ -101,6 +101,9 @@ export function KugouCloudPanel({ onSongSelect, accentColor = '#22c55e' }: Kugou
       if (result.error) setError(result.error)
       setSongs(result.songs)
       setEmpty(result.empty)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '加载失败')
+      setEmpty(false)
     } finally {
       setLoading(false)
     }
@@ -179,6 +182,8 @@ export function KugouPurchasedPanel({ onSongSelect, onOpenAlbum, accentColor = '
       setError(failure || '')
       setSongs(songsResult.songs)
       setAlbums(albumsResult.albums)
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '加载失败')
     } finally {
       setLoading(false)
     }

@@ -3,6 +3,7 @@
 // 但 gateway.kugou.com 的签名接口（Android/H5 双签名 + x-router）可用服务端直连。
 // 盐值/算法为酷狗客户端逆向公开成果。
 import crypto from 'node:crypto'
+import zlib from 'node:zlib'
 import QRCode from 'qrcode'
 
 const KUGOU_HEADERS = {
@@ -531,6 +532,15 @@ const kugouQrStatusSnapshots = new Map()
 const kugouCoverFallbackCache = new Map()
 // 逐曲封面缓存（hash → { cover, at }）：权限接口的 union_cover，给无版权曲目补封面
 const kugouCoverByHashCache = new Map()
+// 两个封面缓存只增不减会随长会话缓慢爬升，统一 FIFO 上限淘汰（仿 kugouQrStatusSnapshots 的界）
+const KUGOU_COVER_CACHE_MAX = 2000
+function boundKugouCoverCache(cache) {
+  while (cache.size > KUGOU_COVER_CACHE_MAX) {
+    const oldestKey = cache.keys().next().value
+    if (oldestKey === undefined) break
+    cache.delete(oldestKey)
+  }
+}
 
 /** 概念版设备身份（GUID→十进制 MID，与 kugoumusicapi 的 createDeviceCookies 一致） */
 export function createKugouDeviceIdentity() {
@@ -612,9 +622,9 @@ function kugouLiteParams(cred, extra, clientverOverride) {
 }
 
 /** 概念版签名网关请求（android 签名；返回解析后的 JSON） */
-async function kugouLiteRequest({ cred, baseURL, path, method = 'GET', params, body, router, headers: extraHeaders, timeout = 12000 }) {
+async function kugouLiteRequest({ cred, baseURL, path, method = 'GET', params, body, router, headers: extraHeaders, timeout = 12000, clientverOverride }) {
   const device = kugouLiteDeviceCookies(cred)
-  const merged = kugouLiteParams(cred, params)
+  const merged = kugouLiteParams(cred, params, clientverOverride)
   const bodyText = body == null ? '' : (typeof body === 'string' ? body : JSON.stringify(body))
   merged.signature = kugouLiteSignatureAndroid(merged, bodyText)
   const u = new URL(path, baseURL || KUGOU_GATEWAY)
@@ -728,8 +738,13 @@ export async function checkKugouQrLogin(key, device) {
       Object.keys(params).forEach(k => u.searchParams.set(k, String(params[k])))
       const json = await requestJson(u.toString(), { headers: KUGOU_HEADERS })
       const data = (json && json.data) || {}
-      // 诊断信息只留在后端日志：扫不动时看这里就能判断是「授权没落到这个 key」还是「凭据回收失败」
-      console.log(`[酷狗扫码][${String(key).slice(0, 8)}] appid=${appid} → ${JSON.stringify(json).slice(0, 200)}`)
+      // 诊断信息只留在后端日志：扫不动时看这里就能判断是「授权没落到这个 key」还是「凭据回收失败」。
+      // status=4 是扫码确认成功，响应里带登录 token —— 不能原文进日志，只打非敏感字段。
+      if (Number(data.status) === 4) {
+        console.log(`[酷狗扫码][${String(key).slice(0, 8)}] appid=${appid} → status=4（扫码确认，凭据已回收，不打印响应体）`)
+      } else {
+        console.log(`[酷狗扫码][${String(key).slice(0, 8)}] appid=${appid} → ${JSON.stringify(json).slice(0, 200)}`)
+      }
       results.push({
         appid,
         status: Number(data.status) || 0,
@@ -834,6 +849,7 @@ export async function fetchKugouConceptUserPlaylists(cred) {
       const cover = (first.tracks || [])[0]?.coverUrl || ''
       if (cover) {
         kugouCoverFallbackCache.set(pl.id, { cover, at: Date.now() })
+        boundKugouCoverCache(kugouCoverFallbackCache)
         pl.coverUrl = cover
       }
     }))
@@ -889,6 +905,7 @@ async function kugouLiteCoverMap(cred, hashes) {
           const url = kugouCoverUrl(cover)
           map[hash] = url
           kugouCoverByHashCache.set(hash, { cover: url, at: Date.now() })
+          boundKugouCoverCache(kugouCoverByHashCache)
         }
       }
     } catch { /* 单批失败不影响其它批次 */ }
@@ -2991,5 +3008,281 @@ export async function reportKugouYouthListen(cred, options = {}) {
     return { success, status: Number(json?.status) || 0, data: (json && json.data) || null }
   } catch (error) {
     return { success: false, error: error?.message || 'KUGOU_YOUTH_LISTEN_FAILED' }
+  }
+}
+
+// ═══════════════════ 发现页（概念版「发现」tab，对齐官方 card/v1/pxy 流式板块）═══════════════════
+// 端点与结构取自真机抓包（D:\opencode\kgd\kg_full.jsonl / kg_modules_sample.json，2026-10-15）：
+// - POST /card/v1/pxy/listen                    发现页卡片流（每页 3 个板块，滚动分页）
+// - POST /card/v1/pxy/youth_recommend           指定 card_rank 组一次性取多板块
+// - POST /persnfm.service/v2/personal_recommend 红心 Radio（顶部播放器数据源）
+// - GET  /youth/v1/channel/tab_list             频道页签（周榜/次元/AI/放松/私藏/学习/国风/流行）
+// - POST /youth/v1/channel/search_recommend_list 频道瀑布流（bi_index 分页，每页 45）
+// 网关只做取数与最小规整，字段语义映射放在前端 kugouService（避免在网关猜错结构静默丢数据）。
+
+/** 解析 pxy 响应：data.responses[].body 是 JSON 字符串，解开并带上 module 名 */
+function unwrapKugouCardResponses(json) {
+  const responses = (json && json.data && Array.isArray(json.data.responses)) ? json.data.responses : []
+  return responses
+    .map(item => {
+      let body = null
+      try { body = typeof item.body === 'string' ? JSON.parse(item.body) : item.body } catch { body = null }
+      return { module: String(item.module || ''), body }
+    })
+    .filter(item => item.body)
+}
+
+/** 发现页卡片流（/card/v1/pxy/listen）。每调用一次返回下一批板块（服务端按序出）。
+ *  实测抓包：每次响应 3 个 responses，滚动即再请求。 */
+const KUGOU_CARD_MODULES = {
+  3001: 'y_song_module_1',
+  3004: 'y_song_module_4',
+  3005: 'y_song_module_5',
+  3006: 'y_song_module_6',
+  3014: 'y_song_module_14',
+  3032: 'y_song_module_32',
+  3101: 'y_hot',
+  3102: 'y_tag',
+  3103: 'y_style',
+  3104: 'y_channel',
+  3106: 'y_lab',
+  3107: 'y_aisong',
+}
+
+/** 发现页单板块（/youth/v1/song/single_card_recommend?ver=v2&card_id=N&pagesize=M）。
+ *  真机抓包：pxy/listen 与 pxy/youth_recommend 都是 gzip 压缩 {requests:[{url,body,method,module}]}
+ *  的代理批量接口，每个板块最终就是一次 single_card_recommend（body {source_mixsong,tagid,u_info}）。
+ *  实测差异：卡 3103（曲风盲盒）/3104（频道推荐）直连返回空/20003，必须走 pxy/listen 代理通道
+ *  （POST octet-stream + Content-Encoding: gzip，外层签名不含 body；内层 URL 签名含 body）。
+ *  其余板块直连即可。 */
+async function fetchKugouSingleCard(cred, cardId, pagesize) {
+  const id = Number(cardId) || 0
+  const size = Math.max(1, Math.min(50, Number(pagesize) || 30))
+  if (id === 3103 || id === 3104) {
+    return fetchKugouSingleCardViaProxy(cred, id, size)
+  }
+  return kugouLiteRequest({
+    cred,
+    path: '/youth/v1/song/single_card_recommend',
+    method: 'POST',
+    params: { ver: 'v2', card_id: id, module_id: 1, pagesize: size, area_code: 1 },
+    body: { source_mixsong: '', tagid: '', u_info: '' },
+    clientverOverride: 11590,
+  })
+}
+
+/** 卡 3103/3104 的 pxy/listen 代理通道（抓包复刻：gzip requests 批量，单板块一次一包） */
+async function fetchKugouSingleCardViaProxy(cred, cardId, pagesize) {
+  const device = kugouLiteDeviceCookies(cred)
+  const innerBody = JSON.stringify({ source_mixsong: '', tagid: '', u_info: '' })
+  const now = Math.floor(Date.now() / 1000)
+  // clientver 用真机抓包值 11590（概念版当前版本）：部分板块（如 y_style 的 tag 歌单）对旧版号返回空数据
+  const innerParams = kugouLiteParams(cred, {
+    ver: 'v2',
+    card_id: cardId,
+    module_id: 1,
+    pagesize,
+    area_code: 1,
+  }, 11590)
+  innerParams.signature = kugouLiteSignatureAndroid(innerParams, innerBody)
+  const innerUrl = new URL('/youth/v1/song/single_card_recommend', KUGOU_GATEWAY)
+  Object.keys(innerParams).forEach(key => innerUrl.searchParams.set(key, String(innerParams[key])))
+  const outerParams = kugouLiteParams(cred, {}, 11590)
+  outerParams.signature = kugouLiteSignatureAndroid(outerParams, '')
+  const outerUrl = new URL('/card/v1/pxy/listen', KUGOU_GATEWAY)
+  Object.keys(outerParams).forEach(key => outerUrl.searchParams.set(key, String(outerParams[key])))
+  const bodyText = JSON.stringify({
+    requests: [{
+      url: innerUrl.toString(),
+      body: innerBody,
+      method: 'POST',
+      headers: '',
+      module: KUGOU_CARD_MODULES[cardId] || 'card_' + cardId,
+    }],
+  })
+  const gz = zlib.gzipSync(Buffer.from(bodyText, 'utf8'))
+  const headers = Object.assign(kugouLiteHeaders(device, outerParams.clienttime), {
+    'Content-Type': 'application/octet-stream',
+    'Content-Encoding': 'gzip',
+  })
+  if (process.env.KUGOU_DEBUG_PXY) console.log('[pxy-debug]', outerUrl.toString().replace(/token=[^&]+/, 'token=x'), '| inner:', innerUrl.toString().replace(/token=[^&]+/, 'token=x'), '| body:', bodyText.slice(0, 120))
+  const text = await requestText(outerUrl.toString(), { method: 'POST', headers, timeout: 12000 }, gz)
+  let json = null
+  try { json = JSON.parse(text) } catch { return null }
+  const innerResp = json && json.data && Array.isArray(json.data.responses) ? json.data.responses[0] : null
+  if (!innerResp || Number(innerResp.status) !== 200) return null
+  try { return typeof innerResp.body === 'string' ? JSON.parse(innerResp.body) : innerResp.body } catch { return null }
+}
+
+/** 发现页卡片流。每页 3 个板块（与官方滚动加载节奏一致），板块组从抓包滚动序列采样。 */
+export async function fetchKugouDiscoverCards(cred, page = 1) {
+  const PAGES = [
+    [['3006', 10], ['3004', 10], ['3101', 30]],
+    [['3001', 30], ['3014', 30], ['3107', 6]],
+    [['3005', 30], ['3103', 3], ['3104', 9]],
+    [['3102', 30], ['3106', 9], ['3014', 30]],
+    [['3005', 30], ['3101', 30], ['3004', 10]],
+    [['3001', 30], ['3104', 9], ['3107', 6]],
+  ]
+  const idx = Math.max(1, Number(page) || 1)
+  const group = PAGES[(idx - 1) % PAGES.length]
+  const settled = await Promise.allSettled(group.map(([cardId, size]) => fetchKugouSingleCard(cred, cardId, size)))
+  const responses = []
+  settled.forEach((res, i) => {
+    const cardId = group[i][0]
+    if (res.status === 'fulfilled' && res.value) {
+      responses.push({ module: KUGOU_CARD_MODULES[cardId] || 'card_' + cardId, body: res.value })
+    }
+  })
+  return { success: responses.length > 0, responses }
+}
+
+/** 发现页指定板块组（/card/v1/pxy/youth_recommend，card_rank 逗号分隔 card_id）。
+ *  官方客户端首屏实际用它一次拉全 13 个板块（card_size=3）。 */
+export async function fetchKugouDiscoverRecommend(cred, cardRank) {
+  const rank = String(cardRank || '3007,3032,3014,3104,3101,3001,3006,3102,3004,3005,3103,3106,3107')
+  const ids = rank.split(',').map(s => s.trim()).filter(Boolean)
+  const settled = await Promise.allSettled(ids.map(id => fetchKugouSingleCard(cred, id, 30)))
+  const responses = []
+  settled.forEach((res, i) => {
+    const cardId = ids[i]
+    if (res.status === 'fulfilled' && res.value) {
+      responses.push({ module: KUGOU_CARD_MODULES[cardId] || 'card_' + cardId, body: res.value })
+    }
+  })
+  return { success: responses.length > 0, responses }
+}
+
+/** 红心 Radio（/persnfm.service/v2/personal_recommend）。
+ *  options.flush=1 时为「换一批」（App RadiO⇄ 按钮行为，实测返回全新歌曲队列）。
+ *  真机抓包 body（gzip 明文，登录态必需）：{userid, hash(md5), area_code:'1', m_type:0, vip_type,
+ *  hash_like_list('hash-hash-…'), callerid:'0', vip_flags, mode:'normal', playlist_ver:2, song_pool_id:0,
+ *  fakem, action:'login', clienttime, uuid:'-', u_info, active_swtich:'on', mid, clientver, platform,
+ *  key(md5), recommend_source_locked:'0'}
+ *  其中 hash/u_info/key/fakem 是客户端指纹字段：网关用可得的凭据字段拼装（hash=key 之类缺失时置空），
+ *  实测服务端校验 userid+token+mid 为主，指纹字段缺席只影响个性化排序不影响可用性。 */
+export async function fetchKugouHeartRadio(cred, size = 10, options = {}) {
+  if (!cred || !cred.token || !cred.userid) return { success: false, error: 'KUGOU_AUTH_REQUIRED', data: null }
+  try {
+    const device = kugouLiteDeviceCookies(cred)
+    const clienttime = Math.floor(Date.now() / 1000)
+    const userid = Number(cred.userid) || 0
+    const body = {
+      userid,
+      hash: crypto.createHash('md5').update(String(cred.token) + KUGOU_LITE_APPID).digest('hex'),
+      area_code: '1',
+      mark_list: '',
+      appid: String(KUGOU_LITE_APPID),
+      m_type: 0,
+      vip_type: 0,
+      hash_like_list: '',
+      callerid: '0',
+      vip_flags: 0,
+      mode: 'normal',
+      playlist_ver: 2,
+      song_pool_id: 0,
+      fakem: '',
+      action: 'login',
+      clienttime: String(clienttime),
+      uuid: '-',
+      u_info: '',
+      active_swtich: 'on',
+      mid: device.mid,
+      clientver: String(KUGOU_LITE_CLIENTVER),
+      platform: 'android',
+      key: crypto.createHash('md5').update(String(cred.token) + userid + clienttime).digest('hex'),
+      recommend_source_locked: '0',
+      token: String(cred.token),
+      dfid: device.dfid || '-',
+      size: Math.max(1, Math.min(30, Number(size) || 10)),
+      flush: Number(options.flush) || 0,
+    }
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/v2/personal_recommend',
+      method: 'POST',
+      router: 'persnfm.service.kugou.com',
+      body,
+    })
+    const data = (json && json.data) || null
+    return { success: Number(json?.status) === 1 || Boolean(data?.song_list?.length), data, raw: json || null }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_HEART_RADIO_FAILED', data: null }
+  }
+}
+
+/** 频道页签（/youth/v1/channel/tab_list?source=1&get_ai=1）：list[] = {tab_id, tab_name, data_type} */
+export async function fetchKugouChannelTabs(cred) {
+  try {
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/youth/v1/channel/tab_list',
+      method: 'GET',
+      params: { source: 1, get_ai: 1 },
+    })
+    return { success: Number(json?.status) === 1, data: (json && json.data) || null }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_CHANNEL_TABS_FAILED', data: null }
+  }
+}
+
+/** 频道瀑布流（/youth/v1/channel/search_recommend_list）。bi_index 0/45/90… 每页 45 个频道。
+ *  实测必须带 area_code=1 与 single_card 同款 body {source_mixsong,tagid,u_info}，否则上游 20003。
+ *  label=「国风」等页签筛选（空=推荐）；data.is_end 表示到底。 */
+export async function fetchKugouChannelWaterfall(cred, biIndex = 0, label = '') {
+  try {
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/youth/v1/channel/search_recommend_list',
+      method: 'POST',
+      params: { bi_index: Math.max(0, Number(biIndex) || 0), label: String(label || ''), area_code: 1 },
+      body: { source_mixsong: '', tagid: '', u_info: '' },
+    })
+    const data = (json && json.data) || null
+    return { success: Number(json?.status) === 1, data }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_CHANNEL_WATERFALL_FAILED', data: null }
+  }
+}
+
+/** 频道搜索（/youth/v1/channel/search?q=…&type=…）：频道页搜索框数据源（同样要求 area_code+标准 body） */
+export async function fetchKugouChannelSearch(cred, keyword, biIndex = 0) {
+  try {
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/youth/v1/channel/search',
+      method: 'POST',
+      params: { bi_index: Math.max(0, Number(biIndex) || 0), q: String(keyword || ''), type: 1, area_code: 1 },
+      body: { source_mixsong: '', tagid: '', u_info: '' },
+    })
+    return { success: Number(json?.status) === 1, data: (json && json.data) || null }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_CHANNEL_SEARCH_FAILED', data: null }
+  }
+}
+
+/** 曲风盲盒·随机心动「换一批」：重取 card 3103（pxy 代理通道）。
+ *  dex 中未见 random_tag_and_song 调用（非客户端常量），App 实际行为即重取该板块。 */
+export async function fetchKugouStyleBlindbox(cred) {
+  try {
+    const json = await fetchKugouSingleCardViaProxy(cred, 3103, 3)
+    if (!json) return { success: false, error: 'KUGOU_BLINDBOX_EMPTY', data: null }
+    return { success: true, data: json?.data || null }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_BLINDBOX_FAILED', data: null }
+  }
+}
+
+/** 乐库 tab（/youth/v1/yueku/tab）：banner/kingkong/new_song_reserve_list/song_rank/digital_album/album_rank */
+export async function fetchKugouYuekuTab(cred) {
+  try {
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/youth/v1/yueku/tab',
+      method: 'GET',
+    })
+    return { success: Number(json?.status) === 1, data: (json && json.data) || null }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_YUEKU_TAB_FAILED', data: null }
   }
 }

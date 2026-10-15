@@ -66,6 +66,8 @@ export interface LongaudioBrowseState {
 }
 
 export interface LongaudioPlayerState {
+  /** 定时关闭：null=未设置；否则为剩余毫秒（每秒 tick） */
+  sleepTimerRemainMs: number | null
   album: KugouLongaudioAlbumDetail | null
   albumLoading: boolean
   albumError: string
@@ -136,6 +138,8 @@ export interface KugouLongaudioStore {
   playPrev: () => Promise<void>
   setRate: (rate: number) => void
   seek: (seconds: number) => void
+  /** 定时关闭：分钟数（0/undefined=取消）。到点自动暂停。 */
+  setSleepTimer: (minutes: number | null) => void
   retryChapter: () => Promise<void>
   /** 退出听书界面：暂停独立音频但保留专辑与进度，主播放器状态不受影响 */
   exit: () => void
@@ -165,6 +169,7 @@ const initialState = (recent: LongaudioRecentAlbum[]): LongaudioState => ({
     rate: 1,
     currentTime: 0,
     duration: 0,
+    sleepTimerRemainMs: null,
   },
   recent,
   activeAlbum: null,
@@ -215,6 +220,7 @@ export function createKugouLongaudioStore(overrides: Partial<KugouLongaudioDeps>
   let browseAttempted = false
   // 快速切章/切专辑时旧请求可能后到：用自增令牌让过期响应静默丢弃
   let playToken = 0
+  let sleepTimerHandle: number | null = null
   let albumToken = 0
 
   const commit = (partial: LongaudioPatch): void => {
@@ -510,6 +516,32 @@ export function createKugouLongaudioStore(overrides: Partial<KugouLongaudioDeps>
       setPlayer({ rate: next })
     },
 
+    setSleepTimer: minutes => {
+      // 清掉旧 timer
+      if (sleepTimerHandle !== null) {
+        window.clearInterval(sleepTimerHandle)
+        sleepTimerHandle = null
+      }
+      if (!minutes || minutes <= 0) {
+        setPlayer({ sleepTimerRemainMs: null })
+        return
+      }
+      let remain = minutes * 60 * 1000
+      setPlayer({ sleepTimerRemainMs: remain })
+      sleepTimerHandle = window.setInterval(() => {
+        remain -= 1000
+        if (remain <= 0) {
+          window.clearInterval(sleepTimerHandle!)
+          sleepTimerHandle = null
+          const el = ensureAudio()
+          if (el) el.pause()
+          setPlayer({ sleepTimerRemainMs: null, status: 'paused' })
+          return
+        }
+        setPlayer({ sleepTimerRemainMs: remain })
+      }, 1000)
+    },
+
     seek: seconds => {
       const element = ensureAudio()
       const duration = state.player.duration || state.player.chapters[state.player.currentIndex]?.duration || 0
@@ -527,7 +559,15 @@ export function createKugouLongaudioStore(overrides: Partial<KugouLongaudioDeps>
     exit: () => {
       // 退出界面就停声：留着独立音频在后台播会让用户以为「关掉还在响」
       ensureAudio()?.pause()
-      setPlayer({ status: state.player.status === 'playing' || state.player.status === 'loading' ? 'paused' : state.player.status })
+      // 退出听书同时取消定时关闭（定时跟播放会话走，App 同款语义）
+      if (sleepTimerHandle !== null) {
+        window.clearInterval(sleepTimerHandle)
+        sleepTimerHandle = null
+      }
+      setPlayer({
+        status: state.player.status === 'playing' || state.player.status === 'loading' ? 'paused' : state.player.status,
+        sleepTimerRemainMs: null,
+      })
       commit({ view: 'closed' })
     },
 
