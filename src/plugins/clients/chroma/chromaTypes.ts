@@ -176,7 +176,10 @@ export const DEFAULT_CHROMA_SETTINGS: ChromaSettings = {
   schemaVersion: 3,
   spectrumScaleVersion: 2,
   outputEnabled: true,
-  fps: 30,
+  // 默认 15fps：呼吸灯/频谱映射在 15fps 与 30fps 间无视觉差异，但常驻 IPC + 本机
+  // HTTP 帧流开销减半（30fps × N 设备 = 每秒 N 次 IPC + N 次 PUT 全在主进程排队）。
+  // 用户可在 Chroma 控制台改回 30。
+  fps: 15,
   previewEnabled: true,
   brightness: 1,
   sensitivity: 1,

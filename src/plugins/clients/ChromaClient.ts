@@ -283,6 +283,11 @@ function createClient() {
   let releaseSent = false;
   let connecting = false;
   let reactivatePromise: Promise<unknown> | null = null;
+  // 重试退避：Synapse 缺失时 registered 恒 false，30fps 帧流会把 activate() 变成每秒
+  // 30 次的注册风暴（每帧一次原生 SDK 调用 + IPC）。指数退避到最长 60s。
+  let reactivateBackoffMs = 1_000;
+  let lastReactivateAt = 0;
+  let activatedNow = false;
   const disabledFramesSent = new Set<ChromaDeviceType>();
   const syncedDeviceEnabled = new Map<ChromaDeviceType, boolean>();
 
@@ -370,18 +375,27 @@ function createClient() {
       window.electron?.chroma &&
       !snapshot.status.registered &&
       !connecting &&
-      !reactivatePromise
+      !reactivatePromise &&
+      Date.now() - lastReactivateAt >= reactivateBackoffMs
     ) {
       reactivatePromise = window.electron.chroma
         .activate()
         .then((status) => {
           set({ status });
+          activatedNow = status.registered;
           if (status.registered)
             return window.electron?.chroma
               ?.refreshDevices()
               .then((next) => next && set({ status: next }));
         })
+        .catch(() => {
+          activatedNow = false;
+        })
         .finally(() => {
+          lastReactivateAt = Date.now();
+          // 注册成功则复位退避；失败翻倍（上限 60s）。用 activate 返回的新值判定，
+          // snapshot 是本帧闭包快照（旧值）不能作为依据
+          reactivateBackoffMs = activatedNow ? 1_000 : Math.min(60_000, reactivateBackoffMs * 2);
           reactivatePromise = null;
         });
       return;

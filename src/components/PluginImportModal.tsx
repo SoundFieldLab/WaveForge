@@ -50,6 +50,15 @@ export default function PluginImportModal() {
         if (typeof parsed.code === 'string' && parsed.code.length > 256_000) {
           throw new ManifestError('插件运行时代码不能超过 256 KB')
         }
+        // detail/notice 是纯展示文本且整体落 localStorage：无上限的超大文本会撑爆
+        // 存储配额，safeSet 静默失败后 wf_installed_plugins 写不进去，后续安装全部丢失。
+        const detail = parsed.detail
+        if (detail !== undefined && (!Array.isArray(detail) || detail.some(item => typeof item !== 'string'))) {
+          throw new ManifestError('detail 必须是字符串数组')
+        }
+        if (Array.isArray(detail) && detail.join('').length > 64_000) {
+          throw new ManifestError('插件详情文本不能超过 64 KB')
+        }
         validateManifest(parsed)
         setManifest({
           ...parsed as unknown as PluginManifest,

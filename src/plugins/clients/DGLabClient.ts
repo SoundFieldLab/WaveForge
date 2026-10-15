@@ -992,6 +992,10 @@ function createClient() {
       // 作废进行中的激活，避免它的 restart/connect 覆盖本次停用
       activationGen += 1
       stopStatusPoll()
+      // 停掉整机 30fps 采集定时器并释放 analysers 引用：只靠 !active 早退的话
+      // 定时器永久空转，重新启用还会用残留 analysers 恢复推送
+      stopSystemTimer()
+      setSystemCaptureAnalysers(null, null)
       disconnect()
       ensureStream()
       void enqueueControl(() => control('stop'))

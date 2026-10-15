@@ -6,10 +6,12 @@
  */
 
 import { useEffect } from 'react'
+import ErrorBoundary from './ErrorBoundary'
 import '../plugins/DGLabPlugin'
 import '../plugins/ChromaPlugin'
 import '../plugins/SignalRgbPlugin'
 import '../plugins/ResonancePlugin'
+import '../plugins/SingAlongPlugin'
 import { getAllPluginManifests, getPluginRuntime, buildPluginContext } from '../plugins/registry'
 import { getGlobalAudioAnalyzerStore } from '../plugins/clients/DGLabClient'
 import {
@@ -144,8 +146,12 @@ export default function PluginOverlay() {
       <PluginCenterModal />
       <PluginDetailModal />
       <PluginImportModal />
-      <DGLabConsoleModal />
-      <ChromaConsoleModal />
+      <ErrorBoundary inline inlineLabel="DG-Lab 控制台渲染出错">
+        <DGLabConsoleModal />
+      </ErrorBoundary>
+      <ErrorBoundary inline inlineLabel="Chroma 控制台渲染出错">
+        <ChromaConsoleModal />
+      </ErrorBoundary>
       <SignalRgbConsoleModal
         open={host.activeConsolePluginId === 'signalrgb'}
         onClose={() => closePluginConsole('signalrgb')}

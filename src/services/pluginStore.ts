@@ -11,6 +11,17 @@ const PLUGINS_KEY = 'wf_plugins'
 const PLUGIN_FLAGS_KEY = 'wf_plugin_flags'
 const WAVES_KEY = 'wf_dglab_waves'
 
+/**
+ * 内置插件 id 集合（与 src/plugins/*Plugin.ts 注册的 id 同步）。
+ * 不从 registry 导入：registry 已 import 本模块（manifest 合并视图），反向引用成环。
+ */
+const BUILTIN_PLUGIN_IDS = new Set(['dg-lab', 'chroma', 'signalrgb', 'resonance', 'sing-along'])
+
+/** 是否内置插件 id（导入插件不得占用）。 */
+export function isBuiltinPluginId(id: string): boolean {
+  return BUILTIN_PLUGIN_IDS.has(id)
+}
+
 export const PLUGIN_STATE_EVENT = 'pluginStateChanged'
 export const DGLAB_WAVES_EVENT = 'dglabWavesChanged'
 export const DGLAB_WIDGET_EVENT = 'dglabWidgetChanged'
@@ -112,6 +123,11 @@ export function installImportedPlugin(manifest: PluginManifest): { ok: true } | 
   const list = getImportedPluginManifests()
   if (list.some(p => p.id === manifest.id)) {
     return { ok: false, error: `插件「${manifest.name}」已安装` }
+  }
+  // 内置插件 id 必须保留：否则导入插件会抢占内置 id（getPluginRuntime 命中导入 code
+  // 执行任意代码；列表出现两个同名插件，开关状态互相串）。见 registry.isBuiltinPlugin。
+  if (isBuiltinPluginId(manifest.id)) {
+    return { ok: false, error: `「${manifest.id}」是内置插件标识，不能用于导入插件` }
   }
   setPluginStates({
     ...getPluginStates(),
