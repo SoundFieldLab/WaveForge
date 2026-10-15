@@ -34,10 +34,11 @@ object UpdateChecker {
     var beforeInstallHook: ((versionName: String, notes: String) -> Unit)? = null
 
     // 版本无关的固定地址（发布脚本维护仓库根目录的 update.json）。
-    // 网络现实：国内无法裸连 GitHub → Gitee 主源、ghproxy 加速的 GitHub 备源、GitHub 直连兜底。
+    // 供应链约束：清单三源全部 https 且只保留受 TLS 保护的源——第三方公益代理
+    // （ghproxy 等）可篡改透传的 update.json（自填 APK URL 与匹配的 sha256），
+    // 曾在备源列表里，已移除。APK 下载 URL 同样强制 https（downloadApk 校验）。
     private val MANIFEST_URLS = listOf(
         "https://gitee.com/kirito666233/wave-forge/raw/master/update.json",
-        "https://ghproxy.net/https://raw.githubusercontent.com/YoshinoRinn/WaveForge/master/update.json",
         "https://raw.githubusercontent.com/YoshinoRinn/WaveForge/master/update.json",
     )
 
@@ -177,6 +178,8 @@ object UpdateChecker {
     }
 
     private fun downloadApk(context: Context, apkUrl: String): File? {
+        // 供应链约束：APK 只接受 https 下载（清单域名被篡改时 cleartext 下载可被同网段劫持）
+        require(apkUrl.startsWith("https://")) { "APK 下载地址必须为 https" }
         val dest = File(context.cacheDir, "waveforge-update.apk")
         val conn = URL(apkUrl).openConnection() as HttpURLConnection
         conn.connectTimeout = DOWNLOAD_TIMEOUT_MS

@@ -16,8 +16,13 @@ const { spawn } = require('child_process')
 let config = {}
 try { config = JSON.parse(process.env.WAVEFORGE_UPDATE_CONFIG || '{}') } catch { /* ignore */ }
 const waitPid = Number(process.env.WAVEFORGE_UPDATE_WAIT_PID || 0)
+try {
+  if (config.stagingDir) fs.writeFileSync(`${config.stagingDir}.pid`, String(process.pid), 'utf8')
+} catch { /* ignore */ }
 // 错误日志放暂存目录外（userData/update），避免随暂存清理被一起删掉
 const logPath = path.join(path.dirname(config.stagingDir || '.'), 'updater-error.log')
+// 自证身份文件（<staging>.pid）：父进程 kill 旧 updater 前校验 PID 归属，防 Windows
+// PID 复用误杀无关进程。父进程崩溃来不及写时由这里补写。
 
 function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch { /* ignore */ } }
 
@@ -57,6 +62,7 @@ function writeLastApplied() {
 }
 
 async function main() {
+  let applied = false
   try {
     await waitParentExit()
     const { resourcesDir, stagingDir } = config
@@ -67,16 +73,41 @@ async function main() {
     const bakPath = path.join(resourcesDir, 'app.asar.bak')
     const unpackedSrc = path.join(stagingDir, 'app.asar.unpacked')
     const unpackedDst = path.join(resourcesDir, 'app.asar.unpacked')
-    // 备份当前 asar（保留一个 .bak 供手动回滚），替换失败可恢复
-    try { if (fs.existsSync(asarDst)) fs.copyFileSync(asarDst, bakPath) } catch { /* 备份失败不阻断 */ }
-    // 替换 app.asar
-    fs.copyFileSync(path.join(stagingDir, 'app.asar'), asarDst)
-    // 整体替换 app.asar.unpacked（worker/服务 .py 等解包文件）
+    const unpackedBakPath = path.join(resourcesDir, 'app.asar.unpacked.bak')
+    // 替换顺序「先 unpacked 后 asar」+ 各自 rename 进位/回滚：保证任何中断点上
+    // 旧版本完整可启动。此前 unpacked 走 rmrf+cpSync（中途失败 → 新 asar 已就位而
+    // unpacked 残缺，worker .py 丢失 → 主进程 require 阶段起不来且无自动恢复）。
+    // 1) unpacked：旧目录 rename 成 .bak → staging rename 进位 → 失败回滚
+    let unpackedSwapped = false
     if (fs.existsSync(unpackedSrc)) {
-      rmrf(unpackedDst)
-      fs.mkdirSync(path.dirname(unpackedDst), { recursive: true })
-      fs.cpSync(unpackedSrc, unpackedDst, { recursive: true })
+      const hadOld = fs.existsSync(unpackedDst)
+      try { if (hadOld) fs.renameSync(unpackedDst, unpackedBakPath) } catch { /* 备份失败不阻断 */ }
+      try {
+        fs.renameSync(unpackedSrc, unpackedDst)
+        unpackedSwapped = true
+      } catch (error) {
+        try { if (hadOld && !fs.existsSync(unpackedDst)) fs.renameSync(unpackedBakPath, unpackedDst) } catch { /* ignore */ }
+        throw error
+      }
+    } else {
+      unpackedSwapped = true // 无 unpacked 更新（老版本包）：无中断点
     }
+    // 2) asar：旧 asar rename 成 .bak → 新 asar rename 进位 → 失败回滚（且恢复 unpacked）
+    try { if (fs.existsSync(asarDst)) fs.renameSync(asarDst, bakPath) } catch { /* 备份失败不阻断 */ }
+    try {
+      fs.renameSync(path.join(stagingDir, 'app.asar'), asarDst)
+    } catch (error) {
+      // 新 asar 进位失败：回滚旧 asar + 旧 unpacked，保持应用可启动
+      try { if (fs.existsSync(bakPath) && !fs.existsSync(asarDst)) fs.renameSync(bakPath, asarDst) } catch { /* ignore */ }
+      if (unpackedSwapped && fs.existsSync(unpackedBakPath)) {
+        try { rmrf(unpackedDst); fs.renameSync(unpackedBakPath, unpackedDst) } catch { /* ignore */ }
+      }
+      throw error
+    }
+    // 3) 两边都成功：删除备份（成功后不再需要；留着会让 resources 持续膨胀几十 MB）
+    try { if (fs.existsSync(bakPath)) fs.rmSync(bakPath, { force: true }) } catch { /* ignore */ }
+    try { if (fs.existsSync(unpackedBakPath)) rmrf(unpackedBakPath) } catch { /* ignore */ }
+    applied = true
     writeLastApplied()
     relaunchIfRequested()
   } catch (error) {
@@ -87,9 +118,13 @@ async function main() {
     // 失败也尝试按标志重启（仍是旧版本），用户可再次检查更新
     relaunchIfRequested()
   } finally {
-    rmrf(config.stagingDir)
-    rmrf(path.join(path.dirname(config.stagingDir || '.'), 'pending-update.json'))
-    rmrf(__filename)
+    if (applied) {
+      // 成功才清理暂存与 pending 标记；失败时保留，下次启动 applyPendingAtStartup 重试
+      rmrf(config.stagingDir)
+      try { fs.rmSync(`${config.stagingDir}.pid`, { force: true }) } catch { /* ignore */ }
+      rmrf(path.join(path.dirname(config.stagingDir || '.'), 'pending-update.json'))
+      rmrf(__filename)
+    }
   }
 }
 

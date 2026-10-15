@@ -28,6 +28,8 @@ interface UpdateInfo {
   hotSha?: string
   installUrls?: string[]
   installSha?: string
+  // 签名过的完整清单对象（含 manifestSignature）：主进程验签后才会下载
+  manifest?: Record<string, unknown> | null
 }
 
 type View = 'idle' | 'details' | 'downloading' | 'ready' | 'confirm-restart' | 'applying' | 'applied' | 'changelog'
@@ -140,12 +142,15 @@ export default function UpdateManager() {
     setPercent(0)
     setView('downloading')
     try {
-      const result = await window.electron?.update?.downloadBackground?.({
-        version: info.version,
-        notes: info.notes || '',
-        urls: info.hotUrls,
-        sha256: info.hotSha || '',
-      })
+      // 携带签名清单（若有）：主进程验签后才接受 urls/sha；开发模式可用裸载荷
+      const result = await window.electron?.update?.downloadBackground?.(info.manifest
+        ? { manifest: info.manifest }
+        : {
+            version: info.version,
+            notes: info.notes || '',
+            urls: info.hotUrls,
+            sha256: info.hotSha || '',
+          })
       if (result && !result.success) {
         toast(`更新下载失败：${result.error || '网络异常'}，请稍后重试`, 'error', 6000)
         setView('idle')
@@ -166,7 +171,11 @@ export default function UpdateManager() {
     setPercent(0)
     setView('downloading')
     try {
-      const result = await window.electron?.update?.downloadAndInstall?.(info.installUrls, info.installSha || '')
+      // 签名清单优先：主进程验签并取 win-x64 产物；开发模式回退裸 urls/sha
+      const result = await window.electron?.update?.downloadAndInstall?.(
+        info.manifest ? { manifest: info.manifest } : info.installUrls,
+        info.manifest ? undefined : (info.installSha || ''),
+      )
       busyRef.current = false
       if (result?.success) {
         toast('安装包已下载，请在弹出的安装向导中完成安装', 'success', 6000)

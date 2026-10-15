@@ -27,6 +27,8 @@ const PENDING_JSON = () => path.join(UPDATE_DIR(), 'pending-update.json')
 const LAST_APPLIED_JSON = () => path.join(UPDATE_DIR(), 'last-applied.json')
 const RELAUNCH_FLAG = () => path.join(UPDATE_DIR(), 'relaunch-request.json')
 const STAGING_DIR = () => path.join(UPDATE_DIR(), 'hot-staging')
+/** updater 自证身份文件：<staging>.pid —— kill 旧 updater 前校验，防 PID 复用误杀 */
+const UPDATER_PID_FILE = () => `${STAGING_DIR()}.pid`
 const APPLIER_DST = () => path.join(UPDATE_DIR(), 'apply-update.cjs')
 const SHA256_RE = /^[a-f0-9]{64}$/i
 const UPDATE_HOSTS = new Set([
@@ -37,14 +39,119 @@ const UPDATE_HOSTS = new Set([
   'github-releases.githubusercontent.com',
   'gitee.com',
   'giteeusercontent.com',
+  // ghproxy 系列第三方镜像只作"透传加速"，镜像运营方可篡改内容；这些主机上的
+  // 产物必须回验清单域下的原始 GitHub URL（isAllowedUpdateUrl 内做前缀反解）。
   'ghproxy.net',
   'mirror.ghproxy.com',
 ])
 
+// 官方仓库标识：canonical 仓库是 SoundFieldLab/WaveForge（api.github.com 确认，
+// YoshinoRinn/WaveForge 301 重定向到此；scripts/publish-release.mjs 里的
+// GITHUB_REPO/GITEE_REPO 与此对应，改名时三处同步）。host 级白名单只限制"能连谁"，
+// 路径前缀把范围收窄到"官方仓库的 releases/raw 资源"——渲染层被入侵后不能再把
+// GitHub/Gitee 上任意第三方仓库附件伪装成更新包执行（RCE → 任意仓库下载）。
+const OFFICIAL_GITHUB_REPO = 'soundfieldlab/waveforge'
+const OFFICIAL_GITEE_REPO = 'kirito666233/wave-forge'
+
+// ── 更新清单 Ed25519 验签（信任根闭环的最后一环） ──
+// 此前 URL 白名单 + 路径前缀锁定后仍有一条缝：渲染层可把官方仓库内"任意 release
+// 资产"连同自算 sha256 一起传进来。签名接管后，可下载的 (urls, sha256) 组合必须
+// 来自发布者签名的清单——与 device-license 兑换码共用同一把 Ed25519 密钥
+// （WaveForge License Studio 私钥签名；主进程只持公钥）。
+// 清单结构：publish-release.mjs 在 update.json 里加 manifestSignature 字段，
+// 签名内容 = 除 manifestSignature 外的全部字段按"稳定键序列化"规范化的 JSON。
+const { UPDATE_MANIFEST_PUBLIC_KEY } = require('./update-manifest-public-key.cjs')
+
+/** 稳定键序列化：对象键按 Unicode 码点排序，数组保序——签名与验签两侧必须一致。 */
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`
+}
+
+/** 验证清单签名。manifest 为解析后的 update.json 对象。 */
+function verifyManifestSignature(manifest) {
+  if (!manifest || typeof manifest !== 'object') return false
+  const signature = manifest.manifestSignature
+  if (typeof signature !== 'string' || !signature) return false
+  const { manifestSignature: _ignored, ...payload } = manifest
+  try {
+    const payloadBuffer = Buffer.from(stableStringify(payload), 'utf8')
+    const signatureBuffer = Buffer.from(signature, 'base64')
+    // Ed25519 签名固定 64 字节
+    if (signatureBuffer.length !== 64) return false
+    return crypto.verify(null, payloadBuffer, UPDATE_MANIFEST_PUBLIC_KEY, signatureBuffer)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * 从"签名过的清单"提取产物信息：返回 { urls, sha256 } 或 null（清单未签名/签名无效）。
+ * 打包版必须走这条路；开发模式（未打包）允许无签名清单（发布脚本本地迭代时无私钥环境）。
+ */
+function extractSignedArtifacts(manifest) {
+  if (!verifyManifestSignature(manifest)) return null
+  const artifacts = manifest?.artifacts || {}
+  const pick = (name) => {
+    const artifact = artifacts[name]
+    const urls = Array.isArray(artifact?.urls) ? artifact.urls.map(String).filter(Boolean) : []
+    const sha256 = String(artifact?.sha256 || '')
+    if (!urls.length || !SHA256_RE.test(sha256)) return null
+    return { urls, sha256 }
+  }
+  const install = pick('win-x64')
+  const hot = pick('win-x64-hot')
+  if (!install && !hot) return null
+  return { version: String(manifest.version || ''), install, hot }
+}
+
+/** ghproxy 代理 URL 反解出被代理的原始 https URL（无法反解/非 https 源则返回 null）。 */
+function unwrapProxyUrl(value) {
+  const raw = String(value)
+  for (const prefix of ['https://ghproxy.net/', 'https://mirror.ghproxy.com/']) {
+    if (raw.startsWith(prefix)) {
+      const inner = raw.slice(prefix.length)
+      return inner.startsWith('https://') ? inner : null
+    }
+  }
+  return null
+}
+
+function isOfficialUpdateUrl(url) {
+  const pathname = url.pathname.toLowerCase()
+  const hostname = url.hostname.toLowerCase()
+  if (hostname === 'github.com') {
+    return pathname.startsWith(`/${OFFICIAL_GITHUB_REPO}/releases/`) || pathname.startsWith(`/${OFFICIAL_GITHUB_REPO}/releases/download/`)
+  }
+  if (hostname === 'raw.githubusercontent.com') {
+    return pathname.startsWith(`/${OFFICIAL_GITHUB_REPO}/master/`)
+  }
+  if (hostname === 'gitee.com') {
+    return pathname.startsWith(`/${OFFICIAL_GITEE_REPO}/releases/download/`) || pathname.startsWith(`/${OFFICIAL_GITEE_REPO}/raw/master/`)
+  }
+  // 其余 GitHub/Gitee 资产域不带仓库路径（objects./release-assets./giteeusercontent.），
+  // host 白名单已限定官方下载基础设施；清单直链以外的路径域按 host 放行。
+  return true
+}
+
 function isAllowedUpdateUrl(value) {
   try {
     const url = new URL(String(value))
-    return url.protocol === 'https:' && UPDATE_HOSTS.has(url.hostname.toLowerCase())
+    if (url.protocol !== 'https:') return false
+    if (!UPDATE_HOSTS.has(url.hostname.toLowerCase())) return false
+    // ghproxy 代理：只信任"代理的是官方仓库 URL"的透传
+    const unwrapped = unwrapProxyUrl(url.href)
+    if (unwrapped) {
+      try {
+        const inner = new URL(unwrapped)
+        return UPDATE_HOSTS.has(inner.hostname.toLowerCase()) && isOfficialUpdateUrl(inner)
+      } catch {
+        return false
+      }
+    }
+    return isOfficialUpdateUrl(url)
   } catch {
     return false
   }
@@ -156,8 +263,15 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
             const total = Number(response.headers['content-length'] || 0)
             let received = 0
             response.on('data', (chunk) => {
-              hash.update(chunk)
               received += chunk.length
+              // 总量上限：sha256 是事后校验，异常的超大响应会先写满磁盘才失败。
+              // NSIS 安装包实际 ~200MB，600MB 上限已是宽裕的异常阈值。
+              if (received > 600 * 1024 * 1024) {
+                fail(new Error(`下载超过 600MB 上限，疑似异常响应`))
+                response.destroy()
+                return
+              }
+              hash.update(chunk)
               if (!writeStream.write(chunk)) {
                 response.pause()
                 writeStream.once('drain', () => response.resume())
@@ -235,9 +349,23 @@ async function startBackgroundDownload(version, notes, urls, expectedSha) {
 /** 拉起独立 updater（等应用退出后替换文件）；返回是否成功 */
 function spawnUpdater() {
   if (!pending || !fs.existsSync(path.join(STAGING_DIR(), 'app.asar'))) return false
-  // 若有旧 updater 在等待，先结束它（避免重复应用/应用旧 staging）
+  // 若有旧 updater 在等待，先结束它（避免重复应用/应用旧 staging）。
+  // kill 前用 <staging>.pid 自证文件核对 PID 归属：PID 在 Windows 上会复用，
+  // 内存里留的旧 PID 可能已被无关进程占用，盲杀等于随机杀进程。
   if (activeUpdaterPid) {
-    try { process.kill(activeUpdaterPid) } catch { /* ignore */ }
+    const pidFile = `${STAGING_DIR()}.pid`
+    let pidMatches = true
+    try {
+      const recorded = Number(fs.readFileSync(pidFile, 'utf8').trim())
+      pidMatches = Number.isFinite(recorded) && recorded === activeUpdaterPid
+    } catch {
+      // 自证文件缺失（崩溃时来不及写）：保守起见按 PID 匹配放行——PID 是本会话
+      // spawn 返回值，误杀窗口极小；有文件但值不符则明确放弃。
+      pidMatches = !fs.existsSync(pidFile)
+    }
+    if (pidMatches) {
+      try { process.kill(activeUpdaterPid) } catch { /* ignore */ }
+    }
     activeUpdaterPid = null
   }
   try {
@@ -269,10 +397,13 @@ function spawnUpdater() {
   }
 }
 
-/** 用户确认立即重启：写重启标志后退出，updater 换完文件会自动重启 */
+/** 用户确认立即重启：写重启标志后退出，updater 换完文件会自动重启。
+ *  走 app.quit() 而不是 app.exit(0)：exit 跳过 before-quit/will-quit，
+ *  Python 服务/Apple bridge/托盘/媒体键全部残留（托盘出现幽灵图标）。
+ *  updater 已 detached 且靠 PID 自证文件工作，正常 quit 不影响换文件。 */
 function restartForUpdate() {
   writeJson(RELAUNCH_FLAG(), { at: Date.now() })
-  setTimeout(() => { app.exit(0) }, 300)
+  setTimeout(() => { app.quit() }, 300)
 }
 
 /** 启动时：若存在待应用更新（上次「稍后」/ 更新中断），自动应用并重启一次 */
@@ -307,12 +438,32 @@ function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = nu
     return Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame)
   })
   const rejectUntrusted = () => ({ success: false, error: '不允许的更新请求来源' })
+  /**
+   * 从渲染层提交的更新载荷解析出 (urls, sha256)。
+   * 优先路径：载荷是签名过的清单对象（含 manifestSignature）→ 验签后取产物；
+   * 兼容路径：载荷是 { urls, sha256 } 裸结构 → 仍走 URL 白名单校验，但打包版
+   * （app.isPackaged）拒绝——生产环境必须走签名清单，开发模式豁免。
+   */
+  const resolveDownloadSpec = (payload) => {
+    if (payload && typeof payload === 'object' && payload.manifestSignature) {
+      const signed = extractSignedArtifacts(payload)
+      if (!signed) return { error: '更新清单签名无效，已拒绝下载' }
+      return signed
+    }
+    if (app.isPackaged) {
+      return { error: '当前版本要求签名更新清单（manifestSignature 缺失）' }
+    }
+    const urls = Array.isArray(payload?.urls) ? payload.urls.map(String).filter(Boolean) : []
+    const sha256 = String(payload?.sha256 || '')
+    if (!urls.length || !SHA256_RE.test(sha256)) return { error: '更新载荷缺少有效的地址或校验值' }
+    return { urls, sha256 }
+  }
   // 后台下载：立即返回，进度/结果经事件广播（下载期间应用完全可用）
   ipcMain.handle('update:download-background', async (event, payload) => {
     if (!trusted(event)) return rejectUntrusted()
-    const { version, notes, urls, sha256 } = payload || {}
-    if (!Array.isArray(urls) || !urls.length) return { success: false, error: '缺少下载地址' }
-    return startBackgroundDownload(String(version || ''), String(notes || ''), urls, String(sha256 || ''))
+    const spec = resolveDownloadSpec(payload)
+    if (spec.error) return { success: false, error: spec.error }
+    return startBackgroundDownload(String(payload?.version || spec.version || ''), String(payload?.notes || ''), spec.urls, spec.sha256)
   })
   // 就绪后：拉起 updater（不退出；由 restart-for-update 决定何时退出重启）
   ipcMain.handle('update:apply-pending', (event) => trusted(event) ? { success: spawnUpdater() } : rejectUntrusted())
@@ -326,13 +477,17 @@ function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = nu
   ipcMain.handle('update:get-pending', (event) => trusted(event) ? getPending() : null)
   // 更新后首次启动的「更新日志」（读取即清除）
   ipcMain.handle('update:consume-last-applied', (event) => trusted(event) ? consumeLastApplied() : null)
-  // 完整安装包兜底（改动大、无热更新产物时）
-  ipcMain.handle('update:download-and-install', async (event, urls, expectedSha) => {
+  // 完整安装包兜底（改动大、无热更新产物时）。载荷必须是签名清单对象；
+  // 开发模式豁免为 { urls, sha256 }（与旧调用兼容）。
+  ipcMain.handle('update:download-and-install', async (event, payload) => {
     if (!trusted(event)) return rejectUntrusted()
+    const spec = resolveDownloadSpec(payload)
+    if (spec.error) return { success: false, error: spec.error }
+    const install = spec.install || spec
     const downloadDir = UPDATE_DIR()
     try { fs.mkdirSync(downloadDir, { recursive: true }) } catch (e) { return { success: false, error: `无法创建下载目录：${e?.message || e}` } }
     const destPath = path.join(downloadDir, `WaveForge-Setup-${Date.now()}.exe`)
-    const result = await downloadToFile(urls, destPath, expectedSha, '更新安装包')
+    const result = await downloadToFile(install.urls, destPath, install.sha256, '更新安装包')
     if (!result.success) return result
     const { shell } = require('electron')
     try {

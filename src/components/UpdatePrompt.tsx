@@ -99,8 +99,8 @@ export default function UpdatePrompt({ playerTheme = 'dark' }: UpdatePromptProps
     if (isDesktop() && winArtifact?.urls?.length && bridge?.downloadAndInstall) {
       setDownloading(true)
       try {
-        // manifest 的 urls 已按 Gitee → ghproxy(GitHub) → GitHub 排好序，整表传入逐个尝试
-        const result = await bridge.downloadAndInstall(winArtifact.urls, winArtifact.sha256 || '')
+        // 直接传签名清单对象：主进程验签后取 win-x64 产物（urls/sha 不再由渲染层自由提供）
+        const result = await bridge.downloadAndInstall({ manifest: manifest as unknown as Record<string, unknown> }, undefined)
         if (result.success) {
           // 写入成功标记：更新生效后下次启动显示成功弹窗
           try {

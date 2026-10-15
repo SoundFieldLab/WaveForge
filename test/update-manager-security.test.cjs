@@ -20,10 +20,13 @@ test('update URLs are restricted to audited HTTPS release hosts', () => {
 })
 
 test('update requests require a full SHA-256 digest', () => {
-  assert.deepEqual(validateUpdateRequest(['https://github.com/org/repo/file.zip'], HASH), ['https://github.com/org/repo/file.zip'])
-  assert.throws(() => validateUpdateRequest(['https://github.com/org/repo/file.zip'], ''), /SHA-256/)
-  assert.throws(() => validateUpdateRequest(['https://github.com/org/repo/file.zip'], 'abc'), /SHA-256/)
+  const officialZip = 'https://github.com/SoundFieldLab/WaveForge/releases/download/v1/file.zip'
+  assert.deepEqual(validateUpdateRequest([officialZip], HASH), [officialZip])
+  assert.throws(() => validateUpdateRequest([officialZip], ''), /SHA-256/)
+  assert.throws(() => validateUpdateRequest([officialZip], 'abc'), /SHA-256/)
   assert.throws(() => validateUpdateRequest(['https://evil.example/file.zip'], HASH), /允许/)
+  // host 在白名单内但仓库不是官方的：拒绝（防任意仓库附件伪装成更新包）
+  assert.throws(() => validateUpdateRequest(['https://github.com/evil/repo/releases/download/v1/file.zip'], HASH), /允许/)
 })
 
 test('zip validation rejects traversal, absolute paths and oversized archives', () => {
