@@ -15,8 +15,8 @@ import {
 } from '../src/services/mvAlignment'
 import { autoMixAnalysisService } from '../src/services/autoMixAnalysisService'
 import * as autoMixModule from '../src/services/autoMixAnalysisService'
-import { detectLiveMusicEntry, detectMusicStart } from '../src/services/autoMixAnalysisService'
-import { buildEnvelopeAlignment } from '../src/services/mvAlignment'
+import { detectLiveMusicEntry, detectMusicStart, envelopeSegmentAnchors, envelopeSegmentVote } from '../src/services/autoMixAnalysisService'
+import { buildEnvelopeAlignment, offsetAt, type MvAlignment } from '../src/services/mvAlignment'
 import * as bilibiliApi from '../src/services/bilibiliApi'
 import type { LyricLine } from '../src/services/musicApi'
 import type { BilibiliSubtitleLine } from '../src/services/bilibiliApi'
@@ -169,7 +169,7 @@ describe('MV alignment negative cache', () => {
       method: 'beat' as const,
       ts: Date.now(),
     }
-    localStorage.setItem('waveforge:mv-alignments:v2-seconds', JSON.stringify({
+    localStorage.setItem('waveforge:mv-alignments:v3-seconds', JSON.stringify({
       'villain-key|BV-villain': poisoned,
     }))
     resetMvAlignmentCachesForTests()
@@ -202,7 +202,7 @@ describe('alignment cache trust gate（候选可信度闸门）', () => {
   })
 
   it('getMvAlignmentFor hides a poisoned cache from fast-path readers', () => {
-    localStorage.setItem('waveforge:mv-alignments:v2-seconds', JSON.stringify({
+    localStorage.setItem('waveforge:mv-alignments:v3-seconds', JSON.stringify({
       'villain-key|BV-villain': { ...beatCache, ts: Date.now() },
     }))
     resetMvAlignmentCachesForTests()
@@ -290,7 +290,7 @@ describe('alignment hardening（5АМ 错位回归）', () => {
   })
 
   it('迁移：丢弃不可信的 live-vocal 旧缓存，live/cover 与其他方法保留', () => {
-    localStorage.setItem('waveforge:mv-alignments:v2-seconds', JSON.stringify({
+    localStorage.setItem('waveforge:mv-alignments:v3-seconds', JSON.stringify({
       'k|BV-legacy': { offsetSeconds: 12.16, confidence: 0.55, method: 'live-vocal', ts: Date.now() },
       'k|BV-other': { offsetSeconds: 9, confidence: 0.55, method: 'live-vocal', candidateType: 'other', ts: Date.now() },
       'k|BV-live': { offsetSeconds: 1.4, confidence: 0.55, method: 'live-vocal', candidateType: 'live', ts: Date.now() },
@@ -592,5 +592,550 @@ describe('detectOffsetFromBeats', () => {
 
   it('节拍过少 → null', () => {
     expect(detectOffsetFromBeats([1, 2, 3, 4], [1.5, 2.5, 3.5])).toBeNull()
+  })
+})
+
+describe('拍点网格循环自证修复（俺の彼女 回归）', () => {
+  const baseInput = {
+    songKey: 'oreno-key',
+    songTitle: '俺の彼女',
+    songArtists: ['宇多田ヒカル'],
+    songDuration: 304,
+    songUrl: 'http://audio/song.flac',
+    bvid: 'BV1tK4y1V7FF',
+    cid: 272669422,
+    videoUrl: 'http://audio/mv.m4a',
+    candidateType: 'lyrics',
+  }
+
+  /** 实测现场 MV 分析产物：provider=browser-fallback + pattern: 签名 = 拍点自证网格 */
+  function patternMvAnalysis(overrides: Record<string, unknown> = {}) {
+    return {
+      trackKey: 'mv-align-video:oreno-key:BV1tK4y1V7FF',
+      duration: 346,
+      provider: 'browser-fallback',
+      beats: Array.from({ length: 668 }, (_, i) => i * 0.38 + 42.74),
+      downbeats: Array.from({ length: 167 }, (_, i) => i * 1.52 + 42.74),
+      estimatedBpm: 157.9,
+      confidence: 0.251,
+      sourceSignature: 'pattern:668:0.300:254.300',
+      envelopePeak: 0.49,
+      envelopeOffset: 42.75,
+      envelopeProminence: 0.08,
+      ...overrides,
+    } as any
+  }
+
+  function mockSubtitlesEmpty() {
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitles').mockResolvedValue({ code: 0, subtitles: [] })
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitleJson').mockResolvedValue([])
+  }
+
+  /** 段落支持率用包络（50fps 白噪声结构，与真实 RMS 同数量级）：
+   *  - aligned 参数给定偏移：前 60% 的 30s 段 MV=歌曲真实平移（强相关），
+   *    后 40% 段 MV 为独立噪声（现场讲段/即兴，相关弱）→ 支持率 ≈0.6 过线；
+   *  - unaligned（null）：MV 为独立噪声 → 任何偏移支持率 ≈0。 */
+  function liveEnvelopes(offsetSeconds: number | null): { mv: number[]; song: number[] } {
+    const fps = 50
+    const segFrames = 30 * fps
+    const songLen = 304 * fps
+    const mvLen = 346 * fps
+    const song: number[] = []
+    let seed = 7
+    const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    for (let i = 0; i < songLen; i++) song.push(0.3 + 0.3 * rand())
+    let seed2 = 99
+    const rand2 = () => { seed2 = (seed2 * 1103515245 + 12345) % 2147483648; return seed2 / 2147483648 }
+    const mv: number[] = []
+    for (let i = 0; i < mvLen; i++) mv.push(0.3 + 0.3 * rand2())
+    if (offsetSeconds != null) {
+      const delta = Math.round(offsetSeconds * fps)
+      const alignedUntil = Math.floor(songLen * 0.6 / segFrames) * segFrames
+      for (let i = 0; i < alignedUntil; i++) {
+        const mvIdx = i + delta
+        if (mvIdx >= 0 && mvIdx < mvLen) mv[mvIdx] = song[i]
+      }
+    }
+    return { mv, song }
+  }
+
+  function mockSongAnalysis(envelope: number[]) {
+    return vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key',
+      duration: 304,
+      beats: Array.from({ length: 668 }, (_, i) => i * 0.38 + 0.3),
+      estimatedBpm: 157.9,
+      provider: 'beat_this',
+      rmsEnvelope: envelope,
+    } as any)
+  }
+
+  function mockMvAnalysis(overrides: Record<string, unknown> = {}, mvEnvelope?: number[]) {
+    return vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue(patternMvAnalysis({
+      rmsEnvelope: mvEnvelope,
+      ...overrides,
+    }))
+  }
+
+  it('现场版（包络弱相关且段落支持不足）→ 拒绝拍点对齐，不再以 conf=1.00 入缓存', async () => {
+    mockSubtitlesEmpty()
+    const { mv, song } = liveEnvelopes(null)
+    mockSongAnalysis(song)
+    const analyze = mockMvAnalysis({ envelopeOffset: 42.75 }, mv)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+
+    expect(result).toBeNull()
+    expect(log).toHaveBeenCalledWith('[MvAlign]', expect.stringContaining('拍点网格拒绝'))
+    // 负缓存生效：同输入立即短路（不再重复分析）
+    expect(analyze).toHaveBeenCalledTimes(1)
+    await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+    expect(analyze).toHaveBeenCalledTimes(1)
+  })
+
+  it('现场版弱峰但段落支持率过线（俺の彼女 实测形态：peak=0.49 偏移 +54.7）→ 采纳包络偏移', async () => {
+    mockSubtitlesEmpty()
+    const { mv, song } = liveEnvelopes(54.7)
+    mockSongAnalysis(song)
+    mockMvAnalysis({ envelopeOffset: 54.7 }, mv)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+
+    expect(result).not.toBeNull()
+    expect(result!.method).toBe('envelope')
+    expect(result!.offsetSeconds).toBeCloseTo(54.7, 1)
+    expect(result!.confidence).toBeGreaterThanOrEqual(0.5)
+    expect(getMvAlignment('oreno-key', 'BV1tK4y1V7FF')).not.toBeNull()
+  })
+
+  it('同录音（包络 peak≥0.6 突出度达标）→ 采纳包络偏移并缓存', async () => {
+    mockSubtitlesEmpty()
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key',
+      duration: 304,
+      beats: Array.from({ length: 668 }, (_, i) => i * 0.38 + 0.3),
+      estimatedBpm: 157.9,
+      provider: 'beat_this',
+      rmsEnvelope: Array.from({ length: 100 }, () => 0.5),
+    } as any)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue(patternMvAnalysis({
+      envelopePeak: 0.72,
+      envelopeOffset: 12.4,
+      envelopeProminence: 0.12,
+    }))
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+
+    expect(result).not.toBeNull()
+    expect(result!.method).toBe('envelope')
+    expect(result!.offsetSeconds).toBeCloseTo(12.4, 1)
+    // 已入缓存
+    expect(getMvAlignment('oreno-key', 'BV1tK4y1V7FF')).not.toBeNull()
+  })
+
+  it('网格偏移与包络偏移一致（≤2s）→ 采用互相关偏移（更精确）', async () => {
+    mockSubtitlesEmpty()
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key',
+      duration: 304,
+      beats: Array.from({ length: 668 }, (_, i) => i * 0.38 + 0.3),
+      estimatedBpm: 157.9,
+      provider: 'beat_this',
+      rmsEnvelope: Array.from({ length: 100 }, () => 0.5),
+    } as any)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue(patternMvAnalysis({
+      envelopePeak: 0.72,
+      envelopeOffset: 42.44,
+      envelopeProminence: 0.12,
+    }))
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+
+    // 歌曲拍 0.3 起、MV 拍 42.74 起 → 互相关偏移 = 42.44；与包络峰差 0.3s ≤ 2s
+    // 同源 → 采信互相关的精确值而非包络的 0.1s 网格值
+    expect(result).not.toBeNull()
+    expect(result!.offsetSeconds).toBeCloseTo(42.44, 1)
+  })
+
+  it('真实检测的 MV 节拍（Python provider）→ detectOffsetFromBeats 仍是有效校验，不受新闸门影响', async () => {
+    mockSubtitlesEmpty()
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key',
+      duration: 304,
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 1),
+      estimatedBpm: 120,
+      provider: 'beat_this',
+      rmsEnvelope: Array.from({ length: 100 }, () => 0.5),
+    } as any)
+    // Python 分析：真实检测节拍（带抖动的 +5s 偏移），provider 不是 browser-fallback
+    const songBeats = Array.from({ length: 600 }, (_, i) => i * 0.5 + 1)
+    const mvBeats = songBeats.map((t) => t + 5 + Math.sin(t * 1.7) * 0.05)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue({
+      trackKey: 'mv-align-video:oreno-key:BV1tK4y1V7FF',
+      duration: 310,
+      provider: 'beat_this',
+      beats: mvBeats,
+      downbeats: mvBeats.filter((_, i) => i % 4 === 0),
+      estimatedBpm: 120,
+      confidence: 0.8,
+    } as any)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({ ...baseInput, trackKey: 'app-key' })
+
+    expect(result).not.toBeNull()
+    expect(result!.method).toBe('beat')
+    expect(result!.offsetSeconds).toBeCloseTo(5, 0)
+  })
+
+  it('旧 v2 缓存键不再读取（版本 bump 迁移）', () => {
+    localStorage.setItem('waveforge:mv-alignments:v2-seconds', JSON.stringify({
+      'oreno-key|BV1tK4y1V7FF': { offsetSeconds: 42.74, confidence: 1, method: 'beat', ts: Date.now() },
+    }))
+    resetMvAlignmentCachesForTests()
+    expect(getMvAlignment('oreno-key', 'BV1tK4y1V7FF')).toBeNull()
+    // 惰性迁移：首次读取时旧键被删除，不留孤儿数据
+    localStorage.setItem('waveforge:mv-alignments:v2-seconds', JSON.stringify({
+      'k|BV-legacy': { offsetSeconds: 1, confidence: 0.6, method: 'beat', ts: Date.now() },
+    }))
+    resetMvAlignmentCachesForTests()
+    getMvAlignment('anything', 'BV-anything')
+    expect(localStorage.getItem('waveforge:mv-alignments:v2-seconds')).toBeNull()
+  })
+})
+
+describe('分段偏移模型（现场改编区插值，俺の彼女 巡演回归）', () => {
+  describe('offsetAt（插值纯函数）', () => {
+    const alignment: MvAlignment = {
+      offsetSeconds: 54.7,
+      confidence: 0.72,
+      method: 'envelope',
+      segments: [
+        { songTime: 15, offsetSeconds: 54.8, correlation: 0.8 },
+        { songTime: 105, offsetSeconds: 54.8, correlation: 0.7 },
+        { songTime: 255, offsetSeconds: 56.2, correlation: 0.6 },
+      ],
+    }
+
+    it('无 segments/空 segments → 恒定 offsetSeconds', () => {
+      expect(offsetAt({ offsetSeconds: 10, confidence: 0.6, method: 'beat' }, 100)).toBe(10)
+      expect(offsetAt({ offsetSeconds: 10, confidence: 0.6, method: 'beat', segments: [] }, 100)).toBe(10)
+      expect(offsetAt(null, 100)).toBe(0)
+    })
+
+    it('锚点区间内：线性插值（相关性均衡时）', () => {
+      // 105→255 之间 t=0.5 → (54.8+56.2)/2 = 55.5
+      expect(offsetAt(alignment, 180)).toBeCloseTo(55.5, 1)
+    })
+
+    it('端点严格等于锚点值', () => {
+      expect(offsetAt(alignment, 105)).toBeCloseTo(54.8, 3)
+      expect(offsetAt(alignment, 255)).toBeCloseTo(56.2, 3)
+    })
+
+    it('锚点区间外：取最近锚', () => {
+      expect(offsetAt(alignment, 0)).toBeCloseTo(54.8, 3)
+      expect(offsetAt(alignment, 300)).toBeCloseTo(56.2, 3)
+    })
+
+    it('相关性偏置：中点偏向相关更高的一侧', () => {
+      const biased: MvAlignment = {
+        offsetSeconds: 0,
+        confidence: 0.7,
+        method: 'envelope',
+        segments: [
+          { songTime: 0, offsetSeconds: 50, correlation: 0.9 },
+          { songTime: 100, offsetSeconds: 54, correlation: 0.3 },
+        ],
+      }
+      // 纯线性中点=52；a 相关更高 → 中点偏小
+      expect(offsetAt(biased, 50)).toBeLessThan(52)
+      // 端点不变
+      expect(offsetAt(biased, 0)).toBeCloseTo(50, 3)
+      expect(offsetAt(biased, 100)).toBeCloseTo(54, 3)
+    })
+  })
+
+  describe('envelopeSegmentAnchors（锚点段提取）', () => {
+    const fps = 50
+    /** 构造包络：歌曲=0.5s 平滑噪声（与真实 RMS 的音节级平滑同尺度——纯白噪声对
+     *  0.3s 错位零容忍，粗扫 0.5s 网格会 miss）；MV=指定偏移序列的分段平移。 */
+    function segmentedEnvelopes(offsets: number[]): { mv: number[]; song: number[] } {
+      let seed = 7
+      const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+      const raw: number[] = []
+      for (let i = 0; i < 304 * fps + 50; i++) raw.push(0.3 + 0.3 * rand())
+      const song: number[] = []
+      for (let i = 0; i < 304 * fps; i++) {
+        let sum = 0
+        for (let k = 0; k < 25; k++) sum += raw[i + k]
+        song.push(sum / 25)
+      }
+      const mv: number[] = new Array(346 * fps).fill(0)
+      const segFrames = 30 * fps
+      offsets.forEach((offset, idx) => {
+        const segStart = idx * segFrames
+        for (let i = 0; i < segFrames && segStart + i < 304 * fps; i++) {
+          const mvIdx = Math.round(segStart + i + offset * fps)
+          if (mvIdx >= 0 && mvIdx < mv.length) mv[mvIdx] = song[segStart + i]
+        }
+      })
+      return { mv, song }
+    }
+
+    it('偏移恒定 → 所有锚点等于全局锚（跨度 <0.3，同步层不启用分段）', () => {
+      const { mv, song } = segmentedEnvelopes(Array.from({ length: 10 }, () => 54.7))
+      const anchors = envelopeSegmentAnchors(mv, song, fps, 54.7)
+      expect(anchors.length).toBeGreaterThanOrEqual(2)
+      const spread = Math.max(...anchors.map((a) => a.offsetSeconds)) - Math.min(...anchors.map((a) => a.offsetSeconds))
+      expect(spread).toBeLessThan(0.3)
+    })
+
+    it('中段偏移漂移（现场改编）→ 锚点跟踪局部偏移', () => {
+      // 前 90s @54.7，中段 90-180 @58.2（现场拉长间奏；58.2=54.7+3.5 落在 0.5s 粗扫
+      // 网格上，与全局锚差 3.5s < 5s 搜索半径），尾段 @54.7
+      const offsets = [54.7, 54.7, 54.7, 58.2, 58.2, 58.2, 54.7, 54.7, 54.7, 54.7]
+      const { mv, song } = segmentedEnvelopes(offsets)
+      const anchors = envelopeSegmentAnchors(mv, song, fps, 54.7)
+      expect(anchors.length).toBeGreaterThanOrEqual(3)
+      // 中段应出现 ≈58.2 的锚，首尾段 ≈54.7
+      const midAnchors = anchors.filter((a) => a.songTime > 120 && a.songTime < 180)
+      const edgeAnchors = anchors.filter((a) => a.songTime < 60)
+      expect(midAnchors.some((a) => Math.abs(a.offsetSeconds - 58.2) < 0.6)).toBe(true)
+      expect(edgeAnchors.every((a) => Math.abs(a.offsetSeconds - 54.7) < 0.6)).toBe(true)
+    })
+
+    it('全局锚错误（±5s 外）→ 无锚点产出（不编造）', () => {
+      const { mv, song } = segmentedEnvelopes(Array.from({ length: 10 }, () => 54.7))
+      // 用 30s 作为全局锚：超出 ±5s 搜索半径，所有段相关塌陷
+      const anchors = envelopeSegmentAnchors(mv, song, fps, 30)
+      expect(anchors.length).toBe(0)
+    })
+
+    it('独立噪声 MV → 无锚点（相关性不足）', () => {
+      const song: number[] = []
+      let seed = 7
+      const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+      for (let i = 0; i < 304 * fps; i++) song.push(0.3 + 0.3 * rand())
+      const mv: number[] = []
+      let seed2 = 99
+      const rand2 = () => { seed2 = (seed2 * 1103515245 + 12345) % 2147483648; return seed2 / 2147483648 }
+      for (let i = 0; i < 346 * fps; i++) mv.push(0.3 + 0.3 * rand2())
+      expect(envelopeSegmentAnchors(mv, song, fps, 54.7)).toHaveLength(0)
+    })
+  })
+
+  describe('segments 持久化恢复', () => {
+    it('写入→读取 segments 往返一致；坏数据（非升序）被丢弃', () => {
+      localStorage.setItem('waveforge:mv-alignments:v3-seconds', JSON.stringify({
+        'k|BV-good': {
+          offsetSeconds: 54.7, confidence: 0.72, method: 'envelope', prominence: 0.08, ts: Date.now(),
+          segments: [
+            { songTime: 15, offsetSeconds: 54.8, correlation: 0.8 },
+            { songTime: 105, offsetSeconds: 56.2, correlation: 0.6 },
+          ],
+        },
+        'k|BV-bad': {
+          offsetSeconds: 3, confidence: 0.72, method: 'envelope', prominence: 0.08, ts: Date.now(),
+          segments: [
+            { songTime: 105, offsetSeconds: 56.2, correlation: 0.6 },
+            { songTime: 15, offsetSeconds: 54.8, correlation: 0.8 },
+          ],
+        },
+      }))
+      resetMvAlignmentCachesForTests()
+      const good = getMvAlignment('k', 'BV-good')
+      expect(good?.segments).toHaveLength(2)
+      expect(good?.segments?.[0].songTime).toBe(15)
+      expect(getMvAlignment('k', 'BV-bad')?.segments).toBeUndefined()
+    })
+  })
+})
+
+describe('段投票一致救援（194 对 live 基准：净增 2TP/0FP）', () => {
+  const fps = 50
+  /** 平滑包络 fixture：歌曲平滑噪声；MV=全局平移（真对齐但峰被现场动态压扁到 0.45-0.6） */
+  function flatPeakEnvelopes(offset: number): { mv: number[]; song: number[] } {
+    let seed = 7
+    const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    const raw: number[] = []
+    for (let i = 0; i < 304 * fps + 50; i++) raw.push(0.3 + 0.3 * rand())
+    const song: number[] = []
+    for (let i = 0; i < 304 * fps; i++) {
+      let sum = 0
+      for (let k = 0; k < 25; k++) sum += raw[i + k]
+      song.push(sum / 25)
+    }
+    const mv: number[] = new Array(346 * fps).fill(0)
+    for (let i = 0; i < 304 * fps; i++) {
+      const mvIdx = Math.round(i + offset * fps)
+      if (mvIdx >= 0 && mvIdx < mv.length) mv[mvIdx] = song[i]
+    }
+    return { mv, song }
+  }
+
+  it('envelopeSegmentVote：多数段聚到同一偏移 → 返回共识偏移', () => {
+    const { mv, song } = flatPeakEnvelopes(54.7)
+    const vote = envelopeSegmentVote(mv, song, fps, 54.7)
+    expect(vote).not.toBeNull()
+    expect(Math.abs(vote! - 54.7)).toBeLessThan(0.6)
+  })
+
+  it('envelopeSegmentVote：独立噪声 → null（无共识不编造）', () => {
+    const song: number[] = []
+    let seed = 7
+    const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    for (let i = 0; i < 304 * fps; i++) song.push(0.3 + 0.3 * rand())
+    const mv: number[] = []
+    let seed2 = 99
+    const rand2 = () => { seed2 = (seed2 * 1103515245 + 12345) % 2147483648; return seed2 / 2147483648 }
+    for (let i = 0; i < 346 * fps; i++) mv.push(0.3 + 0.3 * rand2())
+    expect(envelopeSegmentVote(mv, song, fps, 54.7)).toBeNull()
+  })
+
+  it('拍点路径：峰 0.5 + 段投票与峰一致 → 投票一致救援采纳', async () => {
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitles').mockResolvedValue({ code: 0, subtitles: [] })
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitleJson').mockResolvedValue([])
+    const { mv, song } = flatPeakEnvelopes(54.7)
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key',
+      duration: 304,
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 0.3),
+      estimatedBpm: 120,
+      provider: 'beat_this',
+      rmsEnvelope: song,
+    } as any)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue({
+      trackKey: 'mv-align-video:oreno-key:BV1tK4y1V7FF',
+      duration: 346,
+      provider: 'browser-fallback',
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 55.0),
+      downbeats: Array.from({ length: 150 }, (_, i) => i * 2 + 55.0),
+      estimatedBpm: 120,
+      confidence: 0.3,
+      sourceSignature: 'pattern:600:0.300:300.300',
+      envelopePeak: 0.5,
+      envelopeOffset: 54.7,
+      envelopeProminence: 0.02,
+      envelopeVoteOffset: 54.7,
+      rmsEnvelope: mv,
+    } as any)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({
+      songKey: 'oreno-key',
+      songTitle: '俺の彼女',
+      songArtists: ['宇多田ヒカル'],
+      songDuration: 304,
+      songUrl: 'http://audio/song.flac',
+      bvid: 'BV1tK4y1V7FF',
+      cid: 272669422,
+      videoUrl: 'http://audio/mv.m4a',
+      candidateType: 'lyrics',
+      trackKey: 'app-key',
+    })
+
+    expect(result).not.toBeNull()
+    expect(result!.method).toBe('envelope')
+    expect(result!.offsetSeconds).toBeCloseTo(54.7, 1)
+    expect(getMvAlignment('oreno-key', 'BV1tK4y1V7FF')).not.toBeNull()
+  })
+})
+
+describe('投票真值仲裁（6008 对基准：净挽回 73.5s / FP−3 / ≤2s 99.0→99.5%）', () => {
+  const fps = 50
+  /** 双峰包络:全曲峰在假峰位(重复结构),段投票收敛在真偏移。
+   *  构造:MV=歌曲平移 trueOffset;另在 falsePeak 处注入与歌曲某 60s 段相同的重复内容。 */
+  function doublePeakEnvelopes(trueOffset: number): { mv: number[]; song: number[] } {
+    let seed = 7
+    const rand = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648 }
+    const raw: number[] = []
+    for (let i = 0; i < 304 * fps + 50; i++) raw.push(0.3 + 0.3 * rand())
+    const song: number[] = []
+    for (let i = 0; i < 304 * fps; i++) {
+      let sum = 0
+      for (let k = 0; k < 25; k++) sum += raw[i + k]
+      song.push(sum / 25)
+    }
+    // 歌曲含重复段:60-120s 与 180-240s 内容相同(phonk/副歌重复结构)
+    for (let i = 0; i < 60 * fps; i++) song[(180 * fps) + i] = song[(60 * fps) + i]
+    const mv: number[] = new Array(346 * fps).fill(0)
+    for (let i = 0; i < 304 * fps; i++) {
+      const mvIdx = Math.round(i + trueOffset * fps)
+      if (mvIdx >= 0 && mvIdx < mv.length) mv[mvIdx] = song[i]
+    }
+    return { mv, song }
+  }
+
+  it('峰落在重复段假峰、投票收敛真偏移 → 仲裁信投票', async () => {
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitles').mockResolvedValue({ code: 0, subtitles: [] })
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitleJson').mockResolvedValue([])
+    // 真偏移 -3.1(Ex 案例);峰结构让全曲 argmax 落在重复段错位处
+    const { mv, song } = doublePeakEnvelopes(-3.1)
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key', duration: 304,
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 0.3),
+      estimatedBpm: 120, provider: 'beat_this', rmsEnvelope: song,
+    } as any)
+    // mock 分析产物:峰 0.5 @+0.4(假峰),投票 -3.1(真),支持率 0.40(弱证实)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue({
+      trackKey: 'mv-align-video:oreno-key:BV1tK4y1V7FF',
+      duration: 346, provider: 'browser-fallback',
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 3.5),
+      downbeats: Array.from({ length: 150 }, (_, i) => i * 2 + 3.5),
+      estimatedBpm: 120, confidence: 0.3,
+      sourceSignature: 'pattern:600:0.300:300.300',
+      envelopePeak: 0.5, envelopeOffset: 0.4, envelopeProminence: 0.02,
+      envelopeVoteOffset: -3.1, rmsEnvelope: mv,
+    } as any)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({
+      songKey: 'oreno-key', songTitle: '俺の彼女', songArtists: ['宇多田ヒカル'],
+      songDuration: 304, songUrl: 'http://audio/song.flac',
+      bvid: 'BV1tK4y1V7FF', cid: 272669422, videoUrl: 'http://audio/mv.m4a',
+      candidateType: 'lyrics', trackKey: 'app-key',
+    })
+
+    expect(result).not.toBeNull()
+    // 仲裁采纳投票偏移而非假峰
+    expect(result!.offsetSeconds).toBeCloseTo(-3.1, 1)
+  })
+
+  it('峰≥0.6(同录音)时投票矛盾不仲裁 → 维持峰', async () => {
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitles').mockResolvedValue({ code: 0, subtitles: [] })
+    vi.spyOn(bilibiliApi, 'getBilibiliSubtitleJson').mockResolvedValue([])
+    const { mv, song } = doublePeakEnvelopes(12.4)
+    vi.spyOn(autoMixAnalysisService, 'getCached').mockResolvedValue({
+      trackKey: 'app-key', duration: 304,
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 0.3),
+      estimatedBpm: 120, provider: 'beat_this', rmsEnvelope: song,
+    } as any)
+    vi.spyOn(autoMixAnalysisService, 'analyze').mockResolvedValue({
+      trackKey: 'mv-align-video:oreno-key:BV1tK4y1V7FF',
+      duration: 346, provider: 'browser-fallback',
+      beats: Array.from({ length: 600 }, (_, i) => i * 0.5 + 15.7),
+      downbeats: Array.from({ length: 150 }, (_, i) => i * 2 + 15.7),
+      estimatedBpm: 120, confidence: 0.3,
+      sourceSignature: 'pattern:600:0.300:300.300',
+      envelopePeak: 0.72, envelopeOffset: 12.4, envelopeProminence: 0.12,
+      envelopeVoteOffset: 42.0, rmsEnvelope: mv,
+    } as any)
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    const result = await ensureMvAlignment({
+      songKey: 'oreno-key', songTitle: '俺の彼女', songArtists: ['宇多田ヒカル'],
+      songDuration: 304, songUrl: 'http://audio/song.flac',
+      bvid: 'BV1tK4y1V7FF', cid: 272669422, videoUrl: 'http://audio/mv.m4a',
+      candidateType: 'lyrics', trackKey: 'app-key',
+    })
+
+    // 同录音强证据:峰优先(投票以峰为先验扫描,无独立信息量)
+    expect(result).not.toBeNull()
+    expect(result!.offsetSeconds).toBeCloseTo(12.4, 1)
   })
 })
