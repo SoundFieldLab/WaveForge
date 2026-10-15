@@ -2,8 +2,12 @@ import express from 'express'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'url'
 import { dirname, join, extname, resolve, sep } from 'path'
-import { readdir, stat, readFile } from 'fs/promises'
+import { readdir, stat, readFile, writeFile, mkdir, rm } from 'fs/promises'
 import { existsSync, createReadStream, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+// 跨平台补源日志（rotateCrossFillLogIfNeeded/getCrossFillLogStream）以 fs.xxx 命名空间调用；
+// 此前只导入了命名成员，fs 未定义 → 首次 statSync 抛 ReferenceError 被静默 catch 吞掉，
+// 日志文件永远建不出来（"补源溯源"功能整体失效）。
+import fs from 'fs'
 import dns from 'node:dns'
 import os from 'node:os'
 import { execFile } from 'child_process'
@@ -76,6 +80,14 @@ import {
   fetchKugouYouthDynamic,
   fetchKugouYouthRecent,
   reportKugouYouthListen,
+  fetchKugouDiscoverCards,
+  fetchKugouDiscoverRecommend,
+  fetchKugouHeartRadio,
+  fetchKugouChannelTabs,
+  fetchKugouChannelWaterfall,
+  fetchKugouChannelSearch,
+  fetchKugouStyleBlindbox,
+  fetchKugouYuekuTab,
 } from './server/kugou-gateway.mjs'
 import { decodeAG1Response, encodeAG1Request, zzcSign } from '@jixun/qmweb-sign'
 import axios from 'axios'
@@ -89,7 +101,7 @@ import { registerSodaRoutes } from './server/qishui-api.mjs'
 // 汽水加密音频解密代理（/api/soda/audio）：CENC 流服务端解密为可播 FLAC/m4a
 import { registerSodaAudioProxy, clearSodaDecryptCache, getSodaDecryptCacheStats } from './server/qishui-audio-decryptor.mjs'
 import { registerAppleArtworkRoutes } from './server/apple-artwork-api.mjs'
-import { registerImageProxyRoutes } from './server/image-proxy.mjs'
+import { registerImageProxyRoutes, isBlockedIpAddress } from './server/image-proxy.mjs'
 import { fetchStreamWithIdleTimeout, parseByteRange, StreamProxyError } from './server/stream-proxy-utils.mjs'
 import { isAuthorizedLocalRequest, LOCAL_SERVICE_HEADER } from './server/local-service-auth.mjs'
 import { LOCAL_API_PROTOCOL_VERSION, LOCAL_API_SERVICE } from './server/local-api-health.mjs'
@@ -129,6 +141,10 @@ process.on('uncaughtException', (error) => {
 // 实例，统一设默认 agent 即可覆盖；网易云增强 API 自建 per-request agent，不受影响。
 axios.defaults.httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 64 })
 axios.defaults.httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 })
+// 全局默认超时：qq-music-api 库内部的 63 处 axios 调用全部没有 timeout（上游挂住 =
+// 路由永久悬挂，这是唯一没有超时兜底的上游族）。15s 与文件内其它直连 axios 的
+// withTimeout(10-15s) 同量级；显式设置了 timeout 的调用不受影响（axios 按请求覆盖）。
+axios.defaults.timeout = 15000
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3001
@@ -184,8 +200,14 @@ function getQQCookiePersistPath() {
 function persistQQMusicCookie(cookie) {
   try {
     const target = getQQCookiePersistPath()
+    if (!String(cookie || '').trim()) {
+      // 登出语义：删除持久化文件（而不是留下空文件），确保重启后绝不恢复旧登录态。
+      rmSync(target, { force: true })
+      return
+    }
     mkdirSync(dirname(target), { recursive: true })
-    writeFileSync(target, String(cookie || '').trim(), 'utf8')
+    // 0o600：仅当前用户可读。cookie 是完整登录态，多用户机器上默认 0644 会被其他本机用户读走。
+    writeFileSync(target, String(cookie).trim(), { encoding: 'utf8', mode: 0o600 })
   } catch (error) {
     console.warn('[QQCookie] 持久化失败（不影响本次登录）:', error?.message || error)
   }
@@ -854,7 +876,11 @@ const QQ_PLAYLIST_DETAIL_CACHE_TTL = 5 * 60 * 1000
 const QQ_PLAYLIST_DETAIL_CACHE_MAX = 50
 const qqPlaylistDetailCache = new Map()
 
-function setQQPlaylistDetailCache(cacheKey, value) {
+function setQQPlaylistDetailCache(cacheKey, value, generationAtStart) {
+  // 代次校验下沉到唯一写入点：写操作失效缓存（invalidate → generation+1）后，
+  // 仍在飞行中的旧分页拉取完成时会经这里把失效前的旧歌单写回内存缓存（TTL 5 分钟）。
+  // 未传 generation 的调用方是拉取起点之后的同步写入，天然最新，不拦截。
+  if (typeof generationAtStart === 'number' && generationAtStart !== qqPlaylistDetailGeneration) return
   if (qqPlaylistDetailCache.size >= QQ_PLAYLIST_DETAIL_CACHE_MAX) {
     const oldestKey = qqPlaylistDetailCache.keys().next().value
     if (oldestKey !== undefined) qqPlaylistDetailCache.delete(oldestKey)
@@ -863,6 +889,17 @@ function setQQPlaylistDetailCache(cacheKey, value) {
     value,
     expiresAt: Date.now() + QQ_PLAYLIST_DETAIL_CACHE_TTL,
   })
+}
+/** 统一缓存入口：空结果只进内存缓存自愈（5 分钟），绝不落盘——
+ * 上游抖动返回 {} 时曾被磁盘缓存钉死 24h（实测出现过 36 字节空壳文件）。
+ * v=3：无专辑单曲封面探测上线后作废 v2（旧数据里无专辑单曲存的是 404 的首选 vs URL）。 */
+function cacheQQPlaylistDetail(cacheKey, value, generationAtStart) {
+  if (!value || !Array.isArray(value.songlist) || value.songlist.length === 0) {
+    if (value) setQQPlaylistDetailCache(cacheKey, value, generationAtStart)
+    return
+  }
+  setQQPlaylistDetailCache(cacheKey, value, generationAtStart)
+  writeQQPlaylistDetailDisk(cacheKey, value)
 }
 const QQ_FEEDBACK_CONTEXT_TTL = 30 * 60 * 1000
 const QQ_FEEDBACK_CONTEXT_MAX = 1200
@@ -932,35 +969,123 @@ function qqPlaylistDetailDiskPath(cacheKey) {
   return join(baseDir, 'cache', 'qq-playlist-detail', `${qqHash33(cacheKey).toString(36)}-${safe}.json`)
 }
 function readQQPlaylistDetailDisk(cacheKey) {
-  try {
-    const file = qqPlaylistDetailDiskPath(cacheKey)
-    if (!existsSync(file)) return null
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    if (!parsed || typeof parsed.savedAt !== 'number' || !parsed.value) return null
-    if (Date.now() - parsed.savedAt > QQ_PLAYLIST_DETAIL_DISK_TTL) return null
-    return parsed
-  } catch {
-    return null
-  }
+  // MB 级歌单 JSON 的同步读+解析会卡住事件循环（冷启动/24h 过期后首个请求付全款），
+  // 改为 async：调用方本就在 async 上下文，await 一拍即可。
+  return (async () => {
+    try {
+      const file = qqPlaylistDetailDiskPath(cacheKey)
+      const parsed = JSON.parse(await readFile(file, 'utf8'))
+      // v=2：补封面逻辑上线后作废旧格式缓存（旧数据可能整份缺封面/空壳，钉 24h）
+      if (!parsed || parsed.v !== 3 || typeof parsed.savedAt !== 'number' || !parsed.value) return null
+      if (Date.now() - parsed.savedAt > QQ_PLAYLIST_DETAIL_DISK_TTL) return null
+      return parsed
+    } catch {
+      return null
+    }
+  })()
 }
 function writeQQPlaylistDetailDisk(cacheKey, value) {
-  try {
-    const file = qqPlaylistDetailDiskPath(cacheKey)
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, JSON.stringify({ savedAt: Date.now(), value }), 'utf8')
-  } catch {
-    // 缓存写失败不影响主流程
-  }
+  // 同步 writeFileSync 序列化+写盘同样阻塞事件循环，改 fire-and-forget 异步。
+  return (async () => {
+    try {
+      const file = qqPlaylistDetailDiskPath(cacheKey)
+      await mkdir(dirname(file), { recursive: true })
+      await writeFile(file, JSON.stringify({ savedAt: Date.now(), v: 3, value }), 'utf8')
+    } catch {
+      // 缓存写失败不影响主流程
+    }
+  })()
 }
 /** 写操作（喜欢/歌单增删改）后清两级缓存：磁盘 24h TTL 下必须主动失效，避免展示旧歌单。 */
+// 缓存代次：写操作失效时 +1。磁盘命中触发的后台静默刷新是 fire-and-forget（QQ 大歌单
+// 分页拉取窗口可达数十秒），期间用户加/删歌会让旧数据在刷新完成后被写回新缓存——
+// 完成时校验代次，代次变了就丢弃结果。
+let qqPlaylistDetailGeneration = 0
 function invalidateQQPlaylistDetailCache() {
+  qqPlaylistDetailGeneration += 1
   qqPlaylistDetailCache.clear()
-  try {
-    const baseDir = process.env.WAVEFORGE_USERDATA || join(os.homedir(), '.waveforge')
-    rmSync(join(baseDir, 'cache', 'qq-playlist-detail'), { recursive: true, force: true })
-  } catch {
+  // 磁盘缓存目录异步删除：此处发生在「喜欢/加歌」等高频写操作的响应路径上，
+  // 同步 rmSync 递归删几十份 MB 级 JSON 会阻塞事件循环数十毫秒。调用方均为
+  // fire-and-forget（旧文件多活到自然 TTL 过期也无碍，代次已保证不回读）。
+  const baseDir = process.env.WAVEFORGE_USERDATA || join(os.homedir(), '.waveforge')
+  void rm(join(baseDir, 'cache', 'qq-playlist-detail'), { recursive: true, force: true }).catch(() => {
     // 目录不存在等忽略
+  })
+}
+
+// 「我喜欢」等系统歌单的 uniform_get_Dissinfo 响应里，部分曲目只有 songid/songmid，
+// 不带 album.mid（曲库侧整歌信息，与登录态无关）。封面全靠 album.mid 拼 URL，缺了整行
+// 就是 No Cover。播放链路有逐曲补详情兜底（App.tsx loadQQSongDetail），列表链路没有，
+// 补出的封面也不回写列表——这就是「列表一直没封面、播放页过几秒有」的不对称。
+// 在歌单详情拉取层统一补齐：结果随两级缓存持久化，列表页与播放页拿到的都是全封面数据。
+// 限量：qqSongDetail 每首最多 2 次上游往返，缺封面的歌多时不放大请求——只补前
+// QQ_PLAYLIST_COVER_BACKFILL_MAX 首（其余仍由播放链路的逐曲补详情兜底）；
+// qqSongDetail 自带 mid 维缓存 + 并发闸门，失败回落原对象不阻塞主流程。
+const QQ_PLAYLIST_COVER_BACKFILL_MAX = 12
+async function backfillQQPlaylistSongCovers(songs) {
+  if (!Array.isArray(songs) || songs.length === 0) return songs
+  const missing = []
+  for (let index = 0; index < songs.length; index += 1) {
+    const track = songs[index]?.songInfo || songs[index]?.song || songs[index] || {}
+    const albumMid = track?.album?.mid || track?.albummid || ''
+    // 可信封面 = 有 album.mid（T002R 必可用）或带 coverVerified 标记的实测 albumpic
+    //（qqResolveTrackCover 探测后回写并打标，qqNormalizeSongFromTrack 透传到 albumpic）。
+    // qqTrackCover 对无专辑单曲返回的首个 vs T062 URL 未必可用（实测幸福刑 404），
+    // 不能当 hasCover——这类歌要走探测拿真封面。
+    const verifiedCover = track?.coverVerified
+      ? (track?.albumpic || track?.album?.picUrl || track?.picurl || songs[index]?.albumpic)
+      : ''
+    const hasCover = Boolean(albumMid || verifiedCover)
+    const mid = track.mid || track.songmid || track.songMid
+    if (!hasCover && mid) missing.push({ index, mid })
   }
+  if (missing.length === 0) return songs
+  const details = await Promise.all(missing.slice(0, QQ_PLAYLIST_COVER_BACKFILL_MAX).map(async ({ index, mid }) => {
+    try {
+      // 原始 track 作 fallback：qqSongDetail 失败时原样返回（无封面 → 不覆盖），
+      // 成功时保留 pay/vip、时长等原始字段（与搜索路径补详情同款做法）。
+      return { index, detail: await qqSongDetail(mid, songs[index]?.songInfo || songs[index]?.song || songs[index]) }
+    } catch {
+      return { index, detail: null }
+    }
+  }))
+  const patched = songs.slice()
+  for (const { index, detail } of details) {
+    // qqSongDetail 失败时回落空对象，没有封面就不覆盖
+    if (!detail?.album?.picUrl && !detail?.albumpic) continue
+    patched[index] = detail
+  }
+  return patched
+}
+
+// qq-playlist-detail 磁盘缓存周期清理：TTL 只在读取时惰性判断，纯听歌/浏览场景下
+// 过期文件永久留盘（每条 MB 级）。启动后 10 分钟首扫，此后每 6 小时清一次过期文件。
+{
+  const baseDir = process.env.WAVEFORGE_USERDATA || join(os.homedir(), '.waveforge')
+  const diskDir = join(baseDir, 'cache', 'qq-playlist-detail')
+  const cleanupExpiredPlaylistDetailFiles = async () => {
+    try {
+      for (const entry of await readdir(diskDir, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+        const file = join(diskDir, entry.name)
+        try {
+          const parsed = JSON.parse(await readFile(file, 'utf8'))
+          if (!parsed || typeof parsed.savedAt !== 'number') continue
+          if (Date.now() - parsed.savedAt > QQ_PLAYLIST_DETAIL_DISK_TTL) {
+            await rm(file, { force: true })
+          }
+        } catch {
+          // 单文件解析失败（损坏/并发写）：按 savedAt 缺失处理不删，下次自然覆盖
+        }
+      }
+    } catch {
+      // 目录不存在等忽略
+    }
+  }
+  const firstScan = setTimeout(() => { void cleanupExpiredPlaylistDetailFiles() }, 10 * 60 * 1000)
+  const periodicScan = setInterval(() => { void cleanupExpiredPlaylistDetailFiles() }, 6 * 60 * 60 * 1000)
+  firstScan.unref?.()
+  periodicScan.unref?.()
 }
 
 async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
@@ -978,12 +1103,14 @@ async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
     qqPlaylistDetailCache.delete(cacheKey)
   }
   // 磁盘命中：立即返回（冷启动不用再等大歌单的分页拉取），后台静默刷新一轮。
-  const diskHit = readQQPlaylistDetailDisk(cacheKey)
+  const diskHit = await readQQPlaylistDetailDisk(cacheKey)
   if (diskHit) {
+    const generationAtStart = qqPlaylistDetailGeneration
     void fetchQQPlaylistDetailUncached(id, songNum, cookie, cacheKey)
       .then(value => {
-        setQQPlaylistDetailCache(cacheKey, value)
-        writeQQPlaylistDetailDisk(cacheKey, value)
+        // 期间发生过写操作失效（代次变化）：本次结果基于失效前数据，丢弃不写回
+        if (generationAtStart !== qqPlaylistDetailGeneration) return
+        cacheQQPlaylistDetail(cacheKey, value)
       })
       .catch(() => { /* 后台刷新失败保留磁盘数据 */ })
     return diskHit.value
@@ -991,10 +1118,11 @@ async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
   // 同键并发合并：首页/乐馆/详情页同时拉同一歌单只打一轮上游。
   const pendingTask = qqPlaylistDetailPending.get(cacheKey)
   if (pendingTask) return pendingTask
+  const taskGenerationAtStart = qqPlaylistDetailGeneration
   const task = fetchQQPlaylistDetailUncached(id, songNum, cookie, cacheKey)
     .then(value => {
-      setQQPlaylistDetailCache(cacheKey, value)
-      writeQQPlaylistDetailDisk(cacheKey, value)
+      if (taskGenerationAtStart !== qqPlaylistDetailGeneration) return value
+      cacheQQPlaylistDetail(cacheKey, value)
       return value
     })
     .finally(() => { qqPlaylistDetailPending.delete(cacheKey) })
@@ -1004,6 +1132,9 @@ async function fetchQQPlaylistDetail(id, songNum = 10000, cookie = '') {
 
 async function fetchQQPlaylistDetailUncached(id, songNum = 10000, cookie = '', cacheKey = '') {
   const requestCookie = cookie || qqMusicCookie
+  // 拉取起点的缓存代次：期间发生写操作失效（代次+1）时，完成写入必须丢弃
+  // （setQQPlaylistDetailCache 内部校验；此前只覆盖磁盘命中触发的后台刷新路径）。
+  const fetchGenerationAtStart = qqPlaylistDetailGeneration
 
   let legacyDetail = {}
   if (!cookie) {
@@ -1021,8 +1152,12 @@ async function fetchQQPlaylistDetailUncached(id, songNum = 10000, cookie = '', c
   ) {
     // 旧接口拿到完整歌单时也要入缓存：调用方会用批量循环探测 song_cnt，
     // 不缓存会让每次请求都对上游重复拉取整份歌单。
-    setQQPlaylistDetailCache(cacheKey, legacyData)
-    return legacyData
+    const legacyWithCovers = await backfillQQPlaylistSongCovers(legacyData.songlist)
+    const legacyResult = legacyWithCovers === legacyData.songlist
+      ? legacyData
+      : { ...legacyData, songlist: legacyWithCovers }
+    setQQPlaylistDetailCache(cacheKey, legacyResult, fetchGenerationAtStart)
+    return legacyResult
   }
 
   const fetchPage = async (songBegin, pageSize) => {
@@ -1100,17 +1235,19 @@ async function fetchQQPlaylistDetailUncached(id, songNum = 10000, cookie = '', c
     song
   ])).values())
 
+  const coveredSongs = await backfillQQPlaylistSongCovers(uniqueSongs)
+
   const result = {
     ...firstPage.dirinfo,
-    songlist: uniqueSongs,
-    songnum: totalSongCount || uniqueSongs.length,
-    total_song_num: totalSongCount || uniqueSongs.length
+    songlist: coveredSongs,
+    songnum: totalSongCount || coveredSongs.length,
+    total_song_num: totalSongCount || coveredSongs.length
   }
-  setQQPlaylistDetailCache(cacheKey, result)
+  setQQPlaylistDetailCache(cacheKey, result, fetchGenerationAtStart)
   return result
 }
 
-async function fetchQQPlaylistFirstSong(id) {
+async function fetchQQPlaylistFirstSong(id, cookie = '') {
   if (!id) return null
   const payload = {
     req_0: {
@@ -1126,17 +1263,22 @@ async function fetchQQPlaylistFirstSong(id) {
       }
     }
   }
+  // 请求级 cookie 只读不写全局：请求未带 cookie 时回退全局登录态
+  const requestCookie = resolveRequestCookie(cookie)
   const response = await axios.get(QQ_MUSICU_URL, {
     params: { format: 'json', data: JSON.stringify(payload) },
     headers: {
       ...QQ_HEADERS,
-      ...(qqMusicCookie ? { Cookie: qqMusicCookie } : {})
+      ...(requestCookie ? { Cookie: requestCookie } : {})
     },
     timeout: 15000
   })
   const item = response.data?.req_0?.data?.songlist?.[0]
   if (!item) return null
   const track = item?.songInfo || item?.song || item
+  // 无专辑单曲（如幸福刑）的首个 vs T062 URL 是 404，直接归一化会让「我喜欢」卡片
+  // 封面破图占位——与详情路径一致走探测，拿到真可用封面再归一化。
+  await qqResolveTrackCover(track)
   return qqNormalizeSongFromTrack(track, track?.mid || track?.songmid, track)
 }
 
@@ -1234,11 +1376,19 @@ app.use((req, res, next) => {
   // Apple license 代理：兼容规范 Media-User-Token 与历史 X-Apple-Music-User-Token。
   // X-DGLab-Control-Token：DG-LAB 中继的 /control（启停中继）走这个头，
   // 漏了它浏览器会在预检阶段直接拦掉请求，表现成「点启动中继没反应」。
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Local-Token, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal, X-DGLab-Control-Token')
+  // X-WaveForge-Cookie：登录态从 URL query 迁出（URL 会进错误日志/代理日志）
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-WaveForge-Local-Token, X-WaveForge-Cookie, X-QQMusic-Skill-Key, Authorization, Media-User-Token, X-Apple-Music-User-Token, X-Apple-Renewal, X-DGLab-Control-Token')
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
   if (req.method === 'OPTIONS') return res.sendStatus(204)
   if (!tokenAuthorized) {
     return res.status(403).json({ error: 'Unauthorized local service request' })
+  }
+  // Cookie header 注入：前端新代码把登录态放 X-WaveForge-Cookie，这里在进路由前
+  // 回填到 req.query.cookie（仅当 query 未显式携带），后端约 19 处读取点零改动。
+  // query 里的 cookie 仍兼容（旧构建的 TV 前端），但新代码一律走 header。
+  const headerCookie = req.headers['x-waveforge-cookie']
+  if (typeof headerCookie === 'string' && headerCookie && req.query.cookie === undefined) {
+    req.query.cookie = headerCookie
   }
   next()
 })
@@ -1379,11 +1529,10 @@ app.post('/api/qq/cookie', (req, res) => {
   }
 })
 
-// 获取当前QQ音乐Cookie状态
+// 获取当前QQ音乐Cookie状态（不返回长度：cookieLength 可侧面反映账号/登录态类型）
 app.get('/api/qq/cookie/status', (req, res) => {
-  res.json({ 
-    hasCookie: !!qqMusicCookie,
-    cookieLength: qqMusicCookie.length 
+  res.json({
+    hasCookie: !!qqMusicCookie
   })
 })
 
@@ -1493,24 +1642,13 @@ function parseTimeToMs(timeStr) {
 // ========== TTML解析器结束 ==========
 
 
-// 判断地址是否属于内网/本机/链路本地等不允许代理访问的网段
+// 判断地址是否属于内网/本机/链路本地等不允许代理访问的网段。
+// 实现统一复用 image-proxy 的 isBlockedIpAddress（范本实现：IPv4-mapped IPv6 还原、
+// CGNAT/组播/保留段全覆盖、公网 IPv6 限定 2000::/3）。此前的手写副本漏掉
+// ::ffff:127.0.0.1、64:ff9b::（NAT64）、100.64.0.0/10（Tailscale/CGNAT）等网段，
+// 曾构成 /api/audio 的 SSRF 缺口。
 function isPrivateNetworkAddress(address) {
-  if (address.includes(':')) {
-    const lower = address.toLowerCase()
-    // ::、::1 及全零形式的本机/未指定地址
-    if (lower === '::' || lower === '::1' || lower === '0:0:0:0:0:0:0:0' || lower === '0:0:0:0:0:0:0:1') return true
-    // fc00::/7 唯一本地地址、fe80::/10 链路本地地址
-    if (lower.startsWith('fc') || lower.startsWith('fd')) return true
-    if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true
-    return false
-  }
-  const parts = address.split('.').map(Number)
-  if (parts.length !== 4) return false
-  const [a, b] = parts
-  return a === 0 || a === 127 || a === 10 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
+  return isBlockedIpAddress(address)
 }
 
 // SSRF 防护：返回 true 表示该 URL 指向内网/本机地址或无法安全解析，应拒绝
@@ -1540,17 +1678,20 @@ async function isBlockedFetchUrl(rawUrl) {
     return isPrivateNetworkAddress(hostname)
   }
 
-  // DNS 名称：解析后只要有一个地址落在私网网段即拒绝
+  // DNS 名称：解析后只要有一个地址落在私网网段即拒绝。
+  // lookup 带 AbortSignal（Node 18+）：3 秒超时后中止底层解析，不再像 setTimeout
+  // reject 那样把孤儿 lookup 线程留在后台堆积。
   const name = hostname.toLowerCase()
-  if (name === 'localhost' || name.endsWith('.local')) return true
+  if (name === 'localhost' || name.endsWith('.localhost') || name.endsWith('.local')) return true
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 3000)
   try {
-    const addresses = await Promise.race([
-      dns.promises.lookup(name, { all: true, verbatim: true }),
-      new Promise((resolve, reject) => setTimeout(() => reject(new Error('DNS lookup timeout')), 3000)),
-    ])
+    const addresses = await dns.promises.lookup(name, { all: true, verbatim: true, signal: controller.signal })
     return addresses.some(({ address }) => isPrivateNetworkAddress(address))
   } catch (error) {
     return true // 解析失败或超时：保守拒绝
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -1581,6 +1722,8 @@ app.get('/api/audio', async (req, res) => {
         headerTimeoutMs: AUDIO_PROXY_HEADER_TIMEOUT_MS,
         idleTimeoutMs: AUDIO_PROXY_IDLE_TIMEOUT_MS,
         maxBytes: AUDIO_PROXY_MAX_BYTES,
+        // 逐跳 SSRF 重校验：公网跳板 302 到内网地址时拒绝跟随
+        isUrlBlocked: (hopUrl) => isBlockedFetchUrl(hopUrl),
       }))
     } catch (error) {
       const status = error instanceof StreamProxyError ? error.status : 502
@@ -1650,18 +1793,34 @@ app.get('/api/cache/image/stats', (req, res) => {
 // 跨平台补源日志落盘（userData/cross-fill-log.jsonl）：控制台输出会随终端窗口丢失，
 // 排查「这首歌到底从哪个平台补的」需要持久记录。JSONL 追加写 + 2MB 轮转。
 let crossFillLogStream = null
+let crossFillLogPath = ''
+/** 轮转节流：每次写入都 statSync 太重，每 500 次写入查一次大小即可（2MB ≈ 2 万行）。 */
+let crossFillLogWriteCount = 0
+function rotateCrossFillLogIfNeeded() {
+  crossFillLogWriteCount += 1
+  if (crossFillLogWriteCount % 500 !== 0 || !crossFillLogPath || !crossFillLogStream) return
+  try {
+    const stat = fs.statSync(crossFillLogPath)
+    if (stat.size > 2 * 1024 * 1024) {
+      crossFillLogStream.end()
+      crossFillLogStream = null
+      fs.renameSync(crossFillLogPath, crossFillLogPath.replace(/\.jsonl$/, '.1.jsonl'))
+      crossFillLogStream = fs.createWriteStream(crossFillLogPath, { flags: 'a' })
+    }
+  } catch { /* 文件不存在 / 轮转失败：继续用当前流 */ }
+}
 function getCrossFillLogStream() {
   if (crossFillLogStream) return crossFillLogStream
   try {
     // 本服务是纯 Node 进程（无 electron）：userData 路径由启动方（dev-electron / 桌面主进程）
     // 经 WAVEFORGE_USERDATA 注入；直接 node 启动时缺 env → 退回控制台-only。
     if (!process.env.WAVEFORGE_USERDATA) return null
-    const logPath = path.join(process.env.WAVEFORGE_USERDATA, 'cross-fill-log.jsonl')
+    crossFillLogPath = join(process.env.WAVEFORGE_USERDATA, 'cross-fill-log.jsonl')
     try {
-      const stat = fs.statSync(logPath)
-      if (stat.size > 2 * 1024 * 1024) fs.renameSync(logPath, logPath.replace(/\.jsonl$/, '.1.jsonl'))
+      const stat = fs.statSync(crossFillLogPath)
+      if (stat.size > 2 * 1024 * 1024) fs.renameSync(crossFillLogPath, crossFillLogPath.replace(/\.jsonl$/, '.1.jsonl'))
     } catch { /* 首次无文件 */ }
-    crossFillLogStream = fs.createWriteStream(logPath, { flags: 'a' })
+    crossFillLogStream = fs.createWriteStream(crossFillLogPath, { flags: 'a' })
   } catch (error) {
     console.error('[平台可用性增强] 日志文件初始化失败:', error)
     return null
@@ -1685,6 +1844,7 @@ app.post('/api/diagnostics/cross-platform-fill', (req, res) => {
     // 落盘（带时间戳的 JSONL，尽量与控制台同内容）
     const stream = getCrossFillLogStream()
     if (stream) {
+      rotateCrossFillLogIfNeeded()
       stream.write(JSON.stringify({
         at: new Date().toISOString(),
         from,
@@ -1756,7 +1916,7 @@ async function callNeteaseAPIWithRetry(apiFunc, params, retries = 3, timeoutMs =
   for (let i = 0; i < retries; i++) {
     try {
       const result = await withTimeout(apiFunc(requestParams), timeoutMs)
-      
+
       if (result && result.body) {
         return result
       }
@@ -1768,6 +1928,9 @@ async function callNeteaseAPIWithRetry(apiFunc, params, retries = 3, timeoutMs =
       await new Promise(resolve => setTimeout(resolve, 500 * (i + 1)))
     }
   }
+  // "成功但 body 为空"连续重试耗尽：显式抛错。此前隐式返回 undefined，
+  // 调用方的 result.body 会抛属性访问错误，掩盖真实原因。
+  throw new Error('上游无有效响应（连续多次返回空结果）')
 }
 
 // 专辑封面 URL 进程级缓存：避免每次搜索都对前 15 个专辑重复拉取详情（放大上游请求）。
@@ -1795,9 +1958,14 @@ function cacheNeteaseAlbumCover(albumId, url) {
 }
 
 // 网易云音乐 API 路由
+// 搜索关键词统一清洗：限长（上游 URL/POST body 都不该收到超长词）、去首尾空白。
+// searchParams.set 会自动编码，无注入面；超长词会让上游直接 4xx/断连。
+const sanitizeSearchKeywords = (raw) => String(raw ?? '').trim().slice(0, 120)
+
 app.get('/api/netease/search', async (req, res) => {
   try {
-    const { keywords, limit = 30, type = '1' } = req.query
+    const { keywords: rawKeywords, limit = 30, type = '1' } = req.query
+    const keywords = sanitizeSearchKeywords(rawKeywords)
     if (!keywords) {
       return res.status(400).json({ error: '请提供搜索关键词' })
     }
@@ -1817,10 +1985,13 @@ app.get('/api/netease/search', async (req, res) => {
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        // timeout 参数：上游 axios 无默认超时（与 callNeteaseAPIWithRetry 同口径），
+        // 否则 3 次重试叠加递增等待是一个无上界的等待
         result = await NeteaseAPI.search({
           keywords,
           limit,
-          type
+          type,
+          timeout: 15000
         })
         // 成功获取结果，跳出循环
         if (attempt > 1) {
@@ -1844,58 +2015,50 @@ app.get('/api/netease/search', async (req, res) => {
     }
     
     // 网易云搜索API返回的album.picId会被JavaScript截断
-    // 只获取前30个专辑封面，其余的由前端按需加载
     if (result.body?.result?.songs) {
-      // 批量获取专辑详情
+      // 命中缓存的封面同步填充（无 IO）；未命中的转后台异步补齐并写缓存——
+      // 此前串行 15 专辑 × (100ms sleep + 上游往返) + 批间 200ms，冷启动首次搜索
+      // 固定多等 2-4s。前端对无封面歌曲有占位渲染，后台补齐后由后续搜索/详情读取。
       const albumIds = [...new Set(result.body.result.songs.map(s => s.album?.id).filter(Boolean))]
-      const albumDetails = {}
-      // 只获取前15个专辑的封面
-      const firstBatch = albumIds.slice(0, 15)
-      const batchSize = 3
-      for (let i = 0; i < firstBatch.length; i += batchSize) {
-        const batch = firstBatch.slice(i, i + batchSize)
-        await Promise.all(batch.map(async (albumId) => {
-          // 同一专辑会被反复搜索命中，命中缓存可跳过 100ms 等待与上游请求。
+      const pendingCovers = []
+      for (const song of result.body.result.songs) {
+        const albumId = song.album?.id
+        if (albumId) {
           const cachedCover = getCachedNeteaseAlbumCover(albumId)
-          if (cachedCover) {
-            albumDetails[albumId] = cachedCover
-            return
-          }
-          try {
-            await new Promise(resolve => setTimeout(resolve, 100)) // 每个请求前等待100ms
-            const albumRes = await NeteaseAPI.album({
-              id: albumId
-            })
-            if (albumRes.body?.album?.picUrl) {
-              albumDetails[albumId] = albumRes.body.album.picUrl
-              cacheNeteaseAlbumCover(albumId, albumRes.body.album.picUrl)
-            }
-          } catch (err) {
-            if (devMode) console.error(`✗ 获取专辑 ${albumId} 详情失败:`, err.message)
-          }
-        }))
-        // 批次之间延迟200ms
-        if (i + batchSize < firstBatch.length) {
-          await new Promise(resolve => setTimeout(resolve, 200))
+          if (cachedCover) song.album.picUrl = cachedCover
+          else if (NeteaseAPI?.album) pendingCovers.push(albumId)
         }
-      }
-      
-      if (devMode) console.log(`成功获取 ${Object.keys(albumDetails).length} 个专辑封面`)
-      
-      // 将封面URL添加到歌曲数据，并添加VIP和版权信息
-      result.body.result.songs = result.body.result.songs.map(song => {
-        if (song.album && albumDetails[song.album.id]) {
-          song.album.picUrl = albumDetails[song.album.id]
-        }
-        
         // 添加VIP和版权标识
         // fee: 0免费 1VIP 4付费专辑 8低音质免费
         song.vip = song.fee === 1 || song.fee === 4
         // 无版权：privilege.st < 0 或 privilege.playMaxbr === 0
         song.noCopyright = song.privilege?.st < 0 || song.privilege?.playMaxbr === 0
-        
-        return song
-      })
+      }
+      // 后台补齐（限 15 个，带节流防风控；不 await、不阻塞响应）
+      const firstBatch = pendingCovers.slice(0, 15)
+      if (firstBatch.length > 0) {
+        void (async () => {
+          const batchSize = 3
+          for (let i = 0; i < firstBatch.length; i += batchSize) {
+            const batch = firstBatch.slice(i, i + batchSize)
+            await Promise.all(batch.map(async (albumId) => {
+              try {
+                await new Promise(resolve => setTimeout(resolve, 100))
+                const albumRes = await NeteaseAPI.album({ id: albumId })
+                if (albumRes.body?.album?.picUrl) {
+                  cacheNeteaseAlbumCover(albumId, albumRes.body.album.picUrl)
+                }
+              } catch (err) {
+                if (devMode) console.error(`✗ [后台] 获取专辑 ${albumId} 详情失败:`, err.message)
+              }
+            }))
+            if (i + batchSize < firstBatch.length) {
+              await new Promise(resolve => setTimeout(resolve, 200))
+            }
+          }
+          if (devMode) console.log(`[后台] 搜索封面补齐完成 ${firstBatch.length} 个`)
+        })().catch(() => { /* 后台任务失败不影响主流程 */ })
+      }
     }
     
     res.json(result.body)
@@ -2020,7 +2183,8 @@ app.get('/api/netease/albums/covers', async (req, res) => {
 
 app.get('/api/netease/search/suggest', async (req, res) => {
   try {
-    const { keywords } = req.query
+    const { keywords: rawKeywords } = req.query
+    const keywords = sanitizeSearchKeywords(rawKeywords)
     if (!keywords) {
       return res.status(400).json({ error: '请提供搜索关键词' })
     }
@@ -2089,12 +2253,28 @@ function isAllowedFallbackAudioUrl(value) {
     const url = new URL(String(value || ''))
     if (!['http:', 'https:'].includes(url.protocol)) return false
 
-    const hostname = url.hostname.toLowerCase()
-    if (hostname === 'localhost' || hostname === '::1' || hostname.endsWith('.local')) return false
-    if (/^(0|10|127|169\.254|192\.168)\./.test(hostname)) return false
-    const private172 = /^172\.(\d+)\./.exec(hostname)
-    if (private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31) return false
-    return true
+    let hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    // 浏览器会把 [::ffff:127.0.0.1]、http://2130706433/ 等变体归一化到回环——
+    // 先还原再判断，否则白名单被这些等价写法绕过
+    const mapped = hostname.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)
+    if (mapped) hostname = mapped[1]
+    // IPv6 字面量：本机/链路本地/ULA 一律拒绝，公网段（2000::/3）放行
+    if (hostname.includes(':')) {
+      if (hostname === '::' || hostname === '::1' || hostname.startsWith('fc') || hostname.startsWith('fd') || hostname.startsWith('fe8') || hostname.startsWith('fe9') || hostname.startsWith('fea') || hostname.startsWith('feb')) return false
+      return /^[23][0-9a-f]{3}:/i.test(hostname)
+    }
+    // 非点分十进制的 IPv4 写法（十进制整数/八进制/不足四段）：交由域名分支当"非法主机名"拒绝
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
+      if (/^\d+$/.test(hostname)) return false
+      if (hostname === 'localhost' || hostname.endsWith('.local')) return false
+      return true
+    }
+    const parts = hostname.split('.').map(Number)
+    if (parts.some(part => part > 255)) return false
+    if (hostname === 'localhost' || hostname.endsWith('.local')) return false
+    const [a, b] = parts
+    return !(a === 0 || a === 127 || a === 10 || a === 169 && b === 254 || a === 192 && b === 168
+      || a === 172 && b >= 16 && b <= 31 || a === 100 && b >= 64 && b <= 127)
   } catch {
     return false
   }
@@ -2438,6 +2618,8 @@ app.get('/api/netease/song/url', async (req, res) => {
 // 而 QQ 歌词早已有 30min 缓存。这里加一层同样粒度的 id 维缓存，只缓存成功结果。
 const neteaseLyricCache = new Map()
 const NETEASE_LYRIC_TTL = 30 * 60 * 1000
+// 失败负缓存 TTL：全部重试失败后的空结果只保留 2 分钟，之后允许再次尝试上游
+const NETEASE_LYRIC_NEGATIVE_TTL = 2 * 60 * 1000
 const NETEASE_LYRIC_CACHE_MAX = 300
 
 app.get('/api/netease/lyric', async (req, res) => {
@@ -2456,10 +2638,11 @@ app.get('/api/netease/lyric', async (req, res) => {
       return res.json(cachedLyric.body)
     }
 
-    // 增强重试机制：更多次数，更长超时，指数退避
+    // 重试机制：3 次（此前 5 次 × 10s 超时 + 指数退避，最坏单请求近 1 分钟——
+    // 切歌等歌词的等待不可接受；失败已写负缓存 + 前端有其它歌词来源兜底）
     let lastError = null
-    const retries = 5 // 从 3 次增加到 5 次
-    const delays = [300, 600, 1200, 2400, 4800] // 指数退避
+    const retries = 3
+    const delays = [300, 600] // 指数退避（重试间隙）
     
     for (let i = 0; i < retries; i++) {
       try {
@@ -2489,8 +2672,21 @@ app.get('/api/netease/lyric', async (req, res) => {
     }
     
     // 所有重试都失败，返回空歌词（200状态码，让前端尝试其他来源）
-    console.error(`[歌词API] ⚠️ 所有 ${retries} 次重试均失败，歌曲ID: ${id}，返回空歌词`)
-    res.status(200).json({ 
+    // 失败也写短 TTL 负缓存：上游真挂时同一首歌反复打满 5 次重试 + 指数退避（单请求近 1 分钟）
+    // 毫无意义；负缓存 2 分钟内直接回空歌词，让前端走其它来源，也给上游喘息窗口。
+    console.error(`[歌词API] ⚠️ 所有 ${retries} 次重试均失败，歌曲ID: ${id}，返回空歌词（负缓存 2 分钟）`)
+    neteaseLyricCache.set(String(id), { at: Date.now() - (NETEASE_LYRIC_TTL - NETEASE_LYRIC_NEGATIVE_TTL), body: {
+      code: 200,
+      lrc: { lyric: '' },
+      tlyric: { lyric: '' },
+      yrc: { lyric: '' },
+      romalrc: { lyric: '' },
+    } })
+    if (neteaseLyricCache.size > NETEASE_LYRIC_CACHE_MAX) {
+      const oldestKey = neteaseLyricCache.keys().next().value
+      if (typeof oldestKey === 'string') neteaseLyricCache.delete(oldestKey)
+    }
+    res.status(200).json({
       code: 200,
       // 返回空歌词结构，前端会尝试其他来源
       lrc: { lyric: '' },
@@ -3287,9 +3483,14 @@ function qqTrackCover(track, size = 500) {
     return qqAlbumCover(albumMid, size)
   }
 
-  const singleCoverMid = Array.isArray(track?.vs) ? track.vs.find(Boolean) : ''
-  if (singleCoverMid) {
-    return qqPhotoCover('T062', singleCoverMid, size)
+  // 无专辑单曲（プロセカ等，实测幸福刑 mid=003pLd7W3d6LJt：album.mid 为空）：
+  // vs[] 是关联版本曲目 mid 列表，多数 T062 图 404，个别有真封面（官方 PC 客户端就是
+  // 逐个探测 vs 取第一个能加载的）；pmid 是官方兜底占位图（客户端「兼容性封面」同源）。
+  // 这里无法同步探测 URL 可用性，按「真封面优先」排序给出首选：vs 逐个在前、pmid 垫底，
+  // 调用方（qqSongDetail / 歌单封面回填）用 qqFirstReachableCover 探测后取用。
+  const vsMids = Array.isArray(track?.vs) ? track.vs.filter(Boolean) : []
+  if (vsMids.length > 0) {
+    return qqPhotoCover('T062', vsMids[0], size)
   }
 
   if (track?.album?.pmid) {
@@ -3299,9 +3500,64 @@ function qqTrackCover(track, size = 500) {
   return track?.picurl || track?.picUrl || track?.albumPic || track?.albumCover || track?.cover || ''
 }
 
+/** 无专辑单曲的封面候选链（首个 T062 404 时逐个替换 vs，最后落 pmid 占位图）。 */
+function qqTrackCoverCandidates(track, size = 500) {
+  const candidates = []
+  const seen = new Set()
+  const push = url => { if (url && !seen.has(url)) { seen.add(url); candidates.push(url) } }
+  const vsMids = Array.isArray(track?.vs) ? track.vs.filter(Boolean) : []
+  for (const vsMid of vsMids.slice(0, 6)) push(qqPhotoCover('T062', vsMid, size))
+  if (track?.album?.pmid) push(qqAlbumCover(String(track.album.pmid).replace(/_\d+$/, ''), size))
+  return candidates
+}
+
+/** 逐个 HEAD 探测候选封面 URL，返回第一个真实可用的（QQ 图床占位图无法从状态码区分，
+ * 但 pmid 垫底已把占位图排在真封面之后）。全部失败返回 ''。 */
+async function qqFirstReachableCover(track, size = 500) {
+  const candidates = qqTrackCoverCandidates(track, size)
+  for (const url of candidates) {
+    try {
+      const response = await axios.head(url, {
+        headers: { ...QQ_HEADERS },
+        timeout: 5000,
+        // QQ 图床偶尔拒绝 HEAD：失败也继续试下一个候选
+      })
+      if (response.status === 200 && String(response.headers['content-type'] || '').startsWith('image/')) {
+        return url
+      }
+    } catch {
+      // 下一候选
+    }
+  }
+  return ''
+}
+
+/** 详情路径专用：album.mid 正常时直接拼 URL（同步快路径，T002R 必可用）；
+ *  无专辑单曲（album.mid 空）逐个探测 vs/pmid 候选——候选里 T062 与 T002R 的可用性
+ *  因 mid 而异（实测幸福刑 vs[1] 只在 T062 可用），必须以探测到的**完整 URL** 为准，
+ *  写进 track.picurl 让 qqNormalizeSongFromTrack 最优先采用；绝不能回写 album.mid
+ *  （T062 mid 拼成 T002R 会 404）。探测过的 URL 额外打 coverVerified 标记，
+ *  供 backfill 区分「实测可用」与「盲拼首选（多半 404）」。 */
+async function qqResolveTrackCover(track) {
+  const albumMid = track?.album?.mid || track?.albummid || ''
+  if (albumMid) return qqAlbumCover(albumMid, 500)
+  const reachable = await qqFirstReachableCover(track, 500)
+  if (reachable) {
+    track.picurl = reachable
+    track.coverVerified = 1
+    return reachable
+  }
+  // 全部候选不可用（极少见）：维持旧首选，让上层走 picUrl 原始字段兜底
+  return qqTrackCover(track, 500)
+}
+
 function qqNormalizeSongFromTrack(track, mid, fallback = {}) {
   const artists = (track?.singer || []).map(s => ({ id: s.id, name: s.name, mid: s.mid }))
-  const coverUrl = qqTrackCover(track, 500) || fallback.album?.picUrl || fallback.albumpic || ''
+  // qqResolveTrackCover 探测出的可用封面（T062 等）会以完整 URL 写进 track.picurl，
+  // 必须最优先——qqTrackCover 对无专辑单曲返回的首个 vs T062 URL 未必可用（实测 404）。
+  const coverUrl = track?.picurl || qqTrackCover(track, 500) || fallback.album?.picUrl || fallback.albumpic || ''
+  // 探测标记透传：backfill 靠它区分「实测可用」与「盲拼首选」的封面 URL
+  const coverVerified = track?.coverVerified || fallback.coverVerified || 0
 
   return {
     id: track?.id || fallback.id || fallback.songid || 0,
@@ -3319,6 +3575,7 @@ function qqNormalizeSongFromTrack(track, mid, fallback = {}) {
       picUrl: coverUrl
     },
     albumpic: coverUrl,
+    coverVerified,
     duration: (track?.interval || 0) * 1000 || fallback.duration || (fallback.interval || 0) * 1000 || 0,
     platform: 'qq',
     songType: Number(track?.type ?? track?.songtype ?? track?.songType ?? fallback.songType ?? fallback.type) || 0,
@@ -3489,7 +3746,22 @@ async function fetchQQRecentSongs(cookie, { lastTime = 0 } = {}) {
   }
 
   const rows = getQQRecentSongRows(response)
-  const records = rows.map(normalizeQQRecentSongRow).filter(Boolean)
+  let records = rows.map(normalizeQQRecentSongRow).filter(Boolean)
+  // 最近播放与歌单同病：无专辑单曲（幸福刑等）的归一化封面是首个 vs 的 T062 URL，
+  // 多数 404 → 前端四宫格/最近播放页灰块。对缺专辑 mid 的行限量补详情（探测出真封面），
+  // 复用 qqSongDetail 的 mid 维缓存 + 并发闸门——最近播放过的歌大多已在缓存，增量成本小。
+  try {
+    const covered = await backfillQQPlaylistSongCovers(records.map(record => ({ songInfo: record.song })))
+    records = covered
+      .map((item, index) => {
+        const song = item?.songInfo || item?.song || item
+        if (!song || song === records[index]?.song) return records[index]
+        return { song, playTime: records[index]?.playTime || 0 }
+      })
+      .filter(Boolean)
+  } catch {
+    // 回填失败保留原行
+  }
   const data = requestResult?.data || {}
   return {
     source: 'qq-musicu-play-recently',
@@ -3831,7 +4103,7 @@ async function qqSmartboxSearch(keywords, limit = 10) {
   url.searchParams.set('notice', '0')
   url.searchParams.set('platform', 'yqq.json')
 
-  const response = await fetch(url.toString(), { headers: QQ_HEADERS })
+  const response = await fetch(url.toString(), { headers: QQ_HEADERS, signal: AbortSignal.timeout(10000) })
   const json = await response.json()
   const items = json?.data?.song?.itemlist || []
   // 增加limit，smartbox虽然只返回少量结果，但我们尽量多取
@@ -3860,7 +4132,7 @@ async function qqSmartboxSearch(keywords, limit = 10) {
         name: item.album?.name || item.albumname || '',
         picUrl: qqAlbumCover(albumMid, 500)
       },
-      duration: item.interval || 0,
+      duration: (item.interval || 0) * 1000,
       platform: 'qq'
     }
   })
@@ -3894,14 +4166,15 @@ async function qqWebSearch(keywords, limit = 30, devMode = false) {
     
     if (devMode) console.log('[QQ网页搜索] 请求URL:', url.toString())
     
-    const response = await fetch(url.toString(), { 
+    const response = await fetch(url.toString(), {
       headers: {
         ...QQ_HEADERS,
         'Referer': 'https://y.qq.com/'
-      }
+      },
+      signal: AbortSignal.timeout(10000)
     })
     const json = await response.json()
-    
+
     if (devMode) {
     }
     
@@ -3936,7 +4209,7 @@ artists,
           name: item.albumname || '',
           picUrl: coverUrl
         },
-        duration: item.interval || 0,
+        duration: (item.interval || 0) * 1000,
         platform: 'qq',
         vip: item.pay?.payplay === 1, // payplay=1表示需要VIP才能播放
         noCopyright: false, // QQ音乐搜索结果一般都有版权
@@ -4025,7 +4298,7 @@ async function qqMusicSearch(keywords, limit = 30, devMode = false) {
           name: item.album?.name || '',
           picUrl: qqAlbumCover(albumMid, 500)
         },
-        duration: item.interval || 0,
+        duration: (item.interval || 0) * 1000,
         platform: 'qq'
       }
     })
@@ -4048,11 +4321,13 @@ const QQ_SONG_DETAIL_CONCURRENCY = 6
 let qqSongDetailActive = 0
 const qqSongDetailWaiters = []
 
-// 曲目对象是纯 JSON 结构，深拷贝用 JSON 往返而不是 structuredClone：
-// 本文件也会跑在设备端（TV/Android）可能更老的 Node 上。
-const cloneSongDetail = (value) => {
-  try { return JSON.parse(JSON.stringify(value)) } catch { return value }
-}
+// 曲目对象是纯 JSON 结构，深拷贝优先 structuredClone（原生实现快于 JSON 往返），
+// 本文件也会跑在设备端（TV/Android）可能更老的 Node 上——无 structuredClone 时退回 JSON 往返。
+const cloneSongDetail = typeof structuredClone === 'function'
+  ? (value) => { try { return structuredClone(value) } catch { return value } }
+  : (value) => {
+    try { return JSON.parse(JSON.stringify(value)) } catch { return value }
+  }
 
 async function withQQSongDetailSlot(task) {
   if (qqSongDetailActive >= QQ_SONG_DETAIL_CONCURRENCY) {
@@ -4103,15 +4378,15 @@ async function qqSongDetailUncached(mid, fallback = {}, devMode = false) {
     })
 
     let track = json?.req_1?.data?.track_info
-    
+
     if (track) {
-      const coverUrl = qqTrackCover(track, 500)
-      
+      const coverUrl = await qqResolveTrackCover(track)
+
       if (coverUrl) {
         return qqNormalizeSongFromTrack(track, mid, fallback)
       }
     }
-    
+
     // 方法2: 尝试vkey API (这个API通常返回更完整的信息)
     json = await qqMusicRequest({
       comm: { ct: 24, cv: 0 },
@@ -4121,11 +4396,11 @@ async function qqSongDetailUncached(mid, fallback = {}, devMode = false) {
         param: { song_mid: mid }
       }
     })
-    
+
     track = json?.req_1?.data?.info
     if (track) {
-      const coverUrl = qqTrackCover(track, 500)
-      
+      const coverUrl = await qqResolveTrackCover(track)
+
       if (coverUrl) {
         return qqNormalizeSongFromTrack(track, mid, fallback)
       }
@@ -4141,7 +4416,8 @@ async function qqSongDetailUncached(mid, fallback = {}, devMode = false) {
 // QQ 音乐 API 路由
 app.get('/api/qq/search', async (req, res) => {
   try {
-    const { keywords, limit = 30, type = 'song' } = req.query
+    const { keywords: rawKeywords, limit = 30, type = 'song' } = req.query
+    const keywords = sanitizeSearchKeywords(rawKeywords)
     if (!keywords) {
       return res.status(400).json({ error: '请提供搜索关键词' })
     }
@@ -4175,14 +4451,15 @@ app.get('/api/qq/search', async (req, res) => {
       
       console.log('[QQ音乐歌手搜索] 请求URL:', url.toString())
       
-      const response = await fetch(url.toString(), { 
+      const response = await fetch(url.toString(), {
         headers: {
           ...QQ_HEADERS,
           'Referer': 'https://y.qq.com/'
-        }
+        },
+        signal: AbortSignal.timeout(10000)
       })
       const json = await response.json()
-      
+
       console.log('[QQ音乐歌手搜索] 返回数据keys:', Object.keys(json))
       const singers = []
       
@@ -4227,7 +4504,7 @@ app.get('/api/qq/search', async (req, res) => {
         })
       }
       if (singers.length > 0) {
-        console.log('[QQ音乐歌手搜索] 歌手列表:', JSON.stringify(singers.map(s => ({ id: s.singer_id, mid: s.singer_mid, name: s.singer_name, albumNum: s.albumNum, songNum: s.songNum })), null, 2))
+        if (devMode) console.log('[QQ音乐歌手搜索] 歌手列表:', JSON.stringify(singers.map(s => ({ id: s.singer_id, mid: s.singer_mid, name: s.singer_name, albumNum: s.albumNum, songNum: s.songNum })), null, 2))
         
         // 为所有没有专辑数量或歌曲数量的歌手补充详细信息
         const enrichPromises = singers.map(async (singer) => {
@@ -4260,7 +4537,7 @@ app.get('/api/qq/search', async (req, res) => {
         
         // 等待所有补充操作完成
         await Promise.all(enrichPromises)
-        console.log('[QQ音乐歌手搜索] 最终数据:', JSON.stringify(singers.map(s => ({ name: s.singer_name, albumNum: s.albumNum, songNum: s.songNum })), null, 2))
+        if (devMode) console.log('[QQ音乐歌手搜索] 最终数据:', JSON.stringify(singers.map(s => ({ name: s.singer_name, albumNum: s.albumNum, songNum: s.songNum })), null, 2))
       } else {
       }
       
@@ -4292,11 +4569,12 @@ app.get('/api/qq/search', async (req, res) => {
       url.searchParams.set('p', '1')
       url.searchParams.set('remoteplace', 'txt.mqq.all')
       
-      const response = await fetch(url.toString(), { 
+      const response = await fetch(url.toString(), {
         headers: {
           ...QQ_HEADERS,
           'Referer': 'https://y.qq.com/'
-        }
+        },
+        signal: AbortSignal.timeout(10000)
       })
       const json = await response.json()
       const albumList = json?.data?.album?.list || []
@@ -4331,7 +4609,7 @@ app.get('/api/qq/search', async (req, res) => {
         
         // 调试：输出第一个专辑的完整信息
         if (index === 0) {
-          console.log('[QQ音乐专辑搜索] 第一个专辑原始数据:', JSON.stringify(item, null, 2))
+          if (devMode) console.log('[QQ音乐专辑搜索] 第一个专辑原始数据:', JSON.stringify(item, null, 2))
           console.log('[QQ音乐专辑搜索] 第一个专辑处理后:', JSON.stringify(album, null, 2))
         }
         
@@ -4355,7 +4633,8 @@ app.get('/api/qq/search', async (req, res) => {
         headers: {
           ...QQ_HEADERS,
           'Referer': 'https://y.qq.com/'
-        }
+        },
+        signal: AbortSignal.timeout(10000)
       })
       const json = await response.json()
       const mvList = json?.data?.mv?.list || []
@@ -4375,7 +4654,7 @@ app.get('/api/qq/search', async (req, res) => {
     // QQ 歌单搜索（t=2，需 cookie）
     if (type === 'playlist') {
       useQQMusicCookie(req.query.cookie)
-      const result = await qqMusicApi.api('search', { key: keywords, t: 2, pageNo: 1, pageSize: parseInt(limit) })
+      const result = await qqMusicApi.api('search', { key: keywords, t: 2, pageNo: 1, pageSize: Math.min(100, Math.max(1, parseInt(limit, 10) || 30)) })
       const list = result?.list || []
       const playlists = list.map((item) => ({
         id: item.dissid || item.tid,
@@ -4390,7 +4669,7 @@ app.get('/api/qq/search', async (req, res) => {
     }
 
     // 歌曲搜索（默认）
-    const base = await qqMusicSearch(keywords, parseInt(limit), devMode)
+    const base = await qqMusicSearch(keywords, Math.min(100, Math.max(1, parseInt(limit, 10) || 30)), devMode)
     // 获取每首歌的详细信息（包含封面）
     const detailed = await Promise.all(base.map(async item => {
       try {
@@ -4416,7 +4695,7 @@ app.get('/api/qq/search', async (req, res) => {
 // QQ音乐 - 获取艺人详情
 app.get('/api/qq/artist', async (req, res) => {
   try {
-    const { mid, name } = req.query
+    const { mid, name, devMode } = req.query
     if (!mid) {
       return res.status(400).json({ error: '请提供歌手mid' })
     }
@@ -4439,7 +4718,7 @@ app.get('/api/qq/artist', async (req, res) => {
       songNum = songsData?.total || 0
       singerName = songsData?.singer?.singername || songsData?.singer?.name || '未知歌手'
       fans = songsData?.singer?.fans || 0
-      console.log('[QQ音乐艺人详情] singer对象:', JSON.stringify(songsData?.singer, null, 2))
+      if (devMode) console.log('[QQ音乐艺人详情] singer对象:', JSON.stringify(songsData?.singer, null, 2))
     } catch (songsError) {
       console.warn('[QQ音乐艺人详情] 获取歌曲统计失败:', songsError.message)
     }
@@ -4675,7 +4954,7 @@ app.get('/api/qq/album', async (req, res) => {
 // QQ音乐 - 获取艺人歌曲
 app.get('/api/qq/artist/songs', async (req, res) => {
   try {
-    const { mid, name, limit = 50, offset = 0 } = req.query
+    const { mid, name, limit = 50, offset = 0, devMode } = req.query
     if (!mid) {
       return res.status(400).json({ error: '请提供歌手mid' })
     }
@@ -4705,8 +4984,29 @@ app.get('/api/qq/artist/songs', async (req, res) => {
       interval: item.interval || 0,  // 添加歌曲时长（秒）
       pay: item.pay || {}  // 添加VIP信息
     }))
+    // 无专辑单曲（プロセカ系，实测该艺人 89 首里 6 首 albummid 为空）封面为 404 首选 vs
+    // URL 或空——与歌单/最近播放同款，限量走 qqSongDetail 探测（详情接口带 vs，可探出
+    // T062 真封面）。qqSongDetail 自带 mid 缓存 + 并发闸门，热门歌基本零成本。
+    try {
+      const covered = await backfillQQPlaylistSongCovers(songs.map(song => ({ songInfo: song })))
+      for (let index = 0; index < songs.length; index += 1) {
+        const detail = covered[index]?.songInfo || covered[index]?.song || covered[index]
+        if (detail && detail !== songs[index] && (detail.album?.picUrl || detail.albumpic)) {
+          songs[index] = {
+            ...songs[index],
+            albumid: detail.album?.id ?? songs[index].albumid,
+            albummid: detail.album?.mid || songs[index].albummid,
+            albumname: detail.album?.name || songs[index].albumname,
+            albumpic: detail.album?.picUrl || detail.albumpic || songs[index].albumpic,
+            picurl: detail.album?.picUrl || detail.albumpic || '',
+          }
+        }
+      }
+    } catch {
+      // 探测失败保留原映射（与歌单 backfill 同口径）
+    }
     // 输出前5首歌曲用于调试
-    if (songs.length > 0) {
+    if (devMode && songs.length > 0) {
       console.log('[QQ音乐艺人歌曲] 前5首歌曲:', JSON.stringify(songs.slice(0, 5), null, 2))
     }
     
@@ -4722,7 +5022,7 @@ async function retryApiCall(apiFunc, maxRetries = 3, delayMs = 500) {
   for (let i = 0; i < maxRetries; i++) {
     try {
       const result = await apiFunc()
-      
+
       // 检查是否是网络错误（502等）
       if (result.status === 502 || (result.body && result.body.code === 502)) {
         if (i < maxRetries - 1) {
@@ -4731,7 +5031,7 @@ async function retryApiCall(apiFunc, maxRetries = 3, delayMs = 500) {
           continue
         }
       }
-      
+
       return result
     } catch (error) {
       console.error(`[重试机制] 第 ${i + 1} 次尝试异常:`, error.message)
@@ -4743,6 +5043,8 @@ async function retryApiCall(apiFunc, maxRetries = 3, delayMs = 500) {
       }
     }
   }
+  // 最后一次仍是 502 时循环自然结束：显式抛错，不返回 undefined
+  throw new Error('上游持续 502（重试耗尽）')
 }
 
 // 网易云音乐 - 获取艺人详情
@@ -4870,11 +5172,22 @@ app.get('/api/netease/artist/albums', async (req, res) => {
     if (!id) {
       return res.status(400).json({ error: '请提供歌手id', albums: [] })
     }
-    const response = await fetch(`https://music.163.com/api/artist/albums/${id}?limit=${limit}&offset=${offset}`, {
+    // id 白名单 + limit/offset 数字校验：原模板字符串直拼 query（id 拼路径），可注入
+    // 额外参数或改写路径。参照本文件 7051 AMLL 路由的防护口径。
+    if (!/^[0-9]{1,20}$/.test(String(id))) {
+      return res.status(400).json({ error: '歌手id 非法', albums: [] })
+    }
+    const safeLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 200))
+    const safeOffset = Math.max(0, parseInt(offset, 10) || 0)
+    const upstreamUrl = new URL(`https://music.163.com/api/artist/albums/${encodeURIComponent(id)}`)
+    upstreamUrl.searchParams.set('limit', String(safeLimit))
+    upstreamUrl.searchParams.set('offset', String(safeOffset))
+    const response = await fetch(upstreamUrl, {
       headers: {
         'Referer': 'https://music.163.com/',
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      },
+      signal: AbortSignal.timeout(10000)
     })
     const json = await response.json()
 
@@ -4903,8 +5216,9 @@ app.get('/api/qq/artist/albums', async (req, res) => {
     // 纯数字 mid = singer_id：反查真 mid（与 /api/qq/artist 同口径）
     const effectiveMid = (await resolveQQSingerMid(mid, String(name || ''))) || String(mid)
 
-    const pageNum = parseInt(page)
-    const pageSizeNum = parseInt(pageSize)
+    // 一基对外（page=0 视为 1）：0 基换算后不会再把 -1 发给上游
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
+    const pageSizeNum = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 30))
     // 使用 qq-music-api 库获取歌手专辑
     const result = await qqMusicApi.api('singer/album', {
       singermid: effectiveMid,
@@ -5249,7 +5563,7 @@ app.get('/api/qq/artist/mvs', async (req, res) => {
     // 纯数字 mid = singer_id：反查真 mid（与 /api/qq/artist 同口径）
     const effectiveMid = (await resolveQQSingerMid(mid, String(name || ''))) || String(mid)
 
-    const pageNum = parseInt(page)
+    const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const pageSizeNum = parseInt(pageSize)
     // 使用 qq-music-api 库获取歌手MV
     const result = await qqMusicApi.api('singer/mv', {
@@ -5269,7 +5583,7 @@ app.get('/api/qq/artist/mvs', async (req, res) => {
       const coverUrl = normalizeQQImageUrl(
         item.pic || item.cover_pic || item.coverpic || item.picurl || item.cover
       )
-      
+
       return {
         vid: item.vid,
         name: item.name || item.title,
@@ -5279,6 +5593,58 @@ app.get('/api/qq/artist/mvs', async (req, res) => {
         duration: item.duration
       }
     })
+    // fcg_singer_mv.fcg 对部分艺人返回空（实测 25時、ナイトコードで。 total=0，QQ 客户端却
+    // 有「视频24」页）——上游按 tmem 索引覆盖不全。用 MV 搜索（t=12）按歌手 mid 过滤回填：
+    // 每页 20 条，翻到取满或断流为止，限量 3 页防放大。
+    // name 缺失（部分前端入口不传 artistName）时从歌手详情接口取名兜底，否则回填永远跳过。
+    if (mvs.length === 0) {
+      let keyword = String(name || '').trim()
+      if (!keyword) {
+        try {
+          // 用与 /api/qq/artist 相同的库通道取歌手名(库自带正确请求头,直连 musicu 会被风控)
+          const songsResult = await qqMusicApi.api('singer/songs', { singermid: effectiveMid, num: 1, page: 1 })
+          const songsData = songsResult.data || songsResult
+          keyword = String(songsData?.singer?.singername || songsData?.singer?.name || '').trim()
+        } catch {
+          // 详情失败维持空 keyword，回填自然跳过
+        }
+      }
+      if (keyword) {
+        const seen = new Set()
+        for (let searchPage = 1; searchPage <= 3; searchPage += 1) {
+          let searchResult
+          try {
+            searchResult = await axios.get('https://c.y.qq.com/soso/fcgi-bin/client_search_cp', {
+              params: {
+                format: 'json', inCharset: 'utf-8', outCharset: 'utf-8',
+                w: keyword, t: 12, n: 20, p: searchPage,
+              },
+              headers: { ...QQ_HEADERS },
+              timeout: 10000,
+            })
+          } catch {
+            break
+          }
+          const rows = searchResult.data?.data?.mv?.list || []
+          if (rows.length === 0) break
+          for (const row of rows) {
+            const matchedMid = row.singerMID || (row.singer_list || []).find(singer => singer.mid)?.mid
+            if (matchedMid !== effectiveMid) continue
+            const vid = row.v_id || row.vid
+            if (!vid || seen.has(vid)) continue
+            seen.add(vid)
+            mvs.push({
+              vid,
+              name: row.mv_name || row.title,
+              picurl: normalizeQQImageUrl(row.mv_pic_url),
+              playcnt: row.play_count,
+              pubdate: row.publish_date,
+              duration: row.duration,
+            })
+          }
+        }
+      }
+    }
     if (mvs.length > 0 && pageNum === 1) {
       console.log('[QQ音乐艺人MV] 前5个MV:', JSON.stringify(mvs.slice(0, 5), null, 2))
     }
@@ -5494,14 +5860,15 @@ app.get('/api/qq/suggest', async (req, res) => {
     url.searchParams.set('platform', 'yqq.json')
     url.searchParams.set('needNewCode', '1')
 
-    const response = await fetch(url.toString(), { 
+    const response = await fetch(url.toString(), {
       headers: {
         ...QQ_HEADERS,
         'Referer': 'https://y.qq.com/'
-      }
+      },
+      signal: AbortSignal.timeout(10000)
     })
     const json = await response.json()
-    
+
     const suggestions = []
     
     // 优先添加歌手建议
@@ -5597,7 +5964,8 @@ const KG_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHT
 /** 酷狗搜索（songsearch.kugou.com/song_search_v2） */
 app.get('/api/kugou/search', async (req, res) => {
   try {
-    const { keyword, limit = '30' } = req.query
+    const { keyword: rawKeyword, limit = '30' } = req.query
+    const keyword = sanitizeSearchKeywords(rawKeyword)
     if (!keyword) return res.status(400).json({ error: '请提供关键词' })
     const url = new URL('https://songsearch.kugou.com/song_search_v2')
     url.searchParams.set('keyword', String(keyword))
@@ -5727,7 +6095,18 @@ app.get('/api/kugou/playlist/detail', async (req, res) => {
   try {
     const { specialid, page = '1', pagesize = '50' } = req.query
     if (!specialid) return res.status(400).json({ error: '请提供歌单 ID' })
-    const resp = await fetch(`https://m.kugou.com/plist/list/${String(specialid)}/?json=true&page=${page}&pagesize=${pagesize}`, {
+    // id 白名单 + 分页钳制：specialid 原样拼路径（注入面），pagesize 无上限（99999 一次
+    // 向上游要全量）。参照 AMLL 路由的防护口径。
+    if (!/^[0-9]{1,20}$/.test(String(specialid))) {
+      return res.status(400).json({ error: '歌单 ID 非法' })
+    }
+    const safePage = Math.max(1, parseInt(page, 10) || 1)
+    const safePagesize = Math.min(200, Math.max(1, parseInt(pagesize, 10) || 50))
+    const upstreamUrl = new URL(`https://m.kugou.com/plist/list/${encodeURIComponent(String(specialid))}/`)
+    upstreamUrl.searchParams.set('json', 'true')
+    upstreamUrl.searchParams.set('page', String(safePage))
+    upstreamUrl.searchParams.set('pagesize', String(safePagesize))
+    const resp = await fetch(upstreamUrl, {
       headers: { 'User-Agent': KG_UA },
       redirect: 'follow',
       signal: AbortSignal.timeout(12000),
@@ -5994,7 +6373,12 @@ app.get('/api/kugou/user/playlist/tracks', async (req, res) => {
     const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
     if (!cookieStr || !listid) return res.status(400).json({ error: '缺少参数' })
     const result = await fetchKugouPlaylistTracks(String(listid), cookieStr, Number(pagesize) || 50, Number(page) || 1)
-    if (!result.success) return res.status(401).json({ error: result.error })
+    // 401 只留给真正的鉴权失败；上游 5xx/网络错误/歌单不存在归为 502，避免误导用户重登
+    if (!result.success) {
+      const message = String(result.error || '')
+      const isAuthError = /未登录|登录|credentials|token|401/i.test(message)
+      return res.status(isAuthError ? 401 : 502).json({ error: message || '酷狗接口失败' })
+    }
     res.json({ songs: result.tracks, total: result.total })
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -6008,7 +6392,14 @@ app.post('/api/kugou/like/check', async (req, res) => {
     const cookieStr = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : ''
     if (!cookieStr) return res.status(401).json({ error: '酷狗未登录' })
     const result = await kugouLikeCheckHashes(Array.isArray(hashes) ? hashes : [], cookieStr)
-    if (result.error) return res.status(401).json({ error: result.error })
+    if (result.error) {
+      const message = String(result.error)
+      const isAuthError = /未登录|登录|credentials|token|401/i.test(message)
+      return res.status(isAuthError ? 401 : 502).json({ error: message })
+    }
+    // liked 缺失（上游 200 但空体）：按全部"未红心"返回会让前端把已红心曲目误显示为
+    // 未红心、再次点赞产生脏数据——这里如实报 502 让前端保留当前状态。
+    if (!Array.isArray(result.liked)) return res.status(502).json({ error: '酷狗红心状态返回异常' })
     res.json({ liked: result.liked })
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -6026,8 +6417,11 @@ app.post('/api/kugou/like', async (req, res) => {
       if (!result.success) return res.status(400).json({ error: result.error || '加歌失败' })
       res.json({ result: 100, platform: 'kugou', listId: result.listId })
     } else {
-      // 取消喜欢：酷狗无"移除"专用轻接口，走从歌单删除（需要 fileid）——先返回支持标记
-      res.json({ result: 100, platform: 'kugou', note: 'unlike-via-remove' })
+      // 取消喜欢：网页通道无对应上游端点。此前返回 result:100 是假成功——前端把红心
+      // 立即置为"已取消"，刷新后从服务端拉回真实状态又变回"已喜欢"。如实返回不支持，
+      // 前端（likeKugouSong 的 !resp.ok 分支）返回 false 并提示。（概念版通道有完整的
+      // 取消喜欢实现：/api/kugou/concept/like，前端登录概念版后自动走那条路。）
+      res.status(501).json({ error: '酷狗网页通道暂不支持取消喜欢：请使用酷狗概念版扫码登录后再试' })
     }
   } catch (error) {
     res.status(500).json({ error: error.message })
@@ -6155,6 +6549,15 @@ const kugouExploreRoutes = [
   ['/api/kugou/concept/longaudio/daily', (q) => fetchKugouLongaudioDaily(q.credential, q.page, q.pagesize)],
   ['/api/kugou/concept/longaudio/album', (q) => fetchKugouLongaudioAlbum(q.credential, q.ids || q.album_id)],
   ['/api/kugou/concept/longaudio/audios', (q) => fetchKugouLongaudioAudios(q.credential, q.album_id, q.page, q.pagesize)],
+  // ── 发现页（概念版「发现」tab 真机抓包接口，2026-10-15）──────────
+  ['/api/kugou/concept/discover/cards', (q) => fetchKugouDiscoverCards(q.credential, q.page)],
+  ['/api/kugou/concept/discover/recommend', (q) => fetchKugouDiscoverRecommend(q.credential, q.card_rank)],
+  ['/api/kugou/concept/discover/radio', (q) => fetchKugouHeartRadio(q.credential, q.size, { flush: q.flush })],
+  ['/api/kugou/concept/discover/channel-tabs', (q) => fetchKugouChannelTabs(q.credential)],
+  ['/api/kugou/concept/discover/channel-waterfall', (q) => fetchKugouChannelWaterfall(q.credential, q.bi_index, q.label)],
+  ['/api/kugou/concept/discover/channel-search', (q) => fetchKugouChannelSearch(q.credential, q.q, q.bi_index)],
+  ['/api/kugou/concept/discover/blindbox', (q) => fetchKugouStyleBlindbox(q.credential)],
+  ['/api/kugou/concept/discover/yueku-tab', (q) => fetchKugouYuekuTab(q.credential)],
 ]
 for (const [path, handler] of kugouExploreRoutes) {
   app.post(path, async (req, res) => {
@@ -6535,7 +6938,8 @@ const QISHUI_PUBLIC_CONTENTS_URL = 'https://api-vehicle.volcengine.com/v2/custom
 
 app.get('/api/qishui/search', async (req, res) => {
   try {
-    const { keyword, limit = '30', offset = '0' } = req.query
+    const { keyword: rawKeyword, limit = '30', offset = '0' } = req.query
+    const keyword = sanitizeSearchKeywords(rawKeyword)
     if (!keyword) return res.status(400).json({ error: '缺少关键词' })
     const requestLimit = Math.min(100, Math.max(Number(offset) + (Number(limit) * 3 || 0), 36))
     const url = new URL(QISHUI_PUBLIC_SEARCH_URL)
@@ -6617,15 +7021,23 @@ app.get('/api/qq/song/url', async (req, res) => {
     let songType = 0
     let qqFileInfo = null
     let qqVariants = []
-    try {
-      const metadata = await getQQPlaybackMetadata(songMid)
-      qqFileInfo = metadata.file
-      mediaMid = metadata.mediaMid
-      songType = metadata.songType
-      qqVariants = Array.isArray(metadata.variants) ? metadata.variants : []
-    } catch (detailError) {
-      console.warn('[QQ URL] failed to resolve media metadata:', detailError.message)
-    }
+    // 元数据与 vkey 探测**并行**：元数据（song 详情，冷缓存 0.3-6s）只服务于高端档文件名、
+    // mediaMid 校正与 size_* 日志对照；常规档文件名前缀可先用 songMid 试探（多数曲目
+    // mediaMid === songMid）。串行等元数据会把它的耗时全额加进出声延迟（用户实测点歌
+    // 4-5s 才出声的大头之一）。探测先用 songMid 起跑，元数据回来后若 mediaMid 不同
+    // 且尚无命中 → 用 mediaMid 补一轮探测。
+    const metadataPromise = getQQPlaybackMetadata(songMid)
+      .then(metadata => {
+        qqFileInfo = metadata.file
+        mediaMid = metadata.mediaMid
+        songType = metadata.songType
+        qqVariants = Array.isArray(metadata.variants) ? metadata.variants : []
+        return metadata
+      })
+      .catch(detailError => {
+        console.warn('[QQ URL] failed to resolve media metadata:', detailError.message)
+        return null
+      })
 
     const qualitySizeFields = {
       flac: 'size_flac',
@@ -6673,8 +7085,10 @@ app.get('/api/qq/song/url', async (req, res) => {
       return fallbackQuality
     }
 
-    const requestDirectQQUrl = async (quality, loginflag, filenameOverride) => {
-      const filename = filenameOverride || getQQFilename(mediaMid, quality)
+    const requestDirectQQUrl = async (quality, loginflag, filenameOverride, probeMediaId) => {
+      // 探测文件名可指定 mediaId（songMid 首探 miss 后用元数据 mediaMid 补探）；
+      // songmid 参数始终用 songMid（服务端按 songmid 定位曲目，filename 才是媒体文件名）
+      const filename = filenameOverride || getQQFilename(probeMediaId || mediaMid, quality)
       const json = await qqMusicRequest({
         comm: {
           uin: qqUin,
@@ -6788,15 +7202,27 @@ app.get('/api/qq/song/url', async (req, res) => {
       }
     }
 
-    // 串行探测的教训（用户实测「本曲有无损却播了流畅」）：单次 vkey 请求偶发 5s 超时/抖动，
+    // 串行探测的教训（用户实测「本曲有无损却播了流畅」）：单次 vkey 偶发 5s 超时/抖动，
     // 后续高档还没轮到预算就被耗尽，直接落低档。这里改为**全部候选并行探测**、按候选序
     // （高→低）取第一个成功者——总耗时=最慢一发，且高档不会再被慢请求"挤掉"。
-    const directResults = await Promise.allSettled(
+    // 探测用 songMid 起跑（多数曲目 mediaMid === songMid，可立即命中）；元数据并行拉取，
+    // 探测全 miss 且 mediaMid ≠ songMid 时用 mediaMid 补一轮——元数据耗时被并行吸收，
+    // 不再串行计入出声延迟。
+    const probeWith = mediaId => Promise.allSettled(
       candidates.map(quality => {
         logMetadataMismatch(quality)
-        return requestDirectQQUrl(quality, qqUin ? 1 : 0)
+        return requestDirectQQUrl(quality, qqUin ? 1 : 0, undefined, mediaId)
       }),
     )
+    let directResults = await probeWith(songMid)
+    const firstDirectHit = results => results.find(r => r.status === 'fulfilled' && r.value)
+    if (!firstDirectHit(directResults)) {
+      await metadataPromise
+      if (mediaMid && mediaMid !== songMid) {
+        console.log(`[QQ URL] songMid probe missed, retrying with mediaMid=${mediaMid}`)
+        directResults = await probeWith(mediaMid)
+      }
+    }
     for (let index = 0; index < candidates.length; index += 1) {
       const result = directResults[index]
       if (result.status === 'fulfilled' && result.value) {
@@ -6864,17 +7290,22 @@ app.get('/api/qq/song/detail', async (req, res) => {
       return res.status(400).json({ error: '请提供歌曲mid', song: null })
     }
 
-    const song = await qqSongDetail(songMid, { mid: songMid })
-    // 额外获取完整板块（基础信息 info：语种/流派/唱片公司/发行时间/简介等）
+    // 两个上游请求互不依赖（详情 vs 完整板块），并行拉取——原先串行最多白等两段上游延迟。
     let detail = null
-    try {
-      const full = await qqMusicApi.api('song', { songmid: songMid })
-      if (full && full.info) {
-        detail = { info: full.info, track_info: full.track_info || null, extras: full.extras || null }
-      }
-    } catch (detailError) {
-      console.warn('[QQ音乐详情] 板块获取失败:', detailError?.message || detailError)
-    }
+    const [song] = await Promise.all([
+      qqSongDetail(songMid, { mid: songMid }),
+      // 额外获取完整板块（基础信息 info：语种/流派/唱片公司/发行时间/简介等）
+      (async () => {
+        try {
+          const full = await qqMusicApi.api('song', { songmid: songMid })
+          if (full && full.info) {
+            detail = { info: full.info, track_info: full.track_info || null, extras: full.extras || null }
+          }
+        } catch (detailError) {
+          console.warn('[QQ音乐详情] 板块获取失败:', detailError?.message || detailError)
+        }
+      })(),
+    ])
 
     // 从 track_info.file 提取可用音质等级（size_* > 0 表示该音质可用）
     const ti = detail?.track_info
@@ -7003,7 +7434,7 @@ app.get('/api/lyrics/amll-ttml', async (req, res) => {
 
 app.get('/api/qq/lyric', async (req, res) => {
   try {
-    const { id, mid, cookie } = req.query
+    const { id, mid, cookie, devMode } = req.query
     if (!id && !mid) {
       return res.status(400).json({ error: '请提供歌曲id或mid' })
     }
@@ -7051,7 +7482,7 @@ app.get('/api/qq/lyric', async (req, res) => {
         const j = await qqMusicRequest({
           comm: { ct: 24, cv: 0 },
           lyric: { module: 'music.musichallSong.PlayLyricInfo', method: 'GetPlayLyricInfo', param: p },
-        })
+        }, { cookie: resolveRequestCookie(cookie) })
         return j?.lyric?.data || null
       }
 
@@ -7082,8 +7513,10 @@ app.get('/api/qq/lyric', async (req, res) => {
       }
       if (data?.qrc && typeof data.qrc === 'string') {
         console.log(`[QQ音乐歌词] qrc字符串长度: ${data.qrc.length}, 前50字符: ${data.qrc.substring(0, 50)}`)
-      } else {
-        console.log(`[QQ音乐歌词] qrc字段值: ${data?.qrc} (不是字符串，无法解密)`)
+      } else if (data?.qrc != null) {
+        // musicu 的 qrc 字段只是请求参数的**回显**（请求 qrc:1 → 返回数字 1），
+        // 真正的逐字歌词以 hex 形式在 lyric 字段里，由下方 decryptQQEncryptedLyric 解出。
+        console.log(`[QQ音乐歌词] qrc字段=${data?.qrc}（参数回显，逐字内容在 lyric 字段）`)
       }
       
       // 尝试解密 QRC（只有当 qrc 是非空字符串时）
@@ -7116,12 +7549,12 @@ app.get('/api/qq/lyric', async (req, res) => {
         // 检测是否为 kana 格式
         if (qrcDecrypted.includes('[kana:')) {
           qrcText = convertKanaToYrc(qrcDecrypted)
-          if (qrcText.length > 0) {
+          if (devMode && qrcText.length > 0) {
             console.log(qrcText.substring(0, 300))
           }
         } else {
           qrcText = qrcDecrypted
-          console.log(qrcDecrypted.substring(0, 800))
+          if (devMode) console.log(qrcDecrypted.substring(0, 800))
         }
       } else if (hasQrcWordTiming(decryptedLyric)) {
         // 检测是否为 kana 格式
@@ -7129,11 +7562,11 @@ app.get('/api/qq/lyric', async (req, res) => {
           qrcText = convertKanaToYrc(decryptedLyric)
         } else {
           qrcText = decryptedLyric
-          console.log(decryptedLyric.substring(0, 800))
+          if (devMode) console.log(decryptedLyric.substring(0, 800))
         }
       } else {
         console.log(`[QQ音乐歌词] ⚠️ 未找到逐字歌词 (QRC格式)`)
-        if (qrcDecrypted.length > 0) {
+        if (devMode && qrcDecrypted.length > 0) {
           console.log(qrcDecrypted.substring(0, 500))
         }
       }
@@ -7198,7 +7631,8 @@ app.get('/api/qq/lyric', async (req, res) => {
           headers: {
             'Referer': 'https://y.qq.com/portal/player.html',
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Cookie': cookie || ''
+            // 与方法1 同口径：请求未带 cookie 时回退全局登录态（resolveRequestCookie）
+            'Cookie': resolveRequestCookie(cookie)
           },
           signal: controller.signal
         })
@@ -7229,7 +7663,7 @@ app.get('/api/qq/lyric', async (req, res) => {
         const controller = new AbortController()
         const timeoutId = setTimeout(() => controller.abort(), 3000) // 3秒超时
         
-        const response = await fetch(`https://amlldb.bikonoo.com/qq-lyrics/${songMid}.ttml`, {
+        const response = await fetch(`https://amlldb.bikonoo.com/qq-lyrics/${encodeURIComponent(String(songMid))}.ttml`, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
           },
@@ -7287,11 +7721,16 @@ app.get('/api/qq/top', async (req, res) => {
   try {
     const { id = 26, devMode } = req.query // 26: 热歌榜, 4: 流行榜
     const isDev = devMode === 'true'
-    
+
     if (isDev) console.log('[QQ音乐热榜] 正在获取热榜，ID:', id)
-    
+
+    // id 钳制：非数字 → NaN → JSON.stringify 成 null 打上游（下方空结果分支会把错误吞掉）
+    const topId = parseInt(id, 10)
+    if (!Number.isFinite(topId) || topId <= 0) {
+      return res.status(400).json({ error: '榜单 id 非法' })
+    }
     // 使用qq-music-api获取热榜
-    const result = await qqMusicApi.api('top', { id: parseInt(id) })
+    const result = await qqMusicApi.api('top', { id: topId })
     
     if (isDev) console.log('[QQ音乐热榜] API返回结果:', result ? '成功' : '失败')
     
@@ -9089,12 +9528,15 @@ app.post('/api/explore/qq/native/songs', async (req, res) => {
     const cards = Array.isArray(req.body?.cards) ? req.body.cards.slice(0, 36) : []
     const songs = []
     for (let offset = 0; offset < cards.length; offset += 6) {
+      // 解析失败的卡保留 null 占位：消费端（PcSongShelf / playModuleAt）按数组下标对齐卡片，
+      // filter 掉失败项会让后续歌曲整体前移一位 —— 行上显示 A 歌、点下去播 B 歌。
+      // 前端 resolveQQExploreSongs 会按 songId 对齐过滤，缓存与播放列表不会出现空洞实体。
       const batch = await Promise.all(cards.slice(offset, offset + 6).map(card => resolveQQNativeSongById(card?.songId, requestCookie, {
         name: String(card?.title || ''),
         artist: String(card?.artist || ''),
         coverUrl: String(card?.coverUrl || '')
       }).catch(() => null)))
-      songs.push(...batch.filter(Boolean))
+      songs.push(...batch)
     }
     res.setHeader('Cache-Control', 'private, max-age=3600')
     return res.json({ code: 200, songs })
@@ -9313,7 +9755,8 @@ app.get('/api/qq/radio/channels', async (req, res) => {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         Referer: 'https://y.qq.com/'
-      }
+      },
+      signal: AbortSignal.timeout(10000)
     })
     if (!response.ok) throw new Error(`官方频道页返回 ${response.status}`)
     const data = extractQQWebInitialData(await response.text())
@@ -9336,6 +9779,91 @@ app.get('/api/qq/radio/channels', async (req, res) => {
   } catch (error) {
     console.error('[QQ音乐频道] 获取失败:', error?.message || error)
     return res.status(502).json({ code: 502, error: error?.message || '获取频道列表失败' })
+  }
+})
+
+// 「歌手节目」(艺人弹窗):真数据源 = music.recommend.SingerRadioServer.GetSongList
+// (2026-10-15 从 QQMusic_Protocol.dll 静态逆向得到,官方客户端"歌手节目"按钮同源,
+//  客户端传输走 WNS 长连接但该模块在 musicu.fcg HTTP 网关同样开放)。
+// 参数:singerId(数字 singer_id,非 mid,secretUin 可省)。返回官方编辑的节目歌曲批(vecSong)。
+app.get('/api/qq/artist/programs', async (req, res) => {
+  try {
+    const { mid, name, cookie } = req.query
+    if (!mid) return res.status(400).json({ error: '请提供歌手mid' })
+    const effectiveMid = (await resolveQQSingerMid(mid, String(name || ''))) || String(mid)
+    const requestCookie = resolveRequestCookie(cookie)
+    // mid → 数字 singer_id:复用 /api/qq/artist 的上游(get_singer_detail_info 返回 singer_id)
+    const detailResult = await qqMusicRequest({
+      singer: {
+        module: 'music.web_singer_info_svr',
+        method: 'get_singer_detail_info',
+        param: { sort: 5, singermid: effectiveMid, sin: 0, num: 1 }
+      },
+      comm: { ct: 24, cv: 0 }
+    }, { cookie: requestCookie })
+    const singerInfo = detailResult?.singer?.data?.singer_info || detailResult?.singer?.data?.singer || {}
+    const singerId = Number(singerInfo.singerid || singerInfo.id) || 0
+    if (!singerId) {
+      return res.json({ programs: [], note: '未能解析歌手数字 ID' })
+    }
+    const radioResult = await qqMusicRequest({
+      req: {
+        module: 'music.recommend.SingerRadioServer',
+        method: 'GetSongList',
+        param: { singerId }
+      },
+      comm: { ct: 24, cv: 0, ...(requestCookie ? {} : {}) }
+    }, { cookie: requestCookie })
+    const radioData = radioResult?.req?.data
+    if (!radioData || radioData.retcode !== 0 || !Array.isArray(radioData.vecSong)) {
+      return res.json({ programs: [], note: '该歌手暂无官方节目数据' })
+    }
+    // vecSong[].track 是完整曲目(含 album/singer/interval/pay)。无专辑单曲(track.album.mid 空)
+    // 走既有探测链补 T062 封面,与歌单/艺人歌曲同口径。
+    const tracks = radioData.vecSong.map(entry => entry?.track).filter(Boolean)
+    try {
+      const covered = await backfillQQPlaylistSongCovers(tracks.map(track => ({ songInfo: track })))
+      for (let index = 0; index < tracks.length; index += 1) {
+        const detail = covered[index]?.songInfo || covered[index]?.song || covered[index]
+        const track = tracks[index]
+        if (detail && detail !== track && (detail.album?.picUrl || detail.albumpic)) {
+          const pic = detail.album?.picUrl || detail.albumpic
+          track.album = { ...(track.album || {}), mid: detail.album?.mid || track.album?.mid, picUrl: pic }
+          track.picurl = pic
+        }
+      }
+    } catch {
+      // 探测失败保留原样
+    }
+    // 电台形态:每首歌一个「节目」。封面优先 track.picurl(探测结果)→ album.mid 拼URL。
+    const programs = tracks.map((track, index) => {
+      const albumMid = track.album?.mid || ''
+      const cover = track.picurl || (albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${albumMid}.jpg` : '')
+      const songs = [{
+        songid: track.id,
+        songmid: track.mid,
+        songname: track.name || track.title,
+        albumid: track.album?.id,
+        albummid: albumMid,
+        albumname: track.album?.name || track.album?.title || '',
+        singer: track.singer || [],
+        interval: track.interval || 0,
+        pay: track.pay || {},
+        albumpic: cover,
+      }]
+      return {
+        id: `singer-radio-${track.mid || track.id || index}`,
+        title: track.name || track.title || '节目',
+        coverUrl: cover,
+        duration: (track.interval || 0) * 1000,
+        singer: track.singer || [],
+        songs,
+      }
+    }).filter(program => program.songs[0] && program.songs[0].songmid && program.title)
+    res.json({ programs, total: programs.length, source: 'singer-radio-server', singerId })
+  } catch (error) {
+    console.error('[QQ音乐歌手节目] 错误:', error)
+    res.status(500).json({ error: error.message, programs: [] })
   }
 })
 
@@ -9371,6 +9899,19 @@ app.get('/api/explore/netease/recommendations/next', async (req, res) => {
     const count = Math.max(10, Math.min(Number(req.query.count) || 30, 60))
     const batch = Math.max(1, Math.floor(Number(req.query.batch) || 1))
     const excluded = new Set(String(req.query.exclude || '').split(',').map(value => value.trim()).filter(Boolean))
+    // 命中 60s 缓存：排除仍按本次 exclude 过滤（前端排除集随播放推进）
+    const cachedNext = getRecommendCache(`netease-explore-next:${cookie}:${batch}:${count}`)
+    if (cachedNext && Array.isArray(cachedNext.songs)) {
+      const seen = new Set(excluded)
+      const songs = cachedNext.songs.filter(song => {
+        const key = String(song?.id || '')
+        if (!key || seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      res.setHeader('Cache-Control', 'private, no-store')
+      return res.json({ code: 200, songs, batch: cachedNext.batch, hasMore: true })
+    }
     const areaTypes = [0, 7, 96, 8, 16]
     const areaType = areaTypes[(batch - 1) % areaTypes.length]
 
@@ -9414,6 +9955,10 @@ app.get('/api/explore/netease/recommendations/next', async (req, res) => {
     }
 
     res.setHeader('Cache-Control', 'private, no-store')
+    // 5 路上游结果按 batch 维缓存（60s）：连续「下一批」翻页时前端常以相同 batch 参数
+    // 重试/重入（组件冻结重挂、快速连点），无缓存会把 5 路上游整体重打一遍（风控放大）。
+    // songs 的排除逻辑在前端（exclude 传参），缓存原始 song 数组不影响正确性。
+    setRecommendCache(`netease-explore-next:${cookie}:${batch}:${count}`, { songs, batch })
     return res.json({ code: 200, songs, batch, hasMore: true })
   } catch (error) {
     console.error('[探索模式][网易云] 获取下一批无限推荐失败:', error)
@@ -9450,24 +9995,35 @@ async function fetchNeteasePersonalFmBatches(cookie, targetCount = 21, maxBatche
   const seen = new Set()
   let noGrowthCount = 0
 
-  for (let batch = 0; batch < maxBatches && songs.length < targetCount; batch += 1) {
-    const result = await NeteaseAPI.personal_fm({ cookie })
-    if (!firstResult) firstResult = result || {}
-    const candidates = result?.body?.data || []
-    const before = songs.length
-    for (const song of candidates) {
-      const key = String(song?.id || '')
-      if (!key || seen.has(key)) continue
-      seen.add(key)
-      songs.push(song)
-      if (songs.length >= targetCount) break
-    }
-    noGrowthCount = songs.length === before ? noGrowthCount + 1 : 0
-    if (!Array.isArray(candidates) || candidates.length === 0 || noGrowthCount >= 2) break
-    if (batch < maxBatches - 1 && songs.length < targetCount) {
-      await new Promise(resolve => setTimeout(resolve, 80))
+  // 2-3 路并发拉批（私人 FM 各批独立），凑满 targetCount 或连续空转即停；
+  // 原实现逐批串行（每批间隔 80ms），最多 8 批串行明显拖慢首屏。
+  const CONCURRENCY = 3
+  let nextBatch = 0
+  const runBatch = async () => {
+    while (songs.length < targetCount && noGrowthCount < 2 && nextBatch < maxBatches) {
+      const batch = nextBatch
+      nextBatch += 1
+      const result = await NeteaseAPI.personal_fm({ cookie })
+      if (!firstResult) firstResult = result || {}
+      const candidates = result?.body?.data || []
+      let added = 0
+      for (const song of candidates) {
+        const key = String(song?.id || '')
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        songs.push(song)
+        added += 1
+        if (songs.length >= targetCount) break
+      }
+      if (!Array.isArray(candidates) || candidates.length === 0) noGrowthCount += 1
+      else if (added === 0) noGrowthCount += 1
+      else noGrowthCount = 0
+      if (batch < maxBatches - 1 && songs.length < targetCount && noGrowthCount < 2) {
+        await new Promise(resolve => setTimeout(resolve, 80))
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, maxBatches) }, () => runBatch()))
 
   return {
     ...(firstResult || {}),
@@ -10438,8 +10994,21 @@ app.post('/api/explore/qq/skills/interpretation', async (req, res) => {
     res.setHeader('Connection', 'keep-alive')
     res.flushHeaders?.()
     if (upstreamType.includes('text/event-stream')) {
-      // 上游是标准 SSE：原样透传
-      for await (const chunk of upstream.body) res.write(chunk)
+      // 上游是标准 SSE：原样透传（带背压：客户端消费慢时暂停读上游，避免缓冲堆积）
+      const clientClosed = new Promise(resolve => { res.on('close', resolve) })
+      try {
+        for await (const chunk of upstream.body) {
+          if (res.writableEnded || res.destroyed) break
+          if (!res.write(chunk)) {
+            await Promise.race([new Promise(resolve => res.once('drain', resolve)), clientClosed])
+          }
+        }
+      } catch (streamError) {
+        if (!res.writableEnded) {
+          res.write(`\nevent: error\ndata: ${JSON.stringify({ message: '上游连接中断' })}\n\n`)
+        }
+        console.warn('[QQ AI 解读] SSE 透传中断:', streamError?.message || streamError)
+      }
     } else {
       // 上游返回 JSON（整包）：解析后提取文本，以 SSE data 事件转发，前端才能增量显示
       const json = await upstream.json().catch(() => null)
@@ -10505,9 +11074,12 @@ app.get('/api/qq/user/detail', async (req, res) => {
     if (!id) {
       return res.status(400).json({ result: 500, errMsg: '请提供用户ID' })
     }
-    // 读取类路由：请求 cookie 仅本次使用，不回写全局登录态。
+    // 读取类路由：请求 cookie 仅用于登录判定。数据拉取走 qq-music-api 库（它只认
+    // setQQMusicCookie 写入的全局态，不支持按请求传 cookie），即本路由固定使用全局
+    // 登录态；正常使用中两者一致（登录接口会同时更新两边），仅切账号并发窗口可能
+    // 短暂错位 —— 展示类接口可接受，勿在此把请求 cookie 写回全局（会冲掉登录态）。
     resolveRequestCookie(cookie)
-    
+
     // 使用qq-music-api获取用户信息
     const result = await qqMusicApi.api('user/detail', { id })
     
@@ -10531,12 +11103,47 @@ app.get('/api/qq/user/playlist', async (req, res) => {
     if (!id) {
       return res.status(400).json({ result: 500, errMsg: '请提供用户ID' })
     }
-    // 读取类路由：请求 cookie 仅本次使用，不回写全局登录态。
+    // 读取类路由：请求 cookie 仅用于登录判定。数据拉取走 qq-music-api 库（它只认
+    // setQQMusicCookie 写入的全局态，不支持按请求传 cookie），即本路由固定使用全局
+    // 登录态；正常使用中两者一致（登录接口会同时更新两边），仅切账号并发窗口可能
+    // 短暂错位 —— 展示类接口可接受，勿在此把请求 cookie 写回全局（会冲掉登录态）。
     resolveRequestCookie(cookie)
     
     // 使用qq-music-api获取用户歌单
     const result = await qqMusicApi.api('user/songlist', { id })
-    
+
+    // 自建歌单上游可能不带 diss_cover（实测：整单多为无专辑单曲时 QQ 服务端不给生成封面，
+    // automix测试 dirid=24 返回空串——QQ 官方客户端自己也灰占位）。用歌单内第一首
+    // 有真封面的歌回填，走 detail 缓存，不放大请求。
+    // 注意 uniform_get_Dissinfo 只认 tid（全局歌单 id），dirid 是账号内小 id（实测
+    // disstid=24 直接 tmem error 空列表）——tid 优先，dirid 仅作 tid 缺失时的线索。
+    const cardList = result?.list || result?.data?.list || []
+    for (const card of cardList) {
+      const cover = normalizeQQImageUrl(card?.diss_cover || card?.picurl || card?.logo)
+      if (cover && !/cover_(like|qzone)/.test(cover)) continue
+      const detailId = card.tid || card.dissid || card.disstid || ''
+      if (!detailId || Number(detailId) === 201) continue
+      try {
+        const detail = await fetchQQPlaylistDetail(detailId, 5)
+        // 与官方语义对齐用「首曲」封面。songlist 元素两种形态都可能出现：
+        // 原始 track（有 vs，可探测）或 backfill/qqSongDetail 的归一化对象（封面在
+        // albumpic/album.picUrl 且带 coverVerified 标记，但无 vs/pmid 字段）。
+        // 顺序：已验证的现成封面 → 逐曲探测 vs/pmid → 已有 picurl；绝不盲拼首选 vs URL。
+        let firstReachable = ''
+        for (const song of (detail?.songlist || []).slice(0, 5)) {
+          const track = song?.songInfo || song?.song || song
+          const verifiedCover = (track.coverVerified || track.albumpic) && (track.albumpic || track.album?.picUrl)
+          if (verifiedCover) { firstReachable = track.albumpic || track.album.picUrl; break }
+          const resolved = await qqFirstReachableCover(track, 500)
+          if (resolved) { firstReachable = resolved; break }
+          if (track?.picurl) { firstReachable = track.picurl; break }
+        }
+        if (firstReachable) card.diss_cover = firstReachable
+      } catch {
+        // 回填失败保留原样（空封面 → 前端占位图）
+      }
+    }
+
     if (devMode) console.log('[QQ音乐用户歌单] API返回结果:', JSON.stringify(result, null, 2))
     
     res.json(result)
@@ -10554,7 +11161,10 @@ app.get('/api/qq/user/collect', async (req, res) => {
     if (!id) {
       return res.status(400).json({ result: 500, errMsg: '请提供用户ID' })
     }
-    // 读取类路由：请求 cookie 仅本次使用，不回写全局登录态。
+    // 读取类路由：请求 cookie 仅用于登录判定。数据拉取走 qq-music-api 库（它只认
+    // setQQMusicCookie 写入的全局态，不支持按请求传 cookie），即本路由固定使用全局
+    // 登录态；正常使用中两者一致（登录接口会同时更新两边），仅切账号并发窗口可能
+    // 短暂错位 —— 展示类接口可接受，勿在此把请求 cookie 写回全局（会冲掉登录态）。
     resolveRequestCookie(cookie)
 
     // 直接使用库内已有的收藏歌单路由。旧代码调用了不存在的 getCookie()，
@@ -10619,8 +11229,9 @@ app.get('/api/qq/playlist/detail', async (req, res) => {
         }
       })
     }
-    // 使用qq-music-api获取歌单详情
-    const result = await fetchQQPlaylistDetail(id, Math.max(1, Math.min(Number(songNum) || 10000, 10000)))
+    // 使用qq-music-api获取歌单详情（请求级 cookie 透传：cookie 单事实源——读取路由
+    // 用请求 cookie 仅本次使用，fetchQQPlaylistDetail 内部按 `cookie || qqMusicCookie` 回退）
+    const result = await fetchQQPlaylistDetail(id, Math.max(1, Math.min(Number(songNum) || 10000, 10000)), resolveRequestCookie(cookie))
     
     // songlist 在 result 根级别，不是在 result.data 下
     if (devMode) console.log('[QQ音乐歌单详情] API返回结果 (歌曲数):', result?.songlist?.length || 0)
@@ -10657,6 +11268,8 @@ app.get('/api/qq/playlist/detail', async (req, res) => {
 })
 
 app.delete('/api/qq/cookie', (_req, res) => {
+  // 登出三件事：清全局 cookie、清 qq-music-api 库内 cookie（否则库仍以旧账号请求
+  // user/detail 等接口）、删除落盘的 qq-cookie.txt（否则重启 restoreQQMusicCookie 静默复活登录态）
   qqMusicCookie = ''
   qqMusicApi.setCookie({})
   persistQQMusicCookie('')
@@ -10843,7 +11456,8 @@ app.get('/api/qq/record/recent/song', async (req, res) => {
 app.get('/api/qq/likelist', async (req, res) => {
   try {
     const { cookie, playlistId } = req.query
-    if (!requireQQLogin(res, cookie)) return
+    const activeCookie = requireQQLogin(res, cookie)
+    if (!activeCookie) return
     const data = await qqMusicApi.api('songlist/map', { dirid: '201' })
     // 上游 map/mapmid 是 {id|mid: 1} 对象（不是数组）——旧代码 Array.isArray 判断恒为 false
     // → ids/mids 空 → 客户端红心缓存为空集合 → 「我喜欢」歌单里右键仍显示「我喜欢」、
@@ -10854,7 +11468,7 @@ app.get('/api/qq/likelist', async (req, res) => {
     let firstSong = null
     if (playlistId) {
       try {
-        firstSong = await fetchQQPlaylistFirstSong(playlistId)
+        firstSong = await fetchQQPlaylistFirstSong(playlistId, activeCookie)
       } catch (playlistError) {
         console.warn('[QQ音乐喜欢列表] 从歌单读取首曲失败:', playlistError?.message || playlistError)
       }
@@ -10862,6 +11476,7 @@ app.get('/api/qq/likelist', async (req, res) => {
     if (firstMid) {
       if (!firstSong?.album?.picUrl && !firstSong?.picUrl && !firstSong?.albumpic) {
         try {
+          // qqSongDetail 走全局缓存（无账号维度），封面兜底场景沿用全局登录态可接受
           firstSong = await qqSongDetail(String(firstMid), { mid: String(firstMid) })
         } catch (detailError) {
           console.warn('[QQ音乐喜欢列表] 获取首曲详情失败:', detailError?.message || detailError)
@@ -11413,8 +12028,10 @@ app.get('/api/netease/comment/music', async (req, res) => {
     // 网易云评论资源类型：0=歌曲 1=MV 2=歌单 3=专辑 4=电台 5=视频 6=动态
     const VALID_COMMENT_TYPES = [0, 1, 2, 3, 4, 5, 6]
     const resourceType = VALID_COMMENT_TYPES.includes(parseInt(type)) ? parseInt(type) : 0
-    const pageSize = parseInt(limit)
-    const pageNo = Math.floor(parseInt(offset) / pageSize) + 1
+    // 公开 GET 接口，查询串可任意构造：limit=0/负数/非数字会让 pageNo 变 NaN/Infinity
+    // （JSON.stringify 后成 null 传给上游，行为未定义），这里夹取到合法区间
+    const pageSize = Math.max(1, Math.min(parseInt(limit) || 20, 100))
+    const pageNo = Math.max(1, Math.floor((parseInt(offset) || 0) / pageSize) + 1)
     
     // 添加重试机制
     let lastError = null
@@ -11497,7 +12114,10 @@ app.get('/api/netease/comment/music', async (req, res) => {
       }
     }
 
-    throw lastError
+    // 全部重试失败：lastError 可能为 null（上游「成功但无 body」时循环只继续不赋值）——
+    // throw null 会让下方 error.message 抛 TypeError，Express 4 不接 async rejection，
+    // 客户端收到空响应直到超时。兜底成显式 Error 走 500。
+    throw lastError || new Error('网易云评论上游无有效响应')
   } catch (error) {
     console.error('[网易云评论] 获取失败:', error)
     res.status(500).json({ error: error.message || '获取评论失败' })
@@ -11521,8 +12141,10 @@ app.get('/api/qq/comment', async (req, res) => {
       return res.status(400).json({ error: '请提供歌曲ID' })
     }
 
-    const pageNum = parseInt(pagenum)
-    const pageSize = parseInt(pagesize)
+    // 钳制分页参数：NaN/0/负数会让 pageNo 变 NaN（JSON.stringify 后成 null 传给上游），
+    // hasMore 计算也恒 NaN——同款问题网易云评论路由（11544 附近）已修，此处补齐。
+    const pageNum = Math.max(0, parseInt(pagenum, 10) || 0)
+    const pageSize = Math.min(100, Math.max(1, parseInt(pagesize, 10) || 20))
 
     console.log(`[QQ音乐评论] 请求参数: id=${id}, pagenum=${pageNum}, pagesize=${pageSize}, type=${type}`)
 
@@ -11661,11 +12283,21 @@ app.get('/api/netease/comment/floor', async (req, res) => {
 //   music.globalComment.CommentWrite: AddComment / DelComment / PraiseComment
 // 鉴权关键：comm 里必须带 tmeLoginType=2（QQ 登录），否则模块返回 code=10000。
 // 读取请求用 GET + data 查询参数 + zzc sign（实测无需 ag-1 加密）。
+// 模块白名单：本端点用服务端 zzcSign 为任意 module/method 签名，无白名单时渲染层可借
+// 合法签名调用 QQ 上游任意 MusicU 模块（写接口/购买/关注等横向越权面）。注释域之外
+// 的一律 403；需要新模块时在此显式登记。
+const QQ_COMMENT_MUSICU_ALLOWED = new Set([
+  'music.globalComment.CommentRead',
+  'music.globalComment.CommentWrite',
+])
 app.post('/api/qq/comment/musicu', async (req, res) => {
   try {
     const { module: moduleName, method, param, cookie } = req.body || {}
     if (!moduleName || !method) {
       return res.status(400).json({ error: 'module 与 method 必填' })
+    }
+    if (!QQ_COMMENT_MUSICU_ALLOWED.has(String(moduleName))) {
+      return res.status(403).json({ error: `不支持的 musicu 模块: ${moduleName}` })
     }
     const uin = (String(cookie || '').match(/uin=(\d+)/) || [])[1] || ''
     // ct/cv 用客户端档位（24/1640）：实测 web 档位（19/1873）会被服务端降级——
@@ -12829,12 +13461,15 @@ app.get('/api/netease/song/simi', async (req, res) => {
     const { id, cookie, limit = 10 } = req.query
     if (!id) return res.status(400).json({ error: '请提供歌曲ID' })
     if (!NeteaseAPI || !NeteaseAPI.simi_song) return res.status(500).json({ error: 'API 未初始化' })
-    const cacheKey = recommendCacheKeyWithCookie('ne:simi', id, cookie)
+    // limit 进缓存键：上游按 id 返回全量，切片在本地——键漏 limit 会让先到的小 limit
+    // 结果被缓存，之后大 limit 请求命中同键只能拿到少的一批。
+    const safeLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10))
+    const cacheKey = recommendCacheKeyWithCookie(`ne:simi:${safeLimit}`, id, cookie)
     const cached = getRecommendCache(cacheKey)
     if (cached) return res.json(cached)
     const result = await callNeteaseAPIWithRetry(NeteaseAPI.simi_song, { id: String(id), cookie: String(cookie || '') })
     const body = result.body || result
-    const payload = { songs: (Array.isArray(body.songs) ? body.songs : []).slice(0, Number(limit)) }
+    const payload = { songs: (Array.isArray(body.songs) ? body.songs : []).slice(0, safeLimit) }
     setRecommendCache(cacheKey, payload)
     res.json(payload)
   } catch (error) {
@@ -13933,6 +14568,22 @@ app.post('/api/cache/server/clear', (req, res) => {
     if (scope === 'all') {
       cleared.sodaDecrypt = clearSodaDecryptCache()
       cleared.bilibili = clearBilibiliCaches()
+      // 其余大容量进程级缓存：此前不在清理范围，用户点「清理全部」后内存占用
+      // 几乎不变（与上面歌词/图片同属"丢了只是慢一拍"的可重建缓存）。
+      cleared.qqPlaylistDetail = qqPlaylistDetailCache.size
+      qqPlaylistDetailCache.clear()
+      cleared.qqSongDetail = qqSongDetailCache.size
+      qqSongDetailCache.clear()
+      cleared.qqPlaybackMetadata = qqPlaybackMetadataCache.size
+      qqPlaybackMetadataCache.clear()
+      cleared.neteaseSongDetail = neteaseSongDetailCache.size
+      neteaseSongDetailCache.clear()
+      cleared.neteasePlaylistTrackId = neteasePlaylistTrackIdCache.size
+      neteasePlaylistTrackIdCache.clear()
+      cleared.amllTtml = amllTtmlCache.size
+      amllTtmlCache.clear()
+      cleared.recommend = recommendCache.size
+      recommendCache.clear()
     }
     res.json({ success: true, scope, cleared })
   } catch (error) {
@@ -13974,7 +14625,22 @@ app.use((err, req, res, next) => {
   if (res.headersSent) {
     return next(err)
   }
-  console.error('[错误中间件]', req.method, req.originalUrl, err?.stack || err)
+  // 打印 URL 前剥除敏感 query（cookie/token）：本项目大量接口把登录态放在 query 里，
+  // 未过滤时任一路由抛异常都会把完整 cookie 打进日志——TV 调试模式下 serverLogs
+  // 环形缓冲可在调试台读取，等于凭据泄露。
+  let safeUrl = String(req.originalUrl || '')
+  try {
+    const parsed = new URL(safeUrl, 'http://localhost')
+    let redacted = false
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/cookie|token|key|cred/i.test(key)) {
+        parsed.searchParams.set(key, '[REDACTED]')
+        redacted = true
+      }
+    }
+    if (redacted) safeUrl = parsed.pathname + parsed.search
+  } catch { /* 保留原串 */ }
+  console.error('[错误中间件]', req.method, safeUrl, err?.stack || err)
   res.status(500).json({ error: err?.message || '服务器内部错误' })
 })
 

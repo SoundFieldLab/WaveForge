@@ -21,6 +21,7 @@ const os = require('os')
 const crypto = require('crypto')
 const { WebSocketServer, WebSocket } = require('ws')
 const QRCode = require('qrcode')
+const { isAuthorizedLocalRequest, LOCAL_SERVICE_HEADER } = require('./local-service-auth.mjs')
 
 const DEFAULT_PORT = 30082
 const MAX_LOGS = 120
@@ -218,6 +219,7 @@ function createDGLabRelay() {
     },
     engine: { running: false, lastAudioAt: 0, lastSendAt: 0, seenAudio: false, requested: false, warnedEngineIdle: false },
     listenRetries: 0,
+    listenGeneration: 0, // EADDRINUSE 重试防复活：每次 stop 自增，重试回调比对后放弃
     app: { v3: null, v4: new Map() }, // v3: 单 App ws；v4: Map(tid -> ws)
     ctrlClients: new Set(),
     controlToken: crypto.randomBytes(32).toString('base64url'),
@@ -226,6 +228,10 @@ function createDGLabRelay() {
     devices: [], // V4 slot snapshot
     softLimit: null, // {A,B}（V3 App 反馈）
     deviceStrength: null, // {A,B}（App 反馈的设备当前强度）
+    // V4 差分强度追踪：官方 V4 的 SetIntensity(t:7) 只接受 0（README：不接受其他目标值），
+    // 升强度唯一合法路径是 AddIntensity(t:3) 相对 ±n。这里记录「我方已知设备强度」，
+    // 每次目标变化发 delta；App slots.patch 回报的 props.intensityA/B 用于校准漂移。
+    v4KnownStrength: { A: 0, B: 0 },
     bound: false,
     logs: [],
     timers: { heartbeat: null, silence: null },
@@ -343,7 +349,11 @@ function createDGLabRelay() {
         sendV3Clear(ch)
         sent = true
       } else if (state.settings.version === 'v4' && state.app.v4.size > 0) {
-        for (const [slotId] of state.app.v4) {
+        // slotId 必须用 App 上报的设备槽位（state.devices[0].slotId，如 "Z-zccPUs"），
+        // 不能用 state.app.v4 的键 —— 那是控制端 tid（clientId）。用错的话 clear 发给
+        // 一个不存在的 slot，App 无法处理（实测 2026-10-12：连发后 App 数秒内 abort，code=1005）。
+        const slotId = state.devices[0]?.slotId
+        if (slotId) {
           sendV4Rpc(slotId, { m: 'device.op.clear', data: { s: slotId, c: V4_CHANNEL[ch] } })
           sent = true
         }
@@ -403,16 +413,73 @@ const sendV3Pulse = (channel, frames) => {
     return state.app.v4.keys().next().value
   }
 
+  // V4 强度差分聚合：App 端 AddIntensity 是 oneShot 任务，每条 req 都要入队执行。
+  // 引擎 30Hz 逐帧直发会让 App 每秒收到 20+ 条 t:3（实测 2026-10-12 日志：±1~6 高频
+  // 抖动、设备零输出）。聚合到 100ms 一条：目标值记在 v4TargetStrength，由 tick 统一
+  // 结算 delta；归零（t:7 v:0）即时直发不等窗口（安全路径不能等 100ms）。
+  const v4Agg = {
+    target: { A: 0, B: 0 },
+    dirty: { A: false, B: false },
+    lastFlush: 0,
+    timer: null,
+  }
+  const flushV4StrengthAgg = (force = false) => {
+    const now = Date.now()
+    if (!force && now - v4Agg.lastFlush < 100) return
+    v4Agg.lastFlush = now
+    for (const ch of ['A', 'B']) {
+      if (!force && !v4Agg.dirty[ch]) continue
+      v4Agg.dirty[ch] = false
+      // target=0 的通道在 force 续约时跳过：t:7 归零已在 dirty 时即时直发，
+      // 0 本身不是任务、无需续约（重发只会多一条无意义的归零帧）
+      if (force && v4Agg.target[ch] === 0) continue
+      // force（10s 续约）也发：t:4 任务 30s 自动归零，重发同值 = 续约（幂等）
+      sendV4StrengthNow(ch === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A, v4Agg.target[ch])
+    }
+  }
+
   const sendV4Strength = (channelIdx, strength) => {
+    const channelKey = channelIdx === V4_CHANNEL.B ? 'B' : 'A'
+    const value = clamp(Math.round(strength), 0, 200)
+    if (v4Agg.target[channelKey] === value && !v4Agg.dirty[channelKey]) return
+    v4Agg.target[channelKey] = value
+    v4Agg.dirty[channelKey] = true
+    // 归零是安全路径：绕过聚合窗口立即下发
+    if (value === 0) flushV4StrengthAgg(true)
+    else flushV4StrengthAgg()
+    if (!v4Agg.timer) {
+      v4Agg.timer = setInterval(() => {
+        if (state.app.v4.size === 0) return
+        // t:4 是 30s 自动归零的临时任务：目标值不变时也要周期重发续约，
+        // 否则静默段落（音乐平缓、目标长时间不变）会在 30s 后突然归零。
+        // 续约间隔 10s，留 20s 余量；聚合器内部按 dirty/force 语义跳过无变化通道。
+        flushV4StrengthAgg(true)
+      }, 10_000)
+    }
+  }
+
+  const sendV4StrengthNow = (channelIdx, strength) => {
     const slotId = state.devices[0]?.slotId
     if (!slotId) return
     for (const tid of state.app.v4.keys()) {
       const app = state.app.v4.get(tid)
       if (app.isClosed) continue
-      const value = clamp(strength, 0, 200)
-      const data = { c: channelIdx, t: V4_ACTION.SetIntensity, v: value }
-      app.send(JSON.stringify({ t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, ...data } }))
-      verboseThrottled(`V4 下发强度 c=${channelIdx}=${value}（slot=${slotId}）`)
+      const value = clamp(Math.round(strength), 0, 200)
+      const channelKey = channelIdx === V4_CHANNEL.B ? 'B' : 'A'
+      // V4 强度三选一的最终结论（官方 README + 实测迭代）：
+      //  - t:7 SetIntensity 只接受 v=0；
+      //  - t:3 AddIntensity 是相对量，差分追踪会被 App tick 回报滞后拖到漂移（实测强度卡在 14 不动）；
+      //  - t:4 SetTempIntensity 是「绝对强度临时任务」：v=目标值一步到位，im:true 替换旧任务。
+      // t:4 任务到期会自动归零，因此 d 设 30s、由 10s 续约 tick 持续重发（幂等）。
+      let op
+      if (value === 0) {
+        op = { t: V4_ACTION.SetIntensity, v: 0 }
+      } else {
+        op = { t: V4_ACTION.SetTempIntensity, v: value, d: 30_000, im: true }
+      }
+      state.v4KnownStrength[channelKey] = value
+      app.send(JSON.stringify({ t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: channelIdx, p: 1, ...op } }))
+      verboseThrottled(`V4 下发强度 c=${channelIdx} t=${op.t} v=${op.v}（slot=${slotId}）`)
       break // 1:N 时后续扩展：默认首个已连接设备
     }
   }
@@ -1059,7 +1126,44 @@ const sendV3Pulse = (channel, frames) => {
       if (msg.t === 'settings') {
         const prevPort = Number(state.settings.port)
         const prevDevMode = Boolean(state.settings.devMode)
-        state.settings = { ...state.settings, ...msg.settings }
+        // 字段白名单收敛：此前整包 spread，任意未知键/错误类型（NaN caps、字符串 sensitivity
+        // 等）都会直接覆盖引擎设置，下游行为未定义。仅接受已知字段且按类型归一。
+        const incoming = (msg.settings && typeof msg.settings === 'object') ? msg.settings : {}
+        const num = (v, fallback, min, max) => {
+          const n = Number(v)
+          return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback
+        }
+        const pick = (v, allowed, fallback) => (allowed.includes(v) ? v : fallback)
+        state.settings = {
+          ...state.settings,
+          ...(incoming.version !== undefined ? { version: pick(incoming.version, ['v3', 'v4'], state.settings.version) } : {}),
+          ...(incoming.port !== undefined ? { port: num(incoming.port, state.settings.port, 1024, 65535) } : {}),
+          ...(incoming.devMode !== undefined ? { devMode: incoming.devMode === true } : {}),
+          ...(incoming.feelStyle !== undefined ? { feelStyle: pick(incoming.feelStyle, ['stereo', 'vocal', 'bass', 'drum', 'warm', 'bright', 'custom'], state.settings.feelStyle) } : {}),
+          ...(incoming.sensitivity !== undefined ? { sensitivity: num(incoming.sensitivity, state.settings.sensitivity, 0, 5) } : {}),
+          ...(incoming.smoothing !== undefined ? { smoothing: num(incoming.smoothing, state.settings.smoothing, 0, 1) } : {}),
+          ...(incoming.stepPreset !== undefined ? { stepPreset: pick(incoming.stepPreset, ['strong', 'medium', 'weak', 'custom'], state.settings.stepPreset) } : {}),
+          ...(incoming.stepLimit !== undefined ? { stepLimit: num(incoming.stepLimit, state.settings.stepLimit, 1, 200) } : {}),
+          ...(incoming.rampPreset !== undefined ? { rampPreset: pick(incoming.rampPreset, ['fast', 'medium', 'slow'], state.settings.rampPreset) } : {}),
+          ...(incoming.dynamicRange !== undefined ? { dynamicRange: incoming.dynamicRange === true } : {}),
+          ...(incoming.rtMode !== undefined ? { rtMode: pick(incoming.rtMode, ['auto', 'manual'], state.settings.rtMode) } : {}),
+          ...(incoming.rtGain !== undefined ? { rtGain: num(incoming.rtGain, state.settings.rtGain, 0, 10) } : {}),
+          ...(incoming.rtRange !== undefined ? { rtRange: num(incoming.rtRange, state.settings.rtRange, 0.01, 1) } : {}),
+          ...(incoming.rtHigh !== undefined ? { rtHigh: num(incoming.rtHigh, state.settings.rtHigh, 0, 1) } : {}),
+          ...(incoming.rtLow !== undefined ? { rtLow: num(incoming.rtLow, state.settings.rtLow, 0, 1) } : {}),
+          ...(incoming.rtHys !== undefined ? { rtHys: num(incoming.rtHys, state.settings.rtHys, 0, 1) } : {}),
+          ...(incoming.rtBand !== undefined ? { rtBand: pick(incoming.rtBand, ['all', 'low', 'mid', 'high', 'stereo'], state.settings.rtBand) } : {}),
+          ...(incoming.rtFreqMap !== undefined ? { rtFreqMap: pick(incoming.rtFreqMap, ['linear', 'log', 'deep', 'bright'], state.settings.rtFreqMap) } : {}),
+          ...(incoming.caps !== undefined ? {
+            caps: {
+              A: num(incoming.caps?.A, state.settings.caps.A, 0, 200),
+              B: num(incoming.caps?.B, state.settings.caps.B, 0, 200),
+            },
+          } : {}),
+          ...(incoming.driveMode !== undefined ? { driveMode: pick(incoming.driveMode, ['energy', 'onset'], state.settings.driveMode) } : {}),
+          ...(incoming.pulseEnabled !== undefined ? { pulseEnabled: incoming.pulseEnabled === true } : {}),
+          ...(incoming.waveId !== undefined && typeof incoming.waveId === 'string' ? { waveId: incoming.waveId.slice(0, 64) } : {}),
+        }
         state.settings.lanEnabled = undefined // 局域网恒开，不再作为开关字段使用
         const portChanged = Number(state.settings.port) !== prevPort
         if (state.running && portChanged) restartListener()
@@ -1154,17 +1258,26 @@ const sendV3Pulse = (channel, frames) => {
 
     if (state.app.v3 && !state.app.v3.isClosed) {
       log(`V3 已有 App 连接，新连接（${remote}）覆盖旧的`)
+      // 替换前先向旧 App 发归零：被顶掉的 App 若正在输出，直接 close 会让设备
+      // 按已排队波形继续输出（强度不归零，人身安全）；close 触发的 close 事件
+      // 因等值检查不再成立也会跳过 safetyStop —— 这里是唯一的归零机会。
+      try { sendClear() } catch { /* ignore */ }
       try { state.app.v3.close(4000, 'replaced') } catch { /* ignore */ }
     }
 
     const appId = uuid()
     state.app.v3 = ws
     state.v3AppId = appId
-    state.bound = true
+    // bound=true 仅对携带正确 targetId 的连接生效（扫码二维码里的 targetId 与控制端
+    // clientId 一致才可能连上）。裸连/旧路径不带 targetId——局域网内任何设备都能发起，
+    // 之前无条件 bound=true 等于"裸连即配对"：攻击者可顶掉真实 App、窃听强度流、
+    // 伪造 softLimit 抬高输出上限（人身安全）。裸连保持未配对：收得到 bind 握手、
+    // 不采信其强度/上限回传，控制指令也不会下发。
+    state.bound = hasTarget
     if (hasTarget) {
       log(`V3 App 已配对（${remote}，targetId 快捷接入，appId=${appId}）`)
     } else {
-      log(`V3 App 已连接（${remote}，裸连/旧路径${legacyDglabPath ? ' /dglab/v3' : ''}，appId=${appId}）`)
+      log(`V3 App 已连接（${remote}，裸连/旧路径${legacyDglabPath ? ' /dglab/v3' : ''}，appId=${appId}，未配对——需携带 targetId）`)
       // 官方流程：先告知 App 自己的 clientId（hello bind），再发绑定 200
       ws.send(JSON.stringify({ type: 'bind', clientId: appId, targetId: '', message: 'targetId' }))
     }
@@ -1203,17 +1316,27 @@ const sendV3Pulse = (channel, frames) => {
         // 注意分隔符不可假设：官方 TS SDK 用 "+"，官方 Python SDK 用 "-"，
         // 官方演示前端干脆用 /\d+/g 全取数字。这里同样只抽数字，最大兼容。
         if (text.startsWith('strength-')) {
+          // 未配对连接（裸连）的强度/上限回传一律不采信：局域网攻击者可伪造
+          // strength-0+0+200+200 抬高 softLimit，解除 App 端软上限这道安全钳位。
+          if (!state.bound) {
+            log('V3 未配对连接的强度回传已忽略（不作为钳位依据）')
+            return
+          }
           const nums = (text.match(/\d+/g) || []).map(Number)
           if (nums.length >= 4) {
             const [a, b, aLimit, bLimit] = nums
-            const changed = !state.softLimit || state.softLimit.A !== aLimit || state.softLimit.B !== bLimit
-            state.softLimit = { A: aLimit, B: bLimit }
-            state.deviceStrength = { A: a, B: b }
+            // 上限只允许落在物理合理范围（0..200）内；越界视为异常帧丢弃
+            const limitsValid = aLimit >= 0 && aLimit <= 200 && bLimit >= 0 && bLimit <= 200
+            const changed = limitsValid && (!state.softLimit || state.softLimit.A !== aLimit || state.softLimit.B !== bLimit)
+            if (limitsValid) {
+              state.softLimit = { A: aLimit, B: bLimit }
+              state.deviceStrength = { A: a, B: b }
+            }
             // 无条件记日志（不受 devMode 影响）：这是判断「App 上限爬到多少」的唯一信息源，
             // 之前走 verboseLog，用户关掉开发者模式后完全看不到，误判为「拿不到上限」。
             // 上限爬升期间帧率高，仅在变化时记录，避免刷屏。
             if (changed) log(`V3 App 回传：当前强度 A=${a} B=${b}，App 上限 A=${aLimit} B=${bLimit}（已作为钳位依据）`)
-            broadcastStatus()
+            if (limitsValid) broadcastStatus()
           } else {
             log(`V3 App 强度回传格式异常，已忽略：${text.slice(0, 80)}`)
           }
@@ -1221,11 +1344,17 @@ const sendV3Pulse = (channel, frames) => {
           // 按钮反馈是用户操作的直接证据，取消 devMode 门控
           log(`V3 App 按钮反馈：${text}`)
         }
-        // 兼容带 props.softLimit 的扩展反馈
+        // 兼容带 props.softLimit 的扩展反馈（同样要求已配对 + 数值在物理范围内）
         if (msg.props?.softLimit && typeof msg.props.softLimit === 'object') {
-          state.softLimit = msg.props.softLimit
-          log(`V3 收到设备软上限 softLimit.A=${state.softLimit.A} softLimit.B=${state.softLimit.B}`)
-          broadcastStatus()
+          const a = Number(msg.props.softLimit.A)
+          const b = Number(msg.props.softLimit.B)
+          if (state.bound && Number.isFinite(a) && Number.isFinite(b) && a >= 0 && a <= 200 && b >= 0 && b <= 200) {
+            state.softLimit = { A: a, B: b }
+            log(`V3 收到设备软上限 softLimit.A=${state.softLimit.A} softLimit.B=${state.softLimit.B}`)
+            broadcastStatus()
+          } else {
+            log('V3 props.softLimit 异常（未配对或数值越界），已忽略')
+          }
         }
       } else {
         verboseLog(`V3 未识别帧: ${summarizeFrame(raw)}`)
@@ -1249,9 +1378,14 @@ const sendV3Pulse = (channel, frames) => {
   const handleV4App = (ws, req) => {
     const remote = req?.socket?.remoteAddress || '?'
     const url = req?.url || ''
-    const tid = new URL(url, 'http://x').searchParams.get('tid')
+    let tid = ''
+    try {
+      tid = new URL(url, 'http://x').searchParams.get('tid') || ''
+    } catch {
+      tid = ''
+    }
     if (!tid || tid !== state.clientId) {
-      log(`V4 连接被拒（${remote}）：tid 不匹配（url=${url}）`)
+      log(`V4 连接被拒（${remote}）：tid 不匹配或 url 非法（url=${url}）`)
       ws.close(4000, 'tid mismatch')
       return
     }
@@ -1259,20 +1393,32 @@ const sendV3Pulse = (channel, frames) => {
     // 会把 Map 里「新」socket 的条目删掉，造成 App 在线却被判断链（bound=false + safetyStop）
     const previous = state.app.v4.get(tid)
     if (previous && previous !== ws && previous.readyState === 1) {
+      // 同 V3：替换前先归零（close 后等值检查失效，safetyStop 不会再触发）
+      try { sendClear() } catch { /* ignore */ }
       try { previous.close(4001, 'replaced by new connection') } catch { /* ignore */ }
     }
     state.app.v4.set(tid, ws)
+    ws._lastSeenAt = Date.now()
     state.bound = true
     log(`V4 App 已连接（${remote}，tid=${tid}）`)
     // 官方 v4-server 时序：先 hello（告知 App 自身 clientId）→ controller_attached（告知控制端 ID）→ 再设备列表
     const appClientId = uuid()
     ws.send(JSON.stringify({ type: 'hello', clientId: appClientId }))
+    // 官方 dglab-kit SDK 的状态机只认 client_attached（WaitingForPeer → Paired）；
+    // 旧实现的 controller_attached 是自造名，App 收到后状态机停在等待配对，
+    // 全部后续指令无效，数秒后放弃断开。两个名字都发：SDK 吃 client_attached，
+    // 老版本兼容不炸（未知 type 会被 SDK 忽略）。
+    ws.send(JSON.stringify({ type: 'client_attached', clientId: state.clientId }))
     ws.send(JSON.stringify({ type: 'controller_attached', clientId: state.clientId }))
     log(`V4 已发送 hello + controller_attached（app=${appClientId} controller=${state.clientId}）`)
     // 设备列表
     sendDevicesGet(ws)
+    // 连接即发一次心跳：App 的连接期看门狗只认「收到服务端心跳」，15s 定时器的相位
+    // 可能让首个心跳迟到 15s —— 远超 App 容忍（实测 ~5-8s 即 abort）。
+    try { ws.send(JSON.stringify({ type: 'heartbeat' })) } catch { /* ignore */ }
     maybeAutoRunEngine()
     ws.on('message', (raw) => {
+      ws._lastSeenAt = Date.now()
       verboseLog(`V4 收到 App 帧: ${summarizeFrame(raw)}`)
       let msg
       try {
@@ -1281,9 +1427,35 @@ const sendV3Pulse = (channel, frames) => {
         return
       }
       if (!msg) return
+      // 官方 V4 外层帧：App 上报一律是 {"type":"message","data":{t,ev,...}}，
+      // t/ev 负载在 data 里。旧实现在顶层找 msg.t —— 永远找不到，App 的全部设备
+      // 上报（snapshot/patch/slots）被当未知帧丢弃 → devices 恒为空 → 强度/波形
+      // 下发全部静默失效 → App 侧设备毫无反应，数秒后放弃断开（code=1005）。
+      // 同时兼容裸 t/ev 帧（旧实现/手测场景）。
+      if (msg.type === 'message' && msg.data && typeof msg.data === 'object') {
+        msg = msg.data
+      }
       if (msg.t === 'ev' && msg.ev === 'devices.snapshot') {
         state.devices = Array.isArray(msg.devices) ? msg.devices : []
         log(`V4 设备列表：${JSON.stringify(state.devices.map(d => d.name || d.slotId))}`)
+        // 用 App 上报的真实强度校准差分追踪（连接时设备可能已有非零强度）；
+        // 聚合目标同步归零重算，否则旧目标残留会让校准后第一帧又把 delta 打回去
+        const dev = state.devices[0]
+        if (dev) {
+          state.v4KnownStrength = {
+            A: clamp(Math.round(Number(dev.props?.intensityA ?? 0)), 0, 200),
+            B: clamp(Math.round(Number(dev.props?.intensityB ?? 0)), 0, 200),
+          }
+          v4Agg.target = { ...state.v4KnownStrength }
+          v4Agg.dirty = { A: false, B: false }
+          // 通道静音检测：App 端把通道静音后，所有强度/波形指令都会被 App 接受但设备零输出
+          //（协议没有远程解除静音的操作，只能提示用户在 App 里手动关掉）
+          const muteA = dev.slotState?.channelA?.isMuted === true
+          const muteB = dev.slotState?.channelB?.isMuted === true
+          if (muteA || muteB) {
+            log(`⚠️ [V4] App 端通道静音中：A=${muteA ? '静音' : '开'} B=${muteB ? '静音' : '开'} —— 这会导致设备零输出，请在 DG-Lab App 的通道设置里解除静音`)
+          }
+        }
         broadcastStatus()
       } else if (msg.t === 'ev' && msg.ev === 'devices.patch') {
         const added = Array.isArray(msg.added) ? msg.added : []
@@ -1296,13 +1468,32 @@ const sendV3Pulse = (channel, frames) => {
         const slots = Array.isArray(msg.slots) ? msg.slots : []
         state.softLimit = extractSoftLimit(slots)
         if (state.softLimit) log(`V4 收到设备软上限 softLimit.A=${state.softLimit.A} softLimit.B=${state.softLimit.B}`)
+        // App 按 tick 回报强度变化：校准差分追踪（App 侧手动调整/上限爬坡都不会让 delta 失真）
+        for (const slot of slots) {
+          const ia = slot?.props?.intensityA
+          const ib = slot?.props?.intensityB
+          if (Number.isFinite(Number(ia))) state.v4KnownStrength.A = clamp(Math.round(Number(ia)), 0, 200)
+          if (Number.isFinite(Number(ib))) state.v4KnownStrength.B = clamp(Math.round(Number(ib)), 0, 200)
+          // isMuted 可能被用户在 App 里随时开关，静音期间所有指令都会被接受但设备零输出
+          const muteA = slot?.slotState?.channelA?.isMuted
+          const muteB = slot?.slotState?.channelB?.isMuted
+          if (muteA === true || muteB === true) {
+            log(`⚠️ [V4] App 端通道静音中：A=${muteA ? '静音' : '开'} B=${muteB ? '静音' : '开'} —— 设备不会输出，请在 DG-Lab App 的通道设置里解除静音`)
+          }
+        }
         broadcastStatus()
       } else if (msg.t === 'resp') {
         // 命令响应（调试用）
         verboseLog(`V4 RPC 响应: ${summarizeFrame(raw)}`)
+      } else if (msg.type === 'ping') {
+        // 官方 V4 保活（dglab-kit SDK）：App 每 2s 发 {"type":"ping"}，必须回
+        // {"type":"pong", ts}——连续 3 次（6s）未回 SDK 即判 ping_timeout 主动断开
+        // （实测 2026-10-12：连接后 ~8s 断，code=1005，与 3×2s 完全吻合）。
+        ws.send(JSON.stringify({ type: 'pong', ts: Date.now() }))
+        verboseLog('V4 ping→pong')
       } else if (msg.type === 'heartbeat') {
-        ws.send(JSON.stringify({ type: 'heartbeat' }))
-        verboseLog('V4 心跳往返')
+        // SDK 类型定义：V4 心跳帧「控制方无需回复」；与官方 server 一致不再回显
+        verboseLog('V4 收到心跳帧')
       } else {
         verboseLog(`V4 未识别帧: ${summarizeFrame(raw)}`)
       }
@@ -1315,6 +1506,9 @@ const sendV3Pulse = (channel, frames) => {
       if (state.app.v4.size === 0) {
         state.bound = false
         state.devices = []
+        state.v4KnownStrength = { A: 0, B: 0 }
+        v4Agg.target = { A: 0, B: 0 }
+        v4Agg.dirty = { A: false, B: false }
         log(`V4 App 已断开（code=${code} reason=${reason.toString().slice(0, 100) || '无'}）`)
         safetyStop('V4 App 断开，安全归零')
         broadcastStatus()
@@ -1357,14 +1551,30 @@ const sendV3Pulse = (channel, frames) => {
 
   const startHeartbeat = () => {
     if (state.timers.heartbeat) clearInterval(state.timers.heartbeat)
+    // V4 实测（2026-10-12）：App 连接后若 ~5-8s 内等不到服务端心跳会主动 abort（code=1005）。
+    // 15s 周期 + 相位不定会让首个心跳迟到最远 15s —— 远超 App 容忍窗口。
+    // 改为 5s tick：V4 每个 tick 都发（App 连接时还会立即补一次，见 handleV4App）；
+    // V3 保持官方「~15s 一次」语义 = 每 3 个 tick 发一次，行为不变。
+    // 死连接收割：每 tick 顺带检查 pong 响应。App 正常会回 pong（协议帧）或至少触发
+    // socket 层活动；连续 3 个 tick（15s）无任何收到帧的 socket 视为 TCP 半开，terminate
+    // 释放——否则半开连接上 send 会持续堆积直到 OS 层超时。v3/v4 连接建立时记录 lastSeenAt。
+    let v3TickCount = 0
     state.timers.heartbeat = setInterval(() => {
-      if (state.settings.version === 'v3' && state.app.v3 && !state.app.v3.isClosed && state.v3AppId) {
+      v3TickCount += 1
+      if (state.settings.version === 'v3' && state.app.v3 && !state.app.v3.isClosed && state.v3AppId && v3TickCount % 3 === 0) {
         state.app.v3.send(JSON.stringify({ type: 'heartbeat', clientId: state.clientId, targetId: state.v3AppId, message: '200' }))
       }
       for (const app of state.app.v4.values()) {
-        if (!app.isClosed) app.send(JSON.stringify({ type: 'heartbeat' }))
+        if (app.isClosed) continue
+        const seenAt = Number(app._lastSeenAt || 0)
+        // 刚建立（_lastSeenAt 未初始化）的连接给宽限期
+        if (seenAt > 0 && Date.now() - seenAt > 15_000) {
+          try { app.terminate() } catch { /* ignore */ }
+          continue
+        }
+        try { app.send(JSON.stringify({ type: 'heartbeat' })) } catch { /* ignore */ }
       }
-    }, 15000)
+    }, 5000)
   }
 
   /* ------------------------------ 监听器管理 ------------------------------ */
@@ -1394,17 +1604,23 @@ const sendV3Pulse = (channel, frames) => {
       state.running = false
       state.wss = null
       broadcastStatus()
-      // 端口占用自愈：指数退避重试（最多 5 次），避免残留进程占端口导致永久不可用
+      // 端口占用自愈：指数退避重试（最多 5 次），避免残留进程占端口导致永久不可用。
+      // listenGeneration 防复活：重试窗口内用户已 stopListener / 应用退出时，到点的
+      // 回调必须放弃（否则「已停止」的中继会自己重新监听 0.0.0.0）。
       if (error?.code === 'EADDRINUSE' && state.listenRetries < 5) {
         state.listenRetries += 1
         const delay = 1500 * state.listenRetries
+        const generation = state.listenGeneration
         log(`端口 ${port} 被占用，${delay / 1000}s 后自动重试（${state.listenRetries}/5）…`)
-        setTimeout(startListener, delay)
+        setTimeout(() => {
+          if (state.listenGeneration !== generation || state.running || state.server) return
+          startListener()
+        }, delay)
       } else if (error?.code === 'EADDRINUSE') {
         log(`端口 ${port} 一直被占用：可能有上一次没退干净的 WaveForge 实例。请结束残留进程后，在控制台重新点「启动中继」。`)
       }
     })
-    const wss = new WebSocketServer({ noServer: true })
+    const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
     server.on('upgrade', (req, socket, head) => {
       const url = req.url || '/'
       const path = url.split('?')[0]
@@ -1441,6 +1657,7 @@ const sendV3Pulse = (channel, frames) => {
   }
 
   const stopListener = () => {
+    state.listenGeneration += 1 // 使在途的 EADDRINUSE 重试回调失效（防「已停止却复活」）
     safetyStop('中继停止，安全归零')
     if (state.timers.heartbeat) {
       clearInterval(state.timers.heartbeat)
@@ -1466,6 +1683,14 @@ const sendV3Pulse = (channel, frames) => {
     state.running = false
     state.bound = false
     state.devices = []
+    state.v4KnownStrength = { A: 0, B: 0 }
+    v4Agg.target = { A: 0, B: 0 }
+    v4Agg.dirty = { A: false, B: false }
+    // V4 续约定时器一并清理：否则停止后每 10s 空转一次（永不自停）
+    if (v4Agg.timer) {
+      clearInterval(v4Agg.timer)
+      v4Agg.timer = null
+    }
     broadcastStatus()
   }
 
@@ -1479,8 +1704,30 @@ const sendV3Pulse = (channel, frames) => {
 
   const registerHttp = (app) => {
     app.get('/api/dglab/status', (req, res) => {
+      // controlToken 只下发给受信 Origin（应用窗口 = localhost:3000、TV 端 file://、
+      // DG-LAB 调试平台 3100/3101）。其余来源（宿主在任意网页里的请求）拿不到 token，
+      // 也就无法调用 /api/dglab/control 或连 /dglab/ctrl —— 状态本体（无凭据）照常返回。
+      // 注意 'null'/'' origin 的信任是给 Electron file:// 渲染端和 TV WebView 的——
+      // 但 sandboxed iframe / 无 Origin 的跨站请求同样呈现为 null/缺失。生产打包下
+      // local-server 有全局 token 门（null origin 拿不到状态本体），此风险只在
+      // token 未设置的 dev 直跑模式存在；这里叠加校验：local token 存在时，
+      // null/空 origin 必须同时持有该 token 才视为受信。
+      const origin = String(req.get('origin') || '')
+      const opaqueOrigin = origin === 'file://' || origin === 'null' || origin === ''
+      const localTokenConfigured = Boolean(process.env.WAVEFORGE_LOCAL_TOKEN)
+      const hasLocalToken = localTokenConfigured && isAuthorizedLocalRequest({
+        configuredToken: process.env.WAVEFORGE_LOCAL_TOKEN,
+        suppliedToken: req.get(LOCAL_SERVICE_HEADER),
+      })
+      const trusted = origin === 'http://localhost:3000' || origin === 'http://127.0.0.1:3000'
+        || origin === 'http://localhost:3100' || origin === 'http://127.0.0.1:3100'
+        || (opaqueOrigin && (!localTokenConfigured || hasLocalToken))
       const status = buildStatus()
-      res.json({ ok: true, ...status, controlToken: state.controlToken })
+      if (trusted) {
+        res.json({ ok: true, ...status, controlToken: state.controlToken })
+      } else {
+        res.json({ ok: true, ...status })
+      }
     })
     app.post('/api/dglab/control', (req, res) => {
       // 与本机控制 WS 相同的令牌校验：/control 会启停中继、改设置，此前完全无鉴权 ——

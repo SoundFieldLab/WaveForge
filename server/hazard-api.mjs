@@ -13,6 +13,17 @@ let earthquakeCache = null
 let earthquakeCacheAt = 0
 let earthquakePending = null
 
+// refresh=1 强刷限频：绕过缓存的 force 请求无间隔限制时，渲染端异常轮询（或
+// token 缺失模式下任意本机请求）可无限打上游气象/地震台网。两个源共享 30s 窗口。
+const FORCE_REFRESH_MIN_INTERVAL_MS = 30 * 1000
+let lastForceRefreshAt = 0
+function forceRefreshAllowed() {
+  const now = Date.now()
+  if (now - lastForceRefreshAt < FORCE_REFRESH_MIN_INTERVAL_MS) return false
+  lastForceRefreshAt = now
+  return true
+}
+
 async function fetchText(url, { referer = '', timeout = 12000 } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
@@ -217,7 +228,7 @@ async function loadEarthquakes({ force = false } = {}) {
 export function registerHazardRoutes(app) {
   app.get('/api/hazards/typhoons', async (req, res) => {
     try {
-      const data = await loadTyphoons({ force: req.query.refresh === '1' })
+      const data = await loadTyphoons({ force: req.query.refresh === '1' && forceRefreshAllowed() })
       res.setHeader('Cache-Control', 'private, max-age=120')
       return res.json({ success: true, ...data })
     } catch (error) {
@@ -229,7 +240,7 @@ export function registerHazardRoutes(app) {
 
   app.get('/api/hazards/earthquakes', async (req, res) => {
     try {
-      const data = await loadEarthquakes({ force: req.query.refresh === '1' })
+      const data = await loadEarthquakes({ force: req.query.refresh === '1' && forceRefreshAllowed() })
       res.setHeader('Cache-Control', 'private, max-age=60')
       return res.json({ success: true, ...data })
     } catch (error) {
@@ -240,7 +251,7 @@ export function registerHazardRoutes(app) {
   })
 
   app.get('/api/hazards/snapshot', async (req, res) => {
-    const force = req.query.refresh === '1'
+    const force = req.query.refresh === '1' && forceRefreshAllowed()
     const [typhoons, earthquakes] = await Promise.allSettled([
       loadTyphoons({ force }),
       loadEarthquakes({ force }),

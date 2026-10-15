@@ -40,6 +40,11 @@ export async function fetchStreamWithIdleTimeout(url, options = {}) {
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
     maxBytes = DEFAULT_MAX_BYTES,
     signal: externalSignal,
+    /** 可选逐跳 SSRF 校验（async (url) => boolean，返回 true 表示拒绝该跳）。
+     *  传入后 fetch 改为 redirect:'manual' 并循环重校验——防止公网跳板 302 到
+     *  169.254.169.254 / 127.0.0.1 时被无条件跟随。未传时保持 follow（老调用方）。 */
+    isUrlBlocked = null,
+    maxRedirects = 5,
   } = options
 
   for (const [name, value] of Object.entries({ headerTimeoutMs, idleTimeoutMs, maxBytes })) {
@@ -69,7 +74,28 @@ export async function fetchStreamWithIdleTimeout(url, options = {}) {
 
   let response
   try {
+    if (isUrlBlocked) {
+      const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+      let currentUrl = url
+      for (let hop = 0; hop <= maxRedirects; hop += 1) {
+        if (await isUrlBlocked(currentUrl)) {
+          throw new StreamProxyError(400, 'Audio upstream URL is not allowed')
+        }
+        const hopResponse = await fetchImpl(currentUrl, { headers, redirect: 'manual', signal: controller.signal })
+        if (REDIRECT_STATUSES.has(hopResponse.status) && hop < maxRedirects) {
+          const location = hopResponse.headers?.get?.('location')
+          try { await hopResponse.body?.cancel?.() } catch { /* ignore */ }
+          if (!location) throw new StreamProxyError(502, 'Audio upstream redirect missing location')
+          currentUrl = new URL(location, currentUrl).href
+          continue
+        }
+        response = hopResponse
+        return finishResponse()
+      }
+      throw new StreamProxyError(502, 'Too many audio upstream redirects')
+    }
     response = await fetchImpl(url, { headers, redirect: 'follow', signal: controller.signal })
+    return finishResponse()
   } catch (error) {
     detachExternal()
     if (error instanceof StreamProxyError) throw error
@@ -82,33 +108,36 @@ export async function fetchStreamWithIdleTimeout(url, options = {}) {
     clearTimeout(headerTimer)
   }
 
-  if (!response.ok && response.status !== 206) {
-    detachExternal()
-    await response.body?.cancel?.().catch?.(() => undefined)
-    return { response, stream: null }
-  }
+  /** 拿到最终响应后的共同收尾：镜像非 2xx/206、字节上限检查、包 GuardedStream。 */
+  function finishResponse() {
+    if (!response.ok && response.status !== 206) {
+      detachExternal()
+      void response.body?.cancel?.().catch?.(() => undefined)
+      return { response, stream: null }
+    }
 
-  const declared = readDeclaredLength(response)
-  if (declared !== null && declared > maxBytes) {
-    detachExternal()
-    abortWith(new StreamProxyError(413, 'Audio upstream exceeds byte limit'))
-    await response.body?.cancel?.().catch?.(() => undefined)
-    throw new StreamProxyError(413, 'Audio upstream exceeds byte limit')
-  }
+    const declared = readDeclaredLength(response)
+    if (declared !== null && declared > maxBytes) {
+      detachExternal()
+      abortWith(new StreamProxyError(413, 'Audio upstream exceeds byte limit'))
+      void response.body?.cancel?.().catch?.(() => undefined)
+      throw new StreamProxyError(413, 'Audio upstream exceeds byte limit')
+    }
 
-  if (!response.body?.getReader) {
-    detachExternal()
-    return { response, stream: null }
-  }
+    if (!response.body?.getReader) {
+      detachExternal()
+      return { response, stream: null }
+    }
 
-  const stream = createGuardedStream({
-    body: response.body,
-    controller,
-    idleTimeoutMs,
-    maxBytes,
-    onSettled: detachExternal,
-  })
-  return { response, stream }
+    const stream = createGuardedStream({
+      body: response.body,
+      controller,
+      idleTimeoutMs,
+      maxBytes,
+      onSettled: detachExternal,
+    })
+    return { response, stream }
+  }
 }
 
 function readDeclaredLength(response) {
