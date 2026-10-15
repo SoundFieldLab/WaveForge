@@ -121,10 +121,14 @@ export async function streamQQMusicInterpretation(
   onText: (fullText: string) => void,
 ) {
   const headers = await getQQMusicSkillHeaders()
+  // 初始连接与读取都挂 AbortController：服务端停滞时流永久挂起（SSE 无天然结束）
+  const controller = new AbortController()
+  let stallTimer = window.setTimeout(() => controller.abort(), 90_000)
   const response = await fetch(`${API_BASE}/explore/qq/skills/interpretation`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ query, cookie, assetTypes: [1, 2] }),
+    signal: controller.signal,
   })
   if (!response.ok || !response.body) {
     const data = await response.json().catch(() => ({}))
@@ -135,8 +139,13 @@ export async function streamQQMusicInterpretation(
   const decoder = new TextDecoder()
   let buffer = ''
   let fullText = ''
+  const resetStall = () => {
+    window.clearTimeout(stallTimer)
+    stallTimer = window.setTimeout(() => controller.abort(), 90_000)
+  }
   while (true) {
     const { done, value } = await reader.read()
+    resetStall()
     buffer += decoder.decode(value, { stream: !done })
     const events = buffer.split(/\r?\n\r?\n/)
     buffer = done ? '' : events.pop() || ''
@@ -161,5 +170,6 @@ export async function streamQQMusicInterpretation(
       onText(fullText)
     }
   }
+  window.clearTimeout(stallTimer)
   return fullText
 }

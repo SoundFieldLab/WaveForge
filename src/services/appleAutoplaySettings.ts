@@ -16,7 +16,9 @@ export function readAppleAutoplayEnabled(): boolean {
 }
 
 export function persistAppleAutoplayEnabled(value: boolean): void {
-  localStorage.setItem(STORAGE_KEY, value ? 'true' : 'false')
+  try {
+    localStorage.setItem(STORAGE_KEY, value ? 'true' : 'false')
+  } catch { /* 配额满忽略 */ }
   try {
     window.dispatchEvent(new CustomEvent<boolean>(APPLE_AUTOPLAY_CHANGED_EVENT, { detail: value }))
   } catch { /* 无 window 环境（测试）忽略 */ }

@@ -163,7 +163,7 @@ describe('BilibiliMvBackground regressions', () => {
     expect(onReadyChange).toHaveBeenLastCalledWith(false)
   })
 
-  it('prewarms alignment only for the immediate upcoming track across platforms', async () => {
+  it('prewarms alignment for the first upcoming tracks across platforms', async () => {
     const audio = new Audio()
     vi.mocked(bili.findBestBilibiliMv).mockImplementation((ctx: any) => Promise.resolve(autoResult(`${ctx.platform}-bvid`)) as any)
     const prewarm = vi.mocked(alignment.prewarmMvBeatAnalysis)
@@ -187,7 +187,8 @@ describe('BilibiliMvBackground regressions', () => {
       expect.objectContaining({ platform: 'qq', id: 'qq-later' }),
       expect.anything(),
     ))
-    await waitFor(() => expect(prewarm).toHaveBeenCalledTimes(1))
+    // 前 3 首全部预热对齐（随机跳歌命中第 2/3 首时秒对齐）——两首 upcoming 都应预热
+    await waitFor(() => expect(prewarm).toHaveBeenCalledTimes(2))
     expect(prewarm).toHaveBeenCalledWith(expect.objectContaining({
       bvid: 'apple-bvid',
       videoUrl: 'http://stream/cache/audio',

@@ -359,6 +359,7 @@ export default function QQExplorePage({
       setHallNavKey(key => key + 1)
     }
   }, [hallLayer])
+
   // 刷歌不再有独立全屏界面：队列直接进全局播放器（App 侧按 radar continuation 续取）
   const [preferencesOpen, setPreferencesOpen] = useState(false)
   // 偏好弹窗同样常驻挂载：保留用户未保存的勾选草稿，避免每次打开都重发请求并重置勾选。
@@ -824,6 +825,16 @@ export default function QQExplorePage({
     }
   }, [actionLoading, appendFromCard, guessSongs, onOpenPlaylist, onOpenSearch, onPlaySongs, openPreferences, resolveCards])
 
+  // openHallArtists 的 late-ref：executeMusicHallCard 声明点早于 switchQQTab/hallLayer
+  // 相关回调定义（TDZ 规避）——先建空壳，switchQQTab 定义点之后回填最新闭包。
+  const openHallArtistsRef = useRef<() => void>(() => undefined)
+  // openHallArtists 的 late-ref 回填：executeMusicHallCard 在 switchQQTab/navigateHall
+  // 声明之前定义（TDZ 规避），每次渲染同步最新闭包。
+  openHallArtistsRef.current = () => {
+    switchQQTab('hall')
+    navigateHall('push')
+    setHallLayer({ kind: 'artists' })
+  }
   const executeMusicHallCard = useCallback(async (card: QQMusicHallCard, shelf: QQMusicHallShelf) => {
     const action = card.action
     if (action.type === 'play-songs') {
@@ -865,6 +876,12 @@ export default function QQExplorePage({
       if (action.section === 'charts') onOpenCharts()
       else if (action.section === 'playlists') onOpenPlaylists()
       else if (action.section === 'mvs') onOpenMVs()
+      else if (action.section === 'artists') {
+        // 站内有 QQArtistsPage（乐馆快捷入口在用）：切到乐馆 tab 并打开歌手层级页，
+        // 不再落到「只能在客户端打开」的误导错误。switchQQTab/hallLayer 经 ref 取最新。
+        openHallArtistsRef.current()
+        return
+      }
       return
     }
     if (action.type === 'open-external') {

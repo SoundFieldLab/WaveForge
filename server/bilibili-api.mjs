@@ -137,7 +137,13 @@ function pruneCache(map, ttl, maxEntries) {
 async function fetchBili(url, { params, cookie, referer = BILI_REFERER, headers = {}, signal } = {}) {
   let finalUrl = url
   if (params) finalUrl = `${url}?${new URLSearchParams(params).toString()}`
-  const effectiveCookie = buildCookieHeader(resolveBiliCookie(cookie))
+  // 登录 Cookie 只发给 bilibili.com 系 API 域：浏览器侧 SESSDATA 是 .bilibili.com 作用域，
+  // 不会发给 hdslb CDN；此前无条件拼 Cookie，把登录态（含 bili_jct CSRF token）外发到
+  // 字幕/图片 CDN（凭据面无谓扩大）。匿名 buvid 指纹仍全域带（提升可用度、不涉登录态）。
+  let host = ''
+  try { host = new URL(finalUrl).hostname.toLowerCase() } catch { /* 保持空 → 不带登录 cookie */ }
+  const isApiHost = host === 'bilibili.com' || host.endsWith('.bilibili.com')
+  const effectiveCookie = isApiHost ? buildCookieHeader(resolveBiliCookie(cookie)) : buildCookieHeader('')
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 12000)
   try {
@@ -222,9 +228,15 @@ async function wbiSign(params) {
   const mixinKey = getMixinKey(imgKey + subKey)
   const wts = Math.round(Date.now() / 1000)
   const payload = { ...params, wts }
-  const query = Object.keys(payload)
+  // WBI 官方算法要求签名前从 value 中剔除 !'()* 六个字符（bilibili-API-collect 文档），
+  // 服务端按同一规则重算校验——不过滤时含这些字符的参数（如搜索词带 !）w_rid 必然失配。
+  const filtered = {}
+  for (const [key, value] of Object.entries(payload)) {
+    filtered[key] = String(value).replace(/[!'()*]/g, '')
+  }
+  const query = Object.keys(filtered)
     .sort()
-    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(payload[k])}`)
+    .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(filtered[k])}`)
     .join('&')
   return { ...payload, w_rid: md5Hex(query + mixinKey) }
 }
@@ -357,7 +369,9 @@ export function registerBilibiliRoutes(app) {
     const cid = Number(req.query.cid)
     if (!bvid || !cid) return res.status(400).json({ code: -1, error: 'bvid/cid 必填' })
     await ensureBuvid3()
-    const requestedQn = Math.max(16, Number(req.query.qn) || 80)
+    // Number.isFinite 收口：?qn=1e999 会把 Infinity 一直带进上游 playurl 参数
+    const parsedQn = Number(req.query.qn)
+    const requestedQn = Number.isFinite(parsedQn) ? Math.max(16, parsedQn) : 80
     const fnval = 4048
     try {
       const json = await fetchBiliJson(`${API_BASE}/x/player/playurl`, {

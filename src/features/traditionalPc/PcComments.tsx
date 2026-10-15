@@ -15,6 +15,7 @@ import { createTtlCache } from '../../utils/ttlCache'
 import { getApiBase } from '../../services/apiConfig'
 import { PcEmpty, PcGhostButton, PcListFooter, pcTheme, type PcSkin, type PcTone } from './pcKit'
 import type { PcActions } from './types'
+import { cookieHeaders } from '../../services/cookieRequest'
 
 interface CommentItem {
   commentId: string
@@ -155,8 +156,8 @@ function PcComments({ platform, songId, resourceId, resourceIdKind, chrome, acti
       let nextTotal: number | undefined
       if (platform === 'netease') {
         // 精彩评论优先（sortType=2），comments 列表随之返回；offset 页码分页
-        const endpoint = `${getApiBase()}/netease/comment/music?id=${encodeURIComponent(resourceKey)}&limit=30&offset=${reset ? 0 : offsetRef.current}&sortType=2&type=${neteaseCommentType(resourceIdKind)}&cookie=${encodeURIComponent(getPlatformCookie('netease'))}`
-        const response = await fetch(endpoint, { signal: controller.signal })
+        const endpoint = `${getApiBase()}/netease/comment/music?id=${encodeURIComponent(resourceKey)}&limit=30&offset=${reset ? 0 : offsetRef.current}&sortType=2&type=${neteaseCommentType(resourceIdKind)}`
+        const response = await fetch(endpoint, { signal: controller.signal, headers: cookieHeaders(getPlatformCookie('netease')) })
         const data = await response.json()
         // 失败要落到 error/重试态，不能静默渲染成「还没有评论」
         if (!response.ok || data.code !== 200) throw new Error(data?.message || data?.error || '网易云评论加载失败')
@@ -168,8 +169,8 @@ function PcComments({ platform, songId, resourceId, resourceIdKind, chrome, acti
         // QQ：pagenum 页码分页（0 起，服务端会把 pagenum 映射成上游 pageNo=pagenum+1）；
         // 歌单走 biztype=3。首页必须传 0，传 1 会直接跳过第一条评论。
         const pageNumber = reset ? 0 : pageRef.current + 1
-        const endpoint = `${getApiBase()}/qq/comment?id=${encodeURIComponent(resourceKey)}&pagenum=${pageNumber}&pagesize=20&type=hot&biztype=${qqCommentBizType(resourceIdKind)}&cookie=${encodeURIComponent(getPlatformCookie('qq'))}`
-        const response = await fetch(endpoint, { signal: controller.signal })
+        const endpoint = `${getApiBase()}/qq/comment?id=${encodeURIComponent(resourceKey)}&pagenum=${pageNumber}&pagesize=20&type=hot&biztype=${qqCommentBizType(resourceIdKind)}`
+        const response = await fetch(endpoint, { signal: controller.signal, headers: cookieHeaders(getPlatformCookie('qq')) })
         const data = await response.json()
         if (!response.ok || data.result !== 0 || !data.data) throw new Error(data?.message || 'QQ 音乐评论加载失败')
         hot = (data.data?.hotComments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]

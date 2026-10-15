@@ -11,7 +11,7 @@
 //   · 适合「听」的视频（听抖音）  ← /api/soda/listen-video
 //   · 排行榜                    ← /api/soda/charts
 //   · 我的音乐（我喜欢/抖音收藏/历史播放） ← /api/soda/user/playlists
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Clock, Disc3, Heart, Loader2, Music2, Play, Radio, RefreshCw, Sparkles, TrendingUp, Video } from 'lucide-react'
 import type { Song } from '../../services/musicApi'
 import { getProxiedImageUrl } from '../../services/musicApi'
@@ -68,9 +68,13 @@ function SodaExplorePage({
   const [loading, setLoading] = useState(true)
   const [busyKey, setBusyKey] = useState('')
   const [revision, setRevision] = useState(0)
+  // 只保护「从未成功加载」的冻结：revision>0 后 active=false（被播放页覆盖）不应
+  // 触发 8 路全量重载——已加载的 hero/模式探索/歌单广场会被骨架屏替换（保活语义破坏）
+  const loadedRef = useRef(false)
 
   useEffect(() => {
-    if (!active && revision === 0) return
+    if (!active) return
+    if (loadedRef.current && revision === 0) return
     let cancelled = false
     setLoading(true)
     const jobs: Array<Promise<void>> = [
@@ -91,7 +95,12 @@ function SodaExplorePage({
         setDouyinPlaylist(list.find(p => Number(p.type) === 4 || /抖音/.test(String(p.name))) || null)
       }).catch(() => undefined))
     }
-    void Promise.allSettled(jobs).then(() => { if (!cancelled) setLoading(false) })
+    void Promise.allSettled(jobs).then(() => {
+      if (!cancelled) {
+        loadedRef.current = true
+        setLoading(false)
+      }
+    })
     return () => { cancelled = true }
   }, [active, loggedIn, authRevision, revision])
 
@@ -363,15 +372,17 @@ function SodaExplorePage({
         </section>
       )}
 
-      {/* 适合「听」的视频（手机端听抖音内容） */}
+      {/* 适合「听」的视频（手机端听抖音内容）。站内暂无视频取流/音频入队链路：
+          卡片不做可点击外观（无 hover/pointer），标题处注明需在汽水 App 内观看，
+          避免呈现死按钮。接入取流链路后再恢复交互。 */}
       {videos.length > 0 && (
         <section className="mt-8">
           {sectionTitle(<Video className="h-4 w-4" />, '适合「听」的视频', (
-            <span className={`text-xs ${muted}`}>来自手机端听抖音</span>
+            <span className={`text-xs ${muted}`}>来自手机端听抖音 · 需在汽水 App 内观看</span>
           ))}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
             {videos.map(video => (
-              <div key={video.id} className={`overflow-hidden rounded-2xl ${text}`} style={{ background: cardBg }}>
+              <div key={video.id} className={`overflow-hidden rounded-2xl opacity-80 ${text}`} style={{ background: cardBg }} title="需在汽水 App 内观看">
                 <div className="relative" style={{ aspectRatio: '3 / 4' }}>
                   {video.coverUrl
                     ? <img src={getProxiedImageUrl(video.coverUrl, 400)} alt="" className="h-full w-full object-cover" />

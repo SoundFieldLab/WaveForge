@@ -8,6 +8,7 @@
 
 import type { Song } from './musicApi'
 import { getPlatformCookie } from './platforms'
+import { getSecureToken, setSecureToken, removeSecureToken } from "./secureTokenStore"
 
 const API = 'https://api.spotify.com/v1'
 const TOKEN_URL = 'https://accounts.spotify.com/api/token'
@@ -28,7 +29,7 @@ export function getSpotifyToken(): string {
 }
 
 export function getSpotifyRefreshToken(): string {
-  return localStorage.getItem('spotify_refresh_token') || ''
+  return getSecureToken("spotify_refresh_token") || ''
 }
 
 export function isSpotifyLoggedIn(): boolean {
@@ -61,6 +62,7 @@ async function refreshSpotifyTokenOnce(): Promise<'ok' | 'rejected' | 'failed'> 
   if (!refreshToken) return 'failed'
   try {
     const resp = await fetch(TOKEN_URL, {
+      signal: AbortSignal.timeout(15_000),
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
@@ -76,9 +78,13 @@ async function refreshSpotifyTokenOnce(): Promise<'ok' | 'rejected' | 'failed'> 
     if (!resp.ok) return 'failed'
     const data = await resp.json()
     if (!data.access_token) return 'failed'
-    localStorage.setItem('spotify_access_token', data.access_token)
+    setSecureToken('spotify_access_token', data.access_token)
     // Spotify 刷新可能返回新 refresh token，也更新
-    if (data.refresh_token) localStorage.setItem('spotify_refresh_token', data.refresh_token)
+    // Spotify 官方约定：响应含新 refresh_token 时必须换用新值。该键是迁移键
+    // （secureTokenStore 加密落盘）——直写 localStorage 会 ① 把新值写成明文（安全回退）
+    // ② getSecureToken 内存 cache 仍持旧值 → 下次刷新用旧 token，被撤销后稳定
+    // invalid_grant → 强制重登。走 setSecureToken：cache 即时生效 + 异步加密落盘。
+    if (data.refresh_token) setSecureToken('spotify_refresh_token', data.refresh_token)
     return 'ok'
   } catch (e) {
     console.warn('[Spotify] token 刷新失败:', e)
@@ -92,8 +98,8 @@ async function refreshSpotifyTokenOnce(): Promise<'ok' | 'rejected' | 'failed'> 
  * 只在 OAuth 端点明确拒绝时调用，网络抖动不会走到这里。
  */
 function clearSpotifySession(): void {
-  localStorage.removeItem('spotify_access_token')
-  localStorage.removeItem('spotify_refresh_token')
+  removeSecureToken("spotify_access_token");
+  removeSecureToken("spotify_refresh_token");
   localStorage.removeItem('spotify_username')
   localStorage.removeItem('spotify_avatar')
   localStorage.removeItem('spotify_user_id')
@@ -114,7 +120,7 @@ export async function spotifyFetch(path: string, init?: RequestInit): Promise<an
   try {
     const headers = new Headers(init?.headers)
     headers.set('Authorization', `Bearer ${token}`)
-    const resp = await fetch(`${API}${path}`, { ...init, headers })
+    const resp = await fetch(`${API}${path}`, { ...init, headers, signal: AbortSignal.timeout(15_000) })
     // 401：access token 过期，尝试刷新后重试一次
     if (resp.status === 401) {
       const refreshed = await refreshSpotifyToken()
@@ -127,7 +133,7 @@ export async function spotifyFetch(path: string, init?: RequestInit): Promise<an
       if (refreshed === 'ok') {
         const retryHeaders = new Headers(init?.headers)
         retryHeaders.set('Authorization', `Bearer ${getSpotifyToken()}`)
-        const retry = await fetch(`${API}${path}`, { ...init, headers: retryHeaders })
+        const retry = await fetch(`${API}${path}`, { ...init, headers: retryHeaders, signal: AbortSignal.timeout(15_000) })
         if (retry.ok) return parseSpotifyResponse(retry)
       }
       return null
@@ -208,7 +214,10 @@ async function spotifyPaginate<T>(path: string, extract: (data: any) => any[], m
 
 /** 搜索歌曲 */
 export async function searchSpotifySongs(keyword: string, limit = 30): Promise<SpotifyTrack[]> {
-  const data = await spotifyFetch(`/search?q=${encodeURIComponent(keyword)}&type=track&limit=${limit}`)
+  // Spotify /v1/search 的 limit 上限是 50：>50 一律 400，而 spotifyFetch 对非 401 的
+  // 失败静默返回 null——SearchPanel 融合搜索传 100 时结果恒空。这里钳到 50。
+  const safeLimit = Math.min(50, Math.max(1, limit))
+  const data = await spotifyFetch(`/search?q=${encodeURIComponent(keyword)}&type=track&limit=${safeLimit}`)
   return (data?.tracks?.items || []).map(normalizeTrack).filter((t: SpotifyTrack) => t.id && t.name)
 }
 

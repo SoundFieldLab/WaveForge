@@ -183,6 +183,7 @@ function PcPlaylistDetail({
   }, [chartPeriodId])
   const switchChartPeriod = useCallback((next: string) => {
     if (!next) return
+    const previousPeriod = chartPeriod
     setChartPeriod(next)
     setChartPeriodBusy(true)
     const chartLike = {
@@ -194,10 +195,17 @@ function PcPlaylistDetail({
       songs: [],
     } as unknown as Parameters<typeof fetchExploreChart>[0]
     void fetchExploreChart(chartLike, undefined, next)
-      .then(detail => { if (Array.isArray(detail?.songs) && detail.songs.length) setChartPeriodSongs(detail.songs) })
-      .catch(() => {})
+      .then(detail => {
+        // 拉取失败或空期：回滚周期标签，否则界面显示「第 28 周」内容还是上一期（静默数据错位）
+        if (Array.isArray(detail?.songs) && detail.songs.length) {
+          setChartPeriodSongs(detail.songs)
+        } else {
+          setChartPeriod(previousPeriod)
+        }
+      })
+      .catch(() => { setChartPeriod(previousPeriod) })
       .finally(() => setChartPeriodBusy(false))
-  }, [chartPeriodId, playlist, skin])
+  }, [chartPeriodId, chartPeriod, playlist, skin])
   // 周期选完就把 songs 换成那一期（下游逻辑一行不用改）
   const songs = chartPeriodSongs.length ? chartPeriodSongs : propSongs
 

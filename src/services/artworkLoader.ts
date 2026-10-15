@@ -19,6 +19,11 @@ const MAX_FAILED_LOADS = 256
 const RETRY_DELAY_MS = 150
 let artworkEpoch = 0
 const epochListeners = new Set<() => void>()
+// 缓存代次：只在真正作废缓存的事件（登录态变化、手动清缓存）上 bump。
+// 失败重试的 epoch 脉冲只负责重触发加载 effect，不能作为缓存写入的门槛——
+// 否则页面里有一张坏封面时，每轮重试脉冲都会把同时段加载成功的其他封面
+// 判为「过期请求」而放弃写内存/IDB 缓存，反复重新下载。
+let cacheGeneration = 0
 
 function publishArtworkEpoch(): void {
   artworkEpoch += 1
@@ -182,7 +187,9 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
   const priority = options.priority || 'visible'
   const defaultRetries = priority === 'deferred' ? 0 : 1
   const attempts = Math.max(1, Math.min(2, (options.retries ?? defaultRetries) + 1))
-  const startedAtEpoch = artworkEpoch
+  // 缓存写入的代次快照：只在登录态变化/清缓存时作废在途写入；
+  // 失败重试的 epoch 脉冲不在此列（见 cacheGeneration 注释）。
+  const startedAtGeneration = cacheGeneration
   const controller = new AbortController()
   const task = (async () => {
     let lastError: unknown
@@ -192,7 +199,7 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
         const objectUrl = URL.createObjectURL(persisted)
         try {
           await loadDecoded(objectUrl, priority, controller.signal)
-          if (startedAtEpoch === artworkEpoch) {
+          if (startedAtGeneration === cacheGeneration) {
             imageCache.set(memoryKey, objectUrl)
             failedLoads.delete(memoryKey)
             return objectUrl
@@ -200,6 +207,13 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
           URL.revokeObjectURL(objectUrl)
         } catch (error) {
           URL.revokeObjectURL(objectUrl)
+          // blob 解码失败 = 缓存条目损坏：删掉它，否则 cacheCover 看到未过期条目会跳过
+          // 重写，坏 blob 粘到 30 天 TTL——此后每次加载都白读 IDB、解码失败再落回网络。
+          try {
+            if (cacheKey) await indexedDBCache.deleteCover(cacheKey)
+          } catch {
+            // 清理失败不影响网络回退路径
+          }
           throw error
         }
       }
@@ -208,9 +222,11 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
     }
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       let loaded: string | null = null
+      let loadedFromUrl: string = url
       try {
         loaded = await loadDecoded(url, priority, controller.signal)
       } catch (renditionError) {
+        lastError = renditionError
         if (controller.signal.aborted) throw renditionError
         // 档位 404 降档兜底：网易 param 档位可能大于原图（部分封面 1024 档 404，
         // 同 param 直连也一样 404）；QQ 部分专辑未生成 R800。逐级降档总有一档可用。
@@ -221,6 +237,7 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
           if (fallbackUrl === url) continue
           try {
             loaded = await loadDecoded(fallbackUrl, priority, controller.signal)
+            loadedFromUrl = fallbackUrl
             break
           } catch {
             // 下一档候选
@@ -229,29 +246,40 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
         if (loaded === null) {
           // 无降档候选或全部失败：回退到未代理的源地址（历史上存在的直连兜底）
           if (!/^https?:\/\//i.test(sourceUrl) || sourceUrl === url) throw renditionError
-          loaded = await loadDecoded(sourceUrl, priority, controller.signal)
+          // 直连兜底包独立 try：失败时恢复原错误走正常 attempt 重试与 rememberFailure，
+          // 否则裸 throw 会逃出 for 循环（不重试、不记失败，永久失效封面每帧重跑全链路）
+          try {
+            loaded = await loadDecoded(sourceUrl, priority, controller.signal)
+            loadedFromUrl = sourceUrl
+          } catch {
+            throw renditionError
+          }
         }
       }
       if (loaded === null) throw new Error('Artwork failed to load')
+      if (startedAtGeneration === cacheGeneration) imageCache.set(memoryKey, loaded)
+      // 持久化单独包 try：它属 best effort，失败绝不能把已加载成功的图片拖进重试循环
+      //（fall through 到下一 attempt 会把同一张封面再下载一遍）
       try {
-        if (startedAtEpoch === artworkEpoch) {
-          imageCache.set(memoryKey, loaded)
-          try {
-            const response = await fetch(url)
-            if (cacheKey && response.ok) await indexedDBCache.cacheCover(cacheKey, await response.blob())
-          } catch {
-            // Persistent caching is best effort and must not block display.
-          }
+        if (startedAtGeneration === cacheGeneration) {
+          // cache: 'force-cache'：HTTP 缓存里已有这张图（刚被 Image 加载过）时直接取缓存 blob，
+          // 避免为持久化把同一张封面再从网络完整下载一遍（封面墙/预取场景流量翻倍）。
+          // 超时 + 受 controller 控制：此 await 在 return loaded 之前，挂起会卡住 preloadArtwork
+          // 的 promise，pendingLoads 去重会让等同一封面的所有调用方一起卡死
+          //
+          // 必须取「实际加载成功的地址」：主档位 404 后经降档/直连成功时，原主档位
+          // URL 在 HTTP 缓存里是失败响应，fetch 它 response.ok=false 会跳过持久化——
+          // 降档封面因此永远进不了 IDB，每次会话都重跑整条降档链。
+          const response = await fetch(loadedFromUrl, { cache: 'force-cache', priority: 'low', signal: controller.signal })
+          if (cacheKey && response.ok) await indexedDBCache.cacheCover(cacheKey, await response.blob())
         }
-        failedLoads.delete(memoryKey)
-        return loaded
-      } catch (error) {
-        lastError = error
-        if (controller.signal.aborted) throw error
-        if (attempt + 1 < attempts) await new Promise(resolve => window.setTimeout(resolve, RETRY_DELAY_MS))
+      } catch {
+        // Persistent caching is best effort and must not block display.
       }
+      failedLoads.delete(memoryKey)
+      return loaded
     }
-    if (startedAtEpoch === artworkEpoch) rememberFailure(memoryKey)
+    if (startedAtGeneration === cacheGeneration) rememberFailure(memoryKey)
     throw lastError
   })()
 
@@ -273,6 +301,7 @@ function abortPendingArtworkLoads(): void {
 export function refreshArtworkAfterAuthChange(): void {
   abortPendingArtworkLoads()
   failedLoads.clear()
+  cacheGeneration += 1
   publishArtworkEpoch()
 }
 
@@ -280,6 +309,7 @@ export function clearArtworkMemoryCache(): void {
   abortPendingArtworkLoads()
   failedLoads.clear()
   imageCache.clear()
+  cacheGeneration += 1
   publishArtworkEpoch()
 }
 

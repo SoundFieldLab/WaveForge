@@ -2722,7 +2722,9 @@ async function fetchSodaWebPlaylistTracks(playlistId, cookieText, opts = {}) {
       }
       await cursorState.promise
     }
-    while (sodaWebPlaylistCursorCache.size > 12) sodaWebPlaylistCursorCache.delete(sodaWebPlaylistCursorCache.keys().next().value)
+    // 上限 64：12 条在「同时开 2-3 个歌单详情 + 我喜欢 + 最近播放」场景即逼近上限，
+    // cursor 被逐出后翻页从头重来（重复打上游、页面内容跳变）
+    while (sodaWebPlaylistCursorCache.size > 64) sodaWebPlaylistCursorCache.delete(sodaWebPlaylistCursorCache.keys().next().value)
 
     const allRawItems = cursorState.rawItems
     const lastJson = cursorState.lastJson

@@ -34,7 +34,7 @@ export async function fetchNeteaseJourneyOverview(
   signal?: AbortSignal,
 ): Promise<NeteaseJourneyOverview> {
   const response = await fetch(
-    `http://localhost:3001/api/netease/journey/overview?uid=${encodeURIComponent(uid)}&cookie=${encodeURIComponent(cookie)}`,
+    `http://localhost:3001/api/netease/journey/overview?uid=${encodeURIComponent(uid)}`,
     { signal },
   )
   const body = await response.json().catch(() => ({}))

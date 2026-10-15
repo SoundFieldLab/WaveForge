@@ -27,6 +27,7 @@ import { getAppleCredentials } from './appleAuth'
 import { getAudioQualityPreference, type AppleAudioQualityPreference } from './audioQualitySettings'
 import { recordAppleAcceptanceEvent } from './appleAcceptanceDiagnostics'
 import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
+import { setSecureToken, removeSecureToken } from './secureTokenStore'
 
 const APPLE_WEBPLAYBACK_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
 
@@ -82,6 +83,21 @@ function isCencRejected(): boolean {
 
 export function resetAppleCencRejectionForTests(): void {
   cencRejectedAt = 0
+}
+
+// 重新登录即复位 CENC 冷却：-1001 的根因是"登录会话过期"，用户按提示重新登录后
+// 若还要等满 10 分钟冷却才能恢复原生播放，与提示的引导自相矛盾。
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  // node 环境（单测）无 window.addEventListener：typeof 检测兜底
+  window.addEventListener('waveforge-auth-changed', (event: Event) => {
+    const detail = (event as CustomEvent<{ platform?: string }>).detail
+    if (!detail || detail.platform === 'apple') {
+      if (cencRejectedAt) {
+        cencRejectedAt = 0
+        console.log('[ApplePlayback] 登录态变化，CENC 冷却已复位')
+      }
+    }
+  })
 }
 
 /** 最近一次 EME 能力检测的失败原因（供 UI 提示） */
@@ -191,7 +207,7 @@ async function fetchWebPlayback(songId: string, developerToken: string, mediaUse
     try {
       const refreshedToken = await ensureAppleWebDevToken(true)
       if (refreshedToken && refreshedToken !== token) {
-        localStorage.setItem('appleDeveloperToken', refreshedToken)
+        setSecureToken('appleDeveloperToken', refreshedToken)
         token = refreshedToken
         result = await runWebPlaybackRequest(songId, token, mediaUserToken)
       }
@@ -221,10 +237,14 @@ async function fetchText(url: string): Promise<string | null> {
   try {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), 20000)
-    const response = await fetch(url, { signal: controller.signal })
-    window.clearTimeout(timeout)
-    if (!response.ok) return null
-    return await response.text()
+    // clearTimeout 放 finally：异常/abort 路径也清理，不残留一次性 20s timer
+    try {
+      const response = await fetch(url, { signal: controller.signal })
+      if (!response.ok) return null
+      return await response.text()
+    } finally {
+      window.clearTimeout(timeout)
+    }
   } catch {
     return null
   }
@@ -513,7 +533,7 @@ async function fetchPlayAssets(
     try {
       const refreshedToken = await ensureAppleWebDevToken(true)
       if (refreshedToken && refreshedToken !== token) {
-        localStorage.setItem('appleDeveloperToken', refreshedToken)
+        setSecureToken('appleDeveloperToken', refreshedToken)
         token = refreshedToken
         result = await runPlayAssetsRequest(query, token, mediaUserToken)
       }

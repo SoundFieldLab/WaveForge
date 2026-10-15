@@ -128,6 +128,17 @@ describe('classifyCandidateType（候选类型识别）', () => {
     expect(classifyCandidateType('周杰伦《稻香》歌词字幕版')).toBe('lyrics')
     expect(classifyCandidateType('周杰伦《稻香》超治愈神作')).toBe('other')
   })
+
+  it('巡演/公演等演出形式词优先于字幕组名的「字幕」命中 live（俺の彼女 回归）', () => {
+    // 实测 BV1tK4y1V7FF：宇多田光巡演最终公演的硬字幕组投稿，标题只有「巡演/公演」
+    // + 字幕组名里的「字幕」——曾被判成 lyrics 拿录音室节拍去对现场录音
+    expect(classifyCandidateType('【韩宇森字幕男】宇多田光2018年『Laughter in the Dark』巡演最終公演《俺の彼女》中日字幕HD完整發布！')).toBe('live')
+    expect(classifyCandidateType('宇多田ヒカル 俺の彼女 LIVE from Laughter in the Dark Tour 2018（音樂現場／中日字幕）')).toBe('live')
+    expect(classifyCandidateType('宇多田光 Laughter in the Dark Tour 巡演')).toBe('live')
+    expect(classifyCandidateType('YOASOBI 解散ツアー最終公演')).toBe('live')
+    expect(classifyCandidateType('米津玄師 2020 コンサート')).toBe('live')
+    expect(classifyCandidateType('◯◯ライブ 2019')).toBe('live')
+  })
 })
 
 describe('applyDurationConsistencyPreference（版本一致性优选）', () => {

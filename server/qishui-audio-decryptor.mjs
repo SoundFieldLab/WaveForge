@@ -38,6 +38,7 @@ import crypto from 'node:crypto'
 import dns from 'node:dns'
 import { parseByteRange } from './stream-proxy-utils.mjs'
 import { BoundedAsyncCache } from './bounded-async-cache.mjs'
+import { isBlockedIpAddress } from './image-proxy.mjs'
 
 // ─────────────────────────── mp4 box 解析（移植 mp4-box.js） ───────────────────────────
 
@@ -204,8 +205,17 @@ function parseStsz(data) {
   const sampleSize = data.readUInt32BE(4)
   const count = data.readUInt32BE(8)
 
+  // 上界校验：count 取自 box 数据（恶意/损坏上游可给 0xFFFFFFFF），
+  // 无校验时 Array.from 分配海量元素 → OOM。真实音频单轨 sample 数在数万级。
+  const MAX_SAMPLES = 500_000
+  if (count > MAX_SAMPLES) {
+    throw new Error(`stsz sample count exceeds limit: ${count}`)
+  }
   if (sampleSize !== 0) {
     return Array.from({ length: count }, () => sampleSize)
+  }
+  if (12 + count * 4 > data.length) {
+    throw new Error('stsz table truncated')
   }
 
   const sizes = []
@@ -219,6 +229,9 @@ function parseStsz(data) {
 /** stsc → chunk-sample 映射表（顺序流式解密用不到，保留以维持解析完整性校验） */
 function parseStsc(data) {
   const entryCount = data.readUInt32BE(4)
+  if (8 + entryCount * 12 > data.length) {
+    throw new Error('stsc table truncated')
+  }
   const entries = []
 
   for (let index = 0; index < entryCount; index += 1) {
@@ -242,6 +255,11 @@ function parseSenc(data) {
   const ivs = []
   let position = 8
 
+  // 截断校验：copy 不足 8 字节时会静默产出全零 IV，解密成纯噪声且报错点
+  // 推迟到用户听到杂音——数据不足直接抛错。
+  if (8 + count * 8 > data.length) {
+    throw new Error('senc data truncated')
+  }
   for (let index = 0; index < count; index += 1) {
     const iv = Buffer.alloc(16)
     data.copy(iv, 0, position, position + 8)
@@ -312,17 +330,27 @@ export function resolveSodaTrackKey(spadeA) {
   return key
 }
 
-/** 顺序解密全部 sample：mdat 数据区从 mdat 头后开始按 stsz 依次切分 */
-function decryptSampleList(fileBuffer, key, sampleSizes, ivs, mdatOffset) {
+/** 协作式让出事件循环：整轨逐 sample AES-CTR 同步解密在 512MB 上限时可阻塞事件循环
+ *  数秒（期间音频/封面代理全部停摆）。按字节预算分片，每片之间 setImmediate 让出——
+ *  解密结果与同步版逐字节一致，只是调度更细。 */
+const DECRYPT_YIELD_BYTES = 4 * 1024 * 1024
+
+function yieldEventLoop() {
+  return new Promise(resolve => setImmediate(resolve))
+}
+
+/** 顺序解密全部 sample：mdat 数据区从 mdat 头后开始按 stsz 依次切分（异步分片版） */
+async function decryptSampleList(fileBuffer, key, sampleSizes, ivs, mdatOffset) {
   const decryptedSamples = []
   let sampleOffset = mdatOffset + 8
+  let bytesSinceYield = 0
 
   for (let index = 0; index < sampleSizes.length; index += 1) {
     const size = sampleSizes[index]
     const iv = ivs[index]
 
     if (!iv) {
-      throw new Error('sample ' + index + ' 缺少解密 IV。')
+      throw new Error('sample ' + index + ' 缺失解密 IV。')
     }
 
     const encrypted = fileBuffer.subarray(sampleOffset, sampleOffset + size)
@@ -331,6 +359,11 @@ function decryptSampleList(fileBuffer, key, sampleSizes, ivs, mdatOffset) {
     }
     decryptedSamples.push(aesCtrDecrypt(key, iv, encrypted))
     sampleOffset += size
+    bytesSinceYield += size
+    if (bytesSinceYield >= DECRYPT_YIELD_BYTES) {
+      bytesSinceYield = 0
+      await yieldEventLoop()
+    }
   }
 
   return decryptedSamples
@@ -348,7 +381,10 @@ function buildFlacFile(flacMetadata, decryptedSamples) {
 
 /** m4a 重装：原容器骨架不变，把解密后的 sample 原地覆写回 mdat 数据区 */
 function buildM4aFile(fileBuffer, decryptedSamples, mdat, stsd) {
-  const output = Buffer.from(fileBuffer)
+  // Buffer.allocUnsafe + copy 代替 Buffer.from：fileBuffer 是我们自己的整包 buffer
+  //（上游收集产物，不再被其它路径引用），from 会再复制一整份造成 2× 瞬时峰值。
+  const output = Buffer.allocUnsafe(fileBuffer.length)
+  fileBuffer.copy(output, 0)
   let writePointer = mdat.offset + 8
 
   for (const sample of decryptedSamples) {
@@ -364,7 +400,7 @@ function buildM4aFile(fileBuffer, decryptedSamples, mdat, stsd) {
  * 解密一首汽水加密曲目（对应参考 TrackDecryptor.decrypt）。
  * @returns {{ buffer: Buffer, extension: '.flac'|'.m4a', contentType: string, meta: object }}
  */
-export function decryptSodaTrack({ encryptedBuffer, spadeA }) {
+export async function decryptSodaTrack({ encryptedBuffer, spadeA }) {
   if (!Buffer.isBuffer(encryptedBuffer) || encryptedBuffer.length === 0) {
     throw new Error('encryptedBuffer 必须是非空 Buffer。')
   }
@@ -412,7 +448,7 @@ export function decryptSodaTrack({ encryptedBuffer, spadeA }) {
     throw new Error('解密失败：sample 数量 ' + sampleSizes.length + ' 与 IV 数量 ' + ivs.length + ' 不一致。')
   }
 
-  const decryptedSamples = decryptSampleList(encryptedBuffer, key, sampleSizes, ivs, mdat.offset)
+  const decryptedSamples = await decryptSampleList(encryptedBuffer, key, sampleSizes, ivs, mdat.offset)
 
   const outputBuffer = isFlac
     ? buildFlacFile(flacMetadata, decryptedSamples)
@@ -525,21 +561,10 @@ const SODA_UPSTREAM_TIMEOUT_MS = 30_000
 const SODA_UPSTREAM_MAX_BYTES = 512 * 1024 * 1024
 
 /** 私网/环回/链路本地判断（口径与 local-server 的 isPrivateNetworkAddress 一致） */
+/** 判断地址是否私网：统一复用 image-proxy 的范本实现（IPv4-mapped IPv6 还原、
+ *  CGNAT/组播/保留段全覆盖）。此前的手写副本漏 ::ffff:127.0.0.1、64:ff9b:: 等。 */
 function isPrivateNetworkAddress(address) {
-  if (address.includes(':')) {
-    const lower = address.toLowerCase()
-    if (lower === '::' || lower === '::1' || lower === '0:0:0:0:0:0:0:0' || lower === '0:0:0:0:0:0:0:1') return true
-    if (lower.startsWith('fc') || lower.startsWith('fd')) return true
-    if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true
-    return false
-  }
-  const parts = address.split('.').map(Number)
-  if (parts.length !== 4) return false
-  const [a, b] = parts
-  return a === 0 || a === 127 || a === 10 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 169 && b === 254)
+  return isBlockedIpAddress(address)
 }
 
 /** SSRF 校验：目标必须是解析到公网的 http(s) 地址；返回拒绝原因或空串 */
@@ -565,17 +590,19 @@ async function sodaUpstreamBlockReason(rawUrl) {
   }
 
   const name = hostname.toLowerCase()
-  if (name === 'localhost' || name.endsWith('.local')) return '禁止代理本机音频地址'
+  if (name === 'localhost' || name.endsWith('.localhost') || name.endsWith('.local')) return '禁止代理本机音频地址'
+  // lookup 带 AbortSignal：3 秒超时后中止底层解析，孤儿 lookup 不再堆积
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 3000)
   try {
-    const addresses = await Promise.race([
-      dns.promises.lookup(name, { all: true, verbatim: true }),
-      new Promise((resolve, reject) => setTimeout(() => reject(new Error('dns timeout')), 3000)),
-    ])
+    const addresses = await dns.promises.lookup(name, { all: true, verbatim: true, signal: controller.signal })
     return addresses.some(({ address }) => isPrivateNetworkAddress(address))
       ? '禁止代理内网/本机音频地址'
       : ''
   } catch {
     return '音频域名解析失败，已保守拒绝'
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -595,23 +622,50 @@ function sodaUpstreamHeaders(audioUrl) {
 
 /** 拉取完整上游加密流（整包缓冲，稳定优先） */
 async function fetchSodaEncryptedStream(cleanUrl) {
-  const blockReason = await sodaUpstreamBlockReason(cleanUrl)
-  if (blockReason) {
-    const err = new Error(blockReason)
-    err.statusCode = 400
-    throw err
-  }
-
+  // redirect: 'manual' + 逐跳 SSRF 重校验：公网"跳板 URL"302 到 169.254.169.254 /
+  // 127.0.0.1 时，redirect:'follow' 会无条件跟随，代理就变成对内网的读取通道。
+  const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+  const SODA_MAX_REDIRECTS = 5
+  let currentUrl = cleanUrl
   let response
   try {
-    response = await fetch(cleanUrl, {
-      headers: sodaUpstreamHeaders(cleanUrl),
-      redirect: 'follow',
-      signal: AbortSignal.timeout(SODA_UPSTREAM_TIMEOUT_MS),
-    })
+    for (let hop = 0; hop <= SODA_MAX_REDIRECTS; hop += 1) {
+      const blockReason = await sodaUpstreamBlockReason(currentUrl)
+      if (blockReason) {
+        const err = new Error(blockReason)
+        err.statusCode = 400
+        throw err
+      }
+      let hopResponse
+      try {
+        hopResponse = await fetch(currentUrl, {
+          headers: sodaUpstreamHeaders(currentUrl),
+          redirect: 'manual',
+          signal: AbortSignal.timeout(SODA_UPSTREAM_TIMEOUT_MS),
+        })
+      } catch (err) {
+        const reason = err && err.name === 'TimeoutError' ? '上游音频拉取超时' : '上游音频连接失败：' + ((err && err.message) || err)
+        const wrapped = new Error(reason)
+        wrapped.statusCode = 502
+        throw wrapped
+      }
+      if (REDIRECT_STATUSES.has(hopResponse.status) && hop < SODA_MAX_REDIRECTS) {
+        const location = hopResponse.headers.get('location')
+        try { await hopResponse.body?.cancel?.() } catch { /* ignore */ }
+        if (!location) {
+          const wrapped = new Error('上游重定向缺少 location')
+          wrapped.statusCode = 502
+          throw wrapped
+        }
+        currentUrl = new URL(location, currentUrl).href
+        continue
+      }
+      response = hopResponse
+      break
+    }
   } catch (err) {
-    const reason = err && err.name === 'TimeoutError' ? '上游音频拉取超时' : '上游音频连接失败：' + ((err && err.message) || err)
-    const wrapped = new Error(reason)
+    if (err && (err.statusCode === 400 || err.statusCode === 502)) throw err
+    const wrapped = new Error('上游音频拉取失败：' + ((err && err.message) || err))
     wrapped.statusCode = 502
     throw wrapped
   }
@@ -629,9 +683,53 @@ async function fetchSodaEncryptedStream(cleanUrl) {
     throw wrapped
   }
 
+  // 单 Buffer 预分配收集：chunk 数组 + Buffer.concat 会造成 ~2× 轨道大小的瞬时峰值
+  //（512MB 上限时最坏 1GB）。已声明长度且可信时一次分配到位；无长度/超限回退拼接路径。
+  // 防御：上游谎报 content-length（实际比声明大）时超出预分配区会越界——
+  // copy 前检查剩余空间，声明不可信（filled 超出 declared）则把已收部分并入 chunks 回退。
   const reader = response.body.getReader()
   const chunks = []
   let received = 0
+  let overflowChunk = null
+  if (declaredLength > 0) {
+    const whole = Buffer.allocUnsafe(declaredLength)
+    let filled = 0
+    let declaredTrusted = true
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (filled + value.length > SODA_UPSTREAM_MAX_BYTES) {
+        try { await reader.cancel() } catch { /* 忽略取消错误 */ }
+        const wrapped = new Error('上游音频体积超出代理上限（' + Math.round(SODA_UPSTREAM_MAX_BYTES / 1024 / 1024) + 'MB）')
+        wrapped.statusCode = 502
+        throw wrapped
+      }
+      if (filled + value.length > declaredLength) {
+        // 实际数据超出声明长度：预分配区装不下，放弃预分配；
+        // 当前 value 已从 reader 读出，必须连同已收部分一起入队，否则丢数据。
+        declaredTrusted = false
+        overflowChunk = Buffer.from(value)
+        break
+      }
+      Buffer.from(value).copy(whole, filled)
+      filled += value.length
+    }
+    if (declaredTrusted) {
+      // 实际字节数与声明不符（CDN 压缩/提前结束）时按实际长度截断返回
+      if (filled === declaredLength) return whole
+      if (filled < declaredLength) return whole.subarray(0, filled)
+    }
+    // declaredTrusted=false：已消费的部分（含触发溢出的那个 chunk）先入 chunks，
+    // 剩余数据由下方通用路径继续收集
+    if (filled > 0) {
+      chunks.push(whole.subarray(0, filled))
+      received = filled
+    }
+    if (overflowChunk) {
+      chunks.push(overflowChunk)
+      received += overflowChunk.length
+    }
+  }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
@@ -651,6 +749,11 @@ async function fetchSodaEncryptedStream(cleanUrl) {
 
 const SODA_DECRYPT_CACHE_MAX_BYTES = 256 * 1024 * 1024
 const SODA_DECRYPT_CACHE_MAX_ENTRIES = 12
+// 在途解密并发上限：缓存上限只约束「已完成写入」的条目，每一路在途解密都要持有
+// 整包上游 buffer + 逐 sample 解密输出（典型几十 MB），不封顶的话前端同时预加载
+// N 首歌就是 N×两份整轨内存。超过上限的请求排队等前面的完成（不拒绝——桌面
+// 单用户场景下只是顺序解密）。
+const SODA_DECRYPT_MAX_INFLIGHT = 3
 // 解密结果是整轨音频、常驻内存；长时间没再听的曲目没有保留价值，惰性过期回收即可
 const SODA_DECRYPT_CACHE_TTL_MS = 20 * 60 * 1000
 // 同 key 并发首请求走单飞合并：解密是逐 sample createDecipheriv + 整文件重组，
@@ -661,6 +764,24 @@ const sodaDecryptCache = new BoundedAsyncCache({
   ttlMs: SODA_DECRYPT_CACHE_TTL_MS,
   sizeOf: payload => payload?.buffer?.length || 0,
 })
+let sodaDecryptInflight = 0
+const sodaDecryptQueue = []
+
+async function withSodaDecryptSlot(run) {
+  // 标准信号量：占位前自旋检查——被唤醒者与唤醒间隙新到达者竞争时，
+  // 「无条件占位」会让 in-flight 短暂超过上限；while 重查彻底闭合该窗口
+  while (sodaDecryptInflight >= SODA_DECRYPT_MAX_INFLIGHT) {
+    await new Promise(resolve => sodaDecryptQueue.push(resolve))
+  }
+  sodaDecryptInflight += 1
+  try {
+    return await run()
+  } finally {
+    sodaDecryptInflight -= 1
+    const next = sodaDecryptQueue.shift()
+    if (next) next()
+  }
+}
 
 function sodaDecryptCacheKey(cleanUrl, credential) {
   return crypto.createHash('sha1').update(cleanUrl + '\n' + credential).digest('hex')
@@ -668,11 +789,11 @@ function sodaDecryptCacheKey(cleanUrl, credential) {
 
 async function getSodaDecryptedAudio(cleanUrl, credential) {
   const key = sodaDecryptCacheKey(cleanUrl, credential)
-  return sodaDecryptCache.getOrCreate(key, async () => {
+  return sodaDecryptCache.getOrCreate(key, () => withSodaDecryptSlot(async () => {
     const encryptedBuffer = await fetchSodaEncryptedStream(cleanUrl)
-    const result = decryptSodaTrack({ encryptedBuffer, spadeA: credential })
+    const result = await decryptSodaTrack({ encryptedBuffer, spadeA: credential })
     return { buffer: result.buffer, contentType: result.contentType, extension: result.extension }
-  })
+  }))
 }
 
 /**

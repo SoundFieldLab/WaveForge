@@ -11,7 +11,10 @@ import CachedImage from '../../components/CachedImage'
 //  - QQPlaylistSquarePage 歌单广场（官方分类 chips + 歌单网格 + 翻页，带播放量角标）
 //  - QQZonePage           音质/品牌专区（官方专区名 → 官方歌单搜索）
 
-const API = 'http://localhost:3001'
+import { getApiBase } from '../../services/apiConfig'
+
+// API 基址走统一网关配置（此前硬编码 3001，网关换端口时本页全部请求失效）
+const API = getApiBase()
 
 export function formatQQCount(value?: number | string): string {
   const n = Number(value || 0)
@@ -108,7 +111,8 @@ export function QQArtistsPage({ accent, onPlaySongs, onBack }: { accent: string;
         mid: String(item.singer_mid || item.mid || ''),
         id: item.singer_id ? Number(item.singer_id) : undefined,
         name: String(item.singer_name || item.name || ''),
-        picUrl: String(item.singer_pic || item.picUrl || '').replace(/\.webp$/, ''),
+        // 歌手头像原样保留 .webp 后缀：去掉后缀 y.gtimg.cn 直接 404（与 QQPcHall.parseQQSingers 对齐）
+        picUrl: String(item.singer_pic || item.picUrl || ''),
       })).filter((item: QQSinger) => item.mid && item.name)
       setSingers(previous => {
         if (reset) return list

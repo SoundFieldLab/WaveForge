@@ -31,7 +31,11 @@ export function getQQUserDisplayName(
     if (name) return name.trim()
   }
 
-  const stored = typeof localStorage !== 'undefined' ? localStorage.getItem('qq_username') || '' : ''
+  // localStorage 被禁（隐私模式）时 getItem 直接抛——整个取名函数会跟着炸
+  let stored = ''
+  try {
+    stored = typeof localStorage !== 'undefined' ? localStorage.getItem('qq_username') || '' : ''
+  } catch { /* ignore */ }
   if (stored && !/^QQ用户\d+$/.test(stored) && stored !== 'QQ音乐用户') return stored
 
   // 不再生成“QQ用户数字”作为歌单标题；只有确实没有资料时才使用通用兜底。

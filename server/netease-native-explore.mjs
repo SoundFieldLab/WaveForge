@@ -168,16 +168,16 @@ export async function callEapiRaw(uri, data, cookie) {
 
   let lastError = null
   for (const host of EAPI_HOSTS) {
+    // AbortSignal 让超时后孤儿请求真正断开（withTimeout 只是 race，fetch 本体还挂着占连接）
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 20_000)
     try {
-      const response = await withTimeout(
-        fetch(`${host}/eapi/${uri.replace(/^\/eapi\//, '').replace(/^\/api\//, '')}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: String(cookie || '') },
-          body: new URLSearchParams({ params }).toString(),
-        }),
-        20_000,
-        '网易云 eapi 请求超时',
-      )
+      const response = await fetch(`${host}/eapi/${uri.replace(/^\/eapi\//, '').replace(/^\/api\//, '')}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: String(cookie || '') },
+        body: new URLSearchParams({ params }).toString(),
+        signal: controller.signal,
+      })
       const raw = Buffer.from(await response.arrayBuffer())
       if (raw.length === 0) throw new Error('网易云返回空响应')
       const decipher = crypto.createDecipheriv('aes-128-ecb', EAPI_KEY, null)
@@ -191,7 +191,13 @@ export async function callEapiRaw(uri, data, cookie) {
       const parsed = JSON.parse(body.toString('utf-8').replace(/[\u0000-\u0008]+$/, ''))
       return responseBody(parsed)
     } catch (error) {
-      lastError = error
+      if (error?.name === 'AbortError') {
+        lastError = new Error(`网易云 eapi 请求超时（${host}）`)
+      } else {
+        lastError = error
+      }
+    } finally {
+      clearTimeout(timeoutId)
     }
   }
   throw lastError || new Error('网易云 eapi 请求失败')
@@ -656,7 +662,9 @@ export function registerNeteaseNativeExploreRoutes(app, { getNeteaseApi }) {
     try {
       const cookie = String(req.query.cookie || '')
       const categoryName = String(req.query.categoryName || '推荐')
-      const offset = Math.max(0, Number(req.query.offset) || 0)
+      // Number.isFinite 收口：?offset=1e999 → Infinity，JSON.stringify 后成 null 传给上游
+      const parsedOffset = Number(req.query.offset)
+      const offset = Number.isFinite(parsedOffset) ? Math.max(0, parsedOffset) : 0
       const limit = Math.max(1, Math.min(50, Number(req.query.limit) || 20))
       const cacheKey = `${fingerprint(cookie)}:${categoryName}:${offset}:${limit}`
       if (String(req.query.refresh || '') !== '1') {

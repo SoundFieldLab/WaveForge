@@ -260,12 +260,35 @@ class QishuiAuthRuntime {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        webSecurity: false,
+        // webSecurity 保持开启：跨源读取需求由 _installSessionHooks 的
+        // onHeadersReceived 定向注入 ACAO（仅 api.qishui.com / verify|auth.zijieapi.com，
+        // 且仅本分区会话），不再整窗关闭 CORS——此前关掉后任何被诱导加载的第三方页
+        // 都能跨源调用汽水认证接口（分区内有登录 Cookie）。
         backgroundThrottling: false,
       },
     });
     this.window.setMenuBarVisibility(false);
     this.window.webContents.setUserAgent(UA);
+    // 导航/弹窗守卫：窗口内是汽水安全验证流程（本地资产 + *.qishui.com/*.zijieapi.com 验证域），
+    // authSession 分区内持有登录 Cookie。webSecurity 已恢复开启，跨源仅经 onHeadersReceived
+    // 定向放行；导航守卫仍必须收紧，window.open 一律拒绝。
+    const allowedHost = (url) => {
+      try {
+        const parsed = new URL(String(url || ''));
+        if (parsed.origin === this.assetBase.replace(/\/$/, '')) return true;
+        const host = parsed.hostname.toLowerCase();
+        return parsed.protocol === 'https:' && (
+          host === 'qishui.com' || host.endsWith('.qishui.com') ||
+          host === 'zijieapi.com' || host.endsWith('.zijieapi.com') ||
+          host === 'douyin.com' || host.endsWith('.douyin.com')
+        );
+      } catch (_) { return false; }
+    };
+    this.window.webContents.on('will-navigate', (event, url) => {
+      if (allowedHost(url)) return;
+      event.preventDefault();
+    });
+    this.window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     this.window.on('close', event => {
       if (this.destroying) return;
       event.preventDefault();
@@ -275,23 +298,35 @@ class QishuiAuthRuntime {
       this.window.hide();
     });
 
-    await this.window.loadURL(this.assetBase + 'security_seed.html');
-    let storedToken = await this.window.webContents.executeJavaScript(
-      `localStorage.getItem('xmsty') || localStorage.getItem('xmst') || ''`,
-      true,
-    );
-    if (!/^[A-Za-z0-9_-]{118}==$/.test(String(storedToken || ''))) {
-      storedToken = crypto.randomBytes(88).toString('base64url') + '==';
+    // 窗口创建后的任一步失败（loadURL/executeJavaScript/waitForBdms 超时）都必须
+    // 销毁窗口再抛出：close 被 preventDefault→hide 且无 parent，漏销毁的隐藏窗会
+    // 阻止 window-all-called 触发（进程退出后残留）；且下次 initialize 会 new 一个
+    // 新窗覆盖 this.window 引用，旧窗永久泄漏。
+    try {
+      await this.window.loadURL(this.assetBase + 'security_seed.html');
+      let storedToken = await this.window.webContents.executeJavaScript(
+        `localStorage.getItem('xmsty') || localStorage.getItem('xmst') || ''`,
+        true,
+      );
+      if (!/^[A-Za-z0-9_-]{118}==$/.test(String(storedToken || ''))) {
+        storedToken = crypto.randomBytes(88).toString('base64url') + '==';
+      }
+      this.msToken = String(storedToken);
+      await this.window.webContents.executeJavaScript(
+        `localStorage.setItem('xmst', ${JSON.stringify(this.msToken)});
+         localStorage.setItem('xmsty', ${JSON.stringify(this.msToken)}); true`,
+        true,
+      );
+      await this.window.loadURL(this.assetBase + 'security_host.html');
+      await this.waitForBdms();
+      this.browserInfo = await this.window.webContents.executeJavaScript('window.__qishuiBrowserInfo()', true);
+    } catch (error) {
+      this.destroying = true;
+      try { if (this.window && !this.window.isDestroyed()) this.window.destroy(); } catch (_) {}
+      this.destroying = false;
+      this.window = null;
+      throw error;
     }
-    this.msToken = String(storedToken);
-    await this.window.webContents.executeJavaScript(
-      `localStorage.setItem('xmst', ${JSON.stringify(this.msToken)});
-       localStorage.setItem('xmsty', ${JSON.stringify(this.msToken)}); true`,
-      true,
-    );
-    await this.window.loadURL(this.assetBase + 'security_host.html');
-    await this.waitForBdms();
-    this.browserInfo = await this.window.webContents.executeJavaScript('window.__qishuiBrowserInfo()', true);
     updateConfig({ msToken: this.msToken });
     return true;
   }

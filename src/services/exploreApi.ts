@@ -4,6 +4,7 @@ import { getApiBase } from './apiConfig'
 import type { Song } from './musicApi'
 import { getQQMusicSkillHeaders } from './qqMusicSkills'
 import { fetchAppleExplorePayload } from './appleExploreService'
+import { getSecureToken } from './secureTokenStore'
 import { createTtlCache } from '../utils/ttlCache'
 import {
   appleSongToSong,
@@ -364,14 +365,21 @@ export function getExploreCookie(platform: ExplorePlatform): string {
   return getPlatformCookie(platform)
 }
 
+// 会话级去重：同一 cookie 只同步一次（信息流每翻一页都会带上 cookie，
+// 不去重的话每个请求前都白打一次 /setCookie，探索页请求数近乎翻倍）。
+let lastSyncedQQExploreCookie = ''
 async function syncQQExploreCookie(cookie: string, signal?: AbortSignal): Promise<void> {
   if (!cookie) return
+  if (cookie === lastSyncedQQExploreCookie) return
   await fetch(`${API_BASES[0]}/qq/user/setCookie`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: cookie }),
     signal,
     cache: 'no-store'
+  }).then(response => {
+    // 只在成功时标记已同步：服务端瞬时 4xx/5xx 也标记会让同一 cookie 整个会话不再重试
+    if (response.ok) lastSyncedQQExploreCookie = cookie
   }).catch(error => {
     if ((error as Error).name === 'AbortError') throw error
   })
@@ -629,7 +637,7 @@ export async function fetchExploreHome(
       code: 0,
       platform: 'spotify',
       officialEnhanced: false,
-      personalized: Boolean(localStorage.getItem('spotify_access_token')),
+      personalized: Boolean(getSecureToken('spotify_access_token')),
       dailySongs: [],
       radioSongs: [],
       newSongs,
@@ -1321,6 +1329,8 @@ export async function fetchExploreChannel(channel: ExploreChannel, signal?: Abor
 const kugouTagPlaylistCache = new Map<string, { playlists: ExplorePlaylist[]; hasNext: boolean; expiresAt: number }>()
 const KUGOU_TAG_PLAYLIST_TTL = 5 * 60 * 1000
 const KUGOU_TAG_PLAYLIST_MAX_PAGES = 3
+// FIFO 上限：每条含整页歌单对象，浏览标签越多积累越大，避免无界增长
+const KUGOU_TAG_PLAYLIST_CACHE_MAX = 60
 
 function mapKugouTagPlaylist(item: { specialid: string; globalSpecialId?: string; name: string; coverUrl: string; playCount?: number; trackCount?: number; creator?: string; intro?: string; tags: string[] }): ExplorePlaylist {
   return {
@@ -1370,5 +1380,10 @@ export async function fetchKugouTagPlaylists(
     }
   }
   kugouTagPlaylistCache.set(cacheKey, { ...value, expiresAt: Date.now() + KUGOU_TAG_PLAYLIST_TTL })
+  while (kugouTagPlaylistCache.size > KUGOU_TAG_PLAYLIST_CACHE_MAX) {
+    const oldestKey = kugouTagPlaylistCache.keys().next().value
+    if (oldestKey === undefined) break
+    kugouTagPlaylistCache.delete(oldestKey)
+  }
   return value
 }

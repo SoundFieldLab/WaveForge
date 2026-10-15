@@ -30,6 +30,7 @@ import {
   PcPageTitle, PcPrimaryButton, PcSectionTitle, pcCount, pcTheme, type PcTabItem,
 } from './pcKit'
 import type { PcAccount, PcActions } from './types'
+import { cookieHeaders } from '../../services/cookieRequest'
 
 export interface QQPcHallProps {
   chrome: { tone: 'light' | 'dark'; skin: 'qq'; accent: string }
@@ -332,8 +333,8 @@ function QQPcHall({ chrome, account, actions, active = true, initialTab }: QQPcH
     const controller = new AbortController()
     const cookie = getExploreCookie('qq')
     void Promise.allSettled([
-      fetch(`${getApiBase()}/qq/hall/banners?cookie=${encodeURIComponent(cookie)}`, { signal: controller.signal, cache: 'no-store' }).then(r => r.json()),
-      fetch(`${getApiBase()}/qq/hall/official-playlists?num=12&cookie=${encodeURIComponent(cookie)}`, { signal: controller.signal, cache: 'no-store' }).then(r => r.json()),
+      fetch(`${getApiBase()}/qq/hall/banners`, { headers: cookieHeaders(cookie), signal: controller.signal, cache: 'no-store' }).then(r => r.json()),
+      fetch(`${getApiBase()}/qq/hall/official-playlists?num=12`, { signal: controller.signal, cache: 'no-store' }).then(r => r.json()),
     ]).then(([bannerResult, playlistResult]) => {
       if (controller.signal.aborted) return
       const bannerList = bannerResult.status === 'fulfilled' && Array.isArray(bannerResult.value?.banners) ? bannerResult.value.banners : []
@@ -391,7 +392,9 @@ function QQPcHall({ chrome, account, actions, active = true, initialTab }: QQPcH
   /* ── 推荐 / 排行：账号级货架快照 ── */
   const snapshotKey = `${userId}:${revision}`
   useEffect(() => {
-    // 未登录时接口必然 401（网关要求 cookie），索性不发请求，直接走登录空态
+    // 未登录时接口必然 401（网关要求 cookie），索性不发请求，直接走登录空态。
+    // bootstrap（musicHall）被乐馆**多个页签共享**（推荐货架/精选/视频 curated/排行榜…），
+    // 首次挂载必须拉取；snapshotKeyRef 锁保证同 key 不重复请求，tab 不进守卫。
     if (!active || !loggedIn) return
     if (snapshotKeyRef.current === snapshotKey) return
     snapshotKeyRef.current = snapshotKey
@@ -677,7 +680,7 @@ function QQPcHall({ chrome, account, actions, active = true, initialTab }: QQPcH
     videoBannerKeyRef.current = videoBannerKey
     const controller = new AbortController()
     const cookie = getExploreCookie('qq')
-    void fetch(`${getApiBase()}/qq/video/banners?cookie=${encodeURIComponent(cookie)}`, { signal: controller.signal, cache: 'no-store' })
+    void fetch(`${getApiBase()}/qq/video/banners`, { headers: cookieHeaders(cookie), signal: controller.signal, cache: 'no-store' })
       .then(response => response.json())
       .then(payload => {
         if (controller.signal.aborted) return
@@ -740,7 +743,7 @@ function QQPcHall({ chrome, account, actions, active = true, initialTab }: QQPcH
       setNotice('')
       setRadioPlayingId(channel.id)
       const cookie = getExploreCookie('qq')
-      const response = await fetch(`${getApiBase()}/qq/radio/songs?id=${encodeURIComponent(channel.id)}&count=${RADIO_SONG_COUNT}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+      const response = await fetch(`${getApiBase()}/qq/radio/songs?id=${encodeURIComponent(channel.id)}&count=${RADIO_SONG_COUNT}`, { cache: 'no-store', headers: cookieHeaders(cookie) })
       const payload = await response.json()
       const songs = Array.isArray(payload?.songs) ? payload.songs : []
       if (!songs.length) throw new Error(`「${channel.title}」暂时没有返回歌曲`)

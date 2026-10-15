@@ -90,7 +90,8 @@ export async function fetchNeteaseRecentSongs(cookie: string, limit = 100): Prom
 
   const request = (async () => {
     const query = new URLSearchParams({ limit: String(limit), cookie })
-    const response = await fetch(`http://localhost:3001/api/netease/record/recent/song?${query.toString()}`, { cache: 'no-store' })
+    // 本地网关偶发挂起时不留占位：超时释放 pendingRequests 槽位并走失败路径
+    const response = await fetch(`http://localhost:3001/api/netease/record/recent/song?${query.toString()}`, { cache: 'no-store', signal: AbortSignal.timeout(12000) })
     const payload = await response.json()
     if (!response.ok || payload?.error) throw new Error(payload?.error || 'recent playback unavailable')
     const rows = getRecentRows(payload)

@@ -72,6 +72,11 @@ export default function ApplePcPlaylists({
   const loadedRef = useRef('')
   const requestRef = useRef(0)
 
+  // 取消喜爱后的短窗：favoriteRevision bump 会触发整表重拉，Apple 侧取消若是异步生效，
+  // 重拉结果可能仍含刚取消的那首 —— 行闪现又出现，观感是「取消喜爱失效」。
+  // 2 秒内同 catalogId 的重拉结果继续乐观移除，等下一次真实刷新再恢复权威数据。
+  const recentlyUnlovedRef = useRef<Map<string, number>>(new Map())
+
   const load = useCallback(() => {
     if (!loggedIn) return
     const request = ++requestRef.current
@@ -92,11 +97,20 @@ export default function ApplePcPlaylists({
       })
       : getAppleFavoriteSongs(5000).then(list => {
         if (request !== requestRef.current) return
-        setFavorites(list.map(song => ({
+        // 应用取消喜爱的短窗：刚取消的歌若还在重拉结果里（Apple 侧异步生效），继续乐观移除
+        const now = Date.now()
+        const unloved = recentlyUnlovedRef.current
+        for (const [key, at] of unloved) {
+          if (now - at > 2000) unloved.delete(key)
+        }
+        const filtered = unloved.size
+          ? list.filter(song => !unloved.has(String(song.id)))
+          : list
+        setFavorites(filtered.map(song => ({
           song: appleSongToSong(song),
           catalogId: song.id,
         })))
-        captureEmptyReason(list.length)
+        captureEmptyReason(filtered.length)
       })
     void task
       .catch(reason => { if (request === requestRef.current) setError(reason instanceof Error ? reason.message : '加载失败') })
@@ -117,7 +131,12 @@ export default function ApplePcPlaylists({
     const id = row.catalogId
     if (!id) return
     // 「喜爱歌曲」里取消 ★ = 取消喜爱：乐观移除该行，失败由 App 级提示兜底
-    if (!next) setFavorites(prev => prev.filter(item => item.catalogId !== id))
+    if (!next) {
+      recentlyUnlovedRef.current.set(id, Date.now())
+      setFavorites(prev => prev.filter(item => item.catalogId !== id))
+    } else {
+      recentlyUnlovedRef.current.delete(id)
+    }
     // 收藏链路只走 App（apple 包 setAppleSongLoved）
     actions.onToggleLike?.(row.song, next)
   }, [actions])

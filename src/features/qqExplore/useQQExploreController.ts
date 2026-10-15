@@ -198,12 +198,15 @@ export function useQQExploreController(loggedIn: boolean, userId?: string, authR
       if (id !== generation.current) return
       setState(previous => {
         if (!previous.snapshot) return previous
+        // 刷新永不替换「已解析的 Daily 30」仅限**当天**的：跨天挂机后手动刷新应放行
+        // 新一天的 Daily 30（服务端 dateKey = UTC+8 YYYY-MM-DD），否则继续播昨天的歌单。
+        const todayKey = new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10)
+        const staleDaily = previous.snapshot.daily30 != null && previous.snapshot.daily30.dateKey !== todayKey
         const next = {
           ...previous.snapshot,
           generatedAt: Date.now(),
           feed,
-          // A feed refresh must never replace the account's already-resolved Daily 30.
-          daily30: previous.snapshot.daily30,
+          daily30: staleDaily ? null : previous.snapshot.daily30,
         }
         writeCache(userId, next)
         return { ...previous, snapshot: next, refreshing: false, error: '' }

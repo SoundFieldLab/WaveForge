@@ -20,6 +20,7 @@ import {
   PcTabs, pcSongKey, pcTheme, type PcSkin, type PcTabItem, type PcTone,
 } from './pcKit'
 import type { PcActions, PcAccount } from './types'
+import { cookieHeaders } from '../../services/cookieRequest'
 
 export type QQPcCollectionKind = 'liked' | 'recent'
 
@@ -60,8 +61,44 @@ const TAB_DEFS: Record<QQPcCollectionKind, PcTabItem[]> = {
 /** 操作条只在有歌曲的列表页出现 */
 const TOOLBAR_KINDS: QQPcCollectionKind[] = ['liked', 'recent']
 
-/** 本会话缓存：切走再回来不该重打一遍接口（与 TraditionalView 的最近播放缓存同款做法）。 */
+/** 本会话缓存：切走再回来不该重打一遍接口（与 TraditionalView 的最近播放缓存同款做法）。
+ *  键含 authRevision：登录态每次翻新 set 新条目，旧 revision 条目永不再命中——
+ *  写入前按主键前缀清掉旧 revision，防止长会话反复登录时缓存无限累积。 */
+function evictSamePrefix(map: Map<string, unknown>, key: string) {
+  const prefix = key.slice(0, key.lastIndexOf(':'))
+  for (const existing of map.keys()) {
+    if (existing.startsWith(prefix + ':')) map.delete(existing)
+  }
+}
 const likedCollectionCache = new Map<string, { songs: CollectionSong[]; playlists: any[] }>()
+/** 播放链路补全 QQ 封面后广播（App.tsx waveforge-qq-cover-backfilled）：回写本会话
+ *  列表缓存（喜欢 + 最近播放），否则补出的封面只进播放队列，列表行一直 No Cover。
+ *  返回被更新的列表（按缓存归类），供当前页决定是否要刷新 state。 */
+function patchCachedQQCover(song: Song): { liked?: CollectionSong[]; recent?: CollectionSong[] } | null {
+  if (!song.album?.picUrl) return null
+  const key = pcSongKey(song)
+  const patch = (songs: CollectionSong[]): CollectionSong[] | null => {
+    const index = songs.findIndex(item => pcSongKey(item) === key)
+    if (index === -1 || songs[index].album?.picUrl) return null
+    const next = songs.slice()
+    next[index] = { ...next[index], album: { ...next[index].album, picUrl: song.album.picUrl } }
+    return next
+  }
+  let result: { liked?: CollectionSong[]; recent?: CollectionSong[] } = {}
+  for (const [cacheKey, entry] of likedCollectionCache) {
+    const patched = patch(entry.songs)
+    if (!patched) continue
+    likedCollectionCache.set(cacheKey, { ...entry, songs: patched })
+    result.liked = patched
+  }
+  for (const [cacheKey, songs] of recentSongsCache) {
+    const patched = patch(songs)
+    if (!patched) continue
+    recentSongsCache.set(cacheKey, patched)
+    result.recent = patched
+  }
+  return result.liked || result.recent ? result : null
+}
 const recentSongsCache = new Map<string, CollectionSong[]>()
 const collectedAlbumsCache = new Map<string, any[]>()
 /** 收藏 MV（喜欢→视频 页签）；条目结构与 /api/qq/fav/mv 返回一致。 */
@@ -153,6 +190,30 @@ function QQPcCollection({
   }, [userId])
 
   /* ── 喜欢页：我喜欢歌单曲目（本会话缓存，登录态变化即失效） ── */
+  // 播放链路补全 QQ 封面的广播：回写本页 state 与缓存（歌单详情上游缺 album.mid 时，
+  // 列表行在播放前一直 No Cover——见 fetchQQPlaylistDetail 的封面补全注释）。
+  useEffect(() => {
+    const onCoverBackfilled = (event: Event) => {
+      const detail = (event as CustomEvent<{ song?: Song }>).detail
+      if (!detail?.song) return
+      const patched = patchCachedQQCover(detail.song)
+      if (!patched) return
+      const key = pcSongKey(detail.song)
+      const picUrl = detail.song.album.picUrl
+      const applyPatch = (prev: CollectionSong[]) => {
+        const index = prev.findIndex(item => pcSongKey(item) === key)
+        if (index === -1 || prev[index].album?.picUrl) return prev
+        const next = prev.slice()
+        next[index] = { ...next[index], album: { ...next[index].album, picUrl } }
+        return next
+      }
+      if (kind === 'liked' && patched.liked) setSongs(applyPatch)
+      if (kind === 'recent' && patched.recent) setSongs(applyPatch)
+    }
+    window.addEventListener('waveforge-qq-cover-backfilled', onCoverBackfilled)
+    return () => window.removeEventListener('waveforge-qq-cover-backfilled', onCoverBackfilled)
+  }, [kind])
+
   useEffect(() => {
     if (!active || kind !== 'liked') return
     if (!loggedIn || !userId) {
@@ -208,6 +269,7 @@ function QQPcCollection({
         return
       }
       if (cancelled || requestId !== requestRef.current) return
+      evictSamePrefix(likedCollectionCache, likedCacheKey)
       likedCollectionCache.set(likedCacheKey, { songs: loaded, playlists: others })
       setSongs(loaded)
       setPlaylists(others)
@@ -240,8 +302,8 @@ function QQPcCollection({
     setLoading(true)
     setError('')
     const cookie = getPlatformCookie('qq')
-    const endpoint = `${getApiBase()}/qq/record/recent/song?limit=100${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
-    fetch(endpoint, { cache: 'no-store' })
+    const endpoint = `${getApiBase()}/qq/record/recent/song?limit=100${cookie ? `` : ''}`
+    fetch(endpoint, { cache: 'no-store', headers: cookieHeaders(cookie) })
       .then(response => response.json().catch(() => null).then(payload => ({ response, payload })))
       .then(({ response, payload }) => {
         if (cancelled || requestId !== requestRef.current) return
@@ -268,6 +330,7 @@ function QQPcCollection({
             songType: Number(song?.songType) || undefined,
           } as CollectionSong
         }).filter((item: CollectionSong | null): item is CollectionSong => Boolean(item))
+        evictSamePrefix(recentSongsCache, recentCacheKey)
         recentSongsCache.set(recentCacheKey, list)
         setSongs(list)
         setLoading(false)
@@ -296,6 +359,7 @@ function QQPcCollection({
     void getQQSubscribedAlbums().then(data => {
       if (cancelled) return
       const list = Array.isArray(data?.data?.list) ? data.data.list : (Array.isArray(data?.data) ? data.data : [])
+      evictSamePrefix(collectedAlbumsCache, albumsCacheKey)
       collectedAlbumsCache.set(albumsCacheKey, list)
       setAlbums(list)
       setAlbumsState('ready')
@@ -333,6 +397,7 @@ function QQPcCollection({
       .then(payload => {
         if (cancelled) return
         const list = Array.isArray(payload?.list) ? payload.list : []
+        evictSamePrefix(likedMvsCache, mvsCacheKey)
         likedMvsCache.set(mvsCacheKey, list)
         setMvs(list)
         setMvsState('ready')

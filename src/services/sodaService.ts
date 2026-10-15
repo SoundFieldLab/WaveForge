@@ -1415,6 +1415,7 @@ async function publicSearch(keyword: string, limit = 30): Promise<DouyinMusicIte
   try {
     const resp = await fetch(`${QISHUI_API}/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}`, {
       cache: 'no-store',
+    signal: AbortSignal.timeout(10_000),
     })
     if (!resp.ok) return []
     const json = await resp.json()

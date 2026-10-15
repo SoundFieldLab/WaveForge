@@ -214,7 +214,9 @@ export default function BilibiliVideoPlayerOverlay({ bvid, title, onClose, initi
     const onTimeUpdate = () => {
       setCurrentTime(video.currentTime)
       const audio = audioRef.current
-      if (audio && audioUrl && Math.abs(audio.currentTime - video.currentTime) > 1.5) {
+      // 视频缓冲冻结时 currentTime 停走、音频继续 → 差值超阈会反复把音频拽回冻结点
+      //（声音倒带）。只在视频确有帧在走（readyState>=3）时才拉音频对齐。
+      if (audio && audioUrl && video.readyState >= 3 && Math.abs(audio.currentTime - video.currentTime) > 1.5) {
         audio.currentTime = video.currentTime
       }
       // 续播：loadedmetadata 后跳一次进度

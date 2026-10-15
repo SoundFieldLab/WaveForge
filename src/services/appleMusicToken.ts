@@ -9,6 +9,7 @@
  * 内置在前端资源中。我们定时从 Apple 网页提取并缓存，用户无需提供任何开发者密钥。
  * 优先级：Electron 主进程（无 CORS）→ 公共 CORS 代理（Web 环境）。
  */
+import { setSecureToken, removeSecureToken } from './secureTokenStore'
 
 const WEB_TOKEN_KEY = 'appleWebDevToken'
 const WEB_TOKEN_EXP_KEY = 'appleWebDevTokenExp'
@@ -129,7 +130,7 @@ export async function prepareAppleDeveloperToken(token: string): Promise<string>
   try {
     const fresh = await ensureAppleWebDevToken(true)
     if (fresh) {
-      localStorage.setItem('appleDeveloperToken', fresh)
+      setSecureToken('appleDeveloperToken', fresh)
       return fresh
     }
   } catch {

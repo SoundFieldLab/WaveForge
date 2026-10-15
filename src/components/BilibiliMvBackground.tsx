@@ -48,6 +48,7 @@ import type { TransitionVisualStore } from '../audio/transitionVisualStore'
 import {
   ensureMvAlignment,
   getMvAlignmentFor,
+  offsetAt,
   probeCandidateIdentities,
   prewarmMvBeatAnalysis,
   MIN_ALIGNMENT_CONFIDENCE,
@@ -178,9 +179,11 @@ function formatPlayCount(play: number): string {
 }
 
 export function getMvPreloadPlan<T>(upcomingSongs: T[]): Array<{ song: T; prewarmAlignment: boolean }> {
-  return upcomingSongs.slice(0, 2).map((song, index) => ({
+  // 前 3 首都做对齐预热：随机跳歌/手动连跳时第 2、3 首也会被直接播到，冷算对齐要 3-5s
+  // （下载+解码+网格），预热后命中缓存秒对齐。带宽代价可控（仅 MV 音轨低码率 + 候选搜索）。
+  return upcomingSongs.slice(0, 3).map((song, index) => ({
     song,
-    prewarmAlignment: index === 0,
+    prewarmAlignment: true,
   }))
 }
 
@@ -350,14 +353,18 @@ export default memo(function BilibiliMvBackground({
   // 歌曲倍速同步：背景 MV 视频跟随歌曲倍速（否则节拍对齐会漂移）；过渡重置广播时归 1，
   // 过渡结束（下一首槽位 canplay 后）由设置的 change 事件/新槽位加载恢复。
   const bgSpeedRef = useRef(loadPlaybackSpeedSettings().speed)
+  /** 平滑追频微调量（0.94-1.06 倍率，乘在 bgSpeed 上）：同步循环写入，applyToSlots
+   *  应用倍速时一并带上——否则 2s 轮询会把微调冲掉（追频与倍速系统互搏）。 */
+  const bgRateTrimRef = useRef(1)
   /** 过渡归 1 后到下一首就位前，忽略新的倍速设置：过渡期间引擎在以 BPM 变速驱动歌曲，
    *  此刻改倍速会让槽位视频与歌曲时钟分叉（2s 轮询按新 speed 拉视频、音频却是变速歌）。 */
   const bgSpeedSuppressedRef = useRef(false)
   useEffect(() => {
     const applyToSlots = () => {
+      const effective = bgSpeedRef.current * bgRateTrimRef.current
       for (const slot of [slotARef.current, slotBRef.current]) {
-        if (slot && slot.playbackRate !== bgSpeedRef.current) {
-          try { slot.playbackRate = bgSpeedRef.current } catch { /* 某些编码不支持变速，忽略 */ }
+        if (slot && Math.abs(slot.playbackRate - effective) > 0.004) {
+          try { slot.playbackRate = effective } catch { /* 某些编码不支持变速，忽略 */ }
         }
       }
     }
@@ -478,8 +485,12 @@ export default memo(function BilibiliMvBackground({
   }, [lyrics])
   /** 同步校正冷却：距上次 seek 校正 ≥10s 才允许再次校正（每次 seek 触发重缓冲 = "卡一下"） */
   const lastSyncCorrectionRef = useRef(0)
+  /** 平滑追频冷却：playbackRate 微调的最小间隔（防 1.5s 循环反复改速率造成音画抖动） */
+  const lastRateAdjustRef = useRef(0)
   /** MV 同步诊断状态：跟踪键去重（(歌曲,视频,对齐态) 变化才打"跟踪开始"）、10s 心跳节流、校正计数 */
   const mvSyncStateRef = useRef({ trackingKey: '', lastHeartbeat: 0, corrections: 0 })
+  /** 冻结自愈观测：上一次同步循环看到的视频位置与时间戳——连续两次采样位置不动=流卡死 */
+  const lastVideoPosRef = useRef({ time: -1, at: 0, recovering: false })
   /** 上一次渲染的 hidden 值：从看歌切回（hidden true→false）时做一次性硬同步 */
   const prevHiddenRef = useRef(hidden)
   /** 看歌切回硬同步的重试定时器（隐藏期缓冲可能被回收，视频暂不可 seek 时稍后重试） */
@@ -537,10 +548,14 @@ export default memo(function BilibiliMvBackground({
       if (!video || video.readyState < 2) continue
       if (slotBvidRef.current[slot] !== bvid) continue
       if (Number.isNaN(video.duration)) continue
-      const target = computeMvSyncTarget(playbackTime(audio) + alignment.offsetSeconds, video.duration)
+      // 分段对齐（现场改编区插值）：偏移随歌曲位置变化，逐次计算
+      const audioPosition = playbackTime(audio)
+      const instantOffset = offsetAt(alignment, audioPosition)
+      const target = computeMvSyncTarget(audioPosition + instantOffset, video.duration)
       if (target !== null && Math.abs(video.currentTime - target) > minJumpSec) {
-        void window.electron?.automixLog?.('MvAlign', `[背景] 跳转对齐 ${bvid} offset=${alignment.offsetSeconds}s conf=${alignment.confidence.toFixed(2)} audio=${audio.currentTime.toFixed(1)}s → video seek ${target.toFixed(1)}s（原 ${video.currentTime.toFixed(1)}s，槽${slot} src=${(video.currentSrc || video.src || '空').slice(-40)}）`)?.catch?.(() => undefined)
+        void window.electron?.automixLog?.('MvAlign', `[背景] 跳转对齐 ${bvid} offset=${instantOffset.toFixed(2)}s conf=${alignment.confidence.toFixed(2)} audio=${audioPosition.toFixed(1)}s → video seek ${target.toFixed(1)}s（原 ${video.currentTime.toFixed(1)}s，槽${slot} src=${(video.currentSrc || video.src || '空').slice(-40)}）`)?.catch?.(() => undefined)
         lastSyncCorrectionRef.current = performance.now()
+        bgRateTrimRef.current = 1
         mvSyncStateRef.current.corrections += 1
         video.currentTime = target
           if (isPlayingRef.current && video.paused && video.readyState >= 3 && (slot === activeSlotRef.current || slot === incomingSlotRef.current || isTransitioningStagedSlot(slot))) void video.play().catch(() => undefined)
@@ -570,7 +585,7 @@ export default memo(function BilibiliMvBackground({
       aligned,
       audioSeconds: audioPosition,
       videoSeconds: slotEl(slot)?.currentTime ?? 0,
-      effectiveOffset: aligned && alignment ? alignment.offsetSeconds : 0,
+      effectiveOffset: aligned && alignment ? offsetAt(alignment, audioPosition) : 0,
       lyricLine: activeLyricLine(lyricsRef.current, audioPosition),
       corrections: mvSyncStateRef.current.corrections,
       slot,
@@ -639,6 +654,43 @@ export default memo(function BilibiliMvBackground({
     void video.play().catch(() => undefined)
     return true
   }, [enabled, hidden])
+
+  /**
+   * 播放事件即时对齐钩子：视频 playing/canplay 时立刻尝试对齐跳转。
+   * 修"慢半拍"主根因——对齐算完那一刻视频还在缓冲（readyState<2），jumpToAlignedPosition
+   * 错过后要等 1.5s 粒度的同步循环，而循环还要求漂移>3s+冷却≥10s，最坏拖 10s+（用户体感
+   * "慢半拍/卡一下"）。事件到即响应：就绪瞬间跳到位，不等循环。
+   */
+  const alignOnVideoReady = useCallback((slot: 'A' | 'B') => {
+    const bvid = slotBvidRef.current[slot]
+    if (!bvid) return
+    jumpToAlignedPosition(bvid)
+  }, [jumpToAlignedPosition])
+
+  // 槽位视频播放/就绪事件 → 即时对齐。绑定在 stable 的槽元素上（slotUrl 变化时重绑）。
+  const slotARefForEvents = slotARef
+  const slotBRefForEvents = slotBRef
+  useEffect(() => {
+    if (!enabled) return
+    const handler = (slot: 'A' | 'B') => () => {
+      // 稍延 50ms：seek 目标计算依赖的 audio.currentTime 在 playing 瞬间可能仍在跳变
+      window.setTimeout(() => alignOnVideoReady(slot), 50)
+    }
+    const onA = handler('A')
+    const onB = handler('B')
+    const a = slotARefForEvents.current
+    const b = slotBRefForEvents.current
+    a?.addEventListener('playing', onA)
+    a?.addEventListener('canplay', onA)
+    b?.addEventListener('playing', onB)
+    b?.addEventListener('canplay', onB)
+    return () => {
+      a?.removeEventListener('playing', onA)
+      a?.removeEventListener('canplay', onA)
+      b?.removeEventListener('playing', onB)
+      b?.removeEventListener('canplay', onB)
+    }
+  }, [enabled, alignOnVideoReady, slotAUrl, slotBUrl])
 
   const loadVideo = useCallback(
     (candidate: CandidateScore, chainIndex = 0, stagedOnly = false, ownerSongKey?: string) => {
@@ -905,7 +957,7 @@ export default memo(function BilibiliMvBackground({
           // CC 字幕验证：同步取已加载歌词（含翻译），没加载就不等——命中缓存后零网络升级
           lyricsProvider: () => flattenLyricLinesForMatch(lyricsRef.current),
           // 候选同一性复核：用当前歌音频包络否决"分数相近但选了另一版录音"的候选（与对齐共用解码缓存）
-          identityProbe: (candidates) => probeCandidateIdentities(candidates, getAudioRef.current()?.src || '', controller.signal),
+          identityProbe: (candidates) => probeCandidateIdentities(candidates, getAudioRef.current()?.src || '', controller.signal, songKey),
         })
         if (!isCurrentSearch()) return
         const svBgLog = (msg: string) => { void window.electron?.automixLog?.('MvAlign', msg)?.catch?.(() => undefined) }
@@ -1056,7 +1108,8 @@ export default memo(function BilibiliMvBackground({
             { signal: preloadController.signal, settings: getBilibiliWatchSettings() },
           )
           if (preloadController.signal.aborted || result.status !== 'auto' || !result.best) return
-          // 只预载紧邻下一首的对齐，避免为整列表每首下载数 MB 音频 + 整曲解码
+          // 前 3 首都预热对齐（低码率音轨 + 候选搜索，带宽可控）；随机跳歌命中第 2/3 首
+          // 时对齐秒出。串行的 resolveAndPrewarmAlignment 依次执行，不挤占当前歌带宽。
           if (prewarmAlignment) {
             await resolveAndPrewarmAlignment(
               songKeyOf({ songTitle: upcoming.songTitle, artists: upcoming.songArtists, songDuration: upcoming.songDuration, platform: upcoming.platform, id: upcoming.id }),
@@ -1209,6 +1262,25 @@ export default memo(function BilibiliMvBackground({
     if (fallbackActive !== prevFallbackActiveRef.current) {
       prevFallbackActiveRef.current = fallbackActive
       mvSyncLog(`回退封面 ${fallbackActive ? '进入' : '恢复'} status=${status} song=${songKey} bvid=${slotBvidRef.current[activeSlotRef.current] || '空'}`)
+      // 进入死胡同时**清空视频槽**：旧歌的 MV 帧（视频元素）还挂在槽里，封面层
+      // 渐显 underneath 时旧帧仍可见——Apple 动态封面是图层叠加（非不透明底），
+      // 旧帧穿透尤其明显（用户截图：上一首动画 MV 压在新歌封面上"残留"）。
+      // 保留搜索/加载状态机（status 由 loadVideo 驱动），只释放视觉层。
+      if (fallbackActive) {
+        for (const slot of ['A', 'B'] as const) {
+          const el = slotEl(slot)
+          if (el) {
+            try { el.pause() } catch { /* 忽略 */ }
+            el.removeAttribute('src')
+            el.load()
+          }
+          slotBvidRef.current[slot] = ''
+          slotPlayStateRef.current[slot] = null
+        }
+        stagedSlotRef.current = null
+        setPaintedSlots({ A: false, B: false })
+        mvSyncLog(`回退封面清理：双槽视频释放（旧帧不再穿透封面层）`)
+      }
     }
     onFallbackChange?.(fallbackActive)
   }, [status, showCandidates, onFallbackChange, songKey])
@@ -1261,7 +1333,7 @@ export default memo(function BilibiliMvBackground({
         if (!v || v.readyState < 1 || !Number.isFinite(v.duration) || v.duration <= 0) return false
         const activeBvid = slotBvidRef.current[activeSlotRef.current]
         const alignment = getMvAlignmentFor(songKey, activeBvid, alignmentOwnerFor(activeBvid))
-        const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? alignment.offsetSeconds : 0
+        const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(alignment, playbackTime(audio)) : 0
         const target = computeMvSyncTarget(playbackTime(audio) + offset, v.duration)
         if (target === null) return false
         // 从看歌切回：**无条件** seek 到音频对齐位置——即使偏差只有 0.5s 也要校正，
@@ -1318,7 +1390,7 @@ export default memo(function BilibiliMvBackground({
         // 自己的槽照常晋升/校正，只有真过渡才按目标曲时钟就位并拦下他歌预载的晋升。
         const transitionRunning = transitionActiveRef.current && typeof targetClock === 'number' && Number.isFinite(targetClock)
         if (transitionRunning) {
-          const stagedOffset = stagedAlign && stagedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? stagedAlign.offsetSeconds : 0
+          const stagedOffset = stagedAlign && stagedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(stagedAlign, targetClock) : 0
           if (stagedVideo && stagedVideo.readyState >= 2 && !Number.isNaN(stagedVideo.duration)) {
             const stagedTarget = computeMvSyncTarget(targetClock + stagedOffset, stagedVideo.duration)
             if (stagedTarget !== null && Math.abs(stagedVideo.currentTime - stagedTarget) > 0.5) {
@@ -1340,24 +1412,20 @@ export default memo(function BilibiliMvBackground({
         }
         // armed 期他歌预载保持隐藏：不按当前曲时钟校正
         if (transitionActiveRef.current) return
-        // 无对齐结果（自由播放）时仍按 offset=0 跟随音频位置：背景视频是静音纯视觉，
-        // 歌词跳转/进度拖动时画面必须跟着歌曲走（否则背景冻结在旧位置）
-        const stagedOffset = stagedAlign && stagedAlign.confidence >= MIN_ALIGNMENT_CONFIDENCE ? stagedAlign.offsetSeconds : 0
-        if (stagedVideo && stagedVideo.readyState >= 2 && !Number.isNaN(stagedVideo.duration)) {
-          const stagedTarget = computeMvSyncTarget(playbackTime(audio) + stagedOffset, stagedVideo.duration)
-          if (stagedTarget !== null && Math.abs(stagedVideo.currentTime - stagedTarget) > 1.5 && now - lastSyncCorrectionRef.current > 5000) {
-            lastSyncCorrectionRef.current = now
-            stagedVideo.currentTime = stagedTarget
-          }
-        }
-        return
+        // 他歌预载驻留期（stagedOwner≠当前歌）：预载视频静音纯缓冲，不做周期性 seek——
+        // 用下一首歌的对齐 offset 采样当前歌的时钟是无意义定位，还会反复 seek 到未缓冲
+        // 区拖慢预载；接管/晋升时由 jumpToAlignedPosition / 晋升看门狗统一定位。
+        // 同样**不能在此 return**：预载槽会驻留到晋升/清空，提前返回会让当前槽在驻留期
+        // 失去全部同步（用户跳歌词/拖进度后背景只能靠 onSeek 单次 seek，缓冲中即静默丢失，
+        // 实测 Dandelion 跳歌词背景不跟随）——落到下方主路径继续校正当前槽。
       }
       const activeBvid = slotBvidRef.current[activeSlotRef.current]
       const alignment = getMvAlignmentFor(songKey, activeBvid, alignmentOwnerFor(activeBvid))
       // 无对齐结果（现场/翻唱/对不上）→ 按 offset=0 自由跟随音频位置，而不是完全不校正：
       // 否则用户拖进度条/跳歌词后视频停留在旧位置（实测 宮 现场版跳转不跟随）
       const aligned = Boolean(alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE)
-      const offset = aligned && alignment ? alignment.offsetSeconds : 0
+      const audioPosition = playbackTime(audio)
+      const offset = aligned && alignment ? offsetAt(alignment, audioPosition) : 0
       // —— MV 背景同步诊断（[renderer:MvSync]）：放在早退之前，缓冲/seeking 期间也有心跳 ——
       // 跟踪键含对齐态：对齐算完/缓存命中时（free→aligned）会补一条"跟踪开始"宣告最终映射
       const diag = mvSyncStateRef.current
@@ -1366,6 +1434,7 @@ export default memo(function BilibiliMvBackground({
         diag.trackingKey = diagTrackingKey
         diag.corrections = 0
         diag.lastHeartbeat = now
+        lastVideoPosRef.current = { time: -1, at: now, recovering: false }
         mvSyncLog(formatMvSyncSnapshot('跟踪开始', buildMvSyncSnapshot(audio)))
       } else if (now - diag.lastHeartbeat >= 10_000) {
         diag.lastHeartbeat = now
@@ -1375,13 +1444,66 @@ export default memo(function BilibiliMvBackground({
       if (!video || video.readyState < 2) return
       // 自愈：视频因网络停顿/缓冲被暂停时恢复播放（否则会冻结在当前帧）
       resumeSlot(activeSlotRef.current)
+      // —— 冻结自愈：视频位置连续 ~6s 不动而音频在走 = 流卡死（日志实测 video 卡 130.18s
+      // 不动、漂移恶化到 -27s：seeking 卡死/流断裂时常规漂移>3s 硬 seek 分支永远进不来——
+      // 它排在 video.seeking 早退之后）。先 sample 位置，再处理 seeking 早退。
+      const videoPos = video.currentTime
+      const lastPos = lastVideoPosRef.current
+      if (videoPos === lastPos.time) {
+        const frozenMs = now - lastPos.at
+        if (!lastPos.recovering && frozenMs > 6000 && !video.paused && !video.ended) {
+          lastPos.recovering = true
+          lastPos.at = now
+          diag.corrections += 1
+          bgRateTrimRef.current = 1
+          mvSyncLog(`冻结自愈：视频位置 ${videoPos.toFixed(1)}s 停滞 ${Math.round(frozenMs / 1000)}s（seeking=${video.seeking} readyState=${video.readyState} networkState=${video.networkState}）→ load() 重建流`)
+          try {
+            video.load()
+            const target0 = computeMvSyncTarget(audioPosition + offset, video.duration)
+            if (target0 !== null) video.currentTime = target0
+            void video.play().catch(() => undefined)
+          } catch { /* 重建失败等下一轮再试 */ }
+        }
+      } else {
+        lastPos.time = videoPos
+        lastPos.at = now
+        lastPos.recovering = false
+      }
       if (video.seeking) return
-      const target = computeMvSyncTarget(playbackTime(audio) + offset, video.duration)
+      const target = computeMvSyncTarget(audioPosition + offset, video.duration)
       if (target === null) return
-      if (Math.abs(video.currentTime - target) > 3 && now - lastSyncCorrectionRef.current > 10000) {
-        lastSyncCorrectionRef.current = now
-        diag.corrections += 1
-        video.currentTime = target
+      const drift = Math.abs(video.currentTime - target)
+      // 弱对齐（conf<0.55 = 支持率采纳档，误差审计 24% >1s）：追频容差放宽 0.8→1.2s、
+      // 微调幅度减半——弱对齐的偏移本身有 ±1s 级不确定性，激进追频会把不确定放大成抖动
+      const driftFloor = alignment && alignment.confidence < 0.55 ? 1.2 : 0.8
+      // 大漂移（>3s）：硬 seek（重缓冲不可避免，10s 冷却防连跳）；seek 后清追频微调
+      // 小漂移（体感区）：playbackRate 微调追赶——无重缓冲不卡顿，视频快放 5% 追完
+      // 2s 漂移约需 40s（一首歌内悄然归位）；写 bgRateTrimRef 乘在用户倍速上
+      // （applyToSlots 2s 轮询会应用它，两系统不再互搏）。
+      // 小于容差：人眼对歌词-MV 相位差容差内，不动（反复微调反而制造音画抖动）。
+      if (drift > 3) {
+        if (now - lastSyncCorrectionRef.current > 10000) {
+          lastSyncCorrectionRef.current = now
+          diag.corrections += 1
+          bgRateTrimRef.current = 1
+          video.currentTime = target
+        }
+      } else if (drift > 0.8) {
+        const lagging = video.currentTime < target
+        // 目标微调量：漂移越大 trim 越大（封顶 5%），方向朝 target 追
+        const desiredTrim = Math.min(0.05, drift / 60) * (lagging ? 1 : -1) + 1
+        const changed = Math.abs(desiredTrim - bgRateTrimRef.current) > 0.004
+        // 60s 最小间隔防反复；追上（漂移<0.4s）立即归 1
+        if ((changed && now - lastRateAdjustRef.current > 60000) || (bgRateTrimRef.current !== 1 && drift < driftFloor * 0.5)) {
+          bgRateTrimRef.current = drift < driftFloor * 0.5 ? 1 : desiredTrim
+          lastRateAdjustRef.current = now
+          if (drift >= 0.4) {
+            diag.corrections += 1
+            mvSyncLog(`平滑追频 漂移=${(video.currentTime - target).toFixed(2)}s → trim=${bgRateTrimRef.current.toFixed(3)}x（无 seek）`)
+          }
+        }
+      } else if (bgRateTrimRef.current !== 1) {
+        bgRateTrimRef.current = 1
       }
     }, transitionActive ? 250 : 1500)
     return () => {
@@ -1413,7 +1535,7 @@ export default memo(function BilibiliMvBackground({
     const onSeek = () => {
       const activeBvid = slotBvidRef.current[activeSlotRef.current]
       const alignment = getMvAlignmentFor(songKey, activeBvid, alignmentOwnerFor(activeBvid))
-      const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? alignment.offsetSeconds : 0
+      const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(alignment, audio.currentTime) : 0
       const video = slotEl(activeSlotRef.current)
       if (!video || video.readyState < 2) return
       const target = computeMvSyncTarget(audio.currentTime + offset, video.duration)

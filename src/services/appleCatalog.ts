@@ -162,7 +162,10 @@ export async function searchAppleCatalog(title: string, artist = '', limit = 25,
 const normalizeMatch = (value: string) =>
   (value || '')
     .toLowerCase()
-    .replace(/[\s·•\-–—()（）[\]【】「」『』〈〉《》"'`、，。！？!?,.&/\\|feat.]+/g, '')
+    // 先剥 feat.：feat. 写进下方字符类会逐字符删 f/e/a/t 四个字母（"Fake"→"k"），两首歌名互相碰撞放大包含式误命中
+    .replace(/feat\.\s*/g, ' ')
+    .replace(/[\s·•\-–—()（）[\]【】「」『』〈〉《》"'`、，。！？!?,.&/\\|]+/g, '')
+
 
 /**
  * 在网易云/QQ 中寻找 Apple 曲目的可播放同款（标题+艺人+时长评分）。
@@ -197,7 +200,12 @@ export async function findPlayableAppleSong(track: {
     const artist = normalizeMatch((song.artists || []).map(artist => artist.name).join(' '))
     let score = 0
     if (title === normalizedTitle) score += 100
-    else if (title && (title.includes(normalizedTitle) || normalizedTitle.includes(title))) score += 55
+    else if (title && (title.includes(normalizedTitle) || normalizedTitle.includes(title))) {
+      // 包含式命中从 55 收紧到 35：歌名搜索不带艺人时前 15 条混入大量翻唱/Live，
+      // 55+艺人精确(40)=95 越过 60 门槛让翻唱当原曲。35 需搭配艺人精确(40)=75 才过线，
+      // 或时长接近(+15)=50 仍不过线——保守方向减少误命中
+      score += 35
+    }
     if (normalizedArtist && artist === normalizedArtist) score += 40
     else if (normalizedArtist && artist && (artist.includes(normalizedArtist) || normalizedArtist.includes(artist))) score += 15
     if (track.durationMs && song.duration) {
@@ -638,7 +646,7 @@ export async function searchAppleCatalogArtists(title: string, country = 'cn', l
   if (!term) return []
   const url = `${APPLE_SEARCH_BASE}?term=${encodeURIComponent(term)}&entity=musicArtist&limit=${Math.min(50, Math.max(1, limit))}&country=${COUNTRY_PARAM(country)}`
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return []
     const data = await response.json()
     const results = Array.isArray(data?.results) ? data.results : []
@@ -664,7 +672,7 @@ export async function searchAppleCatalogAlbums(title: string, country = 'cn', li
   if (!term) return []
   const url = `${APPLE_SEARCH_BASE}?term=${encodeURIComponent(term)}&entity=album&limit=${Math.min(50, Math.max(1, limit))}&country=${COUNTRY_PARAM(country)}`
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return []
     const data = await response.json()
     const results = Array.isArray(data?.results) ? data.results : []
@@ -744,7 +752,7 @@ export async function getAppleNewSongs(country = 'cn', limit = 30): Promise<Appl
   const cc = COUNTRY_PARAM(country).toLowerCase()
   const url = `https://itunes.apple.com/${cc}/rss/topsongs/limit=${Math.min(100, Math.max(1, limit))}/json`
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return []
     const data = await response.json()
     const entry = data?.feed?.entry
@@ -983,7 +991,7 @@ export async function getAppleAlbumDetail(albumId: string, country = 'cn'): Prom
 
   const url = `https://itunes.apple.com/lookup?id=${encodeURIComponent(albumId)}&entity=song&country=${COUNTRY_PARAM(country)}&limit=200`
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return null
     const data = await response.json()
     const results = Array.isArray(data?.results) ? data.results : []
@@ -1029,7 +1037,7 @@ export async function getAppleArtistDetail(artistId: string, country = 'cn'): Pr
   if (!artistId) return null
   const url = `https://itunes.apple.com/lookup?id=${encodeURIComponent(artistId)}&entity=song&country=${COUNTRY_PARAM(country)}&limit=50`
   try {
-    const response = await fetch(url)
+    const response = await fetch(url, { signal: AbortSignal.timeout(3000) })
     if (!response.ok) return null
     const data = await response.json()
     const results = Array.isArray(data?.results) ? data.results : []
@@ -1355,6 +1363,22 @@ export async function setAppleSongLoved(songId: string, loved: boolean): Promise
  * 找不到时返回 null（表示不可用），与旧签名一致，调用方无需改动。
  */
 const APPLE_FAVORITES_PLAYLIST_NAMES = ['喜爱歌曲', 'Loved Songs', 'Love', 'Favorites', '喜欢的歌曲']
+// 多语言兜底词表：Apple 系统歌单名随账号语言本地化（日区「お気に入りの曲」、
+// 法区「Titres préférés」、德区「Lieblingssongs」、韩区「좋아하는 노래」等）。
+// 名称匹配始终是最后手段——优先用歌单位置特征判定（见 findAppleFavoritesPlaylistId）。
+const APPLE_FAVORITES_LOOSE_PATTERNS: Array<{ re: RegExp; name: string }> = [
+  { re: /喜爱|喜欢的歌曲/u, name: 'zh' },
+  { re: /loved|favorite/i, name: 'en' },
+  { re: /お気に入り/u, name: 'ja' },
+  { re: /préférés|préférées/i, name: 'fr' },
+  { re: /lieblingssongs|lieblinge/i, name: 'de' },
+  { re: /좋아하는/u, name: 'ko' },
+  { re: /canciones favoritas|favoritas/i, name: 'es' },
+  { re: /песни, которые вам нравятся|любимые/i, name: 'ru' },
+  { re: /brani preferiti/i, name: 'it' },
+  { re: /podane písničky|oblíbené/i, name: 'cs' },
+  { re: /firstryck|favoriter/i, name: 'sv' },
+]
 
 async function findAppleFavoritesPlaylistId(): Promise<string | null> {
   try {
@@ -1364,8 +1388,17 @@ async function findAppleFavoritesPlaylistId(): Promise<string | null> {
       const hit = playlists.find(playlist => playlist.name === name)
       if (hit) return String(hit.id)
     }
-    // 兜底：名称里含「喜爱 / Loved / Favorite」的收藏类歌单
-    const loose = playlists.find(playlist => /喜爱|loved|favorite/i.test(playlist.name || ''))
+    // 位置特征判定（比名称更可靠）：Apple「喜爱歌曲」是资料库中 **ownedByMe=true 且
+    // 没有 catalog 关联**（非用户创建的镜像）的系统歌单。用户自建歌单同样 ownedByMe，
+    // 但通常有自定义名——这里取「无 catalog 关联 + 名字匹配词表」的交集做兜底，
+    // 覆盖词表遗漏的语言。仍匹配不到再退化到纯名称匹配。
+    const candidates = playlists.filter(playlist => {
+      if (playlist.catalogId) return false // 有 catalog 镜像 = 订阅的编辑歌单，排除
+      return APPLE_FAVORITES_LOOSE_PATTERNS.some(({ re }) => re.test(playlist.name || ''))
+    })
+    if (candidates.length > 0) return String(candidates[0].id)
+    // 最终兜底：纯名称宽匹配（可能误命中用户自建的「我喜爱的收藏」类歌单，可接受）
+    const loose = playlists.find(playlist => APPLE_FAVORITES_LOOSE_PATTERNS.some(({ re }) => re.test(playlist.name || '')))
     return loose ? String(loose.id) : null
   } catch {
     return null
@@ -1418,8 +1451,16 @@ export async function getAppleFavoriteSongs(limit = 5000, storefront = getAppleC
 /** 批量读取 Apple Music「喜爱」状态（ratings value===1）。
  *  说明：favorites 系列路径（/v1/me/favorites[/songs]）实测恒为 404 "Path Not Found"，
  *  与账号/地区/订阅无关，故不再尝试；ratings 是唯一可用来源。
- *  ratings 也不可用时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。 */
-let favoritesEndpointsUnavailable = false
+ *  ratings 也不可用时记为不可用，避免每次页面加载重复请求（会刷屏并拖慢封面）。
+ *  不可用标记带 10 分钟 TTL：一次网络抖动/限流就把本会话红心全灭且重启才恢复，
+ *  与 clearAppleSubscriptionFailure 的设计意图相悖。 */
+let favoritesEndpointsUnavailableAt = 0
+const FAVORITES_UNAVAILABLE_TTL_MS = 10 * 60 * 1000
+const markFavoritesUnavailable = (): void => {
+  favoritesEndpointsUnavailableAt = Date.now()
+}
+const favoritesUnavailableRecently = (): boolean =>
+  favoritesEndpointsUnavailableAt > 0 && Date.now() - favoritesEndpointsUnavailableAt < FAVORITES_UNAVAILABLE_TTL_MS
 
 /**
  * 「喜爱」状态短 TTL 缓存：探索页每次 pages 变化、播放页切歌、右键菜单都会带一批 id 来问一次，
@@ -1441,7 +1482,12 @@ const fingerprintIds = (ids: string[]): string => {
   return (hash >>> 0).toString(36)
 }
 
-const clearAppleLovedIdsCache = (): void => { appleLovedIdsCache.clear() }
+const clearAppleLovedIdsCache = (): void => {
+  appleLovedIdsCache.clear()
+  // 登录态变化同步复位「ratings 不可用」标记：重新登录/续订后应立即可用，
+  // 否则最长 10 分钟内红心全灭
+  favoritesEndpointsUnavailableAt = 0
+}
 if (typeof window !== 'undefined') {
   window.addEventListener('waveforge-auth-changed', clearAppleLovedIdsCache)
   // 收藏/资料库变更（含「喜爱歌曲」歌单被改写）→ 立刻失效，避免读到旧红心状态。
@@ -1453,7 +1499,7 @@ if (typeof window !== 'undefined') {
 
 export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]> {
   const ids = [...new Set(songIds.map(id => String(id).trim()).filter(Boolean))]
-  if (ids.length === 0 || favoritesEndpointsUnavailable) return []
+  if (ids.length === 0 || favoritesUnavailableRecently()) return []
   const cacheKey = `${getAppleCredentials().storefront || 'cn'}:${fingerprintIds(ids)}`
   const cached = appleLovedIdsCache.get(cacheKey)
   if (cached) return cached
@@ -1466,8 +1512,8 @@ export async function getAppleLovedSongIds(songIds: string[]): Promise<string[]>
     const ratingData = await appleMeFetch(`/v1/me/ratings/songs?ids=${encodeURIComponent(batch.join(','))}`)
     const ratingItems = Array.isArray(ratingData?.data) ? ratingData.data : null
     if (!ratingItems) {
-      // 连 ratings 都不可用 → 本次会话不再重试（也不缓存：失败绝不落缓存）。
-      favoritesEndpointsUnavailable = true
+      // 连 ratings 都不可用 → TTL 内不再重试（也不缓存：失败绝不落缓存）。
+      markFavoritesUnavailable()
       return [...loved]
     }
     for (const item of ratingItems) {

@@ -164,9 +164,14 @@ function QQPcHome({ payload, chrome, account, actions, active = true, username, 
     let cancelled = false
     const controller = new AbortController()
     const loadRest = async () => {
+      // 服务端依赖 shelfIds/feedKeys 做 v_cache/v_uniq 去重：传空数组时第 2、3 页
+      // 可能拿到与首屏同一批模块（去重后等于白拉），feed 的真实后续内容永远取不到。
+      // 从当前 modules 收集已见身份（与 useQQExploreController 同款口径）。
+      const seenShelfIds = modules.map(module => module.id).filter(Boolean)
+      const seenFeedKeys = modules.flatMap(module => module.cards.map(card => card.feedKey)).filter(Boolean)
       const [pageTwo, pageThree] = await Promise.all([
-        fetchQQExploreFeed({ page: 2, shelfCount: 0 }, [], [], null, controller.signal).catch(() => null),
-        fetchQQExploreFeed({ page: 3, shelfCount: 0 }, [], [], null, controller.signal).catch(() => null),
+        fetchQQExploreFeed({ page: 2, shelfCount: 0 }, seenShelfIds, seenFeedKeys, null, controller.signal).catch(() => null),
+        fetchQQExploreFeed({ page: 3, shelfCount: 0 }, seenShelfIds, seenFeedKeys, null, controller.signal).catch(() => null),
       ])
       if (cancelled || controller.signal.aborted) return
       let merged = modules

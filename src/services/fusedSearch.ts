@@ -103,8 +103,9 @@ const songIdentity = (song: Song) => {
 
 const inferSearchIntent = (keyword: string, songs: Song[], artists: Artist[], albums: Album[]) => {
   const artistConfidence = Math.max(0, ...artists.map(artist => bestMatch(keyword, [artist.name, ...(artist.alias || [])])))
-  const albumConfidence = Math.max(0, ...albums.map(album => textMatchScore(keyword, album.name)))
-  const songConfidence = Math.max(0, ...songs.map(song => textMatchScore(keyword, song.name)))
+  // name 可能是 null（上游畸形数据）：normalizeSearchText 默认参数只兜 undefined
+  const albumConfidence = Math.max(0, ...albums.map(album => textMatchScore(keyword, album.name || '')))
+  const songConfidence = Math.max(0, ...songs.map(song => textMatchScore(keyword, song.name || '')))
   const exactArtistPlatforms = new Set(artists
     .filter(artist => bestMatch(keyword, [artist.name, ...(artist.alias || [])]) >= 0.995)
     .map(platformOf))
@@ -235,11 +236,35 @@ const rankAndMergeSongs = (keyword: string, songs: Song[], entitlements: FusionE
     if (!key) return
 
     // Avoid collapsing two genuinely different recordings that happen to share a title.
+    // 桶边界修正：先在既有组里找「时长互容」的组（两两差 ≤15s 即并入），找不到才按
+    // 时长桶拆新键——旧实现只比对同键组，225s/236s 跨桶界被误拆；且拆分键 Math.round
+    // 依赖插入顺序，{230,244,258} 按到达序不同产生不同分组。
     const existing = groups.get(key)
     const durationDiffers = existing?.some(({ item }) => (
       item.duration > 0 && song.duration > 0 && Math.abs(item.duration - song.duration) > 15_000
     ))
-    if (durationDiffers) key = `${key}|${Math.round(song.duration / 15_000)}`
+    if (durationDiffers) {
+      // 在同身份的衍生组里找互容组
+      let merged = false
+      for (const [groupKey, group] of groups) {
+        if (!groupKey.startsWith(`${key}|`)) continue
+        // 极差判定（组内 max-min ≤15s 不变量）：链式场景（各两两差 ≤15s 但首尾 >15s）
+        // 也不依赖插入顺序
+        const durations = group.map(({ item }) => item.duration).filter(d => d > 0)
+        const fits = !song.duration || !durations.length ||
+          Math.max(...durations, song.duration) - Math.min(...durations, song.duration) <= 15_000
+        if (fits) {
+          // 只 push，不 groups.set(key, …)：group 是派生桶（K|dur）的数组引用，
+          // 用基础键 K 重 set 会 ① 覆盖掉 K 下的基础组（条目静默丢失）
+          // ② 同一数组挂两个键（输出重复行）。group 是引用，push 已生效
+          group.push({ item: song, sourceIndex })
+          merged = true
+          break
+        }
+      }
+      if (merged) return
+      key = `${key}|${song.duration}`
+    }
 
     const group = groups.get(key) || []
     group.push({ item: song, sourceIndex })

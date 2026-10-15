@@ -14,6 +14,7 @@ import { fetchNeteaseRecentSongs } from '../../services/neteaseRecentPlayback'
 import { getNeteaseDjSublist, getNeteaseMvSublist, getSubscribedAlbums } from '../../services/musicApi'
 import { getPlatformCookie } from '../../services/platforms'
 import { getApiBase } from '../../services/apiConfig'
+import { cookieHeaders } from '../../services/cookieRequest'
 import { fetchNeteaseMyPodcasts } from '../neteaseExplore/discover'
 import type { NeteaseNativeResource } from '../neteaseExplore/model'
 import type { Song } from '../../services/musicApi'
@@ -455,7 +456,7 @@ async function fetchRecentListRows(type: RecentContentType): Promise<any[]> {
   if (cached) recentListCache.delete(type)
   const cookie = getPlatformCookie('netease')
   if (!cookie) throw new Error('请先登录网易云音乐')
-  const response = await fetch(`${getApiBase()}/netease/record/recent/${type}?limit=${RECENT_LIMIT}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+  const response = await fetch(`${getApiBase()}/netease/record/recent/${type}?limit=${RECENT_LIMIT}`, { cache: 'no-store' })
   const payload = await response.json().catch(() => null)
   if (!response.ok || payload?.error) throw new Error(payload?.error || `最近${RECENT_TYPE_LABEL[type]}读取失败（HTTP ${response.status}）`)
   const candidates = [payload?.data?.list, payload?.data?.records, payload?.data, payload?.list, payload?.records]
@@ -556,7 +557,7 @@ function recentDjCards(rows: any[], actions: PcActions): RecentCard[] {
  * 失败就退化为没有时间内容（列表照常显示），不阻塞主流程。
  */
 async function fetchRecentPlayTimes(cookie: string): Promise<Map<string, number>> {
-  const response = await fetch(`${getApiBase()}/netease/record/recent/song?limit=${RECENT_LIMIT}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+  const response = await fetch(`${getApiBase()}/netease/record/recent/song?limit=${RECENT_LIMIT}`, { cache: 'no-store', headers: cookieHeaders(cookie) })
   const payload = await response.json()
   const candidates = [
     payload?.data?.list, payload?.data?.records, payload?.data?.songs, payload?.data,
@@ -1148,7 +1149,7 @@ interface CloudResult {
 async function fetchCloudList(signal: AbortSignal): Promise<CloudResult> {
   const cookie = getPlatformCookie('netease')
   if (!cookie) throw new Error('请先登录网易云音乐')
-  const response = await fetch(`${getApiBase()}/netease/cloud/list?limit=200&offset=0&cookie=${encodeURIComponent(cookie)}`, { signal, cache: 'no-store' })
+  const response = await fetch(`${getApiBase()}/netease/cloud/list?limit=200&offset=0`, { signal, cache: 'no-store', headers: cookieHeaders(cookie) })
   const payload = await response.json()
   if (!response.ok || payload?.error) throw new Error(payload?.error || `云盘列表读取失败（HTTP ${response.status}）`)
   const candidates = [payload?.data?.list, payload?.data?.songs, payload?.data, payload?.list, payload?.songs]
@@ -1210,7 +1211,7 @@ async function fetchCloudSongUrl(songId: number | string): Promise<string> {
   if (cached) cloudUrlCache.delete(key)
   const cookie = getPlatformCookie('netease')
   if (!cookie) throw new Error('请先登录网易云音乐')
-  const response = await fetch(`${getApiBase()}/netease/cloud/url?id=${encodeURIComponent(key)}&cookie=${encodeURIComponent(cookie)}`, { cache: 'no-store' })
+  const response = await fetch(`${getApiBase()}/netease/cloud/url?id=${encodeURIComponent(key)}`, { cache: 'no-store', headers: cookieHeaders(cookie) })
   const payload = await response.json().catch(() => null)
   if (!response.ok || payload?.error) throw new Error(payload?.error || `云盘文件地址获取失败（HTTP ${response.status}）`)
   // 服务端把上游 http 直链转成了 https；data 主体兼容对象/数组两种返回形态

@@ -1,17 +1,43 @@
 import type { MusicPlatform } from './platforms'
+import { getSecureToken } from './secureTokenStore'
 import { getPlatformCookie as getStoredPlatformCookie } from './platforms'
 import type { EntitlementTier } from '../utils/musicEntitlements'
 import { getApiBase } from './apiConfig'
 import { resolveArtworkUrl } from './artwork'
 import { createTtlCache } from '../utils/ttlCache'
+import { LYRIC_CREDIT_LINE_RE, isMetadataOnlyLyricTexts } from '../utils/lyricCreditLine'
 import { debugLog } from '../utils/debugLog'
 const API_BASE = getApiBase()
 
 // 统一请求超时：此前仅歌词链路有超时，搜索/详情/歌单写操作全部裸 fetch，
 // 本地网关挂起时相关 UI 会永久卡在加载态。已自带 signal 的调用（歌词 5-8s、song URL 26s）保持原值。
 const DEFAULT_FETCH_TIMEOUT_MS = 20_000
-const fetchT = (url: string, init: RequestInit = {}): Promise<Response> =>
-  fetch(url, { ...init, signal: init.signal ?? AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS) })
+/**
+ * 把 URL 里的 cookie query 迁到 X-WaveForge-Cookie 请求头（后端 CORS 中间件会把它
+ * 回填进 req.query.cookie，路由零改动）。URL 会进后端错误日志/上游代理日志——
+ * 凭据不该出现在 URL 里；新代码禁止再往 URL 拼 cookie（后端仍兼容旧 TV 构建）。
+ */
+export function splitCookieFromUrl(url: string): { url: string; headers: Record<string, string> } {
+  const queryStart = url.indexOf('?')
+  if (queryStart === -1) return { url, headers: {} }
+  try {
+    const parsed = new URL(url)
+    const cookie = parsed.searchParams.get('cookie')
+    if (!cookie) return { url, headers: {} }
+    parsed.searchParams.delete('cookie')
+    return { url: parsed.toString(), headers: { 'X-WaveForge-Cookie': cookie } }
+  } catch {
+    return { url, headers: {} }
+  }
+}
+const fetchT = (url: string, init: RequestInit = {}): Promise<Response> => {
+  const { url: cleanUrl, headers } = splitCookieFromUrl(url)
+  return fetch(cleanUrl, {
+    ...init,
+    headers: { ...headers, ...(init.headers || {}) },
+    signal: init.signal ?? AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS),
+  })
+}
 
 import { parseTTML } from '../utils/ttmlParser'
 import { selectTimingVerifiedLines } from '../utils/lyricTimingBorrow'
@@ -213,7 +239,9 @@ const fetchSongUrlResponse = async (url: string): Promise<Response> => {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), SONG_URL_FETCH_TIMEOUT)
   try {
-    return await fetch(url, { signal: controller.signal })
+    // 与 fetchT 同款 cookie 剥离：URL 里的 cookie 转 X-WaveForge-Cookie 请求头
+    const { url: cleanUrl, headers } = splitCookieFromUrl(url)
+    return await fetch(cleanUrl, { headers, signal: controller.signal })
   } finally {
     window.clearTimeout(timeoutId)
   }
@@ -221,8 +249,8 @@ const fetchSongUrlResponse = async (url: string): Promise<Response> => {
 
 const buildSongUrlCacheKey = (id: number | string, platform: MusicPlatform) => {
   const cookie = platform === 'qq'
-    ? (localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || '')
-    : (localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')
+    ? (getSecureToken('qq_cookie') || getSecureToken('qqCookie') || '')
+    : (getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || '')
   const crossPlatformFallback = localStorage.getItem('crossPlatformFallbackEnabled') ?? 'false'
   const { preference, isVip } = getAudioQualityRequest(platform)
   return `${platform}:${id}:${preference}:${isVip ? 'vip' : 'free'}:${fingerprint(cookie)}:${crossPlatformFallback}`
@@ -531,6 +559,21 @@ export function getProxiedImageUrl(originalUrl: string, size: number = 500): str
   return resolveArtworkUrl(originalUrl, { size })
 }
 
+/**
+ * QQ 歌曲封面统一读取:picUrl 优先,缺失时用 album.mid/albummid 按官方 CDN 规则拼出。
+ * 无专辑单曲(プロセカ系,实测幸福刑/D/N/A 等)的 picUrl 可能是 404 的首选 vs URL,
+ * 而服务端探测链回填的真封面带 coverVerified 标记——本工具不区分验证态,只兜"字段缺失"。
+ * 各组件裸读 album.picUrl 的渲染点统一替换为它,避免同一种数据缺字段在多处各自造兜底。
+ */
+export function qqSongCoverUrl(song: { album?: { picUrl?: string; mid?: string }; albummid?: string } | null | undefined): string {
+  if (!song) return ''
+  const pic = song.album?.picUrl || ''
+  if (pic) return pic
+  const albumMid = song.album?.mid || (song as { albummid?: string }).albummid || ''
+  if (!albumMid) return ''
+  return `https://y.gtimg.cn/music/photo_new/T002R300x300M000${String(albumMid).replace(/_\d+$/, '')}.jpg`
+}
+
 export function getProxiedAudioUrl(originalUrl: string): string {
   if (!originalUrl || !/^https?:\/\//i.test(originalUrl)) return originalUrl
   try {
@@ -608,7 +651,8 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
       // 网易云音乐返回格式
       const songs = (data.result?.songs || []).map((song: any) => ({
         id: song.id,
-        name: song.name,
+        // QQ 同分支有 || '' 兜底：上游畸形数据 name=null 会炸融合搜索的 textMatchScore
+        name: song.name || '',
         artists: song.artists || [],
         album: {
           id: song.album?.id, // 保存专辑ID用于懒加载
@@ -665,6 +709,9 @@ export async function searchSuggest(keywords: string, platform: MusicPlatform = 
       return suggestions
     }
     
+    // kugou / spotify 无联想端点：返回空而不是网易联想词（此前 platform 参数被忽略，
+    // 酷狗/Spotify 页签下拉显示的是网易联想词，点击后却触发本平台搜索——数据串台）
+    if (platform === 'kugou' || platform === 'spotify') return []
     // 网易云音乐
     const response = await fetchT(`${API_BASE}/netease/search/suggest?keywords=${encodeURIComponent(keywords)}`)
     const data = await response.json()
@@ -811,7 +858,9 @@ export async function searchArtists(keywords: string, platform: MusicPlatform = 
   } catch (error) {
     console.error('❌ [搜索歌手] 异常错误:', error)
     console.error('❌ [搜索歌手] 错误堆栈:', (error as Error).stack)
-    return []
+    // rethrow：融合搜索靠 Promise.allSettled 的 rejected 标记平台不可用，
+    // 静默返回 [] 会让"服务挂了"被呈现成"无结果"（与 searchSongs 同口径）
+    throw error
   }
 }
 
@@ -885,7 +934,8 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
     const data = await response.json()
     const albums = (data.result?.albums || []).map((item: any) => ({
       id: item.id,
-      name: item.name,
+      // 同 songs：畸形数据 null 会炸融合搜索的 textMatchScore
+      name: item.name || '',
       picUrl: item.picUrl,
       artist: { name: item.artist?.name, id: item.artist?.id },
       publishTime: item.publishTime,
@@ -895,7 +945,8 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
     return albums
   } catch (error) {
     console.error('搜索专辑失败:', error)
-    return []
+    // rethrow：与 searchArtists/searchSongs 同口径（融合搜索的 rejected 检测依赖）
+    throw error
   }
 }
 
@@ -933,14 +984,14 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
       // 仅网易云响应带回签名有效期（data[0].expi，秒）；其余平台没有可用字段，保持默认 TTL
       let readTtlMs: (data: any) => number = () => SONG_URL_CACHE_TTL
       if (platform === 'qq') {
-        const cookie = localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
+        const cookie = getSecureToken('qq_cookie') || getSecureToken('qqCookie') || ''
         const { preference, isVip } = getAudioQualityRequest('qq')
         apiUrl = `${API_BASE}/qq/song/url?mid=${encodeURIComponent(String(id))}&quality=${encodeURIComponent(preference)}&vip=${isVip ? 'true' : 'false'}${cookie ? '&cookie=' + encodeURIComponent(cookie) : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'kugou') {
         // 酷狗：签名网关四层策略（H5→Mobile→Web），付费歌曲返回 null → 上层降级网易云/QQ
-        const kgCookie = localStorage.getItem('kugou_cookie') || ''
-        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${kgCookie ? `&cookie=${encodeURIComponent(kgCookie)}` : ''}`
+        const kgCookie = getSecureToken('kugou_cookie') || ''
+        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}`
         readUrl = data => data.url || null
       } else if (platform === 'soda') {
         // 汽水音乐：逆向 Web API 音源（VIP/SVIP 分层过滤在服务端完成；
@@ -951,7 +1002,7 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         const sodaQuality = mapSodaQualityParam(preference)
         apiUrl = `${API_BASE}/soda/song/url?id=${encodeURIComponent(String(id))}${sodaQuality ? `&quality=${encodeURIComponent(sodaQuality)}` : ''}${
           (() => {
-            const sdCookie = localStorage.getItem('soda_token') || ''
+            const sdCookie = getSecureToken('soda_token') || ''
             return sdCookie ? '&cookie=' + encodeURIComponent(sdCookie) : ''
           })()
         }`
@@ -960,7 +1011,7 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         // Spotify：未登录无自源音源，返回 null → 上层降级网易云/QQ
         return null
       } else {
-        const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+        const cookie = getSecureToken('netease_cookie') || ''
         const fallbackSetting = localStorage.getItem('crossPlatformFallbackEnabled')
         // localStorage 脏值（非 JSON）解析会抛错进 catch → 返回 null 进负缓存，全量不可播
         let crossPlatformFallback = false
@@ -1425,7 +1476,11 @@ function parseLyric(lyricText: string): LyricLine[] {
   const lines = lyricText.split('\n')
   const result: LyricLine[] = []
 
-  const timeRegex = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/
+  // timeRegexFirst（无 /g）：exec 取行内第一个时间戳定位行起点；
+  // timeRegexAll（/g）：replace 删净全部时间戳——合唱 LRC 一行可带多个时间戳，
+  // 无 /g 只删第一个会让正文残留 [01:20.00] 垃圾并进 30 天缓存
+  const timeRegexFirst = /\[((\d{2}):(\d{2})\.(\d{2,3}))\]/
+  const timeRegexAll = /\[((\d{2}):(\d{2})\.(\d{2,3}))\]/g
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -1450,14 +1505,14 @@ function parseLyric(lyricText: string): LyricLine[] {
       continue
     }
 
-    const match = timeRegex.exec(line)
+    const match = timeRegexFirst.exec(line)
     if (match) {
       const minutes = parseInt(match[1])
       const seconds = parseInt(match[2])
       const milliseconds = parseInt(match[3].padEnd(3, '0'))
 
       const time = minutes * 60 + seconds + milliseconds / 1000
-      const text = line.replace(timeRegex, '').trim()
+      const text = line.replace(timeRegexAll, '').trim()
 
       if (text) {
         result.push({ time, text })
@@ -1600,8 +1655,19 @@ function mergeCrossPlatformLyricTexts(
   }
 }
 
+/** getLyrics 结果级缓存（内存 30 分钟）：服务详情弹窗等直接调用方，主播放路径有自己的双层缓存 */
+const lyricsResultMemoryCache = createTtlCache<LyricLine[]>({ ttlMs: 30 * 60 * 1000, maxEntries: 48 })
+async function storeLyricsResultCache(key: string, lyrics: LyricLine[], platform: MusicPlatform): Promise<void> {
+  if (!Array.isArray(lyrics) || lyrics.length === 0) return
+  try {
+    lyricsResultMemoryCache.set(key, lyrics)
+    const { indexedDBCache } = await import('./indexedDBCache')
+    await indexedDBCache.cacheLyrics(key, platform, lyrics)
+  } catch { /* 缓存失败不影响取词 */ }
+}
+
 export async function getLyrics(
-  id: number | string, 
+  id: number | string,
   platform: MusicPlatform = 'netease',
   songName?: string,
   artistName?: string,
@@ -1610,14 +1676,59 @@ export async function getLyrics(
 ): Promise<LyricLine[]> {
   // 只有元数据（作词/作曲…）没有正文的"空壳歌词"：视为无效结果，
   // 避免 Lrclib/AMLL 等第三方源用空壳抢跑，导致界面只剩"作词 作曲"没有正文。
-  const LYRIC_METADATA_ONLY = /^(词|曲|编曲|作词|作曲|演唱|歌手|制作人|录音|混音|母带)[：:\s]/u
-  const isMetadataOnlyLyrics = (lyrics: LyricLine[]): boolean => {
-    if (!Array.isArray(lyrics) || lyrics.length === 0) return false
-    return !lyrics.some(line => {
-      const text = (line.text || '').trim()
-      if (!text) return false
-      return !LYRIC_METADATA_ONLY.test(text)
-    })
+  // 用共享 i18n 署名正则（含 Lyrics by/Produced by 等英文署名）。
+  const isMetadataOnlyLyrics = (lyrics: LyricLine[]): boolean =>
+    isMetadataOnlyLyricTexts(lyrics.map(l => l.text))
+  // ── 结果级缓存（内存 30 分钟 + IndexedDB 30 天，跟随 indexedDBCache 的 LYRICS_TTL）──
+  // 主播放路径（App 的 ensureSongLyrics）自带 preload 内存层 + IndexedDB 层，不会走到这里；
+  // 这层缓存服务的是其它直接调用方（歌曲详情弹窗等）：每次打开都全量重拉 8+ 个源，
+  // 同一首歌反复查看就是 8+ × N 次重复流量。key 自含取词策略（与 App 的 policy key 同款字段），
+  // 用户改设置后自动失效；只缓存非空成功结果，失败/空结果不钉死。
+  // 与 App 层 policy key 同口径：Apple 的开关/语言/登录态/storefront 变化都会改变
+  // 取词结果（AM 歌词接口消费这些值），不进 key 会命中改设置前的旧缓存并被"洗白"
+  // 进新策略键（30 天 IndexedDB）。storefront 两层原本都缺，一并在 App 层补。
+  const applePolicyPart = (() => {
+    if (platform !== 'apple') return '-'
+    const enabled = localStorage.getItem('appleMusicEnabled') || 'default'
+    const lang = localStorage.getItem('appleLyricLang') || 'zh-hans-cn'
+    const storefront = localStorage.getItem('appleStorefront') || 'cn'
+    const loggedIn = isAppleMusicConfigured() ? 'logged-in' : 'logged-out'
+    return [enabled, lang, storefront, loggedIn].join(':')
+  })()
+  const lyricsPolicyKey = [
+    typeof localStorage !== 'undefined'
+      ? [
+        localStorage.getItem('thirdPartyLyricsEnabled') || 'default',
+        localStorage.getItem('adaptiveLyrics') || 'default',
+        localStorage.getItem('primaryLyricsSource') || 'AMLL',
+      ]
+      : ['default', 'default', 'AMLL'],
+    applePolicyPart,
+    String(id),
+    platform,
+    songName || '',
+    artistName || '',
+    duration ?? 0,
+  ].join('|')
+  const tryLyricsCache = async (): Promise<LyricLine[] | null> => {
+    const memHit = lyricsResultMemoryCache.get(lyricsPolicyKey)
+    if (memHit) return memHit
+    try {
+      const { indexedDBCache } = await import('./indexedDBCache')
+      const persisted = await indexedDBCache.getCachedLyrics<LyricLine[]>(lyricsPolicyKey, platform)
+      if (Array.isArray(persisted) && persisted.length > 0) {
+        lyricsResultMemoryCache.set(lyricsPolicyKey, persisted)
+        return persisted
+      }
+    } catch { /* IndexedDB 不可用时退化为无持久缓存 */ }
+    return null
+  }
+  const cachedLyrics = await tryLyricsCache()
+  if (cachedLyrics) {
+    const hasWW = cachedLyrics.some(line => line.words && line.words.length > 0)
+    // 同步补一次 progress 回调：依赖流式回调做首屏的调用方拿到与实时路径一致的时序
+    onProgress?.(cachedLyrics, '缓存', hasWW)
+    return cachedLyrics
   }
   try {
     // 检查用户设置
@@ -1636,6 +1747,7 @@ export async function getLyrics(
         const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
         if (fills.wordByWord.length > 0) {
           mergeCrossPlatformLyricTexts(fills.wordByWord, fills)
+          if (!onProgress) void storeLyricsResultCache(lyricsPolicyKey, fills.wordByWord, platform)
           return fills.wordByWord
         }
       }
@@ -1649,6 +1761,7 @@ export async function getLyrics(
           const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
           mergeCrossPlatformLyricTexts(appleLyrics, fills)
         }
+        if (!onProgress) void storeLyricsResultCache(lyricsPolicyKey, appleLyrics, platform)
         return appleLyrics
       }
     }
@@ -1657,7 +1770,9 @@ export async function getLyrics(
     }
     // 如果禁用第三方或禁用自适应，直接使用当前平台
     if (!useThirdParty || !useAdaptive || primarySource === 'Platform') {
-      return await getPlatformLyrics(id, platform, songName, artistName)
+      const platformOnlyLyrics = await getPlatformLyrics(id, platform, songName, artistName)
+      if (!onProgress) void storeLyricsResultCache(lyricsPolicyKey, platformOnlyLyrics, platform)
+      return platformOnlyLyrics
     }
     
     // 官方歌词源必须与歌曲所属平台一致，禁止拿一个平台的歌曲 ID 请求另一个平台。
@@ -2021,13 +2136,14 @@ export async function getLyrics(
         debugLog('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
       }
       
+      if (!onProgress) void storeLyricsResultCache(lyricsPolicyKey, currentLyrics, platform)
       return currentLyrics
-      
+
     } catch (error) {
       console.error('  ❌ 获取歌词失败:', error)
       return []
     }
-    
+
   } catch (error) {
     console.error('获取歌词失败:', error)
     return []
@@ -2077,7 +2193,7 @@ async function getPlatformLyrics(id: number | string, platform: MusicPlatform, s
       return []
     }
     if (platform === 'qq') {
-      const qqCookie = localStorage.getItem('qq_cookie') || ''
+      const qqCookie = getSecureToken('qq_cookie') || ''
       const url = new URL(`${API_BASE}/qq/lyric`)
       // 同一参数既可能是 songmid（字符串/数字）也可能是 songID（纯数字）：两种都传，
       // 后端 musicu 按有效字段取——只传 mid 时，songID 型 id 会被当成 songMID 查询 → 空歌词
@@ -2194,8 +2310,9 @@ function mergeLyricsWithTranslationAndRoman(
   return lyrics.map((lyric) => {
     const text = lyric.text?.trim() || ''
     
-    // 检查是否是元数据行（词:、曲:、编曲:等）或歌曲标题行（包含 " - " 分隔符）
-    const isMetadata = /^(词|曲|编曲|作词|作曲|演唱|歌手)[：:]/u.test(text)
+    // 检查是否是元数据行（词:、曲:、编曲:、Lyrics by:、Produced by: 等）或歌曲标题行
+    // i18n 署名正则：旧白名单只认中文，AM 英文元数据行被当正文贪婪匹配到错位翻译（用户实测）
+    const isMetadata = LYRIC_CREDIT_LINE_RE.test(text)
     const isSongTitle = / - /.test(text) && lyric.time < 2 // 前2秒内包含 " - " 的行视为标题
     
     // 元数据行和标题行不需要匹配翻译和罗马音
@@ -2213,8 +2330,9 @@ function mergeLyricsWithTranslationAndRoman(
       if (usedTranslations.has(index)) return
       
       const diff = Math.abs(t.time - lyric.time)
-      // 开头歌词（前5秒）放宽阈值到2秒，因为时间戳经常不准确
-      const threshold = lyric.time < 5 ? 2.0 : 1.0
+      // 开头歌词（前5秒）放宽到 1.2 秒：时间戳确实常有抖动，但 2 秒足以跨过整句
+      // （元数据/纯音乐开场密集行互相抢翻译，用户实测 A Moment Apart 开头错配）
+      const threshold = lyric.time < 5 ? 1.2 : 1.0
       if (diff < threshold && diff < minTransDiff) {
         minTransDiff = diff
         bestTransMatch = t
@@ -2226,14 +2344,12 @@ function mergeLyricsWithTranslationAndRoman(
       if (usedRomans.has(index)) return
       
       const diff = Math.abs(r.time - lyric.time)
-      // 特殊处理：第一句歌词（0-3秒内）使用更宽松的阈值，允许向后匹配
+      // 开头放宽幅度收紧（3s/2s 足以跨过整句导致罗马音错行）：首句 1.5s、前10秒 1.2s
       let threshold = 1.0
       if (lyric.time < 3) {
-        // 第一句歌词放宽到3秒，且允许罗马音时间晚于歌词
-        threshold = 3.0
+        threshold = 1.5
       } else if (lyric.time < 10) {
-        // 前10秒放宽到2秒
-        threshold = 2.0
+        threshold = 1.2
       }
       
       if (diff < threshold && diff < minRomanDiff) {
@@ -2833,7 +2949,9 @@ async function getArtistTopSongsUncached(id: number | string, platform: MusicPla
             id: item.album?.id || item.albumid,
             mid: item.album?.mid || item.albummid,
             name: item.album?.name || item.albumname || item.album?.title || '',
-            picUrl: (item.album?.mid || item.albummid) ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album?.mid || item.albummid}.jpg` : ''
+            // 服务端对无专辑单曲探测出的 T062 真封面放在 albumpic/picurl——必须优先于
+            // albummid 拼 URL（探测 mid 拼 T002R 会 404），否则艺人页仍是占位符。
+            picUrl: item.albumpic || item.picurl || ((item.album?.mid || item.albummid) ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album?.mid || item.albummid}.jpg` : '')
           },
           duration: Number(item.interval || item.duration || 0) * 1000,
           platform: 'qq' as const,
@@ -2872,7 +2990,9 @@ async function getArtistTopSongsUncached(id: number | string, platform: MusicPla
     }))
   } catch (error) {
     console.error('获取歌手热门歌曲失败:', error)
-    return []
+    // rethrow：调用方（艺人详情页/传统页）都有 catch 呈现错误态，
+    // 静默 [] 会把"服务挂了"呈现成"该歌手没有热门歌曲"
+    throw error
   }
 }
 
@@ -3074,7 +3194,8 @@ async function getAlbumSongsUncached(id: number | string, platform: MusicPlatfor
     }))
   } catch (error) {
     console.error('获取专辑歌曲列表失败:', error)
-    return []
+    // rethrow：调用方（专辑详情弹窗/传统页）有 catch 呈现错误态，口径同 getArtistTopSongs
+    throw error
   }
 }
 
@@ -3108,7 +3229,8 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
           id: item.album?.id,
           mid: item.album?.mid,
           name: item.album?.name || item.album?.title || '',
-          picUrl: item.album?.mid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album.mid}.jpg` : ''
+          // 服务端探测出的 T062 真封面优先（无专辑单曲 albummid 拼 T002R 会 404）
+          picUrl: item.albumpic || item.picurl || (item.album?.mid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album.mid}.jpg` : '')
         },
         duration: (item.interval || item.duration) * 1000,
         platform: 'qq' as const,
@@ -3308,7 +3430,7 @@ export async function getMVUrl(mvId: number | string, quality: number = 1080, pl
   try {
     if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
-      const response = await fetchT(`${API_BASE}/qq/mv/url?vid=${mvId}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`)
+      const response = await fetchT(`${API_BASE}/qq/mv/url?vid=${mvId}`)
       const data = await response.json()
       return data.url || null
     }
@@ -3327,7 +3449,7 @@ export async function getMVPlaybackInfo(mvId: number | string, quality: number =
   try {
     if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
-      const response = await fetchT(`${API_BASE}/qq/mv/url?vid=${mvId}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`)
+      const response = await fetchT(`${API_BASE}/qq/mv/url?vid=${mvId}`)
       const data = await response.json()
       return { url: data.url || null, error: data.error, needCookie: data.needCookie }
     }
@@ -3345,7 +3467,7 @@ export async function getMVDetail(mvId: number | string, platform: MusicPlatform
   try {
     if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
-      const response = await fetchT(`${API_BASE}/qq/mv/detail?vid=${mvId}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`)
+      const response = await fetchT(`${API_BASE}/qq/mv/detail?vid=${mvId}`)
       const data = await response.json()
       return {
         id: data.vid,
@@ -3589,7 +3711,7 @@ export async function subscribeAlbum(
 export async function getSubscribedAlbums(platform: 'netease' = 'netease', options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie(platform, options.cookie)
-    const response = await fetchT(`${API_BASE}/${platform}/album/sublist?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/${platform}/album/sublist`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取收藏专辑列表失败')
     return data
@@ -3635,7 +3757,7 @@ export async function getHotComments(
 ): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/comment/hot?id=${id}&type=${type}&limit=${limit}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/comment/hot?id=${id}&type=${type}&limit=${limit}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取热门评论失败')
     return data
@@ -3658,7 +3780,7 @@ export async function getSimilarSongs(
   try {
     const cookie = getPlatformCookie(platform, options.cookie)
     // QQ 需要 numeric id，网易云需要 string id，统一用 id 参数名
-    const url = `${API_BASE}/${platform}/song/similar?id=${encodeURIComponent(id)}&cookie=${encodeURIComponent(cookie)}`
+    const url = `${API_BASE}/${platform}/song/similar?id=${encodeURIComponent(id)}`
     const response = await fetchT(url)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取相似歌曲失败')
@@ -3678,7 +3800,7 @@ export async function getSimilarArtists(
   try {
     const cookie = getPlatformCookie(platform, options.cookie)
     const paramKey = platform === 'qq' ? 'mid' : 'id'
-    const url = `${API_BASE}/${platform}/artist/similar?${paramKey}=${encodeURIComponent(id)}&cookie=${encodeURIComponent(cookie)}`
+    const url = `${API_BASE}/${platform}/artist/similar?${paramKey}=${encodeURIComponent(id)}`
     const response = await fetchT(url)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取相似歌手失败')
@@ -3736,7 +3858,7 @@ export async function getSubscribedArtists(platform: MusicPlatform = 'netease', 
       return { artists }
     }
     const cookie = getPlatformCookie(platform, options.cookie)
-    const response = await fetchT(`${API_BASE}/${platform}/artist/sublist?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/${platform}/artist/sublist`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取关注歌手列表失败')
     return data
@@ -3750,7 +3872,7 @@ export async function getSubscribedArtists(platform: MusicPlatform = 'netease', 
 export async function getQQSubscribedAlbums(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq', options.cookie)
-    const response = await fetchT(`${API_BASE}/qq/album/sublist?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/album/sublist`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取收藏专辑列表失败')
     return data
@@ -3764,7 +3886,7 @@ export async function getQQSubscribedAlbums(options: { cookie?: string } = {}): 
 export async function getQQSubscribedArtists(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq', options.cookie)
-    const response = await fetchT(`${API_BASE}/qq/artist/sublist2?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/artist/sublist2`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取关注歌手列表失败')
     return data
@@ -3989,7 +4111,7 @@ export async function getUserFollows(uid: string, options: { cookie?: string; li
     const cookie = getPlatformCookie('netease', options.cookie)
     const limit = options.limit ?? 30
     const offset = options.offset ?? 0
-    const response = await fetchT(`${API_BASE}/netease/user/follows?uid=${uid}&limit=${limit}&offset=${offset}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/user/follows?uid=${uid}&limit=${limit}&offset=${offset}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取关注列表失败')
     return data
@@ -4005,7 +4127,7 @@ export async function getUserFolloweds(uid: string, options: { cookie?: string; 
     const cookie = getPlatformCookie('netease', options.cookie)
     const limit = options.limit ?? 30
     const offset = options.offset ?? 0
-    const response = await fetchT(`${API_BASE}/netease/user/followeds?uid=${uid}&limit=${limit}&offset=${offset}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/user/followeds?uid=${uid}&limit=${limit}&offset=${offset}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取粉丝列表失败')
     return data
@@ -4140,7 +4262,7 @@ export async function getNeteaseSongWikiRows(id: number | string): Promise<Netea
 export async function getNeteaseSongBlog(albumId: number | string, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/song/blog?albumId=${encodeURIComponent(String(albumId))}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/song/blog?albumId=${encodeURIComponent(String(albumId))}`)
     const data = await response.json()
     if (data?.code !== 200) {
       console.warn('相关博客获取失败:', data?.msg || data?.error || `code ${data?.code}`)
@@ -4181,7 +4303,7 @@ export async function getNeteaseSimiMv(mvid: number | string): Promise<any> {
 export async function getNeteaseMvSublist(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/mv/sublist?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/mv/sublist`)
     const data = await response.json()
     return data?.data || []
   } catch (error) {
@@ -4224,7 +4346,7 @@ export async function getNeteaseToplistDetail(): Promise<any> {
 export async function getNeteaseToplistSongs(id: number | string, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/toplist/songs?id=${encodeURIComponent(String(id))}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/toplist/songs?id=${encodeURIComponent(String(id))}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4273,7 +4395,7 @@ export async function neteaseRecommendDislike(id: number | string, options: { co
 export async function getNeteaseVipInfo(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/vip/info?cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/vip/info`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4286,7 +4408,7 @@ export async function getNeteaseVipInfo(options: { cookie?: string } = {}): Prom
 export async function getNeteaseFollowingEvents(options: { cookie?: string; pagesize?: number; lasttime?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/event/following?pagesize=${Number(options.pagesize) || 20}&lasttime=${Number(options.lasttime) || -1}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/event/following?pagesize=${Number(options.pagesize) || 20}&lasttime=${Number(options.lasttime) || -1}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4299,7 +4421,7 @@ export async function getNeteaseFollowingEvents(options: { cookie?: string; page
 export async function getNeteaseUserEvents(uid: number | string, options: { cookie?: string; lasttime?: number; limit?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/event/user?uid=${encodeURIComponent(String(uid))}&lasttime=${Number(options.lasttime) || -1}&limit=${Number(options.limit) || 30}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/event/user?uid=${encodeURIComponent(String(uid))}&lasttime=${Number(options.lasttime) || -1}&limit=${Number(options.limit) || 30}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4312,7 +4434,7 @@ export async function getNeteaseUserEvents(uid: number | string, options: { cook
 export async function getNeteaseNotices(options: { cookie?: string; limit?: number; lasttime?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/msg/notices?limit=${Number(options.limit) || 30}&lasttime=${Number(options.lasttime) || -1}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/msg/notices?limit=${Number(options.limit) || 30}&lasttime=${Number(options.lasttime) || -1}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4325,7 +4447,7 @@ export async function getNeteaseNotices(options: { cookie?: string; limit?: numb
 export async function getNeteaseCommentMessages(uid: number | string, options: { cookie?: string; limit?: number; before?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/msg/comments?uid=${encodeURIComponent(String(uid))}&limit=${Number(options.limit) || 30}&before=${Number(options.before) || -1}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/msg/comments?uid=${encodeURIComponent(String(uid))}&limit=${Number(options.limit) || 30}&before=${Number(options.before) || -1}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4358,7 +4480,7 @@ export async function subscribeNeteaseDj(rid: number | string, subscribe: boolea
 export async function getNeteaseDjSublist(options: { cookie?: string; limit?: number; offset?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/dj/sublist?limit=${Number(options.limit) || 30}&offset=${Number(options.offset) || 0}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/dj/sublist?limit=${Number(options.limit) || 30}&offset=${Number(options.offset) || 0}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4383,7 +4505,7 @@ export async function getQQSongMV(songId: number | string): Promise<any> {
 export async function likeQQMV(id: number | string, like: boolean = true): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq')
-    const response = await fetchT(`${API_BASE}/qq/mv/like?id=${encodeURIComponent(String(id))}&type=${like ? 1 : 0}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/mv/like?id=${encodeURIComponent(String(id))}&type=${like ? 1 : 0}`)
     const data = await response.json()
     return data
   } catch (error) {
@@ -4434,7 +4556,7 @@ export async function getNeteaseDjRecommend(): Promise<any> {
 export async function getQQListenAlso(songid: number | string, singermid?: string): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq')
-    const response = await fetchT(`${API_BASE}/qq/song/listen-also?songid=${encodeURIComponent(String(songid))}${singermid ? `&singermid=${encodeURIComponent(singermid)}` : ''}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/song/listen-also?songid=${encodeURIComponent(String(songid))}${singermid ? `&singermid=${encodeURIComponent(singermid)}` : ''}`)
     const data = await response.json()
     return data?.data?.songs || []
   } catch (error) {
@@ -4447,7 +4569,7 @@ export async function getQQListenAlso(songid: number | string, singermid?: strin
 export async function getQQLikeAlso(songid: number | string, offset: number = 0): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq')
-    const response = await fetchT(`${API_BASE}/qq/song/like-also?songid=${encodeURIComponent(String(songid))}&offset=${offset}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/song/like-also?songid=${encodeURIComponent(String(songid))}&offset=${offset}`)
     const data = await response.json()
     return data?.data?.playlists || []
   } catch (error) {
@@ -4460,7 +4582,7 @@ export async function getQQLikeAlso(songid: number | string, offset: number = 0)
 export async function getNeteaseSimiSong(id: number | string, limit: number = 10): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease')
-    const response = await fetchT(`${API_BASE}/netease/song/simi?id=${encodeURIComponent(String(id))}&limit=${limit}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/song/simi?id=${encodeURIComponent(String(id))}&limit=${limit}`)
     const data = await response.json()
     return data?.songs || []
   } catch (error) {
@@ -4473,7 +4595,7 @@ export async function getNeteaseSimiSong(id: number | string, limit: number = 10
 export async function getNeteaseRelatedPlaylist(id: number | string): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease')
-    const response = await fetchT(`${API_BASE}/netease/song/related-playlist?id=${encodeURIComponent(String(id))}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/song/related-playlist?id=${encodeURIComponent(String(id))}`)
     const data = await response.json()
     return data?.playlists || []
   } catch (error) {
@@ -4540,7 +4662,7 @@ export async function getQQFollows(options: { cookie?: string; start?: number; n
     const cookie = getPlatformCookie('qq', options.cookie)
     const start = options.start ?? 0
     const num = options.num ?? 30
-    const response = await fetchT(`${API_BASE}/qq/user/follows?start=${start}&num=${num}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/user/follows?start=${start}&num=${num}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取关注列表失败')
     return data
@@ -4556,7 +4678,7 @@ export async function getQQFans(options: { cookie?: string; start?: number; num?
     const cookie = getPlatformCookie('qq', options.cookie)
     const start = options.start ?? 0
     const num = options.num ?? 30
-    const response = await fetchT(`${API_BASE}/qq/user/fans?start=${start}&num=${num}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/user/fans?start=${start}&num=${num}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取粉丝列表失败')
     return data
@@ -4570,7 +4692,7 @@ export async function getQQFans(options: { cookie?: string; start?: number; num?
 export async function getQQUserProfile(encUin: string, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq', options.cookie)
-    const response = await fetchT(`${API_BASE}/qq/user/profile?encUin=${encodeURIComponent(encUin)}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/user/profile?encUin=${encodeURIComponent(encUin)}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取用户主页失败')
     return data
@@ -4584,7 +4706,7 @@ export async function getQQUserProfile(encUin: string, options: { cookie?: strin
 export async function getQQUserFavs(encUin: string, favType: number = 1, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq', options.cookie)
-    const response = await fetchT(`${API_BASE}/qq/user/favs?encUin=${encodeURIComponent(encUin)}&favType=${favType}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/qq/user/favs?encUin=${encodeURIComponent(encUin)}&favType=${favType}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取我喜欢失败')
     return data
@@ -4598,7 +4720,7 @@ export async function getQQUserFavs(encUin: string, favType: number = 1, options
 export async function subscribeQQUser(encUin: string, subscribe: boolean, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('qq', options.cookie)
-    const response = await fetchT(`${API_BASE}/qq/user/subscribe?encUin=${encodeURIComponent(encUin)}&subscribe=${subscribe}&cookie=${encodeURIComponent(cookie)}`, { method: 'POST' })
+    const response = await fetchT(`${API_BASE}/qq/user/subscribe?encUin=${encodeURIComponent(encUin)}&subscribe=${subscribe}`, { method: 'POST' })
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '关注操作失败')
     return data
@@ -4612,7 +4734,7 @@ export async function subscribeQQUser(encUin: string, subscribe: boolean, option
 export async function subscribeNeteaseUser(id: string, subscribe: boolean, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/user/subscribe?id=${encodeURIComponent(id)}&subscribe=${subscribe}&cookie=${encodeURIComponent(cookie)}`, { method: 'POST' })
+    const response = await fetchT(`${API_BASE}/netease/user/subscribe?id=${encodeURIComponent(id)}&subscribe=${subscribe}`, { method: 'POST' })
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '关注操作失败')
     return data
@@ -4626,7 +4748,7 @@ export async function subscribeNeteaseUser(id: string, subscribe: boolean, optio
 export async function getUserRecordRank(uid: string, type: 0 | 1 = 0, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/record/rank/${type}?uid=${uid}&cookie=${encodeURIComponent(cookie)}`)
+    const response = await fetchT(`${API_BASE}/netease/record/rank/${type}?uid=${uid}`)
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取听歌排行失败')
     return data

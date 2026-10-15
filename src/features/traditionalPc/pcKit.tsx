@@ -66,8 +66,15 @@ export function pcSongKey(song?: Song | null): string {
   return `${song.platform || ''}:${song.id || song.mid || song.name || ''}`
 }
 
+/** QQ 专辑封面兜底：数据缺 picUrl 但有 album.mid 时按官方 CDN 规则拼出（与 artwork.ts 降档候选同源）。 */
+export function pcAlbumMidFallbackArtwork(song?: Song | null): string {
+  const albumMid = song?.album?.mid || (song as { albummid?: string } | null | undefined)?.albummid
+  if (!albumMid) return ''
+  return getProxiedImageUrl(`https://y.gtimg.cn/music/photo_new/T002R500x500M000${String(albumMid).replace(/_\d+$/, '')}.jpg`)
+}
+
 export function pcSongArtwork(song?: Song | null): string {
-  const raw = song?.album?.picUrl || ''
+  const raw = song?.album?.picUrl || pcAlbumMidFallbackArtwork(song)
   return raw ? getProxiedImageUrl(raw) : ''
 }
 
@@ -397,7 +404,6 @@ export interface PcSongTableProps {
   /** 行右键/悬浮时右侧出现的操作（客户端 hover 才显示），由页面注入 */
   rowActions?: (song: Song, index: number) => ReactNode
   /** 额外列（如「喜欢」列换成别的），放在时长之前 */
-  extraColumn?: { title: string; render: (song: Song, index: number) => ReactNode; width?: number }
 }
 
 /**
@@ -474,13 +480,12 @@ export const PcSongTable = memo(function PcSongTable({
             </span>
             {showAlbum && (
               <span className="hidden w-[26%] shrink-0 lg:block">
-                <button
-                  type="button"
-                  className={`block max-w-full truncate text-left text-[12px] ${theme.subtle} hover:underline`}
-                  title={song.album?.name || ''}
-                >
+                {/* 专辑名是纯展示文本（非可点入口）：hover:underline 诱导点击但无任何行为，
+                    违反「不留死按钮」验收标准。接打开专辑需向本表透传 onOpenAlbum + 专辑 id，
+                    当前各调用方的数据缺可用的专辑打开链路，先还原为普通文本。 */}
+                <span className={`block max-w-full truncate text-left text-[12px] ${theme.subtle}`} title={song.album?.name || ''}>
                   {song.album?.name || ''}
-                </button>
+                </span>
               </span>
             )}
             {columns.playedAt && <span className={`hidden w-[90px] shrink-0 text-right text-[12px] md:block ${theme.faint}`}>{pcDateTime((song as { playedAt?: number }).playedAt)}</span>}
@@ -632,7 +637,8 @@ export function PcTableSearch({ value, onChange, placeholder = '搜索', accent,
 
 /** 更多（…）按钮：客户端工具栏里的省略号菜单入口。 */
 export function PcMoreButton({ theme, onClick }: { theme: PcTheme; onClick?: () => void }) {
-  return <PcIconButton theme={theme} title="更多"><MoreHorizontal className="h-4 w-4" /></PcIconButton>
+  // onClick 必须透传：此前接收参数但渲染时丢弃，按签名使用即成死按钮
+  return <PcIconButton theme={theme} title="更多" onClick={onClick}><MoreHorizontal className="h-4 w-4" /></PcIconButton>
 }
 
 /* ------------------------------------------------------------------ *
@@ -675,7 +681,7 @@ export function PcDetailHeader({ coverUrl, title, titleExtra, description, creat
           <h1 className={`min-w-0 flex-1 text-[22px] font-semibold leading-tight ${theme.text}`}>{title}</h1>
           {titleExtra}
         </div>
-        {meta ? <div className={`mt-2 text-[12px] ${theme.subtle}`}>{meta}</div> : null}
+        {meta ? <div className={`mt-2 whitespace-pre-line text-[12px] ${theme.subtle}`}>{meta}</div> : null}
         {description ? <div className={`mt-2 line-clamp-3 text-[12px] leading-relaxed ${theme.subtle}`}>{description}</div> : null}
         {creator ? (
           <button type="button" onClick={creator.onClick} className="mt-3 flex items-center gap-2 text-left">

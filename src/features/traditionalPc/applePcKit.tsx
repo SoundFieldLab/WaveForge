@@ -10,7 +10,7 @@
 // 客户端内容页的两种页头（两张截图各见其一）都实现了：
 //   · 大标题页（广播/资料库根页）：左对齐 34px 粗体标题；
 //   · 表格页（资料库-歌曲）：居中小标题 + 右侧「过滤 / 显示选项」两个图标按钮的浅色工具条。
-import { memo, useMemo, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { MoreHorizontal, Music2, Pause, Play, Search, Star } from 'lucide-react'
 import CachedImage from '../../components/CachedImage'
 import { MotionArtworkCover } from '../../components/apple-explore/MotionArtwork'
@@ -351,6 +351,9 @@ export interface ApplePcSongsTableProps {
   initialSort?: { key: ApplePcSongSortKey; dir: 'asc' | 'desc' }
 }
 
+// 资料库长列表每批渲染行数（与 NeteasePcCollection.RENDER_STEP 同口径）
+const APPLE_PC_RENDER_STEP = 300
+
 const APPLE_PC_SONG_COLUMNS: Array<{ key: ApplePcSongSortKey; label: string; width: number; sortable: boolean }> = [
   { key: 'title', label: '标题', width: 0, sortable: true },
   { key: 'duration', label: '时长', width: 48, sortable: true },
@@ -402,6 +405,27 @@ export const ApplePcSongsTable = memo(function ApplePcSongsTable({
     })
     return list
   }, [filtered, sort])
+
+  // 长资料库分批渲染：ApplePcLibrary 传 getAppleLibrarySongs(5000) 全量进来，
+  // 一次性 map 5000 行 × ~10 节点直接进 DOM 会卡死页面。滚到底部哨兵追加下一批
+  //（与 NeteasePcCollection 的 RENDER_STEP 范式一致）。
+  const [visibleCount, setVisibleCount] = useState(APPLE_PC_RENDER_STEP)
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => { setVisibleCount(APPLE_PC_RENDER_STEP) }, [rows, filter, sort])
+  useEffect(() => {
+    // 测试环境（jsdom）无 IntersectionObserver：直接放全量（行数有限不影响断言）
+    if (typeof IntersectionObserver === 'undefined') return
+    const node = sentinelRef.current
+    if (!node) return
+    const total = sorted.length
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) {
+        setVisibleCount(count => (count < total ? Math.min(total, count + APPLE_PC_RENDER_STEP) : count))
+      }
+    }, { rootMargin: '240px' })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [sorted])
 
   const toggleSort = (key: ApplePcSongSortKey) => {
     setSort(prev => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
@@ -469,7 +493,7 @@ export const ApplePcSongsTable = memo(function ApplePcSongsTable({
           <div className="py-20 text-center text-[13px]" style={{ color: theme.secondary }}>正在加载…</div>
         ) : sorted.length === 0 ? (
           <>{empty ?? <ApplePcEmpty theme={theme} title={filter ? '没有匹配的歌曲' : '空空如也'} />}</>
-        ) : sorted.map((row, index) => {
+        ) : sorted.slice(0, visibleCount).map((row, index) => {
           const key = row.catalogId || row.libraryId || `${row.song.id}:${index}`
           const active = Boolean(playingKey) && playingKey === key
           const loved = Boolean(row.catalogId && lovedIds?.has(row.catalogId))
@@ -527,6 +551,8 @@ export const ApplePcSongsTable = memo(function ApplePcSongsTable({
             </div>
           )
         })}
+        {/* 分批渲染哨兵：滚近底部时追加下一批（IntersectionObserver 挂在上方 effect） */}
+        <div ref={sentinelRef} aria-hidden="true" style={{ height: 1 }} />
       </div>
     </div>
   )

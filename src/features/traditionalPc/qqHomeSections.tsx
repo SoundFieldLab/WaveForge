@@ -60,6 +60,8 @@ export function peekQQGuessYouLike(accountKey: string): QQGuessYouLikeBatch | nu
  * 歌曲架：按 id 解析成 Song 并缓存（208 卡只带 id/歌名/歌手，播放前必须补详情）
  * ------------------------------------------------------------------ */
 
+// instanceId 由上游推荐流每次刷新轮换：旧键永不再命中，FIFO 上限防长会话累积
+const MODULE_SONGS_CACHE_MAX = 12
 const moduleSongsCache = new Map<string, Song[]>()
 const moduleSongsInflight = new Map<string, Promise<Song[]>>()
 
@@ -77,7 +79,14 @@ export function prefetchQQModuleSongs(module: QQExploreModule): Promise<Song[]> 
     coverUrl: card.coverUrl,
   })))
     .then(songs => {
-      if (songs.length) moduleSongsCache.set(module.instanceId, songs)
+      if (songs.length) {
+        moduleSongsCache.set(module.instanceId, songs)
+        while (moduleSongsCache.size > MODULE_SONGS_CACHE_MAX) {
+          const oldestKey = moduleSongsCache.keys().next().value
+          if (oldestKey === undefined) break
+          moduleSongsCache.delete(oldestKey)
+        }
+      }
       return songs
     })
     .catch(() => [] as Song[])

@@ -36,6 +36,8 @@ export interface PcPlayOptions {
 export interface PcActions {
   /** 播放歌曲：songs 是所在列表（播放队列），index 为点击位置，options 为续播上下文。 */
   onPlaySongs: (song: Song, songs: Song[], index?: number, options?: PcPlayOptions) => void
+  /** 插入「下一首播放」（不打断当前播放）；未接入时页面据此隐藏「加入播放列表」类按钮。 */
+  onPlayNext?: (song: Song) => void
   onSongMenu: (payload: PcSongMenuPayload) => void
   onOpenPlaylist: (playlist: any) => void
   onPlaylistMenu?: (payload: PcPlaylistMenuPayload) => void

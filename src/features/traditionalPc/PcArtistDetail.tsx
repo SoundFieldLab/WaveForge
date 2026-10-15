@@ -106,6 +106,28 @@ function PcArtistDetail({ id, platform, chrome, actions, active }: PcArtistDetai
     artist?.albumSize ? `${artist.albumSize} 张专辑` : '',
   ].filter(Boolean).join(' · ')
 
+  // QQ 艺人基本信息（中文名/外文名/国籍/代表作/成员/团体人数）：服务端 basic.item 已透传，
+  // 与官方客户端头部信息区同款；其他平台无此数据，各区块自然为空不渲染。
+  const basicEntries = useMemo(() => {
+    const items = (artist as { basic?: { item?: Array<{ key?: string; value?: string }> } } | null)?.basic?.item || []
+    return items.filter(entry => entry?.value)
+  }, [artist])
+  const basicByName = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const entry of basicEntries) map.set(String(entry.key), String(entry.value))
+    return map
+  }, [basicEntries])
+  const nameLine = ['中文名', '外文名', '国籍']
+    .map(key => basicByName.get(key) ? `${key}:${basicByName.get(key)}` : '')
+    .filter(Boolean)
+    .join('　')
+  // 代表作/成员/团体人数：信息量大，单独一行（成员列表可能很长，超长折叠两行）
+  const factLine = ['团体人数', '代表作']
+    .map(key => basicByName.get(key) ? `${key}:${basicByName.get(key)}` : '')
+    .filter(Boolean)
+    .join('　')
+  const membersLine = basicByName.get('成员') || ''
+
   const tabItems = useMemo(() => {
     const items = [{ key: 'hot', label: '热门歌曲', count: songs.length }]
     if (albums.length) items.push({ key: 'albums', label: '专辑', count: albums.length })
@@ -133,6 +155,15 @@ function PcArtistDetail({ id, platform, chrome, actions, active }: PcArtistDetai
         skin={skin}
         coverUrl={artist?.picUrl}
         title={artist?.name || '歌手'}
+        // 标题右侧空白区（红框位）：基本信息行（中文名/外文名/国籍/代表作/成员）。
+        // 放 titleExtra 让它与标题同行 flex 对齐，占满标题右侧空间。
+        titleExtra={nameLine || factLine || membersLine ? (
+          <div className={`ml-4 w-[52%] shrink-0 space-y-1 text-[12px] leading-relaxed ${theme.subtle}`}>
+            {nameLine ? <div className="truncate" title={nameLine}>{nameLine}</div> : null}
+            {factLine ? <div className="truncate" title={factLine}>{factLine}</div> : null}
+            {membersLine ? <div className="line-clamp-2" title={membersLine}>成员:{membersLine}</div> : null}
+          </div>
+        ) : undefined}
         meta={meta}
         description={artist?.briefDesc || artist?.description}
         actions={(

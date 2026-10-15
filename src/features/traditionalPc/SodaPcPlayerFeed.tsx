@@ -397,7 +397,10 @@ function SodaPcPlayerFeed({
           </button>
         </div>
       ) : (
-        <div className="flex w-full items-center justify-center" style={{ padding: '0 50px', gap: 50 }}>
+        // 两列行必须自身撑满页面高度（父级是 flex，h-full 生效）：歌词列的
+        // self-stretch 与内部 overflow 滚动都参照这里的高度——曾因缺 h-full
+        // 被内容撑开，歌词容器 scrollHeight==clientHeight，自动滚动完全失效。
+        <div className="flex h-full min-h-0 w-full items-center justify-center" style={{ padding: '0 50px', gap: 50 }}>
           {/* 左列：封面 + 歌名/演唱者 + 关注 + 喜欢/评论 */}
           <div className="flex shrink-0 flex-col items-start" style={{ width: 'min(40vh, 30vw)', maxWidth: '40vh' }}>
             <div

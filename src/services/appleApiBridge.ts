@@ -13,6 +13,7 @@
  */
 
 import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
+import { setSecureToken } from './secureTokenStore'
 
 export interface AppleApiResult {
   ok: boolean
@@ -143,7 +144,7 @@ export async function appleApiRequest(
   try {
     const refreshedToken = await ensureAppleWebDevToken(true)
     if (!refreshedToken || refreshedToken === developerToken) return result
-    localStorage.setItem('appleDeveloperToken', refreshedToken)
+    setSecureToken('appleDeveloperToken', refreshedToken)
     result = await runAppleApiRequest(path, { ...options, developerToken: refreshedToken })
   } catch {
     // 保留第一次响应，业务层可据其状态给出准确提示。

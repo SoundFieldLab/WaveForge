@@ -166,8 +166,13 @@ export default function BilibiliInteractPanel({
         const sorted = mode === 'new' ? [...mapped].sort((a, b) => b.ctime - a.ctime) : mapped
         setComments((prev) => (append ? [...prev, ...sorted] : sorted))
         setCommentsPn(pn)
-        // 评论总数（页数据未含 total 时用 rcount 汇总兜底）
-        const total = res.replies.reduce((acc, c) => acc + (Number(c.rcount) || 0), 0)
+        // 评论总数：优先用服务端透传的 page.total（B 站权威值）。
+        // 此前用 replies 各条的 rcount（单条回复数）求和——语义完全错，显示值虚高/虚低。
+        // page.total 为 undefined（顶置评论存在时上游不给）才退回 rcount 汇总兜底。
+        const pageTotal = Number(res.page?.total)
+        const total = Number.isFinite(pageTotal) && pageTotal > 0
+          ? pageTotal
+          : res.replies.reduce((acc, c) => acc + (Number(c.rcount) || 0), 0)
         setCommentTotal((prev) => (pn === 1 ? total : Math.max(prev, total)))
       }
     } catch { /* 静默 */ } finally {
@@ -257,8 +262,17 @@ export default function BilibiliInteractPanel({
   const handleUnfav = async () => {
     setFavLoading(true)
     setShowFavPicker(false)
+    // 取消收藏需要视频所在收藏夹的真实 id：此前传字面量 0，服务端对 0 做 falsy
+    // 过滤 → 请求体无 del_media_ids → B 站收到空 deal 返回 code 0 = 假成功
+    //（界面显示已取消，收藏夹里视频仍在）。favFolders 由 interaction 接口下发。
+    const folderId = Number(interaction?.favFolders?.[0]?.id || 0)
+    if (!folderId) {
+      showToast('暂无法定位视频所在收藏夹，请到 B 站客户端内取消收藏')
+      setFavLoading(false)
+      return
+    }
     try {
-      const res = await favBilibiliVideo(aid, { delMediaIds: 0 })
+      const res = await favBilibiliVideo(aid, { delMediaIds: folderId })
       if (res.code === 0) {
         setInteraction((p) => p ? { ...p, favoured: 0 } : p)
         showToast('已取消收藏')
@@ -313,7 +327,7 @@ export default function BilibiliInteractPanel({
           const mid = myMid()
           setComments((prev) => [
             {
-              rpid: Date.now(), // 临时 id（B 站 rpid 为时间戳量级，本地唯一即可）
+              rpid: -Date.now(), // 临时 id：负数命名空间与真实 rpid（毫秒级正数）隔离，防撞 key
               mid: mid || 0,
               root: 0,
               parent: 0,
@@ -760,14 +774,16 @@ export default function BilibiliInteractPanel({
                   </button>
                 ))}
               </div>
-              <button
-                type="button"
-                onClick={() => void handleFav(0)}
-                className="mt-2 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
-                style={{ backgroundColor: 'rgba(251,114,153,0.15)', color: '#FB7299' }}
-              >
-                <Check size={13} /> 使用默认收藏夹
-              </button>
+              {favFolders.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleFav(Number(favFolders[0].id))}
+                  className="mt-2 w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors"
+                  style={{ backgroundColor: 'rgba(251,114,153,0.15)', color: '#FB7299' }}
+                >
+                  <Check size={13} /> 收藏到「{favFolders[0].name}」
+                </button>
+              ) : null}
             </div>
           </div>
         )}

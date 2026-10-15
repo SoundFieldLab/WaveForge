@@ -15,6 +15,7 @@
  */
 
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './loginExpiry'
+import { getSecureToken, removeSecureToken, setSecureToken } from './secureTokenStore'
 import { Converter } from 'opencc-js/t2cn'
 import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } from '../data/bilibiliMvDeclarations'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
@@ -304,22 +305,22 @@ const BILI_COOKIE_KEY = 'bilibili_cookie'
 const BILI_USER_KEY = 'bilibili_user'
 
 export function getBilibiliCookie(): string {
-  try {
-    return localStorage.getItem(BILI_COOKIE_KEY) || ''
-  } catch {
-    return ''
-  }
+  // 凭据走加密存储（DPAPI），localStorage 只作未迁移遗留的回退
+  return getSecureToken(BILI_COOKIE_KEY) || (() => {
+    try { return localStorage.getItem(BILI_COOKIE_KEY) || '' } catch { return '' }
+  })()
 }
 
 export function saveBilibiliCookie(cookie: string): void {
-  try {
-    localStorage.setItem(BILI_COOKIE_KEY, cookie)
-  } catch {
-    // 忽略存储失败
-  }
+  setSecureToken(BILI_COOKIE_KEY, cookie)
 }
 
 export function clearBilibiliLocal(): void {
+  // 登出主路径：必须清加密存储真身——cookie 经 setSecureToken 落 DPAPI + 内存 cache，
+  // 只删 localStorage 明文（迁移后本就不存在）时 getSecureToken 仍命中旧值，
+  // 登出后 isBilibiliLoggedIn() 持续 true、接口继续带旧凭据（登出完全失效）。
+  removeSecureToken(BILI_COOKIE_KEY)
+  removeSecureToken(BILI_USER_KEY)
   try {
     localStorage.removeItem(BILI_COOKIE_KEY)
     localStorage.removeItem(BILI_USER_KEY)
@@ -329,10 +330,11 @@ export function clearBilibiliLocal(): void {
 }
 
 export function isBilibiliLoggedIn(): boolean {
-  return Boolean(getBilibiliCookie()) && !isLoginExpired('bilibili' as never)
+  return Boolean(getBilibiliCookie()) && !isLoginExpired('bilibili')
 }
 
 export function saveBilibiliUser(user: BilibiliUser): void {
+  setSecureToken(BILI_USER_KEY, JSON.stringify(user))
   try {
     localStorage.setItem(BILI_USER_KEY, JSON.stringify(user))
   } catch {
@@ -341,16 +343,22 @@ export function saveBilibiliUser(user: BilibiliUser): void {
 }
 
 export function getStoredBilibiliUser(): BilibiliUser | null {
+  // 双通道读：secureTokenStore（加密落盘副本）优先，回退 localStorage 明文遗留
+  //（迁移后明文被删，只读 localStorage 会把已登录用户的资料清空）
+  const stored = getSecureToken(BILI_USER_KEY) || (() => {
+    try { return localStorage.getItem(BILI_USER_KEY) || '' } catch { return '' }
+  })()
+  if (!stored) return null
   try {
-    const raw = localStorage.getItem(BILI_USER_KEY)
-    return raw ? (JSON.parse(raw) as BilibiliUser) : null
+    const parsed = JSON.parse(stored) as BilibiliUser
+    return parsed || null
   } catch {
     return null
   }
 }
 
 export function recordBilibiliLogin(): void {
-  recordLogin('bilibili' as never)
+  recordLogin('bilibili')
 }
 
 export function clearBilibiliLoginExpiry(): void {
@@ -374,12 +382,20 @@ export function getBilibiliRemainingDays(): number | null {
 // ===== 后端接口包装 =====
 
 /** 数据类接口自动携带本地登录 cookie（服务器重启后依赖 localStorage 恢复登录态） */
-function appendCookie(url: string): string {
-  if (/\/login\/qr\//.test(url) || /\/cookie/.test(url)) return url
+// 登录 Cookie 经 X-WaveForge-Cookie header 传输（服务端统一回填到 req.query.cookie）。
+// 此前拼进 URL query——URL 会进代理/错误日志（与 local-server 把登录态从 query 迁出的
+// 约定相悖）。QR 登录轮询与 /cookie 设置接口本就不带 cookie，无需处理。
+function appendCookieHeaders(url: string, init?: RequestInit): RequestInit {
+  if (/\/login\/qr\//.test(url) || /\/cookie/.test(url)) return init || {}
   const cookie = getBilibiliCookie()
-  if (!cookie) return url
-  const separator = url.includes('?') ? '&' : '?'
-  return `${url}${separator}cookie=${encodeURIComponent(cookie)}`
+  if (!cookie) return init || {}
+  return {
+    ...init,
+    headers: {
+      ...(init?.headers || {}),
+      'X-WaveForge-Cookie': cookie,
+    },
+  }
 }
 
 // 默认 20s 超时（与 musicApi.fetchT 同标准）：后端 3001 卡死/代理悬挂时调用方不至于永久 pending；
@@ -388,7 +404,7 @@ const BILIBILI_FETCH_TIMEOUT_MS = 20_000
 
 async function fetchJson<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const signal = init?.signal ?? AbortSignal.timeout(BILIBILI_FETCH_TIMEOUT_MS)
-  const res = await fetch(appendCookie(url), { ...init, signal })
+  const res = await fetch(url, { ...appendCookieHeaders(url, init), signal })
   if (!res.ok) {
     let message = `HTTP ${res.status}`
     try {
@@ -405,7 +421,7 @@ async function fetchJson<T = unknown>(url: string, init?: RequestInit): Promise<
 /** 不因非 2xx 抛错的 JSON 请求（个人主页登录受限接口：未登录时返回 code:-101 供前端判断） */
 async function fetchJsonLoose<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const signal = init?.signal ?? AbortSignal.timeout(BILIBILI_FETCH_TIMEOUT_MS)
-  const res = await fetch(appendCookie(url), { ...init, signal })
+  const res = await fetch(url, { ...appendCookieHeaders(url, init), signal })
   const text = await res.text()
   try {
     return JSON.parse(text) as T
@@ -540,6 +556,8 @@ export function getBilibiliComments(aid: string | number, pn = 1, signal?: Abort
   code: number
   replies?: BilibiliComment[]
   cursor?: unknown
+  /** 顶层评论总数（服务端从 reply/main 的 page.total 透传；顶置评论存在时为 undefined） */
+  page?: { num?: number; size?: number; total?: number }
 }> {
   return fetchJson(`${BILI_API_BASE}/comments?aid=${encodeURIComponent(String(aid))}&pn=${pn}`, { signal })
 }
@@ -1039,6 +1057,8 @@ const TV_MUSIC_SHOW_MARKERS = [
 const ALTERNATE_VERSION_MARKERS = [
   'acoustic', 'unplugged', 'stripped', 'one take', 'singthrough', 'first take',
   'remix', '重混音', '混音版', 'arrange', '现场', '演唱会', '演出', 'live版', 'colorful live', 'magical mirai', '魔法未来', '歌ってみた', '翻唱',
+  // 巡演/公演投稿与现场同属替代录音（评分与分类两处口径一致，见 LIVE_MARKERS 注释）
+  '巡演', '公演', 'ツアー', 'ライブ', 'コンサート',
   // 电视音乐节目演出版：同一首歌的节目现场录音（见 TV_MUSIC_SHOW_MARKERS 注释）
   ...TV_MUSIC_SHOW_MARKERS,
 ]
@@ -1061,7 +1081,13 @@ const POSITIVE_SONG_MARKERS = ['主题曲', '主題曲', '主题歌', '主題歌
 const TV_ANIME_SIZE_MARKER = /\b(?:tv|anime)[\s._-]*(?:size|ver(?:sion)?|edit|edition)\b|电视版|tv版|动画版|アニメサイズ|アニメ版|アニメver|テレビサイズ|tvサイズ/i
 /** 「完整版 / 加长版」显式声明：短版歌曲的反方向排除依据（见 tv-size 分支） */
 const FULL_VERSION_CLAIM_MARKER = /完整版|加长版|加長版|フルサイズ|フルver|full[\s._-]*(?:size|ver(?:sion)?)/i
-const LIVE_MARKERS = ['live', '现场', '演唱会', 'livehouse', '音乐节', 'live版', 'the first take', 'first take', '一発撮り', 'ファーストテイク', ...TV_MUSIC_SHOW_MARKERS]
+const LIVE_MARKERS = [
+  'live', '现场', '演唱会', 'livehouse', '音乐节', 'live版', 'the first take', 'first take', '一発撮り', 'ファーストテイク',
+  // 巡演/公演等演出形式词（俺の彼女 回归：宇多田光巡演最终公演投稿标题只有「巡演/公演」，
+  // 旧标记全没命中，被字幕组名里的「字幕」判成歌词视频 → 拿录音室节拍去对现场录音）
+  '巡演', '公演', 'ツアー', 'ライブ', 'コンサート', 'フェス',
+  ...TV_MUSIC_SHOW_MARKERS,
+]
 /** 乐器/曲谱类标题（演奏向，多为翻弹/教学，非正片） */
 const INSTRUMENT_MARKERS = [
   '钢琴', '吉他', '指弹', '演奏', '笛子', '古筝', '二胡', '萨克斯', '伴奏', '鼓谱', '架子鼓', '扒谱',
@@ -1850,6 +1876,14 @@ export function scoreCandidate(
   // 含书名号/方括号的标题走上面的括号检测，不重复判罚。
   if (!signals.hasArtist) {
     const songRe = songTitleVariants.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).sort((a, b) => b.length - a.length).join('|')
+    // RegExp 按歌曲缓存：scoreCandidate 对一次搜索的每个候选（≤200）+ 复审各跑一遍，
+    // 同一首歌的 songRe 不变，逐候选 new RegExp 是纯浪费（正则编译不便宜）。
+    let dashFormRe = songReDashFormCache.get(songRe)
+    if (!dashFormRe) {
+      dashFormRe = new RegExp(`^(${songRe})\\s*[-–—:：·]\\s*([^-\\s《》【】\\[\\]（）()]{2,24})$`, 'i')
+      if (songReDashFormCache.size > 64) songReDashFormCache.clear()
+      songReDashFormCache.set(songRe, dashFormRe)
+    }
     // 先剥离前置规格/限定标记（【4K】【HI-RES】…）与括号注释，露出「歌名 - 人名」主干
     const cleaned = String(video.title || '')
       .replace(/【[^】]*】/g, ' ')
@@ -1857,7 +1891,7 @@ export function scoreCandidate(
       .replace(/\([^)]*\)/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
-    const dashForm = cleaned.match(new RegExp(`^(${songRe})\\s*[-–—:：·]\\s*([^-\\s《》【】\\[\\]（）()]{2,24})$`, 'i'))
+    const dashForm = cleaned.match(dashFormRe)
     if (dashForm) {
       const trailing = normalizeText(dashForm[2])
       const isArtist = artistNormList.some((a) => trailing.includes(a) || a.includes(trailing))
@@ -2172,6 +2206,9 @@ const MATCH_CACHE_TTL = 24 * 60 * 60 * 1000
 //      · 作品名变体（去季/篇/剧场版、空格前截断）参与 IP 命中
 //      ——评分口径再次变化，24h 匹配缓存必须失效
 const MATCH_SCORE_VERSION = 'v11-tvshow-and-franchise-variants'
+/** scoreCandidate 的「歌名-后缀」正则按 songRe 串缓存（scoreCandidate 是每候选调用的热路径） */
+const songReDashFormCache = new Map<string, RegExp>()
+
 /** 匹配缓存 LRU 上限（防止长时间会话无界增长） */
 const MATCH_CACHE_MAX = 60
 const matchCache = new Map<string, { at: number; result: BilibiliMatchResult }>()
@@ -2425,6 +2462,8 @@ const REVIEW_TOP_N = 10
 /** 复审缓存的字幕条目：清洗后的分段（原始内容，供歌词比对），有 CC 才抓取 */
 interface ReviewSubtitleSegment { from: number; text: string }
 /** 复审 view/字幕的全局 bvid 缓存（跨歌曲复用，1h TTL；LRU 上限防无界增长） */
+// 复审缓存键 = songKey::bvid：多 P 视频的分 P 选择（cid/effectiveDuration）依赖当前歌，
+// 只按 bvid 键会让 1 小时内后到的另一首歌复用前一首歌选中的分 P。
 const reviewCache = new Map<string, { at: number; officialVerifyType: number; cid: number; manualZh: boolean; autoZh: boolean; effectiveDuration: number; subLines?: ReviewSubtitleSegment[] }>()
 
 /**
@@ -2639,7 +2678,8 @@ async function reviewCandidates(
   const reviewed = await Promise.all(
     top.map(async (candidate) => {
       const bvid = candidate.video.bvid
-      let cached = reviewCache.get(bvid)
+      const reviewCacheKey = `${songKeyOf(ctx)}::${bvid}`
+      let cached = reviewCache.get(reviewCacheKey)
       if (!cached || Date.now() - cached.at > REVIEW_CACHE_TTL) {
         try {
           const view = await getBilibiliView(bvid, signal)
@@ -2689,12 +2729,13 @@ async function reviewCandidates(
             }
           }
           cached = { at: Date.now(), officialVerifyType, cid, manualZh, autoZh, effectiveDuration, subLines }
-          reviewCache.set(bvid, cached)
+          reviewCache.set(reviewCacheKey, cached)
           pruneReviewCache()
         } catch {
+          // 瞬时失败（网络抖动/上游 5xx）不写入 1h 正缓存：否则该候选会带着
+          // cid=0 进入播放链（/playurl 必 400）且错失认证加分，只能靠回退链兜底。
+          // 仅标记 -1 参与本次评分，缓存不落——下次匹配重试。
           cached = { at: Date.now(), officialVerifyType: -1, cid: 0, manualZh: false, autoZh: false, effectiveDuration: 0 }
-          reviewCache.set(bvid, cached)
-          pruneReviewCache()
         }
       }
       const { manualZhSubtitle, autoSubtitle } = applyPreferenceToReview(cached, preference)
@@ -2902,7 +2943,7 @@ export function rescoreResultWithLyrics(
   settings: Pick<BilibiliWatchSettings, 'matchPreference' | 'autoPlayStrictness' | 'forceAutoPlayHighest'>,
   lyricsText: string,
   overrideBvid: string,
-  reviewLookup: (bvid: string) => { manualZh?: boolean; autoZh?: boolean; subLines?: Array<{ from?: number; text?: string }>; cid?: number } | undefined = (bvid) => reviewCache.get(bvid),
+  reviewLookup: (bvid: string) => { manualZh?: boolean; autoZh?: boolean; subLines?: Array<{ from?: number; text?: string }>; cid?: number } | undefined = (bvid) => reviewCache.get(`${songKeyOf(song)}::${bvid}`),
   developerBvid = '',
 ): BilibiliMatchResult {
   if (!result.ccUnverifiedWithoutLyrics || !result.fallbackChain.length) return result
@@ -2981,6 +3022,9 @@ export async function findBestBilibiliMv(
     settings.forceAutoPlayHighest ? 'force' : 'gate',
     overrideBvid,
     developerBvid ? `${BILIBILI_MV_DECLARATION_VERSION}:${developerBvid}` : '',
+    // 黑名单进指纹：拉黑后同歌重进会命中 24h matchCache 返回含已拉黑 BV 的旧结果，
+    // 自动播放用户刚拉黑的视频（唯一联动清缓存入口是手动清理）
+    getBilibiliBlacklist(songKey).join(','),
   ].join('|')
   const cacheKey = `${songKey}::${settingsFingerprint}`
   const cached = matchCache.get(cacheKey)

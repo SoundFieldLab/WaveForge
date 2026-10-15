@@ -255,7 +255,14 @@ export default function NeteaseExplorePage({
       fetchNeteaseUnlimitedFlow(controller.signal),
       fetchNeteaseLinkPage('HOME_RECOMMEND_PAGE', '0', refresh, controller.signal),
     ])
-    if (requestId !== requestRef.current || controller.signal.aborted) return
+    if (requestId !== requestRef.current || controller.signal.aborted) {
+      // 被更新的请求顶掉/abort：必须复位本轮设置的 loading/refreshing——
+      // 此前直接 return，refreshing 无人复位 → 刷新按钮永久禁用（对照 QQ 侧
+      // loadInitial 的 aborted 分支有完整复位）。
+      setLoading(false)
+      setRefreshing(false)
+      return
+    }
     if (homeResult.status === 'fulfilled') setHome(homeResult.value)
     else {
       setHomeError(homeResult.reason instanceof Error ? homeResult.reason.message : '首页推荐加载失败')
@@ -762,6 +769,9 @@ export default function NeteaseExplorePage({
 
   const loadMoreLink = async () => {
     if (!linkHome?.hasMore || !linkHome.cursor || loadingMoreLink) return
+    // auto-fill 循环进行中时不并发翻页：两个请求基于同一 cursor 会互相覆盖
+    //（后完成者以自己的闭包快照 setLinkHome，丢掉对方 additions，cursor 回退）
+    if (linkAutoFillActiveRef.current) return
     setLoadingMoreLink(true)
     try {
       // 翻页必须回传上一页 blockCodeOrderList（服务端要求），并带上已展示区块（与 App 行为一致）
@@ -837,7 +847,24 @@ export default function NeteaseExplorePage({
             break
           }
           current = merged
-          setLinkHome(merged)
+          // 函数式更新：若刷新（setLinkHome(next 整表)）在翻页请求期间发生，这里基于
+          // **最新 state** 合并，而不是用闭包里的旧 current 覆盖刷新结果（丢失更新）
+          setLinkHome(previous => {
+            if (!previous) return merged
+            // 刷新在途：链的 current 已过期（cursor 与最新 state 不一致）→ 放弃本页，
+            // 让 auto-fill 下一轮由 effect 依赖（linkHome 变化）重新接管
+            if (previous.cursor !== current.cursor) return previous
+            const prevSeen = new Set(previous.blocks.map(block => block.blockCode))
+            const newAdditions = merged.blocks.filter(block => !prevSeen.has(block.blockCode))
+            return {
+              ...previous,
+              cursor: merged.cursor,
+              hasMore: merged.hasMore,
+              blockCodeOrderList: merged.blockCodeOrderList.length ? merged.blockCodeOrderList : previous.blockCodeOrderList,
+              blocks: [...previous.blocks, ...newAdditions],
+              rawBlocks: [...previous.rawBlocks, ...merged.rawBlocks],
+            }
+          })
         }
       } catch {
         /* 静默：保留「加载更多推荐」按钮兜底 */
@@ -1003,6 +1030,9 @@ export default function NeteaseExplorePage({
           }
           redCountRequestedRef.current.clear()
           setVisibleSongIds(new Set())
+          // 刷新前终止 auto-fill 循环：否则旧链下一页 setLinkHome 会把新刷新结果覆盖回旧内容
+          linkAutoFillCancelledRef.current = true
+          linkAutoFillActiveRef.current = false
           void load(true)
         }} className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.05] px-4 text-sm text-white/65 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />刷新推荐</button></div>
       </div>

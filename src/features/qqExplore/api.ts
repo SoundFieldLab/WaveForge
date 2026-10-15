@@ -109,8 +109,23 @@ export async function resolveQQExploreSongs(
   cards: Array<{ songId: string; title?: string; artist?: string; coverUrl?: string }>,
   signal?: AbortSignal,
 ): Promise<Song[]> {
-  const data = await post<{ songs: Song[] }>('/songs', { cards: cards.slice(0, 36) }, signal)
-  return Array.isArray(data.songs) ? data.songs : []
+  const data = await post<{ songs: (Song | null)[] }>('/songs', { cards: cards.slice(0, 36) }, signal)
+  // 服务端按卡片下标返回（解析失败的卡为 null 占位）：按 songId 建 Map 对齐，
+  // 丢弃失败项且不错位 —— 缓存数组与卡片下标一一对应是 PcSongShelf / playModuleAt 的契约。
+  const byId = new Map<string, Song>()
+  for (const song of Array.isArray(data.songs) ? data.songs : []) {
+    if (!song) continue
+    // 卡的 songId 是 QQ 数字 id（resolveQQNativeSongById 按 song_id 查询），
+    // 对齐键必须用 song.id；mid 是另一套标识，不能混用
+    const key = String((song as { id?: string | number }).id ?? '')
+    if (key && key !== '0') byId.set(key, song)
+  }
+  const resolved: Song[] = []
+  for (const card of cards) {
+    const song = byId.get(String(card.songId))
+    if (song) resolved.push(song)
+  }
+  return resolved
 }
 
 export async function fetchQQRadarSongs(

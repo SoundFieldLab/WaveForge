@@ -15,7 +15,7 @@
  */
 import type { LyricLine } from './musicApi'
 import { parseTTML, type TTMLAgent } from '../utils/ttmlParser'
-import { getAppleAuthState } from './appleAuth'
+import { getAppleAuthState, getAppleCredentials } from './appleAuth'
 import { appleApiRequest } from './appleApiBridge'
 
 // ─────────────────────────── 设置 ───────────────────────────
@@ -51,10 +51,14 @@ const DEFAULT_SETTINGS: AppleMusicSettings = {
 export function getAppleMusicSettings(): AppleMusicSettings {
   const read = (key: string) => localStorage.getItem(key)
   const enabled = read('appleMusicEnabled')
+  // token 走 getAppleCredentials（secureTokenStore）：凭据迁移进加密存储后
+  // localStorage 明文副本已被删除，直读 localStorage 恒为空串 → 桌面端 Apple
+  // 歌词/对唱功能整体静默失效（本文件曾是唯一仍直读的读取点）。
+  const credentials = getAppleCredentials()
   return {
     enabled: enabled === null ? DEFAULT_SETTINGS.enabled : enabled !== 'false',
-    developerToken: read('appleDeveloperToken') || '',
-    mediaUserToken: read('appleMediaUserToken') || '',
+    developerToken: credentials.developerToken || '',
+    mediaUserToken: credentials.mediaUserToken || '',
     storefront: read('appleStorefront') || DEFAULT_SETTINGS.storefront,
     lyricLang: read('appleLyricLang') || DEFAULT_SETTINGS.lyricLang,
     preferAppleCover: read('applePreferCover') !== 'false',
@@ -202,7 +206,7 @@ export async function matchAppleTrack(
     const trackArtist = normalizeTitle(track.artistName)
     let score = 0
     if (normTitle && trackTitle === normTitle) score += 100
-    else if (normTitle && (trackTitle.includes(normTitle) || normTitle.includes(trackTitle))) score += 60
+    else if (normTitle && (trackTitle.includes(normTitle) || normTitle.includes(trackTitle))) score += 30
     if (normArtist && trackArtist === normArtist) score += 40
     else if (normArtist && (trackArtist.includes(normArtist) || normArtist.includes(trackArtist))) score += 20
     if (durationMs && track.durationMs && Math.abs(track.durationMs - durationMs) < 2500) score += 15
@@ -211,7 +215,9 @@ export async function matchAppleTrack(
       best = track
     }
   })
-  // 标题未命中（<60）视为不匹配
+  // 匹配门槛 60：包含式命中（30）单独不达标，必须叠加艺人命中或时长校验——
+  // 与 appleCatalog 的评分口径对齐。原值 60 会让"仅标题包含"（无艺人/时长佐证）
+  // 即定匹配，歌词/封面挂到翻唱或 Live 版（appleCatalog 侧同类问题已收紧，此处漏改）。
   if (!best || bestScore < 60) return null
   return best
 }
@@ -501,13 +507,19 @@ export function convertAppleTTMLToLyrics(
 
 // ─────────────────────────── 曲目匹配缓存 ───────────────────────────
 
-const appleMatchCache = new Map<string, AppleTrackMatch | null>()
-/** 匹配结果按「标题|艺人」永久累积（每首播放过的歌一条），加 FIFO 上限防长会话无界增长。 */
+// 带 TTL：评分口径收紧后（包含式降分），此前的错误匹配若本会话永久生效会一直
+// 挂着翻唱/Live 版歌词；30 分钟过期后按新口径重试。
+const APPLE_MATCH_CACHE_TTL_MS = 30 * 60 * 1000
+const appleMatchCache = new Map<string, { at: number; match: AppleTrackMatch | null }>()
+/** 匹配结果按「标题|艺人」累积（每首播放过的歌一条），加 FIFO 上限防长会话无界增长。 */
 const APPLE_MATCH_CACHE_MAX = 200
 const matchCacheKey = (title: string, artist: string) => `${normalizeTitle(title)}|${normalizeTitle(artist)}`
 
 export function getCachedAppleMatch(title: string, artist: string): AppleTrackMatch | null | undefined {
-  return appleMatchCache.get(matchCacheKey(title, artist))
+  const entry = appleMatchCache.get(matchCacheKey(title, artist))
+  if (!entry) return undefined
+  if (Date.now() - entry.at > APPLE_MATCH_CACHE_TTL_MS) return undefined
+  return entry.match
 }
 
 /** 带缓存的曲目匹配（歌词与封面共用，避免重复请求 iTunes） */
@@ -518,9 +530,10 @@ export async function resolveAppleTrack(
 ): Promise<AppleTrackMatch | null> {
   if (!title || !artist) return null
   const key = matchCacheKey(title, artist)
-  if (appleMatchCache.has(key)) return appleMatchCache.get(key) ?? null
+  const cached = appleMatchCache.get(key)
+  if (cached && Date.now() - cached.at <= APPLE_MATCH_CACHE_TTL_MS) return cached.match
   const match = await matchAppleTrack(title, artist, durationMs)
-  appleMatchCache.set(key, match)
+  appleMatchCache.set(key, { at: Date.now(), match })
   if (appleMatchCache.size > APPLE_MATCH_CACHE_MAX) {
     const oldestKey = appleMatchCache.keys().next().value
     if (typeof oldestKey === 'string') appleMatchCache.delete(oldestKey)

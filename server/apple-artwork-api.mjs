@@ -241,10 +241,13 @@ const pickVariantUrl = (masterText, masterUrl, maxEdge) => {
   }
 }
 
-/** 结果缓存（LRU 50）+ 同 key 并发去重 */
+/** 结果缓存（LRU 50，命中重插）+ 同 key 并发去重。
+ *  负结果（cover:null）短 TTL：一次上游 5xx 的"没找到"此前会缓存到被逐出为止，
+ *  期间该歌永远拿不到动态封面。 */
 const resultCache = new Map()
 const pending = new Map()
 const MAX_CACHE = 50
+const NEGATIVE_RESULT_TTL_MS = 5 * 60 * 1000
 
 export function registerAppleArtworkRoutes(app) {
   app.get('/api/apple/animated-cover', async (req, res) => {
@@ -255,7 +258,18 @@ export function registerAppleArtworkRoutes(app) {
     if (!title) return res.status(400).json({ code: -1, error: 'title 必填' })
 
     const cacheKey = `${title}|${artist}|${album}|${duration}`
-    if (resultCache.has(cacheKey)) return res.json({ code: 0, ...(resultCache.get(cacheKey) || { cover: null }) })
+    if (resultCache.has(cacheKey)) {
+      // LRU 语义：命中重插（Map 迭代序 = 插入序，delete+set 即移到最新）
+      const hit = resultCache.get(cacheKey)
+      resultCache.delete(cacheKey)
+      resultCache.set(cacheKey, hit)
+      // 负结果过期：当作未命中重新拉取
+      if (!hit?.cover && Date.now() - (hit?.at ?? 0) > NEGATIVE_RESULT_TTL_MS) {
+        resultCache.delete(cacheKey)
+      } else {
+        return res.json({ code: 0, ...(hit || { cover: null }) })
+      }
+    }
     if (pending.has(cacheKey)) {
       const result = await pending.get(cacheKey)
       return res.json({ code: 0, ...result })
@@ -313,7 +327,8 @@ export function registerAppleArtworkRoutes(app) {
     pending.set(cacheKey, task)
     try {
       const result = await task
-      resultCache.set(cacheKey, result)
+      // 负结果带时间戳（供 TTL 判定），正结果无时效
+      resultCache.set(cacheKey, result?.cover ? result : { ...result, at: Date.now() })
       if (resultCache.size > MAX_CACHE) {
         resultCache.delete(resultCache.keys().next().value)
       }
