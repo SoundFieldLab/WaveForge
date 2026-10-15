@@ -122,7 +122,51 @@ function hashDeviceId(deviceId) {
   return crypto.createHash('sha256').update(normalizeDeviceId(deviceId), 'utf8').digest('hex')
 }
 
-function verifyCode(code, deviceId) {
+// 时间水位（防回拨）：记录"见过的最大时间戳"，now 取 max(系统时钟, 水位)。
+// 用户把系统时间回拨即可让已过期测试码重新生效——离线授权的固有弱点，用单调水位封住。
+// 水位 = max(上次落盘水位, 本进程见过的最大值)，由 Electron 侧在 getState/redeem 时
+// 传入 userData 目录初始化（initTimeWatermark）；纯 Node 场景（TV 端 bundle）只用进程内水位。
+let timeWatermarkSec = 0
+let watermarkLoaded = false
+let watermarkAppRef = null
+
+function initTimeWatermark(app) {
+  watermarkAppRef = app
+  loadWatermark()
+}
+
+function loadWatermark() {
+  if (watermarkLoaded || !watermarkAppRef) return
+  watermarkLoaded = true
+  try {
+    const file = path.join(watermarkAppRef.getPath('userData'), 'device-license-clock.json')
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (Number.isFinite(data?.maxSeenSec)) timeWatermarkSec = Math.max(0, Math.floor(data.maxSeenSec))
+  } catch { /* 首次运行/损坏：从当前时间起步 */ }
+}
+
+function persistWatermark() {
+  if (!watermarkAppRef) return
+  try {
+    const file = path.join(watermarkAppRef.getPath('userData'), 'device-license-clock.json')
+    const temporaryPath = `${file}.tmp`
+    fs.writeFileSync(temporaryPath, JSON.stringify({ maxSeenSec: timeWatermarkSec }), 'utf8')
+    fs.renameSync(temporaryPath, file)
+  } catch { /* 水位落盘失败只影响重启后的回拨防护，不阻断授权 */ }
+}
+
+function monotonicNow(app) {
+  if (app && watermarkAppRef !== app) initTimeWatermark(app)
+  loadWatermark()
+  const wallSec = Date.now() / 1000
+  if (wallSec > timeWatermarkSec) {
+    timeWatermarkSec = wallSec
+    persistWatermark()
+  }
+  return Math.max(wallSec, timeWatermarkSec) * 1000
+}
+
+function verifyCode(code, deviceId, app = null) {
   const normalized = String(code || '').trim()
   if (!normalized || normalized.length > MAX_CODE_LENGTH) throw new Error('测试码为空或长度不正确')
   const parts = normalized.split('.')
@@ -147,7 +191,9 @@ function verifyCode(code, deviceId) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(payload.feature)) throw new Error('测试码功能标识无效')
   if (payload.deviceHash !== hashDeviceId(deviceId)) throw new Error('此测试码不属于当前设备')
 
-  const now = Math.floor(Date.now() / 1000)
+  // 时间水位（防回拨）：在 userData 记录"见过的最大时间戳"，now 取 max(系统时钟, 水位)。
+  // 用户把系统时间回拨即可让已过期测试码重新生效——离线授权的固有弱点，用单调水位封住。
+  const now = Math.floor(monotonicNow(app) / 1000)
   if (!Number.isInteger(payload.issuedAt) || payload.issuedAt <= 0 || payload.issuedAt > now + 300) throw new Error('测试码签发时间无效')
   if (payload.expiresAt != null && (!Number.isInteger(payload.expiresAt) || payload.expiresAt <= payload.issuedAt || payload.expiresAt <= now)) {
     throw new Error('测试码已过期')
@@ -167,7 +213,7 @@ function collectGrants(app, deviceId) {
   const unique = new Map()
   for (const code of readStoredCodes(app)) {
     try {
-      const grant = verifyCode(code, deviceId)
+      const grant = verifyCode(code, deviceId, app)
       const previous = unique.get(grant.feature)
       if (!previous || (grant.expiresAt || Number.MAX_SAFE_INTEGER) > (previous.expiresAt || Number.MAX_SAFE_INTEGER)) {
         unique.set(grant.feature, grant)
@@ -184,7 +230,7 @@ function getState(app) {
 
 function redeem(app, code) {
   const identity = getOrCreateDeviceId(app)
-  const grant = verifyCode(code, identity.deviceId)
+  const grant = verifyCode(code, identity.deviceId, app)
   const codes = readStoredCodes(app)
   if (!codes.includes(grant.code)) codes.push(grant.code)
   const storage = writeStoredCodes(app, codes)

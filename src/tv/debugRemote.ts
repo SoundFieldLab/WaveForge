@@ -5,7 +5,7 @@
  *  - 前端 JS 错误（window.onerror/unhandledrejection）上报到后端调试服务，
  *    电脑端无需 adb 即可看到崩溃原因。
  */
-import { isDebugMode, getFrontendLogs } from './debugStore'
+import { isDebugMode, getFrontendLogsSince } from './debugStore'
 import { isAndroid } from '../platform'
 
 let ws: WebSocket | null = null
@@ -94,9 +94,29 @@ function closeWs(): void {
   }
 }
 
+// 错误上报节流：渲染循环里的异常（rAF 内每帧抛错）曾以 60 条/秒的速度打爆后端
+// crash.log 落盘。按 (message) 去重 + 全局每分钟 10 条上限，超出静默丢弃。
+const reportedErrorMessages = new Map<string, number>()
+const ERROR_REPORT_WINDOW_MS = 60_000
+const ERROR_REPORT_MAX_PER_WINDOW = 10
+let errorReportWindowStart = 0
+let errorReportWindowCount = 0
+
 function reportFrontendError(payload: Record<string, unknown>): void {
   if (!isDebugMode()) return
   try {
+    const key = String(payload.message || '')
+    const now = Date.now()
+    if (now - errorReportWindowStart > ERROR_REPORT_WINDOW_MS) {
+      errorReportWindowStart = now
+      errorReportWindowCount = 0
+    }
+    errorReportWindowCount += 1
+    if (errorReportWindowCount > ERROR_REPORT_MAX_PER_WINDOW) return
+    const lastAt = reportedErrorMessages.get(key) || 0
+    if (now - lastAt < 5000) return
+    if (reportedErrorMessages.size > 64) reportedErrorMessages.clear()
+    reportedErrorMessages.set(key, now)
     void fetch('http://localhost:3001/api/tv/debug-report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -113,17 +133,19 @@ function reportFrontendLogs(): void {
   if (!isDebugMode()) return
   // 后端无调试接口（PC 端 local-server 未挂 tv 扩展）：连续失败后停止上报，避免 404 刷屏
   if (debugReportFailures >= 10) return
-  const logs = getFrontendLogs()
-  if (logs.length <= lastReportedLogs) return
-  const batch = logs.slice(lastReportedLogs)
-  lastReportedLogs = logs.length
+  // 按 total 差量取尾部：环形缓冲裁剪后 length 恒等于上限，若按 length 判增量，
+  // 第一次上报后（lastReported = 200）后续日志会全部漏报——调试台只剩前 200 条。
+  const { logs, total } = getFrontendLogsSince(lastReportedLogs)
+  if (!logs.length) return
+  const batch = logs
+  lastReportedLogs = total
   try {
     void fetch('http://localhost:3001/api/tv/debug-report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ logs: batch }),
     })
-      .then((r) => { if (!r.ok) debugReportFailures++ })
+      .then((r) => { if (r.ok) debugReportFailures = 0; else debugReportFailures++ })
       .catch(() => { debugReportFailures++ })
   } catch {
     debugReportFailures++

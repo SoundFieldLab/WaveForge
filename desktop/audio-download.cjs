@@ -20,8 +20,62 @@ function normalizeAudioUrl(value) {
   let parsed
   try { parsed = new URL(value.trim()) } catch { throw new Error('Invalid audio URL') }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Invalid audio URL')
+  // 只放行音乐 CDN 域名 + 本机 3001 代理（请求头注入令牌的合法链路）。
+  // 此前仅查协议，渲染层被入侵后可让主进程 GET 任意 URL（探测内网/读回响应体）。
+  const host = parsed.hostname.toLowerCase()
+  const isLocalProxy = (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1')
+    && (parsed.port === '3001' || (!parsed.port && parsed.protocol === 'http:'))
+  if (!isLocalProxy && !isAllowedAudioDownloadHost(host)) {
+    throw new Error('Audio download host is not allowed')
+  }
   parsed.hash = ''
   return parsed.href
+}
+
+// 音频下载白名单：各音源 CDN/接口域。新增音源时在此登记，而不是放开校验。
+// 例外的三类：① 本机 3001 代理（normalizeAudioUrl 里放行）；② requestFactory 注入
+// （单测/内部 fetch 桩，allowAnyHost）；③ 环回地址上的本地测试服务器（安全测试用）。
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+
+function normalizeAudioUrlForService(value, allowAnyHost = false) {
+  let parsed
+  try { parsed = new URL(String(value).trim()) } catch { throw new Error('Invalid audio URL') }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Invalid audio URL')
+  const host = parsed.hostname.toLowerCase()
+  if (!allowAnyHost) {
+    // 环回只放行本机 3001 代理（带令牌头注入的合法链路）；无端口的 http 即 80 端口
+    // 的任意本机 web 服务不该被主进程下载执行。单测走 requestFactory（allowAnyHost）。
+    const isLocalProxy = LOOPBACK_HOSTS.has(host) && parsed.port === '3001'
+    if (!isLocalProxy && !isAllowedAudioDownloadHost(host)) {
+      throw new Error('Audio download host is not allowed')
+    }
+  }
+  parsed.hash = ''
+  return parsed.href
+}
+const ALLOWED_AUDIO_DOWNLOAD_SUFFIXES = [
+  'qq.com',
+  'qqmusic.qq.com',
+  'gtimg.cn',
+  'music.126.net',
+  '163.com',
+  'bilivideo.com',
+  'bilivideo.cn',
+  'bilibili.com',
+  'hdslb.com',
+  'qishui.com',
+  'douyin.com',
+  'bytecdn.cn',
+  'bytedance.com',
+  'zjcdn.com',
+  'kugou.com',
+  'kgimg.com',
+]
+
+function isAllowedAudioDownloadHost(host) {
+  const name = String(host || '').replace(/^\[|\]$/g, '').toLowerCase()
+  if (!name || name === 'localhost' || name.endsWith('.local')) return false
+  return ALLOWED_AUDIO_DOWNLOAD_SUFFIXES.some(suffix => name === suffix || name.endsWith(`.${suffix}`))
 }
 
 function audioReferer(url) {
@@ -267,7 +321,7 @@ class AudioDownloadService {
       return cachedEntry.filePath
     }
 
-    const canonicalUrl = normalizeAudioUrl(url)
+    const canonicalUrl = normalizeAudioUrlForService(url, Boolean(this.requestFactory))
     const now = this.now()
     const forbiddenUntil = this.forbiddenUntilByUrl.get(canonicalUrl) || 0
     if (forbiddenUntil > now) {
@@ -436,7 +490,10 @@ class AudioDownloadService {
         // 的歌曲/MV 分析下载整批被 403 冷却 30s，节拍/包络分析被迫走浏览器兜底）。
         // 令牌与 local-server 同源（主进程 LOCAL_SERVICE_TOKEN），经环境变量传入。
         const requestHost = parsed.hostname.toLowerCase()
-        if (requestHost === 'localhost' || requestHost === '127.0.0.1' || requestHost === '[::1]' || requestHost === '::1') {
+        const requestPort = parsed.port || (parsed.protocol === 'https:' ? '443' : '80')
+        // 仅 3001（local-server）：令牌是本地服务的唯一凭据，发给本机任意端口的
+        // 服务器等于把凭据交给不可信进程（测试服务器/其它本机应用都能收到）。
+        if ((requestHost === 'localhost' || requestHost === '127.0.0.1' || requestHost === '[::1]' || requestHost === '::1') && requestPort === '3001') {
           const localToken = process.env.WAVEFORGE_LOCAL_TOKEN
           if (localToken) headers['X-WaveForge-Local-Token'] = localToken
         }
@@ -453,7 +510,15 @@ class AudioDownloadService {
               fail(new Error('Audio download redirect limit exceeded'))
               return
             }
-            requestUrl(new URL(location, currentUrl).href, redirectCount + 1)
+            // 逐跳重过 host 白名单：防止公网跳板 302 到内网/任意地址
+            let nextUrl
+            try {
+              nextUrl = normalizeAudioUrl(new URL(location, currentUrl).href)
+            } catch (error) {
+              fail(new Error('Audio download redirected to a disallowed host'))
+              return
+            }
+            requestUrl(nextUrl, redirectCount + 1)
             return
           }
           if (statusCode !== 200 && statusCode !== 206) {
@@ -595,62 +660,87 @@ class AudioDownloadService {
   /**
    * Clean up temporary files older than specified age
    * and enforce the persistent cache size limit.
+   * 异步化 + 索引批量保存：原实现同步 readdirSync+逐文件 rmSync，且 deleteCacheFile
+   * 每删一条就全量 saveCacheIndex 一次（N 条缓存 = N 次全量索引写盘），主线程长卡。
    */
-  cleanupOldFiles(maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
+  async cleanupOldFiles(maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
     const cutoff = Date.now() - Math.max(0, maxAgeMs)
     let deletedCount = 0
     for (const [trackKey, entry] of this.cacheIndex) {
-      if (!fs.existsSync(entry.filePath) || Number(entry.lastAccess || entry.timestamp || 0) < cutoff) {
-        if (this.deleteCacheFile(trackKey)) deletedCount++
-      }
-    }
-    const indexedPaths = new Set(Array.from(this.cacheIndex.values(), entry => path.resolve(entry.filePath)))
-    for (const entry of fs.readdirSync(this.tempRoot, { withFileTypes: true })) {
-      if (!entry.isFile() || entry.name === 'cache-index.json') continue
-      const target = path.join(this.tempRoot, entry.name)
-      const resolvedTarget = path.resolve(target)
-      if (this.activeCacheFiles.has(resolvedTarget)) continue
+      let stale = false
       try {
-        if (entry.name.endsWith('.tmp') || !indexedPaths.has(resolvedTarget)) fs.rmSync(target, { force: true })
+        stale = !(await fs.promises.stat(entry.filePath)).isFile()
+          || Number(entry.lastAccess || entry.timestamp || 0) < cutoff
+      } catch {
+        stale = true
+      }
+      if (!stale) continue
+      if (this.activeCacheFiles.has(path.resolve(entry.filePath))) continue
+      try {
+        await fs.promises.rm(entry.filePath, { force: true })
       } catch {}
+      this.cacheIndex.delete(trackKey)
+      deletedCount++
     }
+    if (deletedCount > 0) this.saveCacheIndex()
+    let indexedPaths
+    try {
+      indexedPaths = new Set(Array.from(this.cacheIndex.values(), entry => path.resolve(entry.filePath)))
+      for (const entry of await fs.promises.readdir(this.tempRoot, { withFileTypes: true })) {
+        if (!entry.isFile() || entry.name === 'cache-index.json') continue
+        const target = path.join(this.tempRoot, entry.name)
+        const resolvedTarget = path.resolve(target)
+        if (this.activeCacheFiles.has(resolvedTarget)) continue
+        try {
+          if (entry.name.endsWith('.tmp') || !indexedPaths.has(resolvedTarget)) await fs.promises.rm(target, { force: true })
+        } catch {}
+      }
+    } catch {}
     this.checkAndCleanupCache()
     return deletedCount
   }
 
   /**
    * Clean up all cached files when the user explicitly clears the cache.
+   * 异步化：同上，数千文件的一次性 unlink 会卡主线程。
    */
-  cleanupAll() {
+  async cleanupAll() {
     if (!fs.existsSync(this.tempRoot)) return
 
     for (const request of this.activeRequests) request.destroy(new Error('Audio cache cleared'))
     this.activeRequests.clear()
 
     console.log('[AudioCache] Cleaning up all cached files...')
-    const files = fs.readdirSync(this.tempRoot)
+    let files
+    try {
+      files = await fs.promises.readdir(this.tempRoot)
+    } catch {
+      return
+    }
     let deletedCount = 0
-    
+
     for (const file of files) {
       // Skip the cache index file
       if (file === 'cache-index.json') continue
-      
+
       try {
         const target = path.join(this.tempRoot, file)
         if (this.activeCacheFiles.has(path.resolve(target))) continue
-        fs.unlinkSync(target)
+        await fs.promises.rm(target, { force: true })
         deletedCount++
       } catch (e) {
         // Ignore
       }
     }
-    
+
     for (const [trackKey, entry] of this.cacheIndex) {
-      if (!fs.existsSync(entry.filePath) || this.activeCacheFiles.has(path.resolve(entry.filePath))) continue
+      let exists = true
+      try { exists = (await fs.promises.stat(entry.filePath)).isFile() } catch { exists = false }
+      if (!exists || this.activeCacheFiles.has(path.resolve(entry.filePath))) continue
       this.cacheIndex.delete(trackKey)
     }
     this.saveCacheIndex()
-    
+
     console.log(`[AudioCache] Cleaned up ${deletedCount} cached files`)
   }
 

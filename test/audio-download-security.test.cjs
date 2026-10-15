@@ -69,27 +69,32 @@ test('failed cache deletion keeps the index entry', t => {
   assert.equal(fs.existsSync(cached), true)
 })
 
-test('cleanup removes orphan tmp files but skips active downloads', t => {
+test('cleanup removes orphan tmp files but skips active downloads', async t => {
   const { cache, service } = fixture(t)
   const orphan = path.join(cache, 'orphan.tmp')
   const active = path.join(cache, 'active.tmp')
   fs.writeFileSync(orphan, 'partial')
   fs.writeFileSync(active, 'active')
   service.activeCacheFiles.add(path.resolve(active))
-  service.cleanupOldFiles()
+  await service.cleanupOldFiles()
   assert.equal(fs.existsSync(orphan), false)
   assert.equal(fs.existsSync(active), true)
 })
 test('remote downloads are materialized inside the controlled cache', async t => {
+  // 生产链路的远端 URL 只有 CDN 域与本机 3001 代理（normalizeAudioUrlForService 收紧后
+  // 环回只放行 3001）——这里用 requestFactory 桩模拟真实下载，验证「下载结果落入受控缓存」
+  // 这一安全属性本身，而不是验证环回端点放行策略（策略由 audio-download-policy 覆盖）。
+  const { PassThrough } = require('stream')
   const { service } = fixture(t)
-  const server = http.createServer((_request, response) => {
-    response.writeHead(200, { 'Content-Type': 'audio/wav' })
-    response.end(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(32)]))
-  })
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  t.after(() => server.close())
-  const { port } = server.address()
-  const downloaded = await service.prepareAudioFile(`http://127.0.0.1:${port}/track`, 'remote')
+  service.requestFactory = (_options, callback) => {
+    const stream = new PassThrough()
+    stream.statusCode = 200
+    stream.headers = { 'content-type': 'audio/wav' }
+    stream.end(Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WAVE'), Buffer.alloc(32)]))
+    setImmediate(() => callback(stream))
+    return { destroyed: false, on() { return this }, setTimeout() {}, destroy() {} }
+  }
+  const downloaded = await service.prepareAudioFile('https://example.music.126.net/track.wav', 'remote')
   assert.equal(service.isInsideTempRoot(downloaded), true)
   assert.equal(service.isInputAllowed(downloaded), true)
 })

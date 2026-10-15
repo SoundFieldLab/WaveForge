@@ -184,6 +184,9 @@ function saveDeviceState(statePath, device) {
   if (!statePath) return;
   try {
     fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    // 注意：mode: 0o600 在 Windows 上不生效（NTFS 忽略 POSIX mode，只认只读位）——
+    // 该文件（含 imei/qimei/sessionUid/sessionSid 会话凭据）的实际保护依赖 userData
+    // 目录的每用户 ACL。若未来需要更强保护，改走 Electron safeStorage 加密后落盘。
     fs.writeFileSync(statePath, `${JSON.stringify({ version: DEVICE_STATE_VERSION, device }, null, 2)}\n`, {
       encoding: 'utf8',
       mode: 0o600,
@@ -1144,7 +1147,13 @@ function createQqMusicQrLogin({ statePath, wsImpl } = {}) {
       const created = createQqMqttListener({
         wsImpl: WebSocketImpl,
         qrcodeId,
-        onEvent: handleEvent,
+        // 代数守卫：同一实例二次 start() 时旧 listener 的迟到事件（连接关闭 →
+        // consumeQrEvents 的 error/timeout）不得污染新会话 —— 用「listener 是否仍是
+        // 本次创建的这一个」判断，旧连接的一切事件直接丢弃。
+        onEvent: (event) => {
+          if (listener !== created) return;
+          handleEvent(event);
+        },
         timeoutMs: expiresInMs,
       });
       listener = created;

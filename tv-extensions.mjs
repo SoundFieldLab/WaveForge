@@ -9,11 +9,12 @@
  * 所有路径（壁纸目录）由调用方传入。
  */
 import { createRemoteServer, getLanIPv4Addresses } from './desktop/remote-server.cjs'
-import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync, readFileSync, appendFileSync } from 'fs'
+import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync, readFileSync, appendFileSync, renameSync, rmSync, statSync as fsStatSync } from 'fs'
 import * as fsPromises from 'fs/promises'
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
 import { dirname, join, sep } from 'path'
+import { randomBytes, timingSafeEqual } from 'crypto'
 import { verifyCode } from './desktop/device-license.cjs'
 
 // ── 局域网调试服务（:3008，仅开发者模式开启时运行） ──
@@ -22,18 +23,52 @@ import { verifyCode } from './desktop/device-license.cjs'
 const DEBUG_PORT = 3008
 let debugServer = null // { server, wss }
 let debugPageClients = new Set() // 前端页面 WS 客户端
+// 调试服务配对令牌：3008 绑 0.0.0.0 局域网可达，/update 可覆写 dist/ 前端（等于
+// 接管应用）、/logs /crash 可读日志。无令牌时同网段任意设备都能注入恶意前端并
+// 窃取各平台登录态。令牌随服务启动随机生成、打印进后端日志环形缓冲（调试台
+// 与 `adb logcat`/:3001 /api/tv/logs 可查）；push-hot-update.mjs 经 `?token=` 或
+// `x-waveforge-debug-token` 头携带。令牌为 24 字节随机 hex，每次重启轮换。
+let debugAccessToken = ''
+
+function issueDebugToken() {
+  debugAccessToken = randomBytes(24).toString('hex')
+  console.log(`[调试服务] 配对令牌: ${debugAccessToken}（调试台 URL 须带 ?token=<令牌>）`)
+  return debugAccessToken
+}
+
+function debugTokenMatches(candidate) {
+  if (!debugAccessToken) return false
+  const provided = String(candidate || '')
+  if (provided.length !== debugAccessToken.length) return false
+  return timingSafeEqual(Buffer.from(provided), Buffer.from(debugAccessToken))
+}
+
+function requestHasDebugToken(req, url) {
+  const header = req.headers['x-waveforge-debug-token']
+  if (typeof header === 'string' && header) return debugTokenMatches(header)
+  const queryToken = url.searchParams.get('token')
+  return Boolean(queryToken) && debugTokenMatches(queryToken)
+}
 
 function setDebugServerEnabled(enabled, { serverLogs, crashFile, distDir = null }) {
   if (enabled && !debugServer) {
+    issueDebugToken()
     const server = createServer((req, res) => {
       const url = new URL(req.url, 'http://localhost')
       const sendJson = (obj) => {
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(obj))
       }
+      // 面板页本身只含静态 HTML（无日志内容），允许无令牌加载；令牌由页面 JS
+      // 从 location.search 读取后附加到 /logs /crash /update 请求与 WS 连接上。
       if (url.pathname === '/') {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         res.end(DEBUG_PANEL_HTML)
+        return
+      }
+      if (!requestHasDebugToken(req, url)) {
+        res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: '缺少或错误的调试令牌（调试台 URL 需带 ?token=）' }))
         return
       }
       if (url.pathname === '/logs') {
@@ -113,7 +148,21 @@ function setDebugServerEnabled(enabled, { serverLogs, crashFile, distDir = null 
       res.writeHead(404)
       res.end('Not Found')
     })
-    const wss = new WebSocketServer({ server, path: '/ws' })
+    const wss = new WebSocketServer({ server, path: '/ws', verifyClient: (info) => {
+      // WS 同样要令牌；且拒绝跨源浏览器连接（drive-by：任意网页可尝试 ws://TV_IP:3008/ws
+      // 发命令操纵 TV）。本机 SPA（localhost:3001）与调试台（同源加载面板页）都带 token。
+      try {
+        const url = new URL(info.req.url, 'http://localhost')
+        if (!requestHasDebugToken(info.req, url)) return false
+        const origin = String(info.req.headers.origin || '')
+        if (!origin) return true // Node 客户端（push-hot-update 的 ws 库等）无 Origin 头
+        const originHost = new URL(origin).host
+        const targetHost = info.req.headers.host || ''
+        return originHost === targetHost || originHost === `localhost:${DEBUG_PORT}` || originHost === `127.0.0.1:${DEBUG_PORT}`
+      } catch {
+        return false
+      }
+    } })
     wss.on('connection', (ws) => {
       debugPageClients.add(ws)
       ws.on('message', (data) => {
@@ -139,7 +188,7 @@ function setDebugServerEnabled(enabled, { serverLogs, crashFile, distDir = null 
     })
     server.listen(DEBUG_PORT, '0.0.0.0')
     debugServer = { server, wss }
-    console.log(`[调试服务] 已开启: http://0.0.0.0:${DEBUG_PORT}（局域网可访问）`)
+    console.log(`[调试服务] 已开启: http://0.0.0.0:${DEBUG_PORT}?token=${debugAccessToken}（须带令牌访问）`)
   } else if (!enabled && debugServer) {
     try { debugServer.wss.close() } catch { /* ignore */ }
     try { debugServer.server.close() } catch { /* ignore */ }
@@ -215,7 +264,10 @@ const DEBUG_PANEL_HTML = `<!DOCTYPE html>
 </div>
 
 <script>
-  var ws = new WebSocket('ws://' + location.host + '/ws');
+  // 调试令牌：调试台 URL 形如 http://<设备IP>:3008/?token=<令牌>（令牌在设备后端日志里）。
+  // 所有 API 请求与 WS 连接都带上；缺失/错误时请求 401、WS 直接被拒。
+  var DEBUG_TOKEN = new URLSearchParams(location.search).get('token') || '';
+  var ws = new WebSocket('ws://' + location.host + '/ws?token=' + encodeURIComponent(DEBUG_TOKEN));
   var wsState = document.getElementById('wsState');
   ws.onopen = function () { wsState.textContent = '已连接'; wsState.style.color = '#31e68b'; };
   ws.onclose = function () { wsState.textContent = '已断开'; wsState.style.color = '#ff6b81'; };
@@ -237,7 +289,7 @@ const DEBUG_PANEL_HTML = `<!DOCTYPE html>
 
   var logBox = document.getElementById('logBox');
   function loadLogs() {
-    fetch('/logs').then(function (r) { return r.json(); }).then(function (d) {
+    fetch('/logs?token=' + encodeURIComponent(DEBUG_TOKEN)).then(function (r) { return r.json(); }).then(function (d) {
       logBox.innerHTML = (d.lines || []).map(function (l) {
         var cls = l.level === 'error' ? 'error' : (l.level === 'warn' ? 'warn' : '');
         return '<span class="' + cls + '">[' + l.time + ' ' + l.level + '] ' + l.text.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</span>';
@@ -271,7 +323,7 @@ const DEBUG_PANEL_HTML = `<!DOCTYPE html>
   });
   function doUpload(payload) {
     uploadStatus.textContent = '上传中…';
-    fetch('/update', {
+    fetch('/update?token=' + encodeURIComponent(DEBUG_TOKEN), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ files: payload }),
@@ -281,7 +333,7 @@ const DEBUG_PANEL_HTML = `<!DOCTYPE html>
   }
 
   function loadCrash() {
-    fetch('/crash').then(function (r) { return r.json(); }).then(function (d) {
+    fetch('/crash?token=' + encodeURIComponent(DEBUG_TOKEN)).then(function (r) { return r.json(); }).then(function (d) {
       document.getElementById('crashBox').textContent = d.content ? ('最后崩溃（' + new Date().toLocaleString() + '）：\\n\\n' + d.content) : '（无崩溃记录）';
     }).catch(function () {});
   }
@@ -291,6 +343,18 @@ const DEBUG_PANEL_HTML = `<!DOCTYPE html>
 
 // ── TV 壁纸扫码上传：手机浏览器 → 25567 上传页 → 存本地/设备存储 ──
 // 手机上传的图片由 SPA 从 /api/tv/wallpapers 拉回并导入 wallpaperManager（IndexedDB）。
+// 每 IP 限流配额（1 分钟滑动窗口）：上传入口匿名可达，防局域网灌盘。
+const wallpaperUploadQuota = new Map()
+// 前端错误落盘限流（/api/tv/debug-report 单错误模式）：每 IP 每分钟窗口
+const crashReportQuota = new Map()
+
+/** tv-crash.log 轮转：超 1MB 时改名留档，下次错误重新建文件（防单文件无界增长）。 */
+function rotateCrashFile(crashFile) {
+  try {
+    renameSync(crashFile, `${crashFile}.1`)
+  } catch { /* ignore */ }
+}
+
 const UPLOAD_PAGE = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -333,6 +397,35 @@ function sanitizeFileName(name) {
   return String(name || 'wallpaper.jpg').replace(/[\\/:*?"<>|]/g, '_').slice(-80)
 }
 
+// 壁纸目录总量上限（超过按 mtime 淘汰最旧，直到写入后仍有余量）
+const WALLPAPER_STORAGE_CAP_BYTES = 500 * 1024 * 1024
+function enforceWallpaperStorageCap(wallpapersDir, incomingBytes) {
+  let entries = []
+  try {
+    entries = readdirSync(wallpapersDir, { withFileTypes: true })
+      .filter(entry => entry.isFile())
+      .map(entry => {
+        const file = join(wallpapersDir, entry.name)
+        const stat = statSync(file)
+        return { file, size: stat.size, mtime: stat.mtimeMs }
+      })
+  } catch {
+    return // 目录不可读：放弃本次淘汰，不影响上传主流程
+  }
+  let total = entries.reduce((sum, entry) => sum + entry.size, 0)
+  if (total + incomingBytes <= WALLPAPER_STORAGE_CAP_BYTES) return
+  entries.sort((a, b) => a.mtime - b.mtime)
+  for (const entry of entries) {
+    if (total + incomingBytes <= WALLPAPER_STORAGE_CAP_BYTES) break
+    try {
+      rmSync(entry.file, { force: true })
+      total -= entry.size
+    } catch {
+      continue
+    }
+  }
+}
+
 function makeWallpaperHttpHandler(wallpapersDir) {
   return function handleWallpaperHttp(req, res, url) {
     if (url.pathname === '/wallpaper') {
@@ -343,6 +436,20 @@ function makeWallpaperHttpHandler(wallpapersDir) {
     if (url.pathname === '/wallpaper/upload' && req.method === 'POST') {
       // 大小上限：该入口可被局域网直接访问，不设上限时数 GB body 会把进程内存打爆
       const MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+      // 防灌盘（该入口当前匿名可达，配对 token 改造需 TV 端配合，此处先限流）：
+      // 每 IP 每分钟 ≤6 次上传、累计 ≤500MB —— 超出直接 429。
+      const clientIp = req.socket?.remoteAddress || 'unknown'
+      const now = Date.now()
+      let quota = wallpaperUploadQuota.get(clientIp)
+      if (!quota || now - quota.windowStart > 60_000) {
+        quota = { windowStart: now, count: 0, bytes: 0 }
+        wallpaperUploadQuota.set(clientIp, quota)
+      }
+      if (quota.count >= 6 || quota.bytes >= 500 * 1024 * 1024) {
+        res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ ok: false, error: '上传过于频繁或超出配额，请稍后再试' }))
+        return true
+      }
       const declared = Number(req.headers['content-length'] || 0)
       if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
         res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -385,7 +492,12 @@ function makeWallpaperHttpHandler(wallpapersDir) {
           if (dataEnd === -1) dataEnd = buf.length
           const image = buf.subarray(dataStart, dataEnd)
           if (!image || image.length < 100) throw new Error('未收到有效图片')
+          quota.count += 1
+          quota.bytes += image.length
           mkdirSync(wallpapersDir, { recursive: true })
+          // 存储总量上限：限流只约束单 IP 速率，攻击者换 IP 仍可长期低速灌盘写满
+          // 设备存储（TV 无自动清理）。目录超过 500MB 时按 mtime 淘汰最旧文件。
+          enforceWallpaperStorageCap(wallpapersDir, image.length)
           const name = Date.now() + '-' + sanitizeFileName(filenameMatch?.[1] || 'wallpaper.jpg')
           writeFileSync(join(wallpapersDir, name), image)
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
@@ -506,8 +618,10 @@ export function installTvExtensions({
       const raw = JSON.parse(readFileSync(tvDebugStateFile, 'utf8'))
       if (typeof raw?.enabled === 'boolean') return raw.enabled
     } catch { /* ignore */ }
-    // 无记录：调试阶段默认开（正式发布改 false）
-    return true
+    // 默认关闭：:3008 绑 0.0.0.0 局域网可达（/update 可覆写前端），无记录时若默认开，
+    // 每个装了正式包的设备都会带出一个公开攻击面。开发者模式下由前端 syncBackend()
+    // （debugRemote → POST /api/tv/debug-mode）显式开启，开启后的状态持久化。
+    return false
   }
   app.post('/api/tv/debug-mode', (req, res) => {
     const enabled = req.body?.enabled === true
@@ -542,7 +656,20 @@ export function installTvExtensions({
       serverLogs.push({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), level: 'error', text })
     }
     try {
-      appendFileSync(tvCrashFile, `[${new Date().toISOString()}] ${text}\n`)
+      // 落盘前限流 + 截断：渲染循环抛错（60 次/秒）曾可无界写盘填满设备存储；
+      // 每 IP 每分钟 ≤12 条错误落盘，超出仅记入内存环形缓冲。文件超 1MB 轮转一次。
+      const clientIp = req.socket?.remoteAddress || 'unknown'
+      const now = Date.now()
+      let crashQuota = crashReportQuota.get(clientIp)
+      if (!crashQuota || now - crashQuota.windowStart > 60_000) {
+        crashQuota = { windowStart: now, count: 0 }
+        crashReportQuota.set(clientIp, crashQuota)
+      }
+      crashQuota.count += 1
+      if (crashQuota.count <= 12) {
+        try { if (fsStatSync(tvCrashFile).size > 1024 * 1024) rotateCrashFile(tvCrashFile) } catch { /* ignore */ }
+        appendFileSync(tvCrashFile, `[${new Date().toISOString()}] ${text}\n`)
+      }
     } catch { /* ignore */ }
     res.json({ ok: true })
   })

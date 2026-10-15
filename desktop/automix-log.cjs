@@ -1,31 +1,13 @@
-/**
- * AutoMix 后端诊断日志：automix 全链路（下载/分析/渲染/AI 混音）关键事件
- * 同时写控制台和 userData/automix-backend.log。
- *
- * 用途：真机调试——用户在前端操作时，后端把每一步（策略、缓存、渲染结果、
- * 回退原因）落盘，开发/合并 AI 直接读文件即可，无需复制粘贴终端输出。
- */
-
 const fs = require('fs')
 const path = require('path')
 
-let logPath = null
-
-// 轮转上限：超过 5MB 滚动为 .old（只保留一份旧档），防止挂机听歌数月后日志涨到 GB 级
 const LOG_MAX_BYTES = 5 * 1024 * 1024
 
-function rotateIfNeeded() {
-  try {
-    const stat = fs.statSync(logPath)
-    if (stat.size > LOG_MAX_BYTES) {
-      const oldPath = logPath + '.old'
-      try { fs.rmSync(oldPath, { force: true }) } catch { /* ignore */ }
-      fs.renameSync(logPath, oldPath)
-    }
-  } catch {
-    // 文件不存在等：直接按无轮转处理
-  }
-}
+let logPath = null
+let dirEnsured = false
+// 写链串行化：异步 stat→(rename)→appendFile 并发调用会交错行序/双轮转，
+// 用尾接尾的 promise 链保证每次写入按调用顺序落盘（与旧同步版语义一致）。
+let writeChain = Promise.resolve()
 
 function init(app) {
   if (!app || !app.getPath) return
@@ -42,13 +24,22 @@ function automixLog(scope, message) {
   const line = `[${new Date().toISOString()}] [AutoMix-Backend][${scope}] ${message}`
   console.log(line)
   if (logPath) {
-    try {
-      fs.mkdirSync(path.dirname(logPath), { recursive: true })
-      rotateIfNeeded()
-      fs.appendFileSync(logPath, line + '\n')
-    } catch {
-      // 日志写入失败不影响主流程
+    // 异步追加：渲染 worker stdout 逐行触发本函数，渲染期间高频同步写（statSync+mkdirSync+
+    // appendFileSync）会间歇卡主进程事件循环。目录只需建一次；轮转的 stat 也走异步链。
+    if (!dirEnsured) {
+      dirEnsured = true
+      try { fs.mkdirSync(path.dirname(logPath), { recursive: true }) } catch {}
     }
+    const target = logPath
+    writeChain = writeChain.then(() =>
+      fs.promises.stat(target).then(stat => {
+        if (stat.size <= LOG_MAX_BYTES) return
+        const oldPath = target + '.old'
+        return fs.promises.rm(oldPath, { force: true }).then(() => fs.promises.rename(target, oldPath))
+      }).then(() => fs.promises.appendFile(target, line + '\n'))
+    ).catch(() => {
+      // 日志写入失败不影响主流程
+    })
   }
 }
 

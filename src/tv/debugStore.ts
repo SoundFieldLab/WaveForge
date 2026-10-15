@@ -6,7 +6,7 @@
  * 全部为只读展示用途（面板 pointer-events:none + data-tv-skip，遥控器/远程光标不可选中）。
  */
 import { useSyncExternalStore } from 'react'
-import { isTvModeActive, isAndroid } from '../platform'
+import { isAndroid } from '../platform'
 
 // ── 调试模式开关（localStorage developerMode + developerModeChanged 事件） ──
 let debugMode = readDebugMode()
@@ -16,11 +16,11 @@ function readDebugMode(): boolean {
   try {
     const saved = localStorage.getItem('developerMode')
     if (saved !== null) return saved === 'true'
-    // 调试阶段：TV 端默认开启（软件进不去时也需要调试台可用）；PC 默认关。
-    // 正式发布时把这里改回 false。
-    return isTvModeActive()
+    // 默认关闭：与后端 tv-extensions 的 readDebugState() 口径一致（正式包不带公开
+    // 调试攻击面）。开发者需要时在设置面板打开，开关持久化后重启保持。
+    return false
   } catch {
-    return isTvModeActive()
+    return false
   }
 }
 
@@ -91,6 +91,16 @@ export interface LogLine {
 let frontendLogs: LogLine[] = []
 const logListeners = new Set<() => void>()
 const MAX_FRONTEND_LOGS = 200
+/** 累计写入条数（单调递增，环形裁剪不清零）：上报差量必须按 total 算 ——
+ *  缓冲裁剪后 length 恒等于上限，按 length 判增量会在第一次上报后永久停摆。 */
+let frontendLogTotal = 0
+
+/** 取「第 seq 条之后」的日志与最新 total；seq 过旧/越界时回退整个缓冲。 */
+export function getFrontendLogsSince(seq: number): { logs: LogLine[]; total: number } {
+  const skip = frontendLogTotal - frontendLogs.length
+  const from = seq >= skip && seq <= frontendLogTotal ? seq - skip : 0
+  return { logs: frontendLogs.slice(from), total: frontendLogTotal }
+}
 
 function stringifyArg(a: unknown): string {
   if (typeof a === 'string') return a
@@ -124,12 +134,15 @@ export function captureFrontendConsole(): void {
     // 日志始终进环形缓冲：即使开发者模式关闭，事后打开调试面板也能回看这段时间的输出。
     // 差别只在于「不通知订阅者」——此时 DebugPanels 未挂载，通知只会白跑一轮 React 重渲染；
     // 而时间格式已换成轻量实现，不再有每条日志一次 Intl 本地化的开销。
-    frontendLogs.push({
+    // push/裁剪必须整体重赋值：useSyncExternalStore 用 Object.is 比较快照，
+    // 原地修改返回同一引用会让订阅者永远 bail（日志面板在 showPerf=false 时冻结）。
+    frontendLogs = [...frontendLogs, {
       time: formatLogTime(),
       level,
       text: args.map(stringifyArg).join(' '),
-    })
-    if (frontendLogs.length > MAX_FRONTEND_LOGS) frontendLogs.splice(0, frontendLogs.length - MAX_FRONTEND_LOGS)
+    }]
+    frontendLogTotal += 1
+    if (frontendLogs.length > MAX_FRONTEND_LOGS) frontendLogs = frontendLogs.slice(frontendLogs.length - MAX_FRONTEND_LOGS)
     if (!debugMode) return
     logListeners.forEach((fn) => fn())
   }

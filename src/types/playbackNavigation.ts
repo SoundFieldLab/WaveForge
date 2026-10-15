@@ -1,6 +1,6 @@
 import type { Song } from '../services/musicApi'
 
-export type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+export type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
 
 export type PlaybackSurface =
   | 'mode-root'
@@ -33,7 +33,7 @@ export interface PlaybackOrigin {
   searchMode?: import('../services/platforms').MusicPlatform | 'fused'
   artistId?: string | number
   albumId?: string | number
-  artistTab?: 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'similarArtists' | 'info'
+  artistTab?: 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'programs' | 'similarArtists' | 'info'
   playlist?: unknown
   songs?: Song[]
   detail?: unknown
@@ -53,4 +53,6 @@ export type SongSelectHandler = (
   song: Song,
   playlist?: Song[],
   origin?: PlaybackOrigin,
+  /** 调用方知道点击项在 playlist 中的下标时传入：同名歌重复出现时按位置精确定位 */
+  sourceIndex?: number,
 ) => void

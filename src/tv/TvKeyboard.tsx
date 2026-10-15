@@ -50,6 +50,10 @@ export default function TvKeyboard() {
   const [target, setTarget] = useState<HTMLInputElement | HTMLTextAreaElement | null>(null)
   const [page, setPage] = useState<Page>('lower')
   const [closing, setClosing] = useState(false)
+  // 输入预览快照：insert/delete 只写原生 value，不触发本组件 setState，
+  // 预览 div 直接读 target.value 会一直显示上一次渲染（弹键盘/翻页/关闭）时的旧值。
+  // 每次写入后 bump 一版，并同步监听目标输入框的 input 事件（覆盖物理键/远程输入改动）。
+  const [previewValue, setPreviewValue] = useState('')
   const targetRef = useRef<typeof target>(null)
   const keyboardRef = useRef<HTMLDivElement>(null)
   const switchBtnRef = useRef<HTMLButtonElement>(null)
@@ -147,6 +151,15 @@ export default function TvKeyboard() {
     })
   }
 
+  // 目标输入框被外部改动（物理键盘/远程输入）时同步预览快照
+  useEffect(() => {
+    if (!tvMode || !target) return
+    setPreviewValue(target.value)
+    const onInput = () => setPreviewValue(target.value)
+    target.addEventListener('input', onInput)
+    return () => target.removeEventListener('input', onInput)
+  }, [tvMode, target])
+
   // ★ hooks 必须全部在提前 return 之前（React 规则：hooks 不能条件化，否则 #310 白屏）
   const deleteCharRef = useRef<() => void>(() => {})
   const closeRef = useRef<() => void>(() => {})
@@ -167,7 +180,7 @@ export default function TvKeyboard() {
 
   if (!tvMode || !target) return null
 
-  const insert = (text: string) => {
+    const insert = (text: string) => {
     const t = target
     if (!t) return
     const proto =
@@ -181,6 +194,7 @@ export default function TvKeyboard() {
     const next = t.value.slice(0, start) + text + t.value.slice(end)
     setter.call(t, next)
     t.dispatchEvent(new Event('input', { bubbles: true }))
+    setPreviewValue(next)
     try {
       t.setSelectionRange(start + text.length, start + text.length)
     } catch {
@@ -203,6 +217,7 @@ export default function TvKeyboard() {
       const next = t.value.slice(0, start - 1) + t.value.slice(end)
       setter.call(t, next)
       t.dispatchEvent(new Event('input', { bubbles: true }))
+      setPreviewValue(next)
       try {
         t.setSelectionRange(start - 1, start - 1)
       } catch {
@@ -212,6 +227,7 @@ export default function TvKeyboard() {
       const next = t.value.slice(0, start) + t.value.slice(end)
       setter.call(t, next)
       t.dispatchEvent(new Event('input', { bubbles: true }))
+      setPreviewValue(next)
       try {
         t.setSelectionRange(start, start)
       } catch {
@@ -315,10 +331,10 @@ export default function TvKeyboard() {
           letterSpacing: (target as HTMLInputElement)?.type === 'password' ? 2 : undefined,
         }}
       >
-        {target.value
+        {previewValue
           ? (target as HTMLInputElement).type === 'password'
-            ? '•'.repeat(Math.min(64, target.value.length))
-            : target.value
+            ? '•'.repeat(Math.min(64, previewValue.length))
+            : previewValue
           : '\u00A0'}
       </div>
 

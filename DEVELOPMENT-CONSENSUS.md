@@ -18,26 +18,28 @@
 
 | 组件 | 说明 |
 |---|---|
-| 开发者模式 | TV 端**默认开启**（`localStorage.developerMode` 无记录 → TV 默认 true；手动关闭后持久化，重启保持关闭）。设置面板可开关。 |
-| 调试服务 `:3002` | node 后端启动时按持久化的开发者模式状态启停，绑定 `0.0.0.0`（局域网可达）。 |
-| 热更新端点 | `POST http://<设备IP>:3002/update`，body `{ files: [{ path, data(base64) }] }`（`path` 相对 `dist/`）→ 设备替换文件 → 广播 `reload` → 前端自动刷新。 |
-| 调试台 | `http://<设备IP>:3002/`：后端日志（2s 自动刷新）、node 崩溃堆栈、前端 console 日志/JS 错误、遥控 App（播放/方向键/OK/返回/主页/搜索/设置）、热更新上传 UI（网页选文件）。 |
-| 崩溃定位 | node 未捕获异常写 `filesDir/tv-crash.log`，前端错误上报同文件；重启后 `:3002/crash` 仍可查。 |
+| 开发者模式 | TV 端**默认关闭**（正式包不带公开调试攻击面）；在设置面板打开后持久化（`localStorage.developerMode` + 后端 `tv-debug-state.json`），重启保持。 |
+| 调试服务 `:3008` | node 后端启动时按持久化的开发者模式状态启停，绑定 `0.0.0.0`（局域网可达）。`:3002-3004` 是 PC 端 Python 服务（beat/loudness/compensation），与 TV 调试无关。 |
+| 配对令牌 | 调试服务开启时随机生成，打印进设备后端日志；`/update`、`/logs`、`/crash`、`/ws` 均要求令牌（URL `?token=` 或 `X-WaveForge-Debug-Token` 头）。 |
+| 热更新端点 | `POST http://<设备IP>:3008/update?token=<令牌>`，body `{ files: [{ path, data(base64) }] }`（`path` 相对 `dist/`）→ 设备替换文件 → 广播 `reload` → 前端自动刷新。 |
+| 调试台 | `http://<设备IP>:3008/?token=<令牌>`：后端日志（2s 自动刷新）、node 崩溃堆栈、前端 console 日志/JS 错误、遥控 App（播放/方向键/OK/返回/主页/搜索/设置）、热更新上传 UI（网页选文件）。 |
+| 崩溃定位 | node 未捕获异常写 `filesDir/tv-crash.log`（超 1MB 轮转），前端错误上报同文件（限流）；重启后 `:3008/crash?token=` 仍可查。 |
 
 ## 三、如何操作（改完代码后推送）
 
 ```bash
 # 一键：构建 android 前端 + 推送到设备（推荐）
-node scripts/push-hot-update.mjs 192.168.88.125 --rebuild
+node scripts/push-hot-update.mjs 192.168.88.125 --token=<调试令牌> --rebuild
 
 # 只推送（不重新构建，用现有 dist）
-node scripts/push-hot-update.mjs 192.168.88.125
+node scripts/push-hot-update.mjs 192.168.88.125 --token=<调试令牌>
 ```
 
 推送脚本读取 `android/app/src/main/assets/nodejs-project/dist/`（vite android 构建产物），
 把全部文件 base64 打包上传 → 设备替换 → 页面自动刷新，改动即刻生效。
 
-**前提**：设备开发者模式已开启（当前默认开启）、设备与电脑同一局域网、能访问 `:3002`。
+**前提**：设备已在设置中开启开发者模式（默认关）、设备与电脑同一局域网、能访问 `:3008`、
+持有配对令牌（设备后端日志 / 调试台 URL 中可见）。
 
 ## 四、边界与注意
 
