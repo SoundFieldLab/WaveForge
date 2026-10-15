@@ -1,0 +1,79 @@
+{
+  "src/components/CommentModal.tsx": [
+    "localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''",
+    "localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''",
+    "userCookie",
+    "localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''",
+    "userCookie",
+    "neteaseCookie",
+    "neteaseCookie"
+  ],
+  "src/components/TraditionalView.tsx": [
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie"
+  ],
+  "src/components/ProfileView.tsx": [
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie"
+  ],
+  "src/components/HomeView.tsx": [
+    "neteaseCookie",
+    "cookie",
+    "cookie"
+  ],
+  "src/features/traditionalPc/QQPcHall.tsx": [
+    "cookie",
+    "cookie"
+  ],
+  "src/features/traditionalPc/NeteasePcCollection.tsx": [
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie"
+  ],
+  "src/features/traditionalPc/PcComments.tsx": [
+    "getPlatformCookie('netease')",
+    "getPlatformCookie('qq')"
+  ],
+  "src/components/TraditionalComments.tsx": [
+    "getCookie()",
+    "getPlatformCookie('qq')"
+  ],
+  "src/components/DesktopView.tsx": [
+    "cookie",
+    "cookie"
+  ],
+  "src/services/neteaseMusicJourney.ts": [
+    "cookie"
+  ],
+  "src/features/traditionalPc/QQPcCollection.tsx": [
+    "cookie"
+  ],
+  "src/services/playlistService.ts": [
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "cookie",
+    "localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''",
+    "localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''",
+    "cookie",
+    "cookie",
+    "cookie"
+  ],
+  "src/services/kugouService.ts": [
+    "kgCookie"
+  ],
+  "src/App.tsx": [
+    "cookie",
+    "qqCookie"
+  ]
+}
