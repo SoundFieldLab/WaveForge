@@ -124,6 +124,27 @@ class MainActivity : Activity() {
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.cacheMode = WebSettings.LOAD_DEFAULT
             webViewClient = object : WebViewClient() {
+                // 主 WebView 挂着 WaveForgeNative 原生桥，只允许停留在本机后端地址：
+                // 任何外部跳转（页面自身被诱导 window.location 外链）一律交系统浏览器，
+                // 防止带桥的 WebView 被导航到不可信站点。
+                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                    val url = request?.url?.toString() ?: return false
+                    if (isLocalServerUrl(url)) return false
+                    return try {
+                        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        true
+                    } catch (_: Exception) {
+                        true
+                    }
+                }
+
+                // 页面开始加载（崩溃恢复重载 / 热更新 reload 都会走到这里）时复位音量键捕获：
+                // 崩溃前若焦点在滑块上，JS 侧开启过捕获但重载后状态丢失，此后音量键全部变成
+                // DOM 事件、系统音量键失效直到用户聚焦其它控件。原生侧在每次导航开始时兜底复位。
+                override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    volumeKeyCapture = false
+                }
+
                 // WebView 渲染进程崩溃（Android 8+ 模拟器/低端机常见）：默认行为是终止整个应用闪退。
                 // 这里接管：返回 true 阻止终止，并尝试重载页面（最多 2 次）。
                 @SuppressLint("NewApi")
@@ -174,9 +195,12 @@ class MainActivity : Activity() {
                     closeQQLoginWindow()
                 }
 
-                // 打开外部链接（TV 无浏览器窗口，交给系统浏览器应用）
+                // 打开外部链接（TV 无浏览器窗口，交给系统浏览器应用）。
+                // 只放行 http/https：url 可能来自 API 响应字段，intent:// 等协议
+                // 经 ACTION_VIEW 可触发任意 Intent，不能透传。
                 @android.webkit.JavascriptInterface
                 fun openExternal(url: String) {
+                    if (!url.startsWith("http://") && !url.startsWith("https://")) return
                     try {
                         startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                     } catch (_: Exception) {}
@@ -440,6 +464,21 @@ class MainActivity : Activity() {
         false
     }
 
+    /** 主 WebView 导航守卫用：只放行本机 Node 后端（localhost:3001）与 about/data 空地址。 */
+    private fun isLocalServerUrl(url: String): Boolean = try {
+        val uri = Uri.parse(url)
+        when (uri.scheme?.lowercase()) {
+            "http", "https" -> {
+                val host = uri.host?.lowercase() ?: return false
+                host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1"
+            }
+            "about", "data", "blob" -> true
+            else -> false
+        }
+    } catch (_: Exception) {
+        false
+    }
+
     private fun injectQQLoginHelper(view: WebView?) {
         view?.evaluateJavascript(
             """
@@ -560,13 +599,15 @@ class MainActivity : Activity() {
             }
             // 派发给页面（useTvBack 逐级关闭弹窗/软键盘），JS 消费后上报；
             // 未消费（页面无弹窗）时再走默认返回/退到桌面，避免真机上 BACK 直接退应用。
+            // 800ms 而非 400ms：低端 TV 上重弹窗（动画+GC 停顿）时 JS 的逐级关闭链
+            // + evaluateJavascript 回传可能超出 400ms，导致页面还在关弹窗、原生已退应用。
             backConsumed.set(false)
             forwardKeyToDom(KeyEvent.KEYCODE_BACK)
             rootView.postDelayed({
                 if (!backConsumed.get() && !isFinishing) {
                     handleBackDefault()
                 }
-            }, 400)
+            }, 800)
             return true
         }
 
