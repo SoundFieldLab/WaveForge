@@ -336,6 +336,10 @@ export class EngineV3 {
   private _spatialOutL = new Float32Array(0)
   private _spatialOutR = new Float32Array(0)
 
+  // —— 各子模块配置签名：setParams 高频调用（调音室拖滑杆 60Hz）时只重算真正变化的
+  //  模块系数；系数重算对相同输入是幂等的，跳过未变模块产出逐位一致的结果。 ——
+  private _moduleCfgKeys: Partial<Record<string, string>> = {}
+
   constructor(sampleRate: number, channelCount = 2) {
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) {
       throw new Error('invalid sample rate')
@@ -398,58 +402,82 @@ export class EngineV3 {
   setParams(p: V3EngineParams): void {
     this._params = cloneParams(p)
     const p2 = this._params
+    // 子模块签名比对：JSON 串相等 ⇒ 系数重算是幂等的 ⇒ 直接跳过（60Hz 拖滑杆时
+    // 未被拖动的十几个模块不再白白重算）。首次调用 key 缓存为空 ⇒ 全量重算。
+    const keyOf = (name: string, value: unknown): string => {
+      const key = JSON.stringify(value)
+      if (this._moduleCfgKeys[name] === key) return ''
+      this._moduleCfgKeys[name] = key
+      return key
+    }
 
     // —— Pre-EQ：用户 EQ（simple/pro）——
     const bands = this.buildPreEqBands(p2)
-    this._eqChain.setBands(bands)
-    this._eqChain.setQCompensation(p2.eq.qCompensation)
-    // Pre-EQ 仅由用户 EQ 开关控制（设备档案已并入 LoudnessComp 音量补偿）
-    this._preEqActive = p2.eq.enabled
+    const eqKey = keyOf('preEq', [bands, p2.eq.qCompensation, p2.eq.enabled])
+    if (eqKey !== '') {
+      this._eqChain.setBands(bands)
+      this._eqChain.setQCompensation(p2.eq.qCompensation)
+      // Pre-EQ 仅由用户 EQ 开关控制（设备档案已并入 LoudnessComp 音量补偿）
+      this._preEqActive = p2.eq.enabled
+    }
 
     // —— Deesser / Compressor ——
-    this._deesser.setParams(p2.deesser)
-    this._compressor.setParams(p2.compressor)
+    if (keyOf('deesser', p2.deesser) !== '') this._deesser.setParams(p2.deesser)
+    if (keyOf('compressor', p2.compressor) !== '') this._compressor.setParams(p2.compressor)
 
     // —— NightMode：压缩增强(ratio×1.5, threshold−6dB) + 6kHz 高频 shelf 衰减(amount×1.5dB) ——
     const nm = p2.nightMode
-    this._nightActive = nm.enabled && nm.amount > 0
-    if (this._nightActive) {
-      const k = nm.amount / 10 // 强度 0..1
-      const base = p2.compressor
-      const night: CompressorSettings = {
-        enabled: true,
-        thresholdDb: base.thresholdDb - 6 * k,
-        ratio: Math.max(1, base.ratio * (1 + 0.5 * k)), // 满强度时 ratio×1.5
-        kneeDb: base.kneeDb,
-        attackMs: base.attackMs,
-        releaseMs: base.releaseMs,
-        makeupDb: base.makeupDb,
-        outputGain: 1,
+    // 键须覆盖 night 派生压缩器的全部输入（threshold/ratio 之外的 knee/attack/release/
+    // makeup 也从 base compressor 拷贝）——只含派生值的话，用户单独改这些字段时
+    // night 压缩器沿用陈旧系数
+    const nmDerived = nm.enabled && nm.amount > 0
+      ? { enabled: true, thresholdDb: p2.compressor.thresholdDb - 6 * (nm.amount / 10), ratio: Math.max(1, p2.compressor.ratio * (1 + 0.5 * (nm.amount / 10))), kneeDb: p2.compressor.kneeDb, attackMs: p2.compressor.attackMs, releaseMs: p2.compressor.releaseMs, makeupDb: p2.compressor.makeupDb }
+      : { enabled: false, thresholdDb: 0, ratio: 1 }
+    if (keyOf('night', [nmDerived, nm.enabled, nm.amount]) !== '') {
+      this._nightActive = nm.enabled && nm.amount > 0
+      if (this._nightActive) {
+        const k = nm.amount / 10 // 强度 0..1
+        const base = p2.compressor
+        const night: CompressorSettings = {
+          enabled: true,
+          thresholdDb: base.thresholdDb - 6 * k,
+          ratio: Math.max(1, base.ratio * (1 + 0.5 * k)), // 满强度时 ratio×1.5
+          kneeDb: base.kneeDb,
+          attackMs: base.attackMs,
+          releaseMs: base.releaseMs,
+          makeupDb: base.makeupDb,
+          outputGain: 1,
+        }
+        this._nightCompressor.setParams(night)
+        const shelfGainDb = -1.5 * nm.amount // 衰减 amount×1.5 dB
+        this._nightShelfL.setParams('highshelf', 6000, 0.707, shelfGainDb)
+        this._nightShelfR.setParams('highshelf', 6000, 0.707, shelfGainDb)
       }
-      this._nightCompressor.setParams(night)
-      const shelfGainDb = -1.5 * nm.amount // 衰减 amount×1.5 dB
-      this._nightShelfL.setParams('highshelf', 6000, 0.707, shelfGainDb)
-      this._nightShelfR.setParams('highshelf', 6000, 0.707, shelfGainDb)
     }
 
     // —— 混响三路路由：convolution | algorithmic | off ——
-    this.configureReverb(p2.reverb)
+    // IR（Float32Array，可达数 MB）不能进 JSON.stringify 热路径：逐索引枚举成巨串，
+    // 导入 IR 后拖任意滑杆每帧都构造 MB 级字符串。用「IR 引用哨兵 + 其余字段 JSON」判重。
+    const reverbForSign = { ...p2.reverb, convolution: { ...p2.reverb.convolution, ir: p2.reverb.convolution.ir ? 'ir-present' : null } }
+    if (keyOf('reverb', [reverbForSign, p2.reverb.convolution.ir, this._convolverDePeriodize]) !== '') this.configureReverb(p2.reverb)
 
     // —— BassEnhancer / LoudnessComp / Limiter ——
-    this._bass.setParams(p2.bassEnhancer)
-    this._loudnessComp.setParams(p2.loudnessCompensation)
-    this._limiter.setParams(p2.limiter)
+    if (keyOf('bass', p2.bassEnhancer) !== '') this._bass.setParams(p2.bassEnhancer)
+    if (keyOf('loudnessComp', p2.loudnessCompensation) !== '') this._loudnessComp.setParams(p2.loudnessCompensation)
+    if (keyOf('limiter', p2.limiter) !== '') this._limiter.setParams(p2.limiter)
 
     // —— IEQ（Post）配置 ——
-    this._ieqActive = p2.ieq.enabled
-    this._ieqStrength = p2.ieq.strength
-    this._ieqTargets = this.ieqTargetCurve(p2.ieq.targetCurve)
-    // 增益平滑系数：α = 1 − exp(−分析间隔/时间常数)，时间常数默认 3s 防抽吸
-    const intervalSec = ANALYSIS_WINDOW / this._fs
-    this._ieqSmooth = 1 - Math.exp(-intervalSec / Math.max(0.1, p2.ieq.timeConstantSec))
-    if (!this._ieqActive) {
-      this._ieqGains.fill(0)
-      this._ieqChain.setBands(this._ieqZeroBands)
+    if (keyOf('ieq', [p2.ieq]) !== '') {
+      this._ieqActive = p2.ieq.enabled
+      this._ieqStrength = p2.ieq.strength
+      this._ieqTargets = this.ieqTargetCurve(p2.ieq.targetCurve)
+      // 增益平滑系数：α = 1 − exp(−分析间隔/时间常数)，时间常数默认 3s 防抽吸
+      const intervalSec = ANALYSIS_WINDOW / this._fs
+      this._ieqSmooth = 1 - Math.exp(-intervalSec / Math.max(0.1, p2.ieq.timeConstantSec))
+      if (!this._ieqActive) {
+        this._ieqGains.fill(0)
+        this._ieqChain.setBands(this._ieqZeroBands)
+      }
     }
 
     // —— 响度归一化 ——

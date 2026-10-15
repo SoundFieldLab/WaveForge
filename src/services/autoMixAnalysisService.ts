@@ -187,6 +187,23 @@ function spectralFeatures(samples: Float32Array, start: number, end: number, sam
   return { chroma: normalize(chroma), timbre }
 }
 
+/** 单拍特征抽取（从 analyzeBuffer 的逐拍 map 提出便于协作式分片复用） */
+function buildBeatFeature(
+  channel: Float32Array,
+  sampleRate: number,
+  beatIndex: number,
+  time: number,
+  start: number,
+  end: number,
+) {
+  const beatRms = rms(channel, start, end)
+  const spectral = spectralFeatures(channel, start, end, sampleRate)
+  const zcr = zeroCrossing(channel, start, end)
+  const mid = (spectral.timbre[2] || 0) + (spectral.timbre[3] || 0)
+  const edge = (spectral.timbre[0] || 0) + (spectral.timbre[5] || 0)
+  return { beatIndex, time, rms: beatRms, loudness: beatRms, energy: beatRms, chroma: spectral.chroma, timbre: spectral.timbre, vocalness: clamp01(mid / Math.max(0.01, mid + edge) * (1 - Math.min(1, zcr * 12))) }
+}
+
 function detectTempo(onset: number[], frameRate: number) {
   let total = 0
   for (const value of onset) total += value * value
@@ -410,6 +427,9 @@ function findBeatPatternGrid(
   downbeats: number[]
   offset: number
   confidence: number
+  /** 网格与 MV onset 的贴合度（gridOnsetConfidence）：拍点模式下互相关的自证分
+   *  不可用（见 detectOffsetFromBeats），对齐判定改用这份独立证据 */
+  baseConfidence: number
   /** 包络互相关峰值（无可信包络时为 undefined）：网格因 MV 节拍缺失而失效时，
    *  峰值 ≥0.6 且突出度达标的包络偏移是"同录音"的强证据，调用方可兜底使用 */
   envelopePeak?: number
@@ -417,13 +437,20 @@ function findBeatPatternGrid(
   envelopeOffset?: number
   /** 包络峰突出度（主峰 − ±2s 外次峰），与 envelopePeak 配套传递 */
   envelopeProminence?: number
+  /** 包络段投票共识偏移（秒，可选）：30s 段在 ±5s 邻域内独立找局部峰，≥2 段聚到
+   *  同一偏移（±2.5s）时取中位。与全曲峰一致（≤5s）= 峰可信旁证，供调用方救援
+   *  "峰 0.45-0.6 但突出度不足"的 live（194 对基准：净增 2TP/0FP）；矛盾则维持拒绝 */
+  envelopeVoteOffset?: number
 } {
   const minOffset = -45
   const maxOffset = 45
-  // 包络强相关时随结果带出（函数级变量：if 块内的 env 在 return 处不可见）
+  // 包络证据随结果带出（函数级变量：if 块内的 env 在 return 处不可见）。
+  // 无论峰是否过闸门都带出：调用方需要"未达同录音证据"这一事实来否决节拍对齐
+  // （俺の彼女 回归：现场版 envPeak=0.49 弱回退仍继续跑了录音室节拍对齐）。
   let envelopePeak: number | undefined
   let envelopeOffset: number | undefined
   let envelopeProminence: number | undefined
+  let envelopeVoteOffset: number | undefined
   // onset 脉冲宽约 2-5 帧。窗口必须远小于相邻拍距（129BPM 约 23 帧），否则会捞到
   // 相邻拍的 onset 造成"偏移错一拍的假峰"；粗扫步长取 0.05s（2.5 帧）确保命中峰。
   const WINDOW_FRAMES = 3
@@ -464,12 +491,18 @@ function findBeatPatternGrid(
   let anchorKind = 'onset'
   if (songRms && songRms.length > 0 && rms && rms.length > 0) {
     const env = envelopeOffsetOf(rms, songRms, frameRate)
+    // 弱相关也记录证据：envPeak 是"MV 是否与歌曲同录音"的独立测量，调用方据此
+    // 否决节拍对齐（现场/翻唱的节拍网格在自证互相关下永远"对得上"）
+    envelopePeak = env.peak
+    envelopeOffset = env.offset
+    envelopeProminence = env.prominence
+    // 段投票共识：30s 段（15s 重叠）在全局锚 ±5s 邻域独立找局部峰，≥2 段聚到
+    // 同一偏移（±2.5s）取中位。10fps 口径（与 envelopeSegmentSupport 一致）。
+    const vote = envelopeSegmentVote(rms, songRms, frameRate, env.offset)
+    if (vote != null) envelopeVoteOffset = vote
     if (env.peak >= 0.6 && env.prominence >= ENVELOPE_PROMINENCE_MIN) {
       anchor = env.offset
       anchorKind = `envelope(peak=${env.peak.toFixed(2)} prominence=${env.prominence.toFixed(2)})`
-      envelopePeak = env.peak
-      envelopeOffset = env.offset
-      envelopeProminence = env.prominence
     } else {
       anchor = detectMusicStart(rms, frameRate) - songStartEstimate
       anchorKind = `musicStart(envPeak=${env.peak.toFixed(2)}/${env.prominence.toFixed(2)}弱回退, 歌曲起始=${songStartEstimate.toFixed(2)}s)`
@@ -532,9 +565,12 @@ function findBeatPatternGrid(
     downbeats: beats.filter((_, index) => index % 4 === 0),
     offset: bestOffset,
     confidence,
+    baseConfidence,
     // 包络信息随结果返回：MV 节拍缺失（metadata-only）时网格置信度无意义，
-    // 但强包络相关（peak≥0.6）证明 MV 与歌曲同录音 → 调用方可用包络偏移兜底
-    ...(envelopePeak !== undefined ? { envelopePeak, envelopeOffset, envelopeProminence } : {}),
+    // 但强包络相关（peak≥0.6）证明 MV 与歌曲同录音 → 调用方可用包络偏移兜底；
+    // 弱相关（<0.6）则是"非同录音"证据 → 调用方否决节拍对齐（见 detectViaBeats）；
+    // 段投票共识（若有）作为峰可信旁证供"投票一致救援"
+    ...(envelopePeak !== undefined ? { envelopePeak, envelopeOffset, envelopeProminence, ...(envelopeVoteOffset !== undefined ? { envelopeVoteOffset } : {}) } : {}),
   }
 }
 
@@ -567,6 +603,13 @@ export const ENVELOPE_PROMINENCE_MIN = 0.05
  *    undefined → NaN → 精化形同虚设，0.25s 网格漏掉大量真实偏移）。
  *  - 末级在**原始帧率**上 ±0.1s 逐帧精化，**peark 也在此级测**（"同源程度"要在真实
  *    偏移处量）；prominence 仍用 10fps 网格口径（偏移唯一性、抗噪）。
+ *  - 搜索范围**非对称**（-45..+90s）且允许尾部截断：现场/巡演投稿 MV 常带数十秒开场
+ *    （观众欢呼/报幕/前奏），真实偏移可远超 +45s（俺の彼女 巡演实测 +54.7s：MV 55s
+ *    才开始演奏，全曲相关 r=0.574 远超窗内假峰 0.38——被旧 ±45s 上限截断后永远对不上）。
+ *    正向范围取 +90s（更长的开场内容基本是"别的视频"了）；负向 -45s（MV 早于歌曲的
+ *    场景少且 45s 前摇已极长）。尾部截断（MV 用尽时歌曲尾部不参与相关）保证长 MV 的
+ *    深偏移可测——现场版音乐 291s < 录音室 304s 是常态（讲段/即兴差异），尾部少 13s
+ *    不影响结构相关。
  */
 export function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: number): { offset: number; peak: number; prominence: number } {
   const step = Math.max(1, Math.round(frameRate / 10))
@@ -608,8 +651,11 @@ export function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: 
     return da * db > 0 ? num / Math.sqrt(da * db) : -1
   }
   const pearson = (deltaFrames: number): number => corrAt(song, mv, deltaFrames)
+  // 非对称搜索：负向 -45s；正向到 MV 时长允许的最大偏移（上限 +90s）。尾部截断由
+  // corrAt 的 n=min(a.length-aStart, b.length-bStart) 自然处理——MV 用尽时歌曲尾部
+  // 不参与相关，长开场 MV 的深偏移可测（俺の彼女 +54.7s 实测峰 0.574）。
   const minF = Math.round(-45 * 10)
-  const maxF = Math.round(45 * 10)
+  const maxF = Math.min(Math.round(90 * 10), mv.length - 64)
   let bestF = 0
   let bestS = -1
   for (let f = minF; f <= maxF; f += 1) { // 10fps 全网格（0.1s 步长，整数帧）
@@ -637,6 +683,252 @@ export function envelopeOffsetOf(mvRms: number[], songRms: number[], frameRate: 
     if (s > refinedScore) { refinedScore = s; refinedFrame = baseFrame + d }
   }
   return { offset: refinedFrame / frameRate, peak: Math.max(bestS, refinedScore), prominence: bestS - runnerUp }
+}
+
+/** 段落支持率/锚点提取共用：10fps 盒平均口径（与 envelopeOffsetOf 的标定基准一致）。
+ *  实测口径敏感性（俺の彼女 巡演）：同一偏移下 10fps 盒平均支持率 0.56、50fps 帧级
+ *  只有 0.22——帧 RMS 的音节级起伏让皮尔逊对帧级错位过敏，未盒平均会漏掉真对齐。 */
+const SEGMENT_ANALYSIS_FPS = 10
+
+function decimateToSegmentFps(env: number[], frameRate: number): { frames: number[]; fps: number } {
+  const step = Math.max(1, Math.round(frameRate / SEGMENT_ANALYSIS_FPS))
+  if (step === 1) return { frames: env, fps: frameRate }
+  const count = Math.floor(env.length / step)
+  const out: number[] = new Array(count)
+  for (let i = 0; i < count; i += 1) {
+    let sum = 0
+    const base = i * step
+    for (let k = 0; k < step; k += 1) sum += env[base + k]
+    out[i] = sum / step
+  }
+  return { frames: out, fps: SEGMENT_ANALYSIS_FPS }
+}
+
+/** 段落支持率判定参数：30s 段、单段相关 >0.4、整体支持 ≥0.35（俺の彼女 巡演实测标定：
+ *  真偏移 +54.7s 支持率 0.56、全曲峰 0.574；窗内假峰支持率全为 0.00——现场录音与
+ *  录音室的响度结构只在多数段落对应，弱段落拉低全曲相关，但强段落不会撒谎） */
+const SEGMENT_SUPPORT_SEG_SECONDS = 30
+const SEGMENT_SUPPORT_SEG_THRESHOLD = 0.4
+const SEGMENT_SUPPORT_MIN_RATIO = 0.35
+
+/**
+ * 段落支持率：在给定恒定偏移下，把歌曲切成 30s 段逐段与 MV 对应段算皮尔逊相关，
+ * 返回「相关 >0.4 的段落占比」与均值。全曲相关把强/弱段平均（现场版讲段/即兴段
+ * 必然拉低），峰值 0.57 也能被假峰 0.46 的"宽胖相关云"逼近；但恒定偏移下**多数
+ * 段落同时过线**只有真对齐做得到（实测唯一判别式）。
+ * 内部先做 10fps 盒平均（与 envelopeOffsetOf/标定数据同口径，见 SEGMENT_ANALYSIS_FPS）。
+ */
+export function envelopeSegmentSupport(
+  mvRms: number[],
+  songRms: number[],
+  frameRate: number,
+  offsetSeconds: number,
+): { ratio: number; mean: number; segments: number } {
+  const mv = decimateToSegmentFps(mvRms, frameRate)
+  const song = decimateToSegmentFps(songRms, frameRate)
+  const fps = mv.fps
+  const corrAt = (deltaFrames: number, nFrames: number, startFrame: number): number => {
+    const aStart = startFrame
+    const bStart = startFrame + deltaFrames
+    if (bStart < 0 || bStart + nFrames > mv.frames.length) return -1
+    let ma = 0
+    let mb = 0
+    for (let k = 0; k < nFrames; k += 1) { ma += song.frames[aStart + k]; mb += mv.frames[bStart + k] }
+    ma /= nFrames
+    mb /= nFrames
+    let num = 0
+    let da = 0
+    let db = 0
+    for (let k = 0; k < nFrames; k += 1) {
+      const x = song.frames[aStart + k] - ma
+      const y = mv.frames[bStart + k] - mb
+      num += x * y
+      da += x * x
+      db += y * y
+    }
+    return da * db > 0 ? num / Math.sqrt(da * db) : -1
+  }
+  const segFrames = Math.round(SEGMENT_SUPPORT_SEG_SECONDS * fps)
+  if (segFrames < 64) return { ratio: 0, mean: 0, segments: 0 }
+  const delta = Math.round(offsetSeconds * fps)
+  const correlations: number[] = []
+  for (let start = 0; start + segFrames <= song.frames.length; start += segFrames) {
+    const r = corrAt(delta, segFrames, start)
+    if (r >= 0) correlations.push(r)
+  }
+  if (correlations.length < 3) return { ratio: 0, mean: 0, segments: correlations.length }
+  const mean = correlations.reduce((sum, v) => sum + v, 0) / correlations.length
+  const ratio = correlations.filter((r) => r > SEGMENT_SUPPORT_SEG_THRESHOLD).length / correlations.length
+  return { ratio, mean, segments: correlations.length }
+}
+
+/** 锚点段提取参数（俺の彼女 巡演 + 多组 live 实测标定，见 ENVELOPE_ANCHOR_MIN_CORR 注释） */
+const ANCHOR_SEG_SECONDS = 30
+/** 锚点段最低相关：低于它的段是现场改编/讲段（实测 俺の彼女 中段 140-225s 改编区在锚处
+ *  r≈0.02-0.03、局部假峰 0.15-0.27 与真锚段 0.44-0.81 泾渭分明），编造偏移会带错歌词 */
+const ENVELOPE_ANCHOR_MIN_CORR = 0.5
+/** 局部微调搜索半径：现场版整曲时间轴不会跳几秒（改编是局部速度/装饰差异，不是段序重排），
+ *  锚点偏离全局锚超过这个值基本是重复结构假峰（副歌相似段）→ 用全局锚 */
+const ENVELOPE_ANCHOR_MAX_DRIFT = 5
+/** 局部粗扫步长（秒）→ 0.1s 级精化 */
+const ENVELOPE_ANCHOR_COARSE_STEP = 0.5
+/** 锚点间最小间距（秒）：比它近的锚合并（30s 段重叠提取出的相邻锚相关性高） */
+const ENVELOPE_ANCHOR_MIN_SPACING = 20
+
+export interface EnvelopeSegmentAnchor {
+  /** 锚点段中心的歌曲时间（秒） */
+  songTime: number
+  /** 该段局部最优偏移（秒）：视频时间 = 歌曲时间 + offset */
+  offsetSeconds: number
+  /** 段内相关（0-1）：锚点可信度 */
+  correlation: number
+}
+
+/**
+ * 锚点段提取：在全局锚 offset0 的 ±MAX_DRIFT 邻域内逐段找局部最优偏移，只保留
+ * 段相关 ≥0.5 的段为锚点。现场版典型形态（俺の彼女 巡演实测）：开头/结尾段偏移稳定
+ * （54.7-55.1s），中段改编区（讲段/即兴/变速）相关塌到 0.02-0.27 → 不产出锚点；
+ * 改编区内由相邻锚点线性内插过渡（近似 tempo 漂移），两端被高置信锚定住。
+ * 内部先做 10fps 盒平均（与 envelopeSegmentSupport/envelopeOffsetOf 同口径，
+ * 见 SEGMENT_ANALYSIS_FPS——帧级口径对音节级起伏过敏，真锚段相关被低估一半）。
+ * 返回按 songTime 升序的锚点序列（首尾必含全曲边界锚——全局锚本身），同步层据此插值。
+ */
+export function envelopeSegmentAnchors(
+  mvRms: number[],
+  songRms: number[],
+  frameRate: number,
+  globalOffset: number,
+): EnvelopeSegmentAnchor[] {
+  const mv = decimateToSegmentFps(mvRms, frameRate)
+  const song = decimateToSegmentFps(songRms, frameRate)
+  const fps = mv.fps
+  const mvFrames = mv.frames
+  const songFrames = song.frames
+  const segFrames = Math.round(ANCHOR_SEG_SECONDS * fps)
+  if (segFrames < 64 || songFrames.length < segFrames) return []
+  const deltaGlobal = Math.round(globalOffset * fps)
+  const maxDriftF = Math.round(ENVELOPE_ANCHOR_MAX_DRIFT * fps)
+  const coarseStepF = Math.max(1, Math.round(ENVELOPE_ANCHOR_COARSE_STEP * fps))
+  const corrAt = (deltaFrames: number, startFrame: number): number => {
+    const bStart = startFrame + deltaFrames
+    if (bStart < 0 || bStart + segFrames > mvFrames.length) return -1
+    let ma = 0
+    let mb = 0
+    for (let k = 0; k < segFrames; k += 1) { ma += songFrames[startFrame + k]; mb += mvFrames[bStart + k] }
+    ma /= segFrames
+    mb /= segFrames
+    let num = 0
+    let da = 0
+    let db = 0
+    for (let k = 0; k < segFrames; k += 1) {
+      const x = songFrames[startFrame + k] - ma
+      const y = mvFrames[bStart + k] - mb
+      num += x * y
+      da += x * x
+      db += y * y
+    }
+    return da * db > 0 ? num / Math.sqrt(da * db) : -1
+  }
+  const anchors: EnvelopeSegmentAnchor[] = []
+  // 步长 = 段长/2（相邻段 15s 重叠），首尾段强制覆盖全曲边界
+  const stepFrames = Math.max(1, Math.floor(segFrames / 2))
+  for (let start = 0; start + segFrames <= songFrames.length + stepFrames; start += stepFrames) {
+    const clampedStart = Math.min(start, songFrames.length - segFrames)
+    if (clampedStart < 0) break
+    // 局部粗扫（全局锚 ±5s，0.5s 步长）
+    let bestDelta = deltaGlobal
+    let bestR = corrAt(deltaGlobal, clampedStart)
+    for (let d = -maxDriftF; d <= maxDriftF; d += coarseStepF) {
+      const r = corrAt(deltaGlobal + d, clampedStart)
+      if (r > bestR) { bestR = r; bestDelta = deltaGlobal + d }
+    }
+    // 逐帧精化 ±0.5s
+    for (let d = -Math.round(0.5 * fps); d <= Math.round(0.5 * fps); d += 1) {
+      const r = corrAt(bestDelta + d, clampedStart)
+      if (r > bestR) { bestR = r; bestDelta = bestDelta + d }
+    }
+    if (bestR < ENVELOPE_ANCHOR_MIN_CORR) continue
+    const songTime = (clampedStart + segFrames / 2) / fps
+    // 跳变防护：与上一个锚差超过 2×搜索半径 = 假峰，丢弃（保全局锚）
+    const prev = anchors[anchors.length - 1]
+    if (prev && Math.abs((bestDelta / fps) - prev.offsetSeconds) > ENVELOPE_ANCHOR_MAX_DRIFT * 2) continue
+    // 间距合并：与前锚太近（<20s）且偏移接近（<1s）不重复收
+    if (prev && songTime - prev.songTime < ENVELOPE_ANCHOR_MIN_SPACING && Math.abs(bestDelta / fps - prev.offsetSeconds) < 1) continue
+    anchors.push({ songTime, offsetSeconds: bestDelta / fps, correlation: bestR })
+  }
+  return anchors
+}
+
+/** 段投票共识门槛：≥2 个 30s 段独立聚到同一偏移（±2.5s）才算共识 */
+const ENVELOPE_VOTE_MIN_SEGMENTS = 2
+const ENVELOPE_VOTE_TOLERANCE = 2.5
+
+/**
+ * 段投票共识偏移：把歌曲切成 30s 段（15s 重叠），每段在全局锚 ±5s 邻域内独立找
+ * 局部最优偏移（10fps 口径），≥2 段聚到同一偏移（±2.5s）时返回簇中位。
+ * 与全曲峰一致（调用方判 ≤5s）= 峰可信旁证——现场录音动态压扁/重复结构把突出度
+ * 打掉时（峰 0.45-0.6），"多数段独立找到同一偏移"仍能证明对齐真实（194 对 live
+ * 基准两轮复现：净增 2TP/0FP）；无共识返回 null（调用方维持拒绝）。
+ */
+export function envelopeSegmentVote(
+  mvRms: number[],
+  songRms: number[],
+  frameRate: number,
+  globalOffset: number,
+): number | null {
+  const mv = decimateToSegmentFps(mvRms, frameRate)
+  const song = decimateToSegmentFps(songRms, frameRate)
+  const fps = mv.fps
+  const segFrames = Math.round(ANCHOR_SEG_SECONDS * fps)
+  if (segFrames < 64 || song.frames.length < segFrames) return null
+  const deltaGlobal = Math.round(globalOffset * fps)
+  const maxDriftF = Math.round(ENVELOPE_ANCHOR_MAX_DRIFT * fps)
+  const coarseStepF = Math.max(1, Math.round(ENVELOPE_ANCHOR_COARSE_STEP * fps))
+  const corrAt = (deltaFrames: number, startFrame: number): number => {
+    const bStart = startFrame + deltaFrames
+    if (bStart < 0 || bStart + segFrames > mv.frames.length) return -1
+    let ma = 0
+    let mb = 0
+    for (let k = 0; k < segFrames; k += 1) { ma += song.frames[startFrame + k]; mb += mv.frames[bStart + k] }
+    ma /= segFrames
+    mb /= segFrames
+    let num = 0
+    let da = 0
+    let db = 0
+    for (let k = 0; k < segFrames; k += 1) {
+      const x = song.frames[startFrame + k] - ma
+      const y = mv.frames[bStart + k] - mb
+      num += x * y
+      da += x * x
+      db += y * y
+    }
+    return da * db > 0 ? num / Math.sqrt(da * db) : -1
+  }
+  const localOffsets: number[] = []
+  const stepFrames = Math.max(1, Math.floor(segFrames / 2))
+  for (let start = 0; start + segFrames <= song.frames.length + stepFrames; start += stepFrames) {
+    const clampedStart = Math.min(start, song.frames.length - segFrames)
+    if (clampedStart < 0) break
+    let bestDelta = deltaGlobal
+    let bestR = corrAt(deltaGlobal, clampedStart)
+    for (let d = -maxDriftF; d <= maxDriftF; d += coarseStepF) {
+      const r = corrAt(deltaGlobal + d, clampedStart)
+      if (r > bestR) { bestR = r; bestDelta = deltaGlobal + d }
+    }
+    if (bestR < ENVELOPE_ANCHOR_MIN_CORR) continue
+    localOffsets.push(bestDelta / fps)
+  }
+  if (localOffsets.length < ENVELOPE_VOTE_MIN_SEGMENTS) return null
+  // 聚类（±2.5s）取最大簇；簇不足 2 段无共识
+  const clusters: Array<{ items: number[]; med: number }> = []
+  for (const off of localOffsets) {
+    const c = clusters.find((c) => Math.abs(off - c.med) <= ENVELOPE_VOTE_TOLERANCE)
+    if (c) { c.items.push(off); c.med = c.items.slice().sort((a, b) => a - b)[Math.floor(c.items.length / 2)] }
+    else clusters.push({ items: [off], med: off })
+  }
+  clusters.sort((a, b) => b.items.length - a.items.length)
+  const top = clusters[0]
+  return top && top.items.length >= ENVELOPE_VOTE_MIN_SEGMENTS ? top.med : null
 }
 
 function detectSilence(frameRms: number[], frameDuration: number, duration: number) {
@@ -739,23 +1031,30 @@ export interface DecodedAudio {
   format: { sampleRate: number; channels: number }
 }
 
+// 共享解码上下文：每次分析新建/关闭 AudioContext 会撞 Chromium 的创建频率限制
+// （"The AudioContext was not allowed to start"），连续切歌分析时还会产生 GC 压力。
+// 解码不产生可听输出，suspend 态上下文照常 decodeAudioData。
+let sharedDecodeContext: AudioContext | null = null
+function getSharedDecodeContext(): AudioContext {
+  if (!sharedDecodeContext || sharedDecodeContext.state === 'closed') {
+    const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+    if (!AudioContextCtor) throw new Error('Web Audio is unavailable')
+    sharedDecodeContext = new AudioContextCtor()
+  }
+  return sharedDecodeContext
+}
+
 export async function decodeAudioUrl(url: string, signal?: AbortSignal): Promise<DecodedAudio> {
   const response = await fetch(url, { signal })
   if (!response.ok) throw new Error(`audio fetch failed: ${response.status}`)
   const data = await response.arrayBuffer()
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-  const AudioContextCtor = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-  if (!AudioContextCtor) throw new Error('Web Audio is unavailable')
-  const context = new AudioContextCtor()
-  try {
-    const decoded = await context.decodeAudioData(data)
-    // 记录解码前容器的真实格式（声道数/采样率）——过渡格式预检消费；
-    // 随后立即降采样为单声道，避免整曲立体声 PCM 留在内存里
-    const format = { sampleRate: decoded.sampleRate, channels: decoded.numberOfChannels }
-    return { buffer: toMonoDownsampled(decoded, context), format }
-  } finally {
-    void context.close()
-  }
+  const context = getSharedDecodeContext()
+  const decoded = await context.decodeAudioData(data)
+  // 记录解码前容器的真实格式（声道数/采样率）——过渡格式预检消费；
+  // 随后立即降采样为单声道，避免整曲立体声 PCM 留在内存里
+  const format = { sampleRate: decoded.sampleRate, channels: decoded.numberOfChannels }
+  return { buffer: toMonoDownsampled(decoded, context), format }
 }
 
 /** 计算单声道 buffer 的逐帧 RMS 与 onset 包络（MV 对齐用；导出供歌曲包络互相关） */
@@ -775,6 +1074,54 @@ export function computeFrameEnvelope(buffer: AudioBuffer): { frameRms: number[];
     previous = value
   }
   return { frameRms, onset, frameRate }
+}
+
+/** 人声频段下限/上限（Hz）：观众欢呼/掌声能量集中在 <200Hz 与 >4kHz，
+ *  人声基频+共振峰在 200-4kHz——该频段包络对"现场讲段干扰"显著更鲁棒
+ *  （俺の彼女 巡演实测：真偏移处段支持率 0.44 vs 全带 0.22，全曲峰 +20%）。 */
+export const VOCAL_BAND_LO_HZ = 200
+export const VOCAL_BAND_HI_HZ = 4000
+
+/**
+ * 人声频段包络：逐帧对 [VOCAL_BAND_LO, VOCAL_BAND_HI] 求频带 RMS。
+ * 与 computeFrameEnvelope 同帧率口径（50fps），可直接与 frameRms 互相关。
+ * 实现：离线 DFT（仅频带 bins，~190/2048），预计算旋转因子复用；整曲约 1-2s，
+ * 仅在 MV 对齐链路调用（automix 主链路不受影响）。
+ */
+export function computeVocalBandEnvelope(buffer: AudioBuffer): { vocalRms: number[]; frameRate: number } {
+  const channel = buffer.getChannelData(0)
+  const sampleRate = buffer.sampleRate
+  const hop = Math.max(256, Math.round(sampleRate * 0.02))
+  const frameRate = sampleRate / hop
+  const frameSize = Math.max(hop * 2, 1024)
+  const window = new Float32Array(frameSize)
+  for (let i = 0; i < frameSize; i += 1) window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (frameSize - 1))
+  const binHz = sampleRate / frameSize
+  const loBin = Math.max(1, Math.floor(VOCAL_BAND_LO_HZ / binHz))
+  const hiBin = Math.min(Math.floor(frameSize / 2) - 1, Math.ceil(VOCAL_BAND_HI_HZ / binHz))
+  const vocalRms: number[] = []
+  // 每帧:窗控 → 限带 DFT。为避免 O(bins×N) 的重计算,用 Goertzel 逐 bin
+  // （Goertzel 对稀疏 bins 比全 FFT 便宜:每 bin O(N) 无复数库依赖）。
+  const n2 = frameSize * 2
+  for (let start = 0; start + frameSize <= channel.length; start += hop) {
+    let energy = 0
+    for (let k = loBin; k <= hiBin; k += 1) {
+      const coeff = 2 * Math.cos((2 * Math.PI * k) / frameSize)
+      let s0 = 0
+      let s1 = 0
+      for (let i = 0; i < frameSize; i += 1) {
+        const x = channel[start + i] * window[i]
+        const s2 = s1
+        s1 = s0
+        s0 = x + coeff * s1 - s2
+      }
+      const power = s0 * s0 + s1 * s1 - coeff * s0 * s1
+      energy += power
+    }
+    vocalRms.push(Math.sqrt(energy / (hiBin - loBin + 1)))
+  }
+  void n2
+  return { vocalRms, frameRate }
 }
 
 function metadataOnly(input: TrackAnalysisInput, reason: TrackAnalysis['provider'] = 'metadata-only'): TrackAnalysis {
@@ -803,12 +1150,20 @@ function metadataOnly(input: TrackAnalysisInput, reason: TrackAnalysis['provider
   }
 }
 
-function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: { sampleRate: number; channels: number }): TrackAnalysis {
+/** 协作式让出主线程：浏览器回退分析在主线程同步跑数十至数百 ms 的 DSP 循环，
+ *  逐片 yield（setTimeout 0 → 宏任务）让渲染/交互插队，计算结果与同步版完全一致。 */
+function yieldToMain(): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, 0))
+}
+
+async function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: { sampleRate: number; channels: number }): Promise<TrackAnalysis> {
   const channel = buffer.getChannelData(0)
   const sampleRate = buffer.sampleRate
   const duration = buffer.duration
   const { frameRms, onset, frameRate } = computeFrameEnvelope(buffer)
+  await yieldToMain()
   const tempo = detectTempo(onset, frameRate)
+  await yieldToMain()
   // beatTimesHint（MV 对齐等场景）：用歌曲真实拍点模式在 MV onset 上滑动相关求偏移，
   // 对歌曲变速/漂移鲁棒（规则网格会因累积漂移失配）；beatWeightsHint 逐拍能量加权
   // 打破拍周期混叠。bpmHint 是规则网格兜底。
@@ -831,14 +1186,20 @@ function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: 
     : null
   let grid: { beats: number[]; downbeats: number[] }
   let confidence: number
+  let gridBaseConfidence: number | undefined
   let gridEnvelopePeak: number | undefined
   let gridEnvelopeOffset: number | undefined
+  let gridEnvelopeProminence: number | undefined
+  let gridEnvelopeVoteOffset: number | undefined
   if (beatPattern) {
     const found = findBeatPatternGrid(onset, frameRate, beatPattern, duration, beatWeights, frameRms, input.rmsEnvelopeHint)
     grid = { beats: found.beats, downbeats: found.downbeats }
     confidence = found.confidence
+    gridBaseConfidence = found.baseConfidence
     gridEnvelopePeak = found.envelopePeak
     gridEnvelopeOffset = found.envelopeOffset
+    gridEnvelopeProminence = found.envelopeProminence
+    gridEnvelopeVoteOffset = found.envelopeVoteOffset
   } else {
     const gridPeriod = hintBpm ? 60 / hintBpm : tempo.period
     grid = buildBeatGrid(onset, frameRate, gridPeriod, duration)
@@ -847,17 +1208,16 @@ function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: 
       : clamp01(tempo.confidence * (grid.downbeats.length >= 4 ? 1 : 0.5))
   }
   const silence = detectSilence(frameRms, 1 / frameRate, duration)
-  const rawFeatures = grid.beats.map((time, beatIndex) => {
+  // 逐拍特征是最大的热点（每拍 49 个 Goertzel 滤波器 × 数百拍）：每 16 拍让出一次主线程
+  const rawFeatures: Array<ReturnType<typeof buildBeatFeature>> = []
+  for (let beatIndex = 0; beatIndex < grid.beats.length; beatIndex += 1) {
+    const time = grid.beats[beatIndex]
     const nextTime = grid.beats[beatIndex + 1] ?? Math.min(duration, time + (hintBpm ? 60 / hintBpm : tempo.period))
     const start = Math.max(0, Math.floor(time * sampleRate))
     const end = Math.min(channel.length, Math.max(start + 1, Math.floor(nextTime * sampleRate)))
-    const beatRms = rms(channel, start, end)
-    const spectral = spectralFeatures(channel, start, end, sampleRate)
-    const zcr = zeroCrossing(channel, start, end)
-    const mid = (spectral.timbre[2] || 0) + (spectral.timbre[3] || 0)
-    const edge = (spectral.timbre[0] || 0) + (spectral.timbre[5] || 0)
-    return { beatIndex, time, rms: beatRms, loudness: beatRms, energy: beatRms, chroma: spectral.chroma, timbre: spectral.timbre, vocalness: clamp01(mid / Math.max(0.01, mid + edge) * (1 - Math.min(1, zcr * 12))) }
-  })
+    rawFeatures.push(buildBeatFeature(channel, sampleRate, beatIndex, time, start, end))
+    if ((beatIndex & 15) === 15) await yieldToMain()
+  }
   const maxRms = Math.max(...rawFeatures.map(frame => frame.rms), 1e-6)
   const beatFeatures = rawFeatures.map(frame => ({ ...frame, loudness: clamp01(frame.loudness / maxRms), energy: clamp01(frame.energy / maxRms) }))
   const now = Date.now()
@@ -883,8 +1243,18 @@ function analyzeBuffer(input: TrackAnalysisInput, buffer: AudioBuffer, format?: 
     analysisVersion: ANALYSIS_VERSION,
     createdAt: now,
     lastAccessAt: now,
-    // 包络强相关（同录音）时透传给调用方，供网格置信度失效时的兜底对齐
-    ...(gridEnvelopePeak !== undefined ? { envelopePeak: gridEnvelopePeak, envelopeOffset: gridEnvelopeOffset } : {}),
+    // 包络证据随结果透传给调用方：强相关（peak≥0.6）供网格置信度失效时的兜底对齐，
+    // 弱相关供 detectViaBeats 否决"拿录音室节拍对不同录音"的对齐（俺の彼女 回归）。
+    // 旧实现只透传 peak/offset、丢 prominence，包络兜底闸门恒失败。
+    ...(gridEnvelopePeak !== undefined ? {
+      envelopePeak: gridEnvelopePeak,
+      envelopeOffset: gridEnvelopeOffset,
+      envelopeProminence: gridEnvelopeProminence,
+      /** 段投票共识偏移（可选）：峰可信旁证，供 detectViaBeats 投票一致救援 */
+      ...(gridEnvelopeVoteOffset !== undefined ? { envelopeVoteOffset: gridEnvelopeVoteOffset } : {}),
+      /** 拍点模式下 confidence 混入锚点/清晰度偏置，对齐判定用未偏置的贴合度 */
+      gridBaseConfidence,
+    } : {}),
   }
 }
 
@@ -1103,7 +1473,7 @@ class AutoMixAnalysisService {
       if (mediaUrl) {
         debugLog('🎧 [AutoMix] 浏览器解码本地文件（可支持 m4a/aac）:', audioPath)
         const decoded = await decodeAudioUrl(mediaUrl, input.signal)
-        return analyzeBuffer(input, decoded.buffer, decoded.format)
+        return await analyzeBuffer(input, decoded.buffer, decoded.format)
       }
     } catch (error) {
       if (isHttp403(error)) {
@@ -1115,7 +1485,7 @@ class AutoMixAnalysisService {
             const mediaUrl = localPath ? await window.electron?.audioDownload?.getMediaUrl?.(localPath) : undefined
             if (mediaUrl) {
               const decoded = await decodeAudioUrl(mediaUrl, input.signal)
-              return analyzeBuffer(input, decoded.buffer, decoded.format)
+              return await analyzeBuffer(input, decoded.buffer, decoded.format)
             }
           }
         }
@@ -1124,7 +1494,7 @@ class AutoMixAnalysisService {
     }
     debugLog('🎧 [AutoMix] 直接抓取原始 URL 解码')
     const decoded = await decodeAudioUrl(input.url, input.signal)
-    return analyzeBuffer(input, decoded.buffer, decoded.format)
+    return await analyzeBuffer(input, decoded.buffer, decoded.format)
   }
 
   private async analyzeAndCache(input: TrackAnalysisInput, key: string): Promise<TrackAnalysis> {
@@ -1194,7 +1564,7 @@ class AutoMixAnalysisService {
           // Web 版没有独立分析进程，才使用浏览器本地检测。
           debugLog('⚠️ [AutoMix] 使用浏览器本地节拍检测')
           const decoded = await decodeAudioUrl(input.url, input.signal)
-          analysis = analyzeBuffer(input, decoded.buffer, decoded.format)
+          analysis = await analyzeBuffer(input, decoded.buffer, decoded.format)
         }
       }
     } catch (error) {

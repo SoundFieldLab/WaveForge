@@ -32,7 +32,11 @@ const Q_MAX = 18
 export class EqChain {
   private readonly fs: number
   private readonly bandCount: number
-  private readonly biquads: Biquad[]
+  // 左右声道各一套 biquad（系数同步更新，状态独立）：processStereo 若共用一链，
+  // L/R 样本交替激励同一 TDF2 状态 = 等效采样率翻倍，频响整体平移一个倍频程且
+  // 声道互相污染（同 LoudnessComp 的注释结论，该处已按每声道建状态）。
+  private readonly biquadsL: Biquad[]
+  private readonly biquadsR: Biquad[]
   /** 当前频段参数（gains 为补偿后的实际增益；userGains 为用户目标，补偿基准不变） */
   private readonly freqs: Float64Array
   private readonly gains: Float64Array
@@ -46,8 +50,12 @@ export class EqChain {
     if (!(fs > 0)) throw new Error('invalid sample rate')
     this.fs = fs
     this.bandCount = Math.max(1, Math.floor(bandCount ?? 20))
-    this.biquads = []
-    for (let i = 0; i < this.bandCount; i++) this.biquads.push(new Biquad('peaking', 1000, 1, 0, fs))
+    this.biquadsL = []
+    this.biquadsR = []
+    for (let i = 0; i < this.bandCount; i++) {
+      this.biquadsL.push(new Biquad('peaking', 1000, 1, 0, fs))
+      this.biquadsR.push(new Biquad('peaking', 1000, 1, 0, fs))
+    }
     this.freqs = new Float64Array(this.bandCount)
     this.gains = new Float64Array(this.bandCount)
     this.userGains = new Float64Array(this.bandCount)
@@ -88,8 +96,11 @@ export class EqChain {
     this.qCompensationEnabled = enabled
     if (enabled) {
       this.compensate()
-      this.updateCoeffs()
+    } else {
+      // 关闭补偿：gains 残留补偿后值会使系数停在补偿态——恢复用户目标并重算
+      for (let i = 0; i < this.bandCount; i++) this.gains[i] = this.userGains[i]
     }
+    this.updateCoeffs()
   }
 
   /**
@@ -112,17 +123,19 @@ export class EqChain {
     for (let iter = 0; iter < 5; iter++) {
       let maxErrDb = 0
       for (let i = 0; i < m0; i++) {
-        // ① 在当前系数下测量段 i 中心频率处的级联响应（线性幅度）
+        // ① 在当前系数下测量段 i 中心频率处的级联响应（线性幅度）——
+        //    系数左右声道同步，用任一链测量结果一致
         let mag = 1
         for (let j = 0; j < n; j++) {
-          mag *= this.biquads[j].magnitudeAt(this.freqs[i], this.fs)
+          mag *= this.biquadsL[j].magnitudeAt(this.freqs[i], this.fs)
         }
         // ②③ 以用户目标为基准做 dB 误差修正（0.8 阻尼）并立即更新该段系数
         const target = Math.pow(10, this.userGains[i] / 20)
         const m = Math.max(mag, 1e-12)
         const errDb = 20 * Math.log10(target / m)
         this.gains[i] = Math.min(Math.max(this.gains[i] + 0.8 * errDb, GAIN_MIN_DB), GAIN_MAX_DB)
-        this.biquads[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
+        this.biquadsL[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
+        this.biquadsR[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
         const a = Math.abs(errDb)
         if (a > maxErrDb) maxErrDb = a
       }
@@ -133,7 +146,8 @@ export class EqChain {
   private updateCoeffs(): void {
     const n = this.bandCount
     for (let i = 0; i < n; i++) {
-      this.biquads[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
+      this.biquadsL[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
+      this.biquadsR[i].setParams('peaking', this.freqs[i], this.qs[i], this.gains[i])
     }
   }
 
@@ -144,17 +158,17 @@ export class EqChain {
     for (let i = 0; i < freqs.length; i++) {
       let mag = 1
       for (let j = 0; j < n; j++) {
-        mag *= this.biquads[j].magnitudeAt(freqs[i], this.fs)
+        mag *= this.biquadsL[j].magnitudeAt(freqs[i], this.fs)
       }
       out[i] = mag
     }
     return out
   }
 
-  /** 单样本级联处理（20 段 peaking 串联） */
+  /** 单声道级联处理（20 段 peaking 串联；走左声道链，仅测试/单声道用途） */
   process(x: number): number {
     let y = x
-    for (let i = 0; i < this.bandCount; i++) y = this.biquads[i].process(y)
+    for (let i = 0; i < this.bandCount; i++) y = this.biquadsL[i].process(y)
     return y
   }
 
@@ -165,17 +179,27 @@ export class EqChain {
     }
   }
 
-  /** 就地处理立体声（左右声道共享同一滤波器状态） */
+  /** 就地处理立体声（左右声道各走独立滤波器链，状态互不污染） */
   processStereo(l: Float32Array, r: Float32Array): void {
     if (l.length !== r.length) throw new Error('eqchain: L/R length mismatch')
     const n = l.length
+    const count = this.bandCount
     for (let i = 0; i < n; i++) {
-      l[i] = this.process(l[i])
-      r[i] = this.process(r[i])
+      let yl = l[i]
+      let yr = r[i]
+      for (let j = 0; j < count; j++) {
+        yl = this.biquadsL[j].process(yl)
+        yr = this.biquadsR[j].process(yr)
+      }
+      l[i] = yl
+      r[i] = yr
     }
   }
 
   reset(): void {
-    for (let i = 0; i < this.bandCount; i++) this.biquads[i].reset()
+    for (let i = 0; i < this.bandCount; i++) {
+      this.biquadsL[i].reset()
+      this.biquadsR[i].reset()
+    }
   }
 }

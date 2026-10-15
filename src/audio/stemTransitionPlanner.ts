@@ -111,20 +111,34 @@ const clamp = (value: number, low: number, high: number) => Math.max(low, Math.m
 const finite = (value: number, fallback: number) => Number.isFinite(value) ? value : fallback
 const round = (value: number) => Math.round(value * 1_000_000) / 1_000_000
 
+// 排序结果按 stem 对象引用缓存：findQuietWindow 以 0.025s 步长最多循环上千次，
+// 每次都重跑 filter+map+sort 全量包络（数万点）会把单次规划卡到数百 ms。
+// StemEvidence 对象在一次规划会话内不可变（上游构建后只读），引用键安全。
+const sortedEnvelopeCache = new WeakMap<StemEvidence, StemEnvelopePoint[]>()
+const sortedActivityCache = new WeakMap<StemEvidence, StemActivityPoint[]>()
+
 function sortedEnvelope(stem: StemEvidence | undefined): StemEnvelopePoint[] {
   if (!stem) return []
-  return stem.envelope
+  const cached = sortedEnvelopeCache.get(stem)
+  if (cached) return cached
+  const result = stem.envelope
     .filter(point => Number.isFinite(point.time) && Number.isFinite(point.db))
     .map(point => ({ time: point.time, db: clamp(point.db, -120, 24) }))
     .sort((left, right) => left.time - right.time)
+  sortedEnvelopeCache.set(stem, result)
+  return result
 }
 
 function sortedActivity(stem: StemEvidence | undefined): StemActivityPoint[] {
   if (!stem?.activity) return []
-  return stem.activity
+  const cachedActivity = sortedActivityCache.get(stem)
+  if (cachedActivity) return cachedActivity
+  const activityResult = stem.activity
     .filter(point => Number.isFinite(point.time) && Number.isFinite(point.value))
     .map(point => ({ time: point.time, value: clamp(point.value, 0, 1) }))
     .sort((left, right) => left.time - right.time)
+  sortedActivityCache.set(stem, activityResult)
+  return activityResult
 }
 
 function interpolate<T extends { time: number }>(

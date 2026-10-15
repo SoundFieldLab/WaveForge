@@ -23,25 +23,28 @@ export function mapAnalyserByteEnergy(value01: number, noiseGate = 0.035, gamma 
   return clamp01(Math.pow(normalized, gamma))
 }
 
-/** 基于真实经过时间的逐频段 attack/release，帧率变化不会改变响应速度。 */
+/** 基于真实经过时间的逐频段 attack/release，帧率变化不会改变响应速度。
+ *  可传入 out 复用缓冲（30Hz 可视化热路径避免每帧新建 Float32Array 的 GC churn）；
+ *  不传时行为与之前一致（新建返回）。 */
 export function applyTimedAttackRelease(
   previous: Float32Array | number[],
   current: Float32Array | number[],
   deltaMs: number,
   attackMs = 55,
   releaseMs = 220,
+  out?: Float32Array,
 ): Float32Array {
   const length = Math.min(previous.length, current.length)
-  const out = new Float32Array(length)
+  const result = out && out.length >= length ? out : new Float32Array(length)
   const dt = Math.max(0, Math.min(100, Number.isFinite(deltaMs) ? deltaMs : 0))
   for (let index = 0; index < length; index += 1) {
     const prev = clamp01(previous[index] || 0)
     const next = clamp01(current[index] || 0)
     const timeConstant = next >= prev ? Math.max(1, attackMs) : Math.max(1, releaseMs)
     const alpha = 1 - Math.exp(-dt / timeConstant)
-    out[index] = prev + (next - prev) * alpha
+    result[index] = prev + (next - prev) * alpha
   }
-  return out
+  return result
 }
 
 /**

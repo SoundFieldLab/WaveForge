@@ -21,7 +21,8 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 function onePoleCoef(timeMs: number, fs: number): number {
-  const ms = Math.max(timeMs, 0.05)
+  // NaN/Inf 回落 floor（同 Compressor：损坏快照透传 NaN 会让输出永久静音）
+  const ms = Math.max(Number.isFinite(timeMs) ? timeMs : 0.05, 0.05)
   return 1 - Math.exp(-1 / ((ms / 1000) * fs))
 }
 

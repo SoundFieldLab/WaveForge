@@ -69,8 +69,11 @@ export interface RoomSimParams {
 
 /** 预设 → 房间参数（off → null；earlyOrders 为早期反射阶数，预设默认 2） */
 export function roomParamsFromPreset(preset: RoomPreset, earlyOrders: number): RoomSimParams | null {
+  // 未知/损坏 preset（分享串 room 值未过白名单等）回落 off：查表 undefined 会产出
+  // NaN 几何 → 抽头延迟 NaN → 卷积历史读 undefined → 输出永久 NaN 静音。
   if (preset === 'off') return null
-  const p = ROOM_PRESETS[preset]
+  const p = (ROOM_PRESETS as Record<string, { width: number; height: number; depth: number; reflectivity: number; rt60: number }>)[preset]
+  if (!p || !Number.isFinite(p.width) || !Number.isFinite(p.depth)) return null
   return { width: p.width, height: p.height, depth: p.depth, reflectivity: p.reflectivity, earlyOrders, rt60: p.rt60 }
 }
 

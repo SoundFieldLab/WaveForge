@@ -51,16 +51,21 @@ export function encodeWav(buffer: AudioBuffer): ArrayBuffer {
   writeString(36, 'data')
   view.setUint32(40, dataSize, true)
 
+  // 批量转换：先把每帧样本 scale 进一个 Int16Array，再一次 copy 到输出——
+  // 逐样本 DataView.setInt16 在整曲（数百万帧）上是导出路径最贵的循环体。
+  const pcm = new Int16Array(frames * numChannels)
   const channels: Float32Array[] = []
   for (let ch = 0; ch < numChannels; ch += 1) channels.push(buffer.getChannelData(ch))
-  let offset = 44
+  let idx = 0
   for (let i = 0; i < frames; i += 1) {
     for (let ch = 0; ch < numChannels; ch += 1) {
-      const sample = Math.max(-1, Math.min(1, channels[ch][i]))
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
-      offset += 2
+      const sample = channels[ch][i]
+      const clamped = sample < -1 ? -1 : sample > 1 ? 1 : sample
+      pcm[idx] = (clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff) | 0
+      idx += 1
     }
   }
+  new Int16Array(arrayBuffer, 44, frames * numChannels).set(pcm)
   return arrayBuffer
 }
 
@@ -72,11 +77,12 @@ export class TransitionRenderer {
   private activeSource: AudioBufferSourceNode | null = null
   private cacheCleanupTimer: ReturnType<typeof setInterval> | null = null
   private cacheBytes = 0
-  // 渲染缓存常驻的是解码后的 PCM：AI 长混音 60s 立体声 48kHz 单条约 23MB，原先 10 条 / 128MB
-  // 意味着峰值可到百 MB 级驻留（多数条目再也不会被命中，过渡本身是一次性的）。
-  // 收紧到 5 条 / 64MB：够放「当前过渡 + 预渲染的下一首 + 余量」，也保留同时预渲染多条时的余热。
-  private readonly MAX_CACHE_SIZE = 5
-  private readonly MAX_CACHE_BYTES = 64 * 1024 * 1024
+  // 渲染缓存常驻的是解码后的 PCM：AI 长混音 60s 立体声 48kHz 单条约 23MB。多数条目
+  // 再也不会被命中（过渡本身是一次性的），常驻只需「当前过渡 + 预渲染的下一首 + 快速
+  // 切歌时的在途替换」共 3 条；被挤出的条目可从磁盘持久层 rehydrate（loadPersisted）。
+  // 48MB 字节上限：两条 AI 长混音（~46MB）可共存，普通短交叉（MB 级）则能放更多条。
+  private readonly MAX_CACHE_SIZE = 3
+  private readonly MAX_CACHE_BYTES = 48 * 1024 * 1024
   private readonly CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
   constructor(audioContext: AudioContext, masterGain?: GainNode) {
@@ -119,6 +125,14 @@ export class TransitionRenderer {
       const buffer = await this.audioContext.decodeAudioData(arrayBuffer)
       const bytes = this.getBufferBytes(buffer)
       const entry: RenderCache = { buffer, timestamp: Date.now(), plan: persisted.plan, bytes }
+      // 走容量守卫：rehydrate 是缓存写入路径之一，绕过上限的话多条 AI 长混音 PCM
+      // （各 ~23MB）可在 TTL 内不触发逐出持续累积
+      while (
+        this.cache.size >= this.MAX_CACHE_SIZE
+        || (this.cacheBytes + bytes > this.MAX_CACHE_BYTES && this.cache.size > 0)
+      ) {
+        if (!this.evictOldestCacheEntry()) break
+      }
       this.cache.set(planId, entry)
       this.cacheBytes += bytes
       this.persistedRenders.set(planId, { ...persisted, timestamp: Date.now() })

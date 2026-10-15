@@ -22,7 +22,9 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 function onePoleCoef(timeMs: number, fs: number, floorMs: number): number {
-  const ms = Math.max(timeMs, floorMs)
+  // NaN/Inf 回落 floor：localStorage 损坏快照透传 NaN 时 Math.max(NaN, floor)=NaN →
+  // 系数 NaN → 包络 NaN → 输出永久静音（Limiter 10^(NaN/20) 同链污染）
+  const ms = Math.max(Number.isFinite(timeMs) ? timeMs : floorMs, floorMs)
   return 1 - Math.exp(-1 / ((ms / 1000) * fs))
 }
 

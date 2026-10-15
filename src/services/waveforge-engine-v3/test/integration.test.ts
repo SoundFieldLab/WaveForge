@@ -128,10 +128,13 @@ describe('EngineV3Host —— worklet 模式', () => {
     host.dispose()
     resolveAdd()
     await attaching
-    // 接线被放弃，但 dispose 已恢复直连（masterGain 只连了 analyser）
+    // 接线被放弃：dispose 与过期分支**各自**恢复一次直连（审计加固——过期分支此前
+    // 直接 return，重 attach 到另一 handle 时本 handle 的 masterGain 会永久悬空）。
+    // 两次 connect 目标相同（analyser），幂等无副作用，仅调用计数 +1。
     const connects = (masterGain.connect as ReturnType<typeof vi.fn>).mock.calls
-    expect(connects.length).toBe(1)
+    expect(connects.length).toBe(2)
     expect(connects[0][0]).toBe(analyser)
+    expect(connects[1][0]).toBe(analyser)
     expect(host.getMode()).toBe(null)
   })
 

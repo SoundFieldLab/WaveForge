@@ -658,81 +658,170 @@ export class AudioEffectsEngine {
     const sampleRate = this.context.sampleRate
 
     // 1. 拉取并解码源音频
-    const response = await fetch(sourceUrl)
+    const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(120_000) })
     if (!response.ok) throw new Error(`拉取音频失败：${response.status}`)
     const arrayBuffer = await response.arrayBuffer()
     const decoded = await this.context.decodeAudioData(arrayBuffer)
 
-    // 2. 离线渲染长度（至少 1 秒，最长不超过源长度）
+    // 2. 离线渲染长度（至少 1 秒，最长不超过源长度；额外 +1s 排空混响尾音）
     const length = Math.max(1, Math.min(Math.floor(durationSeconds * sampleRate), decoded.length))
 
-    const offline = new OfflineAudioContext(2, length, sampleRate)
+    const offline = new OfflineAudioContext(2, length + sampleRate, sampleRate)
     const source = offline.createBufferSource()
     source.buffer = decoded
-    // 3. 搭建与实时链一致的核心效果：EQ → 低音 → 人声 → 伴奏 → 全景声厅（干湿）
-    const { eq, effects } = this.settings
+    // 3. 搭建与实时链一致的效果链（参数与 rebuildFromSettings 同源；此前手抄链已漂移：
+    //    缺 voiceMatrix/presenceMatrix/punch/3D/限幅器，滤波器参数为旧值——人声/伴奏
+    //    滑杆与增强效果对导出完全无效）。链路（与实时同拓扑）：
+    //    source → EQ → voiceMatrix → presenceMatrix → bass → punch → vocal → accomp
+    //      → hall 干(pannerDryGain) / 湿(hallWet) / 3D 湿(panner) → limiter → destination
+    const { eq, effects, pitch } = this.settings
+    const mkGain = (value = 1): GainNode => {
+      const g = offline.createGain()
+      g.gain.value = value
+      return g
+    }
+    const mkBiquad = (type: BiquadFilterType, frequency: number, q: number, gain = 0): BiquadFilterNode => {
+      const f = offline.createBiquadFilter()
+      f.type = type
+      f.frequency.value = frequency
+      f.Q.value = q
+      f.gain.value = gain
+      return f
+    }
+    // M/S 简化矩阵（与实时 createMsMatrix 同构：L'=center·M+side·S、R'=center·M−side·S）
+    const buildMs = (input: AudioNode, centerGain: number, sideGain: number): AudioNode => {
+      const splitter = offline.createChannelSplitter(2)
+      const merger = offline.createChannelMerger(2)
+      const mSum = mkGain(0.5)
+      const sSum = mkGain(0.5)
+      const sideNeg = mkGain(-1)
+      const center = mkGain(centerGain)
+      const side = mkGain(sideGain)
+      input.connect(splitter)
+      splitter.connect(mSum, 0)
+      splitter.connect(sSum, 1)
+      mSum.connect(center)
+      sSum.connect(side)
+      sSum.connect(sideNeg)
+      center.connect(merger, 0, 0)
+      side.connect(merger, 0, 0)
+      center.connect(merger, 0, 1)
+      sideNeg.connect(merger, 0, 1)
+      return merger
+    }
+
+    // 统一经 limiter 汇入 destination（实时链 output→limiter→analyser 同语义；
+    // 多路先汇入 bus，bus→limiter→destination，避免直连 destination 绕过限幅）
+    const bus = mkGain(1)
+    const limiter = offline.createDynamicsCompressor()
+    limiter.threshold.value = -6
+    limiter.knee.value = 3
+    limiter.ratio.value = 12
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.25
+    bus.connect(limiter)
+    limiter.connect(offline.destination)
+
     let prev: AudioNode = source
 
+    // —— EQ（与实时 rebuildEq 同参）——
     if (eq.enabled) {
       const bands = eq.mode === 'simple'
         ? SIMPLE_EQ_BANDS.map((band, i) => ({ frequency: band.frequency, gain: eq.simpleBands[i] || 0, q: 1.0 }))
         : eq.proBands
       for (const band of bands) {
-        const f = offline.createBiquadFilter()
-        f.type = 'peaking'
-        f.frequency.value = band.frequency
-        f.gain.value = band.gain
-        f.Q.value = band.q
+        const f = mkBiquad('peaking', band.frequency, band.q, band.gain)
         prev.connect(f)
         prev = f
       }
     }
 
-    if (effects.bassBoost.enabled) {
-      const f = offline.createBiquadFilter()
-      f.type = 'lowshelf'
-      f.frequency.value = effects.bassBoost.depth
-      f.gain.value = effects.bassBoost.intensity
-      prev.connect(f)
-      prev = f
-    }
-    if (effects.vocalBoost.enabled) {
-      const f = offline.createBiquadFilter()
-      f.type = 'peaking'
-      f.frequency.value = 2500
-      f.Q.value = 1.1
-      f.gain.value = effects.vocalBoost.intensity
-      prev.connect(f)
-      prev = f
-    }
-    if (effects.accompanimentBoost.enabled) {
-      const f = offline.createBiquadFilter()
-      f.type = 'peaking'
-      f.frequency.value = 2500
-      f.Q.value = 1.4
-      f.gain.value = -effects.accompanimentBoost.intensity
-      prev.connect(f)
-      prev = f
+    // —— 人声/伴奏比例（实时 center/side 公式同源）——
+    {
+      const v = Math.max(-1, Math.min(1, pitch.voiceBalance))
+      const center = v >= 0 ? 1 : 1 + v
+      const side = v <= 0 ? 1 : 1 - v
+      prev = buildMs(prev, center, side)
     }
 
-    // 全景声厅：干路 + 卷积混响湿路
-    const dry = offline.createGain()
-    dry.gain.value = 1
-    prev.connect(dry)
-    dry.connect(offline.destination)
+    // —— 人声/伴奏增强 presenceMatrix（实时公式同源）——
+    {
+      const vocalCenter = effects.vocalBoost.enabled ? 1 + effects.vocalBoost.intensity * 0.08 : 1
+      const accompSide = effects.accompanimentBoost.enabled ? 1 + effects.accompanimentBoost.intensity * 0.22 : 1
+      const accompCenter = effects.accompanimentBoost.enabled ? 1 - effects.accompanimentBoost.intensity * 0.1 : 1
+      prev = buildMs(prev, Math.max(0.25, vocalCenter * accompCenter), accompSide)
+    }
+
+    // —— 低音（lowshelf×1.3 + punch×0.55@55Hz，实时同参）——
+    {
+      const bass = mkBiquad('lowshelf', effects.bassBoost.depth, 0.7, effects.bassBoost.enabled ? effects.bassBoost.intensity * 1.3 : 0)
+      prev.connect(bass)
+      const punch = mkBiquad('peaking', 55, 0.9, effects.bassBoost.enabled ? effects.bassBoost.intensity * 0.55 : 0)
+      bass.connect(punch)
+      prev = punch
+    }
+
+    // —— 人声存在感（3kHz/Q2.4×0.7）与伴奏削减（2.8kHz/Q1.6×−0.7，实时同参）——
+    {
+      const vocal = mkBiquad('peaking', 3000, 2.4, effects.vocalBoost.enabled ? effects.vocalBoost.intensity * 0.7 : 0)
+      prev.connect(vocal)
+      const accomp = mkBiquad('peaking', 2800, 1.6, effects.accompanimentBoost.enabled ? -effects.accompanimentBoost.intensity * 0.7 : 0)
+      vocal.connect(accomp)
+      prev = accomp
+    }
+
+    // —— 全景声厅：干路（M/S 加宽，level 调制 hallCenter/hallSide）→ pannerDryGain；
+    //     湿路（卷积）直连 bus；3D 湿路从 hall 干路分叉（与实时拓扑一致）——
+    const hallSide = mkGain(effects.hall.enabled ? 1 + (effects.hall.level / 10) * 2.2 : 1)
+    const hallCenter = mkGain(effects.hall.enabled ? Math.max(0.4, 1 - (effects.hall.level / 10) * 0.42) : 1)
+    const pannerDryGain = mkGain(effects.surround3d.enabled ? 0 : 1)
+    const hallSplitter = offline.createChannelSplitter(2)
+    const hallMerger = offline.createChannelMerger(2)
+    const hallMSum = mkGain(0.5)
+    const hallSSum = mkGain(0.5)
+    const hallSideNeg = mkGain(-1)
+    prev.connect(hallSplitter)
+    hallSplitter.connect(hallMSum, 0)
+    hallSplitter.connect(hallSSum, 1)
+    hallMSum.connect(hallCenter)
+    hallSSum.connect(hallSide)
+    hallSSum.connect(hallSideNeg)
+    hallCenter.connect(hallMerger, 0, 0)
+    hallSide.connect(hallMerger, 0, 0)
+    hallCenter.connect(hallMerger, 0, 1)
+    hallSideNeg.connect(hallMerger, 0, 1)
+    hallMerger.connect(pannerDryGain)
+    pannerDryGain.connect(bus)
 
     if (effects.hall.enabled) {
       const convolver = offline.createConvolver()
       convolver.buffer = generateHallImpulseResponse(offline, 3.6, 2.2)
-      const wet = offline.createGain()
-      wet.gain.value = Math.min(1, effects.hall.reverb / 10) * 0.95
+      const wet = mkGain(Math.min(1, effects.hall.reverb / 10) * 0.95)
       prev.connect(convolver)
       convolver.connect(wet)
-      wet.connect(offline.destination)
+      wet.connect(bus)
+    }
+
+    // —— 3D 环绕湿路（HRTF panner，refDistance=半径：摆位不改变响度）——
+    if (effects.surround3d.enabled) {
+      const radius = 0.6 + effects.surround3d.distance * 0.95
+      const panner = offline.createPanner()
+      panner.panningModel = 'HRTF'
+      panner.distanceModel = 'inverse'
+      panner.refDistance = radius
+      const a = (effects.surround3d.angle * Math.PI) / 180
+      panner.positionX.value = Math.sin(a) * radius
+      panner.positionZ.value = Math.cos(a) * radius
+      panner.positionY.value = 0
+      hallMerger.connect(panner)
+      const pannerWet = mkGain(1)
+      panner.connect(pannerWet)
+      pannerWet.connect(bus)
     }
 
     // 显式限定源播放区间为导出时长：即使 OfflineAudioContext 长度已经截断，
     // 也避免解码后的整曲 buffer 在渲染循环中被无谓读取/混音。
+    // 长度额外 +1s：给卷积混响尾音排空时间（与 v3 导出同语义，结尾不硬切）。
     source.start(0, 0, length / sampleRate)
     const rendered = await offline.startRendering()
 

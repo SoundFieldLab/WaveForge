@@ -78,6 +78,7 @@ export class LufsMeter {
   private readonly shelfR: BiquadState
 
   // 滑动窗口（400ms）内 z² 之和与 z 环形缓冲
+  /** 环形缓冲存每样本双通道功率（yl²+yr²），供滑动求和窗口增量淘汰 */
   private zBuf: Float32Array
   private zPos = 0
   private sumSq = 0
@@ -94,6 +95,14 @@ export class LufsMeter {
   private shortPower: Float32Array = new Float32Array(LufsMeter.SHORT_CAP)
   private shortWrite = 0
   private shortCount = 0
+
+  // 统计失效缓存：getIntegratedLufs 是热路径（EngineV3.process 每块调用一次，
+  // 375 次/s × 全环形双扫描 36000 块；getLra 还要排序全部块）。块写入时置 dirty，
+  // 读时重算一次后复用。两统计各自独立 dirty（任何一个读后清位不得影响另一个）。
+  private integratedDirty = true
+  private integratedCache = NaN
+  private lraDirty = true
+  private lraCache = NaN
 
   // 峰值
   private peak = 0
@@ -176,14 +185,15 @@ export class LufsMeter {
       sr.z1 = sr.c.b1 * y1r - sr.c.a1 * yr + sr.z2
       sr.z2 = sr.c.b2 * y1r - sr.c.a2 * yr
 
-      // 块功率：z = yL + yR（BS.1770 通道求和）
-      const z = yl + yr
-      const zsq = z * z
+      // 块功率（BS.1770）：Σ_ch z_ch²——各通道 K 加权后功率**直接相加**。
+      // 此前实现 (yL+yR)² 含 2·yL·yR 交叉项：双单声道内容响度高估 ~3dB（归一化
+      // 补偿系统性偏低 3dB），反相立体声 z≡0 → 全部块判静音、LUFS 恒 NaN。
+      const power = yl * yl + yr * yr
       const evict = this.zBuf[this.zPos]
-      this.zBuf[this.zPos] = z
+      this.zBuf[this.zPos] = power
       this.zPos++
       if (this.zPos >= this.blockLen) this.zPos = 0
-      this.sumSq += zsq - evict * evict
+      this.sumSq += power - evict
       this.totalSamples++
 
       // 样本峰值
@@ -210,9 +220,12 @@ export class LufsMeter {
     }
   }
 
-  /** 整合响度 LUFS（绝对 -70 + 相对 -10 双门限）；未测到返回 NaN */
+  /** 整合响度 LUFS（绝对 -70 + 相对 -10 双门限）；未测到返回 NaN。
+   *  块间增量：结果按 blockWrite 指纹失效（环形缓冲里旧行为被覆盖时指纹不同），
+   *  未写入新块时直接复用上次结果——热路径从 O(全历史×2) 降为 O(1)。 */
   getIntegratedLufs(): number {
     if (this.blockCount === 0) return NaN
+    if (!this.integratedDirty) return this.integratedCache
     const cap = LufsMeter.BLOCK_CAP
     const start = (this.blockWrite - this.blockCount + cap) % cap
     let sumP1 = 0
@@ -227,7 +240,11 @@ export class LufsMeter {
         n1++
       }
     }
-    if (n1 === 0) return NaN
+    if (n1 === 0) {
+      this.integratedDirty = false
+      this.integratedCache = NaN
+      return NaN
+    }
     const gate = sumL1 / n1 - 10
     let sumP2 = 0
     let n2 = 0
@@ -239,8 +256,14 @@ export class LufsMeter {
         n2++
       }
     }
-    if (n2 === 0) return NaN
-    return -0.691 + 10 * Math.log10(sumP2 / n2)
+    if (n2 === 0) {
+      this.integratedDirty = false
+      this.integratedCache = NaN
+      return NaN
+    }
+    this.integratedDirty = false
+    this.integratedCache = -0.691 + 10 * Math.log10(sumP2 / n2)
+    return this.integratedCache
   }
 
   /** 瞬时响度（最新一个完整 400ms 块）；未测到返回 NaN */
@@ -265,9 +288,12 @@ export class LufsMeter {
     return -0.691 + 10 * Math.log10(sum / cap)
   }
 
-  /** LRA（EBU Tech 3342）：绝对 -70 + 相对 -20 门限后 10/95 百分位差（LU） */
+  /** LRA（EBU Tech 3342）：绝对 -70 + 相对 -20 门限后 10/95 百分位差（LU）。
+   *  与 getIntegratedLufs 同款失效缓存：排序 36000 块在 UI 轮询路径不可每帧重做。 */
   getLra(): number {
     if (this.blockCount < 2) return NaN
+    // 块未变（lraDirty=false）时复用缓存；recordBlock/reset 均置位
+    if (!this.lraDirty) return this.lraCache
     const cap = LufsMeter.BLOCK_CAP
     const start = (this.blockWrite - this.blockCount + cap) % cap
     let sumL = 0
@@ -290,13 +316,19 @@ export class LufsMeter {
         this.sortScratch[m++] = lk
       }
     }
-    if (m < 2) return NaN
+    if (m < 2) {
+      this.lraCache = NaN
+      this.lraDirty = false
+      return NaN
+    }
     // 升序排序（copyWithin 到连续段后排序，避免污染环形语义——用 subarray 视图即可）
     const arr = this.sortScratch.subarray(0, m)
     arr.sort()
     const p10 = this.percentile(arr, 0.1)
     const p95 = this.percentile(arr, 0.95)
-    return p95 - p10
+    this.lraCache = p95 - p10
+    this.lraDirty = false
+    return this.lraCache
   }
 
   /** 样本峰值 dBFS（全静音返回 -Infinity） */
@@ -316,6 +348,10 @@ export class LufsMeter {
     this.zPos = 0
     this.sumSq = 0
     this.totalSamples = 0
+    this.integratedDirty = true
+    this.integratedCache = NaN
+    this.lraDirty = true
+    this.lraCache = NaN
     this.blockLoud.fill(0)
     this.blockPower.fill(0)
     this.blockWrite = 0
@@ -343,6 +379,8 @@ export class LufsMeter {
 
   /** 记录一个完整 400ms 块（静音块响度记 NaN，避免 -Infinity 泄漏） */
   private recordBlock(): void {
+    this.integratedDirty = true
+    this.lraDirty = true
     const p = this.sumSq / this.blockLen
     const lk = p > 1e-30 ? -0.691 + 10 * Math.log10(p) : NaN
     const cap = LufsMeter.BLOCK_CAP

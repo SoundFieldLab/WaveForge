@@ -88,8 +88,14 @@ let persistTimer: number | null = null
 
 /** 快照入库前去除不可序列化数据（卷积 IR 数组 → 仅保留 irName 引用，与 ui/bridge.ts 语义一致） */
 function sanitizeForStorage(p: V3EngineParams): V3EngineParams {
-  const clone = JSON.parse(JSON.stringify(p)) as V3EngineParams
-  if (clone.reverb?.convolution) clone.reverb.convolution.ir = null
+  // 先手动剥 IR 再 stringify：Float32Array 直接进 JSON.stringify 会被逐索引
+  // 枚举成 MB 级巨串（导入 IR 后每次持久化 tick 都是全量序列化）。
+  const clone = JSON.parse(JSON.stringify({
+    ...p,
+    reverb: p.reverb
+      ? { ...p.reverb, convolution: { ...p.reverb.convolution, ir: null } }
+      : p.reverb,
+  })) as V3EngineParams
   return clone
 }
 
@@ -300,7 +306,12 @@ function ensureBridge(fs: number): V3UiBridge {
     wrappedBridge = {
       ...raw,
       setParams: (p: V3EngineParams) => {
-        const key = JSON.stringify(p)
+        // IR（Float32Array，数 MB）不进 stringify：逐索引枚举成巨串 + postMessage
+        // structured clone 整块拷贝。用「IR 引用哨兵 + 剥离后的 JSON」判变化；
+        // IR 引用变化时 key 必然变化，新旧 IR 相同引用则参数重复下发被短路。
+        const ir = p.reverb?.convolution?.ir ?? null
+        const stripped = { ...p, reverb: p.reverb ? { ...p.reverb, convolution: { ...p.reverb.convolution, ir: ir ? 'ir-present' : null } } : p.reverb }
+        const key = `${JSON.stringify(stripped)}|${(ir as unknown) instanceof Float32Array ? 'f32' : String(ir)}`
         if (key === lastParamsKey) return
         lastParamsKey = key
         raw.setParams(p)          // 桥内部快照 + 主线程引擎
@@ -386,6 +397,9 @@ async function encodeMp3(channels: Float32Array[], sampleRate: number): Promise<
   }
   const BLOCK = 1152
   const chunks: Int8Array[] = []
+  // 每 ~64 块（≈1.7s 音频）让出一次主线程：lamejs 的 encodeBuffer 是同步 CPU 密集调用，
+  // 整曲连跑会让导出期间 UI 完全冻结；分片 yield 后编码结果不变，仅总耗时长零点几秒。
+  let blocksSinceYield = 0
   for (let i = 0; i < frames; i += BLOCK) {
     const n = Math.min(BLOCK, frames - i)
     const lBlk = left16.subarray(i, i + n)
@@ -394,6 +408,10 @@ async function encodeMp3(channels: Float32Array[], sampleRate: number): Promise<
       ? encoder.encodeBuffer(lBlk, rBlk)
       : encoder.encodeBuffer(lBlk)
     if (enc.length > 0) chunks.push(enc)
+    if (++blocksSinceYield >= 64) {
+      blocksSinceYield = 0
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
   }
   const tail = encoder.flush()
   if (tail.length > 0) chunks.push(tail)
@@ -421,7 +439,7 @@ export async function exportV3Mp3(sourceUrl: string, durationSeconds: number, op
   if (!ctx) throw new Error('音频引擎尚未就绪')
   if (!currentParams) currentParams = restoreParams(ctx.sampleRate)
 
-  const response = await fetch(sourceUrl)
+  const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(120_000) })
   if (!response.ok) throw new Error(`拉取音频失败：${response.status}`)
   const arrayBuffer = await response.arrayBuffer()
   const decoded = await ctx.decodeAudioData(arrayBuffer)

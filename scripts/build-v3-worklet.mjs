@@ -10,13 +10,37 @@
  * esbuild 为 vite 的直接依赖，无需单独安装。
  */
 import { build } from 'esbuild'
-import { mkdirSync } from 'fs'
+import { mkdirSync, existsSync, statSync, readdirSync } from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const entry = path.join(root, 'src/services/waveforge-engine-v3/src/worklet/AudioEffectsProcessor.ts')
 const outfile = path.join(root, 'public/v3-worklet.js')
+
+// 产物新鲜度检查：worklet 源码树无任何文件比产物新时跳过重打包。
+// 此前 predev/prebuild 每次都无条件全量 esbuild（dev 启动/构建白付 1-2s）。
+function newestMtimeMs(dir) {
+  let newest = 0
+  for (const name of readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, name.name)
+    const m = name.isDirectory() ? newestMtimeMs(p) : statSync(p).mtimeMs
+    if (m > newest) newest = m
+  }
+  return newest
+}
+
+if (existsSync(outfile)) {
+  try {
+    const srcTree = path.join(root, 'src/services/waveforge-engine-v3/src')
+    if (statSync(outfile).mtimeMs >= newestMtimeMs(srcTree)) {
+      console.log(`[build-v3-worklet] ${path.relative(root, outfile)} 已是最新，跳过重打包`)
+      process.exit(0)
+    }
+  } catch {
+    // 检查失败（权限/竞态）则照常重打包，保持旧语义
+  }
+}
 
 mkdirSync(path.dirname(outfile), { recursive: true })
 

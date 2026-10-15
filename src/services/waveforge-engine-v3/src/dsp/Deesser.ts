@@ -28,7 +28,8 @@ function clamp(v: number, lo: number, hi: number): number {
 
 /** 一阶平滑系数：α = 1 − exp(−1/(τ·fs))，τ 由毫秒换算 */
 function onePoleCoef(timeMs: number, fs: number, floorMs: number): number {
-  const ms = Math.max(timeMs, floorMs)
+  // NaN/Inf 回落 floor（同 Compressor：损坏快照透传 NaN 会让输出永久静音）
+  const ms = Math.max(Number.isFinite(timeMs) ? timeMs : floorMs, floorMs)
   return 1 - Math.exp(-1 / ((ms / 1000) * fs))
 }
 

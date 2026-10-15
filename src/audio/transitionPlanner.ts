@@ -463,11 +463,15 @@ export function planTransition(
 
   const tempoRamp = Array.from({ length: Math.max(2, beatCount) }, (_, index) => {
     if (sourceBeatTimes.length !== beatCount + 1 || targetBeatTimes.length !== beatCount + 1) {
+      // 线性插值：末帧必须精确到达 targetBpm（分母 beatCount-1 使 progress 能到 1.0）
       const progress = index / Math.max(1, beatCount - 1)
       return sourceBpm * (1 - progress) + targetBpm * progress
     }
     const sourceDuration = sourceBeatTimes[index + 1] - sourceBeatTimes[index]
     const targetDuration = targetBeatTimes[index + 1] - targetBeatTimes[index]
+    // 逐拍时长插值：第 index 拍代表 [index, index+1) 区间，progress=i/beatCount 让
+    // 渐变跨全部 beatCount 拍平滑完成（最末拍 progress<1 是正确的——不存在 progress=1
+    // 的拍），与线性分支口径不同但各自正确，勿强行统一。
     const progress = index / beatCount
     const outputDuration = (1 - progress) * sourceDuration + progress * targetDuration
     return 60 / Math.max(0.001, outputDuration)
@@ -992,11 +996,15 @@ export function planTransitionV2(
 
   const tempoRamp = Array.from({ length: Math.max(2, beatCount) }, (_, index) => {
     if (sourceBeatTimes.length !== beatCount + 1 || targetBeatTimes.length !== beatCount + 1) {
+      // 线性插值：末帧必须精确到达 targetBpm（分母 beatCount-1 使 progress 能到 1.0）
       const progress = index / Math.max(1, beatCount - 1)
       return sourceBpm * (1 - progress) + targetBpm * progress
     }
     const sourceDuration = sourceBeatTimes[index + 1] - sourceBeatTimes[index]
     const targetDuration = targetBeatTimes[index + 1] - targetBeatTimes[index]
+    // 逐拍时长插值：第 index 拍代表 [index, index+1) 区间，progress=i/beatCount 让
+    // 渐变跨全部 beatCount 拍平滑完成（最末拍 progress<1 是正确的——不存在 progress=1
+    // 的拍），与线性分支口径不同但各自正确，勿强行统一。
     const progress = index / beatCount
     const outputDuration = (1 - progress) * sourceDuration + progress * targetDuration
     return 60 / Math.max(0.001, outputDuration)

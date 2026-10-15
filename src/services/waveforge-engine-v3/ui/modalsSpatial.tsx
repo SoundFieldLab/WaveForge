@@ -37,14 +37,18 @@ export function ReverbModal({ controller, theme, onClose }: { controller: V3Para
   const handleIrFile = async (file: File) => {
     try {
       const ctx = new AudioContext()
-      const buf = await file.arrayBuffer()
-      const decoded = await ctx.decodeAudioData(buf)
-      const mono = new Float32Array(decoded.length)
-      const ch0 = decoded.getChannelData(0)
-      mono.set(ch0)
-      patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: mono, irName: file.name, dePeriodize: true } } })
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已导入 IR「${file.name}」`, type: 'info' } }))
-      void ctx.close()
+      try {
+        const buf = await file.arrayBuffer()
+        const decoded = await ctx.decodeAudioData(buf)
+        const mono = new Float32Array(decoded.length)
+        const ch0 = decoded.getChannelData(0)
+        mono.set(ch0)
+        patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: mono, irName: file.name, dePeriodize: true } } })
+        window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已导入 IR「${file.name}」`, type: 'info' } }))
+      } finally {
+        // 解码失败也要关 context：Chromium 并发 AudioContext 上限 ~6，泄漏 6 个后解码功能整体失效
+        void ctx.close()
+      }
     } catch {
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: 'IR 文件解码失败（请提供 WAV/AIFF 等格式）', type: 'error' } }))
     }

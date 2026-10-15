@@ -1,6 +1,7 @@
 import { debugLog } from '../../utils/debugLog'
 import { SoundTouchNode } from '@soundtouchjs/audio-worklet'
 import processorUrl from '@soundtouchjs/audio-worklet/processor?url'
+import { encodeWav } from '../../audio/TransitionRenderer'
 import { compensationService, type CompensationDesign, type CompensationSegment } from './compensationService'
 
 // ============ 设置类型 ============
@@ -401,11 +402,6 @@ function loadSettings(): AudioEffectsSettings {
 
 // ============ 工具函数 ============
 
-// Chrome 的 DynamicsCompressorNode 扩展了 makeupGain（TS lib 未收录）
-function compressorMakeupGain(comp: DynamicsCompressorNode): AudioParam | null {
-  return (comp as unknown as { makeupGain?: AudioParam }).makeupGain || null
-}
-
 interface ReverbPreset {
   seconds: number
   decay: number
@@ -561,6 +557,9 @@ interface BuiltEffectChain {
   vocalFilter: BiquadFilterNode
   accompFilter: BiquadFilterNode
   compressor: DynamicsCompressorNode
+  /** 压缩器后 makeup 增益（真实 GainNode）：DynamicsCompressorNode.makeupGain 是
+   *  误记的扩展（Chromium 从未实现），此前恒 null → outputGain 滑杆/场景 makeup 全部静默失效 */
+  compressorMakeup: GainNode
   nightShaper: WaveShaperNode
   nightGain: GainNode
   nightCompressor: DynamicsCompressorNode
@@ -593,6 +592,10 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   const panner = context.createPanner()
   panner.panningModel = 'HRTF'
   panner.distanceModel = 'inverse'
+  // refDistance 必须跟随「近远」半径：默认 1m 与实际摆位半径（1.55-10.1m）叠加
+  // inverse 衰减，distance=5 时湿路被压 -14.5dB —— 开启 3D 即音量骤降十几 dB。
+  // 运行时在 applySurround3d 中同步 refDistance = radius，使摆位不改变响度。
+  panner.refDistance = 8
   const pannerWetGain = context.createGain()
   pannerWetGain.gain.value = 0
   const pannerDryGain = context.createGain()
@@ -625,6 +628,9 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   compressor.attack.value = settings.effects.compressor.attack
   compressor.release.value = settings.effects.compressor.release
   compressor.knee.value = 6
+  // makeup：真实 GainNode（outputGain 0-12dB，实时/导出同链生效）
+  const compressorMakeup = context.createGain()
+  compressorMakeup.gain.value = 1
 
   // 夜间模式（重设计 2026-08-15）：夜间 = 深夜低音量舒适听感。
   // 旧实现用 WaveShaper tanh 波形整形（k 最高 6.5）→ 强非线性产生大量谐波失真 = 炸音，
@@ -644,18 +650,18 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   nightCompressor.attack.value = 0.01
   nightCompressor.release.value = 0.35
   nightCompressor.knee.value = 12
-  const nightMakeup = compressorMakeupGain(nightCompressor)
-  if (nightMakeup) nightMakeup.value = 1
   const nightTreble = context.createBiquadFilter()
   nightTreble.type = 'highshelf'
   nightTreble.frequency.value = 6500
   nightTreble.gain.value = 0
 
-  // 骨架：
-  // input → voiceMatrix → [EQ | 频响补偿] → presenceMatrix → bass → punch → vocal → accomp
-  //   → compressor → nightShaper(直通) → nightGain → nightCompressor → nightTreble
+  // 骨架（EQ/补偿实际插入点在 presenceMatrix **之后**——线性级联数学等价，注释以实现为准）：
+  // input → voiceMatrix → presenceMatrix → [EQ | 频响补偿] → bass → punch → vocal → accomp
+  //   → compressor → makeup → nightShaper(直通) → nightGain → nightCompressor → nightTreble
   //   → hallMatrix(干) → pannerDryGain → output
-  //   → hallConvolver(湿) → hallWetGain → pannerDryGain
+  //   → hallConvolver(湿) → hallWetGain → output（直连：v2 可叠加后，混响湿路若挂
+  //     pannerDryGain，开启 3D 环绕时会被其 0 增益整体静音——「重低音 = 低音+混响+全景」
+  //     组合诉求下混响必须独立于 panner 干路开关）
   //   → panner(湿) → pannerWetGain → output
   input.connect(voiceMatrix.input)
   voiceMatrix.output.connect(presenceMatrix.input)
@@ -664,7 +670,8 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   bassPunchFilter.connect(vocalFilter)
   vocalFilter.connect(accompFilter)
   accompFilter.connect(compressor)
-  compressor.connect(nightShaper)
+  compressor.connect(compressorMakeup)
+  compressorMakeup.connect(nightShaper)
   nightShaper.connect(nightGain)
   nightGain.connect(nightCompressor)
   nightCompressor.connect(nightTreble)
@@ -672,7 +679,7 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
   hallMatrix.output.connect(pannerDryGain)
   nightTreble.connect(hallConvolver)
   hallConvolver.connect(hallWetGain)
-  hallWetGain.connect(pannerDryGain)
+  hallWetGain.connect(output)
   pannerDryGain.connect(output)
   // 湿路（HRTF 环绕）必须从干路信号源直接分叉，不能挂在 pannerDryGain 上——
   // 否则 3D 环绕启用时 pannerDryGain 增益降到 0，panner 的输入同样为 0，音乐会完全无声。
@@ -682,6 +689,7 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
 
   return {
     input, output,
+    compressorMakeup,
     voiceMatrix, presenceMatrix,
     bassFilter, bassPunchFilter, vocalFilter, accompFilter,
     compressor, nightShaper, nightGain, nightCompressor, nightTreble,
@@ -691,41 +699,9 @@ function buildEffectChain(context: BaseAudioContext, settings: AudioEffectsSetti
 }
 
 // 把 AudioBuffer 编码为 16-bit PCM WAV
-function encodeWav(buffer: AudioBuffer): Blob {
-  const numChannels = Math.min(2, buffer.numberOfChannels)
-  const sampleRate = buffer.sampleRate
-  const length = buffer.length * numChannels * 2
-  const arrayBuffer = new ArrayBuffer(44 + length)
-  const view = new DataView(arrayBuffer)
-
-  const writeString = (offset: number, text: string) => {
-    for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i))
-  }
-
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + length, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true) // PCM
-  view.setUint16(22, numChannels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, sampleRate * numChannels * 2, true)
-  view.setUint16(32, numChannels * 2, true)
-  view.setUint16(34, 16, true)
-  writeString(36, 'data')
-  view.setUint32(40, length, true)
-
-  let offset = 44
-  for (let i = 0; i < buffer.length; i += 1) {
-    for (let ch = 0; ch < numChannels; ch += 1) {
-      const sample = Math.max(-1, Math.min(1, buffer.getChannelData(ch)[i]))
-      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true)
-      offset += 2
-    }
-  }
-
-  return new Blob([arrayBuffer], { type: 'audio/wav' })
+function encodeWavBlob(buffer: AudioBuffer): Blob {
+  // 复用 TransitionRenderer 的共享 WAV 编码器（批量 Int16 转换）；引擎导出仍以 Blob 交付
+  return new Blob([encodeWav(buffer)], { type: 'audio/wav' })
 }
 
 // ============ 引擎 ============
@@ -742,6 +718,8 @@ export class AudioEffectsEngine {
 
   // 变调/变速（SoundTouch AudioWorklet，异步注册）
   private soundtouchNode: SoundTouchNode | null = null
+  /** attach 代次：initSoundtouch 异步注册完成后的双重校验（v1 同款竞态防护） */
+  private attachSeq = 0
 
   // 效果链（attach 时构建；EQ/频响补偿为动态插入段）
   private chain: BuiltEffectChain | null = null
@@ -827,13 +805,12 @@ export class AudioEffectsEngine {
 
   // 供 UI 一次性导入完整设置（预设导入/恢复）
   applySettings(next: AudioEffectsSettings): void {
+    // 整体替换路径（导入场景/恢复快照）复用 updateSettings 的互斥归一：
+    // 手工构造的 JSON 可能同时携带 补偿+EQ（UI 显示 EQ 开、实际生效补偿），必须收敛。
+    // 以 merge 后的完整 settings 构造等价 patch 走同一条守卫链。
     this.settings = next
+    this.updateSettings({})
     this.saveSettings()
-    // 设置整体替换可能改变补偿参数：作废在途请求并重新设计（补偿启用时）
-    this.compDesignSeq++
-    this.lastCompDesignKey = ''
-    this.applyCompensationDesign()
-    this.rebuildFromSettings()
   }
 
   /** 更新设置；任何手动修改都会把当前状态标记为「自定义」（脱离场景快照） */
@@ -915,8 +892,12 @@ export class AudioEffectsEngine {
       if (anyEffectNewlyOn) this.settings.effects.loudnessCompensation.enabled = false
     }
 
-    // 手动修改 → 脱离场景快照
-    if (patch.activeScene === undefined) this.settings.customized = true
+    // 手动修改 → 脱离场景快照。但响度归一化不属于场景快照内容（applyScene 始终
+    // 保留该通道、音量同语义）：仅开/关归一化的 patch 不应把会话标成「自定义」，
+    // 否则 UI 上刚选的内置场景立刻显示「已自定义」，误导用户。
+    const onlyNormalizationPatch =
+      Object.keys(patch).length === 1 && patch.normalizationEnabled !== undefined
+    if (patch.activeScene === undefined && !onlyNormalizationPatch) this.settings.customized = true
 
     // 频响补偿设计参数（enabled/mode/preset/bands）变化时重新设计（补偿启用时）。
     // 先作废在途请求（旧结果不得覆盖新参数的设计），再触发新设计。
@@ -1069,6 +1050,8 @@ export class AudioEffectsEngine {
         // 服务不可用/空设计 → 清除缓存设计，回退内置近似（下次触发时窗口过后重试）
         this.compDesign = null
         this.compDesignFailedAt = Date.now()
+        // 同步清 key：否则上方同 key early-return 拦住后续调用，重试窗口形同虚设
+        this.lastCompDesignKey = ''
       }
       // 按当前设计（或内置近似）重建补偿段并应用增益；补偿此时必然仍启用
       if (this.settings.effects.loudnessCompensation.enabled && this.context && this.chain) {
@@ -1081,6 +1064,7 @@ export class AudioEffectsEngine {
       if (seq !== this.compDesignSeq) return
       this.compDesign = null
       this.compDesignFailedAt = Date.now()
+      this.lastCompDesignKey = '' // 同上：失败后允许窗口过后重试
       if (this.settings.effects.loudnessCompensation.enabled && this.context && this.chain) {
         this.lastEqStructureKey = this.eqStructureKey()
         this.rebuildEq()
@@ -1154,7 +1138,8 @@ export class AudioEffectsEngine {
     normGain.connect(this.input)
 
     // 异步注册 SoundTouch（变调/变速），成功后插入到 normGain 与 input 之间
-    void this.initSoundtouch(context, normGain, this.input)
+    this.attachSeq += 1
+    void this.initSoundtouch(context, normGain, this.input, this.attachSeq)
 
     // 应用当前设置
     this.rebuildFromSettings()
@@ -1166,13 +1151,17 @@ export class AudioEffectsEngine {
     debugLog('[AudioEffects] 效果链已插入 masterGain 与 analyser 之间')
   }
 
-  private async initSoundtouch(context: AudioContext, prevNode: AudioNode, input: GainNode): Promise<void> {
+  private async initSoundtouch(context: AudioContext, prevNode: AudioNode, input: GainNode, seq?: number): Promise<void> {
     try {
       await SoundTouchNode.register(context, processorUrl)
-      // 竞态防护：await 期间引擎可能已被 dispose 或重新 attach（热切换 v1/v2、重启音频图）。
-      // 此时必须放弃接线，否则会把旧节点插进已废弃的图，且 this.soundtouchNode 指向失联节点
-      // （后完成的旧注册会覆盖新注册，导致变调/变速对实时音频无效）。
-      if (this.context !== context) return
+      // 竞态防护：await 期间引擎可能已被 dispose 或重新 attach（热切换 v1/v2、重启音频图、
+      // 或同一 context 上 dispose→重 attach）。此时必须放弃接线，否则会把旧节点插进已废弃
+      // 的图，且 this.soundtouchNode 指向失联节点（后完成的旧注册会覆盖新注册，导致变调/
+      // 变速对实时音频无效）。「context 引用 + attachSeq 代次」双重校验（与 v1 同款）。
+      if (this.context !== context || (seq !== undefined && this.attachSeq !== seq)) {
+        this.soundtouchNode = null
+        return
+      }
       const node = new SoundTouchNode({ context, outputChannelCount: 2 })
       this.soundtouchNode = node
       prevNode.disconnect()
@@ -1275,7 +1264,7 @@ export class AudioEffectsEngine {
     comp.release.setTargetAtTime(effects.compressor.release, t, 0.02)
     // 输出增益（makeup）：压缩会压低电平，补偿回来
     const compMakeup = effects.compressor.enabled ? effects.compressor.outputGain : 0
-    compressorMakeupGain(comp)?.setTargetAtTime(Math.pow(10, compMakeup / 20), t, 0.02)
+    this.chain.compressorMakeup.gain.setTargetAtTime(Math.pow(10, compMakeup / 20), t, 0.02)
 
     // 夜间模式：软限幅曲线 + 输出增益
     // 夜间模式（重设计）：温和动态压缩 + 高频衰减，深夜低音量舒适不炸音
@@ -1359,6 +1348,13 @@ export class AudioEffectsEngine {
     const t = this.context.currentTime
     const { eq, effects } = this.settings
     if (effects.loudnessCompensation.enabled) {
+      // 补偿分支与 EQ 分支同款守卫：compFilters 为空（dispose 后重 attach、结构指纹
+      // 意外命中）时退回完整重建，避免对空数组静默 return
+      if (this.compFilters.length === 0) {
+        this.rebuildEq()
+        this.lastEqStructureKey = this.eqStructureKey()
+        return
+      }
       this.applyCompensationGains()
       return
     }
@@ -1479,6 +1475,8 @@ export class AudioEffectsEngine {
       const direction = this.settings.effects.surround3d.direction
       const baseAngle = this.settings.effects.surround3d.angle * Math.PI / 180
       const radius = 0.6 + this.settings.effects.surround3d.distance * 0.95
+      // refDistance 跟随半径：inverse 衰减在 d=ref 处为 0dB，摆位不改变响度
+      if (this.chain.panner.refDistance !== radius) this.chain.panner.refDistance = radius
       this.surroundAngle += dt * speed * 2.6 * direction
       const a = this.surroundAngle + baseAngle
       const x = Math.sin(a) * radius
@@ -1511,7 +1509,7 @@ export class AudioEffectsEngine {
     const sampleRate = this.context.sampleRate
 
     // 1. 拉取并解码源音频
-    const response = await fetch(sourceUrl)
+    const response = await fetch(sourceUrl, { signal: AbortSignal.timeout(120_000) })
     if (!response.ok) throw new Error(`拉取音频失败：${response.status}`)
     const arrayBuffer = await response.arrayBuffer()
     const decoded = await this.context.decodeAudioData(arrayBuffer)
@@ -1552,8 +1550,7 @@ export class AudioEffectsEngine {
     const comp = chain.compressor
     comp.threshold.value = effects.compressor.enabled ? effects.compressor.threshold : 0
     comp.ratio.value = effects.compressor.enabled ? effects.compressor.ratio : 1
-    const makeup = compressorMakeupGain(comp)
-    if (makeup) makeup.value = Math.pow(10, (effects.compressor.enabled ? effects.compressor.outputGain : 0) / 20)
+    chain.compressorMakeup.gain.value = Math.pow(10, (effects.compressor.enabled ? effects.compressor.outputGain : 0) / 20)
 
     // 夜间模式（与实时链一致）：动态压缩 + 高频衰减，shapler 恒直通
     const nightOn = effects.nightMode.enabled && effects.nightMode.amount > 0
@@ -1572,6 +1569,7 @@ export class AudioEffectsEngine {
     chain.pannerWetGain.gain.value = effects.surround3d.enabled ? 1 : 0
     chain.pannerDryGain.gain.value = effects.surround3d.enabled ? 0 : 1
     const radius = 0.6 + effects.surround3d.distance * 0.95
+    chain.panner.refDistance = radius
     const baseAngle = effects.surround3d.angle * Math.PI / 180
     if (chain.panner.positionX) {
       chain.panner.positionX.value = Math.sin(baseAngle) * radius
@@ -1626,7 +1624,7 @@ export class AudioEffectsEngine {
     const rendered = await offline.startRendering()
 
     // 6. 编码为 WAV 并下载
-    const wavBlob = encodeWav(rendered)
+    const wavBlob = encodeWavBlob(rendered)
     const url = URL.createObjectURL(wavBlob)
     const a = document.createElement('a')
     a.href = url

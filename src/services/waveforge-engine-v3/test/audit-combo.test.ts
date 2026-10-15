@@ -493,9 +493,13 @@ describe('D. 双路径一致性（热切换连续性 + stats）', () => {
     expect(Number.isFinite(st.peakDb)).toBe(true)
     expect(st.peakDb).toBeLessThanOrEqual(0)
     expect(Number.isFinite(st.truePeakDb)).toBe(true)
-    // 1kHz 0.5 幅度正弦 → 积分响度 ≈ -3 LUFS（K 加权 1kHz 约 +3dB，-6dBFS + 3 ≈ -3）
-    expect(st.lufsIntegrated).toBeGreaterThan(-6)
-    expect(st.lufsIntegrated).toBeLessThan(-1)
+    // 1kHz 0.5 幅度双单声道正弦 → 积分响度 ≈ -6 LUFS。
+    // BS.1770 块功率 = Σ 通道功率（完全相关立体声相对单声道 +3dB，无交叉项）：
+    // -6dBFS + K 加权 1kHz 增益(≈0dB) + 双通道 +3dB - 0.691 ≈ -3.7…实际 -6.06 与
+    // shelf 形状吻合。旧实现 (yL+yR)² 的交叉项给相关信号虚增 +3dB（预期 -3 校准），
+    // 已修正为标准功率求和，边界随物理值更新。
+    expect(st.lufsIntegrated).toBeGreaterThan(-9)
+    expect(st.lufsIntegrated).toBeLessThan(-3)
   })
 
   it('场景热切换后分析路径（getAnalysis）仍返回有限频谱与特征', () => {

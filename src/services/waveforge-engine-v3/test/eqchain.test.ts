@@ -129,3 +129,28 @@ describe('EqChain 边界', () => {
     expect(Math.abs(atCenter - 6)).toBeLessThan(0.1)
   })
 })
+
+describe('EqChain 立体声每声道频响（回归：每声道独立状态）', () => {
+  it('L、R 分别馈入同一单频正弦时，每声道输出增益须等于 responseAt 的幅度', () => {
+    const fs = 48000
+    const chain = new EqChain(fs, 20)
+    chain.setBands([
+      { frequency: 1000, gain: 12, q: 1.1 },
+      { frequency: 100, gain: 4, q: 0.9 },
+    ])
+    const expected = chain.responseAt([1000])[0]
+    const n = 4800
+    const l = new Float32Array(n)
+    const r = new Float32Array(n)
+    for (let i = 0; i < n; i++) {
+      l[i] = Math.sin((2 * Math.PI * 1000 * i) / fs)
+      r[i] = 0 // R 静音：L 的状态不得被 R 污染（反之亦然）
+    }
+    chain.processStereo(l, r)
+    // 取稳态段（跳过初始瞬态 480 样本）测幅度
+    let peak = 0
+    for (let i = 480; i < n; i++) peak = Math.max(peak, Math.abs(l[i]))
+    const measured = peak / 1
+    expect(Math.abs(measured - expected) / expected).toBeLessThan(0.05)
+  })
+})

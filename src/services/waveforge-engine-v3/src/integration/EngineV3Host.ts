@@ -140,8 +140,14 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
       if (ctx.audioWorklet?.addModule && AWNode && this.workletUrl) {
         try {
           await ctx.audioWorklet.addModule(this.workletUrl)
-          // 竞态防护：注册期间被 dispose/重 attach → 放弃接线
-          if (this.disposed || seq !== this.attachSeq) return
+          // 竞态防护：注册期间被 dispose/重 attach → 放弃接线。
+          // dispose 路径会恢复直连；**重 attach 到另一 handle**（seq 过期）不经过 dispose，
+          // 本 handle 的 masterGain 已被上方 disconnect 断开——过期分支必须自己恢复，
+          // 否则旧 handle 的音频永久悬空。
+          if (this.disposed || seq !== this.attachSeq) {
+            try { handle.masterGain.connect?.(handle.analyser) } catch { /* noop */ }
+            return
+          }
           node = new AWNode(ctx, this.processorName, { outputChannelCount: [2] })
           const port = node.port
           if (port) {
@@ -164,6 +170,9 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
 
     // script 兜底路径（同一纯 TS 内核）
     if (!node && (this.defaultMode === 'auto' || this.defaultMode === 'script') && ctx.createScriptProcessor) {
+      // 显式遥测：script 兜底意味着 15 级 DSP 链（含 HRTF 卷积）跑在主线程逐样本回调里，
+      // 此前是静默回退，用户可能长期跑在降级模式而无感知。mode 本身仍按原样工作（不改变音频行为）。
+      console.warn('[V3Host] AudioWorklet 不可用，回退 ScriptProcessor 主线程 DSP 模式（空间音频/卷积将占用主线程；请检查 worklet 资源加载）')
       const sp = ctx.createScriptProcessor(this.blockSize, 2, 2)
       sp.onaudioprocess = (e) => {
         const inL = e.inputBuffer.getChannelData(0)
@@ -197,6 +206,11 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
     this.node = node
     this.activeMode = mode
     if (params) this.lastParams = params
+    // 首次 attach：主线程引擎此前从未收到参数（lastParams 在 attach 前为 null）——
+    // 不补发的话 script 回退路径以默认参数出声、worklet 模式下主线程 getStats 与
+    // worklet 实际参数分裂。统一同步一次。
+    const effective = params ?? this.lastParams
+    if (effective && this.engineRef) this.engineRef.setParams(effective)
   }
 
   /** 下发参数：主线程引擎与 worklet 处理器同步更新 */

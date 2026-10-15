@@ -36,15 +36,29 @@ interface LufsCacheEntry {
   at: number
 }
 
+// 持久层模块级镜像：此前每次 remember 都「全量读 localStorage → 排序 300 条 → 全量重写」，
+// 切歌虽是低频操作，但 300 条 JSON 双向往返完全没必要。镜像一次加载，此后读写全走内存，
+// 仅在增删条目时写透一次；外部清空 localStorage（隐私清理等）后镜像随内存缓存一起自然失效。
+let lufsCacheMirror: Record<string, LufsCacheEntry> | null = null
+
 function loadLufsCache(): Record<string, LufsCacheEntry> {
+  // 镜像失效校验（与 compensationService 同款）：localStorage 的键被外部清空
+  //（用户清缓存 / 测试 beforeEach.clear()）时回落到空，避免旧条目永远命中并被写回复活
+  if (lufsCacheMirror) {
+    try {
+      if (!localStorage.getItem(CACHE_KEY) && Object.keys(lufsCacheMirror).length > 0) {
+        lufsCacheMirror = null
+      }
+    } catch { /* localStorage 不可用时沿用镜像 */ }
+  }
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as Record<string, LufsCacheEntry>
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    const parsed = raw ? (JSON.parse(raw) as Record<string, LufsCacheEntry>) : {}
+    lufsCacheMirror = parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
-    return {}
+    lufsCacheMirror = {}
   }
+  return lufsCacheMirror
 }
 
 function saveLufsCache(cache: Record<string, LufsCacheEntry>): void {

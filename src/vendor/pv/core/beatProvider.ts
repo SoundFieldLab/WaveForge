@@ -18,6 +18,8 @@ export class BeatProvider {
   private analyser: AnalyserNode | null = null;
   private source: MediaElementAudioSourceNode | null = null;
   private audioEl: HTMLAudioElement | null = null;
+  /** objectURL 与 audioEl 同生命周期：dispose 时 revoke，否则每次换音频泄漏整个文件的 Blob */
+  private audioObjectUrl: string | null = null;
   private freqData: Uint8Array<ArrayBuffer> | null = null;
 
   private _bpm = 120;
@@ -55,6 +57,7 @@ export class BeatProvider {
     this.analyser.smoothingTimeConstant = 0.4;
 
     const url = URL.createObjectURL(file);
+    this.audioObjectUrl = url;
     this.audioEl = new Audio();
     this.audioEl.src = url;
     this.audioEl.loop = true;
@@ -184,6 +187,10 @@ export class BeatProvider {
     this.source?.disconnect();
     this.analyser?.disconnect();
     this.audioCtx?.close();
+    if (this.audioObjectUrl) {
+      URL.revokeObjectURL(this.audioObjectUrl);
+      this.audioObjectUrl = null;
+    }
     this.audioEl = null;
     this.source = null;
     this.analyser = null;

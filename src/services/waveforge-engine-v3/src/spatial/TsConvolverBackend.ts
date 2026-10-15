@@ -348,7 +348,8 @@ export class TsConvolverBackend implements SpatialBackend {
     }
     this.speakers = config.speakers ?? []
     this.amount = Math.min(1, Math.max(0, config.amount ?? 1))
-    this.masterGain = config.masterGain ?? 1
+    // 钳制到契约 0.5..1：任何上游路径（含绕过 codec 的直调）都不会把空间级推爆
+    this.masterGain = Math.min(1, Math.max(0.5, config.masterGain ?? 1))
     this.distanceModel = config.distanceModel ?? 'inverse'
     // 距离衰减可配（规划书属性面板：衰减模型/参考距离/最大距离）；钳位防退化
     // （ref ≥ 0.1、max ≥ ref+0.1，linear 分母恒正）

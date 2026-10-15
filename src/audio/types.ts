@@ -183,6 +183,13 @@ export interface TrackAnalysis {
    *  几乎等高，绝对峰值（≥0.6）挡不住 argmax 落在错误的重复段上（实测 Одна 偏移
    *  错 ~4-5s ≈ 一句歌词）；突出度不足 = 偏移不可信 */
   envelopeProminence?: number
+  /** 包络段投票共识偏移（秒，可选）：30s 段独立找局部峰、≥2 段聚到同一偏移的中位。
+   *  与全曲峰一致（≤5s）= 峰可信旁证，供 MV 对齐"投票一致救援"（峰 0.45-0.6 的 live） */
+  envelopeVoteOffset?: number
+  /** 网格与 MV onset 的贴合度（gridOnsetConfidence，未混入锚点/清晰度偏置）。
+   *  拍点提示模式下 confidence 是"拿歌曲节拍自证"的循环分数（恒≈1），对齐判定
+   *  必须用这份独立证据（俺の彼女 回归） */
+  gridBaseConfidence?: number
   sourceSignature?: string
   analysisVersion: string
   createdAt: number

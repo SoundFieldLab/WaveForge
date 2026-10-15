@@ -50,15 +50,29 @@ interface DesignCacheEntry {
   at: number
 }
 
+// 持久层模块级镜像：与 loudnessNormalization 同款——避免每次 remember 都全量读+排序+重写 localStorage。
+let compensationCacheMirror: Record<string, DesignCacheEntry> | null = null
+
 function loadCache(): Record<string, DesignCacheEntry> {
+  // 镜像失效校验：localStorage 的键被外部清空（用户清缓存 / 测试 beforeEach.clear() /
+  // 其他标签页删除）时必须回落到空 —— 否则镜像里的旧条目会永远命中（测试间串味 +
+  // 用户清了缓存补偿设置却不生效）。
+  if (compensationCacheMirror) {
+    try {
+      if (!localStorage.getItem(CACHE_KEY) && Object.keys(compensationCacheMirror).length > 0) {
+        compensationCacheMirror = null
+      }
+    } catch { /* localStorage 不可用时沿用镜像 */ }
+  }
+  if (compensationCacheMirror) return compensationCacheMirror
   try {
     const raw = localStorage.getItem(CACHE_KEY)
-    if (!raw) return {}
-    const parsed = JSON.parse(raw) as Record<string, DesignCacheEntry>
-    return parsed && typeof parsed === 'object' ? parsed : {}
+    const parsed = raw ? (JSON.parse(raw) as Record<string, DesignCacheEntry>) : {}
+    compensationCacheMirror = parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
-    return {}
+    compensationCacheMirror = {}
   }
+  return compensationCacheMirror
 }
 
 function saveCache(cache: Record<string, DesignCacheEntry>): void {
@@ -79,8 +93,30 @@ function cacheKeyFor(
   // custom 模式缓存键必须包含频段指纹：否则用户拖动自定义频段后 design() 命中旧缓存永不更新。
   // 指纹与引擎侧 compensationDesignKey()（`custom:${JSON.stringify(bands || [])}`）保持一致。
   if (mode === 'custom') return `custom:${JSON.stringify(customBands || [])}`
-  const bucket = volume === null ? 100 : Math.round(volume / VOLUME_QUANTUM) * VOLUME_QUANTUM
+  // null 与负值（音量未知）统一按 100：否则 -1 → bucket 0，与引擎侧归一 100 的 key 不一致
+  const bucket = volume == null || volume < 0 ? 100 : Math.round(volume / VOLUME_QUANTUM) * VOLUME_QUANTUM
   return `auto:${Math.max(0, Math.min(100, bucket))}`
+}
+
+/** 3004 响应段逐段校验：坏数据整包拒绝（此前零校验直接持久化，脏缓存会让
+ *  重建滤波器时 throw 且重启不自愈）。 */
+function sanitizeSegments(raw: unknown): CompensationDesign['segments'] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const TYPES = new Set(['lowshelf', 'peaking', 'highshelf'])
+  const out: CompensationDesign['segments'] = []
+  for (const seg of raw) {
+    if (!seg || typeof seg !== 'object') return null
+    const s = seg as Record<string, unknown>
+    if (typeof s.type !== 'string' || !TYPES.has(s.type)) return null
+    const freq = Number(s.frequency)
+    const gain = Number(s.gain)
+    const q = Number(s.q ?? 1)
+    if (!Number.isFinite(freq) || freq < 20 || freq > 20000) return null
+    if (!Number.isFinite(gain) || Math.abs(gain) > 24) return null
+    if (!Number.isFinite(q) || q <= 0 || q > 20) return null
+    out.push({ type: s.type as 'lowshelf' | 'peaking' | 'highshelf', frequency: freq, gain, q })
+  }
+  return out.length > 0 ? out : null
 }
 
 export class CompensationService {
@@ -147,7 +183,9 @@ export class CompensationService {
         const controller = new AbortController()
         timeoutId = window.setTimeout(() => controller.abort(new DOMException('compensation design timed out', 'TimeoutError')), DESIGN_TIMEOUT_MS)
         const body: Record<string, unknown> = { mode }
-        if (mode === 'auto') body.volume = volume ?? 100
+        // null/负值（系统音量未知，如非 Windows/IPC 失败）按满音量：与引擎内置
+        // 回退（volume<0 视为 100）同语义，此前会把 -1 发给服务端（契约违背）
+        if (mode === 'auto') body.volume = volume != null && volume >= 0 ? volume : 100
         if (mode === 'preset') body.preset = preset
         if (mode === 'custom') body.bands = customBands || []
         const response = await fetch(`${COMPENSATION_SERVICE_URL}/compensation`, {
@@ -162,8 +200,11 @@ export class CompensationService {
         }
         const data = await response.json() as Partial<CompensationDesign>
         if (!Array.isArray(data.segments) || data.segments.length === 0 || seq !== this.requestSeq) return null
+        // 逐段校验：坏数据整包拒绝（按 null 处理走内置回退），绝不持久化
+        const segments = sanitizeSegments(data.segments)
+        if (!segments) return null
         const design: CompensationDesign = {
-          segments: data.segments,
+          segments,
           label: typeof data.label === 'string' ? data.label : '频响补偿',
           mode,
           preset: typeof data.preset === 'string' ? data.preset : undefined,

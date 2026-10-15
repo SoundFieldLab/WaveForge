@@ -8,7 +8,7 @@
  *  - replace(next)：整包替换（场景应用 / 分享串导入 / 恢复默认）
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { V3EngineParams } from '../src/types'
 import type { V3UiBridge } from './bridge'
 
@@ -38,6 +38,8 @@ export interface V3ParamsController {
   params: V3EngineParams
   /** 深合并局部修改并提交引擎（完整快照语义） */
   patch: (partial: DeepPartial<V3EngineParams>) => void
+  /** rAF 合流版 patch：滑杆拖动（60Hz input 事件）用这个，降低整页 setState 与 JSON 序列化频率 */
+  patchThrottled: (partial: DeepPartial<V3EngineParams>) => void
   /** 整包替换（场景/分享串/恢复默认） */
   replace: (next: V3EngineParams) => void
 }
@@ -57,9 +59,31 @@ export function useV3Params(bridge: V3UiBridge): V3ParamsController {
     commit(merged)
   }, [bridge, commit])
 
+  // 滑杆拖动路径：input 事件 ~60Hz 直发 commit 会让整页 setState + 5+ 次全量 JSON
+  // 序列化（bridge 对比/克隆/各模块签名）——rAF 合流到每帧一次，观感无差。
+  const pendingPatchRef = useRef<DeepPartial<V3EngineParams> | null>(null)
+  const patchFrameRef = useRef<number | null>(null)
+  const patchThrottled = useCallback((partial: DeepPartial<V3EngineParams>) => {
+    pendingPatchRef.current = pendingPatchRef.current
+      ? deepMerge(pendingPatchRef.current, partial)
+      : partial
+    if (patchFrameRef.current !== null) return
+    patchFrameRef.current = requestAnimationFrame(() => {
+      patchFrameRef.current = null
+      const pending = pendingPatchRef.current
+      if (pending) {
+        pendingPatchRef.current = null
+        patch(pending)
+      }
+    })
+  }, [patch])
+  useEffect(() => () => {
+    if (patchFrameRef.current !== null) cancelAnimationFrame(patchFrameRef.current)
+  }, [])
+
   const replace = useCallback((next: V3EngineParams) => {
     commit(next)
   }, [commit])
 
-  return { params, patch, replace }
+  return { params, patch, patchThrottled, replace }
 }

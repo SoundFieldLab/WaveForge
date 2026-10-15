@@ -423,6 +423,9 @@ export function useAudioPlayer(
   const autoMixPreparationKeyRef = useRef<string | null>(null)
   const acceptanceAutoMixAnalysisStartsRef = useRef(0)
   // REPREPARE 状态：组合级"已就绪"集合 + 失败尝试记录 + 定时重试句柄
+  // 会话集合上限：preparationKey 是 12 字段拼的长串，数百曲的长会话只增不减会缓慢积内存
+  //（preparedOk 只在失败时 delete）。超限按插入序淘汰最旧（FIFO，语义近似会话遗忘）。
+  const AUTO_MIX_SESSION_SET_MAX = 120
   const autoMixPreparedOkRef = useRef<Set<string>>(new Set())
   /** 用户在 HUD 点「关闭」跳过的曲对（`source->target`）：这对曲目不做智能混音，只在末尾做一次
    *  短交叉，让这首歌完整播完。按曲对记，下一首自己的过渡不受影响。 */
@@ -485,6 +488,9 @@ export function useAudioPlayer(
   const trackStemControlRef = useRef(trackStemControl)
   trackStemControlRef.current = trackStemControl
   const trackStemDesiredRef = useRef(false)
+  // 用户是否主动开启过分轨（区别于 desired 的运行时门控）：变速播放会把 desired
+  // 清成 false，恢复原速时按这个标记把分轨接回来——否则倍速过一次分轨就永久失效。
+  const trackStemUserWantedRef = useRef(false)
   const gaplessIntegrationRef = useRef<GaplessIntegration | null>(null)
   // Gapless 首选无缝拼接控制器（独立模块，逻辑见 src/services/gapless/）
   const seamlessJoinControllerRef = useRef<SeamlessJoinController | null>(null)
@@ -692,9 +698,12 @@ export function useAudioPlayer(
       // 音频图（gain 淡化/静音全部失效，且元素以 volume=1 直出）。
       mediaSourcesRef.current = [firstSource, secondSource]
       master.connect(analyser).connect(outputGain).connect(context.destination)
-      // DG-LAB 立体声采集：ChannelSplitter 从 **master** 直接取左右声道。
-      // master 必然参与渲染（避免分析器挂「悬空尾」不被处理导致恒 0）。
-      // 体感强度仍来自 analyser（效果链后）；左右声像采用源声道（EQ/压缩类效果不影响声像）。
+      // DG-LAB 立体声采集：ChannelSplitter 挂在 **analyser 之后**（不是 master）。
+      // 此前从 master 直接取：三引擎 attach 第一步 masterGain.disconnect()（无参全断）
+      // 会连同 master→splitter 一起断开，dispose 只恢复 master→analyser —— 左右声道
+      // 分析自首次 attach 起就永久断流（立体声体感/可视化失效）。挂在 analyser 后，
+      // 引擎恢复 master→analyser 直连时采集支路随之自动恢复。
+      // 体感强度与左右声像同源（效果链后）；EQ/压缩类效果不影响声像，语义不变。
       const splitter = context.createChannelSplitter(2)
       const leftAnalyser = context.createAnalyser()
       const rightAnalyser = context.createAnalyser()
@@ -710,7 +719,7 @@ export function useAudioPlayer(
       const silentR = context.createGain()
       silentL.gain.value = 0
       silentR.gain.value = 0
-      master.connect(splitter)
+      analyser.connect(splitter)
       splitter.connect(leftAnalyser, 0)
       splitter.connect(rightAnalyser, 1)
       leftAnalyser.connect(silentL).connect(context.destination)
@@ -774,6 +783,8 @@ export function useAudioPlayer(
     trackStemManifestRef.current = null
     trackStemGenerationRef.current += 1
     trackStemDesiredRef.current = false
+    // 切歌重置 = 换歌后的全新分轨会话：用户意图标记一并复位
+    trackStemUserWantedRef.current = false
     setTrackStemControl({
       status,
       gains: { ...UNITY_RECONSTRUCTION_GAINS },
@@ -804,7 +815,9 @@ export function useAudioPlayer(
     userSpeedRef.current = clamped
     setEffectivePlaybackSpeed(clamped)
     const audio = getActiveAudio()
-    if (audio && (transitionStateRef.current === 'playing' || transitionStateRef.current === 'idle' || transitionStateRef.current === 'loading-current')) {
+    // armed（automix 已排定下一首但当前曲还在正常播）也要应用：否则 AutoMix 开着时
+    // 用户改倍速完全无效（界面变了、声音没变——用户实测反馈）。running-transition 仍让位。
+    if (audio && (transitionStateRef.current === 'playing' || transitionStateRef.current === 'idle' || transitionStateRef.current === 'loading-current' || transitionStateRef.current === 'armed')) {
       audio.playbackRate = clamped
     }
   }, [getActiveAudio])
@@ -845,7 +858,26 @@ export function useAudioPlayer(
     return () => window.removeEventListener('play', applySpeedOnPlay, true)
   }, [getActiveAudio])
 
-  const enableTrackStems = useCallback(async () => {
+  // 分轨启用防重入：enable 是重活（换 generation 会 kill 上一个 worker），连发会自踩。
+  // 播放页滑块/学歌伴奏模式/预载路径可能短时间内多次触发，这里收敛为单个 in-flight
+  // promise，后来的调用直接等它完成并复用结果——不换 generation、不杀 worker。
+  const trackStemEnableInFlightRef = useRef<Promise<boolean> | null>(null)
+
+  const enableTrackStems = useCallback(async (): Promise<boolean> => {
+    if (trackStemEnableInFlightRef.current) return trackStemEnableInFlightRef.current
+    const attempt = (async () => {
+      return await enableTrackStemsInner()
+    })()
+    trackStemEnableInFlightRef.current = attempt
+    try {
+      return await attempt
+    } finally {
+      // 清理让下一次真实重试成为可能；失败也清（failed 状态允许用户重试）
+      if (trackStemEnableInFlightRef.current === attempt) trackStemEnableInFlightRef.current = null
+    }
+  }, [])
+
+  const enableTrackStemsInner = useCallback(async (): Promise<boolean> => {
     const metadata = currentMetadataRef.current
     const audio = getActiveAudio()
     if (!metadata?.url || !metadata.trackKey || !audio || !Number.isFinite(audio.duration) || audio.duration <= 0) {
@@ -866,6 +898,7 @@ export function useAudioPlayer(
       const resumed = await trackStemMixerRef.current.play(audio.currentTime).catch(() => false)
       if (resumed) {
         trackStemDesiredRef.current = true
+        trackStemUserWantedRef.current = true
         setTrackStemControl(current => ({ ...current, active: true, reason: undefined }))
         return true
       }
@@ -884,6 +917,7 @@ export function useAudioPlayer(
 
     const generation = ++trackStemGenerationRef.current
     trackStemDesiredRef.current = true
+    trackStemUserWantedRef.current = true
     setTrackStemControl(current => ({ ...current, status: 'separating', progress: 0, active: false, locked: false, reason: undefined }))
     // 真实进度代替恒 0%：首次分离要加载模型 + 推理首个 20s 分段（约 10–20s），界面一直显示 0%
     // 会被当成卡死（用户实测"点了没反应"）。这里按**已就绪的分段数**推进，激活后再交给泵接管。
@@ -1243,6 +1277,12 @@ export function useAudioPlayer(
       transitionStrategy: strategy,
       transitionStartTime: null,
     })
+    // 过渡收尾：恢复用户倍速（过渡开始时被归 1 让位 BPM 变速；此后无 'play' 事件，
+    // 不在这里恢复的话用户倍速静默失效到下一次 play/换曲）
+    if (userSpeedRef.current !== 1) {
+      target.playbackRate = userSpeedRef.current
+      setEffectivePlaybackSpeed(userSpeedRef.current)
+    }
     // 消费"过渡期间被延后的设置变更"：提交已完成，此时重排新设置才安全
     //（当场重排会掐断过渡并把源曲增益弹回 1）。
     if (pendingReprepareRef.current) {
@@ -1526,6 +1566,18 @@ export function useAudioPlayer(
             () => { if (handoff) void handoff() },
             { overlap: plan.overlapSeconds, handoffFadeSeconds: RENDERED_HANDOFF_FADE_SECONDS },
           )
+          // playTransition 内部 rehydrate（磁盘读取 + decodeAudioData）可耗时数秒；
+          // 期间用户 seek/暂停/切歌会让本执行失效（cancelScheduledTransition 已 stop
+          // 届时的 activeSource，但取消发生在 source.start 之前时缓冲随后仍会起播）。
+          // 返回后必须立即复查：失效则停掉刚起的缓冲并恢复源曲增益，否则
+          // ① 过渡音频满音量叠上用户已 seek 的源曲；② 源曲被下方静音且 handoff
+          // 因 revision 校验不再提交 → 源曲静音卡死直到缓冲自然播完。
+          if (!isExecutionCurrent()) {
+            transitionRendererRef.current?.stopPlayback()
+            if (source) setDeckGain(getActiveGain(), source, 1)
+            debugLog('⏹️ [Transition] 缓冲启动后执行已失效（seek/暂停竞态），已停止缓冲并恢复源曲增益')
+            return
+          }
           if (result) {
             if (result.tooLate) {
               // 迟到保护（seek 越过切点）：缓冲未启动，source 仍在播放 → 回退标准交叉淡化。
@@ -1602,6 +1654,10 @@ export function useAudioPlayer(
               // 否则 handoff 会以"deck 已在播"的名义提交一个仍在 paused 的 deck
               // （commitTransition 不调用 play()）→ 永久静音但状态是"播放中"。
               let deckStartInFlight = false
+              // 起播结算通知器：handoff 等待 deck 提前起播的结果时挂起在该 Promise 上，
+              // 起播路径 settle（成功/失败）时 resolve——替代旧的 15ms 忙等轮询（最多 30 个定时器续体）。
+              let notifyDeckStartSettled: (() => void) | null = null
+              const deckStartSettled = new Promise<void>(resolve => { notifyDeckStartSettled = resolve })
               // 提前起播的提前量/交叉窗口：overlap 路径沿用混音尾速度同步窗口，
               // 无 overlap（QQ Enhanced 等）走固定 0.6s 提前 + 0.35s 交叉窗口。
               const deckStartLead = overlap > 0 ? overlap : RENDERED_HANDOFF_LEAD_SECONDS
@@ -1643,6 +1699,7 @@ export function useAudioPlayer(
                     // play() 成功后才算"已开始播放"：handoff 据此提交
                     deckStarted = true
                     deckStartInFlight = false
+                    notifyDeckStartSettled?.()
                     const ctx = audioContextRef.current
                     const bufferEndCtx = typeof result.bufferEndCtxTime === 'number' ? result.bufferEndCtxTime : null
                     if (standbyGain && ctx && bufferEndCtx !== null) {
@@ -1694,6 +1751,7 @@ export function useAudioPlayer(
                     const alreadyPlaying = target && !target.paused
                     if (!alreadyPlaying) deckStarted = false
                     deckStartInFlight = false
+                    notifyDeckStartSettled?.()
                     target.playbackRate = 1
                     console.error('❌ [Transition] overlap 提前启动目标失败:', err, alreadyPlaying ? '（deck 已在播放，保留接管）' : '')
                   }
@@ -1808,12 +1866,12 @@ export function useAudioPlayer(
                 }
                 if (deckStartInFlight) {
                   // 提前起播仍在途（seek/缓冲慢）：等它结算（正常 <100ms），不要抢同一个 deck
-                  // 各起播一次（会双重奏/互相 seek）。超时后仍退回 seek+play 兜底路径。
+                  // 各起播一次（会双重奏/互相 seek）。450ms 超时后仍退回 seek+play 兜底路径。
+                  // 等待用一次性 resolver（起播路径 settle 时 notify），不再 15ms 轮询。
                   void (async () => {
-                    const waitStart = performance.now()
-                    while (!deckStarted && deckStartInFlight && performance.now() - waitStart < 450) {
-                      await new Promise(resolve => window.setTimeout(resolve, 15))
-                    }
+                    const timeout = window.setTimeout(() => notifyDeckStartSettled?.(), 450)
+                    await deckStartSettled
+                    window.clearTimeout(timeout)
                     if (executionRevision !== transitionExecutionRevisionRef.current) {
                       releaseHandoff()
                       return
@@ -2286,6 +2344,11 @@ export function useAudioPlayer(
     const recordFailureAndScheduleRetry = (reason: string) => {
       const attempts = (autoMixPreparationAttemptsRef.current.get(preparationKey)?.attempts ?? 0) + 1
       autoMixPreparationAttemptsRef.current.set(preparationKey, { attempts, lastAt: Date.now() })
+      while (autoMixPreparationAttemptsRef.current.size > AUTO_MIX_SESSION_SET_MAX) {
+        const oldest = autoMixPreparationAttemptsRef.current.keys().next().value
+        if (oldest === undefined) break
+        autoMixPreparationAttemptsRef.current.delete(oldest)
+      }
       autoMixPreparedOkRef.current.delete(preparationKey)
       autoMixPreparationKeyRef.current = null
       logAutomixBackend('prepareAutoMix:reprepare', `attempts=${attempts} reason=${reason}`)
@@ -2355,6 +2418,11 @@ export function useAudioPlayer(
           recordFailureAndScheduleRetry(compatibilityIssue)
         } else {
           autoMixPreparedOkRef.current.add(preparationKey)
+          while (autoMixPreparedOkRef.current.size > AUTO_MIX_SESSION_SET_MAX) {
+            const oldestPrepared = autoMixPreparedOkRef.current.keys().next().value
+            if (oldestPrepared === undefined) break
+            autoMixPreparedOkRef.current.delete(oldestPrepared)
+          }
           autoMixPreparationAttemptsRef.current.delete(preparationKey)
         }
         return
@@ -2631,8 +2699,17 @@ export function useAudioPlayer(
       if (retryableFailure) {
         recordFailureAndScheduleRetry(retryableFailure)
       } else {
-        // 成功或确定性降级（置信度/剩余时间/格式预检）：本组合不再重试
+        // 成功或确定性降级（置信度/剩余时间/格式预检）：本组合不再重试。
+        // 同时清"正在准备"标记：seek 越过过渡窗口会清 plan 并重调 prepareAutoMix，
+        // 若 key 还挂着，2279 行的"相同组合正在准备"会把重入拦截掉——本曲剩余
+        // 时间完全失去过渡（硬切 + 静音缝）。
         autoMixPreparedOkRef.current.add(preparationKey)
+        autoMixPreparationKeyRef.current = null
+        while (autoMixPreparedOkRef.current.size > AUTO_MIX_SESSION_SET_MAX) {
+          const oldestPrepared = autoMixPreparedOkRef.current.keys().next().value
+          if (oldestPrepared === undefined) break
+          autoMixPreparedOkRef.current.delete(oldestPrepared)
+        }
         autoMixPreparationAttemptsRef.current.delete(preparationKey)
       }
       debugLog('✅ [AutoMix] 过渡已准备就绪（armed），等待播放到过渡点...')
@@ -2746,6 +2823,11 @@ export function useAudioPlayer(
     if (!current?.trackKey || !next?.trackKey) return
     const pairKey = `${current.trackKey}->${next.trackKey}`
     autoMixSkippedPairsRef.current.add(pairKey)
+    while (autoMixSkippedPairsRef.current.size > AUTO_MIX_SESSION_SET_MAX) {
+      const oldestPair = autoMixSkippedPairsRef.current.keys().next().value
+      if (oldestPair === undefined) break
+      autoMixSkippedPairsRef.current.delete(oldestPair)
+    }
     logAutomixBackend('automix:skipped-by-user', pairKey)
     // 丢掉在飞的准备/渲染与定时器；preserveNext=true 保住待机 deck 的源与元数据（不重载音频），
     // announce=false 不对外播「cancelled」状态（避免播放页闪一下过渡态又消失）。
@@ -3090,8 +3172,29 @@ export function useAudioPlayer(
     }
     const handleRateChange = (event: Event) => {
       const active = getActiveAudio()
-      if (event.currentTarget !== active || !active || Math.abs(active.playbackRate - 1) < 0.001 || !trackStemMixerRef.current) return
+      if (event.currentTarget !== active || !active || !trackStemMixerRef.current) return
+      // 回到原速时自动把分轨接回来（若用户此前开着分轨）：否则倍速过一次歌
+      // 分轨就永久失效，表现为"时好时坏"。desired 会被下方变速分支清成 false，
+      // 所以恢复判定用 userWanted（用户主动开启过的标记）而不是 desired。
+      if (Math.abs(active.playbackRate - 1) < 0.001) {
+        if (trackStemUserWantedRef.current) {
+          trackStemDesiredRef.current = true
+          if (!trackStemControlRef.current.active && transitionStateRef.current !== 'running-transition') {
+            const mixer = trackStemMixerRef.current
+            void mixer.play(active.currentTime).then(ready => {
+              if (ready && trackStemDesiredRef.current) setTrackStemControl(current => ({ ...current, active: true, status: 'partial', reason: undefined }))
+            }).catch(() => undefined)
+          }
+        }
+        return
+      }
       trackStemDesiredRef.current = false
+      // 变速时同时停掉分轨预载泵：泵的循环体只按 generation/desired 门控激活，
+      // prepareWindow 照跑——倍速播放期间后台每 3s 白做一轮 HTDemucs 窗口解码。
+      if (trackStemPumpTimerRef.current !== null) {
+        window.clearInterval(trackStemPumpTimerRef.current)
+        trackStemPumpTimerRef.current = null
+      }
       trackStemMixerRef.current.returnToOriginal()
       setDeckGain(getActiveGain(), active, 1)
       setTrackStemControl(current => ({ ...current, active: false, status: 'unavailable', reason: '变速播放期间暂不支持分轨调节' }))
@@ -3576,7 +3679,10 @@ export function useAudioPlayer(
           try {
             gain.gain.cancelScheduledValues(t0)
             gain.gain.setValueAtTime(0.0001, t0)
-            gain.gain.linearRampToValueAtTime(Math.max(0.0001, volumeRef.current), t0 + fadeDur)
+            // 淡入终点必须是 1（deck 相对增益）而不是 volumeRef：masterGain 已承载
+            // 全局音量，deck 增益再乘一遍 volumeRef 会把整曲响度压成 volume²
+            // （70% 音量实际只有 49%，-6dB）。与上方 setDeckGain(..., 1) 同口径。
+            gain.gain.linearRampToValueAtTime(1, t0 + fadeDur)
             debugLog(`🎚️ [LoadAndPlay] 淡入头 ${fadeDur}s（衔接上一首 Apple 淡出尾）`)
           } catch { /* 增益自动化失败则按原音量起播 */ }
         }
@@ -3914,7 +4020,10 @@ export function useAudioPlayer(
     if (externalActiveRef.current) {
       void bridgeVolume(clamped)
       emit({ volume: clamped })
-      // 淡出尾中拖音量会撞销在途斜坡：按剩余时间以新音量为起点重新淡出
+      // 淡出尾中拖音量会撞销在途斜坡：按剩余时间以新音量为起点重新淡出。
+      // else 分支必须终止在途斜坡：duration 未知（电台/WebView2 初期未回填）时
+      // 窗口判定不成立，若只置 flag 不发指令，已发出的 fade(0) 斜坡会继续降到 0，
+      // 出现"音量条满格但没声音"（bridge 层新 fade 指令会覆盖在途斜坡）。
       if (externalFadeActiveRef.current) {
         const s = getBridgeState()
         const fadeDur = externalFadeDuration()
@@ -3922,6 +4031,7 @@ export function useAudioPlayer(
           void bridgeFade(0, Math.max(0.5, s.duration - s.position) * 1000)
         } else {
           externalFadeActiveRef.current = false
+          void bridgeFade(clamped, 0)
         }
       }
       return
@@ -4082,6 +4192,13 @@ export function useAudioPlayer(
         transitioning: false,
         transitionStrategy: 'gapless',
       })
+      // 过渡收尾：恢复用户倍速。过渡开始时 onTransitionReset 把 deck 归 1（让位 BPM
+      // 变速），此后音频持续播放不会再触发 'play' 事件——不在这里恢复的话，用户倍速
+      // 静默失效直到下一次 play/换曲。
+      if (userSpeedRef.current !== 1) {
+        target.playbackRate = userSpeedRef.current
+        setEffectivePlaybackSpeed(userSpeedRef.current)
+      }
 
       debugLog('[AdoptAudio] 接管完成，当前播放位置:', target.currentTime.toFixed(2))
       return true
@@ -4205,6 +4322,15 @@ export function useAudioPlayer(
       setVocalLevel: setTrackVocalLevel,
       setStemGains: setTrackStemGains,
       returnToOriginal: returnTrackStemsToOriginal,
+      /** 学歌伴奏导出：拿整曲音频的本地缓存路径。当前曲直接复用已准备好的 metadata.url；
+       *  其余歌曲（历史记录跳回等场景）抛错提示先播放该曲——导出本来就只在当前曲上操作。 */
+      prepareInput: async (song: { platform?: string; mid?: string; id?: number; name?: string }) => {
+        const metadata = currentMetadataRef.current
+        if (metadata?.url && (!song || metadata.name === song.name)) {
+          return ensureTrackStemInput(metadata)
+        }
+        throw new Error('请先播放这首歌，再导出伴奏（导出只针对当前播放的曲目）')
+      },
     },
     /** 用户倍速（歌曲本体）：仅 playing/idle 应用；过渡期间自动让位给引擎 BPM 变速 */
     playbackSpeed: {

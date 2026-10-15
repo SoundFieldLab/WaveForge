@@ -143,6 +143,10 @@ export function useAudioAnalyzer(
       let disposed = false
       const smoothedSpectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
       const previousBins = new Float32Array(EXT_BIN_COUNT)
+      // 逐帧缓冲复用：30Hz 热路径上每帧 new 两个 Float32Array 是纯 GC churn
+      const binsScratch = new Float32Array(EXT_BIN_COUNT)
+      const spectrumScratch = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+      const spectrumOut = new Float32Array(ANALYZER_SPECTRUM_BANDS)
       let previousOverall = 0
       let beatPulse = 0
       let lastBeatTime = -1000
@@ -200,7 +204,8 @@ export function useAudioAnalyzer(
 
           // bridge bins（可能非 64 长）→ 固定 64 bin（取峰值重采样，0..1）
           const raw = getBins()
-          const bins = new Float32Array(EXT_BIN_COUNT)
+          const bins = binsScratch
+          bins.fill(0)
           if (raw && raw.length > 0) {
             for (let i = 0; i < EXT_BIN_COUNT; i += 1) {
               const src = Math.floor(i * raw.length / EXT_BIN_COUNT)
@@ -232,11 +237,12 @@ export function useAudioAnalyzer(
           } else beatPulse *= 0.72
 
           // 24 段对数频谱使用固定 byte 标尺，保留绝对强弱并按真实时间平滑。
-          const spectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+          const spectrum = spectrumScratch
           for (let k = 0; k < ANALYZER_SPECTRUM_BANDS; k += 1) {
             spectrum[k] = mapAnalyserByteEnergy(bandEnergy(bins, EXT_BAND_EDGES[k], EXT_BAND_EDGES[k + 1]))
           }
-          const smoothed = applyTimedAttackRelease(smoothedSpectrum, spectrum, deltaMs, 48, 210)
+          // spectrumOut 双缓冲：快照会被下游持有到下一帧，不能与本帧输入/平滑状态共用一块内存
+          const smoothed = applyTimedAttackRelease(smoothedSpectrum, spectrum, deltaMs, 48, 210, spectrumOut)
           smoothedSpectrum.set(smoothed)
 
           // loopback 为混音单声道：L/R 用同一份能量（DG-LAB 立体声映射退化为同相）
@@ -340,6 +346,9 @@ export function useAudioAnalyzer(
     const smoothedSpectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
     // 对数频段边界（20Hz~12kHz），与采样率无关，可预先计算
     const bandEdges = buildLogBandEdges(ANALYZER_SPECTRUM_BANDS, SPECTRUM_MIN_FREQ, SPECTRUM_MAX_FREQ)
+    // 逐帧缓冲复用 + 双缓冲输出（快照会被下游持有到下一帧，不能与平滑状态共用内存）
+    const spectrumScratchLocal = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+    const spectrumOutLocal = new Float32Array(ANALYZER_SPECTRUM_BANDS)
 
     const measureBand = (minimumFrequency: number, maximumFrequency: number) => {
       const nyquist = analyser.context.sampleRate / 2
@@ -393,7 +402,9 @@ export function useAudioAnalyzer(
       if (disposed) return
       // 无消费者或窗口隐藏时进入空闲：不采样、不续帧，避免 Electron
       // backgroundThrottling 关闭后 rAF 在后台仍全速空转。
-      if ((document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) || !store.hasListeners()) return
+      // 门控口径与续帧一致：订阅者或后台消费者任一存在即继续（否则 Chroma/SignalRGB
+      // 后台监听场景里 rAF 停死后无人重启，后台分析静默失效）。
+      if ((document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) || (!store.hasListeners() && !store.hasBackgroundConsumers())) return
       if (now - lastUpdateTime >= updateInterval) {
         const deltaMs = lastUpdateTime > 0 ? now - lastUpdateTime : updateInterval
         lastUpdateTime = now
@@ -405,7 +416,7 @@ export function useAudioAnalyzer(
         const rawOverall = rawBass * 0.38 + rawMid * 0.42 + rawHigh * 0.2
         const nyquist = analyser.context.sampleRate / 2
         // 24 段对数频谱使用固定 byte 标尺，保留绝对响度变化；平滑由真实采样间隔决定。
-        const spectrum = new Float32Array(ANALYZER_SPECTRUM_BANDS)
+        const spectrum = spectrumScratchLocal
         for (let k = 0; k < ANALYZER_SPECTRUM_BANDS; k += 1) {
           const f0 = bandEdges[k]
           const f1 = bandEdges[k + 1]
@@ -420,7 +431,7 @@ export function useAudioAnalyzer(
           }
           spectrum[k] = mapAnalyserByteEnergy((sum / Math.max(1, end - start)) * 0.62 + peak * 0.38)
         }
-        const smoothed = applyTimedAttackRelease(smoothedSpectrum, spectrum, deltaMs, 48, 210)
+        const smoothed = applyTimedAttackRelease(smoothedSpectrum, spectrum, deltaMs, 48, 210, spectrumOutLocal)
         smoothedSpectrum.set(smoothed)
         const fluxStart = Math.max(1, Math.floor(45 / nyquist * data.length))
         const fluxEnd = Math.min(data.length, Math.ceil(10000 / nyquist * data.length))
@@ -503,7 +514,7 @@ export function useAudioAnalyzer(
 
     const start = () => {
       if (disposed) return
-      if (animationFrame || (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) || !store.hasListeners()) return
+      if (animationFrame || (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) || (!store.hasListeners() && !store.hasBackgroundConsumers())) return
       animationFrame = requestAnimationFrame(analyze)
     }
 

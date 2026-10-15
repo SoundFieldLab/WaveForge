@@ -228,11 +228,26 @@ function decodeSpatial(raw: unknown): SpatialSettings {
   const def = createDefaultSpatialSettings()
   return {
     mode,
+    // masterGain 契约 0.5..1（注释见 spatial/types）：无上界时分享串可传 1e6
+    // 把空间级输出 softClip 成方波（严重失真）
     masterGain: typeof o.masterGain === 'number' && Number.isFinite(o.masterGain)
-      ? o.masterGain
+      ? Math.min(1, Math.max(0.5, o.masterGain))
       : def.masterGain,
-    instant: { ...def.instant, ...(o.instant as object) },
-    headLocked: { ...def.headLocked, ...(o.headLocked as object) },
+    instant: {
+      ...def.instant,
+      ...(o.instant as object),
+      // room 枚举白名单：损坏/恶意值绕过类型系统直达 roomSim 查表（undefined → NaN 几何
+      // → 引擎输出永久 NaN 静音）。其余 instant 数值字段由消费端 clamp 兜底。
+      room: oneOf((o.instant as Record<string, unknown>).room,
+        ['off', 'studio', 'hall', 'stage', 'church', 'outdoor', 'bathroom', 'corridor'] as const, def.instant.room),
+    },
+    headLocked: {
+      ...def.headLocked,
+      ...(o.headLocked as object),
+      // speakers 数组字段整体校验：含 null/非数组的 spread 会覆盖默认数组，
+      // 消费端读 .length / p.azimuthDeg 抛 TypeError
+      speakers: rebuildSpeakers((o.headLocked as Record<string, unknown>).speakers) ?? def.headLocked.speakers,
+    },
     world: { ...def.world, ...(o.world as object) },
     stage: { ...def.stage, ...(o.stage as object) },
     ambience: { ...def.ambience, ...(o.ambience as object) },
@@ -242,6 +257,27 @@ function decodeSpatial(raw: unknown): SpatialSettings {
     refDistance: num(o.refDistance, 0.1, 100, def.refDistance),
     maxDistance: num(o.maxDistance, 1, 200, def.maxDistance),
   }
+}
+
+/** headLocked.speakers 逐字段重建：数组元素缺任一字段即整个数组按默认处理 */
+function rebuildSpeakers(raw: unknown): Array<{ azimuthDeg: number; elevationDeg: number; distance: number; gain: number; size: number }> | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null
+  const out: Array<{ azimuthDeg: number; elevationDeg: number; distance: number; gain: number; size: number }> = []
+  for (const item of raw) {
+    if (!isObj(item)) return null
+    const az = (item as Record<string, unknown>).azimuthDeg
+    const el = (item as Record<string, unknown>).elevationDeg
+    const dist = (item as Record<string, unknown>).distance
+    const gain = (item as Record<string, unknown>).gain
+    const size = (item as Record<string, unknown>).size
+    if (typeof az !== 'number' || !Number.isFinite(az)) return null
+    if (typeof el !== 'number' || !Number.isFinite(el)) return null
+    if (typeof dist !== 'number' || !Number.isFinite(dist) || dist <= 0) return null
+    if (typeof gain !== 'number' || !Number.isFinite(gain)) return null
+    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) return null
+    out.push({ azimuthDeg: az, elevationDeg: el, distance: dist, gain, size })
+  }
+  return out
 }
 
 /** 白名单重建：只读取已知字段，未知字段（含 __proto__ 等注入键）一律丢弃 */
@@ -365,7 +401,9 @@ function sanitizeParams(raw: unknown): V3EngineParams {
     },
     surround3d: {
       enabled: bool(surRaw.enabled, false),
-      distance: num(surRaw.distance, 0, 10, 0.5),
+      // 引擎域 0..1（scale = 0.5 + 0.5·d）：此前 clamp 0..10 与引擎域不一致，
+      // 分享串传 distance=10 会把环绕电平拉到 5.5×，下游限幅器长期深压缩
+      distance: num(surRaw.distance, 0, 1, 0.5),
       speed: num(surRaw.speed, 0, 10, 1),
       angle: num(surRaw.angle, -360, 360, 0),
       direction: numOneOf(surRaw.direction, [1, -1] as const, 1),
