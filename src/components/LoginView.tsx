@@ -87,7 +87,8 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         setQQError('')
         setQQManualMode(true)
         setLoading(false)
-        window.open('https://y.qq.com', '_blank')
+        // TV 真机：window.open 无效，走原生 openExternal（ACTION_VIEW）跳系统浏览器
+        openWebsiteExternal('https://y.qq.com')
         return
       }
 
@@ -120,15 +121,36 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     }
   }
 
+  /** TV 上打开网页：window.open 在 Android WebView 里无效，走原生桥 ACTION_VIEW。
+   *  返回 false 表示当前环境打不开网页（调用方自行提示用户在电脑上操作）。 */
+  const openWebsiteExternal = (url: string): boolean => {
+    const native = (window as any).WaveForgeNative
+    if (native?.openExternal) {
+      native.openExternal(url)
+      return true
+    }
+    const opened = window.open(url, '_blank')
+    return Boolean(opened)
+  }
+
   const handleQQOpenWebsite = async () => {
     try {
+      // TV（无 window.open 能力）：剪贴板/F12 步骤都做不到，直接跳浏览器并提示在手机/电脑继续
+      const native = (window as any).WaveForgeNative
+      if (!native?.openExternal && !window.open) {
+        setQQError('当前设备无法打开网页：请在电脑浏览器访问 y.qq.com 登录后复制 Cookie 粘贴到下方')
+        return
+      }
       await navigator.clipboard.writeText('document.cookie')
       if (!mountedRef.current) return
       clearWebsiteTimers()
       setShowCopiedToast(true)
       websiteTimerRef.current = window.setTimeout(() => {
         websiteTimerRef.current = null
-        window.open('https://y.qq.com', '_blank')
+        const opened = openWebsiteExternal('https://y.qq.com')
+        if (!opened) {
+          setQQError('无法打开网页：请在电脑浏览器访问 y.qq.com 登录后复制 Cookie 粘贴到下方')
+        }
         toastTimerRef.current = window.setTimeout(() => {
           toastTimerRef.current = null
           if (mountedRef.current) setShowCopiedToast(false)

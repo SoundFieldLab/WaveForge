@@ -15,6 +15,7 @@
  */
 
 import { appleApiRequest } from './appleApiBridge'
+import { getSecureToken, removeSecureToken } from './secureTokenStore'
 
 export interface AppleUserInfo {
   name: string
@@ -79,8 +80,8 @@ export interface AppleCredentials {
 
 export function getAppleCredentials(): AppleCredentials {
   return {
-    developerToken: localStorage.getItem('appleDeveloperToken') || '',
-    mediaUserToken: localStorage.getItem('appleMediaUserToken') || '',
+    developerToken: getSecureToken('appleDeveloperToken') || '',
+    mediaUserToken: getSecureToken('appleMediaUserToken') || '',
     storefront: localStorage.getItem('appleStorefront') || 'cn',
   }
 }
@@ -154,8 +155,8 @@ export function clearAppleLogin(): void {
   localStorage.removeItem('appleAccountSignInWithApple')
   localStorage.removeItem('appleAccountDevices')
   localStorage.removeItem('appleAccountIcons')
-  localStorage.removeItem('appleDeveloperToken')
-  localStorage.removeItem('appleMediaUserToken')
+  removeSecureToken('appleDeveloperToken')
+  removeSecureToken('appleMediaUserToken')
   localStorage.removeItem('appleStorefront')
   localStorage.removeItem('appleWebDevToken')
   localStorage.removeItem('appleWebDevTokenExp')
@@ -163,22 +164,26 @@ export function clearAppleLogin(): void {
 }
 
 export function saveAppleLogin(user: AppleUserInfo): void {
-  if (user.name) localStorage.setItem('appleAccountName', user.name)
-  if (user.avatarUrl) localStorage.setItem('appleAvatarUrl', user.avatarUrl)
-  if (user.storefront) localStorage.setItem('appleStorefront', user.storefront)
-  if (user.email) localStorage.setItem('appleAccountEmail', user.email)
-  if (user.realName) localStorage.setItem('appleAccountRealName', user.realName)
-  if (user.billingAddress) localStorage.setItem('appleAccountBillingAddress', user.billingAddress)
-  if (user.country) localStorage.setItem('appleAccountCountry', user.country)
-  if (user.paymentType) localStorage.setItem('appleAccountPaymentType', user.paymentType)
-  if (user.accountBalance) localStorage.setItem('appleAccountBalance', user.accountBalance)
-  if (user.birthday) localStorage.setItem('appleAccountBirthday', user.birthday)
-  if (user.language) localStorage.setItem('appleAccountLanguage', user.language)
-  if (user.twoFactor) localStorage.setItem('appleAccountTwoFactor', user.twoFactor)
-  if (user.trustedDevices) localStorage.setItem('appleAccountTrustedDevices', user.trustedDevices)
-  if (user.passwordUpdated) localStorage.setItem('appleAccountPasswordUpdated', user.passwordUpdated)
-  if (user.notificationEmail) localStorage.setItem('appleAccountNotificationEmail', user.notificationEmail)
-  if (user.signInWithApple) localStorage.setItem('appleAccountSignInWithApple', user.signInWithApple)
+  // 字段写入统一守卫：单个字段配额满不应中断整个登录流程（末尾 devices/icons 原已包）
+  const safeSet = (key: string, value: string) => {
+    try { localStorage.setItem(key, value) } catch { /* 配额满忽略 */ }
+  }
+  if (user.name) safeSet('appleAccountName', user.name)
+  if (user.avatarUrl) safeSet('appleAvatarUrl', user.avatarUrl)
+  if (user.storefront) safeSet('appleStorefront', user.storefront)
+  if (user.email) safeSet('appleAccountEmail', user.email)
+  if (user.realName) safeSet('appleAccountRealName', user.realName)
+  if (user.billingAddress) safeSet('appleAccountBillingAddress', user.billingAddress)
+  if (user.country) safeSet('appleAccountCountry', user.country)
+  if (user.paymentType) safeSet('appleAccountPaymentType', user.paymentType)
+  if (user.accountBalance) safeSet('appleAccountBalance', user.accountBalance)
+  if (user.birthday) safeSet('appleAccountBirthday', user.birthday)
+  if (user.language) safeSet('appleAccountLanguage', user.language)
+  if (user.twoFactor) safeSet('appleAccountTwoFactor', user.twoFactor)
+  if (user.trustedDevices) safeSet('appleAccountTrustedDevices', user.trustedDevices)
+  if (user.passwordUpdated) safeSet('appleAccountPasswordUpdated', user.passwordUpdated)
+  if (user.notificationEmail) safeSet('appleAccountNotificationEmail', user.notificationEmail)
+  if (user.signInWithApple) safeSet('appleAccountSignInWithApple', user.signInWithApple)
   if (user.devices && user.devices.length) {
     try { localStorage.setItem('appleAccountDevices', JSON.stringify(user.devices)) } catch { /* 忽略 */ }
   }

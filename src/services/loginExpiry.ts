@@ -32,6 +32,19 @@ const DEFAULT_DURATIONS: Record<MusicPlatform, number> = {
   soda: 30 * 24 * 60 * 60 * 1000,
 }
 
+/** 非MusicPlatform 的扩展平台有效期：bilibili 扫码 SESSDATA 现行约 90~180 天。
+ *  此前 bilibili 用 `as never` 强塞 MusicPlatform，靠 fallback 30 天——cookie 实际
+ *  有效却提前判死强制重登。独立键表 + getDurationFor 兜底读取。 */
+const EXTRA_DURATIONS: Record<string, number> = {
+  bilibili: 90 * 24 * 60 * 60 * 1000,
+}
+
+export function getDurationFor(platform: string): number {
+  return EXTRA_DURATIONS[platform]
+    ?? DEFAULT_DURATIONS[platform as MusicPlatform]
+    ?? 30 * 24 * 60 * 60 * 1000
+}
+
 const STOREFRONT_MAP: Record<string, MusicPlatform> = {
   netease: 'netease',
   qq: 'qq',
@@ -39,9 +52,11 @@ const STOREFRONT_MAP: Record<string, MusicPlatform> = {
 }
 
 /** 登录时记录有效期 */
-export function recordLogin(platform: MusicPlatform, expiresAtOverride?: number): void {
+export type LoginPlatform = MusicPlatform | 'bilibili'
+
+export function recordLogin(platform: LoginPlatform, expiresAtOverride?: number): void {
   const loggedAt = Date.now()
-  const expiresAt = expiresAtOverride || loggedAt + (DEFAULT_DURATIONS[platform] || 30 * 24 * 60 * 60 * 1000)
+  const expiresAt = expiresAtOverride || loggedAt + (getDurationFor(platform) || 30 * 24 * 60 * 60 * 1000)
   try {
     localStorage.setItem(KEY_PREFIX + platform, JSON.stringify({ loggedAt, expiresAt }))
   } catch {
@@ -50,7 +65,7 @@ export function recordLogin(platform: MusicPlatform, expiresAtOverride?: number)
 }
 
 /** 读取某平台有效期记录 */
-export function getLoginExpiry(platform: MusicPlatform): LoginExpiry | null {
+export function getLoginExpiry(platform: LoginPlatform): LoginExpiry | null {
   try {
     const raw = localStorage.getItem(KEY_PREFIX + platform)
     if (!raw) return null
@@ -63,28 +78,28 @@ export function getLoginExpiry(platform: MusicPlatform): LoginExpiry | null {
 }
 
 /** 某平台是否已过期 */
-export function isLoginExpired(platform: MusicPlatform): boolean {
+export function isLoginExpired(platform: LoginPlatform): boolean {
   const expiry = getLoginExpiry(platform)
   if (!expiry) return false
   return Date.now() > expiry.expiresAt
 }
 
 /** 剩余毫秒（已过期返回 <=0） */
-export function getRemainingMs(platform: MusicPlatform): number {
+export function getRemainingMs(platform: LoginPlatform): number {
   const expiry = getLoginExpiry(platform)
   if (!expiry) return 0
   return expiry.expiresAt - Date.now()
 }
 
 /** 剩余天数（向上取整，已过期返回 0） */
-export function getRemainingDays(platform: MusicPlatform): number {
+export function getRemainingDays(platform: LoginPlatform): number {
   const ms = getRemainingMs(platform)
   if (ms <= 0) return 0
   return Math.ceil(ms / (24 * 60 * 60 * 1000))
 }
 
 /** 清除某平台有效期记录（登出/重登时调用） */
-export function clearLoginExpiry(platform: MusicPlatform): void {
+export function clearLoginExpiry(platform: LoginPlatform): void {
   try {
     localStorage.removeItem(KEY_PREFIX + platform)
   } catch {

@@ -45,6 +45,10 @@ export default function BilibiliLoginPanel({ onClose, onLoginSuccess }: Bilibili
 
   const startPolling = (key: string, generation: number) => {
     clearPolling()
+    let consecutiveFailures = 0
+    // 连续失败上限：约 3 分钟（qrcode_key 生命周期）无成功响应即判过期，
+    // 避免代理宕机/断网时每 2s 无限轮询、UI 永远停在「请扫描二维码」
+    const MAX_CONSECUTIVE_FAILURES = 90
     const poll = async () => {
       if (!isCurrent(generation)) return
       const controller = new AbortController()
@@ -53,6 +57,7 @@ export default function BilibiliLoginPanel({ onClose, onLoginSuccess }: Bilibili
       try {
         const data = await checkBilibiliQr(key)
         if (!isCurrent(generation)) return
+        consecutiveFailures = 0
         if (data.status === 'ok' && data.cookie) {
           setStatus('success')
           finished = true
@@ -74,6 +79,13 @@ export default function BilibiliLoginPanel({ onClose, onLoginSuccess }: Bilibili
         }
       } catch (error) {
         if (!controller.signal.aborted) console.error('[Bilibili] 登录轮询失败:', error)
+        if (!controller.signal.aborted && isCurrent(generation)) {
+          consecutiveFailures += 1
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            setStatus('expired')
+            finished = true
+          }
+        }
       } finally {
         if (pollControllerRef.current === controller) pollControllerRef.current = null
         if (!finished && isCurrent(generation)) {

@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { useState, useEffect, useRef } from 'react'
+import { getSecureToken, setSecureToken } from '../services/secureTokenStore'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, Loader2, QrCode, ChevronDown, ChevronUp } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
@@ -83,7 +84,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
       }
       const p = status.profile
       // 落键与 App.handleSodaLogin 同一组四键（此后回调会再次写入同值，幂等）
-      localStorage.setItem('soda_token', cookie)
+      setSecureToken('soda_token', cookie)
       if (p?.nickname) localStorage.setItem('soda_username', p.nickname)
       if (p?.avatarUrl) localStorage.setItem('soda_avatar', p.avatarUrl)
       if (p?.userId) localStorage.setItem('soda_user_id', String(p.userId))

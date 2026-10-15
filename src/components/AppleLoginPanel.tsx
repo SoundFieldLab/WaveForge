@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { useEffect, useRef, useState } from 'react'
+import { getSecureToken, setSecureToken } from '../services/secureTokenStore'
 import { CheckCircle2, ChevronDown, KeyRound, Link2, Loader2, LogOut, Music, ShieldCheck, X } from 'lucide-react'
 import { validateAppleLogin, clearAppleLogin, saveAppleLogin, getAppleAuthState, resolveAppleAccountName, resolveAppleAccountProfile, generateInitialsAvatar, type AppleUserInfo } from '../services/appleAuth'
 import { ensureAppleWebDevToken } from '../services/appleMusicToken'
@@ -36,8 +37,8 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
     onClose()
     return true
   }, [onClose])
-  const [devToken, setDevToken] = useState(() => localStorage.getItem('appleDeveloperToken') || '')
-  const [mediaToken, setMediaToken] = useState(() => localStorage.getItem('appleMediaUserToken') || '')
+  const [devToken, setDevToken] = useState(() => getSecureToken('appleDeveloperToken') || '')
+  const [mediaToken, setMediaToken] = useState(() => getSecureToken('appleMediaUserToken') || '')
   const [storefront, setStorefront] = useState(() => localStorage.getItem('appleStorefront') || 'cn')
   const [loading, setLoading] = useState(false)
   const [autoLoading, setAutoLoading] = useState(false)
@@ -103,8 +104,14 @@ export default function AppleLoginPanel({ accentColor = '#fa2d48', onClose, onLo
         if (!finalUser.avatarUrl) {
           finalUser.avatarUrl = generateInitialsAvatar(finalUser.realName || finalUser.name || '?')
         }
-        localStorage.setItem('appleDeveloperToken', dev)
-        localStorage.setItem('appleMediaUserToken', media)
+        setSecureToken('appleDeveloperToken', dev)
+        setSecureToken('appleMediaUserToken', media)
+        // 换号登录先清旧账号资料字段：saveAppleLogin 是"有值才写"，B 账号缺的字段
+        // （邮箱/生日/设备列表等）会残留 A 账号旧值 → 跨账号隐私信息串显。
+        // clear 只清资料与 token，随后立即重写本次凭据，登录态不中断。
+        clearAppleLogin()
+        setSecureToken('appleDeveloperToken', dev)
+        setSecureToken('appleMediaUserToken', media)
         // 持久化昵称/头像/storefront：不存则重启后判定为未登录，需要重新登录
         saveAppleLogin(finalUser)
         // 记录登录有效期：dev-token 是 JWT 有真实 exp，优先用真实值（media-token 会话用默认预估）

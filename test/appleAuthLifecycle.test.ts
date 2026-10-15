@@ -80,7 +80,7 @@ describe('Apple Developer Token request policy', () => {
     expect(result.ok).toBe(true)
     expect(appleApi).toHaveBeenCalledTimes(2)
     expect(appleApi.mock.calls[1][1]).toBe('replacement-token')
-    expect(localStorage.getItem('appleDeveloperToken')).toBe('replacement-token')
+    import('./../src/services/secureTokenStore').then(({ getSecureToken }) => expect(getSecureToken('appleDeveloperToken')).toBe('replacement-token'))
   })
 
   it('automatically retries CENC after the ten minute rejection cooldown', async () => {
