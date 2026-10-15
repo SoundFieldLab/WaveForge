@@ -253,6 +253,17 @@ class ChromaRestService {
         throw new Error('registration response omitted uri/sessionid')
       }
       const sessionUri = String(response.uri).replace(/\/+$/, '')
+      // 会话 URI 指向校验：Chroma SDK 响应里的 uri 之后会被用于 PUT 心跳/效果帧，
+      // 限定本机回环，防响应被劫持成任意主机
+      try {
+        const parsed = new URL(sessionUri)
+        const host = parsed.hostname.toLowerCase()
+        if (parsed.protocol !== 'http:' || !(host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1')) {
+          throw new Error(`unexpected session uri host: ${host}`)
+        }
+      } catch (error) {
+        throw new Error(`Chroma session uri rejected: ${error?.message || error}`)
+      }
       pendingSessionUri = sessionUri
       await this.waitForSessionReady(sessionUri)
       if (!this.state.active) {

@@ -28,6 +28,14 @@ function externalProcessPath(candidate, app) {
 }
 
 function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = null) {
+  // 写操作类通道的来源守卫：分析缓存/任务可被伪造（save-track 毒化 AutoMix 渲染输入、
+  // start-track 拉起 Python 重任务、clear-cache 清缓存）。读类通道保持放开。
+  const assertMainSender = (event) => {
+    const win = getMainWindow && getMainWindow()
+    if (!win || win.isDestroyed() || event?.sender !== win.webContents || event?.senderFrame !== win.webContents.mainFrame) {
+      throw new Error('不允许的 IPC 请求来源')
+    }
+  }
   const cacheRoot = customCachePath || path.resolve(app.getPath('userData'), 'analysis-cache')
   const trackRoot = path.join(cacheRoot, 'tracks')
   const legacyBeatRoot = path.join(cacheRoot, 'beat_analysis')
@@ -176,7 +184,11 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       env: { ...process.env, PYTHONUNBUFFERED: '1', BEAT_THIS_CHECKPOINT: checkpointPath },
       windowsHide: true,
     })
-    
+
+    // stdin EPIPE 防护：请求发出与 worker 'exit' 之间的竞态窗口里写入已关闭的管道，
+    // stdin 异步 emit 'error'；无监听器时可能升级为 uncaughtException 使主进程退出
+    pythonWorker.stdin?.on?.('error', () => { /* 写已关闭管道：由 exit 路径清理 */ })
+
     let buffer = ''
     
     pythonWorker.stdout.on('data', (data) => {
@@ -434,8 +446,8 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     }
   }
 
-  function cleanupCaches() {
-    audioDownload.cleanupOldFiles()
+  async function cleanupCaches() {
+    await audioDownload.cleanupOldFiles()
     cleanupJsonCache(trackRoot, TRACK_CACHE_TTL_MS, TRACK_CACHE_LIMIT_BYTES)
     cleanupJsonCache(legacyBeatRoot, TRACK_CACHE_TTL_MS, TRACK_CACHE_LIMIT_BYTES)
     cleanupRenderCache()
@@ -491,7 +503,8 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     return value
   })
 
-  ipcMain.handle('analysis:save-track', (_event, analysis) => {
+  ipcMain.handle('analysis:save-track', (event, analysis) => {
+    assertMainSender(event)
     if (!analysis || typeof analysis.trackKey !== 'string' || !analysis.trackKey.trim() || analysis.trackKey.length > 256) {
       return { success: false, error: 'invalid analysis payload' }
     }
@@ -500,7 +513,8 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     return { success: true }
   })
 
-  ipcMain.handle('analysis:start-track', async (_event, input) => {
+  ipcMain.handle('analysis:start-track', async (event, input) => {
+    assertMainSender(event)
     if (!input || typeof input.trackKey !== 'string' || !input.trackKey.trim() || input.trackKey.length > 256) {
       return { status: 'failed', reason: 'A non-empty track key is required' }
     }
@@ -661,17 +675,20 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     return { success: true }
   })
 
-  function clearCache() {
+  async function clearCache() {
     for (const root of [trackRoot, legacyBeatRoot]) {
       if (!isInsideCache(root)) return { success: false, error: 'invalid cache directory' }
       fs.rmSync(root, { recursive: true, force: true })
     }
     ensureDirectories()
-    audioDownload.cleanupOldFiles(0)
+    await audioDownload.cleanupOldFiles(0)
     return { success: true }
   }
 
-  ipcMain.handle('analysis:clear-cache', () => clearCache())
+  ipcMain.handle('analysis:clear-cache', (event) => {
+    assertMainSender(event)
+    return clearCache()
+  })
   
   // Cleanup on app quit
   const handleWillQuit = () => {

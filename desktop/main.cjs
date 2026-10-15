@@ -61,6 +61,23 @@ const windowIcon = nativeImage.createFromPath(windowIconPath)
 if (windowIcon.isEmpty()) {
   console.warn('[Startup] Failed to decode window icon:', windowIconPath)
 }
+
+// 单实例锁：双开时第二实例的启动清扫（sweepBackendOrphans 按 WaveForge*/python* 特征
+// taskkill）会杀掉第一实例正在运行的 3001-3004 后端，且两实例并发写 config/窗口状态
+// 文件互踩。锁被占用时本实例直接退出；已有实例收到 second-instance 后聚焦主窗。
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  console.log('[Startup] 已有 WaveForge 实例在运行，退出本实例')
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  })
+}
 const { fetchAllowedApplePage, readTextWithLimit } = require('./apple-url-policy.cjs')
 const { createDocumentUrlMatcher, createTrustedIpcGuard } = require('./trusted-ipc.cjs')
 const LOCAL_SERVICE_TOKEN = process.env.WAVEFORGE_LOCAL_TOKEN || crypto.randomBytes(32).toString('base64url')
@@ -398,10 +415,57 @@ app.on('child-process-gone', (_event, details) => {
   }
 })
 
+// GPU 进程就绪后复读特性状态：whenReady 时刻的 getGPUFeatureStatus 是初始化前快照，
+// Windows 上频繁误报 disabled_software/disabled_off（GPU 全速运行时同样出现）。
+// 这里以 GPU 进程就绪后的读数为准，纠正 gpuCompositingDisabled（splash 时长启发式）。
+app.on('gpu-process-created', () => {
+  try {
+    const status = app.getGPUFeatureStatus()
+    gpuCompositingDisabled = status.gpu_compositing === 'disabled_software' || status.gpu_compositing === 'disabled'
+    logStartupTiming(`GPU feature status (final): accelerated=${status.gpu_compositing || '?'} webgl=${status.webgl || '?'}`)
+  } catch { /* 读不到就保留早期快照的判定 */ }
+})
+
 // 立即设置应用名称（必须在 app.ready 之前）。打包版使用与安装器一致的
 // AppUserModelID；开发版没有该 ID 对应的开始菜单快捷方式，强行设置会让
 // Windows Shell 回退到空白文件图标，而不是 BrowserWindow 的自定义图标。
 if (app.isPackaged) app.setAppUserModelId('com.waveforge.desktop')
+
+// <webview> 标签全局守卫（主窗 webviewTag: true，供网易云探索页站内面板使用）：
+// ① 禁止渲染层为 webview 指定任意 partition（防借白名单 URL 携带任意会话）；
+// ② webview 的导航不经过主窗 guardAgainstExternalNavigation，这里按源限制可挂载的站点。
+// 网易云探索页 webTarget 目前只指向 music.163.com 系；放宽白名单需同步改前端入口。
+const WEBVIEW_ALLOWED_HOST_SUFFIXES = ['.music.163.com', 'music.163.com']
+app.on('web-contents-created', (_event, contents) => {
+  if (contents.getType() !== 'webview') return
+  contents.on('will-attach-webview', (event, webPreferences, params) => {
+    const src = String(params?.src || '')
+    try {
+      const parsed = new URL(src)
+      const hostname = parsed.hostname.toLowerCase()
+      const hostOk = parsed.protocol === 'https:' &&
+        WEBVIEW_ALLOWED_HOST_SUFFIXES.some(suffix => hostname === suffix || hostname.endsWith(suffix))
+      if (!hostOk) {
+        event.preventDefault()
+        return
+      }
+    } catch {
+      event.preventDefault()
+      return
+    }
+    // webview 默认继承宿主窗口的 preload：第三方页面（music.163.com）会拿到
+    // window.electron 全量特权桥。本应用 webview 无需 preload，必须显式剥掉
+    // （Electron 官方安全清单要求项；仅删 partition 不够）。
+    if (webPreferences) {
+      delete webPreferences.preload
+      delete webPreferences.preloadURL
+      // webPreferences 只允许覆盖必要项，partition 必须是应用自建命名分区或默认
+      if (webPreferences.partition && !/^persist:waveforge|^waveforge/.test(webPreferences.partition)) {
+        delete webPreferences.partition
+      }
+    }
+  })
+})
 
 const { execFile, execFileSync, spawn } = require('child_process')
 const os = require('os')
@@ -1093,6 +1157,13 @@ function closeDesktopPlayerWindow() {
     desktopPlayerWindow.close()
   }
   desktopPlayerWindow = null
+  // 清进行中的拖拽/缩放/展开动画会话：防止下次打开用旧 bounds 基准瞬移
+  desktopPlayerDragSession = null
+  desktopPlayerResizeSession = null
+  if (desktopPlayerBoundsAnimation) {
+    clearInterval(desktopPlayerBoundsAnimation)
+    desktopPlayerBoundsAnimation = null
+  }
 }
 
 function getDesktopLyricsSettingsPath() {
@@ -1268,11 +1339,16 @@ function closeDesktopLyricsWindow() {
   desktopLyricsWindow = null
   desktopLyricsPanelRestoreBounds = null
   desktopLyricsMousePassthrough = false
+  // 窗口关闭时清掉进行中的拖拽/缩放会话：否则下次打开后残留 session 会让
+  // drag-to/resize-to 用旧 bounds 基准瞬移窗口
+  desktopLyricsDragSession = null
+  desktopLyricsResizeSession = null
 }
 
 ipcMain.handle('desktop-lyrics:get-settings', () => getDesktopLyricsSettings())
 
 ipcMain.handle('desktop-lyrics:set-enabled', (_event, enabled) => {
+  assertMainSender(_event)
   desktopLyricsSettings = { ...desktopLyricsSettings, enabled: enabled === true }
   saveDesktopLyricsSettings()
   if (desktopLyricsSettings.enabled) createDesktopLyricsWindow()
@@ -1285,6 +1361,9 @@ ipcMain.handle('desktop-lyrics:set-enabled', (_event, enabled) => {
 })
 
 ipcMain.handle('desktop-lyrics:update-settings', (_event, partial) => {
+  // 调用方有两处：主窗设置面板 与 歌词窗内设置面板（DesktopLyricsApp 字体/颜色/锁定）。
+  // 只查主窗会把歌词窗自身的修改全部拒绝（字体/锁定/面板展开失效），必须双来源放行。
+  assertSenderIsOneOf(_event, () => desktopLyricsWindow)
   const previousOrientation = desktopLyricsSettings.orientation
   desktopLyricsSettings = sanitizeDesktopLyricsSettings(partial, desktopLyricsSettings)
   if (Object.prototype.hasOwnProperty.call(partial || {}, 'locked')) {
@@ -1312,6 +1391,8 @@ ipcMain.handle('desktop-lyrics:update-settings', (_event, partial) => {
 })
 
 ipcMain.handle('desktop-lyrics:set-panel-open', (_event, open) => {
+  // 唯一调用方是歌词窗内设置面板（DesktopLyricsApp 展开设置区）：双来源放行
+  assertSenderIsOneOf(_event, () => desktopLyricsWindow)
   if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || desktopLyricsSettings.locked) return { open: false }
   if (open === true && !desktopLyricsPanelRestoreBounds) {
     const bounds = desktopLyricsWindow.getBounds()
@@ -1331,11 +1412,16 @@ ipcMain.handle('desktop-lyrics:set-panel-open', (_event, open) => {
   return { open: open === true }
 })
 
-ipcMain.handle('desktop-lyrics:set-mouse-passthrough', (_event, passthrough) => ({
-  passthrough: setDesktopLyricsMousePassthrough(passthrough === true),
-}))
+ipcMain.handle('desktop-lyrics:set-mouse-passthrough', (event, passthrough) => {
+  // 唯一调用方是歌词窗自身（拖动/锁定切换）：改变主屏交互行为，须限歌词窗来源
+  assertSenderIsOneOf(event, () => desktopLyricsWindow)
+  return {
+    passthrough: setDesktopLyricsMousePassthrough(passthrough === true),
+  }
+})
 
 ipcMain.on('desktop-lyrics:control', (_event, action) => {
+  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || _event?.sender !== desktopLyricsWindow.webContents || _event?.senderFrame !== desktopLyricsWindow.webContents.mainFrame) return
   if (action === 'close') {
     desktopLyricsSettings = { ...desktopLyricsSettings, enabled: false }
     saveDesktopLyricsSettings()
@@ -1346,8 +1432,9 @@ ipcMain.on('desktop-lyrics:control', (_event, action) => {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('desktop-player:control', action)
 })
 
-ipcMain.on('desktop-lyrics:drag-start', (_event, point) => {
-  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || desktopLyricsSettings.locked) return
+ipcMain.on('desktop-lyrics:drag-start', (event, point) => {
+  // 拖动/缩放只认歌词窗自身：无 sender 校验时任何渲染层都能移动/改变歌词窗
+  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || event?.sender !== desktopLyricsWindow.webContents || desktopLyricsSettings.locked) return
   if (desktopLyricsPanelRestoreBounds) return
   desktopLyricsDragSession = {
     bounds: desktopLyricsWindow.getBounds(),
@@ -1356,8 +1443,8 @@ ipcMain.on('desktop-lyrics:drag-start', (_event, point) => {
   }
 })
 
-ipcMain.on('desktop-lyrics:drag-to', (_event, point) => {
-  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || !desktopLyricsDragSession) return
+ipcMain.on('desktop-lyrics:drag-to', (event, point) => {
+  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || event?.sender !== desktopLyricsWindow.webContents || !desktopLyricsDragSession) return
   const start = desktopLyricsDragSession
   desktopLyricsWindow.setBounds(clampDesktopLyricsBounds({
     ...start.bounds,
@@ -1366,13 +1453,15 @@ ipcMain.on('desktop-lyrics:drag-to', (_event, point) => {
   }))
 })
 
-ipcMain.on('desktop-lyrics:drag-end', () => {
+ipcMain.on('desktop-lyrics:drag-end', (event) => {
+  // 会话由 drag-start 建立，同样只认歌词窗来源
+  if (event?.sender !== desktopLyricsWindow?.webContents) return
   desktopLyricsDragSession = null
   saveDesktopLyricsSettings()
 })
 
-ipcMain.on('desktop-lyrics:resize-start', (_event, point) => {
-  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || desktopLyricsSettings.locked) return
+ipcMain.on('desktop-lyrics:resize-start', (event, point) => {
+  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || event?.sender !== desktopLyricsWindow.webContents || desktopLyricsSettings.locked) return
   if (desktopLyricsPanelRestoreBounds) return
   const edge = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'].includes(point?.edge) ? point.edge : 'se'
   desktopLyricsResizeSession = {
@@ -1383,8 +1472,8 @@ ipcMain.on('desktop-lyrics:resize-start', (_event, point) => {
   }
 })
 
-ipcMain.on('desktop-lyrics:resize-to', (_event, point) => {
-  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || !desktopLyricsResizeSession) return
+ipcMain.on('desktop-lyrics:resize-to', (event, point) => {
+  if (!desktopLyricsWindow || desktopLyricsWindow.isDestroyed() || event?.sender !== desktopLyricsWindow.webContents || !desktopLyricsResizeSession) return
   const start = desktopLyricsResizeSession
   const dx = (Number(point?.x) || 0) - start.x
   const dy = (Number(point?.y) || 0) - start.y
@@ -1404,7 +1493,8 @@ ipcMain.on('desktop-lyrics:resize-to', (_event, point) => {
   }))
 })
 
-ipcMain.on('desktop-lyrics:resize-end', () => {
+ipcMain.on('desktop-lyrics:resize-end', (event) => {
+  if (event?.sender !== desktopLyricsWindow?.webContents) return
   desktopLyricsResizeSession = null
   saveDesktopLyricsSettings()
 })
@@ -1610,7 +1700,9 @@ ipcMain.handle('lyrics-island:get-settings', () => getLyricsIslandSettings())
 
 ipcMain.handle('lyrics-island:get-state', () => buildLyricsIslandSnapshot())
 
-ipcMain.handle('lyrics-island:set-enabled', (_event, enabled) => {
+ipcMain.handle('lyrics-island:set-enabled', (event, enabled) => {
+  // 调用方：主窗设置面板 或 歌词岛窗自身；创建/关闭窗口的写操作必须有来源边界
+  assertSenderIsOneOf(event, () => lyricsIslandWindow)
   lyricsIslandSettings = { ...lyricsIslandSettings, enabled: enabled === true }
   saveLyricsIslandSettings()
   if (lyricsIslandSettings.enabled) createLyricsIslandWindow()
@@ -1619,7 +1711,9 @@ ipcMain.handle('lyrics-island:set-enabled', (_event, enabled) => {
   return { success: true, enabled: lyricsIslandSettings.enabled }
 })
 
-ipcMain.handle('lyrics-island:update-settings', (_event, partial) => {
+ipcMain.handle('lyrics-island:update-settings', (event, partial) => {
+  // 同 set-enabled：主窗设置 与 歌词岛窗内设置面板 双来源
+  assertSenderIsOneOf(event, () => lyricsIslandWindow)
   const previousLocked = lyricsIslandSettings.locked
   const previousScale = lyricsIslandSettings.scale
   lyricsIslandSettings = { ...lyricsIslandSettings, ...sanitizeLyricsIslandSettings(partial, lyricsIslandSettings) }
@@ -1636,6 +1730,7 @@ ipcMain.handle('lyrics-island:update-settings', (_event, partial) => {
 })
 
 ipcMain.on('lyrics-island:control', (_event, action) => {
+  if (!lyricsIslandWindow || lyricsIslandWindow.isDestroyed() || _event?.sender !== lyricsIslandWindow.webContents || _event?.senderFrame !== lyricsIslandWindow.webContents.mainFrame) return
   if (action === 'close') {
     lyricsIslandSettings.enabled = false
     saveLyricsIslandSettings()
@@ -1648,8 +1743,9 @@ ipcMain.on('lyrics-island:control', (_event, action) => {
   }
 })
 
-ipcMain.on('lyrics-island:drag-start', (_event, point) => {
-  if (!lyricsIslandWindow || lyricsIslandWindow.isDestroyed() || lyricsIslandSettings.locked) return
+ipcMain.on('lyrics-island:drag-start', (event, point) => {
+  // 拖动只认歌词岛窗自身（同 desktop-lyrics 系）
+  if (!lyricsIslandWindow || lyricsIslandWindow.isDestroyed() || event?.sender !== lyricsIslandWindow.webContents || lyricsIslandSettings.locked) return
   lyricsIslandDragSession = {
     bounds: lyricsIslandWindow.getBounds(),
     x: Number(point?.x) || 0,
@@ -1657,8 +1753,8 @@ ipcMain.on('lyrics-island:drag-start', (_event, point) => {
   }
 })
 
-ipcMain.on('lyrics-island:drag-to', (_event, point) => {
-  if (!lyricsIslandWindow || lyricsIslandWindow.isDestroyed() || !lyricsIslandDragSession) return
+ipcMain.on('lyrics-island:drag-to', (event, point) => {
+  if (!lyricsIslandWindow || lyricsIslandWindow.isDestroyed() || event?.sender !== lyricsIslandWindow.webContents || !lyricsIslandDragSession) return
   const start = lyricsIslandDragSession
   lyricsIslandWindow.setBounds(clampLyricsIslandBounds({
     ...start.bounds,
@@ -1667,12 +1763,14 @@ ipcMain.on('lyrics-island:drag-to', (_event, point) => {
   }))
 })
 
-ipcMain.on('lyrics-island:drag-end', () => {
+ipcMain.on('lyrics-island:drag-end', (event) => {
+  if (event?.sender !== lyricsIslandWindow?.webContents) return
   lyricsIslandDragSession = null
   saveLyricsIslandSettings()
 })
 
 ipcMain.handle('desktop-player:set-enabled', (_event, enabled) => {
+  assertMainSender(_event)
   desktopPlayerEnabled = enabled === true
   saveDesktopPlayerSettings()
   if (desktopPlayerEnabled) {
@@ -1688,6 +1786,7 @@ ipcMain.handle('desktop-player:set-enabled', (_event, enabled) => {
 })
 
 ipcMain.handle('desktop-player:set-form', (_event, form) => {
+  assertMainSender(_event)
   if (!DESKTOP_PLAYER_FORMS.has(form)) return { success: false, form: desktopPlayerForm }
   const changed = desktopPlayerForm !== form
   desktopPlayerForm = form
@@ -1710,9 +1809,25 @@ ipcMain.handle('desktop-player:set-form', (_event, form) => {
   return { success: true, form: desktopPlayerForm }
 })
 
-ipcMain.handle('desktop-player:get-state', () => getDesktopPlayerSnapshot())
+ipcMain.handle('desktop-player:get-state', (event) => {
+  // 播放器快照（含队列/歌词）接通 capabilities 表里声明却未接线的 desktopPlayer 项：
+  // 歌词窗/小窗/主窗三类受信渲染层可读，其他来源拒绝
+  try {
+    assertSenderIsOneOf(event, () => desktopPlayerWindow, () => desktopLyricsWindow)
+    return getDesktopPlayerSnapshot()
+  } catch {
+    // 主窗不在 desktopPlayerWindow 列表里，单独放行主窗
+    try {
+      assertMainSender(event)
+      return getDesktopPlayerSnapshot()
+    } catch {
+      return null
+    }
+  }
+})
 
 ipcMain.handle('media-keys:set-enabled', (_event, enabled) => {
+  assertMainSender(_event)
   if (!app.isReady()) return { success: false, enabled: false, registrations: {} }
   return setGlobalMediaKeysEnabled(enabled)
 })
@@ -1728,7 +1843,8 @@ ipcMain.handle('oobe:get-flag', () => {
     return false
   }
 })
-ipcMain.handle('oobe:set-flag', () => {
+ipcMain.handle('oobe:set-flag', (_event) => {
+  assertMainSender(_event)
   try {
     fs.writeFileSync(oobeFlagPath(), new Date().toISOString(), 'utf8')
     return true
@@ -1739,6 +1855,9 @@ ipcMain.handle('oobe:set-flag', () => {
 
 // 主窗口推送播放状态（歌曲 / 歌词 / 播放中 / 频谱）
 ipcMain.on('desktop-player:state-update', (_event, partial) => {
+  // 唯一调用方是主窗（App.tsx pushState）：该状态会广播到任务栏/托盘/遥控器等
+  // 全部辅助窗，无来源校验时任何渲染层（含第三方 webview）可伪造播放状态。
+  assertMainSender(_event)
   if (!partial || typeof partial !== 'object') return
   const changed = {}
 
@@ -1854,6 +1973,14 @@ ipcMain.on('desktop-player:state-update', (_event, partial) => {
 
 // 小窗口内的播放控制指令，转发给主窗口执行
 ipcMain.on('desktop-player:control', (_event, action, payload) => {
+  // 播控命令可来自主窗口（媒体键/遥控动作回放）与小窗口本体，两者都受信；
+  // 其余来源一律忽略，避免外部窗口伪造播控指令。
+  // senderFrame 必须是主 frame：辅助窗内的子 frame（未来 webview 等）不可借窗口身份转发播控。
+  const fromMainWindow = mainWindow && !mainWindow.isDestroyed()
+    && _event?.sender === mainWindow.webContents && _event?.senderFrame === mainWindow.webContents.mainFrame
+  const fromWidget = desktopPlayerWindow && !desktopPlayerWindow.isDestroyed()
+    && _event?.sender === desktopPlayerWindow.webContents && _event?.senderFrame === desktopPlayerWindow.webContents.mainFrame
+  if (!fromMainWindow && !fromWidget) return
   // close 由主进程直接处理：关闭小窗口并同步开关状态
   if (action === 'close') {
     desktopPlayerEnabled = false
@@ -1870,7 +1997,7 @@ ipcMain.on('desktop-player:control', (_event, action, payload) => {
 })
 
 ipcMain.on('desktop-player:resize-start', (_event, point) => {
-  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed()) return
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || _event?.sender !== desktopPlayerWindow.webContents) return
   if (desktopPlayerForm !== 'card') return
   if (desktopPlayerBoundsAnimation) {
     clearInterval(desktopPlayerBoundsAnimation)
@@ -1885,7 +2012,7 @@ ipcMain.on('desktop-player:resize-start', (_event, point) => {
 })
 
 ipcMain.on('desktop-player:resize-to', (_event, point) => {
-  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || !desktopPlayerResizeSession) return
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || !desktopPlayerResizeSession || _event?.sender !== desktopPlayerWindow.webContents) return
   const start = desktopPlayerResizeSession
   const workArea = getDesktopPlayerWorkArea(start.bounds)
   const dx = (Number(point?.x) || 0) - start.x
@@ -1899,18 +2026,21 @@ ipcMain.on('desktop-player:resize-to', (_event, point) => {
   desktopPlayerWindow.setBounds(clampDesktopPlayerBounds({ x, y, width, height }))
 })
 
-ipcMain.on('desktop-player:resize-end', () => {
+ipcMain.on('desktop-player:resize-end', (event) => {
+  if (event?.sender !== desktopPlayerWindow?.webContents) return
   desktopPlayerResizeSession = null
 })
 
-ipcMain.handle('desktop-player:set-expanded', (_event, expanded) => {
+ipcMain.handle('desktop-player:set-expanded', (event, expanded) => {
+  // 展开态改变播放器窗几何：主窗（App.tsx pushState 侧）与小窗自身都可能调用，双来源放行
+  assertSenderIsOneOf(event, () => desktopPlayerWindow)
   return { direction: desktopPlayerSetExpanded(expanded === true) || desktopPlayerExpansionDirection }
 })
 
 
 // 内容高度同步：根据屏幕剩余空间保持顶边或底边不动，避免面板跑出屏幕。
-ipcMain.on('desktop-player:content-height', (_event, height) => {
-  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed()) return
+ipcMain.on('desktop-player:content-height', (event, height) => {
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || event?.sender !== desktopPlayerWindow.webContents) return
   if (desktopPlayerResizeSession) return
   // 最小高度与 resize 的 112 一致（此前用 BASE_SIZE.height=150，卡片缩到 112 后收起会被撑回 150，尺寸变长）
   const minimum = desktopPlayerForm === 'bar' ? 80 : 112
@@ -1923,8 +2053,9 @@ ipcMain.on('desktop-player:content-height', (_event, height) => {
 })
 
 // 使用拖动开始时的绝对窗口坐标，避免高频 IPC 延迟造成位移累计误差和窗口抽搐。
-ipcMain.on('desktop-player:drag-start', (_event, point) => {
-  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed()) return
+ipcMain.on('desktop-player:drag-start', (event, point) => {
+  // 拖动只认小窗自身（resize 系已有同款校验）
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || event?.sender !== desktopPlayerWindow.webContents) return
   if (desktopPlayerBoundsAnimation) {
     clearInterval(desktopPlayerBoundsAnimation)
     desktopPlayerBoundsAnimation = null
@@ -1936,8 +2067,8 @@ ipcMain.on('desktop-player:drag-start', (_event, point) => {
   }
 })
 
-ipcMain.on('desktop-player:drag-to', (_event, point) => {
-  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || !desktopPlayerDragSession) return
+ipcMain.on('desktop-player:drag-to', (event, point) => {
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed() || event?.sender !== desktopPlayerWindow.webContents || !desktopPlayerDragSession) return
   const start = desktopPlayerDragSession
   const next = {
     ...start.bounds,
@@ -1947,7 +2078,8 @@ ipcMain.on('desktop-player:drag-to', (_event, point) => {
   desktopPlayerWindow.setBounds(clampDesktopPlayerBounds(next))
 })
 
-ipcMain.on('desktop-player:drag-end', () => {
+ipcMain.on('desktop-player:drag-end', (event) => {
+  if (event?.sender !== desktopPlayerWindow?.webContents) return
   desktopPlayerDragSession = null
 })
 
@@ -2203,6 +2335,27 @@ const trustedIpc = createTrustedIpcGuard({
   },
 })
 const guardTrustedIpc = trustedIpc.handle
+
+// 轻量主窗来源校验：敏感 IPC（授权/GPU/远程/登录窗/抓取桥/壁纸写入）只允许主窗主 frame
+// 调用。guardTrustedIpc 的 capabilities 全套只接了约 22 个 handler，其余敏感面用这个
+// 最小守卫兜底——不满足来源时抛错，ipcMain 会把 promise 拒绝给渲染端。
+function assertMainSender(event) {
+  if (!mainWindow || event?.sender !== mainWindow.webContents || event?.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error('不允许的 IPC 请求来源')
+  }
+}
+
+// 双来源放行（主窗 或 指定辅助窗主 frame）。getter 延迟取窗引用（歌词窗等可能
+// 在 handler 注册后才创建），destroyed 视为不匹配。
+function assertSenderIsOneOf(event, ...getWindowFns) {
+  for (const getWindow of getWindowFns) {
+    const win = typeof getWindow === 'function' ? getWindow() : getWindow
+    if (win && !win.isDestroyed() && event?.sender === win.webContents) {
+      if (!event?.senderFrame || event.senderFrame === win.webContents.mainFrame) return
+    }
+  }
+  throw new Error('不允许的 IPC 请求来源')
+}
 
 ipcMain.handle('diagnostics:get-vmp-status', guardTrustedIpc('privileged', () => getVmpStatus()))
 
@@ -2486,6 +2639,10 @@ function createTaskbarWidgetWindow() {
   try {
     taskbarWidgetWindow.setIgnoreMouseEvents(true, { forward: true })
   } catch { /* 忽略 */ }
+  // 本地 HTML 加载，但仍挂导航守卫（与其他本地窗口一致）：内容被入侵后
+  // will-navigate 只放行应用自身地址，window.open 全拒。
+  guardAgainstExternalNavigation(taskbarWidgetWindow.webContents)
+  taskbarWidgetWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   taskbarWidgetWindow.loadFile(path.join(__dirname, 'taskbar-widget.html'))
   taskbarWidgetPolling.bindWindow(taskbarWidgetWindow)
   taskbarWidgetWindow.on('closed', () => {
@@ -2681,6 +2838,7 @@ function updateTaskbarWidgetInteractive() {
 const taskbarWidgetPolling = createTaskbarWidgetPolling({ poll: updateTaskbarWidgetInteractive })
 
 ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
+  if (_event?.sender !== taskbarWidgetWindow?.webContents || _event?.senderFrame !== taskbarWidgetWindow?.webContents.mainFrame) return
   if (action === 'close') {
     taskbarWidgetClosedByUser = true
     if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed()) taskbarWidgetWindow.hide()
@@ -2702,8 +2860,9 @@ ipcMain.on('taskbar-widget:action', (_event, action, payload) => {
 
 // 点击播控展开/收起：窗口高度在任务栏高度上额外加一段，供向上弹出的按钮面板显示
 const TASKBAR_WIDGET_POPUP_HEIGHT = 218
-ipcMain.on('taskbar-widget:set-expanded', (_event, expanded) => {
-  if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed()) return
+ipcMain.on('taskbar-widget:set-expanded', (event, expanded) => {
+  // 展开态改变任务栏部件窗口几何：只认任务栏窗自身
+  if (!taskbarWidgetWindow || taskbarWidgetWindow.isDestroyed() || event?.sender !== taskbarWidgetWindow.webContents) return
   taskbarWidgetExpanded = expanded === true
   try {
     const pos = getTaskbarWidgetPosition()
@@ -2721,7 +2880,11 @@ ipcMain.on('taskbar-widget:set-interactive', (_event, interactive) => {
   // 保留空处理器仅为兼容旧 preload 调用，不再改变窗口鼠标穿透状态。
 })
 
-ipcMain.handle('taskbar-widget:set-visible', (_event, visible) => setTaskbarWidgetVisible(Boolean(visible)))
+ipcMain.handle('taskbar-widget:set-visible', (event, visible) => {
+  // 显示/隐藏任务栏部件窗：只由主窗设置页调用
+  assertMainSender(event)
+  return setTaskbarWidgetVisible(Boolean(visible))
+})
 ipcMain.handle('taskbar-widget:get-state', () => ({
   visible: Boolean(taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed() && taskbarWidgetWindow.isVisible()),
   closedByUser: taskbarWidgetClosedByUser,
@@ -2729,6 +2892,7 @@ ipcMain.handle('taskbar-widget:get-state', () => ({
 
 // 设置-个性化 开关：启用/禁用任务栏迷你播控（持久化）
 ipcMain.handle('taskbar-widget:set-enabled', (_event, enabled) => {
+  assertMainSender(_event)
   if (process.platform !== 'win32') return { success: false, reason: '仅支持 Windows' }
   loadTaskbarWidgetSettings()
   taskbarWidgetSettings = { ...taskbarWidgetSettings, enabled: enabled === true }
@@ -2749,6 +2913,7 @@ ipcMain.handle('taskbar-widget:get-settings', () => {
 })
 
 ipcMain.handle('taskbar-widget:update-settings', (_event, partial) => {
+  assertMainSender(_event)
   loadTaskbarWidgetSettings()
   taskbarWidgetSettings = sanitizeTaskbarWidgetSettings(partial || {}, taskbarWidgetSettings)
   saveTaskbarWidgetSettings()
@@ -2849,7 +3014,10 @@ function setGameModeEnabled(enabled) {
 
 ipcMain.handle('game-mode:get', () => ({ enabled: gameModeEnabled, frozen: gameModeFrozen }))
 
-ipcMain.handle('game-mode:set', (_event, enabled) => setGameModeEnabled(enabled === true))
+ipcMain.handle('game-mode:set', (_event, enabled) => {
+  assertMainSender(_event)
+  return setGameModeEnabled(enabled === true)
+})
 
 
 // ===== 系统托盘 + 托盘弹窗（QQ 音乐式快控面板） =====
@@ -3074,6 +3242,9 @@ function createTrayPopupWindow() {
     },
   })
   trayPopupWindow.setAlwaysOnTop(true, 'screen-saver')
+  // 本地 HTML 加载，仍挂导航守卫（与任务栏播控窗一致）
+  guardAgainstExternalNavigation(trayPopupWindow.webContents)
+  trayPopupWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   trayPopupWindow.loadFile(path.join(__dirname, 'tray-popup.html'))
   trayPopupWindow.on('blur', () => {
     trayPopupJustHiddenAt = Date.now()
@@ -3137,6 +3308,7 @@ function toggleTrayPopup() {
 }
 
 ipcMain.on('tray-popup:action', (_event, action, payload) => {
+  if (_event?.sender !== trayPopupWindow?.webContents || _event?.senderFrame !== trayPopupWindow?.webContents.mainFrame) return
   if (action === 'quit') {
     app.quit()
     return
@@ -3155,7 +3327,8 @@ ipcMain.on('tray-popup:action', (_event, action, payload) => {
   }
 })
 
-ipcMain.on('tray-popup:show-main', () => {
+ipcMain.on('tray-popup:show-main', (_event) => {
+  if (_event?.sender !== trayPopupWindow?.webContents) return
   trayPopupJustHiddenAt = Date.now()
   if (trayPopupWindow && !trayPopupWindow.isDestroyed()) trayPopupWindow.hide()
   showMainWindowFromTray()
@@ -3192,6 +3365,7 @@ ipcMain.handle('tray-popup:get-usage', () => {
 })
 
 ipcMain.on('tray-popup:set-feature', (_event, name, enabled) => {
+  if (_event?.sender !== trayPopupWindow?.webContents || _event?.senderFrame !== trayPopupWindow?.webContents.mainFrame) return
   if (name === 'desktopLyrics') applyDesktopLyricsEnabledFromTray(enabled === true)
   else if (name === 'desktopPlayer') applyDesktopPlayerEnabledFromTray(enabled === true)
   else if (name === 'taskbarWidget') applyTaskbarWidgetEnabledFromTray(enabled === true)
@@ -3260,6 +3434,7 @@ function ensureRemoteServer() {
 }
 
 ipcMain.handle('remote:start', async (_event, requestedPort) => {
+  assertMainSender(_event)
   const srv = ensureRemoteServer()
   try {
     return await srv.start(Number(requestedPort) || 25566)
@@ -3268,20 +3443,28 @@ ipcMain.handle('remote:start', async (_event, requestedPort) => {
   }
 })
 
-ipcMain.handle('remote:stop', () => {
+ipcMain.handle('remote:stop', (event) => {
+  assertMainSender(event)
   if (remoteServer) remoteServer.stop()
   return remoteServer ? remoteServer.status() : { running: false, port: 25566, token: '', clientCount: 0, ips: getLanIPv4Addresses() }
 })
 
-ipcMain.handle('remote:get-status', () => (
-  remoteServer
-    ? remoteServer.status()
-    : { running: false, port: 25566, token: '', clientCount: 0, ips: getLanIPv4Addresses() }
-))
+ipcMain.handle('remote:get-status', (event) => {
+  assertMainSender(event)
+  return (
+    remoteServer
+      ? remoteServer.status()
+      : { running: false, port: 25566, token: '', clientCount: 0, ips: getLanIPv4Addresses() }
+  )
+})
 
-ipcMain.handle('remote:get-settings', () => getRemoteSettings())
+ipcMain.handle('remote:get-settings', (event) => {
+  assertMainSender(event)
+  return getRemoteSettings()
+})
 
 ipcMain.handle('remote:update-settings', (_event, partial) => {
+  assertMainSender(_event)
   if (partial && typeof partial === 'object') {
     if (partial.theme === 'light' || partial.theme === 'dark') remoteSettings.theme = partial.theme
     if (['song', 'comment', 'artist', 'favorite', 'desktop-lyrics', 'mode-switch'].includes(partial.topRightAction)) remoteSettings.topRightAction = partial.topRightAction
@@ -3933,7 +4116,14 @@ async function readWallpaperEngineConfigCached(configPath) {
   if (weConfigCache.path === configPath && weConfigCache.mtimeMs === stats.mtimeMs && weConfigCache.config) {
     return weConfigCache.config
   }
-  const config = JSON.parse(await fs.promises.readFile(configPath, 'utf8'))
+  // WE 高频重写 config.json：恰逢写入瞬间读取/解析会抛错——返回 null 让 watcher 保持
+  // 上次签名，而不是在 engine↔no-engine 间抖动并向渲染端发假 wallpaper-changed
+  let config = null
+  try {
+    config = JSON.parse(await fs.promises.readFile(configPath, 'utf8'))
+  } catch {
+    return null
+  }
   weConfigCache = { path: configPath, mtimeMs: stats.mtimeMs, config }
   return config
 }
@@ -4127,7 +4317,9 @@ function getWindowsWallpaper() {
 }
 
 // IPC 处理：获取当前壁纸
-ipcMain.handle('get-current-wallpaper', async () => {
+ipcMain.handle('get-current-wallpaper', async (event) => {
+  // 返回壁纸文件绝对路径（含用户名）：限主窗（桌面设置页）
+  assertMainSender(event)
   logWallpaper('📞 [IPC] 收到获取壁纸请求')
   try {
     const wallpaper = await getWindowsWallpaper()
@@ -4144,9 +4336,14 @@ const customWallpaperDir = path.join(app.getPath('userData'), 'waveforge-wallpap
 
 // IPC 处理：保存用户上传的自定义壁纸到磁盘，返回本地路径 + waveforge-media URL
 ipcMain.handle('save-custom-wallpaper', async (_event, payload = {}) => {
+  assertMainSender(_event)
   try {
     const dataBase64 = String(payload.dataBase64 || '')
     if (!dataBase64) return { success: false, error: 'missing data' }
+    // 大小上限：base64 字符串经 IPC 结构化克隆整段进主进程（渲染端还会先持一份），
+    // 无上限的大视频会双端各持 ~1.3GB 字符串打爆内存。对齐 hse-save-rendered-audio 的 300MB 语义。
+    const MAX_WALLPAPER_BASE64 = 400 * 1024 * 1024
+    if (dataBase64.length > MAX_WALLPAPER_BASE64) return { success: false, error: '壁纸文件过大（超过 400MB）' }
     const buffer = Buffer.from(dataBase64, 'base64')
     if (!buffer.length) return { success: false, error: 'empty data' }
     await fs.promises.mkdir(customWallpaperDir, { recursive: true })
@@ -4164,12 +4361,15 @@ ipcMain.handle('save-custom-wallpaper', async (_event, payload = {}) => {
 
 // IPC 处理：把本地路径重新登记进 waveforge-media 白名单（白名单是主进程内存态，重启后为空）
 ipcMain.handle('register-media-files', async (_event, paths) => {
+  assertMainSender(_event)
   const urls = {}
+  const dirWithSep = customWallpaperDir.endsWith(path.sep) ? customWallpaperDir : customWallpaperDir + path.sep
   for (const p of Array.isArray(paths) ? paths : []) {
     if (typeof p !== 'string' || !p) continue
     try {
       const resolved = path.resolve(p)
-      if (resolved.startsWith(customWallpaperDir)) urls[p] = toMediaUrl(resolved)
+      // 前缀必须带分隔符边界：否则 waveforge-wallpapers2 等兄弟目录也被视为内部路径
+      if (resolved === customWallpaperDir || resolved.startsWith(dirWithSep)) urls[p] = toMediaUrl(resolved)
     } catch { /* 忽略非法路径 */ }
   }
   return urls
@@ -4217,13 +4417,31 @@ ipcMain.handle('desktop-widgets:pick-launcher-target', guardTrustedIpc('privileg
     title: kind === 'folder' ? '选择文件夹' : '选择应用或文件',
     properties: kind === 'folder' ? ['openDirectory'] : ['openFile'],
   })
-  return result.canceled ? null : result.filePaths[0] || null
+  if (result.canceled || !result.filePaths[0]) return null
+  // 把用户选择的目标登记进内存白名单：open 通道只放行这里登记过的路径。
+  const selected = path.resolve(result.filePaths[0])
+  try {
+    authorizedLauncherTargets.add(fs.realpathSync.native(selected))
+  } catch {
+    authorizedLauncherTargets.add(selected)
+  }
+  while (authorizedLauncherTargets.size > 64) {
+    const oldest = authorizedLauncherTargets.values().next().value
+    if (!oldest) break
+    authorizedLauncherTargets.delete(oldest)
+  }
+  return result.filePaths[0]
 }))
 
 // 启动器组件合法的可执行/快捷方式类型；扩展名不在白名单内的一律拒绝打开。
 const ALLOWED_LAUNCHER_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.lnk', '.url', '.msi', '.appref-ms',
 ])
+
+// 用户经选择对话框登记过的启动目标（内存白名单）。此前 open 通道只查扩展名，
+// 渲染层被入侵后可对磁盘上任意 .exe/.bat 直接执行（如 cmd.exe），等于把
+// "执行任意程序"原语暴露给渲染层；登记制让 open 只能打开用户明确选过的目标。
+const authorizedLauncherTargets = new Set()
 
 ipcMain.handle('desktop-widgets:open-launcher-target', guardTrustedIpc('privileged', async (_event, target, kind) => {
   const value = String(target || '').trim()
@@ -4237,6 +4455,12 @@ ipcMain.handle('desktop-widgets:open-launcher-target', guardTrustedIpc('privileg
   }
   const resolved = path.resolve(value)
   if (!fs.existsSync(resolved)) return { success: false, error: '文件或目录不存在' }
+  // 必须先经选择对话框登记（realpath 归一化比对），未登记的一律拒绝
+  let authorizedPath = resolved
+  try { authorizedPath = fs.realpathSync.native(resolved) } catch { /* 保持 resolve 结果 */ }
+  if (!authorizedLauncherTargets.has(authorizedPath)) {
+    return { success: false, error: '目标未经过选择对话框登记，无法打开' }
+  }
   // 仅允许启动器组件合法的可执行/快捷方式类型，阻止任意文件被当作程序启动。
   const extension = path.extname(resolved).toLowerCase()
   if (!ALLOWED_LAUNCHER_EXTENSIONS.has(extension)) {
@@ -4316,6 +4540,7 @@ function startWallpaperWatcher() {
 
 // 渲染端按需启停壁纸监控：仅在桌面模式 + 壁纸联动开启时启用（避免非桌面模式持续 powershell 查询拖慢性能）
 ipcMain.handle('set-wallpaper-watcher', (_event, enabled) => {
+  assertMainSender(_event)
   logWallpaper(`[Watcher] 收到启停请求: ${enabled ? '启动' : '停止'}`)
   if (enabled) {
     startWallpaperWatcher()
@@ -4761,7 +4986,8 @@ async function createKugouLoginWindow() {
   })
 }
 
-ipcMain.handle('open-kugou-login-window', async () => {
+ipcMain.handle('open-kugou-login-window', async (event) => {
+  assertMainSender(event)
   try {
     const result = await createKugouLoginWindow()
     // 登录成功后把扩展用户信息（用户名/ID/头像）通知渲染进程持久化
@@ -4776,7 +5002,8 @@ ipcMain.handle('open-kugou-login-window', async () => {
 })
 
 // 退出登录时清除共享 session 的 kugou.com Cookie（防止登录弹窗带出旧账号，无法换号登录）
-ipcMain.handle('kugou-clear-session', async () => {
+ipcMain.handle('kugou-clear-session', async (event) => {
+  assertMainSender(event)
   try {
     const ses = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.session : null
     if (!ses) return { success: false }
@@ -4791,7 +5018,9 @@ ipcMain.handle('kugou-clear-session', async () => {
 })
 
 // 读取当前会话的酷狗登录态（应用启动时自动恢复已登录状态）
-ipcMain.handle('get-kugou-session', async () => {
+ipcMain.handle('get-kugou-session', async (event) => {
+  // 返回完整 KuGoo cookie 串（登录凭据）：只允许主窗读取，防止辅助窗凭空取凭据
+  assertMainSender(event)
   try {
     if (!mainWindow || mainWindow.isDestroyed()) return { success: false, loggedIn: false }
     const cookies = await mainWindow.webContents.session.cookies.get({ domain: '.kugou.com' })
@@ -4856,7 +5085,10 @@ async function createSpotifyLoginWindow(clientId) {
     const redirectPort = 8000
     const redirectUri = `http://127.0.0.1:${redirectPort}/login`
 
-    // 本地回调服务器：接收授权码 → 换 token
+    // 本地回调服务器：接收授权码 → 换 token。
+    // OAuth state 防 CSRF：本机任意进程都能 GET /login?code=…，无 state 校验时
+    // 攻击者可把自己的授权码注入应用（后续歌单/收藏写操作落在攻击者账号上）。
+    const oauthState = crypto.randomBytes(24).toString('base64url')
     spotifyCallbackServer = http.createServer(async (req, res) => {
       try {
         const url = new URL(req.url, `http://127.0.0.1:${redirectPort}`)
@@ -4867,6 +5099,12 @@ async function createSpotifyLoginWindow(clientId) {
           if (!code) {
             res.end('<html><body style="background:#111;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">授权已取消，可以关闭此窗口。</body></html>')
             finish({ success: false, error: error || '授权取消' })
+            return
+          }
+          if (url.searchParams.get('state') !== oauthState) {
+            console.warn('[Spotify] 回调 state 校验失败（可能的授权码注入），拒绝')
+            res.end('<html><body style="background:#111;color:#f66;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">授权校验失败，请重试。</body></html>')
+            finish({ success: false, error: '授权校验失败（state 不匹配），请重试' })
             return
           }
           // 换 token（Spotify 官方 token 端点，POST 不需要 CORS）
@@ -4941,7 +5179,7 @@ async function createSpotifyLoginWindow(clientId) {
         } catch { /* 清理失败不阻塞 */ }
       }
       const scope = 'user-read-private user-read-email playlist-read-private playlist-modify-private playlist-modify-public user-library-read user-library-modify user-top-read user-read-recently-played'
-      const authUrl = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`
+      const authUrl = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(oauthState)}`
       void clearSpotifyCookies().then(() => {
         if (settled) return
         spotifyLoginWindow = new BrowserWindow({
@@ -5004,6 +5242,7 @@ async function createSpotifyLoginWindow(clientId) {
 }
 
 ipcMain.handle('open-spotify-login', async (_event, clientId) => {
+  assertMainSender(_event)
   try {
     const result = await createSpotifyLoginWindow(clientId)
     // 成功后将 token 写入渲染进程 localStorage（通过事件交给前端）
@@ -5066,7 +5305,8 @@ async function createSodaLoginWindow() {
         const configFile = path.join(app.getPath('userData'), 'soda-qr-login.json')
         const readCfg = () => { try { return JSON.parse(fs.readFileSync(configFile, 'utf8')) } catch { return {} } }
         const writeCfg = (patch) => {
-          try { fs.writeFileSync(configFile, JSON.stringify({ ...readCfg(), ...(patch || {}) }, null, 2), 'utf8') } catch {}
+          // 0o600：文件含汽水会话 Cookie + msToken，仅当前用户可读
+          try { fs.writeFileSync(configFile, JSON.stringify({ ...readCfg(), ...(patch || {}) }, null, 2), { encoding: 'utf8', mode: 0o600 }) } catch {}
         }
         auth.configure({
           getConfig: () => ({
@@ -5145,7 +5385,9 @@ async function createSodaLoginWindow() {
           try {
             // 先看凭据文件：MFA/二次验证流程可能在任意时刻把会话写进来
             const cfgSnapshot = readCfg()
-            console.log('[SodaLogin][tick] cookie字段=', String(cfgSnapshot.cookie || '').slice(0, 60))
+            // 只打有无与长度：cookie 前缀（含 sessionid 开头）曾直接进 console——
+            // TV 调试模式下主进程日志进 serverLogs 环形缓冲，调试台可读，等于凭据部分泄露。
+            console.log('[SodaLogin][tick] cookie=', cfgSnapshot.cookie ? `provided(${String(cfgSnapshot.cookie).length} chars)` : 'missing')
             if (hasRealSession(cfgSnapshot)) { console.log('[SodaLogin][tick] 检测到有效会话 → 完成登录'); completeLogin(String(cfgSnapshot.cookie || '')); return }
             const envelope = await auth.checkQrConnect(qrToken)
             consecutiveErrors = 0
@@ -5219,7 +5461,8 @@ async function createSodaLoginWindow() {
     })()
   })
 }
-ipcMain.handle('open-soda-login', async () => {
+ipcMain.handle('open-soda-login', async (event) => {
+  assertMainSender(event)
   try {
     const result = await createSodaLoginWindow()
     // 登录成功后把用户名/头像通知渲染进程持久化
@@ -5238,7 +5481,8 @@ ipcMain.handle('open-soda-login', async () => {
 // 凭据文件保留 deviceId/installId 等设备指纹（稳定可降低风控概率），只清 cookie/msToken，
 // 与打开登录窗前的重置逻辑（writeCfg({ cookie: '' })）对齐。运行时未初始化时 clear()
 // 会直接按分区名清存储，覆盖「应用重启后 runtime 为空」的场景。
-ipcMain.handle('soda-clear-login', async () => {
+ipcMain.handle('soda-clear-login', async (event) => {
+  assertMainSender(event)
   try {
     // 顺序关键：先清凭据文件会话字段，再销毁扫码窗——qrWindow 的 closed 处理器会
     // readCfg() 判断会话是否有效，若先 destroy 会把"刚要被清掉的旧 cookie"误判为登录成功，
@@ -5270,6 +5514,7 @@ ipcMain.handle('soda-clear-login', async () => {
 // 仅开发模式可用（打包版没有 src 源码树，app.isPackaged 直接拒绝），
 // 内容必须带种子赋值语句标记且限长，防止变成任意文件写入通道。
 ipcMain.handle('hse-write-scene-seed', async (_e, content) => {
+  assertMainSender(_e)
   try {
     if (app.isPackaged) return { ok: false, error: '仅开发模式可写回仓库' }
     if (typeof content !== 'string' || !content.includes('export const BUILTIN_SCENE_SEED') || content.length > 2 * 1024 * 1024) {
@@ -5419,9 +5664,23 @@ async function readQqSessionCookie(targetSession) {
   return cookies.map(c => `${c.name}=${c.value}`).join('; ')
 }
 
-/** 扫码成功后：隐藏窗口打开回跳 URL，等待 y.qq.com 会话 cookie 落盘 */
+/** 扫码成功后：隐藏窗口打开回跳 URL，等待 y.qq.com 会话 cookie 落盘。
+ *  该窗共享主 session（持有全部平台 Cookie）且无 UI 可见性，必须像登录窗一样
+ *  挂导航守卫：redirectUrl 只放行 QQ 域 https，窗内跳转/window.open 一律拦。 */
 async function finishQqQrLogin(session_, redirectUrl) {
   destroyQqQrHiddenWindow()
+  const redirectOk = (() => {
+    try {
+      const parsed = new URL(String(redirectUrl || ''))
+      const host = parsed.hostname.toLowerCase()
+      return parsed.protocol === 'https:' &&
+        (host === 'qq.com' || host.endsWith('.qq.com') || host === 'gtimg.com' || host.endsWith('.gtimg.com'))
+    } catch { return false }
+  })()
+  if (!redirectOk) {
+    console.warn('[QQ扫码] 回跳 URL 未通过域校验，放弃完成登录:', String(redirectUrl || '').slice(0, 80))
+    return ''
+  }
   const win = new BrowserWindow({
     show: false,
     width: 480,
@@ -5429,6 +5688,15 @@ async function finishQqQrLogin(session_, redirectUrl) {
     webPreferences: { contextIsolation: true, nodeIntegration: false, session: session_ },
   })
   qqQrHiddenWindow = win
+  win.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'qq.com' || host.endsWith('.qq.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   const targetSession = win.webContents.session
   win.webContents.setUserAgent(REAL_CHROME_UA)
   try { await win.loadURL(redirectUrl) } catch { /* 回跳失败也给 cookie 轮询机会 */ }
@@ -5443,6 +5711,7 @@ async function finishQqQrLogin(session_, redirectUrl) {
 }
 
 ipcMain.handle('qq-qr-login-start', async (_event, channel) => {
+  assertMainSender(_event)
   const useWx = channel === 'wx'
   const useQqMusic = channel === 'qqmusic'
   try {
@@ -5531,7 +5800,8 @@ ipcMain.handle('qq-qr-login-start', async (_event, channel) => {
   }
 })
 
-ipcMain.handle('qq-qr-login-poll', async () => {
+ipcMain.handle('qq-qr-login-poll', async (event) => {
+  assertMainSender(event)
   try {
     if (!qqQrSession || qqQrSession.cancelled) return { status: 'cancelled' }
     if (qqQrSession.status === 'success') return { status: 'success' }
@@ -5639,7 +5909,8 @@ ipcMain.handle('qq-qr-login-poll', async () => {
     return { status: 'waiting' }
   }
 })
-ipcMain.handle('qq-qr-login-cancel', async () => {
+ipcMain.handle('qq-qr-login-cancel', async (event) => {
+  assertMainSender(event)
   try {
     if (qqQrSession) qqQrSession.cancelled = true
     destroyQqQrHiddenWindow()
@@ -5653,7 +5924,8 @@ ipcMain.handle('qq-qr-login-cancel', async () => {
 })
 
 // 监听打开 QQ 登录窗口的请求
-ipcMain.handle('open-qq-login-window', async () => {
+ipcMain.handle('open-qq-login-window', async (event) => {
+  assertMainSender(event)
   try {
     const result = await createQQLoginWindow()
     return result
@@ -5665,6 +5937,9 @@ ipcMain.handle('open-qq-login-window', async () => {
 
 // 渲染进程日志桥：把前端（校验/登录流程）的诊断输出到主进程控制台（后台窗口可见）
 ipcMain.on('app-log', (event, message) => {
+  // 只认主窗：辅助窗（歌词/播放器/webview）的日志没有诊断价值，放开会让任意
+  // 渲染层刷主进程控制台（5MB 轮转兜底仍在，但无谓噪音）。
+  try { assertMainSender(event) } catch { return }
   console.log('[渲染进程]', message)
 })
 
@@ -5703,6 +5978,16 @@ function ensureDouyinBridge() {
   douyinBridgeWindow.webContents.on('did-start-loading', () => { douyinBridgeLastActivityAt = Date.now() })
   // 拦截 window.open：抖音站点弹窗会产生无引用、无守卫的游离原生窗口，桥窗不需要弹窗
   douyinBridgeWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // will-navigate 守卫：桥窗共享主 session（持有全部平台 Cookie），页面 location
+  // 跳转到任意域会带着会话 Cookie 执行第三方 JS —— 只放行抖音系域。
+  douyinBridgeWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'douyin.com' || host.endsWith('.douyin.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
   douyinBridgeWindow.webContents.on('destroyed', () => {
     douyinBridgeReady = false
     douyinBridgeWindow = null
@@ -5713,9 +5998,16 @@ function ensureDouyinBridge() {
   })
   douyinBridgeWindow.webContents.on('did-stop-loading', () => { douyinBridgeLastActivityAt = Date.now() })
   const loadPromise = douyinBridgeWindow.loadURL('https://www.douyin.com/')
-    .catch(error => console.error('❌ [汽水数据桥] 加载抖音失败:', error))
-  douyinBridgeLoading = loadPromise.then(() => douyinBridgeWindow)
-  return loadPromise.then(() => douyinBridgeWindow)
+    .catch(error => {
+      console.error('❌ [汽水数据桥] 加载抖音失败:', error)
+      // 首次加载失败（断网/DNS）时销毁坏窗：否则 ensureDouyinBridge 永远返回同一个
+      // 不可用的窗（loading promise 已 settle），只能等游戏模式冻结才回收
+      try { if (douyinBridgeWindow && !douyinBridgeWindow.isDestroyed()) douyinBridgeWindow.destroy() } catch { /* 忽略 */ }
+      douyinBridgeLoading = null
+      return null
+    })
+  douyinBridgeLoading = loadPromise.then(win => win || douyinBridgeWindow).then(win => win || Promise.reject(new Error("抖音桥不可用")))
+  return douyinBridgeLoading
 }
 
 /** 在隐藏窗口内导航到抖音搜索页并抓取音乐卡片（需已登录抖音） */
@@ -5779,6 +6071,7 @@ async function scrapeDouyinMusic(keyword) {
 }
 
 ipcMain.handle('soda-scrape-search', async (_event, keyword) => {
+  assertMainSender(_event)
   if (typeof keyword !== 'string' || keyword.trim().length === 0) {
     return { success: false, error: '搜索关键词无效', items: [] }
   }
@@ -5822,6 +6115,15 @@ function ensureKugouBridge() {
   kugouBridgeWindow.webContents.on('did-start-loading', () => { kugouBridgeLastActivityAt = Date.now() })
   // 拦截 window.open：页面弹窗会产生无引用、无守卫的游离原生窗口，桥窗不需要弹窗
   kugouBridgeWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  // will-navigate 守卫：桥窗共享主 session，只放行酷狗系域（同 douyin 桥）
+  kugouBridgeWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'kugou.com' || host.endsWith('.kugou.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
   kugouBridgeWindow.webContents.on('destroyed', () => {
     kugouBridgeReady = false
     kugouBridgeWindow = null
@@ -5832,9 +6134,14 @@ function ensureKugouBridge() {
   })
   kugouBridgeWindow.webContents.on('did-stop-loading', () => { kugouBridgeLastActivityAt = Date.now() })
   const loadPromise = kugouBridgeWindow.loadURL('https://www.kugou.com/')
-    .catch(error => console.error('❌ [酷狗数据桥] 加载酷狗失败:', error))
-  kugouBridgeLoading = loadPromise.then(() => kugouBridgeWindow)
-  return loadPromise.then(() => kugouBridgeWindow)
+    .catch(error => {
+      console.error('❌ [酷狗数据桥] 加载酷狗失败:', error)
+      try { if (kugouBridgeWindow && !kugouBridgeWindow.isDestroyed()) kugouBridgeWindow.destroy() } catch { /* 忽略 */ }
+      kugouBridgeLoading = null
+      return null
+    })
+  kugouBridgeLoading = loadPromise.then(win => win || kugouBridgeWindow).then(win => win || Promise.reject(new Error('酷狗桥不可用')))
+  return kugouBridgeLoading
 }
 
 /** 页面内同源 fetch 酷狗用户歌单（真实 Chromium 上下文，绕开服务端 WAF） */
@@ -5894,7 +6201,8 @@ async function scrapeKugouUserInfo() {
   try { return JSON.parse(result || '{}') } catch { return {} }
 }
 
-ipcMain.handle('kugou-scrape-user-playlists', async () => {
+ipcMain.handle('kugou-scrape-user-playlists', async (event) => {
+  assertMainSender(event)
   try {
     const playlists = await scrapeKugouUserPlaylists()
     return { success: true, playlists }
@@ -5904,7 +6212,8 @@ ipcMain.handle('kugou-scrape-user-playlists', async () => {
   }
 })
 
-ipcMain.handle('kugou-scrape-user-info', async () => {
+ipcMain.handle('kugou-scrape-user-info', async (event) => {
+  assertMainSender(event)
   try {
     const info = await scrapeKugouUserInfo()
     return { success: true, info }
@@ -6980,7 +7289,8 @@ async function createAppleLoginWindow() {
                   fs.writeFileSync(
                     path.join(app.getPath('userData'), 'apple-web-cookies.json'),
                     JSON.stringify({ cookie: allCookies, savedAt: Date.now() }),
-                    'utf8',
+                    // 0o600：等价于 Apple ID 网页会话，仅当前用户可读
+                    { encoding: 'utf8', mode: 0o600 },
                   )
                   console.log(`[Apple登录] 网页会话 Cookie 已持久化（license 代理用，${allCookies.length} chars）`)
                 } catch (e) {
@@ -7779,11 +8089,19 @@ async function createQQSkillKeyWindow() {
   // Wipe the dedicated qmk session before opening so the login is always fresh.
   const qmkSession = session.fromPartition(QMK_SESSION_PARTITION)
   // Allow clipboard write so the official copy button can put the key on the clipboard.
-  qmkSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(permission === 'clipboard-sanitized-write' || permission === 'clipboard-read' || permission === 'geolocation')
+  // 授权限定官方技能页来源：该窗口会加载 y.qq.com 远程内容并可被注入脚本，
+  // 不校验 requestingUrl 的话窗口内任何落地页/iframe 都自动获得系统剪贴板读取权。
+  const qmkAllowedOrigin = new URL(QMK_OFFICIAL_KEY_URL).origin
+  qmkSession.setPermissionRequestHandler((wc, permission, callback, details) => {
+    const okPermission = permission === 'clipboard-sanitized-write' || permission === 'clipboard-read'
+    const requestingUrl = String(details?.requestingUrl || "")
+    const okOrigin = requestingUrl.startsWith(qmkAllowedOrigin)
+    callback(Boolean(okPermission && okOrigin && wc === qqSkillKeyWindow?.webContents))
   })
-  qmkSession.setPermissionCheckHandler((_wc, permission) =>
-    permission === 'clipboard-sanitized-write' || permission === 'clipboard-read' || permission === 'geolocation')
+  qmkSession.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
+    const okPermission = permission === 'clipboard-sanitized-write' || permission === 'clipboard-read'
+    return Boolean(okPermission && String(requestingOrigin || '').startsWith(qmkAllowedOrigin))
+  })
   try {
     await qmkSession.clearStorageData()
     await qmkSession.clearCache()
@@ -7821,6 +8139,28 @@ async function createQQSkillKeyWindow() {
         contextIsolation: true,
         session: qmkSession,
       },
+    })
+
+    // 导航/弹窗守卫：该窗是唯一允许打开 y.qq.com 的窗口，但此前 will-navigate 与
+    // window.open 双双裸奔——页面被诱导跳走会带着 qmk 隔离分区导航到任意站点，
+    // window.open 会产生继承该分区的无守卫游离窗。这里收紧到 qq.com 域内，
+    // 其余 http(s) 一律外开系统浏览器、非 http(s) 直接拦掉。
+    const isQmkAllowedDomain = (url) => {
+      try {
+        const hostname = new URL(String(url || '')).hostname.toLowerCase()
+        return hostname === 'qq.com' || hostname.endsWith('.qq.com')
+      } catch {
+        return false
+      }
+    }
+    qqSkillKeyWindow.webContents.on('will-navigate', (event, url) => {
+      if (isQmkAllowedDomain(url)) return
+      event.preventDefault()
+      if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
+    })
+    qqSkillKeyWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
+      return { action: 'deny' }
     })
 
     qqSkillKeyWindow.loadURL(QMK_OFFICIAL_KEY_URL)
@@ -7863,6 +8203,9 @@ async function createQQSkillKeyWindow() {
             const clicked = await qqSkillKeyWindow.webContents.executeJavaScript(QMK_CLICK_COPY_JS, true).catch(() => false)
             if (clicked) await new Promise((r) => setTimeout(r, 500))
           }
+          // 仅在 QMK 窗口聚焦时读剪贴板：窗口开着但用户去干别的时，不应把用户
+          // 复制的无关内容读进主进程内存做正则匹配（隐私）。本轮跳过，下轮再看。
+          if (!qqSkillKeyWindow.isFocused()) return
           const cb = clipboard.readText() || ''
           const m = cb.match(/qmk-[A-Za-z0-9._-]{8,}/)
           if (m) {
@@ -7893,7 +8236,8 @@ async function createQQSkillKeyWindow() {
 }
 
 // 监听打开 QQ 音乐官方增强领取窗口的请求
-ipcMain.handle('open-qq-skill-key-window', async () => {
+ipcMain.handle('open-qq-skill-key-window', async (event) => {
+  assertMainSender(event)
   try {
     return await createQQSkillKeyWindow()
   } catch (err) {
@@ -7916,7 +8260,8 @@ ipcMain.handle('get-developer-mode', () => {
 })
 
 // Device ID is stored in HKCU\Software\WaveForge; file storage is only a fallback.
-ipcMain.handle('device-license:get-state', () => {
+ipcMain.handle('device-license:get-state', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
     return { success: true, ...deviceLicense.getState(app) }
   } catch (error) {
@@ -7955,7 +8300,8 @@ ipcMain.handle('audio:get-system-volume', () => {
   return systemVolumeRequest
 })
 
-ipcMain.handle('device-license:copy-id', () => {
+ipcMain.handle('device-license:copy-id', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
     const identity = deviceLicense.getOrCreateDeviceId(app)
     clipboard.writeText(identity.deviceId)
@@ -7966,7 +8312,8 @@ ipcMain.handle('device-license:copy-id', () => {
   }
 })
 
-ipcMain.handle('device-license:read-clipboard', () => {
+ipcMain.handle('device-license:read-clipboard', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
     return { success: true, text: clipboard.readText() }
   } catch (error) {
@@ -7976,6 +8323,7 @@ ipcMain.handle('device-license:read-clipboard', () => {
 })
 
 ipcMain.handle('device-license:redeem', (_event, code) => {
+  assertMainSender(_event)
   try {
     return deviceLicense.redeem(app, code)
   } catch (error) {
@@ -7984,7 +8332,8 @@ ipcMain.handle('device-license:redeem', (_event, code) => {
   }
 })
 
-ipcMain.handle('device-license:reset', () => {
+ipcMain.handle('device-license:reset', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
     return deviceLicense.resetDeviceLicense(app)
   } catch (error) {
@@ -8066,6 +8415,7 @@ ipcMain.handle('get-hardware-acceleration', async () => {
 })
 
 ipcMain.handle('set-hardware-acceleration', (_event, enabled) => {
+  assertMainSender(_event)
   performanceSettings.hardwareAcceleration = enabled !== false
   // 关闭 GPU 加速属于风险操作，重启后需要用户确认，否则 15 秒自动恢复
   performanceSettings.pendingGpuChange = performanceSettings.hardwareAcceleration ? null : { type: 'acceleration' }
@@ -8074,6 +8424,7 @@ ipcMain.handle('set-hardware-acceleration', (_event, enabled) => {
 })
 
 ipcMain.handle('set-gpu-preference', (_event, preference) => {
+  assertMainSender(_event)
   const next = ['auto', 'discrete', 'integrated'].includes(preference) ? preference : 'discrete'
   performanceSettings.gpuPreference = next
   // 切换到强制显卡（独显/核显）属于风险操作，重启后需要用户确认；自动为安全默认
@@ -8085,6 +8436,7 @@ ipcMain.handle('set-gpu-preference', (_event, preference) => {
 
 // 渲染后端：Chromium ANGLE 图形 API（auto/d3d11/vulkan/gl），重启后生效
 ipcMain.handle('set-render-backend', (_event, backend) => {
+  assertMainSender(_event)
   const next = ['auto', 'd3d11', 'vulkan', 'gl'].includes(backend) ? backend : 'auto'
   performanceSettings.renderBackend = next
   // 切换渲染后端属于风险操作（个别后端可能与显卡驱动/视频解码不兼容），重启后需用户确认
@@ -8095,6 +8447,7 @@ ipcMain.handle('set-render-backend', (_event, backend) => {
 
 // 高性能模式（实验）：禁用 vsync + 解除帧率上限，需重启生效（非风险类设置，无需体验确认）
 ipcMain.handle('set-high-performance-mode', (_event, enabled) => {
+  assertMainSender(_event)
   performanceSettings.highPerformanceMode = enabled === true
   clearTierIfPresetDiverged()
   writePerformanceSettings(performanceSettings)
@@ -8103,6 +8456,7 @@ ipcMain.handle('set-high-performance-mode', (_event, enabled) => {
 
 // 性能模式挡位：一键统管显卡偏好 / 高性能模式 / 全局高刷（重启生效）
 ipcMain.handle('set-performance-tier', (_event, tier) => {
+  assertMainSender(_event)
   const preset = PERF_TIER_PRESETS[tier]
   performanceSettings.performanceTier = preset ? tier : null
   if (preset) {
@@ -8142,14 +8496,16 @@ ipcMain.handle('gpu:clear-cache', guardTrustedIpc('privileged', async () => {
 }))
 
 // 用户确认新的 GPU 设置可用（保留当前设置，清除待确认标记）
-ipcMain.handle('confirm-gpu-change', () => {
+ipcMain.handle('confirm-gpu-change', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   performanceSettings.pendingGpuChange = null
   writePerformanceSettings(performanceSettings)
   return { success: true }
 })
 
 // 用户未确认 / 点击取消：回退到安全默认值（独显 / 渲染后端自动 / 开启 GPU 加速）
-ipcMain.handle('revert-gpu-change', () => {
+ipcMain.handle('revert-gpu-change', (event) =>  {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   const pending = performanceSettings.pendingGpuChange
   let highRefreshChanged = false
   if (pending?.type === 'acceleration') {
@@ -8294,7 +8650,9 @@ ipcMain.handle('display:get-info', () => {
   }
 })
 
-ipcMain.handle('display:set-high-refresh', (_event, enabled, hz) => {
+ipcMain.handle('display:set-high-refresh', (event, enabled, hz) => {
+  // 改变主窗显示帧率 + 写性能设置：只由主窗设置面板调用
+  assertMainSender(event)
   performanceSettings.highRefreshRate = enabled === true
   const savedHz = Number(hz)
   performanceSettings.highRefreshHz = Number.isInteger(savedHz) && savedHz >= HIGH_REFRESH_MIN_HZ && savedHz <= HIGH_REFRESH_MAX_HZ
@@ -8319,8 +8677,11 @@ function persistMainWindowState() {
   }
 }
 
-// IPC 处理：窗口控制
-ipcMain.handle('window-minimize', () => {
+// IPC 处理：窗口控制。主窗专属操作（最小化/关闭/融合重建/高刷切换）加主窗来源校验——
+// 这些通道只被主窗 TitleBar/OOBE/设置调用，无校验时任何渲染层（含第三方 webview）都能
+// 关闭/重建主窗或改变显示行为。纯读取类（is-maximized 等）保持无守卫。
+ipcMain.handle('window-minimize', (event) => {
+  assertMainSender(event)
   if (mainWindow) {
     mainWindow.minimize()
   }
@@ -8523,6 +8884,10 @@ async function recreateMainWindow(transparent) {
       win.focus()
     }
   })
+  // 重建后主动重挂任务栏缩略图播控按钮：旧窗销毁带走 thumbar，而 playing 标志未变
+  // 不会再触发 changed.playing 事件——不补挂则新窗有 1~2s（等渲染端 mount 推送）
+  // 的按钮空窗
+  updateThumbarButtons()
   return win
 }
 
@@ -8573,7 +8938,8 @@ const restoreMainWindowFromExpanded = () => {
   }
 }
 
-ipcMain.handle('window-maximize', async () => {
+ipcMain.handle('window-maximize', async (event) => {
+  assertMainSender(event)
   if (!mainWindow || mainWindow.isDestroyed()) return
   if (mainWindowExpanded) {
     // 扩大态 → 还原窗口
@@ -8618,7 +8984,8 @@ ipcMain.handle('window-maximize', async () => {
   } catch { /* 忽略 */ }
 })
 
-ipcMain.handle('window-close', () => {
+ipcMain.handle('window-close', (event) => {
+  assertMainSender(event)
   if (mainWindow) {
     mainWindow.close()
   }
@@ -8642,7 +9009,10 @@ ipcMain.handle('desktop-fusion:get-state', () => ({ enabled: desktopFusionEnable
 
 // 设置融合状态并重建窗口（透明↔不透明）。供渲染端关闭融合、以及应用启动时
 // 从 localStorage 恢复融合态（此时主进程 desktopFusionEnabled 为 false）调用。
-ipcMain.handle('desktop-fusion:set-enabled', async (_event, enabled) => {
+ipcMain.handle('desktop-fusion:set-enabled', async (event, enabled) => {
+  // 融合穿透会**重建主窗口**（透明↔不透明），且该操作只应由主窗设置触发——
+  // 无守卫时任何渲染层可反复重建主窗（中断播放/丢界面状态）。
+  assertMainSender(event)
   if (!mainWindow || mainWindow.isDestroyed()) return { success: false, canceled: false }
   const next = enabled === true
   if (next === desktopFusionEnabled) return { success: true, enabled: desktopFusionEnabled, recreated: false }
@@ -8672,7 +9042,9 @@ ipcMain.handle('desktop-fusion:set-enabled', async (_event, enabled) => {
 // 为 false，渲染端启动同步调用 set-enabled(true) 触发重建为透明窗口）。
 
 // 渲染端报告「光标是否悬停在组件上」→ 切换鼠标穿透
-ipcMain.on('desktop-fusion:set-interactive', (_event, interactive) => {
+ipcMain.on('desktop-fusion:set-interactive', (event, interactive) => {
+  // 翻转主窗鼠标穿透：只认主窗（唯一调用方就是主窗 preload 的融合部件）
+  try { assertMainSender(event) } catch { return }
   if (!desktopFusionEnabled || !mainWindow || mainWindow.isDestroyed()) return
   try {
     mainWindow.setIgnoreMouseEvents(!(interactive === true), { forward: true })
@@ -8682,6 +9054,8 @@ ipcMain.on('desktop-fusion:set-interactive', (_event, interactive) => {
 
 // IPC 处理：全屏控制
 ipcMain.handle('window-set-fullscreen', (event, fullscreen, kiosk = false) => {
+  // 主窗全屏/kiosk 只由主窗 UI（全屏模式设置）调用
+  assertMainSender(event)
   console.log('[全屏控制] fullscreen=', fullscreen, ', kiosk=', kiosk)
   console.log('[全屏控制] 当前状态: isKiosk=', mainWindow?.isKiosk(), ', isFullScreen=', mainWindow?.isFullScreen(), ', isMaximized=', mainWindow?.isMaximized())
   
@@ -8740,7 +9114,9 @@ ipcMain.handle('window-is-fullscreen', () => {
   }
 })
 
-ipcMain.handle('get-system-location', async () => {
+ipcMain.handle('get-system-location', async (event) => {
+  // 城市级地理位置属隐私数据：只允许主窗（天气部件/定位设置）读取
+  assertMainSender(event)
   try {
     return { success: true, ...(await getWindowsSystemLocation()) }
   } catch (error) {
@@ -8820,10 +9196,13 @@ async function ensurePythonService(name) {
     return true
   }
   if (service.child && service.activeRequests.size > 0) return true
+  // starting 检查必须在 kill 分支之前：启动期（python-embed 绑定端口需数秒，probe
+  // 必然失败）第二个 ensure 会把刚 spawn 的健康子进程当 unresponsive 杀掉，两次
+  // ensure 全部失败且白费一次启动。启动中 → 复用 starting promise 等待即可。
+  if (service.starting) return service.starting
   if (service.child) stopPythonService(service, 'unresponsive')
   if (!app.isPackaged) return false
   if (process.env.WAVEFORGE_DISABLE_LOCAL_BACKEND === '1' || pythonServicesQuitting) return false
-  if (service.starting) return service.starting
 
   const starting = (async () => {
     const pythonExe = path.join(process.resourcesPath, 'python-embed', 'python.exe')
@@ -9096,6 +9475,10 @@ function stopAppleBridgeTree() {
   if (!child || child.killed) return Promise.resolve()
   try {
     if (process.platform === 'win32' && typeof child.pid === 'number') {
+      // will-quit 不等待 Promise：异步 taskkill 的回调在进程退出前基本不会执行，
+      // msedgewebview2 子进程树会残留并锁住 apple-bridge-profile 目录。
+      // 退出路径必须用同步 taskkill（与 stopPythonService 同款）；正常调用方
+      // （如登录前重置）仍走异步包装，避免阻塞 UI。
       return new Promise((resolve) => {
         try {
           execFile('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true, timeout: 5000 }, () => {
@@ -9113,6 +9496,18 @@ function stopAppleBridgeTree() {
     try { child.kill() } catch { /* ignore */ }
   }
   return Promise.resolve()
+}
+
+/** 同步杀 Apple bridge 进程树（will-quit 专用：Electron 不等待异步清理） */
+function stopAppleBridgeTreeSync() {
+  const child = appleBridgeChild
+  if (!child || child.killed) return
+  try {
+    if (process.platform === 'win32' && typeof child.pid === 'number') {
+      execFileSync('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true, timeout: 5000, stdio: 'ignore' })
+    }
+  } catch { /* taskkill 失败（进程已退出等）忽略 */ }
+  try { child.kill() } catch { /* ignore */ }
 }
 let appleBridgeSessionToken = ''
 const appleBridgePythonOkCache = new Map()
@@ -9256,12 +9651,14 @@ async function doStartAppleBridge() {
 }
 
 // 应用退出时一并结束本地子进程
-app.on('will-quit', async () => {
+// 注意：Electron 不会等待 will-quit 监听器返回的 Promise —— 这里的清理必须全部走
+// 同步路径（taskkill via execFileSync / child.kill），异步的 sweepBackendOrphans/
+// stopAppleBridgeTree 在进程退出前基本不会执行（WebView2 树残留锁目录的根因）。
+app.on('will-quit', () => {
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
   try { localApiChild?.kill() } catch {}
   stopAllPythonServices('app quit')
-  await sweepBackendOrphans('quit')
-  await stopAppleBridgeTree().catch(() => {})
+  stopAppleBridgeTreeSync()
   if (stemRuntime) {
     try { stemRuntime.shutdown() } catch { /* optional runtime cleanup */ }
     stemRuntime = null
@@ -9273,6 +9670,7 @@ app.on('will-quit', async () => {
 })
 
 app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return
   logStartupTiming('Electron app ready')
   // 启动时应用上次「稍后」的待更新：拉起 updater 后立即退出，换完文件自动重启到新版本。
   // 返回 true 表示正在重启应用，跳过本窗口创建流程。
@@ -9284,9 +9682,12 @@ app.whenReady().then(async () => {
   }
   // GPU 状态诊断：区分"splash 未渲染出来"（GPU 合成器异常）与"未加载出来"（资源失败）。
   // 每次启动写入日志，便于排查 splash 黑/白屏问题。
+  // 注意：whenReady 瞬间 getGPUFeatureStatus() 返回的是 GPU 进程初始化前的**陈旧快照**
+  //（Windows 上常见误报 disabled_software/disabled_off——实测用户 GPU 全速运行时同样出现）。
+  // 真实状态在 GPU 进程启动后落定，故挂 gpu-process-created 复读一次并纠正标记。
   try {
     const gpuInfo = app.getGPUFeatureStatus()
-    logStartupTiming(`GPU feature status: accelerated=${gpuInfo.gpu_compositing || '?'} webgl=${gpuInfo.webgl || '?'}`)
+    logStartupTiming(`GPU feature status (early snapshot): accelerated=${gpuInfo.gpu_compositing || '?'} webgl=${gpuInfo.webgl || '?'}`)
     // 软件合成（GPU 加速禁用）下，窗口内容层提交明显变慢（可达 2s+）。
     // 记录该状态，createWindow 据此动态延长 splash 最短可见时间，
     // 给内容层足够时间真正上屏，避免 splash 显示 1.2s 后就被关闭、用户只见深色底（≈黑）。
@@ -9409,7 +9810,9 @@ app.whenReady().then(async () => {
   
   // 启动生产版常驻本地 API（3001）。Python 3002/3003/3004 由 renderer 请求前 ensure；
   // 开发模式继续由 scripts/dev-electron.mjs 预启动全部服务。
-  await startLocalBackend()
+  // fire-and-forget：fork + health 轮询（最坏 2.5s）不阻塞 splash/主窗创建——渲染端对
+  // 后端未就绪本就有重试（此处原注释已承认），await 只会把后端启动时间原样加进白屏。
+  void startLocalBackend()
   
   // 传入缓存路径给 analysis runtime。
   // 延迟到 setImmediate 初始化：createAnalysisRuntime 内部 AudioDownloadService 构造时会
@@ -9428,18 +9831,27 @@ app.whenReady().then(async () => {
 
   // 渲染进程的 automix 事件（在调用后端之前就发生/退出的情况）也写进同一个日志文件
   ipcMain.handle('automix-log:append', (_event, scope, message) => {
+    // 只认主窗（App/播放链路是唯一写入方）；防止任意渲染层刷日志文件
+    try { assertMainSender(_event) } catch { return true }
     if (typeof scope !== 'string' || typeof message !== 'string') return true
     automixLog.log(`renderer:${scope}`, message.slice(0, 400))
     return true
   })
 
-  setupRenderIPC(ipcMain, configManager.getCachePath(), toMediaUrl)
+  // 渲染通道：输入白名单（音频缓存根内或对话框授权文件）+ 主窗校验——此前
+  // render:transition/qqAutomix 系不校验输入来源，渲染层被入侵后可把任意本机
+  // 文件当"音频"读入再经 getAudioUrl/readAudioFile 读回（任意文件读外带通道）。
+  setupRenderIPC(ipcMain, configManager.getCachePath(), toMediaUrl, {
+    isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
+    assertMainSender,
+  })
   try {
     const stemModels = require('./stem-model-manager.cjs')
     const { setupStemIPC } = require('./stem-runtime.cjs')
     const { setupTrackStemIPC } = require('./track-stem-runtime.cjs')
     stemModels.setupStemModelIPC(ipcMain, guardTrustedIpc)
     stemRuntime = setupStemIPC(ipcMain, {
+      assertMainSender,
       modelPath: stemModels.getModelPath(),
       pythonPath: stemModels.getRuntimePath(),
       isModelTrusted: stemModels.isModelTrusted,
@@ -9450,6 +9862,7 @@ app.whenReady().then(async () => {
       isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
     })
     trackStemRuntime = setupTrackStemIPC(ipcMain, {
+      assertMainSender,
       modelPath: stemModels.getModelPath(),
       pythonPath: stemModels.getRuntimePath(),
       isModelTrusted: stemModels.isModelTrusted,
@@ -9466,7 +9879,10 @@ app.whenReady().then(async () => {
     console.error('⚠️ [Stem Model] HTDemucs 模型/运行时初始化失败:', error instanceof Error ? error.message : error)
   }
   // AI 混音（DJTransGAN）运行时：严格可选；关闭时 renderer 不调用任何 Torch IPC
-  setupAiMixIPC(ipcMain, configManager.getCachePath())
+  setupAiMixIPC(ipcMain, configManager.getCachePath(), {
+    isInputAllowed: inputPath => Boolean(analysisRuntime?.audioDownload?.isInputAllowed(inputPath)),
+    assertMainSender,
+  })
   // AI 混音模型（DJTransGAN 仓库 + 预训练权重）下载/删除管理：设置面板「下载模型」用
   try {
     const { setupAiModelIPC } = require('./ai-model-manager.cjs')
@@ -9477,7 +9893,7 @@ app.whenReady().then(async () => {
   // 代理自动配置：模型下载/应用更新走用户本地代理（设置 → 高级 → 代理自动配置）
   try {
     const { setupProxyIPC } = require('./proxy-manager.cjs')
-    setupProxyIPC(ipcMain, (scope, message) => automixLog.log(scope, message))
+    setupProxyIPC(ipcMain, (scope, message) => automixLog.log(scope, message), () => mainWindow)
   } catch (error) {
     console.error('⚠️ [Proxy] 代理管理器初始化失败:', error instanceof Error ? error.message : error)
   }
@@ -9505,7 +9921,7 @@ app.whenReady().then(async () => {
 
   // Apple 播放面 bridge：渲染端点 Apple 歌曲时经此自动拉起（appleWebViewBridge.ensureBridgeRunning）
   ipcMain.handle('apple-bridge:spawn', async (event) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents) return { ok: false }
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) return { ok: false }
     try {
       return await startAppleBridge()
     } catch (error) {
@@ -9668,11 +10084,10 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
     return target
   }))
 
-  
-  ipcMain.handle('audio-download:cleanup', guardTrustedIpc('privileged', () => {
+  ipcMain.handle('audio-download:cleanup', guardTrustedIpc('privileged', async () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
       analysisRuntime.audioDownload.clearLocalAuthorizations()
-      analysisRuntime.audioDownload.cleanupOldFiles()
+      await analysisRuntime.audioDownload.cleanupOldFiles()
     }
     return { success: true }
   }))
@@ -9688,10 +10103,10 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
   }))
 
   
-  ipcMain.handle('audio-download:clear-cache', guardTrustedIpc('privileged', () => {
+  ipcMain.handle('audio-download:clear-cache', guardTrustedIpc('privileged', async () => {
     if (analysisRuntime && analysisRuntime.audioDownload) {
       analysisRuntime.audioDownload.clearLocalAuthorizations()
-      analysisRuntime.audioDownload.cleanupAll()
+      await analysisRuntime.audioDownload.cleanupAll()
       return { success: true }
     }
     return { success: false }
@@ -9724,10 +10139,11 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
     const results = {}
     if (analysisRuntime?.audioDownload) {
       analysisRuntime.audioDownload.clearLocalAuthorizations()
-      analysisRuntime.audioDownload.cleanupAll()
+      await analysisRuntime.audioDownload.cleanupAll()
       results.audio = { success: true }
     }
-    if (analysisRuntime) results.analysis = analysisRuntime.clearCache?.() || { success: false }
+    if (analysisRuntime?.clearCache) results.analysis = await analysisRuntime.clearCache()
+    else results.analysis = { success: false }
     try { results.render = await require('./render-runtime.cjs').getRenderRuntime(configManager.getCachePath()).clearCache() } catch (error) { results.render = { success: false, error: error.message } }
     if (stemRuntime?.clearCache) results.stems = await stemRuntime.clearCache()
     if (trackStemRuntime?.clearCache) results.trackStems = await trackStemRuntime.clearCache()
@@ -9786,6 +10202,54 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
       return { success: true, configured: false }
     } catch (error) {
       return { success: false, error: error.message || '删除 API Key 失败' }
+    }
+  }))
+
+  // ── 通用凭据安全存储（safeStorage / DPAPI）：键值型，供渲染层迁移 localStorage 里的
+  // 各平台登录态（qq/netease/kugou/soda/spotify/apple cookie、token 等）。加密不可用时
+  // set 拒绝写入（不落明文），get 返回 unavailable 让调用方回退原路径。
+  const SECURE_STORE_KEY_RE = /^[a-z][a-z0-9._-]{0,63}$/i
+  const SECURE_STORE_MAX_VALUE_CHARS = 64 * 1024
+
+  ipcMain.handle('secure-store:set', guardTrustedIpc('privileged', (_event, key, value) => {
+    const keyName = String(key || '')
+    if (!SECURE_STORE_KEY_RE.test(keyName)) return { success: false, error: '非法的凭据键名' }
+    const valueStr = typeof value === 'string' ? value : ''
+    if (valueStr.length > SECURE_STORE_MAX_VALUE_CHARS) return { success: false, error: '凭据内容过大' }
+    if (!valueStr) {
+      // 空 value = 删除语义
+      try {
+        const credentials = readSecureCredentials()
+        delete credentials[`secure-store:${keyName}`]
+        writeSecureCredentials(credentials)
+        return { success: true, deleted: true }
+      } catch (error) {
+        return { success: false, error: error.message || '删除凭据失败' }
+      }
+    }
+    if (!safeStorage.isEncryptionAvailable()) {
+      return { success: false, error: 'unavailable' }
+    }
+    try {
+      const credentials = readSecureCredentials()
+      credentials[`secure-store:${keyName}`] = safeStorage.encryptString(valueStr).toString('base64')
+      writeSecureCredentials(credentials)
+      return { success: true, secure: true }
+    } catch (error) {
+      return { success: false, error: error.message || '保存凭据失败' }
+    }
+  }))
+
+  ipcMain.handle('secure-store:get', guardTrustedIpc('privileged', (_event, key) => {
+    const keyName = String(key || '')
+    if (!SECURE_STORE_KEY_RE.test(keyName)) return { success: false, error: '非法的凭据键名' }
+    if (!safeStorage.isEncryptionAvailable()) return { success: false, error: 'unavailable', available: false }
+    try {
+      const encrypted = readSecureCredentials()[`secure-store:${keyName}`]
+      if (typeof encrypted !== 'string' || !encrypted) return { success: true, value: null }
+      return { success: true, value: safeStorage.decryptString(Buffer.from(encrypted, 'base64')) }
+    } catch (error) {
+      return { success: false, error: error.message || '读取凭据失败' }
     }
   }))
 
@@ -9869,15 +10333,23 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
   desktopLyricsSettings = loadDesktopLyricsSettings()
   loadLyricsIslandSettings()
 
-  // castlabs ECS：先等 Widevine CDM 组件就绪再开窗口（首次会联网安装，失败不阻断——
-  // AM 原生音源自动回退网易云/QQ 载体，其余功能不受影响）
+  // castlabs ECS：CDM 组件就绪只影响 Apple 原生音源（Widevine L3），不阻塞窗口创建——
+  // 首次启动 CUS 需联网下载 20MB+ 组件包，await 会把这段时间原样变成无窗白屏（进程活着
+  // 但 splash 都没有）。改为后台等待，就绪后广播给渲染端刷新 EME 能力；失败不阻断（AM
+  // 原生音源自动回退网易云/QQ 载体）。
   try {
     const { components } = require('electron')
     if (components && typeof components.whenReady === 'function') {
-      await components.whenReady()
-      let statusText = ''
-      try { statusText = JSON.stringify(components.status ? components.status() : '') } catch { /* 忽略 */ }
-      logStartupTiming(`[ECS] components ready: ${statusText}`)
+      void components.whenReady().then(() => {
+        let statusText = ''
+        try { statusText = JSON.stringify(components.status ? components.status() : '') } catch { /* 忽略 */ }
+        logStartupTiming(`[ECS] components ready: ${statusText}`)
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('ecs-components-ready', statusText)
+        }
+      }).catch((error) => {
+        console.warn('[ECS] components 初始化失败（Widevine 可能未就绪，AM 原生将回退载体）:', error instanceof Error ? error.message : error)
+      })
     }
   } catch (error) {
     console.warn('[ECS] components 初始化失败（Widevine 可能未就绪，AM 原生将回退载体）:', error instanceof Error ? error.message : error)

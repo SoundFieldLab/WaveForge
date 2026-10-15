@@ -69,7 +69,11 @@ function saveWindowState(app, mainWindow, screen) {
     }
     const file = stateFile(app)
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, JSON.stringify({ version: app.getVersion(), displayId, bounds, state }, null, 2))
+    // tmp + rename 原子写（与 config-manager 等设置文件同款）：写一半崩溃/断电
+    // 不会留下截断的 JSON（损坏只自愈为默认布局，但频繁丢布局同样烦人）。
+    const tmpFile = `${file}.${process.pid}.${Date.now()}.tmp`
+    fs.writeFileSync(tmpFile, JSON.stringify({ version: app.getVersion(), displayId, bounds, state }, null, 2))
+    fs.renameSync(tmpFile, file)
   } catch {
     // ignore
   }

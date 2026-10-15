@@ -17,6 +17,12 @@ const DEFAULT_PORT = 25570
 const MAX_MESSAGE_BYTES = 64 * 1024
 const CONNECTION_RATE_WINDOW_MS = 10 * 1000
 const CONNECTION_RATE_LIMIT = 12
+// 全局加入失败熔断：窗口内累计 300 次失败（含跨 IP）即冷却 60s。
+// 6 位码 1e6 空间 × 每次连接至少一次 RTT，300 次/分钟也远高于正常使用
+// （成员输入错码重试是个位数/分钟），对爆破者是把可行时间拉长到不可接受。
+const GLOBAL_FAIL_WINDOW_MS = 60 * 1000
+const GLOBAL_FAIL_LIMIT = 300
+const GLOBAL_FAIL_COOLDOWN_MS = 60 * 1000
 const DEFAULT_MAX_MEMBERS = 15
 /**
  * WebSocket 心跳间隔：每 30s ping 一次，上一轮没回 pong 的连接直接 terminate。
@@ -99,6 +105,24 @@ function createResonanceHub(options = {}) {
     recent.push(now)
     connectionAttempts.set(ip, recent)
     return recent.length > CONNECTION_RATE_LIMIT
+  }
+
+  /** 全局失败计数（跨 IP）：6 位数字码只有 1e6 空间，单 IP 限速挡不住多 IP/容器协同
+   *  爆破。失败次数按滑动窗口累计（含所有来源），达到上限后暂停接受新连接一段时间。 */
+  let globalFailTimestamps = []
+  let globalFailCooldownUntil = 0
+  function noteGlobalJoinFailure() {
+    const now = Date.now()
+    globalFailTimestamps = globalFailTimestamps.filter(at => now - at < GLOBAL_FAIL_WINDOW_MS)
+    globalFailTimestamps.push(now)
+    if (globalFailTimestamps.length >= GLOBAL_FAIL_LIMIT) {
+      globalFailCooldownUntil = now + GLOBAL_FAIL_COOLDOWN_MS
+      globalFailTimestamps = []
+      console.warn(`[Resonance] 全局加入失败次数过多，暂停接受新连接 ${Math.round(GLOBAL_FAIL_COOLDOWN_MS / 1000)}s`)
+    }
+  }
+  function isGlobalJoinCoolingDown() {
+    return Date.now() < globalFailCooldownUntil
   }
 
   /** 房主侧消息路由：'all' | 'others:<peerId>' | '<peerId>' */
@@ -236,16 +260,22 @@ function createResonanceHub(options = {}) {
         let url = null
         try { url = new URL(req.url, 'http://localhost') } catch { /* ignore */ }
         const ip = normalizeIp(ws._socket && ws._socket.remoteAddress)
+        if (isGlobalJoinCoolingDown()) {
+          ws.close(4008, 'Global rate limit exceeded')
+          return
+        }
         if (isConnectionRateLimited(ip)) {
           ws.close(4008, 'Rate limit exceeded')
           return
         }
         if (!url || !room) {
+          noteGlobalJoinFailure()
           ws.close(4001, 'No room')
           return
         }
         // 房间号与房间码都必须匹配（常数时间比较，避免时序侧信道）
         if (!safeEqual(url.searchParams.get('room'), room.roomId) || !safeEqual(url.searchParams.get('code'), room.code)) {
+          noteGlobalJoinFailure()
           ws.close(4001, 'Unauthorized')
           return
         }

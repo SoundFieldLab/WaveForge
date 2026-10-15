@@ -632,13 +632,22 @@ function getTrackStemRuntime(options = {}) {
 
 function setupTrackStemIPC(ipcMain, options = {}) {
   const runtime = getTrackStemRuntime(options)
+  // 重任务（HTDemucs 分离/整曲物化）与清缓存加主窗来源校验；status/readChunk 只读放开
+  // （readChunk 另有缓存根 + .wav 后缀 + 16MB 上限三重路径限定）。
+  const guard = options.assertMainSender || ((event) => {
+    if (!event?.sender) throw new Error('不允许的 IPC 请求来源')
+  })
+  const guarded = (handler) => (event, ...args) => {
+    guard(event)
+    return handler(...args)
+  }
   ipcMain.handle('track-stem:status', () => runtime.status())
-  ipcMain.handle('track-stem:materialize', (_event, request) => runtime.materialize(request))
-  ipcMain.handle('track-stem:ensureWindow', (_event, request) => runtime.ensureWindow(request))
-  ipcMain.handle('track-stem:cancel', (_event, selector) => runtime.cancel(selector))
+  ipcMain.handle('track-stem:materialize', guarded((request) => runtime.materialize(request)))
+  ipcMain.handle('track-stem:ensureWindow', guarded((request) => runtime.ensureWindow(request)))
+  ipcMain.handle('track-stem:cancel', guarded((selector) => runtime.cancel(selector)))
   ipcMain.handle('track-stem:readChunk', (_event, filePath) => runtime.readChunk(filePath))
   ipcMain.handle('track-stem:getCacheStats', () => runtime.getCacheStats())
-  ipcMain.handle('track-stem:clearCache', () => runtime.clearCache())
+  ipcMain.handle('track-stem:clearCache', guarded(() => runtime.clearCache()))
   return runtime
 }
 

@@ -3,6 +3,8 @@
 // 渲染进程通道（window.electron.airplay.*）：
 //   list-devices / get-status / connect / disconnect / set-volume / set-metadata / set-progress
 //   pcm（高频 send） / status（main -> renderer 状态推送）
+// 全部通道要求主窗主 frame 来源：这些操作可连接局域网设备/推流/改系统播放路径，
+// 无守卫时任意渲染层（含第三方 webview）都可驱动。
 const { AirplaySenderService } = require('./airplay-sender-service.cjs')
 
 function setupAirplayIpc({ ipcMain, getMainWindow }) {
@@ -16,49 +18,62 @@ function setupAirplayIpc({ ipcMain, getMainWindow }) {
     },
   })
   // 默认不开启设备发现：由设置-高级「AirPlay 投送」开关控制（airplay:set-enabled）
+  const assertMainSender = (event) => {
+    const win = typeof getMainWindow === 'function' ? getMainWindow() : null
+    if (!win || win.isDestroyed() || event?.sender !== win.webContents || event?.senderFrame !== win.webContents.mainFrame) {
+      throw new Error('不允许的 IPC 请求来源')
+    }
+  }
+  const guard = (handler) => (event, ...args) => {
+    assertMainSender(event)
+    return handler(...args)
+  }
 
-  ipcMain.handle('airplay:set-enabled', (_event, enabled) => {
+  ipcMain.handle('airplay:set-enabled', guard((_event, enabled) => {
     return service.setEnabled(enabled === true)
-  })
-  ipcMain.handle('airplay:list-devices', () => {
+  }))
+  ipcMain.handle('airplay:list-devices', guard(() => {
     service.ensureBrowsing()
     return service.listDevices()
-  })
-  ipcMain.handle('airplay:get-status', () => {
+  }))
+  ipcMain.handle('airplay:get-status', guard(() => {
     return service.getStatus()
-  })
-  ipcMain.handle('airplay:connect', (_event, deviceId, mode = 'auto') => {
+  }))
+  ipcMain.handle('airplay:connect', guard((_event, deviceId, mode = 'auto') => {
     service.ensureBrowsing()
     return service.connect(deviceId, mode)
-  })
-  ipcMain.handle('airplay:disconnect', () => {
+  }))
+  ipcMain.handle('airplay:disconnect', guard(() => {
     service.disconnect()
     return { success: true }
-  })
-  ipcMain.handle('airplay:set-volume', (_event, volume) => {
+  }))
+  ipcMain.handle('airplay:set-volume', guard((_event, volume) => {
     service.setVolume(volume)
     return { success: true }
-  })
-  ipcMain.handle('airplay:set-restore-volume', (_event, volume) => {
+  }))
+  ipcMain.handle('airplay:set-restore-volume', guard((_event, volume) => {
     service.setRestoreVolume(volume)
     return { success: true }
-  })
-  ipcMain.handle('airplay:set-metadata', (_event, metadata) => {
+  }))
+  ipcMain.handle('airplay:set-metadata', guard((_event, metadata) => {
     service.setMetadata(metadata || {})
     return { success: true }
-  })
-  ipcMain.handle('airplay:set-progress', (_event, elapsed, duration) => {
+  }))
+  ipcMain.handle('airplay:set-progress', guard((_event, elapsed, duration) => {
     service.setProgress(Number(elapsed) || 0, Number(duration) || 0)
     return { success: true }
-  })
-  ipcMain.handle('airplay:play-connect-sound', () => {
+  }))
+  ipcMain.handle('airplay:play-connect-sound', guard(() => {
     service.playConnectSound()
     return { success: true }
-  })
-  ipcMain.on('airplay:pcm', (_event, chunk) => {
+  }))
+  ipcMain.on('airplay:pcm', (event, chunk) => {
+    // 高频音频流：不抛错（invoke 语义），来源不符直接丢弃
+    try { assertMainSender(event) } catch { return }
     service.sendPcm(chunk)
   })
-  ipcMain.on('airplay:set-streaming', (_event, streaming) => {
+  ipcMain.on('airplay:set-streaming', (event, streaming) => {
+    try { assertMainSender(event) } catch { return }
     service.setStreaming(streaming === true)
   })
 

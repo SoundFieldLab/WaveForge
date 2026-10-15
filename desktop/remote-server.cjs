@@ -98,7 +98,9 @@ function createRemoteServer(options) {
   }
 
   function renderHtml() {
-    return htmlTemplate.replace('__REMOTE_CONFIG__', JSON.stringify(buildConfig()))
+    // JSON.stringify 不转义 "</script>"：主机名（os.hostname）等配置字段若含 "</"
+    // 序列会提前闭合脚本标签。把 "<" 统一转成 \u003c（JSON 语义等价，浏览器安全）。
+    return htmlTemplate.replace('__REMOTE_CONFIG__', JSON.stringify(buildConfig()).replace(/</g, '\\u003c'))
   }
 
   function randomToken() {
@@ -243,7 +245,7 @@ function createRemoteServer(options) {
   function handleMessage(client, msg) {
     if (!msg || typeof msg !== 'object') return
     if (msg.type === 'hello') {
-      if (typeof msg.name === 'string' && msg.name) client.name = msg.name
+      if (typeof msg.name === 'string' && msg.name) client.name = msg.name.slice(0, 40)
       notifyClients()
       return
     }
@@ -253,8 +255,10 @@ function createRemoteServer(options) {
       return
     }
     if (msg.type === 'text-input') {
-      // 手机端输入完成 → 广播（TV 端 SPA 收到后写入输入框）
-      broadcast({ type: 'text-input', value: msg.value || '' })
+      // 手机端输入完成 → 广播（TV 端 SPA 收到后写入输入框）。
+      // 截断到 TV 软键盘场景的实际长度（搜索/账号框），异常超长输入不放大转发。
+      const text = String(msg.value ?? '')
+      broadcast({ type: 'text-input', value: text.length > 1000 ? text.slice(0, 1000) : text })
       return
     }
     if (msg.type === 'request-input') {

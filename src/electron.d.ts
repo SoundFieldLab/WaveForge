@@ -764,10 +764,12 @@ export interface ElectronAPI {
     getStats: () => Promise<{ fileCount: number; totalSize: number; maxSize: number; cachePath: string }>
     clearCache: () => Promise<{ success: boolean }>
   }
-  /** 应用更新：下载安装包（多源逐个尝试）→ sha256 校验 → 打开安装向导 */
+  /** 应用更新：下载安装包（多源逐个尝试）→ sha256 校验 → 打开安装向导。
+   *  生产载荷必须是签名清单对象 { manifest }（主进程 Ed25519 验签后取产物）；
+   *  兼容 { urls, sha256 } 裸形式仅限开发模式。 */
   update: {
-    downloadAndInstall: (urls: string[], sha256: string) => Promise<{ success: boolean; error?: string; path?: string }>
-    downloadBackground: (payload: { version: string; notes: string; urls: string[]; sha256: string }) => Promise<{ success: boolean; error?: string }>
+    downloadAndInstall: (payload: { manifest: Record<string, unknown> } | string[], sha256?: string) => Promise<{ success: boolean; error?: string; path?: string }>
+    downloadBackground: (payload: { manifest?: Record<string, unknown>; version?: string; notes?: string; urls?: string[]; sha256?: string }) => Promise<{ success: boolean; error?: string }>
     applyPending: () => Promise<{ success: boolean }>
     restartForUpdate: () => Promise<{ success: boolean }>
     getPending: () => Promise<{ version: string; notes: string; stagedAt: number } | null>
@@ -776,7 +778,7 @@ export interface ElectronAPI {
   }
   config: {
     getCachePath: () => Promise<string>
-    setCachePath: (path: string) => Promise<{ success: boolean; error?: string }>
+    // setCachePath 已从 preload 暴露面移除（渲染层零调用，改缓存目录走 selectCachePath）
     selectCachePath: () => Promise<string | null>
     resetCachePath: () => Promise<string>
   }
@@ -1098,10 +1100,14 @@ declare global {
     electron?: ElectronAPI
     desktopPlayer?: DesktopPlayerBridgeAPI
     desktopLyrics?: DesktopLyricsBridgeAPI
+    // 与 desktop/preload.cjs 的 electronAPI 暴露面一致（openExternal + oobe）；
+    // QQ 登录走 window.electron.openQQLoginWindow / qqQrLoginStart，不经此命名空间
     electronAPI?: {
       openExternal: (url: string) => Promise<{ success: boolean; error?: string }>
-      openQQLoginWindow: () => Promise<void>
-      onQQLoginResult: (callback: (cookie: string) => void) => void
+      oobe: {
+        getFlag: () => Promise<boolean>
+        setFlag: () => Promise<boolean>
+      }
     }
   }
 }

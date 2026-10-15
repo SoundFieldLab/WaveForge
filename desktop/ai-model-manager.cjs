@@ -391,7 +391,12 @@ async function setupPython() {
     const zipPath = path.join(getModelRoot(), 'python-embed.zip')
     const ok = await downloadFile(PYTHON_URLS, zipPath)
     if (!ok || state.status === 'cancelled' || state.status === 'paused') return false
-    try { new AdmZip(zipPath).extractAllTo(getModelRoot(), true) } catch (error) {
+    try {
+      // zip-slip 校验：解压产物进入 spawn 路径（python.exe），恶意条目不得写出模型根
+      const zip = new AdmZip(zipPath)
+      assertSafeArchive(zip, getModelRoot())
+      zip.extractAllTo(getModelRoot(), true)
+    } catch (error) {
       state.error = `解压 Python 失败: ${error?.message || error}`; return false
     } finally { try { fs.rmSync(zipPath, { force: true }) } catch { /* ignore */ } }
   }

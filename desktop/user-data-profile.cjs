@@ -169,6 +169,25 @@ function normalizeMigratedConfig(stable, legacy, fsImpl = fs) {
   } catch { /* Invalid legacy config remains untouched for the normal loader to handle. */ }
 }
 
+/** 陈锁判定：持有者 PID 已不存在，或锁文件超过 10 分钟（旧版锁无内容时按 mtime 判）。 */
+function isStaleMigrationLock(lockPath, fsImpl = fs) {
+  try {
+    const raw = fsImpl.readFileSync(lockPath, 'utf8')
+    let parsed = null
+    try { parsed = JSON.parse(raw) } catch { /* 旧格式/空文件 */ }
+    if (parsed && Number.isInteger(parsed.pid)) {
+      if (parsed.pid === process.pid) return false
+      try { process.kill(parsed.pid, 0); return false } catch (error) { if (error?.code === 'EPERM') return false }
+      return true // ESRCH：持有者已退出
+    }
+  } catch { /* 读不到按 mtime 判 */ }
+  try {
+    return Date.now() - fsImpl.statSync(lockPath).mtimeMs > 10 * 60 * 1000
+  } catch {
+    return false
+  }
+}
+
 function migrateLegacyWaveForgeProfile({ appDataRoot, isPackaged, overridePath, platform = process.platform, fsImpl = fs }) {
   const stable = path.resolve(appDataRoot, PRODUCT_PROFILE_NAME)
   const legacy = path.resolve(appDataRoot, LEGACY_PROFILE_NAME)
@@ -190,9 +209,27 @@ function migrateLegacyWaveForgeProfile({ appDataRoot, isPackaged, overridePath, 
   let lockFd
   try {
     lockFd = fs.openSync(lockPath, 'wx')
+    // 锁内容记录持有者与开始时间：进程崩溃/断电后锁残留会让后续每次启动都命中
+    // EEXIST → 'migration-in-progress'，数据永久留在 legacy 目录。陈锁判定 =
+    // 持有者 PID 已不存在或开始时间超过 10 分钟 → 删除重拿。
+    try { fs.writeFileSync(lockFd, `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}`, 'utf8') } catch { /* 锁本体已足够 */ }
   } catch (error) {
-    if (error?.code === 'EEXIST') return { userDataPath: stable, status: 'migration-in-progress' }
-    throw error
+    if (error?.code === 'EEXIST') {
+      if (isStaleMigrationLock(lockPath, fsImpl)) {
+        try { fs.unlinkSync(lockPath) } catch { /* 删不掉就维持原状 */ }
+        try {
+          lockFd = fs.openSync(lockPath, 'wx')
+          try { fs.writeFileSync(lockFd, `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}`, 'utf8') } catch { /* ignore */ }
+        } catch (retryError) {
+          if (retryError?.code === 'EEXIST') return { userDataPath: stable, status: 'migration-in-progress' }
+          throw retryError
+        }
+      } else {
+        return { userDataPath: stable, status: 'migration-in-progress' }
+      }
+    } else {
+      throw error
+    }
   }
 
   const migrated = []

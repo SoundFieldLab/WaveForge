@@ -560,11 +560,19 @@ function getStemRuntime(options = {}) {
 
 function setupStemIPC(ipcMain, options = {}) {
   const runtime = getStemRuntime(options)
-  ipcMain.handle('stem:separate', (_event, request) => runtime.separate(request))
-  ipcMain.handle('stem:separatePair', (_event, request) => runtime.separatePair(request))
+  // 重任务（拉起 torch worker）与清缓存写操作加主窗来源校验；status 只读放开。
+  const guard = options.assertMainSender || ((event) => {
+    if (!event?.sender) throw new Error('不允许的 IPC 请求来源')
+  })
+  const guarded = (handler) => (event, ...args) => {
+    guard(event)
+    return handler(...args)
+  }
+  ipcMain.handle('stem:separate', guarded((request) => runtime.separate(request)))
+  ipcMain.handle('stem:separatePair', guarded((request) => runtime.separatePair(request)))
   ipcMain.handle('stem:status', () => runtime.getStatus())
-  ipcMain.handle('stem:cancel', (_event, requestId) => runtime.cancel(requestId))
-  ipcMain.handle('stem:clearCache', () => runtime.clearCache())
+  ipcMain.handle('stem:cancel', guarded((requestId) => runtime.cancel(requestId)))
+  ipcMain.handle('stem:clearCache', guarded(() => runtime.clearCache()))
   return runtime
 }
 

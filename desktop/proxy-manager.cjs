@@ -292,7 +292,7 @@ function disable() {
 
 function getState() { return { ...state } }
 
-function setupProxyIPC(ipcMain, automixLogFn) {
+function setupProxyIPC(ipcMain, automixLogFn, mainWindowRef = null) {
   if (automixLogFn) setProxyLogger(automixLogFn)
   loadConfig()
   // 启动检测：上次开着自动代理 → 验证代理是否真的可用。
@@ -314,11 +314,22 @@ function setupProxyIPC(ipcMain, automixLogFn) {
       }
     }).catch(() => { void autoDisable('startup') })
   }
-  ipcMain.handle('proxy-manager:scan', () => scan())
-  ipcMain.handle('proxy-manager:enable', (_e, port) => enable(port))
-  ipcMain.handle('proxy-manager:disable', () => disable())
+  // 写操作与探测必须来自主窗口（scan 会向 COMMON_PORTS 逐个发 CONNECT，
+  // enable 会改系统会话代理——任意带桥渲染层不应能触发）。
+  // mainWindowRef 由调用方注入（getter，避免模块加载时序问题）。
+  const assertMain = (event) => {
+    const win = typeof mainWindowRef === 'function' ? mainWindowRef() : mainWindowRef
+    // senderFrame 必须是主 frame：与全局 assertMainSender 同标准（子 frame 不可借窗口身份改系统代理）
+    if (!win || win.isDestroyed?.() || event?.sender !== win.webContents || event?.senderFrame !== win.webContents.mainFrame) {
+      throw new Error('不允许的 IPC 请求来源')
+    }
+  }
+  ipcMain.handle('proxy-manager:scan', (e) => { assertMain(e); return scan() })
+  ipcMain.handle('proxy-manager:enable', (e, port) => { assertMain(e); return enable(port) })
+  ipcMain.handle('proxy-manager:disable', (e) => { assertMain(e); return disable() })
   ipcMain.handle('proxy-manager:get-state', () => getState())
-  ipcMain.handle('proxy-manager:set-enabled', (_e, v) => {
+  ipcMain.handle('proxy-manager:set-enabled', (e, v) => {
+    assertMain(e)
     if (!v && state.enabled) return disable()
     return getState()
   })

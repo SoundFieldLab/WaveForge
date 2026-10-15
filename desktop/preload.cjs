@@ -250,8 +250,9 @@ contextBridge.exposeInMainWorld('electron', {
 
   // 应用更新：后台静默下载 + 退出即应用 + 更新日志/版本历史
   update: {
-    downloadAndInstall: (urls, sha256) =>
-      ipcRenderer.invoke('update:download-and-install', urls, sha256),
+    // 载荷优先为签名清单对象 { manifest }；兼容旧 { urls, sha256 }（仅开发模式接受）
+    downloadAndInstall: (payload, sha256) =>
+      ipcRenderer.invoke('update:download-and-install', payload, sha256),
     downloadBackground: (payload) =>
       ipcRenderer.invoke('update:download-background', payload),
     applyPending: () => ipcRenderer.invoke('update:apply-pending'),
@@ -268,7 +269,8 @@ contextBridge.exposeInMainWorld('electron', {
   // 配置管理
   config: {
     getCachePath: () => ipcRenderer.invoke('config:get-cache-path'),
-    setCachePath: (path) => ipcRenderer.invoke('config:set-cache-path', path),
+    // setCachePath 已从暴露面移除（src 零调用，改缓存目录只经 selectCachePath 的
+    // 系统对话框路径，渲染层不能指定任意路径）。主进程 handler 保留给 select 内部用。
     selectCachePath: () => ipcRenderer.invoke('config:select-cache-path'),
     resetCachePath: () => ipcRenderer.invoke('config:reset-cache-path'),
   },
@@ -278,6 +280,12 @@ contextBridge.exposeInMainWorld('electron', {
     getQQMusicSkillKey: () => ipcRenderer.invoke('credentials:get-qqmusic-skill-key'),
     setQQMusicSkillKey: (key) => ipcRenderer.invoke('credentials:set-qqmusic-skill-key', key),
     deleteQQMusicSkillKey: () => ipcRenderer.invoke('credentials:delete-qqmusic-skill-key'),
+  },
+
+  // 通用凭据安全存储（safeStorage/DPAPI）：localStorage 里各平台登录态的加密迁移目的地
+  secureStore: {
+    set: (key, value) => ipcRenderer.invoke('secure-store:set', key, value),
+    get: (key) => ipcRenderer.invoke('secure-store:get', key),
   },
   
   // QQ 音乐登录

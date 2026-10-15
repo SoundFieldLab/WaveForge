@@ -91,7 +91,7 @@ function externalProcessPath(candidate) {
 }
 
 class RenderRuntime {
-  constructor(customCachePath = null) {
+  constructor(customCachePath = null, options = {}) {
     this.worker = null
     this.workerReady = false
     this.workerStartPromise = null
@@ -105,7 +105,12 @@ class RenderRuntime {
     this.cacheDir = null
     this.tempDir = null
     this.customCachePath = customCachePath
-    
+    // 输入白名单（与 stem/track-stem 系同一口径）：传入 audioDownload.isInputAllowed，
+    // 限定 sourceAudioPath/targetAudioPath 必须在音频缓存根内或经用户文件对话框授权。
+    // 此前只查"存在且是文件"，渲染层被入侵后可把任意本机文件当音频读入并经
+    // getAudioUrl/readAudioFile 读回（任意文件读外带通道）。
+    this.isInputAllowed = typeof options.isInputAllowed === 'function' ? options.isInputAllowed : null
+
     this._initializeDirs()
   }
   
@@ -325,6 +330,19 @@ class RenderRuntime {
   /**
    * Send message to worker
    */
+  /** 超时兜底：杀掉当前 worker（下一请求经 ensureWorker 重拉）。清理 pending 与就绪态。 */
+  _killWorkerForTimeout() {
+    try { this.worker?.kill() } catch { /* noop */ }
+    this.worker = null
+    this.workerReady = false
+    this.workerStartPromise = null
+    for (const [, pending] of this.pendingRequests) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error('Render worker killed after timeout'))
+    }
+    this.pendingRequests.clear()
+  }
+
   async _sendMessage(type, params, timeout = RENDER_TIMEOUT) {
     await this.ensureWorker()
     if (!this.worker || !this.workerReady) throw new Error('Render worker is unavailable')
@@ -339,6 +357,10 @@ class RenderRuntime {
       
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(id)
+        // 超时即杀 worker（对齐 stem-runtime）：Python 串行执行已超时的渲染会阻塞
+        // 后续全部请求；且调用方 finally 已把 outputPath 移出保护集，worker 仍写该
+        // 文件会与 clearCache 撞 EBUSY。杀掉后下一请求自动重拉 worker。
+        this._killWorkerForTimeout()
         reject(new Error(`Render worker timeout (${timeout}ms)`))
         if (this.pendingRequests.size === 0) this._resetIdleTimer()
       }, timeout)
@@ -528,6 +550,16 @@ class RenderRuntime {
     const targetAudioPath = options.targetAudioPath
     if (!sourceAudioPath || !targetAudioPath) {
       throw new Error('sourceAudioPath and targetAudioPath are required')
+    }
+    // 输入白名单：与 _validateRenderInput 同口径（QQ 三档此前完全没校验输入来源）
+    for (const [label, filePath] of [['source', sourceAudioPath], ['target', targetAudioPath]]) {
+      const resolved = path.resolve(String(filePath))
+      if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+        throw new Error(`${label} audio file does not exist`)
+      }
+      if (this.isInputAllowed && !this.isInputAllowed(resolved)) {
+        throw new Error(`${label} audio file is not authorized for rendering`)
+      }
     }
     const statSig = (file) => {
       try {
@@ -729,9 +761,12 @@ class RenderRuntime {
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
         throw new Error(`${label} audio file does not exist`)
       }
+      if (this.isInputAllowed && !this.isInputAllowed(resolved)) {
+        throw new Error(`${label} audio file is not authorized for rendering`)
+      }
     }
   }
-  
+
   /**
    * Generate cache key for transition plan.
    * v1 字段集合保持历史不变；v2 额外纳入所有会改变听感的编排字段与 stem 指纹。
@@ -890,9 +925,9 @@ class RenderRuntime {
 // Singleton instance
 let renderRuntime = null
 
-function getRenderRuntime(customCachePath = null) {
+function getRenderRuntime(customCachePath = null, options = {}) {
   if (!renderRuntime) {
-    renderRuntime = new RenderRuntime(customCachePath)
+    renderRuntime = new RenderRuntime(customCachePath, options)
   }
   return renderRuntime
 }
@@ -918,7 +953,7 @@ function aiPythonCandidates() {
 }
 
 class AiMixRuntime {
-  constructor(customCachePath = null) {
+  constructor(customCachePath = null, options = {}) {
     this.worker = null
     this.workerReady = false
     this.workerStartPromise = null
@@ -929,6 +964,8 @@ class AiMixRuntime {
     this.cacheDir = null
     this.tempDir = null
     this.customCachePath = customCachePath
+    // 输入白名单：与 RenderRuntime 同一口径（见 RenderRuntime 构造函数注释）
+    this.isInputAllowed = typeof options.isInputAllowed === 'function' ? options.isInputAllowed : null
     // 同 cacheKey 在途渲染去重：prepareAutoMix 可能因各种原因反复触发，
     // 同一对歌曲的 AI 渲染只跑一次，其余等待同一 promise。
     this.inflightRenders = new Map()
@@ -1091,8 +1128,17 @@ class AiMixRuntime {
       const message = JSON.stringify({ type, id, params }) + '\n'
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(id)
+        // 超时即杀 worker（对齐 stem-runtime/RenderRuntime）：超时任务占住串行
+        // worker 会阻塞后续全部 AI Mix 渲染
+        try { this.worker?.kill() } catch { /* noop */ }
+        this.worker = null
+        this.workerReady = false
+        for (const [, pending] of this.pendingRequests) {
+          clearTimeout(pending.timeout)
+          pending.reject(new Error('AI Mix worker killed after timeout'))
+        }
+        this.pendingRequests.clear()
         reject(new Error(`AI Mix worker timeout (${timeout}ms)`))
-        if (this.pendingRequests.size === 0) this._resetIdleTimer()
       }, timeout)
       this.pendingRequests.set(id, { resolve, reject, timeout: timeoutId })
       this.worker.stdin.write(message, (error) => {
@@ -1273,6 +1319,9 @@ class AiMixRuntime {
       if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
         throw new Error(`${label} audio file does not exist`)
       }
+      if (this.isInputAllowed && !this.isInputAllowed(resolved)) {
+        throw new Error(`${label} audio file is not authorized for rendering`)
+      }
     }
   }
 
@@ -1297,23 +1346,29 @@ class AiMixRuntime {
 
 let aiMixRuntime = null
 
-function getAiMixRuntime(customCachePath = null) {
-  if (!aiMixRuntime) aiMixRuntime = new AiMixRuntime(customCachePath)
+function getAiMixRuntime(customCachePath = null, options = {}) {
+  if (!aiMixRuntime) aiMixRuntime = new AiMixRuntime(customCachePath, options)
   return aiMixRuntime
 }
 
 // IPC handlers
-function setupAiMixIPC(ipcMain, customCachePath = null) {
+function setupAiMixIPC(ipcMain, customCachePath = null, options = {}) {
+  const { assertMainSender = null } = options
+  const guard = (event) => {
+    if (typeof assertMainSender === 'function') assertMainSender(event)
+  }
   ipcMain.handle('render:transitionAiMix', async (event, plan, sourceAudioPath, targetAudioPath) => {
-    const runtime = getAiMixRuntime(customCachePath)
+    guard(event)
+    const runtime = getAiMixRuntime(customCachePath, options)
     return runtime.renderTransition(plan, sourceAudioPath, targetAudioPath)
   })
   ipcMain.handle('render:aiMixStatus', async () => {
-    const runtime = getAiMixRuntime(customCachePath)
+    const runtime = getAiMixRuntime(customCachePath, options)
     return runtime.getStatus()
   })
   ipcMain.handle('render:aiMixAutomation', async (event, plan, sourceAudioPath, targetAudioPath) => {
-    const runtime = getAiMixRuntime(customCachePath)
+    guard(event)
+    const runtime = getAiMixRuntime(customCachePath, options)
     return runtime.getAutomation(plan, sourceAudioPath, targetAudioPath)
   })
 }
@@ -1323,23 +1378,31 @@ function cleanupAiMix() {
 }
 
 // IPC handlers
-function setupRenderIPC(ipcMain, customCachePath = null, toMediaUrl = null) {
+function setupRenderIPC(ipcMain, customCachePath = null, toMediaUrl = null, options = {}) {
+  const { assertMainSender = null } = options
+  // 主窗校验：渲染通道可触发 Python worker 与大文件 IO，只允许主窗主 frame 调用
+  const guard = (event) => {
+    if (typeof assertMainSender === 'function') assertMainSender(event)
+  }
   // Render transition
   ipcMain.handle('render:transition', async (event, plan, sourceAudioPath, targetAudioPath) => {
-    const runtime = getRenderRuntime(customCachePath)
+    guard(event)
+    const runtime = getRenderRuntime(customCachePath, options)
     return runtime.renderTransition(plan, sourceAudioPath, targetAudioPath)
   })
-  
+
   // AutoMix Enhanced 三档渲染（Lite / Advanced / Extreme）
-  ipcMain.handle('render:qqAutomix', async (event, options) => {
-    const runtime = getRenderRuntime(customCachePath)
-    return runtime.renderQQAutoMix(options || {})
+  ipcMain.handle('render:qqAutomix', async (event, options_) => {
+    guard(event)
+    const runtime = getRenderRuntime(customCachePath, options)
+    return runtime.renderQQAutoMix(options_ || {})
   })
 
   // AutoMix Enhanced 播放前规划（只取交接时间轴，不渲染）
-  ipcMain.handle('render:qqAutomixCue', async (event, options) => {
-    const runtime = getRenderRuntime(customCachePath)
-    return runtime.planQQAutoMix(options || {})
+  ipcMain.handle('render:qqAutomixCue', async (event, options_) => {
+    guard(event)
+    const runtime = getRenderRuntime(customCachePath, options)
+    return runtime.planQQAutoMix(options_ || {})
   })
 
   // Prefer handing Chromium a validated local media URL so it can stream the WAV
@@ -1347,7 +1410,7 @@ function setupRenderIPC(ipcMain, customCachePath = null, toMediaUrl = null) {
   ipcMain.handle('render:getAudioUrl', async (_event, filePath) => {
     try {
       if (typeof toMediaUrl !== 'function') throw new Error('Media URL provider is unavailable')
-      const runtime = getRenderRuntime(customCachePath)
+      const runtime = getRenderRuntime(customCachePath, options)
       return toMediaUrl(runtime.resolveRenderedAudioFile(filePath))
     } catch (error) {
       throw new Error(`Failed to create rendered audio URL: ${error.message}`)
@@ -1356,8 +1419,9 @@ function setupRenderIPC(ipcMain, customCachePath = null, toMediaUrl = null) {
 
   // Compatibility fallback for older renderers/preloads.
   ipcMain.handle('render:readAudioFile', async (event, filePath) => {
+    guard(event)
     try {
-      const runtime = getRenderRuntime(customCachePath)
+      const runtime = getRenderRuntime(customCachePath, options)
       const buffer = await runtime.readRenderedAudioFile(filePath)
       return buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
     } catch (error) {
@@ -1366,7 +1430,8 @@ function setupRenderIPC(ipcMain, customCachePath = null, toMediaUrl = null) {
   })
   
   // Clear cache
-  ipcMain.handle('render:clearCache', async () => {
+  ipcMain.handle('render:clearCache', async (event) => {
+    guard(event)
     const runtime = getRenderRuntime(customCachePath)
     return runtime.clearCache()
   })
