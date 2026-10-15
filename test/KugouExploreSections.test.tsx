@@ -6,7 +6,7 @@
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-import KugouExploreSections, { KugouDiscoverBoard } from '../src/features/kugouExplore/KugouExploreSections'
+import KugouExploreSections, { KugouRecommendBoard } from '../src/features/kugouExplore/KugouExploreSections'
 import type { ExplorePayload } from '../src/services/exploreApi'
 import type { Song } from '../src/services/musicApi'
 
@@ -143,7 +143,7 @@ const baseProps = {
 describe('酷狗探索页五板块渲染', () => {
   it('推荐板块渲染五张官方大卡与今日专属推荐网格', () => {
     const payload = buildPayload(true)
-    render(<KugouDiscoverBoard {...baseProps} payload={payload} />)
+    render(<KugouRecommendBoard {...baseProps} payload={payload} />)
     ;['猜你喜欢', '每日推荐', '排行榜', '歌单广场', '歌手'].forEach(label => {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     })

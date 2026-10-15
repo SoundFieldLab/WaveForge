@@ -2,7 +2,7 @@ import { getQQUserDisplayName } from '../utils/qqUser'
 import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { motion } from 'framer-motion'
 import { X, Music, Heart, List, User, Crown, Calendar, MapPin, RefreshCw, LogOut, Plus, MoreHorizontal, Play, History, Disc3, Radio, Mic2, Users, TrendingUp, ArrowLeft, Film, Eye, EyeOff, ShieldCheck, ChevronDown, ChevronUp, Cloud, ShoppingBag } from 'lucide-react'
-import { Song, isSameSong, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages } from '../services/musicApi'
+import { Song, isSameSong, resolveSongAlbumIdentifier, getUserFollows, getUserFolloweds, getUserRecordRank, getQQFollows, getQQFans, getQQUserProfile, getQQUserFavs, subscribeQQUser, subscribeNeteaseUser, getSubscribedAlbums, getSubscribedArtists, getQQSubscribedAlbums, getQQSubscribedArtists, getNeteaseMvSublist, subscribeNeteaseMV, getNeteaseFollowingEvents, getNeteaseNotices, getNeteaseCommentMessages, qqSongCoverUrl } from '../services/musicApi'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
 import CachedImage from './CachedImage'
 import PlaylistContextMenu from './PlaylistContextMenu'
@@ -35,6 +35,8 @@ import { detectQQMusicVip } from '../utils/musicEntitlements'
 import { isAccountFieldsMasked, setAccountFieldsMasked, isPersonalStationProtected, setPersonalStationProtected, getCachedPersonalStation, PERSONAL_STATION_MASK } from '../utils/applePrivacy'
 import { fetchApplePersonalStation } from '../services/appleWebService'
 import { createTtlCache } from '../utils/ttlCache'
+import ScrollToTop from './ScrollToTop'
+import { cookieHeaders } from '../services/cookieRequest'
 
 // ===== 个人中心模块级短 TTL 缓存 =====
 // ProfileView 现由 App 冻结（关闭只隐藏、不卸载），但切页签 / 切平台 / 进出他人主页仍会
@@ -510,7 +512,7 @@ const RankSongRow = memo(function RankSongRow({
     >
       <span className={`w-8 text-center text-sm font-semibold shrink-0 ${index < 3 ? '' : 'text-white/40'}`} style={index < 3 ? { color: accentColor } : {}}>{index + 1}</span>
       <div className="w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-white/10">
-        {song.album?.picUrl ? <CachedImage src={song.album.picUrl} alt={song.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>} role="row" priority="visible" /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
+        {qqSongCoverUrl(song) ? <CachedImage src={qqSongCoverUrl(song)} alt={song.name} className="w-full h-full object-cover" fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>} role="row" priority="visible" /> : <div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
       </div>
       <div className="min-w-0 flex-1">
         <p className="text-white text-sm font-medium truncate">{song.name}</p>
@@ -549,6 +551,8 @@ interface ProfileViewProps {
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
   onCopyInfo?: (song: Song) => void
+  /** 打开 MV（收藏 MV 卡片点击）：App 侧接 MVExploreModal directPlay */
+  onOpenMv?: (mv: { id: string | number; platform: MusicPlatform }) => void
   /** 直接打开某个用户的主页（歌单创建者等二级入口）；设置后进入即压栈到该用户 */
   initialUserTarget?: { platform: 'netease' | 'qq'; userId: string; nickname?: string } | null
   /** 冻结：由 App 保持挂载但当前不可见（关闭弹窗）。为 true 时暂停监听/后台刷新。 */
@@ -576,6 +580,7 @@ function ProfileView({
   onAddToPlaylist,
   onViewComments,
   onCopyInfo,
+  onOpenMv,
   initialUserTarget,
   suspended = false
 }: ProfileViewProps) {
@@ -617,6 +622,8 @@ function ProfileView({
   // 或把 B 的曲目覆盖成 A 的）。见 fetchUserData / handlePlaylistClick 里的 guard。
   const userDataSeqRef = useRef(0)
   const playlistClickSeqRef = useRef(0)
+  // 内容滚动容器（收藏/歌单/歌手长列表）：回到顶部按钮的判定源
+  const profileScrollRef = useRef<HTMLDivElement | null>(null)
   // 社交（关注/粉丝）状态 —— 仅网易云
   const [socialType, setSocialType] = useState<'follows' | 'followeds' | 'events' | 'messages'>('follows')
   const [socialItems, setSocialItems] = useState<{ userId: string; nickname: string; avatarUrl: string; signature: string; isFollow: boolean }[]>([])
@@ -1049,8 +1056,8 @@ function ProfileView({
       }
       const response = await fetch(
         platform === 'qq'
-          ? `http://localhost:3001/api/qq/playlist/detail?id=${encodeURIComponent(playlist.id)}&cookie=${encodeURIComponent(cookie)}`
-          : `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}&cookie=${encodeURIComponent(cookie)}`
+          ? `http://localhost:3001/api/qq/playlist/detail?id=${encodeURIComponent(playlist.id)}`
+          : `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`
       )
       const data = await response.json()
       if (!response.ok || data.error) throw new Error(data.error || '读取歌单失败')
@@ -1240,7 +1247,7 @@ function ProfileView({
       }
       
       if (platform === 'netease') {
-        response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}&cookie=${encodeURIComponent(cookie)}`)
+        response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(cookie) })
         data = await response.json()
         if (!response.ok || data.error) throw new Error(data.error || '读取网易云歌单失败')
         if (data.playlist) {
@@ -1263,7 +1270,7 @@ function ProfileView({
         }
       } else if (platform === 'qq') {
         console.log('📤 正在获取QQ音乐歌单详情，ID:', playlist.id)
-        response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}&cookie=${encodeURIComponent(cookie)}`)
+        response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
         data = await response.json()
         
         console.log('📥 QQ音乐歌单详情:', data)
@@ -1536,7 +1543,7 @@ function ProfileView({
           type: 'song' as const,
           name: song.name,
           subtitle: song.artists.map(artist => artist.name).join(' / '),
-          coverUrl: song.album?.picUrl || '',
+          coverUrl: qqSongCoverUrl(song),
           playTime: 0,
           song,
         })))
@@ -1934,6 +1941,22 @@ function ProfileView({
   // 同步initialPlatform的变化
   useEffect(() => {
     setCurrentPlatform(initialPlatform)
+    // 平台切换后旧页签可能在新平台不存在（如酷狗专属的「音乐云盘/已购音乐」，
+    // 或网易云专属的「听歌排行」「收藏」）：页签按钮随平台消失，内容区分支全部
+    // 不命中 → 渲染整块空白。切平台时把页签拉回默认的「创建的歌单」。
+    // 平台切换后旧页签可能在新平台不存在（酷狗专属的「音乐云盘/已购音乐」、
+    // 网易云专属的「听歌排行/收藏/关注」、汽水专属的「我喜欢」）：页签按钮随平台
+    // 消失而内容区分支全不命中 → 渲染整块空白且无任何高亮可点回。这里校正到
+    // 新平台仍存在的页签，通用的页签（创建/收藏歌单、最近播放、用户信息）不动。
+    setActiveTab(previous => {
+      if (previous === 'created' || previous === 'subscribed' || previous === 'detail') return previous
+      const stillAvailable
+        = previous === 'cloud' || previous === 'purchased' ? initialPlatform === 'kugou'
+        : previous === 'rank' || previous === 'collections' || previous === 'social' ? (initialPlatform === 'netease' || initialPlatform === 'qq')
+        : previous === 'favs' ? initialPlatform === 'soda'
+        : true // recent 等其余页签全平台可用
+      return stillAvailable ? previous : 'created'
+    })
     // 平台切换瞬间内部 state currentPlatform 还是旧值，而 userId/cookie 已是新平台——
     // 直接以 prop 平台拉取，避免用「旧平台 state + 新平台 userId」的错误组合导致歌单为空
     fetchUserData(initialPlatform)
@@ -2101,7 +2124,7 @@ function ProfileView({
         if (cachedDetail) {
           commitUserDetail(cachedDetail)
         } else {
-          const detailRes = await fetch(`http://localhost:3001/api/netease/user/detail?uid=${uid}`)
+          const detailRes = await fetch(`http://localhost:3001/api/netease/user/detail?uid=${uid}`, { headers: cookieHeaders(cookie) })
           const detailData = await detailRes.json()
 
           if (detailData.profile) {
@@ -2154,7 +2177,7 @@ function ProfileView({
         const qqDetailCacheKey = `qq:${userId}`
         let detailData: any = profileQqDetailCache.get(qqDetailCacheKey)
         if (!detailData) {
-          const detailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${userId}&cookie=${encodeURIComponent(cookie)}`)
+          const detailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${userId}`, { headers: cookieHeaders(cookie) })
           detailData = await detailRes.json()
           if (detailData && !detailData.error) profileQqDetailCache.set(qqDetailCacheKey, detailData)
         }
@@ -2446,12 +2469,15 @@ function ProfileView({
 
       {/* 内容区 */}
       <div className="relative z-10 w-full h-full flex items-center justify-center p-6" onClick={() => (viewStack.length > 0 ? clearView() : onClose())}>
+        {/* 包装容器：包住面板与滚动辅助按钮。按钮定位在面板右缘外侧，不能放进面板内部——
+            面板 overflow-hidden 会把越界的按钮整体裁掉（艺人/专辑弹窗同款处理）。 */}
+        <div className="relative w-full h-full max-w-7xl max-h-[90vh] flex" onClick={(e) => e.stopPropagation()}>
                              <motion.div
           initial={{ opacity: 0, scale: 0.95 }}
           animate={suspended ? { opacity: 0, scale: 0.98 } : { opacity: 1, scale: 1 }}
           exit={{ opacity: 0, scale: 0.95 }}
           transition={{ duration: 0.18 }}
-          className="profile-glass-panel relative w-full h-full max-w-7xl max-h-[90vh] flex flex-col overflow-hidden rounded-[32px]"
+          className="profile-glass-panel relative w-full h-full flex flex-col overflow-hidden rounded-[32px]"
           style={{
             willChange: 'transform, opacity',
           }}
@@ -2706,6 +2732,7 @@ function ProfileView({
           {/* 内容区 */}
           <div className="flex-1 overflow-hidden rounded-b-[24px]">
             <div
+              ref={profileScrollRef}
               className="overflow-y-auto pr-2"
               style={{
                 height: '100%',
@@ -3030,9 +3057,9 @@ function ProfileView({
                             >
                               <span className="w-8 text-center text-xs text-white/40 shrink-0">{index + 1}</span>
                               <div className="w-11 h-11 rounded-lg overflow-hidden shrink-0 bg-white/10">
-                                {song.album?.picUrl ? (
+                                {qqSongCoverUrl(song) ? (
                                   <CachedImage
-                                    src={song.album.picUrl}
+                                    src={qqSongCoverUrl(song)}
                                     alt={song.name}
                                     className="w-full h-full object-cover"
                                     fallback={<div className="w-full h-full flex items-center justify-center"><Music className="w-5 h-5 text-white/20" /></div>}
@@ -3128,7 +3155,7 @@ function ProfileView({
                                 const cover = mv.cover || mv.picUrl || mv.imgurl16v9 || ''
                                 return (
                                   <div key={`${mv.id || index}-${index}`} className="rounded-xl p-2.5 transition-all cursor-pointer relative group" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}
-                                    onClick={() => { if (mv.id) window.dispatchEvent(new CustomEvent('play-mv', { detail: { id: mv.id, name: mvName, platform: 'netease' } })) }} title="点击播放 MV">
+                                    onClick={() => { if (mv.id) onOpenMv?.({ id: mv.id, platform: 'netease' }) }} title="点击播放 MV">
                                     {/* 取消收藏 */}
                                     <button
                                       type="button"
@@ -3628,6 +3655,16 @@ function ProfileView({
             </div>
           </div>
         </motion.div>
+
+        {/* 回到顶部：面板外右侧（包装层不裁剪）。收藏/歌单/歌手网格可达数百项 */}
+        <ScrollToTop
+          containerRef={profileScrollRef}
+          threshold={200}
+          position="absolute"
+          offsetRight={-60}
+          offsetBottom={24}
+        />
+        </div>
       </div>
 
       {/* 歌单详情面板 */}

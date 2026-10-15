@@ -1,7 +1,8 @@
 import { memo, useState, useEffect, useMemo, useRef } from 'react'
+import { getSecureToken, setSecureToken } from '../services/secureTokenStore'
 import { motion } from 'framer-motion'
 import { X, Play, Music, Info, Loader, Heart, Disc3 } from 'lucide-react'
-import { getAlbumDetail, getAlbumSongs, getArtistAlbums, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong } from '../services/musicApi'
+import { getAlbumDetail, getAlbumSongs, getArtistAlbums, Album, Song, getProxiedImageUrl, subscribeAlbum, isAlbumSubscribed, isSameSong, qqSongCoverUrl } from '../services/musicApi'
 import { fetchSodaAlbumTracks, collectSodaAlbum } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleAlbumDetail, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
@@ -166,7 +167,7 @@ function AlbumDetailModal({
       void (async () => {
         try {
           const query = new URLSearchParams({ id })
-          const sdCookie = localStorage.getItem('soda_token') || ''
+          const sdCookie = getSecureToken('soda_token') || ''
           if (sdCookie) query.set('cookie', sdCookie)
           const response = await fetch(`http://localhost:3001/api/soda/album/collect/check?${query.toString()}`, { cache: 'no-store' })
           const payload = await response.json().catch(() => null)
@@ -183,6 +184,8 @@ function AlbumDetailModal({
   
   // 滚动容器引用
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 回到顶部按钮可见时，定位歌曲按钮从底部槽位上移让位
+  const [scrollTopVisible, setScrollTopVisible] = useState(false)
   
   // The modal surface is always darkened by the cover backdrop, independent
   // of the global player theme. Keep neutral text readable on that real surface.
@@ -358,13 +361,16 @@ function AlbumDetailModal({
         className="fixed inset-0 z-[301] flex items-center justify-center p-8"
         onClick={onClose}
       >
+        {/* 包装容器：包住卡片与滚动辅助按钮。按钮定位在卡片右缘外侧（offsetRight=-60），
+            不能放进卡片内部——卡片 overflow-hidden 会把越界的按钮整体裁掉。 */}
+        <div className="relative w-full max-w-6xl max-h-[90vh] flex" onClick={(e) => e.stopPropagation()}>
         <motion.div
           data-tv-scope
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={instantClose ? { scale: 0.9, opacity: 0, transition: { duration: 0 } } : { scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="rounded-3xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden relative"
+          className="rounded-3xl shadow-2xl w-full max-h-[90vh] flex flex-col overflow-hidden relative"
         >
           {/* 液态玻璃背景 - 使用专辑封面，只在弹窗内部 */}
           <div className="absolute inset-0 rounded-3xl overflow-hidden">
@@ -657,9 +663,9 @@ function AlbumDetailModal({
 
                       {/* 封面 */}
                       <div className={`w-10 h-10 rounded-lg overflow-hidden ${bgCard} flex-shrink-0`}>
-                        {song.album?.picUrl ? (
+                        {qqSongCoverUrl(song) ? (
                           <CachedImage 
-                            src={coverImageUrl(platform, song.album.picUrl)} 
+                            src={coverImageUrl(platform, qqSongCoverUrl(song))} 
                             alt={song.name} 
                             className="w-full h-full object-cover"
                             role="row"
@@ -827,29 +833,38 @@ function AlbumDetailModal({
           </div>
         </div>
 
-        {/* 滚动按钮组 - 弹窗外部右侧，相对于弹窗定位 */}
-        {/* 回到顶部按钮 - 最下方 */}
-        <ScrollToTop 
-          containerRef={scrollContainerRef} 
+        </motion.div>
+
+        {/* 滚动按钮组 - 卡片外右侧（包装层不裁剪）。key=activeTab：切 tab 重挂重读 ref */}
+        <ScrollToTop
+          key={`stt-${activeTab}`}
+          containerRef={scrollContainerRef}
           playerTheme={playerTheme}
           position="absolute"
           offsetRight={-60}
           offsetBottom={24}
+          onVisibilityChange={setScrollTopVisible}
         />
-        
-        {/* 跳转到当前播放歌曲按钮 - 在回到顶部按钮上方 */}
-        {currentSongIndex !== -1 && (
-          <ScrollToCurrentSong 
+
+        {/* 跳转到当前播放歌曲按钮：歌曲行滚出可视区即显示；回到顶部出现时上移让位 */}
+        {currentSongIndex !== -1 && activeTab === 'songs' && (
+          <ScrollToCurrentSong
+            key={`stc-${activeTab}`}
             containerRef={scrollContainerRef}
             currentSongIndex={currentSongIndex}
+            threshold={72}
             playerTheme={playerTheme}
             position="absolute"
             offsetRight={-60}
-            offsetBottom={88}
+            offsetBottom={24}
+            slotOffsetBottom={scrollTopVisible ? 64 : 0}
+            cardHeight={64}
+            cardGapY={4}
+            contentPaddingTop={16}
           />
         )}
+        </div>
       </motion.div>
-    </motion.div>
 
     {contextMenu.song && (
       <SongContextMenu

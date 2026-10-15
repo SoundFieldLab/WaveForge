@@ -30,6 +30,7 @@ import {
   type LyricStyleMode,
 } from '../utils/lyricStyle'
 import { setTransitionModeExclusive } from '../services/globalSettingsRegistry'
+import { parseStoredBoolean } from '../utils/storage'
 import type { QuickSettingsSection } from '../services/quickSettingsStore'
 import type { QuickSettingsPlaybackContext } from './quickSettingsPlaybackContext'
 import QuickSettingsPreview from './QuickSettingsPreview'
@@ -390,19 +391,13 @@ export default memo(function QuickSettingsDialog({
    * 过渡三开关的互斥规则直接复用注册表导出的 setTransitionModeExclusive，不另写一份。
    * ------------------------------------------------------------------ */
 
-  const [translationEnabled, setTranslationEnabled] = useState(() => {
-    const saved = localStorage.getItem('translationEnabled')
-    return saved !== null ? JSON.parse(saved) : false
-  })
+  const [translationEnabled, setTranslationEnabled] = useState(() => parseStoredBoolean(localStorage.getItem('translationEnabled'), false))
 
   const [translationPosition, setTranslationPosition] = useState<'traditional' | 'bottom-right'>(() => (
     localStorage.getItem('translationPosition') === 'bottom-right' ? 'bottom-right' : 'traditional'
   ))
 
-  const [romanEnabled, setRomanEnabled] = useState(() => {
-    const saved = localStorage.getItem('romanEnabled')
-    return saved !== null ? JSON.parse(saved) : false
-  })
+  const [romanEnabled, setRomanEnabled] = useState(() => parseStoredBoolean(localStorage.getItem('romanEnabled'), false))
 
   const [transitionMode, setTransitionMode] = useState<TransitionMode>(readTransitionMode)
 
@@ -418,13 +413,11 @@ export default memo(function QuickSettingsDialog({
   // 外部（播放面按钮列 / 其它模式设置）改动时同步回来，避免两边显示不一致
   useEffect(() => {
     const syncTranslation = () => {
-      const saved = localStorage.getItem('translationEnabled')
-      setTranslationEnabled(saved !== null ? JSON.parse(saved) : false)
+      setTranslationEnabled(parseStoredBoolean(localStorage.getItem('translationEnabled'), false))
       setTranslationPosition(localStorage.getItem('translationPosition') === 'bottom-right' ? 'bottom-right' : 'traditional')
     }
     const syncRoman = () => {
-      const saved = localStorage.getItem('romanEnabled')
-      setRomanEnabled(saved !== null ? JSON.parse(saved) : false)
+      setRomanEnabled(parseStoredBoolean(localStorage.getItem('romanEnabled'), false))
     }
     const syncTransition = () => {
       setTransitionMode(readTransitionMode())
@@ -1169,7 +1162,6 @@ export default memo(function QuickSettingsDialog({
                   isDaylight={isDaylight}
                   accentColor={accentHex}
                   lyricDisplayMode={lyricDisplayMode}
-                  lyricDisplayModeLabel={LYRIC_MODE_LABELS[lyricDisplayMode]}
                   backgroundEffect={backgroundEffect}
                   backgroundBlur={activeBackgroundBlur}
                   showImmersiveBar={showImmersiveBar}
@@ -1181,7 +1173,6 @@ export default memo(function QuickSettingsDialog({
                   coverPulseMode={coverPulseMode}
                   hideSongInfo={lyricDisplayMode === 'immersive' && hideImmersiveSongInfo}
                   showVisualizer={modernAudioVisualizerEnabled}
-                  mvBackgroundActive={mvBackgroundActive}
                   playback={playback}
                 />
                 {cornerBrackets.map((position) => (
@@ -1487,20 +1478,8 @@ export default memo(function QuickSettingsDialog({
           </div>
         </div>
 
-        {/* 页脚：说清"改动即时生效"，并给一个明确的完成出口 */}
-        <footer className={`flex shrink-0 items-center justify-between gap-3 border-t px-4 py-2.5 sm:px-5 ${dividerClass}`}>
-          <span className="text-[11.5px]" style={{ color: toRgba(secondary, 0.7) }}>
-            设置即时生效，改动会被记住
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-[9px] px-4 py-1.5 text-[12.5px] font-medium text-white transition-all hover:brightness-110 active:scale-[0.97]"
-            style={{ backgroundColor: accentHex, boxShadow: `0 4px 14px ${toRgba(accentHex, 0.35)}` }}
-          >
-            完成
-          </button>
-        </footer>
+        {/* 页脚（「设置即时生效，改动会被记住」+「完成」按钮）已按用户要求移除：
+            所有改动本来就是即时落盘的，这句话是废话；关闭用右上角的 ✕ / Esc / 点遮罩就够了。 */}
       </motion.div>
     </motion.div>
   )

@@ -23,6 +23,9 @@ import { installNativeTooltipSuppressor } from './utils/suppressNativeTooltips'
 // 并给非 Electron 环境（Android WebView / 纯浏览器）注入 window.electron 最小桩。
 initPlatformUI()
 installElectronShim()
+// 凭据安全存储：启动时把 localStorage 遗留的各平台登录态迁移进主进程 safeStorage
+// （DPAPI 加密落盘），此后凭据读写走 secureTokenStore（内存缓存 + 加密持久化）。
+import('./services/secureTokenStore').then(({ initSecureTokenStore }) => initSecureTokenStore()).catch(() => undefined)
 // 全局禁用原生 title 悬浮气泡（用户要求：样式与播放器视觉不符）
 installNativeTooltipSuppressor()
 // 全局兜底禁用图片原生拖拽：index.css 的 -webkit-user-drag 已覆盖常规场景，

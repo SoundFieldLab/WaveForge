@@ -4,8 +4,10 @@ import { isTv, isTvModeActive, isDesktop } from './platform'
 import { dispatchTvBack, useTvBack, useRemoteCursorMode } from './tv/tvCore'
 import { isPerfModeEfficiency, isPerfModeEnhanced } from './tv/perfMode'
 import { lazy, memo, Suspense, startTransition, useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore, type ComponentProps, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
+import { flushSync } from 'react-dom'
 import { createPortal } from 'react-dom'
 import AlbumCoverPlayer from './components/AlbumCoverPlayer'
+import ErrorBoundary from './components/ErrorBoundary'
 import TransitionTrackTitles from './components/TransitionTrackTitles'
 import { useTransitionLyricsCrossfade, useTransitionOverlayProgress, useTransitionTargetTime, useTransitionVisualIdentity } from './hooks/useTransitionVisual'
 import type { TransitionVisualStore } from './audio/transitionVisualStore'
@@ -44,7 +46,7 @@ import {
 } from './components/foliaTunings'
 import { getVisualizerRegistryEntry } from './vendor/folia/components/visualizer/registry'
 import type { VisualizerTuningBundle } from './vendor/folia/components/visualizer/tuningRegistry'
-import { AutomixHudBadge, useAutomixHudTime, transitionEngineDisplayName } from './components/AutomixHudBadge'
+import { AutomixHudBadge, transitionEngineDisplayName } from './components/AutomixHudBadge'
 
 import MiniPlayer from './components/MiniPlayer'
 import Toast from './components/Toast'
@@ -62,13 +64,14 @@ import { extractDominantColor, useColorThief } from './hooks/useColorThief'
 import { useAudioPlayer, type AudioGraphHandle } from './hooks/useAudioPlayer'
 import { airplayController } from './services/airplayController'
 import { runShaderWarmup } from './services/shaderWarmup'
+import { getSecureToken, setSecureToken, removeSecureToken } from './services/secureTokenStore'
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer'
 import { useAppleDynamicCover } from './hooks/useAppleDynamicCover'
 import { FOLIA_STYLES } from './vendor/folia/stylesMeta'
 import { useAudioPulseStore, type AudioPulseStore } from './hooks/useAudioPulse'
 import { useAutoHideCursor } from './hooks/useAutoHideCursor'
 import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl,
-  getSimilarSongs, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine } from './services/musicApi'
+  getSimilarSongs, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine, qqSongCoverUrl } from './services/musicApi'
 import { recordAppleRecentPlaybackFallback } from './services/appleRecentPlayback'
 import type { MusicPlatform } from './services/platforms'
 import { getPlatformCapabilities, isPlatformVisible, platformLabel } from './services/platforms'
@@ -97,7 +100,8 @@ import { fetchNeteaseHeartMode, fetchNeteaseRoam } from './features/neteaseExplo
 import { fetchQQRadarSongs } from './features/qqExplore/api'
 import { scheduleBackgroundPrefetch } from './services/backgroundPrefetch'
 import { getResolvedArtworkUrl, preloadArtwork } from './services/artworkLoader'
-import { recordListen } from './services/listeningLog'
+import { recordListen, clearListeningLog } from './services/listeningLog'
+import { clearDesktopMusicActivity } from './services/desktopMusicActivity'
 import { getDesktopSpectrumConsumerCount, subscribeDesktopSpectrumConsumers } from './services/desktopSpectrum'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Settings, Sparkles, Check, Image as ImageIcon, Radio, SlidersHorizontal } from 'lucide-react'
@@ -119,6 +123,8 @@ const loadDesktopView = () => import('./components/DesktopView')
 const loadTraditionalView = () => import('./components/TraditionalView')
 // 共振（多人一起听）：独立模式，房间状态由 src/features/resonance 的单例承载
 const loadResonanceView = () => import('./features/resonance/ResonanceView')
+// 学歌（逐句跟学）：独立模式，练习状态在 src/features/singalong 内承载
+const loadSingAlongView = () => import('./features/singalong/SingAlongView')
 // 模式切换过渡动画时长：最短 3s（高性能机秒切也不一闪而过）；最长 12s 兜底（防止加载异常卡死界面）
 const MODE_TRANSITION_MIN_MS = 3000
 // 快速档（目标模式本次会话已挂载过、内容就绪）：只播一段压紧的丝滑过渡，不让用户白等
@@ -129,12 +135,13 @@ const MODE_TRANSITION_MAX_MS = 12000
 // 各模式懒加载 chunk 的统一入口：过渡动画一开始（点击模式卡片）就提前拉取，
 // 与来源面板的收起动画并行下载/编译，viewModeChanged 到达时 chunk 通常已在内存里——
 // 这就是「切换时做预加载」的核心：把串行的 加载→切换 变成并行的 加载‖动画
-const MODE_CHUNK_LOADERS: Record<'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance', () => Promise<unknown>> = {
+const MODE_CHUNK_LOADERS: Record<'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong', () => Promise<unknown>> = {
   explore: loadExploreView,
   minimal: loadHomeView,
   traditional: loadTraditionalView,
   desktop: loadDesktopView,
   resonance: loadResonanceView,
+  singalong: loadSingAlongView,
 }
 const PLAYBACK_NEUTRAL_COLOR = '#6b7280'
 // TV 效能档禁入的重 GPU 歌词模式：多维（R3F WebGL 全速渲染）、Folia（WebGL）、PV（Pixi 60fps ticker）、壁纸（桌面壁纸语义）
@@ -143,9 +150,11 @@ const TV_HEAVY_LYRIC_MODES: LyricDisplayMode[] = ['multidimensional', 'folia', '
 let lastTransitionProgressThrottle = 0
 const LazyHomeView = lazy(loadHomeView)
 const LazyExploreView = lazy(loadExploreView)
+const LazyMVExploreModal = lazy(() => import('./components/MVExploreModal'))
 const LazyDesktopView = lazy(loadDesktopView)
 const LazyTraditionalView = lazy(loadTraditionalView)
 const LazyResonanceView = lazy(loadResonanceView)
+const LazySingAlongView = lazy(loadSingAlongView)
 const loadSearchPanel = () => import('./components/SearchPanel')
 const loadUpNextNotification = () => import('./components/UpNextNotification')
 const LazySearchPanel = lazy(loadSearchPanel)
@@ -237,6 +246,12 @@ import PluginOverlay from './components/PluginOverlay'
 import { setGlobalAudioAnalyzerStore, setGlobalPlaybackActive, setGlobalAudioAnalysers, dglabClient } from './plugins/clients/DGLabClient'
 import { setChromaAudioAnalyzerStore, setChromaPlaybackActive } from './plugins/clients/ChromaClient'
 import { setSignalRgbAudioAnalyzerStore, setSignalRgbPlaybackActive } from './plugins/clients/SignalRgbClient'
+import {
+  publishNowPlaying,
+  setNowPlayingTimeStore,
+  setNowPlayingControls,
+  selectSingableLines,
+} from './plugins/clients/singalong/nowPlaying'
 import { isPluginEnabled, PLUGIN_STATE_EVENT } from './services/pluginStore'
 import { hasEnabledAudioPlugin } from './plugins/registry'
 import {
@@ -267,6 +282,7 @@ import {
   type PlaybackShortcutSettings,
 } from './services/playbackShortcutSettings'
 import { notifyPlaybackSpeedTransitionReset } from './services/playbackSpeedSettings'
+import { cookieHeaders, fetchWithCookieHeader } from './services/cookieRequest'
 
 interface Track {
   id?: number
@@ -806,7 +822,9 @@ function isSameAlbumPlayback(source: Song | undefined, target: Song | undefined)
 }
 
 function normalizeSongCover(song: Song): Song {
-  const picUrl = song.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
+  // qqSongCoverUrl:picUrl 缺失但有 album.mid 时按 CDN 规则拼兜底(与各渲染点同口径)
+  const rawCover = qqSongCoverUrl(song)
+  const picUrl = rawCover ? getProxiedImageUrl(rawCover) : ''
 
   if (!picUrl || picUrl === song.album?.picUrl) {
     return song
@@ -957,16 +975,18 @@ function App() {
   // 视图模式状态（探索 / 简约 / 桌面）
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem('viewMode')
-    let mode: ViewMode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' || saved === 'resonance' ? saved : 'minimal'
+    let mode: ViewMode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' || saved === 'resonance' || saved === 'singalong' ? saved : 'minimal'
     // 上次是「共振」时不要一头扎进共振：回到进共振之前的那个模式，
-    // 免得用户关客户端时正好在共振里，下次启动还得手动切出来。
+    // 免得用户关客户端时正好在共振里，下次启动还得手动切出来。学歌同理（它是练习界面，不是常驻界面）。
     if (mode === 'resonance') {
       const previous = readResonanceEntryMode()
       if (previous === 'explore' || previous === 'minimal' || previous === 'traditional' || previous === 'desktop') mode = previous
       else mode = 'minimal'
     }
-    // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面
-    return isTv() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
+    if (mode === 'singalong') mode = 'minimal'
+    // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面。
+    // isTvModeActive()（html.tv-mode）而非 isTv()：真机与 ?tv=1 模拟口径一致。
+    return isTvModeActive() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
   })
   const viewModeChangeRevisionRef = useRef(0)
   // 已访问过的模式：切走只隐藏、不卸载（与「播放页覆盖时不卸载」同一套做法）。
@@ -992,18 +1012,18 @@ function App() {
     }
     setDesktopFusionEnabled(false)
     localStorage.setItem('desktopFusionEnabled', 'false')
-    try { await window.electron?.desktopFusion.setEnabled(false) } catch { /* 忽略 */ }
+    try { await window.electron?.desktopFusion?.setEnabled(false) } catch { /* 忽略 */ }
   }, [])
   // 确认开启融合：先写 localStorage，主进程销毁重建为透明窗口（本实例随旧窗口销毁，
   // 新窗口启动时据此恢复融合态）；invoke 通道随窗口销毁关闭，异常可忽略
   const confirmEnableFusion = useCallback(async () => {
     setShowFusionConfirm(false)
     localStorage.setItem('desktopFusionEnabled', 'true')
-    try { await window.electron?.desktopFusion.setEnabled(true) } catch { /* 忽略 */ }
+    try { await window.electron?.desktopFusion?.setEnabled(true) } catch { /* 忽略 */ }
   }, [])
   // 重启后同步主进程窗口状态（退出 kiosk / 置顶等），保证与 localStorage 一致
   useEffect(() => {
-    if (desktopFusionEnabled) void window.electron?.desktopFusion.setEnabled(true)
+    if (desktopFusionEnabled) void window.electron?.desktopFusion?.setEnabled(true)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   // 融合穿透的鼠标悬停检测只在桌面模式（DesktopView 内）运行；融合开启且处于其他
@@ -1018,7 +1038,7 @@ function App() {
   }, [desktopFusionEnabled, viewMode])
   // 模式切换过渡动画：全屏覆盖掩盖新模式挂载卡顿。to=目标模式，ready=目标内容已就绪，
   // 收起条件 = ready 且 时长 ≥ 最短 3s（慢机 5~10s 加载期间动画无限循环，不会"断片"）。
-  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'; startedAt: number; ready: boolean; quick?: boolean } | null>(null)
+  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'; startedAt: number; ready: boolean; quick?: boolean } | null>(null)
   const modeTransitionRef = useRef(modeTransition)
   modeTransitionRef.current = modeTransition
   // 转场动画风格 / 音效（设置 → 个性化；全局设置注册表 'transition' 组同键同事件）
@@ -1069,7 +1089,15 @@ function App() {
   const [externalPlaybackActive, setExternalPlaybackActive] = useState(false)
   /** 当前曲目是否为直播流（Apple 电台等；直播时播放器显示 LIVE 指示、禁拖动） */
   const [isLive, setIsLive] = useState(false)
-  const [volume, setVolume] = useState(1.0) // 默认音量100%
+  // 音量持久化：跨启动记忆用户音量（此前每次启动回 100%，主流播放器均记忆）
+  const [volume, setVolume] = useState(() => {
+    try {
+      const saved = parseFloat(localStorage.getItem('waveforge:volume') || '')
+      return Number.isFinite(saved) && saved >= 0 && saved <= 1 ? saved : 1.0
+    } catch {
+      return 1.0
+    }
+  }) // 默认音量100%
   const [showSearch, setShowSearch] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showMixingStudio, setShowMixingStudio] = useState(false)
@@ -1123,8 +1151,10 @@ function App() {
         ? loadDesktopView
         : viewMode === 'traditional'
           ? loadTraditionalView
-          : loadHomeView
-    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView, loadResonanceView]
+          : viewMode === 'singalong'
+            ? MODE_CHUNK_LOADERS.singalong
+            : loadHomeView
+    const alternateViewLoaders = [loadHomeView, loadExploreView, loadTraditionalView, loadDesktopView, loadResonanceView, MODE_CHUNK_LOADERS.singalong]
       .filter(loader => loader !== currentViewLoader)
 
     void currentViewLoader()
@@ -1326,8 +1356,39 @@ function App() {
     window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, invalidatePreloadedAudioUrls)
     window.addEventListener('waveforge-auth-changed', invalidatePreloadedAudioUrls)
     window.addEventListener('waveforge:url-cache-cleared', clearPreloadCache)
+    // 音质切换即时生效：重载当前歌（URL 缓存/预载缓存已被 invalidate，重载会按新档取流），
+    // 保留播放位置与播放态——官方客户端口径（"实际在播"跟随所选档位）。
+    // automix/对齐影响：electron 下载缓存按 trackKey(mid) 存文件，音质变更时旧音质文件
+    // 仍会被 automix 分析/渲染与 MV 对齐复用 → 一并删除当前/预载两轨的缓存文件。
+    const purgeDownloadCacheOnQualityChange = () => {
+      const keys = new Set<string>()
+      if (activeTrackKeyRef.current) keys.add(activeTrackKeyRef.current)
+      for (const key of preloadCacheRef.current.keys()) keys.add(key)
+      for (const key of keys) {
+        void window.electron?.audioDownload?.deleteCached?.(key).catch(() => undefined)
+      }
+    }
+    const reloadCurrentOnQualityChange = () => {
+      const idx = currentIndexRef.current
+      const song = playlistRef.current[idx]
+      if (!song || !isPlayingRef.current) return
+      const el = audioPlayerRef.current?.getAudioElement?.()
+      const resumeAt = Number.isFinite(el?.currentTime) ? Math.max(0, (el?.currentTime || 0) - 0.35) : 0
+      void loadAndPlaySongRef.current(song, idx, playlistRef.current).then(() => {
+        if (resumeAt > 1) {
+          // loadAndPlaySong 从头起播：等 src 就位后 seek 回原位置（留 0.35s 预卷避免循环边界）
+          window.setTimeout(() => {
+            try { audioPlayerRef.current?.seek?.(resumeAt) } catch { /* 忽略 */ }
+          }, 600)
+        }
+      }).catch(() => { /* 重载失败保持现状（下一首自然用新档） */ })
+    }
+    window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, reloadCurrentOnQualityChange)
+    window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, purgeDownloadCacheOnQualityChange)
     return () => {
       window.removeEventListener(AUDIO_QUALITY_SETTINGS_EVENT, invalidatePreloadedAudioUrls)
+      window.removeEventListener(AUDIO_QUALITY_SETTINGS_EVENT, reloadCurrentOnQualityChange)
+      window.removeEventListener(AUDIO_QUALITY_SETTINGS_EVENT, purgeDownloadCacheOnQualityChange)
       window.removeEventListener('waveforge-auth-changed', invalidatePreloadedAudioUrls)
       window.removeEventListener('waveforge:url-cache-cleared', clearPreloadCache)
     }
@@ -1422,6 +1483,19 @@ function App() {
     if (lyricArrowHintTimerRef.current !== null) window.clearTimeout(lyricArrowHintTimerRef.current)
     toastTimersRef.current.forEach(t => window.clearTimeout(t))
     toastTimersRef.current.clear()
+    deferredTimersRef.current.forEach(t => window.clearTimeout(t))
+    deferredTimersRef.current.clear()
+  }, [])
+
+  /** 延迟重试/续载类 setTimeout 的统一收集：卸载（HMR/StrictMode 重挂载）时清理，
+   *  避免定时器唤醒后对已卸载组件 setState 或空转。逻辑性重试守卫（revision 校验）不受影响。 */
+  const deferredTimersRef = useRef<Set<number>>(new Set())
+  const scheduleDeferred = useCallback((fn: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      deferredTimersRef.current.delete(timer)
+      fn()
+    }, delay)
+    deferredTimersRef.current.add(timer)
   }, [])
   
   // 歌词翻译设置
@@ -1628,8 +1702,9 @@ function App() {
     return parseStoredBoolean(saved, false)
   })
   const [crossfadeDuration, setCrossfadeDuration] = useState(() => {
-    const saved = localStorage.getItem('crossfadeDuration')
-    return saved ? parseFloat(saved) : 4 // 默认值 4 秒
+    const saved = parseFloat(localStorage.getItem('crossfadeDuration') || '')
+    // 脏数据（非数字）回退默认：NaN 会一路传进 setValueCurveAtTime 抛错，过渡全挂
+    return Number.isFinite(saved) && saved > 0 ? saved : 4 // 默认值 4 秒
   })
   
   // Gapless 设置
@@ -2034,16 +2109,21 @@ function App() {
     // 派发前先等 showToast 监听器注册（挂载早期直接派发会被丢弃）。
     // 启动类提示额外延后数秒——刚启动界面还没稳定，立即弹用户来不及看；
     // 同时把展示时长拉长到 8s 保证可读。运行中断开提示保持即时。
+    // 定时器统一入 effect 局部集合，卸载时清理（此前卸载后仍会派发全局事件）。
+    const pendingToastTimers = new Set<number>()
     const toast = (message: string, delay = 0, duration = 4000) => {
-      window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
+        pendingToastTimers.delete(timer)
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: 'info', duration } }))
       }, delay)
+      pendingToastTimers.add(timer)
     }
     const off = window.electron?.proxyManager?.onNotice?.((notice) => {
       if (notice.kind === 'disconnected') toast('检测到代理断开，已为您关闭自动代理')
     })
     // 启动提示：主进程的端口检测可能在渲染进程挂载后才完成，轮询几次兜底
     let attempts = 0
+    let retryTimer: number | null = null
     const tryConsume = () => {
       void window.electron?.proxyManager?.consumeNotice?.().then((notice) => {
         if (notice === 'startup-unavailable') {
@@ -2052,12 +2132,17 @@ function App() {
           toast('上次使用的代理已失效（端口在但隧道不通），已为您关闭自动代理功能', 3500, 8000)
         } else if (attempts < 8) {
           attempts += 1
-          window.setTimeout(tryConsume, 800)
+          retryTimer = window.setTimeout(tryConsume, 800)
         }
       }).catch(() => {})
     }
     tryConsume()
-    return () => off?.()
+    return () => {
+      off?.()
+      pendingToastTimers.forEach(t => window.clearTimeout(t))
+      pendingToastTimers.clear()
+      if (retryTimer !== null) window.clearTimeout(retryTimer)
+    }
   }, [])
   // 切歌时重置 MV 背景状态：上一首的回退/就绪状态都不能泄漏到下一首。
   useEffect(() => {
@@ -2191,6 +2276,8 @@ function App() {
     return lyrics.find(hasVisibleContent) || null
   }, [currentLyricIndex, currentLyricLine, lyrics])
   const desktopLyrics = useMemo(() => buildDesktopLyricsWithInterludes(lyrics), [lyrics])
+  // 学歌插件的可唱行视图（过滤间奏/元数据行；与 canonical 同源，行对象引用不变）
+  const singableLyrics = useMemo(() => selectSingableLines(lyrics), [lyrics])
   const playbackLyricsRef = useRef(lyrics)
   const playbackDesktopLyricsRef = useRef(desktopLyrics)
   const playbackLyricOffsetRef = useRef(lyricOffset)
@@ -2302,6 +2389,9 @@ function App() {
       platform === 'apple' ? (localStorage.getItem('appleMusicEnabled') || 'default') : 'non-apple',
       platform === 'apple' ? (localStorage.getItem('appleLyricLang') || 'zh-hans-cn') : '-',
       platform === 'apple' ? (getAppleAuthState().loggedIn ? 'logged-in' : 'logged-out') : '-',
+      // storefront（Apple 商店区域）进入 key：换区后歌词内容会变，policy 变更事件只清
+      // 内存层不清 IndexedDB——不进 key 会在 30 天缓存里永远命中旧区结果。
+      platform === 'apple' ? (localStorage.getItem('appleStorefront') || 'cn') : '-',
       localStorage.getItem('thirdPartyLyricsEnabled') || 'default',
       localStorage.getItem('adaptiveLyrics') || 'default',
       localStorage.getItem('primaryLyricsSource') || 'AMLL',
@@ -2504,27 +2594,27 @@ function App() {
   
   // 登录状态
   const [neteaseLoggedIn, setNeteaseLoggedIn] = useState(() => Boolean(
-    localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie')
+    getSecureToken('netease_cookie') || getSecureToken('neteaseCookie')
   ))
   const [neteaseUsername, setNeteaseUsername] = useState(() => localStorage.getItem('netease_username') || '')
   const [neteaseAvatar, setNeteaseAvatar] = useState(() => localStorage.getItem('netease_avatar') || '')
   const [neteaseUserId, setNeteaseUserId] = useState(() => localStorage.getItem('netease_user_id') || '')
   const [neteaseVip, setNeteaseVip] = useState(() => localStorage.getItem('netease_vip') === 'true')
   const [_neteaseCookie, setNeteaseCookie] = useState(() => (
-    localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+    getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
   ))
   const [qqLoggedIn, setQQLoggedIn] = useState(() => Boolean(
-    localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || localStorage.getItem('qq_logged_in') === 'true'
+    getSecureToken('qq_cookie') || getSecureToken('qqCookie') || localStorage.getItem('qq_logged_in') === 'true'
   ))
   const [qqUsername, setQQUsername] = useState(() => localStorage.getItem('qq_username') || '')
   const [qqAvatar, setQQAvatar] = useState(() => localStorage.getItem('qq_avatar') || '')
   const [qqUserId, setQQUserId] = useState(() => localStorage.getItem('qq_user_id') || '')
   const [qqVip, setQQVip] = useState(() => localStorage.getItem('qq_vip') === 'true')
   const [_qqCookie, setQQCookie] = useState(() => (
-    localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
+    getSecureToken('qq_cookie') || getSecureToken('qqCookie') || ''
   ))
   // Spotify：OAuth token 登录
-  const [spotifyLoggedIn, setSpotifyLoggedIn] = useState(() => Boolean(localStorage.getItem('spotify_access_token')))
+  const [spotifyLoggedIn, setSpotifyLoggedIn] = useState(() => Boolean(getSecureToken('spotify_access_token')))
   const [spotifyUsername, setSpotifyUsername] = useState(() => localStorage.getItem('spotify_username') || '')
   const [spotifyAvatar, setSpotifyAvatar] = useState(() => localStorage.getItem('spotify_avatar') || '')
   const [spotifyUserId, setSpotifyUserId] = useState(() => localStorage.getItem('spotify_user_id') || '')
@@ -2533,14 +2623,22 @@ function App() {
   ))
   // 酷狗音乐：扫码 cookie 登录（KuGoo 网页会话 或 kg_token 客户端令牌）
   const [kugouLoggedIn, setKugouLoggedIn] = useState(() => {
-    const cookie = localStorage.getItem('kugou_cookie') || ''
-    return Boolean(cookie && (/KuGoo=/.test(cookie) || /KugooID=/.test(cookie) || /kg_token/.test(cookie)))
+    const cookie = getSecureToken('kugou_cookie') || ''
+    if (cookie && (/KuGoo=/.test(cookie) || /KugooID=/.test(cookie) || /kg_token/.test(cookie))) return true
+    // 概念版扫码凭据同样是完整登录态（发现页/歌单/喜欢都走它）：
+    // 只看 kugou_cookie 的话，概念版登录重启后 hydrate 前会被误判为未登录（2026-10-15 审计）
+    try {
+      const concept = localStorage.getItem('kugou_concept_credential') || getSecureToken('kugou_concept_credential')
+      return Boolean(concept && JSON.parse(concept).token && JSON.parse(concept).userid)
+    } catch {
+      return false
+    }
   })
   const [kugouUsername, setKugouUsername] = useState(() => localStorage.getItem('kugou_username') || '')
   const [kugouAvatar, setKugouAvatar] = useState(() => localStorage.getItem('kugou_avatar') || '')
   const [kugouUserId, setKugouUserId] = useState(() => localStorage.getItem('kugou_user_id') || '')
   // 汽水音乐：抖音扫码 token 登录
-  const [sodaLoggedIn, setSodaLoggedIn] = useState(() => Boolean(localStorage.getItem('soda_token')))
+  const [sodaLoggedIn, setSodaLoggedIn] = useState(() => Boolean(getSecureToken('soda_token')))
   const [sodaUsername, setSodaUsername] = useState(() => localStorage.getItem('soda_username') || '')
   const [sodaAvatar, setSodaAvatar] = useState(() => localStorage.getItem('soda_avatar') || '')
   const [sodaUserId, setSodaUserId] = useState(() => localStorage.getItem('soda_user_id') || '')
@@ -2782,14 +2880,20 @@ function App() {
   
   // 调音室音效引擎：通过统一适配层（IAudioEngineAdapter）接入 v1/v2/v3，App 不再直接持有引擎实例。
   // engineAdapterRef 在版本切换时重建（getEngineAdapter(next)）；addToast 注入给 v2 低音量提示。
-  const engineAdapterRef = useRef<IAudioEngineAdapter>(getEngineAdapter(getAudioEngineVersion(getAvailableEngineIds()), {
-    onLowVolumeHint: (msg) => addToast(msg, 'info'),
-  }))
+  // 惰性初始化：useRef 实参每次渲染都会求值（仅首次被采用），直接传 getEngineAdapter()
+  // 会每次渲染新建 V2Adapter（同步 loadSettings + loadMyScenes = 两次 localStorage 读 + JSON.parse）。
+  const engineAdapterRef = useRef<IAudioEngineAdapter | null>(null)
+  if (engineAdapterRef.current === null) {
+    engineAdapterRef.current = getEngineAdapter(getAudioEngineVersion(getAvailableEngineIds()), {
+      onLowVolumeHint: (msg) => addToast(msg, 'info'),
+    })
+  }
   const audioGraphHandleRef = useRef<AudioGraphHandle | null>(null)
 
   // 订阅初始 adapter 的导出状态（若启动时默认 v3，导出按钮需要此状态；切换引擎时在 switchAudioEngine 内重新订阅）
   useEffect(() => {
     const adapter = engineAdapterRef.current
+    if (!adapter) return
     if (!adapter.onExportingChange) return
     return adapter.onExportingChange(setEngineExporting)
   }, [])
@@ -2799,7 +2903,7 @@ function App() {
     // AirPlay 投送：采集点挂在 analyser 之后（取完整混音，含音效）；本机静音用 outputGain
     airplayController.setCaptureSource(handle.audioContext, handle.analyser, handle.outputGain)
     // 统一接入：adapter.attach 内部按版本走 v1/v2 同步或 v3 异步（worklet 注册）
-    void engineAdapterRef.current.attach(handle).catch(() => { /* 通路不可用：保持直连，播放不受影响 */ })
+    engineAdapterRef.current?.attach(handle).catch(() => { /* 通路不可用：保持直连，播放不受影响 */ })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -2811,6 +2915,7 @@ function App() {
   // 系统音量检测：告知引擎频响补偿/等响度补偿（按 capabilities 判断，不再写版本分支）
   useEffect(() => {
     const adapter = engineAdapterRef.current
+    if (!adapter) return
     if (!adapter.capabilities.supportsSystemVolume) return // v1 无此能力，不轮询避免 IPC 空转
     let cancelled = false
     let timer: number | null = null
@@ -2869,6 +2974,7 @@ function App() {
   // 响度归一化：开关在调音室切换时即时应用/回退（按 capabilities 判断，v1/v3 no-op）
   useEffect(() => {
     const adapter = engineAdapterRef.current
+    if (!adapter) return
     if (!adapter.capabilities.supportsLoudnessNormalization) return // v1/v3 无外部归一化（v3 引擎内实时）
     const handleNormalizationChange = (e: Event) => {
       const enabled = (e as CustomEvent).detail === true
@@ -2894,19 +3000,30 @@ function App() {
   }, [])
 
   // 播放器状态监听器
+  /** timeupdate 热路径的 songKey 缓存（歌曲引用 + 索引命中即免重算，见下方回调） */
+  const activeSongKeyCacheRef = useRef<{ song: any; index: number; key: string }>({ song: null, index: -1, key: '' })
   const audioPlayer = useAudioPlayer(
     useCallback((state) => {
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying)
       if (state.currentTime !== undefined) {
         currentTimeRef.current = state.currentTime
         const activeSong = playlistRef.current[currentIndexRef.current]
-        const songKey = activeSong ? bilibiliSongKeyOf({
-          songTitle: activeSong.name,
-          artists: (activeSong.artists || []).map((artist: any) => artist.name),
-          songDuration: (activeSong.duration || 0) / 1000,
-          platform: activeSong.platform,
-          id: activeSong.id || activeSong.mid,
-        }) : ''
+        // songKey 拼装（artists map + 多字段拼接）按歌曲引用缓存：timeupdate ~4Hz 每次
+        // 重算是纯浪费，同一首歌期间结果不变。
+        let songKey: string
+        const keyCache = activeSongKeyCacheRef.current
+        if (activeSong && keyCache.song === activeSong && keyCache.index === currentIndexRef.current) {
+          songKey = keyCache.key
+        } else {
+          songKey = activeSong ? bilibiliSongKeyOf({
+            songTitle: activeSong.name,
+            artists: (activeSong.artists || []).map((artist: any) => artist.name),
+            songDuration: (activeSong.duration || 0) / 1000,
+            platform: activeSong.platform,
+            id: activeSong.id || activeSong.mid,
+          }) : ''
+          activeSongKeyCacheRef.current = { song: activeSong, index: currentIndexRef.current, key: songKey }
+        }
         if (songKey && Number.isFinite(state.currentTime) && state.currentTime > 0) {
           modeHandoffTimeRef.current = { songKey, time: state.currentTime }
         }
@@ -3213,7 +3330,7 @@ function App() {
         handleNextRef.current()
       }
     }
-  }, [duration, upNextTime, upNextEnabled, showUpNext, playMode, deterministicNextIndex, autoMixEnabled, gaplessEnabled, transitionStartTime, canShowUpNextOnCurrentSurface, playlist, handleNextRef, dominantColorRef, autoMixEnhancedTier]),
+  }, [duration, upNextTime, upNextEnabled, showUpNext, playMode, deterministicNextIndex, autoMixEnabled, gaplessEnabled, effectiveAutoMixEnabled, effectiveGaplessEnabled, gameModeEnabled, lyricDisplayMode, transitionStartTime, canShowUpNextOnCurrentSurface, playlist, handleNextRef, dominantColorRef, autoMixEnhancedTier]),
     { enabled: effectiveCrossfadeEnabled, duration: crossfadeDuration },
     { enabled: effectiveGaplessEnabled, albumGapless: albumGaplessEnabled },
     {
@@ -3248,6 +3365,10 @@ function App() {
   // 保持最新 audioPlayer 引用的 ref，供 useCallback 处理器读取，避免处理器身份随渲染变化
   const audioPlayerRef = useRef(audioPlayer)
   audioPlayerRef.current = audioPlayer
+  // 学歌插件的播控桥：handlePlayPause/handleSeek 定义在后面，这里先用空实现占位，
+  // 两个 handler 的 useCallback 之后立刻同步 ref（渲染期同步，时序上先于任何插件调用）
+  const handlePlayPauseRef = useRef<() => void>(() => undefined)
+  const handleSeekRef = useRef<(time: number) => void>(() => undefined)
 
   // 引擎切换（实现放在 audioPlayer 之后，规避 TDZ）：
   // 热切换 = 暂停音乐 → dispose 旧链 → attach 新链 → 恢复播放；
@@ -3268,7 +3389,7 @@ function App() {
     // 换引擎：dispose 旧链（恢复 masterGain→analyser 直连），attach 新链
     const oldAdapter = engineAdapterRef.current
     if (handle) {
-      oldAdapter.dispose()
+      oldAdapter?.dispose()
     }
     // 重建 adapter：新版本实例 + 注入 addToast（v2 低音量提示用）
     const newAdapter = getEngineAdapter(next, { onLowVolumeHint: (msg) => addToast(msg, 'info') })
@@ -3455,6 +3576,31 @@ function App() {
     setChromaPlaybackActive(isPlaying)
     setSignalRgbPlaybackActive(isPlaying)
   }, [isPlaying])
+
+  // 学歌插件：注入正在播放信息（歌曲/歌词/进度/播控）。快照只含面板需要的最小集；
+  // 歌词用 selectSingableLines 过滤后的可唱行（与播放页同一份 canonical 数据）。
+  const playbackTimeStore = audioPlayer.playbackTimeStore
+  useEffect(() => {
+    setNowPlayingTimeStore(playbackTimeStore)
+    return () => setNowPlayingTimeStore(null)
+  }, [playbackTimeStore])
+
+  useEffect(() => {
+    setNowPlayingControls({
+      togglePlay: () => handlePlayPauseRef.current(),
+      seek: (time) => handleSeekRef.current(time),
+    })
+    return () => setNowPlayingControls(null)
+  }, [])
+
+  useEffect(() => {
+    publishNowPlaying({
+      song: currentSong,
+      lyrics: singableLyrics,
+      lyricOffset,
+      isPlaying,
+    })
+  }, [currentSong, singableLyrics, lyricOffset, isPlaying])
   
   // 监听封面律动设置变化
   useEffect(() => {
@@ -3520,6 +3666,10 @@ function App() {
       }
         if ((normalizedSong.platform || 'netease') === 'qq' && !normalizedSong.album?.picUrl) {
           normalizedSong = await loadQQSongDetail(normalizedSong)
+          // 与主播放路径一致：补全的封面广播回列表页（gapless 切歌路径）
+          if (normalizedSong.album?.picUrl) {
+            window.dispatchEvent(new CustomEvent('waveforge-qq-cover-backfilled', { detail: { song: normalizedSong } }))
+          }
         }
         
         // 接管预加载的音频元素
@@ -3559,7 +3709,7 @@ function App() {
 
         // Every seamless handoff becomes the new queue anchor. Prepare its
         // successor immediately so transitions remain continuous across tracks.
-        window.setTimeout(() => preloadUpcomingSongs(index, nextRevision), 0)
+        scheduleDeferred(() => preloadUpcomingSongs(index, nextRevision), 0)
         
         return true
       }
@@ -3799,9 +3949,11 @@ function App() {
   
   // 监听视图模式变化
   useEffect(() => {
-    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance') => {
-      // TV 效能档无桌面模式：遥控器/远程/恢复路径都不会进入桌面（模式卡片也已隐藏）
-      if (isTv() && isPerfModeEfficiency() && mode === 'desktop') mode = 'minimal'
+    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong') => {
+      // TV 效能档无桌面模式：遥控器/远程/恢复路径都不会进入桌面（模式卡片也已隐藏）。
+      // 用 isTvModeActive()（html.tv-mode）而不是 isTv()：?tv=1 模拟 TV 时门控也要生效，
+      // 否则 PC 模拟测试与真机行为不一致（isTv() 在 PC 上恒 false）。
+      if (isTvModeActive() && isPerfModeEfficiency() && mode === 'desktop') mode = 'minimal'
       // 记下「进共振之前是什么模式」：下次启动停在共振也能回到原来的模式
       if (mode === 'resonance') {
         rememberResonanceEntryMode(viewModeRef.current)
@@ -3811,8 +3963,8 @@ function App() {
         setResonanceSuspended(false)
       }
       setViewMode(mode)
-      // 共振不作为启动后的持久目标；离开后记录普通模式，下次启动回到它
-      if (mode !== 'resonance') localStorage.setItem('viewMode', mode)
+      // 共振/学歌不作为启动后的持久目标；离开后记录普通模式，下次启动回到它
+      if (mode !== 'resonance' && mode !== 'singalong') localStorage.setItem('viewMode', mode)
       setEnteredFromMode(mode)
       // 壁纸监控按需启停（桌面模式 + 联动开启才启动）
       syncWallpaperWatcher(mode)
@@ -3843,11 +3995,15 @@ function App() {
     syncWallpaperWatcher(viewMode)
 
     const handleViewModeChange = (e: Event) => {
-      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
-      // 共振是插件功能：插件没启用时不该能进这个模式（按钮/卡片/遥控器/注入事件都得拦住）。
+      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
+      // 共振/学歌是插件功能：插件没启用时不该能进这个模式（按钮/卡片/遥控器/注入事件都得拦住）。
       // 插件中心里已经有「启用」开关，这里做最后一道闸，避免绕过界面直接切进去。
       if (mode === 'resonance' && !isPluginEnabled('resonance')) {
-        addToast('「共振 · 一起听」插件未启用，请先在插件中心打开', 'info')
+        addToast('「共振 · 一起听」插件未启用：请先在插件中心打开，然后从**顶部模式选择**切换', 'info')
+        return
+      }
+      if (mode === 'singalong' && !isPluginEnabled('sing-along')) {
+        addToast('「学歌」插件未启用：请先在插件中心打开，然后从**顶部模式选择**切换', 'info')
         return
       }
       // 房间里还有人 + 要切去别的模式 → 先问「挂起还是退出」，不能一声不响把房间丢了
@@ -3875,6 +4031,9 @@ function App() {
       // 已显示则保留原有 startedAt，不重置最短时长）。模式卡片路径已在 viewModeTransitionStart
       // 里提前预加载 chunk + 盖上动画，这里通常只是兜底（遥控器/远程等直接派发 viewModeChanged 的入口）。
       // 暖目标同样出（快速窗口）——简易风格也靠这里补上动画，不再"只有复杂才有过渡"。
+      // 注：模式卡片 380ms 延迟 timer 携带的旧目标到达时同样会走这里并自增 revision，
+      // 此处的守卫只能防"同目标重复重置"，防不了过期目标（revision 恒为最新）——
+      // 要根治需在派发源头（各视图的 switchMode）加目标一致性检查。
       if (mode !== viewModeRef.current && modeTransitionRef.current?.to !== mode) {
         setModeTransition({ to: mode, startedAt: performance.now(), ready: false, quick: warmTarget })
       }
@@ -3918,7 +4077,7 @@ function App() {
     // 再经 viewModeChanged 真正切换——动画从头盖到尾，来源内容不会以展开态残留成顶部占位
     const handleTransitionStart = (e: Event) => {
       const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop'
-      if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance'].includes(mode)) return
+      if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance', 'singalong'].includes(mode)) return
       const complexStyle = modeTransitionStyleRef.current === 'complex'
       const warmTarget = visitedModesRef.current.has(mode)
       // ★ 复杂转场的预加载前移：动画一开始就拉目标模式的 chunk（import 天然幂等，重复调用零开销），
@@ -4680,6 +4839,9 @@ function App() {
   // 歌单详情会话缓存：关→再进同一歌单秒回（冻结约定），不再全量重拉。
   // 短 TTL 避免服务端歌单更新后长时间陈旧；容量封顶防极端浏览堆积。
   const playlistDetailCacheRef = useRef(new Map<string, { at: number; payload: { playlist: any; songs: Song[] } }>())
+  // 请求代次：连续打开两个歌单时（搜索面板快速连点），先发出的请求后返回会把
+  // 当前显示的歌单覆盖成旧的——apply 前校验"仍是最新一次请求"。
+  const playlistDetailRequestSeqRef = useRef(0)
   const handleOpenPlaylistFromDetail = async (playlistId: string, platform: MusicPlatform) => {
     const cacheKey = `${platform}:${playlistId}`
     const cached = playlistDetailCacheRef.current.get(cacheKey)
@@ -4688,9 +4850,11 @@ function App() {
       setDetailPlaylistOpen(true)
       return
     }
+    const requestSeq = ++playlistDetailRequestSeqRef.current
     setDetailPlaylistLoading(true)
     try {
       const data = await getPlaylistDetail(playlistId, platform)
+      if (requestSeq !== playlistDetailRequestSeqRef.current) return
       const songs = data?.songs || data?.songlist || data?.playlist?.tracks || data?.tracks || []
       const payload = { playlist: data?.playlist || { id: playlistId, platform, name: '歌单' }, songs }
       const cache = playlistDetailCacheRef.current
@@ -4702,10 +4866,11 @@ function App() {
       setDetailPlaylist(payload)
       setDetailPlaylistOpen(true)
     } catch {
+      if (requestSeq !== playlistDetailRequestSeqRef.current) return
       closeDetailPlaylistImmediate()
       addToast('歌单加载失败，请稍后重试', 'error')
     } finally {
-      setDetailPlaylistLoading(false)
+      if (requestSeq === playlistDetailRequestSeqRef.current) setDetailPlaylistLoading(false)
     }
   }
   // 评论弹窗：memo(CommentModal) 配套稳定回调（声明在 handleOpenPlaylistFromDetail 之后，避免 TDZ）
@@ -4713,6 +4878,43 @@ function App() {
   commentOpenPlaylistRef.current = handleOpenPlaylistFromDetail
   const commentOpenPlaylistStable = useCallback((playlist: { id: string; platform?: MusicPlatform }) => {
     void commentOpenPlaylistRef.current(playlist.id, playlist.platform || 'netease')
+  }, [])
+
+  // 歌曲详情弹窗（memo(SongDetailModal)，冻结常驻挂载）配套稳定回调：
+  // 播放中 App 约 1Hz 重渲染，内联箭头函数会让 memo 逐秒失效（含隐藏时的 null 渲染路径）。
+  // handleOpenPlaylistFromDetail 定义在上方（可直接引用）；handleOpenAlbum/Artist 定义在
+  // 下方 4900+ 行（TDZ），走 lateRef 回填模式：先建空壳回调，定义点之后再回填最新闭包。
+  const songDetailOpenPlaylistRef = useRef(handleOpenPlaylistFromDetail)
+  songDetailOpenPlaylistRef.current = handleOpenPlaylistFromDetail
+  const songDetailOpenPlaylistStable = useCallback((playlistId: string, platform: 'netease' | 'qq') => {
+    void songDetailOpenPlaylistRef.current(playlistId, platform)
+  }, [])
+  const songDetailAlbumLateRef = useRef<((albumId: string, platform: 'apple') => void) | null>(null)
+  const songDetailOpenAlbumStable = useCallback((albumId: string, platform: 'apple') => {
+    songDetailAlbumLateRef.current?.(albumId, platform)
+  }, [])
+  const songDetailArtistLateRef = useRef<((artistId: string, platform: MusicPlatform) => void) | null>(null)
+  const songDetailOpenArtistStable = useCallback((artistId: string, platform: MusicPlatform) => {
+    songDetailArtistLateRef.current?.(artistId, platform)
+  }, [])
+  // 歌单详情面板（memo(PlaylistDetailPanel)，冻结常驻）的 onSongSelect 同理收敛为稳定引用；
+  // detailPlaylist 经 ref 取最新值，回调本身零依赖。
+  const detailPlaylistSelectRef = useRef<(song: Song, songs: Song[]) => void>(() => {})
+  const detailPlaylistSelectStable = useCallback((song: Song, songs: Song[]) => {
+    detailPlaylistSelectRef.current(song, songs)
+  }, [])
+  // 「查看演唱歌手/专辑」同为播放页常驻弹窗回调：latest-ref 稳定引用。
+  // 注意：handlePlaybackViewArtist/Album 定义在下方 8800 行附近（TDZ），这里只能先建空 ref、
+  // 首帧后再回填（ref 初始化器不会在 undefined 上崩，回填赋值在定义点之后执行）。
+  const playbackViewArtistRef = useRef<(song: Song) => void>((song) => { playbackViewArtistStableLateRef.current?.(song) })
+  const playbackViewArtistStableLateRef = useRef<((song: Song) => void) | null>(null)
+  const playbackViewArtistStable = useCallback((song: Song) => {
+    playbackViewArtistRef.current(song)
+  }, [])
+  const playbackViewAlbumRef = useRef<(song: Song) => void>((song) => { playbackViewAlbumStableLateRef.current?.(song) })
+  const playbackViewAlbumStableLateRef = useRef<((song: Song) => void) | null>(null)
+  const playbackViewAlbumStable = useCallback((song: Song) => {
+    playbackViewAlbumRef.current(song)
   }, [])
 
   // 处理歌曲选择
@@ -4827,7 +5029,7 @@ function App() {
     // viewMode 覆写成 minimal——与 docs/resonance-design.md「共振页内不切走播放页」相悖。
     // 桌面模式同理原地播放：点歌只弹桌面迷你播放器，绝不抢整个窗口进播放页
     // （抢切会把 viewMode 持久化成 minimal，之后不管从哪切回桌面都会再被拽进播放页）。
-    const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore' || originMode === 'resonance' || originMode === 'desktop')
+    const playsInPlace = !isRadioSelection && (originMode === 'traditional' || originMode === 'explore' || originMode === 'resonance' || originMode === 'desktop' || originMode === 'singalong')
     // 电台从探索页点播：探索页（含电台弹窗）保持挂载，播放页以覆盖层打开，返回时原样呈现弹窗
     const exploreRadioOverlay = isRadioSelection && originMode === 'explore'
     setEnteredFromMode(originMode)
@@ -4936,6 +5138,9 @@ function App() {
     setSelectedAlbumPlatform(platform)
     setShowAlbumDetail(true)
   }
+  // 定义点回填 4733 附近（TDZ 规避）的 late-ref：此后每次渲染都指向最新闭包
+  songDetailArtistLateRef.current = (artistId, platform) => handleOpenArtist(artistId, platform)
+  songDetailAlbumLateRef.current = (albumId, platform) => handleOpenAlbum(albumId, platform)
 
   const handlePlayerHome = () => {
     const origin = playbackOriginRef.current
@@ -5018,6 +5223,15 @@ function App() {
     if (playlist.length === 0 || prependInstead) {
       currentIndexRef.current = 0
       setCurrentIndex(0)
+    }
+
+    // 插入目标在「未播区」时引擎可能已按旧顺序预载/武装过渡（standby 已被 cancelTransition
+    // 清空且不重建）——与 handleDesktopQueueRemove/Move 同款收尾：按新队列重预载「下一首」，
+    // 否则当前歌自然播完时 gapless/AutoMix/交叉淡化整段失效（走 idle 完整加载 = 1-2s 静音缝）。
+    const insertAffectsUpcoming = playlist.length > 0 && !prependInstead && insertAt > currentIndexRef.current
+    if (insertAffectsUpcoming) {
+      const nextRevision = bumpQueueRevision()
+      window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, nextRevision, playMode), 0)
     }
 
     // 显示全局消息提示
@@ -5539,7 +5753,7 @@ function App() {
           })
         if (additions.length === 0) {
           continuation.lastQueueLength = 0
-          window.setTimeout(() => setContinuationRetry(value => value + 1), 800)
+          scheduleDeferred(() => setContinuationRetry(value => value + 1), 800)
           return
         }
 
@@ -5560,7 +5774,7 @@ function App() {
         currentIndexRef.current = currentIndexInNewQueue
         setPlaylist(nextQueue)
         setCurrentIndex(currentIndexInNewQueue)
-        window.setTimeout(() => {
+        scheduleDeferred(() => {
           preloadUpcomingSongs(currentIndexInNewQueue, nextRevision, playMode, nextQueue)
           // 仅当等待期间没有新加载（用户没手动选歌）且仍在续播上下文时才自动续播
           if (shouldAdvance && songLoadRevisionRef.current === loadRevisionAtRequest
@@ -5576,7 +5790,7 @@ function App() {
         continuation.lastQueueLength = 0
         // 连播电台创建失败后放弃该上下文的自动连播（避免每次到队尾都重试失败请求）
         if (appleAutoplayActive) appleAutoplayRef.current = { seedKey: appleAutoplayRef.current.seedKey, stationId: undefined, disabled: true }
-        window.setTimeout(() => setContinuationRetry(value => value + 1), 1200)
+        scheduleDeferred(() => setContinuationRetry(value => value + 1), 1200)
         console.warn(`[${appleAutoplayActive ? 'Apple自动连播' : continuationPlatform === 'qq' ? 'QQ猜你喜欢' : '网易云无限推荐'}] 下一批加载失败:`, error)
       })
       .finally(() => {
@@ -5720,7 +5934,7 @@ function App() {
       setPlaylist(nextPlaylist)
       if (playMode !== 'sequential') setPlayMode('sequential')
       if (currentIndex >= 0) {
-        window.setTimeout(() => preloadUpcomingSongs(currentIndex, nextRevision, 'sequential', nextPlaylist), 0)
+        scheduleDeferred(() => preloadUpcomingSongs(currentIndex, nextRevision, 'sequential', nextPlaylist), 0)
       }
 
       const reduction = result.originalCost > 1e-6
@@ -5862,11 +6076,11 @@ function App() {
     }
     void ensureSongLyrics(normalizedSong, cacheKey)
 
-    window.setTimeout(() => {
+    scheduleDeferred(() => {
       if (appleAcceptanceActiveRef.current) return
       preloadUpcomingSongs(targetIndex, nextRevision)
     }, 0)
-  }, [bumpQueueRevision, playlist, preloadUpcomingSongs, ensureSongLyrics, resolveAppleCover, addToast])
+  }, [bumpQueueRevision, playlist, preloadUpcomingSongs, ensureSongLyrics, resolveAppleCover, addToast, scheduleDeferred])
 
   useEffect(() => {
     // 提交分发：视觉预切换（isVisualSwitch）走纯展示的 applyVisualSwitch，
@@ -5895,6 +6109,13 @@ function App() {
           const loadRevision = songLoadRevisionRef.current + 1
           songLoadRevisionRef.current = loadRevision
           const isLatestLoad = () => loadRevision === songLoadRevisionRef.current
+    // 无限队列裁剪/异步渲染竞态下索引可能指向 undefined（handleNext 闭包还是旧帧），
+    // song.name 直接 TypeError 被吞成"加载失败"——入口先挡掉。
+    if (!song) {
+      debugLog('🎵 [PlaySong] song 为空（队列已裁剪/竞态），忽略本次加载')
+      resolve()
+      return
+    }
     const actualPlaylist = playlistOverride || playlist
     debugLog('🎵 [PlaySong] loadAndPlaySong 被调用')
     debugLog('   歌曲:', song.name)
@@ -6067,7 +6288,7 @@ function App() {
         if (!resolved) {
           window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: '该歌曲在网易云/QQ 未找到可播放版本', type: 'error' } }))
           const failedLoadRevision = loadRevision
-          setTimeout(() => {
+          scheduleDeferred(() => {
             if (failedLoadRevision !== songLoadRevisionRef.current) return
             handleNext()
           }, 2000)
@@ -6081,9 +6302,24 @@ function App() {
         }
       }
       if ((normalizedSong.platform || 'netease') === 'qq' && !normalizedSong.album?.picUrl) {
-        normalizedSong = await loadQQSongDetail(normalizedSong)
-        if (!isLatestLoad()) return
-        setPlaylist(prev => prev.map(item => getSongKey(item) === getSongKey(normalizedSong) ? normalizedSong : item))
+        // 封面补全与后续取流**并行**：loadQQSongDetail 只补 album 图（列表图缺失时），
+        // 串行 await 会把它的耗时（0.2-2s）全额加进点歌→出声延迟。歌词页/封面先渲染
+        // 本地已有的歌名/占位，detail 回来后再回填封面。
+        const detailPromise = loadQQSongDetail(normalizedSong)
+          .then(detailed => {
+            if (!isLatestLoad()) return song
+            setPlaylist(prev => prev.map(item => getSongKey(item) === getSongKey(detailed) ? detailed : item))
+            // 补全结果广播给列表页回写缓存：否则封面只进播放队列，
+            // 「我喜欢」等列表行仍是 No Cover（列表数据源不经过 setPlaylist）。
+            if (detailed.album?.picUrl) {
+              normalizedSong = detailed
+              setCurrentTrack(createTrackFromSong(detailed))
+              window.dispatchEvent(new CustomEvent('waveforge-qq-cover-backfilled', { detail: { song: detailed } }))
+            }
+            return detailed
+          })
+          .catch(() => song)
+        void detailPromise
       }
       // 清空当前翻译（切歌时）
       setCurrentTranslation('')
@@ -6102,14 +6338,23 @@ function App() {
       }
       debugLog(`  歌手: ${normalizedSong.artists.map(a => a.name).join(', ')}`)
       if (platform === 'qq') {
-        const cookie = localStorage.getItem('qq_cookie')
+        const cookie = getSecureToken('qq_cookie')
         debugLog(`  Cookie状态: ${cookie ? '有效(长度:' + cookie.length + ')' : '无效'}`)
       }
       const coverUrl = normalizedSong.album?.picUrl || ''
-      setCurrentTrack(createTrackFromSong(normalizedSong))
+      // UI 即时切换（不等取流）：歌名/封面/时间线在此提交，音频 URL 获取（0.5-6s）期间
+      // 用户看到的是新歌信息 + 旧背景，而不是整屏旧歌（旧实现 setCurrentTrack 与取流
+      // 一起被 startTransition 推迟提交，网络慢时旧封面/旧歌名残留 2-3s）。
+      // 时间轴归零提前到取流前：避免取流期间进度条还按旧歌位置走。
+      // 注意：本函数整体在 startTransition 内，transition 里的 setState 会被推迟到
+      // async 流程结束才 commit——必须用 flushSync 强制同步提交，否则"提前"只是形同虚设
+      //（取流期间封面/背景兜底层仍显示上一曲，用户实测残留 2-3s）。
+      flushSync(() => {
+        setCurrentTrack(createTrackFromSong(normalizedSong))
+        // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面
+        setAppleCoverUrl(null)
+      })
       commitCurrentTime(0)
-      // Apple Music：切歌即清封面，后台匹配命中后替换为高清封面
-      setAppleCoverUrl(null)
       if (!radioDescriptor) resolveAppleCover(normalizedSong)
       
       // 如果有艺人ID，获取艺人详情
@@ -6169,13 +6414,14 @@ function App() {
       }
       
       
-      // 检测歌曲下架
+      // 防御性哨兵分支：当前 local-server 各 URL 路由失败时返回 403+reason 而非该哨兵
+      //（全仓无生产者），保留是防上游语义回归；命中即提示并自动切下一首。
       if (!useWebView2 && url === 'SONG_UNAVAILABLE') {
-        console.error('获取歌曲URL失败，重试3次')
+        console.error('获取歌曲URL失败（SONG_UNAVAILABLE 哨兵）')
         addToast('获取歌曲信息失败，请稍后重试', 'error')
         // 捕获本次加载的 revision：3 秒后重试前校验用户是否已手动切歌，避免迟到跳歌
         const failedLoadRevision = loadRevision
-        setTimeout(() => {
+        scheduleDeferred(() => {
           if (failedLoadRevision !== songLoadRevisionRef.current) return
           handleNext()
         }, 3000)
@@ -6338,6 +6584,10 @@ function App() {
           const engineEl = audioPlayerRef.current?.getAudioElement?.()
           if (engineEl) { engineEl.volume = 0; engineEl.pause() }
           watchPausedEngineRef.current = true
+          // 看歌模式下切歌：旧视频的时间轴（time/对齐偏移/验证态）属于上一首歌，
+          // 不重置会让歌词/进度条/任务栏继续按旧 MV 进度显示。归零后由看歌播放器
+          // 对新歌重新对齐（onVideoStateChange 会再次上报 alignmentVerified）。
+          setWatchVideoState({ playing: false, time: 0, duration: (normalizedSong.duration || 0) / 1000, volume, alignmentOffset: 0, alignmentVerified: false })
         }
       } catch (firstPlaybackError) {
         if (!isLatestLoad()) return
@@ -6440,6 +6690,8 @@ function App() {
           const engineEl = audioPlayerRef.current?.getAudioElement?.()
           if (engineEl) { engineEl.volume = 0; engineEl.pause() }
           watchPausedEngineRef.current = true
+          // 看歌模式下切歌：旧视频时间轴属于上一首歌，归零后由看歌播放器对新歌重新对齐
+          setWatchVideoState({ playing: false, time: 0, duration: (normalizedSong.duration || 0) / 1000, volume, alignmentOffset: 0, alignmentVerified: false })
         }
       } // ← closes catch
       } // ← closes else
@@ -6454,7 +6706,7 @@ function App() {
       
       // 响度归一化：按曲目测量 LUFS 并施加增益（adapter 内部按 capabilities 判断，v1/v3 no-op）
       // WebView2 播放面模式无本地音频链路，跳过
-      if (!radioDescriptor && !useWebView2) engineAdapterRef.current.applyLoudnessNormalization(cacheKey, url!)
+      if (!radioDescriptor && !useWebView2) engineAdapterRef.current?.applyLoudnessNormalization(cacheKey, url!)
       
       // 请求可能已经由下一首预载启动；这里仅保持引用，避免重复调用。
       void lyricsPromise
@@ -6478,7 +6730,8 @@ function App() {
     } catch (error) {
       if (!isLatestLoad()) return
       console.error('加载歌曲失败:', error)
-      alert('加载歌曲失败')
+      // 原生 alert 是全应用唯一阻塞式弹窗（网络抖动时挡住渲染进程），统一走 toast 体系
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '加载歌曲失败，请重试', type: 'error' } }))
     }
         } finally {
           resolve() // 无论是成功、提前 return 还是报错，都确保调用方 await 能继续
@@ -6489,19 +6742,21 @@ function App() {
 
   // 上一曲
   const handlePrevious = () => {
-    if (playlist.length === 0 || currentSong?.appleRadio) return
+    // 与 handleNext 同理：从 playlistRef 取队列，防裁剪/异步渲染竞态下索引越界
+    const livePlaylist = playlistRef.current
+    if (livePlaylist.length === 0 || currentSong?.appleRadio) return
     // 共振房间里没有「上一曲」语义（队列由房主向前推进）：与媒体键/遥控器的处理保持一致。
     // 房间里本机列表被压成单曲，走本机逻辑只会在那一首上回绕。
     if (isResonanceHost()) return
     audioPlayer.cancelTransition('manual previous', false)
     audioPlayer.resetGaplessIntegration() // 清理预加载的音频
     bumpQueueRevision()
-    
+
     // 如果当前有歌曲正在播放且播放列表不为空
-    const newIndex = currentIndexRef.current > 0 ? currentIndexRef.current - 1 : playlist.length - 1
-    if (gaplessEnabled && playlist[newIndex]) {
+    const newIndex = currentIndexRef.current > 0 ? currentIndexRef.current - 1 : livePlaylist.length - 1
+    if (gaplessEnabled && livePlaylist[newIndex]) {
       setIsTransitioning(true)
-      
+
       // 1.5秒后重置过渡状态（统一跟踪定时器，快速连切时旧定时器先取消）
       clearTransitionResetTimer()
       transitionResetTimerRef.current = window.setTimeout(() => {
@@ -6509,14 +6764,14 @@ function App() {
         setIsTransitioning(false)
       }, 1500)
     }
-    
+
     // 如果是第一首歌，循环到最后一首
     commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态?
     currentIndexRef.current = newIndex
     setCurrentIndex(newIndex)
-    loadAndPlaySong(playlist[newIndex], newIndex)
+    loadAndPlaySong(livePlaylist[newIndex], newIndex, livePlaylist)
   }
 
   // 下一曲
@@ -6548,12 +6803,17 @@ function App() {
     audioPlayer.resetGaplessIntegration() // 清理预加载的音频
     bumpQueueRevision()
     
-    const newIndex = deterministicNextIndex ?? (currentIndexRef.current < playlist.length - 1 ? currentIndexRef.current + 1 : 0)
-    
+    // 从 playlistRef 取当前队列：deterministicNextIndex 基于渲染态 playlist 计算，
+    // 无限探索队列的"续载批次落库 + 裁剪"与切键同帧竞争时，本帧闭包的 playlist 可能
+    // 已偏移（trimmedPrefix 前移），playlist[newIndex] 为 undefined → loadAndPlaySong
+    // TypeError → 吞成"加载歌曲失败"。ref 是唯一事实源（1269-1275 行同步维护）。
+    const livePlaylist = playlistRef.current
+    const newIndex = deterministicNextIndex ?? (currentIndexRef.current < livePlaylist.length - 1 ? currentIndexRef.current + 1 : 0)
+
     // 如果当前有歌曲正在播放且播放列表不为空
-    if (gaplessEnabled && playlist[newIndex]) {
+    if (gaplessEnabled && livePlaylist[newIndex]) {
       setIsTransitioning(true)
-      
+
       // 1.5秒后重置过渡状态（统一跟踪定时器，快速连切时旧定时器先取消）
       clearTransitionResetTimer()
       transitionResetTimerRef.current = window.setTimeout(() => {
@@ -6561,18 +6821,30 @@ function App() {
         setIsTransitioning(false)
       }, 1500)
     }
-    
+
     // 清空当前时间和歌词
     commitCurrentTime(0)
     setLyrics([])
     setIsPureMusic(false) // 重置纯音乐状态
     currentIndexRef.current = newIndex
     setCurrentIndex(newIndex)
-    loadAndPlaySong(playlist[newIndex], newIndex)
+    loadAndPlaySong(livePlaylist[newIndex], newIndex, livePlaylist)
   }
   handleNextRef.current = handleNext
   const handleSongSelectRef = useRef(handleSongSelect)
   handleSongSelectRef.current = handleSongSelect
+  // 歌单详情面板（memo(PlaylistDetailPanel)，冻结常驻）onSongSelect 的 latest-ref 回填：
+  // 选歌后关闭歌单详情面板（避免盖在播放页上），并记录歌单来源，
+  // home 返回时经 HomeView 恢复同一歌单并自动定位当前歌曲
+  detailPlaylistSelectRef.current = (song, songs) => {
+    closeDetailPlaylistImmediate()
+    if (!detailPlaylist) return
+    void handleSongSelect(song, songs, {
+      surface: 'home-playlist',
+      playlist: detailPlaylist.playlist,
+      songs,
+    })
+  }
 
   useEffect(() => {
     if (new URLSearchParams(window.location.search).get('appleAcceptance') !== '1') return
@@ -6736,8 +7008,9 @@ function App() {
     if (deterministicNextIndex === undefined) return undefined
     return playlist[deterministicNextIndex]
   }, [playlist, deterministicNextIndex])
-  // modern 等流式播放页的过渡徽标倒计时：与 ModengPlayerPage 同一 playbackTimeStore 订阅
-  const automixHudTime = useAutomixHudTime(audioPlayer.playbackTimeStore)
+  // modern 等流式播放页的过渡徽标倒计时：徽标内部订阅 playbackTimeStore（AutomixHudBadge
+  // 的 playbackTimeStore prop）——此前 App 层 useAutomixHudTime 会把整个 App 树钉在 4Hz
+  // 全树 reconcile（播放全程恒定开销，与 HUD 是否显示无关），下沉后重渲染只发生在徽标子树。
   const foliaPresentation = resolveFoliaPresentation({
     isPlaybackPage,
     lyricMode: lyricDisplayMode,
@@ -6841,11 +7114,22 @@ function App() {
     }
     return el
   }, [])
+  // 个人中心「收藏 MV」卡片点击 → 打开 MVExploreModal 直接播放（play-mv 总线事件历史上无订阅方）
+  useEffect(() => {
+    const onPlayMv = (e: Event) => {
+      const detail = (e as CustomEvent<{ id: string | number; platform: 'netease' }>).detail
+      if (detail?.id) setMvDirectPlay({ id: String(detail.id), platform: detail.platform || 'netease' })
+    }
+    window.addEventListener('play-mv', onPlayMv)
+    return () => window.removeEventListener('play-mv', onPlayMv)
+  }, [])
   const handleMvBackgroundPlayStateChange = useCallback((s: { songKey: string; bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number } | null) => {
     // null = MV 背景已卸载/切歌/失败：清空复用缓存，避免切看歌时用上过期视频
     mvBackgroundStateRef.current = s ? { songKey: s.songKey, bvid: s.bvid, cid: s.cid, videoUrl: s.videoUrl, cacheKey: s.cacheKey, type: s.type } : null
   }, [])
   const [watchInitialVideo, setWatchInitialVideo] = useState<SongOwnedHandoff<{ bvid: string; cid: number; videoUrl: string; cacheKey: string; type?: string; currentTime: number }> | null>(null)
+  // 个人中心「收藏 MV」直接播放：MVExploreModal directPlay 模式
+  const [mvDirectPlay, setMvDirectPlay] = useState<{ id: string; platform: 'netease' } | null>(null)
   /** HTMLAudioElement 音量渐变（等功率线性，避免双声爆音） */
   const fadeElementVolume = (el: HTMLAudioElement | null | undefined, from: number, to: number, ms: number): Promise<void> =>
     new Promise((resolve) => {
@@ -6886,6 +7170,7 @@ function App() {
     }
     audioPlayerRef.current.togglePlay()
   }, [lyricDisplayMode])
+  handlePlayPauseRef.current = handlePlayPause
 
   useEffect(() => {
     if (lyricDisplayMode !== 'video') {
@@ -7262,7 +7547,10 @@ function App() {
     } else if (action === 'desktop-lyrics') {
       void window.electron?.desktopLyrics?.setEnabled?.(!desktopLyricsWindowEnabled)
     } else if (action === 'mode-switch') {
+      // TV 效能档没有桌面模式（handleViewModeChange 会强制 minimal），循环里直接跳过，
+      // 否则遥控器切到 desktop 又被弹回 minimal，等于这一档"卡住"
       const order = ['explore', 'minimal', 'traditional', 'desktop', 'resonance']
+        .filter(mode => mode !== 'desktop' || !(isTvModeActive() && isPerfModeEfficiency()))
       const idx = order.indexOf(viewMode)
       const next = order[(idx + 1) % order.length]
       window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: next }))
@@ -7357,6 +7645,7 @@ function App() {
   // IPC 推送变化去重：记录上次推送的进度与频谱，避免 10Hz tick 无变化也扇出
   const desktopSpectrumLastPushProgressRef = useRef(-1)
   const desktopSpectrumLastPushSpectrumRef = useRef<number[]>(Array(5).fill(0))
+  const desktopSpectrumLastPushAtRef = useRef(0)
 
   useEffect(() => {
     const bridge = window.electron?.desktopPlayer
@@ -7804,6 +8093,8 @@ function App() {
     window.electron?.desktopPlayer?.pushState({ accentColor: coverPalette[0] || dominantColor })
   }, [coverPalette, dominantColor])
 
+  // 队列列表与播放索引拆成两条推送：列表只在 playlist 引用变化时重发（无限推荐每 +30 首
+  // 都要重序列化 500 条 —— 切歌不该为此买单），索引变化只推轻量的 currentIndex。
   useEffect(() => {
     window.electron?.desktopPlayer?.pushState({
       playlist: playlist.slice(0, 500).map((song: any, index: number) => ({
@@ -7813,9 +8104,12 @@ function App() {
           ? song.artists.map((artist: any) => artist?.name).filter(Boolean).join(' / ')
           : '',
       })),
-      currentIndex,
     })
-  }, [playlist, currentIndex])
+  }, [playlist])
+
+  useEffect(() => {
+    window.electron?.desktopPlayer?.pushState({ currentIndex })
+  }, [currentIndex])
 
   useEffect(() => {
     let timer: number | null = null
@@ -7913,10 +8207,15 @@ function App() {
           ? (watchVideoStateRef.current?.time || 0)
           : (audioPlayer.isExternalPlaybackActive?.()
               ? (getBridgeState().position || 0)
-              : (Number(audio?.currentTime) || 0)) + lyricOffsetRef.current - 0.2
+              : (Number(audio?.currentTime) || 0)) - 0.2
         const progressChanged = Math.abs(progressNow - desktopSpectrumLastPushProgressRef.current) >= 0.5
         const spectrumChanged = compactSpectrum.some((value, index) => Math.abs(value - desktopSpectrumLastPushSpectrumRef.current[index]) > 0.03)
-        if (progressChanged || spectrumChanged) {
+        // 频谱维度恒变 → 去重对它形同虚设（实际恒定 10Hz × 消费者数扇出）。
+        // 频谱推送自身加 150ms 节流下限（≈6.7Hz）：桌面小窗/歌词岛的频谱条对 >7Hz
+        // 无可感知差异，进度跳变仍走 progressChanged 立即通道不受影响。
+        const spectrumThrottleOk = !spectrumChanged || (Date.now() - desktopSpectrumLastPushAtRef.current >= 150)
+        if ((progressChanged || spectrumChanged) && (progressChanged || spectrumThrottleOk)) {
+          desktopSpectrumLastPushAtRef.current = Date.now()
           desktopSpectrumLastPushProgressRef.current = progressNow
           desktopSpectrumLastPushSpectrumRef.current = Array.from(compactSpectrum)
           if (watchTimelineActiveRef.current) {
@@ -7988,7 +8287,7 @@ function App() {
         const s = getBridgeState()
         if (!s.playing) return
         window.electron?.desktopPlayer?.pushState({
-          progress: (s.position || 0) + lyricOffsetRef.current - 0.2,
+          progress: (s.position || 0) - 0.2,
           duration: s.duration || 0,
         })
         return
@@ -7996,7 +8295,7 @@ function App() {
       const audio = audioPlayer.getAudioElement()
       if (!audio || audio.paused) return
       window.electron?.desktopPlayer?.pushState({
-        progress: (Number(audio.currentTime) || 0) + lyricOffsetRef.current - 0.2,
+        progress: (Number(audio.currentTime) || 0) - 0.2,
         duration: Number.isFinite(audio.duration) && (audio.duration ?? 0) > 0 ? audio.duration : 0,
       })
     }, intervalMs)
@@ -8011,20 +8310,24 @@ function App() {
     }
     audioPlayerRef.current.seek(time)
   }, [lyricDisplayMode])
+  handleSeekRef.current = handleSeek
 
   const handleVolumeChange = useCallback((newVolume: number) => {
     // AirPlay 投送中：音量按钮控制音箱音量（本机输出已静音），同时更新音量条显示
     if (airplayStreamingRef.current) {
       setVolume(newVolume)
+      try { localStorage.setItem('waveforge:volume', String(newVolume)) } catch { /* ignore */ }
       airplayController.setVolume(Math.round(Math.max(0, Math.min(1, newVolume)) * 100))
       return
     }
     // 看歌模式：音量作用于视频音轨
     if (lyricDisplayMode === 'video' && watchPlayerRef.current) {
       watchPlayerRef.current.setVolume(newVolume)
+      try { localStorage.setItem('waveforge:volume', String(newVolume)) } catch { /* ignore */ }
       return
     }
     audioPlayerRef.current.setVolume(newVolume)
+    try { localStorage.setItem('waveforge:volume', String(newVolume)) } catch { /* ignore */ }
     // 界面滑条调整音量时同步解除静音状态：媒体键静音后 mutedRef 仍为 true，
     // 用户拉高音量若不解除，托盘/歌词岛会一直显示静音图标且下一次媒体键「静音」语义反转
     if (newVolume > 0 && mutedRef.current) {
@@ -8083,12 +8386,13 @@ function App() {
   const handleNeteaseLogin = async (cookie: string, showToastMessage = true) => {
     setNeteaseCookie(cookie)
     setNeteaseLoggedIn(true)
-    localStorage.setItem('netease_cookie', cookie)
-    localStorage.setItem('neteaseCookie', cookie)
+    // 凭据进加密存储（DPAPI），不再落 localStorage 明文
+    setSecureToken('netease_cookie', cookie)
+    setSecureToken('neteaseCookie', cookie)
     
     // 获取网易云账号资料
     try {
-      const res = await fetch(`http://localhost:3001/api/netease/user/account?cookie=${encodeURIComponent(cookie)}`)
+      const res = await fetch(`http://localhost:3001/api/netease/user/account`, { headers: cookieHeaders(cookie) })
       const data = await res.json()
       if (data.profile) {
         const profileUserId = data.profile.userId?.toString() || ''
@@ -8123,14 +8427,15 @@ function App() {
   }
 
   const handleNeteaseLogout = () => {
+    clearLocalListeningHistory()
     setNeteaseLoggedIn(false)
     setNeteaseUsername('')
     setNeteaseAvatar('')
     setNeteaseUserId('')
     setNeteaseVip(false)
     setNeteaseCookie('')
-    localStorage.removeItem('netease_cookie')
-    localStorage.removeItem('neteaseCookie')
+    removeSecureToken('netease_cookie')
+    removeSecureToken('neteaseCookie')
     localStorage.removeItem('netease_user_id')
     localStorage.removeItem('netease_username')
     localStorage.removeItem('netease_vip')
@@ -8154,15 +8459,16 @@ function App() {
         setQQCookie(cookie)
         setQQLoggedIn(true)
         setQQUserId(uin)
-        localStorage.setItem('qq_cookie', cookie)
-        localStorage.setItem('qqCookie', cookie)
+        // 凭据进加密存储（DPAPI），不再落 localStorage 明文
+        setSecureToken('qq_cookie', cookie)
+        setSecureToken('qqCookie', cookie)
         localStorage.setItem('qq_logged_in', 'true')
         localStorage.setItem('qq_user_id', uin)
         
         // 2. 获取用户详细信息（失败不回滚已成功的 cookie 登录，仅用默认资料）
         let userDetailData: any = null
         try {
-          const userDetailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${uin}&cookie=${encodeURIComponent(cookie)}`)
+          const userDetailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${uin}`)
           userDetailData = await userDetailRes.json()
         } catch (detailError) {
           console.warn('⚠️ 获取QQ音乐用户详情网络失败，使用默认信息:', detailError)
@@ -8225,27 +8531,41 @@ function App() {
       setQQVip(false)
       setQQCookie('')
       setQQLoggedIn(false)
-      localStorage.removeItem('qq_cookie')
-      localStorage.removeItem('qqCookie')
+      removeSecureToken('qq_cookie')
+      removeSecureToken('qqCookie')
       localStorage.removeItem('qq_logged_in')
       localStorage.removeItem('qq_user_id')
       localStorage.removeItem('qq_vip')
+      // avatar/svip 也属旧账号残留：不清会让换号后显示旧头像与旧 SVIP 徽章
+      localStorage.removeItem('qq_avatar')
+      localStorage.removeItem('qq_svip')
       if (showToastMessage) addToast(error instanceof Error ? error.message : 'QQ音乐登录失败', 'error')
     }
   }
 
+  /** 任一平台登出/换号：清本地听歌足迹与日志（按账号语义展示的本地统计数据） */
+  const clearLocalListeningHistory = useCallback(() => {
+    try {
+      clearDesktopMusicActivity()
+      clearListeningLog()
+    } catch { /* ignore */ }
+  }, [])
+
   const handleQQLogout = () => {
+    clearLocalListeningHistory()
     setQQLoggedIn(false)
     setQQUsername('')
     setQQAvatar('')
     setQQUserId('')
     setQQVip(false)
     setQQCookie('')
-    localStorage.removeItem('qq_cookie')
-    localStorage.removeItem('qqCookie')
+    removeSecureToken('qq_cookie')
+    removeSecureToken('qqCookie')
     localStorage.removeItem('qq_logged_in')
     localStorage.removeItem('qq_user_id')
     localStorage.removeItem('qq_vip')
+    localStorage.removeItem('qq_avatar')
+    localStorage.removeItem('qq_svip')
     clearLoginExpiry('qq')
     setAuthRevision(previous => previous + 1)
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'qq' } }))
@@ -8296,8 +8616,9 @@ function App() {
     if (!bridge?.onSpotifyAuthResult) return
     const unsub = bridge.onSpotifyAuthResult((result: any) => {
       if (!result?.success || !result.accessToken) return
-      localStorage.setItem('spotify_access_token', result.accessToken)
-      if (result.refreshToken) localStorage.setItem('spotify_refresh_token', result.refreshToken)
+      // token 进加密存储（refresh token 是长期凭据，绝不再落 localStorage 明文）
+      setSecureToken('spotify_access_token', result.accessToken)
+      if (result.refreshToken) setSecureToken('spotify_refresh_token', result.refreshToken)
       if (result.username) localStorage.setItem('spotify_username', result.username)
       if (result.avatar) localStorage.setItem('spotify_avatar', result.avatar)
       if (result.product) {
@@ -8401,17 +8722,17 @@ function App() {
         }
         // loggedIn:false 且 cookie 非空 → 疑似已失效。再确认一次：只有后端明确应答
         // loggedIn:false 才清理；网络失败/超时一律不动凭据，防止误清有效登录态。
-        const cookie = localStorage.getItem('soda_token') || ''
+        const cookie = getSecureToken('soda_token') || ''
         if (!cookie) return
         try {
-          const resp = await fetch(`http://localhost:3001/api/soda/status?cookie=${encodeURIComponent(cookie)}`, {
+          const resp = await fetch(`http://localhost:3001/api/soda/status`, { headers: cookieHeaders(cookie),
             cache: 'no-store',
             signal: AbortSignal.timeout(5000),
           })
           if (!resp.ok) return
           const again = await resp.json()
           if (cancelled || again?.loggedIn !== false) return
-          localStorage.removeItem('soda_token')
+          removeSecureToken('soda_token')
           localStorage.removeItem('soda_username')
           localStorage.removeItem('soda_avatar')
           localStorage.removeItem('soda_user_id')
@@ -8438,7 +8759,7 @@ function App() {
     let active = true
     void bridge.getKugouSession().then((session: any) => {
       if (!active || !session?.loggedIn || !session.cookie) return
-      localStorage.setItem('kugou_cookie', session.cookie)
+      setSecureToken('kugou_cookie', session.cookie)
       if (session.username) {
         setKugouUsername(session.username)
         localStorage.setItem('kugou_username', session.username)
@@ -8458,6 +8779,54 @@ function App() {
       }
     }).catch(() => { /* 忽略 */ })
     return () => { active = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // 凭据安全存储 hydrate 完成后重算各平台登录态：useState 初始化时 DPAPI 缓存还没就绪
+  // （initSecureTokenStore 异步），重启后 netease/kugou/spotify/soda 会误判成未登录。
+  // 这里只做「无登录态 → 有凭据」方向的重算，不覆盖主动登出后的状态。
+  useEffect(() => {
+    const recalc = () => {
+      if (!neteaseLoggedIn && Boolean(getSecureToken('netease_cookie') || getSecureToken('neteaseCookie'))) {
+        setNeteaseLoggedIn(true)
+      }
+      // cookie state 同步回填：_neteaseCookie/_qqCookie 是最近播放上报（scrobble）、
+      // 个人中心资料卡等请求的凭据源，hydrate 前初始化为空串且无人回填 →
+      // 登录标志翻了但上报整个会话静默失效
+      setNeteaseCookie(previous => previous || getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || '')
+      setQQCookie(previous => previous || getSecureToken('qq_cookie') || getSecureToken('qqCookie') || '')
+      if (!qqLoggedIn && Boolean(getSecureToken('qq_cookie') || getSecureToken('qqCookie') || localStorage.getItem('qq_logged_in') === 'true')) {
+        setQQLoggedIn(true)
+      }
+      if (!spotifyLoggedIn && Boolean(getSecureToken('spotify_access_token'))) {
+        setSpotifyLoggedIn(true)
+      }
+      if (!sodaLoggedIn && Boolean(getSecureToken('soda_token'))) {
+        setSodaLoggedIn(true)
+      }
+      if (!kugouLoggedIn) {
+        const kugouCookie = getSecureToken('kugou_cookie') || ''
+        const hasConcept = Boolean(localStorage.getItem('kugou_concept_credential'))
+        if (Boolean(kugouCookie && (/KuGoo=/.test(kugouCookie) || /KugooID=/.test(kugouCookie) || /kg_token/.test(kugouCookie))) || hasConcept) {
+          setKugouLoggedIn(true)
+          setAuthRevision(previous => previous + 1)
+          window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'kugou' } }))
+        }
+      }
+    }
+    // hydrate 已完成（快路径）→ 直接算；否则等事件
+    const testHydrated = () => {
+      try {
+        const mod = Boolean((window as unknown as { __secureStoreHydrated?: boolean }).__secureStoreHydrated)
+        return mod
+      } catch { return false }
+    }
+    void import('./services/secureTokenStore').then(({ isSecureStoreHydrated }) => {
+      if (isSecureStoreHydrated()) recalc()
+      else window.addEventListener('secure-store:hydrated', recalc, { once: true })
+    })
+    return () => window.removeEventListener('secure-store:hydrated', recalc)
+    // 只跑一次：目的就是启动竞态的补偿
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -8487,7 +8856,7 @@ function App() {
   // ── 新三平台登录态处理（登录面板写入 localStorage，这里同步 React 状态 + 广播）──
   const handleSpotifyLogin = (cookie: string, username?: string) => {
     // Spotify 由主进程 OAuth 写入 token；仅当存在真实 access_token 才算登录（cookie 参数仅作占位）
-    const loggedIn = Boolean(localStorage.getItem('spotify_access_token'))
+    const loggedIn = Boolean(getSecureToken('spotify_access_token'))
     setSpotifyLoggedIn(loggedIn)
     if (loggedIn) setSpotifyUserId(localStorage.getItem('spotify_user_id') || '')
     if (loggedIn) {
@@ -8507,8 +8876,9 @@ function App() {
     if (loggedIn) addToast('Spotify 登录成功', 'success')
   }
   const handleSpotifyLogout = () => {
-    localStorage.removeItem('spotify_access_token')
-    localStorage.removeItem('spotify_refresh_token')
+    clearLocalListeningHistory()
+    removeSecureToken('spotify_access_token')
+    removeSecureToken('spotify_refresh_token')
     localStorage.removeItem('spotify_username')
     localStorage.removeItem('spotify_avatar')
     localStorage.removeItem('spotify_user_id')
@@ -8527,7 +8897,13 @@ function App() {
     const loggedIn = Boolean(cookie && (/KuGoo=/.test(cookie) || /KugooID=/.test(cookie) || /kg_token/.test(cookie)))
     setKugouLoggedIn(loggedIn)
     if (loggedIn) {
-      localStorage.setItem('kugou_cookie', cookie)
+      setSecureToken('kugou_cookie', cookie)
+      // 换号防护：旧账号（扫码通道）留下的 user_id/avatar 不清会让喜欢缓存归属错账号。
+      // 此路径后续自愈会拉新账号信息重新写入；扫码通道不经过这里不受影响。
+      localStorage.removeItem('kugou_user_id')
+      localStorage.removeItem('kugou_avatar')
+      setKugouUserId('')
+      setKugouAvatar('')
       if (username) {
         setKugouUsername(username)
         localStorage.setItem('kugou_username', username)
@@ -8562,7 +8938,8 @@ function App() {
     if (loggedIn) addToast('酷狗音乐登录成功', 'success')
   }
   const handleKugouLogout = () => {
-    localStorage.removeItem('kugou_cookie')
+    clearLocalListeningHistory()
+    removeSecureToken('kugou_cookie')
     localStorage.removeItem('kugou_username')
     localStorage.removeItem('kugou_avatar')
     localStorage.removeItem('kugou_user_id')
@@ -8582,7 +8959,7 @@ function App() {
   const handleSodaLogin = (cookie: string, username?: string, extra?: { avatar?: string; userId?: string }) => {
     setSodaLoggedIn(Boolean(cookie))
     if (cookie) {
-      localStorage.setItem('soda_token', cookie)
+      setSecureToken('soda_token', cookie)
       if (username) {
         setSodaUsername(username)
         localStorage.setItem('soda_username', username)
@@ -8629,7 +9006,7 @@ function App() {
     // 否则换账号后旧凭据仍有效；TV/旧版无此桥（clearSodaLogin 不存在）时跳过，仅清渲染层四键
     const bridge = (window as any).electron
     if (bridge?.clearSodaLogin) void Promise.resolve(bridge.clearSodaLogin()).catch(() => { /* 忽略 */ })
-    localStorage.removeItem('soda_token')
+    removeSecureToken('soda_token')
     localStorage.removeItem('soda_username')
     localStorage.removeItem('soda_avatar')
     localStorage.removeItem('soda_user_id')
@@ -8793,6 +9170,9 @@ function App() {
       handleOpenAlbum(albumId, platform)
     })
   }
+  // 定义点回填上方（4736 附近 TDZ 规避）的 latest-ref：后续渲染直接取最新闭包
+  playbackViewArtistStableLateRef.current = handlePlaybackViewArtist
+  playbackViewAlbumStableLateRef.current = handlePlaybackViewAlbum
 
   // 播放页两个面板（PlaylistPanel/SimilarSongsPanel）的右键菜单回调包：
   // 处理器经 ref 转发最新闭包、对象用 useMemo 保持引用稳定——原来每次渲染都内联新建
@@ -8849,7 +9229,8 @@ function App() {
       const warnedCredentialPlatforms = new Set<string>()
       const warnIfCredentialInvalid = async (url: string, isInvalid: (body: any) => boolean, label: string) => {
         try {
-          const response = await fetch(url)
+          // fetchWithCookieHeader 会剥离 URL 中的 cookie query 转请求头（凭据不进日志 URL）
+          const response = await fetchWithCookieHeader(url)
           if (!response.ok) return
           const body = await response.json().catch(() => null)
           if (!body || !isInvalid(body) || warnedCredentialPlatforms.has(label)) return
@@ -8860,15 +9241,14 @@ function App() {
         }
       }
       try {
-        const neteaseCookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie')
-        if (neteaseCookie) {
-          await handleNeteaseLogin(neteaseCookie, false)
-        }
-
-        const qqCookie = localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie')
-        if (qqCookie) {
-          await handleQQLogin(qqCookie, false)
-        }
+        const neteaseCookie = getSecureToken("netease_cookie")
+        const qqCookie = getSecureToken('qq_cookie') || getSecureToken('qqCookie')
+        // 两平台恢复互不依赖，串行 await 会把冷缓存下的代理上游耗时相加（每段
+        // 300~1500ms，登录态/侧栏歌单就绪晚 1.5~5s）。并行恢复，失败互不影响。
+        await Promise.all([
+          neteaseCookie ? handleNeteaseLogin(neteaseCookie, false) : Promise.resolve(),
+          qqCookie ? handleQQLogin(qqCookie, false) : Promise.resolve(),
+        ])
 
         // 核验放在恢复之后异步进行（不阻塞界面）；判定信号与登录路径一致：
         // 网易云 account/profile 双空、QQ 没有 creator。
@@ -8882,7 +9262,7 @@ function App() {
         const qqUserId = localStorage.getItem('qq_user_id')
         if (qqCookie && qqUserId) {
           void warnIfCredentialInvalid(
-            `http://localhost:3001/api/qq/user/detail?id=${encodeURIComponent(qqUserId)}&cookie=${encodeURIComponent(qqCookie)}`,
+            `http://localhost:3001/api/qq/user/detail?id=${encodeURIComponent(qqUserId)}`,
             body => !body.creator,
             'QQ 音乐',
           )
@@ -8945,7 +9325,9 @@ function App() {
   const gpuCountdownRef = useRef(30)
   // 渲染后端切换后的「渲染器预热」：重启进入先预编译着色管线（可跳过），完成后才展示 30s 体验确认横幅
   const [gpuPreheatDone, setGpuPreheatDone] = useState(false)
-  const [gpuPreheatProgress, setGpuPreheatProgress] = useState(0)
+  // 进度条不走 state：rAF 每帧 setState 会驱动整棵 App 树 60fps 重渲染约 2.6s，
+  // 这里直接写 DOM width（组件仅在预热遮罩内消费，重挂载时从头再来无碍）。
+  const gpuPreheatBarRef = useRef<HTMLDivElement | null>(null)
 
   const confirmGpuChange = useCallback(async () => {
     try {
@@ -8986,7 +9368,7 @@ function App() {
   useEffect(() => {
     if (pendingGpuChange?.type !== 'backend') {
       setGpuPreheatDone(false)
-      setGpuPreheatProgress(0)
+      if (gpuPreheatBarRef.current) gpuPreheatBarRef.current.style.width = '0%'
       return
     }
     const PREHEAT_MIN_MS = 2600
@@ -8994,7 +9376,8 @@ function App() {
     const t0 = performance.now()
     const tick = () => {
       if (cancelled) return
-      setGpuPreheatProgress(Math.min(100, ((performance.now() - t0) / PREHEAT_MIN_MS) * 100))
+      const bar = gpuPreheatBarRef.current
+      if (bar) bar.style.width = `${Math.min(100, ((performance.now() - t0) / PREHEAT_MIN_MS) * 100)}%`
       requestAnimationFrame(tick)
     }
     requestAnimationFrame(tick)
@@ -9332,6 +9715,11 @@ function App() {
     logout: (platform: MusicPlatform) => profileLogoutRef.current(platform),
     smartReorder: () => smartReorderRef.current(),
     playlistSongSelect: (index: number) => playlistSongSelectRef.current(index),
+    // 艺人详情弹窗（冻结常驻）MV 起播回调：视频开始播放时暂停音频引擎
+    // （handlePlayPause 是 useCallback 恒稳定，直接闭包引用即可）
+    artistVideoPlaybackStart: () => {
+      if (isPlayingRef.current) handlePlayPause()
+    },
   }), [])
 
   // 设置→高级 卡片触发 OOBE（默认不自动启用）
@@ -9457,15 +9845,11 @@ function App() {
               onClose={closeSongDetail}
               playerTheme={playerTheme}
               onPlayNow={viewCallbacks.onSongSelect}
-              onOpenPlaylist={(id, platform) => { void handleOpenPlaylistFromDetail(id, platform) }}
-              onOpenAlbum={(id, platform) => {
-                handleOpenAlbum(id, platform)
-              }}
-              onOpenArtist={(id, platform) => {
-                handleOpenArtist(id, platform)
-              }}
-              onViewArtistSong={handlePlaybackViewArtist}
-              onViewAlbumSong={handlePlaybackViewAlbum}
+              onOpenPlaylist={songDetailOpenPlaylistStable}
+              onOpenAlbum={songDetailOpenAlbumStable}
+              onOpenArtist={songDetailOpenArtistStable}
+              onViewArtistSong={playbackViewArtistStable}
+              onViewAlbumSong={playbackViewAlbumStable}
             />
           </Suspense>
         )}
@@ -9492,28 +9876,19 @@ function App() {
               loading={detailPlaylistLoading}
               onClose={closeDetailPlaylist}
               onExitComplete={handleDetailPlaylistExitComplete}
-              onSongSelect={(song, songs) => {
-                // 选歌后关闭歌单详情面板（避免盖在播放页上），并记录歌单来源，
-                // home 返回时经 HomeView 恢复同一歌单并自动定位当前歌曲
-                closeDetailPlaylistImmediate()
-                void handleSongSelect(song, songs, {
-                  surface: 'home-playlist',
-                  playlist: detailPlaylist.playlist,
-                  songs,
-                })
-              }}
+              onSongSelect={detailPlaylistSelectStable}
               currentPlatform={detailPlaylist.playlist.platform || 'netease'}
               currentUserId={detailPlaylist.playlist.platform === 'qq' ? qqUserId : neteaseUserId}
               neteaseVip={neteaseVip}
               qqVip={qqVip}
-              onOpenArtist={handleOpenArtist}
-              onOpenAlbum={handleOpenAlbum}
-              onPlayNext={handlePlayNext}
-              onAddToFavorites={handleAddToFavorites}
-              onRemoveFromFavorites={handleRemoveFromFavorites}
-              onAddToPlaylist={handleAddToPlaylist}
-              onViewComments={handleViewComments}
-              onCopyInfo={handleCopyInfo}
+              onOpenArtist={viewCallbacks.onOpenArtist}
+              onOpenAlbum={viewCallbacks.onOpenAlbum}
+              onPlayNext={viewCallbacks.onPlayNext}
+              onAddToFavorites={viewCallbacks.onAddToFavorites}
+              onRemoveFromFavorites={viewCallbacks.onRemoveFromFavorites}
+              onAddToPlaylist={viewCallbacks.onAddToPlaylist}
+              onViewComments={viewCallbacks.onViewComments}
+              onCopyInfo={viewCallbacks.onCopyInfo}
               userPlaylists={playbackContextPlaylists}
             />
           </Suspense>
@@ -9538,7 +9913,7 @@ function App() {
                   正在预编译 WebGL 着色器管线，首次进入动效场景将不再卡顿（约 2 秒）
                 </p>
                 <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
-                  <div className="h-full rounded-full transition-[width] duration-150" style={{ width: `${gpuPreheatProgress}%`, backgroundColor: '#ff5a70' }}></div>
+                  <div ref={gpuPreheatBarRef} className="h-full rounded-full transition-[width] duration-150" style={{ width: '0%', backgroundColor: '#ff5a70' }}></div>
                 </div>
                 <button
                   type="button"
@@ -9937,6 +10312,49 @@ function App() {
             </ModeParkedContext.Provider>
           </motion.div>
         )}
+        {renderedMode === 'singalong' && (
+          <motion.div
+            key="singalong-mode"
+            initial={{ opacity: 0, y: 26, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 1.012 }}
+            transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute inset-0 h-full w-full"
+            style={modeLayerStyle({ suspended: false })}
+          >
+            <ModeParkedContext.Provider value={false}>
+            {/* 学歌：逐句跟学。歌曲选择/播放全走 App 注入的回调（onSongSelect 原地开播不切走） */}
+            <SingAlongQueueBridge songs={playlist} />
+            <LazySingAlongView
+              playerTheme={playerTheme}
+              currentSong={currentSong}
+              lyrics={lyrics}
+              lyricOffset={lyricOffset}
+              isPlaying={isPlaying}
+              playbackTimeStore={audioPlayer.playbackTimeStore}
+              onSongSelect={handleSongSelectRef.current}
+              onTogglePlay={handlePlayPauseRef.current}
+              onSeek={handleSeekRef.current}
+              playlist={playlist}
+              currentIndex={currentIndex}
+              stemControl={{
+                state: playerStemControl,
+                enable: audioPlayer.trackStems.enable,
+                setVocalLevel: audioPlayer.trackStems.setVocalLevel,
+                setStemGains: audioPlayer.trackStems.setStemGains,
+                returnToOriginal: audioPlayer.trackStems.returnToOriginal,
+                // 伴奏导出：复用播放器的整曲缓存 prepare（同一条 audioDownload 链路）
+                prepareInput: (song) => audioPlayer.trackStems.prepareInput(song),
+                stemsBridge: (window as unknown as { electron?: { trackStems?: {
+                  ensureWindow: (request: { inputPath: string; trackId: string; generationToken: string; requestId?: string; chunkSeconds?: 5 | 10; start: number; duration: number; priority?: number }) => Promise<unknown>
+                  readChunk: (filePath: string) => Promise<ArrayBuffer>
+                } } }).electron?.trackStems ?? null,
+              }}
+              onSelectMode={mode => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))}
+            />
+            </ModeParkedContext.Provider>
+          </motion.div>
+        )}
         {(renderedMode === 'traditional' || traditionalSuspended) && (
           <motion.div
             key="traditional-mode"
@@ -10031,6 +10449,10 @@ function App() {
             // 它会盖住传统/探索/桌面并吞掉点击——挂起样式必须走 modeLayerStyle。
             style={modeLayerStyle({ suspended: parkedMinimal, overlayAbove: exploreKeptAlive })}
             data-wf-suspended={modeLayerSuspendedAttr(parkedMinimal)}
+            // 播放设置弹窗的实时镜像以此为克隆源（QuickSettingsLiveMirror）。
+            // 背景层（封面/MV/渐变遮罩）是这个层的子节点而非播放面的——只克隆播放面的话，
+            // 预览里 MV 背景会整个缺失（预览黑底像占位）。
+            data-waveforge-playback-layer="true"
           >
             <ModeParkedContext.Provider value={parkedMinimal}>
 
@@ -10213,6 +10635,8 @@ function App() {
             const engineHandoffActive = Number.isFinite(readSongOwnedHandoff(watchSyncSeek, currentWatchSongKey, Number.NaN))
             return (
             <div className={`absolute inset-0 ${showHome ? 'z-0' : 'z-10'}`} data-watch-surface>
+              {/* 看歌模式渲染崩溃（视频解码/iframe/弹幕层）只收起视频面，不白屏整个 App */}
+              <ErrorBoundary inline inlineLabel="看歌视频面渲染出错，可切回普通歌词模式">
               <LazyBilibiliMvPlayer
                 ref={watchPlayerRef}
                 songTitle={currentSong.name}
@@ -10275,6 +10699,7 @@ function App() {
                 // DASH 音频继续当播放源（歌照放），解冻时会自动 syncWatchVideoOnSurfaceRestore 回到音画同帧
                 surfaceVisible={!showHome && lyricDisplayMode === 'video' && !gameModeFrozen}
               />
+              </ErrorBoundary>
             </div>
             )
           })()}
@@ -10948,7 +11373,7 @@ function App() {
                         <div className="pointer-events-none absolute left-0 right-0 top-full mt-4 flex w-full justify-center">
                           <AutomixHudBadge
                             info={modernAutomixHud}
-                            currentTime={automixHudTime}
+                            playbackTimeStore={audioPlayer.playbackTimeStore}
                             scale={1}
                             colors={modernAutomixHudColors}
                             // 药丸底色 = 当前封面主题色的淡色（color-mix 混入原底色，保持对比度）
@@ -11275,7 +11700,7 @@ function App() {
                         <div className={`pointer-events-none absolute left-0 right-0 top-full flex w-full justify-center ${showLyricsColumn ? 'mt-3' : 'mt-4'}`}>
                           <AutomixHudBadge
                             info={modernAutomixHud}
-                            currentTime={automixHudTime}
+                            playbackTimeStore={audioPlayer.playbackTimeStore}
                             scale={1}
                             colors={modernAutomixHudColors}
                             // 药丸底色 = 当前封面主题色的淡色（color-mix 混入原底色，保持对比度）
@@ -11520,6 +11945,8 @@ function App() {
       <AnimatePresence>
         {showMixingStudio && (
           <Suspense fallback={null}>
+            {/* 调音室是全模式共享弹层：渲染期异常不能炸穿到根边界（全 App 白屏） */}
+            <ErrorBoundary inline inlineLabel="调音室渲染出错" >
             {engineAdapterRef.current.renderStudio({
               onClose: () => setShowMixingStudio(false),
               playerTheme,
@@ -11531,6 +11958,7 @@ function App() {
               sourceDuration: mixingStudioAudio?.duration || undefined,
               exportFileName: currentSong?.name || undefined,
             })}
+            </ErrorBoundary>
           </Suspense>
         )}
       </AnimatePresence>
@@ -11685,7 +12113,7 @@ function App() {
             onOpenArtist={viewCallbacks.onOpenArtist}
             onOpenAlbum={viewCallbacks.onOpenAlbum}
             onCopyInfo={viewCallbacks.onCopyInfo}
-            onVideoPlaybackStart={() => { if (isPlaying) handlePlayPause() }}
+            onVideoPlaybackStart={stableDialogCallbacks.artistVideoPlaybackStart}
             />
           )}
       </Suspense>
@@ -11765,6 +12193,7 @@ function App() {
             onAddToPlaylist={viewCallbacks.onAddToPlaylist}
             onViewComments={viewCallbacks.onViewComments}
             onCopyInfo={viewCallbacks.onCopyInfo}
+            onOpenMv={(mv) => setMvDirectPlay({ id: String(mv.id), platform: 'netease' })}
             initialUserTarget={profileUserTarget}
             />
           )}
@@ -11772,8 +12201,29 @@ function App() {
     </Suspense>
     {/* 插件系统（插件中心/详情/导入/使用须知/DG_LAB 控制台） */}
     <PluginOverlay />
+    {/* 个人中心「收藏 MV」直接播放（directPlay：只出播放器，不显示专区列表） */}
+    <Suspense fallback={null}>
+      {mvDirectPlay && (
+        <LazyMVExploreModal
+          initialPlatform="netease"
+          initialMvId={mvDirectPlay.id}
+          directPlay
+          onClose={() => setMvDirectPlay(null)}
+          playerTheme={playerTheme}
+        />
+      )}
+    </Suspense>
     </>
   )
+}
+
+/** 学歌选歌抽屉的队列快照桥：playlist 变化时把最新队列发布给抽屉（避免再加一条 prop 通道）。 */
+function SingAlongQueueBridge({ songs }: { songs: Song[] }) {
+  useEffect(() => {
+    // 延迟 import：抽屉 chunk 只在打开选歌时才需要，但发布动作很轻，直接引模块级单例也可
+    void import('./features/singalong/SingAlongSongPicker').then(({ publishSingAlongQueue }) => publishSingAlongQueue(songs))
+  }, [songs])
+  return null
 }
 
 export default App

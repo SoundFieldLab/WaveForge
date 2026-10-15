@@ -25,6 +25,8 @@ interface ScrollToCurrentSongProps {
   cardGapY?: number
   contentPaddingTop?: number
   visibilityMargin?: number
+  /** 同槽位让位偏移：回到顶部按钮可见时由调用方传入 64（按钮高 48 + 间距 16），本按钮 bottom 从 offsetBottom 平滑过渡到 offsetBottom + slotOffsetBottom */
+  slotOffsetBottom?: number
   /** 面板打开且列表中出现当前播放歌曲时，自动滚动定位到该歌曲（智能播放/从歌单选歌后返回的场景） */
   autoScroll?: boolean
 }
@@ -46,6 +48,7 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
   cardGapY = 20,
   contentPaddingTop = 32,
   visibilityMargin = 12,
+  slotOffsetBottom = 0,
   autoScroll = false,
 }) => {
   const resolvedContainerRef = containerRef ?? scrollContainerRef
@@ -66,9 +69,9 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
     container.scrollTo({ top: Math.max(0, targetScrollTop), behavior: 'smooth' })
   }
 
-  // 按钮显示条件（与 ScrollToTop 同源的 rAF 合并判定，两枚按钮叠放，出现/隐藏保持一致）：
-  // 列表确实可滚动 + 已滚动超过 threshold + 当前歌曲整行已滚出可视区（留 visibilityMargin 余量）。
-  // 此前 showButton 恒为 false（setter 从未被调用），这个「滚动到当前歌曲」浮标实际永不出现。
+  // 按钮显示条件（rAF 合并滚动判定）：列表可滚动 + 当前歌曲整行在可视区外（留 visibilityMargin 余量）。
+  // 不要求已滚动过阈值：打开面板时歌曲在屏外（如重新打开上次听了一半的歌单）也应立即出现定位入口。
+  // threshold 仍保留为"行必须已滚出超过该距离才算远离"，避免刚滚出 1px 就闪现按钮。
   const showButtonRef = useRef(false)
   const scrollCheckFrameRef = useRef<number | null>(null)
   useEffect(() => {
@@ -83,10 +86,9 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
       const rowBottom = rowTop + cardHeight
       const viewTop = container.scrollTop
       const viewBottom = viewTop + container.clientHeight
-      const rowOutOfView = rowBottom <= viewTop + visibilityMargin || rowTop >= viewBottom - visibilityMargin
-      const next = container.scrollHeight > container.clientHeight
-        && container.scrollTop > threshold
-        && rowOutOfView
+      // 行底在可视区上缘之上（上方屏外）或行顶在可视区下缘之下（下方屏外），且超出 threshold 距离
+      const rowOutOfView = rowBottom <= viewTop - threshold + visibilityMargin || rowTop >= viewBottom + threshold - visibilityMargin
+      const next = container.scrollHeight > container.clientHeight && rowOutOfView
       if (next === showButtonRef.current) return
       showButtonRef.current = next
       setShowButton(next)
@@ -125,6 +127,8 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
   const bgColor = resolvedTheme === 'dark' ? 'bg-white/5 hover:bg-white/10' : 'bg-black/5 hover:bg-black/10'
   const textColor = resolvedTheme === 'dark' ? 'text-white/80' : 'text-black/80'
   const borderColor = resolvedTheme === 'dark' ? 'border-white/10' : 'border-black/10'
+  // 同槽位让位：回到顶部按钮出现时，本按钮从底部槽位平滑上移到其上方（slotOffsetBottom）
+  const restBottom = offsetBottom + slotOffsetBottom
 
   return (
     <AnimatePresence>
@@ -132,16 +136,17 @@ const ScrollToCurrentSong: React.FC<ScrollToCurrentSongProps> = ({
         <motion.button
           type="button"
           initial={{ opacity: 0, scale: 0.8, y: 20 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
+          animate={{ opacity: 1, scale: 1, y: 0, bottom: restBottom }}
           exit={{ opacity: 0, scale: 0.8, y: 20 }}
           whileHover={{ scale: 1.05, y: -2 }}
           whileTap={{ scale: 0.95 }}
+          transition={{ type: 'spring', stiffness: 400, damping: 32 }}
           onClick={scrollToCurrentSong}
           aria-label="滚动到当前歌曲"
-          className={`${position} z-50 w-12 h-12 rounded-full ${bgColor} backdrop-blur-xl ${textColor} border ${borderColor} shadow-[0_8px_32px_rgba(0,0,0,0.12)] flex items-center justify-center transition-all duration-300`}
+          className={`${position} z-50 w-12 h-12 rounded-full ${bgColor} backdrop-blur-xl ${textColor} border ${borderColor} shadow-[0_8px_32px_rgba(0,0,0,0.12)] flex items-center justify-center`}
           style={{
             ...(offsetLeft !== undefined ? { left: `${offsetLeft}px` } : { right: `${offsetRight}px` }),
-            bottom: `${offsetBottom}px`,
+            bottom: restBottom,
             backdropFilter: 'blur(20px) saturate(180%)',
             WebkitBackdropFilter: 'blur(20px) saturate(180%)',
           }}

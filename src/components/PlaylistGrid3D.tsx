@@ -2,7 +2,7 @@ import type { MusicPlatform } from '../services/platforms'
 import { useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { motion } from 'framer-motion'
 import { Play, Clock } from 'lucide-react'
-import { Song, resolveSongAlbumIdentifier, isSameSong } from '../services/musicApi'
+import { Song, resolveSongAlbumIdentifier, isSameSong, qqSongCoverUrl } from '../services/musicApi'
 import { debugLog } from '../utils/debugLog'
 import ScrollToTop from './ScrollToTop'
 import ScrollToCurrentSong from './ScrollToCurrentSong'
@@ -79,9 +79,8 @@ const SongCard = ({ song, onPlay, onPlayNext, onContextMenu, formatDuration, car
       >
         {/* 封面区域 */}
         <div className="w-full aspect-square rounded-lg overflow-hidden bg-zinc-800/60 relative shadow-inner flex items-center justify-center shrink-0 mb-3">
-          {song.album?.picUrl ? (
-            <CachedImage
-              src={song.album.picUrl}
+          {qqSongCoverUrl(song) ? (
+            <CachedImage src={qqSongCoverUrl(song)}
               alt={song.name}
               className="w-full h-full"
               lazy

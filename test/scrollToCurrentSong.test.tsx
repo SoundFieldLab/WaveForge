@@ -59,9 +59,9 @@ describe('ScrollToCurrentSong 浮标可见性', () => {
     expect(button()).toBeNull()
   })
 
-  it('当前歌曲已滚出可视区，但滚动幅度未超过 threshold 时不显示', () => {
-    // 第 11 行（1000~1100px）在 0~500 的可视区之外，但 scrollTop = 0
-    render(<Harness currentSongIndex={10} threshold={100} initialScrollTop={0} />)
+  it('当前歌曲已滚出可视区但距可视区不足 threshold 时不显示（刚滚出 1px 不闪现）', () => {
+    // 第 3 行（200~300px）在 0~500 的可视区之下，但只超出 0~88px（< threshold 100）
+    render(<Harness currentSongIndex={2} threshold={100} initialScrollTop={0} />)
     expect(button()).toBeNull()
   })
 

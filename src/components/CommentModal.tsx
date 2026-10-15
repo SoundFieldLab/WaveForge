@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactElement } from 'react'
 import { List, useDynamicRowHeight, type ListImperativeAPI, type RowComponentProps } from 'react-window'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Song } from '../services/musicApi'
+import { Song, qqSongCoverUrl } from '../services/musicApi'
 import { platformLabel, type MusicPlatform } from '../services/platforms'
 import { createSodaComment, fetchSodaComments, isSodaLoggedIn, type SodaComment } from '../services/sodaService'
 import {
@@ -31,6 +31,8 @@ import { createTtlCache } from '../utils/ttlCache'
 import { commentTimeValue, formatCommentTime } from '../utils/commentFormat'
 import { getReadableAccentColor } from '../utils/desktopAccentColor'
 import { useTvBack } from '../tv/tvCore'
+import { getSecureToken, setSecureToken, removeSecureToken } from "../services/secureTokenStore"
+import { cookieHeaders } from '../services/cookieRequest'
 
 // 评论分页短 TTL 缓存：按 `平台:资源ID:排序` 存已加载的评论 + 游标/页码。
 // 反复开关同一首评论时直接回填，既不重发请求也不清空列表（避免「已加载的评论闪一下又重来」）。
@@ -796,7 +798,7 @@ export default memo(function CommentModal({
         : song?.id)
   const commentType = isPlaylistResource ? 2 : 0
   const qqCommentBizType = isPlaylistResource ? 3 : 1
-  const resourceCoverUrl = isPlaylistResource ? (playlist?.coverImgUrl || '') : (song?.album?.picUrl || '')
+  const resourceCoverUrl = isPlaylistResource ? (playlist?.coverImgUrl || '') : qqSongCoverUrl(song)
   const resourceBackgroundUrl = resourceCoverUrl
     ? getResolvedArtworkUrl(resourceCoverUrl, { role: 'background' })
     : ''
@@ -899,14 +901,14 @@ export default memo(function CommentModal({
   useEffect(() => {
     const getUserInfo = async () => {
       if (resourcePlatform === 'netease') {
-        const neteaseCookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+        const neteaseCookie = getSecureToken("netease_cookie") || ''
         setUserCookie(neteaseCookie)
         setIsLoggedIn(!!neteaseCookie)
 
         // 获取当前用户ID
         if (neteaseCookie) {
           try {
-            const res = await fetch(`http://localhost:3001/api/netease/user/account?cookie=${encodeURIComponent(neteaseCookie)}`)
+            const res = await fetch(`http://localhost:3001/api/netease/user/account`, { headers: cookieHeaders(neteaseCookie) })
             const data = await res.json()
             if (data.profile?.userId) {
               setCurrentUserId(data.profile.userId.toString())
@@ -916,7 +918,7 @@ export default memo(function CommentModal({
           }
         }
       } else if (resourcePlatform === 'qq') {
-        const qqCookie = localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
+        const qqCookie = getSecureToken("qq_cookie") || ''
         setUserCookie(qqCookie)
         setIsLoggedIn(!!qqCookie)
 
@@ -1385,18 +1387,19 @@ export default memo(function CommentModal({
         // 最新评论使用cursor分页，精彩评论使用offset分页
         if (loadMode === 'latest') {
           const cursorToUse = reset ? '-1' : cursor
-          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&cursor=${cursorToUse}&type=${commentType}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
+          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&cursor=${cursorToUse}&type=${commentType}`
         } else {
-          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&type=${commentType}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
+          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&type=${commentType}`
         }
       } else {
         // 兜底路径：QQ 页签已全部切到新版接口（上方 musicu 分支），此端点仅在异常回退时使用
-        endpoint = `http://localhost:3001/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageToLoad}&pagesize=${limit}&type=${loadMode === 'hot' ? 'hot' : 'latest'}&biztype=${qqCommentBizType}&cookie=${encodeURIComponent(userCookie)}`
+        endpoint = `http://localhost:3001/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageToLoad}&pagesize=${limit}&type=${loadMode === 'hot' ? 'hot' : 'latest'}&biztype=${qqCommentBizType}`
       }
 
       debugLog(`[评论加载] 平台: ${platform}, 歌曲ID: ${songId}, 页码: ${pageToLoad}`)
 
-      const response = await fetch(endpoint)
+      // 登录态走请求头：endpoint 曾把 cookie 拼在 URL（会进后端错误日志）
+      const response = await fetch(endpoint, { headers: cookieHeaders(userCookie) })
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
@@ -1477,7 +1480,7 @@ export default memo(function CommentModal({
             const floorOf = async (comment: any) => {
               try {
                 const floorResponse = await fetch(
-                  `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(songId))}&parentCommentId=${comment.commentId}&limit=2&type=${commentType}&cookie=${encodeURIComponent(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || '')}`
+                  `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(songId))}&parentCommentId=${comment.commentId}&limit=2&type=${commentType}`
                 )
                 if (floorResponse.ok) {
                   const floorData = await floorResponse.json()
@@ -2120,7 +2123,7 @@ export default memo(function CommentModal({
 
     try {
       const response = await fetch(
-        `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(resourceId))}&parentCommentId=${comment.commentId}&limit=${Math.min(comment.replyCount, 50)}&type=${commentType}&cookie=${encodeURIComponent(userCookie)}`
+        `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(resourceId))}&parentCommentId=${comment.commentId}&limit=${Math.min(comment.replyCount, 50)}&type=${commentType}`
       )
       const result = await response.json()
       if (!response.ok || result.code !== 200) throw new Error(result.message || result.error || '加载回复失败')
@@ -2152,7 +2155,7 @@ export default memo(function CommentModal({
   }, [danmakuStyle])
 
   const [profileData, setProfileData] = useState<{ loading: boolean; error: string; profile: any; playlists: any[] }>({ loading: false, error: '', profile: null, playlists: [] })
-  const neteaseCookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+  const neteaseCookie = getSecureToken("netease_cookie") || ''
 
   const handleOpenCommentUser = useCallback((comment: Comment) => {
     if (resourcePlatform === 'netease' && comment.user.userId) {
@@ -2167,8 +2170,8 @@ export default memo(function CommentModal({
     const controller = new AbortController()
     setProfileData({ loading: true, error: '', profile: null, playlists: [] })
     Promise.all([
-      fetch(`http://localhost:3001/api/netease/user/detail?uid=${profileUser.user.userId}&cookie=${encodeURIComponent(neteaseCookie)}`, { signal: controller.signal }).then(res => res.json()),
-      fetch(`http://localhost:3001/api/netease/user/playlist?uid=${profileUser.user.userId}&limit=30&cookie=${encodeURIComponent(neteaseCookie)}`, { signal: controller.signal }).then(res => res.json()),
+      fetch(`http://localhost:3001/api/netease/user/detail?uid=${profileUser.user.userId}`, { signal: controller.signal }).then(res => res.json()),
+      fetch(`http://localhost:3001/api/netease/user/playlist?uid=${profileUser.user.userId}&limit=30`, { signal: controller.signal }).then(res => res.json()),
     ]).then(([detail, playlist]) => {
       if (controller.signal.aborted) return
       setProfileData({ loading: false, error: '', profile: detail?.profile || null, playlists: Array.isArray(playlist?.playlist) ? playlist.playlist : [] })
@@ -2258,11 +2261,14 @@ export default memo(function CommentModal({
   useEffect(() => {
     if (!isOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
+      // 删除确认框叠在主弹窗上时 ESC 只关确认框（由 DeleteCommentModal 自己处理），
+      // 不能把整个评论弹窗连带关掉
+      if (pendingDeleteComment) return
       if (event.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [isOpen, onClose])
+  }, [isOpen, onClose, pendingDeleteComment])
 
   const changeSpeed = (value: number) => {
     setDanmakuSpeed(value)

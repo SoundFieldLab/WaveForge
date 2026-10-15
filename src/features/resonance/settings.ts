@@ -203,17 +203,17 @@ export function readResonancePushLimit(): number {
  * 启动时的 `viewMode` 若还是 'resonance'，就用这里记的值还原。
  */
 export function rememberResonanceEntryMode(mode: string): void {
-  if (!mode || mode === 'resonance') return
+  if (!mode || mode === 'resonance' || mode === 'singalong') return
   try {
     localStorage.setItem(RESONANCE_SETTING_KEYS.entryMode, mode)
   } catch { /* localStorage 不可用时只是没有记忆 */ }
 }
 
-/** 读「进共振之前的模式」，没记过或记的是共振就返回空串（调用方自己回落到默认模式）。 */
+/** 读「进共振之前的模式」，没记过或记的是共振/学歌就返回空串（调用方自己回落到默认模式）。 */
 export function readResonanceEntryMode(): string {
   try {
     const value = localStorage.getItem(RESONANCE_SETTING_KEYS.entryMode) || ''
-    return value === 'resonance' ? '' : value
+    return value === 'resonance' || value === 'singalong' ? '' : value
   } catch {
     return ''
   }

@@ -1211,7 +1211,17 @@ export class ResonanceSession {
           this.broadcast({ kind: 'queue-page', payload: { offset, items: queuePageOf(room, offset, limit) } }, { to: fromPeerId })
           return
         }
+        // 成员侧：只接受「对得上自己在途请求」的分页。
+        // 说明：传输层星型拓扑下成员无法区分「房主发的」和「别的成员伪造的」
+        // （信封不标记来源角色，见 transport.ts），密钥又是全房共享的——
+        // 所以这里按请求-应答配对防御：伪造者不知道受害者何时请求了哪个偏移，
+        // 随机灌的页几乎不可能命中 pendingQueueRequests；命中也只污染一页且被
+        // revalidateQueuePages 的窗口比对在房主下次广播时纠正。
+        if (!this.pendingQueueRequests.has(offset)) return
         const items = Array.isArray(payload?.items) ? payload.items : []
+        // 基本结构校验：items 必须是「曲目形态」的对象（title 字符串 + key 字符串），
+        // 拒绝明显伪造的载荷类型
+        if (!items.every((item: any) => item && typeof item === 'object' && typeof item.key === 'string' && typeof item.title === 'string')) return
         this.pendingQueueRequests.delete(offset)
         this.queuePages.set(offset, items)
         if (this.snapshot.room) {
@@ -1244,7 +1254,14 @@ export class ResonanceSession {
         // 只接受有控制权的成员（获授权 / 房主放开了成员控制）——canControlPlayback 就是这条判据
         if (!room || !canControlPlayback(room, fromPeerId, Date.now())) return
         const advanced = advanceQueue(room)
+        // 必须与 hostNext() 同款三连：锚定新 cursor、压过本机旧读数、指示本机切歌。
+        // 只 advanceQueue 不动本机的话，房主自己还在放旧歌，pushPlayback 又以本机读数为准，
+        // 会把刚推进的 cursor 拽回去（成员视角：跳过失败，房主视角：房间卡片错位）。
+        this.nextAnchorKey = advanced.cursor >= 0 ? advanced.queue[advanced.cursor]?.key || null : null
         this.commit(advanced)
+        const target = advanced.cursor >= 0 ? advanced.queue[advanced.cursor] : null
+        this.hostExpectedTrackKey = target?.key || null
+        if (target) this.adapter?.apply({ trackKey: target.key, positionMs: 0, playing: true }, true)
         this.pushPlayback(true)
         this.flushPending()
         return
@@ -1396,8 +1413,13 @@ export class ResonanceSession {
       if (!state) return
       if (this.snapshot.role === 'host') {
         const peerId = this.identity?.peerId
-        if (peerId) this.patchRoom(current => heartbeat(current, peerId, Date.now()).state)
-        this.patchRoom(current => markOffline(current, Date.now(), OFFLINE_AFTER_MS))
+        if (peerId) {
+          // 心跳 + 离线标记合并为一次 patch：两个 reducer 各自 notify 会让成员侧
+          // 每 2s 收到两帧无意义刷新（房主侧订阅者整树重渲两次）。
+          let next = heartbeat(state, peerId, Date.now()).state
+          next = markOffline(next, Date.now(), OFFLINE_AFTER_MS)
+          if (next !== state) this.patchRoom(() => next)
+        }
         // 有人掉线/轮次推进后，原本够格的预排可能已经能进队列了
         this.flushPending()
         // 挂起时不再广播播放进度：房间还在，但不由本机驱动播放

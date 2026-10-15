@@ -32,6 +32,139 @@ const CARD_META: Record<WeatherCardKind, { title: string }> = {
   aqi: { title: '空气质量' },
 }
 
+/** 民用晨昏蒙影（civil twilight）时长：太阳从地平线下 6° 升到地平线（或反向）的分钟数。
+ *  纯几何推算：分别求太阳在 0° 与 -6° 时的时角，取差——Apple「第一道晨光/最后一道暮光」
+ *  与日出/日落的时间差就是这个值。极昼/极夜（无交点）回退中纬度典型 32 分钟。 */
+function estimateCivilTwilightMinutes(latitude: number, date: Date): number {
+  const dayOfYear = Math.floor((date.getTime() - new Date(date.getFullYear(), 0, 0).getTime()) / 86400000)
+  // 太阳赤纬（近似）：-23.44° * cos(2π*(N+10)/365)
+  const declination = -23.44 * Math.cos((2 * Math.PI * (dayOfYear + 10)) / 365)
+  const latitudeRad = latitude * Math.PI / 180
+  const declinationRad = declination * Math.PI / 180
+  const cosLatitude = Math.cos(latitudeRad)
+  const sinDeclination = Math.sin(declinationRad)
+  const cosDeclination = Math.cos(declinationRad)
+  const hourAngleDeg = (altitudeDegrees: number): number | null => {
+    const cosH = (Math.sin(altitudeDegrees * Math.PI / 180) - Math.sin(latitudeRad) * sinDeclination) / (cosLatitude * cosDeclination)
+    if (cosH < -1 || cosH > 1) return null
+    return Math.acos(cosH) * 180 / Math.PI
+  }
+  const horizon = hourAngleDeg(0)
+  const civil = hourAngleDeg(-6)
+  if (horizon === null || civil === null) return 32
+  return Math.round((Math.abs(horizon - civil) / 15) * 60)
+}
+
+function formatDuration(totalMinutes: number): string {
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = Math.round(totalMinutes % 60)
+  return `${hours} 小时 ${minutes} 分钟`
+}
+
+function shiftTime(time: string, minutes: number): string {
+  const date = new Date(time)
+  if (Number.isNaN(date.getTime())) return '--:--'
+  date.setMinutes(date.getMinutes() + minutes)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** 日出日落附加数据：日照时长、晨昏蒙影、未来 7 天平均日出/日落（Apple 同款语义） */
+function SunExtras({ sunrise, sunset, daylightDuration, sunshineDuration, daily, timeZone, latitude }: {
+  sunrise: string
+  sunset: string
+  daylightDuration?: number
+  sunshineDuration?: number
+  daily: Array<{ date: string; sunrise: string; sunset: string }>
+  timeZone?: string
+  latitude?: number
+}) {
+  const twilightMinutes = useMemo(() => {
+    const date = new Date(sunrise)
+    if (Number.isNaN(date.getTime())) return 32
+    return typeof latitude === 'number' && Number.isFinite(latitude)
+      ? estimateCivilTwilightMinutes(latitude, date)
+      : 32
+  }, [sunrise, latitude])
+  const firstLight = useMemo(() => shiftTime(sunrise, -twilightMinutes), [sunrise, twilightMinutes])
+  const lastLight = useMemo(() => shiftTime(sunset, twilightMinutes), [sunset, twilightMinutes])
+  const averages = useMemo(() => {
+    const withSun = daily.filter(day => day.sunrise && day.sunset).slice(0, 7)
+    if (withSun.length === 0) return null
+    const toMinutes = (time: string) => {
+      const date = new Date(time)
+      return date.getHours() * 60 + date.getMinutes()
+    }
+    const avg = (values: number[]) => values.reduce((sum, v) => sum + v, 0) / Math.max(1, values.length)
+    const fmt = (minutes: number) => `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(Math.round(minutes % 60)).padStart(2, '0')}`
+    const sunriseValues = withSun.map(day => toMinutes(day.sunrise))
+    const sunsetValues = withSun.map(day => toMinutes(day.sunset))
+    // 平均日出/日落：简单算术平均会在跨 0 点（高纬夏季日出 04:xx 与冬季 07:xx）时失真，
+    // 用向量平均（角度平均）处理时刻环绕
+    const vectorAvg = (values: number[]) => {
+      const rad = values.map(v => (v / 1440) * 2 * Math.PI)
+      const x = rad.reduce((sum, r) => sum + Math.cos(r), 0) / rad.length
+      const y = rad.reduce((sum, r) => sum + Math.sin(r), 0) / rad.length
+      let angle = Math.atan2(y, x)
+      if (angle < 0) angle += 2 * Math.PI
+      return (angle / (2 * Math.PI)) * 1440
+    }
+    const longest = withSun.reduce((best, day) => {
+      const minutes = toMinutes(day.sunset) - toMinutes(day.sunrise)
+      return minutes > best.minutes ? { minutes, date: day.date } : best
+    }, { minutes: -1, date: '' })
+    return {
+      sunrise: fmt(vectorAvg(sunriseValues)),
+      sunset: fmt(vectorAvg(sunsetValues)),
+      longest,
+      sampleDays: withSun.length,
+    }
+  }, [daily])
+  const todaySunrise = new Date(sunrise)
+  const todaySunset = new Date(sunset)
+  const todayDaylight = Number.isFinite(daylightDuration) && daylightDuration! > 0
+    ? daylightDuration! / 60
+    : Number.isFinite(todaySunrise.getTime()) && Number.isFinite(todaySunset.getTime())
+      ? (todaySunset.getTime() - todaySunrise.getTime()) / 60000
+      : 0
+  return (
+    <div className="mt-4 w-full overflow-hidden rounded-3xl border border-white/10">
+      {[
+        ['第一道晨光', firstLight],
+        ['最后一道暮光', lastLight],
+        ['总日照时间', formatDuration(todayDaylight)],
+        ...(sunshineDuration && sunshineDuration > 0 ? [['直达日照', formatDuration(sunshineDuration / 60)] as [string, string]] : []),
+      ].map(([label, value], index, all) => (
+        <div key={label} className={`flex items-center justify-between px-5 py-3 text-sm ${index > 0 ? 'border-t border-white/8' : ''}`}>
+          <span className="text-white/72">{label}</span>
+          <span className="font-medium tabular-nums">{value}</span>
+        </div>
+      ))}
+      {averages && (
+        <>
+          <div className="border-t border-white/10 px-5 pb-2 pt-3">
+            <div className="text-[13px] font-medium text-white/82">日出日落平均时间</div>
+            <div className="mt-0.5 text-[11px] text-white/40">基于未来 {averages.sampleDays} 天预报 · 最长日照 {formatDuration(averages.longest.minutes > 0 ? averages.longest.minutes : 0)}{averages.longest.date ? `（${Number(averages.longest.date.slice(5, 7))}月${Number(averages.longest.date.slice(8, 10))}日）` : ''}</div>
+          </div>
+          <div className="flex items-stretch border-t border-white/8">
+            <div className="flex-1 px-5 py-3">
+              <div className="text-[11px] text-white/45">平均日出</div>
+              <div className="mt-0.5 text-lg font-light tabular-nums">{averages.sunrise}</div>
+            </div>
+            <div className="w-px bg-white/8" />
+            <div className="flex-1 px-5 py-3">
+              <div className="text-[11px] text-white/45">平均日落</div>
+              <div className="mt-0.5 text-lg font-light tabular-nums">{averages.sunset}</div>
+            </div>
+          </div>
+        </>
+      )}
+      <div className="border-t border-white/8 px-5 py-2 text-[11px] text-white/35">
+        晨光/暮光为民用晨昏蒙影近似值{timeZone ? ' · 时区按当地时间显示' : ''}
+      </div>
+    </div>
+  )
+}
+
 /** 迷你趋势图：面积填充折线 */
 function MiniTrend({ values, labels, color = '#8ec9f5', unit = '', suffix = '' }: { values: number[]; labels: string[]; color?: string; unit?: string; suffix?: string }) {
   const w = 640
@@ -143,7 +276,7 @@ export default function WeatherCardDetailOverlay({ card, weather, onClose }: Car
           onClick={onClose}
         >
           <motion.div
-            className="max-h-[calc(100vh-2rem)] max-h-[calc(100dvh-2rem)] w-full max-w-[640px] overflow-y-auto overscroll-contain rounded-[32px] border border-white/14 bg-slate-900/48 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur-2xl sm:max-h-[calc(100dvh-3rem)] sm:p-7"
+            className="max-h-[calc(100vh-2rem)] max-h-[calc(100dvh-2rem)] w-full max-w-[640px] overflow-y-auto overscroll-contain rounded-[32px] border border-white/14 bg-slate-950/85 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.5)] backdrop-blur-2xl sm:max-h-[calc(100dvh-3rem)] sm:p-7"
             role="dialog"
             aria-modal="true"
             aria-labelledby="weather-card-detail-title"
@@ -241,6 +374,15 @@ export default function WeatherCardDetailOverlay({ card, weather, onClose }: Car
                     </div>
                   </div>
                   <div className="mt-3"><SunArc sunrise={weather.daily[0].sunrise} sunset={weather.daily[0].sunset} updatedAt={weather.updatedAt} timeZone={weather.timezone} /></div>
+                  <SunExtras
+                    sunrise={weather.daily[0].sunrise}
+                    sunset={weather.daily[0].sunset}
+                    daylightDuration={weather.daily[0].daylightDuration}
+                    sunshineDuration={weather.daily[0].sunshineDuration}
+                    daily={weather.daily}
+                    timeZone={weather.timezone}
+                    latitude={weather.location.latitude}
+                  />
                 </>
               )}
               {card === 'cloud' && (

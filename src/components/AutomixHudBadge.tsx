@@ -72,18 +72,20 @@ const fadeTransition = (opacity: number) =>
  * 只有「换歌」（当前曲 key 变化）或「本曲重新从头播放」（currentTime 明显回落，如单曲循环）
  * 才重新允许显示一次。
  */
+const NULL_TIME_SNAPSHOT = { currentTime: 0 }
+
 const automixNotificationMemory = {
   trackKey: '',
   notified: false,
   maxTime: 0,
 }
 
-/** AutoMix 过渡倒计时订阅：与 LiveUpNextNotification 同一 useSyncExternalStore 范式（低频重渲染，开销可忽略） */
-export function useAutomixHudTime(playbackTimeStore: PlaybackTimeStore) {
+/** AutoMix 过渡倒计时订阅：徽标内部用（useSyncExternalStore 范式，重渲染仅徽标子树） */
+export function useAutomixHudTime(playbackTimeStore: PlaybackTimeStore | null | undefined) {
   return useSyncExternalStore(
-    playbackTimeStore.subscribe,
-    playbackTimeStore.getSnapshot,
-    playbackTimeStore.getSnapshot,
+    playbackTimeStore ? playbackTimeStore.subscribe : () => () => undefined,
+    playbackTimeStore ? playbackTimeStore.getSnapshot : () => NULL_TIME_SNAPSHOT,
+    playbackTimeStore ? playbackTimeStore.getSnapshot : () => NULL_TIME_SNAPSHOT,
   ).currentTime
 }
 
@@ -124,10 +126,13 @@ export function transitionEngineDisplayName(
  *  「关闭」的语义：**本曲不做智能混音**（想完整听完这首歌，末尾只留一次短交叉），
  *  不是"隐藏这条通知"——点击后引擎会把本曲对的计划换成短交叉安全网。 */
 export const AutomixHudBadge = memo(function AutomixHudBadge({
-  info, currentTime, scale, colors, accentColor = null, onDismiss,
+  info, currentTime: currentTimeProp, playbackTimeStore, scale, colors, accentColor = null, onDismiss,
 }: {
   info: AutomixHudInfo
-  currentTime: number
+  /** 旧用法：外部传入时间（会迫使父级以 store 频率重渲染）。与 playbackTimeStore 二选一。 */
+  currentTime?: number
+  /** 新用法：徽标内部订阅时间 store——重渲染只发生在徽标子树，App 巨型组件不再 4Hz 全树 reconcile */
+  playbackTimeStore?: PlaybackTimeStore
   /** 设计稿缩放系数：固定版式播放页传布局 scale，流式布局（modern 等）传 1 */
   scale: number
   colors: { chip: string; text: string; dim: string }
@@ -135,6 +140,8 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
   accentColor?: string | null
   onDismiss: () => void
 }) {
+  const subscribedTime = useAutomixHudTime(playbackTimeStore)
+  const currentTime = playbackTimeStore ? subscribedTime : (currentTimeProp ?? 0)
   // info.key = `${当前曲 trackKey}|${切点}`：第一段即「当前曲」身份，
   // 同一首歌内重新排程（seek / 快进）只会改变切点，不会改变这一段 → 通知不重复。
   const trackKey = info.key.split('|')[0] || info.key
@@ -282,12 +289,16 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
 /** 进度条上方提示：直接显示引擎名（AutoMix / AutoMix Enhanced）+ 辉光。
  *  不再有「即将介入 / 正在介入 / 过渡效果」这类中间态文案（用户要求）。 */
 export const AutomixHudProgressHint = memo(function AutomixHudProgressHint({
-  info, currentTime, scale,
+  info, currentTime: currentTimeProp, playbackTimeStore, scale,
 }: {
   info: AutomixHudInfo
-  currentTime: number
+  /** 旧用法：外部传入时间。与 playbackTimeStore 二选一（后者重渲染仅限本组件） */
+  currentTime?: number
+  playbackTimeStore?: PlaybackTimeStore
   scale: number
 }) {
+  const subscribedTime = useAutomixHudTime(playbackTimeStore)
+  const currentTime = playbackTimeStore ? subscribedTime : (currentTimeProp ?? 0)
   const running = info.phase === 'running'
   const remaining = info.startAt - currentTime
   const visible = running || (remaining > 0 && remaining <= AUTOMIX_HUD_LEAD_SECONDS)

@@ -464,6 +464,16 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
   const [appleCompactUnavailable, setAppleCompactUnavailable] = useState(false)
   const [appleCompactVisible, setAppleCompactVisible] = useState(true)
   const compactHostRef = useRef<HTMLDivElement | null>(null)
+  // AppleWeatherCompactScene 的主 effect 依赖 onReady/onUnavailable 引用：内联箭头函数
+  // 会让挂件每 60s（setNow 重渲染）把 canvas 动画整个 teardown 重跑——观感就是
+  // 「背景播几秒后刷新一下，永远做不到无缝循环」。latest-ref 固定引用后 effect
+  // 只在 scene 真正变化时重建，动画得以持续运行。
+  // （旧回调里的 sceneId 一致性守卫可省：scene effect cleanup 已置 disposed，
+  // 卸载的旧 scene 不会再触发 onReady；scene.id 变化时上方 effect 会重置状态。）
+  const appleCompactSceneCallbacks = useMemo(() => ({
+    onReady: () => setAppleCompactReady(true),
+    onUnavailable: () => setAppleCompactUnavailable(true),
+  }), [])
 
   useEffect(() => {
     setAppleCompactReady(false)
@@ -519,12 +529,8 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
               scene={appleScene}
               active={!showDetails}
               reducedMotion={Boolean(prefersReducedMotion)}
-              onReady={() => {
-                if (appleSceneIdRef.current === appleSceneId) setAppleCompactReady(true)
-              }}
-              onUnavailable={() => {
-                if (appleSceneIdRef.current === appleSceneId) setAppleCompactUnavailable(true)
-              }}
+              onReady={appleCompactSceneCallbacks.onReady}
+              onUnavailable={appleCompactSceneCallbacks.onUnavailable}
             />
           </Suspense>
         )}

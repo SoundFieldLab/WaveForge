@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { AlertTriangle, Trash2, X } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
@@ -18,6 +19,18 @@ export default function DeleteCommentModal({ show, loading = false, onClose, onC
     }
     return false
   }, [show, onClose])
+  // 桌面端 ESC：只关本确认框（父级 CommentModal 在 pendingDeleteComment 存在时会让出 ESC）
+  useEffect(() => {
+    if (!show) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !loading) {
+        event.stopPropagation()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [show, loading, onClose])
   return (
     <AnimatePresence>
       {show && (

@@ -882,7 +882,9 @@ input, textarea, [contenteditable="true"] {
     inset 0 -1px 1px rgba(0, 0, 0, 0.1);
   backdrop-filter: blur(10px) saturate(180%);
   -webkit-backdrop-filter: blur(10px) saturate(180%);
-  transition: all 0.2s ease;
+  /* 只过渡 transform（hover 改的属性）：all 会让 backdrop-filter/box-shadow 参与
+     过渡，模糊与阴影在过渡期间每帧重新栅格化（见文件顶部 14-16 行的警告） */
+  transition: transform 0.2s ease;
   position: relative;
 }
 
@@ -911,7 +913,7 @@ input, textarea, [contenteditable="true"] {
     0 4px 16px rgba(0, 0, 0, 0.2),
     inset 0 1px 1px rgba(255, 255, 255, 0.8),
     inset 0 -1px 1px rgba(0, 0, 0, 0.1);
-  transition: all 0.2s ease;
+  transition: transform 0.2s ease;
 }
 
 .range-slider-glass::-moz-range-thumb:hover {
@@ -1590,6 +1592,22 @@ input, textarea, [contenteditable="true"] {
 .plugin-center-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.24); }
 .plugin-center-scroll::-webkit-scrollbar-track { background: transparent; }
 
+/* 学歌控制台滚动条：与插件中心同风格 */
+.singalong-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+.singalong-scroll::-webkit-scrollbar-thumb { background: rgba(124,92,255,0.28); border-radius: 3px; }
+.singalong-scroll::-webkit-scrollbar-thumb:hover { background: rgba(124,92,255,0.45); }
+.singalong-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* 学歌分轨滑杆 */
+.singalong-range::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 16px; height: 16px; border-radius: 50%; background: #f7f7fa; border: 1px solid rgba(255,255,255,0.65); box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+.singalong-range::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: #f7f7fa; border: 1px solid rgba(255,255,255,0.65); box-shadow: 0 2px 8px rgba(0,0,0,0.35); }
+
+/* 学歌逐字咬字练习：hover 1s 后的呼吸辉光 */
+@keyframes singalongBreath {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(196,181,253,0.45)); }
+  50% { filter: drop-shadow(0 0 16px rgba(196,181,253,0.95)); }
+}
+
 /* 调试日志等需要可复制文本的容器（覆盖全局 user-select: none） */
 .plugin-log-select,
 .plugin-log-select * {
@@ -1659,4 +1677,16 @@ input[type='number'].no-spinner {
    内联的 scrollbar-width 只管 Firefox，Chromium 得靠这条伪元素规则。 */
 .soda-lyrics-scroller::-webkit-scrollbar {
   display: none;
+}
+
+/* 发现页红心Radio 声纹条：播放中律动（App 同款） */
+@keyframes kg-radio-bar-dance {
+  0%, 100% { transform: scaleY(0.45); }
+  50% { transform: scaleY(1); }
+}
+.kg-radio-bar {
+  animation: kg-radio-bar-dance 0.9s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kg-radio-bar { animation: none; }
 }

@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio, X , Lightbulb, Share2, Link2} from 'lucide-react'
-import { Song, getProxiedImageUrl } from '../services/musicApi'
+import { Song, getProxiedImageUrl, qqSongCoverUrl } from '../services/musicApi'
 import { getAddablePlaylists, getPlaylistMutationId } from '../services/addablePlaylists'
 import { readPlaylistOwnersFromStorage } from '../services/playlistOwnership'
 import { getPlatformCapabilities, getPlatformCookie, getPlatformFavoriteLabels, platformLabel } from '../services/platforms'
@@ -959,10 +959,10 @@ export default function SongContextMenu({
             className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.12] bg-[#101216] shadow-2xl"
           >
             {/* 卡片内部背景 = 当前歌曲封面（外部不铺图）；压暗保证文字可读 */}
-            {artistPicker.song.album?.picUrl ? (
+            {qqSongCoverUrl(artistPicker.song) ? (
               <div className="absolute inset-0">
                 <img
-                  src={getProxiedImageUrl(artistPicker.song.album.picUrl, 512)}
+                  src={getProxiedImageUrl(qqSongCoverUrl(artistPicker.song), 512)}
                   alt=""
                   className="h-full w-full object-cover"
                   draggable={false}

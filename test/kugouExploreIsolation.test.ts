@@ -69,13 +69,13 @@ describe('酷狗探索页板块的平台隔离', () => {
     expect(source).not.toContain('<KugouDiscoverBoard')
   })
 
-  it('KugouExplorePage 是音乐/听书两区外壳（刷歌已下线），且只引用酷狗专属板块', () => {
+  it('KugouExplorePage 是发现/音乐/听书三区外壳（刷歌已下线），且只引用酷狗专属板块', () => {
     const page = feature('kugouExplore/KugouExplorePage.tsx').replace(/\r\n/g, '\n')
-    expect(page).toContain("export type KugouExploreZoneId = 'music' | 'longaudio'")
-    for (const label of ["label: '音乐'", "label: '听书'"]) {
+    expect(page).toContain("export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio'")
+    for (const label of ["label: '发现'", "label: '音乐'", "label: '听书'"]) {
       expect(page).toContain(label)
     }
-    // 三区内容分别由酷狗专属板块提供
+    // 三区内容分别由酷狗专属板块提供（发现 = 概念版「发现」tab 复刻 KugouDiscoverBoard）
     expect(page).toContain('<KugouDiscoverBoard')
     expect(page).toContain('<KugouExploreSections')
     expect(page).toContain('<KugouLongaudioBoard')

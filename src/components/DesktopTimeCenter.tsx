@@ -359,7 +359,7 @@ function WorldClock({ accentColor, now }: { accentColor: string; now: Date }) {
   const availableCities = WORLD_CITIES.filter(city => !selectedIds.includes(city.id) && `${city.name}${city.country}`.toLowerCase().includes(query.toLowerCase()))
   const updateSelection = (ids: string[]) => {
     setSelectedIds(ids)
-    localStorage.setItem(WORLD_CLOCK_STORAGE_KEY, JSON.stringify(ids))
+    try { localStorage.setItem(WORLD_CLOCK_STORAGE_KEY, JSON.stringify(ids)) } catch { /* 配额满忽略 */ }
   }
 
   return (

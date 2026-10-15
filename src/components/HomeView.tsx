@@ -1,4 +1,5 @@
 import { memo, startTransition, useState, useEffect, useRef, lazy, Suspense } from 'react'
+import { getSecureToken, setSecureToken } from '../services/secureTokenStore'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { motion, AnimatePresence, animate, useMotionValue } from 'framer-motion'
 import { useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -6,7 +7,7 @@ import { isTvModeActive } from '../platform'
 import { usePerfMode } from '../tv/perfMode'
 import { Play, Music, LogOut, Crown, User, Heart, MonitorSmartphone, Search, Settings, History, Speaker } from 'lucide-react'
 import { accountTierBadgeClass, getAccountTierBadge } from '../services/accountTier'
-import { Song, resolveSongAlbumIdentifier, getSongUrl, isSameSong } from '../services/musicApi'
+import { Song, resolveSongAlbumIdentifier, getSongUrl, isSameSong, qqSongCoverUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCapabilities, getVisiblePlatforms, PLATFORM_VISIBILITY_EVENT, PLATFORM_ORDER_EVENT } from '../services/platforms'
 import PlaylistDetailPanel from './PlaylistDetailPanel'
@@ -36,6 +37,7 @@ import {
   type HomeModuleType,
 } from '../services/homeModules'
 import type { KugouMinimalTab } from '../features/kugouMinimal/KugouMinimalCenter'
+import { cookieHeaders } from '../services/cookieRequest'
 
 // 酷狗专属区块（听书 / 个人中心 / 最近播放 / 收藏）：懒加载，默认模式 chunk 不为酷狗服务层背体积；
 // 只有切到 kugou 平台才下载/渲染（平台隔离）
@@ -395,6 +397,8 @@ function HomeView({
       : []
   ))
   const [playlistLoading, setPlaylistLoading] = useState(false)
+  // 首次加载失败错误态：与「该账号没有歌单」区分，断网/后端未起不再是误导性空态
+  const [playlistError, setPlaylistError] = useState('')
   // 平台切换器操作提示：15 秒后渐隐
   const [switcherHintVisible, setSwitcherHintVisible] = useState(true)
   useEffect(() => {
@@ -800,8 +804,8 @@ function HomeView({
       }
 
       if (playlistPlatform === 'netease') {
-        const neteaseCookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
-        const response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}&cookie=${encodeURIComponent(neteaseCookie)}`)
+        const neteaseCookie = getSecureToken("netease_cookie") || ''
+        const response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(neteaseCookie) })
         data = await response.json()
         if (!response.ok || data.error) throw new Error(data.error || '读取网易云歌单失败')
         const songs = mapPlaylistTracksToSongs(data.playlist?.tracks || [], 'netease')
@@ -829,8 +833,8 @@ function HomeView({
         return songs
       }
 
-      const cookie = localStorage.getItem('qq_cookie') || ''
-      const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}&cookie=${encodeURIComponent(cookie)}`)
+      const cookie = getSecureToken('qq_cookie') || ''
+      const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
       data = await response.json()
       if (!response.ok || data.error) throw new Error(data.error || '读取QQ歌单失败')
       const songs = mapPlaylistTracksToSongs(data.songlist || data.data?.songlist || [], 'qq')
@@ -1078,8 +1082,12 @@ function HomeView({
           },
         })
       } else if (playlistPlatform === 'qq') {
-        const cookie = localStorage.getItem('qq_cookie') || ''
-        const data = await fetchWithRetry(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}&cookie=${encodeURIComponent(cookie)}`)
+        const cookie = getSecureToken('qq_cookie') || ''
+        // fetchWithRetry 的第二参是 maxRetries：headers 走 URL 剥离不了的路径，改用内联 fetch + headers
+        const data = await (async () => {
+          const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie), signal: abortController.signal, cache: 'no-store' })
+          return response.json()
+        })()
         if (!isCurrentRequest()) return
 
         if (data.playlist) {
@@ -1188,16 +1196,19 @@ function HomeView({
       }
 
       const createdId = result?.playlist?.id || result?.data?.playlist?.id || result?.id || result?.playlistId
+      // 描述/封面是"补传"步骤：失败不应整体回滚——歌单主体已在服务器创建，
+      // 此前 throw 会跳过 refreshPlaylists/关弹窗，用户以为失败再点创建 → 出现重复歌单。
+      const postCreateFailures: string[] = []
       if (platform === 'netease' && description && createdId) {
         const updateResult = await updatePlaylist(createdId.toString(), 'netease', { name, desc: description, tags: '' })
         if (!isPlaylistActionSuccessful(updateResult)) {
-          throw new Error(updateResult?.error || updateResult?.message || '歌单描述保存失败')
+          postCreateFailures.push('描述保存失败')
         }
       }
       if (platform === 'netease' && coverDataUrl && createdId) {
         const coverResult = await updatePlaylistCover(createdId.toString(), coverDataUrl, 'netease')
         if (!isPlaylistActionSuccessful(coverResult)) {
-          throw new Error(coverResult?.error || coverResult?.message || '歌单封面上传失败')
+          postCreateFailures.push('封面上传失败')
         }
       }
 
@@ -1206,8 +1217,10 @@ function HomeView({
       showPlaylistToast(
         platform === 'qq' && (description || coverDataUrl)
           ? 'QQ 歌单创建成功；描述和自定义封面不受当前接口支持'
-          : '歌单创建成功',
-        'success'
+          : postCreateFailures.length
+            ? `歌单已创建，但${postCreateFailures.join('、')}——可稍后在编辑中补`
+            : '歌单创建成功',
+        postCreateFailures.length ? 'info' : 'success'
       )
     } catch (error) {
       console.error('Create playlist failed:', error)
@@ -1613,18 +1626,8 @@ function HomeView({
     }
   }, [])
   
-  // Watch for card blur changes
-  useEffect(() => {
-    const handleBlurChange = (e: Event) => {
-      const customEvent = e as CustomEvent
-      if (customEvent.detail !== undefined) {
-        setCardBlurAmount(customEvent.detail)
-      }
-    }
-    
-    window.addEventListener('cardBlurChanged', handleBlurChange)
-    return () => window.removeEventListener('cardBlurChanged', handleBlurChange)
-  }, [])
+  // cardBlurChanged 是拼写漂移的死监听（正确事件名 cardBlurAmountChanged 在 642 行已有
+  // 监听承担），已删除
   
   // 根据登录状态更新默认模块
   useEffect(() => {
@@ -2081,7 +2084,7 @@ function HomeView({
         // 汽水：/api/soda/recent 复用后端账号库聚合缓存（recently-played-media），
         // 返回 mapSodaMedia 映射歌曲（id/name/artist/album/coverUrl/durationMs...），不新造字段
         if (platform === 'soda') {
-          const sdCookie = localStorage.getItem('soda_token') || ''
+          const sdCookie = getSecureToken('soda_token') || ''
           if (!sdCookie) {
             setRecentPlaybackSummary({ covers: [], count: 0 })
             return
@@ -2111,7 +2114,7 @@ function HomeView({
           return
         }
         if (platform === 'netease') {
-          const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+          const cookie = getSecureToken("netease_cookie") || ''
           if (!cookie) return
           const result = await fetchNeteaseRecentSongs(cookie, 100)
           if (controller.signal.aborted) return
@@ -2127,8 +2130,8 @@ function HomeView({
           return
         }
         const cookie = platform === 'qq'
-          ? localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
-          : localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+          ? getSecureToken("qq_cookie") || ''
+          : getSecureToken("netease_cookie") || ''
         if (!cookie) return
         const endpoint = platform === 'qq'
           ? 'http://localhost:3001/api/qq/record/recent/song'
@@ -2624,9 +2627,8 @@ function HomeView({
 
                           {/* 封面 */}
                           <div className={`w-10 h-10 rounded-md overflow-hidden flex-shrink-0 ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`}>
-                            {song.album?.picUrl ? (
-                              <CachedImage 
-                                src={song.album.picUrl} 
+                            {qqSongCoverUrl(song) ? (
+                              <CachedImage src={qqSongCoverUrl(song)} 
                                 alt={song.name} 
                                 className="w-full h-full object-cover"
                                 role="row"
@@ -2797,6 +2799,16 @@ function HomeView({
             ) : playlistLoading && userPlaylists.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <div className={playerTheme === 'dark' ? 'text-white/60' : 'text-black/55'}>加载中...</div>
+              </div>
+            ) : playlistError && userPlaylists.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full gap-4">
+                <p className={playerTheme === 'dark' ? 'text-white/60' : 'text-black/55'}>{playlistError}</p>
+                <button
+                  onClick={() => void loadUserPlaylists(true)}
+                  className={`px-5 py-2 rounded-full text-sm font-medium transition-colors ${playerTheme === 'dark' ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-black/5 hover:bg-black/10 text-black'}`}
+                >
+                  重试
+                </button>
               </div>
             ) : userPlaylists.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full gap-4">

@@ -131,7 +131,12 @@ function useDesktopProductivity() {
     const next = updater(dataRef.current)
     dataRef.current = next
     setData(next)
-    localStorage.setItem(PRODUCTIVITY_STORAGE_KEY, JSON.stringify(next))
+    // setItem 在 setState updater 之外：配额满时抛异常不能打断 React 更新流程
+    try {
+      localStorage.setItem(PRODUCTIVITY_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      // 配额满/隐私模式：放弃持久化，内存态照常生效
+    }
     window.dispatchEvent(new CustomEvent(PRODUCTIVITY_EVENT, { detail: next }))
   }, [])
 

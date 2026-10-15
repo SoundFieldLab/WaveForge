@@ -82,6 +82,9 @@ export default function DGLabWidget() {
   }, [])
 
   // 波形绘制
+  // 依赖 pluginOn/visible：小组件先以隐藏态挂载时 canvas 不在 DOM（return null），
+  // 首次 effect 拿不到 canvas 直接退出；用户之后在控制台打开「实时波形常驻」时
+  // 必须重跑本 effect，否则绘制循环永远建立不起来（表现为黑画布 + 数值正常）。
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -177,7 +180,7 @@ export default function DGLabWidget() {
       envARef.current = []
       envBRef.current = []
     }
-  }, [])
+  }, [pluginOn, visible])
 
   if (!pluginOn || !visible) return null
 

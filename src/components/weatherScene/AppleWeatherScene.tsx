@@ -225,7 +225,11 @@ export default function AppleWeatherScene({ scene, active, reducedMotion = false
             const h = Math.max(height * 0.42, width / 3)
             const w = h * 3
             const x = -((t * width / 360) % (w / 3))
-            for (let repeat = -1; repeat < Math.ceil(width / w) + 2; repeat += 1) ctx.drawImage(background, x + repeat * w, height * 0.02, w, h)
+            // 云背景图顶部有硬边（裁自原版 .caml，顶缘未羽化）：贴顶 y=2% 时图顶的亮灰
+            // 带以"横贯全屏的灰条"直接可见（用户实测）。上移 6% 把硬边带出屏幕顶，
+            // 高度补偿同量，保持底部覆盖不变。
+            const tileY = -h * 0.06
+            for (let repeat = -1; repeat < Math.ceil(width / w) + 2; repeat += 1) ctx.drawImage(background, x + repeat * w, tileY, w, h)
           }
         }
         const suffix = scene.isDay && scene.kind === 'partly-cloudy' ? 'Blue' : 'Neutral'

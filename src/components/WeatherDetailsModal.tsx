@@ -26,6 +26,8 @@ import { moonInfoAt } from '../services/moonPhase'
 import type { HazardSnapshot } from '../services/hazardService'
 import WeatherHazardsPanel from './WeatherHazardsPanel'
 import WeatherMapExperience from './WeatherMapExperience'
+import ScrollToTop from './ScrollToTop'
+import ErrorBoundary from './ErrorBoundary'
 import MoonPhaseExperience, { MoonDisc } from './MoonPhaseExperience'
 import WeatherCardDetailOverlay, { type WeatherCardKind } from './WeatherCardDetail'
 import { IconSunrise, IconSunset } from './AppleWeatherIcon'
@@ -140,6 +142,8 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
   }, [sceneId])
   const secondaryOverlayOpen = weatherMapOpen || moonOpen || detailCard !== null || selectedDayIndex !== null
   const weatherAnimationActive = open && activeTab === 'weather' && !secondaryOverlayOpen
+  // 天气主视图滚动容器（内容超一屏后显示「回到顶部」）
+  const weatherScrollRef = useRef<HTMLDivElement | null>(null)
   const openDetailCard = useCallback((card: WeatherCardKind) => {
     setWeatherMapOpen(false)
     setMoonOpen(false)
@@ -341,6 +345,7 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
             exit={{ y: 14, opacity: 0 }}
             transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
             className="absolute inset-0 z-[3] overflow-y-auto wf-no-scrollbar"
+            ref={weatherScrollRef}
           >
             <div className="relative mx-auto min-h-full w-full max-w-[1560px] px-7 pb-9 pt-7 md:px-12 xl:max-w-[1720px]">
               <div className="absolute right-6 top-6 flex items-center gap-2 md:right-10 md:top-8">
@@ -586,12 +591,14 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
 
                     {/* 天气地图 */}
                     <div className="lg:col-span-3 xl:col-span-4 [&>button]:mt-0">
-                      <WeatherMapExperience
-                        weather={weather}
-                        open={weatherMapOpen}
-                        onOpen={openWeatherMap}
-                        onClose={() => setWeatherMapOpen(false)}
-                      />
+                      <ErrorBoundary inline inlineLabel="天气地图加载出错">
+                        <WeatherMapExperience
+                          weather={weather}
+                          open={weatherMapOpen}
+                          onOpen={openWeatherMap}
+                          onClose={() => setWeatherMapOpen(false)}
+                        />
+                      </ErrorBoundary>
                     </div>
                   </div>
 
@@ -605,8 +612,15 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
               )}
             </div>
           </motion.div>
+          {/* 回到顶部：天气主视图内容超一屏（10 日预报/逐小时/灾害面板）后显示。
+              挂在滚动容器外层（弹窗视口层），absolute 才能固定在右下角而不是随内容滚走。 */}
+          {activeTab === 'weather' && !secondaryOverlayOpen && (
+            <ScrollToTop containerRef={weatherScrollRef} position="absolute" offsetBottom={28} offsetRight={30} />
+          )}
           {/* 月相页（月亮卡片点击进入） */}
-          <MoonPhaseExperience weather={weather} open={moonOpen} onOpen={openMoon} onClose={() => setMoonOpen(false)} />
+          <ErrorBoundary inline inlineLabel="月相展示出错">
+            <MoonPhaseExperience weather={weather} open={moonOpen} onOpen={openMoon} onClose={() => setMoonOpen(false)} />
+          </ErrorBoundary>
           {/* 详情卡二级弹窗（苹果式：所有卡片均可点开） */}
           <WeatherCardDetailOverlay card={detailCard} weather={weather} onClose={() => setDetailCard(null)} />
           {weather && selectedDayIndex !== null && <WeatherDayDetail open dayIndex={selectedDayIndex} weather={weather} onClose={() => setSelectedDayIndex(null)} onSelectDay={setSelectedDayIndex} />}

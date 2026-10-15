@@ -9,6 +9,7 @@ import {
   SIMPLE_EQ_BANDS,
 } from '../services/audioEffects/AudioEffectsEngine'
 import { useTvBack } from '../tv/tvCore'
+import { isTvModeActive } from '../platform'
 
 interface MixingStudioProps {
   engine: AudioEffectsEngine
@@ -768,7 +769,9 @@ export default function MixingStudio({ engine, onClose, playerTheme, sourceUrl, 
                     </>
                   )}
 
-                  {glassCardShell(
+                  {/* 导出 WAV 需要整曲 decodeAudioData（TV WebView 上数百 MB 级内存开销）+
+                      <a download>（Android WebView 支持不全），TV 上整卡隐藏 */}
+                  {!isTvModeActive() && glassCardShell(
                     <>
                       <div className={`${textPrimary} text-[15px] font-medium mb-1`}>导出处理后的音乐</div>
                       <div className={`${textSecondary} text-xs mb-3`}>把当前音效与均衡器离线渲染成 WAV 文件下载（个人处理用途，涉及版权曲目请勿分发）</div>

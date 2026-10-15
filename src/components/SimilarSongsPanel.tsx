@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useRef, useState, type MouseEvent } from 
 import { motion } from 'framer-motion'
 import { X, Music, Play, ListPlus } from 'lucide-react'
 import type { Song } from '../services/musicApi'
-import { getSimilarSongs, getProxiedImageUrl } from '../services/musicApi'
+import { getSimilarSongs, getProxiedImageUrl, qqSongCoverUrl } from '../services/musicApi'
 import { platformLabel } from '../services/platforms'
 import { createTtlCache } from '../utils/ttlCache'
 import { useTvBack } from '../tv/tvCore'
@@ -236,7 +236,7 @@ function SimilarSongsPanel({ song, onClose, onPlayNow, onPlayNext, playerTheme, 
             </div>
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 rounded-xl overflow-hidden shrink-0" style={{ border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)' }}>
-                {song.album?.picUrl ? <img src={getProxiedImageUrl(song.album.picUrl, 100)} alt={song.name} className="w-full h-full object-cover" /> : <Music className="w-5 h-5 m-auto mt-3.5 text-white/30" />}
+                {qqSongCoverUrl(song) ? <img src={getProxiedImageUrl(qqSongCoverUrl(song), 100)} alt={song.name} className="w-full h-full object-cover" /> : <Music className="w-5 h-5 m-auto mt-3.5 text-white/30" />}
               </div>
               <div className="min-w-0">
                 <p className="text-white text-sm font-medium truncate">{song.name}</p>

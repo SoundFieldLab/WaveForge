@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertCircle, X, Check } from 'lucide-react'
+import { AlertCircle, X, Check, Info } from 'lucide-react'
 
 interface GlobalToastProps {
   show: boolean
@@ -69,7 +69,7 @@ export default function GlobalToast({ show, message, type = 'success', onClose }
       case 'warning':
         return <AlertCircle className="w-5 h-5 text-white" />
       case 'info':
-        return <Check className="w-5 h-5 text-white" />
+        return <Info className="w-5 h-5 text-white" />
     }
   }
 

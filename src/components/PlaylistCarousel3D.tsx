@@ -185,6 +185,10 @@ function PlaylistCarousel3D({ playlists, onPlaylistSelect, onPlaylistContextMenu
       // 空间导航接管，这里跳过，避免同一按键触发两次导航。
       const f = tvFocusRef.current
       if (isTvModeActive() && f && !containerRef.current?.contains(f)) return
+      // 输入框/可编辑区豁免：同视图常驻的桌面备忘/笔记编辑器里按左右键是移动光标，
+      // 不能被这里 preventDefault 抢走（参照 PlayerControls 的 isEditable 口径）。
+      const target = e.target as HTMLElement | null
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault()
         

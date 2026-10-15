@@ -373,7 +373,7 @@ export default function ResonanceSettingsModal(props: ResonanceSettingsModalProp
                           } catch { /* 落盘失败走降级 */ }
                         }
                         if (dataUrl.length > 2 * 1024 * 1024) {
-                          window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '图片过大（>1.5MB），请改用图片地址输入', type: 'warning' } }))
+                          window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '图片过大（>1.5MB），请改用图片地址输入', type: 'error' } }))
                           return
                         }
                         update('backgroundImage', dataUrl)

@@ -19,6 +19,7 @@
 //    不需要登记，写在这里即可。
 // ═══════════════════════════════════════════════════════════════════════════
 import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
+import { setSecureToken } from '../services/secureTokenStore'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic } from 'lucide-react'
 import LoginButton from './LoginButton'
@@ -52,7 +53,7 @@ import { getVersionDisplay } from '../services/versionInfo'
 import { VERSION_HISTORY } from '../services/versionHistory'
 import { getDebugPanelVisible, setDebugPanelVisible } from '../tv/debugStore'
 import { setTvFocus, useTvBack } from '../tv/tvCore'
-import { isTvModeActive, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale } from '../platform'
+import { isTvModeActive, isAndroid, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale } from '../platform'
 import {
   loadPlaybackShortcutSettings,
   savePlaybackShortcutSettings,
@@ -109,6 +110,8 @@ type UpdateDetail = {
   hotSha?: string
   installUrls?: string[]
   installSha?: string
+  // 签名过的完整清单对象（含 manifestSignature）：下载走主进程验签，urls/sha 不再由渲染层自由提供
+  manifest?: Record<string, unknown> | null
 }
 type DeviceGrant = { feature: string; label: string; issuedAt: number; expiresAt: number | null; note?: string }
 type DeviceState = { status: 'idle' | 'loading' | 'ready' | 'error'; deviceId: string; storage?: 'registry' | 'file'; grants: DeviceGrant[]; message?: string }
@@ -306,8 +309,9 @@ function SettingsPanel({
   })
   
   const [upNextSeconds, setUpNextSeconds] = useState(() => {
-    const saved = localStorage.getItem('upNextSeconds')
-    return saved !== null ? parseInt(saved) : 10
+    // 与 App.tsx 读取侧同口径：脏数据（非数字/越界）回退默认，避免 NaN 进 range input
+    const parsed = parseInt(localStorage.getItem('upNextSeconds') || '', 10)
+    return Number.isFinite(parsed) ? Math.min(30, Math.max(5, parsed)) : 10
   })
   
   const [translationPosition, setTranslationPosition] = useState<'traditional' | 'bottom-right'>(() => {
@@ -420,7 +424,14 @@ function SettingsPanel({
   useEffect(() => {
     const onBiliAuthChanged = () => refreshBiliAuth()
     window.addEventListener('bilibili-auth-changed', onBiliAuthChanged as EventListener)
-    return () => window.removeEventListener('bilibili-auth-changed', onBiliAuthChanged as EventListener)
+    // secureTokenStore hydrate 完成广播：B站 cookie 在加密存储，useState 初始化时
+    // hydrate 未完成 → 显示"未登录"；App.tsx 只消费该事件恢复自己的 state，设置页
+    // 必须自行监听刷新，否则错误状态持续到下一次登录事件。
+    window.addEventListener('secure-store:hydrated', onBiliAuthChanged as EventListener)
+    return () => {
+      window.removeEventListener('bilibili-auth-changed', onBiliAuthChanged as EventListener)
+      window.removeEventListener('secure-store:hydrated', onBiliAuthChanged as EventListener)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -428,8 +439,8 @@ function SettingsPanel({
     const next = { ...appleMusic, ...patch }
     setAppleMusic(next)
     localStorage.setItem('appleMusicEnabled', JSON.stringify(next.enabled))
-    localStorage.setItem('appleDeveloperToken', next.developerToken)
-    localStorage.setItem('appleMediaUserToken', next.mediaUserToken)
+    setSecureToken('appleDeveloperToken', next.developerToken)
+    setSecureToken('appleMediaUserToken', next.mediaUserToken)
     localStorage.setItem('appleStorefront', next.storefront)
     localStorage.setItem('appleLyricLang', next.lyricLang)
     localStorage.setItem('applePreferCover', JSON.stringify(next.preferAppleCover))
@@ -1123,9 +1134,19 @@ function SettingsPanel({
         return
       }
 
-      // 桌面/网页：拉多源更新清单（Gitee 主源 → ghproxy 加速的 GitHub → GitHub 直连），比较版本号
+      // 桌面/网页：拉多源更新清单（Gitee 主源 → ghproxy 加速的 GitHub → GitHub 直连），比较版本号。
+      // TV 真机若 WaveForgeNative 桥意外缺失（WebView 注入失败等），不能落到这里——
+      // 清单产物是 Windows 安装包/热更包，TV 用户点"立即更新"会走进死路（electron.update 桥
+      // 在 TV 上是 undefined）。提示改走系统浏览器下载页。
+      if (!nativeBridge && isAndroid()) {
+        setUpdateCheck({
+          status: 'error',
+          message: '当前环境不可用应用内更新，请到 releases 页面下载最新 APK 安装',
+        })
+        return
+      }
       const { UPDATE_MANIFEST_URLS, withDownloadProxies } = await import('../services/updateConstants')
-      let manifest: { version?: string; notes?: string; artifacts?: Record<string, { urls?: string[]; sha256?: string }> } | null = null
+      let manifest: { version?: string; notes?: string; manifestSignature?: string; artifacts?: Record<string, { urls?: string[]; sha256?: string }> } | null = null
       let httpStatus = 0
       for (const url of UPDATE_MANIFEST_URLS) {
         try {
@@ -1161,6 +1182,8 @@ function SettingsPanel({
         hotSha: hotArtifact?.sha256 || '',
         installUrls: winUrl ? withDownloadProxies(winUrl) : undefined,
         installSha: winArtifact?.sha256 || '',
+        // 完整清单（含签名）透传给 UpdateManager → 主进程验签下载
+        manifest: manifest as unknown as Record<string, unknown>,
       }
       setUpdateDetail(detail)
       setUpdateCheck({ status: 'available', message: `当前版本：${packageInfo.version}  新版本：${getVersionDisplay(remoteVersion)}` })
@@ -1264,7 +1287,7 @@ function SettingsPanel({
     setHighRefreshEnabled(enabled)
     try {
       // 开启时默认跟随显示器最高（null）；用户后续可在档位里改
-      const result = await window.electron?.display.setHighRefresh(enabled, enabled ? highRefreshHz : null)
+      const result = await window.electron?.display?.setHighRefresh(enabled, enabled ? highRefreshHz : null)
       if (result) setHighRefreshEnabled(result.enabled)
       window.dispatchEvent(new CustomEvent('showToast', { detail: { message: enabled ? `全局高刷已开启（${result?.hz || '跟随显示器'}Hz）` : '已关闭全局高刷', type: 'info' } }))
       refreshDisplayInfo()
@@ -1278,7 +1301,7 @@ function SettingsPanel({
     setHighRefreshHz(hz)
     if (!highRefreshEnabled) return
     try {
-      const result = await window.electron?.display.setHighRefresh(true, hz)
+      const result = await window.electron?.display?.setHighRefresh(true, hz)
       if (result) window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已切换为 ${hz || '跟随显示器最高'}Hz`, type: 'info' } }))
       refreshDisplayInfo()
     } catch (error) {
@@ -1661,8 +1684,9 @@ function SettingsPanel({
   })
   
   const [crossfadeDuration, setCrossfadeDuration] = useState(() => {
-    const saved = localStorage.getItem('crossfadeDuration')
-    return saved ? parseFloat(saved) : 4
+    const saved = parseFloat(localStorage.getItem('crossfadeDuration') || '')
+    // 与 App.tsx 同口径：脏数据回退默认（NaN 会让引擎过渡时长计算失败）
+    return Number.isFinite(saved) && saved > 0 ? saved : 4
   })
   
   const [gaplessEnabled, setGaplessEnabled] = useState(() => {
@@ -1911,6 +1935,13 @@ function SettingsPanel({
   } | null>(null)
 
   // 触发联通测试并展示（开关开启/重启仍开启时后台测）；75s 兜底超时显示"连接超时"
+  // guard 句柄入 ref 并在卸载时清理：面板中途关闭后 75s 的悬挂 setState 不再触发。
+  const proxyProbeGuardRef = useRef<number | null>(null)
+  // probe 代次：快速切开关时两次 probe 重叠，第一个完成不得清掉第二个的兜底定时器
+  const probeGenerationRef = useRef(0)
+  useEffect(() => () => {
+    if (proxyProbeGuardRef.current !== null) window.clearTimeout(proxyProbeGuardRef.current)
+  }, [])
   const probeAndShow = () => {
     setProxyLatency({ status: 'testing', result: null })
     const timeoutResult = {
@@ -1918,10 +1949,28 @@ function SettingsPanel({
       github: { timeout: true, total: 0, loss: 0, lossRate: 100, avgLatency: 0, minLatency: 0, maxLatency: 0 },
       google: { timeout: true, total: 0, loss: 0, lossRate: 100, avgLatency: 0, minLatency: 0, maxLatency: 0 },
     }
-    const guard = window.setTimeout(() => setProxyLatency({ status: 'done', result: timeoutResult }), 75_000)
+    const generation = ++probeGenerationRef.current
+    if (proxyProbeGuardRef.current !== null) window.clearTimeout(proxyProbeGuardRef.current)
+    const clearOwnGuard = () => {
+      if (proxyProbeGuardRef.current !== null && probeGenerationRef.current === generation) {
+        window.clearTimeout(proxyProbeGuardRef.current)
+        proxyProbeGuardRef.current = null
+      }
+    }
+    proxyProbeGuardRef.current = window.setTimeout(() => {
+      if (probeGenerationRef.current !== generation) return
+      proxyProbeGuardRef.current = null
+      setProxyLatency({ status: 'done', result: timeoutResult })
+    }, 75_000)
     void window.electron?.proxyManager?.probe?.()
-      .then((r) => { window.clearTimeout(guard); if (r) setProxyLatency(r) })
-      .catch(() => { window.clearTimeout(guard); setProxyLatency({ status: 'done', result: timeoutResult }) })
+      .then((r) => {
+        clearOwnGuard()
+        if (probeGenerationRef.current === generation && r) setProxyLatency(r)
+      })
+      .catch(() => {
+        clearOwnGuard()
+        if (probeGenerationRef.current === generation) setProxyLatency({ status: 'done', result: timeoutResult })
+      })
   }
 
   useEffect(() => {
@@ -4720,29 +4769,29 @@ function SettingsPanel({
                                 {showGpuDetail && (
                                   <div className="mt-2 space-y-1 leading-relaxed">
                                     <div className="flex flex-wrap gap-x-4 gap-y-1">
-                                      <span className="inline-flex items-baseline gap-x-1.5">
-                                        <span className="opacity-60">显卡</span>
-                                        <span className="max-w-[340px] truncate align-baseline">{gpuStatus.gpu?.deviceString || gpuStatus.gpu?.vendorString || '未知'}</span>
+                                      <span className="inline-flex min-w-0 max-w-full items-baseline gap-x-1.5">
+                                        <span className="shrink-0 opacity-60">显卡</span>
+                                        <span className="min-w-0 max-w-[340px] truncate align-baseline">{gpuStatus.gpu?.deviceString || gpuStatus.gpu?.vendorString || '未知'}</span>
                                       </span>
                                       {gpuStatus.gpu?.driverVersion && (
-                                        <span className="inline-flex items-baseline gap-x-1.5">
-                                          <span className="opacity-60">驱动版本</span>
-                                          <span className="align-baseline">{gpuStatus.gpu.driverVersion}</span>
+                                        <span className="inline-flex min-w-0 items-baseline gap-x-1.5">
+                                          <span className="shrink-0 opacity-60">驱动版本</span>
+                                          <span className="min-w-0 truncate align-baseline">{gpuStatus.gpu.driverVersion}</span>
                                         </span>
                                       )}
-                                      <span className="inline-flex items-baseline gap-x-1.5">
-                                        <span className="opacity-60">ANGLE 渲染器</span>
-                                        <span className="max-w-[360px] truncate align-baseline font-mono text-[10.5px]">
+                                      <span className="inline-flex min-w-0 max-w-full items-baseline gap-x-1.5">
+                                        <span className="shrink-0 opacity-60">ANGLE 渲染器</span>
+                                        <span className="min-w-0 flex-1 truncate align-baseline font-mono text-[10.5px]">
                                           {gpuDetail ? (gpuDetail.renderer || '不可读取') : '展开时读取…'}
                                         </span>
                                       </span>
-                                      <span className="inline-flex items-baseline gap-x-1.5">
-                                        <span className="opacity-60">WebGL 版本</span>
-                                        <span className="align-baseline">{gpuDetail ? (gpuDetail.version || '不可读取') : '展开时读取…'}</span>
+                                      <span className="inline-flex min-w-0 items-baseline gap-x-1.5">
+                                        <span className="shrink-0 opacity-60">WebGL 版本</span>
+                                        <span className="min-w-0 truncate align-baseline">{gpuDetail ? (gpuDetail.version || '不可读取') : '展开时读取…'}</span>
                                       </span>
-                                      <span className="inline-flex items-baseline gap-x-1.5">
-                                        <span className="opacity-60">GLSL 版本</span>
-                                        <span className="align-baseline">{gpuDetail ? (gpuDetail.glslVersion || '不可读取') : '展开时读取…'}</span>
+                                      <span className="inline-flex min-w-0 items-baseline gap-x-1.5">
+                                        <span className="shrink-0 opacity-60">GLSL 版本</span>
+                                        <span className="min-w-0 truncate align-baseline">{gpuDetail ? (gpuDetail.glslVersion || '不可读取') : '展开时读取…'}</span>
                                       </span>
                                     </div>
                                     <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-white/5 pt-1">

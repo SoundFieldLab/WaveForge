@@ -1,10 +1,14 @@
 import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { Sparkles } from 'lucide-react'
-import type { PlaybackTimeSnapshot, PlaybackTimeStore } from '../audio/playbackTimeStore'
+import type { PlaybackTimeSnapshot } from '../audio/playbackTimeStore'
 import type { LyricStyleMode } from '../utils/lyricStyle'
 import { toRgba } from './quickSettingsPalette'
 import QuickSettingsLiveMirror, { type QuickSettingsMirrorStatus } from './QuickSettingsLiveMirror'
 import { PREVIEW_SCENES, type PreviewRow, type PreviewSceneContext, type PreviewSceneKey } from './quickSettingsPreviewScenes'
+
+// 播放上下文类型单一定义在 quickSettingsPlaybackContext.ts（App/Host/Dialog 共用），
+// 这里重导出保持旧 import 路径兼容 —— 双份定义会在加字段时静默失配（一边改一边没改）。
+export type { QuickSettingsPreviewTrack, QuickSettingsPreviewLyric, QuickSettingsPlaybackContext } from './quickSettingsPlaybackContext'
+import type { QuickSettingsPlaybackContext } from './quickSettingsPlaybackContext'
 
 /**
  * 「播放设置」弹窗**顶部监视器**里的实时预览。
@@ -19,14 +23,15 @@ import { PREVIEW_SCENES, type PreviewRow, type PreviewSceneContext, type Preview
  *
  * | 路径 | 条件 | 内容 |
  * |---|---|---|
- * | **实时镜像**（主） | 页面上存在 `[data-waveforge-playback-page]` | `QuickSettingsLiveMirror` 把真实播放面克隆进来并逐帧同步 —— 预览就是真机 |
- * | **模拟场景**（回退） | jsdom 单测 / home 页 / Apple 电台、播客等自带播放页的模式 | `quickSettingsPreviewScenes.tsx` 那 7 套手绘版式 |
+ * | **实时镜像**（主） | 页面上存在 `[data-waveforge-playback-layer]`（简约模式层，含 MV 背景等兄弟节点） | `QuickSettingsLiveMirror` 把真实播放页克隆进来并逐帧同步 —— 预览就是真机 |
+ * | **模拟场景**（回退） | jsdom 单测 / 简约层未挂载（home 页等） | `quickSettingsPreviewScenes.tsx` 那 7 套手绘版式 |
  *
  * 回退路径**不能删**：`test/QuickSettingsModal.test.tsx` 的
  * 「renders the preview from the injected playback context…」整条用例都建立在模拟场景上
  * （jsdom 里没有真实播放面，必然走回退）。它也保证「没有播放页可镜像」时预览不空白。
  *
- * 两条路径共用顶部的两枚 chip 与 `data-wf-qs-scene`（测试据此断言预览跟着歌词模式换版式）。
+ * 回退场景带 `data-wf-qs-scene`（测试据此断言预览跟着歌词模式换版式）。镜像路径下预览
+ * 与外面的播放页一模一样，不叠加任何标注（顶部两枚 chip 已按用户要求移除）。
  *
  * ⚠️ **`<QuickSettingsLiveMirror>` 必须无条件挂载**，只有模拟场景那部分才吃
  * `mirrorStatus === 'absent'` 条件。镜像自己就是探测者：把它也塞进条件分支里，
@@ -54,39 +59,14 @@ import { PREVIEW_SCENES, type PreviewRow, type PreviewSceneContext, type Preview
  * playbackTimeStore 每帧 publish，只有订阅它的组件会重渲染，弹窗其余控件不受影响。
  * 与 App.tsx 的 `LiveLyricsDisplay` / `LivePlayerControls` 同一套写法。
  *
- * ⚠️ **播放状态（chip 的呼吸点 /「· 已暂停」）与时间订阅是两条独立的订阅**：
- * 前者**无条件**订阅 store 的 `isPlaying`（只取布尔值），不要跟着 `needsTimeline` 一起关掉 ——
- * 关掉的话镜像路径会退回兜底快照（`isPlaying: false`），chip 永远显示「已暂停」。
- * 详见下方 `getIsPlaying` 的注释。
+ * 顶部原先还叠了两枚 chip（「实时预览」/ 模式 · 效果）—— 已按用户要求移除：
+ * 镜像路径下预览就该与外面的播放页一模一样，任何叠加物都是「多出来的无关内容」。
  */
-export interface QuickSettingsPreviewTrack {
-  title?: string
-  artist?: string
-  coverUrl?: string
-}
-
-/** 预览只需要「时间 + 文本 + 可选行末时间」，不依赖完整 LyricLine。 */
-export interface QuickSettingsPreviewLyric {
-  time: number
-  text: string
-  endTime?: number
-}
-
-/** App 层组装、逐层透传到预览的播放上下文。 */
-export interface QuickSettingsPlaybackContext {
-  track?: QuickSettingsPreviewTrack | null
-  lyrics?: readonly QuickSettingsPreviewLyric[] | null
-  lyricOffset?: number
-  playbackTimeStore?: PlaybackTimeStore | null
-}
-
 interface QuickSettingsPreviewProps {
   isDaylight: boolean
   accentColor: string
   /** 当前歌词模式（决定预览用哪套版式）；未知值退回现代 */
   lyricDisplayMode?: string | null
-  /** 模式中文名，来自弹窗的 `LYRIC_MODE_LABELS`（避免两处各维护一份名称表） */
-  lyricDisplayModeLabel?: string
   backgroundEffect: 'transparent' | 'blur' | 'immersive' | 'modern'
   backgroundBlur: number
   showImmersiveBar: boolean
@@ -98,7 +78,6 @@ interface QuickSettingsPreviewProps {
   coverPulseMode: 'dynamic' | 'soft' | 'restless'
   hideSongInfo: boolean
   showVisualizer: boolean
-  mvBackgroundActive: boolean
   playback?: QuickSettingsPlaybackContext | null
 }
 
@@ -106,7 +85,7 @@ interface QuickSettingsPreviewProps {
 const IDLE_SNAPSHOT: PlaybackTimeSnapshot = { currentTime: 0, duration: 0, isPlaying: false }
 const subscribeIdle = () => () => {}
 const getIdleSnapshot = () => IDLE_SNAPSHOT
-/** 无播放上下文时的兜底播放状态：示例动画照常跑（不会显示「已暂停」）。 */
+/** 无播放上下文时的兜底播放状态：示例动画照常跑。 */
 const getIdlePlaying = () => true
 
 /** 示例歌词：中间那句正在唱。无真实歌词时使用。刻意给 7 句 —— 真机一屏就是这个密度。 */
@@ -138,13 +117,6 @@ const DESIGN_H = 260
 const FALLBACK_TITLE = '夜色温柔'
 const FALLBACK_ARTIST = '澜音工坊 · 试听'
 
-const EFFECT_LABEL: Record<QuickSettingsPreviewProps['backgroundEffect'], string> = {
-  transparent: '通透',
-  blur: '模糊',
-  immersive: '沉浸',
-  modern: '摩登',
-}
-
 /** 律动速度（folia 的一档：动感 / 柔和 / 躁动）。 */
 const PULSE_DURATION: Record<QuickSettingsPreviewProps['coverPulseMode'], string> = {
   dynamic: '1.15s',
@@ -169,7 +141,6 @@ export default memo(function QuickSettingsPreview({
   isDaylight,
   accentColor,
   lyricDisplayMode,
-  lyricDisplayModeLabel,
   backgroundEffect,
   backgroundBlur,
   showImmersiveBar,
@@ -181,10 +152,8 @@ export default memo(function QuickSettingsPreview({
   coverPulseMode,
   hideSongInfo,
   showVisualizer,
-  mvBackgroundActive,
   playback,
 }: QuickSettingsPreviewProps) {
-  const bgColor = isDaylight ? '#ffffff' : '#18181b'
   const overText = isDaylight ? '#000000' : '#ffffff'
 
   /**
@@ -232,12 +201,11 @@ export default memo(function QuickSettingsPreview({
   const store = playback?.playbackTimeStore ?? null
 
   /**
-   * 播放状态（chip 的呼吸点 / 「· 已暂停」）走一条**只取布尔值**的独立订阅，
+   * 播放状态走一条**只取布尔值**的独立订阅（示例动画的播放/暂停跟随真机），
    * 与「有没有逐帧时间订阅」解耦。
    *
    * ⚠️ 曾经把它并进下面的 `needsTimeline` 条件里（镜像路径不订阅 store）—— 镜像路径下
-   * `live` 会退回 `IDLE_SNAPSHOT`（`isPlaying: false`），chip 于是**永远显示「· 已暂停」**，
-   * 歌在播也在暂停（2026-09-26 用户反馈）。播放状态是离散值，与预览走哪条渲染路径无关。
+   * `live` 会退回 `IDLE_SNAPSHOT`（`isPlaying: false`），回退场景的动画就会在歌在播时冻住。
    *
    * 只取布尔值**不会**带来 60fps 重渲染：store 每帧 publish 的那条 rAF 里只有时间在变，
    * 而 `useSyncExternalStore` 会用 `Object.is` 比较快照，布尔没变时 React 直接 bail out。
@@ -369,11 +337,6 @@ export default memo(function QuickSettingsPreview({
   const sceneKey = resolveSceneKey(lyricDisplayMode)
   const Scene = PREVIEW_SCENES[sceneKey]
 
-  // 顶部两枚 chip 的配色跟主题走（浅色主题 = 白底深字），否则它们会消失在浅底播放面上
-  const chipText = isDaylight ? 'rgba(24,24,27,0.82)' : 'rgba(255,255,255,0.78)'
-  const chipBorder = isDaylight ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.10)'
-  const chipBackground = isDaylight ? 'rgba(255,255,255,0.66)' : 'rgba(0,0,0,0.25)'
-
   /** 场景上下文：位置全用百分比，字号/配色/内容由这里统一注入。 */
   const ctx: PreviewSceneContext = {
     isDaylight,
@@ -479,53 +442,8 @@ export default memo(function QuickSettingsPreview({
         </>
       )}
 
-      {/* ③ 顶部两枚 chip（「实时预览」/ 模式名）。放在场景之后，压在最上层。
-          配色跟主题走：浅色主题下播放面是浅底，写死「黑底白字」会让这两枚 chip 直接糊掉。
-          尺寸按横版盒（约 460×260）收小了一档 —— `text-xs + px-3 py-1.5` 在竖长盒里合适，
-          横过来就会挡住场景上缘。 */}
-      <div
-        className="absolute left-3 top-3 z-30 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] backdrop-blur-md"
-        style={{
-          color: chipText,
-          borderColor: chipBorder,
-          backgroundColor: chipBackground,
-        }}
-      >
-        {isPlaying ? (
-          <span
-            className="h-[5px] w-[5px] shrink-0 rounded-full"
-            style={{
-              backgroundColor: accentColor,
-              animation: 'qs-preview-dot 1.6s ease-in-out infinite',
-            }}
-          />
-        ) : (
-          <Sparkles size={11} />
-        )}
-        <span>实时预览</span>
-        {!isPlaying && <span className="normal-case tracking-normal opacity-70">· 已暂停</span>}
-      </div>
-      {/* 右上角：模式 · 效果 + （MV 背景生效时的）状态徽标。
-          原先整块会换成「MV 背景」三个字，等于把模式信息顶掉、还多出一块突兀的实心盒子；
-          改为模式常显、MV 背景降级成一枚小徽标（信息不丢，视觉不抢）。 */}
-      <div
-        className="absolute right-3 top-3 z-30 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] backdrop-blur-md"
-        style={{
-          color: chipText,
-          borderColor: chipBorder,
-          backgroundColor: chipBackground,
-        }}
-      >
-        <span>{`${lyricDisplayModeLabel ?? '现代'} · ${EFFECT_LABEL[backgroundEffect]}`}</span>
-        {mvBackgroundActive ? (
-          <span
-            className="rounded-full px-1.5 py-[1px] text-[9px] uppercase tracking-[0.12em]"
-            style={{ backgroundColor: toRgba(accentColor, 0.2), color: chipText }}
-          >
-            MV 背景
-          </span>
-        ) : null}
-      </div>
+      {/* ③ 顶部两枚 chip（「实时预览」/ 模式名）已按用户要求移除 —— 预览应与外面的播放页
+          一模一样，任何叠加物（哪怕是状态标注）都是「多出来的无关内容」。 */}
     </div>
   )
 })

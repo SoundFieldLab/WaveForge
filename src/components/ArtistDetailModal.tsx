@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback, useMemo, memo, type ReactElement } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo, Fragment, type ReactElement } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Play, Music, Disc, Video, Info, Loader, ListMusic, Calendar, Eye, Users, UserPlus, UserCheck } from 'lucide-react'
 import { List, type ListImperativeAPI, type RowComponentProps } from 'react-window'
-import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed, isSameSong } from '../services/musicApi'
+import { getArtistDetail, getArtistTopSongs, getArtistAllSongs, getArtistAlbums, getArtistMVs, Artist, Song, Album, getProxiedImageUrl, resolveSongAlbumIdentifier, subscribeArtist, getSimilarArtists, isArtistFollowed, isSameSong, qqSongCoverUrl } from '../services/musicApi'
 import { fetchSodaArtistSongs, type SodaArtistDetail } from '../services/sodaService'
 import type { MusicPlatform } from '../services/platforms'
 import { getAppleArtistDetail, getAppleCatalogArtist, getAppleCatalogArtistAlbums, getAppleCatalogArtistMusicVideos, getAppleCatalogRelatedArtists, appleSongToSong, getAppleLibraryPlaylists } from '../services/appleCatalog'
@@ -32,7 +32,7 @@ function resolveSimilarArtistPic(artist: any): string {
   return mid ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${mid}.jpg` : ''
 }
 
-type TabType = 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'similarArtists' | 'info'
+type TabType = 'hotSongs' | 'allSongs' | 'albums' | 'videos' | 'programs' | 'similarArtists' | 'info'
 
 const formatDuration = (ms: number) => {
   const seconds = Math.floor(ms / 1000)
@@ -116,9 +116,8 @@ const ArtistSongRow = memo(function ArtistSongRow({
 
       {/* 封面 */}
       <div className={`w-10 h-10 rounded-lg overflow-hidden ${bgCard} flex-shrink-0`}>
-        {song.album?.picUrl ? (
-          <CachedImage
-            src={song.album.picUrl}
+        {qqSongCoverUrl(song) ? (
+          <CachedImage src={qqSongCoverUrl(song)}
             alt={song.name}
             className="w-full h-full object-cover"
             role="row"
@@ -479,6 +478,10 @@ export default function ArtistDetailModal({
   const [allSongsHasMore, setAllSongsHasMore] = useState(true) // 是否还有更多歌曲
   const [albums, setAlbums] = useState<Album[]>([])
   const [mvs, setMvs] = useState<any[]>([])
+  // QQ「歌手节目」:数据源 = music.recommend.SingerRadioServer.GetSongList(官方客户端同源,自 QQMusic_Protocol.dll 逆向)
+  const [programs, setPrograms] = useState<any[]>([])
+  const [programsNote, setProgramsNote] = useState('')
+  const [loadingPrograms, setLoadingPrograms] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loadingAllSongs, setLoadingAllSongs] = useState(false)
   const [loadingAlbums, setLoadingAlbums] = useState(false)
@@ -518,8 +521,12 @@ export default function ArtistDetailModal({
   const [followingLoading, setFollowingLoading] = useState(false)
   const [followError, setFollowError] = useState('')
   const [similarArtists, setSimilarArtists] = useState<any[]>([])
-  const allSongsScrollRef = useRef<HTMLDivElement>(null) // 全部歌曲滚动容器的引用
-  const hotSongsScrollRef = useRef<HTMLDivElement>(null) // 热门歌曲滚动容器的引用
+  // 滚动辅助按钮（ScrollToTop/ScrollToCurrentSong）的监听目标：精选/全部歌曲共用
+  // 外层内容滚动容器；全部歌曲虚拟化激活时切换为 react-window List 的外层 div。
+  const allSongsScrollRef = useRef<HTMLDivElement>(null)
+  const hotSongsScrollRef = allSongsScrollRef
+  // 回到顶部按钮可见时，定位歌曲按钮从底部槽位上移让位（弹簧动画由 ScrollToCurrentSong 内部处理）
+  const [scrollTopVisible, setScrollTopVisible] = useState(false)
   // 虚拟化列表：react-window List 的外层 div 即滚动容器。allSongs 激活时把它的
   // DOM 元素同步进 allSongsScrollRef（供 ScrollToTop/ScrollToCurrentSong 使用），
   // 离开 allSongs 时恢复为外层内容容器。外层容器用函数 ref 保存，避免被覆盖。
@@ -527,7 +534,9 @@ export default function ArtistDetailModal({
   const allSongsListRef = useRef<ListImperativeAPI | null>(null)
   // 歌曲行固定高度（p-3 上下留白 + 40px 封面）；列表尾部提示条高度
   const ALL_SONG_ROW_HEIGHT = 64
-  useEffect(() => {
+  // layout 阶段同步：子组件（ScrollToTop 等）的 passive effect 晚于父级 layout effect，
+  // 保证按钮挂载读 ref 时拿到的已是切换后的滚动容器（虚拟 List 外层 div 或外层内容容器）
+  useLayoutEffect(() => {
     if (activeTab !== 'allSongs') return
     const listEl = allSongsListRef.current?.element ?? null
     if (listEl) allSongsScrollRef.current = listEl
@@ -698,6 +707,9 @@ export default function ArtistDetailModal({
     }
     if (activeTab === 'videos' && mvs.length === 0 && !loadingMVs) {
       loadMVs()
+    }
+    if (activeTab === 'programs' && programs.length === 0 && !loadingPrograms) {
+      loadPrograms()
     }
   }, [activeTab, artistId, platform])
 
@@ -1101,6 +1113,29 @@ export default function ArtistDetailModal({
     }
   }
 
+  // QQ「歌手节目」:官方数据(SingerRadioServer.GetSongList,与客户端同源)
+  // (歌手热门歌曲电台形态,已含无专辑单曲的探测真封面)。服务端无数据时会给 note。
+  const loadPrograms = async () => {
+    if (platform !== 'qq') return
+    setLoadingPrograms(true)
+    try {
+      const { getPlatformCookie } = await import('../services/platforms')
+      const { getApiBase } = await import('../services/apiConfig')
+      const cookie = getPlatformCookie('qq')
+      const params = new URLSearchParams({ mid: String(artistId), name: artistName || '' })
+      if (cookie) params.set('cookie', cookie)
+      const response = await fetch(`${getApiBase()}/qq/artist/programs?${params.toString()}`)
+      const data = await response.json()
+      setPrograms(Array.isArray(data.programs) ? data.programs : [])
+      setProgramsNote(typeof data.note === 'string' ? data.note : '')
+    } catch (error) {
+      console.error('加载歌手节目失败:', error)
+      setProgramsNote('节目加载失败，请稍后重试')
+    } finally {
+      setLoadingPrograms(false)
+    }
+  }
+
   // 处理滚动事件，检测是否到达底部
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     if (activeTab !== 'allSongs' || !allSongsHasMore || loadingAllSongs) return
@@ -1202,13 +1237,16 @@ export default function ArtistDetailModal({
           onClose()
         }}
       >
+        {/* 包装容器：包住卡片与滚动辅助按钮。按钮定位在卡片右缘外侧（offsetRight=-60），
+            不能放进卡片内部——卡片 overflow-hidden 会把越界的按钮整体裁掉。 */}
+        <div className="relative w-full max-w-6xl h-[90vh] flex" onClick={(e) => e.stopPropagation()}>
         <motion.div
           data-tv-scope
           initial={{ scale: 0.9, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={instantClose ? { scale: 0.9, opacity: 0, transition: { duration: 0 } } : { scale: 0.9, opacity: 0 }}
           onClick={(e) => e.stopPropagation()}
-          className="rounded-3xl shadow-2xl w-full max-w-6xl h-[90vh] flex flex-col overflow-hidden relative"
+          className="rounded-3xl shadow-2xl w-full h-full flex flex-col overflow-hidden relative"
         >
         
         {/* 液态玻璃背景层 - 使用艺人头像，只在弹窗内部 */}
@@ -1332,6 +1370,18 @@ export default function ArtistDetailModal({
                         <span>专辑: {artist.albumSize}</span>
                       )}
                     </div>
+                    {/* QQ 艺人头部信息行（与官方客户端同款）：中文名 / 外文名 / 国籍，来自 basic.item */}
+                    {platform === 'qq' && (() => {
+                      const items = (artist.basic?.item || []) as Array<{ key?: string; value?: string }>
+                      const line = ['中文名', '外文名', '国籍']
+                        .map(key => {
+                          const hit = items.find(entry => entry?.key === key && entry.value)
+                          return hit ? `${key}:${hit.value}` : ''
+                        })
+                        .filter(Boolean)
+                        .join('　')
+                      return line ? <div className="text-xs truncate" title={line}>{line}</div> : null
+                    })()}
                     {/* 汽水：无独立艺人实体，下列内容均为按名搜索的派生结果，如实标注 */}
                     {platform === 'soda' && (
                       <div className={`text-xs ${textTertiary}`}>
@@ -1469,7 +1519,28 @@ export default function ArtistDetailModal({
               视频
               {activeTab === 'videos' && (
                 <motion.div
-                   
+
+                  className="absolute bottom-0 left-0 right-0 h-0.5"
+                  style={{ backgroundColor: readableAccentColor }}
+                />
+              )}
+            </button>
+            )}
+            {/* QQ「歌手节目」:官方数据(与客户端同源) */}
+            {platform === 'qq' && (
+            <button
+              onClick={() => setActiveTab('programs')}
+              className={`pb-3 px-3 font-medium transition-all relative text-sm ${
+                activeTab === 'programs'
+                  ? `${textPrimary}`
+                  : `${textSecondary} hover:${textPrimary}`
+              }`}
+            >
+              <ListMusic className="w-4 h-4 inline mr-1.5" />
+              歌手节目
+              {activeTab === 'programs' && (
+                <motion.div
+
                   className="absolute bottom-0 left-0 right-0 h-0.5"
                   style={{ backgroundColor: readableAccentColor }}
                 />
@@ -1543,9 +1614,14 @@ export default function ArtistDetailModal({
             </button>
           </div>
 
-          {/* 内容区（添加滚动） */}
-          <div 
-            ref={(el) => { allSongsOuterRef.current = el }}
+          {/* 内容区（添加滚动）——精选/全部歌曲等所有 tab 共用此滚动容器，
+              同时作为滚动辅助按钮的监听目标（hotSongsScrollRef === allSongsScrollRef） */}
+          <div
+            ref={(el) => {
+              allSongsOuterRef.current = el
+              // 挂载即同步给按钮（此前只挂在内层不滚动的 div 上，按钮判定永不成立）
+              allSongsScrollRef.current = el
+            }}
             onScroll={handleScroll}
             className="flex-1 overflow-y-auto p-4 custom-scrollbar"
             style={{
@@ -1573,7 +1649,7 @@ export default function ArtistDetailModal({
             `}</style>
             {/* 热门歌曲 */}
             {activeTab === 'hotSongs' && (
-              <div className="space-y-1" ref={hotSongsScrollRef}>
+              <div className="space-y-1">
                 {hotSongs.length > 0 ? (
                   <>
                     {hotSongs.map((song, index) => (
@@ -1722,6 +1798,80 @@ export default function ArtistDetailModal({
                   <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
                     <Video className="w-16 h-16 mb-4 opacity-20" />
                     <p>暂无视频</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* QQ「歌手节目」:官方节目歌曲列表,每项一张歌曲卡,点击播放 */}
+            {activeTab === 'programs' && (
+              <div className="space-y-2">
+                {loadingPrograms ? (
+                  <div className="flex flex-col items-center justify-center py-20">
+                    <Loader className={`w-8 h-8 ${textPrimary}/60 animate-spin`} />
+                    <p className={`${textSecondary} mt-4`}>加载中...</p>
+                  </div>
+                ) : programs.length > 0 ? (
+                  <>
+                    <p className={`text-xs ${textSecondary} px-1 pb-1`}>
+                      官方「歌手节目」· 本期节目歌曲
+                    </p>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {programs.map((program, index) => {
+                        const song = program.songs?.[0]
+                        const cover = program.coverUrl ? getProxiedImageUrl(program.coverUrl, 300) : ''
+                        return (
+                          <button
+                            key={`${program.id}-${index}`}
+                            onClick={() => {
+                              if (!song || !onSongSelect) return
+                              // 节目队列 = 全部节目歌(每节目一首),从点击项起播
+                              const queue: Song[] = programs.map(program => {
+                                const s = program.songs?.[0]
+                                return {
+                                  id: s?.songid || 0,
+                                  mid: s?.songmid,
+                                  name: s?.songname || program.title,
+                                  artists: (s?.singer || []).map((a: any) => ({ name: a.name, mid: a.mid })),
+                                  album: { id: s?.albumid, mid: s?.albummid, name: s?.albumname || '', picUrl: s?.albumpic || '' },
+                                  duration: (s?.interval || 0) * 1000,
+                                  platform: 'qq' as const,
+                                  vip: Boolean(s?.pay?.payplay === 1),
+                                }
+                              }).filter(item => item.mid || item.id)
+                              const current = queue.find(item => item.mid === song.songmid)
+                              if (current) {
+                                setInstantClose(true)
+                                onSongSelect(current, queue)
+                                onClose()
+                              }
+                            }}
+                            className={`${bgCard} rounded-xl overflow-hidden text-left hover:scale-[1.02] transition-transform`}
+                          >
+                            <div className="relative aspect-video w-full bg-black/20">
+                              {cover ? (
+                                <img src={cover} alt={program.title} loading="lazy" className="h-full w-full object-cover" />
+                              ) : (
+                                <div className={`h-full w-full flex items-center justify-center ${textPrimary}/20`}>
+                                  <Music className="w-8 h-8 opacity-30" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="p-2.5">
+                              <div className={`text-sm font-medium truncate ${textPrimary}`}>{program.title}</div>
+                              <div className={`text-xs truncate ${textSecondary}`}>
+                                {(program.singer || []).map((s: any) => s.name).join(' / ')}
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </>
+                ) : (
+                  <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
+                    <ListMusic className="w-16 h-16 mb-4 opacity-20" />
+                    <p>{programsNote || '暂无节目'}</p>
                   </div>
                 )}
               </div>
@@ -1899,57 +2049,67 @@ export default function ArtistDetailModal({
           </div>
         </div>
         
-        {/* 滚动按钮组 - 弹窗外部右侧，相对于弹窗定位 */}
-        
-        {/* 回到顶部按钮 - 最下方 */}
-        {activeTab === 'hotSongs' && (
-          <ScrollToTop 
-            containerRef={hotSongsScrollRef} 
-            threshold={300}
-            playerTheme={playerTheme}
-            position="absolute"
-            offsetRight={-60}
-            offsetBottom={24}
-          />
-        )}
-        
-        {activeTab === 'allSongs' && (
-          <ScrollToTop 
-            containerRef={allSongsScrollRef} 
-            threshold={300}
-            playerTheme={playerTheme}
-            position="absolute"
-            offsetRight={-60}
-            offsetBottom={24}
-          />
-        )}
-        
-        {/* 跳转到当前播放歌曲按钮 - 在回到顶部按钮上方，只有当前歌曲存在时显示 */}
-        {activeTab === 'hotSongs' && currentHotSongIndex !== -1 && (
-          <ScrollToCurrentSong
-            containerRef={hotSongsScrollRef}
-            currentSongIndex={currentHotSongIndex}
-            threshold={300}
-            playerTheme={playerTheme}
-            position="absolute"
-            offsetRight={-60}
-            offsetBottom={88}
-          />
-        )}
-        
-        {/* 跳转到当前播放歌曲按钮 - 全部歌曲 */}
-        {activeTab === 'allSongs' && currentAllSongIndex !== -1 && (
-          <ScrollToCurrentSong
-            containerRef={allSongsScrollRef}
-            currentSongIndex={currentAllSongIndex}
-            threshold={300}
-            playerTheme={playerTheme}
-            position="absolute"
-            offsetRight={-60}
-            offsetBottom={88}
-          />
-        )}
         </motion.div>
+
+        {/* 滚动按钮组 - 卡片外右侧（包装层不裁剪），精选/全部歌曲含定位当前歌曲。
+            key=activeTab：切换 tab 时重挂，重读 allSongsScrollRef（虚拟 List 会替换监听目标） */}
+        {(activeTab === 'hotSongs' || activeTab === 'allSongs') && (
+          <Fragment key={activeTab}>
+            <ScrollToTop
+              containerRef={allSongsScrollRef}
+              threshold={300}
+              playerTheme={playerTheme}
+              position="absolute"
+              offsetRight={-60}
+              offsetBottom={24}
+              onVisibilityChange={setScrollTopVisible}
+            />
+            {/* 跳转到当前播放歌曲：只要歌曲行滚出可视区即显示；回到顶部出现时上移让位 */}
+            {activeTab === 'hotSongs' && currentHotSongIndex !== -1 && (
+              <ScrollToCurrentSong
+                containerRef={allSongsScrollRef}
+                currentSongIndex={currentHotSongIndex}
+                threshold={72}
+                playerTheme={playerTheme}
+                position="absolute"
+                offsetRight={-60}
+                offsetBottom={24}
+                slotOffsetBottom={scrollTopVisible ? 64 : 0}
+                cardHeight={64}
+                cardGapY={4}
+                contentPaddingTop={16}
+              />
+            )}
+            {activeTab === 'allSongs' && currentAllSongIndex !== -1 && (
+              <ScrollToCurrentSong
+                containerRef={allSongsScrollRef}
+                currentSongIndex={currentAllSongIndex}
+                threshold={72}
+                playerTheme={playerTheme}
+                position="absolute"
+                offsetRight={-60}
+                offsetBottom={24}
+                slotOffsetBottom={scrollTopVisible ? 64 : 0}
+                cardHeight={ALL_SONG_ROW_HEIGHT}
+                contentPaddingTop={0}
+              />
+            )}
+          </Fragment>
+        )}
+
+        {/* 专辑/视频/相似歌手/歌手详情：长内容同样给回到顶部（无定位歌曲逻辑） */}
+        {(activeTab === 'albums' || activeTab === 'videos' || activeTab === 'similarArtists' || activeTab === 'info') && (
+          <ScrollToTop
+            key={`stt-${activeTab}`}
+            containerRef={allSongsScrollRef}
+            threshold={300}
+            playerTheme={playerTheme}
+            position="absolute"
+            offsetRight={-60}
+            offsetBottom={24}
+          />
+        )}
+        </div>
       </motion.div>
 
       {/* 专辑详情弹窗 */}
@@ -2022,7 +2182,7 @@ export default function ArtistDetailModal({
               id: platform === 'netease' ? Number(albumId) : Number(song.album?.id || 0),
               mid: platform === 'qq' ? albumId : undefined,
               name: song.album?.name || '专辑',
-              picUrl: song.album?.picUrl || '',
+              picUrl: qqSongCoverUrl(song),
               artist: {
                 name: song.artists?.[0]?.name || '未知艺人',
                 id: song.artists?.[0]?.id,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { useModeParked } from '../utils/modeLayer'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -795,6 +795,73 @@ function WeatherMapLegend({ layer, compact = false }: { layer: WeatherMapLayerDe
   )
 }
 
+/**
+ * 预览卡的真实地图底图：以定位城市为中心取一张缩放 9 的瓦片全景（Web 墨卡托）。
+ * 直接复用天气地图在线瓦片源（高德 + ArcGIS 兜底），无需引入 Leaflet。
+ * 256px 瓦片在卡片内以 cover 拉伸铺满，定位点按经纬度在瓦片世界坐标的相对位置标注。
+ */
+function WeatherMapPreviewTiles({ latitude, longitude }: { latitude: number; longitude: number }) {
+  const tiles = useMemo(() => {
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+    const zoom = 9
+    const size = 256 * (2 ** zoom)
+    const x = ((longitude + 180) / 360) * size
+    const clampLatitude = Math.max(-85.0511, Math.min(85.0511, latitude))
+    const radians = clampLatitude * Math.PI / 180
+    const y = (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2 * size
+    const tileX = Math.floor(x / 256)
+    const tileY = Math.floor(y / 256)
+    // 以该瓦片为中心取 3x1 张（城市基本落在中央瓦片内，卡片横向宽、纵向矮）
+    const columnOffsets = [-1, 0, 1]
+    return {
+      fractionX: x / 256 - tileX,
+      fractionY: y / 256 - tileY,
+      columns: columnOffsets.map(offset => ({
+        key: `${tileX + offset}-${tileY}`,
+        upstream: `https://webst0{1-4}.is.autonavi.com/appmaptile?style=7&x=${tileX + offset}&y=${tileY}&z=${zoom}`,
+        arcgis: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${zoom}/${tileY}/${((tileX + offset % (2 ** zoom)) + 2 ** zoom) % 2 ** zoom}`,
+      })),
+    }
+  }, [latitude, longitude])
+  if (!tiles) return <div className="weather-map-preview-base absolute inset-0" />
+  return (
+    <div className="absolute inset-0 overflow-hidden">
+      <div className="absolute inset-y-0 left-1/2 flex w-[300%] -translate-x-1/2">
+        {tiles.columns.map(column => (
+          <img
+            key={column.key}
+            src={column.upstream.replace('webst0{1-4}', 'webst01')}
+            data-fallback-src={column.arcgis}
+            alt=""
+            draggable={false}
+            className="h-full w-1/3 select-none"
+            // 瓦片按卡片纵横比拉伸填充（不用 object-cover）：定位点/地名按瓦片内
+            // 相对坐标映射才与视觉位置一致（卡片 4.5:1，正方形瓦片纵向被压缩）
+            onError={event => {
+              const image = event.currentTarget
+              const fallback = image.dataset.fallbackSrc
+              if (fallback && image.src !== fallback) { image.src = fallback; return }
+              image.style.opacity = '0'
+            }}
+          />
+        ))}
+      </div>
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(10,22,38,.18),transparent_38%,rgba(8,16,30,.34))]" />
+      {/* 定位点：按经纬度相对中央瓦片的位置水平偏移（三瓦片拼幅内），纵向同理由 fractionY 推算 */}
+      <div
+        className="pointer-events-none absolute"
+        style={{
+          left: `calc(${(0.5 + (tiles.fractionX - 0.5) / 3) * 100}%)`,
+          top: `${tiles.fractionY * 100}%`,
+        }}
+      >
+        <span className="absolute -left-[7px] -top-[7px] block h-3.5 w-3.5 rounded-full border-2 border-white bg-sky-500 shadow-[0_0_10px_rgba(14,165,233,.9)]" />
+        <span className="absolute -left-[14px] -top-[14px] block h-7 w-7 animate-ping rounded-full border border-sky-300/70" />
+      </div>
+    </div>
+  )
+}
+
 function WeatherMapPreview({ weather, onOpen }: Pick<WeatherMapExperienceProps, 'weather' | 'onOpen'>) {
   const layer = WEATHER_MAP_LAYER_BY_ID.temperature
   const currentValue = weather.current.temperature
@@ -809,23 +876,21 @@ function WeatherMapPreview({ weather, onOpen }: Pick<WeatherMapExperienceProps, 
       className="weather-map-preview group relative mt-5 w-full overflow-hidden rounded-[30px] border border-white/10 text-left shadow-[0_20px_60px_rgba(5,15,30,.16)]"
       style={previewStyle}
     >
-      <div className="weather-map-preview-base absolute inset-0" />
-      <div className="weather-map-preview-field absolute inset-0" />
+      <WeatherMapPreviewTiles latitude={weather.location.latitude} longitude={weather.location.longitude} />
+      <div className="weather-map-preview-field absolute inset-0 opacity-45" />
       <svg className="absolute inset-0 h-full w-full opacity-70" viewBox="0 0 1000 260" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-        <g fill="none" stroke="rgba(28,47,60,.5)" strokeWidth="2">
+        <g fill="none" stroke="rgba(255,255,255,.32)" strokeWidth="2">
           <path d="M-40 65 C90 20 150 92 270 58 S470 22 550 70 S760 112 1040 42" />
           <path d="M15 250 C130 172 215 226 314 164 S480 140 585 205 S810 246 1012 150" />
-          <path d="M118 -15 C165 58 140 118 207 171 S285 220 255 290" />
-          <path d="M520 -20 C482 54 545 88 514 148 S548 220 620 280" />
-          <path d="M807 -20 C742 45 790 107 758 158 S792 225 880 280" />
         </g>
-        <g fill="rgba(255,255,255,.82)" fontSize="17" fontWeight="600">
-          <text x="95" y="74">{weather.location.province || '区域'}</text>
-          <text x="335" y="132">{weather.location.city || weather.location.name}</text>
-          <text x="615" y="88">{weather.location.district || '周边地区'}</text>
+        <g fill="rgba(255,255,255,.92)" fontSize="17" fontWeight="600" style={{ paintOrder: 'stroke', stroke: 'rgba(15,30,50,.55)', strokeWidth: 4 }}>
           <text x="790" y="195">未来 48h</text>
         </g>
       </svg>
+      {/* 地名标签：压在底图上易与真实地图注记打架，改为信息卡内展示 */}
+      <div className="pointer-events-none absolute left-6 top-6 rounded-full border border-white/18 bg-black/32 px-3.5 py-1.5 text-[12px] font-medium text-white/88 backdrop-blur-md">
+        {[weather.location.district, weather.location.city, weather.location.province].filter(Boolean).slice(0, 2).join(' · ')}
+      </div>
       <div className="relative flex min-h-[220px] flex-col justify-between p-6">
         <div className="flex items-start justify-between gap-5">
           <div>
@@ -1075,6 +1140,11 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
       inertia: true,
       inertiaDeceleration: 3400,
       inertiaMaxSpeed: 1200,
+      // 滚轮缩放手感：默认 wheelPxPerZoomLevel=60，普通鼠标滚轮一格 deltaY≈100-120
+      // 会一次跨 2 档，配合 zoomAnimation:false 的硬切看起来"缩放过头、不跟手"。
+      // 提高阈值后每 notch 稳定缩 1 档，且 scrollWheelZoom 默认锚定光标位置。
+      scrollWheelZoom: true,
+      wheelPxPerZoomLevel: 120,
     })
     mapRef.current = map
 

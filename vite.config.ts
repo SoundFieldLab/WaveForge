@@ -16,9 +16,20 @@ const splitCityDataPlugin = (): Plugin => ({
   },
 })
 
+
+// dev 模式剥离 CSP meta：Vite 的 react-refresh preamble 是内联脚本，会被
+// script-src 'self' 挡掉导致 dev 白屏。构建产物保留 meta（生产无内联脚本）。
+const stripCspInDev = (): Plugin => ({
+  name: 'strip-csp-in-dev',
+  apply: 'serve',
+  transformIndexHtml(html) {
+    return html.replace(/<meta http-equiv="Content-Security-Policy"[\s\S]*?\/>/, '')
+  },
+})
+
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss(), splitCityDataPlugin()],
+  plugins: [react(), tailwindcss(), splitCityDataPlugin(), stripCspInDev()],
   // 打包版用 loadFile()（file:// 协议）加载 dist/index.html；
   // base 必须是 './'，否则资源以 /assets/... 绝对路径引用，file:// 下会 404 导致整窗黑屏。
   base: './',
@@ -31,7 +42,9 @@ export default defineConfig({
     port: 3000,
     host: '127.0.0.1',
     watch: {
-      ignored: ['**/dist/**', '**/release/**'],
+      // resources/python-embed 是 1.8GB / 2.9 万文件的嵌入式运行时，chokidar 不忽略的话
+      // dev server 每次启动都全量扫描（实测拖慢启动数秒）；waveforge-wallpapers/release 同理。
+      ignored: ['**/dist/**', '**/release/**', '**/resources/**', '**/waveforge-wallpapers/**'],
     },
   },
   build: {
@@ -63,3 +76,4 @@ export default defineConfig({
     },
   },
 })
+

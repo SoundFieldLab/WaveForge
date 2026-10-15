@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Disc3, ListMusic, Music2, Play, RefreshCw } from 'lucide-react'
-import type { Song } from '../services/musicApi'
+import { qqSongCoverUrl, type Song } from '../services/musicApi'
 import {
   fetchExploreChart,
   fetchExploreHome,
@@ -99,7 +99,7 @@ const songKey = (song: Song, index: number) => `${song.platform || 'unknown'}:${
 
 export function DesktopNewSongsView({ songs, compact, onPlay, onSongContextMenu }: { songs: Song[]; compact: boolean; onPlay: (song: Song) => void; onSongContextMenu?: (event: React.MouseEvent, song: Song, songs: Song[]) => void }) {
   return <div className="space-y-1">{songs.map((song, index) => <button key={songKey(song, index)} type="button" onClick={event => { event.stopPropagation(); onPlay(song) }} onContextMenu={onSongContextMenu ? event => { event.preventDefault(); event.stopPropagation(); onSongContextMenu(event, song, songs) } : undefined} className="flex w-full items-center gap-3 rounded-2xl px-2.5 py-2 text-left transition hover:bg-white/8">
-    {song.album.picUrl ? <CachedImage src={song.album.picUrl} alt="" className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0 rounded-xl`} role="row" priority="visible" fallback={<span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>} /> : <span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>}
+    {qqSongCoverUrl(song) ? <CachedImage src={qqSongCoverUrl(song)} alt="" className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} shrink-0 rounded-xl`} role="row" priority="visible" fallback={<span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>} /> : <span className={`${compact ? 'h-9 w-9' : 'h-11 w-11'} flex shrink-0 items-center justify-center rounded-xl bg-white/8`}><Music2 className="h-4 w-4 text-white/35" /></span>}
     <span className="min-w-0 flex-1"><span className="block truncate text-sm text-white/86">{song.name}</span><span className="mt-0.5 block truncate text-[11px] text-white/38">{artistsText(song)}</span></span><Play className="h-3.5 w-3.5 text-white/30" />
   </button>)}</div>
 }

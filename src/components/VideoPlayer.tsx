@@ -36,7 +36,8 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
   const [showControls, setShowControls] = useState(true)
   const volumeTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const controlsTimeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const [videoEndBehavior, setVideoEndBehavior] = useState<'next' | 'close' | 'replay'>('next')
+  // canonical 值与 SettingsPanel 对齐：'hold'=播完停在最后一帧显示重播按钮（旧值 'close' 归一为 'hold'）
+  const [videoEndBehavior, setVideoEndBehavior] = useState<'next' | 'replay' | 'hold'>('next')
   const [showReplayButton, setShowReplayButton] = useState(false) // 显示重播按钮
   const [currentMVIndex, setCurrentMVIndex] = useState(currentIndex ?? 0) // 当前播放的MV索引
 
@@ -47,10 +48,10 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
       setVideoEndBehavior(customEvent.detail)
     }
 
-    // 初始化设置
+    // 初始化设置：旧值 'close' 归一为 'hold'（与 SettingsPanel 的 canonical 一致）
     const saved = localStorage.getItem('videoEndBehavior')
     if (saved) {
-      setVideoEndBehavior(saved as 'next' | 'close' | 'replay')
+      setVideoEndBehavior((saved === 'close' ? 'hold' : saved) as 'next' | 'replay' | 'hold')
     }
 
     window.addEventListener('videoEndBehaviorChanged', handleVideoEndBehaviorChange)
@@ -305,8 +306,8 @@ export default function VideoPlayer({ mvId, mvName, platform = 'netease', onClos
       console.log('🎬 视频播放完毕，当前行为设置:', videoEndBehavior)
       
       switch (videoEndBehavior) {
-        case 'close':
-          // 不重播 - 显示重播按钮
+        case 'hold':
+          // 停在最后一帧，显示重播按钮
           console.log('🎬 视频播放完毕，显示重播按钮')
           setShowReplayButton(true)
           break

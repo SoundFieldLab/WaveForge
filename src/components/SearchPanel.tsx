@@ -1,7 +1,8 @@
 ﻿import { memo, useState, useEffect, useMemo, useRef, type MouseEvent as ReactMouseEvent } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { getSecureToken, setSecureToken } from '../services/secureTokenStore'
 import { Search, X, Music, History, Clock, User, Disc, Sparkles, TrendingUp, ListMusic, ArrowUpRight, Play } from 'lucide-react'
-import { searchSongs, searchSuggest, searchArtists, searchAlbums, searchQuick, searchPlaylists, Song, Artist, Album, SearchSuggestion, getProxiedImageUrl, loadAlbumCovers, resolveSongAlbumIdentifier, searchHot } from '../services/musicApi'
+import { searchSongs, searchSuggest, searchArtists, searchAlbums, searchQuick, searchPlaylists, Song, Artist, Album, SearchSuggestion, getProxiedImageUrl, loadAlbumCovers, resolveSongAlbumIdentifier, searchHot, qqSongCoverUrl } from '../services/musicApi'
 import { mergeFusedSearchResults, type FusedSearchIntent, type MusicPlatform } from '../services/fusedSearch'
 import { isPlatformVisible, platformLabel, PLATFORM_VISUAL_METADATA, getPlatformCapabilities } from '../services/platforms'
 import { useTvBack } from '../tv/tvCore'
@@ -18,6 +19,7 @@ import { buildPlaylistShareUrl } from '../services/playlistShare'
 import { searchAppleSongsAsSongs, searchAppleCatalogArtists, searchAppleCatalogAlbums, searchAppleCatalogV1, getAppleSearchSuggestionItems, getAppleLibraryPlaylists, appleSongToSong } from '../services/appleCatalog'
 import { getAppleCredentials } from '../services/appleAuth'
 import { parseStoredArray } from '../utils/storage'
+import { preloadOnIdle } from '../utils/lazyPreload'
 import { getPlatformVipState } from '../services/audioQualitySettings'
 import { debugLog } from '../utils/debugLog'
 
@@ -39,7 +41,7 @@ interface SearchPanelProps {
   onRemoveFromFavorites?: (song: Song) => void | Promise<unknown>
   onAddToPlaylist?: (song: Song, playlistId: string) => void
   onViewComments?: (song: Song) => void
-  onOpenArtist?: (artistId: string, platform: MusicPlatform) => void
+  onOpenArtist?: (artistId: string, platform: MusicPlatform, artistName?: string) => void
   onOpenAlbum?: (albumId: string, platform: MusicPlatform) => void
   /** 打开歌单详情（内部面板）。不传时回退为外部浏览器打开 */
   onOpenPlaylist?: (playlist: { id: string; name: string; coverImgUrl: string; trackCount: number; creator: string; platform: MusicPlatform }) => void
@@ -88,6 +90,17 @@ const getSearchHistoryKey = (platform: SearchPlatform): string => {
   if (platform === 'kugou') return SEARCH_HISTORY_KEY_KUGOU
   if (platform === 'soda') return SEARCH_HISTORY_KEY_SODA
   return SEARCH_HISTORY_KEY_NETEASE
+}
+
+// 融合搜索超时：本地平台（netease/qq 走本地网关）5s；前端直连外部平台的首次调用含
+// 动态 import（chunk 下载）+ 跨源网络（spotify/soda 直连官方、apple 走 iTunes），
+// 冷启动 5s 常态不够 → 融合结果「只剩网易云/QQ 两平台」。给直连平台 12s。
+const SEARCH_TIMEOUT_LOCAL_MS = 5_000
+const SEARCH_TIMEOUT_REMOTE_MS = 12_000
+const SEARCH_TIMEOUT_OVERRIDES: Partial<Record<MusicPlatform, number>> = {
+  apple: SEARCH_TIMEOUT_REMOTE_MS,
+  spotify: SEARCH_TIMEOUT_REMOTE_MS,
+  soda: SEARCH_TIMEOUT_REMOTE_MS,
 }
 
 const withSearchTimeout = <T,>(promise: Promise<T>, timeoutMs = 5_000): Promise<T> => new Promise((resolve, reject) => {
@@ -185,6 +198,19 @@ export default memo(function SearchPanel({
           : 'text-black/55 hover:bg-black/10 hover:text-black'
     }`
   
+  // 融合搜索预热：首次融合搜索要在超时窗口内完成「动态 import 平台服务模块 + 跨源网络
+  // 请求」两件事，冷启动时 import 本身就可能吃掉大半窗口，导致 apple/spotify/kugou/soda
+  // 整体超时退出、结果只剩本地网关的网易云/QQ。打开搜索面板就在空闲时预加载四个直连
+  // 平台的模块，让首次融合搜索的计时只覆盖网络。
+  useEffect(() => {
+    return preloadOnIdle([
+      () => import('../services/spotifyService'),
+      () => import('../services/kugouService'),
+      () => import('../services/sodaService'),
+      () => import('../services/appleCatalog'),
+    ], 3000)
+  }, [])
+
   const [keyword, setKeyword] = useState(() => {
     const saved = sessionStorage.getItem('waveforge_search_keyword')
     return saved || ''
@@ -267,16 +293,21 @@ export default memo(function SearchPanel({
   })
   const [contextUserPlaylists, setContextUserPlaylists] = useState<any[]>([])
 
+  // 右键菜单歌单拉取代次：快速连右键两首歌时，先点歌曲的迟到响应不得覆盖后点歌曲的列表
+  //（否则收藏/添加歌单按错误平台成对提交）
+  const contextPlaylistsGenerationRef = useRef(0)
   const openSongContextMenu = (event: ReactMouseEvent, song: Song) => {
     event.preventDefault()
     event.stopPropagation()
     setSongContextMenu({ show: true, x: event.clientX, y: event.clientY, song })
     setContextUserPlaylists([])
+    const generation = ++contextPlaylistsGenerationRef.current
+    const isStale = () => generation !== contextPlaylistsGenerationRef.current
     const songPlatform = (song.platform || 'netease') as MusicPlatform
     // Apple：右键菜单歌单用资料库歌单（amp-api）
     if (songPlatform === 'apple') {
       void getAppleLibraryPlaylists(100)
-        .then(setContextUserPlaylists)
+        .then(list => { if (!isStale()) setContextUserPlaylists(list) })
         .catch(error => console.warn('Failed to load Apple search context playlists:', error))
       return
     }
@@ -297,7 +328,7 @@ export default memo(function SearchPanel({
     if (songPlatform !== 'spotify' && songPlatform !== 'soda' && !playlistUserId) return
     const username = songPlatform === 'qq' ? (localStorage.getItem('qq_username') || '') : ''
     void getUserPlaylists(songPlatform, playlistUserId, username)
-      .then(setContextUserPlaylists)
+      .then(list => { if (!isStale()) setContextUserPlaylists(list) })
       .catch(error => console.warn('Failed to load search context playlists:', error))
   }
   
@@ -328,10 +359,10 @@ export default memo(function SearchPanel({
   // 根据当前平台判断用户是否是VIP
   const isFused = platform === 'fused'
   const neteaseSessionActive = neteaseLoggedIn || Boolean(
-    localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie')
+    getSecureToken('netease_cookie') || getSecureToken('neteaseCookie')
   )
   const qqSessionActive = qqLoggedIn || Boolean(
-    localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || localStorage.getItem('qq_logged_in') === 'true'
+    getSecureToken('qq_cookie') || getSecureToken('qqCookie') || localStorage.getItem('qq_logged_in') === 'true'
   )
   const isVipForPlatform = (songPlatform?: MusicPlatform) => songPlatform === 'qq' ? qqVip : songPlatform === 'netease' ? neteaseVip : false
   
@@ -481,38 +512,43 @@ export default memo(function SearchPanel({
   // 保存搜索状态到 sessionStorage（会话内记忆）
   // 轻量标量键：随输入/翻页变化，写入成本可忽略。
   useEffect(() => {
-    sessionStorage.setItem('waveforge_search_keyword', keyword)
-    sessionStorage.setItem('waveforge_search_searched', searched.toString())
-    sessionStorage.setItem('waveforge_search_platform', platform)
-    sessionStorage.setItem('waveforge_search_type', searchType)
-    sessionStorage.setItem('waveforge_search_display_count', displayCount.toString())
-    sessionStorage.setItem('waveforge_search_fusion_intent', fusionIntent)
+    // try/catch：配额满（残留大 JSON）时 QuotaExceededError 从 passive effect 冒泡
+    // 到根边界会卸载整棵树——持久化失败只丢会话恢复，不能崩应用
+    try {
+      sessionStorage.setItem('waveforge_search_keyword', keyword)
+      sessionStorage.setItem('waveforge_search_searched', searched.toString())
+      sessionStorage.setItem('waveforge_search_platform', platform)
+      sessionStorage.setItem('waveforge_search_type', searchType)
+      sessionStorage.setItem('waveforge_search_display_count', displayCount.toString())
+      sessionStorage.setItem('waveforge_search_fusion_intent', fusionIntent)
+    } catch { /* ignore */ }
   }, [keyword, searched, platform, searchType, displayCount, fusionIntent])
 
   // 结果数组单独持久化：融合搜索下一次可含上百首 × 多平台，逐键序列化开销大，
   // 只在数组本身变化时写入（每个键各自 last-write-wins，与合并写入等价）。
+  // 空结果也要覆写：只写非空的话，搜 A(100条)→搜 B(0条) 后重开面板会拿 B 关键词
+  // 配 A 的旧结果（keyword/searched 键是无条件写的，两边不对齐）。
   useEffect(() => {
-    if (allResults.length > 0) {
+    // 同上：大结果集（6 平台各 100 首）序列化可达 MB 级，配额满不崩应用
+    try {
       sessionStorage.setItem('waveforge_search_all_results', JSON.stringify(allResults))
-    }
-    if (displayedResults.length > 0) {
       sessionStorage.setItem('waveforge_search_displayed_results', JSON.stringify(displayedResults))
-    }
-    if (artistResults.length > 0) {
       sessionStorage.setItem('waveforge_search_artist_results', JSON.stringify(artistResults))
-    }
-    if (albumResults.length > 0) {
       sessionStorage.setItem('waveforge_search_album_results', JSON.stringify(albumResults))
-    }
+    } catch { /* ignore */ }
   }, [allResults, displayedResults, artistResults, albumResults])
 
   // 保存搜索历史
-  const saveSearchHistory = (query: string) => {
+  const saveSearchHistory = (rawQuery: string) => {
     const key = getSearchHistoryKey(platform)
+    const query = rawQuery.trim()
+    if (!query) return
     const history = [...searchHistory]
     
-    // 移除已存在的相同关键词
-    const index = history.indexOf(query)
+    // 移除已存在的相同关键词（大小写不敏感归一："Jay"/"jay " 视为同条，
+    // 不让 5 个槽位被变体重复词污染）
+    const normalized = query.toLocaleLowerCase()
+    const index = history.findIndex(item => item.toLocaleLowerCase() === normalized)
     if (index > -1) {
       history.splice(index, 1)
     }
@@ -523,7 +559,12 @@ export default memo(function SearchPanel({
     // 只保留最近的
     const newHistory = history.slice(0, MAX_HISTORY)
     setSearchHistory(newHistory)
-    localStorage.setItem(key, JSON.stringify(newHistory))
+    // 守卫必须在 setState 之后、调用方 try 块之前——存储禁用/配额满时抛异常会中断整次搜索
+    try {
+      localStorage.setItem(key, JSON.stringify(newHistory))
+    } catch {
+      // 隐私模式/配额满：放弃历史持久化，搜索照常进行
+    }
   }
 
   // 清空搜索历史
@@ -543,6 +584,16 @@ export default memo(function SearchPanel({
     previousPlatformRef.current = platform
     if (searched && keyword.trim()) {
       handleSearch()
+    } else {
+      // 未搜过或无关键词：无条件清旧结果，避免「apple chip 高亮 + qq 旧结果列表」
+      // 的跨平台残留（改关键词时 onChange 已置 searched=false，这里 effect 不重搜）
+      setAllResults([])
+      setDisplayedResults([])
+      setArtistResults([])
+      setAlbumResults([])
+      setPlaylistResults([])
+      setFusionUnavailablePlatforms([])
+      setSuggestions([])
     }
   }, [platform])
   
@@ -556,6 +607,14 @@ export default memo(function SearchPanel({
     // 如果已搜索过且有关键词，重新搜索
     if (searched && keyword.trim()) {
       handleSearch()
+    } else {
+      // 同平台切换：未搜过/无关键词时清旧结果
+      setAllResults([])
+      setDisplayedResults([])
+      setArtistResults([])
+      setAlbumResults([])
+      setPlaylistResults([])
+      setFusionUnavailablePlatforms([])
     }
   }, [searchType])
 
@@ -620,6 +679,10 @@ export default memo(function SearchPanel({
         setSelectedIndex(-1)
       } catch (error) {
         console.error('获取搜索建议失败:', error)
+        // 失败也要清空：残留上一关键词的下拉项挂在当前输入下是数据错位
+        setSuggestions([])
+        setShowSuggestions(false)
+        setSelectedIndex(-1)
       }
     }, 300)
 
@@ -663,11 +726,13 @@ export default memo(function SearchPanel({
       return
     }
     
-    // 重置结果
+    // 重置结果（playlistResults 也要清：失败路径不清会让旧平台歌单卡顶替新结果——
+    // apple 无 dev token 分支就是显式清空的先例）
     setArtistResults([])
     setAlbumResults([])
     setAllResults([])
     setDisplayedResults([])
+    setPlaylistResults([])
     setFusionUnavailablePlatforms([])
     
     // 保存搜索历史
@@ -678,9 +743,9 @@ export default memo(function SearchPanel({
         // 融合搜索覆盖全部可搜索平台（汽水已接入逆向 Web API 搜索）
         const platforms: MusicPlatform[] = ['netease', 'qq', 'apple', 'spotify', 'kugou', 'soda']
         const requests = platforms.flatMap(sourcePlatform => ([
-          { sourcePlatform, kind: 'songs' as const, promise: withSearchTimeout(searchSongs(finalKeyword, 100, sourcePlatform)) },
-          { sourcePlatform, kind: 'artists' as const, promise: withSearchTimeout(searchArtists(finalKeyword, sourcePlatform)) },
-          { sourcePlatform, kind: 'albums' as const, promise: withSearchTimeout(searchAlbums(finalKeyword, sourcePlatform)) },
+          { sourcePlatform, kind: 'songs' as const, promise: withSearchTimeout(searchSongs(finalKeyword, 100, sourcePlatform), SEARCH_TIMEOUT_OVERRIDES[sourcePlatform] ?? SEARCH_TIMEOUT_LOCAL_MS) },
+          { sourcePlatform, kind: 'artists' as const, promise: withSearchTimeout(searchArtists(finalKeyword, sourcePlatform), SEARCH_TIMEOUT_OVERRIDES[sourcePlatform] ?? SEARCH_TIMEOUT_LOCAL_MS) },
+          { sourcePlatform, kind: 'albums' as const, promise: withSearchTimeout(searchAlbums(finalKeyword, sourcePlatform), SEARCH_TIMEOUT_OVERRIDES[sourcePlatform] ?? SEARCH_TIMEOUT_LOCAL_MS) },
         ]))
         const requestResults = await Promise.allSettled(requests.map(request => request.promise))
         if (requestId !== searchRequestRef.current) return
@@ -708,7 +773,7 @@ export default memo(function SearchPanel({
             apple: { loggedIn: appleLoggedIn, vip: appleLoggedIn },
             spotify: { loggedIn: spotifyLoggedIn, vip: false },
             kugou: { loggedIn: kugouLoggedIn, vip: getPlatformVipState('kugou') },
-            soda: { loggedIn: Boolean(localStorage.getItem('soda_token')), vip: false },
+            soda: { loggedIn: Boolean(getSecureToken('soda_token')), vip: false },
           },
         })
         setFusionUnavailablePlatforms(unavailable)
@@ -857,26 +922,34 @@ export default memo(function SearchPanel({
   // 加载更多结果
   const handleLoadMore = async () => {
     if (loadingMore) return
+    // 陈旧守卫：await loadAlbumCovers 期间新搜索（平台 chip/类型/回车）会重置结果，
+    // 旧 loadMore 落地时用旧数组覆盖新结果（跨平台/跨关键词结果串台）。捕获当前
+    // requestId，落地时比对——不一致即丢弃
+    const requestIdAtStart = searchRequestRef.current
+    const resultsAtStart = allResults
+    const displayCountAtStart = displayCount
     setLoadingMore(true)
     try {
       const newCount = displayCount + SEARCH_PAGE_SIZE
-      const newSongs = allResults.slice(displayCount, newCount)
+      const newSongs = resultsAtStart.slice(displayCount, newCount)
       
       // 如果是网易云，需要加载这批歌曲的封面
       if ((platform === 'netease' || platform === 'fused') && newSongs.length > 0) {
         const songsWithCovers = await loadAlbumCovers(newSongs)
-        
+        if (requestIdAtStart !== searchRequestRef.current) return
         // 更新allResults中的封面
-        const updatedResults = [...allResults]
+        const updatedResults = [...resultsAtStart]
         songsWithCovers.forEach((song, index) => {
           updatedResults[displayCount + index] = song
         })
         setAllResults(updatedResults)
         setDisplayedResults(updatedResults.slice(0, newCount))
       } else {
-        setDisplayedResults(allResults.slice(0, newCount))
+        if (requestIdAtStart !== searchRequestRef.current) return
+        setDisplayedResults(resultsAtStart.slice(0, newCount))
       }
       
+      if (requestIdAtStart !== searchRequestRef.current) return
       setDisplayCount(newCount)
     } catch (error) {
       console.error('加载更多失败:', error)
@@ -1395,7 +1468,8 @@ export default memo(function SearchPanel({
           )}
           {!loading && isFused && fusionUnavailablePlatforms.length > 0 && (
             <div className="mb-3 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-400/20 text-amber-200/80 text-sm">
-              {fusionUnavailablePlatforms.map(item => item === 'netease' ? '网易云音乐' : 'QQ音乐').join('、')} 的部分结果暂时不可用，已展示成功返回的内容。
+              {/* platformLabel：四平台（apple/spotify/kugou/soda）失败也显示各自名字，此前硬编码只会显示「QQ音乐」 */}
+              {fusionUnavailablePlatforms.map(item => platformLabel(item)).join('、')} 的部分结果暂时不可用，已展示成功返回的内容。
             </div>
           )}
           {loading ? (
@@ -1624,9 +1698,9 @@ export default memo(function SearchPanel({
 
                   {/* 封面 */}
                   <div className={`w-12 h-12 rounded-md overflow-hidden ${bgCard} flex-shrink-0`}>
-                    {song.album?.picUrl ? (
+                    {qqSongCoverUrl(song) ? (
                       <CachedImage 
-                        src={getProxiedImageUrl(song.album.picUrl)} 
+                        src={getProxiedImageUrl(qqSongCoverUrl(song))} 
                         alt={songText(song.name, '歌曲封面')} 
                         className="w-full h-full object-cover"
                         role="compact"
@@ -1877,7 +1951,8 @@ export default memo(function SearchPanel({
         const artistId = songPlatform === 'soda' ? (artist?.name || artist?.mid || artist?.id)
           : songPlatform === 'qq' ? (artist?.mid || artist?.id)
             : songPlatform === 'apple' ? (artist?.appleId || artist?.id) : (artist?.mid || artist?.id)
-          if (artistId) onOpenArtist?.(String(artistId), songPlatform)
+          // 第三参歌手名:服务端 MV 回填(部分艺人 fcg 列表为空)按名走搜索,缺名回填失效
+          if (artistId) onOpenArtist?.(String(artistId), songPlatform, artist?.name || '')
         }}
         onCopyInfo={onCopyInfo}
         userPlaylists={contextUserPlaylists}

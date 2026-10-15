@@ -11,6 +11,7 @@ import {
   type HomeModuleType,
 } from '../services/homeModules'
 import { useTvBack } from '../tv/tvCore'
+import { getSecureToken } from '../services/secureTokenStore'
 
 interface ModuleCustomizeModalProps {
   show: boolean
@@ -42,13 +43,13 @@ export default function ModuleCustomizeModal({ show, onClose, playerTheme = 'dar
   // 分平台的模块选择
   const [neteaseModules, setNeteaseModules] = useState<HomeModuleType[]>(() => {
     const saved = localStorage.getItem('homeModules_netease')
-    const loggedIn = Boolean(localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie'))
+    const loggedIn = Boolean(getSecureToken('netease_cookie') || getSecureToken('neteaseCookie'))
     return saved ? sanitizeHomeModules(saved, 'netease') : getDefaultHomeModules('netease', loggedIn)
   })
   
   const [qqModules, setQQModules] = useState<HomeModuleType[]>(() => {
     const saved = localStorage.getItem('homeModules_qq')
-    const loggedIn = Boolean(localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie'))
+    const loggedIn = Boolean(getSecureToken('qq_cookie') || getSecureToken('qqCookie'))
     return saved ? sanitizeHomeModules(saved, 'qq') : getDefaultHomeModules('qq', loggedIn)
   })
 
@@ -60,17 +61,17 @@ export default function ModuleCustomizeModal({ show, onClose, playerTheme = 'dar
   
   // 监听模块变化，自动保存
   useEffect(() => {
-    localStorage.setItem('homeModules_netease', JSON.stringify(neteaseModules))
+    try { localStorage.setItem('homeModules_netease', JSON.stringify(neteaseModules)) } catch { /* 配额满忽略 */ }
     window.dispatchEvent(new Event('homeModulesChanged'))
   }, [neteaseModules])
   
   useEffect(() => {
-    localStorage.setItem('homeModules_qq', JSON.stringify(qqModules))
+    try { localStorage.setItem('homeModules_qq', JSON.stringify(qqModules)) } catch { /* 配额满忽略 */ }
     window.dispatchEvent(new Event('homeModulesChanged'))
   }, [qqModules])
 
   useEffect(() => {
-    localStorage.setItem('homeModules_apple', JSON.stringify(appleModules))
+    try { localStorage.setItem('homeModules_apple', JSON.stringify(appleModules)) } catch { /* 配额满忽略 */ }
     window.dispatchEvent(new Event('homeModulesChanged'))
   }, [appleModules])
   

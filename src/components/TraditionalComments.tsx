@@ -8,6 +8,8 @@ import type { MusicPlatform } from '../services/platforms'
 import { getPlatformCookie, platformLabel } from '../services/platforms'
 import { fetchSodaComments, type SodaComment } from '../services/sodaService'
 import { createTtlCache } from '../utils/ttlCache'
+import { getSecureToken, setSecureToken, removeSecureToken } from "../services/secureTokenStore"
+import { cookieHeaders } from '../services/cookieRequest'
 
 interface CommentItem {
   commentId: string
@@ -23,7 +25,7 @@ interface CommentItem {
 }
 
 const API_BASE = 'http://localhost:3001'
-const getCookie = () => localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+const getCookie = () => getSecureToken("netease_cookie") || ''
 
 const formatDate = (ms: number) => {
   const date = new Date(Number.isFinite(ms) ? ms : 0)
@@ -148,8 +150,8 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
       let more = false
       if (platform === 'netease') {
         const sortType = view === 'hot' ? 2 : 3
-        const endpoint = `${API_BASE}/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=30&offset=${reset ? 0 : offsetRef.current}&sortType=${sortType}&type=0&cookie=${encodeURIComponent(getCookie())}`
-        const response = await fetch(endpoint)
+        const endpoint = `${API_BASE}/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=30&offset=${reset ? 0 : offsetRef.current}&sortType=${sortType}&type=0`
+        const response = await fetch(endpoint, { headers: cookieHeaders(getCookie()) })
         const data = await response.json()
         if (data.code === 200) {
           hot = (data.data?.hotComments || []).map(normalizeNetease).filter(Boolean) as CommentItem[]
@@ -159,8 +161,8 @@ function TraditionalComments({ song, accent, isDark, onClose }: TraditionalComme
       } else if (platform === 'qq') {
         // QQ：pagenum 页码分页（0 起，服务端映射上游 pageNo=pagenum+1）；首页必须传 0，传 1 会跳过第一条评论
         const pageNumber = reset ? 0 : pageRef.current + 1
-        const endpoint = `${API_BASE}/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageNumber}&pagesize=20&type=${view}&biztype=1&cookie=${encodeURIComponent(getPlatformCookie('qq'))}`
-        const response = await fetch(endpoint)
+        const endpoint = `${API_BASE}/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageNumber}&pagesize=20&type=${view}&biztype=1`
+        const response = await fetch(endpoint, { headers: cookieHeaders(getPlatformCookie('qq')) })
         const data = await response.json()
         if (!response.ok || data.result !== 0 || !data.data) throw new Error(data?.message || 'QQ 音乐评论加载失败')
         hot = (data.data?.hotComments || []).map(normalizeQQ).filter(Boolean) as CommentItem[]

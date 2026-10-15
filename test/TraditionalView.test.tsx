@@ -349,7 +349,7 @@ describe('传统模式 TraditionalView', () => {
     render(<TraditionalComments song={song} accent="#22c55e" isDark onClose={() => undefined} />)
     await waitFor(() => expect(screen.getByText('加载更多')).toBeTruthy())
     expect(String(fetchMock.mock.calls[0][0])).toContain('pagenum=0')
-    expect(String(fetchMock.mock.calls[0][0])).toContain('qq-auth-cookie')
+    expect(String(fetchMock.mock.calls[0][1]?.headers?.['X-WaveForge-Cookie'])).toBe('qq-auth-cookie')
     fireEvent.click(screen.getByText('加载更多'))
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
     expect(String(fetchMock.mock.calls[1][0])).toContain('pagenum=1')

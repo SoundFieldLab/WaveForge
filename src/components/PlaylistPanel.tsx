@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { X, Play, Music, Loader2, Sparkles } from 'lucide-react'
 import { isTvModeActive } from '../platform'
-import { Song } from '../services/musicApi'
+import { Song, qqSongCoverUrl } from '../services/musicApi'
 import { isSodaLoggedIn } from '../services/sodaService'
 import CachedImage from './CachedImage'
 import ScrollToTop from './ScrollToTop'
@@ -119,9 +119,8 @@ const PlaylistRow = memo(function PlaylistRow({
       </div>
 
       <div className={`relative h-16 w-16 shrink-0 overflow-hidden rounded-xl shadow-md ring-1 ${isDark ? 'bg-white/10 ring-white/15' : 'bg-black/5 ring-black/10'}`}>
-        {song.album?.picUrl ? (
-          <CachedImage
-            src={song.album.picUrl}
+        {qqSongCoverUrl(song) ? (
+          <CachedImage src={qqSongCoverUrl(song)}
             alt={song.name}
             className="h-full w-full object-cover"
             fallback={

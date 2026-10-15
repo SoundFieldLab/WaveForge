@@ -200,7 +200,9 @@ export default function AppleWeatherCompactScene({ scene, active = true, reduced
           const drawHeight = height * 0.64
           const drawWidth = drawHeight * (background.naturalWidth / background.naturalHeight)
           const offset = -((t * width / 360) % Math.max(1, drawWidth / 3))
-          for (let repeat = -1; repeat < 4; repeat += 1) ctx.drawImage(background, offset + repeat * drawWidth, 0, drawWidth, drawHeight)
+          // 同全屏场景：图顶有硬边，上移 6% 带出屏幕顶并补高保持覆盖
+          const tileY = -drawHeight * 0.09
+          for (let repeat = -1; repeat < 4; repeat += 1) ctx.drawImage(background, offset + repeat * drawWidth, tileY, drawWidth, drawHeight * 1.09)
         }
       }
 

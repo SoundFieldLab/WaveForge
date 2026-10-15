@@ -3,7 +3,7 @@ import { useTvBack } from '../tv/tvCore'
 import { Check, ListMusic, LoaderCircle, Music2, X } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { Song } from '../services/musicApi'
-import { getProxiedImageUrl } from '../services/musicApi'
+import { getProxiedImageUrl, qqSongCoverUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import { platformLabel } from '../services/platforms'
 import { getAddablePlaylists, getPlaylistMutationId } from '../services/addablePlaylists'
@@ -46,7 +46,7 @@ export default function PlaybackAddToPlaylistModal({ show, song, playlists, load
           <motion.div role="dialog" aria-modal="true" aria-label="添加到歌单" className={`relative flex max-h-[72vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border shadow-2xl ${isDark ? 'border-white/15 bg-slate-950/95 text-white' : 'border-black/10 bg-white/95 text-black'}`} initial={{ y: 18, scale: 0.96 }} animate={{ y: 0, scale: 1 }} exit={{ y: 18, scale: 0.96 }}>
             <header className={`flex items-center gap-3 border-b p-4 ${isDark ? 'border-white/10' : 'border-black/10'}`}>
               <div className="h-12 w-12 overflow-hidden rounded-lg bg-black/10">
-                {song.album?.picUrl ? <CachedImage src={getProxiedImageUrl(song.album.picUrl, 96)} alt="" className="h-full w-full object-cover" /> : <Music2 className="m-3 h-6 w-6 opacity-45" />}
+                {qqSongCoverUrl(song) ? <CachedImage src={getProxiedImageUrl(qqSongCoverUrl(song), 96)} alt="" className="h-full w-full object-cover" /> : <Music2 className="m-3 h-6 w-6 opacity-45" />}
               </div>
               <div className="min-w-0 flex-1"><h2 className="font-semibold">添加到歌单</h2><p className={`truncate text-xs ${isDark ? 'text-white/50' : 'text-black/50'}`}>{song.name} · {platformLabel(platform)}</p></div>
               <button type="button" aria-label="关闭" onClick={onClose} className="rounded-lg p-2 transition hover:bg-black/10"><X className="h-5 w-5" /></button>

@@ -74,10 +74,10 @@ export default function EditPlaylistModal({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (name.trim()) {
+      // privacy 仅作展示（上游无反向修改端点），不随提交下发
       onSubmit({
         name: name.trim(),
         desc: description.trim(),
-        privacy: privacy === 'private' ? '10' : '0',
         coverDataUrl: coverDataUrl || undefined
       })
     }
@@ -89,6 +89,10 @@ export default function EditPlaylistModal({
     if (loading) return
     onClose()
   }
+
+  // 新选的本地封面是 data: URL：resolveArtworkUrl 对非 http(s) 输入返回空串，
+  // 直接送代理函数会让预览立即变破图——data: 原样渲染，仅远端 URL 走代理。
+  const coverDisplaySrc = coverPreview?.startsWith('data:') ? coverPreview : getProxiedImageUrl(coverPreview || '')
 
   return (
     <AnimatePresence>
@@ -113,7 +117,7 @@ export default function EditPlaylistModal({
             {/* 液态玻璃背景 */}
             <div className="absolute inset-0 rounded-3xl overflow-hidden">
               {coverPreview && (
-                <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${getProxiedImageUrl(coverPreview)})`, filter: 'blur(40px) brightness(0.6)' }} />
+                <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${coverDisplaySrc})`, filter: 'blur(40px) brightness(0.6)' }} />
               )}
               <div className="absolute inset-0" style={{ background: 'linear-gradient(135deg, rgba(0,0,0,0.3) 0%, rgba(20,20,30,0.5) 50%, rgba(0,0,0,0.4) 100%)', backdropFilter: 'blur(80px) saturate(200%)', WebkitBackdropFilter: 'blur(80px) saturate(200%)' }} />
               <div className="absolute inset-0 rounded-3xl" style={{ border: '1px solid rgba(255,255,255,0.2)', boxShadow: 'inset 0 1px 1px rgba(255,255,255,0.15)', pointerEvents: 'none' }} />
@@ -148,7 +152,7 @@ export default function EditPlaylistModal({
                     style={{ background: 'rgba(255,255,255,0.06)', border: `1px solid ${coverPreview ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.1)'}`, boxShadow: '0 4px 16px rgba(0,0,0,0.3)' }}
                   >
                     {coverPreview ? (
-                      <img src={getProxiedImageUrl(coverPreview)} alt="歌单封面预览" className="w-full h-full object-cover" />
+                      <img src={coverDisplaySrc} alt="歌单封面预览" className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-white/50">
                         <ImagePlus className="w-7 h-7" />
@@ -198,29 +202,20 @@ export default function EditPlaylistModal({
                   />
                 </div>
 
+                {/* 隐私状态：仅展示。上游（网易云 /api/playlist/update/privacy）只支持把隐私歌单
+                    设为公开，没有反向端点；此前这里的「公开/私密」切换点了保存后被静默丢弃
+                    （假成功），改为只读提示，避免误导。 */}
                 <div>
                   <label className="block text-sm font-medium text-white/80 mb-3">
-                    隐私设置
+                    隐私状态
                   </label>
-                  <div className="flex gap-3">
-                    <button
-                      type="button"
-                      onClick={() => setPrivacy('public')}
-                      className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl transition-all ${privacy === 'public' ? 'text-white' : 'text-white/60 hover:bg-white/10'}`}
-                      style={privacy === 'public' ? { background: `${accentColor}33`, border: `1px solid ${accentColor}88` } : { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
-                    >
-                      <Globe className="w-4 h-4" />
-                      <span>公开</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPrivacy('private')}
-                      className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl transition-all ${privacy === 'private' ? 'text-white' : 'text-white/60 hover:bg-white/10'}`}
-                      style={privacy === 'private' ? { background: `${accentColor}33`, border: `1px solid ${accentColor}88` } : { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
-                    >
-                      <Lock className="w-4 h-4" />
-                      <span>私密</span>
-                    </button>
+                  <div
+                    className="flex items-center gap-2 rounded-xl px-4 py-3 text-white/70"
+                    style={{ background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)' }}
+                  >
+                    {privacy === 'private' ? <Lock className="w-4 h-4" /> : <Globe className="w-4 h-4" />}
+                    <span>{privacy === 'private' ? '私密歌单' : '公开歌单'}</span>
+                    <span className="ml-auto text-xs text-white/40">暂不支持在应用内修改</span>
                   </div>
                 </div>
 

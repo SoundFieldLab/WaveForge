@@ -1,6 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { ChevronDown, Music, Play, Clock, Crown, Heart, Infinity as InfinityIcon, Info, Radio, Search, X } from 'lucide-react'
-import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, isSameSong } from '../services/musicApi'
+import { Song, getProxiedImageUrl, resolveSongAlbumIdentifier, isSameSong, qqSongCoverUrl } from '../services/musicApi'
 import { getPlatformCapabilities } from '../services/platforms'
 import type { MusicPlatform } from '../services/platforms'
 import { subscribePlaylist } from '../services/playlistService'
@@ -19,6 +19,8 @@ import DeleteSongModal from './DeleteSongModal'
 import { useTvBack } from '../tv/tvCore'
 import { isCrossFilled, useCrossFillVersion } from '../services/crossFillRegistry'
 import { PLATFORM_LABELS } from '../services/platforms'
+import { getSecureToken, setSecureToken, removeSecureToken } from "../services/secureTokenStore"
+import { cookieHeaders } from '../services/cookieRequest'
 
 const DETAIL_ROW_HEIGHT = 60
 const DETAIL_CARD_HEIGHT = 56
@@ -202,12 +204,13 @@ function PlaylistDetailPanel({
   // 否则每组被当成单曲，name/ar/al/dt 全空 → 播放列表无封面无歌名、时长 0:00。
   const handleSmartPlay = async () => {
     if (!playlist || songs.length === 0 || smartLoading) return
-    const cookie = localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+    const cookie = getSecureToken("netease_cookie") || ''
     if (!cookie) return
     setSmartLoading(true)
     try {
       const res = await fetch(
-        `http://localhost:3001/api/netease/playmode/intelligence/list?cookie=${encodeURIComponent(cookie)}&id=${encodeURIComponent(String(songs[0].id))}&pid=${encodeURIComponent(String(playlist.id))}`
+        `http://localhost:3001/api/netease/playmode/intelligence/list?id=${encodeURIComponent(String(songs[0].id))}&pid=${encodeURIComponent(String(playlist.id))}`,
+        { headers: cookieHeaders(cookie) },
       )
       const data = await res.json()
       const raw = Array.isArray(data?.data) ? data.data : []
@@ -230,6 +233,8 @@ function PlaylistDetailPanel({
     }
   }
   const scrollContainerRef = useRef<HTMLDivElement>(null)
+  // 回到顶部按钮可见时，定位歌曲按钮从底部槽位上移让位
+  const [scrollTopVisible, setScrollTopVisible] = useState(false)
   const [showPlaylistInfo, setShowPlaylistInfo] = useState(false)
   /** 歌单官方介绍是否展开（默认只显示 3 行摘要）。 */
   const [descExpanded, setDescExpanded] = useState(false)
@@ -1073,9 +1078,8 @@ function PlaylistDetailPanel({
 
                           {/* 封面 */}
                           <div className={`w-10 h-10 rounded-md overflow-hidden flex-shrink-0 ${playerTheme === 'dark' ? 'bg-white/10' : 'bg-black/10'}`}>
-                            {song.album?.picUrl ? (
-                              <CachedImage 
-                                src={song.album.picUrl} 
+                            {qqSongCoverUrl(song) ? (
+                              <CachedImage src={qqSongCoverUrl(song)} 
                                 alt={song.name} 
                                 className="w-full h-full object-cover"
                                 lazy={false}
@@ -1189,23 +1193,26 @@ function PlaylistDetailPanel({
               </div> {/* 结束内容层 */}
             </div> {/* 结束主容器 */}
             
-            {/* 返回顶部和跳转到当前歌曲按钮 - 在主容器外部，相对于包装容器定位 */}
-            <ScrollToTop 
-              containerRef={scrollContainerRef} 
+            {/* 返回顶部和跳转到当前歌曲按钮 - 在主容器外部，相对于包装容器定位。
+                定位歌曲：歌曲行滚出可视区即显示（重开面板不用盲滚找歌）；回到顶部出现时上移让位 */}
+            <ScrollToTop
+              containerRef={scrollContainerRef}
               threshold={200}
               playerTheme={playerTheme}
               position="absolute"
               offsetRight={-60}
               offsetBottom={24}
+              onVisibilityChange={setScrollTopVisible}
             />
             <ScrollToCurrentSong
               containerRef={scrollContainerRef}
               currentSongIndex={currentSongIndex}
-              threshold={200}
+              threshold={72}
               playerTheme={playerTheme}
               position="absolute"
               offsetRight={-60}
-              offsetBottom={88}
+              offsetBottom={24}
+              slotOffsetBottom={scrollTopVisible ? 64 : 0}
               cardHeight={DETAIL_CARD_HEIGHT}
               cardGapY={DETAIL_ROW_HEIGHT - DETAIL_CARD_HEIGHT}
               contentPaddingTop={16}

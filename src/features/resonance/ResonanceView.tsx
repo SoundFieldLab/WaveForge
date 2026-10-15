@@ -31,7 +31,7 @@ export interface ResonanceViewProps {
   createAdapter: (hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ResonancePlaybackAdapter
   nowPlaying: { song: Song | null; positionMs: number; playing: boolean } | null
   /** 切成别的模式（交给 App 的拦截器：房间在时会先问「挂起 / 退出」） */
-  onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance') => void
+  onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong') => void
 }
 
 /** 各模式的显示名（「返回 X」按钮用） */

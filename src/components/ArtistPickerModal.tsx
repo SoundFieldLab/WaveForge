@@ -10,7 +10,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
 import { Loader2, Music2, UserRound, X } from 'lucide-react'
 import type { Song } from '../services/musicApi'
-import { searchArtists } from '../services/musicApi'
+import { searchArtists, qqSongCoverUrl } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
 import CachedImage from './CachedImage'
 
@@ -91,7 +91,7 @@ export default function ArtistPickerModal({ show, song, accent = '#31c27c', onSe
   }, [show, onClose])
 
   if (!show || !song) return null
-  const cover = song.album?.picUrl || ''
+  const cover = qqSongCoverUrl(song)
   const pending = entries.some(entry => !entry.resolved)
 
   return (

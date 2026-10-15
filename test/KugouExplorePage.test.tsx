@@ -20,7 +20,27 @@ vi.mock('../src/components/CachedImage', () => ({
 
 vi.mock('../src/services/kugouService', () => ({
   hasKugouConceptCredential: () => true,
-  // 听书：空推荐池（板块自己渲染空态/错误态），其余接口本测试用不到
+  kugouDiscoverSongToTrack: (song: { hash?: string; songName?: string; singerName?: string }) => ({
+    hash: song.hash || '',
+    songName: song.songName || '',
+    singerName: song.singerName || '',
+  }),
+  kugouTrackToSong: (track: { hash?: string; songName?: string; singerName?: string }) => ({
+    id: 0,
+    mid: track.hash || '',
+    name: track.songName || '',
+    artists: [{ name: track.singerName || '' }],
+    album: { name: '', picUrl: '' },
+    duration: 0,
+    platform: 'kugou',
+  }),
+  // 发现分区：空数据（板块自己渲染空态/加载态），其余接口本测试用不到
+  fetchKugouDiscoverSections: vi.fn(async () => []),
+  fetchKugouHeartRadioSongs: vi.fn(async () => ({ songs: [] })),
+  fetchKugouDiscoverBlindbox: vi.fn(async () => []),
+  fetchKugouDiscoverChannelTabs: vi.fn(async () => []),
+  fetchKugouDiscoverWaterfall: vi.fn(async () => ({ channels: [], isEnd: true })),
+  // 听书：空推荐池（板块自己渲染空态/错误态）
   fetchKugouLongaudioDaily: vi.fn(async () => ({ albums: [], hasMore: false })),
   fetchKugouLongaudioAlbumDetail: vi.fn(async () => ({ album: null })),
   fetchKugouLongaudioChapters: vi.fn(async () => ({ chapters: [], hasMore: false })),
@@ -102,54 +122,59 @@ afterEach(() => {
   cleanup()
 })
 
-describe('酷狗探索页一级分区（音乐 / 听书）', () => {
-  it('默认落在音乐分区：页签齐全（无刷歌），激活项用酷狗品牌色，音乐五板块可见', async () => {
+describe('酷狗探索页一级分区（发现 / 音乐 / 听书）', () => {
+  it('默认落在发现分区：页签齐全（无刷歌），激活项用酷狗品牌色，音乐五板块可见', async () => {
     render(<KugouExplorePage {...baseProps} sectionVisible={kugouVisible} />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map(tab => tab.textContent)).toEqual(['音乐', '听书'])
-    const active = screen.getByRole('tab', { name: '音乐' })
+    expect(tabs.map(tab => tab.textContent)).toEqual(['发现', '音乐', '听书'])
+    const active = screen.getByRole('tab', { name: '发现' })
     expect(active.getAttribute('aria-selected')).toBe('true')
     // 品牌色胶囊：accent（#FF7A00）直接写进激活项样式（jsdom 会归一化成 rgb）
     const activeStyle = active.getAttribute('style') || ''
     expect(activeStyle.includes('FF7A00') || activeStyle.includes('rgb(255, 122, 0)')).toBe(true)
-    expect(paneOf('music').className).not.toContain('hidden')
+    expect(paneOf('discover').className).not.toContain('hidden')
+    expect(paneOf('music').className).toContain('hidden')
     expect(paneOf('longaudio').className).toContain('hidden')
     // 「刷歌」分区已下线：DOM 里不存在
     expect(paneOf('youth')).toBeNull()
-    // 音乐分区：推荐 + 乐库 + 歌单 + 频道 + 分类五板块都在
+    // 切到音乐分区：推荐 + 乐库 + 歌单 + 频道 + 分类五板块都在
+    fireEvent.click(screen.getByRole('tab', { name: '音乐' }))
     for (const board of ['discover', 'library', 'playlist-tags', 'channels', 'categories']) {
       expect(document.querySelector(`[data-kugou-board="${board}"]`)).toBeTruthy()
     }
   })
 
-  it('点「听书」切区：听书面板可见、音乐面板隐藏，听书板块挂载', async () => {
+  it('点「听书」切区：听书面板可见、发现/音乐面板隐藏，听书板块挂载', async () => {
     render(<KugouExplorePage {...baseProps} sectionVisible={kugouVisible} />)
     fireEvent.click(screen.getByRole('tab', { name: '听书' }))
     expect(screen.getByRole('tab', { name: '听书' }).getAttribute('aria-selected')).toBe('true')
     expect(paneOf('longaudio').className).not.toContain('hidden')
     expect(paneOf('music').className).toContain('hidden')
+    expect(paneOf('discover').className).toContain('hidden')
     expect(screen.getByText('进入听书')).toBeTruthy()
   })
 
-  it('设置里隐藏听书板块：分区页签消失，音乐分区保留', () => {
+  it('设置里隐藏听书板块：分区页签消失，发现/音乐分区保留', () => {
     const hidden = new Set(['kugouLongaudio'])
     render(<KugouExplorePage {...baseProps} sectionVisible={section => kugouVisible(section) && !hidden.has(section)} />)
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['音乐'])
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '音乐'])
     expect(screen.queryByText('进入听书')).toBeNull()
   })
 
-  it('音乐子板块全部隐藏时：整块音乐面板收起，自动回落到听书分区而不是空白', () => {
+  it('音乐子板块全部隐藏时：整块音乐面板收起，发现/听书分区保留而不是空白', () => {
     const hidden = new Set(['discover', 'kugouLibrary', 'kugouPlaylistTags', 'channels', 'kugouCategories'])
     render(<KugouExplorePage {...baseProps} sectionVisible={section => kugouVisible(section) && !hidden.has(section)} />)
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['听书'])
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '听书'])
     expect(paneOf('music').className).toContain('hidden')
-    expect(paneOf('longaudio').className).not.toContain('hidden')
+    expect(paneOf('discover').className).not.toContain('hidden')
+    expect(paneOf('longaudio').className).toContain('hidden')
   })
 
   it('平台隔离：没有酷狗板块能力时（其它平台的区块列表）整页不渲染，也不出现通用聚合板块', () => {
-    // 其它平台能力表里只有 playlists/charts/newSongs/albums 这类通用区块
+    // 其它平台能力表里只有 playlists/charts/newSongs/albums 这类通用区块；
+    // 发现分区不依赖任何板块位（概念版复刻独立数据源），因此仍保留 —— 音乐/听书分区必须隐藏
     render(<KugouExplorePage {...baseProps} sectionVisible={section => ['playlists', 'charts', 'newSongs', 'albums'].includes(section)} />)
-    expect(screen.queryAllByRole('tab')).toHaveLength(0)
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现'])
     for (const zone of ['music', 'longaudio']) {
       expect(paneOf(zone).className).toContain('hidden')
     }

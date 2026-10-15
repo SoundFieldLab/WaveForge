@@ -17,6 +17,7 @@ import DeletePlaylistModal from './DeletePlaylistModal'
 import DesktopMiniPlayer from './DesktopMiniPlayer'
 import CachedImage from './CachedImage'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS, MODE_SELECTION_PANEL_HEIGHT } from './ModeSelectionPanel'
+import ErrorBoundary from './ErrorBoundary'
 import GlobalToast from './GlobalToast'
 import LyricsDisplay from './LyricsDisplay'
 import DesktopWidgetZone from './DesktopWidgetZone'
@@ -43,6 +44,7 @@ import { preloadOnIdle } from '../utils/lazyPreload'
 import { createPlaybackTimeStore, type PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigation'
 import { addDesktopListeningSeconds, recordDesktopSongStart } from '../services/desktopMusicActivity'
+import { getSecureToken, setSecureToken, removeSecureToken } from '../services/secureTokenStore'
 import type { DesktopMusicWidgetContext } from './DesktopExtraWidgets'
 import {
   loadWallpaperEngineRotationSettings,
@@ -748,7 +750,10 @@ function DesktopView({
           : []
 
         // 保存到缓存并剔除已失效的轮换条目（上限 400 条：WE 库大的用户列表 JSON 可达数百 KB）
-        localStorage.setItem('weWallpapersCache', JSON.stringify(nextWallpapers.slice(0, 400)))
+        // 守卫：数百 KB JSON 在配额紧张时可能抛 QuotaExceeded，不能打断扫描完成流程
+        try {
+          localStorage.setItem('weWallpapersCache', JSON.stringify(nextWallpapers.slice(0, 400)))
+        } catch { /* 配额满：放弃缓存，本次列表照常生效 */ }
         setWeWallpapers(nextWallpapers)
         weWallpapersRef.current = nextWallpapers
 
@@ -939,6 +944,9 @@ function DesktopView({
 
   useEffect(() => {
     const refreshPlaylists = (event: Event) => {
+      // 挂起期间（人在其它模式听歌）不跟着每首歌收藏/加歌单重拉一次歌单：看不到，纯网络浪费
+      //（与下方「最近播放」监听的 suspendedRef 守卫同口径）
+      if (suspendedRef.current) return
       const detail = (event as CustomEvent<{ platform?: MusicPlatform }>).detail
       if (detail?.platform === currentPlatform) {
         playlistLoadSignatureRef.current = ''
@@ -1170,7 +1178,7 @@ function DesktopView({
         }
         if (currentPlatform === 'soda') {
           const cookie = getPlatformCookie('soda')
-          const response = await fetch(`http://localhost:3001/api/soda/recent?limit=50${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, {
+          const response = await fetch(`http://localhost:3001/api/soda/recent?limit=50${cookie ? `` : ''}`, {
             cache: 'no-store',
             signal: controller.signal,
           })
@@ -1183,8 +1191,8 @@ function DesktopView({
           return
         }
         const cookie = currentPlatform === 'qq'
-          ? localStorage.getItem('qq_cookie') || localStorage.getItem('qqCookie') || ''
-          : localStorage.getItem('netease_cookie') || localStorage.getItem('neteaseCookie') || ''
+          ? getSecureToken("qq_cookie") || ''
+          : getSecureToken("netease_cookie") || ''
         if (!cookie) {
           setRecentSongs([])
           setRecentCovers([])
@@ -1559,6 +1567,12 @@ function DesktopView({
     setShowPlaylistDetail(false)
   }, [])
 
+  // 手动关闭（返回按钮/Esc 语义）恢复默认退场动画；点歌路径的当帧卸载只生效一次
+  const closePlaylistDetailAnimated = useCallback(() => {
+    setPlaylistDetailInstantExit(false)
+    closePlaylistDetail()
+  }, [closePlaylistDetail])
+
   const closePlaylistCarousel = useCallback(() => {
     if (hideCarouselTimerRef.current) {
       clearTimeout(hideCarouselTimerRef.current)
@@ -1814,8 +1828,8 @@ function DesktopView({
           },
         })
       } else if (playlistPlatform === 'qq') {
-        const cookie = localStorage.getItem('qq_cookie') || ''
-        const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}&cookie=${encodeURIComponent(cookie)}`, {
+        const cookie = getSecureToken('qq_cookie') || ''
+        const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, {
           signal: playlistLoadController.signal,
           cache: 'no-store',
         })
@@ -1987,15 +2001,19 @@ function DesktopView({
   )
 
   // 播放歌曲 - 关闭歌单详情，显示迷你播放器，4秒后隐藏歌单栏
+  const [playlistDetailInstantExit, setPlaylistDetailInstantExit] = useState(false)
   const handlePlaySong = (song: Song) => {
     onSongSelect(song, playlistSongs, {
       surface: 'desktop-playlist',
       playlist: selectedPlaylist,
       songs: playlistSongs,
     })
+    // 点歌关面板走当帧卸载（exit duration 0）：避免毛玻璃渐隐期透底闪屏，
+    // 也消灭退场动画期间返回按钮无反馈的空窗（见渲染处注释）。
+    setPlaylistDetailInstantExit(true)
     closePlaylistDetail() // 关闭歌单详情弹窗并取消未完成的分页请求
     setShowDesktopMiniPlayer(true) // 显示桌面迷你播放器
-    
+
     // 4秒后隐藏歌单栏
     hideCarouselTimerRef.current = scheduleTransientTimer(() => {
       hideCarouselTimerRef.current = null
@@ -2011,9 +2029,10 @@ function DesktopView({
         playlist: selectedPlaylist,
         songs: playlistSongs,
       })
+      setPlaylistDetailInstantExit(true)
       closePlaylistDetail()
       setShowDesktopMiniPlayer(true)
-      
+
       // 4秒后隐藏歌单栏
       hideCarouselTimerRef.current = scheduleTransientTimer(() => {
         hideCarouselTimerRef.current = null
@@ -2329,6 +2348,7 @@ function DesktopView({
         style={{ willChange: 'transform', backfaceVisibility: 'hidden', transform: 'translateZ(0)' }}
       >
 
+      <ErrorBoundary inline inlineLabel="左侧挂件区渲染出错">
       <DesktopWidgetZone
         side="left"
         suspended={suspended}
@@ -2339,6 +2359,8 @@ function DesktopView({
         layerState={widgetOverlaySide === null ? 'base' : widgetOverlaySide === 'left' ? 'active' : 'behind'}
         musicContext={desktopMusicWidgetContext}
       />
+      </ErrorBoundary>
+      <ErrorBoundary inline inlineLabel="右侧挂件区渲染出错">
       <DesktopWidgetZone
         side="right"
         suspended={suspended}
@@ -2349,6 +2371,7 @@ function DesktopView({
         layerState={widgetOverlaySide === null ? 'base' : widgetOverlaySide === 'right' ? 'active' : 'behind'}
         musicContext={desktopMusicWidgetContext}
       />
+      </ErrorBoundary>
 
       <AnimatePresence>
         {showDesktopLyrics && currentSong && (
@@ -2944,7 +2967,12 @@ function DesktopView({
         )}
       </AnimatePresence>
 
-      {/* 歌单详情 - 3D 网格视图（参考 folia-major） */}
+      {/* 歌单详情 - 3D 网格视图（参考 folia-major）
+          点歌关面板不走毛玻璃退场（instantExit）：exit=毛玻璃 0.3s 渐隐会让底层桌面
+          部件/轮播/迷你播放器在半透明里同时透出来（用户感知为「整个界面闪一下」），
+          而全屏 backdrop-filter 的退场动画在真实 GPU 环境常拖到 1s+，期间面板还挂在
+          DOM 上拦截点击——左上角返回「按了退不出去」正是这一段的无反馈空窗。
+          点歌是「面板已完成使命」的确定性关闭，当帧卸载比动画更符合预期。 */}
       <AnimatePresence
         onExitComplete={() => {
           if (!showPlaylistDetail) {
@@ -2957,7 +2985,7 @@ function DesktopView({
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 0.95 }}
+            exit={playlistDetailInstantExit ? { opacity: 0, transition: { duration: 0 } } : { opacity: 0, scale: 0.95, transition: { duration: 0.3 } }}
             transition={{ duration: 0.3 }}
             className="absolute inset-0 z-50"
             style={{
@@ -2972,7 +3000,7 @@ function DesktopView({
                 <div className="flex items-center gap-6">
                   {/* 返回按钮 */}
                   <button
-                    onClick={closePlaylistDetail}
+                    onClick={closePlaylistDetailAnimated}
                     className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 transition-all flex items-center justify-center shrink-0"
                   >
                     <ChevronDown className="w-5 h-5 text-white rotate-90" />

@@ -125,7 +125,9 @@ export interface HazardMapNavigation {
   viewport: HazardMapViewport
   isDragging: boolean
   wheelZoomEnabled: boolean
-  onWheel: (event: ReactWheelEvent<HTMLDivElement>) => void
+  /** 地图容器 ref：滚轮监听必须挂原生非 passive listener（React 对 wheel 的委托
+   *  listener 是 passive 的，onWheel 里 preventDefault 无效 → 滚轮穿透到外层滚动容器） */
+  containerRef: React.RefObject<HTMLDivElement | null>
   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void
   onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => void
   onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => void
@@ -165,12 +167,18 @@ export function useHazardMapNavigation(bounds: HazardMapBounds | null): HazardMa
     setView(current => current ? { ...current, zoom: clamp(nextZoom, viewport.fitZoom, 13) } : current)
   }
 
-  const onWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
-    if (!viewport || !wheelZoomEnabled) return
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const handleWheel = (event: WheelEvent) => {
+    const container = containerRef.current
+    if (!viewport || !container) return
+    // 无论滚轮缩放是否启用都要吞掉事件：否则未启用（未点击激活）时滚轮穿透到
+    // 天气页外层滚动容器，地图上滚动、整页跟着上下滚（用户实测）。
+    // 必须走原生非 passive listener：React 对 wheel 的委托 listener 是 passive 的，
+    // onWheel 里 preventDefault 是 no-op。
     event.preventDefault()
     event.stopPropagation()
-    event.nativeEvent.stopImmediatePropagation?.()
-    const rect = event.currentTarget.getBoundingClientRect()
+    if (!wheelZoomEnabled) return
+    const rect = container.getBoundingClientRect()
     const screenX = clamp(((event.clientX - rect.left) / rect.width) * HAZARD_MAP_WIDTH, 0, HAZARD_MAP_WIDTH)
     const screenY = clamp(((event.clientY - rect.top) / rect.height) * HAZARD_MAP_HEIGHT, 0, HAZARD_MAP_HEIGHT)
     const nextZoom = clamp(viewport.zoom + (event.deltaY < 0 ? 1 : -1), viewport.fitZoom, 13)
@@ -183,6 +191,13 @@ export function useHazardMapNavigation(bounds: HazardMapBounds | null): HazardMa
     }
     setView({ zoom: nextZoom, center: nextCenter })
   }
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    container.addEventListener('wheel', handleWheel, { passive: false })
+    return () => container.removeEventListener('wheel', handleWheel)
+  })
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!viewport || event.button !== 0) return
@@ -255,7 +270,7 @@ export function useHazardMapNavigation(bounds: HazardMapBounds | null): HazardMa
   return {
     viewport,
     isDragging,
-    onWheel,
+    containerRef,
     onPointerDown,
     onPointerMove,
     onPointerUp: stopDragging,
@@ -455,9 +470,9 @@ export function EarthquakeSourceMap({ event, currentLocation }: {
 
   return (
     <div
+      ref={navigation.containerRef}
       className={`relative aspect-[960/500] overflow-hidden rounded-[22px] border border-white/10 bg-[#17314a] ${navigation.isDragging ? 'cursor-grabbing' : 'cursor-grab'}`}
       style={{ touchAction: 'pan-y pinch-zoom' }}
-      onWheel={navigation.onWheel}
       onPointerDown={navigation.onPointerDown}
       onPointerMove={navigation.onPointerMove}
       onPointerUp={navigation.onPointerUp}

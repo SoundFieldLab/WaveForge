@@ -72,7 +72,12 @@ const formatDuration = (milliseconds = 0) => {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 const songKey = (song: Song) => `${song.platform}:${song.appleId || song.mid || song.id || song.name}`
-const coverOf = (song?: Song | null) => song?.album?.picUrl || ''
+// QQ 兜底：没有 picUrl 但有 album.mid 时按官方 CDN 规则拼出，避免整列 No Cover
+const coverOf = (song?: Song | null) => {
+  if (song?.album?.picUrl) return song.album.picUrl
+  const albumMid = song?.album?.mid || (song as { albummid?: string } | null | undefined)?.albummid
+  return albumMid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${String(albumMid).replace(/_\d+$/, '')}.jpg` : ''
+}
 const DetailCover = ({ src, alt, className, role = 'card', priority = 'critical', lazy = false }: { src?: string; alt: string; className: string; role?: 'row' | 'card'; priority?: 'critical' | 'visible'; lazy?: boolean }) => {
   if (!src) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Headphones className="h-1/3 w-1/3 opacity-40" /></span>
   return <CachedImage src={src} alt={alt} className={className} role={role} priority={priority} lazy={lazy} fallback={<span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Headphones className="h-1/3 w-1/3 opacity-40" /></span>} />

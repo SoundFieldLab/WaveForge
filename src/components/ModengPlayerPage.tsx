@@ -1315,6 +1315,9 @@ export default function ModengPlayerPage({
       className={`absolute inset-0 overflow-hidden select-none ${dark ? '' : 'modeng-lyric-light'}`}
       style={{
         background: mvBackgroundActive ? 'transparent' : c.base,
+        // 封面兜底层淡入淡出：MV 对齐丢失（回退封面）时背景不硬切——
+        // background 从透明到 base 过渡 500ms，配合 MV 层清槽让旧帧平滑退场
+        transition: 'background 500ms ease-in-out',
         fontFamily: FONT_STACK,
         WebkitFontSmoothing: 'antialiased',
         MozOsxFontSmoothing: 'grayscale',
@@ -1536,12 +1539,13 @@ export default function ModengPlayerPage({
           所有层 pointer-events:none，不阻挡任何交互。 */}
       {!mvBackgroundActive && (appleCoverUrl || coverUrl) ? (
         <>
-          {/* 全尺寸基础层：中强模糊 */}
+          {/* 全尺寸基础层：中强模糊（opacity 淡入 600ms：封面层出现不突兀，
+              与 MV 层清槽的时序交叉时旧帧平滑退场——封面残留案例的视觉半边修复） */}
           <img
             src={appleCoverUrl || coverUrl}
             alt=""
             draggable={false}
-            className="absolute inset-0 h-full w-full object-cover pointer-events-none"
+            className="absolute inset-0 h-full w-full object-cover pointer-events-none animate-in fade-in duration-700"
             style={{
               transform: 'scale(1.25)',
               filter: `blur(${60 * s}px) brightness(${dark ? 0.60 : 1.02}) saturate(0.95)`,
@@ -1730,7 +1734,7 @@ export default function ModengPlayerPage({
               <div style={{ pointerEvents: 'auto' }}>
                 <AutomixHudBadge
                   info={automixHud}
-                  currentTime={automixHudTime}
+                  playbackTimeStore={playbackTimeStore}
                   scale={s}
                   colors={{ chip: dark ? 'rgba(15, 17, 24, 0.55)' : 'rgba(255, 255, 255, 0.62)', text: c.title, dim: c.dim }}
                   // 药丸底色 = 当前封面主题色的淡色（与 modern 页一致）
@@ -1799,7 +1803,7 @@ export default function ModengPlayerPage({
           {automixHud && (
             <AutomixHudProgressHint
               info={automixHud}
-              currentTime={automixHudTime}
+              playbackTimeStore={playbackTimeStore}
               scale={s}
             />
           )}

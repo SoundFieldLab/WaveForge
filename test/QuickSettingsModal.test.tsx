@@ -267,28 +267,40 @@ describe('QuickSettings 弹窗', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '多维' }))
     expect(scene()).toBe('multidimensional')
-    // 右上角 chip 也跟着报当前模式（形如「多维 · 模糊」）
-    expect(screen.getByText(/^多维 · /)).toBeTruthy()
+  })
+
+  it('draws nothing on top of the preview and has no footer chrome', () => {
+    renderSettings()
+    fireEvent.click(trigger())
+
+    // 预览应与外面的播放页一模一样：不再有「实时预览」/ 模式 · 效果两枚叠加 chip，
+    // 也没有「设置即时生效」文案与「完成」按钮（关闭走右上角 ✕ / Esc / 点遮罩）。
+    expect(screen.queryByText('实时预览')).toBeNull()
+    expect(screen.queryByText(/已暂停/)).toBeNull()
+    expect(screen.queryByText('设置即时生效，改动会被记住')).toBeNull()
+    expect(screen.queryByRole('button', { name: '完成' })).toBeNull()
   })
 })
 
 /**
  * 预览的「实时镜像」契约。
  *
- * jsdom 里没有真实播放面 → 走内置模拟场景（上面那批用例覆盖）。这里**手工造一个**
- * `[data-waveforge-playback-page]`，把镜像路径也钉住：真机播放面存在时，
- * 预览必须是真身的克隆，而不是另画的抽象画面。
+ * jsdom 里没有真实播放页 → 走内置模拟场景（上面那批用例覆盖）。这里**手工造一个**
+ * `[data-waveforge-playback-layer]`（播放页模式层 = 镜像源），把镜像路径也钉住：
+ * 真机播放页存在时，预览必须是真身的克隆，而不是另画的抽象画面。
  */
 describe('播放设置预览 · 实时镜像', () => {
-  /** 造一个最小的「真实播放面」，并挂到 body 上（真机上它在 #root 里）。 */
+  /** 造一个最小的「播放页模式层」，并挂到 body 上（真机上它在 #root 里）。 */
   function mountFakeSurface() {
     const source = document.createElement('div')
-    source.setAttribute('data-waveforge-playback-page', 'true')
+    source.setAttribute('data-waveforge-playback-layer', 'true')
     source.innerHTML = `
-      <div id="mirror-probe-line" style="color: rgba(255,255,255,0.4)">真身里的第一句</div>
-      <div id="wf-wallpaper-controls-anchor">控件锚点</div>
-      <div data-wf-upnext-card>即将播放</div>
-      <video src="https://example.com/a.mp4"></video>
+      <div data-waveforge-playback-page="true">
+        <div id="mirror-probe-line" style="color: rgba(255,255,255,0.4)">真身里的第一句</div>
+        <div id="wf-wallpaper-controls-anchor">控件锚点</div>
+        <div data-wf-upnext-card>即将播放</div>
+        <video src="https://example.com/a.mp4" muted></video>
+      </div>
     `
     document.body.appendChild(source)
     return source
@@ -298,7 +310,7 @@ describe('播放设置预览 · 实时镜像', () => {
   const cloneRoot = () => mirrorHost()?.firstElementChild?.firstElementChild as HTMLElement | null
 
   afterEach(() => {
-    document.querySelector('[data-waveforge-playback-page="true"]')?.remove()
+    document.querySelector('[data-waveforge-playback-layer="true"]')?.remove()
   })
 
   it('mirrors the real playback surface instead of drawing a scene', () => {
@@ -324,7 +336,9 @@ describe('播放设置预览 · 实时镜像', () => {
 
     const clone = cloneRoot() as HTMLElement
     // 留着源标记的话，镜像会认到自己的克隆体上 → 必须清掉，且全局仍然只有一个真身
+    expect(clone.hasAttribute('data-waveforge-playback-layer')).toBe(false)
     expect(clone.hasAttribute('data-waveforge-playback-page')).toBe(false)
+    expect(document.querySelectorAll('[data-waveforge-playback-layer]')).toHaveLength(1)
     expect(document.querySelectorAll('[data-waveforge-playback-page]')).toHaveLength(1)
     // 会被别处 querySelector / getElementById 当唯一实体用的标记与锚点 id
     expect(clone.hasAttribute('data-wf-upnext-card')).toBe(false)
@@ -332,8 +346,10 @@ describe('播放设置预览 · 实时镜像', () => {
     // 预览是「看」的：不进可访问性树、不可交互
     expect(clone.hasAttribute('inert')).toBe(true)
     expect(clone.getAttribute('aria-hidden')).toBe('true')
-    // 声音不能播第二遍
-    expect(clone.querySelector('video')?.hasAttribute('src')).toBe(false)
+    // 视频断源（不会出第二路声音），但画面由替身 canvas 继续逐帧抄 —— 预览里 MV 照常显示
+    const frame = clone.querySelector('canvas[data-wf-mirror-video-frame]')
+    expect(frame).toBeTruthy()
+    expect(frame?.getAttribute('style')).toBe('')
   })
 
   it('copies the live inline styles of the source onto the clone', async () => {
@@ -353,11 +369,10 @@ describe('播放设置预览 · 实时镜像', () => {
     expect(source.getAttribute('style')).toBeNull()
   })
 
-  it('keeps the preview play-state chip in sync while mirroring', () => {
+  it('does not overlay any play-state chrome while mirroring', () => {
     mountFakeSurface()
-    // 镜像路径不再订阅逐帧时间（预览靠真身的 rAF 驱动），但**播放状态**必须照常跟着走：
-    // 曾经它和「是否需要时间订阅」绑在一起，镜像路径下取到兜底快照 isPlaying:false，
-    // chip 于是永远显示「· 已暂停」，歌在播也在暂停。
+    // 顶部 chip（含「· 已暂停」标注）已删除：镜像路径下预览就是真身，
+    // 播放状态由真身自己的控件表达，预览不再叠加任何状态标注。
     const store = createPlaybackTimeStore({ currentTime: 12, duration: 200, isPlaying: true })
     renderSettings({}, { playbackTimeStore: store })
     fireEvent.click(trigger())
@@ -366,9 +381,6 @@ describe('播放设置预览 · 实时镜像', () => {
     expect(screen.queryByText(/已暂停/)).toBeNull()
 
     act(() => { store.publish({ isPlaying: false }) })
-    expect(screen.getByText(/已暂停/)).toBeTruthy()
-
-    act(() => { store.publish({ isPlaying: true }) })
     expect(screen.queryByText(/已暂停/)).toBeNull()
   })
 

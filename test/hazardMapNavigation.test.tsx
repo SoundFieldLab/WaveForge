@@ -7,10 +7,10 @@ function NavigationHarness() {
   const navigation = useHazardMapNavigation({ minLongitude: 110, maxLongitude: 130, minLatitude: 20, maxLatitude: 40 })
   if (!navigation) return null
   return <div
+    ref={navigation.containerRef}
     data-testid="map"
     data-wheel-enabled={String(navigation.wheelZoomEnabled)}
     data-zoom={String(navigation.viewport.zoom)}
-    onWheel={navigation.onWheel}
     onPointerDown={navigation.onPointerDown}
     onPointerMove={navigation.onPointerMove}
     onPointerUp={navigation.onPointerUp}

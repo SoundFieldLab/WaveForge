@@ -3,6 +3,7 @@
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
  */
 import { lazy, memo, Suspense, startTransition, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentProps, type CSSProperties, type ReactNode } from 'react'
+import { getSecureToken } from '../services/secureTokenStore'
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
@@ -83,13 +84,14 @@ import { shouldShowEntitlementBadge, type PlatformEntitlements } from '../utils/
 import CachedImage from './CachedImage'
 import { FrozenScope } from './frozenScope'
 import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
+import { cookieHeaders } from '../services/cookieRequest'
 
 // 全局设置镜像里的共享弹窗（按需加载）
 const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
 const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
 const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
-type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
 // v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
@@ -507,7 +509,7 @@ const getExploreAccountKey = (platform: ExplorePlatform) => {
   // 否则同一天内切换 Apple 账号会读到上一个账号的数据。
   if (platform === 'apple') {
     // 与 appleMusic.ts 的登录判定同源：有 media user token 即登录态
-    const signedIn = Boolean(localStorage.getItem('appleMediaUserToken'))
+    const signedIn = Boolean(getSecureToken('appleMediaUserToken'))
     return `apple:${localStorage.getItem('appleStorefront') || 'cn'}:${signedIn ? 'signed-in' : 'guest'}`
   }
   const userIdKey = platform === 'qq' ? 'qq_user_id' : platform === 'netease' ? 'netease_user_id' : `${platform}_user_id`
@@ -821,7 +823,7 @@ function ExploreView({
     }
     setFmLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/api/netease/personal_fm?cookie=${encodeURIComponent(cookie)}`)
+      const res = await fetch(`http://localhost:3001/api/netease/personal_fm`, { headers: cookieHeaders(cookie) })
       const data = await res.json()
       const raw = Array.isArray(data?.data) ? data.data : []
       const songs: Song[] = raw.map((s: any) => ({
@@ -1135,7 +1137,9 @@ function ExploreView({
     return () => {
       active = false
     }
-  }, [platform, neteaseLoggedIn, neteaseUsername, neteaseUserId, qqLoggedIn, qqUsername, qqUserId, authRevision])
+    // kugouLoggedIn/kugouUsername 必须在依赖里：凭据安全存储是异步 hydrate，首帧 kugouLoggedIn=false
+    // 会把 userPlaylists 清空，hydrate 完成后不重跑的话「添加到歌单」子菜单永远空态（2026-10-15 审计）
+  }, [platform, neteaseLoggedIn, neteaseUsername, neteaseUserId, qqLoggedIn, qqUsername, qqUserId, kugouLoggedIn, kugouUsername, authRevision])
 
   const heroSongs = useMemo(() => {
     if (!payload) return []
@@ -1880,6 +1884,7 @@ function ExploreView({
                 冻结作用域让面板内的封面释放已解码位图，切回来再从缓存解码。 */}
             <FrozenScope.Provider value={platform !== 'qq'}>
             <QQExplorePage
+              active={platform === 'qq' && !suspended}
               loggedIn={qqLoggedIn}
               username={qqUsername}
               userId={qqUserId}
@@ -1923,6 +1928,7 @@ function ExploreView({
             <div className={platform === 'netease' ? 'contents' : 'hidden'} aria-hidden={platform !== 'netease'}>
             <FrozenScope.Provider value={platform !== 'netease'}>
             <NeteaseExplorePage
+              active={platform === 'netease' && !suspended}
               loggedIn={neteaseLoggedIn}
               username={neteaseUsername}
               userId={neteaseUserId}
@@ -2138,6 +2144,12 @@ function ExploreView({
                     sessionStorage.setItem('waveforge_search_searched', 'false')
                   }
                   onSearchClick()
+                }}
+                onToggleLike={(song, next) => {
+                  // 发现页歌曲行红心：走酷狗概念版喜欢通道（带 name/歌手/专辑，/v6/add_song 需要 name）
+                  void import('../services/kugouService').then(({ likeKugouSong }) => {
+                    void likeKugouSong({ hash: song.hash, mid: song.hash, name: song.songName, artists: [{ name: song.singerName }], album: song.albumId ? { id: song.albumId } : undefined }, next)
+                  })
                 }}
                 onRetry={() => setRefreshKey(key => key + 1)}
               />
@@ -2653,7 +2665,9 @@ function ExploreView({
             ? sodaLoggedIn
             : playlist.platform === 'kugou'
               ? kugouLoggedIn
-              : neteaseLoggedIn && Boolean(neteaseUserId))
+              : playlist.platform === 'spotify'
+                ? spotifyLoggedIn
+                : neteaseLoggedIn && Boolean(neteaseUserId))
             && !isPlaylistOwner(playlist, { neteaseUserId })}
           canShare
         />

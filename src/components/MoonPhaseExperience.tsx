@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useModeParked } from '../utils/modeLayer'
 import { Moon as MoonIcon, X } from 'lucide-react'
@@ -30,8 +30,86 @@ export function MoonDisc({ phase, className = '' }: { phase: number; className?:
   )
 }
 
-const RANGE_DAYS = 7
-const TICKS_PER_DAY = 12 // 每 2 小时一刻度
+const RANGE_DAYS = 30
+const TICKS_PER_DAY = 4 // 每 6 小时一刻度（±30 天跨度下 12/天 过密）
+
+/** 月相日历（Apple 式）：scrubDate 所在月为基准，每格显示日期 + 当日月相小图。
+ *  月份可前后翻页；点击日期把刻度尺拨到那天。 */
+function MoonPhaseCalendar({ scrubDate, onSelect }: { scrubDate: Date; onSelect: (date: Date) => void }) {
+  const [monthOffset, setMonthOffset] = useState(0)
+  const cells = useMemo(() => {
+    const anchor = new Date(scrubDate)
+    const view = new Date(anchor.getFullYear(), anchor.getMonth() + monthOffset, 1)
+    const year = view.getFullYear()
+    const month = view.getMonth()
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    const firstWeekday = new Date(year, month, 1).getDay()
+    const leading = Array.from({ length: firstWeekday }, (_, index) => ({ key: `lead-${index}`, day: null as number | null, date: null as Date | null, phase: 0 }))
+    const dayCells = Array.from({ length: daysInMonth }, (_, index) => {
+      const date = new Date(year, month, index + 1, 12, 0, 0, 0)
+      return { key: `day-${index}`, day: index + 1, date, phase: moonInfoAt(date).phase }
+    })
+    return { year, month, cells: [...leading, ...dayCells] }
+  }, [scrubDate, monthOffset])
+  const monthLabel = `${cells.year} 年 ${cells.month + 1} 月`
+  const isCurrentView = cells.year === scrubDate.getFullYear() && cells.month === scrubDate.getMonth()
+  return (
+    <div className="mt-4 w-full rounded-3xl border border-white/10 p-4">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-white/82">月相日历</span>
+        <span className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setMonthOffset(v => v - 1)}
+            aria-label="上一月"
+            className="flex h-7 w-7 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+          >‹</button>
+          <span className="min-w-[96px] text-center text-[13px] tabular-nums text-white/72">{monthLabel}</span>
+          <button
+            type="button"
+            onClick={() => setMonthOffset(v => v + 1)}
+            aria-label="下一月"
+            className="flex h-7 w-7 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+          >›</button>
+        </span>
+      </div>
+      <div className="mt-3 grid grid-cols-7 gap-y-2 text-center text-[11px] text-white/40">
+        {WEEKDAYS.map(w => <span key={w}>{w[0]}</span>)}
+      </div>
+      <div className="mt-1 grid grid-cols-7 gap-y-2.5">
+        {cells.cells.map(cell => (
+          <div key={cell.key} className="flex flex-col items-center">
+            {cell.day !== null && cell.date ? (
+              <button
+                type="button"
+                onClick={() => onSelect(cell.date!)}
+                className={`group flex flex-col items-center gap-0.5 rounded-xl px-1.5 py-1 transition-colors hover:bg-white/10 ${isCurrentView && cell.date.toDateString() === new Date().toDateString() ? 'ring-1 ring-sky-400/60' : ''}`}
+                title={`${cell.date.getMonth() + 1}月${cell.day}日`}
+              >
+                <span className={`text-[12px] tabular-nums ${cell.date.toDateString() === new Date().toDateString() ? 'font-semibold text-sky-300' : 'text-white/78'}`}>{cell.day}</span>
+                <MoonDisc phase={cell.phase} className="w-6" />
+              </button>
+            ) : (
+              <span />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** 预热全部 28 帧月相图：拖动时相邻帧交叉淡化依赖两张图即时就绪，
+ *  未预热的图在加载间隙会让月亮闪烁（拖快时一闪一闪）。 */
+let moonFramesPreloaded = false
+function preloadMoonFrames() {
+  if (moonFramesPreloaded || typeof window === 'undefined') return
+  moonFramesPreloaded = true
+  for (const src of APPLE_MOON_PHASES) {
+    const image = new Image()
+    image.src = src
+  }
+}
 
 export default function MoonPhaseExperience({ weather, open, onOpen, onClose }: MoonPhaseExperienceProps) {
   // 挂起（所属模式层被切走）时不渲染这个 portal：portal 挂在 body 上，不受挂起层
@@ -58,6 +136,11 @@ export default function MoonPhaseExperience({ weather, open, onOpen, onClose }: 
     return `${d.getMonth() + 1}月${d.getDate()}日 ${WEEKDAYS[d.getDay()]} ${String(h).padStart(2, '0')}:${m}`
   }, [scrubDate])
 
+  // 打开时预热全部帧图：消除拖动中相邻帧切换的加载闪烁
+  useEffect(() => {
+    if (open) preloadMoonFrames()
+  }, [open])
+
   const handleRulerPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     const ruler = rulerRef.current
     if (!ruler) return
@@ -81,7 +164,15 @@ export default function MoonPhaseExperience({ weather, open, onOpen, onClose }: 
         const date = new Date(now + dayFrac * 86400000)
         const isToday = new Date(now).toDateString() === date.toDateString()
         highlight = isToday
-        label = isToday ? '今天' : WEEKDAYS[date.getDay()]
+        if (isToday) {
+          label = '今天'
+        } else {
+          const daysAway = Math.round(dayFrac)
+          // 近端（±7 天）显示周几（Apple 同款），远端显示日期——跨度大了周几没有信息量
+          label = Math.abs(daysAway) <= 7
+            ? WEEKDAYS[date.getDay()]
+            : `${date.getMonth() + 1}/${date.getDate()}`
+        }
       }
       list.push({ x, major, label, highlight })
     }
@@ -123,7 +214,7 @@ export default function MoonPhaseExperience({ weather, open, onOpen, onClose }: 
               </button>
             </div>
 
-            <MoonDisc phase={info.phase} className="mt-8 w-[min(62vw,300px)] drop-shadow-[0_0_50px_rgba(190,205,255,0.22)]" />
+            <MoonDisc phase={info.phase} className="mt-6 w-[min(74vw,380px)] drop-shadow-[0_0_44px_rgba(190,205,255,0.3)]" />
 
             <div className="mt-6 text-center">
               <div className="text-2xl font-semibold">{info.phaseName}</div>
@@ -204,7 +295,14 @@ export default function MoonPhaseExperience({ weather, open, onOpen, onClose }: 
               ))}
             </div>
 
-            <div className="mt-4 text-xs text-white/35">拖动刻度尺查看前后 7 天的月相变化 · 天文数据为近似值</div>
+            <div className="mt-4 text-xs text-white/35">拖动刻度尺查看前后 30 天的月相变化 · 天文数据为近似值</div>
+
+            <MoonPhaseCalendar scrubDate={scrubDate} onSelect={date => {
+              // 点选日历日期：把刻度尺拨到那天 12:00（正午月相代表全天）
+              const target = new Date(date)
+              target.setHours(12, 0, 0, 0)
+              setOffsetDays((target.getTime() - now) / 86400000)
+            }} />
           </motion.div>
         </motion.div>
       )}

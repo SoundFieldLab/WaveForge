@@ -36,7 +36,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { Compass, House, Monitor, PanelsTopLeft, Radio } from 'lucide-react'
 import { playModeTransitionSound } from '../services/modeTransitionSound'
 
-export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
 
 interface ModeTransitionOverlayProps {
   mode: TransitionMode | null
@@ -55,6 +55,7 @@ const MODE_META: Record<TransitionMode, { label: string; hint: string }> = {
   traditional: { label: '传统', hint: '正在铺开你的音乐馆' },
   desktop: { label: '桌面', hint: '正在铺开工作台' },
   resonance: { label: '共振', hint: '正在接入一起听房间' },
+  singalong: { label: '学歌', hint: '正在打开跟唱练习室' },
 }
 
 /**
@@ -100,6 +101,12 @@ const MODE_VISUALS: Record<TransitionMode, {
     auroraA: 'rgba(217,70,239,0.22)', auroraB: 'rgba(139,92,246,0.22)',
     grad: ['#e879f9', '#a78bfa'], glow: 'rgba(232,121,249,0.45)',
     dot: '#eeb0fc', dotLight: '#b57ec9', cometDur: 4.2,
+  },
+  singalong: {
+    darkBg: ['#1d1740', '#141031', '#0a0818'],
+    auroraA: 'rgba(124,92,255,0.24)', auroraB: 'rgba(52,211,153,0.16)',
+    grad: ['#a78bfa', '#7c5cff'], glow: 'rgba(124,92,255,0.45)',
+    dot: '#c4b5fd', dotLight: '#8f7bd8', cometDur: 4.6,
   },
 }
 
@@ -150,6 +157,14 @@ const MODE_ICONS: Record<TransitionMode, IconShape[]> = {
     { kind: 'circle', cx: 24, cy: 24, r: 2.6 },
     { kind: 'path', d: 'M7.5 13.5 A 15 15 0 0 0 7.5 34.5' },
     { kind: 'path', d: 'M40.5 13.5 A 15 15 0 0 1 40.5 34.5' },
+  ],
+  // 学歌 = 麦克风 + 声波弧（逐句跟学）
+  singalong: [
+    { kind: 'rect', x: 18.5, y: 7, width: 11, height: 19, rx: 5.5 },
+    { kind: 'line', x1: 24, y1: 26, x2: 24, y2: 33 },
+    { kind: 'line', x1: 17.5, y1: 33, x2: 30.5, y2: 33 },
+    { kind: 'path', d: 'M14 24 A 10 10 0 0 0 14 24.01' },
+    { kind: 'path', d: 'M34 24 A 10 10 0 0 1 34 24.01' },
   ],
 }
 

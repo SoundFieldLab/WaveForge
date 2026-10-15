@@ -13,6 +13,7 @@ import {
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import EditPlaylistModal from './EditPlaylistModal'
 import DeletePlaylistModal from './DeletePlaylistModal'
+import ScrollToTop from './ScrollToTop'
 import type { Song, LyricLine } from '../services/musicApi'
 import { getProxiedImageUrl, getUserFollows, getUserFolloweds, getQQFollows, getQQFans, getQQUserProfile, subscribeQQUser, subscribeNeteaseUser } from '../services/musicApi'
 import type { MusicPlatform } from '../services/platforms'
@@ -102,6 +103,7 @@ import { resolveReadableForegroundColor } from '../services/foliaReadableColor'
 import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 import type { PlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { PlaybackOrigin, SongSelectHandler, ViewMode } from '../types/playbackNavigation'
+import { cookieHeaders } from '../services/cookieRequest'
 
 // 设置页用的共享弹窗（按需加载，只有用户在设置里点开时才拉取代码）
 const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
@@ -219,7 +221,12 @@ const PLATFORM_ACCENTS: Record<MusicPlatform, string> = {
 
 const platformShortName = (platform: MusicPlatform) => ({ netease: '网易云', qq: 'QQ音乐', apple: 'Apple', spotify: 'Spotify', kugou: '酷狗', soda: '汽水' })[platform]
 const songKey = (song: Song) => `${song.platform}:${song.id || song.mid || song.name}`
-const coverOf = (song?: Song | null) => song?.album?.picUrl ? getProxiedImageUrl(song.album.picUrl) : ''
+const coverOf = (song?: Song | null) => {
+  if (song?.album?.picUrl) return getProxiedImageUrl(song.album.picUrl)
+  // QQ 兜底：没有 picUrl 但有 album.mid 时按官方 CDN 规则拼出，避免整列 No Cover
+  const albumMid = song?.album?.mid || (song as { albummid?: string } | null | undefined)?.albummid
+  return albumMid ? getProxiedImageUrl(`https://y.gtimg.cn/music/photo_new/T002R300x300M000${String(albumMid).replace(/_\d+$/, '')}.jpg`) : ''
+}
 const CoverImage = ({ src, alt, className, lazy = true, priority = 'visible', role = 'card' }: { src?: string; alt: string; className: string; lazy?: boolean; priority?: ArtworkPriority; role?: ArtworkRole }) => {
   if (!src) return <span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Music2 className="h-1/3 w-1/3 opacity-40" /></span>
   return <CachedImage src={src} alt={alt} className={className} lazy={lazy} role={role} priority={priority} fallback={<span aria-label={`${alt}占位`} className={`${className} flex items-center justify-center bg-black/10`}><Music2 className="h-1/3 w-1/3 opacity-40" /></span>} />
@@ -894,7 +901,7 @@ function TraditionalView({
         .catch(() => undefined)
     } else {
       const cookie = getPlatformCookie('qq')
-      void fetch(`${getApiBase()}/qq/record/recent/song?limit=5${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+      void fetch(`${getApiBase()}/qq/record/recent/song?limit=5${cookie ? `` : ''}`, { cache: 'no-store' })
         .then(response => response.json())
         .then(payload => {
           if (cancelled) return
@@ -1652,6 +1659,7 @@ function TraditionalView({
           : {}),
       })
     },
+    onPlayNext: onPlayNext,
     onSongMenu: payload => setSongMenu(payload),
     onOpenPlaylist: playlist => { void openPlaylist(playlist) },
     onPlaylistMenu: payload => setPlaylistMenu(payload),
@@ -2458,8 +2466,7 @@ function TraditionalView({
         {/* 酷狗：外壳（含自带左栏）占前两列（左栏+内容），统一右栏独占第三列；
             其它平台 main 只占内容列 */}
         <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden lg:col-span-2' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
-          {history.map((page, index) => {
-            const active = index === historyIndex
+          {history.map((page, index) => {            const active = index === historyIndex
             // 页面「冻结」：访问过的历史页面保持挂载，切走只隐藏、不卸载（与探索页同款）。
             // display:none 的子树不参与布局与绘制、也拿不到焦点；页面自己的页签/分页/滚动
             // 位置、已解码封面全部保留，返回时不再重新请求、也不再闪一次骨架。
@@ -2469,6 +2476,9 @@ function TraditionalView({
               </div>
             )
           })}
+          {/* 回到顶部：中栏内容（首页/歌单/歌手/榜单）超一屏后右下角显示。
+              sticky 钉在滚动视口底部，不随内容滚走；切页时 mainRef.scrollTo(0) 已有。 */}
+          <ScrollToTop containerRef={mainRef} position="sticky" stickyWrapperClassName="sticky bottom-5 z-30 flex justify-end pr-6 lg:pr-8 pointer-events-none" />
         </main>
 
         {/* 右栏：正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部可滚动）。
@@ -2781,7 +2791,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
         .catch(() => { if (!cancelled) setDetail(fallback) })
     } else if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
-      fetch(`${getApiBase()}/qq/user/detail?id=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+      fetch(`${getApiBase()}/qq/user/detail?id=${encodeURIComponent(uid)}${cookie ? `` : ''}`, { cache: 'no-store' })
         .then(r => r.json())
         .then(data => {
           if (cancelled) return
@@ -2801,7 +2811,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
     let cancelled = false
     if (platform === 'netease') {
       const cookie = getPlatformCookie('netease')
-      fetch(`${getApiBase()}/netease/user/playlist?uid=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+      fetch(`${getApiBase()}/netease/user/playlist?uid=${encodeURIComponent(uid)}${cookie ? `` : ''}`, { cache: 'no-store' })
         .then(r => r.json())
         .then(data => {
           if (cancelled) return
@@ -2811,7 +2821,7 @@ function TraditionalProfile({ platform, accent, isDark, loggedIn, username, avat
         .catch(() => { if (!cancelled) setOtherPlaylists([]) })
     } else if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
-      fetch(`${getApiBase()}/qq/user/playlist?id=${encodeURIComponent(uid)}${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`, { cache: 'no-store' })
+      fetch(`${getApiBase()}/qq/user/playlist?id=${encodeURIComponent(uid)}${cookie ? `` : ''}`, { cache: 'no-store' })
         .then(r => r.json())
         .then(data => {
           if (cancelled) return
@@ -3079,11 +3089,11 @@ function TraditionalRecent({ platform, accent, isDark, active, loggedIn, current
       return
     }
     const endpoint = platform === 'qq'
-      ? `${getApiBase()}/qq/record/recent/song?limit=100${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
+      ? `${getApiBase()}/qq/record/recent/song?limit=100${cookie ? `` : ''}`
       : platform === 'soda'
-        ? `${getApiBase()}/soda/recent?limit=50${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
-        : `${getApiBase()}/netease/record/recent/song?limit=100${cookie ? `&cookie=${encodeURIComponent(cookie)}` : ''}`
-    fetch(endpoint, { cache: 'no-store' })
+        ? `${getApiBase()}/soda/recent?limit=50${cookie ? `` : ''}`
+        : `${getApiBase()}/netease/record/recent/song?limit=100${cookie ? `` : ''}`
+    fetch(endpoint, { cache: 'no-store', headers: cookieHeaders(cookie) })
       .then(response => response.json().catch(() => null).then(payload => ({ response, payload })))
       .then(({ response, payload }) => {
         if (!response.ok || payload?.error) throw new Error(payload?.error || '最近播放加载失败')

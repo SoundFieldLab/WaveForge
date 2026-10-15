@@ -1,6 +1,6 @@
 ﻿import { motion } from 'framer-motion'
 
-export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance'
+export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
 
 interface ModeSelectionCardsProps {
   currentMode: ModeSelectionMode
@@ -20,6 +20,7 @@ const MODE_OPTIONS: ReadonlyArray<{
   { mode: 'traditional', label: '传统', description: '经典布局 · 推荐与歌词' },
   { mode: 'desktop', label: '桌面', description: '沉浸歌词 · 桌面组件' },
   { mode: 'resonance', label: '共振', description: '朋友一起听 · 各自会员音源' },
+  { mode: 'singalong', label: '学歌', description: '逐句跟学 · 评分与跟读' },
 ]
 
 function ExploreMiniature({ accentRgb }: { accentRgb: string }) {
@@ -129,6 +130,7 @@ function ModeMiniature({ mode, exploreAccentRgb }: { mode: ModeSelectionMode; ex
   if (mode === 'minimal') return <MinimalMiniature />
   if (mode === 'traditional') return <TraditionalMiniature />
   if (mode === 'resonance') return <ResonanceMiniature />
+  if (mode === 'singalong') return <SingAlongMiniature />
   return <DesktopMiniature />
 }
 
@@ -168,6 +170,29 @@ function ResonanceMiniature() {
       {/* 连线：星型拓扑（房主居中，成员连过来） */}
       <span className="absolute left-1/2 top-[46px] h-[1px] w-[38px] -translate-y-1/2 origin-left rotate-[155deg] bg-pink-200/35" />
       <span className="absolute left-1/2 top-[46px] h-[1px] w-[38px] -translate-y-1/2 origin-left rotate-[25deg] bg-blue-200/35" />
+    </span>
+  )
+}
+
+/**
+ * 学歌：麦克风 + 音高刻度条，逐句跟学的意象。
+ */
+function SingAlongMiniature() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_36%,rgba(124,92,255,0.36),transparent_46%),radial-gradient(circle_at_14%_86%,rgba(52,211,153,0.22),transparent_40%),linear-gradient(145deg,#191233_0%,#120f24_56%,#08070f_100%)]"
+    >
+      {/* 麦克风（居中） */}
+      <span className="absolute left-1/2 top-[30px] h-[34px] w-[16px] -translate-x-1/2 rounded-full border border-white/40 bg-white/[0.12]" />
+      <span className="absolute left-1/2 top-[30px] h-[18px] w-[10px] -translate-x-1/2 rounded-full bg-violet-300/60" />
+      <span className="absolute left-1/2 top-[62px] h-[12px] w-[2px] -translate-x-1/2 bg-white/35" />
+      <span className="absolute left-1/2 top-[72px] h-[2px] w-[22px] -translate-x-1/2 rounded-full bg-white/35" />
+      {/* 音高刻度：五条短横线，中间一条高亮（唱准的音） */}
+      <span className="absolute right-4 top-[40px] h-[1.5px] w-[26px] rounded-full bg-white/20" />
+      <span className="absolute right-4 top-[52px] h-[1.5px] w-[26px] rounded-full bg-white/20" />
+      <span className="absolute right-4 top-[64px] h-[2px] w-[26px] rounded-full bg-emerald-300/80 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
+      <span className="absolute right-4 top-[76px] h-[1.5px] w-[26px] rounded-full bg-white/20" />
     </span>
   )
 }

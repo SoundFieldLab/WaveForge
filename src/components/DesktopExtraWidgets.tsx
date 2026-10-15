@@ -179,7 +179,12 @@ function usePreferences() {
   const update = useCallback((next: Partial<ExtraWidgetPreferences>) => {
     setPreferences(current => {
       const value = { ...current, ...next }
-      localStorage.setItem(PREFERENCES_KEY, JSON.stringify(value))
+      // try/catch 在 updater 内：setItem 配额满抛异常会打断 React 更新并产生新的 unhandledrejection
+      try {
+        localStorage.setItem(PREFERENCES_KEY, JSON.stringify(value))
+      } catch {
+        // 配额满/隐私模式：放弃持久化，内存态照常生效
+      }
       window.dispatchEvent(new CustomEvent('desktopExtraWidgetPreferencesChanged', { detail: value }))
       return value
     })
@@ -568,7 +573,9 @@ function DesktopExtraWidgetContent({ type, cardBlurAmount, accentColor, context,
   }, [context.platform, topArtists, type])
 
   const addLauncher = async () => {
-    let target = launcherDraft.target.trim()
+    // 本机目标必须走选择对话框（主进程登记白名单，open 通道只放行登记过的路径），
+    // 手输路径一律忽略；url 类型仍可手输。
+    let target = launcherDraft.kind === 'url' ? launcherDraft.target.trim() : ''
     if (!target && launcherDraft.kind !== 'url') target = await window.electron?.desktopWidgets?.pickLauncherTarget?.(launcherDraft.kind) || ''
     if (!target) return
     const item: LauncherItem = { id: crypto.randomUUID(), label: launcherDraft.label.trim() || target.split(/[\\/]/).pop() || '快捷方式', target, kind: launcherDraft.kind }

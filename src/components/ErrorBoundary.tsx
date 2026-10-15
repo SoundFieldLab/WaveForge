@@ -4,6 +4,10 @@ interface ErrorBoundaryProps {
   children: ReactNode
   /** 独立小窗口（桌面歌词/播放器）使用更紧凑的降级 UI */
   compact?: boolean
+  /** 局部边界（弹窗/重型子树）：错误只收起该子树，提供「重试」而非整窗重载 */
+  inline?: boolean
+  /** inline 模式重试按钮下方显示的提示文字 */
+  inlineLabel?: string
 }
 
 interface ErrorBoundaryState {
@@ -48,6 +52,38 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   render() {
     const { error } = this.state
     if (!error) return this.props.children
+    if (this.props.inline) {
+      return (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: 120,
+            padding: 16,
+            gap: 10,
+            flexDirection: 'column',
+            color: 'rgba(255,255,255,0.7)',
+            fontSize: 13,
+          }}
+        >
+          <span>{this.props.inlineLabel || '该区域渲染出错'}</span>
+          <button
+            onClick={() => this.setState({ error: null })}
+            style={{
+              padding: '5px 14px',
+              borderRadius: 8,
+              border: '1px solid rgba(255,255,255,0.2)',
+              background: 'rgba(255,255,255,0.08)',
+              color: '#fff',
+              cursor: 'pointer',
+            }}
+          >
+            重试
+          </button>
+        </div>
+      )
+    }
     if (this.props.compact) {
       return (
         <div

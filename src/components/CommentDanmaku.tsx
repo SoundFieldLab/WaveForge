@@ -286,14 +286,16 @@ export default function CommentDanmaku({
       if (!total) return
       const activeCount = items.reduce((sum, item) => (item.active ? sum + 1 : sum), 0)
       if (activeCount >= Math.min(laneCountRef.current, MAX_ACTIVE_CAP)) return
-      const allowDuplicate = total < laneCountRef.current
       let budget = 2
       let probe = 0
       while (budget > 0 && probe < total) {
         const candidate = items[cursorRef.current % total]
         cursorRef.current = (cursorRef.current + 1) % total
         probe++
-        if (!allowDuplicate && candidate.active) continue
+        // active 候选一律跳过（含 allowDuplicate）：单元素模型下再次 place 同一条
+        // 在飞弹幕 = 把它瞬移回右画外，小评论池（< 轨道数）时弹幕永远到不了左边缘、
+        // 在右侧反复回跳，流完全失效。池小就接受空场（与 MAX_ACTIVE_CAP 克制一致）。
+        if (candidate.active) continue
         if (candidate.el && !candidate.el.isConnected) {
           // 元素被 React 换掉了：重绑一次，避免一直往已卸载的节点上写样式
           bindElements()
