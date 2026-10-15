@@ -22,8 +22,9 @@
  *   - --dry-run 只生成 update.json 到仓库根目录，不发布不推送。
  */
 import { spawnSync } from 'child_process'
-import { createHash } from 'crypto'
+import { createHash, createSign } from 'crypto'
 import { readFileSync, statSync, writeFileSync, existsSync } from 'fs'
+import { homedir } from 'os'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -98,8 +99,31 @@ function readVersionFromGradle() {
   return m[1]
 }
 
+/** 发布版本单一事实源校验：gradle（安卓）与 package.json（桌面/热更新）各自驱动一端，
+ *  漂移时 update.json 只会写其中一个的版本号，另一端客户端比较版本后会拒绝更新或
+ *  提示错误版本（实测仓库曾出现 gradle=0.1.3 / package.json=0.1.4 的漂移）。
+ *  显式传 --version 时同样校验，防呆优先于便利。 */
+function assertVersionsConsistent(version) {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  if (String(pkg.version) !== String(version)) {
+    throw new Error(
+      `版本号漂移：package.json=${pkg.version}，build.gradle.kts/参数=${version}。\n` +
+      '发布前请先统一两处版本（scripts/bump-version.mjs 会同步两者），或显式传 --version 并先修复漂移。',
+    )
+  }
+}
+
 function sha256(file) {
   return createHash('sha256').update(readFileSync(file)).digest('hex')
+}
+
+/** 稳定键序列化（对象键按码点排序、数组保序）：与 desktop/update-manager.cjs
+ *  的 verifyManifestSignature 严格一致，任何一侧改动都要同步。 */
+function stableStringifyJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringifyJson).join(',')}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map(key => `${JSON.stringify(key)}:${stableStringifyJson(value[key])}`).join(',')}}`
 }
 
 async function giteeRequest(method, path, { token, body, form } = {}) {
@@ -232,6 +256,7 @@ function gitPush(version) {
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const version = args.version || readVersionFromGradle()
+  assertVersionsConsistent(version)
   const dryRun = !!args.dryRun
   const notes = args.notes || ''
 
@@ -305,6 +330,27 @@ async function main() {
   }
 
   const updatePath = join(ROOT, UPDATE_JSON)
+  // ── Ed25519 清单签名 ──
+  // 私钥与 device-license 兑换码同一把（WaveForge License Studio 数据目录）。
+  // payload = 除 manifestSignature 外的全部字段，稳定键序列化（对象键排序）后签名；
+  // 客户端（desktop/update-manager.cjs）用内嵌公钥验签，通过才允许下载。
+  // 无私钥环境（本地 dry-run / CI 缺 key）签名字段留空并警告——打包客户端会拒绝
+  // 下载该清单，发布前必须配好私钥。
+  const privateKeyPath = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'WaveForge License Studio', 'license-private-key.pem')
+  if (existsSync(privateKeyPath)) {
+    try {
+      const { sign } = await import('node:crypto')
+      const privateKey = readFileSync(privateKeyPath, 'utf8')
+      const { manifestSignature: _omitted, ...payload } = manifest
+      // Ed25519：sign(null, data, key)（createSign(null) 不接受 Ed25519）
+      manifest.manifestSignature = sign(null, Buffer.from(stableStringifyJson(payload), 'utf8'), privateKey).toString('base64')
+      console.log('update.json 已附 Ed25519 签名（manifestSignature）')
+    } catch (e) {
+      console.warn(`⚠️ 清单签名失败（${e.message}），manifestSignature 未写入——打包客户端将拒绝此清单`)
+    }
+  } else {
+    console.warn('⚠️ 未找到签名私钥（WaveForge License Studio），清单未签名——打包客户端将拒绝下载此清单的产物')
+  }
   writeFileSync(updatePath, JSON.stringify(manifest, null, 2) + '\n')
   console.log(`update.json 已生成：${UPDATE_JSON}`)
 

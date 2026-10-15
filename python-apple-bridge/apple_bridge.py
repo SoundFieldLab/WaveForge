@@ -25,11 +25,14 @@ import json
 import time
 import sys
 import os
+import hmac
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 18790
 PROFILE_DIR = ''
-SESSION_TOKEN = ''
+# 会话 token 优先读环境变量（主进程 spawn 时注入）；--token 参数保留兼容，
+# 但命令行参数会被本机其它进程经 WMI/任务管理器读到，应优先用环境变量。
+SESSION_TOKEN = os.environ.get('WAVEFORGE_APPLE_BRIDGE_TOKEN', '')
 START_VISIBLE = False
 args = sys.argv[1:]
 index = 0
@@ -47,7 +50,7 @@ while index < len(args):
             SESSION_TOKEN = args[index]
     index += 1
 if not SESSION_TOKEN:
-    raise SystemExit('missing required --token')
+    raise SystemExit('missing required --token or WAVEFORGE_APPLE_BRIDGE_TOKEN')
 if not PROFILE_DIR:
     PROFILE_DIR = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'WaveForge', 'apple-bridge-profile')
 
@@ -303,7 +306,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
         origin = self.headers.get('Origin')
         if origin and origin not in ALLOWED_ORIGINS:
             return False
-        return self.headers.get('X-WaveForge-Bridge-Token', '') == SESSION_TOKEN
+        # 常量时间比较（与 local_service_auth.py 同口径），避免逐字节短路泄漏 token
+        return hmac.compare_digest(
+            str(self.headers.get('X-WaveForge-Bridge-Token', '')).encode('utf-8'),
+            str(SESSION_TOKEN).encode('utf-8'),
+        )
 
     def _json(self, data, status=200):
         try:

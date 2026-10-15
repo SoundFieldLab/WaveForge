@@ -196,6 +196,27 @@ async function waitForLocalApi(timeoutMs = 10000) {
   return false
 }
 
+/** 3002/3003/3004 通用健康检查：/health 返回 JSON 且带 service 字段才算本族服务。
+ *  任何无关进程占着端口时 isPortOpen 恒真，此前会被当成"服务已运行"复用，
+ *  渲染端请求全部打到错误服务上（与 3001 的 isLocalApiServerHealthy 同理）。 */
+async function isPythonServiceHealthy(port, expectedService) {
+  let timer
+  try {
+    const controller = new AbortController()
+    timer = setTimeout(() => controller.abort(), 1500)
+    const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: controller.signal })
+    if (!res.ok) return false
+    const contentType = res.headers.get('content-type') || ''
+    if (!contentType.includes('application/json')) return false
+    const body = await res.json()
+    return String(body?.service || '') === expectedService
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function createStaleLocalApiError() {
   const pid = await getPidOnPort(3001)
   const pidText = pid ? `（PID ${pid}）` : ''
@@ -254,18 +275,30 @@ async function freePortIfHijacked(port, serviceName) {
   return false
 }
 
-async function startDev() {
+async function launchDev() {
   logStartup('Development launcher started')
   let apiProcess = null
   let pythonProcess = null
   let loudnessProcess = null
   let compensationProcess = null
 
+  /** 统一清场：杀掉本轮已成功拉起的后端子进程（Promise.all 失败路径与正常退出共用） */
+  const stopStartedBackends = () => {
+    if (apiProcess && !apiProcess.killed) apiProcess.kill()
+    if (pythonProcess && !pythonProcess.killed) pythonProcess.kill()
+    if (loudnessProcess && !loudnessProcess.killed) loudnessProcess.kill()
+    if (compensationProcess && !compensationProcess.killed) compensationProcess.kill()
+  }
+
   // 响度测量服务（3003，独立于节拍服务）——响度归一化按曲目调用
   const startLoudness = async () => {
     if (await isPortOpen(3003)) {
-      console.log('Loudness Service already running on http://localhost:3003')
-      return null
+      if (await isPythonServiceHealthy(3003, 'loudness')) {
+        console.log('Loudness Service already running on http://localhost:3003')
+        return null
+      }
+      console.warn('[LoudnessService] 端口 3003 被其他进程占用（非响度服务），无法启动。请手动关闭占用该端口的程序后重试。')
+      throw new Error('端口 3003 被非 WaveForge 响度服务的进程占用')
     }
     console.log('Starting Loudness Service...')
     const pythonExe = resolve(__dirname, '../resources/python-embed/python.exe')
@@ -296,8 +329,12 @@ async function startDev() {
   // 频响补偿设计服务（3004，独立于节拍/响度服务）——ISO 226 等响度/预设/自定义 → 多段 Biquad 参数
   const startCompensation = async () => {
     if (await isPortOpen(3004)) {
-      console.log('Compensation Service already running on http://localhost:3004')
-      return null
+      if (await isPythonServiceHealthy(3004, 'compensation')) {
+        console.log('Compensation Service already running on http://localhost:3004')
+        return null
+      }
+      console.warn('[CompensationService] 端口 3004 被其他进程占用（非频响补偿服务），无法启动。')
+      throw new Error('端口 3004 被非 WaveForge 频响补偿服务的进程占用')
     }
     console.log('[CompensationService] starting compensation_server.py on port 3004')
     const pythonExe = resolve(__dirname, '../resources/python-embed/python.exe')
@@ -328,8 +365,12 @@ async function startDev() {
   // 并行启动所有服务
   const startPython = async () => {
     if (await isPortOpen(3002)) {
-      console.log('Python Beat Service already running on http://localhost:3002')
-      return null
+      if (await isPythonServiceHealthy(3002, 'beat_this')) {
+        console.log('Python Beat Service already running on http://localhost:3002')
+        return null
+      }
+      console.warn('[BeatService] 端口 3002 被其他进程占用（非节拍服务），无法启动。')
+      throw new Error('端口 3002 被非 WaveForge 节拍服务的进程占用')
     }
     
     console.log('Starting Python Beat Service...')
@@ -447,18 +488,27 @@ async function startDev() {
   // the default fast path; set WAVEFORGE_LIVE_UI=1 to restore full Vite HMR.
   // 先完成 3001 预检，避免旧会话存在时仍启动其余服务并遗留更多进程。
   const api = await startAPI()
-  const [python, loudness, compensation, server] = await Promise.all([
-    startPython(),
-    startLoudness(),
-    startCompensation(),
-    startRendererServer()
-  ])
-  
+  apiProcess = api
+  // Promise.all 一项失败（典型：3000 被占用导致 startRendererServer 内 vite strictPort
+  // 抛错）会让其余已成功拉起的 Python 服务成为孤儿。失败路径必须先清场再退出。
+  let python, loudness, compensation, server
+  try {
+    ;[python, loudness, compensation, server] = await Promise.all([
+      startPython(),
+      startLoudness(),
+      startCompensation(),
+      startRendererServer()
+    ])
+  } catch (error) {
+    stopStartedBackends()
+    throw error
+  }
+
   pythonProcess = python
   apiProcess = api
   loudnessProcess = loudness
   compensationProcess = compensation
-  
+
   logStartup('Backend launch tasks dispatched')
   const devServerUrl = server.resolvedUrls?.local?.[0] || 'http://127.0.0.1:3000/'
   console.log(`Electron loading ${devServerUrl}`)
@@ -488,22 +538,7 @@ async function startDev() {
 
   const cleanup = () => {
     server.close()
-
-    if (apiProcess && !apiProcess.killed) {
-      apiProcess.kill()
-    }
-
-    if (pythonProcess && !pythonProcess.killed) {
-      pythonProcess.kill()
-    }
-
-    if (loudnessProcess && !loudnessProcess.killed) {
-      loudnessProcess.kill()
-    }
-
-    if (compensationProcess && !compensationProcess.killed) {
-      compensationProcess.kill()
-    }
+    stopStartedBackends()
   }
 
   electronProcess.on('close', code => {
@@ -515,6 +550,15 @@ async function startDev() {
     cleanup()
     process.exit()
   })
+}
+
+async function startDev() {
+  try {
+    await launchDev()
+  } catch (error) {
+    console.error('启动失败:', error?.message || error)
+    process.exitCode = 1
+  }
 }
 
 startDev().catch(error => {

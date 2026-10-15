@@ -20,6 +20,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from flask import Flask, request, jsonify
+from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 from local_service_auth import is_allowed_audio_path, is_authorized_local_request
 import librosa
@@ -53,6 +54,25 @@ if sys.platform == 'win32':
 
 app = Flask(__name__)
 CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000", "file://", "null"], allow_headers=["Content-Type", "X-WaveForge-Local-Token"])
+
+
+class _NumpyAwareJSONProvider(DefaultJSONProvider):
+    """jsonify 直编 numpy：免去 convert_to_native_types 对整棵响应树（数万节点）的
+    纯 Python 递归重建——响应对象里残余的少量 numpy 标量/数组由 default() 兜底转换。"""
+
+    def default(self, o):
+        if isinstance(o, np.integer):
+            return int(o)
+        if isinstance(o, np.floating):
+            return float(o)
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        if isinstance(o, np.bool_):
+            return bool(o)
+        return super().default(o)
+
+
+app.json = _NumpyAwareJSONProvider(app)
 
 
 @app.before_request
@@ -118,7 +138,9 @@ def cleanup_cache(force=False):
                         cache_file.unlink(missing_ok=True)
                     continue
                 if cache_file.suffix != '.json' or now - stat.st_mtime > CACHE_MAX_AGE_SECONDS:
-                    if cache_file.is_file() and (cache_file.suffix != '.json' or now - stat.st_mtime > CACHE_MAX_AGE_SECONDS):
+                    # 与 loudness_server 单分支写法一致；此前的内层条件是外层的严格子集
+                    # （合并失误的死代码），且缺少 is_file() 守卫语义
+                    if cache_file.is_file():
                         cache_file.unlink(missing_ok=True)
                     continue
                 entries.append((cache_file, stat.st_size, stat.st_mtime))
@@ -158,7 +180,10 @@ def get_cache_key(track_key: str, duration: float, audio_path: str = '', source_
         file_identity = f'{resolved_path}:{stat.st_mtime_ns}:{stat.st_size}'
     except OSError:
         file_identity = resolved_path
-    fingerprint = f'{track_key}:{duration}:{file_identity}:{source_signature}:{ANALYSIS_VERSION}'
+    # duration 不进指纹：它是客户端上报值（不同调用方取整不同），同一文件会生成不同键
+    # 触发十秒级全量重算；文件身份 (path+mtime_ns+size) 已足够防换源复用。
+    # duration 仍随结果返回用于 UI 展示，不影响分析一致性。
+    fingerprint = f'{track_key}:{file_identity}:{source_signature}:{ANALYSIS_VERSION}'
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 def load_from_cache(cache_key: str):
@@ -186,15 +211,6 @@ def save_to_cache(cache_key: str, data: dict):
     except (OSError, TypeError, ValueError):
         temporary_file.unlink(missing_ok=True)
 
-def _cosine_distance(left, right):
-    left = np.asarray(left, dtype=float)
-    right = np.asarray(right, dtype=float)
-    denominator = np.linalg.norm(left) * np.linalg.norm(right)
-    if denominator < 1e-12:
-        return 1.0
-    return float(np.clip(1.0 - np.dot(left, right) / denominator, 0.0, 1.0))
-
-
 def _detect_sections(beat_features, duration):
     if not beat_features:
         return []
@@ -205,15 +221,30 @@ def _detect_sections(beat_features, duration):
         'type': 'intro',
         'confidence': 0.7,
     }]
-    novelty = np.zeros(len(beat_features), dtype=float)
-    for index in range(1, len(beat_features)):
-        before = beat_features[index - 1]
-        after = beat_features[index]
-        novelty[index] = (
-            _cosine_distance(before['timbre'], after['timbre']) * 0.45
-            + _cosine_distance(before['chroma'], after['chroma']) * 0.25
-            + min(1.0, abs(after['energy'] - before['energy']) / max(1e-6, before['energy'])) * 0.30
-        )
+    # 向量化：timbre/chroma 已是等长向量，预先堆成矩阵一次算完相邻余弦距离，
+    # 替代原来逐对 np.asarray×4 + 逐对 np.linalg.norm 的 N 次小数组重建。
+    n = len(beat_features)
+    novelty = np.zeros(n, dtype=float)
+    if n >= 2:
+        timbre = np.asarray([f['timbre'] for f in beat_features], dtype=float)
+        chroma = np.asarray([f['chroma'] for f in beat_features], dtype=float)
+        energy = np.asarray([f['energy'] for f in beat_features], dtype=float)
+
+        def _pair_cosine_prev(matrix):
+            # rows[i] 与 rows[i-1] 的余弦相似度（i>=1），首行占位 0
+            if matrix.shape[0] < 2:
+                return np.zeros(matrix.shape[0], dtype=float)
+            norms = np.linalg.norm(matrix, axis=1)
+            dots = np.einsum('ij,ij->i', matrix[1:], matrix[:-1])
+            denom = np.maximum(norms[1:] * norms[:-1], 1e-12)
+            sim = np.clip(dots / denom, -1.0, 1.0)
+            return np.concatenate([[0.0], 1.0 - sim])
+
+        timbre_dist = _pair_cosine_prev(timbre)
+        chroma_dist = _pair_cosine_prev(chroma)
+        prev_energy = np.maximum(energy[:-1], 1e-6)
+        energy_jump = np.minimum(1.0, np.abs(np.diff(energy)) / prev_energy)
+        novelty[1:] = timbre_dist[1:] * 0.45 + chroma_dist[1:] * 0.25 + energy_jump * 0.30
 
     threshold = float(np.percentile(novelty, 82)) if len(novelty) >= 8 else 1.0
     last_boundary = 0
@@ -279,15 +310,21 @@ def _detect_silence_bounds(y: np.ndarray, sr: int, frame_duration: float = 0.05)
 def _extract_beat_features(y: np.ndarray, sr: int, beats: np.ndarray) -> list:
     hop_length = 512
     beat_frames = librosa.time_to_frames(beats, sr=sr, hop_length=hop_length)
-    chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=hop_length)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13, hop_length=hop_length)
+    # STFT 只算一次：magnitude 显式算出后同时喂 mfcc（S= 预算参数）与 spectral_flatness，
+    # 避免 mfcc 内部再做一遍 STFT、flatness 再做一遍（同一信号三遍频谱）。
+    # chroma 用 chroma_stft 复用同一份 magnitude——chroma_cqt 的 CQT 滤波器组是全曲
+    # 最贵特征而这里只取逐拍均值，chroma_stft 与之高度相关且几乎免费。
+    magnitude = np.abs(librosa.stft(y, hop_length=hop_length))
+    chroma = librosa.feature.chroma_stft(S=magnitude, sr=sr)
+    mfcc = librosa.feature.mfcc(S=librosa.power_to_db(magnitude ** 2), sr=sr, n_mfcc=13)
     rms_frames = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     zcr_frames = librosa.feature.zero_crossing_rate(y, hop_length=hop_length)[0]
-    magnitude = np.abs(librosa.stft(y, hop_length=hop_length))
     flatness_frames = librosa.feature.spectral_flatness(S=magnitude)[0]
-    frequencies = librosa.fft_frequencies(sr=sr)
+    frequencies = librosa.fft_frequencies(sr=sr, n_fft=magnitude.shape[0] * 2 - 2)
     vocal_band = (frequencies >= 180) & (frequencies <= 4200)
     feature_frame_count = min(chroma.shape[1], mfcc.shape[1], len(rms_frames), len(zcr_frames), magnitude.shape[1], len(flatness_frames))
+    # 逐拍 dB 全拍向量化：此前每拍对单元素数组调 amplitude_to_db（Python 循环 × N）
+    loudness_db = librosa.amplitude_to_db(np.maximum(np.asarray(rms_frames, dtype=float), 1e-8), ref=1.0)
     features = []
     for index, beat_time in enumerate(beats):
         start = min(int(beat_frames[index]), max(0, feature_frame_count - 1))
@@ -299,12 +336,15 @@ def _extract_beat_features(y: np.ndarray, sr: int, beats: np.ndarray) -> list:
         total_energy = float(np.sum(spectrum))
         mid_energy = float(np.sum(spectrum[vocal_band])) / max(1e-9, total_energy)
         flatness = float(np.mean(flatness_frames[frame_slice])) if start < len(flatness_frames) else 1.0
-        zcr = float(np.mean(zcr_frames[frame_slice])) if start < len(zcr_frames) else 1.0
+        zcr = float(np.mean(zcr_frames[frame_slice])) if start < len(flatness_frames) else 1.0
         vocalness = float(np.clip(mid_energy * np.sqrt(max(0.0, 1.0 - flatness)) * (1.0 - min(1.0, zcr * 5.0)), 0.0, 1.0))
+        # loudness 取该拍帧区间内的 dB 均值（向量化预算见上）；与旧「首帧单点 dB」相比
+        # 更平滑且同量纲——rms 已按帧区间取均值，对齐同一口径。
+        loudness_slice = loudness_db[frame_slice] if start < len(loudness_db) else None
         features.append({
             'beatIndex': index,
             'time': float(beat_time),
-            'loudness': float(librosa.amplitude_to_db(np.asarray([max(rms, 1e-8)]), ref=1.0)[0]),
+            'loudness': float(np.mean(loudness_slice)) if loudness_slice is not None else (float(librosa.amplitude_to_db(np.asarray([max(rms, 1e-8)]), ref=1.0)[0])),
             'rms': rms,
             'chroma': np.mean(chroma[:, frame_slice], axis=1).astype(float).tolist(),
             'timbre': np.mean(mfcc[:, frame_slice], axis=1).astype(float).tolist(),
@@ -325,24 +365,34 @@ def analyze_audio_file(file_path: str, track_key: str, source_signature: str = '
     duration = float(librosa.get_duration(y=y, sr=sr))
     print(f"   音频时长: {duration:.2f}s, 采样率: {sr}Hz")
 
+    # 复用已解码信号：此前 File2Beats(file_path) 内部用 torchaudio 按原生采样率 float64
+    # 再整曲解码一次（双重解码，耗时与内存峰值双倍）。Audio2Beats(signal, sr) 直接吃
+    # 上面的 22050Hz 单声道数据（signal2spect 对 sr==22050 跳过重采样），结果一致。
+    # 解码留在锁外：全局推理锁只护模型前向，长解码不再占锁阻塞并发请求。
     with BEAT_THIS_INFERENCE_LOCK:
-        beats_raw, downbeats_raw = BEAT_THIS_TRACKER(file_path)
+        beats_raw, downbeats_raw = BEAT_THIS_TRACKER(y, sr)
     beats = np.asarray(beats_raw.tolist() if hasattr(beats_raw, 'tolist') else beats_raw, dtype=float)
     downbeats = np.asarray(downbeats_raw.tolist() if hasattr(downbeats_raw, 'tolist') else downbeats_raw, dtype=float)
     beats = np.asarray(sorted({float(value) for value in beats if np.isfinite(value) and value >= 0}), dtype=float)
     downbeats = np.asarray(sorted({float(value) for value in downbeats if np.isfinite(value) and value >= 0}), dtype=float)
     if beats.size < 2 or downbeats.size < 2:
-        raise RuntimeError('Beat This returned insufficient beat/downbeat data')
+        # 静音/极短音频：模型给不出足够节拍是**该文件的确定属性**，不是服务故障。
+        # 此前抛 RuntimeError → 500 → 客户端把它当成"服务不可用"触发 5 秒全局熔断，
+        # 一个坏文件会让其它正常曲目的分析全部回退。改返回 metadata-only（客户端语义
+        # 与浏览器解码回退一致，可正常进过渡队列），并写缓存避免每次重打上游。
+        print(f"⚠️ 节拍数据不足（beats={beats.size}, downbeats={downbeats.size}），返回 metadata-only: {track_key}")
+        return _metadata_only_result(track_key, float(librosa.get_duration(y=y, sr=sr)))
 
     intervals = np.diff(beats)
     median_interval = float(np.median(intervals)) if intervals.size else 0.5
     tempo = float(np.clip(60.0 / max(1e-6, median_interval), 30.0, 300.0))
     consistency = float(np.clip(1.0 - np.std(intervals) / max(1e-6, median_interval), 0.0, 1.0)) if intervals.size else 0.0
     confidence = float(np.clip(0.35 + consistency * 0.6, 0.0, 0.98))
-    beats_per_bar = []
-    for index in range(len(downbeats) - 1):
-        count = int(np.sum((beats >= downbeats[index]) & (beats < downbeats[index + 1])))
-        if count > 0: beats_per_bar.append(count)
+    # searchsorted 代替逐 downbeat 全拍布尔扫描：2000 downbeat × 万级 beats 的 O(D×B)
+    # Python 循环（千万次比较）降为两次二分向量化。
+    left_indices = np.searchsorted(beats, downbeats[:-1], side='left')
+    right_indices = np.searchsorted(beats, downbeats[1:], side='left')
+    beats_per_bar = [int(r - l) for l, r in zip(left_indices, right_indices) if r > l]
     meter = int(np.median(beats_per_bar)) if beats_per_bar else 4
 
     beat_features = _extract_beat_features(y, sr, beats)
@@ -482,6 +532,13 @@ def analyze():
         # 校验 audioPath 必须是字符串（而非数字/布尔等被 str() 强转的值）
         if not isinstance(data.get('audioPath'), str):
             return jsonify({'error': 'audioPath must be a string'}), 400
+        # 404 检查必须先于 is_allowed_audio_path：后者用 resolve(strict=True)，
+        # 文件不存在时直接 False → 400「路径越界」，把「文件已丢失」误报成路径错误
+        if not os.path.exists(audio_path):
+            print(f"❌ 文件不存在: {audio_path}")
+            if audio_path.startswith('http'):
+                return jsonify({'error': 'audioPath must reference a local file prepared by WaveForge'}), 400
+            return jsonify({'error': f'File not found: {audio_path}'}), 404
         if not is_allowed_audio_path(audio_path):
             return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
         
@@ -506,6 +563,11 @@ def analyze():
             cached = load_from_cache(cache_key)
             if cached:
                 return jsonify(cached)
+            # owner 走 metadata-only 分支时不写缓存（见下），等待者醒来后缓存 miss
+            # 并不意味着失败——对该文件做同样的格式探测，不可解码时返回同样的
+            # metadata-only（duration 用请求参数，与 owner 分支同源）。
+            if not _probe_audio_format(audio_path):
+                return jsonify(_metadata_only_result(track_key, duration))
             return jsonify({'error': 'Audio analysis did not produce a cache result'}), 503
 
         acquired = _ANALYSIS_SEMAPHORE.acquire(timeout=900)
@@ -558,7 +620,9 @@ def clear_cache():
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
         return jsonify({'status': 'ok', 'message': 'Cache cleared'})
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        # 只回错误类名：shutil 异常文本含本地缓存路径，不外发（细节在服务端日志）
+        print(f"[ERROR] 缓存清理失败: {e}")
+        return jsonify({'error': f'{type(e).__name__}: cache cleanup failed'}), 500
 
 if __name__ == '__main__':
     cleanup_cache(force=True)
@@ -597,6 +661,17 @@ if __name__ == '__main__':
     sys.stdout = TeeOutput(sys.stdout, LogWriter())
     sys.stderr = TeeOutput(sys.stderr, LogWriter())
     
+    # 静音 Werkzeug 的 dev server 告警与 ANSI 颜色码：
+    # ① "WARNING: This is a development server..." —— 三服务只绑 127.0.0.1 本地回环，
+    #    永不对外，dev server 是刻意设计（AGENTS.md），红字警告纯属控制台噪音；
+    # ② click.secho 的 ANSI 颜色码（重定向/管道下残留 [0m 乱码）—— 强制着色关闭。
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+    try:
+        import click
+        click.echo = lambda *a, **k: None
+    except ImportError:
+        pass
+
     print("=" * 60)
     print("Beat Analysis Service Starting...")
     print("=" * 60)

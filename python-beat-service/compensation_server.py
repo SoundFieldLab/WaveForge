@@ -162,8 +162,15 @@ def custom_segments(bands: list) -> tuple:
     """自定义频段：5 个独立 peaking（频率间隔大，级联过冲可控），增益 ±8dB。"""
     freqs, gains = [], []
     for band in bands:
-        f = float(band.get('frequency', 0))
-        g = float(band.get('gain', 0))
+        # 非 dict 元素（数字/字符串）走 400 而不是 AttributeError → 500
+        if not isinstance(band, dict):
+            return None, f'Invalid band: {band}'
+        # 非数字字符串（"abc"）走 400 而不是 ValueError → 500（与 auto 模式口径一致）
+        try:
+            f = float(band.get('frequency', 0))
+            g = float(band.get('gain', 0))
+        except (TypeError, ValueError):
+            return None, f'Invalid band: {band}'
         if not (30.0 <= f <= 16000.0) or not math.isfinite(g):
             return None, f'Invalid band: {band}'
         freqs.append(f)
@@ -207,6 +214,10 @@ def design_compensation():
             volume = float(volume) if volume is not None else 100.0
         except (TypeError, ValueError):
             volume = 100.0
+        # NaN/Inf 会穿透 float() 与 np.clip，以裸 NaN token 进入 200 响应体
+        # （违反 RFC 8259，JS 端 response.json() 直接抛错）—— 在这里挡成 400
+        if not math.isfinite(volume):
+            return jsonify({'error': 'volume must be finite'}), 400
         spl = volume_to_spl(volume)
         segments = design_equal_loudness(volume)
         return jsonify({'segments': segments, 'label': f'等响度补偿（音量 {volume:.0f}%）', 'mode': 'auto', 'volume': volume, 'estimatedSpl': round(spl, 1)})
@@ -217,5 +228,14 @@ def design_compensation():
 
 
 if __name__ == '__main__':
+    # 静音 Werkzeug dev server 告警与 ANSI 颜色码（同 beat_analyzer.py 的说明）：
+    # 服务只绑 127.0.0.1 本地回环，dev server 是刻意设计；颜色码在重定向/管道下残留乱码。
+    import logging as _logging
+    _logging.getLogger('werkzeug').setLevel(_logging.ERROR)
+    try:
+        import click
+        click.echo = lambda *a, **k: None
+    except ImportError:
+        pass
     print(f"🎛️ Compensation service starting on http://127.0.0.1:{PORT}")
     app.run(host='127.0.0.1', port=PORT, debug=False, threaded=True)

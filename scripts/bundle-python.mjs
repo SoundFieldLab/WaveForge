@@ -51,37 +51,65 @@ const GET_PIP_URL = 'https://bootstrap.pypa.io/get-pip.py'
 console.log('🐍 WaveForge Python 嵌入式环境打包工具\n')
 
 /**
- * 下载文件
+ * 下载文件（跟随重定向后再创建唯一写流）。
+ * 旧实现在 301/302 分支里递归调用自身但外层写流已打开且从不关闭——两个句柄
+ * 同时写同一文件（Windows 上行为未定义），外层 'finish' 永不触发，句柄泄漏。
  */
-async function downloadFile(url, destPath) {
+function requestFollowRedirects(url, depth = 0) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destPath)
-    console.log(`📥 下载: ${url}`)
-    
+    if (depth > 5) {
+      reject(new Error(`重定向次数超限: ${url}`))
+      return
+    }
     https.get(url, (response) => {
-      if (response.statusCode === 302 || response.statusCode === 301) {
-        // 处理重定向
-        return downloadFile(response.headers.location, destPath).then(resolve).catch(reject)
+      if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307 || response.statusCode === 308) {
+        const location = response.headers.location
+        response.resume()
+        if (!location) {
+          reject(new Error(`重定向缺少 location: ${url}`))
+          return
+        }
+        resolve(requestFollowRedirects(new URL(location, url).href, depth + 1))
+        return
       }
-      
-      const totalSize = parseInt(response.headers['content-length'], 10)
-      let downloaded = 0
-      
-      response.on('data', (chunk) => {
-        downloaded += chunk.length
+      if (response.statusCode !== 200) {
+        response.resume()
+        reject(new Error(`下载失败 HTTP ${response.statusCode}: ${url}`))
+        return
+      }
+      resolve(response)
+    }).on('error', reject)
+  })
+}
+
+async function downloadFile(url, destPath) {
+  console.log(`📥 下载: ${url}`)
+  const response = await requestFollowRedirects(url)
+  const totalSize = parseInt(response.headers['content-length'], 10)
+  let downloaded = 0
+  await new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destPath)
+    response.on('data', (chunk) => {
+      downloaded += chunk.length
+      if (Number.isFinite(totalSize) && totalSize > 0) {
         const percent = ((downloaded / totalSize) * 100).toFixed(1)
         process.stdout.write(`\r   进度: ${percent}% (${(downloaded / 1024 / 1024).toFixed(2)} MB)`)
-      })
-      
-      response.pipe(file)
-      
-      file.on('finish', () => {
-        file.close()
-        console.log('\n✅ 下载完成')
-        resolve()
-      })
-    }).on('error', (err) => {
-      fs.unlinkSync(destPath)
+      }
+    })
+    // 响应中途断开：此前既不 reject 也不 destroy，脚本永久挂起
+    response.on('error', (err) => {
+      file.destroy()
+      fs.unlink(destPath, () => {})
+      reject(err)
+    })
+    response.pipe(file)
+    file.on('finish', () => {
+      file.close()
+      console.log('\n✅ 下载完成')
+      resolve()
+    })
+    file.on('error', (err) => {
+      fs.unlink(destPath, () => {})
       reject(err)
     })
   })
@@ -291,7 +319,10 @@ async function main() {
       console.log('⏭️  Python 安装包已存在，跳过下载')
     }
     
-    // 3. 解压
+    // 3. 解压（先清空旧目录：requirements 移除的包会残留并混进 VERSION.json，
+    //    嵌入式环境是发布产物，必须与本次 requirements 精确一致）
+    fs.rmSync(PYTHON_EMBED_DIR, { recursive: true, force: true })
+    fs.mkdirSync(PYTHON_EMBED_DIR, { recursive: true })
     extractZip(zipPath, PYTHON_EMBED_DIR)
     
     // 4. 启用 pip

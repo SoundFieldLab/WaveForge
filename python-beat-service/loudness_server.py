@@ -87,11 +87,13 @@ _LOUDNESS_INFLIGHT_LOCK = threading.Lock()
 
 
 def _loudness_cache_key(track_key: str, audio_path: str, sr: int) -> str:
+    # normcase 与 beat_analyzer.get_cache_key 同口径：Windows 路径大小写不敏感，
+    # 同一文件以不同大小写传入时应命中同一缓存键（否则重复整曲解码测量）。
     try:
         stat = os.stat(audio_path)
-        fingerprint = f'{track_key}:{os.path.abspath(audio_path)}:{stat.st_mtime_ns}:{stat.st_size}:{sr}:{MEASURE_VERSION}'
+        fingerprint = f'{track_key}:{os.path.normcase(os.path.abspath(audio_path))}:{stat.st_mtime_ns}:{stat.st_size}:{sr}:{MEASURE_VERSION}'
     except OSError:
-        fingerprint = f'{track_key}:{os.path.abspath(audio_path)}:{sr}:{MEASURE_VERSION}'
+        fingerprint = f'{track_key}:{os.path.normcase(os.path.abspath(audio_path))}:{sr}:{MEASURE_VERSION}'
     return hashlib.md5(fingerprint.encode()).hexdigest()
 
 
@@ -144,15 +146,17 @@ def _cleanup_loudness_cache(force=False):
                 entries.append((cache_file, stat.st_size, stat.st_mtime))
             except OSError:
                 continue
-    total_size = sum(size for _, size, _ in entries)
-    for cache_file, size, _ in sorted(entries, key=lambda entry: entry[2]):
-        if total_size <= LOUDNESS_CACHE_MAX_SIZE_BYTES:
-            break
-        try:
-            cache_file.unlink(missing_ok=True)
-            total_size -= size
-        except OSError:
-            continue
+        # 淘汰循环保持在锁内：并发清理各自基于过期 total_size 会多删有效缓存
+        # （与 beat_analyzer 的同段实现口径一致）
+        total_size = sum(size for _, size, _ in entries)
+        for cache_file, size, _ in sorted(entries, key=lambda entry: entry[2]):
+            if total_size <= LOUDNESS_CACHE_MAX_SIZE_BYTES:
+                break
+            try:
+                cache_file.unlink(missing_ok=True)
+                total_size -= size
+            except OSError:
+                continue
 
 
 # K-weighting 系数按采样率缓存——实际使用时采样率固定为 22050，
@@ -161,6 +165,10 @@ _k_weighting_coeffs_cache: dict = {}
 
 
 def _k_weighting_coeffs(sr: float):
+    # 查缓存：此前实现只写不读（注释声称缓存但每次全量重算 RBJ 系数）
+    cached = _k_weighting_coeffs_cache.get(sr)
+    if cached is not None:
+        return cached
     """K-weighting 两级滤波系数（RBJ 双二阶，按采样率自适应）。
 
     采用 BS.1770-4 标准定义的模拟滤波器参数（与参考实现 libebur128 一致），
@@ -196,18 +204,18 @@ def _k_weighting_coeffs(sr: float):
     return result
 
 
-def integrated_lufs(y, sr: float) -> float:
+def integrated_lufs(y, sr: float):
     """ITU-R BS.1770-4 积分响度（K-weighting + 相对门限，纯 scipy/numpy）。
 
-    返回 LUFS（-70 ~ 0；0.0 仅表示空输入或全静音，此时无法计算响度）。
-    其余计算异常会向上抛出，由路由层转为 500——不能把真实错误当成静音
-    返回 0.0，否则前端会把失败曲目误判为极低响度而错误地大幅衰减。
+    返回 LUFS（-70 ~ 0）；空输入或全静音返回 None（无法计算响度）——此前返回 0.0
+    会被客户端当作"真实响度 0 LUFS"，gainDbForLufs(0) = -14 → clamp 后 -9dB，
+    静音曲目被错误地大幅衰减并永久缓存。其余计算异常向上抛出，由路由层转 500。
     """
     if y is None or len(y) == 0:
-        return 0.0
+        return None
     samples = np.asarray(y, dtype=np.float64)
     if np.max(np.abs(samples)) <= 1e-9:
-        return 0.0
+        return None
     # K-weighting：高通 38Hz（二阶）+ 高架 1681Hz +4dB
     b_hp, a_hp, b_shelf, a_shelf = _k_weighting_coeffs(sr)
     weighted = scipy_signal.lfilter(b_shelf, a_shelf, scipy_signal.lfilter(b_hp, a_hp, samples))
@@ -223,7 +231,7 @@ def integrated_lufs(y, sr: float) -> float:
     mean_square = block_sums / lengths
     active_mask = mean_square > 1e-12
     if not np.any(active_mask):
-        return 0.0
+        return None
     block_loudness = 10.0 * np.log10(mean_square[active_mask]) - 0.691
     # 相对门限：-10 LU（BS.1770 简化门限）
     threshold = float(np.max(block_loudness)) - 10.0
@@ -251,10 +259,12 @@ def measure_lufs():
         return jsonify({'error': 'Missing trackKey or audioPath'}), 400
     if not isinstance(data.get('audioPath'), str):
         return jsonify({'error': 'audioPath must be a string'}), 400
-    if not is_allowed_audio_path(audio_path):
-        return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
+    # 404 检查必须先于 is_allowed_audio_path：后者用 resolve(strict=True)，
+    # 文件不存在时直接 False → 400「路径越界」，把「文件已丢失」误报成路径错误
     if not os.path.exists(audio_path):
         return jsonify({'error': f'File not found: {audio_path}'}), 404
+    if not is_allowed_audio_path(audio_path):
+        return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
 
     # 扩展名白名单 + 大小上限，防止非音频文件或超大文件导致资源耗尽
     ext = os.path.splitext(audio_path)[1].lower()
@@ -298,6 +308,10 @@ def measure_lufs():
         try:
             y, sr = librosa.load(audio_path, sr=sr, mono=True)
             integrated = integrated_lufs(y, sr)
+            if integrated is None:
+                # 空/全静音：不写缓存（None 无意义），客户端对 null 跳过归一化
+                print(f"🔇 响度测量: {track_key} → 静音/无有效音频，跳过")
+                return jsonify({'trackKey': track_key, 'integratedLufs': None})
             _save_loudness_cache(cache_key, integrated)
             print(f"🔊 响度测量: {track_key} → {integrated} LUFS")
             return jsonify({'trackKey': track_key, 'integratedLufs': integrated})
@@ -308,10 +322,19 @@ def measure_lufs():
                 inflight.set()
     except Exception as e:
         print(f"[ERROR] 响度测量失败: {e}")
-        return jsonify({'error': str(e)}), 500
+        # 只回错误类名：librosa/soundfile 的异常文本常含完整文件路径，不外发
+        return jsonify({'error': f'{type(e).__name__}: loudness measurement failed'}), 500
 
 
 if __name__ == '__main__':
+    # 静音 Werkzeug dev server 告警与 ANSI 颜色码（同 beat_analyzer.py 的说明）：
+    # 服务只绑 127.0.0.1 本地回环，dev server 是刻意设计；颜色码在重定向/管道下残留乱码。
+    logging.getLogger('werkzeug').setLevel(logging.ERROR)
+    try:
+        import click
+        click.echo = lambda *a, **k: None
+    except ImportError:
+        pass
     logging.basicConfig(level=logging.WARNING)
     print(f"🔊 Loudness service starting on http://127.0.0.1:{PORT}")
     app.run(host='127.0.0.1', port=PORT, debug=False, threaded=True)

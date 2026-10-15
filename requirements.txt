@@ -16,6 +16,7 @@ pywebview==6.1
 proxy-tools==0.1.0
 pyaudiowpatch==0.2.12.8
 beat-this==1.1.0
+av==19.0.1
 torch==2.7.1
 torchaudio==2.7.1
 einops==0.8.1

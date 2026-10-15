@@ -36,7 +36,8 @@ def probe_audio_format(file_path):
     """读文件头魔数，判断 libsndfile/audioread 能否解码（mp3/flac/wav/ogg）。
 
     B 站 DASH 音频轨是 AAC 封装在 MP4（fMP4），libsndfile 打不开；这类文件
-    直接走 metadata-only，避免 librosa 解码失败刷出大量 mpg123 stderr 噪音。
+    走 PyAV (FFmpeg) 解码路径（见 decode_audio_universal），仍解不开才
+    metadata-only 交给浏览器兜底。
     """
     try:
         with open(file_path, 'rb') as f:
@@ -54,6 +55,46 @@ def probe_audio_format(file_path):
     if head[:4] == b'RIFF' and head[8:12] == b'WAVE':
         return True
     return False  # m4a/mp4/aac/opus/未知格式
+
+
+def decode_audio_universal(file_path, target_sr=22050):
+    """PyAV (FFmpeg) 解码任意容器（m4a/aac/mp4/opus…）→ 单声道 float64 PCM。
+
+    libsndfile 覆盖不了的 AAC 系（B 站 DASH 音频轨等）由这里兜住：
+    实测 300s m4a 解码 ~0.2s，Beat This 直接吃 numpy 波形无额外开销。
+    解码失败/无 PyAV 返回 None（调用方回退 metadata-only）。
+    """
+    try:
+        import av
+    except ImportError:
+        return None
+    try:
+        container = av.open(file_path)
+    except Exception:
+        return None
+    try:
+        stream = next((s for s in container.streams.audio), None)
+        if stream is None:
+            return None
+        resampler = av.AudioResampler(format='s16', layout='mono', rate=target_sr)
+        chunks = []
+        for frame in container.decode(stream):
+            for out in resampler.resample(frame):
+                arr = out.to_ndarray()
+                if arr.ndim == 2 and arr.shape[0] == 1:
+                    arr = arr.T
+                chunks.append(arr)
+        if not chunks:
+            return None
+        pcm = np.concatenate(chunks).flatten().astype(np.float64) / 32768.0
+        return pcm, target_sr
+    except Exception:
+        return None
+    finally:
+        try:
+            container.close()
+        except Exception:
+            pass
 
 
 def safe_error(error):
@@ -94,10 +135,11 @@ class AnalysisWorker:
     
     def __init__(self):
         self.beat_tracker = None
+        self.pcm_tracker = None  # Audio2Beats：PyAV 解码出的 PCM 波形直接喂（m4a/aac 等）
         self.device = 'cpu'  # Default to CPU for stability
         self.checkpoint_path = os.environ.get('BEAT_THIS_CHECKPOINT', 'final0')
         self.beat_this_error = BEAT_THIS_IMPORT_ERROR
-        
+
         # Try to initialize Beat This
         if BEAT_THIS_AVAILABLE:
             try:
@@ -112,6 +154,16 @@ class AnalysisWorker:
                 self.beat_this_error = safe_error(e)
                 print(f"Failed to initialize Beat This: {self.beat_this_error}", file=sys.stderr)
                 self.beat_tracker = None
+            try:
+                self.pcm_tracker = Audio2Beats(
+                    checkpoint_path=self.checkpoint_path,
+                    device=self.device,
+                    float16=False,
+                    dbn=False
+                )
+            except Exception as e:
+                self.pcm_tracker = None
+                print(f"Failed to initialize Audio2Beats (PCM path): {safe_error(e)}", file=sys.stderr)
     
     def analyze_track(self, audio_path, track_key=None, duration=None, source_signature=None):
         """
@@ -154,15 +206,23 @@ class AnalysisWorker:
             if self.beat_tracker is None:
                 raise RuntimeError(self.beat_this_error or "Required Beat This model is unavailable")
 
-            # Unsupported containers are decoded by the browser analysis path. This is
-            # distinct from a missing model, which is always a hard failure.
-            if not probe_audio_format(audio_path):
-                print("Skipping librosa for unsupported format", file=sys.stderr)
-                result['provider'] = 'metadata-only'
-                return result
-            
+            # libsndfile 打不开的容器（m4a/aac/mp4/opus…）走 PyAV 解码成 PCM 再喂 Beat
+            # This（Audio2Beats 直接吃 numpy 波形）；连 PyAV 都解不开才 metadata-only
+            # 交给浏览器兜底。这仍是"缺解码器"，不是缺模型——不当作硬失败。
+            native_readable = probe_audio_format(audio_path)
+            if not native_readable:
+                decoded = decode_audio_universal(audio_path)
+                if decoded is None:
+                    print("Skipping librosa for unsupported format", file=sys.stderr)
+                    result['provider'] = 'metadata-only'
+                    return result
+
             try:
-                beats, downbeats = self.beat_tracker(audio_path)
+                if native_readable:
+                    beats, downbeats = self.beat_tracker(audio_path)
+                else:
+                    # PCM 路径：Beat This 直接吃 numpy 波形（+22050 标准采样率）
+                    beats, downbeats = self.pcm_tracker(decoded[0], sr=decoded[1])
                 result['provider'] = 'beat_this'
                 result['beats'] = normalize_timing(beats)
                 result['downbeats'] = normalize_timing(downbeats)
@@ -204,9 +264,13 @@ class AnalysisWorker:
             
             # 整曲只解码一次，特征提取与静音检测复用（原先各自 librosa.load，
             # 连同 tracker 内部一次共 3 次全量解码；解码是分析链路最贵的磁盘/CPU 开销）
+            # PyAV 路径（m4a/aac 等）直接复用已解码的 PCM——librosa.load 解不开这些容器。
             audio_y, audio_sr = (None, None)
             if LIBROSA_AVAILABLE:
-                audio_y, audio_sr = librosa.load(audio_path, sr=22050, mono=True)
+                if native_readable:
+                    audio_y, audio_sr = librosa.load(audio_path, sr=22050, mono=True)
+                else:
+                    audio_y, audio_sr = decoded
 
             # Extract beat-synchronous features if we have beats
             if result['beats'] and LIBROSA_AVAILABLE:
