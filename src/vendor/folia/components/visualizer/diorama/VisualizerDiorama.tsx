@@ -106,7 +106,19 @@ const SixtyFpsFrameInvalidator: React.FC = () => {
     const frameRef = useRef<number>(0);
     const lastRef = useRef(0);
     useEffect(() => {
+        // 页面隐藏时停帧：Electron backgroundThrottling=false 下 rAF 后台仍全速，
+        // 整帧 WebGL（粒子+几何+MSAA）在最小化/托盘后照跑纯属白烧 GPU；恢复可见
+        // 时继续按 60fps invalidate 补上最新帧，与 tempera/sonnet 的处理一致，观感无差。
+        let hiddenTimer: number | null = null;
         const tick = (now: number) => {
+            if (document.hidden) {
+                // 隐藏期间低频空转（250ms 一跳），恢复可见后立即回 60fps，无需事件接线
+                hiddenTimer = window.setTimeout(() => {
+                    hiddenTimer = null;
+                    frameRef.current = requestAnimationFrame(tick);
+                }, 250);
+                return;
+            }
             frameRef.current = requestAnimationFrame(tick);
             if (now - lastRef.current >= 1000 / 60) {
                 lastRef.current = now;
@@ -114,7 +126,10 @@ const SixtyFpsFrameInvalidator: React.FC = () => {
             }
         };
         frameRef.current = requestAnimationFrame(tick);
-        return () => cancelAnimationFrame(frameRef.current);
+        return () => {
+            cancelAnimationFrame(frameRef.current);
+            if (hiddenTimer !== null) window.clearTimeout(hiddenTimer);
+        };
     }, [invalidate]);
     return null;
 };

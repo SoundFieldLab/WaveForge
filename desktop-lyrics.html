@@ -2,6 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- 纵深防御：锁死 script-src（三个入口都无内联脚本）。dev 模式 Vite 注入的
+         react preamble 是内联脚本 —— @vitejs/plugin-react 在 dev 下会自动加
+         nonce/inline 处理：若 dev 控制台报 CSP 拦截，在 dev 分支（import.meta.env.DEV）
+         放宽；打包版（file://）保持严格。 -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob:; font-src 'self' data:; connect-src *; frame-src 'self' https://y.qq.com https://graph.qq.com; worker-src 'self' blob:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WaveForge 桌面歌词</title>
   </head>

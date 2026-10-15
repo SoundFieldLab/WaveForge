@@ -223,16 +223,23 @@ function BackgroundVocals({
 
 interface SmoothPlaybackTimeStore {
   getSnapshot: () => number
+  /** 行号级通知状态：publishLine 只在行号变化时通知订阅者（根部行切换判定用） */
+  getLineIndex: () => number
   subscribe: (listener: () => void) => () => void
   publish: (time: number) => void
+  publishLine: (lineIndex: number, time: number) => void
 }
 
 const createSmoothPlaybackTimeStore = (initialTime: number): SmoothPlaybackTimeStore => {
   let snapshot = initialTime
+  // 行号级通知状态：根部行切换判定订阅 lineIndex——只在换行时触发重渲染，
+  // time 仍随 publish 更新（getLineTime 用 getSnapshot().time 时取到的是最新值但不触发渲染）
+  let lineIndex = -1
   const listeners = new Set<() => void>()
 
   return {
     getSnapshot: () => snapshot,
+    getLineIndex: () => lineIndex,
     subscribe: listener => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -240,6 +247,12 @@ const createSmoothPlaybackTimeStore = (initialTime: number): SmoothPlaybackTimeS
     publish: time => {
       if (Math.abs(snapshot - time) < 0.0005) return
       snapshot = time
+      listeners.forEach(listener => listener())
+    },
+    publishLine: (nextIndex, time) => {
+      snapshot = time
+      if (nextIndex === lineIndex) return
+      lineIndex = nextIndex
       listeners.forEach(listener => listener())
     },
   }
@@ -845,6 +858,11 @@ export default memo(function LyricsDisplay({
     () => buildLyricsWithGeneratedInterludes(lyrics || []),
     [lyrics]
   )
+  // 30fps 行号探针用的实时引用：tick 是长生命周期的 rAF 闭包，直接闭包捕获会拿到旧数组
+  const displayLyricsDataRef = useRef(displayLyricsData)
+  displayLyricsDataRef.current = displayLyricsData
+  const lyricOffsetRef = useRef(lyricOffset)
+  lyricOffsetRef.current = lyricOffset
   const preparedLyricsData = useMemo(
     () => displayLyricsData.map(lyric => prepareLyricLine(lyric, sustainGlowEnabled)),
     [displayLyricsData, sustainGlowEnabled]
@@ -933,6 +951,8 @@ export default memo(function LyricsDisplay({
   useEffect(() => {
     rafTimeRef.current = { time: currentTime, startedAt: performance.now() }
     smoothTimeStoreRef.current!.publish(currentTime)
+    // 行号级粗时钟同步：根部行切换判定订阅它（换行才触发重渲染），paused 时也要跟上
+    lineSwitchStoreRef.current!.publish(currentTime)
   }, [currentTime])
 
   useEffect(() => {
@@ -955,7 +975,26 @@ export default memo(function LyricsDisplay({
       const now = performance.now()
       if (now - lastLyricFrameRef.current >= LYRIC_FRAME_INTERVAL_MS) {
         const elapsed = (now - rafTimeRef.current.startedAt) / 1000
-        smoothTimeStoreRef.current!.publish(rafTimeRef.current.time + elapsed)
+        const smoothTime = rafTimeRef.current.time + elapsed
+        smoothTimeStoreRef.current!.publish(smoothTime)
+        // 行号级粗时钟：只在"当前行号变化"时通知根部（行切换 effect 由它驱动）。
+        // 逐帧发布会让整个 LyricsDisplay 以 30fps 重渲染（.map 全列表 diff）；
+        // 行号判定是 O(1)（从上次行号向前/后探一步），成本远低于一次全组件重渲染。
+        const prevIdx = lineSwitchStoreRef.current!.getLineIndex()
+        const data = displayLyricsDataRef.current
+        let idx = prevIdx < 0 ? 0 : prevIdx
+        const adjusted = smoothTime + LYRIC_TIMING_LEAD_SECONDS + lyricOffsetRef.current
+        if (data.length > 0) {
+          // 切歌瞬间行号可能来自上一首（更长的）列表：先钳到界内，否则 data[idx] 为
+          // undefined → "Cannot read properties of undefined (reading 'time')"（过渡提交帧实测）
+          if (idx >= data.length) idx = data.length - 1
+          if (adjusted < data[0].time) idx = 0
+          else {
+            while (idx + 1 < data.length && adjusted >= data[idx + 1].time) idx++
+            while (idx > 0 && adjusted < data[idx].time) idx--
+          }
+        }
+        lineSwitchStoreRef.current!.publishLine(idx, smoothTime)
         lastLyricFrameRef.current = now
       }
       wordRafRef.current = requestAnimationFrame(tick)
@@ -1349,18 +1388,38 @@ export default memo(function LyricsDisplay({
       if (modernReturnTimerRef.current !== null) {
         window.clearTimeout(modernReturnTimerRef.current)
       }
+      // hover 计时器：卸载后 2s 内仍会 setBlinkingIndex（React 18 静默 no-op，但属状态机漏洞）
+      if (hoverTimerRef.current) {
+        clearTimeout(hoverTimerRef.current)
+        hoverTimerRef.current = null
+      }
     }
   }, [])
 
   // 行切换判定：粗快照（currentTime prop，约 4Hz）只做兜底；主路径走平滑时钟的 rAF
   // 推进值（同下方逐字/间奏的 30fps 时钟），否则行切换在快照间隔内可迟到 ~250ms——
   // single 模式（modern 歌词页）表现为"上一句淡出后下一句迟迟不进"（用户实测的滚动/切换卡顿）。
-  const smoothCurrentTime = useSyncExternalStore(
-    smoothTimeStoreRef.current.subscribe,
-    smoothTimeStoreRef.current.getSnapshot,
-    smoothTimeStoreRef.current.getSnapshot,
+  // ⚠️ 根部订阅的是"行号级通知"（仅换行才触发本组件重渲染），不是 30fps 细时钟——此前直接
+  // 订阅 smoothTimeStore 会让整个 LyricsDisplay（千行级 .map 全列表 diff + 每行 getLineTiming）
+  // 以 30fps 重渲染，纯播放时 CPU 无谓拉高。细时钟只留给下方激活行的 SmoothPlaybackTime。
+  // smoothCurrentTime 在换行通知间隙读 store 快照：行切换 effect 内取的是最新时间，
+  // 相邻两次渲染间的逐帧推进对"判定当前行"是冗余的。
+  const lineSwitchStoreRef = useRef<SmoothPlaybackTimeStore | null>(null)
+  if (!lineSwitchStoreRef.current) {
+    lineSwitchStoreRef.current = createSmoothPlaybackTimeStore(currentTime)
+  }
+  // 根订阅用"行号"快照（publishLine 只在换行时通知）；细时钟时间由行切换 effect 内
+  // 经 getSnapshot() 读取。⚠️ 不能订阅时间快照：useSyncExternalStore 每次 commit 后会
+  // 校验 getSnapshot() 与渲染值一致，时间值每帧变化 → 强制 30fps 全量重渲染，
+  // "行号级通知"优化被架空（此前实测的 CPU 回归根因）。
+  const lineSwitchIndex = useSyncExternalStore(
+    lineSwitchStoreRef.current.subscribe,
+    lineSwitchStoreRef.current.getLineIndex,
+    lineSwitchStoreRef.current.getLineIndex,
   )
-  // 平滑时钟只在播放中推进；暂停时停在外推值上会和真实进度漂移，暂停瞬间回读粗快照
+  // 平滑时钟只在播放中推进；暂停时停在外推值上会和真实进度漂移，暂停瞬间回读粗快照。
+  // 换行通知间隙（effect 触发的渲染）读 store 最新时间；行号未变的普通渲染复用旧时间。
+  const smoothCurrentTime = lineSwitchStoreRef.current.getSnapshot()
   const effectiveLineSwitchTime = isPlaying ? smoothCurrentTime : currentTime
 
   useEffect(() => {
@@ -2844,7 +2903,10 @@ export default memo(function LyricsDisplay({
 
               <div
                 className={[
-                  'relative z-10 will-change-transform lyric-skia-line',
+                  // will-change 只给当前行与即将激活行：全列表常驻会让 compositor
+                  // 为每行保留图层，长内容（播客/千行 TTML）显存/合成开销线性放大
+                  globalIndex >= currentIndex - 1 && globalIndex <= currentIndex + 2 ? 'will-change-transform' : '',
+                  'relative z-10 lyric-skia-line',
                   isCurrent ? 'lyric-skia-line-current' : '',
                   crowdedCurrentLine ? 'lyric-skia-line-crowded' : '',
                   lineTiming.upcomingProgress > 0 ? 'lyric-skia-line-upcoming' : '',

@@ -231,7 +231,10 @@ export function parseTTML(ttmlText: string): TTMLLyric {
         const text = textOf(node)
         const value = Number.parseFloat(text)
         if (Number.isFinite(value)) {
-          leadingSilenceMs = text.endsWith('ms') ? Math.round(value) : text.includes('.') ? Math.round(value * 1000) : Math.round(value)
+          // 单位口径（TTML 时间语义）：'ms'=毫秒；'s' 或无后缀=秒；带小数点的旧分支
+          // 按毫秒解释是历史数据兼容。裸整数如 "2" 应为 2s——旧逻辑当 2ms（千倍偏差）。
+          if (text.endsWith('ms')) leadingSilenceMs = Math.round(value)
+          else leadingSilenceMs = Math.round(value * 1000)
         }
       }
     })

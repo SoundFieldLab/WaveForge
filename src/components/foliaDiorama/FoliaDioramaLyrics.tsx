@@ -6,7 +6,7 @@
  * 切歌 / 单曲循环时按 folia 的 sequencer 语义把新走廊段铺到世界另一处，相机一气呵成飞过去。
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Canvas } from '@react-three/fiber'
+import { Canvas, useThree } from '@react-three/fiber'
 import { useMotionValue } from 'framer-motion'
 import type { LyricBackgroundVocal, LyricLine, LyricWord } from '../../services/musicApi'
 import type { PlaybackTimeStore } from '../../audio/playbackTimeStore'
@@ -20,6 +20,39 @@ import { DIORAMA_RASTER_FONT_PX, buildDioramaFontSpec, measureDioramaText } from
 import { EMPTY_AUDIO_PULSE_STORE, type AudioPulseStore } from '../../hooks/useAudioPulse'
 import type { AudioAnalyzerStore } from '../../hooks/useAudioAnalyzer'
 import { isGpuSoftwareCompositing, resolveDioramaRenderQuality } from '../../services/playbackPerformancePolicy'
+
+// 60fps 钳制 + 隐藏停帧：r3f 默认 frameloop=always 跟随显示器刷新率，120/240Hz 屏上
+// 整帧 WebGL（粒子+几何+MSAA+Bloom）成本是 60fps 的 2-4 倍。改 demand + 手动 invalidate
+// （与 vendor/VisualizerDiorama 同款门控）——效果保留、粒子动画肉眼无差，GPU 负载减半以上。
+const SixtyFpsFrameInvalidator: React.FC = () => {
+  const invalidate = useThree((state) => state.invalidate)
+  const frameRef = useRef<number>(0)
+  const lastRef = useRef(0)
+  useEffect(() => {
+    let hiddenTimer: number | null = null
+    const tick = (now: number) => {
+      if (document.hidden) {
+        // 隐藏期间低频空转，恢复可见后立即回 60fps
+        hiddenTimer = window.setTimeout(() => {
+          hiddenTimer = null
+          frameRef.current = requestAnimationFrame(tick)
+        }, 250)
+        return
+      }
+      frameRef.current = requestAnimationFrame(tick)
+      if (now - lastRef.current >= 1000 / 60) {
+        lastRef.current = now
+        invalidate()
+      }
+    }
+    frameRef.current = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(frameRef.current)
+      if (hiddenTimer !== null) window.clearTimeout(hiddenTimer)
+    }
+  }, [invalidate])
+  return null
+}
 
 // 字体栈：拉丁字体在前（西文歌词用 SF/Segoe 的拉丁字形，比中文字体的西文部分精致得多），
 // 中文按平台最优顺序回退；canvas 逐字形 fallback，不会影响中文字形选择
@@ -283,6 +316,7 @@ export default function FoliaDioramaLyrics({
           // MV 背景激活时启用 alpha 透明，让下层 MV 视频透过 Canvas 可见；
           // 否则保持默认（不透明）以获得更好的深度清晰度与性能。
           gl={{ powerPreference: 'high-performance', alpha: mvBackgroundActive }}
+          frameloop="demand"
           className="h-full w-full"
           onCreated={(state) => {
             // 引擎实例级懒预热：R3F 场景就位后把真实编译产物写入 GpuDiskCache，
@@ -295,6 +329,7 @@ export default function FoliaDioramaLyrics({
             }, 400)
           }}
         >
+          <SixtyFpsFrameInvalidator />
           <DioramaScene
             currentTime={currentTime}
             sequencer={sequencer}
