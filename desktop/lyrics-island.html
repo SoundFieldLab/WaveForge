@@ -353,6 +353,32 @@
   }
 
   // ── 拖动 vs 点击：位移超过阈值视为拖动 ──
+  // 拖动期间 pointermove 频率远高于帧率（240Hz 屏可达每秒数百次），每次都直发 IPC 会变成
+  // 主进程里一次 screen.getDisplayMatching + 同步 setBounds，拖动明显发涩。
+  // 这里合并成每帧最多一次（与 React 侧 src/utils/rafCoalescedPointSender.ts 同款语义；
+  // 本文件是纯静态 HTML、不引入构建产物，所以内联一份）。
+  let dragFrame = 0
+  let pendingDragPoint = null
+  const flushDragPoint = () => {
+    dragFrame = 0
+    if (!pendingDragPoint) return
+    const point = pendingDragPoint
+    pendingDragPoint = null
+    bridge.dragTo(point)
+  }
+  const queueDragPoint = (point) => {
+    pendingDragPoint = point
+    if (!dragFrame) dragFrame = requestAnimationFrame(flushDragPoint)
+  }
+  const flushDragNow = () => {
+    if (dragFrame) { cancelAnimationFrame(dragFrame); dragFrame = 0 }
+    flushDragPoint()
+  }
+  const dropDragPoint = () => {
+    if (dragFrame) { cancelAnimationFrame(dragFrame); dragFrame = 0 }
+    pendingDragPoint = null
+  }
+
   let pointerSession = null
   $('pill').addEventListener('pointerdown', (e) => {
     if (e.button !== 0) return
@@ -368,13 +394,15 @@
       if (controlsVisible) setControlsVisible(false)
       bridge.startDrag({ x: e.screenX, y: e.screenY })
     }
-    bridge.dragTo({ x: e.screenX, y: e.screenY })
+    queueDragPoint({ x: e.screenX, y: e.screenY })
   })
   window.addEventListener('pointerup', () => {
     if (!pointerSession) return
     const moved = pointerSession.moved
     pointerSession = null
     $('pill').classList.remove('dragging')
+    if (moved) flushDragNow() // 丢掉最后一次移动会让窗口停在差一帧的位置
+    else dropDragPoint()
     bridge.endDrag()
     if (!moved) setControlsVisible(!controlsVisible) // 单击：切换播控浮层
   })

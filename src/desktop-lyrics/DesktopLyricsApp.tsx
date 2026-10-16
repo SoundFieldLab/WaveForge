@@ -15,6 +15,7 @@ import {
   useDesktopRealtimeSnapshot,
 } from '../desktopRealtimeStore'
 import { prepareLyricWords } from '../utils/lyricWordTiming'
+import { createRafCoalescedPointSender } from '../utils/rafCoalescedPointSender'
 
 const DEFAULT_STATE: DesktopPlayerSnapshot = {
   song: null, lyric: null, playing: false, live: false, spectrum: [0, 0, 0, 0, 0], enabled: false,
@@ -410,8 +411,12 @@ export default function DesktopLyricsApp() {
   const beginDrag = (event: ReactPointerEvent) => {
     if (settings.locked || event.button !== 0 || (event.target as HTMLElement).closest('button,input,.dl-settings-panel,.dl-resize')) return
     bridge()?.startDrag({ x: event.screenX, y: event.screenY })
-    const move = (nextEvent: PointerEvent) => bridge()?.dragTo({ x: nextEvent.screenX, y: nextEvent.screenY })
+    // pointermove 频率远高于帧率（240Hz 屏可达每秒数百次），每次都直发 IPC 会变成本
+    // 进程里一次 screen.getDisplayMatching + 同步 setBounds，拖动明显发涩 → 合并成每帧一次
+    const sender = createRafCoalescedPointSender<{ x: number; y: number }>(point => bridge()?.dragTo(point))
+    const move = (nextEvent: PointerEvent) => sender.push({ x: nextEvent.screenX, y: nextEvent.screenY })
     const up = () => {
+      sender.flush() // 丢掉最后一次移动会让窗口停在差一帧的位置
       bridge()?.endDrag()
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
@@ -424,8 +429,11 @@ export default function DesktopLyricsApp() {
     if (settings.locked) return
     event.stopPropagation()
     bridge()?.startResize({ x: event.screenX, y: event.screenY, edge })
-    const move = (nextEvent: PointerEvent) => bridge()?.resizeTo({ x: nextEvent.screenX, y: nextEvent.screenY })
+    // 与拖动同理：缩放期间每次 move 都会让主进程重算边界并 setBounds
+    const sender = createRafCoalescedPointSender<{ x: number; y: number }>(point => bridge()?.resizeTo(point))
+    const move = (nextEvent: PointerEvent) => sender.push({ x: nextEvent.screenX, y: nextEvent.screenY })
     const up = () => {
+      sender.flush()
       bridge()?.endResize()
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)

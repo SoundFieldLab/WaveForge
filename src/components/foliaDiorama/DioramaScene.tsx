@@ -836,6 +836,7 @@ const EMPTY_ANALYZER_STORE: AudioAnalyzerStore = {
     subscribe: () => () => undefined,
     retainBackground: () => () => undefined,
     hasBackgroundConsumers: () => false,
+    getAudioContext: () => null,
 };
 
 export default function DioramaScene({

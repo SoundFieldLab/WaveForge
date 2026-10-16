@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react'
 import type { DesktopPlayerSnapshot, DesktopPlayerControlAction, DesktopPlayerBridgeAPI } from '../electron'
 import { reconcileBoundaryParentheses } from '../utils/lyricBoundaryParentheses'
+import { createRafCoalescedPointSender } from '../utils/rafCoalescedPointSender'
 import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
 import {
   getInterpolatedDesktopProgress,
@@ -590,30 +591,26 @@ export default function DesktopPlayerApp() {
 
   const startDrag = (event: ReactMouseEvent) => {
     if (event.button !== 0 || (event.target as Element).closest('button, .dp-playlist, .dp-resizer')) return
-    const bridge = getBridge()
-    bridge?.startDrag({ x: event.screenX, y: event.screenY })
+    const api = getBridge()
+    api?.startDrag({ x: event.screenX, y: event.screenY })
     const originX = event.screenX
     const originY = event.screenY
-    let frame = 0
-    let latest: MouseEvent | null = null
     let dragging = false
-    const flush = () => {
-      frame = 0
-      if (dragging && latest) bridge?.dragTo({ x: latest.screenX, y: latest.screenY })
-    }
+    // 拖动期间 pointermove 频率远高于帧率，合并成每帧一次 IPC（与桌面歌词/歌词岛共用同一工具）
+    const sender = createRafCoalescedPointSender<{ x: number; y: number }>(point => getBridge()?.dragTo(point))
     const onMove = (moveEvent: MouseEvent) => {
-      latest = moveEvent
       const distance = Math.abs(moveEvent.screenX - originX) + Math.abs(moveEvent.screenY - originY)
-      if (distance > 4) {
+      if (!dragging && distance > 4) {
+        // 超过阈值才算拖动：否则单纯点击也会把窗口挪一下
         dragging = true
         suppressClickRef.current = true
       }
-      if (dragging && !frame) frame = requestAnimationFrame(flush)
+      if (dragging) sender.push({ x: moveEvent.screenX, y: moveEvent.screenY })
     }
     const onUp = () => {
-      if (frame) cancelAnimationFrame(frame)
-      if (dragging && latest) bridge?.dragTo({ x: latest.screenX, y: latest.screenY })
-      bridge?.endDrag()
+      if (dragging) sender.flush() // 丢掉最后一次移动会让窗口停在差一帧的位置
+      else sender.cancel()
+      api?.endDrag()
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }

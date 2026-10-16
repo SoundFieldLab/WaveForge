@@ -373,7 +373,6 @@ export function WeatherRainGlass({ kind, className = '', active = true }: { kind
     const dense = kind === 'heavy-rain' || kind === 'thunder'
     const baseDrops = kind === 'drizzle' ? 26 : dense ? 78 : 48
     const baseSliders = kind === 'drizzle' ? 2 : dense ? 7 : 4
-    const dpr = Math.min(window.devicePixelRatio || 1, 2)
     const rand = (a: number, b: number) => a + Math.random() * (b - a)
 
     interface Drop { x: number; y: number; r: number }
@@ -418,6 +417,9 @@ export function WeatherRainGlass({ kind, className = '', active = true }: { kind
       const rect = canvas.getBoundingClientRect()
       width = Math.max(1, rect.width)
       height = Math.max(1, rect.height)
+      // 每次重设尺寸都重新读 dpr：窗口在不同缩放的显示器间移动时它会变，
+      // 缓存旧值会让后备存储分辨率与新屏不匹配（雨滴/滑块发糊）
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
       canvas.width = Math.round(width * dpr)
       canvas.height = Math.round(height * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)

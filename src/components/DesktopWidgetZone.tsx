@@ -674,7 +674,12 @@ function DesktopWidgetZone({ side, settings, cardBlurAmount, accentColor, onOver
   }, [])
 
   useLayoutEffect(() => {
-    const measure = () => {
+    // 原实现把 measure 直接挂在 resize 上：拖动窗口边缘时 resize 事件可到每秒上百次，
+    // 而 measure 内部有 getBoundingClientRect + scrollHeight（强制同步布局）后 setState。
+    // 合并成每帧一次，避免拖动窗口时反复强制布局。
+    let frame = 0
+    const runMeasure = () => {
+      frame = 0
       const zone = zoneRef.current
       if (!zone) return
       if (!focusActive) {
@@ -690,20 +695,29 @@ function DesktopWidgetZone({ side, settings, cardBlurAmount, accentColor, onOver
       const baseHeight = baseHeightRef.current || Math.max(0, zone.scrollHeight - 128)
       setReplaceTimeDuringFocus(baseHeight + 128 > availableHeight)
     }
-    measure()
+    const measure = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(runMeasure)
+    }
+    runMeasure()
     window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      window.removeEventListener('resize', measure)
+    }
   }, [focusActive, hasDateTimeHere, widgets])
 
   useLayoutEffect(() => {
     const frame = window.requestAnimationFrame(updateScrollFades)
+    // ResizeObserver 观察的就是 zone 自身：窗口 resize 引发 zone 尺寸变化时它同样会回调，
+    // 再挂一个 window resize 只会让同一次变化跑两遍。仅在无 ResizeObserver 时用 resize 兜底。
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollFades) : null
-    if (zoneRef.current) observer?.observe(zoneRef.current)
-    window.addEventListener('resize', updateScrollFades)
+    if (observer && zoneRef.current) observer.observe(zoneRef.current)
+    else window.addEventListener('resize', updateScrollFades)
     return () => {
       window.cancelAnimationFrame(frame)
       observer?.disconnect()
-      window.removeEventListener('resize', updateScrollFades)
+      if (!observer) window.removeEventListener('resize', updateScrollFades)
     }
   }, [updateScrollFades, widgets])
 

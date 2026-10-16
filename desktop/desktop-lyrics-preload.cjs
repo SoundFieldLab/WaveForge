@@ -23,4 +23,13 @@ contextBridge.exposeInMainWorld('desktopLyrics', {
   startDrag: (point) => ipcRenderer.send('desktop-lyrics:drag-start', point),
   dragTo: (point) => ipcRenderer.send('desktop-lyrics:drag-to', point),
   endDrag: () => ipcRenderer.send('desktop-lyrics:drag-end'),
+  // 帧率限流：本窗所在显示器对应的高刷档位由主进程下发（逐窗口，见 display:get-frame-rate）
+  frameRate: {
+    get: () => ipcRenderer.invoke('display:get-frame-rate'),
+    onSet: (callback) => {
+      const listener = (_event, target) => callback(target)
+      ipcRenderer.on('frame-rate:set', listener)
+      return () => ipcRenderer.removeListener('frame-rate:set', listener)
+    },
+  },
 })

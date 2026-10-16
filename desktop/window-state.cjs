@@ -51,6 +51,49 @@ function clampBoundsToWorkArea(bounds, workArea) {
   return { x, y, width, height }
 }
 
+/** 两个矩形是否有交集（接触边不算）。 */
+function rectsIntersect(a, b) {
+  return a.x < b.x + b.width && a.x + a.width > b.x
+    && a.y < b.y + b.height && a.y + a.height > b.y
+}
+
+/**
+ * 显示器布局变化（拔扩展坞/接外接屏/分辨率缩小）后，判断一个窗口要不要被搬回可见区域。
+ *
+ * 返回 null 表示窗口当前与某块显示器有交集、无需搬动；
+ * 否则返回「最近的一块显示器的工作区」，调用方据此把窗口夹回来。
+ *
+ * 为什么需要：笔记本拔掉外接显示器后，留在那块屏上的副屏窗口（桌面歌词、桌面播放器、
+ * 歌词岛、任务栏挂件）坐标指向已不存在的区域；Windows 不会自动搬动它们，应用也没有
+ * 入口把它们找回来——窗口就此"消失"。分辨率缩小同样会把右下角的窗口推出屏外。
+ *
+ * 「最近」按中心点距离判定（而不是依赖 Electron 的 getDisplayMatching），
+ * 这样这段选址逻辑是纯函数、可单测——拔显示器在现场无法模拟。
+ */
+function pickRecoveryWorkArea(displays, bounds) {
+  if (!Array.isArray(displays) || displays.length === 0) return null
+  for (const display of displays) {
+    const area = display && display.bounds
+    if (area && rectsIntersect(bounds, area)) return null
+  }
+  const cx = bounds.x + bounds.width / 2
+  const cy = bounds.y + bounds.height / 2
+  let best = null
+  let bestDistance = Infinity
+  for (const display of displays) {
+    const area = display && display.bounds
+    if (!area) continue
+    const dx = area.x + area.width / 2 - cx
+    const dy = area.y + area.height / 2 - cy
+    const distance = dx * dx + dy * dy
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = display.workArea || area
+    }
+  }
+  return best
+}
+
 /** 保存窗口状态（静默失败：userData 不可写等场景不影响使用）。 */
 function saveWindowState(app, mainWindow, screen) {
   try {
@@ -79,4 +122,4 @@ function saveWindowState(app, mainWindow, screen) {
   }
 }
 
-module.exports = { loadWindowState, saveWindowState, clampBoundsToWorkArea, DEFAULT_WIDTH, DEFAULT_HEIGHT }
+module.exports = { loadWindowState, saveWindowState, clampBoundsToWorkArea, pickRecoveryWorkArea, rectsIntersect, DEFAULT_WIDTH, DEFAULT_HEIGHT }

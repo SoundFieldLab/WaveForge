@@ -20,6 +20,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { setSecureToken } from '../services/secureTokenStore'
+import { getMeasuredFrameRate, isFrameRateLimited } from '../utils/frameRateLimiter'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
 import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic } from 'lucide-react'
 import LoginButton from './LoginButton'
@@ -1265,6 +1266,8 @@ function SettingsPanel({
     highRefreshEnabled: boolean
     highRefreshHz: number | null
     currentHz: number
+    /** 真正会应用到的目标帧率（关闭高刷时为 60 基准）；老主进程可能不返回 */
+    targetHz?: number
     primary: number
     mainWindowDisplayId: number
     error?: string
@@ -1282,6 +1285,22 @@ function SettingsPanel({
   }, [])
 
   useEffect(() => { refreshDisplayInfo() }, [refreshDisplayInfo])
+
+  // 实测帧率：由渲染层限流器统计「真正执行的帧率」。面板打开期间按秒刷新。
+  // 必须显示实测值——旧实现只把「请求值/显示器刷新率」当渲染帧率展示，
+  // 而当时唯一的限流手段（webContents.setFrameRate）对普通窗口完全无效，
+  // 于是界面长期显示一个从未达到过的数字。见 src/utils/frameRateLimiter.ts。
+  const [measuredFrameHz, setMeasuredFrameHz] = useState(0)
+  const [frameRateLimited, setFrameRateLimited] = useState(false)
+  useEffect(() => {
+    const syncMeasured = () => {
+      setMeasuredFrameHz(getMeasuredFrameRate())
+      setFrameRateLimited(isFrameRateLimited())
+    }
+    syncMeasured()
+    const timer = window.setInterval(syncMeasured, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const handleHighRefreshToggle = async (enabled: boolean) => {
     setHighRefreshEnabled(enabled)
@@ -5011,7 +5030,10 @@ function SettingsPanel({
                         <div className={`mt-3 space-y-1 rounded-lg p-3 text-xs ${textTertiary}`} style={{ backgroundColor: playerTheme === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' }}>
                           <div className="flex items-center gap-2">
                             <span className="font-medium text-[13px]" style={{ color: textPrimary }}>当前渲染帧率</span>
-                            <span className="tabular-nums" style={{ color: highRefreshEnabled ? accentColor : undefined }}>{displayInfo.currentHz || 60} Hz</span>
+                            <span className="tabular-nums" style={{ color: highRefreshEnabled ? accentColor : undefined }}>目标 {displayInfo.targetHz || displayInfo.currentHz || 60} Hz</span>
+                            {measuredFrameHz > 0 && (
+                              <span className="tabular-nums" title="渲染层实际执行的帧率（由 rAF 限流器统计）">实测 {measuredFrameHz} Hz</span>
+                            )}
                             {highRefreshEnabled && <span className="ml-1 rounded-full px-2 py-0.5 text-[10px] text-white" style={{ background: accentColor }}>高刷已开启</span>}
                           </div>
                           <div className="mt-2 space-y-0.5">
@@ -5027,6 +5049,9 @@ function SettingsPanel({
                             ))}
                           </div>
                           {displayInfo.error && <div className="mt-1 text-amber-400">显示器信息读取失败：{displayInfo.error}</div>}
+                          {frameRateLimited && (
+                            <div className="mt-1">渲染层正按 {displayInfo.targetHz}Hz 限流：界面动画不会跑满显示器刷新率，以换取稳定帧节奏。</div>
+                          )}
                           <div className="mt-1">开启后立即生效；窗口移到其他显示器时自动跟随该显示器刷新率。</div>
                         </div>
                       )}

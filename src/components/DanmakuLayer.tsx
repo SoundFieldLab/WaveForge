@@ -48,7 +48,6 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const dpr = window.devicePixelRatio || 1
 
     // 尺寸缓存：resize() 会写 canvas.width/height 与 style，本身已作废布局；
     // 若每帧再 getBoundingClientRect 就会强制同步重排。ResizeObserver 回调是尺寸的
@@ -59,6 +58,9 @@ export default function DanmakuLayer({ items, settings, isPlaying, videoRef, get
       const rect = parent.getBoundingClientRect()
       cachedWidth = rect.width
       cachedHeight = rect.height
+      // 每次重设尺寸都重新读 dpr：窗口在不同缩放的显示器间移动时它会变，
+      // 缓存旧值会让后备存储分辨率与新屏不匹配（高 DPI 上弹幕发糊）
+      const dpr = window.devicePixelRatio || 1
       canvas.width = Math.max(1, Math.floor(rect.width * dpr))
       canvas.height = Math.max(1, Math.floor(rect.height * dpr))
       canvas.style.width = `${rect.width}px`

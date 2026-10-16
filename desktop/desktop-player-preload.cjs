@@ -22,4 +22,13 @@ contextBridge.exposeInMainWorld('desktopPlayer', {
   // 卡片形态内容高度变化时上报，主进程把窗口向下延伸
   reportContentHeight: (height) => ipcRenderer.send('desktop-player:content-height', height),
   setExpanded: (expanded) => ipcRenderer.invoke('desktop-player:set-expanded', expanded),
+  // 帧率限流：本窗所在显示器对应的高刷档位由主进程下发（逐窗口，见 display:get-frame-rate）
+  frameRate: {
+    get: () => ipcRenderer.invoke('display:get-frame-rate'),
+    onSet: (callback) => {
+      const listener = (_event, target) => callback(target)
+      ipcRenderer.on('frame-rate:set', listener)
+      return () => ipcRenderer.removeListener('frame-rate:set', listener)
+    },
+  },
 })

@@ -6,6 +6,7 @@ import {
   SPECTRUM_MIN_FREQ,
   SPECTRUM_MAX_FREQ,
 } from '../utils/spectrum'
+import { getAudioThreadClock } from '../services/audioThreadClock'
 
 /** 对数频谱段数（45Hz~12kHz 按对数均分），供频谱可视化按频段取能。 */
 export const ANALYZER_SPECTRUM_BANDS = 24
@@ -42,6 +43,12 @@ export interface AudioAnalyzerStore {
   /** 后台消费者租约：持有期间窗口隐藏后仍继续分析；返回释放函数。 */
   retainBackground: () => () => void
   hasBackgroundConsumers: () => boolean
+  /**
+   * 当前分析器所在的 AudioContext（可能为 null）。
+   * 供需要「窗口隐藏后仍按帧率推送」的模块取音频线程时钟——
+   * 隐藏时主线程定时器会被压到 ~1Hz、rAF 停止，只有音频线程不受影响。
+   */
+  getAudioContext: () => BaseAudioContext | null
 }
 
 const EMPTY_ANALYSIS: AudioAnalyzerData = Object.freeze({
@@ -79,14 +86,18 @@ function createAnalyzerStore(): AudioAnalyzerStore & {
   publish: (value: AudioAnalyzerData) => void
   hasListeners: () => boolean
   setStartCallback: (callback: (() => void) | null) => void
+  setAudioContext: (context: BaseAudioContext | null) => void
 } {
   let snapshot = EMPTY_ANALYSIS
   const listeners = new Set<() => void>()
   // 有新订阅者出现时重启 rAF 循环（由 effect 注入当前的 start 函数）
   let startCallback: (() => void) | null = null
   let backgroundConsumers = 0
+  let context: BaseAudioContext | null = null
   return {
     getSnapshot: () => snapshot,
+    getAudioContext: () => context,
+    setAudioContext: (next: BaseAudioContext | null) => { context = next },
     subscribe: listener => {
       listeners.add(listener)
       startCallback?.()
@@ -292,9 +303,12 @@ export function useAudioAnalyzer(
     }
 
     if (!enabled || !analyser) {
+      store.setAudioContext(null)
       if (store.getSnapshot() !== EMPTY_ANALYSIS) store.publish(EMPTY_ANALYSIS)
       return
     }
+    // 暴露音频上下文：RGB 插件等需要「窗口隐藏后仍按帧率推送」的模块靠它取音频线程时钟
+    store.setAudioContext(analyser.context)
 
     const data = new Uint8Array(analyser.frequencyBinCount)
     const leftData = leftAnalyser ? new Uint8Array(leftAnalyser.frequencyBinCount) : null
@@ -307,6 +321,7 @@ export function useAudioAnalyzer(
 
     // 取消待执行帧；后续由 start() 依据「有订阅者 + 窗口可见」决定是否续帧
     const stop = () => {
+      releaseHiddenClock()
       if (animationFrame) {
         cancelAnimationFrame(animationFrame)
         animationFrame = 0
@@ -321,9 +336,32 @@ export function useAudioAnalyzer(
     // 数据处理在 analyze 内本就以 30Hz 节流，观感帧率不变；空闲期 rAF 回调
     // 从"全刷新率"降到 ~30Hz。窗口隐藏且无后台消费者时不续帧：页面不可见时
     // 必无可视消费者，恢复可见后数据立即刷新，无观感差异。视觉零变化。
+    // 隐藏 + 后台租约时的驱动源：音频线程时钟（不受页面可见性影响）。
+    // 只在跨越「隐藏↔可见」或租约变化时订阅/退订，正常播放期间无额外开销。
+    let hiddenClockUnsubscribe: (() => void) | null = null
+    const releaseHiddenClock = () => {
+      if (!hiddenClockUnsubscribe) return
+      hiddenClockUnsubscribe()
+      hiddenClockUnsubscribe = null
+    }
+    const ensureHiddenClock = () => {
+      if (hiddenClockUnsubscribe) return
+      const clock = getAudioThreadClock(store.getAudioContext())
+      if (!clock) return // 没有音频上下文（如外部播放源）：退回被节流的定时器路径
+      hiddenClockUnsubscribe = clock.subscribe(30, () => {
+        if (!disposed) analyze(performance.now())
+      })
+    }
+
     const scheduleNext = () => {
       if (disposed || animationFrame || frameTimer !== null) return
-      if (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) return
+      // 隐藏 + 有后台租约：交给音频线程时钟（隐藏时 rAF 为 0、setTimeout 被压到 ~1Hz，
+      // 原调度会整体停摆，后台租约将形同虚设）
+      if (document.visibilityState === 'hidden' && store.hasBackgroundConsumers()) {
+        ensureHiddenClock()
+        return
+      }
+      releaseHiddenClock()
       frameTimer = window.setTimeout(() => {
         frameTimer = null
         if (disposed || animationFrame) return
@@ -514,7 +552,14 @@ export function useAudioAnalyzer(
 
     const start = () => {
       if (disposed) return
-      if (animationFrame || (document.visibilityState === 'hidden' && !store.hasBackgroundConsumers()) || (!store.hasListeners() && !store.hasBackgroundConsumers())) return
+      if (document.visibilityState === 'hidden') {
+        // 隐藏时 rAF 不会触发：有后台租约就交给音频线程时钟，否则不该跑
+        if (store.hasBackgroundConsumers()) ensureHiddenClock()
+        else releaseHiddenClock()
+        return
+      }
+      releaseHiddenClock()
+      if (animationFrame || (!store.hasListeners() && !store.hasBackgroundConsumers())) return
       animationFrame = requestAnimationFrame(analyze)
     }
 
@@ -532,6 +577,7 @@ export function useAudioAnalyzer(
       stop()
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       store.setStartCallback(null)
+      store.setAudioContext(null)
       if (store.getSnapshot() !== EMPTY_ANALYSIS) store.publish(EMPTY_ANALYSIS)
     }
   }, [analyser, enabled, leftAnalyser, rightAnalyser, external?.active])

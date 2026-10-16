@@ -50,7 +50,6 @@ export default function DGLabVizCanvas({ status, height = 190, mode = 'envelope'
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
     const frameMs = 1000 / TARGET_FPS[mode]
     let raf = 0
     /** 下一次允许重绘的时间点：用累加而非「上次重绘 + 间隔」，否则实际帧率会被 vsync 周期量化拖慢。 */
@@ -106,6 +105,9 @@ export default function DGLabVizCanvas({ status, height = 190, mode = 'envelope'
 
       const cw = canvas.clientWidth || 320
       const ch = canvas.clientHeight || height
+      // 每帧重读 dpr：窗口在不同缩放的显示器间移动时它会变，缓存旧值会让
+      // 后备存储分辨率与新屏不匹配（波形发糊）
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
       const targetW = Math.round(cw * dpr)
       const targetH = Math.round(ch * dpr)
       if (canvas.width !== targetW || canvas.height !== targetH) {

@@ -318,6 +318,22 @@ export interface VmpStatus {
   source: 'development-verify' | 'build-metadata'
 }
 
+/** 单个窗口的目标渲染帧率：逐窗口按所在显示器解析（见 main.cjs 的 resolveWindowFrameRate）。 */
+export interface FrameRateTarget {
+  /** 设置里是否开启了全局高刷（仅供 UI 显示；是否限流只看 hz 与 displayHz） */
+  enabled: boolean
+  /** 该窗口的目标渲染帧率（Hz）；关闭高刷时为 60 基准 */
+  hz: number
+  /** 该窗口所在显示器的刷新率（Hz） */
+  displayHz: number
+}
+
+/** 渲染层帧率限流桥（见 src/utils/frameRateLimiter.ts）。 */
+export interface FrameRateBridge {
+  get: () => Promise<FrameRateTarget>
+  onSet: (callback: (target: FrameRateTarget) => void) => () => void
+}
+
 export interface ElectronAPI {
   /** 非 Electron 环境安装的兼容桩。 */
   isShim?: boolean
@@ -361,6 +377,8 @@ export interface ElectronAPI {
       highRefreshEnabled: boolean
       highRefreshHz: number | null
       currentHz: number
+      /** 主窗真正会被应用到的目标帧率（关闭高刷时为 60 基准） */
+      targetHz: number
       primary: number
       mainWindowDisplayId: number
       error?: string
@@ -375,7 +393,14 @@ export interface ElectronAPI {
         label: string
       }>
     }>
-    setHighRefresh: (enabled: boolean, hz?: number | null) => Promise<{ success: boolean; enabled: boolean; hz: number }>
+    setHighRefresh: (enabled: boolean, hz?: number | null) => Promise<{ success: boolean; enabled: boolean; hz: number; displayHz: number }>
+    /**
+     * 本窗口自己的目标帧率（逐窗口按所在显示器解析）。
+     * 注意：Electron 的 webContents.setFrameRate 只对离屏渲染生效，普通窗口下无效，
+     * 真正生效的帧率上限在渲染层（src/utils/frameRateLimiter.ts）。
+     */
+    getFrameRate: () => Promise<FrameRateTarget>
+    onFrameRate: (callback: (target: FrameRateTarget) => void) => () => void
   }
   /** 桌面融合穿透：桌面模式空区域鼠标穿透到真实桌面，组件区保持可交互 */
   desktopFusion: {
@@ -1076,6 +1101,8 @@ export interface DesktopPlayerBridgeAPI {
   endDrag: () => void
   reportContentHeight: (height: number) => void
   setExpanded: (expanded: boolean) => Promise<{ direction: 'up' | 'down' }>
+  /** 渲染层帧率限流：本窗所在显示器对应的高刷档位由主进程下发 */
+  frameRate: FrameRateBridge
 }
 
 export interface DesktopLyricsBridgeAPI {
@@ -1093,6 +1120,8 @@ export interface DesktopLyricsBridgeAPI {
   startDrag: (point: { x: number; y: number }) => void
   dragTo: (point: { x: number; y: number }) => void
   endDrag: () => void
+  /** 渲染层帧率限流：本窗所在显示器对应的高刷档位由主进程下发 */
+  frameRate: FrameRateBridge
 }
 
 declare global {

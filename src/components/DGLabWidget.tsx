@@ -90,7 +90,6 @@ export default function DGLabWidget() {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
     // 与实时波形画布一致：按目标帧率重绘（原来每个 vsync 都画一遍，
     // 高刷屏上是纯粹的白耗电）；跳过的帧继续采样，鼓点不会漏
     const frameMs = 1000 / 24
@@ -122,6 +121,9 @@ export default function DGLabWidget() {
       const now = typeof ts === 'number' && ts > 0 ? ts : performance.now()
       const cw = canvas.clientWidth || 140
       const ch = canvas.clientHeight || 56
+      // 每帧重读 dpr：窗口在不同缩放的显示器间移动时它会变，缓存旧值会让
+      // 后备存储分辨率与新屏不匹配（波形发糊）
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
       const targetW = Math.round(cw * dpr)
       const targetH = Math.round(ch * dpr)
       if (canvas.width !== targetW || canvas.height !== targetH) {

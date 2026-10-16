@@ -48,6 +48,14 @@ contextBridge.exposeInMainWorld('electron', {
   display: {
     getInfo: () => ipcRenderer.invoke('display:get-info'),
     setHighRefresh: (enabled, hz) => ipcRenderer.invoke('display:set-high-refresh', enabled, hz),
+    // 本窗口自己该用的目标帧率（逐窗口按所在显示器解析）。渲染层的 rAF 限流靠它，
+    // 见 src/utils/frameRateLimiter.ts（webContents.setFrameRate 只对离屏渲染生效，不可用）。
+    getFrameRate: () => ipcRenderer.invoke('display:get-frame-rate'),
+    onFrameRate: (callback) => {
+      const listener = (_event, target) => callback(target)
+      ipcRenderer.on('frame-rate:set', listener)
+      return () => ipcRenderer.removeListener('frame-rate:set', listener)
+    },
   },
 
   // 桌面融合穿透：桌面模式空区域鼠标穿透到真实桌面，组件区保持可交互

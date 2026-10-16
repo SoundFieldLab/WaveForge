@@ -13,6 +13,7 @@ import {
 } from "./chroma/chromaTypes";
 import type { ChromaVisualizerField } from "./chroma/chromaVisualizerField";
 import type { ChromaStatus } from "../../electron";
+import { startFrameTicker } from "../../services/audioThreadClock";
 
 const SETTINGS_KEY = "wf_chroma_settings";
 export const CHROMA_SETTINGS_EVENT = "chromaSettingsChanged";
@@ -275,7 +276,8 @@ function createClient() {
   };
   const listeners = new Set<() => void>();
   let active = false;
-  let frameTimer: number | null = null;
+  // 推帧循环的释放函数（来自 startFrameTicker：优先音频线程时钟，见 audioThreadClock.ts）
+  let frameTickerRelease: (() => void) | null = null;
   let analyzerUnsubscribe: (() => void) | null = null;
   let backgroundRelease: (() => void) | null = null;
   let statusUnsubscribe: (() => void) | null = null;
@@ -352,6 +354,10 @@ function createClient() {
     const settings = snapshot.settings;
     const hidden =
       typeof document !== "undefined" && document.visibilityState === "hidden";
+    // 已释放（窗口隐藏且未开「后台运行」）时隐藏期间不必每帧重算引擎；
+    // 回到可见要复位，否则灯效会一直停在释放状态。
+    if (hidden && releaseSent) return;
+    if (!hidden) releaseSent = false;
     const result = engine.render(latestAudio, settings, {
       paused: !globalPlaybackActive,
       hidden,
@@ -417,10 +423,16 @@ function createClient() {
   };
 
   const restartFrameLoop = () => {
-    if (frameTimer !== null) window.clearInterval(frameTimer);
-    frameTimer = null;
+    frameTickerRelease?.();
+    frameTickerRelease = null;
     if (!active || !snapshot.settings.outputEnabled) return;
-    frameTimer = window.setInterval(pushResult, 1000 / snapshot.settings.fps);
+    // 用音频线程时钟而不是 setInterval：窗口隐藏后主线程定时器会被压到 ~1Hz，
+    // 「后台运行」开启时氛围灯会形同卡死；音频线程不受页面可见性影响。
+    frameTickerRelease = startFrameTicker(
+      globalAnalyzerStore?.getAudioContext() ?? null,
+      snapshot.settings.fps,
+      pushResult,
+    );
     pushResult();
   };
 
@@ -469,8 +481,8 @@ function createClient() {
     deactivate: async () => {
       active = false;
       window.removeEventListener(CHROMA_SETTINGS_EVENT, handleSettings);
-      if (frameTimer !== null) window.clearInterval(frameTimer);
-      frameTimer = null;
+      frameTickerRelease?.();
+      frameTickerRelease = null;
       analyzerUnsubscribe?.();
       analyzerUnsubscribe = null;
       backgroundRelease?.();

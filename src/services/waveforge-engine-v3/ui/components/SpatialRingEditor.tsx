@@ -198,7 +198,6 @@ export function SpatialRingEditor({
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    const dpr = Math.min(2, window.devicePixelRatio || 1)
     let width = 0
     let height = 0
 
@@ -326,6 +325,9 @@ export function SpatialRingEditor({
       const rect = canvas.getBoundingClientRect()
       width = Math.max(1, rect.width)
       height = Math.max(1, rect.height)
+      // 每次重设尺寸都重新读 dpr：窗口在不同缩放的显示器间移动时它会变，
+      // 缓存旧值会让后备存储分辨率与新屏不匹配（环形图发糊）
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
       canvas.width = Math.round(width * dpr)
       canvas.height = Math.round(height * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)

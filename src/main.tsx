@@ -1,3 +1,8 @@
+// 帧率限流：必须是第一个 import。此模块在求值时替换全局 requestAnimationFrame，
+// 之后才轮到 App/framer-motion/three 等模块求值，它们才不会拿到未包装的 rAF。
+// 详见 utils/frameRateLimiter.ts 顶部关于 webContents.setFrameRate 失效的说明。
+import './utils/frameRateLimiter'
+
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 // @ts-ignore: allow side-effect CSS import without module declaration

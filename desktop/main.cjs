@@ -89,6 +89,7 @@ const {
   loadWindowState,
   saveWindowState,
   clampBoundsToWorkArea,
+  pickRecoveryWorkArea,
 } = require('./window-state.cjs')
 const startupTimingLogPath = process.env.WAVEFORGE_STARTUP_LOG || ''
 function logStartupTiming(message) {
@@ -873,6 +874,8 @@ const MAX_ALLOWED_MEDIA_FILES = 256
 let desktopPlayerWindow = null
 let desktopPlayerEnabled = false
 let desktopPlayerForm = 'card'
+// 用户拖动/缩放记住的位置（{x,y}）。只记位置不记尺寸，见 loadDesktopPlayerSettings 注释。
+let desktopPlayerSavedPosition = null
 const desktopPlayerState = {
   song: null, // { name, artists, coverUrl }
   lyric: null, // { line, translation, words, lineStart }
@@ -932,6 +935,114 @@ function getDesktopPlayerWorkArea(bounds) {
   return screen.getDisplayMatching(bounds).workArea
 }
 
+/**
+ * 副屏窗口首次出现时该落在哪块屏：跟随主窗所在显示器。
+ *
+ * 写死 `screen.getPrimaryDisplay()` 在多屏下会明显错位——主窗在副屏工作时，
+ * 开启桌面歌词/桌面播放器却把窗口丢到另一块屏上。主窗还没建好时回退主屏。
+ */
+function getDefaultOverlayWorkArea() {
+  const { screen } = require('electron')
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      return screen.getDisplayMatching(mainWindow.getBounds()).workArea
+    }
+  } catch { /* 忽略，走主屏兜底 */ }
+  return screen.getPrimaryDisplay().workArea
+}
+
+/** bounds 是否与任意一块现存显示器有交集（无交集 = 落在了不存在的区域） */
+function isBoundsOnAnyDisplay(bounds) {
+  const { screen } = require('electron')
+  try {
+    return pickRecoveryWorkArea(screen.getAllDisplays(), bounds) === null
+  } catch {
+    return true // 读不到显示器信息时不动窗口，避免误搬
+  }
+}
+
+/**
+ * 把落到所有显示器之外的窗口拉回最近的一块屏。
+ *
+ * 必须处理的两个场景：
+ *   1. 笔记本拔掉扩展坞/外接显示器 —— 留在那块屏上的副屏窗口坐标指向不存在的区域，
+ *      Windows 不会自动搬，应用也没有入口把它们找回来，窗口就此"消失"。
+ *   2. 分辨率/缩放变小（display-metrics-changed）—— 右下角的窗口会被推到屏外。
+ *
+ * 「要不要搬、搬到哪块屏」由 window-state.cjs 的 pickRecoveryWorkArea 决定（纯函数，
+ * 由 test/windowStateRecovery.test.cjs 覆盖——拔显示器无法在现场模拟）；每个窗口仍走
+ * 自己的夹取规则，因为各自的最小尺寸/固定尺寸约束不同。
+ */
+function recoverOffscreenWindows() {
+  const needsRecovery = (win) => {
+    if (!win || win.isDestroyed()) return false
+    try {
+      return !isBoundsOnAnyDisplay(win.getBounds())
+    } catch {
+      return false
+    }
+  }
+  const moved = []
+  if (needsRecovery(mainWindow)) {
+    try {
+      const bounds = mainWindow.getBounds()
+      const { screen } = require('electron')
+      const workArea = pickRecoveryWorkArea(screen.getAllDisplays(), bounds)
+      if (workArea) mainWindow.setBounds(clampBoundsToWorkArea(bounds, workArea))
+      moved.push('main')
+    } catch { /* 忽略 */ }
+    // 主窗位置变了要落盘，否则下次启动还会回到屏外
+    persistMainWindowState()
+  }
+  if (needsRecovery(desktopPlayerWindow)) {
+    try {
+      desktopPlayerWindow.setBounds(clampDesktopPlayerBounds(desktopPlayerWindow.getBounds()))
+      moved.push('desktopPlayer')
+    } catch { /* 忽略 */ }
+  }
+  if (needsRecovery(desktopLyricsWindow)) {
+    try {
+      desktopLyricsWindow.setBounds(clampDesktopLyricsBounds(desktopLyricsWindow.getBounds()))
+      moved.push('desktopLyrics')
+    } catch { /* 忽略 */ }
+  }
+  if (needsRecovery(lyricsIslandWindow)) {
+    try {
+      lyricsIslandWindow.setBounds(clampLyricsIslandBounds(lyricsIslandWindow.getBounds()))
+      moved.push('lyricsIsland')
+    } catch { /* 忽略 */ }
+  }
+  if (needsRecovery(taskbarWidgetWindow)) {
+    // 任务栏挂件是贴任务栏的，直接重新贴边比夹取更准
+    try {
+      dockTaskbarWidgetWindow()
+      moved.push('taskbarWidget')
+    } catch { /* 忽略 */ }
+  }
+  if (moved.length > 0) console.log('[窗口回收] 显示器变化后拉回可见区域:', moved.join(', '))
+  return moved
+}
+
+// 显示器增删都会改变副屏窗口的可用区域，且 taskbar 可能换屏承载，统一在这里接线。
+// 只绑一次：反复绑会累积监听。
+let displayRecoveryBound = false
+function bindDisplayRecovery() {
+  if (displayRecoveryBound) return
+  displayRecoveryBound = true
+  const { screen } = require('electron')
+  const onDisplayLayoutChanged = () => {
+    recoverOffscreenWindows()
+    // 任务栏可能随显示器增删换屏承载 / 尺寸变化，必须重新贴边与重测托盘
+    try {
+      taskbarTrayCache = null
+      dockTaskbarWidgetWindow()
+      refreshTaskbarTray()
+    } catch { /* 忽略 */ }
+  }
+  screen.on('display-removed', onDisplayLayoutChanged)
+  screen.on('display-added', onDisplayLayoutChanged)
+}
+
 function clampDesktopPlayerBounds(bounds) {
   const workArea = getDesktopPlayerWorkArea(bounds)
   const width = Math.min(bounds.width, workArea.width)
@@ -975,12 +1086,17 @@ function getDesktopPlayerSettingsPath() {
 function loadDesktopPlayerSettings() {
   try {
     const parsed = JSON.parse(fs.readFileSync(getDesktopPlayerSettingsPath(), 'utf8'))
+    const x = Number(parsed?.position?.x)
+    const y = Number(parsed?.position?.y)
     return {
       enabled: parsed?.enabled === true,
       form: DESKTOP_PLAYER_FORMS.has(parsed?.form) ? parsed.form : 'card',
+      // 只记位置，不记尺寸：卡片高度随内容变化、bar/card 形态尺寸也不同，
+      // 尺寸应由业务逻辑决定，落盘尺寸会在恢复时和形态/内容高度打架。
+      position: Number.isFinite(x) && Number.isFinite(y) ? { x: Math.round(x), y: Math.round(y) } : null,
     }
   } catch {
-    return { enabled: false, form: 'card' }
+    return { enabled: false, form: 'card', position: null }
   }
 }
 
@@ -989,11 +1105,24 @@ function saveDesktopPlayerSettings() {
     const settingsPath = getDesktopPlayerSettingsPath()
     const temporaryPath = `${settingsPath}.tmp`
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true })
-    fs.writeFileSync(temporaryPath, JSON.stringify({ enabled: desktopPlayerEnabled, form: desktopPlayerForm }, null, 2), 'utf8')
+    fs.writeFileSync(
+      temporaryPath,
+      JSON.stringify({ enabled: desktopPlayerEnabled, form: desktopPlayerForm, position: desktopPlayerSavedPosition }, null, 2),
+      'utf8',
+    )
     fs.renameSync(temporaryPath, settingsPath)
   } catch (error) {
     console.error('[桌面播放器] 保存设置失败:', error)
   }
+}
+
+/** 记住当前小窗位置（只在用户拖动/缩放结束时调用，避免形态切换覆盖用户摆位） */
+function rememberDesktopPlayerPosition() {
+  if (!desktopPlayerWindow || desktopPlayerWindow.isDestroyed()) return
+  try {
+    const bounds = desktopPlayerWindow.getBounds()
+    desktopPlayerSavedPosition = { x: bounds.x, y: bounds.y }
+  } catch { /* 忽略 */ }
 }
 
 function getDesktopPlayerSnapshot() {
@@ -1114,16 +1243,27 @@ function createDesktopPlayerWindow() {
 
   desktopPlayerWindow.once('ready-to-show', () => {
     if (desktopPlayerWindow && !desktopPlayerWindow.isDestroyed()) {
-      // 首次创建：卡片位于右上角，紧凑条状位于顶部居中。
+      // 优先恢复用户上次摆放的位置（副屏用户每次启动都被搬回主屏是明显的体验缺陷）；
+      // 没有记录时才用默认位：卡片右上角、紧凑条状顶部居中。
+      // 恢复的是位置而非尺寸：尺寸由形态/内容高度决定。
       try {
-        const { screen } = require('electron')
-        const workArea = screen.getPrimaryDisplay().workArea
         const bounds = desktopPlayerWindow.getBounds()
-        const x = desktopPlayerForm === 'bar'
-          ? Math.round(workArea.x + (workArea.width - bounds.width) / 2)
-          : Math.round(workArea.x + workArea.width - bounds.width - 24)
-        const y = Math.round(workArea.y + (desktopPlayerForm === 'bar' ? 12 : 24))
-        desktopPlayerWindow.setBounds({ x, y, width: bounds.width, height: bounds.height })
+        if (desktopPlayerSavedPosition) {
+          const restored = clampDesktopPlayerBounds({
+            x: desktopPlayerSavedPosition.x,
+            y: desktopPlayerSavedPosition.y,
+            width: bounds.width,
+            height: bounds.height,
+          })
+          desktopPlayerWindow.setBounds(restored)
+        } else {
+          const workArea = getDefaultOverlayWorkArea()
+          const x = desktopPlayerForm === 'bar'
+            ? Math.round(workArea.x + (workArea.width - bounds.width) / 2)
+            : Math.round(workArea.x + workArea.width - bounds.width - 24)
+          const y = Math.round(workArea.y + (desktopPlayerForm === 'bar' ? 12 : 24))
+          desktopPlayerWindow.setBounds({ x, y, width: bounds.width, height: bounds.height })
+        }
       } catch (positionError) {
         console.warn('[桌面播放器] 初始定位失败:', positionError)
       }
@@ -1248,8 +1388,8 @@ function setDesktopLyricsMousePassthrough(passthrough) {
 }
 
 function getDesktopLyricsDefaultBounds(orientation = desktopLyricsSettings.orientation) {
-  const { screen } = require('electron')
-  const workArea = screen.getPrimaryDisplay().workArea
+  // 首次默认落在主窗所在显示器，而不是写死主屏
+  const workArea = getDefaultOverlayWorkArea()
   const size = orientation === 'vertical'
     ? { width: 300, height: Math.min(720, workArea.height - 48) }
     : { width: Math.min(980, workArea.width - 48), height: 180 }
@@ -1558,8 +1698,8 @@ function saveLyricsIslandSettings() {
 }
 
 function getLyricsIslandDefaultBounds() {
-  const { screen } = require('electron')
-  const workArea = screen.getPrimaryDisplay().workArea
+  // 首次默认落在主窗所在显示器，而不是写死主屏
+  const workArea = getDefaultOverlayWorkArea()
   return {
     x: Math.round(workArea.x + (workArea.width - LYRICS_ISLAND_SIZE.width) / 2),
     y: Math.round(workArea.y + workArea.height - LYRICS_ISLAND_SIZE.height - 16),
@@ -2029,6 +2169,9 @@ ipcMain.on('desktop-player:resize-to', (_event, point) => {
 ipcMain.on('desktop-player:resize-end', (event) => {
   if (event?.sender !== desktopPlayerWindow?.webContents) return
   desktopPlayerResizeSession = null
+  // 缩放可能从左边/上边拖，位置也会变；结束时连同位置一起记住
+  rememberDesktopPlayerPosition()
+  saveDesktopPlayerSettings()
 })
 
 ipcMain.handle('desktop-player:set-expanded', (event, expanded) => {
@@ -2081,6 +2224,9 @@ ipcMain.on('desktop-player:drag-to', (event, point) => {
 ipcMain.on('desktop-player:drag-end', (event) => {
   if (event?.sender !== desktopPlayerWindow?.webContents) return
   desktopPlayerDragSession = null
+  // 只在这里记位置：形态切换（card↔bar）会重排窗口，若那时也记就会把用户摆位覆盖掉
+  rememberDesktopPlayerPosition()
+  saveDesktopPlayerSettings()
 })
 
 function getSecureCredentialsPath() {
@@ -2664,6 +2810,8 @@ function bindTaskbarDisplayMetrics() {
     taskbarTrayCache = null // 显示器变化后托盘位置作废，后台重测
     dockTaskbarWidgetWindow()
     refreshTaskbarTray()
+    // 分辨率/缩放变小会把右下角的窗口推到屏外，这里一并拉回（无越界窗口时是空操作）
+    recoverOffscreenWindows()
   })
 }
 
@@ -3745,7 +3893,11 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs'),
       paintWhenInitiallyHidden: true,  // 软件合成下隐藏时也持续绘制，避免显示时首帧空白
-      backgroundThrottling: false, // Chroma 后台联动；各可视化仍由订阅者/可见性自行门控
+      // 必须开启节流：关闭它会把 Page Visibility API 永久钉在 'visible'，窗口被遮挡/隐藏时
+      // 界面仍按显示器刷新率满速渲染（实测 240Hz 屏上 240fps），且全仓所有基于可见性的
+      // 门控失效。窗口不可见时仍需继续的后台工作（RGB 推帧、后台音频分析）改由音频线程
+      // 时钟驱动，见 src/services/audioThreadClock.ts——不需要为此让窗口一直醒着。
+      backgroundThrottling: true,
       webviewTag: true, // 网易云探索页的站内网页面板需要内嵌 webview（替代跳系统浏览器）
     },
   })
@@ -8556,22 +8708,82 @@ function getWindowDisplayFrequency(win) {
   }
 }
 
+/**
+ * 每个窗口上次真正应用过的目标帧率。
+ *
+ * move/resize 在拖动窗口时触发频率极高，而目标帧率只在该窗口跨显示器时才变。
+ * 不做去重的话，「拖动窗口」这条最敏感的路径会退化成「每次 move 事件 × 4 窗口
+ * 查询所在显示器 + 4 次 IPC 推送」——推送会唤醒各个渲染进程去改 rAF 闸门。
+ */
+const lastAppliedFrameRate = new Map() // win.id -> { enabled, hz, displayHz }
+
 /** 把当前高刷设置应用到全部窗口的 webContents（渲染帧率跟随所在显示器） */
-function applyHighRefreshRate() {
-  const enabled = performanceSettings.highRefreshRate === true
-  const displayHz = getWindowDisplayFrequency(mainWindow)
-  // 开启：默认跟随所在显示器最高刷新率；用户手动选档时取其与显示器最高中的较小值
-  // 关闭：回到 60Hz 基准（而不是压到更低），避免关掉高刷反而让界面变卡
-  const targetHz = enabled
-    ? (performanceSettings.highRefreshHz ? Math.min(performanceSettings.highRefreshHz, displayHz) : displayHz)
-    : FRAME_RATE_BASELINE_HZ
-  const targets = [mainWindow, desktopPlayerWindow, desktopLyricsWindow, taskbarWidgetWindow]
-  for (const win of targets) {
-    try {
-      if (win && !win.isDestroyed() && win.webContents) win.webContents.setFrameRate(targetHz)
-    } catch { /* 忽略 */ }
+function applyHighRefreshRate({ force = false } = {}) {
+  const applied = []
+  const liveIds = new Set()
+  for (const win of [mainWindow, desktopPlayerWindow, desktopLyricsWindow, taskbarWidgetWindow]) {
+    if (!win || win.isDestroyed() || !win.webContents) continue
+    liveIds.add(win.id)
+    const target = resolveWindowFrameRate(win)
+    const previous = lastAppliedFrameRate.get(win.id)
+    const unchanged = Boolean(previous)
+      && previous.hz === target.hz
+      && previous.displayHz === target.displayHz
+      && previous.enabled === target.enabled
+    if (force || !unchanged) {
+      lastAppliedFrameRate.set(win.id, target)
+      // 保留 setFrameRate 以表达意图：它只在离屏渲染(offscreen)下生效，本应用全是普通
+      // 窗口，实际帧率上限由渲染层的 rAF 限流实现（见 src/utils/frameRateLimiter.ts）。
+      // 实测过 setFrameRate(15/30/60/120/240) 全部无效，不能作为唯一手段。
+      try { win.webContents.setFrameRate(target.hz) } catch { /* 忽略 */ }
+      try { win.webContents.send('frame-rate:set', target) } catch { /* 忽略 */ }
+    }
+    applied.push(Object.assign({ id: win.id }, target))
   }
-  return { enabled, hz: targetHz, displayFrequency: displayHz }
+  // 窗口销毁后清掉残留项，避免窗口反复重建时映射无限增长
+  for (const id of lastAppliedFrameRate.keys()) {
+    if (!liveIds.has(id)) lastAppliedFrameRate.delete(id)
+  }
+  const main = mainWindow && !mainWindow.isDestroyed()
+    ? applied.find((item) => item.id === mainWindow.id)
+    : null
+  return {
+    enabled: performanceSettings.highRefreshRate === true,
+    hz: main ? main.hz : FRAME_RATE_BASELINE_HZ,
+    displayFrequency: main ? main.displayHz : getWindowDisplayFrequency(mainWindow),
+    windows: applied,
+  }
+}
+
+// move/resize 的合并窗口：拖动期间同一目标会被反复算出，这里按前缘节流，
+// 首次立即生效（跨屏时帧率要跟手），之后 120ms 内的事件合并掉。
+// 配合上面的去重，拖动窗口期间的实际开销降到每 120ms 一次显示器查询、几乎零 IPC。
+let highRefreshApplyAt = 0
+const HIGH_REFRESH_APPLY_COALESCE_MS = 120
+function scheduleApplyHighRefreshRate() {
+  const now = Date.now()
+  if (now - highRefreshApplyAt < HIGH_REFRESH_APPLY_COALESCE_MS) return
+  highRefreshApplyAt = now
+  applyHighRefreshRate()
+}
+
+/**
+ * 单个窗口应使用的目标渲染帧率。
+ *
+ * 逐窗口按「该窗口所在显示器」解析，不能只按主窗算一次再套给全部窗口：歌词窗 /
+ * 桌面播放器被拖到另一块屏（例如 240Hz 主屏 + 144Hz 副屏）时会套上错误的目标帧率。
+ *
+ * 开启：默认跟随所在显示器最高刷新率；用户手动选档时取其与显示器最高中的较小值。
+ * 关闭：回到 60Hz 基准（而不是压到更低），避免关掉高刷反而让界面变卡。
+ */
+function resolveWindowFrameRate(win) {
+  const displayHz = getWindowDisplayFrequency(win)
+  const enabled = performanceSettings.highRefreshRate === true
+  const customHz = performanceSettings.highRefreshHz
+  const hz = enabled
+    ? (customHz ? Math.min(customHz, displayHz) : displayHz)
+    : FRAME_RATE_BASELINE_HZ
+  return { enabled, hz, displayHz }
 }
 
 /** 显示器/主窗口移动后重新贴合所在显示器刷新率 */
@@ -8602,8 +8814,9 @@ function rebindHighRefreshRate() {
     unbindHighRefreshListeners()
     const win = mainWindow
     if (win && !win.isDestroyed()) {
-      highRefreshHandlers.move = applyHighRefreshRate
-      highRefreshHandlers.resize = applyHighRefreshRate
+      // move/resize 走合并版：拖动窗口期间事件极密，直接 apply 会把拖动路径压垮
+      highRefreshHandlers.move = scheduleApplyHighRefreshRate
+      highRefreshHandlers.resize = scheduleApplyHighRefreshRate
       try {
         win.on('move', highRefreshHandlers.move)
         win.on('resize', highRefreshHandlers.resize)
@@ -8612,7 +8825,9 @@ function rebindHighRefreshRate() {
     }
     try {
       const { screen } = require('electron')
-      highRefreshHandlers.displayMetrics = applyHighRefreshRate
+      // 显示器增删/缩放/刷新率变化是低频事件，且可能是跨屏结果，直接应用不合并。
+      // 包一层是为了不把 Electron 的 event 对象当参数解构进 applyHighRefreshRate
+      highRefreshHandlers.displayMetrics = () => applyHighRefreshRate()
       screen.on('display-metrics-changed', highRefreshHandlers.displayMetrics)
     } catch { /* 忽略 */ }
     highRefreshBound = true
@@ -8632,6 +8847,9 @@ ipcMain.handle('display:get-info', () => {
       highRefreshEnabled: performanceSettings.highRefreshRate === true,
       highRefreshHz: performanceSettings.highRefreshHz,
       currentHz: getWindowDisplayFrequency(mainWindow),
+      // 主窗真正会被应用到的目标帧率（关闭高刷时是 60Hz 基准），UI 直接显示这个，
+      // 不要再把「显示器刷新率」当成「渲染帧率」展示
+      targetHz: resolveWindowFrameRate(mainWindow).hz,
       primary: screen.getPrimaryDisplay().displayFrequency,
       mainWindowDisplayId: mainWinDisplay.id,
       displays: screen.getAllDisplays().map(display => ({
@@ -8650,6 +8868,20 @@ ipcMain.handle('display:get-info', () => {
   }
 })
 
+// 本窗口自己该用的目标帧率。只读、逐窗口按所在显示器解析：渲染层启动时拉取一次，
+// 之后由 applyHighRefreshRate() 通过 'frame-rate:set' 推送变更。
+ipcMain.handle('display:get-frame-rate', (event) => {
+  try {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win || win.isDestroyed()) {
+      return { enabled: false, hz: FRAME_RATE_BASELINE_HZ, displayHz: 60 }
+    }
+    return resolveWindowFrameRate(win)
+  } catch {
+    return { enabled: false, hz: FRAME_RATE_BASELINE_HZ, displayHz: 60 }
+  }
+})
+
 ipcMain.handle('display:set-high-refresh', (event, enabled, hz) => {
   // 改变主窗显示帧率 + 写性能设置：只由主窗设置面板调用
   assertMainSender(event)
@@ -8660,9 +8892,9 @@ ipcMain.handle('display:set-high-refresh', (event, enabled, hz) => {
     : null
   clearTierIfPresetDiverged()
   writePerformanceSettings(performanceSettings)
-  applyHighRefreshRate()
+  const applied = applyHighRefreshRate({ force: true })
   rebindHighRefreshRate()
-  return { success: true, enabled: performanceSettings.highRefreshRate, hz: getWindowDisplayFrequency(mainWindow) }
+  return { success: true, enabled: performanceSettings.highRefreshRate, hz: applied.hz, displayHz: applied.displayFrequency }
 })
 
 // 保存主窗口当前状态（窗口化/最大化/全屏覆盖任务栏 + 位置大小 + 所在显示器）
@@ -10330,6 +10562,7 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
   const desktopPlayerSaved = loadDesktopPlayerSettings()
   desktopPlayerEnabled = desktopPlayerSaved.enabled
   desktopPlayerForm = desktopPlayerSaved.form
+  desktopPlayerSavedPosition = desktopPlayerSaved.position
   desktopLyricsSettings = loadDesktopLyricsSettings()
   loadLyricsIslandSettings()
 
@@ -10372,6 +10605,8 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
   // 全局高刷：若设置已开启，启动即应用（跟随所在显示器刷新率，最高 300Hz）
   applyHighRefreshRate()
   rebindHighRefreshRate()
+  // 显示器增删（拔扩展坞/接外接屏）：把落在不存在屏幕上的副屏窗口拉回来
+  bindDisplayRecovery()
   
   // 移除默认菜单栏
   if (mainWindow) {

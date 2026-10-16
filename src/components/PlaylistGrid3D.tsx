@@ -217,36 +217,46 @@ export default function PlaylistGrid3D({
   // 监听容器尺寸
   useEffect(() => {
     if (!containerElement) return
-    
-    const updateSize = () => {
-      if (containerElement) {
-        const newSize = {
-          width: containerElement.clientWidth,
-          height: containerElement.clientHeight,
-        }
-        debugLog(`📏 [PlaylistGrid3D] 更新容器尺寸: ${newSize.width}x${newSize.height}`)
-        setContainerSize(newSize)
+
+    let frame = 0
+    const runUpdateSize = () => {
+      frame = 0
+      if (!containerElement) return
+      const newSize = {
+        width: containerElement.clientWidth,
+        height: containerElement.clientHeight,
       }
+      // 尺寸没变就不 setState：拖动窗口时 resize 会连续触发，尺寸多数帧其实没变，
+      // 而每次 setContainerSize 都会重排 3D 网格
+      setContainerSize(prev => (prev.width === newSize.width && prev.height === newSize.height ? prev : newSize))
     }
-    
+    // 拖动窗口边缘时 resize 事件可达每秒上百次，合并成每帧一次
+    const updateSize = () => {
+      if (frame) return
+      frame = window.requestAnimationFrame(runUpdateSize)
+    }
+
     // 立即更新
-    updateSize()
-    
+    runUpdateSize()
+
     // 延迟更新，确保 DOM 完全渲染（句柄留存：此前这两个 setTimeout 未清理，
     // 组件在 300ms 内卸载/containerElement 变化时会对已卸载组件 setState）
     const delayedTimers = [
       window.setTimeout(updateSize, 100),
       window.setTimeout(updateSize, 300),
     ]
-    
-    const resizeObserver = new ResizeObserver(updateSize)
-    resizeObserver.observe(containerElement)
-    window.addEventListener('resize', updateSize)
-    
+
+    // ResizeObserver 观察的就是 containerElement：窗口 resize 引发的容器尺寸变化它同样会回调，
+    // 再挂 window resize 只会让同一次变化跑两遍。仅在无 ResizeObserver 时用 resize 兜底。
+    const resizeObserver = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateSize) : null
+    if (resizeObserver) resizeObserver.observe(containerElement)
+    else window.addEventListener('resize', updateSize)
+
     return () => {
       for (const timer of delayedTimers) window.clearTimeout(timer)
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', updateSize)
+      if (frame) window.cancelAnimationFrame(frame)
+      resizeObserver?.disconnect()
+      if (!resizeObserver) window.removeEventListener('resize', updateSize)
     }
   }, [containerElement])
 
