@@ -105,6 +105,8 @@ export interface AudioGraphHandle {
   /** DG-LAB 立体声采集（analyser 输出之后、音效后信号）：左/右声道分析器（仅采集，不接 destination） */
   leftAnalyserNode?: AnalyserNode
   rightAnalyserNode?: AnalyserNode
+  /** 左右声道分析器的输入分路；v3 接管音频图时需要将其重新接到处理后输出。 */
+  channelSplitterNode?: ChannelSplitterNode
 }
 
 interface DeckMetadata extends PreloadTrack {
@@ -751,7 +753,7 @@ export function useAudioPlayer(
       }
       
       // 通知外部音效引擎：音频图已就绪（在 masterGain 与 analyser 之间插入效果链）
-      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain, leftAnalyserNode: leftAnalyser, rightAnalyserNode: rightAnalyser })
+      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain, leftAnalyserNode: leftAnalyser, rightAnalyserNode: rightAnalyser, channelSplitterNode: splitter })
       
       if (context.state === 'suspended') await context.resume().catch(() => undefined)
     } catch (error) {

@@ -37,25 +37,55 @@ export function deepMerge<T>(base: T, patch: DeepPartial<T>): T {
 export interface V3ParamsController {
   params: V3EngineParams
   /** 深合并局部修改并提交引擎（完整快照语义） */
-  patch: (partial: DeepPartial<V3EngineParams>) => void
+  patch: (partial: DeepPartial<V3EngineParams>, options?: { markCustomized?: boolean }) => void
   /** rAF 合流版 patch：滑杆拖动（60Hz input 事件）用这个，降低整页 setState 与 JSON 序列化频率 */
   patchThrottled: (partial: DeepPartial<V3EngineParams>) => void
   /** 整包替换（场景/分享串/恢复默认） */
   replace: (next: V3EngineParams) => void
+  masterEnabled: boolean
+  setMasterEnabled: (enabled: boolean) => void
+}
+
+/** 旁路只暂停染色处理；输出音量与限幅保护独立保留。 */
+function bypassEffects(p: V3EngineParams): V3EngineParams {
+  const next = deepMerge(p, {
+    eq: { enabled: false }, deesser: { enabled: false }, compressor: { enabled: false },
+    nightMode: { enabled: false }, bassEnhancer: { enabled: false }, reverb: { enabled: false },
+    surround3d: { enabled: false }, loudnessCompensation: { enabled: false }, ieq: { enabled: false },
+    pitch: { enabled: false, voiceBalance: 0 }, stereoWidth: 1,
+    loudnessNormalization: p.loudnessNormalization.useRealtimeMeter ? { enabled: false } : {},
+  })
+  if (next.spatial) next.spatial = { ...next.spatial, mode: 'off' }
+  return next
 }
 
 export function useV3Params(bridge: V3UiBridge): V3ParamsController {
   const [params, setParams] = useState<V3EngineParams>(() => bridge.getParams())
+  const [masterEnabled, setMasterState] = useState(() => bridge.getMasterSnapshot() === null)
 
   const commit = useCallback((next: V3EngineParams) => {
     bridge.setParams(next)
     setParams(bridge.getParams())
   }, [bridge])
 
-  const patch = useCallback((partial: DeepPartial<V3EngineParams>) => {
-    const merged = deepMerge(bridge.getParams(), partial)
+  const patch = useCallback((partial: DeepPartial<V3EngineParams>, options?: { markCustomized?: boolean }) => {
+    const snapshot = bridge.getMasterSnapshot()
+    const volumeOnly = options?.markCustomized === false
+    const current = bridge.getParams()
+    // 调音时从暂停前的配置继续；音量调整不打开已关闭的音效。
+    const base = snapshot && !volumeOnly
+      ? { ...snapshot, loudnessNormalization: snapshot.loudnessNormalization.useRealtimeMeter
+        ? snapshot.loudnessNormalization : current.loudnessNormalization }
+      : current
+    const merged = deepMerge(base, partial)
     // 手动调整参数后视为脱离场景快照（场景名显示「自定义」，模式卡不再高亮）
-    merged.customized = true
+    if (!volumeOnly) {
+      merged.customized = true
+      bridge.setMasterSnapshot(null)
+      setMasterState(true)
+    } else if (snapshot) {
+      bridge.setMasterSnapshot(deepMerge(snapshot, partial))
+    }
     commit(merged)
   }, [bridge, commit])
 
@@ -82,8 +112,23 @@ export function useV3Params(bridge: V3UiBridge): V3ParamsController {
   }, [])
 
   const replace = useCallback((next: V3EngineParams) => {
+    bridge.setMasterSnapshot(null)
+    setMasterState(true)
     commit(next)
-  }, [commit])
+  }, [bridge, commit])
 
-  return { params, patch, patchThrottled, replace }
+  const setMasterEnabled = useCallback((enabled: boolean) => {
+    const snapshot = bridge.getMasterSnapshot()
+    if (enabled && snapshot) {
+      bridge.setMasterSnapshot(null)
+      commit(snapshot)
+    } else if (!enabled && !snapshot) {
+      const current = bridge.getParams()
+      bridge.setMasterSnapshot(current)
+      commit(bypassEffects(current))
+    }
+    setMasterState(enabled)
+  }, [bridge, commit])
+
+  return { params, patch, patchThrottled, replace, masterEnabled, setMasterEnabled }
 }

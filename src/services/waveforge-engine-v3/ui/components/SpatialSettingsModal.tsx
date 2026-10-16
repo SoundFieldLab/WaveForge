@@ -1,21 +1,7 @@
 /**
- * SpatialSettingsModal —— 空间音频设置弹窗（专业视图工具栏「设置」入口，规划书 §5.6）
- *
- * 本波（UI 全量接入）新增：
- *  - 输出模式：双耳 Binaural / 立体声下混 可切换（→ onPatch({ output })，字段
- *    SpatialParams.output = 'binaural' | 'stereo' | 'multichannel' 已落地）；
- *    多声道（开发中 禁用）；
- *  - HRTF：当前使用 EngineV3 内联合成解析 HRTF；外部数据集导入尚未实现，
- *    因此不展示无效的文件选择控件；
- *  - 卷积模式：时域与分区 FFT 由引擎后端实现；
- *  - 渲染资源：最大对象数 16 → 64（引擎支持到 64 对象，本波性能基准已覆盖）。
- *
- * 保持既有：性能模式（已接线 spatial.perfMode，随快照持久化）、主题静态展示。
- * 快捷键区（§5.6 键位编辑器）：KeyMap 8 个可配置动作逐行显示当前键位 + 捕获按钮
- * （捕获态 window keydown 写回 spatial.keymap，partial 覆盖）；「恢复默认」= keymap
- * 置 undefined 回退 DEFAULT_KEYMAP；重复键位允许、行内小字提示冲突。模态实现仿
- * 既有 Modal（ui/primitives.tsx）：fixed overlay + 玻璃面板 +
- * Esc/背板点击关闭，动画 keyframes 本地注入避免与既有样式冲突。
+ * 空间音频设置：HRTF 插值、卷积方式、距离衰减及世界漫游键位。
+ * 仅提供引擎已接线的配置；输出设备跟随主播放器。
+ * 弹窗限制键盘焦点，键位捕获时拦截页面快捷键，关闭后恢复入口焦点。
  */
 
 import { useEffect, useRef, useState } from 'react'
@@ -57,19 +43,8 @@ interface SpatialSettingsModalProps {
 const SP_SETTINGS_KEYFRAMES = `
 @keyframes wf-sp-settings-fade { from { opacity: 0 } to { opacity: 1 } }
 @keyframes wf-sp-settings-pop { from { opacity: 0; transform: scale(0.96) translateY(8px) } to { opacity: 1; transform: scale(1) translateY(0) } }
+@media (prefers-reduced-motion: reduce) { .hse-spatial-settings, .hse-spatial-settings > [role="dialog"] { animation: none !important } }
 `
-
-/** 「开发中」角标 */
-function DevBadge({ theme }: { theme: HSETheme }) {
-  return (
-    <span
-      className="ml-1.5 px-1 py-px rounded text-[8px] leading-none align-middle"
-      style={{ backgroundColor: 'rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)' }}
-    >
-      开发中
-    </span>
-  )
-}
 
 /** 设置分组标题 */
 function SectionTitle({ children, theme, first }: { children: ReactNode; theme: HSETheme; first?: boolean }) {
@@ -88,7 +63,7 @@ function InfoRow({ label, value, theme, valueClassName }: { label: string; value
   )
 }
 
-/** 键位编辑器：KeyMap 8 个可配置动作（与 worldControl.DEFAULT_KEYMAP 一一对应，§5.6） */
+/** 世界漫游已接线的可配置动作；音乐播放由主播放器操作。 */
 type KeyMapAction = keyof KeyMap
 
 const KEY_ACTIONS: { action: KeyMapAction; label: string }[] = [
@@ -99,7 +74,6 @@ const KEY_ACTIONS: { action: KeyMapAction; label: string }[] = [
   { action: 'up', label: '上升' },
   { action: 'down', label: '下降' },
   { action: 'tab', label: '切换声源' },
-  { action: 'space', label: '播放/暂停' },
 ]
 
 /** 键位显示：空格 → 「空格」；单字符大写；Tab 等复合键原样（e.key 存储值） */
@@ -123,7 +97,7 @@ const DISTANCE_MODELS: { value: 'inverse' | 'linear' | 'exponential'; label: str
 ]
 
 export default function SpatialSettingsModal({ open, onClose, theme, spatial, onPatch }: SpatialSettingsModalProps) {
-  /** 弹窗面板 ref：open 时聚焦（a11y：role=dialog 焦点起点；完整 focus trap 后续） */
+  /** 弹窗面板与键盘焦点范围。 */
   const containerRef = useRef<HTMLDivElement>(null)
   /** 键位捕获态（null = 未捕获；捕获期间 window keydown 写回 keymap） */
   const [capturing, setCapturing] = useState<KeyMapAction | null>(null)
@@ -136,12 +110,28 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
     if (!open) setCapturing(null)
   }, [open])
 
-  // a11y：弹窗打开时聚焦面板（role=dialog 焦点起点；完整 focus trap 后续）
+  // 焦点留在弹窗内；关闭时返回原入口，避免键盘焦点落回页面底部。
   useEffect(() => {
     if (!open) return
-    // 下一帧聚焦，确保面板已挂载（open=true 时 return null 分支已跳过）
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const raf = requestAnimationFrame(() => containerRef.current?.focus())
-    return () => cancelAnimationFrame(raf)
+    const trapFocus = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || capturingRef.current !== null) return
+      const panel = containerRef.current
+      if (!panel) return
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]')).filter((el) => !el.hidden)
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (!first || !last) { e.preventDefault(); panel.focus(); return }
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === panel)) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && (document.activeElement === last || document.activeElement === panel || !panel.contains(document.activeElement))) { e.preventDefault(); first.focus() }
+    }
+    window.addEventListener('keydown', trapFocus)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('keydown', trapFocus)
+      if (previous?.isConnected) previous.focus()
+    }
   }, [open])
 
   useEffect(() => {
@@ -194,11 +184,9 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
 
   return (
     <div
-      className="fixed inset-0 z-[90] flex items-center justify-center p-4"
+      className="hse-spatial-settings fixed inset-0 z-[90] flex items-center justify-center p-4"
       style={{
-        backgroundColor: 'rgba(0,0,0,0.45)',
-        backdropFilter: 'blur(6px)',
-        WebkitBackdropFilter: 'blur(6px)',
+        backgroundColor: 'rgba(21,58,55,0.22)',
         animation: 'wf-sp-settings-fade 0.15s ease-out',
       }}
       onClick={onClose}
@@ -213,11 +201,9 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
         onClick={(e) => e.stopPropagation()}
         className="w-full max-w-md max-h-[86vh] overflow-y-auto rounded-3xl"
         style={{
-          background: theme.panelBg,
-          backdropFilter: theme.glassBlur,
-          WebkitBackdropFilter: theme.glassBlur,
+          background: theme.panelHighlight,
           border: `1px solid ${theme.panelBorder}`,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.12)',
+          boxShadow: 'inset 0 1px 0 #ffffff, 0 16px 48px rgba(21,58,55,0.16)',
           animation: 'wf-sp-settings-pop 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.15)',
           outline: 'none',
         }}
@@ -234,8 +220,8 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
               </div>
               <div className={`${theme.textPrimary} font-semibold`}>空间音频设置</div>
             </div>
-            <button type="button" onClick={onClose} aria-label="关闭弹窗" className={`p-2 rounded-full transition-colors hover:bg-white/15`}>
-              <X className="w-4.5 h-4.5" style={{ color: theme.textSecondary }} />
+            <button type="button" onClick={onClose} aria-label="关闭弹窗" className={`hse-glass-button rounded-full p-2 focus-visible:outline-2 ${theme.textSecondary}`}>
+              <X className="w-4.5 h-4.5" />
             </button>
           </div>
 
@@ -244,21 +230,12 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
               引擎侧不存在（点击无效果），改为如实静态展示 */}
           <SectionTitle theme={theme} first>输出模式</SectionTitle>
           <InfoRow label="当前输出" value="双耳 Binaural" theme={theme} />
-          <p className={`${theme.textMuted} text-[10px] mb-2`}>空间音频经 HRTF 双耳渲染后以立体声写出；立体声下混与多声道输出待后续版本接入。</p>
+          <p className={`${theme.textSecondary} text-xs mb-2`}>空间音频渲染为双耳立体声，建议佩戴耳机聆听。</p>
 
           {/* 输出设备：空间音频已内联 EngineV3，原 fusion 层 enumerateDevices/setSinkId 已移除；
               标注「开发中」，后续 wave 接主播放器 AudioContext.setSinkId */}
           <SectionTitle theme={theme}>输出设备</SectionTitle>
-          <div
-            className="flex items-center justify-between py-1.5 px-2.5 rounded-lg cursor-not-allowed opacity-50"
-            style={{ backgroundColor: 'rgba(255,255,255,0.04)' }}
-          >
-            <span className={`${theme.textTertiary} text-[11px]`}>系统默认（开发中）</span>
-            <DevBadge theme={theme} />
-          </div>
-          <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>
-            输出设备切换后续 wave 接入主播放器 AudioContext.setSinkId。
-          </p>
+          <InfoRow label="使用设备" value="跟随主播放器" theme={theme} />
 
           {/* HRTF 数据集：空间音频由 EngineV3 的 analyticHrtf 提供合成解析 HRTF。 */}
           <SectionTitle theme={theme}>HRTF 数据集</SectionTitle>
@@ -268,39 +245,9 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
           </div>
           {/* 卷积模式（分区 FFT 卷积 / 时域直接卷积；后端契约 spatial_set_convolution_mode，已全量实现） */}
           <SectionTitle theme={theme}>卷积模式</SectionTitle>
-          <div className="flex gap-1.5 mb-2">
-            <button
-              type="button"
-              onClick={() => onPatch({ convolution: 'partitioned' })}
-              className={`flex-1 py-1.5 rounded-lg text-[11px] ${
-                spatial.convolution === 'partitioned'
-                  ? 'text-white font-medium'
-                  : theme.textTertiary
-              }`}
-              style={
-                spatial.convolution === 'partitioned'
-                  ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-                  : { backgroundColor: 'rgba(255,255,255,0.06)' }
-              }
-            >
-              分区卷积
-            </button>
-            <button
-              type="button"
-              onClick={() => onPatch({ convolution: 'time' })}
-              className={`flex-1 py-1.5 rounded-lg text-[11px] ${
-                spatial.convolution === 'time' ? 'text-white font-medium' : theme.textTertiary
-              }`}
-              style={
-                spatial.convolution === 'time'
-                  ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-                  : { backgroundColor: 'rgba(255,255,255,0.06)' }
-              }
-            >
-              时域
-            </button>
-          </div>
-          <p className={`${theme.textMuted} text-[10px] mb-2`}>时域直接卷积与分区卷积干湿对齐一致（脉冲位置 ±0 样本），听感差异仅为 FFT 圆整。</p>
+          <Segmented label="空间音频卷积模式" options={[{ value: 'partitioned', label: '分区卷积' }, { value: 'time', label: '时域卷积' }]}
+            value={spatial.convolution} onChange={(convolution) => onPatch({ convolution })} theme={theme} small />
+          <p className={`${theme.textSecondary} text-xs mt-2 mb-2`}>两种模式保持相同的干湿对齐；分区卷积适合较多声源。</p>
 
           {/* HRIR 长度 / 最大对象数（静态展示；最大对象数 64：引擎支持到 64 对象，本波性能基准已覆盖） */}
           <SectionTitle theme={theme}>渲染资源</SectionTitle>
@@ -311,6 +258,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
               引擎真字段直接接线：三模型 + ref 内不衰减 + linear 到 max 衰减为 0） */}
           <SectionTitle theme={theme}>距离衰减</SectionTitle>
           <Segmented
+            label="距离衰减模型"
             options={DISTANCE_MODELS}
             value={spatial.distanceModel ?? 'inverse'}
             onChange={(v) => onPatch({ distanceModel: v })}
@@ -321,12 +269,12 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
             <Slider
               label="参考距离（内不衰减）" value={spatial.refDistance ?? 1} min={0.5} max={3} step={0.1}
               onChange={(v) => onPatch({ refDistance: v })}
-              display={`${(spatial.refDistance ?? 1).toFixed(1)}m`} theme={theme}
+              display={`${(spatial.refDistance ?? 1).toFixed(1)} m`} theme={theme}
             />
             <Slider
               label="最大距离（linear 衰减到 0）" value={spatial.maxDistance ?? 50} min={5} max={100} step={1}
               onChange={(v) => onPatch({ maxDistance: v })}
-              display={`${Math.round(spatial.maxDistance ?? 50)}m`} theme={theme}
+              display={`${Math.round(spatial.maxDistance ?? 50)} m`} theme={theme}
             />
           </div>
           <p className={`${theme.textMuted} text-[10px] mt-1 mb-2`}>反距离=自然远衰（1/d）；线性=到最大距离衰减为 0；指数=更陡的 1/(d/ref)。参考距离内均不衰减。</p>
@@ -335,6 +283,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
               引擎侧不存在，点击无任何效果；现直接读写 hrtfInterp，切换即时生效） */}
           <SectionTitle theme={theme}>HRTF 插值（性能模式）</SectionTitle>
           <Segmented
+            label="HRTF 插值质量"
             options={HRTF_INTERP_OPTIONS}
             value={spatial.hrtfInterp ?? 'nearest'}
             onChange={(v) => onPatch({ hrtfInterp: v })}
@@ -357,7 +306,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
                     <span className={`${theme.textSecondary} text-[11px]`}>{label}</span>
                     {conflicts.length > 0 && (
                       <span className="ml-1.5 text-[9px]" style={{ color: theme.statusWarn }}>
-                        与 {conflicts.map(displayKey).join(' / ')} 冲突
+                        与 {conflicts.map((action) => KEY_ACTIONS.find((item) => item.action === action)?.label ?? action).join(' / ')} 冲突
                       </span>
                     )}
                   </div>
@@ -367,11 +316,10 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
                     </span>
                     <button
                       type="button"
+                      aria-label={`修改${label}快捷键`}
+                      aria-pressed={isCapturing}
                       onClick={() => setCapturing(isCapturing ? null : action)}
-                      className="px-2 py-0.5 rounded-md text-[10px] transition-all cursor-pointer"
-                      style={isCapturing
-                        ? { background: theme.accentGradient, color: '#fff' }
-                        : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)' }}
+                      className={`hse-glass-button hse-glass-choice min-h-9 px-3 rounded-lg text-xs cursor-pointer focus-visible:outline-2 ${theme.textSecondary}`}
                     >
                       {isCapturing ? '按下新键…' : '修改'}
                     </button>
@@ -385,8 +333,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
             type="button"
             disabled={!spatial.keymap}
             onClick={() => onPatch({ keymap: undefined })}
-            className="w-full py-1.5 rounded-lg text-[11px] text-center transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            style={{ backgroundColor: 'rgba(255,255,255,0.06)', border: `1px dashed ${theme.cardBorder}`, color: theme.textSecondary }}
+            className={`hse-glass-button w-full min-h-9 rounded-lg text-xs text-center cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-2 ${theme.textSecondary}`}
           >
             恢复默认键位
           </button>
@@ -400,9 +347,9 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
           <div className="flex items-center justify-between py-1">
             <span className={`${theme.textTertiary} text-[11px]`}>配色方案</span>
             <span className="flex items-center gap-1.5 text-[11px]">
-              <span className="w-3 h-3 rounded-full" style={{ background: theme.accentFrom, boxShadow: `0 0 8px ${theme.accentFrom}88` }} />
-              <span className="w-3 h-3 rounded-full" style={{ background: theme.accentTo, boxShadow: `0 0 8px ${theme.accentTo}88` }} />
-              <span className={`${theme.textSecondary}`}>HSE 电光青→紫</span>
+              <span className="w-3 h-3 rounded-full border" style={{ background: theme.panelBg, borderColor: theme.cardBorder }} />
+              <span className="w-3 h-3 rounded-full" style={{ background: '#C8EDE4' }} />
+              <span className={`${theme.textSecondary}`}>珍珠白 · 薄荷青</span>
             </span>
           </div>
         </div>

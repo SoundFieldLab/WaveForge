@@ -4,8 +4,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
-import { motion } from 'framer-motion'
-import { Sparkles, Save, RotateCcw, Trash2, Volume2, Gauge, PencilRuler, FileDown, FileUp, FileCode2 } from 'lucide-react'
+import { Sparkles, Save, RotateCcw, Trash2, Volume2, PencilRuler, FileDown, FileUp, FileCode2, ChevronRight } from 'lucide-react'
 import { GlassCard, Toggle, RangeStyle } from '../components/Primitives'
 import DevSceneEditor from '../components/DevSceneEditor'
 import type { HSETheme } from '../hse-theme'
@@ -18,6 +17,7 @@ import {
 import type { EffectUiKey } from '../effectsPanel'
 import type { ScenePreset } from '../../src/types'
 import { createDefaultParams } from '../../src/types'
+import SceneSummary from '../components/SceneSummary'
 
 interface ScenesPageProps {
   bridge: V3UiBridge
@@ -58,19 +58,27 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
   }
 
   const handleSaveScene = () => {
-    const name = sceneName.trim() || `我的场景 ${bridge.getScenes().filter((s) => !s.builtin).length + 1}`
-    if (bridge.saveMyScene(name)) {
-      refreshScenes()
-      setSceneName('')
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已保存场景「${name}」`, type: 'info' } }))
-    } else {
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已达 ${MAX_MY_SCENES} 个上限，请先删除旧场景`, type: 'error' } }))
+    try {
+      const name = sceneName.trim() || `我的场景 ${bridge.getScenes().filter((s) => !s.builtin).length + 1}`
+      if (bridge.saveMyScene(name)) {
+        refreshScenes()
+        setSceneName('')
+        notify(`已保存场景「${name}」`)
+      } else {
+        notify(`已达 ${MAX_MY_SCENES} 个上限，请先删除旧场景`, 'error')
+      }
+    } catch {
+      notify('场景保存失败，无法写入本地存储。请检查存储空间后重试。', 'error')
     }
   }
 
   const handleDeleteScene = (id: string) => {
-    bridge.deleteMyScene(id)
-    refreshScenes()
+    try {
+      bridge.deleteMyScene(id)
+      refreshScenes()
+    } catch {
+      notify('场景删除失败，无法写入本地存储。请检查存储空间后重试。', 'error')
+    }
   }
 
   // —— 开发者模式工具（场景库备份 / 导入）——
@@ -144,46 +152,39 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
     const enabled = effectEnabled(params, key)
     const Icon = meta.icon
     return (
-      <motion.div
+      <article
         key={key}
-        role="button"
-        tabIndex={0}
-        whileHover={{ y: -2 }}
-        onClick={() => onOpenEffect(key)}
-        onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) onOpenEffect(key) }}
-        className="relative cursor-pointer rounded-xl p-3 flex flex-col items-center gap-2 transition-colors"
-        animate={{ opacity: enabled ? 1 : 0.62 }}
+        aria-label={`${meta.name}音效`}
+        className="relative flex min-w-0 flex-col gap-3 rounded-2xl p-3.5 transition-colors"
         style={{
-          background: enabled ? `${theme.accentDim}` : theme.cardBg,
+          background: enabled ? theme.accentDim : theme.cardBg,
           border: `1px solid ${enabled ? theme.accentColor : theme.cardBorder}`,
-          boxShadow: enabled ? `0 0 14px ${theme.accentGlow}` : theme.cardGlow,
         }}
       >
-        {/* 激活呼吸灯：边框辉光缓慢明灭 */}
-        {enabled && (
-          <motion.div
-            className="pointer-events-none absolute inset-0 rounded-xl"
-            style={{ boxShadow: `inset 0 0 12px ${theme.accentColor}55` }}
-            animate={{ opacity: [0.35, 0.7, 0.35] }}
-            transition={{ duration: 2.6, repeat: Infinity, ease: 'easeInOut' }}
-          />
-        )}
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: `${theme.accentColor}22` }}>
-          <Icon className="w-5 h-5" style={{ color: theme.accentColor }} />
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: `${theme.accentColor}18` }}>
+            <Icon className="h-[18px] w-[18px]" style={{ color: theme.accentColor }} />
+          </div>
+          <div className="min-w-0">
+            <div className={`text-sm font-medium leading-tight ${theme.textPrimary}`}>{meta.name}</div>
+            <div className={`mt-1 text-xs leading-relaxed ${theme.textSecondary}`}>{meta.desc}</div>
+          </div>
         </div>
-        <div className={`text-xs font-medium ${theme.textPrimary} text-center leading-tight`}>{meta.name}</div>
-        <div className={`${theme.textTertiary} text-[10px] text-center leading-tight -mt-1`}>{meta.desc}</div>
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); patchEffectEnabled(patch, params, key, !enabled) }}
-          className="relative w-full py-1.5 rounded-lg text-[11px] font-medium transition-colors"
-          style={enabled
-            ? { backgroundColor: theme.accentColor, color: '#fff' }
-            : { backgroundColor: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.6)' }}
-        >
-          {enabled ? '已启用' : '使用'}
-        </button>
-      </motion.div>
+        <div className="mt-auto grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => patchEffectEnabled(patch, params, key, !enabled)}
+            aria-label={`${meta.name}启停`}
+            aria-pressed={enabled}
+            className={`hse-glass-button ${enabled ? 'hse-glass-primary' : theme.textSecondary} relative min-h-9 rounded-lg px-2 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}
+          >
+            {enabled ? '已启用' : '未启用'}
+          </button>
+          <button type="button" onClick={() => onOpenEffect(key)} className={`hse-glass-button flex min-h-9 items-center justify-center gap-1 rounded-lg px-2 text-xs focus-visible:outline-2 ${theme.textSecondary}`} aria-label={`配置${meta.name}`}>
+            配置参数 <ChevronRight className="h-3 w-3 shrink-0" />
+          </button>
+        </div>
+      </article>
     )
   }
 
@@ -193,21 +194,21 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
     const Icon = meta.icon
     return (
       <GlassCard key={key} theme={theme}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-4">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
             <Icon className="w-4 h-4" style={{ color: theme.accentColor }} />
             <div>
               <div className={`${theme.textPrimary} text-sm font-medium`}>{meta.name}</div>
-              <div className={`${theme.textTertiary} text-[10px]`}>{meta.desc}</div>
+              <div className={`${theme.textSecondary} text-xs leading-relaxed mt-1`}>{meta.desc}</div>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0 ml-3">
-            <Toggle checked={enabled} onChange={(v) => patchEffectEnabled(patch, params, key, v)} theme={theme} />
+          <div className="flex items-center gap-3 shrink-0 ml-auto">
+            <Toggle label={`启用${meta.name}`} checked={enabled} onChange={(v) => patchEffectEnabled(patch, params, key, v)} theme={theme} />
             <button
               type="button"
               onClick={() => onOpenEffect(key)}
-              className="px-2.5 py-1 rounded-lg text-[11px] text-white/70 transition-all hover:brightness-110"
-              style={{ background: 'rgba(255,255,255,0.06)', border: `1px solid ${theme.cardBorder}` }}
+              aria-label={`配置${meta.name}`}
+              className={`hse-glass-button px-3 py-2 rounded-lg text-xs focus-visible:outline-2 ${theme.textSecondary}`}
             >
               配置
             </button>
@@ -218,12 +219,12 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
   }
 
   return (
-    <div className="space-y-4">
+    <div className="@container space-y-6">
       <RangeStyle theme={theme} />
 
       {/* 场景方案 */}
       <GlassCard theme={theme}>
-        <div className="flex items-center justify-between mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-5">
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4" style={{ color: theme.accentColor }} />
             <span className={`${theme.textPrimary} text-sm font-medium`}>场景方案</span>
@@ -242,7 +243,7 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
                 if (sel?.builtin) openSceneEditor(sel)
                 else notify('请先在左侧选择一个内置场景')
               }}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/80 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
+              className={`hse-glass-button flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] focus-visible:outline-2 ${theme.textPrimary}`}
             >
               <PencilRuler className="w-3 h-3" /> 编辑当前场景
             </button>
@@ -250,7 +251,7 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
             <button
               type="button"
               onClick={handleExportLibrary}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+              className={`hse-glass-button flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] focus-visible:outline-2 ${theme.textSecondary}`}
             >
               <FileDown className="w-3 h-3" /> 导出场景库
             </button>
@@ -258,14 +259,14 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
               type="button"
               onClick={() => { void handleExportPublishSeed() }}
               title="把微调自动写回仓库默认值（dev 模式），随版本分发给所有用户"
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+              className={`hse-glass-button flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] focus-visible:outline-2 ${theme.textSecondary}`}
             >
               <FileCode2 className="w-3 h-3" /> 写回发布种子
             </button>
             <button
               type="button"
               onClick={() => importFileRef.current?.click()}
-              className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] text-white/60 hover:text-white/90 transition-colors"
+              className={`hse-glass-button flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] focus-visible:outline-2 ${theme.textSecondary}`}
             >
               <FileUp className="w-3 h-3" /> 导入场景库
             </button>
@@ -273,93 +274,41 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
           </div>
         )}
 
-        <div className="flex gap-3">
-          {/* 左：场景列表（纵向，替代横向滚动条） */}
-          <div className="w-[168px] shrink-0 flex flex-col gap-1.5 max-h-[220px] overflow-y-auto pr-1" style={{ scrollbarWidth: 'thin' }}>
+        <div className="grid items-start gap-6 @min-[820px]:grid-cols-[minmax(280px,0.95fr)_minmax(0,1.25fr)]">
+          <div>
+          <div className={`${theme.textSecondary} text-xs mb-3`}>全部场景 · {scenes.length}</div>
+          <div className="grid grid-cols-2 @min-[560px]:grid-cols-3 @min-[820px]:grid-cols-2 gap-2" role="group" aria-label="场景列表">
             {scenes.map((scene) => {
               const active = !params.customized && params.sceneId === scene.id
               return (
-                <button
-                  key={scene.id}
-                  type="button"
-                  onClick={() => handleApplyScene(scene.id)}
-                  className="relative rounded-lg px-2.5 py-2 text-left transition-all hover:brightness-110"
-                  style={{
-                    background: active ? `${theme.accentDim}` : 'rgba(255,255,255,0.04)',
-                    border: `1px solid ${active ? theme.accentColor : 'rgba(255,255,255,0.08)'}`,
-                  }}
-                >
-                  <div className={`text-xs font-medium truncate ${active ? '' : theme.textPrimary}`} style={active ? { color: theme.accentColor } : undefined}>
-                    {!scene.builtin && '★ '}{scene.name}
-                  </div>
-                  {!scene.builtin && (
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); handleDeleteScene(scene.id) }}
-                      className="absolute -top-1.5 -right-1.5 p-1 rounded-full bg-black/70 shadow-md"
-                    >
-                      <Trash2 className="w-3 h-3 text-white/50" />
-                    </button>
-                  )}
-                  {scene.builtin && devMode && (
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); openSceneEditor(scene) }}
-                      title="微调此场景（开发者）"
-                      className="absolute -top-1.5 -right-1.5 p-1 rounded-full bg-black/70 shadow-md"
-                    >
-                      <PencilRuler className="w-3 h-3" style={{ color: theme.accentColor }} />
-                    </button>
-                  )}
-                  {scene.builtin && scene.overridden && (
-                    <span
-                      className="absolute bottom-1 right-1 w-1.5 h-1.5 rounded-full"
-                      style={{ backgroundColor: theme.accentColor, boxShadow: `0 0 6px ${theme.accentColor}` }}
-                      title="此场景含本地微调，恢复出厂见编辑器"
-                    />
-                  )}
-                </button>
+                <div key={scene.id} className="relative min-w-0 flex items-center gap-1">
+                  <button type="button" aria-pressed={active} onClick={() => handleApplyScene(scene.id)}
+                    data-active={active}
+                    className={`${active ? 'hse-glass-choice' : 'hse-glass-button'} min-w-0 min-h-12 flex-1 rounded-xl px-3 py-3 text-left text-xs focus-visible:outline focus-visible:outline-2`}>
+                    <span className={`block truncate font-medium ${active ? '' : theme.textPrimary}`}>{!scene.builtin && '★ '}{scene.name}</span>
+                    {scene.builtin && scene.overridden && <span className="block text-[10px] mt-0.5" style={{ color: theme.accentColor }}>本地微调</span>}
+                  </button>
+                  {!scene.builtin && <button type="button" onClick={() => handleDeleteScene(scene.id)} title={`删除场景「${scene.name}」`} aria-label={`删除场景「${scene.name}」`} className={`hse-glass-button p-2 rounded-lg ${theme.textTertiary} hover:text-red-600 focus-visible:outline focus-visible:outline-2`}><Trash2 className="w-4 h-4" /></button>}
+                  {scene.builtin && devMode && <button type="button" onClick={() => openSceneEditor(scene)} title={`微调场景「${scene.name}」`} aria-label={`微调场景「${scene.name}」`} className="hse-glass-button p-2 rounded-lg focus-visible:outline focus-visible:outline-2" style={{ color: theme.accentColor }}><PencilRuler className="w-4 h-4" /></button>}
+                </div>
               )
             })}
           </div>
+          </div>
 
-          {/* 右：选中场景详情 + 操作 */}
-          <div className="flex-1 min-w-0 flex flex-col">
-            {(() => {
-              const sel = scenes.find((s) => s.id === params.sceneId)
-              return (
-                <>
-                  <div className={`${theme.textPrimary} text-sm font-medium mb-1 truncate`}>
-                    {params.customized ? '自定义' : sel ? sel.name : '未选择'}
-                    {params.customized && <span className={`${theme.textTertiary} text-[10px] ml-1`}>(已调整)</span>}
-                  </div>
-                  <div className={`${theme.textSecondary} text-[11px] leading-relaxed mb-3`}>
-                    {params.customized ? '当前参数已偏离任一场景快照，可保存为新场景或恢复默认。' : sel?.description ?? '选择左侧场景即可一键应用完整参数快照。'}
-                  </div>
-                </>
-              )
-            })()}
-            <div className="flex items-center gap-2 mt-auto">
-              <input
-                value={sceneName}
-                onChange={(e) => setSceneName(e.target.value)}
-                placeholder="场景名称"
-                className="px-3 py-1.5 rounded-lg text-xs outline-none text-white bg-white/5 border border-white/10 w-32"
-              />
-              <button
-                type="button"
-                onClick={handleResetAll}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-white/60 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
-              >
-                <RotateCcw className="w-3 h-3" /> 恢复默认
+          <div className="min-w-0 flex flex-col gap-4">
+            <SceneSummary scene={scenes.find((s) => s.id === params.sceneId)} params={params} theme={theme} />
+            <div className="flex flex-wrap items-end gap-3 pt-3" style={{ borderTop: `1px solid ${theme.cardBorder}` }}>
+              <label className="flex min-w-[180px] flex-1 flex-col gap-1.5 text-xs">
+                <span className={theme.textSecondary}>场景名称</span>
+                <input value={sceneName} onChange={(e) => setSceneName(e.target.value)} placeholder={`我的场景 ${scenes.filter((s) => !s.builtin).length + 1}`}
+                  className={`hse-glass-input w-full rounded-lg px-3 py-2 text-sm outline-none focus-visible:ring-2 ${theme.textPrimary}`} />
+              </label>
+              <button type="button" onClick={handleSaveScene} className="hse-glass-button hse-glass-primary flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium focus-visible:outline focus-visible:outline-2">
+                <Save className="w-4 h-4" /> 保存为场景
               </button>
-              <button
-                type="button"
-                onClick={handleSaveScene}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-white transition-all hover:brightness-110"
-                style={{ backgroundColor: theme.accentColor }}
-              >
-                <Save className="w-3 h-3" /> 保存为场景
+              <button type="button" onClick={handleResetAll} className={`hse-glass-button flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm ${theme.textSecondary}`}>
+                <RotateCcw className="w-4 h-4" /> 恢复默认
               </button>
             </div>
           </div>
@@ -368,17 +317,22 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
 
       {/* 效果卡片 */}
       <GlassCard theme={theme}>
-        <div className={`${theme.textPrimary} text-sm font-medium mb-3`}>音效（可叠加，点卡片配置）</div>
-        <div className="grid grid-cols-5 gap-2.5">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-4">
+          <h3 className={`${theme.textPrimary} text-sm font-medium`}>叠加音效</h3>
+          <span className={`${theme.textSecondary} text-xs`}>独立启停，配置参数随时可调</span>
+        </div>
+        <div className="grid gap-3 @min-[34rem]:grid-cols-2 @min-[58rem]:grid-cols-3">
           {GRID_KEYS.map(renderEffectCard)}
         </div>
       </GlassCard>
 
       {/* 响度相关 */}
-      <div className={`${theme.textPrimary} text-sm font-medium flex items-center gap-2 mb-2`}>
+      <section className="space-y-4" aria-label="响度相关音效">
+      <h3 className={`${theme.textPrimary} text-sm font-medium flex items-center gap-2`}>
         <Volume2 className="w-4 h-4" style={{ color: theme.accentColor }} /> 响度相关
-      </div>
-      {ROW_KEYS.map(renderRowCard)}
+      </h3>
+      <div className="grid items-start gap-4 @min-[900px]:grid-cols-2">{ROW_KEYS.map(renderRowCard)}</div>
+      </section>
 
       {/* 开发者模式：内置场景微调编辑器 */}
       {editingId && (() => {

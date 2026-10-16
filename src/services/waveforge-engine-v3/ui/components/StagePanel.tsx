@@ -186,10 +186,10 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
   }
 
   return (
-    <div>
+    <div className="@container">
       {/* 场景选择：4 卡片网格（2 列自适应，宽屏 4 列）；卡片内嵌 2D 俯视布局缩略图 */}
       <div className={`${theme.textSecondary} text-xs mb-1.5`}>场景</div>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 mb-3">
+      <div className="mb-3 grid grid-cols-2 gap-1.5 @min-[38rem]:grid-cols-4">
         {SCENE_CARDS.map((c) => {
           const active = params.preset === c.id
           const Icon = c.icon
@@ -200,15 +200,13 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
             <button
               key={c.id}
               type="button"
+              aria-pressed={active}
               onClick={() => onChange({ preset: c.id })}
-              className={`relative rounded-xl p-2.5 text-left transition-all ${active ? 'text-white font-medium' : theme.textSecondary}`}
-              style={active
-                ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-                : { backgroundColor: 'rgba(255,255,255,0.06)', border: `1px solid ${theme.cardBorder}` }}
+              className={`hse-glass-button hse-glass-choice relative rounded-xl p-2.5 text-left ${active ? 'font-medium' : theme.textSecondary}`}
             >
-              <Icon className="w-4 h-4 mb-1.5" style={{ color: active ? 'rgba(255,255,255,0.95)' : theme.accentColor }} />
+              <Icon className="w-4 h-4 mb-1.5" style={{ color: theme.accentColor }} />
               <div className="text-xs">{c.name}</div>
-              <div className={`text-[10px] mt-0.5 leading-tight ${active ? 'text-white/80' : theme.textTertiary}`}>{c.desc}</div>
+              <div className={`text-[10px] mt-0.5 leading-tight ${theme.textSecondary}`}>{c.desc}</div>
               {/* 2D 俯视扬声器布局缩略图（3D 缩略图规划书 §5.5 的简化实现，注释见组件头） */}
               <SceneThumb speakers={sceneSpeakers} active={active} theme={theme} />
             </button>
@@ -237,8 +235,7 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
                     aria-label={`删除声源 ${i + 1}`}
                     title="删除声源"
                     onClick={() => removeSource(i)}
-                    className="p-1 rounded-md transition-opacity hover:opacity-70"
-                    style={{ color: theme.textTertiary }}
+                    className={`hse-glass-button p-1 rounded-md ${theme.textSecondary}`}
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -279,8 +276,7 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
           type="button"
           onClick={addSource}
           disabled={params.customSources.length >= MAX_CUSTOM_SOURCES}
-          className="w-full mt-1.5 rounded-lg py-1.5 text-xs flex items-center justify-center gap-1 transition-all hover:brightness-110 disabled:opacity-40"
-          style={{ border: `1px dashed ${theme.cardBorder}`, color: theme.textSecondary }}
+          className={`hse-glass-button w-full mt-1.5 rounded-lg py-1.5 text-xs flex items-center justify-center gap-1 disabled:opacity-40 ${theme.textSecondary}`}
         >
           <Plus className="w-3.5 h-3.5" />
           添加声源{params.customSources.length >= MAX_CUSTOM_SOURCES ? `（上限 ${MAX_CUSTOM_SOURCES}）` : ''}

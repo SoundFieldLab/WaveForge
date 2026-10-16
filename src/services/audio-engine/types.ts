@@ -50,6 +50,8 @@ export interface AudioGraphHandle {
   audioContext: AudioContext
   masterGain: GainNode
   analyser: AnalyserNode
+  /** Stereo splitter feeding per-channel waveform analyzers. */
+  channelSplitterNode?: ChannelSplitterNode
 }
 
 // ==================== 调音室公共 Props ====================

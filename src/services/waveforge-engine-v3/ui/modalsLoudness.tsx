@@ -24,10 +24,11 @@ export const COMP_PRESETS: { id: string; name: string; hint: string }[] = [
 export const CUSTOM_BAND_FREQUENCIES = [80, 250, 1000, 4000, 12000]
 
 /** auto 模式按音量曲线的展示辅助：给定音量百分比 → 低/高频提升 dB */
-export function autoBoostAtVolume(volumePercent: number): { lowDb: number; highDb: number } {
-  const spl = 50 + 30 * (Math.min(100, Math.max(0, volumePercent)) / 100)
-  const lowDb = Math.min(12, Math.max(0, (80 - spl) * 0.35))
-  const highDb = Math.min(6, Math.max(0, (80 - spl) * 0.15))
+export function autoBoostAtVolume(volumePercent: number, maxBoostDb = 12): { lowDb: number; highDb: number } {
+  const v = Math.min(100, Math.max(0, Number.isFinite(volumePercent) ? volumePercent : 0)) / 100
+  const maxBoost = Math.min(24, Math.max(0, Number.isFinite(maxBoostDb) ? maxBoostDb : 0))
+  const lowDb = maxBoost * (1 - v)
+  const highDb = maxBoost * (0.15 / 0.35) * (1 - v)
   return { lowDb, highDb }
 }
 
@@ -37,7 +38,7 @@ export function LoudnessCompModal({ controller, theme, onClose }: { controller: 
   const { params, patch } = controller
   const comp = params.loudnessCompensation
   const mode = comp.mode
-  const { lowDb, highDb } = autoBoostAtVolume(comp.volumePercent)
+  const { lowDb, highDb } = autoBoostAtVolume(comp.volumePercent, comp.maxBoostDb)
 
   const bands = comp.bands.length > 0
     ? comp.bands
@@ -48,10 +49,11 @@ export function LoudnessCompModal({ controller, theme, onClose }: { controller: 
       <p className={`${theme.textSecondary} text-xs leading-relaxed mb-4`}>低音量下人耳对低频/高频不敏感。按系统音量动态补偿低频/高频（等响度通用曲线），或选择场景预设 / 自定义频段，让低音量听感更平衡。</p>
       <div className="flex items-center justify-between mb-4">
         <span className={`${theme.textPrimary} text-sm font-medium`}>启用 音量自适应补偿</span>
-        <Toggle checked={comp.enabled} onChange={(v) => patch({ loudnessCompensation: { ...comp, enabled: v } })} theme={theme} />
+        <Toggle label="启用音量自适应补偿" checked={comp.enabled} onChange={(v) => patch({ loudnessCompensation: { ...comp, enabled: v } })} theme={theme} />
       </div>
 
       <Segmented
+        label="补偿模式"
         options={[
           { value: 'auto' as const, label: '自适应（等响度）' },
           { value: 'preset' as const, label: '场景预设' },
@@ -71,65 +73,49 @@ export function LoudnessCompModal({ controller, theme, onClose }: { controller: 
             <div className={`${theme.textSecondary} text-[11px] mb-1.5`}>当前音量下的补偿曲线（等响度通用曲线）</div>
             <div className="flex gap-3 text-xs">
               <div className="flex-1">
-                <div className={`${theme.textPrimary} font-medium`}>低频 120Hz</div>
-                <div className="font-semibold" style={{ color: theme.accentColor }}>+{lowDb.toFixed(1)}dB</div>
+                <div className={`${theme.textPrimary} font-medium`}>低频补偿上限</div>
+                <div className="hse-mono font-semibold" style={{ color: theme.accentColor }}>+{lowDb.toFixed(1)} dB</div>
               </div>
               <div className="flex-1">
                 <div className={`${theme.textPrimary} font-medium`}>中频（不补偿）</div>
-                <div className={`${theme.textSecondary}`}>0dB</div>
+                <div className={`hse-mono ${theme.textSecondary}`}>0.0 dB</div>
               </div>
               <div className="flex-1">
-                <div className={`${theme.textPrimary} font-medium`}>高频 12kHz</div>
-                <div className="font-semibold" style={{ color: theme.accentColor }}>+{highDb.toFixed(1)}dB</div>
+                <div className={`${theme.textPrimary} font-medium`}>高频补偿上限</div>
+                <div className="hse-mono font-semibold" style={{ color: theme.accentColor }}>+{highDb.toFixed(1)} dB</div>
               </div>
             </div>
-            <div className={`${theme.textTertiary} text-[10px] mt-2`}>音量越低补偿越强：低频上限 +12dB、高频上限 +6dB；音量 100% 时曲线回平。</div>
+            <div className={`${theme.textTertiary} text-[10px] mt-2`}>音量越低补偿越强；中频保持 0 dB，音量 100% 时曲线回平。</div>
           </div>
-          <Slider label="最大提升" value={comp.maxBoostDb} min={0} max={24} step={1} onChange={(v) => patch({ loudnessCompensation: { ...comp, maxBoostDb: v } })} display={`${comp.maxBoostDb}dB`} theme={theme} />
-          <Slider label="平滑时间" value={comp.smoothingSeconds} min={0.05} max={2} step={0.05} onChange={(v) => patch({ loudnessCompensation: { ...comp, smoothingSeconds: v } })} display={`${comp.smoothingSeconds.toFixed(2)}s`} theme={theme} />
-          <InfoLine theme={theme}>音量变化由融合侧监听系统音量并写入 volumePercent；无系统音量源时可固定为 80。</InfoLine>
+          <Slider label="最大提升" value={comp.maxBoostDb} min={0} max={24} step={1} onChange={(v) => patch({ loudnessCompensation: { ...comp, maxBoostDb: v } })} display={`${comp.maxBoostDb} dB`} theme={theme} />
+          <Slider label="平滑时间" value={comp.smoothingSeconds} min={0.05} max={2} step={0.05} onChange={(v) => patch({ loudnessCompensation: { ...comp, smoothingSeconds: v } })} display={`${comp.smoothingSeconds.toFixed(2)} s`} theme={theme} />
+          <InfoLine theme={theme}>补偿强度随音量平滑变化，调节后立即作用于当前播放。</InfoLine>
         </>
       )}
 
       {mode === 'preset' && (
         <>
           <div className={`${theme.textSecondary} text-xs mb-1.5`}>选择目标听感曲线（固定等响度曲线，不随音量变化）</div>
-          <div className="flex flex-wrap gap-1.5 mb-3">
-            {COMP_PRESETS.map((p) => {
-              const active = comp.preset === p.id
-              return (
-                <button key={p.id} type="button" title={p.hint} onClick={() => patch({ loudnessCompensation: { ...comp, mode: 'preset', preset: p.id } })}
-                  className="px-3 py-1.5 rounded-lg text-xs transition-all"
-                  style={active ? { backgroundColor: theme.accentColor, color: '#fff', boxShadow: `0 0 10px ${theme.accentColor}55` } : { background: theme.dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)', color: theme.textSecondary }}>
-                  {p.name}
-                </button>
-              )
-            })}
-          </div>
+          <Segmented label="听感预设" options={COMP_PRESETS.map((p) => ({ value: p.id, label: p.name }))} value={comp.preset}
+            onChange={(preset) => patch({ loudnessCompensation: { ...comp, mode: 'preset', preset } })} theme={theme} small />
+          <div className={`${theme.textTertiary} text-[10px] mt-1 mb-3`}>{COMP_PRESETS.find((p) => p.id === comp.preset)?.hint ?? ''}</div>
         </>
       )}
 
       {mode === 'custom' && (
         <>
-          <div className={`${theme.textTertiary} text-xs leading-relaxed mb-3`}>自定义目标补偿曲线：拖动各频段增益（-8 ~ +8dB）。</div>
+          <div className={`${theme.textTertiary} text-xs leading-relaxed mb-3`}>自定义目标补偿曲线：拖动各频段增益（-8 ~ +8 dB）。</div>
           {bands.map((band, i) => {
-            const freq = CUSTOM_BAND_FREQUENCIES[i] ?? band.frequency
+            const freq = band.frequency
             const gain = band.gain || 0
             return (
-              <div key={freq}>
-                <div className="flex items-center justify-between mb-1">
-                  <span className={`${theme.textSecondary} text-xs`}>{freq >= 1000 ? `${freq / 1000}k` : freq}Hz</span>
-                  <span className={`${theme.textPrimary} text-xs font-medium`}>{gain > 0 ? '+' : ''}{gain.toFixed(1)}dB</span>
-                </div>
-                <input type="range" min={-8} max={8} step={0.5} value={gain}
-                  onChange={(e) => {
+              <Slider key={`${freq}-${i}`} label={`${freq >= 1000 ? `${freq / 1000} kHz` : `${freq} Hz`} 增益`} value={gain} min={-8} max={8} step={0.5}
+                  display={`${gain > 0 ? '+' : ''}${gain.toFixed(1)} dB`} theme={theme}
+                  onChange={(value) => {
                     const next = bands.map((b) => ({ ...b }))
-                    if (next[i]) next[i].gain = parseFloat(e.target.value)
+                    if (next[i]) next[i].gain = value
                     patch({ loudnessCompensation: { ...comp, mode: 'custom', bands: next } })
-                  }}
-                  className="wf-glass-range w-full h-2 rounded-full appearance-none cursor-pointer mb-3"
-                  style={{ background: theme.sliderTrack(gain, -8, 8) }} />
-              </div>
+                  }} />
             )
           })}
         </>
@@ -148,9 +134,10 @@ export function LoudnessNormModal({ controller, theme, onClose }: { controller: 
       <p className={`${theme.textSecondary} text-xs leading-relaxed mb-4`}>逐曲实时测量响度并对齐目标（BS.1770 引擎内测量，无需外部服务），切换歌曲音量一致。</p>
       <div className="flex items-center justify-between mb-4">
         <span className={`${theme.textPrimary} text-sm font-medium`}>启用 响度归一化</span>
-        <Toggle checked={ln.enabled} onChange={(v) => patch({ loudnessNormalization: { ...ln, enabled: v } })} theme={theme} />
+        <Toggle label="启用响度归一化" checked={ln.enabled} onChange={(v) => patch({ loudnessNormalization: { ...ln, enabled: v } })} theme={theme} />
       </div>
       <Segmented
+        label="响度测量模式"
         options={[
           { value: true as const, label: '引擎内实时测量' },
           { value: false as const, label: '外部给定增益' },
@@ -161,12 +148,15 @@ export function LoudnessNormModal({ controller, theme, onClose }: { controller: 
         small
       />
       <Slider label="目标响度" value={ln.targetLufs} min={-30} max={0} step={1} onChange={(v) => patch({ loudnessNormalization: { ...ln, targetLufs: v } })} display={`${ln.targetLufs} LUFS`} theme={theme} />
-      <Slider label="最大增益（提升上限）" value={ln.maxGainDb} min={0} max={24} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, maxGainDb: v } })} display={`+${ln.maxGainDb.toFixed(1)}dB`} theme={theme} />
-      <Slider label="最小增益（衰减下限）" value={ln.minGainDb} min={-24} max={0} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, minGainDb: v } })} display={`${ln.minGainDb.toFixed(1)}dB`} theme={theme} />
+      <Slider label="最大增益（提升上限）" value={ln.maxGainDb} min={0} max={24} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, maxGainDb: v } })} display={`+${ln.maxGainDb.toFixed(1)} dB`} theme={theme} />
+      <Slider label="最小增益（衰减下限）" value={ln.minGainDb} min={-60} max={0} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, minGainDb: v } })} display={`${ln.minGainDb.toFixed(1)} dB`} theme={theme} />
       {!ln.useRealtimeMeter && (
-        <Slider label="外部增益（整曲测量换算）" value={ln.externalGainDb} min={-24} max={24} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, externalGainDb: v } })} display={`${ln.externalGainDb > 0 ? '+' : ''}${ln.externalGainDb.toFixed(1)}dB`} theme={theme} />
+        <>
+          <Slider label="手动增益" value={ln.externalGainDb} min={-60} max={24} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, externalGainDb: v } })} display={`${ln.externalGainDb > 0 ? '+' : ''}${ln.externalGainDb.toFixed(1)} dB`} theme={theme} />
+          <InfoLine theme={theme}>与首页音量使用同一增益通道，调整任一处都会同步；正增益可在此精调。</InfoLine>
+        </>
       )}
-      <InfoLine theme={theme}>实时测量模式下增益 3s 平滑过渡；测量未就绪时保持 0dB 不放大。</InfoLine>
+      <InfoLine theme={theme}>实时测量模式下增益在 3 s 内平滑过渡；测量未就绪时保持 0 dB。</InfoLine>
     </Modal>
   )
 }

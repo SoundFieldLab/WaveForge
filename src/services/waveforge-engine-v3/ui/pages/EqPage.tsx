@@ -1,5 +1,5 @@
 /**
- * 均衡器页 —— 顶部「预设库」快捷入口（10 段曲线一键应用）+ 复用 EqPanel 详细编辑
+ * 均衡器页 —— 编辑控制优先，预设库作为快捷起点嵌入 EqPanel
  */
 
 import { motion } from 'framer-motion'
@@ -45,14 +45,12 @@ export default function EqPage({ controller, theme }: EqPageProps) {
     })
   }
 
-  return (
-    <div className="space-y-3">
-      {/* 预设库入口（显眼 chip 行） */}
-      <div className="rounded-2xl p-3" style={{ background: theme.cardBg, border: `1px solid ${theme.cardBorder}`, boxShadow: theme.cardGlow }}>
-        <div className="flex items-center gap-2 mb-2.5">
+  const presetLibrary = (
+      <section className="hse-glass-card rounded-2xl p-4" aria-label="均衡器预设库" style={{ background: theme.cardBg, border: `1px solid ${theme.cardBorder}` }}>
+        <div className="flex flex-wrap items-center gap-2 mb-3">
           <SlidersHorizontal className="w-4 h-4" style={{ color: theme.accentColor }} />
           <span className={`${theme.textPrimary} text-sm font-medium`}>预设库</span>
-          <span className={`${theme.textTertiary} text-[10px] ml-auto`}>一键应用 10 段曲线</span>
+          <span className={`${theme.textSecondary} text-xs ml-auto`}>一键应用 10 段曲线</span>
         </div>
         <div className="flex flex-wrap gap-1.5">
           {EQ_PRESETS.map((p) => (
@@ -61,16 +59,14 @@ export default function EqPage({ controller, theme }: EqPageProps) {
               type="button"
               whileTap={{ scale: 0.95 }}
               onClick={() => applyPreset(p.gains)}
-              className="px-3 py-1.5 rounded-lg text-[11px] font-medium transition-all hover:brightness-110"
-              style={{ backgroundColor: `${theme.accentColor}1f`, color: theme.accentColor, border: `1px solid ${theme.accentColor}33` }}
+              className={`hse-glass-button px-3 py-2 rounded-lg text-xs font-medium ${theme.textPrimary}`}
             >
               {p.name}
             </motion.button>
           ))}
         </div>
-      </div>
-
-      <BaseEqPanel controller={controller} theme={lt} />
-    </div>
+      </section>
   )
+
+  return <BaseEqPanel controller={controller} theme={lt} quickPresets={presetLibrary} />
 }

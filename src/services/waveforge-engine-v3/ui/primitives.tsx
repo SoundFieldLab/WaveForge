@@ -1,359 +1,149 @@
-/**
- * WaveForge v3 调音室 UI —— 基础组件（primitives）
- *
- * 与 v1/v2 调音室一致的交互基元：胶囊开关 Toggle、玻璃滑块 Slider、
- * 玻璃卡片 GlassCard、弹窗 Modal（CSS 动画替代 framer-motion，零动画依赖）、
- * 分段选择 Segmented、胶囊按钮 Chip、输入框 TextInput、分区标题 SectionTitle。
- *
- * 所有组件均为纯受控组件（props 驱动），不直接读写引擎/存储。
- */
-
-import { useEffect, type ReactNode, type CSSProperties } from 'react'
+/** 既有 HSE 效果弹窗的公共控件，与新调音室使用相同浅色规范。 */
+import { useEffect, useId, useRef, type ReactNode, type CSSProperties } from 'react'
 import { Info, X } from 'lucide-react'
 import type { V3Theme } from './theme'
+import './hse-glass.css'
 
-/* ─────────────────────────── 胶囊开关 ─────────────────────────── */
-
-export function Toggle({ checked, onChange, theme }: {
-  checked: boolean
-  onChange: (v: boolean) => void
-  theme: V3Theme
+export function Toggle({ checked, onChange, theme, label = '启用效果', disabled }: {
+  checked: boolean; onChange: (v: boolean) => void; theme: V3Theme; label?: string; disabled?: boolean
 }) {
-  return (
-    <button
-      type="button"
-      aria-pressed={checked}
-      onClick={(e) => { e.stopPropagation(); onChange(!checked) }}
-      className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${checked ? '' : theme.dark ? 'bg-white/20' : 'bg-black/15'}`}
-      style={checked ? { background: theme.accentGradient, boxShadow: `0 0 12px ${theme.accentColor}55` } : undefined}
-    >
-      <span
-        className="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-md transition-transform"
-        style={{ transform: checked ? 'translateX(20px)' : 'translateX(0)' }}
-      />
-    </button>
-  )
+  return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled}
+    onClick={(e) => { e.stopPropagation(); onChange(!checked) }}
+    className="hse-glass-switch relative h-7 w-12 shrink-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
+    style={{ outlineColor: theme.accentColor }}>
+    <span aria-hidden="true" className="hse-glass-thumb absolute left-[3px] top-1/2 h-5 w-5 rounded-full"
+      style={{ transform: `translate(${checked ? 20 : 0}px, -50%)` }} />
+  </button>
 }
-
-/* ─────────────────────────── 玻璃滑块 ─────────────────────────── */
 
 export function Slider({ label, value, min, max, step, onChange, display, theme, disabled }: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (v: number) => void
-  display?: string
-  theme: V3Theme
-  disabled?: boolean
+  label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void;
+  display?: string; theme: V3Theme; disabled?: boolean
 }) {
-  return (
-    <div className={`mb-3 ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
-      <div className="flex items-center justify-between mb-1">
-        <span className={`${theme.textSecondary} text-xs`}>{label}</span>
-        <span className={`${theme.textPrimary} text-xs font-medium`}>{display ?? value}</span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="wf-glass-range w-full h-2 rounded-full appearance-none cursor-pointer"
-        style={{ background: theme.sliderTrack(value, min, max) }}
-      />
+  const id = useId()
+  return <div className={`mb-4 ${disabled ? 'opacity-60' : ''}`}>
+    <div className="mb-2 flex items-center justify-between gap-3">
+      <label htmlFor={id} className={`${theme.textSecondary} text-xs`}>{label}</label>
+      <output htmlFor={id} className={`${theme.textPrimary} hse-mono text-xs font-medium`}>{display ?? value}</output>
     </div>
-  )
+    <input id={id} type="range" min={min} max={max} step={step} value={value} disabled={disabled}
+      aria-valuetext={display ?? String(value)} onChange={(e) => onChange(parseFloat(e.target.value))}
+      className="wf-glass-range hse-glass-range h-2 w-full cursor-pointer appearance-none rounded-full disabled:cursor-not-allowed"
+      style={{ background: theme.sliderTrack(value, min, max) }} />
+  </div>
 }
-
-/* ─────────────────────────── 玻璃卡片 ─────────────────────────── */
 
 export function GlassCard({ children, theme, className, style }: {
-  children: ReactNode
-  theme: V3Theme
-  className?: string
-  style?: CSSProperties
+  children: ReactNode; theme: V3Theme; className?: string; style?: CSSProperties
 }) {
-  return (
-    <div
-      className={`relative rounded-2xl p-4 overflow-hidden ${className ?? ''}`}
-      style={{
-        background: theme.glassCard,
-        backdropFilter: theme.glassCardBlur,
-        WebkitBackdropFilter: theme.glassCardBlur,
-        border: `1px solid ${theme.glassBorder}`,
-        boxShadow: '0 8px 24px rgba(0,0,0,0.12), inset 0 1px 0 rgba(255,255,255,0.18)',
-        ...style,
-      }}
-    >
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px" style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.5), transparent)' }} />
-      {children}
-    </div>
-  )
+  return <div className={`hse-glass-card relative min-w-0 rounded-[20px] p-5 ${className ?? ''}`}
+    style={{ background: theme.glassCard, border: `1px solid ${theme.glassBorder}`, ...style }}>{children}</div>
 }
 
-/* ─────────────────────────── 弹窗 ─────────────────────────── */
-
-/** CSS 关键帧（弹窗出现/消失动画，替代 framer-motion，零依赖） */
-const MODAL_KEYFRAMES = `
-@keyframes v3-modal-backdrop { from { opacity: 0 } to { opacity: 1 } }
-@keyframes v3-modal-pop { from { opacity: 0; transform: scale(0.9) translateY(12px) } to { opacity: 1; transform: scale(1) translateY(0) } }
-`
-
-/** 居中配置弹窗（点击遮罩关闭；内容由 children 提供，含头部/开关/参数区） */
 export function Modal({ title, icon, onClose, theme, children, maxWidth = 'max-w-sm' }: {
-  title: string
-  icon?: ReactNode
-  onClose: () => void
-  theme: V3Theme
-  children: ReactNode
-  maxWidth?: string
+  title: string; icon?: ReactNode; onClose: () => void; theme: V3Theme; children: ReactNode; maxWidth?: string
 }) {
+  const titleId = useId()
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
-  return (
-    <div
-      className="fixed inset-0 z-[90] flex items-center justify-center p-4"
-      style={{
-        backgroundColor: theme.dark ? 'rgba(0,0,0,0.4)' : 'rgba(0,0,0,0.2)',
-        backdropFilter: 'blur(4px)',
-        WebkitBackdropFilter: 'blur(4px)',
-        animation: 'v3-modal-backdrop 0.18s ease-out',
-      }}
-      onClick={onClose}
-    >
-      <style>{MODAL_KEYFRAMES}</style>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className={`w-full ${maxWidth} max-h-[86vh] overflow-y-auto rounded-3xl`}
-        style={{
-          background: theme.glassPanel,
-          backdropFilter: theme.glassBlur,
-          WebkitBackdropFilter: theme.glassBlur,
-          border: `1px solid ${theme.glassBorder}`,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.2)',
-          animation: 'v3-modal-pop 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2)',
-        }}
-      >
-        <div className="p-5">
-          {/* 头部 */}
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2.5">
-              <div
-                className="w-9 h-9 rounded-xl flex items-center justify-center"
-                style={{ background: `${theme.accentColor}22`, color: theme.accentColor, border: `1px solid ${theme.accentColor}55` }}
-              >
-                {icon}
-              </div>
-              <div className={`${theme.textPrimary} font-semibold`}>{title}</div>
-            </div>
-            <button type="button" onClick={onClose} aria-label="关闭弹窗" className={`p-2 rounded-full transition-colors ${theme.dark ? 'hover:bg-white/15' : 'hover:bg-black/10'}`}>
-              <X className={`w-4.5 h-4.5 ${theme.textSecondary}`} />
-            </button>
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    dialog?.focus()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeRef.current(); return }
+      if (e.key !== 'Tab' || !dialog) return
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'))
+      if (!controls.length) { e.preventDefault(); dialog.focus(); return }
+      const first = controls[0], last = controls[controls.length - 1]
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog)) { e.preventDefault(); first.focus() }
+    }
+    dialog?.addEventListener('keydown', onKey)
+    return () => { dialog?.removeEventListener('keydown', onKey); previous?.focus() }
+  }, [])
+  return <div className="fixed inset-0 z-[90] flex items-center justify-center p-4"
+    style={{ background: 'rgba(21,58,55,0.22)' }} onClick={onClose}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+      onClick={(e) => e.stopPropagation()} className={`w-full ${maxWidth} max-h-[86vh] overflow-y-auto rounded-3xl outline-none`}
+      style={{ background: theme.glassPanelHighlight, border: `1px solid ${theme.glassBorder}`, boxShadow: 'inset 0 1px 0 #ffffff, 0 16px 48px #153a3729' }}>
+      <div className="p-6">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ background: '#C8EDE4', color: theme.accentColor }}>{icon}</div>
+            <h2 id={titleId} className={`${theme.textPrimary} font-semibold`}>{title}</h2>
           </div>
-          {children}
-        </div>
+          <button type="button" onClick={onClose} aria-label="关闭弹窗" className={`hse-glass-button rounded-full p-2 focus-visible:outline-2 ${theme.textSecondary}`}>
+            <X className="h-5 w-5" />
+          </button>
+        </div>{children}
       </div>
     </div>
-  )
+  </div>
 }
 
-/* ─────────────────────────── 分段选择 ─────────────────────────── */
-
-export function Segmented<T extends string | boolean>({ options, value, onChange, theme, small }: {
-  options: { value: T; label: string }[]
-  value: T
-  onChange: (v: T) => void
-  theme: V3Theme
-  small?: boolean
+export function Segmented<T extends string | boolean | number>({ options, value, onChange, theme, small, label = '选择模式' }: {
+  options: { value: T; label: string }[]; value: T; onChange: (v: T) => void; theme: V3Theme; small?: boolean; label?: string
 }) {
-  return (
-    <div className={`flex gap-1.5 ${small ? '' : 'mb-4'}`}>
-      {options.map((opt) => {
-        const active = value === opt.value
-        return (
-          <button
-            key={String(opt.value)}
-            type="button"
-            onClick={() => onChange(opt.value)}
-            className={`flex-1 ${small ? 'py-1.5 rounded-lg text-[11px]' : 'py-2 rounded-lg text-xs'} transition-all ${active ? 'text-white font-medium' : theme.textSecondary + ' ' + (theme.dark ? 'bg-white/5' : 'bg-black/5')}`}
-            style={active ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` } : undefined}
-          >
-            {opt.label}
-          </button>
-        )
-      })}
-    </div>
-  )
+  return <div role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
+    {options.map((opt, index) => {
+      const active = value === opt.value
+      return <button key={String(opt.value)} type="button" role="radio" aria-checked={active} tabIndex={active || (index === 0 && !options.some((option) => option.value === value)) ? 0 : -1}
+        onClick={() => onChange(opt.value)}
+        onKeyDown={(e) => {
+          const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+          if (!delta && e.key !== 'Home' && e.key !== 'End') return
+          e.preventDefault()
+          const next = e.key === 'Home' ? 0 : e.key === 'End' ? options.length - 1 : (index + delta + options.length) % options.length
+          onChange(options[next].value)
+          e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus()
+        }}
+        className={`hse-glass-choice min-h-9 flex-1 whitespace-nowrap rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${active ? `${theme.textPrimary} font-semibold` : theme.textSecondary}`}
+        style={{ outlineColor: theme.accentColor }}>{opt.label}</button>
+    })}
+  </div>
 }
-
-/* ─────────────────────────── 胶囊按钮 ─────────────────────────── */
 
 export function Chip({ active, onClick, children, theme, title, deleteButton }: {
-  active?: boolean
-  onClick: () => void
-  children: ReactNode
-  theme: V3Theme
-  title?: string
-  deleteButton?: ReactNode
+  active?: boolean; onClick: () => void; children: ReactNode; theme: V3Theme; title?: string; deleteButton?: ReactNode
 }) {
-  return (
-    <div className="relative shrink-0">
-      <button
-        type="button"
-        onClick={onClick}
-        title={title}
-        className="rounded-xl px-3 py-2 text-left transition-all hover:brightness-110 active:scale-[0.97]"
-        style={{
-          background: active ? `${theme.accentColor}26` : theme.inputBg,
-          border: `1px solid ${active ? theme.accentColor : theme.glassBorder}`,
-          boxShadow: active ? `0 0 14px ${theme.accentColor}44` : 'none',
-          backdropFilter: 'blur(8px)',
-          minWidth: '96px',
-        }}
-      >
-        {children}
-      </button>
-      {deleteButton}
-    </div>
-  )
+  return <div className="relative shrink-0">
+    <button type="button" aria-pressed={active} onClick={onClick} title={title}
+      className="hse-glass-button hse-glass-choice rounded-full px-4 py-2 text-left focus-visible:outline-2 focus-visible:outline-offset-2"
+      style={{ outlineColor: theme.accentColor }}>{children}</button>{deleteButton}
+  </div>
 }
 
-/* ─────────────────────────── 文本输入 ─────────────────────────── */
-
-export function TextInput({ value, onChange, placeholder, theme, className }: {
-  value: string
-  onChange: (v: string) => void
-  placeholder?: string
-  theme: V3Theme
-  className?: string
+export function TextInput({ value, onChange, placeholder, theme, className, label }: {
+  value: string; onChange: (v: string) => void; placeholder?: string; theme: V3Theme; className?: string; label?: string
 }) {
-  return (
-    <input
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      placeholder={placeholder}
-      className={`px-3 py-1.5 rounded-lg text-xs outline-none ${theme.textPrimary} ${className ?? ''}`}
-      style={{ background: theme.inputBg, border: `1px solid ${theme.glassBorder}` }}
-    />
-  )
+  return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={label ?? placeholder}
+    className={`hse-glass-input rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${theme.textPrimary} ${className ?? ''}`}
+    style={{ outlineColor: theme.accentColor }} />
 }
-
-/* ─────────────────────────── 主按钮 ─────────────────────────── */
 
 export function ActionButton({ onClick, children, theme, disabled, title, ghost }: {
-  onClick: () => void
-  children: ReactNode
-  theme: V3Theme
-  disabled?: boolean
-  title?: string
-  /** 幽灵样式：透明底 + 描边（次要操作） */
-  ghost?: boolean
+  onClick: () => void; children: ReactNode; theme: V3Theme; disabled?: boolean; title?: string; ghost?: boolean
 }) {
-  if (ghost) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        disabled={disabled}
-        title={title}
-        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs transition-all hover:brightness-110 active:scale-95 disabled:opacity-40 ${theme.textSecondary}`}
-        style={{ background: theme.inputBg, border: `1px solid ${theme.glassBorder}` }}
-      >
-        {children}
-      </button>
-    )
-  }
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-white transition-all hover:brightness-110 active:scale-95 disabled:opacity-40"
-      style={{ background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }}
-    >
-      {children}
-    </button>
-  )
+  return <button type="button" onClick={onClick} disabled={disabled} title={title}
+    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : 'text-white'}`}
+    style={{ outlineColor: theme.accentColor }}>{children}</button>
 }
-
-/* ─────────────────────────── 分区标题 ─────────────────────────── */
 
 export function SectionTitle({ icon, children, theme, hint }: {
-  icon?: ReactNode
-  children: ReactNode
-  theme: V3Theme
-  hint?: ReactNode
+  icon?: ReactNode; children: ReactNode; theme: V3Theme; hint?: ReactNode
 }) {
-  return (
-    <div className="flex items-center justify-between mb-3">
-      <div>
-        <div className={`${theme.textPrimary} font-medium flex items-center gap-2`}>
-          {icon}
-          {children}
-        </div>
-        {hint && <div className={`${theme.textSecondary} text-xs mt-0.5`}>{hint}</div>}
-      </div>
-    </div>
-  )
+  return <div className="mb-4"><div className={`${theme.textPrimary} flex items-center gap-2 font-medium`}>{icon}{children}</div>
+    {hint && <div className={`${theme.textSecondary} mt-1 text-xs`}>{hint}</div>}</div>
 }
-
-/* ─────────────────────────── 信息提示行 ─────────────────────────── */
 
 export function InfoLine({ children, theme }: { children: ReactNode; theme: V3Theme }) {
-  return (
-    <div className={`${theme.textTertiary} text-[11px] mt-2 flex items-center gap-1`}>
-      <Info className="w-3 h-3 shrink-0" />
-      {children}
-    </div>
-  )
+  return <div className={`${theme.textTertiary} mt-3 flex items-start gap-2 text-xs leading-relaxed`}><Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />{children}</div>
 }
 
-/** wf-glass-range 滑块 thumb 全局样式（注入一次，双主题） */
 export function GlassRangeStyle({ theme }: { theme: V3Theme }) {
-  return (
-    <style>
-      {`
-        .wf-glass-range::-webkit-slider-thumb {
-          appearance: none;
-          width: 18px;
-          height: 18px;
-          border-radius: 50%;
-          background: rgba(255, 255, 255, 0.92);
-          border: 2px solid rgba(255, 255, 255, 0.6);
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 3px ${theme.accentColor}44, inset 0 1px 2px rgba(255, 255, 255, 0.8);
-          cursor: pointer;
-          transition: transform 0.15s ease, box-shadow 0.15s ease;
-        }
-        .wf-glass-range::-webkit-slider-thumb:hover {
-          transform: scale(1.2);
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3), 0 0 0 5px ${theme.accentColor}55, inset 0 1px 2px rgba(255, 255, 255, 0.8);
-        }
-        .wf-glass-range::-webkit-slider-thumb:active {
-          transform: scale(1.05);
-          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), 0 0 0 4px ${theme.accentColor}66, inset 0 1px 2px rgba(255, 255, 255, 0.8);
-        }
-        .wf-glass-range::-moz-range-thumb {
-          width: 18px;
-          height: 18px;
-          border-radius: 50%;
-          background: rgba(255, 255, 255, 0.92);
-          border: 2px solid rgba(255, 255, 255, 0.6);
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25), 0 0 0 3px ${theme.accentColor}44, inset 0 1px 2px rgba(255, 255, 255, 0.8);
-          cursor: pointer;
-          transition: transform 0.15s ease, box-shadow 0.15s ease;
-        }
-        .wf-glass-range::-moz-range-thumb:hover {
-          transform: scale(1.2);
-          box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3), 0 0 0 5px ${theme.accentColor}55, inset 0 1px 2px rgba(255, 255, 255, 0.8);
-        }
-      `}
-    </style>
-  )
+  return <style>{`
+    .hse-glass-range { --hse-control-accent: ${theme.accentColor}; }
+  `}</style>
 }

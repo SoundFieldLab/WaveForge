@@ -65,6 +65,14 @@ const ROOM = { x: 20, y: 6, z: 20 }
 /** 屏幕边缘内边距（px）：屏幕外声源方向箭头距视图边缘的距离（FPS 标记语义） */
 const EDGE_MARGIN = 16
 
+// 世界画布始终为深色，覆盖控件使用独立前景色，避免浅色主题文字失去对比。
+const VIEW_CONTROL_STYLE = {
+  background: 'rgba(8,8,14,0.88)',
+  border: '1px solid rgba(210,237,232,0.32)',
+  color: '#e5f3f0',
+  backdropFilter: 'blur(6px)',
+}
+
 /** 视角预设（视图内小按钮组，本地 state；persp 为现状自由 OrbitControls） */
 type ViewMode = 'persp' | 'top' | 'side' | 'first'
 
@@ -973,12 +981,7 @@ export function SpatialWorldView({
               className="px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer"
               style={active
                 ? { background: theme.accentGradient, color: '#fff' }
-                : {
-                    background: 'rgba(8,8,14,0.62)',
-                    border: `1px solid ${theme.cardBorder}`,
-                    color: theme.textSecondary,
-                    backdropFilter: 'blur(6px)',
-                  }}
+                : VIEW_CONTROL_STYLE}
             >
               {p.label}
             </button>
@@ -999,12 +1002,7 @@ export function SpatialWorldView({
           onClick={handleResetView}
           title="重置视角：相机回默认位 (6,8,10) 看原点"
           className="px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer"
-          style={{
-            background: 'rgba(8,8,14,0.62)',
-            border: `1px solid ${theme.cardBorder}`,
-            color: theme.textSecondary,
-            backdropFilter: 'blur(6px)',
-          }}
+          style={VIEW_CONTROL_STYLE}
         >
           重置视角
         </button>
@@ -1013,12 +1011,7 @@ export function SpatialWorldView({
           onClick={handleResetView}
           title="回到中心：与重置视角同语义（相机回默认位、目标归零）"
           className="px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer"
-          style={{
-            background: 'rgba(8,8,14,0.62)',
-            border: `1px solid ${theme.cardBorder}`,
-            color: theme.textSecondary,
-            backdropFilter: 'blur(6px)',
-          }}
+          style={VIEW_CONTROL_STYLE}
         >
           回到中心
         </button>
@@ -1027,12 +1020,7 @@ export function SpatialWorldView({
           onClick={() => setViewMode('top')}
           title="俯瞰全局：俯视预设（相机 (0,14,0.01) 看原点）"
           className="px-2 py-1 rounded-md text-[10px] transition-all cursor-pointer"
-          style={{
-            background: 'rgba(8,8,14,0.62)',
-            border: `1px solid ${theme.cardBorder}`,
-            color: theme.textSecondary,
-            backdropFilter: 'blur(6px)',
-          }}
+          style={VIEW_CONTROL_STYLE}
         >
           俯瞰全局
         </button>

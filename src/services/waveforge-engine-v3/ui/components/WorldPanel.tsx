@@ -111,6 +111,7 @@ export function WorldPanel({
   keymap,
 }: WorldPanelProps) {
   /* ── 键盘 → 事件：window keydown/keyup 维护按键集，raf 每帧采样 ── */
+  const rootRef = useRef<HTMLDivElement>(null)
   const keysRef = useRef<Set<string>>(new Set())
   // 最新值走 ref（raf 循环只启动一次，避免闭包过期）
   const speedRef = useRef(params.moveSpeed)
@@ -135,10 +136,33 @@ export function WorldPanel({
   const lastPatchRef = useRef(0)
 
   useEffect(() => {
+    /**
+     * WorldPanel 使用 window 级监听以支持鼠标焦点离开后的持续移动，但子弹窗
+     * （例如空间音频设置）必须拥有自己的键盘焦点。只比较 dialog 节点，避免把
+     * 调音室外层的 dialog 当成阻挡层。
+     */
+    const isNestedDialogTarget = (target: EventTarget | null): boolean => {
+      const element = target instanceof HTMLElement ? target : null
+      const dialog = element?.closest('[role="dialog"]')
+      const ownDialog = rootRef.current?.closest('[role="dialog"]')
+      return Boolean(dialog && dialog !== ownDialog)
+    }
+    const hasOpenNestedDialog = (): boolean => {
+      const ownDialog = rootRef.current?.closest('[role="dialog"]')
+      const active = document.activeElement
+      return Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]'))
+        .some((dialog) => dialog !== ownDialog && dialog.contains(active))
+    }
     const onKeyDown = (e: KeyboardEvent) => {
       // 组合键（Ctrl/Cmd/Alt 快捷键）与表单聚焦时不劫持按键
       if (e.ctrlKey || e.metaKey || e.altKey) return
       const target = e.target as HTMLElement | null
+      if (isNestedDialogTarget(target)) {
+        keysRef.current.clear()
+        accMoveRef.current = { x: 0, y: 0, z: 0 }
+        accYawRef.current = 0
+        return
+      }
       // 表单元素聚焦时让位原生交互：INPUT/TEXTAREA 输入、BUTTON/SELECT 的
       // Space/Enter 激活（避免按钮聚焦按 Space 既触发 click 又触发播放暂停的
       // 双重响应，O3 审计 P2）；isContentEditable 同理。
@@ -158,7 +182,7 @@ export function WorldPanel({
       }
       // 播放/暂停（映射键位，即时触发不按住采样；preventDefault 防页面滚动）
       if (key === km.space.toLowerCase()) {
-        e.preventDefault()
+        if (callbacksRef.current.onTogglePlayback) e.preventDefault()
         if (!e.repeat) callbacksRef.current.onTogglePlayback?.()
         return
       }
@@ -180,6 +204,10 @@ export function WorldPanel({
       keysRef.current.add(key)
     }
     const onKeyUp = (e: KeyboardEvent) => {
+      if (isNestedDialogTarget(e.target)) {
+        keysRef.current.clear()
+        return
+      }
       keysRef.current.delete(e.key.toLowerCase())
     }
     const onBlur = () => {
@@ -194,6 +222,13 @@ export function WorldPanel({
       lastRef.current = now
       // 每帧即时合并键位映射（keymapRef 是 ref 始终最新；O3 审计 P2 闭包陈旧修复）
       const km = { ...DEFAULT_KEYMAP, ...keymapRef.current }
+      if (keysRef.current.size > 0 && hasOpenNestedDialog()) {
+        keysRef.current.clear()
+        accMoveRef.current = { x: 0, y: 0, z: 0 }
+        accYawRef.current = 0
+        rafRef.current = requestAnimationFrame(frame)
+        return
+      }
       // 映射键位随 km 传入（移动四键/升降可重绑定，未配置动作回默认键）
       const move = computeMoveDelta(keysRef.current, yawRef.current, speedRef.current, dt, km)
       const yawDelta = computeYawDelta(keysRef.current, dt, km)
@@ -322,7 +357,7 @@ export function WorldPanel({
   }
 
   return (
-    <div>
+    <div ref={rootRef}>
       {/* 移动速度 */}
       <Slider
         label="移动速度" value={params.moveSpeed} min={0.5} max={5} step={0.1}
@@ -349,7 +384,7 @@ export function WorldPanel({
       {playbackTimeStore && (
         <div className="flex items-center justify-between mb-3">
           <span className={`${theme.textSecondary} text-xs`}>随曲目播放</span>
-          <Toggle checked={followTrack} onChange={setFollowTrack} theme={theme} />
+          <Toggle label="随曲目播放" checked={followTrack} onChange={setFollowTrack} theme={theme} />
         </div>
       )}
 
@@ -373,11 +408,9 @@ export function WorldPanel({
               <span className={`${theme.textPrimary} text-xs font-medium`}>{sourceName(s.id)}</span>
               <button
                 type="button"
+                aria-pressed={sel}
                 onClick={() => onSelectSource(sel ? null : s.id)}
-                className="px-2 py-0.5 rounded-md text-[10px] transition-all cursor-pointer"
-                style={sel
-                  ? { background: theme.accentGradient, color: '#fff' }
-                  : { background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)' }}
+                className={`hse-glass-button hse-glass-choice px-2 py-0.5 rounded-md text-[10px] cursor-pointer ${theme.textSecondary}`}
               >
                 {sel ? '已选中' : '选中'}
               </button>
@@ -405,8 +438,7 @@ export function WorldPanel({
             <button
               type="button"
               onClick={() => clearTrajectory(selectedId)}
-              className="px-2 py-0.5 rounded-md text-[10px] transition-all cursor-pointer"
-              style={{ background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)' }}
+              className={`hse-glass-button px-2 py-0.5 rounded-md text-[10px] cursor-pointer ${theme.textSecondary}`}
             >
               清除轨迹
             </button>
@@ -428,8 +460,7 @@ export function WorldPanel({
           <button
             type="button"
             onClick={addKeyframe}
-            className="w-full py-1.5 rounded-lg text-[11px] transition-all cursor-pointer"
-            style={{ background: `${theme.accentColor}16`, border: `1px dashed ${theme.accentColor}55`, color: theme.textSecondary }}
+            className={`hse-glass-button w-full py-1.5 rounded-lg text-[11px] cursor-pointer ${theme.textSecondary}`}
           >
             添加关键帧（{`${(params.playhead ?? 0).toFixed(1)}s`} 时刻 · 当前位置）
           </button>
@@ -443,7 +474,7 @@ export function WorldPanel({
       >
         <span className={theme.textSecondary}>操作：</span>
         <span className={theme.textTertiary}>
-          W/A/S/D 移动 · Q/E 升降 · ←/→ 转头 · 鼠标拖拽旋转视角 · R 重置听者 · F 第一人称跟随 · 空格 播放/暂停 · Tab 切换声源
+          W/A/S/D 移动 · Q/E 升降 · ←/→ 转头 · 鼠标拖拽旋转视角 · R 重置听者 · F 第一人称跟随{onTogglePlayback ? ' · 空格 播放/暂停' : ''} · Tab 切换声源
         </span>
         <br />
         <span className={theme.textTertiary}>键位可在设置中修改（空间音频设置 → 快捷键）。</span>

@@ -75,6 +75,9 @@ export interface V3GraphHandle {
   audioContext: AudioContext
   masterGain: GainNode
   analyser: AnalyserNode
+  leftAnalyserNode?: AnalyserNode
+  rightAnalyserNode?: AnalyserNode
+  channelSplitterNode?: ChannelSplitterNode
 }
 
 let host: EngineV3Host | null = null
@@ -85,6 +88,15 @@ let lastHandle: V3GraphHandle | null = null
 let hearingTone: { osc: OscillatorNode; gain: GainNode } | null = null
 let onHearingPlay: ((e: Event) => void) | null = null
 let persistTimer: number | null = null
+let masterSnapshot: V3EngineParams | null = null
+let saveState: 'saved' | 'pending' | 'error' = 'saved'
+const saveListeners = new Set<() => void>()
+
+function setSaveState(state: typeof saveState): void {
+  if (saveState === state) return
+  saveState = state
+  saveListeners.forEach((listener) => listener())
+}
 
 /** 快照入库前去除不可序列化数据（卷积 IR 数组 → 仅保留 irName 引用，与 ui/bridge.ts 语义一致） */
 function sanitizeForStorage(p: V3EngineParams): V3EngineParams {
@@ -99,16 +111,28 @@ function sanitizeForStorage(p: V3EngineParams): V3EngineParams {
   return clone
 }
 
-function persistParams(p: V3EngineParams): void {
+function saveParamsNow(): boolean {
   if (persistTimer !== null) window.clearTimeout(persistTimer)
-  persistTimer = window.setTimeout(() => {
-    persistTimer = null
-    try {
-      localStorage.setItem(PARAMS_KEY, JSON.stringify(sanitizeForStorage(p)))
-    } catch {
-      // 存储不可用时静默（不影响播放）
-    }
-  }, 400)
+  persistTimer = null
+  if (!currentParams) return false
+  try {
+    // 同一条记录原子保存旁路参数与恢复快照，旧版仍能读取顶层引擎参数。
+    localStorage.setItem(PARAMS_KEY, JSON.stringify({
+      ...sanitizeForStorage(currentParams),
+      __masterSnapshot: masterSnapshot ? sanitizeForStorage(masterSnapshot) : null,
+    }))
+    setSaveState('saved')
+    return true
+  } catch {
+    setSaveState('error')
+    return false
+  }
+}
+
+function persistParams(): void {
+  if (persistTimer !== null) window.clearTimeout(persistTimer)
+  setSaveState('pending')
+  persistTimer = window.setTimeout(saveParamsNow, 400)
 }
 
 /** 恢复持久化参数：结构与默认值深合并（容错坏数据/旧版本缺字段），失败回默认 */
@@ -117,10 +141,13 @@ function restoreParams(sampleRate: number): V3EngineParams {
   try {
     const raw = localStorage.getItem(PARAMS_KEY)
     if (!raw) return base
-    const saved = JSON.parse(raw) as DeepPartial<V3EngineParams>
+    const saved = JSON.parse(raw) as DeepPartial<V3EngineParams> & { __masterSnapshot?: DeepPartial<V3EngineParams> | null }
     if (!saved || typeof saved !== 'object') return base
+    const { __masterSnapshot, ...storedParams } = saved
+    masterSnapshot = __masterSnapshot && typeof __masterSnapshot === 'object'
+      ? { ...deepMerge(base, __masterSnapshot), sampleRate } : null
     // 深合并（saved 覆盖 base），保证新增字段有默认值；采样率以当前上下文为准
-    const merged = deepMerge(base, saved)
+    const merged = deepMerge(base, storedParams)
     merged.sampleRate = sampleRate
     return merged
   } catch {
@@ -291,6 +318,7 @@ export async function attachV3Engine(handle: V3GraphHandle): Promise<void> {
       if (lastHandle) startHearingTone(lastHandle.audioContext, detail.freqHz, detail.levelDb ?? -20)
     }
     window.addEventListener('v3HearingPlay', onHearingPlay)
+    window.addEventListener('v3HearingStop', stopHearingTone)
   }
 }
 
@@ -303,8 +331,21 @@ function ensureBridge(fs: number): V3UiBridge {
     // JSON 深拷贝 + 双 setParams（15 级链全量重配）+ worklet postMessage + 全页重渲染；
     // 值未变化时（球形拖拽静止帧、React 双调用等）一次 stringify 对比即可全跳过
     let lastParamsKey = ''
+    let leftSamples: Float32Array<ArrayBuffer> | null = null
+    let rightSamples: Float32Array<ArrayBuffer> | null = null
     wrappedBridge = {
       ...raw,
+      getMasterSnapshot: () => masterSnapshot ? structuredClone(masterSnapshot) : null,
+      setMasterSnapshot: (p) => {
+        masterSnapshot = p ? structuredClone(p) : null
+        persistParams()
+      },
+      getSaveState: () => saveState,
+      subscribeSaveState: (listener) => {
+        saveListeners.add(listener)
+        return () => { saveListeners.delete(listener) }
+      },
+      saveNow: saveParamsNow,
       setParams: (p: V3EngineParams) => {
         // IR（Float32Array，数 MB）不进 stringify：逐索引枚举成巨串 + postMessage
         // structured clone 整块拷贝。用「IR 引用哨兵 + 剥离后的 JSON」判变化；
@@ -317,11 +358,22 @@ function ensureBridge(fs: number): V3UiBridge {
         raw.setParams(p)          // 桥内部快照 + 主线程引擎
         host!.setParams(p)        // worklet 处理器同步下发（script 模式下与上一行同源）
         currentParams = p
-        persistParams(p)
+        persistParams()
         void syncPitchChain()     // 变速变调参数变化 → SoundTouch 前置链同步
       },
       getStats: () => host!.getLastStats() ?? raw.getStats(), // worklet 回传值优先
       getAnalysis: () => host!.getLastAnalysis() ?? raw.getAnalysis(), // worklet 回传频谱优先（script 模式主线程引擎自分析）
+      getWaveform: () => {
+        if (!host?.getMode() || !lastHandle?.leftAnalyserNode) return null
+        const leftNode = lastHandle.leftAnalyserNode
+        const rightNode = lastHandle.rightAnalyserNode
+        if (leftSamples?.length !== leftNode.fftSize) leftSamples = new Float32Array(leftNode.fftSize)
+        leftNode.getFloatTimeDomainData(leftSamples)
+        if (!rightNode) return { left: leftSamples, right: null }
+        if (rightSamples?.length !== rightNode.fftSize) rightSamples = new Float32Array(rightNode.fftSize)
+        rightNode.getFloatTimeDomainData(rightSamples)
+        return { left: leftSamples, right: rightSamples }
+      },
     }
     bridgedEngine = host.engine
     if (!currentParams) currentParams = restoreParams(fs)
@@ -334,6 +386,7 @@ function ensureBridge(fs: number): V3UiBridge {
 /** 切走/关闭：恢复 masterGain→analyser 直连（与 v2 dispose 同款语义） */
 export function detachV3Engine(): void {
   stopHearingTone()
+  window.removeEventListener('v3HearingStop', stopHearingTone)
   if (onHearingPlay) {
     window.removeEventListener('v3HearingPlay', onHearingPlay)
     onHearingPlay = null
@@ -371,6 +424,7 @@ export function setV3SystemVolume(volumePercent: number): void {
   if (currentParams.loudnessCompensation?.volumePercent === v) return
   const next = JSON.parse(JSON.stringify(currentParams)) as V3EngineParams
   next.loudnessCompensation.volumePercent = v
+  if (masterSnapshot) masterSnapshot.loudnessCompensation.volumePercent = v
   wrappedBridge.setParams(next)
 }
 

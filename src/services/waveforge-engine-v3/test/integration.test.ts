@@ -14,7 +14,10 @@ import { createDefaultParams } from '../src/types'
 
 class FakeNode {
   // WaveForge 侧 vitest 4：vi.fn() 需带实现签名才能赋给 V3AudioNodeLike 的鸭子类型接口
-  connect = vi.fn((_dest: unknown) => undefined)
+  connect = vi.fn((dest: unknown) => {
+    if (!dest) throw new TypeError('AudioNode.connect 需要有效目标节点')
+    return undefined
+  })
   disconnect = vi.fn(() => undefined)
   port: { postMessage: Mock<(msg: unknown) => void>; onmessage: ((e: { data: unknown }) => void) | null }
   onaudioprocess?: (e: unknown) => void
@@ -23,15 +26,17 @@ class FakeNode {
   }
 }
 
-function makeHandle(opts?: { addModuleImpl?: () => Promise<void> }): {
+function makeHandle(opts?: { addModuleImpl?: () => Promise<void>; withSplitter?: boolean }): {
   handle: V3HostHandle
   ctx: V3AudioContextLike
   masterGain: FakeNode
   analyser: FakeNode
+  splitter: FakeNode | null
   scriptNodes: FakeNode[]
 } {
   const masterGain = new FakeNode()
   const analyser = new FakeNode()
+  const splitter = opts?.withSplitter ? new FakeNode() : null
   const scriptNodes: FakeNode[] = []
   const ctx: V3AudioContextLike = {
     sampleRate: 48000,
@@ -44,7 +49,14 @@ function makeHandle(opts?: { addModuleImpl?: () => Promise<void> }): {
       return n
     }),
   }
-  return { handle: { audioContext: ctx, masterGain, analyser }, ctx, masterGain, analyser, scriptNodes }
+  return {
+    handle: { audioContext: ctx, masterGain, analyser, channelSplitterNode: splitter ?? undefined },
+    ctx,
+    masterGain,
+    analyser,
+    splitter,
+    scriptNodes,
+  }
 }
 
 /** 注册 AudioWorkletNode 全局桩 */
@@ -73,6 +85,21 @@ afterEach(() => {
 })
 
 describe('EngineV3Host —— worklet 模式', () => {
+  it('处理后输出同时接入左右声道分析分路，卸载后恢复原始分路', async () => {
+    stubWorkletNode()
+    const { handle, masterGain, splitter } = makeHandle({ withSplitter: true })
+    const host = new EngineV3Host({ mode: 'worklet', workletUrl: '/v3-worklet.js' })
+    await host.attach(handle)
+
+    const node = (masterGain.connect as ReturnType<typeof vi.fn>).mock.calls[0][0] as FakeNode
+    expect(node.connect).toHaveBeenCalledWith(handle.analyser)
+    expect(node.connect).toHaveBeenCalledWith(splitter)
+
+    host.dispose()
+    const restoredConnections = (masterGain.connect as ReturnType<typeof vi.fn>).mock.calls.slice(1).map(([dest]) => dest)
+    expect(restoredConnections).toEqual([handle.analyser, splitter])
+  })
+
   it('attach：masterGain 先全断 → 接 worklet 节点 → 连 analyser；参数已下发', async () => {
     stubWorkletNode()
     const { handle, masterGain, analyser } = makeHandle()

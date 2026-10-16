@@ -8,7 +8,7 @@
  * 交互（仅自定义布局 editable=true）：
  *  - 拖拽点沿圆周改变方位角（pointer 捕获 + atan2 换算，取整到度）；
  *  - 单击选中 → 下方属性区 Slider 微调（方位角/仰角/距离/增益）；
- *  - 双击删除（调用方保证至少保留 1 只）；「添加扬声器」上限 16 只；
+ *  - 双击选中；删除走右键菜单（调用方保证至少保留 1 只）；「添加扬声器」上限 16 只；
  *  - 右键扬声器弹出菜单（复制/删除/静音/Solo——菜单在 editable 且 muted/
  *    onToggleMuted/onDuplicateSpeaker 全部提供时启用，向后兼容缺省不渲染）。
  * 预设布局（editable=false）只读灰调展示，不可交互。
@@ -88,8 +88,7 @@ function MenuItem({ label, onClick, disabled, theme }: {
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="block w-full text-left px-3 py-1.5 text-xs transition-colors hover:bg-white/10 disabled:opacity-40 disabled:hover:bg-transparent"
-      style={{ color: theme.textSecondary }}
+      className={`hse-glass-choice block w-full rounded-md text-left px-3 py-1.5 text-xs disabled:opacity-40 ${theme.textSecondary}`}
     >
       {label}
     </button>
@@ -462,7 +461,8 @@ export function SpatialRingEditor({
   const menuMuted = menu !== null ? muted?.[menu.index] === true : false
 
   return (
-    <div>
+    <div className="@container">
+      <div className={`grid items-start gap-4 ${editable && sel ? '@min-[46rem]:grid-cols-[minmax(0,360px)_minmax(0,1fr)]' : ''}`}>
       <div className="relative w-full" style={{ height: 240, maxWidth: 360, margin: '0 auto' }}>
         <canvas
           ref={canvasRef}
@@ -498,7 +498,7 @@ export function SpatialRingEditor({
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}
           >
-            <div className="px-3 py-1 text-[10px] hse-mono" style={{ color: theme.textTertiary }}>
+            <div className={`px-3 py-1 text-[10px] hse-mono ${theme.textTertiary}`}>
               #{menu.index + 1}
             </div>
             <MenuItem label="复制" theme={theme} onClick={() => { onDuplicateSpeaker!(menu.index); closeMenu() }} />
@@ -520,7 +520,7 @@ export function SpatialRingEditor({
 
       {/* 选中点属性区 */}
       {editable && selected !== null && sel && (
-        <div className="mt-3">
+        <div className="min-w-0 mt-3 @min-[46rem]:mt-0">
           <div className={`${theme.textSecondary} text-xs mb-1`}>扬声器 {selected + 1} 属性</div>
           <Slider
             label="方位角" value={Math.round(sel.azimuthDeg)} min={-180} max={180} step={1}
@@ -566,20 +566,16 @@ export function SpatialRingEditor({
           )}
         </div>
       )}
+      </div>
 
       {/* 添加扬声器（仅自定义布局，上限 16） */}
       {editable && (
-        <div className="flex items-center justify-between">
+        <div className="mt-3 flex items-center justify-between">
           <button
             type="button"
             disabled={speakers.length >= MAX_SPEAKERS}
             onClick={onAddSpeaker}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs transition-all hover:brightness-110 disabled:opacity-40"
-            style={{
-              backgroundColor: theme.inputBg,
-              border: `1px solid ${theme.cardBorder}`,
-              color: theme.textSecondary,
-            }}
+            className={`hse-glass-button flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs disabled:opacity-40 ${theme.textSecondary}`}
           >
             + 添加扬声器
           </button>
@@ -591,7 +587,7 @@ export function SpatialRingEditor({
 
       {editable && (
         <InfoLine theme={theme}>
-          拖拽点沿圆周调整方位角；双击删除（至少保留 1 只）；仰角 ≠ 0 显示外圈标记（顶置/底部层）。
+          拖拽点沿圆周调整方位角；双击可选中，删除请使用右键菜单（至少保留 1 只）；仰角 ≠ 0 显示外圈标记（顶置/底部层）。
           {menuEnabled && ' 右键扬声器弹出菜单（复制/删除/静音/Solo）。'}
           {onChangeRoute && ' 选中扬声器可指定输入路由（左源/右源/左右混合）。'}
         </InfoLine>

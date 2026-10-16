@@ -1,128 +1,92 @@
-/**
- * HyperSoundEngine 风格主题 —— 深色琥珀金
- *
- * 基于参考图配色：深黑底 (#0d0d0f) + 琥珀金高亮 (#c9a84c, #e8c766)
- * 玻璃拟态卡片 + 内发光边框
- */
-
-import { useEffect, useState } from 'react'
+/** HSE 浅色薄荷规范：正文清晰，交互表面保留玻璃反光与层次。 */
 
 export interface HSETheme {
-  dark: true
+  dark: boolean
   accentColor: string
   accentGlow: string
   accentDim: string
-  /** 渐变起点色（电光青），激活态按钮/滑块轨道渐变起点 */
   accentFrom: string
-  /** 渐变终点色（深邃紫），激活态按钮/滑块轨道渐变终点 */
   accentTo: string
-  /** 电光青→深邃紫线性渐变（激活态按钮背景） */
   accentGradient: string
-  /** 面板背景 */
   panelBg: string
   panelBorder: string
   panelHighlight: string
-  /** 卡片背景 */
   cardBg: string
   cardBorder: string
   cardGlow: string
-  /** 导航 */
   navBg: string
   navActiveBg: string
   navActiveBorder: string
   navHoverBg: string
-  /** 文本 */
   textPrimary: string
   textSecondary: string
   textTertiary: string
   textMuted: string
-  /** 输入/滑块 */
   inputBg: string
   trackBg: string
   trackFill: string
-  /** 状态 */
   statusOk: string
   statusWarn: string
-  /** 毛玻璃 */
   glassBlur: string
   glassCardBlur: string
-  /** 滑条辅助 */
   sliderTrack: (value: number, min: number, max: number) => string
 }
 
-function useAccentColor(): string {
-  const [accentColor, setAccentColor] = useState(() => {
-    try {
-      const saved = localStorage.getItem('accentColor')
-      return saved || '#7c3aed'
-    } catch {
-      return '#7c3aed'
-    }
-  })
-  useEffect(() => {
-    const handleAccentChange = (e: Event) => {
-      const customEvent = e as CustomEvent
-      if (customEvent.detail) setAccentColor(customEvent.detail)
-    }
-    window.addEventListener('accentColorChanged', handleAccentChange)
-    return () => window.removeEventListener('accentColorChanged', handleAccentChange)
-  }, [])
-  return accentColor
+const COLORS = {
+  canvas: '#F5F9F7',
+  surface: '#FBFDFC',
+  accent: '#006A63',
+  accentSoft: '#C8EDE4',
+  text: '#153A37',
+  secondary: '#536B66',
+  muted: '#758983',
+  border: '#DCE9E5',
+  track: '#D7E2DE',
+  blue: '#DCECF8',
+  apricot: '#F6E2D3',
 }
 
 export function useHSETheme(): HSETheme {
-  const accentColor = useAccentColor()
-  // §A 主色：电光青 → 深邃紫线性渐变（激活态按钮 + 滑块轨道，默认启用）
-  const accentFrom = '#22d3ee' // 电光青
-  const accentTo = '#7c3aed'   // 深邃紫
-  const accentGradient = `linear-gradient(135deg, ${accentFrom} 0%, ${accentTo} 100%)`
-  const glow = `${accentColor}44`
-  const dim = `${accentColor}22`
-
+  const accentColor = COLORS.accent
   return {
-    dark: true,
+    dark: false,
     accentColor,
-    accentGlow: glow,
-    accentDim: dim,
-    accentFrom,
-    accentTo,
-    accentGradient,
-    panelBg: 'rgba(18, 18, 22, 0.85)',
-    panelBorder: 'rgba(255,255,255,0.08)',
-    panelHighlight: 'linear-gradient(160deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.02) 45%, rgba(255,255,255,0.04) 100%)',
-    cardBg: 'linear-gradient(150deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.015) 100%)',
-    cardBorder: 'rgba(255,255,255,0.08)',
-    cardGlow: `0 8px 24px rgba(0,0,0,0.25), inset 0 1px 0 rgba(255,255,255,0.12)`,
-    navBg: 'rgba(12,12,16,0.7)',
-    navActiveBg: `linear-gradient(135deg, ${dim} 0%, ${dim}00 60%)`,
-    navActiveBorder: `${accentColor}66`,
-    navHoverBg: 'rgba(255,255,255,0.04)',
-    textPrimary: 'text-white',
-    textSecondary: 'text-white/70',
-    textTertiary: 'text-white/45',
-    textMuted: 'text-white/25',
-    inputBg: 'rgba(255,255,255,0.04)',
-    trackBg: 'rgba(255,255,255,0.10)',
+    accentGlow: 'rgba(0,106,99,0.16)',
+    accentDim: COLORS.accentSoft,
+    accentFrom: '#168D7A',
+    accentTo: accentColor,
+    accentGradient: 'linear-gradient(155deg, #08776A 0%, #005C54 100%)',
+    panelBg: COLORS.surface,
+    panelBorder: COLORS.border,
+    panelHighlight: 'linear-gradient(150deg, #FFFFFF 0%, #F5FAF7 62%, #EEF7F1 100%)',
+    cardBg: 'linear-gradient(150deg, rgba(255,255,255,0.98) 0%, rgba(248,252,250,0.94) 100%)',
+    cardBorder: COLORS.border,
+    cardGlow: 'inset 0 1px 0 rgba(255,255,255,0.98), 0 2px 8px rgba(41,84,67,0.035)',
+    navBg: COLORS.surface,
+    navActiveBg: 'linear-gradient(145deg, rgba(225,247,237,0.96), rgba(174,223,205,0.7))',
+    navActiveBorder: accentColor,
+    navHoverBg: '#EEF6F3',
+    textPrimary: 'text-[#153A37]',
+    textSecondary: 'text-[#536B66]',
+    textTertiary: 'text-[#758983]',
+    textMuted: 'text-[#758983]',
+    inputBg: '#F3F8F6',
+    trackBg: COLORS.track,
     trackFill: accentColor,
-    statusOk: '#4ade80',
-    statusWarn: '#fbbf24',
-    glassBlur: 'blur(24px) saturate(160%)',
-    glassCardBlur: 'blur(16px) saturate(140%)',
+    statusOk: '#16845D',
+    statusWarn: '#A85116',
+    glassBlur: 'blur(14px) saturate(125%)',
+    glassCardBlur: 'none',
     sliderTrack: (value: number, min: number, max: number) => {
       const ratio = Math.min(1, Math.max(0, (value - min) / (max - min)))
-      const rest = 'rgba(255,255,255,0.12)'
-      // 填充段用电光青→深邃紫渐变（§A 主色），剩余段中性灰
-      return `linear-gradient(to right, ${accentFrom} 0%, ${accentTo} ${ratio * 100}%, ${rest} ${ratio * 100}%, ${rest} 100%)`
+      return `linear-gradient(to right, ${accentColor} 0%, ${accentColor} ${ratio * 100}%, ${COLORS.track} ${ratio * 100}%, ${COLORS.track} 100%)`
     },
   }
 }
 
-/**
- * 把 HSE 主题转换为旧 V3Theme 接口（供既有弹窗/面板组件复用）
- * 用于 modals 系列 / eqPanel 等仍依赖 V3Theme 玻璃拟态接口的组件。
- */
+/** Keep legacy effect modals on the same palette while preserving their existing contract. */
 export function toLegacyTheme(t: HSETheme): {
-  dark: true
+  dark: boolean
   accentColor: string
   accentGradient: string
   accentFrom: string
@@ -140,12 +104,12 @@ export function toLegacyTheme(t: HSETheme): {
   sliderTrack: (value: number, min: number, max: number) => string
 } {
   return {
-    dark: true,
+    dark: false,
     accentColor: t.accentColor,
     accentGradient: t.accentGradient,
     accentFrom: t.accentFrom,
     accentTo: t.accentTo,
-    glassPanel: 'rgba(18,18,22,0.92)',
+    glassPanel: t.panelBg,
     glassPanelHighlight: t.panelHighlight,
     glassCard: t.cardBg,
     glassBorder: t.cardBorder,

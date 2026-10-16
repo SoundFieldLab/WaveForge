@@ -46,8 +46,17 @@ export interface V3UiBridge {
   getParams(): V3EngineParams
   /** 设置完整快照（引擎 setParams；UI 侧始终传 getParams 深拷贝修改后的版本） */
   setParams(p: V3EngineParams): void
+  /** 总开关关闭前的配置；与正在输出的旁路参数分别保存。 */
+  getMasterSnapshot(): V3EngineParams | null
+  setMasterSnapshot(p: V3EngineParams | null): void
+  /** 融合宿主提供持久化反馈；独立桥仅将参数应用于当前会话。 */
+  getSaveState?(): 'saved' | 'pending' | 'error'
+  subscribeSaveState?(listener: () => void): () => void
+  saveNow?(): boolean
   getStats(): EngineStats
   getAnalysis(): EngineAnalysis
+  /** Recent left/right time-domain samples; null when the engine graph is not attached. */
+  getWaveform?(): { left: Float32Array; right: Float32Array | null } | null
   getLatencySamples(): number
   getSampleRate(): number
   /** 内置 11 场景（含开发者微调覆盖，被改过的带 overridden 标记）+ 我的场景 */
@@ -98,7 +107,7 @@ function saveMyScenes(list: ScenePreset[]): void {
   try {
     localStorage.setItem(MY_SCENES_KEY, JSON.stringify(list))
   } catch {
-    // 存储不可用时静默（不影响播放）
+    throw new Error('无法写入本地存储')
   }
 }
 
@@ -106,6 +115,7 @@ function saveMyScenes(list: ScenePreset[]): void {
 export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBridge {
   const hearing = new HearingTest(sampleRate)
   let current: V3EngineParams = createDefaultParams(sampleRate)
+  let masterSnapshot: V3EngineParams | null = null
   engine.setParams(current)
 
   const readHearing = (): V3HearingSession => {
@@ -121,6 +131,8 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
 
   const impl: V3UiBridge = {
     getParams: () => JSON.parse(JSON.stringify(current)) as V3EngineParams,
+    getMasterSnapshot: () => masterSnapshot ? structuredClone(masterSnapshot) : null,
+    setMasterSnapshot: (p) => { masterSnapshot = p ? structuredClone(p) : null },
     setParams: (p: V3EngineParams) => {
       current = JSON.parse(JSON.stringify(p)) as V3EngineParams
       engine.setParams(current)
@@ -137,7 +149,7 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
       // 状态（外部增益/归一化模式），场景快照不得重置用户音量
       const ln = current.loudnessNormalization
       impl.setParams(scene.params)
-      impl.setParams({ ...current, loudnessNormalization: ln })
+      impl.setParams({ ...current, sceneId: scene.id, customized: false, loudnessNormalization: ln })
     },
     saveMyScene: (name: string): boolean => {
       const mine = loadMyScenes()
@@ -163,7 +175,9 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
       resetBuiltinSceneOverride(id)
     },
     exportSceneLibrary: () => exportSceneLibraryJson(loadMyScenes()),
-    importSceneLibrary: (json: string) => importSceneLibraryJson(json, (list) => saveMyScenes(list)),
+    importSceneLibrary: (json: string) => importSceneLibraryJson(json, (list) => {
+      saveMyScenes(list)
+    }),
     exportPublishSeed: () => exportPublishSeedTs(),
     encodeShare: (p: V3EngineParams) => encodeShareCode(p),
     decodeShare: (code: string) => decodeShareCode(code),

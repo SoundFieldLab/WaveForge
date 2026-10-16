@@ -240,11 +240,9 @@ function makeWorldPanel(store?: PlaybackTimeStore, onTogglePlayback?: () => void
   return { onChange, onMove, onRotate, onReset, onSelectSource }
 }
 
-/** 找到「随曲目播放」胶囊开关（带 aria-pressed 的按钮） */
+/** 找到「随曲目播放」开关 */
 function findFollowToggle(): HTMLElement {
-  const btn = screen.getAllByRole('button').find((b) => b.getAttribute('aria-pressed') !== null)
-  expect(btn).toBeTruthy()
-  return btn as HTMLElement
+  return screen.getByRole('switch', { name: '随曲目播放' })
 }
 
 /** 轨迹时间预览滑块（range 列表第 2 个：移动速度 / 轨迹时间预览 / 各声源增益） */

@@ -48,6 +48,7 @@ export interface V3HostHandle {
   audioContext: V3AudioContextLike
   masterGain: V3AudioNodeLike
   analyser: V3AudioNodeLike
+  channelSplitterNode?: V3AudioNodeLike
 }
 
 export interface V3HostOptions {
@@ -194,6 +195,7 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
       }
       try {
         handle.masterGain.connect?.(handle.analyser)
+        if (handle.channelSplitterNode) handle.masterGain.connect?.(handle.channelSplitterNode)
       } catch {
         /* noop */
       }
@@ -203,6 +205,7 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
 
     handle.masterGain.connect?.(node)
     node.connect?.(handle.analyser)
+    if (handle.channelSplitterNode) node.connect?.(handle.channelSplitterNode)
     this.node = node
     this.activeMode = mode
     if (params) this.lastParams = params
@@ -245,6 +248,7 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
       }
       try {
         h.masterGain.connect?.(h.analyser)
+        if (h.channelSplitterNode) h.masterGain.connect?.(h.channelSplitterNode)
       } catch {
         /* noop */
       }

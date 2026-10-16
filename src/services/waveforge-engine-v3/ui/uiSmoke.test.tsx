@@ -30,17 +30,18 @@ function clickNav(label: string) {
 describe('V3 调音室 UI 冒烟', () => {
   beforeEach(() => cleanup())
 
-  it('主面板渲染：标题 + 8 导航项 + 默认主页', () => {
+  it('主面板渲染：标题 + 9 导航项 + 默认主页', () => {
     makeUi()
     expect(screen.getByText('HyperSoundEngine')).toBeTruthy()
-    for (const label of ['主页', '音效场景', '均衡器', '空间音效', '空间音频', '动态调音', '分析', '调音器']) {
+    for (const label of ['主页', '音效场景', '均衡器', '空间音效', '空间音频', '动态调音', '分析', '调音器', '关于']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
-    // 默认页：主页包含系统音效 + 音效模式快捷
-    expect(screen.getByText('系统音效')).toBeTruthy()
-    expect(screen.getByText('Hi-Fi 模式')).toBeTruthy()
-    expect(screen.getByText('增强模式')).toBeTruthy()
-    expect(screen.getByText('影院模式')).toBeTruthy()
+    expect(screen.getByText('声音工作台')).toBeTruthy()
+    expect(screen.getByText('实时音频')).toBeTruthy()
+    expect(screen.getByRole('slider', { name: '输出音量' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Hi-Fi模式' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '增强模式' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '影院模式' })).toBeTruthy()
   })
 
   it('空间音效页：混响开关可切换启用态', () => {
@@ -55,13 +56,29 @@ describe('V3 调音室 UI 冒烟', () => {
     expect(screen.getAllByText('混响').length).toBeGreaterThan(0)
     // 默认未启用
     expect(bridge.getParams().reverb.enabled).toBe(false)
-    // 点击「启用 混响」开关文案（位于卡片头部右侧 toggle 按钮的 aria-pressed）
-    const toggles = screen.getAllByRole('button')
-    // 找到混响卡片的开关按钮并切换
-    const reverbToggle = toggles.find((btn) => btn.getAttribute('aria-pressed') === 'false' && btn.classList.contains('rounded-full'))
-    expect(reverbToggle).toBeTruthy()
-    fireEvent.click(reverbToggle!)
+    fireEvent.click(screen.getByRole('switch', { name: '启用混响' }))
     expect(bridge.getParams().reverb.enabled).toBe(true)
+  })
+
+  it.each([
+    ['均衡器', '启用均衡器'],
+    ['空间音效', '启用混响'],
+    ['空间音频', '空间音频'],
+    ['动态调音', '启用动态压缩'],
+  ])('主页快捷卡进入%s后，原有开关可操作', (label, switchName) => {
+    makeUi()
+    fireEvent.click(screen.getByRole('button', { name: `打开${label}` }))
+    const toggle = screen.getByRole('switch', { name: switchName })
+    const initial = toggle.getAttribute('aria-checked')
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-checked')).toBe(initial === 'true' ? 'false' : 'true')
+  })
+
+  it('主页分析快捷卡打开实际分析页', () => {
+    makeUi()
+    fireEvent.click(screen.getByRole('button', { name: '打开分析' }))
+    expect(screen.getByRole('button', { name: '开始测试' })).toBeTruthy()
+    expect(screen.queryByRole('slider', { name: '输出音量' })).toBeNull()
   })
 
   it('空间音频页：Power 按钮开启后切到 instant 模式', () => {
@@ -72,9 +89,9 @@ describe('V3 调音室 UI 冒烟', () => {
     // 空间音频页不应有混响卡（混响留在空间音效页）
     expect(screen.queryByText('混响')).toBeNull()
     // 默认模式 off → Power 按钮可开启 instant
-    const powerBtn = screen.getAllByRole('button').find((btn) => btn.title === '开启空间音频')
-    expect(powerBtn).toBeTruthy()
-    fireEvent.click(powerBtn!)
+    const spatialToggle = screen.getByRole('switch', { name: '空间音频' })
+    fireEvent.click(spatialToggle)
+    expect(spatialToggle.getAttribute('aria-checked')).toBe('true')
     // 开启后切到 instant（一键空间化），模式选择器出现「一键空间化」激活
     expect(screen.getAllByText('一键空间化').length).toBeGreaterThan(0)
   })
@@ -85,11 +102,7 @@ describe('V3 调音室 UI 冒烟', () => {
     // 切换压缩器开关（默认关闭，先开启）
     const compressHeader = screen.getAllByText('动态压缩')
     expect(compressHeader.length).toBeGreaterThan(0)
-    // 找到压缩器开关（aria-pressed=false 的圆角按钮）并开启
-    const toggles = screen.getAllByRole('button')
-    const compToggle = toggles.find((btn) => btn.getAttribute('aria-pressed') === 'false' && btn.classList.contains('rounded-full'))
-    expect(compToggle).toBeTruthy()
-    fireEvent.click(compToggle!)
+    fireEvent.click(screen.getByRole('switch', { name: '启用动态压缩' }))
     expect(bridge.getParams().compressor.enabled).toBe(true)
     // 开启后阈值滑杆出现，拖动到 -30
     const sliders = screen.getAllByRole('slider')

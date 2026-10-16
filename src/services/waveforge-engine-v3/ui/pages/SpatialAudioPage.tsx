@@ -12,7 +12,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Radio, Headphones, Clapperboard, Volume2, Settings, Power } from 'lucide-react'
+import { Radio, Headphones, Clapperboard, Settings, Power } from 'lucide-react'
 import { GlassCard, Toggle, Slider, Segmented, RangeStyle } from '../components/Primitives'
 import { SpatialModeVisual } from '../components/SpatialModeVisual'
 import { SpatialRingEditor } from '../components/SpatialRingEditor'
@@ -55,9 +55,6 @@ const SPATIAL_MODES: { value: SpatialMode; label: string }[] = [
   { value: 'world', label: '世界漫游' },
   { value: 'stage', label: '舞台影院' },
 ]
-
-/** 开发中（禁用）的模式：四模式已全量实现，暂留空集占位 */
-const SPATIAL_DEV_MODES: ReadonlySet<SpatialMode> = new Set<SpatialMode>([])
 
 /** 视图模式：标准（现状卡片流）/ 专业（四象限工作室布局） */
 const SPATIAL_VIEWS: { value: 'standard' | 'pro'; label: string }[] = [
@@ -154,9 +151,9 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     const statsTimer = window.setInterval(() => {
       const stats = bridge.getStats()
       const lat = stats?.engineLatencySamples
-      const fs = 48000 // EngineV3 构造采样率（AudioContext 标准采样率；仅用于样本→毫秒换算）
+      const fs = bridge.getSampleRate()
       setStatusInfo({
-        latencyMs: Number.isFinite(lat) && lat > 0 ? Math.round((lat / fs) * 1000) : 0,
+        latencyMs: Number.isFinite(lat) && Number.isFinite(fs) && fs > 0 ? Math.round((Math.max(0, lat) / fs) * 1000) : null,
         fps,
       })
     }, 500)
@@ -278,34 +275,8 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
 
   /** 模式选择器（标准视图行 / 专业视图工具栏复用同一份） */
   const modeSelector = (): ReactNode => (
-    <div className="flex flex-wrap gap-1.5 mb-2">
-      {SPATIAL_MODES.map((m) => {
-        const isActive = spatial.mode === m.value
-        const isDev = SPATIAL_DEV_MODES.has(m.value)
-        return (
-          <button
-            key={m.value}
-            type="button"
-            disabled={isDev}
-            onClick={() => patchSpatial({ mode: m.value })}
-            className={`relative flex-1 min-w-[74px] py-2 rounded-xl text-xs transition-all ${isDev ? 'cursor-not-allowed opacity-45' : 'cursor-pointer'} ${isActive ? 'text-white font-medium' : theme.textSecondary}`}
-            style={isActive
-              ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-              : { backgroundColor: 'rgba(255,255,255,0.06)' }}
-          >
-            {m.label}
-            {isDev && (
-              <span
-                className="absolute -top-1 -right-1 px-1 py-px rounded text-[8px] leading-none"
-                style={{ backgroundColor: 'rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.5)' }}
-              >
-                开发中
-              </span>
-            )}
-          </button>
-        )
-      })}
-    </div>
+    <Segmented label="空间音频模式" options={SPATIAL_MODES} value={spatial.mode}
+      onChange={(mode) => patchSpatial({ mode })} theme={theme} small />
   )
 
   /**
@@ -345,7 +316,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     <div>
       <div className="mb-2">
         <div className={`${theme.textSecondary} text-xs mb-1`}>房间模拟</div>
-        <Segmented options={SPATIAL_ROOM_OPTIONS} value={spatial.instant.room} onChange={(v) => patchSpatial({ instant: { room: v } })} theme={theme} small />
+        <Segmented label="房间模拟" options={SPATIAL_ROOM_OPTIONS} value={spatial.instant.room} onChange={(v) => patchSpatial({ instant: { room: v } })} theme={theme} small />
       </div>
       <Slider
         label="房间混响" value={Math.round(spatial.instant.roomAmount * 100)} min={0} max={100} step={1}
@@ -364,6 +335,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
           <div className="flex items-center gap-2">
             <span className={`${theme.textSecondary} text-xs`}>顶部仰角层（4 顶置扬声器）</span>
             <Toggle
+              label="启用顶部仰角层"
               checked={spatial.headLocked.heightLayer}
               onChange={(v) => patchSpatial({ headLocked: { heightLayer: v } })}
               theme={theme}
@@ -373,6 +345,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
             <div className="flex items-center gap-2">
               <span className={`${theme.textSecondary} text-xs`}>底部仰角层（2 底部扬声器）</span>
               <Toggle
+                label="启用底部仰角层"
                 checked={spatial.headLocked.bottomLayer}
                 onChange={(v) => patchSpatial({ headLocked: { bottomLayer: v } })}
                 theme={theme}
@@ -385,6 +358,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
           §5.3 新增）——纯 UI 状态不持久化；两视图共用 speakers/onChange 链路 */}
       <div className="mb-2">
         <Segmented
+          label="扬声器编辑视图"
           options={HEAD_LOCKED_EDITOR_VIEWS}
           value={headLockedEditorView}
           onChange={(v) => setHeadLockedEditorView(v)}
@@ -426,53 +400,56 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
    * 增益衰减 + 高频低通（引擎后端已支持），下方滑块 0..100% 直写 world.occlusion。
    */
   const worldCore = (): ReactNode => (
-    <>
-      <div className="relative h-[340px] mb-3 rounded-xl overflow-hidden">
-        <SpatialWorldView
-          sources={spatial.world.sources}
-          listener={spatial.world.listener}
-          theme={theme}
-          onMove={handleWorldMove}
-          onRotate={handleWorldRotate}
-          onSelectSource={setSelectedWorldId}
-          onMoveSource={handleWorldMoveSource}
-          selectedId={selectedWorldId}
-          follow={firstPerson}
-          trajectories={spatial.world.trajectories}
-          playhead={spatial.world.playhead}
-        />
-      </div>
-      <WorldPanel
-        params={spatial.world}
-        listener={spatial.world.listener}
-        sources={spatial.world.sources}
-        theme={theme}
-        selectedId={selectedWorldId}
-        onChange={(patch) => patchSpatial({ world: patch })}
-        onSelectSource={setSelectedWorldId}
-        onMove={handleWorldMove}
-        onRotate={handleWorldRotate}
-        onReset={handleWorldReset}
-        onToggleFirstPerson={() => setFirstPerson((v) => !v)}
-        onTogglePlayback={() => { /* 播放由主播放器驱动，空间层不再独立控制 */ }}
-        keymap={(spatial as any).keymap}
-        playbackTimeStore={playbackTimeStore}
-      />
+    <div className="@container">
+      <div className="grid items-start gap-5 @min-[48rem]:grid-cols-[minmax(0,1.55fr)_minmax(17rem,1fr)]">
+        <div className="relative h-[340px] rounded-xl overflow-hidden">
+          <SpatialWorldView
+            sources={spatial.world.sources}
+            listener={spatial.world.listener}
+            theme={theme}
+            onMove={handleWorldMove}
+            onRotate={handleWorldRotate}
+            onSelectSource={setSelectedWorldId}
+            onMoveSource={handleWorldMoveSource}
+            selectedId={selectedWorldId}
+            follow={firstPerson}
+            trajectories={spatial.world.trajectories}
+            playhead={spatial.world.playhead}
+          />
+        </div>
+        <div className="min-w-0">
+          <WorldPanel
+            params={spatial.world}
+            listener={spatial.world.listener}
+            sources={spatial.world.sources}
+            theme={theme}
+            selectedId={selectedWorldId}
+            onChange={(patch) => patchSpatial({ world: patch })}
+            onSelectSource={setSelectedWorldId}
+            onMove={handleWorldMove}
+            onRotate={handleWorldRotate}
+            onReset={handleWorldReset}
+            onToggleFirstPerson={() => setFirstPerson((v) => !v)}
+            keymap={(spatial as any).keymap}
+            playbackTimeStore={playbackTimeStore}
+          />
 
-      {/* 遮挡/衍射（§4.7 简化模型）：增益衰减 + 高频低通，经 fusion 透传后端 */}
-      <div className="mt-2">
-        <Slider
-          label="遮挡"
-          value={Math.round(spatial.world.occlusion * 100)}
-          min={0}
-          max={100}
-          step={1}
-          onChange={(v) => patchSpatial({ world: { occlusion: v / 100 } })}
-          display={`${Math.round(spatial.world.occlusion * 100)}%`}
-          theme={theme}
-        />
+          {/* 遮挡/衍射（§4.7 简化模型）：增益衰减 + 高频低通，经 fusion 透传后端 */}
+          <div className="mt-5 border-t pt-4" style={{ borderColor: theme.cardBorder }}>
+            <Slider
+              label="遮挡"
+              value={Math.round(spatial.world.occlusion * 100)}
+              min={0}
+              max={100}
+              step={1}
+              onChange={(v) => patchSpatial({ world: { occlusion: v / 100 } })}
+              display={`${Math.round(spatial.world.occlusion * 100)}%`}
+              theme={theme}
+            />
+          </div>
+        </div>
       </div>
-    </>
+    </div>
   )
 
   /** 模式 D 核心（标准/专业共用）：场景卡片网格 + 座位 + 房间/氛围滑块 */
@@ -484,34 +461,47 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     />
   )
 
+  const inactiveState = (): ReactNode => (
+    <div className="mt-5 flex items-start gap-4 rounded-2xl p-5" style={{ background: theme.inputBg }}>
+      <Radio className="mt-0.5 h-6 w-6 shrink-0" style={{ color: theme.accentColor }} />
+      <div className="space-y-2">
+        <div className={`${theme.textPrimary} text-sm font-medium`}>空间音频未开启</div>
+        <p className={`${theme.textSecondary} text-xs leading-relaxed`}>点击电源开启，或选择上方任意模式开始双耳渲染。可展开立体声、编辑环绕扬声器、漫游声场或选择舞台座位。</p>
+      </div>
+    </div>
+  )
+
   return (
-    <div className="space-y-4">
+    <div className="@container space-y-5">
       <RangeStyle theme={theme} />
 
       {/* 空间音频（Spatial Audio）：Power 按钮 + 模式选择器 + 四模式面板 */}
       <GlassCard theme={theme}>
         {/* 头部行：标题 + Power 开关 + 视图切换（标准/专业）+ 状态徽标 */}
-        <div className="flex items-center justify-between mb-3 gap-3">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between mb-4 gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <Radio className="w-4 h-4" style={{ color: theme.accentColor }} />
             <span className={`${theme.textPrimary} text-sm font-medium`}>空间音频</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
             {/* Power 开关（on/off 两态，仿主页系统音效 Power 按钮）：
                 关闭态（mode==='off'）= accent 衬底 + 高亮图标（呼应用户开启）；
                 开启态 = 灰衬底 + 淡图标。点击：off→instant(默认一键空间化)/on→off。 */}
             <button
               type="button"
               onClick={handlePowerToggle}
-              className="p-2 rounded-full transition-colors"
-              style={{ background: spatialActive ? 'rgba(255,255,255,0.06)' : `${theme.accentColor}33` }}
+              role="switch"
+              aria-label="空间音频"
+              aria-checked={spatialActive}
+              className="hse-glass-choice rounded-full p-2.5"
               title={spatialActive ? '关闭空间音频' : '开启空间音频'}
             >
-              <Power className="w-4 h-4" style={{ color: spatialActive ? 'rgba(255,255,255,0.35)' : theme.accentColor }} />
+              <Power className={`h-4 w-4 ${spatialActive ? '' : theme.textSecondary}`} style={spatialActive ? { color: theme.accentColor } : undefined} />
             </button>
             {/* 视图模式切换：专业视图 = 四象限工作室布局（窄窗 <900px 自动回退标准视图） */}
-            <div className="w-[220px] shrink-0">
+            <div className="min-w-0 w-[220px] max-w-full">
               <Segmented
+                label="空间音频页面视图"
                 options={SPATIAL_VIEWS}
                 value={viewMode}
                 onChange={(v) => setViewMode(v)}
@@ -524,11 +514,15 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
               <span
                 className="w-2 h-2 rounded-full"
                 style={spatialActive
-                  ? { background: theme.accentGradient, boxShadow: `0 0 10px ${theme.accentColor}cc` }
-                  : { backgroundColor: 'rgba(255,255,255,0.28)' }}
+                  ? { background: theme.accentColor }
+                  : { backgroundColor: theme.trackBg }}
               />
               {spatialActive ? '已开启' : '已关闭'}
             </span>
+            <button type="button" onClick={() => setSettingsOpen(true)} aria-label="空间音频设置"
+              className={`hse-glass-button flex min-h-9 items-center gap-1.5 rounded-xl px-3 text-xs ${theme.textSecondary}`}>
+              <Settings className="h-3.5 w-3.5" />设置
+            </button>
           </div>
         </div>
 
@@ -536,27 +530,9 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
             原播放/暂停按钮为空操作占位（播放由主播放器驱动，空间页拿不到播放
             控制），已移除——假按钮比没有按钮更误导 */}
         {proActive ? (
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
             {/* 模式选择器（复用标准视图同款） */}
             <div className="flex-1 min-w-0">{modeSelector()}</div>
-            {/* 输出设备（状态展示；枚举/切换在设置弹窗「输出设备」区） */}
-            <div
-              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px]"
-              style={{ backgroundColor: theme.inputBg, border: `1px solid ${theme.cardBorder}`, color: theme.textSecondary }}
-            >
-              <Volume2 className="w-3.5 h-3.5" />
-              {(spatial as any).sinkId ? '已选设备' : '默认耳机'}
-            </div>
-            {/* 设置弹窗入口 */}
-            <button
-              type="button"
-              onClick={() => setSettingsOpen(true)}
-              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] transition-all hover:brightness-110"
-              style={{ backgroundColor: theme.inputBg, border: `1px solid ${theme.cardBorder}`, color: theme.textSecondary }}
-            >
-              <Settings className="w-3.5 h-3.5" />
-              设置
-            </button>
           </div>
         ) : (
           /* 标准视图：模式选择器（on/off 由 Power 按钮负责，选择器只列 4 档） */
@@ -564,7 +540,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
         )}
 
         {instantActive && (
-          <p className={`${theme.textTertiary} text-[11px] mb-1`}>
+          <p className={`${theme.textSecondary} text-xs leading-relaxed mt-4 mb-1`}>
             双耳渲染：把立体声展开到身前 ±{Math.round(spatial.instant.spreadDeg / 2)}° 的虚拟声场，增强临场感。
           </p>
         )}
@@ -585,27 +561,22 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
             {headLockedActive && headLockedCore()}
             {worldActive && worldCore()}
             {stageActive && stageCore()}
-            {!spatialActive && (
-              <div className="flex flex-col items-center justify-center py-20 text-center">
-                <Radio className="w-8 h-8 mb-3 opacity-30" style={{ color: theme.accentColor }} />
-                <span className={`${theme.textTertiary} text-xs`}>空间音频未开启——选择上方模式开始双耳渲染</span>
-              </div>
-            )}
+            {!spatialActive && inactiveState()}
           </SpatialStudioLayout>
         ) : (
           /* 标准视图（现状）：模式 A 面板（主卡内）+ 模式 B/C/D 独立卡片 */
           <>
             {/* 模式 A：一键空间化控制面板 */}
             {instantActive && (
-              <div className="space-y-1">
-                {instantCore()}
-                {roomControls()}
+              <div className="mt-4 grid items-start gap-6 @min-[48rem]:grid-cols-[minmax(0,1.5fr)_minmax(16rem,1fr)]">
+                <div className="min-w-0">{instantCore()}</div>
+                <div className="rounded-2xl p-4" style={{ background: theme.inputBg }}>{roomControls()}</div>
               </div>
             )}
 
             {/* 模式 B：头锁定环绕（插在模式 A 面板之后） */}
             {headLockedActive && (
-              <GlassCard theme={theme}>
+              <GlassCard theme={theme} className="mt-5">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
                     <Headphones className="w-4 h-4" style={{ color: theme.accentColor }} />
@@ -623,6 +594,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
                 <div className="mb-2">
                   <div className={`${theme.textSecondary} text-xs mb-1`}>布局预设</div>
                   <Segmented
+                    label="环绕扬声器布局"
                     options={HEAD_LOCKED_LAYOUTS}
                     value={spatial.headLocked.layout}
                     onChange={(v) => handleHeadLockedLayout(v)}
@@ -637,7 +609,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
 
             {/* 模式 C：世界漫游（3D 自由漫游 + 小地图 + WASD 操作） */}
             {worldActive && (
-              <GlassCard theme={theme}>
+              <GlassCard theme={theme} className="mt-5">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
                     <Radio className="w-4 h-4" style={{ color: theme.accentColor }} />
@@ -656,7 +628,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
 
             {/* 模式 D：舞台/影院（场景预设 + 座位 + 房间氛围） */}
             {stageActive && (
-              <GlassCard theme={theme}>
+              <GlassCard theme={theme} className="mt-5">
                 <div className="flex items-center justify-between mb-1">
                   <div className="flex items-center gap-2">
                     <Clapperboard className="w-4 h-4" style={{ color: theme.accentColor }} />
@@ -672,6 +644,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
                 {stageCore()}
               </GlassCard>
             )}
+            {!spatialActive && inactiveState()}
           </>
         )}
       </GlassCard>

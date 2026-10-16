@@ -11957,6 +11957,7 @@ function App() {
               sourceUrl: mixingStudioAudio?.src || undefined,
               sourceDuration: mixingStudioAudio?.duration || undefined,
               exportFileName: currentSong?.name || undefined,
+              playbackTimeStore: audioPlayer.playbackTimeStore,
             })}
             </ErrorBoundary>
           </Suspense>

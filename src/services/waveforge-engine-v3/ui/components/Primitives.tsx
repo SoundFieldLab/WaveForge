@@ -1,220 +1,87 @@
-/**
- * 基础 UI 组件 —— HyperSoundEngine 风格（framer-motion 微交互）
- */
-
-import type { ReactNode, CSSProperties } from 'react'
-import { motion } from 'framer-motion'
+/** HSE 公共控件：薄透玻璃材质、明确选中状态与原生键盘操作。 */
+import { useId, type ReactNode, type CSSProperties } from 'react'
 import type { HSETheme } from '../hse-theme'
+import '../hse-glass.css'
 
-/* ───────── 点击音效反馈（规划书 C；默认开启，localStorage 'waveforge:ui-click'='0' 关闭） ───────── */
-let clickCtx: AudioContext | null = null
-function uiClick(): void {
-  try {
-    if (typeof localStorage !== 'undefined' && localStorage.getItem('waveforge:ui-click') === '0') return
-    const w = window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }
-    const Ctor = w.AudioContext ?? w.webkitAudioContext
-    if (!Ctor) return
-    if (!clickCtx) clickCtx = new Ctor()
-    const ctx = clickCtx
-    if (ctx.state === 'suspended') void ctx.resume()
-    const o = ctx.createOscillator()
-    const g = ctx.createGain()
-    o.type = 'sine'
-    o.frequency.value = 1320
-    const t = ctx.currentTime
-    g.gain.setValueAtTime(0.0001, t)
-    g.gain.exponentialRampToValueAtTime(0.05, t + 0.004)
-    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05)
-    o.connect(g); g.connect(ctx.destination)
-    o.start(t); o.stop(t + 0.06)
-  } catch { /* 静默：无 AudioContext 或被策略拦截 */ }
-}
-
-/* ───────── 玻璃卡片（hover 上浮 + 边框亮起） ───────── */
 export function GlassCard({ children, theme, className, style }: {
-  children: ReactNode
-  theme: HSETheme
-  className?: string
-  style?: CSSProperties
+  children: ReactNode; theme: HSETheme; className?: string; style?: CSSProperties
 }) {
-  return (
-    <motion.div
-      whileHover={{ y: -2 }}
-      transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-      className={`relative rounded-2xl p-4 overflow-hidden ${className ?? ''}`}
-      style={{
-        background: theme.cardBg,
-        backdropFilter: theme.glassCardBlur,
-        WebkitBackdropFilter: theme.glassCardBlur,
-        border: `1px solid ${theme.cardBorder}`,
-        boxShadow: theme.cardGlow,
-        ...style,
-      }}
-    >
-      {/* 顶部渐变高光线 */}
-      <div className="pointer-events-none absolute inset-x-0 top-0 h-px" style={{ background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent)' }} />
-      {/* 左上角柔光 */}
-      <div className="pointer-events-none absolute -top-8 -left-8 w-24 h-24 rounded-full opacity-60" style={{ background: `radial-gradient(circle, ${theme.accentColor}14 0%, transparent 70%)` }} />
-      {children}
-    </motion.div>
-  )
+  return <div className={`hse-glass-card relative min-w-0 rounded-[20px] p-5 ${className ?? ''}`}
+    style={{ background: theme.cardBg, border: `1px solid ${theme.cardBorder}`, ...style }}>{children}</div>
 }
 
-/* ───────── 胶囊开关（按压微缩） ───────── */
-export function Toggle({ checked, onChange, theme }: {
-  checked: boolean
-  onChange: (v: boolean) => void
-  theme: HSETheme
+export function Toggle({ checked, onChange, theme, label = '启用效果', disabled }: {
+  checked: boolean; onChange: (v: boolean) => void; theme: HSETheme; label?: string; disabled?: boolean
 }) {
-  return (
-    <motion.button
-      type="button"
-      aria-pressed={checked}
-      whileTap={{ scale: 0.9 }}
-      onClick={(e) => { e.stopPropagation(); uiClick(); onChange(!checked) }}
-      className="relative h-6 w-11 shrink-0 rounded-full transition-colors"
-      style={checked
-        ? { background: theme.accentGradient, boxShadow: `0 0 12px ${theme.accentColor}55` }
-        : { backgroundColor: 'rgba(255,255,255,0.15)' }}
-    >
-      <span
-        className="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow-md transition-transform"
-        style={{ transform: checked ? 'translateX(20px)' : 'translateX(0)' }}
-      />
-    </motion.button>
-  )
+  return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled}
+    onClick={(e) => { e.stopPropagation(); onChange(!checked) }}
+    className="hse-glass-switch relative h-7 w-12 shrink-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
+    style={{ outlineColor: theme.accentColor }}>
+    <span aria-hidden="true" className="hse-glass-thumb absolute left-[3px] top-1/2 h-5 w-5 rounded-full"
+      style={{ transform: `translate(${checked ? 20 : 0}px, -50%)` }} />
+  </button>
 }
 
-/* ───────── 滑块 ───────── */
 export function Slider({ label, value, min, max, step, onChange, display, theme, disabled }: {
-  label: string
-  value: number
-  min: number
-  max: number
-  step: number
-  onChange: (v: number) => void
-  display?: string
-  theme: HSETheme
-  disabled?: boolean
+  label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void;
+  display?: string; theme: HSETheme; disabled?: boolean
 }) {
-  return (
-    <div className={`mb-3 ${disabled ? 'opacity-40 pointer-events-none' : ''}`}>
-      <div className="flex items-center justify-between mb-1">
-        <span className={`${theme.textSecondary} text-xs`}>{label}</span>
-        <span className={`hse-mono ${theme.textPrimary} text-xs font-medium`}>{display ?? value}</span>
-      </div>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        className="wf-hse-range w-full h-2 rounded-full appearance-none cursor-pointer"
-        style={{ background: theme.sliderTrack(value, min, max) }}
-      />
+  const id = useId()
+  return <div className={`mb-4 ${disabled ? 'opacity-60' : ''}`}>
+    <div className="mb-2 flex items-center justify-between gap-3">
+      <label htmlFor={id} className={`${theme.textSecondary} text-xs`}>{label}</label>
+      <output htmlFor={id} className={`hse-mono ${theme.textPrimary} text-xs font-medium`}>{display ?? value}</output>
     </div>
-  )
+    <input id={id} type="range" min={min} max={max} step={step} value={value} disabled={disabled}
+      aria-valuetext={display ?? String(value)} onChange={(e) => onChange(parseFloat(e.target.value))}
+      className="wf-hse-range h-2 w-full cursor-pointer appearance-none rounded-full disabled:cursor-not-allowed"
+      style={{ background: theme.sliderTrack(value, min, max), accentColor: theme.accentColor }} />
+  </div>
 }
 
-/* ───────── 分段选择 ───────── */
-export function Segmented<T extends string | boolean | number>({ options, value, onChange, theme, small }: {
-  options: { value: T; label: string }[]
-  value: T
-  onChange: (v: T) => void
-  theme: HSETheme
-  small?: boolean
+export function Segmented<T extends string | boolean | number>({ options, value, onChange, theme, small, label = '选择模式' }: {
+  options: { value: T; label: string }[]; value: T; onChange: (v: T) => void; theme: HSETheme; small?: boolean; label?: string
 }) {
-  return (
-    <div className={`flex gap-1.5 ${small ? '' : 'mb-4'}`}>
-      {options.map((opt) => {
-        const active = value === opt.value
-        return (
-          <motion.button
-            key={String(opt.value)}
-            type="button"
-            whileTap={{ scale: 0.96 }}
-            onClick={() => { uiClick(); onChange(opt.value) }}
-            className={`flex-1 ${small ? 'py-1.5 rounded-lg text-[11px]' : 'py-2 rounded-lg text-xs'} transition-all ${active ? 'text-white font-medium' : theme.textSecondary}`}
-            style={active
-              ? { background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }
-              : { backgroundColor: 'rgba(255,255,255,0.06)' }}
-          >
-            {opt.label}
-          </motion.button>
-        )
-      })}
-    </div>
-  )
+  return <div role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
+    {options.map((opt, index) => {
+      const active = value === opt.value
+      return <button key={String(opt.value)} type="button" role="radio" aria-checked={active} tabIndex={active || (index === 0 && !options.some((option) => option.value === value)) ? 0 : -1}
+        onClick={() => onChange(opt.value)}
+        onKeyDown={(e) => {
+          const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0
+          if (!delta && e.key !== 'Home' && e.key !== 'End') return
+          e.preventDefault()
+          const next = e.key === 'Home' ? 0 : e.key === 'End' ? options.length - 1 : (index + delta + options.length) % options.length
+          onChange(options[next].value)
+          const buttons = e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')
+          buttons?.[next]?.focus()
+        }}
+        className={`hse-glass-choice min-h-9 flex-1 whitespace-nowrap rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${active ? `${theme.textPrimary} font-semibold` : theme.textSecondary}`}
+        style={{ outlineColor: theme.accentColor }}>
+        {opt.label}
+      </button>
+    })}
+  </div>
 }
 
-/* ───────── 动作按钮 ───────── */
 export function ActionBtn({ onClick, children, theme, disabled, ghost }: {
-  onClick: () => void
-  children: ReactNode
-  theme: HSETheme
-  disabled?: boolean
-  ghost?: boolean
+  onClick: () => void; children: ReactNode; theme: HSETheme; disabled?: boolean; ghost?: boolean
 }) {
-  if (ghost) {
-    return (
-      <motion.button
-        type="button"
-        whileHover={{ y: -1 }}
-        whileTap={{ scale: 0.95 }}
-        onClick={() => { uiClick(); onClick() }}
-        disabled={disabled}
-        className={`flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs transition-all hover:brightness-110 disabled:opacity-40 ${theme.textSecondary}`}
-        style={{ backgroundColor: theme.inputBg, border: `1px solid ${theme.cardBorder}` }}
-      >
-        {children}
-      </motion.button>
-    )
-  }
-  return (
-    <motion.button
-      type="button"
-      whileHover={{ y: -1 }}
-      whileTap={{ scale: 0.95 }}
-      onClick={() => { uiClick(); onClick() }}
-      disabled={disabled}
-      className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-white transition-all hover:brightness-110 disabled:opacity-40"
-      style={{ background: theme.accentGradient, boxShadow: `0 4px 14px ${theme.accentColor}44` }}
-    >
-      {children}
-    </motion.button>
-  )
+  return <button type="button" onClick={onClick} disabled={disabled}
+    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : 'text-white'}`}
+    style={{ outlineColor: theme.accentColor }}>{children}</button>
 }
 
-/* ───────── 信息行 ───────── */
 export function InfoLine({ children, theme }: { children: ReactNode; theme: HSETheme }) {
-  return (
-    <div className={`${theme.textTertiary} text-[11px] mt-2 flex items-center gap-1`}>
-      <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><circle cx="6" cy="6" r="5.5" stroke="currentColor" strokeWidth="1"/><text x="6" y="8.5" textAnchor="middle" fill="currentColor" fontSize="7" fontFamily="sans-serif">i</text></svg>
-      {children}
-    </div>
-  )
+  return <div className={`${theme.textTertiary} mt-3 flex items-start gap-2 text-xs leading-relaxed`}>
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 12 12" fill="none" className="mt-0.5 shrink-0">
+      <circle cx="6" cy="6" r="5.5" stroke="currentColor" /><path d="M6 5v4M6 3v.5" stroke="currentColor" />
+    </svg>{children}
+  </div>
 }
 
-/* ───────── 滑块样式注入（含等宽数字类） ───────── */
 export function RangeStyle({ theme }: { theme: HSETheme }) {
-  return (
-    <style>{`
-      .hse-mono { font-family: ui-monospace, 'JetBrains Mono', 'Roboto Mono', SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
-      .wf-hse-range::-webkit-slider-thumb {
-        appearance: none; width: 16px; height: 16px; border-radius: 50%;
-        background: rgba(255,255,255,0.92); border: 2px solid rgba(255,255,255,0.6);
-        box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 3px ${theme.accentColor}44, inset 0 1px 2px rgba(255,255,255,0.8);
-        cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease;
-      }
-      .wf-hse-range::-webkit-slider-thumb:hover { transform: scale(1.2); box-shadow: 0 4px 14px rgba(0,0,0,0.3), 0 0 0 5px ${theme.accentColor}55, inset 0 1px 2px rgba(255,255,255,0.8); }
-      .wf-hse-range::-webkit-slider-thumb:active { transform: scale(1.05); }
-      .wf-hse-range::-moz-range-thumb {
-        width: 16px; height: 16px; border-radius: 50%; background: rgba(255,255,255,0.92); border: 2px solid rgba(255,255,255,0.6);
-        box-shadow: 0 2px 8px rgba(0,0,0,0.25), 0 0 0 3px ${theme.accentColor}44, inset 0 1px 2px rgba(255,255,255,0.8);
-        cursor: pointer; transition: transform 0.15s ease, box-shadow 0.15s ease;
-      }
-      .wf-hse-range::-moz-range-thumb:hover { transform: scale(1.2); }
-    `}</style>
-  )
+  return <style>{`
+    .wf-hse-range { --hse-control-accent: ${theme.accentColor}; }
+  `}</style>
 }
