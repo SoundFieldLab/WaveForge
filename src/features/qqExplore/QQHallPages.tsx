@@ -103,7 +103,7 @@ export function QQArtistsPage({ accent, onPlaySongs, onBack }: { accent: string;
     setError('')
     try {
       const pageNo = reset ? 1 : pageRef.current + 1
-      const res = await fetch(`${API}/api/qq/singer/list?area=${area}&sex=${sex}&pageNo=${pageNo}`, { signal: controller.signal })
+      const res = await fetch(`${API}/qq/singer/list?area=${area}&sex=${sex}&pageNo=${pageNo}`, { signal: controller.signal })
       const data = await res.json()
       if (controller.signal.aborted) return
       const raw = data?.data?.list || data?.data?.singers?.singerlist || data?.data?.singerlist || []
@@ -134,11 +134,16 @@ export function QQArtistsPage({ accent, onPlaySongs, onBack }: { accent: string;
     if (playingMid === singer.mid) return
     setPlayingMid(singer.mid)
     try {
-      const res = await fetch(`${API}/api/qq/singer/songs?singermid=${encodeURIComponent(singer.mid)}&num=30`)
+      // 服务端只有 /qq/artist/songs（此前调用的 /qq/singer/songs 不存在 → 404 且被静默吞掉）
+      const res = await fetch(`${API}/qq/artist/songs?singermid=${encodeURIComponent(singer.mid)}&num=30`)
       const data = await res.json()
+      if (data?.errMsg) throw new Error(String(data.errMsg))
       const list: Song[] = (data?.songs || []).map((item: any) => item?.song || item).filter(Boolean)
       if (list.length) onPlaySongs(list[0], list)
-    } catch { /* 静默：点歌手只是快捷播放 */ }
+      else window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '该歌手暂无可播放的歌曲', type: 'info' } }))
+    } catch (error) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: error instanceof Error ? error.message : '歌手歌曲播放失败', type: 'error' } }))
+    }
     finally { setPlayingMid('') }
   }
 
@@ -248,7 +253,7 @@ export function QQPlaylistSquarePage({ accent, presetCategory, onOpenPlaylist, o
   // 分类 chips
   useEffect(() => {
     const controller = new AbortController()
-    fetch(`${API}/api/qq/songlist/category`, { signal: controller.signal })
+    fetch(`${API}/qq/songlist/category`, { signal: controller.signal })
       .then(res => res.json())
       .then(data => {
         const groups = data?.data || []
@@ -280,7 +285,7 @@ export function QQPlaylistSquarePage({ accent, presetCategory, onOpenPlaylist, o
     setError('')
     try {
       const page = reset ? 1 : pageRef.current + 1
-      const res = await fetch(`${API}/api/qq/songlist/list?id=${activeCat}&page=${page}&pageSize=30&sort=5`, { signal: controller.signal })
+      const res = await fetch(`${API}/qq/songlist/list?id=${activeCat}&page=${page}&pageSize=30&sort=5`, { signal: controller.signal })
       const data = await res.json()
       if (controller.signal.aborted) return
       const raw = data?.data?.list || []
@@ -396,7 +401,7 @@ export function QQZonePage({ zoneTitle, accent, onOpenPlaylist, onBack }: { zone
     const controller = new AbortController()
     const keyword = zoneTitle.replace(/专区$/, '').trim() || zoneTitle
     setLoading(true)
-    fetch(`${API}/api/qq/search?keywords=${encodeURIComponent(keyword)}&type=playlist&limit=40`, { signal: controller.signal })
+    fetch(`${API}/qq/search?keywords=${encodeURIComponent(keyword)}&type=playlist&limit=40`, { signal: controller.signal })
       .then(res => res.json())
       .then(data => {
         const list = data?.playlists || []

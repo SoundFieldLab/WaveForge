@@ -34,6 +34,8 @@ export interface GaplessIntegrationOptions {
   playAt: (index: number, options: any) => Promise<boolean>
   prepareAudioUrl: (song: GaplessSong) => Promise<string>
   onStateChange?: (state: any) => void
+  /** albumGapless handoff 失败后的看门狗出口：把 useAudioPlayer 的 stuck deadline 拨到指定时刻（null 清除） */
+  onStuckDeadline?: (deadline: number | null) => void
   /** 分析期静音边界快查（AutoMix 缓存复用；见 AlbumGaplessService.deps） */
   getTrackAnalysis?: (trackKey: string) => { introSilence: number; outroSilence: number } | null
 }
@@ -54,6 +56,7 @@ export class GaplessIntegration {
       getPlayQueue: options.getPlayQueue,
       canAdvance: options.canAdvance,
       playAt: options.playAt,
+      onStuckDeadline: options.onStuckDeadline,
       onTransitionStart: (targetTrackKey, duration) => {
         this.beginVisualTransition(options.getCurrentTrackKey(), targetTrackKey, duration, false)
       },

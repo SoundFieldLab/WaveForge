@@ -1301,6 +1301,11 @@ export function useAudioPlayer(
   const forceEndStuckTransition = useCallback((reason: string) => {
     if (transitionStateRef.current !== 'running-transition') return
     logAutomixBackend('transition:watchdog', `${reason} · strategy=${transitionStrategyRef.current} · 悬置超过截止时间，强制收尾对齐 UI`)
+    // 看门狗收尾必须失效在途 handoff 续体：不递增 revision 的话，迟到的
+    // startTargetAfterBuffer 仍会把目标 deck 拉满增益起播（提交被状态守卫丢弃 →
+    // "听到下一首、界面停在上一首"）；不清 handoffPendingCount 会让源曲 ended 被永久忽略。
+    transitionExecutionRevisionRef.current += 1
+    handoffPendingCountRef.current = 0
     if (transitionProgressAnimationRef.current !== null) {
       cancelAnimationFrame(transitionProgressAnimationRef.current)
       transitionProgressAnimationRef.current = null
@@ -2987,6 +2992,12 @@ export function useAudioPlayer(
         }
         return false
       },
+      // albumGapless handoff 被拒/失败后的看门狗出口：deadline 只在 startTransition 设置，
+      // albumGapless 路径不经它 → 无人设 deadline，handleTimeUpdate 又在过渡态直接 return，
+      // 表现为静音 + 歌词/进度冻结。失败时把 deadline 拨到"现在"，看门狗下一拍立即收尾。
+      onStuckDeadline: (deadline: number | null) => {
+        transitionStuckDeadlineRef.current = deadline
+      },
       prepareAudioUrl: async (song) => {
         try {
           const prepared = await window.electron?.audioDownload?.prepare?.(song.url, song.key)
@@ -3863,6 +3874,20 @@ export function useAudioPlayer(
         emit({ isPlaying: false })
         return
       }
+      if (transitionStateRef.current === 'running-transition' || handoffPendingCountRef.current > 0 || transitionBufferActiveRef.current) {
+        // AutoMix/AI 长混音过渡中的暂停：源 deck 被静音但继续驱动时间线，**已 ended 的
+        // 源 deck** 若走下方 active.paused → play() 分支会从头起播并让过渡继续——
+        // 用户的"暂停"被吞掉。统一走取消路径：杀掉在途过渡与续体，暂停当前在响的 deck。
+        cancelScheduledTransition('paused during running transition')
+        const audible = [getActiveAudio(), getStandbyAudio()].find(deck =>
+          deck && !deck.paused && (deck.currentSrc || deck.src)) || getActiveAudio()
+        audible?.pause()
+        transitionBufferActiveRef.current = false
+        gaplessIntegrationRef.current?.reset()
+        try { transitionVisualStore.end(false) } catch { /* 视觉收尾失败不阻塞 */ }
+        emit({ isPlaying: false })
+        return
+      }
       if (active.paused) {
         await active.play()
         setTransitionState('playing', { isPlaying: true })
@@ -3933,6 +3958,32 @@ export function useAudioPlayer(
     }
     const active = getActiveAudio()
     if (!active) return
+    // 过渡动画窗口内（视觉已切到目标曲）：time 是目标曲时间轴上的值，写进源 deck
+    // 会按源曲时长截断且听感错位。统一取消过渡后按视觉轨道选 deck 定位。
+    const visual = transitionVisualStore.getSnapshot()
+    const standbyDeck = getStandbyAudio()
+    if (visual.active && visual.switched && standbyDeck) {
+      const target = standbyDeck
+      cancelScheduledTransition('seek during transition (visual on target)')
+      transitionBufferActiveRef.current = false
+      const targetDuration = Number.isFinite(target.duration) && target.duration > 0 ? target.duration : Infinity
+      target.currentTime = Math.max(0, Math.min(time, targetDuration))
+      if (target.paused && transitionStateRef.current !== 'idle') {
+        void target.play().catch(() => undefined)
+      }
+      // 提升 target 为当前 deck（与 handoff 提升同款），UI/后续 seek 落在正确时间轴
+      setDeckGain(getActiveGain(), getActiveAudio(), 0)
+      setDeckGain(getStandbyGain(), target, 1)
+      activePrimaryRef.current = !activePrimaryRef.current
+      if (nextMetadataRef.current) {
+        currentMetadataRef.current = nextMetadataRef.current
+        nextMetadataRef.current = null
+      }
+      setAudioElement(target)
+      try { transitionVisualStore.end(true) } catch { /* 视觉收尾失败不阻塞 */ }
+      emit({ currentTime: target.currentTime, duration: finiteDuration(target.duration) })
+      return
+    }
     const wasPlaying = !active.paused
     // 先取出当前计划：cancelScheduledTransition 会把它清空，而"seek 落在过渡窗口之前"时
     // 旧计划仍然可用（preserveNext 默认 true，standby 的 src 与元数据都保留），无需重新
@@ -4034,7 +4085,7 @@ export function useAudioPlayer(
     if (wasPlaying && active.paused) {
       void active.play().catch(() => undefined)
     }
-  }, [cancelScheduledTransition, emit, getActiveAudio, getActiveGain, isAlbumPlayback, prepareAutoMix, prepareGaplessTransition, resolveBoundaryStrategy, setDeckGain, setTransitionState, finiteDuration])
+  }, [cancelScheduledTransition, emit, getActiveAudio, getActiveGain, isAlbumPlayback, prepareAutoMix, prepareGaplessTransition, resolveBoundaryStrategy, setDeckGain, setTransitionState, finiteDuration, transitionVisualStore])
 
   const setVolume = useCallback((volume: number) => {
     const clamped = Math.max(0, Math.min(1, volume))

@@ -22,7 +22,7 @@ const QQ_QR_CHANNELS = [
 interface LoginViewProps {
   platform: MusicPlatform
   onCancel: () => void
-  onLoginSuccess: (cookie: string, username?: string) => void
+  onLoginSuccess: (cookie: string, username?: string, extra?: { userId?: string; avatar?: string }) => void
 }
 
 export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginViewProps) {
@@ -395,7 +395,7 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     if (platform === 'kugou') {
       return (
         <Suspense fallback={null}>
-          <KugouLoginPanel onClose={onCancel} onLoginSuccess={(cookie: string) => onLoginSuccess(cookie)} />
+          <KugouLoginPanel onClose={onCancel} onLoginSuccess={(cookie: string, username?: string, extra?: { userId?: string; avatar?: string }) => onLoginSuccess(cookie, username, extra)} />
         </Suspense>
       )
     }

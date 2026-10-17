@@ -10,6 +10,8 @@ import { isAndroid } from '../platform'
 
 let ws: WebSocket | null = null
 let lastReportedLogs = 0
+// :3008 调试桥配对令牌（POST /api/tv/debug-mode 返回；3008 的 verifyClient 校验它）
+let debugBridgeToken = ''
 
 function syncBackend(enabled: boolean): void {
   try {
@@ -17,7 +19,10 @@ function syncBackend(enabled: boolean): void {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
-    }).catch(() => {})
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { debugBridgeToken = String(data?.debugToken || '') })
+      .catch(() => {})
   } catch {
     // ignore
   }
@@ -35,8 +40,13 @@ function connectWs(): void {
 }
 
 function connectWsDirect(): void {
+  if (!debugBridgeToken) {
+    // verifyClient 要求令牌：开关刚打开时 syncBackend 可能还没回来，等下一轮重连
+    if (isDebugMode()) setTimeout(connectWs, 3000)
+    return
+  }
   try {
-    ws = new WebSocket('ws://localhost:3008/ws')
+    ws = new WebSocket(`ws://localhost:3008/ws?token=${encodeURIComponent(debugBridgeToken)}`)
   } catch {
     return
   }
@@ -158,7 +168,7 @@ export function installDebugRemote(): () => void {
   const sync = () => {
     const enabled = isDebugMode()
     syncBackend(enabled)
-    if (enabled) connectWs()
+    if (enabled) setTimeout(connectWs, 400) // 等 syncBackend 返回 debugToken 再连（无令牌会被 verifyClient 拒）
     else closeWs()
   }
   const onWindowError = (e: ErrorEvent) => {

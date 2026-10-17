@@ -150,7 +150,9 @@ async function sweepLargeCache(db: IDBDatabase): Promise<void> {
       }
       const value = cursor.value as { savedAt?: number; expiresAt?: number } | undefined
       const expired = Boolean(value?.expiresAt && now > value.expiresAt)
-      if (!expired) found.push({ key: cursor.primaryKey, savedAt: Number(value?.savedAt) || 0, expired })
+      // 过期项同样要收集（doomed 候选）：原实现只收活项，entries.filter(expired) 恒空，
+      // 过期条目永远删不掉、持续占用 IndexedDB 配额。
+      found.push({ key: cursor.primaryKey, savedAt: Number(value?.savedAt) || 0, expired })
       cursor.continue()
     }
     request.onerror = () => reject(request.error)

@@ -436,9 +436,14 @@ if (app.isPackaged) app.setAppUserModelId('com.waveforge.desktop')
 // ① 禁止渲染层为 webview 指定任意 partition（防借白名单 URL 携带任意会话）；
 // ② webview 的导航不经过主窗 guardAgainstExternalNavigation，这里按源限制可挂载的站点。
 // 网易云探索页 webTarget 目前只指向 music.163.com 系；放宽白名单需同步改前端入口。
+//
+// 注意：will-attach-webview 在 **embedder**（宿主窗口）的 webContents 上触发，
+// 挂在 guest（type === 'webview'）的 contents 上是死代码——guest contents 是
+// attach 之后才创建的。按 Electron 官方安全清单，应监听 app 级
+// 'web-contents-created' 里 embedder 的创建事件并在其上注册守卫。
 const WEBVIEW_ALLOWED_HOST_SUFFIXES = ['.music.163.com', 'music.163.com']
 app.on('web-contents-created', (_event, contents) => {
-  if (contents.getType() !== 'webview') return
+  // embedder 守卫：所有窗口的 webContents 都可能挂 <webview>，统一在 attach 前校验
   contents.on('will-attach-webview', (event, webPreferences, params) => {
     const src = String(params?.src || '')
     try {
@@ -464,6 +469,10 @@ app.on('web-contents-created', (_event, contents) => {
       if (webPreferences.partition && !/^persist:waveforge|^waveforge/.test(webPreferences.partition)) {
         delete webPreferences.partition
       }
+      // 第三方站点一律沙箱运行：guest 进程崩溃/漏洞不触及主进程特权面
+      webPreferences.sandbox = true
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
     }
   })
 })
@@ -592,12 +601,14 @@ function isAllowedNavigationTarget(url) {
   return false
 }
 
+/** 主窗导航守卫：拦截 will-navigate + will-redirect（服务器 302 不触发 will-navigate）。
+ *  参数必须是 webContents——融合重建路径曾误传 BrowserWindow，守卫静默失效。 */
 function guardAgainstExternalNavigation(webContents) {
-  webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedNavigationTarget(url)) {
-      event.preventDefault()
-    }
-  })
+  const blockIfExternal = (event, url) => {
+    if (!isAllowedNavigationTarget(url)) event.preventDefault()
+  }
+  webContents.on('will-navigate', blockIfExternal)
+  webContents.on('will-redirect', blockIfExternal)
 }
 
 let mainWindow = null
@@ -2439,6 +2450,12 @@ const TASKBAR_WIDGET_DEFAULTS = { enabled: false, position: 'right', width: 340,
 let taskbarWidgetSettings = { ...TASKBAR_WIDGET_DEFAULTS }
 let taskbarWidgetWindow = null
 
+// 主窗文档白名单（assertMainSender / 权限处理器共用）：dev server 或打包后的应用页面
+const mainDocumentUrlAllowed = createDocumentUrlMatcher([
+  devServerUrl,
+  pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+])
+
 // IPC 权限同时绑定窗口身份、顶层 frame 和当前文档 URL。辅助窗口只保留各自
 // 播控能力；凭据、路径、启动器、模型、下载与更新操作仅主应用文档可调用。
 const trustedIpc = createTrustedIpcGuard({
@@ -2488,6 +2505,14 @@ const guardTrustedIpc = trustedIpc.handle
 function assertMainSender(event) {
   if (!mainWindow || event?.sender !== mainWindow.webContents || event?.senderFrame !== mainWindow.webContents.mainFrame) {
     throw new Error('不允许的 IPC 请求来源')
+  }
+  // sender 相等只说明"来自主窗 webContents"，不说明主窗还在我们自己的文档上：
+  // 融合模式下主窗一旦被导航到外部站点，该页面仍持有受信来源身份，可调用剪贴板/
+  // 酷狗会话/设备授权重置等敏感 IPC。当前文档 URL 必须仍是应用自身页面
+  // （与 trustedIpc roles.main.isAllowedUrl 同一白名单）。
+  const currentUrl = String(mainWindow.webContents.getURL() || '')
+  if (!mainDocumentUrlAllowed(currentUrl)) {
+    throw new Error('不允许的 IPC 请求来源（主窗文档不可信）')
   }
 }
 
@@ -4782,6 +4807,10 @@ async function createQQLoginWindow() {
         }
       }
     })
+    // 服务器 302 不触发 will-navigate：登录窗持有平台 Cookie，302 带到外部域即泄漏
+    qqLoginWindow.webContents.on('will-redirect', (event, url) => {
+      if (!isQQDomain(url)) event.preventDefault()
+    })
     // 阻止 window.open 创建新的 Electron 窗口；外链一律交给系统默认浏览器。
     qqLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(String(url || ''))) {
@@ -5000,6 +5029,10 @@ async function createKugouLoginWindow() {
             event.preventDefault()
             if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
           }
+        })
+        // 302 守卫（同 will-navigate）：登录窗共享会话 Cookie
+        kugouLoginWindow.webContents.on('will-redirect', (event, url) => {
+          if (!isKugouDomain(url)) event.preventDefault()
         })
         kugouLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
           if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
@@ -5360,6 +5393,10 @@ async function createSpotifyLoginWindow(clientId) {
           if (/^https?:\/\//i.test(String(url || ''))) {
             shell.openExternal(String(url)).catch(() => {})
           }
+        })
+        // 302 守卫（同 will-navigate）：登录窗持有会话 Cookie
+        spotifyLoginWindow.webContents.on('will-redirect', (event, url) => {
+          if (!/^https:\/\/([a-z0-9-]+\.)*(spotify\.com|scdn\.co)\//i.test(String(url || ''))) event.preventDefault()
         })
         spotifyLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
           if (/^https?:\/\//i.test(String(url || ''))) {
@@ -5848,6 +5885,14 @@ async function finishQqQrLogin(session_, redirectUrl) {
     } catch { /* 解析失败一律拦 */ }
     event.preventDefault()
   })
+  win.webContents.on('will-redirect', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'qq.com' || host.endsWith('.qq.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   const targetSession = win.webContents.session
   win.webContents.setUserAgent(REAL_CHROME_UA)
@@ -6140,6 +6185,14 @@ function ensureDouyinBridge() {
     } catch { /* 解析失败一律拦 */ }
     event.preventDefault()
   })
+  douyinBridgeWindow.webContents.on('will-redirect', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'douyin.com' || host.endsWith('.douyin.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
   douyinBridgeWindow.webContents.on('destroyed', () => {
     douyinBridgeReady = false
     douyinBridgeWindow = null
@@ -6269,6 +6322,14 @@ function ensureKugouBridge() {
   kugouBridgeWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   // will-navigate 守卫：桥窗共享主 session，只放行酷狗系域（同 douyin 桥）
   kugouBridgeWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const parsed = new URL(String(url || ''))
+      const host = parsed.hostname.toLowerCase()
+      if (parsed.protocol === 'https:' && (host === 'kugou.com' || host.endsWith('.kugou.com'))) return
+    } catch { /* 解析失败一律拦 */ }
+    event.preventDefault()
+  })
+  kugouBridgeWindow.webContents.on('will-redirect', (event, url) => {
     try {
       const parsed = new URL(String(url || ''))
       const host = parsed.hostname.toLowerCase()
@@ -7238,6 +7299,10 @@ async function createAppleLoginWindow() {
             if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
           }
         })
+        // 302 守卫（同 will-navigate）：Apple 登录窗持有会话 Cookie
+        appleLoginWindow.webContents.on('will-redirect', (event, url) => {
+          if (!isAppleLoginAllowedDomain(url)) event.preventDefault()
+        })
         appleLoginWindow.webContents.setWindowOpenHandler(({ url }) => {
           if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
           return { action: 'deny' }
@@ -7807,6 +7872,9 @@ function createAppleSubscribeWindow() {
       if (/^https?:\/\//i.test(String(url || ''))) void shell.openExternal(String(url)).catch(() => {})
     }
   })
+  appleSubscribeWindow.webContents.on('will-redirect', (event, url) => {
+    if (!isAppleLoginAllowedDomain(url)) event.preventDefault()
+  })
   appleSubscribeWindow.webContents.setWindowOpenHandler(({ url }) => {
     // 支付/条款等 window.open 一律外开浏览器，避免产生不受控的无引用窗口
     if (/^https?:\/\//i.test(String(url || ''))) void shell.openExternal(String(url)).catch(() => {})
@@ -8244,15 +8312,18 @@ async function createQQSkillKeyWindow() {
   // 授权限定官方技能页来源：该窗口会加载 y.qq.com 远程内容并可被注入脚本，
   // 不校验 requestingUrl 的话窗口内任何落地页/iframe 都自动获得系统剪贴板读取权。
   const qmkAllowedOrigin = new URL(QMK_OFFICIAL_KEY_URL).origin
+  // origin 精确比较（URL().origin 规范化后 ===）：startsWith 前缀匹配会被
+  // https://y.qq.com.evil.com / https://y.qq.com:8080 之类的地址绕过。
+  const isQmkOrigin = (value) => {
+    try { return new URL(String(value || '')).origin === qmkAllowedOrigin } catch { return false }
+  }
   qmkSession.setPermissionRequestHandler((wc, permission, callback, details) => {
     const okPermission = permission === 'clipboard-sanitized-write' || permission === 'clipboard-read'
-    const requestingUrl = String(details?.requestingUrl || "")
-    const okOrigin = requestingUrl.startsWith(qmkAllowedOrigin)
-    callback(Boolean(okPermission && okOrigin && wc === qqSkillKeyWindow?.webContents))
+    callback(Boolean(okPermission && isQmkOrigin(details?.requestingUrl) && wc === qqSkillKeyWindow?.webContents))
   })
   qmkSession.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
     const okPermission = permission === 'clipboard-sanitized-write' || permission === 'clipboard-read'
-    return Boolean(okPermission && String(requestingOrigin || '').startsWith(qmkAllowedOrigin))
+    return Boolean(okPermission && isQmkOrigin(requestingOrigin))
   })
   try {
     await qmkSession.clearStorageData()
@@ -8309,6 +8380,9 @@ async function createQQSkillKeyWindow() {
       if (isQmkAllowedDomain(url)) return
       event.preventDefault()
       if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
+    })
+    qqSkillKeyWindow.webContents.on('will-redirect', (event, url) => {
+      if (!isQmkAllowedDomain(url)) event.preventDefault()
     })
     qqSkillKeyWindow.webContents.setWindowOpenHandler(({ url }) => {
       if (/^https?:\/\//i.test(String(url || ''))) shell.openExternal(String(url)).catch(() => {})
@@ -9934,10 +10008,7 @@ app.whenReady().then(async () => {
   const isTrustedPermissionRequester = (webContents) => {
     if (!mainWindow || webContents !== mainWindow.webContents || webContents.isDestroyed()) return false
     const url = webContents.getURL?.() || ''
-    return createDocumentUrlMatcher([
-      devServerUrl,
-      pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
-    ])(url)
+    return mainDocumentUrlAllowed(url)
   }
   session.defaultSession.setPermissionCheckHandler((webContents, permission) => (
     isTrustedPermissionRequester(webContents) && (permission === 'geolocation' || permission === 'media')

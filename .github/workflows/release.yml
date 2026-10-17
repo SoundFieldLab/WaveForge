@@ -59,6 +59,15 @@ jobs:
       - name: 添加 Gitee remote（update.json 推送目标）
         run: git remote add gitee "https://gitee.com/kirito666233/wave-forge.git"
 
+      - name: 写出清单签名私钥
+        env:
+          LICENSE_PRIVATE_KEY: ${{ secrets.LICENSE_PRIVATE_KEY }}
+        if: env.LICENSE_PRIVATE_KEY != ''
+        shell: bash
+        run: |
+          mkdir -p "$APPDATA/WaveForge License Studio"
+          printf '%s\n' "$LICENSE_PRIVATE_KEY" > "$APPDATA/WaveForge License Studio/license-private-key.pem"
+
       - name: 发布到 Gitee + GitHub，生成并推送 update.json
         run: |
           NOTES=$(git tag -l --format='%(subject)%0a%0a%(body)' "$GITHUB_REF_NAME" | sed 's/^ *//' | sed '/^$/d' | head -20)

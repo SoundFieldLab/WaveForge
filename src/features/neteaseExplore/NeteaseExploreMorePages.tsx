@@ -3,6 +3,8 @@ import { ArrowLeft, Check, ChevronDown, Headphones, Loader2, Plus, UserPlus } fr
 import type { Song } from '../../services/musicApi'
 import { getApiBase } from '../../services/apiConfig'
 import { getUserRecordRank } from '../../services/musicApi'
+import { getPlatformCookie } from '../../services/platforms'
+import { cookieHeaders } from '../../services/cookieRequest'
 import { NeteaseNativeBlockView, type ResourceCallbacks } from './NeteaseResourceView'
 import type { NeteaseNativeBlock, NeteaseNativeResource } from './model'
 import { normalizeNeteaseResource } from './model'
@@ -122,7 +124,7 @@ export function NeteaseArtistBrowsePage({ accent, callbacks, onBack }: { accent:
   useEffect(() => {
     // 已关注的歌手：用于点亮「已关注」状态（失败静默，不影响浏览）
     const controller = new AbortController()
-    fetch(getApiBase() + '/api/netease/artist/sublist?limit=100', { signal: controller.signal })
+    fetch(getApiBase() + '/netease/artist/sublist?limit=100', { signal: controller.signal, headers: cookieHeaders(getPlatformCookie('netease')) })
       .then(res => res.json())
       .then(data => {
         const list = data?.data?.data || data?.data?.artists || data?.artists || []
@@ -141,7 +143,7 @@ export function NeteaseArtistBrowsePage({ accent, callbacks, onBack }: { accent:
     setError('')
     try {
       const offset = reset ? 0 : offsetRef.current
-      const res = await fetch(`${getApiBase()}/api/netease/artist/list?type=${gender}&area=${area}&limit=30&offset=${offset}`, { signal: controller.signal })
+      const res = await fetch(`${getApiBase()}/netease/artist/list?type=${gender}&area=${area}&limit=30&offset=${offset}`, { signal: controller.signal })
       const data = await res.json()
       if (controller.signal.aborted) return
       const list: NeteaseArtistItem[] = (data?.artists || []).map((item: any) => ({ id: Number(item.id), name: String(item.name || ''), picUrl: String(item.picUrl || '') }))
@@ -173,9 +175,9 @@ export function NeteaseArtistBrowsePage({ accent, callbacks, onBack }: { accent:
       return next
     })
     try {
-      const res = await fetch(getApiBase() + '/api/netease/artist/subscribe', {
+      const res = await fetch(getApiBase() + '/netease/artist/subscribe', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...cookieHeaders(getPlatformCookie('netease')) },
         body: JSON.stringify({ id: artist.id, t: followed ? 0 : 1 }),
       })
       const data = await res.json()
@@ -293,8 +295,8 @@ export function NeteaseMusicZonePage({ accent, callbacks, onBack }: { accent: st
   useEffect(() => {
     const controller = new AbortController()
     Promise.all([
-      fetch(getApiBase() + '/api/netease/top/album?limit=30', { signal: controller.signal }).then(res => res.json()),
-      fetch(getApiBase() + '/api/netease/top/song?type=0', { signal: controller.signal }).then(res => res.json()),
+      fetch(getApiBase() + '/netease/top/album?limit=30', { signal: controller.signal }).then(res => res.json()),
+      fetch(getApiBase() + '/netease/top/song?type=0', { signal: controller.signal }).then(res => res.json()),
     ]).then(([albumPayload, songPayload]) => {
       if (controller.signal.aborted) return
       const albumList: NeteaseAlbumItem[] = (albumPayload?.albums || []).map((item: any) => ({
@@ -385,7 +387,7 @@ export function NeteaseTreasureLibraryPage({ accent, callbacks, onBack }: { acce
     setError('')
     try {
       const beforeParam = reset ? '' : (beforeRef.current != null ? `&before=${beforeRef.current}` : '')
-      const res = await fetch(`${getApiBase()}/api/netease/playlist/highquality?cat=${encodeURIComponent(cat)}&limit=30${beforeParam}`, { signal: controller.signal })
+      const res = await fetch(`${getApiBase()}/netease/playlist/highquality?cat=${encodeURIComponent(cat)}&limit=30${beforeParam}`, { signal: controller.signal })
       const data = await res.json()
       if (controller.signal.aborted) return
       const list = data?.playlists || []

@@ -37,8 +37,8 @@ export default function LoginButton({ platform, isLoggedIn, username, onLogin, o
             ? 'bg-orange-500 hover:bg-orange-600'
             : 'bg-sky-500 hover:bg-sky-600'
 
-  const handleLoginSuccess = (cookie: string, extraUsername?: string) => {
-    onLogin(cookie, extraUsername)
+  const handleLoginSuccess = (cookie: string, extraUsername?: string, extra?: { avatar?: string; userId?: string }) => {
+    onLogin(cookie, extraUsername, extra)
     setShowLoginPanel(false)
   }
 

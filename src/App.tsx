@@ -4865,6 +4865,10 @@ function App() {
     const cacheKey = `${platform}:${playlistId}`
     const cached = playlistDetailCacheRef.current.get(cacheKey)
     if (cached && Date.now() - cached.at < 60_000) {
+      // 缓存命中同样要推进请求序号并复位 loading：否则先打开未缓存歌单 A（慢）、
+      // 再打开已缓存歌单 B 时，A 返回的序号仍是最新 → B 被 A 覆盖，loading 也错乱。
+      playlistDetailRequestSeqRef.current += 1
+      setDetailPlaylistLoading(false)
       setDetailPlaylist(cached.payload)
       setDetailPlaylistOpen(true)
       return
@@ -5230,12 +5234,19 @@ function App() {
     const insertAt = playNextCursorRef.current.at
     const prependInstead = currentIndexRef.current < 0
     setPlaylist(prev => {
-      if (prev.length === 0) return [song]
-      if (prependInstead) return [song, ...prev]
-      const at = Math.max(0, Math.min(insertAt, prev.length))
-      const newPlaylist = [...prev]
-      newPlaylist.splice(at, 0, song)
-      return newPlaylist
+      const next = prev.length === 0
+        ? [song]
+        : prependInstead
+          ? [song, ...prev]
+          : (() => {
+              const copy = [...prev]
+              copy.splice(Math.max(0, Math.min(insertAt, prev.length)), 0, song)
+              return copy
+            })()
+      // ref 立即回写：setTimeout(0) 的重预载读 playlistRef.current，不等 React 提交
+      // （否则回调里拿到的还是旧队列，按旧顺序预载原"下一首"，插入曲被跳过）
+      playlistRef.current = next
+      return next
     })
     playNextCursorRef.current = { base: currentIndexRef.current, at: insertAt + 1 }
     // 索引类副作用移出 setState updater：updater 必须是纯函数（StrictMode/并发下可能被重放）
@@ -5250,7 +5261,10 @@ function App() {
     const insertAffectsUpcoming = playlist.length > 0 && !prependInstead && insertAt > currentIndexRef.current
     if (insertAffectsUpcoming) {
       const nextRevision = bumpQueueRevision()
-      window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, nextRevision, playMode), 0)
+      // 预载必须读新队列：setTimeout 回调执行时本渲染帧的 playlist 闭包还是旧数组，
+      // 按旧顺序预载原"下一首"，提交时刚插入的曲子会被静默跳过（音频/UI 跳错曲目）。
+      // 传 playlistRef.current（state 回写同步见上方索引副作用注释）。
+      window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, nextRevision, playMode, playlistRef.current), 0)
     }
 
     // 显示全局消息提示
@@ -8462,6 +8476,8 @@ function App() {
 
   const handleNeteaseLogout = () => {
     clearLocalListeningHistory()
+    // 歌单详情会话缓存按账号冻结：登出/切号不清会把上一账号的 60s 缓存直接展示给下一个用户
+    playlistDetailCacheRef.current.clear()
     setNeteaseLoggedIn(false)
     setNeteaseUsername('')
     setNeteaseAvatar('')
@@ -8587,6 +8603,8 @@ function App() {
 
   const handleQQLogout = () => {
     clearLocalListeningHistory()
+    // 歌单详情会话缓存按账号冻结：登出/切号不清会串号（同 handleNeteaseLogout）
+    playlistDetailCacheRef.current.clear()
     setQQLoggedIn(false)
     setQQUsername('')
     setQQAvatar('')
@@ -8911,6 +8929,8 @@ function App() {
   }
   const handleSpotifyLogout = () => {
     clearLocalListeningHistory()
+    // 歌单详情会话缓存按账号冻结：登出/切号不清会串号（同 handleNeteaseLogout）
+    playlistDetailCacheRef.current.clear()
     removeSecureToken('spotify_access_token')
     removeSecureToken('spotify_refresh_token')
     localStorage.removeItem('spotify_username')
@@ -8926,22 +8946,38 @@ function App() {
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify' } }))
     addToast('Spotify 已退出登录', 'info')
   }
-  const handleKugouLogin = (cookie: string, username?: string) => {
+  const handleKugouLogin = (cookie: string, username?: string, extra?: { userId?: string; avatar?: string }) => {
     // 仅当 Cookie 含真实登录凭据（KuGoo 会话 或 kg_token）才算登录
     const loggedIn = Boolean(cookie && (/KuGoo=/.test(cookie) || /KugooID=/.test(cookie) || /kg_token/.test(cookie)))
     setKugouLoggedIn(loggedIn)
     if (loggedIn) {
       setSecureToken('kugou_cookie', cookie)
       // 换号防护：旧账号（扫码通道）留下的 user_id/avatar 不清会让喜欢缓存归属错账号。
-      // 此路径后续自愈会拉新账号信息重新写入；扫码通道不经过这里不受影响。
+      // 扫码面板在回调前把新账号的 userid/头像落了盘——这里先读出本次登录的值再清，
+      // 否则同账号重登（如凭据过期重扫）会把刚写入的 user_id 删成空串，红心/加歌单
+      // 提示"未登录"（面板回调带了昵称 → 自愈分支被跳过，只能等重启恢复）。
+      const pendingUserId = extra?.userId || localStorage.getItem('kugou_user_id') || ''
+      const pendingAvatar = extra?.avatar || localStorage.getItem('kugou_avatar') || ''
+      const pendingUsername = username || localStorage.getItem('kugou_username') || ''
       localStorage.removeItem('kugou_user_id')
       localStorage.removeItem('kugou_avatar')
+      localStorage.removeItem('kugou_username')
       setKugouUserId('')
       setKugouAvatar('')
-      if (username) {
-        setKugouUsername(username)
-        localStorage.setItem('kugou_username', username)
-      } else {
+      setKugouUsername('')
+      if (pendingUsername) {
+        setKugouUsername(pendingUsername)
+        localStorage.setItem('kugou_username', pendingUsername)
+      }
+      if (pendingUserId) {
+        setKugouUserId(pendingUserId)
+        localStorage.setItem('kugou_user_id', pendingUserId)
+      }
+      if (pendingAvatar) {
+        setKugouAvatar(pendingAvatar)
+        localStorage.setItem('kugou_avatar', pendingAvatar)
+      }
+      if (!username && !pendingUsername) {
         // 未带回昵称：用隐藏窗口桥/代理拉取用户信息自愈（www.kugou.com 对服务端请求有 WAF，优先桥）
         void import('./services/kugouService').then(({ fetchKugouUserInfo }) =>
           fetchKugouUserInfo(cookie).then((info: any) => {
@@ -8973,6 +9009,8 @@ function App() {
   }
   const handleKugouLogout = () => {
     clearLocalListeningHistory()
+    // 歌单详情会话缓存按账号冻结：登出/切号不清会串号（同 handleNeteaseLogout）
+    playlistDetailCacheRef.current.clear()
     removeSecureToken('kugou_cookie')
     localStorage.removeItem('kugou_username')
     localStorage.removeItem('kugou_avatar')
@@ -9036,6 +9074,8 @@ function App() {
     if (cookie) addToast('汽水音乐登录成功', 'success')
   }
   const handleSodaLogout = () => {
+    // 歌单详情会话缓存按账号冻结：登出/切号不清会串号（同 handleNeteaseLogout）
+    playlistDetailCacheRef.current.clear()
     // 主进程侧同步清理：auth-v6 分区的 .qishui.com Cookie/本地存储 + soda-qr-login.json 会话字段，
     // 否则换账号后旧凭据仍有效；TV/旧版无此桥（clearSodaLogin 不存在）时跳过，仅清渲染层四键
     const bridge = (window as any).electron

@@ -30,7 +30,9 @@ import { fileURLToPath } from 'url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const GITEE_REPO = 'kirito666233/wave-forge'
-const GITHUB_REPO = 'YoshinoRinn/WaveForge'
+// 与 desktop/update-manager.cjs 的 OFFICIAL_GITHUB_REPO、updateConstants.ts 保持一致
+// （canonical 仓库经 api.github.com 确认；改名时三处同步）
+const GITHUB_REPO = 'SoundFieldLab/WaveForge'
 const UPDATE_JSON = 'update.json'
 
 // GitHub 下载加速前缀：国内无法裸连 GitHub，产物 URL 里附加 ghproxy 系列备源
@@ -230,12 +232,22 @@ function gitPush(version) {
     .find((l) => l.includes('github.com'))
     ?.split(/\s+/)[0]
 
+  /** 脱敏：日志/报错里不允许出现带 token 的 URL（token 泄进 CI 日志等于仓库沦陷） */
+  const redact = (text) => {
+    let out = String(text || '')
+    for (const t of [process.env.GITEE_TOKEN, process.env.GH_TOKEN]) {
+      if (t) out = out.split(t).join('***')
+    }
+    return out
+  }
+  let pushFailed = false
   for (const [name, remote] of [
     ['gitee', giteeRemote],
     ['github', githubRemote],
   ]) {
     if (!remote) {
       console.warn(`[跳过] 未找到 ${name} 的 git remote，update.json 未推送（本地提交仍在）`)
+      pushFailed = true
       continue
     }
     const token = name === 'gitee' ? process.env.GITEE_TOKEN : process.env.GH_TOKEN
@@ -247,9 +259,16 @@ function gitPush(version) {
     ]
     for (const cmd of cmds) {
       const r = spawnSync('git', cmd, { encoding: 'utf8', cwd: ROOT, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
-      if (r.status !== 0) console.warn(`[跳过] git ${cmd.join(' ')} 失败: ${(r.stderr || '').slice(0, 200)}`)
+      if (r.status !== 0) {
+        console.error(`[失败] git ${cmd[0]} 失败: ${redact(r.stderr || r.stdout).slice(0, 300)}`)
+        pushFailed = true
+      }
     }
-    console.log(`[${name}] update.json 已推送`)
+    if (!pushFailed) console.log(`[${name}] update.json 已推送`)
+  }
+  if (pushFailed) {
+    // 清单没推上去 = 客户端拿到的还是旧清单，发布必须在 CI 里显式失败而不是静默成功
+    throw new Error('update.json 推送失败，发布中止（详见上方 [失败] 日志）')
   }
 }
 
@@ -334,8 +353,8 @@ async function main() {
   // 私钥与 device-license 兑换码同一把（WaveForge License Studio 数据目录）。
   // payload = 除 manifestSignature 外的全部字段，稳定键序列化（对象键排序）后签名；
   // 客户端（desktop/update-manager.cjs）用内嵌公钥验签，通过才允许下载。
-  // 无私钥环境（本地 dry-run / CI 缺 key）签名字段留空并警告——打包客户端会拒绝
-  // 下载该清单，发布前必须配好私钥。
+  // 未签名清单会被所有打包客户端拒绝，推上去还会覆盖 master 上可用的旧清单——
+  // 除 --dry-run（本地迭代）外，缺私钥直接让发布失败，而不是带病上线。
   const privateKeyPath = join(process.env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'WaveForge License Studio', 'license-private-key.pem')
   if (existsSync(privateKeyPath)) {
     try {
@@ -346,15 +365,26 @@ async function main() {
       manifest.manifestSignature = sign(null, Buffer.from(stableStringifyJson(payload), 'utf8'), privateKey).toString('base64')
       console.log('update.json 已附 Ed25519 签名（manifestSignature）')
     } catch (e) {
-      console.warn(`⚠️ 清单签名失败（${e.message}），manifestSignature 未写入——打包客户端将拒绝此清单`)
+      if (dryRun) {
+        console.warn(`⚠️ 清单签名失败（${e.message}），manifestSignature 未写入（dry-run 不阻断）`)
+      } else {
+        throw new Error(`清单签名失败（${e.message}）：未签名清单会被客户端拒绝，已中止发布`)
+      }
     }
-  } else {
+  } else if (dryRun) {
     console.warn('⚠️ 未找到签名私钥（WaveForge License Studio），清单未签名——打包客户端将拒绝下载此清单的产物')
+  } else {
+    throw new Error('未找到签名私钥（WaveForge License Studio/license-private-key.pem）：未签名清单会被客户端拒绝且会覆盖线上可用清单，已中止发布。CI 请在 release.yml 挂载 LICENSE_PRIVATE_KEY secret')
   }
   writeFileSync(updatePath, JSON.stringify(manifest, null, 2) + '\n')
   console.log(`update.json 已生成：${UPDATE_JSON}`)
 
   if (!dryRun) {
+    // 清单里没有任何 Windows 产物时（只发 APK），客户端会照常比较版本并提示更新，
+    // 但桌面用户点更新永远下载不到东西；master 上的旧清单反而可用。直接拒绝发布。
+    if (!manifest.artifacts['win-x64'] && !manifest.artifacts['win-x64-hot']) {
+      throw new Error('本次发布不含 win-x64 / win-x64-hot 产物：拒绝用"仅 Android"的清单覆盖线上桌面更新通道（如确要发纯 APK，请手工处理 update.json）')
+    }
     gitPush(version)
   } else {
     console.log('[dry-run] 未发布未推送，请检查生成的 update.json 后正式执行')

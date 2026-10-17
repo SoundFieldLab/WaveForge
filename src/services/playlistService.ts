@@ -9,6 +9,7 @@ import { getApplePlaylistTracks, getAppleCatalogPlaylistTracks, getAppleCatalogP
 import { getAppleCredentials } from './appleAuth'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
 import { getSecureToken } from './secureTokenStore'
+import { cookieHeaders } from './cookieRequest'
 
 export interface PlaylistOptions {
   forceRefresh?: boolean
@@ -42,11 +43,11 @@ async function awaitPendingPlaylistInvalidations(): Promise<void> {
   }
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 15_000): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs = 15_000, headers: Record<string, string> = {}): Promise<Response> {
   const controller = new AbortController()
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
   try {
-    return await fetch(url, { signal: controller.signal })
+    return await fetch(url, { signal: controller.signal, headers })
   } finally {
     window.clearTimeout(timeoutId)
   }
@@ -389,8 +390,9 @@ async function fetchUserPlaylists(
   const firstArray = (...values: any[]) => values.find(value => Array.isArray(value)) || []
   
   if (platform === 'netease') {
-    const url = `http://localhost:3001/api/netease/user/playlist?uid=${userId}${cookie ? `` : ''}`
-    const response = await fetchWithTimeout(url)
+    const url = `http://localhost:3001/api/netease/user/playlist?uid=${userId}`
+    // 网易云用户歌单是登录态接口（无 cookie 硬 401）：cookie 已从 URL 迁到请求头
+    const response = await fetchWithTimeout(url, 15_000, cookieHeaders(cookie))
     if (!response.ok) {
       throw new Error(`获取网易云歌单失败（HTTP ${response.status}）`)
     }
@@ -756,6 +758,8 @@ export async function getPlaylistDetail(
   const url = platform === 'netease'
     ? `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlistId)}`
     : `http://localhost:3001/api/qq/playlist/detail?id=${playlistId}&devMode=${devMode}`
+  // 私密歌单（网易云）与部分 QQ 歌单需要登录态：cookie 走请求头（与 cookieRequest 约定一致）
+  const headers = cookieHeaders(getPlatformCookie(platform))
   
   const maxRetries = 3
   const retryDelay = 1000 // 1秒
@@ -767,13 +771,13 @@ export async function getPlaylistDetail(
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), timeout)
       
-      const response = await fetch(url, { signal: controller.signal })
+      const response = await fetch(url, { signal: controller.signal, headers })
       clearTimeout(timeoutId)
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
-      
+
       const data = await response.json()
       return data
     } catch (error) {
@@ -810,7 +814,7 @@ export async function getNeteasePlaylistTrackPage(
 ): Promise<NeteasePlaylistTrackPage> {
   const cookie = getPlatformCookie('netease')
   const url = `${API_BASE}/netease/playlist/detail?id=${encodeURIComponent(String(playlistId))}&offset=${Math.max(0, offset)}&limit=${Math.max(1, Math.min(limit, 500))}`
-  const response = await fetch(url, { signal })
+  const response = await fetch(url, { signal, headers: cookieHeaders(cookie) })
   const data = await response.json()
   if (!response.ok || data.error || !data.playlist) {
     throw new Error(data.error || `读取网易云歌单失败（HTTP ${response.status}）`)
@@ -929,13 +933,13 @@ export async function getLikedSongs(
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), timeout)
       
-      const response = await fetch(url, { signal: controller.signal })
+      const response = await fetch(url, { signal: controller.signal, headers: cookieHeaders(cookie) })
       clearTimeout(timeoutId)
-      
+
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
       }
-      
+
       const data = await response.json()
       return data
     } catch (error) {

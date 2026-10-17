@@ -456,7 +456,7 @@ async function fetchRecentListRows(type: RecentContentType): Promise<any[]> {
   if (cached) recentListCache.delete(type)
   const cookie = getPlatformCookie('netease')
   if (!cookie) throw new Error('请先登录网易云音乐')
-  const response = await fetch(`${getApiBase()}/netease/record/recent/${type}?limit=${RECENT_LIMIT}`, { cache: 'no-store' })
+  const response = await fetch(`${getApiBase()}/netease/record/recent/${type}?limit=${RECENT_LIMIT}`, { cache: 'no-store', headers: cookieHeaders(cookie) })
   const payload = await response.json().catch(() => null)
   if (!response.ok || payload?.error) throw new Error(payload?.error || `最近${RECENT_TYPE_LABEL[type]}读取失败（HTTP ${response.status}）`)
   const candidates = [payload?.data?.list, payload?.data?.records, payload?.data, payload?.list, payload?.records]

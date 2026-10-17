@@ -1249,7 +1249,9 @@ function HomeView({
         return
       }
       const tags = Array.isArray(selectedPlaylist.tags) ? selectedPlaylist.tags.join(';') : (selectedPlaylist.tags || '')
-      const result = await updatePlaylist(selectedPlaylist.id.toString(), 'netease', {
+      // 平台必须真实透传：此前写死 'netease'，Spotify 歌单的编辑请求带着 Spotify id
+      // 打到网易云接口必然失败。汽水/酷狗服务层会自行明确报错。
+      const result = await updatePlaylist(selectedPlaylist.id.toString(), platform, {
         name: data.name,
         desc: data.desc,
         tags

@@ -127,6 +127,8 @@ export class AlbumGaplessService {
       onTransitionStart?: (targetTrackKey: string, duration: number) => void
       onTransitionProgress?: (progress: number) => void
       onTransitionCancel?: () => void
+      /** handoff 被拒/失败后的看门狗出口：把 useAudioPlayer 的 stuck deadline 拨到指定时刻（null 清除） */
+      onStuckDeadline?: (deadline: number | null) => void
       /** 分析期静音边界快查（AutoMix 分析缓存复用）：有值时确定性触发混音，
        *  替代尾部运行时探测的"就近"判定（QQ 无缝跳过首尾静音同语义）。
        *  无缓存/无静音返回 null，维持原有探测路径 */
@@ -521,8 +523,12 @@ export class AlbumGaplessService {
         } catch {
           // The element may already have been released.
         }
-        // 接管被拒绝：混音已完成且旧音频已暂停，恢复主增益让回退路径有声
+        // 接管被拒绝：混音已完成且旧音频已暂停。恢复主增益之外必须发 cancel +
+        // 设看门狗截止：否则 useAudioPlayer 的过渡状态永不退场（stuck deadline 只在
+        // startTransition 里设置，albumGapless 路径无人设置）→ 静音 + 歌词/进度冻结。
+        this.deps.onTransitionCancel?.()
         this.deps.setOutputGain(this.deps.getTargetVolume())
+        this.notifyStuckDeadline()
       }
 
       return success
@@ -535,11 +541,19 @@ export class AlbumGaplessService {
       } catch {
         // The element may already have been released.
       }
+      // 同上：失败分支必须退场过渡状态（cancel + deadline），不能只恢复增益
+      this.deps.onTransitionCancel?.()
       this.deps.setOutputGain(this.deps.getTargetVolume())
+      this.notifyStuckDeadline()
       return false
     } finally {
       this.state.handoff = false
     }
+  }
+
+  /** handoff 被拒/失败后让 useAudioPlayer 的看门狗立即收尾对齐 UI */
+  private notifyStuckDeadline(): void {
+    try { this.deps.onStuckDeadline?.(performance.now()) } catch { /* ignore */ }
   }
 
   // 开始预加载

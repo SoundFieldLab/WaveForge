@@ -60,7 +60,9 @@ const OFFICIAL_GITEE_REPO = 'kirito666233/wave-forge'
 // （WaveForge License Studio 私钥签名；主进程只持公钥）。
 // 清单结构：publish-release.mjs 在 update.json 里加 manifestSignature 字段，
 // 签名内容 = 除 manifestSignature 外的全部字段按"稳定键序列化"规范化的 JSON。
-const { UPDATE_MANIFEST_PUBLIC_KEY } = require('./update-manifest-public-key.cjs')
+const { UPDATE_MANIFEST_PUBLIC_KEY: DECLARED_MANIFEST_PUBLIC_KEY } = require('./update-manifest-public-key.cjs')
+// let：测试通过 verifyManifestSignatureWithKey 临时替换密钥对验签
+let UPDATE_MANIFEST_PUBLIC_KEY = DECLARED_MANIFEST_PUBLIC_KEY
 
 /** 稳定键序列化：对象键按 Unicode 码点排序，数组保序——签名与验签两侧必须一致。 */
 function stableStringify(value) {
@@ -85,6 +87,24 @@ function verifyManifestSignature(manifest) {
   } catch {
     return false
   }
+}
+
+/** 测试专用：注入临时公钥后重验（生产路径永远用内嵌公钥，不暴露给 IPC） */
+function verifyManifestSignatureWithKey(manifest, publicKeyPem) {
+  const previous = UPDATE_MANIFEST_PUBLIC_KEY
+  UPDATE_MANIFEST_PUBLIC_KEY = publicKeyPem
+  try {
+    return verifyManifestSignature(manifest)
+  } finally {
+    UPDATE_MANIFEST_PUBLIC_KEY = previous
+  }
+}
+
+/** 测试专用：整体替换清单验签公钥（返回恢复函数）。仅测试环境使用。 */
+function setManifestPublicKeyForTest(publicKeyPem) {
+  const previous = UPDATE_MANIFEST_PUBLIC_KEY
+  UPDATE_MANIFEST_PUBLIC_KEY = publicKeyPem
+  return () => { UPDATE_MANIFEST_PUBLIC_KEY = previous }
 }
 
 /**
@@ -406,7 +426,12 @@ function restartForUpdate() {
   setTimeout(() => { app.quit() }, 300)
 }
 
-/** 启动时：若存在待应用更新（上次「稍后」/ 更新中断），自动应用并重启一次 */
+/** 启动时：若存在待应用更新（上次「稍后」/ 更新中断），自动应用并重启一次。
+ *  同一份 pending 连续自动失败（杀软锁 asar / 安装目录只读 / 磁盘满）时若无条件
+ *  重试，会退化成「启动→退出→再启动」秒级死循环：最多自动重试一次，之后放弃并
+ *  正常启动 UI，由用户在设置页手动重试（手动重试会重新计数）。 */
+const MAX_AUTO_APPLY_ATTEMPTS = 2
+
 function applyPendingAtStartup() {
   pending = readJson(PENDING_JSON(), null)
   if (!pending || !fs.existsSync(path.join(STAGING_DIR(), 'app.asar'))) {
@@ -415,6 +440,13 @@ function applyPendingAtStartup() {
     try { fs.unlinkSync(PENDING_JSON()) } catch { /* ignore */ }
     return false
   }
+  const attempts = Number(pending.autoApplyAttempts || 0)
+  if (attempts >= MAX_AUTO_APPLY_ATTEMPTS) {
+    console.warn('[更新] 待应用更新连续自动失败，本次跳过自动应用（可在设置中手动重试）')
+    return false
+  }
+  pending.autoApplyAttempts = attempts + 1
+  writeJson(PENDING_JSON(), pending)
   const ok = spawnUpdater()
   if (!ok) return false
   restartForUpdate() // 写标志 + 退出；updater 应用后自动重启到新版本
@@ -440,13 +472,17 @@ function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = nu
   const rejectUntrusted = () => ({ success: false, error: '不允许的更新请求来源' })
   /**
    * 从渲染层提交的更新载荷解析出 (urls, sha256)。
-   * 优先路径：载荷是签名过的清单对象（含 manifestSignature）→ 验签后取产物；
+   * 优先路径：载荷是签名清单对象本身，或包了一层的 { manifest }（渲染层直传检查结果）→
+   * 验签后取产物，返回统一形状 { version, install, hot }（install/hot 均可为 null）；
    * 兼容路径：载荷是 { urls, sha256 } 裸结构 → 仍走 URL 白名单校验，但打包版
    * （app.isPackaged）拒绝——生产环境必须走签名清单，开发模式豁免。
    */
   const resolveDownloadSpec = (payload) => {
-    if (payload && typeof payload === 'object' && payload.manifestSignature) {
-      const signed = extractSignedArtifacts(payload)
+    const manifestSource = payload && typeof payload === 'object' && payload.manifest && typeof payload.manifest === 'object'
+      ? payload.manifest
+      : payload
+    if (manifestSource && typeof manifestSource === 'object' && manifestSource.manifestSignature) {
+      const signed = extractSignedArtifacts(manifestSource)
       if (!signed) return { error: '更新清单签名无效，已拒绝下载' }
       return signed
     }
@@ -463,7 +499,9 @@ function setupUpdateIPC(ipcMain, getMainWindow = () => null, isTrustedEvent = nu
     if (!trusted(event)) return rejectUntrusted()
     const spec = resolveDownloadSpec(payload)
     if (spec.error) return { success: false, error: spec.error }
-    return startBackgroundDownload(String(payload?.version || spec.version || ''), String(payload?.notes || ''), spec.urls, spec.sha256)
+    // 热更新包取清单的 win-x64-hot 产物；签名清单分支的 spec.urls 不存在
+    const hot = spec.hot || spec
+    return startBackgroundDownload(String(payload?.version || spec.version || ''), String(payload?.notes || ''), hot.urls, hot.sha256)
   })
   // 就绪后：拉起 updater（不退出；由 restart-for-update 决定何时退出重启）
   ipcMain.handle('update:apply-pending', (event) => trusted(event) ? { success: spawnUpdater() } : rejectUntrusted())
@@ -507,4 +545,8 @@ module.exports = {
   isAllowedUpdateUrl,
   validateUpdateRequest,
   assertSafeZipEntries,
+  verifyManifestSignature,
+  verifyManifestSignatureWithKey,
+  setManifestPublicKeyForTest,
+  stableStringify,
 }

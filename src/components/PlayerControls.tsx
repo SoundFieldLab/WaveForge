@@ -764,7 +764,9 @@ export default function PlayerControls({
   // 沉浸模式白条设置
   const [showImmersiveBar, setShowImmersiveBar] = useState(() => {
     const saved = localStorage.getItem('showImmersiveBar')
-    return saved !== null ? JSON.parse(saved) : true
+    if (saved === null) return true
+    // localStorage 脏值（非 JSON）会让播放页整树进 ErrorBoundary
+    return saved === 'true' || saved === '1'
   })
 
   // 沉浸模式状态

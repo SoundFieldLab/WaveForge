@@ -41,7 +41,16 @@ for (const method of ['log', 'info', 'warn', 'error', 'debug']) {
 import localApp from './local-server.mjs'
 import express from 'express'
 import { dirname, join } from 'path'
+import { randomBytes } from 'crypto'
 import { installTvExtensions, getLanIPv4Addresses } from './tv-extensions.mjs'
+
+// 本机 API 鉴权令牌：MainActivity 每次启动随机生成、经 argv 传入
+// （--waveforge-local-token=<hex>）。此前未设置 → local-service-auth fail-open，
+// 本机任意 App 都能调用 3001 的全部读写路由（读登录态/写歌单/触发调试服务）。
+// WebView 侧由 MainActivity.shouldInterceptRequest 统一注入同名请求头。
+const argvToken = process.argv.slice(2).find((a) => a.startsWith('--waveforge-local-token='))
+const localToken = argvToken ? argvToken.slice('--waveforge-local-token='.length) : randomBytes(32).toString('base64url')
+if (localToken) process.env.WAVEFORGE_LOCAL_TOKEN = localToken
 
 const serverRoot = dirname(process.argv[1] || process.cwd())
 const distDir = join(serverRoot, 'dist')

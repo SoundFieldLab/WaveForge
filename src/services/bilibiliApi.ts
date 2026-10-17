@@ -3039,7 +3039,13 @@ export async function findBestBilibiliMv(
     return cached.result
   }
   const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider, opts?.useDeveloperDeclarations !== false, sessionPickBvid, opts?.identityProbe)
-  matchCache.set(cacheKey, { at: Date.now(), result })
+  // error / 中止不写缓存（或只做 60s 负缓存）：切歌 abort 后同歌 24h 内固定无 MV、
+  // 重试无效是最常见的"这首歌怎么没有 MV"来源。
+  if (result.status === 'error' || opts?.signal?.aborted) {
+    matchCache.set(cacheKey, { at: Date.now() - (MATCH_CACHE_TTL - 60_000), result })
+  } else {
+    matchCache.set(cacheKey, { at: Date.now(), result })
+  }
   pruneMatchCache()
   return result
 }

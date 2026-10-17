@@ -319,7 +319,9 @@ export default memo(function QuickSettingsDialog({
 
   const [showImmersiveBar, setShowImmersiveBar] = useState(() => {
     const saved = localStorage.getItem('showImmersiveBar')
-    return saved !== null ? JSON.parse(saved) : true
+    if (saved === null) return true
+    // 同 PlayerControls：脏值容错，避免 JSON.parse 抛错炸掉设置弹窗
+    return saved === 'true' || saved === '1'
   })
 
   const [lyricDisplayMode, setLyricDisplayMode] = useState<LyricDisplayMode>(readLyricDisplayMode)

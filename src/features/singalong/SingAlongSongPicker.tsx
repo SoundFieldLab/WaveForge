@@ -16,6 +16,7 @@ import type { Song } from '../../services/musicApi'
 import { searchSongs, getProxiedImageUrl } from '../../services/musicApi'
 import { getApiBase } from '../../services/apiConfig'
 import { getPlatformCookie, type MusicPlatform } from '../../services/platforms'
+import { cookieHeaders } from '../../services/cookieRequest'
 import { getPlaylistDetail, getUserPlaylists } from '../../services/playlistService'
 import { getAppleLibraryPlaylists, getApplePlaylistTracks, appleSongToSong, APPLE_FAVORITES_ID, APPLE_LIBRARY_ID } from '../../services/appleCatalog'
 import { getAppleAuthState } from '../../services/appleAuth'
@@ -179,7 +180,7 @@ export default function SingAlongSongPicker({ open, onClose, currentSong, onPick
       } else if (item.platform === 'netease') {
         const cookie = getPlatformCookie('netease')
         // 走统一 API_BASE（用户改端口/远程后端时不会挂）
-        const response = await fetch(`${getApiBase()}/api/netease/playlist/detail?id=${item.id}`, { signal: controller.signal })
+        const response = await fetch(`${getApiBase()}/netease/playlist/detail?id=${item.id}`, { signal: controller.signal, headers: cookieHeaders(cookie) })
         const data = await response.json()
         if (!response.ok || data.error) throw new Error(data.error || `加载失败 (${response.status})`)
         const tracks: any[] = Array.isArray(data?.playlist?.tracks) ? data.playlist.tracks : []
@@ -196,7 +197,7 @@ export default function SingAlongSongPicker({ open, onClose, currentSong, onPick
         })))
       } else if (item.platform === 'qq') {
         const cookie = getPlatformCookie('qq')
-        const response = await fetch(`${getApiBase()}/api/qq/playlist/detail?id=${item.id}`, { signal: controller.signal })
+        const response = await fetch(`${getApiBase()}/qq/playlist/detail?id=${item.id}`, { signal: controller.signal, headers: cookieHeaders(cookie) })
         if (!response.ok) throw new Error(`加载失败 (${response.status})`)
         const data = await response.json()
         if (controller.signal.aborted) return

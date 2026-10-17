@@ -8,7 +8,7 @@ import { saveKugouConceptCredential } from '../services/kugouService'
 
 interface KugouLoginPanelProps {
   onClose: () => void
-  onLoginSuccess: (cookie: string, username?: string) => void
+  onLoginSuccess: (cookie: string, username?: string, extra?: { userId?: string; avatar?: string }) => void
 }
 
 type LoginMode = 'qr' | 'web'
@@ -138,7 +138,7 @@ export default function KugouLoginPanel({ onClose, onLoginSuccess }: KugouLoginP
           if (credential.avatar) localStorage.setItem('kugou_avatar', credential.avatar)
         } catch { /* 忽略存储失败 */ }
         stopPolling()
-        onLoginSuccess(cookieString, credential.nickname || undefined)
+        onLoginSuccess(cookieString, credential.nickname || undefined, { userId: credential.userid || undefined, avatar: credential.avatar || undefined })
         return
       }
       if (status === 0) {

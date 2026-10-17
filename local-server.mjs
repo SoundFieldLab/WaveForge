@@ -739,8 +739,11 @@ async function resolveQQFavoritePlaylistId(cookie = '') {
       const name = String(
         item?.dirName || item?.dir_name || item?.diss_name || item?.title || item?.name || ''
       ).trim()
+      // 只认官方"我喜欢"目录 ID 或精确名。endsWith('喜欢的音乐') 会命中自建的
+      // 「XX喜欢的音乐」并按上游顺序取第一个命中 → 喜欢/取消喜欢可能写错歌单甚至
+      // 从自建歌单删歌（与 2026-09-24 前端 playlistService 的同类修复对齐）。
       return String(item?.dirId ?? item?.dirid ?? '') === '201' ||
-        name === '我喜欢' || name === '我喜欢的音乐' || name.endsWith('喜欢的音乐')
+        name === '我喜欢' || name === '我喜欢的音乐'
     })
     const favoriteDirId = favorite?.dirId ?? favorite?.dirid
     lastQQPlaylistResolutionDiagnostic = {
@@ -779,8 +782,9 @@ async function resolveQQFavoritePlaylistId(cookie = '') {
       : []
   const favorite = playlists.find(item => {
     const name = String(item?.diss_name || item?.title || item?.dissname || '').trim()
+    // 同上：endsWith 会误命中自建「XX喜欢的音乐」，与前端 2026-09-24 修复对齐
     return String(item?.dirid ?? item?.dirId ?? '') === '201' ||
-      name === '我喜欢' || name === '我喜欢的音乐' || name.endsWith('喜欢的音乐')
+      name === '我喜欢' || name === '我喜欢的音乐'
   })
 
   // 仅在新版读接口不可用时兜底。旧接口没有可用目录 ID 时，201 比 tid 更接近
@@ -7235,7 +7239,20 @@ app.get('/api/qq/song/url', async (req, res) => {
           signal: AbortSignal.timeout(Math.max(800, Math.min(2000, remainingTimeout(2000)))),
         })
         const contentType = String(response.headers.get('content-type') || '').toLowerCase()
-        try { await response.arrayBuffer() } catch { /* 忽略：只要状态与类型 */ }
+        // 只读前几 KB：部分 CDN 忽略 Range 头，arrayBuffer() 会把整首音频（可达 20MB+）
+        // 读进内存且逐候选串行放大。探活只需要状态码与 content-type，读满 4KB 即停。
+        try {
+          const reader = response.body?.getReader()
+          if (reader) {
+            let probeBytes = 0
+            while (probeBytes < 4096) {
+              const chunk = await reader.read()
+              if (chunk.done) break
+              probeBytes += chunk.value?.length || 0
+            }
+            try { await reader.cancel() } catch { /* ignore */ }
+          }
+        } catch { /* 忽略：只要状态与类型 */ }
         if (response.status !== 200 && response.status !== 206) {
           return { ok: false, reason: `HTTP ${response.status}` }
         }

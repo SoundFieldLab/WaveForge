@@ -32,7 +32,9 @@ let debugAccessToken = ''
 
 function issueDebugToken() {
   debugAccessToken = randomBytes(24).toString('hex')
-  console.log(`[调试服务] 配对令牌: ${debugAccessToken}（调试台 URL 须带 ?token=<令牌>）`)
+  // 令牌不打印进 serverLogs：/api/tv/logs 与调试台 /logs 都能读到这段日志，
+  // 打进去等于把"读日志拿令牌"的提权链变成匿名可达。调试台从 adb logcat 获取令牌。
+  console.log(`[调试服务] 配对令牌已生成（长度 ${debugAccessToken.length}，见 adb logcat；调试台 URL 须带 ?token=<令牌>）`)
   return debugAccessToken
 }
 
@@ -188,7 +190,7 @@ function setDebugServerEnabled(enabled, { serverLogs, crashFile, distDir = null 
     })
     server.listen(DEBUG_PORT, '0.0.0.0')
     debugServer = { server, wss }
-    console.log(`[调试服务] 已开启: http://0.0.0.0:${DEBUG_PORT}?token=${debugAccessToken}（须带令牌访问）`)
+    console.log(`[调试服务] 已开启: http://0.0.0.0:${DEBUG_PORT}（访问须带令牌；令牌见 adb logcat，不进 /logs）`)
   } else if (!enabled && debugServer) {
     try { debugServer.wss.close() } catch { /* ignore */ }
     try { debugServer.server.close() } catch { /* ignore */ }
@@ -565,7 +567,8 @@ export function installTvExtensions({
   })
 
   // SPA 读取遥控状态（token/端口/IP 列表），用于展示二维码与连接地址。
-  // local-server.mjs 只绑定 127.0.0.1，该接口仅本机可访问，token 不外泄到局域网。
+  // 该接口挂在 3001（仅本机可达）且 P1-6 修复后 3001 全部路由统一要求本机
+  // 令牌（X-WaveForge-Local-Token），匿名进程已无法读取配对 token。
   app.get('/api/tv/remote-status', (req, res) => {
     res.json(tvRemoteServer.status())
   })
@@ -629,7 +632,10 @@ export function installTvExtensions({
     try {
       writeFileSync(tvDebugStateFile, JSON.stringify({ enabled }))
     } catch { /* ignore */ }
-    res.json({ ok: true, enabled, port: DEBUG_PORT })
+    // 启用时把配对令牌直接返回给本机调用方：3001 只绑回环 + P1-6 修复后全路由
+    // 要求本机令牌，匿名进程拿不到；SPA 拿它拼 ws://localhost:3008/ws?token= 连
+    // 调试桥（verifyClient 校验令牌），不再依赖"从日志里读令牌"的提权链。
+    res.json({ ok: true, enabled, port: DEBUG_PORT, debugToken: enabled ? debugAccessToken : '' })
   })
   // 后端启动时按持久化状态启停（默认开；用户关掉后重启保持关闭，受开关约束）
   setDebugServerEnabled(readDebugState(), { serverLogs, crashFile: tvCrashFile, distDir })

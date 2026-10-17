@@ -115,8 +115,9 @@ async function main() {
       fs.mkdirSync(path.dirname(logPath), { recursive: true })
       fs.writeFileSync(logPath, String((error && error.stack) || error))
     } catch { /* ignore */ }
-    // 失败也尝试按标志重启（仍是旧版本），用户可再次检查更新
-    relaunchIfRequested()
+    // 替换失败时不再按 relaunch 标志自动重启：父进程启动计数已 +1 并写回 pending,
+    // 若这里仍按标志重启,会立即触发下一次「自动应用→失败→重启」死循环。
+    // （成功路径的 relaunchIfRequested 在上方,不受影响。）
   } finally {
     if (applied) {
       // 成功才清理暂存与 pending 标记；失败时保留，下次启动 applyPendingAtStartup 重试
@@ -124,6 +125,9 @@ async function main() {
       try { fs.rmSync(`${config.stagingDir}.pid`, { force: true }) } catch { /* ignore */ }
       rmrf(path.join(path.dirname(config.stagingDir || '.'), 'pending-update.json'))
       rmrf(__filename)
+    } else if (config.relaunchFlag && fs.existsSync(config.relaunchFlag)) {
+      // 失败时清掉重启标志：留着它，下次用户正常退出也会被误当成「更新后自动重启」
+      try { fs.unlinkSync(config.relaunchFlag) } catch { /* ignore */ }
     }
   }
 }

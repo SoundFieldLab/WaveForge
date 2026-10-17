@@ -1,6 +1,7 @@
 import type { MusicPlatform } from './platforms'
 import { getSecureToken } from './secureTokenStore'
 import { getPlatformCookie as getStoredPlatformCookie } from './platforms'
+import { cookieHeaders } from './cookieRequest'
 import type { EntitlementTier } from '../utils/musicEntitlements'
 import { getApiBase } from './apiConfig'
 import { resolveArtworkUrl } from './artwork'
@@ -1010,8 +1011,14 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         readUrl = data => data.url || null
       } else if (platform === 'kugou') {
         // 酷狗：签名网关四层策略（H5→Mobile→Web），付费歌曲返回 null → 上层降级网易云/QQ
+        // cookie/音质档此前被丢弃：服务端只认 query cookie，无 cookie 时 H5/Web 层被
+        // playbackReady 拦截，VIP 曲只剩免费 Mobile 直链；音质偏好对酷狗完全无效。
         const kgCookie = getSecureToken('kugou_cookie') || ''
-        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}`
+        // 前端偏好 → 服务端选档枚举（server/kugou-gateway normalizeQualityPreference）；
+        // auto 不传参（服务端默认 standard，与旧行为一致）
+        const { preference } = getAudioQualityRequest('kugou')
+        const kugouQuality = ({ standard: 'standard', high: 'exhigh', 'very-high': 'exhigh', lossless: 'lossless', 'hi-res': 'hires' } as Record<string, string>)[preference] || ''
+        apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${kugouQuality ? `&quality=${kugouQuality}` : ''}${kgCookie ? '&cookie=' + encodeURIComponent(kgCookie) : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'soda') {
         // 汽水音乐：逆向 Web API 音源（VIP/SVIP 分层过滤在服务端完成；
@@ -3246,19 +3253,23 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
     if (platform === 'qq') {
       const response = await fetchT(`${API_BASE}/qq/artist/songs?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}&limit=${limit}&offset=${offset}`)
       const data = await response.json()
+      // 服务端失败时 errMsg 带具体原因（list 缺失时静默返回空列表会误显示为"暂无歌曲"）
+      if (data?.errMsg) throw new Error(String(data.errMsg))
+      // 服务端返回扁平字段 songid/songmid/songname/albumid/albummid（与 getArtistTopSongs 同口径）；
+      // 此前读 item.id/item.mid/item.name/item.album?.id 全为 undefined → 整页无名、songId=undefined。
       const songs = (data.songs || []).map((item: any) => ({
-        id: item.id,
-        mid: item.mid,
-        name: item.name || item.title,
+        id: item.id || item.songid,
+        mid: item.mid || item.songmid,
+        name: item.name || item.songname || item.title,
         artists: item.singer?.map((s: any) => ({ name: s.name, mid: s.mid })) || [],
         album: {
-          id: item.album?.id,
-          mid: item.album?.mid,
-          name: item.album?.name || item.album?.title || '',
+          id: item.album?.id || item.albumid,
+          mid: item.album?.mid || item.albummid,
+          name: item.album?.name || item.albumname || item.album?.title || '',
           // 服务端探测出的 T062 真封面优先（无专辑单曲 albummid 拼 T002R 会 404）
-          picUrl: item.albumpic || item.picurl || (item.album?.mid ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album.mid}.jpg` : '')
+          picUrl: item.albumpic || item.picurl || ((item.album?.mid || item.albummid) ? `https://y.gtimg.cn/music/photo_new/T002R300x300M000${item.album?.mid || item.albummid}.jpg` : '')
         },
-        duration: (item.interval || item.duration) * 1000,
+        duration: Number(item.interval || item.duration || 0) * 1000,
         platform: 'qq' as const,
         vip: item.pay?.payplay === 1
       }))
@@ -3737,7 +3748,7 @@ export async function subscribeAlbum(
 export async function getSubscribedAlbums(platform: 'netease' = 'netease', options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie(platform, options.cookie)
-    const response = await fetchT(`${API_BASE}/${platform}/album/sublist`)
+    const response = await fetchT(`${API_BASE}/${platform}/album/sublist`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取收藏专辑列表失败')
     return data
@@ -3884,7 +3895,7 @@ export async function getSubscribedArtists(platform: MusicPlatform = 'netease', 
       return { artists }
     }
     const cookie = getPlatformCookie(platform, options.cookie)
-    const response = await fetchT(`${API_BASE}/${platform}/artist/sublist`)
+    const response = await fetchT(`${API_BASE}/${platform}/artist/sublist`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '获取关注歌手列表失败')
     return data
@@ -4329,7 +4340,7 @@ export async function getNeteaseSimiMv(mvid: number | string): Promise<any> {
 export async function getNeteaseMvSublist(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/mv/sublist`)
+    const response = await fetchT(`${API_BASE}/netease/mv/sublist`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data?.data || []
   } catch (error) {
@@ -4421,7 +4432,7 @@ export async function neteaseRecommendDislike(id: number | string, options: { co
 export async function getNeteaseVipInfo(options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/vip/info`)
+    const response = await fetchT(`${API_BASE}/netease/vip/info`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data
   } catch (error) {
@@ -4434,7 +4445,7 @@ export async function getNeteaseVipInfo(options: { cookie?: string } = {}): Prom
 export async function getNeteaseFollowingEvents(options: { cookie?: string; pagesize?: number; lasttime?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/event/following?pagesize=${Number(options.pagesize) || 20}&lasttime=${Number(options.lasttime) || -1}`)
+    const response = await fetchT(`${API_BASE}/netease/event/following?pagesize=${Number(options.pagesize) || 20}&lasttime=${Number(options.lasttime) || -1}`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data
   } catch (error) {
@@ -4460,7 +4471,7 @@ export async function getNeteaseUserEvents(uid: number | string, options: { cook
 export async function getNeteaseNotices(options: { cookie?: string; limit?: number; lasttime?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/msg/notices?limit=${Number(options.limit) || 30}&lasttime=${Number(options.lasttime) || -1}`)
+    const response = await fetchT(`${API_BASE}/netease/msg/notices?limit=${Number(options.limit) || 30}&lasttime=${Number(options.lasttime) || -1}`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data
   } catch (error) {
@@ -4473,7 +4484,7 @@ export async function getNeteaseNotices(options: { cookie?: string; limit?: numb
 export async function getNeteaseCommentMessages(uid: number | string, options: { cookie?: string; limit?: number; before?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/msg/comments?uid=${encodeURIComponent(String(uid))}&limit=${Number(options.limit) || 30}&before=${Number(options.before) || -1}`)
+    const response = await fetchT(`${API_BASE}/netease/msg/comments?uid=${encodeURIComponent(String(uid))}&limit=${Number(options.limit) || 30}&before=${Number(options.before) || -1}`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data
   } catch (error) {
@@ -4506,7 +4517,7 @@ export async function subscribeNeteaseDj(rid: number | string, subscribe: boolea
 export async function getNeteaseDjSublist(options: { cookie?: string; limit?: number; offset?: number } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/dj/sublist?limit=${Number(options.limit) || 30}&offset=${Number(options.offset) || 0}`)
+    const response = await fetchT(`${API_BASE}/netease/dj/sublist?limit=${Number(options.limit) || 30}&offset=${Number(options.offset) || 0}`, { headers: cookieHeaders(cookie) })
     const data = await response.json()
     return data
   } catch (error) {
@@ -4760,7 +4771,7 @@ export async function subscribeQQUser(encUin: string, subscribe: boolean, option
 export async function subscribeNeteaseUser(id: string, subscribe: boolean, options: { cookie?: string } = {}): Promise<any> {
   try {
     const cookie = getPlatformCookie('netease', options.cookie)
-    const response = await fetchT(`${API_BASE}/netease/user/subscribe?id=${encodeURIComponent(id)}&subscribe=${subscribe}`, { method: 'POST' })
+    const response = await fetchT(`${API_BASE}/netease/user/subscribe?id=${encodeURIComponent(id)}&subscribe=${subscribe}`, { method: 'POST', headers: cookieHeaders(cookie) })
     const data = await response.json()
     if (!response.ok) throw new Error(data?.error || '关注操作失败')
     return data

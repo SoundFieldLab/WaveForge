@@ -74,6 +74,9 @@ class MainActivity : Activity() {
     private val backConsumed = java.util.concurrent.atomic.AtomicBoolean(false)
     // WebView 渲染进程崩溃重载计数（防无限重载）
     private var rendererCrashCount = 0
+    // 本机 API 鉴权令牌（nodeStarted 线程生成；shouldInterceptRequest 注入请求头）
+    @Volatile
+    private var localServiceToken: String = ""
     // 焦点在滑块上时由 Web 层开启：音量键转发给页面做 +1/-1 调节，不再调系统音量
     @Volatile
     private var volumeKeyCapture = false
@@ -136,6 +139,21 @@ class MainActivity : Activity() {
                     } catch (_: Exception) {
                         true
                     }
+                }
+
+                // 本机 API 鉴权：给发往本机后端的请求统一注入 token 头（local-service-auth
+                // 校验 X-WaveForge-Local-Token）。页面源与 API 同源，无 CORS 预检问题。
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? {
+                    val url = request?.url?.toString()
+                    if (url != null && localServiceToken.isNotEmpty()) {
+                        val scheme = request.url.scheme?.lowercase()
+                        val host = request.url.host?.lowercase()
+                        if ((scheme == "http" || scheme == "https") &&
+                            (host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1")) {
+                            request.requestHeaders.put("X-WaveForge-Local-Token", localServiceToken)
+                        }
+                    }
+                    return null
                 }
 
                 // 页面开始加载（崩溃恢复重载 / 热更新 reload 都会走到这里）时复位音量键捕获：
@@ -297,8 +315,15 @@ class MainActivity : Activity() {
         if (nodeStarted.compareAndSet(false, true)) {
             Thread {
                 ensureNodeProject()
+                // 本机 API 鉴权令牌：进程级随机生成，经 argv 传给 Node（android-server.mjs
+                // 设为 WAVEFORGE_LOCAL_TOKEN），并注入 WebView 全部请求。缺省时后端
+                // fail-open，本机任意 App 可调用 3001 全部读写路由（读登录态/写歌单）。
+                if (localServiceToken.isEmpty()) {
+                    localServiceToken = java.util.UUID.randomUUID().toString().replace("-", "") +
+                        java.util.UUID.randomUUID().toString().replace("-", "")
+                }
                 val mainJs = File(filesDir, "$NODE_ASSETS_DIR/main.cjs").absolutePath
-                startNodeWithArguments(arrayOf("node", mainJs))
+                startNodeWithArguments(arrayOf("node", mainJs, "--waveforge-local-token=$localServiceToken"))
             }.start()
         }
 

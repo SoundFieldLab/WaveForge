@@ -1,4 +1,5 @@
 import type { Song } from './musicApi'
+import { cookieHeaders } from './cookieRequest'
 
 export interface NeteaseJourneySong extends Song {
   rank?: number
@@ -35,7 +36,8 @@ export async function fetchNeteaseJourneyOverview(
 ): Promise<NeteaseJourneyOverview> {
   const response = await fetch(
     `http://localhost:3001/api/netease/journey/overview?uid=${encodeURIComponent(uid)}`,
-    { signal },
+    // 音乐旅程各分区全是登录态读接口：入参 cookie 此前被丢弃，已登录用户也稳定 401
+    { signal, headers: cookieHeaders(cookie) },
   )
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(body?.error || '网易云音乐旅程加载失败')
