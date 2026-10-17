@@ -45,6 +45,17 @@ export const AUTOMIX_HUD_NODE_HOLD_SECONDS = 8
  *  两段都长于播放时间轴 ~250ms 的量化台阶，进度条上方金色提示的出入场依旧被抹平。 */
 export const AUTOMIX_HUD_FADE_IN_SECONDS = 0.4
 export const AUTOMIX_HUD_FADE_OUT_SECONDS = 0.5
+/** 点击时间节点药丸时，跳到「过渡切点前多少秒」。
+ *  取 11 秒：比 AutoMix 的预介入窗口再早一点，落点仍在过渡之外，用户能听完最后一段。 */
+export const AUTOMIX_HUD_JUMP_LEAD_SECONDS = 11
+
+/** 药丸点击后的 seek 目标（秒）：过渡切点前 11 秒，且不早于 0。
+ *  公式只此一处——药丸与调用方各自再减一次会把落点推成切点前 22 秒。 */
+export function automixHudJumpTarget(startAt: number): number {
+  const value = Number(startAt)
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, value - AUTOMIX_HUD_JUMP_LEAD_SECONDS)
+}
 
 /** 连续两帧后才把不透明度抬到 1：第一帧保证浏览器真的画下 opacity:0 那一帧，第二帧再改值。
  *  单 rAF 的回调可能抢在首帧绘制之前执行（React 提交时序不保证中间留有一帧绘制）——
@@ -126,7 +137,7 @@ export function transitionEngineDisplayName(
  *  「关闭」的语义：**本曲不做智能混音**（想完整听完这首歌，末尾只留一次短交叉），
  *  不是"隐藏这条通知"——点击后引擎会把本曲对的计划换成短交叉安全网。 */
 export const AutomixHudBadge = memo(function AutomixHudBadge({
-  info, currentTime: currentTimeProp, playbackTimeStore, scale, colors, accentColor = null, onDismiss,
+  info, currentTime: currentTimeProp, playbackTimeStore, scale, colors, accentColor = null, onDismiss, onJumpToTransition,
 }: {
   info: AutomixHudInfo
   /** 旧用法：外部传入时间（会迫使父级以 store 频率重渲染）。与 playbackTimeStore 二选一。 */
@@ -139,6 +150,9 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
   /** 当前封面主题色：作为药丸底色的淡色染色（未提供时用 colors.chip 原值） */
   accentColor?: string | null
   onDismiss: () => void
+  /** 点击药丸本体：跳到「过渡切点前 AUTOMIX_HUD_JUMP_LEAD_SECONDS 秒」。
+   *  传 undefined 时药丸不可点（保留纯展示语义）。「关闭」按钮始终独立，不触发本回调。 */
+  onJumpToTransition?: (startAt: number) => void
 }) {
   const subscribedTime = useAutomixHudTime(playbackTimeStore)
   const currentTime = playbackTimeStore ? subscribedTime : (currentTimeProp ?? 0)
@@ -236,6 +250,12 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
       // 基线对齐：小字（关闭）与大字（主文案）的文字基线严格同一水平线；
       // 图标用 alignSelf:center 单独垂直居中（否则 SVG 会跟着基线往下沉）。
       className="flex items-baseline gap-2"
+      // 点药丸本体 = 跳到过渡切点前 11 秒（想再听一遍最后一段）。
+      // 淡入未完成时不响应，避免误触；「关闭」按钮自带 stopPropagation，不会走到这里。
+      onClick={onJumpToTransition && opacity > 0.35
+        ? () => onJumpToTransition(info.startAt)
+        : undefined}
+      title={onJumpToTransition ? `跳到过渡前 ${AUTOMIX_HUD_JUMP_LEAD_SECONDS} 秒` : undefined}
       style={{
         background: chipBackground,
         backdropFilter: 'blur(18px) saturate(150%)',
@@ -245,6 +265,7 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
         opacity,
         transition: fadeTransition(opacity),
         pointerEvents: opacity > 0.35 ? 'auto' : 'none',
+        cursor: onJumpToTransition ? 'pointer' : undefined,
       }}
     >
       <AudioLines style={{ width: 13 * scale, height: 13 * scale, color: colors.text, flexShrink: 0, alignSelf: 'center' }} />
@@ -253,6 +274,8 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
       </span>
       <button
         type="button"
+        // 这块是药丸里「镂空」出来的独立热区：命中它只做单次取消，不冒泡到药丸的跳转。
+        // 语义 = 本曲对（本曲→下一曲）不做智能混音/无缝衔接，只留一次短交叉。
         title={info.kind === 'gapless'
           ? '本曲不做无缝衔接（完整播放这首歌，到结尾再自然切换）'
           : '本曲不做智能混音（完整听完这首歌，末尾只做一次短交叉）'}

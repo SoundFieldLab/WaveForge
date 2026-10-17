@@ -46,7 +46,7 @@ import {
 } from './components/foliaTunings'
 import { getVisualizerRegistryEntry } from './vendor/folia/components/visualizer/registry'
 import type { VisualizerTuningBundle } from './vendor/folia/components/visualizer/tuningRegistry'
-import { AutomixHudBadge, transitionEngineDisplayName } from './components/AutomixHudBadge'
+import { AutomixHudBadge, transitionEngineDisplayName, automixHudJumpTarget } from './components/AutomixHudBadge'
 
 import MiniPlayer from './components/MiniPlayer'
 import Toast from './components/Toast'
@@ -8310,6 +8310,13 @@ function App() {
     }
     audioPlayerRef.current.seek(time)
   }, [lyricDisplayMode])
+
+  // 时间节点药丸点一下：跳到过渡切点前 11 秒（想再听一遍最后一段）。
+  // 落点公式在 automixHudJumpTarget 里（单处定义，避免两边各减一次把落点推成切点前 22 秒）；
+  // handleSeek 已覆盖「看歌模式 seek 视频」。
+  const handleAutomixHudJump = useCallback((startAt: number) => {
+    handleSeek(automixHudJumpTarget(startAt))
+  }, [handleSeek])
   handleSeekRef.current = handleSeek
 
   const handleVolumeChange = useCallback((newVolume: number) => {
@@ -11379,6 +11386,7 @@ function App() {
                             // 药丸底色 = 当前封面主题色的淡色（color-mix 混入原底色，保持对比度）
                             accentColor={playbackCoverColor}
                             onDismiss={() => { setDismissedAutomixHudKey(modernAutomixHud.key); setAutomixHudSkippedTrackKey(modernAutomixHud.key.split('|')[0] || null); audioPlayer.skipAutoMixForCurrentPair() }}
+                            onJumpToTransition={handleAutomixHudJump}
                           />
                         </div>
                       )}
@@ -11706,6 +11714,7 @@ function App() {
                             // 药丸底色 = 当前封面主题色的淡色（color-mix 混入原底色，保持对比度）
                             accentColor={playbackCoverColor}
                             onDismiss={() => { setDismissedAutomixHudKey(modernAutomixHud.key); setAutomixHudSkippedTrackKey(modernAutomixHud.key.split('|')[0] || null); audioPlayer.skipAutoMixForCurrentPair() }}
+                            onJumpToTransition={handleAutomixHudJump}
                           />
                         </div>
                       )}
