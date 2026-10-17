@@ -347,6 +347,9 @@ export interface PlaybackEngineState {
   /** 渲染过渡缓冲内当前可听到的目标歌曲绝对时间（MV 目标槽同步用） */
   transitionTargetTime?: number
   transitionStartTime?: number | null // 当前音轨进入计划过渡的时间点（秒）
+  /** 过渡窗口的合成终点（源曲时间轴，= plan.sourceEndTime）：AI 长混音的合成时间
+   *  会超过源曲时长，进度条用它作为分母而不是 duration（否则恒 100%） */
+  transitionSourceEndTime?: number | null
   transitionFromTrackKey?: string  // 前一曲的 trackKey
   transitionToTrackKey?: string    // 下一曲的 trackKey
   transitionStyle?: 'energetic' | 'atmospheric' | 'clean' | undefined // v2 过渡风格标签（UI 提示用）

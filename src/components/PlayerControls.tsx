@@ -60,6 +60,8 @@ interface PlayerControlsProps {
   /** 增强渲染的引擎名（'AutoMix Pro' / 'AutoMix Enhanced'）；缺省按 Pro 显示 */
   transitionEngineLabel?: string
   transitionStartTime?: number | null
+  /** 过渡窗口合成终点（源曲时间轴）：AI 长混音的合成 currentTime 可超源曲时长，进度条分母用它 */
+  transitionSourceEndTime?: number | null
   immersiveTranslation?: string
   immersiveRoman?: string
   showImmersiveTranslation?: boolean
@@ -685,6 +687,7 @@ export default function PlayerControls({
   enhancedAutoMixActive = false,
   transitionEngineLabel,
   transitionStartTime = null,
+  transitionSourceEndTime = null,
   immersiveTranslation = '',
   immersiveRoman = '',
   showImmersiveTranslation = false,
@@ -1033,7 +1036,11 @@ export default function PlayerControls({
     : (glideTime !== null ? Math.min(glideTime, duration > 0 ? duration : glideTime) : currentTime)
   // 过渡期间合成 currentTime 可能超过源曲时长（AI 长混音从源曲深处起步）：
   // 显示时长自适应为 max(原时长, 当前时间)，进度条/总时长跟随，不再顶着曲尾不动。
-  const effectiveDuration = Math.max(duration, displayTime)
+  // 过渡窗口内用合成终点做分母：AI 长混音从源曲深处起步，合成 currentTime 超过源曲
+  // duration 时 Math.max(duration, displayTime) 恒等于 displayTime → 进度条恒 100%。
+  const effectiveDuration = transitionSourceEndTime && transitionSourceEndTime > duration
+    ? transitionSourceEndTime
+    : Math.max(duration, displayTime)
   // 直播流（Apple 电台）：时长恒为 0，进度条不走、总时长显示 LIVE 徽标
   const isLiveStream = Boolean(live)
   const progressPercent = isLiveStream ? 0 : (displayTime / effectiveDuration) * 100

@@ -770,6 +770,8 @@ class RenderRuntime {
   /**
    * Generate cache key for transition plan.
    * v1 字段集合保持历史不变；v2 额外纳入所有会改变听感的编排字段与 stem 指纹。
+   * 两者都纳入源/目标文件身份：音质切换（重新转码）后文件字节变了，旧键会复用
+   * 旧码率的 WAV（v1 此前没有身份字段）。
    */
   _generateCacheKey(plan, sourceAudioPath = null, targetAudioPath = null) {
     const key = JSON.stringify({
@@ -785,6 +787,8 @@ class RenderRuntime {
       sourceBeatTimes: plan.sourceBeatTimes,
       targetBeatTimes: plan.targetBeatTimes,
       djEffects: plan.djEffects,
+      sourceIdentity: sourceAudioPath ? fileIdentity(sourceAudioPath) : null,
+      targetIdentity: targetAudioPath ? fileIdentity(targetAudioPath) : null,
       ...(plan.strategy === 'smart-rendered-v2'
         ? {
           v2: {

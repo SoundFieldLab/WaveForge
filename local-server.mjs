@@ -1,5 +1,5 @@
 import express from 'express'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash } from 'node:crypto'
 import { fileURLToPath } from 'url'
 import { dirname, join, extname, resolve, sep } from 'path'
 import { readdir, stat, readFile, writeFile, mkdir, rm } from 'fs/promises'
@@ -3564,7 +3564,13 @@ function qqNormalizeSongFromTrack(track, mid, fallback = {}) {
   const coverVerified = track?.coverVerified || fallback.coverVerified || 0
 
   return {
-    id: track?.id || fallback.id || fallback.songid || 0,
+    // id 只接受纯数字：QQ songmid 可能整体数字开头（"003Vz5hK1iS1ZY"），任何隐式
+    // 数字化都会得到一个看似合法的小整数 → /api/qq/like 把喜欢写到另一首歌。
+    // 非数字时置 0，交给 like 路由的 mid→歌曲详情解析（qqSongDetail）。
+    id: (/^\d+$/.test(String(track?.id ?? '')) && Number(track.id))
+      || (/^\d+$/.test(String(fallback?.id ?? '')) && Number(fallback.id))
+      || (/^\d+$/.test(String(fallback?.songid ?? '')) && Number(fallback.songid))
+      || 0,
     mid: track?.mid || mid,
     name: track?.title || track?.name || fallback.name || fallback.songname || '',
     artists: artists.length ? artists : (fallback.artists || fallback.singer || []),
@@ -5224,10 +5230,11 @@ app.get('/api/qq/artist/albums', async (req, res) => {
     const pageNum = Math.max(1, parseInt(page, 10) || 1)
     const pageSizeNum = Math.min(100, Math.max(1, parseInt(pageSize, 10) || 30))
     // 使用 qq-music-api 库获取歌手专辑
+    // 上游只读 pageNo（1 基，内部换算 begin），传 page 会被忽略 → 第 2 页起重复第 1 页
     const result = await qqMusicApi.api('singer/album', {
       singermid: effectiveMid,
-      page: pageNum - 1, // API从0开始计数
-      pageSize: pageSizeNum 
+      pageNo: pageNum,
+      pageSize: pageSizeNum
     })
     // 兼容两种数据结构：result.data 或直接 result
     const data = result.data || result
@@ -5382,6 +5389,7 @@ app.post('/api/netease/playlist/create', async (req, res) => {
       console.error('[网易云创建歌单] 创建失败:', result.body)
       return res.status(500).json({ error: '创建歌单失败' })
     }
+    invalidateNeteasePlaylistCaches(result.body?.id || result.body?.playlist?.id, cookie)
     res.json(result.body)
   } catch (error) {
     console.error('[网易云创建歌单] 错误:', error)
@@ -5481,6 +5489,7 @@ app.post('/api/netease/playlist/tracks', async (req, res) => {
       console.error('[网易云管理歌单歌曲] 操作失败:', result.body)
       return res.status(500).json({ error: '管理歌单歌曲失败' })
     }
+    invalidateNeteasePlaylistCaches(normalizedPid, cookie)
     res.json(result.body)
   } catch (error) {
     console.error('[网易云管理歌单歌曲] 错误:', error)
@@ -5509,6 +5518,7 @@ app.post('/api/netease/playlist/subscribe', async (req, res) => {
       console.error('[网易云收藏歌单] 操作失败:', result.body)
       return res.status(500).json({ error: '收藏歌单失败' })
     }
+    invalidateNeteasePlaylistCaches(id, cookie)
     res.json(result.body)
   } catch (error) {
     console.error('[网易云收藏歌单] 错误:', error)
@@ -7138,6 +7148,9 @@ app.get('/api/qq/song/url', async (req, res) => {
     // 所以拿不到 purl 就只能如实告诉上层"这档需要超级会员"，然后回落常规档位（播放不中断）。
     let restrictedTier = ''
     if (QQ_PREMIUM_TIERS[qualityPreference]) {
+      // 高端档依赖 qqVariants（来自 metadataPromise）：普通探测先命中时此变量可能
+      // 还是空数组 → 高端档被静默跳过并回落。进入分支前显式等元数据（受 deadline 约束）。
+      await metadataPromise
       const tierSpec = QQ_PREMIUM_TIERS[qualityPreference]
       const premiumHeaders = {
         comm: {
@@ -10133,7 +10146,13 @@ function setNeteaseSongDetailCache(song) {
 }
 
 async function getNeteasePlaylistTrackIds(id, cookie = '') {
-  const cacheKey = String(id)
+  // 键带 cookie 指纹：私密歌单的 trackIds 属于登录态数据，A 账号缓存 5 分钟内
+  // 换 B 账号/游客读同一 id 会拿到 A 的完整列表（串号）。不同 cookie 各自缓存。
+  let cookieFingerprint = ''
+  if (cookie) {
+    cookieFingerprint = createHash('sha256').update(String(cookie)).digest('hex').slice(0, 12)
+  }
+  const cacheKey = `${String(id)}:${cookieFingerprint}`
   const cached = neteasePlaylistTrackIdCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) return cached.ids
 
@@ -10283,6 +10302,21 @@ async function fetchNeteasePlaylistTrackPage(id, cookie = '', offset = 0, limit 
 const NETEASE_PLAYLIST_DETAIL_CACHE_TTL = 5 * 60 * 1000
 const NETEASE_PLAYLIST_DETAIL_CACHE_MAX = 60
 const neteasePlaylistDetailCache = new Map()
+
+/** 歌单写操作（加/删歌、创建、收藏）成功后调用：写后 5 分钟内读到旧 trackIds
+ *  是"刚加的歌没出现/删了还在"的直接来源。按账号指纹定向清除。 */
+function invalidateNeteasePlaylistCaches(playlistId, cookie = '') {
+  const fingerprint = cookie ? qqHash33(String(cookie)).toString(36) : 'guest'
+  const key = `${fingerprint}:${String(playlistId)}`
+  neteasePlaylistDetailCache.delete(key)
+  if (!playlistId) return
+  // trackId 缓存键是 `${id}:${cookieFingerprint}`（createHash 截断 12 位），无法反推
+  // 完整键 → 前缀扫描清除该歌单的所有账号副本（容量 ≤100，代价可忽略）。
+  const idPrefix = `${String(playlistId)}:`
+  for (const cacheKey of neteasePlaylistTrackIdCache.keys()) {
+    if (String(cacheKey).startsWith(idPrefix)) neteasePlaylistTrackIdCache.delete(cacheKey)
+  }
+}
 
 async function getNeteasePlaylistDetailCached(id, cookie = '') {
   const accountKey = cookie ? qqHash33(String(cookie)).toString(36) : 'guest'
@@ -11323,9 +11357,9 @@ app.get('/api/qq/playlist/detail', async (req, res) => {
     // 检查是否有有效数据
     if (!result || !result.songlist) {
       if (devMode) console.warn('[QQ音乐歌单详情] API返回数据无效，尝试备用方法')
-      // 返回空列表而不是报错
-      return res.json({
-        result: 100,
+      // 失败返回 502：200 + 空歌单会被前端当"空歌单"展示，掩盖了真实错误
+      return res.status(502).json({
+        result: 500,
         songlist: [],
         errMsg: 'QQ音乐API暂时不可用'
       })
@@ -11342,11 +11376,11 @@ app.get('/api/qq/playlist/detail', async (req, res) => {
     })
   } catch (error) {
     console.error('[QQ音乐歌单详情] 获取错误:', error)
-    // 返回空列表而不是500错误
-    res.json({ 
-      result: 100, 
+    // 失败返回 502（同上：200 + 空歌单会伪装成"空歌单"）
+    res.status(502).json({
+      result: 500,
       songlist: [],
-      errMsg: error.message 
+      errMsg: error.message
     })
   }
 })
@@ -13227,6 +13261,12 @@ app.get('/api/qq/user/profile', async (req, res) => {
     // 粉丝列表（他人）
     const fansResult = await call({ module: 'music.concern.RelationList', method: 'GetFansList', param: { From: 0, Size: 30, HostUin: encUin } })
 
+    // 上游整体失败（code 非 0）时不写缓存：失败被 || 0 / || [] 固化后，用户主页
+    // 会持续 10 分钟显示"0 关注 / 0 粉丝"。
+    if (numResult?.code !== 0 || followResult?.code !== 0 || fansResult?.code !== 0) {
+      return res.status(502).json({ result: 500, error: '上游返回失败，请稍后重试' })
+    }
+
     const payload = {
       result: 100,
       data: {
@@ -13504,9 +13544,15 @@ app.post('/api/qq/pc/entry-point/save', async (req, res) => {
 // 探针：对比手机身份(ct=11)与 PC 身份(ct=24)对同一模块的返回差异（排查「PC 数据 vs 手机数据」用）
 app.post('/api/qq/pc/probe', async (req, res) => {
   try {
+    // 遗留调试口：只要求登录、无模块白名单 = 任意 MusicU 模块代理（可触达上游任意
+    // 能力）。前端零调用。加白名单：只放行推荐流探针本身需要的模块。
+    const module = String(req.body?.module || 'music.recommend.RecommendFeed')
+    const PROBE_ALLOWED_MODULES = new Set(['music.recommend.RecommendFeed'])
+    if (!PROBE_ALLOWED_MODULES.has(module)) {
+      return res.status(403).json({ code: 403, error: 'probe 模块不在白名单内' })
+    }
     const requestCookie = resolveRequestCookie(String(req.body?.cookie || ''))
     if (!requestCookie) return res.status(401).json({ code: 401, error: '需要登录 QQ 音乐' })
-    const module = String(req.body?.module || 'music.recommend.RecommendFeed')
     const method = String(req.body?.method || 'get_recommend_feed')
     const param = req.body?.param || { page: 1, direction: 0 }
     const identity = req.body?.identity === 'pc'

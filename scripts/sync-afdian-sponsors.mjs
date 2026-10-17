@@ -72,6 +72,8 @@ async function queryPage(page) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(signedBody(page)),
+    // 挂在 prebuild 链路里：上游 5xx/TCP 挂起不能无超时拖死 npm run build
+    signal: AbortSignal.timeout(10_000),
   })
   if (!response.ok) throw new Error(`爱发电开放 API 返回 HTTP ${response.status}`)
   const result = await response.json()
@@ -79,9 +81,21 @@ async function queryPage(page) {
   return result.data
 }
 
-const first = await queryPage(1)
-const pages = [first]
-for (let page = 2; page <= Number(first.total_page || 1); page += 1) pages.push(await queryPage(page))
+let pages
+try {
+  const first = await queryPage(1)
+  pages = [first]
+  for (let page = 2; page <= Number(first.total_page || 1); page += 1) pages.push(await queryPage(page))
+} catch (error) {
+  // --optional 只容忍"缺 token"是不够的：API 5xx/超时同样不该让 npm run build 失败。
+  // 保留现有名单继续构建（名单会陈旧但不缺失），失败原因进日志。
+  if (optional) {
+    console.warn(`⚠️ 爱发电同步失败（保留现有名单）: ${error?.message || error}`)
+    process.exit(0)
+  }
+  console.error('爱发电同步失败:', error?.message || error)
+  process.exit(1)
+}
 
 const supporters = pages
   .flatMap(page => Array.isArray(page.list) ? page.list : [])

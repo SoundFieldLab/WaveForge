@@ -571,6 +571,13 @@ export function useAudioPlayer(
 
   const setTransitionState = useCallback((state: TransitionState, extra: Partial<AudioPlayerState> = {}) => {
     transitionStateRef.current = state
+    // 过渡窗口终点随状态一起下发：AI 长混音的合成时间超过源曲时长，进度条需要
+    // 用 plan.sourceEndTime（而不是 duration）做分母，否则恒 100%。
+    if (state === 'armed' || state === 'running-transition') {
+      extra.transitionSourceEndTime = transitionPlanRef.current?.sourceEndTime ?? null
+    } else if (extra.transitionSourceEndTime === undefined) {
+      extra.transitionSourceEndTime = null
+    }
     if (state === 'running-transition') {
       // 视觉轨道开跑：从这一帧起进度/时间线由 rAF 逐帧发布；真实时长由随后的帧回填。
       // animationLeadSeconds 必须与 App 侧算动画窗口的口径一致（AI 长混音 20s，其余 10s），
@@ -819,7 +826,9 @@ export function useAudioPlayer(
     const audio = getActiveAudio()
     // armed（automix 已排定下一首但当前曲还在正常播）也要应用：否则 AutoMix 开着时
     // 用户改倍速完全无效（界面变了、声音没变——用户实测反馈）。running-transition 仍让位。
-    if (audio && (transitionStateRef.current === 'playing' || transitionStateRef.current === 'idle' || transitionStateRef.current === 'loading-current' || transitionStateRef.current === 'armed')) {
+    // preparing-next 同理：预载下一首期间当前曲还在正常播，忽略倍速会"UI 显示新倍速、
+    // 实际 1.0"直到下一次 play/过渡提交（无补应用的出口）。
+    if (audio && (transitionStateRef.current === 'playing' || transitionStateRef.current === 'idle' || transitionStateRef.current === 'loading-current' || transitionStateRef.current === 'armed' || transitionStateRef.current === 'preparing-next')) {
       audio.playbackRate = clamped
     }
   }, [getActiveAudio])
@@ -851,7 +860,7 @@ export function useAudioPlayer(
       const state = transitionStateRef.current
       const audio = getActiveAudio()
       if (audio && userSpeedRef.current !== 1
-        && (state === 'playing' || state === 'idle' || state === 'loading-current')) {
+        && (state === 'playing' || state === 'idle' || state === 'loading-current' || state === 'preparing-next')) {
         audio.playbackRate = userSpeedRef.current
         setEffectivePlaybackSpeed(userSpeedRef.current)
       }
@@ -3283,6 +3292,12 @@ export function useAudioPlayer(
     const handleError = (event: Event) => {
       if (event.currentTarget === getActiveAudio()) {
         setTransitionState('failed', { isPlaying: false, fallbackReason: getActiveAudio()?.error?.message || 'media decode failed' })
+        // 通知上层（App 显示 toast / 触发重取 URL），普通歌曲播放失败不再无声无息
+        try {
+          window.dispatchEvent(new CustomEvent('waveforge:playback-media-error', {
+            detail: { message: getActiveAudio()?.error?.message || 'media decode failed', src: getActiveAudio()?.currentSrc || '' },
+          }))
+        } catch { /* ignore */ }
       }
     }
 
@@ -3821,8 +3836,10 @@ export function useAudioPlayer(
         externalFadeActiveRef.current = false
         void bridgeVolume(volumeRef.current)
       }
-      // 歌曲结束：与 Apple HLS ended 语义一致（置 idle 交上层切歌/单曲循环）
-      if (!externalEndedFiredRef.current && s.duration > 0 && (s.ended || s.position >= s.duration - 0.5)) {
+      // 歌曲结束：与 Apple HLS ended 语义一致（置 idle 交上层切歌/单曲循环）。
+      // 只认"正在播放"时到达结尾：用户暂停在结尾（s.playing=false）不该被误判成
+      // ended 而直接切下一首——恢复播放由 bridge 的 playing 事件清除标记重新评估。
+      if (!externalEndedFiredRef.current && s.playing && s.duration > 0 && (s.ended || s.position >= s.duration - 0.5)) {
         externalEndedFiredRef.current = true
         // 带淡出尾自然结束 → 记录标记，下一首（Apple 播放面或本地 deck）做淡入头
         externalEndedWithFadeRef.current = externalFadeActiveRef.current
@@ -4328,6 +4345,8 @@ export function useAudioPlayer(
       }
     },
     getAudioElement: getActiveAudio,
+    /** 恢复/接管播放前确保 AudioContext 就绪（看歌切回、外部接管等场景） */
+    ensureAudioGraph,
     audioElement,
     playbackTimeStore,
     transitionVisualStore,

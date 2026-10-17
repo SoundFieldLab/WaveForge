@@ -217,8 +217,13 @@ export default function UpdateManager() {
   }
 
   const canCloseBackdrop = view !== 'applying'
-  const actionLabel = info?.hotUrls?.length ? '立即更新' : '下载完整安装包'
-  const onPrimaryAction = info?.hotUrls?.length ? startDownload : startInstallerDownload
+  // 清单里两个产物都没有（例如只发了 APK）时主按钮不渲染：原来的"死按钮"点了
+  // startDownload/startInstallerDownload 都因 urls 为空直接 return，停在 0%。
+  const hasHot = Boolean(info?.hotUrls?.length)
+  const hasInstall = Boolean(info?.installUrls?.length)
+  const actionLabel = hasHot ? '立即更新' : '下载完整安装包'
+  const onPrimaryAction = hasHot ? startDownload : startInstallerDownload
+  const hasDownloadablePayload = hasHot || hasInstall
 
   return (
     <AnimatePresence>
@@ -344,7 +349,7 @@ export default function UpdateManager() {
                   {view === 'details' ? '稍后再说' : '稍后'}
                 </button>
               )}
-              {view === 'details' && (
+              {view === 'details' && hasDownloadablePayload && (
                 <button type="button" onClick={() => void onPrimaryAction()} className="flex-1 py-2.5 px-4 rounded-xl font-medium text-white" style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', boxShadow: '0 4px 16px rgba(99,102,241,0.4)' }}>
                   {actionLabel}
                 </button>

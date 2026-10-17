@@ -775,7 +775,10 @@ export async function getPlaylistDetail(
       clearTimeout(timeoutId)
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`)
+        // 502 响应体带 errMsg（服务端失败不再伪装 200 空歌单）：透出具体原因
+        let detail = ''
+        try { detail = String((await response.clone().json())?.errMsg || '') } catch { /* ignore */ }
+        throw new Error(detail || `HTTP ${response.status}`)
       }
 
       const data = await response.json()

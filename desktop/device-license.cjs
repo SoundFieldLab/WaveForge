@@ -270,16 +270,24 @@ function resetDeviceLicense(app) {
 
   const filePath = fallbackPath(app)
   const hadFile = fs.existsSync(filePath)
+  let fileRemoved = !hadFile
   if (hadFile) {
     try {
       fs.unlinkSync(filePath)
+      fileRemoved = true
     } catch (error) {
+      // 删除失败（只读/被占用）仍报成功会让用户以为设备已解绑，实际授权还在
       console.warn('[DeviceLicense] Failed to remove fallback file:', error.message)
+      return { success: false, error: '授权文件删除失败：' + error.message, removed: { registry: hadRegistry, file: false } }
     }
   }
-  return { success: true, removed: { registry: hadRegistry, file: hadFile } }
+  // 注册表残留同样校验：删除后仍能读到说明删除未生效
+  const registryCleared = readRegistryValue(DEVICE_VALUE) === null && readRegistryValue(LEGACY_CODES_VALUE) === null
+  if (hadRegistry && !registryCleared) {
+    return { success: false, error: '注册表授权删除失败（可能被策略保护）', removed: { registry: false, file: fileRemoved } }
+  }
+  return { success: true, removed: { registry: hadRegistry, file: fileRemoved } }
 }
-
 module.exports = {
   REGISTRY_KEY,
   getState,

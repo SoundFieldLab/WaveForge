@@ -11,6 +11,10 @@
 export interface TtlCache<T> {
   get(key: string): T | undefined
   set(key: string, value: T): void
+  /** 定向失效单个键（写操作后清理旧缓存） */
+  delete(key: string): void
+  /** 遍历现有键（定向失效一组前缀键用） */
+  keys(): IterableIterator<string>
   clear(): void
   /** 仅测试/诊断用 */
   size(): number
@@ -39,7 +43,13 @@ export function createTtlCache<T>(options: { ttlMs: number; maxEntries?: number 
         entries.delete(oldest)
       }
     },
-    clear() { entries.clear() },
+    delete(key) {
+    entries.delete(key)
+  },
+  keys() {
+    return entries.keys()
+  },
+  clear() { entries.clear() },
     size() { return entries.size },
   }
 }

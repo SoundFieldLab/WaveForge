@@ -57,7 +57,9 @@ export const SIMPLE_EQ_BANDS = [
 
 export const PRO_EQ_FREQUENCIES = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 
-const SETTINGS_KEY = 'waveforge:audio-effects-settings'
+// v1 与 v2 引擎共用键会让 v1 保存的整份对象抹掉 v2 专属字段（响度补偿/变调/归一化）：
+// v1 迁到独立键（旧键里可能已有 v2 数据，不能反向覆盖）。
+const SETTINGS_KEY = 'waveforge:audio-effects-settings-v1'
 
 function defaultSettings(): AudioEffectsSettings {
   return {
@@ -87,6 +89,15 @@ function loadSettings(): AudioEffectsSettings {
   const defaults = defaultSettings()
   try {
     const raw = localStorage.getItem(SETTINGS_KEY)
+    if (!raw) {
+      // 旧共享键迁移：只取 v1 认识的字段，v2 专属字段（loudnessCompensation 等）留在原键
+      try {
+        const legacy = JSON.parse(localStorage.getItem('waveforge:audio-effects-settings') || 'null')
+        if (legacy && typeof legacy === 'object' && legacy.effects) {
+          return { ...defaultSettings(), effects: legacy.effects }
+        }
+      } catch { /* 旧键损坏按默认值 */ }
+    }
     if (!raw) return defaults
     const parsed = JSON.parse(raw) as Partial<AudioEffectsSettings>
     const de = defaults.effects

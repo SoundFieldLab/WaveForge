@@ -1203,7 +1203,15 @@ function SettingsPanel({
 
   // 待更新已就绪：拉起 updater 并立即退出重启（重启后即为新版本）
   const handleRestartForUpdate = async () => {
-    await window.electron?.update?.applyPending?.()
+    // applyPending 失败（updater 拉起失败/staging 缺失）不再盲目重启：旧版还在，
+    // 用户可重试；重启会白丢一次会话且可能反复循环。
+    const applied = await window.electron?.update?.applyPending?.()
+    if (applied && applied.success === false) {
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: `拉起更新失败：${applied.error || '未知错误'}，请稍后重试`, type: 'error', duration: 6000 },
+      }))
+      return
+    }
     await window.electron?.update?.restartForUpdate?.()
   }
 

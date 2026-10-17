@@ -6,11 +6,13 @@ import { useTvBack } from '../tv/tvCore'
 interface DeleteCommentModalProps {
   show: boolean
   loading?: boolean
+  /** 删除失败原因：显示在确认框按钮上方（此前错误只写进被本框遮住的 actionError） */
+  error?: string | null
   onClose: () => void
   onConfirm: () => void
 }
 
-export default function DeleteCommentModal({ show, loading = false, onClose, onConfirm }: DeleteCommentModalProps) {
+export default function DeleteCommentModal({ show, loading = false, error = null, onClose, onConfirm }: DeleteCommentModalProps) {
   // TV 遥控器 BACK：关闭删除评论确认弹窗
   useTvBack(() => {
     if (show) {
@@ -73,6 +75,11 @@ export default function DeleteCommentModal({ show, loading = false, onClose, onC
                   </div>
                 </div>
               </div>
+              {error && (
+                <div className="mx-7 mb-3 rounded-lg border border-red-400/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+                  {error}
+                </div>
+              )}
               <div className="flex gap-4 border-t border-white/10 p-5">
                 <button
                   type="button"

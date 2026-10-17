@@ -157,6 +157,20 @@ writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8')
 writeFileSync(lockPath, `${JSON.stringify(lock, null, 2)}\n`, 'utf8')
 console.log(`✅ 已更新 package.json / package-lock.json -> ${next}`)
 
+// 1.5 同步 Android 端版本（build.gradle.kts 的 appVersionName）：双事实源会让
+// publish-release 的版本一致性断言失败（gradle 驱动版本读取）。
+const gradlePath = path.join(root, 'android', 'app', 'build.gradle.kts')
+try {
+  const gradle = readFileSync(gradlePath, 'utf8')
+  if (gradle.includes('val appVersionName = ')) {
+    const nextGradle = gradle.replace(/val appVersionName = "[^"]+"/, `val appVersionName = "${next}"`)
+    writeFileSync(gradlePath, nextGradle, 'utf8')
+    console.log(`✅ 已更新 android/app/build.gradle.kts -> ${next}`)
+  }
+} catch (error) {
+  console.warn('⚠️ 同步 build.gradle.kts 失败（可手动改 appVersionName）:', error?.message || error)
+}
+
 // 2. 提交
 if (DO_COMMIT) {
   git(`add package.json package-lock.json`)

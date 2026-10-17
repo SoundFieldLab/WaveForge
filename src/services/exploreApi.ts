@@ -23,6 +23,9 @@ if (typeof window !== 'undefined') {
   window.addEventListener('waveforge-auth-changed', () => {
     exploreHomeMemoryCache.clear()
     exploreDetailCache.clear()
+    // 汽水无限续播游标是账号态：切号后继续用旧账号游标/"已到底"标记 → 新账号
+    // 续播拿到旧账号的 feed 或直接停摆。登录态变化一律重置。
+    resetSodaContinuation()
   })
   // 歌单内容变化（加/删歌、收藏、删除歌单）→ 歌单/榜单详情缓存立刻失效。
   // 传统模式等会把「用户自己的歌单」也走这条缓存，不清的话重开详情最长 5 分钟还是旧曲目。
@@ -951,6 +954,12 @@ export async function fetchQQGuessYouLikeBatch(
 // 极端交叉调用可能复用同一游标取到重复曲目，下游已有按歌曲 key 去重兜底（App additions 过滤）。
 let sodaFeedContinuationCursor: string | undefined
 let sodaFeedContinuationExhausted = false
+
+/** 登出/切号时重置游标（auth-changed 监听调用；函数声明提升不够——用 function 声明） */
+function resetSodaContinuation(): void {
+  sodaFeedContinuationCursor = undefined
+  sodaFeedContinuationExhausted = false
+}
 
 export async function fetchExploreRecommendationBatch(
   platform: ExplorePlatform,

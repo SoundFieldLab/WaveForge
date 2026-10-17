@@ -82,6 +82,21 @@ function requestFollowRedirects(url, depth = 0) {
   })
 }
 
+// 已知产物的 sha256（python.org 官方公布值；可用 PYTHON_EMBED_SHA256 环境变量补充）。
+// 缓存命中同样校验：下载源被劫持或本地缓存损坏时在解压前拦截。
+const KNOWN_SHA256 = {
+  [PYTHON_EMBED_URL]: process.env.PYTHON_EMBED_SHA256 || '',
+}
+
+function verifySha256(filePath, expected, label) {
+  if (!expected) return
+  const actual = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+  if (actual.toLowerCase() !== String(expected).toLowerCase()) {
+    try { fs.unlinkSync(filePath) } catch { /* ignore */ }
+    throw new Error(label + ' sha256 校验失败（期望 ' + expected + '，实际 ' + actual + '）——已删除可疑文件')
+  }
+}
+
 async function downloadFile(url, destPath) {
   console.log(`📥 下载: ${url}`)
   const response = await requestFollowRedirects(url)
@@ -313,17 +328,31 @@ async function main() {
     // 2. 下载 Python 嵌入式版本
     const zipPath = path.join(tempDir, 'python-embed.zip')
     
+    const embedSha = KNOWN_SHA256[PYTHON_EMBED_URL] || ''
     if (!fs.existsSync(zipPath)) {
       await downloadFile(PYTHON_EMBED_URL, zipPath)
+      verifySha256(zipPath, embedSha, 'Python 嵌入包')
     } else {
-      console.log('⏭️  Python 安装包已存在，跳过下载')
+      try {
+        verifySha256(zipPath, embedSha, 'Python 嵌入包（本地缓存）')
+        console.log('⏭️  Python 安装包已存在，校验通过，跳过下载')
+      } catch {
+        console.warn('⚠️ 本地缓存校验失败（已删除），重新下载')
+        await downloadFile(PYTHON_EMBED_URL, zipPath)
+        verifySha256(zipPath, embedSha, 'Python 嵌入包')
+      }
     }
     
-    // 3. 解压（先清空旧目录：requirements 移除的包会残留并混进 VERSION.json，
-    //    嵌入式环境是发布产物，必须与本次 requirements 精确一致）
+    // 3. 解压到 staging 目录成功后再替换旧运行时：先删后解压会让"解压失败"直接把
+    //    本机唯一可用的 Python 运行时删掉（下个构建也无从恢复）。
+    //    旧目录必须整体清空：requirements 移除的包会残留并混进 VERSION.json，
+    //    嵌入式环境是发布产物，必须与本次 requirements 精确一致。
+    const stagingDir = PYTHON_EMBED_DIR + '.staging'
+    fs.rmSync(stagingDir, { recursive: true, force: true })
+    fs.mkdirSync(stagingDir, { recursive: true })
+    extractZip(zipPath, stagingDir)
     fs.rmSync(PYTHON_EMBED_DIR, { recursive: true, force: true })
-    fs.mkdirSync(PYTHON_EMBED_DIR, { recursive: true })
-    extractZip(zipPath, PYTHON_EMBED_DIR)
+    fs.renameSync(stagingDir, PYTHON_EMBED_DIR)
     
     // 4. 启用 pip
     enablePip(PYTHON_EMBED_DIR)

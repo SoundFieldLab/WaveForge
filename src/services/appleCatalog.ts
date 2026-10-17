@@ -349,7 +349,12 @@ const appleLibraryCache = new Map<string, { at: number; value: { items: any[]; i
 
 async function fetchAppleMePages(path: string, requestedLimit: number, strict = false): Promise<{ items: any[]; included: any[] }> {
   if (requestedLimit < APPLE_LIBRARY_CACHE_MIN_LIMIT) return fetchAppleMePagesUncached(path, requestedLimit, strict)
-  const cacheKey = `${strict ? '1' : '0'}|${requestedLimit}|${path}`
+  // 键带 MUT 指纹：资料库列表属登录态数据，5s 窗口内切号会读到上一账号列表。
+  // 指纹用「长度+首尾样本」（同 audioQualitySettings.fingerprintOf）：渲染端无 node:crypto，
+  // 且这里只要求同进程内不同 token 产生不同键、不需要抗碰撞安全性。
+  const mut = getAppleCredentials().mediaUserToken
+  const accountFingerprint = mut ? (mut.length <= 32 ? mut : `${mut.length}:${mut.slice(0, 16)}:${mut.slice(-16)}`) : 'anon'
+  const cacheKey = `${accountFingerprint}|${strict ? '1' : '0'}|${requestedLimit}|${path}`
   const cached = appleLibraryCache.get(cacheKey)
   if (cached && Date.now() - cached.at < APPLE_LIBRARY_CACHE_TTL_MS) return cached.value
   const value = await fetchAppleMePagesUncached(path, requestedLimit, strict)

@@ -250,7 +250,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
     if (!clearAllConfirm) {
       // 第一次点击，进入确认状态
       setClearAllConfirm(true)
-      
+
       // 5秒后自动取消确认状态
       if (clearAllTimerRef.current) {
         clearTimeout(clearAllTimerRef.current)
@@ -262,6 +262,7 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       const failed: string[] = []
       setBusyTarget('全部')
       setFailedTargets([])
+      try {
       window.dispatchEvent(new Event('waveforge:track-stem-cache-clearing'))
       cacheManager.clearAll()
       clearArtworkMemoryCache()
@@ -328,9 +329,17 @@ export default function CacheClearModal({ show, onClose, playerTheme = 'dark' }:
       showToastMessage(failed.length ? `部分缓存清理失败：${failed.join('、')}，可重试` : '所有缓存清理成功')
       setClearAllConfirm(false)
       setBusyTarget(null)
-      
+
       if (clearAllTimerRef.current) {
         clearTimeout(clearAllTimerRef.current)
+      }
+      // 整个流程同步抛错（clearTarget 之外的调用）时 busyTarget 不复位 → 所有按钮永久禁用
+      } catch (error) {
+        console.error('清理所有缓存失败:', error)
+        setFailedTargets([])
+        showToastMessage('清理失败，请重试')
+        setBusyTarget(null)
+        setClearAllConfirm(false)
       }
     }
   }

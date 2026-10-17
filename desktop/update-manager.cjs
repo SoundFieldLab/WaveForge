@@ -226,6 +226,12 @@ function writeJson(file, obj) {
 }
 function rmrf(p) { try { fs.rmSync(p, { recursive: true, force: true }) } catch { /* ignore */ } }
 
+// 下载无超时 = TCP 挂起时进度永远停在 0% 且无错误事件（UI 卡"下载中"）。
+// 空闲超时：两次数据块之间的最大间隔（正文到达后 30s 无新数据判死）；
+// 总超时：单源整体上限（安装包 200MB 量级，慢链路 10 分钟足够）。
+const DOWNLOAD_IDLE_TIMEOUT_MS = 30_000
+const DOWNLOAD_TOTAL_TIMEOUT_MS = 10 * 60_000
+
 /** 多源下载（代理会话 + sha256 校验 + 背压写盘），onProgress({received,total}) 可选 */
 function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onProgress = null) {
   let list
@@ -255,7 +261,18 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
         let settled = false
         let finished = false
         let lastEmit = 0
+        let idleTimer = null
+        const totalTimer = setTimeout(() => fail(new Error(`下载超过 ${DOWNLOAD_TOTAL_TIMEOUT_MS / 60000} 分钟总超时`)), DOWNLOAD_TOTAL_TIMEOUT_MS)
+        const armIdleTimer = () => {
+          if (idleTimer) clearTimeout(idleTimer)
+          idleTimer = setTimeout(() => fail(new Error(`下载停滞超过 ${DOWNLOAD_IDLE_TIMEOUT_MS / 1000} 秒（网络中断）`)), DOWNLOAD_IDLE_TIMEOUT_MS)
+        }
+        const clearTimers = () => {
+          clearTimeout(totalTimer)
+          if (idleTimer) { clearTimeout(idleTimer); idleTimer = null }
+        }
         const fail = (err) => {
+          clearTimers()
           if (!finished) { finished = true; writeStream.destroy() }
           if (!settled) { settled = true; rejectReq(err) }
         }
@@ -280,9 +297,11 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
               fail(new Error(`HTTP ${response.statusCode}`))
               return
             }
+            armIdleTimer()
             const total = Number(response.headers['content-length'] || 0)
             let received = 0
             response.on('data', (chunk) => {
+              armIdleTimer()
               received += chunk.length
               // 总量上限：sha256 是事后校验，异常的超大响应会先写满磁盘才失败。
               // NSIS 安装包实际 ~200MB，600MB 上限已是宽裕的异常阈值。
@@ -303,6 +322,7 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
               }
             })
             response.on('end', () => {
+              clearTimers()
               writeStream.end(() => {
                 finished = true
                 digest = hash.digest('hex')
@@ -314,7 +334,13 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
           request.on('error', fail)
           request.end()
         }
-        requestUrl(url)
+        try {
+          requestUrl(url)
+        } catch (err) {
+          // net.request 同步抛错（如 exe 环境异常）也要终止 promise 并清掉定时器，
+          // 否则 totalTimer 的长句柄会让进程/测试挂住
+          fail(err instanceof Error ? err : new Error(String(err)))
+        }
       })
       if (expectedSha && digest.toLowerCase() !== String(expectedSha).toLowerCase()) {
         throw new Error(`${label}校验失败（sha256 不匹配）`)
@@ -331,7 +357,22 @@ function downloadToFile(urls, destPath, expectedSha = '', label = '下载', onPr
 }
 
 /** 后台下载热更新包：下载 → sha256 → 解压 staging → 写 pending-update.json → 广播就绪 */
+let stagingDownloadInFlight = false
 async function startBackgroundDownload(version, notes, urls, expectedSha) {
+  // 互斥：双击下载按钮/并发触发会同时 rmrf + 解压 staging，两个请求交错时 staging
+  // 可能是"一半新一半旧"或 pending 指向已删除的目录。同一时刻只允许一次下载。
+  if (stagingDownloadInFlight) {
+    return { success: false, error: '已有更新下载在进行中，请等待完成' }
+  }
+  stagingDownloadInFlight = true
+  try {
+    return await startBackgroundDownloadInner(version, notes, urls, expectedSha)
+  } finally {
+    stagingDownloadInFlight = false
+  }
+}
+
+async function startBackgroundDownloadInner(version, notes, urls, expectedSha) {
   const updateDir = UPDATE_DIR()
   try {
     fs.mkdirSync(updateDir, { recursive: true })

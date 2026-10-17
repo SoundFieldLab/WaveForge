@@ -1623,14 +1623,12 @@ export default memo(function CommentModal({
       console.error('加载评论失败:', err)
       if (!isStaleRequest()) setError('加载评论失败，请重试')
     } finally {
-      // 过期请求不动 loading：否则旧请求的 finally 会提前关掉新请求的加载态
-      if (!isStaleRequest()) {
-        if (reset) {
-          setLoading(false)
-        } else {
-          setIsLoadingMore(false)
-        }
-      }
+      // 过期请求不动 loading：否则旧请求的 finally 会提前关掉新请求的加载态。
+      // isLoadingMore 除外：它只由"加载更多"请求置位，若旧 loadMore 已过期而新请求
+      // 是 reset，新请求的 finally 只复位 loading——isLoadingMore 无人复位，
+      // 按钮永久"加载中"（实测加载途中切页签后复现）。
+      if (!isStaleRequest() && reset) setLoading(false)
+      if (!reset) setIsLoadingMore(false)
     }
   }
 
@@ -1647,6 +1645,11 @@ export default memo(function CommentModal({
     setAllComments(drop)
     setHotComments(drop)
     setMyPostedComments(drop)
+    // 3 分钟页面缓存里的旧列表也要剔除：切页签/重开同曲从缓存回填会让
+    // "已删除"的评论复活。这里整键清除（该曲的缓存已与新状态不符）。
+    for (const key of commentPageCache.keys()) {
+      if (key.startsWith(`${resourcePlatform}:${resourceId}:`)) commentPageCache.delete(key)
+    }
   }, [])
 
   const findComment = useCallback((commentId: string): Comment | undefined => (
@@ -1656,6 +1659,9 @@ export default memo(function CommentModal({
   ), [allComments, hotComments, myPostedComments])
 
   // 点赞评论
+  // 点赞在途守卫：快速双击会发出两次 toggle → 计数 +2 / 状态翻回
+  const likeInFlightRef = useRef<Set<string>>(new Set())
+
   const handleLike = async (comment: LikeTarget | string) => {
     const target = typeof comment === 'string' ? findComment(comment) : comment
     if (!target) return
@@ -1663,6 +1669,8 @@ export default memo(function CommentModal({
       setActionError('请先登录后再进行点赞操作')
       return
     }
+    if (likeInFlightRef.current.has(target.commentId)) return
+    likeInFlightRef.current.add(target.commentId)
 
     const commentId = target.commentId
     const newLikeState = !target.isLiked
@@ -1742,6 +1750,8 @@ export default memo(function CommentModal({
     } catch (error) {
       console.error('点赞操作失败:', error)
       setActionError('点赞操作失败，请重试')
+    } finally {
+      likeInFlightRef.current.delete(commentId)
     }
   }
 
@@ -2906,8 +2916,12 @@ export default memo(function CommentModal({
       <DeleteCommentModal
         show={Boolean(pendingDeleteComment)}
         loading={deleteLoading}
+        error={actionError}
         onClose={() => {
-          if (!deleteLoading) setPendingDeleteComment(null)
+          if (!deleteLoading) {
+            setPendingDeleteComment(null)
+            setActionError(null)
+          }
         }}
         onConfirm={() => {
           if (pendingDeleteComment) void handleDelete(pendingDeleteComment)

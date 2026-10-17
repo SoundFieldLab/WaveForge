@@ -53,8 +53,22 @@ jobs:
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-35" "build-tools;35.0.0"
 
-      - name: 构建 APK（debug 签名，侧载用；正式签名后续接入 secrets）
-        run: cd android && ./gradlew assembleDebug --no-daemon
+      - name: 写出 Release keystore（固定签名，保证可覆盖安装）
+        env:
+          RELEASE_KEYSTORE_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          RELEASE_KEYSTORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+        if: env.RELEASE_KEYSTORE_B64 != '' && env.RELEASE_KEYSTORE_PASSWORD != ''
+        shell: bash
+        run: |
+          echo "$RELEASE_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/waveforge-release.keystore"
+          echo "WAVEFORGE_RELEASE_KEYSTORE=$RUNNER_TEMP/waveforge-release.keystore" >> "$GITHUB_ENV"
+          echo "WAVEFORGE_RELEASE_KEYSTORE_PASSWORD=$RELEASE_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: 构建 APK（release keystore；未配置 secret 时回退 debug 签名）
+        run: cd android && ./gradlew assembleRelease --no-daemon
+        env:
+          WAVEFORGE_RELEASE_KEYSTORE: ${{ env.WAVEFORGE_RELEASE_KEYSTORE }}
+          WAVEFORGE_RELEASE_KEYSTORE_PASSWORD: ${{ env.WAVEFORGE_RELEASE_KEYSTORE_PASSWORD }}
 
       - name: 添加 Gitee remote（update.json 推送目标）
         run: git remote add gitee "https://gitee.com/kirito666233/wave-forge.git"
@@ -72,7 +86,7 @@ jobs:
         run: |
           NOTES=$(git tag -l --format='%(subject)%0a%0a%(body)' "$GITHUB_REF_NAME" | sed 's/^ *//' | sed '/^$/d' | head -20)
           node scripts/publish-release.mjs \
-            --apk android/app/build/outputs/apk/debug/app-debug.apk \
+            --apk android/app/build/outputs/apk/release/app-release.apk \
             --notes "$NOTES"
         env:
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}

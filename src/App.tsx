@@ -1665,8 +1665,7 @@ function App() {
   
   // 播放模式状态
   const [playerTheme, setPlayerTheme] = useState<'dark' | 'light'>(() => {
-    const saved = localStorage.getItem('playerTheme')
-    return (saved as 'dark' | 'light') || 'dark'
+    return localStorage.getItem('playerTheme') === 'light' ? 'light' : 'dark'
   })
 
   // 将主题同步到根节点属性，供全局 CSS（玻璃质感等）做浅色适配
@@ -1677,13 +1676,14 @@ function App() {
   // 歌词状态
   const [backgroundEffect, setBackgroundEffect] = useState<'transparent' | 'blur' | 'immersive' | 'modern'>(() => {
     const saved = localStorage.getItem('backgroundEffect')
-    return (saved as 'transparent' | 'blur' | 'immersive' | 'modern') || 'blur'
+    // localStorage 脏值校验：脏字符串会让条件分支全空（背景效果失效）
+    return saved === 'transparent' || saved === 'immersive' || saved === 'modern' ? saved : 'blur'
   })
   
   // 背景模糊度（仅用于透明模式）
   const [backgroundBlur, setBackgroundBlur] = useState(() => {
-    const saved = localStorage.getItem('backgroundBlur')
-    return saved ? parseFloat(saved) : 30 // 默认值 30px
+    const saved = parseFloat(localStorage.getItem('backgroundBlur') || '')
+    return Number.isFinite(saved) ? saved : 30 // 默认值 30px（脏值/NaN 兜底）
   })
 
   // MV 视频背景的独立模糊度：与封面背景两套设置，互不覆盖。
@@ -1741,12 +1741,12 @@ function App() {
     return parseStoredBoolean(saved, true)
   })
   const [autoMixMinDuration, setAutoMixMinDuration] = useState(() => {
-    const saved = localStorage.getItem('autoMixMinDuration')
-    return saved ? parseFloat(saved) : 2
+    const saved = parseFloat(localStorage.getItem('autoMixMinDuration') || '')
+    return Number.isFinite(saved) ? saved : 2 // 脏值/NaN 兜底（脏值会让过渡窗口算错）
   })
   const [autoMixMaxDuration, setAutoMixMaxDuration] = useState(() => {
-    const saved = localStorage.getItem('autoMixMaxDuration')
-    return saved ? parseFloat(saved) : 12
+    const saved = parseFloat(localStorage.getItem('autoMixMaxDuration') || '')
+    return Number.isFinite(saved) ? saved : 12 // 脏值/NaN 兜底
   })
   const [autoMixEnhanced, setAutoMixEnhanced] = useState(() => {
     const saved = localStorage.getItem('autoMixEnhanced')
@@ -1871,6 +1871,8 @@ function App() {
   const [transitionDuration, setTransitionDuration] = useState(0)
   const transitionTargetTimeRef = useRef(Number.NaN)
   const [transitionStartTime, setTransitionStartTime] = useState<number | null>(null)
+  // 过渡窗口合成终点（源曲时间轴）：AI 长混音合成时间可超源曲时长，进度条分母用它
+  const [transitionSourceEndTime, setTransitionSourceEndTime] = useState<number | null>(null)
 
   // AutoMix 过渡 HUD（播放页封面下方时间节点徽标 + 进度条介入/过渡提示）。
   // 个性化 → 「AutoMix 过渡提示」开关控制显示；localStorage 键 automixTransitionHudEnabled（默认开）。
@@ -3099,6 +3101,7 @@ function App() {
     if (state.transitionTargetTime !== undefined) transitionTargetTimeRef.current = state.transitionTargetTime
     if (state.transitionDebug !== undefined) setTransitionDebug(state.transitionDebug)
     if ('transitionStartTime' in state) setTransitionStartTime(state.transitionStartTime ?? null)
+    if ('transitionSourceEndTime' in state) setTransitionSourceEndTime(state.transitionSourceEndTime ?? null)
     if (state.fallbackReason !== undefined || state.transitionState === 'armed' || state.transitionState === 'preparing-next') {
       setTransitionFallbackReason(state.fallbackReason)
     }
@@ -3352,6 +3355,25 @@ function App() {
     handleAudioGraphReady
   )
   audioPlayerCacheControlRef.current = audioPlayer
+
+  // 播放中 MediaError：引擎此前只置 failed 态，普通歌曲失败无 toast/无恢复——用户只看到
+  // "卡住不响"。这里提示一次（同 src 30s 去重），避免错误刷屏。
+  useEffect(() => {
+    const lastReportedRef = { src: '', at: 0 }
+    const onMediaError = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { message?: string; src?: string } | undefined
+      const key = String(detail?.src || detail?.message || '')
+      const now = Date.now()
+      if (lastReportedRef.src === key && now - lastReportedRef.at < 30_000) return
+      lastReportedRef.src = key
+      lastReportedRef.at = now
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: '当前歌曲播放失败，可尝试切换音质或播放下一首', type: 'error', duration: 6000 },
+      }))
+    }
+    window.addEventListener('waveforge:playback-media-error', onMediaError)
+    return () => window.removeEventListener('waveforge:playback-media-error', onMediaError)
+  }, [])
   const playerStemControl = useMemo(() => ({
     ...audioPlayer.trackStems.state,
     onEnable: () => audioPlayer.trackStems.enable(),
@@ -6172,6 +6194,9 @@ function App() {
       setExternalPlaybackActive(false)
 
       let normalizedSong = normalizeSongCover(song)
+      // 本地听歌记录：普通点歌/切歌同样入账（此前只有 gapless 交接路径记 recordListen，
+      // 听歌报告长期接近空）。90 秒同曲去重在 recordListen 内部处理。
+      recordListen(normalizedSong)
       // Apple Music 播放路由（官方支持方向）：
       // ① ECS Browser CDM (L3) + CENC/HLS 原生播放；② WebView2 兼容兜底；③ 网易云/QQ 载体。
       // castLabs 已确认 Windows MF CDM 是已废弃实验路径，默认 Browser CDM L3 才是生产方向。
@@ -7229,6 +7254,9 @@ function App() {
             // play() 的媒体事件是异步的；先同步发布恢复意图，避免背景层在 hidden=false
             // 的首个 render 中仍看到看歌接管期间的 isPlaying=false 而再次暂停视频。
             setIsPlaying(true)
+            // 看歌期间 AudioContext 可能被挂起（hidden/切换路径会 suspend）：suspended
+            // 的 context 下 play() 会"UI 在播、没有声音"。恢复前先确保音频图就绪。
+            void audioPlayerRef.current?.ensureAudioGraph?.().catch(() => undefined)
             const playPromise = engineEl.play()
             void playPromise.catch(() => {
               const activeEngineEl = audioPlayerRef.current?.getAudioElement?.()
@@ -8618,6 +8646,8 @@ function App() {
     localStorage.removeItem('qq_vip')
     localStorage.removeItem('qq_avatar')
     localStorage.removeItem('qq_svip')
+    // 昵称此前漏清：下一个账号登录前个人中心会短暂显示上一账号昵称
+    localStorage.removeItem('qq_username')
     clearLoginExpiry('qq')
     setAuthRevision(previous => previous + 1)
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'qq' } }))
@@ -11944,6 +11974,7 @@ function App() {
               // （只写引擎名；无可归属引擎时为 undefined → 不显示）
               transitionEngineLabel={transitionEngineName ?? undefined}
               transitionStartTime={transitionStartTime}
+              transitionSourceEndTime={transitionSourceEndTime}
               immersiveTranslation={immersiveLyricLine?.translation || ''}
               immersiveRoman={immersiveLyricLine?.roman || ''}
               showImmersiveTranslation={lyricDisplayMode === 'immersive' && translationEnabled && Boolean(immersiveLyricLine?.translation?.trim())}

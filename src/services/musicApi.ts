@@ -2195,7 +2195,10 @@ async function getPlatformLyrics(id: number | string, platform: MusicPlatform, s
       const data = await response.json()
       const lyricText = data.lyric || ''
       if (!lyricText) return []
-      return parseLyric(lyricText)
+      // 服务端同时返回 translation（krcs trans）：丢弃翻译会让外语歌只剩原文
+      const translations = parseLyric(String(data.translation || ''))
+      const lyrics = parseLyric(lyricText)
+      return translations.length ? mergeLyricsWithTranslationAndRoman(lyrics, translations) : lyrics
     }
     if (platform === 'soda') {
       // 汽水：逆向歌词管线（SEO → track_v2 → 公开目录）；getSodaLyrics 已随原文对齐挂载汽水自带翻译（tlyric）
@@ -3284,7 +3287,11 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
       const all: Song[] = []
       const pageSize = 50
       const startPage = Math.floor(offset / pageSize) + 1
-      const pagesToFetch = Math.max(1, Math.ceil(limit / pageSize))
+      // 覆盖 [offset, offset+limit) 需要的页数：非页对齐的 offset 会跨 3 个页边界
+      //（例 offset=60, limit=40 → 需第 2/3 页），只取 ceil(limit/pageSize) 页会丢歌
+      const endOffset = offset + limit
+      const endPage = Math.ceil(endOffset / pageSize)
+      const pagesToFetch = Math.max(1, endPage - startPage + 1)
       for (let p = startPage; p < startPage + pagesToFetch; p += 1) {
         const tracks = await fetchKugouSingerSongs(String(id), p, pageSize)
         if (tracks.length === 0) break
@@ -3297,11 +3304,28 @@ export async function getArtistAllSongs(id: number | string, platform: MusicPlat
       return { songs: all.slice(pageInnerOffset, pageInnerOffset + limit), total: all.length }
     }
     
-    // 网易云暂时不支持分页，返回热门歌曲
-    const songs = await getArtistTopSongs(id, 'netease')
+    // 网易云：/netease/artist/songs 支持分页（服务端透传 limit/offset）——此前永远
+    // 请求同一批热门歌曲，"全部歌曲"翻页只是重复第一批
+    const response = await fetchT(`${API_BASE}/netease/artist/songs?id=${id}&limit=${Math.max(1, Math.min(limit, 200))}&offset=${Math.max(0, offset)}`)
+    const data = await response.json()
+    if (data.error) throw new Error(data.error)
+    const songs = (data.songs || []).map((item: any) => ({
+      id: item.id,
+      name: item.name,
+      artists: item.ar || item.artists || [],
+      album: {
+        id: item.al?.id || item.album?.id,
+        mid: undefined,
+        name: item.al?.name || item.album?.name || '',
+        picUrl: item.al?.picUrl || item.album?.picUrl || ''
+      },
+      duration: Number(item.dt || item.duration || 0),
+      platform: 'netease' as const,
+      vip: item.fee === 1
+    }))
     return {
       songs,
-      total: songs.length
+      total: data.total || songs.length
     }
   } catch (error) {
     console.error('获取歌手全部歌曲失败:', error)

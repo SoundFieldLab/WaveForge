@@ -471,6 +471,12 @@ export interface ElectronAPI {
   openKugouLoginWindow: () => Promise<{ success: boolean; cookie?: string; error?: string }>
   /** 退出登录时清除共享 session 的 kugou.com Cookie（防止登录弹窗带出旧账号） */
   clearKugouSession: () => Promise<{ success: boolean }>
+  /** 读取共享 session 的酷狗会话（重启后恢复登录态用；TV/网页端缺失） */
+  getKugouSession?: () => Promise<{ cookie?: string; userId?: string; nickname?: string; avatar?: string } | null>
+  /** 酷狗登录结果推送（登录弹窗关闭后主进程回传凭据；TV/网页端缺失） */
+  onKugouAuthResult?: (callback: (result: { success: boolean; cookie?: string; userId?: string; nickname?: string; avatar?: string; error?: string }) => void) => () => void
+  /** 汽水登录结果推送（同上；TV/网页端缺失） */
+  onSodaAuthResult?: (callback: (result: { success: boolean; token?: string; username?: string; avatar?: string; userId?: string; error?: string }) => void) => () => void
   /** Spotify OAuth 授权（Electron 弹窗；clientId 可选，自定义 Client ID） */
   openSpotifyLogin: (clientId?: string) => Promise<{ success: boolean; username?: string; error?: string }>
   /** Spotify 授权完成回调 */
@@ -491,6 +497,11 @@ export interface ElectronAPI {
     userInfo: () => Promise<{ success: boolean; info?: { nickname: string; user_id: string; avatar: string } | null; error?: string }>
   }
   /** 渲染进程日志转发到主进程控制台（后台窗口可见） */
+  /** 凭据加密存储（safeStore/DPAPI）：secureTokenStore 的主进程桥（TV/网页端缺失） */
+  secureStore?: {
+    set: (key: string, value: string) => Promise<{ success: boolean; error?: string }>
+    get: (key: string) => Promise<{ success: boolean; value: string | null; available?: boolean }>
+  }
   log: (message: string) => void
   wallpaper: {
     getCurrentWallpaper: () => Promise<WallpaperResult>
@@ -795,7 +806,7 @@ export interface ElectronAPI {
   update: {
     downloadAndInstall: (payload: { manifest: Record<string, unknown> } | string[], sha256?: string) => Promise<{ success: boolean; error?: string; path?: string }>
     downloadBackground: (payload: { manifest?: Record<string, unknown>; version?: string; notes?: string; urls?: string[]; sha256?: string }) => Promise<{ success: boolean; error?: string }>
-    applyPending: () => Promise<{ success: boolean }>
+    applyPending: () => Promise<{ success: boolean; error?: string }>
     restartForUpdate: () => Promise<{ success: boolean }>
     getPending: () => Promise<{ version: string; notes: string; stagedAt: number } | null>
     consumeLastApplied: () => Promise<{ version: string; notes: string; appliedAt: number } | null>

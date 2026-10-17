@@ -23,6 +23,11 @@ const FIRST_PARTY_DIRS = [
   'resources/',
   'python-beat-service/',
   'python-apple-bridge/',
+  // android/ 整目录在 .gitignore（构建产物不入库），但已跟踪的源文件
+  //（.kt/.java/build.gradle.kts/CMakeLists）不受影响——新增文件被静默忽略时
+  // 这里必须报警（否则 build:android 带不上新代码，发布后才暴露）。
+  'android/',
+  'installer/',
 ]
 const SOURCE_EXT = /\.(ts|tsx|mts|cts|js|mjs|cjs|jsx|py|json|sh)$/
 const IGNORE_ALLOWED = [
@@ -30,6 +35,16 @@ const IGNORE_ALLOWED = [
   /\.generated\.json$/,
   /^python-beat-service\/packages\//,
   /^resources\/python-embed\//,
+  // vitest 缓存（.vite/vitest/<hash>/results.json）：测试运行器可再生成的产物
+  /node_modules\/\.vite\//,
+  // Android 原生构建中间产物（CMake reply/compile_commands 等，gradle 生成）
+  /^android\/app\/\.cxx\//,
+  /^android\/\.gradle\//,
+  /^android\/app\/build\//,
+  /^android\/build\//,
+  // android 内嵌 Node 工程整体：main.cjs 是 esbuild 产物、node_modules 是打包依赖
+  //（build:android 从根目录 node_modules 重新组装），均由构建脚本整目录生成。
+  /^android\/app\/src\/main\/assets\/nodejs-project\//,
 ]
 
 function git(args, useRepoRoot = false) {

@@ -67,6 +67,23 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 签名：CI 从 Release keystore secret 注入（每次 runner 重新生成 debug
+            // keystore 会让第二版起拒绝覆盖安装 → 用户必须卸载丢数据）。
+            // 本地无 keystore 时回退 debug 签名（只影响本地侧载，不影响 CI 产物）。
+            val releaseKeystorePath = System.getenv("WAVEFORGE_RELEASE_KEYSTORE")
+                ?: (project.findProperty("waveforgeReleaseKeystore") as String?)
+            val releaseKeystorePassword = System.getenv("WAVEFORGE_RELEASE_KEYSTORE_PASSWORD")
+                ?: (project.findProperty("waveforgeReleaseKeystorePassword") as String?)
+            val releaseKeystoreAlias = System.getenv("WAVEFORGE_RELEASE_KEYSTORE_ALIAS")
+                ?: (project.findProperty("waveforgeReleaseKeystoreAlias") as String? ?: "waveforge")
+            if (releaseKeystorePath != null && java.io.File(releaseKeystorePath).exists() && releaseKeystorePassword != null) {
+                signingConfig = signingConfigs.create("release") {
+                    storeFile = file(releaseKeystorePath)
+                    storePassword = releaseKeystorePassword
+                    keyAlias = releaseKeystoreAlias
+                    keyPassword = releaseKeystorePassword
+                }
+            }
         }
     }
 

@@ -487,6 +487,8 @@ export default function ArtistDetailModal({
   const [loadingAlbums, setLoadingAlbums] = useState(false)
   const [loadingMVs, setLoadingMVs] = useState(false)
   const [allSongsError, setAllSongsError] = useState<string | null>(null) // 全部歌曲加载错误
+  const [albumsError, setAlbumsError] = useState<string | null>(null) // 专辑加载错误
+  const [mvsError, setMvsError] = useState<string | null>(null) // MV 加载错误
   const [hotSongsError, setHotSongsError] = useState<string | null>(null) // 热门歌曲加载错误
   // 汽水从外部跳转时把「歌手名」当 artistId，恢复记忆标签可能无对应数据，默认收敛到精选
   const [activeTab, setActiveTab] = useState<TabType>(platform === 'soda' ? 'hotSongs' : initialTab)
@@ -1049,6 +1051,7 @@ export default function ArtistDetailModal({
       setAlbums(allAlbums)
     } catch (error) {
       console.error('加载艺人专辑失败:', error)
+      setAlbumsError(error instanceof Error ? error.message : '加载失败，请重试')
     } finally {
       setLoadingAlbums(false)
     }
@@ -1108,6 +1111,7 @@ export default function ArtistDetailModal({
       setMvs(allMVs)
     } catch (error) {
       console.error('加载艺人MV失败:', error)
+      setMvsError(error instanceof Error ? error.message : '加载失败，请重试')
     } finally {
       setLoadingMVs(false)
     }
@@ -1765,6 +1769,18 @@ export default function ArtistDetailModal({
                       />
                     ))}
                   </div>
+                ) : albumsError ? (
+                  <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
+                    <Disc className="w-16 h-16 mb-4 opacity-20" />
+                    <p className="mb-4">{albumsError}</p>
+                    <button
+                      onClick={() => { setAlbumsError(null); void loadAlbums() }}
+                      className="px-4 py-2 rounded-lg hover:opacity-80 transition-opacity"
+                      style={{ backgroundColor: accentColor, color: 'white' }}
+                    >
+                      重试
+                    </button>
+                  </div>
                 ) : (
                   <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
                     <Disc className="w-16 h-16 mb-4 opacity-20" />
@@ -1793,6 +1809,18 @@ export default function ArtistDetailModal({
                         onOpen={handleMvOpen}
                       />
                     ))}
+                  </div>
+                ) : mvsError ? (
+                  <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>
+                    <Video className="w-16 h-16 mb-4 opacity-20" />
+                    <p className="mb-4">{mvsError}</p>
+                    <button
+                      onClick={() => { setMvsError(null); void loadMVs() }}
+                      className="px-4 py-2 rounded-lg hover:opacity-80 transition-opacity"
+                      style={{ backgroundColor: accentColor, color: 'white' }}
+                    >
+                      重试
+                    </button>
                   </div>
                 ) : (
                   <div className={`flex flex-col items-center justify-center py-20 ${textSecondary}`}>

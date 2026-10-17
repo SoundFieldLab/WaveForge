@@ -161,6 +161,9 @@ const performanceSettings = readPerformanceSettings()
 // 软件合成标记：GPU 合成器禁用时置 true（app ready 后由 getGPUFeatureStatus 判定）。
 // createWindow 据此动态调整 splash 最短可见时间（软件合成下内容层提交慢）。
 let gpuCompositingDisabled = false
+// 主窗渲染进程崩溃自动重载的滑动窗口计数（60s 内最多 3 次，防崩溃循环）
+let rendererCrashWindowStartRef = { current: 0 }
+let rendererCrashCountRef = { current: 0 }
 // 性能模式挡位：一个挡位统管三个底层开关（显卡偏好 / 高性能模式 / 全局高刷）。
 // 渲染后端不随挡位变动（保持 auto = D3D11 最优）。可再被下方手动开关覆盖。
 const PERF_TIER_PRESETS = {
@@ -1867,7 +1870,15 @@ ipcMain.handle('lyrics-island:update-settings', (event, partial) => {
   assertSenderIsOneOf(event, () => lyricsIslandWindow)
   const previousLocked = lyricsIslandSettings.locked
   const previousScale = lyricsIslandSettings.scale
-  lyricsIslandSettings = { ...lyricsIslandSettings, ...sanitizeLyricsIslandSettings(partial, lyricsIslandSettings) }
+  // 位置只在调用方明确携带 x/y 时才更新：sanitize 对缺失字段会得到 null，
+  // 直接展开合并会把已保存的摆位清成 null（改缩放/锁定后位置丢失的根因）。
+  const mentionsPosition = partial && (Object.prototype.hasOwnProperty.call(partial, 'x') || Object.prototype.hasOwnProperty.call(partial, 'y'))
+  const sanitized = sanitizeLyricsIslandSettings(partial, lyricsIslandSettings)
+  if (!mentionsPosition) {
+    sanitized.x = lyricsIslandSettings.x
+    sanitized.y = lyricsIslandSettings.y
+  }
+  lyricsIslandSettings = { ...lyricsIslandSettings, ...sanitized }
   if (Object.prototype.hasOwnProperty.call(partial || {}, 'locked')) {
     setLyricsIslandMousePassthrough(lyricsIslandSettings.locked)
   }
@@ -3968,6 +3979,30 @@ function createWindow() {
       reason: details?.reason,
       exitCode: details?.exitCode,
     })
+    // 崩溃自动重载（最多 3 次 / 60s 窗口）：主窗崩溃后无 UI、无菜单（F12 需开发者
+    // 模式门控），普通用户只能杀进程。优雅退出（reason=clean-exit）不重载。
+    if (details?.reason === 'clean-exit') return
+    const now = Date.now()
+    if (now - rendererCrashWindowStartRef.current > 60_000) {
+      rendererCrashWindowStartRef.current = now
+      rendererCrashCountRef.current = 0
+    }
+    if (rendererCrashCountRef.current >= 3) {
+      console.error('[ProcessHealth] 渲染进程 60s 内连续崩溃 3 次，停止自动重载（避免崩溃循环）')
+      return
+    }
+    rendererCrashCountRef.current += 1
+    const win = mainWindow
+    if (!win || win.isDestroyed()) return
+    setTimeout(() => {
+      try {
+        if (win.isDestroyed()) return
+        console.warn('[ProcessHealth] 自动重载主窗渲染进程（第', rendererCrashCountRef.current, '次）')
+        win.webContents.reload()
+      } catch (error) {
+        console.error('[ProcessHealth] 自动重载失败:', error?.message || error)
+      }
+    }, 800)
   })
 
   mainWindow.webContents.once('dom-ready', () => {
@@ -8651,7 +8686,9 @@ ipcMain.handle('set-hardware-acceleration', (_event, enabled) => {
 
 ipcMain.handle('set-gpu-preference', (_event, preference) => {
   assertMainSender(_event)
-  const next = ['auto', 'discrete', 'integrated'].includes(preference) ? preference : 'discrete'
+  // 非法值兜底为 auto（安全默认）：兜底 discrete 会让弱显卡/核显机器强制独显，
+  // 轻则费电、重则驱动异常黑屏，且用户并没有做出过这个选择。
+  const next = ['auto', 'discrete', 'integrated'].includes(preference) ? preference : 'auto'
   performanceSettings.gpuPreference = next
   // 切换到强制显卡（独显/核显）属于风险操作，重启后需要用户确认；自动为安全默认
   performanceSettings.pendingGpuChange = next === 'auto' ? null : { type: 'preference' }
@@ -9024,6 +9061,10 @@ function closeAllDependentWindows() {
   try { if (taskbarWidgetWindow && !taskbarWidgetWindow.isDestroyed()) taskbarWidgetWindow.destroy() } catch { /* 忽略 */ }
   try { if (douyinBridgeWindow && !douyinBridgeWindow.isDestroyed()) douyinBridgeWindow.destroy() } catch { /* 忽略 */ }
   try { if (kugouBridgeWindow && !kugouBridgeWindow.isDestroyed()) kugouBridgeWindow.destroy() } catch { /* 忽略 */ }
+  // 托盘弹窗平时只 hide() 不 close()：不在本列表里销毁的话，主窗关闭后它让
+  // window-all-closed 永不触发 → 进程常驻、remote/resonance 服务继续监听。
+  try { if (trayPopupWindow && !trayPopupWindow.isDestroyed()) trayPopupWindow.destroy() } catch { /* 忽略 */ }
+  trayPopupWindow = null
 }
 
 // 主窗口事件接线：启动创建（createWindow）与融合穿透重建（recreateMainWindow）共用。
@@ -10018,7 +10059,16 @@ app.whenReady().then(async () => {
       devServerUrl,
       pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
     ])(details.requestingUrl)
-    callback(isTrustedPermissionRequester(webContents) && frameTrusted && (permission === 'geolocation' || permission === 'media'))
+    let ok = isTrustedPermissionRequester(webContents) && frameTrusted && (permission === 'geolocation' || permission === 'media')
+    // media 细分：只放行音频输出设备枚举/选择（设置-「音频输出设备」）。
+    // 整体放行会让被注入的主窗脚本静默打开摄像头/麦克风（getUserMedia）。
+    if (ok && permission === 'media') {
+      const mediaTypes = details?.mediaTypes
+      ok = Array.isArray(mediaTypes)
+        ? mediaTypes.every(t => t === 'audio')
+        : true // 未携带 mediaTypes 的枚举类请求（enumerateDevices）放行
+    }
+    callback(Boolean(ok))
   })
   session.defaultSession.setDevicePermissionHandler((details) => {
     const requestOrigin = details?.origin || details?.embeddingOrigin || ''
@@ -10106,7 +10156,14 @@ app.whenReady().then(async () => {
   
   requiredDirs.forEach(dir => {
     if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true })
+      try {
+        fs.mkdirSync(dir, { recursive: true })
+        console.log('📁 [Config] 创建目录:', dir)
+      } catch (error) {
+        // 缓存盘不可用/权限被收走时 mkdir 抛错会让 whenReady 中断 → 无 UI 无报错。
+        // 降级：跳过该目录继续启动（读写失败由各调用方的错误处理兜底）。
+        console.error('📁 [Config] 缓存目录创建失败，跳过:', dir, error?.message || error)
+      }
       console.log('📁 [Config] 创建目录:', dir)
     }
   })
