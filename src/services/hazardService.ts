@@ -83,7 +83,7 @@ export interface EarthquakeLocationRisk {
   message: string
 }
 
-const API_BASE = 'http://localhost:3001/api'
+const API_BASE = '${getApiBase()}'
 const MEMORY_CACHE_TTL = 2 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 35_000
 let cachedSnapshot: HazardSnapshot | null = null

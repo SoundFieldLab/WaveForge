@@ -17,7 +17,7 @@ export interface PlaylistOptions {
   skipCache?: boolean
 }
 
-const API_BASE = '${getApiBase()}'
+const API_BASE = getApiBase()
 const userPlaylistsCache = new Map<string, any[]>()
 const userPlaylistsPending = new Map<string, Promise<any[]>>()
 const MAX_USER_PLAYLIST_CACHE_ENTRIES = 16

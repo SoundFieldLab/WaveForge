@@ -148,7 +148,13 @@ axios.defaults.timeout = 15000
 
 const app = express()
 const PORT = Number(process.env.PORT) || 3001
-const LOCAL_SERVICE_TOKEN = String(process.env.WAVEFORGE_LOCAL_TOKEN || '')
+// 惰性读取：桌面 main.cjs 在 spawn 前就设好 env，两者等价；Android 端 nodejs-mobile
+// 把 android-server.mjs（argv→env 赋值）与本文件打进同一 bundle，ESM import 提升
+// 使本文件的求值先于 android-server 体内语句——若在此处捕获快照，拿到的恒是空串
+// → fail-open，Android 本机 API 鉴权形同虚设。改由函数在每请求时读 env。
+function currentLocalServiceToken() {
+  return process.env.WAVEFORGE_LOCAL_TOKEN || ''
+}
 const ALLOWED_RENDERER_ORIGINS = new Set([
   'http://localhost:3000',
   'http://127.0.0.1:3000',
@@ -1363,7 +1369,7 @@ app.use((req, res, next) => {
   const origin = req.headers.origin
   const suppliedLocalToken = req.headers[LOCAL_SERVICE_HEADER]
   const tokenAuthorized = isAuthorizedLocalRequest({
-    configuredToken: LOCAL_SERVICE_TOKEN,
+    configuredToken: currentLocalServiceToken(),
     suppliedToken: suppliedLocalToken,
   })
   if (origin && !ALLOWED_RENDERER_ORIGINS.has(origin)) {

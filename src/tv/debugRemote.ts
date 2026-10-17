@@ -42,8 +42,12 @@ function connectWs(): void {
 
 function connectWsDirect(): void {
   if (!debugBridgeToken) {
-    // verifyClient 要求令牌：开关刚打开时 syncBackend 可能还没回来，等下一轮重连
-    if (isDebugMode()) setTimeout(connectWs, 3000)
+    // verifyClient 要求令牌：令牌缺失（启动时 syncBackend 失败/后端未就绪）→ 重跑
+    // 一次 syncBackend 再等重连。只重试"连接"不重试"取令牌"会让 WS 永远连不上。
+    if (isDebugMode()) {
+      syncBackend(true)
+      setTimeout(connectWs, 3000)
+    }
     return
   }
   try {

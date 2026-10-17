@@ -21,17 +21,25 @@ async function setup(t, startOptions = {}, hubOptions = {}) {
     hub.stop()
   })
   const connect = (params) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${status.port}/ws?${new URLSearchParams(params).toString()}`)
+    // hostKey 是房主鉴权凭据（2026-10-18 修复：任何成员曾可用 ?role=host 抢占 host 位）。
+    // role=host 且调用方未显式给 hostKey 时自动补当前房间的（正常房主路径）；
+    // 显式传入错误 hostKey 的负向用例保留原值。每次实时读 hub.status()：
+    // 空房间可被新房顶掉，旧 status 快照的 hostKey 已失效。
+    const effective = (params.role === 'host' && !params.hostKey)
+      ? { ...params, hostKey: hub.status().hostKey }
+      : params
+    const ws = new WebSocket(`ws://127.0.0.1:${status.port}/ws?${new URLSearchParams(effective).toString()}`)
     sockets.push(ws)
     const messages = []
     ws.on('message', (raw) => {
       try { messages.push(JSON.parse(raw.toString())) } catch { /* ignore */ }
     })
-    // 服务端拒绝时是「先完成握手，再 close(4001/4002/4003)」：open 后留一个宽限期再判定成功
+    // 服务端拒绝时是「先完成握手，再 close(4001/4002/4003)」。判定成功前等 400ms：
+    // 150ms 在串行负载下会与服务端 close 竞速，被拒连接被误判为成功（flaky）。
     const outcome = new Promise((resolve) => {
       let settled = false
       const settle = (value) => { if (!settled) { settled = true; resolve(value) } }
-      ws.on('open', () => { setTimeout(() => settle({ ok: true, code: 0 }), 150) })
+      ws.on('open', () => { setTimeout(() => settle({ ok: true, code: 0 }), 400) })
       ws.on('error', () => settle({ ok: false, code: -1 }))
       ws.on('close', (code) => settle({ ok: false, code }))
     })
@@ -43,7 +51,20 @@ async function setup(t, startOptions = {}, hubOptions = {}) {
     }
     return { ws, messages, outcome, joined }
   }
-  return { hub, status, connect }
+  // 不做任何参数加工的原始连接（hostKey 负向用例用：模拟只拿到邀请串的成员）
+  const rawConnect = (params) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${status.port}/ws?${new URLSearchParams(params).toString()}`)
+    sockets.push(ws)
+    const outcome = new Promise((resolve) => {
+      let settled = false
+      const settle = (value) => { if (!settled) { settled = true; resolve(value) } }
+      ws.on('open', () => { setTimeout(() => settle({ ok: true, code: 0 }), 400) })
+      ws.on('error', () => settle({ ok: false, code: -1 }))
+      ws.on('close', (code) => settle({ ok: false, code }))
+    })
+    return { ws, outcome }
+  }
+  return { hub, status, connect, rawConnect }
 }
 
 test('共振中转：房间码错误或房间号错误一律拒绝', async (t) => {
@@ -57,6 +78,26 @@ test('共振中转：房间码错误或房间号错误一律拒绝', async (t) =
   assert.equal(ready.t, 'host-ready')
   assert.ok(ready.peerId)
   assert.equal(hub.status().memberCount, 0)
+})
+
+test('共振中转：role=host 必须携带正确 hostKey（成员不可凭邀请串抢占 host 位）', async (t) => {
+  const { hub, status, connect, rawConnect } = await setup(t, { roomId: 'room-hk', code: '654321' })
+
+  // 负向用例必须绕过 connect 的自动补 key（模拟"只拿到邀请串的成员"能构造的一切形态）
+  assert.deepEqual(await rawConnect({ room: 'room-hk', code: '654321', role: 'host' }).outcome, { ok: false, code: 4001 })
+  assert.deepEqual(await rawConnect({ room: 'room-hk', code: '654321', role: 'host', hostKey: 'a'.repeat(64) }).outcome, { ok: false, code: 4001 })
+  assert.deepEqual(await rawConnect({ room: 'room-hk', code: '654321', role: 'host', hostKey: status.hostKey + '0' }).outcome, { ok: false, code: 4001 })
+  // 即便发送者持有一个历史房间的 hostKey，也不能通过当前房间的校验
+  assert.deepEqual(await rawConnect({ room: 'room-hk', code: '654321', role: 'host', hostKey: 'f'.repeat(64) }).outcome, { ok: false, code: 4001 })
+
+  // 正确 hostKey 可连，且 host 席位被占后第二个 host（哪怕密钥正确）被拒
+  const host = connect({ room: 'room-hk', code: '654321', role: 'host' })
+  await host.joined()
+  assert.deepEqual(await rawConnect({ room: 'room-hk', code: '654321', role: 'host', hostKey: hub.status().hostKey }).outcome, { ok: false, code: 4002 })
+
+  // member 不受影响（不需要 hostKey）
+  const member = connect({ room: 'room-hk', code: '654321' })
+  await member.joined()
 })
 
 test('共振中转：匿名发现只返回服务信息，不泄露房间号与房间码', async (t) => {

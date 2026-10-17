@@ -365,6 +365,9 @@ const checkForUpdate = () => {
           hotSha: hotArtifact?.sha256 || '',
           installUrls: winArtifact?.urls?.[0] ? withDownloadProxies(winArtifact.urls[0]) : undefined,
           installSha: winArtifact?.sha256 || '',
+          // 完整清单（含 manifestSignature）必须透传：主进程打包版只接受签名清单载荷，
+          // 缺了它 UpdateManager 的下载永远报"manifestSignature 缺失"（与 SettingsPanel 同口径）
+          manifest: manifest as unknown as Record<string, unknown>,
         },
       }))
     } catch {

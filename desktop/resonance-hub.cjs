@@ -44,6 +44,16 @@ function safeEqual(left, right) {
   return crypto.timingSafeEqual(a, b)
 }
 
+/** host WS 连接凭据：32 字节随机 hex（房间创建时生成，本进程调用方持有） */
+function randomToken() {
+  return crypto.randomBytes(32).toString('hex')
+}
+
+/** hostKey 常数时间比较（长度先比对，防时序泄露） */
+function hostKeyMatches(supplied, expected) {
+  return Boolean(expected) && safeEqual(String(supplied || ''), String(expected))
+}
+
 /** 6 位数字房间码（避免易混字符，纯数字便于口述） */
 function generateRoomCode() {
   return String(crypto.randomInt(100000, 1000000))
@@ -147,6 +157,12 @@ function createResonanceHub(options = {}) {
       createdAt: room ? room.createdAt : 0,
       ips: typeof options.getLanIps === 'function' ? options.getLanIps() : [],
       isHost: Boolean(hostSocket),
+      /**
+       * host WS 连接凭据：房间创建时随机生成，只随 start()/status() 返回给本进程
+       * 调用方（房主渲染层 / 测试）。邀请串里只有 roomId+code，成员拿不到它——
+       * role=host WS 通道据此鉴权（此前任何成员都能 ?role=host 抢占 host 位）。
+       */
+      hostKey: room ? room.hostKey : '',
     }
   }
 
@@ -282,6 +298,14 @@ function createResonanceHub(options = {}) {
         const connectedRoomId = room.roomId
         const role = url.searchParams.get('role') || 'member'
         if (role === 'host') {
+          // host WS 通道需要 hostKey（房间创建时随机生成，只给本进程调用方；
+          // 邀请串只有 roomId+code，成员拿不到）。常数时间比较防时序侧信道。
+          const suppliedKey = String(url.searchParams.get('hostKey') || '')
+          if (!hostKeyMatches(suppliedKey, room.hostKey)) {
+            noteGlobalJoinFailure()
+            ws.close(4001, 'Unauthorized')
+            return
+          }
           if (hostSocket) {
             ws.close(4002, 'Host already connected')
             return
@@ -293,7 +317,7 @@ function createResonanceHub(options = {}) {
           send(ws, { t: 'host-ready', peerId: hostPeerId, roomId: room.roomId, memberCount: members.size })
           emit({ type: 'host-connected', peerId: hostPeerId })
         } else {
-          // 房主占 1 席（房主通常就在本进程内，不需要额外连接）
+          // 房主占 1 席（房主就在本进程内，不需要额外连接）
           if (members.size >= room.maxMembers - 1) {
             ws.close(4003, 'Room full')
             return
@@ -302,7 +326,7 @@ function createResonanceHub(options = {}) {
           members.set(peerId, { ws, ip, joinedAt: Date.now() })
           ws.__wfAlive = true
           send(ws, { t: 'joined', peerId, roomId: room.roomId, memberCount: members.size })
-          send(hostSocket, { t: 'peer-joined', peerId, memberCount: members.size })
+          if (hostSocket) send(hostSocket, { t: 'peer-joined', peerId, memberCount: members.size })
           emit({ type: 'peer-joined', peerId, memberCount: members.size })
         }
 
@@ -363,7 +387,7 @@ function createResonanceHub(options = {}) {
         const address = server.address()
         if (address && typeof address === 'object' && address.port) port = address.port
         // discoverable=false 时 /discover 返回 404（对应设置项「允许局域网发现」关闭）
-        room = { roomId, code, maxMembers, createdAt: Date.now(), discoverable: config.discoverable !== false }
+        room = { roomId, code, maxMembers, createdAt: Date.now(), discoverable: config.discoverable !== false, hostKey: randomToken() }
         startHeartbeat()
         resolve(status())
       })

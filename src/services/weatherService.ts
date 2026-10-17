@@ -1,4 +1,5 @@
 import type { DesktopCustomizationSettings } from './desktopCustomization'
+import { getApiBase } from './apiConfig'
 
 export interface WeatherLocation {
   name: string
@@ -529,7 +530,7 @@ export const resolveCoordinatesLocation = async (
 ): Promise<WeatherLocation> => {
   const query = `latitude=${encodeURIComponent(latitude)}&longitude=${encodeURIComponent(longitude)}`
   try {
-    const data = await requestReverseLocation(`http://127.0.0.1:3001/api/location/reverse?${query}`, signal)
+    const data = await requestReverseLocation(`${getApiBase()}/location/reverse?${query}`, signal)
     if (data.success !== false) return normalizeReverseLocation(data, latitude, longitude)
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw error
@@ -618,7 +619,7 @@ const resolveIpLocation = async (signal?: AbortSignal): Promise<WeatherLocation>
     normalize: (data: Record<string, unknown>) => Record<string, unknown>
   }> = [
     {
-      endpoint: 'http://127.0.0.1:3001/api/location/ip',
+      endpoint: getApiBase() + '/location/ip',
       normalize: data => data,
     },
     {

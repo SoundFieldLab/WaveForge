@@ -1,7 +1,7 @@
 // 传统模式独立评论弹层：不复用全局 CommentModal，数据仍走本地 API，
 // 但渲染完全采用传统模式自己的设计语言（纯展示 + 分页，不实现点赞/回复交互）。
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { getApiBase } from '../services/apiConfig'
+import { getApiOrigin } from '../services/apiConfig'
 import { Heart, MessageCircle, X } from 'lucide-react'
 import type { Song } from '../services/musicApi'
 import { getProxiedImageUrl } from '../services/musicApi'
@@ -25,7 +25,7 @@ interface CommentItem {
   ipLabel?: string
 }
 
-const API_BASE = getApiBase()
+const API_BASE = getApiOrigin()
 const getCookie = () => getSecureToken("netease_cookie") || ''
 
 const formatDate = (ms: number) => {
