@@ -63,6 +63,19 @@ const getPlatformCookie = (platform: MusicPlatform, explicitCookie?: string) => 
 const SONG_URL_CACHE_TTL = 5 * 60 * 1000
 
 /**
+ * QQ 音频 URL 的缓存上限。
+ *
+ * QQ 的 vkey URL 响应里没有网易云那样的 `expi`，无法按上游真实有效期收窄，于是此前一律按
+ * 默认 5 分钟缓存。实测线上日志：URL 在 05:22:29 解析、05:26:30 才真正交给 <audio> 加载
+ * （当前歌播完），间隔 4 分 01 秒——缓存仍判有效，加载却因 URL 已失效而失败，表现为
+ * 「放几首就放不了，点下一曲又正常」（下一曲会重新解析）。
+ * 这里按 2 分钟封顶：过期后任何 getSongUrl 都会重新解析，宁可多一次请求也不要把死链交给播放器。
+ */
+const QQ_SONG_URL_MAX_TTL = 2 * 60 * 1000
+/** 超过这个年龄的 URL 交给播放器前打一条日志，便于线上判断是否还在吃失效链接 */
+const SONG_URL_STALE_WARN_AGE = 2 * 60 * 1000
+
+/**
  * QQ 超级会员专享档（杜比全景声 / 臻品母带4.0 / 臻品音质2.0）被上游拒绝时的提示。
  * 同一首歌同一档只提示一次：切歌/切档反复触发会把播放页刷屏。
  * 服务端此时已回落常规档位并正常返回 url，所以这里只需要如实告知用户为什么没听到那一档。
@@ -116,7 +129,7 @@ const SONG_URL_SAFETY_MARGIN_MS = 30 * 1000
 const SONG_URL_MIN_POSITIVE_TTL_MS = 15 * 1000
 const SONG_URL_FETCH_TIMEOUT = 26 * 1000
 const SONG_URL_CACHE_MAX_ENTRIES = 256
-const songUrlCache = new Map<string, { url: string | null; expiresAt: number }>()
+const songUrlCache = new Map<string, { url: string | null; expiresAt: number; resolvedAt: number }>()
 const songUrlPending = new Map<string, Promise<string | null>>()
 const songUrlRefreshPending = new Map<string, Promise<string | null>>()
 const songUrlRefreshUntil = new Map<string, number>()
@@ -226,6 +239,7 @@ const cacheSongUrl = (key: string, url: string | null, ttlMs?: number) => {
   songUrlCache.delete(key)
   songUrlCache.set(key, {
     url,
+    resolvedAt: url ? now : 0,
     expiresAt: now + (url ? (ttlMs ?? SONG_URL_CACHE_TTL) : SONG_URL_NEGATIVE_CACHE_TTL),
   })
   while (songUrlCache.size > SONG_URL_CACHE_MAX_ENTRIES) {
@@ -968,6 +982,12 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
   if (cached && cached.expiresAt > now) {
     songUrlCache.delete(cacheKey)
     songUrlCache.set(cacheKey, cached)
+    // 命中一条偏老的签名 URL 时才提示：这是「交给播放器后加载失败」的高危信号，
+    // 排查「放几首就放不了」时先看有没有这行、年龄多大。
+    const ageMs = cached.resolvedAt ? now - cached.resolvedAt : -1
+    if (cached.url && ageMs > SONG_URL_STALE_WARN_AGE) {
+      console.warn(`[SongUrl] 命中偏老 URL：platform=${platform} id=${id} age=${Math.round(ageMs / 1000)}s（可能已被上游判定失效）`)
+    }
     return cached.url
   }
   if (cached) songUrlCache.delete(cacheKey)
@@ -1056,7 +1076,13 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         && data.requestedQuality !== data.actualQuality) {
         notifyNeteaseTierUnavailable(id, getAudioQualityRequest('netease').preference, String(data.actualQuality))
       }
-      cacheSongUrl(cacheKey, url, url ? readTtlMs(data) : undefined)
+      // QQ 的 vkey URL 没有上游 expi，按 2 分钟封顶（见 QQ_SONG_URL_MAX_TTL 的说明），
+      // 否则一条 5 分钟前解析的链接会被交给 <audio>，加载时才失败。
+      const rawTtl = url ? readTtlMs(data) : undefined
+      const effectiveTtl = url && platform === 'qq'
+        ? Math.min(rawTtl ?? QQ_SONG_URL_MAX_TTL, QQ_SONG_URL_MAX_TTL)
+        : rawTtl
+      cacheSongUrl(cacheKey, url, effectiveTtl)
       return url
     } catch (error) {
       if (requestGeneration !== songUrlCacheGeneration) {

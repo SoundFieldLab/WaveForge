@@ -45,6 +45,8 @@ export const AUTOMIX_HUD_NODE_HOLD_SECONDS = 8
  *  两段都长于播放时间轴 ~250ms 的量化台阶，进度条上方金色提示的出入场依旧被抹平。 */
 export const AUTOMIX_HUD_FADE_IN_SECONDS = 0.4
 export const AUTOMIX_HUD_FADE_OUT_SECONDS = 0.5
+/** 鼠标从药丸移开后的宽限：给用户留出「再想一下」的余地，再渐隐。 */
+export const AUTOMIX_HUD_HOVER_GRACE_SECONDS = 4
 /** 点击时间节点药丸时，跳到「过渡切点前多少秒」。
  *  取 11 秒：比 AutoMix 的预介入窗口再早一点，落点仍在过渡之外，用户能听完最后一段。 */
 export const AUTOMIX_HUD_JUMP_LEAD_SECONDS = 11
@@ -187,8 +189,18 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
   // 提示会话：一开始提示就落记「本曲已提示」（模块级 → 切播放页卸载重挂也不会对同曲重弹），
   // 淡入结束后才开始计满 8 秒驻留（淡入/淡出不计入显示时长），到点自动收起（渐隐由下面的进出场状态机负责）。
   const [holding, setHolding] = useState(false)
+  // 悬停状态：鼠标停在药丸上时不倒数（让用户有时间决定「跳回去」还是「关闭」），
+  // 移开后按 4 秒宽限再渐隐。用户诉求：悬停期间不要自动消失，移出后 4 秒收起。
+  const [hovered, setHovered] = useState(false)
+  /** 本次驻留的剩余计时长度：默认「淡入预算 + 8 秒」；悬停结束后改为 4 秒宽限 */
+  const holdMsRef = useRef((AUTOMIX_HUD_FADE_IN_SECONDS + AUTOMIX_HUD_NODE_HOLD_SECONDS) * 1000)
   // 换歌（当前曲身份变化）：上一首的驻留窗口不延续到新歌，新歌从自己的第 5 秒重新开始计时
   useEffect(() => { setHolding(false) }, [trackKey])
+  // 新一次提示开始：驻留时长复位（必须排在下面的计时 effect 之前，否则会读到上次的 4 秒宽限）
+  useEffect(() => {
+    if (!holding) return
+    holdMsRef.current = (AUTOMIX_HUD_FADE_IN_SECONDS + AUTOMIX_HUD_NODE_HOLD_SECONDS) * 1000
+  }, [holding])
   useEffect(() => {
     if (!eligible) return
     memory.notified = true
@@ -196,13 +208,12 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
   }, [eligible])
   useEffect(() => {
     if (!holding) return
-    // 总驻留计时 = 淡入预算 + 8 秒完全可见；计时到点才开始淡出
-    const timer = window.setTimeout(
-      () => setHolding(false),
-      (AUTOMIX_HUD_FADE_IN_SECONDS + AUTOMIX_HUD_NODE_HOLD_SECONDS) * 1000,
-    )
+    // 鼠标停在药丸上：暂停倒数（悬停期间不在中途消失，用户可能在纠结要不要跳/关）
+    if (hovered) return
+    // 驻留计时：默认「淡入预算 + 8 秒」；悬停结束后改用 4 秒宽限（见 onPointerLeave）
+    const timer = window.setTimeout(() => setHolding(false), holdMsRef.current)
     return () => window.clearTimeout(timer)
-  }, [holding])
+  }, [holding, hovered])
   const shouldShow = holding && info.phase === 'armed' && remaining > 0
 
   // 进出场用「状态机 + CSS 过渡」而不是每帧算不透明度：
@@ -256,6 +267,12 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
         ? () => onJumpToTransition(info.startAt)
         : undefined}
       title={onJumpToTransition ? `跳到过渡前 ${AUTOMIX_HUD_JUMP_LEAD_SECONDS} 秒` : undefined}
+      // 悬停期间暂停自动收起；移开后按 4 秒宽限再渐隐（不是立刻消失，也不是重新数 8 秒）
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => {
+        holdMsRef.current = AUTOMIX_HUD_HOVER_GRACE_SECONDS * 1000
+        setHovered(false)
+      }}
       style={{
         background: chipBackground,
         backdropFilter: 'blur(18px) saturate(150%)',

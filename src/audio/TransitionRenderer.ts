@@ -800,6 +800,20 @@ export class TransitionRenderer {
     return true
   }
 
+  /**
+   * 让已渲染的过渡全部失效（音质切换时调用）。
+   *
+   * 缓存键是 planId（由曲目对/档位/风格决定，**不含音质档**），内存 PCM 与磁盘产物
+   * 两层命中都会直接复用。所以切到无损后，之前以 128k 渲染的成品仍会被拿去播——
+   * 听感上就是「切了无损，但过渡那几秒还是糊的」。清掉内存与磁盘索引即可，
+   * 磁盘文件由主进程的缓存清理回收。
+   */
+  clearRenderedCache(): void {
+    this.cache.clear()
+    this.cacheBytes = 0
+    this.persistedRenders.clear()
+  }
+
   private evictOldestCacheEntry(): boolean {
     let oldestKey: string | null = null
     let oldestTime = Number.POSITIVE_INFINITY

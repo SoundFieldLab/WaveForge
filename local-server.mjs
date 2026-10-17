@@ -7223,10 +7223,68 @@ app.get('/api/qq/song/url', async (req, res) => {
         directResults = await probeWith(mediaMid)
       }
     }
+    // 上游偶尔「给了 purl，但文件在 CDN 上不存在」：实测某曲目 flac 的 purl 取回来是
+    // HTTP 404 + 27 字节 "Audio upstream returned 404"，<audio> 只能报
+    // code=4 SRC_NOT_SUPPORTED / Format error——用户看到的就是「放几首就放不了」。
+    // 所以 purl 有值不再等于可播放：按候选序逐个探活，取第一个真能取到音频的档位。
+    // 探活失败（超时/网络抖动）一律 fail-open，绝不能因为探活本身把正常曲目判死。
+    const probeUpstreamAudio = async url => {
+      try {
+        const response = await fetch(url, {
+          headers: { Range: 'bytes=0-15' },
+          signal: AbortSignal.timeout(Math.max(800, Math.min(2000, remainingTimeout(2000)))),
+        })
+        const contentType = String(response.headers.get('content-type') || '').toLowerCase()
+        try { await response.arrayBuffer() } catch { /* 忽略：只要状态与类型 */ }
+        if (response.status !== 200 && response.status !== 206) {
+          return { ok: false, reason: `HTTP ${response.status}` }
+        }
+        if (contentType.includes('text/html') || contentType.includes('application/json') || contentType.includes('text/plain')) {
+          return { ok: false, reason: `body is ${contentType}` }
+        }
+        return { ok: true }
+      } catch (error) {
+        return { ok: true, uncertain: true, reason: error?.name || error?.message }
+      }
+    }
+
     for (let index = 0; index < candidates.length; index += 1) {
       const result = directResults[index]
       if (result.status === 'fulfilled' && result.value) {
-        const direct = result.value
+        let direct = result.value
+        let liveness = await probeUpstreamAudio(direct.url)
+        if (!liveness.ok) {
+          // 文件名可能用错了 mid：无损/高码率文件按 media_mid 命名，而 songmid 常与之不同。
+          // 实测 Worship Me：songmid=001hP9vJ1BeJCx、media_mid=000Nuvv31PdSYg、size_flac=23.7MB，
+          // 用 songmid 请求时上游照样给 purl，但 CDN 对 F000001hP9vJ1BeJCx.flac 返回 404。
+          // 旧逻辑只在「整轮都没拿到 purl」时才用 mediaMid 补一轮——拿到假 purl 就永远不补。
+          // 这里在探活失败时用 mediaMid 重试同一档位：文件存在就仍然是 FLAC，不降档。
+          const metadata = await metadataPromise
+          if (metadata && mediaMid && mediaMid !== songMid) {
+            try {
+              const retry = await requestDirectQQUrl(candidates[index], qqUin ? 1 : 0, undefined, mediaMid)
+              if (retry) {
+                const retryLiveness = await probeUpstreamAudio(retry.url)
+                if (retryLiveness.ok) {
+                  console.warn('[QQ URL] ' + direct.quality + ' 用 songmid 取不到，mediaMid=' + mediaMid + ' 命中')
+                  direct = retry
+                  liveness = retryLiveness
+                } else {
+                  console.warn('[QQ URL] ' + direct.quality + ' 用 mediaMid=' + mediaMid + ' 仍取不到（' + retryLiveness.reason + '）')
+                }
+              }
+            } catch (retryError) {
+              console.warn('[QQ URL] ' + direct.quality + ' 的 mediaMid 重试失败:', retryError?.message || retryError)
+            }
+          }
+        }
+        if (!liveness.ok) {
+          console.warn('[QQ URL] ' + direct.quality + ' 的 purl 取不到音频（' + liveness.reason + '），继续下一个候选')
+          continue
+        }
+        if (liveness.uncertain) {
+          console.warn('[QQ URL] ' + direct.quality + ' 探活未确认（' + liveness.reason + '），按可用处理')
+        }
         console.log('[QQ URL] direct quality ' + direct.quality + ' succeeded as ' + direct.actualQuality)
         return res.json({
           url: direct.url,
@@ -7257,6 +7315,11 @@ app.get('/api/qq/song/url', async (req, res) => {
           const path = (() => { try { return new URL(url).pathname } catch { return url } })()
           const expectedFilename = getQQFilename(mediaMid, actualQuality)
           if (path.endsWith('/' + expectedFilename) || path.includes('/' + expectedFilename + '?')) {
+            const liveness = await probeUpstreamAudio(url)
+            if (!liveness.ok) {
+              console.warn('[QQ URL] package quality ' + quality + ' 的链接取不到音频（' + liveness.reason + '），跳过')
+              continue
+            }
             console.log('[QQ URL] package quality ' + quality + ' succeeded')
             return res.json({ url, qualityPreference, requestedQuality: quality, actualQuality, isPreview: false, ...(restrictedTier ? { restrictedTier } : {}) })
           }
@@ -7270,7 +7333,11 @@ app.get('/api/qq/song/url', async (req, res) => {
     try {
       const preview = await requestDirectQQUrl('m4a', 0)
       if (preview) {
-        return res.json({ url: preview.url, qualityPreference, requestedQuality: 'm4a', actualQuality: preview.actualQuality, isPreview: true, ...(restrictedTier ? { restrictedTier } : {}) })
+        const liveness = await probeUpstreamAudio(preview.url)
+        if (liveness.ok) {
+          return res.json({ url: preview.url, qualityPreference, requestedQuality: 'm4a', actualQuality: preview.actualQuality, isPreview: true, ...(restrictedTier ? { restrictedTier } : {}) })
+        }
+        console.warn('[QQ URL] preview 链接取不到音频（' + liveness.reason + '），放弃试听回退')
       }
     } catch (previewError) {
       console.warn('[QQ URL] preview failed:', previewError.message)

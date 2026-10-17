@@ -1367,6 +1367,9 @@ function App() {
       for (const key of keys) {
         void window.electron?.audioDownload?.deleteCached?.(key).catch(() => undefined)
       }
+      // 已渲染的过渡成品也必须失效：它的缓存键不含音质档，切到无损后仍会复用
+      // 之前以低码率渲染的 WAV（过渡那几秒听起来还是糊的）。
+      try { audioPlayerRef.current?.clearTransitionRenders?.() } catch { /* 忽略 */ }
     }
     const reloadCurrentOnQualityChange = () => {
       const idx = currentIndexRef.current
@@ -4646,11 +4649,27 @@ function App() {
   //  · AutoMix 有介入点 → automixHud.startAt（与药丸时间节点一致）
   //  · 无缝衔接（gapless）→ gaplessBoundaryStartAt（跨专辑 = 交叉起点，同专辑 = 曲末）；
   //    否则用动画窗口起点（=原始末尾前 10s），裁剪/交叉生效时卡片会停在「0秒后」等好几秒
+  // 本曲最近一次已知的过渡切点。
+  // 暂停时过渡计划会被暂时摘掉（automixHud / transitionStartTime 都变 null），此时若回退到
+  // duration，倒计时会从「切点前 1 秒」跳成「曲末前 9 秒」（实测 2:39/2:48 处显示 9 秒）。
+  // 按曲目身份记住切点：暂停期间沿用它，换歌自动失效。
+  const lastTransitionCutRef = useRef<{ songKey: string; cutAt: number } | null>(null)
+  const currentSongKey = currentSong ? String(currentSong.id || currentSong.mid || currentSong.name || '') : ''
   const upNextEventTime = useMemo(() => {
     const base = automixHud?.startAt
       ?? ((effectiveAutoMixEnabled || effectiveGaplessEnabled) ? (transitionStartTime ?? duration) : duration)
-    return gaplessBoundaryStartAt != null ? Math.min(base, gaplessBoundaryStartAt) : base
-  }, [automixHud?.startAt, effectiveAutoMixEnabled, effectiveGaplessEnabled, transitionStartTime, duration, gaplessBoundaryStartAt])
+    const next = gaplessBoundaryStartAt != null ? Math.min(base, gaplessBoundaryStartAt) : base
+    // 有计划里的真实切点：记录并直接使用（暂停前的最后一次值就是正确答案）
+    const realCut = automixHud?.startAt ?? gaplessBoundaryStartAt ?? null
+    if (realCut != null) {
+      lastTransitionCutRef.current = { songKey: currentSongKey, cutAt: next }
+      return next
+    }
+    // 计划被摘掉（典型：暂停）：沿用本曲已知切点，不要回退到曲末
+    const remembered = lastTransitionCutRef.current
+    if (remembered && remembered.songKey === currentSongKey) return remembered.cutAt
+    return next
+  }, [automixHud?.startAt, effectiveAutoMixEnabled, effectiveGaplessEnabled, transitionStartTime, duration, gaplessBoundaryStartAt, currentSongKey])
 
   // 过渡调试弹窗：过渡计划就绪（armed）时展示引擎/策略/DJ 效果清单；
   // 受「过渡调试」开关控制（设置 → 开发者选项 → 调试面板），关闭则不显示。
@@ -6663,7 +6682,15 @@ function App() {
           lyricsLoaded: latest?.lyricsLoaded,
           lyricsPromise: latest?.lyricsPromise,
         })
+        // 诊断（此前这两条路径静默失败，线上完全看不出重试为什么没用）：
+        // 打出重试时原 URL 的年龄，以及新 URL 是否真的换了。
+        const failedUrl = url
+        const staleAgeSec = latest?.urlTimestamp ? Math.round((Date.now() - latest.urlTimestamp) / 1000) : -1
+        console.warn(`[PlaySong] 首次加载失败，重试：trackKey=${cacheKey} 原URL年龄=${staleAgeSec}s`)
         const refreshedUrl = await getSongUrl(songId, platform)
+        console.warn(`[PlaySong] 重试结果：${refreshedUrl
+          ? (refreshedUrl === failedUrl ? '取到与失败 URL 相同的链接' : '已取到新链接')
+          : 'getSongUrl 返回 null（没有拿到新链接）'}`)
         // 即使签名 URL 与失败 URL 相同也再试一次：瞬时 CDN 解码失败不代表 URL 无效
         if (!refreshedUrl || !isLatestLoad()) throw firstPlaybackError
         url = refreshedUrl

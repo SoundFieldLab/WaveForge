@@ -3644,7 +3644,28 @@ export function useAudioPlayer(
             callback()
           }
           const canPlay = () => settle(resolve)
-          const failed = () => settle(() => reject(active.error || new Error('media load failed')))
+          // MediaError 不是 Error 实例：直接 reject(active.error) 后 console.error 只会打出
+          // `{}`（code/message 在原型上，JSON.stringify 看不到），线上日志因此完全无法判断
+          // 是解码失败、格式不支持还是网络中断。这里拍平成带 code 的可读 Error。
+          const failed = () => settle(() => {
+            const mediaError = active.error
+            const code = Number(mediaError?.code ?? 0)
+            const codeLabel = code === 1 ? 'ABORTED'
+              : code === 2 ? 'NETWORK'
+                : code === 3 ? 'DECODE'
+                  : code === 4 ? 'SRC_NOT_SUPPORTED'
+                    : 'UNKNOWN'
+            const src = String(active.currentSrc || active.src || '')
+            const error = new Error(
+              `media load failed: code=${code}(${codeLabel})`
+              + `${mediaError?.message ? ` message=${mediaError.message}` : ''}`
+              + ` src=${src.slice(0, 140)}`,
+            ) as Error & { mediaCode?: number }
+            // 调用方据此决定是否降档重试：code=3/4 说明这份文件本身不可解码，
+            // 换一条同档位的新 URL 仍然会失败（实测 flac 换新 vkey 依旧 code=4）。
+            error.mediaCode = code
+            reject(error)
+          })
           const cancelled = () => settle(resolve)
           currentLoadWaitCancelRef.current = cancelled
           active.addEventListener('canplay', canPlay, { once: true })
@@ -4267,6 +4288,10 @@ export function useAudioPlayer(
     resetGaplessIntegration,
     /** HUD「关闭」：本曲对不做智能混音（完整播放本曲，末尾只留短交叉） */
     skipAutoMixForCurrentPair,
+    /** 音质切换后让已渲染的过渡失效（见 TransitionRenderer.clearRenderedCache） */
+    clearTransitionRenders: () => {
+      transitionRendererRef.current?.clearRenderedCache()
+    },
     adoptExternalAudio,
     getAcceptanceState: () => {
       const active = getActiveAudio()

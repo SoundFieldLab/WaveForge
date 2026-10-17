@@ -63,6 +63,17 @@ function describeConsoleArg(value: unknown): string {
     const frame = value.stack?.split('\n')[1]?.trim()
     return frame ? `${value.name}: ${value.message} @ ${frame}` : `${value.name}: ${value.message}`
   }
+  // MediaError / DOMException 这类宿主对象的 code/message 挂在原型上，JSON.stringify 只会得到
+  // "{}"——线上日志里就完全看不出是解码失败还是格式不支持。这里显式取出来。
+  if (value && typeof value === 'object') {
+    const holder = value as { name?: unknown; message?: unknown; code?: unknown }
+    const hasCode = typeof holder.code === 'number'
+    const hasNameMessage = typeof holder.name === 'string' && typeof holder.message === 'string'
+    if (hasCode || hasNameMessage) {
+      const name = typeof holder.name === 'string' ? holder.name : 'MediaError'
+      return `${name}${hasCode ? ` code=${holder.code}` : ''}${typeof holder.message === 'string' ? ` ${holder.message}` : ''}`
+    }
+  }
   try { return JSON.stringify(value) } catch { return String(value) }
 }
 
@@ -73,6 +84,18 @@ console.error = (...args: unknown[]) => {
     const w = window as unknown as { electron?: { automixLog?: (s: string, m: string) => Promise<unknown> } }
     const text = args.map(describeConsoleArg).join(' ').slice(0, 400)
     w.electron?.automixLog?.('renderer-error', text)?.catch?.(() => undefined)
+  } catch { /* ignore */ }
+}
+
+// console.warn 同样转发到后端日志：排查「放几首就放不了」这类问题时，重试路径与 URL 失效
+// 提示都是 warn 级别——不转发就等于没打。此前只有 error 被捕获。
+const origConsoleWarn = console.warn
+console.warn = (...args: unknown[]) => {
+  try { origConsoleWarn(...args) } catch { /* ignore */ }
+  try {
+    const w = window as unknown as { electron?: { automixLog?: (s: string, m: string) => Promise<unknown> } }
+    const text = args.map(describeConsoleArg).join(' ').slice(0, 400)
+    w.electron?.automixLog?.('renderer-warn', text)?.catch?.(() => undefined)
   } catch { /* ignore */ }
 }
 

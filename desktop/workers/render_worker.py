@@ -609,6 +609,9 @@ def render_transition(params: dict) -> dict:
                 )
         
         output_sample_rate = source_sample_rate
+        # 采样率留痕：成品 WAV 用输入文件的采样率（两首可能不同，其中一首会被重采样）。
+        # 出现「过渡后音色/音高异常」时，这一行能直接区分是采样率选取还是重采样质量问题。
+        logger.info(f"[render] sr={output_sample_rate} a={source_sample_rate} b={target_sample_rate}")
 
         # 统一为立体声输出：
         # 单声道输入上采样为立体声，避免折叠 mono 丢失声像信息
@@ -1308,6 +1311,7 @@ def render_transition_v2(params: dict) -> dict:
                     axis=1,
                 )
         output_sample_rate = source_sample_rate
+        logger.info(f"[render] sr={output_sample_rate} a={source_sample_rate} b={target_sample_rate}")
         source_audio = ensure_stereo(source_audio)
         target_audio = ensure_stereo(target_audio)
 
