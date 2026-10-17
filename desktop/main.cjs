@@ -10183,7 +10183,7 @@ app.whenReady().then(async () => {
   // setImmediate 回调，因此 handler 注册顺序不受影响；启动失败也只会让分析功能降级，
   // 不影响窗口显示与后端服务。
   setImmediate(() => {
-    analysisRuntime = createAnalysisRuntime(app, ipcMain, () => mainWindow, cachePath)
+    analysisRuntime = createAnalysisRuntime(app, ipcMain, () => mainWindow, cachePath, assertMainSender)
   })
   
   // Setup render runtime IPC handlers
@@ -10260,7 +10260,7 @@ app.whenReady().then(async () => {
 
   // AirPlay 投送端：mDNS 设备发现 + RAOP/AirPlay2 会话管理（纯 JS，无原生依赖）
   try {
-    airplayControllerHandle = setupAirplayIpc({ ipcMain, getMainWindow: () => mainWindow })
+    airplayControllerHandle = setupAirplayIpc({ ipcMain, getMainWindow: () => mainWindow, injectedAssertMainSender: assertMainSender })
     console.log('🎵 [AirPlay] 投送端已启动（mDNS 设备发现中）')
   } catch (error) {
     console.error('🎵 [AirPlay] 启动失败:', error instanceof Error ? error.message : error)
@@ -10332,11 +10332,11 @@ app.whenReady().then(async () => {
   }))
 
   // Setup audio download IPC handlers
-  ipcMain.handle('audio-download:prepare', guardTrustedIpc('privileged', async (_event, urlOrPath, trackKey) => {
+  ipcMain.handle('audio-download:prepare', guardTrustedIpc('privileged', async (_event, urlOrPath, trackKey, options) => {
     if (!analysisRuntime || !analysisRuntime.audioDownload) {
       throw new Error('Audio download service not initialized')
     }
-    const result = await analysisRuntime.audioDownload.prepareAudioFile(urlOrPath, trackKey)
+    const result = await analysisRuntime.audioDownload.prepareAudioFile(urlOrPath, trackKey, options)
     const ext = String(result || '').split('.').pop()?.toLowerCase() || '?'
     automixLog.log('download', `trackKey=${trackKey} url=${String(urlOrPath).slice(0, 120)} -> ${result} (ext=${ext})`)
     return result

@@ -561,7 +561,13 @@ function setupChromaIpc({ ipcMain, getMainWindow, baseUrl, fetchImpl, timers, di
   const guard = (handler) => (typeof guardTrustedIpc === 'function' ? guardTrustedIpc('privileged', handler) : handler)
   for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, guard(handler))
   const frameListener = (_event, payload) => { service.submitFrame(payload) }
-  ipcMain.on('chroma:frame', guard(frameListener))
+  // 高频帧通道走 ipcMain.on：guard 抛出的异常不会像 handle 那样转成渲染层
+  // promise reject，而是成为主进程未捕获异常 → 非白名单 renderer 一条消息
+  // 即崩掉整个主进程。对齐 airplay-ipc 的做法：来源不符静默丢弃。
+  const wrappedFrameListener = guard(frameListener)
+  ipcMain.on('chroma:frame', (event, payload) => {
+    try { wrappedFrameListener(event, payload) } catch { /* 来源不符：丢弃 */ }
+  })
 
   return {
     service,
@@ -570,7 +576,7 @@ function setupChromaIpc({ ipcMain, getMainWindow, baseUrl, fetchImpl, timers, di
       for (const channel of Object.keys(handlers)) {
         try { ipcMain.removeHandler(channel) } catch { /* Electron may already be shutting down. */ }
       }
-      if (typeof ipcMain.removeListener === 'function') ipcMain.removeListener('chroma:frame', frameListener)
+      if (typeof ipcMain.removeListener === 'function') ipcMain.removeListener('chroma:frame', wrappedFrameListener)
       else ipcMain.removeAllListeners('chroma:frame')
       await service.dispose()
       if (mock) await mock.stop()

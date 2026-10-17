@@ -27,15 +27,17 @@ function externalProcessPath(candidate, app) {
   return candidate.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`)
 }
 
-function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = null) {
+function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = null, injectedAssertMainSender = null) {
   // 写操作类通道的来源守卫：分析缓存/任务可被伪造（save-track 毒化 AutoMix 渲染输入、
   // start-track 拉起 Python 重任务、clear-cache 清缓存）。读类通道保持放开。
-  const assertMainSender = (event) => {
+  // 注入版（main.cjs 的 assertMainSender）额外校验主窗当前文档 URL——sender 相等
+  // 不等于文档可信（融合模式下主窗可能被导航到外部站点）。
+  const assertMainSender = injectedAssertMainSender || ((event) => {
     const win = getMainWindow && getMainWindow()
     if (!win || win.isDestroyed() || event?.sender !== win.webContents || event?.senderFrame !== win.webContents.mainFrame) {
       throw new Error('不允许的 IPC 请求来源')
     }
-  }
+  })
   const cacheRoot = customCachePath || path.resolve(app.getPath('userData'), 'analysis-cache')
   const trackRoot = path.join(cacheRoot, 'tracks')
   const legacyBeatRoot = path.join(cacheRoot, 'beat_analysis')

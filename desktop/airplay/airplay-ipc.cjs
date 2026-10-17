@@ -7,7 +7,7 @@
 // 无守卫时任意渲染层（含第三方 webview）都可驱动。
 const { AirplaySenderService } = require('./airplay-sender-service.cjs')
 
-function setupAirplayIpc({ ipcMain, getMainWindow }) {
+function setupAirplayIpc({ ipcMain, getMainWindow, injectedAssertMainSender }) {
   const service = new AirplaySenderService({
     debug: process.env.WF_AIRPLAY_DEBUG === '1',
     onStatus: (status) => {
@@ -18,12 +18,14 @@ function setupAirplayIpc({ ipcMain, getMainWindow }) {
     },
   })
   // 默认不开启设备发现：由设置-高级「AirPlay 投送」开关控制（airplay:set-enabled）
-  const assertMainSender = (event) => {
+  // 注入版（main.cjs）额外校验主窗当前文档 URL：sender 相等不等于文档可信
+  //（融合模式下主窗可能被导航到外部站点，页面仍持有受信来源身份）
+  const assertMainSender = injectedAssertMainSender || ((event) => {
     const win = typeof getMainWindow === 'function' ? getMainWindow() : null
     if (!win || win.isDestroyed() || event?.sender !== win.webContents || event?.senderFrame !== win.webContents.mainFrame) {
       throw new Error('不允许的 IPC 请求来源')
     }
-  }
+  })
   const guard = (handler) => (event, ...args) => {
     assertMainSender(event)
     return handler(...args)

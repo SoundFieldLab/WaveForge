@@ -21,7 +21,10 @@ function init(app) {
 }
 
 function automixLog(scope, message) {
-  const line = `[${new Date().toISOString()}] [AutoMix-Backend][${scope}] ${message}`
+  // 渲染层可控字段（trackKey/url 等）可能内含换行，原样落盘会伪造独立日志条目
+  //（如把 "analysis:fail" 行伪装成 "analysis:ok"）。拍平成单行。
+  const flat = String(message).replace(/[\r\n]+/g, ' | ')
+  const line = `[${new Date().toISOString()}] [AutoMix-Backend][${scope}] ${flat}`
   console.log(line)
   if (logPath) {
     // 异步追加：渲染 worker stdout 逐行触发本函数，渲染期间高频同步写（statSync+mkdirSync+
