@@ -5,6 +5,8 @@ import { QRCodeSVG } from 'qrcode.react'
 import { wallpaperManager, WallpaperFile, WallpaperMode, WallpaperSwitchMode } from '../services/wallpaperManager'
 import { isTvModeActive } from '../platform'
 import { useTvBack } from '../tv/tvCore'
+import { getApiOrigin } from '../services/apiConfig'
+import { getApiBase } from '../services/apiConfig'
 
 interface WallpaperCustomizeModalProps {
   show: boolean
@@ -84,7 +86,7 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
     if (!show || !isTvModeActive()) return
     void (async () => {
       try {
-        const stRes = await fetch('http://localhost:3001/api/tv/remote-status', { cache: 'no-store' })
+        const stRes = await fetch(`${getApiBase()}/tv/remote-status`, { cache: 'no-store' })
         const st = stRes.ok ? await stRes.json() : null
         const ip = st?.ips?.[0]?.address
         if (ip) setTvQrUrl(`http://${ip}:25567/wallpaper`)
@@ -92,7 +94,7 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
         // ignore
       }
       try {
-        const res = await fetch('http://localhost:3001/api/tv/wallpapers', { cache: 'no-store' })
+        const res = await fetch(`${getApiBase()}/tv/wallpapers`, { cache: 'no-store' })
         const data = res.ok ? await res.json() : null
         setTvWallpapers(data?.wallpapers || [])
       } catch {
@@ -113,12 +115,12 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
       } catch {
         // ignore
       }
-      const res = await fetch('http://localhost:3001/api/tv/wallpapers', { cache: 'no-store' })
+      const res = await fetch(`${getApiBase()}/tv/wallpapers`, { cache: 'no-store' })
       const data = res.ok ? await res.json() : { wallpapers: [] }
       let imported = 0
       for (const wp of data.wallpapers || []) {
         if (importedNames.includes(wp.name)) continue
-        const imgRes = await fetch('http://localhost:3001' + wp.url)
+        const imgRes = await fetch(getApiOrigin() + wp.url)
         if (!imgRes.ok) continue
         const blob = await imgRes.blob()
         const file = new File([blob], wp.name, { type: blob.type || 'image/jpeg' })

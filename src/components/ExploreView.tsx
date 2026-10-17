@@ -85,6 +85,7 @@ import CachedImage from './CachedImage'
 import { FrozenScope } from './frozenScope'
 import type { ArtworkPriority, ArtworkRole } from '../services/artwork'
 import { cookieHeaders } from '../services/cookieRequest'
+import { getApiBase } from '../services/apiConfig'
 
 // 全局设置镜像里的共享弹窗（按需加载）
 const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
@@ -823,7 +824,7 @@ function ExploreView({
     }
     setFmLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/api/netease/personal_fm`, { headers: cookieHeaders(cookie) })
+      const res = await fetch(`${getApiBase()}/netease/personal_fm`, { headers: cookieHeaders(cookie) })
       const data = await res.json()
       const raw = Array.isArray(data?.data) ? data.data : []
       const songs: Song[] = raw.map((s: any) => ({

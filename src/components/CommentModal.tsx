@@ -33,6 +33,7 @@ import { getReadableAccentColor } from '../utils/desktopAccentColor'
 import { useTvBack } from '../tv/tvCore'
 import { getSecureToken, setSecureToken, removeSecureToken } from "../services/secureTokenStore"
 import { cookieHeaders } from '../services/cookieRequest'
+import { getApiBase } from '../services/apiConfig'
 
 // 评论分页短 TTL 缓存：按 `平台:资源ID:排序` 存已加载的评论 + 游标/页码。
 // 反复开关同一首评论时直接回填，既不重发请求也不清空列表（避免「已加载的评论闪一下又重来」）。
@@ -908,7 +909,7 @@ export default memo(function CommentModal({
         // 获取当前用户ID
         if (neteaseCookie) {
           try {
-            const res = await fetch(`http://localhost:3001/api/netease/user/account`, { headers: cookieHeaders(neteaseCookie) })
+            const res = await fetch(`${getApiBase()}/netease/user/account`, { headers: cookieHeaders(neteaseCookie) })
             const data = await res.json()
             if (data.profile?.userId) {
               setCurrentUserId(data.profile.userId.toString())
@@ -925,7 +926,7 @@ export default memo(function CommentModal({
         // QQ音乐获取用户ID
         if (qqCookie) {
           try {
-            const res = await fetch('http://localhost:3001/api/qq/user/setCookie', {
+            const res = await fetch(`${getApiBase()}/qq/user/setCookie`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ data: qqCookie })
@@ -1282,7 +1283,7 @@ export default memo(function CommentModal({
         if (loadMode === 'latest' && !reset && cursor && cursor !== '-1') {
           try { qqCursor = JSON.parse(cursor) } catch { qqCursor = {} }
         }
-        const musicuResponse = await fetch('http://localhost:3001/api/qq/comment/musicu', {
+        const musicuResponse = await fetch(`${getApiBase()}/qq/comment/musicu`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1387,13 +1388,13 @@ export default memo(function CommentModal({
         // 最新评论使用cursor分页，精彩评论使用offset分页
         if (loadMode === 'latest') {
           const cursorToUse = reset ? '-1' : cursor
-          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&cursor=${cursorToUse}&type=${commentType}`
+          endpoint = `${getApiBase()}/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&cursor=${cursorToUse}&type=${commentType}`
         } else {
-          endpoint = `http://localhost:3001/api/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&type=${commentType}`
+          endpoint = `${getApiBase()}/netease/comment/music?id=${encodeURIComponent(String(songId))}&limit=${limit}&offset=${offset}&sortType=${sortType}&type=${commentType}`
         }
       } else {
         // 兜底路径：QQ 页签已全部切到新版接口（上方 musicu 分支），此端点仅在异常回退时使用
-        endpoint = `http://localhost:3001/api/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageToLoad}&pagesize=${limit}&type=${loadMode === 'hot' ? 'hot' : 'latest'}&biztype=${qqCommentBizType}`
+        endpoint = `${getApiBase()}/qq/comment?id=${encodeURIComponent(String(songId))}&pagenum=${pageToLoad}&pagesize=${limit}&type=${loadMode === 'hot' ? 'hot' : 'latest'}&biztype=${qqCommentBizType}`
       }
 
       debugLog(`[评论加载] 平台: ${platform}, 歌曲ID: ${songId}, 页码: ${pageToLoad}`)
@@ -1480,7 +1481,7 @@ export default memo(function CommentModal({
             const floorOf = async (comment: any) => {
               try {
                 const floorResponse = await fetch(
-                  `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(songId))}&parentCommentId=${comment.commentId}&limit=2&type=${commentType}`
+                  `${getApiBase()}/netease/comment/floor?id=${encodeURIComponent(String(songId))}&parentCommentId=${comment.commentId}&limit=2&type=${commentType}`
                 )
                 if (floorResponse.ok) {
                   const floorData = await floorResponse.json()
@@ -1703,7 +1704,7 @@ export default memo(function CommentModal({
           likedCount: Math.max(0, comment.likedCount + (finalLiked ? 1 : -1)),
         }))
       } else if (platform === 'netease') {
-        const response = await fetch('http://localhost:3001/api/netease/comment/like', {
+        const response = await fetch(`${getApiBase()}/netease/comment/like`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1727,7 +1728,7 @@ export default memo(function CommentModal({
         }
       } else {
         // QQ音乐
-        const response = await fetch('http://localhost:3001/api/qq/comment/like', {
+        const response = await fetch(`${getApiBase()}/qq/comment/like`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1770,7 +1771,7 @@ export default memo(function CommentModal({
 
       if (platform === 'netease') {
         // 调用网易云API删除评论
-        const response = await fetch('http://localhost:3001/api/netease/comment/delete', {
+        const response = await fetch(`${getApiBase()}/netease/comment/delete`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1793,7 +1794,7 @@ export default memo(function CommentModal({
         }
       } else {
         // QQ音乐删除评论API
-        const response = await fetch('http://localhost:3001/api/qq/comment/del', {
+        const response = await fetch(`${getApiBase()}/qq/comment/del`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1910,7 +1911,7 @@ export default memo(function CommentModal({
 
       if (platform === 'netease') {
         // 调用网易云API发布评论
-        const response = await fetch('http://localhost:3001/api/netease/comment/add', {
+        const response = await fetch(`${getApiBase()}/netease/comment/add`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1932,7 +1933,7 @@ export default memo(function CommentModal({
         }
       } else {
         // QQ音乐发布评论API
-        const response = await fetch('http://localhost:3001/api/qq/comment/send', {
+        const response = await fetch(`${getApiBase()}/qq/comment/send`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1994,7 +1995,7 @@ export default memo(function CommentModal({
 
       if (platform === 'netease') {
         // 调用网易云API回复评论
-        const response = await fetch('http://localhost:3001/api/netease/comment/reply', {
+        const response = await fetch(`${getApiBase()}/netease/comment/reply`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -2018,7 +2019,7 @@ export default memo(function CommentModal({
       } else {
         // QQ 回复与顶级评论共用接口，但必须携带根评论和父评论 ID 才能形成楼中楼；
         // 回复「评论的评论」时 parentCommentId 指向被回复的那条回复
-        const response = await fetch('http://localhost:3001/api/qq/comment/send', {
+        const response = await fetch(`${getApiBase()}/qq/comment/send`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2060,7 +2061,7 @@ export default memo(function CommentModal({
       // QQ 列表接口的 ReplyCnt 恒为 0：只要还没有展开拉取过，就允许拉全量
       if (comment.replyCount > 0 && (comment.replies?.length || 0) >= comment.replyCount) return
       try {
-        const response = await fetch('http://localhost:3001/api/qq/comment/musicu', {
+        const response = await fetch(`${getApiBase()}/qq/comment/musicu`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2133,7 +2134,7 @@ export default memo(function CommentModal({
 
     try {
       const response = await fetch(
-        `http://localhost:3001/api/netease/comment/floor?id=${encodeURIComponent(String(resourceId))}&parentCommentId=${comment.commentId}&limit=${Math.min(comment.replyCount, 50)}&type=${commentType}`
+        `${getApiBase()}/netease/comment/floor?id=${encodeURIComponent(String(resourceId))}&parentCommentId=${comment.commentId}&limit=${Math.min(comment.replyCount, 50)}&type=${commentType}`
       )
       const result = await response.json()
       if (!response.ok || result.code !== 200) throw new Error(result.message || result.error || '加载回复失败')
@@ -2180,8 +2181,8 @@ export default memo(function CommentModal({
     const controller = new AbortController()
     setProfileData({ loading: true, error: '', profile: null, playlists: [] })
     Promise.all([
-      fetch(`http://localhost:3001/api/netease/user/detail?uid=${profileUser.user.userId}`, { signal: controller.signal }).then(res => res.json()),
-      fetch(`http://localhost:3001/api/netease/user/playlist?uid=${profileUser.user.userId}&limit=30`, { signal: controller.signal }).then(res => res.json()),
+      fetch(`${getApiBase()}/netease/user/detail?uid=${profileUser.user.userId}`, { signal: controller.signal }).then(res => res.json()),
+      fetch(`${getApiBase()}/netease/user/playlist?uid=${profileUser.user.userId}&limit=30`, { signal: controller.signal }).then(res => res.json()),
     ]).then(([detail, playlist]) => {
       if (controller.signal.aborted) return
       setProfileData({ loading: false, error: '', profile: detail?.profile || null, playlists: Array.isArray(playlist?.playlist) ? playlist.playlist : [] })

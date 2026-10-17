@@ -1336,10 +1336,12 @@ class AutoMixAnalysisService {
       if (input.url.startsWith('http://') || input.url.startsWith('https://')) {
         debugLog('⏳ [AutoMix] 下载音频文件到本地缓存...')
         
-        // 使用 Electron 的音频下载服务
+        // 使用 Electron 的音频下载服务。expectedDuration：下载/缓存复用侧校验实际时长，
+        // 拦截空 vkey/试听返回的"合法容器但只有半首"的截断文件（实测 370s 的歌缓存里
+        // 只有 176.5s 的 FLAC，半首歌分析还把 Python worker 搞崩）
         if (window.electron?.audioDownload) {
           try {
-            audioPath = await window.electron.audioDownload.prepare(input.url, input.trackKey)
+            audioPath = await window.electron.audioDownload.prepare(input.url, input.trackKey, { expectedDuration: input.duration })
             debugLog('✅ [AutoMix] 音频文件已缓存:', audioPath)
           } catch (error) {
             const identity = parseRefreshIdentity(input.trackKey)
@@ -1347,7 +1349,7 @@ class AutoMixAnalysisService {
               const refreshedUrl = await refreshSongUrlOnce(identity.id, identity.platform, input.url).catch(() => null)
               if (refreshedUrl && refreshedUrl !== input.url) {
                 try {
-                  audioPath = await window.electron.audioDownload.prepare(refreshedUrl, input.trackKey)
+                  audioPath = await window.electron.audioDownload.prepare(refreshedUrl, input.trackKey, { expectedDuration: input.duration })
                   debugLog('✅ [AutoMix] 刷新签名后音频已缓存:', audioPath)
                 } catch (retryError) {
                   console.warn('⚠️ [AutoMix] 刷新签名后音频下载仍失败:', retryError)
@@ -1444,11 +1446,14 @@ class AutoMixAnalysisService {
     if (!normalizedTrackKey) return null
     // 只认"带可用节拍网格"的缓存：空节拍（metadata-only 等解码失败降级）一旦命中会
     // 把 m4a/aac 的浏览器解码回退（唯一能解的路）永远挡掉——MV 背景对不上的根因之一。
+    // 同一 trackKey 可能存在多份不同 cacheKey 变体（时长/签名/bpmHint/rms 预热差异），
+    // 逐条校验完整键，命中第一条可用项即返回（原实现就有该语义，这里显式不依赖键序）。
     for (const [key, analysis] of memoryCache.entries()) {
-      if (analysis.trackKey === normalizedTrackKey && isSupportedAnalysis(analysis) && hasUsableBeats(analysis) && !isWeakBrowserFallback(analysis)) {
-        cacheInMemory(key, analysis)
-        return { ...analysis, lastAccessAt: Date.now() }
-      }
+      if (!key.startsWith(`${normalizedTrackKey}:`)) continue
+      if (analysis.trackKey !== normalizedTrackKey) continue
+      if (!isSupportedAnalysis(analysis) || !hasUsableBeats(analysis) || isWeakBrowserFallback(analysis)) continue
+      cacheInMemory(key, analysis)
+      return { ...analysis, lastAccessAt: Date.now() }
     }
     try {
       const persisted = await window.electron?.analysis?.getTrackAnalysis(normalizedTrackKey) || null
@@ -1468,7 +1473,7 @@ class AutoMixAnalysisService {
   private async analyzeInBrowser(input: TrackAnalysisInput): Promise<TrackAnalysis> {
     let audioPath: string | null = null
     try {
-      audioPath = await window.electron?.audioDownload?.prepare?.(input.url, input.trackKey) || null
+      audioPath = await window.electron?.audioDownload?.prepare?.(input.url, input.trackKey, { expectedDuration: input.duration }) || null
       const mediaUrl = audioPath ? await window.electron?.audioDownload?.getMediaUrl?.(audioPath) : undefined
       if (mediaUrl) {
         debugLog('🎧 [AutoMix] 浏览器解码本地文件（可支持 m4a/aac）:', audioPath)
@@ -1481,7 +1486,7 @@ class AutoMixAnalysisService {
         if (identity) {
           const refreshedUrl = await refreshSongUrlOnce(identity.id, identity.platform, input.url).catch(() => null)
           if (refreshedUrl && refreshedUrl !== input.url) {
-            const localPath = await window.electron?.audioDownload?.prepare?.(refreshedUrl, input.trackKey)
+            const localPath = await window.electron?.audioDownload?.prepare?.(refreshedUrl, input.trackKey, { expectedDuration: input.duration })
             const mediaUrl = localPath ? await window.electron?.audioDownload?.getMediaUrl?.(localPath) : undefined
             if (mediaUrl) {
               const decoded = await decodeAudioUrl(mediaUrl, input.signal)

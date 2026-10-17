@@ -1,3 +1,4 @@
+import { getApiBase } from './apiConfig'
 /**
  * 私有模块（Private Module）—— 见仓库根 PRIVATE-LICENSE.md。
  * 版权所有（c）2026 WaveForge 澜音工坊，保留所有权利；未经书面授权禁止复制/移植/再分发。
@@ -20,7 +21,7 @@ export interface AppleDynamicCoverData {
   storefront: string
 }
 
-const API_ENDPOINT = 'http://localhost:3001/api/apple/animated-cover'
+const API_ENDPOINT = `${getApiBase()}/apple/animated-cover`
 const CACHE_MAX = 50
 const cache = new Map<string, AppleDynamicCoverData | null>()
 

@@ -18,6 +18,15 @@ export function getApiBase(): string {
   return DEFAULT_API_BASE
 }
 
+/**
+ * API 源（origin，不带 /api 后缀）：供非 /api 路由使用——媒体流
+ *（/api/wallpaper-engine/media 经 toWallpaperUrl 二次包装）、健康检查、页面资源等。
+ * 与 getApiBase 共用同一 override（override 指向 http://host:port/api 时剥掉尾部 /api）。
+ */
+export function getApiOrigin(): string {
+  return getApiBase().replace(/\/api\/?$/, '')
+}
+
 export function setApiBaseOverride(url: string | null): void {
   try {
     if (url && url.trim()) {

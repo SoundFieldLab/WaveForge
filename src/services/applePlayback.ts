@@ -28,6 +28,7 @@ import { getAudioQualityPreference, type AppleAudioQualityPreference } from './a
 import { recordAppleAcceptanceEvent } from './appleAcceptanceDiagnostics'
 import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
 import { setSecureToken, removeSecureToken } from './secureTokenStore'
+import { getApiBase } from './apiConfig'
 
 const APPLE_WEBPLAYBACK_URL = 'https://play.itunes.apple.com/WebObjects/MZPlay.woa/wa/webPlayback'
 
@@ -768,7 +769,7 @@ export function createAppleHlsConfig(
         ? stream.hlsKeyServerUrl
         : ''
       const endpoint = desktop
-        ? `http://localhost:3001/api/apple/license${appleLicenseEndpoint ? `?target=${encodeURIComponent(appleLicenseEndpoint)}` : ''}`
+        ? `${getApiBase()}/apple/license${appleLicenseEndpoint ? `?target=${encodeURIComponent(appleLicenseEndpoint)}` : ''}`
         : (appleLicenseEndpoint || stream.hlsKeyServerUrl || url)
       if (!xhr.readyState) xhr.open('POST', endpoint, true)
       xhr.setRequestHeader('Content-Type', 'application/json')

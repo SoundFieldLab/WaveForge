@@ -176,7 +176,15 @@ export class TransitionRenderer {
     })().finally(() => {
       this.inFlightRenders.delete(renderKey)
     })
+    // 纪元快照：捕获 clear 时刻，渲染完成后若纪元已变则本次结果作废（不写回缓存）
+    const epochAtStart = this.cacheEpoch
     this.inFlightRenders.set(renderKey, renderPromise)
+    void renderPromise.then(() => {
+      if (epochAtStart !== this.cacheEpoch) {
+        debugLog(`[TransitionRenderer] render ${renderKey} finished after cache clear — discarding stale result`)
+        this.cache.delete(plan.id)
+      }
+    }).catch(() => undefined)
     return renderPromise
   }
 
@@ -369,7 +377,10 @@ export class TransitionRenderer {
     debugLog('[TransitionRenderer] Downloading source audio...')
     const sourceAudioPath = await audioDownload.prepare(
       sourceUrl,
-      plan.sourceTrackKey
+      plan.sourceTrackKey,
+      // 时长闸：空 vkey/试听片段返回"合法容器但只有半首"的截断文件，渲染前拦下
+      //（半首产物进过渡 → 切歌瞬间跳变/静音）。计划裁剪点 +10s 余量作期望时长。
+      { expectedDuration: plan.sourceEndTime + 10 }
     )
     // Bail out as early as possible once superseded: the downloaded temp file
     // is managed by the main-process download cache (cleanupOldFiles), and we
@@ -377,11 +388,12 @@ export class TransitionRenderer {
     if (isStale?.()) throw new Error('Transition render superseded')
 
     onProgress?.({ stage: 'analyzing', progress: 0.2 })
-    
+
     debugLog('[TransitionRenderer] Downloading target audio...')
     const targetAudioPath = await audioDownload.prepare(
       targetUrl,
-      plan.targetTrackKey
+      plan.targetTrackKey,
+      { expectedDuration: plan.targetEndTime + 10 }
     )
     if (isStale?.()) throw new Error('Transition render superseded')
 
@@ -807,8 +819,13 @@ export class TransitionRenderer {
    * 两层命中都会直接复用。所以切到无损后，之前以 128k 渲染的成品仍会被拿去播——
    * 听感上就是「切了无损，但过渡那几秒还是糊的」。清掉内存与磁盘索引即可，
    * 磁盘文件由主进程的缓存清理回收。
+   *
+   * 在途渲染互斥：clear 时记录一个纪元号，在途渲染完成写入前检查纪元——
+   * 旧的 128k 渲染结果不再写回已清空的缓存（否则清了等于没清）。
    */
+  private cacheEpoch = 0
   clearRenderedCache(): void {
+    this.cacheEpoch += 1
     this.cache.clear()
     this.cacheBytes = 0
     this.persistedRenders.clear()
@@ -1011,6 +1028,8 @@ export class TransitionRenderer {
         transitionGain.gain.setValueAtTime(1, Math.max(now, endAt - handoffFade))
         transitionGain.gain.linearRampToValueAtTime(0.0001, endAt)
       }
+      // 注册到实例字段：stopPlayback（取消/seek 路径）不再经过 ended 回调，需在此补断开
+      this.activeTransitionGain = transitionGain
       source.connect(transitionGain)
       if (this.masterGain) {
         transitionGain.connect(this.masterGain)
@@ -1036,6 +1055,7 @@ export class TransitionRenderer {
         transitionGain.disconnect()
         transitionGain = null
       }
+      this.activeTransitionGain = null
       source.disconnect()
       // 事件驱动 handoff：缓冲精确结束时通知调用方启动 target（消除 50ms 固定补偿的缝隙/双播）
       onEnded?.()
@@ -1071,9 +1091,18 @@ export class TransitionRenderer {
     }
   }
 
+  /** 在途播放的过渡增益节点：stopPlayback 时补断开（每次过渡 seek/取消都会
+   *  重建 source+gain，旧的 gain 只挂在 ended 回调里清理——取消路径不再触发
+   *  ended，GainNode 连同其下游引用会一直留在 context 图里直至 dispose）。 */
+  private activeTransitionGain: GainNode | null = null
+
   stopPlayback(): void {
     const source = this.activeSource
     this.activeSource = null
+    try {
+      this.activeTransitionGain?.disconnect()
+    } catch { /* already disconnected */ }
+    this.activeTransitionGain = null
     if (!source) return
     try {
       source.stop()

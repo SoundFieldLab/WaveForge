@@ -19,8 +19,9 @@ import { getSecureToken, removeSecureToken, setSecureToken } from './secureToken
 import { Converter } from 'opencc-js/t2cn'
 import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } from '../data/bilibiliMvDeclarations'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
+import { getApiBase } from './apiConfig'
 
-export let BILI_API_BASE = 'http://localhost:3001/api/bilibili'
+export let BILI_API_BASE = `${getApiBase()}/bilibili`
 
 /** 覆盖 API 基址（测试/调试用；生产固定指向本机后端 3001） */
 export function setBilibiliApiBaseForTest(base: string): void {

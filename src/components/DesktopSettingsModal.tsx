@@ -23,6 +23,7 @@ import { MirroredGlobalSettings, makeSkin } from './MirroredGlobalSettings'
 import type { MirrorActionId } from '../services/globalSettingsRegistry'
 import { useTvBack } from '../tv/tvCore'
 import { isTvModeActive } from '../platform'
+import { getApiOrigin } from '../services/apiConfig'
 
 // 全局设置镜像里的共享弹窗（按需加载，与简约 / 传统 / 探索模式同一组件）
 const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
@@ -1716,7 +1717,7 @@ export default function DesktopSettingsModal({
                                   </button>
                                   {wallpaper.preview ? (
                                     <img
-                                      src={`http://localhost:3001${wallpaper.preview}`}
+                                      src={`${getApiOrigin()}${wallpaper.preview}`}
                                       alt={wallpaper.title}
                                       className="w-full h-full object-cover"
                                       onError={(e) => {

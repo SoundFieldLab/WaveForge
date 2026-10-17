@@ -10,13 +10,14 @@ import { getAppleCredentials } from './appleAuth'
 import { isQQFallbackDisplayName } from '../utils/qqUser'
 import { getSecureToken } from './secureTokenStore'
 import { cookieHeaders } from './cookieRequest'
+import { getApiBase } from './apiConfig'
 
 export interface PlaylistOptions {
   forceRefresh?: boolean
   skipCache?: boolean
 }
 
-const API_BASE = 'http://localhost:3001/api'
+const API_BASE = '${getApiBase()}'
 const userPlaylistsCache = new Map<string, any[]>()
 const userPlaylistsPending = new Map<string, Promise<any[]>>()
 const MAX_USER_PLAYLIST_CACHE_ENTRIES = 16
@@ -390,7 +391,7 @@ async function fetchUserPlaylists(
   const firstArray = (...values: any[]) => values.find(value => Array.isArray(value)) || []
   
   if (platform === 'netease') {
-    const url = `http://localhost:3001/api/netease/user/playlist?uid=${userId}`
+    const url = `${getApiBase()}/netease/user/playlist?uid=${userId}`
     // 网易云用户歌单是登录态接口（无 cookie 硬 401）：cookie 已从 URL 迁到请求头
     const response = await fetchWithTimeout(url, 15_000, cookieHeaders(cookie))
     if (!response.ok) {
@@ -418,7 +419,7 @@ async function fetchUserPlaylists(
     // 1. 获取自建歌单
     try {
       const devMode = localStorage.getItem('developerMode') === 'true'
-      const url = `http://localhost:3001/api/qq/user/playlist?id=${userId}&devMode=${devMode}`
+      const url = `${getApiBase()}/qq/user/playlist?id=${userId}&devMode=${devMode}`
       const response = await fetchWithTimeout(url)
       const createdData = await response.json()
       
@@ -455,7 +456,7 @@ async function fetchUserPlaylists(
     // 2. 获取收藏歌单
     try {
       const devMode = localStorage.getItem('developerMode') === 'true'
-      const url = `http://localhost:3001/api/qq/user/collect?id=${userId}&devMode=${devMode}`
+      const url = `${getApiBase()}/qq/user/collect?id=${userId}&devMode=${devMode}`
       const response = await fetchWithTimeout(url)
       const collectedData = await response.json()
       
@@ -756,8 +757,8 @@ export async function getPlaylistDetail(
     }
   }
   const url = platform === 'netease'
-    ? `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlistId)}`
-    : `http://localhost:3001/api/qq/playlist/detail?id=${playlistId}&devMode=${devMode}`
+    ? `${getApiBase()}/netease/playlist/detail?id=${encodeURIComponent(playlistId)}`
+    : `${getApiBase()}/qq/playlist/detail?id=${playlistId}&devMode=${devMode}`
   // 私密歌单（网易云）与部分 QQ 歌单需要登录态：cookie 走请求头（与 cookieRequest 约定一致）
   const headers = cookieHeaders(getPlatformCookie(platform))
   
@@ -1091,8 +1092,8 @@ export async function addSongToPlaylist(
   }
 
   const url = platform === 'netease'
-    ? `http://localhost:3001/api/netease/playlist/tracks`
-    : `http://localhost:3001/api/qq/playlist/tracks`
+    ? `${getApiBase()}/netease/playlist/tracks`
+    : `${getApiBase()}/qq/playlist/tracks`
   
   const response = await fetch(url, {
     method: 'POST',
@@ -1188,8 +1189,8 @@ export async function removeSongFromPlaylist(
   }
 
   const url = platform === 'netease'
-    ? `http://localhost:3001/api/netease/playlist/tracks`
-    : `http://localhost:3001/api/qq/playlist/tracks`
+    ? `${getApiBase()}/netease/playlist/tracks`
+    : `${getApiBase()}/qq/playlist/tracks`
   
   const response = await fetch(url, {
     method: 'POST',
@@ -1390,7 +1391,7 @@ export async function updatePlaylist(
     throw new Error('QQ 音乐暂不支持修改歌单信息')
   }
   const cookie = options.cookie || getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
-  const url = 'http://localhost:3001/api/netease/playlist/update'
+  const url = `${getApiBase()}/netease/playlist/update`
   
   const response = await fetch(url, {
     method: 'POST',
@@ -1424,7 +1425,7 @@ export async function updatePlaylistCover(
     throw new Error('汽水音乐暂不支持修改歌单封面')
   }
   const cookie = options.cookie || getSecureToken('netease_cookie') || getSecureToken('neteaseCookie') || ''
-  const response = await fetch('http://localhost:3001/api/netease/playlist/cover', {
+  const response = await fetch(`${getApiBase()}/netease/playlist/cover`, {
     method: 'POST',
     signal: AbortSignal.timeout(15_000),
     headers: { 'Content-Type': 'application/json' },

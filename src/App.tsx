@@ -8474,6 +8474,7 @@ function App() {
         const profileUserId = data.profile.userId?.toString() || ''
         setNeteaseUsername(data.profile.nickname || '网易云用户')
         setNeteaseAvatar(data.profile.avatarUrl || '')
+        localStorage.setItem('netease_avatar', data.profile.avatarUrl || '')
         setNeteaseUserId(profileUserId)
         const isVip = data.profile.vipType > 0
         setNeteaseVip(isVip)
@@ -8676,6 +8677,7 @@ function App() {
     },
     logout: () => {
       void window.electron?.appleLogout?.().catch(() => undefined)
+      clearLocalListeningHistory()
       clearAppleLogin()
       refreshAppleAuth(null)
       setAuthRevision(previous => previous + 1)
@@ -9104,6 +9106,7 @@ function App() {
     if (cookie) addToast('汽水音乐登录成功', 'success')
   }
   const handleSodaLogout = () => {
+    clearLocalListeningHistory()
     // 歌单详情会话缓存按账号冻结：登出/切号不清会串号（同 handleNeteaseLogout）
     playlistDetailCacheRef.current.clear()
     // 主进程侧同步清理：auth-v6 分区的 .qishui.com Cookie/本地存储 + soda-qr-login.json 会话字段，

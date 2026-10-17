@@ -5,6 +5,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import { X, Unplug, Loader2, MonitorSmartphone, ChevronDown, Check, Wifi, Copy, Plus, Smartphone } from 'lucide-react'
 import type { RemoteSettings, RemoteStatus } from '../electron'
 import { isAndroid } from '../platform'
+import { getApiBase } from '../services/apiConfig'
 
 interface RemoteControlModalProps {
   onClose: () => void
@@ -64,7 +65,7 @@ export default function RemoteControlModal({ onClose, playerTheme }: RemoteContr
       } else {
         // TV / 浏览器调试：设备内置 Node 已自动启动遥控服务（复用 PC 端同一套 remote-server），
         // 读取状态（含 token / 端口 / 网卡 IP），用于生成手机连接二维码
-        const res = await fetch('http://localhost:3001/api/tv/remote-status', { cache: 'no-store' })
+        const res = await fetch(`${getApiBase()}/tv/remote-status`, { cache: 'no-store' })
         if (res.ok) {
           const st = await res.json()
           setStatus(st || { running: false, port: 25567, token: '', clientCount: 0, maxClients: 5, clients: [], ips: [] })
@@ -99,7 +100,7 @@ export default function RemoteControlModal({ onClose, playerTheme }: RemoteContr
     if (!bridge) {
       // TV/浏览器调试：无 Electron 事件，轮询状态（客户端增减 / 端口 / IP 变化）
       const timer = window.setInterval(() => {
-        void fetch('http://localhost:3001/api/tv/remote-status', { cache: 'no-store' })
+        void fetch(`${getApiBase()}/tv/remote-status`, { cache: 'no-store' })
           .then((r) => (r.ok ? r.json() : null))
           .then((st) => {
             if (st) {

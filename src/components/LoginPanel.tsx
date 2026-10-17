@@ -2,14 +2,16 @@ import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, Loader2 } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
+import { getApiBase, getApiOrigin } from '../services/apiConfig'
 
 interface LoginPanelProps {
-  platform: 'netease' | 'qq'
+  /** 仅网易云：QQ 走 QQLoginPanel（本组件的 QQ 分支调用不存在的 /api/qq/login/qr/check，为死代码） */
+  platform: 'netease'
   onClose: () => void
   onLoginSuccess: (cookie: string) => void
 }
 
-export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginPanelProps) {
+export default function LoginPanel({ onClose, onLoginSuccess }: LoginPanelProps) {
   // TV 遥控器 BACK 关闭登录面板
   useTvBack(() => {
     onClose()
@@ -25,8 +27,8 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
   const generationRef = useRef(0)
   const mountedRef = useRef(false)
 
-  const platformName = platform === 'netease' ? '?????' : 'QQ??'
-  const platformColor = platform === 'netease' ? 'bg-red-600' : 'bg-green-600'
+  const platformName = '网易云音乐'
+  const platformColor = 'bg-red-600'
 
   const clearPolling = () => {
     if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current)
@@ -46,29 +48,20 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
       pollControllerRef.current = controller
       let finished = false
       try {
-        const endpoint = platform === 'netease'
-          ? `/api/netease/login/qr/check?key=${key}`
-          : `/api/qq/login/qr/check?key=${key}`
-        const res = await fetch(`http://localhost:3001${endpoint}`, { signal: controller.signal })
+        const res = await fetch(`${getApiOrigin()}/api/netease/login/qr/check?key=${key}`, { signal: controller.signal })
         const data = await res.json()
         if (!isCurrent(generation)) return
 
-        if (platform === 'netease') {
-          if (data.code === 800) {
-            setStatus('expired')
-            finished = true
-          } else if (data.code === 802) {
-            setStatus('scanned')
-          } else if (data.code === 803) {
-            setStatus('success')
-            finished = true
-            if (data.cookie) onLoginSuccess(data.cookie)
-            else console.error('login succeeded without cookie')
-          }
-        } else if (data.code === 0) {
+        if (data.code === 800) {
+          setStatus('expired')
+          finished = true
+        } else if (data.code === 802) {
+          setStatus('scanned')
+        } else if (data.code === 803) {
           setStatus('success')
           finished = true
-          onLoginSuccess(data.cookie)
+          if (data.cookie) onLoginSuccess(data.cookie)
+          else console.error('login succeeded without cookie')
         }
       } catch (error) {
         if (!controller.signal.aborted) console.error('login polling failed:', error)
@@ -92,12 +85,12 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
     setLoading(true)
     setStatus('pending')
     try {
-      const keyRes = await fetch('http://localhost:3001/api/netease/login/qr/key', { signal: controller.signal })
+      const keyRes = await fetch(`${getApiBase()}/netease/login/qr/key`, { signal: controller.signal })
       const keyData = await keyRes.json()
       if (!keyData.data?.unikey) throw new Error('failed to get QR key')
 
       const key = keyData.data.unikey
-      const qrRes = await fetch(`http://localhost:3001/api/netease/login/qr/create?key=${key}`, { signal: controller.signal })
+      const qrRes = await fetch(`${getApiBase()}/netease/login/qr/create?key=${key}`, { signal: controller.signal })
       const qrData = await qrRes.json()
       if (!isCurrent(generation)) return
 
@@ -117,8 +110,7 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
 
   useEffect(() => {
     mountedRef.current = true
-    if (platform === 'netease') void fetchQRCode()
-    else setLoading(false)
+    void fetchQRCode()
     return () => {
       mountedRef.current = false
       generationRef.current += 1
@@ -126,7 +118,8 @@ export default function LoginPanel({ platform, onClose, onLoginSuccess }: LoginP
       requestControllerRef.current?.abort()
       requestControllerRef.current = null
     }
-  }, [platform])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const getStatusText = () => {
     switch (status) {

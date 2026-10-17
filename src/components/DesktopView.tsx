@@ -46,6 +46,7 @@ import type { PlaybackOrigin, SongSelectHandler } from '../types/playbackNavigat
 import { addDesktopListeningSeconds, recordDesktopSongStart } from '../services/desktopMusicActivity'
 import { getSecureToken, setSecureToken, removeSecureToken } from '../services/secureTokenStore'
 import type { DesktopMusicWidgetContext } from './DesktopExtraWidgets'
+import { getApiBase, getApiOrigin } from '../services/apiConfig'
 import {
   loadWallpaperEngineRotationSettings,
   saveWallpaperEngineRotationSettings,
@@ -707,7 +708,7 @@ function DesktopView({
     setWeLoading(true)
     setWeError(null)
     try {
-      const response = await fetch('http://localhost:3001/api/wallpaper-engine/scan', { signal: scanController.signal, cache: 'no-store' })
+      const response = await fetch(`${getApiBase()}/wallpaper-engine/scan`, { signal: scanController.signal, cache: 'no-store' })
       const data = await response.json()
       if (scanController.signal.aborted || wallpaperScanControllerRef.current !== scanController) return
       
@@ -807,7 +808,7 @@ function DesktopView({
       desktopWallpaperManager.saveSettings({ lastWallpaperSource: 'wallpaper-engine-manual' })
 
       if (wallpaper.type === 'video') {
-        const mediaUrl = `http://localhost:3001/api/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`
+        const mediaUrl = `${getApiBase()}/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`
         console.log('[DesktopView] 应用视频壁纸:', mediaUrl)
         setDesktopLiveWallpaper({
           kind: 'wallpaper-engine',
@@ -819,10 +820,10 @@ function DesktopView({
         })
         setDesktopWallpaper(null)
       } else if (wallpaper.type === 'image') {
-        setDesktopWallpaper(`http://localhost:3001/api/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`)
+        setDesktopWallpaper(`${getApiBase()}/wallpaper-engine/media?id=${encodeURIComponent(wallpaper.id)}&file=${encodeURIComponent(wallpaper.file)}`)
         setDesktopLiveWallpaper(null)
       } else if (wallpaper.preview) {
-        setDesktopWallpaper(`http://localhost:3001${wallpaper.preview}`)
+        setDesktopWallpaper(`${getApiOrigin()}${wallpaper.preview}`)
         setDesktopLiveWallpaper(null)
       } else {
         throw new Error('Wallpaper has no playable media')
@@ -1178,7 +1179,7 @@ function DesktopView({
         }
         if (currentPlatform === 'soda') {
           const cookie = getPlatformCookie('soda')
-          const response = await fetch(`http://localhost:3001/api/soda/recent?limit=50${cookie ? `` : ''}`, {
+          const response = await fetch(`${getApiBase()}/soda/recent?limit=50${cookie ? `` : ''}`, {
             cache: 'no-store',
             signal: controller.signal,
           })
@@ -1201,8 +1202,8 @@ function DesktopView({
           return
         }
         const endpoint = currentPlatform === 'qq'
-          ? 'http://localhost:3001/api/qq/record/recent/song'
-          : 'http://localhost:3001/api/netease/record/recent/song'
+          ? `${getApiBase()}/qq/record/recent/song`
+          : `${getApiBase()}/netease/record/recent/song`
         const query = new URLSearchParams({ limit: '100', cookie })
         const response = await fetch(`${endpoint}?${query.toString()}`, {
           cache: 'no-store',
@@ -1829,7 +1830,7 @@ function DesktopView({
         })
       } else if (playlistPlatform === 'qq') {
         const cookie = getSecureToken('qq_cookie') || ''
-        const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, {
+        const response = await fetch(`${getApiBase()}/qq/playlist/detail?id=${playlist.id}`, {
           signal: playlistLoadController.signal,
           cache: 'no-store',
         })

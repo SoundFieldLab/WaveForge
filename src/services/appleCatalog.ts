@@ -17,6 +17,7 @@ import { AMP_API, getAppleCredentials, forwardToBackend } from './appleAuth'
 import { appleApiRequest } from './appleApiBridge'
 import { describeAppleApiFailure } from './appleApiErrors'
 import { createTtlCache } from '../utils/ttlCache'
+import { getApiBase } from './apiConfig'
 
 export interface AppleCatalogSong {
   id: string
@@ -56,7 +57,7 @@ export const APPLE_EXPLORE_COUNTRIES = [
 
 const RSS_BASE = 'https://rss.marketingtools.apple.com/api/v2'
 /** WaveForge 本地 API 服务提供的 Apple RSS 代理（见 local-server.mjs /api/apple/rss） */
-const RSS_PROXY = 'http://localhost:3001/api/apple/rss'
+const RSS_PROXY = `${getApiBase()}/apple/rss`
 
 /**
  * Apple 营销工具 RSS 无 CORS 头，浏览器直连会被拦截。

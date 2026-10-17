@@ -10,6 +10,7 @@ import { createTtlCache } from '../utils/ttlCache'
 import LyricModal from './LyricModal'
 import VideoPlayer from './VideoPlayer'
 import { useTvBack } from '../tv/tvCore'
+import { getApiBase } from '../services/apiConfig'
 
 // 歌曲详情附加载荷（详情字段 / 相似推荐 / 百科 / 发现页数据）短 TTL 缓存：
 // 同一首歌反复打开详情弹窗不再重发请求。歌词本身已由 getLyrics 缓存，这里只管其它只读载荷。
@@ -277,7 +278,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
         }
         if (song.platform === 'qq') {
           const mid = String(song.mid || song.id)
-          const data = await cachedJsonFetch(`qdetail:qq:${mid}`, `http://localhost:3001/api/qq/song/detail?mid=${encodeURIComponent(mid)}`)
+          const data = await cachedJsonFetch(`qdetail:qq:${mid}`, `${getApiBase()}/qq/song/detail?mid=${encodeURIComponent(mid)}`)
           if (!cancelled && data?.song) {
             setExtra({
               publishTime: data.song.publishTime || data.song.album?.publishTime,
@@ -308,7 +309,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
           }
           if (!cancelled) setLyricsLoading(false)
         } else {
-          const data = await cachedJsonFetch(`qdetail:netease:${song.id}`, `http://localhost:3001/api/netease/song/detail?ids=${encodeURIComponent(String(song.id))}`)
+          const data = await cachedJsonFetch(`qdetail:netease:${song.id}`, `${getApiBase()}/netease/song/detail?ids=${encodeURIComponent(String(song.id))}`)
           const detail = data?.songs?.[0]
           if (!cancelled && detail) {
             const quality = detail.hr ? 'Hi-Res 无损'

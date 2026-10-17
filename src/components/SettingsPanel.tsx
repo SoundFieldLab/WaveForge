@@ -86,6 +86,7 @@ import { checkBridgeRunning, ensureBridgeRunning, bridgeShowWindow, bridgeHideWi
 import BilibiliLoginPanel from './BilibiliLoginPanel'
 import BilibiliProfileModal from './BilibiliProfileModal'
 import VmpStatusCard from './VmpStatusCard'
+import { getApiBase } from '../services/apiConfig'
 import {
   isBilibiliLoggedIn,
   getStoredBilibiliUser,
@@ -1001,7 +1002,7 @@ function SettingsPanel({
     const deviceId = getTvDeviceId()
     try {
       const res = await fetch(
-        `http://localhost:3001/api/tv/license/status?deviceId=${encodeURIComponent(deviceId)}`,
+        `${getApiBase()}/tv/license/status?deviceId=${encodeURIComponent(deviceId)}`,
         { cache: 'no-store' }
       )
       if (res.ok) {
@@ -1020,7 +1021,7 @@ function SettingsPanel({
     }
     setTvRedeemState({ status: 'redeeming', message: null })
     try {
-      const res = await fetch('http://localhost:3001/api/tv/license/redeem', {
+      const res = await fetch(`${getApiBase()}/tv/license/redeem`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code, deviceId: getTvDeviceId() }),

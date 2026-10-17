@@ -220,7 +220,9 @@ describe('mode integration wiring', () => {
   it('routes Desktop Soda recent playback through the Soda credential and endpoint', () => {
     const view = source('components/DesktopView.tsx')
     expect(view).toContain("getPlatformCookie('soda')")
-    expect(view).toContain('/api/soda/recent?limit=50')
+    // 2026-10-17 P3：API 基址统一走 getApiBase()（支持 waveforge:apiBase 覆盖），
+    // 源码里不再有硬编码的完整 URL，断言改为路由路径本身。
+    expect(view).toContain('/soda/recent?limit=50')
     expect(view).toContain('map(sodaMediaToSong)')
   })
 

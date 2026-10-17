@@ -13,6 +13,7 @@ import SongContextMenu from './SongContextMenu'
 import { getUserPlaylists } from '../services/playlistService'
 import { getReadableAccentColor } from '../utils/desktopAccentColor'
 import { useTvBack } from '../tv/tvCore'
+import { getApiBase } from '../services/apiConfig'
 
 interface AlbumDetailModalProps {
   albumId: string | number
@@ -169,7 +170,7 @@ function AlbumDetailModal({
           const query = new URLSearchParams({ id })
           const sdCookie = getSecureToken('soda_token') || ''
           if (sdCookie) query.set('cookie', sdCookie)
-          const response = await fetch(`http://localhost:3001/api/soda/album/collect/check?${query.toString()}`, { cache: 'no-store' })
+          const response = await fetch(`${getApiBase()}/soda/album/collect/check?${query.toString()}`, { cache: 'no-store' })
           const payload = await response.json().catch(() => null)
           if (!cancelled && response.ok && payload?.loggedIn && payload?.collected) setSubscribed(true)
         } catch { /* 静默：保持默认未收藏 */ }

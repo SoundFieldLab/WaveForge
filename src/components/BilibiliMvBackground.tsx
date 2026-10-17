@@ -57,6 +57,7 @@ import type { BilibiliVideo, CandidateSignals } from '../services/bilibiliApi'
 import type { LyricLine } from '../services/musicApi'
 import { loadPlaybackSpeedSettings, setEffectivePlaybackSpeed, PLAYBACK_SPEED_SETTINGS_EVENT, PLAYBACK_SPEED_TRANSITION_EVENT } from '../services/playbackSpeedSettings'
 import { clampMvBlur, resolveMvBackgroundQuality } from '../services/playbackPerformancePolicy'
+import { getApiBase } from '../services/apiConfig'
 
 type MvBackgroundStatus = 'idle' | 'searching' | 'loading' | 'playing' | 'confirm' | 'none' | 'error'
 
@@ -237,7 +238,7 @@ async function findFallbackMvUrl(ctx: { songTitle: string; artists: string[]; so
   if (!title) return null
   try {
     // 1. 网易云搜索（取前 5 条，匹配标题+歌手）
-    const searchUrl = `http://localhost:3001/api/netease/search?keyword=${encodeURIComponent(`${title} ${artist}`)}&limit=5`
+    const searchUrl = `${getApiBase()}/netease/search?keyword=${encodeURIComponent(`${title} ${artist}`)}&limit=5`
     const searchResp = await fetch(searchUrl, { signal })
     if (!searchResp.ok) return null
     const searchJson = await searchResp.json()
@@ -251,7 +252,7 @@ async function findFallbackMvUrl(ctx: { songTitle: string; artists: string[]; so
     })
     if (!match?.mv) return null
     // 2. 获取 MV 播放地址
-    const mvUrl = `http://localhost:3001/api/netease/mv/url?id=${match.mv}`
+    const mvUrl = `${getApiBase()}/netease/mv/url?id=${match.mv}`
     const mvResp = await fetch(mvUrl, { signal })
     if (!mvResp.ok) return null
     const mvJson = await mvResp.json()
@@ -493,6 +494,10 @@ export default memo(function BilibiliMvBackground({
   const lastVideoPosRef = useRef({ time: -1, at: 0, recovering: false })
   /** 上一次渲染的 hidden 值：从看歌切回（hidden true→false）时做一次性硬同步 */
   const prevHiddenRef = useRef(hidden)
+  // 上一轮同步 effect 是否处于「播放中且可见」：暂停→续播（false→true）时音频流
+  // 重新缓冲可能比视频迟到，视频带着陈旧相对位置续播（实测 Can't look away 暂停/
+  // 续播后漂移 +0.40s 且落在自由播放/追频的死区里永不校正）→ 恢复时也做一次硬同步
+  const prevResumeSyncActiveRef = useRef(false)
   /** 看歌切回硬同步的重试定时器（隐藏期缓冲可能被回收，视频暂不可 seek 时稍后重试） */
   const returnSyncTimerRef = useRef<number | null>(null)
   /** 过渡预载进行中（stagedOnly）：底部"MV 加载中"徽标不显示（预载是后台行为，不打扰） */
@@ -1318,6 +1323,8 @@ export default memo(function BilibiliMvBackground({
         if (ref.current && !ref.current.paused) ref.current.pause()
       }
       prevHiddenRef.current = hidden
+      // 暂停/隐藏期间标记「非活跃」：下次恢复播放（false→true）时触发一次性硬同步
+      prevResumeSyncActiveRef.current = false
       return
     }
     // 从看歌切回（hidden true→false）：视频被隐藏期间缓冲可能被系统回收/位置陈旧，
@@ -1325,7 +1332,12 @@ export default memo(function BilibiliMvBackground({
     // 否则会停留在上次隐藏前的旧画面，直到手动拖进度才恢复。
     const returningFromHidden = prevHiddenRef.current === true
     prevHiddenRef.current = false
-    if (returningFromHidden) {
+    // 暂停→续播（false→true）：与看歌切回同待遇。音频流（QQ 直链等）重新缓冲常比
+    // 视频迟到，视频把这点领先量保留下来——落在追频死区（<0.8s）内的漂移永不校正
+    //（实测 +0.40s 心跳一直维持到对齐就绪后仍残留 -0.15s）。
+    const resumingFromPause = prevResumeSyncActiveRef.current === false
+    prevResumeSyncActiveRef.current = true
+    if (returningFromHidden || resumingFromPause) {
       const audio = getAudioRef.current()
       const applyReturnSync = (): boolean => {
         if (!audio) return false
@@ -1336,8 +1348,10 @@ export default memo(function BilibiliMvBackground({
         const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(alignment, playbackTime(audio)) : 0
         const target = computeMvSyncTarget(playbackTime(audio) + offset, v.duration)
         if (target === null) return false
-        // 从看歌切回：**无条件** seek 到音频对齐位置——即使偏差只有 0.5s 也要校正，
-        // 否则视频从隐藏前的旧位置续播、小偏移逐次累积变大（实测切 2 次后慢 ~10s）
+        // **无条件** seek 到音频对齐位置——即使偏差只有 0.4s 也要校正：
+        // 看歌切回是防视频从隐藏前的旧位置续播（小偏移逐次累积变大，实测切 2 次后慢 ~10s）；
+        // 续播是防视频带着领先量续播（落在死区里永不校正）。过渡期不适用（时钟由过渡路径接管）。
+        if (!returningFromHidden && transitionActiveRef.current) return true
         lastSyncCorrectionRef.current = performance.now()
         v.currentTime = target
         // 看歌期间用户倍速可能在歌曲 audio 上生效：切回立即同步视频倍速，
@@ -1348,7 +1362,7 @@ export default memo(function BilibiliMvBackground({
       }
       // 隐藏期视频缓冲可能被系统回收、暂不可 seek：立即尝试 + 每 500ms 重试，
       // 直到视频就位并同步到看歌结束时的位置（最多约 2s，避免"切回还停在旧画面"）。
-      if (!applyReturnSync()) {
+      if (!applyReturnSync() && returningFromHidden) {
         let retries = 0
         returnSyncTimerRef.current = window.setInterval(() => {
           retries += 1

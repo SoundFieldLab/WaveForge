@@ -37,6 +37,7 @@ import { fetchApplePersonalStation } from '../services/appleWebService'
 import { createTtlCache } from '../utils/ttlCache'
 import ScrollToTop from './ScrollToTop'
 import { cookieHeaders } from '../services/cookieRequest'
+import { getApiBase } from '../services/apiConfig'
 
 // ===== 个人中心模块级短 TTL 缓存 =====
 // ProfileView 现由 App 冻结（关闭只隐藏、不卸载），但切页签 / 切平台 / 进出他人主页仍会
@@ -1056,8 +1057,8 @@ function ProfileView({
       }
       const response = await fetch(
         platform === 'qq'
-          ? `http://localhost:3001/api/qq/playlist/detail?id=${encodeURIComponent(playlist.id)}`
-          : `http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`
+          ? `${getApiBase()}/qq/playlist/detail?id=${encodeURIComponent(playlist.id)}`
+          : `${getApiBase()}/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`
       )
       const data = await response.json()
       if (!response.ok || data.error) throw new Error(data.error || '读取歌单失败')
@@ -1247,7 +1248,7 @@ function ProfileView({
       }
       
       if (platform === 'netease') {
-        response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(cookie) })
+        response = await fetch(`${getApiBase()}/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(cookie) })
         data = await response.json()
         if (!response.ok || data.error) throw new Error(data.error || '读取网易云歌单失败')
         if (data.playlist) {
@@ -1270,7 +1271,7 @@ function ProfileView({
         }
       } else if (platform === 'qq') {
         console.log('📤 正在获取QQ音乐歌单详情，ID:', playlist.id)
-        response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
+        response = await fetch(`${getApiBase()}/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
         data = await response.json()
         
         console.log('📥 QQ音乐歌单详情:', data)
@@ -1495,7 +1496,7 @@ function ProfileView({
           return
         }
         const query = new URLSearchParams({ limit: '50', cookie: sdCookie })
-        const response = await fetch(`http://localhost:3001/api/soda/recent?${query.toString()}`, {
+        const response = await fetch(`${getApiBase()}/soda/recent?${query.toString()}`, {
           cache: 'no-store',
           signal: controller.signal,
         })
@@ -1551,8 +1552,8 @@ function ProfileView({
       }
       const requestType = requestPlatform === 'qq' ? 'song' : type
       const endpoint = requestPlatform === 'qq'
-        ? 'http://localhost:3001/api/qq/record/recent/song'
-        : `http://localhost:3001/api/netease/record/recent/${requestType}`
+        ? `${getApiBase()}/qq/record/recent/song`
+        : `${getApiBase()}/netease/record/recent/${requestType}`
       const query = new URLSearchParams({ limit: '100', cookie: requestCookie })
       const response = await fetch(`${endpoint}?${query.toString()}`, {
         cache: 'no-store',
@@ -2124,7 +2125,7 @@ function ProfileView({
         if (cachedDetail) {
           commitUserDetail(cachedDetail)
         } else {
-          const detailRes = await fetch(`http://localhost:3001/api/netease/user/detail?uid=${uid}`, { headers: cookieHeaders(cookie) })
+          const detailRes = await fetch(`${getApiBase()}/netease/user/detail?uid=${uid}`, { headers: cookieHeaders(cookie) })
           const detailData = await detailRes.json()
 
           if (detailData.profile) {
@@ -2177,7 +2178,7 @@ function ProfileView({
         const qqDetailCacheKey = `qq:${userId}`
         let detailData: any = profileQqDetailCache.get(qqDetailCacheKey)
         if (!detailData) {
-          const detailRes = await fetch(`http://localhost:3001/api/qq/user/detail?id=${userId}`, { headers: cookieHeaders(cookie) })
+          const detailRes = await fetch(`${getApiBase()}/qq/user/detail?id=${userId}`, { headers: cookieHeaders(cookie) })
           detailData = await detailRes.json()
           if (detailData && !detailData.error) profileQqDetailCache.set(qqDetailCacheKey, detailData)
         }

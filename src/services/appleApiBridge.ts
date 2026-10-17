@@ -14,6 +14,7 @@
 
 import { ensureAppleWebDevToken, prepareAppleDeveloperToken, shouldRefreshAppleDeveloperToken } from './appleMusicToken'
 import { setSecureToken } from './secureTokenStore'
+import { getApiBase } from './apiConfig'
 
 export interface AppleApiResult {
   ok: boolean
@@ -58,7 +59,7 @@ const runAppleApiRequest = async (
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), options.timeoutMs || 12000)
     try {
-      const response = await fetch(`http://localhost:3001/api/apple/amp?path=${encodeURIComponent(apiPath)}`, {
+      const response = await fetch(`${getApiBase()}/apple/amp?path=${encodeURIComponent(apiPath)}`, {
         method: options.method || 'GET',
         headers: {
           Authorization: `Bearer ${options.developerToken}`,

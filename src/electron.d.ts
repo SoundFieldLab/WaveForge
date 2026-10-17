@@ -787,7 +787,9 @@ export interface ElectronAPI {
   audioDownload: {
     /** 通过系统文件选择器授权一个本地音频文件；取消时返回 null */
     selectLocalFile?: () => Promise<string | null>
-    prepare: (urlOrPath: string, trackKey: string) => Promise<string>
+    /** options.expectedDuration：曲目元数据时长（秒）——下载 commit / 缓存复用前校验
+     *  实际时长，拦截空 vkey/试听片段返回的"合法容器但只有半首"的截断文件 */
+    prepare: (urlOrPath: string, trackKey: string, options?: { expectedDuration?: number }) => Promise<string>
     /** 只读缓存命中检查：已缓存返回本地路径，未缓存返回 null（不触发下载） */
     peekCached?: (trackKey: string) => Promise<string | null>
     /** 删除指定 trackKey 的本地音频缓存（分析发现试听片段等陈旧缓存时自愈用） */

@@ -21,6 +21,7 @@ import { isCrossFilled, useCrossFillVersion } from '../services/crossFillRegistr
 import { PLATFORM_LABELS } from '../services/platforms'
 import { getSecureToken, setSecureToken, removeSecureToken } from "../services/secureTokenStore"
 import { cookieHeaders } from '../services/cookieRequest'
+import { getApiBase } from '../services/apiConfig'
 
 const DETAIL_ROW_HEIGHT = 60
 const DETAIL_CARD_HEIGHT = 56
@@ -209,7 +210,7 @@ function PlaylistDetailPanel({
     setSmartLoading(true)
     try {
       const res = await fetch(
-        `http://localhost:3001/api/netease/playmode/intelligence/list?id=${encodeURIComponent(String(songs[0].id))}&pid=${encodeURIComponent(String(playlist.id))}`,
+        `${getApiBase()}/netease/playmode/intelligence/list?id=${encodeURIComponent(String(songs[0].id))}&pid=${encodeURIComponent(String(playlist.id))}`,
         { headers: cookieHeaders(cookie) },
       )
       const data = await res.json()

@@ -17,6 +17,7 @@ import { useTvBack } from '../tv/tvCore'
 import SongContextMenu from './SongContextMenu'
 import { getUserPlaylists } from '../services/playlistService'
 import { getReadableAccentColor } from '../utils/desktopAccentColor'
+import { getApiBase } from '../services/apiConfig'
 
 /**
  * 相似歌手头像地址。各平台字段命名不一（QQ: singer_pic / pic_url；网易云: img1v1Url / picUrl），
@@ -866,7 +867,7 @@ export default function ArtistDetailModal({
         }
       } else if (platform === 'netease') {
         // 网易云音乐：调用全部歌曲接口
-        const response = await fetch(`http://localhost:3001/api/netease/artist/songs?id=${artistId}&limit=${limit}&offset=${offset}`)
+        const response = await fetch(`${getApiBase()}/netease/artist/songs?id=${artistId}&limit=${limit}&offset=${offset}`)
         const data = await response.json()
         
         // 检查是否有错误
@@ -905,7 +906,7 @@ export default function ArtistDetailModal({
         }))
       } else {
         // QQ音乐：调用后端API，传入offset和limit（使用mid参数；带歌手名提示供纯数字 id 反查真 mid）
-        const response = await fetch(`http://localhost:3001/api/qq/artist/songs?mid=${encodeURIComponent(String(artistId))}&name=${encodeURIComponent(artistName || '')}&limit=${limit}`)
+        const response = await fetch(`${getApiBase()}/qq/artist/songs?mid=${encodeURIComponent(String(artistId))}&name=${encodeURIComponent(artistName || '')}&limit=${limit}`)
         const data = await response.json()
         const newSongs = data.songs || []
         total = data.total || 0

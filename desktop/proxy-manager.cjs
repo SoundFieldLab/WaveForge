@@ -18,6 +18,8 @@ const COMMON_PORTS = [7890, 7897, 7891, 1080, 10808, 10809, 8080, 8888, 8118, 20
 const CONFIG_PATH = () => path.join(path.dirname(app.getPath('exe')), 'proxy-config.json')
 
 let state = { enabled: false, proxy: null }
+/** 最近一次扫描发现的可用代理端口（setEnabled(true) 无参拉起用） */
+let lastScannedPort = 0
 let proxySession = null
 let healthTimer = null
 /** 启动时待消费的提示（渲染进程挂载后读取）：'startup-unavailable' 等 */
@@ -252,7 +254,10 @@ async function scan() {
     const r = await testPort(port)
     if (r) results.push(r)
   }
-  return results.sort((a, b) => a.latency - b.latency)
+  results.sort((a, b) => a.latency - b.latency)
+  // 记录最近一次扫描发现的端口：setEnabled(true) 无参拉起时用（set-enabled 修复）
+  if (results.length > 0) lastScannedPort = results[0].port
+  return results
 }
 
 /** 代理会话：下载/更新请求显式路由到本机代理（enabled 时） */
@@ -331,6 +336,13 @@ function setupProxyIPC(ipcMain, automixLogFn, mainWindowRef = null) {
   ipcMain.handle('proxy-manager:set-enabled', (e, v) => {
     assertMain(e)
     if (!v && state.enabled) return disable()
+    // v=true：曾有空操作问题——返回 getState() 等于什么都不做，UI 打开开关却无效果。
+    // 用最近一次扫描到的可用端口拉起（与 enable(port) 同路径）；没有可用端口则如实返回未启用。
+    if (v && !state.enabled) {
+      const port = Number(state.proxy?.port || lastScannedPort || 0)
+      if (port > 0) return enable(port)
+      return { ...state, error: '未检测到可用代理端口，请先扫描' }
+    }
     return getState()
   })
   // 联通状态结果：一次性/轮询读取；probe = 立即重测（任何异常都返回 done，绝不悬挂）

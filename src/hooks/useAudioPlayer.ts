@@ -2486,8 +2486,8 @@ export function useAudioPlayer(
           const renderApi = window.electron?.render
           if (audioDownload?.prepare && typeof renderApi?.qqAutomixCue === 'function') {
             const [qqSourcePath, qqTargetPath] = await Promise.all([
-              audioDownload.prepare(current.url, plan.sourceTrackKey),
-              audioDownload.prepare(next.url, plan.targetTrackKey),
+              audioDownload.prepare(current.url, plan.sourceTrackKey, { expectedDuration: current.duration }),
+              audioDownload.prepare(next.url, plan.targetTrackKey, { expectedDuration: next.duration }),
             ])
             const cue = await renderApi.qqAutomixCue({
               tier: plan.qq.tier,
@@ -3009,7 +3009,7 @@ export function useAudioPlayer(
       },
       prepareAudioUrl: async (song) => {
         try {
-          const prepared = await window.electron?.audioDownload?.prepare?.(song.url, song.key)
+          const prepared = await window.electron?.audioDownload?.prepare?.(song.url, song.key, { expectedDuration: song.duration })
           if (!prepared) return song.url
           return await window.electron?.audioDownload?.getMediaUrl?.(prepared) || song.url
         } catch {

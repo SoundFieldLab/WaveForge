@@ -38,6 +38,7 @@ import {
 } from '../services/homeModules'
 import type { KugouMinimalTab } from '../features/kugouMinimal/KugouMinimalCenter'
 import { cookieHeaders } from '../services/cookieRequest'
+import { getApiBase } from '../services/apiConfig'
 
 // 酷狗专属区块（听书 / 个人中心 / 最近播放 / 收藏）：懒加载，默认模式 chunk 不为酷狗服务层背体积；
 // 只有切到 kugou 平台才下载/渲染（平台隔离）
@@ -805,7 +806,7 @@ function HomeView({
 
       if (playlistPlatform === 'netease') {
         const neteaseCookie = getSecureToken("netease_cookie") || ''
-        const response = await fetch(`http://localhost:3001/api/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(neteaseCookie) })
+        const response = await fetch(`${getApiBase()}/netease/playlist/detail?id=${encodeURIComponent(playlist.id)}`, { headers: cookieHeaders(neteaseCookie) })
         data = await response.json()
         if (!response.ok || data.error) throw new Error(data.error || '读取网易云歌单失败')
         const songs = mapPlaylistTracksToSongs(data.playlist?.tracks || [], 'netease')
@@ -834,7 +835,7 @@ function HomeView({
       }
 
       const cookie = getSecureToken('qq_cookie') || ''
-      const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
+      const response = await fetch(`${getApiBase()}/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie) })
       data = await response.json()
       if (!response.ok || data.error) throw new Error(data.error || '读取QQ歌单失败')
       const songs = mapPlaylistTracksToSongs(data.songlist || data.data?.songlist || [], 'qq')
@@ -1085,7 +1086,7 @@ function HomeView({
         const cookie = getSecureToken('qq_cookie') || ''
         // fetchWithRetry 的第二参是 maxRetries：headers 走 URL 剥离不了的路径，改用内联 fetch + headers
         const data = await (async () => {
-          const response = await fetch(`http://localhost:3001/api/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie), signal: abortController.signal, cache: 'no-store' })
+          const response = await fetch(`${getApiBase()}/qq/playlist/detail?id=${playlist.id}`, { headers: cookieHeaders(cookie), signal: abortController.signal, cache: 'no-store' })
           return response.json()
         })()
         if (!isCurrentRequest()) return
@@ -2092,7 +2093,7 @@ function HomeView({
             return
           }
           const query = new URLSearchParams({ limit: '50', cookie: sdCookie })
-          const response = await fetch(`http://localhost:3001/api/soda/recent?${query.toString()}`, {
+          const response = await fetch(`${getApiBase()}/soda/recent?${query.toString()}`, {
             cache: 'no-store',
             signal: controller.signal,
           })
@@ -2136,8 +2137,8 @@ function HomeView({
           : getSecureToken("netease_cookie") || ''
         if (!cookie) return
         const endpoint = platform === 'qq'
-          ? 'http://localhost:3001/api/qq/record/recent/song'
-          : 'http://localhost:3001/api/netease/record/recent/song'
+          ? `${getApiBase()}/qq/record/recent/song`
+          : `${getApiBase()}/netease/record/recent/song`
         const recentQuery = new URLSearchParams({ limit: '100', cookie })
         const response = await fetch(`${endpoint}?${recentQuery.toString()}`, {
           cache: 'no-store',

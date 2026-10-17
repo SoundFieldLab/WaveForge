@@ -539,6 +539,14 @@ namespace WaveForge.SetupUI
                 return true;
             }
             string dir = ArgStr(a, "dir");
+            // 安装路径防御：拒绝盘符根（C:\ 等）。装到根目录会把应用文件与系统/用户
+            // 文件混在同一层，卸载时 SafeDeleteDir 也因"拒绝删除非本软件路径"留下残骸。
+            if (!string.IsNullOrWhiteSpace(dir))
+            {
+                string fullDir = Path.GetFullPath(dir).TrimEnd('\\');
+                if (string.Equals(fullDir, Path.GetPathRoot(fullDir)?.TrimEnd('\\') ?? "", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("安装路径不能是盘符根目录，请选择一个子文件夹（如 D:\\WaveForge）。");
+            }
             string scope = ArgStr(a, "scope") ?? "current";
             bool desktop = true;
             object deskObj; a.TryGetValue("desktopShortcut", out deskObj);
@@ -771,7 +779,7 @@ namespace WaveForge.SetupUI
                     "device-license.json",
                 };
                 AddItem("ud:settings", "个性化配置", string.Join("|", settingsFiles.Select(f => Path.Combine(userData, f))), "filegroup", true, "wf-un-detail-settings");
-                AddItem("ud:creds", "登录凭据", string.Join("|", new[] { "qq-cookie.txt", "soda-qr-login.json", "secure-credentials.json" }.Select(f => Path.Combine(userData, f))), "filegroup", true, "wf-un-detail-creds");
+                AddItem("ud:creds", "登录凭据", string.Join("|", new[] { "qq-cookie.txt", "soda-qr-login.json", "secure-credentials.json", "apple-web-cookies.json", "apple-bridge-profile" }.Select(f => Path.Combine(userData, f))), "filegroup", true, "wf-un-detail-creds");
                 for (int i = _unItems.Count - 1; i >= 0; i -= 1)
                 {
                     if (_unItems[i].Key == "ud:settings") { _unItems[i].Base = userData; break; }

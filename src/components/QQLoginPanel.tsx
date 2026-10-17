@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { X, Music, ExternalLink, Copy, Check, QrCode } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
+import { getApiBase } from '../services/apiConfig'
 
 interface QQLoginPanelProps {
   onClose: () => void
@@ -93,7 +94,7 @@ document.cookie
     const controller = new AbortController()
     loginControllerRef.current = controller
     try {
-      const res = await fetch('http://localhost:3001/api/qq/user/setCookie', {
+      const res = await fetch(`${getApiBase()}/qq/user/setCookie`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

@@ -12,6 +12,7 @@
  */
 import { isTvModeActive } from '../platform'
 import { setRemoteCursorMode } from './tvCore'
+import { getApiBase } from '../services/apiConfig'
 
 let installed = false
 let ws: WebSocket | null = null
@@ -27,7 +28,7 @@ async function fetchRemoteStatus(): Promise<{
   clientCount?: number
 } | null> {
   try {
-    const res = await fetch('http://localhost:3001/api/tv/remote-status', { cache: 'no-store' })
+    const res = await fetch(`${getApiBase()}/tv/remote-status`, { cache: 'no-store' })
     if (!res.ok) return null
     return (await res.json()) as {
       running?: boolean

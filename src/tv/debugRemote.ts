@@ -7,6 +7,7 @@
  */
 import { isDebugMode, getFrontendLogsSince } from './debugStore'
 import { isAndroid } from '../platform'
+import { getApiBase } from '../services/apiConfig'
 
 let ws: WebSocket | null = null
 let lastReportedLogs = 0
@@ -15,7 +16,7 @@ let debugBridgeToken = ''
 
 function syncBackend(enabled: boolean): void {
   try {
-    void fetch('http://localhost:3001/api/tv/debug-mode', {
+    void fetch(`${getApiBase()}/tv/debug-mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled }),
@@ -127,7 +128,7 @@ function reportFrontendError(payload: Record<string, unknown>): void {
     if (now - lastAt < 5000) return
     if (reportedErrorMessages.size > 64) reportedErrorMessages.clear()
     reportedErrorMessages.set(key, now)
-    void fetch('http://localhost:3001/api/tv/debug-report', {
+    void fetch(`${getApiBase()}/tv/debug-report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -150,7 +151,7 @@ function reportFrontendLogs(): void {
   const batch = logs
   lastReportedLogs = total
   try {
-    void fetch('http://localhost:3001/api/tv/debug-report', {
+    void fetch(`${getApiBase()}/tv/debug-report`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ logs: batch }),

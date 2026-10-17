@@ -7,6 +7,7 @@
  */
 import { useSyncExternalStore } from 'react'
 import { isAndroid } from '../platform'
+import { getApiBase } from '../services/apiConfig'
 
 // ── 调试模式开关（localStorage developerMode + developerModeChanged 事件） ──
 let debugMode = readDebugMode()
@@ -176,7 +177,7 @@ async function pollBackendLogs(): Promise<void> {
   // 页面隐藏（TV 退后台/息屏）时跳过本轮 fetch，恢复可见后下一轮继续（与 remoteBridge 同策略）
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
   try {
-    const res = await fetch('http://localhost:3001/api/tv/logs', { cache: 'no-store' })
+    const res = await fetch(`${getApiBase()}/tv/logs`, { cache: 'no-store' })
     if (!res.ok) {
       // 后端无此接口（PC 端 local-server 未挂 tv 扩展）：连续失败后停止轮询，避免 404 刷屏
       backendPollFailures++

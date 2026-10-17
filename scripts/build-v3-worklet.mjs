@@ -10,7 +10,7 @@
  * esbuild 为 vite 的直接依赖，无需单独安装。
  */
 import { build } from 'esbuild'
-import { mkdirSync, existsSync, statSync, readdirSync } from 'fs'
+import { mkdirSync, existsSync, statSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -44,16 +44,25 @@ if (existsSync(outfile)) {
 
 mkdirSync(path.dirname(outfile), { recursive: true })
 
-await build({
+// 写前读旧内容：内容一致则跳过写盘——esbuild 输出含随机 hash 键名/顺序差异时
+// 每次都会产生假的未提交 diff（报告 P3：“工作区常驻未提交 diff”的根因之一）。
+const previous = existsSync(outfile) ? readFileSync(outfile, 'utf8') : null
+const output = await build({
   entryPoints: [entry],
   bundle: true,
   format: 'iife',
   minify: true,
-  outfile,
+  write: false,
   banner: {
     js: '// WaveForge v3 AudioWorklet processor (waveforge-v3-effects) — 自动生成，勿手改；重新生成：npm run build:v3-worklet',
   },
   logLevel: 'info',
 })
 
-console.log(`[build-v3-worklet] ${path.relative(root, outfile)} 已生成`)
+const generated = output.outputFiles[0].text
+if (previous !== null && previous === generated) {
+  console.log(`[build-v3-worklet] ${path.relative(root, outfile)} 内容未变化，跳过写盘（避免常驻未提交 diff）`)
+} else {
+  writeFileSync(outfile, generated)
+  console.log(`[build-v3-worklet] ${path.relative(root, outfile)} 已生成`)
+}
