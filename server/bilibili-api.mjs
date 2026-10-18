@@ -133,6 +133,33 @@ function pruneCache(map, ttl, maxEntries) {
   }
 }
 
+/** 读取响应体但不超过 maxBytes（超限即抛错并中断流）：防异常超大响应吃满内存 */
+async function cappedArrayBuffer(resp, maxBytes) {
+  const len = Number(resp.headers.get('content-length') || 0)
+  if (len > maxBytes) {
+    try { await resp.body?.cancel() } catch { /* ignore */ }
+    throw new Error(`响应超过 ${Math.round(maxBytes / 1024)}KB 上限`)
+  }
+  const reader = resp.body?.getReader()
+  if (!reader) return resp.arrayBuffer()
+  const chunks = []
+  let received = 0
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    received += chunk.value.length
+    if (received > maxBytes) {
+      try { await reader.cancel() } catch { /* ignore */ }
+      throw new Error(`响应超过 ${Math.round(maxBytes / 1024)}KB 上限`)
+    }
+    chunks.push(chunk.value)
+  }
+  const out = new Uint8Array(received)
+  let offset = 0
+  for (const c of chunks) { out.set(c, offset); offset += c.length }
+  return out.buffer
+}
+
 /** 带 UA/Referer/Cookie 的 B 站请求（12s 超时），返回 Response */
 async function fetchBili(url, { params, cookie, referer = BILI_REFERER, headers = {}, signal } = {}) {
   let finalUrl = url
@@ -688,7 +715,8 @@ export function registerBilibiliRoutes(app) {
       const url = `${API_BASE}/x/v2/dm/web/seg.so?type=1&oid=${cid}&segment_index=${idx}`
       const resp = await fetchBili(url, { referer: BILI_REFERER })
       if (!resp.ok) throw new Error(`seg.so HTTP ${resp.status}`)
-      const buf = Buffer.from(await resp.arrayBuffer())
+      // 单段上限 4MB（正常弹幕段几十 KB）：异常超大响应会经 arrayBuffer 全量进内存
+      const buf = Buffer.from(await cappedArrayBuffer(resp, 4 * 1024 * 1024))
       if (buf.length < 2) break
       const { items, next } = parseDanmakuSeg(buf)
       all.push(...items)
@@ -722,7 +750,8 @@ export function registerBilibiliRoutes(app) {
   const fetchDanmakuXml = async (url) => {
     const resp = await fetchBili(url, { referer: BILI_REFERER })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const buf = Buffer.from(await resp.arrayBuffer())
+    // 同 seg.so：单响应上限 4MB（旧 XML 弹幕正常几百 KB）
+    const buf = Buffer.from(await cappedArrayBuffer(resp, 4 * 1024 * 1024))
     // Node fetch 会按 Content-Encoding 自动解压 → 直接拿到的可能就是明文 XML；
     // 若否则尝试 deflate-raw / gzip / deflate / brotli 逐种解压
     const direct = buf.toString('utf8')

@@ -100,9 +100,11 @@ function encodePowerShell(script) {
   return Buffer.from(script, 'utf16le').toString('base64')
 }
 
-function createElevationCommand(scriptPath) {
-  const elevatedPayload = `& ${psQuote(scriptPath)}\nexit $LASTEXITCODE`
-  const elevatedArguments = `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShell(elevatedPayload)}`
+// 提权载荷直接以 -EncodedCommand 内联传递，不落盘：此前脚本写在用户可写目录
+// 再被 -Verb RunAs 执行，写入与 UAC 批准之间同用户恶意进程可替换该文件获得
+// 管理员代码执行（TOCTOU）。内联后无可替换文件。
+function createElevationCommand(repairScript) {
+  const elevatedArguments = `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodePowerShell(repairScript)}`
   return `$ErrorActionPreference = 'Stop'\n` +
     `try {\n` +
     `  $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -Verb RunAs -ArgumentList ${psQuote(elevatedArguments)} -PassThru -Wait\n` +
@@ -172,11 +174,11 @@ async function launchChromaAppListRepair(userDataPath, options = {}) {
   }
   const directory = path.join(userDataPath || os.tmpdir(), 'chroma-repair')
   fs.mkdirSync(directory, { recursive: true })
-  const scriptPath = path.join(directory, 'repair-chroma-app-list.ps1')
+  // 结果文件仍需落盘（提权进程与主进程的交接面），目录在 userData 下属当前用户私有。
+  // 提权载荷本身以内联 EncodedCommand 传递，不再写脚本文件（消除 TOCTOU 替换窗口）。
   const resultPath = path.join(directory, 'repair-result.json')
   try { fs.rmSync(resultPath, { force: true }) } catch { /* Ignore an absent previous result. */ }
-  fs.writeFileSync(scriptPath, `\uFEFF${createRepairScript(resultPath)}`, 'utf8')
-  const processResult = await runPowerShell(createElevationCommand(scriptPath), options)
+  const processResult = await runPowerShell(createElevationCommand(createRepairScript(resultPath)), options)
   if (processResult.kind === 'spawn-error') return { outcome: 'process-failed', error: processResult.error }
   if (processResult.kind === 'timeout') return { outcome: 'timeout', error: processResult.error }
   if (/WF_CHROMA_ERROR:1223:/.test(processResult.stdout)) {

@@ -1405,6 +1405,30 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '12mb' }))
 app.use(express.urlencoded({ extended: true, limit: '12mb' }))
+
+// ── 登录 QR 轮询限速（每 IP 滑动窗口）──
+// QR create/check 对上游发起真实请求（kugou create 还会注册设备身份），匿名放大
+// 会触发上游风控并连累本机 IP。正常登录 2s 轮询一次、单次会话 <2 分钟，限额远高
+// 于正常用量。
+const QR_RATE_WINDOW_MS = 60_000
+const QR_CREATE_LIMIT = 6      // 每分钟 6 次 create（正常用户远用不到）
+const QR_CHECK_LIMIT = 60      // 每分钟 60 次 check（2s 轮询 × 2 分钟会话的 1.5 倍余量）
+const qrRateBuckets = new Map()
+function qrRateLimited(req, kind) {
+  const ip = String(req.socket?.remoteAddress || 'unknown')
+  const bucketKey = `${kind}:${ip}`
+  const now = Date.now()
+  const recent = (qrRateBuckets.get(bucketKey) || []).filter(at => now - at < QR_RATE_WINDOW_MS)
+  recent.push(now)
+  qrRateBuckets.set(bucketKey, recent)
+  if (qrRateBuckets.size > 1024) {
+    for (const [key, timestamps] of qrRateBuckets) {
+      if (timestamps.every(at => now - at >= QR_RATE_WINDOW_MS)) qrRateBuckets.delete(key)
+    }
+  }
+  return kind === 'create' ? recent.length > QR_CREATE_LIMIT : recent.length > QR_CHECK_LIMIT
+}
+app.use(express.urlencoded({ extended: true, limit: '12mb' }))
 registerHazardRoutes(app)
 registerLocationRoutes(app)
 registerBilibiliRoutes(app)
@@ -2818,6 +2842,7 @@ app.get('/api/netease/login/qr/key', async (req, res) => {
 
 app.get('/api/netease/login/qr/create', async (req, res) => {
   try {
+    if (qrRateLimited(req, 'create')) return res.status(429).json({ error: '请求过于频繁，请稍后再试' })
     const { key } = req.query
     if (typeof key !== 'string' || !key) {
       return res.status(400).json({ error: '请提供key' })
@@ -2849,6 +2874,7 @@ app.get('/api/netease/login/qr/create', async (req, res) => {
 
 app.get('/api/netease/login/qr/check', async (req, res) => {
   try {
+    if (qrRateLimited(req, 'check')) return res.status(429).json({ error: '请求过于频繁，请稍后再试' })
     const { key } = req.query
     if (typeof key !== 'string' || !key) {
       return res.status(400).json({ error: '请提供key' })
@@ -6474,6 +6500,7 @@ app.post('/api/kugou/playlist/tracks', async (req, res) => {
 /** 生成概念版扫码登录二维码（含设备注册，返回值由渲染进程保管） */
 app.post('/api/kugou/qr/create', async (_req, res) => {
   try {
+    if (qrRateLimited(_req, 'create')) return res.status(429).json({ success: false, error: '请求过于频繁，请稍后再试' })
     const result = await createKugouQrLogin()
     if (!result) return res.status(502).json({ success: false, error: '二维码生成失败' })
     res.json({ success: true, key: result.key, image: result.image, url: result.url, device: result.device })
@@ -6485,6 +6512,7 @@ app.post('/api/kugou/qr/create', async (_req, res) => {
 /** 查询扫码状态：0=过期 1=待扫 2=待确认 4=成功 */
 app.post('/api/kugou/qr/check', async (req, res) => {
   try {
+    if (qrRateLimited(req, 'check')) return res.status(429).json({ success: false, error: '请求过于频繁，请稍后再试' })
     const { key, device } = req.body || {}
     if (!key) return res.status(400).json({ success: false, error: '缺少 key' })
     const result = await checkKugouQrLogin(key, device)

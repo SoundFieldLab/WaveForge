@@ -179,7 +179,23 @@ class SignalRgbEffectManager {
   }
 
   async responseBody(response) {
-    const text = await response.text()
+    // 本机端口（16034/16038）可能被恶意进程抢占：无上限的 response.text() 会被
+    // 超大响应打爆主进程内存（超时只限时长不限体积）。流式读取并截断到 1MB。
+    const reader = response.body?.getReader()
+    if (!reader) {
+      const text = await response.text()
+      return this.parseBodyText(text.slice(0, 1024 * 1024))
+    }
+    let text = ''
+    while (text.length <= 1024 * 1024) {
+      const chunk = await reader.read()
+      if (chunk.done) break
+      text += new TextDecoder().decode(chunk.value, { stream: true })
+    }
+    try { await reader.cancel() } catch { /* already closed */ }
+    return this.parseBodyText(text.slice(0, 1024 * 1024))
+  }
+  parseBodyText(text) {
     if (!text) return null
     try { return JSON.parse(text) } catch { return text }
   }
