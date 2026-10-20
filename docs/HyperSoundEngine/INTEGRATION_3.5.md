@@ -112,6 +112,7 @@ npm run build
 - **打包验收边界**：验收期间临时使用过的 resources/node_modules 解析垫片已全部删除，最终 release/win-unpacked 无临时文件。
 - **代码评审修复（第二轮）**：engines/v3.ts 用户可见描述改 “HSE 3.5”（含 V3MixingStudio 兜底）；index.html CSP 注释写明两处最窄例外理由；spatialPlaybackInput 对 WAV 损坏/无 mask/声道数与声明格式不符统一回落普通立体声 + 单次提示、configure 失败不再暂停播放；新增 sourceChannelLabels/targetChannelLabels（类型 + normalizeSpatial 清洗 + syncDiscreteInput 下发 + 空间页输入）；DEBUG_PAGES.md 登记 HSE 探针，AGENTS.md 补头追权限边界与新目录说明；新增/更新对应测试（spatialPlaybackInput 9→11 项、hseSpatialInputLifecycle 3→4 项、spatial-completion 标签清洗断言）。
 - **系统音效总开关（64 段预设轮回归）**：全旁路状态开启默认应用「增强」场景（64 段 EQ）并提示；关闭前真实配置按快照恢复；平直 EQ 与限幅不计入已开启状态。
+- **内置 EQ 预设重设计（音乐频点锚点）**：场景 + 预设库按底鼓 60–80 / 军鼓 200–240 / 贝斯 700–1k / 人声 1–4k / 齿音 5–10k / 空气感 12–16k 锚点生成 64 段曲线；30Hz 以下与 16kHz 以上强制 0dB（不做次声/超声微调与抬升）；允许 ±5dB 听感级调整，Q=8.9 + 级联 Q 补偿；实测 40Hz–5kHz 目标/实测误差 ≤0.5dB，12kHz 约 −0.5dB。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

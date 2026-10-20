@@ -15,7 +15,7 @@
 
 import { createDefaultParams } from '../types'
 import type { ScenePreset, V3EngineParams } from '../types'
-import { buildEq64Curve } from './EqCurve64'
+import { buildEq64Curve, type EqCurveAnchor } from './EqCurve64'
 
 /** 11 个场景 id（顺序固定，与 SCENE_PRESETS 一一对应） */
 export const SCENE_IDS = [
@@ -41,9 +41,12 @@ function base(): V3EngineParams {
   return p
 }
 
-/** 内置场景 EQ：10 个历史锚点 + 场景专属窄带 trims → 64 段曲线（见 EqCurve64） */
-function applyEqCurve(p: V3EngineParams, gains: number[], trims: ReadonlyArray<readonly [number, number]> = []): void {
-  const bands = buildEq64Curve(gains, trims)
+/**
+ * 内置场景 EQ：用「音乐内容频点」锚点（底鼓/军鼓/贝斯/人声/镲片/空气感）生成 64 段曲线。
+ * 30Hz 以下与 16kHz 以上不做微调（见 EqCurve64），锚点数值偏听感目标，允许 ±5dB 的激进调整。
+ */
+function applyEqCurve(p: V3EngineParams, anchors: ReadonlyArray<EqCurveAnchor>): void {
+  const bands = buildEq64Curve(anchors)
   p.eq.enabled = true
   p.eq.mode = 'pro'
   p.eq.bandCount = bands.length
@@ -145,7 +148,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 流行：轻微微笑曲线（低音+中高音突出），中等压缩，轻虚拟低音（干声，不加空间混响）
-    applyEqCurve(p, [3.5, 2.5, 1.5, 0.5, -0.5, 0, 1, 2, 2.5, 1.5], [[315, -0.6], [1250, 0.6], [3150, -0.6], [12500, 0.8]])
+    applyEqCurve(p, [[40, 1], [60, 2.5], [80, 2], [120, 1], [200, -1.5], [300, -1], [500, 0], [800, 0.3], [1200, 0.5], [2000, 1], [2500, 1.5], [4000, 2], [5000, 1], [6300, -1], [8000, 0.5], [10000, 1], [12500, 2], [16000, 1.5]])
     setCompressor(p, { thresholdDb: -18, ratio: 2.5, kneeDb: 8, attackMs: 12, releaseMs: 180, makeupDb: 5 })
     disableReverb(p)
     setBass(p, { cutoffHz: 100, harmonicGain: 0.35, mix: 0.3, lowBoostDb: 3 })
@@ -158,7 +161,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 摇滚：中频凹陷（吉他/人声让位），中高频锐利，重压缩，低频有力（干声保冲击）
-    applyEqCurve(p, [2.5, 2, 0.5, -1.5, -1.5, 0, 1.5, 2.5, 3, 2], [[80, 0.8], [250, -0.8], [2500, 0.8], [10000, 0.6]])
+    applyEqCurve(p, [[40, 1.5], [60, 3], [80, 2.5], [120, 0.5], [200, -1.5], [300, -1.8], [500, -0.5], [800, 0.5], [1200, 1], [2500, 1.5], [4000, 2], [5000, 1.5], [7000, 0.5], [9000, 1], [12500, 1.5], [16000, 1]])
     setCompressor(p, { thresholdDb: -22, ratio: 5, kneeDb: 4, attackMs: 5, releaseMs: 120, makeupDb: 13 })
     disableReverb(p)
     setBass(p, { cutoffHz: 85, harmonicType: 'odd', harmonicGain: 0.6, mix: 0.5, lowBoostDb: 6 })
@@ -171,7 +174,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 爵士：温暖柔和，高频略收，俱乐部轻大厅混响，轻压缩（保留动态）
-    applyEqCurve(p, [2, 1.5, 1, 0.5, 0, 0, 0.5, 0.5, -0.5, -1], [[160, 0.5], [2500, -0.5], [5000, 0.4]])
+    applyEqCurve(p, [[50, 1], [80, 1.5], [120, 1.5], [200, 1], [300, 0.5], [500, 0], [800, 0.5], [1200, 0.5], [2000, 0.5], [3000, 0.8], [4000, 0.3], [5000, -0.5], [6300, -1], [8000, -1.2], [10000, -1], [12500, -1.5], [16000, -2]])
     setCompressor(p, { thresholdDb: -16, ratio: 1.8, kneeDb: 10, attackMs: 20, releaseMs: 250, makeupDb: 4 })
     setReverb(p, { type: 'hall', roomSize: 0.55, damping: 0.45, wet: 0.35, dry: 0.8, preDelayMs: 10 })
     const sc = finish(p, 'jazz')
@@ -182,7 +185,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 舞曲：大低音 + 明亮高频 + 泵感压缩 + 立体声加宽（干声保舞池冲击力）
-    applyEqCurve(p, [4, 3, 1.5, 0.5, -0.5, 0, 1, 2, 3, 3], [[63, 0.8], [400, -0.6], [6300, 0.6]])
+    applyEqCurve(p, [[40, 2], [50, 3], [60, 3.5], [80, 3], [100, 1.5], [200, -1.5], [300, -2], [500, -1], [700, 0], [1000, 0.5], [2000, 1], [3000, 1.5], [5000, 2], [7000, 1.5], [9000, 1.5], [12500, 2], [16000, 1]])
     setCompressor(p, { thresholdDb: -14, ratio: 4, kneeDb: 4, attackMs: 8, releaseMs: 90, makeupDb: 4 })
     disableReverb(p)
     setBass(p, { cutoffHz: 100, harmonicType: 'even', harmonicGain: 0.7, mix: 0.6, levelDb: 1, lowBoostDb: 6 })
@@ -196,7 +199,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 古典：接近平直 + 长尾大厅混响 + 极轻压缩 + 宽声场（保留动态与定位）
-    applyEqCurve(p, [0.5, 0.5, 0, 0, 0, 0, 0, 0, 0.5, 0.5], [[2500, 0.3], [12500, 0.4]])
+    applyEqCurve(p, [[40, 0.5], [60, 0.5], [80, 0.5], [120, 0.5], [200, 0.3], [300, 0], [500, 0], [1000, 0], [2000, 0.5], [3000, 0.8], [4000, 0.5], [5000, 0.3], [7000, 0], [10000, 0.4], [12500, 0.6], [16000, 0.8]])
     setCompressor(p, { thresholdDb: -24, ratio: 1.5, kneeDb: 12, attackMs: 30, releaseMs: 400, makeupDb: 1 })
     setReverb(p, { type: 'hall', roomSize: 0.75, damping: 0.3, wet: 0.55, dry: 0.7, preDelayMs: 15 })
     p.stereoWidth = 1.15
@@ -208,7 +211,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // LiveHouse：大空间感 + 中高频临场感 + 中等压缩
-    applyEqCurve(p, [1, 1, 0.5, 0, 0, 0.5, 1.5, 2, 2, 1], [[500, 0.5], [2000, -0.4], [8000, 0.6]])
+    applyEqCurve(p, [[50, 1], [80, 1.5], [120, 1], [200, -0.5], [300, -1], [500, 0.5], [800, 1], [1500, 1.5], [2500, 2], [4000, 2], [5000, 1], [7000, 0.5], [9000, 1], [12500, 1.5], [16000, 1.5]])
     setCompressor(p, { thresholdDb: -20, ratio: 3, kneeDb: 6, attackMs: 10, releaseMs: 200, makeupDb: 3 })
     setReverb(p, { type: 'stage', roomSize: 0.7, damping: 0.35, wet: 0.6, dry: 0.65, preDelayMs: 20 })
     const sc = finish(p, 'livehouse')
@@ -219,7 +222,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 录音棚：监听级平直 + 最小化处理 + 轻微齿音控制（完全干声，忠于原声）
-    applyEqCurve(p, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], [])
+    applyEqCurve(p, [])
     setCompressor(p, { thresholdDb: -16, ratio: 2, kneeDb: 10, attackMs: 15, releaseMs: 200, makeupDb: 4 })
     disableReverb(p)
     setDeesser(p, { centerHz: 7000, mix: 0.5 })
@@ -231,7 +234,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 温暖：低频/中低频饱满，高频柔和滚降（干声，温暖靠音色不靠空间）
-    applyEqCurve(p, [3, 2.5, 2, 1, 0.5, 0, -0.5, -1.5, -2.5, -3], [[200, 0.5], [6300, -0.6]])
+    applyEqCurve(p, [[50, 2], [80, 2.5], [120, 2], [200, 1.5], [300, 0.8], [500, 0], [1000, -0.3], [2000, -0.8], [3000, -1.2], [5000, -1.8], [7000, -2.2], [10000, -2.5], [12500, -2.8], [16000, -3]])
     setCompressor(p, { thresholdDb: -18, ratio: 2, kneeDb: 10, attackMs: 20, releaseMs: 300, makeupDb: 5 })
     disableReverb(p)
     setBass(p, { cutoffHz: 110, harmonicGain: 0.4, mix: 0.35, lowBoostDb: 4 })
@@ -243,7 +246,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // DTS 浩渺：开阔大空间 + 明亮空气感 + 加宽声场 + 长混响（最强的空间向场景）
-    applyEqCurve(p, [1, 1, 0.5, 0, 0, 0, 1, 2, 3, 3], [[630, -0.5], [12500, 0.6]])
+    applyEqCurve(p, [[50, 1], [80, 1.5], [120, 0.5], [200, -0.5], [300, -1], [500, -0.5], [1000, 0], [1500, 0.5], [2500, 1.5], [4000, 1.5], [5000, 1], [7000, 1.5], [9000, 2], [12500, 3], [16000, 2.5]])
     setCompressor(p, { thresholdDb: -20, ratio: 2.5, kneeDb: 8, attackMs: 15, releaseMs: 250, makeupDb: 2 })
     setReverb(p, { type: 'hall', roomSize: 0.85, damping: 0.25, wet: 0.7, dry: 0.55, preDelayMs: 25, width: 1.4 })
     p.stereoWidth = 1.3
@@ -255,7 +258,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
   (() => {
     const p = base()
     // 悠扬舞台：人声中心化（1–4kHz 临场提升）+ 齿音抑制 + 舞台混响
-    applyEqCurve(p, [-0.5, 0, 0, 1, 1.5, 2.5, 2, 1.5, 0.5, 0], [[1000, 0.8], [3150, 0.6], [6300, -0.5]])
+    applyEqCurve(p, [[50, -1], [80, -1.5], [120, -1], [200, -0.5], [300, 0], [500, 0.8], [800, 1.5], [1200, 2], [2000, 2.5], [3000, 3], [4000, 2.5], [5000, 1.5], [6300, 0], [7000, -1.5], [9000, 0], [12500, 0.5], [16000, 0.5]])
     setCompressor(p, { thresholdDb: -18, ratio: 3, kneeDb: 6, attackMs: 8, releaseMs: 150, makeupDb: 0 })
     setReverb(p, { type: 'stage', roomSize: 0.5, damping: 0.45, wet: 0.45, dry: 0.75, preDelayMs: 8 })
     setDeesser(p, { centerHz: 6500, ratio: 10, thresholdDb: -32 })
@@ -270,7 +273,7 @@ export const SCENE_PRESETS: ScenePreset[] = [
     // 审计修复（C 报告）：原参数高频堆叠过暗（EQ -3dB@16k + night 预设 -3dB@16k +
     // nightMode shelf -12dB + deesser 6kHz 压制 → 10-15kHz 响应 -33.5dB 越出 ±24dB 契约界），
     // 现调平：EQ 高频 -2、nightMode 5（shelf -7.5dB）、deesser 阈值放宽、补偿预设换 warm
-    applyEqCurve(p, [4, 3.5, 2, 0.5, 0, 0, -0.5, -1, -0.5, 0], [[31.5, 0.8], [125, 0.5], [4000, -0.5], [12500, 0.5]]) // 12.5k −0.5 / 16k 0（收敛迭代到契约界内）
+    applyEqCurve(p, [[40, 2], [50, 3.5], [60, 4], [80, 4.5], [100, 3], [150, 1.5], [200, 0.5], [300, -0.5], [500, -0.5], [800, 0], [1500, -0.8], [2500, -1.2], [4000, -1.5], [6000, -2], [8000, -2.2], [10000, -2], [12500, -2], [16000, -2]]) // 30Hz 以下不抬升；高频收敛仍按夜间模式契约界内
     setCompressor(p, { thresholdDb: -24, ratio: 6, kneeDb: 4, attackMs: 5, releaseMs: 200, makeupDb: 15 })
     disableReverb(p)
     setBass(p, { cutoffHz: 120, harmonicType: 'even', harmonicGain: 0.8, mix: 0.7, levelDb: 1, lowBoostDb: 8 })

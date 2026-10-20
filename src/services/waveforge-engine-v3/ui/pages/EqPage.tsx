@@ -8,7 +8,7 @@ import { toLegacyTheme } from '../hse-theme'
 import type { HSETheme } from '../hse-theme'
 import type { V3UiBridge } from '../bridge'
 import type { V3ParamsController } from '../hooks'
-import { buildEq64Curve } from '../../src/engine/EqCurve64'
+import { buildEq64Curve, type EqCurveAnchor } from '../../src/engine/EqCurve64'
 
 interface EqPageProps {
   bridge: V3UiBridge
@@ -18,17 +18,18 @@ interface EqPageProps {
 }
 
 /**
- * 内置 EQ 预设库：10 个历史锚点 + 预设专属窄带 trims，应用时展开为 64 段曲线
- * （与内置场景同一套 EqCurve64：PRO_EQ_64_BANDS + Q 8.9 + 级联 Q 补偿）。
+ * 内置 EQ 预设库：按「音乐内容频点」锚点设计（底鼓 50–80 / 军鼓 200–240 / 贝斯 700–1k /
+ * 人声 1–4k + 齿音 5–10k / 镲片与空气感 7–16k），应用时展开为 64 段曲线；
+ * 30Hz 以下与 16kHz 以上保持平直（EqCurve64 会清零），不做无意义的次声/超声抬升。
  */
-const EQ_PRESETS: { id: string; name: string; gains: readonly number[]; trims?: ReadonlyArray<readonly [number, number]> }[] = [
-  { id: 'flat', name: '平直', gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-  { id: 'pop', name: '流行', gains: [3, 2.5, 1.5, 0.5, -0.5, 0, 1, 2, 2.5, 1.5], trims: [[315, -0.6], [1250, 0.6], [3150, -0.6], [12500, 0.8]] },
-  { id: 'rock', name: '摇滚', gains: [2.5, 2, 0.5, -1.5, -1.5, 0, 1.5, 2.5, 3, 2], trims: [[80, 0.8], [250, -0.8], [2500, 0.8], [10000, 0.6]] },
-  { id: 'bass', name: '低音增强', gains: [6, 5, 4, 2, 0, 0, 0, 0, 0, 0], trims: [[40, 0.8], [100, -0.5], [200, 0.4]] },
-  { id: 'vocal', name: '人声', gains: [-2, -1, 0, 1, 2, 3, 3, 2.5, 1, 0], trims: [[1000, 0.8], [3150, 0.6], [6300, -0.5]] },
-  { id: 'bright', name: '明亮', gains: [0, 0, 0, 0, 0, 1, 2, 3, 4, 4], trims: [[6300, 0.5], [12500, 0.8]] },
-  { id: 'warm', name: '温暖', gains: [3, 2.5, 2, 1, 0, 0, -0.5, -1.5, -2.5, -3], trims: [[200, 0.5], [6300, -0.6]] },
+const EQ_PRESETS: { id: string; name: string; anchors: ReadonlyArray<EqCurveAnchor> }[] = [
+  { id: 'flat', name: '平直', anchors: [] },
+  { id: 'pop', name: '流行', anchors: [[50, 1.5], [80, 2], [120, 1], [200, -1], [300, -1], [500, 0], [800, 0.3], [1200, 0.5], [2500, 1.5], [4000, 2], [5000, 1], [7000, -0.5], [9000, 1], [12500, 2], [16000, 1.5]] },
+  { id: 'rock', name: '摇滚', anchors: [[50, 2], [80, 2.5], [120, 1], [200, -1.5], [300, -1.8], [500, -0.5], [800, 0.5], [1200, 1], [2000, 1.5], [3000, 2], [4000, 2.5], [5000, 2], [7000, 1], [9000, 1.5], [12500, 1.5], [16000, 1]] },
+  { id: 'bass', name: '低音增强', anchors: [[30, 1], [40, 3], [55, 4.5], [70, 5], [100, 4], [150, 2.5], [200, 1], [300, 0], [500, -1], [700, -0.8], [1000, -1], [2000, -1.2], [4000, -1], [8000, -0.8], [12500, -0.5], [16000, 0]] },
+  { id: 'vocal', name: '人声', anchors: [[50, -1.5], [80, -2], [120, -1], [200, -0.5], [300, 0], [500, 0.8], [800, 1.5], [1200, 2], [2000, 2.5], [3000, 3], [4000, 2.5], [5000, 1.5], [7000, -1.5], [9000, 0], [12500, 0.5], [16000, 0.5]] },
+  { id: 'bright', name: '明亮', anchors: [[80, 0], [120, 0], [200, 0], [500, 0], [1000, 0], [2000, 0.5], [3000, 1.5], [4000, 2], [5000, 2.5], [7000, 3], [9000, 3.5], [12500, 4], [14000, 4], [16000, 3.5]] },
+  { id: 'warm', name: '温暖', anchors: [[50, 2], [80, 2.5], [120, 2], [200, 1.5], [300, 0.8], [500, 0], [1000, -0.3], [2000, -0.8], [3000, -1.2], [5000, -1.8], [7000, -2.2], [10000, -2.5], [12500, -2.8], [16000, -3]] },
 ]
 
 export default function EqPage({ controller, theme }: EqPageProps) {
@@ -36,7 +37,7 @@ export default function EqPage({ controller, theme }: EqPageProps) {
   const lt = toLegacyTheme(theme)
 
   const applyPreset = (preset: typeof EQ_PRESETS[number]) => {
-    const bands = buildEq64Curve(preset.gains, preset.trims)
+    const bands = buildEq64Curve(preset.anchors)
     patch({
       eq: {
         ...params.eq,

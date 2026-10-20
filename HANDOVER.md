@@ -861,5 +861,6 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - **显式声道标签入口（Spec A2）**：SpatialSettings 新增 sourceChannelLabels/targetChannelLabels，normalizeSpatial 做合法性清洗（1..32 个非空短字符串，非法整体丢弃），attachV3Engine.syncDiscreteInput 把它们随 inputFormat 一起下发并纳入去重 key，空间音频页「音源与声道格式」新增两个标签输入（留空回落 WAV mask）；空数组按未提供处理。
 - **文档**：DEBUG_PAGES.md 新增 HSE 探针登记（命令/范围/生产状态/安全规则，含未迁入的 spatial-debug 预览说明）；AGENTS.md 补 HSE 头追 serial/BLE/OSC 的权限与 IPC 边界、vendor/、examples/、docs/HyperSoundEngine/ 目录说明。
 - **系统音效总开关回归**：3.5 融合曾把「开启默认应用增强（enhanced）」改成纯快照恢复，导致全旁路状态一启动就显示已开启、点击无默认预设；现恢复历史行为——全旁路状态开启 → 默认 `applyScene("enhanced")`（含 64 段 EQ）并提示「已开启增强模式」；关闭前有真实配置则仍按快照恢复；平直 EQ（全 0dB）与限幅保护不计入「已开启」。
+- **内置 EQ 预设重新设计（音乐频点锚点）**：场景与均衡器预设库改用「底鼓 60–80 / 军鼓 200–240 / 贝斯 700–1k / 人声 1–4k / 齿音 5–10k / 空气感 12–16k」锚点生成 64 段曲线，30Hz 以下与 16kHz 以上强制 0dB（次声/超声不抬升）；预设允许 ±5dB 的听感级激进调整，仍由 EqChain 级联 Q 补偿校准；参考 Bobby Owsinski《The Magic Frequencies For EQing Mix Elements》与 SoundGadget EQ 频点表（经 cheatography EQ tips 整理）。
 - **评审确认但保留**（判断项/设计边界）：replayGainTags 仍是预留字段（QQ/网易云不返回标签，实际走 URL 扫描）；useAudioPlayer 的 deck 索引/源映射重复属可读性 smell，未在功能修复轮改动。
 

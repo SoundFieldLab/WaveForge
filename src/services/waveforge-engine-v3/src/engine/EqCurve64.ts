@@ -1,20 +1,29 @@
 /**
  * EqCurve64 —— 64 段图形 EQ 曲线生成（内置场景预设与预设库共用）
  *
- * 设计：
- *  - 历史 10 段锚点（PRO_EQ_DEFAULT_BANDS）继续承担主体听感目标；
- *  - trims 是场景/预设专属的窄带微调锚点（相对主体曲线的 ±dB 增量），
- *    让 64 段数据不是简单插值，而是带特征的细调；
- *  - 全频点在对数频率轴线性插值，增益保留 0.1dB；Q 取约 1/6 倍频程的临界 Q，
+ * 设计（2026-10-20 重新设计）：
+ *  - 锚点改为「音乐内容频点」而非旧 10 段网格：底鼓 50–80Hz / 2–4kHz beater，
+ *    军鼓 200–240Hz 厚度 + 5kHz crack，贝斯 60–80Hz 下潜 + 700–1000Hz attack，
+ *    人声 120Hz 厚度 + 1–4kHz presence + 5kHz / 7–10kHz sibilance，
+ *    镲片 7.5–10kHz，空气感 12–16kHz（参考 Bobby Owsinski / SoundGadget EQ 频点表）；
+ *  - 64 个频点仍覆盖 20Hz–20kHz，但**人耳可听/音乐内容频段以外（<30Hz、>16kHz）的微调强制为 0**：
+ *    次声与 16kHz 以上既听不到，抬升只会浪费动态余量；
+ *  - 锚点在对数频率轴上线性插值，增益保留 0.1dB；Q=8.9（约 1/6 倍频程临界 Q），
  *    由 EqChain 的级联 Q 补偿把实际响应压回目标曲线。
  */
 
-import { PRO_EQ_64_BANDS, PRO_EQ_DEFAULT_BANDS, type EqBand } from '../types'
+import { PRO_EQ_64_BANDS, type EqBand } from '../types'
 
 /** 64 段（约 1/6 倍频程）图形 EQ 的默认 Q；与 EqChain 级联 Q 补偿配合。 */
 export const EQ_64_Q = 8.9
 
-function interpolateLogDb(anchors: ReadonlyArray<readonly [number, number]>, frequency: number): number {
+/** 预设只在这段「音乐/人耳关注区」内做微调；两端保持平直，避免抬升次声与超声。 */
+export const EQ_TRIM_LOW_HZ = 30
+export const EQ_TRIM_HIGH_HZ = 16000
+
+export type EqCurveAnchor = readonly [frequency: number, gainDb: number]
+
+function interpolateLogDb(anchors: ReadonlyArray<EqCurveAnchor>, frequency: number): number {
   if (frequency <= anchors[0][0]) return anchors[0][1]
   const last = anchors[anchors.length - 1]
   if (frequency >= last[0]) return last[1]
@@ -28,18 +37,17 @@ function interpolateLogDb(anchors: ReadonlyArray<readonly [number, number]>, fre
   return last[1]
 }
 
-/** 以 10 个旧锚点 + 可选窄带 trims 生成完整 64 段 EQ 数据。 */
-export function buildEq64Curve(
-  gains10: readonly number[],
-  trims: ReadonlyArray<readonly [number, number]> = [],
-): EqBand[] {
-  const baseAnchors = PRO_EQ_DEFAULT_BANDS.map((frequency, index) =>
-    [frequency, gains10[index] ?? 0] as [number, number])
-  const trimAnchors = trims.map(([frequency, delta]) =>
-    [frequency, interpolateLogDb(baseAnchors, frequency) + delta] as [number, number])
-  const anchors = [...baseAnchors, ...trimAnchors].sort((a, b) => a[0] - b[0])
+/**
+ * 用音乐频点锚点生成完整 64 段 EQ 数据。
+ * @param anchors 频点锚点（Hz, dB），内部按频率排序；建议覆盖 30Hz–16kHz
+ */
+export function buildEq64Curve(anchors: ReadonlyArray<EqCurveAnchor>): EqBand[] {
+  if (anchors.length === 0) return PRO_EQ_64_BANDS.map((frequency) => ({ frequency, gain: 0, q: EQ_64_Q }))
+  const sorted = [...anchors].sort((a, b) => a[0] - b[0])
   return PRO_EQ_64_BANDS.map((frequency) => {
-    const gain = Number(interpolateLogDb(anchors, frequency).toFixed(1))
+    // 可听区之外不做任何微调；UI 仍保留对应频段供手动调整。
+    if (frequency < EQ_TRIM_LOW_HZ || frequency > EQ_TRIM_HIGH_HZ) return { frequency, gain: 0, q: EQ_64_Q }
+    const gain = Number(interpolateLogDb(sorted, frequency).toFixed(1))
     // 归一化 -0：分享串往返用 Object.is 比较，-0 与 0 会被判为不等。
     return { frequency, gain: gain === 0 ? 0 : gain, q: EQ_64_Q }
   })

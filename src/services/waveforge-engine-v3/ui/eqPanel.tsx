@@ -270,7 +270,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
                 <button type="button" disabled={eq.locked || eq.proBands.length <= 1} onClick={removeBand}
                   className={`hse-glass-choice rounded-lg px-3 py-2 text-xs disabled:opacity-40 ${theme.textSecondary}`}>删除选中频段</button>
                 </div>
-                <div className={`${theme.textTertiary} mt-1 text-xs`}>{eq.proBands.length} / {MAX_PRO_EQ_BANDS} 段</div>
+                <div className={`${theme.textTertiary} mt-1 text-xs`}>{eq.proBands.length} / {MAX_PRO_EQ_BANDS} 段 · 内置预设微调集中在 30Hz–16kHz（次声/超声区保持平直）</div>
               </div>
             )}
             <div className="flex flex-wrap items-center gap-3 pb-1">

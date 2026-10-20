@@ -50,6 +50,8 @@ function expectValidParams(p: V3EngineParams, id: string): void {
     expect(b.frequency).toBeGreaterThan(10)
     expect(b.frequency).toBeLessThan(24000)
     expect(isFiniteNumber(b.gain)).toBe(true)
+    // 30Hz 以下 / 16kHz 以上属于次声/超声区，内置预设不做微调（保持 0dB）。
+    if (b.frequency < 30 || b.frequency > 16000) expect(b.gain).toBe(0)
     expect(b.q).toBeGreaterThan(0.05)
     expect(b.q).toBeLessThan(20)
   }

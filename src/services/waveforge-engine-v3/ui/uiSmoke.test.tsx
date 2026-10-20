@@ -203,7 +203,10 @@ describe('V3 调音室 UI 冒烟', () => {
     clickNav('音效场景')
     fireEvent.click(screen.getByText('流行'))
     expect(bridge.getParams().sceneId).toBe('pop')
-    expect(bridge.getParams().eq.proBands[0].gain).not.toBe(0)
+    // 64 段预设：20Hz 端点保持 0dB，微调落在可听/音乐频段。
+    expect(bridge.getParams().eq.bandCount).toBe(64)
+    expect(bridge.getParams().eq.proBands.some((band) => band.gain !== 0)).toBe(true)
+    expect(bridge.getParams().eq.proBands[0].gain).toBe(0)
   })
 
   it('场景应用保留音量控制：内置场景与我的场景快照均不得覆盖 loudnessNormalization', () => {

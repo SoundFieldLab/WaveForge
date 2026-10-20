@@ -315,7 +315,10 @@ describe('HSE 融合层参数持久化', () => {
     expect(hostSetParams).toHaveBeenCalled()
     const submitted = hostSetParams.mock.calls.at(-1)![0] as V3EngineParams
     expect(submitted.sceneId).toBe('pop')
-    expect(submitted.eq.proBands[0].gain).not.toBe(0)
+    // 64 段预设把微调放在可听/音乐频段（20Hz 端点按设计保持 0dB）。
+    expect(submitted.eq.bandCount).toBe(64)
+    expect(submitted.eq.proBands.some((band) => band.gain !== 0)).toBe(true)
+    expect(submitted.eq.proBands[0].gain).toBe(0)
 
     expect(bridge.getSaveState()).toBe('pending')
     vi.advanceTimersByTime(400)
