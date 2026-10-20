@@ -802,7 +802,7 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | --- | --- | --- |
 | 类型检查 | `npm run lint` | **通过，0 error** |
 | HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **117 文件（114 passed + 3 skipped）/ 1171 用例 = 1155 passed + 16 skipped + 0 failed**（虚拟扬声器轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
-| 全仓测试 | `npx vitest run --maxWorkers=8` | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（虚拟扬声器轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| 全仓测试 | `npx vitest run --maxWorkers=4` | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（虚拟扬声器轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **512,198 bytes（500.2 KiB）**，sha256 `7b5bea51…ebaefed5`（`worklet-build.log`；虚拟扬声器上混前为 507,839B / `83376e8d…8a3c53f7`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |

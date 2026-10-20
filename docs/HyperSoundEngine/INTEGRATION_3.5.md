@@ -79,11 +79,11 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
 | HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **117 文件（114 passed + 3 skipped）/ 1171 用例 = 1155 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
-| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=4`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 
-**并发口径**：默认 31 worker 在 15.2GB 机器上并发 325 文件会因换页出现多个与功能无关的 5s 超时抖动；11 个可疑文件逐个单跑 205 项全部通过（`tests-final-isolated.log`）。**最终回归固定 `npx vitest run --maxWorkers=8`**，不做 skip/retry。
+**并发口径**：默认 31 worker 在 15.2GB 机器上并发 325 文件会因换页出现多个与功能无关的 5s 超时抖动；11 个可疑文件逐个单跑 205 项全部通过（`tests-final-isolated.log`）。**最终回归固定 `npx vitest run --maxWorkers=4`**（8 worker 在构建/Defender 负载下仍会出现假超时；4 worker 全绿），不做 skip/retry。
 
 跑法与命令：
 
