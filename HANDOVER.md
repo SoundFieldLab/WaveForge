@@ -801,8 +801,8 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run lint` | **通过，0 error** |
-| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **113 文件（110 passed + 3 skipped）/ 1155 用例 = 1139 passed + 16 skipped + 0 failed**，连跑两遍一致（`tests-final-hse-run1.log` / `tests-final-hse-run2.log`） |
-| 全仓测试 | `npx vitest run --maxWorkers=8` | **325 文件（321 passed + 4 skipped）/ 3165 用例 = 3148 passed + 17 skipped + 0 failed**，81.41s（最终代码状态复跑，`tests-final-full-after-ui-fix.log`）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **113 文件（110 passed + 3 skipped）/ 1156 用例 = 1140 passed + 16 skipped + 0 failed**（评审修复轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为修复前 1155 用例记录） |
+| 全仓测试 | `npx vitest run --maxWorkers=8` | **325 文件（321 passed + 4 skipped）/ 3169 用例 = 3152 passed + 17 skipped + 0 failed**（评审修复轮复跑，`tests-final-review-fixes.log`；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **507,004 bytes（495.1 KiB）**，sha256 `d5e8e708…5a0fe1`（`worklet-build.log`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
@@ -849,5 +849,16 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - 测试：`tests-final-hse-run1.log`、`tests-final-hse-run2.log`、`tests-final-full-maxworkers8.log`、`tests-final-full-after-ui-fix.log`、`tests-final-isolated.log`。
 - 真实 Electron UI / 音频图：`electron-ui/SUMMARY.md`、`11-page-*.png`、`34-final-*.png`；`audio-graph/README.md`、`verify-spatial-playback.json`、`completion-48000-summary.json`、`completion-96000-summary.json`、`wasm-kernel-capability.json`。
 - 打包验收期间临时使用过的 `resources/node_modules` 解析垫片已全部删除，最终 `release/win-unpacked` 无临时文件。
-- 以上证据均在 `.verification/hse35-integration/`（`/.verification/` 已 gitignore）。
+- 以上证据均在 .verification/hse35-integration/（/.verification/ 已 gitignore）。
+
+### 30.8 代码评审修复（2026-10-20 第二轮）
+
+/code-review（固定点 8b90d34）的 Standards / Spec 两轴结论已逐项处理：
+
+- **用户可见命名**：src/services/audio-engine/engines/v3.ts 的引擎描述 “HyperSoundEngine 3.5” → “HSE 3.5”；V3MixingStudio 引擎切换兜底描述同步改 “HSE 3.5”（对齐 AGENTS「UI/用户可见一律叫 HSE」）。
+- **CSP 注释口径**：index.html 顶部注释补上两处最窄例外的理由（script-src wasm-unsafe-eval 供 h5wasm/HDF5 与 WASM SIMD；connect-src data: waveforge-media: 供 HSE 导出/空间输入的 fetch），并注明不要继续放宽。
+- **多声道回落（Spec C1）**：spatialPlaybackInput.prepare() 现在把「WAV 损坏 / 无 mask / 声道数与声明 AmbiX 或标签不符」全部捕获为普通立体声回落 + 每配置一次 onSourceWarning；configure() 失败不再 pause() 当前歌曲。旧行为会把错误抛回 loadAndPlay 导致停播。
+- **显式声道标签入口（Spec A2）**：SpatialSettings 新增 sourceChannelLabels/targetChannelLabels，normalizeSpatial 做合法性清洗（1..32 个非空短字符串，非法整体丢弃），attachV3Engine.syncDiscreteInput 把它们随 inputFormat 一起下发并纳入去重 key，空间音频页「音源与声道格式」新增两个标签输入（留空回落 WAV mask）；空数组按未提供处理。
+- **文档**：DEBUG_PAGES.md 新增 HSE 探针登记（命令/范围/生产状态/安全规则，含未迁入的 spatial-debug 预览说明）；AGENTS.md 补 HSE 头追 serial/BLE/OSC 的权限与 IPC 边界、vendor/、examples/、docs/HyperSoundEngine/ 目录说明。
+- **评审确认但保留**（判断项/设计边界）：replayGainTags 仍是预留字段（QQ/网易云不返回标签，实际走 URL 扫描）；useAudioPlayer 的 deck 索引/源映射重复属可读性 smell，未在功能修复轮改动。
 

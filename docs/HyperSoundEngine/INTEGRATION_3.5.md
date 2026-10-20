@@ -59,8 +59,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 接入前备份 | `main-before.zip` | 接入前主程序模块/脚本备份，1,036,876 bytes，2026-10-20 00:51 |
 | 迁移前清单 | `migration-before.json`、`support-files.json`、`before/scripts/build-v3-worklet.mjs` | 接入前文件/哈希与外围支持文件清单、旧构建脚本副本 |
 | 类型检查 | `typecheck.log`、`typecheck-2.log`、`typecheck-desktop-fix.log`、`typecheck-resume.log` | 接入过程分阶段 `tsc --noEmit` 日志（含 desktop 修复收敛记录） |
-| HSE 模块最终测试 | `tests-final-hse-run1.log`、`tests-final-hse-run2.log` | 113 文件 / 1155 用例 = **1139 passed + 16 skipped + 0 failed**，两遍一致 |
-| 全仓最终测试 | `tests-final-full-maxworkers8.log`、`tests-final-full-after-ui-fix.log` | 325 文件 / 3165 用例 = **3148 passed + 17 skipped + 0 failed**；后者为 81.41s 最终代码状态复跑 |
+| HSE 模块最终测试 | `tests-final-hse-run1.log`、`tests-final-hse-run2.log`、`tests-final-review-fixes.log` | 修复轮后 113 文件 / 1156 用例 = **1140 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终测试 | `tests-final-full-maxworkers8.log`、`tests-final-full-after-ui-fix.log`、`tests-final-review-fixes.log` | 修复轮后 325 文件 / 3169 用例 = **3152 passed + 17 skipped + 0 failed**（修复前 3165/3148） |
 | 逐文件隔离复跑 | `tests-final-isolated.log` | 11 个可疑文件单独跑 205 项全过，证明默认 31 worker 下的 5s 超时是 15.2GB 机器换页抖动 |
 | 验收总报告 | `ACCEPTANCE.md` | 五个门禁结论、最终计数、修复清单、证据索引与残余边界 |
 | 真实 Electron UI | `electron-ui/SUMMARY.md`、`11-page-*.png`、`34-final-*.png`、`audit-final-9pages.json` | 九页导航/亮色薄荷风格/窄窗 390px/导出/引擎往返实测 |
@@ -78,8 +78,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 基线 | 结果 |
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
-| HSE 模块最终实测（2026-10-20 09:11，`tests-final-hse-run1/2.log`） | **113 文件（110 passed + 3 skipped）/ 1155 用例 = 1139 passed + 16 skipped + 0 failed**，连跑两遍一致 |
-| 全仓最终实测（2026-10-20 09:54 最终代码状态，`tests-final-full-after-ui-fix.log`） | **325 文件（321 passed + 4 skipped）/ 3165 用例 = 3148 passed + 17 skipped + 0 failed**，81.41s（`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **113 文件（110 passed + 3 skipped）/ 1156 用例 = 1140 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **325 文件（321 passed + 4 skipped）/ 3169 用例 = 3152 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 
@@ -109,7 +109,8 @@ npm run build
 - **导出源**：`App.tsx` 导出源优先 `audioPlayer.getPlaybackSource()?.url`——多声道接管时元素 `src` 被换成静音时钟 WAV，旧逻辑会把静音时钟当源导出无声文件。
 - **UI**：`ui/hse-glass.css` ≤700px 头部允许换行 + 行高 56px→auto（修 390px 下引擎切换组被裁、关闭键溢出）；`ui/eqPanel.tsx` 补「均衡器已旁路」说明卡（均衡器旁路时整页空白）；`SpatialRingEditor.tsx` canvas dpr 每次 resize 重读（修 `canvasDprAndResize` 守卫）。
 - **测试**：`test/spatialPlaybackInput.test.ts` 7→9（时钟静音支路、多声道→立体声 null 通知）；新增 `test/hseSpatialInputLifecycle.test.ts`（3 项：多声道参数注入/回滚、非 WAV info toast、pitch+多声道仅前 L/R 进 SoundTouch）；`test/modeIntegrationWiring.test.ts` 同步导出源断言；`attachV3Engine.persistence.test.ts` 10 个用例声明 `IMPORT_TIMEOUT=20_000`（断言未改）；`test/hse-desktop.test.cjs` 纳入 `npm run test:desktop`。
-- **打包验收边界**：验收期间临时使用过的 `resources/node_modules` 解析垫片已全部删除，最终 `release/win-unpacked` 无临时文件。
+- **打包验收边界**：验收期间临时使用过的 resources/node_modules 解析垫片已全部删除，最终 release/win-unpacked 无临时文件。
+- **代码评审修复（第二轮）**：engines/v3.ts 用户可见描述改 “HSE 3.5”（含 V3MixingStudio 兜底）；index.html CSP 注释写明两处最窄例外理由；spatialPlaybackInput 对 WAV 损坏/无 mask/声道数与声明格式不符统一回落普通立体声 + 单次提示、configure 失败不再暂停播放；新增 sourceChannelLabels/targetChannelLabels（类型 + normalizeSpatial 清洗 + syncDiscreteInput 下发 + 空间页输入）；DEBUG_PAGES.md 登记 HSE 探针，AGENTS.md 补头追权限边界与新目录说明；新增/更新对应测试（spatialPlaybackInput 9→11 项、hseSpatialInputLifecycle 3→4 项、spatial-completion 标签清洗断言）。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

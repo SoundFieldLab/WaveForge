@@ -207,7 +207,7 @@ export default function V3MixingStudio({
               {transportControls}
               {onSwitchEngine && (
                 <div role="group" aria-label="切换音效引擎" className="hse-glass-group flex shrink-0 items-center gap-1 rounded-xl p-1">
-                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: 'HyperSoundEngine' }]).map((eng) => {
+                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: 'HSE 3.5' }]).map((eng) => {
                     const active = engineVersion === eng.id
                     return <button key={eng.id} type="button" onClick={() => onSwitchEngine(eng.id)} title={eng.description}
                       aria-pressed={active}

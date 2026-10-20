@@ -297,6 +297,10 @@ export interface HearingSettings {
 export interface SpatialSettings {
   speakerCancellation?: { enabled: boolean; amount: number; delayMs: number; cutoffHz: number }
   inputFormat?: 'channels' | 'ambix' | 'ambix1' | 'ambix2' | 'ambix3' | 'fuma' | 'stereo51' | 'stereo71'
+  /** 多声道 WAV 的物理声道标签（按文件物理顺序）；缺省时按 WAV mask，二者都没有则回落普通立体声。 */
+  sourceChannelLabels?: string[]
+  /** 期望的输出声道标签（必须与 sourceChannelLabels 构成同一集合，仅重排不增减）。 */
+  targetChannelLabels?: string[]
   /** Ambisonics 声场旋转与各阶线性增益，角度沿 HSE 右/上/右倾约定。 */
   ambisonicTransform?: { yawDeg: number; pitchDeg: number; rollDeg: number; orderGains: number[] }
   /** 自然外化保留直达节目；清晰定位按完整双耳湿声控制。 */

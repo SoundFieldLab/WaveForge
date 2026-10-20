@@ -86,4 +86,17 @@ describe('空间补全的完整信号路径', () => {
     params.spatial.ambisonicTransform.orderGains[3] = 0
     expect((engine as any)._params.spatial.ambisonicTransform?.orderGains[3]).toBe(0.4)
   })
+  it('多声道 WAV 的显式声道标签经持久化清洗保留，非法数据回落缺省', () => {
+    const { params } = fixture('channels')
+    const spatial: SpatialSettings = { ...params.spatial,
+      sourceChannelLabels: ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR'],
+      targetChannelLabels: ['SR', 'SL', 'LFE', 'FC', 'FR', 'FL'] }
+    const clean = normalizeSpatialSettings(spatial)
+    expect(clean.sourceChannelLabels).toEqual(spatial.sourceChannelLabels)
+    expect(clean.targetChannelLabels).toEqual(spatial.targetChannelLabels)
+    // 空标签/类型错误/超上限整体丢弃，交给 WAV mask 或普通立体声回落。
+    expect(normalizeSpatialSettings({ ...spatial, sourceChannelLabels: ['FL', '', 'FR'] }).sourceChannelLabels).toBeUndefined()
+    expect(normalizeSpatialSettings({ ...spatial, targetChannelLabels: [1, 2] as never }).targetChannelLabels).toBeUndefined()
+    expect(normalizeSpatialSettings({ ...spatial, sourceChannelLabels: Array.from({ length: 33 }, (_, i) => `c${i}`) }).sourceChannelLabels).toBeUndefined()
+  })
 })

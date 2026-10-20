@@ -54,6 +54,27 @@ function NumberField({ label, value, onChange, min, max, step = 0.1, theme }: {
   </label>
 }
 
+/**
+ * 多声道 WAV 的显式声道标签输入（逗号/空格分隔）。
+ * 没有 WAV mask 的文件必须靠它才能确定物理顺序；留空则回落到 mask/标准布局。
+ */
+function LabelsField({ label, hint, value, theme, onCommit }: {
+  label: string; hint: string; value: string[]; theme: HSETheme; onCommit: (labels: string[]) => void
+}) {
+  const [draft, setDraft] = useState(value.join(', '))
+  const serialized = value.join(',')
+  useEffect(() => setDraft(value.join(', ')), [serialized])
+  const commit = () => onCommit(draft.split(/[,，\s]+/).map(item => item.trim()).filter(Boolean))
+  return <label className={`mt-3 block text-xs ${theme.textSecondary}`}>{label}
+    <input type="text" value={draft} aria-label={label} placeholder="例如 FL, FR, FC, LFE, SL, SR"
+      className={`hse-glass-input mt-1.5 min-h-10 w-full rounded-lg px-3 hse-mono ${theme.textPrimary}`}
+      onChange={event => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
+    <span className="mt-1 block leading-relaxed">{hint}</span>
+  </label>
+}
+
 export default function SpatialAudioPage({ bridge, controller, theme, playbackTimeStore, initialView = '3d' }: {
   bridge: V3UiBridge; controller: V3ParamsController; theme: HSETheme
   onOpenEffect?: (key: string) => void; playbackTimeStore?: PlaybackTimeStore
@@ -244,6 +265,15 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
             : spatial.inputFormat === 'stereo51' || spatial.inputFormat === 'stereo71'
               ? '从立体声派生环绕信号后，在耳机中试听。原文件仍为立体声。'
               : '普通音频使用此项。多声道文件可在上方指定布局。'}</InfoLine>
+        {(spatial.inputFormat ?? 'channels') !== 'ambix' && spatial.inputFormat !== 'ambix1'
+          && spatial.inputFormat !== 'ambix2' && spatial.inputFormat !== 'ambix3' && spatial.inputFormat !== 'fuma' && <>
+          <LabelsField label="源声道标签（可选）" theme={theme} value={spatial.sourceChannelLabels ?? []}
+            hint="按文件物理顺序填写（如 7.1：FL, FR, FC, LFE, BL, BR, SL, SR）。留空则按 WAV mask；两者都不可用时回落普通立体声。数量必须等于文件声道数。"
+            onCommit={labels => patch({ sourceChannelLabels: labels })} />
+          <LabelsField label="目标声道标签（可选）" theme={theme} value={spatial.targetChannelLabels ?? []}
+            hint="只重排、不增减：必须与源标签是同一集合。留空则按标准布局顺序输出。"
+            onCommit={labels => patch({ targetChannelLabels: labels })} />
+        </>}
       </div>
     </details>
     {mode === 'stage' && <GlassCard theme={theme}><StagePanel params={spatial.stage} theme={theme} onChange={stage => patch({ stage })} /></GlassCard>}

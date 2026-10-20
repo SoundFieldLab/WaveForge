@@ -107,6 +107,19 @@ describe('HSE 多声道输入生命周期', () => {
     channelCountSpy.mockRestore()
   })
 
+  it('声源/目标声道标签随参数下发到多声道输入层，清空后回落 mask', async () => {
+    await attachForTest()
+    const bridge = getV3Bridge()
+    const base = createDefaultParams(48000)
+    bridge.setParams({ ...base, spatial: { ...base.spatial,
+      sourceChannelLabels: ['FL', 'FR', 'SL', 'SR'], targetChannelLabels: ['SR', 'SL', 'FR', 'FL'] } })
+    expect(capturedOptions.sourceChannelLabels).toEqual(['FL', 'FR', 'SL', 'SR'])
+    expect(capturedOptions.targetChannelLabels).toEqual(['SR', 'SL', 'FR', 'FL'])
+    const cleared = bridge.getParams()
+    bridge.setParams({ ...cleared, spatial: { ...cleared.spatial, sourceChannelLabels: [] } })
+    expect(capturedOptions.sourceChannelLabels).toBeUndefined()
+  })
+
   it('非 WAV 源提示走 info toast，不产生 error', async () => {
     await attachForTest()
     const toasts: any[] = []

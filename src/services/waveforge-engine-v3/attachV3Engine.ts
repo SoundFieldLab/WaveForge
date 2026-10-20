@@ -157,11 +157,16 @@ function acceptPlaybackInput(source: SpatialPlaybackSourceInfo | null): void {
 
 function syncDiscreteInput(): void {
   if (!lastHandle?.configureDiscreteInput || !currentParams) return
-  const format = currentParams.spatial?.inputFormat
+  const spatial = currentParams.spatial
+  const format = spatial?.inputFormat
   const inputFormat = format && !['stereo51', 'stereo71'].includes(format) ? format as SpatialPlaybackInputOptions['inputFormat'] : 'channels'
-  if (discreteInputKey === inputFormat) return
-  discreteInputKey = inputFormat ?? 'channels'
-  lastHandle.configureDiscreteInput(true, { inputFormat,
+  // 空数组 = 用户清空标签（回落 WAV mask），传给解码器的应是 undefined 而不是空数组。
+  const sourceChannelLabels = spatial?.sourceChannelLabels?.length ? spatial.sourceChannelLabels : undefined
+  const targetChannelLabels = spatial?.targetChannelLabels?.length ? spatial.targetChannelLabels : undefined
+  const key = JSON.stringify([inputFormat ?? 'channels', sourceChannelLabels ?? null, targetChannelLabels ?? null])
+  if (discreteInputKey === key) return
+  discreteInputKey = key
+  lastHandle.configureDiscreteInput(true, { inputFormat, sourceChannelLabels, targetChannelLabels,
     onSourceDecoded: acceptPlaybackInput,
     // 非 WAV 源无法验证声道顺序：提示一次并继续普通立体声播放，绝不中断。
     onSourceWarning: message => window.dispatchEvent(new CustomEvent('showToast', {

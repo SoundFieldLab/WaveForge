@@ -70,6 +70,21 @@ function boolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
 }
 
+/** 声道标签数组：只接受 1..MAX_ITEMS 个非空短字符串；非法数据整体丢弃（回落 mask/自动布局）。 */
+function labelList(value: unknown): string[] | undefined {
+  const values = array(value)
+  if (!values || values.length === 0 || values.length > MAX_ITEMS) return undefined
+  const labels: string[] = []
+  for (let i = 0; i < values.length; i++) {
+    const raw = item(values, i)
+    if (typeof raw !== 'string') return undefined
+    const label = raw.trim()
+    if (!label || label.length > 64) return undefined
+    labels.push(label)
+  }
+  return labels
+}
+
 function id(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const result = value.slice(0, MAX_ID_LENGTH).trim()
@@ -225,10 +240,14 @@ export function normalizeSpatialSettings(raw: unknown): SpatialSettings {
     pitch: finite(field(listener, 'pitch'), defaults.world.listener.pitch, -90, 90),
     roll: angle(field(listener, 'roll'), defaults.world.listener.roll),
   }
+  const sourceChannelLabels = labelList(field(input, 'sourceChannelLabels'))
+  const targetChannelLabels = labelList(field(input, 'targetChannelLabels'))
   return {
     budgetMode: choice(field(input, 'budgetMode'), ['quality', 'auto', 'lowLatency'] as const, 'quality'),
     renderStyle: choice(field(input, 'renderStyle'), ['natural', 'focused'] as const, 'natural'),
     inputFormat: choice(field(input, 'inputFormat'), ['channels', 'ambix', 'ambix1', 'ambix2', 'ambix3', 'fuma', 'stereo51', 'stereo71'] as const, 'channels'),
+    ...(sourceChannelLabels ? { sourceChannelLabels } : {}),
+    ...(targetChannelLabels ? { targetChannelLabels } : {}),
     ambisonicTransform: { yawDeg: angle(field(transform, 'yawDeg'), 0), pitchDeg: angle(field(transform, 'pitchDeg'), 0),
       rollDeg: angle(field(transform, 'rollDeg'), 0), orderGains: Array.from({ length: 4 }, (_, i) => finite(orderGains ? item(orderGains, i) : undefined, 1, -4, 4)) },
     speakerCancellation: { enabled: boolean(field(cancellation, 'enabled'), false),

@@ -117,10 +117,40 @@ describe('正式多声道播放源', () => {
     g.input.dispose()
   })
 
-  it('四声道不自动猜 FOA，无 mask 拒绝；显式 AmbiX 保留最高阶平面', async () => {
-    serve(wav(4)); const g = graph(); g.input.configure(true)
-    await expect(g.input.prepare('https://site/no-mask.wav')).rejects.toThrow('不能根据声道数猜测')
-    serve(wav(16)); g.input.configure(true, { inputFormat: 'ambix3' })
+  // 真实缺陷回归：声明格式/缺少 mask/文件损坏时旧实现会抛给播放器并停播；现在一律回落普通立体声并提示一次。
+  it('无 mask / 声明格式与声道数不符时回落普通立体声并提示，不抛错', async () => {
+    serve(wav(4)); const g = graph(), warn = vi.fn()
+    g.input.configure(true, { onSourceWarning: warn })
+    expect(await g.input.prepare('https://site/no-mask.wav')).toBe('https://site/no-mask.wav')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(g.input.controlled).toBe(false)
+    // 2 声道 WAV + 三阶 AmbiX 声明：同一配置只提示一次，且不接管 PCM
+    serve(wav(2)); const g2 = graph(), warn2 = vi.fn()
+    g2.input.configure(true, { inputFormat: 'ambix3', onSourceWarning: warn2 })
+    expect(await g2.input.prepare('https://site/stereo.wav')).toBe('https://site/stereo.wav')
+    expect(warn2).toHaveBeenCalledTimes(1)
+    expect(g2.input.controlled).toBe(false)
+    g.input.dispose(); g2.input.dispose()
+  })
+
+  it('显式源/目标声道标签可重排没有 mask 的多声道 WAV', async () => {
+    serve(wav(4)); const g = graph(), info = vi.fn()
+    g.input.configure(true, { sourceChannelLabels: ['SR', 'FL', 'SL', 'FR'], onSourceDecoded: info })
+    g.element.src = await g.input.prepare('https://site/quad.wav'); await g.element.play()
+    expect(g.input.controlled).toBe(true)
+    expect(g.nodes.at(-1)?.buffer?.numberOfChannels).toBe(4)
+    // 物理顺序 SR,FL,SL,FR；标准 Quad 输出 FL,FR,SL,SR → 值依次 0.02 / 0.04 / 0.03 / 0.01
+    expect(g.nodes.at(-1)?.buffer?.getChannelData(0)[0]).toBeCloseTo(0.02)
+    expect(g.nodes.at(-1)?.buffer?.getChannelData(1)[0]).toBeCloseTo(0.04)
+    expect(g.nodes.at(-1)?.buffer?.getChannelData(2)[0]).toBeCloseTo(0.03)
+    expect(g.nodes.at(-1)?.buffer?.getChannelData(3)[0]).toBeCloseTo(0.01)
+    expect(info).toHaveBeenCalledWith(expect.objectContaining({ channels: 4, channelMap: [1, 3, 2, 0] }))
+    g.input.dispose()
+  })
+
+  it('16 声道显式 AmbiX 保留最高阶平面', async () => {
+    serve(wav(16)); const g = graph()
+    g.input.configure(true, { inputFormat: 'ambix3' })
     g.element.src = await g.input.prepare('https://site/hoa.wav'); await g.element.play()
     expect(g.nodes.at(-1)?.buffer?.getChannelData(15)[0]).toBeCloseTo(0.16)
     g.input.dispose()

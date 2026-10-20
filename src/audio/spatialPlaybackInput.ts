@@ -124,7 +124,10 @@ export class SpatialPlaybackInput {
         if (playing) void this.element.play().catch(() => undefined)
       }, { once: true })
       this.element.load()
-    }).catch(error => { this.element.pause(); this.options.onSourceError?.(error instanceof Error ? error : new Error(String(error))) })
+    }).catch(error => {
+      // 预期内的解码问题已在 prepare() 内回落；这里只报告真正异常，且不暂停正在播放的歌曲。
+      this.options.onSourceError?.(error instanceof Error ? error : new Error(String(error)))
+    })
   }
 
   notify(): void {
@@ -143,11 +146,22 @@ export class SpatialPlaybackInput {
     this.options.onSourceDecoded?.(null)
   }
 
-  /** 非 WAV 源只提示一次（每次切换输入格式），不中断播放、不逐曲弹错。 */
-  private warnUnsupportedSource(): void {
+  /** 同一输入配置只提示一次，避免逐曲弹错；提示后一律继续普通立体声播放。 */
+  private warnOnce(message: string): void {
     if (this.warnedKey === this.key) return
     this.warnedKey = this.key
-    this.options.onSourceWarning?.('该音源不是 WAV，无法验证声道顺序：已按普通立体声播放（空间重排仅支持多声道 WAV）')
+    this.options.onSourceWarning?.(message)
+  }
+
+  /** 非 WAV 源只提示一次（每次切换输入格式），不中断播放、不逐曲弹错。 */
+  private warnUnsupportedSource(): void {
+    this.warnOnce('该音源不是 WAV，无法验证声道顺序：已按普通立体声播放（空间重排仅支持多声道 WAV）')
+  }
+
+  /** WAV 内容与声明格式/标签不符、损坏或缺少声道 mask：回落普通立体声，绝不停播。 */
+  private warnDecodeFallback(error: unknown): void {
+    const reason = error instanceof Error ? error.message : String(error)
+    this.warnOnce(`空间音源无法按声明格式解码，已按普通立体声播放：${reason}`)
   }
 
   /**
@@ -215,6 +229,13 @@ export class SpatialPlaybackInput {
       this.attachElementClock()
       this.notify()
       return clockUrl
+    } catch (error) {
+      // 源被切走/实例已释放：静默回落到普通播放，不提示也不覆盖新源状态。
+      if (this.disposed || revision !== this.revision) return url
+      // WAV 损坏、无 mask、声道数与声明 AmbiX/标签不符等：不抛给播放器（旧实现会中断当前歌曲），
+      // 回落普通立体声并由上层提示一次。
+      this.warnDecodeFallback(error)
+      this.clear(); this.originalUrl = url; return url
     } finally { clearTimeout(timer); if (this.abort === abort) this.abort = null }
   }
 
