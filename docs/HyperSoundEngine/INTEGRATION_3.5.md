@@ -18,7 +18,7 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | WASM SIMD | `src/dsp/wasmSimdKernel.ts` 运行时自研生成约 370 字节 WASM 模块（f32x4/f64x2 复数乘法），无第三方工具链、不 fetch 外部 `.wasm`；`vectorKernel.ts` 为门面（f32 阈值 256 / f64 阈值 512，低于阈值或环境不支持静默回退纯 TS）；f64 与 double 逐位一致，f32 输出改为逐步 `Math.fround`（可能 ≤1 ulp 差异） |
 | 全链路 Float64 | `setPrecision('float32' / 'float64')` / `getPrecision()` 下发到卷积、多段压缩、双耳/时域卷积、传播延迟、房间、氛围提取、上混、Ambisonics 解码；prepared IR/双耳/谱反射负载带精度自描述与校验；默认 float32，仅 HRIR/FIR 系数、源 IR 副本、HRTF 网格等非信号路径保留 Float32 |
 | 空间后端 | 实测 KEMAR HRTF（MIT compact，8–192 kHz 重采样）+ 球谐插值、双耳卷积与 prepared 跨线程接管、镜像反射/谱反射/FDN/房间氛围、AmbiX 一至三阶与 FOA FuMa 解码、5.1/7.1 上混与双声道折叠、传播延迟/Doppler、world/stage/headLocked 路由、SOFA 导入（h5wasm）、串扰消除与音箱校准工具、头追姿态输入 |
-| Worklet | 模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移；主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`：**507,127 bytes（495.2 KiB），sha256 `71dcdb6b…e041d9aa`**，旧的 95,518 bytes 包不可再用；`npm run verify:worklet` 全过；帧边界零分配（128/64 帧稳态无 typed-array/Array 构造）、参数消息就地修改 structured clone、Host/Worklet 同版协议与 `EngineConfigWork` 遥测字段 |
+| Worklet | 模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移；主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`：**507,841 bytes（495.9 KiB），sha256 `4696d987…bb7b1c`**，旧的 95,518 bytes 包不可再用；`npm run verify:worklet` 全过；帧边界零分配（128/64 帧稳态无 typed-array/Array 构造）、参数消息就地修改 structured clone、Host/Worklet 同版协议与 `EngineConfigWork` 遥测字段 |
 | 宿主 | `EngineV3Host` 支持最多 32 声道离散输入（`channelCountMode='max'` / `channelInterpretation='discrete'`）、prepared IR/房间线索控制线程准备 + Transferable 接管、worklet 优先/失败回退 script；遥测仅诊断用途，不作验收指标 |
 | 九页 UI | 主页 / 音效场景 / 均衡器 / 空间音效 / **空间音频** / 动态调音 / 分析 / 调音器 / 关于；保持主程序**亮色薄荷玻璃**风格（主色 `#006A63`），不引入深色/AFG/M3 风格，不恢复 Atmos/360RA/个性化 HRTF 入口；空间 3D 世界编辑（`SpatialWorldScene`，懒加载浅色房间/地面/音箱，相机独立于音频） |
 | 融合层 | `attachV3Engine` 的 `createV3UiBridge(engine, fs, { submit })` 为**唯一提交路径**（`setParams`/`applyScene`/外部替换同路，`applyScene` 不再绕过宿主下发与持久化）；补齐 `subscribeParams` 让系统音量/ReplayGain/总开关等外部更新刷新已打开 UI；IR 去重改为 `WeakMap<Float32Array, token>` 引用身份（不按内容 hash、不进分享串） |
@@ -66,7 +66,7 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 真实 Electron UI | `electron-ui/SUMMARY.md`、`11-page-*.png`、`34-final-*.png`、`audit-final-9pages.json` | 九页导航/亮色薄荷风格/窄窗 390px/导出/引擎往返实测 |
 | 真实音频图 | `audio-graph/README.md`、`verify-spatial-playback.json`、`completion-48000-summary.json`、`completion-96000-summary.json`、`wasm-kernel-capability.json` | 多声道空间接管 10/10、WASM 能力探针、44.1/48/96 kHz 图探针 |
 | 打包 file:// | `packaged/FINAL-REPORT.md`、`stage-b3-results.json`、`asar-fix-verification.json`、`exported-WaveForge-HSE-Modified.wav` | exit 0、file:// PASS、79 请求 0 失败、WAV 294,956B 落盘、@noble/CSP 复验 |
-| Worklet | `worklet-build.log`、`worklet-verify.log` | 重建输出 507,127 bytes / 495.2 KiB（sha256 `71dcdb6b…e041d9aa`；64 段预设前为 507,004B）与 `verify:worklet` 全过记录 |
+| Worklet | `worklet-build.log`、`worklet-verify.log` | 重建输出 507,841 bytes / 495.9 KiB（sha256 `4696d987…bb7b1c`；空间静音闸门前为 507,127B）与 `verify:worklet` 全过记录 |
 | 生产构建 | `build-first.log`、`packaged/build.log` | 接入后首次构建与打包重构建日志 |
 | 早期接入日志 | `merged-tests.log`、`tests-resume.log`、`bridge-tests.log`、`lifecycle-tests.log`、`tests-stability-*.log` | 接入过程测试记录与 5s 抖动定位过程（最终口径以 tests-final-* 为准） |
 | 其他 | `types-ws-8.18.2.tgz`、`fix-test-types.cjs` | 仅类型补丁包与一次性测试类型修复脚本，均非运行时依赖 |
@@ -78,8 +78,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 基线 | 结果 |
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
-| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **115 文件（112 passed + 3 skipped）/ 1165 用例 = 1149 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
-| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **327 文件（323 passed + 4 skipped）/ 3178 用例 = 3161 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **116 文件（113 passed + 3 skipped）/ 1167 用例 = 1151 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **328 文件（324 passed + 4 skipped）/ 3180 用例 = 3163 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 
@@ -114,6 +114,7 @@ npm run build
 - **系统音效总开关（64 段预设轮回归）**：全旁路状态开启默认应用「增强」场景（64 段 EQ）并提示；关闭前真实配置按快照恢复；平直 EQ 与限幅不计入已开启状态。
 - **内置 EQ 预设重设计（音乐频点锚点）**：场景 + 预设库按底鼓 60–80 / 军鼓 200–240 / 贝斯 700–1k / 人声 1–4k / 齿音 5–10k / 空气感 12–16k 锚点生成 64 段曲线；30Hz 以下与 16kHz 以上强制 0dB（不做次声/超声微调与抬升）；允许 ±5dB 听感级调整，Q=8.9 + 级联 Q 补偿；实测 40Hz–5kHz 目标/实测误差 ≤0.5dB，12kHz 约 −0.5dB。
 - **空间音频可验证性与版本标签**：UI 版本标签统一改为 **HSE 1.5**（引擎目录/类名/3.5 代号不变）；空间音频页新增「试听空间效果」按钮，派发 `v3SpatialAudition`，attachV3Engine 把「左→右→双耳」测试音注入 `masterGain` 经 HSE 链真实 HRTF 处理（与直连 destination 的听力测试纯音区分）；开启空间音频时若强度为 0 自动补 0.7，避免「UI 已启用但引擎旁路」。验证：worklet 内左声道单频测试音，空间关闭时右耳 RMS=0，开启 natural 后 0.016、focused 后 0.065（真实跨耳串扰）；实时 A/B 实测输出相关度 0.69→0.93。
+- **空间音频虚拟声源静音（轮 3）**：头锁定/世界/舞台模式下，虚源 muted 或音量 0 时，进入空间后端前对相应节目声道加干声闸门（20ms 平滑），全部虚源静音时 dry+wet 一起消失，仍保留其它声道经 HRTF 的交叉声；受控引擎测试覆盖右源静音/全静音/音量 0；打包应用双虚源静音后输出 RMS=0（未静音 0.28/0.27）。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

@@ -893,6 +893,27 @@ function speakersFromSettings(s: SpatialSettings, inputChannels = 2): VirtualSpe
 }
 
 /**
+ * 头锁定 / 世界 / 舞台模式下，虚拟声源就是节目声道的唯一路由：
+ * 当路由到某声道的虚拟声源全部被静音（muted 或音量 0）时，干声床对应声道也必须静音，
+ * 否则「静音」只消掉湿声，原声仍从耳机输出（用户实测反馈）。
+ */
+function dryGateTargetsFromSpeakers(
+  speakers: readonly VirtualSpeaker[],
+  mode: SpatialSettings['mode'],
+): { l: number; r: number } {
+  if (mode !== 'headLocked' && mode !== 'world' && mode !== 'stage') return { l: 1, r: 1 }
+  let totalL = 0, totalR = 0, activeL = 0, activeR = 0
+  for (const speaker of speakers) {
+    if (speaker.channel === 0) { totalL++; if (speaker.gain > 1e-6) activeL++ }
+    else if (speaker.channel === 1) { totalR++; if (speaker.gain > 1e-6) activeR++ }
+  }
+  return {
+    l: totalL > 0 ? (activeL > 0 ? 1 : 0) : 1,
+    r: totalR > 0 ? (activeR > 0 ? 1 : 0) : 1,
+  }
+}
+
+/**
  * SpatialSettings → 后端渲染配置（port 自 fusion.spatialConfigFromParams）。
  * stage 模式 room/roomAmount 取场景预设（与 instant 全局房间解耦）；wet/dry amount
  * 恒取 instant.amount（与 fusion 一致——空间化强度全局由 instant.amount 控制）。
@@ -1111,6 +1132,11 @@ export class EngineV3 {
   private _spatialWanted = false
   private _spatialMix = 0
   private _spatialWarmup = 0
+  /** 干声床闸门：头锁定/世界/舞台模式下，某声道的虚拟声源全部静音时干声也静音。 */
+  private _spatialDryGateL = 1
+  private _spatialDryGateR = 1
+  private _spatialDryTargetL = 1
+  private _spatialDryTargetR = 1
   /** 空间渲染配置签名：写入预分配 Float64Array 比较，避免每帧 JSON.stringify 分配。
    *  仅当配置实际变化时才 setConfig，避免非空间参数变更触发后端状态清零造成咔哒声。 */
   private _spatialSignature = new Float64Array(0)
@@ -1693,6 +1719,9 @@ export class EngineV3 {
         if (!wasActive) this._spatialBackend.reset()
         this._spatialInputLayout = sp.instant.multichannelLayout
         this._spatialBackend.setConfig(config)
+        const dryGates = dryGateTargetsFromSpeakers(config.speakers, sp.mode)
+        this._spatialDryTargetL = dryGates.l
+        this._spatialDryTargetR = dryGates.r
         this._spatialUsesMultichannel = config.multichannelAuto === true
         let usesSide = false
         let channelCount = 4
@@ -1716,6 +1745,8 @@ export class EngineV3 {
       this._spatialMix = 0
       this._spatialActive = false
       this._spatialSignatureLength = -1
+      this._spatialDryTargetL = 1
+      this._spatialDryTargetR = 1
     }
     const configMs = Math.max(0, engineClock() - configStartedAt)
     this._configWork.spatialConfigMs += configMs
@@ -1980,9 +2011,16 @@ export class EngineV3 {
       const spatialL = views[2]
       const spatialR = views[3]
       const side = views[4]
+      // 静音闸门在「进入空间后端之前」生效：被静音声道的节目信号连同干声一起消失，
+      // 但仍保留其它声道经 HRTF 串到该耳的交叉声（否则就不是空间音频而是砍耳朵）。
+      const gateStep = Math.min(1, n / Math.max(1, Math.round(this._fs * 0.02)))
+      this._spatialDryGateL += (this._spatialDryTargetL - this._spatialDryGateL) * gateStep
+      this._spatialDryGateR += (this._spatialDryTargetR - this._spatialDryGateR) * gateStep
+      const gateL = this._spatialDryGateL
+      const gateR = this._spatialDryGateR
       for (let i = 0; i < n; i++) {
-        spatialL[i] = L[i]
-        spatialR[i] = R[i]
+        spatialL[i] = L[i] * gateL
+        spatialR[i] = R[i] * gateR
       }
       if (this._spatialUsesMultichannel) {
         const multi = this._spatialMultiViews[n]
@@ -2023,8 +2061,10 @@ export class EngineV3 {
         else if (this._spatialWanted) this._spatialMix = Math.min(1, this._spatialMix + fadeStep)
         else this._spatialMix = Math.max(0, this._spatialMix - fadeStep)
         const mix = this._spatialMix
-        L[i] += (oL[i] - L[i]) * mix
-        R[i] += (oR[i] - R[i]) * mix
+        const dryL = L[i] * gateL
+        const dryR = R[i] * gateR
+        L[i] = dryL + (oL[i] - dryL) * mix
+        R[i] = dryR + (oR[i] - dryR) * mix
       }
       if (!this._spatialWanted && this._spatialMix === 0) {
         this._spatialActive = false
