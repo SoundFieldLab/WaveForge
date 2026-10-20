@@ -78,8 +78,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 基线 | 结果 |
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
-| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **115 文件（112 passed + 3 skipped）/ 1162 用例 = 1146 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
-| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **327 文件（323 passed + 4 skipped）/ 3175 用例 = 3158 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **115 文件（112 passed + 3 skipped）/ 1163 用例 = 1147 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **327 文件（323 passed + 4 skipped）/ 3176 用例 = 3159 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 
@@ -111,6 +111,7 @@ npm run build
 - **测试**：`test/spatialPlaybackInput.test.ts` 7→9（时钟静音支路、多声道→立体声 null 通知）；新增 `test/hseSpatialInputLifecycle.test.ts`（3 项：多声道参数注入/回滚、非 WAV info toast、pitch+多声道仅前 L/R 进 SoundTouch）；`test/modeIntegrationWiring.test.ts` 同步导出源断言；`attachV3Engine.persistence.test.ts` 10 个用例声明 `IMPORT_TIMEOUT=20_000`（断言未改）；`test/hse-desktop.test.cjs` 纳入 `npm run test:desktop`。
 - **打包验收边界**：验收期间临时使用过的 resources/node_modules 解析垫片已全部删除，最终 release/win-unpacked 无临时文件。
 - **代码评审修复（第二轮）**：engines/v3.ts 用户可见描述改 “HSE 3.5”（含 V3MixingStudio 兜底）；index.html CSP 注释写明两处最窄例外理由；spatialPlaybackInput 对 WAV 损坏/无 mask/声道数与声明格式不符统一回落普通立体声 + 单次提示、configure 失败不再暂停播放；新增 sourceChannelLabels/targetChannelLabels（类型 + normalizeSpatial 清洗 + syncDiscreteInput 下发 + 空间页输入）；DEBUG_PAGES.md 登记 HSE 探针，AGENTS.md 补头追权限边界与新目录说明；新增/更新对应测试（spatialPlaybackInput 9→11 项、hseSpatialInputLifecycle 3→4 项、spatial-completion 标签清洗断言）。
+- **系统音效总开关（64 段预设轮回归）**：全旁路状态开启默认应用「增强」场景（64 段 EQ）并提示；关闭前真实配置按快照恢复；平直 EQ 与限幅不计入已开启状态。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 
