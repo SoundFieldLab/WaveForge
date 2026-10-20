@@ -6,8 +6,8 @@
  *    军鼓 200–240Hz 厚度 + 5kHz crack，贝斯 60–80Hz 下潜 + 700–1000Hz attack，
  *    人声 120Hz 厚度 + 1–4kHz presence + 5kHz / 7–10kHz sibilance，
  *    镲片 7.5–10kHz，空气感 12–16kHz（参考 Bobby Owsinski / SoundGadget EQ 频点表）；
- *  - 64 个频点仍覆盖 20Hz–20kHz，但**人耳可听/音乐内容频段以外（<30Hz、>16kHz）的微调强制为 0**：
- *    次声与 16kHz 以上既听不到，抬升只会浪费动态余量；
+ *  - 64 个频点本身落在 20Hz–16kHz（可听 / 音乐内容频段），不再分配 16kHz 以上的超声频段；
+ *    这样每一段都有人耳可听的内容，不会出现「拉满也没声音」的空段；
  *  - 锚点在对数频率轴上线性插值，增益保留 0.1dB；Q=8.9（约 1/6 倍频程临界 Q），
  *    由 EqChain 的级联 Q 补偿把实际响应压回目标曲线。
  */
@@ -15,10 +15,10 @@
 import { PRO_EQ_64_BANDS, type EqBand } from '../types'
 
 /** 64 段（约 1/6 倍频程）图形 EQ 的默认 Q；与 EqChain 级联 Q 补偿配合。 */
-export const EQ_64_Q = 8.9
+export const EQ_64_Q = 9.4
 
-/** 预设只在这段「音乐/人耳关注区」内做微调；两端保持平直，避免抬升次声与超声。 */
-export const EQ_TRIM_LOW_HZ = 30
+/** 可听 / 音乐内容频段；64 段频点全部落在此区间内。 */
+export const EQ_TRIM_LOW_HZ = 20
 export const EQ_TRIM_HIGH_HZ = 16000
 
 export type EqCurveAnchor = readonly [frequency: number, gainDb: number]

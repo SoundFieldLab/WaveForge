@@ -45,13 +45,14 @@ function expectValidParams(p: V3EngineParams, id: string): void {
     expect(p.eq.proBands[i].frequency).toBeGreaterThan(p.eq.proBands[i - 1].frequency)
   }
   expect(p.eq.proBands[0].frequency).toBeCloseTo(20, 1)
-  expect(p.eq.proBands[63].frequency).toBeCloseTo(20000, 0)
+  expect(p.eq.proBands[63].frequency).toBeCloseTo(16000, 0)
   for (const b of p.eq.proBands) {
     expect(b.frequency).toBeGreaterThan(10)
     expect(b.frequency).toBeLessThan(24000)
     expect(isFiniteNumber(b.gain)).toBe(true)
-    // 30Hz 以下 / 16kHz 以上属于次声/超声区，内置预设不做微调（保持 0dB）。
-    if (b.frequency < 30 || b.frequency > 16000) expect(b.gain).toBe(0)
+    // 64 段全部落在 20Hz–16kHz 可听频段，不再包含 16kHz 以上超声段。
+    expect(b.frequency).toBeGreaterThanOrEqual(20)
+    expect(b.frequency).toBeLessThanOrEqual(16000)
     expect(b.q).toBeGreaterThan(0.05)
     expect(b.q).toBeLessThan(20)
   }

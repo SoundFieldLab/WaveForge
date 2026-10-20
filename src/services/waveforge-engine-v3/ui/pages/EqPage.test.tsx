@@ -31,7 +31,7 @@ describe('均衡器预设库（64 段）', () => {
     expect(eq.bandCount).toBe(64)
     expect(eq.proBands).toHaveLength(64)
     expect(eq.proBands[0].frequency).toBeCloseTo(20, 1)
-    expect(eq.proBands[0].q).toBeCloseTo(8.9, 5)
+    expect(eq.proBands[0].q).toBeCloseTo(9.4, 5)
     expect(eq.proBands.some((band: EqBand) => band.gain !== 0)).toBe(true)
   })
 

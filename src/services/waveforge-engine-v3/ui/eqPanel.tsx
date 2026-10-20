@@ -163,7 +163,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
     const target = count === 20 ? PRO_EQ_20_BANDS : count === 64 ? PRO_EQ_64_BANDS : PRO_EQ_DEFAULT_BANDS
     const next = target.map((frequency) => {
       const existing = eq.proBands.find((band) => Math.abs(band.frequency - frequency) < 0.5)
-      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? (count === 64 ? 8.9 : 1.1), type: existing?.type }
+      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? (count === 64 ? 9.4 : 1.1), type: existing?.type }
     })
     const selectedFrequency = eq.proBands[activeBandIndex]?.frequency ?? next[0].frequency
     setSelectedBand(next.reduce((nearest, band, index) =>
@@ -270,7 +270,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
                 <button type="button" disabled={eq.locked || eq.proBands.length <= 1} onClick={removeBand}
                   className={`hse-glass-choice rounded-lg px-3 py-2 text-xs disabled:opacity-40 ${theme.textSecondary}`}>删除选中频段</button>
                 </div>
-                <div className={`${theme.textTertiary} mt-1 text-xs`}>{eq.proBands.length} / {MAX_PRO_EQ_BANDS} 段 · 内置预设微调集中在 30Hz–16kHz（次声/超声区保持平直）</div>
+                <div className={`${theme.textTertiary} mt-1 text-xs`}>{eq.proBands.length} / {MAX_PRO_EQ_BANDS} 段 · 全部频点落在 20Hz–16kHz 可听/乐器与人声频段</div>
               </div>
             )}
             <div className="flex flex-wrap items-center gap-3 pb-1">

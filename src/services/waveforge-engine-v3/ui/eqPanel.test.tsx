@@ -96,15 +96,15 @@ describe('HSE 均衡器编辑', () => {
     expect(bridge.getParams().eq.qCompensation).toBe(true)
   })
 
-  it('64 段布局一键生成 64 个对数频点，新频段默认 Q 8.9', () => {
+  it('64 段布局一键生成 64 个对数频点（20Hz–16kHz），新频段默认 Q 9.4', () => {
     const { bridge } = makePanel()
     fireEvent.click(screen.getByRole('button', { name: '64 段' }))
     const eq = bridge.getParams().eq
     expect(eq.bandCount).toBe(64)
     expect(eq.proBands).toHaveLength(64)
     expect(eq.proBands[0].frequency).toBeCloseTo(20, 1)
-    expect(eq.proBands[63].frequency).toBeCloseTo(20000, 0)
-    expect(eq.proBands[32].q).toBeCloseTo(8.9, 5)
+    expect(eq.proBands[63].frequency).toBeCloseTo(16000, 0)
+    expect(eq.proBands[32].q).toBeCloseTo(9.4, 5)
     expect(screen.getByText(/64 \/ 64 段/)).toBeTruthy()
   })
 

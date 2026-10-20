@@ -318,7 +318,8 @@ describe('HSE 融合层参数持久化', () => {
     // 64 段预设把微调放在可听/音乐频段（20Hz 端点按设计保持 0dB）。
     expect(submitted.eq.bandCount).toBe(64)
     expect(submitted.eq.proBands.some((band) => band.gain !== 0)).toBe(true)
-    expect(submitted.eq.proBands[0].gain).toBe(0)
+    expect(submitted.eq.proBands[0].frequency).toBeCloseTo(20, 1)
+    expect(submitted.eq.proBands[63].frequency).toBeCloseTo(16000, 0)
 
     expect(bridge.getSaveState()).toBe('pending')
     vi.advanceTimersByTime(400)

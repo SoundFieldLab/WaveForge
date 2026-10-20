@@ -206,7 +206,8 @@ describe('V3 调音室 UI 冒烟', () => {
     // 64 段预设：20Hz 端点保持 0dB，微调落在可听/音乐频段。
     expect(bridge.getParams().eq.bandCount).toBe(64)
     expect(bridge.getParams().eq.proBands.some((band) => band.gain !== 0)).toBe(true)
-    expect(bridge.getParams().eq.proBands[0].gain).toBe(0)
+    expect(bridge.getParams().eq.proBands[0].frequency).toBeCloseTo(20, 1)
+    expect(bridge.getParams().eq.proBands[63].frequency).toBeCloseTo(16000, 0)
   })
 
   it('场景应用保留音量控制：内置场景与我的场景快照均不得覆盖 loudnessNormalization', () => {
