@@ -212,4 +212,32 @@ describe('空间页面完成度：头追入口和生命周期', () => {
     act(() => device.options.onPose({ yaw: 60, pitch: 0, roll: 0 }, 2000))
     expect(headPose).toHaveBeenCalledTimes(calls)
   })
+
+  it('「试听空间效果」按钮派发 v3SpatialAudition，试听走 HSE 主链路', () => {
+    setup()
+    const handler = vi.fn()
+    window.addEventListener('v3SpatialAudition', handler)
+    try {
+      fireEvent.click(screen.getByRole('button', { name: '试听空间效果' }))
+      expect(handler).toHaveBeenCalledTimes(1)
+    } finally {
+      window.removeEventListener('v3SpatialAudition', handler)
+    }
+  })
+
+  it('强度为 0 时开启空间音频自动补默认强度，避免“已启用但无效果”', () => {
+    const engine = new EngineV3(48000)
+    const bridge = createV3UiBridge(engine, 48000)
+    const p = bridge.getParams()
+    bridge.setParams({ ...p, spatial: { ...p.spatial!, mode: 'off', instant: { ...p.spatial!.instant, amount: 0 } } })
+    function Harness() {
+      return <SpatialAudioPage bridge={bridge} controller={useV3Params(bridge)} theme={useHSETheme()} initialView="top" />
+    }
+    render(<Harness />)
+    const master = screen.getByRole('switch', { name: '空间音频' })
+    expect(master.getAttribute('aria-checked')).toBe('false')
+    fireEvent.click(master)
+    expect(bridge.getParams().spatial!.mode).toBe('instant')
+    expect(bridge.getParams().spatial!.instant.amount).toBeCloseTo(0.7)
+  })
 })

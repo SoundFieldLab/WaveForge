@@ -78,8 +78,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 基线 | 结果 |
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
-| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **115 文件（112 passed + 3 skipped）/ 1163 用例 = 1147 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
-| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **327 文件（323 passed + 4 skipped）/ 3176 用例 = 3159 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **115 文件（112 passed + 3 skipped）/ 1165 用例 = 1149 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **327 文件（323 passed + 4 skipped）/ 3178 用例 = 3161 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=8`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 
@@ -113,6 +113,7 @@ npm run build
 - **代码评审修复（第二轮）**：engines/v3.ts 用户可见描述改 “HSE 3.5”（含 V3MixingStudio 兜底）；index.html CSP 注释写明两处最窄例外理由；spatialPlaybackInput 对 WAV 损坏/无 mask/声道数与声明格式不符统一回落普通立体声 + 单次提示、configure 失败不再暂停播放；新增 sourceChannelLabels/targetChannelLabels（类型 + normalizeSpatial 清洗 + syncDiscreteInput 下发 + 空间页输入）；DEBUG_PAGES.md 登记 HSE 探针，AGENTS.md 补头追权限边界与新目录说明；新增/更新对应测试（spatialPlaybackInput 9→11 项、hseSpatialInputLifecycle 3→4 项、spatial-completion 标签清洗断言）。
 - **系统音效总开关（64 段预设轮回归）**：全旁路状态开启默认应用「增强」场景（64 段 EQ）并提示；关闭前真实配置按快照恢复；平直 EQ 与限幅不计入已开启状态。
 - **内置 EQ 预设重设计（音乐频点锚点）**：场景 + 预设库按底鼓 60–80 / 军鼓 200–240 / 贝斯 700–1k / 人声 1–4k / 齿音 5–10k / 空气感 12–16k 锚点生成 64 段曲线；30Hz 以下与 16kHz 以上强制 0dB（不做次声/超声微调与抬升）；允许 ±5dB 听感级调整，Q=8.9 + 级联 Q 补偿；实测 40Hz–5kHz 目标/实测误差 ≤0.5dB，12kHz 约 −0.5dB。
+- **空间音频可验证性与版本标签**：UI 版本标签统一改为 **HSE 1.5**（引擎目录/类名/3.5 代号不变）；空间音频页新增「试听空间效果」按钮，派发 `v3SpatialAudition`，attachV3Engine 把「左→右→双耳」测试音注入 `masterGain` 经 HSE 链真实 HRTF 处理（与直连 destination 的听力测试纯音区分）；开启空间音频时若强度为 0 自动补 0.7，避免「UI 已启用但引擎旁路」。验证：worklet 内左声道单频测试音，空间关闭时右耳 RMS=0，开启 natural 后 0.016、focused 后 0.065（真实跨耳串扰）；实时 A/B 实测输出相关度 0.69→0.93。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

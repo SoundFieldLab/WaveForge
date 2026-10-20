@@ -189,13 +189,13 @@ export default function V3MixingStudio({
             <div className="flex min-w-0 items-center gap-2.5">
               <AudioWaveform aria-hidden="true" className="h-5 w-5 shrink-0" style={{ color: theme.accentColor }} />
               <span className="hse-studio-brand truncate text-sm font-semibold">HyperSoundEngine</span>
-              <span className="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold" style={{ color: theme.accentColor, background: theme.accentDim }}>HSE 3.5</span>
+              <span className="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold" style={{ color: theme.accentColor, background: theme.accentDim }}>HSE 1.5</span>
             </div>
             <div className="hse-studio-header-actions flex min-w-0 items-center gap-3">
               {transportControls}
               {onSwitchEngine && (
                 <div role="group" aria-label="切换音效引擎" className="hse-glass-group flex shrink-0 items-center gap-1 rounded-xl p-1">
-                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: 'HSE 3.5' }]).map((eng) => {
+                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: 'HSE 1.5' }]).map((eng) => {
                     const active = engineVersion === eng.id
                     return <button key={eng.id} type="button" onClick={() => onSwitchEngine(eng.id)} title={eng.description}
                       aria-pressed={active}

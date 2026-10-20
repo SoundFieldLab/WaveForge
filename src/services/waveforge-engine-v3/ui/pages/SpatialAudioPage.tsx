@@ -205,15 +205,31 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     }
   }
   const reset = () => { patch(createDefaultSpatialSettings()); setSelected(null); soloBefore.current = null }
+  /**
+   * 开启空间音频：强度为 0 时引擎会按旁路处理（UI 却会显示已启用），
+   * 因此同时补默认强度，避免出现「开关打开了但没有效果」。
+   */
+  const enableSpatial = (enabled: boolean) => {
+    if (!enabled) { patch({ mode: 'off' }); return }
+    const next: DeepPartial<SpatialSettings> = { mode: lastMode.current }
+    if (!((spatial.instant.amount ?? 0) > 0)) next.instant = { ...spatial.instant, amount: 0.7 }
+    patch(next)
+  }
+  const audition = () => window.dispatchEvent(new CustomEvent('v3SpatialAudition'))
   const roomAmount = mode === 'stage' ? spatial.stage.reverbAmount : spatial.instant.roomAmount
 
   return <div className="hse-spatial-workbench @container">
     <header className="hse-spatial-page-header">
       <div><div className="hse-spatial-eyebrow">HSE / 空间工作台</div>
         <h1 className={theme.textPrimary}>空间音频</h1>
-        <p className={theme.textSecondary}>在耳机中试听方向、距离与房间感。</p></div>
+        <p className={theme.textSecondary}>在耳机中试听方向、距离与房间感。</p>
+        <p className="mt-1 text-xs" style={{ color: '#536b66' }}>建议佩戴耳机；点「试听空间效果」可直接 A/B 对比原声与 HRTF 空间处理。「自然外化」较克制，想要更明显的方向感可切到「清晰定位」。</p></div>
       <div className="hse-spatial-master"><span>{active ? '空间音频已启用' : '正在对比原声'}</span>
-        <Toggle label="空间音频" checked={active} onChange={enabled => patch({ mode: enabled ? lastMode.current : 'off' })} theme={theme} /></div>
+        <button type="button" onClick={audition} aria-label="试听空间效果"
+          className="hse-glass-button rounded-lg px-3 py-2 text-xs font-medium" style={{ color: theme.accentColor }}>
+          试听空间效果
+        </button>
+        <Toggle label="空间音频" checked={active} onChange={enableSpatial} theme={theme} /></div>
     </header>
     <div className="hse-spatial-mode-grid" role="group" aria-label="空间模式">
       {MODES.map(({ value, label, hint, icon: Icon }) => <button key={value} type="button" aria-pressed={mode === value}
@@ -227,7 +243,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       <span className="hse-mono">{bridge.getSampleRate() / 1000} kHz · {Number.isFinite(latency) ? latency.toFixed(1) : '—'} ms</span>
       <div ref={compareRef} className="hse-spatial-compare" role="group" aria-label="原声与空间对比">
         <button type="button" aria-pressed={!active} onClick={() => patch({ mode: 'off' })}>A · 原声</button>
-        <button type="button" aria-pressed={active} onClick={() => patch({ mode: lastMode.current })}>B · 空间</button>
+        <button type="button" aria-pressed={active} onClick={() => enableSpatial(true)}>B · 空间</button>
       </div>
     </div>
     {!formatValid && <p role="alert" className="hse-spatial-alert">音源格式与实际声道数不匹配，当前按普通声道下混。请检查下方的音源设置。</p>}

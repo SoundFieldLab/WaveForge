@@ -61,7 +61,7 @@ describe('V3 调音室 UI 冒烟', () => {
   it('主面板渲染：标题 + 9 导航项 + 默认主页', () => {
     makeUi()
     expect(screen.getByText('HyperSoundEngine')).toBeTruthy()
-    expect(screen.getByText('HSE 3.5')).toBeTruthy()
+    expect(screen.getByText('HSE 1.5')).toBeTruthy()
     for (const label of ['主页', '音效场景', '均衡器', '空间音效', '空间音频', '动态调音', '分析', '调音器', '关于']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }

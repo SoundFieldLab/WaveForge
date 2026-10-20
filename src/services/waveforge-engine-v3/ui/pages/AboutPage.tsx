@@ -28,7 +28,7 @@ export default function AboutPage({ theme }: AboutPageProps) {
           <Terminal className="h-7 w-7" aria-hidden="true" />
         </div>
         <div>
-          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>HSE 3.5</h1>
+          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>HSE 1.5</h1>
           <p className={`${theme.textSecondary} mt-1 text-sm`}>HyperSoundEngine · WaveForge 特供版</p>
         </div>
       </div>

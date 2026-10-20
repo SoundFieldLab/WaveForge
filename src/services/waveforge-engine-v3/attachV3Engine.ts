@@ -98,6 +98,8 @@ let replayGainScanSeq = 0
 let lastHandle: V3GraphHandle | null = null
 let hearingTone: { osc: OscillatorNode; gain: GainNode } | null = null
 let onHearingPlay: ((e: Event) => void) | null = null
+let spatialAuditionNodes: AudioNode[] | null = null
+let onSpatialAudition: (() => void) | null = null
 let persistTimer: number | null = null
 let masterSnapshot: V3EngineParams | null = null
 let saveState: 'saved' | 'pending' | 'error' = 'saved'
@@ -277,6 +279,58 @@ function stopHearingTone(): void {
     /* noop */
   }
   hearingTone = null
+}
+
+/**
+ * 空间音频试听：把「左 → 右 → 双耳」的短测试音送进 HSE 主链路（masterGain 之后的 v3 节点），
+ * 因此「空间音频」开启/关闭时同一段试听音会经过真实 HRTF，可与原声直接 A/B。
+ * 与听力测试纯音不同：后者直连 destination、不经过 HSE 处理链，不能用来验证空间化。
+ */
+function stopSpatialAudition(): void {
+  if (!spatialAuditionNodes) return
+  for (const node of spatialAuditionNodes) {
+    try { (node as OscillatorNode).stop?.() } catch { /* noop */ }
+    try { node.disconnect() } catch { /* noop */ }
+  }
+  spatialAuditionNodes = null
+}
+
+function startSpatialAudition(ctx: AudioContext, destination: AudioNode): void {
+  stopSpatialAudition()
+  try {
+    const now = ctx.currentTime + 0.05
+    const merger = ctx.createChannelMerger(2)
+    const master = ctx.createGain()
+    master.gain.value = 0.16
+    merger.connect(master)
+    master.connect(destination)
+    const osc = ctx.createOscillator()
+    osc.type = 'sine'
+    osc.frequency.value = 523.25
+    const gainL = ctx.createGain()
+    const gainR = ctx.createGain()
+    gainL.gain.value = 0
+    gainR.gain.value = 0
+    osc.connect(gainL); gainL.connect(merger, 0, 0)
+    osc.connect(gainR); gainR.connect(merger, 0, 1)
+    const beep = (gain: GainNode, from: number, to: number) => {
+      gain.gain.setValueAtTime(0, now + from)
+      gain.gain.linearRampToValueAtTime(1, now + from + 0.02)
+      gain.gain.setValueAtTime(1, now + to - 0.02)
+      gain.gain.linearRampToValueAtTime(0, now + to)
+    }
+    // 左 → 右 → 双耳：先给方向对比，再给稳定的居中参考。
+    beep(gainL, 0.05, 0.45)
+    beep(gainR, 0.55, 0.95)
+    beep(gainL, 1.05, 1.75)
+    beep(gainR, 1.05, 1.75)
+    osc.start(now)
+    osc.stop(now + 1.85)
+    spatialAuditionNodes = [osc, gainL, gainR, merger, master]
+    osc.onended = () => stopSpatialAudition()
+  } catch {
+    // 上下文不可用时静默；实时空间化本身不受影响。
+  }
 }
 
 // ==================== 变速变调（SoundTouch 前置链，与 v1/v2 同款） ====================
@@ -539,6 +593,13 @@ export async function attachV3Engine(handle: V3GraphHandle): Promise<void> {
     window.addEventListener('v3HearingPlay', onHearingPlay)
     window.addEventListener('v3HearingStop', stopHearingTone)
   }
+  // 空间音频试听：测试音进 HSE 主链路，确保空间开/关的差异能被直接听到。
+  if (!onSpatialAudition) {
+    onSpatialAudition = () => {
+      if (lastHandle) startSpatialAudition(lastHandle.audioContext, lastHandle.masterGain)
+    }
+    window.addEventListener('v3SpatialAudition', onSpatialAudition)
+  }
 }
 
 /**
@@ -666,10 +727,15 @@ function ensureBridge(fs: number): V3UiBridge {
 export function detachV3Engine(): void {
   fusionAttachSeq++
   stopHearingTone()
+  stopSpatialAudition()
   window.removeEventListener('v3HearingStop', stopHearingTone)
   if (onHearingPlay) {
     window.removeEventListener('v3HearingPlay', onHearingPlay)
     onHearingPlay = null
+  }
+  if (onSpatialAudition) {
+    window.removeEventListener('v3SpatialAudition', onSpatialAudition)
+    onSpatialAudition = null
   }
   // 变速变调前置链先摘除（masterGain 的断开重连交给 host.dispose）
   pitchSeq++

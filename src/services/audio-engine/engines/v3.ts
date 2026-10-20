@@ -12,6 +12,6 @@ import { V3Adapter } from '../V3Adapter'
 export const v3Manifest: EngineManifest = {
   id: 'v3',
   displayName: 'HSE',
-  description: 'HSE 3.5 · 动态均衡、双耳空间渲染、双精度处理与离线导出',
+  description: 'HSE 1.5 · 动态均衡、双耳空间渲染、双精度处理与离线导出',
   createAdapter: () => new V3Adapter(),
 }
