@@ -250,7 +250,7 @@ export default function V3MixingStudio({
           </ContentViewport>
 
           <footer className="hse-studio-footer col-span-2 flex min-w-0 items-center justify-between gap-4 border-t px-4" style={{ borderColor: theme.panelBorder, background: '#F8FBF9' }}>
-            <OutputStatus bridge={bridge} gainDb={controller.params.loudnessNormalization.externalGainDb ?? 0} />
+            <OutputStatus bridge={bridge} />
             <div className="flex shrink-0 items-center gap-4">
               <button type="button" onClick={handleResetAll} title="恢复 HSE 默认参数" className="hse-glass-button flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline-2 focus-visible:outline-offset-2" style={{ color: '#536b66', outlineColor: theme.accentColor }}>
                 <RotateCcw className="h-3.5 w-3.5" /> 重置

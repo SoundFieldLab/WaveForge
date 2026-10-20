@@ -40,7 +40,10 @@
 }
 
 .hse-output-status { color: var(--md-sys-color-on-surface-variant); }
-.hse-output-status[data-clip=true] { color: var(--md-sys-color-error); }
+.hse-status-dot { flex: none; width: 8px; height: 8px; border-radius: 9999px; background: #2bb673;
+  box-shadow: 0 0 0 3px rgba(43, 182, 115, 0.14); transition: background 0.2s ease, box-shadow 0.2s ease; }
+.hse-status-dot[data-state=warn] { background: #e8a13a; box-shadow: 0 0 0 3px rgba(232, 161, 58, 0.18); }
+.hse-status-separator { color: #9fb4ae; }
 .hse-floating-layer { max-height: min(72dvh, calc(100dvh - 230px)); }
 .hse-studio-footer { position: relative; z-index: 100; background: #fbfdfc; }
 @media(max-width:1000px) { .hse-output-status { gap: 8px; font-size: 11px; } }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { EngineV3 } from '../src/engine/EngineV3'
 import { createDefaultParams } from '../src/types'
-import type { V3EngineParams } from '../src/types'
 
 const FS = 48000
 const N = 128
@@ -50,7 +49,7 @@ function renderRms(engine: EngineV3, seconds = 1) {
   return { l: Math.sqrt(sumL / count), r: Math.sqrt(sumR / count) }
 }
 
-function applySpeakers(engine: EngineV3, params: V3EngineParams, muteL: boolean, muteR: boolean, volL = 1, volR = 1) {
+function applySpeakers(engine: EngineV3, params: ReturnType<typeof createDefaultParams>, muteL: boolean, muteR: boolean, volL = 1, volR = 1) {
   const speakers = params.spatial.headLocked.speakers.map((speaker, index) => ({
     ...speaker,
     muted: index === 0 ? muteL : muteR,

@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
-import { AlertTriangle, Check } from 'lucide-react'
 import type { V3UiBridge } from '../bridge'
 import { useStateFeedback } from '../feedback'
 
-/** 固定状态条只刷新自身。浮窗出现时，仍能读取峰值与输出增益。 */
-export function OutputStatus({ bridge, gainDb }: { bridge: V3UiBridge; gainDb: number }) {
+/** 固定状态条：LED 指示灯 + 引擎就绪状态 + 当前听感模式；只刷新自身。 */
+export function OutputStatus({ bridge }: { bridge: V3UiBridge }) {
   const [stats, setStats] = useState(() => bridge.getStats())
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -13,9 +12,18 @@ export function OutputStatus({ bridge, gainDb }: { bridge: V3UiBridge; gainDb: n
   }, [bridge])
   const clip = stats.truePeakDb >= 0 || stats.peakDb >= 0
   useStateFeedback(clip, ref)
-  return <div ref={ref} className="hse-output-status flex items-center gap-3 text-xs" data-clip={clip} aria-label="输出监测">
-    <span className="hse-mono whitespace-nowrap">手动增益 {Number.isFinite(gainDb) ? `${gainDb > 0 ? '+' : ''}${gainDb.toFixed(1)}` : '—'} dB</span>
-    <span className="hse-mono whitespace-nowrap">TP {Number.isFinite(stats.truePeakDb) ? stats.truePeakDb.toFixed(1) : '—'} dBFS</span>
-    <span className="flex items-center gap-1 whitespace-nowrap">{clip ? <AlertTriangle size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}{clip ? '峰值越界' : Number.isFinite(stats.truePeakDb) ? '峰值正常' : '等待信号'}</span>
+  const params = bridge.getParams()
+  const scene = params.customized ? undefined : bridge.getScenes().find((entry) => entry.id === params.sceneId)
+  const modeText = scene ? scene.name : '自定义调音'
+  const spatial = params.spatial && params.spatial.mode !== 'off' ? ' · 空间音频' : ''
+  const rate = bridge.getSampleRate()
+  const sampleRate = Number.isFinite(rate) && rate > 0 ? `${(rate / 1000).toFixed(rate % 1000 === 0 ? 0 : 1)} kHz` : '—'
+  return <div ref={ref} className="hse-output-status flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs" data-clip={clip}
+    aria-label="引擎状态" aria-live="polite">
+    <span className="hse-status-dot" data-state={clip ? 'warn' : 'ok'} aria-hidden="true"
+      title={clip ? '峰值接近满刻' : '输出正常'} />
+    <span className="whitespace-nowrap">HyperSoundEngine 已就绪 · DSP 双声道 · {sampleRate}</span>
+    <span className="hse-status-separator" aria-hidden="true">/</span>
+    <span className="whitespace-nowrap">目前模式：{modeText}{spatial}</span>
   </div>
 }
