@@ -63,14 +63,39 @@ function bypassEffects(p: V3EngineParams): V3EngineParams {
   return next
 }
 
+/**
+ * 任一音效/空间模块已启用（系统音效总开关的真实状态）。
+ * 平直 EQ（enabled 但所有增益为 0）不算「已开启音效」——默认参数就带平直 EQ，
+ * 若把它算作开启，总开关一启动就是「已开启」态，无法再触发默认「增强」预设。
+ * 限幅器是安全保护，同样不计入。
+ */
+export function hasActiveEffects(p: V3EngineParams): boolean {
+  const eqActive = p.eq.enabled && (p.eq.mode === 'simple'
+    ? p.eq.simpleBands.some((gain) => gain !== 0)
+    : p.eq.proBands.some((band) => band.gain !== 0))
+  return eqActive
+    || (p.dynamicEq?.enabled ?? false)
+    || (p.crossfeed?.enabled ?? false)
+    || p.deesser.enabled || p.compressor.enabled || p.nightMode.enabled || p.bassEnhancer.enabled
+    || p.reverb.enabled || p.surround3d.enabled || p.loudnessCompensation.enabled
+    || p.ieq.enabled || p.pitch.enabled
+    || (p.spatial !== undefined && p.spatial.mode !== 'off')
+}
+
+/** 总开关应显示「已开启」：有场景身份、用户自定义，或确有生效的音效。 */
+function isMasterActive(p: V3EngineParams): boolean {
+  return p.sceneId !== null || p.customized || hasActiveEffects(p)
+}
+
 export function useV3Params(bridge: V3UiBridge): V3ParamsController {
   const [params, setParams] = useState<V3EngineParams>(() => bridge.getParams())
-  const [masterEnabled, setMasterState] = useState(() => bridge.getMasterSnapshot() === null)
+  const [masterEnabled, setMasterState] = useState(() =>
+    bridge.getMasterSnapshot() === null && isMasterActive(bridge.getParams()))
 
   useEffect(() => {
     const refresh = () => {
       setParams(bridge.getParams())
-      setMasterState(bridge.getMasterSnapshot() === null)
+      setMasterState(bridge.getMasterSnapshot() === null && isMasterActive(bridge.getParams()))
     }
     const unsubscribe = bridge.subscribeParams?.(refresh)
     // 补读订阅建立前的最新快照；外部文件加载和另一界面编辑都只刷新展示状态。
@@ -134,9 +159,18 @@ export function useV3Params(bridge: V3UiBridge): V3ParamsController {
 
   const setMasterEnabled = useCallback((enabled: boolean) => {
     const snapshot = bridge.getMasterSnapshot()
-    if (enabled && snapshot) {
+    if (enabled && snapshot && isMasterActive(snapshot)) {
+      // 关闭前有真实音效配置：恢复原设置（音量通道已随快照保留）。
       bridge.setMasterSnapshot(null)
       commit(snapshot)
+      setMasterState(true)
+    } else if (enabled) {
+      // 首次开启 / 关闭前是纯旁路：默认应用「增强」场景（含 64 段 EQ 预设）。
+      bridge.setMasterSnapshot(null)
+      bridge.applyScene('enhanced')
+      commit(bridge.getParams())
+      setMasterState(true)
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已开启增强模式', type: 'info' } }))
     } else if (!enabled && !snapshot) {
       const current = bridge.getParams()
       bridge.setMasterSnapshot(current)
