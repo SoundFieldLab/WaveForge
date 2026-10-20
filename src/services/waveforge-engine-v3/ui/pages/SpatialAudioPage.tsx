@@ -27,6 +27,13 @@ const WorldPreview = lazy(() => import('../components/SpatialWorldView').then(mo
 const HOME_LISTENER = { position: { x: 0, y: 1.6, z: 0 }, yaw: 0, pitch: 0, roll: 0 }
 const ROUTES = [{ value: 'l', label: '左声道 L' }, { value: 'r', label: '右声道 R' }, { value: 'both', label: '中央 M' }, { value: 'side', label: '差分 S' }] as const
 const ROUTE_LABELS = { l: '左声道', r: '右声道', both: '中央信号', side: '侧向差分' } as const
+/** 音源格式的中文名，与「音源与声道格式」下拉的选项保持一致（用于说明布局是否被音源格式接管）。 */
+const INPUT_FORMAT_LABELS: Record<NonNullable<SpatialSettings['inputFormat']>, string> = {
+  channels: '普通音频', ambix: '一阶 AmbiX', ambix1: '一阶 AmbiX', ambix2: '二阶 AmbiX',
+  ambix3: '三阶 AmbiX', fuma: '一阶 FuMa', stereo51: '立体声 → 虚拟 5.1', stereo71: '立体声 → 虚拟 7.1',
+}
+/** 虚拟 5.1 布局的扬声器数量（5 只：C / FL / FR / SL / SR；LFE 无方向性不计入）。 */
+const VIRTUAL_51_SPEAKER_COUNT = createLayoutSpeakers('51').length
 const MODES = [
   { value: 'instant', label: '快速空间化', hint: '让立体声在身前展开', icon: Headphones },
   { value: 'headLocked', label: '扬声器布局', hint: '在耳机方向上固定音箱布局', icon: Speaker },
@@ -206,6 +213,26 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
   }
   const reset = () => { patch(createDefaultSpatialSettings()); setSelected(null); soloBefore.current = null }
   /**
+   * 一键虚拟 5.1 环绕：普通立体声节目先由引擎上混成 5.1 声道（中心 / 左右主 / 侧环绕），
+   * 再逐只虚拟扬声器经 HRTF 在耳机中双耳渲染。
+   * 只改模式、布局、声音风格与空间强度；inputFormat 保持用户原值——普通立体声音源
+   * 不需要先选「立体声 → 虚拟 5.1」也能上混。
+   */
+  const applyVirtual51 = () => {
+    soloBefore.current = null
+    lastMode.current = 'headLocked'
+    patch({
+      mode: 'headLocked',
+      renderStyle: 'focused',
+      instant: { amount: 1 },
+      headLocked: { layout: '51', speakers: createLayoutSpeakers('51'), routes: [] },
+    })
+    setSelected(null)
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: '已切到虚拟 5.1 环绕（清晰定位 · 100% 强度），点「试听空间效果」即可对比', type: 'info' },
+    }))
+  }
+  /**
    * 开启空间音频：强度为 0 时引擎会按旁路处理（UI 却会显示已启用），
    * 因此同时补默认强度，避免出现「开关打开了但没有效果」。
    */
@@ -217,6 +244,15 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
   }
   const audition = () => window.dispatchEvent(new CustomEvent('v3SpatialAudition'))
   const roomAmount = mode === 'stage' ? spatial.stage.reverbAmount : spatial.instant.roomAmount
+  // 「当前听到的是哪套虚拟扬声器」摘要：布局名、扬声器数量、声音风格与强度实时可见。
+  const layoutLabel = HEAD_LOCKED_LAYOUTS.find(option => option.value === spatial.headLocked.layout)?.label ?? '自定义'
+  const styleLabel = (spatial.renderStyle ?? 'natural') === 'focused' ? '清晰定位' : '自然外化'
+  const intensityPercent = Math.round(spatial.instant.amount * 100)
+  const virtual51Active = active && spatial.mode === 'headLocked' && spatial.headLocked.layout === '51'
+    && (spatial.renderStyle ?? 'natural') === 'focused' && Math.abs(spatial.instant.amount - 1) < 0.005
+  // Ambisonics 与「立体声 → 虚拟 5.1/7.1」由音源格式决定扬声器，会覆盖布局选择。
+  const inputFormatOverridesLayout = (spatial.inputFormat ?? 'channels') !== 'channels'
+  const inputFormatLabel = INPUT_FORMAT_LABELS[spatial.inputFormat ?? 'channels']
 
   return <div className="hse-spatial-workbench @container">
     <header className="hse-spatial-page-header">
@@ -238,6 +274,23 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
         {mode === value && <Check className="hse-spatial-mode-check" size={16} aria-hidden="true" />}
       </button>)}
     </div>
+    <section className="hse-spatial-surround-entry" aria-label="虚拟扬声器环绕快捷入口"
+      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px 20px',
+        padding: '14px 18px', borderRadius: '16px', border: `1px solid ${virtual51Active ? theme.accentColor : theme.cardBorder}`,
+        background: virtual51Active ? theme.accentDim : theme.inputBg }}>
+      <div className="min-w-0">
+        <p className={`text-sm font-semibold ${theme.textPrimary}`}>虚拟扬声器环绕</p>
+        <p className={`mt-1 text-xs leading-relaxed ${theme.textSecondary}`}>
+          普通立体声音源会自动上混到「扬声器布局」所选布局的虚拟扬声器（5.1 共 {VIRTUAL_51_SPEAKER_COUNT} 只、7.1.4 共 11 只），再经 HRTF 在耳机中渲染；不需要改动「音源格式」。
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="hse-mono text-[11px]" style={{ color: '#536b66' }}>
+          {virtual51Active ? `当前：${layoutLabel} · ${styleLabel} · 强度 ${intensityPercent}%` : '头锁定 5.1 · 清晰定位 · 100% 强度'}
+        </span>
+        <ActionBtn theme={theme} onClick={applyVirtual51}><Speaker size={14} aria-hidden="true" />一键虚拟 5.1 环绕</ActionBtn>
+      </div>
+    </section>
     <div className="hse-spatial-session-strip">
       <span className="hse-spatial-signal-path"><span>{channels ? `${channels} 声道输入` : '等待音频输入'}</span><ArrowUpRight size={14} /><span>{active ? '空间处理' : '原声旁路'}</span><ArrowUpRight size={14} /><span>耳机双声道</span></span>
       <span className="hse-mono">{bridge.getSampleRate() / 1000} kHz · {Number.isFinite(latency) ? latency.toFixed(1) : '—'} ms</span>
@@ -302,6 +355,15 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       </div>
       {mode === 'headLocked' && <div className="mb-4"><Segmented label="扬声器布局" options={HEAD_LOCKED_LAYOUTS} value={spatial.headLocked.layout}
         onChange={layout => { soloBefore.current = null; patch({ headLocked: { layout, speakers: layout === 'custom' ? headLockedSpeakers(current().headLocked) : createLayoutSpeakers(layout), routes: [] } }); setSelected(null) }} theme={theme} small />
+        <div className="mt-3 rounded-xl border px-3 py-2.5" style={{ borderColor: theme.cardBorder, background: theme.inputBg }}>
+          <p className={`text-xs leading-relaxed ${theme.textSecondary}`}>普通立体声音源会<strong className={theme.textPrimary}>自动上混到所选布局的虚拟扬声器</strong>，再经 HRTF 在耳机中渲染；不需要改动「音源格式」。</p>
+          <p className="hse-mono mt-1 text-[11px]" style={{ color: '#536b66' }}>
+            当前 {layoutLabel} · {speakers.length} 只虚拟扬声器 · {styleLabel} · 强度 {intensityPercent}%
+          </p>
+          {inputFormatOverridesLayout && <p className="mt-1 text-[11px] leading-relaxed" style={{ color: theme.statusWarn }}>
+            音源格式当前是「{inputFormatLabel}」，扬声器由音源格式决定，上面的布局暂不生效；切回「普通音频」即按所选布局上混。
+          </p>}
+        </div>
         {(spatial.headLocked.layout === '514' || spatial.headLocked.layout === '714') && <div className="mt-3 flex items-center gap-3"><span className={`text-xs ${theme.textSecondary}`}>顶置声源</span><Toggle label="启用顶置声源" theme={theme} checked={spatial.headLocked.heightLayer} onChange={heightLayer => { setSelected(null); patch({ headLocked: { heightLayer } }) }} /></div>}
       </div>}
       <p className={`mb-4 text-xs leading-relaxed ${theme.textSecondary}`}>{mode === 'world' ? '声源固定在场景中；改变听者的位置或朝向，会改变听到的方向。' : '音箱布局随头部朝向移动；头部追踪不会旋转这组布局。'}</p>

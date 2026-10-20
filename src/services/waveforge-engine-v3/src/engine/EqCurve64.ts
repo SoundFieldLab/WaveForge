@@ -8,7 +8,7 @@
  *    镲片 7.5–10kHz，空气感 12–16kHz（参考 Bobby Owsinski / SoundGadget EQ 频点表）；
  *  - 64 个频点本身落在 20Hz–16kHz（可听 / 音乐内容频段），不再分配 16kHz 以上的超声频段；
  *    这样每一段都有人耳可听的内容，不会出现「拉满也没声音」的空段；
- *  - 锚点在对数频率轴上线性插值，增益保留 0.1dB；Q=8.9（约 1/6 倍频程临界 Q），
+ *  - 锚点在对数频率轴上线性插值，增益保留 0.1dB；Q=9.4（约 1/6 倍频程临界 Q），
  *    由 EqChain 的级联 Q 补偿把实际响应压回目标曲线。
  */
 
@@ -39,14 +39,13 @@ function interpolateLogDb(anchors: ReadonlyArray<EqCurveAnchor>, frequency: numb
 
 /**
  * 用音乐频点锚点生成完整 64 段 EQ 数据。
- * @param anchors 频点锚点（Hz, dB），内部按频率排序；建议覆盖 30Hz–16kHz
+ * @param anchors 频点锚点（Hz, dB），内部按频率排序；建议覆盖 20Hz–16kHz
  */
 export function buildEq64Curve(anchors: ReadonlyArray<EqCurveAnchor>): EqBand[] {
   if (anchors.length === 0) return PRO_EQ_64_BANDS.map((frequency) => ({ frequency, gain: 0, q: EQ_64_Q }))
   const sorted = [...anchors].sort((a, b) => a[0] - b[0])
   return PRO_EQ_64_BANDS.map((frequency) => {
-    // 可听区之外不做任何微调；UI 仍保留对应频段供手动调整。
-    if (frequency < EQ_TRIM_LOW_HZ || frequency > EQ_TRIM_HIGH_HZ) return { frequency, gain: 0, q: EQ_64_Q }
+    // PRO_EQ_64_BANDS 本身就是 20Hz–16kHz 可听频段，不再需要额外的排除分支。
     const gain = Number(interpolateLogDb(sorted, frequency).toFixed(1))
     // 归一化 -0：分享串往返用 Object.is 比较，-0 与 0 会被判为不等。
     return { frequency, gain: gain === 0 ? 0 : gain, q: EQ_64_Q }

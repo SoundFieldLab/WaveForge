@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Save, Trash2, RotateCcw, Lock, LockOpen, Info } from 'lucide-react'
 import { PRO_EQ_DEFAULT_BANDS, PRO_EQ_20_BANDS, PRO_EQ_64_BANDS, MAX_PRO_EQ_BANDS } from '../src/types'
+import { EQ_64_Q } from '../src/engine/EqCurve64'
 import type { EqBand, EqMode, V3EngineParams } from '../src/types'
 import type { V3Theme } from './theme'
 import { ActionButton, GlassCard, GlassRangeStyle, InfoLine, SectionTitle, TextInput, Toggle } from './primitives'
@@ -157,13 +158,13 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
 
   /**
    * 切换段数时同步重建 proBands：目标频点表包含旧频点则沿用其增益，新增频点补 0。
-   * 64 段为近 1/6 倍频程布局，新频段默认 Q=8.9（与场景预设同一临界 Q），保证密集段不糊成一片。
+   * 64 段为近 1/6 倍频程布局，新频段默认 Q=EQ_64_Q（与场景预设同一临界 Q），保证密集段不糊成一片。
    */
   const remapBands = (count: 10 | 20 | 64) => {
     const target = count === 20 ? PRO_EQ_20_BANDS : count === 64 ? PRO_EQ_64_BANDS : PRO_EQ_DEFAULT_BANDS
     const next = target.map((frequency) => {
       const existing = eq.proBands.find((band) => Math.abs(band.frequency - frequency) < 0.5)
-      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? (count === 64 ? 9.4 : 1.1), type: existing?.type }
+      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? (count === 64 ? EQ_64_Q : 1.1), type: existing?.type }
     })
     const selectedFrequency = eq.proBands[activeBandIndex]?.frequency ?? next[0].frequency
     setSelectedBand(next.reduce((nearest, band, index) =>

@@ -785,7 +785,7 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 
 - **DSP 内核**：`EngineV3` 改为引擎自有快照结构化 `setParams`（删除深拷贝与 `JSON.stringify` 比较）；新增 14 个 DSP 模块（动态均衡、Crossfeed、多段压缩模式、ReplayGain、PCM 量化/WAV、`audioBuffer`、`ChannelDownmix`、IR 库、`EffectTransition`/`SampleRamp`、低频管理/次声高通，以及 `vectorKernel`/`wasmSimdKernel` 两个复数乘法内核门面）；全链路 Float64（`setPrecision('float32'|'float64')`，默认 float32；prepared IR/双耳负载带精度校验）；WASM SIMD128 内核运行时自研生成，不可用/低于阈值静默回退纯 TS；9 个音色/动态模块的 `processingOrder` 排序保留，整链固定边界；内部逐位旁路（bit-perfect bypass）保留。
 - **空间后端**：实测 KEMAR HRTF + 球谐插值、双耳卷积（prepared 跨线程接管）、镜像反射/谱反射/FDN/房间氛围、AmbiX 一至三阶与 FOA FuMa 解码、5.1/7.1 上混与双声道折叠、传播延迟/Doppler、世界/舞台/头锁定路由、SOFA 导入（h5wasm）、串扰消除与音箱校准工具、头追姿态输入。
-- **Worklet**：模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移，主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`（2026-10-20 实测 507,839 bytes；旧包 95,518 bytes 不可再用）；帧边界零分配、Host/Worklet 同版消息协议；新增 `npm run verify:worklet`。
+- **Worklet**：模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移，主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`（2026-10-21 实测 512,198 bytes；旧包 95,518 bytes 不可再用）；帧边界零分配、Host/Worklet 同版消息协议；新增 `npm run verify:worklet`。
 - **宿主**：`EngineV3Host` 支持最多 32 声道离散输入、prepared IR/房间线索跨线程接管、`EngineConfigWork` 诊断遥测（仅诊断，不作验收指标）。
 - **九页 UI**：主页 / 音效场景 / 均衡器 / 空间音效 / 空间音频 / 动态调音 / 分析 / 调音器 / 关于；保持主程序亮色薄荷玻璃风格（主色 `#006A63`），不引入深色/AFG/M3 风格，不恢复 Atmos/360RA/个性化 HRTF 入口。
 - **融合层**：`attachV3Engine` 的 `createV3UiBridge(engine, fs, { submit })` 为唯一提交路径（`setParams`/`applyScene`/外部替换同路），补齐 `subscribeParams` 让系统音量/ReplayGain/总开关等外部更新刷新已打开 UI；IR 去重改为 `WeakMap<Float32Array, token>` 引用身份。
@@ -801,13 +801,13 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run lint` | **通过，0 error** |
-| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **116 文件（113 passed + 3 skipped）/ 1167 用例 = 1151 passed + 16 skipped + 0 failed**（空间音频静音轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早 1155 用例记录） |
-| 全仓测试 | `npx vitest run --maxWorkers=8` | **328 文件（324 passed + 4 skipped）/ 3180 用例 = 3163 passed + 17 skipped + 0 failed**（空间音频静音轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **117 文件（114 passed + 3 skipped）/ 1171 用例 = 1155 passed + 16 skipped + 0 failed**（虚拟扬声器轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
+| 全仓测试 | `npx vitest run --maxWorkers=8` | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（虚拟扬声器轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
-| Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **507,839 bytes（495.9 KiB）**，sha256 `83376e8d…8a3c53f7`（`worklet-build.log`；EQ 64 段频点重映射前为 507,839B / `F078EB29…867EA2`） |
+| Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **512,198 bytes（500.2 KiB）**，sha256 `7b5bea51…ebaefed5`（`worklet-build.log`；虚拟扬声器上混前为 507,839B / `83376e8d…8a3c53f7`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
 | 生产构建 | `npm run build` | **通过**（vite build） |
-| 打包 file:// | `npm run build:electron:dir:unsigned` + 真实安装目录窗口 | **exit 0，file:// 验收 PASS**：worklet 200/507,839B、WASM basic+SIMD true、HDF5/SOFA 真解析入 IndexedDB、WAV 导出落盘 294,956B、79 个 file:// 请求 0 失败、0 console error（`packaged/FINAL-REPORT.md`、`stage-b3-results.json`） |
+| 打包 file:// | `npm run build:electron:dir:unsigned` + 真实安装目录窗口 | **exit 0，file:// 验收 PASS**：worklet 200/512,198B、WASM basic+SIMD true、HDF5/SOFA 真解析入 IndexedDB、WAV 导出落盘 294,956B、79 个 file:// 请求 0 失败、0 console error（`packaged/FINAL-REPORT.md`、`stage-b3-results.json`） |
 
 说明：全部门禁均在本轮实际执行并通过；打包 exe 为未签名调试产物（EVS/VMP 需交互式密码）；打包 profile 无在线源，联网播放未验证（导出用本机 HTTP 测试 WAV 走真实离线渲染链）。
 
@@ -866,5 +866,6 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - **空间音频静音真正静音（虚拟声源）**：头锁定/世界/舞台模式下，虚拟声源静音或音量拖到 0 时，原来只把湿声增益置 0，干声床仍按大部分比例输出，导致「静音后耳机还有声」。现在 EngineV3 在进入空间后端前对相应节目声道加干声闸门（20ms 平滑），全部虚源静音时该声道 dry+wet 都消失，仍保留其它声道经 HRTF 的交叉声。验证：受控引擎左声道单频，右虚源静音后右耳节目源消失（仅剩左源交叉声）；打包应用双虚源静音后输出 RMS=0（未静音 0.28/0.27）。
 - **空间音频强度增强（用户反馈“还是不明显”）**：自然外化湿声映射从 `amount·(0.15+0.35·amount)`（70%→0.28）改为 `amount·(0.5+0.5·amount)`（70%→0.595，100%→1.0）；stereoPreservation 0.3→0.2、音乐床分频 5000→3500Hz；默认参数改为强度 0.8 / 展开 90° / 房间混响 0.2（仅影响新建或重置空间设置，旧参数保留用户选择）。实测受控左声道单频：右耳串音占左耳 6.2%→22.9%（70%）、42.8%（100%），focused 70% 为 42.6%；打包应用试听/实时链路正常。
 - **页脚状态改为 LED 指示**：移除「手动增益 0.0 dB / TP 9.7 dBFS / 峰值越界」数字条，改为状态圆点 + `HyperSoundEngine 已就绪 · DSP 双声道 · 48 kHz / 目前模式：<场景名或自定义调音>`；峰值 ≥0 时圆点变琥珀色（title「峰值接近满刻」），正常绿色；空间音频开启时模式后追加「· 空间音频」。
+- **空间音频虚拟扬声器（本轮核心）**：headLocked 51/514/71/714 在普通立体声（inputFormat=channels、输入≤2 声道）下由 EngineV3 内部 StereoUpmixer 上混为 5.1（6ch）/7.1（8ch）/5.1.4（10ch）/7.1.4（12ch），再走 processMulti 逐只 HRTF；custom 保持 L/R，真实多声道输入不二次上混；discrete/full wet（musicBed=0、stereoPreservation=0）。StereoUpmixer 新增 5.1.4/7.1.4：顶置由 3kHz 高通 mid/side 派生（TFL/TFR=0.35·HP(L/R)、TRL/TRR=±0.4·HP((L-R)/2)），并从 FL/FR 扣回下混贡献。实测 5.1 后端 6ch：FC RMS .1772、SL/SR .0400；5.1.4 顶置 .0145/.0149/.0107/.0107；180Hz 时顶置 .00027/0；5.1.4 与 5.1 双耳输出最大差 .0662。UI 新增「一键虚拟 5.1 环绕」（focused/100%），输入格式不变。
 - **评审确认但保留**（判断项/设计边界）：replayGainTags 仍是预留字段（QQ/网易云不返回标签，实际走 URL 扫描）；useAudioPlayer 的 deck 索引/源映射重复属可读性 smell，未在功能修复轮改动。
 

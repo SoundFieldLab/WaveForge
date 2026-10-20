@@ -7,6 +7,7 @@ import { Terminal } from 'lucide-react'
 import { Toggle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
 import { isDevMode, setDevMode, HSE_DEV_MODE_EVENT } from '../sceneStore'
+import { HSE_DISPLAY_VERSION } from '../../version'
 
 interface AboutPageProps {
   theme: HSETheme
@@ -28,7 +29,7 @@ export default function AboutPage({ theme }: AboutPageProps) {
           <Terminal className="h-7 w-7" aria-hidden="true" />
         </div>
         <div>
-          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>HSE 1.5</h1>
+          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>{HSE_DISPLAY_VERSION}</h1>
           <p className={`${theme.textSecondary} mt-1 text-sm`}>HyperSoundEngine · WaveForge 特供版</p>
         </div>
       </div>

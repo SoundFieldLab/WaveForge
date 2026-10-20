@@ -1,14 +1,18 @@
 /**
  * Matrix / phase-decoding stereo upmixer for headphone or downstream spatial paths.
  *
- * This derives center, surround, rear, and LFE channels from a stereo program. It
- * cannot recover discrete stems or prove that a mono source contains real spatial
- * information. For L=R, the difference-derived surround channels are silent.
+ * This derives center, surround, rear, height, and LFE channels from a stereo program.
+ * It cannot recover discrete stems or prove that a mono source contains real spatial
+ * information. For L=R, the difference-derived surround/rear channels are silent; the
+ * height layer still carries the high band of the coherent program so a mono source
+ * keeps an elevated front image.
+ *
+ * Channel orders follow WAVE convention (7.1.4 adds TFL/TFR/TRL/TRR after 7.1).
  */
 
 import { allocBuffer, normalizePrecision, type AudioBuffer, type Precision } from '../dsp/audioBuffer'
 
-export type StereoUpmixLayout = '5.1' | '7.1'
+export type StereoUpmixLayout = '5.1' | '7.1' | '5.1.4' | '7.1.4'
 
 export interface StereoUpmixerOptions {
   layout: StereoUpmixLayout
@@ -21,16 +25,31 @@ export interface StereoUpmixerOptions {
 
 const LFE_CUTOFF_HZ = 120
 const LFE_GAIN = 0.25
+/**
+ * 顶置层取 3 kHz 以上的高频带：HRTF 的仰角线索主要落在高频，而人声基频/主体
+ * 留在正面，避免把整段人声拉到头顶。前顶置保留左右高频，后顶置取高频差分
+ * （与前顶置不同源），形成上方包围而非简单复制地面层。
+ */
+const HEIGHT_CROSSOVER_HZ = 3000
+const HEIGHT_FRONT_GAIN = 0.35
+const HEIGHT_REAR_GAIN = 0.4
+
+const CHANNEL_ORDERS: Record<StereoUpmixLayout, readonly string[]> = {
+  '5.1': ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR'],
+  '7.1': ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR', 'SL', 'SR'],
+  '5.1.4': ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR', 'TFL', 'TFR', 'TRL', 'TRR'],
+  '7.1.4': ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR', 'SL', 'SR', 'TFL', 'TFR', 'TRL', 'TRR'],
+}
 
 /**
  * Reusable block processor. Channel order is 5.1: FL, FR, FC, LFE, SL, SR;
- * 7.1: FL, FR, FC, LFE, BL, BR, SL, SR.
+ * 7.1: FL, FR, FC, LFE, BL, BR, SL, SR; 5.1.4/7.1.4 append TFL, TFR, TRL, TRR.
  *
  * Output is matrix-derived, not discrete multichannel. `process` reuses the same
  * channel buffers on every call and zeroes any unused tail after a short block.
  * Every extracted channel's HSE downmix contribution is subtracted from FL/FR:
- * C/SL/SR use 1/sqrt(2), BL/BR use 0.5 and LFE uses 0.25. A corresponding
- * downmix reconstructs the input instead of duplicating program level.
+ * C/SL/SR use 1/sqrt(2), BL/BR use 0.5, LFE uses 0.25 and each height channel 0.5.
+ * A corresponding downmix reconstructs the input instead of duplicating program level.
  */
 export class StereoUpmixer {
   readonly layout: StereoUpmixLayout
@@ -45,10 +64,27 @@ export class StereoUpmixer {
   private readonly lfeAlpha: number
   private lfeStage1 = 0
   private lfeStage2 = 0
+  /** 顶置层 2 阶高通（左右独立状态；非 .4 布局不参与运算，5.1/7.1 输出逐位不变）。 */
+  private readonly heightLayer: boolean
+  private readonly heightBase: number
+  private readonly hpB0: number
+  private readonly hpB1: number
+  private readonly hpB2: number
+  private readonly hpA1: number
+  private readonly hpA2: number
+  private hpX1L = 0
+  private hpX2L = 0
+  private hpY1L = 0
+  private hpY2L = 0
+  private hpX1R = 0
+  private hpX2R = 0
+  private hpY1R = 0
+  private hpY2R = 0
 
   constructor(options: StereoUpmixerOptions) {
     const { layout, sampleRate, blockSize } = options
-    if (layout !== '5.1' && layout !== '7.1') throw new RangeError('layout must be 5.1 or 7.1')
+    const order = CHANNEL_ORDERS[layout]
+    if (order === undefined) throw new RangeError('layout must be 5.1, 7.1, 5.1.4 or 7.1.4')
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new RangeError('sampleRate must be finite and positive')
     if (!Number.isInteger(blockSize) || blockSize <= 0) throw new RangeError('blockSize must be a positive integer')
 
@@ -56,11 +92,21 @@ export class StereoUpmixer {
     this.sampleRate = sampleRate
     this.blockSize = blockSize
     this.precision = normalizePrecision(options.precision)
-    this.channelOrder = Object.freeze(layout === '5.1'
-      ? ['FL', 'FR', 'FC', 'LFE', 'SL', 'SR']
-      : ['FL', 'FR', 'FC', 'LFE', 'BL', 'BR', 'SL', 'SR'])
+    this.channelOrder = Object.freeze([...order])
     this.outputChannels = this.channelOrder.map(() => allocBuffer(blockSize, this.precision))
     this.lfeAlpha = 1 - Math.exp((-2 * Math.PI * Math.min(LFE_CUTOFF_HZ, sampleRate * 0.45)) / sampleRate)
+    this.heightLayer = layout === '5.1.4' || layout === '7.1.4'
+    this.heightBase = this.channelOrder.length - 4
+    // RBJ cookbook 2 阶高通（Q=1/sqrt(2)）；系数与状态无关，构造期一次算好。
+    const w0 = 2 * Math.PI * Math.min(HEIGHT_CROSSOVER_HZ, sampleRate * 0.45) / sampleRate
+    const cosW = Math.cos(w0)
+    const alpha = Math.sin(w0) / (2 * Math.SQRT1_2)
+    const a0 = 1 + alpha
+    this.hpB0 = (1 + cosW) / 2 / a0
+    this.hpB1 = -(1 + cosW) / a0
+    this.hpB2 = this.hpB0
+    this.hpA1 = (-2 * cosW) / a0
+    this.hpA2 = (1 - alpha) / a0
   }
 
   /** 当前输出声道缓冲精度。 */
@@ -92,6 +138,8 @@ export class StereoUpmixer {
       : (Number.isFinite(frameCount) ? Math.floor(frameCount) : 0)
     const count = Math.max(0, Math.min(requested, left.length, right.length, this.blockSize))
     const out = this.outputChannels
+    const heights = this.heightLayer
+    const heightBase = this.heightBase
 
     for (let channel = 0; channel < out.length; channel++) out[channel].fill(0)
 
@@ -105,7 +153,7 @@ export class StereoUpmixer {
       out[2][i] = mid
       out[3][i] = this.filterLfe(mid) * LFE_GAIN
 
-      if (this.layout === '5.1') {
+      if (this.layout === '5.1' || this.layout === '5.1.4') {
         out[4][i] = side * 0.5
         out[5][i] = oppositeSide * 0.5
       } else {
@@ -117,18 +165,33 @@ export class StereoUpmixer {
         out[7][i] = oppositeSide * 0.5
       }
 
+      let heightL = 0
+      let heightR = 0
+      if (heights) {
+        const highLeft = this.filterHeightL(l)
+        const highRight = this.filterHeightR(r)
+        const highSide = (highLeft - highRight) * 0.5
+        out[heightBase][i] = highLeft * HEIGHT_FRONT_GAIN
+        out[heightBase + 1][i] = highRight * HEIGHT_FRONT_GAIN
+        out[heightBase + 2][i] = highSide * HEIGHT_REAR_GAIN
+        out[heightBase + 3][i] = -highSide * HEIGHT_REAR_GAIN
+        // 与 HSE 下混矩阵一致：每只高度声道同侧各计 0.5。
+        heightL = (out[heightBase][i] + out[heightBase + 2][i]) * 0.5
+        heightR = (out[heightBase + 1][i] + out[heightBase + 3][i]) * 0.5
+      }
+
       // Subtract the contributions of the actual Float32 extracted samples,
       // so quantization cannot turn a full-strength upmix into a second copy
       // of the original program when HSE folds the virtual channels down.
       const common = out[2][i] * Math.SQRT1_2 + out[3][i] * 0.25
-      const surroundL = this.layout === '5.1'
+      const surroundL = this.layout === '5.1' || this.layout === '5.1.4'
         ? out[4][i] * Math.SQRT1_2
         : out[6][i] * Math.SQRT1_2 + out[4][i] * 0.5
-      const surroundR = this.layout === '5.1'
+      const surroundR = this.layout === '5.1' || this.layout === '5.1.4'
         ? out[5][i] * Math.SQRT1_2
         : out[7][i] * Math.SQRT1_2 + out[5][i] * 0.5
-      out[0][i] = l - common - surroundL
-      out[1][i] = r - common - surroundR
+      out[0][i] = l - common - surroundL - heightL
+      out[1][i] = r - common - surroundR - heightR
     }
 
     return out
@@ -137,6 +200,14 @@ export class StereoUpmixer {
   reset(): void {
     this.lfeStage1 = 0
     this.lfeStage2 = 0
+    this.hpX1L = 0
+    this.hpX2L = 0
+    this.hpY1L = 0
+    this.hpY2L = 0
+    this.hpX1R = 0
+    this.hpX2R = 0
+    this.hpY1R = 0
+    this.hpY2R = 0
     for (let channel = 0; channel < this.outputChannels.length; channel++) this.outputChannels[channel].fill(0)
   }
 
@@ -144,6 +215,26 @@ export class StereoUpmixer {
     this.lfeStage1 += this.lfeAlpha * (input - this.lfeStage1)
     this.lfeStage2 += this.lfeAlpha * (this.lfeStage1 - this.lfeStage2)
     return this.lfeStage2
+  }
+
+  private filterHeightL(input: number): number {
+    const y = this.hpB0 * input + this.hpB1 * this.hpX1L + this.hpB2 * this.hpX2L
+      - this.hpA1 * this.hpY1L - this.hpA2 * this.hpY2L
+    this.hpX2L = this.hpX1L
+    this.hpX1L = input
+    this.hpY2L = this.hpY1L
+    this.hpY1L = y
+    return y
+  }
+
+  private filterHeightR(input: number): number {
+    const y = this.hpB0 * input + this.hpB1 * this.hpX1R + this.hpB2 * this.hpX2R
+      - this.hpA1 * this.hpY1R - this.hpA2 * this.hpY2R
+    this.hpX2R = this.hpX1R
+    this.hpX1R = input
+    this.hpY2R = this.hpY1R
+    this.hpY1R = y
+    return y
   }
 }
 

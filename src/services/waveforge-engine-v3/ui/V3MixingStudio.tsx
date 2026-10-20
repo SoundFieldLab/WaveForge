@@ -16,6 +16,7 @@ import { useHSETheme, toLegacyTheme, themeVariables } from './hse-theme'
 import type { HSETheme } from './hse-theme'
 import { RangeStyle } from './components/Primitives'
 import { OutputStatus } from './components/OutputStatus'
+import { HSE_DISPLAY_NAME, HSE_DISPLAY_VERSION } from '../version'
 import { useStateFeedback } from './feedback'
 import { ContentViewport } from './components/ContentViewport'
 import './hse-glass.css'
@@ -131,6 +132,10 @@ export default function V3MixingStudio({
   const activeSceneName = controller.params.customized
     ? '自定义'
     : (controller.params.sceneId ? scenes.find((s) => s.id === controller.params.sceneId)?.name ?? '无' : '无')
+  const footerMode = controller.params.customized || !controller.params.sceneId || activeSceneName === '无'
+    ? '自定义调音'
+    : activeSceneName
+  const footerModeText = `${footerMode}${controller.params.spatial && controller.params.spatial.mode !== 'off' ? ' · 空间音频' : ''}`
 
   const handleResetAll = () => {
     controller.replace(createDefaultParams(bridge.getSampleRate()))
@@ -188,14 +193,14 @@ export default function V3MixingStudio({
           >
             <div className="flex min-w-0 items-center gap-2.5">
               <AudioWaveform aria-hidden="true" className="h-5 w-5 shrink-0" style={{ color: theme.accentColor }} />
-              <span className="hse-studio-brand truncate text-sm font-semibold">HyperSoundEngine</span>
-              <span className="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold" style={{ color: theme.accentColor, background: theme.accentDim }}>HSE 1.5</span>
+              <span className="hse-studio-brand truncate text-sm font-semibold">{HSE_DISPLAY_NAME}</span>
+              <span className="shrink-0 rounded-md px-2 py-1 text-[10px] font-semibold" style={{ color: theme.accentColor, background: theme.accentDim }}>{HSE_DISPLAY_VERSION}</span>
             </div>
             <div className="hse-studio-header-actions flex min-w-0 items-center gap-3">
               {transportControls}
               {onSwitchEngine && (
                 <div role="group" aria-label="切换音效引擎" className="hse-glass-group flex shrink-0 items-center gap-1 rounded-xl p-1">
-                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: 'HSE 1.5' }]).map((eng) => {
+                  {(availableEngines || [{ id: 'v1', displayName: 'v1', description: '' }, { id: 'v2', displayName: 'v2', description: '' }, { id: 'v3', displayName: 'HSE', description: HSE_DISPLAY_VERSION }]).map((eng) => {
                     const active = engineVersion === eng.id
                     return <button key={eng.id} type="button" onClick={() => onSwitchEngine(eng.id)} title={eng.description}
                       aria-pressed={active}
@@ -250,7 +255,7 @@ export default function V3MixingStudio({
           </ContentViewport>
 
           <footer className="hse-studio-footer col-span-2 flex min-w-0 items-center justify-between gap-4 border-t px-4" style={{ borderColor: theme.panelBorder, background: '#F8FBF9' }}>
-            <OutputStatus bridge={bridge} />
+            <OutputStatus bridge={bridge} modeText={footerModeText} />
             <div className="flex shrink-0 items-center gap-4">
               <button type="button" onClick={handleResetAll} title="恢复 HSE 默认参数" className="hse-glass-button flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline-2 focus-visible:outline-offset-2" style={{ color: '#536b66', outlineColor: theme.accentColor }}>
                 <RotateCcw className="h-3.5 w-3.5" /> 重置

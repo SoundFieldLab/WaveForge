@@ -794,6 +794,75 @@ function headLockedChannel(azimuthDeg: number): number {
   return azimuthDeg <= 0 ? 0 : 1
 }
 
+/**
+ * headLocked 预设多声道布局：普通立体声节目下由 EngineV3 内部上混成真实多声道，
+ * 再逐声道经 TsConvolverBackend HRTF 渲染（中心/环绕/顶置不再只是 L/R 的复制）。
+ * 自定义布局没有标准声道映射，仍按 routes/方位就近路由。
+ */
+type HeadLockedUpmixLayout = '51' | '514' | '71' | '714'
+
+/**
+ * 预设扬声器索引 → 上混器输出声道（HSE 内部顺序）：
+ * 布局顺序取自 layouts.ts（C/FL/FR/SL/SR[/RL/RR][/TFL/TFR/TRL/TRR]），
+ * 上混器顺序为 WAVE（5.1: FL FR FC LFE SL SR；7.1/7.1.4 的后环在 SL/SR 之前），
+ * 7.1/7.1.4 由 _upmix71Channels/_upmix714Channels 重排后交给后端。
+ */
+const HEAD_LOCKED_UPMIX_CHANNELS: Record<HeadLockedUpmixLayout, readonly number[]> = {
+  '51': [2, 0, 1, 4, 5],
+  '514': [2, 0, 1, 4, 5, 6, 7, 8, 9],
+  '71': [2, 0, 1, 6, 7, 4, 5],
+  '714': [2, 0, 1, 6, 7, 4, 5, 8, 9, 10, 11],
+}
+
+/** 预设扬声器对应的节目侧（仅供干声静音闸门使用；不影响后端声道选择）。 */
+const HEAD_LOCKED_UPMIX_SIDES: Record<HeadLockedUpmixLayout, readonly SpeakerRoute[]> = {
+  '51': ['both', 'l', 'r', 'l', 'r'],
+  '514': ['both', 'l', 'r', 'l', 'r', 'l', 'r', 'l', 'r'],
+  '71': ['both', 'l', 'r', 'l', 'r', 'l', 'r'],
+  '714': ['both', 'l', 'r', 'l', 'r', 'l', 'r', 'l', 'r', 'l', 'r'],
+}
+
+/**
+ * 是否需要为 headLocked 布局建立内部立体声上混：
+ * 仅四套预设布局 + 普通立体声节目（≤2 声道）且输入格式未显式声明为多声道/Ambisonics。
+ * 关闭顶置层的 .4 布局退回地面层上混（否则顶置通道会白白抽走前方高频）。
+ */
+function headLockedUpmixLayout(s: SpatialSettings, inputChannels: number): HeadLockedUpmixLayout | null {
+  if (s.mode !== 'headLocked' || inputChannels > 2) return null
+  const format = s.inputFormat
+  if (format !== undefined && format !== 'channels') return null
+  switch (s.headLocked.layout) {
+    case '51': return '51'
+    case '514': return s.headLocked.heightLayer ? '514' : '51'
+    case '71': return '71'
+    case '714': return s.headLocked.heightLayer ? '714' : '71'
+    default: return null
+  }
+}
+
+/** headLocked 预设布局 → 上混声道驱动的虚拟扬声器（顺序与 layouts.ts 预设一致）。 */
+function headLockedUpmixSpeakers(s: SpatialSettings, layout: HeadLockedUpmixLayout): VirtualSpeaker[] {
+  const configs = headLockedSpeakers(s.headLocked)
+  const channels = HEAD_LOCKED_UPMIX_CHANNELS[layout]
+  const sides = HEAD_LOCKED_UPMIX_SIDES[layout]
+  const speakers: VirtualSpeaker[] = []
+  for (let i = 0; i < configs.length; i++) {
+    const cfg = configs[i]
+    speakers.push({
+      channel: channels[i] ?? 2,
+      azimuthDeg: cfg.azimuthDeg,
+      elevationDeg: cfg.elevationDeg,
+      distance: cfg.distance,
+      gain: cfg.muted ? 0 : cfg.gain,
+      size: cfg.size,
+      diffuse: cfg.diffuse,
+      polarity: cfg.polarity,
+      route: sides[i] ?? 'both',
+    })
+  }
+  return speakers
+}
+
 /** 模式 B 单只扬声器按路由展开（'l'→0、'r'→1、'both'→两只半增益、undefined→就近） */
 function routeSpeaker(cfg: VirtualSpeakerCfg, route: VirtualSpeakerCfg['route']): VirtualSpeaker[] {
   const sourceRoute = route ?? cfg.route ?? (Math.abs(cfg.azimuthDeg) < 0.001 ? 'both' : undefined)
@@ -863,6 +932,9 @@ function speakersFromSettings(s: SpatialSettings, inputChannels = 2): VirtualSpe
     return instantSpeakers(s.instant)
   }
   if (s.mode === 'headLocked') {
+    // 5.1/5.1.4/7.1/7.1.4 预设 + 普通立体声：先矩阵上混到布局声道，再逐只 HRTF。
+    const upmix = headLockedUpmixLayout(s, inputChannels)
+    if (upmix !== null) return headLockedUpmixSpeakers(s, upmix)
     const routes = s.headLocked.routes
     return headLockedSpeakers(s.headLocked).flatMap((cfg, i) =>
       routeSpeaker(cfg.muted ? { ...cfg, gain: 0 } : cfg, s.headLocked.layout === 'custom' && i < routes.length ? routes[i] : undefined),
@@ -904,8 +976,14 @@ function dryGateTargetsFromSpeakers(
   if (mode !== 'headLocked' && mode !== 'world' && mode !== 'stage') return { l: 1, r: 1 }
   let totalL = 0, totalR = 0, activeL = 0, activeR = 0
   for (const speaker of speakers) {
-    if (speaker.channel === 0) { totalL++; if (speaker.gain > 1e-6) activeL++ }
-    else if (speaker.channel === 1) { totalR++; if (speaker.gain > 1e-6) activeR++ }
+    // 上混布局的 channel 指向上混声道；节目侧由 route 标记（中心=both），
+    // 这样「所有扬声器静音 → 干声也静音」的语义在 5.1/7.1 布局下继续成立。
+    const feedsLeft = speaker.route === 'l' || speaker.route === 'both' || speaker.route === 'side'
+      || (speaker.route === undefined && speaker.channel <= 0)
+    const feedsRight = speaker.route === 'r' || speaker.route === 'both' || speaker.route === 'side'
+      || (speaker.route === undefined && speaker.channel === 1)
+    if (feedsLeft) { totalL++; if (speaker.gain > 1e-6) activeL++ }
+    if (feedsRight) { totalR++; if (speaker.gain > 1e-6) activeR++ }
   }
   return {
     l: totalL > 0 ? (activeL > 0 ? 1 : 0) : 1,
@@ -924,7 +1002,11 @@ function spatialConfigFromSettings(s: SpatialSettings, inputChannels = 2, sample
   const speakers = speakersFromSettings(s, inputChannels)
   const foa = isAmbisonicFormat(s.inputFormat)
   const stereoUpmix = s.inputFormat === 'stereo51' || s.inputFormat === 'stereo71'
-  const discrete = foa || stereoUpmix || (s.mode === 'instant' && s.instant.multichannelAuto && inputChannels > 2)
+  // headLocked 预设多声道布局的节目上混：输入本身已是真实多声道，按全湿处理
+  // （音乐床分频会只保留 3.5kHz 以下干声的中频，正好抵掉中心声道内容）。
+  const headLockedUpmix = headLockedUpmixLayout(s, inputChannels)
+  const discrete = foa || stereoUpmix || headLockedUpmix !== null
+    || (s.mode === 'instant' && s.instant.multichannelAuto && inputChannels > 2)
   const natural = s.renderStyle !== 'focused' && !discrete
   if (s.ambience.enabled && s.ambience.amount > 0) {
     for (const azimuthDeg of [-65, 65, -140, 140]) speakers.push({
@@ -948,7 +1030,8 @@ function spatialConfigFromSettings(s: SpatialSettings, inputChannels = 2, sample
     ambienceExtraction: s.ambience.extraction ?? 'pca',
     earlyReflectionOrders: s.budgetMode === 'lowLatency' ? 0
       : s.budgetMode === 'auto' && sampleRate >= 96000 && speakers.length >= 8 ? 1 : 2,
-    multichannelAuto: foa || stereoUpmix || (s.mode === 'instant' && s.instant.multichannelAuto),
+    multichannelAuto: foa || stereoUpmix || headLockedUpmix !== null
+      || (s.mode === 'instant' && s.instant.multichannelAuto),
     lfeChannel: foa ? -1 : 3,
     room: stageActive ? stageRoom(s.stage) : s.instant.room,
     roomAmount: stageActive ? s.stage.reverbAmount : s.instant.roomAmount,
@@ -985,7 +1068,12 @@ export class EngineV3 {
   private readonly _ambisonic: AmbisonicDecoder
   private readonly _stereoUpmixer51: StereoUpmixer
   private readonly _stereoUpmixer71: StereoUpmixer
+  private readonly _stereoUpmixer514: StereoUpmixer
+  private readonly _stereoUpmixer714: StereoUpmixer
   private readonly _upmix71Channels: AudioBuffer[] = []
+  private readonly _upmix714Channels: AudioBuffer[] = []
+  /** 当前生效的 headLocked 内部上混布局（null = 未启用，按原 L/R 路由）。 */
+  private _spatialHeadLockedUpmix: HeadLockedUpmixLayout | null = null
   private _headPose: HeadPose | undefined
   private _spatialHrtfPending = false
   private _pendingHrtfRoomHrir: PreparedRoomHrir[] = []
@@ -1226,7 +1314,15 @@ export class EngineV3 {
     this._stereoUpmixer71 = new StereoUpmixer({
       layout: '7.1', sampleRate, blockSize: 128, precision: this._precisionMode,
     })
+    // headLocked 5.1.4/7.1.4 的顶置层由上混器 mid/side 高频派生（普通立体声节目）。
+    this._stereoUpmixer514 = new StereoUpmixer({
+      layout: '5.1.4', sampleRate, blockSize: 128, precision: this._precisionMode,
+    })
+    this._stereoUpmixer714 = new StereoUpmixer({
+      layout: '7.1.4', sampleRate, blockSize: 128, precision: this._precisionMode,
+    })
     this.refreshUpmix71Channels()
+    this.refreshUpmix714Channels()
     this._speakerCancellation = new CrosstalkCancellation(sampleRate)
     this._spatialBackend.loadHrtf(sampleRate >= 8000 && sampleRate <= 192000
       ? createMeasuredHrtfGrid(sampleRate)
@@ -1290,6 +1386,8 @@ export class EngineV3 {
     if (changes.spatialInputFormat) {
       this._stereoUpmixer51.reset()
       this._stereoUpmixer71.reset()
+      this._stereoUpmixer514.reset()
+      this._stereoUpmixer714.reset()
     }
     // 串扰参数只在空间设置变化时重算；复用参数对象避免每次 setParams 新建。
     if (changes.spatial) {
@@ -1716,6 +1814,15 @@ export class EngineV3 {
     this._spatialWanted = active
     if (active && sp) {
       const config = spatialConfigFromSettings(sp, this._lastInputChannels, this._fs, this._headPose)
+      // 上混布局与空间配置一起提交：布局切换时清零上混器流式状态（LFE/顶置滤波）。
+      const nextUpmix = headLockedUpmixLayout(sp, this._lastInputChannels)
+      if (nextUpmix !== this._spatialHeadLockedUpmix) {
+        this._spatialHeadLockedUpmix = nextUpmix
+        this._stereoUpmixer51.reset()
+        this._stereoUpmixer71.reset()
+        this._stereoUpmixer514.reset()
+        this._stereoUpmixer714.reset()
+      }
       if (this.spatialConfigChanged(config)) {
         this._configWork.spatialConfigs++
         if (!wasActive) this._spatialBackend.reset()
@@ -1749,6 +1856,7 @@ export class EngineV3 {
       this._spatialSignatureLength = -1
       this._spatialDryTargetL = 1
       this._spatialDryTargetR = 1
+      this._spatialHeadLockedUpmix = null
     }
     const configMs = Math.max(0, engineClock() - configStartedAt)
     this._configWork.spatialConfigMs += configMs
@@ -1829,6 +1937,13 @@ export class EngineV3 {
       && spatial.instant.multichannelLayout === 'auto' && !this._params.bitPerfectBypass) {
       this._transitions.spatial.configure(true, () => this.syncSpatialConfig(spatial))
     }
+    // headLocked 预设布局是否上混取决于实际输入声道数（立体声 → 上混；真实多声道 → 直通）。
+    if (inputCountChanged && spatial?.mode === 'headLocked' && !this._params.bitPerfectBypass) {
+      const nextUpmix = headLockedUpmixLayout(spatial, this._lastInputChannels)
+      if (nextUpmix !== this._spatialHeadLockedUpmix) {
+        this._transitions.spatial.configure(this._spatialWanted, () => this.syncSpatialConfig(spatial))
+      }
+    }
     if (this._params.bitPerfectBypass) {
       if (inputs.length > 2 && outputs.length === 2 && outputs[0] && outputs[1]) {
         let count = Math.min(outputs[0].length, outputs[1].length)
@@ -1892,6 +2007,7 @@ export class EngineV3 {
     const foa = isAmbisonicFormat(inputFormat)
     const upmix51 = inputFormat === 'stereo51'
     const upmix71 = inputFormat === 'stereo71'
+    const headLockedUpmix = this._spatialHeadLockedUpmix
     if ((upmix51 || upmix71) && this._spatialInputFormatValid) {
       // 上混只进入空间湿路，原立体声干路不重复叠加中心与低频。
       for (let i = 0; i < n; i++) { this._spatialInputL[i] = L[i]; this._spatialInputR[i] = R[i] }
@@ -1900,6 +2016,29 @@ export class EngineV3 {
       if (upmix71) {
         // 上混器为 WAVE 顺序 BL/BR/SL/SR，HSE 内部为 SL/SR/BL/BR。
         this._spatialBlockChannels = this._upmix71Channels
+      }
+      this._spatialBlockOffset = 0
+    } else if (headLockedUpmix !== null && this._spatialInputFormatValid) {
+      // headLocked 预设 5.1/5.1.4/7.1/7.1.4：普通立体声节目先矩阵上混到布局声道
+      // （center/surround/height/LFE），再由 renderSpatial 走 processMulti 逐只 HRTF。
+      if (this._lastInputChannels <= 1) {
+        // 单声道按双单声道上混：否则 R=0 会被当成反相立体声，环绕/侧向残差错位。
+        for (let i = 0; i < n; i++) { const sample = L[i]; this._spatialInputL[i] = sample; this._spatialInputR[i] = sample }
+      } else {
+        for (let i = 0; i < n; i++) { this._spatialInputL[i] = L[i]; this._spatialInputR[i] = R[i] }
+      }
+      const leftView = this._spatialViews[n][2]
+      const rightView = this._spatialViews[n][3]
+      if (headLockedUpmix === '51') {
+        this._spatialBlockChannels = this._stereoUpmixer51.process(leftView, rightView, n)
+      } else if (headLockedUpmix === '514') {
+        this._spatialBlockChannels = this._stereoUpmixer514.process(leftView, rightView, n)
+      } else if (headLockedUpmix === '71') {
+        this._stereoUpmixer71.process(leftView, rightView, n)
+        this._spatialBlockChannels = this._upmix71Channels
+      } else {
+        this._stereoUpmixer714.process(leftView, rightView, n)
+        this._spatialBlockChannels = this._upmix714Channels
       }
       this._spatialBlockOffset = 0
     } else {
@@ -2222,6 +2361,8 @@ export class EngineV3 {
     this._ambisonic.reset()
     this._stereoUpmixer51.reset()
     this._stereoUpmixer71.reset()
+    this._stereoUpmixer514.reset()
+    this._stereoUpmixer714.reset()
     this._channelGainL = 1
     this._channelGainR = 1
     for (let i = 0; i < this._processingNodes.length; i++) this._processingNodes[i].reset?.()
@@ -2326,7 +2467,10 @@ export class EngineV3 {
   private setSpatialUpmixerPrecision(precision: InternalPrecision): void {
     this._stereoUpmixer51.setPrecision(precision)
     this._stereoUpmixer71.setPrecision(precision)
+    this._stereoUpmixer514.setPrecision(precision)
+    this._stereoUpmixer714.setPrecision(precision)
     this.refreshUpmix71Channels()
+    this.refreshUpmix714Channels()
   }
 
   /** 重建 7.1 上混输出的 HSE 声道顺序引用（精度切换会重建上混器输出缓冲）。 */
@@ -2335,6 +2479,15 @@ export class EngineV3 {
     const order = this._upmix71Channels
     order.length = 0
     order.push(channels[0], channels[1], channels[2], channels[3], channels[6], channels[7], channels[4], channels[5])
+  }
+
+  /** 7.1.4 上混输出的 HSE 声道顺序：WAVE 的 BL/BR 与 SL/SR 互换，顶置层保持。 */
+  private refreshUpmix714Channels(): void {
+    const channels = this._stereoUpmixer714.outputChannels
+    const order = this._upmix714Channels
+    order.length = 0
+    order.push(channels[0], channels[1], channels[2], channels[3], channels[6], channels[7],
+      channels[4], channels[5], channels[8], channels[9], channels[10], channels[11])
   }
 
   /** 比较空间渲染配置签名；变化时保存新签名供下次比较（无字符串/对象分配）。 */
