@@ -84,19 +84,7 @@ const NAV_ITEMS: NavItem[] = [
 ]
 
 const subscribeToNothing = () => () => undefined
-const idlePlayback = () => false
 const sessionSaveState = () => 'session' as const
-
-/** 播放时钟只在播放/暂停变化时更新此小区域，连续进度不刷新调音室。 */
-function PlaybackStatus({ store }: { store?: PlaybackTimeStore }) {
-  const playing = useSyncExternalStore(store?.subscribe ?? subscribeToNothing,
-    store ? () => store.getSnapshot().isPlaying : idlePlayback, idlePlayback)
-  return <>
-    <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: playing ? '#16845D' : '#9AA9A4' }} />
-    <span className="shrink-0 font-medium">HSE</span>
-    <span className="hidden text-[#536b66] sm:inline">{playing ? '播放中' : '待机'}</span>
-  </>
-}
 
 function SaveSettings({ bridge, accent }: { bridge: V3UiBridge; accent: string }) {
   const state = useSyncExternalStore(bridge.subscribeSaveState ?? subscribeToNothing,
@@ -262,11 +250,6 @@ export default function V3MixingStudio({
           </ContentViewport>
 
           <footer className="hse-studio-footer col-span-2 flex min-w-0 items-center justify-between gap-4 border-t px-4" style={{ borderColor: theme.panelBorder, background: '#F8FBF9' }}>
-            <div className="flex min-w-0 items-center gap-2 text-xs">
-              <PlaybackStatus store={playbackTimeStore} />
-              <span className="hidden text-[#536b66] sm:inline">{bridge.getSampleRate().toLocaleString()} Hz</span>
-              <span className="truncate text-[#536b66]">场景：{activeSceneName}</span>
-            </div>
             <OutputStatus bridge={bridge} gainDb={controller.params.loudnessNormalization.externalGainDb ?? 0} />
             <div className="flex shrink-0 items-center gap-4">
               <button type="button" onClick={handleResetAll} title="恢复 HSE 默认参数" className="hse-glass-button flex h-9 items-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline-2 focus-visible:outline-offset-2" style={{ color: '#536b66', outlineColor: theme.accentColor }}>
