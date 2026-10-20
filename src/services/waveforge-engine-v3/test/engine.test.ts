@@ -408,7 +408,7 @@ describe('EngineV3 空间音乐床配置', () => {
 
     engine.setParams(params)
 
-    expect(setConfig).toHaveBeenLastCalledWith(expect.objectContaining({ stereoPreservation: 0.3 }))
+    expect(setConfig).toHaveBeenLastCalledWith(expect.objectContaining({ stereoPreservation: 0.2 }))
   })
 })
 

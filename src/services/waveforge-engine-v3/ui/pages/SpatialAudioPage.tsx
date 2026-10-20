@@ -223,7 +223,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       <div><div className="hse-spatial-eyebrow">HSE / 空间工作台</div>
         <h1 className={theme.textPrimary}>空间音频</h1>
         <p className={theme.textSecondary}>在耳机中试听方向、距离与房间感。</p>
-        <p className="mt-1 text-xs" style={{ color: '#536b66' }}>建议佩戴耳机；点「试听空间效果」可直接 A/B 对比原声与 HRTF 空间处理。「自然外化」较克制，想要更明显的方向感可切到「清晰定位」。</p></div>
+        <p className="mt-1 text-xs" style={{ color: '#536b66' }}>建议佩戴耳机；点「试听空间效果」可直接 A/B 对比原声与 HRTF 空间处理。「自然外化」保留部分原声；想要更强方向感可切「清晰定位」或把强度拉满。</p></div>
       <div className="hse-spatial-master"><span>{active ? '空间音频已启用' : '正在对比原声'}</span>
         <button type="button" onClick={audition} aria-label="试听空间效果"
           className="hse-glass-button rounded-lg px-3 py-2 text-xs font-medium" style={{ color: theme.accentColor }}>

@@ -336,7 +336,7 @@ export function createDefaultSpatialParams(): SpatialParams {
     // 默认平衡档（quality 球谐插值 / balanced·lowLatency 最近邻，fusion 按此映射 hrtfInterp）
     perfMode: 'balanced',
     masterGain: 0.9,
-    instant: { spreadDeg: 60, amount: 0.7, room: 'studio', roomAmount: 0.15,
+    instant: { spreadDeg: 90, amount: 0.8, room: 'studio', roomAmount: 0.2,
       multichannelAuto: false, multichannelLayout: '51' },
     // 默认 5.1 布局，speakers 取 51 预设副本（与 layouts.ts 单事实源一致）；
     // routes 空数组 = 全按方位角就近路由（行为不回归）

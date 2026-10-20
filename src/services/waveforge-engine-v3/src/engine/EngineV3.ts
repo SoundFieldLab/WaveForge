@@ -960,7 +960,9 @@ function spatialConfigFromSettings(s: SpatialSettings, inputChannels = 2, sample
     earlyReflectionModel: s.earlyReflectionModel ?? 'cues',
     // 离线引擎各模式都处理同一首立体声音乐，世界对象也不是独立分轨。
     // 保留至少约三分之二直达声，避免多扬声器 HRTF 与原声深度相消。
-    amount: natural ? s.instant.amount * (0.15 + 0.35 * s.instant.amount) : s.instant.amount,
+    // 自然外化不再压得过低：默认 70% 强度时湿声约 0.6（旧约 0.28），保留约 40% 原声保证自然度；
+    // 100% 强度时全湿。清晰定位（focused）仍按用户强度全量。
+    amount: natural ? s.instant.amount * (0.5 + 0.5 * s.instant.amount) : s.instant.amount,
     distanceModel: s.distanceModel ?? 'inverse',
     refDistance: s.refDistance,
     maxDistance: s.maxDistance,
@@ -969,8 +971,8 @@ function spatialConfigFromSettings(s: SpatialSettings, inputChannels = 2, sample
     masterGain: s.masterGain,
     airAbsorption: 'natural',
     coherentInputNormalization: true,
-    musicBedMidCrossoverHz: natural ? 5000 : 0,
-    stereoPreservation: natural ? 0.3 : 0,
+    musicBedMidCrossoverHz: natural ? 3500 : 0,
+    stereoPreservation: natural ? 0.2 : 0,
     occlusionAmount: s.mode === 'world' ? s.world.occlusion : undefined,
   }
 }

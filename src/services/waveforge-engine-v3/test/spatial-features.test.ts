@@ -55,7 +55,8 @@ describe('空间扩展的真实信号路径', () => {
     const backend = (engine as unknown as { _spatialBackend: { setConfig: (value: any) => void } })._spatialBackend
     const spy = vi.spyOn(backend, 'setConfig')
     engine.setSpatialHeadPose({ yaw: 30, pitch: 0, roll: 0 })
-    expect(spy.mock.calls.at(-1)![0].speakers[0].azimuthDeg).toBeCloseTo(-60, 5)
+    // 默认展开角 90° => 左右虚拟扬声器 ±45°，头部 yaw=30° 后位于 -75°。
+    expect(spy.mock.calls.at(-1)![0].speakers[0].azimuthDeg).toBeCloseTo(-75, 5)
     p.spatial.mode = 'headLocked'; engine.setParams(p)
     engine.setSpatialHeadPose({ yaw: 45, pitch: 0, roll: 0 })
     expect(spy.mock.calls.at(-1)![0].speakers[0].azimuthDeg).toBe(0)

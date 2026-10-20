@@ -88,7 +88,7 @@ describe('空间音频虚拟声源静音', () => {
     const baseline = renderRms(engine)
     applySpeakers(engine, params, false, true, 1, 0)
     const zeroVolume = renderRms(engine)
-    // 只保留左源经 HRTF 串到右耳的交叉声（约 -20dB），右节目源本身应消失。
-    expect(zeroVolume.r).toBeLessThan(baseline.r * 0.15)
+    // 只保留左源经 HRTF 串到右耳的交叉声（空间化越强，串音越大），右节目源本身应消失。
+    expect(zeroVolume.r).toBeLessThan(baseline.r * 0.35)
   })
 })
