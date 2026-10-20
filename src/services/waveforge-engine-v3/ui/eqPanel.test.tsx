@@ -96,6 +96,18 @@ describe('HSE 均衡器编辑', () => {
     expect(bridge.getParams().eq.qCompensation).toBe(true)
   })
 
+  it('64 段布局一键生成 64 个对数频点，新频段默认 Q 8.9', () => {
+    const { bridge } = makePanel()
+    fireEvent.click(screen.getByRole('button', { name: '64 段' }))
+    const eq = bridge.getParams().eq
+    expect(eq.bandCount).toBe(64)
+    expect(eq.proBands).toHaveLength(64)
+    expect(eq.proBands[0].frequency).toBeCloseTo(20, 1)
+    expect(eq.proBands[63].frequency).toBeCloseTo(20000, 0)
+    expect(eq.proBands[32].q).toBeCloseTo(8.9, 5)
+    expect(screen.getByText(/64 \/ 64 段/)).toBeTruthy()
+  })
+
   it('20 段清空仍保留段数和 Q，并且专业增益支持引擎的正负 20 dB', () => {
     const { bridge } = makePanel()
     fireEvent.click(screen.getByRole('button', { name: '20 段' }))

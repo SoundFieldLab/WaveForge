@@ -550,3 +550,11 @@ export const SIMPLE_EQ_FREQUENCIES = [80, 250, 1000, 4000, 12000]
 export const PRO_EQ_DEFAULT_BANDS = [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
 /** v3 扩展：20 段（1/2 octave，20Hz–20kHz） */
 export const PRO_EQ_20_BANDS = [20, 31.5, 50, 63, 100, 125, 200, 250, 400, 500, 800, 1000, 1600, 2000, 3200, 4000, 6300, 8000, 12500, 16000, 20000].slice(0, 20)
+/**
+ * v3.5 扩展：64 段（约 1/6 octave，20Hz–20kHz 对数等距）。
+ * 内置场景预设按这组频点落库（每段独立 Q=8.9 + 级联 Q 补偿），使预设打开即为 64 段曲线。
+ */
+export const PRO_EQ_64_BANDS: number[] = Array.from({ length: MAX_PRO_EQ_BANDS }, (_, index) => {
+  const frequency = 20 * Math.pow(1000, index / (MAX_PRO_EQ_BANDS - 1))
+  return frequency < 1000 ? Number(frequency.toFixed(1)) : Number(frequency.toFixed(0))
+})
