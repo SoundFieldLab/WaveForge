@@ -821,7 +821,7 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 
 ### 30.4 回滚单位
 
-- **分支**：`codex/hse-35-main-integration`（本轮接入改动尚未提交，工作区即回滚对象）。
+- **分支**：`codex/hse-35-main-integration`（本轮接入已提交为 `de7c881`，本地已提交、**未 push**；回滚点即该提交，回退到其父提交 `8b90d34`）。
 - **接入前备份**：`.verification/hse35-integration/main-before.zip`（2026-10-20 00:51，1,036,876 bytes）＋迁移前文件/哈希清单 `migration-before.json`、`support-files.json`、`before/scripts/build-v3-worklet.mjs`。
 - **回滚方式**：回退同一批源码、类型、适配器、依赖锁文件、资源与 Worklet（`build:v3-worklet --force` 重建），不要只换 JS bundle；不要通过清空用户 localStorage/IndexedDB 或 `git reset --hard` 处理；`temp/hse-optimise` 快照在用户确认主程序接入正确前保留。
 
