@@ -2,7 +2,6 @@
  * 均衡器页 —— 编辑控制优先，预设库作为快捷起点嵌入 EqPanel
  */
 
-import { motion } from 'framer-motion'
 import { SlidersHorizontal } from 'lucide-react'
 import { EqPanel as BaseEqPanel } from '../eqPanel'
 import { toLegacyTheme } from '../hse-theme'
@@ -54,15 +53,14 @@ export default function EqPage({ controller, theme }: EqPageProps) {
         </div>
         <div className="flex flex-wrap gap-1.5">
           {EQ_PRESETS.map((p) => (
-            <motion.button
+            <button
               key={p.id}
               type="button"
-              whileTap={{ scale: 0.95 }}
               onClick={() => applyPreset(p.gains)}
               className={`hse-glass-button px-3 py-2 rounded-lg text-xs font-medium ${theme.textPrimary}`}
             >
               {p.name}
-            </motion.button>
+            </button>
           ))}
         </div>
       </section>

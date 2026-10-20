@@ -8,7 +8,7 @@
  *  - 数值容差取 1e-3~1e-6 量级（浮点累加误差），dB 类断言用 0.1dB 容差。
  */
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { EngineV3 } from '../src/engine/EngineV3'
 import { SCENE_PRESETS } from '../src/engine/ScenePresets'
 import { createDefaultParams, PRO_EQ_DEFAULT_BANDS } from '../src/types'
@@ -268,6 +268,147 @@ describe('EngineV3 限幅与统计', () => {
     p.reverb.enabled = false
     engine.setParams(p)
     expect(engine.getLatencySamples()).toBe(0)
+  })
+})
+
+describe('EngineV3 低频单声道管理接线', () => {
+  it('低频收窄参数在真实 PCM 链路中压低反相低音侧信号', () => {
+    const fs = 48000
+    const engine = new EngineV3(fs)
+    const params = createDefaultParams(fs)
+    params.lowMonoAmount = 1
+    params.lowMonoCutoffHz = 120
+    params.limiter.enabled = false
+    engine.setParams(params)
+    const length = fs * 2
+    const inputL = new Float32Array(length)
+    const inputR = new Float32Array(length)
+    for (let i = 0; i < length; i++) {
+      const sample = 0.1 * Math.sin((2 * Math.PI * 40 * i) / fs)
+      inputL[i] = sample
+      inputR[i] = -sample
+    }
+    const outputL = new Float32Array(length)
+    const outputR = new Float32Array(length)
+    engine.process([inputL, inputR], [outputL, outputR])
+    let beforePower = 0
+    let afterPower = 0
+    for (let i = fs; i < length; i++) {
+      const before = (inputL[i] - inputR[i]) * 0.5
+      const after = (outputL[i] - outputR[i]) * 0.5
+      beforePower += before * before
+      afterPower += after * after
+    }
+    expect(Math.sqrt(afterPower / beforePower)).toBeLessThan(0.15)
+  })
+
+  it('次声高通位于空间与自定义节点之后并作用于最终 PCM', () => {
+    const fs = 48000
+    const engine = new EngineV3(fs)
+    const params = createDefaultParams(fs)
+    params.subsonicEnabled = true
+    params.subsonicCutoffHz = 20
+    params.limiter.enabled = false
+    engine.setParams(params)
+    const length = fs * 2
+    const inputL = new Float32Array(length)
+    const inputR = new Float32Array(length)
+    for (let i = 0; i < length; i++) {
+      inputL[i] = inputR[i] = 0.1 * Math.sin((2 * Math.PI * 5 * i) / fs)
+    }
+    const outputL = new Float32Array(length)
+    const outputR = new Float32Array(length)
+    engine.process([inputL, inputR], [outputL, outputR])
+    let inputPower = 0
+    let outputPower = 0
+    for (let i = fs; i < length; i++) {
+      inputPower += inputL[i] * inputL[i]
+      outputPower += outputL[i] * outputL[i]
+    }
+    expect(Math.sqrt(outputPower / inputPower)).toBeLessThan(0.1)
+  })
+
+  it('真峰值限幅阈值为低音下潜提供余量，降低限幅器持续衰减', () => {
+    const fs = 48000
+    const engine = new EngineV3(fs)
+    const params = createDefaultParams(fs)
+    params.bassEnhancer.enabled = true
+    params.bassEnhancer.harmonicGain = 0
+    params.bassEnhancer.lowBoostDb = 12
+    params.limiter.thresholdDb = -1
+    params.limiter.truePeak = true
+    engine.setParams(params)
+    const length = fs * 2
+    const inputL = new Float32Array(length)
+    const inputR = new Float32Array(length)
+    for (let i = 0; i < length; i++) {
+      inputL[i] = inputR[i] = 0.5 * Math.sin((2 * Math.PI * 60 * i) / fs)
+    }
+    const outputL = new Float32Array(length)
+    const outputR = new Float32Array(length)
+    engine.process([inputL, inputR], [outputL, outputR])
+    const stats = engine.getStats()
+    expect(stats.truePeakDb).toBeLessThan(-0.5)
+    expect(stats.limiterReductionDb).toBeGreaterThan(-0.5)
+  })
+})
+
+describe('EngineV3 卷积 IR 线程预计算', () => {
+  it('Worklet 引擎使用预分区 IR 后与控制线程参照 PCM 逐样本一致', () => {
+    const fs = 48000
+    const params = createDefaultParams(fs)
+    const ir = new Float32Array(4096)
+    for (let i = 0; i < ir.length; i++) ir[i] = (i === 0 ? 1 : 0) + 0.15 * Math.exp(-i / 700) * Math.sin(i * 0.13)
+    params.reverb.enabled = true
+    params.reverb.mode = 'convolution'
+    params.reverb.convolution = {
+      ...params.reverb.convolution, ir, irName: 'prepared-engine-test', partitionSize: 128,
+      dePeriodize: false, mix: 0.6, preDelayMs: 1,
+    }
+    const control = new EngineV3(fs)
+    control.setParams(params)
+    const prepared = control.createPreparedConvolverIRTransfer()
+    expect(prepared).not.toBeNull()
+
+    const worklet = new EngineV3(fs)
+    worklet.setParams(params, [], prepared!)
+    const inputL = lcg(19, 2048)
+    const inputR = lcg(21, 2048)
+    const outputs = [new Float32Array(2048), new Float32Array(2048), new Float32Array(2048), new Float32Array(2048)]
+    control.process([inputL, inputR], [outputs[0], outputs[1]])
+    worklet.process([inputL, inputR], [outputs[2], outputs[3]])
+    expect(outputs[2]).toEqual(outputs[0])
+    expect(outputs[3]).toEqual(outputs[1])
+  })
+})
+
+describe('EngineV3 空间音乐床配置', () => {
+  it('自定义扬声器差分路由实际映射到侧向节目输入', () => {
+    const engine = new EngineV3(48000)
+    const backend = (engine as unknown as { _spatialBackend: { setConfig: (config: unknown) => void } })._spatialBackend
+    const setConfig = vi.spyOn(backend, 'setConfig')
+    const params = createDefaultParams(48000)
+    params.spatial.mode = 'headLocked'
+    params.spatial.headLocked.layout = 'custom'
+    params.spatial.headLocked.routes = []
+    params.spatial.headLocked.speakers = [{ azimuthDeg: 30, elevationDeg: 0, distance: 1,
+      gain: 1, size: 0, route: 'side' }]
+    engine.setParams(params)
+    expect(setConfig).toHaveBeenLastCalledWith(expect.objectContaining({ speakers: [expect.objectContaining({ channel: 2 })] }))
+  })
+
+  it('实际向空间后端下发非零立体声保留量', () => {
+    const engine = new EngineV3(48000)
+    const backend = (engine as unknown as {
+      _spatialBackend: { setConfig: (config: unknown) => void }
+    })._spatialBackend
+    const setConfig = vi.spyOn(backend, 'setConfig')
+    const params = createDefaultParams(48000)
+    params.spatial.mode = 'instant'
+
+    engine.setParams(params)
+
+    expect(setConfig).toHaveBeenLastCalledWith(expect.objectContaining({ stereoPreservation: 0.3 }))
   })
 })
 

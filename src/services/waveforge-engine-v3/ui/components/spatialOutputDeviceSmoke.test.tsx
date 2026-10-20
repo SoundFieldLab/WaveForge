@@ -72,6 +72,7 @@ describe('空间音频：输出设备选择 UI 冒烟', () => {
     rerender(
       <SpatialStudioLayout mode="instant" spatial={{ ...createDefaultSpatialParams(), sinkId: 'dev-a' }} {...common} />,
     )
-    expect(screen.getByText('已选设备')).toBeTruthy()
+    expect(screen.getByText('双耳渲染')).toBeTruthy()
+    expect(screen.queryByText('已选设备')).toBeNull()
   })
 })

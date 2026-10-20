@@ -25,6 +25,8 @@ import {
 } from './sceneStore'
 import { encodeShareCode, decodeShareCode } from '../src/engine/ShareCodec'
 import { HearingTest, type AudiogramPoint } from '../src/analysis/HearingTest'
+import type { HrtfGrid } from '../src/spatial/types'
+import type { HeadPose } from '../src/spatial/HeadPose'
 
 /** 我的场景存储键（v3 独立命名空间，与 v2 区分） */
 const MY_SCENES_KEY = 'waveforge:v3-my-scenes'
@@ -42,10 +44,15 @@ export interface V3HearingSession {
 }
 
 export interface V3UiBridge {
+  setSpatialHrtf?(grid: HrtfGrid | null): void
+  getSpatialHrtfSource?(): string
+  setSpatialHeadPose?(pose: HeadPose | null): void
   /** 当前参数快照（深拷贝，防止外部突变） */
   getParams(): V3EngineParams
   /** 设置完整快照（引擎 setParams；UI 侧始终传 getParams 深拷贝修改后的版本） */
   setParams(p: V3EngineParams): void
+  /** 宿主或其他界面修改参数后通知 UI；订阅者只读取状态，不重新提交参数。 */
+  subscribeParams?(listener: () => void): () => void
   /** 总开关关闭前的配置；与正在输出的旁路参数分别保存。 */
   getMasterSnapshot(): V3EngineParams | null
   setMasterSnapshot(p: V3EngineParams | null): void
@@ -87,8 +94,16 @@ export interface V3UiBridge {
 
 /** 快照入库前去除不可序列化数据（卷积 IR 数组 → irName 引用语义） */
 function sanitizeForStorage(p: V3EngineParams): V3EngineParams {
-  const clone = JSON.parse(JSON.stringify(p)) as V3EngineParams
-  clone.reverb.convolution.ir = null
+  return JSON.parse(JSON.stringify({
+    ...p,
+    reverb: { ...p.reverb, convolution: { ...p.reverb.convolution, ir: null } },
+  })) as V3EngineParams
+}
+
+/** 运行时参数保留 IR 类型与引用；常规字段仍隔离 UI 的可变对象。 */
+function cloneRuntimeParams(p: V3EngineParams): V3EngineParams {
+  const clone = sanitizeForStorage(p)
+  clone.reverb.convolution.ir = p.reverb.convolution.ir
   return clone
 }
 
@@ -111,12 +126,37 @@ function saveMyScenes(list: ScenePreset[]): void {
   }
 }
 
+/** 桥的可选融合钩子（不传时行为与独立桥完全一致）。 */
+export interface V3UiBridgeOptions {
+  /**
+   * 参数提交钩子：桥完成内部快照更新（cloneRuntimeParams）与 engine.setParams 之后调用。
+   *
+   * 融合层在这里承载所有「提交后」副作用：worklet/宿主参数下发、持久化、
+   * 变速变调前置链同步等；钩子可以对传入快照做就地修订（例如注入当前曲目的
+   * ReplayGain 增益）——修订后的对象就是桥之后 getParams() 读到的当前快照。
+   * applyScene 内部同样走 setParams，因此场景切换自动经过同一路径，
+   * 不会绕过宿主下发与持久化。
+   */
+  submit?: (p: V3EngineParams) => void
+}
+
 /** 把 EngineV3 包装成 UI 桥（融合时在 WaveForge 侧调用） */
-export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBridge {
+export function createV3UiBridge(engine: EngineV3, sampleRate: number, options?: V3UiBridgeOptions): V3UiBridge {
   const hearing = new HearingTest(sampleRate)
   let current: V3EngineParams = createDefaultParams(sampleRate)
   let masterSnapshot: V3EngineParams | null = null
   engine.setParams(current)
+
+  /**
+   * 唯一的参数提交路径（setParams / applyScene / 外部 replace 都走这里）：
+   * 先克隆成桥内快照 → 交给引擎 → 再通知融合层钩子。
+   * 不再有第二条「直接调 engine.setParams」的旁路。
+   */
+  const commitParams = (p: V3EngineParams): void => {
+    current = cloneRuntimeParams(p)
+    engine.setParams(current)
+    options?.submit?.(current)
+  }
 
   const readHearing = (): V3HearingSession => {
     const step = hearing.nextStep()
@@ -130,14 +170,14 @@ export function createV3UiBridge(engine: EngineV3, sampleRate: number): V3UiBrid
   }
 
   const impl: V3UiBridge = {
-    getParams: () => JSON.parse(JSON.stringify(current)) as V3EngineParams,
+    getParams: () => cloneRuntimeParams(current),
     getMasterSnapshot: () => masterSnapshot ? structuredClone(masterSnapshot) : null,
     setMasterSnapshot: (p) => { masterSnapshot = p ? structuredClone(p) : null },
-    setParams: (p: V3EngineParams) => {
-      current = JSON.parse(JSON.stringify(p)) as V3EngineParams
-      engine.setParams(current)
-    },
+    setParams: (p: V3EngineParams) => commitParams(p),
     getStats: () => engine.getStats(),
+    setSpatialHrtf: grid => engine.setSpatialHrtf(grid),
+    getSpatialHrtfSource: () => engine.getSpatialHrtfSource(),
+    setSpatialHeadPose: pose => engine.setSpatialHeadPose(pose),
     getAnalysis: () => engine.getAnalysis(),
     getLatencySamples: () => engine.getLatencySamples(),
     getSampleRate: () => sampleRate,

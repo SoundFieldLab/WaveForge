@@ -3,7 +3,7 @@
  *
  * 出处/许可：
  *  - 相位声码器算法原理：research/docs/音频算法技术文档.md §9（相位差 → 瞬时频率 → 按目标步进累积相位）；
- *    STFT 采用 Hann 窗、N=2048、hop=512（75% 重叠，COLA 条件满足）。
+ *    STFT 采用 Hann 窗、N=2048、分析 hop 最多 512；大伸长倍率自动缩小 hop。
  *  - signalsmith-stretch（MIT）仅作为可选动态适配目标（import() + try/catch 探测，失败回退自研）。
  *  - 内部 FFT 为自研基-2 蝶形（kissfft 思路，BSD-3 参考），与 fft.ts 签名无关，纯模块内使用。
  *
@@ -15,15 +15,15 @@
  *    阶段二：用 Resampler 按 1/pitchScale 重采样（长度 ÷pitchScale，频率 ×pitchScale）。
  *  合成后总长度 ≈ 输入 × rate ✓，音高 = 原 × pitchScale ✓。
  *
- * 内部缓冲设计（自洽的环形 + 滑动结构，均预分配、process 内零分配）：
- *  - 输入侧：帧读取采用"环形窗口"语义——帧 m 需要样本 [m·hop, m·hop+N)，
- *    实现上直接按绝对索引读输入并在越界处补零（流式分段时该窗口即环形缓冲的等价物）；
- *  - 输出侧：合成帧按 m·Hs 直接重叠相加进目标缓冲（滑动 OLA，无二次拷贝）；
- *  - 分析频谱上一帧（prevRe/prevIm）与合成相位累积（synPhase）跨帧保留，reset() 清零。
+ * 缓冲设计（FFT 暂存预分配；输出与窗和按本次目标长度分配）：
+ *  - 输入侧：整段前后补半窗静音，帧按绝对索引读取，越界补零；
+ *  - 输出侧：合成帧按逐帧舍入的目标位置 OLA，裁去开头 padding 并限定目标长度；
+ *  - 分析频谱与合成相位在每个声道/每次整段调用前清零，防止左右串扰。
  *
- * 幅度归一化（WOLA 精确窗和）：分析帧带窗 w（IDFT 重建本身携带 w），合成时再乘 w，
- * 每帧贡献 w²·x；逐样本除以 S(t) = Σ_m w(t-m·Hs)²（帧循环中同步累加）即恢复 x(t)。
- * 对所有 hop/rate 精确（rate=1 时 S=1.5 恒定，rate=2 时 S 随 t 起伏但被精确消除）。
+ * 幅度归一化：分析与合成均乘 Hann 窗，逐样本累计窗平方并在安全阈值之上除以窗和。
+ * 相位重排后无法完全还原瞬态，窗边缘不过度放大微弱数值误差。
+ * 自研相位声码器额外使用谱通量检测瞬态并映射其窗内时间位置；平稳段采用峰值邻域 identity
+ * phase-locking，让谐波簇保持相对相位，减少脉冲拖尾与谐波散开。
  *
  * 确定性：无 Math.random / Date / console；同输入同参数同输出（signalsmith 路径仅在
  * 其纯 DSP 类接口可同步使用时启用，见 isSignalsmithAvailable 注释）。
@@ -57,6 +57,8 @@ export class Stretch {
   private readonly synRe: Float32Array
   private readonly synIm: Float32Array
   private readonly synPhase: Float32Array // N/2+1：合成相位累积
+  private readonly phasePeaks: Int32Array // identity phase-locking 的频谱峰位置
+  private pitchResampler: Resampler | null = null // 同一变调参数下复用系数表
 
   /** signalsmith 纯 DSP 模块缓存（由 isSignalsmithAvailable 探测填充） */
   private static _signalsmith: unknown = null
@@ -75,16 +77,17 @@ export class Stretch {
     this.synRe = new Float32Array(N)
     this.synIm = new Float32Array(N)
     this.synPhase = new Float32Array(N / 2 + 1)
+    this.phasePeaks = new Int32Array(N / 2 + 1)
   }
 
   /** 参数即时生效；rate/semitones 做边界 clamp 避免 NaN/病态伸缩。 */
   setParams(p: StretchParams): void {
-    const r = clamp(p.rate, 0.1, 8)
-    const s = clamp(p.semitones, -36, 36)
+    const r = Number.isFinite(p.rate) ? clamp(p.rate, 0.1, 8) : 1
+    const s = Number.isFinite(p.semitones) ? clamp(p.semitones, -36, 36) : 0
     const ps = Math.pow(2, s / 12)
-    // 参数突变会改变 STFT 合成 hop 与频率映射：旧帧相位/频谱与新参数不匹配，
-    // OLA 归一化失配会导致输出幅度膨胀（审计实测 14 倍炸音）。检测到变化时重置内部状态。
+    // 参数变化时清空相位暂存；变调比例改变时丢弃旧的重采样系数表。
     if (r !== this.rate || s !== this.semitones) {
+      if (s !== this.semitones) this.pitchResampler = null
       this.rate = r
       this.semitones = s
       this.pitchScale = ps
@@ -98,9 +101,12 @@ export class Stretch {
 
   /**
    * 变速/变调处理立体声。输入输出为独立数组（不就地修改输入）。
-   * 返回 { l, r }，长度 ≈ 输入 × rate（±3% 量级，见测试）。
+   * 返回 { l, r }，两声道分别按各自输入长度 × rate 取整。
    */
   processStereo(l: Float32Array, r: Float32Array): { l: Float32Array; r: Float32Array } {
+    if (this.rate === 1 && this.semitones === 0) {
+      return { l: l.slice(), r: r.slice() }
+    }
     if (Stretch._signalsmith) {
       const via = this._processWithSignalsmith(l, r)
       if (via) return via // 适配成功；否则回退自研
@@ -148,37 +154,46 @@ export class Stretch {
   // 自研相位声码器
   // ------------------------------------------------------------------
 
-  /** 单声道处理：先按 rate·pitchScale 时间伸缩（不变调），再按 1/pitchScale 重采样变调。 */
+  /** 单声道处理：每段/每声道独立初始化相位，再先伸缩、后重采样。 */
   private _processChannel(x: Float32Array, rate: number, pitchScale: number): Float32Array {
+    // processStereo 是整段 API，不是流式 API；左右声道和连续调用不得共享上一段的末帧。
+    this.reset()
     const stretched = this._vocoderStretch(x, rate * pitchScale)
     if (Math.abs(pitchScale - 1) < 1e-9) return stretched
     // 变调 = 重采样：inRate=fs·pitchScale, outRate=fs ⇒ 输出长度 ÷pitchScale、频率 ×pitchScale
-    const rs = new Resampler(this.fs * pitchScale, this.fs, 1, 8)
-    return rs.process(stretched)
+    if (!this.pitchResampler) this.pitchResampler = new Resampler(this.fs * pitchScale, this.fs, 1, 8)
+    const resampled = this.pitchResampler.process(stretched)
+    const targetLen = Math.round(x.length * rate)
+    if (resampled.length === targetLen) return resampled
+    const result = new Float32Array(targetLen)
+    result.set(resampled.subarray(0, targetLen))
+    return result
   }
 
   /**
    * 相位声码器时间伸缩（不变调）：帧 m 的幅度取输入帧 m 的 STFT 幅度，
-   * 相位按瞬时频率在合成 hop Hs=HOP·factor 上累积，Hann 窗 OLA。
+   * 相位按瞬时频率在实际合成 hop 上累积，Hann 窗 OLA。
    */
   private _vocoderStretch(x: Float32Array, factor: number): Float32Array {
     const len = x.length
     if (len === 0) return new Float32Array(0)
-    // 帧数：完整帧（窗完全落在输入内）+ 至多一个尾部部分帧（越界补零，保证输出覆盖完整尾段）
-    const full = len >= N ? Math.floor((len - N) / HOP) + 1 : 0
-    const partial = full * HOP < len ? 1 : 0
-    const M = Math.max(1, full + partial)
-    // 合成 hop 取整：保证帧位置与 OLA 下标为整数（非整数 factor 时有效速率近似，偏差 <0.5 样本/帧）
-    const Hs = Math.max(1, Math.round(HOP * factor))
-    const outLen = (M - 1) * Hs + N
+    // 首尾补半窗使首个真实样本位于窗的非零区域，最后一帧有充分的尾部覆盖。
+    const pad = N / 2
+    const paddedLen = len + 2 * pad
+    // 伸长倍率较大时固定 HOP 会令 Hs >= N，帧之间出现整段零样本。
+    // 缩短分析 hop，使合成 hop 不超过半窗（至少 50% 重叠）；其余速率仍用原 512。
+    const Ha = Math.min(HOP, Math.max(1, Math.floor((N / 2) / factor)))
+    // 合成位置用逐帧舍入，避免低倍率下把每帧的分数 hop 丢弃造成累计速率漂移。
+    const M = Math.ceil(paddedLen / Ha)
+    const trimStart = Math.round(pad * factor)
+    const targetLen = Math.round(len * factor)
+    const outLen = trimStart + targetLen
     const out = new Float32Array(outLen)
     const sArr = new Float32Array(outLen) // 窗平方和 S(t)（与 out 同步累加）
     // 幅度归一化（WOLA 精确窗和）：
     // 分析帧带窗 w（IDFT 重建本身携带 w），合成时再乘 w → 每帧贡献 w²·x；
-    // 逐样本 OLA 增益 S(t) = Σ_m w(t-m·Hs)²（按实际有限帧集累加，帧循环中同步生成 sArr）
-    // ⇒ 输出除以 S(t) 即恢复 x(t)。对所有 hop/rate 精确（rate=1 时 S=1.5 恒定；
-    // rate=2 时 S=0.5..1 随 t 起伏，但被逐样本除法精确消除；帧集有限导致首尾 S 不同，
-    // 故不能用单周期表，必须按实际帧位置累加）。
+    // 逐样本 OLA 增益按实际有限帧集累计；合成位置随倍率变化，
+    // 首尾窗和与稳态不同，因此不能只用固定周期表。
     const win = this.win
     const anaRe = this.anaRe
     const anaIm = this.anaIm
@@ -191,21 +206,59 @@ export class Stretch {
     const TWO_PI = 2 * Math.PI
 
     for (let m = 0; m < M; m++) {
-      const start = m * HOP
+      const start = m * Ha
+      const base = Math.round(start * factor)
+      const synthesisHop = m === 0 ? 0 : base - Math.round((start - Ha) * factor)
       // 分析帧（尾部越界补零；流式分段时本窗口即环形缓冲语义）
       for (let i = 0; i < N; i++) {
-        const j = start + i
-        anaRe[i] = (j < len ? x[j] : 0) * win[i]
+        const j = start + i - pad
+        anaRe[i] = (j >= 0 && j < len ? x[j] : 0) * win[i]
         anaIm[i] = 0
       }
       this._fft(anaRe, anaIm, false)
+
+      let maxMagnitude = 0
+      let positiveFlux = 0
+      let previousEnergy = 0
+      let currentEnergy = 0
+      if (m > 0) {
+        for (let k = 0; k <= half; k++) {
+          const magnitude = Math.hypot(anaRe[k], anaIm[k])
+          const previousMagnitude = Math.hypot(prevRe[k], prevIm[k])
+          if (magnitude > maxMagnitude) maxMagnitude = magnitude
+          if (magnitude > previousMagnitude) positiveFlux += magnitude - previousMagnitude
+          previousEnergy += previousMagnitude
+          currentEnergy += magnitude
+        }
+      } else {
+        for (let k = 0; k <= half; k++) {
+          const magnitude = Math.hypot(anaRe[k], anaIm[k])
+          if (magnitude > maxMagnitude) maxMagnitude = magnitude
+        }
+      }
+      // 窗间正谱通量突增表示新瞬态进入分析窗；按当前分析相位重置，避免旧相位拖出前回声。
+      const transient = m > 0 && currentEnergy > 1e-8 && positiveFlux / Math.max(previousEnergy, 1e-8) > 0.25
+      let transientShift = 0
+      if (transient) {
+        // 将瞬态在当前窗内的位置也按伸缩倍率映射，避免只移动分析帧而让脉冲系统性提前/滞后。
+        let strongest = 0
+        let localPosition = N / 2
+        for (let i = 0; i < N; i++) {
+          const inputIndex = start + i - pad
+          if (inputIndex < 0 || inputIndex >= len) continue
+          const magnitude = Math.abs(x[inputIndex] * win[i])
+          if (magnitude > strongest) { strongest = magnitude; localPosition = i }
+        }
+        transientShift = (factor - 1) * localPosition
+      }
 
       // 合成相位：帧 0 用分析相位初始化；之后按瞬时频率累积
       for (let k = 0; k <= half; k++) {
         const re = anaRe[k]
         const im = anaIm[k]
-        if (m === 0) {
-          synPhase[k] = Math.atan2(im, re)
+        if (m === 0 || transient) {
+          const phase = Math.atan2(im, re)
+          synPhase[k] = transient ? phase - ((TWO_PI * k) / N) * transientShift : phase
         } else {
           // 帧间复相位差（数值稳定）：Δφ = ∠(X_m · conj(X_{m-1}))
           const dphi = Math.atan2(
@@ -214,10 +267,36 @@ export class Stretch {
           )
           const wk = (TWO_PI * k) / N // bin 中心角频率（弧度/输入样本）
           // 偏差 = 实测相位差 − 期望 bin 中心相位步进，折叠回 (-π, π]
-          let dev = dphi - HOP * wk
+          let dev = dphi - Ha * wk
           dev -= TWO_PI * Math.round(dev / TWO_PI)
-          const winst = wk + dev / HOP // 瞬时角频率
-          synPhase[k] += Hs * winst // 按合成 hop 累积
+          const winst = wk + dev / Ha // 瞬时角频率
+          synPhase[k] += synthesisHop * winst // 按实际合成 hop 累积
+        }
+      }
+
+      // Identity phase-locking：峰值相位继续沿瞬时频率前进，峰值邻域保留当前帧的相对相位。
+      // 这让谐波簇协同移动，减少持续音相位散开；瞬态帧已重置相位，仍可安全应用此约束。
+      let peakCount = 0
+      const peakFloor = maxMagnitude * 0.03
+      for (let k = 1; k < half; k++) {
+        const magnitude = Math.hypot(anaRe[k], anaIm[k])
+        const leftMagnitude = Math.hypot(anaRe[k - 1], anaIm[k - 1])
+        const rightMagnitude = Math.hypot(anaRe[k + 1], anaIm[k + 1])
+        if (magnitude >= peakFloor && magnitude > leftMagnitude && magnitude >= rightMagnitude) {
+          this.phasePeaks[peakCount++] = k
+        }
+      }
+      for (let p = 0; p < peakCount && !transient; p++) {
+        const peak = this.phasePeaks[p]
+        const left = p === 0 ? 0 : Math.floor((this.phasePeaks[p - 1] + peak) / 2) + 1
+        const right = p + 1 === peakCount ? half : Math.floor((peak + this.phasePeaks[p + 1]) / 2)
+        const peakAnalysisPhase = Math.atan2(anaIm[peak], anaRe[peak])
+        const lockedPeakPhase = synPhase[peak]
+        for (let k = left; k <= right; k++) {
+          if (k === peak) continue
+          const relative = Math.atan2(anaIm[k], anaRe[k]) - peakAnalysisPhase
+          const wrapped = relative - TWO_PI * Math.round(relative / TWO_PI)
+          synPhase[k] = lockedPeakPhase + wrapped
         }
       }
 
@@ -240,8 +319,7 @@ export class Stretch {
 
       // 逆变换 + 合成窗 OLA（同步累加窗平方和 sArr 供归一化）
       this._fft(synRe, synIm, true)
-      const base = m * Hs
-      for (let i = 0; i < N; i++) {
+      for (let i = 0, limit = Math.min(N, outLen - base); i < limit; i++) {
         out[base + i] += win[i] * synRe[i]
         sArr[base + i] += win[i] * win[i]
       }
@@ -255,11 +333,11 @@ export class Stretch {
     // 部分帧（尾部补零）的 IDFT 重建在窗边缘存在相位误差（synRe 非零），
     // 若在此处以极小 S(t) 做除法会把误差放大（审计实测 14 倍炸音）；
     // S 过小处保留窗内原值（w·synRe ≈ 0）→ 自然淡入淡出。
-    for (let i = 0; i < outLen; i++) {
+    for (let i = trimStart; i < outLen; i++) {
       const s = sArr[i]
       if (s > 0.01) out[i] /= s
     }
-    return out
+    return out.slice(trimStart)
   }
 
   // ------------------------------------------------------------------
@@ -328,7 +406,11 @@ export class Stretch {
       } else {
         return null
       }
-      if (typeof s.setTimeFactor === 'function') (s.setTimeFactor as (v: number) => void)(this.rate)
+      if (typeof s.setTimeFactor === 'function') {
+        ;(s.setTimeFactor as (v: number) => void)(this.rate)
+      } else if (this.rate !== 1) {
+        return null // 无时间比例接口时不能保证 rate 语义
+      }
       const process = s.process as
         | ((input: Float32Array, output: Float32Array, samples: number) => number)
         | undefined

@@ -87,7 +87,7 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
 
   const feats = analysis.features
 
-  /** 把 0..1 的柱值序列转成 Catmull-Rom→三次贝塞尔平滑面积路径（SVG viewBox 100×40） */
+  /** 频谱线与面积分开绘制，填充的闭合边不作为信号曲线显示。 */
   const spectrumPath = (() => {
     const n = barData.length
     if (n === 0) return ''
@@ -96,8 +96,8 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
       (i / Math.max(1, n - 1)) * W,
       H - pad - v * (H - pad * 2),
     ])
-    // Catmull-Rom → 三次贝塞尔（张力 0.5）：模拟模拟电路柔和感
-    let d = `M ${pts[0][0].toFixed(2)} ${(H - pad).toFixed(2)} L ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`
+    // Catmull-Rom → 三次贝塞尔，保持频率点的原始位置。
+    let d = `M ${pts[0][0].toFixed(2)} ${pts[0][1].toFixed(2)}`
     for (let i = 0; i < n - 1; i++) {
       const p0 = pts[i - 1] ?? pts[i]
       const p1 = pts[i]
@@ -109,9 +109,9 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
       const c2y = p2[1] - (p3[1] - p1[1]) / 6
       d += ` C ${c1x.toFixed(2)} ${c1y.toFixed(2)}, ${c2x.toFixed(2)} ${c2y.toFixed(2)}, ${p2[0].toFixed(2)} ${p2[1].toFixed(2)}`
     }
-    d += ` L ${pts[n - 1][0].toFixed(2)} ${(H - pad).toFixed(2)} Z`
     return d
   })()
+  const spectrumFillPath = spectrumPath ? `${spectrumPath} L 100 39 L 0 39 Z` : ''
 
   return (
     <div className="grid items-start gap-5 @min-[52rem]:grid-cols-[minmax(0,0.95fr)_minmax(0,1.25fr)]">
@@ -124,10 +124,10 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
         <div className="grid grid-cols-2 gap-3">
           {/* 主卡：整合响度（大字号 + 微型趋势条） */}
           <div className="row-span-3 flex flex-col justify-between gap-5 rounded-xl p-3" style={{ background: theme.accentDim, border: `1px solid ${theme.cardBorder}` }}>
-            <div className={`${theme.textTertiary} text-[10px]`}>整合响度</div>
+            <div className={`${theme.textSecondary} text-[10px]`}>整合响度</div>
             <div className="hse-mono font-semibold leading-none" style={{ color: theme.accentColor, fontSize: 30 }}>
               {Number.isFinite(stats.lufsIntegrated) ? stats.lufsIntegrated.toFixed(1) : '—'}
-              <span className="text-xs ml-0.5 opacity-70">LUFS</span>
+              <span className="text-xs ml-0.5">LUFS</span>
             </div>
             <div className="h-1 overflow-hidden rounded-full" style={{ background: theme.trackBg }}>
               <div className="h-full transition-all duration-300" style={{ width: `${Number.isFinite(stats.lufsIntegrated) ? Math.max(0, Math.min(100, (stats.lufsIntegrated + 30) / 26 * 100)) : 0}%`, background: theme.accentColor }} />
@@ -135,7 +135,7 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
           </div>
           {/* 次级三格 */}
           {[
-            { label: '短时响度', value: Number.isFinite(stats.lufsMomentary) ? stats.lufsMomentary.toFixed(1) + ' LUFS' : '—' },
+            { label: '瞬时响度', value: Number.isFinite(stats.lufsMomentary) ? stats.lufsMomentary.toFixed(1) + ' LUFS' : '—' },
             { label: 'LRA', value: Number.isFinite(stats.lra) ? stats.lra.toFixed(1) + ' LU' : '—' },
             { label: '峰值 / 真峰值', value: `${Number.isFinite(stats.peakDb) ? stats.peakDb.toFixed(1) : '—'} / ${Number.isFinite(stats.truePeakDb) ? stats.truePeakDb.toFixed(1) : '—'} dBFS` },
           ].map((item) => (
@@ -163,13 +163,7 @@ function RealtimeAnalysis({ bridge, theme }: Pick<AnalysisPageProps, 'bridge' | 
           <span className={`${theme.textPrimary} text-sm font-medium`}>实时频谱</span>
         </div>
         <svg role="img" aria-label="实时频谱，20 Hz 至 20 kHz" viewBox="0 0 100 40" preserveAspectRatio="none" className="w-full h-36 rounded-xl" style={{ background: theme.inputBg }}>
-          <defs>
-            <linearGradient id="hse-spec-grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={theme.accentColor} stopOpacity={0.55} />
-              <stop offset="100%" stopColor={theme.accentColor} stopOpacity={0.04} />
-            </linearGradient>
-          </defs>
-          <path d={spectrumPath} fill="url(#hse-spec-grad)" />
+          <path d={spectrumFillPath} fill={theme.accentColor} fillOpacity={0.08} />
           {[10, 20, 30].map((y) => <line key={y} x1="0" x2="100" y1={y} y2={y} stroke={theme.cardBorder} vectorEffect="non-scaling-stroke" />)}
           <path d={spectrumPath} fill="none" stroke={theme.accentColor} strokeWidth={0.7} vectorEffect="non-scaling-stroke" />
         </svg>

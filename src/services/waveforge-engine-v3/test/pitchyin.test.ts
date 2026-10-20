@@ -79,6 +79,32 @@ describe('yinPitch', () => {
     expect(() => yinPitch(new Float32Array(2048), 0)).toThrow('invalid sample rate')
   })
 
+  it('默认与窄频率区间都不选取二倍周期', () => {
+    const x = sine(FS, 440, 4096)
+    for (const opts of [undefined, { minHz: 300, maxHz: 500 }, { minHz: 400, maxHz: 480 }]) {
+      expect(yinPitch(x, FS, opts)).toBeGreaterThan(439)
+      expect(yinPitch(x, FS, opts)).toBeLessThan(441)
+    }
+  })
+
+  it('高频窄区间具有正确 CMND 基准，区间外与非法参数返回 -1', () => {
+    const x = sine(FS, 1200, 2048)
+    expect(yinPitch(x, FS, { minHz: 1100, maxHz: 1300 })).toBeGreaterThan(1190)
+    expect(yinPitch(x, FS, { minHz: 320, maxHz: 350 })).toBe(-1)
+    expect(yinPitch(x, FS, { minHz: 0 })).toBe(-1)
+    expect(yinPitch(x, FS, { maxHz: -200 })).toBe(-1)
+    expect(yinPitch(x, FS, { minHz: 500, maxHz: 400 })).toBe(-1)
+    expect(yinPitch(x, FS, { threshold: NaN })).toBe(-1)
+  })
+
+  it('直流、非有限样本和长度极短均不误报', () => {
+    const dc = new Float32Array(2048).fill(0.4)
+    expect(yinPitch(dc, FS)).toBe(-1)
+    dc[99] = NaN
+    expect(yinPitch(dc, FS)).toBe(-1)
+    expect(yinPitch(sine(FS, 440, 128), FS, { minHz: 10 })).toBe(-1)
+  })
+
   it('确定性：同一输入多次调用结果一致', () => {
     const x = sine(FS, 440, 2048)
     expect(yinPitch(x, FS)).toBe(yinPitch(x, FS))

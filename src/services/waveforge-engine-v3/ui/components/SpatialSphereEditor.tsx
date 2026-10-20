@@ -391,7 +391,7 @@ function NumberField({ label, value, onChange, step, min, max }: {
 }) {
   return (
     <label className="block mb-2">
-      <span className="text-white/70 text-xs mb-1 block">{label}</span>
+      <span className="text-[#536b66] text-xs mb-1 block">{label}</span>
       <input
         type="number"
         value={value}
@@ -450,17 +450,17 @@ function NumericPopup({ index, speaker, theme, onConfirm, onCancel }: {
       onPointerDown={(e) => { if (e.target === e.currentTarget) onCancel() }}
     >
       <div
-        className="w-56 rounded-xl p-4 shadow-2xl"
+        className="w-56 rounded-xl p-4 "
         style={{
           background: theme.panelBg,
           border: `1px solid ${theme.cardBorder}`,
-          backdropFilter: theme.glassBlur,
-          WebkitBackdropFilter: theme.glassBlur,
+          backdropFilter: 'none',
+          WebkitBackdropFilter: 'none',
         }}
         onKeyDown={onKey}
         onPointerDown={(e) => e.stopPropagation()}
       >
-        <div className="text-white/85 text-xs font-medium mb-2">扬声器 #{index + 1} 精确位置</div>
+        <div className="text-[#153a37] text-xs font-medium mb-2">扬声器 #{index + 1} 精确位置</div>
         <NumberField label="方位角（°）" value={az} onChange={setAz} step={1} min={-180} max={180} />
         <NumberField label="仰角（°）" value={el} onChange={setEl} step={1} min={-90} max={90} />
         <NumberField label="距离（m）" value={dist} onChange={setDist} step={0.1} min={MIN_DISTANCE} max={MAX_DISTANCE} />
@@ -587,7 +587,7 @@ export function SpatialSphereEditor({
         style={{
           height: 340,
           border: `1px solid ${theme.cardBorder}`,
-          background: 'radial-gradient(120% 120% at 50% 0%, #14141c 0%, #0b0b11 62%)',
+          background: '#f5f9f7',
         }}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}

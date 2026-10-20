@@ -776,3 +776,78 @@ WaveForge 用 CDP（端口 9223）逐页开，两边截图逐块比对。客户�
 - 空间音效页把混响与 3D 环绕、立体声宽度组合为主次两列；空间音频页的世界漫游、舞台预设和环形扬声器编辑区在宽内容区提前换为并排布局，窄窗回到单列。环形编辑器说明修正为实际的双击选中、右键菜单删除。
 - 动态调音六张不同高度的功能卡采用连续双列流，避免等高网格空洞；分析页的频谱特征和听力结果随卡片宽度换列；调音器引擎信息压为两列，空反馈不预留高度；关于页改为品牌信息与版权、授权、开发者模式响应式卡片。所有既有开关、参数、详细设置和开发者入口保留。
 - 本轮代码验证：HSE UI 测试 14 文件、142 用例通过；`npm run lint` 与 `npm run build` 通过。构建仍有项目既存的大体积 chunk 提示。遵照用户要求，本轮未启动应用，未做 Windows MCP 实机视觉或听感验收。
+
+## 30. HSE 3.5 主程序接入（2026-10-20，分支 `codex/hse-35-main-integration`）
+
+HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨，只读参考）整快照接入主程序：DSP 内核、空间后端、Worklet、宿主、九页 UI、融合层、ReplayGain 曲目生命周期、多声道输入、WAV+MP3 导出、头追桥 IPC 与测试收集一次接入。逐项摘要、文件映射与证据索引见 [docs/HyperSoundEngine/INTEGRATION_3.5.md](docs/HyperSoundEngine/INTEGRATION_3.5.md)；交接原文归档在 [docs/HyperSoundEngine/MAIN_APP_INTEGRATION_HANDOVER.md](docs/HyperSoundEngine/MAIN_APP_INTEGRATION_HANDOVER.md) 与 [UPDATE_3.5.md](docs/HyperSoundEngine/UPDATE_3.5.md)（`temp/` 已被 git 忽略，原文不随仓库分发；归档副本除来源说明外内容未改）。
+
+### 30.1 接入范围
+
+- **DSP 内核**：`EngineV3` 改为引擎自有快照结构化 `setParams`（删除深拷贝与 `JSON.stringify` 比较）；新增 14 个 DSP 模块（动态均衡、Crossfeed、多段压缩模式、ReplayGain、PCM 量化/WAV、`audioBuffer`、`ChannelDownmix`、IR 库、`EffectTransition`/`SampleRamp`、低频管理/次声高通，以及 `vectorKernel`/`wasmSimdKernel` 两个复数乘法内核门面）；全链路 Float64（`setPrecision('float32'|'float64')`，默认 float32；prepared IR/双耳负载带精度校验）；WASM SIMD128 内核运行时自研生成，不可用/低于阈值静默回退纯 TS；9 个音色/动态模块的 `processingOrder` 排序保留，整链固定边界；内部逐位旁路（bit-perfect bypass）保留。
+- **空间后端**：实测 KEMAR HRTF + 球谐插值、双耳卷积（prepared 跨线程接管）、镜像反射/谱反射/FDN/房间氛围、AmbiX 一至三阶与 FOA FuMa 解码、5.1/7.1 上混与双声道折叠、传播延迟/Doppler、世界/舞台/头锁定路由、SOFA 导入（h5wasm）、串扰消除与音箱校准工具、头追姿态输入。
+- **Worklet**：模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移，主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`（2026-10-20 实测 507,004 bytes；旧包 95,518 bytes 不可再用）；帧边界零分配、Host/Worklet 同版消息协议；新增 `npm run verify:worklet`。
+- **宿主**：`EngineV3Host` 支持最多 32 声道离散输入、prepared IR/房间线索跨线程接管、`EngineConfigWork` 诊断遥测（仅诊断，不作验收指标）。
+- **九页 UI**：主页 / 音效场景 / 均衡器 / 空间音效 / 空间音频 / 动态调音 / 分析 / 调音器 / 关于；保持主程序亮色薄荷玻璃风格（主色 `#006A63`），不引入深色/AFG/M3 风格，不恢复 Atmos/360RA/个性化 HRTF 入口。
+- **融合层**：`attachV3Engine` 的 `createV3UiBridge(engine, fs, { submit })` 为唯一提交路径（`setParams`/`applyScene`/外部替换同路），补齐 `subscribeParams` 让系统音量/ReplayGain/总开关等外部更新刷新已打开 UI；IR 去重改为 `WeakMap<Float32Array, token>` 引用身份。
+- **ReplayGain 曲目生命周期**：`IAudioEngineAdapter` 新增可选 `setPlaybackSource`，`V3Adapter` 按 `trackKey/url/isLive/标签` 接收当前曲目；有标签直传、否则 URL 有限区间扫描；切歌/切走/直播/失败均取消旧扫描并清空旧增益，增益不写入持久化、不跨曲目沿用。
+- **多声道输入**：`src/integration/SpatialAudioSource.ts`（PCM/float/extensible WAV、mask/显式标签重排、≤32 输入声道）与主程序 `src/audio/spatialPlaybackInput.ts`（双 deck 独立实例、元素仍是播放时钟、热切换解码成功后原子切 PCM、切 v1/v2 时显式折叠）接线；实时输出仍为双声道，4 声道普通音频不自动猜 FOA。
+- **WAV + MP3 导出**：`exportV3Wav`/`exportV3Mp3` 经 `V3Adapter.exportWav/exportMp3` 注入调音室（`exporting` 状态上提、并发保护、失败 toast）；离线渲染输入上限 8→32 声道并同步当前 SOFA HRTF；导出容器仍是双声道 WAV/MP3，pitch+多声道为近似时基。
+- **头追桥 IPC**：`desktop/hse-head-tracking.cjs` + preload `window.electron.hseHeadTracking`（`hse-head-tracking:state/start/stop`，仅可信窗口、用户显式启动、退出清理）；OSC 桥 `npm run head-tracking:bridge`（UDP 9000 → `ws://127.0.0.1:8989/pose`）；串口/蓝牙权限走受控授权。
+- **测试收集**：`vitest.config.ts` 增加模块 `ui/**/*.test.{ts,tsx}`、`integration/**/*.test.tsx` 与 `src/spatial/test/**`（原有 `test/`、模块 `test/` 不变）；主程序新增 `test/spatialPlaybackInput.test.ts`（验收轮扩到 9 项）、`test/v3AdapterLifecycle.test.tsx`、`test/hseSpatialInputLifecycle.test.ts`（3 项）、`test/hse-desktop.test.cjs`，其中 `test/hse-desktop.test.cjs` 已纳入 `npm run test:desktop`。
+- **依赖/配置**：`h5wasm@0.10.3` 补为直接依赖、`@types/ws`；`index.html` CSP `script-src` 为 `'self' 'wasm-unsafe-eval'`（HDF5/SOFA 与 WASM SIMD，file:// 下实测 basic+SIMD 均 true），`connect-src` 已补 `data: waveforge-media:`（HSE 导出/空间输入 fetch 必需），favicon 改 `./vite.svg`（public 无该文件，图标仍 404，既有小事）；`package.json` 增加 npm script `verify:worklet`（`node scripts/verify-worklet.mjs`）与 `head-tracking:bridge`，把 `test/hse-desktop.test.cjs` 纳入 `test:desktop`，删除 `build.files` 中 `!node_modules/@noble/**/*`（AirPlay 发送端依赖，缺它打包版启动即崩溃）与 `!node_modules/dotenv/**/*`（打包版网易云 API MODULE_NOT_FOUND，**仅改配置、未再打包复验**），并增加许可证/第三方声明打包项。
+
+### 30.2 门禁结果（2026-10-20 验收实测，完整报告见 `.verification/hse35-integration/ACCEPTANCE.md`）
+
+| 门禁 | 命令 | 结果 |
+| --- | --- | --- |
+| 类型检查 | `npm run lint` | **通过，0 error** |
+| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **113 文件（110 passed + 3 skipped）/ 1155 用例 = 1139 passed + 16 skipped + 0 failed**，连跑两遍一致（`tests-final-hse-run1.log` / `tests-final-hse-run2.log`） |
+| 全仓测试 | `npx vitest run --maxWorkers=8` | **325 文件（321 passed + 4 skipped）/ 3165 用例 = 3148 passed + 17 skipped + 0 failed**，81.41s（最终代码状态复跑，`tests-final-full-after-ui-fix.log`）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
+| Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **507,004 bytes（495.1 KiB）**，sha256 `d5e8e708…5a0fe1`（`worklet-build.log`） |
+| Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
+| 生产构建 | `npm run build` | **通过**（vite build） |
+| 打包 file:// | `npm run build:electron:dir:unsigned` + 真实安装目录窗口 | **exit 0，file:// 验收 PASS**：worklet 200/507,004B、WASM basic+SIMD true、HDF5/SOFA 真解析入 IndexedDB、WAV 导出落盘 294,956B、79 个 file:// 请求 0 失败、0 console error（`packaged/FINAL-REPORT.md`、`stage-b3-results.json`） |
+
+说明：全部门禁均在本轮实际执行并通过；打包 exe 为未签名调试产物（EVS/VMP 需交互式密码）；打包 profile 无在线源，联网播放未验证（导出用本机 HTTP 测试 WAV 走真实离线渲染链）。
+
+### 30.3 已取消项（2026-10-20 用户决定，见交接 §2.1，不要当待办）
+
+1. **宿主级零拷贝直通取消**：不做「断开 Worklet、`masterGain` 直连 `analyser`」的端到端零拷贝；内部逐位旁路已满足比特完美，接入只保留该契约。
+2. **192 kHz 不再是硬实时期限目标**：仅保留压力/参考测量，严格期限按 44.1/48/96 kHz 评估，不为 192 kHz 单独开性能任务。
+3. **「整条信号链自由排序」取消**：信号链按固定边界设计（输入解码/下混 → 空间解码 → 分析 → 最终限幅）；既有 9 个音色/动态模块的 `processingOrder` 保留。
+4. **不再继续性能测试与优化**：44.1/48/96 kHz 初始化/切换阶段的少量超预算作为已知边界记录，接入验收只核对既有基线。
+5. 继续不做：Atmos/360RA/真实多声道设备输出/个性化 HRTF、AI 源分离/人声消除、VST2/VST3 宿主、完整音频线程「绝对零分配」宣称。
+
+### 30.4 回滚单位
+
+- **分支**：`codex/hse-35-main-integration`（本轮接入改动尚未提交，工作区即回滚对象）。
+- **接入前备份**：`.verification/hse35-integration/main-before.zip`（2026-10-20 00:51，1,036,876 bytes）＋迁移前文件/哈希清单 `migration-before.json`、`support-files.json`、`before/scripts/build-v3-worklet.mjs`。
+- **回滚方式**：回退同一批源码、类型、适配器、依赖锁文件、资源与 Worklet（`build:v3-worklet --force` 重建），不要只换 JS bundle；不要通过清空用户 localStorage/IndexedDB 或 `git reset --hard` 处理；`temp/hse-optimise` 快照在用户确认主程序接入正确前保留。
+
+### 30.5 边界与残余未完成项（不得把边界写成已完成）
+
+- **打包 file:// 已 PASS，但仅限未签名调试目录**：`build:electron:dir:unsigned` exit 0，HSE/Worklet/WASM/HDF5/SOFA/WAV 导出在真实 file:// 窗口验证通过；**exe 未签名**（EVS/VMP 需交互式密码，发版仍需可交互签名环境）；打包 profile 无在线源，**联网播放未验证**；`dotenv` 打包修复仅改配置、**未再打包复验**；favicon 指向不存在的 `dist/vite.svg`（仅图标 404，既有）。
+- **主观听感**：真实耳机/音箱、真实多声道与 HOA 曲库、HRTF 前后/高度定位、音箱校准真实房间均未主观验收。
+- **真实硬件头追**：仅本机桥协议与模拟输入验证；Web Serial/BLE/DeviceOrientation 真机权限、设备选择与延迟未验收，不能写成硬件已可用。
+- **严格实时期限未通过**：44.1/48/96 kHz 初始化/切换阶段仍有少量超预算（用户已要求不再继续性能优化，作为已知边界记录）。
+- **音频线程并非绝对零分配**：帧边界已零分配，控制线程参数消息与部分分析返回对象仍有已记录的小分配。
+- **导出容器仍双声道**：≤32 声道只作用于输入解码与空间/下混路径，不能宣称多声道文件导出。
+- 以上边界与证据细节见 `docs/HyperSoundEngine/INTEGRATION_3.5.md` §6；验收结论见 `.verification/hse35-integration/ACCEPTANCE.md`（git 忽略，不随仓库分发）。
+
+### 30.6 验收发现与修复（2026-10-20）
+
+- **打包配置**：删除 `package.json` `build.files` 的 `!node_modules/@noble/**/*`——AirPlay 发送端运行时依赖，缺它打包版启动即 `Cannot find module '@noble/ed25519'`（复验：asar 含 @noble 114 条目、打包版正常启动）；删除 `!node_modules/dotenv/**/*`——打包版网易云 API `MODULE_NOT_FOUND` 的根因，**此项仅改配置、未再打包复验**（下次打包生效）。
+- **CSP / 资源**：`index.html` 的 `connect-src *` 改为 `connect-src * data: waveforge-media:`——`*` 不匹配 `data:`/自定义协议，正是 HSE 导出与空间输入 fetch 被 CSP 拒绝的直接原因（修复后打包页内 `fetch(data:audio/wav)` 200/88,244B）；favicon 改 `./vite.svg`（public 无 vite.svg，图标仍 404，既有小事）。
+- **真实缺陷**：`src/audio/spatialPlaybackInput.ts` ① 元素时钟冻结——`MediaElementAudioSourceNode` 断开后 Chromium 不再拉动 `HTMLMediaElement`（进度/seek/ended 停摆），改为 `media → 0 增益 mediaClockGain → deck` 静音支路，`clear()/dispose()` 恢复直连；② 非 WAV + 显式 AmbiX/FuMa 旧实现按 WAV 解码抛错导致逐曲中断，改为按原 URL 普通立体声播放 + 每格式一次 `onSourceWarning`；③ `clear()` 发 `onSourceDecoded(null)` 修状态残留。`attachV3Engine.acceptPlaybackInput(null)` 回滚 `multichannelAuto/multichannelLayout`（注入前备份用户取值）、`setSpatialInputChannelCount(2)`、按 2 声道重接 SoundTouch 前置链并刷新 UI；detach 清理备份。`App.tsx` 导出源改为优先 `audioPlayer.getPlaybackSource()?.url`——多声道接管时元素 `src` 被换成静音时钟 WAV，旧逻辑会把静音时钟当源导出成无声文件。`SpatialRingEditor.tsx` 的 canvas dpr 改为每次 resize 重读（修 `canvasDprAndResize` 守卫）。
+- **UI**：`ui/hse-glass.css` ≤700px 头部允许换行、行高 56px→auto（修 390px 下引擎切换组被裁、关闭键溢出）；`ui/eqPanel.tsx` 均衡器旁路时补「均衡器已旁路」说明卡（此前整页空白）。
+- **新增/更新测试**：`test/spatialPlaybackInput.test.ts` 7→9 项（时钟静音支路、多声道→立体声 null 通知）；新增 `test/hseSpatialInputLifecycle.test.ts`（3 项：多声道参数注入/回滚、非 WAV info toast、pitch+多声道仅前 L/R 进 SoundTouch）；`test/modeIntegrationWiring.test.ts` 同步导出源断言；`attachV3Engine.persistence.test.ts` 10 个用例声明 `IMPORT_TIMEOUT=20_000`（并发 transform 下首轮 import 慢，断言未改）；`test/hse-desktop.test.cjs` 纳入 `npm run test:desktop`。
+
+### 30.7 验收证据索引
+
+- 总报告：`.verification/hse35-integration/ACCEPTANCE.md`；打包：`packaged/FINAL-REPORT.md`、`stage-b3-results.json`、`asar-fix-verification.json`、`exported-WaveForge-HSE-Modified.wav`。
+- 测试：`tests-final-hse-run1.log`、`tests-final-hse-run2.log`、`tests-final-full-maxworkers8.log`、`tests-final-full-after-ui-fix.log`、`tests-final-isolated.log`。
+- 真实 Electron UI / 音频图：`electron-ui/SUMMARY.md`、`11-page-*.png`、`34-final-*.png`；`audio-graph/README.md`、`verify-spatial-playback.json`、`completion-48000-summary.json`、`completion-96000-summary.json`、`wasm-kernel-capability.json`。
+- 打包验收期间临时使用过的 `resources/node_modules` 解析垫片已全部删除，最终 `release/win-unpacked` 无临时文件。
+- 以上证据均在 `.verification/hse35-integration/`（`/.verification/` 已 gitignore）。
+

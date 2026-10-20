@@ -43,6 +43,9 @@ local-page.*
 probe*.wav
 /logs/
 
+# 验证证据与临时产物（HSE 3.5 接入等；根锚定规则，内部含备份 zip/日志/截图，体量大不入库）
+/.verification/
+
 # TV 壁纸扫码上传（dev-tv-server.mjs 存项目根，运行时生成不入库）
 waveforge-wallpapers/
 

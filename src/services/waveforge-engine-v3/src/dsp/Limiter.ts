@@ -1,3 +1,5 @@
+import { SampleRamp } from './SampleRamp'
+import type { AudioBuffer } from './audioBuffer'
 /**
  * WaveForge v3 —— 前瞻限幅器（Lookahead Limiter + True Peak）
  *
@@ -5,12 +7,12 @@
  * 平滑增益 g = min(1, 10^(thresholdDb/20)/peak)，施加到延迟后的音频上（brickwall 零过冲）；
  * 真峰值检测采用 ITU-R BS.1770 的 4× 过采样思路（窗函数 sinc 插值取峰）。本文件为自研实现。
  *
- * 时序（流式逐样本）：在输入时刻 idx 已知 x[0..idx]，输出 y[idx] = x[idx−L]·g[idx]，
- *   g[idx] 由检测窗 [idx−L, idx]（真峰值模式为 [idx−L−3, idx−3]，检测值延迟 3 样本
- *   以便居中 sinc 插值）的峰值决定 —— 瞬时峰值在到达输出前约 L 个样本即被检测并
- *   预先压低增益，因此输出不会过冲，也不产生增益跳变咔哒声。
+ * 时序（流式逐样本）：在输入时刻 idx 已知 x[0..idx]，输出 y[idx] = x[idx−L]·g[idx]。
+ * 检测窗覆盖延迟线内的信号；真峰值 sinc 插值需等待右侧样本，额外保留 7 样本的
+ * 检测历史。增益提前按 attack 平滑；在输出点再按该样本/插值核峰值约束钳位，
+ * 防止不足一个 attack 时间的孤立瞬态穿过限幅阈值。
  *
- * 增益平滑：target < gain 时用 attack（快，默认 0.5ms），否则用 release（慢，默认 150ms）。
+ * lookahead < 7 样本时没有足够未来样本保证插值真峰值，仅保证数字采样峰值。
  * 延迟线 / 检测队列 / 插值历史均预分配，process 内零分配。
  */
 
@@ -21,12 +23,18 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 function onePoleCoef(timeMs: number, fs: number): number {
-  // NaN/Inf 回落 floor（同 Compressor：损坏快照透传 NaN 会让输出永久静音）
-  const ms = Math.max(Number.isFinite(timeMs) ? timeMs : 0.05, 0.05)
+  const ms = Math.max(timeMs, 0.05)
   return 1 - Math.exp(-1 / ((ms / 1000) * fs))
 }
 
 export class Limiter {
+  private readonly thresholdRamp: SampleRamp
+  private readonly lookaheadRamp: SampleRamp
+  private readonly attackRamp: SampleRamp
+  private readonly releaseRamp: SampleRamp
+  private readonly enabledRamp: SampleRamp
+  private readonly truePeakRamp: SampleRamp
+  private enableWarmup = 0
   private fs: number
   private enabled = true
   private thresholdLin = Math.pow(10, -1 / 20)
@@ -38,11 +46,13 @@ export class Limiter {
   // 延迟线（尺寸 lookahead+1，读取最旧样本 = 延迟 L）
   private delayL = new Float32Array(1)
   private delayR = new Float32Array(1)
+  // 插值核覆盖到的输入样本共享峰值约束，输出时作为平滑包络的安全上界
+  private tpDelay = new Float64Array(1)
   private delayW = 0
 
   // 单调递减队列（环形）—— 滑动窗口峰值检测
-  private qIdx = new Int32Array(8)
-  private qVal = new Float32Array(8)
+  private qIdx = new Float64Array(8)
+  private qVal = new Float64Array(8)
   private qHead = 0
   private qTail = 0
   private qLen = 0
@@ -61,6 +71,18 @@ export class Limiter {
   constructor(fs: number) {
     if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
     this.fs = fs
+    this.thresholdRamp = new SampleRamp(fs, this.thresholdLin)
+    this.lookaheadRamp = new SampleRamp(fs, 0)
+    this.attackRamp = new SampleRamp(fs, 0)
+    this.releaseRamp = new SampleRamp(fs, 0)
+    this.enabledRamp = new SampleRamp(fs, 1)
+    this.truePeakRamp = new SampleRamp(fs, 0)
+    // 固定容量保留输入历史；改前瞻只移动读点，不清空音频管线。
+    const size = Math.max(1, Math.floor(fs * 0.1) + 1)
+    this.delayL = new Float32Array(size); this.delayR = new Float32Array(size)
+    this.tpDelay = new Float64Array(size + 8)
+    this.qCap = size + 8
+    this.qIdx = new Float64Array(this.qCap); this.qVal = new Float64Array(this.qCap)
     this.applyParams({ enabled: true, thresholdDb: -1, lookaheadMs: 5, attackMs: 0.5, releaseMs: 150, truePeak: true })
   }
 
@@ -68,7 +90,7 @@ export class Limiter {
     this.applyParams(p)
   }
 
-  /** 参数即时生效：钳制 + 系数重算；缓冲尺寸变化或从禁用切回启用时清空管线 */
+  /** 阈值、时间系数、前瞻读点与开关逐样本 20ms 渐变；固定容量保留历史 */
   private applyParams(p: LimiterSettings): void {
     const wasEnabled = this.enabled
     this.enabled = p.enabled
@@ -78,65 +100,38 @@ export class Limiter {
     this.releaseCoef = onePoleCoef(p.releaseMs, this.fs)
     this.truePeak = p.truePeak
 
-    const size = Math.max(this.lookahead + 1, 1)
-    const cap = Math.max(this.lookahead + 8, 8)
-    if (size !== this.delayL.length || cap !== this.qCap) {
-      this.delayL = new Float32Array(size)
-      this.delayR = new Float32Array(size)
-      this.qIdx = new Int32Array(cap)
-      this.qVal = new Float32Array(cap)
-      this.qCap = cap
-      this.qHead = 0
-      this.qTail = 0
-      this.qLen = 0
-      this.histL.fill(0)
-      this.histR.fill(0)
-      this.histW = 0
-      this.gain = 1
-      this.sampleIndex = 0
-      this.reductionDb = 0
-    }
+    this.thresholdRamp.set(this.thresholdLin)
+    this.lookaheadRamp.set(this.lookahead)
+    this.attackRamp.set(this.attackCoef); this.releaseRamp.set(this.releaseCoef)
+    this.enabledRamp.set(this.enabled ? 1 : 0)
+    this.truePeakRamp.set(this.truePeak ? 1 : 0)
     if (this.enabled && !wasEnabled) {
-      // 禁用期间延迟线未更新，恢复时清空避免陈旧样本
-      this.delayL.fill(0)
-      this.delayR.fill(0)
-      this.qHead = 0
-      this.qTail = 0
-      this.qLen = 0
-      this.histL.fill(0)
-      this.histR.fill(0)
-      this.histW = 0
-      this.gain = 1
-      this.sampleIndex = 0
-      this.reductionDb = 0
+      this.qHead = this.qTail = this.qLen = 0
+      this.enableWarmup = this.lookahead
     }
     // 4× 过采样 sinc 插值系数（Blackman 窗，3 相位 × 8 taps，窗支撑 [-5, 5]）
     if (this.truePeak) {
       for (let ph = 0; ph < 3; ph++) {
         const frac = (ph + 1) / 4
+        let sum = 0
         for (let k = -4; k <= 3; k++) {
           const x = frac - k
           const sx = x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)
           const u = (x + 5) / 10
           const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * u) + 0.08 * Math.cos(4 * Math.PI * u)
           this.interp[ph * 8 + (k + 4)] = sx * w
+          sum += sx * w
         }
+        // 各相位直流增益为 1，避免持续信号被插值核的增益误差误压限
+        for (let t = 0; t < 8; t++) this.interp[ph * 8 + t] /= sum
       }
     }
   }
 
   /** 就地处理立体声（l/r 原地改写）。输出相对输入延迟 lookahead 样本。 */
-  processStereo(l: Float32Array, r: Float32Array): void {
-    if (!this.enabled) {
-      this.reductionDb = 0
-      return
-    }
-    const n = l.length
-    const thr = this.thresholdLin
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
+    const n = Math.min(l.length, r.length)
     const dsize = this.delayL.length
-    const tp = this.truePeak
-    const attack = this.attackCoef
-    const release = this.releaseCoef
     const interp = this.interp
     const histL = this.histL
     const histR = this.histR
@@ -144,45 +139,56 @@ export class Limiter {
       const xl = l[i]
       const xr = r[i]
       const idx = this.sampleIndex
+      const thr = this.thresholdRamp.next(), delay = this.lookaheadRamp.next()
+      const attack = this.attackRamp.next(), release = this.releaseRamp.next()
+      const tpMix = this.truePeakRamp.next(), tp = tpMix > 0
+      let wet = this.enabledRamp.current()
+      if (this.enableWarmup > 0) this.enableWarmup--
+      else wet = this.enabledRamp.next()
+      // 停用时仍保留延迟/插值历史，下一次启用不吐旧音频。
+      if (!this.enabled && wet === 0) {
+        this.delayL[this.delayW] = xl; this.delayR[this.delayW] = xr
+        this.delayW = (this.delayW + 1) % dsize
+        histL[this.histW] = xl; histR[this.histW] = xr; this.histW = (this.histW + 1) & 7
+        this.sampleIndex++; this.reductionDb = 0
+        continue
+      }
+
 
       // 1) 4× 过采样历史写入（位置 idx−7..idx）
       histL[this.histW] = xl
       histR[this.histW] = xr
       this.histW = (this.histW + 1) & 7
 
-      // 2) 检测值：数字峰值 或 真峰值（4× sinc 插值，位置 p = idx−3）
-      let det: number
+      // 2) 数字峰值立即入队；插值位置 idx−3+frac，完整核覆盖 idx−7..idx。
+      // 检测结果按到达时间入队，额外保留 7 样本，不能把当前数字峰值误标成 idx−3。
+      let det = Math.max(Math.abs(xl), Math.abs(xr))
+      const tpSize = this.tpDelay.length
+      this.tpDelay[idx % tpSize] = 0
       if (tp) {
-        det = Math.abs(xl) > Math.abs(xr) ? Math.abs(xl) : Math.abs(xr)
-        if (idx >= 7) {
-          const w = this.histW // 最旧样本位置（x[idx−7]）
-          let vL = 0
-          let vR = 0
-          for (let ph = 0; ph < 3; ph++) {
-            const off = ph * 8
-            let sL = 0
-            let sR = 0
-            for (let t = 0; t < 8; t++) {
-              const c = interp[off + t]
-              const si = (w + t) & 7
-              sL += c * histL[si]
-              sR += c * histR[si]
-            }
-            const aL = Math.abs(sL)
-            const aR = Math.abs(sR)
-            if (aL > vL) vL = aL
-            if (aR > vR) vR = aR
+        const w = this.histW
+        let interpolated = 0
+        for (let ph = 0; ph < 3; ph++) {
+          const off = ph * 8
+          let sL = 0
+          let sR = 0
+          for (let t = 0; t < 8; t++) {
+            const c = interp[off + t]
+            const si = (w + t) & 7
+            sL += c * histL[si]
+            sR += c * histR[si]
           }
-          if (vL > det) det = vL
-          if (vR > det) det = vR
+          interpolated = Math.max(interpolated, Math.abs(sL), Math.abs(sR))
         }
-        this.popStale(idx - 3 - this.lookahead)
-        this.pushBack(idx - 3, det)
-      } else {
-        det = Math.abs(xl) > Math.abs(xr) ? Math.abs(xl) : Math.abs(xr)
-        this.popStale(idx - this.lookahead)
-        this.pushBack(idx, det)
+        det = Math.max(det, det + tpMix * (interpolated - det))
+        // 让插值峰值约束核内所有样本。L>=7 时这些样本均尚未输出。
+        for (let t = 0; t < 8 && t <= idx; t++) {
+          const slot = (idx - t) % tpSize
+          if (interpolated > this.tpDelay[slot]) this.tpDelay[slot] = interpolated
+        }
       }
+      this.popStale(idx - Math.ceil(Math.max(delay, this.lookahead)) - (tp ? 7 : 0))
+      this.pushBack(idx, det)
 
       // 3) 延迟线写入
       this.delayL[this.delayW] = xl
@@ -195,9 +201,22 @@ export class Limiter {
       if (target < this.gain) this.gain += attack * (target - this.gain)
       else this.gain += release * (target - this.gain)
 
-      // 5) 输出 = 延迟 L 样本 × 平滑增益
-      l[i] = this.delayL[this.delayW] * this.gain
-      r[i] = this.delayR[this.delayW] * this.gain
+      // 5) 输出时的硬上界保证任意 attack/lookahead 组合都不会漏掉数字峰值。
+      // 钳位写回包络状态，随后按 release 恢复，避免每次瞬态后立即弹回。
+      const read = (this.delayW - 1 - delay + dsize) % dsize
+      const read0 = Math.floor(read), fraction = read - read0, read1 = (read0 + 1) % dsize
+      const outL = this.delayL[read0] + fraction * (this.delayL[read1] - this.delayL[read0])
+      const outR = this.delayR[read0] + fraction * (this.delayR[read1] - this.delayR[read0])
+      let outputPeak = Math.max(Math.abs(outL), Math.abs(outR))
+      const outputIndex = idx - Math.floor(delay)
+      if (tp && delay >= 7 && outputIndex >= 0) {
+        const interpolated = Math.max(this.tpDelay[outputIndex % tpSize],
+          outputIndex > 0 ? this.tpDelay[(outputIndex - 1) % tpSize] : 0)
+        outputPeak = Math.max(outputPeak, outputPeak + tpMix * (interpolated - outputPeak))
+      }
+      this.gain = Math.min(this.gain, thr / Math.max(outputPeak, 1e-12))
+      l[i] = xl + wet * (outL * this.gain - xl)
+      r[i] = xr + wet * (outR * this.gain - xr)
       this.sampleIndex++
     }
     this.reductionDb = 20 * Math.log10(this.gain)
@@ -236,8 +255,11 @@ export class Limiter {
   }
 
   reset(): void {
+    this.thresholdRamp.reset(); this.lookaheadRamp.reset(); this.attackRamp.reset(); this.releaseRamp.reset()
+    this.enabledRamp.reset(); this.truePeakRamp.reset(); this.enableWarmup = 0
     this.delayL.fill(0)
     this.delayR.fill(0)
+    this.tpDelay.fill(0)
     this.delayW = 0
     this.qHead = 0
     this.qTail = 0
@@ -250,3 +272,4 @@ export class Limiter {
     this.sampleIndex = 0
   }
 }
+

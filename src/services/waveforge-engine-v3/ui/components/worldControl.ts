@@ -37,10 +37,10 @@ export const MAX_FRAME_DT = 0.05
 
 /** 声源 id → 中文名（未知 id 显示原文，WorldPanel 列表与 3D 标签共用） */
 export const SOURCE_NAMES: Record<string, string> = {
-  vocal: '人声',
-  guitar: '吉他',
-  drums: '鼓组',
-  ambience: '环境声',
+  vocal: '声源 A',
+  guitar: '声源 B',
+  drums: '声源 C',
+  ambience: '声源 D',
 }
 
 /** 声源 id → 显示名 */

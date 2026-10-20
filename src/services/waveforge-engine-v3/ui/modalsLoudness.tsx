@@ -152,8 +152,16 @@ export function LoudnessNormModal({ controller, theme, onClose }: { controller: 
       <Slider label="最小增益（衰减下限）" value={ln.minGainDb} min={-60} max={0} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, minGainDb: v } })} display={`${ln.minGainDb.toFixed(1)} dB`} theme={theme} />
       {!ln.useRealtimeMeter && (
         <>
+          <Segmented
+            label="ReplayGain 标签"
+            options={[{ value: 'off' as const, label: '关闭' }, { value: 'track' as const, label: '曲目' }, { value: 'album' as const, label: '专辑' }]}
+            value={ln.replayGainMode ?? 'off'}
+            onChange={(replayGainMode) => patch({ loudnessNormalization: { ...ln, replayGainMode } })}
+            theme={theme}
+            small
+          />
           <Slider label="手动增益" value={ln.externalGainDb} min={-60} max={24} step={0.5} onChange={(v) => patch({ loudnessNormalization: { ...ln, externalGainDb: v } })} display={`${ln.externalGainDb > 0 ? '+' : ''}${ln.externalGainDb.toFixed(1)} dB`} theme={theme} />
-          <InfoLine theme={theme}>与首页音量使用同一增益通道，调整任一处都会同步；正增益可在此精调。</InfoLine>
+          <InfoLine theme={theme}>与首页音量使用同一增益通道；ReplayGain 标签由播放源解析后写入，当前标签增益：{Number.isFinite(ln.replayGainDb) ? `${ln.replayGainDb! > 0 ? '+' : ''}${ln.replayGainDb!.toFixed(2)} dB` : '未读取'}。</InfoLine>
         </>
       )}
       <InfoLine theme={theme}>实时测量模式下增益在 3 s 内平滑过渡；测量未就绪时保持 0 dB。</InfoLine>

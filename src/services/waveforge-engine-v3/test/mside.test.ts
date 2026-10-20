@@ -112,6 +112,16 @@ describe('MidSide', () => {
     }
   })
 
+  it('损坏参数回退中性宽度/声像，不污染整链输出', () => {
+    const [l, r] = makeStereo(512)
+    const l0 = l.slice(), r0 = r.slice()
+    const ms = new MidSide()
+    ms.setParams(Number.NaN, Number.POSITIVE_INFINITY)
+    ms.processStereo(l, r)
+    expect(l).toEqual(l0)
+    expect(r).toEqual(r0)
+  })
+
   it('参数 clamp：width>2 等效 2；vb 越界等效 ±1（行为一致性）', () => {
     const [l1, r1] = makeStereo(128)
     const [l2, r2] = makeStereo(128)
@@ -124,5 +134,67 @@ describe('MidSide', () => {
       expect(Math.abs(l1[i] - l2[i])).toBeLessThan(1e-7)
       expect(Math.abs(r1[i] - r2[i])).toBeLessThan(1e-7)
     }
+  })
+
+  it('低频单声道管理只收窄截止以下的侧信号，高频侧信号保留', () => {
+    const measureSideRatio = (frequency: number) => {
+      const fs = 48000
+      const length = fs * 2
+      const l = new Float32Array(length)
+      const r = new Float32Array(length)
+      for (let i = 0; i < length; i++) {
+        const x = Math.sin((2 * Math.PI * frequency * i) / fs)
+        l[i] = x
+        r[i] = -x
+      }
+      const before = l.slice()
+      const ms = new MidSide(fs)
+      ms.setParams(1, 0, 120, 1)
+      ms.processStereo(l, r)
+      let inputPower = 0
+      let outputPower = 0
+      for (let i = fs; i < length; i++) {
+        inputPower += before[i] * before[i]
+        outputPower += l[i] * l[i]
+      }
+      return Math.sqrt(outputPower / inputPower)
+    }
+    expect(measureSideRatio(40)).toBeLessThan(0.15)
+    expect(measureSideRatio(1000)).toBeGreaterThan(0.98)
+  })
+
+  it('低频单声道管理不改变中声道，且分块处理保持一致', () => {
+    const fs = 48000
+    const length = 2048
+    const [l, r] = makeStereo(length)
+    const blockL = l.slice()
+    const blockR = r.slice()
+    const full = new MidSide(fs)
+    const blocked = new MidSide(fs)
+    full.setParams(1.2, -0.1, 150, 0.75)
+    blocked.setParams(1.2, -0.1, 150, 0.75)
+    full.processStereo(l, r)
+    for (let offset = 0; offset < length; offset += 127) {
+      const end = Math.min(length, offset + 127)
+      blocked.processStereo(blockL.subarray(offset, end), blockR.subarray(offset, end))
+    }
+    for (let i = 0; i < length; i++) {
+      expect(blockL[i]).toBeCloseTo(l[i], 6)
+      expect(blockR[i]).toBeCloseTo(r[i], 6)
+    }
+
+    const monoL = new Float32Array(fs)
+    const monoR = new Float32Array(fs)
+    for (let i = 0; i < fs; i++) {
+      monoL[i] = monoR[i] = Math.sin((2 * Math.PI * 60 * i) / fs)
+    }
+    const expected = monoL.slice()
+    full.reset()
+    full.setParams(1, 0, 120, 1)
+    full.processStereo(monoL, monoR)
+    let maxMonoError = 0
+    for (let i = 0; i < fs; i++) maxMonoError = Math.max(maxMonoError, Math.abs(monoL[i] - expected[i]))
+    expect(maxMonoError).toBeLessThan(1e-6)
+    expect(monoR).toEqual(monoL)
   })
 })

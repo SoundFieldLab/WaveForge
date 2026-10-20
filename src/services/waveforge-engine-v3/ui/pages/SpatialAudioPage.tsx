@@ -1,662 +1,458 @@
-/**
- * 空间音频页 —— Power 按钮 + 模式选择器 + 四模式面板（独立顶级选项卡）
- *
- * 从 SpatialPage 拆分而来（SpatialPage 现仅保留混响/3D环绕/立体声宽度等
- * V3EngineParams 效果卡）。本页只承载空间音频（Spatial Audio）：双耳渲染的
- * 4 档模式（instant/headLocked/world/stage）+ 标准/专业视图切换 +
- * 设置弹窗入口。状态走 V3EngineParams.spatial（EngineV3 第 15 级内联）。
- *
- * 视图模式：标准视图（卡片流，默认）/ 专业视图（四象限工作室布局，窄窗
- * < 900px 自动回退标准视图 useProViewEligible）。
- */
-
-import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { Radio, Headphones, Clapperboard, Settings, Power } from 'lucide-react'
-import { GlassCard, Toggle, Slider, Segmented, RangeStyle } from '../components/Primitives'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { Headphones, RotateCcw, Settings2, Check, Move3D, Speaker, DoorOpen, ArrowUpRight, Volume2 } from 'lucide-react'
+import { ActionBtn, GlassCard, InfoLine, Segmented, Slider, Toggle } from '../components/Primitives'
+import { SpatialSceneEditor, type SpatialScenePoint } from '../components/SpatialSceneEditor'
 import { SpatialModeVisual } from '../components/SpatialModeVisual'
-import { SpatialRingEditor } from '../components/SpatialRingEditor'
-import { SpatialSphereEditor } from '../components/SpatialSphereEditor'
-import { WorldPanel } from '../components/WorldPanel'
-import { SpatialWorldView } from '../components/SpatialWorldView'
+import { SpeakerCalibrationPanel } from '../components/SpeakerCalibrationPanel'
+import { useStateFeedback } from '../feedback'
 import StagePanel from '../components/StagePanel'
-import SpatialStudioLayout, { useProViewEligible } from '../components/SpatialStudioLayout'
-import SpatialSettingsModal from '../components/SpatialSettingsModal'
-import { moveListener, rotateListener } from '../../src/spatial/controller'
-import { stageSpeakers } from '../../src/spatial/scenes'
-import type { HSETheme } from '../hse-theme'
-import type { V3UiBridge } from '../bridge'
-import type { V3ParamsController } from '../hooks'
-import type { SpatialMode, DeepPartial, HeadLockedSettings, SpeakerRoute, VirtualSpeakerCfg } from '../../src/spatial/types'
-import type { PlaybackTimeStore } from '../../../../audio/playbackTimeStore'
-import { createDefaultSpatialParams } from '../../src/spatial/types'
-import { createDefaultSpatialSettings } from '../../src/types'
-import type { SpatialSettings } from '../../src/types'
-import { createLayoutSpeakers, headLockedSpeakers } from '../../src/spatial/layouts'
-// 共享常量（O3 审计：消除与 SpatialStudioLayout 的重复定义，单事实源见 spatialConstants.ts）
+import { importSofaFile } from '../sofaImport'
+import { readActiveHrtf, saveActiveHrtf } from '../hrtfStore'
+import { HeadPoseFilter, type HeadPose } from '../../src/spatial/HeadPose'
+import { HeadTrackingInput } from '../headTrackingInput'
+import { HeadTrackingBridgeControls } from '../components/HeadTrackingBridgeControls'
 import { HEAD_LOCKED_LAYOUTS, SPATIAL_ROOM_OPTIONS } from '../components/spatialConstants'
+import { createLayoutSpeakers, headLockedSpeakers } from '../../src/spatial/layouts'
+import { createDefaultSpatialSettings, type SpatialSettings } from '../../src/types'
+import { computeRelativeDirection } from '../../src/spatial/controller'
+import { resolveMusicSourceRoute } from '../../src/spatial/worldRouting'
+import type { AudioObject, SpatialMode, VirtualSpeakerCfg } from '../../src/spatial/types'
+import { deepMerge, type DeepPartial, type V3ParamsController } from '../hooks'
+import type { V3UiBridge } from '../bridge'
+import type { HSETheme } from '../hse-theme'
+import './spatial-workbench.css'
+import type { PlaybackTimeStore } from '../../../../audio/playbackTimeStore'
 
-interface SpatialAudioPageProps {
-  bridge: V3UiBridge
-  /** V3 引擎参数控制器：空间音频参数在 V3EngineParams.spatial（EngineV3 第 15 级内联）。 */
-  controller: V3ParamsController
-  theme: HSETheme
-  onOpenEffect: (key: string) => void
-  /** 播放时钟 store（可选）：透传给 WorldPanel「随曲目播放」；缺省 = 独立运行无播放器 */
-  playbackTimeStore?: PlaybackTimeStore
+const WorldPreview = lazy(() => import('../components/SpatialWorldView').then(module => ({ default: module.SpatialWorldView })))
+const HOME_LISTENER = { position: { x: 0, y: 1.6, z: 0 }, yaw: 0, pitch: 0, roll: 0 }
+const ROUTES = [{ value: 'l', label: '左声道 L' }, { value: 'r', label: '右声道 R' }, { value: 'both', label: '中央 M' }, { value: 'side', label: '差分 S' }] as const
+const ROUTE_LABELS = { l: '左声道', r: '右声道', both: '中央信号', side: '侧向差分' } as const
+const MODES = [
+  { value: 'instant', label: '快速空间化', hint: '让立体声在身前展开', icon: Headphones },
+  { value: 'headLocked', label: '扬声器布局', hint: '在耳机方向上固定音箱布局', icon: Speaker },
+  { value: 'world', label: '自由声场', hint: '自由摆放声源与听者位置', icon: Move3D },
+  { value: 'stage', label: '房间预设', hint: '从现成的空间开始试听', icon: DoorOpen },
+] as const
+
+function NumberField({ label, value, onChange, min, max, step = 0.1, theme }: {
+  label: string; value: number; onChange: (value: number) => void; min: number; max: number; step?: number; theme: HSETheme
+}) {
+  const [draft, setDraft] = useState(String(Math.round(value * 100) / 100))
+  useEffect(() => setDraft(String(Math.round(value * 100) / 100)), [value])
+  return <label className={`block text-xs ${theme.textSecondary}`}>{label}
+    <input type="number" aria-label={label} min={min} max={max} step={step} value={draft}
+      className={`mt-1.5 min-h-10 w-full rounded-xl border px-3 hse-mono ${theme.textPrimary}`} style={{ background: theme.inputBg, borderColor: theme.cardBorder }}
+      onChange={event => {
+        setDraft(event.target.value)
+        const next = Number(event.target.value)
+        if (event.target.value !== '' && Number.isFinite(next) && next >= min && next <= max) onChange(next)
+      }} onBlur={() => {
+        const next = Number(draft)
+        if (draft !== '' && Number.isFinite(next)) onChange(Math.max(min, Math.min(max, next)))
+        else setDraft(String(value))
+      }} />
+  </label>
 }
 
-/* ── 空间音频：模式选择 + 模式 A（一键空间化）/ 模式 B（头锁定环绕） ──
- *   模式选择器只列 4 档（instant/headLocked/world/stage）；on/off 由顶部
- *   Power 按钮负责（关闭态点击 → 默认开启 instant）。 */
-const SPATIAL_MODES: { value: SpatialMode; label: string }[] = [
-  { value: 'instant', label: '一键空间化' },
-  { value: 'headLocked', label: '头锁定环绕' },
-  { value: 'world', label: '世界漫游' },
-  { value: 'stage', label: '舞台影院' },
-]
+export default function SpatialAudioPage({ bridge, controller, theme, playbackTimeStore, initialView = '3d' }: {
+  bridge: V3UiBridge; controller: V3ParamsController; theme: HSETheme
+  onOpenEffect?: (key: string) => void; playbackTimeStore?: PlaybackTimeStore
+  initialView?: 'top' | 'side' | '3d'
+}) {
+  const spatial = controller.params.spatial ?? createDefaultSpatialSettings()
+  const active = spatial.mode !== 'off'
+  const lastMode = useRef<Exclude<SpatialMode, 'off'>>('instant')
+  if (active) lastMode.current = spatial.mode as Exclude<SpatialMode, 'off'>
+  const mode = active ? spatial.mode : lastMode.current
+  const [advanced, setAdvanced] = useState(false)
+  const [view, setView] = useState<'top' | 'side' | '3d'>(initialView)
+  const [selected, setSelected] = useState<string | null>(null)
+  const [followTrack, setFollowTrack] = useState(false)
+  const [latency, setLatency] = useState(0)
+  const [channels, setChannels] = useState<number | null>(null)
+  const [formatValid, setFormatValid] = useState(true)
+  const [hrtfName, setHrtfName] = useState(() => bridge.getSpatialHrtfSource?.() ?? 'MIT KEMAR compact')
+  const [importing, setImporting] = useState(false)
+  const [hrtfMessage, setHrtfMessage] = useState('')
+  const hrtfInput = useRef<HTMLInputElement>(null)
+  const [tracking, setTracking] = useState(false)
+  const [trackingStatus, setTrackingStatus] = useState('未连接姿态输入')
+  const poseFilter = useRef(new HeadPoseFilter())
+  const trackingInput = useRef<HeadTrackingInput | null>(null)
+  const [trackingUrl, setTrackingUrl] = useState('ws://127.0.0.1:8989/pose')
+  const [bluetoothService, setBluetoothService] = useState('')
+  const [bluetoothCharacteristic, setBluetoothCharacteristic] = useState('')
+  const soloBefore = useRef<boolean[] | null>(null)
+  const compareRef = useRef<HTMLDivElement>(null)
+  useStateFeedback(active, compareRef)
+  const hrtfFeedbackRef = useRef<HTMLDivElement>(null)
+  useStateFeedback(hrtfName, hrtfFeedbackRef)
 
-/** 视图模式：标准（现状卡片流）/ 专业（四象限工作室布局） */
-const SPATIAL_VIEWS: { value: 'standard' | 'pro'; label: string }[] = [
-  { value: 'standard', label: '标准视图' },
-  { value: 'pro', label: '专业视图' },
-]
-
-/** 模式 B 编辑器视图（规划书 §5.3：2D 环形保留为默认，3D 球形为新增视图） */
-const HEAD_LOCKED_EDITOR_VIEWS: { value: 'ring' | 'sphere'; label: string }[] = [
-  { value: 'ring', label: '2D 环形' },
-  { value: 'sphere', label: '3D 球形' },
-]
-
-export default function SpatialAudioPage({ bridge, controller, theme, playbackTimeStore }: SpatialAudioPageProps) {
-  /* ── 空间音频（V3EngineParams.spatial，EngineV3 第 15 级内联） ── */
-  const { params, patch } = controller
-  const spatial: SpatialSettings = params.spatial ?? createDefaultSpatialSettings()
-
-  /* ── 视图模式：标准（默认）/ 专业四象限；窄窗（< 900px）回退标准视图 ── */
-  const [viewMode, setViewMode] = useState<'standard' | 'pro'>('standard')
-  const proEligible = useProViewEligible()
-  const proActive = viewMode === 'pro' && proEligible
-
-  /** 设置弹窗开关（专业视图工具栏「设置」按钮） */
-  const [settingsOpen, setSettingsOpen] = useState(false)
-
-  /** 模式 B 编辑器视图（仅 UI 状态不持久化）：2D 环形（默认）/ 3D 球形
-   *  （规划书 §5.3 新增）；两视图共用 speakers/onChange 链路 */
-  const [headLockedEditorView, setHeadLockedEditorView] = useState<'ring' | 'sphere'>('ring')
-
-  /* 空间激活态与各模式命中（顶级选项卡直接渲染：模式由 spatial.mode 驱动，
-     模式选择器始终展示，Power 按钮负责 on/off） */
-  const spatialActive = spatial.mode !== 'off'
-  const instantActive = spatial.mode === 'instant'
-  const headLockedActive = spatial.mode === 'headLocked'
-  const worldActive = spatial.mode === 'world'
-  const stageActive = spatial.mode === 'stage'
-
-  /** 深合并写入空间参数（V3EngineParams.spatial，EngineV3 第 15 级内联） */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const patchSpatial = (p: any): void => {
-    patch({ spatial: { ...spatial, ...p } })
-  }
-
-  /** Power 开关（顶部 Power 按钮）：on/off 两态。
-   *  - 关闭态（mode==='off'）→ 开启默认 instant（一键空间化）；
-   *  - 开启态（mode!=='off'）→ 关闭（mode='off'）。 */
-  const handlePowerToggle = (): void => {
-    patchSpatial({ mode: spatialActive ? 'off' : 'instant' })
-  }
-
-  /* ── 模式 A 补全：切入 instant 时 2s 轻量过渡提示（showToast 事件，与 IR 导入提示同机制） ── */
-  /** 过渡动画触发信号：模式从非 instant 切入 instant 时自增（初始 0），
-   *  驱动 SpatialModeVisual 播放 2s「空间化过渡动画」（L/R 波形从耳机飘出
-   *  扩散到扬声器，示意声音从颅内→颅内外渐变）；与 toast 提示双通道并存 */
-  const [transitionKey, setTransitionKey] = useState(0)
-  const prevModeRef = useRef(spatial.mode)
+  const patch = (partial: DeepPartial<SpatialSettings>) => controller.patch({ spatial: deepMerge(current(), partial) })
+  // 事件内从桥读取最新值，连续的移动/转头/数值操作不会互相写回旧快照。
+  const current = () => bridge.getParams().spatial ?? createDefaultSpatialSettings()
   useEffect(() => {
-    const prev = prevModeRef.current
-    prevModeRef.current = spatial.mode
-    if (spatial.mode === 'instant' && prev !== 'instant') {
-      window.dispatchEvent(new CustomEvent('showToast', {
-        detail: { message: '已切换至一键空间化：立体声展开为双耳虚拟声场', type: 'info' },
-      }))
-      // 双通道并存：toast 文案提示 + transitionKey 自增触发画布过渡动画
-      setTransitionKey((k) => k + 1)
-    }
-  }, [spatial.mode])
-
-  /* ── 模式 C（世界漫游）：本地 UI 状态 + 事件接线 ── */
-  const [selectedWorldId, setSelectedWorldId] = useState<string | null>(null)
-  const [firstPerson, setFirstPerson] = useState(false)
-
-  /* ── 状态栏实数据（专业视图）：引擎延迟（getStats().engineLatencySamples）500ms
-     轮询 + rAF 帧率测量（CPU 占用的直观代理——无独立 worklet 统计） ── */
-  const [statusInfo, setStatusInfo] = useState<{ latencyMs: number | null; fps: number | null }>({ latencyMs: null, fps: null })
-  useEffect(() => {
-    if (!proActive) return
-    let disposed = false
-    let frames = 0
-    let fpsWindowStart = performance.now()
-    let fps = 0
-    const tickFrame = (): void => {
-      frames++
-      const now = performance.now()
-      if (now - fpsWindowStart >= 1000) {
-        fps = Math.round((frames * 1000) / (now - fpsWindowStart))
-        frames = 0
-        fpsWindowStart = now
+    let cancelled = false
+    void readActiveHrtf().then(grid => {
+      if (grid && !cancelled && bridge.setSpatialHrtf) {
+        if (bridge.getSpatialHrtfSource?.() !== grid.source) bridge.setSpatialHrtf(grid)
+        setHrtfName(grid.source ?? '用户 HRTF')
       }
-      if (!disposed) rafId = requestAnimationFrame(tickFrame)
+    }).catch(() => { if (!cancelled) setHrtfMessage('本地 HRTF 未能恢复，当前使用内置数据。') })
+    return () => { cancelled = true }
+  }, [bridge])
+  useEffect(() => {
+    if (!tracking || !bridge.setSpatialHeadPose) return
+    let lastAt = 0
+    let alive = true
+    const forwardPose = (input: HeadPose | null, timestamp: number) => {
+      if (!alive) return
+      if (!input) { bridge.setSpatialHeadPose?.(null); lastAt = 0; return }
+      const pose = poseFilter.current.update(input, timestamp)
+      if (pose) { lastAt = performance.now(); bridge.setSpatialHeadPose?.(pose); setTrackingStatus(`已接收 · 朝向 ${pose.yaw.toFixed(0)}°`) }
     }
-    let rafId = requestAnimationFrame(tickFrame)
-    const statsTimer = window.setInterval(() => {
+    trackingInput.current = new HeadTrackingInput({ onPose: forwardPose, onStatus: (status, message) => {
+      if (!alive) return
+      if (status === 'connected' && lastAt) return
+      const labels = { connecting: '正在连接姿态设备', connected: '设备已连接，等待姿态', reconnecting: '连接中断，正在重连',
+        stalled: '姿态输入超时', disconnected: '姿态设备已断开', error: '姿态设备连接失败' }
+      setTrackingStatus(message ?? labels[status])
+    } })
+    const receive = (event: Event) => {
+      const detail = (event as CustomEvent<HeadPose & { timestamp?: number }>).detail
+      if (!detail || typeof detail !== 'object') return
+      forwardPose(detail, detail.timestamp ?? performance.now())
+    }
+    window.addEventListener('hse:head-pose', receive)
+    const timer = window.setInterval(() => { if (!lastAt || performance.now() - lastAt > 1500) setTrackingStatus(lastAt ? '姿态输入已中断' : '等待姿态输入') }, 500)
+    return () => { alive = false; window.removeEventListener('hse:head-pose', receive); window.clearInterval(timer)
+      void trackingInput.current?.disconnect(); trackingInput.current = null; bridge.setSpatialHeadPose?.(null) }
+  }, [tracking, bridge])
+  useEffect(() => {
+    const tick = () => {
       const stats = bridge.getStats()
-      const lat = stats?.engineLatencySamples
-      const fs = bridge.getSampleRate()
-      setStatusInfo({
-        latencyMs: Number.isFinite(lat) && Number.isFinite(fs) && fs > 0 ? Math.round((Math.max(0, lat) / fs) * 1000) : null,
-        fps,
-      })
-    }, 500)
-    return () => {
-      disposed = true
-      cancelAnimationFrame(rafId)
-      window.clearInterval(statsTimer)
+      setLatency(stats.engineLatencySamples / bridge.getSampleRate() * 1000)
+      const observed = (stats as typeof stats & { inputChannels?: number }).inputChannels
+      setChannels(observed && observed > 0 ? observed : null)
+      setFormatValid(stats.spatialInputFormatValid !== false)
     }
-  }, [proActive, bridge])
+    tick(); const timer = window.setInterval(tick, 300)
+    return () => window.clearInterval(timer)
+  }, [bridge])
+  useEffect(() => {
+    if (!followTrack || !playbackTimeStore || !active || mode !== 'world' || !spatial.world.trajectories.length) return
+    const timer = window.setInterval(() => {
+      const next = playbackTimeStore.getSnapshot().currentTime
+      if (Math.abs(current().world.playhead - next) >= 0.04) patch({ world: { playhead: next } })
+    }, 50)
+    return () => window.clearInterval(timer)
+  }, [followTrack, playbackTimeStore, active, mode, spatial.world.trajectories.length])
 
-  /** 位移增量（世界系米）→ 引擎听者位置（controller.moveListener 不可变更新） */
-  const handleWorldMove = (d: { x: number; y: number; z: number }): void => {
-    patchSpatial({ world: { listener: moveListener(spatial.world.listener, d) } })
+  const listener = mode === 'world' ? spatial.world.listener : HOME_LISTENER
+  const speakers = headLockedSpeakers(spatial.headLocked)
+  const headPoints: SpatialScenePoint[] = speakers.map((speaker, index) => {
+    const az = speaker.azimuthDeg * Math.PI / 180, el = speaker.elevationDeg * Math.PI / 180
+    return { id: `speaker-${index}`, label: `#${index + 1}`, muted: speaker.muted,
+      position: { x: Math.sin(az) * Math.cos(el) * speaker.distance, y: 1.6 + Math.sin(el) * speaker.distance,
+        z: Math.cos(az) * Math.cos(el) * speaker.distance } }
+  })
+  const worldSources = spatial.world.sources
+  const points: SpatialScenePoint[] = mode === 'world' ? worldSources.map((source, index) => ({
+    id: source.id, label: `${ROUTE_LABELS[resolveMusicSourceRoute(source)]} ${index + 1}`, position: source.position, muted: source.gain === 0,
+  })) : headPoints
+  const selectedPoint = points.find(point => point.id === selected)
+  const selectedIndex = points.findIndex(point => point.id === selected)
+  const selectedSpeaker = mode === 'headLocked' && selectedIndex >= 0 ? speakers[selectedIndex] : undefined
+  const selectedSource = mode === 'world' ? worldSources.find(source => source.id === selected) : undefined
+  const setSpeaker = (index: number, update: Partial<VirtualSpeakerCfg>) => {
+    const head = current().headLocked
+    const list = headLockedSpeakers(head).map((speaker, i) => ({ ...speaker,
+      route: speaker.route ?? (Math.abs(speaker.azimuthDeg) < 0.001 ? 'both' as const : speaker.azimuthDeg < 0 ? 'l' as const : 'r' as const),
+      ...(i === index ? update : {}) }))
+    patch({ headLocked: { layout: 'custom', speakers: list, routes: [] } })
   }
-
-  /** 偏航增量（度，右正）→ 引擎听者朝向（wrap 到 [-180,180)） */
-  const handleWorldRotate = (dYawDeg: number): void => {
-    patchSpatial({ world: { listener: rotateListener(spatial.world.listener, dYawDeg) } })
+  const setSource = (id: string, update: Partial<AudioObject>) => {
+    patch({ world: { sources: current().world.sources.map(source => source.id === id
+      ? { ...source, route: resolveMusicSourceRoute(source), ...update } : source) } })
   }
-
-  /** R 键：听者回默认位姿（原点 1.6m 高、朝前） */
-  const handleWorldReset = (): void => {
-    patchSpatial({ world: { listener: createDefaultSpatialSettings().world.listener } })
-  }
-
-  /** 拖拽声源改位置（世界系）：按 id 局部替换后数组整段回传（patch 深合并语义） */
-  const handleWorldMoveSource = (id: string, position: { x: number; y: number; z: number }): void => {
-    patchSpatial({
-      world: {
-        sources: spatial.world.sources.map((s) => (s.id === id ? { ...s, position } : s)),
-      },
-    })
-  }
-
-  /** 模式 B：切换布局预设（同步 speakers 列表，作为自定义编辑起点） */
-  const handleHeadLockedLayout = (layout: HeadLockedSettings['layout']): void => {
-    const patchObj: DeepPartial<HeadLockedSettings> = { layout }
-    if (layout !== 'custom') {
-      // 切到预设布局：同步 headLocked.speakers（数组整段替换；预设渲染仍走预设表）
-      patchObj.speakers = createLayoutSpeakers(layout)
+  const movePoint = (id: string, position: SpatialScenePoint['position']) => {
+    if (mode === 'world') setSource(id, { position })
+    else {
+      const index = Number(id.slice(8))
+      const relative = computeRelativeDirection(HOME_LISTENER, position)
+      setSpeaker(index, { ...relative, distance: Math.max(0.1, relative.distance) })
     }
-    patchSpatial({ headLocked: patchObj })
   }
+  const reset = () => { patch(createDefaultSpatialSettings()); setSelected(null); soloBefore.current = null }
+  const roomAmount = mode === 'stage' ? spatial.stage.reverbAmount : spatial.instant.roomAmount
 
-  /** 模式 B：扬声器列表编辑统一入口——预设布局下任何 speakers 修改都切到
-   *  "自定义"承接（headLockedSpeakers 在预设分支忽略 speakers 字段，不转
-   *  custom 改动不生效；预设定义不变，随时可重新选回） */
-  const patchSpeakers = (next: VirtualSpeakerCfg[]): void => {
-    patchSpatial(spatial.headLocked.layout === 'custom'
-      ? { headLocked: { speakers: next } }
-      : { headLocked: { layout: 'custom', speakers: next } })
-  }
-
-  const handleChangeSpeaker = (index: number, patchCfg: Partial<VirtualSpeakerCfg>): void => {
-    patchSpeakers(spatial.headLocked.speakers.map((s, i) => (i === index ? { ...s, ...patchCfg } : s)))
-  }
-
-  /** 模式 B：删除第 index 只自定义扬声器（编辑器保证至少保留 1 只） */
-  const handleDeleteSpeaker = (index: number): void => {
-    patchSpeakers(spatial.headLocked.speakers.filter((_, i) => i !== index))
-  }
-
-  /** 模式 B：添加自定义扬声器（上限 16 只；新增点避开已有方位角——固定 0° 与
-   *  预设 C 声道重合会导致拾取二义/极难选中） */
-  const handleAddSpeaker = (): void => {
-    const cur = spatial.headLocked.speakers
-    if (cur.length >= 16) return
-    const used = new Set(cur.map((s) => Math.round(s.azimuthDeg / 15) * 15))
-    let az = 15
-    while (used.has(az) && az < 360) az += 15
-    if (az >= 360) az = 15
-    patchSpeakers([...cur, { azimuthDeg: az, elevationDeg: 0, distance: 2, gain: 1, size: 0 }])
-  }
-
-  /** 模式 B：修改第 index 只扬声器的输入路由（数组整段替换；缺失项按方位角默认补齐
-   *  ——az≤0→'l'、az>0→'r'，与 fusion 缺省语义一致，补齐后 routes 与 speakers 等长） */
-  const handleChangeRoute = (index: number, route: SpeakerRoute): void => {
-    const next = spatial.headLocked.speakers.map((s, i) =>
-      spatial.headLocked.routes[i] ?? (s.azimuthDeg <= 0 ? 'l' : 'r'),
-    )
-    next[index] = route
-    patchSpatial({ headLocked: { routes: next } })
-  }
-
-  /** 模式 B：切换第 index 只自定义扬声器的静音状态（右键菜单「静音/取消静音」）。
-   *  muted 存于扬声器配置内（缺失视为未静音）——整段重建 speakers 数组，
-   *  muted 布尔显式写回（muted:false 保留键位，与 VirtualSpeakerCfg.muted 缺省
-   *  语义一致）；Solo 的「其它全 muted」归一化由编辑器逐只调用本函数完成。 */
-  const handleToggleMuted = (index: number): void => {
-    patchSpeakers(spatial.headLocked.speakers.map((s, i) =>
-      i === index ? { ...s, muted: !(s.muted === true) } : s,
-    ))
-  }
-
-  /** 模式 B：Solo 第 index 只扬声器（右键菜单「Solo」）——基于当前 params
-   *  一次性构建目标数组（其它 muted=true、本只 muted=false），单次 patch。
-   *
-   *  修复 O3 审计 P1：编辑器旧 handleSolo 逐只调 handleToggleMuted，而后者闭包读
-   *  spatial（React state，事件内不更新）构建 next 数组——后一次覆盖前一次，Solo
-   *  多扬声器时仅末只生效。本回调绕过闭包陈旧，从当前快照一次性提交目标态，
-   *  编辑器 handleSolo 优先走本路径（缺省回退逐只翻转，向后兼容）。 */
-  const handleSoloSpeaker = (index: number): void => {
-    patchSpeakers(spatial.headLocked.speakers.map((s, i) =>
-      i === index ? { ...s, muted: false } : { ...s, muted: true },
-    ))
-  }
-
-  /** 模式 B：复制第 index 只自定义扬声器并追加到列表尾部（右键菜单「复制」；
-   *  上限 16，复用 handleAddSpeaker 的容量检查；routes 保持原长——融合层对
-   *  长度不足按方位角就近补齐，不强制对齐，见 fusion headLocked 分支） */
-  const handleDuplicateSpeaker = (index: number): void => {
-    const cur = spatial.headLocked.speakers
-    if (cur.length >= 16) return
-    if (index < 0 || index >= cur.length) return
-    patchSpeakers([...cur, { ...cur[index] }])
-  }
-
-  /* ════════════════ 模式面板渲染器（标准/专业视图共用，不重写编辑交互） ════════════════ */
-
-  /** 模式选择器（标准视图行 / 专业视图工具栏复用同一份） */
-  const modeSelector = (): ReactNode => (
-    <Segmented label="空间音频模式" options={SPATIAL_MODES} value={spatial.mode}
-      onChange={(mode) => patchSpatial({ mode })} theme={theme} small />
-  )
-
-  /**
-   * 模式 A 核心（标准/专业共用）：俯视可视化 + 输入格式检测 + 展开/强度滑块。
-   * 房间模拟/混响走 roomControls()（标准视图模式 A 卡 / 专业视图右下面板分别挂载）。
-   */
-  const instantCore = (): ReactNode => (
-    <div className="space-y-1">
-      <SpatialModeVisual
-        spreadDeg={spatial.instant.spreadDeg}
-        amount={spatial.instant.amount}
-        active={instantActive}
-        theme={theme}
-        transitionKey={transitionKey}
-        onSpreadChange={(v) => patchSpatial({ instant: { spreadDeg: v } })}
-      />
-      {/* 输入格式检测（本波静态显示；多声道输入自动检测后续 wave） */}
-      <div className="flex items-center justify-between px-1">
-        <span className={`${theme.textTertiary} text-[11px]`}>输入格式</span>
-        <span className={`hse-mono ${theme.textSecondary} text-[11px]`}>Stereo (2ch)</span>
-      </div>
-      <Slider
-        label="展开角度" value={spatial.instant.spreadDeg} min={20} max={120} step={1}
-        onChange={(v) => patchSpatial({ instant: { spreadDeg: v } })}
-        display={`${Math.round(spatial.instant.spreadDeg)}°`} theme={theme}
-      />
-      <Slider
-        label="空间化强度" value={Math.round(spatial.instant.amount * 100)} min={0} max={100} step={1}
-        onChange={(v) => patchSpatial({ instant: { amount: v / 100 } })}
-        display={`${Math.round(spatial.instant.amount * 100)}%`} theme={theme}
-      />
+  return <div className="hse-spatial-workbench @container">
+    <header className="hse-spatial-page-header">
+      <div><div className="hse-spatial-eyebrow">HSE / 空间工作台</div>
+        <h1 className={theme.textPrimary}>空间音频</h1>
+        <p className={theme.textSecondary}>在耳机中试听方向、距离与房间感。</p></div>
+      <div className="hse-spatial-master"><span>{active ? '空间音频已启用' : '正在对比原声'}</span>
+        <Toggle label="空间音频" checked={active} onChange={enabled => patch({ mode: enabled ? lastMode.current : 'off' })} theme={theme} /></div>
+    </header>
+    <div className="hse-spatial-mode-grid" role="group" aria-label="空间模式">
+      {MODES.map(({ value, label, hint, icon: Icon }) => <button key={value} type="button" aria-pressed={mode === value}
+        onClick={() => { lastMode.current = value; patch({ mode: value }); setSelected(null) }} className="hse-spatial-mode hse-glass-choice">
+        <Icon size={21} aria-hidden="true" /><span><strong>{label}</strong><small>{hint}</small></span>
+        {mode === value && <Check className="hse-spatial-mode-check" size={16} aria-hidden="true" />}
+      </button>)}
     </div>
-  )
-
-  /** 房间环境控制（标准视图模式 A 卡；非 stage 模式房间路径统一走 instant.room/roomAmount） */
-  const roomControls = (): ReactNode => (
-    <div>
-      <div className="mb-2">
-        <div className={`${theme.textSecondary} text-xs mb-1`}>房间模拟</div>
-        <Segmented label="房间模拟" options={SPATIAL_ROOM_OPTIONS} value={spatial.instant.room} onChange={(v) => patchSpatial({ instant: { room: v } })} theme={theme} small />
+    <div className="hse-spatial-session-strip">
+      <span className="hse-spatial-signal-path"><span>{channels ? `${channels} 声道输入` : '等待音频输入'}</span><ArrowUpRight size={14} /><span>{active ? '空间处理' : '原声旁路'}</span><ArrowUpRight size={14} /><span>耳机双声道</span></span>
+      <span className="hse-mono">{bridge.getSampleRate() / 1000} kHz · {Number.isFinite(latency) ? latency.toFixed(1) : '—'} ms</span>
+      <div ref={compareRef} className="hse-spatial-compare" role="group" aria-label="原声与空间对比">
+        <button type="button" aria-pressed={!active} onClick={() => patch({ mode: 'off' })}>A · 原声</button>
+        <button type="button" aria-pressed={active} onClick={() => patch({ mode: lastMode.current })}>B · 空间</button>
       </div>
-      <Slider
-        label="房间混响" value={Math.round(spatial.instant.roomAmount * 100)} min={0} max={100} step={1}
-        onChange={(v) => patchSpatial({ instant: { roomAmount: v / 100 } })}
-        display={`${Math.round(spatial.instant.roomAmount * 100)}%`} theme={theme}
-      />
     </div>
-  )
-
-  /** 模式 B 核心（标准/专业共用）：顶置/底部仰角层开关（7.1.4）+ 编辑器
-   *  （2D 环形默认 / 3D 球形新增，视图 Segmented 切换）；布局预设见各自视图挂载 */
-  const headLockedCore = (): ReactNode => (
-    <>
-      {(spatial.headLocked.layout === '714' || spatial.headLocked.layout === '514') && (
-        <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 mb-2">
-          <div className="flex items-center gap-2">
-            <span className={`${theme.textSecondary} text-xs`}>顶部仰角层（4 顶置扬声器）</span>
-            <Toggle
-              label="启用顶部仰角层"
-              checked={spatial.headLocked.heightLayer}
-              onChange={(v) => patchSpatial({ headLocked: { heightLayer: v } })}
-              theme={theme}
-            />
-          </div>
-          {spatial.headLocked.layout === '714' && (
-            <div className="flex items-center gap-2">
-              <span className={`${theme.textSecondary} text-xs`}>底部仰角层（2 底部扬声器）</span>
-              <Toggle
-                label="启用底部仰角层"
-                checked={spatial.headLocked.bottomLayer}
-                onChange={(v) => patchSpatial({ headLocked: { bottomLayer: v } })}
-                theme={theme}
-              />
-            </div>
-          )}
-        </div>
-      )}
-      {/* 编辑器视图切换（模式 B 区块）：2D 环形（默认，现状）/ 3D 球形（规划书
-          §5.3 新增）——纯 UI 状态不持久化；两视图共用 speakers/onChange 链路 */}
-      <div className="mb-2">
-        <Segmented
-          label="扬声器编辑视图"
-          options={HEAD_LOCKED_EDITOR_VIEWS}
-          value={headLockedEditorView}
-          onChange={(v) => setHeadLockedEditorView(v)}
-          theme={theme}
-          small
-        />
+    {!formatValid && <p role="alert" className="hse-spatial-alert">音源格式与实际声道数不匹配，当前按普通声道下混。请检查下方的音源设置。</p>}
+    <section className={`hse-spatial-main-controls ${mode === 'headLocked' || mode === 'world' ? 'is-editor-mode' : ''}`} aria-label="空间听感">
+      <Slider label="空间强度" value={Math.round(spatial.instant.amount * 100)} min={0} max={100} step={1}
+        onChange={value => patch({ instant: { amount: value / 100 } })} display={`${Math.round(spatial.instant.amount * 100)}%`} theme={theme} />
+      {mode === 'instant' && <Slider label="展开角度" value={spatial.instant.spreadDeg} min={20} max={120} step={1} disabled={spatial.instant.multichannelAuto}
+        onChange={value => patch({ instant: { spreadDeg: value } })} display={`${spatial.instant.spreadDeg}°`} theme={theme} />}
+      <div><p className={`mb-2 text-xs ${theme.textSecondary}`}>声音风格</p><Segmented label="空间听感" options={[{ value: 'natural', label: '自然外化' }, { value: 'focused', label: '清晰定位' }]}
+        value={spatial.renderStyle ?? 'natural'} onChange={renderStyle => patch({ renderStyle })} theme={theme} small /></div>
+    </section>
+    {mode === 'instant' && <section className="hse-spatial-quick-view" aria-label="立体声空间预览">
+      <div><h2>立体声展开</h2><p>拖动 L、R 调整展开角度；也可以选中后用方向键微调。</p></div>
+      <SpatialModeVisual spreadDeg={spatial.instant.spreadDeg} amount={spatial.instant.amount} active={active}
+        theme={theme} onSpreadChange={spatial.instant.multichannelAuto ? undefined : value => patch({ instant: { spreadDeg: value } })} />
+      <p className="hse-spatial-quick-note">{spatial.renderStyle === 'focused' ? '清晰定位侧重方向感。' : '自然外化混合原始声音与空间声音。'}边试听边调整强度。</p>
+    </section>}
+    <details className="hse-spatial-input-settings"><summary><Volume2 size={16} />音源与声道格式<span>普通音频保持默认即可</span></summary>
+      <div className="mt-3 flex items-center justify-between gap-3"><span className={`text-sm ${theme.textPrimary}`}>按多声道布局空间化</span>
+        <Toggle theme={theme} label="多声道输入空间化" checked={spatial.instant.multichannelAuto}
+          onChange={value => patch({ instant: { multichannelAuto: value, multichannelLayout: 'auto' } })} /></div>
+      {spatial.instant.multichannelAuto && <div className="mt-3"><Segmented label="输入声道布局" theme={theme} small
+        options={[{ value: 'auto', label: '自动布局' }, { value: 'quad', label: 'Quad' }, { value: '51', label: '5.1' }, { value: '71', label: '7.1' }, { value: '714', label: '7.1.4' }]}
+        value={spatial.instant.multichannelLayout} onChange={value => patch({ instant: { multichannelLayout: value } })} /></div>}
+      <div className="mt-4"><label className={`block text-xs ${theme.textSecondary}`}>音源格式
+        <select aria-label="音源格式" className={`hse-glass-input mt-2 min-h-10 w-full rounded-lg px-3 ${theme.textPrimary}`}
+          value={spatial.inputFormat === 'ambix1' ? 'ambix' : spatial.inputFormat ?? 'channels'}
+          onChange={event => patch({ inputFormat: event.currentTarget.value as NonNullable<SpatialSettings['inputFormat']> })}>
+          <option value="channels">普通音频 · 单声道 / 立体声 / 多声道</option>
+          <optgroup label="Ambisonics 文件"><option value="ambix">一阶 AmbiX · 4 声道</option><option value="ambix2">二阶 AmbiX · 9 声道</option><option value="ambix3">三阶 AmbiX · 16 声道</option><option value="fuma">一阶 FuMa · 4 声道</option></optgroup>
+          <optgroup label="立体声上混"><option value="stereo51">立体声 → 虚拟 5.1</option><option value="stereo71">立体声 → 虚拟 7.1</option></optgroup>
+        </select></label>
+        <InfoLine theme={theme}>{spatial.inputFormat?.startsWith('ambix') ? 'AmbiX 文件使用 ACN/SN3D；一、二、三阶分别需要 4、9、16 个声道。'
+          : spatial.inputFormat === 'fuma' ? '四声道 FuMa 文件使用 W、X、Y、Z 顺序。'
+            : spatial.inputFormat === 'stereo51' || spatial.inputFormat === 'stereo71'
+              ? '从立体声派生环绕信号后，在耳机中试听。原文件仍为立体声。'
+              : '普通音频使用此项。多声道文件可在上方指定布局。'}</InfoLine>
       </div>
-      {headLockedEditorView === 'sphere' ? (
-        <SpatialSphereEditor
-          speakers={spatial.headLocked.speakers}
-          editable={true} // 预设布局直接可编辑（编辑动作自动转自定义承接）
-          onChangeSpeaker={handleChangeSpeaker}
-          onDeleteSpeaker={handleDeleteSpeaker}
-          onAddSpeaker={handleAddSpeaker}
-          theme={theme}
-        />
-      ) : (
-        <SpatialRingEditor
-          speakers={spatial.headLocked.speakers}
-          editable={true} // 预设布局直接可编辑（编辑动作自动转自定义承接）
-          onChangeSpeaker={handleChangeSpeaker}
-          onDeleteSpeaker={handleDeleteSpeaker}
-          onAddSpeaker={handleAddSpeaker}
-          routes={spatial.headLocked.routes}
-          onChangeRoute={handleChangeRoute}
-          muted={spatial.headLocked.speakers.map((s) => s.muted === true)}
-          onToggleMuted={handleToggleMuted}
-          onSoloSpeaker={handleSoloSpeaker}
-          onDuplicateSpeaker={handleDuplicateSpeaker}
-          theme={theme}
-        />
-      )}
-    </>
-  )
+    </details>
+    {mode === 'stage' && <GlassCard theme={theme}><StagePanel params={spatial.stage} theme={theme} onChange={stage => patch({ stage })} /></GlassCard>}
 
-  /**
-   * 遮挡/衍射（§4.7 简化模型）：world.occlusion（0..1）经 fusion
-   * spatialConfigFromParams 透传为 SpatialRenderConfig.occlusionAmount——
-   * 增益衰减 + 高频低通（引擎后端已支持），下方滑块 0..100% 直写 world.occlusion。
-   */
-  const worldCore = (): ReactNode => (
-    <div className="@container">
-      <div className="grid items-start gap-5 @min-[48rem]:grid-cols-[minmax(0,1.55fr)_minmax(17rem,1fr)]">
-        <div className="relative h-[340px] rounded-xl overflow-hidden">
-          <SpatialWorldView
-            sources={spatial.world.sources}
-            listener={spatial.world.listener}
-            theme={theme}
-            onMove={handleWorldMove}
-            onRotate={handleWorldRotate}
-            onSelectSource={setSelectedWorldId}
-            onMoveSource={handleWorldMoveSource}
-            selectedId={selectedWorldId}
-            follow={firstPerson}
-            trajectories={spatial.world.trajectories}
-            playhead={spatial.world.playhead}
-          />
-        </div>
+    {(mode === 'headLocked' || mode === 'world') && <section className="hse-spatial-editor hse-glass-card" aria-label="声场编辑工作区">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <h3 className={`text-sm font-semibold ${theme.textPrimary}`}>{mode === 'world' ? '虚拟声源' : '虚拟扬声器'}</h3>
+        <Segmented label="声场观察方式" options={[{ value: 'top', label: '俯视' }, { value: 'side', label: '侧视' }, { value: '3d', label: '3D 预览' }]}
+          value={view} onChange={setView} theme={theme} small />
+      </div>
+      {mode === 'headLocked' && <div className="mb-4"><Segmented label="扬声器布局" options={HEAD_LOCKED_LAYOUTS} value={spatial.headLocked.layout}
+        onChange={layout => { soloBefore.current = null; patch({ headLocked: { layout, speakers: layout === 'custom' ? headLockedSpeakers(current().headLocked) : createLayoutSpeakers(layout), routes: [] } }); setSelected(null) }} theme={theme} small />
+        {(spatial.headLocked.layout === '514' || spatial.headLocked.layout === '714') && <div className="mt-3 flex items-center gap-3"><span className={`text-xs ${theme.textSecondary}`}>顶置声源</span><Toggle label="启用顶置声源" theme={theme} checked={spatial.headLocked.heightLayer} onChange={heightLayer => { setSelected(null); patch({ headLocked: { heightLayer } }) }} /></div>}
+      </div>}
+      <p className={`mb-4 text-xs leading-relaxed ${theme.textSecondary}`}>{mode === 'world' ? '声源固定在场景中；改变听者的位置或朝向，会改变听到的方向。' : '音箱布局随头部朝向移动；头部追踪不会旋转这组布局。'}</p>
+      <div className="hse-spatial-editor-grid">
         <div className="min-w-0">
-          <WorldPanel
-            params={spatial.world}
-            listener={spatial.world.listener}
-            sources={spatial.world.sources}
-            theme={theme}
-            selectedId={selectedWorldId}
-            onChange={(patch) => patchSpatial({ world: patch })}
-            onSelectSource={setSelectedWorldId}
-            onMove={handleWorldMove}
-            onRotate={handleWorldRotate}
-            onReset={handleWorldReset}
-            onToggleFirstPerson={() => setFirstPerson((v) => !v)}
-            keymap={(spatial as any).keymap}
-            playbackTimeStore={playbackTimeStore}
-          />
-
-          {/* 遮挡/衍射（§4.7 简化模型）：增益衰减 + 高频低通，经 fusion 透传后端 */}
-          <div className="mt-5 border-t pt-4" style={{ borderColor: theme.cardBorder }}>
-            <Slider
-              label="遮挡"
-              value={Math.round(spatial.world.occlusion * 100)}
-              min={0}
-              max={100}
-              step={1}
-              onChange={(v) => patchSpatial({ world: { occlusion: v / 100 } })}
-              display={`${Math.round(spatial.world.occlusion * 100)}%`}
-              theme={theme}
-            />
-          </div>
+          {view === '3d' ? <div className="min-w-0"><Suspense fallback={<p className={theme.textSecondary}>正在准备三维预览…</p>}>
+            <WorldPreview sources={points.map((point, index) => ({ id: point.id, position: point.position, gain: mode === 'world' ? worldSources[index].gain : point.muted ? 0 : speakers[index].gain, size: mode === 'world' ? worldSources[index].size : speakers[index].size }))}
+              sourceLabels={Object.fromEntries(points.map(point => [point.id, point.label]))}
+              sourceRoutes={Object.fromEntries(points.map((point, index) => [point.id, ({ l: 'L', r: 'R', both: 'M', side: 'S' } as const)[mode === 'world' ? resolveMusicSourceRoute(spatial.world.sources[index]) : speakers[index].route ?? (Math.abs(speakers[index].azimuthDeg) < 0.001 ? 'both' : speakers[index].azimuthDeg > 0 ? 'r' : 'l')]]))}
+              trajectories={mode === 'world' ? spatial.world.trajectories : undefined} playhead={spatial.world.playhead}
+              listener={listener} theme={theme} selectedId={selected} onSelectSource={setSelected}
+              onMove={() => {}} onRotate={() => {}} onMoveSource={movePoint} />
+          </Suspense></div> : <SpatialSceneEditor points={points} listener={listener} selected={selected} onSelect={setSelected} onMove={movePoint} view={view} theme={theme} />}
+          {view === '3d' && <InfoLine theme={theme}>拖动音箱调整位置，拖动空白处旋转视角。数值编辑在声源属性中。</InfoLine>}
+          {view === '3d' && <div className="hse-spatial-source-list mt-3 flex flex-wrap gap-2" aria-label="声源列表">{points.map(point => <button type="button" key={point.id} aria-pressed={selected === point.id}
+            onClick={() => setSelected(point.id)} className={`hse-glass-button min-h-10 rounded-xl border px-3 text-xs ${theme.textPrimary}`}
+            style={{ borderColor: selected === point.id ? theme.accentColor : theme.cardBorder, background: selected === point.id ? theme.accentDim : theme.inputBg }}>
+            {selected === point.id && <Check size={12} aria-hidden="true" />}{point.label}{point.muted ? ' · 静音' : ''}</button>)}</div>}
+          <div className="mt-3"><ActionBtn theme={theme} ghost disabled={points.length >= 16} onClick={() => {
+            if (mode === 'world') {
+              const id = `声源-${Date.now().toString(36)}`
+              patch({ world: { sources: [...current().world.sources, { id, position: { x: 2, y: 1.6, z: 3 }, gain: 1, size: 0, route: 'r' }] } }); setSelected(id)
+            } else {
+              const list = headLockedSpeakers(current().headLocked)
+              patch({ headLocked: { layout: 'custom', speakers: [...list, { azimuthDeg: 60, elevationDeg: 0, distance: 2, gain: 1, size: 0, route: 'r' }], routes: [] } }); setSelected(`speaker-${list.length}`)
+            }
+          }}>添加{mode === 'world' ? '声源' : '扬声器'}</ActionBtn></div>
         </div>
+        <aside className="hse-spatial-inspector hse-glass-card" aria-label="选中声源属性">
+          <h4 className={`text-sm font-semibold ${theme.textPrimary}`}>{selectedPoint ? `${selectedPoint.label} · 属性` : '选择一个声源'}</h4>
+          {!selectedPoint && <p className={`mt-3 text-xs leading-relaxed ${theme.textSecondary}`}>选择场景中的音箱或下方声源。这里可以调整位置、音量与输入声道。</p>}
+          {selectedPoint && <div className="mt-4 space-y-4">
+            <p className={`hse-mono text-xs ${theme.textSecondary}`}>距听者 {Math.hypot(selectedPoint.position.x - listener.position.x, selectedPoint.position.y - listener.position.y, selectedPoint.position.z - listener.position.z).toFixed(2)} m</p>
+            {selectedSpeaker && <div className="grid grid-cols-2 gap-3">
+              <NumberField label="方位角 °" value={selectedSpeaker.azimuthDeg} min={-180} max={180} theme={theme} onChange={azimuthDeg => setSpeaker(selectedIndex, { azimuthDeg })} />
+              <NumberField label="仰角 °" value={selectedSpeaker.elevationDeg} min={-90} max={90} theme={theme} onChange={elevationDeg => setSpeaker(selectedIndex, { elevationDeg })} />
+              <NumberField label="距离 m" value={selectedSpeaker.distance} min={0.1} max={100} theme={theme} onChange={distance => setSpeaker(selectedIndex, { distance })} />
+            </div>}
+            {selectedSource && <div className="grid grid-cols-3 gap-2">{(['x', 'y', 'z'] as const).map(axis => <NumberField key={axis} label={`${({ x: '左右 X', y: '高度 Y', z: '前后 Z' })[axis]} m`} value={selectedSource.position[axis]} min={-100} max={100} theme={theme}
+              onChange={value => setSource(selectedSource.id, { position: { ...current().world.sources.find(source => source.id === selectedSource.id)!.position, [axis]: value } })} />)}</div>}
+            <Slider label="声源音量" value={selectedSpeaker?.gain ?? selectedSource?.gain ?? 1} min={0} max={2} step={0.01} theme={theme}
+              display={`${(selectedSpeaker?.gain ?? selectedSource?.gain ?? 1).toFixed(2)} ×`} onChange={gain => selectedSpeaker ? setSpeaker(selectedIndex, { gain }) : setSource(selected!, { gain })} />
+            <div><span className={`text-xs ${theme.textSecondary}`}>使用哪个声道</span><div className="mt-2"><Segmented label="声源输入绑定" options={[...ROUTES]}
+              value={selectedSpeaker?.route ?? (selectedSource ? resolveMusicSourceRoute(selectedSource) : selectedSpeaker && Math.abs(selectedSpeaker.azimuthDeg) < 0.001 ? 'both' : selectedSpeaker && selectedSpeaker.azimuthDeg > 0 ? 'r' : 'l')}
+              onChange={route => selectedSpeaker ? setSpeaker(selectedIndex, { route }) : setSource(selected!, { route })} theme={theme} small /></div></div>
+            {selectedSpeaker && <div className="flex flex-wrap gap-2">
+              <ActionBtn theme={theme} ghost onClick={() => setSpeaker(selectedIndex, { muted: !selectedSpeaker.muted })}>{selectedSpeaker.muted ? '取消静音' : '静音'}</ActionBtn>
+              <ActionBtn theme={theme} ghost onClick={() => {
+                const list = headLockedSpeakers(current().headLocked)
+                if (soloBefore.current) { const muted = soloBefore.current; patch({ headLocked: { layout: 'custom', speakers: list.map((speaker, index) => ({ ...speaker, muted: muted[index] ?? false })), routes: [] } }); soloBefore.current = null }
+                else { soloBefore.current = list.map(speaker => speaker.muted ?? false); patch({ headLocked: { layout: 'custom', speakers: list.map((speaker, index) => ({ ...speaker, muted: index !== selectedIndex })), routes: [] } }) }
+              }}>{soloBefore.current ? '退出独奏' : '独奏'}</ActionBtn>
+            </div>}
+            <Slider label="声源扩散" value={Math.round((selectedSpeaker?.size ?? selectedSource?.size ?? 0) * 100)} min={0} max={100} step={1} theme={theme}
+              display={`${Math.round((selectedSpeaker?.size ?? selectedSource?.size ?? 0) * 100)}%`} onChange={value => selectedSpeaker ? setSpeaker(selectedIndex, { size: value / 100 }) : setSource(selected!, { size: value / 100 })} />
+            <div className="flex flex-wrap gap-2"><ActionBtn theme={theme} ghost disabled={points.length >= 16} onClick={() => {
+              if (selectedSource) {
+                const id = `声源-${Date.now().toString(36)}`
+                patch({ world: { sources: [...current().world.sources, { ...selectedSource, id, position: { ...selectedSource.position, x: selectedSource.position.x + 0.5 } }] } }); setSelected(id)
+              } else if (selectedSpeaker) {
+                const list = headLockedSpeakers(current().headLocked)
+                patch({ headLocked: { layout: 'custom', speakers: [...list, { ...selectedSpeaker, azimuthDeg: selectedSpeaker.azimuthDeg + 10 }], routes: [] } }); setSelected(`speaker-${list.length}`)
+              }
+            }}>复制</ActionBtn><ActionBtn theme={theme} ghost disabled={points.length <= 1} onClick={() => {
+              if (mode === 'world') patch({ world: { sources: current().world.sources.filter(source => source.id !== selected), trajectories: current().world.trajectories.filter(item => item.sourceId !== selected) } })
+              else patch({ headLocked: { layout: 'custom', speakers: headLockedSpeakers(current().headLocked).filter((_, index) => index !== selectedIndex), routes: [] } })
+              setSelected(null); soloBefore.current = null
+            }}>删除</ActionBtn></div>
+          </div>}
+        </aside>
       </div>
-    </div>
-  )
-
-  /** 模式 D 核心（标准/专业共用）：场景卡片网格 + 座位 + 房间/氛围滑块 */
-  const stageCore = (): ReactNode => (
-    <StagePanel
-      params={spatial.stage}
-      theme={theme}
-      onChange={(patch) => patchSpatial({ stage: patch })}
-    />
-  )
-
-  const inactiveState = (): ReactNode => (
-    <div className="mt-5 flex items-start gap-4 rounded-2xl p-5" style={{ background: theme.inputBg }}>
-      <Radio className="mt-0.5 h-6 w-6 shrink-0" style={{ color: theme.accentColor }} />
-      <div className="space-y-2">
-        <div className={`${theme.textPrimary} text-sm font-medium`}>空间音频未开启</div>
-        <p className={`${theme.textSecondary} text-xs leading-relaxed`}>点击电源开启，或选择上方任意模式开始双耳渲染。可展开立体声、编辑环绕扬声器、漫游声场或选择舞台座位。</p>
-      </div>
-    </div>
-  )
-
-  return (
-    <div className="@container space-y-5">
-      <RangeStyle theme={theme} />
-
-      {/* 空间音频（Spatial Audio）：Power 按钮 + 模式选择器 + 四模式面板 */}
-      <GlassCard theme={theme}>
-        {/* 头部行：标题 + Power 开关 + 视图切换（标准/专业）+ 状态徽标 */}
-        <div className="flex flex-wrap items-center justify-between mb-4 gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Radio className="w-4 h-4" style={{ color: theme.accentColor }} />
-            <span className={`${theme.textPrimary} text-sm font-medium`}>空间音频</span>
+      <InfoLine theme={theme}>L、R 分别取左、右声道；M 取左右声道的平均，S 取左右声道的差分。这些声源使用同一首音乐，并非分离出的人声或乐器。</InfoLine>
+      {mode === 'world' && <details className="hse-spatial-listener-settings mt-5 border-t pt-4" style={{ borderColor: theme.cardBorder }}>
+        <summary className={`mb-3 cursor-pointer text-sm font-semibold ${theme.textPrimary}`}>听者位置、朝向与声源轨迹</summary>
+        <div className="grid grid-cols-2 gap-3 @min-[40rem]:grid-cols-4">{(['x', 'y', 'z'] as const).map(axis => <NumberField key={axis} label={`听者 ${axis.toUpperCase()} m`} value={listener.position[axis]} min={-100} max={100} theme={theme}
+          onChange={value => patch({ world: { listener: { position: { ...current().world.listener.position, [axis]: value } } } })} />)}
+          <NumberField label="听者朝向 °" value={listener.yaw} min={-180} max={180} step={1} theme={theme} onChange={yaw => patch({ world: { listener: { yaw } } })} />
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2"><ActionBtn theme={theme} ghost onClick={() => patch({ world: { listener: HOME_LISTENER } })}>重置听者</ActionBtn>
+          {(['pitch', 'roll'] as const).map(axis => <NumberField key={axis} label={axis === 'pitch' ? '抬头角 °' : '侧倾角 °'} value={listener[axis]} min={-90} max={90} theme={theme} onChange={value => patch({ world: { listener: { [axis]: value } } })} />)}</div>
+        <details className="mt-4"><summary className={`cursor-pointer text-xs ${theme.textSecondary}`}>声源轨迹</summary>
+          <div className="mt-3"><Slider label="轨迹时刻" value={spatial.world.playhead} min={0} max={Math.max(30, spatial.world.playhead)} step={0.1} theme={theme} display={`${spatial.world.playhead.toFixed(1)} s`} onChange={playhead => patch({ world: { playhead } })} />
+            {selectedSource && <div className="flex flex-wrap gap-2"><ActionBtn theme={theme} ghost onClick={() => {
+              const now = current().world, existing = now.trajectories.find(item => item.sourceId === selected)
+              const keyframes = [...(existing?.keyframes ?? []).filter(frame => frame.t !== now.playhead), { t: now.playhead, position: { ...now.sources.find(source => source.id === selected)!.position } }].sort((a, b) => a.t - b.t)
+              patch({ world: { trajectories: [...now.trajectories.filter(item => item.sourceId !== selected), { sourceId: selected!, keyframes }] } })
+            }}>记录当前位置</ActionBtn><ActionBtn theme={theme} ghost onClick={() => patch({ world: { trajectories: current().world.trajectories.filter(item => item.sourceId !== selected) } })}>清除该轨迹</ActionBtn></div>}
+            {playbackTimeStore && <div className="mt-3 flex items-center gap-3"><span className={`text-xs ${theme.textSecondary}`}>随曲目播放轨迹</span><Toggle label="随曲目播放轨迹" checked={followTrack} onChange={setFollowTrack} theme={theme} /></div>}
           </div>
-          <div className="flex min-w-0 flex-wrap items-center gap-3">
-            {/* Power 开关（on/off 两态，仿主页系统音效 Power 按钮）：
-                关闭态（mode==='off'）= accent 衬底 + 高亮图标（呼应用户开启）；
-                开启态 = 灰衬底 + 淡图标。点击：off→instant(默认一键空间化)/on→off。 */}
-            <button
-              type="button"
-              onClick={handlePowerToggle}
-              role="switch"
-              aria-label="空间音频"
-              aria-checked={spatialActive}
-              className="hse-glass-choice rounded-full p-2.5"
-              title={spatialActive ? '关闭空间音频' : '开启空间音频'}
-            >
-              <Power className={`h-4 w-4 ${spatialActive ? '' : theme.textSecondary}`} style={spatialActive ? { color: theme.accentColor } : undefined} />
-            </button>
-            {/* 视图模式切换：专业视图 = 四象限工作室布局（窄窗 <900px 自动回退标准视图） */}
-            <div className="min-w-0 w-[220px] max-w-full">
-              <Segmented
-                label="空间音频页面视图"
-                options={SPATIAL_VIEWS}
-                value={viewMode}
-                onChange={(v) => setViewMode(v)}
-                theme={theme}
-                small
-              />
+        </details>
+      </details>}
+    </section>}
+
+    <GlassCard theme={theme}>
+      <h3 className={`mb-4 text-sm font-semibold ${theme.textPrimary}`}>房间与氛围</h3>
+      {mode !== 'stage' && <Segmented label="房间预设" options={SPATIAL_ROOM_OPTIONS} value={spatial.instant.room}
+        onChange={room => patch({ instant: { room } })} theme={theme} small />}
+      <div className="mt-4 grid gap-x-8 @min-[40rem]:grid-cols-2">
+        <Slider label="房间混响" value={Math.round(roomAmount * 100)} min={0} max={100} step={1} display={`${Math.round(roomAmount * 100)}%`} theme={theme}
+          onChange={value => mode === 'stage' ? patch({ stage: { reverbAmount: value / 100 } }) : patch({ instant: { roomAmount: value / 100 } })} />
+        <Slider label="环境扩散" value={spatial.ambience.enabled ? Math.round(spatial.ambience.amount * 100) : 0} min={0} max={100} step={1} theme={theme}
+          onChange={value => patch({ ambience: { enabled: value > 0, amount: value / 100 } })} display={`${spatial.ambience.enabled ? Math.round(spatial.ambience.amount * 100) : 0}%`} />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><ActionBtn theme={theme} ghost onClick={reset}><RotateCcw size={14} />重置空间设置</ActionBtn>
+      <button type="button" aria-controls="hse-spatial-advanced" aria-expanded={advanced} onClick={() => setAdvanced(!advanced)} className={`hse-glass-button flex min-h-10 items-center gap-2 rounded-xl px-3 text-xs ${theme.textSecondary}`}><Settings2 size={14} />{advanced ? '收起设备与高级设置' : '设备与高级设置'}</button></div>
+      {advanced && <div id="hse-spatial-advanced" className="hse-spatial-advanced mt-5 space-y-4">
+        {(spatial.inputFormat?.startsWith('ambix') || spatial.inputFormat === 'fuma') && <div className="rounded-2xl border p-4" style={{ borderColor: theme.cardBorder }}>
+          <h4 className={`mb-3 text-sm font-medium ${theme.textPrimary}`}>Ambisonics 声场旋转与缩放</h4>
+          <div className="grid grid-cols-3 gap-3">{(['yawDeg', 'pitchDeg', 'rollDeg'] as const).map((key, index) =>
+            <NumberField key={key} label={['声场右转 °', '声场抬头 °', '声场右倾 °'][index]}
+              value={spatial.ambisonicTransform?.[key] ?? 0} min={-180} max={180} step={1} theme={theme}
+              onChange={value => patch({ ambisonicTransform: { [key]: value } })} />)}</div>
+          <div className="grid gap-x-6 @min-[40rem]:grid-cols-2">{Array.from({ length: spatial.inputFormat === 'ambix3' ? 4 : spatial.inputFormat === 'ambix2' ? 3 : 2 }, (_, order) =>
+            <Slider key={order} label={`${order} 阶增益`} value={spatial.ambisonicTransform?.orderGains[order] ?? 1}
+              min={0} max={2} step={0.05} display={`${(spatial.ambisonicTransform?.orderGains[order] ?? 1).toFixed(2)}×`} theme={theme}
+              onChange={value => { const gains = [...(current().ambisonicTransform?.orderGains ?? [1, 1, 1, 1])]; gains[order] = value; patch({ ambisonicTransform: { orderGains: gains } }) }} />)}</div>
+          <InfoLine theme={theme}>旋转整个声场，分阶增益改变方向性；0 阶保留全向分量，高阶不从普通声道数推断。</InfoLine>
+        </div>}
+        <div className="rounded-2xl border p-4" style={{ borderColor: theme.cardBorder }}>
+          <div className="flex items-center justify-between gap-3"><h4 className={`text-sm font-medium ${theme.textPrimary}`}>头部追踪</h4>
+            <Toggle label="启用头部追踪输入" theme={theme} checked={tracking} disabled={!bridge.setSpatialHeadPose} onChange={setTracking} /></div>
+          <div role="status" className={`mt-2 text-xs ${theme.textSecondary}`}>{tracking ? trackingStatus : '未启用姿态输入'}</div>
+          <div className="mt-3"><ActionBtn theme={theme} ghost disabled={!tracking || !trackingStatus.startsWith('已接收')} onClick={() => bridge.setSpatialHeadPose?.(poseFilter.current.recenter())}>以当前方向校准朝前</ActionBtn></div>
+          <HeadTrackingBridgeControls theme={theme} onBridgeUrl={setTrackingUrl} />
+          {tracking && <div className="mt-3 space-y-3"><div className="flex flex-wrap gap-2">
+            <ActionBtn theme={theme} ghost onClick={() => void trackingInput.current?.connectSerial().catch(error => setTrackingStatus(String(error)))}>连接串口头追</ActionBtn>
+            <ActionBtn theme={theme} ghost onClick={() => void trackingInput.current?.connectDeviceOrientation().catch(error => setTrackingStatus(String(error)))}>连接设备方向传感器</ActionBtn>
+            <ActionBtn theme={theme} ghost onClick={() => void trackingInput.current?.disconnect()}>断开姿态设备</ActionBtn></div>
+            <label className={`block text-xs ${theme.textSecondary}`}>本机姿态桥地址<input aria-label="本机姿态桥地址" value={trackingUrl} onChange={event => setTrackingUrl(event.currentTarget.value)}
+              className={`mt-1.5 min-h-10 w-full rounded-xl border px-3 ${theme.textPrimary}`} style={{ background: theme.inputBg, borderColor: theme.cardBorder }} /></label>
+            <ActionBtn theme={theme} ghost onClick={() => void trackingInput.current?.connectWebSocket(trackingUrl).catch(error => setTrackingStatus(String(error)))}>连接 OSC / 蓝牙姿态桥</ActionBtn>
+            <div className="grid grid-cols-1 gap-3 @min-[40rem]:grid-cols-2">
+              <label className={`text-xs ${theme.textSecondary}`}>蓝牙服务 UUID<input aria-label="蓝牙服务 UUID" value={bluetoothService} onChange={event => setBluetoothService(event.currentTarget.value)}
+                className={`mt-1.5 min-h-10 w-full rounded-xl border px-3 ${theme.textPrimary}`} style={{ background: theme.inputBg, borderColor: theme.cardBorder }} /></label>
+              <label className={`text-xs ${theme.textSecondary}`}>蓝牙通知特征 UUID<input aria-label="蓝牙通知特征 UUID" value={bluetoothCharacteristic} onChange={event => setBluetoothCharacteristic(event.currentTarget.value)}
+                className={`mt-1.5 min-h-10 w-full rounded-xl border px-3 ${theme.textPrimary}`} style={{ background: theme.inputBg, borderColor: theme.cardBorder }} /></label>
             </div>
-            {/* 状态徽标 */}
-            <span className={`flex items-center gap-1.5 text-[11px] ${spatialActive ? theme.textSecondary : theme.textMuted}`}>
-              <span
-                className="w-2 h-2 rounded-full"
-                style={spatialActive
-                  ? { background: theme.accentColor }
-                  : { backgroundColor: theme.trackBg }}
-              />
-              {spatialActive ? '已开启' : '已关闭'}
-            </span>
-            <button type="button" onClick={() => setSettingsOpen(true)} aria-label="空间音频设置"
-              className={`hse-glass-button flex min-h-9 items-center gap-1.5 rounded-xl px-3 text-xs ${theme.textSecondary}`}>
-              <Settings className="h-3.5 w-3.5" />设置
-            </button>
-          </div>
+            <ActionBtn theme={theme} ghost disabled={!bluetoothService.trim() || !bluetoothCharacteristic.trim()}
+              onClick={() => void trackingInput.current?.connectBluetooth({ serviceUuid: bluetoothService.trim(), characteristicUuid: bluetoothCharacteristic.trim() }).catch(error => setTrackingStatus(String(error)))}>连接蓝牙头追</ActionBtn>
+          </div>}
+          <InfoLine theme={theme}>串口支持逐行 JSON 或 yaw,pitch,roll。OSC 与蓝牙可由本机姿态桥转入；方向传感器按屏幕朝上、设备顶边朝前安装。头锁定模式不随追踪旋转。</InfoLine>
         </div>
-
-        {/* 专业视图：顶部工具栏（模式选择器复用 + 输出设备 + 设置弹窗入口）。
-            原播放/暂停按钮为空操作占位（播放由主播放器驱动，空间页拿不到播放
-            控制），已移除——假按钮比没有按钮更误导 */}
-        {proActive ? (
-          <div className="flex flex-wrap items-center gap-2 mb-3">
-            {/* 模式选择器（复用标准视图同款） */}
-            <div className="flex-1 min-w-0">{modeSelector()}</div>
-          </div>
-        ) : (
-          /* 标准视图：模式选择器（on/off 由 Power 按钮负责，选择器只列 4 档） */
-          modeSelector()
-        )}
-
-        {instantActive && (
-          <p className={`${theme.textSecondary} text-xs leading-relaxed mt-4 mb-1`}>
-            双耳渲染：把立体声展开到身前 ±{Math.round(spatial.instant.spreadDeg / 2)}° 的虚拟声场，增强临场感。
-          </p>
-        )}
-
-        {/* 专业视图：四象限工作室布局（左面板摘要 + 中央模式视图 + 环境与设置 + 状态栏） */}
-        {proActive ? (
-          <SpatialStudioLayout
-            mode={spatial.mode}
-            theme={theme}
-            spatial={spatial as any}
-            onPatch={patchSpatial}
-            onHeadLockedLayout={handleHeadLockedLayout}
-            selectedWorldId={selectedWorldId}
-            onSelectWorld={setSelectedWorldId}
-            status={statusInfo}
-          >
-            {instantActive && instantCore()}
-            {headLockedActive && headLockedCore()}
-            {worldActive && worldCore()}
-            {stageActive && stageCore()}
-            {!spatialActive && inactiveState()}
-          </SpatialStudioLayout>
-        ) : (
-          /* 标准视图（现状）：模式 A 面板（主卡内）+ 模式 B/C/D 独立卡片 */
-          <>
-            {/* 模式 A：一键空间化控制面板 */}
-            {instantActive && (
-              <div className="mt-4 grid items-start gap-6 @min-[48rem]:grid-cols-[minmax(0,1.5fr)_minmax(16rem,1fr)]">
-                <div className="min-w-0">{instantCore()}</div>
-                <div className="rounded-2xl p-4" style={{ background: theme.inputBg }}>{roomControls()}</div>
-              </div>
-            )}
-
-            {/* 模式 B：头锁定环绕（插在模式 A 面板之后） */}
-            {headLockedActive && (
-              <GlassCard theme={theme} className="mt-5">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <Headphones className="w-4 h-4" style={{ color: theme.accentColor }} />
-                    <span className={`${theme.textPrimary} text-sm font-medium`}>头锁定环绕</span>
-                  </div>
-                  <span className={`hse-mono ${theme.textTertiary} text-[11px]`}>
-                    {headLockedSpeakers(spatial.headLocked).length} 扬声器
-                  </span>
-                </div>
-                <p className={`${theme.textTertiary} text-[11px] mb-2`}>
-                  双耳环绕：立体声输入按方位路由到环绕虚拟扬声器，声场固定于头部（耳机听感）。
-                </p>
-
-                {/* 布局预设 */}
-                <div className="mb-2">
-                  <div className={`${theme.textSecondary} text-xs mb-1`}>布局预设</div>
-                  <Segmented
-                    label="环绕扬声器布局"
-                    options={HEAD_LOCKED_LAYOUTS}
-                    value={spatial.headLocked.layout}
-                    onChange={(v) => handleHeadLockedLayout(v)}
-                    theme={theme}
-                    small
-                  />
-                </div>
-
-                {headLockedCore()}
-              </GlassCard>
-            )}
-
-            {/* 模式 C：世界漫游（3D 自由漫游 + 小地图 + WASD 操作） */}
-            {worldActive && (
-              <GlassCard theme={theme} className="mt-5">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <Radio className="w-4 h-4" style={{ color: theme.accentColor }} />
-                    <span className={`${theme.textPrimary} text-sm font-medium`}>世界漫游</span>
-                  </div>
-                  <span className={`hse-mono ${theme.textTertiary} text-[11px]`}>
-                    {spatial.world.sources.length} 声源
-                  </span>
-                </div>
-                <p className={`${theme.textTertiary} text-[11px] mb-2`}>
-                  W/A/S/D 移动、Q/E 升降、鼠标拖拽转头、F 第一人称跟随、R 重置听者。
-                </p>
-                {worldCore()}
-              </GlassCard>
-            )}
-
-            {/* 模式 D：舞台/影院（场景预设 + 座位 + 房间氛围） */}
-            {stageActive && (
-              <GlassCard theme={theme} className="mt-5">
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-2">
-                    <Clapperboard className="w-4 h-4" style={{ color: theme.accentColor }} />
-                    <span className={`${theme.textPrimary} text-sm font-medium`}>舞台影院</span>
-                  </div>
-                  <span className={`hse-mono ${theme.textTertiary} text-[11px]`}>
-                    {stageSpeakers(spatial.stage).length} 扬声器
-                  </span>
-                </div>
-                <p className={`${theme.textTertiary} text-[11px] mb-2`}>
-                  固定座位：选择场景预设，微调座位前后与房间氛围。
-                </p>
-                {stageCore()}
-              </GlassCard>
-            )}
-            {!spatialActive && inactiveState()}
-          </>
-        )}
-      </GlassCard>
-
-      {/* 空间音频设置弹窗（专业视图工具栏入口；内部 open=false 时不渲染） */}
-      <SpatialSettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        theme={theme}
-        spatial={spatial as any}
-        onPatch={patchSpatial}
-      />
-    </div>
-  )
+        {mode === 'world' && <div><div className="mt-4 flex items-center gap-3"><Toggle label="物理传播延迟" checked={spatial.world.propagation ?? false} onChange={propagation => patch({ world: { propagation } })} theme={theme} /><span className={`text-xs ${theme.textSecondary}`}>按距离模拟传播时间</span></div>
+        <InfoLine theme={theme}>传播按 343 m/s 计算，移动时延迟连续变化；自然外化混合直达声，清晰定位可使用完整湿声。</InfoLine>
+        <Slider label="全局遮挡衰减" value={Math.round(spatial.world.occlusion * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round(spatial.world.occlusion * 100)}%`} onChange={value => patch({ world: { occlusion: value / 100 } })} /></div>}
+        <div className="rounded-2xl border p-4" style={{ borderColor: theme.cardBorder }}>
+          <div className="flex items-center justify-between gap-3"><h4 className={`text-sm font-medium ${theme.textPrimary}`}>双音箱串扰消除</h4>
+            <Toggle label="启用双音箱串扰消除" theme={theme} checked={spatial.speakerCancellation?.enabled ?? false}
+              onChange={enabled => patch({ speakerCancellation: { enabled } })} /></div>
+          <InfoLine theme={theme}>用于两只音箱的立体声回放；佩戴耳机时关闭。它与耳机 Crossfeed 分开处理。</InfoLine>
+          {spatial.speakerCancellation?.enabled && <div className="mt-4">
+            <Slider label="串扰消除强度" value={Math.round(spatial.speakerCancellation.amount * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round(spatial.speakerCancellation.amount * 100)}%`} onChange={value => patch({ speakerCancellation: { amount: value / 100 } })} />
+            <div className="grid grid-cols-2 gap-3"><NumberField label="声学路径时差 ms" value={spatial.speakerCancellation.delayMs} min={0.02} max={1.5} step={0.01} theme={theme} onChange={delayMs => patch({ speakerCancellation: { delayMs } })} />
+              <NumberField label="有效频率上限 Hz" value={spatial.speakerCancellation.cutoffHz} min={200} max={5000} step={100} theme={theme} onChange={cutoffHz => patch({ speakerCancellation: { cutoffHz } })} /></div>
+          </div>}
+          <details className="mt-4"><summary className={`cursor-pointer text-xs ${theme.textSecondary}`}>摆位估算与测量文件</summary><SpeakerCalibrationPanel theme={theme} sampleRate={bridge.getSampleRate()} onApply={speakerCancellation => patch({ speakerCancellation })} /></details>
+        </div>
+        <div className="rounded-2xl border p-4" style={{ borderColor: theme.cardBorder }}>
+          <div ref={hrtfFeedbackRef} className={`text-sm font-medium ${theme.textPrimary}`}>耳机方向模型 · HRTF</div>
+          <p className={`mt-1 break-all text-xs ${theme.textSecondary}`}>{hrtfName}</p>
+          <input ref={hrtfInput} type="file" accept=".sofa" className="hidden" aria-label="导入 SOFA HRTF" disabled={importing} onChange={async event => {
+            const file = event.target.files?.[0]; event.target.value = ''
+            if (!file || !bridge.setSpatialHrtf) return
+            setImporting(true); setHrtfMessage('正在解析本地 SOFA…')
+            try {
+              const grid = await importSofaFile(file, bridge.getSampleRate())
+              bridge.setSpatialHrtf(grid); setHrtfName(grid.source ?? file.name)
+              try { await saveActiveHrtf(grid); setHrtfMessage('已应用并保存在本机。') }
+              catch { setHrtfMessage('本次会话已应用；本地保存失败。') }
+            } catch (error) { setHrtfMessage(error instanceof Error ? error.message : 'SOFA 导入失败') }
+            finally { setImporting(false) }
+          }} />
+          <div className="mt-3 flex flex-wrap gap-2"><ActionBtn theme={theme} ghost disabled={importing || !bridge.setSpatialHrtf} onClick={() => hrtfInput.current?.click()}>{importing ? '正在导入…' : '导入 SOFA'}</ActionBtn>
+            <ActionBtn theme={theme} ghost disabled={importing || !bridge.setSpatialHrtf} onClick={async () => {
+              bridge.setSpatialHrtf?.(null); setHrtfName('MIT KEMAR compact')
+              try { await saveActiveHrtf(null); setHrtfMessage('已恢复内置 KEMAR。') } catch { setHrtfMessage('已恢复内置数据；本地记录清理失败。') }
+            }}>恢复内置 HRTF</ActionBtn></div>
+          <p role="status" className={`mt-2 text-xs ${theme.textSecondary}`}>{hrtfMessage}</p>
+          <InfoLine theme={theme}>支持双耳 SimpleFreeFieldHRIR，最大 32 MiB；仅在本机解析，数据不进入分享串。</InfoLine>
+        </div>
+        <section className="hse-spatial-render-settings"><h4 className={`mb-4 text-sm font-medium ${theme.textPrimary}`}>渲染与距离</h4>
+        <div className="grid gap-x-8 @min-[40rem]:grid-cols-2">
+          <Slider label="早期反射" value={Math.round((spatial.earlyAmount ?? 1) * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round((spatial.earlyAmount ?? 1) * 100)}%`} onChange={value => patch({ earlyAmount: value / 100 })} />
+          <Slider label="晚期混响" value={Math.round((spatial.lateAmount ?? 1) * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round((spatial.lateAmount ?? 1) * 100)}%`} onChange={value => patch({ lateAmount: value / 100 })} />
+        </div>
+        <Segmented label="HRTF 插值" options={[{ value: 'spherical', label: '连续方向' }, { value: 'nearest', label: '测量点' }]} value={spatial.hrtfInterp} onChange={hrtfInterp => patch({ hrtfInterp })} theme={theme} small />
+        <Segmented label="反射计算预算" options={[{ value: 'quality', label: '完整反射' }, { value: 'auto', label: '自动预算' }, { value: 'lowLatency', label: '仅晚混响' }]} value={spatial.budgetMode ?? 'quality'} onChange={budgetMode => patch({ budgetMode })} theme={theme} small />
+        <Segmented label="早反射双耳模型" options={[{ value: 'cues', label: '轻量线索' }, { value: 'spectral', label: '完整 HRTF 频谱' }]} value={spatial.earlyReflectionModel ?? 'cues'} onChange={earlyReflectionModel => patch({ earlyReflectionModel })} theme={theme} small />
+        <Segmented label="环境声提取" options={[{ value: 'pca', label: '非相干环境估计' }, { value: 'difference', label: 'L-R 残差' }]} value={spatial.ambience.extraction ?? 'pca'} onChange={extraction => patch({ ambience: { extraction } })} theme={theme} small />
+        <Segmented label="空间卷积方式" options={[{ value: 'partitioned', label: 'FFT 分区卷积' }, { value: 'time', label: '直接卷积' }]} value={spatial.convolution} onChange={convolution => patch({ convolution })} theme={theme} small />
+        <Segmented label="距离衰减模型" options={[{ value: 'inverse', label: '反距离' }, { value: 'linear', label: '线性' }, { value: 'exponential', label: '指数' }]} value={spatial.distanceModel} onChange={distanceModel => patch({ distanceModel })} theme={theme} small />
+        <div className="grid grid-cols-2 gap-3"><NumberField label="参考距离 m" value={spatial.refDistance} min={0.1} max={100} theme={theme} onChange={refDistance => patch({ refDistance })} />
+          <NumberField label="最大距离 m" value={spatial.maxDistance} min={spatial.refDistance + 0.1} max={200} theme={theme} onChange={maxDistance => patch({ maxDistance })} /></div>
+        <Slider label="空间输出电平" value={spatial.masterGain} min={0.5} max={1} step={0.01} theme={theme} display={`${(20 * Math.log10(spatial.masterGain)).toFixed(1)} dB`} onChange={masterGain => patch({ masterGain })} />
+        <p className={`text-xs leading-relaxed ${theme.textSecondary}`}>当前数据集：{hrtfName} · 耳机双声道输出</p>
+        </section>
+      </div>}
+    </GlassCard>
+  </div>
 }

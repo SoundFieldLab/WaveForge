@@ -27,18 +27,18 @@ export interface FeatureInput {
   rms?: number
 }
 
-/** 汇总特征（zcr 需时域信号，FeatureInput 不含时域 → 恒为 0，见文件头契约说明）。 */
-export function computeFeatures(input: FeatureInput): SpectralFeatures {
+/** 汇总特征；传 output 可复用结果对象，供实时调用方避免逐帧分配。 */
+export function computeFeatures(input: FeatureInput, output?: SpectralFeatures): SpectralFeatures {
   const mags = input.magnitudes
   const freqs = input.binFreqs
-  return {
-    rms: input.rms !== undefined ? input.rms : 0,
-    zcr: 0, // 无法从幅度谱推导过零率；调用方需对时域信号单独 computeZcr
-    centroidHz: spectralCentroid(mags, freqs),
-    rolloffHz: spectralRolloff(mags, freqs),
-    flatness: spectralFlatness(mags),
-    crest: spectralCrest(mags),
-  }
+  const out = output ?? { rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 }
+  out.rms = input.rms !== undefined ? input.rms : 0
+  out.zcr = 0 // 无法从幅度谱推导过零率；调用方需对时域信号单独 computeZcr
+  out.centroidHz = spectralCentroid(mags, freqs)
+  out.rolloffHz = spectralRolloff(mags, freqs)
+  out.flatness = spectralFlatness(mags)
+  out.crest = spectralCrest(mags)
+  return out
 }
 
 /** RMS：√(mean(x²))。空输入返回 0。 */

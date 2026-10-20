@@ -79,6 +79,56 @@ function makeBackend(): TsConvolverBackend {
 }
 
 describe('TsConvolverBackend：爆音修复回归（多扬声器布局）', () => {
+  it('播放中开启和关闭传播时间不会让湿声硬切', () => {
+    const b = makeBackend()
+    const source: VirtualSpeaker = {
+      id: 'moving', channel: 0, azimuthDeg: -30, elevationDeg: 0,
+      distance: 1, gain: 1, size: 0,
+    }
+    b.setConfig(cfg([source]))
+    const input = sine(FS, 0.6)
+    const outL = new Float32Array(FS)
+    const outR = new Float32Array(FS)
+    const onAt = 128 * 120
+    const offAt = 128 * 240
+    for (let at = 0; at < FS; at += 128) {
+      if (at === onAt) b.setConfig(cfg([{ ...source, propagation: true }]))
+      if (at === offAt) b.setConfig(cfg([source]))
+      b.processStereo(input.subarray(at, at + 128), input.subarray(at, at + 128),
+        outL.subarray(at, at + 128), outR.subarray(at, at + 128))
+    }
+    for (const at of [onAt, offAt]) {
+      let maxJump = 0
+      for (let i = at; i < at + 2048; i++) {
+        maxJump = Math.max(maxJump, Math.abs(outL[i] - outL[i - 1]), Math.abs(outR[i] - outR[i - 1]))
+      }
+      expect(maxJump).toBeLessThan(0.1)
+    }
+  })
+
+  it('对象 ID 更换后清理旧状态，同时保持湿声淡出淡入', () => {
+    const b = makeBackend()
+    const source: VirtualSpeaker = {
+      id: 'first', channel: 0, azimuthDeg: -30, elevationDeg: 0,
+      distance: 1.5, gain: 1, size: 0, propagation: true,
+    }
+    b.setConfig(cfg([source]))
+    const input = sine(FS, 0.6)
+    const outL = new Float32Array(FS)
+    const outR = new Float32Array(FS)
+    const changeAt = 188 * 128
+    for (let i = 0; i < changeAt + 2048; i += 128) {
+      if (i === changeAt) b.setConfig(cfg([{ ...source, id: 'second' }]))
+      b.processStereo(input.subarray(i, i + 128), input.subarray(i, i + 128),
+        outL.subarray(i, i + 128), outR.subarray(i, i + 128))
+    }
+    let maxJump = 0
+    for (let i = changeAt; i < changeAt + 2048; i++) {
+      maxJump = Math.max(maxJump, Math.abs(outL[i] - outL[i - 1]), Math.abs(outR[i] - outR[i - 1]))
+    }
+    expect(maxJump).toBeLessThan(0.1)
+  })
+
   it('7.1.4 满幅低频驱动：输出峰值 ≤ 1.0 且无样本超幅（归一化 + 软限幅兜底）', () => {
     const b = makeBackend()
     b.setConfig(cfg(SPK_714))

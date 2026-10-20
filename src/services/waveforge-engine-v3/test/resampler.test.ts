@@ -151,6 +151,61 @@ describe('Resampler', () => {
     expect(maxDR).toBeLessThan(1e-6)
   })
 
+  it('空输入无 NaN；强降采样抑制高于新 Nyquist 的音调', () => {
+    const rs = new Resampler(48000, 4800)
+    expect(rs.process(new Float32Array(0))).toHaveLength(0)
+    const inBand = rs.process(sine(48000, 440, 0.25))
+    const aliased = rs.process(sine(48000, 8000, 0.25))
+    expect(rms(inBand, 200, inBand.length - 200)).toBeGreaterThan(0.6)
+    expect(rms(aliased, 200, aliased.length - 200)).toBeLessThan(0.02)
+  })
+
+  it('强降采样保持恒定幅度，不随分数相位起伏', () => {
+    const rs = new Resampler(48000, 4400, 1, 8)
+    const out = rs.process(new Float32Array(4800).fill(0.7))
+    for (let i = 30; i < out.length - 30; i++) expect(Math.abs(out[i] - 0.7)).toBeLessThan(0.002)
+  })
+
+  it('流式输出缓冲不足时保留未消费输入，空输入调用可续读', () => {
+    const input = sine(8000, 440, 0.1)
+    const reference = new Resampler(8000, 16000).process(input)
+    const rs = new Resampler(8000, 16000)
+    const collected: number[] = []
+    const first = new Float32Array(7)
+    collected.push(...first.subarray(0, rs.processStreaming(input, first)))
+    for (let attempt = 0; attempt < 100 && collected.length < reference.length - 64; attempt++) {
+      const chunk = new Float32Array(23)
+      collected.push(...chunk.subarray(0, rs.processStreaming(new Float32Array(0), chunk)))
+    }
+    expect(collected.length).toBeGreaterThanOrEqual(reference.length - 64)
+    for (let i = 0; i < collected.length; i++) expect(collected[i]).toBeCloseTo(reference[i], 6)
+  })
+
+  it('立体声流式背压后追加新块仍与整段交错输出一致', () => {
+    const a = sine(8000, 440, 0.04)
+    const b = sine(8000, 660, 0.04)
+    const interleaved = new Float32Array(a.length * 2)
+    for (let i = 0; i < a.length; i++) {
+      interleaved[2 * i] = a[i]
+      interleaved[2 * i + 1] = b[i]
+    }
+    const reference = new Resampler(8000, 16000, 2).process(interleaved)
+    const rs = new Resampler(8000, 16000, 2)
+    const collected: number[] = []
+    const write = (input: Float32Array) => {
+      const buf = new Float32Array(18)
+      const frames = rs.processStreaming(input, buf)
+      collected.push(...buf.subarray(0, frames * 2))
+    }
+    write(interleaved.subarray(0, 200))
+    write(interleaved.subarray(200))
+    for (let attempt = 0; attempt < 100 && collected.length < reference.length - 128; attempt++) {
+      write(new Float32Array(0))
+    }
+    expect(collected.length).toBeGreaterThanOrEqual(reference.length - 128)
+    for (let i = 0; i < collected.length; i++) expect(collected[i]).toBeCloseTo(reference[i], 6)
+  })
+
   it('reset 后流式状态清空，输出从头开始', () => {
     const input = sine(44100, 440, 1)
     const rs = new Resampler(44100, 48000)

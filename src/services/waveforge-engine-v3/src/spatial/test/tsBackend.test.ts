@@ -18,6 +18,8 @@
  */
 import { describe, it, expect } from 'vitest'
 import { TsConvolverBackend, nearestGridIndex, dopplerRate } from '../TsConvolverBackend'
+import { RoomSim, roomParamsFromPreset } from '../roomSim'
+import { TimeConvolver } from '../TimeConvolver'
 import { sphericalHrtf } from '../hrtfInterp'
 import type { HrtfGrid, RoomPreset, SpatialRenderConfig, VirtualSpeaker } from '../types'
 
@@ -73,6 +75,253 @@ function maxAbsDiff(a: Float32Array, b: Float32Array, offsetB = 0): number {
 }
 
 describe('TsConvolverBackend：直通与延迟', () => {
+  it('正前方对象的传播时间对双耳一致，不能只延迟左耳', () => {
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    backend.setConfig(makeConfig([{
+      channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 10, gain: 1, size: 0, propagation: true,
+    }]))
+    const input = new Float32Array(8192)
+    input[2048] = 0.5
+    const left = new Float32Array(input.length)
+    const right = new Float32Array(input.length)
+    backend.processStereo(input, input, left, right)
+    expect(maxAbsDiff(left, right)).toBeLessThan(1e-6)
+  })
+
+  it('传播延迟按声源距离推迟对象路径，关闭时保持原有延迟', () => {
+    const input = new Float32Array(4096)
+    input[0] = 1
+    const render = (propagation: boolean): Float32Array => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(deltaGrid())
+      backend.setConfig(makeConfig([{
+        channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 10, gain: 1, size: 0, propagation,
+      }]))
+      const warmup = new Float32Array(1024)
+      backend.processStereo(warmup, warmup, new Float32Array(1024), new Float32Array(1024))
+      const out = new Float32Array(input.length)
+      backend.processStereo(input, new Float32Array(input.length), out, new Float32Array(input.length))
+      return out
+    }
+    const peak = (signal: Float32Array): number => {
+      let index = 0
+      let value = 0
+      for (let i = 0; i < signal.length; i++) {
+        if (Math.abs(signal[i]) > value) { value = Math.abs(signal[i]); index = i }
+      }
+      return index
+    }
+    const withoutPropagation = peak(render(false))
+    const withPropagation = peak(render(true))
+    expect(Math.abs(withPropagation - withoutPropagation - (10 / 343) * FS)).toBeLessThanOrEqual(1)
+  })
+
+  it('虚拟声源改名或重新开启传播时不泄漏旧声源的延迟历史', () => {
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    const source: VirtualSpeaker = {
+      id: 'first', channel: 0, azimuthDeg: 0, elevationDeg: 0,
+      distance: 10, gain: 1, size: 0, propagation: true,
+    }
+    backend.setConfig(makeConfig([source]))
+    const delayOf = () => (backend as unknown as { propagation: unknown[] }).propagation[0]
+    const previousDelay = delayOf()
+    const seed = new Float32Array(128)
+    seed[0] = 0.5
+    backend.processStereo(seed, new Float32Array(128), new Float32Array(128), new Float32Array(128))
+    backend.setConfig(makeConfig([{ ...source, id: 'second' }]))
+    expect(delayOf()).not.toBe(previousDelay)
+    expect((delayOf() as { ring: Float32Array }).ring.some(value => value !== 0)).toBe(false)
+    const silence = new Float32Array(4096)
+    const out = new Float32Array(4096)
+    backend.processStereo(silence, silence, out, new Float32Array(4096))
+    expect((delayOf() as { ring: Float32Array }).ring.some(value => value !== 0)).toBe(false)
+    expect(out.findIndex(value => Math.abs(value) > 1e-8)).toBe(-1)
+  })
+
+  it('同源幅度归一：两只复用同一声道的扬声器不抬高音乐电平', () => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const render = (speakers: VirtualSpeaker[], coherentInputNormalization: boolean) => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(deltaGrid())
+      backend.setConfig(makeConfig(speakers, { coherentInputNormalization }))
+      const input = lowFreqSine(4096)
+      const left = new Float32Array(input.length)
+      backend.processStereo(input, new Float32Array(input.length), left, new Float32Array(input.length))
+      return left
+    }
+    const single = render([speaker], true)
+    const musicPair = render([speaker, { ...speaker }], true)
+    const legacyPair = render([speaker, { ...speaker }], false)
+    expect(maxAbsDiff(musicPair, single)).toBeLessThan(1e-5)
+    expect(Math.max(...legacyPair)).toBeGreaterThan(Math.max(...single) * 1.3)
+  })
+
+  it('音乐中声道分频在反相 HRIR 下保护高频，且保留低频空间混合', () => {
+    const grid = deltaGrid()
+    for (let i = 0; i < grid.left.length; i++) {
+      grid.left[i] = -grid.left[i]
+      grid.right[i] = -grid.right[i]
+    }
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const level = (hz: number, crossover: number) => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(grid)
+      backend.setConfig(makeConfig([speaker], { amount: 0.5, airAbsorption: 'natural', musicBedMidCrossoverHz: crossover }))
+      const input = lowFreqSine(8192, hz, 0.2)
+      const left = new Float32Array(input.length)
+      backend.processStereo(input, input, left, new Float32Array(input.length))
+      let power = 0
+      for (let i = 4096; i < left.length; i++) power += left[i] * left[i]
+      return Math.sqrt(power / (left.length - 4096))
+    }
+    expect(level(8000, 5000)).toBeGreaterThan(level(8000, 0) * 1.5)
+    expect(Math.abs(level(125, 5000) - level(125, 0))).toBeLessThan(0.015)
+  })
+
+  it.each([0, 5000])('stereoPreservation 将湿声侧向分量平滑混回原始差分，分频=%i', (crossover) => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const measureSide = (preservation: number) => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(deltaGrid())
+      backend.setConfig(makeConfig([speaker], {
+        amount: 1, coherentInputNormalization: true, musicBedMidCrossoverHz: crossover,
+        stereoPreservation: preservation,
+      }))
+      const inputL = lowFreqSine(8192, 250, 0.2)
+      const inputR = Float32Array.from(inputL, (sample) => -sample * 0.5)
+      const left = new Float32Array(inputL.length)
+      const right = new Float32Array(inputL.length)
+      backend.processStereo(inputL, inputR, left, right)
+      let sidePower = 0
+      for (let i = 4096; i < left.length; i++) {
+        const side = (left[i] - right[i]) * 0.5
+        sidePower += side * side
+      }
+      return Math.sqrt(sidePower / (left.length - 4096))
+    }
+
+    const defaultSide = measureSide(0)
+    const preservedSide = measureSide(1)
+    expect(defaultSide).toBeLessThan(1e-4)
+    expect(preservedSide).toBeGreaterThan(0.08)
+  })
+
+  it('diffuse 扬声器使用立体声侧向残差，polarity 反转差分支路', () => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: -60, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const render = (diffuse: number, polarity: number, left: Float32Array, right: Float32Array) => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(deltaGrid())
+      backend.setConfig(makeConfig([{ ...speaker, diffuse, polarity }], { amount: 1 }))
+      const outputL = new Float32Array(left.length)
+      const outputR = new Float32Array(right.length)
+      backend.processStereo(left, right, outputL, outputR)
+      return { left: outputL, right: outputR }
+    }
+    const signal = lowFreqSine(4096, 500, 0.2)
+    const zeros = new Float32Array(signal.length)
+    const diffuse = render(1, 1, signal, Float32Array.from(signal, (sample) => -sample))
+    const direct = render(0, 1, signal, zeros)
+    const inverted = render(1, -1, signal, Float32Array.from(signal, (sample) => -sample))
+
+    expect(maxAbsDiff(diffuse.left, direct.left)).toBeLessThan(1e-6)
+    expect(maxAbsDiff(diffuse.right, direct.right)).toBeLessThan(1e-6)
+    for (let i = 0; i < inverted.left.length; i++) {
+      expect(inverted.left[i]).toBeCloseTo(-diffuse.left[i], 6)
+      expect(inverted.right[i]).toBeCloseTo(-diffuse.right[i], 6)
+    }
+  })
+
+  it('diffuse 与 polarity 在线更新时按约 20ms 平滑，reset 回到当前目标', () => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: -60, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    backend.setConfig(makeConfig([speaker], { amount: 1 }))
+    const render = (frames: number) => {
+      const left = Float32Array.from({ length: frames }, (_, i) => 0.2 * Math.sin(2 * Math.PI * 500 * i / FS))
+      const right = Float32Array.from(left, (sample) => -sample)
+      backend.processStereo(left, right, new Float32Array(frames), new Float32Array(frames))
+    }
+    render(2048)
+
+    backend.setConfig(makeConfig([{ ...speaker, diffuse: 1, polarity: -1 }], { amount: 1 }))
+    render(128)
+    const state = backend as unknown as { diffuseCur: Float64Array; polarityCur: Float64Array }
+    expect(state.diffuseCur[0]).toBeGreaterThan(0)
+    expect(state.diffuseCur[0]).toBeLessThan(0.15)
+    expect(state.polarityCur[0]).toBeLessThan(1)
+    expect(state.polarityCur[0]).toBeGreaterThan(0.7)
+
+    render(Math.round(FS * 0.02))
+    expect(state.diffuseCur[0]).toBeGreaterThan(0.6)
+    expect(state.diffuseCur[0]).toBeLessThan(0.9)
+    expect(state.polarityCur[0]).toBeLessThan(-0.2)
+    expect(state.polarityCur[0]).toBeGreaterThan(-0.5)
+
+    backend.reset()
+    expect(state.diffuseCur[0]).toBe(1)
+    expect(state.polarityCur[0]).toBe(-1)
+  })
+
+  it('音乐中声道分频与调用块长无关，reset 后可重现', () => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: -30, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const inputL = lowFreqSine(4096, 997, 0.2)
+    const inputR = lowFreqSine(4096, 1301, 0.15)
+    const create = () => {
+      const backend = new TsConvolverBackend()
+      backend.loadHrtf(deltaGrid())
+      backend.setConfig(makeConfig([speaker], {
+        amount: 0.5, airAbsorption: 'natural', musicBedMidCrossoverHz: 5000,
+      }))
+      return backend
+    }
+    const whole = create()
+    const expectedL = new Float32Array(inputL.length)
+    const expectedR = new Float32Array(inputL.length)
+    whole.processStereo(inputL, inputR, expectedL, expectedR)
+
+    const blocks = create()
+    const actualL = new Float32Array(inputL.length)
+    const actualR = new Float32Array(inputL.length)
+    for (let i = 0; i < inputL.length; i += 128) {
+      blocks.processStereo(inputL.subarray(i, i + 128), inputR.subarray(i, i + 128),
+        actualL.subarray(i, i + 128), actualR.subarray(i, i + 128))
+    }
+    expect(maxAbsDiff(expectedL, actualL)).toBeLessThan(1e-6)
+    expect(maxAbsDiff(expectedR, actualR)).toBeLessThan(1e-6)
+
+    whole.reset()
+    const replayL = new Float32Array(inputL.length)
+    const replayR = new Float32Array(inputL.length)
+    whole.processStereo(inputL, inputR, replayL, replayR)
+    expect(maxAbsDiff(expectedL, replayL)).toBeLessThan(1e-6)
+    expect(maxAbsDiff(expectedR, replayR)).toBeLessThan(1e-6)
+  })
+
+  it('无效空间参数在配置边界归一化，PCM 不传播 NaN', () => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+    const badSpeaker: VirtualSpeaker = { channel: Infinity, azimuthDeg: NaN, elevationDeg: Infinity,
+      distance: NaN, gain: Infinity, size: NaN }
+    const bad = new TsConvolverBackend()
+    const safe = new TsConvolverBackend()
+    for (const backend of [bad, safe]) backend.loadHrtf(deltaGrid())
+    bad.setRoomEarlyOrders(NaN)
+    bad.setConfig(makeConfig([badSpeaker], { amount: NaN, masterGain: Infinity,
+      room: 'invalid' as RoomPreset, roomAmount: NaN, refDistance: NaN, maxDistance: Infinity,
+      occlusionAmount: NaN, dopplerVelocity: { x: Infinity, y: NaN, z: -Infinity } }))
+    safe.setConfig(makeConfig([speaker], { dopplerVelocity: { x: 0, y: 0, z: 0 } }))
+    const input = lowFreqSine(2048)
+    const actualL = new Float32Array(input.length)
+    const actualR = new Float32Array(input.length)
+    const expectedL = new Float32Array(input.length)
+    const expectedR = new Float32Array(input.length)
+    bad.processStereo(input, input, actualL, actualR)
+    safe.processStereo(input, input, expectedL, expectedR)
+    expect(actualL).toEqual(expectedL)
+    expect(actualR).toEqual(expectedR)
+  })
+
   it('speakers 为空 → 直通（无额外延迟）', () => {
     const b = new TsConvolverBackend()
     b.loadHrtf(deltaGrid())
@@ -85,6 +334,25 @@ describe('TsConvolverBackend：直通与延迟', () => {
     expect(outL).toEqual(inL)
     expect(outR).toEqual(inR)
     expect(b.getLatencySamples()).toBe(0)
+  })
+
+  it.each(['partitioned', 'time'] as const)('%s 换采样率重建卷积器与房间，等于新采样率初始状态', (convolution) => {
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }
+    const cfg = makeConfig([speaker], { room: 'studio', roomAmount: 0.5, convolution })
+    const reused = new TsConvolverBackend()
+    reused.loadHrtf(deltaGrid(FS))
+    reused.setConfig(cfg)
+    const x = lowFreqSine(2048)
+    reused.processStereo(x, x, new Float32Array(x.length), new Float32Array(x.length))
+    reused.loadHrtf(deltaGrid(44100))
+    const fresh = new TsConvolverBackend()
+    fresh.loadHrtf(deltaGrid(44100))
+    fresh.setConfig(cfg)
+    const actual = new Float32Array(x.length)
+    const expected = new Float32Array(x.length)
+    reused.processStereo(x, x, actual, new Float32Array(x.length))
+    fresh.processStereo(x, x, expected, new Float32Array(x.length))
+    expect(maxAbsDiff(actual, expected)).toBeLessThan(1e-6)
   })
 
   it('getLatencySamples：有扬声器 = 512，无扬声器 = 0', () => {
@@ -374,11 +642,64 @@ describe('TsConvolverBackend：多普勒（§4.6，模式 C）', () => {
 
 // ---------------------------------------------------------------------------
 // 房间模拟（§4.5 完整版：镜像声源法早期反射 1-3 阶 + FDN 晚期混响）
-// 房间位于后端湿路内部（roomSim.ts，与 Rust 侧逐位对拍）：
+// 房间位于后端湿路内部（roomSim.ts；方向性反射尚待 Rust 同步）：
 //   out = ((1−amount)·dry + amount·(wetSum + roomAmount·(earlyBus + fdnOut)))·masterGain
 // ---------------------------------------------------------------------------
 describe('TsConvolverBackend：房间模拟（§4.5）', () => {
   const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1.5, gain: 1, size: 0 }
+
+  it('切换反射预算时重建正确阶数的抽头并保留晚混响状态', () => {
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    const getRoom = () => (backend as unknown as { room: { fdn: unknown; states: { taps: unknown[] }[] } }).room
+    backend.setConfig(makeConfig([speaker], { room: 'hall', roomAmount: 1, earlyReflectionOrders: 2 }))
+    const full = getRoom()
+    const fullTapCount = full.states[0].taps.length
+    expect(fullTapCount).toBeGreaterThan(6)
+    backend.setConfig(makeConfig([speaker], { room: 'hall', roomAmount: 1, earlyReflectionOrders: 0 }))
+    expect(getRoom().fdn).toBe(full.fdn)
+    expect(getRoom().states[0].taps).toHaveLength(0)
+    backend.setConfig(makeConfig([speaker], { room: 'hall', roomAmount: 1, earlyReflectionOrders: 1 }))
+    expect(getRoom().fdn).toBe(full.fdn)
+    expect(getRoom().states[0].taps.length).toBeGreaterThan(0)
+    expect(getRoom().states[0].taps.length).toBeLessThan(fullTapCount)
+  })
+
+  it('同位置替换对象时保留房间尾音并重建旧对象的早反射历史', () => {
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    backend.setConfig(makeConfig([{ ...speaker, id: 'old' }], { room: 'studio', roomAmount: 1 }))
+    const getRoom = () => (backend as unknown as { room: RoomSim }).room
+    const previous = getRoom()
+    backend.setConfig(makeConfig([{ ...speaker, id: 'new' }], { room: 'studio', roomAmount: 1 }))
+    const next = getRoom()
+    expect(next).not.toBe(previous)
+    const internals = (room: RoomSim) => room as unknown as { fdn: unknown; states: unknown[] }
+    expect(internals(next).fdn).toBe(internals(previous).fdn)
+    expect(internals(next).states[0]).not.toBe(internals(previous).states[0])
+  })
+
+  it('移动声源更新配置时保留房间尾音', () => {
+    const backend = new TsConvolverBackend()
+    backend.loadHrtf(deltaGrid())
+    backend.setRoomEarlyOrders(0)
+    backend.setConfig(makeConfig([speaker], { room: 'studio', roomAmount: 1 }))
+    const roomOf = (): RoomSim | null => (backend as unknown as { room: RoomSim | null }).room
+    const before = roomOf()!
+    const impulse = new Float32Array(128)
+    impulse[0] = 1
+    before.beginBlock(128)
+    before.lateAndMix(Float32Array.from(impulse), Float32Array.from(impulse), 128)
+    backend.setConfig(makeConfig([{ ...speaker, distance: 1.7 }], { room: 'studio', roomAmount: 1 }))
+    const after = roomOf()!
+    expect(after).not.toBe(before)
+    const tailL = new Float32Array(512)
+    const tailR = new Float32Array(512)
+    after.beginBlock(512)
+    after.lateAndMix(tailL, tailR, 512)
+    expect(tailL.some(value => value !== 0)).toBe(true)
+    expect(tailR.some(value => value !== 0)).toBe(true)
+  })
   // 682ms @48kHz：远尾区相对响应早期已显著衰减（FDN 每秒幅度衰减 10^(-3/rt60)）
   const N = 32768
 
@@ -453,6 +774,23 @@ describe('TsConvolverBackend：房间模拟（§4.5）', () => {
     expect(e2).toBeGreaterThan(e0)
   })
 
+  it('已有房间的 amount→0 平滑退场，初始 amount=0 仍逐位旁路', () => {
+    const b = new TsConvolverBackend()
+    b.loadHrtf(deltaGrid())
+    b.setConfig(makeConfig([speaker], { room: 'studio', roomAmount: 1, amount: 1 }))
+    const x = new Float32Array(2048).fill(0.15)
+    b.processStereo(x, x, new Float32Array(x.length), new Float32Array(x.length))
+    b.setConfig(makeConfig([speaker], { room: 'studio', roomAmount: 0, amount: 1 }))
+    const after = new Float32Array(4096)
+    b.processStereo(new Float32Array(after.length), new Float32Array(after.length), after, new Float32Array(after.length))
+    for (const v of after) expect(Number.isFinite(v)).toBe(true)
+    // FDN 尾音没有在 setConfig 当拍被直接截断。
+    expect(energy(after, 0, 1024)).toBeGreaterThan(1e-8)
+    const off = render('off', 0)
+    const initialZero = render('studio', 0)
+    expect(maxAbsDiff(off.outL, initialZero.outL)).toBe(0)
+  })
+
   it('房间 128 分块与整块输出一致（跨块确定性：历史环/FDN 状态跨块连续）', () => {
     const run = (chunked: boolean): { outL: Float32Array; outR: Float32Array } => {
       const b = new TsConvolverBackend()
@@ -481,6 +819,72 @@ describe('TsConvolverBackend：房间模拟（§4.5）', () => {
     const c = run(false)
     expect(maxAbsDiff(a.outL, c.outL)).toBeLessThan(1e-6)
     expect(maxAbsDiff(a.outR, c.outR)).toBeLessThan(1e-6)
+  })
+})
+
+describe('RoomSim：FDN 增益与房间混合平滑', () => {
+  const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
+  const makeRoom = () => new RoomSim(FS, [speaker], roomParamsFromPreset('studio', 0), 1)
+
+  it('八路 FDN 首次回声以单位范数输入/输出耦合（单线路延迟 179 样本）', () => {
+    const room = makeRoom()
+    const x = new Float32Array(180)
+    x[0] = 0.4
+    const y = x.slice()
+    room.beginBlock(x.length)
+    room.early(0, x, x, x.length)
+    room.lateAndMix(y, y.slice(), y.length)
+    // 首次回声只有第一条线读出；低通 a=exp(-2π·4000/fs)，输入/输出各 1/√8。
+    const lp = 1 - Math.exp(-2 * Math.PI * 4000 / FS)
+    expect(y[179]).toBeCloseTo(0.4 * lp / 8, 6)
+  })
+
+  it('房间 amount 热更新无瞬时全幅阶跃，分块/整块的两耳混合逐位一致', () => {
+    const a = makeRoom()
+    const b = makeRoom()
+    const N = 8192
+    const l = new Float32Array(N).fill(0.2)
+    const r = new Float32Array(N).fill(-0.1)
+    const outAL = l.slice(), outAR = r.slice()
+    const outBL = l.slice(), outBR = r.slice()
+    for (const room of [a, b]) {
+      room.beginBlock(N)
+      room.early(0, l, r, N)
+      room.lateAndMix(new Float32Array(N), new Float32Array(N), N)
+      room.setAmount(0)
+    }
+    a.beginBlock(N)
+    a.early(0, l, r, N)
+    a.lateAndMix(outAL, outAR, N)
+    for (let i = 0; i < N; i += 128) {
+      const lChunk = l.subarray(i, i + 128), rChunk = r.subarray(i, i + 128)
+      b.beginBlock(128)
+      b.early(0, lChunk, rChunk, 128)
+      b.lateAndMix(outBL.subarray(i, i + 128), outBR.subarray(i, i + 128), 128)
+    }
+    expect(maxAbsDiff(outAL, outBL)).toBe(0)
+    expect(maxAbsDiff(outAR, outBR)).toBe(0)
+    expect(Math.abs(outAL[0] - l[0])).toBeLessThan(0.1)
+    expect(Math.abs(outAR[0] - r[0])).toBeLessThan(0.1)
+    expect(Math.abs(outAL[N - 1] - l[N - 1])).toBeLessThan(0.001)
+  })
+})
+
+describe('RoomSim：越界声源镜像几何', () => {
+  it('声源越过浴室墙面时反射抽头不出现无穷增益', () => {
+    // 未约束的 x = -1.25m，其一阶镜像 -x 正好位于听者 x=1.25m。
+    const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: -90, elevationDeg: 0, distance: 2.5, gain: 1, size: 0 }
+    const room = new RoomSim(FS, [speaker], roomParamsFromPreset('bathroom', 1), 0.5)
+    const input = new Float32Array(2048)
+    input[0] = 0.2
+    const wetL = input.slice()
+    const wetR = input.slice()
+    room.beginBlock(wetL.length)
+    room.early(0, wetL, wetR, wetL.length)
+    room.lateAndMix(wetL, wetR, wetL.length)
+    expect(Array.from(wetL).every(Number.isFinite)).toBe(true)
+    expect(Array.from(wetR).every(Number.isFinite)).toBe(true)
+    expect(Math.max(...wetL)).toBeLessThan(2)
   })
 })
 
@@ -612,6 +1016,32 @@ describe('TsConvolverBackend：声源大小 size（扩散声源）', () => {
 // 时域卷积（契约 spatial_set_convolution_mode=time）：与分区模式同块调度同放行
 //   （wet[t] = (x*h)[t−512]）——干湿对齐一致、脉冲位置一致，仅差 FFT 圆整（≤1e-4）
 // ---------------------------------------------------------------------------
+describe('TimeConvolver：环形抽头读取', () => {
+  it.each([1, 7, 33, 96])('IR 长度 %i：跨多个块与朴素线性卷积一致', (m) => {
+    const L = 32
+    const N = 160
+    const h = new Float32Array(m)
+    const x = new Float32Array(N)
+    for (let i = 0; i < m; i++) h[i] = Math.sin(i * 0.47 + 1) / (i + 1)
+    for (let i = 0; i < N; i++) x[i] = Math.cos(i * 0.31)
+    const conv = new TimeConvolver(FS, { partitionSize: L, dePeriodize: false })
+    conv.loadIR(h)
+    const actual = new Float32Array(N)
+    for (let i = 0; i < N; i += 13) {
+      const part = x.subarray(i, Math.min(N, i + 13)).slice()
+      conv.processStereo(part, new Float32Array(part.length))
+      actual.set(part, i)
+    }
+    for (let i = 0; i < N; i++) {
+      let expected = 0
+      if (i >= L) {
+        for (let tap = 0; tap < m; tap++) if (i - L - tap >= 0) expected += h[tap] * x[i - L - tap]
+      }
+      expect(Math.abs(actual[i] - expected)).toBeLessThan(1e-5)
+    }
+  })
+})
+
 describe('TsConvolverBackend：时域卷积（convolution: time）', () => {
   const speaker: VirtualSpeaker = { channel: 0, azimuthDeg: 0, elevationDeg: 0, distance: 1, gain: 1, size: 0 }
 
@@ -930,6 +1360,124 @@ describe('TsConvolverBackend：多声道输入 processMulti（②）', () => {
     }
     expect(maxAbsDiff(out1[0], out2[0])).toBeLessThan(1e-6)
     expect(maxAbsDiff(out1[1], out2[1])).toBeLessThan(1e-6)
+  })
+})
+
+describe('TsConvolverBackend：IR 热切换状态', () => {
+  const speaker = (azimuthDeg: number, channel = 0, gain = 1): VirtualSpeaker => ({
+    channel, azimuthDeg, elevationDeg: 0, distance: 1, gain, size: 0,
+  })
+  const setup = (interp: 'nearest' | 'spherical' = 'nearest', convolution: 'partitioned' | 'time' = 'time'): TsConvolverBackend => {
+    const b = new TsConvolverBackend()
+    const grid = deltaGrid()
+    for (let e = 0; e < grid.elevations.length; e++) {
+      for (let a = 0; a < grid.azimuths.length; a++) {
+        const at = (e * grid.azimuths.length + a) * grid.hrirLength
+        const rad = grid.azimuths[a] * Math.PI / 180
+        grid.left[at] = grid.right[at] = 0.4 + 0.25 * Math.cos(4 * rad) + 0.1 * Math.cos(rad)
+      }
+    }
+    b.loadHrtf(grid)
+    b.setConfig(makeConfig([speaker(0)], { hrtfInterp: interp, convolution }))
+    return b
+  }
+  const advance = (b: TsConvolverBackend, input: Float32Array): Float32Array => {
+    const result = new Float32Array(input.length)
+    b.processStereo(input, input, result, new Float32Array(input.length))
+    return result
+  }
+
+  it.each(['partitioned', 'time'] as const)('%s：淡出边界落在调用块中间时，IR 与后续输入按样本对齐', (convolution) => {
+    const N = 2048
+    const warmup = lowFreqSine(N, 37)
+    const next = lowFreqSine(N, 53)
+    const large = setup('nearest', convolution)
+    const small = setup('nearest', convolution)
+    advance(large, warmup)
+    advance(small, warmup)
+    const cfg = makeConfig([speaker(90)], { convolution })
+    large.setConfig(cfg)
+    small.setConfig(cfg)
+    const a = advance(large, next)
+    const b = new Float32Array(N)
+    for (let i = 0; i < N; i += 128) b.set(advance(small, next.subarray(i, i + 128)), i)
+    expect(maxAbsDiff(a, b)).toBeLessThan(1e-6)
+    // 切换结果不同于保留原 IR 的参考，避免同 IR 下分块一致的假阳性。
+    const unchanged = setup('nearest', convolution)
+    advance(unchanged, warmup)
+    expect(maxAbsDiff(a, advance(unchanged, next))).toBeGreaterThan(0.01)
+  })
+
+  it('扩容不重启既有扬声器的 spherical IR 淡出，也不丢弃待装 IR', () => {
+    const N = 2048
+    const signal = lowFreqSine(N, 37)
+    const original = setup('spherical')
+    const expanded = setup('spherical')
+    advance(original, signal)
+    advance(expanded, signal)
+    const cfg = makeConfig([speaker(90)], { hrtfInterp: 'spherical', convolution: 'time' })
+    original.setConfig(cfg)
+    expanded.setConfig(cfg)
+    advance(original, signal.subarray(0, 128))
+    advance(expanded, signal.subarray(0, 128))
+    expanded.setConfig(makeConfig([speaker(90), speaker(-90, 1, 0)], { hrtfInterp: 'spherical', convolution: 'time' }))
+    const a = advance(original, signal)
+    const b = advance(expanded, signal)
+    expect(maxAbsDiff(a, b)).toBeLessThan(1e-6)
+    const unchanged = setup('spherical')
+    advance(unchanged, signal)
+    advance(unchanged, signal.subarray(0, 128))
+    expect(maxAbsDiff(a, advance(unchanged, signal))).toBeGreaterThan(0.01)
+  })
+
+  it('同角度切换 nearest→spherical→nearest，恢复原网格 IR', () => {
+    const b = setup()
+    const signal = lowFreqSine(4096, 37)
+    advance(b, signal)
+    b.setConfig(makeConfig([speaker(0)], { hrtfInterp: 'spherical', convolution: 'time' }))
+    advance(b, signal)
+    b.setConfig(makeConfig([speaker(0)], { hrtfInterp: 'nearest', convolution: 'time' }))
+    const switched = advance(b, signal)
+    const fresh = setup()
+    advance(fresh, signal)
+    const expected = advance(fresh, signal)
+    expect(maxAbsDiff(switched.subarray(1536), expected.subarray(1536))).toBeLessThan(1e-6)
+  })
+
+  it('连续改方向时保留淡出进度，并从淡入当前增益反向淡出', () => {
+    const N = 2048
+    const signal = lowFreqSine(N, 37)
+    const left = setup()
+    const right = setup()
+    advance(left, signal)
+    advance(right, signal)
+    const first = makeConfig([speaker(90)], { convolution: 'time' })
+    left.setConfig(first)
+    right.setConfig(first)
+    advance(left, signal.subarray(0, 128))
+    advance(right, signal.subarray(0, 128))
+    left.setConfig(makeConfig([speaker(45)], { convolution: 'time' }))
+    expect(maxAbsDiff(advance(left, signal.subarray(128, 192)), advance(right, signal.subarray(128, 192)))).toBe(0)
+    right.setConfig(makeConfig([speaker(45)], { convolution: 'time' }))
+
+    // 淡出结束、新 IR 放行并淡入到约 50% 后再次改方向。
+    advance(left, signal.subarray(192, 900))
+    advance(right, signal.subarray(192, 900))
+    left.setConfig(makeConfig([speaker(-90)], { convolution: 'time' }))
+    const a = advance(left, signal.subarray(900, 901))
+    const b = advance(right, signal.subarray(900, 901))
+    expect(Math.abs(a[0] - b[0])).toBeLessThan(0.01)
+  })
+
+  it('扬声器缩减后 reset 不访问已释放的卷积器槽位', () => {
+    const b = setup()
+    b.setConfig(makeConfig([speaker(0), speaker(90, 1)], { convolution: 'time' }))
+    advance(b, lowFreqSine(1024))
+    b.setConfig(makeConfig([speaker(0), speaker(-90, 1)], { convolution: 'time' }))
+    b.setConfig(makeConfig([speaker(0)], { convolution: 'time' }))
+    expect(() => b.reset()).not.toThrow()
+    const out = advance(b, lowFreqSine(1024))
+    expect(Array.from(out).every(Number.isFinite)).toBe(true)
   })
 })
 

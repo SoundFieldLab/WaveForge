@@ -7,9 +7,9 @@
  *   - 环境提取：立体声输入 → FOA 环境场能量级（stereoToFoa）。
  *
  * 方向约定与 hrtfInterp.ts 一致：az=0 正前、az>0 右、el=0 水平、el>0 上
- * （x=前，y=右，z=上）。ACN 排序（0-3）：W（全向）、X（前后）、Y（左右）、Z（上下）。
+ * （x=前，y=右，z=上）。这里是内部旧辅助格式 WXYZ；不等同于 ACN 的 WYZX。
  *
- * 归一化约定（SN3D + W 缩放，即常见 DAW/AmbiX 的 B-format 工程约定）：
+ * 内部归一化（方向余弦 + W 缩放，接近 FuMa；不是 AmbiX/SN3D 文件格式）：
  *   实球谐基 Y1,±1 = ∓√(3/4π)·sin/cos(az)·cos(el)、Y1,0 = √(3/4π)·sin(el)（见
  *   hrtfInterp.shBasis，含 Condon-Shortley 相因子）。去掉 √(4π/3) 标度后方向分量为
  *   方向余弦 cos(el)·cos(az) / cos(el)·sin(az) / sin(el)（单位增益源方向能量恒为 1）；
@@ -17,7 +17,7 @@
  *   见 decodeFoaToSpeakers 注释）。纯函数、确定性、无依赖（不 import 任何模块）。
  */
 
-/** FOA（First-Order Ambisonics）信号：[W, X, Y, Z]（ACN 0-3） */
+/** 内部辅助信号：[W, X, Y, Z]，W 带 1/√2 缩放；外部音源解码见 AmbisonicDecoder。 */
 export type FoaSignal = [number, number, number, number]
 
 /**

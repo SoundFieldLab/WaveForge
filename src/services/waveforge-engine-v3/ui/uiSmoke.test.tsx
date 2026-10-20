@@ -18,7 +18,7 @@ import { encodeShareCode, decodeShareCode } from '../src/engine/ShareCodec'
 function makeUi() {
   const engine = new EngineV3(48000, 2)
   const bridge = createV3UiBridge(engine, 48000)
-  const view = render(<V3MixingStudio bridge={bridge} playerTheme="dark" onClose={() => undefined} />)
+  const view = render(<V3MixingStudio bridge={bridge} playerTheme="light" onClose={() => undefined} />)
   return { engine, bridge, view }
 }
 
@@ -30,9 +30,38 @@ function clickNav(label: string) {
 describe('V3 调音室 UI 冒烟', () => {
   beforeEach(() => cleanup())
 
+  it('动态均衡可从动态调音页启用并打开参数弹窗', () => {
+    const { bridge } = makeUi()
+    clickNav('动态调音')
+    fireEvent.click(screen.getByRole('switch', { name: '启用动态均衡' }))
+    expect(bridge.getParams().dynamicEq?.enabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '动态均衡详细设置' }))
+    expect(screen.getByRole('slider', { name: '中心频率' })).toBeTruthy()
+  })
+
+  it('动态均衡弹窗可增减独立频段并写入参数快照', () => {
+    const { bridge } = makeUi()
+    clickNav('动态调音')
+    fireEvent.click(screen.getByRole('button', { name: '动态均衡详细设置' }))
+    fireEvent.click(screen.getByRole('button', { name: '添加频段' }))
+    expect(bridge.getParams().dynamicEq?.bands).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('button', { name: '删除频段' })[0])
+    expect(bridge.getParams().dynamicEq?.bands).toBeUndefined()
+  })
+
+  it('耳机交叉馈送可从音效场景页启用并打开配置', () => {
+    const { bridge } = makeUi()
+    clickNav('音效场景')
+    fireEvent.click(screen.getByRole('button', { name: '耳机交叉馈送启停' }))
+    expect(bridge.getParams().crossfeed?.enabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '配置耳机交叉馈送' }))
+    expect(screen.getByRole('slider', { name: '馈送量' })).toBeTruthy()
+  })
+
   it('主面板渲染：标题 + 9 导航项 + 默认主页', () => {
     makeUi()
     expect(screen.getByText('HyperSoundEngine')).toBeTruthy()
+    expect(screen.getByText('HSE 3.5')).toBeTruthy()
     for (const label of ['主页', '音效场景', '均衡器', '空间音效', '空间音频', '动态调音', '分析', '调音器', '关于']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
@@ -44,14 +73,54 @@ describe('V3 调音室 UI 冒烟', () => {
     expect(screen.getByRole('button', { name: '影院模式' })).toBeTruthy()
   })
 
+  it('内部精度可切换到 Float64 并由引擎统计确认', () => {
+    const { engine, bridge } = makeUi()
+    clickNav('调音器')
+    fireEvent.click(screen.getByRole('radio', { name: '双精度 · Float64' }))
+    expect(bridge.getParams().precision).toBe('float64')
+    expect(engine.getStats().internalPrecision).toBe('float64')
+    fireEvent.click(screen.getByRole('radio', { name: '标准 · Float32' }))
+    expect(engine.getStats().internalPrecision).toBe('float32')
+  })
+
+  it('M/S 比例显式启用后提交，宽度不依赖该开关', () => {
+    const { bridge } = makeUi()
+    clickNav('空间音效')
+    const balance = screen.getByRole('slider', { name: '差分 S ↔ 中央 M' }) as HTMLInputElement
+    expect(balance.disabled).toBe(true)
+    const width = screen.getByRole('slider', { name: '宽度' }) as HTMLInputElement
+    expect(width.disabled).toBe(false)
+    fireEvent.click(screen.getByRole('switch', { name: '启用 M/S 比例与变速变调' }))
+    expect(balance.disabled).toBe(false)
+    fireEvent.change(balance, { target: { value: '0.5' } })
+    expect(bridge.getParams().pitch.enabled).toBe(true)
+    expect(bridge.getParams().pitch.voiceBalance).toBe(0.5)
+    expect(screen.getByText('差分衰减 50%')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '立体声宽度详细设置' }))
+    expect((screen.getByRole('slider', { name: '差分 S ↔ 中央 M（精调）' }) as HTMLInputElement).disabled).toBe(false)
+  })
+
+  it('向上压缩图显示低电平提升，最大提升为零时回到单位曲线', () => {
+    makeUi()
+    clickNav('动态调音')
+    fireEvent.click(screen.getByRole('button', { name: '动态压缩详细设置' }))
+    fireEvent.click(screen.getByRole('radio', { name: '向上' }))
+    const curve = screen.getByRole('img', { name: '向上压缩器输入输出传输曲线' })
+    const paths = curve.querySelectorAll('path')
+    const firstY = (path: Element) => Number(path.getAttribute('d')?.match(/^M[^,]+,([\d.-]+)/)?.[1])
+    expect(firstY(paths[1])).toBeLessThan(firstY(paths[0]))
+    fireEvent.change(screen.getByRole('slider', { name: '最大提升' }), { target: { value: '0' } })
+    expect(firstY(curve.querySelectorAll('path')[1])).toBe(firstY(paths[0]))
+  })
+
   it('空间音效页：混响开关可切换启用态', () => {
     const { bridge } = makeUi()
     clickNav('空间音效')
     // 空间音效页只剩混响/3D环绕/立体声宽度卡（空间音频已独立为「空间音频」选项卡）。
     // 注意：导航栏始终展示「空间音频」标签，故不能以该文案判存在——改用空间音频页
-    // 独有的模式选择器文案「一键空间化」与 Power 按钮 title 作为页面内容标记。
-    expect(screen.queryByText('一键空间化')).toBeNull()
-    expect(screen.queryByTitle('开启空间音频')).toBeNull()
+    // 独有的模式按钮和空间音频开关作为页面内容标记。
+    expect(screen.queryByRole('button', { name: /^快速空间化/ })).toBeNull()
+    expect(screen.queryByRole('switch', { name: '空间音频' })).toBeNull()
     // 混响卡片标题存在
     expect(screen.getAllByText('混响').length).toBeGreaterThan(0)
     // 默认未启用
@@ -81,19 +150,36 @@ describe('V3 调音室 UI 冒烟', () => {
     expect(screen.queryByRole('slider', { name: '输出音量' })).toBeNull()
   })
 
-  it('空间音频页：Power 按钮开启后切到 instant 模式', () => {
-    makeUi()
+  it('空间音频页：开启后恢复快速空间化并同步引擎参数', () => {
+    const { bridge } = makeUi()
     clickNav('空间音频')
     // 空间音频页头部标题存在（与空间音效页区分）
     expect(screen.getAllByText('空间音频').length).toBeGreaterThan(0)
     // 空间音频页不应有混响卡（混响留在空间音效页）
     expect(screen.queryByText('混响')).toBeNull()
-    // 默认模式 off → Power 按钮可开启 instant
+    // 默认模式 off → 总开关可开启 instant
     const spatialToggle = screen.getByRole('switch', { name: '空间音频' })
     fireEvent.click(spatialToggle)
     expect(spatialToggle.getAttribute('aria-checked')).toBe('true')
-    // 开启后切到 instant（一键空间化），模式选择器出现「一键空间化」激活
-    expect(screen.getAllByText('一键空间化').length).toBeGreaterThan(0)
+    expect(bridge.getParams().spatial!.mode).toBe('instant')
+    expect(screen.getByRole('button', { name: /^快速空间化/ }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('快速空间化可启用多声道输入并选择 7.1.4 布局', () => {
+    const { bridge } = makeUi()
+    clickNav('空间音频')
+    fireEvent.click(screen.getByRole('switch', { name: '空间音频' }))
+    fireEvent.click(screen.getByText('音源与声道格式'))
+    const multi = screen.getByRole('switch', { name: '多声道输入空间化' })
+    fireEvent.click(multi)
+    expect(bridge.getParams().spatial!.instant.multichannelAuto).toBe(true)
+    fireEvent.click(screen.getByRole('radio', { name: '7.1.4' }))
+    expect(bridge.getParams().spatial!.instant.multichannelLayout).toBe('714')
+    fireEvent.click(screen.getByRole('radio', { name: '自动布局' }))
+    expect(bridge.getParams().spatial!.instant.multichannelLayout).toBe('auto')
+    fireEvent.click(screen.getByRole('button', { name: '设备与高级设置' }))
+    fireEvent.click(screen.getByRole('radio', { name: '仅晚混响' }))
+    expect(bridge.getParams().spatial!.budgetMode).toBe('lowLatency')
   })
 
   it('动态调音页：压缩器阈值修改经桥写入引擎', () => {
@@ -181,6 +267,14 @@ describe('V3 调音室 UI 冒烟', () => {
     expect(bridge.getParams().eq.proBands.length).toBe(20)
     // SVG 曲线编辑器
     expect(document.querySelector('svg')).toBeTruthy()
+  })
+
+  it('均衡器页：可为选中频段切换滤波器类型', () => {
+    const { bridge } = makeUi()
+    clickNav('均衡器')
+    const selector = screen.getByRole('combobox', { name: '滤波器类型' })
+    fireEvent.change(selector, { target: { value: 'notch' } })
+    expect(bridge.getParams().eq.proBands[0].type).toBe('notch')
   })
 
   it('主页音量控制：拖动到 20% → 引擎增益写入响度归一化通道', () => {

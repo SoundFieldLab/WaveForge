@@ -131,6 +131,20 @@ describe('features', () => {
     expect(f.crest).toBeGreaterThan(1)
   })
 
+  it('computeFeatures 可复用调用方对象；默认返回快照且不保留上帧字段', () => {
+    const input: FeatureInput = { magnitudes: new Float32Array([1, 2, 3]), binFreqs: new Float32Array([0, 100, 200]), rms: 0.4 }
+    const snapshot = computeFeatures(input)
+    const out = { rms: -1, zcr: -1, centroidHz: -1, rolloffHz: -1, flatness: -1, crest: -1 }
+    expect(computeFeatures(input, out)).toBe(out)
+    expect(out).toEqual(snapshot)
+    input.magnitudes.fill(0)
+    delete input.rms
+    computeFeatures(input, out)
+    expect(out).toEqual({ rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 })
+    expect(snapshot.rms).toBe(0.4)
+    expect(snapshot.crest).toBeGreaterThan(0)
+  })
+
   it('空输入安全：返回 0 或安全默认值（不 NaN/不抛）', () => {
     const empty = new Float32Array(0)
     expect(computeRms(empty)).toBe(0)

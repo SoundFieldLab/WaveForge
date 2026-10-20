@@ -17,7 +17,10 @@
  * 纯 TS、零运行时依赖：仅使用平台全局（TextEncoder/TextDecoder/Math.imul）。
  */
 
-import type { V3EngineParams, EqBand, SpatialSettings } from '../types'
+import type { V3EngineParams, EqBand, SpatialSettings, ProcessingModuleKey } from '../types'
+import { DEFAULT_PROCESSING_ORDER, MAX_PRO_EQ_BANDS } from '../types'
+import type { VirtualSpeakerCfg } from '../spatial/types'
+import type { BiquadType } from '../dsp/biquad'
 import { createDefaultSpatialSettings } from '../types'
 
 /** 当前分享串格式版本；变更不兼容格式时递增 */
@@ -125,6 +128,11 @@ function numOneOf<T extends number>(v: unknown, allowed: readonly T[], def: T): 
   return typeof v === 'number' && (allowed as readonly number[]).includes(v) ? (v as T) : def
 }
 
+/** 专业 EQ 滤波器类型白名单；旧分享串省略 type 时保持 peaking 语义。 */
+const EQ_FILTER_TYPES: readonly BiquadType[] = [
+  'peaking', 'lowshelf', 'highshelf', 'lowpass', 'highpass', 'bandpass', 'notch', 'allpass',
+]
+
 /** 数值数组（clamp 后截断到 maxLen）；缺失时返回默认值副本 */
 function numArray(v: unknown, min: number, max: number, def: number[], maxLen: number): number[] {
   if (!Array.isArray(v)) return def.slice()
@@ -155,7 +163,7 @@ function defaultEqProBands(): EqBand[] {
 
 /** 编码：SpatialSettings → plain object 深拷贝（剔除 undefined 字段，保 JSON 可序列化） */
 function encodeSpatial(s: SpatialSettings): unknown {
-  return JSON.parse(JSON.stringify(s))
+  return decodeSpatial(JSON.parse(JSON.stringify(s)))
 }
 
 /** 递归深度上限（防恶意深度嵌套栈溢出） */
@@ -228,6 +236,23 @@ function decodeSpatial(raw: unknown): SpatialSettings {
   const def = createDefaultSpatialSettings()
   return {
     mode,
+    renderStyle: oneOf(o.renderStyle, ['natural', 'focused'] as const, 'natural'),
+    inputFormat: oneOf(o.inputFormat, ['channels', 'ambix', 'ambix1', 'ambix2', 'ambix3', 'fuma', 'stereo51', 'stereo71'] as const, 'channels'),
+    ambisonicTransform: (() => {
+      const transform = isObj(o.ambisonicTransform) ? o.ambisonicTransform : {}
+      return { yawDeg: num(transform.yawDeg, -180, 180, 0), pitchDeg: num(transform.pitchDeg, -180, 180, 0),
+        rollDeg: num(transform.rollDeg, -180, 180, 0), orderGains: Array.from({ length: 4 }, (_, i) =>
+          num(Array.isArray(transform.orderGains) ? transform.orderGains[i] : undefined, -4, 4, 1)) }
+    })(),
+    speakerCancellation: {
+      enabled: bool((o.speakerCancellation as Record<string, unknown> | undefined)?.enabled, false),
+      amount: num((o.speakerCancellation as Record<string, unknown> | undefined)?.amount, 0, 1, 0.4),
+      delayMs: num((o.speakerCancellation as Record<string, unknown> | undefined)?.delayMs, 0.02, 1.5, 0.25),
+      cutoffHz: num((o.speakerCancellation as Record<string, unknown> | undefined)?.cutoffHz, 200, 5000, 1800),
+    },
+    earlyAmount: num(o.earlyAmount, 0, 1, 1),
+    lateAmount: num(o.lateAmount, 0, 1, 1),
+    earlyReflectionModel: oneOf(o.earlyReflectionModel, ['cues', 'spectral'] as const, 'cues'),
     // masterGain 契约 0.5..1（注释见 spatial/types）：无上界时分享串可传 1e6
     // 把空间级输出 softClip 成方波（严重失真）
     masterGain: typeof o.masterGain === 'number' && Number.isFinite(o.masterGain)
@@ -240,6 +265,9 @@ function decodeSpatial(raw: unknown): SpatialSettings {
       // → 引擎输出永久 NaN 静音）。其余 instant 数值字段由消费端 clamp 兜底。
       room: oneOf((o.instant as Record<string, unknown>).room,
         ['off', 'studio', 'hall', 'stage', 'church', 'outdoor', 'bathroom', 'corridor'] as const, def.instant.room),
+      multichannelAuto: bool((o.instant as Record<string, unknown>).multichannelAuto, def.instant.multichannelAuto),
+      multichannelLayout: oneOf((o.instant as Record<string, unknown>).multichannelLayout,
+        ['auto', 'quad', '51', '71', '714'] as const, def.instant.multichannelLayout),
     },
     headLocked: {
       ...def.headLocked,
@@ -248,9 +276,14 @@ function decodeSpatial(raw: unknown): SpatialSettings {
       // 消费端读 .length / p.azimuthDeg 抛 TypeError
       speakers: rebuildSpeakers((o.headLocked as Record<string, unknown>).speakers) ?? def.headLocked.speakers,
     },
-    world: { ...def.world, ...(o.world as object) },
+    world: {
+      ...def.world, ...(o.world as object),
+      propagation: (o.world as Record<string, unknown>).propagation === true,
+    },
     stage: { ...def.stage, ...(o.stage as object) },
-    ambience: { ...def.ambience, ...(o.ambience as object) },
+    ambience: { ...def.ambience, ...(o.ambience as object),
+      extraction: oneOf((o.ambience as Record<string, unknown>).extraction, ['pca', 'difference'] as const, 'pca') },
+    budgetMode: oneOf(o.budgetMode, ['quality', 'auto', 'lowLatency'] as const, 'quality'),
     convolution: oneOf(o.convolution, ['partitioned', 'time'] as const, def.convolution),
     hrtfInterp: oneOf(o.hrtfInterp, ['nearest', 'spherical'] as const, def.hrtfInterp),
     distanceModel: oneOf(o.distanceModel, ['inverse', 'linear', 'exponential'] as const, def.distanceModel),
@@ -260,9 +293,9 @@ function decodeSpatial(raw: unknown): SpatialSettings {
 }
 
 /** headLocked.speakers 逐字段重建：数组元素缺任一字段即整个数组按默认处理 */
-function rebuildSpeakers(raw: unknown): Array<{ azimuthDeg: number; elevationDeg: number; distance: number; gain: number; size: number }> | null {
+function rebuildSpeakers(raw: unknown): VirtualSpeakerCfg[] | null {
   if (!Array.isArray(raw) || raw.length === 0) return null
-  const out: Array<{ azimuthDeg: number; elevationDeg: number; distance: number; gain: number; size: number }> = []
+  const out: VirtualSpeakerCfg[] = []
   for (const item of raw) {
     if (!isObj(item)) return null
     const az = (item as Record<string, unknown>).azimuthDeg
@@ -272,22 +305,53 @@ function rebuildSpeakers(raw: unknown): Array<{ azimuthDeg: number; elevationDeg
     const size = (item as Record<string, unknown>).size
     if (typeof az !== 'number' || !Number.isFinite(az)) return null
     if (typeof el !== 'number' || !Number.isFinite(el)) return null
-    if (typeof dist !== 'number' || !Number.isFinite(dist) || dist <= 0) return null
+    if (typeof dist !== 'number' || !Number.isFinite(dist) || dist < 0) return null
     if (typeof gain !== 'number' || !Number.isFinite(gain)) return null
-    if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) return null
-    out.push({ azimuthDeg: az, elevationDeg: el, distance: dist, gain, size })
+    if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) return null
+    const speaker: VirtualSpeakerCfg = {
+      azimuthDeg: az, elevationDeg: Math.max(-90, Math.min(90, el)),
+      distance: Math.min(200, dist), gain: Math.max(0, Math.min(2, gain)), size: Math.min(1, size),
+    }
+    if (typeof item.muted === 'boolean') speaker.muted = item.muted
+    if (item.route === 'l' || item.route === 'r' || item.route === 'both' || item.route === 'side') speaker.route = item.route
+    if (typeof item.diffuse === 'number') speaker.diffuse = num(item.diffuse, 0, 1, 0)
+    if (typeof item.polarity === 'number') speaker.polarity = num(item.polarity, -1, 1, 1)
+    out.push(speaker)
   }
   return out
 }
 
 /** 白名单重建：只读取已知字段，未知字段（含 __proto__ 等注入键）一律丢弃 */
-function sanitizeParams(raw: unknown): V3EngineParams {
+function sanitizeParams(raw: unknown): V3EngineParams & { spatial: SpatialSettings } {
   if (!isObj(raw)) throw new Error('invalid share code payload')
   const sampleRate = Math.round(num(raw.sampleRate, 8000, 192000, 48000))
+  const precision = oneOf(raw.precision, ['float32', 'float64'] as const, 'float32')
+  const order: ProcessingModuleKey[] = []
+  if (Array.isArray(raw.processingOrder)) {
+    for (const key of raw.processingOrder) {
+      if (typeof key === 'string' && DEFAULT_PROCESSING_ORDER.includes(key as ProcessingModuleKey)
+        && !order.includes(key as ProcessingModuleKey)) order.push(key as ProcessingModuleKey)
+    }
+  }
+  for (const key of DEFAULT_PROCESSING_ORDER) if (!order.includes(key)) order.push(key)
 
   const eqRaw = isObj(raw.eq) ? raw.eq : {}
+  const dynamicEqRaw = isObj(raw.dynamicEq) ? raw.dynamicEq : {}
+  const dynamicBands = Array.isArray(dynamicEqRaw.bands)
+    ? dynamicEqRaw.bands.filter(isObj).slice(0, 8).map((band) => ({
+      enabled: bool(band.enabled, true),
+      frequency: num(band.frequency, 20, Math.min(20000, sampleRate * 0.49), 1000),
+      q: num(band.q, 0.1, 18, 1),
+      thresholdDb: num(band.thresholdDb, -80, 0, -30),
+      ratio: num(band.ratio, 1, 20, 4),
+      maxReductionDb: num(band.maxReductionDb, 0, 24, 12),
+      attackMs: num(band.attackMs, 0.1, 500, 10),
+      releaseMs: num(band.releaseMs, 0.1, 3000, 150),
+    })) : undefined
+  const crossfeedRaw = isObj(raw.crossfeed) ? raw.crossfeed : {}
   const deesserRaw = isObj(raw.deesser) ? raw.deesser : {}
   const compRaw = isObj(raw.compressor) ? raw.compressor : {}
+  const compMultiRaw = isObj(compRaw.multiband) ? compRaw.multiband : {}
   const nightRaw = isObj(raw.nightMode) ? raw.nightMode : {}
   const bassRaw = isObj(raw.bassEnhancer) ? raw.bassEnhancer : {}
   const revRaw = isObj(raw.reverb) ? raw.reverb : {}
@@ -300,23 +364,27 @@ function sanitizeParams(raw: unknown): V3EngineParams {
   const ieqRaw = isObj(raw.ieq) ? raw.ieq : {}
   const pitchRaw = isObj(raw.pitch) ? raw.pitch : {}
   const hearingRaw = isObj(raw.hearing) ? raw.hearing : {}
+  const channelRaw = isObj(raw.channelCalibration) ? raw.channelCalibration : {}
 
   // eq.simpleBands：5 段，缺失补 0
   const simple = numArray(eqRaw.simpleBands, -20, 20, [0, 0, 0, 0, 0], 5)
   while (simple.length < 5) simple.push(0)
 
-  // eq.proBands：白名单 {frequency,gain,q}；字段缺失 → 默认 10 段；显式空数组 → 保留空
+  // eq.proBands：白名单 {frequency,gain,q,type}；字段缺失 → 默认 10 段；显式空数组 → 保留空
   let proBands: EqBand[] = defaultEqProBands()
   if (Array.isArray(eqRaw.proBands)) {
     const parsed: EqBand[] = []
     for (const b of eqRaw.proBands) {
-      if (parsed.length >= 20) break
+      if (parsed.length >= MAX_PRO_EQ_BANDS) break
       if (isObj(b)) {
-        parsed.push({
+        const band: EqBand = {
           frequency: num(b.frequency, 20, 20000, 1000),
           gain: num(b.gain, -20, 20, 0),
           q: num(b.q, 0.1, 10, 1.1),
-        })
+        }
+        // 保持旧分享串的对象形状：未携带 type 时不写入字段，运行时按 peaking 处理。
+        if (typeof b.type === 'string') band.type = oneOf(b.type, EQ_FILTER_TYPES, 'peaking')
+        parsed.push(band)
       }
     }
     proBands = parsed
@@ -335,14 +403,34 @@ function sanitizeParams(raw: unknown): V3EngineParams {
 
   return {
     sampleRate,
+    bitPerfectBypass: bool(raw.bitPerfectBypass, false),
+    processingOrder: order,
+    precision,
     eq: {
       enabled: bool(eqRaw.enabled, true),
       mode: oneOf(eqRaw.mode, ['simple', 'pro'] as const, 'pro'),
       simpleBands: simple,
       proBands,
-      bandCount: numOneOf(eqRaw.bandCount, [10, 20] as const, 10),
+      bandCount: Math.round(num(eqRaw.bandCount, 1, MAX_PRO_EQ_BANDS, 10)),
       qCompensation: bool(eqRaw.qCompensation, true),
       locked: bool(eqRaw.locked, false),
+    },
+    dynamicEq: {
+      enabled: bool(dynamicEqRaw.enabled, false),
+      frequency: num(dynamicEqRaw.frequency, 20, Math.min(20000, sampleRate * 0.49), 1000),
+      q: num(dynamicEqRaw.q, 0.1, 18, 1),
+      thresholdDb: num(dynamicEqRaw.thresholdDb, -80, 0, -30),
+      ratio: num(dynamicEqRaw.ratio, 1, 20, 4),
+      maxReductionDb: num(dynamicEqRaw.maxReductionDb, 0, 24, 12),
+      attackMs: num(dynamicEqRaw.attackMs, 0.1, 500, 10),
+      releaseMs: num(dynamicEqRaw.releaseMs, 0.1, 3000, 150),
+      ...(dynamicBands?.length ? { bands: dynamicBands } : {}),
+    },
+    crossfeed: {
+      enabled: bool(crossfeedRaw.enabled, false),
+      amount: num(crossfeedRaw.amount, 0, 1, 0.3),
+      cutoffHz: num(crossfeedRaw.cutoffHz, 100, 3000, 700),
+      delayMs: num(crossfeedRaw.delayMs, 0, 1, 0.2),
     },
     deesser: {
       enabled: bool(deesserRaw.enabled, false),
@@ -357,6 +445,9 @@ function sanitizeParams(raw: unknown): V3EngineParams {
     },
     compressor: {
       enabled: bool(compRaw.enabled, false),
+      mode: oneOf(compRaw.mode, ['downward', 'upward', 'multiband'] as const, 'downward'),
+      upwardMaxGainDb: num(compRaw.upwardMaxGainDb, 0, 36, 24),
+      transientPreserve: num(compRaw.transientPreserve, 0, 1, 0),
       thresholdDb: num(compRaw.thresholdDb, -60, 0, -20),
       ratio: num(compRaw.ratio, 1, 50, 4),
       kneeDb: num(compRaw.kneeDb, 0, 24, 6),
@@ -364,6 +455,34 @@ function sanitizeParams(raw: unknown): V3EngineParams {
       releaseMs: num(compRaw.releaseMs, 0, 3000, 150),
       makeupDb: num(compRaw.makeupDb, -24, 24, 0),
       outputGain: num(compRaw.outputGain, 0, 2, 1),
+      multiband: {
+        lowMidHz: num(compMultiRaw.lowMidHz, 40, 2000, 180),
+        midHighHz: num(compMultiRaw.midHighHz, 500, 20000, 4000),
+        low: {
+          thresholdDb: num(isObj(compMultiRaw.low) ? compMultiRaw.low.thresholdDb : undefined, -60, 0, -24),
+          ratio: num(isObj(compMultiRaw.low) ? compMultiRaw.low.ratio : undefined, 1, 50, 3),
+          kneeDb: num(isObj(compMultiRaw.low) ? compMultiRaw.low.kneeDb : undefined, 0, 24, 6),
+          attackMs: num(isObj(compMultiRaw.low) ? compMultiRaw.low.attackMs : undefined, 0, 500, 12),
+          releaseMs: num(isObj(compMultiRaw.low) ? compMultiRaw.low.releaseMs : undefined, 0, 3000, 180),
+          makeupDb: num(isObj(compMultiRaw.low) ? compMultiRaw.low.makeupDb : undefined, -24, 24, 0),
+        },
+        mid: {
+          thresholdDb: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.thresholdDb : undefined, -60, 0, -20),
+          ratio: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.ratio : undefined, 1, 50, 2.5),
+          kneeDb: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.kneeDb : undefined, 0, 24, 6),
+          attackMs: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.attackMs : undefined, 0, 500, 10),
+          releaseMs: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.releaseMs : undefined, 0, 3000, 150),
+          makeupDb: num(isObj(compMultiRaw.mid) ? compMultiRaw.mid.makeupDb : undefined, -24, 24, 0),
+        },
+        high: {
+          thresholdDb: num(isObj(compMultiRaw.high) ? compMultiRaw.high.thresholdDb : undefined, -60, 0, -24),
+          ratio: num(isObj(compMultiRaw.high) ? compMultiRaw.high.ratio : undefined, 1, 50, 2),
+          kneeDb: num(isObj(compMultiRaw.high) ? compMultiRaw.high.kneeDb : undefined, 0, 24, 6),
+          attackMs: num(isObj(compMultiRaw.high) ? compMultiRaw.high.attackMs : undefined, 0, 500, 5),
+          releaseMs: num(isObj(compMultiRaw.high) ? compMultiRaw.high.releaseMs : undefined, 0, 3000, 100),
+          makeupDb: num(isObj(compMultiRaw.high) ? compMultiRaw.high.makeupDb : undefined, -24, 24, 0),
+        },
+      },
     },
     nightMode: {
       enabled: bool(nightRaw.enabled, false),
@@ -393,9 +512,12 @@ function sanitizeParams(raw: unknown): V3EngineParams {
       },
       convolution: {
         ir: null, // IR 数组不进入分享串；解码后恒为 null，由调用方按 irName 重新加载
+        irId: str(revConvRaw.irId, null, 128),
         irName: str(revConvRaw.irName, null, 256),
+        purpose: oneOf(revConvRaw.purpose, ['reverb', 'roomCorrection', 'speakerCorrection', 'headphoneCorrection'] as const, 'reverb'),
         mix: num(revConvRaw.mix, 0, 1, 0.3),
         preDelayMs: num(revConvRaw.preDelayMs, 0, 500, 0),
+        partitionSize: numOneOf(revConvRaw.partitionSize, [128, 256, 512, 1024] as const, 512),
         dePeriodize: bool(revConvRaw.dePeriodize, true),
       },
     },
@@ -424,6 +546,8 @@ function sanitizeParams(raw: unknown): V3EngineParams {
       minGainDb: num(lnRaw.minGainDb, -24, 0, -9),
       useRealtimeMeter: bool(lnRaw.useRealtimeMeter, true),
       externalGainDb: num(lnRaw.externalGainDb, -24, 24, 0),
+      replayGainMode: oneOf(lnRaw.replayGainMode, ['off', 'track', 'album'] as const, 'off'),
+      replayGainDb: lnRaw.replayGainDb === null ? null : num(lnRaw.replayGainDb, -60, 24, 0),
     },
     limiter: {
       enabled: bool(limRaw.enabled, true),
@@ -452,6 +576,15 @@ function sanitizeParams(raw: unknown): V3EngineParams {
     // 旧分享串（无 spatial）往返得默认 off，行为与 v3 历史一致
     spatial: decodeSpatial(raw.spatial),
     stereoWidth: num(raw.stereoWidth, 0, 2, 1),
+    lowMonoAmount: num(raw.lowMonoAmount, 0, 1, 0),
+    lowMonoCutoffHz: num(raw.lowMonoCutoffHz, 40, 250, 120),
+    subsonicEnabled: bool(raw.subsonicEnabled, false),
+    subsonicCutoffHz: num(raw.subsonicCutoffHz, 10, 40, 20),
+    channelCalibration: {
+      enabled: bool(channelRaw.enabled, false),
+      leftDb: num(channelRaw.leftDb, -24, 24, 0),
+      rightDb: num(channelRaw.rightDb, -24, 24, 0),
+    },
     sceneId: str(raw.sceneId, null, 64),
     customized: bool(raw.customized, false),
   }
@@ -463,15 +596,25 @@ function sanitizeParams(raw: unknown): V3EngineParams {
 function toShareObject(p: V3EngineParams): unknown {
   return {
     sampleRate: p.sampleRate,
+    bitPerfectBypass: p.bitPerfectBypass ?? false,
+    processingOrder: p.processingOrder ?? [...DEFAULT_PROCESSING_ORDER],
+    precision: p.precision ?? 'float32',
     eq: {
       enabled: p.eq.enabled,
       mode: p.eq.mode,
       simpleBands: p.eq.simpleBands.slice(0, 5),
-      proBands: p.eq.proBands.slice(0, 20).map((b) => ({ frequency: b.frequency, gain: b.gain, q: b.q })),
+      proBands: p.eq.proBands.slice(0, MAX_PRO_EQ_BANDS).map((b) => ({
+        frequency: b.frequency,
+        gain: b.gain,
+        q: b.q,
+        ...(b.type ? { type: b.type } : {}),
+      })),
       bandCount: p.eq.bandCount,
       qCompensation: p.eq.qCompensation,
       locked: p.eq.locked,
     },
+    dynamicEq: p.dynamicEq ? { ...p.dynamicEq } : undefined,
+    crossfeed: p.crossfeed ? { ...p.crossfeed } : undefined,
     deesser: {
       enabled: p.deesser.enabled,
       centerHz: p.deesser.centerHz,
@@ -485,6 +628,9 @@ function toShareObject(p: V3EngineParams): unknown {
     },
     compressor: {
       enabled: p.compressor.enabled,
+      mode: p.compressor.mode ?? 'downward',
+      upwardMaxGainDb: p.compressor.upwardMaxGainDb ?? 24,
+      transientPreserve: p.compressor.transientPreserve ?? 0,
       thresholdDb: p.compressor.thresholdDb,
       ratio: p.compressor.ratio,
       kneeDb: p.compressor.kneeDb,
@@ -492,6 +638,13 @@ function toShareObject(p: V3EngineParams): unknown {
       releaseMs: p.compressor.releaseMs,
       makeupDb: p.compressor.makeupDb,
       outputGain: p.compressor.outputGain,
+      multiband: p.compressor.multiband ? {
+        lowMidHz: p.compressor.multiband.lowMidHz,
+        midHighHz: p.compressor.multiband.midHighHz,
+        low: { ...p.compressor.multiband.low },
+        mid: { ...p.compressor.multiband.mid },
+        high: { ...p.compressor.multiband.high },
+      } : undefined,
     },
     nightMode: {
       enabled: p.nightMode.enabled,
@@ -521,9 +674,12 @@ function toShareObject(p: V3EngineParams): unknown {
       },
       // 去 IR 数组：卷积 IR 只保留 irName 引用，ir 不参与序列化
       convolution: {
+        irId: p.reverb.convolution.irId ?? null,
         irName: p.reverb.convolution.irName,
+        purpose: p.reverb.convolution.purpose ?? 'reverb',
         mix: p.reverb.convolution.mix,
         preDelayMs: p.reverb.convolution.preDelayMs,
+        partitionSize: p.reverb.convolution.partitionSize ?? 512,
         dePeriodize: p.reverb.convolution.dePeriodize,
       },
     },
@@ -550,6 +706,8 @@ function toShareObject(p: V3EngineParams): unknown {
       minGainDb: p.loudnessNormalization.minGainDb,
       useRealtimeMeter: p.loudnessNormalization.useRealtimeMeter,
       externalGainDb: p.loudnessNormalization.externalGainDb,
+      replayGainMode: p.loudnessNormalization.replayGainMode ?? 'off',
+      replayGainDb: p.loudnessNormalization.replayGainDb ?? null,
     },
     limiter: {
       enabled: p.limiter.enabled,
@@ -579,6 +737,11 @@ function toShareObject(p: V3EngineParams): unknown {
     // 递归过滤为 plain data 防 prototype 污染/超大 payload；非法/缺省 → 默认 off）。
     spatial: p.spatial ? encodeSpatial(p.spatial) : undefined,
     stereoWidth: p.stereoWidth,
+    lowMonoAmount: p.lowMonoAmount ?? 0,
+    lowMonoCutoffHz: p.lowMonoCutoffHz ?? 120,
+    subsonicEnabled: p.subsonicEnabled ?? false,
+    subsonicCutoffHz: p.subsonicCutoffHz ?? 20,
+    channelCalibration: p.channelCalibration ? { ...p.channelCalibration } : undefined,
     sceneId: p.sceneId,
     customized: p.customized,
   }
@@ -596,7 +759,7 @@ export function encodeShareCode(p: V3EngineParams): string {
 }
 
 /** 反序列化：版本/校验和验证 + 白名单字段 + 数值 clamp；非法输入抛 Error */
-export function decodeShareCode(s: string): V3EngineParams {
+export function decodeShareCode(s: string): V3EngineParams & { spatial: SpatialSettings } {
   if (typeof s !== 'string' || s.length === 0) {
     throw new Error('invalid share code: empty input')
   }

@@ -15,6 +15,7 @@
 
 import type { AudioEngineVersion } from '../audioEngineVersion'
 import type { PlaybackTimeStore } from '../../audio/playbackTimeStore'
+import type { SpatialPlaybackInputOptions } from '../../audio/spatialPlaybackInput'
 
 // ==================== 引擎清单（每个引擎用独立文件声明自己） ====================
 
@@ -50,6 +51,11 @@ export interface AudioGraphHandle {
   audioContext: AudioContext
   masterGain: GainNode
   analyser: AnalyserNode
+  outputGain?: GainNode
+  leftAnalyserNode?: AnalyserNode
+  rightAnalyserNode?: AnalyserNode
+  /** HSE 接管输入时保留离散声道；切走后恢复浏览器扬声器混音。 */
+  configureDiscreteInput?(enabled: boolean, options?: SpatialPlaybackInputOptions): void
   /** Stereo splitter feeding per-channel waveform analyzers. */
   channelSplitterNode?: ChannelSplitterNode
 }
@@ -159,6 +165,9 @@ export interface IAudioEngineAdapter {
   /** 是否已接入音频图 */
   isAttached(): boolean
 
+  /** 只通知正式当前源；预加载与视觉提前切换不得调用。 */
+  setPlaybackSource?(source: EnginePlaybackSource | null): void
+
   // —— 系统音量 → 等响度补偿 ——
 
   /** 系统音量（0-100）告知引擎；v1 no-op，v2/v3 据此调整频响补偿 */
@@ -196,4 +205,12 @@ export interface IAudioEngineAdapter {
   isExporting(): boolean
   /** 订阅导出状态变化；返回取消订阅函数 */
   onExportingChange?(cb: (exporting: boolean) => void): () => void
+}
+
+/** 播放器提交给引擎的当前源，身份与 URL 分开，避免复用 URL 吞掉切歌。 */
+export interface EnginePlaybackSource {
+  trackKey: string
+  url: string
+  isLive?: boolean
+  replayGainTags?: Record<string, unknown> | null
 }

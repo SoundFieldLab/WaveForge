@@ -10,6 +10,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { SpectrumAnalyzer } from '../src/analysis/Spectrum'
+import { fft, hannWindow } from '../src/dsp/fft'
 
 /** mulberry32：确定性伪随机（测试专用，避免 Math.random） */
 function mulberry32(seed: number): () => number {
@@ -43,6 +44,10 @@ describe('SpectrumAnalyzer', () => {
     expect(() => new SpectrumAnalyzer(2047, FS)).toThrow()
     expect(() => new SpectrumAnalyzer(1000, FS)).toThrow()
     expect(() => new SpectrumAnalyzer(N, 0)).toThrow('invalid sample rate')
+    for (const size of [NaN, Infinity, 2.5, 2048.1, 2 ** 32 + 2]) {
+      expect(() => new SpectrumAnalyzer(size, FS)).toThrow('invalid fftSize')
+    }
+    expect(() => new SpectrumAnalyzer(N, Infinity)).toThrow('invalid sample rate')
   })
 
   it('幅度谱长度 = N/2+1；reset 后清零', () => {
@@ -115,6 +120,78 @@ describe('SpectrumAnalyzer', () => {
     const noise = new SpectrumAnalyzer(N, FS)
     noise.processStereo(makeNoise(N, 7), makeNoise(N, 7))
     expect(noise.getFeatures().rms).toBeCloseTo(1 / Math.sqrt(3), 1)
+  })
+
+  it('同相/反相保留 rawFFT 尺度；单侧输入按双声道平均功率为 -3dB，交换声道不变', () => {
+    const x = makeSine(FS * 32 / N, FS, N, 0.7)
+    const opposite = Float32Array.from(x, (v) => -v)
+    const silence = new Float32Array(N)
+    const same = new SpectrumAnalyzer(N, FS)
+    const anti = new SpectrumAnalyzer(N, FS)
+    const left = new SpectrumAnalyzer(N, FS)
+    const right = new SpectrumAnalyzer(N, FS)
+    same.processStereo(x, x)
+    anti.processStereo(x, opposite)
+    left.processStereo(x, silence)
+    right.processStereo(silence, x)
+    const reference = new Float32Array(N)
+    const imag = new Float32Array(N)
+    const window = hannWindow(N)
+    for (let i = 0; i < N; i++) reference[i] = x[i] * window[i]
+    fft(reference, imag, false)
+    const peak = 32
+    const raw = Math.hypot(reference[peak], imag[peak])
+    expect(same.getMagnitudes()[peak]).toBeCloseTo(raw, 3)
+    expect(anti.getMagnitudes()[peak]).toBeCloseTo(raw, 3)
+    expect(right.getMagnitudes()[peak]).toBeCloseTo(raw / Math.SQRT2, 3)
+    expect(left.getMagnitudes()[peak]).toBeCloseTo(right.getMagnitudes()[peak], 3)
+    expect(anti.getFeatures().rms).toBeCloseTo(same.getFeatures().rms, 6)
+    expect(right.getFeatures().rms).toBeCloseTo(same.getFeatures().rms / Math.SQRT2, 6)
+  })
+
+  it('打包双声道 FFT 与两个独立 FFT 的 bin 功率平均一致（含 DC/Nyquist）', () => {
+    const l = makeNoise(N, 73)
+    const r = makeNoise(N, 123)
+    const realL = new Float32Array(N)
+    const realR = new Float32Array(N)
+    const imagL = new Float32Array(N)
+    const imagR = new Float32Array(N)
+    const window = hannWindow(N)
+    for (let i = 0; i < N; i++) {
+      realL[i] = l[i] * window[i]
+      realR[i] = r[i] * window[i]
+    }
+    fft(realL, imagL, false)
+    fft(realR, imagR, false)
+    const sa = new SpectrumAnalyzer(N, FS)
+    sa.processStereo(l, r)
+    for (let k = 0; k <= N / 2; k++) {
+      const expected = Math.hypot(realL[k], imagL[k], realR[k], imagR[k]) / Math.SQRT2
+      expect(sa.getMagnitudes()[k]).toBeCloseTo(expected, 4)
+    }
+  })
+
+  it('结果复用、短/空输入无上帧残留；默认特征仍是独立快照', () => {
+    const sa = new SpectrumAnalyzer(N, FS)
+    const buffer = sa.getMagnitudes()
+    const l = makeSine(440, FS, N)
+    sa.processStereo(l, l)
+    const snapshot = sa.getFeatures()
+    const out = { rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 }
+    expect(sa.getFeatures(out)).toBe(out)
+    expect(out).toEqual(snapshot)
+    sa.processStereo(new Float32Array(0), new Float32Array(0))
+    expect(sa.getMagnitudes()).toBe(buffer)
+    expect(buffer.every((v) => v === 0)).toBe(true)
+    sa.getFeatures(out)
+    expect(out).toEqual({ rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 })
+    expect(snapshot.rms).toBeGreaterThan(0)
+    const short = makeNoise(73, 5)
+    sa.processStereo(new Float32Array(0), short)
+    const fresh = new SpectrumAnalyzer(N, FS)
+    fresh.processStereo(new Float32Array(0), short)
+    expect(sa.getMagnitudes()).toEqual(fresh.getMagnitudes())
+    expect(sa.getFeatures()).toEqual(fresh.getFeatures())
   })
 
   it('输入短于 fftSize 时补零处理不崩溃且结果确定', () => {

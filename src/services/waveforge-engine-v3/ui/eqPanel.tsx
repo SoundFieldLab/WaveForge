@@ -1,14 +1,14 @@
 /**
  * WaveForge v3 调音室 UI —— 均衡器页
  *
- * v3 EQ：简约 5 段 / 专业 10-20 段 + 级联 Q 补偿 + 锁定 + 曲线编辑器拖拽。
+ * v3 EQ：简约 5 段 / 专业 1–64 段 + 级联 Q 补偿 + 锁定 + 曲线编辑器拖拽。
  * 预设（localStorage）格式：{mode, simpleBands, proBands}；完整 v3 分享串见调音器页。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Save, Trash2, RotateCcw, Lock, LockOpen } from 'lucide-react'
-import { PRO_EQ_DEFAULT_BANDS, PRO_EQ_20_BANDS } from '../src/types'
+import { Save, Trash2, RotateCcw, Lock, LockOpen, Info } from 'lucide-react'
+import { PRO_EQ_DEFAULT_BANDS, PRO_EQ_20_BANDS, MAX_PRO_EQ_BANDS } from '../src/types'
 import type { EqBand, EqMode, V3EngineParams } from '../src/types'
 import type { V3Theme } from './theme'
 import { ActionButton, GlassCard, GlassRangeStyle, InfoLine, SectionTitle, TextInput, Toggle } from './primitives'
@@ -49,6 +49,21 @@ export const SIMPLE_EQ_BANDS = [
   { frequency: 4000, label: '中高', hint: '4kHz，影响清晰度与齿音附近的临场感' },
   { frequency: 12000, label: '高音', hint: '12kHz，影响空气感与高频光泽' },
 ]
+
+const FILTER_TYPE_OPTIONS: { value: NonNullable<EqBand['type']>; label: string }[] = [
+  { value: 'peaking', label: '峰值' },
+  { value: 'lowshelf', label: '低架' },
+  { value: 'highshelf', label: '高架' },
+  { value: 'lowpass', label: '低通' },
+  { value: 'highpass', label: '高通' },
+  { value: 'bandpass', label: '带通' },
+  { value: 'notch', label: '陷波' },
+  { value: 'allpass', label: '全通' },
+]
+
+function hasGainControl(type: EqBand['type']): boolean {
+  return type === undefined || type === 'peaking' || type === 'lowshelf' || type === 'highshelf'
+}
 
 function BandNumberInput({ label, value, min, max, step, decimals, unit, disabled, theme, onCommit }: {
   label: string
@@ -122,7 +137,8 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
   }
 
   const handleApplyPreset = (preset: EqPreset) => {
-    patchEq({ mode: preset.mode, bandCount: preset.proBands.length > 10 ? 20 : 10, simpleBands: [...preset.simpleBands], proBands: preset.proBands.map((b) => ({ ...b })) })
+    const bands = preset.proBands.slice(0, MAX_PRO_EQ_BANDS)
+    patchEq({ mode: preset.mode, bandCount: Math.max(1, bands.length), simpleBands: [...preset.simpleBands], proBands: bands.map((b) => ({ ...b })) })
   }
 
   const handleDeletePreset = (id: string) => {
@@ -134,7 +150,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
   const handleResetEq = () => {
     patchEq({
       simpleBands: [0, 0, 0, 0, 0],
-      proBands: eq.proBands.map((band) => ({ ...band, gain: 0 })),
+      proBands: eq.proBands.map((band) => ({ ...band, gain: 0, type: 'peaking' as const })),
     })
     window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '均衡器已全部归零', type: 'info' } }))
   }
@@ -144,7 +160,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
     const target = count === 20 ? PRO_EQ_20_BANDS : PRO_EQ_DEFAULT_BANDS
     const next = target.map((frequency) => {
       const existing = eq.proBands.find((band) => Math.abs(band.frequency - frequency) < 0.5)
-      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? 1.1 }
+      return { frequency, gain: existing?.gain ?? 0, q: existing?.q ?? 1.1, type: existing?.type }
     })
     const selectedFrequency = eq.proBands[activeBandIndex]?.frequency ?? next[0].frequency
     setSelectedBand(next.reduce((nearest, band, index) =>
@@ -152,9 +168,34 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
     patchEq({ bandCount: count, proBands: next })
   }
 
+  const addBand = () => {
+    if (eq.locked || eq.proBands.length >= MAX_PRO_EQ_BANDS) return
+    const next = eq.proBands.map((band) => ({ ...band })).sort((a, b) => a.frequency - b.frequency)
+    let low = 20, bestLow = 20, bestHigh = 20000, largest = 0
+    for (const high of [...next.map((band) => band.frequency), 20000]) {
+      const gap = Math.log(high / low)
+      if (gap > largest) { largest = gap; bestLow = low; bestHigh = high }
+      low = high
+    }
+    const frequency = Math.sqrt(bestLow * bestHigh)
+    const index = next.findIndex((band) => band.frequency > frequency)
+    const insertion = index < 0 ? next.length : index
+    next.splice(insertion, 0, { frequency, gain: 0, q: 1.1, type: 'peaking' })
+    setSelectedBand(insertion)
+    patchEq({ proBands: next, bandCount: next.length })
+  }
+
+  const removeBand = () => {
+    if (eq.locked || eq.proBands.length <= 1) return
+    const next = eq.proBands.filter((_, index) => index !== activeBandIndex)
+    setSelectedBand(Math.min(activeBandIndex, next.length - 1))
+    patchEq({ proBands: next, bandCount: next.length })
+  }
+
   // 曲线编辑器数据源
-  const curvePoints: EqPoint[] = eq.proBands.map((b) => ({ frequency: b.frequency, gain: b.gain }))
+  const curvePoints: EqPoint[] = eq.proBands.map((b) => ({ frequency: b.frequency, gain: hasGainControl(b.type) ? b.gain : 0 }))
   const setCurveGain = (index: number, gain: number) => {
+    if (!hasGainControl(eq.proBands[index]?.type)) return
     const next = eq.proBands.map((b) => ({ ...b }))
     if (next[index]) next[index].gain = gain
     patchEq({ proBands: next })
@@ -170,6 +211,15 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
       band.frequency = Number(clamp(value, low, high).toFixed(1))
     } else if (field === 'gain') band.gain = clamp(value, -20, 20)
     else band.q = clamp(value, 0.1, 10)
+    patchEq({ proBands: next })
+  }
+
+  const setBandType = (index: number, type: NonNullable<EqBand['type']>) => {
+    const next = eq.proBands.map((band) => ({ ...band }))
+    const band = next[index]
+    if (!band) return
+    // peaking 是历史默认值，写入它也能让分享串明确表达当前滤波器类型。
+    band.type = type
     patchEq({ proBands: next })
   }
 
@@ -205,14 +255,19 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
             {eq.mode === 'pro' && (
               <div>
                 <div className={`${theme.textSecondary} text-xs mb-2`}>频段数</div>
-                <div className="hse-glass-group flex gap-1 rounded-xl p-1">
+                <div className="hse-glass-group flex flex-wrap gap-1 rounded-xl p-1">
                 {([{ value: 10 as const, label: '10 段' }, { value: 20 as const, label: '20 段' }]).map((n) => (
-                  <button key={n.value} type="button" onClick={() => remapBands(n.value)} aria-pressed={eq.bandCount === n.value}
+                  <button key={n.value} type="button" disabled={eq.locked} onClick={() => remapBands(n.value)} aria-pressed={eq.bandCount === n.value}
                     className={`hse-glass-choice px-3 py-2 rounded-lg text-sm focus-visible:outline focus-visible:outline-2 ${eq.bandCount === n.value ? 'font-medium' : theme.textSecondary}`}>
                     {n.label}
                   </button>
                 ))}
+                <button type="button" disabled={eq.locked || eq.proBands.length >= MAX_PRO_EQ_BANDS} onClick={addBand}
+                  className={`hse-glass-choice rounded-lg px-3 py-2 text-xs disabled:opacity-40 ${theme.textSecondary}`}>添加频段</button>
+                <button type="button" disabled={eq.locked || eq.proBands.length <= 1} onClick={removeBand}
+                  className={`hse-glass-choice rounded-lg px-3 py-2 text-xs disabled:opacity-40 ${theme.textSecondary}`}>删除选中频段</button>
                 </div>
+                <div className={`${theme.textTertiary} mt-1 text-xs`}>{eq.proBands.length} / {MAX_PRO_EQ_BANDS} 段</div>
               </div>
             )}
             <div className="flex flex-wrap items-center gap-3 pb-1">
@@ -231,6 +286,20 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
           </div>
         )}
       </GlassCard>
+
+      {!eq.enabled && (
+        <GlassCard theme={theme}>
+          <div className="flex items-start gap-3">
+            <Info aria-hidden="true" className="mt-0.5 h-4 w-4 shrink-0" style={{ color: theme.accentColor }} />
+            <div className="min-w-0">
+              <div className={`${theme.textPrimary} text-sm font-medium`}>均衡器已旁路</div>
+              <div className={`${theme.textSecondary} mt-1 text-xs leading-relaxed`}>
+                打开上方「启用均衡器」可编辑频段曲线、Q 值与滤波器类型；关闭时音频完全直通，不做任何频段处理。
+              </div>
+            </div>
+          </div>
+        </GlassCard>
+      )}
 
       {quickPresets}
 
@@ -279,16 +348,28 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
                 maxDb={20}
               />
               {eq.proBands[activeBandIndex] && (
-                <div className="grid grid-cols-3 gap-3 mt-4 rounded-xl p-3" aria-label="选中频段数值编辑" style={{ background: theme.inputBg }}>
+                <div className="grid grid-cols-2 @min-[680px]:grid-cols-4 gap-3 mt-4 rounded-xl p-3" aria-label="选中频段数值编辑" style={{ background: theme.inputBg }}>
                   {(['frequency', 'gain', 'q'] as const).map((field) => {
                     const band = eq.proBands[activeBandIndex]
                     const limits = field === 'frequency' ? { min: 20, max: 20000, step: 0.1, decimals: 1, unit: 'Hz' } : field === 'gain' ? { min: -20, max: 20, step: 0.1, decimals: 1, unit: 'dB' } : { min: 0.1, max: 10, step: 0.01, decimals: 2, unit: '' }
                     const labels = { frequency: '频率', gain: '增益', q: 'Q 值' }
                     return (
-                      <BandNumberInput key={`${activeBandIndex}-${field}`} label={labels[field]} value={band[field]} min={limits.min} max={limits.max} step={limits.step} decimals={limits.decimals} unit={limits.unit} disabled={eq.locked} theme={theme}
+                      <BandNumberInput key={`${activeBandIndex}-${field}`} label={labels[field]} value={band[field]} min={limits.min} max={limits.max} step={limits.step} decimals={limits.decimals} unit={limits.unit} disabled={eq.locked || (field === 'gain' && !hasGainControl(band.type))} theme={theme}
                         onCommit={(value) => setBandField(activeBandIndex, field, value)} />
                     )
                   })}
+                  <label className={`${theme.textSecondary} text-[11px]`}>
+                    <span className="block mb-1">滤波器类型</span>
+                    <select
+                      value={eq.proBands[activeBandIndex].type ?? 'peaking'}
+                      disabled={eq.locked}
+                      aria-label="滤波器类型"
+                      onChange={(e) => setBandType(activeBandIndex, e.target.value as NonNullable<EqBand['type']>)}
+                      className={`hse-glass-input w-full rounded-md px-2 py-1.5 text-xs outline-none focus-visible:ring-2 disabled:cursor-not-allowed ${theme.textPrimary}`}
+                    >
+                      {FILTER_TYPE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                    </select>
+                  </label>
                 </div>
               )}
               <div className="grid grid-cols-2 @min-[680px]:grid-cols-3 @min-[900px]:grid-cols-4 gap-x-4 gap-y-2 mt-5">
@@ -297,7 +378,9 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
                     style={{ background: activeBandIndex === i ? `${theme.accentColor}20` : 'transparent', outline: activeBandIndex === i ? `1px solid ${theme.accentColor}` : undefined }}>
                     <div className="flex items-center justify-between mb-0.5">
                       <button type="button" onClick={() => setSelectedBand(i)} aria-pressed={activeBandIndex === i} className={`${theme.textSecondary} text-[11px] tabular-nums underline-offset-2 hover:underline ${activeBandIndex === i ? 'font-semibold' : ''}`}>{Number(band.frequency.toFixed(1))} Hz</button>
-                      <span className={`${theme.textPrimary} text-[11px] font-medium tabular-nums`}>{band.gain > 0 ? '+' : ''}{band.gain.toFixed(1)} dB</span>
+                      <span className={`${theme.textPrimary} text-[11px] font-medium tabular-nums`}>
+                        {FILTER_TYPE_OPTIONS.find((option) => option.value === (band.type ?? 'peaking'))?.label ?? '峰值'} · {hasGainControl(band.type) ? `${band.gain > 0 ? '+' : ''}${band.gain.toFixed(1)} dB` : '固定形状'}
+                      </span>
                     </div>
                     <input type="range" min={-20} max={20} step={0.1} value={band.gain} aria-label={`${Number(band.frequency.toFixed(1))} Hz 增益`}
                       onFocus={() => setSelectedBand(i)}
@@ -311,7 +394,7 @@ export function EqPanel({ controller, theme, quickPresets }: { controller: V3Par
                         next[i].gain = 0
                         patchEq({ proBands: next })
                       }}
-                      disabled={eq.locked}
+                      disabled={eq.locked || !hasGainControl(band.type)}
                       className="wf-glass-range hse-glass-range w-full h-1.5 rounded-full appearance-none cursor-pointer disabled:opacity-40"
                       style={{ background: theme.sliderTrack(band.gain, -20, 20) }} />
                   </div>

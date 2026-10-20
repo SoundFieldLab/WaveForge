@@ -2482,6 +2482,18 @@ const trustedIpc = createTrustedIpcGuard({
 })
 const guardTrustedIpc = trustedIpc.handle
 
+// HSE 头追仅限主应用主文档；桥与设备授权都不随应用启动自动恢复。
+const { createHseHeadTrackingController } = require('./hse-head-tracking.cjs')
+const hseHeadTracking = createHseHeadTrackingController({
+  getWindow: () => mainWindow,
+  isTrusted: contents => Boolean(contents && trustedIpc.isTrusted({ sender: contents, senderFrame: contents.mainFrame }, 'privileged')),
+  showMessageBox: (win, options) => dialog.showMessageBox(win, options),
+  createBridge: options => require('../scripts/lib/head-tracking-osc.cjs').createHeadTrackingBridge(options),
+})
+ipcMain.handle('hse-head-tracking:state', guardTrustedIpc('privileged', () => hseHeadTracking.state()))
+ipcMain.handle('hse-head-tracking:start', guardTrustedIpc('privileged', () => hseHeadTracking.startBridge()))
+ipcMain.handle('hse-head-tracking:stop', guardTrustedIpc('privileged', () => hseHeadTracking.stopBridge()))
+
 // 轻量主窗来源校验：敏感 IPC（授权/GPU/远程/登录窗/抓取桥/壁纸写入）只允许主窗主 frame
 // 调用。guardTrustedIpc 的 capabilities 全套只接了约 22 个 handler，其余敏感面用这个
 // 最小守卫兜底——不满足来源时抛错，ipcMain 会把 promise 拒绝给渲染端。
@@ -5684,26 +5696,33 @@ ipcMain.handle('hse-write-scene-seed', async (_e, content) => {
   }
 })
 
-// HSE 离线导出落盘：把调音室渲染好的 MP3 直写到用户桌面。
-// 文件名由渲染层给（<歌曲名>-Modified.mp3），这里再做一次非法字符兜底清洗与
+// HSE 离线导出落盘：把调音室渲染好的 MP3/WAV 写到用户桌面。
+// 文件名由渲染层给，这里再做一次非法字符兜底清洗与
 // 重名自动 (2) 序号，绝不覆盖用户已存在的文件。300MB 上限防误传巨型数据。
 ipcMain.handle('hse-save-rendered-audio', guardTrustedIpc('privileged', async (_e, data, fileName) => {
   try {
+    if (!(data instanceof ArrayBuffer) && !(data instanceof Uint8Array)) return { ok: false, error: '导出数据格式无效' }
+    if (data.byteLength > 300 * 1024 * 1024) return { ok: false, error: '导出内容超过 300MB，疑似异常' }
     const buf = Buffer.from(data)
     if (!buf.length) return { ok: false, error: '导出内容为空' }
     if (buf.length > 300 * 1024 * 1024) return { ok: false, error: '导出内容超过 300MB，疑似异常' }
-    const safeName = String(fileName || '').replace(/[\\/:*?"<>|]/g, '_').trim()
+    const safeName = String(fileName || '').replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().replace(/[. ]+$/, '').slice(0, 180)
       .replace(/^\.{1,2}$/, '_') || 'WaveForge-HSE-Modified.mp3'
     const dir = app.getPath('desktop')
     const ext = path.extname(safeName) || '.mp3'
-    const stem = safeName.slice(0, safeName.length - ext.length)
-    let target = path.join(dir, safeName)
-    let n = 2
-    while (fs.existsSync(target)) {
-      target = path.join(dir, `${stem} (${n})${ext}`)
-      n += 1
+    if (!['.mp3', '.wav'].includes(ext.toLowerCase())) return { ok: false, error: '仅支持导出 MP3 或 WAV 音频' }
+    const stem = path.extname(safeName) ? safeName.slice(0, -ext.length) : safeName
+    let target
+    for (let n = 1; ; n++) {
+      target = path.join(dir, `${stem}${n === 1 ? '' : ` (${n})`}${ext}`)
+      try {
+        // wx 使并发导出同名文件也不能覆盖已有内容。
+        await fs.promises.writeFile(target, buf, { flag: 'wx' })
+        break
+      } catch (cause) {
+        if (cause.code !== 'EEXIST') throw cause
+      }
     }
-    await fs.promises.writeFile(target, buf)
     console.log('🎵 [HSE] 渲染音频已保存:', target, `(${(buf.length / 1024 / 1024).toFixed(1)}MB)`)
     return { ok: true, path: target }
   } catch (err) {
@@ -8955,6 +8974,7 @@ function closeAllDependentWindows() {
 // 主窗口事件接线：启动创建（createWindow）与融合穿透重建（recreateMainWindow）共用。
 // 重建后必须重新挂接，否则窗口会失去状态推送（标题栏图标）/窗口记忆/F12 快捷键。
 function wireMainWindowEvents(win) {
+  hseHeadTracking.attachWindow(win)
   // 阻止 window.open 创建新的 Electron 窗口（外部链接交给系统浏览器）
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -9887,6 +9907,8 @@ async function doStartAppleBridge() {
 // 同步路径（taskkill via execFileSync / child.kill），异步的 sweepBackendOrphans/
 // stopAppleBridgeTree 在进程退出前基本不会执行（WebView2 树残留锁目录的根因）。
 app.on('will-quit', () => {
+  // bridge.close() 立即清除定时器、终止订阅者并关闭本进程监听；无需杀子进程。
+  hseHeadTracking.shutdown()
   persistMainWindowState() // 关闭前做最终窗口状态保存（防抖定时器可能尚未触发）
   try { localApiChild?.kill() } catch {}
   stopAllPythonServices('app quit')
@@ -9939,17 +9961,26 @@ app.whenReady().then(async () => {
       pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
     ])(url)
   }
-  session.defaultSession.setPermissionCheckHandler((webContents, permission) => (
-    isTrustedPermissionRequester(webContents) && (permission === 'geolocation' || permission === 'media')
+  hseHeadTracking.installSession(session.defaultSession)
+  session.defaultSession.setPermissionCheckHandler((webContents, permission, _origin, details) => (
+    isTrustedPermissionRequester(webContents)
+    && (permission === 'geolocation' || permission === 'media'
+      || (permission === 'serial' && details?.isMainFrame === true
+        && (!details.requestingUrl || createDocumentUrlMatcher([
+          devServerUrl, pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
+        ])(details.requestingUrl))))
   ))
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const frameTrusted = !details?.requestingUrl || createDocumentUrlMatcher([
       devServerUrl,
       pathToFileURL(path.join(__dirname, '../dist/index.html')).href,
     ])(details.requestingUrl)
-    callback(isTrustedPermissionRequester(webContents) && frameTrusted && (permission === 'geolocation' || permission === 'media'))
+    callback(isTrustedPermissionRequester(webContents) && frameTrusted
+      && (permission === 'geolocation' || permission === 'media'
+        || (permission === 'serial' && details?.isMainFrame === true)))
   })
   session.defaultSession.setDevicePermissionHandler((details) => {
+    if (details?.deviceType === 'serial') return hseHeadTracking.canUseSerial(details)
     const requestOrigin = details?.origin || details?.embeddingOrigin || ''
     const originTrusted = createDocumentUrlMatcher([
       devServerUrl,

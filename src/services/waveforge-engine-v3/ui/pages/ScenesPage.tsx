@@ -26,7 +26,7 @@ interface ScenesPageProps {
   onOpenEffect: (key: string) => void
 }
 
-const GRID_KEYS: EffectUiKey[] = ['reverb', 'surround3d', 'bassEnhancer', 'compressor', 'nightMode', 'deesser', 'ieq', 'limiter', 'pitch', 'stereoWidth']
+const GRID_KEYS: EffectUiKey[] = ['reverb', 'surround3d', 'crossfeed', 'bassEnhancer', 'compressor', 'dynamicEq', 'nightMode', 'deesser', 'ieq', 'limiter', 'pitch', 'stereoWidth']
 const ROW_KEYS: EffectUiKey[] = ['loudnessCompensation', 'loudnessNormalization']
 
 export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: ScenesPageProps) {
@@ -157,12 +157,12 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
         aria-label={`${meta.name}音效`}
         className="relative flex min-w-0 flex-col gap-3 rounded-2xl p-3.5 transition-colors"
         style={{
-          background: enabled ? theme.accentDim : theme.cardBg,
-          border: `1px solid ${enabled ? theme.accentColor : theme.cardBorder}`,
+          background: theme.cardBg,
+          border: `1px solid ${theme.cardBorder}`,
         }}
       >
         <div className="flex min-w-0 items-start gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: `${theme.accentColor}18` }}>
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: theme.panelBg }}>
             <Icon className="h-[18px] w-[18px]" style={{ color: theme.accentColor }} />
           </div>
           <div className="min-w-0">
@@ -176,7 +176,7 @@ export default function ScenesPage({ bridge, controller, theme, onOpenEffect }: 
             onClick={() => patchEffectEnabled(patch, params, key, !enabled)}
             aria-label={`${meta.name}启停`}
             aria-pressed={enabled}
-            className={`hse-glass-button ${enabled ? 'hse-glass-primary' : theme.textSecondary} relative min-h-9 rounded-lg px-2 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}
+            className={`hse-glass-button ${enabled ? 'hse-glass-choice' : theme.textSecondary} relative min-h-9 rounded-lg px-2 py-2 text-xs font-medium focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2`}
           >
             {enabled ? '已启用' : '未启用'}
           </button>

@@ -10,11 +10,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { V3EngineParams } from '../src/types'
+import { createDefaultParams } from '../src/types'
 import type { V3UiBridge } from './bridge'
 
 /** 递归可选（数组与 Float32Array 整体替换，不做成员递归） */
 export type DeepPartial<T> = {
-  [K in keyof T]?: T[K] extends Float32Array | Array<unknown> ? T[K] : T[K] extends object ? DeepPartial<T[K]> : T[K]
+  [K in keyof T]?: NonNullable<T[K]> extends Float32Array | Array<unknown> ? T[K]
+    : NonNullable<T[K]> extends object ? DeepPartial<NonNullable<T[K]>> : T[K]
 }
 
 /** 深合并：普通对象递归；数组/原始值/Float32Array 直接替换 */
@@ -49,7 +51,9 @@ export interface V3ParamsController {
 /** 旁路只暂停染色处理；输出音量与限幅保护独立保留。 */
 function bypassEffects(p: V3EngineParams): V3EngineParams {
   const next = deepMerge(p, {
-    eq: { enabled: false }, deesser: { enabled: false }, compressor: { enabled: false },
+    eq: { enabled: false }, dynamicEq: { ...(p.dynamicEq ?? createDefaultParams(p.sampleRate).dynamicEq!), enabled: false },
+    crossfeed: { ...(p.crossfeed ?? createDefaultParams(p.sampleRate).crossfeed!), enabled: false },
+    deesser: { enabled: false }, compressor: { enabled: false },
     nightMode: { enabled: false }, bassEnhancer: { enabled: false }, reverb: { enabled: false },
     surround3d: { enabled: false }, loudnessCompensation: { enabled: false }, ieq: { enabled: false },
     pitch: { enabled: false, voiceBalance: 0 }, stereoWidth: 1,
@@ -62,6 +66,17 @@ function bypassEffects(p: V3EngineParams): V3EngineParams {
 export function useV3Params(bridge: V3UiBridge): V3ParamsController {
   const [params, setParams] = useState<V3EngineParams>(() => bridge.getParams())
   const [masterEnabled, setMasterState] = useState(() => bridge.getMasterSnapshot() === null)
+
+  useEffect(() => {
+    const refresh = () => {
+      setParams(bridge.getParams())
+      setMasterState(bridge.getMasterSnapshot() === null)
+    }
+    const unsubscribe = bridge.subscribeParams?.(refresh)
+    // 补读订阅建立前的最新快照；外部文件加载和另一界面编辑都只刷新展示状态。
+    refresh()
+    return unsubscribe
+  }, [bridge])
 
   const commit = useCallback((next: V3EngineParams) => {
     bridge.setParams(next)

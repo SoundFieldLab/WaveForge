@@ -1,3 +1,4 @@
+import type { AudioBuffer } from './audioBuffer'
 /**
  * LufsMeter —— ITU-R BS.1770-4 / EBU R128 响度测量（模块 11）
  *
@@ -10,8 +11,8 @@
  *  - K 加权：两级 biquad —— ① RLB 高通（38.135822Hz，Q=0.5，滤除次声）；
  *    ② 高频搁架（+4dB，f0=1681.974Hz，Q=0.707）。支持 44100/48000 精确系数；
  *    其余采样率按 48k 系数近似（注释说明，误差仅在滤波器拐点附近）。
- *  - 块统计：400ms 窗、100ms 步进（75% 重叠）；块响度 Lk = -0.691 + 10·log10(mean(z²))，
- *    z = 左右通道 K 加权之和（BS.1770 通道求和）。
+ *  - 块统计：400ms 窗、100ms 步进（75% 重叠）；块响度 Lk = -0.691 + 10·log10(mean(yL²+yR²))，
+ *    左右通道各自 K 加权后求能量和（相位相反也不会抵消）。
  *  - 整合响度：绝对门限 -70 LUFS → 相对门限（绝对门限后均值 - 10 LU）→ 对通过
  *    门限的块功率求均值。未测到（如纯静音）返回 NaN。
  *  - LRA（EBU Tech 3342）：绝对门限 -70 LUFS → 相对门限（均值 - 20 LU）→
@@ -77,9 +78,8 @@ export class LufsMeter {
   private readonly rlbR: BiquadState
   private readonly shelfR: BiquadState
 
-  // 滑动窗口（400ms）内 z² 之和与 z 环形缓冲
-  /** 环形缓冲存每样本双通道功率（yl²+yr²），供滑动求和窗口增量淘汰 */
-  private zBuf: Float32Array
+  // 滑动窗口（400ms）内每通道 K 加权能量之和；存能量而非合成波形
+  private powerBuf: Float64Array
   private zPos = 0
   private sumSq = 0
   private totalSamples = 0
@@ -96,9 +96,7 @@ export class LufsMeter {
   private shortWrite = 0
   private shortCount = 0
 
-  // 统计失效缓存：getIntegratedLufs 是热路径（EngineV3.process 每块调用一次，
-  // 375 次/s × 全环形双扫描 36000 块；getLra 还要排序全部块）。块写入时置 dirty，
-  // 读时重算一次后复用。两统计各自独立 dirty（任何一个读后清位不得影响另一个）。
+  /** 块历史不变时复用门限和排序结果；音频回调会频繁读取统计。 */
   private integratedDirty = true
   private integratedCache = NaN
   private lraDirty = true
@@ -114,11 +112,13 @@ export class LufsMeter {
   private readonly histR: Float32Array = new Float32Array(TRUE_PEAK_HIST)
   private histPos = 0
   private histFull = false
+  private readonly trackTruePeak: boolean
 
   // LRA 排序暂存
   private sortScratch: Float32Array = new Float32Array(LufsMeter.BLOCK_CAP)
 
-  constructor(fs: number) {
+  constructor(fs: number, options: { trackTruePeak?: boolean } = {}) {
+    this.trackTruePeak = options.trackTruePeak !== false
     if (fs <= 0 || !Number.isFinite(fs)) {
       throw new Error('invalid sample rate')
     }
@@ -133,9 +133,9 @@ export class LufsMeter {
 
     this.blockLen = Math.max(1, Math.round(0.4 * fs))
     this.hopLen = Math.max(1, Math.round(0.1 * fs))
-    this.zBuf = new Float32Array(this.blockLen)
+    this.powerBuf = new Float64Array(this.blockLen)
 
-    // 预计算 4× 多相插值核（Blackman 窗 sinc，截止 = 原 Nyquist = 4× 率的 1/4，逐相归一化）
+    // 预计算 4× 多相插值核（Blackman 窗 sinc，u 的单位是输入样本，逐相归一化）
     for (let phi = 0; phi < TRUE_PEAK_OVS; phi++) {
       let sum = 0
       const base = phi * TRUE_PEAK_HIST
@@ -143,7 +143,7 @@ export class LufsMeter {
         const u = j - (TRUE_PEAK_TAPS_PER_PHASE - 1) + phi / TRUE_PEAK_OVS
         let c
         if (Math.abs(u) < 1e-9) c = 1
-        else c = Math.sin((Math.PI * u) / TRUE_PEAK_OVS) / ((Math.PI * u) / TRUE_PEAK_OVS)
+        else c = Math.sin(Math.PI * u) / (Math.PI * u)
         const xw = u / TRUE_PEAK_TAPS_PER_PHASE
         if (Math.abs(xw) <= 1) {
           c *= 0.42 + 0.5 * Math.cos(Math.PI * xw) + 0.08 * Math.cos(2 * Math.PI * xw)
@@ -159,8 +159,8 @@ export class LufsMeter {
     }
   }
 
-  /** 就地分析立体声（L/R 均过 K 加权；z = L'+R'） */
-  processStereo(l: Float32Array, r: Float32Array): void {
+  /** 就地分析立体声（L/R 各过 K 加权，各通道能量独立累加） */
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
     const B = Math.min(l.length, r.length)
     for (let i = 0; i < B; i++) {
       const xl = l[i]
@@ -185,12 +185,10 @@ export class LufsMeter {
       sr.z1 = sr.c.b1 * y1r - sr.c.a1 * yr + sr.z2
       sr.z2 = sr.c.b2 * y1r - sr.c.a2 * yr
 
-      // 块功率（BS.1770）：Σ_ch z_ch²——各通道 K 加权后功率**直接相加**。
-      // 此前实现 (yL+yR)² 含 2·yL·yR 交叉项：双单声道内容响度高估 ~3dB（归一化
-      // 补偿系统性偏低 3dB），反相立体声 z≡0 → 全部块判静音、LUFS 恒 NaN。
+      // BS.1770：逐通道均方后求和，绝不能先把波形相加（反相立体声也有响度）
       const power = yl * yl + yr * yr
-      const evict = this.zBuf[this.zPos]
-      this.zBuf[this.zPos] = power
+      const evict = this.powerBuf[this.zPos]
+      this.powerBuf[this.zPos] = power
       this.zPos++
       if (this.zPos >= this.blockLen) this.zPos = 0
       this.sumSq += power - evict
@@ -202,16 +200,20 @@ export class LufsMeter {
       if (aL > this.peak) this.peak = aL
       if (aR > this.peak) this.peak = aR
 
-      // 真峰值（4× 插值）：左右共用一个写入游标，每样本推进一次
-      this.histL[this.histPos] = xl
-      this.histR[this.histPos] = xr
-      this.histPos++
-      if (this.histPos >= TRUE_PEAK_HIST) {
-        this.histPos = 0
-        this.histFull = true
+      // 真峰值至少包含数字样本峰值，包括起始/末尾尚未填满插值历史的瞬态。
+      if (this.peak > this.truePeak) this.truePeak = this.peak
+      if (this.trackTruePeak) {
+        // 左右共用一个写入游标，每样本推进一次
+        this.histL[this.histPos] = xl
+        this.histR[this.histPos] = xr
+        this.histPos++
+        if (this.histPos >= TRUE_PEAK_HIST) {
+          this.histPos = 0
+          this.histFull = true
+        }
+        this.updateTruePeakInterp(this.histL)
+        this.updateTruePeakInterp(this.histR)
       }
-      this.updateTruePeakInterp(this.histL)
-      this.updateTruePeakInterp(this.histR)
 
       // 块边界（400ms 窗 / 100ms 步进）
       if (this.totalSamples >= this.blockLen && (this.totalSamples - this.blockLen) % this.hopLen === 0) {
@@ -220,32 +222,28 @@ export class LufsMeter {
     }
   }
 
-  /** 整合响度 LUFS（绝对 -70 + 相对 -10 双门限）；未测到返回 NaN。
-   *  块间增量：结果按 blockWrite 指纹失效（环形缓冲里旧行为被覆盖时指纹不同），
-   *  未写入新块时直接复用上次结果——热路径从 O(全历史×2) 降为 O(1)。 */
+  /** 整合响度 LUFS（绝对 -70 + 相对 -10 双门限）；未测到返回 NaN */
   getIntegratedLufs(): number {
     if (this.blockCount === 0) return NaN
     if (!this.integratedDirty) return this.integratedCache
     const cap = LufsMeter.BLOCK_CAP
     const start = (this.blockWrite - this.blockCount + cap) % cap
     let sumP1 = 0
-    let sumL1 = 0
     let n1 = 0
     for (let k = 0; k < this.blockCount; k++) {
       const idx = (start + k) % cap
       const lk = this.blockLoud[idx]
       if (lk >= -70) {
         sumP1 += this.blockPower[idx]
-        sumL1 += lk
         n1++
       }
     }
     if (n1 === 0) {
       this.integratedDirty = false
-      this.integratedCache = NaN
-      return NaN
+      return (this.integratedCache = NaN)
     }
-    const gate = sumL1 / n1 - 10
+    // 相对门限由绝对门限后各块的平均能量计算，不是响度 dB 的算术平均
+    const gate = -0.691 + 10 * Math.log10(sumP1 / n1) - 10
     let sumP2 = 0
     let n2 = 0
     for (let k = 0; k < this.blockCount; k++) {
@@ -256,14 +254,8 @@ export class LufsMeter {
         n2++
       }
     }
-    if (n2 === 0) {
-      this.integratedDirty = false
-      this.integratedCache = NaN
-      return NaN
-    }
     this.integratedDirty = false
-    this.integratedCache = -0.691 + 10 * Math.log10(sumP2 / n2)
-    return this.integratedCache
+    return (this.integratedCache = n2 === 0 ? NaN : -0.691 + 10 * Math.log10(sumP2 / n2))
   }
 
   /** 瞬时响度（最新一个完整 400ms 块）；未测到返回 NaN */
@@ -288,11 +280,9 @@ export class LufsMeter {
     return -0.691 + 10 * Math.log10(sum / cap)
   }
 
-  /** LRA（EBU Tech 3342）：绝对 -70 + 相对 -20 门限后 10/95 百分位差（LU）。
-   *  与 getIntegratedLufs 同款失效缓存：排序 36000 块在 UI 轮询路径不可每帧重做。 */
+  /** LRA（EBU Tech 3342）：绝对 -70 + 相对 -20 门限后 10/95 百分位差（LU） */
   getLra(): number {
     if (this.blockCount < 2) return NaN
-    // 块未变（lraDirty=false）时复用缓存；recordBlock/reset 均置位
     if (!this.lraDirty) return this.lraCache
     const cap = LufsMeter.BLOCK_CAP
     const start = (this.blockWrite - this.blockCount + cap) % cap
@@ -306,7 +296,10 @@ export class LufsMeter {
         n1++
       }
     }
-    if (n1 < 2) return NaN
+    if (n1 < 2) {
+      this.lraDirty = false
+      return (this.lraCache = NaN)
+    }
     const gate = sumL / n1 - 20
     let m = 0
     for (let k = 0; k < this.blockCount; k++) {
@@ -317,18 +310,16 @@ export class LufsMeter {
       }
     }
     if (m < 2) {
-      this.lraCache = NaN
       this.lraDirty = false
-      return NaN
+      return (this.lraCache = NaN)
     }
     // 升序排序（copyWithin 到连续段后排序，避免污染环形语义——用 subarray 视图即可）
     const arr = this.sortScratch.subarray(0, m)
     arr.sort()
     const p10 = this.percentile(arr, 0.1)
     const p95 = this.percentile(arr, 0.95)
-    this.lraCache = p95 - p10
     this.lraDirty = false
-    return this.lraCache
+    return (this.lraCache = p95 - p10)
   }
 
   /** 样本峰值 dBFS（全静音返回 -Infinity） */
@@ -344,14 +335,14 @@ export class LufsMeter {
   }
 
   reset(): void {
-    this.zBuf.fill(0)
-    this.zPos = 0
-    this.sumSq = 0
-    this.totalSamples = 0
     this.integratedDirty = true
     this.integratedCache = NaN
     this.lraDirty = true
     this.lraCache = NaN
+    this.powerBuf.fill(0)
+    this.zPos = 0
+    this.sumSq = 0
+    this.totalSamples = 0
     this.blockLoud.fill(0)
     this.blockPower.fill(0)
     this.blockWrite = 0
@@ -422,13 +413,17 @@ export class LufsMeter {
     for (let phi = 0; phi < TRUE_PEAK_OVS; phi++) {
       const base = phi * TRUE_PEAK_HIST
       let y = 0
+      // totalSamples 与 histPos 同步推进，当前被插值窗口从最新样本的前一格倒读。
+      // 保持原j累加顺序；游标递减取代每抽头两次浮点余数，长曲也不依赖大样本索引。
+      let ringIdx = this.histPos - 2
+      if (ringIdx < 0) ringIdx += TRUE_PEAK_HIST
       for (let j = 0; j < TRUE_PEAK_HIST; j++) {
-        const idx = t - j + TRUE_PEAK_TAPS_PER_PHASE - 1
-        const ringIdx = ((idx % TRUE_PEAK_HIST) + TRUE_PEAK_HIST) % TRUE_PEAK_HIST
         y += this.tpKernel[base + j] * hist[ringIdx]
+        if (--ringIdx < 0) ringIdx = TRUE_PEAK_HIST - 1
       }
       if (y < 0) y = -y
       if (y > this.truePeak) this.truePeak = y
     }
   }
 }
+

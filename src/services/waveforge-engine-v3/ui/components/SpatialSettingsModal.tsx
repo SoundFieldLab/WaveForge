@@ -1,3 +1,4 @@
+import { themeVariables } from '../hse-theme'
 /**
  * 空间音频设置：HRTF 插值、卷积方式、距离衰减及世界漫游键位。
  * 仅提供引擎已接线的配置；输出设备跟随主播放器。
@@ -186,8 +187,8 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
     <div
       className="hse-spatial-settings fixed inset-0 z-[90] flex items-center justify-center p-4"
       style={{
-        backgroundColor: 'rgba(21,58,55,0.22)',
-        animation: 'wf-sp-settings-fade 0.15s ease-out',
+        backgroundColor: 'rgba(0,0,0,0.55)',
+
       }}
       onClick={onClose}
     >
@@ -199,12 +200,10 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
         aria-label="空间音频设置"
         tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md max-h-[86vh] overflow-y-auto rounded-3xl"
+        className="hse-floating-layer w-full max-w-md max-h-[86vh] overflow-y-auto rounded-3xl"
         style={{
-          background: theme.panelHighlight,
-          border: `1px solid ${theme.panelBorder}`,
-          boxShadow: 'inset 0 1px 0 #ffffff, 0 16px 48px rgba(21,58,55,0.16)',
-          animation: 'wf-sp-settings-pop 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.15)',
+          ...themeVariables(theme),
+
           outline: 'none',
         }}
       >
@@ -241,7 +240,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
           <SectionTitle theme={theme}>HRTF 数据集</SectionTitle>
           <div className="flex items-center justify-between py-1">
             <span className={`${theme.textTertiary} text-[11px]`}>当前数据集</span>
-            <span className={`hse-mono text-[11px] ${theme.textSecondary}`}>合成解析 HRTF</span>
+            <span className={`hse-mono text-[11px] ${theme.textSecondary}`}>MIT KEMAR 实测</span>
           </div>
           {/* 卷积模式（分区 FFT 卷积 / 时域直接卷积；后端契约 spatial_set_convolution_mode，已全量实现） */}
           <SectionTitle theme={theme}>卷积模式</SectionTitle>
@@ -251,8 +250,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
 
           {/* HRIR 长度 / 最大对象数（静态展示；最大对象数 64：引擎支持到 64 对象，本波性能基准已覆盖） */}
           <SectionTitle theme={theme}>渲染资源</SectionTitle>
-          <InfoRow label="HRIR 长度" value="256 样本" theme={theme} />
-          <InfoRow label="最大对象数" value="64" theme={theme} />
+          <InfoRow label="HRIR 长度" value="随采样率与数据集变化" theme={theme} />
 
           {/* 距离衰减（规格书属性面板「衰减模型/参考距离/最大距离」——全局渲染参数，
               引擎真字段直接接线：三模型 + ref 内不衰减 + linear 到 max 衰减为 0） */}
@@ -348,7 +346,7 @@ export default function SpatialSettingsModal({ open, onClose, theme, spatial, on
             <span className={`${theme.textTertiary} text-[11px]`}>配色方案</span>
             <span className="flex items-center gap-1.5 text-[11px]">
               <span className="w-3 h-3 rounded-full border" style={{ background: theme.panelBg, borderColor: theme.cardBorder }} />
-              <span className="w-3 h-3 rounded-full" style={{ background: '#C8EDE4' }} />
+              <span className="w-3 h-3 rounded-full" style={{ background: '#c8ede4' }} />
               <span className={`${theme.textSecondary}`}>珍珠白 · 薄荷青</span>
             </span>
           </div>

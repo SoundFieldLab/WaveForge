@@ -16,6 +16,8 @@ export default function SceneSummary({ scene, params, theme }: { scene?: ScenePr
   const metrics = [
     { label: '低音下潜', value: params.bassEnhancer.lowBoostDb.toFixed(1), unit: 'dB', enabled: params.bassEnhancer.enabled },
     { label: '立体声宽度', value: params.stereoWidth.toFixed(2), unit: '倍', enabled: true },
+    { label: '低频单声道', value: `${Math.round((params.lowMonoAmount ?? 0) * 100)}`, unit: '%', enabled: (params.lowMonoAmount ?? 0) > 0.001 },
+    { label: '次声高通', value: `${params.subsonicCutoffHz ?? 20}`, unit: 'Hz', enabled: params.subsonicEnabled === true },
     { label: '压缩比', value: params.compressor.ratio.toFixed(1) + ':1', unit: '', enabled: params.compressor.enabled },
     { label: '限幅阈值', value: params.limiter.thresholdDb.toFixed(1), unit: 'dBFS', enabled: params.limiter.enabled },
   ]

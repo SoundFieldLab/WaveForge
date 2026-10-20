@@ -7,6 +7,7 @@ import { GlassCard, Toggle, Slider, Segmented, RangeStyle } from '../components/
 import type { HSETheme } from '../hse-theme'
 import type { V3UiBridge } from '../bridge'
 import type { V3ParamsController } from '../hooks'
+import { createDefaultParams } from '../../src/types'
 
 interface DynamicsPageProps {
   bridge: V3UiBridge
@@ -56,6 +57,18 @@ export default function DynamicsPage({ controller, theme, onOpenEffect }: Dynami
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-2">
               <Activity className="w-4 h-4" style={{ color: theme.accentColor }} />
+              <span className={`${theme.textPrimary} text-sm font-medium`}>动态均衡</span>
+            </div>
+            <Toggle label="启用动态均衡" checked={params.dynamicEq?.enabled === true} onChange={(enabled) => patch({ dynamicEq: { ...(params.dynamicEq ?? createDefaultParams(params.sampleRate).dynamicEq!), enabled } })} theme={theme} />
+          </div>
+          {summary(params.dynamicEq?.enabled === true, '只在指定频段过强时降低增益，轻声时恢复。')}
+          {details('dynamicEq', '动态均衡')}
+        </GlassCard>
+
+        <GlassCard theme={theme} className="mb-5 break-inside-avoid">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4" style={{ color: theme.accentColor }} />
               <span className={`${theme.textPrimary} text-sm font-medium`}>动态压缩</span>
             </div>
             <Toggle label="启用动态压缩" checked={c.enabled} onChange={(v) => patch({ compressor: { ...c, enabled: v } })} theme={theme} />
@@ -63,8 +76,27 @@ export default function DynamicsPage({ controller, theme, onOpenEffect }: Dynami
           {summary(c.enabled, '收拢强弱起伏，让声音保持稳定。')}
           {c.enabled && (
             <div className="space-y-1">
-              <Slider label="阈值" value={c.thresholdDb} min={-60} max={0} step={1} onChange={(v) => patch({ compressor: { ...c, thresholdDb: v } })} display={`${c.thresholdDb.toFixed(1)} dB`} theme={theme} />
-              <Slider label="比率" value={c.ratio} min={1} max={20} step={0.5} onChange={(v) => patch({ compressor: { ...c, ratio: v } })} display={`${c.ratio.toFixed(1)}:1`} theme={theme} />
+              <Segmented
+                label="压缩模式"
+                options={[{ value: 'downward' as const, label: '向下' }, { value: 'upward' as const, label: '向上' }, { value: 'multiband' as const, label: '多段' }]}
+                value={c.mode ?? 'downward'}
+                onChange={(mode) => patch({ compressor: { ...c, mode } })}
+                theme={theme}
+                small
+              />
+              {c.mode !== 'multiband' && <>
+                <Slider label="阈值" value={c.thresholdDb} min={-60} max={0} step={1} onChange={(v) => patch({ compressor: { ...c, thresholdDb: v } })} display={`${c.thresholdDb.toFixed(1)} dB`} theme={theme} />
+                <Slider label="比率" value={c.ratio} min={1} max={20} step={0.5} onChange={(v) => patch({ compressor: { ...c, ratio: v } })} display={`${c.ratio.toFixed(1)}:1`} theme={theme} />
+              </>}
+              {c.mode === 'multiband' && (() => {
+                const mb = c.multiband ?? createDefaultParams(params.sampleRate).compressor.multiband!
+                return <>
+                  <Slider label="低/中分频" value={mb.lowMidHz} min={40} max={1000} step={10} onChange={(v) => patch({ compressor: { ...c, mode: 'multiband', multiband: { ...mb, lowMidHz: v } } })} display={`${Math.round(mb.lowMidHz)} Hz`} theme={theme} />
+                  <Slider label="中/高分频" value={mb.midHighHz} min={1000} max={12000} step={100} onChange={(v) => patch({ compressor: { ...c, mode: 'multiband', multiband: { ...mb, midHighHz: v } } })} display={`${Math.round(mb.midHighHz)} Hz`} theme={theme} />
+                  <p className={`${theme.textTertiary} text-[11px]`}>低、中、高频段的阈值和时间参数在详细设置中调整。</p>
+                </>
+              })()}
+              {c.mode === 'upward' && <p className={`${theme.textTertiary} text-[11px]`}>低于阈值的声音会向上补偿，比例越高，弱声越接近阈值。</p>}
               <Slider label="补偿增益" value={c.makeupDb} min={0} max={12} step={0.5} onChange={(v) => patch({ compressor: { ...c, makeupDb: v } })} display={`+${c.makeupDb.toFixed(1)} dB`} theme={theme} />
             </div>
           )}

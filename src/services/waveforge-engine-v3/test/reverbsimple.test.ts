@@ -89,6 +89,31 @@ describe('ReverbSimple', () => {
     }
   })
 
+  it('实时调整干湿与反馈参数时用 20ms 斜坡，避免首样本突变', () => {
+    const rev = new ReverbSimple(FS)
+    rev.setParams(baseParams({ wet: 0, dry: 1 }))
+    const warmL = new Float32Array(1024)
+    const warmR = new Float32Array(1024)
+    rev.processStereo(warmL, warmR)
+
+    rev.setParams(baseParams({ roomSize: 0.9, damping: 0.1, wet: 1, dry: 0 }))
+    // Inspect the first 5ms, before the Freeverb comb delay can add its wet return.
+    const rampL = new Float32Array(Math.round(FS * 0.005)).fill(0.25)
+    const rampR = new Float32Array(rampL.length).fill(0.25)
+    rev.processStereo(rampL, rampR)
+
+    expect(rampL[0]).toBeGreaterThan(0.249)
+    expect(rampR[0]).toBeGreaterThan(0.249)
+    expect(rampL[rampL.length - 1]).toBeGreaterThan(0.185)
+    expect(rampL[rampL.length - 1]).toBeLessThan(0.19)
+    expect(rampR[rampR.length - 1]).toBeGreaterThan(0.185)
+    expect(rampR[rampR.length - 1]).toBeLessThan(0.19)
+    for (let i = 1; i < rampL.length; i++) {
+      expect(Math.abs(rampL[i] - rampL[i - 1])).toBeLessThan(0.001)
+      expect(Math.abs(rampR[i] - rampR[i - 1])).toBeLessThan(0.001)
+    }
+  })
+
   it('冲激响应能量包络单调衰减（无发散），尾部落到峰值以下 >40dB', () => {
     const rev = new ReverbSimple(FS)
     rev.setParams(baseParams({ roomSize: 0.7, damping: 0.4, wet: 1, dry: 0 }))
@@ -193,6 +218,88 @@ describe('ReverbSimple', () => {
       if (a > afterPeak) afterPeak = a
     }
     expect(afterPeak).toBeGreaterThan(1e-4)
+  })
+
+  it('preDelay 左右各延迟准确的采样帧数，不受另一声道读写影响', () => {
+    const render = (preDelayMs: number) => {
+      const rev = new ReverbSimple(FS)
+      rev.setParams(baseParams({ preDelayMs, wet: 1, dry: 0, width: 1 }))
+      const l = new Float32Array(8000)
+      const r = new Float32Array(8000)
+      l[0] = 1
+      r[137] = 1
+      rev.processStereo(l, r)
+      const first = (x: Float32Array) => x.findIndex((v) => Math.abs(v) > 1e-6)
+      return [first(l), first(r)]
+    }
+    const direct = render(0)
+    const delayed = render(10)
+    expect(direct[0]).toBeGreaterThan(0)
+    expect(direct[1]).toBeGreaterThan(0)
+    expect(delayed[0] - direct[0]).toBe(480)
+    expect(delayed[1] - direct[1]).toBe(480)
+  })
+
+  it('运行中调整 preDelay 会平滑移动读点并保留已在途的冲激尾音', () => {
+    const rev = new ReverbSimple(FS)
+    rev.setParams(baseParams({ preDelayMs: 10, wet: 1, dry: 0 }))
+    const initialL = new Float32Array(Math.round(FS * 0.005))
+    const initialR = new Float32Array(initialL.length)
+    initialL[0] = 1
+    initialR[0] = 1
+    rev.processStereo(initialL, initialR)
+
+    // A live delay change must retain the impulse already stored in the pre-delay line.
+    rev.setParams(baseParams({ preDelayMs: 20, wet: 1, dry: 0 }))
+    const tailL = new Float32Array(Math.round(FS * 0.12))
+    const tailR = new Float32Array(tailL.length)
+    rev.processStereo(tailL, tailR)
+    let peakL = 0
+    let peakR = 0
+    for (let i = 0; i < tailL.length; i++) {
+      peakL = Math.max(peakL, Math.abs(tailL[i]))
+      peakR = Math.max(peakR, Math.abs(tailR[i]))
+    }
+    expect(peakL).toBeGreaterThan(1e-4)
+    expect(peakR).toBeGreaterThan(1e-4)
+    expect(tailL.every(Number.isFinite)).toBe(true)
+    expect(tailR.every(Number.isFinite)).toBe(true)
+  })
+
+  it('运行中切换房间类型会平滑改变 comb/allpass 读点且保留在途信号', () => {
+    const rev = new ReverbSimple(FS)
+    rev.setParams(baseParams({ type: 'hall', wet: 1, dry: 0 }))
+    const initialL = new Float32Array(Math.round(FS * 0.005))
+    const initialR = new Float32Array(initialL.length)
+    initialL[0] = 1
+    initialR[0] = 1
+    rev.processStereo(initialL, initialR)
+
+    rev.setParams(baseParams({ type: 'room', wet: 1, dry: 0 }))
+    const tailL = new Float32Array(Math.round(FS * 0.12))
+    const tailR = new Float32Array(tailL.length)
+    rev.processStereo(tailL, tailR)
+    let peakL = 0
+    let peakR = 0
+    for (let i = 0; i < tailL.length; i++) {
+      peakL = Math.max(peakL, Math.abs(tailL[i]))
+      peakR = Math.max(peakR, Math.abs(tailR[i]))
+    }
+    expect(peakL).toBeGreaterThan(1e-4)
+    expect(peakR).toBeGreaterThan(1e-4)
+    expect(tailL.every(Number.isFinite)).toBe(true)
+    expect(tailR.every(Number.isFinite)).toBe(true)
+  })
+
+  it('非法数值控制回落到有限状态（不污染反馈环）', () => {
+    const rev = new ReverbSimple(FS)
+    rev.setParams(baseParams({ wet: Number.NaN, dry: 1, preDelayMs: Number.POSITIVE_INFINITY, damping: Number.NaN }))
+    const l = new Float32Array(4000)
+    const r = new Float32Array(4000)
+    l[0] = r[0] = 1
+    rev.processStereo(l, r)
+    expect(Array.from(l).every(Number.isFinite)).toBe(true)
+    expect(Array.from(r).every(Number.isFinite)).toBe(true)
   })
 
   it('非法采样率抛错', () => {
