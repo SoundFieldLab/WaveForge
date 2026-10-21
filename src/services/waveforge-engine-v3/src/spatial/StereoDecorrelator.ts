@@ -13,12 +13,6 @@ import type { AudioBuffer } from '../dsp/audioBuffer'
 
 export type DecorrelationLayout = '51' | '514' | '71' | '714'
 
-interface DecorrelationTap {
-  channel: number
-  delaySamples: number
-  gain: number
-}
-
 /** 环绕/后环绕声道在 HSE 上混输出中的索引（HSE 顺序见 StereoUpmixer）。 */
 const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs: number; gain: number }[]> = {
   '51': [
@@ -54,32 +48,35 @@ const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs
 const MAX_DELAY_MS = 25
 /** 去相关副本的高通拐点：避免把低频整体灌到后方，只保留空间线索。 */
 const HIGHPASS_HZ = 180
+/** 上混最多 12 声道；状态按声道索引放在定长数组里，热路径零分配。 */
+const MAX_CHANNELS = 16
+const MAX_TAPS = 8
 
 export class StereoDecorrelator {
   readonly sampleRate: number
   private readonly ring: Float32Array
-  private readonly maxDelaySamples: number
   private readonly hpAlpha: number
-  private readonly taps: Record<DecorrelationLayout, readonly DecorrelationTap[]>
+  private readonly hpState = new Float64Array(MAX_CHANNELS)
+  /** 当前布局的 tap 表（channel/delay/gain 已含 amount 预乘），避免每样本查对象。 */
+  private readonly tapChannel = new Int32Array(MAX_TAPS)
+  private readonly tapDelay = new Int32Array(MAX_TAPS)
+  private readonly tapGain = new Float64Array(MAX_TAPS)
+  private tapCount = 0
   private writeIndex = 0
-  private readonly hpState = new Map<number, number>()
 
   constructor(sampleRate: number) {
     if (!Number.isFinite(sampleRate) || sampleRate <= 0) throw new RangeError('sampleRate must be finite and positive')
     this.sampleRate = sampleRate
-    this.maxDelaySamples = Math.max(1, Math.ceil((MAX_DELAY_MS / 1000) * sampleRate))
-    this.ring = new Float32Array(this.maxDelaySamples + 1)
+    const maxDelaySamples = Math.max(1, Math.ceil((MAX_DELAY_MS / 1000) * sampleRate))
+    this.ring = new Float32Array(maxDelaySamples + 1)
     this.hpAlpha = 1 - Math.exp((-2 * Math.PI * Math.min(HIGHPASS_HZ, sampleRate * 0.45)) / sampleRate)
-    this.taps = {
-      '51': this.buildTaps('51'), '514': this.buildTaps('514'),
-      '71': this.buildTaps('71'), '714': this.buildTaps('714'),
-    }
   }
 
   reset(): void {
     this.ring.fill(0)
+    this.hpState.fill(0)
+    this.tapCount = 0
     this.writeIndex = 0
-    this.hpState.clear()
   }
 
   /**
@@ -90,32 +87,48 @@ export class StereoDecorrelator {
     layout: DecorrelationLayout | null, amount: number): void {
     const normalized = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0
     if (layout === null || normalized <= 0) return
-    const taps = this.taps[layout]
     const requested = Number.isFinite(frameCount) ? Math.floor(frameCount) : 0
-    const count = Math.max(0, Math.min(requested, left.length, right.length))
-    const ringLength = this.ring.length
+    const frames = Math.max(0, Math.min(requested, left.length, right.length))
+    if (frames === 0) return
+    this.prepareTaps(layout, normalized)
+    const taps = this.tapCount
+    const ring = this.ring
+    const ringLength = ring.length
+    const alpha = this.hpAlpha
+    const hp = this.hpState
+    const tapChannel = this.tapChannel
+    const tapDelay = this.tapDelay
+    const tapGain = this.tapGain
+    let write = this.writeIndex
 
-    for (let i = 0; i < count; i++) {
+    for (let i = 0; i < frames; i++) {
       const mid = (left[i] + right[i]) * 0.5
-      this.ring[this.writeIndex] = Number.isFinite(mid) ? mid : 0
-      for (const tap of taps) {
-        const target = channels[tap.channel]
+      ring[write] = Number.isFinite(mid) ? mid : 0
+      for (let t = 0; t < taps; t++) {
+        const channel = tapChannel[t]
+        const target = channels[channel]
         if (!target || i >= target.length) continue
-        const delayed = this.ring[(this.writeIndex - tap.delaySamples + ringLength) % ringLength]
-        const previous = this.hpState.get(tap.channel) ?? 0
-        const low = previous + this.hpAlpha * (delayed - previous)
-        this.hpState.set(tap.channel, low)
-        target[i] += (delayed - low) * normalized * tap.gain
+        // 延迟读指针只做一次加法回绕，避免每样本取模。
+        let read = write - tapDelay[t]
+        if (read < 0) read += ringLength
+        const delayed = ring[read]
+        const low = hp[channel] + alpha * (delayed - hp[channel])
+        hp[channel] = low
+        target[i] += (delayed - low) * tapGain[t]
       }
-      this.writeIndex = (this.writeIndex + 1) % ringLength
+      if (++write === ringLength) write = 0
     }
+    this.writeIndex = write
   }
 
-  private buildTaps(layout: DecorrelationLayout): readonly DecorrelationTap[] {
-    return TAP_SPECS[layout].map((tap) => ({
-      channel: tap.channel,
-      delaySamples: Math.max(1, Math.round((tap.delayMs / 1000) * this.sampleRate)),
-      gain: tap.gain,
-    }))
+  /** 布局/强度变化时刷新 tap 表（gain 预乘 amount，热路径不再逐样本乘）。 */
+  private prepareTaps(layout: DecorrelationLayout, amount: number): void {
+    const specs = TAP_SPECS[layout]
+    for (let i = 0; i < specs.length; i++) {
+      this.tapChannel[i] = specs[i].channel
+      this.tapDelay[i] = Math.max(1, Math.round((specs[i].delayMs / 1000) * this.sampleRate))
+      this.tapGain[i] = specs[i].gain * amount
+    }
+    this.tapCount = specs.length
   }
 }
