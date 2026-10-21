@@ -801,8 +801,8 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run lint` | **通过，0 error** |
-| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **117 文件（114 passed + 3 skipped）/ 1171 用例 = 1155 passed + 16 skipped + 0 failed**（虚拟扬声器轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
-| 全仓测试 | `npx vitest run --maxWorkers=4` | **329 文件（325 passed + 4 skipped）/ 3184 用例 = 3167 passed + 17 skipped + 0 failed**（虚拟扬声器轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **117 文件（114 passed + 3 skipped）/ 1173 用例 = 1157 passed + 16 skipped + 0 failed**（沉浸 7.1.4 轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
+| 全仓测试 | `npx vitest run --maxWorkers=4` | **329 文件（325 passed + 4 skipped）/ 3186 用例 = 3169 passed + 17 skipped + 0 failed**（沉浸 7.1.4 轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **512,198 bytes（500.2 KiB）**，sha256 `7b5bea51…ebaefed5`（`worklet-build.log`；虚拟扬声器上混前为 507,839B / `83376e8d…8a3c53f7`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
@@ -867,5 +867,6 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - **空间音频强度增强（用户反馈“还是不明显”）**：自然外化湿声映射从 `amount·(0.15+0.35·amount)`（70%→0.28）改为 `amount·(0.5+0.5·amount)`（70%→0.595，100%→1.0）；stereoPreservation 0.3→0.2、音乐床分频 5000→3500Hz；默认参数改为强度 0.8 / 展开 90° / 房间混响 0.2（仅影响新建或重置空间设置，旧参数保留用户选择）。实测受控左声道单频：右耳串音占左耳 6.2%→22.9%（70%）、42.8%（100%），focused 70% 为 42.6%；打包应用试听/实时链路正常。
 - **页脚状态改为 LED 指示**：移除「手动增益 0.0 dB / TP 9.7 dBFS / 峰值越界」数字条，改为状态圆点 + `HyperSoundEngine 已就绪 · DSP 双声道 · 48 kHz / 目前模式：<场景名或自定义调音>`；峰值 ≥0 时圆点变琥珀色（title「峰值接近满刻」），正常绿色；空间音频开启时模式后追加「· 空间音频」。
 - **空间音频虚拟扬声器（本轮核心）**：headLocked 51/514/71/714 在普通立体声（inputFormat=channels、输入≤2 声道）下由 EngineV3 内部 StereoUpmixer 上混为 5.1（6ch）/7.1（8ch）/5.1.4（10ch）/7.1.4（12ch），再走 processMulti 逐只 HRTF；custom 保持 L/R，真实多声道输入不二次上混；discrete/full wet（musicBed=0、stereoPreservation=0）。StereoUpmixer 新增 5.1.4/7.1.4：顶置由 3kHz 高通 mid/side 派生（TFL/TFR=0.35·HP(L/R)、TRL/TRR=±0.4·HP((L-R)/2)），并从 FL/FR 扣回下混贡献。实测 5.1 后端 6ch：FC RMS .1772、SL/SR .0400；5.1.4 顶置 .0145/.0149/.0107/.0107；180Hz 时顶置 .00027/0；5.1.4 与 5.1 双耳输出最大差 .0662。UI 新增「一键虚拟 5.1 环绕」（focused/100%），输入格式不变。
+- **空间音频沉浸 7.1.4 品质模式（轮 6）**：空间音频页新增「沉浸空间 7.1.4」一键预设：headLocked 714 + 顶置层 + focused + 100% + budgetMode quality + hrtfInterp spherical + hall/roomAmount 0.4 + early/late 1；普通立体声自动上混 12 路虚拟扬声器并逐只 HRTF；inputFormat 不变。规格见 `docs/specs/spatial-audio-immersive-714.md`。测试新增 714 的 12 路/顶置能量与 UI 参数用例（1173/3186）。
 - **评审确认但保留**（判断项/设计边界）：replayGainTags 仍是预留字段（QQ/网易云不返回标签，实际走 URL 扫描）；useAudioPlayer 的 deck 索引/源映射重复属可读性 smell，未在功能修复轮改动。
 

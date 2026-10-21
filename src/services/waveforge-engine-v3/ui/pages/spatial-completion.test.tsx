@@ -225,6 +225,22 @@ describe('空间页面完成度：头追入口和生命周期', () => {
     }
   })
 
+  it('沉浸空间 7.1.4 按钮写入品质参数且不改 inputFormat', () => {
+    const { bridge } = setup()
+    fireEvent.click(screen.getByRole('button', { name: '沉浸空间 7.1.4' }))
+    const p = bridge.getParams().spatial!
+    expect(p.mode).toBe('headLocked')
+    expect(p.headLocked.layout).toBe('714')
+    expect(p.headLocked.heightLayer).toBe(true)
+    expect(p.renderStyle).toBe('focused')
+    expect(p.instant.amount).toBeCloseTo(1)
+    expect(p.instant.room).toBe('hall')
+    expect(p.instant.roomAmount).toBeCloseTo(0.4)
+    expect(p.budgetMode).toBe('quality')
+    expect(p.hrtfInterp).toBe('spherical')
+    expect(p.inputFormat).toBe('channels')
+  })
+
   it('强度为 0 时开启空间音频自动补默认强度，避免“已启用但无效果”', () => {
     const engine = new EngineV3(48000)
     const bridge = createV3UiBridge(engine, 48000)

@@ -186,6 +186,33 @@ describe('headLocked 立体声自动上混（虚拟扬声器 5.1/7.1）', () => 
     expect(maxAbs(outL) + maxAbs(outR), '输出不能是静音').toBeGreaterThan(0.01)
   })
 
+  it('布局 714：立体声上混为 12 路，顶置虚拟扬声器有真实高频内容', () => {
+    const engine = new EngineV3(SAMPLE_RATE, 2)
+    const state = probe(engine)
+    const params = headLockedParams('714')
+    params.spatial.headLocked.heightLayer = true
+    engine.setParams(params)
+    expect(state._spatialHeadLockedUpmix,
+      '布局 714 + 立体声输入应进入 7.1.4 上混分支').toBe('714')
+    expect(state._spatialMultiChannelCount,
+      '7.1.4 上混应把空间后端多声道容量扩到 12 路').toBe(12)
+
+    const processMulti = vi.spyOn(state._spatialBackend, 'processMulti')
+    const left = new Float32Array(FRAMES)
+    const right = new Float32Array(FRAMES)
+    for (let i = 0; i < FRAMES; i++) {
+      left[i] = 0.3 * Math.sin(2 * Math.PI * 440 * i / SAMPLE_RATE) + 0.08 * Math.sin(2 * Math.PI * 6000 * i / SAMPLE_RATE)
+      right[i] = 0.25 * Math.sin(2 * Math.PI * 660 * i / SAMPLE_RATE + 0.7) + 0.08 * Math.cos(2 * Math.PI * 7000 * i / SAMPLE_RATE)
+    }
+    const { outL, outR } = processThrough(engine, [left, right])
+    const block = lastProcessedMulti(processMulti)
+    expect(block, '7.1.4 上混应向后端提供 12 路离散输入').toHaveLength(12)
+    const heights = block.slice(8, 12)
+    expect(heights.every((channel) => maxAbs(channel) > 0.002),
+      '4 只顶置虚拟扬声器应由高频 mid/side 派生，不能静音').toBe(true)
+    expect(outL.every(Number.isFinite) && outR.every(Number.isFinite)).toBe(true)
+  })
+
   it('输入本身是 5.1（6 声道）时不再被立体声上混器二次上混', () => {
     const engine = new EngineV3(SAMPLE_RATE, 2)
     const state = probe(engine)

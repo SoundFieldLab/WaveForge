@@ -233,6 +233,28 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     }))
   }
   /**
+   * 沉浸空间 7.1.4（品质优先）：11 只虚拟扬声器（含 4 只顶置）+ 球谐 HRTF + 完整反射预算。
+   * 普通立体声仍由引擎自动上混，inputFormat 保持用户原值。
+   */
+  const applyImmersive714 = () => {
+    soloBefore.current = null
+    lastMode.current = 'headLocked'
+    patch({
+      mode: 'headLocked',
+      renderStyle: 'focused',
+      instant: { amount: 1, room: 'hall', roomAmount: 0.4 },
+      budgetMode: 'quality',
+      hrtfInterp: 'spherical',
+      earlyAmount: 1,
+      lateAmount: 1,
+      headLocked: { layout: '714', heightLayer: true, speakers: createLayoutSpeakers('714'), routes: [] },
+    })
+    setSelected(null)
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: '已切到沉浸空间 7.1.4（品质优先 · 11 只虚拟扬声器），点「试听空间效果」即可对比', type: 'info' },
+    }))
+  }
+  /**
    * 开启空间音频：强度为 0 时引擎会按旁路处理（UI 却会显示已启用），
    * 因此同时补默认强度，避免出现「开关打开了但没有效果」。
    */
@@ -250,6 +272,10 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
   const intensityPercent = Math.round(spatial.instant.amount * 100)
   const virtual51Active = active && spatial.mode === 'headLocked' && spatial.headLocked.layout === '51'
     && (spatial.renderStyle ?? 'natural') === 'focused' && Math.abs(spatial.instant.amount - 1) < 0.005
+  const immersive714Active = active && spatial.mode === 'headLocked' && spatial.headLocked.layout === '714'
+    && spatial.headLocked.heightLayer && (spatial.renderStyle ?? 'natural') === 'focused'
+    && Math.abs(spatial.instant.amount - 1) < 0.005 && spatial.budgetMode === 'quality'
+    && spatial.hrtfInterp === 'spherical'
   // Ambisonics 与「立体声 → 虚拟 5.1/7.1」由音源格式决定扬声器，会覆盖布局选择。
   const inputFormatOverridesLayout = (spatial.inputFormat ?? 'channels') !== 'channels'
   const inputFormatLabel = INPUT_FORMAT_LABELS[spatial.inputFormat ?? 'channels']
@@ -289,6 +315,23 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
           {virtual51Active ? `当前：${layoutLabel} · ${styleLabel} · 强度 ${intensityPercent}%` : '头锁定 5.1 · 清晰定位 · 100% 强度'}
         </span>
         <ActionBtn theme={theme} onClick={applyVirtual51}><Speaker size={14} aria-hidden="true" />一键虚拟 5.1 环绕</ActionBtn>
+      </div>
+    </section>
+    <section className="hse-spatial-immersive-entry" aria-label="沉浸空间 7.1.4 品质模式"
+      style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px 20px',
+        padding: '14px 18px', borderRadius: '16px', border: `1px solid ${immersive714Active ? theme.accentColor : theme.cardBorder}`,
+        background: immersive714Active ? theme.accentDim : theme.inputBg }}>
+      <div className="min-w-0">
+        <p className={`text-sm font-semibold ${theme.textPrimary}`}>沉浸空间 · 7.1.4（品质优先）</p>
+        <p className={`mt-1 text-xs leading-relaxed ${theme.textSecondary}`}>
+          11 只虚拟扬声器（含 4 只顶置）+ 球谐 HRTF 插值 + 完整反射预算 + 音乐厅房间；普通立体声自动上混，不改「音源格式」。
+        </p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="hse-mono text-[11px]" style={{ color: '#536b66' }}>
+          {immersive714Active ? '当前：7.1.4 · 11 只 · 品质优先 · 强度 100%' : '7.1.4 · 11 只 · 球谐 HRTF · 完整反射'}
+        </span>
+        <ActionBtn theme={theme} onClick={applyImmersive714}><Speaker size={14} aria-hidden="true" />沉浸空间 7.1.4</ActionBtn>
       </div>
     </section>
     <div className="hse-spatial-session-strip">
