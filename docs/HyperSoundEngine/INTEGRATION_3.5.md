@@ -18,7 +18,7 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | WASM SIMD | `src/dsp/wasmSimdKernel.ts` 运行时自研生成约 370 字节 WASM 模块（f32x4/f64x2 复数乘法），无第三方工具链、不 fetch 外部 `.wasm`；`vectorKernel.ts` 为门面（f32 阈值 256 / f64 阈值 512，低于阈值或环境不支持静默回退纯 TS）；f64 与 double 逐位一致，f32 输出改为逐步 `Math.fround`（可能 ≤1 ulp 差异） |
 | 全链路 Float64 | `setPrecision('float32' / 'float64')` / `getPrecision()` 下发到卷积、多段压缩、双耳/时域卷积、传播延迟、房间、氛围提取、上混、Ambisonics 解码；prepared IR/双耳/谱反射负载带精度自描述与校验；默认 float32，仅 HRIR/FIR 系数、源 IR 副本、HRTF 网格等非信号路径保留 Float32 |
 | 空间后端 | 实测 KEMAR HRTF（MIT compact，8–192 kHz 重采样）+ 球谐插值、双耳卷积与 prepared 跨线程接管、镜像反射/谱反射/FDN/房间氛围、AmbiX 一至三阶与 FOA FuMa 解码、5.1/7.1 上混与双声道折叠、传播延迟/Doppler、world/stage/headLocked 路由、SOFA 导入（h5wasm）、串扰消除与音箱校准工具、头追姿态输入 |
-| Worklet | 模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移；主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`：**514,160 bytes（502.1 KiB），sha256 `cae11610…c3a1d79`**，旧的 95,518 bytes 包不可再用；`npm run verify:worklet` 全过；帧边界零分配（128/64 帧稳态无 typed-array/Array 构造）、参数消息就地修改 structured clone、Host/Worklet 同版协议与 `EngineConfigWork` 遥测字段 |
+| Worklet | 模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移；主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`：**514,311 bytes（502.3 KiB），sha256 `b9d108d4…6c569e47`**，旧的 95,518 bytes 包不可再用；`npm run verify:worklet` 全过；帧边界零分配（128/64 帧稳态无 typed-array/Array 构造）、参数消息就地修改 structured clone、Host/Worklet 同版协议与 `EngineConfigWork` 遥测字段 |
 | 宿主 | `EngineV3Host` 支持最多 32 声道离散输入（`channelCountMode='max'` / `channelInterpretation='discrete'`）、prepared IR/房间线索控制线程准备 + Transferable 接管、worklet 优先/失败回退 script；遥测仅诊断用途，不作验收指标 |
 | 九页 UI | 主页 / 音效场景 / 均衡器 / 空间音效 / **空间音频** / 动态调音 / 分析 / 调音器 / 关于；保持主程序**亮色薄荷玻璃**风格（主色 `#006A63`），不引入深色/AFG/M3 风格，不恢复 Atmos/360RA/个性化 HRTF 入口；空间 3D 世界编辑（`SpatialWorldScene`，懒加载浅色房间/地面/音箱，相机独立于音频） |
 | 融合层 | `attachV3Engine` 的 `createV3UiBridge(engine, fs, { submit })` 为**唯一提交路径**（`setParams`/`applyScene`/外部替换同路，`applyScene` 不再绕过宿主下发与持久化）；补齐 `subscribeParams` 让系统音量/ReplayGain/总开关等外部更新刷新已打开 UI；IR 去重改为 `WeakMap<Float32Array, token>` 引用身份（不按内容 hash、不进分享串） |
@@ -66,7 +66,7 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 真实 Electron UI | `electron-ui/SUMMARY.md`、`11-page-*.png`、`34-final-*.png`、`audit-final-9pages.json` | 九页导航/亮色薄荷风格/窄窗 390px/导出/引擎往返实测 |
 | 真实音频图 | `audio-graph/README.md`、`verify-spatial-playback.json`、`completion-48000-summary.json`、`completion-96000-summary.json`、`wasm-kernel-capability.json` | 多声道空间接管 10/10、WASM 能力探针、44.1/48/96 kHz 图探针 |
 | 打包 file:// | `packaged/FINAL-REPORT.md`、`stage-b3-results.json`、`asar-fix-verification.json`、`exported-WaveForge-HSE-Modified.wav` | exit 0、file:// PASS、79 请求 0 失败、WAV 294,956B 落盘、@noble/CSP 复验 |
-| Worklet | `worklet-build.log`、`worklet-verify.log` | 重建输出 514,160 bytes / 502.1 KiB（sha256 `cae11610…c3a1d79`；环绕去相关前为 512,198B）与 `verify:worklet` 全过记录 |
+| Worklet | `worklet-build.log`、`worklet-verify.log` | 重建输出 514,311 bytes / 502.3 KiB（sha256 `b9d108d4…6c569e47`；环绕去相关前为 512,198B）与 `verify:worklet` 全过记录 |
 | 生产构建 | `build-first.log`、`packaged/build.log` | 接入后首次构建与打包重构建日志 |
 | 早期接入日志 | `merged-tests.log`、`tests-resume.log`、`bridge-tests.log`、`lifecycle-tests.log`、`tests-stability-*.log` | 接入过程测试记录与 5s 抖动定位过程（最终口径以 tests-final-* 为准） |
 | 其他 | `types-ws-8.18.2.tgz`、`fix-test-types.cjs` | 仅类型补丁包与一次性测试类型修复脚本，均非运行时依赖 |
@@ -117,7 +117,7 @@ npm run build
 - **空间音频虚拟声源静音（轮 3）**：头锁定/世界/舞台模式下，虚源 muted 或音量 0 时，进入空间后端前对相应节目声道加干声闸门（20ms 平滑），全部虚源静音时 dry+wet 一起消失，仍保留其它声道经 HRTF 的交叉声；受控引擎测试覆盖右源静音/全静音/音量 0；打包应用双虚源静音后输出 RMS=0（未静音 0.28/0.27）。
 - **空间音频强度增强（轮 4）**：自然外化湿声映射改为 `amount·(0.5+0.5·amount)`（70% 时 0.595，旧 0.28；100% 全湿），stereoPreservation 0.2、音乐床分频 3500Hz；默认强度 0.8 / 展开 90° / 房间 0.2（仅新建/重置生效）。受控 worklet 左声道单频右耳串音：关闭 0%、70% 22.9%、100% 42.8%、focused 70% 42.6%；打包应用实时链路正常。
 - **虚拟扬声器上混（轮 5）**：headLocked 51/514/71/714 + 普通立体声（≤2 声道、inputFormat=channels）由 EngineV3 内部 StereoUpmixer 上混为 5.1（6ch）/7.1（8ch）/5.1.4（10ch）/7.1.4（12ch），再 processMulti 逐只 HRTF；custom 保持 L/R，真实多声道输入不二次上混；discrete/full wet（musicBed=0、stereoPreservation=0）。StereoUpmixer 新增 5.1.4/7.1.4 顶置层（3kHz 高通 mid/side，TFL/TFR=0.35·HP(L/R)、TRL/TRR=±0.4·HP((L-R)/2)，下混扣回）。实测 5.1 后端 6ch：FC RMS .1772、SL/SR .0400；5.1.4 顶置 .0145/.0149/.0107/.0107；180Hz 时顶置 .00027/0；5.1.4 与 5.1 双耳输出最大差 .0662。UI「一键虚拟 5.1 环绕」（focused/100%），不改 inputFormat。
-- **环绕去相关（轮 7）**：`StereoDecorrelator` 在 headLocked 上混后对 SL/SR/BL/BR 叠加 mid 短延迟副本（8.5–19.5ms 不同延迟、180Hz 高通、低增益），解决单声道/相关节目矩阵环绕为 0；`decorrelation` 0..1 默认 0，5.1 快捷 0.2、沉浸 7.1.4 0.35；真实多声道/custom 不处理；UI 新增「环绕去相关」滑杆。规格 `docs/specs/spatial-decorrelation.md`。
+- **环绕去相关（轮 7）**：`StereoDecorrelator` 在 headLocked 上混后对 SL/SR/BL/BR 叠加 mid 短延迟副本（8.5–19.5ms 不同延迟、180Hz 高通、低增益），解决单声道/相关节目矩阵环绕为 0；`decorrelation` 0..1 默认 0，5.1 快捷 0.2、沉浸 7.1.4 0.35；真实多声道/custom 不处理；UI 新增「环绕去相关」滑杆；另增 earlyReflectionOrders 0..3（沉浸预设 3 阶）。规格 `docs/specs/spatial-decorrelation.md`。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

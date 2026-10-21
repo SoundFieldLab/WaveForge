@@ -727,6 +727,7 @@ function syncSpatialSettings(destination: SpatialSettings, source: SpatialSettin
   changed = assignField(destination, 'earlyAmount', source.earlyAmount) || changed
   changed = assignField(destination, 'lateAmount', source.lateAmount) || changed
   changed = assignField(destination, 'decorrelation', source.decorrelation) || changed
+  changed = assignField(destination, 'earlyReflectionOrders', source.earlyReflectionOrders) || changed
   changed = assignField(destination, 'earlyReflectionModel', source.earlyReflectionModel) || changed
   changed = assignField(destination, 'budgetMode', source.budgetMode) || changed
   changed = assignField(destination, 'mode', source.mode) || changed
@@ -1030,8 +1031,10 @@ function spatialConfigFromSettings(s: SpatialSettings, inputChannels = 2, sample
   return {
     speakers,
     ambienceExtraction: s.ambience.extraction ?? 'pca',
-    earlyReflectionOrders: s.budgetMode === 'lowLatency' ? 0
-      : s.budgetMode === 'auto' && sampleRate >= 96000 && speakers.length >= 8 ? 1 : 2,
+    earlyReflectionOrders: s.earlyReflectionOrders !== undefined
+      ? Math.max(0, Math.min(3, Math.floor(s.earlyReflectionOrders)))
+      : s.budgetMode === 'lowLatency' ? 0
+        : s.budgetMode === 'auto' && sampleRate >= 96000 && speakers.length >= 8 ? 1 : 2,
     multichannelAuto: foa || stereoUpmix || headLockedUpmix !== null
       || (s.mode === 'instant' && s.instant.multichannelAuto),
     lfeChannel: foa ? -1 : 3,

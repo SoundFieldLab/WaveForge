@@ -244,6 +244,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       mode: 'headLocked',
       renderStyle: 'focused',
       decorrelation: 0.35,
+      earlyReflectionOrders: 3,
       instant: { amount: 1, room: 'hall', roomAmount: 0.4 },
       budgetMode: 'quality',
       hrtfInterp: 'spherical',
@@ -595,6 +596,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
         <div className="grid gap-x-8 @min-[40rem]:grid-cols-2">
           <Slider label="早期反射" value={Math.round((spatial.earlyAmount ?? 1) * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round((spatial.earlyAmount ?? 1) * 100)}%`} onChange={value => patch({ earlyAmount: value / 100 })} />
           <Slider label="晚期混响" value={Math.round((spatial.lateAmount ?? 1) * 100)} min={0} max={100} step={1} theme={theme} display={`${Math.round((spatial.lateAmount ?? 1) * 100)}%`} onChange={value => patch({ lateAmount: value / 100 })} />
+          <Slider label="反射阶数" value={spatial.earlyReflectionOrders ?? 2} min={0} max={3} step={1} theme={theme} display={`${spatial.earlyReflectionOrders ?? 2} 阶`} onChange={value => patch({ earlyReflectionOrders: value })} />
         </div>
         <Segmented label="HRTF 插值" options={[{ value: 'spherical', label: '连续方向' }, { value: 'nearest', label: '测量点' }]} value={spatial.hrtfInterp} onChange={hrtfInterp => patch({ hrtfInterp })} theme={theme} small />
         <Segmented label="反射计算预算" options={[{ value: 'quality', label: '完整反射' }, { value: 'auto', label: '自动预算' }, { value: 'lowLatency', label: '仅晚混响' }]} value={spatial.budgetMode ?? 'quality'} onChange={budgetMode => patch({ budgetMode })} theme={theme} small />

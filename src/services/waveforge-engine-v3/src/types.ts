@@ -311,6 +311,8 @@ export interface SpatialSettings {
   decorrelation?: number
   /** 完整 HRIR 频谱早反射，或低开销的双耳能量/到达线索近似。 */
   earlyReflectionModel?: 'cues' | 'spectral'
+  /** 早期反射阶数 0..3（缺省由 budgetMode 推导：quality=2、auto 高采样多声源=1、lowLatency=0）。 */
+  earlyReflectionOrders?: number
   /** 空间计算预算：quality 保持二阶反射，auto 在高采样率多声源下降为一阶，lowLatency 仅保留晚混响。 */
   budgetMode?: 'quality' | 'auto' | 'lowLatency'
   /** 空间模式：off=关闭（旁路）/ instant=一键空间化 / headLocked=头锁定环绕 / world=世界漫游 / stage=舞台影院 */

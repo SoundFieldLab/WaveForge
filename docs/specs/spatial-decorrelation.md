@@ -18,6 +18,7 @@
 6. 作为用户，我想 custom 两只扬声器布局不被强行加入后方延迟。
 7. 作为用户，我想去相关不会改变左右声道的音量平衡或引起明显削波。
 8. 作为开发者，我想去相关逻辑独立于 StereoUpmixer，保持纯矩阵上下混契约不变，便于测试。
+9. 作为追求音质的用户，我想能选择早期反射阶数（0–3），这样可以在完整反射和计算预算之间取舍。
 
 ## Implementation Decisions
 
@@ -25,6 +26,7 @@
 - 用 mid=(L+R)/2 的短延迟副本（左右不同延迟，约 8–20ms）低增益叠加到环绕声道；不同声道不同延迟降低相关性，不引入可辨的单一回声。
 - SpatialSettings 增加 decorrelation 0..1（默认 0），随参数快照持久化；仅 headLocked + 立体声上混路径生效；真实多声道/custom 不处理。
 - 沉浸空间 7.1.4 预设写入约 0.35；5.1 快捷预设写入约 0.2；UI 增加「环绕去相关」滑杆。
+- 增加 `earlyReflectionOrders` 0..3（缺省由 budgetMode 推导）；沉浸预设用 3 阶，UI「反射阶数」滑杆可调。
 - 不改变任何默认关闭时的样本输出；不改变 StereoUpmixer 既有测试的逐样本重建。
 
 ## Testing Decisions
@@ -32,7 +34,7 @@
 - 测试单声道输入：decorrelation=0 时 SL/SR 仍为 0；>0 时 SL/SR 有能量且左右不完全相同。
 - 测试默认 5.1/7.1 StereoUpmixer 输出逐位不变（现有回归）。
 - 测试真实多声道输入和 custom 布局不进入去相关。
-- 测试 UI 滑杆写入 decorrelation 且范围 0..1。
+- 测试 UI 滑杆写入 decorrelation 且范围 0..1；沉浸预设同时写入 earlyReflectionOrders=3。
 - 参考 stereoUpmixer.test.ts、spatial-virtual-speakers.test.ts。
 
 ## Out of Scope
