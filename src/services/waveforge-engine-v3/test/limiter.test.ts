@@ -121,6 +121,100 @@ describe('Limiter', () => {
     expect(pkT).toBeLessThan(pkD - 0.01)
   })
 
+  it('孤立瞬态在零/短前瞻、慢 attack 下仍不超过阈值，双声道使用共同增益', () => {
+    const thresholdDb = -12
+    const ceiling = Math.pow(10, thresholdDb / 20)
+    for (const truePeak of [false, true]) {
+      for (const lookaheadMs of [0, 1 / FS * 1000, 0.1, 5]) {
+        const lim = new Limiter(FS)
+        lim.setParams(settings({ truePeak, lookaheadMs, attackMs: 100, thresholdDb }))
+        const delay = lim.getLatencySamples()
+        const l = new Float32Array(1024)
+        const r = new Float32Array(1024)
+        l[0] = 8
+        r[0] = -4
+        l[333] = -16
+        r[333] = 8
+        // 故意跨块分割，在峰值进入输出前中断调用
+        for (let offset = 0; offset < l.length; offset += 17) {
+          lim.processStereo(l.subarray(offset, offset + 17), r.subarray(offset, offset + 17))
+        }
+        expect(peak(l)).toBeLessThanOrEqual(ceiling + 1e-7)
+        expect(peak(r)).toBeLessThanOrEqual(ceiling + 1e-7)
+        expect(Math.abs(l[delay])).toBeGreaterThan(0)
+        expect(r[delay] / l[delay]).toBeCloseTo(-0.5, 6)
+        expect(Math.abs(l[333 + delay])).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it('lookahead 渐变完成或禁用后重启时，延迟线游标与报告延迟一致', () => {
+    const lim = new Limiter(FS)
+    lim.setParams(settings({ truePeak: false, lookaheadMs: 50 }))
+    lim.processStereo(new Float32Array(1200), new Float32Array(1200))
+    lim.setParams(settings({ truePeak: false, lookaheadMs: 0.1 }))
+    lim.processStereo(new Float32Array(Math.round(FS * 0.025)), new Float32Array(Math.round(FS * 0.025)))
+    const l = new Float32Array(64)
+    const r = new Float32Array(64)
+    l[0] = 0.25
+    lim.processStereo(l, r)
+    expect(Array.from(l).findIndex(v => v !== 0)).toBe(lim.getLatencySamples())
+    expect(l[lim.getLatencySamples()]).toBe(0.25)
+    lim.setParams(settings({ enabled: false, truePeak: false, lookaheadMs: 0.1 }))
+    lim.setParams(settings({ truePeak: false, lookaheadMs: 0.1 }))
+    const next = new Float32Array(64)
+    next[0] = 0.25
+    lim.processStereo(next, r)
+    expect(next).toEqual(l)
+  })
+
+  it('一次处理与不规则分块处理逐样本一致', () => {
+    const a = new Limiter(FS)
+    const b = new Limiter(FS)
+    a.setParams(settings({ attackMs: 20 }))
+    b.setParams(settings({ attackMs: 20 }))
+    const l1 = makeSine(4000, 16000, 3)
+    const r1 = makeSine(4000, 713, 2)
+    const l2 = l1.slice()
+    const r2 = r1.slice()
+    a.processStereo(l1, r1)
+    for (let off = 0; off < l2.length; off += 113) b.processStereo(l2.subarray(off, off + 113), r2.subarray(off, off + 113))
+    expect(l2).toEqual(l1)
+    expect(r2).toEqual(r1)
+    expect(b.getReductionDb()).toBe(a.getReductionDb())
+  })
+
+  it('12kHz 相位偏移短音：慢 attack 下 4× 独立 sinc 重建峰值仍受压制', () => {
+    const lim = new Limiter(FS)
+    const thresholdDb = -6
+    lim.setParams(settings({ thresholdDb, attackMs: 100 }))
+    const l = new Float32Array(4096)
+    const r = new Float32Array(4096)
+    for (let i = 512; i < 1536; i++) {
+      l[i] = 2 * Math.sin(Math.PI * i / 2 + Math.PI / 4)
+      r[i] = -l[i]
+    }
+    lim.processStereo(l, r)
+    // 独立 64-tap Hann 窗 sinc；包含起音/收音与前瞻延迟，不只查稳态数字峰值。
+    let reconstructedPeak = 0
+    for (let i = 400; i < 2000; i++) {
+      for (let phase = 0; phase < 4; phase++) {
+        let y = 0
+        let sum = 0
+        for (let k = -31; k <= 32; k++) {
+          const distance = phase / 4 - k
+          const weight = Math.abs(distance) < 32 ? 0.5 + 0.5 * Math.cos(Math.PI * distance / 32) : 0
+          const c = Math.abs(distance) < 1e-12 ? 1 : Math.sin(Math.PI * distance) / (Math.PI * distance) * weight
+          y += l[i + k] * c
+          sum += c
+        }
+        reconstructedPeak = Math.max(reconstructedPeak, Math.abs(y / sum))
+      }
+    }
+    // 8-tap 实时检测与长核参考并非同一插值器，留 0.2dB 重建误差容差。
+    expect(reconstructedPeak).toBeLessThanOrEqual(Math.pow(10, (thresholdDb + 0.2) / 20))
+  })
+
   it('reset 后重新处理结果一致（确定性）', () => {
     const lim = new Limiter(FS)
     lim.setParams(settings({}))

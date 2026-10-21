@@ -52,25 +52,25 @@ export function ContentViewport({ pageKey, children }: { pageKey: string; childr
   }
 
   return (
-    <div className="@container relative min-h-0 min-w-0" style={{ background: '#FBFDFC' }}>
+    <div className="@container grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)_auto]" style={{ background: '#fbfdfc' }}>
       <main
         ref={viewportRef}
         id="hse-page-content"
         aria-label="当前调音页面内容"
         tabIndex={0}
-        className="h-full overflow-y-auto overscroll-contain p-4 pb-16 outline-offset-[-3px] focus-visible:outline-2 focus-visible:outline-[#006A63] sm:p-6 sm:pb-16"
+        className="h-full overflow-y-auto overscroll-contain p-4 outline-offset-[-3px] focus-visible:outline-2 focus-visible:outline-[#006a63] sm:p-6"
         style={{ scrollPaddingBottom: '32px', scrollbarGutter: 'stable' }}
       >
         <div ref={contentRef}>{children}</div>
       </main>
       {hasMore && (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center px-4 pb-3 pt-8" style={{ background: 'linear-gradient(transparent, rgba(245,249,247,0.94))' }}>
+        <div className="flex justify-center border-t border-[#dce9e5] bg-[#fbfdfc] px-4 py-1" >
           <button
             ref={hintRef}
             type="button"
             aria-controls="hse-page-content"
             onClick={scrollFurther}
-            className="hse-glass-button pointer-events-auto inline-flex min-h-10 items-center gap-2 rounded-full px-4 text-xs font-semibold text-[#006A63]"
+            className="hse-glass-button pointer-events-auto inline-flex min-h-8 items-center gap-2 rounded-full px-4 text-xs font-semibold text-[#006a63]"
           >
             <ArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
             向下查看更多

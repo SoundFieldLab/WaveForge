@@ -1,7 +1,8 @@
-/** 既有 HSE 效果弹窗的公共控件，与新调音室使用相同浅色规范。 */
+/** 既有 HSE 效果弹窗的公共控件，与新调音室使用同一套亮色语义令牌。 */
 import { useEffect, useId, useRef, type ReactNode, type CSSProperties } from 'react'
 import { Info, X } from 'lucide-react'
 import type { V3Theme } from './theme'
+import { useStateFeedback } from './feedback'
 import './hse-glass.css'
 
 export function Toggle({ checked, onChange, theme, label = '启用效果', disabled }: {
@@ -10,7 +11,7 @@ export function Toggle({ checked, onChange, theme, label = '启用效果', disab
   return <button type="button" role="switch" aria-label={label} aria-checked={checked} disabled={disabled}
     onClick={(e) => { e.stopPropagation(); onChange(!checked) }}
     className="hse-glass-switch relative h-7 w-12 shrink-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
-    style={{ outlineColor: theme.accentColor }}>
+    style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>
     <span aria-hidden="true" className="hse-glass-thumb absolute left-[3px] top-1/2 h-5 w-5 rounded-full"
       style={{ transform: `translate(${checked ? 20 : 0}px, -50%)` }} />
   </button>
@@ -21,10 +22,12 @@ export function Slider({ label, value, min, max, step, onChange, display, theme,
   display?: string; theme: V3Theme; disabled?: boolean
 }) {
   const id = useId()
+  const feedbackRef = useRef<HTMLOutputElement>(null)
+  useStateFeedback(value === 0 ? 'zero' : value === min ? 'min' : value === max ? 'max' : 'normal', feedbackRef)
   return <div className={`mb-4 ${disabled ? 'opacity-60' : ''}`}>
     <div className="mb-2 flex items-center justify-between gap-3">
       <label htmlFor={id} className={`${theme.textSecondary} text-xs`}>{label}</label>
-      <output htmlFor={id} className={`${theme.textPrimary} hse-mono text-xs font-medium`}>{display ?? value}</output>
+      <output ref={feedbackRef} htmlFor={id} className={`${theme.textPrimary} hse-mono text-xs font-medium`}>{display ?? value}</output>
     </div>
     <input id={id} type="range" min={min} max={max} step={step} value={value} disabled={disabled}
       aria-valuetext={display ?? String(value)} onChange={(e) => onChange(parseFloat(e.target.value))}
@@ -66,12 +69,12 @@ export function Modal({ title, icon, onClose, theme, children, maxWidth = 'max-w
   return <div className="fixed inset-0 z-[90] flex items-center justify-center p-4"
     style={{ background: 'rgba(21,58,55,0.22)' }} onClick={onClose}>
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
-      onClick={(e) => e.stopPropagation()} className={`w-full ${maxWidth} max-h-[86vh] overflow-y-auto rounded-3xl outline-none`}
-      style={{ background: theme.glassPanelHighlight, border: `1px solid ${theme.glassBorder}`, boxShadow: 'inset 0 1px 0 #ffffff, 0 16px 48px #153a3729' }}>
+      onClick={(e) => e.stopPropagation()} className={`hse-floating-layer w-full ${maxWidth} max-h-[86vh] overflow-y-auto rounded-3xl outline-none`}
+      style={{ background: theme.glassPanelHighlight, border: `1px solid ${theme.glassBorder}`, boxShadow: 'inset 0 1px 0 #ffffff, 0 16px 48px #153a3729', '--md-sys-color-primary': theme.accentColor } as CSSProperties}>
       <div className="p-6">
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ background: '#C8EDE4', color: theme.accentColor }}>{icon}</div>
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl" style={{ background: '#c8ede4', color: theme.accentColor }}>{icon}</div>
             <h2 id={titleId} className={`${theme.textPrimary} font-semibold`}>{title}</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="关闭弹窗" className={`hse-glass-button rounded-full p-2 focus-visible:outline-2 ${theme.textSecondary}`}>
@@ -86,7 +89,9 @@ export function Modal({ title, icon, onClose, theme, children, maxWidth = 'max-w
 export function Segmented<T extends string | boolean | number>({ options, value, onChange, theme, small, label = '选择模式' }: {
   options: { value: T; label: string }[]; value: T; onChange: (v: T) => void; theme: V3Theme; small?: boolean; label?: string
 }) {
-  return <div role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
+  const feedbackRef = useRef<HTMLDivElement>(null)
+  useStateFeedback(value, feedbackRef)
+  return <div ref={feedbackRef} role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
     {options.map((opt, index) => {
       const active = value === opt.value
       return <button key={String(opt.value)} type="button" role="radio" aria-checked={active} tabIndex={active || (index === 0 && !options.some((option) => option.value === value)) ? 0 : -1}
@@ -100,7 +105,7 @@ export function Segmented<T extends string | boolean | number>({ options, value,
           e.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[next]?.focus()
         }}
         className={`hse-glass-choice min-h-9 flex-1 whitespace-nowrap rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${active ? `${theme.textPrimary} font-semibold` : theme.textSecondary}`}
-        style={{ outlineColor: theme.accentColor }}>{opt.label}</button>
+        style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}><span aria-hidden="true" className={`hse-choice-mark ${active ? 'is-selected' : ''}`}>✓</span>{opt.label}</button>
     })}
   </div>
 }
@@ -111,7 +116,7 @@ export function Chip({ active, onClick, children, theme, title, deleteButton }: 
   return <div className="relative shrink-0">
     <button type="button" aria-pressed={active} onClick={onClick} title={title}
       className="hse-glass-button hse-glass-choice rounded-full px-4 py-2 text-left focus-visible:outline-2 focus-visible:outline-offset-2"
-      style={{ outlineColor: theme.accentColor }}>{children}</button>{deleteButton}
+      style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>{children}</button>{deleteButton}
   </div>
 }
 
@@ -120,15 +125,15 @@ export function TextInput({ value, onChange, placeholder, theme, className, labe
 }) {
   return <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} aria-label={label ?? placeholder}
     className={`hse-glass-input rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${theme.textPrimary} ${className ?? ''}`}
-    style={{ outlineColor: theme.accentColor }} />
+    style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties} />
 }
 
 export function ActionButton({ onClick, children, theme, disabled, title, ghost }: {
   onClick: () => void; children: ReactNode; theme: V3Theme; disabled?: boolean; title?: string; ghost?: boolean
 }) {
   return <button type="button" onClick={onClick} disabled={disabled} title={title}
-    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : 'text-white'}`}
-    style={{ outlineColor: theme.accentColor }}>{children}</button>
+    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : ''}`}
+    style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>{children}</button>
 }
 
 export function SectionTitle({ icon, children, theme, hint }: {

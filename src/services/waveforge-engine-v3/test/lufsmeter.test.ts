@@ -97,6 +97,16 @@ describe('LufsMeter', () => {
     expect(truePeakDb).toBeGreaterThan(peakDb - 0.05)
   })
 
+  it('12kHz 偏相正弦：真峰值恢复采样点之间的 +3dB 峰值', () => {
+    const m = new LufsMeter(48000)
+    const x = new Float32Array(4800)
+    for (let i = 0; i < x.length; i++) x[i] = 0.5 * Math.sin(Math.PI * i / 2 + Math.PI / 4)
+    feed(m, x, x, 127)
+    expect(m.getPeakDb()).toBeCloseTo(20 * Math.log10(0.5 / Math.sqrt(2)), 4)
+    expect(m.getTruePeakDb()).toBeGreaterThan(m.getPeakDb() + 2.9)
+    expect(Math.abs(m.getTruePeakDb() - 20 * Math.log10(0.5))).toBeLessThan(0.1)
+  })
+
   it('44.1kHz 同样支持：1kHz 满刻度正弦 ≈ -3.01 LUFS（±0.5）', () => {
     const m = new LufsMeter(44100)
     const l = sineMono(44100, 1000, 1.0, 4)
@@ -129,6 +139,52 @@ describe('LufsMeter', () => {
     // 重置后再次测量应可重复
     feed(m, l, zeros(48000, 2))
     expect(m.getIntegratedLufs()).toBeGreaterThan(-3.6)
+  })
+
+  it('同相/反相双声道均为单声道能量的两倍（+3.0103 LU），且不修改输入', () => {
+    for (const fs of [44100, 48000]) {
+      const l = sineMono(fs, 1000, 0.5, 4)
+      const original = l.slice()
+      const inverse = Float32Array.from(l, v => -v)
+      const mono = new LufsMeter(fs, { trackTruePeak: false })
+      const inPhase = new LufsMeter(fs, { trackTruePeak: false })
+      const antiPhase = new LufsMeter(fs, { trackTruePeak: false })
+      feed(mono, l, new Float32Array(l.length), 127)
+      feed(inPhase, l, l, 113)
+      feed(antiPhase, l, inverse, 511)
+      for (const read of ['getIntegratedLufs', 'getMomentaryLufs', 'getShortTermLufs'] as const) {
+        expect(inPhase[read]() - mono[read]()).toBeCloseTo(10 * Math.log10(2), 4)
+        expect(antiPhase[read]()).toBeCloseTo(inPhase[read](), 5)
+      }
+      expect(l).toEqual(original)
+    }
+  })
+
+  it('相对门限按平均能量计算，长弱音段不把门限拖低到弱音电平以下', () => {
+    const fs = 48000
+    const m = new LufsMeter(fs, { trackTruePeak: false })
+    const ref = new LufsMeter(fs, { trackTruePeak: false })
+    const loud = sineMono(fs, 1000, 0.5, 4)
+    feed(ref, loud, new Float32Array(loud.length))
+    feed(m, loud, new Float32Array(loud.length))
+    const quiet = sineMono(fs, 1000, 0.05, 12)
+    feed(m, quiet, new Float32Array(quiet.length))
+    expect(Math.abs(m.getIntegratedLufs() - ref.getIntegratedLufs())).toBeLessThan(0.25)
+  })
+
+  it('短流和末尾冲激的真峰值不低于样本峰值，轻量测量模式结果一致', () => {
+    const x = new Float32Array([0, 0.1, -0.9])
+    const full = new LufsMeter(48000)
+    const light = new LufsMeter(48000, { trackTruePeak: false })
+    full.processStereo(x, x)
+    light.processStereo(x, x)
+    expect(full.getTruePeakDb()).toBeGreaterThanOrEqual(full.getPeakDb())
+    expect(light.getTruePeakDb()).toBe(light.getPeakDb())
+    expect(light.getPeakDb()).toBe(full.getPeakDb())
+    const tone = sineMono(48000, 1000, 0.5, 0.5)
+    full.processStereo(tone, tone)
+    light.processStereo(tone, tone)
+    expect(light.getIntegratedLufs()).toBe(full.getIntegratedLufs())
   })
 
   it('非法采样率抛错', () => {

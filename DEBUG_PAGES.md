@@ -86,6 +86,28 @@ pulse: freq stays near 100 — check rtFreqMap influence
 - Keeping test music out of the repo is preferred; point `DGLAB_DEBUG_MUSIC_DIR` at a local folder instead of committing audio.
 - `installDevBridgeRafFallback` and `window.__dglabDebug` are debug-only affordances; keep them out of production plugin code.
 
+## HSE Diagnostic Probes (no standalone page)
+
+HSE 3.5 ships developer-only Electron probes and worklet verification scripts (migrated from the isolated `temp/hse-optimise` snapshot). They are **not pages and not production inputs**; each launches its own hidden Electron window or runs headless, so they do not touch the running app's profile or ports.
+
+| Tool | Command | Scope |
+|---|---|---|
+| Worklet bundle check | `npm run verify:worklet` | Loads `public/v3-worklet.js` in a bare VM: register name, room/spatial PCM, multichannel HRTF routing, IR reuse, frame-boundary params/reset, extension nodes, 4ch/5.1 fold |
+| Spatial completion probe | `node scripts/probes/electron-spatial-completion.cjs --rate=48000` (also 44100 / 96000; 192000 pressure only) | Real Electron AudioContext + worklet: spatial modes, ambisonics, multichannel HRTF, A/B, deadline counts |
+| Spatial graph probe | `node scripts/probes/electron-spatial-graph.cjs --rate=96000` | Host-prepared vs direct-worklet spatial graph comparison |
+| IR persistence probe | `node scripts/probes/electron-ir-persistence.cjs` | IndexedDB IR library persistence across sessions |
+| WASM kernel capability | `node scripts/probes/wasm-kernel-capability.cjs` | Real AudioWorklet: WASM available / SIMD compiled / kernel matches / f64 path / view allocations |
+| Spatial quality / spectrum / motion | `node scripts/probes/spatial-quality.mjs`, `spatial-spectrum.mjs`, `spatial-motion-benchmark.mjs` | Spectrum/ITD/ILD measurements and motion timing (diagnostic only) |
+| Binaural partition benchmark | `node scripts/probes/benchmark-binaural-partition.mjs` | Partitioned convolution cost breakdown |
+| Head-tracking OSC bridge | `npm run head-tracking:bridge` (UDP 9000 → `ws://127.0.0.1:8989/pose`) | Local-only pose bridge; never auto-started by the app |
+
+### Safety Rules
+
+- These scripts write evidence under `.verification/` (gitignored); do not commit probe output or profiles.
+- They must not run against the production user profile: probes create their own temporary Electron `userData` and do not open ports 3000 / 3001.
+- `--require-deadline` is a strict performance gate; initialization/switch overruns are recorded as known boundaries, never hidden by removing counts.
+- The snapshot's standalone `spatial-debug.html` / `src/spatial-debug/**` preview entry and `electron-ui-afg.cjs` were deliberately **not** migrated. If a HSE preview page is needed later, follow "Adding A New Debug Page" and register it here with its URL, command, scope, and production status.
+
 ## Adding A New Debug Page
 
 1. Create a root `*-debug.html` entry and a dedicated `src/<feature>-debug/` folder.

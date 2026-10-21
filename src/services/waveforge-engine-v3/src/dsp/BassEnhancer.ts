@@ -1,3 +1,4 @@
+import type { AudioBuffer } from './audioBuffer'
 /**
  * WaveForge v3 —— 虚拟低频增强（Virtual Bass / Bass Enhancer）
  *
@@ -24,6 +25,7 @@
 import type { BassEnhancerSettings, HarmonicType } from '../types'
 
 function clamp(v: number, lo: number, hi: number): number {
+  if (!Number.isFinite(v)) return lo
   return v < lo ? lo : v > hi ? hi : v
 }
 
@@ -42,7 +44,7 @@ class Biquad {
 
   /** 设计系数；type 支持 lowpass / highpass */
   design(type: 'lowpass' | 'highpass', f0: number, q: number, fs: number): void {
-    const f = clamp(f0, 10, fs * 0.49)
+    const f = clamp(f0, Math.min(10, fs * 0.45), fs * 0.45)
     const qq = clamp(q, 0.05, 20)
     const w0 = (2 * Math.PI * f) / fs
     const cw = Math.cos(w0)
@@ -93,6 +95,10 @@ export class BassEnhancer {
   private levelLin = 1
   private lowBoostDb = 0
   private lowLin = 0 // 10^(lowBoostDb/20) − 1，低频带混回增益（真实能量提升）
+  private headroomCeiling = 1
+  private boostTrim = 1
+  private readonly boostAttackAlpha: number
+  private readonly boostReleaseAlpha: number
   private readonly lpL = new Biquad()
   private readonly lpR = new Biquad()
   private readonly hpL = new Biquad()
@@ -101,6 +107,8 @@ export class BassEnhancer {
   constructor(fs: number) {
     if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
     this.fs = fs
+    this.boostAttackAlpha = 1 - Math.exp(-1 / (fs * 0.001))
+    this.boostReleaseAlpha = 1 - Math.exp(-1 / (fs * 0.12))
     this.applyParams({ enabled: true, cutoffHz: 90, q: 0.7, harmonicType: 'odd', harmonicGain: 0.6, mix: 0.5, levelDb: 0, lowBoostDb: 0 })
   }
 
@@ -108,24 +116,54 @@ export class BassEnhancer {
     this.applyParams(p)
   }
 
+  /** 设置最终真峰值限幅器提供的保守余量；1 表示不执行联动。 */
+  setHeadroomCeiling(linear: number): void {
+    const nextCeiling = Number.isFinite(linear) ? Math.min(Math.max(linear, 0.1), 1) : 1
+    if (nextCeiling < this.headroomCeiling && this.lowLin > 0) this.boostTrim = 0
+    this.headroomCeiling = nextCeiling
+  }
+
+  /** 依据 L/R 中更紧张一侧的低频提升预测值联动增益，并分别平滑回升/衰减。 */
+  private nextBoostTrim(baseL: number, boostL: number, baseR: number, boostR: number): number {
+    let target = 1
+    if (this.lowLin > 0 && this.headroomCeiling < 1) {
+      if (Math.abs(baseL + boostL) > this.headroomCeiling && Math.abs(boostL) > 1e-12) {
+        target = Math.min(target, clamp((this.headroomCeiling - Math.abs(baseL)) / Math.abs(boostL), 0, 1))
+      }
+      if (Math.abs(baseR + boostR) > this.headroomCeiling && Math.abs(boostR) > 1e-12) {
+        target = Math.min(target, clamp((this.headroomCeiling - Math.abs(baseR)) / Math.abs(boostR), 0, 1))
+      }
+    }
+    const alpha = target < this.boostTrim ? this.boostAttackAlpha : this.boostReleaseAlpha
+    this.boostTrim += alpha * (target - this.boostTrim)
+    return this.boostTrim
+  }
+
   /** 参数即时生效：钳制 + 系数重算 */
   private applyParams(p: BassEnhancerSettings): void {
+    const activating = !this.enabled && p.enabled
     this.enabled = p.enabled
-    this.cutoffHz = clamp(p.cutoffHz, 20, this.fs * 0.45)
+    this.cutoffHz = clamp(p.cutoffHz, Math.min(20, this.fs * 0.45), this.fs * 0.45)
     this.q = clamp(p.q, 0.1, 20)
     this.harmonicType = p.harmonicType
+    const wasHarmonicActive = this.harmonicGain * this.mix !== 0
     this.harmonicGain = clamp(p.harmonicGain, 0, 1)
     this.mix = clamp(p.mix, 0, 1)
+    if (wasHarmonicActive !== (this.harmonicGain * this.mix !== 0)) {
+      this.hpL.reset()
+      this.hpR.reset()
+    }
     this.levelLin = Math.pow(10, clamp(p.levelDb, -6, 6) / 20)
     // 防御旧参数快照（缺字段时为 undefined，直接 clamp 会得 NaN 污染输出）
     this.lowBoostDb = clamp(Number.isFinite(p.lowBoostDb) ? p.lowBoostDb : 0, -6, 12)
     this.lowLin = Math.pow(10, this.lowBoostDb / 20) - 1
     // 谐波整形高通：≥150Hz 或 cutoffHz·1.5（取较大），上限 fs·0.45
-    const hpCut = clamp(Math.max(150, this.cutoffHz * 1.5), 20, this.fs * 0.45)
+    const hpCut = clamp(Math.max(150, this.cutoffHz * 1.5), Math.min(20, this.fs * 0.45), this.fs * 0.45)
     this.lpL.design('lowpass', this.cutoffHz, this.q, this.fs)
     this.lpR.design('lowpass', this.cutoffHz, this.q, this.fs)
     this.hpL.design('highpass', hpCut, 0.707, this.fs)
     this.hpR.design('highpass', hpCut, 0.707, this.fs)
+    if (activating) this.reset()
   }
 
   /** 谐波非线性函数（仅作用于低频带，避免全频互调） */
@@ -147,11 +185,26 @@ export class BassEnhancer {
   }
 
   /** 就地处理立体声（l/r 原地改写） */
-  processStereo(l: Float32Array, r: Float32Array): void {
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
     if (!this.enabled) return // 恒等直通
-    const n = l.length
+    const n = Math.min(l.length, r.length)
     const k = this.mix * this.harmonicGain * this.levelLin
     const low = this.lowLin
+    if (k === 0) {
+      for (let i = 0; i < n; i++) {
+        const xl = l[i]
+        const xr = r[i]
+        // 低频路径持续跟踪输入；再次打开低音下潜时不从空状态启动。
+        const bl = this.lpL.process(xl)
+        const br = this.lpR.process(xr)
+        if (low !== 0) {
+          const trim = this.nextBoostTrim(xl, low * bl, xr, low * br)
+          l[i] = xl + trim * low * bl
+          r[i] = xr + trim * low * br
+        }
+      }
+      return
+    }
     for (let i = 0; i < n; i++) {
       const xl = l[i]
       const xr = r[i]
@@ -163,8 +216,13 @@ export class BassEnhancer {
       const hr = this.hpR.process(this.nonlinearity(br))
       // 4) 混回（dry 不变，谐波路径按 mix×harmonicGain×level）
       // 5) 低音下潜：低频带按 lowBoostDb 混回（真实低频能量提升）
-      l[i] = xl + k * hl + low * bl
-      r[i] = xr + k * hr + low * br
+      const baseL = xl + k * hl
+      const baseR = xr + k * hr
+      const boostL = low * bl
+      const boostR = low * br
+      const trim = this.nextBoostTrim(baseL, boostL, baseR, boostR)
+      l[i] = baseL + trim * boostL
+      r[i] = baseR + trim * boostR
     }
   }
 
@@ -173,5 +231,8 @@ export class BassEnhancer {
     this.lpR.reset()
     this.hpL.reset()
     this.hpR.reset()
+    // 有受控低频提升时从零余量渐进恢复，防止启用瞬间未经约束的低频峰值。
+    this.boostTrim = this.headroomCeiling < 1 && this.lowLin > 0 ? 0 : 1
   }
 }
+

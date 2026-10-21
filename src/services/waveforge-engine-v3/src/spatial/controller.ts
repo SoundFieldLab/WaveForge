@@ -1,137 +1,178 @@
 /**
- * controller —— 模式 C 世界漫游：听者 → 声源相对方向计算 + 听者移动/旋转（纯函数）
- *
- * 规划书 §4.3：direction = src − listener；
- *   azimuth = atan2(dx, dz) − listener.yaw（度，右正、前方 0、正后 ±180）
- *   elevation = asin(dy / distance)（度，上方为正）
- *   distance = |direction|（米）
- * ListenerState/AudioObject 定义复用于 types.ts（本模块不重复声明）。
- * 移动/旋转（moveListener/rotateListener/listenerForwardVector/applyKeyboardMove）
- * 供 UI 键盘漫游调用：世界系基向量约定 forward=(sin yaw, cos yaw)、
- * right=(cos yaw, −sin yaw)（与 ui/worldControl.ts 一致），位移方向恒相对听者朝向。
+ * 世界漫游几何/轨迹纯函数。世界坐标：+Z 前、+X 右、+Y 上；角度单位度。
+ * 头朝向的世界变换为 Ry(yaw)·Rx(-pitch)·Rz(-roll)：yaw 正向右，pitch 正抬头，
+ * roll 正表示朝 +Z 望去头向右（顺时针）倾斜。求声源方向时取逆变换，
+ * 先平移到听者原点，再依次逆 yaw、pitch、roll，最后计算头部坐标的方位/仰角。
+ * WASD 平移仍只用水平 yaw，避免抬头/侧倾改变原有键盘操作语义。
  */
 
 import type { ListenerState } from './types'
 
-/** 相对方向计算结果（角度单位度，距离单位米） */
+type Position = { x: number; y: number; z: number }
+type Keyframe = { t: number; position: Position }
+
+/** 相对方向（方位角 [-180,180)，仰角 [-90,90]，距离米）。 */
 export interface RelativeDirection {
   azimuthDeg: number
   elevationDeg: number
   distance: number
 }
 
-/**
- * 计算声源相对听者的方向（世界坐标 → 头相关方位/仰角/距离）。
- * 输入为任意世界坐标（与听者朝向无关的位置量）；输出已扣除听者偏航 yaw，
- * 使 0° 恒为听者正前方。纯函数：无状态、无副作用。
- */
-export function computeRelativeDirection(
+const RAD = Math.PI / 180
+const DEG = 180 / Math.PI
+// 与 normalizeSpatialSettings 的世界坐标界限一致；避免极大有限值生成无意义距离。
+const MAX_WORLD_COORD = 1000
+
+function finite(value: number): number {
+  return Number.isFinite(value) ? value : 0
+}
+
+function wrapAngle(value: number): number {
+  return ((((value + 180) % 360) + 360) % 360) - 180
+}
+
+/** 实时路径：只写入预分配的 out，无分配；无效/重合的方向归零。 */
+export function computeRelativeDirectionInto(
   listener: ListenerState,
-  source: { x: number; y: number; z: number },
+  source: Position,
+  out: RelativeDirection,
 ): RelativeDirection {
   const dx = source.x - listener.position.x
   const dy = source.y - listener.position.y
   const dz = source.z - listener.position.z
-  const distance = Math.sqrt(dx * dx + dy * dy + dz * dz)
-  if (distance === 0) {
-    // 声源与听者重合：方向未定义，约定为正前方（避免 asin 除零 → NaN）
-    return { azimuthDeg: 0, elevationDeg: 0, distance: 0 }
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz) ||
+      Math.abs(source.x) > MAX_WORLD_COORD || Math.abs(source.y) > MAX_WORLD_COORD || Math.abs(source.z) > MAX_WORLD_COORD ||
+      Math.abs(listener.position.x) > MAX_WORLD_COORD || Math.abs(listener.position.y) > MAX_WORLD_COORD ||
+      Math.abs(listener.position.z) > MAX_WORLD_COORD ||
+      !Number.isFinite(listener.yaw) || !Number.isFinite(listener.pitch) || !Number.isFinite(listener.roll)) {
+    out.azimuthDeg = 0
+    out.elevationDeg = 0
+    out.distance = 0
+    return out
   }
-  const azimuthDeg = (Math.atan2(dx, dz) * 180) / Math.PI - listener.yaw
-  const elevationDeg = (Math.asin(dy / distance) * 180) / Math.PI
-  return { azimuthDeg, elevationDeg, distance }
+  const distance = Math.hypot(dx, dy, dz)
+  if (!Number.isFinite(distance) || distance === 0) {
+    out.azimuthDeg = 0
+    out.elevationDeg = 0
+    out.distance = 0
+    return out
+  }
+
+  const yaw = listener.yaw * RAD
+  const cosYaw = Math.cos(yaw)
+  const sinYaw = Math.sin(yaw)
+  const xYaw = cosYaw * dx - sinYaw * dz
+  const zYaw = sinYaw * dx + cosYaw * dz
+
+  const pitch = listener.pitch * RAD
+  const cosPitch = Math.cos(pitch)
+  const sinPitch = Math.sin(pitch)
+  const yPitch = cosPitch * dy - sinPitch * zYaw
+  const zPitch = sinPitch * dy + cosPitch * zYaw
+
+  const roll = listener.roll * RAD
+  const xHead = Math.cos(roll) * xYaw - Math.sin(roll) * yPitch
+  const yHead = Math.sin(roll) * xYaw + Math.cos(roll) * yPitch
+
+  out.azimuthDeg = wrapAngle(Math.atan2(xHead, zPitch) * DEG)
+  out.elevationDeg = Math.atan2(yHead, Math.hypot(xHead, zPitch)) * DEG
+  out.distance = distance
+  return out
 }
 
-// ==================== 声源轨迹插值（模式 C：声源沿时间轨迹运动） ====================
+/** 分配一个结果对象的兼容接口；实时循环请复用 computeRelativeDirectionInto 的 out。 */
+export function computeRelativeDirection(listener: ListenerState, source: Position): RelativeDirection {
+  return computeRelativeDirectionInto(listener, source, { azimuthDeg: 0, elevationDeg: 0, distance: 0 })
+}
+
+/** 将关键帧的位置复制至 out；不暴露输入对象引用。 */
+function copyPosition(frame: Keyframe, out: Position): Position {
+  out.x = finite(frame.position.x)
+  out.y = finite(frame.position.y)
+  out.z = finite(frame.position.z)
+  return out
+}
 
 /**
- * 声源轨迹关键帧线性插值（纯函数，供 fusion world 分支按 playhead 取声源位置）：
- *   - t ≤ 首关键帧时刻 → 首位置；t ≥ 末关键帧时刻 → 末位置（越界夹取）；
- *   - 否则取 t 所在相邻两帧 A、B 线性插值：
- *       u = (t − tA) / (tB − tA)，position(t) = A + (B − A) × u（逐分量，u∈[0,1]）；
- *   - 单关键帧 → 恒为该位置；空数组 → 原点 {0,0,0}（防御：避免 NaN 扩散）。
- * 防御：先按 t 升序排序副本——UI 可能按任意顺序追加关键帧，排序保证插值区间正确
- * （轨迹关键帧数量少，O(n log n) 开销可忽略）。
+ * 实时路径：sortedKeys 按 t 升序（归一化后同 t 已去重）；越界夹取，段内线性插值。
+ * 二分查找，不排序、不创建数组/对象；同 t 即使未经归一化也取最后一帧。
  */
-export function computeTrajectoryPosition(
-  keyframes: { t: number; position: { x: number; y: number; z: number } }[],
-  t: number,
-): { x: number; y: number; z: number } {
-  if (keyframes.length === 0) return { x: 0, y: 0, z: 0 }
-  const sorted = [...keyframes].sort((a, b) => a.t - b.t)
-  const first = sorted[0]
-  const last = sorted[sorted.length - 1]
-  if (t <= first.t) return { ...first.position }
-  if (t >= last.t) return { ...last.position }
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const a = sorted[i]
-    const b = sorted[i + 1]
-    if (t >= a.t && t <= b.t) {
-      const span = b.t - a.t
-      const u = span === 0 ? 0 : (t - a.t) / span
-      return {
-        x: a.position.x + (b.position.x - a.position.x) * u,
-        y: a.position.y + (b.position.y - a.position.y) * u,
-        z: a.position.z + (b.position.z - a.position.z) * u,
-      }
-    }
+export function sampleTrajectoryInto(sortedKeys: readonly Keyframe[], t: number, out: Position): Position {
+  const count = sortedKeys.length
+  if (count === 0) {
+    out.x = 0
+    out.y = 0
+    out.z = 0
+    return out
   }
-  return { ...last.position } // 防御：t 已在 (first.t, last.t) 内，循环必命中
+  // 无效播放时刻停在轨迹开头；±Infinity 按前/后越界夹取。
+  if (Number.isNaN(t) || t === -Infinity || t < sortedKeys[0].t) return copyPosition(sortedKeys[0], out)
+  if (t >= sortedKeys[count - 1].t) return copyPosition(sortedKeys[count - 1], out)
+  let low = 0
+  let high = count
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (sortedKeys[mid].t <= t) low = mid + 1
+    else high = mid
+  }
+  const before = sortedKeys[low - 1]
+  const after = sortedKeys[low]
+  const span = after.t - before.t
+  if (!(span > 0)) return copyPosition(after, out)
+  const u = (t - before.t) / span
+  out.x = finite(before.position.x + (after.position.x - before.position.x) * u)
+  out.y = finite(before.position.y + (after.position.y - before.position.y) * u)
+  out.z = finite(before.position.z + (after.position.z - before.position.z) * u)
+  return out
 }
 
-// ==================== 听者移动 / 旋转（模式 C 世界漫游） ====================
+/** 兼容旧调用：乱序帧排序副本，按同 t 最后有效帧取样；输入/输出互不共享位置对象。 */
+export function computeTrajectoryPosition(keyframes: Keyframe[], t: number): Position {
+  const valid = keyframes.filter((frame) => frame && Number.isFinite(frame.t) && frame.position &&
+    Number.isFinite(frame.position.x) && Number.isFinite(frame.position.y) && Number.isFinite(frame.position.z))
+  const sorted = valid.sort((a, b) => a.t - b.t)
+  return sampleTrajectoryInto(sorted, t, { x: 0, y: 0, z: 0 })
+}
 
-/** 世界坐标平移（米）：位置按增量移动，yaw/pitch/roll 不变。返回新对象（不可变）。 */
-export function moveListener(l: ListenerState, d: { x: number; y: number; z: number }): ListenerState {
+/** 世界坐标平移（米）：朝向不变；无效增量不传播 NaN，返回新对象。 */
+export function moveListener(l: ListenerState, d: Position): ListenerState {
   return {
-    position: { x: l.position.x + d.x, y: l.position.y + d.y, z: l.position.z + d.z },
+    position: {
+      x: finite(finite(l.position.x) + finite(d.x)),
+      y: finite(finite(l.position.y) + finite(d.y)),
+      z: finite(finite(l.position.z) + finite(d.z)),
+    },
     yaw: l.yaw,
     pitch: l.pitch,
     roll: l.roll,
   }
 }
 
-/**
- * 偏航增量旋转（度）：yaw += dYawDeg 后 wrap 到 [-180, 180)，pitch/roll 不变。
- * 返回新对象（不可变）。wrap 公式：((yaw+180) mod 360) − 180 —— 恒等旋转（dYawDeg=0）不改变
- * 既有的合法 yaw；跨 ±180 边界正确折返（如 170°+20° → −170°、355°+10° → 5°）。
- */
+/** yaw 增量旋转：有效输入延续原有 [-180,180) wrap 与 pitch/roll 保持语义。 */
 export function rotateListener(l: ListenerState, dYawDeg: number): ListenerState {
-  const yaw = ((((l.yaw + dYawDeg + 180) % 360) + 360) % 360) - 180
+  const yaw = wrapAngle(finite(l.yaw) + finite(dYawDeg))
   return { position: { ...l.position }, yaw, pitch: l.pitch, roll: l.roll }
 }
 
-/**
- * 水平面前向单位向量（yaw → (x, z)）：
- *   forward = (sin(yaw), cos(yaw))，yaw 弧度化。
- * 与方位角定义互补（azimuth = atan2(dx, dz) − yaw）：
- *   yaw=0 → (0, +1)（+Z 前方）；yaw=90 → (+1, 0)（+X 右前方）。
- */
+/** 水平面前向单位向量：yaw=0 朝 +Z，yaw=90 朝 +X。 */
 export function listenerForwardVector(l: ListenerState): { x: number; z: number } {
-  const yawRad = (l.yaw * Math.PI) / 180
+  const yawRad = finite(l.yaw) * RAD
   return { x: Math.sin(yawRad), z: Math.cos(yawRad) }
 }
 
-/**
- * 键盘移动（纯函数）：WASD 按听者朝向相对前后左右、QE 世界 Y 轴升降。
- *   forward = (sin yaw, cos yaw)；right = (cos yaw, −sin yaw)（右手系：右 = 上×前；
- *   yaw=0 时 forward=+Z、right=+X；yaw=90 时 forward=+X、right=−Z）。
- *   W/S 沿 forward 前后，D/A 沿 right 左右（斜向为向量和，不归一化），
- *   Q 升（+Y）/ E 降（−Y）（与 ui/worldControl.ts 的 Q 升 E 降约定一致）。
- * 位移 = 方向 × speed × dt；dt 秒、speed m/s。返回新对象（不可变）。
- */
+/** WASD 按水平 yaw 前后左右，QE 沿世界 Y 升降；斜向不归一化。 */
 export function applyKeyboardMove(
   l: ListenerState,
   keys: Record<'w' | 'a' | 's' | 'd' | 'q' | 'e', boolean>,
   speed: number,
   dt: number,
 ): ListenerState {
-  const yawRad = (l.yaw * Math.PI) / 180
+  const yawRad = finite(l.yaw) * RAD
   const fwdX = Math.sin(yawRad)
   const fwdZ = Math.cos(yawRad)
   const rightX = Math.cos(yawRad)
   const rightZ = -Math.sin(yawRad)
-  const step = speed * dt
+  const step = finite(speed * dt)
   let dx = 0
   let dy = 0
   let dz = 0
@@ -151,7 +192,7 @@ export function applyKeyboardMove(
     dx -= rightX * step
     dz -= rightZ * step
   }
-  if (keys.q) dy += step // Q：上升（+Y）
-  if (keys.e) dy -= step // E：下降（−Y）
+  if (keys.q) dy += step
+  if (keys.e) dy -= step
   return moveListener(l, { x: dx, y: dy, z: dz })
 }

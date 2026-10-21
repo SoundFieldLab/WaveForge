@@ -5,11 +5,14 @@
  * 低音增强（4 种谐波非线性）。使用 HSE 公共面板与控件。
  */
 
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Headphones, Music2 } from 'lucide-react'
 import type { V3Theme } from './theme'
 import { InfoLine, Modal, Segmented, Slider, Toggle } from './primitives'
 import type { V3ParamsController } from './hooks'
+import type { ConvolutionPurpose } from '../src/types'
+import type { ConvolutionIrMetadata } from '../src/dsp/ConvolutionIrLibrary'
+import { listConvolutionIr, loadConvolutionIr, removeConvolutionIr, saveConvolutionIr, updateConvolutionIrPurpose } from './irStore'
 
 export const REVERB_TYPES: { value: 'hall' | 'room' | 'plate' | 'spring' | 'stage'; label: string; hint: string }[] = [
   { value: 'hall', label: '大厅', hint: '开阔空间，长混响' },
@@ -26,12 +29,42 @@ export const HARMONIC_TYPES: { value: 'odd' | 'even' | 'atan' | 'soft'; label: s
   { value: 'soft', label: '软饱和', hint: 'tanh 软饱和，柔和' },
 ]
 
+const CONVOLUTION_PURPOSES: { value: ConvolutionPurpose; label: string }[] = [
+  { value: 'reverb', label: '混响' },
+  { value: 'roomCorrection', label: '房间校正' },
+  { value: 'speakerCorrection', label: '扬声器校正' },
+  { value: 'headphoneCorrection', label: '耳机校正' },
+]
+
+/* ─────────────────────────── 耳机交叉馈送 ─────────────────────────── */
+
+export function CrossfeedModal({ controller, theme, onClose }: { controller: V3ParamsController; theme: V3Theme; onClose: () => void }) {
+  const { params, patch } = controller
+  const cf = params.crossfeed ?? { enabled: false, amount: 0.3, cutoffHz: 700, delayMs: 0.2 }
+  return (
+    <Modal title="耳机交叉馈送" icon={<Headphones className="w-4.5 h-4.5" />} onClose={onClose} theme={theme}>
+      <p className={`${theme.textSecondary} text-xs leading-relaxed mb-4`}>将左右声道少量互相混入，模拟扬声器到达另一只耳朵的自然串音，减少耳机的“左右分离感”。</p>
+      <div className="flex items-center justify-between mb-4">
+        <span className={`${theme.textPrimary} text-sm font-medium`}>启用耳机交叉馈送</span>
+        <Toggle label="启用耳机交叉馈送" checked={cf.enabled} onChange={(enabled) => patch({ crossfeed: { ...cf, enabled } })} theme={theme} />
+      </div>
+      <Slider label="馈送量" value={cf.amount} min={0} max={1} step={0.01} onChange={(amount) => patch({ crossfeed: { ...cf, amount } })} display={`${Math.round(cf.amount * 100)}%`} theme={theme} />
+      <Slider label="低通频率" value={cf.cutoffHz} min={100} max={3000} step={10} onChange={(cutoffHz) => patch({ crossfeed: { ...cf, cutoffHz } })} display={`${Math.round(cf.cutoffHz)} Hz`} theme={theme} />
+      <Slider label="串音延迟" value={cf.delayMs} min={0} max={1} step={0.01} onChange={(delayMs) => patch({ crossfeed: { ...cf, delayMs } })} display={`${cf.delayMs.toFixed(2)} ms`} theme={theme} />
+      <InfoLine theme={theme}>馈送量越高，声场越集中；低通频率越低，低频串音越突出。建议从默认值开始。</InfoLine>
+    </Modal>
+  )
+}
+
 /* ─────────────────────────── 混响 ─────────────────────────── */
 
 export function ReverbModal({ controller, theme, onClose }: { controller: V3ParamsController; theme: V3Theme; onClose: () => void }) {
   const { params, patch } = controller
   const rv = params.reverb
   const fileRef = useRef<HTMLInputElement>(null)
+  const [irEntries, setIrEntries] = useState<ConvolutionIrMetadata[]>([])
+
+  useEffect(() => { void listConvolutionIr().then(setIrEntries).catch(() => undefined) }, [])
 
   // IR 文件选择：读取 WAV/任意音频 → 解码为单声道 Float32Array（浏览器 AudioContext 解码）
   const handleIrFile = async (file: File) => {
@@ -44,17 +77,39 @@ export function ReverbModal({ controller, theme, onClose }: { controller: V3Para
         const mono = new Float32Array(decoded.length)
         const ch0 = decoded.getChannelData(0)
         mono.set(ch0)
-        patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: mono, irName: file.name, dePeriodize: true } } })
+        const entry = await saveConvolutionIr(file.name, rv.convolution.purpose ?? 'reverb', decoded.sampleRate, mono)
+        setIrEntries(await listConvolutionIr())
+        const playbackIr = await loadConvolutionIr(entry.id, params.sampleRate)
+        patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: playbackIr?.ir ?? mono, irId: entry.id, irName: file.name,
+          dePeriodize: (rv.convolution.purpose ?? 'reverb') === 'reverb' } } })
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已导入 IR「${file.name}」`, type: 'info' } }))
       } finally {
         // 解码失败也要关 context：Chromium 并发 AudioContext 上限 ~6，泄漏 6 个后解码功能整体失效
         void ctx.close()
       }
-    } catch {
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: 'IR 文件解码失败（请提供 WAV/AIFF 等格式）', type: 'error' } }))
+    } catch (error) {
+      const message = error instanceof Error && error.message.startsWith('IR 库')
+        ? error.message : 'IR 导入失败，请检查文件格式与存储空间'
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: 'error' } }))
     } finally {
       if (ctx) void ctx.close()
     }
+  }
+
+  const chooseIr = async (id: string) => {
+    const entry = await loadConvolutionIr(id, params.sampleRate)
+    if (!entry) return
+    patch({ reverb: { ...rv, enabled: true, mode: 'convolution', convolution: { ...rv.convolution,
+      ir: entry.ir, irId: id, irName: entry.metadata.name, purpose: entry.metadata.purpose,
+      dePeriodize: entry.metadata.purpose === 'reverb' } } })
+  }
+
+  const deleteIr = async () => {
+    const id = rv.convolution.irId
+    if (!id) return
+    await removeConvolutionIr(id)
+    setIrEntries(await listConvolutionIr())
+    patch({ reverb: { ...rv, mode: 'algorithmic', convolution: { ...rv.convolution, ir: null, irId: null, irName: null } } })
   }
 
   return (
@@ -110,13 +165,29 @@ export function ReverbModal({ controller, theme, onClose }: { controller: V3Para
             <div className={`${theme.textPrimary} text-sm font-medium`}>{rv.convolution.irName ?? '点击导入脉冲响应（IR）'}</div>
             <div className={`${theme.textTertiary} text-[11px] mt-1`}>WAV / AIFF / FLAC，自动转为单声道；未导入时回退算法混响</div>
           </div>
-          <Slider label="湿声混合" value={rv.convolution.mix} min={0} max={1} step={0.01} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, mix: v } } })} display={`${Math.round(rv.convolution.mix * 100)}%`} theme={theme} />
+          {irEntries.length > 0 && <div className="mb-3 flex items-center gap-2">
+            <select aria-label="选择已保存的 IR" value={rv.convolution.irId ?? ''} onChange={(e) => { void chooseIr(e.target.value) }}
+              className={`hse-glass-input min-w-0 flex-1 rounded-lg px-2 py-2 text-xs ${theme.textPrimary}`}>
+              <option value="">选择已保存的 IR</option>
+              {irEntries.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+            </select>
+            <button type="button" disabled={!rv.convolution.irId} onClick={() => { void deleteIr() }} className={`hse-glass-button rounded-lg px-2 py-2 text-xs ${theme.textSecondary}`}>删除</button>
+          </div>}
+          <Segmented label="IR 用途" options={CONVOLUTION_PURPOSES} value={rv.convolution.purpose ?? 'reverb'} onChange={(purpose) => {
+            patch({ reverb: { ...rv, convolution: { ...rv.convolution, purpose, dePeriodize: purpose === 'reverb' } } })
+            if (rv.convolution.irId) void updateConvolutionIrPurpose(rv.convolution.irId, purpose)
+              .then(() => listConvolutionIr().then(setIrEntries))
+              .catch(() => window.dispatchEvent(new CustomEvent('showToast', { detail: { message: 'IR 用途保存失败', type: 'error' } })))
+          }} theme={theme} small />
+          <Slider label="湿声混合" value={rv.convolution.mix} min={0} max={1} step={0.01} disabled={(rv.convolution.purpose ?? 'reverb') !== 'reverb'} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, mix: v } } })} display={(rv.convolution.purpose ?? 'reverb') === 'reverb' ? `${Math.round(rv.convolution.mix * 100)}%` : '校正全湿'} theme={theme} />
           <Slider label="预延迟" value={rv.convolution.preDelayMs} min={0} max={200} step={1} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, preDelayMs: v } } })} display={`${rv.convolution.preDelayMs} ms`} theme={theme} />
+          <Segmented label="卷积分区长度" options={[128, 256, 512, 1024].map((value) => ({ value: value as 128 | 256 | 512 | 1024, label: `${value} 帧` }))}
+            value={rv.convolution.partitionSize ?? 512} onChange={(partitionSize) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, partitionSize } } })} theme={theme} small />
           <div className="flex items-center justify-between mb-2">
             <span className={`${theme.textSecondary} text-xs`}>IR 去周期化（消除循环伪影）</span>
             <Toggle label="IR 去周期化" checked={rv.convolution.dePeriodize} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, dePeriodize: v } } })} theme={theme} />
           </div>
-          <InfoLine theme={theme}>卷积混响会增加处理延迟，当前总延迟可在调音器中查看。</InfoLine>
+          <InfoLine theme={theme}>分区越短，卷积延迟越低、CPU 开销越高；当前总延迟可在调音器中查看。</InfoLine>
         </>
       )}
     </Modal>
@@ -166,7 +237,7 @@ export function Surround3dModal({ controller, theme, onClose }: { controller: V3
           <div className="absolute left-1/2 top-0 bottom-0 w-px" style={{ background: theme.glassBorder }} />
           <div className="absolute top-1/2 left-0 right-0 h-px" style={{ background: theme.glassBorder }} />
           <div className="absolute left-1/2 top-1/2 w-2.5 h-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full" style={{ background: '#9AB2AB' }} />
-          <div className="absolute w-4 h-4 -translate-x-1/2 -translate-y-1/2 rounded-full" style={{ left: `${dotX}%`, top: `${dotY}%`, background: theme.accentColor, boxShadow: '0 0 0 4px #C8EDE4' }} />
+          <div className="absolute w-4 h-4 -translate-x-1/2 -translate-y-1/2 rounded-full" style={{ left: `${dotX}%`, top: `${dotY}%`, background: theme.accentColor, boxShadow: '0 0 0 4px #c8ede4' }} />
         </div>
         <span className={`absolute bottom-1 inset-x-0 text-center text-[11px] ${theme.textSecondary}`}>拖动圆点调整角度与距离，也可使用下方滑块</span>
       </div>
@@ -205,8 +276,9 @@ export function BassEnhancerModal({ controller, theme, onClose }: { controller: 
 }
 
 /* 聚合导出：空间/染色类弹窗按 key 分发 */
-export function SpatialModal({ effectKey: key, controller, theme, onClose }: { effectKey: 'reverb' | 'surround3d' | 'bassEnhancer'; controller: V3ParamsController; theme: V3Theme; onClose: () => void }) {
+export function SpatialModal({ effectKey: key, controller, theme, onClose }: { effectKey: 'reverb' | 'surround3d' | 'crossfeed' | 'bassEnhancer'; controller: V3ParamsController; theme: V3Theme; onClose: () => void }) {
   if (key === 'reverb') return <ReverbModal controller={controller} theme={theme} onClose={onClose} />
   if (key === 'surround3d') return <Surround3dModal controller={controller} theme={theme} onClose={onClose} />
+  if (key === 'crossfeed') return <CrossfeedModal controller={controller} theme={theme} onClose={onClose} />
   return <BassEnhancerModal controller={controller} theme={theme} onClose={onClose} />
 }

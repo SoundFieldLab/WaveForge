@@ -7,6 +7,7 @@ import { Terminal } from 'lucide-react'
 import { Toggle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
 import { isDevMode, setDevMode, HSE_DEV_MODE_EVENT } from '../sceneStore'
+import { HSE_DISPLAY_VERSION } from '../../version'
 
 interface AboutPageProps {
   theme: HSETheme
@@ -28,9 +29,14 @@ export default function AboutPage({ theme }: AboutPageProps) {
           <Terminal className="h-7 w-7" aria-hidden="true" />
         </div>
         <div>
-          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>HSE</h1>
+          <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>{HSE_DISPLAY_VERSION}</h1>
           <p className={`${theme.textSecondary} mt-1 text-sm`}>HyperSoundEngine · WaveForge 特供版</p>
         </div>
+      </div>
+      <div className="rounded-2xl border p-4" style={{ background: theme.cardBg, borderColor: theme.cardBorder }}>
+        <h2 className={`${theme.textPrimary} text-sm font-medium`}>声音处理与空间渲染</h2>
+        <p className={`${theme.textSecondary} mt-2 text-xs leading-relaxed`}>动态均衡、三段压缩、卷积 IR、耳机交叉馈送与双精度处理可在各页面独立调整。空间音频支持多声道输入、AmbiX 一至三阶、FOA FuMa 和通用 SOFA，最终渲染为双声道，适合耳机试听。</p>
+        <p className={`${theme.textSecondary} mt-2 text-xs leading-relaxed`}>中央信号 / 差分信号来自原曲左右声道的组合。头部追踪需要连接兼容设备或本机姿态桥；扬声器校准使用几何估算与导入的 IR 分析结果。</p>
       </div>
       <div className="grid items-stretch gap-3 @min-[36rem]:grid-cols-2 @min-[52rem]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(18rem,1.2fr)]">
         <div className="rounded-2xl border p-4" style={{ background: theme.cardBg, borderColor: theme.cardBorder }}>
@@ -43,7 +49,7 @@ export default function AboutPage({ theme }: AboutPageProps) {
         </div>
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border p-4 @min-[36rem]:col-span-2 @min-[52rem]:col-span-1" style={{ background: theme.cardBg, borderColor: theme.cardBorder }}>
           <div className="flex items-start gap-3">
-            <Terminal className="mt-0.5 h-4 w-4 shrink-0" style={{ color: dev ? theme.accentColor : '#71817b' }} />
+            <Terminal className="mt-0.5 h-4 w-4 shrink-0" style={{ color: dev ? theme.accentColor : '#536b66' }} />
             <div>
               <div className={`${theme.textPrimary} text-sm font-medium`}>开发者模式</div>
               <div className={`${theme.textSecondary} mt-1 text-xs leading-relaxed`}>开启后可在「音效场景」页编辑内置场景参数并保存</div>

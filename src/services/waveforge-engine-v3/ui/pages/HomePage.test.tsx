@@ -76,6 +76,20 @@ describe('HSE 首页', () => {
     expect(screen.getByRole('button', { name: '增强模式' }).getAttribute('aria-pressed')).toBe('true')
   })
 
+  it('系统音效从全旁路开启时默认应用「增强」场景（64 段 EQ）', () => {
+    const { bridge } = makePage()
+    const master = screen.getByRole('switch', { name: '系统音效' })
+    expect(master.getAttribute('aria-checked')).toBe('false')
+    expect(screen.getByText('已关闭')).toBeTruthy()
+
+    fireEvent.click(master)
+    expect(master.getAttribute('aria-checked')).toBe('true')
+    expect(bridge.getParams().sceneId).toBe('enhanced')
+    expect(bridge.getParams().eq.bandCount).toBe(64)
+    expect(bridge.getParams().eq.proBands).toHaveLength(64)
+    expect(screen.getByRole('button', { name: '增强模式' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('手动滑块按 externalGainDb 公式写入并且应用场景保留该通道', () => {
     const { bridge } = makePage()
     const slider = screen.getByRole('slider', { name: '输出音量' })

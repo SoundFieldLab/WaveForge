@@ -147,7 +147,7 @@ export function WaveformVisualizer({
 
       ctx.lineWidth = 1
       ctx.setLineDash([])
-      ctx.strokeStyle = '#D6E5E0'
+      ctx.strokeStyle = '#dce9e5'
       for (const y of [leftY, rightY]) {
         ctx.beginPath()
         ctx.moveTo(plotX, y)
@@ -155,8 +155,8 @@ export function WaveformVisualizer({
         ctx.stroke()
       }
 
-      drawChannel(ctx, left, plotX, leftY, plotWidth, laneHeight, '#006A63', dpr)
-      drawChannel(ctx, right, plotX, rightY, plotWidth, laneHeight, '#3E83A5', dpr)
+      drawChannel(ctx, left, plotX, leftY, plotWidth, laneHeight, '#006a63', dpr)
+      drawChannel(ctx, right, plotX, rightY, plotWidth, laneHeight, '#416986', dpr)
     }
 
     raf = requestAnimationFrame(draw)

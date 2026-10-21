@@ -231,7 +231,7 @@ export function SpatialRingEditor({
         ctx.arc(g.cx, g.cy, r, 0, Math.PI * 2)
         ctx.strokeStyle = 'rgba(255,255,255,0.07)'
         ctx.stroke()
-        ctx.fillStyle = 'rgba(255,255,255,0.22)'
+        ctx.fillStyle = '#536b66'
         ctx.fillText(`${d}m`, g.cx + r + 4, g.cy)
       }
 
@@ -249,7 +249,7 @@ export function SpatialRingEditor({
 
       // 方位标注（前/后/左/右）
       ctx.font = '10px "PingFang SC", "Microsoft YaHei", sans-serif'
-      ctx.fillStyle = 'rgba(255,255,255,0.35)'
+      ctx.fillStyle = '#536b66'
       ctx.textAlign = 'center'
       ctx.textBaseline = 'bottom'
       ctx.fillText('前', g.cx, g.cy - g.radius - 2)
@@ -285,7 +285,7 @@ export function SpatialRingEditor({
         ctx.globalAlpha = speakerDim
         if (editable) {
           ctx.shadowColor = color
-          ctx.shadowBlur = isSel ? 18 : 12
+          ctx.shadowBlur = 0
         }
         ctx.fillStyle = color
         ctx.beginPath()
@@ -322,12 +322,12 @@ export function SpatialRingEditor({
     }
 
     const resize = () => {
+      // dpr 必须在每次重设画布尺寸时重读：窗口移到不同缩放比例的显示器后，
+      // 缓存的 dpr 会让后备存储分辨率与新屏不匹配（高 DPI 上发糊）。
+      const dpr = Math.min(2, window.devicePixelRatio || 1)
       const rect = canvas.getBoundingClientRect()
       width = Math.max(1, rect.width)
       height = Math.max(1, rect.height)
-      // 每次重设尺寸都重新读 dpr：窗口在不同缩放的显示器间移动时它会变，
-      // 缓存旧值会让后备存储分辨率与新屏不匹配（环形图发糊）
-      const dpr = Math.min(2, window.devicePixelRatio || 1)
       canvas.width = Math.round(width * dpr)
       canvas.height = Math.round(height * dpr)
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -488,14 +488,14 @@ export function SpatialRingEditor({
             冒泡，避免 document 监听先关菜单导致按钮 click 丢失） */}
         {menuEnabled && menu && menuSpeaker && (
           <div
-            className="absolute z-50 rounded-lg py-1 shadow-xl"
+            className="absolute z-50 rounded-lg py-1 "
             style={{
               left: menu.x,
               top: menu.y,
               backgroundColor: theme.panelBg,
               border: `1px solid ${theme.cardBorder}`,
-              backdropFilter: theme.glassBlur,
-              WebkitBackdropFilter: theme.glassBlur,
+              backdropFilter: 'none',
+              WebkitBackdropFilter: 'none',
             }}
             onPointerDown={(e) => e.stopPropagation()}
             onContextMenu={(e) => e.preventDefault()}

@@ -20,12 +20,19 @@
  * IR 去周期化与 Convolver 相同（镜像其私有 dePeriodizeIR 算法——dsp/* 属并行
  * 代理分区，本文件不跨分区引用；实测分析网格上为 no-op，纯一致性保留）。
  * 热路径：稳态零分配（缓冲预分配，队列压缩/扩容策略与 Convolver 相同）。
+ *
+ * 可选内部精度（setPrecision）：float64 时 IR 系数、环形历史、输入块与待放行
+ * 湿块全部为 Float64Array，时域抽头累加本就以 double 进行、不再逐样本写回
+ * float32；默认 float32 不变。
  */
+
+import { allocBuffer, normalizePrecision, type AudioBuffer, type Precision } from '../dsp/audioBuffer'
 
 /** 卷积引擎共用接口（TimeConvolver 与 dsp/Convolver 结构一致，可在后端互换） */
 export interface StereoConvEngine {
   loadIR(ir: Float32Array, irName?: string): void
-  processStereo(l: Float32Array, r: Float32Array): void
+  updateIR?(ir: Float32Array, irName?: string): void
+  processStereo(l: AudioBuffer, r: AudioBuffer): void
   reset(): void
 }
 
@@ -35,23 +42,28 @@ export class TimeConvolver implements StereoConvEngine {
   private readonly dePeriodize: boolean
 
   private irLoaded = false
+  private precision: Precision = 'float32'
+  /** 源 IR 副本（去周期化之前）：setPrecision 重建精度系数的依据。 */
+  private sourceIr: Float32Array | null = null
   /** 去周期化后的 IR（长度 M） */
-  private ir: Float32Array = new Float32Array(0)
+  private ir: AudioBuffer = new Float32Array(0)
   private irLength = 0
+  private targetIr: AudioBuffer = new Float32Array(0)
+  private morphLeft = 0
   private irName: string | null = null
 
   // ---- 流式状态（与 Convolver 同构；全部预分配） ----
-  private inputBlockL: Float32Array = new Float32Array(0)
-  private inputBlockR: Float32Array = new Float32Array(0)
+  private inputBlockL: AudioBuffer = new Float32Array(0)
+  private inputBlockR: AudioBuffer = new Float32Array(0)
   private inputPos = 0
   /** 每通道环形输入历史（长度 M，跨块携带"卷积尾"） */
-  private histL: Float32Array = new Float32Array(0)
-  private histR: Float32Array = new Float32Array(0)
+  private histL: AudioBuffer = new Float32Array(0)
+  private histR: AudioBuffer = new Float32Array(0)
   private histPosL = 0
   private histPosR = 0
   /** 待放行湿块队列（容量 (1+2)·L = 3L，与 Convolver (P+2)·L 对齐，P=1） */
-  private pendingWetL: Float32Array = new Float32Array(0)
-  private pendingWetR: Float32Array = new Float32Array(0)
+  private pendingWetL: AudioBuffer = new Float32Array(0)
+  private pendingWetR: AudioBuffer = new Float32Array(0)
   private pendingLen = 0
   private pendingPos = 0
   /** 已完成的输入块数（块完成时 +1）：湿路放行的"已产出"依据 */
@@ -61,7 +73,7 @@ export class TimeConvolver implements StereoConvEngine {
   /** 已放行的湿路样本总数（严格按序放行依据） */
   private totalWetOut = 0
 
-  constructor(fs: number, opts?: { partitionSize?: number; dePeriodize?: boolean }) {
+  constructor(fs: number, opts?: { partitionSize?: number; dePeriodize?: boolean; precision?: Precision }) {
     if (fs <= 0 || !Number.isFinite(fs)) {
       throw new Error('invalid sample rate')
     }
@@ -71,6 +83,39 @@ export class TimeConvolver implements StereoConvEngine {
     // 分区长取合理范围 [32, 8192]（与 Convolver 同约束；时域模式下仅决定块长与放行延迟）
     this.partitionSize = Math.min(8192, Math.max(32, L))
     this.dePeriodize = opts ? opts.dePeriodize !== false : true
+    this.precision = normalizePrecision(opts?.precision)
+  }
+
+  /** 当前内部精度。 */
+  getPrecision(): Precision {
+    return this.precision
+  }
+
+  /**
+   * 切换内部精度（幂等）：保留源 IR 并按其重建系数/历史/块缓冲（随后 reset）。
+   * 没有源 IR 时按元素转换已有系数数组并 reset。
+   */
+  setPrecision(p: Precision): void {
+    const next = normalizePrecision(p)
+    if (next === this.precision) return
+    this.precision = next
+    if (this.sourceIr) {
+      this.loadFromSource(this.sourceIr, this.irName ?? undefined)
+      return
+    }
+    const convert = (buffer: AudioBuffer): AudioBuffer => {
+      if (next === 'float64') return buffer instanceof Float64Array ? buffer : Float64Array.from(buffer)
+      return buffer instanceof Float32Array ? buffer : Float32Array.from(buffer)
+    }
+    this.ir = convert(this.ir)
+    this.targetIr = convert(this.targetIr)
+    this.inputBlockL = convert(this.inputBlockL)
+    this.inputBlockR = convert(this.inputBlockR)
+    this.histL = convert(this.histL)
+    this.histR = convert(this.histR)
+    this.pendingWetL = convert(this.pendingWetL)
+    this.pendingWetR = convert(this.pendingWetR)
+    this.reset()
   }
 
   /**
@@ -93,23 +138,34 @@ export class TimeConvolver implements StereoConvEngine {
     if (!anyNonZero) {
       throw new Error('invalid impulse response: all zero')
     }
+    this.sourceIr = new Float32Array(ir)
+    this.loadFromSource(this.sourceIr, irName)
+  }
 
+  /** 由源 IR 重建系数与流式缓冲（loadIR / setPrecision 共用；非实时路径）。 */
+  private loadFromSource(ir: Float32Array, irName?: string): void {
     const L = this.partitionSize
+    const precision = this.precision
     const src = this.dePeriodize ? this.dePeriodizeIR(ir) : ir
     const M = src.length
 
-    this.ir = src.slice() // 拷贝（调用方 scratch 可复用）
+    // 拷贝（调用方 scratch 可复用）；内存类型跟随当前精度。
+    this.ir = allocBuffer(M, precision)
+    this.ir.set(src)
+    this.targetIr = allocBuffer(M, precision)
+    this.targetIr.set(src)
+    this.morphLeft = 0
     this.irLength = M
     this.irName = irName !== undefined ? irName : null
 
     // （重新）分配流式缓冲（loadIR 非实时路径，允许分配）
-    this.inputBlockL = new Float32Array(L)
-    this.inputBlockR = new Float32Array(L)
-    this.histL = new Float32Array(M)
-    this.histR = new Float32Array(M)
+    this.inputBlockL = allocBuffer(L, precision)
+    this.inputBlockR = allocBuffer(L, precision)
+    this.histL = allocBuffer(M, precision)
+    this.histR = allocBuffer(M, precision)
     const pendingCap = 3 * L // (P+2)·L，P=1（时域单分区语义）
-    this.pendingWetL = new Float32Array(pendingCap)
-    this.pendingWetR = new Float32Array(pendingCap)
+    this.pendingWetL = allocBuffer(pendingCap, precision)
+    this.pendingWetR = allocBuffer(pendingCap, precision)
 
     this.inputPos = 0
     this.histPosL = 0
@@ -122,12 +178,21 @@ export class TimeConvolver implements StereoConvEngine {
     this.irLoaded = true
   }
 
+  /** 同长度方向更新保留历史；每输入块推进一次系数，左右耳共享同一组系数。 */
+  updateIR(ir: Float32Array, irName?: string): void {
+    if (!this.irLoaded || ir.length !== this.irLength) { this.loadIR(ir, irName); return }
+    if (!ir.every(Number.isFinite) || !ir.some(value => value !== 0)) throw new Error('invalid impulse response')
+    this.targetIr.set(this.dePeriodize ? this.dePeriodizeIR(ir) : ir)
+    this.irName = irName ?? null
+    this.morphLeft = Math.max(1, Math.ceil(this.fs * 0.02 / this.partitionSize))
+  }
+
   /**
    * 流式立体声就地处理（与 Convolver.processStereo 同调度）：
    * 湿路 = 时域直接卷积（块装配 + 待放行队列），out[i] = wet[i]，相对输入延迟 L。
    * 未载入 IR 时抛错。
    */
-  processStereo(l: Float32Array, r: Float32Array): void {
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
     if (!this.irLoaded) {
       throw new Error('no impulse response loaded')
     }
@@ -142,6 +207,10 @@ export class TimeConvolver implements StereoConvEngine {
       this.inputBlockR[this.inputPos] = r[i]
       this.inputPos++
       if (this.inputPos >= L) {
+        if (this.morphLeft > 0) {
+          const step = 1 / this.morphLeft--
+          for (let m = 0; m < this.irLength; m++) this.ir[m] += (this.targetIr[m] - this.ir[m]) * step
+        }
         const cap = this.pendingWetL.length
         if (this.pendingPos + this.pendingLen + L > cap) {
           const remain = this.pendingLen
@@ -152,10 +221,11 @@ export class TimeConvolver implements StereoConvEngine {
           this.pendingPos = 0
           if (this.pendingLen + L > this.pendingWetL.length) {
             const newCap = Math.max(cap * 2, this.pendingLen + L)
-            const nl = new Float32Array(newCap)
+            const precision = this.precision
+            const nl = allocBuffer(newCap, precision)
             nl.set(this.pendingWetL.subarray(0, this.pendingLen))
             this.pendingWetL = nl
-            const nr = new Float32Array(newCap)
+            const nr = allocBuffer(newCap, precision)
             nr.set(this.pendingWetR.subarray(0, this.pendingLen))
             this.pendingWetR = nr
           }
@@ -202,6 +272,7 @@ export class TimeConvolver implements StereoConvEngine {
   }
 
   reset(): void {
+    if (this.morphLeft) { this.ir.set(this.targetIr); this.morphLeft = 0 }
     this.inputPos = 0
     this.histPosL = 0
     this.histPosR = 0
@@ -235,21 +306,22 @@ export class TimeConvolver implements StereoConvEngine {
    * 处理一个完整输入块：直接时域卷积（环形输入历史）并把输出块写入
    * pending[writeAt..writeAt+L)。ear=0 左 / 1 右（各自独立的环形历史）。
    */
-  private processWetBlock(blk: Float32Array, pending: Float32Array, writeAt: number, ear: number): void {
+  private processWetBlock(blk: AudioBuffer, pending: AudioBuffer, writeAt: number, ear: number): void {
     const L = this.partitionSize
     const M = this.irLength
     const hist = ear === 0 ? this.histL : this.histR
     let hp = ear === 0 ? this.histPosL : this.histPosR
     for (let j = 0; j < L; j++) {
       hist[hp] = blk[j]
-      hp = (hp + 1) % M
-      const newest = (hp + M - 1) % M // 最新写入样本（= blk[j]）
-      // y[j] = Σ_{m=0}^{M−1} h[m]·x[j−m]（x[j−m] 越界取环内上一块尾部；
-      // f64 累加、f32 写回——与 Rust 侧时域分支逐位对齐）
+      const newest = hp
+      hp++
+      if (hp === M) hp = 0
+      // 先从 newest 倒读至 0，再从 M−1 倒读；抽头累加次序不变，
+      // 但热路径不再对每个抽头取模（长 IR × 多扬声器时减少索引运算）。
       let acc = 0
-      for (let m = 0; m < M; m++) {
-        acc += this.ir[m] * hist[(newest + M - m) % M]
-      }
+      let m = 0
+      for (let idx = newest; idx >= 0; idx--) acc += this.ir[m++] * hist[idx]
+      for (let idx = M - 1; idx > newest; idx--) acc += this.ir[m++] * hist[idx]
       pending[writeAt + j] = acc
     }
     if (ear === 0) this.histPosL = hp

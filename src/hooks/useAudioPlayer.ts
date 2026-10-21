@@ -18,8 +18,10 @@ import { releaseAppleNativeStream, type AppleNativeStream } from '../services/ap
 import { isHlsUrl, attachAppleHls, detachAppleHls, getActiveAppleStream, getActiveHls } from '../services/appleHlsPlayer'
 import { planTransition, planTransitionV2 } from '../audio/transitionPlanner'
 import { TransitionRenderer } from '../audio/TransitionRenderer'
+import { SpatialPlaybackInput, type SpatialPlaybackInputOptions } from '../audio/spatialPlaybackInput'
 import { TrackStemMixer, TRACK_STEMS, UNITY_RECONSTRUCTION_GAINS, type TrackStemGains, type TrackStemName } from '../audio/trackStemMixer'
 import { createPlaybackTimeStore } from '../audio/playbackTimeStore'
+import type { EnginePlaybackSource } from '../services/audio-engine/types'
 import { createTransitionVisualStore } from '../audio/transitionVisualStore'
 import { GaplessIntegration } from '../services/gaplessIntegration'
 import { createSeamlessJoinController, type SeamlessJoinController } from '../services/gapless/seamlessJoinController'
@@ -107,6 +109,7 @@ export interface AudioGraphHandle {
   rightAnalyserNode?: AnalyserNode
   /** 左右声道分析器的输入分路；v3 接管音频图时需要将其重新接到处理后输出。 */
   channelSplitterNode?: ChannelSplitterNode
+  configureDiscreteInput?(enabled: boolean, options?: SpatialPlaybackInputOptions): void
 }
 
 interface DeckMetadata extends PreloadTrack {
@@ -382,7 +385,8 @@ export function useAudioPlayer(
     enableBeatMatching: true,
     skipSilence: true,
   },
-  onAudioGraphReady?: (handle: AudioGraphHandle) => void
+  onAudioGraphReady?: (handle: AudioGraphHandle) => void,
+  onPlaybackSourceChange?: (source: EnginePlaybackSource | null) => void,
 ) {
   const primaryRef = useRef<HTMLAudioElement | null>(null)
   const secondaryRef = useRef<HTMLAudioElement | null>(null)
@@ -393,6 +397,16 @@ export function useAudioPlayer(
   const gaplessRef = useRef(gaplessSettings)
   const autoMixRef = useRef(autoMixSettings)
   const onAudioGraphReadyRef = useRef(onAudioGraphReady)
+  const onPlaybackSourceChangeRef = useRef(onPlaybackSourceChange)
+  onPlaybackSourceChangeRef.current = onPlaybackSourceChange
+  const notifyPlaybackSource = (metadata: DeckMetadata | null) => {
+    onPlaybackSourceChangeRef.current?.(metadata ? {
+      trackKey: metadata.trackKey ?? metadata.url, url: metadata.url, isLive: Boolean(metadata.appleHls?.live),
+      replayGainTags: metadata.replayGainTags,
+    } : null)
+    const index = activePrimaryRef.current ? 0 : 1
+    spatialInputsRef.current[index]?.notify()
+  }
   const volumeRef = useRef(DEFAULT_VOLUME)
   const transitionStateRef = useRef<TransitionState>('idle')
   /** 时钟停滞看门（见 emit）：{at: 上次采样时刻, value: 上次采样时间} */
@@ -463,6 +477,7 @@ export function useAudioPlayer(
   // 全部失效（元素以 element.volume 直出），而 setDeckGain 还会把 volume 强制成 1，
   // 表现为"过渡期两首歌一起响、只能靠暂停清掉"。
   const mediaSourcesRef = useRef<[MediaElementAudioSourceNode | null, MediaElementAudioSourceNode | null]>([null, null])
+  const spatialInputsRef = useRef<[SpatialPlaybackInput | null, SpatialPlaybackInput | null]>([null, null])
   /** handoff 在途计数：异步续体（waitForSeek/waitForPlayable）期间的源曲 ended 不能被当作
    *  自然播完（否则 App 会整曲重载下一首，与随后 target.play() 打架）。用计数而非布尔，
    *  这样过期续体的收尾不会清掉"新过渡"的在途标记。 */
@@ -608,6 +623,7 @@ export function useAudioPlayer(
   const getStandbyAudio = useCallback(() => activePrimaryRef.current ? secondaryRef.current : primaryRef.current, [])
   const getActiveGain = useCallback(() => gainNodesRef.current[activePrimaryRef.current ? 0 : 1], [])
   const getStandbyGain = useCallback(() => gainNodesRef.current[activePrimaryRef.current ? 1 : 0], [])
+  const hasSpatialDeck = useCallback(() => spatialInputsRef.current.some(input => input?.controlled), [])
 
   // 专辑播放判定（三方案分流依据）：当前曲与下一曲属于同一专辑
   // （albumId 都存在且相等）→ 专辑场景；否则为非专辑（普通列表）场景。
@@ -631,6 +647,8 @@ export function useAudioPlayer(
       crossfade: crossfadeRef.current.enabled,
       gapless: gaplessRef.current.enabled,
     })
+    // 严格多声道源始终保留在 managed 双 deck；旧渲染/外部拼接器只有立体声契约。
+    if (hasSpatialDeck() && pair === 'automix') return 'gapless'
     return resolveBoundaryStrategyFor(pair, isAlbumPlayback())
   }, [isAlbumPlayback])
 
@@ -683,6 +701,22 @@ export function useAudioPlayer(
       const master = context.createGain()
       const firstGain = context.createGain()
       const secondGain = context.createGain()
+      const configureDiscreteInput = (enabled: boolean, options: SpatialPlaybackInputOptions = {}) => {
+        for (const node of [firstGain, secondGain, master]) {
+          node.channelCountMode = 'max'
+          node.channelInterpretation = enabled ? 'discrete' : 'speakers'
+        }
+        spatialInputsRef.current.forEach((input, index) => input?.configure(enabled, {
+          ...options,
+          onSourceDecoded: source => {
+            if ((activePrimaryRef.current ? 0 : 1) === index) options.onSourceDecoded?.(source)
+          },
+          onSourceError: error => {
+            console.error('[HSE] 多声道源解码失败', error)
+            if ((activePrimaryRef.current ? 0 : 1) === index) options.onSourceError?.(error)
+          },
+        }))
+      }
       const analyser = context.createAnalyser()
       analyser.fftSize = 1024
       analyser.minDecibels = -90
@@ -699,6 +733,10 @@ export function useAudioPlayer(
       // 必须持有引用：MediaElementAudioSourceNode 无 JS 引用时可能被回收，元素随即脱离
       // 音频图（gain 淡化/静音全部失效，且元素以 volume=1 直出）。
       mediaSourcesRef.current = [firstSource, secondSource]
+      spatialInputsRef.current = [
+        new SpatialPlaybackInput(context, first, firstSource, firstGain),
+        new SpatialPlaybackInput(context, second, secondSource, secondGain),
+      ]
       master.connect(analyser).connect(outputGain).connect(context.destination)
       // DG-LAB 立体声采集：ChannelSplitter 挂在 **analyser 之后**（不是 master）。
       // 此前从 master 直接取：三引擎 attach 第一步 masterGain.disconnect()（无参全断）
@@ -753,7 +791,7 @@ export function useAudioPlayer(
       }
       
       // 通知外部音效引擎：音频图已就绪（在 masterGain 与 analyser 之间插入效果链）
-      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain, leftAnalyserNode: leftAnalyser, rightAnalyserNode: rightAnalyser, channelSplitterNode: splitter })
+      onAudioGraphReadyRef.current?.({ audioContext: context, masterGain: master, analyser, outputGain, leftAnalyserNode: leftAnalyser, rightAnalyserNode: rightAnalyser, channelSplitterNode: splitter, configureDiscreteInput })
       
       if (context.state === 'suspended') await context.resume().catch(() => undefined)
     } catch (error) {
@@ -1252,6 +1290,7 @@ export function useAudioPlayer(
     setDeckGain(getStandbyGain(), target, 1)
     activePrimaryRef.current = !activePrimaryRef.current
     currentMetadataRef.current = targetMetadata
+    notifyPlaybackSource(targetMetadata)
     nextMetadataRef.current = null
     transitionPlanRef.current = null
     setAudioElement(target)
@@ -1328,6 +1367,7 @@ export function useAudioPlayer(
       setDeckGain(getStandbyGain(), audible, 1)
       activePrimaryRef.current = !activePrimaryRef.current
       currentMetadataRef.current = pendingNext
+      notifyPlaybackSource(pendingNext)
       nextMetadataRef.current = null
       setAudioElement(audible)
     }
@@ -2210,6 +2250,14 @@ export function useAudioPlayer(
   }, [commitTransition, ensureAudioGraph, getActiveAudio, getActiveGain, getStandbyAudio, getStandbyGain, runFallbackGainAnimation, setDeckGain, setTransitionState])
 
   const prepareAutoMix = useCallback(async () => {
+    if (hasSpatialDeck()) {
+      preparationRevisionRef.current += 1
+      preparationAbortRef.current?.abort()
+      transitionPlanRef.current = null
+      setTransitionState('armed', { transitionStrategy: 'gapless', transitioning: false,
+        fallbackReason: '多声道输入使用双 deck 衔接以保留全部声道' })
+      return
+    }
     // 看歌挂起（见 setWatchHold）：看歌期间引擎时间线静止，任何自动过渡的“准备→提交”
     // 都不允许发生——否则已武装的过渡会在看歌期间照常 commit → 切回时已经是下一首
     //（用户实测：Shelter 进看歌约 1.8s 后自动切到下一曲）
@@ -2750,6 +2798,7 @@ export function useAudioPlayer(
    * 播放到窗口起点时由 handleTimeUpdate 触发 beat-crossfade 执行。
    */
   const prepareGaplessCrossfade = useCallback(async () => {
+    if (hasSpatialDeck()) return
     const current = currentMetadataRef.current
     const next = nextMetadataRef.current
     if (!gaplessRef.current.enabled || autoMixRef.current.enabled) return
@@ -2857,7 +2906,7 @@ export function useAudioPlayer(
   const prepareGaplessTransition = useCallback(async () => {
     const current = currentMetadataRef.current
     const next = nextMetadataRef.current
-    if (current?.appleHls || next?.appleHls) {
+    if (current?.appleHls || next?.appleHls || hasSpatialDeck()) {
       transitionPlanRef.current = null
       debugLog('🍎 [Gapless] Apple CENC 相邻边使用 managed 双 deck 无缝衔接')
       setTransitionState('armed', {
@@ -3062,7 +3111,7 @@ export function useAudioPlayer(
           const skippedPair = autoMixSkippedPairsRef.current.has(
             `${currentMetadataRef.current?.trackKey}->${nextMetadataRef.current?.trackKey}`
           )
-          if (!skippedPair) {
+          if (!skippedPair && !hasSpatialDeck()) {
             const albumDirectJoin = albumPlayback && !applePair
             const controller = seamlessJoinControllerRef.current
             if (albumDirectJoin) {
@@ -3251,7 +3300,7 @@ export function useAudioPlayer(
       } else if (standby?.src && resolveBoundaryStrategy() === 'gapless') {
         debugLog('⏭️ [Event] 待机音频就绪且当前相邻边使用 Gapless')
         const applePair = Boolean(currentMetadataRef.current?.appleHls || nextMetadataRef.current?.appleHls)
-        if (gaplessIntegrationRef.current && !applePair) {
+        if (gaplessIntegrationRef.current && !applePair && !hasSpatialDeck()) {
           // 使用 Cuefield/Album Gapless 执行过渡
           const result = gaplessIntegrationRef.current.executeTransition()
           if (result.success) {
@@ -3321,6 +3370,8 @@ export function useAudioPlayer(
       trackStemMixerRef.current = null
       gaplessIntegrationRef.current?.dispose()
       gaplessIntegrationRef.current = null
+      spatialInputsRef.current.forEach(input => input?.dispose())
+      spatialInputsRef.current = [null, null]
       for (const audio of [primary, secondary]) {
         audio.removeEventListener('timeupdate', handleTimeUpdate)
         audio.removeEventListener('play', handlePlay)
@@ -3540,17 +3591,23 @@ export function useAudioPlayer(
     preloadReadyCleanupRef.current?.()
     preloadReadyCleanupRef.current = cleanupReady
     if (hlsPreload) {
+      spatialInputsRef.current[standby === primaryRef.current ? 0 : 1]?.reset()
       void attachAppleHls(standby, appleHls!, () => {
         if (!preloadMetadataMatches()) return
         failed()
       }).then(ready, failed)
     } else {
-      standby.src = track.appleHls ? track.url : getProxiedAudioUrl(track.url)
-      standby.preload = 'auto'
-      standby.addEventListener('canplay', ready, { once: true })
-      standby.addEventListener('error', failed, { once: true })
-      timeoutId = window.setTimeout(failed, PRELOAD_MEDIA_LOAD_TIMEOUT_MS)
-      standby.load()
+      const input = spatialInputsRef.current[standby === primaryRef.current ? 0 : 1]
+      const url = track.appleHls ? track.url : getProxiedAudioUrl(track.url)
+      void (input ? input.prepare(url) : Promise.resolve(url)).then(sourceUrl => {
+        if (!isCurrentPreload()) return
+        standby.src = sourceUrl
+        standby.preload = 'auto'
+        standby.addEventListener('canplay', ready, { once: true })
+        standby.addEventListener('error', failed, { once: true })
+        timeoutId = window.setTimeout(failed, PRELOAD_MEDIA_LOAD_TIMEOUT_MS)
+        standby.load()
+      }).catch(error => { console.error('[HSE] 多声道预载失败', error); failed() })
     }
   }, [cancelScheduledTransition, getActiveAudio, getStandbyAudio, getStandbyGain, prepareAutoMix, prepareGaplessTransition, setDeckGain, setTransitionState])
 
@@ -3602,6 +3659,7 @@ export function useAudioPlayer(
       isLiveRef.current = Boolean(appleHls?.live)
       active.playbackRate = 1 // post-settle 残留防护：新歌一律原速
       currentMetadataRef.current = { url, ...track }
+      notifyPlaybackSource(currentMetadataRef.current)
       setAudioElement(active)
       await ensureAudioGraph()
       if (masterGainRef.current && audioContextRef.current) {
@@ -3610,6 +3668,7 @@ export function useAudioPlayer(
       setDeckGain(getActiveGain(), active, 1)
       setDeckGain(getStandbyGain(), standby, 0)
       if (hlsMode) {
+        spatialInputsRef.current[active === primaryRef.current ? 0 : 1]?.reset()
         // Apple Music 原生 HLS（Widevine EME）：hls.js 接管 src 与缓冲，
         // attachAppleHls 自行等待首个分片就绪（含 license 协商），随后照常 play()
         debugLog('📡 [LoadAndPlay] Apple HLS 原生音源，由 hls.js 接管')
@@ -3626,7 +3685,10 @@ export function useAudioPlayer(
         })
       } else {
         debugLog('⏳ [LoadAndPlay] 加载音频文件...')
-        active.src = url
+        const spatialInput = spatialInputsRef.current[active === primaryRef.current ? 0 : 1]
+        const sourceUrl = spatialInput ? await spatialInput.prepare(url) : url
+        if (loadRevision !== currentLoadRevisionRef.current) return false
+        active.src = sourceUrl
         active.preload = 'auto'
         await new Promise<void>((resolve, reject) => {
           let settled = false
@@ -4111,8 +4173,9 @@ export function useAudioPlayer(
       if (masterGainRef.current && audioContextRef.current) {
         masterGainRef.current.gain.setValueAtTime(volumeRef.current, audioContextRef.current.currentTime)
       }
-      if (target.src !== metadata.url) {
-        target.src = metadata.url
+      const spatialInput = spatialInputsRef.current[target === primaryRef.current ? 0 : 1]
+      if (target.src !== metadata.url && !spatialInput?.matches(metadata.url)) {
+        target.src = spatialInput ? await spatialInput.prepare(metadata.url) : metadata.url
         target.preload = 'auto'
         target.load()
         await new Promise<void>((resolve, reject) => {
@@ -4198,6 +4261,7 @@ export function useAudioPlayer(
       active.load()
       activePrimaryRef.current = !activePrimaryRef.current
       currentMetadataRef.current = { ...metadata }
+      notifyPlaybackSource(currentMetadataRef.current)
       nextMetadataRef.current = null
       setAudioElement(target)
 
@@ -4238,6 +4302,11 @@ export function useAudioPlayer(
 
   return {
     loadAndPlay,
+    getPlaybackSource: (): EnginePlaybackSource | null => {
+      const metadata = currentMetadataRef.current
+      return metadata ? { trackKey: metadata.trackKey ?? metadata.url, url: metadata.url,
+        isLive: externalActiveRef.current || Boolean(metadata.appleHls?.live), replayGainTags: metadata.replayGainTags } : null
+    },
     togglePlay,
     seek,
     setVolume,
@@ -4341,6 +4410,7 @@ export function useAudioPlayer(
         audio.load()
       }
       currentMetadataRef.current = null
+      notifyPlaybackSource(null)
       nextMetadataRef.current = null
     },
     trackStems: {

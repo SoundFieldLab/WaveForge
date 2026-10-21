@@ -20,6 +20,15 @@ function makePanel() {
 }
 
 describe('HSE 均衡器编辑', () => {
+  it('可增减自定义频段，段数与分享串保持一致', () => {
+    const { bridge } = makePanel()
+    fireEvent.click(screen.getByRole('button', { name: '添加频段' }))
+    expect(bridge.getParams().eq.bandCount).toBe(11)
+    expect(bridge.getParams().eq.proBands).toHaveLength(11)
+    fireEvent.click(screen.getByRole('button', { name: '删除选中频段' }))
+    expect(bridge.getParams().eq.bandCount).toBe(10)
+    expect(bridge.getParams().eq.proBands).toHaveLength(10)
+  })
   beforeEach(() => localStorage.clear())
   afterEach(() => cleanup())
 
@@ -34,13 +43,14 @@ describe('HSE 均衡器编辑', () => {
     expect(screen.getByRole('button', { name: '1000 Hz' }).getAttribute('aria-pressed')).toBe('true')
   })
 
-  it('20 段缩回 10 段后保留可用选择，并沿用匹配频段的 Q 值', () => {
+  it('20 段缩回 10 段后保留选择、Q 值与滤波器类型', () => {
     const { bridge } = makePanel()
     fireEvent.click(screen.getByRole('button', { name: '16000 Hz' }))
     const qInput = screen.getByRole('spinbutton', { name: 'Q 值' })
     fireEvent.focus(qInput)
     fireEvent.change(qInput, { target: { value: '1.67' } })
     fireEvent.blur(qInput)
+    fireEvent.change(screen.getByRole('combobox', { name: '滤波器类型' }), { target: { value: 'notch' } })
     fireEvent.click(screen.getByRole('button', { name: '20 段' }))
     fireEvent.click(screen.getByRole('button', { name: '16000 Hz' }))
     fireEvent.click(screen.getByRole('button', { name: '10 段' }))
@@ -48,6 +58,7 @@ describe('HSE 均衡器编辑', () => {
     expect(bridge.getParams().eq.proBands).toHaveLength(10)
     expect(screen.getByRole('spinbutton', { name: '频率 Hz' }).getAttribute('value')).toBe('16000.0')
     expect(screen.getByRole('spinbutton', { name: 'Q 值' }).getAttribute('value')).toBe('1.67')
+    expect((screen.getByRole('combobox', { name: '滤波器类型' }) as HTMLSelectElement).value).toBe('notch')
     expect(screen.getByRole('button', { name: '选择 16000 Hz 频段' }).getAttribute('aria-pressed')).toBe('true')
   })
 
@@ -85,6 +96,18 @@ describe('HSE 均衡器编辑', () => {
     expect(bridge.getParams().eq.qCompensation).toBe(true)
   })
 
+  it('64 段布局一键生成 64 个对数频点（20Hz–16kHz），新频段默认 Q 9.4', () => {
+    const { bridge } = makePanel()
+    fireEvent.click(screen.getByRole('button', { name: '64 段' }))
+    const eq = bridge.getParams().eq
+    expect(eq.bandCount).toBe(64)
+    expect(eq.proBands).toHaveLength(64)
+    expect(eq.proBands[0].frequency).toBeCloseTo(20, 1)
+    expect(eq.proBands[63].frequency).toBeCloseTo(16000, 0)
+    expect(eq.proBands[32].q).toBeCloseTo(9.4, 5)
+    expect(screen.getByText(/64 \/ 64 段/)).toBeTruthy()
+  })
+
   it('20 段清空仍保留段数和 Q，并且专业增益支持引擎的正负 20 dB', () => {
     const { bridge } = makePanel()
     fireEvent.click(screen.getByRole('button', { name: '20 段' }))
@@ -97,5 +120,15 @@ describe('HSE 均衡器编辑', () => {
     expect(bridge.getParams().eq.bandCount).toBe(20)
     expect(bridge.getParams().eq.proBands).toHaveLength(20)
     expect(bridge.getParams().eq.proBands.every((band) => band.gain === 0)).toBe(true)
+  })
+
+  it('陷波类型禁用无效增益控件，清空后恢复平直峰值段', () => {
+    const { bridge } = makePanel()
+    fireEvent.change(screen.getByRole('combobox', { name: '滤波器类型' }), { target: { value: 'notch' } })
+    expect((screen.getByRole('spinbutton', { name: '增益 dB' }) as HTMLInputElement).disabled).toBe(true)
+    expect((screen.getByRole('slider', { name: '31.5 Hz 增益' }) as HTMLInputElement).disabled).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: '清空' }))
+    expect(bridge.getParams().eq.proBands[0].type).toBe('peaking')
+    expect((screen.getByRole('slider', { name: '31.5 Hz 增益' }) as HTMLInputElement).disabled).toBe(false)
   })
 })

@@ -38,11 +38,21 @@ function expectValidParams(p: V3EngineParams, id: string): void {
   expect(p.eq.simpleBands.length).toBe(5)
   for (const g of p.eq.simpleBands) expect(isFiniteNumber(g)).toBe(true)
   expect(p.eq.proBands.length).toBe(p.eq.bandCount)
-  expect([10, 20]).toContain(p.eq.bandCount)
+  // 内置场景的 EQ 以 64 段（1/6 倍频程）落库，打开预设即 64 段微调曲线。
+  expect(p.eq.bandCount).toBe(64)
+  expect(p.eq.proBands).toHaveLength(64)
+  for (let i = 1; i < p.eq.proBands.length; i++) {
+    expect(p.eq.proBands[i].frequency).toBeGreaterThan(p.eq.proBands[i - 1].frequency)
+  }
+  expect(p.eq.proBands[0].frequency).toBeCloseTo(20, 1)
+  expect(p.eq.proBands[63].frequency).toBeCloseTo(16000, 0)
   for (const b of p.eq.proBands) {
     expect(b.frequency).toBeGreaterThan(10)
     expect(b.frequency).toBeLessThan(24000)
     expect(isFiniteNumber(b.gain)).toBe(true)
+    // 64 段全部落在 20Hz–16kHz 可听频段，不再包含 16kHz 以上超声段。
+    expect(b.frequency).toBeGreaterThanOrEqual(20)
+    expect(b.frequency).toBeLessThanOrEqual(16000)
     expect(b.q).toBeGreaterThan(0.05)
     expect(b.q).toBeLessThan(20)
   }

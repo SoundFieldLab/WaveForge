@@ -38,7 +38,7 @@ export const STAGE_SCENES: StageScene[] = [
   {
     id: 'stage',
     name: '音乐舞台',
-    description: 'Live 乐队全景：主唱居中，乐器环绕展开，舞台纵深感',
+    description: '立体声节目映射到前方与侧后扬声器，增加舞台纵深',
     speakers: [
       { azimuthDeg: 0, elevationDeg: 0, distance: 2.5, gain: 1, size: 0 }, // 主唱：正前居中
       { azimuthDeg: -30, elevationDeg: 0, distance: 4, gain: 1, size: 0 }, // 吉他：左前
@@ -53,7 +53,7 @@ export const STAGE_SCENES: StageScene[] = [
   {
     id: 'cinema',
     name: '电影院',
-    description: '7.1.4 影院布局：银幕对白 + 侧后环绕 + 顶置天空声道',
+    description: '立体声节目经过影院虚拟扬声器布局与音乐厅混响',
     speakers: [
       { azimuthDeg: 0, elevationDeg: 0, distance: 4, gain: 1, size: 0 }, // C：银幕中央
       { azimuthDeg: -30, elevationDeg: 0, distance: 4, gain: 1, size: 0 }, // FL：银幕左
@@ -72,7 +72,7 @@ export const STAGE_SCENES: StageScene[] = [
   {
     id: 'piano',
     name: '钢琴独奏',
-    description: '独奏钢琴居中，音乐厅长尾混响环绕，静谧沉浸',
+    description: '保留前方主声像，加入音乐厅长尾氛围',
     speakers: [
       { azimuthDeg: 0, elevationDeg: 0, distance: 2, gain: 1, size: 0 }, // 钢琴：正前近场
       { azimuthDeg: -90, elevationDeg: 0, distance: 9, gain: 1, size: 0 }, // 音乐厅环境：左
@@ -84,7 +84,7 @@ export const STAGE_SCENES: StageScene[] = [
   {
     id: 'nature',
     name: '自然场景',
-    description: '雨声头顶、雷声身后、鸟鸣溪流，置身户外旷野',
+    description: '立体声节目经过稀疏高位与后方布局，使用弱户外反射',
     speakers: [
       { azimuthDeg: 0, elevationDeg: 50, distance: 7, gain: 1, size: 0 }, // 雨：头顶上方（仰角 50°）
       { azimuthDeg: 180, elevationDeg: 0, distance: 15, gain: 1, size: 0 }, // 雷：正后方远处

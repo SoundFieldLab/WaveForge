@@ -9,7 +9,9 @@
 import { describe, it, expect } from 'vitest'
 import {
   computeRelativeDirection,
+  computeRelativeDirectionInto,
   computeTrajectoryPosition,
+  sampleTrajectoryInto,
   moveListener,
   rotateListener,
   listenerForwardVector,
@@ -88,6 +90,56 @@ describe('controller：computeRelativeDirection 几何', () => {
     const r = computeRelativeDirection(listenerAt({ x: 0, y: 0, z: 0 }), { x: 0, y: -2.5, z: 4.330 })
     expect(r.elevationDeg).toBeCloseTo(-30, 1) // asin(-0.5) ≈ −30（z 值 4.330 取近似）
     expect(r.distance).toBeCloseTo(5, 1)
+  })
+
+  it('pitch 正抬头：世界上扬 30° 的声源回到听者水平正前', () => {
+    const l = { ...listenerAt({ x: 0, y: 0, z: 0 }), pitch: 30 }
+    const ahead = computeRelativeDirection(l, { x: 0, y: 5, z: 5 * Math.sqrt(3) })
+    expect(ahead.azimuthDeg).toBeCloseTo(0, 8)
+    expect(ahead.elevationDeg).toBeCloseTo(0, 8)
+    expect(ahead.distance).toBeCloseTo(10, 8)
+    // 原世界水平正前现在应位于头下方，而不是仍以世界系仰角 0 返回。
+    expect(computeRelativeDirection(l, { x: 0, y: 0, z: 5 }).elevationDeg).toBeCloseTo(-30, 8)
+  })
+
+  it('roll 正向右倾：头右侧变为世界下方，反向也成立', () => {
+    const l = { ...listenerAt({ x: 0, y: 0, z: 0 }), roll: 90 }
+    const headRight = computeRelativeDirection(l, { x: 0, y: -5, z: 0 })
+    expect(headRight.azimuthDeg).toBeCloseTo(90, 8)
+    expect(headRight.elevationDeg).toBeCloseTo(0, 8)
+    expect(computeRelativeDirection(l, { x: 5, y: 0, z: 0 }).elevationDeg).toBeCloseTo(90, 8)
+  })
+
+  it('全 Euler 逆旋转：yaw=90、pitch=30、roll=90 的斜向头坐标 (2,0,5)', () => {
+    const l: ListenerState = { position: { x: 3, y: 4, z: -2 }, yaw: 90, pitch: 30, roll: 90 }
+    // 头坐标先向右 2、前 5；世界坐标增量由正向旋转依次推出。
+    const world = { x: 4 + 2.5 * Math.sqrt(3), y: 4 - Math.sqrt(3) + 2.5, z: -2 }
+    const result = computeRelativeDirection(l, world)
+    expect(result.azimuthDeg).toBeCloseTo(Math.atan2(2, 5) * 180 / Math.PI, 8)
+    expect(result.elevationDeg).toBeCloseTo(0, 8)
+    expect(result.distance).toBeCloseTo(Math.sqrt(29), 8)
+  })
+
+  it('yaw 360 等价及后方 wrap 恒落在 [-180,180)', () => {
+    const source = { x: Math.sin(-170 * Math.PI / 180), y: 0, z: Math.cos(-170 * Math.PI / 180) }
+    expect(computeRelativeDirection(listenerAt({ x: 0, y: 0, z: 0 }, 360), { x: 5, y: 0, z: 0 }).azimuthDeg).toBeCloseTo(90, 8)
+    const wrapped = computeRelativeDirection(listenerAt({ x: 0, y: 0, z: 0 }, 30), source)
+    expect(wrapped.azimuthDeg).toBeCloseTo(160, 8)
+    expect(computeRelativeDirection(listenerAt({ x: 0, y: 0, z: 0 }), { x: 0, y: 0, z: -5 }).azimuthDeg).toBe(-180)
+  })
+
+  it('Into 原地写预分配结果，无效方位/坐标与重合都给有限零值，输入不变', () => {
+    const l = Object.freeze({ position: Object.freeze({ x: 1, y: 2, z: 3 }), yaw: 45, pitch: 15, roll: -10 })
+    const source = Object.freeze({ x: 2, y: 2, z: 4 })
+    const out = { azimuthDeg: 99, elevationDeg: 99, distance: 99 }
+    expect(computeRelativeDirectionInto(l, source, out)).toBe(out)
+    expect(out.distance).toBeCloseTo(Math.SQRT2, 8)
+    expect(computeRelativeDirectionInto(l, { x: 1, y: 2, z: 3 }, out)).toEqual({ azimuthDeg: 0, elevationDeg: 0, distance: 0 })
+    expect(computeRelativeDirectionInto(l, { x: NaN, y: 0, z: 0 }, out)).toBe(out)
+    expect(out).toEqual({ azimuthDeg: 0, elevationDeg: 0, distance: 0 })
+    expect(computeRelativeDirectionInto({ ...l, roll: Infinity }, source, out)).toEqual({ azimuthDeg: 0, elevationDeg: 0, distance: 0 })
+    expect(computeRelativeDirectionInto(l, { x: 1e308, y: 1e308, z: 1e308 }, out)).toEqual({ azimuthDeg: 0, elevationDeg: 0, distance: 0 })
+    expect(source).toEqual({ x: 2, y: 2, z: 4 })
   })
 })
 

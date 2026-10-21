@@ -114,6 +114,16 @@ describe('BassEnhancer', () => {
     }
   })
 
+  it('非法音色/频率参数回退有限滤波器状态，低音增强仍可用', () => {
+    const be = new BassEnhancer(FS)
+    be.setParams(settings({ cutoffHz: Number.NaN, q: Number.POSITIVE_INFINITY, harmonicGain: Number.NaN, lowBoostDb: 6 }))
+    const l = makeSine(4096, 60, 0.3)
+    const r = l.slice()
+    be.processStereo(l, r)
+    expect(Array.from(l).every(Number.isFinite)).toBe(true)
+    expect(Array.from(r).every(Number.isFinite)).toBe(true)
+  })
+
   it('harmonicGain=0 时输出=输入（谐波路径关闭）', () => {
     const be = new BassEnhancer(FS)
     be.setParams(settings({ harmonicGain: 0 }))
@@ -142,6 +152,39 @@ describe('BassEnhancer', () => {
     for (let i = 4800; i < n; i++) peak = Math.max(peak, Math.abs(l[i]))
     expect(peak).toBeGreaterThan(0.78)
     expect(peak).toBeLessThan(0.88)
+  })
+
+  it('真峰值余量联动主动收敛低音下潜，并保留限幅器作为最终保护', () => {
+    const renderPeak = (ceiling: number) => {
+      const be = new BassEnhancer(FS)
+      be.setParams(settings({ harmonicGain: 0, lowBoostDb: 12 }))
+      be.setHeadroomCeiling(ceiling)
+      const n = FS * 2
+      const l = makeSine(n, 60, 0.5)
+      const r = l.slice()
+      be.processStereo(l, r)
+      let peak = 0
+      for (let i = FS; i < n; i++) peak = Math.max(peak, Math.abs(l[i]))
+      return peak
+    }
+    const uncontrolled = renderPeak(1)
+    const controlled = renderPeak(Math.pow(10, -1.5 / 20))
+    expect(uncontrolled).toBeGreaterThan(1.5)
+    expect(controlled).toBeLessThan(0.9)
+    expect(controlled).toBeGreaterThan(0.75)
+  })
+
+  it('低音余量控制使用同一立体声增益包络，不改变左右电平比', () => {
+    const be = new BassEnhancer(FS)
+    be.setParams(settings({ harmonicGain: 0, lowBoostDb: 12 }))
+    be.setHeadroomCeiling(Math.pow(10, -1.5 / 20))
+    const n = FS * 2
+    const l = makeSine(n, 60, 0.5)
+    const r = makeSine(n, 60, 0.25)
+    be.processStereo(l, r)
+    let maxError = 0
+    for (let i = FS; i < n; i++) maxError = Math.max(maxError, Math.abs(l[i] - 2 * r[i]))
+    expect(maxError).toBeLessThan(1e-5)
   })
 
   it('lowBoostDb 越界钳制：+99→+12（幅度≈×3.3）、-99→-6（幅度≈×0.87），均无 NaN', () => {

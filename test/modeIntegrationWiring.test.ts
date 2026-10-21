@@ -57,7 +57,8 @@ describe('mode integration wiring', () => {
     expect(app).toContain('const originMode = viewModeRef.current')
     expect(app).toContain("playbackOriginRef.current = origin ||")
     expect(app).toContain('const mixingStudioAudio = showMixingStudio ? audioPlayer.getAudioElement() : null')
-    expect(app).toContain('sourceUrl: mixingStudioAudio?.src || undefined')
+    // 多声道空间输入接管时元素 src 是静音时钟 WAV，导出源必须优先取播放器记录的原曲 URL。
+    expect(app).toContain("sourceUrl: audioPlayer.getPlaybackSource()?.url || mixingStudioAudio?.src || undefined")
     expect(app).toContain('调音室是全模式共享弹层')
     // 探索页进入播放页：探索页保持挂载（覆盖层模式），返回不重载
     expect(app).toContain("const exploreKeptAlive = isPlaybackPage && enteredFromMode === 'explore' && viewMode === 'explore'")

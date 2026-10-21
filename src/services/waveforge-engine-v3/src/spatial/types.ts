@@ -1,11 +1,11 @@
 /**
  * 空间音频（Spatial Audio）参数模型 —— HSE 独立命名空间
  *
- * 空间音频是 v3 处理节点之后的兄弟 AudioWorklet 节点（同 SoundTouch 先例）：
- *   masterGain → [soundtouch?] → v3Node → [spatial?] → analyser
+ * 当前空间音频内联于 EngineV3：IEQ → 空间处理 → 最终 Limiter。
+ * 旧独立 SpatialNode 的契约类型仍用于融合层/测试；接线以实际宿主源码为准。
  *
  * 与 V3EngineParams 完全解耦：不进入场景快照（像音量一样是全局设置），
- * 独立持久化于 localStorage（waveforge:spatial-params）。EngineV3 零改动。
+ * EngineV3 的 SpatialSettings 是该参数模型的投影，随引擎快照更新。
  * 角度单位：度；距离单位：米。
  */
 
@@ -17,8 +17,8 @@ import type { KeyMap } from './keymap'
 /** 空间模式：off=关闭 / instant=一键空间化 / headLocked=头锁定环绕 / world=世界漫游 / stage=舞台影院 */
 export type SpatialMode = 'off' | 'instant' | 'headLocked' | 'world' | 'stage'
 
-/** 输出模式：binaural=双耳 HRTF / stereo=立体声下混（干声直通）/ multichannel=多声道输出映射（2 声道设备退化为 stereo） */
-export type OutputMode = 'binaural' | 'stereo' | 'multichannel'
+/** 空间渲染仅提供双耳立体声输出。 */
+export type OutputMode = 'binaural'
 
 /** 房间预设（混响语义；off=无房间模拟） */
 export type RoomPreset = 'off' | 'studio' | 'hall' | 'stage' | 'church' | 'outdoor' | 'bathroom' | 'corridor'
@@ -26,7 +26,7 @@ export type RoomPreset = 'off' | 'studio' | 'hall' | 'stage' | 'church' | 'outdo
 /** 距离衰减模型 */
 export type DistanceModel = 'inverse' | 'linear' | 'exponential'
 
-/** HRTF 插值模式：nearest=最近邻（默认）/ spherical=球谐插值（性能模式 quality 档启用，见 SpatialParams.perfMode） */
+/** HRTF 插值模式：nearest=最近邻 / spherical=连续插值（实测环时间对齐，解析网格球谐） */
 export type HrtfInterpMode = 'nearest' | 'spherical'
 
 /** 卷积模式：partitioned=FFT 分区卷积 / time=时域直接卷积 */
@@ -42,14 +42,10 @@ export interface InstantSpatialSettings {
   room: RoomPreset
   /** 房间混响混合 0..1（叠加在双耳湿信号上） */
   roomAmount: number
-  /**
-   * 多声道输入自动映射（默认 false；UI 开关后续 wave）：
-   * true 时 instant 布局按输入声道数自动映射——输入 >2 声道（5.1/7.1）→
-   * multichannelLayout（融合层按处理器 stats 回传的 inputChannels 推导，
-   * speaker.channel 按标准声道序路由，后端 processMulti 逐声道双耳渲染）；
-   * ≤2 声道 → 常规 instantSpeakers（±spreadDeg/2 立体声对，行为与现状一致）。
-   */
+  /** Multi-channel mapping toggle; the selected layout defines discrete input order. */
   multichannelAuto: boolean
+  /** Physical input order used when multichannelAuto is enabled. */
+  multichannelLayout: 'auto' | 'quad' | '51' | '71' | '714'
 }
 
 /** 单个虚拟扬声器配置（模式 B 自定义布局用；角度=度，距离=米） */
@@ -59,8 +55,14 @@ export interface VirtualSpeakerCfg {
   distance: number // 米
   /** 0..2 */
   gain: number
-  /** 0..1 扩散度（占位，后端可忽略） */
+  /** 0..1：点声源到对称扩散声源。 */
   size: number
+  /** 0..1：湿声输入从路由节目声道渐变到立体声侧向残差。 */
+  diffuse?: number
+  /** 侧向残差极性，+1 保持、-1 反相；缺省 +1。 */
+  polarity?: number
+  /** 自定义输入绑定；缺省由布局确定，移动时不改变绑定。 */
+  route?: 'l' | 'r' | 'both' | 'side'
   /**
    * 静音标记（右键菜单「静音/Solo」；缺省 undefined=false——未静音）。
    * 静音在后端渲染层以增益 0 表达（fusion headLocked 分支置零）；Solo 语义
@@ -98,11 +100,13 @@ export interface TrajectoryKeyframes {
 
 /** 模式 C：世界漫游（听者 + 声源对象；移动/旋转由 controller 纯函数驱动，方位映射见 fusion world 分支） */
 export interface WorldSettings {
+  /** 可选物理传播时间；默认关闭，避免立体声节目与延迟副本形成明显梳状滤波。 */
+  propagation?: boolean
   /** 移动速度 m/s（0.5..5） */
   moveSpeed: number
   /** 听者世界坐标 + 朝向（默认原点前方偏上 1.6m、yaw=0 朝 +Z） */
   listener: ListenerState
-  /** 声源对象列表（默认 4 个演示源：人声/吉他/鼓组/环境声，见 createDefaultSpatialParams） */
+  /** 声源对象列表（默认 4 个虚拟节目声源，复用立体声输入，见 createDefaultSpatialParams） */
   sources: AudioObject[]
   /** 播放时钟（秒，默认 0；UI 时间预览用，自动随曲目播放后续 wave） */
   playhead: number
@@ -160,7 +164,6 @@ export interface SpatialParams {
    * 5.1/其它→6；显式设置时优先于此推导。真实设备声道能力检测 / setSinkId
    * 设备选择后续 wave。
    */
-  multichannelChannels?: 6 | 8
   /**
    * 输出设备 sinkId（AudioContext.setSinkId 目标；缺省 undefined = 系统默认设备）。
    * 经 fusion.setOutputDevice 应用（已接线上下文即时热切换）并随快照整体持久化
@@ -191,10 +194,18 @@ export interface AudioObject {
   position: { x: number; y: number; z: number }
   gain: number
   size: number
+  /** 0..1：湿声由路由节目声道渐变到立体声侧向残差。 */
+  diffuse?: number
+  /** 侧向残差极性，+1 保持、-1 反相；缺省 +1。 */
+  polarity?: number
+  /** 固定的节目输入绑定；缺省按对象初始位置确定，与移动后的方位无关。 */
+  route?: 'l' | 'r' | 'both' | 'side'
 }
 
 /** 环境声 Ambisonics 上混（FOA 环境场 → 4 方向虚拟扬声器，叠加到各模式主渲染） */
 export interface AmbienceSettings {
+  /** 主成分估计非相干残差，或兼容旧的 L-R 差分。 */
+  extraction?: 'pca' | 'difference'
   enabled: boolean
   /** 环境声混合 0..1 */
   amount: number
@@ -207,17 +218,26 @@ export interface AmbienceSettings {
  */
 export interface HrtfGrid {
   sampleRate: number
-  /** 度，升序，覆盖 -180..180 */
+  /** 度，升序；没有 rings 时为每个仰角共用的方位网格。 */
   azimuths: number[]
   /** 度，升序 */
   elevations: number[]
   hrirLength: number
   left: Float32Array
   right: Float32Array
+  /** 实测数据可保留不同仰角的原始采样环；offset 为该环第一个方向的索引（非样本索引）。 */
+  rings?: { elevation: number; azimuths: number[]; offset: number }[]
+  /** 数据出处；渲染器不依赖此字符串。 */
+  source?: string
+  /** 实测 HRIR 相对卷积分区起点的主到达时间；用于对齐音乐干路。 */
+  referenceDelaySamples?: number
 }
 
 /** 虚拟扬声器：输入声道按 channel 路由，HRTF 双耳渲染后求和 */
 export interface VirtualSpeaker {
+  roomPosition?: { x: number; y: number; z: number }
+  /** 轨迹声源的径向速度 m/s，正值远离听者；传播读头直接生成一次多普勒变化。 */
+  propagationVelocity?: number
   /** 输入声道索引（当前立体声图：0=L，1=R） */
   channel: number
   azimuthDeg: number
@@ -233,10 +253,28 @@ export interface VirtualSpeaker {
    * renderAmbience 注释）；缺省 undefined = 普通渲染（后端 HRTF 卷积路径）。
    */
   ambience?: boolean
+  /** 稳定的声源标识，控制更新及轨迹以此对齐。 */
+  id?: string
+  /** 立体声派生总线；缺省使用 channel。 */
+  route?: 'l' | 'r' | 'both' | 'side'
+  /** 0..1：湿声输入从路由节目声道渐变到立体声侧向残差。 */
+  diffuse?: number
+  /** 世界模式可启用真实传播延迟，默认不加入距离内容延迟。 */
+  propagation?: boolean
+  /** 侧向残差极性，+1 保持、-1 反相；缺省 +1。 */
+  polarity?: number
 }
 
 /** 后端渲染配置（融合层由 SpatialParams.mode 计算产出，全量替换语义） */
 export interface SpatialRenderConfig {
+  ambienceExtraction?: 'pca' | 'difference'
+  roomListener?: ListenerState
+  lfeChannel?: number
+  earlyAmount?: number
+  lateAmount?: number
+  earlyReflectionModel?: 'cues' | 'spectral'
+  /** 房间镜像反射阶数 0..3；缺省保持后端设置。 */
+  earlyReflectionOrders?: number
   speakers: VirtualSpeaker[]
   room: RoomPreset
   roomAmount: number
@@ -251,7 +289,7 @@ export interface SpatialRenderConfig {
   convolution: ConvolutionMode
   masterGain: number
   /** 多普勒（§4.6，模式 C 专属）：听者速度（世界坐标 m/s）。缺省 = 无多普勒。
-   *  fusion world 分支填默认 {0,0,0}，UI 层移动听者时随 config 更新（本波引擎侧只留接口）。 */
+   *  兼容旧调用；启用物理传播的声源由传播读头生成多普勒，不再叠加该重采样器。 */
   dopplerVelocity?: { x: number; y: number; z: number }
   /** 遮挡/衍射简化（§4.7，模式 C）：0..1 全局遮挡量——每 speaker 增益
    *  gain·(1−0.8·occlusion) + 空气式低通 fc = 12000·(1−occlusion) Hz（系数公式与
@@ -271,6 +309,20 @@ export interface SpatialRenderConfig {
    * 淹没主渲染）。缺省 undefined = 环境混合器关闭（无 ambience 附加，行为与现状一致）。
    */
   ambienceAmount?: number
+  /** 房间几何缩放，缺省 1。 */
+  roomSize?: number
+  /** 关闭空间渲染时以同一后端平滑退出；缺省为开启。 */
+  enabled?: boolean
+  /** 预留给融合层对象总线选择；当前 EngineV3 立体声后端不读取此开关。 */
+  objectRendering?: boolean
+  /** 0..1：将湿声侧向分量平滑混向对齐后的原始侧向分量，避免立体声宽度塌陷。 */
+  stereoPreservation?: number
+  /** natural 保留近场音乐高频；实测网格缺省 natural，解析网格缺省 legacy。 */
+  airAbsorption?: 'natural' | 'legacy'
+  /** 同一节目声道被多只扬声器复用时按幅度和归一，适合立体声音乐床。 */
+  coherentInputNormalization?: boolean
+  /** 立体声音乐床的中声道保真分频；高于此频率逐渐保留原声，0 为旧干湿混合。 */
+  musicBedMidCrossoverHz?: number
 }
 
 /** 默认空间参数（与 createDefaultParams 同风格） */
@@ -284,23 +336,22 @@ export function createDefaultSpatialParams(): SpatialParams {
     // 默认平衡档（quality 球谐插值 / balanced·lowLatency 最近邻，fusion 按此映射 hrtfInterp）
     perfMode: 'balanced',
     masterGain: 0.9,
-    instant: { spreadDeg: 60, amount: 0.7, room: 'studio', roomAmount: 0.15, multichannelAuto: false },
+    instant: { spreadDeg: 90, amount: 0.8, room: 'studio', roomAmount: 0.2,
+      multichannelAuto: false, multichannelLayout: '51' },
     // 默认 5.1 布局，speakers 取 51 预设副本（与 layouts.ts 单事实源一致）；
     // routes 空数组 = 全按方位角就近路由（行为不回归）
     headLocked: { layout: '51', speakers: createLayoutSpeakers('51'), heightLayer: true, bottomLayer: true, routes: [] },
-    // 模式 C 默认：听者立于原点前方 1.6m 高朝 +Z；4 个演示声源——
-    //   人声   (-2, 1.6, 4)  左前近场
-    //   吉他   (-5, 1.6, 6)  左前远场
-    //   鼓组   ( 3, 1.6, 7)  右前远场
-    //   环境声 ( 0, 2.5,10)  正前高空（扩散：size 0.5、增益 0.6）
+    // 模式 C 默认：4 个虚拟声源复用立体声节目，不代表已分离的人声/乐器。
+    // 保留旧 id 供用户既有位置和轨迹快照兼容，route 固定节目输入。
     world: {
+      propagation: false,
       moveSpeed: 2,
       listener: { position: { x: 0, y: 1.6, z: 0 }, yaw: 0, pitch: 0, roll: 0 },
       sources: [
-        { id: 'vocal', position: { x: -2, y: 1.6, z: 4 }, gain: 1, size: 0 },
-        { id: 'guitar', position: { x: -5, y: 1.6, z: 6 }, gain: 1, size: 0 },
-        { id: 'drums', position: { x: 3, y: 1.6, z: 7 }, gain: 1, size: 0 },
-        { id: 'ambience', position: { x: 0, y: 2.5, z: 10 }, gain: 0.6, size: 0.5 },
+        { id: 'vocal', position: { x: -2, y: 1.6, z: 4 }, gain: 1, size: 0, route: 'l' },
+        { id: 'guitar', position: { x: -5, y: 1.6, z: 6 }, gain: 1, size: 0, route: 'l' },
+        { id: 'drums', position: { x: 3, y: 1.6, z: 7 }, gain: 1, size: 0, route: 'r' },
+        { id: 'ambience', position: { x: 0, y: 2.5, z: 10 }, gain: 0.6, size: 0.5, route: 'both' },
       ],
       // 播放时钟默认 0 秒、无轨迹（声源静止于 sources 静态位置，行为不回归）、无遮挡
       playhead: 0,

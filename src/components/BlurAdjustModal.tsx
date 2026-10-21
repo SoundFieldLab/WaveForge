@@ -58,6 +58,21 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
   // 处理同款做法）；localStorage 只在松手/保存时落盘（其他组件仅在挂载时读取它）。
   const pendingBlurRef = useRef<number | null>(null)
   const blurFrameRef = useRef<number | null>(null)
+  // 保存/取消后延迟重开设置面板的定时器：必须在卸载时清掉。
+  // 否则 jsdom 卸载后（window 已不存在）定时器仍会触发 window.dispatchEvent，
+  // 抛 "ReferenceError: window is not defined" 污染同进程的其他测试（CI 实测）。
+  const reopenTimerRef = useRef<number | null>(null)
+
+  /** 延迟重开设置面板；同一时刻只保留一个定时器，卸载即取消。 */
+  const scheduleReopenSettings = useCallback(() => {
+    if (reopenTimerRef.current !== null) window.clearTimeout(reopenTimerRef.current)
+    reopenTimerRef.current = window.setTimeout(() => {
+      reopenTimerRef.current = null
+      // 运行环境可能已随卸载/销毁失效（测试 teardown、窗口关闭），此时静默跳过。
+      if (typeof window === 'undefined') return
+      window.dispatchEvent(new CustomEvent('reopenSettings'))
+    }, 100)
+  }, [])
 
   const commitBlur = useCallback((value: number) => {
     localStorage.setItem('cardBlurAmount', value.toString())
@@ -103,6 +118,10 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
       localStorage.setItem('cardBlurAmount', pending.toString())
       window.dispatchEvent(new CustomEvent('cardBlurAmountChanged', { detail: pending }))
     }
+    if (reopenTimerRef.current !== null) {
+      window.clearTimeout(reopenTimerRef.current)
+      reopenTimerRef.current = null
+    }
   }, [])
   
   const handleSliderMouseMove = (e: React.MouseEvent<HTMLInputElement>) => {
@@ -132,9 +151,7 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
     commitBlurNow(blurAmount)
     onClose()
     // 保存后重新打开设置面板
-    setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('reopenSettings'))
-    }, 100)
+    scheduleReopenSettings()
   }
   
   const handleCancel = () => {
@@ -142,9 +159,7 @@ export default function BlurAdjustModal({ show, onClose, playerTheme = 'dark', o
     commitBlurNow(initialBlurAmount)
     onClose()
     // 取消后也重新打开设置面板
-    setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('reopenSettings'))
-    }, 100)
+    scheduleReopenSettings()
   }
   
   return (

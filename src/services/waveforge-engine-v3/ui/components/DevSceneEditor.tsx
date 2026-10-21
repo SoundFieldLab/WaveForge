@@ -1,3 +1,4 @@
+import { themeVariables } from '../hse-theme'
 /**
  * 开发者场景编辑器 —— 微调内置组合场景并保存为参数覆盖
  *
@@ -6,7 +7,7 @@
  * 保存写入 sceneStore 覆盖层（localStorage 持久化），可一键还原出厂默认值。
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { X, RotateCcw, Save, PencilRuler, Volume2 } from 'lucide-react'
 import { Toggle, Slider, Segmented, RangeStyle } from './Primitives'
 import type { HSETheme } from '../hse-theme'
@@ -37,15 +38,29 @@ const fmtDb = (v: number) => `${v > 0 ? '+' : ''}${v.toFixed(1).replace(/\.0$/, 
 export default function DevSceneEditor({ scene, theme, bridge, controller, onClose, onSaved }: DevSceneEditorProps) {
   const [draft, setDraft] = useState<V3EngineParams>(() => deepCopy(scene.params))
   const [preview, setPreview] = useState(true)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef(onClose)
+  const titleId = useId()
+  closeRef.current = onClose
 
-  // Esc 关闭（不保存）
+  // 弹窗接管键盘焦点，关闭后回到打开它的场景按钮。
   useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const dialog = dialogRef.current
+    dialog?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') { e.stopPropagation(); closeRef.current(); return }
+      if (e.key !== 'Tab' || !dialog) return
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'))
+        .filter(control => control.getClientRects().length > 0)
+      const first = controls[0], last = controls[controls.length - 1]
+      if (!first) { e.preventDefault(); dialog.focus(); return }
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && (document.activeElement === last || document.activeElement === dialog)) { e.preventDefault(); first.focus() }
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+    dialog?.addEventListener('keydown', onKey)
+    return () => { dialog?.removeEventListener('keydown', onKey); previous?.focus() }
+  }, [])
 
   // 试听必须保留实时音量通道：预设快照不得固化用户音量（与 sceneStore 入库清洗同一约束）
   const pushPreview = (next: V3EngineParams) => {
@@ -109,22 +124,20 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
   return (
     <div
       className="fixed inset-0 z-[95] flex items-center justify-center p-4"
-      style={{ backgroundColor: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)', WebkitBackdropFilter: 'blur(6px)' }}
+      style={{ backgroundColor: 'rgba(0,0,0,0.5)' }}
       onClick={onClose}
     >
       <RangeStyle theme={theme} />
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
-        aria-label={`编辑场景 ${scene.name}`}
+        aria-labelledby={titleId}
+        tabIndex={-1}
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-3xl"
+        className="hse-floating-layer @container w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-3xl"
         style={{
-          background: theme.panelBg,
-          backdropFilter: theme.glassBlur,
-          WebkitBackdropFilter: theme.glassBlur,
-          border: `1px solid ${theme.panelBorder}`,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.45)',
+          ...themeVariables(theme),
           outline: 'none',
         }}
       >
@@ -137,14 +150,14 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
               <PencilRuler className="w-5 h-5" style={{ color: theme.accentColor }} />
             </div>
             <div>
-              <div className={`${theme.textPrimary} text-sm font-semibold`}>编辑场景 · {scene.name}</div>
+              <h2 id={titleId} className={`${theme.textPrimary} text-sm font-semibold`}>编辑场景 · {scene.name}</h2>
               <div className={`${theme.textTertiary} text-[10px]`}>
                 开发者模式{scene.overridden ? ' · 已有本地微调' : ''}
               </div>
             </div>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors">
-            <X className="w-4 h-4 text-white/60" />
+          <button type="button" onClick={onClose} aria-label="关闭场景编辑器" className="hse-glass-button rounded-lg p-2 transition-colors">
+            <X className="w-4 h-4 text-[#536b66]" />
           </button>
         </div>
 
@@ -154,18 +167,18 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
             <div className="flex items-center gap-2 min-w-0">
               <Volume2 className="w-4 h-4 shrink-0" style={{ color: theme.accentColor }} />
               <span className={`${theme.textPrimary} text-xs shrink-0`}>边调边听</span>
-              <span className={`${theme.textTertiary} text-[10px] truncate`}>(改动即时下发引擎，不影响音量)</span>
+              <span className={`${theme.textSecondary} hidden text-xs @min-[30rem]:inline`}>音量保持当前设置</span>
             </div>
-            <Toggle checked={preview} onChange={setPreview} theme={theme} />
+            <Toggle label="边调边听" checked={preview} onChange={setPreview} theme={theme} />
           </div>
 
           {/* EQ 10 段 */}
           <div className="rounded-xl p-3 space-y-1" style={sectionStyle}>
             <div className="flex items-center justify-between mb-1">
               <span className={titleCls}>均衡器（专业 10 段）</span>
-              <Toggle checked={draft.eq.enabled} onChange={(v) => update((d) => { d.eq.enabled = v })} theme={theme} />
+              <Toggle label="启用场景均衡器" checked={draft.eq.enabled} onChange={(v) => update((d) => { d.eq.enabled = v })} theme={theme} />
             </div>
-            <div className="grid grid-cols-5 gap-x-4 gap-y-1">
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 @min-[30rem]:grid-cols-5">
               {eqBands.map((b, i) => (
                 <Slider
                   key={`${EQ_LABELS[i]}-${i}`}
@@ -186,7 +199,7 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
           <div className="rounded-xl p-3 space-y-1" style={sectionStyle}>
             <div className="flex items-center justify-between mb-1">
               <span className={titleCls}>动态压缩</span>
-              <Toggle checked={draft.compressor.enabled} onChange={(v) => update((d) => { d.compressor.enabled = v })} theme={theme} />
+              <Toggle label="启用场景动态压缩" checked={draft.compressor.enabled} onChange={(v) => update((d) => { d.compressor.enabled = v })} theme={theme} />
             </div>
             <Slider label="阈值" value={draft.compressor.thresholdDb} min={-60} max={0} step={1} display={`${Math.round(draft.compressor.thresholdDb)}dB`}
               onChange={(v) => update((d) => { d.compressor.thresholdDb = v })} theme={theme} />
@@ -206,7 +219,7 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
           <div className="rounded-xl p-3 space-y-1" style={sectionStyle}>
             <div className="flex items-center justify-between mb-1">
               <span className={titleCls}>低音增强</span>
-              <Toggle checked={draft.bassEnhancer.enabled} onChange={(v) => update((d) => { d.bassEnhancer.enabled = v })} theme={theme} />
+              <Toggle label="启用场景低音增强" checked={draft.bassEnhancer.enabled} onChange={(v) => update((d) => { d.bassEnhancer.enabled = v })} theme={theme} />
             </div>
             <div className="flex items-center justify-between gap-3 py-1">
               <span className={`${theme.textTertiary} text-[11px] shrink-0`}>谐波类型</span>
@@ -234,7 +247,7 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
           <div className="rounded-xl p-3 space-y-1" style={sectionStyle}>
             <div className="flex items-center justify-between mb-1">
               <span className={titleCls}>齿音抑制</span>
-              <Toggle checked={draft.deesser.enabled} onChange={(v) => update((d) => { d.deesser.enabled = v })} theme={theme} />
+              <Toggle label="启用场景齿音抑制" checked={draft.deesser.enabled} onChange={(v) => update((d) => { d.deesser.enabled = v })} theme={theme} />
             </div>
             <Slider label="中心频率" value={draft.deesser.centerHz} min={4000} max={9000} step={50}
               display={`${draft.deesser.centerHz >= 1000 ? (draft.deesser.centerHz / 1000).toFixed(1) + 'k' : Math.round(draft.deesser.centerHz)}Hz`}
@@ -298,13 +311,13 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
               onChange={(v) => update((d) => { d.stereoWidth = v })} theme={theme} />
             <div className="flex items-center justify-between">
               <span className={`${theme.textTertiary} text-[11px]`}>夜间模式</span>
-              <Toggle checked={draft.nightMode.enabled} onChange={(v) => update((d) => { d.nightMode.enabled = v })} theme={theme} />
+              <Toggle label="启用场景夜间模式" checked={draft.nightMode.enabled} onChange={(v) => update((d) => { d.nightMode.enabled = v })} theme={theme} />
             </div>
             <Slider label="夜间强度" value={draft.nightMode.amount} min={0} max={10} step={0.5} display={draft.nightMode.amount.toFixed(1)}
               onChange={(v) => update((d) => { d.nightMode.amount = v; if (!d.nightMode.enabled && v > 0) d.nightMode.enabled = true })} theme={theme} />
             <div className="flex items-center justify-between pt-1">
               <span className={`${theme.textTertiary} text-[11px]`}>等响度补偿</span>
-              <Toggle checked={draft.loudnessCompensation.enabled} onChange={(v) => update((d) => { d.loudnessCompensation.enabled = v })} theme={theme} />
+              <Toggle label="启用场景等响度补偿" checked={draft.loudnessCompensation.enabled} onChange={(v) => update((d) => { d.loudnessCompensation.enabled = v })} theme={theme} />
             </div>
             <div className="flex items-center justify-between gap-3 pt-1">
               <span className={`${theme.textTertiary} text-[11px] shrink-0`}>补偿曲线</span>
@@ -326,29 +339,27 @@ export default function DevSceneEditor({ scene, theme, bridge, controller, onClo
         </div>
 
         {/* 底部操作条 */}
-        <div className="sticky bottom-0 z-10 px-5 py-3 flex items-center gap-2"
+        <div className="sticky bottom-0 z-10 flex flex-wrap items-center justify-end gap-2 px-5 py-3"
           style={{ background: theme.panelBg, borderTop: `1px solid ${theme.panelBorder}` }}>
           <button
             type="button"
             onClick={handleReset}
             disabled={!scene.overridden}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs text-white/60 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors disabled:opacity-35 disabled:cursor-not-allowed"
+            className={`hse-glass-button mr-auto flex min-h-9 items-center gap-1 rounded-lg px-3 py-1.5 text-xs ${theme.textSecondary}`}
           >
             <RotateCcw className="w-3 h-3" /> 还原出厂
           </button>
-          <div className="flex-1" />
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1.5 rounded-lg text-xs text-white/70 bg-white/5 border border-white/10 hover:bg-white/10 transition-colors"
+            className={`hse-glass-button min-h-9 rounded-lg px-3 py-1.5 text-xs ${theme.textSecondary}`}
           >
             关闭
           </button>
           <button
             type="button"
             onClick={handleSave}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-all hover:brightness-110"
-            style={{ backgroundColor: theme.accentColor, color: '#fff', boxShadow: `0 4px 14px ${theme.accentColor}44` }}
+            className="hse-glass-button hse-glass-primary flex min-h-9 items-center gap-1.5 rounded-lg px-4 py-1.5 text-xs font-medium"
           >
             <Save className="w-3.5 h-3.5" /> 保存到此场景
           </button>

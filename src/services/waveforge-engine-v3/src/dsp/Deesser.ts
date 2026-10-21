@@ -1,3 +1,4 @@
+import type { AudioBuffer } from './audioBuffer'
 /**
  * WaveForge v3 —— 动态齿音抑制（De-esser）
  *
@@ -6,15 +7,15 @@
  *   以及《音频算法技术文档.md》§4；本文件为全新自研实现。
  *
  * 信号流：
- *   1. 侧链提取：单声道和 (L+R)/2 → RBJ 带通(centerHz, q) 取出齿音频段 s[n]；
- *   2. 包络检测：对 s[n] 平方，按 attack(默认 1ms)/release(默认 80ms) 一阶平滑得到 env；
+ *   1. 侧链提取：左右分别经 RBJ 带通(centerHz, q)，避免反相齿音在单声道求和时抵消；
+ *   2. 包络检测：左右带通能量平均后按 attack(默认 1ms)/release(默认 80ms) 平滑得到 env；
  *   3. dB 域阈值压缩：levelDb = 10·log10(env)，超过 thresholdDb 的部分按 ratio 衰减：
  *        reduction = (levelDb − thresholdDb)·(1 − 1/ratio)，g = 10^(−reduction/20)；
  *   4. 增益施加：
- *      - 分带式（splitBand=true，推荐）：Linkwitz-Riley 4 阶交叉（2 级 Q=0.7071
- *        低通/高通于同一截止），低频带 LP2(x) 原样、高频带 HP2(x) 乘以 g：
- *        out = LP2(x) + g·HP2(x)。g=1 时 LP2+HP2 恰为全通（幅度不变），
- *        中低频不受影响，齿音频段被精确压制；
+ *      - 分带式（splitBand=true，推荐）：互补一阶低通/高通，
+ *        高频残差 x−LP(x) 按 g 衰减：out = x + (g−1)·(x−LP(x))。
+ *        一阶 LP 相位至多旋转 90°，部分干湿混合不会在交叉点深陷；
+ *        g=1 逐样本恒等，g=0 为低通结果。
  *      - 宽带式（splitBand=false）：整体乘以 g —— out = x·g；
  *   5. mix 干湿混合：out = x + mix·(processed − x)。
  */
@@ -23,13 +24,13 @@ import type { DeesserSettings } from '../types'
 
 /** 数值钳制 */
 function clamp(v: number, lo: number, hi: number): number {
+  if (!Number.isFinite(v)) return lo
   return v < lo ? lo : v > hi ? hi : v
 }
 
 /** 一阶平滑系数：α = 1 − exp(−1/(τ·fs))，τ 由毫秒换算 */
 function onePoleCoef(timeMs: number, fs: number, floorMs: number): number {
-  // NaN/Inf 回落 floor（同 Compressor：损坏快照透传 NaN 会让输出永久静音）
-  const ms = Math.max(Number.isFinite(timeMs) ? timeMs : floorMs, floorMs)
+  const ms = Number.isFinite(timeMs) ? Math.max(timeMs, floorMs) : floorMs
   return 1 - Math.exp(-1 / ((ms / 1000) * fs))
 }
 
@@ -48,7 +49,7 @@ class Biquad {
 
   /** 设计系数；type 支持 lowpass / highpass / bandpass（0dB 峰值增益） */
   design(type: 'lowpass' | 'highpass' | 'bandpass', f0: number, q: number, fs: number): void {
-    const f = clamp(f0, 10, fs * 0.49)
+    const f = clamp(f0, Math.min(10, fs * 0.45), fs * 0.45)
     const qq = clamp(q, 0.05, 20)
     const w0 = (2 * Math.PI * f) / fs
     const cw = Math.cos(w0)
@@ -92,28 +93,49 @@ class Biquad {
   }
 }
 
+class OnePoleLowpass {
+  private b = 0
+  private a1 = 0
+  private prevInput = 0
+  private prevOutput = 0
+
+  design(cutoffHz: number, fs: number): void {
+    const k = Math.tan(Math.PI * cutoffHz / fs)
+    this.b = k / (1 + k)
+    this.a1 = (k - 1) / (k + 1)
+  }
+
+  process(x: number): number {
+    const y = this.b * (x + this.prevInput) - this.a1 * this.prevOutput
+    this.prevInput = x
+    this.prevOutput = y
+    return y
+  }
+
+  reset(): void {
+    this.prevInput = 0
+    this.prevOutput = 0
+  }
+}
+
 export class Deesser {
   private fs: number
   private enabled = true
   private centerHz = 6000
   private q = 0.7
   private thresholdDb = -30
+  private thresholdPower = 0.001
   private ratio = 8
   private splitBand = true
   private mix = 1
   private attackCoef = 0
   private releaseCoef = 0
   private env = 0
-  private readonly bp = new Biquad()
-  // Linkwitz-Riley 4 阶交叉：每通道 2 级 LP + 2 级 HP（Q=0.7071）
-  private readonly lpL1 = new Biquad()
-  private readonly lpL2 = new Biquad()
-  private readonly lpR1 = new Biquad()
-  private readonly lpR2 = new Biquad()
-  private readonly hpL1 = new Biquad()
-  private readonly hpL2 = new Biquad()
-  private readonly hpR1 = new Biquad()
-  private readonly hpR2 = new Biquad()
+  private readonly bpL = new Biquad()
+  private readonly bpR = new Biquad()
+  // 一阶互补分带：低通保留原相位参考，高通由原声减低通得到
+  private readonly lpL = new OnePoleLowpass()
+  private readonly lpR = new OnePoleLowpass()
 
   constructor(fs: number) {
     if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
@@ -127,81 +149,70 @@ export class Deesser {
 
   /** 参数即时生效：钳制 + 系数重算；包络状态保留（避免参数变化时爆音） */
   private applyParams(p: DeesserSettings): void {
+    const activating = !this.enabled && p.enabled
     this.enabled = p.enabled
-    this.centerHz = clamp(p.centerHz, 100, this.fs * 0.45)
-    this.q = clamp(p.q, 0.1, 20)
-    this.thresholdDb = clamp(p.thresholdDb, -80, 0)
-    this.ratio = clamp(p.ratio, 1, 100)
+    this.centerHz = clamp(Number.isFinite(p.centerHz) ? p.centerHz : 6000, Math.min(100, this.fs * 0.45), this.fs * 0.45)
+    this.q = clamp(Number.isFinite(p.q) ? p.q : 0.7, 0.1, 20)
+    this.thresholdDb = clamp(Number.isFinite(p.thresholdDb) ? p.thresholdDb : -30, -80, 0)
+    this.thresholdPower = Math.pow(10, this.thresholdDb / 10)
+    this.ratio = clamp(Number.isFinite(p.ratio) ? p.ratio : 8, 1, 100)
     this.splitBand = p.splitBand
-    this.mix = clamp(p.mix, 0, 1)
-    this.attackCoef = onePoleCoef(p.attackMs, this.fs, 0.05)
-    this.releaseCoef = onePoleCoef(p.releaseMs, this.fs, 1)
+    this.mix = clamp(Number.isFinite(p.mix) ? p.mix : 1, 0, 1)
+    this.attackCoef = onePoleCoef(Number.isFinite(p.attackMs) ? p.attackMs : 1, this.fs, 0.05)
+    this.releaseCoef = onePoleCoef(Number.isFinite(p.releaseMs) ? p.releaseMs : 80, this.fs, 1)
     // 侧链带通：齿音频段
-    this.bp.design('bandpass', this.centerHz, this.q, this.fs)
-    // 分带式交叉：截止取 centerHz·0.6（下限 2.5kHz，上限 fs·0.45），LR-4（每级 Q=0.7071）
-    const xo = clamp(this.centerHz * 0.6, 2500, this.fs * 0.45)
-    this.lpL1.design('lowpass', xo, 0.7071, this.fs)
-    this.lpL2.design('lowpass', xo, 0.7071, this.fs)
-    this.lpR1.design('lowpass', xo, 0.7071, this.fs)
-    this.lpR2.design('lowpass', xo, 0.7071, this.fs)
-    this.hpL1.design('highpass', xo, 0.7071, this.fs)
-    this.hpL2.design('highpass', xo, 0.7071, this.fs)
-    this.hpR1.design('highpass', xo, 0.7071, this.fs)
-    this.hpR2.design('highpass', xo, 0.7071, this.fs)
+    this.bpL.design('bandpass', this.centerHz, this.q, this.fs)
+    this.bpR.design('bandpass', this.centerHz, this.q, this.fs)
+    // 截止取 centerHz·0.6；采样率较低时仍严格小于 Nyquist
+    const xo = clamp(this.centerHz * 0.6, Math.min(2500, this.fs * 0.45), this.fs * 0.45)
+    this.lpL.design(xo, this.fs)
+    this.lpR.design(xo, this.fs)
+    if (activating) this.reset()
   }
 
   /** 就地处理立体声（l/r 原地改写） */
-  processStereo(l: Float32Array, r: Float32Array): void {
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
     if (!this.enabled) return // 恒等直通
-    const n = l.length
+    const n = Math.min(l.length, r.length)
     const attack = this.attackCoef
     const release = this.releaseCoef
     const thresholdDb = this.thresholdDb
+    const thresholdPower = this.thresholdPower
     const invRatio = 1 - 1 / this.ratio
     const mix = this.mix
     const split = this.splitBand
     for (let i = 0; i < n; i++) {
       const xl = l[i]
       const xr = r[i]
-      // 1) 侧链：单声道和 → 带通
-      const s = this.bp.process(0.5 * (xl + xr))
+      // 1) 左右带通后取能量均值，同相输入保持旧触发电平，反相输入不抵消
+      const sl = this.bpL.process(xl)
+      const sr = this.bpR.process(xr)
       // 2) 平方包络 + attack/release 一阶平滑
-      const p = s * s
+      const p = 0.5 * (sl * sl + sr * sr)
       if (p > this.env) this.env += attack * (p - this.env)
       else this.env += release * (p - this.env)
-      // 3) dB 域阈值压缩
-      const levelDb = 10 * Math.log10(this.env + 1e-12)
-      const over = levelDb - thresholdDb
-      const reduction = over > 0 ? over * invRatio : 0
-      const g = Math.pow(10, -reduction / 20)
+      // 3) dB 域阈值压缩；低于阈值时避免逐样本对数/幂运算
+      const over = this.env > thresholdPower ? 10 * Math.log10(this.env) - thresholdDb : 0
+      const attenuation = over > 0 ? mix * (1 - Math.pow(10, -over * invRatio / 20)) : 0
       if (split) {
-        // 分带式：LP2 + g·HP2；g=1 时 LR-4 交叉重建全通（幅度不变）
-        const lowL = this.lpL2.process(this.lpL1.process(xl))
-        const lowR = this.lpR2.process(this.lpR1.process(xr))
-        const highL = this.hpL2.process(this.hpL1.process(xl))
-        const highR = this.hpR2.process(this.hpR1.process(xr))
-        const outL = lowL + g * highL
-        const outR = lowR + g * highR
-        l[i] = xl + mix * (outL - xl)
-        r[i] = xr + mix * (outR - xr)
+        // 滤波器始终跟踪输入，关闭衰减或重新触发时不会丢失低通历史
+        const lowL = this.lpL.process(xl)
+        const lowR = this.lpR.process(xr)
+        l[i] = xl - attenuation * (xl - lowL)
+        r[i] = xr - attenuation * (xr - lowR)
       } else {
-        // 宽带式：整体增益
-        l[i] = xl + mix * (xl * g - xl)
-        r[i] = xr + mix * (xr * g - xr)
+        l[i] = xl * (1 - attenuation)
+        r[i] = xr * (1 - attenuation)
       }
     }
   }
 
   reset(): void {
     this.env = 0
-    this.bp.reset()
-    this.lpL1.reset()
-    this.lpL2.reset()
-    this.lpR1.reset()
-    this.lpR2.reset()
-    this.hpL1.reset()
-    this.hpL2.reset()
-    this.hpR1.reset()
-    this.hpR2.reset()
+    this.bpL.reset()
+    this.bpR.reset()
+    this.lpL.reset()
+    this.lpR.reset()
   }
 }
+

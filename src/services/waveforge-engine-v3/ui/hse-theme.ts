@@ -46,7 +46,7 @@ const COLORS = {
   apricot: '#F6E2D3',
 }
 
-export function useHSETheme(): HSETheme {
+export function createHSETheme(): HSETheme {
   const accentColor = COLORS.accent
   return {
     dark: false,
@@ -68,8 +68,8 @@ export function useHSETheme(): HSETheme {
     navHoverBg: '#EEF6F3',
     textPrimary: 'text-[#153A37]',
     textSecondary: 'text-[#536B66]',
-    textTertiary: 'text-[#758983]',
-    textMuted: 'text-[#758983]',
+    textTertiary: 'text-[#5F756F]',
+    textMuted: 'text-[#5F756F]',
     inputBg: '#F3F8F6',
     trackBg: COLORS.track,
     trackFill: accentColor,
@@ -121,4 +121,21 @@ export function toLegacyTheme(t: HSETheme): {
     inputBg: t.inputBg,
     sliderTrack: t.sliderTrack,
   }
+}
+
+
+export function useHSETheme(): HSETheme { return createHSETheme() }
+
+/** 语义变量仅为快照新增空间控件适配，颜色来自主程序。 */
+export function themeVariables(theme: HSETheme): import('react').CSSProperties {
+  return {
+    '--md-sys-color-primary': theme.accentColor,
+    '--md-sys-color-primary-container': theme.accentDim,
+    '--md-sys-color-secondary': '#536B66', '--md-sys-color-tertiary': '#416986',
+    '--md-sys-color-error': '#A6362A', '--md-sys-color-background': '#F5F9F7',
+    '--md-sys-color-surface': '#FBFDFC', '--md-sys-color-surface-container': '#FFFFFF',
+    '--md-sys-color-surface-container-high': '#EEF6F3',
+    '--md-sys-color-on-surface': '#153A37', '--md-sys-color-on-surface-variant': '#536B66',
+    '--md-sys-color-outline-variant': theme.cardBorder,
+  } as import('react').CSSProperties
 }
