@@ -248,6 +248,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       renderStyle: 'focused',
       decorrelation: 0.35,
       earlyReflectionOrders: 3,
+      earlyReflectionModel: 'spectral',
       instant: { amount: 1, room: 'hall', roomAmount: 0.4 },
       budgetMode: 'quality',
       hrtfInterp: 'spherical',

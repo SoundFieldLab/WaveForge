@@ -117,7 +117,7 @@ npm run build
 - **空间音频虚拟声源静音（轮 3）**：头锁定/世界/舞台模式下，虚源 muted 或音量 0 时，进入空间后端前对相应节目声道加干声闸门（20ms 平滑），全部虚源静音时 dry+wet 一起消失，仍保留其它声道经 HRTF 的交叉声；受控引擎测试覆盖右源静音/全静音/音量 0；打包应用双虚源静音后输出 RMS=0（未静音 0.28/0.27）。
 - **空间音频强度增强（轮 4）**：自然外化湿声映射改为 `amount·(0.5+0.5·amount)`（70% 时 0.595，旧 0.28；100% 全湿），stereoPreservation 0.2、音乐床分频 3500Hz；默认强度 0.8 / 展开 90° / 房间 0.2（仅新建/重置生效）。受控 worklet 左声道单频右耳串音：关闭 0%、70% 22.9%、100% 42.8%、focused 70% 42.6%；打包应用实时链路正常。
 - **虚拟扬声器上混（轮 5）**：headLocked 51/514/71/714 + 普通立体声（≤2 声道、inputFormat=channels）由 EngineV3 内部 StereoUpmixer 上混为 5.1（6ch）/7.1（8ch）/5.1.4（10ch）/7.1.4（12ch），再 processMulti 逐只 HRTF；custom 保持 L/R，真实多声道输入不二次上混；discrete/full wet（musicBed=0、stereoPreservation=0）。StereoUpmixer 新增 5.1.4/7.1.4 顶置层（3kHz 高通 mid/side，TFL/TFR=0.35·HP(L/R)、TRL/TRR=±0.4·HP((L-R)/2)，下混扣回）。实测 5.1 后端 6ch：FC RMS .1772、SL/SR .0400；5.1.4 顶置 .0145/.0149/.0107/.0107；180Hz 时顶置 .00027/0；5.1.4 与 5.1 双耳输出最大差 .0662。UI「一键虚拟 5.1 环绕」（focused/100%），不改 inputFormat。
-- **环绕去相关（轮 7）**：`StereoDecorrelator` 在 headLocked 上混后对 SL/SR/BL/BR 叠加 mid 短延迟副本（8.5–19.5ms 不同延迟、180Hz 高通、低增益），解决单声道/相关节目矩阵环绕为 0；`decorrelation` 0..1 默认 0，5.1 快捷 0.2、沉浸 7.1.4 0.35；真实多声道/custom 不处理；UI 新增「环绕去相关」滑杆；另增 earlyReflectionOrders 0..3（沉浸预设 3 阶）。规格 `docs/specs/spatial-decorrelation.md`。
+- **环绕去相关（轮 7）**：`StereoDecorrelator` 在 headLocked 上混后对 SL/SR/BL/BR 叠加 mid 短延迟副本（8.5–19.5ms 不同延迟、180Hz 高通、低增益），解决单声道/相关节目矩阵环绕为 0；`decorrelation` 0..1 默认 0，5.1 快捷 0.2、沉浸 7.1.4 0.35；真实多声道/custom 不处理；UI 新增「环绕去相关」滑杆；另增 earlyReflectionOrders 0..3（沉浸预设 3 阶），沉浸预设另用 earlyReflectionModel=spectral（完整 HRTF 频谱早反射）。规格 `docs/specs/spatial-decorrelation.md`。
 
 ## 6. 边界与残余未完成项（不得把边界写成已完成）
 

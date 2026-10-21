@@ -238,6 +238,7 @@ describe('空间页面完成度：头追入口和生命周期', () => {
     expect(p.instant.roomAmount).toBeCloseTo(0.4)
     expect(p.decorrelation).toBeCloseTo(0.35)
     expect(p.earlyReflectionOrders).toBe(3)
+    expect(p.earlyReflectionModel).toBe('spectral')
     expect(p.budgetMode).toBe('quality')
     expect(p.hrtfInterp).toBe('spherical')
     expect(p.inputFormat).toBe('channels')
