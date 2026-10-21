@@ -78,8 +78,8 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 | 基线 | 结果 |
 | --- | --- |
 | HSE 快照基线（交接 §7） | 109 文件通过 + 3 跳过；1134 项通过 + 16 跳过（16 = 5 项可选 LGPL SoundTouch 适配 + 11 项显式诊断微基准） |
-| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **117 文件（114 passed + 3 skipped）/ 1174 用例 = 1158 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
-| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **329 文件（325 passed + 4 skipped）/ 3187 用例 = 3170 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=4`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
+| HSE 模块最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **118 文件（115 passed + 3 skipped）/ 1176 用例 = 1160 passed + 16 skipped + 0 failed**（修复前 1155/1139） |
+| 全仓最终实测（2026-10-20 评审修复轮，`tests-final-review-fixes.log`） | **330 文件（326 passed + 4 skipped）/ 3189 用例 = 3172 passed + 17 skipped + 0 failed**（修复前 3165/3148；`--maxWorkers=4`；跳过 17 = 16 项 HSE 可选 LGPL/诊断微基准 + 1 项主程序可选依赖） |
 | 桌面测试（`npm run test:desktop`） | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | 历史数字 | 858 / 881 / 1017 / 1057 / 1069 等均为旧文档计数，**不能当当前结果** |
 

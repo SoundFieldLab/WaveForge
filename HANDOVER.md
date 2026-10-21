@@ -801,8 +801,8 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | 门禁 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查 | `npm run lint` | **通过，0 error** |
-| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **117 文件（114 passed + 3 skipped）/ 1174 用例 = 1158 passed + 16 skipped + 0 failed**（环绕去相关轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
-| 全仓测试 | `npx vitest run --maxWorkers=4` | **329 文件（325 passed + 4 skipped）/ 3187 用例 = 3170 passed + 17 skipped + 0 failed**（环绕去相关轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
+| HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **118 文件（115 passed + 3 skipped）/ 1176 用例 = 1160 passed + 16 skipped + 0 failed**（空间方案轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
+| 全仓测试 | `npx vitest run --maxWorkers=4` | **330 文件（326 passed + 4 skipped）/ 3189 用例 = 3172 passed + 17 skipped + 0 failed**（空间方案轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
 | Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **514,311 bytes（502.3 KiB）**，sha256 `b9d108d4…6c569e47`（`worklet-build.log`；环绕去相关前为 512,198B / `7b5bea51…ebaefed5`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
@@ -869,5 +869,6 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 - **空间音频虚拟扬声器（本轮核心）**：headLocked 51/514/71/714 在普通立体声（inputFormat=channels、输入≤2 声道）下由 EngineV3 内部 StereoUpmixer 上混为 5.1（6ch）/7.1（8ch）/5.1.4（10ch）/7.1.4（12ch），再走 processMulti 逐只 HRTF；custom 保持 L/R，真实多声道输入不二次上混；discrete/full wet（musicBed=0、stereoPreservation=0）。StereoUpmixer 新增 5.1.4/7.1.4：顶置由 3kHz 高通 mid/side 派生（TFL/TFR=0.35·HP(L/R)、TRL/TRR=±0.4·HP((L-R)/2)），并从 FL/FR 扣回下混贡献。实测 5.1 后端 6ch：FC RMS .1772、SL/SR .0400；5.1.4 顶置 .0145/.0149/.0107/.0107；180Hz 时顶置 .00027/0；5.1.4 与 5.1 双耳输出最大差 .0662。UI 新增「一键虚拟 5.1 环绕」（focused/100%），输入格式不变。
 - **空间音频沉浸 7.1.4 品质模式（轮 6）**：空间音频页新增「沉浸空间 7.1.4」一键预设：headLocked 714 + 顶置层 + focused + 100% + budgetMode quality + hrtfInterp spherical + hall/roomAmount 0.4 + early/late 1；普通立体声自动上混 12 路虚拟扬声器并逐只 HRTF；inputFormat 不变。规格见 `docs/specs/spatial-audio-immersive-714.md`。测试新增 714 的 12 路/顶置能量与 UI 参数用例（1173/3186）。
 - **空间音频环绕去相关（轮 7）**：新增 `StereoDecorrelator`，仅 headLocked 立体声上混后对 SL/SR/BL/BR 叠加 mid 短延迟副本（8.5–19.5ms、180Hz 高通、低增益），解决单声道/相关节目环绕声道接近 0 的问题；默认 `decorrelation=0` 逐样本旁路，5.1 快捷 0.2、沉浸 7.1.4 0.35；真实多声道/custom 不处理。另增 `earlyReflectionOrders` 0..3（沉浸预设 3 阶、UI「反射阶数」滑杆）。规格 `docs/specs/spatial-decorrelation.md`；测试新增单声道 dry/wet 环绕能量与 UI 参数断言（1174/3187）。
+- **空间方案本机保存（轮 8）**：`ui/spatialPresetStore.ts` 用 localStorage 保存完整 SpatialSettings 快照（最多 20 条、深拷贝、损坏 JSON 回空）；空间音频页「我的空间方案」可命名保存/点击应用/删除，方便 5.1/7.1.4/房间参数 A/B。规格 `docs/specs/spatial-presets.md`；新增 store 2 项测试（1176/3189）。
 - **评审确认但保留**（判断项/设计边界）：replayGainTags 仍是预留字段（QQ/网易云不返回标签，实际走 URL 扫描）；useAudioPlayer 的 deck 索引/源映射重复属可读性 smell，未在功能修复轮改动。
 

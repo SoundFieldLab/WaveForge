@@ -11,6 +11,7 @@ import { readActiveHrtf, saveActiveHrtf } from '../hrtfStore'
 import { HeadPoseFilter, type HeadPose } from '../../src/spatial/HeadPose'
 import { HeadTrackingInput } from '../headTrackingInput'
 import { HeadTrackingBridgeControls } from '../components/HeadTrackingBridgeControls'
+import { deleteSpatialPreset, loadSpatialPresets, saveSpatialPreset, type SpatialPreset } from '../spatialPresetStore'
 import { HEAD_LOCKED_LAYOUTS, SPATIAL_ROOM_OPTIONS } from '../components/spatialConstants'
 import { createLayoutSpeakers, headLockedSpeakers } from '../../src/spatial/layouts'
 import { createDefaultSpatialSettings, type SpatialSettings } from '../../src/types'
@@ -93,6 +94,8 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
   if (active) lastMode.current = spatial.mode as Exclude<SpatialMode, 'off'>
   const mode = active ? spatial.mode : lastMode.current
   const [advanced, setAdvanced] = useState(false)
+  const [presets, setPresets] = useState<SpatialPreset[]>(() => loadSpatialPresets())
+  const [presetName, setPresetName] = useState('')
   const [view, setView] = useState<'top' | 'side' | '3d'>(initialView)
   const [selected, setSelected] = useState<string | null>(null)
   const [followTrack, setFollowTrack] = useState(false)
@@ -257,6 +260,28 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
       detail: { message: '已切到沉浸空间 7.1.4（品质优先 · 11 只虚拟扬声器），点「试听空间效果」即可对比', type: 'info' },
     }))
   }
+  /** 保存当前空间快照到本机，方便在几套布局/房间之间快速 A/B。 */
+  const saveCurrentPreset = () => {
+    setPresets(saveSpatialPreset(presetName, current()))
+    setPresetName('')
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: '已保存当前空间方案；可在「我的空间方案」里快速切换', type: 'info' },
+    }))
+  }
+  const applyPreset = (preset: SpatialPreset) => {
+    patch(preset.settings)
+    lastMode.current = preset.settings.mode === 'off' ? 'instant' : preset.settings.mode
+    setSelected(null)
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: `已应用空间方案「${preset.name}」`, type: 'info' },
+    }))
+  }
+  const removePreset = (preset: SpatialPreset) => {
+    setPresets(deleteSpatialPreset(preset.id))
+    window.dispatchEvent(new CustomEvent('showToast', {
+      detail: { message: `已删除空间方案「${preset.name}」`, type: 'info' },
+    }))
+  }
   /**
    * 开启空间音频：强度为 0 时引擎会按旁路处理（UI 却会显示已启用），
    * 因此同时补默认强度，避免出现「开关打开了但没有效果」。
@@ -303,6 +328,23 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
         {mode === value && <Check className="hse-spatial-mode-check" size={16} aria-hidden="true" />}
       </button>)}
     </div>
+    <details className="mt-3 rounded-2xl border px-4 py-3" style={{ borderColor: theme.cardBorder, background: theme.inputBg }}>
+      <summary className={`cursor-pointer text-xs font-medium ${theme.textPrimary}`}>我的空间方案（{presets.length}）</summary>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <input aria-label="空间方案名称" value={presetName} onChange={event => setPresetName(event.currentTarget.value)}
+          placeholder="给当前方案起个名字（可留空）" maxLength={40}
+          className="min-h-9 min-w-40 flex-1 rounded-lg border px-3 text-xs" style={{ background: theme.panelBg, borderColor: theme.cardBorder, color: theme.textPrimary }} />
+        <ActionBtn theme={theme} onClick={saveCurrentPreset}>保存当前方案</ActionBtn>
+      </div>
+      {presets.length > 0
+        ? <div className="mt-3 flex flex-wrap gap-2">{presets.map(preset => <span key={preset.id} className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs"
+          style={{ background: theme.accentDim, color: theme.accentColor }}>
+          <button type="button" className="max-w-40 truncate text-left" onClick={() => applyPreset(preset)}>{preset.name}</button>
+          <button type="button" aria-label={`删除空间方案 ${preset.name}`} className="rounded-full px-1 text-[11px] opacity-70 hover:opacity-100"
+            onClick={() => removePreset(preset)}>×</button>
+        </span>)}</div>
+        : <p className={`mt-2 text-xs ${theme.textSecondary}`}>保存后可以把 5.1、7.1.4、不同房间/强度快速切回来对比。</p>}
+    </details>
     <section className="hse-spatial-surround-entry" aria-label="虚拟扬声器环绕快捷入口"
       style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: '12px 20px',
         padding: '14px 18px', borderRadius: '16px', border: `1px solid ${virtual51Active ? theme.accentColor : theme.cardBorder}`,
