@@ -91,7 +91,7 @@ HSE 3.5 = `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打磨
 Set-Location -LiteralPath 'D:\Code\ZCode\WaveForge'
 npm run lint
 npx vitest run src/services/waveforge-engine-v3
-npx vitest run --maxWorkers=8
+npx vitest run --maxWorkers=4
 npm run test:desktop
 node scripts/build-v3-worklet.mjs --force
 npm run verify:worklet
