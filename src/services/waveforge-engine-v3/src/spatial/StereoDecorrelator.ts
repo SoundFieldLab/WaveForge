@@ -6,14 +6,18 @@
  * 叠加到环绕声道，让相关内容也有非相干的后方/侧方反射线索。
  *
  * 它不是音源分离：不改变 StereoUpmixer 的矩阵契约，也不用于真实多声道输入或
- * custom 双扬声器布局。默认 amount=0 时逐样本旁路。
+ * custom 双扬声器布局。默认 amount=0 时逐样本旁路（但仍保持延迟线最新，
+ * 避免重新开启时重放旧节目）。
  */
 
 import type { AudioBuffer } from '../dsp/audioBuffer'
 
 export type DecorrelationLayout = '51' | '514' | '71' | '714'
 
-/** 环绕/后环绕声道在 HSE 上混输出中的索引（HSE 顺序见 StereoUpmixer）。 */
+/**
+ * 环绕/后环绕/顶置声道在 HSE 上混输出中的索引
+ * （HSE 顺序：FL FR FC LFE SL SR [BL BR] [TFL TFR TRL TRR]）。
+ */
 const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs: number; gain: number }[]> = {
   '51': [
     { channel: 4, delayMs: 8.5, gain: 0.28 },
@@ -27,14 +31,14 @@ const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs
     { channel: 7, delayMs: 6.5, gain: 0.1 },
   ],
   '71': [
-    { channel: 4, delayMs: 7.5, gain: 0.22 },
-    { channel: 5, delayMs: 11.5, gain: 0.22 },
+    { channel: 4, delayMs: 8.5, gain: 0.22 },
+    { channel: 5, delayMs: 12.5, gain: 0.22 },
     { channel: 6, delayMs: 15.5, gain: 0.18 },
     { channel: 7, delayMs: 19.5, gain: 0.18 },
   ],
   '714': [
-    { channel: 4, delayMs: 7.5, gain: 0.22 },
-    { channel: 5, delayMs: 11.5, gain: 0.22 },
+    { channel: 4, delayMs: 8.5, gain: 0.22 },
+    { channel: 5, delayMs: 12.5, gain: 0.22 },
     { channel: 6, delayMs: 15.5, gain: 0.18 },
     { channel: 7, delayMs: 19.5, gain: 0.18 },
     // 4 只顶置（TFL/TFR/TRL/TRR）用更短延迟的独立反射，避免上方只剩高频派生。
@@ -51,6 +55,10 @@ const HIGHPASS_HZ = 180
 /** 上混最多 12 声道；状态按声道索引放在定长数组里，热路径零分配。 */
 const MAX_CHANNELS = 16
 const MAX_TAPS = 8
+/** 构造期校验：tap 表超出定长容量会静默丢 tap，宁可启动即报错。 */
+const TAP_COUNT_MAX = Math.max(...Object.values(TAP_SPECS).map((specs) => specs.length))
+
+if (TAP_COUNT_MAX > MAX_TAPS) throw new RangeError('Tap table exceeds MAX_TAPS capacity')
 
 export class StereoDecorrelator {
   readonly sampleRate: number
@@ -80,16 +88,18 @@ export class StereoDecorrelator {
   }
 
   /**
-   * 就地给环绕声道加入去相关副本。amount=0 时不写 ring，保持逐样本旁路；
-   * layout=null（custom/真实多声道）不处理。
+   * 就地给环绕声道加入去相关副本。layout=null（custom/真实多声道）不处理；
+   * amount=0 时只推进延迟线、不写声道，保持逐样本旁路且不会在重新开启时
+   * 重放关闭前的旧节目。
    */
   process(channels: readonly AudioBuffer[], left: AudioBuffer, right: AudioBuffer, frameCount: number,
     layout: DecorrelationLayout | null, amount: number): void {
-    const normalized = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0
-    if (layout === null || normalized <= 0) return
+    if (layout === null) return
     const requested = Number.isFinite(frameCount) ? Math.floor(frameCount) : 0
     const frames = Math.max(0, Math.min(requested, left.length, right.length))
     if (frames === 0) return
+    const normalized = Number.isFinite(amount) ? Math.max(0, Math.min(1, amount)) : 0
+    if (normalized <= 0) { this.advanceDelayLine(left, right, frames); return }
     this.prepareTaps(layout, normalized)
     const taps = this.tapCount
     const ring = this.ring
@@ -121,14 +131,28 @@ export class StereoDecorrelator {
     this.writeIndex = write
   }
 
+  /** 关闭态：只写延迟线，保证重新开启时读到的是当前节目而不是旧片段。 */
+  private advanceDelayLine(left: AudioBuffer, right: AudioBuffer, frames: number): void {
+    const ring = this.ring
+    const ringLength = ring.length
+    let write = this.writeIndex
+    for (let i = 0; i < frames; i++) {
+      const mid = (left[i] + right[i]) * 0.5
+      ring[write] = Number.isFinite(mid) ? mid : 0
+      if (++write === ringLength) write = 0
+    }
+    this.writeIndex = write
+  }
+
   /** 布局/强度变化时刷新 tap 表（gain 预乘 amount，热路径不再逐样本乘）。 */
   private prepareTaps(layout: DecorrelationLayout, amount: number): void {
     const specs = TAP_SPECS[layout]
-    for (let i = 0; i < specs.length; i++) {
+    const count = Math.min(specs.length, MAX_TAPS)
+    for (let i = 0; i < count; i++) {
       this.tapChannel[i] = specs[i].channel
       this.tapDelay[i] = Math.max(1, Math.round((specs[i].delayMs / 1000) * this.sampleRate))
       this.tapGain[i] = specs[i].gain * amount
     }
-    this.tapCount = specs.length
+    this.tapCount = count
   }
 }

@@ -285,7 +285,8 @@ function decodeSpatial(raw: unknown): SpatialSettings {
       extraction: oneOf((o.ambience as Record<string, unknown>).extraction, ['pca', 'difference'] as const, 'pca') },
     budgetMode: oneOf(o.budgetMode, ['quality', 'auto', 'lowLatency'] as const, 'quality'),
     decorrelation: num(o.decorrelation, 0, 1, def.decorrelation ?? 0),
-    ...(o.earlyReflectionOrders === undefined ? {} : { earlyReflectionOrders: num(o.earlyReflectionOrders, 0, 3, 2) }),
+    // 非有限值视为未指定，保留 budgetMode 推导（lowLatency=0 阶）。
+    ...(Number.isFinite(o.earlyReflectionOrders) ? { earlyReflectionOrders: num(o.earlyReflectionOrders, 0, 3, 2) } : {}),
     convolution: oneOf(o.convolution, ['partitioned', 'time'] as const, def.convolution),
     hrtfInterp: oneOf(o.hrtfInterp, ['nearest', 'spherical'] as const, def.hrtfInterp),
     distanceModel: oneOf(o.distanceModel, ['inverse', 'linear', 'exponential'] as const, def.distanceModel),

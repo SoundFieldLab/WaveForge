@@ -240,6 +240,15 @@ describe('空间页面完成度：头追入口和生命周期', () => {
     expect(bridge.getParams().spatial!.decorrelation).toBeCloseTo(0.35)
   })
 
+  it('环绕去相关滑杆写入 0..1 的 decorrelation', () => {
+    const { bridge } = setup()
+    const slider = screen.getByRole('slider', { name: '环绕去相关' }) as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '65' } })
+    expect(bridge.getParams().spatial!.decorrelation).toBeCloseTo(0.65)
+    fireEvent.change(slider, { target: { value: '0' } })
+    expect(bridge.getParams().spatial!.decorrelation).toBe(0)
+  })
+
   it('沉浸空间 7.1.4 按钮写入品质参数且不改 inputFormat', () => {
     const { bridge } = setup()
     fireEvent.click(screen.getByRole('button', { name: '沉浸空间 7.1.4' }))

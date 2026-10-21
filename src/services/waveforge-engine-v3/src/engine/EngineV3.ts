@@ -813,8 +813,10 @@ type HeadLockedUpmixLayout = '51' | '514' | '71' | '714'
 const HEAD_LOCKED_UPMIX_CHANNELS: Record<HeadLockedUpmixLayout, readonly number[]> = {
   '51': [2, 0, 1, 4, 5],
   '514': [2, 0, 1, 4, 5, 6, 7, 8, 9],
-  '71': [2, 0, 1, 6, 7, 4, 5],
-  '714': [2, 0, 1, 6, 7, 4, 5, 8, 9, 10, 11],
+  // 7.1/7.1.4 的 _upmix71Channels/_upmix714Channels 已重排为 HSE 顺序
+  // （FL FR FC LFE SL SR BL BR [TFL TFR TRL TRR]），所以侧环=4/5、后环=6/7。
+  '71': [2, 0, 1, 4, 5, 6, 7],
+  '714': [2, 0, 1, 4, 5, 6, 7, 8, 9, 10, 11],
 }
 
 /** 预设扬声器对应的节目侧（仅供干声静音闸门使用；不影响后端声道选择）。 */

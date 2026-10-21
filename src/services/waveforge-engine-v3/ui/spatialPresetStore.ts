@@ -2,6 +2,7 @@
  * 我的空间方案：把 SpatialSettings 快照保存在本机，用于快速切回/对比。
  * 只存空间设置，不进入全局场景快照；数据完全本地，不上传。
  */
+import { normalizeSpatialSettings } from '../src/spatial/normalizeSpatial'
 import type { SpatialSettings } from '../src/types'
 
 const STORAGE_KEY = 'waveforge:hse-spatial-presets'
@@ -23,7 +24,10 @@ function readRaw(): unknown {
   }
 }
 
-/** 损坏/旧版本数据按空列表处理，避免整个页面因一个坏字段崩掉。 */
+/**
+ * 损坏/旧版本数据按空列表处理；保存的设置也重新走 normalizeSpatialSettings，
+ * 避免数组/旧结构/NaN 原样进入 patch 打到引擎上。
+ */
 export function loadSpatialPresets(): SpatialPreset[] {
   const raw = readRaw()
   if (!Array.isArray(raw)) return []
@@ -32,7 +36,10 @@ export function loadSpatialPresets(): SpatialPreset[] {
     const value = item as Partial<SpatialPreset>
     return typeof value.id === 'string' && typeof value.name === 'string'
       && typeof value.createdAt === 'number' && !!value.settings && typeof value.settings === 'object'
-  }).slice(0, MAX_PRESETS)
+  }).slice(0, MAX_PRESETS).map((preset) => ({
+    ...preset,
+    settings: normalizeSpatialSettings(preset.settings),
+  }))
 }
 
 function writePresets(presets: SpatialPreset[]): void {
@@ -46,7 +53,7 @@ export function saveSpatialPreset(name: string, settings: SpatialSettings): Spat
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     name: name.trim().slice(0, 40) || `空间方案 ${presets.length + 1}`,
     createdAt: Date.now(),
-    settings: JSON.parse(JSON.stringify(settings)) as SpatialSettings,
+    settings: normalizeSpatialSettings(JSON.parse(JSON.stringify(settings))),
   }
   const next = [preset, ...presets].slice(0, MAX_PRESETS)
   writePresets(next)

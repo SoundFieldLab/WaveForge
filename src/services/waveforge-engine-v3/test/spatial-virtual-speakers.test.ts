@@ -37,6 +37,7 @@ type EngineProbe = {
   _spatialMultiChannelCount: number
   _stereoUpmixer51: { process: (left: Float32Array, right: Float32Array, frames?: number) => unknown }
   _stereoUpmixer71: { process: (left: Float32Array, right: Float32Array, frames?: number) => unknown }
+  _spatialDecorrelator: { process: (...args: unknown[]) => void }
 }
 
 function probe(engine: EngineV3): EngineProbe {
@@ -244,6 +245,35 @@ describe('headLocked 立体声自动上混（虚拟扬声器 5.1/7.1）', () => 
       '左右环绕延迟不同，不应是同一路复制').toBe(true)
   })
 
+  it('custom 布局与真实多声道输入不进入去相关', () => {
+    // custom 两只扬声器：即使 decorrelation=1 也不应产生任何额外环绕能量。
+    const custom = new EngineV3(SAMPLE_RATE, 2)
+    const customState = probe(custom)
+    const customParams = createDefaultParams(SAMPLE_RATE)
+    customParams.eq.enabled = false
+    customParams.limiter.enabled = false
+    customParams.spatial.mode = 'headLocked'
+    customParams.spatial.inputFormat = 'channels'
+    customParams.spatial.headLocked.layout = 'custom'
+    customParams.spatial.headLocked.routes = []
+    customParams.spatial.headLocked.speakers = [
+      { azimuthDeg: -30, elevationDeg: 0, distance: 1.5, gain: 1, size: 0, route: 'l' },
+      { azimuthDeg: 30, elevationDeg: 0, distance: 1.5, gain: 1, size: 0, route: 'r' },
+    ]
+    customParams.spatial.decorrelation = 1
+    customParams.spatial.instant.amount = 1
+    customParams.spatial.instant.room = 'off'
+    custom.setParams(customParams)
+    expect(customState._spatialHeadLockedUpmix, 'custom 布局不应建立上混').toBeNull()
+
+    const decorrelate = vi.spyOn(customState._spatialDecorrelator, 'process')
+    const left = new Float32Array(FRAMES).fill(0.1)
+    const right = new Float32Array(FRAMES).fill(0.1)
+    processThrough(custom, [left, right])
+    // 去相关只在 headLocked 上混分支调用；custom 布局根本不应进入该分支。
+    expect(decorrelate, 'custom 布局不得进入去相关处理').not.toHaveBeenCalled()
+  })
+
   it('7.1.4 去相关同时作用于顶置虚拟扬声器', () => {
     const render = (decorrelation: number): Float32Array[] => {
       const engine = new EngineV3(SAMPLE_RATE, 2)
@@ -267,6 +297,31 @@ describe('headLocked 立体声自动上混（虚拟扬声器 5.1/7.1）', () => 
     for (const channel of [8, 9, 10, 11]) {
       expect(maxAbs(wet[channel]), `顶置声道 ${channel} 应获得去相关反射能量`).toBeGreaterThan(maxAbs(dry[channel]) + 0.0005)
     }
+  })
+
+  it('7.1 上混的侧/后声道方位映射：SL/SR 取 0.5 侧，RL/RR 取 0.25 后', () => {
+    const engine = new EngineV3(SAMPLE_RATE, 2)
+    const state = probe(engine)
+    engine.setParams(headLockedParams('71'))
+    const processMulti = vi.spyOn(state._spatialBackend, 'processMulti')
+    const left = new Float32Array(FRAMES)
+    const right = new Float32Array(FRAMES)
+    for (let i = 0; i < FRAMES; i++) {
+      left[i] = 0.3 * Math.sin(2 * Math.PI * 440 * i / SAMPLE_RATE)
+      right[i] = 0.1 * Math.sin(2 * Math.PI * 660 * i / SAMPLE_RATE)
+    }
+    processThrough(engine, [left, right])
+    const block = lastProcessedMulti(processMulti)
+    expect(block).toHaveLength(8)
+    const speakers = state._spatialBackend.speakers
+    // 方位 -110/110 的侧环绕必须落在 HSE ch4/5（0.5 侧向），±140 后环绕在 ch6/7（0.25）。
+    const sideL = speakers.find((speaker) => Math.abs(speaker.azimuthDeg + 110) < 0.01)
+    const rearL = speakers.find((speaker) => Math.abs(speaker.azimuthDeg + 140) < 0.01)
+    expect(sideL?.channel, '7.1 的 -110° 侧环绕必须驱动 ch4').toBe(4)
+    expect(rearL?.channel, '7.1 的 -140° 后环绕必须驱动 ch6').toBe(6)
+    const sidePeak = maxAbs(block[4])
+    const rearPeak = maxAbs(block[6])
+    expect(sidePeak / Math.max(rearPeak, 1e-9), '侧环绕电平应高于后环绕（0.5 vs 0.25）').toBeGreaterThan(1.5)
   })
 
   it('输入本身是 5.1（6 声道）时不再被立体声上混器二次上混', () => {

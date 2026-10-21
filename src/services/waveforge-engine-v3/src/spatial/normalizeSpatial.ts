@@ -256,8 +256,11 @@ export function normalizeSpatialSettings(raw: unknown): SpatialSettings {
     earlyAmount: finite(field(input, 'earlyAmount'), 1, 0, 1),
     lateAmount: finite(field(input, 'lateAmount'), 1, 0, 1),
     decorrelation: finite(field(input, 'decorrelation'), 0, 0, 1),
-    ...(field(input, 'earlyReflectionOrders') === undefined ? {}
-      : { earlyReflectionOrders: finite(field(input, 'earlyReflectionOrders'), 2, 0, 3) }),
+    // 只有有限数值才固化该字段：null/NaN 视为「未指定」，继续由 budgetMode 推导，
+    // 避免分享串 round-trip 把 lowLatency 的 0 阶覆盖成 2 阶。
+    ...(Number.isFinite(field(input, 'earlyReflectionOrders'))
+      ? { earlyReflectionOrders: finite(field(input, 'earlyReflectionOrders'), 2, 0, 3) }
+      : {}),
     earlyReflectionModel: choice(field(input, 'earlyReflectionModel'), ['cues', 'spectral'] as const, 'cues'),
     mode: choice(field(input, 'mode'), ['off', 'instant', 'headLocked', 'world', 'stage'], defaults.mode),
     masterGain: finite(field(input, 'masterGain'), defaults.masterGain, 0.5, 1),
