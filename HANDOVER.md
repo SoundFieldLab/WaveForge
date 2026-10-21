@@ -785,7 +785,7 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 
 - **DSP 内核**：`EngineV3` 改为引擎自有快照结构化 `setParams`（删除深拷贝与 `JSON.stringify` 比较）；新增 14 个 DSP 模块（动态均衡、Crossfeed、多段压缩模式、ReplayGain、PCM 量化/WAV、`audioBuffer`、`ChannelDownmix`、IR 库、`EffectTransition`/`SampleRamp`、低频管理/次声高通，以及 `vectorKernel`/`wasmSimdKernel` 两个复数乘法内核门面）；全链路 Float64（`setPrecision('float32'|'float64')`，默认 float32；prepared IR/双耳负载带精度校验）；WASM SIMD128 内核运行时自研生成，不可用/低于阈值静默回退纯 TS；9 个音色/动态模块的 `processingOrder` 排序保留，整链固定边界；内部逐位旁路（bit-perfect bypass）保留。
 - **空间后端**：实测 KEMAR HRTF + 球谐插值、双耳卷积（prepared 跨线程接管）、镜像反射/谱反射/FDN/房间氛围、AmbiX 一至三阶与 FOA FuMa 解码、5.1/7.1 上混与双声道折叠、传播延迟/Doppler、世界/舞台/头锁定路由、SOFA 导入（h5wasm）、串扰消除与音箱校准工具、头追姿态输入。
-- **Worklet**：模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移，主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`（2026-10-21 实测 514,508 bytes；旧包 95,518 bytes 不可再用）；帧边界零分配、Host/Worklet 同版消息协议；新增 `npm run verify:worklet`。
+- **Worklet**：模块 `src/worklet/AudioEffectsProcessor.ts` 整套迁移，主程序根 `node scripts/build-v3-worklet.mjs --force` 重建 `public/v3-worklet.js`（2026-10-21 实测 514,594 bytes；旧包 95,518 bytes 不可再用）；帧边界零分配、Host/Worklet 同版消息协议；新增 `npm run verify:worklet`。
 - **宿主**：`EngineV3Host` 支持最多 32 声道离散输入、prepared IR/房间线索跨线程接管、`EngineConfigWork` 诊断遥测（仅诊断，不作验收指标）。
 - **九页 UI**：主页 / 音效场景 / 均衡器 / 空间音效 / 空间音频 / 动态调音 / 分析 / 调音器 / 关于；保持主程序亮色薄荷玻璃风格（主色 `#006A63`），不引入深色/AFG/M3 风格，不恢复 Atmos/360RA/个性化 HRTF 入口。
 - **融合层**：`attachV3Engine` 的 `createV3UiBridge(engine, fs, { submit })` 为唯一提交路径（`setParams`/`applyScene`/外部替换同路），补齐 `subscribeParams` 让系统音量/ReplayGain/总开关等外部更新刷新已打开 UI；IR 去重改为 `WeakMap<Float32Array, token>` 引用身份。
@@ -804,10 +804,10 @@ HSE 3.5 指 `temp/hse-optimise` 独立快照（2026-10-17 起在 `temp/` 内打�
 | HSE 模块测试 | `npx vitest run src/services/waveforge-engine-v3` | **118 文件（115 passed + 3 skipped）/ 1178 用例 = 1162 passed + 16 skipped + 0 failed**（空间方案轮复跑；`tests-final-hse-run1.log` / `tests-final-hse-run2.log` 为更早记录） |
 | 全仓测试 | `npx vitest run --maxWorkers=4` | **330 文件（326 passed + 4 skipped）/ 3191 用例 = 3174 passed + 17 skipped + 0 failed**（空间方案轮复跑，`tests-final-review-fixes.log` 为评审轮记录；修复前为 3165/3148）；默认 31 worker 在 15.2GB 机器会换页导致 5s 超时抖动，11 个文件逐个单跑 205 项全过（`tests-final-isolated.log`），回归固定 `--maxWorkers=8` |
 | 桌面测试 | `npm run test:desktop` | **117 passed / 0 failed**（含新增 `test/hse-desktop.test.cjs` 6 项） |
-| Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **514,508 bytes（502.4 KiB）**，sha256 `d192ad44…8b5cc64`（`worklet-build.log`；顶置去相关前为 514,311B / `b9d108d4…6c569e47`） |
+| Worklet 重建 | `node scripts/build-v3-worklet.mjs --force` | **514,594 bytes（502.5 KiB）**，sha256 `9aa92102…5adff`（`worklet-build.log`；去相关热路径优化前为 514,508B / `d192ad44…8b5cc64`） |
 | Worklet 验证 | `npm run verify:worklet` | **全过**：打包装载、空间/房间、多声道 HRTF 路由、IR 复用、帧边界参数/reset、可序列化节点、四声道/5.1 折叠（`worklet-verify.log`） |
 | 生产构建 | `npm run build` | **通过**（vite build） |
-| 打包 file:// | `npm run build:electron:dir:unsigned` + 真实安装目录窗口 | **exit 0，file:// 验收 PASS**：worklet 200/514,508B、WASM basic+SIMD true、HDF5/SOFA 真解析入 IndexedDB、WAV 导出落盘 294,956B、79 个 file:// 请求 0 失败、0 console error（`packaged/FINAL-REPORT.md`、`stage-b3-results.json`） |
+| 打包 file:// | `npm run build:electron:dir:unsigned` + 真实安装目录窗口 | **exit 0，file:// 验收 PASS**：worklet 200/514,594B、WASM basic+SIMD true、HDF5/SOFA 真解析入 IndexedDB、WAV 导出落盘 294,956B、79 个 file:// 请求 0 失败、0 console error（`packaged/FINAL-REPORT.md`、`stage-b3-results.json`） |
 
 说明：全部门禁均在本轮实际执行并通过；打包 exe 为未签名调试产物（EVS/VMP 需交互式密码）；打包 profile 无在线源，联网播放未验证（导出用本机 HTTP 测试 WAV 走真实离线渲染链）。
 
