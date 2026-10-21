@@ -100,6 +100,7 @@ import { prepareHrtfGrid } from '../spatial/HrtfDataset'
 import type { HrtfGrid } from '../spatial/types'
 import { CrosstalkCancellation } from '../spatial/CrosstalkCancellation'
 import { StereoUpmixer } from '../spatial/StereoUpmixer'
+import { StereoDecorrelator } from '../spatial/StereoDecorrelator'
 import type { HeadPose } from '../spatial/HeadPose'
 import type {
   AudioObject,
@@ -725,6 +726,7 @@ function syncSpatialSettings(destination: SpatialSettings, source: SpatialSettin
   changed = assignField(destination, 'renderStyle', source.renderStyle) || changed
   changed = assignField(destination, 'earlyAmount', source.earlyAmount) || changed
   changed = assignField(destination, 'lateAmount', source.lateAmount) || changed
+  changed = assignField(destination, 'decorrelation', source.decorrelation) || changed
   changed = assignField(destination, 'earlyReflectionModel', source.earlyReflectionModel) || changed
   changed = assignField(destination, 'budgetMode', source.budgetMode) || changed
   changed = assignField(destination, 'mode', source.mode) || changed
@@ -1070,6 +1072,8 @@ export class EngineV3 {
   private readonly _stereoUpmixer71: StereoUpmixer
   private readonly _stereoUpmixer514: StereoUpmixer
   private readonly _stereoUpmixer714: StereoUpmixer
+  /** headLocked 虚拟扬声器环绕声道的早期反射式去相关。 */
+  private readonly _spatialDecorrelator: StereoDecorrelator
   private readonly _upmix71Channels: AudioBuffer[] = []
   private readonly _upmix714Channels: AudioBuffer[] = []
   /** 当前生效的 headLocked 内部上混布局（null = 未启用，按原 L/R 路由）。 */
@@ -1321,6 +1325,7 @@ export class EngineV3 {
     this._stereoUpmixer714 = new StereoUpmixer({
       layout: '7.1.4', sampleRate, blockSize: 128, precision: this._precisionMode,
     })
+    this._spatialDecorrelator = new StereoDecorrelator(sampleRate)
     this.refreshUpmix71Channels()
     this.refreshUpmix714Channels()
     this._speakerCancellation = new CrosstalkCancellation(sampleRate)
@@ -2040,6 +2045,8 @@ export class EngineV3 {
         this._stereoUpmixer714.process(leftView, rightView, n)
         this._spatialBlockChannels = this._upmix714Channels
       }
+      this._spatialDecorrelator.process(this._spatialBlockChannels, leftView, rightView, n, headLockedUpmix,
+        this._params.spatial?.decorrelation ?? 0)
       this._spatialBlockOffset = 0
     } else {
       this._spatialBlockChannels = foa && channels ? this._ambisonic.channels : channels
@@ -2363,6 +2370,7 @@ export class EngineV3 {
     this._stereoUpmixer71.reset()
     this._stereoUpmixer514.reset()
     this._stereoUpmixer714.reset()
+    this._spatialDecorrelator.reset()
     this._channelGainL = 1
     this._channelGainR = 1
     for (let i = 0; i < this._processingNodes.length; i++) this._processingNodes[i].reset?.()

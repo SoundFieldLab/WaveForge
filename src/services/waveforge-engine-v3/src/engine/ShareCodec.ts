@@ -284,6 +284,7 @@ function decodeSpatial(raw: unknown): SpatialSettings {
     ambience: { ...def.ambience, ...(o.ambience as object),
       extraction: oneOf((o.ambience as Record<string, unknown>).extraction, ['pca', 'difference'] as const, 'pca') },
     budgetMode: oneOf(o.budgetMode, ['quality', 'auto', 'lowLatency'] as const, 'quality'),
+    decorrelation: num(o.decorrelation, 0, 1, def.decorrelation ?? 0),
     convolution: oneOf(o.convolution, ['partitioned', 'time'] as const, def.convolution),
     hrtfInterp: oneOf(o.hrtfInterp, ['nearest', 'spherical'] as const, def.hrtfInterp),
     distanceModel: oneOf(o.distanceModel, ['inverse', 'linear', 'exponential'] as const, def.distanceModel),

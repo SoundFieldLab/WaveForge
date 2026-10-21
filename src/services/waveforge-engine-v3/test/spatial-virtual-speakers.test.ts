@@ -213,6 +213,37 @@ describe('headLocked 立体声自动上混（虚拟扬声器 5.1/7.1）', () => 
     expect(outL.every(Number.isFinite) && outR.every(Number.isFinite)).toBe(true)
   })
 
+  it('环绕去相关：默认关闭单声道环绕静音，开启后环绕声道获得非相干反射能量', () => {
+    const render = (decorrelation: number): Float32Array[] => {
+      const engine = new EngineV3(SAMPLE_RATE, 2)
+      const state = probe(engine)
+      const params = headLockedParams('51')
+      params.spatial.decorrelation = decorrelation
+      params.spatial.instant.amount = 1
+      params.spatial.instant.room = 'off'
+      engine.setParams(params)
+      const processMulti = vi.spyOn(state._spatialBackend, 'processMulti')
+      const left = new Float32Array(FRAMES)
+      const right = new Float32Array(FRAMES)
+      // 单声道节目：矩阵差分环绕为 0，只有去相关能提供后方线索。
+      for (let i = 0; i < FRAMES; i++) {
+        left[i] = 0.2 * Math.sin(2 * Math.PI * 440 * i / SAMPLE_RATE)
+        right[i] = left[i]
+      }
+      for (let block = 0; block < 3; block++) processThrough(engine, [left, right])
+      return lastProcessedMulti(processMulti)
+    }
+
+    const dry = render(0)
+    const wet = render(0.6)
+    expect(maxAbs(dry[4]), '默认关闭时 5.1 单声道 SL 必须保持矩阵语义的静音').toBeLessThan(1e-7)
+    expect(maxAbs(dry[5]), '默认关闭时 5.1 单声道 SR 必须保持矩阵语义的静音').toBeLessThan(1e-7)
+    expect(maxAbs(wet[4]), '开启去相关后 SL 应有早期反射能量').toBeGreaterThan(0.002)
+    expect(maxAbs(wet[5]), '开启去相关后 SR 应有早期反射能量').toBeGreaterThan(0.002)
+    expect(wet[4].some((value, i) => Math.abs(value - wet[5][i]) > 1e-4),
+      '左右环绕延迟不同，不应是同一路复制').toBe(true)
+  })
+
   it('输入本身是 5.1（6 声道）时不再被立体声上混器二次上混', () => {
     const engine = new EngineV3(SAMPLE_RATE, 2)
     const state = probe(engine)

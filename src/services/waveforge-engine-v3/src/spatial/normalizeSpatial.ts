@@ -255,6 +255,7 @@ export function normalizeSpatialSettings(raw: unknown): SpatialSettings {
       cutoffHz: finite(field(cancellation, 'cutoffHz'), 1800, 200, 5000) },
     earlyAmount: finite(field(input, 'earlyAmount'), 1, 0, 1),
     lateAmount: finite(field(input, 'lateAmount'), 1, 0, 1),
+    decorrelation: finite(field(input, 'decorrelation'), 0, 0, 1),
     earlyReflectionModel: choice(field(input, 'earlyReflectionModel'), ['cues', 'spectral'] as const, 'cues'),
     mode: choice(field(input, 'mode'), ['off', 'instant', 'headLocked', 'world', 'stage'], defaults.mode),
     masterGain: finite(field(input, 'masterGain'), defaults.masterGain, 0.5, 1),

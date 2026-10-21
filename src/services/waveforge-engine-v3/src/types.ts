@@ -307,6 +307,8 @@ export interface SpatialSettings {
   renderStyle?: 'natural' | 'focused'
   earlyAmount?: number
   lateAmount?: number
+  /** 环绕声道去相关强度 0..1（默认 0；仅 headLocked 立体声上混生效）。 */
+  decorrelation?: number
   /** 完整 HRIR 频谱早反射，或低开销的双耳能量/到达线索近似。 */
   earlyReflectionModel?: 'cues' | 'spectral'
   /** 空间计算预算：quality 保持二阶反射，auto 在高采样率多声源下降为一阶，lowLatency 仅保留晚混响。 */
@@ -351,6 +353,7 @@ export function createDefaultSpatialSettings(): SpatialSettings {
     ambisonicTransform: { yawDeg: 0, pitchDeg: 0, rollDeg: 0, orderGains: [1, 1, 1, 1] },
     earlyAmount: 1,
     lateAmount: 1,
+    decorrelation: 0,
     earlyReflectionModel: 'cues',
     mode: p.mode,
     masterGain: p.masterGain,

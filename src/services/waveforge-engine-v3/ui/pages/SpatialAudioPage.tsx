@@ -224,6 +224,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     patch({
       mode: 'headLocked',
       renderStyle: 'focused',
+      decorrelation: 0.2,
       instant: { amount: 1 },
       headLocked: { layout: '51', speakers: createLayoutSpeakers('51'), routes: [] },
     })
@@ -242,6 +243,7 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     patch({
       mode: 'headLocked',
       renderStyle: 'focused',
+      decorrelation: 0.35,
       instant: { amount: 1, room: 'hall', roomAmount: 0.4 },
       budgetMode: 'quality',
       hrtfInterp: 'spherical',
@@ -346,6 +348,8 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
     <section className={`hse-spatial-main-controls ${mode === 'headLocked' || mode === 'world' ? 'is-editor-mode' : ''}`} aria-label="空间听感">
       <Slider label="空间强度" value={Math.round(spatial.instant.amount * 100)} min={0} max={100} step={1}
         onChange={value => patch({ instant: { amount: value / 100 } })} display={`${Math.round(spatial.instant.amount * 100)}%`} theme={theme} />
+      <Slider label="环绕去相关" value={Math.round((spatial.decorrelation ?? 0) * 100)} min={0} max={100} step={1}
+        onChange={value => patch({ decorrelation: value / 100 })} display={`${Math.round((spatial.decorrelation ?? 0) * 100)}%`} theme={theme} />
       {mode === 'instant' && <Slider label="展开角度" value={spatial.instant.spreadDeg} min={20} max={120} step={1} disabled={spatial.instant.multichannelAuto}
         onChange={value => patch({ instant: { spreadDeg: value } })} display={`${spatial.instant.spreadDeg}°`} theme={theme} />}
       <div><p className={`mb-2 text-xs ${theme.textSecondary}`}>声音风格</p><Segmented label="空间听感" options={[{ value: 'natural', label: '自然外化' }, { value: 'focused', label: '清晰定位' }]}
