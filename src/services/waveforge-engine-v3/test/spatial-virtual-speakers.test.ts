@@ -244,6 +244,31 @@ describe('headLocked 立体声自动上混（虚拟扬声器 5.1/7.1）', () => 
       '左右环绕延迟不同，不应是同一路复制').toBe(true)
   })
 
+  it('7.1.4 去相关同时作用于顶置虚拟扬声器', () => {
+    const render = (decorrelation: number): Float32Array[] => {
+      const engine = new EngineV3(SAMPLE_RATE, 2)
+      const state = probe(engine)
+      const params = headLockedParams('714')
+      params.spatial.headLocked.heightLayer = true
+      params.spatial.decorrelation = decorrelation
+      engine.setParams(params)
+      const processMulti = vi.spyOn(state._spatialBackend, 'processMulti')
+      const left = new Float32Array(FRAMES)
+      const right = new Float32Array(FRAMES)
+      for (let i = 0; i < FRAMES; i++) {
+        left[i] = 0.2 * Math.sin(2 * Math.PI * 440 * i / SAMPLE_RATE)
+        right[i] = left[i]
+      }
+      for (let block = 0; block < 3; block++) processThrough(engine, [left, right])
+      return lastProcessedMulti(processMulti)
+    }
+    const dry = render(0)
+    const wet = render(0.6)
+    for (const channel of [8, 9, 10, 11]) {
+      expect(maxAbs(wet[channel]), `顶置声道 ${channel} 应获得去相关反射能量`).toBeGreaterThan(maxAbs(dry[channel]) + 0.0005)
+    }
+  })
+
   it('输入本身是 5.1（6 声道）时不再被立体声上混器二次上混', () => {
     const engine = new EngineV3(SAMPLE_RATE, 2)
     const state = probe(engine)

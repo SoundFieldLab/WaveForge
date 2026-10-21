@@ -28,6 +28,9 @@ const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs
   '514': [
     { channel: 4, delayMs: 8.5, gain: 0.28 },
     { channel: 5, delayMs: 12.5, gain: 0.28 },
+    // 顶置层只有 3kHz 以上高频派生，补一点更短延迟的反射让上方也有房间感。
+    { channel: 6, delayMs: 4.5, gain: 0.1 },
+    { channel: 7, delayMs: 6.5, gain: 0.1 },
   ],
   '71': [
     { channel: 4, delayMs: 7.5, gain: 0.22 },
@@ -40,6 +43,11 @@ const TAP_SPECS: Record<DecorrelationLayout, readonly { channel: number; delayMs
     { channel: 5, delayMs: 11.5, gain: 0.22 },
     { channel: 6, delayMs: 15.5, gain: 0.18 },
     { channel: 7, delayMs: 19.5, gain: 0.18 },
+    // 4 只顶置（TFL/TFR/TRL/TRR）用更短延迟的独立反射，避免上方只剩高频派生。
+    { channel: 8, delayMs: 4.5, gain: 0.1 },
+    { channel: 9, delayMs: 6.5, gain: 0.1 },
+    { channel: 10, delayMs: 9.5, gain: 0.09 },
+    { channel: 11, delayMs: 12.5, gain: 0.09 },
   ],
 }
 

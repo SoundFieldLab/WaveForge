@@ -24,6 +24,7 @@
 
 - 新增一个独立的去相关处理器概念，作用于 headLocked 上混后的环绕声道（5.1 的 SL/SR；7.1/7.1.4 的 SL/SR/BL/BR），不修改 StereoUpmixer 的输出或矩阵重建契约。
 - 用 mid=(L+R)/2 的短延迟副本（左右不同延迟，约 8–20ms）低增益叠加到环绕声道；不同声道不同延迟降低相关性，不引入可辨的单一回声。
+- 5.1.4/7.1.4 的 4 只顶置声道额外使用更短延迟（4.5–12.5ms、更低增益）的独立反射，避免上方只剩 3kHz 以上派生高频。
 - SpatialSettings 增加 decorrelation 0..1（默认 0），随参数快照持久化；仅 headLocked + 立体声上混路径生效；真实多声道/custom 不处理。
 - 沉浸空间 7.1.4 预设写入约 0.35；5.1 快捷预设写入约 0.2；UI 增加「环绕去相关」滑杆。
 - 增加 `earlyReflectionOrders` 0..3（缺省由 budgetMode 推导）；沉浸预设用 3 阶，UI「反射阶数」滑杆可调。
@@ -32,6 +33,7 @@
 ## Testing Decisions
 
 - 测试单声道输入：decorrelation=0 时 SL/SR 仍为 0；>0 时 SL/SR 有能量且左右不完全相同。
+- 测试 7.1.4 顶置声道：开启去相关后 4 只顶置的能量高于关闭时。
 - 测试默认 5.1/7.1 StereoUpmixer 输出逐位不变（现有回归）。
 - 测试真实多声道输入和 custom 布局不进入去相关。
 - 测试 UI 滑杆写入 decorrelation 且范围 0..1；沉浸预设同时写入 earlyReflectionOrders=3。

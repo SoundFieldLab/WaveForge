@@ -225,6 +225,21 @@ describe('空间页面完成度：头追入口和生命周期', () => {
     }
   })
 
+  it('我的空间方案：保存后生成方案芯片，点击可恢复快照', async () => {
+    const { bridge } = setup()
+    fireEvent.click(screen.getByRole('button', { name: '沉浸空间 7.1.4' }))
+    fireEvent.click(screen.getByText(/我的空间方案/))
+    fireEvent.change(screen.getByRole('textbox', { name: '空间方案名称' }), { target: { value: '测试方案' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存当前方案' }))
+    const chip = await screen.findByRole('button', { name: '测试方案' })
+    // 切走后再应用方案，参数应回到保存时的 7.1.4 快照。
+    fireEvent.click(screen.getByRole('button', { name: '一键虚拟 5.1 环绕' }))
+    expect(bridge.getParams().spatial!.headLocked.layout).toBe('51')
+    fireEvent.click(chip)
+    expect(bridge.getParams().spatial!.headLocked.layout).toBe('714')
+    expect(bridge.getParams().spatial!.decorrelation).toBeCloseTo(0.35)
+  })
+
   it('沉浸空间 7.1.4 按钮写入品质参数且不改 inputFormat', () => {
     const { bridge } = setup()
     fireEvent.click(screen.getByRole('button', { name: '沉浸空间 7.1.4' }))
