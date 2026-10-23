@@ -220,7 +220,15 @@ async function fetchBiliJson(url, options) {
   try {
     return JSON.parse(text)
   } catch {
-    return { code: -1, message: text.slice(0, 200) }
+    // HTML 响应 = 风控网关页（aba.bilibili.com 滑块验证）。JSON.parse 失败时把可判读的
+    // 原因带回去：调用方（搜索路由 502 → 前端 errorText）能区分「网络坏了」与
+    // 「出口 IP 被风控」（梯子全局/家宽共享出口常见），而不是一律显示"搜索失败，请稍后重试"。
+    const isRiskPage = /aba\.bilibili\.com|gaia\/vigil|滑块|验证/.test(text)
+    const title = /<title>([^<]*)<\/title>/.exec(text)?.[1] || ''
+    if (isRiskPage) {
+      return { code: -352, message: `B站风控拦截（${title || 'aba 验证页'}）：当前出口 IP 需要过验证——关掉梯子/换网络后重试通常即可恢复` }
+    }
+    return { code: -1, message: `HTTP ${res.status} 非JSON响应${title ? `（${title}）` : ''}` }
   }
 }
 
