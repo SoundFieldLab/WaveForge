@@ -25,10 +25,10 @@ interface StagePanelProps {
 
 /** 场景卡片元数据（与 STAGE_SCENES 顺序一致；描述为一句中文短语） */
 const SCENE_CARDS: { id: StagePreset; name: string; desc: string; icon: LucideIcon }[] = [
-  { id: 'stage', name: '音乐舞台', desc: 'Live 乐队全景', icon: Mic2 },
-  { id: 'cinema', name: '电影院', desc: '7.1.4 影院环绕', icon: Clapperboard },
-  { id: 'piano', name: '钢琴独奏', desc: '音乐厅长尾', icon: Piano },
-  { id: 'nature', name: '自然场景', desc: '雨雷鸟溪户外', icon: CloudRain },
+  { id: 'stage', name: '音乐舞台', desc: '前方声像与舞台纵深', icon: Mic2 },
+  { id: 'cinema', name: '电影院', desc: '影院布局与房间反射', icon: Clapperboard },
+  { id: 'piano', name: '近场音乐厅', desc: '近场主声像与长尾', icon: Piano },
+  { id: 'nature', name: '开放空间', desc: '高位布局与弱反射', icon: CloudRain },
 ]
 
 /** 座位选项（前端 middle 对应 ×1.0 基准距离，见 scenes.ts SEAT_DISTANCE_SCALE） */
@@ -75,27 +75,27 @@ function SceneThumb({ speakers, active, theme }: { speakers: VirtualSpeakerCfg[]
     // 方位角/距离 → 屏幕坐标：az=0 朝上、az>0 偏右（与 SpatialModeVisual 同约定）
     const dotAt = (s: VirtualSpeakerCfg) => {
       const rad = (s.azimuthDeg * Math.PI) / 180
-      const r = Math.max(2, Math.min(1, s.distance / maxDist)) * radius
+      const r = Math.max(0.08, Math.min(1, s.distance / maxDist)) * radius
       return { x: cx + r * Math.sin(rad), y: cy - r * Math.cos(rad) }
     }
 
     if (!active) {
       // 未选中：灰调布局（只展示位置关系，弱化视觉不抢选中卡片）
-      ctx.strokeStyle = 'rgba(255,255,255,0.15)'
+      ctx.strokeStyle = '#d7e2de'
       ctx.lineWidth = 1
       ctx.setLineDash([3, 4])
       ctx.beginPath()
       ctx.arc(cx, cy, radius, 0, Math.PI * 2)
       ctx.stroke()
       ctx.setLineDash([])
-      ctx.fillStyle = 'rgba(255,255,255,0.28)'
+      ctx.fillStyle = '#536b66'
       for (const s of speakers) {
         const p = dotAt(s)
         ctx.beginPath()
         ctx.arc(p.x, p.y, 2.4, 0, Math.PI * 2)
         ctx.fill()
       }
-      ctx.fillStyle = 'rgba(255,255,255,0.42)'
+      ctx.fillStyle = '#536b66'
       ctx.beginPath()
       ctx.arc(cx, cy, 3, 0, Math.PI * 2) // 听者
       ctx.fill()
@@ -110,7 +110,7 @@ function SceneThumb({ speakers, active, theme }: { speakers: VirtualSpeakerCfg[]
     ctx.beginPath()
     ctx.arc(cx, cy, 6, 0, Math.PI * 2)
     ctx.stroke()
-    ctx.strokeStyle = 'rgba(255,255,255,0.18)'
+    ctx.strokeStyle = '#d7e2de'
     ctx.setLineDash([2, 4])
     ctx.beginPath()
     ctx.moveTo(cx, cy - 6)
@@ -123,7 +123,7 @@ function SceneThumb({ speakers, active, theme }: { speakers: VirtualSpeakerCfg[]
       const color = i % 2 === 0 ? from : to
       ctx.save()
       ctx.shadowColor = color
-      ctx.shadowBlur = 5
+      ctx.shadowBlur = 0
       ctx.fillStyle = color
       ctx.beginPath()
       ctx.arc(p.x, p.y, 2.6, 0, Math.PI * 2)
@@ -142,7 +142,7 @@ function SceneThumb({ speakers, active, theme }: { speakers: VirtualSpeakerCfg[]
       role="img"
       aria-label="场景扬声器布局缩略图"
       className="w-full block mt-1.5 rounded-md"
-      style={{ height: 64, backgroundColor: 'rgba(0,0,0,0.22)' }}
+      style={{ height: 64, backgroundColor: theme.inputBg }}
     />
   )
 }
@@ -169,7 +169,7 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
   }
 
   /** 单个声源位置（米；X 左右 / Y 高度 / Z 前后——方位由融合层相对默认听者计算）。
-   *  坐标钳制 ±12m（XY）/ 0.2..12m（Z 高度下限防入地） */
+   *  坐标钳制 ±12m（XY）/ 0.2..12m（Y 高度下限防入地） */
   const setSourcePos = (idx: number, axis: 'x' | 'y' | 'z', v: number): void => {
     onChange({
       customSources: params.customSources.map((s, i) => {
@@ -225,7 +225,7 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
             <div
               key={src.id}
               className="rounded-xl p-2"
-              style={{ backgroundColor: 'rgba(255,255,255,0.06)', border: `1px solid ${theme.cardBorder}` }}
+              style={{ backgroundColor: theme.cardBg, border: `1px solid ${theme.cardBorder}` }}
             >
               <div className="flex items-center justify-between gap-2">
                 <span className={`${theme.textPrimary} text-xs font-medium`}>声源 {i + 1}</span>
@@ -282,7 +282,7 @@ export default function StagePanel({ params, theme, onChange }: StagePanelProps)
           添加声源{params.customSources.length >= MAX_CUSTOM_SOURCES ? `（上限 ${MAX_CUSTOM_SOURCES}）` : ''}
         </button>
         <div className={`${theme.textTertiary} text-[10px] mt-1 leading-relaxed`}>
-          附加声源相对默认座位（原点听者 1.6m 高）计算方位，与预设扬声器同一坐标系；预设声源删除（替换语义）完整布局编辑器后续 wave。
+          附加声源使用当前音乐的输入信号。左右为 X，高度为 Y，前后为 Z；听者耳位高 1.6 m。
         </div>
       </div>
 

@@ -2994,13 +2994,16 @@ function App() {
     })
   }
   const audioGraphHandleRef = useRef<AudioGraphHandle | null>(null)
+  const engineExportUnsubscribeRef = useRef<(() => void) | undefined>(undefined)
+  const engineSwitchResumeRef = useRef<HTMLAudioElement | null>(null)
 
   // 订阅初始 adapter 的导出状态（若启动时默认 v3，导出按钮需要此状态；切换引擎时在 switchAudioEngine 内重新订阅）
   useEffect(() => {
     const adapter = engineAdapterRef.current
     if (!adapter) return
     if (!adapter.onExportingChange) return
-    return adapter.onExportingChange(setEngineExporting)
+    engineExportUnsubscribeRef.current = adapter.onExportingChange(setEngineExporting)
+    return () => engineExportUnsubscribeRef.current?.()
   }, [])
 
   const handleAudioGraphReady = useCallback((handle: AudioGraphHandle) => {
@@ -3475,7 +3478,8 @@ function App() {
       intensity: autoMixTransitionIntensity,
       aiMix: autoMixAiMix && autoMixAiAvailable,
     },
-    handleAudioGraphReady
+    handleAudioGraphReady,
+    source => engineAdapterRef.current?.setPlaybackSource?.(source),
   )
   audioPlayerCacheControlRef.current = audioPlayer
 
@@ -3531,27 +3535,38 @@ function App() {
     // audioElement 是 state，只在初次加载/过渡提交时更新，双 deck 静默转正/gapless 拼接
     // 路径下是陈旧引用，用它判断会误判未在播 → 恢复播放打在错误的元素上 → 热切换后无声。
     const activeAudio = audioPlayerRef.current?.getAudioElement() ?? null
-    const wasPlaying = !!handle && !!activeAudio && !activeAudio.paused
+    const wasPlaying = !!handle && !!activeAudio && (!activeAudio.paused || engineSwitchResumeRef.current === activeAudio)
+    engineSwitchResumeRef.current = wasPlaying ? activeAudio : null
     if (wasPlaying) void activeAudio?.pause()
 
     // 换引擎：dispose 旧链（恢复 masterGain→analyser 直连），attach 新链
     const oldAdapter = engineAdapterRef.current
-    if (handle) {
-      oldAdapter?.dispose()
-    }
+    oldAdapter?.dispose()
     // 重建 adapter：新版本实例 + 注入 addToast（v2 低音量提示用）
     const newAdapter = getEngineAdapter(next, { onLowVolumeHint: (msg) => addToast(msg, 'info') })
+    engineExportUnsubscribeRef.current?.()
+    engineExportUnsubscribeRef.current = undefined
+    setEngineExporting(false)
     engineAdapterRef.current = newAdapter
     audioEngineVersionRef.current = next
     setAudioEngineVersionState(next)
     setAudioEngineVersion(next)
+    newAdapter.setPlaybackSource?.(audioPlayerRef.current?.getPlaybackSource() ?? null)
     // 订阅新 adapter 的导出状态（v3 adapter 有此事件；v1/v2 adapter 无，isExporting 恒 false）
     if (newAdapter.onExportingChange) {
-      newAdapter.onExportingChange(setEngineExporting)
+      engineExportUnsubscribeRef.current = newAdapter.onExportingChange(setEngineExporting)
     }
     if (handle) {
-      // attach 新链（v3 异步 worklet 注册，v1/v2 同步；恢复播放不等待 attach 完成）
-      void newAdapter.attach(handle).catch(() => { /* 通路不可用：保持直连 */ })
+      // 等新链准备完毕再恢复；快速连续切换只允许最后选中的引擎恢复播放。
+      void newAdapter.attach(handle).catch(() => {
+        if (engineAdapterRef.current === newAdapter) addToast('音效引擎接入失败，已恢复原声播放', 'error')
+      }).finally(() => {
+        if (engineAdapterRef.current !== newAdapter) return
+        if (engineSwitchResumeRef.current === activeAudio && activeAudio) {
+          engineSwitchResumeRef.current = null
+          if (audioPlayerRef.current?.getAudioElement() === activeAudio) void activeAudio.play().catch(() => undefined)
+        }
+      })
       // 补挂响度归一化（若新引擎支持且调音室已开启；adapter 内部按 capabilities 判断，不支持则 no-op）
       const trackKey = activeTrackKeyRef.current
       if (trackKey) {
@@ -3559,14 +3574,10 @@ function App() {
         const url = cached?.url || ''
         if (url) newAdapter.applyLoudnessNormalization(trackKey, url)
       }
-      // 恢复播放（热切换成功路径）：恢复同一个活跃 deck
-      if (wasPlaying && activeAudio) {
-        window.setTimeout(() => { void activeAudio?.play().catch(() => { /* 用户暂停等场景忽略 */ }) }, 80)
-      }
     }
     // 右上角 2s 淡出弹窗（连点/重入时先清旧定时器，避免旧弹窗提前清掉新弹窗）
     if (engineSwitchToastTimerRef.current !== null) window.clearTimeout(engineSwitchToastTimerRef.current)
-    const versionLabel = next === 'v3' ? 'v3（DSP 内核）' : next === 'v2' ? 'v2（增强版）' : 'v1（原版）'
+    const versionLabel = getAvailableEngines().find(engine => engine.id === next)?.displayName ?? next
     setEngineSwitchToast(`音效引擎已切换至 ${versionLabel}${handle ? '' : '，下次启动生效'}`)
     engineSwitchToastTimerRef.current = window.setTimeout(() => {
       engineSwitchToastTimerRef.current = null
@@ -12446,7 +12457,9 @@ function App() {
               engineVersion: audioEngineVersion,
               onSwitchEngine: switchAudioEngine,
               availableEngines: getAvailableEngines(),
-              sourceUrl: mixingStudioAudio?.src || undefined,
+              // 多声道空间输入时元素 src 被换成静音时钟 WAV（真实 PCM 走受控 BufferSource），
+              // 导出必须拿播放器记录的原曲 URL，否则会把静音时钟当源导出成无声文件。
+              sourceUrl: audioPlayer.getPlaybackSource()?.url || mixingStudioAudio?.src || undefined,
               sourceDuration: mixingStudioAudio?.duration || undefined,
               exportFileName: currentSong?.name || undefined,
               playbackTimeStore: audioPlayer.playbackTimeStore,

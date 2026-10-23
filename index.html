@@ -6,9 +6,18 @@
     <!-- 纵深防御：锁死 script-src（三个入口都无内联脚本）。dev 模式 Vite 注入的
          react preamble 是内联脚本 —— @vitejs/plugin-react 在 dev 下会自动加
          nonce/inline 处理：若 dev 控制台报 CSP 拦截，在 dev 分支（import.meta.env.DEV）
-         放宽；打包版（file://）保持严格。 -->
+         放宽；打包版（file://）保持严格。
+         已核准的三处最窄例外（不要继续放宽）：
+         1) script-src 'wasm-unsafe-eval'：h5wasm/HDF5 导入 SOFA 与 HSE 的 WASM SIMD 内核
+            都需要编译 WebAssembly；只放开 wasm 编译，未放开 'unsafe-eval'。
+         2) connect-src data: waveforge-media: waveforge-spotify:：CSP 的 '*' 不匹配
+            data: 与自定义协议——HSE 离线导出/空间音源会 fetch data:，MV 对齐/转码会
+            fetch waveforge-media:，Spotify 直播走 waveforge-spotify:；均为本应用自有
+            数据源，不引入外部网络能力。
+         3) media-src waveforge-media: waveforge-spotify:：本地媒体与 Spotify 直播流落
+            media 元素（CSP '*' 同样不匹配自定义协议）。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob: waveforge-media: waveforge-spotify:; font-src 'self' data:; connect-src * waveforge-media: waveforge-spotify:; frame-src 'self' https://y.qq.com https://graph.qq.com; worker-src 'self' blob:;" />
+          content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob: waveforge-media: waveforge-spotify:; font-src 'self' data:; connect-src * data: waveforge-media: waveforge-spotify:; frame-src 'self' https://y.qq.com https://graph.qq.com; worker-src 'self' blob:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- B 站图片 CDN（i*.hdslb.com）在 Referer=localhost 时返回 403（防盗链），
          全局不发送 Referer 即可正常加载头像/封面/poster。不影响本地 API（CORS 看 Origin，与 Referer 无关）。 -->

@@ -76,6 +76,25 @@ describe('Compressor', () => {
     expect(s2).toBeLessThan(0.35)
   })
 
+  it('瞬态保留延长增益 attack，让起音短暂穿过压缩并收敛到同一稳态', () => {
+    const length = FS
+    const onset = 4800
+    const render = (transientPreserve: number) => {
+      const compressor = new Compressor(FS)
+      compressor.setParams(settings({ attackMs: 1, releaseMs: 100, transientPreserve }))
+      const left = new Float32Array(length)
+      const right = new Float32Array(length)
+      left.fill(1, onset)
+      right.fill(1, onset)
+      compressor.processStereo(left, right)
+      return left
+    }
+    const normal = render(0)
+    const preserved = render(1)
+    expect(preserved[onset + 100]).toBeGreaterThan(normal[onset + 100] * 1.5)
+    expect(preserved[length - 1]).toBeCloseTo(normal[length - 1], 3)
+  })
+
   it('软拐点：输入恰在阈值处产生部分压缩（knee=6dB）', () => {
     const c = new Compressor(FS)
     c.setParams(settings({ kneeDb: 6, attackMs: 1, releaseMs: 100 }))
@@ -124,6 +143,44 @@ describe('Compressor', () => {
       }
     }
     expect(monotonic).toBe(true)
+  })
+
+  it('ratio=1 且无 makeup 时逐样本恒等；无信号时避免对数计算污染状态', () => {
+    const c = new Compressor(FS)
+    c.setParams(settings({ ratio: 1, kneeDb: 12 }))
+    const l = makeSine(8192, 1000, 0.8)
+    const r = makeSine(8192, 3000, 0.2)
+    const originalL = l.slice()
+    const originalR = r.slice()
+    c.processStereo(l, r)
+    expect(l).toEqual(originalL)
+    expect(r).toEqual(originalR)
+    expect(c.getReductionDb()).toBe(0)
+  })
+
+  it('旁路后重新启用不继承停滞的旧包络', () => {
+    const c = new Compressor(FS)
+    c.setParams(settings({ attackMs: 1 }))
+    c.processStereo(new Float32Array(10000).fill(1), new Float32Array(10000).fill(1))
+    expect(c.getReductionDb()).toBeLessThan(-10)
+    c.setParams(settings({ enabled: false, attackMs: 1 }))
+    c.processStereo(new Float32Array(10000), new Float32Array(10000))
+    c.setParams(settings({ attackMs: 1 }))
+    const l = new Float32Array(100).fill(0.001)
+    const r = l.slice()
+    c.processStereo(l, r)
+    expect(c.getReductionDb()).toBe(0)
+    expect(l[0]).toBeCloseTo(0.001, 7)
+  })
+
+  it('损坏的时间/增益参数不使输出变成 NaN', () => {
+    const c = new Compressor(FS)
+    c.setParams(settings({ attackMs: Number.NaN, releaseMs: Number.NaN, thresholdDb: Number.NaN, makeupDb: Number.POSITIVE_INFINITY }))
+    const l = new Float32Array(4096).fill(0.5)
+    const r = new Float32Array(4096).fill(0.5)
+    c.processStereo(l, r)
+    expect(Array.from(l).every(Number.isFinite)).toBe(true)
+    expect(Number.isFinite(c.getReductionDb())).toBe(true)
   })
 
   it('enabled=false 输出=输入（恒等）', () => {

@@ -6,7 +6,7 @@
  * 参考：research/docs/音频算法技术文档.md §10.1。
  *
  * 算法步骤（与论文一致）：
- *  1. 差分函数 d(τ) = Σ_j (x[j] − x[j+τ])²；
+ *  1. 差分函数 d(τ) = Σ_j (x[j] − x[j+τ])²，所有 τ 共用长度为 w−τmax 的分析窗；
  *  2. CMND 累积均值归一化：d'(τ) = d(τ) / ((1/τ)·Σ_{j=1..τ} d(j))，消除高阶谐波偏置；
  *  3. 绝对阈值（默认 0.1）：找第一个低于阈值的谷点；
  *  4. 抛物线插值求亚采样精度周期 τ* ⇒ f0 = fs/τ*。
@@ -34,16 +34,11 @@ const TAU_MAX_DEFAULT_HZ = 40
 /** 返回基频 Hz；未检出（噪声/静音/长度不足）返回 -1。 */
 export function yinPitch(mono: Float32Array, fs: number, opts?: YinOptions): number {
   if (!Number.isFinite(fs) || fs <= 0) throw new Error('invalid sample rate')
-  // 参数校验：minHz>maxHz 或阈值无效 → 未检出（审计修复）
-  if (opts) {
-    const mn = opts.minHz ?? TAU_MIN_DEFAULT_HZ
-    const mx = opts.maxHz ?? TAU_MAX_DEFAULT_HZ
-    if (mn > mx || !Number.isFinite(mn) || !Number.isFinite(mx)) return -1
-    if (opts.threshold !== undefined && (!Number.isFinite(opts.threshold) || opts.threshold <= 0 || opts.threshold >= 1)) return -1
-  }
-  const threshold = opts?.threshold !== undefined ? opts.threshold : 0.1
-  const minHz = opts?.minHz !== undefined ? opts.minHz : TAU_MAX_DEFAULT_HZ
-  const maxHz = opts?.maxHz !== undefined ? opts.maxHz : TAU_MIN_DEFAULT_HZ
+  const threshold = opts?.threshold ?? 0.1
+  const minHz = opts?.minHz ?? TAU_MAX_DEFAULT_HZ
+  const maxHz = opts?.maxHz ?? TAU_MIN_DEFAULT_HZ
+  if (!Number.isFinite(minHz) || !Number.isFinite(maxHz) || minHz <= 0 || maxHz <= 0 || minHz > maxHz ||
+      !Number.isFinite(threshold) || threshold <= 0 || threshold >= 1) return -1
   // usePrevious 参数：无状态纯函数不支持跨帧约束（见文件头），引用一次避免误用告警
   if (opts?.usePrevious === true) {
     // 保持契约兼容；行为与 false 一致（确定性优先）
@@ -52,19 +47,27 @@ export function yinPitch(mono: Float32Array, fs: number, opts?: YinOptions): num
   const w = mono.length
   // 最小可用窗长：至少覆盖两倍最大周期 + 少量余量
   const tauMax = Math.min(Math.floor(fs / minHz), Math.floor(w / 2) - 1)
-  const tauMin = Math.max(2, Math.floor(fs / maxHz))
-  if (w < 32 || tauMax <= tauMin) return -1
+  const tauMin = Math.max(2, Math.ceil(fs / maxHz))
+  if (w < 32 || tauMax < tauMin || tauMax < 2) return -1
 
   // 静音/直流保护：能量过低直接返回 -1（避免 0/0 → NaN）
   let energy = 0
-  for (let i = 0; i < w; i++) energy += mono[i] * mono[i]
-  if (energy < 1e-12) return -1
+  let sum = 0
+  for (let i = 0; i < w; i++) {
+    const sample = mono[i]
+    if (!Number.isFinite(sample)) return -1
+    energy += sample * sample
+    sum += sample
+  }
+  // 纯直流没有基频；对极低音量信号以方差（而非绝对幅度）作静音门。
+  if ((energy - sum * sum / w) / w < 1e-12) return -1
 
-  // 1) 差分函数 d(τ)，Float64 累加保证大窗精度
+  // 1) CMND 的累积均值必须包含 τ=1..τmin-1；从 τmin 起算会使
+  //    第一个允许的延迟错误地固定为 1，导致高频/窄区间完全无法检测。
   const d = new Float64Array(tauMax + 1)
-  for (let tau = tauMin; tau <= tauMax; tau++) {
+  const lim = w - tauMax // 所有延迟采用同一分析窗，避免大延迟因样本更少而虚假变小
+  for (let tau = 1; tau <= tauMax; tau++) {
     let s = 0
-    const lim = w - tau
     for (let j = 0; j < lim; j++) {
       const diff = mono[j] - mono[j + tau]
       s += diff * diff
@@ -80,7 +83,7 @@ export function yinPitch(mono: Float32Array, fs: number, opts?: YinOptions): num
     cmnd[tau] = cum > 0 ? (d[tau] * tau) / cum : 1
   }
 
-  // 3) 绝对阈值找第一个低于阈值的谷点
+  // 3) 绝对阈值找第一个低于阈值的延迟，再顺坡下行到第一个谷底
   let tau0 = -1
   for (let tau = tauMin; tau <= tauMax; tau++) {
     if (cmnd[tau] < threshold) {
@@ -90,26 +93,20 @@ export function yinPitch(mono: Float32Array, fs: number, opts?: YinOptions): num
   }
   if (tau0 < 0) return -1 // 无周期成分（如噪声）→ 未检出
 
-  // 在 [τ0, 2τ0] 内取局部最小值（抑制倍频/半频跳变；2τ0 封顶避免跑到低频端）
+  // YIN 取第一个低于阈值的局部谷底，而不是跨到 2τ0 的全局最低点：
+  // 后者常把单音选成两倍周期（半频八度误判）。
   let best = tau0
-  const hi = Math.min(tau0 + tau0, tauMax)
-  for (let tau = tau0 + 1; tau <= hi; tau++) {
-    if (cmnd[tau] < cmnd[best]) best = tau
-  }
+  while (best < tauMax && cmnd[best + 1] < cmnd[best]) best++
 
   // 4) 抛物线插值（三点拟合求亚采样最小点）
-  const a = best > 1 ? cmnd[best - 1] : cmnd[best]
-  const b = cmnd[best]
-  const c = best < tauMax ? cmnd[best + 1] : cmnd[best]
-  const denom = a - 2 * b + c
   let delta = 0
-  if (Math.abs(denom) > 1e-12) {
-    delta = (0.5 * (a - c)) / denom
-    if (delta < -1) delta = -1
-    else if (delta > 1) delta = 1
+  if (best > tauMin && best < tauMax) {
+    const a = cmnd[best - 1]
+    const b = cmnd[best]
+    const c = cmnd[best + 1]
+    const denom = a - 2 * b + c
+    if (denom > 1e-12) delta = Math.max(-0.5, Math.min(0.5, 0.5 * (a - c) / denom))
   }
-  const tauRefined = best + delta
-  if (!Number.isFinite(tauRefined) || tauRefined <= 0) return -1
-  const f0 = fs / tauRefined
-  return Number.isFinite(f0) ? f0 : -1
+  const f0 = fs / (best + delta)
+  return Number.isFinite(f0) && f0 >= minHz && f0 <= maxHz ? f0 : -1
 }

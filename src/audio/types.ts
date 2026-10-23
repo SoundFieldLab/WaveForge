@@ -311,6 +311,7 @@ export interface TransitionCommit {
 
 export interface PreloadTrack {
   url: string
+  replayGainTags?: Record<string, unknown> | null
   trackKey?: string
   index?: number
   duration?: number

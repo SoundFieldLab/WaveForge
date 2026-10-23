@@ -46,6 +46,18 @@ describe('encodeShareCode / decodeShareCode', () => {
     expect(decoded).toEqual(p)
   })
 
+  it('世界模式传播开关分享往返且拒绝非布尔注入', () => {
+    const p = createDefaultParams(48000)
+    p.spatial!.world.propagation = true
+    expect(decodeShareCode(encodeShareCode(p)).spatial!.world.propagation).toBe(true)
+    const injected = JSON.parse(JSON.stringify(p)) as Record<string, unknown>
+    const spatial = injected.spatial as Record<string, unknown>
+    const world = spatial.world as Record<string, unknown>
+    world.propagation = 'true'
+    const decoded = decodeShareCode(makeRawShare(JSON.stringify(injected)))
+    expect(decoded.spatial!.world.propagation).toBe(false)
+  })
+
   it('非默认参数往返一致（含 sceneId/自定义 EQ 段）', () => {
     const p = createDefaultParams(44100)
     p.customized = true
@@ -54,15 +66,54 @@ describe('encodeShareCode / decodeShareCode', () => {
     p.eq.proBands[1] = { frequency: 160, gain: -2, q: 1.4 }
     p.deesser.enabled = true
     p.deesser.thresholdDb = -40
+    p.compressor.transientPreserve = 0.65
     p.reverb.enabled = true
     p.reverb.mode = 'convolution'
     p.reverb.convolution.irName = 'hall-cathedral'
     p.loudnessNormalization.targetLufs = -16
     p.stereoWidth = 1.4
+    p.lowMonoAmount = 0.65
+    p.lowMonoCutoffHz = 175
+    p.subsonicEnabled = true
+    p.subsonicCutoffHz = 28
     const decoded = decodeShareCode(encodeShareCode(p))
     expect(decoded).toEqual(p)
     expect(decoded.reverb.convolution.ir).toBeNull()
     expect(decoded.reverb.convolution.irName).toBe('hall-cathedral')
+  })
+
+  it('低频单声道参数参与分享串往返并清洗越界值', () => {
+    const p = createDefaultParams(48000)
+    p.lowMonoAmount = 0.7
+    p.lowMonoCutoffHz = 180
+    const decoded = decodeShareCode(encodeShareCode(p))
+    expect(decoded.lowMonoAmount).toBe(0.7)
+    expect(decoded.lowMonoCutoffHz).toBe(180)
+    const malformed = decodeShareCode(makeRawShare(JSON.stringify({ sampleRate: 48000, lowMonoAmount: 4, lowMonoCutoffHz: 4 })))
+    expect(malformed.lowMonoAmount).toBe(1)
+    expect(malformed.lowMonoCutoffHz).toBe(40)
+  })
+
+  it('次声高通参数参与分享串往返并清洗越界值', () => {
+    const p = createDefaultParams(48000)
+    p.subsonicEnabled = true
+    p.subsonicCutoffHz = 32
+    const decoded = decodeShareCode(encodeShareCode(p))
+    expect(decoded.subsonicEnabled).toBe(true)
+    expect(decoded.subsonicCutoffHz).toBe(32)
+    const malformed = decodeShareCode(makeRawShare(JSON.stringify({ sampleRate: 48000, subsonicEnabled: 'on', subsonicCutoffHz: 100 })))
+    expect(malformed.subsonicEnabled).toBe(false)
+    expect(malformed.subsonicCutoffHz).toBe(40)
+  })
+
+  it('压缩器瞬态保留量参与分享串往返，旧分享串缺省为关闭', () => {
+    const p = createDefaultParams(48000)
+    p.compressor.transientPreserve = 0.7
+    expect(decodeShareCode(encodeShareCode(p)).compressor.transientPreserve).toBe(0.7)
+    expect(decodeShareCode(makeRawShare(JSON.stringify({ sampleRate: 48000, compressor: { transientPreserve: 4 } })))
+      .compressor.transientPreserve).toBe(1)
+    expect(decodeShareCode(makeRawShare(JSON.stringify({ sampleRate: 48000, compressor: {} })))
+      .compressor.transientPreserve).toBe(0)
   })
 
   it('IR 数组被去除：编码后解码 ir 恒为 null，irName 保留', () => {
@@ -147,7 +198,7 @@ describe('encodeShareCode / decodeShareCode', () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
   })
 
-  it('枚举白名单：非法枚举回落默认值', () => {
+  it('非法枚举回落默认值，自定义段数越界时钳制到容量上限', () => {
     const json = JSON.stringify({
       sampleRate: 48000,
       reverb: { mode: 'nuclear' },
@@ -159,7 +210,20 @@ describe('encodeShareCode / decodeShareCode', () => {
     expect(decoded.reverb.mode).toBe('algorithmic')
     expect(decoded.bassEnhancer.harmonicType).toBe('odd')
     expect(decoded.surround3d.direction).toBe(1)
-    expect(decoded.eq.bandCount).toBe(10)
+    expect(decoded.eq.bandCount).toBe(64)
+  })
+
+  it('多声道空间布局分享串往返，并对白名单外布局回退 5.1', () => {
+    const params = createDefaultParams(48000)
+    params.spatial.mode = 'instant'
+    params.spatial.instant.multichannelAuto = true
+    params.spatial.instant.multichannelLayout = '714'
+    const decoded = decodeShareCode(encodeShareCode(params))
+    expect(decoded.spatial.instant.multichannelAuto).toBe(true)
+    expect(decoded.spatial.instant.multichannelLayout).toBe('714')
+    const invalid = decodeShareCode(makeRawShare(JSON.stringify({ sampleRate: 48000,
+      spatial: { ...params.spatial, instant: { ...params.spatial.instant, multichannelLayout: 'unsupported' } } })))
+    expect(invalid.spatial.instant.multichannelLayout).toBe('51')
   })
 
   it('长字符串截断（防超长注入）', () => {
@@ -168,3 +232,19 @@ describe('encodeShareCode / decodeShareCode', () => {
     expect(decoded.reverb.convolution.irName!.length).toBeLessThanOrEqual(256)
   })
 });
+
+
+describe('空间高级参数持久化', () => {
+  it('自动输入布局、反射策略及零尺寸自定义扬声器完整往返', () => {
+    const params = createDefaultParams(48000)
+    params.spatial.budgetMode = 'auto'
+    params.spatial.instant.multichannelLayout = 'auto'
+    params.spatial.headLocked.layout = 'custom'
+    params.spatial.headLocked.speakers = [{ azimuthDeg: -40, elevationDeg: 20, distance: 0,
+      gain: 0.8, size: 0, diffuse: 0.75, polarity: -1, muted: true, route: 'side' }]
+    const decoded = decodeShareCode(encodeShareCode(params))
+    expect(decoded.spatial.budgetMode).toBe('auto')
+    expect(decoded.spatial.instant.multichannelLayout).toBe('auto')
+    expect(decoded.spatial.headLocked.speakers).toEqual(params.spatial.headLocked.speakers)
+  })
+})

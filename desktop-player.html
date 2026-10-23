@@ -7,7 +7,7 @@
          nonce/inline 处理：若 dev 控制台报 CSP 拦截，在 dev 分支（import.meta.env.DEV）
          放宽；打包版（file://）保持严格。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob: waveforge-media: waveforge-spotify:; font-src 'self' data:; connect-src * waveforge-media: waveforge-spotify:; frame-src 'self' https://y.qq.com https://graph.qq.com; worker-src 'self' blob:;" />
+          content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src * data: blob:; media-src * data: blob: waveforge-media: waveforge-spotify:; font-src 'self' data:; connect-src * data: waveforge-media: waveforge-spotify:; frame-src 'self' https://y.qq.com https://graph.qq.com; worker-src 'self' blob:;" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>WaveForge 桌面播放器</title>
   </head>

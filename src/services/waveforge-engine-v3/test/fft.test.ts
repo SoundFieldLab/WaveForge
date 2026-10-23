@@ -85,6 +85,27 @@ describe('fft', () => {
     expect(nextPow2(1024)).toBe(1024)
   })
 
+  it('nextPow2 超过 32 位边界仍终止且不向下舍入；非法输入快速拒绝', () => {
+    expect(nextPow2(2 ** 30 + 1)).toBe(2 ** 31)
+    expect(nextPow2(2 ** 31 + 1)).toBe(2 ** 32)
+    expect(nextPow2(2 ** 32)).toBe(2 ** 32)
+    expect(nextPow2(1024 + Number.EPSILON * 1024)).toBe(2048)
+    expect(nextPow2(1.1)).toBe(2)
+    expect(nextPow2(Number.MAX_SAFE_INTEGER)).toBe(2 ** 53)
+    for (const invalid of [NaN, Infinity, -Infinity, 2 ** 53]) {
+      expect(() => nextPow2(invalid)).toThrow('nextPow2: invalid size')
+    }
+  })
+
+  it('单点 FFT 正逆保持复数值', () => {
+    const re = new Float32Array([0.25])
+    const im = new Float32Array([-0.5])
+    fft(re, im, false)
+    fft(re, im, true)
+    expect(re[0]).toBe(0.25)
+    expect(im[0]).toBe(-0.5)
+  })
+
   it('hannWindow：端点 0、对称、非负；奇数 N 中心恰为 1', () => {
     const n = 8
     const w = hannWindow(n)

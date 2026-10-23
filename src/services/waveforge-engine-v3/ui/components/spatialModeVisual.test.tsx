@@ -1,92 +1,61 @@
-/**
- * SpatialModeVisual 空间化过渡动画测试（jsdom：含组件挂载冒烟）
- *
- * 纯函数部分：transitionProgress 相位映射——2s 总时长线性 0..1
- * （0ms→0、1s→0.5、2s→1）、越界钳制（>2s 钳 1、<0 钳 0）、start 偏移、
- * 确定性（相同输入恒等输出）+ TRANSITION_DURATION_MS 常量。
- * 组件冒烟（jsdom）：transitionKey 缺省（向后兼容）/传值两种挂载不抛错；
- * jsdom 无 2D canvas 上下文（getContext 返回 null），绘制路径提前返回，
- * 只验证挂载与 props 接线。
- * 注意：文件用 .tsx 后缀是因为 vitest.config.ts 对 ui/ 目录只收集
- * `ui/**\/*.test.tsx`；组件部分需要 DOM，故文件头启用 jsdom。
- */
-
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach } from 'vitest'
-import { render, cleanup } from '@testing-library/react'
-import { SpatialModeVisual, transitionProgress, TRANSITION_DURATION_MS } from './SpatialModeVisual'
-import type { HSETheme } from '../hse-theme'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { SpatialModeVisual } from './SpatialModeVisual'
+import { createHSETheme } from '../hse-theme'
 
-/** 测试用 HSE 主题（最小对象；jsdom 无 2D 上下文，绘制路径不会读取其余字段） */
-const theme: HSETheme = {
-  dark: true,
-  accentFrom: '#22d3ee',
-  accentTo: '#7c3aed',
-  // 其余字段仅类型占位（绘制路径未使用）
-} as unknown as HSETheme
+afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+const theme = createHSETheme()
 
-/* ═══════════ transitionProgress：2s 过渡相位映射 ═══════════ */
-
-describe('transitionProgress（2s 过渡相位映射）', () => {
-  it('0ms → 0、1s → 0.5、2s → 1（线性映射）', () => {
-    expect(transitionProgress(0, 0)).toBe(0)
-    expect(transitionProgress(1000, 0)).toBe(0.5)
-    expect(transitionProgress(2000, 0)).toBe(1)
-    expect(transitionProgress(500, 0)).toBe(0.25)
+describe('立体声展开图', () => {
+  it('清楚标示听者、前方和两个声道，不依赖 Canvas', () => {
+    const { container } = render(<SpatialModeVisual spreadDeg={60} amount={0.8} active theme={theme} />)
+    expect(screen.getByText('左声道 L')).toBeTruthy()
+    expect(screen.getByText('右声道 R')).toBeTruthy()
+    expect(screen.getByText('听者')).toBeTruthy()
+    expect(screen.getByText('前方')).toBeTruthy()
+    expect(container.querySelector('canvas')).toBeNull()
+    expect(screen.getByText('空间强度 80%')).toBeTruthy()
   })
 
-  it('超过 2s 钳制到 1（>2s 钳 1）', () => {
-    expect(transitionProgress(2001, 0)).toBe(1)
-    expect(transitionProgress(5000, 0)).toBe(1)
-    expect(transitionProgress(1e9, 0)).toBe(1)
+  it('两个扬声器都支持键盘调角度与上下界', () => {
+    const onSpreadChange = vi.fn()
+    render(<SpatialModeVisual spreadDeg={60} amount={0.8} active theme={theme} onSpreadChange={onSpreadChange} />)
+    const [left, right] = screen.getAllByRole('slider')
+    fireEvent.keyDown(left, { key: 'ArrowRight' }); expect(onSpreadChange).toHaveBeenLastCalledWith(61)
+    fireEvent.keyDown(right, { key: 'ArrowDown', shiftKey: true }); expect(onSpreadChange).toHaveBeenLastCalledWith(55)
+    fireEvent.keyDown(right, { key: 'End' }); expect(onSpreadChange).toHaveBeenLastCalledWith(120)
+    fireEvent.keyDown(left, { key: 'Home' }); expect(onSpreadChange).toHaveBeenLastCalledWith(20)
   })
 
-  it('未开始/早于起点钳制到 0（<0 钳 0）', () => {
-    expect(transitionProgress(-1, 0)).toBe(0)
-    expect(transitionProgress(-500, 0)).toBe(0)
-    expect(transitionProgress(0, 1000)).toBe(0) // now 在 start 之前
+  it('旁路时保留位置但暂停编辑', () => {
+    const onSpreadChange = vi.fn()
+    render(<SpatialModeVisual spreadDeg={60} amount={0.8} active={false} theme={theme} onSpreadChange={onSpreadChange} transitionKey={2} />)
+    const node = screen.getAllByRole('slider')[0]
+    expect(node.getAttribute('aria-disabled')).toBe('true')
+    fireEvent.keyDown(node, { key: 'ArrowRight' })
+    expect(onSpreadChange).not.toHaveBeenCalled()
+    expect(screen.getByText('原声对比 · 位置编辑暂停')).toBeTruthy()
   })
 
-  it('start 偏移：以 start 为相对零点', () => {
-    expect(transitionProgress(1500, 1000)).toBe(0.25)
-    expect(transitionProgress(3000, 1000)).toBe(1)
-    expect(transitionProgress(1000, 1000)).toBe(0)
-  })
-
-  it('确定性：相同输入恒等输出（含边界）', () => {
-    for (let i = 0; i < 50; i += 1) {
-      const now = i * 137
-      expect(transitionProgress(now, 0)).toBe(transitionProgress(now, 0))
-    }
-    expect(transitionProgress(2000, 0)).toBe(transitionProgress(2000, 0))
-    expect(transitionProgress(0, 0)).toBe(transitionProgress(0, 0))
-  })
-
-  it('TRANSITION_DURATION_MS 常量 = 2000（总时长）', () => {
-    expect(TRANSITION_DURATION_MS).toBe(2000)
-  })
-})
-
-/* ═══════════ SpatialModeVisual 挂载冒烟 ═══════════ */
-
-describe('SpatialModeVisual 挂载冒烟', () => {
-  beforeEach(() => cleanup())
-
-  it('transitionKey 缺省挂载不抛错（向后兼容：不播过渡）', () => {
-    expect(() =>
-      render(<SpatialModeVisual spreadDeg={60} amount={0.8} active theme={theme} />),
-    ).not.toThrow()
-  })
-
-  it('transitionKey 传值挂载不抛错（触发链路接线：值变化时播放过渡）', () => {
-    expect(() =>
-      render(<SpatialModeVisual spreadDeg={60} amount={0.8} active theme={theme} transitionKey={1} />),
-    ).not.toThrow()
-  })
-
-  it('关闭态（active=false）挂载不抛错', () => {
-    expect(() =>
-      render(<SpatialModeVisual spreadDeg={60} amount={0.8} active={false} theme={theme} transitionKey={2} />),
-    ).not.toThrow()
+  it('使用 SVG 屏幕矩阵换算拖动，响应式缩放不改变角度', () => {
+    vi.stubGlobal('PointerEvent', MouseEvent)
+    const onSpreadChange = vi.fn()
+    const { container } = render(<SpatialModeVisual spreadDeg={60} amount={0.8} active theme={theme} onSpreadChange={onSpreadChange} />)
+    const svg = container.querySelector('svg')!
+    Object.defineProperty(svg, 'getScreenCTM', { value: () => ({ inverse: () => ({}) }) })
+    Object.defineProperty(svg, 'createSVGPoint', { value: () => ({ x: 0, y: 0,
+      matrixTransform() { return { x: (this.x - 80) / 2, y: (this.y - 40) / 2 } },
+    }) })
+    const right = screen.getAllByRole('slider')[1]
+    fireEvent.pointerDown(right, { button: 0, clientX: 724, clientY: 204 })
+    const angle = Math.PI / 4
+    fireEvent.pointerMove(svg, { clientX: 80 + (240 + 164 * Math.sin(angle)) * 2,
+      clientY: 40 + (224 - 164 * Math.cos(angle)) * 2 })
+    expect(onSpreadChange).toHaveBeenLastCalledWith(90)
+    fireEvent.pointerUp(svg)
+    onSpreadChange.mockClear()
+    fireEvent.pointerMove(svg, { clientX: 700, clientY: 100 })
+    expect(onSpreadChange).not.toHaveBeenCalled()
   })
 })

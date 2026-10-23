@@ -160,7 +160,80 @@ describe('Convolver.process（有限块卷积）', () => {
   })
 })
 
+describe('Convolver Worklet 预计算 IR', () => {
+  it('控制线程预计算的分区频谱可接管并逐样本复现标准 IR 路径', () => {
+    const ir = new Float32Array(4096)
+    for (let i = 0; i < ir.length; i++) ir[i] = (i === 0 ? 1 : 0) + 0.12 * Math.exp(-i / 900) * Math.sin(i * 0.17)
+    const options = { partitionSize: 128, dePeriodize: true }
+    const control = new Convolver(FS, options)
+    control.loadIR(ir, 'prepared-test')
+    const prepared = control.createPreparedIRTransfer()!
+    const consumer = new Convolver(FS, options)
+    expect(consumer.loadPreparedIR({ ...prepared, fftSize: prepared.fftSize * 2 })).toBe(false)
+    expect(consumer.loadPreparedIR(prepared)).toBe(true)
+    for (const cv of [control, consumer]) {
+      cv.setMix(0.63)
+      cv.setPreDelayMs(3)
+    }
+
+    const sourceL = makeInput(4096)
+    const sourceR = Float32Array.from(sourceL, (sample) => -sample * 0.4)
+    const outputs = [control, consumer].map((cv) => {
+      const left = sourceL.slice()
+      const right = sourceR.slice()
+      for (let offset = 0; offset < left.length; offset += 73) {
+        const end = Math.min(left.length, offset + 73)
+        cv.processStereo(left.subarray(offset, end), right.subarray(offset, end))
+      }
+      return [left, right] as const
+    })
+    expect(maxAbsDiff(outputs[0][0], outputs[1][0])).toBeLessThan(1e-6)
+    expect(maxAbsDiff(outputs[0][1], outputs[1][1])).toBeLessThan(1e-6)
+  })
+})
+
 describe('Convolver.processStereo（流式 + 干湿混合）', () => {
+  it('多分区 FDL 与时域线性卷积对拍，支持非二次幂分区和不规则块', () => {
+    for (const size of [32, 73, 128]) {
+      const ir = Float32Array.from({ length: 3 * size + 19 }, (_, i) => Math.cos(i * 0.7) * Math.exp(-i / 53) * 0.03)
+      const input = Float32Array.from({ length: 437 }, (_, i) => Math.sin(i * 0.13) * 0.3)
+      const reference = new Float32Array(input.length + ir.length - 1)
+      for (let i = 0; i < input.length; i++) {
+        for (let j = 0; j < ir.length; j++) reference[i + j] += input[i] * ir[j]
+      }
+      const cv = new Convolver(FS, { partitionSize: size, dePeriodize: false })
+      cv.loadIR(ir)
+      const offline = cv.process(input)
+      expect(maxAbsDiff(offline, reference)).toBeLessThan(2e-6)
+      const l = new Float32Array(reference.length + size)
+      const r = new Float32Array(l.length)
+      l.set(input)
+      for (let i = 0; i < input.length; i++) r[i] = -input[i] * 0.7
+      for (let offset = 0; offset < l.length; offset += 19) {
+        cv.processStereo(l.subarray(offset, offset + 19), r.subarray(offset, offset + 19))
+      }
+      expect(maxAbsDiff(l.subarray(size), reference)).toBeLessThan(2e-6)
+      for (let i = 0; i < reference.length; i++) {
+        expect(r[i + size]).toBeCloseTo(-reference[i] * 0.7, 5)
+      }
+    }
+  })
+
+  it('预延迟关开期间继续推进历史，不重放旧湿声', () => {
+    const cv = new Convolver(FS, { partitionSize: 32, dePeriodize: false })
+    cv.loadIR(new Float32Array([1]))
+    cv.setPreDelayMs(10)
+    cv.processStereo(new Float32Array(132).fill(1), new Float32Array(132).fill(1))
+    cv.setPreDelayMs(0)
+    cv.processStereo(new Float32Array(2000), new Float32Array(2000))
+    cv.setPreDelayMs(10)
+    const l = new Float32Array(1000)
+    const r = new Float32Array(1000)
+    cv.processStereo(l, r)
+    expect(l.every((x) => Math.abs(x) < 1e-6)).toBe(true)
+    expect(r.every((x) => Math.abs(x) < 1e-6)).toBe(true)
+  })
+
   it('mix=0 时输出=输入（干路恒等）', () => {
     const cv = new Convolver(FS, { partitionSize: 512 })
     cv.loadIR(new Float32Array([1]))
@@ -180,6 +253,35 @@ describe('Convolver.processStereo（流式 + 干湿混合）', () => {
     }
     expect(maxAbsDiff(l, l0)).toBeLessThan(TOL)
     expect(maxAbsDiff(r, r0)).toBeLessThan(TOL)
+  })
+
+  it('立体声预延迟按同一采样位置推进，重载 IR 不泄漏旧湿声', () => {
+    const L = 64
+    const D = 12
+    const cv = new Convolver(FS, { partitionSize: L, dePeriodize: false })
+    cv.loadIR(new Float32Array([1]))
+    cv.setMix(1)
+    cv.setPreDelayMs((D / FS) * 1000)
+    expect(cv.getLatencySamples()).toBe(L + D)
+    const n = 4 * L
+    const l = new Float32Array(n)
+    const r = new Float32Array(n)
+    l[0] = 0.75
+    r[0] = -0.25
+    for (let offset = 0; offset < n; offset += 17) {
+      const end = Math.min(n, offset + 17)
+      cv.processStereo(l.subarray(offset, end), r.subarray(offset, end))
+    }
+    for (let i = 0; i < n; i++) {
+      expect(l[i]).toBeCloseTo(i === L + D ? 0.75 : 0, 4)
+      expect(r[i]).toBeCloseTo(i === L + D ? -0.25 : 0, 4)
+    }
+    cv.loadIR(new Float32Array([1]))
+    const silenceL = new Float32Array(n)
+    const silenceR = new Float32Array(n)
+    cv.processStereo(silenceL, silenceR)
+    expect(silenceL.every((sample) => Math.abs(sample) < TOL)).toBe(true)
+    expect(silenceR.every((sample) => Math.abs(sample) < TOL)).toBe(true)
   })
 
   it('IR=[1]、mix=1 时湿路输出 = 输入延迟一个分区长', () => {

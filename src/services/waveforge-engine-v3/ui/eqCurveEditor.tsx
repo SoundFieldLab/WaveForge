@@ -78,7 +78,7 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
   const x = (f: number) => padL + fToX(f, fMin, fMax) * iw
   const y = (g: number) => padT + dbToY(g, minDb, maxDb) * ih
 
-  /** Catmull-Rom→三次贝塞尔平滑路径（模拟模拟电路柔和感，替代生硬折线） */
+  /** 频段控制点的三次贝塞尔连线。 */
   const smoothPath = (pts: EqPoint[]): string => {
     if (pts.length === 0) return ''
     if (pts.length === 1) return `M${x(pts[0].frequency).toFixed(2)},${y(pts[0].gain).toFixed(2)}`
@@ -156,8 +156,8 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
       ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
       aria-label="均衡器响应曲线"
-      className="w-full touch-none select-none"
-      style={{ height, display: 'block', cursor: readonly ? 'default' : 'grab' }}
+      className="hse-mono w-full touch-none select-none rounded-xl border"
+      style={{ height, display: 'block', background: theme.inputBg, borderColor: theme.glassBorder, cursor: readonly ? 'default' : 'grab' }}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={endDrag}
@@ -166,14 +166,14 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
     >
       {/* 网格 */}
       {gridFreqs.map((f) => (
-        <line key={f} x1={x(f)} y1={padT} x2={x(f)} y2={padT + ih} stroke={theme.dark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.07)'} strokeWidth={1} />
+        <line key={f} x1={x(f)} y1={padT} x2={x(f)} y2={padT + ih} stroke={theme.glassBorder} strokeWidth={1} />
       ))}
       {/* 0dB 中线 */}
-      <line x1={padL} y1={zeroY} x2={padL + iw} y2={zeroY} stroke={theme.dark ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)'} strokeWidth={1} strokeDasharray="4 3" />
+      <line x1={padL} y1={zeroY} x2={padL + iw} y2={zeroY} stroke="#8b9e91" strokeWidth={1} strokeDasharray="4 3" />
 
       {/* 参考曲线（Q 补偿预估等） */}
       {reference && reference.length > 0 && (
-        <path d={smoothPath(reference)} fill="none" stroke={theme.dark ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.3)'} strokeWidth={1.2} strokeDasharray="3 3" />
+        <path d={smoothPath(reference)} fill="none" stroke="#536b66" strokeWidth={1.2} strokeDasharray="3 3" />
       )}
 
       {/* 主曲线（贝塞尔平滑） */}
@@ -199,7 +199,7 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
             }}>
             {selected && <circle cx={x(p.frequency)} cy={y(p.gain)} r={9} fill="none" stroke={theme.accentColor} strokeWidth={1} opacity={0.45} />}
             <circle cx={x(p.frequency)} cy={y(p.gain)} r={8} fill="transparent" style={{ cursor: readonly ? 'default' : 'pointer' }} />
-            <circle cx={x(p.frequency)} cy={y(p.gain)} r={active ? 5.5 : selected ? 5 : 4.5} fill={theme.dark ? '#0b0d14' : '#ffffff'} stroke={theme.accentColor} strokeWidth={selected ? 2.5 : 2}
+            <circle cx={x(p.frequency)} cy={y(p.gain)} r={active ? 5.5 : selected ? 5 : 4.5} fill="#ffffff" stroke={theme.accentColor} strokeWidth={selected ? 2.5 : 2}
               style={{ cursor: readonly ? 'default' : 'pointer', transition: 'r 0.1s ease' }} />
           </g>
         )
@@ -214,7 +214,7 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
         const w = label.length * 4.2 + 10
         return (
           <g pointerEvents="none">
-            <rect x={tx - w / 2} y={ty - 11} width={w} height={15} rx={4} fill={theme.dark ? 'rgba(10,12,20,0.92)' : 'rgba(255,255,255,0.92)'} stroke={theme.accentColor} strokeWidth={0.8} />
+            <rect x={tx - w / 2} y={ty - 11} width={w} height={15} rx={4} fill="#ffffff" stroke={theme.accentColor} strokeWidth={0.8} />
             <text x={tx} y={ty} textAnchor="middle" fontSize={9} fill={theme.accentColor} style={{ font: '9px ui-monospace, monospace' }}>{label}</text>
           </g>
         )
@@ -223,15 +223,15 @@ export function EqCurveEditor({ points, theme, onChange, onSelect, selectedIndex
       {/* 频率标签 */}
       {[100, 1000, 10000].map((f) => (
         <text key={f} x={x(f)} y={H - 5} textAnchor="middle" fontSize={9}
-          fill={theme.dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.45)'}>{f >= 1000 ? `${f / 1000}k` : f}Hz</text>
+          fill={'#536b66'}>{f >= 1000 ? `${f / 1000}k` : f}Hz</text>
       ))}
-      <text x={padL} y={H - 5} textAnchor="start" fontSize={9} fill={theme.dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.45)'}>20</text>
-      <text x={padL + iw} y={H - 5} textAnchor="end" fontSize={9} fill={theme.dark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.45)'}>20k</text>
+      <text x={padL} y={H - 5} textAnchor="start" fontSize={9} fill={'#536b66'}>20</text>
+      <text x={padL + iw} y={H - 5} textAnchor="end" fontSize={9} fill={'#536b66'}>20k</text>
 
       {/* 增益刻度位于独立左边距，避免压住曲线 */}
       {gainTicks.map((db) => (
         <text key={db} x={padL - 7} y={y(db) + 3} textAnchor="end" fontSize={9}
-          fill={theme.dark ? 'rgba(255,255,255,0.42)' : 'rgba(0,0,0,0.48)'}>{db > 0 ? `+${db}` : db} dB</text>
+          fill={'#536b66'}>{db > 0 ? `+${db}` : db} dB</text>
       ))}
     </svg>
   )

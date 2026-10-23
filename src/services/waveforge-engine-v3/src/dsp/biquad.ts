@@ -1,3 +1,4 @@
+import type { AudioBuffer } from './audioBuffer'
 /**
  * biquad.ts —— RBJ 双二阶滤波器（系数设计 + TDF2 实现）
  *
@@ -36,14 +37,15 @@ export interface BiquadCoeffs {
  * RBJ 系数设计（BLT 预畸变已内置在 w0 = 2π·f0/fs 中）。
  * f0 越界（<=0 或 >=fs/2）自动 clamp；q 必须 >0；gainDb 仅 peaking/shelf 使用。
  */
-export function designBiquad(type: BiquadType, f0: number, q: number, gainDb: number, fs: number): BiquadCoeffs {
-  if (!(fs > 0)) throw new Error('invalid sample rate')
+export function designBiquad(type: BiquadType, f0: number, q: number, gainDb: number, fs: number, out?: BiquadCoeffs): BiquadCoeffs {
+  if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
   const nyq = fs / 2
   // 下限 10Hz：过低频率在 48k 采样下 BLT 系数病态（b≈0 杀静音 / 极点贴圆不稳定）——
   // 审计修复（原 clamp 1e-6 退化，1Hz 仍边缘；10Hz 与 Deesser 等内联实现一致）
-  const f = Math.min(Math.max(f0, 10), nyq * (1 - 1e-9))
-  const qq = Math.max(q, 1e-6)
-  const g = Math.min(Math.max(gainDb, -60), 60)
+  // 非有限参数回退中性默认值，不能依赖 Math.min/max 消除 NaN。
+  const f = Math.min(Math.max(Number.isFinite(f0) ? f0 : 1000, 10), nyq * (1 - 1e-9))
+  const qq = Math.max(Number.isFinite(q) ? q : 1, 1e-6)
+  const g = Math.min(Math.max(Number.isFinite(gainDb) ? gainDb : 0, -60), 60)
 
   const w0 = (2 * Math.PI * f) / fs
   const cosw = Math.cos(w0)
@@ -106,12 +108,19 @@ export function designBiquad(type: BiquadType, f0: number, q: number, gainDb: nu
   }
 
   // 归一化（除以 a0）。a0 理论上恒 >0，防御性兜底为直通。
-  if (!(a0 > 0) || !Number.isFinite(a0)) return { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0 }
+  const result = out ?? { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0 }
+  if (!(a0 > 0) || !Number.isFinite(a0)) {
+    result.b0 = 1; result.b1 = 0; result.b2 = 0; result.a1 = 0; result.a2 = 0
+    return result
+  }
   const inv = 1 / a0
-  return { b0: b0 * inv, b1: b1 * inv, b2: b2 * inv, a1: a1 * inv, a2: a2 * inv }
+  result.b0 = b0 * inv; result.b1 = b1 * inv; result.b2 = b2 * inv
+  result.a1 = a1 * inv; result.a2 = a2 * inv
+  return result
 }
 
 export class Biquad {
+  private readonly coeffScratch: BiquadCoeffs = { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0 }
   private b0 = 1
   private b1 = 0
   private b2 = 0
@@ -124,7 +133,7 @@ export class Biquad {
 
   constructor(type?: BiquadType, f0?: number, q?: number, gainDb?: number, fs?: number) {
     const rate = fs ?? 48000
-    if (!(rate > 0)) throw new Error('invalid sample rate')
+    if (!(rate > 0) || !Number.isFinite(rate)) throw new Error('invalid sample rate')
     this.fs = rate
     this.reset()
     if (type !== undefined) {
@@ -133,6 +142,9 @@ export class Biquad {
   }
 
   setCoeffs(c: BiquadCoeffs): void {
+    // 原子拒绝非法外部系数，保留现有滤波器和状态，避免一次 NaN 污染后续所有样本。
+    if (!Number.isFinite(c.b0) || !Number.isFinite(c.b1) || !Number.isFinite(c.b2)
+      || !Number.isFinite(c.a1) || !Number.isFinite(c.a2)) throw new Error('biquad: invalid coefficients')
     this.b0 = c.b0
     this.b1 = c.b1
     this.b2 = c.b2
@@ -140,9 +152,20 @@ export class Biquad {
     this.a2 = c.a2
   }
 
+  /** Copy coefficient and delay state into a preallocated parallel filter for parameter crossfades. */
+  copyStateFrom(source: Biquad): void {
+    this.b0 = source.b0
+    this.b1 = source.b1
+    this.b2 = source.b2
+    this.a1 = source.a1
+    this.a2 = source.a2
+    this.s1 = source.s1
+    this.s2 = source.s2
+  }
+
   /** 按 RBJ 公式重算系数（参数更新即时生效，状态保留） */
   setParams(type: BiquadType, f0: number, q: number, gainDb: number): void {
-    this.setCoeffs(designBiquad(type, f0, q, gainDb, this.fs))
+    this.setCoeffs(designBiquad(type, f0, q, gainDb, this.fs, this.coeffScratch))
   }
 
   /** TDF2 处理单样本，返回 y（转置直接 II 型：状态转移在输出之后） */
@@ -153,7 +176,7 @@ export class Biquad {
     return y
   }
 
-  processBlock(input: Float32Array, output: Float32Array): void {
+  processBlock(input: AudioBuffer, output: AudioBuffer): void {
     if (input.length !== output.length) throw new Error('biquad: input/output length mismatch')
     const { b0, b1, b2, a1, a2 } = this
     let s1 = this.s1
@@ -176,8 +199,8 @@ export class Biquad {
 
   /** 在给定频率处求 |H(e^{jw})|（线性幅度，单位增益），用于级联响应测量 */
   magnitudeAt(freqHz: number, fs: number): number {
-    if (!(fs > 0)) throw new Error('invalid sample rate')
-    const f = Math.min(Math.max(freqHz, 1e-6), (fs / 2) * (1 - 1e-9))
+    if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
+    const f = Math.min(Math.max(Number.isFinite(freqHz) ? freqHz : 1000, 1e-6), (fs / 2) * (1 - 1e-9))
     const w = (2 * Math.PI * f) / fs
     const cw = Math.cos(w)
     const sw = Math.sin(w)
@@ -191,3 +214,4 @@ export class Biquad {
     return Math.hypot(br, bi) / Math.hypot(ar, ai)
   }
 }
+

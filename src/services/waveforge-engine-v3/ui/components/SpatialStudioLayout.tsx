@@ -318,7 +318,7 @@ export default function SpatialStudioLayout({
             <div className="flex items-center justify-between">
               <span className={`${theme.textTertiary} text-[11px]`}>插值</span>
               <span className={`hse-mono ${theme.textSecondary} text-[11px]`}>
-                最近邻<span className={`${theme.textMuted} ml-1`}>（球谐开发中）</span>
+                实测方向插值
               </span>
             </div>
             <p className={`${theme.textMuted} text-[10px] mt-2`}>
@@ -363,16 +363,16 @@ export default function SpatialStudioLayout({
         {/* 活跃对象（规划书 §5.6「活跃对象: [8/64]」）：当前配置的虚拟扬声器数 / 展示上限 */}
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>对象</span>
-          <span className={theme.textSecondary}>{activeObjects}/{ACTIVE_OBJECTS_CAPACITY}</span>
+          <span className={theme.textSecondary}>{activeObjects}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>HRTF</span>
-          <span className={theme.textSecondary}>合成（解析式）</span>
+          <span className={theme.textSecondary}>实测 KEMAR</span>
         </div>
         {/* 输出设备（只读展示：sinkId 快照存在 → 已选设备，缺省 → 系统默认） */}
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>输出</span>
-          <span className={theme.textSecondary}>{spatial.sinkId ? '已选设备' : '双耳渲染'}</span>
+          <span className={theme.textSecondary}>双耳渲染</span>
         </div>
         <div className="flex items-center gap-1.5">
           <span className={theme.textMuted}>模式</span>

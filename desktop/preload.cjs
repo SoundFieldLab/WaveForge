@@ -343,6 +343,12 @@ contextBridge.exposeInMainWorld('electron', {
   writeHseSceneSeed: (content) => ipcRenderer.invoke('hse-write-scene-seed', content),
   // HSE 离线导出：渲染完成的 MP3 直写用户桌面（<歌曲名>-Modified.mp3）
   saveHseRenderedAudio: (data, fileName) => ipcRenderer.invoke('hse-save-rendered-audio', data, fileName),
+  // 受控本机 OSC 桥；不自动启动、不自动连接设备。
+  hseHeadTracking: {
+    getBridgeState: () => ipcRenderer.invoke('hse-head-tracking:state'),
+    startBridge: () => ipcRenderer.invoke('hse-head-tracking:start'),
+    stopBridge: () => ipcRenderer.invoke('hse-head-tracking:stop'),
+  },
   // 汽水音乐（抖音）数据桥：隐藏窗口导航抖音搜索页抓取音乐卡片
   sodaScrapeSearch: (keyword) => ipcRenderer.invoke('soda-scrape-search', keyword),
   // 酷狗数据桥：隐藏窗口页面内同源 fetch 用户歌单/用户信息（绕开服务端 WAF）

@@ -7,14 +7,16 @@
  * 本页恢复为纯卡片流（与混响/3D环绕/立体声宽度效果一一对应）。
  */
 
-import { useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { AudioLines, Headphones, Columns2, Settings2 } from 'lucide-react'
 import { GlassCard, Toggle, Slider, Segmented, RangeStyle } from '../components/Primitives'
 import type { HSETheme } from '../hse-theme'
 import type { V3UiBridge } from '../bridge'
 import type { V3ParamsController } from '../hooks'
 import type { PlaybackTimeStore } from '../../../../audio/playbackTimeStore'
-import type { ReverbType } from '../../src/types'
+import type { ReverbType, ConvolutionPurpose } from '../../src/types'
+import type { ConvolutionIrMetadata } from '../../src/dsp/ConvolutionIrLibrary'
+import { listConvolutionIr, loadConvolutionIr, removeConvolutionIr, saveConvolutionIr, updateConvolutionIrPurpose } from '../irStore'
 
 interface SpatialPageProps {
   bridge: V3UiBridge
@@ -34,11 +36,21 @@ const REVERB_TYPES: { value: ReverbType; label: string }[] = [
   { value: 'stage', label: '舞台' },
 ]
 
+const CONVOLUTION_PURPOSES: { value: ConvolutionPurpose; label: string }[] = [
+  { value: 'reverb', label: '混响' },
+  { value: 'roomCorrection', label: '房间校正' },
+  { value: 'speakerCorrection', label: '扬声器校正' },
+  { value: 'headphoneCorrection', label: '耳机校正' },
+]
+
 export default function SpatialPage({ controller, theme, onOpenEffect }: SpatialPageProps) {
   const { params, patch } = controller
   const rv = params.reverb
   const s3 = params.surround3d
   const fileRef = useRef<HTMLInputElement>(null)
+  const [irEntries, setIrEntries] = useState<ConvolutionIrMetadata[]>([])
+
+  useEffect(() => { void listConvolutionIr().then(setIrEntries).catch(() => undefined) }, [])
 
   const details = (key: string, name: string) => (
     <button type="button" onClick={() => onOpenEffect(key)} aria-label={`${name}详细设置`}
@@ -56,16 +68,38 @@ export default function SpatialPage({ controller, theme, onOpenEffect }: Spatial
         const decoded = await ctx.decodeAudioData(buf)
         const mono = new Float32Array(decoded.length)
         mono.set(decoded.getChannelData(0))
-        patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: mono, irName: file.name, dePeriodize: true } } })
+        const entry = await saveConvolutionIr(file.name, rv.convolution.purpose ?? 'reverb', decoded.sampleRate, mono)
+        setIrEntries(await listConvolutionIr())
+        const playbackIr = await loadConvolutionIr(entry.id, params.sampleRate)
+        patch({ reverb: { ...rv, mode: 'convolution', convolution: { ...rv.convolution, ir: playbackIr?.ir ?? mono, irId: entry.id, irName: file.name,
+          dePeriodize: (rv.convolution.purpose ?? 'reverb') === 'reverb' } } })
         window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `已导入 IR「${file.name}」`, type: 'info' } }))
       } finally {
         void ctx.close()
       }
-    } catch {
-      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: 'IR 文件解码失败', type: 'error' } }))
+    } catch (error) {
+      const message = error instanceof Error && error.message.startsWith('IR 库')
+        ? error.message : 'IR 导入失败，请检查文件格式与存储空间'
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message, type: 'error' } }))
     } finally {
       if (ctx) void ctx.close()
     }
+  }
+
+  const chooseIr = async (id: string) => {
+    const entry = await loadConvolutionIr(id, params.sampleRate)
+    if (!entry) return
+    patch({ reverb: { ...rv, enabled: true, mode: 'convolution', convolution: { ...rv.convolution,
+      ir: entry.ir, irId: id, irName: entry.metadata.name, purpose: entry.metadata.purpose,
+      dePeriodize: entry.metadata.purpose === 'reverb' } } })
+  }
+
+  const deleteIr = async () => {
+    const id = rv.convolution.irId
+    if (!id) return
+    await removeConvolutionIr(id)
+    setIrEntries(await listConvolutionIr())
+    patch({ reverb: { ...rv, mode: 'algorithmic', convolution: { ...rv.convolution, ir: null, irId: null, irName: null } } })
   }
 
   return (
@@ -117,7 +151,23 @@ export default function SpatialPage({ controller, theme, onOpenEffect }: Spatial
                 <div className={`${theme.textPrimary} text-xs font-medium`}>{rv.convolution.irName ?? '点击导入脉冲响应（IR）'}</div>
                 <div className={`${theme.textTertiary} text-[10px] mt-1`}>WAV / AIFF / FLAC</div>
               </div>
-              <Slider label="湿声混合" value={rv.convolution.mix} min={0} max={1} step={0.01} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, mix: v } } })} display={`${Math.round(rv.convolution.mix * 100)}%`} theme={theme} />
+              {irEntries.length > 0 && <div className="flex items-center gap-2">
+                <select aria-label="选择已保存的 IR" value={rv.convolution.irId ?? ''} onChange={(e) => { void chooseIr(e.target.value) }}
+                  className={`hse-glass-input min-w-0 flex-1 rounded-lg px-2 py-2 text-xs ${theme.textPrimary}`}>
+                  <option value="">选择已保存的 IR</option>
+                  {irEntries.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}
+                </select>
+                <button type="button" disabled={!rv.convolution.irId} onClick={() => { void deleteIr() }} className={`hse-glass-button rounded-lg px-2 py-2 text-xs ${theme.textSecondary}`}>删除</button>
+              </div>}
+              <Segmented label="IR 用途" options={CONVOLUTION_PURPOSES} value={rv.convolution.purpose ?? 'reverb'} onChange={(purpose) => {
+                patch({ reverb: { ...rv, convolution: { ...rv.convolution, purpose, dePeriodize: purpose === 'reverb' } } })
+                if (rv.convolution.irId) void updateConvolutionIrPurpose(rv.convolution.irId, purpose)
+                  .then(() => listConvolutionIr().then(setIrEntries))
+                  .catch(() => window.dispatchEvent(new CustomEvent('showToast', { detail: { message: 'IR 用途保存失败', type: 'error' } })))
+              }} theme={theme} small />
+              <Slider label="湿声混合" value={rv.convolution.mix} min={0} max={1} step={0.01} disabled={(rv.convolution.purpose ?? 'reverb') !== 'reverb'} onChange={(v) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, mix: v } } })} display={(rv.convolution.purpose ?? 'reverb') === 'reverb' ? `${Math.round(rv.convolution.mix * 100)}%` : '校正全湿'} theme={theme} />
+              <Segmented label="卷积分区长度" options={[128, 256, 512, 1024].map((value) => ({ value: value as 128 | 256 | 512 | 1024, label: `${value} 帧` }))}
+                value={rv.convolution.partitionSize ?? 512} onChange={(partitionSize) => patch({ reverb: { ...rv, convolution: { ...rv.convolution, partitionSize } } })} theme={theme} small />
             </div>
           )}
           {details('reverb', '混响')}
@@ -157,16 +207,36 @@ export default function SpatialPage({ controller, theme, onOpenEffect }: Spatial
             <Columns2 className="w-4 h-4" style={{ color: theme.accentColor }} />
             <span className={`${theme.textPrimary} text-sm font-medium`}>立体声宽度</span>
           </div>
-          <p className={`${theme.textSecondary} mb-4 text-xs leading-relaxed`}>宽度 1.00 × 为原始声像；人声与伴奏比例可单独调整。</p>
+          <p className={`${theme.textSecondary} mb-4 text-xs leading-relaxed`}>宽度 1.00 × 为原始声像。M 为左右平均的中央信号，S 为左右差分信号；比例调节与变速变调共用启用状态。</p>
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <span className={`${theme.textPrimary} text-xs`}>启用 M/S 比例与变速变调</span>
+            <Toggle label="启用 M/S 比例与变速变调" checked={params.pitch.enabled} onChange={(enabled) => patch({ pitch: { ...params.pitch, enabled } })} theme={theme} />
+          </div>
           <div className="grid gap-x-8 @min-[38rem]:grid-cols-2">
             <Slider label="宽度" value={params.stereoWidth} min={0} max={2} step={0.05} onChange={(v) => patch({ stereoWidth: v })} display={`${params.stereoWidth.toFixed(2)} ×`} theme={theme} />
-            <Slider label="人声 ↔ 伴奏" value={params.pitch.voiceBalance} min={-1} max={1} step={0.05}
+            <Slider label="差分 S ↔ 中央 M" value={params.pitch.voiceBalance} min={-1} max={1} step={0.05} disabled={!params.pitch.enabled}
               onChange={(v) => patch({ pitch: { ...params.pitch, voiceBalance: v } })}
-              display={params.pitch.voiceBalance === 0 ? '原声' : params.pitch.voiceBalance > 0 ? `人声 +${Math.round(params.pitch.voiceBalance * 100)}%` : `伴奏 +${Math.round(-params.pitch.voiceBalance * 100)}%`}
+              display={params.pitch.voiceBalance === 0 ? '原始比例' : params.pitch.voiceBalance > 0 ? `差分衰减 ${Math.round(params.pitch.voiceBalance * 100)}%` : `中央衰减 ${Math.round(-params.pitch.voiceBalance * 100)}%`}
               theme={theme}
             />
           </div>
           {details('stereoWidth', '立体声宽度')}
+        </GlassCard>
+        <GlassCard theme={theme} className="@container">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <Columns2 className="w-4 h-4" style={{ color: theme.accentColor }} />
+              <span className={`${theme.textPrimary} text-sm font-medium`}>声道校准</span>
+            </div>
+            <Toggle label="启用左右声道校准" checked={params.channelCalibration?.enabled === true} onChange={(enabled) => patch({ channelCalibration: { ...(params.channelCalibration ?? { enabled: false, leftDb: 0, rightDb: 0 }), enabled } })} theme={theme} />
+          </div>
+          <p className={`${theme.textSecondary} mb-4 text-xs leading-relaxed`}>补偿左右耳机或扬声器灵敏度差异；参数以 dB 记录，并在 20ms 内平滑切换。</p>
+          {params.channelCalibration?.enabled && (
+            <div className="grid gap-x-8 @min-[38rem]:grid-cols-2">
+              <Slider label="左声道" value={params.channelCalibration.leftDb} min={-12} max={12} step={0.1} onChange={(leftDb) => patch({ channelCalibration: { ...params.channelCalibration!, leftDb } })} display={`${params.channelCalibration.leftDb > 0 ? '+' : ''}${params.channelCalibration.leftDb.toFixed(1)} dB`} theme={theme} />
+              <Slider label="右声道" value={params.channelCalibration.rightDb} min={-12} max={12} step={0.1} onChange={(rightDb) => patch({ channelCalibration: { ...params.channelCalibration!, rightDb } })} display={`${params.channelCalibration.rightDb > 0 ? '+' : ''}${params.channelCalibration.rightDb.toFixed(1)} dB`} theme={theme} />
+            </div>
+          )}
         </GlassCard>
         </div>
       </div>

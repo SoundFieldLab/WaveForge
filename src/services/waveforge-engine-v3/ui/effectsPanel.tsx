@@ -18,8 +18,8 @@ import type { DeepPartial, V3ParamsController } from './hooks'
 
 /** 可配置效果卡片 id（含响度类，响度类以独立行呈现但共用弹窗） */
 export type EffectUiKey =
-  | 'reverb' | 'surround3d' | 'bassEnhancer' | 'compressor' | 'nightMode'
-  | 'deesser' | 'ieq' | 'limiter' | 'pitch' | 'stereoWidth'
+  | 'reverb' | 'surround3d' | 'crossfeed' | 'bassEnhancer' | 'compressor' | 'nightMode'
+  | 'deesser' | 'dynamicEq' | 'ieq' | 'limiter' | 'pitch' | 'stereoWidth'
   | 'loudnessCompensation' | 'loudnessNormalization'
 
 export const EFFECT_META: Record<EffectUiKey, { name: string; desc: string; intro: string; icon: LucideIcon; row?: boolean }> = {
@@ -29,11 +29,17 @@ export const EFFECT_META: Record<EffectUiKey, { name: string; desc: string; intr
   surround3d: {
     name: '3D 环绕', desc: '耳机内环绕旋转', intro: '轻量立体声旋转实现：在圆形图上拖动圆点调整角度与距离，并设置旋转方向与速度，让声音在耳机内绕头旋转。', icon: Headphones,
   },
+  crossfeed: {
+    name: '耳机交叉馈送', desc: '自然耳机声场', intro: '将经过低通和短延迟的少量左声道混入右声道，反向对称处理，减轻耳机左右声道过度隔离。', icon: Headphones,
+  },
   bassEnhancer: {
     name: '低音增强', desc: '虚拟低频谐波', intro: '通过低通提取低频并生成谐波（偶次/奇次/ATSR/软饱和四种非线性），让小型设备也能感知到低频冲击力。', icon: Music2,
   },
   compressor: {
     name: '动态压缩', desc: '让响度更平稳', intro: '软拐点压缩器压平音量起伏：阈值越低压缩越狠、比率越大效果越强，补偿增益弥补压缩损失的电平。', icon: Activity,
+  },
+  dynamicEq: {
+    name: '动态均衡', desc: '随电平控制频段', intro: '检测指定频段的电平；超过阈值时自动降低该频段增益，轻声时恢复原始频响。', icon: Activity,
   },
   nightMode: {
     name: '夜间模式', desc: '压缩增强 + 高频衰减', intro: '深夜语义：动态压缩增强 + 6kHz 高频衰减，低音量听感不刺耳。强度 0-10 级。', icon: Moon,
@@ -51,7 +57,7 @@ export const EFFECT_META: Record<EffectUiKey, { name: string; desc: string; intr
     name: '变速变调', desc: '相位声码器 / LGPL 链接', intro: '独立变调与变速（相位声码器自研实现；可选 soundtouchjs LGPL 链接或 signalsmith WASM 路径）。', icon: Music,
   },
   stereoWidth: {
-    name: '立体声宽度', desc: 'M/S 宽度 + 人声比例', intro: '基于中/侧声道分离：宽度 0-2 控制声场开合，人声比例 -1..+1 在伴奏与纯人声之间滑动（卡拉OK级）。', icon: Columns2,
+    name: '立体声宽度', desc: 'M/S 宽度 + 低频管理', intro: '基于中/侧声道分离：宽度 0-2 控制声场开合，人声比例 -1..+1 在伴奏与纯人声之间滑动；低频单声道管理可逐渐收窄低频侧信号，也可启用输出次声高通。', icon: Columns2,
   },
   loudnessCompensation: {
     name: '音量自适应补偿', desc: '等响度按音量通用曲线', intro: '低音量下人耳对低频/高频不敏感：按系统音量动态补偿低频（最高 +12dB）与高频（最高 +6dB），音量恢复后自动回平；也可选场景预设或自定义频段。', icon: Volume2, row: true,
@@ -62,7 +68,7 @@ export const EFFECT_META: Record<EffectUiKey, { name: string; desc: string; intr
 }
 
 /** 网格卡片顺序（响度类两卡以独立行呈现） */
-const GRID_KEYS: EffectUiKey[] = ['reverb', 'surround3d', 'bassEnhancer', 'compressor', 'nightMode', 'deesser', 'ieq', 'limiter', 'pitch', 'stereoWidth']
+const GRID_KEYS: EffectUiKey[] = ['reverb', 'surround3d', 'crossfeed', 'bassEnhancer', 'compressor', 'dynamicEq', 'nightMode', 'deesser', 'ieq', 'limiter', 'pitch', 'stereoWidth']
 const ROW_KEYS: EffectUiKey[] = ['loudnessCompensation', 'loudnessNormalization']
 
 export interface EffectsPanelProps {
@@ -78,14 +84,17 @@ export function effectEnabled(p: V3EngineParams, key: EffectUiKey): boolean {
   switch (key) {
     case 'reverb': return p.reverb.enabled && p.reverb.mode !== 'off'
     case 'surround3d': return p.surround3d.enabled
+    case 'crossfeed': return p.crossfeed?.enabled === true
     case 'bassEnhancer': return p.bassEnhancer.enabled
     case 'compressor': return p.compressor.enabled
+    case 'dynamicEq': return p.dynamicEq?.enabled === true
     case 'nightMode': return p.nightMode.enabled && p.nightMode.amount > 0
     case 'deesser': return p.deesser.enabled
     case 'ieq': return p.ieq.enabled
     case 'limiter': return p.limiter.enabled
     case 'pitch': return p.pitch.enabled
     case 'stereoWidth': return Math.abs(p.stereoWidth - 1) > 0.001 || Math.abs(p.pitch.voiceBalance) > 0.001
+      || (p.lowMonoAmount ?? 0) > 0.001 || p.subsonicEnabled === true
     case 'loudnessCompensation': return p.loudnessCompensation.enabled
     case 'loudnessNormalization': return p.loudnessNormalization.enabled
   }
@@ -96,8 +105,10 @@ export function patchEffectEnabled(patch: (partial: DeepPartial<V3EngineParams>)
   switch (key) {
     case 'reverb': patch({ reverb: { ...p.reverb, enabled: on } }); return
     case 'surround3d': patch({ surround3d: { ...p.surround3d, enabled: on } }); return
+    case 'crossfeed': patch({ crossfeed: { ...(p.crossfeed ?? createDefaultParams(p.sampleRate).crossfeed!), enabled: on } }); return
     case 'bassEnhancer': patch({ bassEnhancer: { ...p.bassEnhancer, enabled: on } }); return
     case 'compressor': patch({ compressor: { ...p.compressor, enabled: on } }); return
+    case 'dynamicEq': patch({ dynamicEq: { ...(p.dynamicEq ?? createDefaultParams(p.sampleRate).dynamicEq!), enabled: on } }); return
     case 'nightMode': patch({ nightMode: { ...p.nightMode, enabled: on } }); return
     case 'deesser': patch({ deesser: { ...p.deesser, enabled: on } }); return
     case 'ieq': patch({ ieq: { ...p.ieq, enabled: on } }); return
@@ -106,7 +117,7 @@ export function patchEffectEnabled(patch: (partial: DeepPartial<V3EngineParams>)
     case 'stereoWidth': {
       // 宽度卡无独立开关：开启=回默认（宽 1 / 人声比例 0），关闭=… 这里用"恢复"语义
       if (!on) {
-        patch({ stereoWidth: 1, pitch: { ...p.pitch, voiceBalance: 0 } })
+        patch({ stereoWidth: 1, pitch: { ...p.pitch, voiceBalance: 0 }, lowMonoAmount: 0, subsonicEnabled: false })
       } else {
         patch({ stereoWidth: p.stereoWidth === 1 ? 1.3 : p.stereoWidth, pitch: { ...p.pitch, voiceBalance: 0 } })
       }

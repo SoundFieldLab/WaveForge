@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import { Biquad, designBiquad } from '../src/dsp/biquad'
+import type { BiquadType } from '../src/dsp/biquad'
 
 const FS = 48000
 
@@ -95,6 +96,48 @@ describe('边界', () => {
     expect(() => designBiquad('peaking', 1000, 1, 6, 0)).toThrow('invalid sample rate')
     expect(() => new Biquad('peaking', 1000, 1, 6, -1)).toThrow('invalid sample rate')
     expect(() => new Biquad().magnitudeAt(1000, 0)).toThrow('invalid sample rate')
+  })
+
+  it('所有采样率入口拒绝 NaN/Infinity', () => {
+    for (const fs of [NaN, Infinity, -Infinity]) {
+      expect(() => designBiquad('peaking', 1000, 1, 6, fs)).toThrow('invalid sample rate')
+      expect(() => new Biquad('peaking', 1000, 1, 6, fs)).toThrow('invalid sample rate')
+      expect(() => new Biquad().magnitudeAt(1000, fs)).toThrow('invalid sample rate')
+    }
+  })
+
+  it('8 类滤波器的非有限 f/Q/gain 回退默认值，系数及后续样本不被污染', () => {
+    const types: BiquadType[] = ['peaking', 'lowshelf', 'highshelf', 'lowpass', 'highpass', 'bandpass', 'notch', 'allpass']
+    for (const type of types) {
+      for (const value of [NaN, Infinity, -Infinity]) {
+        const cases = [
+          { input: [value, 1, 6], safe: [1000, 1, 6] },
+          { input: [1000, value, 6], safe: [1000, 1, 6] },
+          { input: [1000, 1, value], safe: [1000, 1, 0] },
+        ]
+        for (const { input, safe } of cases) {
+          const coeffs = designBiquad(type, input[0], input[1], input[2], FS)
+          expect(coeffs).toEqual(designBiquad(type, safe[0], safe[1], safe[2], FS))
+          const bq = new Biquad(type, input[0], input[1], input[2], FS)
+          for (let i = 0; i < 128; i++) expect(Number.isFinite(bq.process(i === 0 ? 0.5 : 0))).toBe(true)
+          expect(bq.magnitudeAt(value, FS)).toBe(bq.magnitudeAt(1000, FS))
+        }
+      }
+    }
+  })
+
+  it('setCoeffs 非有限值原子拒绝，不改写已有有效系数或状态', () => {
+    const bq = new Biquad('peaking', 1000, 1, 6, FS)
+    const ref = new Biquad('peaking', 1000, 1, 6, FS)
+    bq.process(0.5)
+    ref.process(0.5)
+    for (const key of ['b0', 'b1', 'b2', 'a1', 'a2'] as const) {
+      for (const value of [NaN, Infinity, -Infinity]) {
+        const coeffs = { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0, [key]: value }
+        expect(() => bq.setCoeffs(coeffs)).toThrow('invalid coefficients')
+        expect(bq.process(0.1)).toBe(ref.process(0.1))
+      }
+    }
   })
 
   it('setParams 后幅频随之更新（参数即时生效）', () => {

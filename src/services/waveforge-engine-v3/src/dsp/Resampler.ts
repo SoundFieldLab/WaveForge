@@ -10,17 +10,20 @@
  *  1. 内核：h(u) = cutoff · sinc(cutoff·u) · kaiser(u/L)（理想低通 h(t)=c·sinc(c·t) 加 Kaiser 窗，
  *     因子 c=cutoff 保证单位直流增益）；cutoff = min(1, outRate/inRate)，归一化到输入采样率：
  *     降采样时截止到输出 Nyquist，升采样时保留输入全带宽。
- *     抽头数 taps = 2L 随 quality 分级（8→64、10→128）。
+ *     抽头数 taps = 2L 随 quality 分级（8→64、10→128），强降采样按倍率扩窗，封顶 4096。
  *  2. 多相表：把内核按分数相位 f∈[0,1) 离散为 PH=256 个相位，两相邻相位线性插值
- *     得到任意相位 f 的抽头系数；相位 f=0 的内核在整数偏移处 sinc 采样值精确为 0，
- *     因此 inRate==outRate 时逐样本恒等（±1e-6 级，供测试验证）。
+ *     得到任意相位 f 的抽头系数；每行归一化保持直流增益。
+ *     inRate==outRate 的整数相位内核仅中心抽头非零，逐样本恒等（±1e-6）。
  *  3. process()：一次性处理整段输入；头部越界样本按静音（与流式语义一致），
  *     尾部越界样本做"边界保持"（clamp 到末样本）避免截断爆音；输出长度 ≈ round(N·outRate/inRate)。
  *  4. processStreaming()：输入侧使用环形缓冲（容量 taps+16，> 内核窗口宽），采用"喂入/产出
  *     交错"——仅当内核窗口完全落在已接收样本内时才产出，环形占用恒有界、旧样本回绕自动丢弃；
- *     尾部样本留给后续输入，因此流式输出与一次性输出在公共区间逐样本一致（确定性）。
+ *     尾部样本留给后续输入；输出背压时保留未消费输入供空输入调用续读，
+ *     因此流式输出与一次性输出在公共区间逐样本一致（确定性）。
  *  5. 确定性：全部系数在构造/首用时预计算，无 Math.random / Date / console。
  */
+const EMPTY_INPUT = new Float32Array(0)
+
 export class Resampler {
   private readonly inRate: number
   private readonly outRate: number
@@ -35,6 +38,7 @@ export class Resampler {
   private ring: Float32Array // 容量 (taps+16)×ch 的环形缓冲（交错）
   private inTotal = 0 // 累计已接收输入帧数（每声道）
   private outPos = 0 // 已产生的输出帧数（每声道）
+  private pending = EMPTY_INPUT // 输出背压时尚未喂入环形缓冲的输入
 
   /** quality 0..10（默认 8）：控制抽头数（4 << (quality>>1)）与 Kaiser β。 */
   constructor(inRate: number, outRate: number, channels = 1, quality = 8) {
@@ -42,13 +46,17 @@ export class Resampler {
       throw new Error('invalid sample rate')
     }
     if (!Number.isInteger(channels) || channels < 1) throw new Error('invalid channel count')
-    const q = Math.min(10, Math.max(0, Math.floor(quality)))
+    const q = Number.isFinite(quality) ? Math.min(10, Math.max(0, Math.floor(quality))) : 8
+    const ratio = inRate / outRate
+    if (!Number.isFinite(ratio) || ratio <= 0) throw new Error('invalid sample rate ratio')
     this.inRate = inRate
     this.outRate = outRate
     this.channels = channels
-    this.taps = 4 << (q >> 1)
+    // 强降采样时，固定输入域 64 抽头只覆盖很少的输出域周期，阻带严重混叠。
+    // 随比率增加窗宽（最多 4096 抽头，避免病态比率引发无界内存分配）。
+    this.taps = Math.min(4096, (4 << (q >> 1)) * Math.ceil(Math.max(1, ratio)))
     this.half = this.taps / 2
-    this.ratio = inRate / outRate
+    this.ratio = ratio
     this.cutoff = Math.min(1, outRate / inRate) // 归一化截止（输入采样率单位）
     this.ph = 256
     this.table = this.buildTable(6 + q * 0.35)
@@ -64,6 +72,7 @@ export class Resampler {
     for (let p = 0; p < rows; p++) {
       const f = p / this.ph // 分数相位
       const base = p * this.taps
+      let gain = 0
       for (let k = 0; k < this.taps; k++) {
         const u = k - (L - 1) - f // 内核偏移（中心在 k = L-1 处，对应输入样本 x[i]）
         let h = 0
@@ -75,7 +84,10 @@ export class Resampler {
           h = this.cutoff * s * w
         }
         t[base + k] = h
+        gain += h
       }
+      // 有限窗的离散内核并非恰好单位增益，尤其低质量/窄带配置会让直流随相位起伏。
+      if (gain !== 0) for (let k = 0; k < this.taps; k++) t[base + k] /= gain
     }
     return t
   }
@@ -90,6 +102,7 @@ export class Resampler {
     const nFrames = input.length / ch
     const outFrames = Math.round(nFrames * (this.outRate / this.inRate))
     const out = new Float32Array(outFrames * ch)
+    if (nFrames === 0) return out
     const L = this.half
     const ph = this.ph
     const taps = this.taps
@@ -137,7 +150,8 @@ export class Resampler {
   processStreaming(input: Float32Array, out: Float32Array): number {
     const ch = this.channels
     if (input.length % ch !== 0) throw new Error('input length must be a multiple of channels')
-    const inFrames = input.length / ch
+    const queued = this.pending
+    const inFrames = queued.length / ch + input.length / ch
     const ring = this.ring
     const cap = this.ring.length / ch
     const L = this.half
@@ -148,15 +162,20 @@ export class Resampler {
     const maxOut = Math.floor(out.length / ch)
     let pos = 0
     let written = 0
-    while (pos < inFrames && written < maxOut) {
+    // 即使本次没有新输入，也可能有上次已经喂入但尚未写出的输出。
+    while (written < maxOut) {
       const m = this.outPos
       const i = Math.floor(m * ratio)
       if (i + L >= this.inTotal) {
         // 窗口尾部未覆盖：只喂入满足该输出所需的样本量（保持环形占用有界）
         const take = Math.min(inFrames - pos, i + L + 1 - this.inTotal)
+        if (take <= 0) break
         for (let j = 0; j < take; j++) {
           const slot = ((this.inTotal + j) % cap) * ch
-          for (let c = 0; c < ch; c++) ring[slot + c] = input[(pos + j) * ch + c]
+          const src = (pos + j) * ch
+          for (let c = 0; c < ch; c++) {
+            ring[slot + c] = src < queued.length ? queued[src + c] : input[src - queued.length + c]
+          }
         }
         this.inTotal += take
         pos += take
@@ -182,6 +201,19 @@ export class Resampler {
         written++
       }
     }
+    // API 只返回产出帧数而没有 consumed-input 计数；调用方会认为本次输入已全消费。
+    // 将未喂入的尾部留在实例中，后续调用（包括空输入调用）继续处理。
+    const remaining = inFrames - pos
+    if (remaining > 0) {
+      const next = new Float32Array(remaining * ch)
+      const fromQueued = Math.max(0, queued.length - pos * ch)
+      if (fromQueued > 0) next.set(queued.subarray(pos * ch), 0)
+      const fromInput = Math.max(0, pos * ch - queued.length)
+      next.set(input.subarray(fromInput), fromQueued)
+      this.pending = next
+    } else {
+      this.pending = EMPTY_INPUT
+    }
     return written
   }
 
@@ -190,6 +222,7 @@ export class Resampler {
     this.ring.fill(0)
     this.inTotal = 0
     this.outPos = 0
+    this.pending = EMPTY_INPUT
   }
 }
 

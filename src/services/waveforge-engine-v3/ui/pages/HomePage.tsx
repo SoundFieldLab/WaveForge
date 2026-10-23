@@ -186,7 +186,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
         <div>
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <h1 className={`${theme.textPrimary} text-2xl font-semibold`}>声音工作台</h1>
-            <div className="inline-flex items-center gap-2.5 rounded-full px-3 py-1.5" style={{ background: masterEnabled ? '#E2F5ED' : '#EAF0ED' }}>
+            <div className="inline-flex items-center gap-2.5 rounded-full px-3 py-1.5" style={{ background: masterEnabled ? '#c8ede4' : '#eef6f3' }}>
               <span className={`${theme.textPrimary} text-xs font-medium`}>系统音效</span>
               <span className={`${theme.textSecondary} text-xs`} aria-live="polite">{masterEnabled ? '已开启' : '已关闭'}</span>
               <Toggle checked={masterEnabled} onChange={setMasterEnabled} theme={theme} label="系统音效" />
@@ -197,7 +197,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
         <button
           type="button"
           onClick={() => onNavigate?.('scenes')}
-          className="hse-glass-button inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-sm font-medium transition-colors hover:bg-white/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+          className="hse-glass-button inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-sm font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
           style={{ color: theme.accentColor, outlineColor: theme.accentColor }}
           title="打开音效场景"
         >
@@ -252,7 +252,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
                 <button
                   type="button"
                   onClick={switchToManual}
-                  className="hse-glass-button min-h-9 rounded-md px-2 text-xs font-medium transition-colors hover:bg-white/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+                  className="hse-glass-button min-h-9 rounded-md px-2 text-xs font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                   style={{ color: theme.accentColor, outlineColor: theme.accentColor }}
                 >
                   切换到手动音量
@@ -260,7 +260,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
               )}
             </div>
             {!automaticNormalization && actualGainDb === -60 && (
-              <p className="mt-1 text-xs" style={{ color: '#536B66' }}>0% 对应 -60 dB 最小输出电平，不是静音。</p>
+              <p className="mt-1 text-xs" style={{ color: '#536b66' }}>0% 对应 -60 dB 最小输出电平，不是静音。</p>
             )}
             {!automaticNormalization && gainOutsideVolumeRange && (
               <p className={`${theme.textSecondary} mt-1 text-xs`}>当前增益超出百分比滑块范围；拖动滑块将切换到 -60 至 0 dB。</p>
@@ -287,7 +287,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
                     title={scene.desc}
                     className={`hse-glass-choice min-h-11 rounded-full px-2 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 `}
                     style={{
-                      color: active ? theme.accentColor : '#536B66',
+                      color: active ? theme.accentColor : '#536b66',
                       outlineColor: theme.accentColor,
                     }}
                   >
@@ -304,7 +304,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
             <button
               type="button"
               onClick={() => onNavigate?.('eq')}
-              className="hse-glass-button mt-2 inline-flex min-h-10 items-center gap-1 rounded-md px-1 text-sm font-medium transition-colors hover:bg-white/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+              className="hse-glass-button mt-2 inline-flex min-h-10 items-center gap-1 rounded-md px-1 text-sm font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
               style={{ color: theme.accentColor, outlineColor: theme.accentColor }}
             >
               详细调节 <SlidersHorizontal aria-hidden="true" className="h-4 w-4" />
@@ -313,7 +313,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
         </aside>
       </div>
 
-      <section className="border-t pt-4" style={{ borderColor: '#DCEAE5' }} aria-labelledby="ambience-heading">
+      <section className="border-t pt-4" style={{ borderColor: '#dce9e5' }} aria-labelledby="ambience-heading">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-[165px]">
             <h2 id="ambience-heading" className={`${theme.textPrimary} text-base font-semibold`}>空间氛围</h2>
@@ -330,7 +330,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
                   onClick={() => setAmbience(option.key)}
                   className="hse-glass-choice min-h-10 rounded-full px-4 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
                   style={{
-                    color: active ? theme.accentColor : '#536B66',
+                    color: active ? theme.accentColor : '#536b66',
                     outlineColor: theme.accentColor,
                   }}
                 >
@@ -343,7 +343,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
           <button
             type="button"
             onClick={() => onOpenEffect('reverb')}
-            className="hse-glass-button inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-sm font-medium transition-colors hover:bg-white/70 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+            className="hse-glass-button inline-flex min-h-10 items-center gap-1 rounded-md px-2 text-sm font-medium transition-colors hover:bg-[#eef6f3] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
             style={{ color: theme.accentColor, outlineColor: theme.accentColor }}
           >
             调整环境 <ChevronRight aria-hidden="true" className="h-4 w-4" />
@@ -352,7 +352,7 @@ export default function HomePage({ bridge, controller, theme, onOpenEffect, onNa
       </section>
 
       {onNavigate && (
-        <section className="border-t pt-5" style={{ borderColor: '#DCEAE5' }} aria-labelledby="fine-tuning-heading">
+        <section className="border-t pt-5" style={{ borderColor: '#dce9e5' }} aria-labelledby="fine-tuning-heading">
           <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
             <h2 id="fine-tuning-heading" className={`${theme.textPrimary} text-base font-semibold`}>精细调节</h2>
             <p className={`${theme.textSecondary} text-xs`}>进入对应页面，独立启停与调整参数</p>

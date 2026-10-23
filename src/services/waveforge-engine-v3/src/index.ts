@@ -20,6 +20,9 @@ export * from './types'
 export { EngineV3 } from './engine/EngineV3'
 export { EngineV3Host } from './integration/EngineV3Host'
 export type { V3HostHandle, V3HostMode, V3HostOptions, V3AudioContextLike, V3AudioNodeLike } from './integration/EngineV3Host'
+export type { HseProcessingNode } from './integration/ProcessingNode'
+export { createSerializableProcessingNode, registerProcessingNodeFactory } from './integration/ProcessingNode'
+export type { HseSerializableNodeConfig, HseNodeData, HseProcessingNodeFactory } from './integration/ProcessingNode'
 export { SCENE_PRESETS, getSceneById, SCENE_IDS } from './engine/ScenePresets'
 export { encodeShareCode, decodeShareCode, SHARE_CODEC_VERSION } from './engine/ShareCodec'
 export { SpectrumAnalyzer } from './analysis/Spectrum'
@@ -32,6 +35,23 @@ export type { SeparationStem, StemSeparatorAdapter, SeparationTask } from './off
 export * from './dsp/fft'
 export * from './dsp/biquad'
 export * from './dsp/EqChain'
+export { DynamicEq, DynamicEqBank } from './dsp/DynamicEq'
+export { Pcm16Quantizer } from './dsp/PcmQuantizer'
+export { encodePcm16Wav } from './dsp/PcmWav'
+export type { QuantizationMode } from './dsp/PcmQuantizer'
+export { Crossfeed } from './dsp/Crossfeed'
+export { MultibandCompressor } from './dsp/MultibandCompressor'
+export { ConvolutionIrLibrary } from './dsp/ConvolutionIrLibrary'
+export { parseReplayGainTags, selectReplayGainDb, scanReplayGainBytes, scanReplayGainUrl } from './dsp/ReplayGain'
+export { UnrolledComplexProduct, TypeScriptComplexProductKernel, createComplexProductKernel } from './dsp/vectorKernel'
+export type { VectorComplexProduct, ComplexProductKernel, ComplexProductKernelOptions } from './dsp/vectorKernel'
+export {
+  isWasmSimdKernelAvailable,
+  getComplexProductWasmModuleBytes,
+  getWasmKernelViewAllocationCount,
+  WASM_SIMD_THRESHOLD_SAMPLES,
+  WASM_SIMD_THRESHOLD_SAMPLES_F64,
+} from './dsp/wasmSimdKernel'
 export * from './dsp/MidSide'
 export * from './dsp/Deesser'
 export * from './dsp/Compressor'

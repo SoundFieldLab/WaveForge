@@ -1,6 +1,7 @@
-/** HSE 公共控件：薄透玻璃材质、明确选中状态与原生键盘操作。 */
-import { useId, type ReactNode, type CSSProperties } from 'react'
+/** HSE 公共控件：主程序玻璃材质、明确选中状态与原生键盘操作。 */
+import { useId, useRef, type ReactNode, type CSSProperties } from 'react'
 import type { HSETheme } from '../hse-theme'
+import { useStateFeedback } from '../feedback'
 import '../hse-glass.css'
 
 export function GlassCard({ children, theme, className, style }: {
@@ -16,7 +17,7 @@ export function Toggle({ checked, onChange, theme, label = '启用效果', disab
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled}
     onClick={(e) => { e.stopPropagation(); onChange(!checked) }}
     className="hse-glass-switch relative h-7 w-12 shrink-0 rounded-full focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50"
-    style={{ outlineColor: theme.accentColor }}>
+    style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>
     <span aria-hidden="true" className="hse-glass-thumb absolute left-[3px] top-1/2 h-5 w-5 rounded-full"
       style={{ transform: `translate(${checked ? 20 : 0}px, -50%)` }} />
   </button>
@@ -27,10 +28,12 @@ export function Slider({ label, value, min, max, step, onChange, display, theme,
   display?: string; theme: HSETheme; disabled?: boolean
 }) {
   const id = useId()
+  const feedbackRef = useRef<HTMLOutputElement>(null)
+  useStateFeedback(value === 0 ? 'zero' : value === min ? 'min' : value === max ? 'max' : 'normal', feedbackRef)
   return <div className={`mb-4 ${disabled ? 'opacity-60' : ''}`}>
     <div className="mb-2 flex items-center justify-between gap-3">
       <label htmlFor={id} className={`${theme.textSecondary} text-xs`}>{label}</label>
-      <output htmlFor={id} className={`hse-mono ${theme.textPrimary} text-xs font-medium`}>{display ?? value}</output>
+      <output ref={feedbackRef} htmlFor={id} className={`hse-mono ${theme.textPrimary} text-xs font-medium`}>{display ?? value}</output>
     </div>
     <input id={id} type="range" min={min} max={max} step={step} value={value} disabled={disabled}
       aria-valuetext={display ?? String(value)} onChange={(e) => onChange(parseFloat(e.target.value))}
@@ -42,7 +45,9 @@ export function Slider({ label, value, min, max, step, onChange, display, theme,
 export function Segmented<T extends string | boolean | number>({ options, value, onChange, theme, small, label = '选择模式' }: {
   options: { value: T; label: string }[]; value: T; onChange: (v: T) => void; theme: HSETheme; small?: boolean; label?: string
 }) {
-  return <div role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
+  const feedbackRef = useRef<HTMLDivElement>(null)
+  useStateFeedback(value, feedbackRef)
+  return <div ref={feedbackRef} role="radiogroup" aria-label={label} className={`hse-glass-group flex flex-wrap gap-1 rounded-2xl p-1 ${small ? '' : 'mb-4'}`}>
     {options.map((opt, index) => {
       const active = value === opt.value
       return <button key={String(opt.value)} type="button" role="radio" aria-checked={active} tabIndex={active || (index === 0 && !options.some((option) => option.value === value)) ? 0 : -1}
@@ -57,8 +62,8 @@ export function Segmented<T extends string | boolean | number>({ options, value,
           buttons?.[next]?.focus()
         }}
         className={`hse-glass-choice min-h-9 flex-1 whitespace-nowrap rounded-xl px-3 py-2 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 ${active ? `${theme.textPrimary} font-semibold` : theme.textSecondary}`}
-        style={{ outlineColor: theme.accentColor }}>
-        {opt.label}
+        style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>
+        <span aria-hidden="true" className={`hse-choice-mark ${active ? 'is-selected' : ''}`}>✓</span>{opt.label}
       </button>
     })}
   </div>
@@ -68,8 +73,8 @@ export function ActionBtn({ onClick, children, theme, disabled, ghost }: {
   onClick: () => void; children: ReactNode; theme: HSETheme; disabled?: boolean; ghost?: boolean
 }) {
   return <button type="button" onClick={onClick} disabled={disabled}
-    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : 'text-white'}`}
-    style={{ outlineColor: theme.accentColor }}>{children}</button>
+    className={`hse-glass-button ${ghost ? '' : 'hse-glass-primary'} inline-flex min-h-9 items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-4 disabled:cursor-not-allowed disabled:opacity-50 ${ghost ? theme.textSecondary : ''}`}
+    style={{ outlineColor: theme.accentColor, '--md-sys-color-primary': theme.accentColor } as CSSProperties}>{children}</button>
 }
 
 export function InfoLine({ children, theme }: { children: ReactNode; theme: HSETheme }) {

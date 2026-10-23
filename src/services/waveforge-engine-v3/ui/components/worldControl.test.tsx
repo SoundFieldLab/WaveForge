@@ -154,10 +154,10 @@ describe('computeYawDelta', () => {
 
 describe('sourceName', () => {
   it('已知 id 中文映射，未知 id 显示原文', () => {
-    expect(sourceName('vocal')).toBe('人声')
-    expect(sourceName('guitar')).toBe('吉他')
-    expect(sourceName('drums')).toBe('鼓组')
-    expect(sourceName('ambience')).toBe('环境声')
+    expect(sourceName('vocal')).toBe('声源 A')
+    expect(sourceName('guitar')).toBe('声源 B')
+    expect(sourceName('drums')).toBe('声源 C')
+    expect(sourceName('ambience')).toBe('声源 D')
     expect(sourceName('bass')).toBe('bass')
   })
 })

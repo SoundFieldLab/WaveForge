@@ -58,6 +58,21 @@ function measureGain(comp: LoudnessComp, freq: number, durationSec = 3): number 
 }
 
 describe('LoudnessComp', () => {
+  it('0dB 目标曲线逐样本直通（无滤波状态或相位变化）', () => {
+    const comp = new LoudnessComp(FS)
+    comp.setParams(params({ volumePercent: 100 }))
+    const l = new Float32Array(4096)
+    const r = new Float32Array(4096)
+    for (let i = 0; i < l.length; i++) {
+      l[i] = Math.sin(i * 0.2) * 0.3
+      r[i] = Math.sin(i * 0.34) * 0.25
+    }
+    const dryL = l.slice(), dryR = r.slice()
+    comp.processStereo(l, r)
+    expect(l).toEqual(dryL)
+    expect(r).toEqual(dryR)
+  })
+
   it('volumePercent=100 → 全频增益 ≈ 0dB（±0.3dB）', () => {
     const comp = new LoudnessComp(FS)
     comp.setParams(params({ volumePercent: 100, mode: 'auto' }))
@@ -146,6 +161,36 @@ describe('LoudnessComp', () => {
     // 1kHz 附近的响应不应泄漏到 120Hz 低频（<1.5dB）
     const g120 = measureGain(comp, 120)
     expect(g120).toBeLessThan(1.5)
+  })
+
+  it('同一流用不同块长处理逐样本相同（平滑时间不依赖回调分块）', () => {
+    const n = 8192
+    const src = new Float32Array(n)
+    for (let i = 0; i < n; i++) src[i] = 0.3 * Math.sin(2 * Math.PI * 120 * i / FS) + 0.2 * Math.sin(2 * Math.PI * 3000 * i / FS)
+    const a = src.slice(), ar = src.slice()
+    const b = src.slice(), br = src.slice()
+    const bulk = new LoudnessComp(FS)
+    const chunks = new LoudnessComp(FS)
+    bulk.setParams(params({ volumePercent: 20 }))
+    chunks.setParams(params({ volumePercent: 20 }))
+    bulk.processStereo(a, ar)
+    let off = 0
+    while (off < n) {
+      const end = Math.min(n, off + 1 + off % 263)
+      chunks.processStereo(b.subarray(off, end), br.subarray(off, end))
+      off = end
+    }
+    expect(b).toEqual(a)
+    expect(br).toEqual(ar)
+  })
+
+  it('相同增益下切换 custom 频率仍立即更新系数（不沿用上一频段）', () => {
+    const comp = new LoudnessComp(FS)
+    comp.setParams(params({ mode: 'custom', bands: [{ frequency: 1000, gain: 6 }] }))
+    expect(measureGain(comp, 1000)).toBeGreaterThan(4)
+    comp.setParams(params({ mode: 'custom', bands: [{ frequency: 2000, gain: 6 }] }))
+    expect(measureGain(comp, 2000)).toBeGreaterThan(4)
+    expect(measureGain(comp, 1000)).toBeLessThan(2)
   })
 
   it('非法采样率抛错', () => {

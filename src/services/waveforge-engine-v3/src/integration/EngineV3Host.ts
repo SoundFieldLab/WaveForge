@@ -11,7 +11,7 @@
  *
  * 接入模式：
  *  - 'worklet'：AudioWorklet 处理器（`worklet/AudioEffectsProcessor.ts`，需先打包单文件）——
- *    参数经 `port.postMessage({type:'params'})` 下发，`stats` 周期回传；
+ *    参数经 `port.postMessage({type:'params'})` 下发，大型卷积 IR 以预计算 Transferable 一并发送，`stats` 周期回传；
  *  - 'script'：ScriptProcessorNode 兜底（已废弃但 Electron/Chromium 可用），
  *    onaudioprocess 内直接调 EngineV3.process（同一纯 TS 内核，无需打包）；
  *  - 'auto'：优先 worklet，失败自动回退 script（默认）。
@@ -21,15 +21,26 @@
 
 import { EngineV3 } from '../engine/EngineV3'
 import type { V3EngineParams, EngineStats, EngineAnalysis } from '../types'
+import type { PreparedConvolverIR } from '../dsp/Convolver'
+import type { HrtfGrid } from '../spatial/types'
+import type { HeadPose } from '../spatial/HeadPose'
+import type { HseProcessingNode, HseSerializableNodeConfig } from './ProcessingNode'
+import { createSerializableProcessingNode } from './ProcessingNode'
+
+/** 卷积分区长度的合法集合（避免每次下发参数时重建数组字面量做 includes）。 */
+const WORKLET_PARTITION_SIZES = [128, 256, 512, 1024]
+/** 空 transfer 常量：无 Transferable 时不构造 Set/空数组。 */
+const EMPTY_TRANSFER: Transferable[] = []
 
 export type V3HostMode = 'worklet' | 'script' | 'auto'
 
 /** 最小 AudioNode 接口（鸭子类型；Node 测试环境可用 stub 实现） */
 export interface V3AudioNodeLike {
+  channelInterpretation?: 'speakers' | 'discrete'
   connect?(dest: unknown): unknown
   disconnect?(): unknown
   port?: {
-    postMessage(msg: unknown): void
+    postMessage(msg: unknown, transfer?: Transferable[]): void
     onmessage?: ((e: { data: unknown }) => void) | null
   }
   onaudioprocess?: (e: {
@@ -45,6 +56,8 @@ export interface V3AudioContextLike {
 }
 
 export interface V3HostHandle {
+  /** 解码器确认的离散输入声道数；尤其供 ScriptProcessor 回退使用。 */
+  inputChannels?: number
   audioContext: V3AudioContextLike
   masterGain: V3AudioNodeLike
   analyser: V3AudioNodeLike
@@ -56,6 +69,8 @@ export interface V3HostOptions {
   mode?: V3HostMode
   /** worklet 打包产物 URL（worklet 模式必需） */
   workletUrl?: string
+  /** 可信第三方 DSP 模块的打包 URL；各模块须注册与主线程同名的工厂。 */
+  processingModuleUrls?: readonly string[]
   /** worklet 处理器注册名，默认 'waveforge-v3-effects' */
   processorName?: string
   /** script 兜底模式的块长，默认 4096 */
@@ -69,6 +84,7 @@ export class EngineV3Host {
   private readonly engineInjected: boolean
   private readonly defaultMode: V3HostMode
   private readonly workletUrl: string | undefined
+  private readonly processingModuleUrls: readonly string[]
   private readonly processorName: string
   private readonly blockSize: number
 
@@ -78,12 +94,36 @@ export class EngineV3Host {
   private lastParams: V3EngineParams | null = null
   private lastStats: EngineStats | null = null
   private lastAnalysis: EngineAnalysis | null = null
+  private workletIrRef: Float32Array | null = null
+  private workletIrConfigKey = ''
+  private workletNeedsRoomCache = true
+  /** Worklet 参数消息骨架：postMessage 在返回前结构化克隆，骨架对象可原地更新复用。 */
+  private workletMessage: Record<string, unknown> | null = null
+  /** 已下发消息的缓存状态；内容未变化时直接重发同一对象，零对象展开/零 Set。 */
+  private workletCacheValid = false
+  private workletCacheSource: V3EngineParams | null = null
+  private workletCacheIr: Float32Array | null = null
+  private workletCacheConfigKey = ''
+  private workletCacheReuseIr = false
+  private workletCacheIrState = false
+  /** 无 IR 参数副本缓存（reuseIr/deferIR/preparedIR 三种路径共用同一份，按快照身份失效）。 */
+  private workletParamsVariantSource: V3EngineParams | null = null
+  private workletParamsVariant: V3EngineParams | null = null
+  /** roomEarlyTransferList 结果缓存：仅预准备快照变化时重建。 */
+  private roomTransferSource: unknown = null
+  private roomTransferCache: Transferable[] | null = null
+  private readonly serializableNodes = new Map<string, HseSerializableNodeConfig>()
   private hostFs = 0
   private attachSeq = 0
   private disposed = false
+  private spatialHrtf: HrtfGrid | null = null
+  private headPose: HeadPose | null = null
+  private spatialInputChannels = 2
 
   constructor(opts?: V3HostOptions) {
     this.defaultMode = opts?.mode ?? 'auto'
+    this.processingModuleUrls = [...(opts?.processingModuleUrls ?? [])]
+    if (this.processingModuleUrls.length > 32 || this.processingModuleUrls.some(url => typeof url !== 'string' || !url.trim())) throw new Error('invalid processing module URLs')
     this.workletUrl = opts?.workletUrl
     this.processorName = opts?.processorName ?? 'waveforge-v3-effects'
     this.blockSize = opts?.blockSize ?? 4096
@@ -102,7 +142,7 @@ export class EngineV3Host {
    * 把 v3 引擎接入音频图（幂等：同一 handle 重复调用直接 return）。
    * 语义：masterGain 全断 → 接 v3 处理节点 → 连 analyser；防新旧双链并联。
    */
-async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
+  async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
     if (this.handle === handle) {
       if (params) this.setParams(params)
       return
@@ -110,15 +150,30 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
     const seq = ++this.attachSeq
     this.disposed = false
     const ctx = handle.audioContext
+    if (Number.isInteger(handle.inputChannels) && handle.inputChannels! > 0 && handle.inputChannels! <= 32)
+      this.spatialInputChannels = handle.inputChannels!
 
     // 采样率校准（仅自建引擎；注入引擎由调用方保证一致）
     if (!this.engineInjected) {
       if (this.engineRef === null || Math.abs(this.hostFs - ctx.sampleRate) > 1) {
+        const previousNodes = this.engineRef?.getProcessingNodes() ?? []
         this.engineRef = new EngineV3(ctx.sampleRate, 2)
         this.hostFs = ctx.sampleRate
         if (this.lastParams) this.engineRef.setParams(this.lastParams)
+        // 保留注册顺序；描述节点按新采样率重建，函数节点由调用方持有并清理流式状态。
+        for (const previous of previousNodes) {
+          const config = this.serializableNodes.get(previous.id)
+          const node = config ? createSerializableProcessingNode(config, ctx.sampleRate) : previous
+          if (!config) node.reset?.()
+          this.engineRef.registerProcessingNode(node)
+        }
       }
     }
+
+    // 在主线程先完成配置，随后把精确房间线索与参数一起下发。
+    const effective = params ?? this.lastParams
+    if (effective) this.engine.setParams(effective)
+    if (this.spatialHrtf) this.engine.setSpatialHrtf(this.spatialHrtf)
 
     // ★ 尽早记录 handle：attach 的异步注册期间若被 dispose，
     //   dispose 也能据此恢复 masterGain→analyser 直连（否则音频会死）
@@ -141,6 +196,7 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
       if (ctx.audioWorklet?.addModule && AWNode && this.workletUrl) {
         try {
           await ctx.audioWorklet.addModule(this.workletUrl)
+          for (const url of this.processingModuleUrls) await ctx.audioWorklet.addModule(url)
           // 竞态防护：注册期间被 dispose/重 attach → 放弃接线。
           // dispose 路径会恢复直连；**重 attach 到另一 handle**（seq 过期）不经过 dispose，
           // 本 handle 的 masterGain 已被上方 disconnect 断开——过期分支必须自己恢复，
@@ -149,18 +205,39 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
             try { handle.masterGain.connect?.(handle.analyser) } catch { /* noop */ }
             return
           }
-          node = new AWNode(ctx, this.processorName, { outputChannelCount: [2] })
+          node = new AWNode(ctx, this.processorName, {
+            numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+            channelCount: 32, channelCountMode: 'max', channelInterpretation: 'discrete',
+          })
           const port = node.port
           if (port) {
             port.onmessage = (e: { data: unknown }) => {
               const d = e.data as { type?: string; stats?: EngineStats; analysis?: EngineAnalysis }
               if (d?.type === 'stats') {
-                if (d.stats) this.lastStats = d.stats
+                if (d.stats) {
+                  this.lastStats = d.stats
+                  const observed = d.stats.inputChannels
+                  if (observed && observed !== this.spatialInputChannels) this.setSpatialInputChannelCount(observed)
+                }
                 if (d.analysis) this.lastAnalysis = d.analysis
               }
             }
+            this.workletIrRef = null
+            this.workletIrConfigKey = ''
+            this.workletNeedsRoomCache = true
+            this.invalidateWorkletParamsCache()
             const p = params ?? this.lastParams
-            if (p) port.postMessage({ type: 'params', params: p })
+            if (this.spatialHrtf) {
+              // 无预准备数据时传纯消息（不构造空 transfer 数组）。
+              const roomHrir = this.engine.takePreparedRoomHrir(true)
+              const message = { type: 'spatial-hrtf', grid: this.spatialHrtf, roomHrir }
+              const transfer = roomHrir === undefined ? EMPTY_TRANSFER : this.roomEarlyTransferList(roomHrir)
+              if (transfer.length) port.postMessage(message, transfer)
+              else port.postMessage(message)
+            }
+            if (this.headPose) port.postMessage({ type: 'head-pose', pose: this.headPose })
+            if (p) this.postWorkletParams(port, p)
+            for (const config of this.serializableNodes.values()) port.postMessage({ type: 'register-node', config })
           }
           mode = 'worklet'
         } catch {
@@ -174,13 +251,18 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
       // 显式遥测：script 兜底意味着 15 级 DSP 链（含 HRTF 卷积）跑在主线程逐样本回调里，
       // 此前是静默回退，用户可能长期跑在降级模式而无感知。mode 本身仍按原样工作（不改变音频行为）。
       console.warn('[V3Host] AudioWorklet 不可用，回退 ScriptProcessor 主线程 DSP 模式（空间音频/卷积将占用主线程；请检查 worklet 资源加载）')
-      const sp = ctx.createScriptProcessor(this.blockSize, 2, 2)
+      const sp = ctx.createScriptProcessor(this.blockSize, 32, 2)
+      sp.channelInterpretation = 'discrete'
+      const scriptInputs: Float32Array[] = new Array(32)
+      const scriptOutputs: Float32Array[] = new Array(2)
       sp.onaudioprocess = (e) => {
-        const inL = e.inputBuffer.getChannelData(0)
-        const inR = e.inputBuffer.getChannelData(1)
+        const count = this.spatialInputChannels
+        scriptInputs.length = count
+        for (let channel = 0; channel < count; channel++) scriptInputs[channel] = e.inputBuffer.getChannelData(channel)
         const outL = e.outputBuffer.getChannelData(0)
         const outR = e.outputBuffer.getChannelData(1)
-        this.engine.process([inL, inR], [outL, outR])
+        scriptOutputs[0] = outL; scriptOutputs[1] = outR
+        this.engine.process(scriptInputs, scriptOutputs)
       }
       node = sp
       mode = 'script'
@@ -209,18 +291,192 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
     this.node = node
     this.activeMode = mode
     if (params) this.lastParams = params
-    // 首次 attach：主线程引擎此前从未收到参数（lastParams 在 attach 前为 null）——
-    // 不补发的话 script 回退路径以默认参数出声、worklet 模式下主线程 getStats 与
-    // worklet 实际参数分裂。统一同步一次。
-    const effective = params ?? this.lastParams
-    if (effective && this.engineRef) this.engineRef.setParams(effective)
   }
 
   /** 下发参数：主线程引擎与 worklet 处理器同步更新 */
   setParams(p: V3EngineParams): void {
     this.lastParams = p
     this.engine.setParams(p)
-    if (this.node?.port) this.node.port.postMessage({ type: 'params', params: p })
+    if (this.node?.port) this.postWorkletParams(this.node.port, p)
+  }
+
+  setSpatialHrtf(grid: HrtfGrid | null): void {
+    this.engine.setSpatialHrtf(grid)
+    this.spatialHrtf = grid
+    const roomHrir = this.engine.takePreparedRoomHrir(true)
+    const port = this.node?.port
+    if (!port) return
+    const message = { type: 'spatial-hrtf', grid, roomHrir }
+    const transfer = roomHrir === undefined ? EMPTY_TRANSFER : this.roomEarlyTransferList(roomHrir)
+    if (transfer.length) port.postMessage(message, transfer)
+    else port.postMessage(message)
+  }
+
+  setSpatialHeadPose(pose: HeadPose | null): void {
+    this.headPose = pose
+    this.engine.setSpatialHeadPose(pose)
+    const roomHrir = this.engine.takePreparedRoomHrir()
+    const port = this.node?.port
+    if (!port) return
+    const message = { type: 'head-pose', pose, roomHrir }
+    const transfer = roomHrir === undefined ? EMPTY_TRANSFER : this.roomEarlyTransferList(roomHrir)
+    if (transfer.length) port.postMessage(message, transfer)
+    else port.postMessage(message)
+  }
+
+  /** 解码器已知声道数时可提前准备；统计回传也会自动修正该提示。 */
+  setSpatialInputChannelCount(channels: number): void {
+    if (!Number.isInteger(channels) || channels < 1 || channels > 32) return
+    this.spatialInputChannels = channels
+    this.engine.setSpatialInputChannelCount(channels)
+    if (this.node?.port && this.lastParams) this.postWorkletParams(this.node.port, this.lastParams)
+  }
+
+  /** 已装载的 IR 留在 Worklet 侧；调其他效果时只发送轻量参数快照。 */
+  private postWorkletParams(port: NonNullable<V3AudioNodeLike['port']>, p: V3EngineParams): void {
+    this.engine.setSpatialInputChannelCount(this.spatialInputChannels)
+    const roomHrir = this.engine.takePreparedRoomHrir(this.workletNeedsRoomCache)
+    this.workletNeedsRoomCache = false
+    const ir = p.reverb.convolution.ir
+    const convolution = p.reverb.convolution
+    const requestedPartitionSize = convolution.partitionSize ?? 512
+    const partitionSize = WORKLET_PARTITION_SIZES.includes(requestedPartitionSize) ? requestedPartitionSize : 512
+    const dePeriodize = (convolution.purpose ?? 'reverb') === 'reverb' && convolution.dePeriodize
+    const activeConvolution = !!ir && p.reverb.enabled && p.reverb.mode === 'convolution'
+    const configKey = activeConvolution
+      ? `${p.sampleRate}:${ir!.length}:${convolution.irName ?? ''}:${partitionSize}:${dePeriodize}`
+      : ''
+    const sameCachedIR = !!ir && ir === this.workletIrRef
+    const reuseIr = this.workletIrRef !== null && (!activeConvolution
+      || (sameCachedIR && configKey === this.workletIrConfigKey))
+    const prepareOnControlThread = activeConvolution && ir!.length > partitionSize * 4
+    const needsPreparedIR = !reuseIr && prepareOnControlThread
+    const deferIR = !activeConvolution
+    const irStatePresent = !!ir || this.workletIrRef !== null
+    // 快路径：同一参数快照 + 相同 IR/路由状态 + 没有新的预准备数据 ⇒ 直接重发缓存消息。
+    // 复用对象是安全的：postMessage 返回前已完成结构化克隆，音频线程只会拿到独立副本。
+    if (roomHrir === undefined && !needsPreparedIR && this.workletCacheValid
+      && this.workletCacheSource === p && this.workletCacheIr === ir
+      && this.workletCacheConfigKey === configKey && this.workletCacheReuseIr === reuseIr
+      && this.workletCacheIrState === irStatePresent) {
+      port.postMessage(this.workletMessage)
+      return
+    }
+    const preparedIR = needsPreparedIR ? this.engine.createPreparedConvolverIRTransfer() : null
+    // 消息骨架复用：只改字段，不再每次调用展开多个对象；缺省字段删除以保持消息形状稳定。
+    const message = this.workletMessage ?? (this.workletMessage = { type: 'params', params: p })
+    message.params = reuseIr || deferIR || preparedIR ? this.irNullParamsVariant(p) : p
+    if (roomHrir !== undefined) message.roomHrir = roomHrir
+    else delete message.roomHrir
+    if (irStatePresent) {
+      message.reuseIr = reuseIr
+      message.irChanged = !reuseIr
+    } else {
+      delete message.reuseIr
+      delete message.irChanged
+    }
+    if (preparedIR) message.preparedConvolverIR = preparedIR
+    else delete message.preparedConvolverIR
+    // 只有真正存在 Transferable 时才构造列表；无预准备数据时零 Set、零空数组。
+    const roomTransfer = roomHrir === undefined ? null : this.roomEarlyTransferList(roomHrir)
+    const irTransfer = preparedIR ? this.convolverIrTransferList(preparedIR) : null
+    const transfer = roomTransfer && irTransfer ? [...roomTransfer, ...irTransfer] : (roomTransfer ?? irTransfer)
+    if (transfer && transfer.length) port.postMessage(message, transfer)
+    else port.postMessage(message)
+    // 缓存仅在无 transfer 时可复用：转移后的 buffer 已脱离主线程，不能再投递。
+    this.workletCacheSource = p
+    this.workletCacheIr = ir
+    this.workletCacheConfigKey = configKey
+    this.workletCacheReuseIr = reuseIr
+    this.workletCacheIrState = irStatePresent
+    this.workletCacheValid = !(transfer && transfer.length)
+    if (activeConvolution) {
+      this.workletIrRef = ir
+      this.workletIrConfigKey = configKey
+    } else if (!reuseIr) {
+      // Worklet no longer retains a reusable identity for this IR; defer loading until convolution is enabled.
+      this.workletIrRef = null
+      this.workletIrConfigKey = ''
+    }
+  }
+
+  /** 无 IR 参数副本（ir=null）：reuseIr/deferIR/preparedIR 三条路径共用，按快照身份缓存。 */
+  private irNullParamsVariant(p: V3EngineParams): V3EngineParams {
+    if (this.workletParamsVariantSource !== p || this.workletParamsVariant === null) {
+      this.workletParamsVariantSource = p
+      this.workletParamsVariant = { ...p, reverb: { ...p.reverb,
+        convolution: { ...p.reverb.convolution, ir: null } } }
+    }
+    return this.workletParamsVariant
+  }
+
+  /** 清空 Worklet 参数消息缓存（重连/dispose/采样率重建后重新下发）。 */
+  private invalidateWorkletParamsCache(): void {
+    this.workletCacheValid = false
+    this.workletCacheSource = null
+    this.workletCacheIr = null
+    this.workletCacheConfigKey = ''
+    this.workletCacheReuseIr = false
+    this.workletCacheIrState = false
+    this.workletParamsVariantSource = null
+    this.workletParamsVariant = null
+    this.roomTransferSource = null
+    this.roomTransferCache = null
+  }
+
+  /** 只遍历主线程刚生成的可转移快照；频谱与工作缓冲不在音频线程重新分配。
+   *  同一个预准备快照对象的结果缓存复用（快照是一次性的，调用方每个快照只取一次）。 */
+  private roomEarlyTransferList(prepared: unknown): Transferable[] {
+    if (prepared === undefined) return EMPTY_TRANSFER
+    if (prepared === this.roomTransferSource && this.roomTransferCache) return this.roomTransferCache
+    const buffers = new Set<ArrayBuffer>()
+    const visit = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return
+      if (ArrayBuffer.isView(value)) { if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer); return }
+      for (const child of Object.values(value)) visit(child)
+    }
+    visit(prepared)
+    const list = [...buffers]
+    this.roomTransferSource = prepared
+    this.roomTransferCache = list
+    return list
+  }
+
+  private convolverIrTransferList(ir: PreparedConvolverIR): Transferable[] {
+    return [
+      ir.irSpecReal.buffer, ir.irSpecImag.buffer,
+      ir.workReal.buffer, ir.workImag.buffer, ir.sumReal.buffer, ir.sumImag.buffer,
+      ir.simdProductReal.buffer, ir.simdProductImag.buffer,
+      ir.historyRealL.buffer, ir.historyImagL.buffer, ir.historyRealR.buffer, ir.historyImagR.buffer,
+      ir.overlapL.buffer, ir.overlapR.buffer, ir.inputBlockL.buffer, ir.inputBlockR.buffer,
+      ir.pendingWetL.buffer, ir.pendingWetR.buffer,
+      ir.wetDelayL.buffer, ir.wetDelayR.buffer,
+    ]
+  }
+
+  /** 可序列化节点同时进入主线程参照引擎和 Worklet 实际音频链。 */
+  registerSerializableProcessingNode(config: HseSerializableNodeConfig): void {
+    const copy = structuredClone(config)
+    const fs = this.handle?.audioContext.sampleRate ?? (this.hostFs > 0 ? this.hostFs : 48000)
+    const node = createSerializableProcessingNode(copy, fs)
+    this.serializableNodes.set(copy.id, copy)
+    this.engine.registerProcessingNode(node)
+    this.node?.port?.postMessage({ type: 'register-node', config: copy })
+  }
+
+  /** 函数回调仅可在 ScriptProcessor 模式注册，避免 Worklet 播放静默跳过。 */
+  registerProcessingNode(node: HseProcessingNode): void {
+    if (this.activeMode === 'worklet' || (this.activeMode === null && this.defaultMode !== 'script')) {
+      throw new Error('函数处理节点仅支持 script 模式；Worklet 请注册可序列化节点')
+    }
+    this.engine.registerProcessingNode(node)
+    this.serializableNodes.delete(node.id)
+  }
+
+  unregisterProcessingNode(id: string): boolean {
+    const removed = this.engine.unregisterProcessingNode(id)
+    if (this.serializableNodes.delete(id)) this.node?.port?.postMessage({ type: 'unregister-node', id })
+    return removed
   }
 
   /** 拆除 v3 链路并恢复 masterGain→analyser 直连（v2 dispose 同款语义） */
@@ -233,6 +489,9 @@ async attach(handle: V3HostHandle, params?: V3EngineParams): Promise<void> {
     this.handle = null
     this.activeMode = null
     this.lastAnalysis = null
+    this.workletIrRef = null
+    this.workletIrConfigKey = ''
+    this.invalidateWorkletParamsCache()
     if (n) {
       try {
         n.disconnect?.()

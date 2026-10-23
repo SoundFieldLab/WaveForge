@@ -1,3 +1,4 @@
+import type { AudioBuffer } from './audioBuffer'
 /**
  * LoudnessComp —— 等响度补偿（模块 12）
  *
@@ -16,8 +17,8 @@
  *  - 拟合：固定 low shelf 120Hz Q0.707 + high shelf 12kHz Q0.707 +
  *    中频 peaking（auto/preset 从候选频点按 |增益| 选取至多 4 段；
  *    custom 直接用用户中频 bands），总段数 2–6。
- *  - 增益平滑：各段目标增益经一阶低通（smoothingSeconds）逐块平滑，
- *    系数在平滑增益变化时重算，避免切换爆音。
+ *  - 增益平滑：各段目标增益经一阶低通（smoothingSeconds）按固定 32 样本
+ *    控制周期推进，避免处理块长改变平滑时间与滤波器更新频率。
  *  - mode：auto=音量线性等响度；preset=固定场景曲线；custom=用户曲线。
  *
  * 确定性：同输入同参数必同输出；无随机、无 Date、无 console。
@@ -78,6 +79,8 @@ const PRESET_CURVES: Record<string, Array<[number, number]>> = {
 
 // 最大段数：2 shelf + 4 peaking
 const MAX_BANDS = 6
+const CONTROL_SAMPLES = 32
+const IDENTITY_COEFFS: BiquadCoeffs = { b0: 1, b1: 0, b2: 0, a1: 0, a2: 0 }
 
 export class LoudnessComp {
   private readonly fs: number
@@ -92,6 +95,8 @@ export class LoudnessComp {
   private targetFreqs: Float64Array = new Float64Array(MAX_BANDS)
   private targetTypes: Int32Array = new Int32Array(MAX_BANDS) // 0=low shelf,1=high shelf,2=peaking
   private currentGains: Float64Array = new Float64Array(MAX_BANDS)
+  private smoothAlpha = 0
+  private samplesToUpdate = 0
 
   // 内部 biquad 链（6 段，0 增益时为恒等）；左右声道各自独立状态，
   // 避免"一链两声道"时另一声道的处理污染本声道滤波器状态（等效频率翻倍失真）。
@@ -120,37 +125,36 @@ export class LoudnessComp {
     this.maxBoostDb = clamp(p.maxBoostDb, 0, 24)
     this.preset = typeof p.preset === 'string' ? p.preset : 'flat'
     this.smoothingSeconds = clamp(p.smoothingSeconds, 0.01, 10)
+    this.smoothAlpha = 1 - Math.exp(-CONTROL_SAMPLES / (this.smoothingSeconds * this.fs))
 
     const bands = Array.isArray(p.bands) ? p.bands : []
     const targets = this.computeTargets(bands)
-    // 写入目标（频率/类型随目标一起）
-    this.targetGains.set(targets.gains)
-    this.targetFreqs.set(targets.freqs)
-    this.targetTypes.set(targets.types)
+    // 频率/类型变化时旧系数不再对应 currentGains；先用当前增益重建设计。
+    // 无增益变化也必须更新系数，避免切 custom bands 时滤波器留在旧频率。
+    for (let i = 0; i < MAX_BANDS; i++) {
+      // 退场段沿原频率平滑至 0dB，不能提前把中心频率改成 0。
+      const nextFreq = targets.freqs[i] === 0 && this.currentGains[i] !== 0 ? this.targetFreqs[i] : targets.freqs[i]
+      const changed = this.targetFreqs[i] !== nextFreq || this.targetTypes[i] !== targets.types[i]
+      this.targetGains[i] = targets.gains[i]
+      this.targetFreqs[i] = nextFreq
+      this.targetTypes[i] = targets.types[i]
+      if (changed) this.recomputeCoeffs(i, this.currentGains[i])
+    }
   }
 
-  /** 就地处理立体声；6 段 biquad 级联 + 逐块增益平滑 */
-  processStereo(l: Float32Array, r: Float32Array): void {
+  /** 就地处理立体声；滤波器控制周期独立于调用方块长 */
+  processStereo(l: AudioBuffer, r: AudioBuffer): void {
     const B = Math.min(l.length, r.length)
-    // 逐块平滑增益（一阶低通，时间常数 smoothingSeconds）
-    const alpha = 1 - Math.exp(-B / (this.smoothingSeconds * this.fs))
-    for (let i = 0; i < MAX_BANDS; i++) {
-      const target = this.targetGains[i]
-      const current = this.currentGains[i]
-      if (current !== target) {
-        let g = current + alpha * (target - current)
-        if (Math.abs(g - target) < 1e-9) g = target
-        this.currentGains[i] = g
-        this.recomputeCoeffs(i, g)
-      }
-    }
-
     for (let i = 0; i < B; i++) {
-      const xl = l[i]
-      const xr = r[i]
-      let yl = xl
-      let yr = xr
+      if (this.samplesToUpdate === 0) {
+        this.updateGains()
+        this.samplesToUpdate = CONTROL_SAMPLES
+      }
+      this.samplesToUpdate--
+      let yl = l[i]
+      let yr = r[i]
       for (let k = 0; k < MAX_BANDS; k++) {
+        if (this.currentGains[k] === 0) continue
         yl = this.biquadStep(this.bq[k], yl)
         yr = this.biquadStep(this.bqR[k], yr)
       }
@@ -159,7 +163,20 @@ export class LoudnessComp {
     }
   }
 
+  private updateGains(): void {
+    for (let i = 0; i < MAX_BANDS; i++) {
+      const target = this.targetGains[i]
+      const current = this.currentGains[i]
+      if (current === target) continue
+      let g = current + this.smoothAlpha * (target - current)
+      if (Math.abs(g - target) < 1e-9) g = target
+      this.currentGains[i] = g
+      this.recomputeCoeffs(i, g)
+    }
+  }
+
   reset(): void {
+    this.samplesToUpdate = 0
     for (let i = 0; i < MAX_BANDS; i++) {
       this.bq[i].z1 = 0
       this.bq[i].z2 = 0
@@ -181,7 +198,11 @@ export class LoudnessComp {
     const gains = new Float64Array(MAX_BANDS)
     const freqs = new Float64Array(MAX_BANDS)
     const types = new Int32Array(MAX_BANDS)
-    let n = 0
+    // 固定 low/high/peaking 槽位，避免某一段开关时余下滤波器整链位移。
+    types[1] = 1
+    for (let i = 2; i < MAX_BANDS; i++) types[i] = 2
+    freqs[0] = 120
+    freqs[1] = 12000
 
     if (this.mode === 'custom') {
       // custom：低/高频段增益取用户低/高频 bands 均值；中频直接用用户 bands 做 peaking
@@ -190,18 +211,8 @@ export class LoudnessComp {
       const mid = bands.filter((b) => b.frequency > 250 && b.frequency < 6000)
       const lowGain = low.length > 0 ? average(low.map((b) => clamp(b.gain, -24, 24))) : 0
       const highGain = high.length > 0 ? average(high.map((b) => clamp(b.gain, -24, 24))) : 0
-      if (Math.abs(lowGain) >= 0.25) {
-        gains[n] = lowGain
-        freqs[n] = 120
-        types[n] = 0
-        n++
-      }
-      if (Math.abs(highGain) >= 0.25) {
-        gains[n] = highGain
-        freqs[n] = 12000
-        types[n] = 1
-        n++
-      }
+      if (Math.abs(lowGain) >= 0.25) gains[0] = lowGain
+      if (Math.abs(highGain) >= 0.25) gains[1] = highGain
       // 中频 peaking（按 |增益| 降序取至多 4 段，再按频率升序排列）
       const picked = mid
         .filter((b) => Math.abs(clamp(b.gain, -24, 24)) >= 0.25)
@@ -209,12 +220,10 @@ export class LoudnessComp {
         .sort((a, b) => Math.abs(b.g) - Math.abs(a.g) || a.f - b.f)
         .slice(0, 4)
         .sort((a, b) => a.f - b.f)
-      for (const pk of picked) {
-        gains[n] = pk.g
-        freqs[n] = pk.f
-        types[n] = 2
-        n++
-      }
+      picked.forEach((pk, i) => {
+        gains[i + 2] = pk.g
+        freqs[i + 2] = pk.f
+      })
       return { gains, freqs, types }
     }
 
@@ -236,18 +245,8 @@ export class LoudnessComp {
     // 固定 2 shelf
     const lowGain = table[THIRD_OCTAVE_FREQS.indexOf(100)]
     const highGain = table[THIRD_OCTAVE_FREQS.indexOf(10000)]
-    if (Math.abs(lowGain) >= 0.25) {
-      gains[n] = lowGain
-      freqs[n] = 120
-      types[n] = 0
-      n++
-    }
-    if (Math.abs(highGain) >= 0.25) {
-      gains[n] = highGain
-      freqs[n] = 12000
-      types[n] = 1
-      n++
-    }
+    if (Math.abs(lowGain) >= 0.25) gains[0] = lowGain
+    if (Math.abs(highGain) >= 0.25) gains[1] = highGain
     // 中频 peaking 候选
     const picked: Array<{ f: number; g: number }> = []
     for (const f of PEAKING_CANDIDATES) {
@@ -256,17 +255,23 @@ export class LoudnessComp {
     }
     picked.sort((a, b) => Math.abs(b.g) - Math.abs(a.g) || a.f - b.f)
     const top = picked.slice(0, 4).sort((a, b) => a.f - b.f)
-    for (const pk of top) {
-      gains[n] = pk.g
-      freqs[n] = pk.f
-      types[n] = 2
-      n++
-    }
+    top.forEach((pk, i) => {
+      gains[i + 2] = pk.g
+      freqs[i + 2] = pk.f
+    })
     return { gains, freqs, types }
   }
 
   /** 按当前平滑增益重算某段 biquad 系数 */
   private recomputeCoeffs(idx: number, gainDb: number): void {
+    // 0dB 段直接旁路；避免 f=0 的空槽参与设计，并防止残留滤波器状态漏入干声。
+    if (gainDb === 0 || this.targetFreqs[idx] === 0) {
+      this.bq[idx].c = IDENTITY_COEFFS
+      this.bqR[idx].c = IDENTITY_COEFFS
+      this.bq[idx].z1 = this.bq[idx].z2 = 0
+      this.bqR[idx].z1 = this.bqR[idx].z2 = 0
+      return
+    }
     const f = this.targetFreqs[idx]
     const type = this.targetTypes[idx]
     const c =

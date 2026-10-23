@@ -6,8 +6,9 @@
  *   FFT 内核使用自研 dsp/fft（kissfft 蝶形思路，BSD-3）。纯 TS、零运行时依赖。
  *
  * 用途：频谱可视化、引擎 getAnalysis 的特征统计、听力分析演示的频域依据。
- * 行为：processStereo 取 L 通道前 fftSize 个样本，加 Hann 窗后做复 FFT，
- *   就地写幅度谱（N/2+1 bins）；同帧计算 RMS / 过零率 / 质心 / 滚降 / 平坦度 / 峰值比。
+ * 行为：processStereo 将 L+jR 打包做一次 Hann 窗复 FFT，再由镜像 bin 合并双声道功率，
+ *   就地写 rawFFT 幅度谱 sqrt((|XL|²+|XR|²)/2)（N/2+1 bins，不改变 UI 的 N/2 缩放约定）；
+ *   同帧计算双声道 RMS / 平均过零计数 / 质心 / 滚降 / 平坦度 / 峰值比。
  * 性能：FFT 缓冲与幅度谱在构造时预分配，process 内零分配。
  */
 
@@ -30,8 +31,8 @@ export class SpectrumAnalyzer {
   private crest = 0
 
   constructor(fftSize = 2048, fs: number) {
-    if (!(fs > 0)) throw new Error('invalid sample rate')
-    if (fftSize < 2 || (fftSize & (fftSize - 1)) !== 0) {
+    if (!(fs > 0) || !Number.isFinite(fs)) throw new Error('invalid sample rate')
+    if (!Number.isInteger(fftSize) || fftSize < 2 || fftSize > 0x40000000 || (fftSize & (fftSize - 1)) !== 0) {
       throw new Error('invalid fftSize: must be a power of two')
     }
     this.fftSize = fftSize
@@ -41,30 +42,44 @@ export class SpectrumAnalyzer {
     this.real = new Float32Array(fftSize)
     this.imag = new Float32Array(fftSize)
     this.magnitudes = new Float32Array(this.binCount)
+    // 在构造阶段预热 twiddle 缓存，首个音频块也不分配 FFT 工作表。
+    fft(this.real, this.imag, false)
   }
 
-  /** 就地分析（取 L 通道，Hann 窗；r 通道忽略） */
-  processStereo(l: Float32Array, _r: Float32Array): void {
+  /** 双声道平均功率分析；不足 fftSize 的部分及缺失声道按静音补零，不修改输入。 */
+  processStereo(l: Float32Array, r: Float32Array): void {
     const n = this.fftSize
     const real = this.real
-    const take = Math.min(l.length, n)
-    let i = 0
-    for (; i < take; i++) real[i] = l[i] * this.window[i]
-    for (; i < n; i++) real[i] = 0 // 不足 fftSize 的部分补零
-    this.imag.fill(0)
-    fft(real, this.imag, false)
+    const imag = this.imag
+    const takeL = Math.min(l.length, n)
+    const takeR = Math.min(r.length, n)
+    const take = Math.max(takeL, takeR)
+    let sumSquares = 0
+    let crossings = 0
+    for (let i = 0; i < n; i++) {
+      const left = i < takeL ? l[i] : 0
+      const right = i < takeR ? r[i] : 0
+      real[i] = left * this.window[i]
+      imag[i] = right * this.window[i]
+      sumSquares += left * left + right * right
+      if (i > 0) {
+        if (i < takeL && (l[i - 1] >= 0) !== (left >= 0)) crossings++
+        if (i < takeR && (r[i - 1] >= 0) !== (right >= 0)) crossings++
+      }
+    }
+    fft(real, imag, false)
 
-    // 幅度谱（就地写入预分配缓冲；N/2+1 个 bin，含直流与 Nyquist）
+    // Z=FFT(L+jR)。镜像 bin 配对的平方和消去互相关项：
+    // (|Z[k]|²+|Z[-k]|²)/4 = (|XL[k]|²+|XR[k]|²)/2。
+    // 同相/反相等幅输入都保持原单声道 rawFFT 标度，不会因下混抵消或无故 +3dB。
     const mags = this.magnitudes
     for (let k = 0; k < this.binCount; k++) {
-      const re = real[k]
-      const im = this.imag[k]
-      mags[k] = Math.sqrt(re * re + im * im)
+      const mirror = k === 0 ? 0 : n - k
+      mags[k] = 0.5 * Math.hypot(real[k], imag[k], real[mirror], imag[mirror])
     }
 
-    // 时域特征（对实际取到的样本计算；count=0 时为空输入，特征置 0）
-    this.rms = computeRms(l, take)
-    this.zcr = computeZcr(l, take)
+    this.rms = take > 0 ? Math.sqrt(sumSquares / (2 * take)) : 0
+    this.zcr = crossings * 0.5
     this.centroidHz = spectralCentroid(mags, this.binFreqs)
     this.rolloffHz = spectralRolloff(mags, this.binFreqs, 0.95)
     this.flatness = spectralFlatness(mags)
@@ -76,15 +91,16 @@ export class SpectrumAnalyzer {
     return this.magnitudes
   }
 
-  getFeatures(): SpectralFeatures {
-    return {
-      rms: this.rms,
-      zcr: this.zcr,
-      centroidHz: this.centroidHz,
-      rolloffHz: this.rolloffHz,
-      flatness: this.flatness,
-      crest: this.crest,
-    }
+  /** 默认返回独立快照；实时轮询可传 output 复用，避免分配而不改变旧调用方的所有权语义。 */
+  getFeatures(output?: SpectralFeatures): SpectralFeatures {
+    const out = output ?? { rms: 0, zcr: 0, centroidHz: 0, rolloffHz: 0, flatness: 0, crest: 0 }
+    out.rms = this.rms
+    out.zcr = this.zcr
+    out.centroidHz = this.centroidHz
+    out.rolloffHz = this.rolloffHz
+    out.flatness = this.flatness
+    out.crest = this.crest
+    return out
   }
 
   reset(): void {
@@ -103,24 +119,6 @@ export class SpectrumAnalyzer {
 // ---------------------------------------------------------------------------
 // meyda 式特征（自研实现，公式对齐 meyda(MIT) extractors）
 // ---------------------------------------------------------------------------
-
-/** RMS = sqrt(mean(x²))，取前 count 个样本；count<=0 返回 0 */
-function computeRms(x: Float32Array, count: number): number {
-  if (count <= 0) return 0
-  let s = 0
-  for (let i = 0; i < count; i++) s += x[i] * x[i]
-  return Math.sqrt(s / count)
-}
-
-/** 过零率（符号变化次数，meyda 语义：返回计数而非归一化比率） */
-function computeZcr(x: Float32Array, count: number): number {
-  if (count <= 1) return 0
-  let z = 0
-  for (let i = 1; i < count; i++) {
-    if ((x[i - 1] >= 0 && x[i] < 0) || (x[i - 1] < 0 && x[i] >= 0)) z++
-  }
-  return z
-}
 
 /** 频谱质心 Hz = Σ(f·|X|)/Σ|X|（meyda 一阶矩，bin 频率加权） */
 function spectralCentroid(mags: Float32Array, freqs: Float32Array): number {

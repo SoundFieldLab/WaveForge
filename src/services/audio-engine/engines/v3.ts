@@ -8,10 +8,11 @@
 
 import type { EngineManifest } from '../types'
 import { V3Adapter } from '../V3Adapter'
+import { HSE_DISPLAY_VERSION } from '../../waveforge-engine-v3/version'
 
 export const v3Manifest: EngineManifest = {
   id: 'v3',
   displayName: 'HSE',
-  description: 'HyperSoundEngine DSP 内核（14 级链 + 11 场景 + 分享串）',
+  description: `${HSE_DISPLAY_VERSION} · 动态均衡、双耳空间渲染、双精度处理与离线导出`,
   createAdapter: () => new V3Adapter(),
 }

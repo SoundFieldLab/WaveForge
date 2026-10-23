@@ -30,7 +30,7 @@ function newestMtimeMs(dir) {
   return newest
 }
 
-if (existsSync(outfile)) {
+if (existsSync(outfile) && !process.argv.includes('--force')) {
   try {
     const srcTree = path.join(root, 'src/services/waveforge-engine-v3/src')
     if (statSync(outfile).mtimeMs >= newestMtimeMs(srcTree)) {
