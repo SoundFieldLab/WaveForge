@@ -3966,8 +3966,17 @@ function App() {
   }, [])
 
   // 允许独立模式打开全局播放列表面板，避免传统模式依赖父级布局实现按钮行为。
+  // detail 带 { platform, playlistId } 时为「打开歌单详情」（如 Spotify 歌曲电台建完直达）；
+  // 否则退回全局播放列表面板（旧行为，调用方不关心具体歌单）。
   useEffect(() => {
-    const openPlaylist = () => setShowPlaylist(true)
+    const openPlaylist = (event?: Event) => {
+      const detail = (event as CustomEvent<{ platform?: MusicPlatform; playlistId?: string }> | undefined)?.detail
+      if (detail?.platform && detail?.playlistId) {
+        void handleOpenPlaylistFromDetail(String(detail.playlistId), detail.platform)
+        return
+      }
+      setShowPlaylist(true)
+    }
     window.addEventListener('waveforge:open-playlist', openPlaylist)
     return () => window.removeEventListener('waveforge:open-playlist', openPlaylist)
   }, [])
@@ -6734,7 +6743,9 @@ function App() {
         // 跨平台可用性增强（设置开关「平台可用性增强」）：原生播放失败（付费/版权/未登录）→ 尝试同名匹配播放。
         // 此前酷狗/汽水无论开关如何都会匹配、QQ 完全不匹配，与设置文案不符；现在统一受开关控制。
         const fallbackEnabled = parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)
-        const fallbackPlatforms = ['kugou', 'soda', 'qq']
+        // spotify 无自源（librespot 不可用/崩溃）时同样走同名匹配兜底；
+        // apple 原生取流失败在专属分支处理，不在此列
+        const fallbackPlatforms = ['kugou', 'soda', 'qq', 'spotify']
         if (fallbackEnabled && fallbackPlatforms.includes(normalizedSong.platform || 'netease')) {
           // 汽水源不可播：先弹一次性可感知提示（标注「汽水·」前缀，避免用户误以为播的是网易云版本），
           // 再走既有同名匹配兜底；netease/qq 兜底流程本身不变
@@ -6796,6 +6807,41 @@ function App() {
                 audioSourceOverride: { platform: resolvedPlatform, id: String(resolved.mid || resolved.id || '') },
               }
               url = carrierUrl
+            } else if (resolvedPlatform !== 'qq') {
+              // 首选载体（评分最高者）取流失败：换下一个有候选的载体平台再试一轮。
+              // 实测场景：酷狗评分最高但 hash 已失效（403 url_unavailable），QQ 明明有同曲可播——
+              // 不换源的话用户只会看到「补源失败」，尽管 QQ/网易有完整的同名曲。
+              const remainingSources = (['qq', 'netease', 'kugou'] as MusicPlatform[])
+                .filter(p => p !== resolvedPlatform && p !== sourceSong.platform)
+              for (const retryPlatform of remainingSources) {
+                const retryResolved = await resolvePlayableSongSmart(normalizedSong, {
+                  originPlatform: sourceSong.platform as MusicPlatform,
+                  profiles: carrierProfiles,
+                  sources: [retryPlatform],
+                })
+                if (!retryResolved) continue
+                const retryId = retryResolved.platform === 'qq' ? (retryResolved.song.mid || retryResolved.song.id) : retryResolved.song.id
+                const retryUrl = await getSongUrl(retryId, retryResolved.platform)
+                if (retryUrl && retryUrl !== 'SONG_UNAVAILABLE') {
+                  void import('./services/crossFillRegistry')
+                    .then(m => {
+                      m.recordCrossFill(sourceSong, retryResolved.platform, String(retryResolved.song.mid || retryResolved.song.id || ''))
+                      m.reportCrossPlatformFill({
+                        from: (sourceSong.platform || 'netease') as MusicPlatform,
+                        to: retryResolved.platform,
+                        ...fillTrackInfo,
+                        success: true,
+                      })
+                    })
+                    .catch(() => undefined)
+                  normalizedSong = {
+                    ...normalizedSong,
+                    audioSourceOverride: { platform: retryResolved.platform, id: String(retryResolved.song.mid || retryResolved.song.id || '') },
+                  }
+                  url = retryUrl
+                  break
+                }
+              }
             }
           }
           if (!url) {
@@ -7492,6 +7538,42 @@ function App() {
     audioPlayerRef.current.togglePlay()
   }, [currentSong, isPlaying, lyricDisplayMode])
   handlePlayPauseRef.current = handlePlayPause
+
+  // 睡眠定时器（官方 Spotify 右键菜单「睡眠定时器」）：到点暂停播放。
+  // 菜单项派发 waveforge:playback-sleep-timer { minutes: 15 | 30 | 60 | 90 | 0 }（0 = 取消）；
+  // 同一时刻只保留一个定时器；剩余时间经 waveforge:playback-sleep-timer-tick 广播（播放条可显示）。
+  const sleepTimerTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ minutes?: number }>).detail ?? {}
+      const minutes = Number(detail.minutes ?? 0)
+      if (sleepTimerTimerRef.current !== null) {
+        window.clearTimeout(sleepTimerTimerRef.current)
+        sleepTimerTimerRef.current = null
+      }
+      if (minutes <= 0) {
+        window.dispatchEvent(new CustomEvent('waveforge:playback-sleep-timer-tick', { detail: { remainingMs: null } }))
+        addToast('已取消睡眠定时器', 'info')
+        return
+      }
+      const remainingMs = minutes * 60_000
+      const startedAt = Date.now()
+      window.dispatchEvent(new CustomEvent('waveforge:playback-sleep-timer-tick', { detail: { remainingMs, endsAt: startedAt + remainingMs } }))
+      addToast(`睡眠定时器已设置：${minutes} 分钟后暂停`, 'success')
+      sleepTimerTimerRef.current = window.setTimeout(() => {
+        sleepTimerTimerRef.current = null
+        // 到点暂停：isPlaying 时才 togglePlay（引擎无独立 pause API，与播放条同链路）
+        try { if (isPlayingRef.current) handlePlayPauseRef.current?.() } catch { /* 引擎未就绪 */ }
+        window.dispatchEvent(new CustomEvent('waveforge:playback-sleep-timer-tick', { detail: { remainingMs: null } }))
+        addToast('睡眠定时器到点，已暂停播放', 'info')
+      }, remainingMs)
+    }
+    window.addEventListener('waveforge:playback-sleep-timer', handler)
+    return () => {
+      window.removeEventListener('waveforge:playback-sleep-timer', handler)
+      if (sleepTimerTimerRef.current !== null) window.clearTimeout(sleepTimerTimerRef.current)
+    }
+  }, [])
 
   useEffect(() => {
     if (lyricDisplayMode !== 'video') {
@@ -9311,6 +9393,13 @@ function App() {
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify' } }))
     addToast('Spotify 已退出登录', 'info')
   }
+  // Spotify 客户端顶栏（传统模式）的「登出」菜单项：经事件转发到 handleSpotifyLogout
+  //（TraditionalView 不直接持有 logout 函数，走全局事件保持 props 面不变）
+  useEffect(() => {
+    const handler = () => handleSpotifyLogout()
+    window.addEventListener('waveforge-spotify-logout-request', handler)
+    return () => window.removeEventListener('waveforge-spotify-logout-request', handler)
+  }, [])
   const handleKugouLogin = (cookie: string, username?: string, extra?: { userId?: string; avatar?: string }) => {
     // 仅当 Cookie 含真实登录凭据（KuGoo 会话 或 kg_token）才算登录
     const loggedIn = Boolean(cookie && (/KuGoo=/.test(cookie) || /KugooID=/.test(cookie) || /kg_token/.test(cookie)))

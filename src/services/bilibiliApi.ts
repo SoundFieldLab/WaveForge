@@ -21,6 +21,8 @@ import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } fr
 import { OP_ED_EXTENSION_UPLOADER_MIDS, OP_ED_EXTENSION_VERSION, getOpEdExtensionDeclaration, findOpEdExtensionByMeta, isOpEdExtensionUploader } from '../data/bilibiliOpEdExtensions'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
 import { getApiBase } from './apiConfig'
+import { lookupLearnedArtistAlias, lookupLearnedSongVariant, getLearnedSongVariants, getLearnedArtistAliases, getQueryWin, recordQueryWin, recencyFactor } from './mvAdaptive'
+import { evolutionScore, extractEvolutionFeatures, consumeEvolutionSample } from './mvEvolution'
 
 export let BILI_API_BASE = `${getApiBase()}/bilibili`
 
@@ -43,6 +45,8 @@ export interface BilibiliVideo {
   mid?: number
   pic: string
   typename?: string
+  /** 投稿时间（秒级时间戳）：播放先验的时效衰减依赖（搜索接口 2026-10 起携带） */
+  pubdate?: number
 }
 
 export interface BilibiliViewData {
@@ -1449,6 +1453,35 @@ const UPLOADER_WEIGHT_PROFILES: readonly UploaderWeightProfile[] = [
     score: 15,
     requireTitleMarker: /OP完整|ED完整|完整OP|完整ED|(?:OP|ED)\s*完整版|完整版|主題歌|主题曲/i,
   },
+  {
+    // 沙理戰-動漫遊戲頻道-（mid 407183085，2026-10-23 档案抽检）：「回忆系列」479+ 期系统性
+    // 经典/老番动画 OP 完整还原（官方素材 MAD·AMV，完整歌曲时长，标题形态
+    // 「作品名 OP 歌名 (回忆系列N) (MAD·AMV)」，desc 带完整制作信息）。
+    // 价值：百億/Aki 覆盖不到的老番/冷门 OP 维度。未逐曲人工核验，类目限定同前两者。
+    names: ['沙理戰-動漫遊戲頻道-', '沙理戰-动漫游戏频道-'],
+    mid: 407183085,
+    score: 15,
+    requireTitleMarker: /OP\d?\s|ED\d?\s|(?:OP|ED)\s*完整版|回忆系列|MAD/i,
+  },
+  {
+    // 幻空绘星（mid 22644094，2026-10-23 档案抽检）：BD 特典 NCOP/NCED 搬运
+    //（无字幕无 logo 片头片尾，蓝光画质，标题形态「【BD/特典】番剧《作品》NCOP+NCED+…」）。
+    // 内容为 BD 合集（含 PV/CM/Menu）——单稿时长常远超单首歌，匹配端靠分 P/时长门控；
+    // 其 NCOP 段是最高画质的完整 OP/ED 来源，故类目限定在 NC 标记内。
+    names: ['幻空绘星'],
+    mid: 22644094,
+    score: 15,
+    requireTitleMarker: /NCOP|NCED|BD[/／]特典/i,
+  },
+  {
+    // EVK塔克（mid 240468109，2026-10-23 搜索抽检）：4K BD 修复 OP&ED 合集搬运
+    //（标题形态「【𝟒𝐊 𝘽𝘿修复】作品 OP&ED合集」「超级战队 XX OP 4K」；𝟒𝐂 数学粗体
+    // 不吃 HD 加分，类目限定后由信任分补偿）。未逐曲人工核验，类目限定同前。
+    names: ['EVK塔克'],
+    mid: 240468109,
+    score: 15,
+    requireTitleMarker: /OP&ED|OP\s*4K|ED\s*4K|修复|合集/i,
+  },
 ]
 
 interface ScopedOfficialSource {
@@ -2223,8 +2256,10 @@ export function scoreCandidate(
   // OP/ED 但视频是 TV 版短时长：输入本身要求 TV size 时是精确版本，否则作为完整版的降级候选。
   if (isOpEdTitle && compareDuration >= 70 && compareDuration <= 110 && targetVersion !== 'tv-size') score -= 25
 
-  // 播放量只作为质量先验；曲线在超高播放处继续保留小幅区分。
-  score += playCountScore(video.play)
+  // 播放量先验 + 时效衰减（mvAdaptive，与世俱进层）：投稿 >1 年的旧视频播放先验按年龄
+  // 线性打折（≤3 年至 0.85，5 年后触底 0.7）——新番 OP 的新投稿/新修复版自然上浮，
+  // 老视频不被历史播放量永久锁位；常青经典靠播放绝对值仍保持竞争力。
+  score += playCountScore(video.play) * recencyFactor(video.pubdate)
 
   // 搜索排名（B 站相关度顺序偏"标题精确命中"而非"MV 质量"，只作弱信号）
   score += Math.max(0, 15 - rank) * 0.5
@@ -2236,6 +2271,15 @@ export function scoreCandidate(
   // 学习式信任（自动，无人工）：该 UP 此前多次播放成功（正片类内容）→ 递进加权。
   // 与人工档案（uploaderWeight）可叠加：人工 +30 的 PCS 与学习出的 +10/+20 属不同来源。
   score += learnedUploaderScore(video.mid)
+  // 自适应词汇词典（mvAdaptive，与世俱进层）：候选作者/标题命中学到的歌手别名或歌名变体
+  // → +8/+14 置信加成。平台新叫法（新拉丁写法/汉化组译名/缩写）第一次被用户认可见后
+  // 就进入词典——静态别名表（ARTIST_ALIASES）的自动补充，只做 tie-break 不反超强信号。
+  {
+    const learnedArtist = video.author ? lookupLearnedArtistAlias(video.author) : null
+    if (learnedArtist) score += learnedArtist.score
+    const learnedSong = lookupLearnedSongVariant(video.title)
+    if (learnedSong) score += learnedSong.score
+  }
   if (QUALITY_COMMUNITY_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))) score += 15
 
   // 复审增强：B 站原始认证值为 -1 未认证、0 个人、1 机构。
@@ -2377,6 +2421,41 @@ export function learnedUploaderScore(mid: number | undefined): number {
   }
   return 0
 }
+
+// ===== 进化引擎结局消费（mvEvolution，与世俱进层的核心闭环）=====
+
+/** 最近的匹配特征缓存（songKey → bvid → 特征）：供结局事件取回训练样本。 */
+const recentEvolutionFeatures = new Map<string, Map<string, number[]>>()
+const RECENT_EVOLUTION_MAX = 40
+
+/**
+ * 消费一条匹配结局（BilibiliMvBackground 在播放生命周期事件处调用）：
+ *   outcome 'accepted'：best 播放成功（弱正样本 w=0.5）
+ *   outcome 'manual'  ：用户手动选择/永久标记（强正样本 w=1.5）
+ *   outcome 'skipped' ：用户切走/拉黑该视频（强负样本 w=1.2）
+ *   outcome 'exhausted'：fallback 链耗尽（弱负样本 w=0.8，整链都非正解）
+ * 从 recentEvolutionFeatures 取回该候选的特征向量喂给在线 SGD。
+ */
+export function consumeEvolutionOutcome(songKey: string, bvid: string, outcome: 'accepted' | 'manual' | 'skipped' | 'exhausted'): void {
+  const bucket = recentEvolutionFeatures.get(songKey)
+  const features = bucket?.get(bvid)
+  if (!features) return
+  const y: 1 | -1 = outcome === 'accepted' || outcome === 'manual' ? 1 : -1
+  const w = outcome === 'accepted' ? 0.5 : outcome === 'manual' ? 1.5 : outcome === 'skipped' ? 1.2 : 0.8
+  consumeEvolutionSample(features, y, w)
+}
+
+/** 缓存匹配特征（findBestBilibiliMvUncached 步骤 4 处调用）。 */
+function cacheEvolutionFeatures(songKey: string, entries: Array<{ bvid: string; features: number[] }>): void {
+  const bucket = new Map(entries.map((e) => [e.bvid, e.features]))
+  recentEvolutionFeatures.set(songKey, bucket)
+  // LRU：只保留最近的歌曲（切歌事件流）
+  if (recentEvolutionFeatures.size > RECENT_EVOLUTION_MAX) {
+    const oldest = recentEvolutionFeatures.keys().next().value
+    if (oldest) recentEvolutionFeatures.delete(oldest)
+  }
+}
+
 
 /**
  * 延长库解析（全平台，2026-10 v3）：先按 songKey（platform:id）精确命中；
@@ -2742,12 +2821,23 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   if (template === 'title-mv') return [`${title} MV`]
 
   const queries: string[] = []
+  // 自适应层（mvAdaptive，与世俱进）：同首歌上次匹配的「胜出查询」直接置顶——
+  // 首轮就命中上次的赢家查询，省掉 1-2 次弯路（alias 型歌名收益最大）；30 天过期。
+  const queryWin = songKeyOf(song) ? getQueryWin(songKeyOf(song)) : null
+  if (queryWin) queries.push(queryWin.query)
   // 可信上传者查询优先执行，避免基础查询累计到候选上限后漏掉高信誉账号。
   for (const query of uploaderQueries(song, resolvedArtists)) queries.push(query)
   // 1. 原文标题 + 全部歌手（首选；日韩等原文标题直接搜原文，中文仅作辅助）
   if (artist) queries.push(`${title} ${artist}`.trim())
   const franchiseNames = franchiseNamesOf(song)
   for (const franchise of franchiseNames) queries.push(`${title} ${franchise}`.trim())
+  // 1.5 学到的别名/变体（mvAdaptive）：用户手动选择/播放成功学到的歌手别名与歌名变体，
+  //     优先级仅次于主查询——静态别名表（ARTIST_ALIASES/SONG_TITLE_VARIANTS）的自动补充。
+  for (const alias of getLearnedArtistAliases(resolvedArtists.raw[0] || '')) queries.push(`${title} ${alias}`.trim())
+  for (const variant of getLearnedSongVariants(title)) {
+    queries.push(variant)
+    if (artist) queries.push(`${variant} ${artist}`.trim())
+  }
   // 2. 逐个歌手 + 歌手别名尝试（如 宇多田光 ↔ 宇多田ヒカル，B 站标题两种写法都常见）
   const artistVariants: string[] = []
   for (const a of artists) {
@@ -3387,7 +3477,9 @@ async function findBestBilibiliMvUncached(
   // 1. 偏好感知多查询搜索（前两页提升召回）
   const queries = buildQueries(song, settings)
   const seenBvids = new Set<string>()
-  let videos: BilibiliVideo[] = []
+  /** bvid → 首次召回它的查询（查询胜出学习的溯源表） */
+  const bvidSourceQuery = new Map<string, string>()
+  const videos: BilibiliVideo[] = []
   // 每查询至少执行一轮（不因配额截断跳过后面的查询）：靠后查询可能是高召回的
   // 变体/语境查询（SONG_TITLE_VARIANTS.searchContexts——希腊字母歌名唯一能召回头部
   // 正片的入口），先到先得的 60 条截断会把它们整个饿死（用户实测 βiοs：前 4 条查询
@@ -3405,6 +3497,8 @@ async function findBestBilibiliMvUncached(
         if (!v.bvid || seenBvids.has(v.bvid)) continue
         seenBvids.add(v.bvid)
         videos.push(v)
+        // 溯源：记录每个 bvid 首次被哪条查询召回——best 落地后写查询胜出（自适应层）
+        if (!bvidSourceQuery.has(v.bvid)) bvidSourceQuery.set(v.bvid, query)
       }
     } catch (error) {
       if (signal?.aborted) return empty()
@@ -3469,8 +3563,56 @@ async function findBestBilibiliMvUncached(
 
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
   let fallbackChain = prioritizeExplicitCandidates(candidates, rememberedOverride, developerDeclaration, extensionDeclaration)
+  // 4.2 进化引擎残差重排（mvEvolution，与世俱进）：在线逻辑回归从历史结局学到的
+  // 修正项（[-6,+6]，冷启动渐入）叠加在静态分上重排**搜索候选**（显式注入不动——
+  // 声明/记忆/延长库的位置是人工语义）。模型只影响静态模型判不准的边缘排序。
+  const explicitBvids = new Set([rememberedOverride, developerDeclaration, extensionDeclaration].filter(Boolean).map((c) => c!.video.bvid))
+  const learnRanks = new Map<string, { rank: number; candidate: CandidateScore }>()
+  fallbackChain.forEach((c, index) => {
+    learnRanks.set(c.video.bvid, { rank: index, candidate: c })
+  })
+  // 显式候选（声明/记忆/延长库）保持 pinned 位置不动；只对搜索候选应用残差并局部重排
+  const explicitPart = fallbackChain.filter((c) => explicitBvids.has(c.video.bvid))
+  const searchPart = fallbackChain.filter((c) => !explicitBvids.has(c.video.bvid)).map((c) => {
+    const features = extractEvolutionFeatures({
+      staticScore: c.score,
+      videoDuration: c.video.duration,
+      songDuration: song.songDuration,
+      play: c.video.play || 0,
+      uploaderTrustScore: learnedUploaderScore(c.video.mid) + (uploaderWeightProfile(c.video)?.score ?? 0),
+      type: c.type,
+      isExtension: EXTENDED_KIND_MARKER.test(c.video.title) || EXTENDED_LENGTH_MARKER.test(c.video.title),
+      queryRank: learnRanks.get(c.video.bvid)?.rank ?? 0,
+      hasArtist: c.signals.hasArtist,
+      officialVerifyType: c.officialVerifyType,
+    })
+    return { ...c, score: c.score + evolutionScore(features) }
+  }).sort(compareCandidates)
+  fallbackChain = [...explicitPart, ...searchPart]
   const best = fallbackChain[0]
   const topCandidates = fallbackChain.slice(0, TOP_CONFIRM_COUNT)
+  // 查询胜出学习（自适应层）：best 来自搜索候选（非显式注入）时记录其溯源查询——
+  // 同首歌下次匹配该查询置顶。声明/记忆视频不记录（它们的查询无关）。
+  if (best && bvidSourceQuery.has(best.video.bvid)) {
+    recordQueryWin(songKey, bvidSourceQuery.get(best.video.bvid)!, best.video.bvid)
+  }
+  // 进化引擎特征缓存：结局消费（播放成功/跳过/手动选）时按 bvid 取回特征向量，
+  // 喂给在线 SGD（consumeEvolutionOutcome）。重排后的残差已含入 c.score。
+  cacheEvolutionFeatures(songKey, fallbackChain.map((c) => ({
+    bvid: c.video.bvid,
+    features: extractEvolutionFeatures({
+      staticScore: c.score,
+      videoDuration: c.video.duration,
+      songDuration: song.songDuration,
+      play: c.video.play || 0,
+      uploaderTrustScore: learnedUploaderScore(c.video.mid) + (uploaderWeightProfile(c.video)?.score ?? 0),
+      type: c.type,
+      isExtension: EXTENDED_KIND_MARKER.test(c.video.title) || EXTENDED_LENGTH_MARKER.test(c.video.title),
+      queryRank: learnRanks.get(c.video.bvid)?.rank ?? 0,
+      hasArtist: c.signals.hasArtist,
+      officialVerifyType: c.officialVerifyType,
+    }),
+  })))
   if (rememberedOverride || developerDeclaration || extensionDeclaration || !best) {
     if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
     return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })

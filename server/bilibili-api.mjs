@@ -359,6 +359,8 @@ export function registerBilibiliRoutes(app) {
           mid: item.mid || 0,
           pic: item.pic || '',
           typename: item.typename || '',
+          // 投稿时间（秒）：匹配端时效先验（recencyFactor）依赖；搜索接口原生携带
+          pubdate: item.pubdate || 0,
         }))
         .filter((item) => item.bvid)
       res.json({ code: 0, results, page, ...(loginDegraded ? { loginDegraded: true } : {}) })

@@ -54,6 +54,17 @@ function buildMock(kind: WeatherSceneKind, isDay: boolean): WeatherSnapshot {
         pressure: 1006 + (i % 5) - 2,
         dewPoint: 21 + (i % 4) - 1,
         cloudCover: kind === 'clear' ? 12 + (i % 5) * 4 : kind === 'partly-cloudy' ? 48 : 90,
+        // 扩展字段（WeatherHour 必填）：预览 mock 用稳定派生值填充，形状与真实接口一致
+        windDirection: (135 + i * 12) % 360,
+        snowDepth: kind === 'snow' ? Number((0.04 + i * 0.01).toFixed(3)) : 0,
+        freezingLevel: kind === 'snow' ? 500 : 3200 + i * 40,
+        cape: kind === 'thunder' ? 1350 + i * 50 : kind === 'heavy-rain' ? 620 : 90,
+        shortwaveRadiation: t.getHours() >= 6 && t.getHours() < 19 ? Math.max(0, Math.round(720 * Math.sin(((t.getHours() - 6) / 13) * Math.PI))) : 0,
+        cloudCoverLow: kind === 'clear' ? 8 + (i % 4) * 3 : kind === 'partly-cloudy' ? 40 : 88,
+        cloudCoverMid: kind === 'clear' ? 5 + (i % 3) * 2 : kind === 'partly-cloudy' ? 30 : 80,
+        cloudCoverHigh: kind === 'clear' ? 4 + (i % 3) * 2 : kind === 'partly-cloudy' ? 24 : 70,
+        windSpeed80m: Number(((8 + (i % 5) * 2) * 1.7).toFixed(1)),
+        uvIndexClearSky: t.getHours() >= 6 && t.getHours() < 19 ? Math.max(0, Math.round(9 - Math.abs(t.getHours() - 13) * 1.5)) : 0,
       }
     })
   const daily = Array.from({ length: 10 }, (_, i) => {
@@ -73,6 +84,13 @@ function buildMock(kind: WeatherSceneKind, isDay: boolean): WeatherSnapshot {
       uvIndexMax: kind === 'clear' ? 8 : kind === 'snow' ? 1 : 4,
       sunrise: `${date}T05:47`,
       sunset: `${date}T18:58`,
+      // 扩展字段（WeatherDay 必填）
+      rainSum: kind === 'snow' ? 0 : 1.2,
+      showersSum: kind === 'thunder' ? 2.4 : 0.3,
+      snowfallSum: kind === 'snow' ? 4.6 : 0,
+      precipitationHours: ['drizzle', 'rain', 'heavy-rain', 'thunder', 'snow'].includes(kind) ? 5 : 0,
+      windDirectionDominant: (135 + i * 25) % 360,
+      uvIndexClearSkyMax: kind === 'clear' ? 9 : kind === 'snow' ? 2 : 5,
     }
   })
   return {

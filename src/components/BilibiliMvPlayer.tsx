@@ -100,6 +100,7 @@ import { getEffectivePlaybackSpeed, loadPlaybackSpeedSettings, savePlaybackSpeed
 import type { LyricLine } from '../services/musicApi'
 import { autoMixAnalysisService } from '../services/autoMixAnalysisService'
 import { ensureMvAlignment, getMvAlignmentFor, offsetAt, probeCandidateIdentities, MIN_ALIGNMENT_CONFIDENCE, type MvAlignmentSegment } from '../services/mvAlignment'
+import { learnFromMatch } from '../services/mvAdaptive'
 
 export interface BilibiliMvPlayerHandle {
   /** 返回 true 表示已接管播放/暂停（视频模式活动） */
@@ -1305,6 +1306,14 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const confirmManualMark = useCallback(() => {
     const target = manualMarkTargetRef.current
     if (!target) return
+    // 自适应词汇学习（最强证据 weight=3）：用户永久标记 = 最高置信的映射确认
+    learnFromMatch({
+      platformArtist: songArtists?.[0],
+      videoAuthor: target.author,
+      platformSongTitle: songTitle,
+      videoTitle: target.videoTitle,
+      weight: 3,
+    })
     saveLocalMvMark({
       songKey,
       songTitle,

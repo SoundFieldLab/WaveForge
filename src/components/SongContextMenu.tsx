@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio, X , Lightbulb, Share2, Link2} from 'lucide-react'
+import { Play, ListPlus, Heart, HeartOff, MessageSquare, Disc, User, Copy, ChevronRight, Info, ListMusic, ThumbsDown, SlidersHorizontal, Radio, X , Lightbulb, Share2, Link2, ListEnd, AlarmClock} from 'lucide-react'
 import { Song, getProxiedImageUrl, qqSongCoverUrl } from '../services/musicApi'
 import { getAddablePlaylists, getPlaylistMutationId } from '../services/addablePlaylists'
 import { readPlaylistOwnersFromStorage } from '../services/playlistOwnership'
@@ -140,6 +140,8 @@ export default function SongContextMenu({
   onMenuOpen
 }: SongContextMenuProps) {
   const [showPlaylistSubmenu, setShowPlaylistSubmenu] = useState(false)
+  // 官方「睡眠定时器」子菜单显隐（与歌单子菜单同款开关）
+  const [showSleepSubmenu, setShowSleepSubmenu] = useState(false)
   const [submenuPosition, setSubmenuPosition] = useState<'right' | 'left'>('right')
   const [submenuTop, setSubmenuTop] = useState(0)
   const [submenuMaxHeight, setSubmenuMaxHeight] = useState(SUBMENU_MAX_HEIGHT)
@@ -547,6 +549,48 @@ export default function SongContextMenu({
         onClose()
       }
     }] : []),
+    // 官方「加入播放队列」：与下一首播放同插队链路（官方语义：追加进当前队列尾部等待）。
+    ...(resolvedPlatform === 'spotify' && onPlayNext ? [{
+      label: '加入播放队列',
+      icon: ListEnd,
+      onClick: () => {
+        onPlayNext(song)
+        onClose()
+      }
+    }] : []),
+    // 官方「睡眠定时器」：子菜单（15/30/60/90 分钟/关闭）→ 派发 App 全局定时暂停。
+    ...(resolvedPlatform === 'spotify' ? [{
+      label: '睡眠定时器',
+      icon: AlarmClock,
+      hasSubmenu: true,
+      onClick: () => setShowSleepSubmenu(value => !value),
+      onMouseEnter: () => setShowSleepSubmenu(true),
+      onMouseLeave: () => setShowSleepSubmenu(false)
+    }] : []),
+    // 官方「转至歌曲电台」：用该曲 seed 一个电台歌单（官方 inspiredby-mix 通道），建完自动打开。
+    ...(resolvedPlatform === 'spotify' ? [{
+      label: '转至歌曲电台',
+      icon: Radio,
+      onClick: () => {
+        const trackId = String(song?.mid || '')
+        if (!/^[0-9A-Za-z]{22}$/.test(trackId)) {
+          showMenuToast('缺少 Spotify 曲目 id，无法创建电台', 'error')
+          onClose()
+          return
+        }
+        void import('../services/spotifyPartnerClient').then(({ spotifyPartnerRadio }) =>
+          spotifyPartnerRadio(trackId).then(playlistId => {
+            if (playlistId) {
+              window.dispatchEvent(new CustomEvent('waveforge:open-playlist', { detail: { platform: 'spotify', playlistId } }))
+              showMenuToast('已创建歌曲电台', 'success')
+            } else {
+              showMenuToast('歌曲电台创建失败', 'error')
+            }
+          }),
+        )
+        onClose()
+      }
+    }] : []),
     { separator: true },
     ...(favoriteStatusLoading ? [{
       label: '正在检查收藏状态…',
@@ -918,6 +962,47 @@ export default function SongContextMenu({
                         </div>
                       </motion.div>
                     )}
+                    {/* 睡眠定时器的子菜单（官方时长档 + 关闭） */}
+                    {item.hasSubmenu && showSleepSubmenu && (item as { label: string }).label === '睡眠定时器' && (
+                      <motion.div
+                        initial={{ opacity: 0, x: submenuPosition === 'right' ? -10 : 10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: submenuPosition === 'right' ? -10 : 10 }}
+                        transition={{ duration: 0.1 }}
+                        className="absolute z-30 rounded-xl shadow-2xl border py-2 min-w-[180px] overflow-hidden"
+                        style={{
+                          top: submenuTop,
+                          borderColor: isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.12)',
+                          [submenuPosition === 'right' ? 'left' : 'right']: '100%',
+                        }}
+                      >
+                        <div className={`absolute inset-0 z-0 bg-gradient-to-br backdrop-blur-2xl ${menuBg}`} />
+                        <div className="relative z-10">
+                          {[15, 30, 60, 90].map(min => (
+                            <button
+                              key={min}
+                              onClick={() => {
+                                window.dispatchEvent(new CustomEvent('waveforge:playback-sleep-timer', { detail: { minutes: min } }))
+                                onClose()
+                              }}
+                              className={`w-full px-4 py-2 text-left text-sm transition-colors ${textPrimary} ${hoverBg}`}
+                            >
+                              {min} 分钟
+                            </button>
+                          ))}
+                          <div className={`h-px my-1 mx-2 ${separatorColor}`} />
+                          <button
+                            onClick={() => {
+                              window.dispatchEvent(new CustomEvent('waveforge:playback-sleep-timer', { detail: { minutes: 0 } }))
+                              onClose()
+                            }}
+                            className={`w-full px-4 py-2 text-left text-sm transition-colors ${textPrimary} ${hoverBg}`}
+                          >
+                            关闭睡眠定时器
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
                   </div>
                 )
               })}
@@ -926,7 +1011,6 @@ export default function SongContextMenu({
         </>
       )}
     </AnimatePresence>
-    {/* 多歌手选择：背景用当前歌曲封面（重糊压暗），列出全部歌手供选择 */}
     <AnimatePresence>
       {artistPicker && (
         <motion.div

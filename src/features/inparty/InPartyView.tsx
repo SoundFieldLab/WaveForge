@@ -1424,6 +1424,40 @@ function RoulettePanel({ snapshot, selfPeerId, session, onStart, onRespond, onSp
 }
 
 /** 互控日志（最近 80 条：谁对我做了什么 + 我做了什么） */
+/** 派对小结：本房从进房起算的互动计数（本机视角；30s 刷新一次时长显示） */
+function PartySummaryCard({ stats }: { stats: { startedAt: number; controlOps: number; punishSent: number; shocked: number; games: number } }) {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const minutes = Math.max(0, Math.floor((now - stats.startedAt) / 60_000))
+  const hours = Math.floor(minutes / 60)
+  const duration = hours > 0 ? `${hours} 小时 ${minutes % 60} 分` : `${minutes} 分钟`
+  const items = [
+    { label: '已进行', value: duration },
+    { label: '互控指令', value: String(stats.controlOps) },
+    { label: '送出惩罚', value: String(stats.punishSent) },
+    { label: '被电次数', value: String(stats.shocked) },
+    { label: '玩法场次', value: String(stats.games) },
+  ]
+  return (
+    <div className="p-3">
+      <p className="mb-2 text-[10px] text-white/35">本房派对小结（从你进房开始算）</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {items.map(item => (
+          <div key={item.label} className="rounded-xl px-2.5 py-2" style={{ background: PANEL_2 }}>
+            <p className="truncate text-sm font-bold tabular-nums" style={{ color: GOLD }}>{item.value}</p>
+            <p className="mt-0.5 text-[9px] text-white/35">{item.label}</p>
+          </div>
+        ))}
+        {/* 已进行占两格排版里的一格即可：5 项 → 最后一行留一个空位对齐 */}
+        <div className="rounded-xl px-2.5 py-2 opacity-0" aria-hidden="true" />
+      </div>
+    </div>
+  )
+}
+
 function ControlLogList({ log }: { log: ControlLogEntry[] }) {
   if (!log.length) return <p className="p-4 text-center text-[10px] text-white/30">还没有互控记录</p>
   return (
@@ -2787,7 +2821,12 @@ function Room({ snapshot, selfPeerId, settings, onLeave, onDissolve, onKick, onS
               {sideTab === 'roulette' && (
                 <RoulettePanel snapshot={snapshot} selfPeerId={selfPeerId} session={session} onStart={onStartRoulette} onRespond={onRespondRoulette} onSpin={onSpinRoulette} />
               )}
-              {sideTab === 'log' && <ControlLogList log={snapshot.controlLog} />}
+              {sideTab === 'log' && (
+                <>
+                  <PartySummaryCard stats={snapshot.partyStats} />
+                  <ControlLogList log={snapshot.controlLog} />
+                </>
+              )}
               {sideTab === 'duel' && (
                 <DuelPanel
                   snapshot={snapshot}

@@ -107,13 +107,14 @@ export interface GameHubState {
   at: number
 }
 
-/** 统一惩罚规格：输家吃电（强度=对方上限 × percent） */
-export function punishOp(caps: { A: number; B: number } | null, percent: number, frames: number, freq: number): PartyRemoteOp {
+/** 统一惩罚规格：输家吃电（强度=对方上限 × percent）。channel 缺省 A（B 通道惩罚直接传 'B'，
+ *  不要在调用点 spread 覆盖——那会把返回类型展开成「含 clear 的非法联合」，TS 直接报错）。 */
+export function punishOp(caps: { A: number; B: number } | null, percent: number, frames: number, freq: number, channel: 'A' | 'B' = 'A'): { kind: 'pulse'; channel: 'A' | 'B'; frames: { freq: number; strength: number }[] } {
   const cap = Math.min(caps?.A ?? 60, caps?.B ?? 60)
   const value = Math.max(1, Math.round(cap * percent))
   return {
     kind: 'pulse',
-    channel: 'A',
+    channel,
     frames: Array.from({ length: frames }, (_, i) => ({
       freq: Math.max(10, freq - i * 2),
       strength: Math.max(1, Math.round(value * (1 - i * (0.8 / Math.max(1, frames))))),

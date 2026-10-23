@@ -98,6 +98,13 @@ export interface InPartySessionSnapshot {
   songRequests: Array<{ from: string; title: string; at: number }>
   /** 派对玩法中心（同一时刻一个玩法） */
   game: GameHubState | null
+  /**
+   * 本房派对小结（进房起算，本机视角；离房清零）：
+   * startedAt=进房时刻 / controlOps=我发出的互控指令数 / punishSent=我送出的玩法惩罚帧组 /
+   * shocked=我被远端出电的次数 / games=我参与的玩法场次（发起了就 +1）。
+   * 侧栏「派对小结」卡片用；计数只在发成功路径上累加。
+   */
+  partyStats: { startedAt: number; controlOps: number; punishSent: number; shocked: number; games: number }
   /** 观战模式（只看不电：忽略一切远端强度/波形/惩罚指令） */
   spectating: boolean
   /** 语音房名册（peerId → 静音状态） */
@@ -151,6 +158,7 @@ export class InPartySession {
     status: 'idle', role: null, error: '', room: null, roomName: '', invite: '', fingerprint: '', chat: [],
     summary: null, grantsByPeer: {}, controlRequests: [], device: null, live: false,
     broadcasters: [], callSignals: [], roulette: null, controlLog: [], friendRequests: [], unreadByPeer: {}, typingPeers: {}, reactions: {}, mutedUntil: {}, voiceUsers: {}, admins: [], songRequests: [], game: null,
+    partyStats: { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 },
     spectating: false,
     syncPlayback: null, hostBeat: null, followHostRhythm: false, duel: null, duelStreaks: {},
   }
@@ -285,7 +293,7 @@ export class InPartySession {
     })
     const info = (transport as unknown as { startResult: () => { port: number; code: string; running: boolean } | null }).startResult()
     const invite = info ? buildInvite({ roomId, code: info.code, secret, host: pickInviteHost((await this.options.bridge?.getStatus())?.ips), port: info.port }) : ''
-    this.update({ status: 'connected', role: 'host', room, roomName: options.name, invite, live: true, summary: roomSummary(room) })
+    this.update({ status: 'connected', role: 'host', room, roomName: options.name, invite, live: true, summary: roomSummary(room), partyStats: { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 } })
     this.award('first-room')
     void this.refreshFingerprint()
     this.startTimers()
@@ -361,7 +369,7 @@ export class InPartySession {
       }
     }
     await this.refreshFingerprint()
-    this.update({ status: 'connected', live: true, roomName: '' })
+    this.update({ status: 'connected', live: true, roomName: '', partyStats: { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 } })
     this.award('first-join')
     this.send({ kind: 'hello', payload: { profile: this.profile, policy: this.policy } })
     this.startTimers()
@@ -416,6 +424,7 @@ export class InPartySession {
     this.update({
       status: 'closed', live: false, room: null, summary: null,
       grantsByPeer: {}, controlRequests: [], roulette: null, duel: null, duelStreaks: {}, game: null,
+      partyStats: { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 },
     spectating: false,
       songRequests: [], friendRequests: [], controlLog: [], unreadByPeer: {}, typingPeers: {},
       reactions: {}, mutedUntil: {}, voiceUsers: {}, admins: [],
@@ -499,7 +508,7 @@ export class InPartySession {
     // 退出玩法：清空本地玩法快照并广播退出（发起人侧判罚时按「已离场」处理）
     if (this.snapshot.game || this.snapshot.roulette || this.snapshot.duel) {
       this.update({ game: null,
-    spectating: false, roulette: null, duel: null })
+    partyStats: this.snapshot?.partyStats ?? { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 }, spectating: false, roulette: null, duel: null })
       this.broadcast({ kind: 'game-end', payload: {} })
       this.pushSystemMessage('已叫停并退出当前玩法——惩罚资格已取消')
     }
@@ -527,6 +536,8 @@ export class InPartySession {
     this.send({ kind: 'ctrl-op', payload: { op }, to: peerId })
     this.award('first-control')
     this.awardCounter('control-ops', 'control-50', 50)
+    // 派对小结：发出一条互控指令 +1（clear 安全路径也计入「有来有回」）
+    this.bumpPartyStats('controlOps')
     return true
   }
 
@@ -893,6 +904,10 @@ export class InPartySession {
     this.clearGameTimers()
     const online = (this.snapshot.room?.members ?? []).filter(m => m.online).map(m => m.peerId)
     const now = Date.now()
+    // 参与玩法计数：game-first（首场）与 games-10（累计 10 场）；派对小结同步 +1
+    this.award('game-first')
+    this.awardCounter('games', 'games-10', 10)
+    this.bumpPartyStats('games')
     let game: GameHubState
 
     if (kind === 'truth-dare') {
@@ -944,8 +959,8 @@ export class InPartySession {
         const target = findMember(this.snapshot.room!, order[0])
         const caps = target?.device.caps ?? null
         const opA = punishOp(caps, 0.25, 3, 60)
-        this.send({ kind: 'punish-op', payload: { op: opA, gameAt: game.at, by: this.profile?.peerId || '' }, to: order[0] })
-        this.send({ kind: 'punish-op', payload: { op: { ...opA, channel: 'B' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: order[0] })
+        this.sendPunishOp(opA, game.at, order[0])
+        this.sendPunishOp({ ...opA, channel: 'B' }, game.at, order[0])
       }
       this.pushSystemMessage(`🎮 ${GAME_LABEL[kind]}：电流已传给 ${this.nicknameOf(order[0] || '')}，3 秒内传给下一位！`)
       this.gameTimers.push(window.setTimeout(() => this.timeOutGame(), 121_000))
@@ -1001,8 +1016,8 @@ export class InPartySession {
       const target = findMember(this.snapshot.room!, next)
       const caps = target?.device.caps ?? null
       const opA = punishOp(caps, 0.25, 3, 60)
-      this.send({ kind: 'punish-op', payload: { op: opA, gameAt: game.at, by: this.profile?.peerId || '' }, to: next })
-      this.send({ kind: 'punish-op', payload: { op: { ...opA, channel: 'B' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: next })
+      this.sendPunishOp(opA, game.at, next)
+      this.sendPunishOp({ ...opA, channel: 'B' }, game.at, next)
       if (peerId === this.profile?.peerId) this.award('relay-survive')
       this.pushSystemMessage(`${this.nicknameOf(peerId)} 把电传给了 ${this.nicknameOf(next)}！`)
       return
@@ -1104,8 +1119,8 @@ export class InPartySession {
       const percent = outcome.double ? 0.6 : 0.4
       const frames = outcome.double ? 10 : 5
       for (const ch of ['A', 'B'] as const) {
-        const op = punishOp(caps, percent, frames, 45)
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: ch }, gameAt: game.at, by: this.profile?.peerId || '' }, to: loser })
+        const op = punishOp(caps, percent, frames, 45, ch)
+        this.sendPunishOp(op, game.at, loser)
       }
       this.pushSystemMessage(`🎮 ${GAME_LABEL[game.kind]} 结算：${this.nicknameOf(loser)} ${outcome.note}，吃${outcome.double ? '双倍' : '一轮'}电⚡`)
     } else {
@@ -1148,7 +1163,7 @@ export class InPartySession {
       const targetMember = findMember(this.snapshot.room!, peerId)
       const caps = targetMember?.device.caps ?? null
       const op = punishOp(caps, 0.3, 4, 55)
-      this.send({ kind: 'punish-op', payload: { op: { ...op, channel: 'A' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: peerId })
+      this.sendPunishOp(op, game.at, peerId)
     }
     // 终局判定：先输 3 的队全员大电
     const losingTeam = loses.gold >= TEAM_MATCH_LOSE_TARGET ? 'gold' : loses.blue >= TEAM_MATCH_LOSE_TARGET ? 'blue' : null
@@ -1159,8 +1174,8 @@ export class InPartySession {
         const targetMember = findMember(this.snapshot.room!, peerId)
         const caps = targetMember?.device.caps ?? null
         const op = punishOp(caps, 0.7, 10, 35)
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: 'A' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: peerId })
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: 'B' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: peerId })
+        this.sendPunishOp(op, game.at, peerId)
+        this.sendPunishOp(punishOp(caps, 0.3, 4, 55, 'B'), game.at, peerId)
       }
     }
     window.setTimeout(() => { if (this.snapshot.game?.at === game.at) this.update({ game: null }) }, 20_000)
@@ -1243,7 +1258,7 @@ export class InPartySession {
       const caps = targetMember?.device.caps ?? null
       for (const ch of ['A', 'B'] as const) {
         const op = punishOp(caps, slot.percent, Math.min(slot.frames, 100), slot.freq)
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: ch }, gameAt: game.at, by: me }, to: victim })
+        this.sendPunishOp({ ...op, channel: ch }, game.at, victim)
       }
     }
     window.setTimeout(() => { if (this.snapshot.game?.at === game.at) this.update({ game: null }) }, 8_000)
@@ -1342,7 +1357,7 @@ export class InPartySession {
       const caps = targetMember?.device.caps ?? null
       for (const ch of ['A', 'B'] as const) {
         const op = punishOp(caps, 0.8, 12, 40)
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: ch }, gameAt: game.at, by: this.profile?.peerId || '' }, to: finalLose })
+        this.sendPunishOp({ ...op, channel: ch }, game.at, finalLose)
       }
       this.pushSystemMessage(`🎮 谁是卧底：${this.nicknameOf(finalLose)} 被揪出来了，吃最终大电⚡`)
     } else {
@@ -1351,7 +1366,7 @@ export class InPartySession {
         const targetMember = findMember(this.snapshot.room!, peerId)
         const caps = targetMember?.device.caps ?? null
         const op = punishOp(caps, 0.3, 4, 60)
-        this.send({ kind: 'punish-op', payload: { op: { ...op, channel: 'A' }, gameAt: game.at, by: this.profile?.peerId || '' }, to: peerId })
+        this.sendPunishOp(op, game.at, peerId)
       }
       this.pushSystemMessage(`🎮 谁是卧底：${ejected.tie ? '平票' : '投错人'}，平民们各吃小电⚡`)
     }
@@ -1788,6 +1803,21 @@ export class InPartySession {
   }
   /* ── 成就系统 ── */
 
+  /** 派对小结计数：只累加指定字段（其余不变）；进房时 startedAt 重置 */
+  private bumpPartyStats(field: 'controlOps' | 'punishSent' | 'shocked' | 'games', by = 1): void {
+    const stats = this.snapshot.partyStats
+    if (!stats) return
+    this.update({ partyStats: { ...stats, [field]: stats[field] + by } })
+  }
+
+  /** 玩法惩罚统一出口：发送 + 派对小结 punishSent 计数（一次一组，不按帧算）。
+   *  op 的静态类型是 PartyRemoteOp 全集（spread 换 channel 后 TS 收不窄成 pulse），
+   *  运行时全部来自 punishOp()（恒为 pulse）；接收端仍会复核 kind !== 'pulse' 拒收。 */
+  private sendPunishOp(op: PartyRemoteOp, gameAt: number, to: string): void {
+    this.send({ kind: 'punish-op', payload: { op, gameAt, by: this.profile?.peerId || '' }, to })
+    this.bumpPartyStats('punishSent')
+  }
+
   /** 解锁成就：新解锁时入弹窗队列 */
   private award(id: string): void {
     try {
@@ -2083,6 +2113,8 @@ export class InPartySession {
           }
           getDGLabClient().sendRemoteOp({ kind: 'strength', channel: op.channel, value: op.channel === 'A' ? guarded.A : guarded.B })
           this.pushControlLog(from, `${this.nicknameOf(from)} 调整 ${op.channel} → ${op.channel === 'A' ? guarded.A : guarded.B}`, 'strength', from)
+          // 派对小结：按「实际送进设备」计——被安全层拦下的不算
+          if (guarded.A > 0 || guarded.B > 0) this.bumpPartyStats('shocked')
           return
         }
         if (op.kind === 'pulse' && Array.isArray(op.frames)) {
@@ -2103,6 +2135,7 @@ export class InPartySession {
           }
           getDGLabClient().sendRemoteOp({ kind: 'pulse', channel: op.channel, frames: clamped })
           this.pushControlLog(from, `${this.nicknameOf(from)} 发送波形（${clamped.length} 帧 → ${op.channel}）`, 'pulse', from)
+          this.bumpPartyStats('shocked')
           return
         }
         getDGLabClient().sendRemoteOp(op)
@@ -2481,6 +2514,7 @@ export class InPartySession {
       status: 'idle', role: null, error: '', room: null, roomName: '', invite: '', fingerprint: '', chat: [],
       summary: null, grantsByPeer: {}, controlRequests: [], device: null, live: false,
       broadcasters: [], callSignals: [], roulette: null, controlLog: [], friendRequests: [], unreadByPeer: {}, typingPeers: {}, reactions: {}, mutedUntil: {}, voiceUsers: {}, admins: [], songRequests: [], game: null,
+      partyStats: { startedAt: Date.now(), controlOps: 0, punishSent: 0, shocked: 0, games: 0 },
     spectating: false,
     syncPlayback: null, hostBeat: null, followHostRhythm: false, duel: null, duelStreaks: {},
     }

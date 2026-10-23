@@ -105,6 +105,7 @@ const localServiceEnv = {
   ...process.env,
   WAVEFORGE_LOCAL_TOKEN: localServiceToken,
   WAVEFORGE_CACHE_PATH: pythonCacheRoot,
+  WAVEFORGE_PROJECT_ROOT: projectRoot,
   WAVEFORGE_USERDATA: userDataRoot,
 }
 

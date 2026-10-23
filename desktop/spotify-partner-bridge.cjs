@@ -20,6 +20,8 @@
 
 const crypto = require('node:crypto');
 const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
 
 // ── 接口常量（均为 Spotify 服务端事实）───────────────────────────
 const QUERY_ENDPOINT = 'https://api-partner.spotify.com/pathfinder/v2/query';
@@ -34,8 +36,31 @@ const LOOPBACK_REDIRECT = `http://127.0.0.1:${LOOPBACK_PORT}${LOOPBACK_PATH}`;
 
 // 预注册查询哈希表（Spotify 服务端按名寻址；上游换版时报错会点名，按名更新）
 const GRAPH_QUERY_HASHES = Object.freeze({
-  home: '3357ffed7961629ba92b4e0a41514e4d5004a14355c964c23ce442205c9e44a1',
-  homeSection: 'd62af2714f2623c923cc9eeca4b9545b4363abaa9188a9e94e2b63b823419a2c',
+  // home/homeSection/homePinnedSections 三操作共用一个 persisted hash（官方桌面 xpui 模块 65250，
+  // 从官方客户端 xpui.spa 解包逆向得到；2026-10-23 实测）
+  home: '5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1',
+  homeSection: '5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1',
+  homePinnedSections: '5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1',
+  // 官方 xpui 逆向的扩展查询（搜索分区/浏览页/艺人目录/制作人员等）
+  searchDesktop: 'eef7cc54888d91bdd6802623477873caa3948ae173a0c34fd86827b267e94c03',
+  searchTopResultsList: 'dd78eaff943eba629ed70ee25517b9cea0dcaa41193e2592ae2727660b21892c',
+  searchPlaylists: 'd520014e748f9ea44f7707d8df1819867ac1205e8b7f3e28f22fe5fc858921b1',
+  searchAlbums: '202cb3305e31e5a0767ba7925f28bd728cf8f8b0217e6da43909056071cd70e9',
+  searchArtists: '7bf95d754fdbe32c8b161fbbe54d1ae50974900df4dce4c8f1afcbcad153224d',
+  browseAll: 'dbd8b55e09a58afc52eab438bc228ba28fd72ac2f2148c6c26354980e4579001',
+  browseSection: 'b13c1cccbfcb6947753c2613411b3566485c21fd5f36d80a80bb64be61ba2d51',
+  playlistSection: '2615df403a9043c1d7d3094fbeb4c9653b07b11a33d8081fbd31f0f7959ff4a1',
+  queryArtistDiscographyOverview: '5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599',
+  queryArtistDiscographyAlbums: '5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599',
+  queryArtistDiscographySingles: '5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599',
+  queryTrackCreditsGroupedModal: 'f135fb9be58a72d041ab5d214d817021a272405d883860468e2627afb01a3ca9',
+  queryArtistPlaylists: '54f7e5a5a2af05b7dc98526df376a46c6b15c05440c8dfdc8f6cecb1a807eca7',
+  queryArtistDiscoveredOn: '71c2392e4cecf6b48b9ad1311ae08838cbdabcfd189c6bf0c66c2430b8dcfdb1',
+  queryArtistFeaturing: '20842d6d9d2d28ef945984b68cb927bb33edd00eab84a8da1667def21f1f2c54',
+  queryArtistAboutModal: '702e29a866e0b4b4fabdf974454512a2c32d93643b1969b7a3a0dd92084f05f6',
+  queryArtistRelated: '3d031d6cb22a2aa7c8d203d49b49df731f58b1e2799cc38d9876d58771aa66f3',
+  getAlbumNameAndTracks: '8628ad33de3267d7bef516c76a746979a5f98891a2c9eaff3dfec828abdcd983',
+  getArtistNameAndTracks: '0adaf1a1a8a94c7ed095639c4d9456d2b1cfac16ac511d5dd2b01b6dd89f748a',
   browsePage: 'f5c4e6d668f5716464a231c1cc8b22c1cbf6ad68b09929fd7de813a30581298b',
   queryWhatsNewFeed: '3b53dede3c6054e8b7c962dd280eb6761c5d1c82b06b039f4110d76a62b4966b',
   profileAttributes: '53bcb064f6cd18c23f752bc324a791194d20df612d8e1239c735144ab0399ced',
@@ -581,6 +606,26 @@ function createSpotifyPartnerBridge({ store, safeStorage, fetch: fetchImpl = fet
     },
 
     // 电台：以一首曲目为种子生成"类似"歌单，返回歌单 uri
+    // 官方首页 feed：官方桌面客户端把 home 数据经原生层拉取（xpui renderer 无 HTTP 请求可抓）。
+    // 这里返回的是从官方客户端运行时 react-query 缓存导出的官方真实 payload（desktop/spotify-home-*.json，
+    // 由 scripts/export-official-home.cjs 从带调试端口的官方客户端导出；官方客户端开着时数据自动更新）。
+    // 参数 facet: 'all' | 'music'（官方首页「全部/音乐/播客」页签口径）。
+    async home_snapshot(params) {
+      const facet = String(params?.facet ?? 'all');
+      const file = facet === 'music' ? path.join(__dirname, 'spotify-home-music-snapshot.json') : path.join(__dirname, 'spotify-home-snapshot.json');
+      try {
+        const raw = await fs.promises.readFile(file, 'utf8');
+        return JSON.parse(raw);
+      } catch {
+        const fallbackFile = path.join(__dirname, 'spotify-home-snapshot.json');
+        try {
+          return JSON.parse(await fs.promises.readFile(fallbackFile, 'utf8'));
+        } catch {
+          return null;
+        }
+      }
+    },
+
     async radio(params) {
       if (typeof params?.id !== 'string' || !TRACK_ID_PATTERN.test(params.id)) {
         throw new PartnerApiError('invalid-response', '非法曲目 id');

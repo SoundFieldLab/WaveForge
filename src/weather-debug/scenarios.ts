@@ -62,6 +62,17 @@ export function createWeatherDebugSnapshot(scenarioId: WeatherDebugScenarioId, i
       pressure: Math.round(1014 - intensity.precipitation * 0.7 + Math.sin(index * 0.4) * 3),
       dewPoint: Math.round(baseTemperature - (scenarioId === 'snow' ? 2 : 4)),
       cloudCover: Math.min(100, Math.max(0, Math.round(intensity.cloud + Math.sin(index * 0.35) * 8))),
+      // 扩展字段（WeatherHour 必填）：调试场景用稳定的派生值填充，保证快照形状与真实接口一致
+      windDirection: (index * 15) % 360,
+      snowDepth: scenarioId === 'snow' ? Number((0.05 + index * 0.012).toFixed(3)) : 0,
+      freezingLevel: scenarioId === 'snow' ? 400 : 3200 + index * 40,
+      cape: scenarioId === 'thunder' ? 1200 + index * 55 : Math.round(intensity.precipitation * 30),
+      shortwaveRadiation: isDay ? Math.max(0, Math.round(760 * Math.sin(Math.max(0, Math.min(1, index / 12)) * Math.PI))) : 0,
+      cloudCoverLow: Math.min(100, Math.round(intensity.cloud * 0.7)),
+      cloudCoverMid: Math.min(100, Math.round(intensity.cloud * 0.5)),
+      cloudCoverHigh: Math.min(100, Math.round(intensity.cloud * 0.3)),
+      windSpeed80m: Number((intensity.wind * 1.6 + Math.sin(index * 0.5) * 3).toFixed(1)),
+      uvIndexClearSky: isDay ? Math.max(0, Number((7.2 * Math.sin(Math.max(0, Math.min(1, index / 12)) * Math.PI)).toFixed(1))) : 0,
     }
   })
   const daily = Array.from({ length: 10 }, (_, index) => {
@@ -81,6 +92,13 @@ export function createWeatherDebugSnapshot(scenarioId: WeatherDebugScenarioId, i
       uvIndexMax: isDay ? Math.round(6 - index * 0.3) : 0,
       sunrise: `${dateText}T05:28`,
       sunset: `${dateText}T18:22`,
+      // 扩展字段（WeatherDay 必填）：调试场景用稳定的派生值填充
+      rainSum: Number((intensity.precipitation * (1.4 - index * 0.1)).toFixed(1)),
+      showersSum: Number((intensity.precipitation * 0.35).toFixed(1)),
+      snowfallSum: scenarioId === 'snow' ? Number((intensity.snowfall * (1.4 - index * 0.1)).toFixed(1)) : 0,
+      precipitationHours: intensity.precipitation > 0 ? Math.max(1, Math.round(intensity.precipitation * 1.5)) : 0,
+      windDirectionDominant: (index * 30 + 135) % 360,
+      uvIndexClearSkyMax: isDay ? Math.round(7 - index * 0.3) : 0,
     }
   })
 

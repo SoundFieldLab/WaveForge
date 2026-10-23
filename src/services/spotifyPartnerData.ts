@@ -35,26 +35,39 @@ const trackIdFromUri = (uri: unknown): string => {
   return value.startsWith(TRACK_URI_PREFIX) ? value.slice(TRACK_URI_PREFIX.length) : ''
 }
 
+/** 任意 spotify:<type>:<id> uri → id（artist/playlist/album 等通用） */
+const idFromUri = (uri: unknown): string => {
+  const value = String(uri ?? '')
+  const m = /^spotify:[^:]+:([^:?]+)/.exec(value)
+  return m ? m[1] : ''
+}
+
 /** 桌面端 Track 节点 → Web API SpotifyTrack 形态 */
 function normalizePartnerTrack(data: any, fallbackAlbumName = ''): SpotifyTrack | null {
-  if (!data || data.__typename !== 'Track') return null
+  if (!data) return null
+  // getAlbum 的 tracksV2 节点不带 __typename（fetchPlaylist/searchTracks 带）：
+  // 有 __typename 就校验类型；没有则按「有 uri + name」判定是 Track 节点
+  if (data.__typename !== undefined && data.__typename !== 'Track') return null
   // 曲目 id 优先 data.uri；UserLibraryTrack 的包装把 _uri 挂在 track 外层（entry.track._uri）
   const id = trackIdFromUri(data.uri) || trackIdFromUri(data._uri)
-  if (!id) return null
+  if (!id || !data.name) return null
   const album = data.albumOfTrack ?? {}
   const cover = firstCover(album.coverArt)
   return {
     id,
     name: String(data.name ?? ''),
     artists: (album.artists?.items ?? data.artists?.items ?? [])
-      .map((item: any) => ({ name: String(item?.profile?.name ?? item?.name ?? '') }))
+      .map((item: any) => ({
+        name: String(item?.profile?.name ?? item?.name ?? ''),
+        id: idFromUri(item?.uri) || undefined,
+      }))
       .filter((artist: { name: string }) => artist.name),
     album: {
-      id: trackIdFromUri(album.uri) || undefined,
+      id: trackIdFromUri(album.uri) || idFromUri(album.uri) || undefined,
       name: String(album.name ?? fallbackAlbumName),
       images: cover ? [{ url: cover }] : undefined,
     },
-    duration_ms: Number(data.duration?.totalMilliseconds) || undefined,
+    duration_ms: Number(data.duration?.totalMilliseconds) || Number(data.trackDuration?.totalMilliseconds) || undefined,
     explicit: Boolean(data.contentRating?.label === 'EXPLICIT'),
     preview_url: null,
   }
@@ -141,6 +154,47 @@ export async function fetchPartnerMyPlaylists(limit = 50): Promise<SpotifyPlayli
   return out.length > 0 ? out : null
 }
 
+/** 资料库收藏的艺人（libraryV3，客户端过滤 Artist）：官方左栏「艺人」页签数据源 */
+export interface PartnerLibraryArtist {
+  id: string
+  name: string
+  avatarUrl: string
+}
+export async function fetchPartnerLibraryArtists(limit = 100): Promise<PartnerLibraryArtist[] | null> {
+  const out: PartnerLibraryArtist[] = []
+  const pageSize = 50
+  for (let offset = 0; offset < limit; offset += pageSize) {
+    const page = await partnerQuery('libraryV3', {
+      filters: [],
+      order: null,
+      textFilter: '',
+      features: [],
+      limit: pageSize,
+      offset,
+      flatten: false,
+      expandedFolders: [],
+      folderUris: [],
+      includeFolders: true,
+      withGid: true,
+      libraryItemType: null,
+      offsetInUri: false,
+    })
+    const items = page?.me?.libraryV3?.items
+    if (!Array.isArray(items) || items.length === 0) break
+    for (const entry of items) {
+      const wrapper = entry?.item ?? entry
+      if (wrapper?.data?.__typename !== 'Artist') continue
+      const id = idFromUri(String(wrapper?._uri ?? wrapper?.data?.uri ?? ''))
+      const name = String(wrapper?.data?.profile?.name ?? '')
+      if (!id || !name) continue
+      out.push({ id, name, avatarUrl: firstCover(wrapper?.data?.visuals?.avatarImage) })
+      if (out.length >= limit) return out
+    }
+    if (items.length < pageSize) break
+  }
+  return out.length > 0 ? out : null
+}
+
 /** 歌单详情 + 全部曲目（fetchPlaylist，自动翻页；行里带 uid 备将来歌单编辑用） */
 export async function fetchPartnerPlaylistDetail(
   playlistId: string,
@@ -218,12 +272,14 @@ export async function fetchPartnerPlaylistDetailFull(
       header = {
         name: String(v2.name ?? ''),
         description: String(v2.description ?? ''),
-        coverUrl: firstCover(v2.coverArt),
+        // fetchPlaylist 的封面在 images（coverArt 缺省）；两处都试
+        coverUrl: firstCover(v2.coverArt) || firstCover(v2.images),
         ownerName: String(v2.ownerV2?.data?.name ?? v2.ownerV2?.data?.username ?? ''),
         ownerAvatar: firstCover(v2.ownerV2?.data?.avatar),
         ownerId: String(v2.ownerV2?.data?.username ?? ''),
         trackCount: Number(v2.trackCount) || 0,
-        durationMs: Number(v2.duration?.totalMilliseconds) || 0,
+        // 歌单头没有 duration 字段：取完行后求和兜底
+        durationMs: 0,
       }
     }
     const items = v2.content?.items
@@ -241,12 +297,16 @@ export async function fetchPartnerPlaylistDetailFull(
         playcount: Number(data.playcount) || undefined,
         uid: String(row?.uid ?? '') || undefined,
       })
-      if (rows.length >= maxRows) break
     }
     if (items.length < pageSize) break
   }
   if (!header || rows.length === 0) return null
-  return { id: playlistId, ...header, ownedByMe: header.ownerId === myAccountId, rows }
+  return {
+    id: playlistId, ...header,
+    durationMs: header.durationMs || rows.reduce((acc, r) => acc + (r.track.duration_ms ?? 0), 0),
+    ownedByMe: header.ownerId === myAccountId,
+    rows,
+  }
 }
 
 /** 歌单曲目（fetchPlaylist，自动翻页；ProfileView 播放入口用，不含歌单头） */
@@ -260,7 +320,17 @@ export async function fetchPartnerPlaylistTracks(
 
 /** 喜欢的歌曲（fetchLibraryTracks，自动翻页） */
 export async function fetchPartnerLiked(limit = 50): Promise<SpotifyTrack[] | null> {
-  const out: SpotifyTrack[] = []
+  const out = await fetchPartnerLikedRows(limit)
+  return out.length > 0 ? out.map(r => r.track) : null
+}
+
+/** 喜欢的歌曲（含每行添加日期）：官方「已点赞的歌曲」页的「添加日期」列需要 */
+export interface PartnerLikedRow {
+  track: SpotifyTrack
+  addedAt?: string
+}
+export async function fetchPartnerLikedRows(limit = 50): Promise<PartnerLikedRow[]> {
+  const out: PartnerLikedRow[] = []
   const pageSize = 50
   for (let offset = 0; offset < limit; offset += pageSize) {
     const page = await partnerQuery('fetchLibraryTracks', {
@@ -275,10 +345,75 @@ export async function fetchPartnerLiked(limit = 50): Promise<SpotifyTrack[] | nu
       // normalizePartnerTrack 读 data.uri，这里注入一次即可
       const wrapper = entry?.track ?? entry
       const track = normalizePartnerTrack({ ...wrapper?.data, uri: wrapper?.data?.uri ?? wrapper?._uri })
-      if (track && track.id && track.name) out.push(track)
+      if (track && track.id && track.name) out.push({ track, addedAt: entry?.addedAt?.isoString })
       if (out.length >= limit) return out
     }
     if (items.length < pageSize) break
   }
-  return out.length > 0 ? out : null
+  return out
+}
+
+/** 专辑详情（getAlbum 桥，tracksV2 自动翻页）：官方专辑页需要 */
+export interface PartnerAlbumFull {
+  id: string
+  name: string
+  coverUrl: string
+  artists: Array<{ id: string; name: string }>
+  date?: string
+  year?: string
+  label?: string
+  description?: string
+  trackCount: number
+  durationMs: number
+  /** 是否已收藏（专辑页心形按钮态） */
+  saved: boolean
+  rows: PartnerPlaylistRow[]
+}
+export async function fetchPartnerAlbumFull(albumId: string, maxRows = 200): Promise<PartnerAlbumFull | null> {
+  const uri = 'spotify:album:' + albumId
+  let header: { name: string; coverUrl: string; artists: Array<{ id: string; name: string }>; date?: string; year?: string; label?: string; description?: string; saved: boolean } | null = null
+  const rows: PartnerPlaylistRow[] = []
+  const pageSize = 50
+  for (let offset = 0; offset < maxRows; offset += pageSize) {
+    const page = await partnerQuery('getAlbum', { uri, locale: 'zh-CN', offset, limit: pageSize })
+    const a = page?.albumUnion
+    if (!a) break
+    if (!header) {
+      header = {
+        name: String(a.name ?? ''),
+        coverUrl: firstCover(a.coverArt),
+        artists: (a.artists?.items ?? []).map((x: any) => ({ id: idFromUri(x?.uri), name: String(x?.profile?.name ?? '') })).filter((x: { id: string; name: string }) => x.id && x.name),
+        date: a.date?.isoString,
+        year: a.date?.isoString ? String(a.date.isoString).slice(0, 4) : undefined,
+        label: String(a.label ?? '') || undefined,
+        description: String(a.courtesyLine ?? '') || undefined,
+        saved: Boolean(a.saved),
+      }
+    }
+    const items = a.tracksV2?.items
+    if (!Array.isArray(items) || items.length === 0) break
+    for (const row of items) {
+      const data = row?.track ?? row?.item
+      // getAlbum 的 tracksV2 节点没有 __typename 字段（与 fetchPlaylist 的 itemV2.data 不同），只认 uri
+      if (!data || !data.uri) continue
+      const track = normalizePartnerTrack({ ...data, uri: data.uri })
+      if (!track) continue
+      rows.push({
+        track,
+        addedAt: undefined,
+        albumUri: albumId,
+        trackNumber: Number(data.trackNumber) || undefined,
+        playcount: Number(data.playcount) || undefined,
+        uid: String(row?.uid ?? '') || undefined,
+      })
+    }
+    if (items.length < pageSize) break
+  }
+  if (!header) return null
+  return {
+    id: albumId, ...header,
+    trackCount: rows.length,
+    durationMs: rows.reduce((acc, r) => acc + (r.track.duration_ms ?? 0), 0),
+    rows,
+  }
 }

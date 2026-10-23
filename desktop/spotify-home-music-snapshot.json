@@ -1,0 +1,68 @@
+{
+ "home": {
+  "__typename": "HomeResponsePayload",
+  "greeting": {
+   "transformedLabel": "晚上好",
+   "translatedBaseText": "晚上好"
+  },
+  "sectionContainer": {
+   "sections": {
+    "items": [
+     {
+      "data": {
+       "__typename": "HomeOnboardingSectionDataV2"
+      },
+      "sectionItems": {
+       "items": [],
+       "pagingInfo": {
+        "nextOffset": null
+       },
+       "totalCount": 0
+      },
+      "uri": "spotify:section:0JQ5Ks6OZ3Mzdywwcp94li"
+     }
+    ],
+    "totalCount": 0
+   },
+   "uri": "spotify:page:0JQ5DAEGa6B35o96Sz0ucN"
+  },
+  "homeChips": [
+   {
+    "highlightColor": null,
+    "highlightScheme": null,
+    "id": "music-chip",
+    "label": {
+     "transformedLabel": "音乐",
+     "translatedBaseText": "音乐"
+    },
+    "subChips": [
+     {
+      "id": "music-following-chip",
+      "label": {
+       "transformedLabel": "关注中",
+       "translatedBaseText": "关注中"
+      }
+     }
+    ]
+   },
+   {
+    "highlightColor": null,
+    "highlightScheme": null,
+    "id": "podcasts-chip",
+    "label": {
+     "transformedLabel": "播客",
+     "translatedBaseText": "播客"
+    },
+    "subChips": [
+     {
+      "id": "podcasts-following-chip",
+      "label": {
+       "transformedLabel": "关注中",
+       "translatedBaseText": "关注中"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

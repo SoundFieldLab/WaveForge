@@ -6,9 +6,9 @@ import { lazy, memo, Suspense, startTransition, useCallback, useEffect, useLayou
 import { PLATFORM_CHANGED_EVENT, readSyncedPlatform, syncPlatformAcrossViews } from '../services/platformSync'
 import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
-  Captions, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Disc3, Headphones, Heart, History, Home, Library, ListMusic, LogIn, Music2,
+  Captions, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Disc3, Headphones, Heart, History, Home, House, Library, ListMusic, LogIn, Music2,
   Pause, Play, Plus, Repeat, Repeat1, Search, Settings, Shuffle, SkipBack, SkipForward, SlidersHorizontal,
-  Sparkles, Volume2, Waves, Check,
+  Sparkles, Volume2, Waves, Check, Bell, Users,
 } from 'lucide-react'
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import EditPlaylistModal from './EditPlaylistModal'
@@ -49,8 +49,8 @@ const LazyApplePcRadio = lazy(() => import('../features/traditionalPc/ApplePcRad
 const LazyApplePcLibrary = lazy(() => import('../features/traditionalPc/ApplePcLibrary'))
 const LazyApplePcPlaylists = lazy(() => import('../features/traditionalPc/ApplePcPlaylists'))
 const LazyApplePcSearch = lazy(() => import('../features/traditionalPc/ApplePcSearch'))
-const LazySpotifyPcHome = lazy(() => import('../features/traditionalPc/SpotifyPcHome'))
-const LazySpotifyPcSidebar = lazy(() => import('../features/traditionalPc/SpotifyPcSidebar'))
+const LazySpotifyPcShell = lazy(() => import('../features/traditionalPc/SpotifyPcShell'))
+const LazySpotifyPcSearch = lazy(() => import('../features/traditionalPc/SpotifyPcSearch'))
 import ApplePcSidebar, { type ApplePcNavKey } from '../features/traditionalPc/ApplePcSidebar'
 import { applePcTheme } from '../features/traditionalPc/applePcKit'
 // PC 客户端复刻（QQ/网易云）：平台化左栏 + 中栏列表页与二级页
@@ -97,6 +97,8 @@ import TraditionalAlbumDetail from './TraditionalAlbumDetail'
 import CachedImage from './CachedImage'
 import { buildPlaylistShareUrl } from '../services/playlistShare'
 import SongContextMenu from './SongContextMenu'
+import SpotifyAccountMenu from './SpotifyTopBar'
+import SpotifySidePanel, { type SpotifyPanelKind } from './SpotifySidePanel'
 import PlaylistContextMenu from './PlaylistContextMenu'
 import { MirroredGlobalSettings, PlatformOrderEditor, makeSkin } from './MirroredGlobalSettings'
 import { GLOBAL_SETTINGS_GROUPS, isEntryVisible, useGlobalSettings, type GlobalSettingsGroupId, type MirrorActionId } from '../services/globalSettingsRegistry'
@@ -753,6 +755,8 @@ function TraditionalView({
   const [showDeletePlaylist, setShowDeletePlaylist] = useState(false)
   const [playlistMutationBusy, setPlaylistMutationBusy] = useState(false)
   const [topBarActive, setTopBarActive] = useState(false)
+  // Spotify 官方面板（新增内容/收听动态）：顶栏铃铛/好友键打开，覆盖内容区
+  const [spotifySidePanel, setSpotifySidePanel] = useState<SpotifyPanelKind>(null)
   // TV 遥控器模式（无鼠标）：顶部模式下拉条常驻显示；平台药丸变成单个可聚焦单元，左右键切换。
   // 手机遥控器连上（光标模式）后恢复 PC 式 hover/拖拽交互。
   const tvMode = useTvMode()
@@ -1929,6 +1933,10 @@ function TraditionalView({
   const isSodaFeedPage = isSodaPc && currentPage.name === 'home'
   /** Apple 客户端复刻页（主页/广播/资料库/播放列表）自带版式内边距，不吃通用内边距 */
   const isAppleBleedPage = isApplePc && (currentPage.name === 'home' || currentPage.name === 'search' || currentPage.name === 'pc')
+  /** Spotify 客户端复刻外壳页：左栏+中栏一体（与酷狗同款铺满），不吃通用内边距 */
+  const isSpotifyShellPage = isSpotifyPc && currentPage.name === 'home'
+  /** Spotify 的搜索页也走外壳铺满（否则落回通用三栏会出现窄列断裂） */
+  const isSpotifyBleedPage = isSpotifyPc && (currentPage.name === 'search' || currentPage.name === 'pc')
   /**
    * 汽水推荐页只服务**汽水自己的歌**（客户端语义：/player-feed 永远属于汽水推荐流）。
    * 在别的平台放歌时切到汽水，若把全局 currentSong 原样显示，用户就「卡在」别平台的歌上、
@@ -2033,52 +2041,72 @@ function TraditionalView({
       return wrap(<PcEmpty theme={pcTheme(pcChromeApple.tone)} title="该页面暂未提供" />, 'Apple Music')
     }
     if (platform === 'spotify') {
+      // Spotify 客户端复刻外壳（自管左栏+中栏，内部导航自管；搜索走全局搜索页）
       if (pageId === 'home') {
         return wrap(
-          <LazySpotifyPcHome
+          <LazySpotifyPcShell
             tone={pcChromeApple.tone}
             accent='#1ed760'
             loggedIn={spotifyLoggedIn}
             username={spotifyUsername}
             avatar={spotifyAvatar}
-            actions={pcActions}
-            active={active}
             currentSong={currentSong}
+            isPlaying={isPlaying}
+            active={active}
+            onPlaySongs={(song, songs, index) => pcActions.onPlaySongs(song, songs, index)}
+            onPlayPause={onPlayPause}
+            onNext={onNext}
+            onPrevious={onPrevious}
             onLoginClick={() => onLoginClick('spotify')}
+            onSongMenu={payload => setSongMenu({ ...payload, show: true, songs: [payload.song] })}
+            onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+            onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
+            onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
+            onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
           />,
-          'Spotify 发现页'
+          'Spotify 客户端'
         )
       }
       if (pageId === 'favorites' || pageId === 'liked') {
         return wrap(
-          <LazySpotifyPcHome
+          <LazySpotifyPcShell
             tone={pcChromeApple.tone}
             accent='#1ed760'
             loggedIn={spotifyLoggedIn}
             username={spotifyUsername}
             avatar={spotifyAvatar}
-            actions={pcActions}
-            active={active}
             currentSong={currentSong}
+            isPlaying={isPlaying}
+            active={active}
+            onPlaySongs={(song, songs, index) => pcActions.onPlaySongs(song, songs, index)}
+            onPlayPause={onPlayPause}
+            onNext={onNext}
+            onPrevious={onPrevious}
             onLoginClick={() => onLoginClick('spotify')}
+            onSongMenu={payload => setSongMenu({ ...payload, show: true, songs: [payload.song] })}
+            onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+            onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
+            onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
+            onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
           />,
-'Spotify 喜欢的歌曲'
+          'Spotify 客户端'
         )
       }
       if (pageId === 'search') {
         return wrap(
-          <LazySpotifyPcHome
+          <LazySpotifyPcSearch
             tone={pcChromeApple.tone}
             accent='#1ed760'
-            loggedIn={spotifyLoggedIn}
-            username={spotifyUsername}
-            avatar={spotifyAvatar}
-            actions={pcActions}
+            initialKeyword={keyword ?? ''}
             active={active}
             currentSong={currentSong}
-            onLoginClick={() => onLoginClick('spotify')}
+            onPlaySongs={(song, songs, index) => pcActions.onPlaySongs(song, songs, index)}
+            onOpenAlbum={(albumId) => openAlbumDetail(albumId, 'spotify')}
+            onOpenArtist={(artistId) => openArtistDetail(artistId, 'spotify')}
+            onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+            onSongMenu={payload => setSongMenu({ ...payload, show: true })}
           />,
-'Spotify 搜索'
+          'Spotify 搜索'
         )
       }      return wrap(<PcEmpty theme={pcTheme(pcChromeApple.tone)} title="该页面暂未提供" />, 'Spotify')
     }
@@ -2229,6 +2257,36 @@ function TraditionalView({
       // PC 平台：歌手详情换客户端复刻版（热门歌曲/专辑/MV 页签）；酷狗/Apple 同样走复刻版。
       // 汽水也走复刻版（2026-10-08）：真实艺人接口接通后有头像/简介/专辑，
       // 旧的 TraditionalArtistDetail（按名搜索伪艺人）只保留给其它平台兜底。
+      if (page.platform === 'spotify') {
+        // Spotify：官方艺人页外壳（官方布局，关注按钮/热门曲目/专辑网格），左栏由外壳自管
+        return (
+          <EmbeddedExploreErrorBoundary label="Spotify 艺人页">
+            <Suspense fallback={pcPageFallback}>
+              <LazySpotifyPcShell
+                tone={pcChromeApple.tone}
+                accent='#1ed760'
+                loggedIn={spotifyLoggedIn}
+                username={spotifyUsername}
+                avatar={spotifyAvatar}
+                currentSong={currentSong}
+                isPlaying={isPlaying}
+                active={active}
+                onPlaySongs={(song, songs, index) => pcActions.onPlaySongs(song, songs, index)}
+                onPlayPause={onPlayPause}
+                onNext={onNext}
+                onPrevious={onPrevious}
+                onLoginClick={() => onLoginClick('spotify')}
+                onSongMenu={payload => setSongMenu({ ...payload, show: true, songs: [payload.song] })}
+                onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+                onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
+                onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
+                onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+                initialArtistId={page.id}
+              />
+            </Suspense>
+          </EmbeddedExploreErrorBoundary>
+        )
+      }
       if (page.platform === 'qq' || page.platform === 'netease' || page.platform === 'kugou' || page.platform === 'apple' || page.platform === 'soda') {
         return (
           <EmbeddedExploreErrorBoundary label="歌手详情">
@@ -2271,7 +2329,8 @@ function TraditionalView({
       {preferences.backgroundDim && <div className={`pointer-events-none absolute inset-0 ${isDark ? 'bg-black/25' : 'bg-white/12'}`} />}
       <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/15" />
 
-      {/* 顶栏加高（h-20）+ 内容下沉：隐藏 Windows 标题栏的拖拽区占顶部 32px，控件整体下移避免「一半在标题栏上」 */}
+      {/* 顶栏加高（h-20）+ 内容下沉：隐藏 Windows 标题栏的拖拽区占顶部 32px，控件整体下移避免「一半在标题栏上」
+          Spotify：全局顶栏保留（平台药丸/logo），官方元素作为附加段融入（见下方 spotify-extra 段）。 */}
       <header className="relative z-30 flex h-20 items-end gap-3 border-b px-4 pb-2.5 backdrop-blur-xl" style={{ borderColor: isDark ? 'rgba(255,255,255,.08)' : 'rgba(15,23,42,.1)' }}>
         {/* 平台药丸（左上角，拖拽切换） */}
         <div className="relative h-9 w-[240px] shrink-0 overflow-hidden rounded-2xl border" style={{ borderColor: isDark ? 'rgba(255,255,255,.12)' : 'rgba(15,23,42,.12)' }}
@@ -2343,6 +2402,34 @@ function TraditionalView({
             </span>
           </div>
         </form>
+        {/* Spotify 官方顶栏附加段（融入全局顶栏，全局元素不动）：
+            主页键 + 通知铃铛（新增内容）+ 好友活动 + 头像下拉（账户/资料/设置/登出）。
+            铃铛/好友点击打开官方空态面板（覆盖内容区，右上角 X 关闭）。 */}
+        {isSpotifyPc && (
+          <div className="flex shrink-0 items-center gap-2">
+            <button type="button" onClick={() => navigate({ name: 'home' })} aria-label="主页"
+              className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: currentPage.name === 'home' ? accent : undefined }}>
+              <Home className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={() => setSpotifySidePanel(previous => previous === 'whats-new' ? null : 'whats-new')}
+              aria-label="新增内容" className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: spotifySidePanel === 'whats-new' ? accent : undefined }}>
+              <Bell className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={() => setSpotifySidePanel(previous => previous === 'friend-activity' ? null : 'friend-activity')}
+              aria-label="好友活动" className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: spotifySidePanel === 'friend-activity' ? accent : undefined }}>
+              <Users className="h-4 w-4" />
+            </button>
+            <SpotifyAccountMenu
+              loggedIn={spotifyLoggedIn}
+              username={spotifyUsername}
+              avatar={spotifyAvatar}
+              onAccount={() => onLoginClick('spotify')}
+              onProfile={() => navigate({ name: 'profile' })}
+              onSettings={() => navigate({ name: 'settings' })}
+              onLogout={() => { window.dispatchEvent(new CustomEvent('waveforge-spotify-logout-request')) }}
+            />
+          </div>
+        )}
         {/* 右上角：Logo + 软件名（品牌标识，非交互；个人中心入口在右栏资料卡，避免与右上角隐藏窗口按钮抢点击） */}
         <div className="flex shrink-0 items-center gap-2">
           <img src={new URL('../../logo.png', import.meta.url).href} alt="WaveForge" className="h-9 w-9 rounded-xl object-cover" />
@@ -2501,21 +2588,7 @@ function TraditionalView({
             />
           </Suspense>
         )}
-        {/* 左栏（Spotify 客户端复刻）：搜索框 + 发现/喜欢的歌曲/搜索导航 + 底部账号。右栏保留。 */}
-        {isSpotifyPc && (
-          <Suspense fallback={null}>
-            <LazySpotifyPcSidebar
-              tone={pcChromeApple.tone}
-              loggedIn={spotifyLoggedIn}
-              username={spotifyUsername}
-              avatar={spotifyAvatar}
-              currentKey={'home'}
-              onNavigate={(key) => { if (key === 'home' || key === 'liked') renderPcPage(key === 'home' ? 'home' : 'favorites', true) }}
-              onSearch={(kw) => { if (kw) renderPcPage('search', true, kw) }}
-              onAccountClick={() => onLoginClick('spotify')}
-            />
-          </Suspense>
-        )}
+        {/* Spotify 客户端复刻：外壳自管左栏+中栏（SpotifyPcShell），右侧第三栏仍由本文件下方渲染。 */}
         {/* 左栏（通用）：导航 + 我的歌单 / 收藏歌单。酷狗用自带左栏的客户端外壳，这里整体让位 */}
         {showGenericSidebar && (
         <aside className={`hidden min-h-0 flex-col border-r px-3 py-5 lg:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
@@ -2567,7 +2640,9 @@ function TraditionalView({
             Apple 客户端复刻页自带 40px 内边距与内容底色（客户端版式），这里不再叠通用内边距。 */}
         {/* 酷狗：外壳（含自带左栏）占前两列（左栏+内容），统一右栏独占第三列；
             其它平台 main 只占内容列 */}
-        <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden lg:col-span-2' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
+        {/* 跨列包装仅用于「外壳占左栏+中栏」的平台（酷狗/Spotify 外壳与搜索页）；其余平台保持原网格，右栏仍在第三列 */}
+        <div className={`relative min-h-0 ${isKugouPc || isSpotifyShellPage || isSpotifyBleedPage ? 'lg:col-span-2' : ''}`}>
+          <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isSpotifyShellPage || isSpotifyBleedPage ? 'min-h-0 overflow-hidden' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
           {history.map((page, index) => {            const active = index === historyIndex
             // 页面「冻结」：访问过的历史页面保持挂载，切走只隐藏、不卸载（与探索页同款）。
             // display:none 的子树不参与布局与绘制、也拿不到焦点；页面自己的页签/分页/滚动
@@ -2581,7 +2656,16 @@ function TraditionalView({
           {/* 回到顶部：中栏内容（首页/歌单/歌手/榜单）超一屏后右下角显示。
               sticky 钉在滚动视口底部，不随内容滚走；切页时 mainRef.scrollTo(0) 已有。 */}
           <ScrollToTop containerRef={mainRef} position="sticky" stickyWrapperClassName="sticky bottom-5 z-30 flex justify-end pr-6 lg:pr-8 pointer-events-none" />
-        </main>
+          </main>
+          {/* Spotify 官方面板（新增内容/收听动态）：覆盖中栏，右上角 X 关闭 */}
+          {isSpotifyPc && (
+            <SpotifySidePanel
+              kind={spotifySidePanel}
+              onClose={() => setSpotifySidePanel(null)}
+              onOpenSettings={() => { setSpotifySidePanel(null); navigate({ name: 'settings' }) }}
+            />
+          )}
+        </div>
 
         {/* 右栏：正在播放（真实频谱）+ 歌词 + 播放列表（覆盖到底部可滚动）。
             QQ/网易云的账号资料卡已在左栏顶部出现，这里不再重复渲染（避免同一屏两处账号区）。

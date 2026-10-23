@@ -1,0 +1,4463 @@
+{
+ "home": {
+  "__typename": "HomeResponsePayload",
+  "greeting": {
+   "transformedLabel": "晚上好",
+   "translatedBaseText": "晚上好"
+  },
+  "sectionContainer": {
+   "sections": {
+    "items": [
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "你的歌单",
+        "translatedBaseText": "你的歌单"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 0
+           },
+           "description": "",
+           "format": "",
+           "images": {
+            "items": []
+           },
+           "name": "WaveForge 验收 10-22T17:52",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Kirito",
+             "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79"
+            }
+           },
+           "uri": "spotify:playlist:62fbcVkVKHV5ww312ibXiE"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:62fbcVkVKHV5ww312ibXiE"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 3
+           },
+           "description": "",
+           "format": "",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#6038C0",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67616d00001e025d8b558bf5be33f52474a6b9",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "A Cielo Abierto (Viaje V)",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Kirito",
+             "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79"
+            }
+           },
+           "uri": "spotify:playlist:5yHCqrgFTswrTfX0luNBQM"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:5yHCqrgFTswrTfX0luNBQM"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 354
+           },
+           "description": "Created with Spotlistr - www.spotlistr.com",
+           "format": "",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A80818",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": 640,
+                "url": "https://mosaic.scdn.co/640/ab67616d00001e0259228e47a1ef1820936945d1ab67616d00001e02760dca9422caf3556e9f69e6ab67616d00001e0283dd33a8ecf250c119b70b1fab67616d00001e02a9a688cc44dc03cd34cae240",
+                "width": 640
+               },
+               {
+                "height": 300,
+                "url": "https://mosaic.scdn.co/300/ab67616d00001e0259228e47a1ef1820936945d1ab67616d00001e02760dca9422caf3556e9f69e6ab67616d00001e0283dd33a8ecf250c119b70b1fab67616d00001e02a9a688cc44dc03cd34cae240",
+                "width": 300
+               },
+               {
+                "height": 60,
+                "url": "https://mosaic.scdn.co/60/ab67616d00001e0259228e47a1ef1820936945d1ab67616d00001e02760dca9422caf3556e9f69e6ab67616d00001e0283dd33a8ecf250c119b70b1fab67616d00001e02a9a688cc44dc03cd34cae240",
+                "width": 60
+               }
+              ]
+             }
+            ]
+           },
+           "name": "1",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Kirito",
+             "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79"
+            }
+           },
+           "uri": "spotify:playlist:5ljjHgSp3cRKM5rzBYumaV"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:5ljjHgSp3cRKM5rzBYumaV"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 185
+           },
+           "description": "此歌单由 heart.uselesses.com 创建",
+           "format": "",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#72777D",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": 640,
+                "url": "https://mosaic.scdn.co/640/ab67616d00001e02444205d8a01da0499724432cab67616d00001e025ca9595a01d8c8334da91956ab67616d00001e028d5ddf78a7e57d38c5b178cdab67616d00001e02a0f7f7d11a5d78d992a5adf5",
+                "width": 640
+               },
+               {
+                "height": 300,
+                "url": "https://mosaic.scdn.co/300/ab67616d00001e02444205d8a01da0499724432cab67616d00001e025ca9595a01d8c8334da91956ab67616d00001e028d5ddf78a7e57d38c5b178cdab67616d00001e02a0f7f7d11a5d78d992a5adf5",
+                "width": 300
+               },
+               {
+                "height": 60,
+                "url": "https://mosaic.scdn.co/60/ab67616d00001e02444205d8a01da0499724432cab67616d00001e025ca9595a01d8c8334da91956ab67616d00001e028d5ddf78a7e57d38c5b178cdab67616d00001e02a0f7f7d11a5d78d992a5adf5",
+                "width": 60
+               }
+              ]
+             }
+            ]
+           },
+           "name": "我喜欢",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Kirito",
+             "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79"
+            }
+           },
+           "uri": "spotify:playlist:44AGSP5O13RMmIDbgfgZLP"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:44AGSP5O13RMmIDbgfgZLP"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": null
+       },
+       "totalCount": 4
+      },
+      "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu4d"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "热门电台",
+        "translatedBaseText": "热门电台"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/0du5cEVh5yTK9QJze8zA0C/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/0du5cEVh5yTK9QJze8zA0C/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 Ed Sheeran, Katy Perry, One Direction 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#508162",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/0du5cEVh5yTK9QJze8zA0C/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Bruno Mars 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4vTHVDH1FT3Y"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4vTHVDH1FT3Y"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/7lbSsjYACZHn1MSDXPxNF2/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/7lbSsjYACZHn1MSDXPxNF2/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 Fujii Kaze, 鬼束千尋, DREAMS COME TRUE 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#5878A1",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/7lbSsjYACZHn1MSDXPxNF2/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "宇多田光 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4tbqYJxc4EAN"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4tbqYJxc4EAN"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/2IUl3m1H1EQ7QfNbNWvgru/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/2IUl3m1H1EQ7QfNbNWvgru/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 King Gnu, Fujii Kaze, ヨルシカ 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#6F74A4",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/2IUl3m1H1EQ7QfNbNWvgru/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Vaundy 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4jNjgVjCKkUX"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4jNjgVjCKkUX"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/6rs1KAoQnFalSqSU4LTh8g/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/6rs1KAoQnFalSqSU4LTh8g/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 愛繆, Vaundy, 菅田 将暉 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#5878A1",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/6rs1KAoQnFalSqSU4LTh8g/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "back number 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4t3F2zE384wZ"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4t3F2zE384wZ"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/6bDWAcdtVR3WHz2xtiIPUi/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/6bDWAcdtVR3WHz2xtiIPUi/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 natori, King Gnu, AKASAKI 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#8E69A3",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/6bDWAcdtVR3WHz2xtiIPUi/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Fujii Kaze 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4uED6L36Co1U"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4uED6L36Co1U"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/1snhtMLeb2DYoMOcVbb8iB/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/1snhtMLeb2DYoMOcVbb8iB/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 King Gnu, YOASOBI, ヨルシカ 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#508162",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/1snhtMLeb2DYoMOcVbb8iB/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "米津玄師 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4y5ZlyqNBat6"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4y5ZlyqNBat6"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/5kjGRHClVacSyllOUqU1S0/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/5kjGRHClVacSyllOUqU1S0/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 サザンオールスターズ, Sukima Switch, Elephant Kashimashi 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#C0574A",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/5kjGRHClVacSyllOUqU1S0/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "SPITZ 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4ryeuHcFYE4k"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4ryeuHcFYE4k"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/2vjeuQwzSP5ErC1S41gONX/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/2vjeuQwzSP5ErC1S41gONX/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 HANA, No No Girls, LANA 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#8E69A3",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/2vjeuQwzSP5ErC1S41gONX/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "CHANMINA 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4ubb42wRt4ek"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4ubb42wRt4ek"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e83fd8f22aa74434cadef9931417651ed"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/64tJ2EAv1R6UaZqc4iOCyj/en"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/64tJ2EAv1R6UaZqc4iOCyj/en"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e83fd8f22aa74434cadef9931417651ed"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "With Yorushika, yama, Kenshi Yonezu and more",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A4646F",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/64tJ2EAv1R6UaZqc4iOCyj/en",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "YOASOBI Radio",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4nCrZFTegWCl"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4nCrZFTegWCl"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "request_id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-mobile/artist/4QvgGvpgzgyUOo8Yp8LDm9/zh-Hans"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio-desktop/artist/4QvgGvpgzgyUOo8Yp8LDm9/zh-Hans"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "should_show_promo_disclosure",
+             "value": "true"
+            },
+            {
+             "key": "send-impression-for-rows",
+             "value": "true"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7cd5b069cd9990b8a2a3d13f44a"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "包含 大森元貴, back number, Yuuri 等艺人的作品",
+           "format": "inspiredby-mix",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A3694F",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://pickasso.spotifycdn.com/image/ab67c0de0000deef/dt/v1/img/radio/artist/4QvgGvpgzgyUOo8Yp8LDm9/zh-Hans",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Mrs. GREEN APPLE 电台",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1E4EFxbqxoXbdY"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1E4EFxbqxoXbdY"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": 10
+       },
+       "totalCount": 50
+      },
+      "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu4h"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "当红艺人",
+        "translatedBaseText": "当红艺人"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "Mrs. GREEN APPLE"
+           },
+           "uri": "spotify:artist:4QvgGvpgzgyUOo8Yp8LDm9",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#658113",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb0b6fd24c14a46a5027d65e47",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f1780b6fd24c14a46a5027d65e47",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab676161000051740b6fd24c14a46a5027d65e47",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:4QvgGvpgzgyUOo8Yp8LDm9"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "米津玄師"
+           },
+           "uri": "spotify:artist:1snhtMLeb2DYoMOcVbb8iB",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#AC643D",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb341c2d82c4976180b1bc0192",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178341c2d82c4976180b1bc0192",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174341c2d82c4976180b1bc0192",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:1snhtMLeb2DYoMOcVbb8iB"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "Vaundy"
+           },
+           "uri": "spotify:artist:2IUl3m1H1EQ7QfNbNWvgru",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#B81000",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5ebb718d2d3988005d3a72f22c9",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178b718d2d3988005d3a72f22c9",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174b718d2d3988005d3a72f22c9",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:2IUl3m1H1EQ7QfNbNWvgru"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "Official鬍子男dism"
+           },
+           "uri": "spotify:artist:5Vo1hnCRmCM6M4thZCInCj",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#947214",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eba603edbfe14a6bced859d7e1",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178a603edbfe14a6bced859d7e1",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174a603edbfe14a6bced859d7e1",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:5Vo1hnCRmCM6M4thZCInCj"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "愛繆"
+           },
+           "uri": "spotify:artist:5kVZa4lFUmAQlBogl1fkd6",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#517E7E",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5ebc0a723402eb1cfbf2e10ce5c",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178c0a723402eb1cfbf2e10ce5c",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174c0a723402eb1cfbf2e10ce5c",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:5kVZa4lFUmAQlBogl1fkd6"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "King Gnu"
+           },
+           "uri": "spotify:artist:6wxfx1yhyqjCPYwwxJktR2",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#535353",
+               "isFallback": true
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb4ec795dffef81475326da642",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f1784ec795dffef81475326da642",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab676161000051744ec795dffef81475326da642",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:6wxfx1yhyqjCPYwwxJktR2"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "YOASOBI"
+           },
+           "uri": "spotify:artist:64tJ2EAv1R6UaZqc4iOCyj",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#6F787C",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb192be4e9b455c2d5dd5dfe09",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178192be4e9b455c2d5dd5dfe09",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174192be4e9b455c2d5dd5dfe09",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:64tJ2EAv1R6UaZqc4iOCyj"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "ヨルシカ"
+           },
+           "uri": "spotify:artist:4UK2Lzi6fBfUi9rpDt6cik",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#535353",
+               "isFallback": true
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5ebe62cff9c6018ae5616b01eab",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f178e62cff9c6018ae5616b01eab",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab67616100005174e62cff9c6018ae5616b01eab",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:4UK2Lzi6fBfUi9rpDt6cik"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "RADWIMPS"
+           },
+           "uri": "spotify:artist:1EowJ1WwkMzkCkRomFhui7",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#483000",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb61c979f8a7cdfe8fa2e8e909",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f17861c979f8a7cdfe8fa2e8e909",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab6761610000517461c979f8a7cdfe8fa2e8e909",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:1EowJ1WwkMzkCkRomFhui7"
+        },
+        {
+         "content": {
+          "__typename": "ArtistResponseWrapper",
+          "data": {
+           "__typename": "Artist",
+           "profile": {
+            "name": "back number"
+           },
+           "uri": "spotify:artist:6rs1KAoQnFalSqSU4LTh8g",
+           "visuals": {
+            "avatarImage": {
+             "extractedColors": {
+              "colorDark": {
+               "hex": "#76767C",
+               "isFallback": false
+              }
+             },
+             "sources": [
+              {
+               "height": 640,
+               "url": "https://i.scdn.co/image/ab6761610000e5eb4344b16f251fbbd9d34f3d5a",
+               "width": 640
+              },
+              {
+               "height": 160,
+               "url": "https://i.scdn.co/image/ab6761610000f1784344b16f251fbbd9d34f3d5a",
+               "width": 160
+              },
+              {
+               "height": 320,
+               "url": "https://i.scdn.co/image/ab676161000051744344b16f251fbbd9d34f3d5a",
+               "width": 320
+              }
+             ]
+            }
+           }
+          }
+         },
+         "data": null,
+         "uri": "spotify:artist:6rs1KAoQnFalSqSU4LTh8g"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": 10
+       },
+       "totalCount": 50
+      },
+      "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu3C"
+     },
+     {
+      "data": {
+       "__typename": "HomeRecentlyPlayedSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "title": {
+        "transformedLabel": "最近播放",
+        "translatedBaseText": "最近播放"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "ListResponseWrapper",
+          "data": {
+           "__typename": "List",
+           "items": {
+            "items": [
+             {
+              "entity": {
+               "__typename": "EntityResponseWrapper",
+               "_uri": "spotify:playlist:62fbcVkVKHV5ww312ibXiE",
+               "data": {
+                "__typename": "Entity",
+                "consumptionExperienceTrait": {
+                 "__typename": "NotFound"
+                },
+                "entityTypeTrait": {
+                 "__typename": "EntityTypeTrait",
+                 "type": "ENTITY_TYPE_PLAYLIST"
+                },
+                "identityTrait": {
+                 "__typename": "IdentityTrait",
+                 "contentHierarchyParent": null,
+                 "contributors": {
+                  "items": [
+                   {
+                    "name": "Kirito",
+                    "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79"
+                   }
+                  ],
+                  "totalCount": 1
+                 },
+                 "description": "",
+                 "name": "WaveForge 验收 10-22T17:52",
+                 "type": "歌单"
+                },
+                "sharingInfo": {
+                 "shareId": "43rrByQ-SIyyVlNQsfaDJQ",
+                 "shareUrl": "https://open.spotify.com/playlist/62fbcVkVKHV5ww312ibXiE?si=43rrByQ-SIyyVlNQsfaDJQ"
+                },
+                "typedEntity": {
+                 "__typename": "PlaylistResponseWrapper"
+                },
+                "uri": "spotify:playlist:62fbcVkVKHV5ww312ibXiE",
+                "visualIdentityTrait": {
+                 "__typename": "NotFound"
+                }
+               }
+              },
+              "formatListAttributes": [
+               {
+                "key": "group_id_0",
+                "value": ""
+               },
+               {
+                "key": "group_metadata",
+                "value": ""
+               },
+               {
+                "key": "recent_type_saved",
+                "value": ""
+               },
+               {
+                "key": "content_type_music",
+                "value": ""
+               }
+              ],
+              "uid": "93c49bf6fb61b8c56e912ec390098c05"
+             }
+            ],
+            "totalCount": 1
+           },
+           "uri": "spotify:list:recents:main"
+          }
+         },
+         "data": null,
+         "uri": "spotify:list:recents:main"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": null
+       },
+       "totalCount": 1
+      },
+      "uri": "spotify:section:0JQ5DAroEmF9ANbLaiJ7XR"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "热门专辑与单曲",
+        "translatedBaseText": "热门专辑与单曲"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Fujii Kaze"
+              },
+              "uri": "spotify:artist:6bDWAcdtVR3WHz2xtiIPUi"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#B65E2F",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02af62b027ee85ae2e2f7c9702",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851af62b027ee85ae2e2f7c9702",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273af62b027ee85ae2e2f7c9702",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "LOVE ALL SERVE ALL",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:6VJwkUQXD3DnqqUUaxqDzH"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:6VJwkUQXD3DnqqUUaxqDzH"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "CHANMINA"
+              },
+              "uri": "spotify:artist:2vjeuQwzSP5ErC1S41gONX"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#CF24C0",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02f306fb3f9fd03555becbb1fe",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851f306fb3f9fd03555becbb1fe",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273f306fb3f9fd03555becbb1fe",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "ハレンチ",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:7FlnNVqs9nwO2NKe37zxFh"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:7FlnNVqs9nwO2NKe37zxFh"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "星野源"
+              },
+              "uri": "spotify:artist:1S2S00lgLYLGHWA44qGEUs"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#535353",
+              "isFallback": true
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e0267786a7fd9d8a30e2213ba3d",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d0000485167786a7fd9d8a30e2213ba3d",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b27367786a7fd9d8a30e2213ba3d",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Gen",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:1s9TxbeBWAbz939OHhl3ch"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:1s9TxbeBWAbz939OHhl3ch"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Mrs. GREEN APPLE"
+              },
+              "uri": "spotify:artist:4QvgGvpgzgyUOo8Yp8LDm9"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#B83028",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e0281f55cd879e9480e3ed313df",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d0000485181f55cd879e9480e3ed313df",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b27381f55cd879e9480e3ed313df",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Attitude",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:3bRSI9DOQA2KdJ7t6zdW0V"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:3bRSI9DOQA2KdJ7t6zdW0V"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Vaundy"
+              },
+              "uri": "spotify:artist:2IUl3m1H1EQ7QfNbNWvgru"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#C45707",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02e0c3a68b9981c2e7b25f9737",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851e0c3a68b9981c2e7b25f9737",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273e0c3a68b9981c2e7b25f9737",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "replica",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:4LWbfv8uvEF3oz7YBFxmzn"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:4LWbfv8uvEF3oz7YBFxmzn"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "back number"
+              },
+              "uri": "spotify:artist:6rs1KAoQnFalSqSU4LTh8g"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#857717",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02fd363d834b815375814ae78e",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851fd363d834b815375814ae78e",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273fd363d834b815375814ae78e",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "ユーモア",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:4Owee1i5rIFJvQczZXSdiQ"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:4Owee1i5rIFJvQczZXSdiQ"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "BE:FIRST"
+              },
+              "uri": "spotify:artist:4wCW8kZ8LL7QIdcE8EOKPP"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#81737D",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02530e4b27e7f9281ee1ad4ee6",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851530e4b27e7f9281ee1ad4ee6",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273530e4b27e7f9281ee1ad4ee6",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "夢中",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:78HCbdRoQpbPL0eZaTk4mS"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:78HCbdRoQpbPL0eZaTk4mS"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Snow Man"
+              },
+              "uri": "spotify:artist:0UuiWPm9FpWvRuWNrXO98N"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#837474",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02aade74cd735a5fe5531bee97",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851aade74cd735a5fe5531bee97",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273aade74cd735a5fe5531bee97",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "THE BEST 2020 - 2025",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "COMPILATION",
+           "uri": "spotify:album:4aAwZdP0gcG0WXPoFH5Tpp"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:4aAwZdP0gcG0WXPoFH5Tpp"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "SEVENTEEN"
+              },
+              "uri": "spotify:artist:7nqOGRxlXj7N2JYbgNEjYH"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#535353",
+              "isFallback": true
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02950b4ffac4aaebdb6698465c",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851950b4ffac4aaebdb6698465c",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273950b4ffac4aaebdb6698465c",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "SEVENTEEN 5th Album 'HAPPY BURSTDAY'",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:0xlyof8BowaJtYPsxWYmkN"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:0xlyof8BowaJtYPsxWYmkN"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Number_i"
+              },
+              "uri": "spotify:artist:4XFkDALFTsSHVnRtJSsaMN"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#383828",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e024e5b055f1d0ca731b4a3780b",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d000048514e5b055f1d0ca731b4a3780b",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b2734e5b055f1d0ca731b4a3780b",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "GOD_i",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "EP",
+           "uri": "spotify:album:5H6luqWnHTkwrl30T8D8GD"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:5H6luqWnHTkwrl30T8D8GD"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": 10
+       },
+       "totalCount": 30
+      },
+      "uri": "spotify:section:0JQ5DAnM3wGh0gz1MXnu3B"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "你喜爱的艺人发布的新音乐。",
+        "translatedBaseText": "你喜爱的艺人发布的新音乐。"
+       },
+       "title": {
+        "transformedLabel": "为你推荐的新歌热播",
+        "translatedBaseText": "为你推荐的新歌热播"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "LISA"
+              },
+              "uri": "spotify:artist:5L1lO4eRHmJ7a0Q6csE5cT"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#701818",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02ae49c87dcf0b8e27f27303c5",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851ae49c87dcf0b8e27f27303c5",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273ae49c87dcf0b8e27f27303c5",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "PRESS PLAY",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": {
+            "isoString": "2026-10-22T15:00:00Z"
+           },
+           "albumType": "EP",
+           "uri": "spotify:album:7H0c8sfmrbAbrMjYuEvWQk"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:7H0c8sfmrbAbrMjYuEvWQk"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Haute & Freddy"
+              },
+              "uri": "spotify:artist:66T34XqGkEWbzKWALSBDuR"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#535353",
+              "isFallback": true
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02d3a0a4dfed31a6bca25ee592",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851d3a0a4dfed31a6bca25ee592",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273d3a0a4dfed31a6bca25ee592",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Film Noir",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:1Kffzv98M9zDC9TlIBZFPw"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:1Kffzv98M9zDC9TlIBZFPw"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Anderson .Paak"
+              },
+              "uri": "spotify:artist:3jK9MiCrA42lLAdMGUZpwa"
+             },
+             {
+              "profile": {
+               "name": "Cordae"
+              },
+              "uri": "spotify:artist:0huGjMyP507tBCARyzSkrv"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#627990",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02e9c1b191c7e4b2f85e6431e8",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851e9c1b191c7e4b2f85e6431e8",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273e9c1b191c7e4b2f85e6431e8",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Heavy Is The Crown",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": {
+            "isoString": "2026-10-22T15:00:00Z"
+           },
+           "albumType": "ALBUM",
+           "uri": "spotify:album:1pbMoqpMgCyjPefcJ9PKdq"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:1pbMoqpMgCyjPefcJ9PKdq"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Yung Miami"
+              },
+              "uri": "spotify:artist:5lbW0rNhFyCiSlClBMYbki"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#405058",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02e9e691ff80a06c85b60b4059",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851e9e691ff80a06c85b60b4059",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273e9e691ff80a06c85b60b4059",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Watch Dis!",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:6vGsnz0EkIqv9zYPFKub3j"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:6vGsnz0EkIqv9zYPFKub3j"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "keshi"
+              },
+              "uri": "spotify:artist:3pc0bOVB5whxmD50W79wwO"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#6A7A7A",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e029f2c9d2c307e24f93a1831b5",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d000048519f2c9d2c307e24f93a1831b5",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b2739f2c9d2c307e24f93a1831b5",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "MISS ME",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:18QfFnvtg9l6VlBpgU5vkb"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:18QfFnvtg9l6VlBpgU5vkb"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Dominic Fike"
+              },
+              "uri": "spotify:artist:6USv9qhCn6zfxlBQIYJ9qs"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#406098",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e023b17d48730dfa852269b51b9",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d000048513b17d48730dfa852269b51b9",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b2733b17d48730dfa852269b51b9",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Pangea",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:7F0wEfyBPyUlHyCnXHQwiG"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:7F0wEfyBPyUlHyCnXHQwiG"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "John Mayer"
+              },
+              "uri": "spotify:artist:0hEurMDQu99nJRq8pTxO14"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#E31F5E",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e028be2adbc6f0b0d4dc82e2db1",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d000048518be2adbc6f0b0d4dc82e2db1",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b2738be2adbc6f0b0d4dc82e2db1",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Tom and Jerry",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:5PflBP4GjYSCtb54nCdra0"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:5PflBP4GjYSCtb54nCdra0"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Sammy Virji"
+              },
+              "uri": "spotify:artist:1GuqTQbuixFHD6eBkFwVcb"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#304078",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e0209d651ceb29430bd40026616",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d0000485109d651ceb29430bd40026616",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b27309d651ceb29430bd40026616",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Open Late",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "ALBUM",
+           "uri": "spotify:album:6SrOv99B12ZeggHewdjp56"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:6SrOv99B12ZeggHewdjp56"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "Kacey Musgraves"
+              },
+              "uri": "spotify:artist:70kkdajctXSbqSMJbQO424"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#A05048",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02d3f4b4942a3d66864fb2cb80",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851d3f4b4942a3d66864fb2cb80",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273d3f4b4942a3d66864fb2cb80",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "Weekend In Texas",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "SINGLE",
+           "uri": "spotify:album:5vZb4srhLbumEbI13z33Qf"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:5vZb4srhLbumEbI13z33Qf"
+        },
+        {
+         "content": {
+          "__typename": "AlbumResponseWrapper",
+          "data": {
+           "__typename": "Album",
+           "artists": {
+            "items": [
+             {
+              "profile": {
+               "name": "girl in red"
+              },
+              "uri": "spotify:artist:3uwAm6vQy7kWPS2bciKWx9"
+             }
+            ]
+           },
+           "coverArt": {
+            "extractedColors": {
+             "colorDark": {
+              "hex": "#000848",
+              "isFallback": false
+             }
+            },
+            "sources": [
+             {
+              "height": 300,
+              "url": "https://i.scdn.co/image/ab67616d00001e02c3c4fba8a4034c5e4ff57ba2",
+              "width": 300
+             },
+             {
+              "height": 64,
+              "url": "https://i.scdn.co/image/ab67616d00004851c3c4fba8a4034c5e4ff57ba2",
+              "width": 64
+             },
+             {
+              "height": 640,
+              "url": "https://i.scdn.co/image/ab67616d0000b273c3c4fba8a4034c5e4ff57ba2",
+              "width": 640
+             }
+            ]
+           },
+           "isPreRelease": false,
+           "name": "BLUE",
+           "playability": {
+            "playable": true,
+            "reason": "PLAYABLE"
+           },
+           "preReleaseEndDateTime": null,
+           "albumType": "EP",
+           "uri": "spotify:album:5mutH6AczN5onZ1binwkvO"
+          }
+         },
+         "data": null,
+         "uri": "spotify:album:5mutH6AczN5onZ1binwkvO"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": null
+       },
+       "totalCount": 10
+      },
+      "uri": "spotify:section:0JQ5DAKjwZmJ0lVR7e0D2E"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "秋之惬意纯音乐",
+        "translatedBaseText": "秋之惬意纯音乐"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWWiuGVvOB4uo"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:3TOUW1MYPgYX13UXBm552d,spotify:artist:6Rsd9PL48rBbTSgG75Yjy4,spotify:artist:6KYtoDiXQBtuF3cO2sj0EO,spotify:artist:5LPJmnBnq8R8c5qG3B7K2K,spotify:artist:7heeKWcFPebvgKqeamk5fl"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DWY8U6Zq7nvbE"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 80
+           },
+           "description": "Acoustic covers of all your favourite songs.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#880800",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002d00bd48fe1506e3afb07c768",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Cozy Coffeehouse Covers",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWWiuGVvOB4uo"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DWWiuGVvOB4uo"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWTr1aQUUVrXx"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:0tJbegEI1Xa3pUnlGhwph8,spotify:artist:4Syv4sTnGc2Kq3gWqGGdJ3,spotify:artist:0vF49H73xGuKS1vRSNN3av,spotify:artist:5TDtP1kKqz98kh9c0MXuOp,spotify:artist:2IQF92w0RMFsspuMr89Ylj"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DWV7EzJMK2FUI"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 160
+           },
+           "description": "Your favourite café with that warm and cozy Jazz vibe.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#C04810",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002af0196700e9eac422c184095",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Cozy Coffee Shop Jazz",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWTr1aQUUVrXx"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DWTr1aQUUVrXx"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWUXyq4CJGeZ5"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "true"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX7K31D69s4M1"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 430
+           },
+           "description": "Piano music for fall vibes and autumnal moods.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A6690B",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002d6e6e2cc1d91ccbfe61a3709",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Autumn Piano",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWUXyq4CJGeZ5"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DWUXyq4CJGeZ5"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX7UE7qrnkvsf"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:2fXgR9zumFEqEl3mRdyqqs,spotify:artist:0UAwkBmAPuCYxBPtf6g9K6,spotify:artist:4dH20BbKaKVPBfwfmvUfZp,spotify:artist:4KuBcbUdLyPvc6bC84lQ6Y,spotify:artist:5WdixIK85kM8klaN4qpQfT"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DWYxwmBaMqxsl"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 150
+           },
+           "description": "Jazz that captures the essence of autumn.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A16B26",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002d03e8851422d0570439b905e",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Jazz for Autumn",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX7UE7qrnkvsf"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DX7UE7qrnkvsf"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX9O8HCSWScgZ"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:3d777CYj1CxUWukg7Btbxm,spotify:artist:7kDzFaRe9l7To45Hqo6Kdh,spotify:artist:3Ux7jaAusHBJAKgdzZ1RCe,spotify:artist:7eci6ktzmN5wocxdk17C2m,spotify:artist:08tB77WyTGC9pZ5Pm7Ymu6"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 80
+           },
+           "description": "warm and cozy beats to watch the leaves fall, focus, study or chill to.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#583030",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002409a98a40d38e6c16f39d796",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "lofi autumn beats 🍁🍂",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX9O8HCSWScgZ"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DX9O8HCSWScgZ"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX6TJWXRemQHy"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:2W4sX0RRSKjnAd599CxiX6,spotify:artist:79guO4ndu3WasS8qTpee8n,spotify:artist:0ZXLhPxIihjrquOaJFGU6Z,spotify:artist:7tazsVXyiv13qgBbmDRtHI,spotify:artist:0lFZFORfkO4KUR7f2a3gLN"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 125
+           },
+           "description": "An ambient + rain playlist. Blurred city lights, empty sidewalks, and windowpane reflections 🌧️",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#727777",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002a95092f3a005dbce0f7fa381",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "mentally i'm here",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX6TJWXRemQHy"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DX6TJWXRemQHy"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWT3gM3xdPT0c"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "moveFollowersJobId",
+             "value": "ebd455d0-c042-46ae-a603-3db9a9bb58a7"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:7BWwgrlgeQmwmHyw5OSExP,spotify:artist:2jH6TryZOIvoPpQqb1hRmc,spotify:artist:1wPjGpHJKKk8Nkd6fYLZMD,spotify:artist:1JTHwGu0pNf3WuXKyaZFAE,spotify:artist:4JlBaKUUlUUChHUlgDahZB"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX0jgyAiPl8Af"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 105
+           },
+           "description": "Warm instrumental guitar for a gentle start.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#504848",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f0000000291b4de873c02ce48d2cf31dc",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Cozy Acoustic Morning",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWT3gM3xdPT0c"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DWT3gM3xdPT0c"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWUvZBXGjNCU4"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:2W1nq0Ox5T3BshpYbjxjCj,spotify:artist:2ZcyQDuJb3xFY8QxgqsX8h,spotify:artist:2gJCO2wkZJeVALM0a9PpV3,spotify:artist:3vBuuLV3C6cLsz2UtUUDfN,spotify:artist:0mVoFjwABzQkARh5w2hUBg"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX0jgyAiPl8Af"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 137
+           },
+           "description": "Warm and cozy acoustic instrumentals.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#727972",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002806967499b5e253dab8981c6",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Sweater Weather Instrumentals",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWUvZBXGjNCU4"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DWUvZBXGjNCU4"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX4MB9zAGi61h"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:6au8W1s6SC8vFldlQoTSU5,spotify:artist:1hhSZdhbeXdXavwXMYxEc0,spotify:artist:3CTqF5KWRHPvxA8SMgxHNA,spotify:artist:5qxFrVV26X1IFNzeaDl9Cw,spotify:artist:63cagQjQkkMRWkUD28NXE5"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 107
+           },
+           "description": "Close Mic, Muted Strings, Cozy Vibes ",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#BA5D06",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f0000000241e38f1a2e1770bb9ab28ade",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Cozy Piano 🍂",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX4MB9zAGi61h"
+          }
+         },
+         "data": null,
+         "uri": "spotify:playlist:37i9dQZF1DX4MB9zAGi61h"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX7hmlhGsyxU0"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "true"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX4sWSpwq3LiO"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 75
+           },
+           "description": "Strings and pianos to accompany your latest great read.",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#A85010",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f0000000283e8dcd2c9ac6cea2268a96a",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Instrumental Reading",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX7hmlhGsyxU0"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX7hmlhGsyxU0"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": 10
+       },
+       "totalCount": 20
+      },
+      "uri": "spotify:section:0JQ5IMCbQBLvO1miRpddv2"
+     },
+     {
+      "data": {
+       "__typename": "HomeGenericSectionData",
+       "headerEntity": {
+        "__typename": "UnknownType"
+       },
+       "subtitle": {
+        "transformedLabel": "",
+        "translatedBaseText": null
+       },
+       "title": {
+        "transformedLabel": "今週のスポットライト",
+        "translatedBaseText": "今週のスポットライト"
+       }
+      },
+      "sectionItems": {
+       "items": [
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX4OR8pnFkwhR"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:3qFK1j4FfFGUiR7EeeLbuZ,spotify:artist:3fJfvyieATQfDE47J42H2E,spotify:artist:0TkhuOSDpZ6NhRiPkmQ77M,spotify:artist:2tQe3JU05yYIs9350ppVPD,spotify:artist:2Gy7SZvabW5UQgL0oljfeB"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DWYyZPHcqXzx5"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe89df1375e4967473dcfe9eb1bf"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae0d79a66d2b66c7db90f4a62da"
+            },
+            {
+             "key": "episode_description",
+             "value": "Spotifyが注目するニューカマー・プレイリスト。 Cover: めっちゃ美人"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 60
+           },
+           "description": "Spotifyが注目するニューカマー・プレイリスト。 Cover: めっちゃ美人",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#B02098",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002afb2fd7b36dc223d3f92cb23",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "RADAR: Early Noise ",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX4OR8pnFkwhR"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX4OR8pnFkwhR"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DWTbkKlc06FmH"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "true"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DXdY5tVYFPWb2"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe896ecbd5b8b2d7e0261787652a"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae08de45fca11bb09f99de01ef5"
+            },
+            {
+             "key": "episode_description",
+             "value": "都会の空を見上げると聴こえてくる音楽。 cover painting: 永井博"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 100
+           },
+           "description": "都会の空を見上げると聴こえてくる音楽。 cover painting: 永井博",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#3048B0",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002282ec71ecbe449d750626fbf",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "都会の空と音楽と",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DWTbkKlc06FmH"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DWTbkKlc06FmH"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX0gw71wbsSV6"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "true"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "忙しかった1日の終わりは、半身浴と心に沁みる音楽でゆったりリラックス。",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#183038",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f000000027d985a83395ec35d88921037",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "半身浴ノススメ",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX0gw71wbsSV6"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX0gw71wbsSV6"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX0Eftsfm2dbT"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:0pWR7TsFhvSCnbmHDjWgrE,spotify:artist:6Qhgat07PNOdnJSnCXJigu,spotify:artist:4iCVfqA83pTcu5Dngc2v6u,spotify:artist:2is0dsRjGdhfOeHUnFfJFm,spotify:artist:491qzCBIds12Ab7kNjlZMb"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX7BxU8vAAmBy"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe8913e095a904cbf9f5aecf56d3"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae0fc41268cdab9133946f2f896"
+            },
+            {
+             "key": "episode_description",
+             "value": "ヒップホップの最新トレンドをここで体感しよう Cover: Creepy Nuts *水曜更新。マイライブラリに保存して毎週チェックしよう"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 108
+           },
+           "description": "ヒップホップの最新トレンドをここで体感しよう Cover: Creepy Nuts *水曜更新。マイライブラリに保存して毎週チェックしよう",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#D93F2A",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f00000002dda790a24d32dc4456d2114c",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "+81 Connect: J-HipHop 最新注目曲",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX0Eftsfm2dbT"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX0Eftsfm2dbT"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX4CB6zI8FWXS"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:3KedxarmBCyFBevnqQHy3P,spotify:artist:6TWEX2qTj9b0bBsXSVCMKM,spotify:artist:5Vuvs6Py2JRU7WiFDVsI7J,spotify:artist:75VKfyoBlkmrJFDqo1o2VY,spotify:artist:5y2Xq6xcjJb2jVM54GHK3t"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX6GwdWRQMQpq"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 100
+           },
+           "description": "R&Bの最新話題曲をまとめてお届けします。cover: Jessie Reyez\n",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#004008",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f0000000277fd579eb6509a6a65fed64b",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Groovin' R&B",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX4CB6zI8FWXS"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX4CB6zI8FWXS"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DXdcuhTbpro3s"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:4W9M5MNUsI9uoIfvzND8Fa,spotify:artist:0xGtOrmB2hnrNRLG3vhpSo,spotify:artist:7fmXV2O48buswss04YetaN,spotify:artist:7k73EtZwoPs516ZxE72KsO,spotify:artist:0LOK81e9H5lr61HlGGHqwA"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e840210052aa8a0b5940c74e6f43ee546"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 264
+           },
+           "description": "Spotifyで1億再生を突破した楽曲のみを集めたプレイリスト。祝！\"おつかれSUMMER\" 1億回再生突破！！cover: HALCALI",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#6F787D",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f000000021e44c812931a127c00a448f3",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "100 MILLION+: 1億超えヒット",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DXdcuhTbpro3s"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DXdcuhTbpro3s"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DXbiEfzyzIRj9"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "moveFollowersJobId",
+             "value": "35a9e0fa-9771-4d76-8665-c8cd178a1041"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:1GuqTQbuixFHD6eBkFwVcb,spotify:artist:4nhvb6x9ZhPiYCzrHDNia9,spotify:artist:0ygIgsjUzKivFgxgjQ9iV9,spotify:artist:7w2BHxP6oYaE5sWW7fE4NE,spotify:artist:0YSI1Vwzd1u7wO7p3md4qD"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DWZASvfwxHkco"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe8955325dd61609cc4cfb5f0aac"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae0511308d5d412f99835bca03a"
+            },
+            {
+             "key": "episode_description",
+             "value": "国内外のオルタナティブダンスミュージック  Cover: Sammy Virji *金曜更新。マイライブラリに保存して毎週チェックしよう"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 100
+           },
+           "description": "国内外のオルタナティブダンスミュージック  Cover: Sammy Virji *金曜更新。マイライブラリに保存して毎週チェックしよう",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#737873",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f000000029d36d38b93fe4fd1c883260d",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Altar JP: オルタナティブ・ダンスミュージック",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DXbiEfzyzIRj9"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DXbiEfzyzIRj9"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX2K2376Q0zTJ"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:1nK2FcujOkjFDDAr1EMo2M,spotify:artist:2vjeuQwzSP5ErC1S41gONX,spotify:artist:4OfU76YhPU04wlmbVFFgTJ,spotify:artist:48apiuEaHdddhdRvfFjPB7,spotify:artist:0hrH2z8pQzrUUZ8tbfRQKi"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DX4F2k37fMTyn"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "音楽におけるジェンダーの公平性促進を目指し、女性の持つパワーや可能性を最大限に引き出していくプログラム。cover: LAUSBUB",
+           "format": "editorial",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#2C8823",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f0000000264d68187d743294ed116d227",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "EQUAL Japan",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX2K2376Q0zTJ"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX2K2376Q0zTJ"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX9rVeQ0kNLOd"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "true"
+            },
+            {
+             "key": "primary_color",
+             "value": "#ffffff"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe89e28ccf7ab40d31f0918b5509"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae011215c8b0b0ffc7aff28bcf7"
+            },
+            {
+             "key": "episode_description",
+             "value": "いろいろあるかも知れないけれど、ちょっと休憩しませんか？チルな楽曲でゆったりまったりなひと時を。"
+            },
+            {
+             "key": "madeFor.username",
+             "value": "Kirito"
+            },
+            {
+             "key": "madeFor.displayed",
+             "value": "1"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 50
+           },
+           "description": "いろいろあるかも知れないけれど、ちょっと休憩しませんか？チルな楽曲でゆったりまったりなひと時を。",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#203068",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f000000024e4168798f31d5ea20583486",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "まどろみの中で",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX9rVeQ0kNLOd"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX9rVeQ0kNLOd"
+        },
+        {
+         "content": {
+          "__typename": "PlaylistResponseWrapper",
+          "data": {
+           "__typename": "Playlist",
+           "attributes": [
+            {
+             "key": "uri",
+             "value": "spotify:user:spotify:playlist:37i9dQZF1DX1LU4UHKqdtg"
+            },
+            {
+             "key": "status",
+             "value": "PUBLISHED"
+            },
+            {
+             "key": "isAlgotorial",
+             "value": "false"
+            },
+            {
+             "key": "primary_color",
+             "value": "#FFFFFF"
+            },
+            {
+             "key": "recs.hasArtists",
+             "value": "spotify:artist:5L1lO4eRHmJ7a0Q6csE5cT,spotify:artist:6RHTUrRF63xao58xh9FXYJ,spotify:artist:0Vkn28k7P4K95Ce3knN0hQ,spotify:artist:08hHTBHlv0WRXWlyrsb6Kv,spotify:artist:4gOc8TsQed9eqnqJct2c5v"
+            },
+            {
+             "key": "autoplay",
+             "value": "spotify:playlist:37i9dQZF1DXbirtHQBuwCo"
+            },
+            {
+             "key": "header_image_url_desktop",
+             "value": "https://i.scdn.co/image/ab6768640000fe89798a8091f54a8035a7039ec5"
+            },
+            {
+             "key": "image_url",
+             "value": "https://i.scdn.co/image/ab67686d00003ae081afce37c2e4c864eb8597c8"
+            },
+            {
+             "key": "episode_description",
+             "value": "Girls groups/solo artists shining beyond borders. グローバルに活躍するガールズグループ/ソロアーティストを一つのプレイリストに。Cover: LISA"
+            },
+            {
+             "key": "is_video_first",
+             "value": "false"
+            },
+            {
+             "key": "correlation-id",
+             "value": "ssp~065e8424d7c44fe96f378189a3dfabfc2a96"
+            }
+           ],
+           "content": {
+            "__typename": "PlaylistItemsPage",
+            "totalCount": 80
+           },
+           "description": "Girls groups/solo artists shining beyond borders. グローバルに活躍するガールズグループ/ソロアーティストを一つのプレイリストに。Cover: LISA",
+           "format": "format-shows-shuffle",
+           "images": {
+            "items": [
+             {
+              "extractedColors": {
+               "colorDark": {
+                "hex": "#B36211",
+                "isFallback": false
+               }
+              },
+              "sources": [
+               {
+                "height": null,
+                "url": "https://i.scdn.co/image/ab67706f000000020ceb30187287dfb3ce75b439",
+                "width": null
+               }
+              ]
+             }
+            ]
+           },
+           "name": "Stargirl vibes",
+           "ownerV2": {
+            "data": {
+             "__typename": "User",
+             "name": "Spotify",
+             "uri": "spotify:user:spotify"
+            }
+           },
+           "uri": "spotify:playlist:37i9dQZF1DX1LU4UHKqdtg"
+          }
+         },
+         "data": {
+          "__typename": "HomeRecsItemData"
+         },
+         "uri": "spotify:playlist:37i9dQZF1DX1LU4UHKqdtg"
+        }
+       ],
+       "pagingInfo": {
+        "nextOffset": 0
+       },
+       "totalCount": 26
+      },
+      "uri": "spotify:section:0JQ5DAuChZYPe9iDhh2mJz"
+     }
+    ],
+    "totalCount": 8
+   },
+   "uri": "spotify:page:0JQ5DAozXW0GUBAKjHsifH"
+  },
+  "homeChips": [
+   {
+    "highlightColor": null,
+    "highlightScheme": null,
+    "id": "music-chip",
+    "label": {
+     "transformedLabel": "音乐",
+     "translatedBaseText": "音乐"
+    },
+    "subChips": [
+     {
+      "id": "music-following-chip",
+      "label": {
+       "transformedLabel": "关注中",
+       "translatedBaseText": "关注中"
+      }
+     }
+    ]
+   },
+   {
+    "highlightColor": null,
+    "highlightScheme": null,
+    "id": "podcasts-chip",
+    "label": {
+     "transformedLabel": "播客",
+     "translatedBaseText": "播客"
+    },
+    "subChips": [
+     {
+      "id": "podcasts-following-chip",
+      "label": {
+       "transformedLabel": "关注中",
+       "translatedBaseText": "关注中"
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

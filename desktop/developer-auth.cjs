@@ -137,7 +137,9 @@ async function verifyDeveloper({ userDataDir, token } = {}) {
   }
 
   const commit = await hooks.fetchRosterHeadCommit(config, token)
-  const verification = commit.verification || {}
+  // GitHub 列表端点（/commits?path=）把 verification 放在 commit.verification；
+  // 单提交端点（/commits/{sha}）放在顶层。两处兼容取值。
+  const verification = commit.verification || (commit.commit && commit.commit.verification) || {}
   const commitLogin = extractCommitGithubLogin(commit)
 
   const failures = []

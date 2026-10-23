@@ -26,7 +26,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from local_service_auth import _cache_root, is_allowed_audio_path, is_authorized_local_request
+from local_service_auth import _allowed_roots, is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
 from scipy import signal as scipy_signal
@@ -268,7 +268,7 @@ def measure_lufs():
         return jsonify({
             'error': 'audioPath must be inside the WaveForge cache',
             'audioPath': audio_path,
-            'expectedRoot': str(_cache_root()),
+            'expectedRoots': [str(r) for r in _allowed_roots()],
         }), 400
 
     # 扩展名白名单 + 大小上限，防止非音频文件或超大文件导致资源耗尽

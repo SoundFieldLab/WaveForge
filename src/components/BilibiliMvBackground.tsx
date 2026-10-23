@@ -59,6 +59,8 @@ import type { LyricLine } from '../services/musicApi'
 import { loadPlaybackSpeedSettings, setEffectivePlaybackSpeed, PLAYBACK_SPEED_SETTINGS_EVENT, PLAYBACK_SPEED_TRANSITION_EVENT } from '../services/playbackSpeedSettings'
 import { clampMvBlur, resolveMvBackgroundQuality } from '../services/playbackPerformancePolicy'
 import { getApiBase } from '../services/apiConfig'
+import { learnFromMatch } from '../services/mvAdaptive'
+import { consumeEvolutionOutcome } from '../services/bilibiliApi'
 
 type MvBackgroundStatus = 'idle' | 'searching' | 'loading' | 'playing' | 'confirm' | 'none' | 'error'
 
@@ -850,6 +852,19 @@ export default memo(function BilibiliMvBackground({
           // 学习式 UP 信任（自动，免人工审核）：正片类视频真实播放成功即记一次信任，
           // 达阈值后该 UP 自动获得递进加权（见 bilibiliApi.recordUploaderPlaySuccess）。
           if (!stagedOnly) recordUploaderPlaySuccess(candidate.video.mid, candidate.video.author, candidate.video.title)
+          // 自适应词汇学习（与世俱进层）：播放成功 = 用户认可的映射——视频作者↔平台歌手、
+          // 标题歌名变体↔平台歌名进入词典（+1 弱证据；手动选择 +2，见 learnFromMatch）。
+          if (!stagedOnly) {
+            learnFromMatch({
+              platformArtist: songRef.current.songArtists?.[0],
+              videoAuthor: candidate.video.author,
+              platformSongTitle: songRef.current.songTitle,
+              videoTitle: candidate.video.title,
+              weight: 1,
+            })
+            // 进化引擎（在线 SGD）：播放成功 = 弱正样本（w=0.5）
+            consumeEvolutionOutcome(songKeyRef.current, candidate.video.bvid, 'accepted')
+          }
           if (lastPlayStateRef.current) {
             onPlayStateChangeRef.current?.({ ...lastPlayStateRef.current, songKey: slotOwnerRef.current[activeSlotRef.current] || songKeyRef.current, currentTime: activeEl()?.currentTime || 0 })
           }
@@ -869,9 +884,14 @@ export default memo(function BilibiliMvBackground({
             ? fallbackChainRef.current.findIndex((c, i) => i > chainIndex && !failedBvidsRef.current.has(c.video.bvid))
             : -1
           if (nextIndex >= 0) {
+            // 加载失败的候选 = 该特征组合是负解（进化引擎弱负样本 w=0.8）
+            consumeEvolutionOutcome(expectedSongKey, candidate.video.bvid, 'skipped')
             void loadVideo(fallbackChainRef.current[nextIndex], nextIndex)
             return
           }
+          // 链耗尽：整链无正解（弱负 w=0.8 只打给链首——链尾特征噪声大）
+          const chainHead = fallbackChainRef.current[0]
+          if (chainHead) consumeEvolutionOutcome(expectedSongKey, chainHead.video.bvid, 'exhausted')
           setStatus('error')
           showNotice(message)
         } finally {
@@ -1768,6 +1788,21 @@ export default memo(function BilibiliMvBackground({
   const selectCandidate = (candidate: CandidateScore) => {
     // 手动选择 = 只看这次（会话内内存记忆），不写 override：只有点「标记」才持久化
     setSessionManualPick(songKey, candidate.video.bvid)
+    // 自适应词汇学习（强证据 weight=2）：用户亲手选的视频 = 用户认可的映射，词典优先吸收
+    learnFromMatch({
+      platformArtist: songArtists?.[0],
+      videoAuthor: candidate.video.author,
+      platformSongTitle: songTitle,
+      videoTitle: candidate.video.title,
+      weight: 2,
+    })
+    // 进化引擎：用户在候选列表里选了**别的**视频 = 对此前自动选择（链首）的隐式否定。
+    // 链首强负样本 w=1.2，用户选中者强正样本 w=1.5（见 consumeEvolutionOutcome）。
+    const previousBest = fallbackChainRef.current[0]
+    if (previousBest && previousBest.video.bvid !== candidate.video.bvid) {
+      consumeEvolutionOutcome(songKey, previousBest.video.bvid, 'skipped')
+      consumeEvolutionOutcome(songKey, candidate.video.bvid, 'manual')
+    }
     setShowCandidates(false)
     setCandidates([])
     fallbackChainRef.current = [candidate, ...fallbackChainRef.current.filter((c) => c.video.bvid !== candidate.video.bvid)]

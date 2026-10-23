@@ -320,14 +320,17 @@ function deleteRegistryValue(name) {
 
 /**
  * 删除设备授权相关全部本地数据（不可逆）：
- * - 注册表：DeviceId（识别码）与 RedeemedCodes（历史测试码，旧版存储）
- * - 应用数据目录：device-license.json（兜底文件，含识别码与已兑换测试码）
- * 下次调用 getState 时会生成全新的设备标识，旧测试码因设备绑定将全部失效。
+ * - 注册表：DeviceId（识别码）、RedeemedCodes（历史测试码）、DeviceFingerprint（v2 指纹快照）
+ * - 应用数据目录：device-license.json（兜底文件）与 device-fingerprint.json（v2 快照兜底）
+ * v2 确定性指纹下，清除后重算仍得到同一 ID——重置的意义是清空已兑换授权并
+ * 让绑定旧 ID 的码失效语义保持一致（换硬件导致 ID 变化时旧码自然失效）。
  */
 function resetDeviceLicense(app) {
-  const hadRegistry = readRegistryValue(DEVICE_VALUE) !== null || readRegistryValue(LEGACY_CODES_VALUE) !== null
+  const hadRegistry = readRegistryValue(DEVICE_VALUE) !== null || readRegistryValue(LEGACY_CODES_VALUE) !== null || fingerprint.__testHooks !== undefined && fingerprint.readRegistrySnapshot() !== null
   deleteRegistryValue(DEVICE_VALUE)
   deleteRegistryValue(LEGACY_CODES_VALUE)
+  // v2 指纹快照一并清理（clearFingerprintSnapshots 内部容忍键不存在）
+  fingerprint.clearFingerprintSnapshots(app)
 
   const filePath = fallbackPath(app)
   const hadFile = fs.existsSync(filePath)

@@ -116,6 +116,34 @@ function uuid() {
   return crypto.randomUUID()
 }
 
+/** 配对 ID 持久化（userdata/dglab-pair.json）：进程重启 tid 不变，App 免重扫码。 */
+function clientIdStorePath() {
+  const path = require('path')
+  const baseDir = process.env.WAVEFORGE_USERDATA || path.join(require('os').homedir(), '.waveforge')
+  return path.join(baseDir, 'dglab-pair.json')
+}
+
+function loadPersistedClientId() {
+  try {
+    const raw = require('fs').readFileSync(clientIdStorePath(), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (typeof parsed.clientId === 'string' && /^[0-9a-f-]{36}$/i.test(parsed.clientId)) return parsed.clientId
+  } catch { /* 首次运行/损坏则重建 */ }
+  const fresh = uuid()
+  persistClientId(fresh)
+  return fresh
+}
+
+function persistClientId(id) {
+  try {
+    const fs = require('fs')
+    const path = require('path')
+    const file = clientIdStorePath()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ clientId: id, savedAt: Date.now() }), 'utf8')
+  } catch { /* 只读环境放弃持久化（每次重启需重扫码） */ }
+}
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value))
 }
@@ -223,7 +251,9 @@ function createDGLabRelay() {
     app: { v3: null, v4: new Map() }, // v3: 单 App ws；v4: Map(tid -> ws)
     ctrlClients: new Set(),
     controlToken: crypto.randomBytes(32).toString('base64url'),
-    clientId: uuid(),
+    // 配对 ID 持久化：控制端 tid 每次进程重启都换会让 App 上的配对全部失效（必须重新扫码）。
+    // 固定到 userdata 文件：进程/应用重启后 tid 不变，App 重连即可。
+    clientId: loadPersistedClientId(),
     v3AppId: null,
     devices: [], // V4 slot snapshot
     softLimit: null, // {A,B}（V3 App 反馈）
@@ -234,7 +264,7 @@ function createDGLabRelay() {
     v4KnownStrength: { A: 0, B: 0 },
     bound: false,
     logs: [],
-    timers: { heartbeat: null, silence: null },
+    timers: { heartbeat: null, silence: null, strengthWatchdog: null },
   }
 
   const log = (message) => {
@@ -267,7 +297,9 @@ function createDGLabRelay() {
     const text = raw.toString()
     try {
       const parsed = JSON.parse(text)
-      return JSON.stringify(parsed).slice(0, 200)
+      // 1200：devices.get resp 携带全量 props（强度/静音/comfortLimit），200 字符会截掉
+      // 诊断所需的关键字段
+      return JSON.stringify(parsed).slice(0, 1200)
     } catch {
       return `raw(${text.length}B): ${text.slice(0, 80).replace(/[^\x20-\x7E]/g, '·')}`
     }
@@ -368,6 +400,10 @@ function createDGLabRelay() {
     log(reason)
     state.engine.running = false
     try { sendClear() } catch { /* ws closed */ }
+    // 目标同步归零：差分驱动下不清目标的话，下一次 flush 会把强度原样推回去
+    v4TargetStrength = { A: 0, B: 0 }
+    engineState.A = { target: 0, current: 0 }
+    engineState.B = { target: 0, current: 0 }
     broadcastStatus()
   }
 
@@ -421,74 +457,117 @@ const sendV3Pulse = (channel, frames) => {
     return state.app.v4.keys().next().value
   }
 
-  // V4 强度差分聚合：App 端 AddIntensity 是 oneShot 任务，每条 req 都要入队执行。
-  // 引擎 30Hz 逐帧直发会让 App 每秒收到 20+ 条 t:3（实测 2026-10-12 日志：±1~6 高频
-  // 抖动、设备零输出）。聚合到 100ms 一条：目标值记在 v4TargetStrength，由 tick 统一
-  // 结算 delta；归零（t:7 v:0）即时直发不等窗口（安全路径不能等 100ms）。
+  // V4 强度驱动（真机 2026-10-23/24 两轮联调结论，替代旧 t:4 方案）：
+  //  - t:4 SetTempIntensity 是「持续任务」：真机上高频下发会叠加而非替换（强度爬到 120+），
+  //    且大量任务堆积会把波形任务饿死（有数值、无波形）。
+  //  - t:3 AddIntensity 是 oneShot 相对增量：即发即生效、无任务期。
+  // 关键坑（2026-10-24 实测）：App 的强度回报有 tick 滞后——在途增量尚未执行时 slots.patch
+  // 仍报旧值。若直接用回报值校准基线，同一增量会被重复下发，反复叠加越界（日志实录：
+  // B=74→归零→B=127→归零→…每秒打摆，设备输出被清没、「没波形」即此竞态）。
+  // 修复：基线只「单向收敛」——回报值 >= 已知值时采信；回报偏低（滞后）只记为降速信号，
+  // 不回拨基线。唯一例外：engine 目标为 0（正在归零）时回报值可以往下采。
+  let v4TargetStrength = { A: 0, B: 0 }
+  // 在途增量记账：发出但尚未被回报确认的 |delta|（校准竞态窗口用）
+  const v4InFlight = { A: 0, B: 0 }
   const v4Agg = {
-    target: { A: 0, B: 0 },
-    dirty: { A: false, B: false },
     lastFlush: 0,
-    timer: null,
   }
-  const flushV4StrengthAgg = (force = false) => {
+  const flushV4StrengthAgg = () => {
     const now = Date.now()
-    if (!force && now - v4Agg.lastFlush < 100) return
+    if (now - v4Agg.lastFlush < 100) return
     v4Agg.lastFlush = now
     for (const ch of ['A', 'B']) {
-      if (!force && !v4Agg.dirty[ch]) continue
-      v4Agg.dirty[ch] = false
-      // target=0 的通道在 force 续约时跳过：t:7 归零已在 dirty 时即时直发，
-      // 0 本身不是任务、无需续约（重发只会多一条无意义的归零帧）
-      if (force && v4Agg.target[ch] === 0) continue
-      // force（10s 续约）也发：t:4 任务 30s 自动归零，重发同值 = 续约（幂等）
-      sendV4StrengthNow(ch === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A, v4Agg.target[ch])
+      const target = engineState[ch].current > 0 || engineState[ch].target > 0
+        ? v4TargetStrength[ch]
+        : 0
+      const known = state.v4KnownStrength[ch]
+      const delta = clamp(Math.round(target - known), -200, 200)
+      if (delta === 0) continue
+      // 归零走 t:7（绝对 0），其余走 t:3 相对增量
+      sendV4StrengthDelta(ch, delta)
     }
   }
 
   const sendV4Strength = (channelIdx, strength) => {
     const channelKey = channelIdx === V4_CHANNEL.B ? 'B' : 'A'
     const value = clamp(Math.round(strength), 0, 200)
-    if (v4Agg.target[channelKey] === value && !v4Agg.dirty[channelKey]) return
-    v4Agg.target[channelKey] = value
-    v4Agg.dirty[channelKey] = true
-    // 归零是安全路径：绕过聚合窗口立即下发
-    if (value === 0) flushV4StrengthAgg(true)
-    else flushV4StrengthAgg()
-    if (!v4Agg.timer) {
-      v4Agg.timer = setInterval(() => {
-        if (state.app.v4.size === 0) return
-        // t:4 是 30s 自动归零的临时任务：目标值不变时也要周期重发续约，
-        // 否则静默段落（音乐平缓、目标长时间不变）会在 30s 后突然归零。
-        // 续约间隔 10s，留 20s 余量；聚合器内部按 dirty/force 语义跳过无变化通道。
-        flushV4StrengthAgg(true)
-      }, 10_000)
+    v4TargetStrength[channelKey] = value
+    // 归零是安全路径：立即直发不等聚合窗口
+    if (value === 0 && state.v4KnownStrength[channelKey] !== 0) {
+      sendV4SetZero(channelKey)
+      return
     }
+    flushV4StrengthAgg()
   }
 
-  const sendV4StrengthNow = (channelIdx, strength) => {
+  const sendV4StrengthDelta = (channelKey, delta) => {
     const slotId = state.devices[0]?.slotId
     if (!slotId) return
     for (const tid of state.app.v4.keys()) {
       const app = state.app.v4.get(tid)
       if (app.isClosed) continue
-      const value = clamp(Math.round(strength), 0, 200)
-      const channelKey = channelIdx === V4_CHANNEL.B ? 'B' : 'A'
-      // V4 强度三选一的最终结论（官方 README + 实测迭代）：
-      //  - t:7 SetIntensity 只接受 v=0；
-      //  - t:3 AddIntensity 是相对量，差分追踪会被 App tick 回报滞后拖到漂移（实测强度卡在 14 不动）；
-      //  - t:4 SetTempIntensity 是「绝对强度临时任务」：v=目标值一步到位，im:true 替换旧任务。
-      // t:4 任务到期会自动归零，因此 d 设 30s、由 10s 续约 tick 持续重发（幂等）。
-      let op
-      if (value === 0) {
-        op = { t: V4_ACTION.SetIntensity, v: 0 }
-      } else {
-        op = { t: V4_ACTION.SetTempIntensity, v: value, d: 30_000, im: true }
+      const chIdx = channelKey === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A
+      const capA = Math.min(state.settings.caps?.A ?? 200, state.softLimit?.A ?? 200)
+      const capB = Math.min(state.settings.caps?.B ?? 200, state.softLimit?.B ?? 200)
+      const cap = channelKey === 'B' ? capB : capA
+      if (delta > 0) {
+        // 正向增量不得把「已知+在途」顶过上限（含 softLimit），且不再叠加在途量
+        const ceiling = Math.min(cap, state.v4KnownStrength[channelKey] + v4InFlight[channelKey] + delta)
+        delta = Math.min(delta, ceiling - state.v4KnownStrength[channelKey] - v4InFlight[channelKey])
+        if (delta <= 0) return
       }
-      state.v4KnownStrength[channelKey] = value
-      sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: channelIdx, p: 1, ...op } })
-      verboseThrottled(`V4 下发强度 c=${channelIdx} t=${op.t} v=${op.v}（slot=${slotId}）`)
-      break // 1:N 时后续扩展：默认首个已连接设备
+      state.v4KnownStrength[channelKey] += delta
+      v4InFlight[channelKey] += Math.abs(delta)
+      sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: chIdx, p: 1, t: V4_ACTION.AddIntensity, v: delta } })
+      verboseThrottled(`V4 下发强度 c=${chIdx} t=3 v=${delta}（known=${state.v4KnownStrength[channelKey]}，inFlight=${v4InFlight[channelKey]}，slot=${slotId}）`)
+      break
+    }
+  }
+
+  const sendV4SetZero = (channelKey) => {
+    const slotId = state.devices[0]?.slotId
+    if (!slotId) return
+    for (const tid of state.app.v4.keys()) {
+      const app = state.app.v4.get(tid)
+      if (app.isClosed) continue
+      const chIdx = channelKey === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A
+      state.v4KnownStrength[channelKey] = 0
+      v4TargetStrength[channelKey] = 0
+      v4InFlight[channelKey] = 0
+      sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: chIdx, p: 1, t: V4_ACTION.SetIntensity, v: 0 } })
+      log(`V4 下发归零 c=${chIdx}（t:7 v:0）`)
+      break
+    }
+  }
+
+  /**
+   * 用 App 回报的真实强度校准差分基线，并执行用户上限（硬上限兜底）。
+   * 竞态防护（2026-10-24）：回报含 tick 滞后——在途增量未执行时回报仍是旧值。
+   *  - 回报 >= 基线 - 在途：正常确认，采信并把在途清零；
+   *  - 回报偏低且在途 > 0：判定为滞后，不回拨基线（只等下一个 tick）；
+   *  - 回报超过 min(caps, softLimit)：真越界 → t:7 立即归零（最后一道闸）。
+   */
+  const enforceKnownStrength = (channelKey, raw) => {
+    const reported = clamp(Math.round(Number(raw)), 0, 200)
+    const capA = Math.min(state.settings.caps?.A ?? 200, state.softLimit?.A ?? 200)
+    const capB = Math.min(state.settings.caps?.B ?? 200, state.softLimit?.B ?? 200)
+    const cap = channelKey === 'B' ? capB : capA
+    if (reported > cap) {
+      log(`⚠️ [V4] 设备强度越界：${channelKey}=${reported} > 上限${cap} → 立即归零（看门狗）`)
+      sendV4SetZero(channelKey)
+      return
+    }
+    if (v4InFlight[channelKey] > 0) {
+      // 在途未确认：回报 >= 基线（已经到位）才采信并清在途；偏低视为滞后，保持基线
+      if (reported >= state.v4KnownStrength[channelKey]) {
+        v4InFlight[channelKey] = 0
+        state.v4KnownStrength[channelKey] = reported
+      }
+      return
+    }
+    // 无在途：引擎目标为 0（归零中）时回报值可自由下采；否则只单向收敛防滞后回推
+    if (reported >= state.v4KnownStrength[channelKey] || v4TargetStrength[channelKey] === 0) {
+      state.v4KnownStrength[channelKey] = reported
     }
   }
 
@@ -964,15 +1043,20 @@ const sendV3Pulse = (channel, frames) => {
     state.engine.lastSendAt = now
 
     // 节拍脉冲：上升沿立即触发 + 节拍锁定（持续鼓点时按节拍间隔连续敲击），
-    // 且与上次间隔 ≥ max(120ms, 节拍×0.85)
+    // 且与上次间隔 ≥ max(120ms, 节拍×0.85)。
+    // V4 真机限流（2026-10-24）：脉冲段 A/B 各一条 + LiveWave 叠加时峰值 13 帧/s，
+    // App（DG-Lab 4）帧处理扛不住会 abort（code=1006）。V4 增加最小脉冲间隔 300ms
+    // （V3 官方 App 无此问题，保持原逻辑），把总下发压到 ≤8 帧/s。
     const prevBeat = engineState.prevBeat
     engineState.prevBeat = audio.beat ?? 0
 
     const out = mapAudio(audio)
     const beatPeriodMs = Math.max(0.12, (engineState.pulsePeriod || 0.5) * 0.85) * 1000
+    const pulseMinGapMs = state.settings.version === 'v3' ? 0 : 300
     const risingEdge = prevBeat <= 0.22 && out.beat > 0.35
-    const tempoLocked = out.beat > 0.35 && (now - engineState.lastPulseAt) >= beatPeriodMs
+    const tempoLocked = out.beat > 0.35 && (now - engineState.lastPulseAt) >= Math.max(beatPeriodMs, pulseMinGapMs)
     const pulseNow = state.settings.pulseEnabled && (risingEdge || tempoLocked) && out.beat > 0.3
+      && now - engineState.lastPulseAt >= pulseMinGapMs
     if (pulseNow) {
       engineState.lastPulseAt = now
       // 脉冲频率即时调制：风格 carrier 为基底，随高频能量与乐速上升（频率维度也 1:1 跟歌）
@@ -1018,7 +1102,11 @@ const sendV3Pulse = (channel, frames) => {
 
     // LiveWave 实时波形流：每 100ms 追加一帧「实时 freq+强度」波形帧（A/B 交替），
     // 让 App 端实时波形像官方实时音频模式一样**连续绘制、频率随音乐变化**（队列 500 帧≈50s，10帧/s 不掉队）。
-    if (now - engineState.liveWaveAt >= 100) {
+    // V4 真机限流（2026-10-24）：叠加节拍脉冲后峰值 13 帧/s，App 的 WebSocket 处理扛不住
+    // 洪峰（00:09 存活 3s、00:23 存活 ~2min 后 abort code=1006；2026-10-12 亦有帧洪水 abort 先例）。
+    // V4 路径把 LiveWave 降到 200ms 一帧（5帧/s），与脉冲错峰；App 实时波形仍连续，只是步进更疏。
+    const liveWaveInterval = state.settings.version === 'v3' ? 100 : 200
+    if (now - engineState.liveWaveAt >= liveWaveInterval) {
       engineState.liveWaveAt = now
       const side = engineState.liveWaveSide
       engineState.liveWaveSide = side === 'A' ? 'B' : 'A'
@@ -1429,6 +1517,11 @@ const sendV3Pulse = (channel, frames) => {
     log(`V4 已发送 hello + controller_attached（app=${ws._v4ClientId} controller=${state.clientId}）`)
     // 设备列表
     sendDevicesGet(ws)
+    // 连接即清残留任务（不带 data = 清全部设备全部通道）：App 端可能留着上一次会话的
+    // t:4 临时强度任务（30s 有效期内在续命，实测 A=120 残留 20 分钟+，App tick 会一直
+    // 维持）。不 clear 的话设备会带着旧强度出波形，且越过用户上限。
+    sendV4ToApp(ws, { t: 'req', reqId: uuid(), m: 'device.op.clear', data: {} })
+    verboseLog('V4 连接即清残留任务（device.op.clear 全量）')
     // 连接即发一次心跳：App 的连接期看门狗只认「收到服务端心跳」，15s 定时器的相位
     // 可能让首个心跳迟到 15s —— 远超 App 容忍（实测 ~5-8s 即 abort）。
     try { ws.send(JSON.stringify({ type: 'heartbeat' })) } catch { /* ignore */ }
@@ -1462,8 +1555,17 @@ const sendV3Pulse = (channel, frames) => {
             A: clamp(Math.round(Number(dev.props?.intensityA ?? 0)), 0, 200),
             B: clamp(Math.round(Number(dev.props?.intensityB ?? 0)), 0, 200),
           }
-          v4Agg.target = { ...state.v4KnownStrength }
-          v4Agg.dirty = { A: false, B: false }
+          // 已知强度重置为 App 真实值；目标归零：连接瞬间引擎差分会把残留强度拉回目标
+          //（引擎未跑时目标为 0 → delta 为负 → t:3 负增量/超限时看门狗 t:7 兜底）
+          v4TargetStrength = {
+            A: state.engine.running ? state.v4KnownStrength.A : 0,
+            B: state.engine.running ? state.v4KnownStrength.B : 0,
+          }
+          if (!state.engine.running && (state.v4KnownStrength.A > 0 || state.v4KnownStrength.B > 0)) {
+            log(`V4 连接时设备残留强度 A=${state.v4KnownStrength.A} B=${state.v4KnownStrength.B}（引擎未启动）→ 发送归零`)
+            sendV4SetZero('A')
+            sendV4SetZero('B')
+          }
           // 通道静音检测：App 端把通道静音后，所有强度/波形指令都会被 App 接受但设备零输出
           //（协议没有远程解除静音的操作，只能提示用户在 App 里手动关掉）
           const muteA = dev.slotState?.channelA?.isMuted === true
@@ -1483,13 +1585,12 @@ const sendV3Pulse = (channel, frames) => {
       } else if (msg.t === 'ev' && msg.ev === 'slots.patch') {
         const slots = Array.isArray(msg.slots) ? msg.slots : []
         state.softLimit = extractSoftLimit(slots)
-        if (state.softLimit) log(`V4 收到设备软上限 softLimit.A=${state.softLimit.A} softLimit.B=${state.softLimit.B}`)
         // App 按 tick 回报强度变化：校准差分追踪（App 侧手动调整/上限爬坡都不会让 delta 失真）
         for (const slot of slots) {
           const ia = slot?.props?.intensityA
           const ib = slot?.props?.intensityB
-          if (Number.isFinite(Number(ia))) state.v4KnownStrength.A = clamp(Math.round(Number(ia)), 0, 200)
-          if (Number.isFinite(Number(ib))) state.v4KnownStrength.B = clamp(Math.round(Number(ib)), 0, 200)
+          if (Number.isFinite(Number(ia))) enforceKnownStrength('A', Number(ia))
+          if (Number.isFinite(Number(ib))) enforceKnownStrength('B', Number(ib))
           // isMuted 可能被用户在 App 里随时开关，静音期间所有指令都会被接受但设备零输出
           const muteA = slot?.slotState?.channelA?.isMuted
           const muteB = slot?.slotState?.channelB?.isMuted
@@ -1523,8 +1624,9 @@ const sendV3Pulse = (channel, frames) => {
         state.bound = false
         state.devices = []
         state.v4KnownStrength = { A: 0, B: 0 }
-        v4Agg.target = { A: 0, B: 0 }
-        v4Agg.dirty = { A: false, B: false }
+        v4TargetStrength = { A: 0, B: 0 }
+        v4InFlight.A = 0
+        v4InFlight.B = 0
         log(`V4 App 已断开（code=${code} reason=${reason.toString().slice(0, 100) || '无'}）`)
         safetyStop('V4 App 断开，安全归零')
         broadcastStatus()
@@ -1563,6 +1665,28 @@ const sendV3Pulse = (channel, frames) => {
         lastActive = now
       }
     }, 500)
+  }
+
+  /** 强度看门狗（V4）：定期 devices.get 拉全量快照。
+   *  双职责：
+   *  1) 硬上限兜底——用户上限(caps)只在 App 端设备强度上生效；真机上任何失控（旧任务残留、
+   *     App 端手动爬升、差分漂移）都会在这里被拉回：超过 min(caps, softLimit) 立即 t:7 归零
+   *     （安全优先：不做精确回落，直接清零由引擎差分重新升起）。
+   *  2) 校准 v4KnownStrength——差分驱动的基线以 App 真实回报为准，防漂移。
+   */
+  const startStrengthWatchdog = () => {
+    stopStrengthWatchdog()
+    state.timers.strengthWatchdog = setInterval(() => {
+      if (state.settings.version !== 'v4' || state.app.v4.size === 0) return
+      for (const app of state.app.v4.values()) {
+        if (!app.isClosed) sendDevicesGet(app)
+      }
+    }, 5000)
+  }
+
+  const stopStrengthWatchdog = () => {
+    if (state.timers.strengthWatchdog) clearInterval(state.timers.strengthWatchdog)
+    state.timers.strengthWatchdog = null
   }
 
   const startHeartbeat = () => {
@@ -1668,6 +1792,7 @@ const sendV3Pulse = (channel, frames) => {
       log(`  V4 扫码地址 = ${st.urlV4}`)
       if (state.settings.devMode) console.log('[DG_LAB-调试] 开发者模式已开启（启动阶段）')
       startHeartbeat()
+      startStrengthWatchdog()
       broadcastStatus()
     })
   }
@@ -1700,13 +1825,10 @@ const sendV3Pulse = (channel, frames) => {
     state.bound = false
     state.devices = []
     state.v4KnownStrength = { A: 0, B: 0 }
-    v4Agg.target = { A: 0, B: 0 }
-    v4Agg.dirty = { A: false, B: false }
-    // V4 续约定时器一并清理：否则停止后每 10s 空转一次（永不自停）
-    if (v4Agg.timer) {
-      clearInterval(v4Agg.timer)
-      v4Agg.timer = null
-    }
+    v4TargetStrength = { A: 0, B: 0 }
+    v4InFlight.A = 0
+    v4InFlight.B = 0
+    stopStrengthWatchdog()
     broadcastStatus()
   }
 

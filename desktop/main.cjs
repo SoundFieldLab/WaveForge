@@ -2292,6 +2292,21 @@ function readSecureCredentialsField(keyName) {
   }
 }
 
+// 写渲染层 secure-store 命名空间里的一个键（与 secure-store:set IPC 同格式加密落盘）。
+// 供主进程自有链路刷新凭据用（如 Spotify 直播通道的 token 续期）；渲染层内存缓存
+// 可能持旧值 —— 渲染层下次 hydrate 时会读到新值。
+function writeSecureCredentialsField(keyName, value) {
+  if (!safeStorage.isEncryptionAvailable()) return false
+  try {
+    const credentials = readSecureCredentials()
+    credentials[`secure-store:${keyName}`] = safeStorage.encryptString(String(value ?? '')).toString('base64')
+    writeSecureCredentials(credentials)
+    return true
+  } catch {
+    return false
+  }
+}
+
 function readQQMusicSkillKey() {
   if (!safeStorage.isEncryptionAvailable()) return ''
   const encrypted = readSecureCredentials()[QQMUSIC_SKILL_CREDENTIAL]
@@ -9897,6 +9912,7 @@ async function ensurePythonService(name) {
         ...process.env,
         WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
         WAVEFORGE_CACHE_PATH: configManager.getCachePath(),
+        WAVEFORGE_PROJECT_ROOT: path.resolve(__dirname, '..'),
         ...(service.script === 'beat_analyzer.py' ? {
           BEAT_THIS_CHECKPOINT: beatModelPath,
           WAVEFORGE_BEAT_MODEL_PATH: beatModelPath,
@@ -10118,6 +10134,7 @@ async function startLocalBackend() {
         // 歌单详情磁盘缓存的根与主进程 cachePath 同源（此前漏传导致该缓存固定写
         // userData\cache，迁移/自定义盘后仍在 C 盘堆积）
         WAVEFORGE_CACHE_PATH: configManager.getCachePath(),
+        WAVEFORGE_PROJECT_ROOT: path.resolve(__dirname, '..'),
       },
       stdio: 'pipe',
     })
@@ -11206,15 +11223,163 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
   // ── Spotify 直播通道（librespot + waveforge-spotify:// 协议）────────────────
   // 懒建会话：第一次播放才连 Spotify。librespot 缺 prebuilt 时通道不可用，
   // 渲染层 issue 失败 → 降级载体匹配（getPlatformCapabilities('spotify') 口径）。
-  const { createSpotifyAudio } = require('./spotifyAudio.cjs')
-  let spotifyAudio = null
+  // access token 约 1 小时过期：连接报 Bad credentials 时用 refresh token 换新再试
+  //（渲染层的 refreshSpotifyToken 只覆盖 Web API 401 通道，不覆盖直播路径）。
+  let spotifyRefreshBusy = null
+  const SPOTIFY_AUDIO_CLIENT_ID = '65b708073fc0480ea92a077233ca87bd'
+  const refreshSpotifyAccessToken = async () => {
+    if (!spotifyRefreshBusy) {
+      spotifyRefreshBusy = (async () => {
+        const refreshToken = readSecureCredentialsField('spotify_refresh_token')
+        if (!refreshToken) return false
+        try {
+          const resp = await fetch('https://accounts.spotify.com/api/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'refresh_token',
+              refresh_token: refreshToken,
+              client_id: SPOTIFY_AUDIO_CLIENT_ID,
+            }),
+          })
+          if (!resp.ok) return false
+          const data = await resp.json()
+          if (!data.access_token) return false
+          writeSecureCredentialsField('spotify_access_token', String(data.access_token))
+          if (data.refresh_token) writeSecureCredentialsField('spotify_refresh_token', String(data.refresh_token))
+          return true
+        } catch {
+          return false
+        }
+      })().finally(() => { spotifyRefreshBusy = null })
+    }
+    return spotifyRefreshBusy
+  }
+  const freshSpotifyAccessToken = async () => {
+    let token = readSecureCredentialsField('spotify_access_token')
+    if (!token) return token
+    try {
+      const probe = await fetch('https://api.spotify.com/v1/me', { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000) })
+      if (probe.status === 401 || probe.status === 403) {
+        const refreshed = await refreshSpotifyAccessToken()
+        if (refreshed) token = readSecureCredentialsField('spotify_access_token')
+      }
+    } catch { /* 探测失败照旧用原 token（可能只是网络抖动） */ }
+    return token
+  }
+
+  // ── 子进程隔离层 ──
+  // librespot 的 resolveAudioFileAsync 在部分 Windows 机器上原生 abort（整个进程消失、
+  // 无 JS 堆栈、无 crash-log）。locate 阶段搬进 utilityProcess：崩了只损失一次解析，
+  // 主进程把失败转成 SPOTIFY_CHILD_CRASH，上层照常降级。
+  // CDN 取流/解密仍在主进程协议 handler 内（流式、高频，不值得再跨进程一跳）。
+  let spotifyChild = null
+  let spotifyChildSeq = 0
+  const spotifyChildPending = new Map()
+
+  const killSpotifyChild = (reason) => {
+    if (spotifyChild) {
+      try { spotifyChild.kill() } catch { /* 已死 */ }
+      spotifyChild = null
+    }
+    for (const [, settle] of spotifyChildPending) {
+      try { settle.reject(new Error(`SPOTIFY_CHILD_CRASH: ${reason}`)) } catch { /* 已结算 */ }
+    }
+    spotifyChildPending.clear()
+  }
+
+  const getSpotifyChild = () => {
+    if (spotifyChild && !spotifyChild.exited) return spotifyChild
+    const child = utilityProcess.fork(path.join(__dirname, 'spotify-audio-child.cjs'), [], {
+      serviceName: 'waveforge-spotify-audio',
+      stdio: 'ignore',
+    })
+    child.exited = false
+    child.on('message', (message) => {
+      const data = message ?? {}
+      if (data.type === 'issue-ok' || data.type === 'issue-err') {
+        const settle = spotifyChildPending.get(data.id)
+        if (settle) {
+          spotifyChildPending.delete(data.id)
+          clearTimeout(settle.timer)
+          if (data.type === 'issue-ok') settle.resolve(data)
+          else settle.reject(new Error(data.error || 'SPOTIFY_CHILD_ERROR'))
+        }
+      }
+    })
+    child.on('exit', () => {
+      child.exited = true
+      if (spotifyChild === child) {
+        spotifyChild = null
+        for (const [, settle] of spotifyChildPending) {
+          try { settle.reject(new Error('SPOTIFY_CHILD_CRASH: child exited')) } catch { /* 已结算 */ }
+        }
+        spotifyChildPending.clear()
+        console.warn('[Spotify] 音频子进程退出（librespot 原生崩溃隔离生效），下次请求自动重建')
+      }
+    })
+    spotifyChild = child
+    return child
+  }
+
+  // 通过子进程定位曲目 → { cdnUrl, keyHex, format, mimeType, skip, total, length }
+  const locateViaChild = (trackId, bitrate) => new Promise((resolve, reject) => {
+    const child = getSpotifyChild()
+    const id = ++spotifyChildSeq
+    const timer = setTimeout(() => {
+      spotifyChildPending.delete(id)
+      reject(new Error('SPOTIFY_CHILD_TIMEOUT'))
+    }, 45_000)
+    spotifyChildPending.set(id, { resolve, reject, timer })
+    freshSpotifyAccessToken().then((token) => {
+      try { child.postMessage({ type: 'issue', id, trackId, bitrate, accessToken: token }) } catch (error) {
+        spotifyChildPending.delete(id)
+        clearTimeout(timer)
+        reject(error)
+      }
+    }, (error) => {
+      spotifyChildPending.delete(id)
+      clearTimeout(timer)
+      reject(error)
+    })
+  })
+
+  // 主进程侧轻量包装：只持 CDN 元数据与已发 key（取流/解密协议不跨进程）
+  const spotifyRemoteMeta = new Map()
+
   const getSpotifyAudio = () => {
     if (!spotifyAudio) {
-      spotifyAudio = createSpotifyAudio({
-        getAccessToken: () => readSecureCredentialsField('spotify_access_token'),
-        log: (message) => console.log(`[Spotify] ${message}`),
-        warn: (message) => console.warn(`[Spotify] ${message}`),
-      })
+      spotifyAudio = {
+        available: () => true,
+        async prime() {
+          try { await freshSpotifyAccessToken(); return true } catch { return false }
+        },
+        invalidate() {
+          spotifyRemoteMeta.clear()
+          killSpotifyChild('invalidate')
+        },
+        async issue(trackId, quality = 'high') {
+          if (!/^[0-9A-Za-z]{22}$/.test(String(trackId ?? ''))) throw new Error('SPOTIFY_BAD_TRACK_ID')
+          const bitrate = quality === 'lossless' ? 320 : quality === 'high' ? 160 : 96
+          let located
+          try {
+            located = await locateViaChild(String(trackId), bitrate)
+          } catch (error) {
+            // 子进程原生崩溃后重建一次再试（librespot 崩溃常在首连；第二次往往成功）
+            if (/SPOTIFY_CHILD_CRASH/.test(String(error?.message ?? ''))) {
+              killSpotifyChild('retry-rebuild')
+              located = await locateViaChild(String(trackId), bitrate)
+            } else {
+              throw error
+            }
+          }
+          const key = require('crypto').randomBytes(16).toString('hex')
+          spotifyRemoteMeta.set(key, { trackId: String(trackId), bitrate, ...located })
+          while (spotifyRemoteMeta.size > 64) spotifyRemoteMeta.delete(spotifyRemoteMeta.keys().next().value)
+          return { key, mimeType: located.mimeType, total: located.total }
+        },
+        holds(key) { return spotifyRemoteMeta.has(String(key ?? '')) },
+      }
     }
     return spotifyAudio
   }
@@ -11236,15 +11401,51 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
         from = rangeMatch[1] ? Number(rangeMatch[1]) : 0
         to = rangeMatch[2] ? Number(rangeMatch[2]) : null
       }
-      const channel = getSpotifyAudio()
-      if (!channel.holds(key)) {
+      const meta = spotifyRemoteMeta.get(String(key))
+      if (!meta) {
         return new Response('invalid key', { status: 403 })
       }
-      const opened = await channel.openRange(key, from, to ?? Number.MAX_SAFE_INTEGER)
-      if (!opened.stream) {
-        return new Response(null, { status: opened.status, headers: opened.headers })
+      // CDN Range 取流 + AES-CTR 解密（密钥不出主进程）；Ogg 头 skip 剥离
+      const crypto = require('crypto')
+      const skip = meta.skip || 0
+      const fileFrom = Math.max(0, Math.floor(from) + skip)
+      const fileTo = to === null || to === undefined ? null : Math.min(Number.MAX_SAFE_INTEGER, Math.floor(to) + skip)
+      const control = new AbortController()
+      const limit = setTimeout(() => control.abort(), 30_000)
+      let response
+      try {
+        response = await fetch(meta.cdnUrl, { headers: { Range: `bytes=${fileFrom}-${fileTo ?? ''}` }, signal: control.signal })
+      } finally {
+        clearTimeout(limit)
       }
-      return new Response(opened.stream, { status: opened.status, headers: opened.headers })
+      if (response.status !== 206 && response.status !== 200) {
+        try { control.abort() } catch { /* 已断 */ }
+        return new Response(`cdn http ${response.status}`, { status: response.status === 416 ? 416 : 502 })
+      }
+      const contentRange = response.headers.get('content-range') ?? ''
+      const totalMatch = /\/(\d+)$/.exec(contentRange)
+      const fileTotal = totalMatch ? Number(totalMatch[1]) : 0
+      const buffer = Buffer.from(await response.arrayBuffer())
+      // AES-CTR：key 是 16 字节音频密钥，IV 从请求起点所在 16 字节块开始
+      const audioKey = Buffer.from(meta.keyHex, 'hex')
+      const blockBase = Math.floor(fileFrom / 16) * 16
+      const offsetInBlock = fileFrom - blockBase
+      const ivCounter = Buffer.alloc(16)
+      ivCounter.writeBigUInt64BE(BigInt(Math.floor(blockBase / 16)), 8)
+      const decipherAligned = crypto.createDecipheriv('aes-128-ctr', audioKey, ivCounter)
+      const decrypted = decipherAligned.update(buffer)
+      const out = decrypted.subarray(offsetInBlock)
+      const audioFrom = Math.floor(from)
+      const total = meta.total || (fileTotal > skip ? fileTotal - skip : 0)
+      return new Response(out, {
+        status: 206,
+        headers: {
+          'Content-Type': meta.mimeType || 'audio/ogg',
+          'Content-Length': String(out.length),
+          'Content-Range': `bytes ${audioFrom}-${audioFrom + out.length - 1}/${total || '*'}`,
+          'Accept-Ranges': 'bytes',
+        },
+      })
     } catch (error) {
       const message = String(error?.message ?? error)
       // key 失效/越界类返回 4xx 让播放器重新走 getSongUrl；CDN 侧失败 5xx 触发上层重试

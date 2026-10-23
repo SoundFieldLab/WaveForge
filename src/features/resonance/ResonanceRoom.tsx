@@ -16,7 +16,7 @@ import {
 } from 'lucide-react'
 import CachedImage from '../../components/CachedImage'
 import { platformLabel } from '../../services/platforms'
-import { RESONANCE_MODE_LABEL, type ResonanceRoomState, type ResonanceTrack } from './model'
+import { RESONANCE_MODE_LABEL, isQueuePlaceholder, type ResonanceRoomState, type ResonanceTrack } from './model'
 import type { ResonanceSessionSnapshot } from './session'
 import type { ResonanceSettings } from './settings'
 
@@ -96,6 +96,8 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
   const queueScrollRef = useRef<HTMLDivElement>(null)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [copied, setCopied] = useState('')
+  /** 队列清单复制成功提示（1.8s 自动回落） */
+  const [queueCopied, setQueueCopied] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   const border = dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'
@@ -329,7 +331,8 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
                   <span className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: chip }}>
                     <span className="block h-full rounded-full" style={{ width: `${nowPlaying.durationMs ? Math.min(100, (nowPlaying.positionMs / nowPlaying.durationMs) * 100) : 0}%`, background: accent }} />
                   </span>
-                  <span>{formatClock(nowPlaying.durationMs)}</span>
+                  {/* 剩余时间：负值（进度略超时长）钳到 0 */}
+                  <span>-{formatClock(Math.max(0, nowPlaying.durationMs - nowPlaying.positionMs))}</span>
                 </div>
               )}
 
@@ -364,12 +367,30 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
           <header className="mb-2 flex items-center gap-2">
             <h3 className="text-sm font-semibold">播放队列</h3>
             <span className="text-xs" style={{ color: sub }}>{snapshot.queue.total} 首{loadedCount < snapshot.queue.total ? `（已载入 ${loadedCount}）` : ''}</span>
+            {/* 复制队列清单：把已载入的队列文本化，方便分享到群聊 */}
+            <button
+              type="button"
+              onClick={() => {
+                const lines = queue
+                  .filter(track => !isQueuePlaceholder(track))
+                  .map((track, index) => `${index + 1}. ${track.title} - ${(track.artists || []).join('/')}${track.requestedBy ? `（${room.members.find(member => member.peerId === track.requestedBy)?.nickname || ''}点）` : ''}`)
+                void navigator.clipboard?.writeText(`【共振房间队列】共 ${snapshot.queue.total} 首\n${lines.join('\n')}`)
+                setQueueCopied(true)
+                window.setTimeout(() => setQueueCopied(false), 1800)
+              }}
+              disabled={queue.length === 0}
+              className="ml-auto flex items-center gap-1 rounded-full px-2.5 py-1.5 text-xs disabled:opacity-40"
+              style={{ background: chip, color: sub }}
+              title="把已载入的队列清单复制到剪贴板"
+            >
+              {queueCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}{queueCopied ? '已复制' : '复制清单'}
+            </button>
             {(isHost || room.mode !== 'shared-playlist') && (
               <button
                 type="button"
                 onClick={onOpenAdd}
                 disabled={room.mode === 'round-robin' && !snapshot.myTurn}
-                className="ml-auto flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium text-white disabled:opacity-45"
+                className="flex items-center gap-1 rounded-full px-3 py-1.5 text-xs font-medium text-white disabled:opacity-45"
                 style={{ background: accent }}
                 title={room.mode === 'round-robin' && !snapshot.myTurn ? '还没轮到你推荐' : '挑歌加入'}
               >

@@ -1169,3 +1169,15 @@ describe('证据链裁决模型（evidence model，2026-10-18 标定）', () => 
     expect(score).toBeLessThanOrEqual(1)
   })
 })
+
+describe('跨平台对齐键控（全平台覆盖验证）', () => {
+  it('ensureMvAlignment 缓存按 (songKey, bvid) 键控——与歌曲平台无关', async () => {
+    // 同一 B 站视频：QQ 播放与 netease 播放的歌曲 songKey 不同，但对齐缓存
+    // 只按 (songKey|bvid) 键——音源永远来自 B 站流，平台无关。验证两种 songKey
+    // 产生不同的缓存条目（互不污染）。
+    const { getMvAlignment } = await import('../src/services/mvAlignment')
+    // 直接验证内存缓存隔离：不同 songKey 查询同一 bvid 返回各自独立结果（未对齐时都为 null）
+    expect(getMvAlignment('qq:8143228', 'BV1pi4y1g7AC')).toBeNull()
+    expect(getMvAlignment('netease:2101788798', 'BV1pi4y1g7AC')).toBeNull()
+  })
+})

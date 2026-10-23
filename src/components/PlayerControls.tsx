@@ -1514,29 +1514,25 @@ export default function PlayerControls({
                   }}
                 >
                   {/* 引擎名已恢复悬浮在条上方（锚定外层常驻容器，白条/药丸两种状态都显示） */}
-                  {/* 进度行退场策略（v2）：收起时内容**先**整体淡出（0.16s），淡出完成后 padding
-                      才随同一条 framer 时间线收零（0.28s 宽度收缩并行）——padding 变化发生在
-                      内容不可见期间，既无旧版的"padding 清零→内容拉满→宽度收"挤压窗口，
-                      也不会像 v1（恒定 pl）那样把收起态 360px 药丸撑成空壳（收起态没有左侧
-                      按钮集群，预留 132px 纯属浪费且溢出）。展开反向：padding 先到位（0s），
-                      内容 0.1s 后淡入——按钮落位后进度行才出现。padding 与 opacity 由同一
-                      framer animate 驱动（同曲线），不再两条系统打架。 */}
+                  {/* 进度行退场策略（v3）：收起态内容**保留**（0.7 透明度的进度行就是收起态的样子——
+                      完全淡出会让 360px 药丸剩一颗空壳，看起来像控件坏了）。收起时内容先快速变暗
+                      （0.16s），padding/宽度随后收拢（同一条 framer 时间线、同曲线，挤压发生在
+                      已变暗的内容上）；展开反向：padding 先到位（0s），内容 0.1s 后淡入——按钮落位
+                      后进度行才出现。padding 与 opacity 同由 framer animate 驱动，不再两条系统打架。 */}
                   <div className="relative overflow-hidden">
                     <motion.div
                       className="w-full"
                       animate={{
-                        opacity: isExpanded ? 1 : 0,
-                        x: isExpanded ? 0 : -14,
+                        opacity: isExpanded ? 1 : 0.7,
                         paddingLeft: isExpanded ? '8.25rem' : '0rem',
                       }}
                       // 展开：padding 立即到位（无延迟），内容 0.1s 后淡入；
-                      // 收起：内容立刻淡出（0.16s），padding 随后归零（0.28s，与宽度同程）
+                      // 收起：内容立刻变暗（0.16s），padding 随后归零（0.28s，与宽度同程）
                       transition={{
                         duration: isExpanded ? 0.3 : 0.28,
                         delay: isExpanded ? 0 : 0.16,
                         ease: [0.32, 0.72, 0, 1],
                         opacity: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
-                        x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
                       }}
                     >
                       {/* TV 紧凑药丸（480px）并入右侧控件后行内固定宽度更大，滑轨下限相应收窄防溢出 */}
@@ -1770,14 +1766,13 @@ export default function PlayerControls({
           {/* 引擎名已恢复悬浮在条上方（见本容器开头 AutomixEngineLabel） */}
           {/* 进度条区域：展开态左侧 pl 预留上一首/播放/下一首集群，右侧控件组并入行尾共享 gap，
               滑块弹性自适应；任何宽度下时间文字都不会再与两侧按钮相压。
-              退场策略与沉浸模式一致（见 renderImmersiveLayout 内 v2 注释）：收起时内容先淡出，
-              padding 随同一条 framer 时间线归零（变化发生在内容不可见期间），无挤压无空壳。 */}
+              退场策略与沉浸模式一致（见 renderImmersiveLayout 内 v3 注释）：收起态内容保留
+              （0.7 变暗进度行），收起时先变暗 padding 再归零，无挤压无空壳。 */}
           <div className="relative overflow-hidden">
             <motion.div
               className="w-full"
               animate={{
-                opacity: isExpanded ? 1 : 0,
-                x: isExpanded ? 0 : -14,
+                opacity: isExpanded ? 1 : 0.7,
                 paddingLeft: isExpanded ? '8.25rem' : '0rem',
               }}
               transition={{
@@ -1785,7 +1780,6 @@ export default function PlayerControls({
                 delay: isExpanded ? 0 : 0.16,
                 ease: [0.32, 0.72, 0, 1],
                 opacity: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
-                x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
               }}
             >
               {renderProgressContent('flex-1 min-w-[7rem]', 'gap-3')}

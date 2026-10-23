@@ -69,7 +69,8 @@ async function main() {
   if (head.status !== 200) throw new Error(`GitHub API 不可达（HTTP ${head.status}），无法验证开发者身份`)
   const commit = JSON.parse(head.body)[0]
   if (!commit) throw new Error('花名册尚无签名提交')
-  if (!(commit.verification && commit.verification.verified)) throw new Error('花名册最新提交未通过 GitHub 签名校验')
+  const verification = commit.verification || (commit.commit && commit.commit.verification) || {}
+  if (!(verification.verified)) throw new Error('花名册最新提交未通过 GitHub 签名校验')
 
   // 签名者解析（与 desktop/developer-auth.cjs 同规则）
   const commitLogin = ((commit.author && commit.author.login)
@@ -78,7 +79,7 @@ async function main() {
   if (!commitLogin || !developers.includes(commitLogin)) throw new Error(`签名提交者 ${commitLogin || '(未知)'} 不在花名册`)
 
   if (!token) throw new Error('需要 GitHub token（GH_TOKEN 环境变量或请求参数 githubToken）走协作者强校验')
-  const me = await apiGet('user')
+  const me = await apiGet('/user')
   if (me.status !== 200) throw new Error(`GitHub token 无效（HTTP ${me.status}）`)
   const login = (JSON.parse(me.body).login || '').toLowerCase()
   if (login !== commitLogin) throw new Error(`token 账号 ${login} 与花名册签名者 ${commitLogin} 不一致`)

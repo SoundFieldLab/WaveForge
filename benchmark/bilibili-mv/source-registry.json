@@ -407,5 +407,72 @@
    "https://space.bilibili.com/15319615"
   ],
   "note": "2026-10-22 用户确认 + 全量遍历 638 份投稿：362 期完整版 OP/ED/主题曲；328 首 QQ 标注，227 条入库（bilibiliOpEdExtensions v2，与 PCS 同曲 2 例由多版本播放数取胜）"
+ },
+{
+  "canonicalName": "沙理戰-動漫遊戲頻道-",
+  "aliases": [
+   "沙理戰-動漫遊戲頻道-"
+  ],
+  "roles": [
+   [
+    "oped-complete-restorer"
+   ]
+  ],
+  "scope": [
+   "经典/老番动画 OP 完整还原（回忆系列 908 期 MAD·AMV）"
+  ],
+  "bilibiliMids": [
+   407183085
+  ],
+  "verification": "archive-scan",
+  "verifiedAt": "2026-10-23",
+  "sources": [
+   "https://space.bilibili.com/407183085"
+  ],
+  "note": "2026-10-23 搜索发现 + 档案抽检：官方素材完整歌长还原，desc 带完整制作信息；未逐曲核验"
+ },
+{
+  "canonicalName": "幻空绘星",
+  "aliases": [
+   "幻空绘星"
+  ],
+  "roles": [
+   [
+    "bd-ncop-nced-uploader"
+   ]
+  ],
+  "scope": [
+   "BD 特典 NCOP/NCED 蓝光搬运"
+  ],
+  "bilibiliMids": [
+   22644094
+  ],
+  "verification": "archive-scan",
+  "verifiedAt": "2026-10-23",
+  "sources": [
+   "https://space.bilibili.com/22644094"
+  ],
+  "note": "2026-10-23 搜索发现 + 档案抽检：无字幕无 logo 片头片尾合集；未逐曲核验"
+ },
+{
+  "canonicalName": "EVK塔克",
+  "aliases": [
+   "EVK塔克"
+  ],
+  "roles": [
+   "4k-bd-op-ed-uploader"
+  ],
+  "scope": [
+   "4K BD 修复 OP&ED 合集（含特摄/老番）"
+  ],
+  "bilibiliMids": [
+   240468109
+  ],
+  "verification": "search-scan",
+  "verifiedAt": "2026-10-23",
+  "sources": [
+   "https://space.bilibili.com/240468109"
+  ],
+  "note": "2026-10-23 搜索抽检：4K BD 修复 OP&ED 合集搬运（含超级战队系列）；未逐曲核验"
  }
 ]

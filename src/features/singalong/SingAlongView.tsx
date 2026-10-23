@@ -1184,6 +1184,32 @@ export default function SingAlongView({
                         <div className="flex justify-between"><span>节奏</span><span className="tabular-nums">{summary.rhythm}</span></div>
                         <div className="flex justify-between"><span>已唱</span><span className="tabular-nums">{scoredLines.length}/{lines.length} 句</span></div>
                       </div>
+                      {/* 最弱句一键循环练：取已唱句里得分最低的那句，直接进单句循环 */}
+                      {(() => {
+                        let weakestIndex = -1
+                        let weakestScore = 101
+                        for (const scored of scoredLines) {
+                          const index = lines.indexOf(scored.line)
+                          if (index < 0) continue
+                          if (scored.score.total < weakestScore) { weakestScore = scored.score.total; weakestIndex = index }
+                        }
+                        const isWeakestLooping = loopTarget === weakestIndex && weakestIndex >= 0
+                        if (weakestIndex < 0) return null
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => { setLoopTarget(isWeakestLooping ? null : weakestIndex); if (!isWeakestLooping) onSeek(Math.max(0, lines[weakestIndex].time - 0.15)) }}
+                            className="mt-2.5 w-full rounded-xl border px-3 py-2 text-left text-[11px] transition hover:brightness-125"
+                            style={{ borderColor: isWeakestLooping ? ACCENT : 'rgba(255,255,255,0.12)', background: isWeakestLooping ? `${ACCENT}22` : 'rgba(255,255,255,0.04)', color: dark ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)' }}
+                            title={isWeakestLooping ? '点击取消循环' : '把这句设为单句循环，唱会为止'}
+                          >
+                            <Repeat className="mr-1.5 inline h-3 w-3" style={{ color: isWeakestLooping ? ACCENT : undefined }} />
+                            {isWeakestLooping ? '循环中：' : '练最弱句：'}
+                            <span className="font-semibold">{lineText(lines[weakestIndex]).slice(0, 12)}{lineText(lines[weakestIndex]).length > 12 ? '…' : ''}</span>
+                            <span className="ml-1 tabular-nums" style={{ color: scoreColor(weakestScore) }}>{weakestScore} 分</span>
+                          </button>
+                        )
+                      })()}
                     </>
                   ) : (
                     <p className="mt-3 text-xs leading-relaxed" style={{ color: dark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.55)' }}>

@@ -238,6 +238,7 @@ module.exports = {
   resolveHardwareIdentity,
   clearFingerprintSnapshots,
   normalize,
+  readRegistrySnapshot: () => readRegistryValueSafe(SNAPSHOT_VALUE),
   __testHooks: {
     setCimReader: (reader) => { cimReader = reader },
     resetCimReader: () => { cimReader = realReadCimField },

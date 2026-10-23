@@ -239,13 +239,15 @@ describe('传统模式 TraditionalView', () => {
     await waitFor(() => expect(screen.getByPlaceholderText(/在网易云音乐中搜索/)).toBeTruthy())
   })
 
-  it('复刻平台（Spotify）显示官方客户端风主页：欢迎横幅 + 发现音乐侧栏', async () => {
-    // Spotify 自 2026-10-22 起也走客户端复刻左栏/页面（与 Apple 同策略，右侧第三栏保留）。
+  it('复刻平台（Spotify）显示官方客户端风外壳：音乐库左栏 + 已点赞置顶', async () => {
+    // Spotify 自 2026-10-22 起走客户端复刻（与 Apple 同策略，右侧第三栏保留）；
+    // 首页是「自管外壳」（对齐官方三栏布局）：左栏『音乐库』+ 已点赞置顶。
+    // 侧栏条目来自 partner 桥异步加载，用 findBy 等待。
     localStorage.setItem('waveforge:platform', 'spotify')
     render(<TraditionalView {...baseProps} spotifyLoggedIn />)
-    expect(await screen.findByText(/欢迎回来/)).toBeTruthy()
-    expect(screen.getByText('发现音乐')).toBeTruthy()
-    expect(screen.getByText('喜欢的歌曲')).toBeTruthy()
+    expect(await screen.findByText('音乐库', {}, { timeout: 4000 })).toBeTruthy()
+    expect(await screen.findByText('已点赞的歌曲', {}, { timeout: 4000 })).toBeTruthy()
+    expect(screen.getAllByText('歌单').length).toBeGreaterThan(0)
   })
 
   it('网易云左栏按官方分组显示 创建的歌单/收藏的歌单 与新建入口', async () => {
