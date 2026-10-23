@@ -2982,10 +2982,15 @@ async function reviewCandidates(
   lyricsText?: string,
   songDurationOverride?: number,
 ): Promise<CandidateScore[]> {
-  // 复审候选数固定为 8；每个候选可能包含 view、字幕目录和一条字幕正文请求。
+  // 复审两阶段（风控加固后的提速项）：候选 6-10 名只有进播放失败回退链才被真正消费，
+  // 而回退加载（loadVideo）会按需自取 view/cid——它们的字幕/CC 验证在头部 5 名与歌曲
+  // 明显区分时几乎不影响 best 选择。前 5 名全量复审（view+字幕+CC），6-10 名轻复审
+  //（只 view 拿 cid/认证/时长，跳过字幕请求）：每次匹配省 3-15 个字幕类请求。
   const top = candidates.slice(0, REVIEW_TOP_N)
+  const fullCount = Math.min(5, top.length)
   const reviewed = await Promise.all(
-    top.map(async (candidate) => {
+    top.map(async (candidate, index) => {
+      const withSubtitles = index < fullCount
       const bvid = candidate.video.bvid
       const reviewCacheKey = `${songKeyOf(ctx)}::${bvid}`
       let cached = reviewCache.get(reviewCacheKey)
@@ -3012,7 +3017,9 @@ async function reviewCandidates(
             }
             if (!cid) cid = view.data.cid
             if (!effectiveDuration) effectiveDuration = view.data.duration || 0
-            if (cid) {
+            // 轻复审（6-10 名）：跳过字幕目录/正文请求——cid 已拿到（播放够用），
+            // 认证/时长已评分；CC 加分缺失只影响回退位排序，不影响 best。
+            if (cid && withSubtitles) {
               const subInfo = await getBilibiliSubtitles(bvid, cid, signal).catch(
                 () => ({ code: -1, subtitles: [] as BilibiliSubtitleInfo[] }),
               )

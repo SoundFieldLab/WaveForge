@@ -93,10 +93,12 @@ const STREAM_REQUEST_TIMEOUT_MS = 30_000
  * 供设置页「清理缓存」调用：这些缓存此前没有任何清理入口。
  */
 export function clearBilibiliCaches() {
-  const cleared = streamCache.size + subtitleJsonCache.size + danmakuCache.size
+  const cleared = streamCache.size + subtitleJsonCache.size + danmakuCache.size + viewCache.size + searchCache.size
   streamCache.clear()
   subtitleJsonCache.clear()
   danmakuCache.clear()
+  viewCache.clear()
+  searchCache.clear()
   return { success: true, cleared }
 }
 
@@ -320,6 +322,19 @@ function extractCookieValue(setCookieArray, name) {
   return ''
 }
 
+// view 详情缓存（bvid → {json, at}）：复审一轮并发打 8-10 个 view，同一 MV 被重复
+// 匹配（切歌回跳/跨会话）时全部白打——30min 缓存让二次匹配零 view 请求。
+const viewCache = new Map()
+const VIEW_CACHE_TTL = 30 * 60 * 1000
+const VIEW_CACHE_MAX_ENTRIES = 1024
+
+// 搜索结果缓存（keyword|page → {json, at}）：同一关键词 10min 内二次搜索直接回缓存
+// （切歌回跳/automix 重排会重复搜同一词）。风控视角同样成立：少一轮上游搜索 = 少一次
+// 高敏接口暴露。命中数高的词通常结果稳定，10min 窗口足够覆盖一次会话。
+const searchCache = new Map()
+const SEARCH_CACHE_TTL = 10 * 60 * 1000
+const SEARCH_CACHE_MAX_ENTRIES = 256
+
 const officialVerifyCache = new Map()
 const OFFICIAL_VERIFY_CACHE_TTL = 60 * 60 * 1000
 
@@ -354,6 +369,12 @@ export function registerBilibiliRoutes(app) {
     if (Date.now() < searchRiskCooldownUntil) {
       return res.status(503).json({ code: -352, error: 'B站风控冷却中（约20秒后自动恢复）：当前出口 IP 刚被风控，先不打上游——关掉梯子/换网络可立即解除' })
     }
+    const searchCacheKey = `${keyword}|${page}`
+    const cachedSearch = searchCache.get(searchCacheKey)
+    if (cachedSearch && Date.now() - cachedSearch.at < SEARCH_CACHE_TTL) {
+      cachedSearch.at = Date.now()
+      return res.json(cachedSearch.json)
+    }
     const keyword = String(req.query.keyword || '').trim()
     const page = Math.max(1, Number(req.query.page) || 1)
     if (!keyword) return res.status(400).json({ code: -1, error: 'keyword 必填' })
@@ -383,7 +404,13 @@ export function registerBilibiliRoutes(app) {
           pubdate: item.pubdate || 0,
         }))
         .filter((item) => item.bvid)
-      res.json({ code: 0, results, page, ...(loginDegraded ? { loginDegraded: true } : {}) })
+      const searchPayload = { code: 0, results, page, ...(loginDegraded ? { loginDegraded: true } : {}) }
+      searchCache.set(searchCacheKey, { json: searchPayload, at: Date.now() })
+      if (searchCache.size > SEARCH_CACHE_MAX_ENTRIES) {
+        const oldest = [...searchCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+        if (oldest) searchCache.delete(oldest[0])
+      }
+      res.json(searchPayload)
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '搜索失败' })
     }
@@ -395,8 +422,18 @@ export function registerBilibiliRoutes(app) {
     if (!bvid) return res.status(400).json({ code: -1, error: 'bvid 必填' })
     await ensureBuvid3()
     try {
+      const cachedView = viewCache.get(bvid)
+      if (cachedView && Date.now() - cachedView.at < VIEW_CACHE_TTL) {
+        cachedView.at = Date.now()
+        return res.json(cachedView.json)
+      }
       const { json } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/web-interface/view`, { params: { bvid }, cookie: req.query.cookie })
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '视频不存在' })
+      viewCache.set(bvid, { json, at: Date.now() })
+      if (viewCache.size > VIEW_CACHE_MAX_ENTRIES) {
+        const oldest = [...viewCache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+        if (oldest) viewCache.delete(oldest[0])
+      }
       const data = json.data || {}
       const page = (data.pages || [])[0] || {}
       const officialVerifyType = await getOfficialVerifyType(data.owner?.mid, req.query.cookie)
