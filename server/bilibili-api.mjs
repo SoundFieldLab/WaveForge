@@ -342,9 +342,18 @@ async function getOfficialVerifyType(mid, cookie) {
 
 // ===== 路由注册 =====
 
+// 风控感知全局冷却：搜索一旦被 aba 验证页拦截，同出口 IP 的后续搜索大概率同样被拦。
+// 冷却期内直接返回降级响应而不打上游——重试风暴只会加深 IP 画像（实测：automix 连环
+// 匹配每首歌 N 条查询全撞，冷却 20s 让风暴自动停摆；用户关梯子后下一首自然恢复）。
+let searchRiskCooldownUntil = 0
+const SEARCH_RISK_COOLDOWN_MS = 20_000
+
 export function registerBilibiliRoutes(app) {
   // 搜索视频（WBI 签名）
   app.get('/api/bilibili/search', async (req, res) => {
+    if (Date.now() < searchRiskCooldownUntil) {
+      return res.status(503).json({ code: -352, error: 'B站风控冷却中（约20秒后自动恢复）：当前出口 IP 刚被风控，先不打上游——关掉梯子/换网络可立即解除' })
+    }
     const keyword = String(req.query.keyword || '').trim()
     const page = Math.max(1, Number(req.query.page) || 1)
     if (!keyword) return res.status(400).json({ code: -1, error: 'keyword 必填' })
@@ -353,6 +362,9 @@ export function registerBilibiliRoutes(app) {
       const signed = await wbiSign({ search_type: 'video', keyword, page })
       const { json, loginDegraded } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/web-interface/wbi/search/type`, { params: signed, cookie: req.query.cookie })
       if (json.code !== 0) {
+        if (json.code === -352 || json.code === -412 || String(json.message || '').includes('aba')) {
+          searchRiskCooldownUntil = Date.now() + SEARCH_RISK_COOLDOWN_MS
+        }
         return res.status(502).json({ code: json.code, error: json.message || '搜索失败（可能触发风控）' })
       }
       const results = (json.data?.result || [])

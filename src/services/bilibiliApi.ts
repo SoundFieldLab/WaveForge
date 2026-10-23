@@ -3354,10 +3354,15 @@ export async function findBestBilibiliMv(
     return cached.result
   }
   const result = await findBestBilibiliMvUncached(song, cacheKey, settings, opts?.signal, opts?.lyricsProvider, opts?.useDeveloperDeclarations !== false, sessionPickBvid, opts?.identityProbe)
-  // error / 中止不写缓存（或只做 60s 负缓存）：切歌 abort 后同歌 24h 内固定无 MV、
+  // error / 中止不写缓存（或只做短负缓存）：切歌 abort 后同歌 24h 内固定无 MV、
   // 重试无效是最常见的"这首歌怎么没有 MV"来源。
+  // 负缓存时长按失败类型分档：普通错误 60s（瞬时网络抖动值得快重试）；**风控类 10min**——
+  // -352 是出口 IP 被风控（aba 验证页），60s 后重试只会再吃一次风控、还加深 IP 画像
+  // （实测：梯子全局下每首歌的匹配都撞，重试风暴让整段会话全部失败）。文案里已含
+  // 可行动提示，用户关梯子后再手动点"重新搜索"仍可即时恢复（负缓存只在自动链路生效）。
   if (result.status === 'error' || opts?.signal?.aborted) {
-    matchCache.set(cacheKey, { at: Date.now() - (MATCH_CACHE_TTL - 60_000), result })
+    const isRiskGate = String(result.error || '').includes('B站风控拦截')
+    matchCache.set(cacheKey, { at: Date.now() - (MATCH_CACHE_TTL - (isRiskGate ? 10 * 60_000 : 60_000)), result })
   } else {
     matchCache.set(cacheKey, { at: Date.now(), result })
   }
@@ -3485,14 +3490,23 @@ async function findBestBilibiliMvUncached(
   // 正片的入口），先到先得的 60 条截断会把它们整个饿死（用户实测 βiοs：前 4 条查询
   // 就凑满 60 条，语境查询一次都没执行，485 万/403 万播放的官方投稿永远进不了候选）。
   // 截断只控制「再开新查询」，当轮已合并结果照常入池。
+  // 风控加固（实测：梯子/共享出口下搜索接口间歇性弹 aba 验证页）：查询**串行**执行
+  // （不再两页并发砸同秒），页间加 150-400ms 随机抖动打散节奏；凑满 60 条且已跑完
+  // 保底 3 条查询即提前收手——头部查询命中率极高，后面多半是 0 新增的纯风控消耗。
+  const QUERY_MIN_RESULTS = 60
+  const QUERY_MIN_ROUNDS = 3
+  const searchJitter = (ms: number) => new Promise<void>((r) => { if (signal?.aborted) return r(); const t = window.setTimeout(r, ms); signal?.addEventListener('abort', () => { window.clearTimeout(t); r() }, { once: true }) })
   for (let qi = 0; qi < queries.length; qi += 1) {
     const query = queries[qi]
     try {
-      const [r1, r2] = await Promise.all([
-        searchBilibiliVideos(query, 1, signal),
-        searchBilibiliVideos(query, 2, signal).catch(() => ({ code: -1, results: [] as BilibiliVideo[] })),
-      ])
-      const merged = [...(r1.code === 0 ? r1.results : []), ...(r2.code === 0 ? r2.results : [])]
+      const r1 = await searchBilibiliVideos(query, 1, signal)
+      const merged = [...(r1.code === 0 ? r1.results : [])]
+      // 第 2 页仅在首页有货时才追（首页空 = 该查询无结果，第 2 页必空）
+      if (r1.code === 0 && r1.results.length > 0) {
+        await searchJitter(150 + Math.round(Math.random() * 250))
+        const r2 = await searchBilibiliVideos(query, 2, signal).catch(() => ({ code: -1, results: [] as BilibiliVideo[] }))
+        merged.push(...(r2.code === 0 ? r2.results : []))
+      }
       for (const v of merged) {
         if (!v.bvid || seenBvids.has(v.bvid)) continue
         seenBvids.add(v.bvid)
@@ -3504,8 +3518,11 @@ async function findBestBilibiliMvUncached(
       if (signal?.aborted) return empty()
       // 单查询失败不阻断（风控/超时降级继续）
     }
-    // 每条查询都执行（见循环头注释）；只在总量突破硬上限时提前收手（防极端风控雪崩）。
+    // 每条查询都执行（见循环头注释）；提前收手条件：候选已足够且保底查询已跑完
+    //（防极端风控雪崩），或总候选突破硬上限。
+    if (qi + 1 >= QUERY_MIN_ROUNDS && videos.length >= QUERY_MIN_RESULTS) break
     if (videos.length >= 200) break
+    if (qi + 1 < queries.length) await searchJitter(120 + Math.round(Math.random() * 280))
   }
   if (!videos.length) return explicitOnly() || empty('搜索失败，请稍后重试')
 
