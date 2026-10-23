@@ -411,15 +411,19 @@ export class AlbumGaplessService {
     preload.mixPending = true
     preload.releaseReason = reason
 
-    // 如果需要重置，暂停并重置到开头
+    // 如果需要重置，暂停并重置到「有声内容起点」：平台文件普遍烧死几秒前奏静音，
+    // 从 0 起播会把空白全放出来（用户实测同专辑连播接缝明显空白）。上限 2s 与
+    // automix gapless 的 introSkip 同口径；无分析缓存时维持 0（真无缝母带零改动）。
     if ((reason === 'boundary-crossmix-reset' ||
          reason === 'tail-silence-fast-crossmix' ||
          reason === 'tail-analysis-silence-crossmix' ||
          reason === 'tail-direct-silence-crossmix') &&
         preload.prerollStarted) {
+      const targetAnalysis = this.deps.getTrackAnalysis?.(preload.key) || null
+      const introSkip = targetAnalysis ? Math.max(0, Math.min(2, targetAnalysis.introSilence || 0)) : 0
       try {
         preload.media.pause()
-        preload.media.currentTime = 0
+        preload.media.currentTime = introSkip
       } catch (e) {
         console.warn('[AlbumGapless] 重置预加载失败', e)
       }

@@ -20,16 +20,19 @@
  * 平台隔离：只在 ExploreView 的 platform === 'kugou' 分支挂载。
  */
 import { useState, type CSSProperties, type ReactNode } from 'react'
-import { BookAudio, Compass, Music2 } from 'lucide-react'
+import { BookAudio, Compass, Music2, Radio } from 'lucide-react'
 import type { ExplorePayload } from '../../services/exploreApi'
 import type { ExploreSectionId } from '../../components/ExploreSettingsPanel'
 import KugouExploreSections, { KugouRecommendBoard, type KugouExploreHandlers } from './KugouExploreSections'
 import KugouDiscoverBoard from './KugouDiscoverBoard'
 import KugouLongaudioBoard from '../kugouLongaudio/KugouLongaudioBoard'
 import KugouLongaudioOverlay from '../kugouLongaudio/KugouLongaudioOverlay'
+import KugouYouthFeedBoard from '../kugouYouth/KugouYouthFeedBoard'
+import KugouYouthFeedOverlay from '../kugouYouth/KugouYouthFeedOverlay'
+import { kugouYouthStore } from '../kugouYouth/store'
 import { kugouDiscoverSongToTrack, kugouTrackToSong } from '../../services/kugouService'
 
-export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio'
+export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio' | 'youth'
 
 /** 「音乐」分区收纳的五个子板块（对应官方客户端页签：推荐 / 乐库 / 歌单 / 频道 / 分类） */
 const KUGOU_MUSIC_SECTIONS: readonly ExploreSectionId[] = [
@@ -68,6 +71,10 @@ export default function KugouExplorePage(props: KugouExplorePageProps) {
   }
   if (sectionVisible('kugouLongaudio')) {
     zones.push({ id: 'longaudio', label: '听书', hint: '有声小说 · 相声评书 · 助眠解压（独立听书播放器）', icon: <BookAudio className="h-4 w-4" /> })
+  }
+  // 「刷歌」分区（官方一级入口；账号无动态时板块内展示空态 + 最近动态）
+  if (sectionVisible('kugouYouth')) {
+    zones.push({ id: 'youth', label: '刷歌', hint: '竖滑切歌 · 猜你爱听（账号暂无动态时显示最近刷到）', icon: <Radio className="h-4 w-4" /> })
   }
 
   // 当前选中的分区在设置里被隐藏（或其全部子板块被隐藏）时回落到第一个可用分区。
@@ -204,9 +211,29 @@ export default function KugouExplorePage(props: KugouExplorePageProps) {
         />
       </div>
 
-      {/* 独立听书播放器挂在分区外壳下面，只在 kugou 下存在。
-          （KugouYouthFeedOverlay 随「刷歌」下线一起移除。） */}
+      {/* 刷歌分区：入口卡片条 + 空态 + 最近动态（数据/状态在 kugouYouth 独立 store） */}
+      <div className={paneClass('youth')} aria-hidden={activeZone !== 'youth'} data-kugou-zone="youth">
+        <KugouYouthFeedBoard
+          accent={props.accent}
+          compactCards={props.compactCards}
+          showSubtitles={props.showSubtitles}
+          exploreCardBg={props.exploreCardBg}
+          sectionStyle={props.sectionStyle}
+          sectionVisible={props.sectionVisible}
+          onPlaySongs={props.onPlaySongs}
+          onSongContextMenu={props.onSongContextMenu}
+        />
+      </div>
+
+      {/* 独立听书播放器挂在分区外壳下面，只在 kugou 下存在。 */}
       <KugouLongaudioOverlay />
+      {/* 刷歌全屏竖滑页（store 共享：分区卡片条/其它入口的「开始刷歌」按钮都开它） */}
+      <KugouYouthFeedOverlay
+        playing={false}
+        onTogglePlay={() => { /* 播放控制由 onPlaySongs 起播的主播放器承担 */ }}
+        onPlaySongs={(song, songs) => props.onPlaySongs(song, songs, true)}
+        onSongContextMenu={(event, song, songs) => props.onSongContextMenu(event, song, songs)}
+      />
     </div>
   )
 }

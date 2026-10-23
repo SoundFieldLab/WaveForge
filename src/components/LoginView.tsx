@@ -8,6 +8,51 @@ import GlobalToast from './GlobalToast'
 import LoginBackdrop from './LoginBackdrop'
 import { getApiBase } from '../services/apiConfig'
 
+/** 主进程 qqLoginFailure.cjs 的 failureHint 形状（脱敏：不含凭据） */
+interface QQFailureHint {
+  case: string
+  title: string
+  guidance: string
+  retryable: boolean
+  retryAfterMs: number | null
+  upstreamCode: number | null
+  globalCode: number | null
+  phase: string
+  message: string
+}
+
+/** 登录自检结果（desktop/loginSelfCheck.cjs + rules） */
+interface SelfCheckItem { id: string; state: 'ok' | 'fail' | 'warn' | 'skip'; detail: string | null }
+interface SelfCheckState {
+  ok: boolean
+  verdict: { kind: string; detail?: string | null; proxyNote?: string | null }
+  checklist: SelfCheckItem[]
+  error?: string
+  durationMs?: number
+}
+
+const SELF_CHECK_ITEM_LABELS: Record<string, string> = {
+  backend: '本地服务',
+  dns: 'DNS 解析',
+  ipv4: 'IPv4 连接',
+  ipv6: 'IPv6 连接',
+  https: 'HTTPS 请求',
+  proxy: '代理',
+  clock: '系统时钟',
+}
+
+/** verdict → 界面文案（与 desktop/loginSelfCheckRules.cjs 的 kind 一一对应） */
+const SELF_CHECK_VERDICT_TEXT: Record<string, string> = {
+  'backend-down': '本地登录服务异常',
+  'dns-failed': '域名解析失败',
+  'tls-reset': '与 QQ 音乐的连接被重置（常见于代理/防火墙拦截）',
+  'upstream-unreachable': '无法连接 QQ 音乐服务器',
+  'ipv6-failed': 'IPv6 网络异常（IPv4 正常）',
+  'https-failed': 'HTTPS 请求失败',
+  'clock-skew': '本机时钟与标准时间偏差过大，可能导致登录校验失败',
+  'network-ok': '网络检查没有发现问题',
+}
+
 // 新平台登录面板（组件外声明，避免条件内 lazy 造成重挂载）
 const KugouLoginPanel = lazy(() => import('./KugouLoginPanel').then(m => ({ default: m.default })))
 const SpotifyLoginPanel = lazy(() => import('./SpotifyLoginPanel').then(m => ({ default: m.default })))
@@ -56,6 +101,12 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
   const [qqQrChannel, setQqQrChannel] = useState<'qq' | 'wx' | 'qqmusic'>('qq')
   const [qqQrStatus, setQqQrStatus] = useState<'idle' | 'waiting' | 'scanned' | 'expired' | 'error'>('idle')
   const [qqQrMessage, setQqQrMessage] = useState('')
+  // 登录失败分类（平台可用性增强）：主进程 classifyQqLoginFailure 的结果——
+  // 设备上限/账号受限/风控等有专属标题与指导文案，不再一律当"二维码过期"
+  const [qqFailureHint, setQqFailureHint] = useState<QQFailureHint | null>(null)
+  // 登录自检（失败后可手动触发）：分层网络探测 + 结论清单
+  const [selfCheckState, setSelfCheckState] = useState<SelfCheckState | null>(null)
+  const [selfCheckRunning, setSelfCheckRunning] = useState(false)
   const qqQrTimerRef = useRef<number | null>(null)
   // 应用内扫码登录（TV）回调的最新引用，供事件监听使用（在函数定义后赋值）
   const handleQQLoginWithCookieRef = useRef<(cookie: string) => Promise<void>>(async () => {})
@@ -278,6 +329,37 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     qqQrTimerRef.current = null
   }
 
+  // 登录自检（平台可用性增强）：分层探测「本地服务 → DNS → IPv4/IPv6 → HTTPS → 代理/时钟」，
+  // 结论 + 清单展示在失败详情下方（folia 同款"自动检查"）。纯只读，不改任何状态。
+  const runSelfCheck = async () => {
+    const electron = window.electron as (Window & typeof globalThis & { runLoginSelfCheck?: (p: string) => Promise<SelfCheckState> }) | undefined
+    if (!electron?.runLoginSelfCheck || selfCheckRunning) return
+    setSelfCheckRunning(true)
+    setSelfCheckState(null)
+    try {
+      const result = await electron.runLoginSelfCheck('qq')
+      if (mountedRef.current) setSelfCheckState(result)
+    } catch {
+      if (mountedRef.current) setSelfCheckState({ ok: false, verdict: { kind: 'unknown' }, checklist: [], error: '自检未能完成' })
+    } finally {
+      if (mountedRef.current) setSelfCheckRunning(false)
+    }
+  }
+
+  // 复制诊断报告（脱敏文本：不含账号/cookie/token）
+  const copyDiagnosticsReport = async () => {
+    const electron = window.electron as (Window & typeof globalThis & { buildLoginDiagnosticsReport?: (p: string, hint: QQFailureHint | null) => Promise<string | null> }) | undefined
+    try {
+      const report = await electron?.buildLoginDiagnosticsReport?.('qq', qqFailureHint)
+      if (report) {
+        await navigator.clipboard.writeText(report)
+        setShowCopiedToast(true)
+        if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current)
+        toastTimerRef.current = window.setTimeout(() => setShowCopiedToast(false), 2000)
+      }
+    } catch { /* 剪贴板不可用：静默 */ }
+  }
+
   const cancelQqQr = () => {
     stopQqQrPolling()
     try { window.electron?.qqQrLoginCancel?.() } catch { /* 忽略 */ }
@@ -300,8 +382,16 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         await handleQQLoginWithCookie(result.cookie)
         return
       }
-      if (result.status === 'expired') { setQqQrStatus('expired'); setQqQrMessage(result.message || '二维码已过期，请刷新'); return }
-      if (result.status === 'error') { setQqQrStatus('error'); setQqQrMessage(result.message || '扫码登录失败，请重试'); return }
+      if (result.status === 'expired') { setQqFailureHint(result.failureHint ?? null); setQqQrStatus('expired'); setQqQrMessage(result.message || '二维码已过期，请刷新'); return }
+      if (result.status === 'error') {
+        setQqFailureHint(result.failureHint ?? null)
+        setQqQrStatus('error')
+        setQqQrMessage(result.message || '扫码登录失败，请重试')
+        // 有分类结论的失败自动触发一次自检（等价 folia 的"自动检查"）；
+        // 纯过期/取消不打扰
+        if (result.failureHint && mountedRef.current) void runSelfCheck()
+        return
+      }
       if (result.status === 'cancelled') return
       setQqQrStatus(result.status === 'scanned' ? 'scanned' : 'waiting')
       setQqQrMessage(result.message || '')
@@ -318,6 +408,8 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
     setQqQrChannel(channel)
     setQqQrImage('')
     setQqQrMessage('')
+    setQqFailureHint(null)
+    setSelfCheckState(null)
     setQqQrStatus('waiting')
     setQQError('')
     try {
@@ -597,6 +689,95 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                         刷新二维码
                       </button>
                     </div>
+
+                    {/* 失败分类结论（平台可用性增强）：可行动的标题 + 指导，替代笼统的"已过期" */}
+                    {(qqQrStatus === 'error' || qqQrStatus === 'expired') && qqFailureHint && (
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-2.5">
+                        <p className="text-white font-medium text-sm leading-relaxed">{qqFailureHint.title}</p>
+                        <p className="text-white/60 text-[13px] leading-relaxed">{qqFailureHint.guidance}</p>
+                        {(qqFailureHint.upstreamCode !== null || qqFailureHint.message) && (
+                          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-0.5 rounded-lg bg-black/25 px-3 py-2 font-mono text-[11px] leading-5">
+                            <dt className="font-sans text-white/40">类别</dt>
+                            <dd className="m-0 text-white/70 [overflow-wrap:anywhere]">{qqFailureHint.case}</dd>
+                            {qqFailureHint.upstreamCode !== null && (
+                              <>
+                                <dt className="font-sans text-white/40">上游码</dt>
+                                <dd className="m-0 text-white/70 [overflow-wrap:anywhere]">{qqFailureHint.upstreamCode}</dd>
+                              </>
+                            )}
+                            {qqFailureHint.phase && (
+                              <>
+                                <dt className="font-sans text-white/40">环节</dt>
+                                <dd className="m-0 text-white/70 [overflow-wrap:anywhere]">{qqFailureHint.phase}</dd>
+                              </>
+                            )}
+                            {qqFailureHint.message && (
+                              <>
+                                <dt className="font-sans text-white/40">原始信息</dt>
+                                <dd className="m-0 text-white/70 [overflow-wrap:anywhere]">{qqFailureHint.message}</dd>
+                              </>
+                            )}
+                          </dl>
+                        )}
+                      </div>
+                    )}
+
+                    {/* 自动检查（folia 同款）：失败后分层网络探测的结论与清单 */}
+                    {(qqQrStatus === 'error' || (qqQrStatus === 'expired' && qqFailureHint)) && (
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 space-y-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-white/80 text-sm font-medium">自动检查</p>
+                          <button
+                            onClick={() => void runSelfCheck()}
+                            disabled={selfCheckRunning}
+                            className="text-xs text-white/50 hover:text-white/80 disabled:opacity-50 transition-colors inline-flex items-center gap-1"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${selfCheckRunning ? 'animate-spin' : ''}`} />
+                            {selfCheckRunning ? '检查中…' : '重新检查'}
+                          </button>
+                        </div>
+                        {selfCheckRunning && !selfCheckState && (
+                          <p className="text-white/50 text-xs">正在逐层检查网络（本地服务 → DNS → 连接 → 上游）…</p>
+                        )}
+                        {selfCheckState && !selfCheckState.ok && (
+                          <p className="text-red-400 text-xs">{selfCheckState.error || '自检未能完成'}</p>
+                        )}
+                        {selfCheckState?.ok && (
+                          <>
+                            <p className={`text-xs leading-relaxed ${selfCheckState.verdict.kind === 'network-ok' ? 'text-green-400' : 'text-amber-400'}`}>
+                              {SELF_CHECK_VERDICT_TEXT[selfCheckState.verdict.kind] || '检查完成'}
+                              {selfCheckState.verdict.detail ? `（${selfCheckState.verdict.detail}）` : ''}
+                            </p>
+                            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1">
+                              {selfCheckState.checklist.filter(item => item.state !== 'skip').map(item => (
+                                <div key={item.id} className="contents">
+                                  <dt className="text-xs text-white/40">{SELF_CHECK_ITEM_LABELS[item.id] || item.id}</dt>
+                                  <dd className={`m-0 text-xs [overflow-wrap:anywhere] ${
+                                    item.state === 'ok' ? 'text-white/60'
+                                      : item.state === 'warn' ? 'text-amber-400'
+                                        : 'text-red-400'
+                                  }`}>
+                                    {item.state === 'ok' ? '正常' : item.state === 'warn' ? '注意' : '异常'}
+                                    {item.detail ? ` · ${item.detail}` : ''}
+                                  </dd>
+                                </div>
+                              ))}
+                            </dl>
+                          </>
+                        )}
+                        <p className="text-white/35 text-[11px] leading-relaxed">
+                          诊断信息包含：应用与系统版本、网络与代理状态、各层连接探测结果；不含账号、cookie 和 token。
+                        </p>
+                        <div className="flex justify-end">
+                          <button
+                            onClick={() => void copyDiagnosticsReport()}
+                            className="text-xs px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white/80 transition-colors"
+                          >
+                            {showCopiedToast ? '已复制' : '复制诊断信息'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </>
                 ) : !qqManualMode ? (
                   // 自动登录模式

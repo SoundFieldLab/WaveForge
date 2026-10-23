@@ -18,11 +18,11 @@ interface MVItem {
   cover: string
   artistName: string
   playCount: number
-  platform: 'netease' | 'qq'
+  platform: 'netease' | 'qq' | 'kugou'
 }
 
 interface MVExploreModalProps {
-  initialPlatform?: 'netease' | 'qq'
+  initialPlatform?: 'netease' | 'qq' | 'kugou'
   initialMvId?: string | number
   onClose: () => void
   playerTheme?: 'dark' | 'light'
@@ -50,7 +50,7 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
   const dark = playerTheme === 'dark'
   const textPrimary = dark ? 'text-white' : 'text-black'
   const textSecondary = dark ? 'text-white/60' : 'text-black/60'
-  const [platform, setPlatform] = useState<'netease' | 'qq'>(initialPlatform)
+  const [platform, setPlatform] = useState<'netease' | 'qq' | 'kugou'>(initialPlatform)
 
   // 通用列表状态
   const [mvs, setMvs] = useState<MVItem[]>([])
@@ -148,7 +148,11 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
       }
       searchMVs(kw, platform, 30).then((data) => {
         if (seq !== requestSeqRef.current) return
-        setMvs(platform === 'netease' ? normalizeNetease(data?.result?.mvs || []) : normalizeQQ(data?.mvs || []))
+        setMvs(
+          platform === 'netease' ? normalizeNetease(data?.result?.mvs || [])
+          : platform === 'kugou' ? normalizeKugou(data?.mvs || [])
+          : normalizeQQ(data?.mvs || []),
+        )
         setHasMore(false)
         setLoading(false)
       }).catch(() => {
@@ -156,6 +160,23 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
         setError('搜索MV失败')
         setLoading(false)
       })
+      return
+    }
+
+    if (platform === 'kugou') {
+      // 酷狗浏览列表 = 热门 MV（mobilecdn mv/hot）
+      void import('../services/kugouService').then(({ fetchKugouMvList }) =>
+        fetchKugouMvList('hot', '', 1, 30).then(list => {
+          if (seq !== requestSeqRef.current) return
+          setMvs(normalizeKugou(list))
+          setHasMore(list.length >= 30)
+          setLoading(false)
+        }).catch(() => {
+          if (seq !== requestSeqRef.current) return
+          setError('加载MV列表失败')
+          setLoading(false)
+        }),
+      )
       return
     }
 
@@ -204,6 +225,16 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
     artistName: Array.isArray(item.singers) ? item.singers.map((s: any) => s.name).join('/') : '',
     playCount: Number(item.playcnt || 0),
     platform: 'qq' as const
+  }))
+
+  // 酷狗 MV（hash 为 id；infov2 不带播放量时保持 0，封面是列表自带 imgurl）
+  const normalizeKugou = (list: any[]): MVItem[] => list.map((item) => ({
+    id: item.hash,
+    name: item.filename || item.mvname || '',
+    cover: getProxiedImageUrl(item.imgurl || '', 400),
+    artistName: item.singername || item.singers || '',
+    playCount: 0,
+    platform: 'kugou' as const
   }))
 
   // 加载更多
@@ -311,13 +342,13 @@ export default function MVExploreModal({ initialPlatform = 'netease', initialMvI
             <h2 className={`text-base font-semibold ${textPrimary}`}>MV 专区</h2>
             {/* 平台切换 */}
             <div className={`flex rounded-full p-0.5 ml-2 ${dark ? 'bg-white/8' : 'bg-black/8'}`} style={{ background: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)' }}>
-              {(['netease', 'qq'] as const).map((p) => (
+              {(['netease', 'qq', 'kugou'] as const).map((p) => (
                 <button
                   key={p}
                   onClick={() => setPlatform(p)}
                   className={`px-3 py-1 rounded-full text-xs transition-colors ${platform === p ? (dark ? 'bg-white text-black' : 'bg-black text-white') : textSecondary}`}
                 >
-                  {p === 'netease' ? '网易云' : 'QQ 音乐'}
+                  {p === 'netease' ? '网易云' : p === 'kugou' ? '酷狗' : 'QQ 音乐'}
                 </button>
               ))}
             </div>

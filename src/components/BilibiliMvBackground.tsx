@@ -37,6 +37,7 @@ import {
   resolveBiliPic,
   formatBiliTime,
   decodeBiliTitle,
+  recordUploaderPlaySuccess,
   type MatchContext,
   type CandidateScore,
   type CandidateType,
@@ -795,7 +796,24 @@ export default memo(function BilibiliMvBackground({
               }
             }
             if (!isCurrentRequest()) return
-            const stage = otherSlot(activeSlotRef.current)
+            // 预载（stagedOnly）绝不覆盖**当前歌**已落位的槽：上一曲切回场景里，主搜索
+            // 刚把当前歌视频落进 otherSlot(active)（"直接进槽"写了 owner 但 active 翻转
+            // 滞后），过渡预载若照常落 otherSlot 会把当前歌的 MV 顶掉 → 背景回封面
+            // （用户实测：切走再上一曲切回，MV 开着开着没了）。目标槽 owner 是当前歌时
+            // 改落另一槽；两槽都被当前歌占用则放弃本次预载（下轮过渡重新预载）。
+            let stage: 'A' | 'B' = otherSlot(activeSlotRef.current)
+            if (stagedOnly) {
+              const stageOwner = slotOwnerRef.current[stage]
+              const otherStage = otherSlot(stage)
+              const otherOwner = slotOwnerRef.current[otherStage]
+              if (stageOwner === songKeyRef.current && otherOwner !== songKeyRef.current) {
+                stage = otherStage
+                void window.electron?.automixLog?.('MvAlign', `[背景] 预载让位：槽${otherSlot(activeSlotRef.current)} 归当前歌 → 改落槽${stage}`)?.catch?.(() => undefined)
+              } else if (stageOwner === songKeyRef.current && otherOwner === songKeyRef.current) {
+                void window.electron?.automixLog?.('MvAlign', `[背景] 预载放弃：两槽均归当前歌`)?.catch?.(() => undefined)
+                return
+              }
+            }
             stagedSlotRef.current = stage
             // 该槽正作为新视频淡入/待晋升：新目标顶掉它，取消旧晋升定时器并重置 incoming（避免残留 opacity:1 直接弹出）
             //（stagedOnly 经上方等待后 incoming 已清空、此处对预载恒为 no-op；真实换槽仍是覆盖语义）
@@ -829,6 +847,9 @@ export default memo(function BilibiliMvBackground({
           // 尚未就绪 readyState<2 跳过，错过就只剩这个循环兜底）
           lastSyncCorrectionRef.current = 0
           setStatus('playing')
+          // 学习式 UP 信任（自动，免人工审核）：正片类视频真实播放成功即记一次信任，
+          // 达阈值后该 UP 自动获得递进加权（见 bilibiliApi.recordUploaderPlaySuccess）。
+          if (!stagedOnly) recordUploaderPlaySuccess(candidate.video.mid, candidate.video.author, candidate.video.title)
           if (lastPlayStateRef.current) {
             onPlayStateChangeRef.current?.({ ...lastPlayStateRef.current, songKey: slotOwnerRef.current[activeSlotRef.current] || songKeyRef.current, currentTime: activeEl()?.currentTime || 0 })
           }
@@ -1487,9 +1508,12 @@ export default memo(function BilibiliMvBackground({
       const target = computeMvSyncTarget(audioPosition + offset, video.duration)
       if (target === null) return
       const drift = Math.abs(video.currentTime - target)
-      // 弱对齐（conf<0.55 = 支持率采纳档，误差审计 24% >1s）：追频容差放宽 0.8→1.2s、
-      // 微调幅度减半——弱对齐的偏移本身有 ±1s 级不确定性，激进追频会把不确定放大成抖动
-      const driftFloor = alignment && alignment.confidence < 0.55 ? 1.2 : 0.8
+      // 追频容差按对齐质量分三档——conf≥0.9（节拍/字幕强对齐，offset 精度 ±0.02s）：
+      // 0.35s（旧档 0.8s 对强对齐太懒，0.3-0.8s 常驻漂移 = 用户实测"对齐差一点点"）；
+      // conf≤0.55（弱对齐，误差审计 24% >1s）：放宽 1.2s、微调幅度减半——激进追频会把
+      // 不确定放大成抖动。边界用 ≤：产线弱对齐档统一产 conf=0.55（历史遗留边界错位）。
+      const strongAlignment = Boolean(alignment && alignment.confidence >= 0.9)
+      const driftFloor = alignment && alignment.confidence <= 0.55 ? 1.2 : (strongAlignment ? 0.35 : 0.8)
       // 大漂移（>3s）：硬 seek（重缓冲不可避免，10s 冷却防连跳）；seek 后清追频微调
       // 小漂移（体感区）：playbackRate 微调追赶——无重缓冲不卡顿，视频快放 5% 追完
       // 2s 漂移约需 40s（一首歌内悄然归位）；写 bgRateTrimRef 乘在用户倍速上
@@ -1502,13 +1526,16 @@ export default memo(function BilibiliMvBackground({
           bgRateTrimRef.current = 1
           video.currentTime = target
         }
-      } else if (drift > 0.8) {
+      } else if (drift > driftFloor) {
         const lagging = video.currentTime < target
-        // 目标微调量：漂移越大 trim 越大（封顶 5%），方向朝 target 追
-        const desiredTrim = Math.min(0.05, drift / 60) * (lagging ? 1 : -1) + 1
+        // 目标微调量：漂移越大 trim 越大（强对齐封顶 8%、弱对齐 5%），方向朝 target 追
+        const maxTrim = strongAlignment ? 0.08 : 0.05
+        const desiredTrim = Math.min(maxTrim, drift / (strongAlignment ? 40 : 60)) * (lagging ? 1 : -1) + 1
         const changed = Math.abs(desiredTrim - bgRateTrimRef.current) > 0.004
-        // 60s 最小间隔防反复；追上（漂移<0.4s）立即归 1
-        if ((changed && now - lastRateAdjustRef.current > 60000) || (bgRateTrimRef.current !== 1 && drift < driftFloor * 0.5)) {
+        // 冷却按档位：强对齐 20s（精度可信，纠偏要跟得上）；弱对齐维持 60s 防抖
+        // 追上（漂移 < 容差一半）立即归 1
+        const rateCooldown = strongAlignment ? 20000 : 60000
+        if ((changed && now - lastRateAdjustRef.current > rateCooldown) || (bgRateTrimRef.current !== 1 && drift < driftFloor * 0.5)) {
           bgRateTrimRef.current = drift < driftFloor * 0.5 ? 1 : desiredTrim
           lastRateAdjustRef.current = now
           if (drift >= 0.4) {

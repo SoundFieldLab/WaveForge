@@ -369,10 +369,22 @@ function WeatherWidget({ settings, cardBlurAmount, accentColor, onOverlayOpenCha
       // 窗口本身还是 visible，visibilityState 判断不出来，会一直在后台发请求。
       if (document.visibilityState !== 'visible' || suspended) return
       void refreshWeather(true)
-      timer = window.setInterval(() => void refreshWeather(true), 15 * 60 * 1000)
+      // 对齐整 10 分钟刻度（:00/:10/:20…）再启动周期刷新：天气模型的观测/更新
+      // 都落在整点附近，对齐刻度每次都能拿到最新一轮数据，而不是随应用启动时刻漂移。
+      const now = Date.now()
+      const msToNextTick = 10 * 60 * 1000 - (now % (10 * 60 * 1000))
+      timer = window.setInterval(() => void refreshWeather(true), 10 * 60 * 1000)
+      // 首个刻度对齐的一次性触发
+      window.setTimeout(() => {
+        if (document.visibilityState === 'visible' && !suspended) void refreshWeather(true)
+      }, msToNextTick)
     }
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') startTimer()
+      if (document.visibilityState === 'visible') {
+        // 从后台/屏保切回：数据超过 10 分钟立即刷新（不空转——新数据在缓存 TTL 内就不发请求）
+        void refreshWeather(false)
+        startTimer()
+      }
       else {
         stopTimer()
         requestControllerRef.current?.abort()

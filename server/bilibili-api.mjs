@@ -234,6 +234,25 @@ async function fetchBiliJsonWithRiskRetry(url, options) {
   return json
 }
 
+/**
+ * 登录态失效降级：凭据过期（-101 账号未登录）时 B 站对 wbi/search 这类接口的判定
+ * 比"无 cookie 匿名"更严——过期 SESSDATA 常直接引风控拒绝，导致整轮 MV 匹配全挂
+ * （用户实测：退出重登立刻恢复）。这里对带 cookie 的请求在 -101/-352/-412 时
+ * 剥掉登录 cookie 降级为匿名 buvid 再试一次：匿名可用度略降但搜索照常出结果。
+ * 返回 { json, loginDegraded }：loginDegraded=true 表示带 cookie 请求被拒、
+ * 匿名重试救回——调用方应据此提示用户重新登录。
+ */
+async function fetchBiliJsonWithLoginFallback(url, options) {
+  const hasCookie = Boolean(resolveBiliCookie(options?.cookie))
+  const json = await fetchBiliJsonWithRiskRetry(url, options)
+  if (!hasCookie || (json.code !== -101 && json.code !== -352 && json.code !== -412)) {
+    return { json, loginDegraded: false }
+  }
+  const retry = await fetchBiliJsonWithRiskRetry(url, { ...options, cookie: '' })
+  if (retry.code !== 0) return { json, loginDegraded: false }
+  return { json: retry, loginDegraded: true }
+}
+
 /** 获取 WBI 密钥（nav 接口的 wbi_img，缓存 1h） */
 async function ensureWbiKeys() {
   if (wbiCache.imgKey && Date.now() - wbiCache.fetchedAt < WBI_CACHE_TTL) return wbiCache
@@ -324,7 +343,7 @@ export function registerBilibiliRoutes(app) {
     await ensureBuvid3()
     try {
       const signed = await wbiSign({ search_type: 'video', keyword, page })
-      const json = await fetchBiliJsonWithRiskRetry(`${API_BASE}/x/web-interface/wbi/search/type`, { params: signed, cookie: req.query.cookie })
+      const { json, loginDegraded } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/web-interface/wbi/search/type`, { params: signed, cookie: req.query.cookie })
       if (json.code !== 0) {
         return res.status(502).json({ code: json.code, error: json.message || '搜索失败（可能触发风控）' })
       }
@@ -342,7 +361,7 @@ export function registerBilibiliRoutes(app) {
           typename: item.typename || '',
         }))
         .filter((item) => item.bvid)
-      res.json({ code: 0, results, page })
+      res.json({ code: 0, results, page, ...(loginDegraded ? { loginDegraded: true } : {}) })
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '搜索失败' })
     }
@@ -354,7 +373,7 @@ export function registerBilibiliRoutes(app) {
     if (!bvid) return res.status(400).json({ code: -1, error: 'bvid 必填' })
     await ensureBuvid3()
     try {
-      const json = await fetchBiliJson(`${API_BASE}/x/web-interface/view`, { params: { bvid }, cookie: req.query.cookie })
+      const { json } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/web-interface/view`, { params: { bvid }, cookie: req.query.cookie })
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '视频不存在' })
       const data = json.data || {}
       const page = (data.pages || [])[0] || {}
@@ -401,7 +420,9 @@ export function registerBilibiliRoutes(app) {
     const requestedQn = Number.isFinite(parsedQn) ? Math.max(16, parsedQn) : 80
     const fnval = 4048
     try {
-      const json = await fetchBiliJson(`${API_BASE}/x/player/playurl`, {
+      // 登录降级同搜索：过期凭据对 playurl 轻则限画质、重则 -101 拒绝——剥 cookie 匿名重试
+      // 保住"匹配到了却放不出来"的最后一环（匿名上限 480p，前端 vipLimited 档位提示照常工作）
+      const { json } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/player/playurl`, {
         params: { bvid, cid, qn: Math.max(requestedQn, 120), fnval, fnver: 0, fourk: 1 },
         cookie: req.query.cookie,
       })
@@ -564,7 +585,9 @@ export function registerBilibiliRoutes(app) {
     await ensureBuvid3()
     try {
       const signed = await wbiSign({ bvid, cid })
-      const json = await fetchBiliJson(`${API_BASE}/x/player/wbi/v2`, { params: signed, cookie: req.query.cookie })
+      // 登录降级同搜索：CC 字幕接口对过期凭据同样可能拒绝——匿名取不到字幕时返回空列表
+      //（前端按"无字幕"降级，不阻断播放）
+      const { json } = await fetchBiliJsonWithLoginFallback(`${API_BASE}/x/player/wbi/v2`, { params: signed, cookie: req.query.cookie })
       if (json.code !== 0) return res.status(502).json({ code: json.code, error: json.message || '获取字幕失败' })
       const subtitles = (json.data?.subtitle?.subtitles || []).map((s) => {
         // 稳定 key（bvid+cid+lan）：服务端重启后 /subtitle 可据 key 反查重建，不再随机串+内存缓存一重启就 410

@@ -94,6 +94,9 @@ function TraditionalPlaylistDetail({
   const dark = playerTheme === 'dark'
   const muted = dark ? 'text-white/50' : 'text-slate-500'
   const platform = playlist?.platform || 'netease'
+  // 专辑列按数据决定：全部曲目都没有专辑名（酷狗 rank/歌单接口不回传专辑）时不摆
+  // 「未知专辑」列，列宽让给歌名/歌手（与 PcSongTable 的 columns.album 同口径）
+  const hasAlbumData = songs.some(song => Boolean(song.album?.name))
   const playlistId = String(playlist?.id || playlist?.dirId || '')
   const canRemoveAppleTracks = platform === 'apple' && !playlist?.isLike && playlistId !== APPLE_LIBRARY_ID && !playlistId.startsWith('pl.')
   const canShare = getPlatformCapabilities(platform).sharePlaylist && (platform !== 'apple' || playlistId.startsWith('pl.'))
@@ -232,10 +235,12 @@ function TraditionalPlaylistDetail({
 
           {/* 歌曲列表：歌名/歌手 | 收藏 | 专辑 | 时长；整行右键打开菜单，无 ⋯ 按钮 */}
           <section className="mt-8">
-            <div className="mb-3">
+            <div className={`mb-3`}>
               <div className="inline-block border-b-2 pb-2 text-base font-semibold" style={{ borderColor: accentColor, color: accentColor }}>歌曲 {songs.length || playlist?.trackCount || 0}</div>
             </div>
-            <div className={`grid grid-cols-[minmax(0,1fr)_44px_minmax(110px,.7fr)_58px] items-center gap-3 px-4 pb-2 text-xs ${muted}`}><span>歌名 / 歌手</span><span /><span className="hidden sm:block">专辑</span><span className="flex justify-end"><Clock3 className="h-3.5 w-3.5" /></span></div>
+            {/* 专辑列按数据决定：全部曲目都没有专辑名（酷狗 rank/歌单接口不回传专辑）时
+                不摆一列「未知专辑」，列宽让给歌名/歌手（与 PcSongTable 的 columns.album 同口径） */}
+            <div className={`grid items-center gap-3 px-4 pb-2 text-xs ${muted} ${hasAlbumData ? 'grid-cols-[minmax(0,1fr)_44px_minmax(110px,.7fr)_58px]' : 'grid-cols-[minmax(0,1fr)_44px_58px]'}`}><span>歌名 / 歌手</span><span />{hasAlbumData ? <span className="hidden sm:block">专辑</span> : null}<span className="flex justify-end"><Clock3 className="h-3.5 w-3.5" /></span></div>
             {songs.length === 0 ? <div className={`rounded-xl border p-12 text-center text-sm ${muted} ${dark ? 'border-white/10' : 'border-slate-200'}`}>{platform === 'soda' && !isSodaLoggedIn() ? '登录汽水音乐后查看歌单歌曲' : '这个歌单还没有可播放的歌曲'}</div> : (
               <div className="relative" style={{ height: virtualListHeight }}>
                 {visibleSongs.map(({ song, index }) => {
@@ -271,7 +276,7 @@ function TraditionalPlaylistDetail({
                         </span>
                       </span>
                       <button type="button" onClick={event => { event.stopPropagation(); onAddToFavorites?.(song) }} aria-label="收藏歌曲" className={`flex justify-center transition hover:scale-110 ${muted}`}><Heart className="h-4 w-4" /></button>
-                      <button type="button" onClick={event => { event.stopPropagation(); const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button>
+                      {hasAlbumData ? <button type="button" onClick={event => { event.stopPropagation(); const albumId = song.album?.appleId || song.album?.mid || song.album?.id; if (albumId) onOpenAlbum?.(String(albumId), song.platform || platform) }} className={`hidden truncate text-left text-xs sm:block ${muted}`}>{song.album?.name || '未知专辑'}</button> : null}
                       <span className={`text-right text-xs tabular-nums ${muted}`}>{formatDuration(song.duration)}</span>
                     </div>
                   )

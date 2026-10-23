@@ -46,7 +46,7 @@ export interface PcActions {
   onOpenChart?: (chart: any, autoplay?: boolean) => void
   onOpenComments?: (song: Song) => void
   /** 打开 MV（弹窗内直接播放）；mvId 缺省 = 打开 MV 浏览弹窗（不直达播放）。 */
-  onOpenMv?: (mvId?: string, platform?: 'qq' | 'netease') => void
+  onOpenMv?: (mvId?: string, platform?: 'qq' | 'netease' | 'kugou') => void
   /** 打开某用户的个人主页（网易云用户卡片/粉丝行用）；不传时页面降级为自己的主页。 */
   onOpenUserProfile?: (userId: string, nickname?: string, avatarUrl?: string) => void
   /** 分享歌单（复制平台分享链接 + toast）；未接入时为 undefined，页面据此不渲染分享按钮 */

@@ -143,6 +143,7 @@ class QishuiAuthRuntime {
     this.msToken = '';
     this.browserInfo = null;
     this.lastPassportRequest = null;
+    this.lastXMsToken = '';
     this.initializing = null;
     this.destroying = false;
     this.mfaNetworkLog = [];
@@ -166,6 +167,61 @@ class QishuiAuthRuntime {
           return;
         }
         const name = url.pathname.slice(prefix.length);
+        // 同源代理（2026-10-20）：security_host.html 的 XHR 打向本服务器**同路径**
+        //（除 /proxy 转发标记外，路径与 api.qishui.com 完全一致）——bdms SDK 按
+        // paths: ['/passport'] 匹配签名，路径必须保留字面量。主进程 fetch 转发到
+        // api.qishui.com 同路径（Node fetch 无 CORS，Host 头改写为上游域名）。
+        // token 在 URL 前缀里，外部不可猜；仅转发汽水认证路径（/passport 前缀）。
+        if (name.startsWith('passport/')) {
+          const target = API_BASE + '/' + name + url.search;
+          const chunks = [];
+          request.on('data', (chunk) => chunks.push(chunk));
+          request.on('end', async () => {
+            try {
+              const body = Buffer.concat(chunks);
+              const upstreamHeaders = { ...(request.headers || {}) };
+              delete upstreamHeaders.host;
+              delete upstreamHeaders.origin;
+              delete upstreamHeaders.referer;
+              upstreamHeaders.host = 'api.qishui.com';
+              const upstream = await fetch(target, {
+                method: request.method,
+                headers: upstreamHeaders,
+                body: ['GET', 'HEAD'].includes(request.method) ? undefined : body,
+              });
+              const responseHeaders = {};
+              upstream.headers.forEach((value, headerName) => {
+                if (/content-encoding|transfer-encoding|content-length/i.test(headerName)) return;
+                responseHeaders[headerName] = value;
+              });
+              // Set-Cookie 域改写（2026-10-21 修复）：上游会话 Cookie 的 Domain=qishui.com，
+              // 浏览器把 127.0.0.1 源下收到的跨域 Cookie 直接丢弃（两个 jar 都实测为空）→
+              // 扫码确认成功后 authSession.cookies 里永远没有 .qishui.com Cookie，
+              // persistSessionCookies/hasRealSession 判空 → 窗口停在"请扫码"不闭环（用户报障）。
+              // 同源代理必须把 Set-Cookie 的 Domain 属性剥成 Host-only，浏览器才会收进本域 jar。
+              const upstreamSetCookies = upstream.headers.getSetCookie ? upstream.headers.getSetCookie() : [];
+              if (upstreamSetCookies.length) {
+                responseHeaders['set-cookie'] = upstreamSetCookies.map(cookie => {
+                  const rewritten = cookie
+                    .replace(/;\s*domain=[^;]+/gi, '')
+                    .replace(/;\s*secure/gi, '')
+                    .replace(/;\s*samesite=(?:lax|strict|none)/gi, '; SameSite=Lax');
+                  return rewritten;
+                });
+                delete responseHeaders['Set-Cookie'];
+              }
+              // 供 persistSessionCookies 兜底读取（认证接口响应头里的服务端 msToken）
+              const xMsToken = upstream.headers.get('x-ms-token');
+              if (xMsToken) this.lastXMsToken = xMsToken;
+              const responseBody = Buffer.from(await upstream.arrayBuffer());
+              response.writeHead(upstream.status, responseHeaders);
+              response.end(responseBody);
+            } catch (proxyError) {
+              response.writeHead(502).end('proxy error: ' + (proxyError && proxyError.message || 'unknown'));
+            }
+          });
+          return;
+        }
         const type = ASSETS.get(name);
         if (!type) {
           response.writeHead(404).end('not found');
@@ -206,11 +262,34 @@ class QishuiAuthRuntime {
         const headers = { ...(details.responseHeaders || {}) };
         headers['Access-Control-Allow-Origin'] = ['*'];
         headers['Access-Control-Expose-Headers'] = ['*'];
+        // CORS 预检三件套（2026-10-20 修复）：security_host.html 从 127.0.0.1 源发 XHR，
+        // 带 x-tt-passport-verify-portrait 等自定义头 → 触发 OPTIONS 预检。此前只注入
+        // ACAO：预检因缺 Allow-Methods/Allow-Headers 失败 → 浏览器报笼统的
+        // "XMLHttpRequest network error"（汽水登录窗口整个不可用）。旧实现靠
+        // webSecurity:false 跳过 CORS 掩盖了这一点；webSecurity 恢复开启后必须补齐。
+        // 预检（OPTIONS）直接短路成 200 + 完整许可；实际请求补 Allow-Headers 回显
+        // Access-Control-Request-Headers，方法全放行。
+        if (details.method === 'OPTIONS') {
+          const requestHeaders = String(
+            (details.requestHeaders || {})['Access-Control-Request-Headers'] || '',
+          );
+          headers['Access-Control-Allow-Methods'] = ['GET, POST, PUT, DELETE, OPTIONS'];
+          headers['Access-Control-Allow-Headers'] = [requestHeaders || 'Content-Type'];
+          headers['Access-Control-Max-Age'] = ['86400'];
+          callback({ statusLine: 'HTTP/1.1 200 OK', responseHeaders: headers });
+          return;
+        }
+        const requestHeaders = String(
+          (details.requestHeaders || {})['Access-Control-Request-Headers'] || '',
+        );
+        if (requestHeaders) headers['Access-Control-Allow-Headers'] = [requestHeaders];
         callback({ responseHeaders: headers });
       },
     );
     authSession.webRequest.onBeforeSendHeaders(
-      { urls: ['https://api.qishui.com/passport/*'] },
+      // 2026-10-20：同源代理后 XHR 打向 127.0.0.1/<token>/passport/*——捕获签名参数
+      // （a_bogus/msToken 校验用）必须同时匹配同源代理 URL
+      { urls: ['https://api.qishui.com/passport/*', 'http://127.0.0.1/*/passport/*'] },
       (details, callback) => {
         this.lastPassportRequest = {
           method: details.method,
@@ -535,11 +614,31 @@ class QishuiAuthRuntime {
     const cookies = await this.authSession.cookies.get({});
     for (const cookie of cookies) {
       const domain = String(cookie.domain || '').replace(/^\./, '').toLowerCase();
-      if (domain === 'qishui.com' || domain.endsWith('.qishui.com')) {
+      // qishui.com：直连模式的会话 Cookie；127.0.0.1：同源代理改写 Domain 后的 host-only Cookie
+      // （上游 Set-Cookie 带 Domain=qishui.com，在 127.0.0.1 源下被浏览器丢弃——见 asset server 改写注释）
+      if (domain === 'qishui.com' || domain.endsWith('.qishui.com')
+        || domain === '127.0.0.1' || domain === 'localhost') {
         current[cookie.name] = cookie.value;
       }
     }
-    updateConfig({ cookie: buildCookieString(current), msToken: this.msToken });
+    // 兜底（2026-10-21）：check_qrconnect 确认帧的响应头 X-Ms-Token 里有服务端会话 msToken，
+    // 同源代理模式下浏览器 jar 可能仍缺部分键——这里与 jar 合并，绝不让"确认成功但零凭据"发生。
+    // X-Ms-Token 与 cookie 名单（sessionid/sid_tt 等）互补：响应头只在认证接口上返回，可信。
+    const headerToken = this.lastXMsToken || '';
+    if (headerToken && !current.msToken) current['msToken'] = headerToken;
+    // 会话键白名单（2026-10-21）：同源代理改写 Domain 后，jar 里会混入 127.0.0.1 域的
+    // 非会话键（如 reg-store-region）。整串发给真实 API 时垃圾键无害但难看，而 msToken
+    // 是页面 localStorage 维护的运行时值，不该以 cookie 形态入串——统一按名单过滤。
+    const SESSION_COOKIE_KEYS = new Set([
+      'sessionid', 'sessionid_ss', 'sid_guard', 'sid_tt', 'sid_ucp_v1', 'ssid_ucp_v1',
+      'uid_tt', 'uid_tt_ss', 'sid_ucp_sso_v1', 'ssid_ucp_sso_v1', 'odin_tt', 'passport_assist_verify_token',
+      'ttwid', 'msToken', 'uiin', 'client_key',
+    ]);
+    const filtered = {};
+    for (const [name, value] of Object.entries(current)) {
+      if (SESSION_COOKIE_KEYS.has(name) || /^tt_/i.test(name)) filtered[name] = value;
+    }
+    updateConfig({ cookie: buildCookieString(filtered), msToken: this.msToken || current['msToken'] || '' });
   }
 
   async clear() {

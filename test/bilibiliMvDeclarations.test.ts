@@ -7,6 +7,21 @@ import {
 } from '../src/data/bilibiliMvDeclarations'
 
 describe('developer Bilibili MV declarations', () => {
+  it('prioritizes override > developer > extension declaration > algorithm (4-level chain)', () => {
+    const candidate = (bvid: string) => ({ video: { bvid }, score: 0 }) as any
+    const algorithm = [candidate('BValgorithm1'), candidate('BV18A4m1N7Hc')]
+    const developer = candidate('BV18A4m1N7Hc')
+    const extension = candidate('BVextension01')
+    const user = candidate('BVuser000001')
+
+    expect(prioritizeExplicitCandidates(algorithm, user, developer, extension).map(item => item.video.bvid)).toEqual([
+      'BVuser000001',
+      'BV18A4m1N7Hc',
+      'BVextension01',
+      'BValgorithm1',
+    ])
+  })
+
   it('prioritizes user override before developer declaration and algorithm results', () => {
     const candidate = (bvid: string) => ({ video: { bvid }, score: 0 }) as any
     const algorithm = [candidate('BValgorithm1'), candidate('BV18A4m1N7Hc')]

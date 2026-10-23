@@ -52,9 +52,8 @@ export function platformLabel(platform: MusicPlatform | string | undefined | nul
 /** 探索页区块 ID（与 ExploreSettingsPanel 的 ExploreSectionId 同构）。
  *  kugouLibrary/kugouPlaylistTags/kugouCategories/kugouLongaudio 是酷狗官方客户端
  *  「乐库/歌单/分类/听书」对应的独立板块，只出现在 kugou 的能力表里，
- *  其它平台的区块列表不受影响。（kugouYouth「刷歌」按产品决策已下线：
- *  上游 /youth 动态流对本账号恒为空，入口无内容可展示。）
- *  保留 'kugouYouth' 于联合类型仅为兼容旧 localStorage 偏好，运行时会过滤。 */
+ *  其它平台的区块列表不受影响。（kugouYouth「刷歌」2026-10-22 恢复提供：
+ *  上游动态流对部分账号为空是正常空态，UI 有「暂无动态+最近动态」兜底。） */
 export type ExploreSectionId =
   | 'discover'
   | 'journey'
@@ -270,10 +269,9 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   profile: true,
   userPlaylists: true, // H5 签名网关
   createPlaylist: false, // 仅概念版凭据可用（getPlatformCapabilities 动态放行 /v5/add_list）
-  updatePlaylist: false, // 上游未提供重命名/改简介端点
-  deletePlaylist: false,
-  searchPlaylists: false,
-  sharePlaylist: false,
+  updatePlaylist: true, // /v2/modify_list（2026-10-22 逆向验证：改名/简介）
+  deletePlaylist: true, // /v2/delete_list（概念版凭据；与 subscribe 共用动态放行）
+  sharePlaylist: true, // 酷狗分享页 https://www.kugou.com/mixsong/ 形态歌单链接（见 playlistShare）
   removeTracksFromPlaylist: false, // 仅概念版凭据可用（按 fileid 移除）
   addTracksToPlaylist: true, // /v6/add_song
   subscribePlaylist: false, // 仅概念版凭据可用（add_list type=1 / v2/delete_list）
@@ -283,7 +281,8 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   explore: true,
   // 酷狗官方客户端一级分区：音乐（推荐 / 乐库 / 歌单 / 频道 / 分类）/ 听书 / 刷歌；
   // 探索页由 KugouExplorePage 按分区收纳（不再是通用板块瀑布），目录类接口用概念版通道。
-  // 「刷歌」(kugouYouth) 已按产品决策下线：上游动态流恒空，入口不提供。
+  // 「刷歌」(kugouYouth) 恢复提供（2026-10-22）：上游动态流对部分账号为空（is_end=1），
+  // 这是正常空态而非错误——UI 有专门的「当前账号暂无动态 + 最近动态」兜底。
   exploreSections: [
     'discover',
     'kugouLibrary',
@@ -291,9 +290,12 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
     'channels',
     'kugouCategories',
     'kugouLongaudio',
+    'kugouYouth',
   ],
   search: true,
-  searchSuggest: false,
+  // 派生联想（songsearch 前缀搜索聚拢歌名/歌手/专辑；上游无公开 suggest 端点，2026-10-22 探测后实装）
+  searchSuggest: true,
+  searchPlaylists: true, // 分类歌单池派生（by-tag 池按关键词客户端过滤，与探索页歌单页签同源）
   lyrics: true,
   // 概念版 /mcomment/v1/cmtlist 可读（设备凭据即可）；点赞/回复/发表上游未提供 → UI 只读并注明
   comments: true,
@@ -303,17 +305,17 @@ const KUGOU_CAPABILITIES: PlatformCapabilities = {
   channels: true,
   newSongs: true,
   albums: true, // mobilecdn /api/v3/album/list + album/info + album/song
-  mv: false,
+  mv: true, // m3ws /api/v1/mv/infov2（2026-10-22 逆向官方 MV 分享页 H5 签名；三档清晰度直链）
   signin: false,
   social: false,
-  rank: false,
-  recentPlayed: false,
+  rank: true, // mobilecdn rank/list + 概念版榜单（探索页排行榜区）
+  recentPlayed: true, // 概念版 playhistory/v1/get_songs（需登录；未登录时页面有登录提示空态）
   artistDetail: true, // mobilecdn /api/v3/singer/info + singer/song
   albumDetail: true,
   similarSongs: true, // 同歌手热门歌曲（singer/song）+ 榜单相关探索
   radio: false,
   playAsCarrier: true, // H5 签名网关可原生播放（需登录）；未登录时由上层匹配播放
-  audioQuality: false,
+  audioQuality: true, // 音质设置面板有酷狗专档（auto/128/320/FLAC/Hi-Res）；播放链路按档选参数（gateway normalizeQualityPreference）
 }
 
 const SODA_CAPABILITIES: PlatformCapabilities = {
@@ -367,10 +369,14 @@ export const PLATFORM_CAPABILITIES: Record<MusicPlatform, PlatformCapabilities> 
 
 export function getPlatformCapabilities(platform: MusicPlatform): PlatformCapabilities {
   // 酷狗按当前凭据动态判定：概念版扫码凭据支持移除（按 fileid）、新建/收藏歌单（cloudlist），
-  // 网页 cookie 通道没有这些写接口
+  // 网页 cookie 通道没有这些写接口。
+  // 注意不能用 localStorage 直查：桌面端凭据已迁到加密存储（secureTokenStore），
+  // localStorage 明文副本落盘成功后会被删除——只查 localStorage 会把已登录误判成未登录。
   if (platform === 'kugou') {
     let conceptCredential = false
-    try { conceptCredential = Boolean(localStorage.getItem('kugou_concept_credential')) } catch { /* 忽略 */ }
+    try {
+      conceptCredential = Boolean(localStorage.getItem('kugou_concept_credential')) || Boolean(getSecureToken('kugou_concept_credential'))
+    } catch { /* 忽略 */ }
     return conceptCredential
       ? {
           ...KUGOU_CAPABILITIES,
@@ -378,8 +384,19 @@ export function getPlatformCapabilities(platform: MusicPlatform): PlatformCapabi
           removeTracksFromPlaylist: true,
           createPlaylist: true,
           subscribePlaylist: true,
+          deletePlaylist: true,
         }
       : KUGOU_CAPABILITIES
+  }
+  // Spotify 分档（平台可用性增强）：librespot 通道可用且 Premium → 自源直播（false）；
+  // 免费号/通道缺失/未登录 → 可借载体（true，上层按 needsCarrier 走降级匹配）。
+  // 档位来源 spotify_product（登录链路落盘）；unknown 按降级处理（保守）。
+  if (platform === 'spotify') {
+    let directPlay = false
+    try {
+      directPlay = localStorage.getItem('spotify_product') === 'premium'
+    } catch { /* 忽略 */ }
+    return { ...SPOTIFY_CAPABILITIES, playAsCarrier: !directPlay }
   }
   return PLATFORM_CAPABILITIES[platform] || NETEASE_CAPABILITIES
 }

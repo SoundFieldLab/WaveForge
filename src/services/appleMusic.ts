@@ -14,6 +14,7 @@
  * <ttm:agent type="person|other" xml:id="..."/> 声明；渲染端按演唱者着色。
  */
 import type { LyricLine } from './musicApi'
+import { getApiBase } from './apiConfig'
 import { parseTTML, type TTMLAgent } from '../utils/ttmlParser'
 import { getAppleAuthState, getAppleCredentials } from './appleAuth'
 import { appleApiRequest } from './appleApiBridge'
@@ -341,28 +342,102 @@ export async function fetchAppleSyllableLyricsDirect(
   params.set('extend', 'ttmlLocalizations')
 
   // 走主进程代理（浏览器直连 amp-api 会被 CORS 拦截，与登录/资料库同理）
-  const path = `/v1/catalog/${encodeURIComponent(storefront)}/songs/${encodeURIComponent(match.songId)}/syllable-lyrics?${params.toString()}`
-  const result = await appleApiRequest(path, {
-    developerToken: settings.developerToken,
-    mediaUserToken: settings.mediaUserToken,
-    timeoutMs: 6000,
-  })
-  if (!result.ok) {
-    if (result.status === 401 || result.status === 403) {
-      console.warn('[AppleMusic] AMP 401/403：token 无效或未授权，回退社区库')
-    } else if (result.status === 0) {
-      console.warn('[AppleMusic] AMP 网络错误，回退社区库:', result.error)
-    } else {
-      console.warn(`[AppleMusic] AMP HTTP ${result.status}`)
+  const fetchBundle = async (songId: string, sf: string): Promise<AppleTtmlBundle | null> => {
+    const path = `/v1/catalog/${encodeURIComponent(sf)}/songs/${encodeURIComponent(songId)}/syllable-lyrics?${params.toString()}`
+    const result = await appleApiRequest(path, {
+      developerToken: settings.developerToken,
+      mediaUserToken: settings.mediaUserToken,
+      timeoutMs: 6000,
+    })
+    if (!result.ok) {
+      if (result.status === 401 || result.status === 403) {
+        console.warn('[AppleMusic] AMP 401/403：token 无效或未授权，回退社区库')
+      } else if (result.status === 0) {
+        console.warn('[AppleMusic] AMP 网络错误，回退社区库:', result.error)
+      } else {
+        console.warn(`[AppleMusic] AMP HTTP ${result.status} (storefront=${sf})`)
+      }
+      return null
     }
-    return null
+    const attributes = result.data?.data?.[0]?.attributes
+    if (!attributes) return null
+    return collectAppleTtml(attributes, settings)
   }
-  const attributes = result.data?.data?.[0]?.attributes
-  if (!attributes) return null
-  return collectAppleTtml(attributes, settings)
+
+  // 逐级回退：① 配置 storefront → ② match 自带 storefront（iTunes 匹配到的区域，同一首歌
+  // 的 syllable-lyrics 按区逐曲开放，CN 区 404 的曲在 US/TW 区往往有）→ ③ 其余常见区。
+  // syllable-lyrics 404 = Apple 未对该曲在该区提供逐字歌词，换区重试是官方客户端同款行为。
+  const primary = await fetchBundle(match.songId, storefront)
+  if (primary) return primary
+  const fallbackStores = [...new Set([match.storefront || '', 'us', 'tw', 'hk', 'jp'])]
+    .filter(sf => sf && sf.toLowerCase() !== storefront.toLowerCase())
+  for (const sf of fallbackStores) {
+    const bundle = await fetchBundle(match.songId, sf)
+    if (bundle) return bundle
+  }
+  return null
 }
 
 // ─────────────────────────── AMLL am-lyrics 社区库（免 token） ───────────────────────────
+
+/**
+ * 行级歌词兜底（catalog songs?extend=lyrics）：
+ * syllable-lyrics 按曲/区逐个开放，404 的曲用这个端点仍能拿到**带时间轴的行级歌词**。
+ * Apple 行级返回的是 JSON（lyrics.lines[]：text + begin/end 时间），不是 TTML——
+ * 这里把它包装成简易 TTML 文档，复用同一套 parseTTML → convertAppleTTMLToLyrics 管线。
+ * 无逐字/和声/agent（行级本来就没有），但行时间准确，"没歌词"变"有歌词"。
+ */
+export async function fetchAppleLineLyricsDirect(
+  match: AppleTrackMatch,
+  settings: AppleMusicSettings = getAppleMusicSettings(),
+): Promise<string | null> {
+  const storefronts = [...new Set([
+    settings.storefront || match.storefront || 'cn',
+    match.storefront || '',
+    'us', 'tw', 'hk', 'jp',
+  ])].filter(Boolean)
+  for (const sf of storefronts) {
+    const path = `/v1/catalog/${encodeURIComponent(sf)}/songs/${encodeURIComponent(match.songId)}?extend=lyrics`
+    const result = await appleApiRequest(path, {
+      developerToken: settings.developerToken,
+      mediaUserToken: settings.mediaUserToken,
+      timeoutMs: 6000,
+    })
+    if (!result.ok) continue
+    const song = result.data?.data?.[0]
+    const lines = song?.attributes?.lyrics?.lines
+    if (!Array.isArray(lines) || lines.length === 0) continue
+    // JSON → 简易 TTML：每行一个 <p begin end>；多行歌词 time 分隔（~秒）保持换行语义
+    const escapeXml = (s: string) => s
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+    const paragraphs = lines.map((line: any) => {
+      // Apple 行级 lyrics 的 begin/end 单位官方文档为**秒**（小数），但部分响应实测
+      // 返回毫秒（整数且 >10000）。归一保护：>10000 视为毫秒换算成秒，
+      // 否则 "12500.000s" 会被 parseTime 解析成 3.47 小时 → 歌词永远不滚动。
+      const normalizeTime = (value: unknown): number => {
+        const n = Number(value) || 0
+        return n > 10000 ? n / 1000 : n
+      }
+      const begin = normalizeTime(line.begin)
+      const end = Math.max(normalizeTime(line.end), begin + 0.5)
+      const text = String(line.text || '').trim()
+      if (!text) return ''
+      return `    <p begin="${begin.toFixed(3)}s" end="${end.toFixed(3)}s">${escapeXml(text)}</p>`
+    }).filter(Boolean)
+    if (paragraphs.length === 0) continue
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" ittp:aspectRatio="1" xmlns:ittp="http://www.w3.org/ns/ttml/profile/mp4-ttml#metadata" xmlns:tts="http://www.w3.org/ns/ttml#styling" lang="${song.attributes?.language || 'en'}">
+  <head><metadata><ttm:title>${escapeXml(match.trackName)}</ttm:title></metadata></head>
+  <body>
+    <div>
+${paragraphs.join('\n')}
+    </div>
+  </body>
+</tt>`
+  }
+  return null
+}
 
 export async function fetchAmLyricsTtml(songId: string): Promise<string | null> {
   const endpoints = [
@@ -554,6 +629,49 @@ export function isAppleMusicConfigured(): boolean {
   return Boolean(s.loggedIn && settings.developerToken && settings.mediaUserToken)
 }
 
+/** 免登录特殊歌词结果：TTML 是否含特殊结构（agent 对唱 / x-bg 和声） */
+export interface AppleTokenlessLyrics {
+  ttml: string | null
+  songId?: string
+  trackName?: string
+  hasSpecial: boolean
+}
+
+/** 服务端免登录 Apple 逐字歌词（WebPlayKid 公共 token，与动态封面同链）：
+ *  按 标题+歌手 在 Apple catalog 匹配 → 跨区拉 syllable-lyrics。
+ *  仅当 TTML 携带特殊结构（ttm:agent 对唱 / x-bg 和声）时才返回——
+ *  与"检测到动态封面自动用 AM 封面"同策略：普通歌词各平台自有，不替换。 */
+export async function fetchAppleTokenlessSpecialLyrics(
+  title: string,
+  artist: string,
+  durationMs?: number,
+): Promise<AppleTokenlessLyrics> {
+  if (!title.trim()) return { ttml: null, hasSpecial: false }
+  try {
+    const params = new URLSearchParams({
+      title: title.trim(),
+      artist: artist.trim(),
+      ...(durationMs ? { duration: String(durationMs) } : {}),
+    })
+    const resp = await fetch(`${getApiBase()}/apple/lyrics-ttml?${params.toString()}`, { signal: AbortSignal.timeout(15000) })
+    if (!resp.ok) return { ttml: null, hasSpecial: false }
+    const data = await resp.json().catch(() => null)
+    const ttml = typeof data?.ttml === 'string' && data.ttml.includes('<tt') ? data.ttml : null
+    if (!ttml) return { ttml: null, hasSpecial: false, songId: data?.songId, trackName: data?.trackName }
+    // 特殊结构检测：**对唱（≥2 个不同 agent）或 x-bg 和声**才视为特殊。
+    // 只有单个 agent（独唱标注）不算——独唱无分栏无着色，替换平台源没有收益。
+    const agentIds = new Set(
+      (ttml.match(/ttm:agent="[^"]+"/g) ?? []).map((entry: string) => entry.slice('ttm:agent="'.length, -1))
+    )
+    const hasSpecial = agentIds.size >= 2
+      || /role="x-bg"/.test(ttml)
+      || /ttm:role="x-bg"/.test(ttml)
+    return { ttml, hasSpecial, songId: data?.songId, trackName: data?.trackName }
+  } catch {
+    return { ttml: null, hasSpecial: false }
+  }
+}
+
 export async function getAppleMusicLyrics(
   title: string,
   artist: string,
@@ -561,8 +679,26 @@ export async function getAppleMusicLyrics(
   options?: { songId?: string | number; storefront?: string },
 ): Promise<LyricLine[]> {
   const settings = getAppleMusicSettings()
-  // 未登录默认关闭 AM 歌词：不请求 Apple 官方接口，也不用社区库替换平台歌词
-  if (!settings.enabled || !isAppleMusicConfigured()) return []
+  // 未登录不再整体短路：走服务端免登录源（WebPlayKid token），但**只采纳特殊歌词**
+  // （agent 对唱 / x-bg 和声）——普通歌词各平台自有，不替换。
+  const loggedIn = getAppleAuthState().loggedIn
+  const ampUsable = Boolean(loggedIn && settings.developerToken && settings.mediaUserToken)
+  if (!settings.enabled || (!isAppleMusicConfigured() && !loggedIn)) {
+    // 完全未登录：无官方 token，只能用免登录源。仍需 settings.enabled（总开关语义）。
+    if (!settings.enabled || !title || !artist) return []
+    const tokenless = await fetchAppleTokenlessSpecialLyrics(title, artist, durationMs)
+    if (!tokenless.ttml || !tokenless.hasSpecial) return []
+    try {
+      const artistNames = artist.split(/[,，&/和、]/).map(item => item.trim()).filter(Boolean)
+      const { lyrics } = convertAppleTTMLToLyrics(tokenless.ttml, artistNames)
+      // 免登录源只贡献**含特殊结构的行**之外的完整歌词——这里整份返回（它就是这首歌的
+      // Apple 官方逐字歌词），骨架竞争交给 getLyrics 的评分制；agent 跨源补挂消费它。
+      return lyrics
+    } catch (error) {
+      console.warn('[AppleMusic] 免登录 TTML 解析失败:', error)
+      return []
+    }
+  }
 
   const directSongId = String(options?.songId || '').trim()
   const usableDirectSongId = directSongId && directSongId !== '0' && !/^(?:i|l|p|ra)\./i.test(directSongId)
@@ -577,17 +713,46 @@ export async function getAppleMusicLyrics(
     : title && artist
       ? await resolveAppleTrack(title, artist, durationMs)
       : null
-  if (!match) return []
+  if (!match) {
+    // 已登录但没匹配到 Apple 曲目：尝试免登录源的特殊歌词（匹配口径不同，可能命中）
+    if (ampUsable && title && artist) {
+      const tokenless = await fetchAppleTokenlessSpecialLyrics(title, artist, durationMs)
+      if (tokenless.ttml && tokenless.hasSpecial) {
+        try {
+          const artistNames = artist.split(/[,，&/和、]/).map(item => item.trim()).filter(Boolean)
+          const { lyrics } = convertAppleTTMLToLyrics(tokenless.ttml, artistNames)
+          return lyrics
+        } catch { /* 解析失败按无词处理 */ }
+      }
+    }
+    return []
+  }
 
   let ttml: string | null = null
   // 仅「已登录」才请求 Apple 官方接口（token 存在但未登录成功时直接走社区库）
-  const loggedIn = getAppleAuthState().loggedIn
-  if (loggedIn && settings.developerToken && settings.mediaUserToken) {
+  if (ampUsable) {
     const bundle = await fetchAppleSyllableLyricsDirect(match, settings)
     if (bundle) ttml = mergeAppleTtmlBundle(bundle)
+    // 逐字歌词（syllable-lyrics）按曲/区逐个开放，404 = 该曲无逐字数据。
+    // 回退到**行级歌词**（catalog songs?extend=lyrics）：没有逐字/和声，但至少有
+    // 带时间轴的整行歌词——此前直接空手而归，表现为"这首歌没歌词"。
+    if (!ttml) {
+      ttml = await fetchAppleLineLyricsDirect(match, settings)
+    }
   }
   if (!ttml) {
     ttml = await fetchAmLyricsTtml(match.songId)
+  }
+  // 登录态两路都空手：免登录源再试一次（匹配口径不同，可能命中特殊歌词）
+  if (!ttml && title && artist) {
+    const tokenless = await fetchAppleTokenlessSpecialLyrics(title, artist, durationMs)
+    if (tokenless.ttml && tokenless.hasSpecial) {
+      try {
+        const artistNames = artist.split(/[,，&/和、]/).map(item => item.trim()).filter(Boolean)
+        const { lyrics } = convertAppleTTMLToLyrics(tokenless.ttml, artistNames)
+        return lyrics
+      } catch { /* 解析失败按无词处理 */ }
+    }
   }
   if (!ttml) return []
 

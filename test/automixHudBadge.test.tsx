@@ -72,7 +72,7 @@ describe('AutoMix HUD 药丸', () => {
     expect(formatAutomixHudTime(59.9)).toBe('0:59')
   })
 
-  it('显示满 8 秒后渐隐并卸载（驻留不含淡入淡出）；同一首歌换切点重挂也不再提示', async () => {
+  it('显示满 8 秒后渐隐并卸载（驻留不含淡入淡出）；同一首歌换切点视为新一轮——重新提示（计划重算语义，2026-10-22 用户定稿）', async () => {
     vi.useFakeTimers()
     const props = badgeProps('t-hold')
     const { container, rerender } = render(<AutomixHudBadge {...props} currentTime={6} onDismiss={noop} />)
@@ -92,10 +92,13 @@ describe('AutoMix HUD 药丸', () => {
     expect(fading!.style.opacity).toBe('0')
     await act(async () => { vi.advanceTimersByTime(AUTOMIX_HUD_FADE_OUT_SECONDS * 1000 + 120) })
     expect(container.firstElementChild).toBeNull()
-    // 同曲（trackKey 相同）换了切点、位置也早已 ≥5s → 仍不再提示（每曲一遍）
+    // 同曲（trackKey 相同）换了切点 = 过渡计划被重算（插入下一曲/seek 等）：用户必须
+    // 重新看到新过渡点（否则不知道过渡点已改——2026-10-22 实测反馈"点药丸跳转后新计划
+    // 没有任何提示"）。key 整体变化（含切点段）→ 重置"已提示"，位置 ≥5s 满足入场 → 立即重弹。
     rerender(<AutomixHudBadge {...props} info={{ ...props.info, key: 't-hold|305' }} currentTime={120} onDismiss={noop} />)
     await flushFadeIn()
-    expect(container.firstElementChild).toBeNull()
+    expect(container.firstElementChild).toBeTruthy()
+    expect(container.textContent).toContain('5:00') // 305s → 新切点的时刻
   })
 
   it('计划晚到（冷启动/新歌未预载，播放位置早已超过 5 秒）：就绪那一刻立刻提示', async () => {

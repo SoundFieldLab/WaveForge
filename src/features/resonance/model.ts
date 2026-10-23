@@ -764,6 +764,28 @@ export function removeTrack(
 }
 
 /** 置顶（下一首播放）：房主可对任意曲目，成员只能对自己点的 */
+/** 拖拽重排：把一首歌移到任意位置（房主或点歌者本人） */
+export function moveTrackTo(
+  state: ResonanceRoomState,
+  peerId: string,
+  trackKey: string,
+  toIndex: number,
+): { ok: boolean; state: ResonanceRoomState } {
+  if (state.closed) return { ok: false, state }
+  const from = state.queue.findIndex(track => track.key === trackKey)
+  if (from < 0) return { ok: false, state }
+  const isHost = peerId === state.hostId
+  if (!isHost && state.queue[from].requestedBy !== peerId) return { ok: false, state }
+  const current = state.cursor >= 0 ? state.cursor : 0
+  // 不能移到正在播放的曲目之前
+  let target = Math.max(current + 1, Math.min(state.queue.length - 1, toIndex))
+  if (target === from) return { ok: true, state }
+  const queue = [...state.queue]
+  const [moved] = queue.splice(from, 1)
+  queue.splice(target > from ? target - 1 : target, 0, moved)
+  return { ok: true, state: { ...state, queue, seq: state.seq + 1 } }
+}
+
 export function moveTrackNext(
   state: ResonanceRoomState,
   peerId: string,

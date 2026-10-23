@@ -14,7 +14,7 @@
  * AudioContext 懒创建 + 播放前 resume（浏览器自动播放策略下首次点击后才出声）。
  */
 
-export type TransitionSoundMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
+export type TransitionSoundMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'
 
 interface SoundRecipe {
   /** whoosh 起止频率（带通中心滑频，Hz） */
@@ -75,6 +75,17 @@ const MODE_SOUND_RECIPES: Record<TransitionSoundMode, SoundRecipe> = {
       { freq: 493.88, type: 'sine', at: 0.35, dur: 1.2, gain: 0.18 },
     ],
     level: 0.95,
+  },
+  // In Party：短促双脉冲（电波互控意象）+ 低频扫入
+  inparty: {
+    sweep: [160, 640],
+    sweepDur: 0.8,
+    tones: [
+      { freq: 261.63, type: 'sine', at: 0.18, dur: 0.18, gain: 0.34 },
+      { freq: 261.63, type: 'sine', at: 0.4, dur: 0.18, gain: 0.3 },
+      { freq: 392, type: 'sine', at: 0.6, dur: 0.5, gain: 0.2 },
+    ],
+    level: 0.85,
   },
   // 学歌：Do-Mi-So 上行三音（练声意象）+ 温和的滑频
   singalong: {

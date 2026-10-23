@@ -295,7 +295,7 @@ function QQPcHome({ payload, chrome, account, actions, active = true, username, 
         case 'play-radar': {
           const result = await fetchQQRadarSongs({ page: 1, reqType: 0, entranceSongs: [] })
           const songs: Song[] = result?.songs || []
-          if (!songs.length) throw new Error('雷达模式暂时没有返回歌曲')
+          if (!songs.length) throw new Error('AI伴听暂时没有返回歌曲')
           // 雷达续页：播放中按 result.page（服务端返回的待取页）自动续拉下一批
           act.onPlaySongs(songs[0], songs, 0, {
             continuous: true,
@@ -365,15 +365,16 @@ function QQPcHome({ payload, chrome, account, actions, active = true, username, 
         subtitle: '每日30首',
       }
     }
-    // 雷达卡（202/900/991）：feed 里 title 是「雷达模式」，官方客户端的界面名是「刷歌模式」
-    // （与左栏「刷歌」同一功能），卡面第一行是当前刷到的那首歌，第二行是功能名。
+    // 雷达卡（202/900/991）：官方客户端界面名是「AI伴听」（2026-10-20 起；旧名「刷歌模式」，
+    // 更早 feed title 是「雷达模式」）。上游 title 现在带宣传后缀（"AI伴听-最懂你的音乐伙伴"），
+    // 不能整串透传——只取短名。卡面第一行是当前刷到的那首歌，第二行是功能名。
     // 官方这张卡封面没有英文标签条（2026-10-07 截图核对），所以 strip 保持 null。
     if (card.subtype === 991) {
       const first = card.songs?.[0]
       return {
         strip: null,
         caption: card.subtitle || (first ? `${first.name} - ${artistLine(first)}` : ''),
-        subtitle: '刷歌模式',
+        subtitle: 'AI伴听',
       }
     }
     const first = card.songs?.[0]

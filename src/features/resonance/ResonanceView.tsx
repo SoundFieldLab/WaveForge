@@ -31,7 +31,7 @@ export interface ResonanceViewProps {
   createAdapter: (hooks: { onUnplayable: (track: ResonanceTrack, result: ResonanceLocalTrack) => void }) => ResonancePlaybackAdapter
   nowPlaying: { song: Song | null; positionMs: number; playing: boolean } | null
   /** 切成别的模式（交给 App 的拦截器：房间在时会先问「挂起 / 退出」） */
-  onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong') => void
+  onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty') => void
 }
 
 /** 各模式的显示名（「返回 X」按钮用） */
@@ -354,9 +354,13 @@ export default function ResonanceView(props: ResonanceViewProps) {
                   selfPeerId={session.getIdentity()?.peerId || peerIdRef.current}
                   remainingQuota={remainingQuota}
                   onSendChat={text => session.sendChat(text)}
+                  onToggleReaction={(id, emoji) => session.toggleReaction(id, emoji)}
+                  onRecall={id => void session.recallMessage(id)}
+                  onTyping={() => session.notifyTyping()}
                   onVoteSkip={target => session.voteSkip(target)}
                   onForceSkip={() => session.hostForceSkip()}
                   onNext={() => session.hostNext()}
+                  onTogglePlay={() => session.requestPlayToggle()}
                   onRemoveTrack={key => {
                     const result = session.removeFromQueue(key)
                     if (!result.ok && result.reason === 'not-allowed') {
@@ -364,6 +368,7 @@ export default function ResonanceView(props: ResonanceViewProps) {
                     }
                   }}
                   onMoveToNext={key => session.moveToNext(key)}
+                  onMoveToIndex={(key, idx) => void session.moveToIndex(key, idx)}
                   onGrantControl={peerId => session.grantControl(peerId)}
                   onRevokeControl={() => session.revokeControl()}
                   onRequestControl={() => session.requestControl()}

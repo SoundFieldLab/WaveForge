@@ -7,13 +7,13 @@ import { useTvMode, useTvBack } from '../tv/tvCore'
 interface MV {
   id: number | string
   name: string
-  platform?: 'netease' | 'qq'
+  platform?: 'netease' | 'qq' | 'kugou'
 }
 
 interface VideoPlayerProps {
   mvId: number | string
   mvName: string
-  platform?: 'netease' | 'qq'
+  platform?: 'netease' | 'qq' | 'kugou'
   onClose: () => void
   mvList?: MV[] // MV列表（用于自动续播）
   currentIndex?: number // 当前MV在列表中的索引

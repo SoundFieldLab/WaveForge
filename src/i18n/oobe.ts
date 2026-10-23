@@ -21,6 +21,8 @@ export type OobeStringKey =
   | 'exit' | 'agreeTpl' | 'readingHint'
   | 'finalTitle' | 'finalP1' | 'finalP2' | 'finalP3' | 'finalP4'
   | 'welcomeLine' | 'welcomeEnter'
+  | 'bgmTitle' | 'bgmBody' | 'bgmAllow' | 'bgmDeny'
+  | 'nowPlayingLine'
   | 'legalModalTitle' | 'legalModalClose' | 'ariaClose'
 
 type LangMap = Record<LocaleCode, string>
@@ -309,6 +311,32 @@ export const OOBE_STRINGS: Record<OobeStringKey, LangMap> = {
     '이용해 주셔서 환영합니다',
   ),
   welcomeEnter: zh('进入', '進入', 'Enter', 'はじめる', '시작'),
+
+  // 背景音乐授权弹窗（主题选择之后）：同意 → 循环播放 Beginning_H - C418，拒绝 → 静默
+  bgmTitle: zh(
+    '播放背景音乐',
+    '播放背景音樂',
+    'Play Background Music',
+    'BGMを再生します',
+    '배경 음악 재생',
+  ),
+  bgmBody: zh(
+    '是否允许我们为您播放一份背景音乐？',
+    '是否允許我們為您播放一份背景音樂？',
+    'May we play a piece of background music for you?',
+    'あなたのためにBGMを再生してもよろしいですか？',
+    '배경 음악을 재생해도 괜찮으신가요?',
+  ),
+  bgmAllow: zh('同意', '同意', 'Allow', '許可', '허용'),
+  bgmDeny: zh('拒绝', '拒絕', 'Deny', '拒否', '거부'),
+  // MC 唱片机式顶部提示（像素字体 + 彩色动画）
+  nowPlayingLine: zh(
+    '正在播放：Beginning_H - C418',
+    '正在播放：Beginning_H - C418',
+    'Now Playing: Beginning_H - C418',
+    '再生中：Beginning_H - C418',
+    '재생 중: Beginning_H - C418',
+  ),
   legalModalTitle: zh(
     '法律声明与用户协议',
     '法律聲明與使用者協議',

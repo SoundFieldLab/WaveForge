@@ -243,7 +243,7 @@ export function WeatherAtmosphere({ theme, compact = false, skyBodies, active = 
               src={moonUrl}
               alt=""
               className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full object-cover"
-              style={{ width: '46%', height: '46%', filter: 'brightness(1.08) contrast(1.05)' }}
+              style={{ width: '82%', height: '82%', filter: 'brightness(1.08) contrast(1.05)' }}
             />
           ) : (
             <div

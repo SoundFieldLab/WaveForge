@@ -6,7 +6,7 @@
  * 汽水音乐服务（抖音音乐体系）—— /api/soda/* 全能力类型化客户端
  *
  * 数据源分层：
- * 1. 本地后端 http://localhost:3001/api/soda/*（登录态、搜索、个性化推荐、榜单、
+ * 1. 本地后端 ${getApiBase()}/soda/*（登录态、搜索、个性化推荐、榜单、
  *    歌单、喜欢/收藏、评论、歌词、播放地址等全部能力；cookie 经 query ?cookie=
  *    或 body 字段传递，来源 localStorage['soda_token']）。
  * 2. 兜底（后端未就绪/失败时）：火山引擎公开目录 API（无需登录，经 local-server

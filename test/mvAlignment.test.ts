@@ -16,7 +16,7 @@ import {
 import { autoMixAnalysisService } from '../src/services/autoMixAnalysisService'
 import * as autoMixModule from '../src/services/autoMixAnalysisService'
 import { detectLiveMusicEntry, detectMusicStart, envelopeSegmentAnchors, envelopeSegmentVote } from '../src/services/autoMixAnalysisService'
-import { buildEnvelopeAlignment, offsetAt, type MvAlignment } from '../src/services/mvAlignment'
+import { buildEnvelopeAlignment, offsetAt, scoreEvidenceAlignment, type MvAlignment } from '../src/services/mvAlignment'
 import * as bilibiliApi from '../src/services/bilibiliApi'
 import type { LyricLine } from '../src/services/musicApi'
 import type { BilibiliSubtitleLine } from '../src/services/bilibiliApi'
@@ -1137,5 +1137,35 @@ describe('投票真值仲裁（6008 对基准：净挽回 73.5s / FP−3 / ≤2s
     // 同录音强证据:峰优先(投票以峰为先验扫描,无独立信息量)
     expect(result).not.toBeNull()
     expect(result!.offsetSeconds).toBeCloseTo(12.4, 1)
+  })
+})
+
+describe('证据链裁决模型（evidence model，2026-10-18 标定）', () => {
+  it('scoreEvidenceAlignment：强证据组合（高支持率+高峰+锚点一致）→ 高分', () => {
+    // 形态取自标定集可救样本（support=1.0 peak=0.85 prom=0.21 voteΔ=0）
+    const score = scoreEvidenceAlignment({
+      peak: 0.85, prom: 0.21, support: 1.0, anchors: 9, strongAnchors: 3,
+      anchorSpread: 0.0, segs: 9, durRatio: 1.01, voteOffDelta: 0.0,
+    })
+    expect(score).toBeGreaterThan(0.9)
+  })
+
+  it('scoreEvidenceAlignment：翻唱/混剪形态（峰虚高但无结构支持+投票矛盾）→ 低分', () => {
+    // 形态取自标定集误放样本（"I Don't Have a Pen" peak=0.56 support=0.33 voteΔ=22.5）
+    const score = scoreEvidenceAlignment({
+      peak: 0.56, prom: 0.01, support: 0.33, anchors: 2, strongAnchors: 0,
+      anchorSpread: 0.0, segs: 6, durRatio: 1.0, voteOffDelta: 22.5,
+    })
+    expect(score).toBeLessThan(0.25)
+  })
+
+  it('scoreEvidenceAlignment：非法输入（NaN/Infinity）按 0 处理不抛错', () => {
+    const score = scoreEvidenceAlignment({
+      peak: NaN, prom: Infinity, support: -1, anchors: 0, strongAnchors: 0,
+      anchorSpread: NaN, segs: 0, durRatio: 0, voteOffDelta: 30,
+    })
+    expect(Number.isFinite(score)).toBe(true)
+    expect(score).toBeGreaterThanOrEqual(0)
+    expect(score).toBeLessThanOrEqual(1)
   })
 })

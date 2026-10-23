@@ -742,7 +742,10 @@ export default function ModengPlayerPage({
             ?? (lastWord ? vocal.time + (lastWord.startTime + lastWord.duration) / 1000 : vocal.time + 1)
           const rowEl = bgVocalRowRefs.current.get(`bg${ci}-${vi}`)
           if (rowEl) {
-            const fadeIn = clamp01((t - vocal.time) / 0.24)
+            // AM 官方时序（用户实测）：和声随**主行激活**向下淡入——不使用和声自己的
+            // begin（可能远晚于主行激活，主行唱半天和声才出现）；显示持续到主行窗口
+            // 结束（和声唱完不提前消失），逐词亮度仍按和声自己的词时间。
+            const fadeIn = clamp01((t - line.time) / 0.24)
             const fadeOut = clamp01((vocalEnd - t) / 0.36)
             rowEl.style.opacity = Math.min(fadeIn, fadeOut).toFixed(3)
           }
@@ -2268,14 +2271,19 @@ export default function ModengPlayerPage({
                         : 'flex-start',
                     }}
                   >
-                    {/* 罗马音行（逐字或整行）：显示在主歌词上方，淡色与行距离同步 */}
-                    {effectiveRomanEnabled && Boolean(line.roman || line.romanWords?.length) ? (
+                    {/* 罗马音行（逐字或整行）：仅当前行显示——LB/AM 实机非当前行只有主文字，
+                        翻译/罗马音随行激活才展开（与柔和风格 isCurrent 条件一致）；
+                        全行都渲染会让歌词列每行拖一条小尾巴，密度过高观感碎。
+                        颜色不能走 lineColor(0)：LINE_FADE 表按"距离-1"取下标，distance=0
+                        会取 [-1] → 回退 0.15，当前行罗马音会暗到几乎不可见——
+                        当前行统一用 unsung 色（比主歌词略淡一档）。 */}
+                    {isCurrent && effectiveRomanEnabled && Boolean(line.roman || line.romanWords?.length) ? (
                       <div
-                        data-testid={isCurrent ? 'modeng-roman' : undefined}
+                        data-testid="modeng-roman"
                         style={{
-                          fontSize: (isCurrent ? 17 : 13.5) * s,
-                          fontWeight: isCurrent ? 500 : 400,
-                          color: lineColor(distance, line.agent),
+                          fontSize: 17 * s,
+                          fontWeight: 500,
+                          color: duetUnsungColor(line.agent) ?? unsungColor,
                           letterSpacing: 0.5 * s,
                           lineHeight: 1,
                           marginBottom: 4 * s,
@@ -2310,8 +2318,11 @@ export default function ModengPlayerPage({
                         maxWidth: '100%',
                         wordBreak: 'break-word',
                         overflowWrap: 'break-word',
-                        textAlign: 'left',
-                        justifyContent: 'flex-start',
+                        // 左右交替：flex 容器的 text-align 不作用于布局（flex 子项忽略它），
+                        //   但决定换行后各文本行的水平对齐；配合 alignItems 才能让"整块靠右 +
+                        //   块内文字也靠右"（否则只有块框贴右、文字仍悬在左侧）。
+                        textAlign: lineSideFor(index) === 'right' ? 'right' : 'left',
+                        justifyContent: lineSideFor(index) === 'right' ? 'flex-end' : 'flex-start',
                       }}
                     >
                       {words && words.length > 0 ? (
@@ -2371,7 +2382,9 @@ export default function ModengPlayerPage({
                             style={{
                               fontSize: (isCurrent ? 22 : 18) * s,
                               fontWeight: 500,
-                              color: lineColor(distance, vocal.agentId || vocal.agent),
+                              // 和声色：对唱 tint 优先；无 tint 时用未唱色（比主行 sung 白暗一档、
+                              // 但远亮于 lineColor(0) 的 0.15 回退——否则和声黑/暗到不可见）。
+                              color: duetUnsungColor(vocal.agentId || vocal.agent) ?? unsungColor,
                               letterSpacing: 0.4 * s,
                               lineHeight: 1.3,
                               opacity: 0,
@@ -2392,63 +2405,34 @@ export default function ModengPlayerPage({
                                   </span>
                                 ))
                               : vocal.text}
+                          {(vocal.translation || vocal.romanization) && (
+                            <div style={{ marginTop: '0.08em' }}>
+                              {vocal.translation ? (
+                                <div style={{ fontSize: '0.78em', opacity: 0.72, lineHeight: 1.4 }}>
+                                  {vocal.translation}
+                                </div>
+                              ) : null}
+                              {vocal.romanization ? (
+                                <div style={{ fontSize: '0.72em', opacity: 0.6, lineHeight: 1.4, letterSpacing: '0.03em' }}>
+                                  {vocal.romanization}
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
                           </div>
                         ))}
                       </div>
                     ) : null}
-                    {/* 间奏三点：仅在当前行渲染、且检测到"两句间 gap>=4s"时由 rAF 显示。
-                       三点错峰呼吸（~0.9s beat 周期，0.3s/点相位差），临近下一句时按
-                       remain 错峰依次"熄灭"对齐开唱时机。与歌词主文本行保持同样的行高与
-                       缩进；独立容器隐藏时高度为 0 不挤占原行。 */}
-                    {isCurrent ? (
+                    {/* 间奏三点：见 Fragment 尾部的独立 frame（.modeng-interlude-frame）——
+                       旧版行内容器已删除（与独立 frame 双份渲染、ref 互相覆盖，rAF 只驱动得到其中一份）。 */}
+                    {/* 翻译行：仅当前行显示（LB/AM 实机非当前行只有主文字，翻译随行激活展开）；
+                        全行渲染会让歌词列每行拖一条小尾巴。 */}
+                    {isCurrent && effectiveTranslationEnabled && line.translation?.trim() ? (
                       <div
-                        ref={el => { interludeWrapRef.current = el ?? null }}
-                        className="modeng-interlude-dots"
+                        data-testid="modeng-translation"
                         style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          // 三点与上下句间距放大：通过 --pad-top/--pad-bottom/--row-min-h 三个 CSS 变量，
-                          // 由 rAF 按 fadeIn 实时插值（间奏 fadeIn=0 时三变量为 0，不产生空洞占高；
-                          // fadeIn 线性增长到 1 时，上距 24s、下距 22s、行高 76s，呼吸溢出 30% 有余量。）
-                          // 注意：整体"呼吸" scale 写在容器 transform 上（transform-origin: left 40% 使
-                          // 缩放锚点对齐左缩进，不会整体向右偏）。
-                          gap: 18 * s,
-                          marginTop: 'calc(var(--modeng-interlude-pad-top, 0px))',
-                          marginBottom: 'calc(var(--modeng-interlude-pad-bottom, 0px))',
-                          minHeight: 'calc(var(--modeng-interlude-min-h, 0px))',
-                          opacity: 0,
-                          transform: 'translateZ(0) scale(1)',
-                          willChange: 'transform, opacity, margin, min-height',
-                        }}
-                      >
-                        {[0, 1, 2].map(i => (
-                          <span
-                            key={`dot-${index}-${i}`}
-                            style={{
-                              display: 'inline-block',
-                              width: 12 * s,
-                              height: 12 * s,
-                              borderRadius: '50%',
-                              background: dark ? 'rgba(235,235,245,0.78)' : 'rgba(60,60,67,0.72)',
-                              boxShadow: dark
-                                ? `0 0 ${10 * s}px rgba(255,255,255,0.18), 0 ${2 * s}px ${4 * s}px rgba(0,0,0,0.25)`
-                                : `0 0 ${8 * s}px rgba(0,0,0,0.12), 0 ${2 * s}px ${4 * s}px rgba(0,0,0,0.10)`,
-                              transform: 'translateZ(0) scale(1)',
-                              transformOrigin: 'center center',
-                              willChange: 'transform, opacity',
-                              flexShrink: 0,
-                            }}
-                          />
-                        ))}
-                      </div>
-                    ) : null}
-                    {/* 翻译行：显示在主歌词下方，淡色与行距离同步；仅当前行稍亮强调 */}
-                    {effectiveTranslationEnabled && line.translation?.trim() ? (
-                      <div
-                        data-testid={isCurrent ? 'modeng-translation' : undefined}
-                        style={{
-                          fontSize: (isCurrent ? 17 : 13.5) * s,
-                          fontWeight: isCurrent ? 500 : 400,
+                          fontSize: 17 * s,
+                          fontWeight: 500,
                           color: lineBaseColor,
                           letterSpacing: 0.3 * s,
                           lineHeight: 1,

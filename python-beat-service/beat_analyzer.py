@@ -22,25 +22,29 @@ if str(SCRIPT_DIR) not in sys.path:
 from flask import Flask, request, jsonify
 from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
-from local_service_auth import is_allowed_audio_path, is_authorized_local_request
+from local_service_auth import _cache_root, is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
 import soundfile as sf
 
 try:
-    from beat_this.inference import File2Beats
+    from beat_this.inference import Audio2Beats
     BEAT_THIS_IMPORT_ERROR = None
 except ImportError as error:
-    File2Beats = None
+    Audio2Beats = None
     BEAT_THIS_IMPORT_ERROR = f'{error.__class__.__name__}: Beat This runtime unavailable'
 
 BEAT_THIS_CHECKPOINT = os.environ.get('BEAT_THIS_CHECKPOINT') or os.environ.get('WAVEFORGE_BEAT_MODEL_PATH') or 'final0'
 BEAT_THIS_TRACKER = None
 BEAT_THIS_INFERENCE_LOCK = threading.Lock()
 BEAT_THIS_INIT_ERROR = BEAT_THIS_IMPORT_ERROR
-if File2Beats is not None:
+if Audio2Beats is not None:
     try:
-        BEAT_THIS_TRACKER = File2Beats(checkpoint_path=BEAT_THIS_CHECKPOINT, device='cpu', float16=False, dbn=False)
+        # Audio2Beats(signal, sr)：analyze_audio_file 已用 librosa 解码出 22050Hz 单声道
+        # PCM，直接喂波形（signal2spect 对 sr==22050 跳过重采样）。此前用 File2Beats
+        # 却按 (y, sr) 两参调用——File2Beats.__call__ 只收 audio_path，任何分析请求都会
+        # 在这里抛裸 TypeError（实测 Can't look away 截断 FLAC → 500 → worker 全崩）。
+        BEAT_THIS_TRACKER = Audio2Beats(checkpoint_path=BEAT_THIS_CHECKPOINT, device='cpu', float16=False, dbn=False)
         BEAT_THIS_INIT_ERROR = None
     except Exception as error:
         BEAT_THIS_INIT_ERROR = f'{error.__class__.__name__}: Beat This model initialization failed'
@@ -98,7 +102,7 @@ CACHE_ROOT = default_cache_root()
 CACHE_DIR = CACHE_ROOT / "beat_analysis"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-ANALYSIS_VERSION = "beat-this-dsp-v1"
+ANALYSIS_VERSION = "beat-this-hpss-v2"
 CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 CACHE_MAX_SIZE_BYTES = 512 * 1024 * 1024
 
@@ -354,7 +358,7 @@ def _extract_beat_features(y: np.ndarray, sr: int, beats: np.ndarray) -> list:
     return features
 
 
-def analyze_audio_file(file_path: str, track_key: str, source_signature: str = '') -> dict:
+def analyze_audio_file(file_path: str, track_key: str, source_signature: str = '', reported_duration: float = 0.0) -> dict:
     """Analyze beat timing with required Beat This plus librosa feature extraction."""
     if BEAT_THIS_TRACKER is None:
         raise RuntimeError(BEAT_THIS_INIT_ERROR or 'Beat This model is unavailable')
@@ -364,15 +368,63 @@ def analyze_audio_file(file_path: str, track_key: str, source_signature: str = '
     y, sr = librosa.load(file_path, sr=22050, mono=True)
     duration = float(librosa.get_duration(y=y, sr=sr))
     print(f"   音频时长: {duration:.2f}s, 采样率: {sr}Hz")
+    # 截断/试听片段警告：上报时长与实际解码明显不符 = 空 vkey/试听流
+    #（实测 370s 的歌存下 176.5s 的合法 FLAC——文件头正常、能解，但只有半首）。
+    # duration 恒用实际解码值（上报值只影响这条日志），下游脏缓存防线不会被半首分析骗过。
+    if reported_duration > 5 and reported_duration - duration > 5:
+        print(f"   ⚠️ 音频明显短于上报时长：解码={duration:.1f}s 上报={reported_duration:.0f}s（截断/试听片段）")
+
+    # 打击乐预分离（folia 0.7.21 智能动感同思路）：beat_this 直接吃全混音 mel 时，
+    # 人声/和声/持续低音的 onset 会污染拍点检测——电子乐与人声主导的曲目上
+    # "鼓点抓不准"的主因。librosa HPSS（中值滤波谐波/打击乐分离）把 percussive
+    # 分量提出来再喂模型：拍点证据更纯。仅在打击乐能量占比不极端时启用
+    #（纯人声/管弦曲目 HPSS 反而会削掉真实证据）；HPSS 代价约整曲解码的 +30%，
+    # 结果进缓存，只付一次。
+    beat_input = y
+    try:
+        harmonic, percussive = librosa.effects.hpss(y, margin=(1.0, 2.0))
+        h_energy = float(np.sum(harmonic ** 2))
+        p_energy = float(np.sum(percussive ** 2))
+        total = h_energy + p_energy
+        p_ratio = p_energy / total if total > 1e-9 else 0.0
+        if 0.04 <= p_ratio <= 0.9:
+            beat_input = percussive
+            print(f"   🥁 HPSS 打击乐占比 {p_ratio:.2f} → 拍点检测使用打击乐分量")
+        else:
+            print(f"   🎼 HPSS 打击乐占比 {p_ratio:.2f}（过低/过高，拍点检测保持全混音）")
+    except Exception as hpss_error:
+        print(f"   ⚠️ HPSS 失败（退回全混音）: {hpss_error.__class__.__name__}: {hpss_error}")
 
     # 复用已解码信号：此前 File2Beats(file_path) 内部用 torchaudio 按原生采样率 float64
     # 再整曲解码一次（双重解码，耗时与内存峰值双倍）。Audio2Beats(signal, sr) 直接吃
     # 上面的 22050Hz 单声道数据（signal2spect 对 sr==22050 跳过重采样），结果一致。
     # 解码留在锁外：全局推理锁只护模型前向，长解码不再占锁阻塞并发请求。
     with BEAT_THIS_INFERENCE_LOCK:
-        beats_raw, downbeats_raw = BEAT_THIS_TRACKER(y, sr)
-    beats = np.asarray(beats_raw.tolist() if hasattr(beats_raw, 'tolist') else beats_raw, dtype=float)
-    downbeats = np.asarray(downbeats_raw.tolist() if hasattr(downbeats_raw, 'tolist') else downbeats_raw, dtype=float)
+        # 直接拿帧级 logits（而非 Audio2Beats 的时间序列）：智能动感动效需要
+        # 节奏连续性网格拟合（beat_grid_postprocess），它吃 logits 自己出拍——
+        # 修复 minimal 后处理的漏检/假峰问题（folia 智能动感的拍点质量关键）。
+        beat_logits, downbeat_logits = BEAT_THIS_TRACKER.spect2frames(
+            BEAT_THIS_TRACKER.signal2spect(beat_input, sr)
+        )
+    beat_logits_np = beat_logits.detach().cpu().numpy().astype(np.float64)
+    downbeat_logits_np = downbeat_logits.detach().cpu().numpy().astype(np.float64)
+    if beat_logits_np.ndim > 1:
+        beat_logits_np = beat_logits_np[0]
+        downbeat_logits_np = downbeat_logits_np[0]
+
+    # 节奏连续性网格拟合（纯 numpy，<50ms）：补漏检、剔假峰、对齐 downbeat。
+    # 置信度极低时回退 minimal 时间序列（Audio2Beats.__call__ 的输出）。
+    from beat_grid_postprocess import fit_beat_grid
+    grid_beats, grid_downbeats = fit_beat_grid(beat_logits_np, downbeat_logits_np, fps=50)
+    if grid_beats.size >= 8 and grid_downbeats.size >= 2:
+        beats = np.asarray(grid_beats, dtype=float)
+        downbeats = np.asarray(grid_downbeats, dtype=float)
+        print(f"   🥁 网格拟合拍点: {len(beats)} beats / {len(downbeats)} downbeats")
+    else:
+        beats_raw, downbeats_raw = BEAT_THIS_TRACKER(beat_input, sr)
+        beats = np.asarray(beats_raw.tolist() if hasattr(beats_raw, 'tolist') else beats_raw, dtype=float)
+        downbeats = np.asarray(downbeats_raw.tolist() if hasattr(downbeats_raw, 'tolist') else downbeats_raw, dtype=float)
+        print(f"   ↩️ 网格拟合失败（{grid_beats.size} beats），回退 minimal 后处理")
     beats = np.asarray(sorted({float(value) for value in beats if np.isfinite(value) and value >= 0}), dtype=float)
     downbeats = np.asarray(sorted({float(value) for value in downbeats if np.isfinite(value) and value >= 0}), dtype=float)
     if beats.size < 2 or downbeats.size < 2:
@@ -461,6 +513,15 @@ def _validate_audio_path(audio_path: str):
     return True, None
 
 
+def _coerce_duration(value) -> float:
+    """上报时长 → float；缺失/非法返回 0（仅用于截断警告，不进分析结果）。"""
+    try:
+        duration = float(value)
+        return duration if duration > 0 and np.isfinite(duration) else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _probe_audio_format(file_path: str) -> bool:
     """读文件头魔数，判断 libsndfile/audioread 能否解码（mp3/flac/wav/ogg）。
 
@@ -540,7 +601,13 @@ def analyze():
                 return jsonify({'error': 'audioPath must reference a local file prepared by WaveForge'}), 400
             return jsonify({'error': f'File not found: {audio_path}'}), 404
         if not is_allowed_audio_path(audio_path):
-            return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
+            # 带上实际白名单根与收到的路径：渲染端日志"音频路径:"一直为空（响应体没这字段），
+            # 排查缓存根劈叉（允许根 ≠ 下载目录）时只能干瞪眼
+            return jsonify({
+                'error': 'audioPath must be inside the WaveForge cache',
+                'audioPath': audio_path,
+                'expectedRoot': str(_cache_root()),
+            }), 400
         
         # 检查缓存
         cache_key = get_cache_key(track_key, duration, audio_path, source_signature)
@@ -593,7 +660,7 @@ def analyze():
                 if not valid:
                     print(f"❌ 音频路径校验失败: {validation_error}")
                     return jsonify({'error': validation_error}), 400
-                result = convert_to_native_types(analyze_audio_file(audio_path, track_key, source_signature))
+                result = convert_to_native_types(analyze_audio_file(audio_path, track_key, source_signature, reported_duration=_coerce_duration(duration)))
                 save_to_cache(cache_key, result)
             return jsonify(result)
         finally:

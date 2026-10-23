@@ -279,8 +279,8 @@ export default function ResonanceLobby(props: ResonanceLobbyProps) {
               step={1}
               value={maxMembers}
               onChange={event => onMaxMembersChange(Number(event.target.value))}
-              className="h-1 min-w-0 flex-1 cursor-pointer appearance-none rounded-full"
-              style={{ background: `linear-gradient(90deg, ${accent} ${((maxMembers - 2) / (RESONANCE_MAX_MEMBERS - 2)) * 100}%, ${chip} ${((maxMembers - 2) / (RESONANCE_MAX_MEMBERS - 2)) * 100}%)` }}
+              className={'party-slider min-w-0 flex-1' + (dark ? '' : ' on-light')}
+              style={{ background: `linear-gradient(90deg, ${accent} ${((maxMembers - 2) / (RESONANCE_MAX_MEMBERS - 2)) * 100}%, ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)'} ${((maxMembers - 2) / (RESONANCE_MAX_MEMBERS - 2)) * 100}%)` }}
               aria-label="房间人数上限"
             />
             <span className="w-14 text-right text-sm tabular-nums" style={{ color: sub }}>{maxMembers} 人</span>

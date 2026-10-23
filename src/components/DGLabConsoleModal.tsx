@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   X, Copy, Check, QrCode, Power, Zap, TriangleAlert, Trash2, FileUp, Download, ScrollText,
-  Plug, PlugZap, Wifi, ChevronDown, AudioWaveform, BookOpen, ChevronRight, Link2, RadioTower,
+  Plug, PlugZap, Wifi, ChevronDown, AudioWaveform, BookOpen, ChevronRight, Link2, RadioTower, Users,
 } from 'lucide-react'
 import { useTvBack } from '../tv/tvCore'
 import {
@@ -43,6 +43,20 @@ const GOLD_DEEP = '#d9bd6e'
 const BLACK = '#0b0b0e'
 const PANEL = 'rgba(255,255,255,0.045)'
 const BORDER = 'rgba(255,255,255,0.08)'
+
+/** 当前全局 viewMode（In Party 开关镜像用；读不到默认非 party） */
+function readViewMode(): string {
+  try { return localStorage.getItem('viewMode') || '' } catch { return '' }
+}
+
+/** In Party 的返回目标（进入前记录的模式；缺省探索） */
+function readEntryModeForParty(): 'explore' | 'minimal' | 'traditional' | 'desktop' {
+  try {
+    const value = localStorage.getItem('waveforge:inparty-entry-mode')
+    if (value === 'minimal' || value === 'traditional' || value === 'desktop') return value
+  } catch { /* ignore */ }
+  return 'explore'
+}
 
 const STYLE_OPTIONS: { value: FeelStyleId; label: string; desc: string }[] = [
   { value: 'split', label: '分频', desc: 'A低频 B高频' },
@@ -482,6 +496,18 @@ export default function DGLabConsoleModal() {
   const [vizMode, setVizMode] = useState<DGLabVizModeId>('envelope')
   // 连接引导（OOBE）在控制台弹窗内部整屏呈现，与控制台弹窗同尺寸，不再另开全屏页
   const [oobeOpen, setOobeOpen] = useState(false)
+  // In Party 模式开关状态（顶部标题旁的开关）：镜像全局 viewMode
+  const [partyOn, setPartyOn] = useState(() => readViewMode() === 'inparty')
+
+  useEffect(() => {
+    const sync = () => setPartyOn(readViewMode() === 'inparty')
+    window.addEventListener('viewModeChanged', sync)
+    window.addEventListener('wf:viewmode-updated', sync)
+    return () => {
+      window.removeEventListener('viewModeChanged', sync)
+      window.removeEventListener('wf:viewmode-updated', sync)
+    }
+  }, [])
 
   useTvBack(() => {
     if (oobeOpen) { closeOobe(); return true } // 兜底：引导自身通常已消费返回（先退回上一步）
@@ -611,6 +637,8 @@ export default function DGLabConsoleModal() {
   }[status.state] ?? { text: status.state, color: '#94a3b8' }
 
   const isBuiltinWave = ['continuous', 'breath', 'tide', 'beat', 'dglab-sweep'].includes(settings.waveId)
+  // 连接设置的三段选择器：3.0 / 4.0 / In Party（In Party 只是入口，不占用 version 字段）
+  const connSegmentValue: 'v3' | 'v4' | 'inparty' = partyOn ? 'inparty' : settings.version
   const stepPresetValue = settings.stepPreset === 'custom' ? settings.stepLimit : ({ strong: 30, medium: 12, weak: 5 }[settings.stepPreset] ?? 5)
 
   const copyAddress = async () => {
@@ -654,7 +682,32 @@ export default function DGLabConsoleModal() {
               <img src={DGLAB_LOGO} alt="DG-LAB" className="w-9 h-9 rounded-xl object-contain bg-white/90 p-0.5" draggable={false} />
               <div>
                 <h2 className="text-lg font-bold text-white tracking-tight">DG-LAB</h2>
-                <p className="text-[11px]" style={{ color: `${GOLD}88` }}>音乐体感 · 7 种风格 · 左右立体声</p>
+                {/* In Party 开关（原「音乐体感 · 7 种风格 · 左右立体声」小字位置）：
+                    开启后切到 In Party 模式（多人互控派对）；同时模式选择里也会出现 In Party 卡片 */}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={partyOn}
+                  onClick={() => {
+                    if (partyOn) {
+                      window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: readEntryModeForParty() }))
+                    } else {
+                      window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))
+                    }
+                  }}
+                  className="group mt-0.5 flex items-center gap-1.5 text-[11px] transition-colors"
+                  style={{ color: partyOn ? GOLD : `${GOLD}88` }}
+                  title={partyOn ? 'In Party 已开启：点击返回之前模式' : '开启 In Party：多人互控派对（点击进入）'}
+                >
+                  <span
+                    className={`relative inline-flex h-3.5 w-7 items-center rounded-full transition-colors ${partyOn ? '' : 'bg-white/15'}`}
+                    style={partyOn ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
+                  >
+                    <span className={`absolute left-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform ${partyOn ? 'translate-x-3.5' : ''}`} />
+                  </span>
+                  In Party
+                  <Users className="h-3 w-3 opacity-70" />
+                </button>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -809,9 +862,19 @@ export default function DGLabConsoleModal() {
                         </h3>
                         <div className="flex items-center gap-2">
                           <Segmented
-                            options={[{ value: 'v3', label: '3.0' }, { value: 'v4', label: '4.0' }]}
-                            value={settings.version}
-                            onChange={(v) => update({ version: v })}
+                            options={[
+                              { value: 'v3', label: '3.0' },
+                              { value: 'v4', label: '4.0' },
+                              { value: 'inparty', label: 'In Party', hint: 'In Party：多人互控派对（P2P 端到端加密）' },
+                            ]}
+                            value={connSegmentValue}
+                            onChange={(v) => {
+                              if (v === 'inparty') {
+                                window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))
+                                return
+                              }
+                              update({ version: v })
+                            }}
                           />
                           {status.state === 'bound' && (
                             <button onClick={() => setConnExpanded(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-white/50 transition-colors" title="收起连接设置">

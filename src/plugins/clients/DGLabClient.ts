@@ -147,6 +147,21 @@ export interface DGLabOutput {
   beat: number
 }
 
+/** In Party：本机设备摘要（控制台广播给房间成员） */
+export interface DGLabDeviceSummary {
+  connected: boolean
+  version: 'v3' | 'v4'
+  softLimit: { A: number; B: number } | null
+  deviceStrength: { A: number; B: number } | null
+  caps: { A: number; B: number }
+}
+
+/** In Party：远端互控指令（远端成员 → 本机设备） */
+export type DGLabRemoteOp =
+  | { kind: 'strength'; channel: 'A' | 'B'; value: number }
+  | { kind: 'pulse'; channel: 'A' | 'B'; frames: { freq: number; strength: number }[] }
+  | { kind: 'clear' }
+
 export interface DGLabNetIf {
   address: string
   name: string
@@ -432,6 +447,18 @@ function createClient() {
   }
 
   let controlToken = ''
+  /** setOutputEnabled 的晚绑定引用（其声明在后面，这里用 let 引用规避暂时性死区）。 */
+  let setOutputEnabledRef: (on: boolean) => void = () => undefined
+  /**
+   * 设备连上（bound false→true）时自动恢复波形输出。
+   * 「波形输出」是全局开关，之前一旦被关掉（哪怕只是误触播放栏按钮），
+   * 之后每次重连设备都静默无输出且毫无提示。产品语义定为：每次设备连上默认有输出；
+   * 连接保持期间用户仍可随时手动暂停（那次手动关闭不会在下次连接被覆盖）。
+   */
+  const maybeAutoEnableOutput = (nextBound: boolean) => {
+    if (!nextBound || snapshot.bound) return
+    if (!loadDGLabSettings().outputEnabled) setOutputEnabledRef(true)
+  }
   /**
    * 用户是否手动点过「停止中继」。
    * 中继默认是开的：应用启动/插件启用/打开控制台与连接引导都会把它拉起来；
@@ -499,6 +526,7 @@ function createClient() {
       })
       // 自动硬上限钳位（连接后即检查，App 改限再反馈持续生效）
       maybeAutoAdjustCaps(json.softLimit ?? null)
+      maybeAutoEnableOutput(Boolean(json.bound))
       return json
     } catch {
       if (seq !== fetchSeq) return null
@@ -519,6 +547,7 @@ function createClient() {
         set({ connected: true })
         sendSettings()
         socket.send(JSON.stringify({ t: 'start' }))
+        requestDeviceSummary()
       }
       socket.onmessage = (event) => {
         try {
@@ -546,11 +575,16 @@ function createClient() {
             })
             // 自动硬上限钳位（App 反馈即检查）
             maybeAutoAdjustCaps(msg.softLimit ?? null)
+            maybeAutoEnableOutput(Boolean(msg.bound))
           } else if (msg.t === 'log') {
             const line = String(msg.line ?? '')
             set({ logs: [...snapshot.logs.slice(-120), line] })
           } else if (msg.t === 'output') {
             set({ out: msg.out ?? null })
+          } else if (msg.t === 'device-summary') {
+            // In Party：本机设备摘要（广播到房间、供其他成员看「我有没有设备/什么协议」）
+            deviceSummary = msg.summary ?? null
+            deviceSummaryListeners.forEach(fn => { try { fn(deviceSummary) } catch { /* ignore */ } })
           } else if (msg.t === 'pong') {
             /* keep-alive ok */
           }
@@ -844,6 +878,32 @@ function createClient() {
       ws.send(JSON.stringify({ t: 'output', on }))
     }
   }
+  setOutputEnabledRef = setOutputEnabled
+
+  /* --------------------------- In Party：互控桥接 --------------------------- */
+
+  /** 本机设备摘要（中继经 ctrl WS 推送；供 In Party 房间广播） */
+  let deviceSummary: DGLabDeviceSummary | null = null
+  const deviceSummaryListeners = new Set<(s: DGLabDeviceSummary | null) => void>()
+
+  /** 远端互控指令：经 ctrl WS 交给中继翻译成 V3/V4 下发（渲染端已做完房间鉴权） */
+  const sendRemoteOp = (op: DGLabRemoteOp): boolean => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false
+    ws.send(JSON.stringify({ t: 'remote-op', op }))
+    return true
+  }
+
+  /** 订阅本机设备摘要变化（In Party 广播用）；返回取消函数 */
+  const onDeviceSummary = (fn: (s: DGLabDeviceSummary | null) => void): (() => void) => {
+    deviceSummaryListeners.add(fn)
+    fn(deviceSummary)
+    return () => deviceSummaryListeners.delete(fn)
+  }
+
+  /** 立即拉一次设备摘要（连上中继后调用） */
+  const requestDeviceSummary = () => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ t: 'remote-summary' }))
+  }
 
   /** 切换外部音源（MV 看歌 audio 元素）；null = 回到主图。 */
   const setExternalMediaSource = (el: HTMLMediaElement | null) => {
@@ -1037,6 +1097,10 @@ function createClient() {
         return null
       }
     },
+    /* In Party 互控桥接 */
+    sendRemoteOp,
+    onDeviceSummary,
+    requestDeviceSummary,
     control,
     /** 保证中继在跑（默认开；尊重用户手动停止） */
     ensureRelayRunning,

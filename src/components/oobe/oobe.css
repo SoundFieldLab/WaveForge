@@ -1,5 +1,73 @@
 /* ── OOBE 首次启动引导专属动画 ─────────────────────────── */
 
+/* ── 像素字体（Minecraft 风格）：Fusion Pixel 12px，SIL OFL 1.1，可随软件分发 ──
+   按语言拆分的 OOBE 文案子集（各 2~5KB），见 src/assets/fonts/fusion-pixel/ */
+@font-face {
+  font-family: 'Fusion Pixel zh-hans';
+  src: url('../../assets/fonts/fusion-pixel/fusion-pixel-12-zh_hans.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel zh-hant';
+  src: url('../../assets/fonts/fusion-pixel/fusion-pixel-12-zh_hant.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel en';
+  src: url('../../assets/fonts/fusion-pixel/fusion-pixel-12-en.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel ja';
+  src: url('../../assets/fonts/fusion-pixel/fusion-pixel-12-ja.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Fusion Pixel ko';
+  src: url('../../assets/fonts/fusion-pixel/fusion-pixel-12-ko.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* MC 唱片机式"正在播放"提示条：像素字 + 深色底板 + 每字彩色循环变换 */
+.oobe-mc-nowplaying {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 14px 9px;
+  border-radius: 6px;
+  background: rgba(12, 10, 8, 0.66);
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+  font-size: 17px;
+  line-height: 1.5;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+  /* 像素字体关掉平滑更贴近 MC 的"生硬"渲染感 */
+  -webkit-font-smoothing: none;
+  font-smooth: never;
+}
+/* 每个字一个色相偏移，循环流转（MC 彩字 §o 效果） */
+@keyframes oobe-mc-color-cycle {
+  0%   { color: hsl(0, 90%, 65%); }
+  20%  { color: hsl(72, 90%, 62%); }
+  40%  { color: hsl(144, 85%, 58%); }
+  60%  { color: hsl(216, 90%, 66%); }
+  80%  { color: hsl(288, 85%, 68%); }
+  100% { color: hsl(0, 90%, 65%); }
+}
+.oobe-mc-char {
+  animation: oobe-mc-color-cycle 5.6s linear infinite;
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
+}
+
 /* 极光背景：缓慢位移（不做 hue-rotate/滤镜，避免大区域每帧重绘拖垮帧率） */
 @keyframes oobe-aurora {
   0%, 100% { transform: translate(0, 0) scale(1); }

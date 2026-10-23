@@ -103,6 +103,19 @@ def safe_error(error):
     return text.replace('\\', '/').split('/')[-1] if '/' in text or '\\' in text else text
 
 
+def decoded_duration_seconds(audio_path, audio=None, sr=None):
+    """实际解码时长（秒）；audio/sr 已解码时直接用，否则整曲解码一次。
+    解不开返回 0.0（调用方对 0 保守处理）。"""
+    if audio is not None and sr:
+        return len(audio) / float(sr)
+    try:
+        import librosa
+        y, _ = librosa.load(audio_path, sr=22050, mono=True)
+        return len(y) / 22050.0
+    except Exception:
+        return 0.0
+
+
 def normalize_timing(values):
     """Keep finite, strictly ascending timing values in seconds."""
     if values is None:
@@ -202,7 +215,7 @@ class AnalysisWorker:
             }
             if source_signature is not None:
                 result['sourceSignature'] = source_signature
-            
+
             if self.beat_tracker is None:
                 raise RuntimeError(self.beat_this_error or "Required Beat This model is unavailable")
 
@@ -210,12 +223,27 @@ class AnalysisWorker:
             # This（Audio2Beats 直接吃 numpy 波形）；连 PyAV 都解不开才 metadata-only
             # 交给浏览器兜底。这仍是"缺解码器"，不是缺模型——不当作硬失败。
             native_readable = probe_audio_format(audio_path)
+            decoded = None
             if not native_readable:
                 decoded = decode_audio_universal(audio_path)
                 if decoded is None:
                     print("Skipping librosa for unsupported format", file=sys.stderr)
                     result['provider'] = 'metadata-only'
                     return result
+
+            # duration 以**实际解码时长**为准：调用方上报值只是元数据，空 vkey/试听片段
+            # 会返回合法容器但只有半首（实测 370s 的歌存下 176.5s 的 FLAC）。此前把上报
+            # 值写进结果，下游「分析时长 vs 元数据时长」的脏缓存防线被半首分析骗过
+            #（半首节拍网格长期入缓存）。差异明显时打警告，便于日志里直接识别坏源。
+            actual_duration = decoded_duration_seconds(audio_path, decoded[0] if decoded else None, decoded[1] if decoded else None)
+            requested_duration = float(duration) if isinstance(duration, (int, float)) and duration else 0.0
+            result['duration'] = actual_duration
+            if requested_duration > 5 and actual_duration > 0 and requested_duration - actual_duration > 5:
+                print(
+                    f"WARNING: audio shorter than reported duration: decoded={actual_duration:.1f}s "
+                    f"reported={requested_duration:.0f}s — truncated/preview stream (trackKey={track_key})",
+                    file=sys.stderr,
+                )
 
             try:
                 if native_readable:
@@ -292,7 +320,10 @@ class AnalysisWorker:
             return result
             
         except Exception as e:
+            # 完整堆栈打到 stderr（主进程透传 [Python Worker] 日志）：此前只打类名，
+            # 截断 FLAC 触发的裸 TypeError 在日志里无任何定位线索
             print(f"Track analysis error: {safe_error(e)}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             return {
                 'error': safe_error(e),
                 'trackKey': track_key or 'unknown',

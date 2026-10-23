@@ -204,6 +204,182 @@ export async function searchKugouSongs(keyword: string, limit = 30): Promise<Kug
   }
 }
 
+export interface KugouSearchSuggestion {
+  keyword: string
+  /** 候选类别：song=歌名 singer=歌手名 album=专辑名 */
+  type: 'song' | 'singer' | 'album'
+}
+
+export interface KugouPlaylistSearchItem {
+  specialid: string
+  name: string
+  coverUrl: string
+  trackCount?: number
+  playCount?: number
+  creator?: string
+}
+
+export interface KugouMvVariant {
+  key: 'sq' | 'le' | 'rq'
+  hash: string
+  bitrate?: number
+  filesize?: number
+  timelength?: number
+  url: string
+}
+
+export interface KugouMvInfo {
+  hash: string
+  songname: string
+  singers: string
+  publishDate: string
+  playCount?: number
+  likeCount?: number
+  commentCount?: number
+  collectCount?: number
+  timelength?: number
+  privilege: number
+  screenType: string
+  authors: Array<{ authorId: string; authorName: string; avatar: string }>
+  /** 清晰度变体：sq=超清 le=标清 rq=蓝光（官方码表），url 为视频直链 */
+  variants: KugouMvVariant[]
+}
+
+export interface KugouMvListItem {
+  hash: string
+  filename: string
+  singername: string
+  imgurl: string
+  intro: string
+}
+
+/** MV 数据（2026-10-22 逆向官方 MV 分享页 H5 协议；网关侧带签名） */
+export async function fetchKugouMvInfo(mvHash: string): Promise<KugouMvInfo | null> {
+  const hash = String(mvHash || '').trim()
+  if (!hash) return null
+  try {
+    const resp = await kgFetch(`${KG_API}/mv/info?hash=${encodeURIComponent(hash)}`, { cache: 'no-store' })
+    if (!resp.ok) return null
+    const json = await resp.json()
+    if (!json?.hash || !Array.isArray(json.variants) || !json.variants.length) return null
+    return json as KugouMvInfo
+  } catch (e) {
+    console.warn('[Kugou] MV 数据获取失败:', e)
+    return null
+  }
+}
+
+/** MV 列表（kind='singer' 按歌手 / kind='hot' 热门） */
+export async function fetchKugouMvList(kind: 'singer' | 'hot', singerId = '', page = 1, pagesize = 30): Promise<KugouMvListItem[]> {
+  try {
+    const query = new URLSearchParams({ kind, page: String(page), pagesize: String(pagesize) })
+    if (singerId) query.set('singerid', String(singerId))
+    const resp = await kgFetch(`${KG_API}/mv/list?${query.toString()}`, { cache: 'no-store' })
+    if (!resp.ok) return []
+    const json = await resp.json()
+    return Array.isArray(json?.list) ? json.list : []
+  } catch (e) {
+    console.warn('[Kugou] MV 列表获取失败:', e)
+    return []
+  }
+}
+
+/** 歌曲 → MV hash 反查（按「歌名 歌手」搜 MV，歌名一致才算命中）。
+ *  酷狗歌曲详情/频道视频都没有现成 mv hash 字段，这是唯一可靠通路。 */
+export async function searchKugouMvBySong(songName: string, singerName?: string): Promise<string | null> {
+  const name = String(songName || '').trim()
+  if (!name) return null
+  try {
+    const keyword = singerName ? `${singerName} ${name}` : name
+    const query = new URLSearchParams({ format: 'json', keyword, page: '1', pagesize: '10' })
+    const resp = await fetch(`http://mobilecdn.kugou.com/api/v3/search/mv?${query.toString()}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!resp.ok) return null
+    const json = await resp.json()
+    const rows: any[] = Array.isArray(json?.data?.info) ? json.data.info : []
+    const normalize = (text: string) => String(text || '').replace(/\s+/g, '').toLowerCase()
+    const target = normalize(name)
+    const hit = rows.find((item: any) => {
+      const filename = String(item?.filename || '')
+      // 「歌名(括号注记)」形态的 MV：按去空白小写前缀匹配，避免「晴天」「晴天 (live)」都算同一首
+      return normalize(filename) === target || normalize(filename).startsWith(target)
+    })
+    return hit?.hash ? String(hit.hash) : null
+  } catch (e) {
+    console.warn('[Kugou] 歌曲 MV 反查失败:', e)
+    return null
+  }
+}
+
+/** 搜索歌单（mobilecdn /api/v3/search/special；2026-10-22 探测可用，公开接口无需登录） */
+export async function searchKugouPlaylists(keyword: string, limit = 20): Promise<KugouPlaylistSearchItem[]> {
+  const kw = String(keyword || '').trim()
+  if (!kw) return []
+  try {
+    const query = new URLSearchParams({ format: 'json', keyword: kw, page: '1', pagesize: String(Math.min(50, Math.max(1, limit))) })
+    const resp = await fetch(`http://mobilecdn.kugou.com/api/v3/search/special?${query.toString()}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      signal: AbortSignal.timeout(10_000),
+    })
+    if (!resp.ok) return []
+    const json = await resp.json()
+    const rows = Array.isArray(json?.data?.info) ? json.data.info : []
+    return rows.map((item: any) => ({
+      specialid: String(item?.specialid || ''),
+      name: String(item?.specialname || item?.name || '').trim(),
+      coverUrl: resolveKugouCover(String(item?.imgurl || item?.img || '')),
+      trackCount: Number(item?.songcount || 0) || undefined,
+      playCount: Number(item?.playcount || 0) || undefined,
+      creator: String(item?.nickname || '').trim() || undefined,
+    })).filter((item: KugouPlaylistSearchItem) => item.specialid && item.name)
+  } catch (e) {
+    console.warn('[Kugou] 歌单搜索失败:', e)
+    return []
+  }
+}
+
+/** 搜索联想（派生端点）：上游无公开 suggest 接口（msearch 健康检查 'helo world!'、
+ *  complexsearch/everydoor 全 404/502，2026-10-22 逐一探测）。
+ *  与汽水 fetchSodaSearchSuggest 同构：用 songsearch 按前缀搜一批，歌名/歌手名/专辑名
+ *  按出现频次聚拢 + 前缀命中优先，失败/未命中返回空数组。 */
+export async function fetchKugouSearchSuggest(keywords: string, limit = 8): Promise<KugouSearchSuggestion[]> {
+  const kw = String(keywords || '').trim()
+  if (!kw) return []
+  try {
+    const tracks = await searchKugouSongs(kw, 50)
+    if (!tracks.length) return []
+    const lower = kw.toLowerCase()
+    type Candidate = { keyword: string; type: KugouSearchSuggestion['type']; hits: number; prefix: boolean }
+    const map = new Map<string, Candidate>()
+    const push = (raw: string | undefined, type: Candidate['type']) => {
+      const text = String(raw || '').trim()
+      if (text.length < 2 || text.length > 24) return
+      const key = `${type}:${text.toLowerCase()}`
+      const prefix = text.toLowerCase().startsWith(lower)
+      const existing = map.get(key)
+      if (existing) {
+        existing.hits += 1
+        existing.prefix = existing.prefix || prefix
+        return
+      }
+      map.set(key, { keyword: text, type, hits: 1, prefix })
+    }
+    for (const track of tracks) {
+      push(track.songName, 'song')
+      push(track.singerName, 'singer')
+      push(track.albumName, 'album')
+    }
+    return [...map.values()]
+      .sort((a, b) => (b.prefix ? 1 : 0) - (a.prefix ? 1 : 0) || b.hits - a.hits || a.keyword.length - b.keyword.length)
+      .slice(0, limit)
+      .map(({ keyword, type }) => ({ keyword, type }))
+  } catch {
+    return []
+  }
+}
+
 /** 酷狗榜单分类列表 */
 export async function fetchKugouRankList(): Promise<KugouRank[]> {
   try {
@@ -745,7 +921,7 @@ export async function getKugouLyrics(hash: string, extra: { albumAudioId?: numbe
 }
 
 /** 酷狗喜欢歌曲：概念版通道支持喜欢/取消（取消按 fileid 从「我喜欢」移除）；网页通道仅支持喜欢 */
-export async function likeKugouSong(song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }>; album?: { id?: string | number }; fileId?: string }, like: boolean): Promise<boolean> {
+export async function likeKugouSong(song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }>; album?: { id?: string | number }; fileId?: string; mixSongId?: string | number; albumAudioId?: number }, like: boolean): Promise<boolean> {
   const concept = getKugouConceptCredential()
   if (concept) {
     try {
@@ -762,9 +938,13 @@ export async function likeKugouSong(song: { hash?: string; mid?: string; name?: 
         liked: like,
         song: {
           hash,
+          // 上游 /cloudlist.service/v6/add_song 拒绝空 name（实测 302→status!=1），
+          // 歌名与歌手必须随请求带上
           name: song.name || '',
           albumId: song.album?.id ? String(song.album.id) : '',
           artists: song.artists || [],
+          mixSongId: song.mixSongId,
+          albumAudioId: song.albumAudioId,
         },
         fileId: fileId || undefined,
       })
@@ -794,7 +974,7 @@ export async function likeKugouSong(song: { hash?: string; mid?: string; name?: 
 }
 
 /** 概念版歌单加歌（listId 为概念版 specialid 时先映射回 listid；找不到则按数字直接使用） */
-export async function addKugouSongToPlaylist(listId: string, song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }> }): Promise<boolean> {
+export async function addKugouSongToPlaylist(listId: string, song: { hash?: string; mid?: string; name?: string; artists?: Array<{ name: string }>; mixSongId?: string | number; albumAudioId?: number }): Promise<boolean> {
   const concept = getKugouConceptCredential()
   if (concept) {
     try {
@@ -810,7 +990,14 @@ export async function addKugouSongToPlaylist(listId: string, song: { hash?: stri
         credential: concept,
         liked: true,
         listid: numericListId,
-        song: { hash, name: song.name || '', artists: song.artists || [] },
+        song: {
+          hash,
+          // /v6/add_song 拒绝空歌名（2026-10-22 验证）：歌名/歌手必须带上
+          name: song.name || '',
+          artists: song.artists || [],
+          mixSongId: song.mixSongId,
+          albumAudioId: song.albumAudioId,
+        },
       })
       return Boolean(json?.success)
     } catch (e) {
@@ -877,7 +1064,7 @@ export interface KugouChannelDetail {
   /** 官方头部「歌单」页签的计数（情歌 3000 / DJ 3000 / 经典 3006） */
   playlistTotal?: number
 }
-export interface KugouChannelVideo { id: string; name: string; singer: string; coverUrl: string; duration?: number; publishTime?: string; albumAudioId?: number }
+export interface KugouChannelVideo { id: string; name: string; singer: string; coverUrl: string; duration?: number; publishTime?: string; albumAudioId?: number; /** 按视频名反查到的 MV hash（有值才可点击播放，见网关 fetchKugouChannelVideos） */ mvHash?: string }
 export interface KugouChannelSub { id: string; name: string; type: string; coverUrl: string }
 
 async function kgIpPost<T>(path: string, body: Record<string, unknown>): Promise<T | null> {
@@ -1373,6 +1560,8 @@ export async function fetchKugouYueku(): Promise<{ yueku: KugouYueku | null; err
         ...extra,
         specialid: extra.specialid || item?.id,
         specialname: extra.specialname || item?.title,
+        // 上游 yueku.recommend 的 gid 字段名是 global_specialid（其余板块是 global_collection_id）
+        global_collection_id: extra.global_collection_id || item?.global_specialid || extra.global_specialid || '',
         imgurl: item?.imgurl || extra.imgurl,
         songcount: extra.songcount,
         user_name: extra.user_name,
@@ -2240,6 +2429,25 @@ export async function deleteKugouUserPlaylist(listid: string, type: 0 | 1 = 1): 
     return { success: true, listid: String(listid) }
   } catch (e) {
     return { success: false, error: e instanceof Error ? e.message : '删除歌单失败' }
+  }
+}
+
+/** 编辑歌单信息（改名/简介；/v2/modify_list）。listid 为数字 listid。 */
+export async function modifyKugouUserPlaylist(
+  listid: string,
+  info: { name?: string; intro?: string },
+): Promise<KugouMutationResult> {
+  const credential = getKugouConceptCredential()
+  if (!credential) return { success: false, error: '请先登录酷狗音乐（概念版扫码）' }
+  const cleanName = info.name == null ? undefined : String(info.name).trim()
+  const cleanIntro = info.intro == null ? undefined : String(info.intro)
+  if (!cleanName && cleanIntro === undefined) return { success: false, error: '没有要修改的内容' }
+  try {
+    const json = await kgConceptPost('playlist/modify', { credential, listid, name: cleanName, intro: cleanIntro })
+    if (!json?.success) return { success: false, error: json?.error || '编辑歌单失败' }
+    return { success: true, listid: String(listid) }
+  } catch (e) {
+    return { success: false, error: e instanceof Error ? e.message : '编辑歌单失败' }
   }
 }
 

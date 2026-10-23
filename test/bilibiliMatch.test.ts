@@ -22,6 +22,10 @@ import {
   flattenLyricLinesForMatch,
   rescoreResultWithLyrics,
   detectSongDurationConsensus,
+  recordUploaderPlaySuccess,
+  learnedUploaderScore,
+  resolveOpEdExtensionEntry,
+  applySameSongPlayCountPreference,
   pickBestPage,
   getBilibiliBlacklist,
   addBilibiliBlacklist,
@@ -335,7 +339,11 @@ describe('scoreCandidate（候选打分）', () => {
       { rank: 0, officialVerifyType: 0 },
     )
     const reupload = scoreCandidate(
-      video({ bvid: 'BV1oc411X74G', title: '【中日字幕】Vaundy 新曲「カーニバル(狂欢节)」完整版【日剧「火烧御手洗家」主题歌】正式音源', duration: 203, play: 38_603, author: '百億_光年' }),
+      // 2026-10-21 修订：原标题带【日剧…主题歌】后缀，命中百億_光年 的「OP/ED 完整版」信任类目
+      //（该类目下字幕完整版是用户想要的内容，上传者加权生效——见 UPLOADER_WEIGHT_PROFILES 注释）。
+      // 本回归要保护的语义是"普通 MV 字幕搬运不得压过歌手本人官方 MV"，故改用不属
+      // OP/ED 完整版类目的同量级搬运标题；类目内加权的正向断言见下一个用例。
+      video({ bvid: 'BV1oc411X74G', title: '【中日字幕】Vaundy 新曲「カーニバル(狂欢节)」正式音源', duration: 203, play: 38_603, author: '百億_光年' }),
       carnivalCtx,
       { rank: 2, officialVerifyType: -1 },
     )
@@ -343,6 +351,21 @@ describe('scoreCandidate（候选打分）', () => {
     expect(reupload.signals.uploaderMatchesArtist).toBe(false)
     // 字幕对背景 MV 是冗余项（应用自带歌词），权威来源优先
     expect(official.score).toBeGreaterThan(reupload.score)
+  })
+
+  it('OP/ED 完整版信任类目：百億_光年 的主题歌完整版吃上传者加权（+15），普通搬运不吃', () => {
+    const carnivalCtx: MatchContext = { songTitle: 'カーニバル', artists: ['Vaundy'], songDuration: 203, platform: 'qq', id: 1, album: 'replica' }
+    const themed = scoreCandidate(
+      video({ bvid: 'BV1oc411X74G', title: '【中日字幕】Vaundy 新曲「カーニバル(狂欢节)」完整版【日剧「火烧御手洗家」主题歌】正式音源', duration: 203, play: 38_603, author: '百億_光年' }),
+      carnivalCtx,
+      { rank: 2, officialVerifyType: -1 },
+    )
+    const plain = scoreCandidate(
+      video({ bvid: 'BV1oc411X74G', title: '【中日字幕】Vaundy 新曲「カーニバル(狂欢节)」正式音源', duration: 203, play: 38_603, author: '百億_光年' }),
+      carnivalCtx,
+      { rank: 2, officialVerifyType: -1 },
+    )
+    expect(themed.score - plain.score).toBeGreaterThanOrEqual(15)
   })
 
   it('私藏馆类高播放搬运：无官方信号 → 播放加权推高分数（15172e1 行为，实测接受自动播放）', () => {
@@ -1748,5 +1771,206 @@ describe('pickBestPage（多P分P选择：标题内容为主，时长兜底）',
   it('单 P 视频直接返回 0', () => {
     const idx = pickBestPage(pages([['稻香', 223]]), pageCtx(223))
     expect(idx).toBe(0)
+  })
+})
+
+// ===== OP/ED 延长专项（2026-10，v12-oped-extension）=====
+// 背景：动画 OP/ED 官方常只有 TV size（~90s），B 站的高质量「官方素材加长版」（标杆 PCS_Studio）
+// 是完整画面正片——标题命中「官方 OP/ED + 加长/延长」时 +22 正片加分且时长偏离豁免（比值 ≤1.6）。
+describe('OP/ED 延长版正片信号（官方素材加长）', () => {
+  const opedCtx: MatchContext = { songTitle: '紅蓮の弓矢', artists: ['Linked Horizon'], songDuration: 306, platform: 'qq', id: 4973706 }
+
+  it('「官方OP曲 剧本级加长版」命中延长正片：加长视频（比歌曲长但 ≤1.6x）不吃时长扣分', () => {
+    const extended = scoreCandidate(
+      video({ title: '【PCS Anime/官方OP延长/季①】「进击的巨人」【紅蓮の弓矢】官方OP1曲 剧本级加长版 PCS Studio', duration: 330, play: 170956, author: 'PCS_Studio' }),
+      opedCtx,
+    )
+    const tvSize = scoreCandidate(
+      video({ title: '紅蓮の弓矢 (TV size)', duration: 90, play: 80000, author: '普通搬运' }),
+      opedCtx,
+    )
+    // 加长版时长偏离 330/306=1.08 → durationTerm ≥ 0（+40 贴近档）；TV size 偏离 90/306=0.29 也吃惩罚
+    // 评分口径：加长版必须稳压短版（正片 +22 + 时长贴近 + 上传者信任 +30）
+    expect(extended.score).toBeGreaterThan(tvSize.score)
+  })
+
+  it('延长版比值 >1.6（合集/串烧区）不再豁免时长惩罚', () => {
+    const megaExtended = scoreCandidate(
+      video({ title: '【官方OP延长】「进击的巨人」【紅蓮の弓矢】官方OP曲 加长完整版', duration: 900, play: 50000 }),
+      opedCtx,
+    )
+    // 900/306 = 2.94 → 超 3 倍走软罚 -15 档；正片 +22 仍计入但时长惩罚保留
+    expect(megaExtended.score).toBeLessThan(
+      scoreCandidate(video({ title: '【官方OP延长】「进击的巨人」【紅蓮の弓矢】官方OP曲 加长完整版', duration: 400, play: 50000 }), opedCtx).score,
+    )
+  })
+
+  it('只写「加长版」不提官方 OP/ED 的普通 MV 不吃延长正片加分', () => {
+    const plain = scoreCandidate(
+      video({ title: '紅蓮の弓矢 加长版 MV', duration: 330, play: 30000 }),
+      opedCtx,
+    )
+    const extended = scoreCandidate(
+      video({ title: '紅蓮の弓矢 官方OP 加长版 MV', duration: 330, play: 30000 }),
+      opedCtx,
+    )
+    expect(extended.score).toBeGreaterThan(plain.score)
+  })
+
+  it('PCS_Studio 上传者信任档案生效（+30）', () => {
+    const byPcs = scoreCandidate(
+      video({ title: '【PCS Anime/官方ED延长/季①】「Re:从零开始的异世界生活」【STYX HELIX】官方ED1曲 剧本级加长版', duration: 280, play: 200742, author: 'PCS_Studio', mid: 8871554 }),
+      { songTitle: 'STYX HELIX', artists: ['MYTH & ROID'], songDuration: 268, platform: 'qq', id: 12345 },
+    )
+    const sameByOthers = scoreCandidate(
+      video({ title: '【PCS Anime/官方ED延长/季①】「Re:从零开始的异世界生活」【STYX HELIX】官方ED1曲 剧本级加长版', duration: 280, play: 200742, author: '路人UP主' }),
+      { songTitle: 'STYX HELIX', artists: ['MYTH & ROID'], songDuration: 268, platform: 'qq', id: 12345 },
+    )
+    expect(byPcs.score - sameByOthers.score).toBeGreaterThanOrEqual(30)
+  })
+})
+
+describe('延长库声明（bilibiliOpEdExtensions 注入 findBestBilibiliMv）', () => {
+  it('songKey 命中延长库时声明视频进 fallbackChain 头部且 status=auto', async () => {
+    // qq:4973706 = 紅蓮の弓矢（QQ 自由への進撃专辑版）（PCS 延长库 BV1pi4y1g7AC）。
+    // 网络照例 mock（搜索/view 走假响应）：延长库的 view 请求也由同一 fetch stub 覆盖，
+    // 重点是"延长库声明被注入优先于搜索候选"这一接线逻辑本身。
+    setBilibiliApiBaseForTest('http://probe.invalid/api/bilibili')
+    const json = (payload: unknown) => ({ ok: true, json: async () => payload }) as Response
+    const hit = (bvid: string, title: string, duration: number, play: number, author: string, mid = 1) => ({
+      bvid, title, duration, play, author, mid, pic: '', typename: '音乐',
+    })
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input)
+      if (url.includes('/search')) {
+        return json({
+          code: 0,
+          results: [hit('BVSEARCH', 'Linked Horizon - 紅蓮の弓矢 MV', 306, 400_000, '搬运工')],
+        })
+      }
+      if (url.includes('/view')) {
+        const bvid = new URL(url).searchParams.get('bvid') || ''
+        const isPcs = bvid === 'BV1pi4y1g7AC'
+        return json({
+          code: 0,
+          data: {
+            bvid,
+            cid: 1,
+            title: isPcs ? '【PCS Anime/官方OP延长/季①】「进击的巨人」【紅蓮の弓矢】官方OP1曲 剧本级加长版 PCS Studio' : 'Linked Horizon - 紅蓮の弓矢 MV',
+            duration: isPcs ? 330 : 306,
+            play: isPcs ? 170956 : 400_000,
+            pic: '',
+            owner: { mid: isPcs ? 8871554 : 1, name: isPcs ? 'PCS_Studio' : '搬运工', officialVerifyType: -1 },
+          },
+        })
+      }
+      return json({ code: -1 })
+    }))
+    const song: MatchContext = { songTitle: '紅蓮の弓矢', artists: ['Linked Horizon'], songDuration: 306, platform: 'qq', id: 4973706 }
+    try {
+      clearAllMvMatchCache()
+      const result = await findBestBilibiliMv(song, { useDeveloperDeclarations: false })
+      expect(result.status).toBe('auto')
+      expect(result.fallbackChain[0]?.video.bvid).toBe('BV1pi4y1g7AC')
+      // 搜索候选仍在链上（声明注入不覆盖候选池）
+      expect(result.fallbackChain.some((c) => c.video.bvid === 'BVSEARCH')).toBe(true)
+    } finally {
+      clearAllMvMatchCache()
+      setBilibiliApiBaseForTest('http://localhost:3001/api/bilibili')
+      vi.unstubAllGlobals()
+    }
+  }, 20000)
+
+  it('未命中延长库的歌曲不注入（普通匹配路径不受影响）', async () => {
+    const song: MatchContext = { songTitle: ' nonexistent song xyz', artists: ['nobody'], songDuration: 200, platform: 'netease', id: 99123456 }
+    // 不 mock 网络：无候选/搜索失败只影响断言强度，这里只验证不抛异常且结构完整
+    const result = await findBestBilibiliMv(song, { settings: { autoPlayStrictness: 'strict' }, useDeveloperDeclarations: false })
+    expect(Array.isArray(result.fallbackChain)).toBe(true)
+    const hasPcs = result.fallbackChain.some((c) => c.video.author.includes('PCS'))
+    expect(hasPcs).toBe(false)
+  }, 20000)
+})
+
+// ===== 学习式 UP 信任 + 同曲播放数竞争（2026-10 v2）=====
+describe('学习式 UP 信任（recordUploaderPlaySuccess / learnedUploaderScore）', () => {
+  it('正片类播放成功计数 → 分级加权（≥2 次 +10，≥5 次 +20）', () => {
+    localStorage.removeItem('oped_learned_uploaders')
+    const mid = 998877
+    expect(learnedUploaderScore(mid)).toBe(0)
+    // 同 UP 1h 内去重：连续两次只算一次
+    recordUploaderPlaySuccess(mid, '某UP', '【官方OP延长】「作品」【歌名】官方OP曲 加长版')
+    recordUploaderPlaySuccess(mid, '某UP', '【官方ED延长】「作品2」【歌名2】官方ED曲 加长版')
+    expect(learnedUploaderScore(mid)).toBe(0) // 1 次，未达阈值
+    // 模拟时间推进：手动改 lastAt
+    const map = JSON.parse(localStorage.getItem('oped_learned_uploaders')!)
+    map[String(mid)].lastAt = Date.now() - 2 * 60 * 60 * 1000
+    localStorage.setItem('oped_learned_uploaders', JSON.stringify(map))
+    recordUploaderPlaySuccess(mid, '某UP', '【官方OP延长】「作品」【歌名】官方OP曲 加长版')
+    expect(learnedUploaderScore(mid)).toBe(10) // 2 次
+    const map2 = JSON.parse(localStorage.getItem('oped_learned_uploaders')!)
+    map2[String(mid)].successes = 5
+    localStorage.setItem('oped_learned_uploaders', JSON.stringify(map2))
+    expect(learnedUploaderScore(mid)).toBe(20)
+    localStorage.removeItem('oped_learned_uploaders')
+  })
+
+  it('普通搬运类（无正片标记）播放成功不计入信任', () => {
+    localStorage.removeItem('oped_learned_uploaders')
+    recordUploaderPlaySuccess(998876, '普通搬运', '某歌曲 高清MV')
+    expect(learnedUploaderScore(998876)).toBe(0)
+    localStorage.removeItem('oped_learned_uploaders')
+  })
+})
+
+describe('同曲播放数竞争（applySameSongPlayCountPreference）', () => {
+  const full = (bvid: string, score: number, play: number, title = '【官方OP延长】歌名 加长版') => ({
+    video: { bvid, title, duration: 300, play, author: 'x' },
+    score,
+    type: 'official',
+    signals: { officialMarker: true, mvMarker: false, negativeHit: false, hasArtist: false, nearDuration: true, hdMarker: false, uploaderMatchesArtist: false, officialChannel: false, ccSubtitle: false },
+    rank: 0, officialVerifyType: -1, manualZhSubtitle: false, autoSubtitle: false, ccVerification: 'unverified' as const,
+  })
+
+  it('同曲两个完整版候选（分数带内）→ 播放数高者胜出', () => {
+    const a = full('BVAAAA', 250, 50_000)
+    const b = full('BVBBBB', 245, 900_000)
+    const ordered = applySameSongPlayCountPreference([a, b])
+    expect(ordered[0].video.bvid).toBe('BVBBBB')
+  })
+
+  it('播放数最高但分数出带（>20 分差距）→ 不动', () => {
+    const a = full('BVAAAA', 260, 10_000)
+    const b = full('BVBBBB', 200, 900_000)
+    const ordered = applySameSongPlayCountPreference([a, b])
+    expect(ordered[0].video.bvid).toBe('BVAAAA')
+  })
+
+  it('非完整版候选不参与竞争', () => {
+    const a = full('BVAAAA', 250, 50_000, '某歌曲 MV')
+    const b = full('BVBBBB', 245, 900_000, '某歌曲 高清')
+    const ordered = applySameSongPlayCountPreference([a, b])
+    expect(ordered[0].video.bvid).toBe('BVAAAA')
+  })
+})
+
+describe('延长库全平台解析（resolveOpEdExtensionEntry）', () => {
+  it('netease 平台（id 与 QQ 不同）经元数据回退命中同一延长版声明', async () => {
+    // 紅蓮の弓矢：库内 songKey=qq:4973706；网易云播放时 songKey=netease:26270016，
+    // 精确查找必不命中 → 元数据索引兜底
+    const song: MatchContext = { songTitle: '紅蓮の弓矢', artists: ['Linked Horizon'], songDuration: 316, platform: 'netease', id: 26270016 }
+    const resolved = resolveOpEdExtensionEntry(song, songKeyOf(song))
+    expect(resolved?.bvid).toBe('BV1pi4y1g7AC')
+  })
+
+  it('apple 平台（无 id 也无 qq 键）同样命中', () => {
+    const song: MatchContext = { songTitle: 'Grand Blue', artists: ['湘南乃風'], songDuration: 313, platform: 'apple' }
+    const resolved = resolveOpEdExtensionEntry(song, songKeyOf(song))
+    expect(resolved?.bvid).toBe('BV1sa411f7Yp')
+  })
+
+  it('TV size 录音（时长远离库内版本）不命中——宁缺毋滥', () => {
+    const song: MatchContext = { songTitle: '紅蓮の弓矢 (TVサイズver.)', artists: ['Linked Horizon'], songDuration: 94, platform: 'netease', id: 26270016 }
+    const resolved = resolveOpEdExtensionEntry(song, songKeyOf(song))
+    expect(resolved).toBeNull()
   })
 })

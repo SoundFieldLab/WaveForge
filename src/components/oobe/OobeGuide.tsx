@@ -16,7 +16,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Moon, Sun, Check, ChevronRight, ArrowLeft, ShieldCheck, ShieldAlert, LogOut, X } from 'lucide-react'
+import { Moon, Sun, Check, ChevronRight, ArrowLeft, ShieldCheck, ShieldAlert, LogOut, X, Music } from 'lucide-react'
 import LegalAgreement from '../legal/LegalAgreement'
 import { LocaleSwitcher, countdownLabel, renderRich, type LocaleCode } from '../../i18n'
 import { OOBE_STRINGS, type OobeStringKey } from '../../i18n/oobe'
@@ -24,9 +24,30 @@ import './oobe.css'
 
 const OOBE_FLAG = 'waveforge:oobe-shown'
 
-const appLogoUrl = new URL('../../../logo.png', import.meta.url).href
+// 背景音乐淡出进行中标记（模块级）：complete() 置 done 卸载组件后淡出仍要继续跑完，
+// 卸载 cleanup 据此跳过 pause/remove，由淡出 interval 自己收尾。
+declare global {
+  interface Window {
+    __oobeBgmFading?: boolean
+  }
+}
 
-type OobeStep = 'theme' | 'privacyIntro' | 'privacy' | 'disclaimerIntro' | 'disclaimer' | 'welcome'
+const appLogoUrl = new URL('../../../logo.png', import.meta.url).href
+// 背景音乐（打包进安装包，不读用户目录）：C418 - Beginning_H（Minecraft 风格彩蛋）
+const bgmMusicUrl = new URL('../../assets/oobe-music/beginning_h.ogg', import.meta.url).href
+
+type OobeStep = 'theme' | 'bgm' | 'privacyIntro' | 'privacy' | 'disclaimerIntro' | 'disclaimer' | 'welcome'
+
+// 像素字体（Fusion Pixel 12px，SIL OFL，已按 OOBE 文案子集化）按语言选择对应子集
+const PIXEL_FONT_BY_LOCALE: Record<LocaleCode, string> = {
+  'zh-CN': "'Fusion Pixel zh-hans', monospace",
+  'zh-TW': "'Fusion Pixel zh-hant', monospace",
+  'zh-HK': "'Fusion Pixel zh-hant', monospace",
+  'zh-MO': "'Fusion Pixel zh-hant', monospace",
+  en: "'Fusion Pixel en', monospace",
+  ja: "'Fusion Pixel ja', monospace",
+  ko: "'Fusion Pixel ko', monospace",
+}
 
 interface OobeGuideProps {
   playerTheme?: 'light' | 'dark'
@@ -78,6 +99,77 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   const [revealCount, setRevealCount] = useState(0)
   const [done, setDone] = useState(false)
   const [showLegalModal, setShowLegalModal] = useState(false)
+
+  // ── 背景音乐（C418 - Beginning_H）──
+  // bgmAllowed = null 未选择 / true 循环播放 / false 拒绝（保持静默）
+  const [bgmAllowed, setBgmAllowed] = useState<boolean | null>(null)
+  const [bgmBarVisible, setBgmBarVisible] = useState(false)
+  const bgmAudioRef = useRef<HTMLAudioElement | null>(null)
+  const bgmBarTimerRef = useRef<number | null>(null)
+
+  // 同意后循环播放，并在顶部显示 5 秒 MC 唱片机式提示（淡入淡出）
+  const startBgm = () => {
+    setBgmAllowed(true)
+    setBgmBarVisible(true)
+    if (bgmBarTimerRef.current) window.clearTimeout(bgmBarTimerRef.current)
+    bgmBarTimerRef.current = window.setTimeout(() => setBgmBarVisible(false), 5000)
+    try {
+      if (!bgmAudioRef.current) {
+        // 挂到 body（display:none 会导致部分内核不解码音频，因此用零尺寸隐藏），同时避免被 GC
+        const audio = new Audio(bgmMusicUrl)
+        audio.loop = true
+        audio.volume = 0.45
+        audio.setAttribute('data-oobe-bgm', '')
+        audio.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none'
+        document.body.appendChild(audio)
+        bgmAudioRef.current = audio
+      }
+      bgmAudioRef.current.currentTime = 0
+      void bgmAudioRef.current.play().catch(() => { /* 自动播放被拦时静默失败（用户刚点击过按钮，一般不会发生） */ })
+    } catch { /* ignore */ }
+    // 弹窗继续推进：同意/拒绝都进入隐私欢迎动画
+    setStep('privacyIntro')
+  }
+
+  const denyBgm = () => {
+    setBgmAllowed(false)
+    setStep('privacyIntro')
+  }
+
+  // OOBE 完成或退出：5 秒淡出并停止背景音乐。
+  // ⚠️ complete() 会置 done → 组件卸载，卸载 cleanup 里的 pause() 会立刻掐断淡出——
+  // 因此淡出进行中置 window.__oobeBgmFading：卸载 cleanup 检测到就不再 pause，
+  // 由淡出 interval 自己负责收尾（pause + remove）。
+  const fadeOutBgm = () => {
+    const audio = bgmAudioRef.current
+    if (!audio || window.__oobeBgmFading) return
+    window.__oobeBgmFading = true
+    if (bgmBarTimerRef.current) { window.clearTimeout(bgmBarTimerRef.current); bgmBarTimerRef.current = null }
+    const startVolume = audio.volume
+    const stepMs = 100
+    const steps = Math.ceil(5000 / stepMs)
+    let elapsed = 0
+    const fadeOutTimer = window.setInterval(() => {
+      elapsed += 1
+      audio.volume = Math.max(0, startVolume * (1 - elapsed / steps))
+      if (elapsed >= steps) {
+        window.clearInterval(fadeOutTimer)
+        window.__oobeBgmFading = false
+        audio.pause()
+        audio.currentTime = 0
+        audio.remove()
+      }
+    }, stepMs)
+  }
+  useEffect(() => () => {
+    // 正在淡出：交给淡出 interval 收尾（pause 会打断 5s 淡出）
+    if (!window.__oobeBgmFading) {
+      bgmAudioRef.current?.pause()
+      bgmAudioRef.current?.remove()
+    }
+    if (bgmBarTimerRef.current) window.clearTimeout(bgmBarTimerRef.current)
+  }, [])
+
   const [accentColor] = useState(() => {
     try { return localStorage.getItem('accentColor') || '#3B82F6' } catch { return '#3B82F6' }
   })
@@ -125,14 +217,6 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step])
-
-  // 逐条显示完毕后启动 2s 倒计时（同意按钮可点击前的等待）
-  useEffect(() => {
-    if (step === 'disclaimer' && revealCount >= disclaimerItems.length && countdown <= 0) {
-      setCountdown(2)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [revealCount, step])
 
   // 逐条出现时：仅当新条目超出可视区才滚动并钉到列表顶部；
   // 前几条（约 1~5）自然显示不动，第六条左右开始跟随，末尾几条浏览器自动限制在底部
@@ -203,6 +287,7 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
   const allRevealed = step === 'disclaimer' && revealCount >= disclaimerItems.length
 
   const quitApp = () => {
+    if (bgmAllowed) fadeOutBgm()
     const bridge = (window as any).electron
     if (bridge?.system?.close) {
       void bridge.system.close()
@@ -218,6 +303,8 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
     if (bridge?.oobe?.setFlag) {
       void bridge.oobe.setFlag().catch(() => { /* 写失败不影响（localStorage 已兜底） */ })
     }
+    // OOBE 结束：背景音乐 5 秒淡出
+    if (bgmAllowed) fadeOutBgm()
     setDone(true)
     onComplete?.()
   }
@@ -257,6 +344,28 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
           <X className="w-5 h-5" />
         </motion.button>
       </div>
+
+      {/* ── MC 唱片机式"正在播放"提示：顶部居中，像素字体 + 彩色渐变流动，5s 淡入淡出 ── */}
+      <AnimatePresence>
+        {bgmBarVisible && (
+          <div className="absolute top-14 z-[10040] pointer-events-none select-none" style={{ left: '50%', transform: 'translateX(-50%)' }}>
+            <motion.div
+              initial={{ opacity: 0, y: -14 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -14 }}
+              transition={{ duration: 0.7, ease: 'easeInOut' }}
+              className="oobe-mc-nowplaying"
+              style={{ fontFamily: PIXEL_FONT_BY_LOCALE[locale] }}
+            >
+              {t('nowPlayingLine').split('').map((ch, i) => (
+                <span key={i} className="oobe-mc-char" style={{ animationDelay: `${i * 0.18}s` }}>
+                  {ch === ' ' ? '\u00A0' : ch}
+                </span>
+              ))}
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* ── 背景：accent 光晕 + 液态光斑 + 噪点 + 底部水波 ── */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden" aria-hidden>
@@ -461,12 +570,45 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
                   </div>
                   <div className="mt-8 flex justify-end">
                     <button
-                      onClick={() => setStep('privacyIntro')}
+                      onClick={() => setStep('bgm')}
                       className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all hover:brightness-110 active:scale-[0.98] flex items-center gap-1.5"
                       style={{ backgroundColor: accentColor, boxShadow: `0 8px 24px ${accentColor}33` }}
                     >
                       {t('themeNext')} <ChevronRight className="w-4 h-4" />
                     </button>
+                  </div>
+                </motion.div>
+              )}
+
+              {step === 'bgm' && (
+                <motion.div key="bgm" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }} transition={{ duration: 0.3 }} className="p-7 sm:p-9">
+                  <div className="flex items-center gap-3 mb-1">
+                    <Music className="w-6 h-6" style={{ color: accentColor }} />
+                    <h2 className={`text-xl sm:text-2xl font-bold ${textPrimary}`}>{t('bgmTitle')}</h2>
+                  </div>
+                  <p className={`mt-3 text-[15px] leading-relaxed ${textSecondary}`}>{t('bgmBody')}</p>
+                  <div className="mt-8 flex items-center justify-between">
+                    <button
+                      onClick={() => setStep('theme')}
+                      className={`px-5 py-2.5 rounded-xl text-sm font-medium flex items-center gap-1.5 transition-colors ${ghostBtn} ${textPrimary}`}
+                    >
+                      <ArrowLeft className="w-4 h-4" /> {t('back')}
+                    </button>
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        onClick={denyBgm}
+                        className={`px-6 py-2.5 rounded-xl text-sm font-medium flex items-center gap-1.5 transition-colors ${ghostBtn} ${textPrimary} active:scale-[0.98]`}
+                      >
+                        <X className="w-4 h-4" /> {t('bgmDeny')}
+                      </button>
+                      <button
+                        onClick={startBgm}
+                        className="px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all hover:brightness-110 active:scale-[0.98] flex items-center gap-1.5"
+                        style={{ backgroundColor: accentColor, boxShadow: `0 8px 24px ${accentColor}33` }}
+                      >
+                        <Music className="w-4 h-4" /> {t('bgmAllow')}
+                      </button>
+                    </div>
                   </div>
                 </motion.div>
               )}
@@ -579,13 +721,13 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
                     </div>
                     <button
                       onClick={() => { setShowFinal(true) }}
-                      disabled={!allRevealed || countdown > 0}
+                      disabled={!allRevealed}
                       className={`px-6 py-2.5 rounded-xl text-sm font-semibold text-white transition-all ${
-                        !allRevealed || countdown > 0 ? 'opacity-45 cursor-not-allowed' : 'hover:brightness-110 active:scale-[0.98]'
+                        !allRevealed ? 'opacity-45 cursor-not-allowed' : 'hover:brightness-110 active:scale-[0.98]'
                       }`}
-                      style={{ backgroundColor: accentColor, boxShadow: (!allRevealed || countdown > 0) ? undefined : `0 8px 24px ${accentColor}33` }}
+                      style={{ backgroundColor: accentColor, boxShadow: !allRevealed ? undefined : `0 8px 24px ${accentColor}33` }}
                     >
-                      {allRevealed ? countdownLabel(t('agreeTpl'), countdown) : t('readingHint')}
+                      {allRevealed ? t('agreeTpl').replace(/[（(]\{n\}[）)]/, '') : t('readingHint')}
                     </button>
                   </div>
                 </motion.div>

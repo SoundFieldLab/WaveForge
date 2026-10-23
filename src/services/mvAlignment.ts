@@ -38,6 +38,13 @@ export interface MvAlignment {
   /** 0-1 置信度 */
   confidence: number
   method: 'subtitle' | 'beat' | 'live-vocal' | 'envelope'
+  /**
+   * 判定来源溯源（可选，线上审计用）：'model-veto' = 模型否决路径产出，'model-rescue' =
+   * 闸门拒绝后模型翻案，'subtitle-scan' = 字幕翻译口径全局扫描（低样本），缺省 = 常规
+   * 证据链。rescue/封顶产物进 30 天缓存后与普通对齐不可区分——线上审计「翻案采纳的
+   * 对齐实际表现如何」必须靠这个字段。
+   */
+  source?: 'model-rescue' | 'subtitle-scan'
   /** 包络峰突出度（method=envelope 时携带）：主峰 − ±2s 外次峰，持久化迁移据此裁决可信度 */
   prominence?: number
   /**
@@ -70,6 +77,109 @@ const MAX_ENVELOPE_OFFSET_SECONDS = 90
 /** 包络证据链的结构证实门槛：段落支持率（恒定偏移下 30s 段相关>0.4 的占比）。
  *  实测标定：真对齐 0.44、全部假峰 0.00——0.35 留出弱段干扰余量 */
 const ENVELOPE_SEGMENT_SUPPORT_MIN = 0.35
+
+/**
+ * 包络证据链裁决模型（逻辑回归，2026-10-18 用 .tmp-kg-align 采集集训练标定）：
+ * 训练数据 = live-eval-results × live-evidence join 的 206 条金样本（124 可救 / 82 不可救；
+ * 真值来自三探测器入口锚一致的 strong-anchor，无需人工标注）。9 特征全部是证据链
+ * 在线已计算的量。5 折 CV：救 96% / 误放 1%——对照现行规则闸门在同样本上误放 12/82
+ * （翻唱/混剪被错放 → 歌词错位），模型把它压到 1/82。
+ * 半监督扩展实验（votes-cache 5222 条弱标签）召回反降至 60%——弱标签有噪声，不采用。
+ * 用法是「双向补丁」而非替换闸门：
+ *  - 否决（veto）：闸门放行但 score<0.25 且 peak<0.6（非同录音铁证）→ 拒绝；
+ *    实测砍掉 10/12 误放、0 漏救（阈值 0.25/0.3 效用并列最优，取 0.25 留召回余量）。
+ *  - 翻案（rescue）：闸门拒绝但 score≥0.7 且投票-峰偏移一致 ≤1.5s → 弱对齐采纳
+ *    （conf 封顶 0.55，同步层追频容差自动放宽；本标定集上闸门拒绝子集无漏救，
+ *    该分支是保险带，覆盖标定集未见的组合）。
+ */
+const EVIDENCE_MODEL_FEATURES = ['peak', 'prom', 'support', 'anchors', 'strongAnchors', 'anchorSpread', 'segs', 'durRatio', 'voteOffDelta'] as const
+/** v1 模型：206 条金样本（live-eval × evidence join，2026-10-18）——硬真值口径精确 */
+const EVIDENCE_MODEL_MU = [0.585491, 0.139356, 0.595812, 4.495146, 2.57767, 0.843204, 6.461165, 1.174453, 10.21165]
+const EVIDENCE_MODEL_SD = [0.269441, 0.123276, 0.433484, 3.316255, 2.666092, 1.842415, 2.065892, 1.496235, 18.76248]
+const EVIDENCE_MODEL_WEIGHTS = [0.941639, 0.927916, 1.675872, 0.869195, 0.432629, -0.143366, -0.000179, -0.097504, -0.873591]
+const EVIDENCE_MODEL_BIAS = 1.39506
+/** v2/v3 模型：4712-4750 条样本（5524 组全量复算重标定，2026-10-18）。v3 在 v2 基础上
+ *  两项修正：① 共识过滤——256/1343 首的「强候选间偏移散布>2s」的不可靠共识歌不产灰区
+ *  标签（共识本身错时相对标签就是噪声）；② 灰区样本降权 0.5（相对标签弱于硬真值）。
+ *  v3 单独 CV 召回 87.8%/误放 2.2%，但与 v1 组合后是全部组合里最优的：
+ *  金样本 救121/误放1/漏救3（v1+v2 为 119/1/5，三模型 120/3/4）——不对称效用（救-3×误放）
+ *  v1+v3=118 最高，故产线取 v1+v3 均值。 */
+const EVIDENCE_MODEL_V2_MU = [0.79703, 0.23193, 0.237065, 1.111158, 1.111158, 0.976632, 4.417684, 1.087691, 27.685112]
+const EVIDENCE_MODEL_V2_SD = [0.297421, 0.152234, 0.207844, 0.843715, 0.843715, 1.975023, 1.946512, 1.061153, 7.837813]
+const EVIDENCE_MODEL_V2_WEIGHTS = [2.255976, 1.197891, 0.697516, 0.548505, 0.548505, -0.45519, 0.113254, -0.182286, 0.267588]
+const EVIDENCE_MODEL_V2_BIAS = 2.295523
+const EVIDENCE_MODEL_V3_MU = [0.801298, 0.234174, 0.238572, 1.108111, 1.108111, 0.979498, 4.398835, 1.091605, 27.665915]
+const EVIDENCE_MODEL_V3_SD = [0.304654, 0.153841, 0.209564, 0.85274, 0.85274, 1.975575, 1.944622, 1.091735, 7.866195]
+const EVIDENCE_MODEL_V3_WEIGHTS = [6.604523, 2.840231, 1.744424, 5.630855, 5.630855, -1.833398, 0.0857, -1.692419, -0.509836]
+const EVIDENCE_MODEL_V3_BIAS = -0.062846
+const EVIDENCE_MODEL_VETO_SCORE = 0.25
+const EVIDENCE_MODEL_RESCUE_SCORE = 0.7
+const EVIDENCE_MODEL_RESCUE_MAX_VOTE_DELTA = 1.5
+
+export interface EvidenceModelInput {
+  peak: number
+  prom: number
+  support: number
+  anchors: number
+  strongAnchors: number
+  anchorSpread: number
+  segs: number
+  durRatio: number
+  voteOffDelta: number
+}
+
+const sigmoid01 = (z: number): number => 1 / (1 + Math.exp(-Math.max(-30, Math.min(30, z))))
+
+function evidenceModelForward(mu: number[], sd: number[], weights: number[], bias: number, values: number[]): number {
+  let z = bias
+  for (let i = 0; i < values.length; i += 1) {
+    const value = Number.isFinite(values[i]) ? values[i] : 0
+    z += weights[i] * (value - mu[i]) / sd[i]
+  }
+  return sigmoid01(z)
+}
+
+/** 证据链裁决模型前向（v1+v3 ensemble 均值）：返回 P(可救)∈[0,1]。输入缺失按 0 处理。 */
+export function scoreEvidenceAlignment(input: EvidenceModelInput): number {
+  const values = [input.peak, input.prom, input.support, input.anchors, input.strongAnchors, input.anchorSpread, input.segs, input.durRatio, input.voteOffDelta]
+  const v1 = evidenceModelForward(EVIDENCE_MODEL_MU, EVIDENCE_MODEL_SD, EVIDENCE_MODEL_WEIGHTS, EVIDENCE_MODEL_BIAS, values)
+  const v3 = evidenceModelForward(EVIDENCE_MODEL_V3_MU, EVIDENCE_MODEL_V3_SD, EVIDENCE_MODEL_V3_WEIGHTS, EVIDENCE_MODEL_V3_BIAS, values)
+  return (v1 + v3) / 2
+}
+
+/**
+ * 从包络证据链的运行时量构造模型输入。anchors 统计取自 envelopeSegmentAnchors
+ *（与采纳路径的分段锚点同一来源）；无锚点（全曲均匀贴合）时 anchors/strongAnchors/
+ * anchorSpread 记 0——训练集里「锚点全部≈全局锚」的样本正是这个形态。
+ */
+function buildEvidenceModelInput(args: {
+  peak: number
+  prom: number
+  supportRatio: number
+  supportSegments: number
+  voteOffset: number | null | undefined
+  envOffset: number
+  songDuration: number
+  mvDuration: number | undefined
+  anchors: Array<{ offsetSeconds: number; correlation: number }> | null
+}): EvidenceModelInput {
+  const anchors = args.anchors ?? []
+  const strongAnchors = anchors.filter((a) => a.correlation >= 0.5).length
+  const anchorSpread = anchors.length >= 2
+    ? Math.max(...anchors.map((a) => a.offsetSeconds)) - Math.min(...anchors.map((a) => a.offsetSeconds))
+    : 0
+  return {
+    peak: args.peak,
+    prom: args.prom,
+    support: args.supportRatio,
+    anchors: anchors.length,
+    strongAnchors,
+    anchorSpread,
+    segs: args.supportSegments,
+    durRatio: args.songDuration > 0 && args.mvDuration && args.mvDuration > 0 ? args.mvDuration / args.songDuration : 1,
+    voteOffDelta: args.voteOffset != null ? Math.abs(args.voteOffset - args.envOffset) : 30,
+  }
+}
 
 /**
  * 包络互相关结果的统一裁决：峰值与峰突出度双门槛，置信度按证据分级。
@@ -222,7 +332,7 @@ function loadPersisted(): Map<string, MemoryEntry> {
             && (i === 0 || s.songTime > entry.segments![i - 1].songTime))
           if (valid) segments = entry.segments
         }
-        map.set(key, { offsetSeconds: entry.offsetSeconds, confidence: entry.confidence, method: entry.method, prominence: entry.prominence, candidateType: entry.candidateType, ...(segments ? { segments } : {}) })
+        map.set(key, { offsetSeconds: entry.offsetSeconds, confidence: entry.confidence, method: entry.method, prominence: entry.prominence, candidateType: entry.candidateType, ...(entry.source ? { source: entry.source } : {}), ...(segments ? { segments } : {}) })
       }
     }
     return map
@@ -497,19 +607,10 @@ const songEnvelopeCache = new Map<string, { frameRms: number[]; frameRate: numbe
 const songEnvelopeInFlight = new Map<string, Promise<{ frameRms: number[]; frameRate: number } | null>>()
 
 /** 解码歌曲音频取帧 RMS 包络：优先 electron 下载缓存（automix 同路——QQ 音频 URL 的
- *  vkey 会过期/被竞态打断，裸 fetch 实测 "Failed to fetch"），失败再试裸 URL。 */
-async function decodeSongEnvelope(songUrl: string, cacheKey: string, signal?: AbortSignal): Promise<{ frameRms: number[]; frameRate: number }> {
-  const localSong = await window.electron?.audioDownload?.prepare?.(songUrl, cacheKey)
-  const mediaSong = localSong ? await window.electron?.audioDownload?.getMediaUrl?.(localSong) : null
-  const { buffer } = await decodeAudioUrl(mediaSong || songUrl, signal)
-  return computeFrameEnvelope(buffer)
-}
-
-/** 取歌曲音频的帧 RMS 包络（50fps，与 MV 侧同口径）；失败返回 null（调用方降级）。
- *  cacheKey：electron 下载缓存的 trackKey——必须传 songKey 域的稳定 ID（如 qq:123），
- *  **不要传 URL**：缓存索引/403 冷却按 trackKey 组织，URL 作 key 会随 vkey 刷新而
- *  碎片化，且打包版 prepare 对 URL key 曾抛 Invalid track key（Ghost 案例日志）。 */
-export async function getSongEnvelope(songUrl: string, signal?: AbortSignal, cacheKey?: string): Promise<{ frameRms: number[]; frameRate: number } | null> {
+ *  vkey 会过期/被竞态打断，裸 fetch 实测 "Failed to fetch"），失败再试裸 URL。
+ *  expectedDuration：透传给下载侧做时长闸（空 vkey/试听返回"合法容器但只有半首"，
+ *  半首包络算出的偏移/支持率全不可信）。 */
+export async function getSongEnvelope(songUrl: string, signal?: AbortSignal, cacheKey?: string, expectedDuration?: number): Promise<{ frameRms: number[]; frameRate: number } | null> {
   if (!songUrl || !(songUrl.startsWith('http') || songUrl.startsWith('blob:'))) return null
   const cached = songEnvelopeCache.get(songUrl)
   if (cached) return cached
@@ -517,9 +618,13 @@ export async function getSongEnvelope(songUrl: string, signal?: AbortSignal, cac
   if (existing) return existing
   const promise = (async () => {
     try {
-      // trackKey 缺省用 songUrl 的哈希（稳定且不会撞缓存索引语义）；调用方有 songKey 时优先
+      // trackKey 缺省用 songUrl 的哈希（稳定且不会撞缓存索引语义）；调用方有 songKey 时优先。
+      // songKey 域的键与现场版补偿/拍点路径一致——同一首歌整条对齐链只解码一次。
       const key = cacheKey || `env:${hashString(songUrl)}`
-      const envelope = await decodeSongEnvelope(songUrl, key, signal)
+      const localSong = await window.electron?.audioDownload?.prepare?.(songUrl, key, { expectedDuration })
+      const mediaSong = localSong ? await window.electron?.audioDownload?.getMediaUrl?.(localSong) : null
+      const { buffer } = await decodeAudioUrl(mediaSong || songUrl, signal)
+      const envelope = computeFrameEnvelope(buffer)
       // 上限 8 条：一次会话里通常只有当前曲 + 预载下一曲
       if (songEnvelopeCache.size >= 8) {
         const oldest = songEnvelopeCache.keys().next().value
@@ -607,7 +712,7 @@ async function computeLiveCompensation(input: MvAlignmentInput, signal?: AbortSi
       const mvEntryAbs = detectMusicStart(frameRms, frameRate)
 
       // 歌曲侧包络：锚 C 与锚 B 共用一次解码（与「候选同一性复核」也共享缓存）
-      const songEnv = input.songUrl ? await getSongEnvelope(input.songUrl, signal, input.songKey) : null
+      const songEnv = input.songUrl ? await getSongEnvelope(input.songUrl, signal, input.songKey, input.songDuration) : null
 
       // 锚 C（首选）：全曲包络互相关。现场/翻唱与音源虽是两条录音、节拍网格不可用，
       // 但同一首歌的**响度结构**仍逐段对应：相关峰过闸（buildEnvelopeAlignment：
@@ -959,6 +1064,50 @@ function normalizeText(s: string): string {
     .replace(/[a-zāáǎàēéěèīíǐìōóǒòūúǔùǖǘǚǜ]+/g, (m) => m.replace(/[āáǎà]/g, 'a').replace(/[ēéěè]/g, 'e').replace(/[īíǐì]/g, 'i').replace(/[ōóǒò]/g, 'o').replace(/[ūúǔù]/g, 'u').replace(/[ǖǘǚǜ]/g, 'ü'))
 }
 
+/** 提取内容词：CJK 段切字符 bigram（跨语序的翻译仍共享大量 bigram——"奔向夜晚"
+ *  vs "向夜晚飞奔而去"共享 向夜/夜晚；整段当一个词则语序一变就零交集），
+ *  拉丁词保持整词（长度 ≥2）。翻译口径差异（不同译者的用词/语序）会破坏整行
+ *  文本匹配，但内容词集合仍高度重叠，按词命中率匹配可跨译者对齐。 */
+function contentTokens(s: string): string[] {
+  const raw = (s || '').toLowerCase()
+  const tokens: string[] = []
+  for (const m of raw.matchAll(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+|[a-zü][a-zü]+/gu)) {
+    const seg = m[0]
+    if (/^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]+$/u.test(seg)) {
+      if (seg.length === 1) { tokens.push(seg); continue }
+      for (let i = 0; i + 2 <= seg.length; i += 1) tokens.push(seg.slice(i, i + 2))
+    } else if (seg.length >= 2) {
+      tokens.push(seg)
+    }
+  }
+  return Array.from(new Set(tokens))
+}
+
+/** 内容词命中率：|A∩B| / min(|A|,|B|)。0-1，双方都空返回 0。 */
+function tokenOverlap(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0
+  const setB = new Set(b)
+  let hit = 0
+  for (const t of new Set(a)) if (setB.has(t)) hit += 1
+  return hit / Math.min(new Set(a).size, setB.size)
+}
+
+/** AI 字幕轨的「歌词性」判定（真实 12 样本标定）：音乐/环境声识别行（♪音乐♪、
+ *  掌声等）占比 >0.5，或去重内容词 <20 个 → 判非歌词（闲聊转写/纯环境识别）。
+ *  人工歌词轨（ai=0）不套此判据——人工字幕即使短也是真词。 */
+export function isLyricLikeSubtitle(lines: BilibiliSubtitleLine[]): boolean {
+  const contents = lines
+    .map((l) => String(l?.content || '').replace(/[♪♫\s]/g, '').trim())
+    .filter((c) => c.length > 0)
+  if (contents.length < 10) return true // 行太少不足以判非歌词，放行由匹配数闸门兜底
+  const ambient = contents.filter((c) => c === '音乐' || c === '音乐声' || c === 'music' || c === 'music声' || c === '掌声' || c === '歌声' || c === '欢呼' || c === ' applause').length
+  if (ambient / contents.length > 0.5) return false
+  const vocab = new Set<string>()
+  for (const c of contents) for (const t of contentTokens(c)) vocab.add(t)
+  if (vocab.size < 20) return false
+  return true
+}
+
 /** 字幕行时间 ↔ 本地歌词行时间文本匹配，取偏移中位数；匹配数或离散度过低返回 null */
 export function detectOffsetFromSubtitles(
   songLyrics: LyricLine[],
@@ -982,8 +1131,29 @@ export function detectOffsetFromSubtitles(
   if (lyricEntries.length < 3) return null
 
   const offsets: number[] = []
+  const matchedPairs: Array<{ songTime: number; offset: number }> = []
+  // 双语 CC 行（"原文\n翻译"同格）先按换行拆成语段分别匹配——整体规范化后 overlap
+  // 恒 ≈0.5（原文/翻译各半），会被 0.55 覆盖度闸门全部拒掉（合成数据实测双语 CC
+  // 对齐完全失效）。每段独立匹配、共享同一字幕时间。
+  const subSegments: Array<{ from: number; norm: string }> = []
   for (const sub of subLines) {
-    const norm = normalizeText(sub.content)
+    const parts = String(sub.content || '').split(/\n+/)
+    if (parts.length > 1) {
+      let pushed = false
+      for (const part of parts) {
+        const norm = normalizeText(part)
+        if (norm.length >= 2) {
+          subSegments.push({ from: sub.from, norm })
+          pushed = true
+        }
+      }
+      if (pushed) continue
+    }
+    subSegments.push({ from: sub.from, norm: normalizeText(sub.content) })
+  }
+  // 第一遍：整行文本匹配（精确/包含，原有口径）
+  for (const seg of subSegments) {
+    const norm = seg.norm
     if (norm.length < 2) continue
     // 精确相等优先；否则**包含匹配**——CC 字幕常把一句歌词拆成 2~3 段逐段显示
     //（各段与视频同步，只是同一句拆开），段落文本是整句的子串；偶尔也反过来
@@ -1001,18 +1171,91 @@ export function detectOffsetFromSubtitles(
         continue
       }
       // 就近惩罚：同词多行（副歌重复）时取时间最接近的，避免对到别的副歌句
-      const timePenalty = Math.abs(e.timeSeconds - sub.from) / 120
+      const timePenalty = Math.abs(e.timeSeconds - seg.from) / 120
       if (!best || score - timePenalty > best.score) {
         best = { timeSeconds: e.timeSeconds, score: score - timePenalty }
       }
     }
     if (!best) continue
-    const offset = sub.from - best.timeSeconds
+    const offset = seg.from - best.timeSeconds
     // 剔除明显越界的匹配（字幕与歌词行整体偏移应在合理前摇范围内）
     if (Math.abs(offset) > MAX_SANE_OFFSET_SECONDS) continue
     offsets.push(offset)
+    matchedPairs.push({ songTime: best.timeSeconds, offset })
   }
-  if (offsets.length < 3) return null
+  // 第二遍（翻译口径容忍）：整行匹配数不足时降级到内容词命中率。不同译者对同一句
+  // 的用词/语序不同（"奔向夜晚" vs "向夜晚飞奔而去"），单对 overlap 常不足 0.6，
+  // 逐对判定漏配太多。改用**全局扫描**：对每个候选偏移（±45s、0.5s 步长），统计全部
+  // CC 段与「该偏移下时间最近的歌词行」的内容词命中率之和——正确偏移下全局总分
+  // 显著高于错误偏移（与包络互相关同构，全局证据远强于单对）。取总分峰的偏移中位数。
+  let usedTokenScan = false
+  if (offsets.length < 3) {
+    const entryTokens = lyricEntries.map((e) => ({ timeSeconds: e.timeSeconds, tokens: contentTokens(e.norm) })).filter((e) => e.tokens.length >= 2)
+    const segTokens = subSegments.map((s) => ({ from: s.from, tokens: contentTokens(s.norm) })).filter((s) => s.tokens.length >= 2)
+    if (entryTokens.length >= 3 && segTokens.length >= 3) {
+      let bestOffset: number | null = null
+      let bestScore = 0
+      for (let cand = -45; cand <= 45; cand += 0.5) {
+        let total = 0
+        let hits = 0
+        for (const seg of segTokens) {
+          const alignedAt = seg.from - cand
+          // 对齐位置 ±3s 窗口内取 **overlap 最高**的歌词行：同时间戳常有 text+translation
+          // 两个 entry（日文原文+中文翻译），中文 CC 段配日文行 overlap=0、配翻译行才有分
+          // ——按「距离最近」取会永远命中先遍历的 text 行（实测场景1 全灭的根因）。
+          let bestOverlap = 0
+          let bestTime: number | null = null
+          for (const e of entryTokens) {
+            const d = Math.abs(e.timeSeconds - alignedAt)
+            if (d > 3) continue
+            const overlap = tokenOverlap(seg.tokens, e.tokens)
+            if (overlap > bestOverlap) { bestOverlap = overlap; bestTime = e.timeSeconds }
+          }
+          if (bestTime != null && bestOverlap >= 0.45) { total += bestOverlap; hits += 1 }
+        }
+        // 总分相同时偏好命中数多的（更多行参与=更稳）。
+        // 门槛 hits>=2 且总分 >=1.2：跨译者单对 overlap 常在 0.3-0.8 波动（语序差异），
+        // 要求 3 对以上会漏掉真实对齐（合成数据 5 对里只有 2-3 对 ≥0.45）；
+        // 全局扫描的正确偏移总分显著高于错误偏移，2 对强证据（≥1.2 总分）已可区分。
+        const score = total + hits * 0.01
+        if (hits >= 2 && total >= 1.2 && score > bestScore) {
+          bestScore = score
+          bestOffset = cand
+        }
+      }
+      if (bestOffset != null) {
+        // 按最优偏移重收集配对（供漂移拟合与置信度）：同扫描逻辑取窗口内 overlap 最高行
+        for (const seg of segTokens) {
+          const alignedAt = seg.from - bestOffset
+          let bestOverlap = 0
+          let bestTime: number | null = null
+          for (const e of entryTokens) {
+            const d = Math.abs(e.timeSeconds - alignedAt)
+            if (d > 3) continue
+            const overlap = tokenOverlap(seg.tokens, e.tokens)
+            if (overlap > bestOverlap) { bestOverlap = overlap; bestTime = e.timeSeconds }
+          }
+          if (bestTime != null && bestOverlap >= 0.45) {
+            const offset = seg.from - bestTime
+            if (Math.abs(offset) > MAX_SANE_OFFSET_SECONDS) continue
+            offsets.push(offset)
+            matchedPairs.push({ songTime: bestTime, offset })
+          }
+        }
+        if (offsets.length >= 2) {
+          usedTokenScan = offsets.length < 3
+          const sorted0 = [...offsets].sort((a, b) => a - b)
+          const median0 = sorted0[Math.floor(sorted0.length / 2)]
+          const spread0 = sorted0[Math.floor((3 * sorted0.length) / 4)] - sorted0[Math.floor(sorted0.length / 4)]
+          mvLog(`字幕翻译口径对齐：整行匹配不足，全局内容词扫描 offset=${median0}s（总分=${bestScore.toFixed(2)}，${offsets.length} 段，IQR=${spread0.toFixed(1)}）`)
+        }
+      }
+    }
+  }
+  // 最低配对数：整行匹配 ≥3；翻译口径（内容词全局扫描）置信度低一档，≥2 对即可，
+  // 但给 confidence 打折（扫描分支已有总分+spread 双门槛兜质量）。
+  const minPairs = usedTokenScan ? 2 : 3
+  if (offsets.length < minPairs) return null
 
   const sorted = [...offsets].sort((a, b) => a - b)
   const median = sorted[Math.floor(sorted.length / 2)]
@@ -1022,20 +1265,94 @@ export function detectOffsetFromSubtitles(
   const spread = q3 - q1
   if (spread > 3) return null
 
-  const confidence = Math.max(0, Math.min(1, 0.35 + 0.1 * offsets.length - 0.06 * spread))
-  return { offsetSeconds: median, confidence, method: 'subtitle' }
+  // 渐进漂移检测：字幕组逐句微偏（压帧/不同源时间轴）会让 offset 随歌曲时间线性
+  // 累积（合成数据实测 0.2s/句 × 30 句 = 6s 漂移，恒定中位数在中段错 ±3s）。
+  // 对（歌词行时间 → offset）做线性拟合：斜率显著且拟合不差时产出首尾两个锚点
+  // （segments），同步层 offsetAt 按位置插值逐段纠正；否则维持恒定偏移。
+  const pairs = matchedPairs
+    .filter((p) => Number.isFinite(p.songTime) && Number.isFinite(p.offset))
+  if (pairs.length >= 5) {
+    const meanT = pairs.reduce((s, p) => s + p.songTime, 0) / pairs.length
+    const meanO = pairs.reduce((s, p) => s + p.offset, 0) / pairs.length
+    let sTT = 0
+    let sTO = 0
+    for (const p of pairs) {
+      sTT += (p.songTime - meanT) ** 2
+      sTO += (p.songTime - meanT) * (p.offset - meanO)
+    }
+    const slope = sTT > 0 ? sTO / sTT : 0
+    // 双门槛：斜率（s/s）本身微小（句距秒级下每句 0.2s ≈ 斜率 0.02），单看斜率会
+    // 误触发；结合「总漂移量 = |slope| × 歌曲跨度 ≥1.5s」（可感知的错位）才纠。
+    if (pairs.length >= 2) {
+      const times0 = pairs.map((p) => p.songTime)
+      const span = Math.max(...times0) - Math.min(...times0)
+      const totalDrift = Math.abs(slope) * span
+      if (Math.abs(slope) >= 0.008 && totalDrift >= 1.5) {
+        // 拟合优度（相关系数平方）：太散的匹配不产漂移锚
+        let sOO = 0
+        for (const p of pairs) sOO += (p.offset - meanO) ** 2
+        const r2 = sTT > 0 && sOO > 0 ? (sTO * sTO) / (sTT * sOO) : 0
+        if (r2 >= 0.5) {
+          const times = pairs.map((p) => p.songTime)
+          const tMin = Math.min(...times)
+          const tMax = Math.max(...times)
+          const anchor = (t: number) => ({ songTime: Math.round(t * 10) / 10, offsetSeconds: Math.round((meanO + slope * (t - meanT)) * 100) / 100, correlation: 1 })
+          const segments = [anchor(tMin), anchor(tMax)]
+          mvLog(`字幕漂移拟合：斜率=${slope.toFixed(3)}s/s 总漂移=${totalDrift.toFixed(1)}s r²=${r2.toFixed(2)}（${pairs.length} 对）→ 分段锚 [${tMin.toFixed(0)}s→${segments[0].offsetSeconds}s, ${tMax.toFixed(0)}s→${segments[1].offsetSeconds}s]`)
+          return { offsetSeconds: median, confidence: Math.max(0, Math.min(1, 0.35 + 0.1 * offsets.length - 0.06 * spread)), method: 'subtitle', segments }
+        }
+      }
+    }
+  }
+
+  // 低样本封顶（304 对真实语料标定）：n_pairs 是可靠性的最强预测器——n≥7 的 10 条
+  // 全部正确（多投稿偏移收敛），n≤5 的 5 条里 4 条可疑（LOFI 改编偏 4.6s、重复结构假
+  // 锁 22.99s、双语轨弱侧偏 4.1s）。低样本（<6 对）置信度封顶 0.55（同步层弱对齐档，
+  // 追频容差自动放宽），扫描路径（无整行匹配佐证）再降 0.05——真实偏移靠多投稿收敛
+  // 站得住，假对齐被 conf<0.6 挡在应用门槛外也不可惜（宁缺毋滥）。
+  let confidence = Math.max(0, Math.min(1, 0.35 + 0.1 * offsets.length - 0.06 * spread))
+  if (offsets.length < 6) confidence = Math.min(confidence, usedTokenScan ? 0.5 : 0.55)
+  return { offsetSeconds: median, confidence, method: 'subtitle', ...(usedTokenScan ? { source: 'subtitle-scan' as const } : {}) }
 }
 
 async function detectViaSubtitles(input: MvAlignmentInput, signal?: AbortSignal): Promise<MvAlignment | null> {
   try {
     const info = await getBilibiliSubtitles(input.bvid, input.cid, signal)
     if (info.code !== 0 || !info.subtitles.length) return null
+    // 多字幕逐条试配而非只选一条：双语/多语视频常同时挂「原文 CC + 翻译 CC」，
+    // pickBestSubtitle 的语言偏好猜错（如本地歌词只有日文原文而偏好选了中文翻译 CC）
+    // 会让字幕对齐整体失效。每条字幕各算一次，取置信度最高者；偏好序只作并列打破。
     const pref = getBilibiliWatchSettings().subtitlePreference
-    const chosen = pickBestSubtitle(info.subtitles, pref) || info.subtitles[0] || null
-    if (!chosen) return null
-    const lines = await getBilibiliSubtitleJson(chosen.cacheKey, signal)
-    const clean = cleanSubtitleLines(lines)
-    return detectOffsetFromSubtitles(input.lyrics || [], clean)
+    const ordered = [...info.subtitles].sort((a, b) => {
+      const chosenA = pickBestSubtitle([a, b], pref) === a ? -1 : 1
+      return chosenA
+    })
+    let best: { result: MvAlignment; index: number } | null = null
+    for (let i = 0; i < ordered.length; i += 1) {
+      if (signal?.aborted) return null
+      const chosen = ordered[i]
+      if (!chosen?.cacheKey) continue
+      const lines = await getBilibiliSubtitleJson(chosen.cacheKey, signal).catch(() => null)
+      const clean = cleanSubtitleLines(lines)
+      if (!clean.length) continue
+      // AI 字幕歌词性预检（真实数据 P1，12 样本实测）：AI 转写轨分两种——纯音乐/环境声
+      // 识别（「♪ 音乐 ♪」×186/200、去重词 14 个）和现场闲聊转写（「紧张紧张呢」「家庭
+      // 作业」）。两者都不是歌词，拿去文本对齐会产出完全错误的偏移。判据：音乐/环境
+      // 声行占比 >0.5 或去重内容词 <20 → 不用于对齐（仍可用于显示，clean 原样保留）。
+      if (chosen.aiType === 1 && !isLyricLikeSubtitle(clean)) {
+        mvLog(`AI 字幕非歌词（音乐/环境声识别或闲聊转写）→ 跳过对齐：${chosen.lanDoc || chosen.lan}`)
+        continue
+      }
+      const result = detectOffsetFromSubtitles(input.lyrics || [], clean)
+      if (result && (!best || result.confidence > best.result.confidence)) {
+        best = { result, index: i }
+      }
+    }
+    if (!best) return null
+    if (best.index > 0) {
+      mvLog(`字幕多选一：偏好序首选外的第 ${best.index + 1} 条字幕置信度更高（conf=${best.result.confidence.toFixed(2)} offset=${best.result.offsetSeconds}s）`)
+    }
+    return best.result
   } catch {
     return null
   }
@@ -1078,12 +1395,14 @@ export function detectOffsetFromBeats(songBeats: number[], mvBeats: number[]): M
   }
   const peakCenter = peakBucket * BUCKET
 
-  // 精化：峰值桶中心 ±0.25s、0.02s 步进，统计容差 0.15s 内的匹配对；
-  // 对取得最大匹配数的偏移取平均（半拍歧义取中心即精确偏移）
+  // 精化（两级）：先以 0.02s 步进找**匹配数最多**的偏移候选（容差 0.15s）；
+  // 均匀节拍网格下大量相邻候选并列最优（±半拍歧义），旧实现取并列候选的平均——
+  // 量化到 0.02s 步进，真值可偏 0.05-0.1s（用户实测"对齐差一点点"）。
+  // v2：并列区间确定后，收集该区间内**全部命中对**的残差 δ = mvBeat - 最近songBeat - 基准，
+  // 用残差均值（最小二乘意义的中心）把 offset 从 0.02s 步进精修到亚 0.01s 级。
   const TOL = 0.15
   let bestMatches = 0
-  let bestSum = 0
-  let bestCount = 0
+  let bestOffsets: number[] = []
   for (let d = -0.25; d <= 0.25 + 1e-9; d += 0.02) {
     const offset = peakCenter + d
     let matches = 0
@@ -1092,15 +1411,28 @@ export function detectOffsetFromBeats(songBeats: number[], mvBeats: number[]): M
     }
     if (matches > bestMatches) {
       bestMatches = matches
-      bestSum = offset
-      bestCount = 1
+      bestOffsets = [offset]
     } else if (matches === bestMatches && bestMatches > 0) {
-      bestSum += offset
-      bestCount += 1
+      bestOffsets.push(offset)
     }
   }
   if (bestMatches === 0) return null
-  const bestOffset = bestSum / bestCount
+  // 残差精修：以并列区间中点为基准，收集命中对的 (m - 最近 songBeat)，其均值即
+  // 基准相对真值的系统性偏差（TOL 内所有命中对的残差中心 = 最小二乘 offset）；
+  // 残差样本过少（< 50% 命中数，异常）时退回并列平均。
+  const baseOffset = bestOffsets[Math.floor(bestOffsets.length / 2)]
+  let residualSum = 0
+  let residualCount = 0
+  for (const m of M) {
+    const j = nearestIndex(S, m - baseOffset, TOL)
+    if (j >= 0) {
+      residualSum += m - S[j] - baseOffset
+      residualCount += 1
+    }
+  }
+  const bestOffset = residualCount >= Math.max(5, bestMatches * 0.5)
+    ? baseOffset + residualSum / residualCount
+    : bestOffsets.reduce((a, b) => a + b, 0) / bestOffsets.length
   if (Math.abs(bestOffset) > MAX_SANE_OFFSET_SECONDS) return null
 
   const minLen = Math.min(S.length, M.length)
@@ -1193,11 +1525,12 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
       mvLog(`歌曲包络来源：分析结果 rmsEnvelope（${songRms.length} 帧）`)
     } else if (songUrl.startsWith('http')) {
       try {
-        // 与 getSongEnvelope 同路：electron 下载缓存优先（automix 已缓存同曲时命中本地，
-        // 零网络）；media 协议 fetch 再失败则退裸 URL。
-        const decoded = await decodeSongEnvelope(songUrl, input.songKey || `env:${hashString(songUrl)}`, signal)
-        songRms = decoded.frameRms
-        mvLog(`歌曲包络来源：解码歌曲音频（${decoded.frameRms.length} 帧）`)
+        // 与 computeLiveCompensation/候选探针同路同键（getSongEnvelope 记忆化 +
+        // songKey 缓存键）：现场版补偿与拍点路径共用同一次解码——此前这条分支
+        // 直调 decodeSongEnvelope 且用 env:<hash> 键，同一首歌的包络被解码/计算两遍。
+        const decoded = await getSongEnvelope(songUrl, signal, input.songKey, input.songDuration)
+        songRms = decoded?.frameRms
+        if (songRms) mvLog(`歌曲包络来源：解码歌曲音频（${songRms.length} 帧）`)
       } catch (error) {
         mvLog(`歌曲包络解码失败：${error instanceof Error ? error.message : String(error)}（回退音乐起始锚点）`)
       }
@@ -1219,21 +1552,30 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
     const songRmsForSupport = songRms
     // 人声频段二次意见：全带包络弱相关时（欢呼/观众噪声污染的现场），
     // 用 200-4kHz 频段包络重做互相关——俺の彼女 巡演实测该口径段支持率 0.44 vs 全带 0.22。
-    let mvVocalRms: number[] | undefined
-    let songVocalRms: number[] | undefined
-    if (mvRmsForSupport && songRmsForSupport) {
+    // 人声频段二次意见（懒求值）：只有全带支持率未过线时才需要 200-4kHz 频段包络
+    //（观众欢呼/掌声能量在频段外，现场场景该口径显著更可信——俺の彼女 实测 0.44 vs 全带 0.22）。
+    // 惰性解码函数：官方 MV（绝大多数对齐）支持率一次过线 → 这两次整曲解码 + Goertzel
+    // 频段包络完全省掉；解码失败返回 null（二次意见静默跳过）。
+    const mvRmsForVocalBand = mvRmsForSupport
+    const songRmsForVocalBand = songRmsForSupport
+    const getVocalBandEnvelopes = async (): Promise<{ mvVocalRms?: number[]; songVocalRms?: number[] }> => {
+      if (!mvRmsForVocalBand || !songRmsForVocalBand) return {}
       try {
         const [mvBuf, songBuf] = await Promise.all([
           decodeAudioUrl(videoUrl, signal),
           (async () => {
-            const local = await window.electron?.audioDownload?.prepare?.(songUrl, input.songKey || `env:${songUrl.length}`)
+            const local = await window.electron?.audioDownload?.prepare?.(songUrl, input.songKey || `env:${songUrl.length}`, { expectedDuration: input.songDuration })
             const media = local ? await window.electron?.audioDownload?.getMediaUrl?.(local) : null
             return decodeAudioUrl(media || songUrl, signal)
           })().catch(() => null),
         ])
-        mvVocalRms = computeVocalBandEnvelope(mvBuf.buffer).vocalRms
-        if (songBuf) songVocalRms = computeVocalBandEnvelope(songBuf.buffer).vocalRms
-      } catch { /* 频段包络不可得 → 跳过二次意见 */ }
+        return {
+          mvVocalRms: computeVocalBandEnvelope(mvBuf.buffer).vocalRms,
+          songVocalRms: songBuf ? computeVocalBandEnvelope(songBuf.buffer).vocalRms : undefined,
+        }
+      } catch {
+        return {} /* 频段包络不可得 → 跳过二次意见 */
+      }
     }
     const mvBeats = mvAnalysis?.beats || null
     if (!mvBeats || mvBeats.length < 10) {
@@ -1292,15 +1634,19 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
         : { ratio: 0, mean: 0, segments: 0 }
       // 人声频段二次意见：全带支持率未过线但频段包络可用时，用 200-4kHz 包络重算——
       // 观众欢呼/掌声能量在频段外，现场场景该口径显著更可信（俺の彼女 实测 0.44 vs 0.22）。
-      // 取两者较大者作为结构证据（频段包络通过闸门时日志注明口径）。
+      // 取两者较大者作为结构证据（频段包络通过闸门时日志注明口径）。懒解码：只在此处
+      // （全带证据不足）才花两次整曲解码，官方 MV 的常规对齐完全不付这笔开销。
       let vocalSupplement = false
-      if (mvRmsForSupport && songRmsForSupport && support.ratio < ENVELOPE_SEGMENT_SUPPORT_MIN && mvVocalRms && songVocalRms) {
-        const vocal = envelopeSegmentSupport(mvVocalRms, songVocalRms, 50, envOffset)
-        if (vocal.ratio > support.ratio) {
-          vocalSupplement = vocal.ratio >= ENVELOPE_SEGMENT_SUPPORT_MIN
-          support.ratio = vocal.ratio
-          support.mean = vocal.mean
-          support.segments = vocal.segments
+      if (mvRmsForSupport && songRmsForSupport && support.ratio < ENVELOPE_SEGMENT_SUPPORT_MIN) {
+        const { mvVocalRms, songVocalRms } = await getVocalBandEnvelopes()
+        if (mvVocalRms && songVocalRms) {
+          const vocal = envelopeSegmentSupport(mvVocalRms, songVocalRms, 50, envOffset)
+          if (vocal.ratio > support.ratio) {
+            vocalSupplement = vocal.ratio >= ENVELOPE_SEGMENT_SUPPORT_MIN
+            support.ratio = vocal.ratio
+            support.mean = vocal.mean
+            support.segments = vocal.segments
+          }
         }
       }
       const offsetInRange = Math.abs(envOffset) <= MAX_ENVELOPE_OFFSET_SECONDS
@@ -1317,7 +1663,31 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
         && mvAnalysis.envelopePeak >= 0.45
         && mvAnalysis.envelopeVoteOffset != null
         && Math.abs(mvAnalysis.envelopeVoteOffset - envOffset) <= 5
+      // 分段锚点统计：采纳路径的分段锚点与模型特征共用一次计算（现场改编区
+      // 讲段/即兴/变速在全局锚处相关塌陷；锚点统计也是裁决模型的特征之一）。
+      const evidenceAnchors = mvRmsForSupport && songRmsForSupport
+        ? envelopeSegmentAnchors(mvRmsForSupport, songRmsForSupport, 50, envOffset)
+        : []
+      const evidenceInput = buildEvidenceModelInput({
+        peak: mvAnalysis.envelopePeak ?? 0,
+        prom: mvAnalysis.envelopeProminence ?? 0,
+        supportRatio: support.ratio,
+        supportSegments: support.segments,
+        voteOffset: mvAnalysis.envelopeVoteOffset,
+        envOffset,
+        songDuration: songAnalysis.duration,
+        mvDuration: mvAnalysis.duration,
+        anchors: evidenceAnchors,
+      })
       if (strongEnvelope || structureConfirmed || voteConsistent) {
+        // 模型否决（veto）：闸门放行但证据组合分极低且 peak<0.6（非同录音铁证）
+        // → 拒绝。训练标定（206 金样本）：砍 10/12 误放（翻唱/混剪错放 → 歌词错位），
+        // 0 漏救。同录音铁证（peak≥0.6）不受否决——那是最强的独立证据。
+        const evidenceScore = scoreEvidenceAlignment(evidenceInput)
+        if (!strongEnvelope && evidenceScore < EVIDENCE_MODEL_VETO_SCORE && mvAnalysis.envelopePeak < 0.6) {
+          mvLog(`证据模型否决：${input.bvid} 闸门${strongEnvelope ? '同录音' : structureConfirmed ? '结构证实' : '投票一致'}放行但组合分=${evidenceScore.toFixed(3)}<${EVIDENCE_MODEL_VETO_SCORE}（peak=${mvAnalysis.envelopePeak.toFixed(2)} 支持=${support.ratio.toFixed(2)} 投票Δ=${evidenceInput.voteOffDelta.toFixed(1)}s 锚=${evidenceInput.anchors}）→ 自由播放（疑似翻唱/混剪错放）`)
+          return null
+        }
         // 投票真值仲裁（分档，6248 对 votes-cache 标定）：
         //   · 峰<0.45 → 无条件信投票（簇票==2 弱簇矛盾时真值 71% 在投票侧，全量验证 11:0）
         //   · 峰 0.45-0.6 → 需支持率<0.45（此档矛盾对真值多在峰侧——簇票≥3 时投票≈峰影子，
@@ -1345,27 +1715,72 @@ async function detectViaBeats(input: MvAlignmentInput, signal?: AbortSignal): Pr
         // 提取段相关 ≥0.5 的局部偏移锚（跳变防护内含），改编区由相邻锚插值过渡；
         // 全曲均匀贴合（锚点全部≈全局锚）或锚点过少时省略 segments（与常数无差别，省序列化）。
         let segments: MvAlignmentSegment[] | undefined
-        if (mvRmsForSupport && songRmsForSupport) {
-          const anchors = envelopeSegmentAnchors(mvRmsForSupport, songRmsForSupport, 50, chosenOffset)
-          if (anchors.length >= 2) {
-            const driftSpread = Math.max(...anchors.map((a) => a.offsetSeconds)) - Math.min(...anchors.map((a) => a.offsetSeconds))
-            if (driftSpread >= 0.3) {
-              segments = anchors.map((a) => ({ songTime: Math.round(a.songTime * 10) / 10, offsetSeconds: Math.round(a.offsetSeconds * 100) / 100, correlation: Math.round(a.correlation * 100) / 100 }))
-              mvLog(`分段锚点：${input.bvid} ${anchors.length} 个锚（跨度 ${driftSpread.toFixed(2)}s）[${anchors.map((a) => `${a.songTime.toFixed(0)}s→${a.offsetSeconds.toFixed(1)}s(r${a.correlation.toFixed(2)})`).join(' ')}]`)
-            }
+        if (evidenceAnchors.length >= 2) {
+          const driftSpread = Math.max(...evidenceAnchors.map((a) => a.offsetSeconds)) - Math.min(...evidenceAnchors.map((a) => a.offsetSeconds))
+          if (driftSpread >= 0.3) {
+            segments = evidenceAnchors.map((a) => ({ songTime: Math.round(a.songTime * 10) / 10, offsetSeconds: Math.round(a.offsetSeconds * 100) / 100, correlation: Math.round(a.correlation * 100) / 100 }))
+            mvLog(`分段锚点：${input.bvid} ${evidenceAnchors.length} 个锚（跨度 ${driftSpread.toFixed(2)}s）[${evidenceAnchors.map((a) => `${a.songTime.toFixed(0)}s→${a.offsetSeconds.toFixed(1)}s(r${a.correlation.toFixed(2)})`).join(' ')}]`)
           }
         }
         mvLog(`拍点网格对齐（包络证实）：${input.bvid} 偏移=${chosenOffset.toFixed(2)}s peak=${mvAnalysis.envelopePeak!.toFixed(2)} 突出度=${(mvAnalysis.envelopeProminence ?? 0).toFixed(2)} 段落支持=${support.ratio.toFixed(2)}（${support.segments} 段${vocalSupplement ? '，人声频段' : ''}）→ conf=${confidence.toFixed(2)}${strongEnvelope ? '（同录音）' : '（结构证实）'}${arbitrated ? '（投票仲裁）' : ''}${segments ? ` 分段=${segments.length}` : ''}`)
         return { offsetSeconds: Math.round(chosenOffset * 100) / 100, confidence, method: 'envelope', prominence: Math.round((mvAnalysis.envelopeProminence ?? 0) * 100) / 100, ...(segments ? { segments } : {}) }
       }
-      // 包络与结构都不支持：拍点网格偏移是循环自证抛硬币 → 不对齐
-      mvLog(`拍点网格拒绝：${input.bvid} 包络 peak=${mvAnalysis.envelopePeak!.toFixed(2)} 段落支持=${support.ratio.toFixed(2)} 偏移=${envOffset.toFixed(2)}s（范围合规=${offsetInRange}）→ 自由播放（循环自证分不可信）`)
+      // 包络与结构都不支持：拍点网格偏移是循环自证抛硬币 → 不对齐。
+      // 模型翻案（rescue）保险带：规则闸门拒绝但证据组合分高（≥0.7）且投票-峰
+      // 偏移一致（≤1.5s，排除"峰落在重复段上"的抛硬币形态）→ 弱对齐采纳，conf
+      // 封顶 0.55（同步层追频容差自动放宽到 1.2s）。本标定集（206 金样本）上闸门
+      // 拒绝子集无漏救——该分支覆盖的是标定集未见的组合，故三重门槛从严。
+      const rescueScore = scoreEvidenceAlignment(evidenceInput)
+      if (rescueScore >= EVIDENCE_MODEL_RESCUE_SCORE
+        && offsetInRange
+        && mvAnalysis.envelopeVoteOffset != null
+        && Math.abs(mvAnalysis.envelopeVoteOffset - envOffset) <= EVIDENCE_MODEL_RESCUE_MAX_VOTE_DELTA) {
+        // 锚点仲裁：翻案是"规则闸门拒绝后的非常规采纳"，偏移再用段锚中位复核——
+        // 有强锚（≥2 个锚贴同一偏移 ±2s）且与峰偏移矛盾（>2s）时信锚（多段独立
+        // 找到的偏移比全曲峰更能对抗重复结构假峰）；锚与峰一致或无锚 → 用峰偏移。
+        let rescueOffset = envOffset
+        const strongAnchors = evidenceAnchors.filter((a) => a.correlation >= 0.5)
+        if (strongAnchors.length >= 2) {
+          const anchorMedian = [...strongAnchors.map((a) => a.offsetSeconds)].sort((x, y) => x - y)[Math.floor(strongAnchors.length / 2)]
+          if (Math.abs(anchorMedian - envOffset) > 2) {
+            mvLog(`翻案锚点仲裁：${input.bvid} 峰偏移=${envOffset.toFixed(2)}s 与 ${strongAnchors.length} 个强锚中位=${anchorMedian.toFixed(2)}s 矛盾 → 信锚`)
+            rescueOffset = anchorMedian
+          }
+        }
+        mvLog(`证据模型翻案：${input.bvid} 闸门拒绝但组合分=${rescueScore.toFixed(3)}≥${EVIDENCE_MODEL_RESCUE_SCORE} 且投票一致（Δ=${Math.abs(mvAnalysis.envelopeVoteOffset! - envOffset).toFixed(2)}s）→ 弱对齐采纳 offset=${rescueOffset.toFixed(2)}s conf=0.55`)
+        return { offsetSeconds: Math.round(rescueOffset * 100) / 100, confidence: 0.55, method: 'envelope', source: 'model-rescue', prominence: Math.round((mvAnalysis.envelopeProminence ?? 0) * 100) / 100 }
+      }
+      mvLog(`拍点网格拒绝：${input.bvid} 包络 peak=${mvAnalysis.envelopePeak!.toFixed(2)} 段落支持=${support.ratio.toFixed(2)} 偏移=${envOffset.toFixed(2)}s（范围合规=${offsetInRange}${rescueScore < EVIDENCE_MODEL_RESCUE_SCORE ? ` 模型分=${rescueScore.toFixed(2)}` : ' 模型分过线但投票不一致'}）→ 自由播放（循环自证分不可信）`)
       return null
     }
     // 无包络证据（歌曲包络解码失败等）：只信网格-MV onset 贴合度，门槛提到入库线
     if (!result || mvAnalysis.confidence < MIN_ALIGNMENT_CONFIDENCE) {
       mvLog(`拍点对齐拒绝：${input.bvid} 无包络证据且网格贴合度 ${(mvAnalysis?.confidence ?? 0).toFixed(3)} < ${MIN_ALIGNMENT_CONFIDENCE} → 尝试媒体元素包络`)
       return mediaEnvelopeAlignmentFallback(songUrl, videoUrl, signal)
+    }
+    // 主路径模型否决：Python/Electron 真实节拍检测下 matchRatio/下标差已做双判据，
+    // 但「不同录音的两个规则节拍网格侥幸互中」（EDM/流行曲常态，复算数据 1020 组
+    // 双弱组合是风险池）仍可能全绿。证据模型作为最后一道独立否决：组合分极低且
+    // 峰<0.6（非同录音）时拒绝——无离线标定数据，只上 veto 不上 rescue（保守）。
+    if (mvRmsForSupport && songRmsForSupport && (mvAnalysis.envelopePeak ?? 0) < 0.6) {
+      const mainSupport = envelopeSegmentSupport(mvRmsForSupport, songRmsForSupport, 50, result.offsetSeconds)
+      const mainPathAnchors = envelopeSegmentAnchors(mvRmsForSupport, songRmsForSupport, 50, result.offsetSeconds)
+      const mainInput = buildEvidenceModelInput({
+        peak: mvAnalysis.envelopePeak ?? 0,
+        prom: mvAnalysis.envelopeProminence ?? 0,
+        supportRatio: mainSupport.ratio,
+        supportSegments: mainSupport.segments,
+        voteOffset: mvAnalysis.envelopeVoteOffset,
+        envOffset: result.offsetSeconds,
+        songDuration: songAnalysis.duration,
+        mvDuration: mvAnalysis.duration,
+        anchors: mainPathAnchors,
+      })
+      const mainScore = scoreEvidenceAlignment(mainInput)
+      if (mainScore < EVIDENCE_MODEL_VETO_SCORE) {
+        mvLog(`主路径模型否决：${input.bvid} 节拍网格放行但组合分=${mainScore.toFixed(3)}<${EVIDENCE_MODEL_VETO_SCORE}（peak=${(mvAnalysis.envelopePeak ?? 0).toFixed(2)} 支持=${mainSupport.ratio.toFixed(2)}）→ 自由播放（不同录音的规则节拍侥幸互中）`)
+        return null
+      }
     }
     return { ...result, confidence: Math.min(result.confidence, mvAnalysis.confidence) }
   }

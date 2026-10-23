@@ -51,10 +51,13 @@ export interface SeamlessJoinDeps {
 export interface SeamlessJoinController {
   /** 专辑播放预热：结束前 20s 静音预启动 standby 并缓存前 10s（幂等） */
   warmup: () => void
-  /** 边界调度：remaining ≤1s 时的三方案分流（arm 首选 / 备选 timer / 兜底 timer） */
-  scheduleBoundary: (ctx: { active: HTMLAudioElement; remaining: number; albumPlayback: boolean }) => void
-  /** source ended 时执行首选拼接；返回 true = 已处理（调用方应 return） */
-  onEnded: (standby: HTMLAudioElement | null) => boolean
+  /** 边界调度：remaining ≤1s 时的三方案分流（arm 首选 / 备选 timer / 兜底 timer）。
+   *  remaining 已由调用方扣掉尾部静音（有声内容实际剩余）；joinOffset 为
+   *  standby 起播位置（introSilence），由调用方从分析缓存算好传入。 */
+  scheduleBoundary: (ctx: { active: HTMLAudioElement; remaining: number; albumPlayback: boolean; joinOffset?: number }) => void
+  /** source ended 时执行首选拼接；返回 true = 已处理（调用方应 return）。
+   *  joinOffset：standby 起播位置（introSilence，秒），缺省 0（完整从头）。 */
+  onEnded: (standby: HTMLAudioElement | null, joinOffset?: number) => boolean
   /** 清除边界调度 timer（handleEnded 竞态兜底） */
   cancelBoundaryTimer: () => void
   /** 预热是否已完成（前 10s 已缓存、回拨 0 停住） */
@@ -155,9 +158,11 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
   }
 
   // ── 边界调度：remaining ≤1s 时的三方案分流 ──
-  const scheduleBoundary = (ctx: { active: HTMLAudioElement; remaining: number; albumPlayback: boolean }) => {
+  const scheduleBoundary = (ctx: { active: HTMLAudioElement; remaining: number; albumPlayback: boolean; joinOffset?: number }) => {
     if (!deps.isGaplessEnabled() || boundaryScheduled || deps.hasActiveTransition()) return
     const { active, remaining, albumPlayback } = ctx
+    // standby 起播位置（introSilence）：源曲 ended 提前量与 standby seek 共用
+    const joinOffset = Math.max(0, Math.min(2, ctx.joinOffset || 0))
     const scheduledSource = active
     const scheduledStandby = deps.getStandbyAudio()
 
@@ -176,10 +181,12 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
     boundaryScheduled = true
 
     if (albumPlayback && standbySeamlessReady) {
-      // ── 首选：无缝拼接（头尾都不掐）──
+      // ── 首选：无缝拼接（源曲烧死的尾静音不播，standby 跳过烧死的前静音）──
       armed = true
       prerolled = false
-      debugLog('⚡ [Gapless] 首选：standby 已缓存就绪，source 完整播完后直接拼接下一首开头')
+      debugLog(joinOffset > 0
+        ? `⚡ [Gapless] 首选：standby 已缓存就绪，源曲播到有声内容结束（提前 ${joinOffset.toFixed(2)}s 内接上），standby 从 ${joinOffset.toFixed(2)}s 起播`
+        : '⚡ [Gapless] 首选：standby 已缓存就绪，source 完整播完后直接拼接下一首开头')
 
       // 高频监测：source 剩余 PREROLL 秒时静音预启动 standby，
       // 让切换瞬间 play() 已在解码，消除 ended→play 的启动延迟。
@@ -190,13 +197,14 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
         if (liveSource !== scheduledSource || liveSource.paused) return  // 已被取消/暂停/切歌
         if (prerolled) return  // 已预启动，停止监测
         const liveRemaining = (liveSource.duration || 0) - liveSource.currentTime
-        if (liveRemaining <= GAPLESS_SEAMLESS_PREROLL_SECONDS) {
+        if (liveRemaining <= Math.max(GAPLESS_SEAMLESS_PREROLL_SECONDS, joinOffset)) {
           prerolled = true
           const standbyAudio = deps.getStandbyAudio()
           try {
             deps.setDeckGain(deps.getStandbyGain(), standbyAudio, 0)
             if (standbyAudio) {
-              standbyAudio.currentTime = 0
+              // 预启动直接落在 joinOffset（introSilence）：ended 提前触发时无需再 seek
+              standbyAudio.currentTime = joinOffset
               void standbyAudio.play().catch(() => {
                 // 预启动被拦截/失败：放弃首选，兜底 timer 回退备选
                 debugLog('⚠️ [Gapless] 首选预启动失败，等待兜底回退备选')
@@ -239,6 +247,7 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
       // ── 第二种方案：60ms 淡入淡出 ──
       // 非专辑场景默认走这里（无需提前缓存）；专辑场景 standby 未就绪时兜底。
       // BUG-A2：不再提前 -12ms 丢弃原曲尾部，delayMs 取 remaining*1000 让原曲完整播完。
+      // remaining 已由调用方扣掉尾部静音（有声内容实际剩余），提前交叉是期望行为。
       const delayMs = Math.max(0, remaining * 1000)
       deps.setBoundaryTimer(window.setTimeout(() => {
         deps.setBoundaryTimer(null)
@@ -259,8 +268,8 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
     }
   }
 
-  // ── source ended：首选拼接（头尾都不掐）──
-  const onEnded = (standby: HTMLAudioElement | null): boolean => {
+  // ── source ended：首选拼接（源曲尾静音不播，standby 跳过前静音）──
+  const onEnded = (standby: HTMLAudioElement | null, joinOffset = 0): boolean => {
     if (!armed) return false
     armed = false
     prerolled = false
@@ -268,6 +277,7 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
     warmupDone = true        // 视为完成，无需再预热
     clearPrerollPoll()
     clearWarmupPoll()
+    const offset = Math.max(0, Math.min(2, joinOffset || 0))
 
     const standbyBufferedOk = Boolean(
       standby?.buffered.length
@@ -292,14 +302,16 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
         debugLog('⚡ [Gapless] 首选拼接优先：先停用 AlbumGapless 外部 deck')
         deps.resetGaplessIntegration()
       }
-      debugLog('⚡ [Gapless] 首选拼接：source 完整播完，standby 无缝接上（从头开始）')
+      debugLog(offset > 0
+        ? `⚡ [Gapless] 首选拼接：源曲有声内容播完（跳过烧死的尾静音），standby 从 ${offset.toFixed(2)}s 起播`
+        : '⚡ [Gapless] 首选拼接：source 完整播完，standby 无缝接上（从头开始）')
       void (async () => {
         try {
           deps.setDeckGain(deps.getStandbyGain(), standby, 0)
           if (standby.paused) {
             await standby.play().catch(() => { throw new Error('standby play failed') })
           }
-          standby.currentTime = 0
+          standby.currentTime = offset
           await waitForSeek(standby)
           if (standby.paused) {
             // 拼接前被并发操作暂停：ended 已被本方法消费（调用方直接 return），
@@ -332,6 +344,12 @@ export function createSeamlessJoinController(deps: SeamlessJoinDeps): SeamlessJo
             seamlessTransition: true,
             transitionStrategy: 'gapless',
           })
+          // 提前拼接（offset>0）：源曲尚未自然 ended（还在放烧死的尾静音），必须显式
+          // 暂停——置 running-transition **之后** pause，handlePause 的 emit 抑制分支
+          // 会接住这个事件，UI 不会闪暂停态；正常 ended 路径源 deck 已自然停止，幂等。
+          if (offset > 0) {
+            try { deps.getActiveAudio()?.pause() } catch { /* 元素可能已被释放 */ }
+          }
           deps.commitTransition('gapless', standby.currentTime, deps.getRevision())
           // commitTransition 有多个静默守卫分支（执行版本不匹配 / 缺目标音频或元数据），
           // 被拦时不抛错也不回退，而这条路径没有设置看门狗截止 —— 状态若停在

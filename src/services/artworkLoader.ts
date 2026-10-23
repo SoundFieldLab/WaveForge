@@ -83,16 +83,22 @@ function scheduleArtworkFailureRetry(): void {
   }, delay)
 }
 
+/** 封面加载硬超时：本地代理高峰/并发挤压时 Image 可能长时间无响应，没有超时
+ *  会把 pendingLoads 去重键上的所有后续调用（含组件退避重试）挂在同一条死链上永不返回。 */
+const LOAD_TIMEOUT_MS = 10_000
+
 function loadDecoded(url: string, priority: ArtworkPriority, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const image = new Image()
     image.decoding = 'async'
     image.fetchPriority = priority === 'critical' ? 'high' : priority === 'deferred' ? 'low' : 'auto'
     let settled = false
+    let timer: number | null = null
     const cleanup = () => {
       image.onload = null
       image.onerror = null
       signal.removeEventListener('abort', abort)
+      if (timer !== null) window.clearTimeout(timer)
     }
     const finish = (callback: () => void) => {
       if (settled) return
@@ -107,6 +113,12 @@ function loadDecoded(url: string, priority: ArtworkPriority, signal: AbortSignal
       })
     }
     signal.addEventListener('abort', abort, { once: true })
+    timer = window.setTimeout(() => {
+      finish(() => {
+        image.src = ''
+        reject(new Error('Artwork load timed out'))
+      })
+    }, LOAD_TIMEOUT_MS)
     image.onload = () => {
       const decoded = typeof image.decode === 'function' ? image.decode().catch(() => undefined) : Promise.resolve()
       void decoded.then(() => finish(() => {
@@ -179,14 +191,18 @@ export function preloadArtwork(src: string, options: ArtworkLoadOptions = {}): P
   const memoryKey = cacheKey || url
   const cached = imageCache.get(memoryKey)
   if (cached) return Promise.resolve(cached)
+  const priority = options.priority || 'visible'
+  // critical 优先级豁免失败 TTL：切歌/进播放页是用户正盯着等的那张图，
+  // 早期一次失败（服务预热/瞬时限流）不应把这次加载秒拒成「再等 4s 退避」——
+  // 没有豁免时切歌后的首屏背景会持续显示上一曲画面（实测残留 4-6s）。
   const failedAt = failedLoads.get(memoryKey) || 0
-  if (Date.now() - failedAt < FAILURE_TTL_MS) return Promise.reject(new Error('Artwork is temporarily unavailable'))
+  if (priority !== 'critical' && Date.now() - failedAt < FAILURE_TTL_MS) return Promise.reject(new Error('Artwork is temporarily unavailable'))
   const existing = pendingLoads.get(memoryKey)
   if (existing) return existing
 
-  const priority = options.priority || 'visible'
   const defaultRetries = priority === 'deferred' ? 0 : 1
   const attempts = Math.max(1, Math.min(2, (options.retries ?? defaultRetries) + 1))
+
   // 缓存写入的代次快照：只在登录态变化/清缓存时作废在途写入；
   // 失败重试的 epoch 脉冲不在此列（见 cacheGeneration 注释）。
   const startedAtGeneration = cacheGeneration

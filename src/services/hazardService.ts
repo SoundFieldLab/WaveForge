@@ -1,4 +1,6 @@
-﻿export interface TyphoonForecastPoint {
+﻿import { getApiBase } from './apiConfig'
+
+export interface TyphoonForecastPoint {
   agency: string
   hours: number
   time: string
@@ -83,7 +85,9 @@ export interface EarthquakeLocationRisk {
   message: string
 }
 
-const API_BASE = '${getApiBase()}'
+// 必须 import getApiBase（而非字符串内插）——此前写成单引号 '${getApiBase()}',
+// 请求打向字面量 URL 导致台风/地震数据永远加载失败、面板反复重试闪烁。
+const API_BASE = getApiBase()
 const MEMORY_CACHE_TTL = 2 * 60 * 1000
 const REQUEST_TIMEOUT_MS = 35_000
 let cachedSnapshot: HazardSnapshot | null = null
@@ -141,7 +145,10 @@ export async function ensureHazardSnapshot(options: { forceRefresh?: boolean; si
         typhoons: normalized.typhoons || cachedSnapshot?.typhoons || null,
         earthquakes: normalized.earthquakes || cachedSnapshot?.earthquakes || null,
       }
-      if (generation === requestGeneration) {
+      // 部分失败（某源为 null 且无旧缓存兜底）不写内存缓存：否则接下来 2 分钟内的
+      // 自动重试只会拿到同一份残缺快照，面板永远停在"尚未加载"。
+      const partialFailure = (!merged.typhoons || !merged.earthquakes) && Boolean(normalized.errors.typhoons || normalized.errors.earthquakes)
+      if (generation === requestGeneration && !partialFailure) {
         cachedSnapshot = merged
         cachedAt = Date.now()
       }

@@ -47,7 +47,7 @@ import {
   getAudioQualityRequest,
   resolvedQualityDisplayName,
 } from './audioQualitySettings'
-import { getAppleMusicLyrics, isAppleMusicConfigured } from './appleMusic'
+import { getAppleMusicLyrics, getAppleMusicSettings, isAppleMusicConfigured } from './appleMusic'
 
 const isYrcTimestampFragment = (value: string) => {
   const trimmed = value.trim()
@@ -724,9 +724,15 @@ export async function searchSuggest(keywords: string, platform: MusicPlatform = 
       return suggestions
     }
     
-    // kugou / spotify 无联想端点：返回空而不是网易联想词（此前 platform 参数被忽略，
-    // 酷狗/Spotify 页签下拉显示的是网易联想词，点击后却触发本平台搜索——数据串台）
-    if (platform === 'kugou' || platform === 'spotify') return []
+    // 酷狗：派生联想（songsearch 前缀搜索聚拢歌名/歌手/专辑，2026-10-22 实装；
+    // 上游无公开 suggest 端点，详见 kugouService.fetchKugouSearchSuggest 注释）
+    if (platform === 'kugou') {
+      const { fetchKugouSearchSuggest } = await import('./kugouService')
+      return (await fetchKugouSearchSuggest(keywords, 8)).map(item => ({ keyword: item.keyword, type: 'song' as const }))
+    }
+    // Spotify 无联想端点：返回空而不是网易联想词（此前 platform 参数被忽略，
+    // Spotify 页签下拉显示的是网易联想词，点击后却触发本平台搜索——数据串台）
+    if (platform === 'spotify') return []
     // 网易云音乐
     const response = await fetchT(`${API_BASE}/netease/search/suggest?keywords=${encodeURIComponent(keywords)}`)
     const data = await response.json()
@@ -967,6 +973,19 @@ export async function searchAlbums(keywords: string, platform: MusicPlatform = '
 
 // 获取歌曲播放URL（支持平台）。attemptLimit：缓存代际失效后的重入上限——
 // auth/音质事件短窗口内连续 clear 会让每层重入再次过期，无上限会形成请求风暴
+/** 酷狗概念版凭据读取（取流用）：与 kugouService.getKugouConceptCredential 同一存储键，
+ *  但不 import kugouService（musicApi ← kugouService 会成环）。凭据缺失/损坏返回 null。 */
+function getKugouConceptCredentialForUrl(): Record<string, unknown> | null {
+  try {
+    const raw = getSecureToken('kugou_concept_credential') || ''
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && parsed.token && parsed.userid ? parsed : null
+  } catch {
+    return null
+  }
+}
+
 export async function getSongUrl(id: number | string, platform: MusicPlatform = 'netease', attemptLimit = 2, song?: Song | null): Promise<string | null> {
   ensureSongUrlListenersRegistered()
   if (!String(id).trim()) return null
@@ -1010,14 +1029,60 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         apiUrl = `${API_BASE}/qq/song/url?mid=${encodeURIComponent(String(id))}&quality=${encodeURIComponent(preference)}&vip=${isVip ? 'true' : 'false'}${cookie ? '&cookie=' + encodeURIComponent(cookie) : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'kugou') {
-        // 酷狗：签名网关四层策略（H5→Mobile→Web），付费歌曲返回 null → 上层降级网易云/QQ
-        // cookie/音质档此前被丢弃：服务端只认 query cookie，无 cookie 时 H5/Web 层被
-        // playbackReady 拦截，VIP 曲只剩免费 Mobile 直链；音质偏好对酷狗完全无效。
+        // 酷狗：概念版凭据优先（POST /concept/song/url，/v5/url 通道）。
+        // 2026-10-22 实测：H5 四层策略对付费曲目（PayType=3）0/10 全部 url_unavailable，
+        // 概念版 /v5/url 10/10 全部命中——付费歌找不到音源的根因就是主链路从不走概念版通道。
+        // 有概念版凭据先走它；失败/无凭据再退 H5 四层 GET（免费曲/网页 cookie 兜底）。
+        const conceptCredential = getKugouConceptCredentialForUrl()
+        if (conceptCredential) {
+          const { preference } = getAudioQualityRequest('kugou')
+          const kugouQuality = preference === 'auto'
+            ? ''
+            : ({ standard: 'standard', high: 'exhigh', 'very-high': 'exhigh', lossless: 'lossless', 'hi-res': 'hires' } as Record<string, string>)[preference] || ''
+          try {
+            const controller = new AbortController()
+            const timeoutId = window.setTimeout(() => controller.abort(), SONG_URL_FETCH_TIMEOUT)
+            let conceptResp: Response
+            try {
+              conceptResp = await fetch(`${API_BASE}/kugou/concept/song/url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  credential: conceptCredential,
+                  hash: String(id),
+                  ...(kugouQuality ? { quality: kugouQuality } : {}),
+                  // 播放记录上报要 albumAudioId（=mixsongid），歌曲对象里有就带上
+                  ...(song?.kugouMixSongId ? { albumAudioId: song.kugouMixSongId } : {}),
+                  ...(song?.album?.mid ? { albumId: String(song.album.mid) } : {}),
+                }),
+                signal: controller.signal,
+              })
+            } finally {
+              window.clearTimeout(timeoutId)
+            }
+            const conceptData = await conceptResp.json().catch(() => ({}))
+            if (conceptResp.ok && conceptData?.url) {
+              if (requestGeneration !== songUrlCacheGeneration) {
+                if (attemptLimit <= 0) return null
+                return getSongUrl(id, platform, attemptLimit - 1)
+              }
+              if (conceptData?.level) setLastResolvedQuality(platform, String(conceptData.level), id)
+              // 与 H5 成功路径同款：写入 getSongUrl 层缓存（重播同曲 5 分钟内不重复签名）。
+              // 概念版 URL 是带时效签名的 CDN 直链，TTL 与通用缓存一致（其它平台无 expi 回读时同为默认值）。
+              cacheSongUrl(cacheKey, conceptData.url)
+              return conceptData.url
+            }
+          } catch { /* 概念版通道失败 → 退 H5 */ }
+        }
+        // 概念版不可用/失败：H5 四层策略（H5→Mobile→Web），免费曲/网页 cookie 通道。
         const kgCookie = getSecureToken('kugou_cookie') || ''
-        // 前端偏好 → 服务端选档枚举（server/kugou-gateway normalizeQualityPreference）；
-        // auto 不传参（服务端默认 standard，与旧行为一致）
+        // 前端偏好 → 服务端选档枚举（server/kugou-gateway normalizeQualityPreference）。
+        // auto 不传参：服务端按「自动最高」处理（请求 flac 档，从响应回读实际档）——
+        // 此前 auto 与未设置混同被服务端落成 128k，登录了也只放标准音质。
         const { preference } = getAudioQualityRequest('kugou')
-        const kugouQuality = ({ standard: 'standard', high: 'exhigh', 'very-high': 'exhigh', lossless: 'lossless', 'hi-res': 'hires' } as Record<string, string>)[preference] || ''
+        const kugouQuality = preference === 'auto'
+          ? ''
+          : ({ standard: 'standard', high: 'exhigh', 'very-high': 'exhigh', lossless: 'lossless', 'hi-res': 'hires' } as Record<string, string>)[preference] || ''
         apiUrl = `${API_BASE}/kugou/song/url?hash=${encodeURIComponent(String(id))}${kugouQuality ? `&quality=${kugouQuality}` : ''}${kgCookie ? '&cookie=' + encodeURIComponent(kgCookie) : ''}`
         readUrl = data => data.url || null
       } else if (platform === 'soda') {
@@ -1035,8 +1100,21 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         }`
         readUrl = data => data.url || null
       } else if (platform === 'spotify') {
-        // Spotify：未登录无自源音源，返回 null → 上层降级网易云/QQ
-        return null
+        // Spotify：优先 librespot 直播通道（Premium；主进程发 waveforge-spotify:// key），
+        // 通道不可用（未装 prebuilt / 未登录 / 免费号无 CDN 音频）→ null → 上层降级网易云/QQ。
+        // 借源降级不在这里做（needsCarrier 分支负责），这里只决定"自源有没有"。
+        if (!window.electron?.spotifyAudioIssue) return null
+        try {
+          const { qualityPreferenceScoreOf } = await import('./carrierResolver')
+          const score = qualityPreferenceScoreOf('spotify')
+          const quality = score >= 90 ? 'lossless' : score >= 70 ? 'high' : 'standard'
+          const issued = await window.electron.spotifyAudioIssue(String(id), quality)
+          if (issued?.ok && issued.url) return issued.url
+          // UNPLAYABLE（免费号/无版权）也降级：与通道不可用同路径
+          return null
+        } catch {
+          return null
+        }
       } else {
         const cookie = getSecureToken('netease_cookie') || ''
         const fallbackSetting = localStorage.getItem('crossPlatformFallbackEnabled')
@@ -1073,6 +1151,12 @@ export async function getSongUrl(id: number | string, platform: MusicPlatform = 
         try {
           if (platform === 'qq' && data?.actualQuality) setLastResolvedQuality(platform, String(data.actualQuality), id)
           else if (platform === 'netease' && data?.data?.[0]?.level) setLastResolvedQuality(platform, String(data.data[0].level), id)
+          // 酷狗：kugou-gateway 从响应探测的实际档（standard/exhigh/lossless/hires）。
+          // 此前不记录 →「自动」括号恒为空白；现在与 QQ/网易云同口径。
+          else if (platform === 'kugou' && data?.level) setLastResolvedQuality(platform, String(data.level), id)
+          // 汽水：qishui-api 的 sodaPlaybackLevel（standard/exhigh/lossless/hires，从流标签+码率推断）。
+          // 同样此前不记录 →「自动」括号空白。
+          else if (platform === 'soda' && data?.level) setLastResolvedQuality(platform, String(data.level), id)
         } catch { /* 记录失败不影响播放 */ }
       }
       // 超级会员专享档被上游拒绝（服务端已自动回落到可用最高音质）：如实提示一次
@@ -1512,8 +1596,11 @@ function parseLyric(lyricText: string): LyricLine[] {
   // timeRegexFirst（无 /g）：exec 取行内第一个时间戳定位行起点；
   // timeRegexAll（/g）：replace 删净全部时间戳——合唱 LRC 一行可带多个时间戳，
   // 无 /g 只删第一个会让正文残留 [01:20.00] 垃圾并进 30 天缓存
-  const timeRegexFirst = /\[((\d{2}):(\d{2})\.(\d{2,3}))\]/
-  const timeRegexAll = /\[((\d{2}):(\d{2})\.(\d{2,3}))\]/g
+  // ⚠️ 捕获组必须是 3 个（分/秒/毫秒）—— 50f2ea4 一度改成外层多包一层（4 组），
+  // 但取值下标没跟着动（match[1]/[2]/[3]），导致 match[1]=整体、match[2]=分、match[3]=秒，
+  // 解析出的时间全部塌到 0~1s 内 → 翻译/罗马音贪心匹配整首失败（真机 2026-10-19 定位）
+  const timeRegexFirst = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/
+  const timeRegexAll = /\[(\d{2}):(\d{2})\.(\d{2,3})\]/g
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -1729,6 +1816,8 @@ export async function getLyrics(
     return [enabled, lang, storefront, loggedIn].join(':')
   })()
   const lyricsPolicyKey = [
+    // v9：与 App 层同版本——parseLyric 时间正则修复后，结果级缓存的旧行时间全坏，必须换 key
+    'v9',
     typeof localStorage !== 'undefined'
       ? [
         localStorage.getItem('thirdPartyLyricsEnabled') || 'default',
@@ -1834,7 +1923,17 @@ export async function getLyrics(
     const platformSourcePromise = isApplePlatform
       ? Promise.resolve([])
       : platform === 'spotify'
-        ? Promise.resolve([])
+        ? (async (): Promise<LyricLine[]> => {
+          // Spotify 官方歌词：partner 桥的 color-lyrics（行级时间轴）。2026-10-22 接入——
+          // 此前被误标为"无官方歌词接口"而硬编码空，桥会话（OAuth 播种）登录后即可用。
+          const { spotifyPartnerLyrics } = await import('./spotifyPartnerClient')
+          const colorLyrics = await spotifyPartnerLyrics(String(id)).catch(() => null)
+          if (!colorLyrics || colorLyrics.lines.length === 0) return []
+          return colorLyrics.lines.map(line => ({
+            time: (Number(line.startMs) || 0) / 1000,
+            text: String(line.words ?? ''),
+          }))
+        })()
         : getPlatformLyrics(id, platform, songName, artistName)
     const amllSourcePromise = isApplePlatform
       ? Promise.resolve([])
@@ -1844,7 +1943,10 @@ export async function getLyrics(
       { name: platformSourceName, promise: platformSourcePromise },
       { name: 'AMLL TTML DB', promise: amllSourcePromise },
       // Apple Music：仅在用户已完成 Apple 登录时才请求（未登录默认关闭，不替换平台歌词）
-      ...(isAppleMusicConfigured()
+      // Apple Music 源：登录态走官方 AMP（逐字/和声/对唱全量）；
+      // 未登录但开启 AM 开关时走服务端免登录源（WebPlayKid token，getAppleMusicLyrics
+      // 内部只采纳特殊歌词 agent/x-bg）——与其他平台"检测到 AM 特殊封面自动换封面"同策略
+      ...(getAppleMusicSettings().enabled
         ? [{ name: 'Apple Music', promise: songName && artistName
           ? getAppleMusicLyrics(songName, artistName, duration, isApplePlatform ? { songId: id } : undefined)
           : Promise.resolve([]) }]
@@ -2117,6 +2219,21 @@ export async function getLyrics(
         currentLyrics = merged.lyrics
         if (merged.attached > 0) {
           debugLog(`  [结构补挂] 从 AMLL 补挂演唱者/背景和声到骨架（${baseResult.source}）：和声 ${merged.attached} 处，移除重复行 ${merged.removed}`)
+        }
+      }
+      // ── 演唱者（agent/对唱）补挂：Apple 源专属结构，落选骨架时不丢弃 ──
+      // 对唱分栏/演唱者着色依赖 line.agent/isDuet。AMLL 的 ncm/qq 目录社区打轴通常
+      // 不标 agent，而 **Apple 官方 TTML（syllable-lyrics / am-lyrics）带完整 agent**——
+      // 但 Apple 源在评分竞争中常落选骨架（默认 AMLL 优先 +35）。骨架无 agent 时，
+      // 把 Apple 源的 agent/isDuet 按「归一化文本 + 时间邻近」补挂到骨架行，
+      // 否则"社区库明确标注了对唱的歌在我们软件上没有特殊歌词效果"。
+      const appleResult = successfulResults.find(result => result.source === 'Apple Music')
+      const skeletonHasAgent = currentLyrics.some(line => line.agent || line.agentId)
+      if (appleResult && appleResult !== baseResult && !skeletonHasAgent
+        && appleResult.lyrics.some(line => line.agent || line.agentId)) {
+        const agentAttached = attachAgentsFromSource(currentLyrics, appleResult.lyrics)
+        if (agentAttached > 0) {
+          debugLog(`  [结构补挂] 从 Apple 源补挂演唱者/对唱到骨架（${baseResult.source}）：agent ${agentAttached} 行`)
         }
       }
 
@@ -2430,6 +2547,69 @@ const stripBackgroundParens = (text: string): string =>
 export const normalizeLyricTextForMatch = (text: string): string => (text || '')
   .toLowerCase()
   .replace(/[\s·•\-–—()（）[\]【】「」『』〈〉《》"'`、，。！？!?,.&/|:：]+/g, '')
+
+/**
+ * 演唱者（agent / 对唱）跨源补挂：把带 agent 的源（Apple 官方 TTML）的演唱者身份，
+ * 按「归一化文本 + 时间邻近」补到无 agent 的骨架行上。
+ *
+ * 背景：对唱分栏与演唱者着色依赖 line.agent/isDuet，但这些结构只在 Apple 官方 TTML 里
+ * 完整存在；网易云/QQ 歌在评分竞争中 Apple 源常落选骨架（AMLL ncm/qq 社区打轴通常
+ * 不标 agent 且拿 preferred 加成），落选后 agent 数据随源被丢弃——社区库明确标注了
+ * 对唱的歌在我们软件上没有特殊歌词效果。
+ *
+ * 匹配口径与 attachBackgroundVocalsFromAmll 相同：精确（归一化文本一致 + ±1.5s）
+ * → 宽松（时间 − 源间偏差中位数 ±0.35s 且文本前 5 字符一致）。isDuet 一并复制
+ * （两侧由源文件的 agent 交替顺序决定，跨源语义一致）。仅补空缺，不覆盖骨架已有值。
+ */
+export function attachAgentsFromSource(
+  currentLyrics: LyricLine[],
+  agentSource: LyricLine[],
+): number {
+  const structuredLines = agentSource.filter(line => line.agent || line.agentId)
+  if (structuredLines.length === 0 || currentLyrics.length === 0) return 0
+
+  // 源内 agent 数 <2 时补挂无意义（独唱不分栏不着色），还可能把单 agent 误挂到合唱行
+  const sourceAgents = new Set(structuredLines.map(line => line.agent || line.agentId || ''))
+  if (sourceAgents.size < 2) return 0
+
+  const exactMatches = currentLyrics.map(line => {
+    const key = normalizeLyricTextForMatch(line.text)
+    if (!key) return null
+    return structuredLines.find(candidate =>
+      normalizeLyricTextForMatch(candidate.text) === key && Math.abs(candidate.time - line.time) < 1.5
+    ) ?? null
+  })
+  const deltas = exactMatches
+    .map((cand, index) => (cand ? currentLyrics[index].time - cand.time : null))
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => a - b)
+  const medianDelta = deltas.length > 0 ? deltas[Math.floor(deltas.length / 2)] : 0
+
+  let attached = 0
+  for (let index = 0; index < currentLyrics.length; index++) {
+    const line = currentLyrics[index]
+    if (line.agent || line.agentId) continue
+    const key = normalizeLyricTextForMatch(line.text)
+    if (!key) continue
+    let match = exactMatches[index]
+    if (!match) {
+      const fuzzy = structuredLines.find(candidate =>
+        Math.abs((line.time - medianDelta) - candidate.time) < 0.35
+        && normalizeLyricTextForMatch(candidate.text).slice(0, 5) === key.slice(0, 5)
+      )
+      if (!fuzzy) continue
+      match = fuzzy
+    }
+    if (match.agent || match.agentId) {
+      line.agent = match.agent
+      line.agentId = match.agentId || match.agent
+      if (match.isDuet !== undefined) line.isDuet = match.isDuet
+      if (match.agentName && !line.agentName) line.agentName = match.agentName
+      attached++
+    }
+  }
+  return attached
+}
 
 /**
  * 把带 x-bg / ttm:agent 结构的源（AMLL）的结构信息，按「归一化文本 + 时间邻近」补挂到骨架歌词上：
@@ -3450,6 +3630,19 @@ export async function getArtistAlbums(id: number | string, platform: MusicPlatfo
 // 获取歌手MV列表
 export async function getArtistMVs(id: number | string, platform: MusicPlatform = 'netease', limit: number = 200, offset: number = 0, nameHint = ''): Promise<any[]> {
   try {
+    // 酷狗：mobilecdn singer/mv（2026-10-22 探测可用；hash+filename+singername+imgurl）
+    if (platform === 'kugou') {
+      const { fetchKugouMvList } = await import('./kugouService')
+      const page = Math.floor(Math.max(0, offset) / Math.max(1, limit)) + 1
+      const list = await fetchKugouMvList('singer', String(id), page, limit)
+      return list.map(item => ({
+        id: item.hash,
+        name: item.filename,
+        picUrl: item.imgurl,
+        playCount: undefined,
+        publishTime: undefined,
+      }))
+    }
     if (platform === 'qq') {
       const page = Math.floor(offset / limit) + 1
       const response = await fetchT(`${API_BASE}/qq/artist/mvs?mid=${encodeURIComponent(String(id))}&name=${encodeURIComponent(nameHint)}&page=${page}&pageSize=${limit}`)
@@ -3508,6 +3701,14 @@ export async function getMVUrl(mvId: number | string, quality: number = 1080, pl
 // 获取MV播放信息（含失败原因）——QQ MV 无免费播放源时返回 error 供 UI 展示
 export async function getMVPlaybackInfo(mvId: number | string, quality: number = 1080, platform: MusicPlatform = 'netease'): Promise<{ url: string | null, error?: string, needCookie?: boolean }> {
   try {
+    // 酷狗：mvId = MV hash；取三档清晰度直链（rq>sq>le 就高选，与官方「优先高清」一致）
+    if (platform === 'kugou') {
+      const { fetchKugouMvInfo } = await import('./kugouService')
+      const info = await fetchKugouMvInfo(String(mvId))
+      const variants = info?.variants || []
+      const picked = variants.find(v => v.key === 'rq') || variants.find(v => v.key === 'sq') || variants[0]
+      return { url: picked?.url || null, error: picked ? undefined : '酷狗未返回 MV 播放地址' }
+    }
     if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
       const response = await fetchT(`${API_BASE}/qq/mv/url?vid=${mvId}`)
@@ -3526,6 +3727,24 @@ export async function getMVPlaybackInfo(mvId: number | string, quality: number =
 // 获取MV详情
 export async function getMVDetail(mvId: number | string, platform: MusicPlatform = 'netease'): Promise<any> {
   try {
+    // 酷狗：mvId = MV hash（infov2 详情；封面从列表接口取，infov2 不带 img）
+    if (platform === 'kugou') {
+      const { fetchKugouMvInfo, fetchKugouMvList } = await import('./kugouService')
+      const info = await fetchKugouMvInfo(String(mvId))
+      if (!info) return null
+      // infov2 无封面字段：用列表接口反查同 hash 的封面（官方分享页也是这个组合）
+      const list = await fetchKugouMvList('singer', info.authors[0]?.authorId || '', 1, 30).catch(() => [])
+      const cover = list.find(item => item.hash === String(mvId))?.imgurl || ''
+      return {
+        id: info.hash,
+        name: info.songname,
+        artistName: info.singers,
+        cover,
+        playCount: info.playCount || 0,
+        publishTime: info.publishDate,
+        desc: '',
+      }
+    }
     if (platform === 'qq') {
       const cookie = getPlatformCookie('qq')
       const response = await fetchT(`${API_BASE}/qq/mv/detail?vid=${mvId}`)
@@ -4042,6 +4261,14 @@ export async function getMVListByCategory(version: number = 7, area: number = 15
 /** 搜索 MV（网易云 type=1004，QQ t=12） */
 export async function searchMVs(keywords: string, platform: MusicPlatform = 'netease', limit: number = 30): Promise<any> {
   try {
+    // 酷狗：mv 搜索 = mobilecdn search/mv（2026-10-22 探测；参数名是 keyword，字段 filename/singername/hash）
+    if (platform === 'kugou') {
+      const query = new URLSearchParams({ format: 'json', keyword: keywords, page: '1', pagesize: String(limit) })
+      const response = await fetchT(`http://mobilecdn.kugou.com/api/v3/search/mv?${query.toString()}`)
+      const data = await response.json()
+      if (!response.ok || Number(data?.status) !== 1) throw new Error('MV搜索失败')
+      return { mvs: (data?.data?.info || []).map((item: any) => ({ mvhash: item.hash, mvname: item.filename, singers: item.singername, img: item.imgurl })) }
+    }
     if (platform === 'qq') {
       const response = await fetchT(`${API_BASE}/qq/search?keywords=${encodeURIComponent(keywords)}&limit=${limit}&type=mv`)
       const data = await response.json()
@@ -4077,7 +4304,22 @@ export interface PlaylistSearchResult {
 /** 搜索歌单；所有平台返回统一结构，不支持的平台显式标记。 */
 export async function searchPlaylists(keywords: string, platform: MusicPlatform = 'netease', limit: number = 20): Promise<PlaylistSearchResult> {
   try {
-    if (platform === 'kugou' || platform === 'soda') return { playlists: [], unsupported: true }
+    // 酷狗：mobilecdn /api/v3/search/special（2026-10-22 探测可用：specialid/播放量/曲目数/创建者齐全）
+    if (platform === 'kugou') {
+      const { searchKugouPlaylists } = await import('./kugouService')
+      const rows = await searchKugouPlaylists(keywords, limit)
+      return {
+        playlists: rows.map(item => ({
+          id: String(item.specialid || ''),
+          name: String(item.name || ''),
+          coverImgUrl: String(item.coverUrl || ''),
+          trackCount: Number(item.trackCount || 0),
+          creator: String(item.creator || ''),
+          platform: 'kugou',
+        })),
+      }
+    }
+    if (platform === 'soda') return { playlists: [], unsupported: true }
     if (platform === 'spotify') {
       const { searchSpotifyPlaylists } = await import('./spotifyService')
       const playlists = await searchSpotifyPlaylists(keywords, limit)

@@ -93,7 +93,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
     return true
   }, [onClose, suspended])
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem('accentColor') || '#3B82F6')
-  const [extra, setExtra] = useState<{ publishTime?: number; mvId?: number; fee?: number; quality?: string; qualityLevels?: { key: string; label: string; br: number }[]; albumExtra?: { company?: string; subType?: string; type?: string }; publishDate?: string; bpm?: number; genreText?: string; languageText?: string; mvVid?: string } | null>(null)
+  const [extra, setExtra] = useState<{ publishTime?: number; mvId?: number; fee?: number; quality?: string; qualityLevels?: { key: string; label: string; br: number }[]; albumExtra?: { company?: string; subType?: string; type?: string }; publishDate?: string; bpm?: number; genreText?: string; languageText?: string; mvVid?: string; kugouMvHash?: string } | null>(null)
   // MV 播放
   const [showMV, setShowMV] = useState(false)
   // QQ 歌曲详情的板块数据
@@ -262,7 +262,8 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
           setLyricsLoading(false)
           return
         }
-        // 酷狗：/kmr/v2/audio 官方「歌曲详情」弹窗同源（词曲/专辑/发行时间/语种/风格）
+        // 酷狗：/kmr/v2/audio 官方「歌曲详情」弹窗同源（词曲/专辑/发行时间/语种/风格）；
+        // 同时按「歌名+歌手」反查 MV hash（m3ws MV 通道以 hash 播放），查到才出 MV 行
         if (song.platform === 'kugou') {
           setLyricsLoading(false)
           const detail = await fetchKugouSongDetail(song as { kugouMixSongId?: number })
@@ -274,6 +275,11 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
               languageText: detail.language || undefined,
             })
           }
+          void import('../services/kugouService').then(({ searchKugouMvBySong }) =>
+            searchKugouMvBySong(song.name, song.artists?.[0]?.name).then(mvHash => {
+              if (!cancelled && mvHash) setExtra(prev => ({ ...(prev || {}), kugouMvHash: mvHash }))
+            }).catch(() => undefined),
+          )
           return
         }
         if (song.platform === 'qq') {
@@ -726,7 +732,7 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
                 {extra?.languageText && infoRow(<Mic2 className="w-4 h-4" />, '语种', extra.languageText)}
                 {extra?.albumExtra?.company && infoRow(<Disc3 className="w-4 h-4" />, '唱片公司', extra.albumExtra.company)}
                 {extra?.albumExtra?.subType && infoRow(<Disc3 className="w-4 h-4" />, '专辑类型', extra.albumExtra.subType)}
-                {extra?.mvId != null && (
+                {(extra?.mvId != null || extra?.kugouMvHash) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1073,11 +1079,11 @@ function SongDetailModal({ song, onClose, onPlayNow, onOpenPlaylist, onOpenAlbum
       )}
 
       {/* MV 播放器（点击播放） */}
-      {showMV && extra?.mvId != null && (
+      {showMV && (extra?.mvId != null || extra?.kugouMvHash) && (
         <VideoPlayer
-          mvId={song.platform === 'qq' ? (extra.mvVid || String(extra.mvId)) : extra.mvId}
+          mvId={song.platform === 'qq' ? (extra.mvVid || String(extra.mvId)) : song.platform === 'kugou' ? extra.kugouMvHash! : extra.mvId!}
           mvName={song.name || ''}
-          platform={song.platform === 'qq' ? 'qq' : 'netease'}
+          platform={song.platform === 'qq' ? 'qq' : song.platform === 'kugou' ? 'kugou' : 'netease'}
           onClose={() => setShowMV(false)}
         />
       )}

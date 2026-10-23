@@ -30,6 +30,13 @@ type PixiModule = typeof import('pixi.js');
  * compiled sources, so a program built before the flip would keep its mediump variant.
  */
 export const loadPixi = async (): Promise<PixiModule> => {
+    // unsafe-eval polyfill 必须在第一次 new Application() 之前装上：Pixi 8 默认用
+    // Function 构造器生成 uniform/shader 同步代码，而 WaveForge 的 index.html CSP
+    // 锁死 script-src 'self'（2026-10-16 起）——没有 polyfill 时三个 Pixi 样式
+    // （商籁/凝彩/绘光）初始化即抛 "Current environment does not allow unsafe-eval"，
+    // 表现为歌词只剩 fallback 文本。polyfill 换成纯字符串拼接实现，CSP 无需放开。
+    // import 即自安装（模块顶层 selfInstall()）。
+    await import('pixi.js/unsafe-eval');
     const pixi = await import('pixi.js');
     pixi.GlProgram.defaultOptions.preferredFragmentPrecision = 'highp';
     return pixi;

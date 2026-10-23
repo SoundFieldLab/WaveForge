@@ -305,7 +305,10 @@ class WeatherWindParticleLayer extends L.Layer {
     // 隐藏时主动停帧，回到可见时恢复）
     document.addEventListener('visibilitychange', this.handleVisibilityChange)
     this.resetCanvas()
-    this.restart()
+    // addTo 前调用的 setFrame 因 mapInstance 未就绪不会重建矢量场（且引用相同时
+    // setFrame 直接去重跳过），这里强制重建一次——否则粒子层挂上后一直空白，
+    // 直到用户缩放/平移触发 handleMoveEnd 才突然出现。
+    this.rebuildVectorField()
     return this
   }
 
@@ -796,47 +799,130 @@ function WeatherMapLegend({ layer, compact = false }: { layer: WeatherMapLayerDe
 }
 
 /**
- * 预览卡的真实地图底图：以定位城市为中心取一张缩放 9 的瓦片全景（Web 墨卡托）。
+ * 预览卡的真实地图底图：以定位点为中心的"全景地图"实景瓦片拼幅。
  * 直接复用天气地图在线瓦片源（高德 + ArcGIS 兜底），无需引入 Leaflet。
- * 256px 瓦片在卡片内以 cover 拉伸铺满，定位点按经纬度在瓦片世界坐标的相对位置标注。
+ * zoom 13 为街道级实景（路网/街区形状清晰可见）；3×2 瓦片网格保持 1:1 纵横比
+ * 拼接后按像素精确居中（定位点恒在卡片中央），地名注记不再被压扁。
+ * 高德底图是 GCJ-02 坐标系，WGS-84 的 GPS 定位坐标需先转换，否则 13 级下
+ * 定位点会偏离实际位置约 30 像素（约 500 米）。
  */
+const PREVIEW_ZOOM = 13
+const PREVIEW_ROWS = 2
+
+// WGS-84 → GCJ-02（火星坐标）：高德底图坐标系的标准偏移算法
+const transformWgs84ToGcj02 = (latitude: number, longitude: number): [number, number] => {
+  const outOfChina = longitude < 72.004 || longitude > 137.8347 || latitude < 0.8293 || latitude > 55.8271
+  if (outOfChina) return [latitude, longitude]
+  const a = 6378245.0
+  const ee = 0.00669342162296594323
+  const transformLat = (x: number, y: number) => {
+    let result = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * Math.sqrt(Math.abs(x))
+    result += (20 * Math.sin(6 * x * Math.PI) + 20 * Math.sin(2 * x * Math.PI)) * 2 / 3
+    result += (20 * Math.sin(y * Math.PI) + 40 * Math.sin(y / 3 * Math.PI)) * 2 / 3
+    result += (160 * Math.sin(y / 12 * Math.PI) + 320 * Math.sin(y * Math.PI / 30)) * 2 / 3
+    return result
+  }
+  const transformLng = (x: number, y: number) => {
+    let result = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * Math.sqrt(Math.abs(x))
+    result += (20 * Math.sin(6 * x * Math.PI) + 20 * Math.sin(2 * x * Math.PI)) * 2 / 3
+    result += (20 * Math.sin(x * Math.PI) + 40 * Math.sin(x / 3 * Math.PI)) * 2 / 3
+    result += (150 * Math.sin(x / 12 * Math.PI) + 300 * Math.sin(x / 30 * Math.PI)) * 2 / 3
+    return result
+  }
+  const dLat = transformLat(longitude - 105, latitude - 35)
+  const dLng = transformLng(longitude - 105, latitude - 35)
+  const radLat = latitude / 180 * Math.PI
+  let magic = Math.sin(radLat)
+  magic = 1 - ee * magic * magic
+  const sqrtMagic = Math.sqrt(magic)
+  return [
+    latitude + dLat * 180 / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI),
+    longitude + dLng * 180 / (a / sqrtMagic * Math.cos(radLat) * Math.PI),
+  ]
+}
+
 function WeatherMapPreviewTiles({ latitude, longitude }: { latitude: number; longitude: number }) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const [viewport, setViewport] = useState({ width: 0, height: 0 })
+
+  useEffect(() => {
+    const element = containerRef.current
+    if (!element) return
+    const update = () => setViewport({ width: element.clientWidth, height: element.clientHeight })
+    update()
+    if (typeof ResizeObserver === 'undefined') {
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }
+    const observer = new ResizeObserver(update)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
   const tiles = useMemo(() => {
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
-    const zoom = 9
+    const [gcjLatitude, gcjLongitude] = transformWgs84ToGcj02(latitude, longitude)
+    if (!Number.isFinite(gcjLatitude) || !Number.isFinite(gcjLongitude)) return null
+    // 列数按卡片纵横比动态取：cover 铺满时瓦片不放大（保持原生清晰度）。
+    // 卡片约 4.5:1 → rows=2 时需要 ≥9 列；窄卡片自然缩到 3~4 列。
+    const aspect = viewport.height > 0 ? Math.max(1, viewport.width / viewport.height) : 3
+    const columns = Math.max(3, Math.min(12, Math.ceil(PREVIEW_ROWS * aspect) + 1))
+    const zoom = PREVIEW_ZOOM
     const size = 256 * (2 ** zoom)
-    const x = ((longitude + 180) / 360) * size
-    const clampLatitude = Math.max(-85.0511, Math.min(85.0511, latitude))
+    const x = ((gcjLongitude + 180) / 360) * size
+    const clampLatitude = Math.max(-85.0511, Math.min(85.0511, gcjLatitude))
     const radians = clampLatitude * Math.PI / 180
     const y = (1 - Math.log(Math.tan(radians) + 1 / Math.cos(radians)) / Math.PI) / 2 * size
     const tileX = Math.floor(x / 256)
     const tileY = Math.floor(y / 256)
-    // 以该瓦片为中心取 3x1 张（城市基本落在中央瓦片内，卡片横向宽、纵向矮）
-    const columnOffsets = [-1, 0, 1]
-    return {
-      fractionX: x / 256 - tileX,
-      fractionY: y / 256 - tileY,
-      columns: columnOffsets.map(offset => ({
-        key: `${tileX + offset}-${tileY}`,
-        upstream: `https://webst0{1-4}.is.autonavi.com/appmaptile?style=7&x=${tileX + offset}&y=${tileY}&z=${zoom}`,
-        arcgis: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${zoom}/${tileY}/${((tileX + offset % (2 ** zoom)) + 2 ** zoom) % 2 ** zoom}`,
-      })),
+    const maxTile = 2 ** zoom - 1
+    const grid: Array<{ key: string; row: number; column: number; upstream: string; arcgis: string }> = []
+    for (let row = 0; row < PREVIEW_ROWS; row += 1) {
+      for (let column = 0; column < columns; column += 1) {
+        const tileColumn = tileX + column - Math.floor(columns / 2)
+        const tileRow = Math.max(0, Math.min(maxTile, tileY + row - Math.floor(PREVIEW_ROWS / 2)))
+        const wrappedColumn = ((tileColumn % (maxTile + 1)) + maxTile + 1) % (maxTile + 1)
+        grid.push({
+          key: `${wrappedColumn}-${tileRow}`,
+          row,
+          column,
+          upstream: `https://webst01.is.autonavi.com/appmaptile?style=7&x=${wrappedColumn}&y=${tileRow}&z=${zoom}`,
+          arcgis: `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${zoom}/${tileRow}/${wrappedColumn}`,
+        })
+      }
     }
-  }, [latitude, longitude])
+    return {
+      columnCount: columns,
+      // 定位点在拼幅内的精确相对位置（拼幅以中央瓦片为中心向两侧展开）
+      fractionX: (x - (tileX - Math.floor(columns / 2)) * 256) / (columns * 256),
+      fractionY: (y - (tileY - Math.floor(PREVIEW_ROWS / 2)) * 256) / (PREVIEW_ROWS * 256),
+      grid,
+    }
+  }, [latitude, longitude, viewport.width, viewport.height])
+
   if (!tiles) return <div className="weather-map-preview-base absolute inset-0" />
+
+  // 拼幅显示尺寸：以宽铺满为基准（瓦片保持 1:1 不变形）；列数已按纵横比取够，
+  // 高度不足的部分由拼幅纵向裁切自然覆盖。定位点恒在卡片正中。
+  const displayWidth = viewport.width
+  const displayHeight = displayWidth * (PREVIEW_ROWS / tiles.columnCount)
+  const offsetX = viewport.width / 2 - tiles.fractionX * displayWidth
+  const offsetY = viewport.height / 2 - tiles.fractionY * displayHeight
+
   return (
-    <div className="absolute inset-0 overflow-hidden">
-      <div className="absolute inset-y-0 left-1/2 flex w-[300%] -translate-x-1/2">
-        {tiles.columns.map(column => (
+    <div ref={containerRef} className="absolute inset-0 overflow-hidden">
+      <div
+        className="absolute"
+        style={{ width: displayWidth, height: displayHeight, left: offsetX, top: offsetY, visibility: viewport.width ? 'visible' : 'hidden' }}
+      >
+        {tiles.grid.map(tile => (
           <img
-            key={column.key}
-            src={column.upstream.replace('webst0{1-4}', 'webst01')}
-            data-fallback-src={column.arcgis}
+            key={tile.key}
+            src={tile.upstream}
+            data-fallback-src={tile.arcgis}
             alt=""
             draggable={false}
-            className="h-full w-1/3 select-none"
-            // 瓦片按卡片纵横比拉伸填充（不用 object-cover）：定位点/地名按瓦片内
-            // 相对坐标映射才与视觉位置一致（卡片 4.5:1，正方形瓦片纵向被压缩）
+            className="absolute select-none"
+            style={{ left: `${tile.column * 100 / tiles.columnCount}%`, top: `${tile.row * 100 / PREVIEW_ROWS}%`, width: `${100 / tiles.columnCount}%`, height: `${100 / PREVIEW_ROWS}%` }}
             onError={event => {
               const image = event.currentTarget
               const fallback = image.dataset.fallbackSrc
@@ -847,14 +933,8 @@ function WeatherMapPreviewTiles({ latitude, longitude }: { latitude: number; lon
         ))}
       </div>
       <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(10,22,38,.18),transparent_38%,rgba(8,16,30,.34))]" />
-      {/* 定位点：按经纬度相对中央瓦片的位置水平偏移（三瓦片拼幅内），纵向同理由 fractionY 推算 */}
-      <div
-        className="pointer-events-none absolute"
-        style={{
-          left: `calc(${(0.5 + (tiles.fractionX - 0.5) / 3) * 100}%)`,
-          top: `${tiles.fractionY * 100}%`,
-        }}
-      >
+      {/* 定位点恒在卡片正中（拼幅按定位点居中裁切） */}
+      <div className="pointer-events-none absolute left-1/2 top-1/2">
         <span className="absolute -left-[7px] -top-[7px] block h-3.5 w-3.5 rounded-full border-2 border-white bg-sky-500 shadow-[0_0_10px_rgba(14,165,233,.9)]" />
         <span className="absolute -left-[14px] -top-[14px] block h-7 w-7 animate-ping rounded-full border border-sky-300/70" />
       </div>
@@ -877,26 +957,15 @@ function WeatherMapPreview({ weather, onOpen }: Pick<WeatherMapExperienceProps, 
       style={previewStyle}
     >
       <WeatherMapPreviewTiles latitude={weather.location.latitude} longitude={weather.location.longitude} />
+      {/* 左侧信息带渐变：保证文字可读，右侧留出通透的实景 */}
       <div className="weather-map-preview-field absolute inset-0 opacity-45" />
-      <svg className="absolute inset-0 h-full w-full opacity-70" viewBox="0 0 1000 260" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
-        <g fill="none" stroke="rgba(255,255,255,.32)" strokeWidth="2">
-          <path d="M-40 65 C90 20 150 92 270 58 S470 22 550 70 S760 112 1040 42" />
-          <path d="M15 250 C130 172 215 226 314 164 S480 140 585 205 S810 246 1012 150" />
-        </g>
-        <g fill="rgba(255,255,255,.92)" fontSize="17" fontWeight="600" style={{ paintOrder: 'stroke', stroke: 'rgba(15,30,50,.55)', strokeWidth: 4 }}>
-          <text x="790" y="195">未来 48h</text>
-        </g>
-      </svg>
-      {/* 地名标签：压在底图上易与真实地图注记打架，改为信息卡内展示 */}
-      <div className="pointer-events-none absolute left-6 top-6 rounded-full border border-white/18 bg-black/32 px-3.5 py-1.5 text-[12px] font-medium text-white/88 backdrop-blur-md">
-        {[weather.location.district, weather.location.city, weather.location.province].filter(Boolean).slice(0, 2).join(' · ')}
-      </div>
-      <div className="relative flex min-h-[220px] flex-col justify-between p-6">
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,rgba(8,18,32,.58)_0%,rgba(8,18,32,.30)_34%,transparent_60%)]" />
+      <div className="relative flex min-h-[240px] flex-col justify-between p-6">
         <div className="flex items-start justify-between gap-5">
           <div>
-            <div className="flex items-center gap-2 text-sm font-semibold text-white/72"><MapIcon className="h-4 w-4" />天气地图</div>
-            <div className="mt-2 text-2xl font-semibold tracking-tight">查看天气图层</div>
-            <div className="mt-1 text-sm text-white/62">温度、风、湿度、云量、气压与更多模式 · 图层为预报推算</div>
+            <div className="flex items-center gap-2 text-sm font-semibold text-white/72"><MapIcon className="h-4 w-4" />全景地图</div>
+            <div className="mt-2 text-2xl font-semibold tracking-tight">实景地图 · 直观天气</div>
+            <div className="mt-1 text-sm text-white/62">街道级实景底图 · 点击进入温度、风、湿度等 14 种专业图层</div>
           </div>
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-white/18 bg-black/18 transition-transform group-hover:translate-x-1 group-hover:bg-black/28">
             <ChevronRight className="h-5 w-5" />
@@ -945,6 +1014,30 @@ interface WeatherFieldLayerPair {
 
 const getWeatherFieldOpacity = (layerId: WeatherMapLayerId) => layerId === 'cloud' ? .62 : .78
 
+// 地图偏好持久化键（底图样式/当前图层/动画图层开关）
+const MAP_PREF_KEY = 'waveforge:weatherMapPrefs'
+
+// 天气地图底图工厂：street=高德街道图（GCJ-02 坐标系，注记全中文）；
+// satellite=Esri World Imagery（WGS-84，真实卫星实景）。图层样式/缓存策略一致。
+const createBaseTileLayer = (style: 'street' | 'satellite') => style === 'satellite'
+  ? L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      maxZoom: 19,
+      pane: 'weatherMapBasePane',
+      className: 'weather-map-base-tile',
+      updateWhenIdle: true,
+      updateWhenZooming: false,
+      keepBuffer: 1,
+    })
+  : L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}', {
+      subdomains: ['1', '2', '3', '4'],
+      maxZoom: 19,
+      pane: 'weatherMapBasePane',
+      className: 'weather-map-base-tile',
+      updateWhenIdle: true,
+      updateWhenZooming: false,
+      keepBuffer: 1,
+    })
+
 function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperienceProps, 'weather' | 'open' | 'onClose'>) {
   // 挂起（所属模式层被切走）时不渲染这个 portal：portal 挂在 body 上，不受挂起层
   // visibility:hidden 约束，留着会盖住当前模式。只隐藏不卸载，切回来状态原样。
@@ -962,6 +1055,7 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
   const placeLookupControllerRef = useRef<AbortController | null>(null)
   const windLayerRef = useRef<WeatherWindParticleLayer | null>(null)
   const isobarLayerRef = useRef<WeatherIsobarLayer | null>(null)
+  const baseLayerRef = useRef<L.TileLayer | null>(null)
   const fieldLayersRef = useRef<WeatherFieldLayerPair>({
     layerId: null,
     currentFrameKey: -1,
@@ -970,7 +1064,7 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
     next: null,
   })
   const selectedPointRef = useRef<LatLng | null>(null)
-  const activeLayerIdRef = useRef<WeatherMapLayerId>('temperature')
+  const activeLayerIdRef = useRef<WeatherMapLayerId | null>('temperature')
   const hourOffsetRef = useRef(0)
   const locationRef = useRef({ latitude: weather.location.latitude, longitude: weather.location.longitude })
   const timezoneRef = useRef(weather.timezone)
@@ -978,19 +1072,33 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
   const gridRequestRef = useRef<AbortController | null>(null)
   const gridRequestIdRef = useRef(0)
   const [gridStatus, setGridStatus] = useState<'loading' | 'forecast' | 'estimate'>('loading')
-  const [activeLayerId, setActiveLayerId] = useState<WeatherMapLayerId>('temperature')
+  // activeLayerId=null 表示用户点掉了当前图层（纯底图模式），再点其它图层恢复。
+  // 底图样式/天气图层/动画开关跨会话记忆（localStorage，弹窗重开甚至重启应用后保持）。
+  const [activeLayerId, setActiveLayerId] = useState<WeatherMapLayerId | null>(() => {
+    try { return (localStorage.getItem(MAP_PREF_KEY + ':layer') as WeatherMapLayerId) || 'temperature' } catch { return 'temperature' }
+  })
   const [layerPanelOpen, setLayerPanelOpen] = useState(false)
   const [hourOffset, setHourOffset] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [playbackSpeed, setPlaybackSpeed] = useState<0.5 | 1 | 2>(1)
-  const [windWaves, setWindWaves] = useState(false)
-  const [isobars, setIsobars] = useState(false)
+  const [windWaves, setWindWaves] = useState(() => { try { return localStorage.getItem(MAP_PREF_KEY + ':windWaves') === '1' } catch { return false } })
+  const [isobars, setIsobars] = useState(() => { try { return localStorage.getItem(MAP_PREF_KEY + ':isobars') === '1' } catch { return false } })
+  // 底图样式：street=高德街道图（GCJ-02），satellite=Esri 世界影像（WGS-84，真实实景）
+  const [baseStyle, setBaseStyle] = useState<'street' | 'satellite'>(() => {
+    try { return localStorage.getItem(MAP_PREF_KEY + ':base') === 'satellite' ? 'satellite' : 'street' } catch { return 'street' }
+  })
   const [selectedPoint, setSelectedPoint] = useState<LatLng | null>(null)
   const [selectedPlaceName, setSelectedPlaceName] = useState<string | null>(null)
   const [pointValue, setPointValue] = useState<WeatherMapPointValue | null>(null)
   const [pointLoading, setPointLoading] = useState(false)
   const [popupPosition, setPopupPosition] = useState<{ x: number; y: number } | null>(null)
-  const activeLayer = WEATHER_MAP_LAYER_BY_ID[activeLayerId]
+  const activeLayer = activeLayerId ? WEATHER_MAP_LAYER_BY_ID[activeLayerId] : null
+
+  // 偏好持久化：写入即存，下一次打开（甚至重启）自动恢复
+  useEffect(() => { try { localStorage.setItem(MAP_PREF_KEY + ':layer', activeLayerId ?? '') } catch {} }, [activeLayerId])
+  useEffect(() => { try { localStorage.setItem(MAP_PREF_KEY + ':base', baseStyle) } catch {} }, [baseStyle])
+  useEffect(() => { try { localStorage.setItem(MAP_PREF_KEY + ':windWaves', windWaves ? '1' : '0') } catch {} }, [windWaves])
+  useEffect(() => { try { localStorage.setItem(MAP_PREF_KEY + ':isobars', isobars ? '1' : '0') } catch {} }, [isobars])
 
   activeLayerIdRef.current = activeLayerId
   selectedPointRef.current = selectedPoint
@@ -1043,6 +1151,11 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
     if (!map) return
     const layerId = activeLayerIdRef.current
     const bounded = Math.max(0, Math.min(48, value))
+    // activeLayerId 为 null = 用户点掉了图层（纯底图模式）：移除全部天气场图层即可
+    if (layerId === null) {
+      clearFieldLayers()
+      return
+    }
     const grid = weatherGridRef.current
     const framePair: WeatherGridFramePair | null = grid
       ? getWeatherGridFramePair(grid, Date.now() + bounded * 60 * 60 * 1000)
@@ -1125,11 +1238,13 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
   useEffect(() => {
     if (!open || !mapElementRef.current || mapRef.current) return
     const initialLocation = locationRef.current
+    // 初始即街道级放大视图（12 级 ≈ 街区尺度），与预览卡"全景地图"衔接；
+    // maxZoom 17 支持继续放大到楼宇细节。
     const map = L.map(mapElementRef.current, {
       center: [initialLocation.latitude, initialLocation.longitude],
-      zoom: 6,
-      minZoom: 2,
-      maxZoom: 11,
+      zoom: 12,
+      minZoom: 3,
+      maxZoom: 17,
       zoomControl: false,
       attributionControl: true,
       worldCopyJump: true,
@@ -1162,21 +1277,14 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
       if (pointerless) pane.style.pointerEvents = 'none'
     })
 
-    const baseLayer = L.tileLayer('https://webst0{s}.is.autonavi.com/appmaptile?style=7&x={x}&y={y}&z={z}', {
-      subdomains: ['1', '2', '3', '4'],
-      maxZoom: 19,
-      pane: 'weatherMapBasePane',
-      className: 'weather-map-base-tile',
-      updateWhenIdle: true,
-      updateWhenZooming: false,
-      keepBuffer: 1,
-    }).addTo(map)
+    const baseLayer = createBaseTileLayer(baseStyle).addTo(map)
     baseLayer.on('tileerror', event => {
       const tile = event.tile as HTMLImageElement
       if (tile.dataset.weatherMapFallback === 'true') return
       tile.dataset.weatherMapFallback = 'true'
       tile.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${event.coords.z}/${event.coords.y}/${event.coords.x}`
     })
+    baseLayerRef.current = baseLayer
 
     new WeatherReferenceGridLayer({
       tileSize: 256,
@@ -1306,8 +1414,26 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
       selectedMarkerRef.current = null
       windLayerRef.current = null
       isobarLayerRef.current = null
+      baseLayerRef.current = null
     }
   }, [clearFieldLayers, open, syncFieldLayers, updatePopupPosition])
+
+  // 底图切换：先加新层再移除旧层，避免瞬间露出背景；瓦片容错兜底两样式通用。
+  useEffect(() => {
+    const map = mapRef.current
+    const current = baseLayerRef.current
+    if (!map || !current) return
+    const newLayer = createBaseTileLayer(baseStyle)
+    newLayer.on('tileerror', event => {
+      const tile = event.tile as HTMLImageElement
+      if (tile.dataset.weatherMapFallback === 'true') return
+      tile.dataset.weatherMapFallback = 'true'
+      tile.src = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/${event.coords.z}/${event.coords.y}/${event.coords.x}`
+    })
+    newLayer.addTo(map)
+    baseLayerRef.current = newLayer
+    map.removeLayer(current)
+  }, [baseStyle])
 
   useEffect(() => {
     const point: [number, number] = [weather.location.latitude, weather.location.longitude]
@@ -1352,7 +1478,8 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
   useEffect(() => {
     const map = mapRef.current
     if (!map || !open) return
-    const shouldShow = activeLayerId === 'wind' || windWaves
+    // 风/海浪是独立动画图层：开关打开即显示（可选叠加在任意天气图层或纯地图上）
+    const shouldShow = windWaves
     if (shouldShow && !windLayerRef.current) {
       const grid = weatherGridRef.current
       const frame = grid ? (() => {
@@ -1387,7 +1514,7 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
     if (!selectedPoint || !open) return
     setPointLoading(true)
     const controller = new AbortController()
-    const requestedLayer = activeLayerId
+    const requestedLayer = activeLayerId ?? 'temperature'
     const timeoutId = window.setTimeout(() => {
       fetchWeatherMapPointValue(requestedLayer, selectedPoint.lat, selectedPoint.lng, pointForecastHour, controller.signal)
         .then(value => setPointValue(value))
@@ -1501,14 +1628,34 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
                   <div className="mb-2.5 flex items-center justify-between px-1">
                     <div>
                       <div className="text-xs font-semibold text-slate-800">专业天气图层</div>
-                      <div className="mt-0.5 text-[9px] text-slate-500">当前：{activeLayer.label}</div>
+                      <div className="mt-0.5 text-[9px] text-slate-500">当前：{activeLayer ? activeLayer.label : '纯地图（再点图层恢复）'}</div>
                     </div>
                     <span className="rounded-full bg-blue-50 px-2 py-1 text-[9px] font-medium text-blue-600">14 种模式</span>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     {WEATHER_MAP_LAYERS.map(layer => (
-                      <LayerButton key={layer.id} layer={layer} active={layer.id === activeLayerId} onClick={() => { setActiveLayerId(layer.id); setLayerPanelOpen(false) }} />
+                      <LayerButton key={layer.id} layer={layer} active={layer.id === activeLayerId} onClick={() => { setActiveLayerId(current => current === layer.id ? null : layer.id); setLayerPanelOpen(false) }} />
                     ))}
+                  </div>
+                  <div className="mt-3 border-t border-slate-200/70 pt-3">
+                    <div className="mb-2 text-[10px] font-semibold uppercase text-slate-500">底图样式</div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {([
+                        ['street', '街道地图', '高德 · 中文注记路网'],
+                        ['satellite', '实景卫星', 'Esri · 真实影像'],
+                      ] as const).map(([style, label, description]) => (
+                        <button
+                          key={style}
+                          type="button"
+                          onClick={() => setBaseStyle(style)}
+                          aria-pressed={baseStyle === style}
+                          className={`rounded-2xl border px-3 py-2.5 text-left transition-colors ${baseStyle === style ? 'border-blue-500 bg-blue-50' : 'border-slate-200 bg-white/70 hover:bg-slate-50'}`}
+                        >
+                          <span className={`block text-xs font-semibold ${baseStyle === style ? 'text-blue-700' : 'text-slate-700'}`}>{label}</span>
+                          <span className="mt-0.5 block text-[9px] text-slate-500">{description}</span>
+                        </button>
+                      ))}
+                    </div>
                   </div>
                   <div className="mt-3 border-t border-slate-200/70 pt-3">
                     <div className="mb-2 text-[10px] font-semibold uppercase text-slate-500">动画图层</div>
@@ -1548,14 +1695,16 @@ function WeatherMapModal({ weather, open, onClose }: Pick<WeatherMapExperiencePr
             </div>
           </div>
 
-          <div className="absolute right-6 top-1/2 z-[540] hidden -translate-y-1/2 md:block">
-            <WeatherMapLegend layer={activeLayer} />
-          </div>
+          {activeLayer && (
+            <div className="absolute right-6 top-1/2 z-[540] hidden -translate-y-1/2 md:block">
+              <WeatherMapLegend layer={activeLayer} />
+            </div>
+          )}
 
           <div className="absolute left-1/2 top-5 z-[540] -translate-x-1/2 rounded-full border border-white/30 bg-white/82 px-5 py-2 text-center shadow-lg backdrop-blur-xl">
-            <div className="flex items-center gap-2 text-sm font-semibold"><Layers3 className="h-4 w-4" />{activeLayer.label}</div>
+            <div className="flex items-center gap-2 text-sm font-semibold"><Layers3 className="h-4 w-4" />{activeLayer ? activeLayer.label : '纯地图'}</div>
             <div className="mt-0.5 flex items-center justify-center gap-1.5 text-[10px] text-slate-500">
-              <span>{activeLayer.description}</span>
+              <span>{activeLayer ? activeLayer.description : '仅显示底图，点图层按钮叠加天气'}</span>
               <span>·</span>
               <span className={gridStatus === 'forecast' ? 'text-emerald-700' : gridStatus === 'loading' ? 'text-blue-700' : 'text-amber-700'}>
                 {gridStatus === 'forecast' ? '真实预报网格' : gridStatus === 'loading' ? '加载预报网格' : '本地估算'}

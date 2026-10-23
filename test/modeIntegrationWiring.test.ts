@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 
 const source = (path: string) => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8')
 
-/** App.tsx 里六个同级整屏模式层容器（key="xxx-mode"）。新增模式层时必须一并登记。 */
-const MODE_LAYER_KEYS = ['explore-mode', 'desktop-mode', 'resonance-mode', 'traditional-mode', 'minimal-mode', 'singalong-mode']
+/** App.tsx 里七个同级整屏模式层容器（key="xxx-mode"）。新增模式层时必须一并登记。 */
+const MODE_LAYER_KEYS = ['explore-mode', 'desktop-mode', 'resonance-mode', 'traditional-mode', 'minimal-mode', 'singalong-mode', 'inparty-mode']
 
 /** 从标签起始 '<' 扫到该标签的结束 '>'（跳过 {} / () / [] 与字符串里的 '>'） */
 function findTagEnd(text: string, tagStart: number): number {

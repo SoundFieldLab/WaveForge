@@ -41,6 +41,7 @@ import {
   revokeControl,
   removeTrack,
   moveTrackNext,
+  moveTrackTo,
   serializeRoomState,
   deserializeRoomState,
   RESONANCE_QUEUE_WINDOW,
@@ -70,6 +71,8 @@ import {
   type ResonanceTransport,
 } from './transport'
 import { readResonanceJoinBehavior, readResonancePushLimit, readResonanceSettings } from './settings'
+import { bumpCounter, isAchievementUnlocked, unlockAchievement } from '../inparty/achievements'
+import { notifyAchievement } from '../inparty/AchievementToast'
 
 export type ResonanceStatus = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed' | 'error'
 
@@ -80,11 +83,17 @@ export interface ResonanceChatMessage {
   text: string
   at: number
   self: boolean
+  /** 已撤回（本端把正文换成「撤回了一条消息」并置位，渲染成斜体灰字） */
+  recalled?: boolean
 }
 
 export interface ResonanceClockSample { offsetMs: number; rttMs: number }
 
 export interface ResonanceSessionSnapshot {
+  /** 消息回应（messageId → emoji → peerId[]） */
+  reactions: Record<string, Record<string, string[]>>
+  /** 正在输入的成员（peerId → 昵称） */
+  typingPeers: Record<string, string>
   status: ResonanceStatus
   role: 'host' | 'member' | null
   error: string
@@ -149,7 +158,10 @@ const CHAT_LIMIT = 200
 type EnvelopeKind =
   | 'hello' | 'welcome' | 'state' | 'queue-request' | 'queue-page' | 'queue-remove' | 'queue-move'
   | 'chat' | 'playback' | 'vote' | 'force-skip' | 'cannot-play' | 'leave' | 'dissolve'
+  | 'react' | 'recall' | 'typing'
   | 'control-request' | 'control-grant' | 'control-revoke' | 'next-request' | 'ping' | 'pong'
+  | 'queue-move-to'
+  | 'play-toggle-request'
 
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
 
@@ -165,6 +177,7 @@ export class ResonanceSession {
   private listeners = new Set<() => void>()
   private snapshot: ResonanceSessionSnapshot = {
     status: 'idle', role: null, error: '', room: null, invite: '', fingerprint: '', chat: [],
+      reactions: {}, typingPeers: {},
     summary: null, clock: { offsetMs: 0, rttMs: 0 }, unplayable: {}, myTurn: false, live: false,
     queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [],
     remainingQuotaByPeer: {}, turnPeerId: null, suspended: false,
@@ -202,6 +215,22 @@ export class ResonanceSession {
   private skipFirstApplyTrackKey: string | null = null
   /** 出站限流窗口（毫秒级防风暴兜底） */
   private outboundWindow: number[] = []
+
+  /* ── 成就（与 In Party 共享同一套本机成就墙） ── */
+  private listenSecondsCounter = 0
+
+  private award(id: string): void {
+    try {
+      if (unlockAchievement(id)) notifyAchievement(id)
+    } catch { /* ignore */ }
+  }
+
+  private awardCount(counterKey: string, achievementId: string, target: number): void {
+    try {
+      if (bumpCounter(counterKey) >= target && !isAchievementUnlocked(achievementId)) this.award(achievementId)
+    } catch { /* ignore */ }
+  }
+
   private timers: number[] = []
   private lastPlaybackPushAt = 0
   /**
@@ -258,7 +287,7 @@ export class ResonanceSession {
 
   /** 创建房间（房主）：起局域网中转 → 生成房间密钥 → 建立本地房间状态 */
   /** 逐出仍在主进程里运行的旧房间中转（渲染进程重载/上一次没退干净时会留下僵尸房间）。 */
-  private async releaseRelay(force = false): Promise<void> {
+  private async releaseRelay(force = false, keepRoomId?: string): Promise<void> {
     const host = this.transport
     this.transport = null
     if (host) { try { await host.close() } catch { /* 已经停了 */ } }
@@ -267,7 +296,9 @@ export class ResonanceSession {
     if (!bridge) return
     try {
       const status = await bridge.getStatus()
-      if (status?.running && status.roomId && (force || status.roomId !== this.roomId)) await bridge.stop()
+      // keepRoomId: hub 正跑着「这个房间」时不停（同机双角色，杀掉会把房主的房间端掉）
+      const isSameRoom = Boolean(keepRoomId && status?.roomId && status.roomId === keepRoomId)
+      if (status?.running && status.roomId && !isSameRoom && (force || status.roomId !== this.roomId)) await bridge.stop()
     } catch { /* 主进程不可用：交给 start 的真实错误上报 */ }
   }
 
@@ -349,6 +380,7 @@ export class ResonanceSession {
     const info = (transport as ReturnType<typeof createLanHostTransport>).startResult()
     const invite = info ? buildInvite({ roomId: options.roomId, code: info.code, secret, host: pickInviteHost((await this.options.bridge?.getStatus())?.ips), port: info.port }) : ''
     this.update({ status: 'connected', role: 'host', room, invite, live: true, summary: roomSummary(room, at) })
+    this.award('rz-first-room')
     void this.refreshFingerprint()
     this.startTimers()
     this.broadcastState()
@@ -356,10 +388,12 @@ export class ResonanceSession {
 
   /** 加入房间（成员）：解析邀请串 → 连房主中转 → 用房间密钥解密房间状态 */
   async join(inviteText: string, profile: { nickname: string; platforms: ResonancePlatformBadge[]; peerId?: string; avatarUrl?: string; nicknameFrom?: string }): Promise<void> {
-    // 成员不该继续挂着本机的中转：先停掉（强制的，自己当房主的那个房间已经放弃了）
-    await this.releaseRelay(true)
-    this.reset()
+    // 先解析邀请串：中转释放策略依赖它（同房间主场景，hub 正跑着的就是这个房间时不能停）
     const invite = parseInvite(inviteText)
+    // 成员不该继续挂着本机的中转：先停掉。但「同房间」例外——同机双角色
+    // （房主会话与成员会话共用一个 hub/bridge，测试/自玩场景）时不能把房主的房间停掉
+    await this.releaseRelay(true, invite?.roomId)
+    this.reset()
     if (!invite) {
       this.update({ status: 'error', error: '邀请串无法识别' })
       throw new Error('邀请串无法识别')
@@ -415,6 +449,7 @@ export class ResonanceSession {
     }
     await this.refreshFingerprint()
     this.update({ status: 'connected', live: true })
+    this.award('rz-first-join')
     this.sendIdentity()
     // 入房行为（设置项）：'next' = 不打断本机正在听的东西，等房主换下一首再开始跟随。
     // 此刻还没收到房主状态，不知道「正在放哪首」，所以只挂一个待决标记；
@@ -476,6 +511,7 @@ export class ResonanceSession {
     // 清掉会让「加入成功后界面不刷新」（数据已到位但 React 不再收到通知）。
     this.snapshot = {
       status: 'idle', role: null, error: '', room: null, invite: '', fingerprint: '', chat: [],
+      reactions: {}, typingPeers: {},
       summary: null, clock: { offsetMs: 0, rttMs: 0 }, unplayable: {}, myTurn: false, live: false,
       queue: { items: [], offset: 0, total: 0 }, canControl: false, controlRequests: [],
       remainingQuotaByPeer: {}, turnPeerId: null, suspended: false,
@@ -612,6 +648,31 @@ export class ResonanceSession {
    * 只向房主**发请求**，由房主推进队列并广播——否则该成员只会推进自己那份「窗口」副本，
    * 界面上闪一下就被下一次状态广播拽回去，而且谁也不会真的换歌。
    */
+  /**
+   * 房主 / 获授权控制者：暂停/播放切换。
+   * 权威只有房主：成员发 play-toggle-request，由房主翻转本机播放并广播（与 next-request 同款）。
+   */
+  requestPlayToggle(): void {
+    const state = this.snapshot.room
+    const peerId = this.identity?.peerId
+    if (!state || !peerId) return
+    if (!canControlPlayback(state, peerId, Date.now())) return
+    if (state.hostId !== peerId) {
+      this.broadcast({ kind: 'play-toggle-request', payload: {} })
+      return
+    }
+    this.hostPlayToggle()
+  }
+
+  /** 房主本机执行暂停/播放翻转（成员请求到达时由房主侧调用，经 App 注入的 hook） */
+  hostPlayToggle(): void {
+    if (this.snapshot.role !== 'host') return
+    this.adapter?.apply(
+      { trackKey: this.snapshot.room?.playback?.trackKey || '', positionMs: this.snapshot.room?.playback?.positionMs || 0, playing: !(this.snapshot.room?.playback?.playing ?? false) },
+      false,
+    )
+  }
+
   hostNext(): void {
     const state = this.snapshot.room
     const peerId = this.identity?.peerId
@@ -782,6 +843,20 @@ export class ResonanceSession {
   }
 
   /** 置顶（下一首播放） */
+  /** 拖拽重排：把一首歌移到指定下标（房主或点歌者） */
+  moveToIndex(trackKey: string, toIndex: number): { ok: boolean } {
+    const room = this.snapshot.room
+    const peerId = this.identity?.peerId
+    if (!room || !peerId) return { ok: false }
+    if (this.snapshot.role === 'host') {
+      const result = moveTrackTo(room, peerId, trackKey, toIndex)
+      if (result.ok) this.commit(result.state)
+      return { ok: result.ok }
+    }
+    this.broadcast({ kind: 'queue-move-to', payload: { trackKey, toIndex } })
+    return { ok: true }
+  }
+
   moveToNext(trackKey: string): { ok: boolean } {
     const room = this.snapshot.room
     const peerId = this.identity?.peerId
@@ -877,6 +952,8 @@ export class ResonanceSession {
   sendChat(text: string): void {
     const content = String(text || '').trim().slice(0, 500)
     if (!content || !this.identity) return
+    this.award('rz-first-chat')
+    this.awardCount('chat', 'chat-100', 100)
     this.pushChat({ peerId: this.identity.peerId, nickname: this.identity.nickname, text: content, at: Date.now(), self: true })
     this.broadcast({ kind: 'chat', payload: { text: content } })
   }
@@ -1248,6 +1325,19 @@ export class ResonanceSession {
         if (result.ok) this.commit(result.state)
         return
       }
+      case 'queue-move-to': {
+        if (!isHost) return
+        const moveRoom = this.snapshot.room
+        const moveTrack = String(payload?.trackKey || '')
+        const moveIndex = Number(payload?.toIndex)
+        if (!moveRoom || !moveTrack || !Number.isFinite(moveIndex)) return
+        const moved = moveTrackTo(moveRoom, fromPeerId, moveTrack, moveIndex)
+        if (moved.ok) {
+          this.commit(moved.state)
+          this.broadcastState()
+        }
+        return
+      }
       case 'next-request': {
         if (!isHost) return
         const room = this.snapshot.room
@@ -1356,6 +1446,76 @@ export class ResonanceSession {
     return Math.max(0, playback.positionMs + Math.max(0, elapsed))
   }
 
+
+  /* ── QQ 级聊天补足（表情回应/撤回/输入中——与 In Party 同款语义） ── */
+
+  toggleReaction(messageId: string, emoji: string): void {
+    if (!this.identity) return
+    const message = this.snapshot.chat.find(m => m.id === messageId)
+    if (!message) return
+    const reactions = { ...(this.snapshot.reactions ?? {}) }
+    const forMessage = { ...(reactions[messageId] ?? {}) }
+    const list = [...(forMessage[emoji] ?? [])]
+    const index = list.indexOf(this.identity.peerId)
+    if (index >= 0) list.splice(index, 1)
+    else list.push(this.identity.peerId)
+    if (list.length) forMessage[emoji] = list
+    else delete forMessage[emoji]
+    if (Object.keys(forMessage).length) reactions[messageId] = forMessage
+    else delete reactions[messageId]
+    this.update({ reactions })
+    this.broadcast({ kind: 'react', payload: { id: messageId, emoji, peerId: this.identity.peerId } })
+    // 房主本地已应用（上面的 update）；applyReaction 只用于「收到成员 react 信封」的路径
+  }
+
+  private applyReaction(messageId: string, emoji: string, peerId: string): void {
+    const reactions = { ...(this.snapshot.reactions ?? {}) }
+    const forMessage = { ...(reactions[messageId] ?? {}) }
+    const list = [...(forMessage[emoji] ?? [])]
+    const index = list.indexOf(peerId)
+    if (index >= 0) list.splice(index, 1)
+    else list.push(peerId)
+    if (list.length) forMessage[emoji] = list
+    else delete forMessage[emoji]
+    if (Object.keys(forMessage).length) reactions[messageId] = forMessage
+    else delete reactions[messageId]
+    this.update({ reactions })
+  }
+
+  /** 撤回自己的消息（2 分钟内；房主转播） */
+  recallMessage(messageId: string): boolean {
+    const selfId = this.identity?.peerId
+    if (!selfId) return false
+    const message = this.snapshot.chat.find(m => m.id === messageId && m.peerId === selfId)
+    if (!message || Date.now() - message.at > 120_000) return false
+    this.broadcast({ kind: 'recall', payload: { id: messageId } })
+    if (this.snapshot.role === 'host') this.markRecalled(messageId)
+    return true
+  }
+
+  private markRecalled(messageId: string): void {
+    this.update({ chat: this.snapshot.chat.map(m => m.id === messageId ? { ...m, text: '撤回了一条消息', recalled: true } : m) })
+  }
+
+  private lastTypingAt = 0
+
+  /** 我正在输入（2s 节流；房主转播给他人） */
+  notifyTyping(): void {
+    if (!this.identity) return
+    const now = Date.now()
+    if (now - this.lastTypingAt < 2000) return
+    this.lastTypingAt = now
+    this.broadcast({ kind: 'typing', payload: { peerId: this.identity.peerId } })
+  }
+
+  private applyTyping(peerId: string, nickname: string): void {
+    this.update({ typingPeers: { ...(this.snapshot.typingPeers ?? {}), [peerId]: nickname } })
+    window.setTimeout(() => {
+      const next = { ...(this.snapshot.typingPeers ?? {}) }
+      if (next[peerId]) { delete next[peerId]; this.update({ typingPeers: next }) }
+    }, 3000)
+  }
+
   private pushChat(message: Omit<ResonanceChatMessage, 'id'>): void {
     const chat = [...this.snapshot.chat, { ...message, id: `${message.peerId}-${message.at}-${this.snapshot.chat.length}` }]
     this.update({ chat: chat.slice(-CHAT_LIMIT) })
@@ -1408,6 +1568,14 @@ export class ResonanceSession {
   private startTimers(): void {
     this.stopTimers()
     if (typeof window === 'undefined') return
+    // 同听时长成就：每心跳（2s）在房内且正在跟播时累计；30 分钟解锁
+    this.timers.push(window.setInterval(() => {
+      const playback = this.snapshot.room?.playback
+      if (this.snapshot.live && playback?.playing && playback.trackKey) {
+        this.listenSecondsCounter += 2
+        this.awardCount('rz-listen-seconds', 'rz-listen-30min', 1800)
+      }
+    }, HEARTBEAT_MS))
     this.timers.push(window.setInterval(() => {
       const state = this.snapshot.room
       if (!state) return

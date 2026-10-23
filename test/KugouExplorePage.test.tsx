@@ -45,6 +45,10 @@ vi.mock('../src/services/kugouService', () => ({
   fetchKugouLongaudioAlbumDetail: vi.fn(async () => ({ album: null })),
   fetchKugouLongaudioChapters: vi.fn(async () => ({ chapters: [], hasMore: false })),
   getKugouLongaudioUrl: vi.fn(async () => ({ url: '' })),
+  // 刷歌：空动态 + 空最近（板块渲染「当前账号暂无动态」空态）
+  fetchKugouYouthDynamic: vi.fn(async () => ({ cards: [], empty: true, isEnd: true })),
+  fetchKugouYouthRecent: vi.fn(async () => ({ cards: [], empty: true })),
+  reportKugouYouthListen: vi.fn(async () => true),
 }))
 
 import KugouExplorePage from '../src/features/kugouExplore/KugouExplorePage'
@@ -112,9 +116,9 @@ const baseProps = {
   sectionStyle: () => ({}),
 }
 
-/** 模拟 kugou 能力表：只有酷狗板块（含通用 discover/channels 别名）可见 */
+/** 模拟 kugou 能力表：只有酷狗板块（含通用 discover/channels 别名 + 刷歌）可见 */
 const kugouVisible = (section: string) =>
-  ['discover', 'kugouLibrary', 'kugouPlaylistTags', 'channels', 'kugouCategories', 'kugouLongaudio'].includes(section)
+  ['discover', 'kugouLibrary', 'kugouPlaylistTags', 'channels', 'kugouCategories', 'kugouLongaudio', 'kugouYouth'].includes(section)
 
 const paneOf = (zone: string) => document.querySelector(`[data-kugou-zone="${zone}"]`) as HTMLElement
 
@@ -122,11 +126,11 @@ afterEach(() => {
   cleanup()
 })
 
-describe('酷狗探索页一级分区（发现 / 音乐 / 听书）', () => {
-  it('默认落在发现分区：页签齐全（无刷歌），激活项用酷狗品牌色，音乐五板块可见', async () => {
+describe('酷狗探索页一级分区（发现 / 音乐 / 听书 / 刷歌）', () => {
+  it('默认落在发现分区：页签齐全（含刷歌），激活项用酷狗品牌色，音乐五板块可见', async () => {
     render(<KugouExplorePage {...baseProps} sectionVisible={kugouVisible} />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map(tab => tab.textContent)).toEqual(['发现', '音乐', '听书'])
+    expect(tabs.map(tab => tab.textContent)).toEqual(['发现', '音乐', '听书', '刷歌'])
     const active = screen.getByRole('tab', { name: '发现' })
     expect(active.getAttribute('aria-selected')).toBe('true')
     // 品牌色胶囊：accent（#FF7A00）直接写进激活项样式（jsdom 会归一化成 rgb）
@@ -135,8 +139,7 @@ describe('酷狗探索页一级分区（发现 / 音乐 / 听书）', () => {
     expect(paneOf('discover').className).not.toContain('hidden')
     expect(paneOf('music').className).toContain('hidden')
     expect(paneOf('longaudio').className).toContain('hidden')
-    // 「刷歌」分区已下线：DOM 里不存在
-    expect(paneOf('youth')).toBeNull()
+    expect(paneOf('youth').className).toContain('hidden')
     // 切到音乐分区：推荐 + 乐库 + 歌单 + 频道 + 分类五板块都在
     fireEvent.click(screen.getByRole('tab', { name: '音乐' }))
     for (const board of ['discover', 'library', 'playlist-tags', 'channels', 'categories']) {
@@ -157,14 +160,14 @@ describe('酷狗探索页一级分区（发现 / 音乐 / 听书）', () => {
   it('设置里隐藏听书板块：分区页签消失，发现/音乐分区保留', () => {
     const hidden = new Set(['kugouLongaudio'])
     render(<KugouExplorePage {...baseProps} sectionVisible={section => kugouVisible(section) && !hidden.has(section)} />)
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '音乐'])
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '音乐', '刷歌'])
     expect(screen.queryByText('进入听书')).toBeNull()
   })
 
   it('音乐子板块全部隐藏时：整块音乐面板收起，发现/听书分区保留而不是空白', () => {
     const hidden = new Set(['discover', 'kugouLibrary', 'kugouPlaylistTags', 'channels', 'kugouCategories'])
     render(<KugouExplorePage {...baseProps} sectionVisible={section => kugouVisible(section) && !hidden.has(section)} />)
-    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '听书'])
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现', '听书', '刷歌'])
     expect(paneOf('music').className).toContain('hidden')
     expect(paneOf('discover').className).not.toContain('hidden')
     expect(paneOf('longaudio').className).toContain('hidden')
@@ -175,7 +178,7 @@ describe('酷狗探索页一级分区（发现 / 音乐 / 听书）', () => {
     // 发现分区不依赖任何板块位（概念版复刻独立数据源），因此仍保留 —— 音乐/听书分区必须隐藏
     render(<KugouExplorePage {...baseProps} sectionVisible={section => ['playlists', 'charts', 'newSongs', 'albums'].includes(section)} />)
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['发现'])
-    for (const zone of ['music', 'longaudio']) {
+    for (const zone of ['music', 'longaudio', 'youth']) {
       expect(paneOf(zone).className).toContain('hidden')
     }
     // 通用聚合板块（推荐歌单/排行榜速览/最新音乐/新碟上架）不属于酷狗页

@@ -420,6 +420,24 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     }
   }
 
+  /**
+   * 分析缓存「治疗」：启动时/每小时全量体检，删除所有已知毒形态的记录（而非等消费方
+   * 踩到才逐条自愈）。毒形态全部来自线上实测：
+   *  F1 损坏 JSON（半截写入/磁盘错误）；
+   *  F2 trackKey 缺失（半条记录）；
+   *  F3 duration 非正但带节拍（元数据坏）；
+   *  F4 节拍超出分析时长 +1s（音频截断/换源错位——实测 qq:857362 176s 音频带 251s
+   *     节拍，AutoMix/MV 对齐全链路吃毒）。
+   * 治疗即重建：删掉的记录下次分析自然重算（分析管线便宜），不缓存 never worse。
+   */
+  function sanitizeAnalysisCache() {
+    const result = sanitizeAnalysisCaches([trackRoot, legacyBeatRoot])
+    if (result.cured > 0) {
+      try { automixLog.log('analysis:sanitize', `cured ${result.cured}/${result.scanned} poisoned analysis caches`) } catch {}
+    }
+    return result
+  }
+
   function cleanupJsonCache(root, maxAgeMs, maxBytes) {
     ensureDirectories()
     const now = Date.now()
@@ -453,6 +471,7 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
     cleanupJsonCache(trackRoot, TRACK_CACHE_TTL_MS, TRACK_CACHE_LIMIT_BYTES)
     cleanupJsonCache(legacyBeatRoot, TRACK_CACHE_TTL_MS, TRACK_CACHE_LIMIT_BYTES)
     cleanupRenderCache()
+    sanitizeAnalysisCache()
   }
 
   function runtimeStatus() {
@@ -511,6 +530,16 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
       return { success: false, error: 'invalid analysis payload' }
     }
     const trackKey = analysis.trackKey.trim()
+    // 落盘前自愈校验：节拍不得超出分析时长（+1s 容差）——越界说明音频与分析错位
+    //（截断 FLAC 时代的写入形态：上报 370s 的歌存下 176.5s 音频，或反过来）。这类
+    // 记录进缓存后被 trackKey 钉死，AutoMix/MV 对齐全链路吃毒（实测 qq:857362）。
+    if (Array.isArray(analysis.beats) && analysis.beats.length > 0
+      && Number.isFinite(analysis.duration) && analysis.duration > 0
+      && Number.isFinite(analysis.beats[analysis.beats.length - 1])
+      && analysis.beats[analysis.beats.length - 1] > analysis.duration + 1) {
+      automixLog.log('analysis:save-track', `rejected out-of-range beats: trackKey=${trackKey} duration=${analysis.duration} lastBeat=${analysis.beats[analysis.beats.length - 1].toFixed(1)}`)
+      return { success: false, error: 'beats exceed analysis duration (stale/truncated audio mismatch)' }
+    }
     atomicWriteJson(cacheFile(trackRoot, trackKey), versioned({ ...analysis, trackKey }))
     return { success: true }
   })
@@ -717,4 +746,47 @@ function createAnalysisRuntime(app, ipcMain, getMainWindow, customCachePath = nu
   }
 }
 
-module.exports = { createAnalysisRuntime }
+/** 分析缓存「治疗」纯函数（可导出单测）：扫描 roots 下的分析 JSON，删除所有已知毒形态
+ *  的记录。毒形态全部来自线上实测（F1-F4 见 sanitizeAnalysisCache 调用处注释）。
+ *  治疗即重建：删掉的记录下次分析自然重算，不缓存 never worse。 */
+function sanitizeAnalysisCaches(roots) {
+  let scanned = 0
+  let cured = 0
+  for (const root of roots) {
+    if (!fs.existsSync(root)) continue
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const target = path.join(root, entry.name)
+      scanned++
+      let analysis
+      try {
+        analysis = JSON.parse(fs.readFileSync(target, 'utf-8'))
+      } catch {
+        try { fs.rmSync(target, { force: true }); cured++ } catch {}
+        continue
+      }
+      const beats = Array.isArray(analysis?.beats) ? analysis.beats : null
+      const lastBeat = beats && beats.length > 0 ? Number(beats[beats.length - 1]) : NaN
+      // F5（2026-10-20 数据流体检新增）：弱 browser-fallback 网格——渲染层 isWeakBrowserFallback
+      // 守卫（conf<0.55 不持久化）上线前的历史残留，实测磁盘 123 条。读取侧已免疫，但它们
+      // 占着 trackKey 且 sanitize 之前不清理；低置信网格的节拍/段落本来就不该被任何离线
+      // 消费方（MV 对齐取缓存分析）当参考。provider=浏览器兜底 + conf<0.55 → 治疗即重建。
+      const weakBrowserFallback =
+        analysis && analysis.provider === 'browser-fallback'
+        && Number.isFinite(analysis.confidence) && analysis.confidence < 0.55
+      const poisoned =
+        !analysis || typeof analysis !== 'object'
+        || typeof analysis.trackKey !== 'string' || !analysis.trackKey.trim()
+        || (beats && beats.length > 0 && (!Number.isFinite(analysis.duration) || analysis.duration <= 0))
+        || (beats && beats.length > 0 && Number.isFinite(analysis.duration) && analysis.duration > 0
+          && Number.isFinite(lastBeat) && lastBeat > analysis.duration + 1)
+        || weakBrowserFallback
+      if (poisoned) {
+        try { fs.rmSync(target, { force: true }); cured++ } catch {}
+      }
+    }
+  }
+  return { scanned, cured }
+}
+
+module.exports = { createAnalysisRuntime, sanitizeAnalysisCaches }

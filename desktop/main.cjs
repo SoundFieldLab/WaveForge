@@ -196,6 +196,10 @@ if (!performanceSettings.hardwareAcceleration) {
   // 强制使用核显/集成显卡（低功耗 GPU）
   app.commandLine.appendSwitch('force_low_power_gpu')
 }
+// Chromium 磁盘缓存配额（Cache_Data：图片/HTTP 资源）：默认无硬上限，实测会自然长到
+// 数百 MB。256MB 对封面/流媒体分段绰绰有余——超出后 Chromium 按自己的 LRU 淘汰，
+// 不需要应用侧管理。必须在 app ready 前注册才生效。
+app.commandLine.appendSwitch('disk-cache-size', String(256 * 1024 * 1024))
 // 渲染后端：Chromium ANGLE 图形 API 选择。默认 D3D11；NVIDIA 驱动异常/帧节奏异常时
 // 可切 Vulkan（--use-angle=vulkan，高刷帧节奏与 WebGL 吞吐更稳）或用 gl 兜底。
 if (['d3d11', 'vulkan', 'gl'].includes(performanceSettings.renderBackend)) {
@@ -2274,6 +2278,20 @@ function writeSecureCredentials(credentials) {
   fs.renameSync(temporaryPath, credentialsPath)
 }
 
+// 读渲染层 secure-store 命名空间里的一个键（加密落盘格式 `secure-store:<name>`）。
+// 主进程侧的 Spotify 音频通道用它拿 access token——token 从不过渲染层之外还有一条
+// 主进程直读路径，两边看到的是同一份加密数据。
+function readSecureCredentialsField(keyName) {
+  if (!safeStorage.isEncryptionAvailable()) return ''
+  const encrypted = readSecureCredentials()[`secure-store:${keyName}`]
+  if (typeof encrypted !== 'string' || !encrypted) return ''
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+  } catch {
+    return ''
+  }
+}
+
 function readQQMusicSkillKey() {
   if (!safeStorage.isEncryptionAvailable()) return ''
   const encrypted = readSecureCredentials()[QQMUSIC_SKILL_CREDENTIAL]
@@ -2514,6 +2532,12 @@ const guardTrustedIpc = trustedIpc.handle
 // 调用。guardTrustedIpc 的 capabilities 全套只接了约 22 个 handler，其余敏感面用这个
 // 最小守卫兜底——不满足来源时抛错，ipcMain 会把 promise 拒绝给渲染端。
 function assertMainSender(event) {
+  if (typeof event === 'function') {
+    // 被当作 HOF 误用（assertMainSender(async handler)）：返回真正的包装器。
+    // 之前直接调用会因 mainWindow 未初始化在模块加载时抛错，导致整个 app 无法启动。
+    const handler = event
+    return (event, ...args) => { assertMainSender(event); return handler(event, ...args) }
+  }
   if (!mainWindow || event?.sender !== mainWindow.webContents || event?.senderFrame !== mainWindow.webContents.mainFrame) {
     throw new Error('不允许的 IPC 请求来源')
   }
@@ -3689,6 +3713,12 @@ ipcMain.handle('resonance:start', guardTrustedIpc('privileged', async (_event, c
       port: Number(config && config.port) || RESONANCE_DEFAULT_PORT,
       // 设置项「允许局域网发现」关掉时，/discover 返回 404（别人扫不到这个房间）
       discoverable: !(config && config.discoverable === false),
+      // In Party（DG-LAB 多人互控）：公开/私有（6 位密码）房。密码只留在主进程内
+      party: config && config.party && typeof config.party === 'object' ? {
+        visibility: String(config.party.visibility || 'public'),
+        password: String(config.party.password || ''),
+        name: String(config.party.name || ''),
+      } : null,
     })
   } catch (error) {
     return { running: false, error: error && error.message ? error.message : String(error) }
@@ -3728,7 +3758,8 @@ ipcMain.handle('resonance:update-code', guardTrustedIpc('privileged', (_event, c
   resonanceHub ? resonanceHub.updateCode(String(code || '')) : false
 )))
 
-/** 局域网扫描：找出同网段开着共振中转的主机（只读 /discover，匿名信息） */
+/** 局域网扫描：找出同网段开着共振/In Party 中转的主机（只读 /discover，匿名信息）。
+ *  In Party 默认端口与共振相同（25570），另扫 25571-25575 兜端口顺延的房间。 */
 ipcMain.handle('resonance:scan-lan', guardTrustedIpc('privileged', async () => {
   const interfaces = getLanIPv4Addresses()
   const targets = []
@@ -3738,28 +3769,46 @@ ipcMain.handle('resonance:scan-lan', guardTrustedIpc('privileged', async () => {
     const prefix = parts.slice(0, 3).join('.')
     for (let host = 2; host <= 254; host += 1) targets.push(`${prefix}.${host}`)
   }
-  const uniqueTargets = [...new Set(targets)].slice(0, 512)
+  const ports = [RESONANCE_DEFAULT_PORT, 25571, 25572, 25573, 25574, 25575]
   const found = []
-  const probe = async (host) => {
+  const probe = async (host, port) => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 700)
     try {
-      const response = await fetch(`http://${host}:${RESONANCE_DEFAULT_PORT}/discover`, { signal: controller.signal })
+      const response = await fetch(`http://${host}:${port}/discover`, { signal: controller.signal })
       if (!response.ok) return
       const body = await response.json()
-      if (body && body.service === 'waveforge-resonance') {
-        found.push({ address: host, name: String(body.name || ''), memberCount: Number(body.memberCount) || 0, open: body.open === true })
+      if (body && (body.service === 'waveforge-resonance' || body.service === 'waveforge-inparty')) {
+        found.push({
+          address: host,
+          port: Number(port) || RESONANCE_DEFAULT_PORT,
+          name: String(body.name || ''),
+          memberCount: Number(body.memberCount) || 0,
+          open: body.open === true,
+          // In Party 房间标记：成员大厅据此区分「共振房」与「In Party 房」
+          kind: body.service === 'waveforge-inparty' ? 'inparty' : 'resonance',
+          visibility: body.visibility === 'private' ? 'private' : 'public',
+          roomName: typeof body.roomName === 'string' && body.roomName ? body.roomName : undefined,
+        })
       }
     } catch { /* 未响应即视为无服务 */ } finally {
       clearTimeout(timer)
     }
   }
-  const concurrency = 48
-  for (let index = 0; index < uniqueTargets.length; index += concurrency) {
-    await Promise.all(uniqueTargets.slice(index, index + concurrency).map(probe))
+  const jobs = []
+  for (const host of uniqueTargets(targets)) {
+    for (const port of ports) jobs.push(() => probe(host, port))
+  }
+  const concurrency = 96
+  for (let index = 0; index < jobs.length; index += concurrency) {
+    await Promise.all(jobs.slice(index, index + concurrency).map(fn => fn()))
   }
   return found
 }))
+
+function uniqueTargets(targets) {
+  return [...new Set(targets)].slice(0, 512)
+}
 
 
 function getWindowsSystemLocation() {
@@ -3835,6 +3884,11 @@ protocol.registerSchemesAsPrivileged([
       // 修改后必须完全重启应用。
       corsEnabled: true,
     },
+  },
+  {
+    // Spotify 直播（librespot CDN 解密流）：与 waveforge-media 同等的流式特权
+    scheme: 'waveforge-spotify',
+    privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true },
   },
 ])
 
@@ -4226,22 +4280,76 @@ function isServableMediaFile(filePath) {
   return ok
 }
 
+// 媒体扩展名 → Content-Type：video/img/audio 元素与 fetch decodeAudioData 都依赖正确类型
+const MEDIA_PROTOCOL_MIME = {
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mkv': 'video/x-matroska', '.mov': 'video/quicktime',
+  '.avi': 'video/x-msvideo', '.flv': 'video/x-flv', '.m4v': 'video/x-m4v', '.ts': 'video/mp2t',
+  '.mp3': 'audio/mpeg', '.flac': 'audio/flac', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg', '.opus': 'audio/ogg', '.wav': 'audio/wav', '.wma': 'audio/x-ms-wma',
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.bmp': 'image/bmp', '.avif': 'image/avif', '.svg': 'image/svg+xml',
+}
+
 function registerMediaProtocol() {
-  protocol.registerFileProtocol('waveforge-media', (request, callback) => {
+  // protocol.handle（而非 registerFileProtocol）：后者发出的响应**不经过 webRequest
+  // 拦截器**，main.cjs 里 onHeadersReceived 补 CORS 头的补丁对它完全无效——渲染层
+  // MV 对齐链路（getSongEnvelope → decodeAudioUrl）fetch 该协议时被 Chromium 判为
+  // 跨源无 ACAO → "Failed to fetch"（真机 2026-10-20/10-22 实锤：automix render-ok
+  // 但 MvAlign 歌曲包络解码常态化失败 → MV 对齐退化为自由播放）。handle 模式在
+  // handler 里直接带 ACAO 头，且保留 Range 支持（上传的视频壁纸 seek/loop 必需）。
+  protocol.handle('waveforge-media', async (request) => {
     try {
       const url = new URL(request.url)
       const encodedPath = url.pathname.replace(/^\/+/, '')
       const filePath = path.resolve(decodeURIComponent(encodedPath))
 
       if (!filePath || !allowedMediaFiles.has(filePath) || !isServableMediaFile(filePath)) {
-        callback({ error: -6 })
-        return
+        return new Response('not found', { status: 404 })
       }
 
-      callback({ path: filePath })
+      const ext = path.extname(filePath).toLowerCase()
+      const contentType = MEDIA_PROTOCOL_MIME[ext] || 'application/octet-stream'
+      const stat = fs.statSync(filePath)
+      const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('range') || '')
+      const commonHeaders = {
+        'content-type': contentType,
+        'accept-ranges': 'bytes',
+        'access-control-allow-origin': '*',
+      }
+
+      if (!rangeMatch) {
+        return new Response(fs.createReadStream(filePath), {
+          status: 200,
+          headers: { ...commonHeaders, 'content-length': String(stat.size) },
+        })
+      }
+
+      // Range 分片："bytes=500-"（start 到尾）/"bytes=-200"（尾部 200 字节，RFC 9110
+      // suffix-range：start = size-200，不是从头取 200）
+      let start = rangeMatch[1] ? Number(rangeMatch[1]) : 0
+      let end = rangeMatch[2] ? Math.min(Number(rangeMatch[2]), stat.size - 1) : stat.size - 1
+      if (!rangeMatch[1] && rangeMatch[2]) {
+        // suffix-range："bytes=-N" = 最后 N 字节
+        start = Math.max(0, stat.size - Number(rangeMatch[2]))
+        end = stat.size - 1
+      }
+      if (!Number.isFinite(start) || start < 0 || start >= stat.size || end < start) {
+        return new Response('range not satisfiable', {
+          status: 416,
+          headers: { ...commonHeaders, 'content-range': `bytes */${stat.size}` },
+        })
+      }
+      return new Response(fs.createReadStream(filePath, { start, end }), {
+        status: 206,
+        headers: {
+          ...commonHeaders,
+          'content-length': String(end - start + 1),
+          'content-range': `bytes ${start}-${end}/${stat.size}`,
+        },
+      })
     } catch (error) {
       console.warn('[MediaProtocol] Failed to resolve media URL:', error.message)
-      callback({ error: -2 })
+      return new Response('internal error', { status: 500 })
     }
   })
 }
@@ -5309,6 +5417,11 @@ async function createSpotifyLoginWindow(clientId) {
     // OAuth state 防 CSRF：本机任意进程都能 GET /login?code=…，无 state 校验时
     // 攻击者可把自己的授权码注入应用（后续歌单/收藏写操作落在攻击者账号上）。
     const oauthState = crypto.randomBytes(24).toString('base64url')
+    // PKCE（RFC 7636）：授权请求带 code_challenge(S256)，token 请求带 code_verifier。
+    // 对 spotifyd 这个 client 此前"碰巧能用"（未强制 PKCE），但用户自定义 Client ID
+    // （Spotify 新应用一律强制 PKCE）没有 verifier 必定失败——两边现在都覆盖。
+    const codeVerifier = crypto.randomBytes(64).toString('base64url')
+    const codeChallenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url')
     spotifyCallbackServer = http.createServer(async (req, res) => {
       try {
         const url = new URL(req.url, `http://127.0.0.1:${redirectPort}`)
@@ -5327,7 +5440,7 @@ async function createSpotifyLoginWindow(clientId) {
             finish({ success: false, error: '授权校验失败（state 不匹配），请重试' })
             return
           }
-          // 换 token（Spotify 官方 token 端点，POST 不需要 CORS）
+          // 换 token（Spotify 官方 token 端点，POST 不需要 CORS；带 PKCE code_verifier）
           const tokenResp = await fetch('https://accounts.spotify.com/api/token', {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -5336,6 +5449,7 @@ async function createSpotifyLoginWindow(clientId) {
               code,
               redirect_uri: redirectUri,
               client_id: SPOTIFY_CLIENT_ID,
+              code_verifier: codeVerifier,
             }),
           })
           const tokenData = await tokenResp.json()
@@ -5351,11 +5465,14 @@ async function createSpotifyLoginWindow(clientId) {
           let username = ''
           let avatar = ''
           let userId = ''
+          let product = ''
           if (userResp.ok) {
             const me = await userResp.json()
             username = me.display_name || me.id || ''
             userId = me.id || ''
             avatar = me.images?.[0]?.url || ''
+            // 账号档位（premium/free/open）：渲染层据此决定 Spotify 直播还是降级载体匹配
+            product = String(me.product || '')
           }
           // 持久化（通过主窗口 webContents 写 localStorage 或返回给渲染进程）
           const result = {
@@ -5366,6 +5483,7 @@ async function createSpotifyLoginWindow(clientId) {
             username,
             avatar,
             userId,
+            product,
           }
           res.end('<html><body style="background:#111;color:#1DB954;display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;font-size:18px;">✓ 授权成功，可以关闭此窗口。</body></html>')
           finish(result)
@@ -5399,7 +5517,7 @@ async function createSpotifyLoginWindow(clientId) {
         } catch { /* 清理失败不阻塞 */ }
       }
       const scope = 'user-read-private user-read-email playlist-read-private playlist-modify-private playlist-modify-public user-library-read user-library-modify user-top-read user-read-recently-played'
-      const authUrl = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(oauthState)}`
+      const authUrl = `https://accounts.spotify.com/authorize?client_id=${SPOTIFY_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}&state=${encodeURIComponent(oauthState)}&code_challenge=${encodeURIComponent(codeChallenge)}&code_challenge_method=S256`
       void clearSpotifyCookies().then(() => {
         if (settled) return
         spotifyLoginWindow = new BrowserWindow({
@@ -5414,6 +5532,10 @@ async function createSpotifyLoginWindow(clientId) {
             nodeIntegration: false,
             contextIsolation: true,
             session: mainWindow.webContents.session,
+            // 常驻关闭按钮（2026-10-21）：此前按钮在 did-finish-load 注入，Spotify 授权页是
+            // 重 SPA，首次 finish-load 要等它 CDN 全拉完（网络一般时 1 分钟+），期间无框窗口
+            // 没有任何关闭入口。preload 在每个页面的 DOM 建立前执行，与页面加载快慢无关。
+            preload: path.join(__dirname, 'spotify-login-preload.cjs'),
           },
         })
         // Spotify 对 Electron UA 会在授权页报错（页面显示 something wrong），伪装为普通 Chrome
@@ -5440,20 +5562,8 @@ async function createSpotifyLoginWindow(clientId) {
           return { action: 'deny' }
         })
         spotifyLoginWindow.loadURL(authUrl)
-      // 注入关闭按钮
-      spotifyLoginWindow.webContents.on('did-finish-load', () => {
-        spotifyLoginWindow.webContents.executeJavaScript(`
-          (function() {
-            if (document.getElementById('waveforge-close-btn')) return;
-            const b = document.createElement('div');
-            b.id = 'waveforge-close-btn';
-            b.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>';
-            b.style.cssText = 'position:fixed;top:12px;right:12px;width:32px;height:32px;background:rgba(0,0,0,0.55);border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2147483647;color:#fff;';
-            b.addEventListener('click', () => window.close());
-            document.body.appendChild(b);
-          })();
-        `).catch(() => {})
-      })
+      // 关闭按钮已改为 preload 常驻注入（spotify-login-preload.cjs）：Spotify 授权页是重
+      // SPA，did-finish-load 要等 CDN 全拉完（实测 1 分钟+），期间无框窗口没有任何关闭入口。
       spotifyLoginWindow.on('closed', () => {
         spotifyLoginWindow = null
         finish({ success: false, error: '用户取消授权' })
@@ -5529,8 +5639,13 @@ async function createSodaLoginWindow() {
         const configFile = path.join(app.getPath('userData'), 'soda-qr-login.json')
         const readCfg = () => { try { return JSON.parse(fs.readFileSync(configFile, 'utf8')) } catch { return {} } }
         const writeCfg = (patch) => {
-          // 0o600：文件含汽水会话 Cookie + msToken，仅当前用户可读
-          try { fs.writeFileSync(configFile, JSON.stringify({ ...readCfg(), ...(patch || {}) }, null, 2), { encoding: 'utf8', mode: 0o600 }) } catch {}
+          // 0o600：文件含汽水会话 Cookie + msToken，仅当前用户可读。
+          // writeFileSync 的 mode 在 Windows 上受 umask 影响（实测落成 0o666，其它本机
+          // 账号可读）——写入后显式 fchmod 收紧，双保险。
+          try {
+            fs.writeFileSync(configFile, JSON.stringify({ ...readCfg(), ...(patch || {}) }, null, 2), { encoding: 'utf8', mode: 0o600 })
+            fs.chmodSync(configFile, 0o600)
+          } catch {}
         }
         auth.configure({
           getConfig: () => ({
@@ -6155,6 +6270,81 @@ ipcMain.handle('qq-qr-login-cancel', async (event) => {
   }
 })
 
+// ── 登录诊断（平台可用性增强配套）：主动自检 + 环境快照 ─────────────────────
+// 扫码登录失败后渲染进程可发起：自检按「本地后端 → 代理 → DNS → v4/v6 TCP+TLS →
+// HTTPS+时钟偏差」分层探测（desktop/loginSelfCheck.cjs）；快照收集 app/系统环境供诊断报告。
+// 全部脱敏：不含任何平台 cookie/token/凭据。
+const { runLoginSelfCheck } = require('./loginSelfCheck.cjs')
+const { verdictOfSelfCheck, selfCheckChecklist } = require('./loginSelfCheckRules.cjs')
+
+// 各登录链路要探测的上游域名（跟随真实请求走的域）
+const LOGIN_SELF_CHECK_HOSTS = {
+  qq: ['u.y.qq.com', 'mu.y.qq.com', 'api.tencentmusic.com', 'open.weixin.qq.com'],
+  netease: ['interface.music.163.com', 'interface3.music.163.com'],
+  kugou: ['www.kugou.com', 'userservice.kugou.com'],
+  spotify: ['accounts.spotify.com', 'api.spotify.com'],
+  soda: ['music.163.com'],
+}
+
+ipcMain.handle('login-self-check', assertMainSender(async (event, providerId) => {
+  const id = ['qq', 'netease', 'kugou', 'spotify', 'soda'].includes(String(providerId)) ? String(providerId) : null
+  if (!id) return { ok: false, error: '未知平台' }
+  try {
+    // 本地后端探测：WaveForge 的 API 服务跑在 3001（local-server），只对 netease/qq 有意义
+    const backendPort = (id === 'netease' || id === 'qq') ? 3001 : null
+    const result = await runLoginSelfCheck({
+      providerId: id,
+      backend: backendPort ? { status: 'running', port: backendPort } : null,
+      hosts: LOGIN_SELF_CHECK_HOSTS[id],
+      resolveSystemProxy: mainWindow && !mainWindow.isDestroyed()
+        ? (url) => mainWindow.webContents.session.resolveProxy(url)
+        : null,
+    })
+    const verdict = verdictOfSelfCheck(result)
+    return {
+      ok: true,
+      result,
+      verdict,
+      checklist: selfCheckChecklist(result),
+      // 连接层记录：该平台最近的上游请求实际怎么连的（DNS/地址尝试/TLS/错误层）
+      connections: networkRecorder.snapshot(id),
+      app: {
+        version: app.getVersion(),
+        electron: process.versions.electron,
+        node: process.versions.node,
+        platform: process.platform,
+        arch: process.arch,
+        locale: app.getLocale?.() ?? null,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone ?? null,
+      },
+    }
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error) }
+  }
+}))
+
+ipcMain.handle('login-diagnostics-report', assertMainSender(async (event, providerId, failureHint) => {
+  const id = ['qq', 'netease', 'kugou', 'spotify', 'soda'].includes(String(providerId)) ? String(providerId) : null
+  if (!id) return null
+  const os = require('node:os')
+  const lines = [
+    '### WaveForge 登录诊断',
+    '',
+    '```text',
+    `generated: ${new Date().toISOString()}`,
+    `app: ${app.getVersion()} electron ${process.versions.electron} (node ${process.versions.node}) ${process.platform} ${process.arch}`,
+    `os: ${os.release()}, locale ${app.getLocale?.() ?? '?'}, time zone ${Intl.DateTimeFormat().resolvedOptions().timeZone ?? '?'}`,
+    `provider: ${id}`,
+    failureHint && typeof failureHint === 'object'
+      ? `failure: case=${failureHint.case ?? 'unknown'}${failureHint.upstreamCode ? ` upstream=${failureHint.upstreamCode}` : ''}${failureHint.phase ? ` phase=${failureHint.phase}` : ''} message=${JSON.stringify(String(failureHint.message ?? '').slice(0, 160))}`
+      : 'failure: (not provided)',
+    '```',
+    '',
+    '本报告不含任何账号、cookie、token 或其它登录凭据。',
+  ]
+  return lines.join('\n')
+}))
+
 // 监听打开 QQ 登录窗口的请求
 ipcMain.handle('open-qq-login-window', async (event) => {
   assertMainSender(event)
@@ -6174,6 +6364,32 @@ ipcMain.on('app-log', (event, message) => {
   try { assertMainSender(event) } catch { return }
   console.log('[渲染进程]', message)
 })
+
+// ── 连接层网络记录器（诊断面）────────────────────────────────────────
+// 订阅 Node diagnostics_channel，记下发往上游白名单域名的每个请求的连接过程
+// （DNS/逐地址尝试/v4-v6/TCP+TLS 耗时/失败在哪层/Node 错误码）。只进诊断报告
+// （login-self-check IPC 的 connections 字段），不影响任何请求本身。
+const { createNetworkRecorder } = require('./networkRecorder.cjs')
+const networkRecorder = createNetworkRecorder({})
+networkRecorder.start()
+
+// ── 崩溃日志（总是写、同步写）────────────────────────────────────────
+// uncaughtException / unhandledRejection 同步落盘 userData/crash-logs/，保留 20 份。
+// 与 opt-in 的运行日志分开：崩溃是唯一没人有第二次机会记录的事件。
+const { installCrashLog } = require('./crashLog.cjs')
+const crashLog = installCrashLog({
+  crashDir: path.join(app.getPath('userData'), 'crash-logs'),
+  announce: (file) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('crash-log-written', file)
+      } else {
+        dialog.showErrorBox('WaveForge 遇到了一个错误', `崩溃日志已写入：\n${file}`)
+      }
+    } catch { /* 播报失败不循环 */ }
+  },
+})
+ipcMain.handle('crash-log-last-path', assertMainSender(() => crashLog.lastReportPath))
 
 // ── 汽水音乐（抖音）数据桥 ──────────────────────────────────────────
 // 汽水音乐（api.qishui.com/luna）为 protobuf 签名接口，网页直连不可用；
@@ -8467,7 +8683,8 @@ async function createQQSkillKeyWindow() {
           // 仅在 QMK 窗口聚焦时读剪贴板：窗口开着但用户去干别的时，不应把用户
           // 复制的无关内容读进主进程内存做正则匹配（隐私）。本轮跳过，下轮再看。
           if (!qqSkillKeyWindow.isFocused()) return
-          const cb = clipboard.readText() || ''
+          // Electron 44 起 clipboard.readText 返回 Promise<string>，需 await
+          const cb = (await clipboard.readText()) || ''
           const m = cb.match(/qmk-[A-Za-z0-9._-]{8,}/)
           if (m) {
             const star = info.masked.indexOf('*')
@@ -8561,11 +8778,12 @@ ipcMain.handle('audio:get-system-volume', () => {
   return systemVolumeRequest
 })
 
-ipcMain.handle('device-license:copy-id', (event) =>  {
+ipcMain.handle('device-license:copy-id', async (event) =>  {
   try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
     const identity = deviceLicense.getOrCreateDeviceId(app)
-    clipboard.writeText(identity.deviceId)
+    // Electron 44 起 clipboard.writeText 返回 Promise<void>
+    await clipboard.writeText(identity.deviceId)
     return { success: true, ...identity }
   } catch (error) {
     console.error('[DeviceLicense] Failed to copy device ID:', error)
@@ -8573,10 +8791,11 @@ ipcMain.handle('device-license:copy-id', (event) =>  {
   }
 })
 
-ipcMain.handle('device-license:read-clipboard', (event) =>  {
+ipcMain.handle('device-license:read-clipboard', async (event) =>  {
   try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
   try {
-    return { success: true, text: clipboard.readText() }
+    // Electron 44 起 clipboard.readText 返回 Promise<string>
+    return { success: true, text: await clipboard.readText() }
   } catch (error) {
     console.error('[DeviceLicense] Failed to read clipboard:', error)
     return { success: false, error: error?.message || 'Unable to read clipboard' }
@@ -8601,6 +8820,99 @@ ipcMain.handle('device-license:reset', (event) =>  {
     console.error('[DeviceLicense] Reset failed:', error?.message || error)
     return { success: false, error: error?.message || 'Unable to reset device license' }
   }
+})
+
+// ── 开发者身份验证（GitHub 签名提交 + 花名册） ──
+// 信任根：仓库 developers/roster.json（developers/ 目录内维护）。验证链条与
+// 权限边界见 desktop/developer-auth.cjs 头注：App 内只解锁开发者面板/调试
+// 能力；兑换码签发私钥永远不进 App，走 License Studio 工具侧 license-keys issue。
+const developerAuth = require('./developer-auth.cjs')
+
+ipcMain.handle('developer:verify', async (event, payload) => {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
+  try {
+    const token = payload && typeof payload.token === 'string' ? payload.token.trim() : ''
+    const result = await developerAuth.verifyDeveloper({ userDataDir: app.getPath('userData'), token })
+    if (token) {
+      // 不回传明文 token；仅提示是否生效。
+      result.tokenAccepted = result.collaboratorCheck === 'ok'
+    }
+    return { success: result.ok, ...result }
+  } catch (error) {
+    console.warn('[DeveloperAuth] verify failed:', error?.message || error)
+    return { success: false, error: error?.message || '开发者验证失败' }
+  }
+})
+
+ipcMain.handle('developer:state', (event) => {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
+  try {
+    return { success: true, ...developerAuth.developerStateSync({ userDataDir: app.getPath('userData') }) }
+  } catch (error) {
+    return { success: false, error: error?.message || 'Unable to read developer state' }
+  }
+})
+
+ipcMain.handle('developer:logout', (event) => {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
+  developerAuth.clearCache(app.getPath('userData'))
+  return { success: true }
+})
+
+// ── 兑换码签发（License Studio 桥） ──
+// App 内管理面板不持有私钥：签发走 resources/license-studio/issue.cjs 子进程，
+// 私钥只在开发者机 %APPDATA%\WaveForge License Studio\，GitHub 开发者验证门
+// （roster 签名提交 + 协作者强校验）在子进程内完成。逆向 App 只能得到一个
+// "需要本机私钥 + GitHub 验证"的门，无签发能力。
+ipcMain.handle('license-studio:issue', async (event, payload) => {
+  try { assertMainSender(event) } catch (e) { return Promise.reject(e) }
+  // 双保险门禁 1：App 内开发者验证必须已通过（缓存有效）。
+  const devState = developerAuth.developerStateSync({ userDataDir: app.getPath('userData') })
+  if (!devState.ok) {
+    return { success: false, error: '开发者验证未通过或已过期，请先完成开发者验证' }
+  }
+  // 双保险门禁 2：只有开发者构建（isPackaged=false）或存在本地私钥的机器才会真正签出。
+  const request = payload && typeof payload === 'object' ? payload : {}
+  const scriptPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'license-studio', 'issue.cjs')
+    : path.join(app.getAppPath(), 'resources', 'license-studio', 'issue.cjs')
+  if (!fs.existsSync(scriptPath)) {
+    return { success: false, error: '签发器缺失（安装包不完整）' }
+  }
+  return await new Promise((resolve) => {
+    const child = spawn(process.execPath, [scriptPath], {
+      windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', GH_TOKEN: request.githubToken || process.env.GH_TOKEN || '' },
+    })
+    let stdout = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      if (!settled) { settled = true; child.kill(); resolve({ success: false, error: '签发超时' }) }
+    }, 30000)
+    child.stdout.on('data', (chunk) => { stdout += chunk })
+    child.stderr.on('data', () => { /* 静默：错误经 stdout JSON 回传 */ })
+    child.on('close', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      try {
+        const result = JSON.parse(stdout)
+        resolve(result.ok ? { success: true, ...result } : { success: false, error: result.error || '签发被拒' })
+      } catch {
+        resolve({ success: false, error: '签发器输出异常' })
+      }
+    })
+    child.stdin.write(JSON.stringify({
+      deviceId: String(request.deviceId || '').trim(),
+      tier: String(request.tier || 'limited'),
+      feature: String(request.feature || ''),
+      label: String(request.label || ''),
+      expiresDays: Number(request.expiresDays) || 0,
+      note: String(request.note || ''),
+      githubToken: String(request.githubToken || ''),
+    }))
+    child.stdin.end()
+  })
 })
 
 // 根据 vendor/设备名判断 GPU 类型（独显 / 核显 / 未知），用于显卡选择 UI 展示
@@ -9783,6 +10095,9 @@ async function startLocalBackend() {
         ...process.env,
         WAVEFORGE_USERDATA: app.getPath('userData'),
         WAVEFORGE_LOCAL_TOKEN: LOCAL_SERVICE_TOKEN,
+        // 歌单详情磁盘缓存的根与主进程 cachePath 同源（此前漏传导致该缓存固定写
+        // userData\cache，迁移/自定义盘后仍在 C 盘堆积）
+        WAVEFORGE_CACHE_PATH: configManager.getCachePath(),
       },
       stdio: 'pipe',
     })
@@ -10019,6 +10334,16 @@ app.on('will-quit', () => {
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return
   logStartupTiming('Electron app ready')
+  // GPU 瓦片内存预算：播放器切歌会同时持有两张全窗口背景 + 歌词层，Chromium 默认预算
+  // （4K 屏约 874MB）会整层丢出画面——表现为色块闪烁。按 folia 口径翻倍（≥512MB、≤RAM/4）。
+  // 必须在第一个窗口创建前调用（渲染进程启动时复制开关）；命令行显式传入时不覆盖。
+  try {
+    const { applyTileMemoryBudget } = require('./tileMemoryBudget.cjs')
+    const applied = applyTileMemoryBudget({ screen: require('electron').screen, appendSwitch: app.commandLine.appendSwitch, commandLine: app.commandLine })
+    if (applied) logStartupTiming('GPU tile memory budget raised')
+  } catch (error) {
+    console.warn('[TileBudget] 应用失败:', error?.message || error)
+  }
   // 启动时应用上次「稍后」的待更新：拉起 updater 后立即退出，换完文件自动重启到新版本。
   // 返回 true 表示正在重启应用，跳过本窗口创建流程。
   try {
@@ -10108,8 +10433,25 @@ app.whenReady().then(async () => {
   // 这里对 Apple 域名响应统一重写 CORS 头为请求方源（并吞掉不友好的预检 4xx），
   // 只影响跨域响应头，不触碰请求内容。
   const APPLE_CORS_HOST_RE = /(^|\.)(apple\.com|itunes\.apple\.com|mzstatic\.com)$/i
+  // waveforge-media 自定义协议：CORS 头已由 protocol.handle 的 handler 直接附带
+  // （registerFileProtocol 的响应不经过 webRequest，此处的 onHeadersReceived 补丁
+  // 对它无效——保留本段只为 Apple 音源等其他响应头重写）。
+  const WAVEFORGE_MEDIA_ORIGIN = 'waveforge-media://'
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     try {
+      if (details.url.startsWith(WAVEFORGE_MEDIA_ORIGIN)) {
+        // protocol.handle 已带 ACAO 头（见 registerMediaProtocol）；此处仅兜底去重，
+        // 防止 handler 头 + 本补丁头叠加成双 ACAO 反而校验失败
+        const headers = {}
+        for (const key of Object.keys(details.responseHeaders || {})) {
+          headers[String(key).toLowerCase()] = details.responseHeaders[key]
+        }
+        if (!headers['access-control-allow-origin']) {
+          headers['access-control-allow-origin'] = [details.headers?.origin || '*']
+          headers['access-control-allow-headers'] = ['Content-Type']
+        }
+        return callback({ responseHeaders: headers })
+      }
       const hostname = new URL(details.url).hostname
       if (!APPLE_CORS_HOST_RE.test(hostname)) return callback({})
       const requestOrigin = details.headers?.origin || '*'
@@ -10141,8 +10483,98 @@ app.whenReady().then(async () => {
 
   // 初始化配置管理器
   configManager = new ConfigManager(app)
-  const cachePath = configManager.getCachePath()
+  let cachePath = configManager.getCachePath()
   console.log('📁 [Config] 缓存路径:', cachePath)
+
+  // 旧默认位置（userData cache）一次性迁移到当前默认位置：同盘 rename（瞬时），
+  // 跨盘流式复制后删源。仅当旧位置有数据、新位置为空（或不存在）时执行——
+  // 新位置已有内容（二次启动）绝不覆盖。迁移失败静默降级（旧数据原地保留可重试）。
+  const legacyCachePath = path.join(app.getPath('userData'), 'cache')
+  if (path.resolve(legacyCachePath) !== path.resolve(cachePath) && fs.existsSync(legacyCachePath)) {
+    const legacyHasContent = (() => {
+      try { return fs.readdirSync(legacyCachePath).some((n) => n !== 'cache-index.json') } catch { return false }
+    })()
+    const newIsEmpty = (() => {
+      try { return !fs.existsSync(cachePath) || fs.readdirSync(cachePath).length === 0 } catch { return false }
+    })()
+    if (legacyHasContent && newIsEmpty) {
+      try {
+        // 迁移锁（O_EXCL 哨兵）：双实例同时启动会都看到「旧有数据/新为空」，A rename
+        // 完成后 B 的 rmSync(cachePath) 会把 A 刚迁好的缓存连根删掉——先用独占创建的
+        // 哨兵文件保证只有一个实例执行迁移。哨兵留在新位置（无副作用，被缓存清理忽略）。
+        const migrateLock = path.join(path.dirname(cachePath), `.cache-migrate-${path.basename(cachePath)}.lock`)
+        let lockAcquired = false
+        try {
+          fs.closeSync(fs.openSync(migrateLock, 'wx'))
+          lockAcquired = true
+        } catch {
+          lockAcquired = false // 已有实例在迁移
+        }
+        if (lockAcquired) {
+          try {
+            try {
+              fs.renameSync(legacyCachePath, cachePath)
+              console.log('📁 [Config] 缓存已迁移（rename）:', legacyCachePath, '→', cachePath)
+            } catch {
+              // 跨盘：EXDEV 等 → **先全部复制，全部成功后才删源**（两阶段）：中途满盘/
+              // 断电时旧数据原地保留，下次启动重试；边 copy 边删会在中途失败时丢数据。
+              fs.mkdirSync(cachePath, { recursive: true })
+              const copiedEntries = []
+              for (const entry of fs.readdirSync(legacyCachePath, { withFileTypes: true })) {
+                const from = path.join(legacyCachePath, entry.name)
+                const to = path.join(cachePath, entry.name)
+                if (entry.isDirectory()) fs.cpSync(from, to, { recursive: true })
+                else fs.copyFileSync(from, to)
+                copiedEntries.push({ from, to, isDir: entry.isDirectory() })
+              }
+              for (const { from, isDir } of copiedEntries) {
+                try { fs.rmSync(from, { recursive: true, force: true }) } catch (e) {
+                  // 删源失败（文件被占用等）：旧数据残留无害，下次启动重试
+                  console.error('📁 [Config] 迁移删源失败（残留无害）:', from, e?.message || e)
+                }
+              }
+              console.log('📁 [Config] 缓存已迁移（copy）:', legacyCachePath, '→', cachePath)
+            }
+            // 音频缓存索引的 filePath 迁移：旧索引条目存绝对路径（指向 C 盘旧位置），
+            // 不改写的话 loadCacheIndex 的 tempRoot 校验会把全部条目过滤掉 → 文件成孤儿
+            // 被 cleanupOldFiles 删除（实测丢 125 个音频）。把绝对路径重写为相对文件名
+            //（新版索引格式，加载时按新 tempRoot 拼回）；已是相对名的条目跳过。
+            try {
+              const indexPath = path.join(cachePath, 'temp', 'cache-index.json')
+              if (fs.existsSync(indexPath)) {
+                const items = JSON.parse(fs.readFileSync(indexPath, 'utf8'))
+                if (Array.isArray(items)) {
+                  const newTempRoot = path.join(cachePath, 'temp')
+                  let rewritten = 0
+                  for (const item of items) {
+                    if (typeof item.filePath !== 'string' || !item.filePath) continue
+                    if (!path.isAbsolute(item.filePath)) continue
+                    const resolved = path.resolve(item.filePath)
+                    if (resolved.toLowerCase().startsWith(legacyCachePath.toLowerCase() + path.sep)) {
+                      item.filePath = path.relative(newTempRoot, path.join(newTempRoot, path.basename(resolved)))
+                      rewritten++
+                    } else {
+                      // 指向其它位置的条目无法映射 → 删除条目（文件由清理逻辑自然淘汰）
+                      item.filePath = ''
+                      rewritten++
+                    }
+                  }
+                  if (rewritten > 0) fs.writeFileSync(indexPath, JSON.stringify(items, null, 2), 'utf8')
+                  if (rewritten) console.log(`📁 [Config] 缓存索引已改写 ${rewritten} 条（绝对路径 → 相对文件名）`)
+                }
+              }
+            } catch (indexError) {
+              console.error('📁 [Config] 缓存索引改写失败（文件仍在，索引会重建）:', indexError?.message || indexError)
+            }
+          } finally {
+            try { fs.rmSync(migrateLock, { force: true }) } catch {}
+          }
+        }
+      } catch (error) {
+        console.error('📁 [Config] 缓存迁移失败（旧数据保留，下次启动重试）:', error?.message || error)
+      }
+    }
+  }
   loadRemoteSettings()
   
   // 创建缓存目录结构
@@ -10188,6 +10620,47 @@ app.whenReady().then(async () => {
   
   // Setup render runtime IPC handlers
   automixLog.init(app)
+
+  // ── Spotify 数据桥（api-partner GraphQL，移植自 folia，MIT）──
+  // 借用官方 Web Player client_id 调 api.spotify.com 会被全局 429 限流（真机 2026-10-20：
+  // browse/search/me 全 429 → 首页/歌单全空）；api-partner 的 GraphQL persisted query
+  // 不在 Web API 限流体系内。会话凭据 safeStorage 加密存主进程，渲染层仅见账号摘要。
+  const { createSpotifyPartnerBridge } = require('./spotify-partner-bridge.cjs')
+  // 项目未依赖 electron-store：给一个等价的最小 JSON 文件 store（get/set/delete），
+  // 写盘走 safeStorage 加密由 bridge 内部完成，这里只做明文容器读写。
+  const partnerStore = (() => {
+    const fsMod = require('node:fs')
+    const pathMod = require('node:path')
+    const file = pathMod.join(app.getPath('userData'), 'spotify-partner-session.json')
+    let cache = null
+    const load = () => {
+      if (cache) return cache
+      try { cache = JSON.parse(fsMod.readFileSync(file, 'utf8')) } catch { cache = {} }
+      return cache
+    }
+    return {
+      get(key) { return load()[key] },
+      set(key, value) { const data = load(); data[key] = value; cache = data; fsMod.writeFileSync(file, JSON.stringify(data)) },
+      delete(key) { const data = load(); delete data[key]; cache = data; fsMod.writeFileSync(file, JSON.stringify(data)) },
+    }
+  })()
+  const spotifyPartnerBridge = createSpotifyPartnerBridge({
+    store: partnerStore,
+    safeStorage,
+    log: (...args) => console.log(...args),
+    warn: (...args) => console.warn(...args),
+  })
+  ipcMain.handle('spotify-partner:request', async (_event, operation, params) => {
+    try { assertMainSender(_event) } catch { return { ok: false, error: { code: 'unavailable', message: 'Untrusted Spotify request' } } }
+    // 桥的操作方法成功时直接返回数据、失败时抛 SpotifyPartnerError；
+    // 渲染层契约是 { ok, data?, error? }，这里统一包一层。
+    try {
+      const data = await spotifyPartnerBridge.request(operation, params ?? {})
+      return { ok: true, data }
+    } catch (error) {
+      return { ok: false, error: { code: error?.code ?? 'invalid-response', message: String(error?.message ?? error).slice(0, 200) } }
+    }
+  })
 
   // 渲染进程的 automix 事件（在调用后端之前就发生/退出的情况）也写进同一个日志文件
   ipcMain.handle('automix-log:append', (_event, scope, message) => {
@@ -10643,17 +11116,30 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
         title: '选择缓存存储路径',
         buttonLabel: '选择'
       })
-      
+
       if (result.canceled || result.filePaths.length === 0) {
         return null
       }
-      
+
       const selectedPath = result.filePaths[0]
-      
+
       // 自动保存选择的路径
       const success = configManager.setCachePath(selectedPath)
       if (success) {
         console.log('📁 [Config] 缓存路径已更新:', selectedPath)
+        // 旧位置的现有缓存一次性搬到新选择的位置（与启动迁移共用两阶段逻辑）：
+        // 不搬的话旧缓存成僵尸（GB 级占着旧盘），新位置为空全部重新下载。
+        // 各 runtime 已绑定旧路径实例，本次会话继续用旧位置（无害），重启后切新位置。
+        const previousPath = path.join(app.getPath('userData'), 'cache')
+        if (path.resolve(previousPath) !== path.resolve(selectedPath) && fs.existsSync(previousPath)) {
+          const migration = migrateCacheDir(previousPath, selectedPath)
+          if (migration.migrated) {
+            rewriteAudioCacheIndexPath(selectedPath, previousPath)
+            console.log(`📁 [Config] 旧缓存已迁移到新路径（${migration.method}）`)
+          } else if (migration.error && migration.error !== 'legacy empty' && migration.error !== 'destination not empty') {
+            console.error('📁 [Config] 旧缓存迁移未执行:', migration.error)
+          }
+        }
         return selectedPath
       } else {
         throw new Error('保存配置失败')
@@ -10685,6 +11171,79 @@ ipcMain.handle('audio-download:saveWav', guardTrustedIpc('privileged', async (_e
 
   
   registerMediaProtocol()
+
+  // ── Spotify 直播通道（librespot + waveforge-spotify:// 协议）────────────────
+  // 懒建会话：第一次播放才连 Spotify。librespot 缺 prebuilt 时通道不可用，
+  // 渲染层 issue 失败 → 降级载体匹配（getPlatformCapabilities('spotify') 口径）。
+  const { createSpotifyAudio } = require('./spotifyAudio.cjs')
+  let spotifyAudio = null
+  const getSpotifyAudio = () => {
+    if (!spotifyAudio) {
+      spotifyAudio = createSpotifyAudio({
+        getAccessToken: () => readSecureCredentialsField('spotify_access_token'),
+        log: (message) => console.log(`[Spotify] ${message}`),
+        warn: (message) => console.warn(`[Spotify] ${message}`),
+      })
+    }
+    return spotifyAudio
+  }
+
+  protocol.handle('waveforge-spotify', async (request) => {
+    try {
+      const url = new URL(request.url)
+      // 形如 waveforge-spotify://audio/<trackId>?k=<key>
+      const trackId = url.hostname || url.pathname.split('/')[1]
+      if (url.pathname.replace(/^\/+/, '').split('/')[0] === 'audio' && !trackId) {
+        return new Response('bad request', { status: 400 })
+      }
+      const key = url.searchParams.get('k') ?? ''
+      const range = request.headers.get('range') ?? ''
+      let from = 0
+      let to = null
+      const rangeMatch = /^bytes=(\d*)-(\d*)$/.exec(range)
+      if (rangeMatch) {
+        from = rangeMatch[1] ? Number(rangeMatch[1]) : 0
+        to = rangeMatch[2] ? Number(rangeMatch[2]) : null
+      }
+      const channel = getSpotifyAudio()
+      if (!channel.holds(key)) {
+        return new Response('invalid key', { status: 403 })
+      }
+      const opened = await channel.openRange(key, from, to ?? Number.MAX_SAFE_INTEGER)
+      if (!opened.stream) {
+        return new Response(null, { status: opened.status, headers: opened.headers })
+      }
+      return new Response(opened.stream, { status: opened.status, headers: opened.headers })
+    } catch (error) {
+      const message = String(error?.message ?? error)
+      // key 失效/越界类返回 4xx 让播放器重新走 getSongUrl；CDN 侧失败 5xx 触发上层重试
+      const status = /BAD_KEY|BAD_TRACK_ID|UNAVAILABLE/.test(message) ? 403 : 502
+      console.warn('[Spotify] audio protocol error:', message.slice(0, 160))
+      return new Response(message.slice(0, 200), { status })
+    }
+  })
+
+  // 渲染层取 Spotify 播放 URL：发 key（校验登录态 + trackId，密钥不出主进程语义由协议保证）
+  ipcMain.handle('spotify-audio-issue', assertMainSender(async (_event, trackId, quality) => {
+    try {
+      const channel = getSpotifyAudio()
+      if (!channel.available()) return { ok: false, error: 'SPOTIFY_UNAVAILABLE' }
+      const issued = await channel.issue(String(trackId ?? ''), String(quality ?? 'high'))
+      return { ok: true, ...issued, url: `waveforge-spotify://audio/${encodeURIComponent(String(trackId))}?k=${encodeURIComponent(issued.key)}` }
+    } catch (error) {
+      return { ok: false, error: String(error?.message ?? error).slice(0, 200) }
+    }
+  }))
+
+  // 登录成功后预热 librespot 会话（免费号/缺 prebuilt 静默失败，不影响登录态）
+  ipcMain.handle('spotify-audio-prime', assertMainSender(async () => {
+    try { return { ok: await getSpotifyAudio().prime() } } catch { return { ok: false } }
+  }))
+
+  // 登出/凭据失效：会话、缓存、已发 key 全部作废
+  ipcMain.handle('spotify-audio-invalidate', assertMainSender(async () => {
+    try { getSpotifyAudio().invalidate(); return { ok: true } } catch { return { ok: false } }
+  }))
 
   // 桌面播放器：读取上次的开关与形态设置
   const desktopPlayerSaved = loadDesktopPlayerSettings()

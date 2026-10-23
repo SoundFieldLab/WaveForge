@@ -142,6 +142,68 @@ const mergeLocations = (...locations) => {
   }
 }
 
+const NEIGHBOURHOOD_CACHE_TTL = 24 * 60 * 60 * 1000
+const NEIGHBOURHOOD_CACHE_LIMIT = 300
+const neighbourhoodCache = new Map()
+
+// Overpass 实例按可用性轮询：官方实例高峰期常 502/排队，kumi 镜像要求真实 UA。
+// 任一实例成功后结果进 24h 缓存，同一坐标不会重复打网络。
+const NEIGHBOURHOOD_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+]
+
+// Overpass 查询坐标所在的带名居住区多边形（小区/村落）。OSM 对国内小区的标注是
+// landuse=residential 命名多边形，常规逆地理接口不返回，必须用空间"点在多边形内"查询。
+// 命中容差：GPS 坐标常落在小区边上而非内部，太紧会频繁查空；太松会显示隔壁小区。
+const NEIGHBOURHOOD_RADIUS_M = 120
+
+const resolveNeighbourhood = async (latitude, longitude) => {
+  // 4 位小数（约 11 米）粒度缓存：同小区反反复复的查询只打一次 Overpass
+  const cacheKey = `${latitude.toFixed(4)},${longitude.toFixed(4)}`
+  const cached = neighbourhoodCache.get(cacheKey)
+  if (cached && Date.now() - cached.updatedAt < NEIGHBOURHOOD_CACHE_TTL) return cached.name
+
+  const query = `[out:json][timeout:8];(
+    way["landuse"="residential"]["name"](around:${NEIGHBOURHOOD_RADIUS_M},${latitude.toFixed(6)},${longitude.toFixed(6)});
+    relation["landuse"="residential"]["name"](around:${NEIGHBOURHOOD_RADIUS_M},${latitude.toFixed(6)},${longitude.toFixed(6)});
+  );out tags center 6;`
+
+  for (const endpoint of NEIGHBOURHOOD_ENDPOINTS) {
+    try {
+      const data = await fetchJson(`${endpoint}?data=${encodeURIComponent(query)}`, 'WaveForge/0.1 (local desktop weather neighbourhood lookup)')
+      const elements = Array.isArray(data?.elements) ? data.elements : []
+      let best = null
+      let bestDistance = Number.POSITIVE_INFINITY
+      for (const element of elements) {
+        const name = String(element?.tags?.name || '').trim()
+        const center = element?.center
+        const elementLatitude = Number(center?.lat)
+        const elementLongitude = Number(center?.lon)
+        if (!name || !Number.isFinite(elementLatitude) || !Number.isFinite(elementLongitude)) continue
+        // 距多边形中心超过 ~600m 的小区视为不相关（大居住区多边形中心可能在几百米外）
+        const distanceMeters = Math.hypot(
+          (elementLongitude - longitude) * Math.cos(latitude * Math.PI / 180) * 111_320,
+          (elementLatitude - latitude) * 110_540,
+        )
+        if (distanceMeters > 600) continue
+        if (distanceMeters < bestDistance) {
+          best = name
+          bestDistance = distanceMeters
+        }
+      }
+      if (!best) return ''
+      if (neighbourhoodCache.size >= NEIGHBOURHOOD_CACHE_LIMIT) neighbourhoodCache.delete(neighbourhoodCache.keys().next().value)
+      neighbourhoodCache.set(cacheKey, { name: best, updatedAt: Date.now() })
+      return best
+    } catch {
+      // 该实例拥堵/超时：换下一个实例；全部失败则静默降级（不影响行政三级地址返回）
+    }
+  }
+  return ''
+}
+
 const requestReverseLocation = async (latitude, longitude) => {
   const photonUrl = new URL('https://photon.komoot.io/reverse')
   photonUrl.searchParams.set('lat', String(latitude))
@@ -152,13 +214,24 @@ const requestReverseLocation = async (latitude, longitude) => {
   fallbackUrl.searchParams.set('longitude', String(longitude))
   fallbackUrl.searchParams.set('localityLanguage', 'zh')
 
-  const [photonResult, administrativeResult] = await Promise.allSettled([
+  const [photonResult, administrativeResult, neighbourhoodResult] = await Promise.allSettled([
     fetchJson(photonUrl.toString(), 'WaveForge/0.1 local desktop weather').then(normalizePhoton),
     fetchJson(fallbackUrl.toString(), 'WaveForge/0.1 local desktop weather').then(normalizeBigDataCloud),
+    resolveNeighbourhood(latitude, longitude),
   ])
   const photon = photonResult.status === 'fulfilled' ? photonResult.value : null
   const administrative = administrativeResult.status === 'fulfilled' ? administrativeResult.value : null
+  const neighbourhood = neighbourhoodResult.status === 'fulfilled' ? neighbourhoodResult.value : ''
   const merged = mergeLocations(administrative, photon)
+  // Overpass 点内查询命中的小区名：OSM 系反查源（Photon/BigDataCloud/Nominatim）对国内
+  // 小区几乎不返回 neighbourhood——居住区是带名 landuse 多边形，不是地址对象。命中后写入
+  // neighbourhood 字段（前端取名优先级 street → township → neighbourhood，有路名时仍显示路名）。
+  if (neighbourhood) {
+    merged.neighbourhood = neighbourhood
+    merged.formattedAddress = unique([merged.province, merged.city, merged.district, merged.township, merged.street, neighbourhood]).join('')
+      || merged.formattedAddress
+    merged.displayName = merged.formattedAddress
+  }
   if (merged.formattedAddress) return merged
 
   const nominatimUrl = new URL('https://nominatim.openstreetmap.org/reverse')

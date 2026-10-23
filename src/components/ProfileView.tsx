@@ -31,6 +31,19 @@ import { getAppleLibraryPlaylists, getAppleFavoriteSongs, getAppleRecentPlayed, 
 import { preloadArtwork } from '../services/artworkLoader'
 import { fetchNeteaseRecentSongs } from '../services/neteaseRecentPlayback'
 import { fetchSpotifyMyPlaylists, fetchSpotifyLiked, fetchSpotifyPlaylist, spotifyTrackToSong } from '../services/spotifyService'
+import { fetchPartnerLiked, fetchPartnerMyPlaylists, fetchPartnerPlaylistTracks } from '../services/spotifyPartnerData'
+/** Spotify 曲目拉取（partner 桥优先，未登录/桥失败回落 Web API；ProfileView 各处共用） */
+async function fetchSpotifyTracksPreferred(playlistId: string, limit = 50) {
+  if (playlistId === 'spotify-liked') {
+    const partner = await fetchPartnerLiked(limit).catch(() => null)
+    if (partner) return partner
+    return fetchSpotifyLiked(limit)
+  }
+  const partner = await fetchPartnerPlaylistTracks(playlistId, limit).catch(() => null)
+  if (partner) return partner
+  return fetchSpotifyPlaylist(playlistId, limit)
+}
+
 import { detectQQMusicVip } from '../utils/musicEntitlements'
 import { isAccountFieldsMasked, setAccountFieldsMasked, isPersonalStationProtected, setPersonalStationProtected, getCachedPersonalStation, PERSONAL_STATION_MASK } from '../utils/applePrivacy'
 import { fetchApplePersonalStation } from '../services/appleWebService'
@@ -1047,9 +1060,7 @@ function ProfileView({
       }
       // Spotify：我的歌单 / 我喜欢的歌曲（曲目经 App 层自动匹配载体）
       if (platform === 'spotify') {
-        const tracks = playlist.id === 'spotify-liked'
-          ? await fetchSpotifyLiked(50)
-          : await fetchSpotifyPlaylist(String(playlist.id || ''), 50)
+        const tracks = await fetchSpotifyTracksPreferred(String(playlist.id || 'spotify-liked'), 50)
         const songs = tracks.map(track => spotifyTrackToSong(track))
         if (songs.length > 0) handleSongSelection(songs[0], songs)
         else showPlaylistToast('歌单中暂无可播放歌曲', 'info')
@@ -1214,12 +1225,9 @@ function ProfileView({
         return
       }
       
-      // Spotify：我的歌单 / 我喜欢的歌曲（官方 Web API，曲目经 App 层自动匹配载体）
+      // Spotify：我的歌单 / 我喜欢的歌曲（partner 桥优先，曲目经 App 层自动匹配载体）
       if (platform === 'spotify') {
-        const isLiked = playlist.id === 'spotify-liked'
-        const tracks = isLiked
-          ? await fetchSpotifyLiked(50)
-          : await fetchSpotifyPlaylist(String(playlist.id || ''), 50)
+        const tracks = await fetchSpotifyTracksPreferred(String(playlist.id || 'spotify-liked'), 50)
         commitSelectedPlaylist({ ...playlist, platform: 'spotify' })
         commitManagementPlaylist({ ...playlist, platform: 'spotify' })
         commitPlaylistSongs(tracks.map(track => spotifyTrackToSong(track)))
@@ -1472,7 +1480,7 @@ function ProfileView({
       }
       // Spotify：无最近播放官方接口，尽力而为（展示音乐库喜欢的歌曲）
       if (currentPlatform === 'spotify') {
-        const liked = await fetchSpotifyLiked(50)
+        const liked = await fetchPartnerLiked(50).catch(() => null) ?? await fetchSpotifyLiked(50)
         if (recentRequestRef.current.revision !== revision) return
         commitRecent(liked.map((track, index) => ({
           id: track.id || String(index),
@@ -2243,8 +2251,8 @@ function ProfileView({
       const playlists: Playlist[] = []
       try {
         const [playlistsRes, likedRes] = await Promise.allSettled([
-          fetchSpotifyMyPlaylists(50),
-          fetchSpotifyLiked(50),
+          fetchPartnerMyPlaylists(50).catch(() => null).then(v => v ?? fetchSpotifyMyPlaylists(50)),
+          fetchPartnerLiked(50).catch(() => null).then(v => v ?? fetchSpotifyLiked(50)),
         ])
         if (playlistsRes.status === 'fulfilled') {
           for (const item of playlistsRes.value) {

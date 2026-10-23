@@ -23,9 +23,11 @@ export type AudioQualityPreference =
   //   dolby  杜比全景声   D004{档位mid}.mp4
   //   master 臻品母带4.0  AI00{档位mid}.flac
   //   atmos2 臻品音质2.0  Q000{档位mid}.flac
+  //   tqlq   臻品全景声3.0 Q001/Q002{档位mid}.flac（官方 9.x 新档，前缀待权益实测收敛）
   | 'dolby'
   | 'master'
   | 'atmos2'
+  | 'tqlq'
 
 export type AppleAudioQualityPreference =
   | 'auto'
@@ -75,7 +77,7 @@ const QUALITY_VALUES: AudioQualityPreference[] = [
 ]
 
 /** QQ 专属档（AAC 三档 + 杜比全景声）：只有 qq 平台允许持久化，其余平台读到/写入时回落默认。 */
-const QQ_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['192aac', '96aac', '48aac', 'dolby', 'master', 'atmos2']
+const QQ_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['192aac', '96aac', '48aac', 'dolby', 'master', 'atmos2', 'tqlq']
 /** 网易云专属档（沉浸环绕声/超清母带/臻音全景声/高清臻音）：只有 netease 平台允许持久化。 */
 const NETEASE_ONLY_QUALITY_VALUES: AudioQualityPreference[] = ['jyeffect', 'sky', 'jymaster', 'vivid']
 
@@ -272,6 +274,7 @@ const QQ_OPTIONS: QualityOption[] = [
   { value: 'dolby', label: '杜比全景声（Atmos）', shortLabel: '杜比', description: '杜比全景声独立音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
   { value: 'master', label: '臻品母带4.0', shortLabel: '母带', description: '臻品母带音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
   { value: 'atmos2', label: '臻品音质2.0', shortLabel: '臻品', description: '臻品音质/全景声音轨（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
+  { value: 'tqlq', label: '臻品全景声3.0', shortLabel: '全景声', description: '自研空间音频（超级会员专享；取不到时自动回落可用档位）', requiresVip: true, tier: 'svip' },
 ]
 
 /**
@@ -283,7 +286,7 @@ const QQ_OPTIONS: QualityOption[] = [
  *   SQ 无损 / HQ 高品(192k AAC) → VIP；杜比全景声 / 臻品母带4.0 / 臻品音质2.0 / Hi-Res → 超级会员。
  */
 export function getQualityTier(platform: MusicPlatform, value: QualityOptionValue): 'vip' | 'svip' | undefined {
-  const options = platform === 'apple' ? APPLE_OPTIONS : platform === 'qq' ? QQ_OPTIONS : platform === 'netease' ? NETEASE_OPTIONS : GENERIC_OPTIONS
+  const options = platform === 'apple' ? APPLE_OPTIONS : platform === 'qq' ? QQ_OPTIONS : platform === 'netease' ? NETEASE_OPTIONS : platform === 'kugou' ? KUGOU_OPTIONS : GENERIC_OPTIONS
   const hit = options.find(option => option.value === value)
   if (hit?.tier) return hit.tier
   if (!hit?.requiresVip) return undefined
@@ -297,6 +300,21 @@ const GENERIC_OPTIONS: QualityOption[] = [
   { value: 'standard', label: '标准（128k）', shortLabel: '标准', description: '优先使用标准码率音源' },
   { value: 'high', label: '高品（320k）', shortLabel: '高品', description: '优先使用高码率音源（约 320 kbps 档）' },
   { value: 'lossless', label: '无损（FLAC）', shortLabel: '无损', description: '优先请求无损音质', requiresVip: true },
+]
+
+/**
+ * 酷狗专属档位（四层取流 H5→Mobile→Web + 概念版）：
+ * - auto = 自动最高：按无损档请求，酷狗对超出账号权限的档静默回落，实际档从响应回读
+ *   （音质按钮的「自动（…）」括号显示的就是这个实际档）；
+ * - 未登录/签名失败时落到 Mobile 免费直链 = 标准 128k（此时弹层括号会如实显示「标准」）；
+ * - Hi-Res：仅概念版凭据的 hires 档，标记 VIP。
+ */
+const KUGOU_OPTIONS: QualityOption[] = [
+  { value: 'auto', label: '自动最高音质', shortLabel: '自动', description: '按账号权限与歌曲可用性自动选档；实际取到的档在「自动（…）」括号里显示' },
+  { value: 'standard', label: '标准（128k）', shortLabel: '标准', description: '128 kbps，兼容性最好（未登录/免费直链固定此档）' },
+  { value: 'high', label: '高品（320k）', shortLabel: '高品', description: '320 kbps（酷狗 exhigh 档）' },
+  { value: 'lossless', label: '无损（FLAC）', shortLabel: '无损', description: 'FLAC 无损（酷狗 flac 档，需酷狗 VIP）', requiresVip: true, tier: 'vip' },
+  { value: 'hi-res', label: 'Hi-Res 无损', shortLabel: 'Hi-Res', description: 'Hi-Res 高解析档（需概念版凭据 + 酷狗 VIP；取不到自动回落无损）', requiresVip: true, tier: 'vip' },
 ]
 
 const APPLE_OPTIONS: QualityOption[] = [
@@ -334,6 +352,7 @@ export function getQualityOptions(platform: MusicPlatform): QualityOption[] {
   if (platform === 'apple') return APPLE_OPTIONS
   if (platform === 'qq') return QQ_OPTIONS
   if (platform === 'netease') return NETEASE_OPTIONS
+  if (platform === 'kugou') return KUGOU_OPTIONS
   if (platform === 'soda') {
     const tier = getSodaEntitlementTier()
     return buildSodaOptions(tier === 'vip' || tier === 'svip', tier !== 'unknown')
@@ -366,6 +385,8 @@ export function resolvedQualityDisplayName(platform: MusicPlatform, value: strin
         return '臻品母带4.0'
       case 'atmos2':
         return '臻品音质2.0'
+      case 'tqlq':
+        return '臻品全景声3.0'
       default:
         return value
     }
@@ -424,6 +445,8 @@ export function resolvedQualityShortLabel(platform: MusicPlatform, value: string
         return '母带'
       case 'atmos2':
         return '臻品'
+      case 'tqlq':
+        return '全景声'
       default:
         return '自动'
     }
@@ -452,7 +475,22 @@ export function resolvedQualityShortLabel(platform: MusicPlatform, value: string
         return '自动'
     }
   }
-  return '自动'
+  // 酷狗实际档（kugou-gateway 的 level：standard/exhigh/lossless/hires）与其余平台共用的兜底
+  switch (value) {
+    case 'standard':
+    case '128':
+      return '标准'
+    case 'exhigh':
+    case '320':
+      return '高品'
+    case 'lossless':
+    case 'flac':
+      return '无损'
+    case 'hires':
+      return 'Hi-Res'
+    default:
+      return '自动'
+  }
 }
 
 /**
@@ -471,11 +509,15 @@ export function getPlatformSvipState(platform: MusicPlatform): boolean {
 export function isVipOnlyResolvedQuality(platform: MusicPlatform, value: string): boolean {
   if (platform === 'qq') {
     return value === 'flac' || value === 'ape' || value === '192aac'
-      || value === 'dolby' || value === 'master' || value === 'atmos2'
+      || value === 'dolby' || value === 'master' || value === 'atmos2' || value === 'tqlq'
   }
   if (platform === 'netease') {
     return value === 'lossless' || value === 'hires' || value === 'jyeffect'
       || value === 'sky' || value === 'jymaster' || value === 'vivid' || value === 'dolby'
+  }
+  // 酷狗：无损/Hi-Res 是 VIP 档（kugou-gateway 的 level 回读值）
+  if (platform === 'kugou') {
+    return value === 'lossless' || value === 'hires'
   }
   return false
 }

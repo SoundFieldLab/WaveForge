@@ -883,6 +883,21 @@ export default memo(function SearchPanel({
         debugLog('🔍 搜索结果:', { songs: songResult.songs.length })
         setAllResults(songResult.songs)
         setDisplayedResults(songResult.songs.slice(0, SEARCH_PAGE_SIZE))
+        // 首屏封面补齐：上游搜索偶发不带专辑封面（前端只剩 img1v1 占位灰图），
+        // 服务端搜索响应内的后台补齐只写缓存、不回推本次响应。不等用户触底加载，
+        // 首屏落地后立刻对当前页 songs 走一次 albums/covers 批量补齐（命中缓存零开销），
+        // 与 handleLoadMore 同一套陈旧守卫。（此分支 platform 已排除 'fused'，只判 netease）
+        if (platform === 'netease' && songResult.songs.length > 0) {
+          void loadAlbumCovers(songResult.songs.slice(0, SEARCH_PAGE_SIZE)).then(filled => {
+            if (requestId !== searchRequestRef.current) return
+            const changed = filled.some((song, index) => song.album?.picUrl !== songResult.songs[index]?.album?.picUrl)
+            if (!changed) return
+            const updated = [...songResult.songs]
+            filled.forEach((song, index) => { updated[index] = song })
+            setAllResults(updated)
+            setDisplayedResults(updated.slice(0, SEARCH_PAGE_SIZE))
+          })
+        }
       } else if (searchType === 'artist') {
         const artists = await searchArtists(finalKeyword, platform)
         if (requestId !== searchRequestRef.current) return

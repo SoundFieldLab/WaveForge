@@ -38,6 +38,7 @@ import {
 } from './sonnetCredits';
 import { sonnetDebugState } from './sonnetDebug';
 import { resolveSonnetSegmentCameraFocus } from './sonnetCameraTracking';
+import { SmartBeatPulse, applySmartBeatToCamera, type SmartBeatEffectFrame } from './smartBeat';
 
 // src/components/visualizer/sonnet/createSonnetPixiRuntime.ts
 // Owns Pixi lifecycle and mutates bounded scene views directly from absolute playback time.
@@ -57,6 +58,10 @@ export interface SonnetRuntimeOptions {
     currentTime: MotionValue<number>;
     audioPower?: MotionValue<number>;
     audioBands?: AudioBands;
+    /** 智能动感模式（Smart Beat）：效果开关/强度表（smartBeatSettings.ts 的形状），缺省全开 */
+    smartBeatToggles?: Record<string, { on: boolean; strength: number } | undefined>;
+    /** 智能动感的拍脉冲数据源：renderFrame 每帧喂入（beat/accent/bass，0..1） */
+    smartBeatSample?: () => { beat: number; accent: number; bass: number };
     lyricsFontScale: number;
     staticMode: boolean;
     paused: boolean;
@@ -93,6 +98,10 @@ export class SonnetPixiRuntime {
         focusRanges: { startTime: number; endTime: number }[];
     }>();
 
+    // 智能动感：拍脉冲状态机 + 当前帧效果（renderFrame 每帧更新）
+    private readonly smartBeatPulse = new SmartBeatPulse();
+    private smartBeatFrame: SmartBeatEffectFrame | null = null;
+
     private getShotFocusCache(view: ShotView) {
         const cached = this.shotFocusCache.get(view);
         if (cached) return cached;
@@ -119,7 +128,10 @@ export class SonnetPixiRuntime {
     ) { }
 
     static async create(options: SonnetRuntimeOptions) {
-        const pixi = await import('pixi.js');
+        // 统一经 loadPixi：它先装 pixi.js/unsafe-eval polyfill（CSP 锁死 script-src 'self'
+        // 时直接 import('pixi.js') 会在 Application 初始化抛 unsafe-eval 错误），并抬高精度
+        const { loadPixi } = await import('../loadPixi');
+        const pixi = await loadPixi();
         const app = new pixi.Application();
         const width = Math.max(options.host.clientWidth, 320);
         const height = Math.max(options.host.clientHeight, 240);
@@ -410,6 +422,13 @@ export class SonnetPixiRuntime {
 
         const shake = resolveTimelineShake(time, shakeIntensity);
 
+        // 智能动感：拍脉冲叠加进相机（推近/旋转）——folia 的 beatFx 相机合成同款。
+        // 在 shake 之后、应用进 container 之前改 cameraFrame，所有下游（缩放/旋转/位移）
+        // 自然继承。
+        if (this.smartBeatFrame) {
+            applySmartBeatToCamera(this.smartBeatFrame, cameraFrame as unknown as { scale: number; rotation: number });
+        }
+
         // Tracking/decoration segment selection, focus ranges and reveal time are static per shot;
         // reuse the one-time cache instead of re-filtering and re-mapping on every frame. Same
         // values, so the breathing float and camera focus math produce identical results.
@@ -622,6 +641,11 @@ export class SonnetPixiRuntime {
             sonnetDebugState.paragraphIndex = -1;
             return;
         }
+        // 智能动感：每帧喂拍脉冲快照，产出本帧效果（zoom/tear/…）
+        const smartSample = this.options.smartBeatSample;
+        this.smartBeatFrame = smartSample
+            ? this.smartBeatPulse.update(performance.now(), smartSample(), this.options.smartBeatToggles ?? {})
+            : null;
         const time = this.options.currentTime.get();
         const paragraphIndex = findSonnetParagraphIndexAtTime(this.options.program, time);
         if (paragraphIndex !== this.activeParagraphIndex) {

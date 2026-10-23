@@ -46,7 +46,7 @@ import {
 } from './components/foliaTunings'
 import { getVisualizerRegistryEntry } from './vendor/folia/components/visualizer/registry'
 import type { VisualizerTuningBundle } from './vendor/folia/components/visualizer/tuningRegistry'
-import { AutomixHudBadge, transitionEngineDisplayName, automixHudJumpTarget } from './components/AutomixHudBadge'
+import { AutomixHudBadge, transitionEngineDisplayName, automixHudJumpTarget, AUTOMIX_HUD_JUMP_LEAD_SECONDS } from './components/AutomixHudBadge'
 
 import MiniPlayer from './components/MiniPlayer'
 import Toast from './components/Toast'
@@ -71,14 +71,16 @@ import { FOLIA_STYLES } from './vendor/folia/stylesMeta'
 import { useAudioPulseStore, type AudioPulseStore } from './hooks/useAudioPulse'
 import { useAutoHideCursor } from './hooks/useAutoHideCursor'
 import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl,
-  getSimilarSongs, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine, qqSongCoverUrl } from './services/musicApi'
+  getSimilarSongs, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine, qqSongCoverUrl, searchSongs } from './services/musicApi'
 import { recordAppleRecentPlaybackFallback } from './services/appleRecentPlayback'
 import type { MusicPlatform } from './services/platforms'
 import { getPlatformCapabilities, isPlatformVisible, platformLabel } from './services/platforms'
 import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
 import { getAppleAuthState, clearAppleLogin, type AppleUserInfo } from './services/appleAuth'
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './services/loginExpiry'
-import { resolvePlayableSong, setAppleSongLoved, getLastAppleMutationResult, addAppleTracksToPlaylist, getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleHotSongs, appleLibraryTrackToSong, appleSongToSong, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
+import { setAppleSongLoved, getLastAppleMutationResult, addAppleTracksToPlaylist, getAppleLibraryPlaylists, getAppleLibrarySongs, getAppleHotSongs, appleLibraryTrackToSong, appleSongToSong, resolveAppleLibraryCatalogId, APPLE_LIBRARY_ID_PATTERN } from './services/appleCatalog'
+import { resolvePlayableSongSmart, qualityPreferenceScoreOf } from './services/carrierResolver'
+import type { CarrierPlatformProfile } from './services/carrierSelection'
 import { ensureBridgeRunning, checkBridgeRunning, bridgePlay, bridgeStop, getState as getBridgeState, isBridgeReady, fetchBridgeSpectrum } from './services/appleWebViewBridge'
 import { getAppleRadioFailReason, isAppleNativeStreamEnabled, isAppleEmeCapable, isAppleTrackRadioStation, releaseAppleNativeStream, resolveAppleNativeStream, resolveAppleRadioStream, type AppleNativeStream } from './services/applePlayback'
 import { APPLE_AUTOPLAY_CHANGED_EVENT, readAppleAutoplayEnabled } from './services/appleAutoplaySettings'
@@ -125,6 +127,8 @@ const loadTraditionalView = () => import('./components/TraditionalView')
 const loadResonanceView = () => import('./features/resonance/ResonanceView')
 // 学歌（逐句跟学）：独立模式，练习状态在 src/features/singalong 内承载
 const loadSingAlongView = () => import('./features/singalong/SingAlongView')
+// In Party（DG-LAB 多人互控派对）：独立模式，房间状态在 src/features/inparty 内承载
+const loadInPartyView = () => import('./features/inparty/InPartyView')
 // 模式切换过渡动画时长：最短 3s（高性能机秒切也不一闪而过）；最长 12s 兜底（防止加载异常卡死界面）
 const MODE_TRANSITION_MIN_MS = 3000
 // 快速档（目标模式本次会话已挂载过、内容就绪）：只播一段压紧的丝滑过渡，不让用户白等
@@ -135,13 +139,14 @@ const MODE_TRANSITION_MAX_MS = 12000
 // 各模式懒加载 chunk 的统一入口：过渡动画一开始（点击模式卡片）就提前拉取，
 // 与来源面板的收起动画并行下载/编译，viewModeChanged 到达时 chunk 通常已在内存里——
 // 这就是「切换时做预加载」的核心：把串行的 加载→切换 变成并行的 加载‖动画
-const MODE_CHUNK_LOADERS: Record<'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong', () => Promise<unknown>> = {
+const MODE_CHUNK_LOADERS: Record<'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty', () => Promise<unknown>> = {
   explore: loadExploreView,
   minimal: loadHomeView,
   traditional: loadTraditionalView,
   desktop: loadDesktopView,
   resonance: loadResonanceView,
   singalong: loadSingAlongView,
+  inparty: loadInPartyView,
 }
 const PLAYBACK_NEUTRAL_COLOR = '#6b7280'
 // TV 效能档禁入的重 GPU 歌词模式：多维（R3F WebGL 全速渲染）、Folia（WebGL）、PV（Pixi 60fps ticker）、壁纸（桌面壁纸语义）
@@ -154,6 +159,7 @@ const LazyMVExploreModal = lazy(() => import('./components/MVExploreModal'))
 const LazyDesktopView = lazy(loadDesktopView)
 const LazyTraditionalView = lazy(loadTraditionalView)
 const LazyResonanceView = lazy(loadResonanceView)
+const LazyInPartyView = lazy(loadInPartyView)
 const LazySingAlongView = lazy(loadSingAlongView)
 const loadSearchPanel = () => import('./components/SearchPanel')
 const loadUpNextNotification = () => import('./components/UpNextNotification')
@@ -971,11 +977,61 @@ const buildSodaSourceSwitchToast = (
   return `${heading}暂不可播（${why}），已切换其他来源版本`
 }
 
+/**
+ * In Party 房间悬浮徽标：不在 In Party 模式、但房间还活着（session 单例保活）时，
+ * 右下角常驻「回到房间」。切模式不再退出房间——这是回房入口，也展示在线人数。
+ * chunk 未加载（从未进过 In Party）时静默不渲染。
+ */
+function InPartyRoomBadge({ active }: { active: boolean }) {
+  const [roomInfo, setRoomInfo] = useState<{ name: string; online: number; host: boolean } | null>(null)
+  useEffect(() => {
+    if (!active) return
+    let disposed = false
+    let unsubscribe: (() => void) | null = null
+    void import('./features/inparty/session').then(({ getInPartySession }) => {
+      if (disposed) return
+      const session = getInPartySession()
+      const sync = () => {
+        const snapshot = session.getSnapshot()
+        if (snapshot.live && snapshot.room) {
+          setRoomInfo({
+            name: snapshot.roomName || snapshot.room.roomId,
+            online: snapshot.summary?.online ?? 0,
+            host: snapshot.role === 'host',
+          })
+        } else {
+          setRoomInfo(null)
+        }
+      }
+      sync()
+      unsubscribe = session.subscribe(sync)
+    }).catch(() => undefined)
+    return () => { disposed = true; unsubscribe?.() }
+  }, [active])
+  if (!active || !roomInfo) return null
+  return (
+    <button
+      type="button"
+      onClick={() => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))}
+      className="fixed bottom-5 right-5 z-[90] flex items-center gap-2 rounded-full border px-4 py-2.5 text-xs font-medium shadow-2xl backdrop-blur-md transition-transform hover:scale-[1.03]"
+      style={{ borderColor: 'rgba(255,232,156,0.45)', background: 'linear-gradient(160deg, rgba(30,24,10,0.92), rgba(12,12,14,0.92))', color: '#FFE89C' }}
+      title={`回到 In Party 房间「${roomInfo.name}」`}
+    >
+      <span className="relative flex h-2 w-2">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
+      </span>
+      {roomInfo.host ? '房主' : '房间'}「{roomInfo.name}」· {roomInfo.online} 人在线
+      <span className="text-[10px] text-white/45">点击回房</span>
+    </button>
+  )
+}
+
 function App() {
   // 视图模式状态（探索 / 简约 / 桌面）
   const [viewMode, setViewMode] = useState<ViewMode>(() => {
     const saved = localStorage.getItem('viewMode')
-    let mode: ViewMode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' || saved === 'resonance' || saved === 'singalong' ? saved : 'minimal'
+    let mode: ViewMode = saved === 'explore' || saved === 'minimal' || saved === 'traditional' || saved === 'desktop' || saved === 'resonance' || saved === 'singalong' || saved === 'inparty' ? saved : 'minimal'
     // 上次是「共振」时不要一头扎进共振：回到进共振之前的那个模式，
     // 免得用户关客户端时正好在共振里，下次启动还得手动切出来。学歌同理（它是练习界面，不是常驻界面）。
     if (mode === 'resonance') {
@@ -984,6 +1040,11 @@ function App() {
       else mode = 'minimal'
     }
     if (mode === 'singalong') mode = 'minimal'
+    // In Party 同理：启动不直进派对（回到进入前记录的模式）
+    if (mode === 'inparty') {
+      const previous = localStorage.getItem('waveforge:inparty-entry-mode')
+      mode = previous === 'explore' || previous === 'minimal' || previous === 'traditional' || previous === 'desktop' ? previous : 'minimal'
+    }
     // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面。
     // isTvModeActive()（html.tv-mode）而非 isTv()：真机与 ?tv=1 模拟口径一致。
     return isTvModeActive() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
@@ -1038,7 +1099,7 @@ function App() {
   }, [desktopFusionEnabled, viewMode])
   // 模式切换过渡动画：全屏覆盖掩盖新模式挂载卡顿。to=目标模式，ready=目标内容已就绪，
   // 收起条件 = ready 且 时长 ≥ 最短 3s（慢机 5~10s 加载期间动画无限循环，不会"断片"）。
-  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'; startedAt: number; ready: boolean; quick?: boolean } | null>(null)
+  const [modeTransition, setModeTransition] = useState<{ to: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'; startedAt: number; ready: boolean; quick?: boolean } | null>(null)
   const modeTransitionRef = useRef(modeTransition)
   modeTransitionRef.current = modeTransition
   // 转场动画风格 / 音效（设置 → 个性化；全局设置注册表 'transition' 组同键同事件）
@@ -1511,6 +1572,8 @@ function App() {
     return (saved as 'traditional' | 'bottom-right') || 'traditional'
   })
   const [currentTranslation, setCurrentTranslation] = useState('')
+  /** 当前行的和声翻译（有和声时非空）：现代（右下角）显示第二枚药丸 */
+  const [currentVocalTranslation, setCurrentVocalTranslation] = useState('')
   
   // 罗马音设置
   const [romanEnabled, setRomanEnabled] = useState(() => {
@@ -1605,6 +1668,14 @@ function App() {
     .filter(id => effectiveVisibleFoliaStyles.includes(id))
     .map(id => FOLIA_STYLES.find(style => style.id === id))
     .filter((style): style is (typeof FOLIA_STYLES)[number] => Boolean(style))
+  // 下拉样式条展示顺序：当前样式移到末尾 —— 打开下拉时它天然在视线末端，
+  // 前面全部是可切换的其它样式（用户反馈：当前样式挡在最前面，每次都要越过它找别的）。
+  // 仅影响下拉条的展示顺序，不落盘 —— 参数面板里的手动排序（foliaStyleOrder）仍是事实。
+  const dropdownFoliaStyleEntries = useMemo(() => {
+    const current = visibleFoliaStyleEntries.find(style => style.id === foliaStyle)
+    const rest = visibleFoliaStyleEntries.filter(style => style.id !== foliaStyle)
+    return current ? [...rest, current] : visibleFoliaStyleEntries
+  }, [visibleFoliaStyleEntries, foliaStyle])
   const orderedLyricModes = useMemo(
     () => mergeOrder(ALL_LYRIC_MODES, lyricModeOrder).filter((mode): mode is LyricDisplayMode => ALL_LYRIC_MODES.includes(mode as LyricDisplayMode)),
     [lyricModeOrder],
@@ -2005,6 +2076,8 @@ function App() {
     songId?: string | number
     /** 目标曲歌词（取预载缓存；缺失时沿用当前歌词，提交帧会自然纠正） */
     lyrics: LyricLine[]
+    /** 切轨帧目标词尚未就绪：歌词面板在此期间收起（而不是挂上一曲的词），新词到达即展开 */
+    lyricsPending: boolean
   } | null>(null)
   const visualTrackRef = useRef<typeof visualTrack>(null)
   const wasAudioTransitioningRef = useRef(false)
@@ -2029,8 +2102,25 @@ function App() {
    * 视觉轨道仅在过渡 90% 之后存在，其余时间这两个绑定等于 canonical 值。
    */
   const currentSong = visualTrack ? (playlist[visualTrack.index] ?? canonicalSong) : canonicalSong
-  /** 歌词同理：切轨后歌词面板读目标曲歌词（时钟也已切到目标曲，避免"新时钟配旧歌词"）。 */
-  const lyrics = visualTrack && visualTrack.lyrics.length > 0 ? visualTrack.lyrics : canonicalLyrics
+  /**
+   * 歌词同理：切轨后歌词面板读目标曲歌词（时钟也已切到目标曲，避免"新时钟配旧歌词"）。
+   * 切轨帧目标词未就绪（lyricsPending）时返回空数组——歌词列收起/显示加载态，
+   * 绝不把上一曲的词挂在下一曲歌名下；新词到达（canonical 更新）自然展开。
+   */
+  const lyrics = visualTrack
+    ? (visualTrack.lyrics.length > 0 ? visualTrack.lyrics : visualTrack.lyricsPending ? [] : canonicalLyrics)
+    : canonicalLyrics
+  /** 特殊歌词（对唱分栏 / 背景和声）：宽屏下歌词列右移拉宽（Apple Music 观感），
+   *  普通歌词保持原有左置布局。与 LyricsDisplay 的 hasDuetLines 同口径。 */
+  const hasDuetLyrics = useMemo(
+    () => lyrics.some(line => Boolean(line.isDuet) || (line.agentId || line.agent)),
+    [lyrics],
+  )
+  const hasBackgroundVocalLyrics = useMemo(
+    () => lyrics.some(line => Boolean(line.backgroundVocals?.length)),
+    [lyrics],
+  )
+  const hasSpecialLyrics = hasDuetLyrics || hasBackgroundVocalLyrics
   const currentAppleRadio = currentSong?.appleRadio || null
   const isAppleRadioPlayback = Boolean(currentAppleRadio)
 
@@ -2386,6 +2476,9 @@ function App() {
     //     在部分网络下整批失败）。v6 缓存里存的正是"无 agent、无 backgroundVocals"的
     //     旧骨架（TTL 30 天，重启也不会失效），必须再升一版；**今后任何歌词取数/解析/
     //     合并管线的改动都要随手升这个版本号**，否则等于没改。
+    // v9：修复 parseLyric 时间正则 50f2ea4 引入的捕获组错位（match[1] 变整段、分/秒各
+    //     错一位）——v8 缓存里所有 LRC 源（trans/tlyric/lrc/roma 文本）行时间全部塌到
+    //     0~1s，翻译/罗马音贪心匹配整首失败，必须整体重取。
     // 来源策略进入 key：切语言、登录态、第三方/自适应/主源后不会继续读取旧结果。
     const lyricsPolicyKey = [
       // 跨平台补源换轨进入 key：同一首歌补源前后取词平台不同（汽水源无翻译、网易云源有），
@@ -2401,7 +2494,7 @@ function App() {
       localStorage.getItem('adaptiveLyrics') || 'default',
       localStorage.getItem('primaryLyricsSource') || 'AMLL',
     ].join(':')
-    const lyricsCacheKey = `v8:${lyricsPolicyKey}:${cacheKey}`
+    const lyricsCacheKey = `v9:${lyricsPolicyKey}:${cacheKey}`
     const isFresh = cached
       && cached.lyricsPolicyKey === lyricsPolicyKey
       && Date.now() - (cached.lyricsTimestamp ?? cached.timestamp) < 5 * 60 * 1000
@@ -2672,6 +2765,13 @@ function App() {
     { platform: 'kugou' as MusicPlatform, loggedIn: kugouLoggedIn, tier: platformEntitlements.kugou },
     { platform: 'soda' as MusicPlatform, loggedIn: sodaLoggedIn, tier: platformEntitlements.soda },
   ], [appleLoggedIn, kugouLoggedIn, neteaseLoggedIn, platformEntitlements, qqLoggedIn, sodaLoggedIn, spotifyLoggedIn])
+  // 载体平台档案（平台可用性增强）：登录态 + 会员档 + 用户音质偏好折算分。
+  // 算法模块（carrierSelection）只吃这份档案不做 IO；登录/登出/会员/音质变化经依赖数组即时生效。
+  const carrierProfiles = useMemo<Array<CarrierPlatformProfile>>(() => ([
+    { platform: 'netease', loggedIn: neteaseLoggedIn, tier: platformEntitlements.netease, qualityScore: qualityPreferenceScoreOf('netease') },
+    { platform: 'qq', loggedIn: qqLoggedIn, tier: platformEntitlements.qq, qualityScore: qualityPreferenceScoreOf('qq') },
+    { platform: 'kugou', loggedIn: kugouLoggedIn, tier: platformEntitlements.kugou, qualityScore: qualityPreferenceScoreOf('kugou') },
+  ]), [kugouLoggedIn, neteaseLoggedIn, platformEntitlements, qqLoggedIn])
   const resonanceUserIds = useMemo(() => ({
     netease: neteaseUserId,
     qq: qqUserId,
@@ -3049,11 +3149,30 @@ function App() {
           desktopLyricIndex = Math.min(desktopLyricIndex + 1, playbackDesktopLyricsRef.current.length - 1)
         }
 
-        // 倒计时基准：gapless/autoMix 启用时以 transitionStartTime（=动画起点）为准，
-        // 否则以歌曲结束时间为准。
+        // 倒计时基准：gapless/autoMix 启用时以**真实切点**（计划 sourceStartTime，即
+        // 混音介入点）为准；计划未就绪回退动画起点/曲末。此前用 transitionStartTime
+        // （=动画起点，切点前 ~10s 的视觉窗口）当倒计时目标——「提前 N 秒显示」设置
+        // 比较的是动画窗口而非混音切点，用户设 10s 时卡片实际在真实切点前 4-5s 才弹
+        // （窗口打开时刻 = 动画起点进入 N 秒圈）。改用真实切点后与卡片倒计时数字同源
+        // （upNextEventTime 同样取 automixHud.startAt = dbg.sourceStartTime）。
+        // sourceTrackKey 必须是当前曲：切歌后新计划未武装的空窗里 ref 还挂着上一曲
+        // 的 debug，直接读会把上一曲切点当成这首歌的（timeRemaining 完全错）。
         const useTransitionCountdown = effectiveAutoMixEnabled || effectiveGaplessEnabled
-        const eventTime = useTransitionCountdown ? (transitionStartTime ?? duration) : duration
+        const planDebug = transitionDebugRef.current
+        const planCutAt = planDebug && planDebug.sourceTrackKey === songKey && Number.isFinite(planDebug.sourceStartTime)
+          ? planDebug.sourceStartTime
+          : null
+        const eventTime = useTransitionCountdown
+          ? (planCutAt ?? (transitionStartTime ?? duration))
+          : duration
         const timeRemaining = (eventTime ?? duration) - state.currentTime
+        // 显示窗口下限 = 时间节点药丸的跳转提前量（11s）：药丸点击的落点就是「切点前
+        // 11 秒」，若窗口（用户设置，默认 10s）小于它，跳转后要再播 1 秒卡片才出现——
+        // 用户点药丸的意图就是"去看过渡"，卡片应当场就在。automix 切点已知时窗口
+        // 取 max(设置值, 11s)；无计划（普通播放/gapless 未就绪）维持用户设置。
+        const displayWindow = useTransitionCountdown && planCutAt != null
+          ? Math.max(upNextTime, AUTOMIX_HUD_JUMP_LEAD_SECONDS)
+          : upNextTime
         const inAnimationWindowNow = transitionStartTime === null || state.currentTime >= transitionStartTime
         const effectiveDuration = duration > 0
           ? duration
@@ -3078,11 +3197,15 @@ function App() {
 
         // AI 长混音音频过渡远早于动画点开始（transitioning 全程 true）——只有真正
         // 进入动画窗口后才隐藏"即将播放/即将进入过渡"卡片（卡片负责动画前的倒计时）。
-        if ((state.transitioning && inAnimationWindowNow) || state.transitionState === 'preparing-next') {
+        // 倒计时归零也必须收卡：automix 计划就绪晚于「剩余 N 秒」时，卡片在切点前
+        // 4-5s 才弹出（transitionStartTime 从 null 跳成真实切点，timeRemaining 瞬间
+        // 跳进显示窗）；若过渡动画还没开跑（transitioning 未置位），倒计时已到 0，
+        // 旧条件（只看 transitioning/preparing-next）会让卡片停在「0秒后」数秒。
+        if ((state.transitioning && inAnimationWindowNow) || state.transitionState === 'preparing-next' || timeRemaining <= 0) {
           if (showUpNext) setShowUpNext(false)
         } else if (Date.now() < suppressUpNextUntilRef.current) {
           if (showUpNext) setShowUpNext(false)
-        } else if (canShowUpNextOnCurrentSurface && playMode !== 'repeat' && upNextEnabled && duration > 0 && eventTime !== null && timeRemaining <= upNextTime && timeRemaining > 0) {
+        } else if (canShowUpNextOnCurrentSurface && playMode !== 'repeat' && upNextEnabled && duration > 0 && eventTime !== null && timeRemaining <= displayWindow && timeRemaining > 0) {
           if (!showUpNext && deterministicNextIndex !== undefined) {
             setShowUpNext(true)
           }
@@ -3730,6 +3853,7 @@ function App() {
         setLyrics(cachedLyrics)
         setIsPureMusic(detectPureMusic(cachedLyrics))
         setCurrentTranslation('')
+      setCurrentVocalTranslation('')
         void ensureSongLyrics(normalizedSong, cacheKey)
 
         // Every seamless handoff becomes the new queue anchor. Prepare its
@@ -3964,17 +4088,30 @@ function App() {
     const handleReopenSettings = () => {
       setShowSettings(true)
     }
-    
+
     window.addEventListener('reopenSettings', handleReopenSettings)
-    
+
     return () => {
       window.removeEventListener('reopenSettings', handleReopenSettings)
     }
   }, [])
+
+  // B 站凭据被服务端判定失效（搜索全部走匿名降级成功）：提示重登。
+  // 不改 loginReady 门控（看歌不中断，MV 靠降级照常匹配），只给一次性 toast；
+  // 会话级节流在派发端（bilibiliApi.notifyBilibiliLoginDegraded）。
+  useEffect(() => {
+    const handleBiliLoginExpired = () => {
+      window.dispatchEvent(new CustomEvent('showToast', {
+        detail: { message: 'B站登录已失效，MV 匹配已降级为匿名模式（画质/字幕受限）——建议到 设置→账号 重新扫码登录', type: 'info', duration: 8000 },
+      }))
+    }
+    window.addEventListener('bilibili-login-expired', handleBiliLoginExpired)
+    return () => window.removeEventListener('bilibili-login-expired', handleBiliLoginExpired)
+  }, [])
   
   // 监听视图模式变化
   useEffect(() => {
-    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong') => {
+    const applyMode = (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty') => {
       // TV 效能档无桌面模式：遥控器/远程/恢复路径都不会进入桌面（模式卡片也已隐藏）。
       // 用 isTvModeActive()（html.tv-mode）而不是 isTv()：?tv=1 模拟 TV 时门控也要生效，
       // 否则 PC 模拟测试与真机行为不一致（isTv() 在 PC 上恒 false）。
@@ -3987,9 +4124,13 @@ function App() {
         session.setSuspended(false)
         setResonanceSuspended(false)
       }
+      // In Party 同理：记录进入前模式（返回按钮与启动恢复用）
+      if (mode === 'inparty') {
+        import('./features/inparty/settings').then(({ rememberEntryMode }) => rememberEntryMode(viewModeRef.current)).catch(() => undefined)
+      }
       setViewMode(mode)
-      // 共振/学歌不作为启动后的持久目标；离开后记录普通模式，下次启动回到它
-      if (mode !== 'resonance' && mode !== 'singalong') localStorage.setItem('viewMode', mode)
+      // 共振/学歌/In Party 不作为启动后的持久目标；离开后记录普通模式，下次启动回到它
+      if (mode !== 'resonance' && mode !== 'singalong' && mode !== 'inparty') localStorage.setItem('viewMode', mode)
       setEnteredFromMode(mode)
       // 壁纸监控按需启停（桌面模式 + 联动开启才启动）
       syncWallpaperWatcher(mode)
@@ -4020,8 +4161,8 @@ function App() {
     syncWallpaperWatcher(viewMode)
 
     const handleViewModeChange = (e: Event) => {
-      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
-      // 共振/学歌是插件功能：插件没启用时不该能进这个模式（按钮/卡片/遥控器/注入事件都得拦住）。
+      const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'
+      // 共振/学歌/In Party 是插件功能：插件没启用时不该能进这个模式（按钮/卡片/遥控器/注入事件都得拦住）。
       // 插件中心里已经有「启用」开关，这里做最后一道闸，避免绕过界面直接切进去。
       if (mode === 'resonance' && !isPluginEnabled('resonance')) {
         addToast('「共振 · 一起听」插件未启用：请先在插件中心打开，然后从**顶部模式选择**切换', 'info')
@@ -4029,6 +4170,10 @@ function App() {
       }
       if (mode === 'singalong' && !isPluginEnabled('sing-along')) {
         addToast('「学歌」插件未启用：请先在插件中心打开，然后从**顶部模式选择**切换', 'info')
+        return
+      }
+      if (mode === 'inparty' && !isPluginEnabled('dglab')) {
+        addToast('「In Party」随 DG-LAB 插件提供：请先在插件中心启用 DG-LAB', 'info')
         return
       }
       // 房间里还有人 + 要切去别的模式 → 先问「挂起还是退出」，不能一声不响把房间丢了
@@ -4098,17 +4243,37 @@ function App() {
     }
     
     window.addEventListener('viewModeChanged', handleViewModeChange as EventListener)
+    // In Party「跟播这首」：成员用它把房主正在听的歌搜索并直接播放
+    const handleInPartyPlaySame = async (e: Event) => {
+      const title = String((e as CustomEvent).detail?.title || '').trim()
+      if (!title) return
+      try {
+        const platform = (localStorage.getItem('platform') as MusicPlatform) || 'netease'
+        const result = await searchSongs(title, 5, platform)
+        const candidate = (result?.songs || []).find(song => song.name === title)
+          || (result?.songs || [])[0]
+        if (candidate) {
+          handleSongSelect(candidate)
+          addToast(`已为你跟播《${candidate.name}》`, 'success')
+        } else {
+          addToast(`没找到《${title}》——去搜索页手动找找`, 'info')
+        }
+      } catch {
+        addToast('跟播失败（搜索服务不可用）', 'error')
+      }
+    }
+    window.addEventListener('waveforge:inparty-play-same', handleInPartyPlaySame as EventListener)
     // 点击模式卡片时立即派发：先显示过渡动画（不切模式），等来源模式的面板收起/内容复位后
     // 再经 viewModeChanged 真正切换——动画从头盖到尾，来源内容不会以展开态残留成顶部占位
     const handleTransitionStart = (e: Event) => {
       const mode = (e as CustomEvent).detail as 'explore' | 'minimal' | 'traditional' | 'desktop'
-      if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance', 'singalong'].includes(mode)) return
+      if (!['explore', 'minimal', 'traditional', 'desktop', 'resonance', 'singalong', 'inparty'].includes(mode)) return
       const complexStyle = modeTransitionStyleRef.current === 'complex'
       const warmTarget = visitedModesRef.current.has(mode)
       // ★ 复杂转场的预加载前移：动画一开始就拉目标模式的 chunk（import 天然幂等，重复调用零开销），
       //   与面板收起动画并行下载/编译；等 viewModeChanged 到达时 loadTarget() 直接命中缓存。
       //   简易转场维持旧机制（viewModeChanged 时才加载）。
-      if (complexStyle) void MODE_CHUNK_LOADERS[mode]().catch(() => undefined)
+      if (complexStyle) void MODE_CHUNK_LOADERS[mode as keyof typeof MODE_CHUNK_LOADERS]().catch(() => undefined)
       // 复杂转场：冷目标 → 完整档动画；暖目标（内容已就绪）→ 压紧的快速档，丝滑但不白等。
       // 简易转场：同样每次都播（暖目标用短窗口）——此前暖目标完全不出遮罩，用户实测
       // 「选了简易就再也看不到简易动画，只剩复杂」（2026-10-06）。
@@ -4124,6 +4289,7 @@ function App() {
     return () => {
       window.removeEventListener('wallpaperSyncChanged', onWallpaperSyncChange)
       window.removeEventListener('viewModeChanged', handleViewModeChange as EventListener)
+      window.removeEventListener('waveforge:inparty-play-same', handleInPartyPlaySame as EventListener)
       window.removeEventListener('viewModeTransitionStart', handleTransitionStart as EventListener)
     }
   }, [])
@@ -4578,14 +4744,21 @@ function App() {
   // 若不加门控，视觉会跟着 60s 混音全程走。transitionStartTime 为 null（普通交叉淡化/
   // gapless）时视为始终在窗口内，保持 v1 行为不变。
   const inAnimationWindow = transitionStartTime === null || currentTime >= transitionStartTime
-  // 叠加动画（封面/字/MV 渐变）在过渡的最后一段完成：窗口取"最后 4 秒"与"90% 切换点"的交集，
-  // 使交叉淡化**恰好在视觉轨道切换那一帧到 100%**（随后叠加层退休、由 canonical 无缝接替）。
+  // 叠加动画（封面/字/MV 渐变）在过渡的最后一段完成：窗口取"动画窗口起点 → 90% 切换点"内的
+  // 最后一段（≤4s），使交叉淡化**恰好在视觉轨道切换那一帧到 100%**（随后叠加层退休、由 canonical 无缝接替）。
+  // ⚠️ 渐变区间必须夹在窗口起点与 90% 之间：AI 长混音（dur=60）若直接取"最后 4 秒"，
+  // start=1-4/60=0.933 > 0.9 → 区间倒置，叠加层在 90% 处从 0 直接跳 1（观感"瞬间变"）。
   const overlayProgress = (() => {
     if (!inAnimationWindow) return 0
     const dur = transitionDuration > 0 ? transitionDuration : 20
-    const span = Math.min(4, dur)
-    const start = 1 - span / dur
     const end = 0.9
+    // 进入窗口时的 progress 下限 = 1 - lead/dur（与 transitionStartTime 对应）；
+    // transitionStartTime 为 null（普通交叉/gapless）时窗口起点即 0。
+    const windowStart = transitionStartTime !== null && dur > 0
+      ? Math.max(0, 1 - Math.min(1, (transitionDuration > 0 ? 1 : 0) * (duration - Math.max(0, currentTime < transitionStartTime ? currentTime : transitionStartTime)) / dur))
+      : 0
+    const span = Math.min(4, dur, Math.max(0.1, dur * (end - windowStart)))
+    const start = end - span / dur
     if (transitionProgress >= end) return 1
     return Math.max(0, Math.min(1, (transitionProgress - start) / Math.max(1e-6, end - start)))
   })()
@@ -5246,15 +5419,29 @@ function App() {
   // 下一首播放
   // 「下一首播放」的插入游标：连点两次时第二首会插到第一首前面（顺序反了），
   // 因为每次都算 currentIndex + 1。这里记住上一首插到哪，当前曲目变了就重置。
-  const playNextCursorRef = useRef<{ base: number; at: number }>({ base: -1, at: 0 })
+  // 游标必须校验"插过的歌还在原地"：队列删除/拖动（handleDesktopQueueRemove/Move）
+  // 不重置游标，at 可能指向已删除区间的旧值——插入落点漂移到已播区，还会连带
+  // insertAffectsUpcoming 误判（跳过重预载 → automix 按旧队列切歌）。
+  // 校验法：at-1 位置上一首"下一曲"的歌还在且 base 未变才沿用，否则按 currentIndex+1 重置。
+  const playNextCursorRef = useRef<{ base: number; at: number; lastKey: string }>({ base: -1, at: 0, lastKey: '' })
   const handlePlayNext = (song: Song, toastText = '已添加至下一首播放') => {
     audioPlayer.cancelTransition('play-next queue changed', false)
     bumpQueueRevision()
-    if (playNextCursorRef.current.base !== currentIndexRef.current) {
-      playNextCursorRef.current = { base: currentIndexRef.current, at: currentIndexRef.current + 1 }
+    const liveQueue = playlistRef.current
+    const currentIdx = currentIndexRef.current
+    if (playNextCursorRef.current.base !== currentIdx) {
+      playNextCursorRef.current = { base: currentIdx, at: currentIdx + 1, lastKey: '' }
+    } else {
+      // base 相同也要验游标所指的上一首插入曲还在原位（被删/被拖走则重置）
+      const prevAt = playNextCursorRef.current.at - 1
+      const anchored = prevAt >= 0
+        && prevAt < liveQueue.length
+        && getSongKey(liveQueue[prevAt]) === playNextCursorRef.current.lastKey
+        && prevAt > currentIdx
+      if (!anchored) playNextCursorRef.current = { base: currentIdx, at: currentIdx + 1, lastKey: '' }
     }
     const insertAt = playNextCursorRef.current.at
-    const prependInstead = currentIndexRef.current < 0
+    const prependInstead = currentIdx < 0
     setPlaylist(prev => {
       const next = prev.length === 0
         ? [song]
@@ -5270,7 +5457,7 @@ function App() {
       playlistRef.current = next
       return next
     })
-    playNextCursorRef.current = { base: currentIndexRef.current, at: insertAt + 1 }
+    playNextCursorRef.current = { base: currentIdx, at: insertAt + 1, lastKey: getSongKey(song) }
     // 索引类副作用移出 setState updater：updater 必须是纯函数（StrictMode/并发下可能被重放）
     if (playlist.length === 0 || prependInstead) {
       currentIndexRef.current = 0
@@ -5369,7 +5556,12 @@ function App() {
 
       const result = await likeSong(mutationSong.id.toString(), userId, platform, true, {
         songMid: mutationSong.mid,
-        songType: mutationSong.songType
+        songType: mutationSong.songType,
+        songName: mutationSong.name,
+        songArtists: mutationSong.artists,
+        songAlbumId: mutationSong.album?.id != null ? String(mutationSong.album.id) : undefined,
+        songMixId: (mutationSong as any).mixSongId,
+        songAlbumAudioId: (mutationSong as any).albumAudioId,
       })
       
       if (result.code === 200 || result.result === 100) {
@@ -5656,10 +5848,13 @@ function App() {
       }
 
       // Apple 原生播放被明确关闭且 bridge 未运行时，预载备用载体 URL。
+      // 平台可用性增强管住预载：开关关闭时不再预载载体 URL（与主播放路径同一口径）。
       const audioSource = platform === 'apple'
-        ? resolvePlayableSong(song).then(resolved => resolved
-            ? { songId: resolved.platform === 'qq' ? resolved.mid || resolved.id : resolved.id, platform: resolved.platform || 'netease' }
-            : null)
+        ? (parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)
+          ? resolvePlayableSongSmart(song, { originPlatform: 'apple', profiles: carrierProfiles }).then(resolved => resolved
+              ? { songId: resolved.platform === 'qq' ? (resolved.song.mid || resolved.song.id) : resolved.song.id, platform: resolved.platform }
+              : null)
+          : Promise.resolve(null))
         : Promise.resolve({ songId: (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (song.mid || song.id) : song.id, platform })
       
       // 检查缓存是否已存在且未过期（5分钟内有效）
@@ -5686,7 +5881,8 @@ function App() {
         const resolvedSongId = source.songId
         const resolvedPlatform = source.platform
         debugLog(`⏳ [Preload] URL 缓存未命中，开始获取音频地址...`)
-        getSongUrl(resolvedSongId, resolvedPlatform).catch(() => null).then(url => {
+        // 传 song：酷狗概念版取流通道用 kugouMixSongId/album.mid 提升 hash 匹配率与播放上报质量
+        getSongUrl(resolvedSongId, resolvedPlatform, 2, song).catch(() => null).then(url => {
           if (audioUrlGeneration !== audioUrlCacheGenerationRef.current) return
           if (url && url !== 'SONG_UNAVAILABLE') {
             const latest = preloadCacheRef.current.get(cacheKey)
@@ -5881,8 +6077,13 @@ function App() {
     const analyzeSongForSequencing = async (song: Song) => {
       const platform = song.platform || 'netease'
       const trackKey = getSongKey(song)
-      // Apple：队列条目需先解析载体歌曲取真实音频 URL，避免用 Apple ID 打网易云接口
-      const playable = platform === 'apple' ? await resolvePlayableSong(song) : song
+      // Apple：队列条目需先解析载体歌曲取真实音频 URL，避免用 Apple ID 打网易云接口。
+      // 平台可用性增强管住队列分析：开关关闭时 Apple 条目直接放弃预解析（后续取流同样会拦）。
+      const playable = platform === 'apple'
+        ? (parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)
+          ? await resolvePlayableSongSmart(song, { originPlatform: 'apple', profiles: carrierProfiles }).then(resolved => resolved?.song ?? null)
+          : null)
+        : song
       if (!playable) return null
       // 音质与供源平台绑定：Apple 曲目预载走载体平台（身份仍是 Apple）；其它平台按 override 分流
       const carrierSong: Song = platform === 'apple' && playable !== song
@@ -5899,7 +6100,7 @@ function App() {
         ? override.id
         : (resolvedPlatform === 'qq' || resolvedPlatform === 'soda' || resolvedPlatform === 'kugou') ? (playable.mid || playable.id) : playable.id
       const audioUrlGeneration = audioUrlCacheGenerationRef.current
-      const url = cachedUrlIsFresh ? cached!.url : await getSongUrl(songId, resolvedPlatform)
+      const url = cachedUrlIsFresh ? cached!.url : await getSongUrl(songId, resolvedPlatform, 2, playable)
       if (!url || url === 'SONG_UNAVAILABLE') return null
 
       if (!cachedUrlIsFresh && audioUrlGeneration === audioUrlCacheGenerationRef.current) {
@@ -6036,6 +6237,7 @@ function App() {
     const normalizedSong = normalizeSongCover(normalizeRawSongShape(song))
     const cacheKey = getSongKey(normalizedSong)
     const cachedLyrics = preloadCacheRef.current.get(cacheKey)?.lyrics
+    const targetLyricsReady = Boolean(cachedLyrics && cachedLyrics.length > 0)
     const next: NonNullable<typeof visualTrack> = {
       trackKey: cacheKey,
       index: targetIndex,
@@ -6044,7 +6246,12 @@ function App() {
       artist: normalizedSong.artists.map(artist => artist.name).join(', '),
       albumName: normalizedSong.album?.name,
       songId: normalizedSong.id ?? normalizedSong.mid,
-      lyrics: cachedLyrics && cachedLyrics.length > 0 ? cachedLyrics : lyrics,
+      // 歌词未就绪时兜底空数组：2092 行对 length>0 判空会回落 canonical（仍是旧曲的词），
+      // 但同时置 lyricsPending —— 歌词列在此期间收起（显示"加载中"态），而不是把
+      // 上一曲的歌词挂在下一曲的歌名下（串词，用户实测）。新词到达由 commit 帧
+      // ensureSongLyrics → setLyrics 自然展开。
+      lyrics: targetLyricsReady ? cachedLyrics! : [],
+      lyricsPending: !targetLyricsReady,
     }
     visualTrackRef.current = next
     setVisualTrack(next)
@@ -6119,6 +6326,7 @@ function App() {
     commitCurrentTime(commit.targetTime)
     setDuration(normalizedSong.duration / 1000)
     setCurrentTranslation('')
+        setCurrentVocalTranslation('')
 
     const cached = preloadCacheRef.current.get(cacheKey)
     if (cached && cached.lyrics.length > 0) {
@@ -6338,13 +6546,19 @@ function App() {
       // 需要跨平台载体转换的平台：apple（原生取流失败时）/spotify（无自源音源，始终）。
       // kugou/soda 先试原生播放（汽水走逆向 Web API，免费/试听流可播），
       // 付费/失败时在 URL 为空分支再匹配网易云/QQ 同款。
-      const needsCarrier = !appleHlsStream && !useWebView2 && (normalizedSong.platform === 'apple'
-        || normalizedSong.platform === 'spotify')
+      // 平台可用性增强统一管住所有平台：开关关闭时 apple/spotify 也不再静默借源
+      // （apple 原生可用时根本不进这个分支；走到这里=取流失败/无自源，如实提示）。
+      const crossPlatformFallbackEnabled = parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)
+      const needsCarrier = !appleHlsStream && !useWebView2 && crossPlatformFallbackEnabled
+        && (normalizedSong.platform === 'apple' || normalizedSong.platform === 'spotify')
       let audioSong: Song = normalizedSong
       if (needsCarrier) {
-        const resolved = await resolvePlayableSong(normalizedSong)
+        const resolved = await resolvePlayableSongSmart(normalizedSong, { originPlatform: normalizedSong.platform, profiles: carrierProfiles })
         if (!resolved) {
-          window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: '该歌曲在网易云/QQ 未找到可播放版本', type: 'error' } }))
+          const fallbackTip = crossPlatformFallbackEnabled
+            ? '已开启平台可用性增强，但该歌曲在已登录的平台中未找到可播放版本'
+            : '该歌曲无法在原平台直接播放；可在设置中开启「平台可用性增强」借其它平台音源'
+          window.dispatchEvent(new CustomEvent('app-toast', { detail: { message: fallbackTip, type: 'error' } }))
           const failedLoadRevision = loadRevision
           scheduleDeferred(() => {
             if (failedLoadRevision !== songLoadRevisionRef.current) return
@@ -6352,11 +6566,14 @@ function App() {
           }, 2000)
           return
         }
-        // 身份不换：apple/spotify 曲目借网易云/QQ 载体出声，但歌曲仍是原平台身份
+        // 身份不换：apple/spotify 曲目借载体平台出声，但歌曲仍是原平台身份
         // （platform/歌词/艺人/专辑/收藏不动）；audioSourceOverride 告诉取流层用载体。
         audioSong = {
           ...normalizedSong,
-          audioSourceOverride: { platform: resolved.platform || 'netease', id: String(resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id) },
+          audioSourceOverride: {
+            platform: resolved.platform,
+            id: String(resolved.platform === 'qq' ? (resolved.song.mid || resolved.song.id) : resolved.song.id),
+          },
         }
       }
       if ((normalizedSong.platform || 'netease') === 'qq' && !normalizedSong.album?.picUrl) {
@@ -6381,6 +6598,7 @@ function App() {
       }
       // 清空当前翻译（切歌时）
       setCurrentTranslation('')
+      setCurrentVocalTranslation('')
       
       const platform = audioSong.platform || 'netease'
       const songId = (platform === 'qq' || platform === 'soda' || platform === 'kugou') ? (audioSong.mid || audioSong.id) : audioSong.id
@@ -6538,18 +6756,22 @@ function App() {
             artist: normalizedSong.artists?.map(a => a.name).filter(Boolean).join(' / ') || '',
             reason: fillReason,
           }
-          const resolved = await resolvePlayableSong(normalizedSong)
-          if (resolved && resolved.platform !== normalizedSong.platform) {
-            const carrierUrl = await getSongUrl(resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id, resolved.platform)
+          const resolvedSmart = await resolvePlayableSongSmart(normalizedSong, { originPlatform: normalizedSong.platform, profiles: carrierProfiles })
+          const resolved = resolvedSmart
+            ? (resolvedSmart.platform !== normalizedSong.platform ? resolvedSmart.song : null)
+            : null
+          const resolvedPlatform = resolvedSmart?.platform
+          if (resolved && resolvedPlatform) {
+            const carrierUrl = await getSongUrl(resolvedPlatform === 'qq' ? (resolved.mid || resolved.id) : resolved.id, resolvedPlatform)
             if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE') {
               // 登记补源：歌单行尾显示「补」，让用户知道播的不是原平台音源；
               // 同时把「从哪个平台补的」打到后端控制台（【平台可用性增强】）
               void import('./services/crossFillRegistry')
                 .then(m => {
-                  m.recordCrossFill(sourceSong, resolved.platform as MusicPlatform, String(resolved.mid || resolved.id || ''))
+                  m.recordCrossFill(sourceSong, resolvedPlatform, String(resolved.mid || resolved.id || ''))
                   m.reportCrossPlatformFill({
                     from: (sourceSong.platform || 'netease') as MusicPlatform,
-                    to: resolved.platform as MusicPlatform,
+                    to: resolvedPlatform,
                     ...fillTrackInfo,
                     success: true,
                   })
@@ -6560,7 +6782,7 @@ function App() {
               // 并登记进 crossFillRegistry（音质菜单跨会话也能对上供源平台）。
               normalizedSong = {
                 ...normalizedSong,
-                audioSourceOverride: { platform: resolved.platform as MusicPlatform, id: String(resolved.mid || resolved.id || '') },
+                audioSourceOverride: { platform: resolvedPlatform, id: String(resolved.mid || resolved.id || '') },
               }
               url = carrierUrl
             }
@@ -6677,17 +6899,24 @@ function App() {
             return
           }
 
-          // WebView2 也不可用时回退网易云/QQ 载体（避免把用户晾在 0:00）。
-              const resolved = await resolvePlayableSong(normalizedSong)
-              if (resolved && isLatestLoad()) {
-                const carrierId = resolved.platform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
-                const carrierUrl = await getSongUrl(carrierId, resolved.platform || 'netease')
+          // WebView2 也不可用时回退载体（避免把用户晾在 0:00）。
+          // 平台可用性增强管住最后回退：开关关闭时如实提示，不再静默借源。
+          if (!parseStoredBoolean(localStorage.getItem('crossPlatformFallbackEnabled'), false)) {
+            addToast('Apple 播放失败（CENC 与兼容层均不可用）；可在设置中开启「平台可用性增强」借其它平台音源', 'error')
+            return
+          }
+              const resolvedSmart = await resolvePlayableSongSmart(normalizedSong, { originPlatform: 'apple', profiles: carrierProfiles })
+              const resolved = resolvedSmart?.song ?? null
+              const resolvedPlatform = resolvedSmart?.platform
+              if (resolved && resolvedPlatform && isLatestLoad()) {
+                const carrierId = resolvedPlatform === 'qq' ? (resolved.mid || resolved.id) : resolved.id
+                const carrierUrl = await getSongUrl(carrierId, resolvedPlatform)
                 if (carrierUrl && carrierUrl !== 'SONG_UNAVAILABLE' && isLatestLoad()) {
                   // 身份不换：HLS 失败回落载体时同样保留原平台身份（Apple 仍是 Apple），
                   // 只借载体音频；详情/收藏/歌单操作继续按 Apple 平台走。
                   normalizedSong = {
                     ...normalizedSong,
-                    audioSourceOverride: { platform: resolved.platform || 'netease', id: String(carrierId || '') },
+                    audioSourceOverride: { platform: resolvedPlatform, id: String(carrierId || '') },
                   }
                   url = carrierUrl
                   setCurrentTrack(createTrackFromSong(normalizedSong, url))
@@ -6696,7 +6925,7 @@ function App() {
               started = await audioPlayer.loadAndPlay(carrierDeckUrl, volume, buildDeckMetadata(normalizedSong, carrierDeckUrl, songIndex, {
                 trackKey: cacheKey,
                 duration: normalizedSong.duration / 1000,
-                albumId: getLocalAlbumIdentifier(normalizedSong, resolved.platform || 'netease') || undefined,
+                albumId: getLocalAlbumIdentifier(normalizedSong, resolvedPlatform) || undefined,
                 albumCover: normalizedSong.album?.picUrl || undefined,
               }))
               if (started && lyricDisplayModeRef.current === 'video') {
@@ -6838,6 +7067,12 @@ function App() {
     currentIndexRef.current = newIndex
     setCurrentIndex(newIndex)
     loadAndPlaySong(livePlaylist[newIndex], newIndex, livePlaylist)
+    // 与 handlePlayNext 同款立即重预载：cancelTransition 已清掉旧 standby/快照，
+    // loadAndPlaySong 尾部的重预载要等整条取流链（getSongUrl 0.5-6s）才跑——
+    // 不在这里先按新队列注入「下一首」的话，上一曲后第一首播完时引擎无 standby，
+    // automix/无缝衔接退化为 idle 完整加载（1-2s 静音缝）。
+    const prevRevision = bumpQueueRevision()
+    window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, prevRevision, playMode, playlistRef.current), 0)
   }
 
   // 下一曲
@@ -7234,8 +7469,17 @@ function App() {
       const handled = watchPlayerRef.current.togglePlay()
       if (handled) return
     }
+    // 失败/空载恢复：选了歌但引擎 deck 无源（上一次播放失败被清理、或启动恢复未完成）时，
+    // togglePlay 会在 !active?.src 处静默 return——用户点「播放」毫无反应。这里重新走完整
+    // loadAndPlaySong（含 URL 拉取与失败提示），让重试真正生效。
+    const deck = audioPlayerRef.current?.getAudioElement?.()
+    if (currentSong && !isPlaying && (!deck || !deck.src)) {
+      const index = currentIndexRef.current
+      void loadAndPlaySongRef.current(currentSong, index, playlistRef.current.length ? playlistRef.current : undefined)
+      return
+    }
     audioPlayerRef.current.togglePlay()
-  }, [lyricDisplayMode])
+  }, [currentSong, isPlaying, lyricDisplayMode])
   handlePlayPauseRef.current = handlePlayPause
 
   useEffect(() => {
@@ -8723,6 +8967,17 @@ function App() {
         setSpotifyEntitlement(tier)
         if (profile.product) localStorage.setItem('spotify_product', profile.product)
       }))
+      // 会话播种（2026-10-21）：OAuth 与数据桥（api-partner GraphQL）是两套会话。旧路径要求
+      // 用户再到系统浏览器点一次授权做"静默同步"，实测常被忽略 → 桥永远未登录 → 首页/
+      // 探索页/歌单数据全空。同一 client_id 下 OAuth token 与桥通用，直接播种即可。
+      void import('./services/spotifyPartnerClient').then(async ({ spotifyPartnerSeedSession }) => {
+        await spotifyPartnerSeedSession({
+          accessToken: result.accessToken,
+          refreshToken: result.refreshToken,
+          expiresIn: result.expiresIn,
+          user: { nickname: result.username || 'Spotify' },
+        })
+      }).catch(() => undefined)
       setAuthRevision(previous => previous + 1)
       window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify', userId: result.userId || '' } }))
       addToast('Spotify 授权成功', 'success')
@@ -8884,6 +9139,27 @@ function App() {
       }
       if (!spotifyLoggedIn && Boolean(getSecureToken('spotify_access_token'))) {
         setSpotifyLoggedIn(true)
+        // 启动恢复资料（2026-10-22）：恢复路径此前只翻登录标志，不落
+        // username/avatar/user_id —— 重启后个人信息面板资料卡空白、"我的歌单"
+        // 判不了本人。partner 桥会话已加密落盘（含 username 摘要），从桥回填。
+        void import('./services/spotifyPartnerClient').then(async ({ spotifyPartnerStatus }) => {
+          const status = await spotifyPartnerStatus()
+          const user = status.user
+          if (!user) return
+          if (user.nickname) {
+            setSpotifyUsername(user.nickname)
+            localStorage.setItem('spotify_username', user.nickname)
+          }
+          if (user.avatarUrl) {
+            setSpotifyAvatar(user.avatarUrl)
+            localStorage.setItem('spotify_avatar', user.avatarUrl)
+          }
+          if (user.username) {
+            setSpotifyUserId(user.username)
+            localStorage.setItem('spotify_user_id', user.username)
+          }
+          setAuthRevision(previous => previous + 1)
+        }).catch(() => undefined)
       }
       if (!sodaLoggedIn && Boolean(getSecureToken('soda_token'))) {
         setSodaLoggedIn(true)
@@ -8955,9 +9231,51 @@ function App() {
       setSpotifyUsername(username)
       localStorage.setItem('spotify_username', username)
     }
+    // 资料落盘兜底（2026-10-22）：OAuth 回调路径写 username/avatar/user_id，但用户从
+    // 桌面模式等入口登录时 username 可能没传 —— 这里统一从 partner 桥（已播种，含
+    // username/avatar 摘要）补齐，否则个人信息面板资料卡空白、"我的歌单"判不了本人。
+    if (loggedIn) {
+      void import('./services/spotifyPartnerClient').then(async ({ spotifyPartnerStatus }) => {
+        const status = await spotifyPartnerStatus()
+        const user = status.user
+        if (!user) return
+        if (user.nickname) {
+          setSpotifyUsername(user.nickname)
+          localStorage.setItem('spotify_username', user.nickname)
+        }
+        if (user.avatarUrl) {
+          setSpotifyAvatar(user.avatarUrl)
+          localStorage.setItem('spotify_avatar', user.avatarUrl)
+        }
+        if (user.username) {
+          setSpotifyUserId(user.username)
+          localStorage.setItem('spotify_user_id', user.username)
+        }
+        setAuthRevision(previous => previous + 1)
+      }).catch(() => undefined)
+    }
     setAuthRevision(previous => previous + 1)
     window.dispatchEvent(new CustomEvent('waveforge-auth-changed', { detail: { platform: 'spotify' } }))
     if (loggedIn) addToast('Spotify 登录成功', 'success')
+    // 数据桥（api-partner GraphQL）登录状态同步（2026-10-21 改播种）：旧路径要求用户
+    // 到系统浏览器再点一次授权（60s 轮询），实测常被忽略 → 桥永远未登录 → 首页/探索页
+    // 数据全空。同一 client_id 下 OAuth token 与桥通用——直接播种，不再二次授权。
+    try {
+      const accessToken = getSecureToken('spotify_access_token')
+      const refreshToken = getSecureToken('spotify_refresh_token')
+      if (accessToken && refreshToken) {
+        void import('./services/spotifyPartnerClient').then(async ({ spotifyPartnerSeedSession }) => {
+          await spotifyPartnerSeedSession({
+            accessToken,
+            refreshToken,
+            user: { nickname: username || 'Spotify' },
+          })
+        }).catch(() => undefined)
+      }
+    } catch { /* 播种失败不影响登录态 */ }
+    // librespot 直播通道预热：登录成功后主进程提前连 Spotify（第一次播放零等待）。
+    // 免费号/通道不可用静默失败——取流时同样会降级。
+    try { void (window as any).electron?.spotifyAudioPrime?.() } catch { /* 忽略 */ }
   }
   const handleSpotifyLogout = () => {
     clearLocalListeningHistory()
@@ -8965,6 +9283,10 @@ function App() {
     playlistDetailCacheRef.current.clear()
     removeSecureToken('spotify_access_token')
     removeSecureToken('spotify_refresh_token')
+    // 数据桥会话同步登出（不清的话换号后桥还持旧账号）
+    try { void (window as any).electron?.spotifyPartner?.request?.('logout') } catch { /* 忽略 */ }
+    // librespot 会话与已发 key 全部作废（generation 守卫）
+    try { void (window as any).electron?.spotifyAudioInvalidate?.() } catch { /* 忽略 */ }
     localStorage.removeItem('spotify_username')
     localStorage.removeItem('spotify_avatar')
     localStorage.removeItem('spotify_user_id')
@@ -9161,7 +9483,9 @@ function App() {
       const mutationSong = platform === 'qq' && !song.mid ? await loadQQSongDetail(song) : song
       const result = await likeSong(mutationSong.id.toString(), userId, platform, false, {
         songMid: mutationSong.mid,
-        songType: mutationSong.songType
+        songType: mutationSong.songType,
+        songName: mutationSong.name,
+        songArtists: mutationSong.artists,
       })
 
       if (result.code === 200 || result.result === 100) {
@@ -9329,6 +9653,27 @@ function App() {
   // 监听喜欢状态变化
   useEffect(() => {
     const restoreLoginState = async () => {
+      // 等凭据安全存储 hydrate 完成再读 cookie：getSecureToken 读的是内存缓存，
+      // 缓存由 initSecureTokenStore（main.tsx 动态 import）经主进程 IPC 异步填充。
+      // 此前 restoreLoginState 在挂载即跑，多数时候 hydrate 还没完成 →
+      // neteaseCookie/qqCookie 读到空串 → QQ/网易云的静默恢复整体跳过 →
+      // 重启后没有用户信息和歌单（localStorage 兜底的登录标志还在，
+      // 服务端 qq-cookie.txt 也在，但 handleQQLogin 没跑 = 服务端会话和 UI 资料都不刷新），
+      // 退出重登才恢复。与下方 hydrate 补偿 effect（9039 注释）同根因的两处链路，此处补齐。
+      try {
+        const { isSecureStoreHydrated } = await import('./services/secureTokenStore')
+        if (!isSecureStoreHydrated()) {
+          await new Promise<void>((resolve) => {
+            const timer = window.setTimeout(done, 8000) // 兜底：桥不可用时 8s 放行，恢复降级不卡死启动
+            function done() {
+              window.clearTimeout(timer)
+              window.removeEventListener('secure-store:hydrated', done)
+              resolve()
+            }
+            window.addEventListener('secure-store:hydrated', done, { once: true })
+          })
+        }
+      } catch { /* import 失败按未 hydrate 处理：上面的等待已兜底放行 */ }
       // cookie 可能早于 30 天有效期就被撤销，而恢复到这一步只会「显示已登录」并把后续请求
       // 变成静默失败。这里在启动后**后台核验一次**，仅在明确判定未登录时提示用户重新登录；
       // 接口异常/网络失败一律按「未知」处理、不动登录态。刻意不做自动登出——误判的代价
@@ -9618,10 +9963,9 @@ function App() {
     onOpenDeviceControl: () => setShowDeviceControl(true),
     onSettingsClick: () => setShowSettings(true),
     onProfileClick: (platform, initialTab = 'created') => {
-      // ProfileView 支持网易云/QQ/Apple/汽水（汽水分支数据自足：资料读 localStorage，
-      // 歌单/最近播放走 /api/soda/* 路由）；酷狗/Spotify 登录用户按钮可见但渲染条件
-      // 短路（点了没反应），改为明确提示
-      if (!['netease', 'qq', 'apple', 'soda'].includes(platform)) {
+      // ProfileView 支持网易云/QQ/Apple/汽水/Spotify（Spotify 分支：资料读 localStorage，
+      // 歌单/喜欢/最近播放走 partner 桥优先）；酷狗登录用户按钮可见但渲染条件短路（点了没反应），改为明确提示
+      if (!['netease', 'qq', 'apple', 'soda', 'spotify'].includes(platform)) {
         addToast('该平台暂不支持查看个人主页', 'info')
         return
       }
@@ -9897,7 +10241,7 @@ function App() {
   const [commentModalFrozen, setCommentModalFrozen] = useState(false)
   if (showCommentModal && !commentModalFrozen) setCommentModalFrozen(true)
   const [profileFrozen, setProfileFrozen] = useState(false)
-  if (showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && !profileFrozen) setProfileFrozen(true)
+  if (showProfile && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn || spotifyLoggedIn) && !profileFrozen) setProfileFrozen(true)
 
   return (
     <>
@@ -10219,6 +10563,10 @@ function App() {
       {/* #10 Gapless 方案弹窗（切歌完成时提示本次衔接方案，2.5s 后淡出） */}
       <GaplessModeToast message={gaplessModeToast} playerTheme={playerTheme} />
 
+      {/* In Party 房间悬浮条：不在 In Party 模式但房间还活着时，右下角常驻「回到房间」。
+          切模式不再退出房间（房间在 session 单例里保活），悬浮条是回来的入口。 */}
+      <InPartyRoomBadge active={viewMode !== 'inparty'} />
+
       {/* 过渡调试弹窗（受「过渡调试」开关控制；top-28 与 Gapless 弹窗错位，二者可能同时出现） */}
       <TransitionDebugToast info={transitionDebugToast} playerTheme={playerTheme} />
 
@@ -10457,6 +10805,26 @@ function App() {
                   readChunk: (filePath: string) => Promise<ArrayBuffer>
                 } } }).electron?.trackStems ?? null,
               }}
+              onSelectMode={mode => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))}
+            />
+            </ModeParkedContext.Provider>
+          </motion.div>
+        )}
+        {renderedMode === 'inparty' && (
+          <motion.div
+            key="inparty-mode"
+            initial={{ opacity: 0, y: 26, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -18, scale: 1.012 }}
+            transition={{ duration: 0.52, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute inset-0 h-full w-full"
+            style={modeLayerStyle({ suspended: false })}
+          >
+            <ModeParkedContext.Provider value={false}>
+            {/* In Party：DG-LAB 多人互控派对。房间状态在 features/inparty 单例里，模式切换不丢房间 */}
+            <LazyInPartyView
+              playerTheme={playerTheme}
+              nowPlaying={currentSong ? { title: currentSong.name, artists: (currentSong.artists || []).map((a: { name: string }) => a.name).join(' / '), playing: isPlaying } : null}
               onSelectMode={mode => window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: mode }))}
             />
             </ModeParkedContext.Provider>
@@ -10856,6 +11224,7 @@ function App() {
               spotifyUsername={spotifyUsername}
               spotifyAvatar={spotifyAvatar}
               spotifyUserId={spotifyUserId}
+              authRevision={authRevision}
               kugouLoggedIn={kugouLoggedIn}
               kugouUsername={kugouUsername}
               kugouAvatar={kugouAvatar}
@@ -11100,7 +11469,7 @@ function App() {
                                     // 一屏 8 个 + 第 9 个露出约 30px（8.3 分法），提示右侧还有内容
                                     itemClassName="w-[calc((100%-3.65rem)/8.3)] shrink-0"
                                   >
-                                    {visibleFoliaStyleEntries.map((style) => {
+                                    {dropdownFoliaStyleEntries.map((style) => {
                                       const active = lyricDisplayMode === 'folia' && foliaStyle === style.id
                                       // 绘光需要 WebGL：不支持时灰掉并标明原因，而不是点了之后抛错
                                       const unsupported = style.id === 'lumiere' && !lumiereSupported
@@ -11524,6 +11893,7 @@ function App() {
                       translationEnabled={translationEnabled}
                       translationPosition="traditional"
                       onCurrentTranslationChange={setCurrentTranslation}
+                      onCurrentVocalTranslationChange={setCurrentVocalTranslation}
                       onSeek={audioPlayer.seek}
                       romanEnabled={romanEnabled}
                       displayMode="single"
@@ -11765,12 +12135,19 @@ function App() {
                   transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
                   className="flex-1 w-full flex items-center justify-center"
                 >
-                  <div className={`w-full flex items-center justify-center ${showLyricsColumn ? 'max-w-7xl h-[85vh] gap-12' : 'gap-0'}`}>
+                  <div className={`w-full flex items-center justify-center ${showLyricsColumn ? 'h-[85vh] gap-12 max-[1600px]:max-w-7xl' : 'gap-0'}`}
+                    style={showLyricsColumn
+                      // 特殊歌词（对唱/和声）：整体更宽（96vw/124rem）；普通歌词 92vw/112rem
+                      ? { width: hasSpecialLyrics ? 'min(96vw, 124rem)' : 'min(92vw, 112rem)' }
+                      : undefined}
+                  >
                   {/* 左侧：封面展示区 */}
                   <motion.div
                     layout="position"
                     transition={{ duration: 0.5, ease: [0.32, 0.72, 0, 1] }}
                     className={`flex flex-col items-center justify-center ${showLyricsColumn ? 'flex-1 gap-6' : 'gap-8 px-6'}`}
+                    // 特殊歌词时封面列收窄（封面:歌词 = 2:3，歌词右移拉宽，Apple Music 观感）
+                    style={showLyricsColumn && hasSpecialLyrics ? { flexGrow: 2 } : undefined}
                   >
                     <AlbumCoverPlayer
                       coverUrl={displayCoverUrl}
@@ -11829,6 +12206,8 @@ function App() {
                     animate={{ opacity: 1 }}
                     transition={{ duration: 0.4, ease: 'easeOut' }}
                     className="flex-1 flex flex-col justify-between h-full min-h-0 py-8"
+                    // 特殊歌词时歌词列拉宽（封面:歌词 = 2:3）
+                    style={hasSpecialLyrics ? { flexGrow: 3 } : undefined}
                   >
                     {/* 歌词显示 */}
                     <div className="flex-1 min-h-0 flex items-center justify-center">
@@ -11841,6 +12220,7 @@ function App() {
                           translationEnabled={translationEnabled}
                           translationPosition={translationPosition}
                           onCurrentTranslationChange={setCurrentTranslation}
+                          onCurrentVocalTranslationChange={setCurrentVocalTranslation}
                           onSeek={audioPlayer.seek}
                           romanEnabled={romanEnabled}
                           backgroundEffect={backgroundEffect}
@@ -11947,6 +12327,7 @@ function App() {
             <LivePlayerControls
                       playbackTimeStore={audioPlayer.playbackTimeStore}
               isPlaying={isPlaying}
+              playPending={transitionState === 'loading-current'}
               duration={duration}
               live={isLive}
               volume={volume}
@@ -11997,6 +12378,7 @@ function App() {
           show={true}
           coverUrl={displayCoverUrl}
           isPlaying={watchTimelineActive ? watchVideoState.playing : isPlaying}
+          playPending={transitionState === 'loading-current'}
           duration={watchTimelineActive && watchVideoState.duration > 0 ? watchVideoState.duration : duration}
           volume={watchTimelineActive ? watchVideoState.volume : volume}
           title={currentTrack.title}
@@ -12078,7 +12460,14 @@ function App() {
           弹窗内部由 QuickSettingsHost 自己 portal 到 body —— 挂在这里而不是各播放页里，
           既避免被四个模式容器的层叠上下文困住，也让弹窗不再受播放页 overflow-hidden 裁切。 */}
       <Suspense fallback={null}>
-        <LazyQuickSettingsHost playback={quickSettingsPlayback} />
+        <LazyQuickSettingsHost
+          playback={quickSettingsPlayback}
+          foliaStyle={foliaStyle}
+          foliaTuning={resolvePanelTuning(userFoliaTunings, foliaStyle)}
+          onFoliaTuningCommit={commitFoliaTuning}
+          onFoliaTuningReset={resetFoliaTuning}
+          hasFoliaTuningOverride={hasFoliaTuningOverride(userFoliaTunings, foliaStyle)}
+        />
       </Suspense>
 
       {/* 播放提示是全局覆盖层：播放页始终允许显示；探索、简约首页和桌面模式
@@ -12282,7 +12671,7 @@ function App() {
           backdrop-filter，退出节点在播放页挂载时会被 Chromium/framer-motion 卡住不卸载
           → 最近播放等弹窗选歌后残留盖在播放页上；普通条件渲染关闭即当帧卸载。 */}
       <Suspense fallback={null}>
-          {profileFrozen && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn) && (
+          {profileFrozen && (neteaseLoggedIn || qqLoggedIn || appleLoggedIn || sodaLoggedIn || spotifyLoggedIn) && (
             <LazyProfileView
             suspended={!showProfile}
             initialPlatform={profileInitialPlatform}

@@ -334,10 +334,15 @@ async function fetchUserPlaylists(
       ...mapped,
     ]
   }
-  // Spotify：我的歌单（token 驱动，无需 userId）
+  // Spotify：我的歌单（token 驱动，无需 userId）。
+  // partner 桥优先（不受 Web API 公共 client_id 限流影响）；未登录/桥失败回落 Web API。
   if (platform === 'spotify') {
-    const { fetchSpotifyMyPlaylists } = await import('./spotifyService')
-    const playlists = await fetchSpotifyMyPlaylists(50)
+    const { fetchPartnerMyPlaylists } = await import('./spotifyPartnerData')
+    const partnerPlaylists = await fetchPartnerMyPlaylists(50).catch(() => null)
+    const playlists = partnerPlaylists ?? await (async () => {
+      const { fetchSpotifyMyPlaylists } = await import('./spotifyService')
+      return fetchSpotifyMyPlaylists(50)
+    })()
     return playlists.map(p => ({
       id: p.id,
       name: p.name,
@@ -638,10 +643,17 @@ export async function getPlaylistDetail(
 ): Promise<any> {
   console.log(`🌐 从服务器获取歌单详情: ${playlistId}`)
   const devMode = localStorage.getItem('developerMode') === 'true'
-  // Spotify：官方 API 歌单详情（前端直连，含歌单名/封面）
+  // Spotify：官方 API 歌单详情（前端直连，含歌单名/封面）。
+  // partner 桥优先（fetchPlaylist GraphQL 不受限流影响），未登录/桥失败回落 Web API。
   if (platform === 'spotify') {
-    const { fetchSpotifyPlaylistDetail, spotifyTrackToSong } = await import('./spotifyService')
-    const detail = await fetchSpotifyPlaylistDetail(playlistId)
+    const { spotifyTrackToSong } = await import('./spotifyService')
+    const detail = await (async () => {
+      const { fetchPartnerPlaylistDetail } = await import('./spotifyPartnerData')
+      const partnerDetail = await fetchPartnerPlaylistDetail(playlistId).catch(() => null)
+      if (partnerDetail) return partnerDetail
+      const { fetchSpotifyPlaylistDetail } = await import('./spotifyService')
+      return fetchSpotifyPlaylistDetail(playlistId)
+    })()
     if (!detail) return { playlist: { id: playlistId, name: 'Spotify 歌单' }, tracks: [], privileges: {} }
     return {
       playlist: {
@@ -901,19 +913,25 @@ export async function getLikedSongs(
     }
     return { ids: [...ids] }
   }
-  // Spotify：官方 Saved Tracks（/v1/me/tracks，token 驱动与 userId 无关）；标识为 Spotify track id 字符串。
-  // 用导出的 spotifyFetch 复用其 token 刷新逻辑；官方单页上限 50、next 为空即到底，20 页封顶防异常循环
+  // Spotify：Saved Tracks。partner 桥优先（fetchLibraryTracks 免限流），失败回落官方 Web API。
+  // 标识为 Spotify track id 字符串。
   if (platform === 'spotify') {
-    const { spotifyFetch } = await import('./spotifyService')
     const ids = new Set<string>()
-    for (let offset = 0; offset < 20 * 50; offset += 50) {
-      const page = await spotifyFetch(`/me/tracks?limit=50&offset=${offset}`)
-      const items = Array.isArray(page?.items) ? page.items : []
-      items.forEach((item: any) => {
-        const trackId = String(item?.track?.id || '').trim()
-        if (trackId) ids.add(trackId)
-      })
-      if (!page?.next || items.length < 50) break
+    const { fetchPartnerLiked } = await import('./spotifyPartnerData')
+    const partnerLiked = await fetchPartnerLiked(1000).catch(() => null)
+    if (partnerLiked && partnerLiked.length > 0) {
+      partnerLiked.forEach(t => { if (t.id) ids.add(t.id) })
+    } else {
+      const { spotifyFetch } = await import('./spotifyService')
+      for (let offset = 0; offset < 20 * 50; offset += 50) {
+        const page = await spotifyFetch(`/me/tracks?limit=50&offset=${offset}`)
+        const items = Array.isArray(page?.items) ? page.items : []
+        items.forEach((item: any) => {
+          const trackId = String(item?.track?.id || '').trim()
+          if (trackId) ids.add(trackId)
+        })
+        if (!page?.next || items.length < 50) break
+      }
     }
     return { ids: [...ids] }
   }
@@ -968,23 +986,35 @@ export async function likeSong(
   userId: string,
   platform: MusicPlatform,
   like: boolean = true,
-  options: { songMid?: string; songType?: number; cookie?: string } = {}
+  options: { songMid?: string; songType?: number; cookie?: string; songName?: string; songArtists?: Array<{ name: string }>; songAlbumId?: string; songMixId?: string | number; songAlbumAudioId?: number } = {}
 ): Promise<any> {
   console.log(`${like ? '❤️' : '💔'} ${like ? '喜欢' : '取消喜欢'}歌曲: ${songId}`)
 
-  // Spotify：官方 API 前端直连（songMid 为 Spotify track id）
+  // Spotify：官方 API 前端直连（songMid 为 Spotify track id）。
+  // partner 桥写操作优先（免 Web API 限流），失败回落官方 Web API。
   if (platform === 'spotify') {
-    const { likeSpotifyTracks } = await import('./spotifyService')
     const trackId = options.songMid || songId
-    const ok = await likeSpotifyTracks([trackId], like)
+    const { spotifyPartnerSetLibrarySaved } = await import('./spotifyPartnerClient')
+    let ok = await spotifyPartnerSetLibrarySaved(`spotify:track:${trackId}`, like).catch(() => false)
+    if (!ok) {
+      const { likeSpotifyTracks } = await import('./spotifyService')
+      ok = await likeSpotifyTracks([trackId], like)
+    }
     if (!ok) throw new Error('Spotify 喜欢操作失败（token 失效或网络异常）')
     invalidateUserPlaylistsCache(platform, userId)
     return { result: 200, platform: 'spotify' }
   }
-  // 酷狗：H5 签名网关喜欢（hash 为歌曲标识）
+  // 酷狗：H5 签名网关喜欢（hash 为歌曲标识；歌名/歌手必传——上游拒绝空名字）
   if (platform === 'kugou') {
     const { likeKugouSong } = await import('./kugouService')
-    const ok = await likeKugouSong({ hash: options.songMid || songId, name: '', artists: [] }, like)
+    const ok = await likeKugouSong({
+      hash: options.songMid || songId,
+      name: options.songName || '',
+      artists: options.songArtists || [],
+      album: options.songAlbumId ? { id: options.songAlbumId } : undefined,
+      mixSongId: options.songMixId,
+      albumAudioId: options.songAlbumAudioId,
+    }, like)
     if (!ok) throw new Error('酷狗喜欢操作失败')
     invalidateUserPlaylistsCache(platform, userId)
     return { result: 100, platform: 'kugou' }
@@ -1041,7 +1071,7 @@ export async function addSongToPlaylist(
   songId: string,
   userId: string,
   platform: MusicPlatform,
-  options: { songMid?: string; songType?: number; cookie?: string } = {}
+  options: { songMid?: string; songType?: number; cookie?: string; songName?: string; songArtists?: Array<{ name: string }>; songMixId?: string | number; songAlbumAudioId?: number } = {}
 ): Promise<any> {
   console.log(`➕ 添加歌曲 ${songId} 到歌单 ${playlistId}`)
 
@@ -1067,10 +1097,17 @@ export async function addSongToPlaylist(
     invalidateUserPlaylistsCache(platform, userId)
     return { result: 200, platform: 'spotify' }
   }
-  // 酷狗：H5 签名网关加歌
+  // 酷狗：H5 签名网关加歌（/v6/add_song 拒绝空歌名；上游认数字 listid，
+  // 传入 specialid/collection_id 时由 addKugouSongToPlaylist 内部反查）
   if (platform === 'kugou') {
     const { addKugouSongToPlaylist } = await import('./kugouService')
-    const ok = await addKugouSongToPlaylist(playlistId, { hash: options.songMid || songId, name: '', artists: [] })
+    const ok = await addKugouSongToPlaylist(playlistId, {
+      hash: options.songMid || songId,
+      name: options.songName || '',
+      artists: options.songArtists || [],
+      mixSongId: options.songMixId,
+      albumAudioId: options.songAlbumAudioId,
+    })
     if (!ok) throw new Error('酷狗加歌失败')
     invalidateUserPlaylistsCache(platform, userId)
     return { result: 100, platform: 'kugou' }
@@ -1321,9 +1358,26 @@ export async function deletePlaylist(
     invalidateUserPlaylistsCache(platform, localStorage.getItem('soda_user_id') || '')
     return { result: 200, platform: 'soda' }
   }
-  // Spotify Web API 无删除歌单接口；酷狗无删除网关。均诚实拦截，
+  // 酷狗：/v2/delete_list（2026-10-22 逆向验证）。type=0 删除自建；此处由右键「删除歌单」进入，
+  // 只删自建（取消收藏走 subscribePlaylist(false)，入口在收藏歌单右键）。
+  // 上游只认数字 listid；调用方常持有 specialid（两者不同！），从用户歌单缓存反查真实 listid。
+  if (platform === 'kugou') {
+    const { deleteKugouUserPlaylist, fetchKugouUserPlaylists } = await import('./kugouService')
+    const raw = String(playlistId || '')
+    let listid = raw.match(/collection_3_\d+_(\d+)_\d+/)?.[1] || ''
+    if (!listid) {
+      const all = await fetchKugouUserPlaylists().catch(() => [])
+      const hit = all.find(p => p.specialid === raw) || all.find(p => p.listid === raw)
+      listid = String(hit?.listid || '')
+    }
+    if (!listid) throw new Error('酷狗删除歌单失败：缺少歌单 listid')
+    const result = await deleteKugouUserPlaylist(listid, 0)
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('kugou_user_id') || '')
+    return { result: 100, platform: 'kugou', ...result }
+  }
+  // Spotify Web API 无删除歌单接口；均诚实拦截，
   // 避免落入下方默认分支误打网易/QQ 删除接口
-  if (platform === 'spotify' || platform === 'kugou') {
+  if (platform === 'spotify') {
     throw new Error(`${platformLabel(platform)}暂不支持删除歌单：上游未提供删除歌单的接口`)
   }
 
@@ -1380,10 +1434,21 @@ export async function updatePlaylist(
   if (platform === 'soda') {
     throw new Error('汽水音乐暂不支持修改歌单信息')
   }
-  // 酷狗：概念版上游未提供重命名/改简介端点（能力表 updatePlaylist=false，入口置灰）；
-  // 这里也拦截，避免落入下方默认分支误打网易更新接口
+  // 酷狗：/v2/modify_list（2026-10-22 逆向验证：id 为数字 listid，name/intro 至少一项）。
+  // 调用方常持有 specialid（与 listid 不同），与 deletePlaylist 同款反查。
   if (platform === 'kugou') {
-    throw new Error('酷狗音乐暂不支持重命名歌单：上游未提供修改歌单信息的接口')
+    const { modifyKugouUserPlaylist, fetchKugouUserPlaylists } = await import('./kugouService')
+    const raw = String(playlistId || '')
+    let listid = raw.match(/collection_3_\d+_(\d+)_\d+/)?.[1] || ''
+    if (!listid) {
+      const all = await fetchKugouUserPlaylists().catch(() => [])
+      const hit = all.find(p => p.specialid === raw) || all.find(p => p.listid === raw)
+      listid = String(hit?.listid || raw.replace(/\D/g, '') || '')
+    }
+    if (!listid) throw new Error('酷狗编辑歌单失败：缺少歌单 listid')
+    const result = await modifyKugouUserPlaylist(listid, { name: options.name, intro: options.desc })
+    invalidateUserPlaylistsCache(platform, localStorage.getItem('kugou_user_id') || '')
+    return { result: 100, platform: 'kugou', ...result }
   }
   // QQ：能力表 updatePlaylist=false（上游无改单端点），与 kugou/soda 同款服务层自查——
   // 否则会拿着网易云 cookie 打 /api/netease/playlist/update 去改一个 QQ 歌单 id

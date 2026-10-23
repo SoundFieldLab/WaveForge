@@ -102,6 +102,8 @@ export function createLanHostTransport(options: {
   bridge?: NonNullable<Window['electron']>['resonance']
   /** 是否允许局域网发现（关闭时中转 /discover 返回 404） */
   discoverable?: boolean
+  /** In Party：公开/私有（6 位密码）房——经 bridge.start 透传给主进程中转 */
+  party?: { visibility: 'public' | 'private'; password: string }
 }): ResonanceTransport & { startResult: () => { port: number; code: string; running: boolean } | null } {
   const bridge = options.bridge
   const envelopes = new EventBus<{ envelope: ResonanceEnvelope; from: string }>()
@@ -122,6 +124,7 @@ export function createLanHostTransport(options: {
         maxMembers: options.maxMembers,
         port: options.port,
         discoverable: options.discoverable !== false,
+        ...(options.party ? { party: options.party } : {}),
       })
       if (!status || status.running !== true) throw new Error(status?.error || '房间中转启动失败')
       startInfo = { port: status.port, code: status.code, running: true }
@@ -167,6 +170,8 @@ export function createLanMemberTransport(options: {
   roomId: string
   code: string
   selfPeerId?: string
+  /** In Party 私有房：入房密码（经连接参数提交，中转常数时间比对） */
+  password?: string
 }): ResonanceTransport & { assignedPeerId: () => string } {
   const envelopes = new EventBus<{ envelope: ResonanceEnvelope; from: string }>()
   const peers = new EventBus<ResonancePeerEvent>()
@@ -175,7 +180,7 @@ export function createLanMemberTransport(options: {
   let hostPeerId = ''
   const pending: ResonanceEnvelope[] = []
 
-  const url = `ws://${options.host}:${options.port || 25570}/ws?room=${encodeURIComponent(options.roomId)}&code=${encodeURIComponent(options.code)}`
+  const url = `ws://${options.host}:${options.port || 25570}/ws?room=${encodeURIComponent(options.roomId)}&code=${encodeURIComponent(options.code)}${options.password ? `&password=${encodeURIComponent(options.password)}` : ''}`
 
   return {
     kind: 'lan-member',
@@ -215,7 +220,7 @@ export function createLanMemberTransport(options: {
         ws.onclose = (event) => {
           window.clearTimeout(timer)
           if (!peerId) {
-            reject(new Error(event.code === 4001 ? '房间码不正确' : event.code === 4003 ? '房间已满' : '连接已断开'))
+            reject(new Error(`code-${event.code}: ${event.code === 4001 ? '房间码不正确' : event.code === 4003 ? '房间已满' : event.code === 4005 ? '房间密码不正确' : '连接已断开'}`))
             return
           }
           peers.emit({ type: 'closed', reason: `code-${event.code}` })

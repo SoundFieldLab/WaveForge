@@ -258,9 +258,36 @@ export default function QuickSettingsLiveMirror({ onStatusChange }: QuickSetting
      * 重建后要重扫这对子树的视频替身 —— 新克隆出来的 `<video>` 同样要换 canvas 并
      * 进帧复制表，否则局部重建过的区域里 MV 会退回黑洞。
      */
+    /**
+     * 子树的「视觉签名」：文本内容 + 字级内联颜色按序拼接。
+     * React 重渲染常把同一份文本拆成全新的一组节点（key 变化 / 结构微调），
+     * textContent 不变——这类重建对预览视觉零影响。但 folia 的逐字卡拉OK颜色
+     * 也是经 span 重建携带的（wordColoring 每拍换色），所以签名必须包含
+     * 内联 color：颜色没变 → 跳过重建（消除每帧鬼畜）；颜色变了 → 正常重建
+     * （每拍一次，视觉连续）。
+     */
+    const visualSignature = (node: Node): string => {
+      if (node.nodeType === Node.TEXT_NODE) return node.nodeValue ?? ''
+      if (!(node instanceof Element)) return ''
+      // 签名纳入所有会随播放/设置变化的本节点内联视觉属性：
+      // color（逐字卡拉OK填色）、fontSize/fontWeight（字幕缩放设置）、
+      // opacity/transform（淡入淡出与逐字位移动画）、background（填充层）。
+      const style = (node as HTMLElement).style
+      let out = ''
+      for (const prop of ['color', 'fontSize', 'fontWeight', 'opacity', 'transform', 'background', 'width', 'height']) {
+        const value = style ? (style as unknown as Record<string, string>)[prop] : ''
+        if (value) out += `${prop}=${value}`
+      }
+      for (const child of node.childNodes) out += visualSignature(child)
+      return out
+    }
+
     const resyncChildren = (srcElement: Element) => {
       const dstElement = pairs.get(srcElement)
       if (!(dstElement instanceof Element)) return false
+      // 守卫：源与克隆体的视觉签名一致 → 文本和字色都没变，只是节点被 React
+      // 拆了重建。跳过 replaceChildren（重建会让克隆体歌词行每帧白闪一次）。
+      if (visualSignature(srcElement) === visualSignature(dstElement)) return true
       const rebuilt: Node[] = []
       for (const child of Array.from(srcElement.childNodes)) {
         rebuilt.push(sanitizeNode(child.cloneNode(true)))

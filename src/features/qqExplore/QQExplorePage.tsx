@@ -88,7 +88,8 @@ const ENTRY_LABELS: Record<string, string> = {
 const ENTRY_SUBLABELS: Record<TopEntryKind, string> = {
   guess: '猜你喜欢',
   daily: '每日30首',
-  radar: '刷歌',
+  // 官方 2026-10 起 UI 名「AI伴听」（旧「刷歌」）；入口短标签跟随官方
+  radar: 'AI伴听',
   'top-fav': '百万收藏',
   'new-songs': '新歌推荐',
   'star-mix': '歌手漫游',
@@ -975,7 +976,7 @@ export default function QQExplorePage({
           {showDescription && <p className="mt-2 text-sm text-white/42">内容直接来自当前账号的手机客户端推荐流。</p>}
         </div>
         <div className="flex items-center gap-2">
-          {entries.some(entry => entry.kind === 'radar') && <button type="button" onClick={() => { const radar = entries.find(entry => entry.kind === 'radar'); if (radar) void executeCard(radar.card, entryModule) }} disabled={Boolean(actionLoading)} className="flex h-10 items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/[0.08] px-4 text-sm text-emerald-100/80 transition hover:bg-emerald-300/[0.16] disabled:opacity-50"><Sparkles className="h-4 w-4" />进入刷歌模式</button>}
+          {entries.some(entry => entry.kind === 'radar') && <button type="button" onClick={() => { const radar = entries.find(entry => entry.kind === 'radar'); if (radar) void executeCard(radar.card, entryModule) }} disabled={Boolean(actionLoading)} className="flex h-10 items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/[0.08] px-4 text-sm text-emerald-100/80 transition hover:bg-emerald-300/[0.16] disabled:opacity-50"><Sparkles className="h-4 w-4" />进入 AI伴听</button>}
           <button type="button" onClick={() => void refreshFeed()} disabled={state.refreshing || Boolean(state.refreshingModuleId) || state.loadingMore} className="flex h-10 items-center gap-2 rounded-full border border-white/[0.1] bg-white/[0.05] px-4 text-sm text-white/65 transition hover:bg-white/[0.1] disabled:opacity-50">
           <RefreshCw className={`h-4 w-4 ${state.refreshing ? 'animate-spin' : ''}`} />
           刷新推荐
@@ -997,7 +998,9 @@ export default function QQExplorePage({
       )}
 
       {entries.length > 0 && (
-        <section aria-label="QQ 音乐快捷入口" className="relative">
+        // group/section：右缘渐隐遮罩（下方 data-shelf-edge-fade）经 group-has- 跟随
+        // HorizontalShelf viewport 的 data-right-edge 状态——滑到最右时隐藏遮罩。
+        <section aria-label="QQ 音乐快捷入口" className="group/shelf relative">
           <HorizontalShelf ariaLabel="QQ 音乐快捷入口" edgeControls="hover" className="-mx-5" viewportClassName="gap-[26px]" itemClassName="w-[250px] sm:w-[270px] xl:w-[290px]">
             {entries.map(({ card, kind }) => {
               const daily = kind === 'daily' ? snapshot?.daily30 : null
@@ -1058,7 +1061,14 @@ export default function QQExplorePage({
               )
             })}
           </HorizontalShelf>
-          <div aria-hidden="true" className="pointer-events-none absolute right-0 top-0 z-20 h-full w-12 bg-gradient-to-r from-transparent via-black/[0.03] to-black/25 backdrop-blur-[2px] [mask-image:linear-gradient(to_right,transparent,black)]" />
+          {/* 右缘渐隐遮罩：滑到最右（无更多内容可滚）时隐藏，否则最右卡片上永远压着一层暗影。
+              HorizontalShelf 的 viewport 带 data-right-edge="scrollable|hidden"，
+              经 group-has- 兄弟级跟随（group 在外层 section 上）。 */}
+          <div
+            aria-hidden="true"
+            data-shelf-edge-fade
+            className="pointer-events-none absolute right-0 top-0 z-20 h-full w-12 bg-gradient-to-r from-transparent via-black/[0.03] to-black/25 backdrop-blur-[2px] [mask-image:linear-gradient(to_right,transparent,black)] opacity-100 transition-opacity duration-200 group-has-[[data-right-edge=hidden]]:opacity-0"
+          />
         </section>
       )}
 

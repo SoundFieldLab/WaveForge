@@ -14,6 +14,13 @@ import { useTranslation } from 'react-i18next'
 import { getVisualizerRegistryEntry } from '../vendor/folia/components/visualizer/registry'
 import type { VisualizerSettingsPanelProps } from '../vendor/folia/components/visualizer/definition'
 import { buildFoliaPanelStyles, buildFoliaTheme } from './foliaTunings'
+import {
+  readSmartBeatSettings,
+  writeSmartBeatSettings,
+  notifySmartBeatChanged,
+  type SmartBeatSettings,
+} from '../vendor/folia/components/visualizer/smartBeatSettings'
+import { SMART_BEAT_EFFECT_IDS } from '../vendor/folia/components/visualizer/sonnet/smartBeat'
 
 export interface FoliaTuningPanelProps {
   /** 当前 folia 模式 id */
@@ -91,6 +98,11 @@ export function FoliaTuningPanel({
           {t('options.lumiereFontSizeAutoNotice')}
         </p>
       )}
+      {(mode === 'sonnet' || mode === 'diorama' || mode === 'pendolo') && (
+        // 智能动感模式（Smart Beat，folia 0.7.21）：节拍驱动的镜头推近/裂光/粒子涟漪。
+        // 总开关 + 各效果开关与强度；设置存 localStorage 并经事件通知挂载中的 runtime。
+        <SmartBeatSection playerTheme={playerTheme} accentColor={accentColor} mode={mode} />
+      )}
       {hasOverride && (
         <button
           type="button"
@@ -106,3 +118,117 @@ export function FoliaTuningPanel({
 }
 
 export default FoliaTuningPanel
+
+// ── 智能动感模式（Smart Beat）设置区 ──────────────────────────────
+// folia 0.7.21 的 Smart Beat：节拍驱动动效（商籁的镜头推近/裂光等），总开关 +
+// 各效果独立开关与强度。存储与事件经 smartBeatSettings.ts；效果 id 与文案随模式。
+
+const SMART_BEAT_EFFECT_LABELS: Record<string, string> = {
+  'sonnet.beatZoom': '每拍镜头推近',
+  'sonnet.downbeatZoom': '重拍额外推近',
+  'sonnet.beatRotation': '每拍旋转',
+  'sonnet.tear': '重拍裂光',
+  'sonnet.flare': '亮斑',
+  'sonnet.iconPop': '图标弹跳',
+  'diorama.ripple': '粒子涟漪',
+  'diorama.wordHop': '歌词跳动',
+  'pendolo.kick': '底鼓起伏',
+  'pendolo.snare': '军鼓起伏',
+  'pendolo.hihat': '镲片闪烁',
+}
+
+interface SmartBeatSectionProps {
+  playerTheme: 'dark' | 'light'
+  accentColor: string
+  mode: string
+}
+
+function SmartBeatSection({ playerTheme, accentColor, mode }: SmartBeatSectionProps) {
+  const defaults = useMemo<SmartBeatSettings>(() => ({
+    enabled: true,
+    effects: Object.fromEntries(
+      Object.values(SMART_BEAT_EFFECT_IDS).map(id => [id, { on: true, strength: 1 }]),
+    ),
+  }), [])
+  const [settings, setSettings] = useState<SmartBeatSettings>(() => readSmartBeatSettings(defaults))
+
+  const persist = (next: SmartBeatSettings) => {
+    setSettings(next)
+    writeSmartBeatSettings(next)
+    notifySmartBeatChanged()
+  }
+
+  const toggleEnabled = () => persist({ ...settings, enabled: !settings.enabled })
+  const toggleEffect = (id: string) => {
+    const current = settings.effects[id] ?? { on: true, strength: 1 }
+    persist({ ...settings, effects: { ...settings.effects, [id]: { ...current, on: !current.on } } })
+  }
+  const setStrength = (id: string, strength: number) => {
+    const current = settings.effects[id] ?? { on: true, strength: 1 }
+    persist({ ...settings, effects: { ...settings.effects, [id]: { ...current, strength } } })
+  }
+
+  // 本模式的效果清单：sonnet 全集；diorama/pendolo 的效果在各自 runtime 接线时加入
+  const effectIds: string[] = (Object.values(SMART_BEAT_EFFECT_IDS) as string[])
+    .filter(id => mode !== 'sonnet' || !/^(diorama|pendolo)\./.test(id))
+
+  const card = playerTheme === 'dark' ? 'bg-white/[0.05] border-white/10' : 'bg-black/[0.03] border-black/10'
+  const textMain = playerTheme === 'dark' ? 'text-white/85' : 'text-black/80'
+  const textSub = playerTheme === 'dark' ? 'text-white/50' : 'text-black/50'
+
+  return (
+    <div className={`rounded-xl border p-2.5 space-y-2 ${card}`}>
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className={`text-[12px] font-medium ${textMain}`}>智能动感模式</p>
+          <p className={`text-[10px] leading-relaxed ${textSub}`}>跟拍点与鼓点动起来；需要播放中才有节拍</p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={settings.enabled}
+          onClick={toggleEnabled}
+          className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${settings.enabled ? '' : 'opacity-60'}`}
+          style={{ backgroundColor: settings.enabled ? accentColor : (playerTheme === 'dark' ? 'rgba(255,255,255,0.15)' : 'rgba(0,0,0,0.15)') }}
+        >
+          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-[left] duration-200 ${settings.enabled ? 'left-[18px]' : 'left-0.5'}`} />
+        </button>
+      </div>
+      {settings.enabled && (
+        <div className="space-y-1.5">
+          {effectIds.map(id => {
+            const effect = settings.effects[id] ?? { on: true, strength: 1 }
+            return (
+              <div key={id} className="rounded-lg bg-black/[0.12] px-2.5 py-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => toggleEffect(id)}
+                    className={`min-w-0 flex-1 text-left text-[11px] transition-colors ${effect.on ? textMain : 'opacity-45 line-through'} ${playerTheme === 'dark' ? 'hover:text-white' : 'hover:text-black'}`}
+                  >
+                    {SMART_BEAT_EFFECT_LABELS[id] ?? id}
+                  </button>
+                  <span className="shrink-0 font-mono text-[10px] text-white/40">{effect.strength.toFixed(1)}×</span>
+                </div>
+                {effect.on && (
+                  <input
+                    type="range"
+                    min={0}
+                    max={2}
+                    step={0.1}
+                    value={effect.strength}
+                    onChange={event => setStrength(id, Number(event.target.value))}
+                    onMouseUp={() => { /* 拖动即落盘（folia 的 strength 无草稿需求） */ }}
+                    className="mt-1 w-full accent-current"
+                    style={{ accentColor }}
+                    aria-label={`${SMART_BEAT_EFFECT_LABELS[id] ?? id} 强度`}
+                  />
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}

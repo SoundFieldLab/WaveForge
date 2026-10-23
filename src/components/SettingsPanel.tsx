@@ -86,6 +86,7 @@ import { checkBridgeRunning, ensureBridgeRunning, bridgeShowWindow, bridgeHideWi
 import BilibiliLoginPanel from './BilibiliLoginPanel'
 import BilibiliProfileModal from './BilibiliProfileModal'
 import VmpStatusCard from './VmpStatusCard'
+import { DeveloperLicenseManager } from './DeveloperLicenseManager'
 import { getApiBase } from '../services/apiConfig'
 import {
   isBilibiliLoggedIn,
@@ -1647,18 +1648,45 @@ function SettingsPanel({
     setDeveloperMode(enabled)
     localStorage.setItem('developerMode', JSON.stringify(enabled))
     window.dispatchEvent(new CustomEvent('developerModeChanged', { detail: enabled }))
-    
+
     // 通知 Electron 后端
     if (window.electron?.developerMode) {
       window.electron.developerMode.set(enabled).catch((err: Error) => {
         console.error('Failed to set developer mode:', err)
       })
     }
-    
-    window.dispatchEvent(new CustomEvent('showToast', { 
+
+    window.dispatchEvent(new CustomEvent('showToast', {
       detail: { message: enabled ? '开发者模式已启用' : '开发者模式已禁用', type: 'info' }
     }))
   }
+
+  // ── 兑换码管理入口（隐藏门）：连点开发者模式警告 8 次 → 触发开发者验证 ──
+  // 不做本地开关/持久化解锁：每次进入都必须通过 GitHub 开发者验证（服务端侧
+  // roster 签名链），8 连点只是"我是个知道彩蛋的开发者"的提示性门槛。
+  const [devGateTapCount, setDevGateTapCount] = useState(0)
+  const devGateTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [devAuthPanelOpen, setDevAuthPanelOpen] = useState(false)
+  const devGateRef = useRef<HTMLParagraphElement | null>(null)
+
+  const handleDevGateTap = () => {
+    if (devGateTapTimer.current) clearTimeout(devGateTapTimer.current)
+    const next = devGateTapCount + 1
+    if (next >= 8) {
+      setDevGateTapCount(0)
+      setDevAuthPanelOpen(true)
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: '已进入兑换码管理', type: 'info' } }))
+      return
+    }
+    if (next >= 3) {
+      window.dispatchEvent(new CustomEvent('showToast', { detail: { message: `再点 ${8 - next} 次…`, type: 'info' } }))
+    }
+    setDevGateTapCount(next)
+    devGateTapTimer.current = setTimeout(() => setDevGateTapCount(0), 2500)
+  }
+
+  useEffect(() => () => { if (devGateTapTimer.current) clearTimeout(devGateTapTimer.current) }, [])
+
 
   // 全屏模式切换
   const handleFullscreenModeChange = async (mode: 'kiosk' | 'normal') => {
@@ -5226,10 +5254,15 @@ function SettingsPanel({
                         </label>
                       </div>
                       
-                      {/* 警告文案 */}
+                      {/* 警告文案（连点 8 次进入兑换码管理，见 handleDevGateTap） */}
                       {developerMode && (
                         <div className={`mt-3 p-3 rounded-lg ${playerTheme === 'dark' ? 'bg-yellow-500/10 border border-yellow-500/30' : 'bg-yellow-100 border border-yellow-300'}`}>
-                          <p className={`text-xs ${playerTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'}`}>
+                          <p
+                            ref={devGateRef}
+                            onClick={handleDevGateTap}
+                            className={`text-xs ${playerTheme === 'dark' ? 'text-yellow-300' : 'text-yellow-800'}`}
+                            style={{ cursor: 'default', userSelect: 'none' }}
+                          >
                             ⚠️ 当前模式仅限调试作用，无问题情况下请勿打开
                           </p>
                         </div>
@@ -5286,6 +5319,19 @@ function SettingsPanel({
                       )}
                     </div>
                   </div>
+
+                  {/* 兑换码管理（隐藏门：警告连点 8 次；见 handleDevGateTap） */}
+                  {devAuthPanelOpen && (
+                    <DeveloperLicenseManager
+                      dark={playerTheme === 'dark'}
+                      accent={accentColor}
+                      borderColor={borderColor}
+                      bgCard={bgCard}
+                      textPrimary={textPrimary}
+                      textSecondary={textSecondary}
+                      onClose={() => setDevAuthPanelOpen(false)}
+                    />
+                  )}
 
                   {/* 缓存清理 */}
                   <div className="mt-8">

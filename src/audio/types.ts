@@ -204,6 +204,10 @@ export interface TransitionPlan {
   sourceEndTime: number
   targetStartTime: number
   targetEndTime: number
+  /** 源曲全曲时长（秒）。云端切点（Enhanced）会落在曲中，渲染下载缓存的时长闸
+   *  需要「全曲时长」而不是「过渡终点」——否则误判截断并永久降级固定交叉。 */
+  sourceTrackDuration?: number
+  targetTrackDuration?: number
   beatCount: number
   sourceBpm: number
   targetBpm: number

@@ -19,7 +19,7 @@ const MODE_VISIBILITY_KEY = 'waveforge_visible_modes'
 // 已见模式记录：识别"保存的可见列表早于新模式上线"的情况——
 // 否则旧列表（如 8/22 传统模式上线前保存的）会让新增模式永远不可见
 const MODE_KNOWN_KEY = 'waveforge_known_modes'
-const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'traditional', 'desktop', 'resonance', 'singalong']
+const ALL_MODES: ModeSelectionMode[] = ['explore', 'minimal', 'traditional', 'desktop', 'resonance', 'singalong', 'inparty']
 const MODE_NAMES: Record<ModeSelectionMode, string> = {
   explore: '探索',
   minimal: '简约',
@@ -27,6 +27,7 @@ const MODE_NAMES: Record<ModeSelectionMode, string> = {
   desktop: '桌面',
   resonance: '共振',
   singalong: '学歌',
+  inparty: 'In Party',
 }
 
 function parseKnownModes(value: string | null): ModeSelectionMode[] {
@@ -134,6 +135,7 @@ export default function ModeSelectionPanel({
   const gatedModes = (visibleModes.includes(currentMode) ? visibleModes : [...visibleModes, currentMode])
     .filter(mode => mode !== 'resonance' || isPluginEnabled('resonance'))
     .filter(mode => mode !== 'singalong' || isPluginEnabled('sing-along'))
+    .filter(mode => mode !== 'inparty' || isPluginEnabled('dglab'))
   const effectiveVisibleModes = ensureMinimalVisible(
     gatedModes.includes(currentMode)
       ? gatedModes

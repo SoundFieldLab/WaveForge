@@ -26,7 +26,7 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from local_service_auth import is_allowed_audio_path, is_authorized_local_request
+from local_service_auth import _cache_root, is_allowed_audio_path, is_authorized_local_request
 import librosa
 import numpy as np
 from scipy import signal as scipy_signal
@@ -264,7 +264,12 @@ def measure_lufs():
     if not os.path.exists(audio_path):
         return jsonify({'error': f'File not found: {audio_path}'}), 404
     if not is_allowed_audio_path(audio_path):
-        return jsonify({'error': 'audioPath must be inside the WaveForge cache'}), 400
+        # 带上实际白名单根与收到的路径：排查缓存根劈叉（允许根 ≠ 下载目录）时可直接对账
+        return jsonify({
+            'error': 'audioPath must be inside the WaveForge cache',
+            'audioPath': audio_path,
+            'expectedRoot': str(_cache_root()),
+        }), 400
 
     # 扩展名白名单 + 大小上限，防止非音频文件或超大文件导致资源耗尽
     ext = os.path.splitext(audio_path)[1].lower()

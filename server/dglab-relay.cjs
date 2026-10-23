@@ -400,10 +400,18 @@ const sendV3Pulse = (channel, frames) => {
 
   /* ------------------------------ V4 指令 ------------------------------ */
 
+  // 官方 V4 外层帧：服务器发给 APP 的应用层消息（RPC 请求/心跳外的透传数据）必须包
+  // {"type":"message","clientId":<APP被控方ID>,"data":…} 信封（dglab-kit README「控制方发送给指定 APP」）。
+  // 之前裸发 t:"req" 帧，APP 解析层只认信封帧 —— 指令全部被静默丢弃（App 无响应、无强度回报、
+  // 设备零输出；入站方向 App→控制方同样带信封，见 handleV4App 的 msg.type==='message' 解包）。
+  const sendV4ToApp = (app, data) => {
+    app.send(JSON.stringify({ type: 'message', clientId: app._v4ClientId, data }))
+  }
+
   const sendV4Rpc = (slotId, { m, data }) => {
     const app = state.app.v4.get(findAppForSlot(slotId))
     if (!app || app.readyState !== WebSocket.OPEN) return
-    app.send(JSON.stringify({ t: 'req', reqId: uuid(), m, data: { ...data, s: slotId } }))
+    sendV4ToApp(app, { t: 'req', reqId: uuid(), m, data: { ...data, s: slotId } })
   }
 
   const findAppForSlot = (slotId) => {
@@ -478,7 +486,7 @@ const sendV3Pulse = (channel, frames) => {
         op = { t: V4_ACTION.SetTempIntensity, v: value, d: 30_000, im: true }
       }
       state.v4KnownStrength[channelKey] = value
-      app.send(JSON.stringify({ t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: channelIdx, p: 1, ...op } }))
+      sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, c: channelIdx, p: 1, ...op } })
       verboseThrottled(`V4 下发强度 c=${channelIdx} t=${op.t} v=${op.v}（slot=${slotId}）`)
       break // 1:N 时后续扩展：默认首个已连接设备
     }
@@ -491,7 +499,7 @@ const sendV3Pulse = (channel, frames) => {
     const data = { c: channelIdx, t: V4_ACTION.Pulse, v: hex, p: 1, ver: 3 }
     for (const app of state.app.v4.values()) {
       if (!app.isClosed) {
-        app.send(JSON.stringify({ t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, ...data } }))
+        sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, ...data } })
         verboseLog(`V4 下发脉冲 c=${channelIdx} ${frames.length}帧 hex0=${hex[0]}`)
         break
       }
@@ -1223,6 +1231,14 @@ const sendV3Pulse = (channel, frames) => {
         }
       } else if (msg.t === 'ping') {
         ws.send(JSON.stringify({ t: 'pong' }))
+      } else if (msg.t === 'remote-op') {
+        // In Party：远端成员的互控指令（渲染端负责房间信封解密与规则校验后才转发到这里）
+        const result = injectRemoteOp(msg.op)
+        if (!result.ok) verboseLog(`In Party 远端指令被拒：${JSON.stringify(result)}`)
+        else verboseLog(`In Party 远端指令已执行：${JSON.stringify(msg.op).slice(0, 120)}`)
+      } else if (msg.t === 'remote-summary') {
+        // In Party：渲染端请求本机设备摘要（广播到房间用）
+        ws.send(JSON.stringify({ t: 'device-summary', summary: getDeviceSummary() }))
       } else {
         verboseLog(`未知控制指令: ${summarizeFrame(raw)}`)
       }
@@ -1398,19 +1414,19 @@ const sendV3Pulse = (channel, frames) => {
       try { previous.close(4001, 'replaced by new connection') } catch { /* ignore */ }
     }
     state.app.v4.set(tid, ws)
+    ws._v4ClientId = uuid() // APP 被控方 ID：message 信封的 clientId 字段（官方协议要求）
     ws._lastSeenAt = Date.now()
     state.bound = true
     log(`V4 App 已连接（${remote}，tid=${tid}）`)
     // 官方 v4-server 时序：先 hello（告知 App 自身 clientId）→ controller_attached（告知控制端 ID）→ 再设备列表
-    const appClientId = uuid()
-    ws.send(JSON.stringify({ type: 'hello', clientId: appClientId }))
+    ws.send(JSON.stringify({ type: 'hello', clientId: ws._v4ClientId }))
     // 官方 dglab-kit SDK 的状态机只认 client_attached（WaitingForPeer → Paired）；
     // 旧实现的 controller_attached 是自造名，App 收到后状态机停在等待配对，
     // 全部后续指令无效，数秒后放弃断开。两个名字都发：SDK 吃 client_attached，
     // 老版本兼容不炸（未知 type 会被 SDK 忽略）。
     ws.send(JSON.stringify({ type: 'client_attached', clientId: state.clientId }))
     ws.send(JSON.stringify({ type: 'controller_attached', clientId: state.clientId }))
-    log(`V4 已发送 hello + controller_attached（app=${appClientId} controller=${state.clientId}）`)
+    log(`V4 已发送 hello + controller_attached（app=${ws._v4ClientId} controller=${state.clientId}）`)
     // 设备列表
     sendDevicesGet(ws)
     // 连接即发一次心跳：App 的连接期看门狗只认「收到服务端心跳」，15s 定时器的相位
@@ -1518,7 +1534,7 @@ const sendV3Pulse = (channel, frames) => {
   }
 
   const sendDevicesGet = (ws) => {
-    ws.send(JSON.stringify({ t: 'req', reqId: uuid(), m: 'devices.get', data: {} }))
+    ws.send(JSON.stringify({ type: 'message', clientId: ws._v4ClientId, data: { t: 'req', reqId: uuid(), m: 'devices.get', data: {} } }))
   }
 
   const extractSoftLimit = (slots) => {
@@ -1765,11 +1781,68 @@ const sendV3Pulse = (channel, frames) => {
     })
   }
 
+  /* ------------------------------ In Party：远端互控指令注入 ------------------------------ */
+
+  /**
+   * In Party 模式：房间里的其他成员经端到端加密信道发来「控制我的设备」指令，
+   * 由本机中继翻译成 V3/V4 协议发给 App。安全边界：
+   *  - 指令只来自本机渲染进程（ctrl WS），渲染进程负责验证房间信封解密与会话规则；
+   *  - 强度钳位沿用 softLimit 与 0-200 物理上限；clear 恒可用（安全路径）。
+   * op: { kind: 'strength', channel: 'A'|'B', value: 0..200 }
+   *   | { kind: 'pulse', channel: 'A'|'B', frames: [{freq,strength}...] }
+   *   | { kind: 'clear' }  （A/B 全归零）
+   */
+  const injectRemoteOp = (op) => {
+    if (!connected()) return { ok: false, reason: 'device-not-connected' }
+    try {
+      if (op?.kind === 'clear') {
+        sendClear()
+        return { ok: true }
+      }
+      const ch = op?.channel === 'B' ? 'B' : 'A'
+      if (op?.kind === 'strength') {
+        const value = clamp(Math.round(Number(op.value) || 0), 0, 200)
+        const cap = Math.min(ch === 'B' ? (state.settings.caps.B ?? 60) : (state.settings.caps.A ?? 60), state.softLimit?.[ch] ?? 200)
+        const capped = Math.min(value, cap) // 远端指令同样受本机用户上限钳位（人身安全）
+        if (state.settings.version === 'v3') sendV3Strength(ch, capped)
+        else sendV4Strength(ch === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A, capped)
+        return { ok: true, value: capped }
+      }
+      if (op?.kind === 'pulse' && Array.isArray(op.frames) && op.frames.length) {
+        // 远端脉冲帧同样受本机上限钳位：强度整体缩放到 min(用户上限, App 硬上限)，
+        // 远端伪造 200 强帧也会被压到被控方的安全范围内
+        const cap = Math.min(ch === 'B' ? (state.settings.caps.B ?? 60) : (state.settings.caps.A ?? 60), state.softLimit?.[ch] ?? 200)
+        const frames = op.frames.slice(0, 1000)
+          .map(f => ({ freq: clamp(Math.round(Number(f?.freq) || 10), 0, 255), strength: clamp(Math.round(Number(f?.strength) || 0), 0, 200) }))
+          .map(f => ({ ...f, strength: Math.min(f.strength, cap) }))
+          .filter(f => f.strength > 0)
+        if (!frames.length) return { ok: false, reason: 'empty-frames' }
+        if (state.settings.version === 'v3') sendV3Pulse(ch, frames)
+        else sendV4Pulse(ch === 'B' ? V4_CHANNEL.B : V4_CHANNEL.A, frames)
+        return { ok: true, count: frames.length }
+      }
+      return { ok: false, reason: 'bad-op' }
+    } catch (error) {
+      return { ok: false, reason: String(error?.message || error) }
+    }
+  }
+
+  /** In Party：本机设备当前状态（是否有设备连接、协议版本、软上限）——渲染端组装房间广播用 */
+  const getDeviceSummary = () => ({
+    connected: connected(),
+    version: state.settings.version,
+    softLimit: state.softLimit,
+    deviceStrength: state.deviceStrength,
+    caps: { A: state.settings.caps.A, B: state.settings.caps.B },
+  })
+
   return {
     registerHttp,
     start: () => startListener(),
     stop: stopListener,
     getStatus: buildStatus,
+    injectRemoteOp,
+    getDeviceSummary,
     _internal: state, // 调试用
     _engine: engineState, // 调试用（冒烟测试读取引擎内部状态）
   }

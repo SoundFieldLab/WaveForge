@@ -42,8 +42,9 @@ describe('cross-platform service routing', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it.each(['kugou', 'soda'] as const)('marks %s playlist search unsupported', async platform => {
-    await expect(searchPlaylists('mix', platform)).resolves.toEqual({ playlists: [], unsupported: true })
+  // 酷狗歌单搜索已实装（mobilecdn search/special，2026-10-22）——路由走 kugouService，见 searchKugouPlaylists 冒烟
+  it('marks soda playlist search unsupported', async () => {
+    await expect(searchPlaylists('mix', 'soda')).resolves.toEqual({ playlists: [], unsupported: true })
     expect(fetch).not.toHaveBeenCalled()
   })
 

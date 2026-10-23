@@ -21,10 +21,10 @@ function normalizeAudioUrl(value) {
   try { parsed = new URL(value.trim()) } catch { throw new Error('Invalid audio URL') }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Invalid audio URL')
   // 只放行音乐 CDN 域名 + 本机 3001 代理（请求头注入令牌的合法链路）。
-  // 此前仅查协议，渲染层被入侵后可让主进程 GET 任意 URL（探测内网/读回响应体）。
+  // 与 normalizeAudioUrlForService 同口径：环回无端口（http=80）不再放行——
+  // 302 重定向到 127.0.0.1:80 曾借这条缝探测内网任意 web 服务。
   const host = parsed.hostname.toLowerCase()
-  const isLocalProxy = (host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1')
-    && (parsed.port === '3001' || (!parsed.port && parsed.protocol === 'http:'))
+  const isLocalProxy = LOOPBACK_HOSTS.has(host) && parsed.port === '3001'
   if (!isLocalProxy && !isAllowedAudioDownloadHost(host)) {
     throw new Error('Audio download host is not allowed')
   }
@@ -121,6 +121,8 @@ class AudioDownloadService {
     this.activeRequests = new Set()
     this.activeCacheFiles = new Set()
     this.cacheIndex = new Map() // trackKey -> {filePath, size, timestamp, lastAccess}
+    // 时长探测记忆化：key = path:mtime:size，value = 秒数或 null。文件被替换时键失效。
+    this._durationProbeCache = new Map()
     this.maxCacheSize = 2 * 1024 * 1024 * 1024 // 2GB
     this.cacheIndexFile = path.join(this.tempRoot, 'cache-index.json')
     this.ensureTempDir()
@@ -138,6 +140,9 @@ class AudioDownloadService {
 
   /**
    * Load cache index from disk
+   * 索引可移植性：条目 filePath 存**相对 tempRoot 的文件名**（saveCacheIndex 序列化时
+   * 转换），加载时拼回绝对路径——缓存目录整体迁移（盘符变更/便携使用）后索引仍有效。
+   * 兼容旧索引的绝对路径条目（在 tempRoot 内才接受）。
    */
   loadCacheIndex() {
     try {
@@ -146,7 +151,12 @@ class AudioDownloadService {
         const items = JSON.parse(data)
         const validItems = Array.isArray(items) ? items.filter(item => {
           if (!item || typeof item.trackKey !== 'string' || !item.trackKey.trim()) return false
-          if (typeof item.filePath !== 'string' || !this.isInsideTempRoot(item.filePath)) return false
+          if (typeof item.filePath !== 'string' || !item.filePath.trim()) return false
+          // 相对文件名 → 拼回 tempRoot 绝对路径；绝对路径（旧索引）须在 tempRoot 内
+          item.filePath = path.isAbsolute(item.filePath)
+            ? item.filePath
+            : path.join(this.tempRoot, item.filePath.replace(/^[/\\]/, ''))
+          if (!this.isInsideTempRoot(item.filePath)) return false
           if (!fs.existsSync(item.filePath)) return false
           try {
             const stat = fs.statSync(item.filePath)
@@ -199,7 +209,12 @@ class AudioDownloadService {
    */
   saveCacheIndex() {
     try {
-      const items = Array.from(this.cacheIndex.values())
+      // 序列化时把绝对路径转成相对 tempRoot 的文件名（索引可移植——缓存目录迁移后仍有效）
+      const items = Array.from(this.cacheIndex.values()).map((item) => {
+        const resolved = typeof item.filePath === 'string' ? path.resolve(item.filePath) : ''
+        const relative = resolved && this.isInsideTempRoot(resolved) ? path.relative(this.tempRoot, resolved) : null
+        return relative ? { ...item, filePath: relative } : item
+      })
       const temporaryPath = `${this.cacheIndexFile}.tmp`
       fs.writeFileSync(temporaryPath, JSON.stringify(items, null, 2), 'utf8')
       fs.renameSync(temporaryPath, this.cacheIndexFile)
@@ -260,6 +275,10 @@ class AudioDownloadService {
         fs.unlinkSync(cached.filePath)
       }
       this.cacheIndex.delete(trackKey)
+      // 同路径重下后旧探测值必须作废（mtime 兜底，显式清防同 mtime 竞态）
+      for (const key of this._durationProbeCache.keys()) {
+        if (key.startsWith(cached.filePath + ':')) this._durationProbeCache.delete(key)
+      }
       this.saveCacheIndex()
       console.log(`[AudioCache] Deleted: ${trackKey}`)
       return true
@@ -293,6 +312,143 @@ class AudioDownloadService {
   }
 
   /**
+   * 从容器头探测音频实际时长（秒）；解不出返回 null。零解码、只读文件头：
+   * - FLAC：STREAMINFO 块（总采样数/采样率）——精确；
+   * - WAV：fmt/data 块（字节率/数据长度）——精确；
+   * - MP3：Xing/Info 头帧数（精确），无 Xing 按 CBR 码率估算。
+   * 不做结果记忆化：同路径覆写同尺寸文件时（mtime 粒度粗）会返回旧探测值
+   * （测试实测命中），而探测本身只是一次 stat + ≤64KB 读取，缓存无收益。
+   * 用途：下载 commit / 缓存复用前校验「实际时长 ≈ 曲目元数据时长」——空 vkey/
+   * 试听片段会返回**合法容器但只有半首**（实测 370s 的歌存下 176.5s 截断 FLAC，
+   * 文件头完全合法，分析侧拿它算出半首歌的节拍还把 worker 搞崩），长度校验
+   * 能在坏文件进缓存/被复用前把它拦下来。
+   */
+  probeAudioDurationSeconds(filePath) {
+    try {
+      const stat = fs.statSync(filePath)
+      if (!stat.isFile() || stat.size < 64) return null
+      return this._probeAudioDurationSecondsUncached(filePath, stat)
+    } catch {
+      return null
+    }
+  }
+
+  _probeAudioDurationSecondsUncached(filePath, stat) {
+    try {
+      const fd = fs.openSync(filePath, 'r')
+      try {
+        const head = Buffer.alloc(64)
+        fs.readSync(fd, head, 0, 64, 0)
+        // FLAC：'fLaC' + 块头，首个元数据块固定 STREAMINFO（34 字节 payload）
+        if (head.subarray(0, 4).toString('latin1') === 'fLaC') {
+          const streamInfo = Buffer.alloc(34)
+          const read = fs.readSync(fd, streamInfo, 0, 34, 8)
+          if (read < 34) return null
+          // STREAMINFO 偏移 10 起大端位域：20bit 采样率 + 20bit 总采样数
+          const sampleRate = (streamInfo[10] << 12) | (streamInfo[11] << 4) | (streamInfo[12] >> 4)
+          const totalSamples = ((streamInfo[13] & 0x0f) * 2 ** 32)
+            + (streamInfo[14] * 2 ** 24) + (streamInfo[15] << 16) + (streamInfo[16] << 8) + streamInfo[17]
+          if (sampleRate <= 0 || totalSamples <= 0) return null
+          return totalSamples / sampleRate
+        }
+        // WAV：遍历 RIFF 块取 fmt（字节率）与 data（数据长度）
+        if (head.subarray(0, 4).toString('latin1') === 'RIFF' && head.subarray(8, 12).toString('latin1') === 'WAVE') {
+          let byteRate = 0
+          let offset = 12
+          const chunkHeader = Buffer.alloc(8)
+          while (offset + 8 <= stat.size) {
+            if (fs.readSync(fd, chunkHeader, 0, 8, offset) < 8) break
+            const chunkId = chunkHeader.subarray(0, 4).toString('latin1')
+            const chunkSize = chunkHeader.readUInt32LE(4)
+            if (chunkId === 'fmt ' && chunkSize >= 16) {
+              const fmt = Buffer.alloc(Math.min(chunkSize, 16))
+              fs.readSync(fd, fmt, 0, fmt.length, offset + 8)
+              byteRate = fmt.readUInt32LE(8)
+            } else if (chunkId === 'data') {
+              return byteRate > 0 && chunkSize > 0 ? chunkSize / byteRate : null
+            }
+            offset += 8 + chunkSize + (chunkSize % 2)
+          }
+          return null
+        }
+        // MP3：跳过 ID3v2 定位首帧，找 Xing/Info 头；无则 CBR 估算
+        if (head[0] === 0x49 && head[1] === 0x44 && head[2] === 0x33) {
+          const tagSize = ((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f)
+          return this._probeMp3Duration(fd, 10 + tagSize, stat.size)
+        }
+        if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) {
+          return this._probeMp3Duration(fd, 0, stat.size)
+        }
+        return null
+      } finally {
+        fs.closeSync(fd)
+      }
+    } catch {
+      return null
+    }
+  }
+
+  /** MP3 时长：从 searchStart 起最多扫 64KB 找首个合法帧头；Xing/Info 给精确帧数，
+   *  无则按首帧 CBR 码率估算（VBR 无头时误差大，但足以识别"半首歌"级截断）。
+   *  MPEG1/MPEG2(LSF) 都覆盖：MPEG2/2.5 的码率表减半、帧长 576 采样（此前只按
+   *  MPEG1 表读码率，低码率播客/有声书会估出 2 倍时长）。扫描区一次读进内存——
+   *  此前逐字节 readSync 最坏 6.5 万次 syscall（每次缓存命中都跑一遍）。 */
+  _probeMp3Duration(fd, searchStart, fileSize) {
+    const start = Math.max(0, searchStart)
+    const limit = Math.min(start + 65536, fileSize - 4)
+    if (limit <= start) return null
+    const window = Buffer.alloc(limit - start)
+    if (fs.readSync(fd, window, 0, window.length, start) < 4) return null
+    for (let pos = 0; pos + 4 <= window.length; pos += 1) {
+      const frame = window
+      if (frame[pos] !== 0xff || (frame[pos + 1] & 0xe0) !== 0xe0) continue
+      const versionBits = (frame[pos + 1] >> 3) & 0x03 // 0=MPEG2.5 2=MPEG2 3=MPEG1（1=保留）
+      const layerBits = (frame[pos + 1] >> 1) & 0x03 // 1=Layer3
+      if (versionBits === 1 || layerBits !== 1) continue
+      const isMpeg1 = versionBits === 3
+      const bitRate = (isMpeg1
+        ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+        : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160])[frame[pos + 2] >> 4] * 1000
+      const sampleRate = (isMpeg1
+        ? [44100, 48000, 32000]
+        : versionBits === 2 ? [22050, 24000, 16000] : [11025, 12000, 8000])[(frame[pos + 2] >> 2) & 0x03]
+      if (!bitRate || !sampleRate) continue
+      const samplesPerFrame = isMpeg1 ? 1152 : 576
+      // Xing/Info 头紧跟首帧侧信息（MPEG1 立体声 32B，MPEG2/单声道 17B；取小者先试）
+      const xingOff = pos + 4 + 17
+      if (xingOff + 12 <= window.length) {
+        const tag = window.toString('latin1', xingOff, xingOff + 4)
+        if (tag === 'Xing' || tag === 'Info') {
+          const flags = window.readUInt32BE(xingOff + 4)
+          if (flags & 0x01) return window.readUInt32BE(xingOff + 8) * samplesPerFrame / sampleRate
+        }
+      }
+      return (fileSize - start - pos) * 8 / bitRate
+    }
+    return null
+  }
+
+  /**
+   * 缓存复用前的时长闸：**只拦实际截断**——文件比期望短超过容差（试听 30s vs 整曲 200s）
+   * 才算坏；文件比期望**长**或短得不多（元数据虚高，QQ 真机实测元数据比实际 flac 普遍长
+   * ~10s，2026-10-19）必须放行——双向 abs 比较会把完整文件误判成"截断"，智能渲染永远失败。
+   * 探测不出时长（不认识的容器）放行——格式防线在扩展名校验/分析侧兜底。
+   */
+  _cachedDurationMismatch(filePath, expectedDuration, tolerance, trackKey) {
+    const actual = this.probeAudioDurationSeconds(filePath)
+    if (actual == null) return false
+    if (actual >= expectedDuration - tolerance) return false
+    // 相对阈值兜底：QQ 元数据时长普遍比实际文件虚高 ~10s（真机 2026-10-19 日志 4/4 首
+    // actual = expected - 10）。固定 5s 容差会把这种**完整文件**误判成截断——删缓存重下
+    // 后依旧差 10s，分析/渲染每次都失败（"过渡直接跳过"）。短过期望 10% 以内视为元数据
+    // 虚高放行：139.1/149=93% 放行；真截断 176.5/370=48%、试听 30/200=15% 仍拒。
+    if (actual >= expectedDuration * 0.9) return false
+    console.warn(`[AudioCache] Cached file duration mismatch (${trackKey}): actual=${actual.toFixed(1)}s expected=${Math.round(expectedDuration)}s — treating as stale, re-downloading`)
+    this.deleteCacheFile(trackKey)
+    return true
+  }
+
+  /**
    * 下载音频到本地缓存（供分析/渲染复用）：URL → 本地文件。
    * 与 downloadForAnalysis 相同，暴露给外部直接调用。
    */
@@ -301,8 +457,11 @@ class AudioDownloadService {
       throw new Error('Invalid track key')
     }
     trackKey = trackKey.trim()
-    const { timeout = 60000, maxSize = 100 * 1024 * 1024 } = options // 100MB max
-
+    const { timeout = 60000, maxSize = 100 * 1024 * 1024, expectedDuration } = options // 100MB max
+    // 期望时长校验容差：5s —— 拦"半首歌"级截断（试听 30s vs 整曲 200s+ 远超此值），
+    // 同时对元数据时长本身 ±数秒的取整误差不敏感。expectedDuration 缺省（<5s）不校验。
+    const durationTolerance = 5
+    const expectedDurationValid = Number.isFinite(expectedDuration) && expectedDuration >= durationTolerance
     // Check if already in cache —— 必须排在 403 冷却检查之前：
     // 冷却按「URL」记录（典型：预热期拿到空 vkey URL 被上游 403）。文件已经缓存时
     // 根本不需要下载，若被 URL 冷却挡住，渲染/分析会在文件就绪的情况下依然拿不到
@@ -311,7 +470,9 @@ class AudioDownloadService {
     const cacheUsable = Boolean(
       cachedEntry
       && this.isInsideTempRoot(cachedEntry.filePath)
-      && this._extensionMatchesContent(cachedEntry.filePath),
+      && this._extensionMatchesContent(cachedEntry.filePath)
+      // 复用缓存也要过时长闸：坏文件一旦入缓存，commit 校验就再也管不到它了
+      && !(expectedDurationValid && this._cachedDurationMismatch(cachedEntry.filePath, expectedDuration, durationTolerance, trackKey)),
     )
     if (cacheUsable) {
       // Update last access time
@@ -345,7 +506,7 @@ class AudioDownloadService {
       return await this.activeDownloads.get(activeKey)
     }
 
-    const downloadPromise = this._performDownload(canonicalUrl, trackKey, timeout, maxSize)
+    const downloadPromise = this._performDownload(canonicalUrl, trackKey, timeout, maxSize, { expectedDurationValid, expectedDuration, durationTolerance })
     this.activeDownloads.set(activeKey, downloadPromise)
 
     try {
@@ -356,7 +517,7 @@ class AudioDownloadService {
     }
   }
 
-  _performDownload(url, trackKey, timeout, maxSize) {
+  _performDownload(url, trackKey, timeout, maxSize, durationGate = {}) {
     return new Promise((resolve, reject) => {
       // Generate cache file path
       const hash = crypto.createHash('md5').update(`${trackKey}\n${url}`).digest('hex')
@@ -443,6 +604,19 @@ class AudioDownloadService {
           if (downloadedSize === 0) {
             fail(new Error('Empty audio download'))
             return
+          }
+          // 时长闸（commit 前）：空 vkey/试听片段返回合法容器但只有半首（实测 370s 的
+          // 歌存下 176.5s 的 FLAC），拦在进缓存之前。期望时长缺省/容器探测不出 → 不校验。
+          // ⚠️ 只拦真截断（双向 abs 会把"元数据虚高 ~10s"的完整文件误判 → 智能渲染
+          // 永远失败，真机 2026-10-19）：actual < expected-5 **且** actual < expected×90%
+          // 才拒——QQ 元数据虚高 ~10s/139s≈6.7% 落在放行区，真截断/试听两条件都满足。
+          const { expectedDurationValid: gateValid, expectedDuration: gateExpected, durationTolerance: gateTolerance } = durationGate
+          if (gateValid) {
+            const actualDuration = this.probeAudioDurationSeconds(cacheFile)
+            if (actualDuration != null && actualDuration < gateExpected - gateTolerance && actualDuration < gateExpected * 0.9) {
+              fail(new Error(`AUDIO_DOWNLOAD_DURATION_MISMATCH: downloaded ${actualDuration.toFixed(1)}s but track is ${Math.round(gateExpected)}s (truncated/preview stream)`))
+              return
+            }
           }
           settled = true
           cleanup(false)
@@ -776,7 +950,7 @@ class AudioDownloadService {
    * Prepare audio file for analysis
    * Returns local file path (either original or downloaded temp file)
    */
-  async prepareAudioFile(urlOrPath, trackKey) {
+  async prepareAudioFile(urlOrPath, trackKey, options = {}) {
     if (typeof trackKey !== 'string' || !trackKey.trim() || trackKey.length > 256) {
       throw new Error('Invalid track key')
     }
@@ -793,7 +967,7 @@ class AudioDownloadService {
 
     // Remote URL, need to download
     if (urlOrPath.startsWith('http://') || urlOrPath.startsWith('https://')) {
-      return await this.downloadForAnalysis(urlOrPath, trackKey)
+      return await this.downloadForAnalysis(urlOrPath, trackKey, options)
     }
 
     if (localPath) throw new Error('Local audio file is not authorized')

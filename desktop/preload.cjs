@@ -121,6 +121,18 @@ contextBridge.exposeInMainWorld('electron', {
     redeem: (code) => ipcRenderer.invoke('device-license:redeem', code),
     reset: () => ipcRenderer.invoke('device-license:reset'),
   },
+
+  // 开发者身份验证（GitHub 签名提交 + 花名册；见 desktop/developer-auth.cjs）
+  developerAuth: {
+    verify: (payload) => ipcRenderer.invoke('developer:verify', payload),
+    state: () => ipcRenderer.invoke('developer:state'),
+    logout: () => ipcRenderer.invoke('developer:logout'),
+  },
+
+  // 兑换码签发桥（私钥不出开发者机；见 main.cjs license-studio:issue 门禁说明）
+  licenseStudio: {
+    issue: (payload) => ipcRenderer.invoke('license-studio:issue', payload),
+  },
   
   // Production Python helpers are started lazily; development may already run them.
   localPython: {
@@ -233,12 +245,17 @@ contextBridge.exposeInMainWorld('electron', {
   
   // AutoMix 渲染进程诊断日志：写入后端 automix-backend.log
   automixLog: (scope, message) => ipcRenderer.invoke('automix-log:append', scope, message),
+
+  // Spotify 数据桥（api-partner GraphQL，主进程持会话）：登录/查询/歌词
+  spotifyPartner: {
+    request: (operation, params) => ipcRenderer.invoke('spotify-partner:request', operation, params),
+  },
   
   // Audio download for rendering
   audioDownload: {
     selectLocalFile: () => ipcRenderer.invoke('audio-download:selectLocalFile'),
-    prepare: (urlOrPath, trackKey) => 
-      ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey),
+    prepare: (urlOrPath, trackKey, options) =>
+      ipcRenderer.invoke('audio-download:prepare', urlOrPath, trackKey, options),
     peekCached: (trackKey) =>
       ipcRenderer.invoke('audio-download:peekCached', trackKey),
     deleteCached: (trackKey) =>
@@ -303,6 +320,9 @@ contextBridge.exposeInMainWorld('electron', {
   qqQrLoginStart: (channel) => ipcRenderer.invoke('qq-qr-login-start', ['qq', 'wx', 'qqmusic'].includes(channel + '') ? channel + '' : 'qq'),
   qqQrLoginPoll: () => ipcRenderer.invoke('qq-qr-login-poll'),
   qqQrLoginCancel: () => ipcRenderer.invoke('qq-qr-login-cancel'),
+  // 登录诊断（平台可用性增强）：失败后主动自检（分层网络探测 + verdict + 清单）与诊断报告文本
+  runLoginSelfCheck: (providerId) => ipcRenderer.invoke('login-self-check', providerId),
+  buildLoginDiagnosticsReport: (providerId, failureHint) => ipcRenderer.invoke('login-diagnostics-report', providerId, failureHint),
   // 酷狗音乐登录（Electron 弹窗扫码，抓 kg_token/KuGoo）
   openKugouLoginWindow: () => ipcRenderer.invoke('open-kugou-login-window'),
   clearKugouSession: () => ipcRenderer.invoke('kugou-clear-session'),
@@ -310,6 +330,11 @@ contextBridge.exposeInMainWorld('electron', {
   getKugouSession: () => ipcRenderer.invoke('get-kugou-session'),
   // Spotify OAuth 授权（Electron 弹窗；clientId 可选，自定义 Client ID）
   openSpotifyLogin: (clientId) => ipcRenderer.invoke('open-spotify-login', clientId),
+  // Spotify 直播（librespot 通道）：换播放 URL（waveforge-spotify://，密钥留在主进程）
+  spotifyAudioIssue: (trackId, quality) => ipcRenderer.invoke('spotify-audio-issue', trackId, quality),
+  // 登录后预热会话 / 登出后作废会话与已发 key
+  spotifyAudioPrime: () => ipcRenderer.invoke('spotify-audio-prime'),
+  spotifyAudioInvalidate: () => ipcRenderer.invoke('spotify-audio-invalidate'),
   // 汽水音乐登录（Electron 弹窗扫码，抓 token）
   openSodaLogin: () => ipcRenderer.invoke('open-soda-login'),
   // 汽水音乐登出清理（清 auth 分区 .qishui.com Cookie/本地存储 + 凭据文件会话字段）

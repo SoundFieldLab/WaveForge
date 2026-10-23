@@ -356,6 +356,11 @@ export default function ModernAudioVisualizer({
     }
   }, [analyser, accentColor, paletteKey, isPlaying])
 
+  // 无分析器时整个组件不渲染：条柱永远全零，只剩玻璃框 + blur(28px) backdrop 的
+  // 空壳挂在左下角（音频图初始化失败走媒体音量兜底、或残留实例 props 停在旧值时都会这样）。
+  // 判断放在所有 hooks 之后，满足 hooks 规则（analyser null→有值时 hooks 数量不变）。
+  if (!analyser) return null
+
   return (
     <motion.div
       initial={{ opacity: 0, x: -18, filter: 'blur(8px)' }}

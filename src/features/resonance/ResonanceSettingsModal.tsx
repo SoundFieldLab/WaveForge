@@ -394,14 +394,18 @@ export default function ResonanceSettingsModal(props: ResonanceSettingsModalProp
             <input
               type="range" min={0} max={80} value={settings.backgroundBlur}
               onChange={event => update('backgroundBlur', Number(event.target.value))}
-              className="w-40" style={{ accentColor: accent }} aria-label="背景模糊"
+              className={'party-slider w-40' + (dark ? '' : ' on-light')}
+              style={{ background: `linear-gradient(90deg, ${accent} ${(settings.backgroundBlur / 80) * 100}%, ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)'} ${(settings.backgroundBlur / 80) * 100}%)` }}
+              aria-label="背景模糊"
             />
           </Row>
           <Row border={border} sub={sub} title={`背景暗度 ${settings.backgroundDim}%`} hint="压暗背景以保证文字对比度">
             <input
               type="range" min={0} max={90} value={settings.backgroundDim}
               onChange={event => update('backgroundDim', Number(event.target.value))}
-              className="w-40" style={{ accentColor: accent }} aria-label="背景暗度"
+              className={'party-slider w-40' + (dark ? '' : ' on-light')}
+              style={{ background: `linear-gradient(90deg, ${accent} ${(settings.backgroundDim / 90) * 100}%, ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.14)'} ${(settings.backgroundDim / 90) * 100}%)` }}
+              aria-label="背景暗度"
             />
           </Row>
           <Row border={border} sub={sub} title="强调色" hint="房间里的按钮、进度、徽章都用它">

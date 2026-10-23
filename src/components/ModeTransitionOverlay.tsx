@@ -33,10 +33,10 @@
 
 import { useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Compass, House, Monitor, PanelsTopLeft, Radio } from 'lucide-react'
+import { Compass, House, Monitor, PanelsTopLeft, Radio, Users } from 'lucide-react'
 import { playModeTransitionSound } from '../services/modeTransitionSound'
 
-export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
+export type TransitionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'
 
 interface ModeTransitionOverlayProps {
   mode: TransitionMode | null
@@ -56,6 +56,7 @@ const MODE_META: Record<TransitionMode, { label: string; hint: string }> = {
   desktop: { label: '桌面', hint: '正在铺开工作台' },
   resonance: { label: '共振', hint: '正在接入一起听房间' },
   singalong: { label: '学歌', hint: '正在打开跟唱练习室' },
+  inparty: { label: 'In Party', hint: '正在打开互控派对' },
 }
 
 /**
@@ -108,6 +109,12 @@ const MODE_VISUALS: Record<TransitionMode, {
     grad: ['#a78bfa', '#7c5cff'], glow: 'rgba(124,92,255,0.45)',
     dot: '#c4b5fd', dotLight: '#8f7bd8', cometDur: 4.6,
   },
+  inparty: {
+    darkBg: ['#241b08', '#171208', '#0a0908'],
+    auroraA: 'rgba(255,232,156,0.22)', auroraB: 'rgba(255,140,90,0.16)',
+    grad: ['#FFE89C', '#d9a13c'], glow: 'rgba(255,232,156,0.42)',
+    dot: '#ffe9a8', dotLight: '#c9a558', cometDur: 4.4,
+  },
 }
 
 /**
@@ -124,6 +131,15 @@ type IconShape =
   | { kind: 'path'; d: string }
 
 const MODE_ICONS: Record<TransitionMode, IconShape[]> = {
+  // In Party = 中心节点 + 三圈电波 + 三个成员点（互控派对的意象）
+  inparty: [
+    { kind: 'circle', cx: 24, cy: 24, r: 3.2 },
+    { kind: 'circle', cx: 24, cy: 24, r: 9 },
+    { kind: 'circle', cx: 24, cy: 24, r: 15.5 },
+    { kind: 'circle', cx: 36.5, cy: 12.5, r: 2 },
+    { kind: 'circle', cx: 12, cy: 33, r: 2 },
+    { kind: 'circle', cx: 34, cy: 36, r: 2 },
+  ],
   // 探索 = 北极星 + 倾斜星轨 + 轨道上的行星（星辰大海）
   explore: [
     { kind: 'path', d: 'M24 7 L27.4 20.6 L41 24 L27.4 27.4 L24 41 L20.6 27.4 L7 24 L20.6 20.6 Z' },
@@ -302,6 +318,7 @@ function SimpleOverlay({ mode, theme }: { mode: TransitionMode | null; theme: 'l
                 {mode === 'desktop' && <Monitor size={52} strokeWidth={1.6} style={{ color: accent }} />}
                 {/* 共振：同心环图标（与侧栏入口、房间头图同一套视觉），此前这一档没有图标会留一个空环 */}
                 {mode === 'resonance' && <Radio size={52} strokeWidth={1.6} style={{ color: accent }} />}
+                {mode === 'inparty' && <Users size={52} strokeWidth={1.6} style={{ color: accent }} />}
               </motion.div>
             </div>
 

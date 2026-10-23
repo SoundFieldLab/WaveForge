@@ -8,7 +8,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Flame, Search as SearchIcon, TrendingDown, TrendingUp, X } from 'lucide-react'
 import type { Album, Artist, Song } from '../../services/musicApi'
-import { searchAlbums, searchArtists, searchPlaylists, searchQuick, searchSongs, searchSuggest, searchUsers, type SearchSuggestion } from '../../services/musicApi'
+import { searchAlbums, searchArtists, searchPlaylists, searchQuick, searchSongs, searchSuggest, searchUsers, loadAlbumCovers, type SearchSuggestion } from '../../services/musicApi'
 import { getPlatformCapabilities, platformLabel, type MusicPlatform } from '../../services/platforms'
 import {
   PcCardGrid, PcCover, PcEmpty, PcSongTable, PcTabs, pcTheme, type PcSkin, type PcTone,
@@ -43,7 +43,9 @@ function PcSearch({ initialKeyword, platform, chrome, account, actions, active =
   const accent = chrome.accent
   const skin = chrome.skin
   const [keyword, setKeyword] = useState(initialKeyword || '')
-  const [submitted, setSubmitted] = useState(initialKeyword || '')
+  // submitted 必须从空串起步：预填 initialKeyword 会让下方 effect 判定「已搜过该词」
+  // 而跳过首次自动搜索——顶栏/侧栏带词进入时页面永远停在空结果（2026-10-18 实测复现）。
+  const [submitted, setSubmitted] = useState('')
   const [tab, setTab] = useState('songs')
   const [songs, setSongs] = useState<Song[]>([])
   const [songCount, setSongCount] = useState(0)
@@ -95,6 +97,20 @@ function PcSearch({ initialKeyword, platform, chrome, account, actions, active =
       setAlbums(Array.isArray(albumResult) ? albumResult : [])
       setPlaylists((playlistResult as { playlists?: any[] })?.playlists || [])
       setUsers(Array.isArray(userResult) ? userResult : [])
+      // 首屏封面补齐：上游搜索偶发不带专辑封面（前端只剩 img1v1 占位灰图），服务端
+      // 的后台补齐只写缓存、不回推本次响应。落地后立即对当前结果批量补一次
+      //（albums/covers，命中缓存零开销），与简约模式 SearchPanel 同款逻辑。
+      const resultSongs = songResult?.songs || []
+      if (platform === 'netease' && resultSongs.length > 0) {
+        void loadAlbumCovers(resultSongs).then(filled => {
+          if (requestId !== requestRef.current) return
+          const changed = filled.some((song, index) => song.album?.picUrl !== resultSongs[index]?.album?.picUrl)
+          if (!changed) return
+          const updated = [...resultSongs]
+          filled.forEach((song, index) => { updated[index] = song })
+          setSongs(updated)
+        })
+      }
     } catch (searchError) {
       if (requestId !== requestRef.current) return
       setError(searchError instanceof Error ? searchError.message : '搜索失败')
@@ -135,7 +151,7 @@ function PcSearch({ initialKeyword, platform, chrome, account, actions, active =
     return () => { cancelled = true }
   }, [active, submitted, platform])
 
-  // 输入联想：300ms 防抖；QQ 走 searchQuick，网易云走 searchSuggest
+  // 输入联想：300ms 防抖；QQ 走 searchQuick，网易云/酷狗走 searchSuggest（酷狗为派生联想）
   useEffect(() => {
     const trimmed = keyword.trim()
     if (!trimmed || trimmed === submitted) { setSuggestions([]); setSuggestOpen(false); return }
@@ -151,8 +167,8 @@ function PcSearch({ initialKeyword, platform, chrome, account, actions, active =
               : []
             setSuggestions(list.filter(item => item.keyword))
             setSuggestOpen(list.length > 0)
-          } else if (platform === 'netease') {
-            const list = await searchSuggest(trimmed, 'netease')
+          } else if (platform === 'netease' || platform === 'kugou') {
+            const list = await searchSuggest(trimmed, platform)
             if (seq !== suggestSeqRef.current) return
             setSuggestions(list.slice(0, 10))
             setSuggestOpen(list.length > 0)

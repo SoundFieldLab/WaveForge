@@ -198,6 +198,33 @@ function pickKugouPlayUrl(json) {
   ).replace(/\\\//g, '/').trim()
 }
 
+/**
+ * 从酷狗取流响应里读**实际下发**的音质档。
+ * 酷狗服务端对超出账号权限/曲目不存在的档会静默回落（请求 flac 给 128 是常态），
+ * 「请求档 = 实际档」会谎报。可靠信号优先级：
+ *   data[0].bitrate（部分响应带，>900≈flac、>300≈320、否则 128）
+ *   data[0].ext / trans_param.fileHead（文件扩展名：flac → lossless，mp3 看 bitrate）
+ * 返回 'standard' | 'exhigh' | 'lossless' | 'hires'，读不到时回 null（调用方按请求档兜底并标记 unverified）。
+ */
+function detectKugouActualLevel(json) {
+  const data = json?.data
+  const item = Array.isArray(data) ? data[0] : data
+  if (!item || typeof item !== 'object') return null
+  const bitrate = Number(item.bitrate) || 0
+  const ext = String(item.ext || item.trans_param?.fileHead || '').toLowerCase()
+  if (ext === 'flac') return bitrate >= 1500 ? 'hires' : 'lossless'
+  if (ext === 'mp3') {
+    if (bitrate >= 300) return 'exhigh'
+    if (bitrate > 0) return 'standard'
+  }
+  if (bitrate >= 900) return 'lossless'
+  if (bitrate >= 300) return 'exhigh'
+  if (bitrate > 0) return 'standard'
+  return null
+}
+
+export { detectKugouActualLevel }
+
 async function kugouPlayViaMobile(hash, albumId, cookie, userid) {
   const key = kugouCloudKey(hash)
   const u = new URL(KUGOU_PLAY_MOBILE)
@@ -253,7 +280,11 @@ export async function resolveKugouSongUrl(params, cookie) {
   const hash = String(params.hash || params.fileHash || params.id || '').trim()
   const albumId = String(params.albumId || params.album_id || '').trim()
   const albumAudioId = Number(params.albumAudioId || params.album_audio_id || params.mixSongId || 0) || 0
-  const requestedQuality = normalizeQualityPreference(params.quality)
+  // auto = 自动最高：按 flac 档请求，酷狗服务端对超出账号权限/曲目不存在的档会静默回落
+  // （「请求档 ≠ 实际档」），实际档由 detectKugouActualLevel 从响应回读——与官方客户端
+  // 「自动最高音质」同语义。此前 auto 不传参 → 服务端默认 128k，登录了也只放标准音质。
+  const autoRequested = !params.quality
+  const requestedQuality = autoRequested ? 'lossless' : normalizeQualityPreference(params.quality)
   if (!hash) return { provider: 'kugou', url: '', playable: false, error: 'MISSING_HASH' }
 
   const attempts = []
@@ -286,15 +317,24 @@ export async function resolveKugouSongUrl(params, cookie) {
       const url = pickKugouPlayUrl(json)
       if (json && Number(json.status) === 1 && url) {
         attempts.push('h5')
-        return { provider: 'kugou', url, playable: true, level: requestedQuality, source: 'h5', hash }
+        // 实际档从响应探测（酷狗对超出权限的档会静默回落，请求档 ≠ 实际档）；
+        // 探测不到才按请求档兜底并标记 unverified。auto 时实际档如实回读。
+        const actualLevel = detectKugouActualLevel(json)
+        return {
+          provider: 'kugou', url, playable: true,
+          level: actualLevel || requestedQuality,
+          ...(actualLevel ? {} : { levelUnverified: true }),
+          requestedQuality: autoRequested ? 'auto' : requestedQuality,
+          source: 'h5', hash,
+        }
       }
     } catch { /* 尝试下一层 */ }
   }
-  // 2) Mobile 免费直链
+  // 2) Mobile 免费直链（免费接口只有标准档；H5 已按请求档试过，此处是未登录/签名失败兜底）
   const mobile = await kugouPlayViaMobile(hash, albumId, cookie, auth.userid)
   if (mobile.url) {
     attempts.push('mobile')
-    return { provider: 'kugou', url: mobile.url, playable: true, level: 'standard', source: 'mobile', hash }
+    return { provider: 'kugou', url: mobile.url, playable: true, level: 'standard', source: 'mobile', hash, requestedQuality: autoRequested ? 'auto' : requestedQuality }
   }
   // 3) Web play/getdata（完整参数）
   if (auth.playbackReady) {
@@ -311,6 +351,104 @@ export async function resolveKugouSongUrl(params, cookie) {
     message: restriction.message || '酷狗未返回播放地址',
     attempts: attempts.join(','),
     hash,
+  }
+}
+
+/** MV 播放数据（m3ws.kugou.com /api/v1/mv/infov2）。
+ *  协议 2026-10-22 从官方 MV 分享页 JS（index_mv_v7.js + inf_public-min.js）逆向：
+ *  H5 签名（与 signatureH5Params 同盐）但参数集固定为
+ *  {cmd:100, hash:<mvhash>, ext:'mp4', ismp3:1, ssl:1, srcappid:2919, clientver:20000, clienttime, mid, uuid, dfid:'-'}——
+ *  注意 mid/uuid 都用 clienttime 毫秒值（官方 getInterFacePublic 行为）。
+ *  响应 mvdata.{sq,le,rq}（超清/标清/蓝光）各带 backupdownurl 视频直链。 */
+export async function fetchKugouMvInfo(mvHash) {
+  const mvFileHash = String(mvHash || '').trim().toLowerCase()
+  if (!mvFileHash) return { success: false, error: 'MISSING_MV_HASH', data: null }
+  const now = Date.now()
+  const params = {
+    cmd: 100,
+    hash: mvFileHash,
+    ext: 'mp4',
+    ismp3: 1,
+    ssl: 1,
+    srcappid: KUGOU_H5_SRC_APPID,
+    clientver: KUGOU_H5_CLIENTVER,
+    clienttime: now,
+    mid: now,
+    uuid: now,
+    dfid: '-',
+  }
+  params.signature = signatureH5Params(params, null)
+  const u = new URL('/api/v1/mv/infov2', 'https://m3ws.kugou.com')
+  Object.keys(params).forEach(key => u.searchParams.set(key, String(params[key])))
+  const json = await requestJson(u.toString(), {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15',
+      Referer: 'https://m3ws.kugou.com/mv/index.php',
+    },
+  })
+  if (!json || Number(json.status) !== 1 || !json.mvdata) {
+    return { success: false, error: (json && (json.error || json.error_message)) || 'KUGOU_MV_INFO_FAILED', data: null }
+  }
+  const pickVariant = (entry) => entry && {
+    hash: String(entry.hash || ''),
+    bitrate: Number(entry.bitrate || 0) || undefined,
+    filesize: Number(entry.filesize || 0) || undefined,
+    timelength: Number(entry.timelength || 0) || undefined,
+    url: String((Array.isArray(entry.backupdownurl) ? entry.backupdownurl.find(Boolean) : entry.backupdownurl) || ''),
+  }
+  const variants = ['sq', 'le', 'rq']
+    .map(key => ({ key, ...pickVariant(json.mvdata[key]) }))
+    .filter(v => v.url)
+  if (!variants.length) {
+    return { success: false, error: 'KUGOU_MV_URL_EMPTY', message: json.play_limit_tips || 'MV 播放地址为空（可能需要 VIP）', data: json }
+  }
+  return {
+    success: true,
+    data: {
+      hash: mvFileHash,
+      songname: decodeKugouDisplayText(json.songname || ''),
+      singers: decodeKugouDisplayText(json.singer || ''),
+      publishDate: String(json.publish_date || ''),
+      playCount: Number(json.play_count || 0) || undefined,
+      likeCount: Number(json.like_count || 0) || undefined,
+      commentCount: Number(json.comment_count || 0) || undefined,
+      collectCount: Number(json.collect_count || 0) || undefined,
+      timelength: Number(json.timelength || 0) || undefined,
+      privilege: Number(json.privilege || 0),
+      screenType: String(json.screen_type || ''),
+      authors: (Array.isArray(json.authors) ? json.authors : []).map(a => ({
+        authorId: String(a.author_id || ''),
+        authorName: decodeKugouDisplayText(a.author_name || ''),
+        avatar: String(a.avatar || ''),
+      })),
+      variants,
+    },
+  }
+}
+
+/** MV 列表（mobilecdn /api/v3/singer/mv：歌手 MV；/api/v3/mv/hot：热门 MV） */
+export async function fetchKugouMvList(kind, singerId, page = 1, pagesize = 30) {
+  const safePage = Math.max(1, Number(page) || 1)
+  const safeSize = Math.max(1, Math.min(50, Number(pagesize) || 30))
+  const isSinger = kind === 'singer'
+  const path = isSinger ? '/api/v3/singer/mv' : '/api/v3/mv/hot'
+  const query = new URLSearchParams({ page: String(safePage), pagesize: String(safeSize) })
+  if (isSinger) query.set('singerid', String(singerId || '').replace(/\D/g, '') || '0')
+  try {
+    const json = await requestJson(`http://mobilecdn.kugou.com${path}?${query.toString()}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+    })
+    const rows = (json && json.data && Array.isArray(json.data.info)) ? json.data.info : []
+    const list = rows.map(item => ({
+      hash: String(item.hash || ''),
+      filename: decodeKugouDisplayText(item.filename || ''),
+      singername: decodeKugouDisplayText(item.singername || ''),
+      imgurl: kugouCoverUrl(item.imgurl || ''),
+      intro: decodeKugouDisplayText(item.intro || ''),
+    })).filter(item => item.hash && item.filename)
+    return { success: list.length > 0, list, total: Number(json?.data?.total || 0) || undefined }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_MV_LIST_FAILED', list: [] }
   }
 }
 
@@ -915,12 +1053,24 @@ async function kugouLiteCoverMap(cred, hashes) {
 
 /** 概念版歌单曲目（/v4/get_list_all_file，listid 为数字）。
  *  实测 /pubsongs/v2/get_other_list_file_nofilt（Folia 用的那个）会漏歌：
- *  同一账号下「我喜欢」只回 45/50，「珂拉琪」直接 0/17；v4 端点两个歌单都完整。 */
+ *  同一账号下「我喜欢」只回 45/50，「珂拉琪」直接 0/17；v4 端点两个歌单都完整。
+ *  注意：v4 只认**本账号**的 listid——别人公开歌单（yueku recommend / by-tag 池，
+ *  global_collection_id 形如 collection_3_<作者uid>_<slid>_0）必须走
+ *  /pubsongs/v2/get_other_list_file_nofilt 按 global_collection_id 取，
+ *  两个端点的行结构不同（nofilt 是 name="歌手 - 歌名" 扁平行），这里统一成同一形状。 */
 export async function fetchKugouConceptPlaylistTracks(cred, collectionId, limit = 100, page = 1) {
   const listid = kugouListIdOf(collectionId)
   if (!listid) return { success: false, error: 'MISSING_PLAYLIST_ID', tracks: [] }
   const pagesize = Math.max(1, Math.min(300, Number(limit) || 100))
+  const rawId = String(collectionId || '').trim()
+  // 非 collection_ 前缀的纯数字默认按本账号 listid 走 v4（用户自建歌单/「我喜欢」）。
+  // 带 collection_ 前缀时先看是不是本人歌单（collection_3_<自己uid>_…）：不是则走公开端点。
+  const isGlobalId = rawId.startsWith('collection_')
+  const ownUid = String(cred?.userid || '')
+  const isOwnCollection = isGlobalId && new RegExp(`^collection_3_${ownUid}_`).test(rawId)
+  const otherGid = isGlobalId && !isOwnCollection ? rawId : ''
   try {
+    if (otherGid) return await fetchKugouConceptOtherPlaylistTracks(cred, otherGid, pagesize, page)
     const json = await kugouLiteRequest({
       cred,
       path: '/v4/get_list_all_file',
@@ -981,6 +1131,58 @@ export async function fetchKugouConceptPlaylistTracks(cred, collectionId, limit 
   }
 }
 
+/** 概念版他人公开歌单曲目（/pubsongs/v2/get_other_list_file_nofilt，global_collection_id）。
+ *  行结构是扁平的 name="歌手 - 歌名"，no singerinfo/albuminfo 嵌套——
+ *  映射与 v4 端点统一（songName/singerName/albumAudioId/mixSongId）。 */
+export async function fetchKugouConceptOtherPlaylistTracks(cred, globalCollectionId, pagesize = 300, page = 1) {
+  try {
+    const json = await kugouLiteRequest({
+      cred,
+      path: '/pubsongs/v2/get_other_list_file_nofilt',
+      method: 'POST',
+      body: {
+        global_collection_id: String(globalCollectionId || ''),
+        userid: Number(cred?.userid) || 0,
+        pagesize: Math.max(1, Math.min(300, Number(pagesize) || 300)),
+        page: Math.max(1, Number(page) || 1),
+      },
+    })
+    if (!json || Number(json.status) !== 1) {
+      return { success: false, error: (json && (json.error || json.errmsg || json.msg)) || 'KUGOU_OTHER_PLAYLIST_TRACKS_FAILED', tracks: [] }
+    }
+    const data = json.data || {}
+    const rows = Array.isArray(data.info) ? data.info : (Array.isArray(data.songs) ? data.songs : [])
+    const tracks = rows.map(item => {
+      const hash = String(item.hash || '').toLowerCase()
+      const filename = decodeKugouDisplayText(item.name || item.filename || '')
+      const clean = filename.replace(/\.(mp3|flac|m4a|ape|wav|ogg|aac)$/i, '')
+      const sep = clean.indexOf(' - ')
+      return {
+        hash,
+        songName: sep > 0 ? clean.slice(sep + 3) : clean,
+        singerName: sep > 0 ? clean.slice(0, sep) : '',
+        singerId: item.singerid ? String(item.singerid) : undefined,
+        albumId: String(item.album_id || ''),
+        albumName: decodeKugouDisplayText(item.remark || ''),
+        albumAudioId: Number(item.audio_id || 0) || undefined,
+        mixSongId: Number(item.add_mixsongid || item.mixsongid || 0) || undefined,
+        fileId: String(item.fileid || ''),
+        duration: Math.round((Number(item.timelen || item.duration || 0) || 0) / 1000) || undefined,
+        coverUrl: kugouCoverUrl(item.cover || item.sizable_cover || ''),
+      }
+    }).filter(t => t.hash && t.songName)
+    if (tracks.some(t => !t.coverUrl)) {
+      const coverMap = await kugouLiteCoverMap(cred, tracks.map(t => t.hash))
+      for (const track of tracks) {
+        if (!track.coverUrl && coverMap[track.hash]) track.coverUrl = coverMap[track.hash]
+      }
+    }
+    return { success: true, tracks, total: Number(data.count || 0) || tracks.length }
+  } catch (err) {
+    return { success: false, error: err.message || 'KUGOU_OTHER_PLAYLIST_TRACKS_FAILED', tracks: [] }
+  }
+}
+
 /** 概念版歌单信息（/v3/get_list_info，pubsongs.kugou.com）：详情页标题/封面/曲目数 */
 export async function fetchKugouConceptPlaylistInfo(cred, collectionId) {
   const raw = String(collectionId || '').trim()
@@ -1034,13 +1236,28 @@ export async function fetchKugouConceptLikedMap(cred, hashes) {
   return { liked, listid }
 }
 
-/** 概念版加歌（喜欢=加入默认「我喜欢」歌单，listid=2） */
+/** 概念版加歌（喜欢=加入默认「我喜欢」歌单，listid=2）。
+ *  上游 /cloudlist.service/v6/add_song 拒绝空 name——歌名缺失时先用搜索接口补齐。 */
 export async function kugouConceptAddSong(cred, listid, song) {
   const hash = String((song && (song.hash || song.fileHash)) || '').toLowerCase()
   if (!hash) return { success: false, error: 'MISSING_HASH' }
   const target = String(listid || '2').replace(/\D/g, '') || '2'
-  const name = String((song && (song.songName || song.name)) || '')
-  const singer = String((song && (song.singerName || (Array.isArray(song.artists) && song.artists.map(a => a.name).join('、')))) || '')
+  let name = String((song && (song.songName || song.name)) || '')
+  let singer = String((song && (song.singerName || (Array.isArray(song.artists) && song.artists.map(a => a.name).join('、')))) || '')
+  if (!name) {
+    // hash 直接查歌曲信息（m.kugou.com app 接口，搜索接口不认 hash）
+    try {
+      const info = await requestJson(`${KUGOU_PLAY_MOBILE}?cmd=playInfo&hash=${encodeURIComponent(hash)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+        timeout: 8000,
+      })
+      if (info && (info.songName || info.singerName)) {
+        name = String(info.songName || '')
+        singer = singer || String(info.singerName || '')
+      }
+    } catch { /* 补齐失败按原样尝试 */ }
+  }
+  if (!name) return { success: false, error: 'MISSING_SONG_NAME' }
   try {
     const clienttime = Math.floor(Date.now() / 1000)
     const json = await kugouLiteRequest({
@@ -1108,7 +1325,11 @@ export async function kugouConceptRemoveSong(cred, listid, fileIds) {
 }
 
 function kugouLiteQualityCandidates(quality) {
-  const level = normalizeQualityPreference(quality)
+  // 「自动最高」= 完整降级链从高往低试（上游 /v5/url 必须带 quality 参数，auto 语义由候选链实现）。
+  // 显式档位只从该档向下降（standard 恒 128，不越权升档）。
+  const raw = String(quality || '').trim().toLowerCase()
+  if (!raw || raw === 'auto') return ['high', 'flac', '320', '128']
+  const level = normalizeQualityPreference(raw)
   if (level === 'jymaster') return ['viper_tape', 'flac', '320', '128']
   if (level === 'hires') return ['high', 'flac', '320', '128']
   if (level === 'lossless') return ['flac', '320', '128']
@@ -1155,7 +1376,15 @@ export async function resolveKugouConceptSongUrl(cred, params) {
     })
     const url = pickKugouPlayUrl(json)
     if (json && Number(json.status) === 1 && url) {
-      return { provider: 'kugou', url, playable: true, level: quality, source: 'concept', hash }
+      // 实际档从响应探测（每层候选都可能被静默回落；探测不到按本层请求档兜底）
+      const actualLevel = detectKugouActualLevel(json)
+      return {
+        provider: 'kugou', url, playable: true,
+        level: actualLevel || quality,
+        ...(actualLevel ? {} : { levelUnverified: true }),
+        requestedQuality: normalizeQualityPreference(params.quality),
+        source: 'concept', hash,
+      }
     }
     const errCode = json && Number(json.error_code)
     const message = String((json && (json.error || json.errmsg)) || '') || `酷狗未返回播放地址(${errCode || json?.status || '?'})`
@@ -1163,6 +1392,16 @@ export async function resolveKugouConceptSongUrl(cred, params) {
     lastRestriction = {
       category: vipBlocked ? 'vip_required' : 'url_unavailable',
       message,
+    }
+    // 35104「Hash not found」（实测：不存在的 hash 无论请求哪档都回同一码）与 20018（凭据被拒）
+    // 都是资源/凭据级失败——换档重试必然同样失败，早退省掉剩余 3 档的无效请求（每档 ~170ms）。
+    if (errCode === 35104 || errCode === 20018) {
+      return {
+        provider: 'kugou', url: '', playable: false,
+        reason: errCode === 20018 ? 'auth_required' : 'url_unavailable',
+        message,
+        hash,
+      }
     }
   }
   return {
@@ -1405,6 +1644,19 @@ export async function fetchKugouChannelVideos(ipId, page = 1, pagesize = 6) {
       albumAudioId: Number(base.album_audio_id || 0) || undefined,
     }
   }).filter(v => v.id && v.name)
+  // video_id 是纯数字（频道视频库），不是 MV hash——MV 播放器认 hash。
+  // 按视频名搜 MV 反查 hash（2026-10-22 实测「战马(DJ默涵版)」命中并取到三档直链）；
+  // 反查失败的视频保持 mvHash 空，UI 据此禁用点击（不留假入口）。
+  await Promise.all(videos.filter(v => !v.mvHash).map(async v => {
+    try {
+      const q = new URLSearchParams({ format: 'json', keyword: v.name, page: '1', pagesize: '5' })
+      const json = await requestJson(`http://mobilecdn.kugou.com/api/v3/search/mv?${q.toString()}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15' },
+      })
+      const hit = (json && json.data && Array.isArray(json.data.info) ? json.data.info : []).find(m => m && m.hash)
+      if (hit) v.mvHash = String(hit.hash)
+    } catch { /* 反查失败保持空 */ }
+  }))
   return { success: true, videos, total: Number(json.total || 0) || videos.length }
 }
 
@@ -2815,6 +3067,60 @@ export async function deleteKugouUserPlaylist(cred, listid, type = 1) {
     return { success: true, data: json }
   } catch (error) {
     return { success: false, error: error?.message || 'KUGOU_PLAYLIST_DELETE_FAILED' }
+  }
+}
+
+/** 编辑歌单信息（/v2/modify_list；与 delete_list 同款 AES+RSA p 通道）。
+ *  body {listid, total_ver: 0, type: 0, name, intro}——name/intro 至少传一个；
+ *  实测回包 data.info.name/intro 即新值（2026-10-22 验证）。 */
+export async function modifyKugouUserPlaylist(cred, listid, { name, intro } = {}) {
+  if (!cred || !cred.token || !cred.userid) return { success: false, error: 'KUGOU_AUTH_REQUIRED' }
+  const numericListId = Number(String(listid || '').replace(/\D/g, '')) || 0
+  if (!numericListId) return { success: false, error: 'MISSING_LIST_ID' }
+  const cleanName = name == null ? undefined : String(name).trim()
+  const cleanIntro = intro == null ? undefined : String(intro)
+  if (!cleanName && cleanIntro === undefined) return { success: false, error: 'NOTHING_TO_UPDATE' }
+  try {
+    const payload = { listid: numericListId, total_ver: 0, type: 0 }
+    if (cleanName) payload.name = cleanName
+    if (cleanIntro !== undefined) payload.intro = cleanIntro
+    const rawKey = crypto.randomBytes(3).toString('hex')
+    const bodyText = kugouLiteAes(rawKey, JSON.stringify(payload), false)
+    const p = crypto.publicEncrypt(
+      { key: KUGOU_LITE_RSA_PUBLIC_KEY, padding: crypto.constants.RSA_PKCS1_PADDING },
+      Buffer.from(JSON.stringify({ aes: rawKey, uid: Number(cred.userid) || 0, token: String(cred.token || '') }), 'utf8'),
+    ).toString('hex').toUpperCase()
+    const clienttime = Math.floor(Date.now() / 1000)
+    const buf = await kugouLiteArrayBufferRequest({
+      cred,
+      path: '/v2/modify_list',
+      router: 'cloudlist.service.kugou.com',
+      params: {
+        clienttime,
+        key: crypto.createHash('md5').update(`${KUGOU_LITE_APPID}${KUGOU_LITE_ANDROID_SALT}${KUGOU_LITE_CLIENTVER}${clienttime}`).digest('hex'),
+        last_area: 'gztx',
+        clientver: KUGOU_LITE_CLIENTVER,
+        appid: KUGOU_LITE_APPID,
+        last_time: clienttime,
+        p,
+      },
+      body: bodyText,
+    })
+    const text = kugouLiteAes(rawKey, buf.toString('base64'), true)
+    let json = null
+    try { json = JSON.parse(text) } catch { json = null }
+    const info = json && json.data && json.data.info
+    const entry = Array.isArray(info) ? info[0] : info
+    if (!json || Number(json.status) !== 1) {
+      return { success: false, error: (entry && (entry.err || entry.error)) || (json && (json.error || json.msg)) || 'KUGOU_PLAYLIST_MODIFY_FAILED', data: json }
+    }
+    return {
+      success: true,
+      name: decodeKugouDisplayText((entry && entry.name) || cleanName || ''),
+      intro: decodeKugouDisplayText((entry && entry.intro) || cleanIntro || ''),
+    }
+  } catch (error) {
+    return { success: false, error: error?.message || 'KUGOU_PLAYLIST_MODIFY_FAILED' }
   }
 }
 

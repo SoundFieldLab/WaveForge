@@ -3,6 +3,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const { LICENSE_PUBLIC_KEY } = require('./license-public-key.cjs')
+const fingerprint = require('./device-fingerprint.cjs')
 
 const REGISTRY_KEY = 'HKCU\\Software\\WaveForge'
 const DEVICE_VALUE = 'DeviceId'
@@ -10,6 +11,16 @@ const LEGACY_CODES_VALUE = 'RedeemedCodes'
 const DEVICE_ID_PATTERN = /^WF-[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$/
 const CODE_PREFIX = 'WF1'
 const MAX_CODE_LENGTH = 4096
+
+// ── 兑换码分级（tier）──
+// 等级越高覆盖越广；数组序即等级序，扩展新 tier 时追加并同步 ISSUE_TIER_META。
+//   limited   限制级：解锁单一 feature（payload.feature 指定）
+//   test      测试级：解锁测试版更新通道（可与正式版通道自行切换）
+//   universal 完全开放级：解锁一切限制级 feature + 测试通道（最高等级）
+const CODE_TIERS = Object.freeze(['limited', 'test', 'universal'])
+const TIER_RANK = Object.freeze(Object.fromEntries(CODE_TIERS.map((tier, index) => [tier, index])))
+// feature 前缀约定：universal 授权视同持有任意 feature。测试通道 feature 名固定。
+const TEST_CHANNEL_FEATURE = 'update.test-channel'
 
 function getRegExe() {
   return path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe')
@@ -66,27 +77,44 @@ function normalizeDeviceId(value) {
   return String(value || '').trim().toUpperCase()
 }
 
-function createDeviceId() {
+/** 兜底随机 UUID（非 Windows / WMI 全空时使用，等同 v1 行为）。 */
+function createDeviceIdLegacy() {
   return `WF-${crypto.randomUUID().toUpperCase()}`
 }
 
 function getOrCreateDeviceId(app) {
   const registryValue = normalizeDeviceId(readRegistryValue(DEVICE_VALUE))
-  if (DEVICE_ID_PATTERN.test(registryValue)) {
-    return { deviceId: registryValue, storage: 'registry' }
+  const legacyValid = DEVICE_ID_PATTERN.test(registryValue)
+
+  // v2：硬件指纹优先。同一台机器上无论注册表/文件是否被清，都得到同一 ID。
+  try {
+    const identity = fingerprint.resolveHardwareIdentity(app)
+    if (identity && DEVICE_ID_PATTERN.test(identity.deviceId)) {
+      if (identity.deviceId !== registryValue) {
+        // 注册表里的旧值（v1 随机 UUID 或更早的指纹）与硬件指纹不一致：
+        // 以硬件指纹为准回写。注意这会使绑定在旧 ID 上的兑换码失效——
+        // 只发生在"这台机器本来就换了硬件/重装系统"的场景，是预期行为。
+        try { writeRegistryValue(DEVICE_VALUE, identity.deviceId) } catch { }
+        writeFallback(app, { deviceId: identity.deviceId })
+      }
+      return { deviceId: identity.deviceId, storage: identity.storage, fingerprintVersion: fingerprint.FINGERPRINT_VERSION, matchedWeight: identity.matchedWeight }
+    }
+  } catch (error) {
+    console.warn('[DeviceLicense] 硬件指纹解析失败，回退随机 ID:', error?.message || error)
   }
 
+  // 指纹不可用（非 Windows 等）：沿用 v1 读写路径。
   const fallbackValue = normalizeDeviceId(readFallback(app).deviceId)
-  const deviceId = DEVICE_ID_PATTERN.test(fallbackValue) ? fallbackValue : createDeviceId()
+  const deviceId = legacyValid ? registryValue : (DEVICE_ID_PATTERN.test(fallbackValue) ? fallbackValue : createDeviceIdLegacy())
 
   try {
-    if (writeRegistryValue(DEVICE_VALUE, deviceId)) return { deviceId, storage: 'registry' }
+    if (writeRegistryValue(DEVICE_VALUE, deviceId)) return { deviceId, storage: 'registry', fingerprintVersion: 1 }
   } catch (error) {
     console.warn('[DeviceLicense] 无法写入 HKCU 注册表，改用应用数据目录:', error.message)
   }
 
   writeFallback(app, { deviceId })
-  return { deviceId, storage: 'file' }
+  return { deviceId, storage: 'file', fingerprintVersion: 1 }
 }
 
 function parseStoredCodeList(value) {
@@ -191,6 +219,14 @@ function verifyCode(code, deviceId, app = null) {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(payload.feature)) throw new Error('测试码功能标识无效')
   if (payload.deviceHash !== hashDeviceId(deviceId)) throw new Error('此测试码不属于当前设备')
 
+  // tier（v1.1 起新增；旧码无 tier 视为 limited，行为不变）
+  const tier = CODE_TIERS.includes(payload.tier) ? payload.tier : 'limited'
+  if (tier === 'limited' && !payload.feature) throw new Error('限制级兑换码缺少功能标识')
+  if (tier !== 'limited') {
+    // 非限制级：feature 字段仅作展示（如 test 通道的说明），不参与权限判定
+  }
+  if (payload.deviceHash !== hashDeviceId(deviceId)) throw new Error('此测试码不属于当前设备')
+
   // 时间水位（防回拨）：在 userData 记录"见过的最大时间戳"，now 取 max(系统时钟, 水位)。
   // 用户把系统时间回拨即可让已过期测试码重新生效——离线授权的固有弱点，用单调水位封住。
   const now = Math.floor(monotonicNow(app) / 1000)
@@ -201,12 +237,37 @@ function verifyCode(code, deviceId, app = null) {
 
   return {
     feature: payload.feature,
+    tier,
     label: typeof payload.label === 'string' && payload.label.trim() ? payload.label.trim().slice(0, 80) : payload.feature,
     issuedAt: payload.issuedAt,
     expiresAt: payload.expiresAt ?? null,
     note: typeof payload.note === 'string' ? payload.note.slice(0, 160) : '',
     code: normalized,
   }
+}
+
+/**
+ * 权限判定（分级感知）：
+ *  - universal 码持有 → 一切 feature + 测试通道；
+ *  - test 码 → 仅测试通道 feature；
+ *  - limited 码 → 仅其 feature。
+ * feature 名可带通配后缀 `*`（如 `dj.*` 解锁 dj 前缀全部功能）。
+ */
+function hasFeature(app, featureName) {
+  const identity = getOrCreateDeviceId(app)
+  const grants = collectGrants(app, identity.deviceId)
+  const wanted = String(featureName || '').trim()
+  if (!wanted) return false
+  return grants.some((grant) => {
+    if (grant.tier === 'universal') return true
+    if (grant.tier === 'test') return wanted === TEST_CHANNEL_FEATURE
+    if (grant.feature === wanted) return true
+    if (grant.feature && grant.feature.endsWith('.*')) {
+      const prefix = grant.feature.slice(0, -1)
+      return wanted.startsWith(prefix)
+    }
+    return false
+  })
 }
 
 function collectGrants(app, deviceId) {
@@ -290,10 +351,14 @@ function resetDeviceLicense(app) {
 }
 module.exports = {
   REGISTRY_KEY,
+  CODE_TIERS,
+  TIER_RANK,
+  TEST_CHANNEL_FEATURE,
   getState,
   getOrCreateDeviceId,
   redeem,
   resetDeviceLicense,
   verifyCode,
+  hasFeature,
   hashDeviceId,
 }

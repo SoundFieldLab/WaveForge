@@ -20,10 +20,12 @@ import KugouPcPlaylists, { KugouPcCategories } from './KugouPcPlaylists'
 import KugouPcFavorites from './KugouPcFavorites'
 import KugouPcRecent from './KugouPcRecent'
 import KugouPcLongaudio from './KugouPcLongaudio'
-import { KugouPcPurchased } from './KugouPcPersonal'
+import { KugouCloudPanel, KugouPcPurchased } from './KugouPcPersonal'
 import { KUGOU_PC_MUSIC_TABS, type KugouPcMusicTab, type KugouPcPageContext } from './KugouPcShared'
 import { kugouLongaudioStore } from '../kugouLongaudio/store'
 import KugouLongaudioOverlay from '../kugouLongaudio/KugouLongaudioOverlay'
+import { kugouYouthStore } from '../kugouYouth/store'
+import KugouYouthFeedOverlay from '../kugouYouth/KugouYouthFeedOverlay'
 
 export interface KugouPcShellProps {
   chrome: { tone: PcTone; accent: string; skin?: string }
@@ -63,6 +65,8 @@ function KugouPcShell({
   const [navKey, setNavKey] = useState<KugouPcNavKey>('music')
   const [musicTab, setMusicTab] = useState<KugouPcMusicTab>('discover')
   const [selectedTag, setSelectedTag] = useState<string | null>(null)
+  // 场景音乐大卡指定的场景专区名：频道页签挂载后按名解析 ipId 自动打开频道详情
+  const [sceneZoneName, setSceneZoneName] = useState('')
   const [playlistTab, setPlaylistTab] = useState<'mine' | 'collected'>('mine')
   const [creatingPlaylist, setCreatingPlaylist] = useState(false)
   const [newPlaylistName, setNewPlaylistName] = useState('')
@@ -157,6 +161,13 @@ function KugouPcShell({
     setMusicTab(tab)
   }, [])
 
+  /** 首页「场景音乐」大卡：切到频道页签并按专区名打开详情（zone 由频道页自行解析） */
+  const openSceneZone = useCallback((zoneName: string) => {
+    setSceneZoneName(zoneName || '')
+    setNavKey('music')
+    setMusicTab('channels')
+  }, [])
+
   /** 分类页点标签：切到歌单页签并选中该标签（与探索页分类板块一致） */
   const pickTag = useCallback((tag: string | null) => {
     setSelectedTag(tag)
@@ -170,23 +181,38 @@ function KugouPcShell({
       kugouLongaudioStore.openLibrary()
       return
     }
+    if (key === 'shuffle') {
+      // 「刷歌」= 全屏竖滑刷歌页（kugouYouth 独立 store + Overlay；播放走主播放器）
+      kugouYouthStore.open()
+      return
+    }
     setNavKey(key)
   }, [])
 
   const openPlaylist = useCallback((playlist: any) => { actions.onOpenPlaylist(playlist) }, [actions])
 
+  // 云盘面板动作包（KugouCloudPanel 的数据自加载，只需播放/菜单/跳专辑）
+  const cloudPanelActions = useMemo(() => ({
+    onPlaySongs: (song: any, songs: any[], index?: number) => actions.onPlaySongs(song, songs, index),
+    onSongMenu: (event: { clientX: number; clientY: number }, song: any, songs: any[]) =>
+      actions.onSongMenu({ show: true, x: event.clientX, y: event.clientY, song, songs }),
+    currentSongKey: actions.currentSongKey,
+    isPlaying: actions.isPlaying,
+  }), [actions])
+
   const content = (() => {
     if (navKey === 'music') {
-      if (musicTab === 'discover') return <KugouPcHome ctx={ctx} payload={payload} onOpenTab={goMusic} />
+      if (musicTab === 'discover') return <KugouPcHome ctx={ctx} payload={payload} onOpenTab={goMusic} onOpenSceneZone={openSceneZone} />
       if (musicTab === 'library') return <KugouPcLibrary ctx={ctx} payload={payload} />
       if (musicTab === 'playlists') return <KugouPcPlaylists ctx={ctx} payload={payload} selectedTag={selectedTag} onSelectTag={setSelectedTag} />
-      if (musicTab === 'channels') return <KugouPcChannels ctx={ctx} payload={payload} onSearch={onSearchSubmit} onRetry={onReloadData} />
+      if (musicTab === 'channels') return <KugouPcChannels ctx={ctx} payload={payload} onSearch={onSearchSubmit} onRetry={onReloadData} initialZoneName={sceneZoneName} onInitialZoneConsumed={() => setSceneZoneName('')} />
       return <KugouPcCategories ctx={ctx} payload={payload} selectedTag={selectedTag} onSelectTag={pickTag} />
     }
     if (navKey === 'longaudio') return <KugouPcLongaudio ctx={ctx} />
     if (navKey === 'favorites') return <KugouPcFavorites ctx={ctx} likedPlaylist={likedPlaylist} minePlaylists={minePlaylists} collectedPlaylists={collectedPlaylists} onRefreshPlaylists={() => void loadPlaylists()} />
     if (navKey === 'recent') return <KugouPcRecent ctx={ctx} authRevision={authRevision} />
     if (navKey === 'purchased') return <KugouPcPurchased ctx={ctx} />
+    if (navKey === 'cloud') return <KugouCloudPanel theme={theme} accent={accent} actions={cloudPanelActions} />
     // 兜底：导航表里没有的 key（官方的 直播/刷歌 已下线；本地与下载/音乐云盘 按产品决策不做）
     return (
       <PcEmpty
@@ -275,6 +301,13 @@ function KugouPcShell({
 
       {/* 听书独立播放器（portal，挂在 body；store 与本外壳共享） */}
       <KugouLongaudioOverlay />
+      {/* 刷歌全屏竖滑页（左栏「刷歌」入口打开；播放走主播放器链路） */}
+      <KugouYouthFeedOverlay
+        playing={isPlaying}
+        onTogglePlay={onPlayPause}
+        onPlaySongs={(song, songs) => actions.onPlaySongs(song, songs, undefined, { continuous: true })}
+        onSongContextMenu={(event, song, songs) => actions.onSongMenu({ show: true, x: event.clientX, y: event.clientY, song, songs })}
+      />
     </div>
   )
 }

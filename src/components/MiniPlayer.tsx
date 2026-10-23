@@ -1,5 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
-import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX } from 'lucide-react'
+import { Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, LoaderCircle } from 'lucide-react'
 import { useState, useEffect, useRef } from 'react'
 import CachedImage from './CachedImage'
 import { useTvMode, useRemoteCursorMode, useTvFocus, useTvBack } from '../tv/tvCore'
@@ -8,6 +8,9 @@ interface MiniPlayerProps {
   show: boolean
   coverUrl: string
   isPlaying: boolean
+  /** 播放链路进行中（取播放地址/媒体加载）：按钮显示转圈而不是可点的 ▶/⏸，
+   *  避免「点了没反应」的静默等待（切歌冷启动最长可达数秒）。 */
+  playPending?: boolean
   currentTime: number
   duration: number
   volume: number
@@ -116,6 +119,7 @@ export default function MiniPlayer({
   hideSkipControls = false,
   lyricsPlaceholder,
   accentColor = '#3b82f6',
+  playPending = false,
   onPlayPause,
   onNext,
   onPrevious,
@@ -321,8 +325,10 @@ export default function MiniPlayer({
                   {/* 播放控制按钮：电台/播客没有「上一曲/下一曲」语义，按 hideSkipControls 隐藏 */}
                   <div className="mt-auto flex items-center gap-1">
                     {!live && !hideSkipControls && <button onClick={onPrevious} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="上一曲"><SkipBack className="h-3.5 w-3.5" fill="currentColor" /></button>}
-                    <button onClick={onPlayPause} className="rounded-full p-2 text-white shadow-lg" style={{ backgroundColor: extractedColor }} aria-label={isPlaying ? '暂停' : '播放'}>
-                      {isPlaying ? <Pause className="h-3.5 w-3.5" fill="currentColor" /> : <Play className="h-3.5 w-3.5" fill="currentColor" />}
+                    <button onClick={onPlayPause} className="rounded-full p-2 text-white shadow-lg" style={{ backgroundColor: extractedColor }} aria-label={isPlaying ? '暂停' : '播放'} aria-busy={playPending || undefined}>
+                      {playPending && !isPlaying
+                        ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" aria-label="加载中" />
+                        : isPlaying ? <Pause className="h-3.5 w-3.5" fill="currentColor" /> : <Play className="h-3.5 w-3.5" fill="currentColor" />}
                     </button>
                     {!live && !hideSkipControls && <button onClick={onNext} className="rounded-full p-1.5 text-white/75 transition hover:bg-white/10 hover:text-white" aria-label="下一曲"><SkipForward className="h-3.5 w-3.5" fill="currentColor" /></button>}
                     

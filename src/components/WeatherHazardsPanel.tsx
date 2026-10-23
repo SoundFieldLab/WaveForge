@@ -49,6 +49,39 @@ import {
 
 export type WeatherHazardTab = 'typhoon' | 'earthquake'
 
+/** 灾害源加载失败态：显示错误 + 8 秒后自动重试一次 + 手动立即重试按钮。
+ *  此前"部分失败"（snapshot 200 但该源为 null）会永远停在"尚未加载"空态。 */
+function ErrorRetryState({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const [autoRetryIn, setAutoRetryIn] = useState(8)
+  const retriedRef = useRef(false)
+  useEffect(() => {
+    setAutoRetryIn(8)
+    const timer = window.setInterval(() => {
+      setAutoRetryIn(current => {
+        if (current <= 1) {
+          window.clearInterval(timer)
+          if (!retriedRef.current) {
+            retriedRef.current = true
+            onRetry()
+          }
+          return 0
+        }
+        return current - 1
+      })
+    }, 1000)
+    return () => window.clearInterval(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [message])
+  return (
+    <div className="rounded-[26px] border border-amber-300/22 bg-amber-950/15 p-8 text-center">
+      <ShieldAlert className="mx-auto h-9 w-9 text-amber-200/70" />
+      <div className="mt-4 text-sm leading-6 text-amber-100/85">{message}</div>
+      <div className="mt-2 text-xs text-white/45">{autoRetryIn > 0 ? `${autoRetryIn} 秒后自动重试一次` : '正在重试…'}</div>
+      <button type="button" onClick={onRetry} className="mt-4 rounded-full border border-white/12 bg-white/8 px-5 py-2 text-sm text-white/75 transition-colors hover:bg-white/14">立即重试</button>
+    </div>
+  )
+}
+
 interface WeatherHazardsPanelProps {
   tab: WeatherHazardTab
   weather: WeatherSnapshot | null
@@ -57,6 +90,8 @@ interface WeatherHazardsPanelProps {
   errors?: { typhoons: string; earthquakes: string }
   transportError?: string
   onRefresh: () => void
+  /** 温和重试（非 force）：走 2 分钟内存缓存/pending 合并，自动重试与"立即重试"按钮用 */
+  onHazardEnsure?: () => void
 }
 
 const WARNING_LINES = {
@@ -384,7 +419,7 @@ function TyphoonTrackChart({ typhoon, weather }: { typhoon: TyphoonInfo; weather
   )
 }
 
-function TyphoonPanel({ weather, hazards, loading, errors, transportError, onRefresh }: Omit<WeatherHazardsPanelProps, 'tab'>) {
+function TyphoonPanel({ weather, hazards, loading, errors, transportError, onRefresh, onRetry }: Omit<WeatherHazardsPanelProps, 'tab'> & { onRetry: () => void }) {
   const typhoons = hazards?.typhoons?.items || []
   const error = errors?.typhoons || transportError || ''
   const sourceLoaded = hazards?.typhoons !== null && hazards?.typhoons !== undefined
@@ -403,7 +438,11 @@ function TyphoonPanel({ weather, hazards, loading, errors, transportError, onRef
         <button type="button" onClick={onRefresh} disabled={loading} className="flex items-center gap-2 rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white/70 hover:bg-white/14 disabled:opacity-50"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />刷新</button>
       </div>
       {!sourceLoaded && loading ? <div className="flex min-h-[360px] items-center justify-center text-white/55"><RefreshCw className="mr-2 h-5 w-5 animate-spin" />正在连接中央气象台…</div>
-        : !sourceLoaded ? <div className="rounded-[26px] border border-white/10 bg-white/[0.04] p-8 text-center text-white/58">台风数据尚未加载，正在准备连接数据源。</div>
+        : !sourceLoaded && !loading ? (
+          // 服务端"部分失败"态（另一源成功 → HTTP 200 但本源为 null）：此前会永远
+          // 卡在"尚未加载"空态且无重试。现在显示错误并 8s 后自动重试一次。
+          <ErrorRetryState message={error || '台风数据暂时不可用，可能中央气象台台风网响应失败。'} onRetry={onRetry} />
+        )
           : error && typhoons.length === 0 ? <div className="rounded-[26px] border border-rose-300/20 bg-rose-950/20 p-6 text-rose-100/75">{error}</div>
           : typhoons.length === 0 ? <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-10 text-center"><ShieldAlert className="mx-auto h-9 w-9 text-emerald-200/70" /><div className="mt-4 font-medium">当前没有中央气象台标记为活跃的台风</div><div className="mt-2 text-sm text-white/45">数据会随桌面天气自动更新，也可以点击右上角刷新。</div></div>
             : <>
@@ -433,7 +472,7 @@ function TyphoonPanel({ weather, hazards, loading, errors, transportError, onRef
   )
 }
 
-function EarthquakePanel({ weather, hazards, loading, errors, transportError, onRefresh }: Omit<WeatherHazardsPanelProps, 'tab'>) {
+function EarthquakePanel({ weather, hazards, loading, errors, transportError, onRefresh, onRetry }: Omit<WeatherHazardsPanelProps, 'tab'> & { onRetry: () => void }) {
   const error = errors?.earthquakes || transportError || ''
   const sourceLoaded = hazards?.earthquakes !== null && hazards?.earthquakes !== undefined
   const risk = weather ? getEarthquakeLocationRisk(hazards, weather.location.latitude, weather.location.longitude) : null
@@ -457,7 +496,7 @@ function EarthquakePanel({ weather, hazards, loading, errors, transportError, on
       </div>
       <div className="rounded-[24px] border border-amber-300/18 bg-amber-950/15 px-5 py-4 text-sm leading-6 text-amber-100/72"><RadioTower className="mr-2 inline h-4 w-4" />本板块使用{hazards?.earthquakes?.source || '中国地震台网中心公开地震目录'}生成位置提醒，不等同于面向终端设备的到秒地震预警。发生明显震感时请立即避险并遵循当地官方信息。</div>
       {!sourceLoaded && loading ? <div className="flex min-h-[360px] items-center justify-center text-white/55"><RefreshCw className="mr-2 h-5 w-5 animate-spin" />正在获取地震目录…</div>
-        : !sourceLoaded ? <div className="rounded-[26px] border border-white/10 bg-white/[0.04] p-8 text-center text-white/58">地震目录尚未加载，正在准备连接数据源。</div>
+        : !sourceLoaded && !loading ? <ErrorRetryState message={error || '地震目录暂时不可用，数据源可能响应失败。'} onRetry={onRetry} />
           : error && events.length === 0 ? <div className="rounded-[26px] border border-rose-300/20 bg-rose-950/20 p-6 text-rose-100/75">{error}</div>
             : events.length === 0 ? <div className="rounded-[28px] border border-white/10 bg-white/[0.04] p-10 text-center"><Activity className="mx-auto h-9 w-9 text-cyan-200/70" /><div className="mt-4 font-medium">当前目录暂无地震事件</div><div className="mt-2 text-sm text-white/45">数据源已连接，可点击刷新获取最新目录。</div></div>
           : <>
@@ -496,8 +535,10 @@ function EarthquakePanel({ weather, hazards, loading, errors, transportError, on
 }
 
 export default function WeatherHazardsPanel(props: WeatherHazardsPanelProps) {
+  // onRetry = 非强制的温和重试（走缓存/合并 pending），与右上角"刷新"（force）区分
+  const onRetry = () => props.onHazardEnsure?.()
   return props.tab === 'typhoon'
-    ? <TyphoonPanel {...props} />
-    : <EarthquakePanel {...props} />
+    ? <TyphoonPanel {...props} onRetry={onRetry} />
+    : <EarthquakePanel {...props} onRetry={onRetry} />
 }
 

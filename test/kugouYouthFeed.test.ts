@@ -176,24 +176,26 @@ describe('createKugouYouthStore（空态 / 起播上报 / 翻页）', () => {
 describe('刷歌下线后的平台隔离（源码守卫）', () => {
   const source = (name: string) => readFileSync(new URL(`../src/components/${name}`, import.meta.url), 'utf8')
 
-  it('探索页酷狗一级分区只剩「音乐 / 听书」，刷歌不再挂载', () => {
+  it('探索页酷狗一级分区含「刷歌」，Board 与 Overlay 挂在外壳下', () => {
     const explore = source('ExploreView.tsx')
     expect(explore).toContain("import KugouExplorePage from '../features/kugouExplore/KugouExplorePage'")
     expect(explore).toContain('<KugouExplorePage')
     const page = readFileSync(new URL('../src/features/kugouExplore/KugouExplorePage.tsx', import.meta.url), 'utf8')
-    // 刷歌（kugouYouth）已按产品决策下线：外壳不再 import/挂载 Board 与 Overlay
-    expect(page).not.toContain("import KugouYouthFeedBoard from '../kugouYouth/KugouYouthFeedBoard'")
-    expect(page).not.toContain('<KugouYouthFeedBoard')
-    expect(page).not.toContain('<KugouYouthFeedOverlay')
+    // 刷歌（kugouYouth）恢复（2026-10-22）：外壳 import/挂载 Board 与 Overlay
+    expect(page).toContain("import KugouYouthFeedBoard from '../kugouYouth/KugouYouthFeedBoard'")
+    expect(page).toContain('<KugouYouthFeedBoard')
+    expect(page).toContain('<KugouYouthFeedOverlay')
     expect(page).toContain("from '../kugouLongaudio/KugouLongaudioBoard'")
   })
 
-  it('传统模式酷狗左栏不再有刷歌导航项与全屏入口', () => {
+  it('传统模式酷狗左栏通过 KugouPcShell 挂刷歌入口（不使用旧 KugouYouthTraditionalEntry）', () => {
     const traditional = source('TraditionalView.tsx')
     expect(traditional).not.toContain("import { KugouYouthTraditionalOverlay } from '../features/kugouYouth/KugouYouthTraditionalEntry'")
     expect(traditional).not.toContain('<KugouYouthTraditionalOverlay')
     const sidebar = readFileSync(new URL('../src/features/traditionalPc/KugouPcSidebar.tsx', import.meta.url), 'utf8')
     expect(sidebar).not.toContain("import { KugouYouthNavButton } from '../kugouYouth/KugouYouthTraditionalEntry'")
     expect(sidebar).not.toContain('<KugouYouthNavButton')
+    // PC 左栏导航表恢复 shuffle 项（KugouPcShell 的 handleNavigate 打开 kugouYouthStore）
+    expect(sidebar).toContain("{ key: 'shuffle', label: '刷歌', icon: Radio }")
   })
 })

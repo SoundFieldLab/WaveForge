@@ -17,6 +17,10 @@ import { compileSonnetProgram } from './sonnetProgram';
 const EMPTY_SONNET_LINES: Line[] = [];
 
 const VisualizerSonnet: React.FC<VisualizerSharedProps> = (props) => {
+    // 最新 props 引用：runtime 只在创建时读一次 smartBeat 开关/采样源，面板改动
+    // 经 ref 透传（runtime.setPaused 等已有 setter 同款模式；smartBeat 表用事件重读）
+    const propsRef = useRef(props);
+    propsRef.current = props;
     const {
         currentTime,
         currentLineIndex,
@@ -136,6 +140,9 @@ const VisualizerSonnet: React.FC<VisualizerSharedProps> = (props) => {
                     currentTime,
                     audioPower,
                     audioBands,
+                    // 智能动感（Smart Beat）：开关/强度表 + 拍脉冲采样源（读 ref 拿最新值）
+                    smartBeatToggles: propsRef.current.smartBeatToggles,
+                    smartBeatSample: propsRef.current.smartBeatSample,
                     lyricsFontScale,
                     staticMode,
                     paused: pausedRef.current,

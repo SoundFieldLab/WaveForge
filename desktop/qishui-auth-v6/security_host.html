@@ -176,9 +176,18 @@
       };
 
       window.__qishuiRequest = function (request) {
+        // 同源代理（2026-10-20 修复）：跨源 XHR 直连 api.qishui.com 带自定义头触发
+        // CORS 预检，即使主进程注入 ACAO 预检仍被判定失败（实测 status=0，登录窗口
+        // 整个不可用——用户报障）。改打本 asset server 的**同路径** URL：
+        // http://127.0.0.1:<port>/<token>/passport/... —— 路径与 api.qishui.com 完全
+        // 一致，bdms SDK 按 paths:['/passport'] 的签名拦截照常工作；server 转发上游
+        // 并改写 Host（见 qishui-auth-v6.cjs 的 passport/ 转发实现）。头/体/状态透传。
+        const target = new URL(String(request.url || ''), 'https://api.qishui.com/');
+        const proxyUrl = location.origin + '/' + location.pathname.split('/')[1] + '/'
+          + target.pathname.replace(/^\//, '') + target.search;
         return new Promise((resolve, reject) => {
           const xhr = new XMLHttpRequest();
-          xhr.open(request.method || 'GET', request.url, true);
+          xhr.open(request.method || 'GET', proxyUrl, true);
           for (const [name, value] of Object.entries(request.headers || {})) {
             xhr.setRequestHeader(name, String(value));
           }
@@ -186,10 +195,14 @@
           xhr.onload = () => resolve({
             status: xhr.status,
             body: xhr.responseText,
-            responseURL: xhr.responseURL,
+            responseURL: target.toString(),
             headers: xhr.getAllResponseHeaders(),
           });
-          xhr.onerror = () => reject(new Error('XMLHttpRequest network error'));
+          xhr.onerror = () => {
+            const detail = `readyState=${xhr.readyState} status=${xhr.status} url=${target.toString().slice(0, 120)} origin=${location.origin}`;
+            (window.__qishuiSecurityTrace || []).push({ at: Date.now(), kind: 'xhr.onerror', detail });
+            reject(new Error(`XMLHttpRequest network error (${detail})`));
+          };
           xhr.ontimeout = () => reject(new Error('XMLHttpRequest timeout'));
           xhr.send(request.body == null ? null : request.body);
         });

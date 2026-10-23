@@ -157,11 +157,19 @@ function BackgroundVocals({
   playbackTime,
   colorForAgent,
   wordTimed = false,
+  fallbackColor = 'rgba(255, 255, 255, 1)',
+  /** 和声的显示起点：AM 官方时序是和声随主行激活淡入——调用方传主行激活时间。
+   *  不传则退回和声自己的 begin（旧行为）。 */
+  displayAt,
 }: {
   vocals: LyricBackgroundVocal[]
   playbackTime: number
   colorForAgent: (agent?: string) => string | undefined
   wordTimed?: boolean
+  /** 无演唱者 tint 时的兜底色：和声是主行 p 的**兄弟节点**，无 color 样式会继承
+   * 行容器的深色（祖先链上没有白色），在深色背景上黑字不可见——必须显式兜底 */
+  fallbackColor?: string
+  displayAt?: number
 }) {
   return <>
     {vocals.map((vocal, index) => {
@@ -169,7 +177,12 @@ function BackgroundVocals({
         Math.max(latest, vocal.time + (word.startTime + word.duration) / 1000)
       ), vocal.time) ?? vocal.time
       const endTime = vocal.endTime ?? Math.max(vocal.time + 0.8, wordEnd)
-      const fadeIn = clamp((playbackTime - vocal.time) / (wordTimed ? 0.24 : 0.44))
+      // AM 官方时序（用户实测）：和声随**主行激活**向下淡入——不用和声自己的 begin
+      //（TTML 里和声 begin 可能远晚于主行激活，照用会导致主行唱半天和声才出现）；
+      // 显示持续到主行窗口结束（和声唱完不提前消失，文本全程可见，逐字填充仍按
+      // 和声自己的词时间）。主行切走时和声跟随消失（流程 3）。
+      const appearAt = displayAt ?? vocal.time
+      const fadeIn = clamp((playbackTime - appearAt) / (wordTimed ? 0.24 : 0.44))
       const fadeOut = clamp((endTime - playbackTime) / 0.36)
       const presence = Math.min(fadeIn, fadeOut)
       if (presence <= 0) return null
@@ -179,10 +192,10 @@ function BackgroundVocals({
           data-testid="background-vocal"
           className="block mt-1.5 font-normal"
           style={{
-            color: colorForAgent(vocal.agentId || vocal.agent),
-            fontSize: '0.46em',
-            lineHeight: 1.4,
-            opacity: wordTimed ? presence : presence * 0.62,
+            color: colorForAgent(vocal.agentId || vocal.agent) ?? fallbackColor,
+            fontSize: '0.68em',
+            lineHeight: 1.45,
+            opacity: wordTimed ? presence : presence * 0.9,
             textShadow: '0 1px 8px rgba(0,0,0,0.45)',
           }}
         >
@@ -210,9 +223,18 @@ function BackgroundVocals({
           {vocal.translation ? (
             <span
               className="block"
-              style={{ fontSize: '0.92em', opacity: 0.55, marginTop: '0.08em' }}
+              style={{ fontSize: '0.92em', opacity: 0.72, marginTop: '0.08em' }}
             >
               {vocal.translation}
+            </span>
+          ) : null}
+          {/* 和声自己的罗马音（TTML x-bg 内嵌 x-roman）：跟在翻译下方 */}
+          {vocal.romanization ? (
+            <span
+              className="block"
+              style={{ fontSize: '0.86em', opacity: 0.6, marginTop: '0.06em', letterSpacing: '0.03em' }}
+            >
+              {vocal.romanization}
             </span>
           ) : null}
         </span>
@@ -623,6 +645,8 @@ interface LyricsDisplayProps {
   translationEnabled?: boolean
   translationPosition?: 'traditional' | 'bottom-right'
   onCurrentTranslationChange?: (translation: string) => void
+  /** 当前行的和声翻译（含拼接文本）：现代（右下角药丸）在有和声时显示第二枚药丸 */
+  onCurrentVocalTranslationChange?: (translation: string) => void
   onSeek?: (time: number) => void
   romanEnabled?: boolean
   displayMode?: 'scroll' | 'single'
@@ -679,6 +703,7 @@ export default memo(function LyricsDisplay({
   translationEnabled = true,
   translationPosition = 'traditional',
   onCurrentTranslationChange,
+  onCurrentVocalTranslationChange,
   onSeek,
   romanEnabled = false,
   displayMode = 'scroll',
@@ -1456,11 +1481,20 @@ export default memo(function LyricsDisplay({
             const translation = displayLyricsData[nextIndex].translation ?? ''
             onCurrentTranslationChange(translation)
           }
+          if (onCurrentVocalTranslationChange) {
+            // 当前行的和声翻译拼接（多段和声按序拼接）：现代（右下角）药丸
+            // 在有和声时显示第二枚药丸用。行切换时只取静态翻译，逐时间更新的
+            // 和声可见性由 BackgroundVocals 自己处理。
+            const vocalTranslations = (displayLyricsData[nextIndex].backgroundVocals ?? [])
+              .map(vocal => [(vocal.translation ?? '').trim(), (vocal.romanization ?? '').trim()].filter(Boolean).join(' '))
+              .filter(Boolean)
+            onCurrentVocalTranslationChange(vocalTranslations.join(' / '))
+          }
         }
         break
       }
     }
-  }, [effectiveLineSwitchTime, displayLyricsData, currentIndex, onCurrentTranslationChange, lyricOffset])
+  }, [effectiveLineSwitchTime, displayLyricsData, currentIndex, onCurrentTranslationChange, onCurrentVocalTranslationChange, lyricOffset])
 
   // Automatically scroll to the active lyric
   useEffect(() => {
@@ -1743,6 +1777,8 @@ export default memo(function LyricsDisplay({
     lyric: LyricLine,
     wordsWithIndex: Array<{ word: LyricWord; originalIndex: number }>,
     playbackTime: number,
+    /** 该行的侧别对齐（左右交替/对唱分栏）：'left' | 'right' | null */
+    lineSideAlign: 'left' | 'right' | null = null,
   ) => {
     const lineStartMs = lyric.time * 1000
     // 与柔和/旧 Apple 路径一致的 200ms 节拍延迟，让填充跟随演唱而非提前
@@ -1753,7 +1789,16 @@ export default memo(function LyricsDisplay({
     const lastWordIndex = wordsWithIndex.length - 1
 
     return (
-      <span className="relative" style={{ display: 'inline-block', width: '100%' }}>
+      <span
+        className="relative"
+        style={{
+          display: 'inline-block',
+          width: '100%',
+          // 智能动感/对唱左右分栏（极左/极右）：词组贴向该行侧别缘。词 span 是
+          // inline-block，受本 span 的 text-align 影响。
+          textAlign: (lineSideAlign === 'right' ? 'right' : 'left') as 'left' | 'right',
+        }}
+      >
         {wordsWithIndex.map(({ word, originalIndex }, wordIndex) => {
           const text = word.word || ''
           if (!text) return null
@@ -1826,12 +1871,14 @@ export default memo(function LyricsDisplay({
     isCurrent: boolean,
     lineIndex: number,
     minimalWordEffect = false,
-    playbackTime = currentTime
+    playbackTime = currentTime,
+    /** 该行的侧别对齐（左右交替/对唱分栏）：'left' | 'right' | null（无侧别） */
+    lineSideAlign: 'left' | 'right' | null = null
   ) => {
     const { lyric, wordsWithIndex, sustainProfiles } = preparedLyric
     // 摩登：整行走 AMLL 光带 + 长音强调（与柔和的 sustainGlow 路径完全分开）
     if (isAmllFill && isCurrent && lyric.words && lyric.words.length > 0) {
-      return renderAmllLine(lyric, wordsWithIndex, playbackTime)
+      return renderAmllLine(lyric, wordsWithIndex, playbackTime, sideAlignSides?.[lineIndex] ?? null)
     }
     if (effectiveWordByWordEnabled && isCurrent && lyric.words && lyric.words.length > 0) {
       // 计算相对于行开始的当前时间（毫秒）
@@ -2244,7 +2291,18 @@ export default memo(function LyricsDisplay({
       
       return (
         <span
-          className={`relative inline-flex w-full min-w-0 flex-wrap whitespace-normal break-words [overflow-wrap:anywhere] ${scrollAlignment === 'center' ? 'justify-center text-center' : ''}`}
+          className={`relative inline-flex w-full min-w-0 flex-wrap whitespace-normal break-words [overflow-wrap:anywhere] ${(() => {
+            // 对齐解析：逐字容器是 inline-flex，text-align 对 flex 子项无效——
+            // 主轴对齐必须用 justify-content。侧别行（左右交替）> 对唱行 > 滚动设置。
+            // 极左/极右（folia 实测）：右侧行词组贴容器右缘，左侧行贴左缘。
+            const align = lineSideAlign
+              ?? (hasDuetLines && scrollAlignment !== 'center'
+                ? (lyric.isDuet ? 'right' : 'left')
+                : scrollAlignment === 'center' ? 'center' : 'left')
+            if (align === 'right') return 'justify-end text-right'
+            if (align === 'center') return 'justify-center text-center'
+            return 'justify-start text-left'
+          })()}`}
           style={{
             columnGap: 0,
             rowGap: effectConfig.wordRowGap,
@@ -2605,7 +2663,8 @@ export default memo(function LyricsDisplay({
                       true,
                       singleIndex,
                       activeImmersiveEffect === 'minimal',
-                      playbackTime
+                      playbackTime,
+                      sideAlignSides?.[singleIndex] ?? null
                     )}
                   </SmoothPlaybackTime>
                 </motion.p>
@@ -2615,7 +2674,9 @@ export default memo(function LyricsDisplay({
                       <BackgroundVocals
                         vocals={singleLyric.backgroundVocals!}
                         playbackTime={playbackTime + lyricOffset}
+                        displayAt={singleLyric.time}
                         wordTimed={effectiveLyricStyle === 'modern' && effectiveWordByWordEnabled}
+                        fallbackColor={activeLyricColor}
                         colorForAgent={agent => {
                           if (!appleDuetColorsEnabled || appleAgentCount < 2 || !agent) return undefined
                           const tint = getAgentTintColor(agent, appleAgentCount, !isLightTheme, undefined, appleAgentOrder)
@@ -2803,7 +2864,7 @@ export default memo(function LyricsDisplay({
               ref={isCurrent ? activePulseLineRef : undefined}
               data-index={globalIndex}
               key={lyricKey}
-              className={`${scrollAlignment === 'center' ? 'text-center mx-auto' : 'text-left'} w-full ${isDesktopLayout ? 'max-w-[62rem]' : 'max-w-[54rem]'} min-w-0 relative cursor-pointer ${
+              className={`${scrollAlignment === 'center' ? 'text-center mx-auto' : 'text-left'} w-full ${isDesktopLayout ? 'max-w-[62rem]' : hasDuetLines || sideAlignSides ? 'max-w-[60rem]' : 'max-w-[54rem]'} min-w-0 relative cursor-pointer ${
                 isInactiveGeneratedInterlude
                   ? 'h-0 mb-0 overflow-hidden pointer-events-none'
                   : isDesktopLayout ? 'mb-5 pointer-events-auto' : 'mb-7 pointer-events-auto'
@@ -2827,15 +2888,13 @@ export default memo(function LyricsDisplay({
                 scale: lineScale === undefined ? (isCurrent ? 'var(--restless-lyric-scale, 1.008)' : 1) : undefined,
                 transition: lineScale === undefined ? 'scale 140ms cubic-bezier(0.22, 1, 0.36, 1)' : undefined,
                 zIndex: isCurrent ? 2 : lineTiming.upcomingProgress > 0 ? 1 : 0,
-                // 对唱左右分栏（Apple Music）；开启"左右交替歌词"时按行侧别对齐（柔和/摩登通用）
+                // 对唱左右分栏（Apple Music）；开启"左右交替歌词"时按行侧别对齐（柔和/摩登通用）。
+                // 极左/极右：右侧行右缘贴容器右缘、左侧行左缘贴容器左缘——不加任何
+                // 缩进（folia 实测没有缩进；此前自创的 15% 内缩会让文本悬空不贴边）。
                 ...(sideAlignSide
-                  ? sideAlignSide === 'right'
-                    ? { textAlign: 'right' as const, paddingLeft: '15%' }
-                    : { paddingRight: '15%' }
+                  ? { textAlign: (sideAlignSide === 'right' ? 'right' : 'left') as 'left' | 'right' }
                   : hasDuetLines && scrollAlignment !== 'center'
-                    ? lyric.isDuet
-                      ? { textAlign: 'right' as const, paddingLeft: '15%' }
-                      : { paddingRight: '15%' }
+                    ? { textAlign: (lyric.isDuet ? 'right' : 'left') as 'left' | 'right' }
                     : {}),
               }}
               transition={{
@@ -2925,7 +2984,16 @@ export default memo(function LyricsDisplay({
                 ref={(node) => {
                   lyricTextRefs.current[globalIndex] = node
                 }}
-                className={`${scrollAlignment === 'center' ? 'text-center' : 'text-left'} font-medium leading-relaxed whitespace-normal break-words [overflow-wrap:anywhere] relative z-10 lyric-skia-text`}
+                className={`${(() => {
+                  // 对齐解析：侧别行 > 对唱行 > 滚动设置。
+                  // bug 修复：此前这里硬编码 text-left，Tailwind 类会覆盖外层容器的
+                  // textAlign:right——导致左右分栏时歌词本体永远居左，只有罗马音
+                  // /翻译（无 className，正确继承）随侧别走到右侧，出现"歌词在左
+                  // 只是右侧留了空隙"的错位。
+                  if (sideAlignSide) return sideAlignSide === 'right' ? 'text-right' : 'text-left'
+                  if (hasDuetLines && scrollAlignment !== 'center') return lyric.isDuet ? 'text-right' : 'text-left'
+                  return scrollAlignment === 'center' ? 'text-center' : 'text-left'
+                })()} font-medium leading-relaxed whitespace-normal break-words [overflow-wrap:anywhere] relative z-10 lyric-skia-text`}
                 initial={false}
                 animate={{
                   scale: useLineMotionModel ? 1 : (isCurrent ? 1.006 : 1),
@@ -2970,9 +3038,9 @@ export default memo(function LyricsDisplay({
               >
                 {isCurrent ? (
                   <SmoothPlaybackTime store={smoothTimeStoreRef.current!}>
-                    {playbackTime => renderLyricLine(preparedLyric, true, globalIndex, false, playbackTime)}
+                    {playbackTime => renderLyricLine(preparedLyric, true, globalIndex, false, playbackTime, sideAlignSides?.[globalIndex] ?? null)}
                   </SmoothPlaybackTime>
-                ) : renderLyricLine(preparedLyric, false, globalIndex)}
+                ) : renderLyricLine(preparedLyric, false, globalIndex, false, currentTime, sideAlignSides?.[globalIndex] ?? null)}
               </motion.p>
               {isCurrent && lyric.backgroundVocals?.length ? (
                 <SmoothPlaybackTime store={smoothTimeStoreRef.current!}>
@@ -2980,7 +3048,9 @@ export default memo(function LyricsDisplay({
                     <BackgroundVocals
                       vocals={lyric.backgroundVocals!}
                       playbackTime={playbackTime + lyricOffset}
+                      displayAt={lyric.time}
                       wordTimed={effectiveLyricStyle === 'modern' && effectiveWordByWordEnabled}
+                      fallbackColor={activeLyricColor}
                       colorForAgent={agent => {
                         if (!appleDuetColorsEnabled || appleAgentCount < 2 || !agent) return undefined
                         const tint = getAgentTintColor(agent, appleAgentCount, !isLightTheme, undefined, appleAgentOrder)
@@ -2995,9 +3065,9 @@ export default memo(function LyricsDisplay({
               {romanEnabled && lyric.roman && isCurrent && (
                 <motion.p
                   initial={{ opacity: 0, y: -5 }}
-                  animate={{ 
-                    opacity: 0.6, 
-                    y: 0 
+                  animate={{
+                    opacity: 0.6,
+                    y: 0
                   }}
                   exit={{ opacity: 0, y: -5 }}
                   transition={{ duration: 0.3 }}
@@ -3006,6 +3076,12 @@ export default memo(function LyricsDisplay({
                     fontSize: `${effectiveLyricSize * 0.45}rem`,
                     textShadow: '0 1px 4px rgba(0,0,0,0.4)',
                     letterSpacing: '0.05em',
+                    // 侧别行：罗马音跟随主行的侧别（极左/极右，不缩进）。
+                    ...(sideAlignSide
+                      ? { textAlign: (sideAlignSide === 'right' ? 'right' : 'left') as 'left' | 'right' }
+                      : hasDuetLines && scrollAlignment !== 'center'
+                        ? { textAlign: (lyric.isDuet ? 'right' : 'left') as 'left' | 'right' }
+                        : {}),
                   }}
                 >
                   {(() => {
@@ -3021,7 +3097,18 @@ export default memo(function LyricsDisplay({
                             const currentMs = Math.max(0, absoluteCurrentMs - lineStartTime - 200)
 
                             return (
-                              <span className="inline-flex flex-wrap gap-x-1">
+                              <span
+                                className={`inline-flex flex-wrap gap-x-1 w-full ${(() => {
+                                  // 罗马音逐字容器也是 flex：对齐必须用 justify-content
+                                  //（text-align 对 flex 子项无效）。跟随罗马音行侧别。
+                                  const align = sideAlignSide
+                                    ? sideAlignSide
+                                    : hasDuetLines && scrollAlignment !== 'center'
+                                      ? (lyric.isDuet ? 'right' : 'left')
+                                      : 'left'
+                                  return align === 'right' ? 'justify-end text-right' : 'justify-start text-left'
+                                })()}`}
+                              >
                                 {preparedLyric.romanWordsToRender.map((word, idx) => {
                                   const startTime = word.startTime
                                   const endTime = startTime + Math.max(word.duration, 1)
@@ -3080,8 +3167,18 @@ export default memo(function LyricsDisplay({
                   style={{
                     textShadow: '0 2px 8px rgba(0,0,0,0.5)',
                     letterSpacing: '0.02em',
-                    paddingLeft: '0.5rem',
-                    borderLeft: '3px solid rgba(255, 255, 255, 0.3)',
+                    // 侧别行：翻译与罗马音同规则跟随主行侧别（极左/极右，无缩进）。
+                    // 竖线装饰留在文本起始侧（左侧行 borderLeft / 右侧行 borderRight），
+                    // 0.4rem 间距只隔开竖线与文字。
+                    ...(sideAlignSide
+                      ? sideAlignSide === 'right'
+                        ? { textAlign: 'right' as const, paddingRight: '0.4rem', borderLeft: 'none', borderRight: '3px solid rgba(255, 255, 255, 0.3)' }
+                        : { textAlign: 'left' as const, paddingLeft: '0.4rem', borderLeft: '3px solid rgba(255, 255, 255, 0.3)' }
+                      : hasDuetLines && scrollAlignment !== 'center'
+                        ? lyric.isDuet
+                          ? { textAlign: 'right' as const, paddingRight: '0.4rem', borderLeft: 'none', borderRight: '3px solid rgba(255, 255, 255, 0.3)' }
+                          : { textAlign: 'left' as const, paddingLeft: '0.4rem', borderLeft: '3px solid rgba(255, 255, 255, 0.3)' }
+                        : { paddingLeft: '0.4rem', borderLeft: '3px solid rgba(255, 255, 255, 0.3)' }),
                   }}
                 >
                   {lyric.translation}

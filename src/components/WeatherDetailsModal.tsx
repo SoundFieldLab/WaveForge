@@ -32,8 +32,8 @@ import MoonPhaseExperience, { MoonDisc } from './MoonPhaseExperience'
 import WeatherCardDetailOverlay, { type WeatherCardKind } from './WeatherCardDetail'
 import { IconSunrise, IconSunset } from './AppleWeatherIcon'
 // 纯函数/常量/类型与纯视觉组件从轻量模块复用（桌面小组件静态依赖它，避免把 leaflet 拉进桌面模式）。
-import { WeatherGlyph, getWeatherVisualTheme, WeatherAtmosphere, WeatherRainGlass, isRainySceneKind, getUvLabel, getWindDirection, WindCompass, WeatherSkyTip, type WeatherDetailsTab } from './weatherVisualTheme'
-import { computeSkyBodies } from '../services/moonPhase'
+import { WeatherGlyph, getWeatherVisualTheme, WeatherAtmosphere, WeatherRainGlass, isRainySceneKind, getUvLabel, getWindDirection, WindCompass, type WeatherDetailsTab } from './weatherVisualTheme'
+import { computeSkyBodies, azimuthDirection } from '../services/moonPhase'
 import { createAppleWeatherSceneModel } from './weatherScene/weatherSceneModel'
 import { formatDateInTimezone } from '../services/weatherTime'
 import HourlyForecastRainGlass from './weatherScene/HourlyForecastRainGlass'
@@ -59,6 +59,22 @@ interface WeatherDetailsModalProps {
 
 const formatTime = (value: string) => value ? value.slice(11, 16) : '--:--'
 const formatHour = (value: string, index: number) => index === 0 ? '现在' : `${value.slice(11, 13)}时`
+/** 分钟数 → "X 小时 Y 分钟"（卡片紧凑显示用） */
+const formatDurationShort = (totalMinutes: number) => {
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = Math.round(totalMinutes % 60)
+  if (hours <= 0) return `${minutes} 分钟`
+  return `${hours} 小时 ${minutes} 分钟`
+}
+const getSnowLabel = (snowfallSum: number) => snowfallSum > 0 ? '当日有降雪' : '当日预计无降雪'
+/** 秒 → "X 小时 Y 分钟"（昼长显示） */
+const formatDaylight = (seconds: number) => {
+  const totalMinutes = Math.round(seconds / 60)
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  if (hours <= 0) return `${minutes} 分钟`
+  return `${hours} 小时 ${minutes} 分钟`
+}
 const isHourDaylight = (time: string, weather: WeatherSnapshot) => {
   const date = time.slice(0, 10)
   const day = weather.daily.find(item => item.date === date)
@@ -115,7 +131,7 @@ function DetailCard({ icon: Icon, label, value, detail, className = '', children
 
 /** 月相缩略盘（卡片内） */
 function MoonDiscSmall({ phase }: { phase: number }) {
-  return <MoonDisc phase={phase} className="w-[52px] shrink-0" soft={false} />
+  return <MoonDisc phase={phase} className="w-[76px] shrink-0" soft={false} />
 }
 
 export default function WeatherDetailsModal({ open, weather, onClose, onRefresh, loading, hazards, hazardLoading, hazardErrors, hazardTransportError = '', initialTab = 'weather', onHazardRefresh, onHazardEnsure }: WeatherDetailsModalProps) {
@@ -141,7 +157,9 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
     if (sceneIdRef.current === sceneId) setAppleSceneReady(true)
   }, [sceneId])
   const secondaryOverlayOpen = weatherMapOpen || moonOpen || detailCard !== null || selectedDayIndex !== null
-  const weatherAnimationActive = open && activeTab === 'weather' && !secondaryOverlayOpen
+  // 背景动画只在「全屏天气地图」或「台风/地震页」时暂停；居中小弹窗（详情卡/月相）
+  // 不遮挡天空，保持云/雨/月亮动画继续动（冻结看起来像卡死）。
+  const weatherAnimationActive = open && activeTab === 'weather' && !weatherMapOpen
   // 天气主视图滚动容器（内容超一屏后显示「回到顶部」）
   const weatherScrollRef = useRef<HTMLDivElement | null>(null)
   const openDetailCard = useCallback((card: WeatherCardKind) => {
@@ -256,7 +274,7 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
     return computeSkyBodies(new Date(), weather.location.latitude, weather.location.longitude)
   }, [weather, open])
 
-  // 每小时卡片右上角的动态提示：降水/特殊天气预期 + 阵风极值
+  // 每小时卡右上角的动态提示：降水/特殊天气预期 + 阵风极值
   const hourlyTip = useMemo(() => {
     if (!weather) return ''
     const hours = weather.hourly.slice(0, 25)
@@ -282,6 +300,30 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
     }
     const fogNow = weather.current.weatherCode === 45 || weather.current.weatherCode === 48
     return `${fogNow ? '当前有雾 · ' : '未来 24 小时无明显降水 · '}${windPart}`
+  }, [weather])
+
+  // 逐小时卡三态视图（Apple 式）：condition=气温天气 / precipitation=降水强度概率 / wind=风速级
+  const [hourlyView, setHourlyView] = useState<'condition' | 'precipitation' | 'wind'>('condition')
+  // 10 日预报卡三态视图（图 1055/1056：温度条 / 降水迷你柱 / 风迷你曲线）
+  const [dailyView, setDailyView] = useState<'condition' | 'precipitation' | 'wind'>('condition')
+  const windSpeedBeaufort = (kmh: number) => {
+    const thresholds = [1, 6, 12, 20, 29, 39, 50, 62, 75, 89, 103, 117]
+    let level = 12
+    for (let i = 0; i < thresholds.length; i += 1) { if (kmh < thresholds[i]) { level = i; break } }
+    return level
+  }
+  // 每日逐时序列缓存键：日期 → 当天 hours（10 日卡的降水/风迷你图用）
+  const dailyHours = useMemo(() => {
+    const map = new Map<string, WeatherHour[]>()
+    if (weather) {
+      for (const hour of weather.hourly) {
+        const date = hour.time.slice(0, 10)
+        const list = map.get(date)
+        if (list) list.push(hour)
+        else map.set(date, [hour])
+      }
+    }
+    return map
   }, [weather])
 
   if (typeof document === 'undefined') return null
@@ -338,7 +380,6 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
               />
             </Suspense>
           )}
-          {activeTab === 'weather' && weather && skyBodies && <WeatherSkyTip skyBodies={skyBodies} isDay={weather.current.isDay} />}
           <motion.div
             initial={{ y: 18, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
@@ -374,7 +415,7 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
 
               {activeTab !== 'weather' ? (
                 <>
-                  {/* 台风/地震页：保持原左上角布局 */}
+                  {/* 台风/地震页：保持原左上角布局；面板内容随 tab 切换淡入上移（不再生硬直切） */}
                   <div className="pt-2">
                     <div className="text-sm font-medium tracking-[0.18em] text-white/60">
                       {weather?.location.source === 'ip' ? '我的位置 · 自动定位' : '自定义位置'}
@@ -382,15 +423,26 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                     <h2 className="mt-2 text-4xl font-semibold tracking-tight">{weather ? getWeatherLocationName(weather.location) : '天气'}</h2>
                   </div>
                   <div className="mt-6">{tabBar}</div>
-                  <WeatherHazardsPanel
-                    tab={activeTab}
-                    weather={weather}
-                    hazards={hazards}
-                    loading={hazardLoading}
-                    errors={hazardErrors}
-                    transportError={hazardTransportError}
-                    onRefresh={onHazardRefresh}
-                  />
+                  {/* tab 切换过渡：不用 mode="wait"（串行等待 0.5s+ 显得卡）；改为
+                      极短交叉淡入——新内容立即可交互，只有轻量透明度过渡 */}
+                  <AnimatePresence mode="popLayout" initial={false}>
+                    <motion.div
+                      key={activeTab}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1, transition: { duration: 0.18, ease: 'easeOut' } }}
+                      exit={{ opacity: 0, transition: { duration: 0.1 } }}
+                    >
+                      <WeatherHazardsPanel
+                        tab={activeTab}
+                        weather={weather}
+                        hazards={hazards}
+                        loading={hazardLoading}
+                        errors={hazardErrors}
+                        transportError={hazardTransportError}
+                        onRefresh={onHazardRefresh}
+                      />
+                    </motion.div>
+                  </AnimatePresence>
                 </>
               ) : !weather ? (
                 <div className="flex min-h-[420px] flex-col items-center justify-center text-center">
@@ -421,9 +473,13 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                       最高 {Math.round(weather.daily[0]?.temperatureMax ?? weather.current.temperature)}° · 最低 {Math.round(weather.daily[0]?.temperatureMin ?? weather.current.temperature)}°
                     </div>
                     <div className="mt-1 text-[22px] font-medium">{getWeatherLabel(weather.current.weatherCode)}</div>
-                    <div className="mt-2 flex items-center gap-1.5 text-xs text-white/45">
+                    <div className="mt-2 flex items-center justify-center gap-1.5 text-xs text-white/45">
                       <Clock3 className="h-3.5 w-3.5" />
                       {loading ? '正在更新天气…' : `更新于 ${formatDateInTimezone(new Date(weather.updatedAt), weather.timezone, { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' })}`}
+                      {/* 数据陈旧提示：请求失败回退旧缓存时（数据仍在但不是最新的） */}
+                      {!loading && Date.now() - weather.updatedAt > 60 * 60 * 1000 && (
+                        <span className="text-amber-200/70">· 数据可能已过期</span>
+                      )}
                     </div>
                     <div className="mt-5">{tabBar}</div>
                   </div>
@@ -453,12 +509,39 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
 
                   {/* —— 玻璃卡片网格（列数随窗口自适应） —— */}
                   <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                    {/* 每小时天气预报（含日出/日落槽位；按住左右拖拽浏览） */}
+                    {/* 每小时天气预报（含日出/日落槽位；按住左右拖拽浏览；三态视图切换） */}
                     <section className="weather-glass-panel relative isolate overflow-hidden rounded-[26px] border border-white/10 p-5 [clip-path:inset(0_round_26px)] md:col-span-2 lg:col-span-3 xl:col-span-4">
                       <div className="relative z-[1]">
                         <div className="mb-4 flex items-center justify-between gap-3">
-                        <span className="flex items-center gap-2 text-sm font-medium text-white/55"><Clock3 className="h-4 w-4" />每小时天气预报</span>
-                        <span className="text-xs text-white/40">{hourlyTip}</span>
+                        <span className="flex items-center gap-2 text-sm font-medium text-white/55">
+                          <Clock3 className="h-4 w-4" />
+                          {hourlyView === 'condition' ? '天气状况' : hourlyView === 'precipitation' ? '降水' : '风'}
+                          <span className="ml-1 text-xs text-white/38">
+                            {hourlyView === 'condition' ? '气温 (°C)' : hourlyView === 'precipitation' ? '强度 · 降雨概率' : '风速 (级) · 阵风'}
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className="hidden text-xs text-white/40 md:block">{hourlyView === 'condition' ? hourlyTip : ''}</span>
+                          {/* Apple 式三态切换：天气状况 / 降水 / 风 */}
+                          <div className="flex items-center gap-0.5 rounded-full border border-white/12 bg-black/20 p-1">
+                            {([
+                              ['condition', Cloud],
+                              ['precipitation', Droplets],
+                              ['wind', Wind],
+                            ] as const).map(([view, Icon]) => (
+                              <button
+                                key={view}
+                                type="button"
+                                onClick={() => setHourlyView(view)}
+                                aria-label={view === 'condition' ? '按天气状况查看' : view === 'precipitation' ? '按降水查看' : '按风查看'}
+                                aria-pressed={hourlyView === view}
+                                className={`flex h-7 w-9 items-center justify-center rounded-full transition-colors ${hourlyView === view ? 'bg-white/18 text-white' : 'text-white/45 hover:text-white/75'}`}
+                              >
+                                <Icon className="h-4 w-4" />
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                       <div
                         ref={hourlyScrollRef}
@@ -474,12 +557,34 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                             {item.rise ? <IconSunrise className="my-3 h-8 w-8" /> : <IconSunset className="my-3 h-8 w-8" />}
                             <span className="mt-auto pt-2 text-[13px] text-amber-200/75">{item.label}</span>
                           </div>
-                        ) : (
+                        ) : hourlyView === 'condition' ? (
                           <div key={item.hour.time} className="flex min-w-[66px] flex-col items-center border-r border-white/10 px-2 py-3 last:border-r-0">
                             <span className="text-[13px] font-medium text-white/72">{formatHour(item.hour.time, item.index)}</span>
                             <WeatherGlyph code={item.hour.weatherCode} isDay={isHourDaylight(item.hour.time, weather)} className="my-3 h-8 w-8" />
                             <span className="text-[15px] font-semibold tabular-nums">{Math.round(item.hour.temperature)}°</span>
                             <span className="mt-1 min-h-[16px] text-[11px] font-medium text-cyan-200/75">{item.hour.precipitationProbability > 0 ? `${Math.round(item.hour.precipitationProbability)}%` : ' '}</span>
+                          </div>
+                        ) : hourlyView === 'precipitation' ? (
+                          // Apple 降水视图：按小时画强度柱（相对高度），柱下概率百分比
+                          <div key={item.hour.time} className="flex min-w-[66px] flex-col items-center border-r border-white/10 px-2 py-3 last:border-r-0">
+                            <span className="text-[13px] font-medium text-white/72">{formatHour(item.hour.time, item.index)}</span>
+                            <div className="relative my-3 flex h-8 w-8 items-end justify-center overflow-hidden rounded-lg bg-white/[0.04]">
+                              <div
+                                className="w-2.5 rounded-full bg-gradient-to-t from-sky-500 to-cyan-300"
+                                style={{ height: `${Math.min(100, Math.max(3, item.hour.precipitation / 4 * 100))}%` }}
+                              />
+                            </div>
+                            <span className="mt-1 min-h-[16px] text-[11px] font-medium text-sky-200/80">{Math.round(item.hour.precipitation * 10) / 10 > 0 ? `${Math.round(item.hour.precipitation * 10) / 10}毫米` : `${Math.round(item.hour.precipitationProbability)}%`}</span>
+                          </div>
+                        ) : (
+                          // Apple 风视图：蒲福风级大数字 + 小"级"字，底部阵风
+                          <div key={item.hour.time} className="flex min-w-[66px] flex-col items-center border-r border-white/10 px-2 py-3 last:border-r-0">
+                            <span className="text-[13px] font-medium text-white/72">{formatHour(item.hour.time, item.index)}</span>
+                            <div className="my-3 flex h-8 items-baseline justify-center gap-0.5">
+                              <span className="text-[22px] font-semibold leading-none tabular-nums">{windSpeedBeaufort(item.hour.windSpeed)}</span>
+                              <span className="text-[11px] text-white/50">级</span>
+                            </div>
+                            <span className="mt-1 min-h-[16px] text-[11px] font-medium text-emerald-200/75">阵风 {Math.round(item.hour.windGusts)}</span>
                           </div>
                         ))}
                       </div>
@@ -496,9 +601,32 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                       )}
                     </section>
 
-                    {/* 10 日天气预报（左上大卡：3 卡宽 × 4 卡高；行高自动均分，小屏时内部滚动） */}
+                    {/* 10 日天气预报（左上大卡；三态视图：温度条 / 降水迷你柱 / 风迷你曲线） */}
                     <section className="weather-glass-panel flex flex-col overflow-hidden rounded-[26px] border border-white/10 p-4 md:col-span-2 lg:col-span-1 lg:row-span-2 lg:max-h-[320px] xl:col-span-2 xl:row-span-4 xl:max-h-none">
-                      <div className="mb-1 flex shrink-0 items-center gap-2 text-sm font-medium text-white/55"><Sun className="h-4 w-4" />10 日天气预报</div>
+                      <div className="mb-1 flex shrink-0 items-center justify-between gap-2">
+                        <span className="flex items-center gap-2 text-sm font-medium text-white/55">
+                          <Sun className="h-4 w-4" />10 日天气预报
+                          <span className="text-xs text-white/38">{dailyView === 'condition' ? '气温' : dailyView === 'precipitation' ? '降水' : '风速 (级)'}</span>
+                        </span>
+                        <div className="flex items-center gap-0.5 rounded-full border border-white/12 bg-black/20 p-1">
+                          {([
+                            ['condition', Cloud],
+                            ['precipitation', Droplets],
+                            ['wind', Wind],
+                          ] as const).map(([view, Icon]) => (
+                            <button
+                              key={view}
+                              type="button"
+                              onClick={() => setDailyView(view)}
+                              aria-label={view === 'condition' ? '按气温查看' : view === 'precipitation' ? '按降水查看' : '按风查看'}
+                              aria-pressed={dailyView === view}
+                              className={`flex h-6 w-8 items-center justify-center rounded-full transition-colors ${dailyView === view ? 'bg-white/18 text-white' : 'text-white/45 hover:text-white/75'}`}
+                            >
+                              <Icon className="h-3.5 w-3.5" />
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                       <div className="flex min-h-0 flex-1 flex-col divide-y divide-white/8 overflow-y-auto wf-no-scrollbar">
                         {weather.daily.map((day, index) => {
                           const range = Math.max(1, day.temperatureMax - day.temperatureMin)
@@ -507,21 +635,77 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                           const overallRange = Math.max(1, overallMax - overallMin)
                           const left = ((day.temperatureMin - overallMin) / overallRange) * 100
                           const width = Math.max(12, (range / overallRange) * 100)
+                          const dayHoursFor = dailyHours.get(day.date) || []
+                          const precipMax = Math.max(0.5, ...dayHoursFor.map(hour => hour.precipitation))
+                          const windLevels = dayHoursFor.map(hour => windSpeedBeaufort(hour.windSpeed))
+                          const windMinLevel = windLevels.length > 0 ? Math.min(...windLevels) : 0
+                          const windMaxLevel = windLevels.length > 0 ? Math.max(...windLevels) : 0
                           return (
-                            <button type="button" onClick={() => setSelectedDayIndex(index)} aria-label={`查看${formatWeekday(day.date, index)}详细预报`} key={day.date} className="grid flex-1 grid-cols-[52px_34px_38px_1fr_38px_16px] items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-white/[0.055] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200/65">
+                            <button type="button" onClick={() => setSelectedDayIndex(index)} aria-label={`查看${formatWeekday(day.date, index)}详细预报`} key={day.date} className="grid flex-1 grid-cols-[52px_34px_1fr_64px_14px] items-center gap-2 rounded-lg py-1 text-left transition-colors hover:bg-white/[0.055] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-200/65">
                               <span className="text-sm font-medium">{formatWeekday(day.date, index)}</span>
                               <div className="flex flex-col items-center">
                                 <WeatherGlyph code={day.weatherCode} className="h-5 w-5" />
-                                {day.precipitationProbability > 0 && <span className="text-[9px] leading-3 text-cyan-200">{Math.round(day.precipitationProbability)}%</span>}
+                                {dailyView === 'condition' && day.precipitationProbability > 0 && <span className="text-[9px] leading-3 text-cyan-200">{Math.round(day.precipitationProbability)}%</span>}
                               </div>
-                              <span className="text-right text-[13px] tabular-nums text-white/48">{Math.round(day.temperatureMin)}°</span>
-                              <div className="relative h-1 rounded-full bg-black/15">
-                                <div
-                                  className="absolute h-full rounded-full bg-gradient-to-r from-cyan-300 via-amber-300 to-orange-400"
-                                  style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }}
-                                />
-                              </div>
-                              <span className="text-[13px] tabular-nums">{Math.round(day.temperatureMax)}°</span>
+                              {dailyView === 'condition' ? (
+                                // 温度条视图：最低+条+最高占满中间 1fr 列
+                                <div className="grid grid-cols-[38px_1fr_38px] items-center gap-2">
+                                  <span className="text-right text-[13px] tabular-nums text-white/48">{Math.round(day.temperatureMin)}°</span>
+                                  <div className="relative h-1 rounded-full bg-black/15">
+                                    <div
+                                      className="absolute h-full rounded-full bg-gradient-to-r from-cyan-300 via-amber-300 to-orange-400"
+                                      style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }}
+                                    />
+                                  </div>
+                                  <span className="text-[13px] tabular-nums">{Math.round(day.temperatureMax)}°</span>
+                                </div>
+                              ) : dailyView === 'precipitation' ? (
+                                // 图 1055 行样式：24 根迷你柱 + 右侧"毫米/概率%"上下两行（64px 值列内不换行）
+                                <div className="flex h-7 items-end gap-[1.5px]">
+                                  {dayHoursFor.length > 0 ? dayHoursFor.slice(0, 24).map(hour => (
+                                    <span
+                                      key={hour.time}
+                                      className={`w-[3px] rounded-sm ${hour.precipitation >= 0.05 ? 'bg-sky-400' : 'bg-white/12'}`}
+                                      style={{ height: `${Math.max(12, hour.precipitation / precipMax * 100)}%` }}
+                                    />
+                                  )) : <span className="text-[11px] text-white/35">暂无逐时数据</span>}
+                                </div>
+                              ) : (
+                                // 图 1056 行样式：迷你风速曲线（阵风暗线 + 主线 + 底部渐变填充）
+                                <svg viewBox="0 0 120 24" className="h-7 w-full" preserveAspectRatio="none" aria-hidden="true">
+                                  <defs>
+                                    <linearGradient id={`wind-row-${day.date}`} x1="0" y1="0" x2="0" y2="1">
+                                      <stop offset="0%" stopColor="#34d399" stopOpacity="0.35" />
+                                      <stop offset="100%" stopColor="#0f766e" stopOpacity="0.04" />
+                                    </linearGradient>
+                                  </defs>
+                                  <polyline
+                                    points={dayHoursFor.slice(0, 24).map((hour, hourIndex) => {
+                                      const level = windSpeedBeaufort(hour.windGusts || hour.windSpeed)
+                                      return `${(hourIndex / Math.max(1, Math.min(23, dayHoursFor.length - 1))) * 120},${22 - (level / 8) * 20}`
+                                    }).join(' ')}
+                                    fill="none" stroke="#166534" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" opacity="0.85"
+                                  />
+                                  <polyline
+                                    points={dayHoursFor.slice(0, 24).map((hour, hourIndex) => {
+                                      const level = windSpeedBeaufort(hour.windSpeed)
+                                      return `${(hourIndex / Math.max(1, Math.min(23, dayHoursFor.length - 1))) * 120},${22 - (level / 8) * 20}`
+                                    }).join(' ')}
+                                    fill="none" stroke="#4ade80" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                                  />
+                                </svg>
+                              )}
+                              {/* 右值列：降水=毫米+概率两行；风=级数区间；温度视图空（温度在条两端） */}
+                              {dailyView === 'precipitation' ? (
+                                <span className="flex flex-col items-end leading-tight">
+                                  <span className="text-[12px] tabular-nums text-white/85">{Math.round(day.precipitationSum * 10) / 10} 毫米</span>
+                                  <span className="text-[11px] tabular-nums text-sky-300">{Math.round(day.precipitationProbability)}%</span>
+                                </span>
+                              ) : dailyView === 'wind' ? (
+                                <span className="text-right text-[12px] tabular-nums text-emerald-200/90">{windMinLevel}-{windMaxLevel} 级</span>
+                              ) : (
+                                <span />
+                              )}
                               <ChevronRight className="h-3.5 w-3.5 text-white/25" />
                             </button>
                           )
@@ -560,13 +744,42 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                             <div className="text-[26px] font-semibold leading-8 tracking-tight">{moonInfo.name}</div>
                             <div className="mt-1.5 text-[13px] text-white/50">照射范围 {Math.round(moonInfo.illumination * 100)}%</div>
                             <div className="text-[13px] text-white/50">下次满月 {moonInfo.nextFull} 天</div>
+                            {/* 方位/高度从左上角 SkyTip 移到这里（实时天体位置） */}
+                            {skyBodies && (
+                              <div className="mt-1 text-[13px] text-white/50">
+                                {skyBodies.moon.visible
+                                  ? `月亮在${azimuthDirection(skyBodies.moon.azimuth)}方 · 高度 ${Math.round(skyBodies.moon.altitude)}°`
+                                  : '月亮在地平线下'}
+                              </div>
+                            )}
                           </div>
                           <MoonDiscSmall phase={moonInfo.phase} />
                         </div>
                       </div>
                     </button>
 
-                    <DetailCard icon={Sunrise} label="日出" value={formatTime(weather.daily[0]?.sunrise || '')} detail={`日落 ${formatTime(weather.daily[0]?.sunset || '')}`} onClick={() => openDetailCard('sun')} />
+                    <DetailCard icon={Sunrise} label="日出" onClick={() => openDetailCard('sun')}>
+                      <div className="mt-auto flex items-end justify-between gap-2 pt-4">
+                        <div>
+                          <div className="text-[30px] font-semibold leading-9 tabular-nums">{formatTime(weather.daily[0]?.sunrise || '')}</div>
+                          <div className="mt-1 text-[13px] text-white/50">日落 {formatTime(weather.daily[0]?.sunset || '')}</div>
+                          {/* 与月亮卡对称的实时太阳位置（方位/高度），太阳在地平线下时显示昼长 */}
+                          <div className="mt-1 text-[13px] text-white/50">
+                            {skyBodies
+                              ? (skyBodies.sun.visible
+                                ? `太阳在${azimuthDirection(skyBodies.sun.azimuth)}方 · 高度 ${Math.round(skyBodies.sun.altitude)}°`
+                                : `昼长 ${formatDaylight(weather.daily[0]?.daylightDuration ?? 0)}`)
+                              : `日落 ${formatTime(weather.daily[0]?.sunset || '')}`}
+                          </div>
+                        </div>
+                        {/* 迷你太阳圆盘：与月亮缩略盘同尺寸同构图 */}
+                        <span className="relative block h-[76px] w-[76px] shrink-0 rounded-full"
+                          style={{ background: 'radial-gradient(circle, rgba(255,236,170,0.35) 0%, rgba(255,222,130,0.08) 55%, transparent 70%)' }}>
+                          <span className="absolute left-1/2 top-1/2 h-[46px] w-[46px] -translate-x-1/2 -translate-y-1/2 rounded-full"
+                            style={{ background: 'radial-gradient(circle at 42% 38%, #fff7db 0%, #ffd75e 55%, #f5a623 100%)', boxShadow: '0 0 22px rgba(255,205,90,0.55)' }} />
+                        </span>
+                      </div>
+                    </DetailCard>
 
 
                     {/* 其余详情瓷片（点击进入详情弹窗） */}
@@ -588,6 +801,12 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
                     ) : (
                       <DetailCard icon={Leaf} label="空气质量" value="—" detail="暂无空气质量数据" />
                     )}
+
+                    {/* API 扩展卡：日照 / 降雪 / 月出月落 / 冻结高度 */}
+                    <DetailCard icon={Sun} label="日照" value={formatDurationShort((weather.daily[0]?.sunshineDuration ?? 0) / 60)} detail={`太阳总辐射 ${Math.round((weather.daily[0]?.shortwaveRadiationSum ?? 0) * 10) / 10} MJ/m²`} onClick={() => openDetailCard('daylight')} />
+                    <DetailCard icon={Cloud} label="降雪" value={`${Math.round((weather.daily[0]?.snowfallSum ?? 0) * 10) / 10} 厘米`} detail={getSnowLabel(weather.daily[0]?.snowfallSum ?? 0)} onClick={() => openDetailCard('snow')} />
+                    <DetailCard icon={MoonLucide} label="月出月落" value={weather.daily[0]?.moonrise ? weather.daily[0].moonrise.slice(11, 16) : '--:--'} detail={`月落 ${weather.daily[0]?.moonset ? weather.daily[0].moonset.slice(11, 16) : '--:--'}`} onClick={() => openDetailCard('moonrise')} />
+                    <DetailCard icon={Gauge} label="冻结高度" value={`${Math.round(weather.hourly[0]?.freezingLevel ?? 0).toLocaleString('zh-CN')} 米`} detail="0°C 等温面海拔" onClick={() => openDetailCard('freezing')} />
 
                     {/* 天气地图 */}
                     <div className="lg:col-span-3 xl:col-span-4 [&>button]:mt-0">
@@ -612,17 +831,18 @@ export default function WeatherDetailsModal({ open, weather, onClose, onRefresh,
               )}
             </div>
           </motion.div>
-          {/* 回到顶部：天气主视图内容超一屏（10 日预报/逐小时/灾害面板）后显示。
+          {/* 回到顶部：天气/台风/地震页内容超一屏后显示（出现机制与歌单列表一致：
+              超过一屏 + 阈值才出现，滚回顶部自动隐藏）。
               挂在滚动容器外层（弹窗视口层），absolute 才能固定在右下角而不是随内容滚走。 */}
-          {activeTab === 'weather' && !secondaryOverlayOpen && (
+          {!secondaryOverlayOpen && (
             <ScrollToTop containerRef={weatherScrollRef} position="absolute" offsetBottom={28} offsetRight={30} />
           )}
           {/* 月相页（月亮卡片点击进入） */}
           <ErrorBoundary inline inlineLabel="月相展示出错">
             <MoonPhaseExperience weather={weather} open={moonOpen} onOpen={openMoon} onClose={() => setMoonOpen(false)} />
           </ErrorBoundary>
-          {/* 详情卡二级弹窗（苹果式：所有卡片均可点开） */}
-          <WeatherCardDetailOverlay card={detailCard} weather={weather} onClose={() => setDetailCard(null)} />
+          {/* 详情卡二级弹窗（苹果式：所有卡片均可点开；右上角菜单可直接切换指标） */}
+          <WeatherCardDetailOverlay card={detailCard} weather={weather} onClose={nextCard => nextCard ? setDetailCard(nextCard) : setDetailCard(null)} />
           {weather && selectedDayIndex !== null && <WeatherDayDetail open dayIndex={selectedDayIndex} weather={weather} onClose={() => setSelectedDayIndex(null)} onSelectDay={setSelectedDayIndex} />}
           {/* 雨滴打在玻璃上的效果：盖在内容层之上，模拟整个天气视图是块被雨淋的玻璃 */}
           {isRainySceneKind(weatherTheme.kind) && <WeatherRainGlass kind={weatherTheme.kind} active={weatherAnimationActive} className="absolute inset-0 z-[4]" />}

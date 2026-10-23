@@ -1,4 +1,5 @@
-import { motion } from 'framer-motion'
+import { motion, AnimatePresence } from 'framer-motion'
+import { createPortal } from 'react-dom'
 import {
   memo,
   useEffect,
@@ -34,7 +35,25 @@ import { parseStoredBoolean } from '../utils/storage'
 import type { QuickSettingsSection } from '../services/quickSettingsStore'
 import type { QuickSettingsPlaybackContext } from './quickSettingsPlaybackContext'
 import QuickSettingsPreview from './QuickSettingsPreview'
+import FoliaTuningPanel from './FoliaTuningPanel'
+import { getVisualizerRegistryEntry } from '../vendor/folia/components/visualizer/registry'
+import { useModeParked } from '../utils/modeLayer'
 import { buildQuickSettingsPalette, toRgba } from './quickSettingsPalette'
+import { FOLIA_STYLES } from '../vendor/folia/stylesMeta'
+
+/** 当前 Folia 样式是否有独立参数面板（registry entry 声明了 renderSettingsPanel 即有）。 */
+const foliaStyleHasPanel = (style: string): boolean => {
+  try {
+    return typeof getVisualizerRegistryEntry(style as never)?.renderSettingsPanel === 'function'
+  } catch {
+    return false
+  }
+}
+
+/** folia 样式 id → 中文名（二级弹窗标题用）。 */
+const FOLIA_STYLE_ZH: Record<string, string> = Object.fromEntries(
+  FOLIA_STYLES.map(style => [style.id, style.zhName]),
+)
 
 /**
  * 播放设置弹窗（原 QuickSettings 下拉面板）。
@@ -125,6 +144,12 @@ interface QuickSettingsDialogProps {
   initialSection: QuickSettingsSection
   /** 预览用的播放上下文（当前曲目 / 歌词 / 播放时间源），由 App 经 Host 透传 */
   playback?: QuickSettingsPlaybackContext | null
+  /** Folia 歌词：当前样式 id 与参数面板所需的调参/提交回调（App 层持有） */
+  foliaStyle?: string
+  foliaTuning?: Record<string, unknown>
+  onFoliaTuningCommit?: (next: Record<string, unknown>) => void
+  onFoliaTuningReset?: () => void
+  hasFoliaTuningOverride?: boolean
   onClose: () => void
 }
 
@@ -183,9 +208,23 @@ export default memo(function QuickSettingsDialog({
   isPureMusic,
   initialSection,
   playback,
+  foliaStyle,
+  foliaTuning,
+  onFoliaTuningCommit,
+  onFoliaTuningReset,
+  hasFoliaTuningOverride,
   onClose,
 }: QuickSettingsDialogProps) {
   const [activeSection, setActiveSection] = useState<QuickSettingsSection>(initialSection)
+  /** Folia 参数二级弹窗：从 02 槽入口按钮打开（参数多，槽内塞不下） */
+  const [foliaSubDialogOpen, setFoliaSubDialogOpen] = useState(false)
+  // 模式挂起守卫：portal 逃出模式层的 visibility，挂起时必须停止渲染（否则
+  // 切模式后 Folia 参数弹窗会盖在当前模式顶部）；恢复时 open 状态也复位，
+  // 避免切回播放页时它自己再展开一次（与顶部歌词下拉的 parked 行为同款）。
+  const modeParked = useModeParked()
+  useEffect(() => {
+    if (modeParked) setFoliaSubDialogOpen(false)
+  }, [modeParked])
 
   // 遥控器 BACK：关闭弹窗。本组件只在打开时挂载 → BACK 处理器后于播放页注册，天然是栈顶。
   useTvBack(() => {
@@ -969,8 +1008,12 @@ export default memo(function QuickSettingsDialog({
     <motion.div
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.22, ease: 'easeOut' }}
+      // exit 不做动画：关闭立即卸载。曾用 exit={{ opacity: 0 }} + 0.22s 过渡，但
+      // 窗口失焦/后台标签下 framer 的 rAF 驱动会暂停，exit 永远停在半路 —— 遮罩以
+      // opacity:0 但 pointer-events:auto 残留在全屏播放页上，拦截一切点击且"面板关不掉"。
+      // 播放设置是功能性弹层，立即消失比"可能卡住的淡出"正确（若要动画须保证 rAF 常驻）。
+      exit={{ opacity: 0, pointerEvents: 'none' }}
+      transition={{ duration: 0 }}
       role="presentation"
       className="fixed inset-0 z-[140] flex items-stretch justify-center p-3 sm:items-center sm:p-6"
       style={{
@@ -996,8 +1039,8 @@ export default memo(function QuickSettingsDialog({
         aria-label="播放设置"
         initial={{ opacity: 0, y: 18, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 18, scale: 0.98 }}
-        transition={{ duration: 0.2, ease: 'easeOut' }}
+        exit={{ opacity: 0, y: 18, scale: 0.98, pointerEvents: 'none' }}
+        transition={{ duration: 0 }}
         className="relative m-auto flex max-h-[840px] w-full max-w-[1060px] flex-col overflow-hidden rounded-[20px] border"
         data-qs-theme={isDaylight ? 'light' : 'dark'}
         style={{
@@ -1345,23 +1388,9 @@ export default memo(function QuickSettingsDialog({
                       renderToggleRow('左右交替歌词', lyricsSideAlign, handleLyricsSideAlignToggle, {
                         description: '对唱按演唱者左右分栏（柔和与摩登通用）',
                       })}
-                  </>,
-                )}
 
-                {renderSlot(
-                  '02',
-                  '歌词呈现',
-                  Settings2,
-                  <>
-                    {!isPureMusic &&
-                      renderPresetGroup(
-                        '歌词模式',
-                        lyricModeOptions,
-                        lyricDisplayMode,
-                        (value) => handleLyricDisplayModeSelect(value as LyricDisplayMode),
-                        { columns: 3 },
-                      )}
-
+                    {/* 歌词大小从原 02 槽（歌词呈现）挪来：模式切换已由顶部下拉承担，
+                        播放设置不再重复；字号是所有模式通用的画面属性，归 01 画面显示。 */}
                     {renderSliderRow(
                       '歌词大小',
                       lyricSize,
@@ -1371,6 +1400,46 @@ export default memo(function QuickSettingsDialog({
                       0.1,
                       handleLyricSizeChange,
                       handleLyricSizeCommit,
+                    )}
+                  </>,
+                )}
+
+                {renderSlot(
+                  '02',
+                  '歌词呈现',
+                  Settings2,
+                  <>
+                    {lyricDisplayMode === 'folia' && foliaStyle ? (
+                      <>
+                        {/* Folia 参数改成**二级弹窗**（用户反馈：参数项多，塞在 02 槽
+                            既溢出又挤压预览）。02 槽只留入口按钮 + 当前样式名；
+                            点击打开独立弹窗，复用 FoliaTuningPanel 的大空间布局。 */}
+                        <button
+                          type="button"
+                          onClick={() => setFoliaSubDialogOpen(true)}
+                          className={`w-full rounded-xl border px-4 py-3 text-left transition-colors ${playerTheme === 'dark' ? 'border-white/12 bg-white/[0.05] hover:bg-white/[0.09]' : 'border-black/10 bg-black/[0.03] hover:bg-black/[0.06]'}`}
+                        >
+                          <span className={`block text-[13px] font-medium ${playerTheme === 'dark' ? 'text-white/90' : 'text-black/85'}`}>
+                            {FOLIA_STYLE_ZH[foliaStyle] ?? foliaStyle} · 参数设置
+                          </span>
+                          <span className={`mt-0.5 block text-[11px] ${playerTheme === 'dark' ? 'text-white/45' : 'text-black/45'}`}>
+                            {foliaStyleHasPanel(foliaStyle)
+                              ? '歌词动画 / 智能动感 / 字幕与背景等参数'
+                              : '当前样式没有独立参数'}
+                          </span>
+                        </button>
+                      </>
+                    ) : (
+                      /* 非 Folia 模式：02 槽保留原「歌词模式」网格（下拉切换器之外的快捷入口），
+                         Folia 模式下隐藏 —— 模式切换已在顶部下拉，避免重复入口。 */
+                      !isPureMusic &&
+                      renderPresetGroup(
+                        '歌词模式',
+                        lyricModeOptions.filter(option => option.value !== 'folia'),
+                        lyricDisplayMode,
+                        (value) => handleLyricDisplayModeSelect(value as LyricDisplayMode),
+                        { columns: 3 },
+                      )
                     )}
                   </>,
                 )}
@@ -1483,6 +1552,88 @@ export default memo(function QuickSettingsDialog({
         {/* 页脚（「设置即时生效，改动会被记住」+「完成」按钮）已按用户要求移除：
             所有改动本来就是即时落盘的，这句话是废话；关闭用右上角的 ✕ / Esc / 点遮罩就够了。 */}
       </motion.div>
+
+      {/* Folia 参数二级弹窗：02 槽入口按钮打开。portal 到 body —— 主弹窗 backdrop
+          有 onMouseDown/onClick 关闭处理，弹层就地渲染会被遮罩点击误关。 */}
+      {foliaSubDialogOpen && foliaStyle && onFoliaTuningCommit && !modeParked
+        ? createPortal(
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.14 }}
+              role="presentation"
+              className="fixed inset-0 z-[150] flex items-center justify-center p-4 sm:p-6"
+              style={{
+                backgroundColor: isDaylight ? 'rgba(242,243,247,0.8)' : 'rgba(8,9,13,0.78)',
+                backdropFilter: 'blur(20px)',
+                WebkitBackdropFilter: 'blur(20px)',
+              }}
+              onClick={() => setFoliaSubDialogOpen(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.97, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.98, opacity: 0 }}
+                transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                role="dialog"
+                aria-label={`Folia 歌词参数 · ${FOLIA_STYLE_ZH[foliaStyle] ?? foliaStyle}`}
+                className="flex max-h-[82vh] w-full max-w-md flex-col overflow-hidden rounded-2xl border"
+                style={{
+                  borderColor: toRgba(accentHex, 0.25),
+                  backgroundColor: isDaylight ? 'rgba(250,250,252,0.98)' : 'rgba(12,14,26,0.98)',
+                  boxShadow: `0 24px 70px rgba(0,0,0,0.55)`,
+                }}
+                onClick={event => event.stopPropagation()}
+              >
+                <div
+                  className="flex shrink-0 items-center justify-between border-b px-4 py-3"
+                  style={{ borderColor: toRgba(accentHex, 0.18) }}
+                >
+                  <div className="min-w-0">
+                    <p className={`truncate text-sm font-semibold ${playerTheme === 'dark' ? 'text-white/92' : 'text-black/85'}`}>
+                      {FOLIA_STYLE_ZH[foliaStyle] ?? foliaStyle} · 歌词参数
+                    </p>
+                    <p className={`mt-0.5 truncate text-[10px] ${playerTheme === 'dark' ? 'text-white/40' : 'text-black/40'}`}>
+                      设计来源 Project Folia · 改动即时生效
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setFoliaSubDialogOpen(false)}
+                    aria-label="关闭 Folia 参数"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border transition-colors"
+                    style={{
+                      borderColor: toRgba(accentHex, 0.18),
+                      backgroundColor: isDaylight ? 'rgba(0,0,0,0.02)' : 'rgba(255,255,255,0.04)',
+                      color: accentHex,
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+                <div className={`min-h-0 flex-1 overflow-y-auto p-3 ${playerTheme === 'dark' ? 'qs-scroll' : 'qs-scroll-light'}`}>
+                  {foliaStyleHasPanel(foliaStyle) ? (
+                    <FoliaTuningPanel
+                      mode={foliaStyle}
+                      tuning={foliaTuning}
+                      onCommit={onFoliaTuningCommit}
+                      onReset={onFoliaTuningReset ?? (() => {})}
+                      hasOverride={Boolean(hasFoliaTuningOverride)}
+                      playerTheme={playerTheme}
+                      accentColor={accentHex}
+                    />
+                  ) : (
+                    <p className={`rounded-lg px-2.5 py-2 text-[11px] leading-relaxed ${playerTheme === 'dark' ? 'bg-white/[0.05] text-white/50' : 'bg-black/[0.04] text-black/50'}`}>
+                      当前样式没有独立参数。样式与显示/隐藏请在顶部下拉的歌词样式选择里调整。
+                    </p>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>,
+            document.body,
+          )
+        : null}
     </motion.div>
   )
 })

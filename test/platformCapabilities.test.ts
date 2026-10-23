@@ -9,7 +9,9 @@ describe('platform capability contracts', () => {
     expect(getPlatformCapabilities('qq')).toMatchObject({ searchPlaylists: true, updatePlaylist: false, deletePlaylist: true, sharePlaylist: true, removeTracksFromPlaylist: true })
     expect(getPlatformCapabilities('apple')).toMatchObject({ searchPlaylists: true, updatePlaylist: true, deletePlaylist: true, subscribePlaylist: false, removeTracksFromPlaylist: true })
     expect(getPlatformCapabilities('spotify')).toMatchObject({ searchPlaylists: true, updatePlaylist: true, deletePlaylist: false, sharePlaylist: true, removeTracksFromPlaylist: true })
-    expect(getPlatformCapabilities('kugou')).toMatchObject({ searchPlaylists: false, createPlaylist: false, removeTracksFromPlaylist: false })
+    // 酷狗：searchPlaylists 于 2026-10-22 由 false 修正为 true——mobilecdn search/special 探测可用；
+    // updatePlaylist（/v2/modify_list）同日逆向验证（改名/简介实测成功）。
+    expect(getPlatformCapabilities('kugou')).toMatchObject({ searchPlaylists: true, createPlaylist: false, removeTracksFromPlaylist: false, updatePlaylist: true })
     // 汽水：createPlaylist / deletePlaylist 于 2026-10-08 由「上游无此端点」的旧判断修正为可用。
     // 依据是客户端 IDL（CreatePlaylist → /luna/pc/me/playlist、MDeletePlaylists → .../playlist/delete），
     // 且已实测建删闭环成功（创建拿到真实 id、删除后列表无残留）。

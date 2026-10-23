@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { Play, Pause, SkipBack, SkipForward, List, Repeat, Repeat1, Shuffle, Volume2, VolumeX, AudioWaveform, Crown } from 'lucide-react'
+import { Play, Pause, SkipBack, SkipForward, List, Repeat, Repeat1, Shuffle, Volume2, VolumeX, AudioWaveform, Crown, LoaderCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useDGLabStatus, getDGLabClient, loadDGLabSettings, DGLAB_SETTINGS_EVENT } from '../plugins/clients/DGLabClient'
 import { isPluginEnabled } from '../services/pluginStore'
@@ -32,6 +32,9 @@ import { AUTOMIX_HUD_GOLD } from './AutomixHudBadge'
 
 interface PlayerControlsProps {
   isPlaying: boolean
+  /** 播放链路进行中（取播放地址/媒体加载）：按钮显示转圈而不是可点的 ▶/⏸，
+   *  避免「点了没反应」的静默等待（切歌冷启动最长可达数秒）。 */
+  playPending?: boolean
   currentTime: number
   duration: number
   /** 直播流（Apple 电台等）：显示 LIVE 指示、禁拖动进度 */
@@ -325,6 +328,16 @@ type QualityMenuEntry = {
   requiresVip?: boolean
   /** 会员档位：vip=绿钻，svip=超级会员（与官方客户端两级标注一致） */
   tier?: 'vip' | 'svip'
+  /** 本曲该档文件大小（bytes）：官方风格"（21.9M）"标注；0/缺省不显示 */
+  sizeBytes?: number
+}
+
+/** bytes → 官方面板风格的文件大小文本（21.9M / 768K；不足 1K 不显示） */
+function formatQualitySize(bytes?: number): string {
+  if (!bytes || bytes <= 0) return ''
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}M`
+  if (bytes >= 1024) return `${Math.max(1, Math.round(bytes / 1024))}K`
+  return ''
 }
 
 /** QQ 歌曲详情 qualityLevels 的 size_* 键 → 我们已实现的取流档位（AAC 前缀映射已实测校准）。 */
@@ -339,6 +352,8 @@ const QQ_QUALITY_LEVEL_TO_PREFERENCE: Record<string, QualityOptionValue> = {
   size_dolby: 'dolby',
   size_master: 'master',
   size_atmos2: 'atmos2',
+  size_tqlq: 'tqlq',
+  size_nac: '48aac', // NAC（76k AICodes 省流档）：无取流实现前不单列，落到省流档不入列表
 }
 
 /** 服务端「实际解析档」原始值 → 本曲 qualityLevels 的 size_* 键：元数据偶发漏档
@@ -354,18 +369,23 @@ const QQ_RESOLVED_RAW_TO_LEVEL_KEY: Record<string, string> = {
   dolby: 'size_dolby',
   master: 'size_master',
   atmos2: 'size_atmos2',
+  tqlq: 'size_tqlq',
+  nac: 'size_nac',
 }
 
-/** 已有取流实现的逐曲档位（列表只显示这些）：SQ/HQ/标准/流畅/省流 + 臻品母带4.0。
- *  Hi-Res / 杜比全景声 / 臻品音质2.0 / NAC 暂未打通，按"支持啥显示啥"的原则不列。 */
-const QQ_IMPLEMENTED_LEVEL_KEYS = new Set(['size_master', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_48aac'])
+/** 已有取流实现的逐曲档位（列表只显示这些）：臻品母带/臻品音质2.0/臻品全景声3.0 + SQ/HQ/标准/流畅/省流。
+ *  臻品音质2.0（Q000/Q0M0）2026-10-21 已实测打通（且存在大量曲目"无 SQ 却有臻品2.0"，
+ *  升档回退会实际播出该档，列表必须可显示/可选）；全景声3.0（Q001/Q002，服务端 QQ_PREMIUM_TIERS.tqlq）
+ *  与 NAC（N000.mnac，取流实现待验证）由服务端同一探测管线负责，弹层只认 qualityLevels 有无。
+ *  Hi-Res / 杜比暂未打通，按"支持啥显示啥"的原则不列。 */
+const QQ_IMPLEMENTED_LEVEL_KEYS = new Set(['size_master', 'size_atmos2', 'size_tqlq', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_48aac'])
 
 /** 本曲档位列表的码率序（高→低），与服务端 sort 一致（NAC 76k 位于 96k 与 48k 之间）。 */
-const QQ_LEVEL_SIZE_ORDER = ['size_master', 'size_atmos2', 'size_hires', 'size_dolby', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_nac', 'size_48aac']
+const QQ_LEVEL_SIZE_ORDER = ['size_master', 'size_tqlq', 'size_atmos2', 'size_hires', 'size_dolby', 'size_flac', 'size_320mp3', 'size_192aac', 'size_128mp3', 'size_96aac', 'size_nac', 'size_48aac']
 
 /** QQ 本曲可用音质（qualityLevels）的模块级缓存：切歌即预取，弹层打开时直接命中，
  *  不再出现「先显示通用档位列表、拉到本曲详情后再换成本曲列表」的闪现。 */
-type QualityLevelEntry = { key: string; label: string }
+type QualityLevelEntry = { key: string; label: string; size?: number }
 const qqSongLevelsCache = new Map<string, { levels: QualityLevelEntry[] | null; at: number }>()
 const QQ_SONG_LEVELS_TTL = 30 * 60 * 1000
 
@@ -377,7 +397,7 @@ async function fetchQQSongLevels(songId: string | number, signal?: AbortSignal):
   const data = await res.json().catch(() => null)
   const levels = data?.song?.qualityLevels
   return Array.isArray(levels) && levels.length > 0
-    ? levels.map((level: { key: string; label?: string }) => ({ key: String(level.key), label: String(level.label || level.key) }))
+    ? levels.map((level: { key: string; label?: string; size?: number }) => ({ key: String(level.key), label: String(level.label || level.key), size: Number(level.size) || 0 }))
     : null
 }
 
@@ -390,6 +410,59 @@ const QQ_PREFERENCE_TO_LEVEL_KEY: Partial<Record<QualityOptionValue, string>> = 
   standard: 'size_128mp3',
   '96aac': 'size_96aac',
   '48aac': 'size_48aac',
+}
+
+// ── 网易云本曲档位映射（/api/netease/song/detail 的 qualityLevels：hr/sq/db/jm/je/h/m/l）──
+
+/** 网易云 qualityLevels 的 key → 偏好档。db/jm/je 官方是 SVIP 档；h/m/l 是高/标/普。 */
+const NETEASE_QUALITY_LEVEL_TO_PREFERENCE: Partial<Record<string, QualityOptionValue>> = {
+  hr: 'hi-res',
+  sq: 'lossless',
+  h: 'high',
+  m: 'standard',
+  l: 'standard',
+  // db/jm/je：官方杜比/母带/臻音全景声——服务端取流候选链覆盖（明确选中才探测），弹层映射到最近偏好
+  db: 'dolby',
+  jm: 'jymaster',
+  je: 'jyeffect',
+}
+
+/** 网易云「实际在播档」原始值（eapi level 枚举）→ qualityLevels key：补挂漏档用 */
+const NETEASE_RESOLVED_RAW_TO_LEVEL_KEY: Record<string, string> = {
+  hires: 'hr',
+  lossless: 'sq',
+  exhigh: 'h',
+  standard: 'm',
+  dolby: 'db',
+  jymaster: 'jm',
+  sky: 'je',
+  jyeffect: 'je',
+}
+
+/** 偏好档 → 网易云 qualityLevels key（补挂手动偏好选中态） */
+const NETEASE_PREFERENCE_TO_LEVEL_KEY: Partial<Record<QualityOptionValue, string>> = {
+  'hi-res': 'hr',
+  lossless: 'sq',
+  high: 'h',
+  standard: 'm',
+  dolby: 'db',
+  jymaster: 'jm',
+  jyeffect: 'je',
+  sky: 'je',
+  vivid: 'je',
+}
+
+/** 网易云弹层码率序（高→低）；与 QQ_LEVEL_SIZE_ORDER 同型 */
+const NETEASE_LEVEL_SIZE_ORDER = ['jm', 'je', 'db', 'hr', 'sq', 'h', 'm', 'l']
+
+/** 网易云弹层只列这些 key：db（杜比）/ jm（母带）/ je（臻音全景声）官方 SVIP 档在
+ *  服务端取流候选链里有完整回落（选中即探测），与官方"列出来但取不到就近落档"一致。 */
+const NETEASE_IMPLEMENTED_LEVEL_KEYS = new Set(['jm', 'je', 'db', 'hr', 'sq', 'h', 'm', 'l'])
+
+/** 按平台取「本曲档位键映射」族：songLevelEntries 内部按平台分流用 */
+const PREFERENCE_TO_LEVEL_KEY: Partial<Record<MusicPlatform, Partial<Record<QualityOptionValue, string>>>> = {
+  qq: QQ_PREFERENCE_TO_LEVEL_KEY,
+  netease: NETEASE_PREFERENCE_TO_LEVEL_KEY,
 }
 
 function QualityQuickSwitch({
@@ -431,8 +504,9 @@ function QualityQuickSwitch({
   }, [])
 
   // 本曲音质：切歌时预取（不等弹层打开），弹层打开时同步读缓存 → 不再闪现通用列表。
+  // QQ 与网易云都提供本曲 qualityLevels（官方逐曲可用档），酷狗/汽水没有逐曲元数据接口，维持静态表。
   useEffect(() => {
-    if (qualityPlatform !== 'qq' || qualitySongId == null) {
+    if ((qualityPlatform !== 'qq' && qualityPlatform !== 'netease') || qualitySongId == null) {
       setSongLevels(null)
       setLevelsLoading(false)
       return
@@ -471,8 +545,8 @@ function QualityQuickSwitch({
   const options = getQualityOptions(qualityPlatform)
   const preference = getPlatformQualityPreference(qualityPlatform)
   const current = options.find(option => option.value === preference) ?? options[0]
-  // QQ 本曲档位在途：先只出「自动」+ 读取提示，避免拿通用列表顶上后又切换（用户看到的"闪一下"）。
-  const qqLevelsPending = qualityPlatform === 'qq' && qualitySongId != null && !songLevels && levelsLoading
+  // QQ/网易云本曲档位在途：先只出「自动」+ 读取提示，避免拿通用列表顶上后又切换（用户看到的"闪一下"）。
+  const qqLevelsPending = (qualityPlatform === 'qq' || qualityPlatform === 'netease') && qualitySongId != null && !songLevels && levelsLoading
 
   // 会员检测：读各平台登录链路维护的会员状态（qq_vip / netease_vip / soda_entitlement，
   // 登录与启动恢复时刷新，auth 事件驱动重渲染）——会员档一律金字，非会员才加皇冠。
@@ -494,37 +568,44 @@ function QualityQuickSwitch({
   // 本曲列表 + 两类补挂：①实际在播档（元数据偶发漏档，服务端已按 vkey 事实解析）；
   // ②手动偏好档（跨曲持久，服务端自动回落到本曲可播的最近一档，选中态不能丢）。
   // 均按码率序插回，保证列表顺序稳定。
-  const resolvedLevelKey = qualityPlatform === 'qq' && resolvedQuality
-    ? QQ_RESOLVED_RAW_TO_LEVEL_KEY[resolvedQuality]
+  // QQ 与网易云共用这套结构：网易云的 level 键（hr/sq/db/jm/je/h/m/l）经独立映射表转换。
+  const resolvedLevelKey = resolvedQuality
+    ? (qualityPlatform === 'qq' ? QQ_RESOLVED_RAW_TO_LEVEL_KEY[resolvedQuality] : NETEASE_RESOLVED_RAW_TO_LEVEL_KEY[resolvedQuality])
     : undefined
+  const levelKeyMap = qualityPlatform === 'qq' ? QQ_QUALITY_LEVEL_TO_PREFERENCE : NETEASE_QUALITY_LEVEL_TO_PREFERENCE
   const resolvedPreferenceValue = resolvedLevelKey
-    ? QQ_QUALITY_LEVEL_TO_PREFERENCE[resolvedLevelKey]
+    ? levelKeyMap[resolvedLevelKey]
     : undefined
-  const songLevelEntries: QualityMenuEntry[] | null = songLevels && qualityPlatform === 'qq'
+  const songLevelEntries: QualityMenuEntry[] | null = songLevels && (qualityPlatform === 'qq' || qualityPlatform === 'netease')
     ? (() => {
         const levels = [...songLevels]
         if (resolvedLevelKey && resolvedPreferenceValue && resolvedQuality
           && !levels.some(level => level.key === resolvedLevelKey)) {
           levels.push({ key: resolvedLevelKey, label: resolvedQualityDisplayName(qualityPlatform, resolvedQuality) })
         }
-        const preferredLevelKey = preference !== 'auto' ? QQ_PREFERENCE_TO_LEVEL_KEY[preference] : undefined
+        const preferredLevelKey = preference !== 'auto'
+          ? PREFERENCE_TO_LEVEL_KEY[qualityPlatform]?.[preference]
+          : undefined
         if (preferredLevelKey && !levels.some(level => level.key === preferredLevelKey)) {
           const preferredOption = options.find(option => option.value === preference)
           if (preferredOption) levels.push({ key: preferredLevelKey, label: preferredOption.label })
         }
+        const sizeOrder = qualityPlatform === 'qq' ? QQ_LEVEL_SIZE_ORDER : NETEASE_LEVEL_SIZE_ORDER
+        const implementedKeys = qualityPlatform === 'qq' ? QQ_IMPLEMENTED_LEVEL_KEYS : NETEASE_IMPLEMENTED_LEVEL_KEYS
         levels.sort((a, b) => {
-          const ia = QQ_LEVEL_SIZE_ORDER.indexOf(a.key)
-          const ib = QQ_LEVEL_SIZE_ORDER.indexOf(b.key)
-          return (ia < 0 ? QQ_LEVEL_SIZE_ORDER.length : ia) - (ib < 0 ? QQ_LEVEL_SIZE_ORDER.length : ib)
+          const ia = sizeOrder.indexOf(a.key)
+          const ib = sizeOrder.indexOf(b.key)
+          return (ia < 0 ? sizeOrder.length : ia) - (ib < 0 ? sizeOrder.length : ib)
         })
         return levels
-          // 只列「我们有取流实现」的档位：Hi-Res / 杜比全景声 / 臻品音质2.0 / NAC 目前取不到流，
+          // 只列「我们有取流实现」的档位：QQ 的 Hi-Res / 杜比 / NAC，网易云的杜比/母带/全景声
+          // （后者服务端取流候选链覆盖，但点击走相同链路，保守起见列implemented 集合）。
           // 列出来只会变成"点了没反应/提示不支持"（用户明确要求：支持啥显示啥，不支持就别列）。
-          .filter(level => QQ_IMPLEMENTED_LEVEL_KEYS.has(level.key))
+          .filter(level => implementedKeys.has(level.key))
           .map(level => {
-            const value = QQ_QUALITY_LEVEL_TO_PREFERENCE[level.key] ?? null
-            const tier = value ? getQualityTier('qq', value) : undefined
-            return { key: level.key, label: level.label, value, requiresVip: Boolean(tier), tier }
+            const value = levelKeyMap[level.key] ?? null
+            const tier = value ? getQualityTier(qualityPlatform, value) : undefined
+            return { key: level.key, label: level.label, value, requiresVip: Boolean(tier), tier, sizeBytes: Number(level.size) || 0 }
           })
       })()
     : null
@@ -578,6 +659,8 @@ function QualityQuickSwitch({
       >
         <span className={`flex-1 truncate ${premium ? 'font-medium' : ''}`} style={entry.requiresVip ? { color: '#fbbf24' } : undefined}>
           {entry.label}
+          {/* 官方面板口径：档名后跟本曲该档实际文件大小（"（21.9M）"） */}
+          {(() => { const sizeText = formatQualitySize(entry.sizeBytes); return sizeText ? <span className="text-white/40">（{sizeText}）</span> : null })()}
         </span>
         {/* 官方客户端口径：绿钻档标「VIP」，超级会员档标「超级会员」（都配金皇冠）；
             当前账号已有该级别时不再重复提示 */}
@@ -665,6 +748,7 @@ export default function PlayerControls({
   playMode = 'sequential',
   onPlayModeChange,
   isPlaying,
+  playPending = false,
   currentTime,
   duration,
   live = false,
@@ -1298,7 +1382,7 @@ export default function PlayerControls({
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ duration: 0.22, delay: 0.25, ease: 'easeOut' }}
+            transition={{ duration: 0.22, delay: 0.18, ease: 'easeOut' }}
             className="flex items-center gap-2"
           >
             {songPlatform && qualityQuickSwitchEnabled && (
@@ -1414,7 +1498,9 @@ export default function PlayerControls({
                     paddingTop: tvCompact ? (isExpanded ? '2px' : '10px') : isExpanded ? '6px' : '12px',
                     paddingBottom: tvCompact ? (isExpanded ? '2px' : '10px') : isExpanded ? '6px' : '12px',
                   }}
-                  transition={{ duration: 0.35, delay: isExpanded ? 0 : 0.2, ease: [0.32, 0.72, 0, 1] }}
+                  // 展开：宽度立即起跑；收起：内容先撤（0.16s），宽度再收——收起时鼠标已离开，
+                  // 空壳停留只会显得"迟钝"（旧版 delay 0.2s 的 640px 空壳 + 0.35s 收缩 = 生硬主因）。
+                  transition={{ duration: isExpanded ? 0.4 : 0.28, delay: isExpanded ? 0 : 0.16, ease: [0.32, 0.72, 0, 1] }}
                   className="relative rounded-full backdrop-blur-3xl px-5"
                   style={{
                     background: playerTheme === 'dark'
@@ -1428,16 +1514,30 @@ export default function PlayerControls({
                   }}
                 >
                   {/* 引擎名已恢复悬浮在条上方（锚定外层常驻容器，白条/药丸两种状态都显示） */}
-                  {/* 两侧预留与药丸宽度同步动画（同曲线同延迟）：否则收起时 padding 瞬间清零、
-                      宽度还在 640→360 的动画中，进度内容会突然拉满整条（用户看到的"退出动画变形"） */}
-                  <div
-                    className={`flex items-center justify-center ${isExpanded ? 'pl-[8.25rem]' : ''}`}
-                    style={{ transition: `padding 0.35s ease ${isExpanded ? '0s' : '0.2s'}` }}
-                  >
+                  {/* 进度行退场策略（v2）：收起时内容**先**整体淡出（0.16s），淡出完成后 padding
+                      才随同一条 framer 时间线收零（0.28s 宽度收缩并行）——padding 变化发生在
+                      内容不可见期间，既无旧版的"padding 清零→内容拉满→宽度收"挤压窗口，
+                      也不会像 v1（恒定 pl）那样把收起态 360px 药丸撑成空壳（收起态没有左侧
+                      按钮集群，预留 132px 纯属浪费且溢出）。展开反向：padding 先到位（0s），
+                      内容 0.1s 后淡入——按钮落位后进度行才出现。padding 与 opacity 由同一
+                      framer animate 驱动（同曲线），不再两条系统打架。 */}
+                  <div className="relative overflow-hidden">
                     <motion.div
                       className="w-full"
-                      animate={{ scale: 1, opacity: isExpanded ? 1 : 0.7 }}
-                      transition={{ duration: 0.3, delay: isExpanded ? 0.15 : 0.15, ease: 'easeInOut' }}
+                      animate={{
+                        opacity: isExpanded ? 1 : 0,
+                        x: isExpanded ? 0 : -14,
+                        paddingLeft: isExpanded ? '8.25rem' : '0rem',
+                      }}
+                      // 展开：padding 立即到位（无延迟），内容 0.1s 后淡入；
+                      // 收起：内容立刻淡出（0.16s），padding 随后归零（0.28s，与宽度同程）
+                      transition={{
+                        duration: isExpanded ? 0.3 : 0.28,
+                        delay: isExpanded ? 0 : 0.16,
+                        ease: [0.32, 0.72, 0, 1],
+                        opacity: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
+                        x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
+                      }}
                     >
                       {/* TV 紧凑药丸（480px）并入右侧控件后行内固定宽度更大，滑轨下限相应收窄防溢出 */}
                       {renderProgressContent(tvCompact ? 'flex-1 min-w-[4rem]' : 'flex-1 min-w-[7rem]', tvCompact ? 'gap-1.5' : 'gap-3', tvCompact, true)}
@@ -1447,12 +1547,14 @@ export default function PlayerControls({
                   <AnimatePresence>
                     {isExpanded && (
                       <motion.div
-                        initial={{ opacity: 0, x: 150 }}
+                        initial={{ opacity: 0, x: 28 }}
                         animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: 150 }}
+                        // 退出：淡出 + 轻微左移（回到自身锚位方向），不再横穿整个药丸——
+                        // 旧版 exit x:150 会让按钮从 left-5 横掠过进度条上方（视觉一闪）。
+                        exit={{ opacity: 0, x: -18 }}
                         transition={{
-                          opacity: { duration: 0.22, delay: isExpanded ? 0.25 : 0, ease: 'easeOut' },
-                          x: { duration: 0.28, delay: isExpanded ? 0.25 : 0, ease: [0.32, 0.72, 0, 1] },
+                          opacity: { duration: isExpanded ? 0.24 : 0.14, delay: isExpanded ? 0.18 : 0, ease: 'easeOut' },
+                          x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.18 : 0, ease: [0.32, 0.72, 0, 1] },
                         }}
                         className={`absolute left-5 top-1/2 -translate-y-1/2 flex items-center ${tvCompact ? 'gap-1.5' : 'gap-2'}`}
                       >
@@ -1461,8 +1563,11 @@ export default function PlayerControls({
                           <SkipBack className={`w-4 h-4 ${playerTheme === 'dark' ? 'text-white' : 'text-black'}`} />
                         </motion.button>
                         <motion.button whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }} onClick={onPlayPause}
-                          className="p-2.5 rounded-full transition-colors" style={{ backgroundColor: accentColor }}>
-                          {isPlaying ? <Pause className="w-4 h-4" style={{ color: iconColor }} /> : <Play className="w-4 h-4 ml-0.5" style={{ color: iconColor }} />}
+                          className="p-2.5 rounded-full transition-colors" style={{ backgroundColor: accentColor }}
+                          aria-busy={playPending && !isPlaying ? true : undefined}>
+                          {playPending && !isPlaying
+                            ? <LoaderCircle className={`w-4 h-4 animate-spin`} style={{ color: iconColor }} />
+                            : isPlaying ? <Pause className="w-4 h-4" style={{ color: iconColor }} /> : <Play className="w-4 h-4 ml-0.5" style={{ color: iconColor }} />}
                         </motion.button>
                         <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={onNext} disabled={!onNext}
                           className={`p-2 rounded-full transition-colors disabled:opacity-30 ${playerTheme === 'dark' ? 'hover:bg-white/10' : 'hover:bg-black/10'}`}>
@@ -1639,9 +1744,11 @@ export default function PlayerControls({
             paddingTop: isExpanded ? '6px' : '12px',
             paddingBottom: isExpanded ? '6px' : '12px',
           }}
-          transition={{ 
-            duration: 0.35,
-            delay: isExpanded ? 0 : 0.2,
+          // 与沉浸模式药丸同一套时间轴（见 renderImmersiveLayout 内注释）：
+          // 展开=宽度先行，收起=内容先撤（0.16s）宽度再收（0.28s），不再空壳停留 0.2s。
+          transition={{
+            duration: isExpanded ? 0.4 : 0.28,
+            delay: isExpanded ? 0 : 0.16,
             ease: [0.32, 0.72, 0, 1]
           }}
           onMouseEnter={() => setIsHovered(true)}
@@ -1663,21 +1770,22 @@ export default function PlayerControls({
           {/* 引擎名已恢复悬浮在条上方（见本容器开头 AutomixEngineLabel） */}
           {/* 进度条区域：展开态左侧 pl 预留上一首/播放/下一首集群，右侧控件组并入行尾共享 gap，
               滑块弹性自适应；任何宽度下时间文字都不会再与两侧按钮相压。
-              预留与药丸宽度同步动画（同曲线同延迟），收起中不会出现进度内容拉满整条的中间态 */}
-          <div
-            className={`flex items-center justify-center ${isExpanded ? 'pl-[8.25rem]' : ''}`}
-            style={{ transition: `padding 0.35s ease ${isExpanded ? '0s' : '0.2s'}` }}
-          >
+              退场策略与沉浸模式一致（见 renderImmersiveLayout 内 v2 注释）：收起时内容先淡出，
+              padding 随同一条 framer 时间线归零（变化发生在内容不可见期间），无挤压无空壳。 */}
+          <div className="relative overflow-hidden">
             <motion.div
               className="w-full"
               animate={{
-                scale: 1,
-                opacity: isExpanded ? 1 : 0.7
+                opacity: isExpanded ? 1 : 0,
+                x: isExpanded ? 0 : -14,
+                paddingLeft: isExpanded ? '8.25rem' : '0rem',
               }}
-              transition={{ 
-                duration: 0.3,
-                delay: isExpanded ? 0.15 : 0.15,
-                ease: "easeInOut"
+              transition={{
+                duration: isExpanded ? 0.3 : 0.28,
+                delay: isExpanded ? 0 : 0.16,
+                ease: [0.32, 0.72, 0, 1],
+                opacity: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
+                x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.1 : 0, ease: 'easeOut' },
               }}
             >
               {renderProgressContent('flex-1 min-w-[7rem]', 'gap-3')}
@@ -1688,12 +1796,13 @@ export default function PlayerControls({
           <AnimatePresence>
             {isExpanded && (
               <motion.div
-                initial={{ opacity: 0, x: 150 }}
+                initial={{ opacity: 0, x: 28 }}
                 animate={{ opacity: 1, x: 0 }}
-                exit={{ opacity: 0, x: 150 }}
+                // 退出：淡出 + 轻微左移（同沉浸模式，不再横穿药丸）
+                exit={{ opacity: 0, x: -18 }}
                 transition={{
-                  opacity: { duration: 0.22, delay: isExpanded ? 0.25 : 0, ease: "easeOut" },
-                  x: { duration: 0.28, delay: isExpanded ? 0.25 : 0, ease: [0.32, 0.72, 0, 1] },
+                  opacity: { duration: isExpanded ? 0.24 : 0.14, delay: isExpanded ? 0.18 : 0, ease: "easeOut" },
+                  x: { duration: isExpanded ? 0.3 : 0.16, delay: isExpanded ? 0.18 : 0, ease: [0.32, 0.72, 0, 1] },
                 }}
                 className="absolute left-5 top-1/2 -translate-y-1/2 flex items-center gap-2"
               >
@@ -1717,8 +1826,11 @@ export default function PlayerControls({
                   style={{
                     backgroundColor: accentColor,
                   }}
+                  aria-busy={playPending && !isPlaying ? true : undefined}
                 >
-                  {isPlaying ? (
+                  {playPending && !isPlaying ? (
+                    <LoaderCircle className="w-4 h-4 animate-spin" style={{ color: iconColor }} />
+                  ) : isPlaying ? (
                     <Pause className="w-4 h-4" style={{ color: iconColor }} />
                   ) : (
                     <Play className="w-4 h-4 ml-0.5" style={{ color: iconColor }} />

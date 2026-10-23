@@ -435,8 +435,24 @@ export interface ElectronAPI {
   openQQLoginWindow: () => Promise<{ success: boolean; cookie?: string; error?: string }>
   /** QQ 音乐扫码登录（应用内二维码；channel: 'qq'=手机QQ扫 / 'wx'=微信扫 / 'qqmusic'=QQ音乐App扫） */
   qqQrLoginStart: (channel?: 'qq' | 'wx' | 'qqmusic') => Promise<{ success: boolean; image?: string; error?: string }>
-  qqQrLoginPoll: () => Promise<{ status: 'waiting' | 'scanned' | 'expired' | 'success' | 'error' | 'cancelled'; cookie?: string; message?: string }>
+  qqQrLoginPoll: () => Promise<{ status: 'waiting' | 'scanned' | 'expired' | 'success' | 'error' | 'cancelled'; cookie?: string; message?: string; failureHint?: { case: string; title: string; guidance: string; retryable: boolean; retryAfterMs: number | null; upstreamCode: number | null; globalCode: number | null; phase: string; message: string } }>
   qqQrLoginCancel: () => Promise<{ success: boolean }>
+  /** 登录诊断（平台可用性增强）：失败后主动自检（分层网络探测 + verdict + 清单） */
+  runLoginSelfCheck: (providerId: 'qq' | 'netease' | 'kugou' | 'spotify' | 'soda') => Promise<{
+    ok: boolean
+    error?: string
+    verdict: { kind: string; detail?: string | null; proxyNote?: string | null }
+    checklist: Array<{ id: string; state: 'ok' | 'fail' | 'warn' | 'skip'; detail: string | null }>
+    durationMs?: number
+  }>
+  /** 登录诊断报告（脱敏文本，不含账号/cookie/token），复制进 issue/剪贴板用 */
+  buildLoginDiagnosticsReport: (providerId: 'qq' | 'netease' | 'kugou' | 'spotify' | 'soda', failureHint: unknown) => Promise<string | null>
+  /** Spotify 直播（librespot 通道）：发播放 URL（waveforge-spotify://，密钥留主进程）；不可用返回 ok:false */
+  spotifyAudioIssue: (trackId: string, quality?: 'standard' | 'high' | 'lossless') => Promise<{ ok: boolean; url?: string; mimeType?: string; total?: number; error?: string }>
+  /** 登录成功后预热 librespot 会话（免费号/缺 prebuilt 静默失败） */
+  spotifyAudioPrime: () => Promise<{ ok: boolean }>
+  /** 登出后作废 librespot 会话与已发 key */
+  spotifyAudioInvalidate: () => Promise<{ ok: boolean }>
   openQQSkillKeyWindow: () => Promise<{ success: boolean; apiKey?: string; error?: string }>
   /** Apple Music 网页一键登录：内置窗口登录 Apple ID，自动抓取 media-user-token 与 Developer Token */
   appleLogin: () => Promise<{ success: boolean; mediaUserToken?: string; developerToken?: string; name?: string; email?: string; realName?: string; avatar?: string; billingAddress?: string; country?: string; paymentType?: string; accountBalance?: string; birthday?: string; language?: string; twoFactor?: string; trustedDevices?: string; passwordUpdated?: string; notificationEmail?: string; signInWithApple?: string; devices?: Array<{ name: string; model: string; icon?: string }>; icons?: Record<string, string>; error?: string }>
@@ -526,6 +542,14 @@ export interface ElectronAPI {
     readClipboard?: () => Promise<{ success: true; text: string } | { success: false; error: string }>
     redeem: (code: string) => Promise<DeviceRedeemResult>
     reset: () => Promise<{ success: boolean; removed?: { registry: boolean; file: boolean }; error?: string }>
+  }
+  developerAuth: {
+    verify: (payload: { token?: string }) => Promise<{ success: boolean; ok?: boolean; signer?: string; collaboratorCheck?: string; error?: string; headSha?: string; tokenAccepted?: boolean }>
+    state: () => Promise<{ success: boolean; ok?: boolean; fromCache?: boolean; headSha?: string; signer?: string; reason?: string }>
+    logout: () => Promise<{ success: boolean }>
+  }
+  licenseStudio: {
+    issue: (payload: { deviceId: string; tier: 'limited' | 'test' | 'universal'; feature?: string; label?: string; expiresDays?: number; note?: string; githubToken?: string }) => Promise<{ success: boolean; code?: string; tier?: string; feature?: string; deviceId?: string; issuedBy?: string; error?: string }>
   }
   render: {
     transition: (plan: TransitionPlan, sourceAudioPath: string, targetAudioPath: string) => Promise<{ 

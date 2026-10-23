@@ -379,8 +379,11 @@ export class TransitionRenderer {
       sourceUrl,
       plan.sourceTrackKey,
       // 时长闸：空 vkey/试听片段返回"合法容器但只有半首"的截断文件，渲染前拦下
-      //（半首产物进过渡 → 切歌瞬间跳变/静音）。计划裁剪点 +10s 余量作期望时长。
-      { expectedDuration: plan.sourceEndTime + 10 }
+      //（半首产物进过渡 → 切歌瞬间跳变/静音）。期望时长 = max(全曲时长, 渲染需要的最晚点)。
+      // ⚠️ 不再 "+10s 余量"：QQ 元数据时长普遍比实际文件虚高 ~10s（真机 2026-10-19 日志
+      // 4/4 首 actual = expected-10），余量会让 |actual-expected| 超容差把**完整文件**判成
+      // 截断 → 智能渲染永远失败（"过渡直接跳过/药丸不显示"）。截断判定交给闸的单向下限。
+      { expectedDuration: Math.max(plan.sourceTrackDuration ?? 0, plan.sourceEndTime) }
     )
     // Bail out as early as possible once superseded: the downloaded temp file
     // is managed by the main-process download cache (cleanupOldFiles), and we
@@ -393,7 +396,7 @@ export class TransitionRenderer {
     const targetAudioPath = await audioDownload.prepare(
       targetUrl,
       plan.targetTrackKey,
-      { expectedDuration: plan.targetEndTime + 10 }
+      { expectedDuration: Math.max(plan.targetTrackDuration ?? 0, plan.targetEndTime) }
     )
     if (isStale?.()) throw new Error('Transition render superseded')
 

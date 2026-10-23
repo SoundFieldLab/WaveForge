@@ -36,6 +36,12 @@ export interface KugouMinimalSuiteProps {
   onOpenPlaylist?: (playlist: KugouMinimalPlaylist) => void
   onAddToFavorites?: (song: Song) => void
   onRemoveFromFavorites?: (song: Song) => boolean | Promise<boolean>
+  /**
+   * 入口网格渲染位置（2026-10-20 迁移）：'sidebar'（默认）= 原样渲染在个人信息栏——
+   * 实测酷狗下这五张入口卡会把退出登录等账号操作挤出可视区，故 HomeView 已改传
+   * 'panel'：入口网格挪到「我的歌单」面板尾部，本组件在 sidebar 下只保留浮层。
+   */
+  entriesPlacement?: 'sidebar' | 'panel'
 }
 
 interface EntryItem {
@@ -61,6 +67,7 @@ export function KugouMinimalSuite({
   onOpenPlaylist,
   onAddToFavorites,
   onRemoveFromFavorites,
+  entriesPlacement = 'sidebar',
 }: KugouMinimalSuiteProps) {
   const dark = theme === 'dark'
 
@@ -112,40 +119,44 @@ export function KugouMinimalSuite({
 
   return (
     <>
-      <div className="px-6 pt-5">
-        <div className={`mb-3 flex items-center gap-2 text-sm font-semibold ${dark ? 'text-white/80' : 'text-black/75'}`}>
-          <BookAudio className="h-4 w-4" style={{ color: '#FF7A00' }} /> 酷狗专区
+      {/* 入口网格：sidebar（旧位置，个人信息栏）或 panel（歌单面板尾部）按 placements 渲染。
+          默认 sidebar 仅为兼容；HomeView 酷狗分支已改传 'panel'（见 entriesPlacement 注释）。 */}
+      {entriesPlacement === 'sidebar' && (
+        <div className="px-6 pt-5">
+          <div className={`mb-3 flex items-center gap-2 text-sm font-semibold ${dark ? 'text-white/80' : 'text-black/75'}`}>
+            <BookAudio className="h-4 w-4" style={{ color: '#FF7A00' }} /> 酷狗专区
+          </div>
+          <div className="grid grid-cols-2 gap-2.5">
+            {entries.map(entry => {
+              const Icon = entry.icon
+              return (
+                <motion.button
+                  key={entry.key}
+                  type="button"
+                  whileHover={{ scale: 1.02, y: -1 }}
+                  whileTap={{ scale: 0.98 }}
+                  onClick={() => { if (!loggedIn && entry.key !== 'longaudio' && entry.key !== 'longaudio-library') { onLoginClick?.(); return } entry.onSelect() }}
+                  className="home-recent-card relative overflow-hidden rounded-2xl px-3 py-2.5 text-left"
+                  title={entry.hint}
+                >
+                  <div
+                    aria-hidden="true"
+                    className="home-recent-card-glass absolute inset-0 pointer-events-none rounded-2xl"
+                  />
+                  <span className="relative z-10 flex items-center gap-2">
+                    <Icon className="h-4 w-4 shrink-0" style={{ color: '#FF7A00' }} />
+                    <span className={`truncate text-sm font-medium ${dark ? 'text-white' : 'text-black/85'}`}>{entry.label}</span>
+                  </span>
+                  <span className={`relative z-10 mt-1 block truncate text-[11px] ${dark ? 'text-white/45' : 'text-black/45'}`}>{entry.hint}</span>
+                </motion.button>
+              )
+            })}
+          </div>
+          <p className={`mt-2 truncate text-[10px] ${dark ? 'text-white/35' : 'text-black/40'}`} title="听书走独立播放通道；最近播放与收藏在下面「个人中心」里查看">
+            听书为独立播放通道；最近播放与收藏在「个人中心」。
+          </p>
         </div>
-        <div className="grid grid-cols-2 gap-2.5">
-          {entries.map(entry => {
-            const Icon = entry.icon
-            return (
-              <motion.button
-                key={entry.key}
-                type="button"
-                whileHover={{ scale: 1.02, y: -1 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={() => { if (!loggedIn && entry.key !== 'longaudio' && entry.key !== 'longaudio-library') { onLoginClick?.(); return } entry.onSelect() }}
-                className="home-recent-card relative overflow-hidden rounded-2xl px-3 py-2.5 text-left"
-                title={entry.hint}
-              >
-                <div
-                  aria-hidden="true"
-                  className="home-recent-card-glass absolute inset-0 pointer-events-none rounded-2xl"
-                />
-                <span className="relative z-10 flex items-center gap-2">
-                  <Icon className="h-4 w-4 shrink-0" style={{ color: '#FF7A00' }} />
-                  <span className={`truncate text-sm font-medium ${dark ? 'text-white' : 'text-black/85'}`}>{entry.label}</span>
-                </span>
-                <span className={`relative z-10 mt-1 block truncate text-[11px] ${dark ? 'text-white/45' : 'text-black/45'}`}>{entry.hint}</span>
-              </motion.button>
-            )
-          })}
-        </div>
-        <p className={`mt-2 truncate text-[10px] ${dark ? 'text-white/35' : 'text-black/40'}`} title="听书走独立播放通道；最近播放与收藏在下面「个人中心」里查看">
-          听书为独立播放通道；最近播放与收藏在「个人中心」。
-        </p>
-      </div>
+      )}
 
       {/* 个人中心浮层：只在打开时挂载；听书独立播放器复用 kugouLongaudio 的 Overlay */}
       <Suspense fallback={null}>
@@ -170,6 +181,78 @@ export function KugouMinimalSuite({
         <LazyLongaudioOverlay />
       </Suspense>
     </>
+  )
+}
+
+/**
+ * 酷狗专区入口网格（独立导出）：渲染在「我的歌单」面板尾部（2026-10-20 从个人信息栏
+ * 迁出——五张入口卡在个人信息栏会把退出登录等账号操作挤出可视区）。
+ * 与 Suite 的浮层（个人中心/听书 Overlay）解耦：浮层由 Suite 挂载（portal 语义），
+ * 这里只放入口卡片。panel 版用单列紧凑行卡片，适配歌单面板宽度。
+ */
+export function KugouMinimalEntries({
+  loggedIn,
+  theme,
+  openTab,
+  onOpenTab,
+  onLoginClick,
+}: {
+  loggedIn: boolean
+  theme: 'light' | 'dark'
+  openTab: KugouMinimalTab | null
+  onOpenTab: (tab: KugouMinimalTab | null) => void
+  onLoginClick?: () => void
+}) {
+  const dark = theme === 'dark'
+  const openLongaudio = useCallback((view: 'enter' | 'library') => {
+    void import('../kugouLongaudio/store').then(({ kugouLongaudioStore }) => {
+      if (view === 'library') kugouLongaudioStore.openLibrary()
+      else kugouLongaudioStore.enter()
+    })
+  }, [])
+
+  const entries: EntryItem[] = [
+    { key: 'longaudio', label: '听书', hint: '有声小说 / 评书', icon: BookAudio, onSelect: () => onOpenTab('longaudio') },
+    { key: 'longaudio-library', label: '我的听书', hint: '最近收听（本机）', icon: History, onSelect: () => openLongaudio('library') },
+    { key: 'liked', label: '我喜欢', hint: '酷狗红心歌曲', icon: Heart, onSelect: () => onOpenTab('liked') },
+    { key: 'playlists', label: '收藏歌单', hint: '收藏的他人歌单', icon: ListMusic, onSelect: () => onOpenTab('playlists') },
+    { key: 'purchased', label: '已购', hint: '已购单曲与数字专辑', icon: Disc3, onSelect: () => onOpenTab('purchased') },
+  ]
+
+  return (
+    <div className="px-4 pb-5 pt-2 border-t border-white/5">
+      <div className={`mb-2.5 mt-3 flex items-center gap-2 text-sm font-semibold ${dark ? 'text-white/80' : 'text-black/75'}`}>
+        <BookAudio className="h-4 w-4" style={{ color: '#FF7A00' }} /> 酷狗专区
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {entries.map(entry => {
+          const Icon = entry.icon
+          const needsLogin = !loggedIn && entry.key !== 'longaudio' && entry.key !== 'longaudio-library'
+          return (
+            <motion.button
+              key={entry.key}
+              type="button"
+              whileHover={{ scale: 1.01, x: 2 }}
+              whileTap={{ scale: 0.99 }}
+              onClick={() => { if (needsLogin) { onLoginClick?.(); return } entry.onSelect() }}
+              className={`home-recent-card relative overflow-hidden rounded-xl px-3 py-2 text-left ${needsLogin ? 'opacity-60' : ''}`}
+              title={needsLogin ? '登录酷狗后可用' : entry.hint}
+            >
+              <div
+                aria-hidden="true"
+                className="home-recent-card-glass absolute inset-0 pointer-events-none rounded-xl"
+              />
+              <span className="relative z-10 flex items-center gap-2.5">
+                <Icon className="h-4 w-4 shrink-0" style={{ color: '#FF7A00' }} />
+                <span className={`truncate text-sm font-medium ${dark ? 'text-white' : 'text-black/85'}`}>{entry.label}</span>
+                <span className={`ml-auto shrink-0 truncate text-[11px] ${dark ? 'text-white/40' : 'text-black/40'}`}>{entry.hint}</span>
+                {needsLogin && <span className={`shrink-0 text-[10px] ${dark ? 'text-white/35' : 'text-black/35'}`}>需登录</span>}
+              </span>
+            </motion.button>
+          )
+        })}
+      </div>
+    </div>
   )
 }
 

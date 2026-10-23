@@ -83,53 +83,31 @@ const getUserStorageKey = (p: MusicPlatform): string => {
 const isThirdPartyPlatform = (p: MusicPlatform): boolean =>
   p === 'spotify' || p === 'kugou' || p === 'soda'
 
-/** Spotify 官方 API：收藏歌曲（放入音乐库） */
+/** Spotify：收藏歌曲（partner 桥写操作优先，Web API 兑底） */
 async function spotifySaveTrack(song: Song): Promise<boolean> {
-  const token = getPlatformCookie('spotify')
-  if (!token || !song.mid) return false
-  try {
-    const resp = await fetch(`https://api.spotify.com/v1/me/tracks?ids=${encodeURIComponent(song.mid)}`, {
-      method: 'PUT',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    return resp.ok
-  } catch (error) {
-    console.warn('[SongContextMenu] Spotify 收藏失败:', error)
-    return false
-  }
+  if (!song.mid) return false
+  const { spotifyPartnerSetLibrarySaved } = await import('../services/spotifyPartnerClient')
+  if (await spotifyPartnerSetLibrarySaved(`spotify:track:${song.mid}`, true).catch(() => false)) return true
+  const { likeSpotifyTracks } = await import('../services/spotifyService')
+  return likeSpotifyTracks([String(song.mid)], true)
 }
 
-/** Spotify 官方 API：取消收藏歌曲 */
+/** Spotify：取消收藏歌曲（partner 桥写操作优先，Web API 兑底） */
 async function spotifyRemoveTrack(song: Song): Promise<boolean> {
-  const token = getPlatformCookie('spotify')
-  if (!token || !song.mid) return false
-  try {
-    const resp = await fetch(`https://api.spotify.com/v1/me/tracks?ids=${encodeURIComponent(song.mid)}`, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    return resp.ok
-  } catch (error) {
-    console.warn('[SongContextMenu] Spotify 取消收藏失败:', error)
-    return false
-  }
+  if (!song.mid) return false
+  const { spotifyPartnerSetLibrarySaved } = await import('../services/spotifyPartnerClient')
+  if (await spotifyPartnerSetLibrarySaved(`spotify:track:${song.mid}`, false).catch(() => false)) return true
+  const { likeSpotifyTracks } = await import('../services/spotifyService')
+  return likeSpotifyTracks([String(song.mid)], false)
 }
 
-/** Spotify 官方 API：添加歌曲到歌单 */
+/** Spotify：添加歌曲到歌单（partner 桥写操作优先，Web API 兑底） */
 async function spotifyAddTrackToPlaylist(song: Song, playlistId: string): Promise<boolean> {
-  const token = getPlatformCookie('spotify')
-  if (!token || !song.mid) return false
-  try {
-    const resp = await fetch(`https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uris: [`spotify:track:${song.mid}`] }),
-    })
-    return resp.ok
-  } catch (error) {
-    console.warn('[SongContextMenu] Spotify 添加到歌单失败:', error)
-    return false
-  }
+  if (!song.mid) return false
+  const { spotifyPartnerEditPlaylist } = await import('../services/spotifyPartnerClient')
+  if (await spotifyPartnerEditPlaylist(String(playlistId), 'add', [String(song.mid)]).catch(() => false)) return true
+  const { addSpotifyTrackToPlaylist } = await import('../services/spotifyService')
+  return addSpotifyTrackToPlaylist(String(song.mid), String(playlistId))
 }
 
 export default function SongContextMenu({
@@ -461,13 +439,20 @@ export default function SongContextMenu({
     if (p === 'kugou') {
       // 酷狗：喜欢=概念版加入默认「我喜欢」歌单；取消=按 fileid 从「我喜欢」移除
       //（kugouService 会先查 hash→fileid 映射）。加歌=/v6/add_song。
+      // 上游 add_song 拒绝空歌名：歌名/歌手/mixSongId 必须随请求带上（与 likeSong 修复同款，2026-10-22）。
       const kugouHash = String(song.mid || '')
       if (action === 'playlist' && playlistId) {
-        void addKugouSongToPlaylist(playlistId, { hash: kugouHash }).then(ok => {
+        void addKugouSongToPlaylist(playlistId, { hash: kugouHash, name: song.name, artists: song.artists }).then(ok => {
           showMenuToast(ok ? '已添加到酷狗歌单' : '添加到酷狗歌单失败', ok ? 'success' : 'error')
         })
       } else if (action === 'like') {
-        void likeKugouSong({ hash: kugouHash, name: song.name }, true).then(ok => {
+        void likeKugouSong({
+          hash: kugouHash,
+          name: song.name,
+          artists: song.artists,
+          mixSongId: (song as { kugouMixSongId?: number }).kugouMixSongId,
+          album: song.album?.mid ? { id: song.album.mid } : undefined,
+        }, true).then(ok => {
           if (ok) {
             setFavoriteStatus(true)
             applyFavoriteMutation({ platform: 'kugou', type: 'like', songId: song.id, songMid: song.mid })
@@ -475,7 +460,12 @@ export default function SongContextMenu({
           showMenuToast(ok ? '已加入酷狗喜欢' : '喜欢失败，请检查登录状态', ok ? 'success' : 'error')
         })
       } else {
-        void likeKugouSong({ hash: kugouHash, name: song.name }, false).then(ok => {
+        void likeKugouSong({
+          hash: kugouHash,
+          name: song.name,
+          artists: song.artists,
+          mixSongId: (song as { kugouMixSongId?: number }).kugouMixSongId,
+        }, false).then(ok => {
           if (ok) {
             setFavoriteStatus(false)
             applyFavoriteMutation({ platform: 'kugou', type: 'unlike', songId: song.id, songMid: song.mid })

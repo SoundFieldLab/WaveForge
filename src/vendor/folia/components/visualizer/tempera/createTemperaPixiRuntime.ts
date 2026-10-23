@@ -168,7 +168,9 @@ export class TemperaPixiRuntime {
     ) { }
 
     static async create(options: TemperaRuntimeOptions) {
-        const pixi = await import('pixi.js');
+        // 统一经 loadPixi：先装 pixi.js/unsafe-eval polyfill（CSP 锁死 script-src 'self'），并抬高精度
+        const { loadPixi } = await import('../loadPixi');
+        const pixi = await loadPixi();
         const app = new pixi.Application();
         const width = Math.max(options.host.clientWidth, 320);
         const height = Math.max(options.host.clientHeight, 240);

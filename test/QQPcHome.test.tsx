@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 // QQ 传统模式首页冒烟：Hero 行必须与官方客户端一致——
-// 主推大卡后接**服务器顺序前 4 张 style 202 卡**（每日30首 / 刷歌模式 / 百万收藏 / 新歌推荐），
+// 主推大卡后接**服务器顺序前 4 张 style 202 卡**（每日30首 / AI伴听 / 百万收藏 / 新歌推荐），
 // 不能把 202/900/991 的刷歌卡漏掉、也不能让第 5 张「歌手漫游」挤进来。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
@@ -68,20 +68,20 @@ afterEach(() => {
 })
 
 describe('QQ 首页 Hero 行', () => {
-  it('彩色卡 = 服务器顺序前 4 张 202 卡（含刷歌模式，不含第 5 张歌手漫游）', async () => {
+  it('彩色卡 = 服务器顺序前 4 张 202 卡（含AI伴听，不含第 5 张歌手漫游）', async () => {
     render(<QQPcHome payload={null} account={{ loggedIn: true, username: '测试', userId: '1' }} actions={actions} />)
     // 前三张与官方一致
     expect(await screen.findByText('Daily 30')).toBeTruthy()
-    expect(screen.getAllByText('刷歌模式').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('AI伴听').length).toBeGreaterThan(0)
     expect(screen.getAllByText('百万收藏').length).toBeGreaterThan(0)
     expect(screen.getAllByText('新歌推荐').length).toBeGreaterThan(0)
     // 第 5 张不进这一行
     expect(screen.queryByText('歌手漫游')).toBeNull()
   })
 
-  it('刷歌模式卡点击走雷达（GetRadarSong）并起播', async () => {
+  it('AI伴听卡点击走雷达（GetRadarSong）并起播', async () => {
     render(<QQPcHome payload={null} account={{ loggedIn: true, username: '测试', userId: '1' }} actions={actions} />)
-    const radarCard = (await screen.findAllByText('刷歌模式'))[0].closest('button')
+    const radarCard = (await screen.findAllByText('AI伴听'))[0].closest('button')
     expect(radarCard).toBeTruthy()
     fireEvent.click(radarCard as HTMLButtonElement)
     await waitFor(() => expect(actions.onPlaySongs).toHaveBeenCalled())
@@ -108,7 +108,7 @@ describe('QQ 首页首屏加载体验', () => {
     vi.mocked(fetchQQExploreBootstrap).mockImplementationOnce(() => new Promise(() => {}) as never)
     render(<QQPcHome payload={null} account={{ loggedIn: true, username: '测试', userId: '1' }} actions={actions} />)
     expect(screen.getByText('Daily 30')).toBeTruthy()
-    expect(screen.getAllByText('刷歌模式').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('AI伴听').length).toBeGreaterThan(0)
     expect(screen.queryByLabelText('正在加载推荐')).toBeNull()
   })
 

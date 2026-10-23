@@ -1,7 +1,7 @@
 {
   "name": "waveforge",
   "productName": "WaveForge 澜音工坊",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "沉浸式音乐播放器，支持网易云和QQ音乐",
   "author": "WaveForge",
   "type": "module",
@@ -45,7 +45,7 @@
     "benchmark:mv": "node scripts/bilibili-mv-benchmark.mjs",
     "benchmark:mv-franchise": "node scripts/mv-franchise-impact.mjs",
     "audit:mv-franchise": "node scripts/mv-franchise-audit.mjs",
-    "test:desktop": "node --test test/apple-url-policy.test.cjs test/audio-download-security.test.cjs test/audio-download-policy.test.cjs test/automixHudHoverAndCountdown.test.cjs test/backgroundThrottling.test.cjs test/canvasDprAndResize.test.cjs test/dev-runtime-bootstrap.test.cjs test/dglab-relay-lifecycle.test.cjs test/highRefreshBaseline.test.cjs test/local-python-service-lifecycle.test.cjs test/multiDisplayWindows.test.cjs test/performanceTierConfirm.test.cjs test/playbackUrlDiagnostics.test.cjs test/remote-server-security.test.cjs test/resonanceHub.test.cjs test/taskbar-widget-polling.test.cjs test/trusted-ipc.test.cjs test/update-manager-security.test.cjs test/update-payload-contract.test.cjs test/user-data-profile.test.cjs test/vmp-status.test.cjs test/vmp-status-wiring.test.cjs test/windowStateRecovery.test.cjs",
+    "test:desktop": "node --test test/apple-url-policy.test.cjs test/audio-download-security.test.cjs test/audio-download-policy.test.cjs test/automixHudHoverAndCountdown.test.cjs test/backgroundThrottling.test.cjs test/canvasDprAndResize.test.cjs test/dev-runtime-bootstrap.test.cjs test/dglab-relay-lifecycle.test.cjs test/highRefreshBaseline.test.cjs test/local-python-service-lifecycle.test.cjs test/multiDisplayWindows.test.cjs test/performanceTierConfirm.test.cjs test/playbackUrlDiagnostics.test.cjs test/remote-server-security.test.cjs test/resonanceHub.test.cjs test/taskbar-widget-polling.test.cjs test/trusted-ipc.test.cjs test/developer-auth.test.cjs test/update-manager-security.test.cjs test/update-payload-contract.test.cjs test/user-data-profile.test.cjs test/vmp-status.test.cjs test/vmp-status-wiring.test.cjs test/windowStateRecovery.test.cjs",
     "test:stems:node": "node test/audio-download-security.test.cjs && node test/ai-model-manager.test.cjs && node test/stem-model-manager.test.cjs && node test/stem-runtime.test.cjs && node test/track-stem-runtime.test.cjs",
     "test:stems:python": "node scripts/run-stem-python-tests.cjs",
     "lint": "tsc --noEmit",
@@ -76,6 +76,7 @@
       "dist/**/*",
       "server/**/*",
       "shared/**/*",
+      "developers/**/*",
       "python-beat-service/**/*",
       "python-apple-bridge/**/*",
       "!python-beat-service/packages/**/*",
@@ -129,6 +130,13 @@
           "final0.ckpt",
           "model.json"
         ]
+      },
+      {
+        "from": "resources/license-studio",
+        "to": "license-studio",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "asar": true,
@@ -138,7 +146,8 @@
       "desktop/workers/qq_automix_lab/**/*",
       "server/**/*.py",
       "python-beat-service/**/*.py",
-      "python-apple-bridge/**/*.py"
+      "python-apple-bridge/**/*.py",
+      "node_modules/@lox-audioserver/node-librespot/**/*"
     ],
     "win": {
       "icon": "build/icon.ico",
@@ -215,7 +224,7 @@
     "@types/react-dom": "^19.0.1",
     "@types/three": "^0.184.1",
     "@vitejs/plugin-react": "^5.2.0",
-    "electron": "github:castlabs/electron-releases#v42.8.0+wvcus",
+    "electron": "github:castlabs/electron-releases#v44.5.1+wvcus",
     "electron-builder": "^26.15.3",
     "esbuild": "^0.25.12",
     "heic-decode": "^2.1.0",
@@ -242,5 +251,8 @@
       },
       "useragent": "npm:useragent-ng@2.4.5"
     }
+  },
+  "optionalDependencies": {
+    "@lox-audioserver/node-librespot": "^0.5.1"
   }
 }

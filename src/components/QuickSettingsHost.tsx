@@ -19,7 +19,21 @@ import { closeQuickSettings, useQuickSettingsState } from '../services/quickSett
  * 预览用的播放上下文（当前曲目 / 歌词 / 播放时间源）由 App 层以 prop 下发：
  * 宿主挂在 App 根节点，拿不到播放页的上下文，而这些信息只在 App 层有。
  */
-export default function QuickSettingsHost({ playback }: { playback?: QuickSettingsPlaybackContext | null }) {
+export default function QuickSettingsHost({
+  playback,
+  foliaStyle,
+  foliaTuning,
+  onFoliaTuningCommit,
+  onFoliaTuningReset,
+  hasFoliaTuningOverride,
+}: {
+  playback?: QuickSettingsPlaybackContext | null
+  foliaStyle?: string
+  foliaTuning?: Record<string, unknown>
+  onFoliaTuningCommit?: (next: Record<string, unknown>) => void
+  onFoliaTuningReset?: () => void
+  hasFoliaTuningOverride?: boolean
+}) {
   const { isOpen, seq, section, playerTheme, isPureMusic } = useQuickSettingsState()
 
   if (typeof document === 'undefined') return null
@@ -34,6 +48,11 @@ export default function QuickSettingsHost({ playback }: { playback?: QuickSettin
           isPureMusic={isPureMusic}
           initialSection={section}
           playback={playback}
+          foliaStyle={foliaStyle}
+          foliaTuning={foliaTuning}
+          onFoliaTuningCommit={onFoliaTuningCommit}
+          onFoliaTuningReset={onFoliaTuningReset}
+          hasFoliaTuningOverride={hasFoliaTuningOverride}
           onClose={closeQuickSettings}
         />
       )}

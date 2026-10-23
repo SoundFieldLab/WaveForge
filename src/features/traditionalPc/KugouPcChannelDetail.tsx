@@ -281,23 +281,28 @@ function KugouPcChannelDetail({ ctx, ipId, onBack, onOpenChannel }: KugouPcChann
         </div>
       ) : null}
 
-      {/* 视频页签：官方同款卡片**仅展示**。酷狗频道视频（video_id）没有可用的播放链路——
-          全局 MV 播放器只支持 netease/qq，传对象给 onOpenMv 会拼出非法请求（点开即「加载 MV
-          失败」），外链目标站也未提供。按验收标准「没有数据源的能力不留可点入口」，
-          等接入酷狗视频播放链路后再恢复点击。 */}
+      {/* 视频页签：官方同款卡片。带 mvHash（按视频名反查，见网关）的视频可点击用全局 MV
+          播放器（m3ws 逆向通道）直接播放；反查失败的视频仅展示，不留点击死口。 */}
       {tab === 'videos' ? (
         <div className="grid grid-cols-2 gap-4 pt-5 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {videos.map(video => (
-            <div
-              key={video.id}
-              className="group min-w-0 text-left"
-              title={video.name}
-            >
-              <PcCover src={video.coverUrl} alt={video.name} className="aspect-video w-full transition group-hover:-translate-y-0.5" rounded="rounded-lg" />
-              <p className={`mt-2 line-clamp-2 text-[13px] ${theme.text}`}>{video.name}</p>
-              <p className={`mt-0.5 text-[11px] ${theme.faint}`}>{video.singer}{video.duration ? ` · ${kugouDuration(video.duration)}` : ''}</p>
-            </div>
-          ))}
+          {videos.map(video => {
+            const clickable = Boolean(video.mvHash)
+            const Wrapper = clickable ? 'button' : 'div'
+            return (
+              <Wrapper
+                key={video.id}
+                {...(clickable ? {
+                  type: 'button' as const,
+                  onClick: () => ctx.actions.onOpenMv?.(video.mvHash, 'kugou'),
+                  className: 'group min-w-0 cursor-pointer text-left',
+                } : { className: 'group min-w-0 text-left', title: video.name })}
+              >
+                <PcCover src={video.coverUrl} alt={video.name} className="aspect-video w-full transition group-hover:-translate-y-0.5" rounded="rounded-lg" />
+                <p className={`mt-2 line-clamp-2 text-[13px] ${theme.text}`}>{video.name}</p>
+                <p className={`mt-0.5 text-[11px] ${theme.faint}`}>{video.singer}{video.duration ? ` · ${kugouDuration(video.duration)}` : ''}</p>
+              </Wrapper>
+            )
+          })}
           {videos.length === 0 ? <p className={`col-span-full py-10 text-center text-[12px] ${theme.faint}`}>加载中…</p> : null}
         </div>
       ) : null}

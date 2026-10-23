@@ -16,6 +16,8 @@ import { ensureFoliaI18n } from '../vendor/folia/i18n'
 import { buildFoliaTheme } from './foliaTunings'
 import VisualizerRenderer from '../vendor/folia/components/visualizer/VisualizerRenderer'
 import { hasVisualizerMode, DEFAULT_VISUALIZER_MODE } from '../vendor/folia/components/visualizer/registry'
+import { SMART_BEAT_SETTINGS_EVENT, readSmartBeatSettings } from '../vendor/folia/components/visualizer/smartBeatSettings'
+import { SMART_BEAT_EFFECT_IDS } from '../vendor/folia/components/visualizer/sonnet/smartBeat'
 import { DEFAULT_TEMPERA_TUNING, DEFAULT_SONNET_TUNING, type Line, type LyricAlternateText as FoliaAlternateText, type LyricBackgroundVocal as FoliaBackgroundVocal, type Theme, type Word, type VisualizerMode } from '../vendor/folia/types'
 import type { VisualizerBackgroundConfig } from '../vendor/folia/components/visualizer/backgrounds/definition'
 import type { VisualizerTuningBundle } from '../vendor/folia/components/visualizer/tuningRegistry'
@@ -160,6 +162,45 @@ export function FoliaLyricsPage({
 }: FoliaLyricsPageProps) {
   const mode: VisualizerMode = hasVisualizerMode(foliaStyle) ? foliaStyle : DEFAULT_VISUALIZER_MODE
   const perfMode = usePerfMode()
+
+  // ── 智能动感模式（Smart Beat）：设置读取 + 拍脉冲采样 ──
+  // 设置存 localStorage（visualizer_smart_beat），面板/命令面板改动经事件通知到这里；
+  // 拍脉冲来自 analyzerStore 快照的 beat/accent（onset 检测），renderFrame 每帧经
+  // smartBeatSample 读取——不走 MotionValue（拍事件是离散的，值通道会丢拍）。
+  const [smartBeatSettings, setSmartBeatSettings] = useState(() => readSmartBeatSettings({
+    enabled: true,
+    effects: {
+      [SMART_BEAT_EFFECT_IDS.beatZoom]: { on: true, strength: 1 },
+      [SMART_BEAT_EFFECT_IDS.downbeatZoom]: { on: true, strength: 1 },
+      [SMART_BEAT_EFFECT_IDS.beatRotation]: { on: true, strength: 1 },
+      [SMART_BEAT_EFFECT_IDS.tear]: { on: true, strength: 1 },
+      [SMART_BEAT_EFFECT_IDS.flare]: { on: true, strength: 1 },
+      [SMART_BEAT_EFFECT_IDS.iconPop]: { on: true, strength: 1 },
+    },
+  }))
+  useEffect(() => {
+    const reload = () => setSmartBeatSettings(readSmartBeatSettings({
+      enabled: true,
+      effects: {
+        [SMART_BEAT_EFFECT_IDS.beatZoom]: { on: true, strength: 1 },
+        [SMART_BEAT_EFFECT_IDS.downbeatZoom]: { on: true, strength: 1 },
+        [SMART_BEAT_EFFECT_IDS.beatRotation]: { on: true, strength: 1 },
+        [SMART_BEAT_EFFECT_IDS.tear]: { on: true, strength: 1 },
+        [SMART_BEAT_EFFECT_IDS.flare]: { on: true, strength: 1 },
+        [SMART_BEAT_EFFECT_IDS.iconPop]: { on: true, strength: 1 },
+      },
+    }))
+    window.addEventListener(SMART_BEAT_SETTINGS_EVENT, reload)
+    return () => window.removeEventListener(SMART_BEAT_SETTINGS_EVENT, reload)
+  }, [])
+  const smartBeatSample = useMemo(() => {
+    if (!analyzerStore) return undefined
+    return () => {
+      const snapshot = analyzerStore.getSnapshot()
+      return { beat: snapshot.beat, accent: snapshot.accent, bass: snapshot.bass }
+    }
+  }, [analyzerStore])
+  const smartBeatToggles = useMemo(() => smartBeatSettings.effects, [smartBeatSettings])
 
   // ── 播放时间 → MotionValue（rAF 外推）──
   // 60fps 门控：claddagh/tilt 等样式订阅 currentTime.on('change') 对整行字符逐个写样式，
@@ -329,6 +370,8 @@ export function FoliaLyricsPage({
           background={background}
           visualizerTunings={visualizerTunings}
           paused={!isPlaying}
+          smartBeatToggles={smartBeatToggles}
+          smartBeatSample={smartBeatSample}
           onLyricLineSeek={onSeek}
         />
       )}

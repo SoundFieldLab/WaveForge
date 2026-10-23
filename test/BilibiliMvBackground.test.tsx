@@ -30,6 +30,7 @@ vi.mock('../src/services/bilibiliApi', () => ({
   resolveBiliPic: vi.fn((url: string) => url),
   formatBiliTime: vi.fn(() => '3:00'),
   decodeBiliTitle: vi.fn((title: string) => title),
+  recordUploaderPlaySuccess: vi.fn(),
 }))
 
 vi.mock('../src/services/mvAlignment', () => ({

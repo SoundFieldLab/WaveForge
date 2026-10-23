@@ -15,6 +15,12 @@ const SERVICE_NAME = 'waveforge-resonance'
 const SERVICE_VERSION = 1
 const DEFAULT_PORT = 25570
 const MAX_MESSAGE_BYTES = 64 * 1024
+// In Party（DG-LAB 多人互控）房间上限 50 人：消息是「密文信封 + 互控指令」，
+// 载荷上限放宽到 8MB（视频通话信令、图片/语音消息 base64 都走这里；
+// 房间本身有 50 人上限，8MB×在线数的瞬时洪峰由发送侧分片+限流兜住）。
+const PARTY_MAX_MESSAGE_BYTES = 8 * 1024 * 1024
+// In Party 服务名：/discover 与 /health 返回它，成员扫描时区分「共振」与「In Party」房间
+const PARTY_SERVICE_NAME = 'waveforge-inparty'
 const CONNECTION_RATE_WINDOW_MS = 10 * 1000
 const CONNECTION_RATE_LIMIT = 12
 // 全局加入失败熔断：窗口内累计 300 次失败（含跨 IP）即冷却 60s。
@@ -54,9 +60,34 @@ function hostKeyMatches(supplied, expected) {
   return Boolean(expected) && safeEqual(String(supplied || ''), String(expected))
 }
 
-/** 6 位数字房间码（避免易混字符，纯数字便于口述） */
+// 6 位数字房间码（避免易混字符，纯数字便于口述）
 function generateRoomCode() {
   return String(crypto.randomInt(100000, 1000000))
+}
+
+/**
+ * In Party 的 6 位房间密码校验：数字 / 英文字母 / 常见特殊符号，长度 4-16。
+ * 私有房间入房必须带对 password；公开房间 password 为空。
+ */
+function isValidPartyPassword(pw) {
+  const value = String(pw || '')
+  if (value.length < 4 || value.length > 16) return false
+  return /^[\x21-\x7e]+$/.test(value) // 可见 ASCII（数字/字母/特殊符号），不含空格
+}
+
+function normalizePartyProfile(config) {
+  const party = config && config.party
+  if (!party) return null
+  const visibility = party.visibility === 'private' ? 'private' : 'public'
+  const password = String(party.password || '')
+  if (visibility === 'private' && !isValidPartyPassword(password)) return null
+  return {
+    visibility,
+    // 私有房：密码留在房主进程内，成员连接时提交比对；公开房恒空
+    password: visibility === 'private' ? password : '',
+    // 房间名（大厅列表展示用）：公开房随 /discover 匿名广播；私有房不广播（防枚举）
+    name: String(party.name || '').slice(0, 24),
+  }
 }
 
 /**
@@ -70,12 +101,15 @@ function createResonanceHub(options = {}) {
   let wss = null
   let running = false
   let port = DEFAULT_PORT
-  let room = null        // { roomId, code, maxMembers, createdAt }
+  let room = null        // { roomId, code, maxMembers, createdAt, profile?, maxMessageBytes }
   let hostSocket = null
   let hostPeerId = null
   let heartbeatTimer = null
   const members = new Map() // peerId => { ws, ip, joinedAt, alive }
   const connectionAttempts = new Map() // ip => timestamps
+
+  /** In Party 房间：true。影响人数上限来源、密码校验、载荷上限与发现服务名 */
+  const isPartyRoom = () => Boolean(room && room.profile)
 
   const emit = (event) => {
     try { options.onEvent && options.onEvent(event) } catch { /* 事件回调失败不影响服务 */ }
@@ -157,6 +191,7 @@ function createResonanceHub(options = {}) {
       createdAt: room ? room.createdAt : 0,
       ips: typeof options.getLanIps === 'function' ? options.getLanIps() : [],
       isHost: Boolean(hostSocket),
+      party: room && room.profile ? { visibility: room.profile.visibility } : null,
       /**
        * host WS 连接凭据：房间创建时随机生成，只随 start()/status() 返回给本进程
        * 调用方（房主渲染层 / 测试）。邀请串里只有 roomId+code，成员拿不到它——
@@ -224,7 +259,13 @@ function createResonanceHub(options = {}) {
     if (!roomId) return Promise.reject(new Error('缺少房间号'))
     const code = String(config.code || generateRoomCode())
     if (!/^\d{6}$/.test(code)) return Promise.reject(new Error('房间码必须是 6 位数字'))
-    const maxMembers = Math.min(DEFAULT_MAX_MEMBERS, Math.max(2, Number(config.maxMembers) || DEFAULT_MAX_MEMBERS))
+    // party 配置存在但非法（如密码太短/含空格）要显式拒绝，不能静默降级成共振房——
+    // 房主以为开的是密码房，实际任何拿到房间码的人都能进
+    const profile = normalizePartyProfile(config)
+    if (config.party && !profile) return Promise.reject(new Error('In Party 房间密码无效（4-16 位数字/英文/特殊符号，不含空格）'))
+    // In Party：默认上限 50 人（需求 1-50）；共振：15 人
+    const defaultMax = profile ? 50 : DEFAULT_MAX_MEMBERS
+    const maxMembers = Math.min(defaultMax, Math.max(2, Number(config.maxMembers) || defaultMax))
     // 显式传 0 = 由系统分配临时端口（测试用）；未传时用默认端口
     port = config.port === undefined || config.port === null || config.port === '' ? DEFAULT_PORT : Math.max(0, Number(config.port) || 0)
 
@@ -247,12 +288,17 @@ function createResonanceHub(options = {}) {
           }
           res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
           res.end(JSON.stringify({
-            service: SERVICE_NAME,
+            service: profile ? PARTY_SERVICE_NAME : SERVICE_NAME,
             version: SERVICE_VERSION,
             name: options.getComputerName ? options.getComputerName() : 'WaveForge',
             port,
             memberCount: members.size,
-            open: running,
+            maxMembers,
+            // In Party：公开房标记 open=true；私有房 open=false（不泄露有没有密码，只给「要不要弹密码框」用）
+            open: profile ? profile.visibility === 'public' : running,
+            visibility: profile ? profile.visibility : undefined,
+            // 公开房的房间名（大厅列表展示）；私有房匿名（防枚举）
+            roomName: profile && profile.visibility === 'public' ? profile.name : undefined,
           }))
           return
         }
@@ -260,7 +306,7 @@ function createResonanceHub(options = {}) {
         res.end('404 Not Found')
       })
 
-      wss = new WebSocketServer({ server, path: '/ws', maxPayload: MAX_MESSAGE_BYTES })
+      wss = new WebSocketServer({ server, path: '/ws', maxPayload: profile ? PARTY_MAX_MESSAGE_BYTES : MAX_MESSAGE_BYTES })
       wss.on('error', () => {})
 
       wss.on('connection', (ws, req) => {
@@ -295,6 +341,15 @@ function createResonanceHub(options = {}) {
           ws.close(4001, 'Unauthorized')
           return
         }
+        // In Party 私有房：成员必须提交对上密码（常数时间比较）
+        if (profile && profile.visibility === 'private') {
+          const supplied = String(url.searchParams.get('password') || '')
+          if (!safeEqual(supplied, profile.password)) {
+            noteGlobalJoinFailure()
+            ws.close(4005, 'Wrong password')
+            return
+          }
+        }
         const connectedRoomId = room.roomId
         const role = url.searchParams.get('role') || 'member'
         if (role === 'host') {
@@ -318,7 +373,7 @@ function createResonanceHub(options = {}) {
           emit({ type: 'host-connected', peerId: hostPeerId })
         } else {
           // 房主占 1 席（房主就在本进程内，不需要额外连接）
-          if (members.size >= room.maxMembers - 1) {
+          if (members.size >= maxMembers - 1) {
             ws.close(4003, 'Room full')
             return
           }
@@ -387,7 +442,7 @@ function createResonanceHub(options = {}) {
         const address = server.address()
         if (address && typeof address === 'object' && address.port) port = address.port
         // discoverable=false 时 /discover 返回 404（对应设置项「允许局域网发现」关闭）
-        room = { roomId, code, maxMembers, createdAt: Date.now(), discoverable: config.discoverable !== false, hostKey: randomToken() }
+        room = { roomId, code, maxMembers, createdAt: Date.now(), discoverable: config.discoverable !== false, hostKey: randomToken(), profile }
         startHeartbeat()
         resolve(status())
       })

@@ -92,7 +92,7 @@ const LazyAudioQualityModal = lazy(() => import('./AudioQualitySettingsModal'))
 const LazyCacheClearModal = lazy(() => import('./CacheClearModal'))
 const LazyRemoteSettingsModal = lazy(() => import('./RemoteControlSettingsModal'))
 
-type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
+type ViewMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'
 const appLogoUrl = new URL('../../logo.png', import.meta.url).href
 // v2：酷狗探索数据修复（封面/真新歌榜/多榜单）后升级版本，强制旧缓存失效
 // v3：榜单歌曲携带 appleId（目录曲目 id，原生取流必需）。v2 缓存里的 Apple 榜单
@@ -1255,7 +1255,9 @@ function ExploreView({
       // 听书板块自取数据（/concept/longaudio/daily，不走 payload），空态由板块自己渲染
       case 'kugouLongaudio':
         return platform === 'kugou'
-      // 「刷歌」(kugouYouth) 已下线：能力表不再包含该板块，这里恒 false 兜底旧偏好
+      // 「刷歌」分区自取数据（/youth 动态流 + 最近动态），空流是正常态由板块自己渲染
+      case 'kugouYouth':
+        return platform === 'kugou'
       default:
         return true
     }

@@ -49,6 +49,7 @@ import {
   createKugouUserPlaylist,
   collectKugouPlaylist,
   deleteKugouUserPlaylist,
+  modifyKugouUserPlaylist,
   fetchKugouUserCloud,
   fetchKugouPurchasedSongs,
   fetchKugouPurchasedAlbums,
@@ -88,6 +89,8 @@ import {
   fetchKugouChannelSearch,
   fetchKugouStyleBlindbox,
   fetchKugouYuekuTab,
+  fetchKugouMvInfo,
+  fetchKugouMvList,
 } from './server/kugou-gateway.mjs'
 import { decodeAG1Response, encodeAG1Request, zzcSign } from '@jixun/qmweb-sign'
 import axios from 'axios'
@@ -2347,27 +2350,25 @@ function getNeteaseQualityCandidates(preference, isVip) {
   }
 }
 
-function getQQQualityCandidates(preference, isVip) {
+function getQQQualityCandidates(preference) {
   // AAC 档（192k/96k/48k）不设会员闸门：是否可取由 vkey 与歌曲实际文件决定，拿不到自然落下一档。
   // 档位↔前缀映射已实测校准（Meting provider 对照 + Content-Length 与 track_info.size_* 比对）：
   // 192k=C600 / 96k=C400 / 48k=C200（.m4a 容器）。
-  // 「自动」档不按 vip 标志裁剪候选链：账号能不能出高档由取流接口（vkey）说话——
-  // vip 标志来自登录时的 localStorage，可能过期/不准；多出的失败探测很快（空 purl 立即返回），
-  // 换来「自动 = 账号当前实际可用的最高音质」。手动档的回落链保持原样。
+  // **全部档位（含手动）都不按 vip 标志裁剪候选链**：账号能不能出高档由取流接口（vkey）
+  // 说话——vip 标志来自登录事件一次性写入的 localStorage，会过期/不准（会员续费/过期后
+  // 标志不刷新），按它裁剪会把「会员选了 SQ 却被静默降到 320」（实测口径：自动档早已是
+  // vkey 说话，手动档此前仍信标志 → 用户「切换音质没效果」的根因）。多出的失败探测很快
+  //（空 purl 立即返回），换来手动档与自动档、与账号实际权益三者一致。
   if (preference === 'auto') return ['flac', '320', '128', 'm4a']
   if (preference === '48aac') return ['48aac', 'm4a']
   if (preference === '96aac') return ['96aac', '128']
   if (preference === '192aac') return ['192aac', '96aac', '128']
-  if (!isVip) {
-    if (preference === 'standard') return ['128', 'm4a']
-    return ['320', '128', 'm4a']
-  }
   switch (preference) {
     case 'standard': return ['128', 'm4a']
     case 'high': return ['320', '128', 'm4a']
     case 'very-high':
-    case 'lossless':
-    case 'hi-res': return ['flac', '320', '128', 'm4a']
+    case 'hi-res':
+    case 'lossless': return ['flac', '320', '128', 'm4a']
     default: return ['flac', '320', '128', 'm4a']
   }
 }
@@ -2402,12 +2403,29 @@ const QQ_PREMIUM_TIERS = {
     encrypted: { prefix: 'Q0M0', extension: '.mflac' },
     vsIndex: -1, // 下标未确证：靠"只认 purl"的判定在所有 vs 候选里找出真身
   },
+  // 全景声3.0（2026-10-21 新增，官方客户端"超级会员独家尊享"第三卡；dll 内部名 tqlq）：
+  // 前缀未从权益墙后确证（裸调一律 104003），Q001/Q002 双候选靠"只认 purl"判定真身。
+  tqlq: {
+    label: '臻品全景声3.0',
+    plain: { prefixes: ['Q001', 'Q002'], extension: '.flac' },
+    encrypted: { prefixes: ['Q0M1', 'Q0M2'], extension: '.mflac' },
+    vsIndex: -1,
+  },
+  // NAC 品质（2026-10-21 新增，官方"标准音质"分组里的省流档：最高 76kbps 自研 AICodes 编码）：
+  // 官方 dll 内部扩展名 .mnac（加密），前缀 N000（vs[7] 独立 mid 为空时退化 songmid，实测 104003=有档需权益）。
+  nac: {
+    label: 'NAC品质',
+    plain: { prefix: 'N000', extension: '.mnac' },
+    encrypted: null, // N000.mnac 本身走 GetEVkey 加密通道（与 .mflac 同型）
+    vsIndex: -1,
+  },
 }
 
 function buildQQPremiumCandidates(tier, variants, mediaMid, songMid, variant = 'plain') {
   const spec = QQ_PREMIUM_TIERS[tier]
   if (!spec) return []
   const fileSpec = variant === 'encrypted' ? spec.encrypted : spec.plain
+  if (!fileSpec) return []
   const prefixes = Array.isArray(fileSpec.prefixes) ? fileSpec.prefixes : [fileSpec.prefix]
   const list = Array.isArray(variants) ? variants : []
   const ordered = []
@@ -5981,7 +5999,17 @@ app.get('/api/kugou/song/url', async (req, res) => {
       albumAudioId: Number(album_audio_id || 0) || undefined,
     }, cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : '')
     if (result.playable && result.url) {
-      res.json({ url: result.url, level: result.level, source: result.source, songName: '', author: '' })
+      // level 是从响应探测到的**实际档**（可能低于请求档：酷狗对超权限档静默回落）；
+      // requestedQuality 原样回传（auto 时为 'auto'），渲染层据此显示「自动（无损）」等
+      res.json({
+        url: result.url,
+        level: result.level,
+        requestedQuality: result.requestedQuality || null,
+        levelUnverified: Boolean(result.levelUnverified),
+        source: result.source,
+        songName: '',
+        author: '',
+      })
     } else {
       res.status(403).json({ error: result.message || '酷狗播放获取失败', reason: result.reason || 'url_unavailable' })
     }
@@ -6431,6 +6459,32 @@ app.get('/api/kugou/user/playlist/tracks', async (req, res) => {
   }
 })
 
+/** 酷狗 MV（2026-10-22 逆向 m3ws H5 协议）：infov2 播放数据（三档清晰度直链）+ 歌手/热门 MV 列表 */
+app.get('/api/kugou/mv/info', async (req, res) => {
+  try {
+    const { hash } = req.query
+    if (!hash) return res.status(400).json({ error: '请提供 MV hash' })
+    const result = await fetchKugouMvInfo(String(hash))
+    if (!result.success) {
+      return res.status(result.error === 'MISSING_MV_HASH' ? 400 : 403).json({ error: result.error, message: result.message })
+    }
+    res.json(result.data)
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
+app.get('/api/kugou/mv/list', async (req, res) => {
+  try {
+    const { kind = 'singer', singerid, page = '1', pagesize = '30' } = req.query
+    const result = await fetchKugouMvList(String(kind), String(singerid || ''), Number(page), Number(pagesize))
+    if (!result.success) return res.status(403).json({ error: result.error || 'MV 列表加载失败' })
+    res.json({ list: result.list, total: result.total })
+  } catch (error) {
+    res.status(500).json({ error: error.message })
+  }
+})
+
 /** 酷狗喜欢检查（批量 hash） */
 app.post('/api/kugou/like/check', async (req, res) => {
   try {
@@ -6831,6 +6885,18 @@ app.post('/api/kugou/concept/playlist/delete', async (req, res) => {
   }
 })
 
+/** 编辑歌单信息（改名/简介；/v2/modify_list） */
+app.post('/api/kugou/concept/playlist/modify', async (req, res) => {
+  try {
+    const { credential, listid, name, intro } = req.body || {}
+    const result = await modifyKugouUserPlaylist(credential, listid, { name, intro })
+    if (!result.success) return res.status(400).json({ success: false, error: result.error || '编辑歌单失败' })
+    res.json(result)
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message })
+  }
+})
+
 /** 云盘列表（mcloudservice 独立加密路径；空盘返回 success + empty） */
 app.post('/api/kugou/concept/cloud', async (req, res) => {
   try {
@@ -7054,7 +7120,7 @@ app.get('/api/qq/song/url', async (req, res) => {
     const songMid = String(mid || id)
     const qualityPreference = normalizeAudioQualityPreference(req.query.quality)
     const isVip = req.query.vip === 'true'
-    const candidates = getQQQualityCandidates(qualityPreference, isVip)
+    const candidates = getQQQualityCandidates(qualityPreference)
     const normalizedCookie = cookie ? String(cookie).replace(/^['"]|['"]$/g, '') : qqMusicCookie
     console.log('[QQ URL] cookie: ' + (normalizedCookie ? 'provided' : 'missing'))
 
@@ -7172,7 +7238,7 @@ app.get('/api/qq/song/url', async (req, res) => {
       const domains = Array.isArray(responseData?.sip) ? responseData.sip : []
       const domain = domains.find(item => typeof item === 'string' && !item.startsWith('http://ws')) || domains[0] || 'https://dl.stream.qqmusic.qq.com/'
       const url = purl.startsWith('http') ? purl : new URL(purl, domain).toString()
-      return { url, quality, actualQuality: getActualQQQuality(url, quality) }
+      return { url, quality, actualQuality: getActualQQQuality(url, quality), filesize: Number(info?.filesize) || 0 }
     }
 
     // ── 超级会员专享高端档（杜比全景声 / 臻品母带4.0 / 臻品音质2.0）───────────────
@@ -7181,11 +7247,13 @@ app.get('/api/qq/song/url', async (req, res) => {
     // 判定只看 purl：无权益时上游会给整批请求打 104003（每批首个条目，实测与文件名无关），
     // 所以拿不到 purl 就只能如实告诉上层"这档需要超级会员"，然后回落常规档位（播放不中断）。
     let restrictedTier = ''
-    if (QQ_PREMIUM_TIERS[qualityPreference]) {
-      // 高端档依赖 qqVariants（来自 metadataPromise）：普通探测先命中时此变量可能
-      // 还是空数组 → 高端档被静默跳过并回落。进入分支前显式等元数据（受 deadline 约束）。
+    // 超专档探测（2026-10-21 提为复用函数）：显式选择与常规链回退共用同一段逻辑。
+    // 「升档回退」背景：部分曲目 SQ/HQ 资产缺失（track_info.size_flac=0）但 size_new 里有
+    // 臻品音质2.0（Q000，实测《幸福刑》26MB/3072kbps）——常规链全 miss 时先往上试一把
+    // 超专档，拿到就**宁高勿低**，绝不在有 3072kbps 资产时落回 128k。
+    const probePremiumTier = async (tier) => {
       await metadataPromise
-      const tierSpec = QQ_PREMIUM_TIERS[qualityPreference]
+      const tierSpec = QQ_PREMIUM_TIERS[tier]
       const premiumHeaders = {
         comm: {
           uin: qqUin,
@@ -7196,7 +7264,7 @@ app.get('/api/qq/song/url', async (req, res) => {
         },
       }
       const tryPremiumBatch = async (variant) => {
-        const filenames = buildQQPremiumCandidates(qualityPreference, qqVariants, mediaMid, songMid, variant)
+        const filenames = buildQQPremiumCandidates(tier, qqVariants, mediaMid, songMid, variant)
         if (!filenames.length) return null
         const encrypted = variant === 'encrypted'
         const json = await qqMusicRequest({
@@ -7218,7 +7286,7 @@ app.get('/api/qq/song/url', async (req, res) => {
         const responseData = json?.req_1?.data || json?.req_0?.data
         const infos = Array.isArray(responseData?.midurlinfo) ? responseData.midurlinfo : []
         if (process.env.WF_QQ_PREMIUM_DEBUG) {
-          console.warn('[QQ URL] ' + qualityPreference + '/' + variant + ' vs长度=' + qqVariants.length + ' vs[34]=' + (qqVariants[34] || '(空)') + ' vs[3]=' + (qqVariants[3] || '(空)') + ' 候选结果: ' + infos.map(info => (info.filename || '?') + '=' + info.result + (info.purl ? '/PURL' : '')).join(' '))
+          console.warn('[QQ URL] ' + tier + '/' + variant + ' vs长度=' + qqVariants.length + ' vs[34]=' + (qqVariants[34] || '(空)') + ' vs[3]=' + (qqVariants[3] || '(空)') + ' 候选结果: ' + infos.map(info => (info.filename || '?') + '=' + info.result + (info.purl ? '/PURL' : '')).join(' '))
         }
         const hit = infos.find(info => info?.purl && (!info?.songmid || String(info.songmid) === songMid || String(info.songmid) === mediaMid))
         if (!hit) return null
@@ -7228,29 +7296,47 @@ app.get('/api/qq/song/url', async (req, res) => {
         return { url, filename: hit.filename, filesize: hit.filesize, ekey: hit.ekey || '', encrypted }
       }
       try {
-        // 这首歌没有该档位的任何变体 mid → 直接判定"没有这一档"，不打上游
-        if (!qqVariants.length) {
+        // 这首歌没有该档位的任何变体 mid → 直接判定"没有这一档"，不打上游。
+        // 例外：NAC 前缀用 songmid 本身（vs[7] 实测为空），variants 空不影响它。
+        if (!qqVariants.length && tier !== 'nac') {
           console.warn('[QQ URL] ' + tierSpec.label + '：曲目详情没有 vs 变体列表，跳过探测')
-        } else {
-          const plainHit = await tryPremiumBatch('plain')
-          const hit = plainHit || await tryPremiumBatch('encrypted')
-          if (hit) {
-            console.log('[QQ URL] ' + qualityPreference + ' hit: file=' + hit.filename + ' encrypted=' + hit.encrypted + ' filesize=' + hit.filesize)
-            return res.json({
-              url: hit.url,
-              qualityPreference,
-              requestedQuality: qualityPreference,
-              actualQuality: qualityPreference,
-              isPreview: false,
-              ...(hit.encrypted ? { encrypted: true } : {}),
-            })
-          }
-          restrictedTier = 'svip'
-          console.warn('[QQ URL] ' + tierSpec.label + ' 未取到 purl（账号无该档权益，需 QQ 音乐超级会员）→ 回落常规档位')
+          return null
         }
+        // NAC 的 .mnac 本身即加密资产：plain 形态也要走 GetEVkey。
+        const variantsToTry = tier === 'nac'
+          ? ['encrypted']
+          : (tierSpec.encrypted ? ['plain', 'encrypted'] : ['plain'])
+        let hit = null
+        for (const variant of variantsToTry) {
+          hit = await tryPremiumBatch(variant)
+          if (hit) break
+        }
+        if (hit) {
+          console.log('[QQ URL] ' + tier + ' hit: file=' + hit.filename + ' encrypted=' + hit.encrypted + ' filesize=' + hit.filesize)
+          return hit
+        }
+        console.warn('[QQ URL] ' + tierSpec.label + ' 未取到 purl（账号无该档权益，需 QQ 音乐超级会员）')
+        return null
       } catch (premiumError) {
-        console.warn('[QQ URL] ' + qualityPreference + ' 探测失败:', premiumError.message)
+        console.warn('[QQ URL] ' + tier + ' 探测失败:', premiumError.message)
+        return null
       }
+    }
+    if (QQ_PREMIUM_TIERS[qualityPreference]) {
+      const hit = await probePremiumTier(qualityPreference)
+      if (hit) {
+        return res.json({
+          url: hit.url,
+          qualityPreference,
+          requestedQuality: qualityPreference,
+          actualQuality: qualityPreference,
+          // 文件大小（bytes）：弹层按官方风格显示"（21.9M）"；0 = 上游未回
+          filesize: Number(hit.filesize) || 0,
+          isPreview: false,
+          ...(hit.encrypted ? { encrypted: true } : {}),
+        })
+      }
+      restrictedTier = 'svip'
     }
 
     // 串行探测的教训（用户实测「本曲有无损却播了流畅」）：单次 vkey 偶发 5s 超时/抖动，
@@ -7312,6 +7398,43 @@ app.get('/api/qq/song/url', async (req, res) => {
       }
     }
 
+    // ── 升档回退（2026-10-21 回归加固版）────────────────────────────────────
+    // 仅一种触发条件：**元数据确认该曲没有请求档的常规资产**（用户口径："平台返回什么音质
+    // 就用什么音质（最好的）"——平台没有 SQ/320 时，size_new 里更高档的独立音轨就是"最好的"）。
+    // 首轮回归教训：探测函数定义在调用点之后（const 暂时性死区），凡降档歌一进主循环就抛
+    // ReferenceError → 整个路由 500 → 渲染层拿到 null →"未找到可播放版本"（用户实测全挂）。
+    // 加固：tryPremiumUpgrade 定义在主循环**之前**；元数据门（零网络）只在"请求档资产确认
+    // 缺失"时才**单次**按序探测 atmos2→master→dolby，命中且探活通过才返回；失败立刻回原路径。
+    const requestedLevelKey = {
+      flac: 'size_flac', '320': 'size_320mp3', '192aac': 'size_192aac',
+      '128': 'size_128mp3', '96aac': 'size_96aac', '48aac': 'size_48aac',
+      m4a: 'size_96aac',
+    }[qualityPreference] || (qualityPreference === 'auto' ? 'size_flac' : '')
+    const tryPremiumUpgrade = async () => {
+      // 元数据就绪（受 deadline 约束）：qqVariants/qqFileInfo 由并行元数据填充，
+      // 主循环命中时它往往还没回来——不 await 就判门，门恒关（升级永远不触发）。
+      try { await metadataPromise } catch { /* 详情拉失败：门保持关闭，走原路径 */ }
+      // 元数据门（零网络开销）：qqVariants 为空（详情还没回来/拉失败）→ 放行原路径，绝不阻塞
+      if (!qqVariants.length || !requestedLevelKey) return null
+      const targetSize = (() => {
+        const file = qqFileInfo && typeof qqFileInfo === 'object' ? qqFileInfo : null
+        return file ? Number(file[requestedLevelKey] || 0) : 0
+      })()
+      // 请求档元数据上存在（哪怕 vkey 偶发没出）→ 不升级，按原路径重试/回落
+      if (targetSize > 0) return null
+      for (const tier of ['atmos2', 'master', 'dolby']) {
+        const hit = await probePremiumTier(tier)
+        if (hit) {
+          const liveness = await probeUpstreamAudio(hit.url)
+          if (liveness.ok) return { tier, hit }
+          console.warn('[QQ URL] 升档回退 ' + tier + ' 探活失败（' + liveness.reason + '），试下一档')
+        }
+      }
+      return null
+    }
+    // 场景②预备：请求档在候选链中的位置（判断命中档是否低于请求档）
+    const requestedIndex = candidates.indexOf(qualityPreference === 'auto' ? 'flac' : qualityPreference)
+
     for (let index = 0; index < candidates.length; index += 1) {
       const result = directResults[index]
       if (result.status === 'fulfilled' && result.value) {
@@ -7349,18 +7472,54 @@ app.get('/api/qq/song/url', async (req, res) => {
         if (liveness.uncertain) {
           console.warn('[QQ URL] ' + direct.quality + ' 探活未确认（' + liveness.reason + '），按可用处理')
         }
+        // 场景②：命中档低于请求档（如请求 SQ 只拿到 128）且元数据门确认请求档无资产 →
+        // 试一次超专档（该曲 SQ/HQ 缺失但臻品/杜比独立音轨在的情况实测存在）。
+        // 元数据门不通过（请求档其实有货/详情未就绪）时零网络开销，直接按原结果返回。
+        const hitIndex = candidates.indexOf(direct.quality)
+        if (requestedIndex >= 0 && hitIndex > requestedIndex) {
+          const upgrade = await tryPremiumUpgrade()
+          if (upgrade) {
+            console.log('[QQ URL] 升档回退：' + direct.quality + ' 命中但低于请求档 ' + qualityPreference + '，改用 ' + upgrade.tier + '（' + upgrade.hit.filename + ' ' + upgrade.hit.filesize + 'B）')
+            return res.json({
+              url: upgrade.hit.url,
+              qualityPreference,
+              requestedQuality: qualityPreference,
+              actualQuality: upgrade.tier,
+              isPreview: false,
+              ...(upgrade.hit.encrypted ? { encrypted: true } : {}),
+            })
+          }
+        }
         console.log('[QQ URL] direct quality ' + direct.quality + ' succeeded as ' + direct.actualQuality)
         return res.json({
           url: direct.url,
           qualityPreference,
           requestedQuality: direct.quality,
           actualQuality: direct.actualQuality,
+          // 文件大小（bytes）：官方风格"（21.9M）"标注；0 = 上游未回
+          filesize: Number(direct.filesize) || 0,
           isPreview: false,
           ...(restrictedTier ? { restrictedTier } : {}),
         })
       }
       if (result.status === 'rejected') {
         console.warn('[QQ URL] direct quality ' + candidates[index] + ' failed:', result.reason?.message || result.reason)
+      }
+    }
+
+    // ── 升档回退·场景①裁决点：常规链全 miss → 先升档再走 package/preview 兜底 ──
+    if (!directResults.some(r => r.status === 'fulfilled' && r.value)) {
+      const upgrade = await tryPremiumUpgrade()
+      if (upgrade) {
+        console.log('[QQ URL] 升档回退：常规档全 miss，命中 ' + upgrade.tier + '（' + upgrade.hit.filename + ' ' + upgrade.hit.filesize + 'B）')
+        return res.json({
+          url: upgrade.hit.url,
+          qualityPreference,
+          requestedQuality: qualityPreference,
+          actualQuality: upgrade.tier,
+          isPreview: false,
+          ...(upgrade.hit.encrypted ? { encrypted: true } : {}),
+        })
       }
     }
 
@@ -7443,14 +7602,19 @@ app.get('/api/qq/song/detail', async (req, res) => {
     if (ti?.file) {
       const f = ti.file
       const qualityLevels = []
+      // size（bytes）随档带出：弹层按官方风格显示"（21.9M）"实际文件大小
       const pushLevel = (key, label, br) => {
-        if (Number(f[key]) > 0) qualityLevels.push({ key, label, br })
+        if (Number(f[key]) > 0) qualityLevels.push({ key, label, br, size: Number(f[key]) || 0 })
       }
       // 超级会员专享高端档（2026-10-08 实装）：可用性看 size_new 下标
       // （0=臻品母带 AI00.flac、1=臻品音质 Q000.flac、2/6=臻品全景声 5.1/7.1、9=DTS:X、7=NAC）
+      // 2026-10-21 对官方客户端逐卡核对（Cold Blood 实测）：size_new[0]=母带（126.8M 卡吻合）；
+      // 2/6=全景声（旧 5.1/7.1），官方 9.x 新增"臻品全景声3.0"（tqlq）取流前缀未定，先用 2/6 归 atmos 组。
       const sizeNew = Array.isArray(f.size_new) ? f.size_new.map(value => Number(value) || 0) : []
-      if (sizeNew[0] > 0) qualityLevels.push({ key: 'size_master', label: '臻品母带4.0', br: 4608 })
-      if (sizeNew[1] > 0 || sizeNew[2] > 0 || sizeNew[6] > 0) qualityLevels.push({ key: 'size_atmos2', label: '臻品音质2.0', br: 3072 })
+      if (sizeNew[0] > 0) qualityLevels.push({ key: 'size_master', label: '臻品母带4.0', br: 4608, size: sizeNew[0] })
+      if (sizeNew[1] > 0 || sizeNew[2] > 0 || sizeNew[6] > 0) {
+        qualityLevels.push({ key: 'size_atmos2', label: '臻品音质2.0', br: 3072, size: sizeNew[1] || sizeNew[2] || sizeNew[6] })
+      }
       pushLevel('size_hires', 'Hi-Res 无损（192k）', 9216)
       pushLevel('size_dolby', '杜比全景声', 1536)
       pushLevel('size_flac', 'SQ 无损（1024k）', 1024)
@@ -7460,7 +7624,10 @@ app.get('/api/qq/song/detail', async (req, res) => {
       // QQ 新档「NAC品质」（自研 AICodes 编码，官方面板标注最高 76kbps）：字段名按官方面板
       // 口径防御式补充，track_info.file 没有该字段时 pushLevel 自动跳过；取流前缀尚未实现，
       // 客户端会把它标为「暂未支持」。
-      pushLevel('size_nac', 'NAC品质', 76)
+      // 2026-10-21：Cold Blood 实测 size_new[7]=1774691B 与官方面板 NAC 1.7M 吻合 → NAC 资产在 size_new[7]。
+      if (sizeNew[7] > 0 || Number(f.size_nac) > 0) {
+        qualityLevels.push({ key: 'size_nac', label: 'NAC品质', br: 76, size: sizeNew[7] || Number(f.size_nac) || 0 })
+      }
       pushLevel('size_96aac', '流畅（96k）', 96)
       pushLevel('size_48aac', '省流（48k）', 48)
       qualityLevels.sort((a, b) => (b.br || 0) - (a.br || 0))

@@ -239,14 +239,13 @@ describe('传统模式 TraditionalView', () => {
     await waitFor(() => expect(screen.getByPlaceholderText(/在网易云音乐中搜索/)).toBeTruthy())
   })
 
-  it('非复刻平台（Spotify）音乐库页仍显示个性化推荐', async () => {
-    // Apple 自 2026-10-08 起也走客户端复刻左栏/页面（见 test/ApplePcTraditional.test.tsx），
-    // 这里改用仍走通用左栏的 Spotify 验证「非复刻平台保留原生音乐库页」。
+  it('复刻平台（Spotify）显示官方客户端风主页：欢迎横幅 + 发现音乐侧栏', async () => {
+    // Spotify 自 2026-10-22 起也走客户端复刻左栏/页面（与 Apple 同策略，右侧第三栏保留）。
     localStorage.setItem('waveforge:platform', 'spotify')
-    render(<TraditionalView {...baseProps} />)
-    fireEvent.click(await screen.findByRole('button', { name: '音乐库' }))
-    await waitFor(() => expect(screen.getByText(/专属音乐库|量身推荐|热门音乐推荐/)).toBeTruthy())
-    expect(screen.getAllByText(/每日推荐|热门推荐/).length).toBeGreaterThan(0)
+    render(<TraditionalView {...baseProps} spotifyLoggedIn />)
+    expect(await screen.findByText(/欢迎回来/)).toBeTruthy()
+    expect(screen.getByText('发现音乐')).toBeTruthy()
+    expect(screen.getByText('喜欢的歌曲')).toBeTruthy()
   })
 
   it('网易云左栏按官方分组显示 创建的歌单/收藏的歌单 与新建入口', async () => {

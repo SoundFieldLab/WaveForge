@@ -67,6 +67,9 @@ export interface VisualizerSharedProps {
     showSubtitleTranslation?: boolean;
     subtitleContentMode?: SubtitleContentMode;
     paused?: boolean;
+    /** 智能动感模式（Smart Beat）：效果开关/强度表 + 拍脉冲采样源。仅 sonnet 等 beat 系样式消费 */
+    smartBeatToggles?: Record<string, { on: boolean; strength: number } | undefined>;
+    smartBeatSample?: () => { beat: number; accent: number; bass: number };
     onBack?: () => void;
     isPanelOpen?: boolean;
     alwaysShowBackButton?: boolean;

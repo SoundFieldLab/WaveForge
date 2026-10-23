@@ -58,14 +58,23 @@ export interface CrossfadeSettings {
 // GaplessSettings 已移入 src/services/gapless/gaplessConstants（本文件 re-export 保持兼容）
 
 /** AutoMix Enhanced：把播放器曲目对象映射成云端档匹配所需的身份。
- *  QQ 曲库曲目直接给 mid；网易云/本地等其他平台留空 mid，由后端按「歌名 + 歌手」联想匹配。 */
+ *  QQ 曲库曲目直接给 mid；网易云/本地等其他平台留空 mid，由后端按「歌名 + 歌手」联想匹配。
+ *  ⚠️ 跨平台补源（audioSourceOverride）时**渲染/下载用的音频来自 override 平台**，
+ *  mid 必须取 override 的 id（QQ 的真实 songmid）——若拿原平台（如汽水）的 mid 当 QQ mid，
+ *  云端会按完全无关的 QQ 歌给切点，过渡错位且无法被时长钳制发现（两版曲长可能恰好都在界内）。 */
 function qqTrackRef(song: unknown): { mid?: string; title?: string; artist?: string; trackId?: string } {
   const s = song as {
     mid?: string; songmid?: string; songMid?: string; name?: string
     id?: string | number; artists?: Array<{ name?: string }>
+    audioSourceOverride?: { platform?: string; id?: string | number }
   } | null | undefined
   if (!s) return {}
-  const mid = [s.mid, s.songmid, s.songMid].find(value => typeof value === 'string' && value.length > 0) as string | undefined
+  const override = s.audioSourceOverride
+  // 音源被补成 QQ 时，override.id 就是实际发声的 QQ 曲目 mid；此时原平台的 mid 不能用。
+  const overrideIsQQ = override?.platform === 'qq' && String(override.id || '').trim().length > 0
+  const mid = overrideIsQQ
+    ? String(override!.id)
+    : ([s.mid, s.songmid, s.songMid].find(value => typeof value === 'string' && value.length > 0) as string | undefined)
   const artist = Array.isArray(s.artists) ? s.artists.map(a => a?.name).filter(Boolean).join(' / ') : ''
   return {
     ...(mid ? { mid } : {}),
@@ -196,10 +205,14 @@ export function describeTransitionCompatibilityIssue(
 
   // 分析时长与流时长不一致（旧缓存/换源）：渲染窗口可能越过真实音频末尾，
   // AudioFile 读越界 → 渲染中途失败 → 只能在窗口起点后才发现
+  // ⚠️ 只拦"分析比流短"（真截断：试听片段被钉进缓存）。"分析比流长"是元数据虚高
+  // （QQ 真机实测元数据比实际文件普遍长 ~10s，2026-10-19 日志 4/4 首），不是陈旧缓存——
+  // 双向 abs 比较会触发 stale-invalidate → 删缓存重下 → 依旧差 10s → REPREPARE 死循环
+  //（真机表现：过渡药丸不显示、每次过渡直接跳过）。
   const durationIssue = (analysis: TrackAnalysis, stream: number, label: string): string | null => {
     if (!Number.isFinite(stream) || stream <= 0) return null
     if (!Number.isFinite(analysis.duration)) return null
-    if (Math.abs(analysis.duration - stream) <= 1.5) return null
+    if (analysis.duration >= stream - 1.5) return null
     return `${label}分析时长与流时长不一致（analysis=${analysis.duration.toFixed(1)}s vs stream=${stream.toFixed(1)}s），疑似过期缓存或换源`
   }
   const streamIssue = durationIssue(source, Number(current?.duration) || 0, '当前曲')
@@ -1421,7 +1434,17 @@ export function useAudioPlayer(
     // 能被感知，同时 UI 切到下一首的延迟仍 <1s，不破坏「无缝」的体感。
     let visualDuration = strategy === 'gapless' ? 0.8 : audioDuration
     
-    let targetTime = Math.max(0, Math.min(plan?.targetStartTime || 0, targetAudioEnd))
+    // 目标起播位置：有 plan 用 plan 的（automix/gapless 智能计划已含 introSkip）；
+    // 无 plan 的 gapless（备选 60ms 淡入淡出：超时回退/竞态兜底等）——直接查下一首的
+    // introSilence，跳过烧死的前奏静音（与首选拼接的 joinOffset 同口径），否则备选
+    // 路径从绝对 0 起播，接缝照放空白（审查 D 项）。
+    const gaplessFallbackIntroSkip = strategy === 'gapless' && !plan
+      ? (() => {
+          const silence = autoMixAnalysisService.peekSilenceBounds(nextMetadataRef.current?.trackKey || '')
+          return silence ? Math.max(0, Math.min(2, silence.introSilence || 0)) : 0
+        })()
+      : 0
+    let targetTime = Math.max(0, Math.min(plan?.targetStartTime || gaplessFallbackIntroSkip, targetAudioEnd))
 
     debugLog('⏱️ [Transition] 过渡参数:')
     debugLog('   音频过渡时长:', audioDuration.toFixed(2), 's')
@@ -2460,6 +2483,14 @@ export function useAudioPlayer(
           minDuration: autoMixRef.current.minDuration,
           maxDuration: autoMixRef.current.maxDuration,
         }, 'smart-rendered')
+      // 渲染下载缓存时长闸的全曲时长基准（Enhanced 云端切点会落在曲中，
+      // plan.sourceEndTime/targetEndTime 只是过渡段终点，不是全曲——
+      // 拿它当期望时长会把 236s 的整曲误判成"29s 截断"→ 永久降级固定交叉）。
+      // ⚠️ 优先用 analysis.duration（从实际文件解码得出）而不是队列元数据：
+      // QQ 元数据时长普遍比实际文件虚高 ~10s（真机 2026-10-19 日志 4/4 首
+      // actual = 元数据 - 10），拿元数据做期望会把完整文件误判成截断。
+      plan.sourceTrackDuration = Number(sourceAnalysis.duration) || Number(current.duration) || undefined
+      plan.targetTrackDuration = Number(targetAnalysis.duration) || Number(next.duration) || undefined
 
       // AutoMix Enhanced（三档）：走 QQ 官方智能混音链路。
       // 计划里的时间轴先由本地规划器给出占位，实际切点/时长以渲染结果为准
@@ -2506,14 +2537,37 @@ export function useAudioPlayer(
             const duration = Number(cue?.transition_duration_s)
             const targetStart = Number(cue?.target_start_s) || 0
             if (cue?.success && Number.isFinite(start) && Number.isFinite(duration) && duration > 0) {
-              plan.sourceStartTime = start
-              plan.sourceEndTime = start + duration
-              plan.targetStartTime = targetStart
-              plan.targetEndTime = targetStart + duration
-              plan.qqAppliedTier = String(cue.effectiveTier || plan.qq.tier)
-              debugLog(`[AutoMix] Enhanced 交接计划（${plan.qqAppliedTier}）：源 ${start.toFixed(2)}s + 过渡 ${duration.toFixed(2)}s，目标从 ${targetStart.toFixed(2)}s 续播`)
-              if (cue.fallback?.reason) {
-                debugLog(`[AutoMix] Enhanced 已降级为 ${plan.qqAppliedTier}：${cue.fallback.reason}`)
+              // 云端 sanity 钳制：云端曲库的曲长与本地文件（试听片段/不同版本/地区版）可能不一致，
+              // OutCue/InCue 照单全收会让过渡窗口越过本地音频末尾——渲染产物含静音尾、
+              // 播放调度在源曲自然结束前就试图切歌（听感"突然静音又切走"）。
+              // 按本地全曲时长把窗口压回曲内（保留至少 0.5s 尾余量），越界幅度 > 3s 视为
+              // 云端/本地曲长严重错配，直接退回 Pro（v2）链路。
+              // ⚠️ 时长基准用 analysis.duration（实际文件解码）优先：元数据在补源场景
+              // （audioSourceOverride）是**原平台**的时长，与实际 QQ 音频可能差几十秒——
+              // 用它钳制会把"本应退 Pro"的错配 cue 放过去（钳制变松）。
+              const srcDur = Number(sourceAnalysis.duration) || Number(current.duration) || 0
+              const tgtDur = Number(targetAnalysis.duration) || Number(next.duration) || 0
+              const clampedStart = srcDur > 0 ? Math.max(0, Math.min(start, srcDur - 0.5)) : Math.max(0, start)
+              const clampedDuration = srcDur > 0 ? Math.max(0.5, Math.min(duration, srcDur - 0.5 - clampedStart)) : duration
+              const clampedTargetStart = tgtDur > 0 ? Math.max(0, Math.min(targetStart, Math.max(0, tgtDur - 0.5))) : Math.max(0, targetStart)
+              const cueOutOfRange = srcDur > 0 && (start > srcDur - 0.5 || (start + duration) > srcDur + 3)
+                || (tgtDur > 0 && (targetStart > tgtDur - 0.5 || (targetStart + duration) > tgtDur + 3))
+              if (cueOutOfRange) {
+                logAutomixBackend('prepareAutoMix:cue-out-of-range', `start=${start.toFixed(2)} dur=${duration.toFixed(2)} targetStart=${targetStart.toFixed(2)} src=${srcDur.toFixed(1)} tgt=${tgtDur.toFixed(1)} → 退回 Pro`)
+                plan.strategy = 'smart-rendered-v2'
+                plan.qq = undefined
+                plan.qqAppliedTier = undefined
+                plan.rendererVersion = 'automix-v2-dsp-r1'
+              } else {
+                plan.sourceStartTime = clampedStart
+                plan.sourceEndTime = clampedStart + clampedDuration
+                plan.targetStartTime = clampedTargetStart
+                plan.targetEndTime = clampedTargetStart + clampedDuration
+                plan.qqAppliedTier = String(cue.effectiveTier || plan.qq.tier)
+                debugLog(`[AutoMix] Enhanced 交接计划（${plan.qqAppliedTier}）：源 ${clampedStart.toFixed(2)}s + 过渡 ${clampedDuration.toFixed(2)}s，目标从 ${clampedTargetStart.toFixed(2)}s 续播`)
+                if (cue.fallback?.reason) {
+                  debugLog(`[AutoMix] Enhanced 已降级为 ${plan.qqAppliedTier}：${cue.fallback.reason}`)
+                }
               }
             } else {
               // 取不到云端交接计划时不能只渲染不排期：计划与音频时间轴会不一致
@@ -3087,10 +3141,35 @@ export function useAudioPlayer(
             const controller = seamlessJoinControllerRef.current
             if (albumDirectJoin) {
               if (controller) {
-                if (remaining > 1 && remaining <= GAPLESS_SEAMLESS_WARMUP_SECONDS) {
+                // 尾静音裁剪：平台文件普遍烧死几秒尾部静音，拼接/交叉点提前到
+                // 有声内容结束处（outroSilence，上限 5s 防异常分析值吃掉整曲尾段）；
+                // joinOffset = 下一首 introSilence（上限 2s，与 automix gapless 同口径）。
+                // 两个字段来自**不同歌**的分析：outroSilence 查源曲、introSilence 查下一首
+                const sourceSilence = autoMixAnalysisService.peekSilenceBounds(currentMetadataRef.current?.trackKey || '')
+                const nextSilence = autoMixAnalysisService.peekSilenceBounds(nextMetadataRef.current?.trackKey || '')
+                const outroSilence = sourceSilence ? Math.max(0, Math.min(5, sourceSilence.outroSilence || 0)) : 0
+                const joinOffset = nextSilence ? Math.max(0, Math.min(2, nextSilence.introSilence || 0)) : 0
+                const audibleRemaining = Math.max(0, remaining - outroSilence)
+                if (audibleRemaining > 1 && remaining <= GAPLESS_SEAMLESS_WARMUP_SECONDS) {
                   controller.warmup()
-                } else if (remaining > 0 && remaining <= 1) {
-                  controller.scheduleBoundary({ active, remaining, albumPlayback: true })
+                } else if (audibleRemaining > 0 && audibleRemaining <= 1) {
+                  controller.scheduleBoundary({ active, remaining: audibleRemaining, albumPlayback: true, joinOffset })
+                }
+                // 提前 ended：烧死的尾静音不值得等——有声内容已结束（remaining ≤ outroSilence）
+                // 且首选已武装时，直接执行拼接（ended 事件将来还会来，但 armed 已被消费，
+                // onEnded 返回 false 落到普通分支也只是重复停一个已停的 deck）。
+                // onEnded false（armed 未置位：seek 直落尾静音区会清掉边界调度）→
+                // 立即补武装一次：scheduleBoundary remaining=0，首选分支下一拍拼接、
+                // 备选分支 timer 立即过渡——否则该曲边白等最长 5s 尾静音 + 不跳 intro。
+                if (outroSilence > 0.05 && audibleRemaining <= 0) {
+                  const standbyAudio = getStandbyAudio()
+                  if (controller.onEnded(standbyAudio, joinOffset)) {
+                    debugLog(`⚡ [Gapless] 有声内容结束（尾静音 ${outroSilence.toFixed(2)}s 不播），提前拼接`)
+                    return
+                  }
+                  if (!standbyAudio?.paused && standbyAudio?.src) {
+                    controller.scheduleBoundary({ active, remaining: 0, albumPlayback: true, joinOffset })
+                  }
                 }
               }
             } else {
@@ -3247,18 +3326,30 @@ export function useAudioPlayer(
       // （边界 timer 与竞态互斥由 seamlessJoinController 管理）
       seamlessJoinControllerRef.current?.cancelBoundaryTimer()
 
+      // 看歌挂起：切歌类提交（首选拼接/ended 兜底提交）一律冻结——看歌进入时已
+      // cancelScheduledTransition，但 ended 与取消存在同拍竞态，onEnded 首选拼接
+      // 内部会自己 standby.play() 把下一首放出声（绕过 startTransition 的 watchHold
+      // 拦截）。挂起期间不提交：保留 ended 语义交给退出看歌后的重武装链收尾。
+      if (watchHoldRef.current) {
+        debugLog('⏸ [Event] 看歌挂起：忽略源曲 ended（退出看歌后由重武装链接管）')
+        return
+      }
+
       const standby = getStandbyAudio()
       debugLog('🔍 [Event] 检查过渡状态:', transitionStateRef.current)
       debugLog('   待机音频:', standby ? '存在' : '不存在')
       debugLog('   待机音频暂停?', standby?.paused)
       debugLog('   待机音频 src:', standby?.src || '无')
 
-      // ── 首选：无缝拼接（头尾都不掐）──
-      // source 已完整播到 ended。standby 可能处于三种就绪形态：PREROLL 静音预启动中、
-      // 预热完成后暂停回拨 0、或已缓冲暂停。控制器统一"确保 standby 从头播放"：
-      // 未在播则启动（0 位置已缓冲 → 快），回拨 0 后瞬时切换增益——
-      // 不做任何淡入淡出、不掐 source 尾部、不跳过 standby 开头。
-      if (seamlessJoinControllerRef.current?.onEnded(standby)) return
+      // ── 首选：无缝拼接（源曲尾静音不播，standby 跳过烧死的前静音）──
+      // source 已播到 ended。standby 可能处于三种就绪形态：PREROLL 静音预启动中、
+      // 预热完成后暂停回拨 joinOffset、或已缓冲暂停。控制器统一"确保 standby 从
+      // joinOffset（下一首 introSilence，无分析缓存时 0）播放"：未在播则启动，
+      // seek 后瞬时切换增益——不做任何淡入淡出、不掐 source 有声尾部。
+      // joinOffset 查的是**下一首**的 introSilence（源曲的是 outroSilence，别混）
+      const nextSilenceForJoin = autoMixAnalysisService.peekSilenceBounds(nextMetadataRef.current?.trackKey || '')
+      const joinOffset = nextSilenceForJoin ? Math.max(0, Math.min(2, nextSilenceForJoin.introSilence || 0)) : 0
+      if (seamlessJoinControllerRef.current?.onEnded(standby, joinOffset)) return
 
       if (transitionStateRef.current === 'running-transition' && standby && !standby.paused) {
         debugLog('✅ [Event] 过渡正在进行中，提交过渡')

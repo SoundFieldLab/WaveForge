@@ -91,6 +91,7 @@ const automixNotificationMemory = {
   trackKey: '',
   notified: false,
   maxTime: 0,
+  lastKey: '',
 }
 
 /** AutoMix 过渡倒计时订阅：徽标内部用（useSyncExternalStore 范式，重渲染仅徽标子树） */
@@ -160,12 +161,23 @@ export const AutomixHudBadge = memo(function AutomixHudBadge({
   const currentTime = playbackTimeStore ? subscribedTime : (currentTimeProp ?? 0)
   // info.key = `${当前曲 trackKey}|${切点}`：第一段即「当前曲」身份，
   // 同一首歌内重新排程（seek / 快进）只会改变切点，不会改变这一段 → 通知不重复。
+  // 例外：**切点本身变化**（插入下一曲/队列重排触发 cancelTransition+重武装，过渡
+  // 对从 A→B 换成 A→C）——用户必须重新看到「即将在 xx:xx 过渡」提示，否则不知道
+  // 过渡点已改。key 整体变化（含切点段）时重置 notified，视为新一轮。
   const trackKey = info.key.split('|')[0] || info.key
   const memory = automixNotificationMemory
   if (memory.trackKey !== trackKey) {
     memory.trackKey = trackKey
     memory.notified = false
     memory.maxTime = 0
+    memory.lastKey = ''
+  }
+  if (memory.lastKey !== info.key) {
+    // 换了计划（新对/新切点）：重新允许提示一次。seek 重排同曲窗口也会走到这里，
+    // 但 seek 时 remaining 大多 >0 且用户已见过的提示刚消失——再提示一次反而符合
+    // "过渡点变了该告知"的直觉；纯同切点重算 key 不变，不会重弹。
+    memory.notified = false
+    memory.lastKey = info.key
   }
   // 同一首歌重新从头播放（时间轴明显回落）：视为新一轮，允许再提示一次
   if (memory.notified && currentTime + 2 < memory.maxTime) {

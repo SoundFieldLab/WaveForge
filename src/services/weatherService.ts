@@ -45,6 +45,13 @@ export interface WeatherAirQuality {
   aqi: number
   pm25: number
   pm10: number
+  /** 美国环保署 AQI（可选） */
+  usAqi?: number
+  /** 其他污染物（μg/m³，可选） */
+  ozone?: number
+  nitrogenDioxide?: number
+  sulphurDioxide?: number
+  carbonMonoxide?: number
   /** 逐小时 AQI（用于趋势图） */
   hourlyAqi: Array<{ time: string; aqi: number }>
 }
@@ -88,12 +95,30 @@ export interface WeatherHour {
   weatherCode: number
   windSpeed: number
   windGusts: number
+  /** 逐时风向（度，0=北风，气象惯例：风来的方向） */
+  windDirection: number
   visibility: number
   uvIndex: number
   humidity: number
   pressure: number
   dewPoint: number
   cloudCover: number
+  /** 地面积雪深度（米） */
+  snowDepth: number
+  /** 0°C 冻结层海拔（米） */
+  freezingLevel: number
+  /** 对流有效位能 CAPE（J/kg） */
+  cape: number
+  /** 短波辐射（W/m²，该小时平均） */
+  shortwaveRadiation: number
+  /** 分层云量：低云(≤3km)/中云(3-8km)/高云(>8km)，% */
+  cloudCoverLow: number
+  cloudCoverMid: number
+  cloudCoverHigh: number
+  /** 80 米高空风速（km/h，风机/高层参考） */
+  windSpeed80m: number
+  /** 晴空（无云）假设下的 UV 指数 */
+  uvIndexClearSky: number
 }
 
 export interface WeatherDay {
@@ -105,15 +130,36 @@ export interface WeatherDay {
   apparentTemperatureMin: number
   precipitationProbability: number
   precipitationSum: number
+  /** 降雨/阵雨/降雪分项（毫米/厘米） */
+  rainSum: number
+  showersSum: number
+  snowfallSum: number
+  /** 有降水的小时数 */
+  precipitationHours: number
   windSpeedMax: number
   windGustsMax: number
+  /** 当日主导风向（度） */
+  windDirectionDominant: number
   uvIndexMax: number
+  /** 晴空（无云）条件下的 UV 峰值 */
+  uvIndexClearSkyMax: number
+  /** 日最大饱和水汽压差 VPD（kPa，干燥度指标） */
+  vapourPressureDeficitMax?: number
   sunrise: string
   sunset: string
   /** 当日总日照时长（秒，Open-Meteo daylight_duration）；
    *  sunshine_duration 是直达日照（无云遮挡），晨昏蒙影等衍生值由 UI 侧从日出/日落推算 */
   daylightDuration?: number
   sunshineDuration?: number
+  /** 太阳总辐射（MJ/m²，Apple「日照」卡的数值源） */
+  shortwaveRadiationSum?: number
+  /** 参考作物蒸散 ET₀（毫米） */
+  et0Evapotranspiration?: number
+  /** 月出/月落（ISO 字符串，可能为空——极昼极夜或月不出） */
+  moonrise?: string
+  moonset?: string
+  /** 月相 0-1（0 新月 0.5 满月） */
+  moonPhase?: number
 }
 
 export interface WeatherSnapshot {
@@ -129,7 +175,7 @@ export interface WeatherSnapshot {
 
 const WEATHER_CACHE_PREFIX = 'desktopWeatherSnapshot:'
 const weatherSnapshotPending = new Map<string, Promise<WeatherSnapshot>>()
-const WEATHER_CACHE_MAX_AGE = 15 * 60 * 1000
+const WEATHER_CACHE_MAX_AGE = 10 * 60 * 1000
 const LOCATION_SEARCH_CACHE_MAX_AGE = 5 * 60 * 1000
 const locationSearchCache = new Map<string, { expiresAt: number; results: WeatherLocationSearchResult[] }>()
 const LOCATION_SEARCH_CACHE_MAX_ENTRIES = 50
@@ -183,12 +229,13 @@ export const WEATHER_LABELS: Record<number, string> = {
 export const getWeatherLabel = (code: number) => WEATHER_LABELS[code] || '天气变化'
 
 export const getWeatherCacheKey = (settings: DesktopCustomizationSettings) =>
-  `${WEATHER_CACHE_PREFIX}${settings.weatherLocationMode}:${settings.weatherLocationMode === 'manual'
+  // v4：新增分层云量/80m风/晴空UV/VPD 字段
+  `${WEATHER_CACHE_PREFIX}v4:${settings.weatherLocationMode}:${settings.weatherLocationMode === 'manual'
     ? [settings.weatherCountryCode, settings.weatherProvinceCode, settings.weatherCityCode, settings.weatherDistrictCode || settings.weatherDistrict, settings.weatherLatitude, settings.weatherLongitude]
       .filter(value => value !== null && value !== undefined && value !== '')
       .join(':')
       .toLowerCase()
-    : 'current-auto-v2'}`
+    : 'current-auto-v4'}`
 
 const normalizePlaceName = (value: unknown) =>
   String(value || '')
@@ -560,10 +607,21 @@ export const getCachedWeather = (settings: DesktopCustomizationSettings, allowSt
     const updatedAt = Number(snapshot.updatedAt)
     if (!Number.isFinite(updatedAt)) return null
     if (!allowStale && Date.now() - updatedAt > WEATHER_CACHE_MAX_AGE) return null
+    // 结构校验：解析成功但内容残缺（半截写入/旧版本结构）当作无缓存，
+    // 并把坏数据删掉自愈，避免每次读取都撞同一份垃圾
+    const structurallyValid = Array.isArray(snapshot?.daily) && snapshot.daily.length > 0
+      && Array.isArray(snapshot?.hourly) && snapshot.hourly.length > 0
+      && snapshot?.current && Number.isFinite(snapshot.current.temperature)
+    if (!structurallyValid) {
+      try { localStorage.removeItem(getWeatherCacheKey(settings)) } catch { /* ignore */ }
+      return null
+    }
     const location = normalizeLocationParts(snapshot.location as Partial<WeatherLocation>) as WeatherLocation
     if (settings.weatherLocationMode === 'auto' && location.name === '当前位置' && !location.province && !location.city && !location.district) return null
     return { ...snapshot, location }
   } catch {
+    // JSON 解析失败（写入中断/损坏）：删掉坏缓存自愈
+    try { localStorage.removeItem(getWeatherCacheKey(settings)) } catch { /* ignore */ }
     return null
   }
 }
@@ -691,12 +749,25 @@ const resolveIpLocation = async (signal?: AbortSignal): Promise<WeatherLocation>
   throw new Error('自动定位服务暂时繁忙，请稍后重试或选择手动定位')
 }
 
+// 自动定位结果缓存：Windows 系统定位（PowerShell 子进程 1-3s）+ 逆地理（1-2s）是
+// 刷新链最慢的两段，而 10 分钟内用户位置几乎不变。缓存命中时刷新只需一次预报请求。
+const AUTO_LOCATION_CACHE_TTL = 10 * 60 * 1000
+let autoLocationCache: { location: WeatherLocation; at: number } | null = null
+
 const resolveAutoLocation = async (signal?: AbortSignal): Promise<WeatherLocation> => {
+  if (autoLocationCache && Date.now() - autoLocationCache.at < AUTO_LOCATION_CACHE_TTL) {
+    return autoLocationCache.location
+  }
   try {
-    return await resolveBrowserLocation(signal)
+    const location = await resolveBrowserLocation(signal)
+    autoLocationCache = { location, at: Date.now() }
+    return location
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw error
-    return resolveIpLocation(signal)
+    // 精确定位失败降级 IP 定位：IP 结果同样进缓存
+    const ipLocation = await resolveIpLocation(signal)
+    autoLocationCache = { location: ipLocation, at: Date.now() }
+    return ipLocation
   }
 }
 
@@ -955,14 +1026,19 @@ export async function fetchWeatherSnapshot(
   ].join(',')
   const hourlyFields = [
     'temperature_2m', 'apparent_temperature', 'precipitation_probability', 'precipitation', 'snowfall',
-    'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'visibility', 'uv_index', 'relative_humidity_2m', 'surface_pressure',
-    'dew_point_2m', 'cloud_cover',
+    'weather_code', 'wind_speed_10m', 'wind_gusts_10m', 'wind_direction_10m', 'visibility', 'uv_index',
+    'relative_humidity_2m', 'surface_pressure', 'dew_point_2m', 'cloud_cover',
+    'snow_depth', 'freezing_level_height', 'cape', 'shortwave_radiation',
+    'cloud_cover_low', 'cloud_cover_mid', 'cloud_cover_high', 'wind_speed_80m', 'uv_index_clear_sky',
   ].join(',')
   const dailyFields = [
     'weather_code', 'temperature_2m_max', 'temperature_2m_min', 'apparent_temperature_max',
     'apparent_temperature_min', 'precipitation_probability_max', 'precipitation_sum',
     'wind_speed_10m_max', 'wind_gusts_10m_max', 'uv_index_max', 'sunrise', 'sunset',
     'daylight_duration', 'sunshine_duration',
+    'snowfall_sum', 'precipitation_hours', 'rain_sum', 'showers_sum',
+    'shortwave_radiation_sum', 'uv_index_clear_sky_max', 'moonrise', 'moonset', 'moon_phase',
+    'wind_direction_10m_dominant', 'et0_fao_evapotranspiration', 'vapour_pressure_deficit_max',
   ].join(',')
   const forecastUrl = new URL('https://api.open-meteo.com/v1/forecast')
   forecastUrl.searchParams.set('latitude', String(location.latitude))
@@ -973,38 +1049,56 @@ export async function fetchWeatherSnapshot(
   forecastUrl.searchParams.set('timezone', 'auto')
   forecastUrl.searchParams.set('forecast_days', '10')
 
-  const response = await fetch(forecastUrl.toString(), { signal })
+  // 空气质量（独立免费端点）：与主预报并行请求（省一整个串行 RTT，刷新明显更快），
+  // 失败/超时（6s）不影响主数据——主预报不陪它等。
+  const aqUrl = new URL('https://air-quality-api.open-meteo.com/v1/air-quality')
+  aqUrl.searchParams.set('latitude', String(location.latitude))
+  aqUrl.searchParams.set('longitude', String(location.longitude))
+  // 注意：air-quality API 不提供 pm1（传了会整单 400），其余 current 字段可任意组合
+  aqUrl.searchParams.set('current', 'european_aqi,pm2_5,pm10,ozone,nitrogen_dioxide,sulphur_dioxide,carbon_monoxide,us_aqi')
+  aqUrl.searchParams.set('hourly', 'european_aqi')
+  aqUrl.searchParams.set('timezone', 'auto')
+  aqUrl.searchParams.set('forecast_days', '2')
+
+  const [forecastResult, aqResult] = await Promise.allSettled([
+    fetch(forecastUrl.toString(), { signal }),
+    fetch(aqUrl.toString(), { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(6_000)]) : AbortSignal.timeout(6_000) }),
+  ])
+
+  if (forecastResult.status === 'rejected') throw forecastResult.reason instanceof Error ? forecastResult.reason : new Error('天气预报服务暂时不可用')
+  const response = forecastResult.value
   if (!response.ok) throw new Error('天气预报服务暂时不可用')
   const data = await response.json()
   if (data.error) throw new Error(data.reason || '天气预报返回错误')
+  // 结构完整性守卫：字段组不齐（上游模型变更/半响应）宁可报错走重试/缓存，也不落一份残缺快照
+  if (!Array.isArray(data.daily?.time) || data.daily.time.length === 0 || !Array.isArray(data.hourly?.time) || data.hourly.time.length === 0 || !data.current) {
+    throw new Error('天气预报返回数据不完整')
+  }
 
-  // 空气质量（独立免费端点，失败不影响主数据）
+  // 空气质量解析：失败/超时静默（可选数据）
   let airQuality: WeatherAirQuality | null = null
-  try {
-    const aqUrl = new URL('https://air-quality-api.open-meteo.com/v1/air-quality')
-    aqUrl.searchParams.set('latitude', String(location.latitude))
-    aqUrl.searchParams.set('longitude', String(location.longitude))
-    aqUrl.searchParams.set('current', 'european_aqi,pm2_5,pm10')
-    aqUrl.searchParams.set('hourly', 'european_aqi')
-    aqUrl.searchParams.set('timezone', 'auto')
-    aqUrl.searchParams.set('forecast_days', '2')
-    const aqResponse = await fetch(aqUrl.toString(), { signal })
-    if (aqResponse.ok) {
-      const aqData = await aqResponse.json()
+  if (aqResult.status === 'fulfilled' && aqResult.value.ok) {
+    try {
+      const aqData = await aqResult.value.json()
       const aqi = toNumber(aqData.current?.european_aqi)
       if (Number.isFinite(aqi)) {
         airQuality = {
           aqi,
           pm25: toNumber(aqData.current?.pm2_5),
           pm10: toNumber(aqData.current?.pm10),
+          usAqi: toNumber(aqData.current?.us_aqi),
+          ozone: toNumber(aqData.current?.ozone),
+          nitrogenDioxide: toNumber(aqData.current?.nitrogen_dioxide),
+          sulphurDioxide: toNumber(aqData.current?.sulphur_dioxide),
+          carbonMonoxide: toNumber(aqData.current?.carbon_monoxide),
           hourlyAqi: (aqData.hourly?.time || []).slice(0, 25).map((time: string, index: number) => ({
             time,
             aqi: toNumber(aqData.hourly?.european_aqi?.[index]),
           })),
         }
       }
-    }
-  } catch { /* 空气质量为可选数据 */ }
+    } catch { /* 空气质量为可选数据 */ }
+  }
 
   const current: WeatherCurrent = {
     time: data.current?.time || '',
@@ -1032,6 +1126,16 @@ export async function fetchWeatherSnapshot(
     weatherCode: toNumber(data.hourly.weather_code?.[index]),
     windSpeed: toNumber(data.hourly.wind_speed_10m?.[index]),
     windGusts: toNumber(data.hourly.wind_gusts_10m?.[index]),
+    windDirection: toNumber(data.hourly.wind_direction_10m?.[index]),
+    snowDepth: toNumber(data.hourly.snow_depth?.[index]),
+    freezingLevel: toNumber(data.hourly.freezing_level_height?.[index]),
+    cape: toNumber(data.hourly.cape?.[index]),
+    shortwaveRadiation: toNumber(data.hourly.shortwave_radiation?.[index]),
+    cloudCoverLow: toNumber(data.hourly.cloud_cover_low?.[index]),
+    cloudCoverMid: toNumber(data.hourly.cloud_cover_mid?.[index]),
+    cloudCoverHigh: toNumber(data.hourly.cloud_cover_high?.[index]),
+    windSpeed80m: toNumber(data.hourly.wind_speed_80m?.[index]),
+    uvIndexClearSky: toNumber(data.hourly.uv_index_clear_sky?.[index]),
     visibility: toNumber(data.hourly.visibility?.[index]),
     uvIndex: toNumber(data.hourly.uv_index?.[index]),
     humidity: toNumber(data.hourly.relative_humidity_2m?.[index]),
@@ -1049,13 +1153,25 @@ export async function fetchWeatherSnapshot(
     apparentTemperatureMin: toNumber(data.daily.apparent_temperature_min?.[index]),
     precipitationProbability: toNumber(data.daily.precipitation_probability_max?.[index]),
     precipitationSum: toNumber(data.daily.precipitation_sum?.[index]),
+    rainSum: toNumber(data.daily.rain_sum?.[index]),
+    showersSum: toNumber(data.daily.showers_sum?.[index]),
+    snowfallSum: toNumber(data.daily.snowfall_sum?.[index]),
+    precipitationHours: toNumber(data.daily.precipitation_hours?.[index]),
     windSpeedMax: toNumber(data.daily.wind_speed_10m_max?.[index]),
     windGustsMax: toNumber(data.daily.wind_gusts_10m_max?.[index]),
+    windDirectionDominant: toNumber(data.daily.wind_direction_10m_dominant?.[index]),
     uvIndexMax: toNumber(data.daily.uv_index_max?.[index]),
+    uvIndexClearSkyMax: toNumber(data.daily.uv_index_clear_sky_max?.[index]),
+    vapourPressureDeficitMax: toNumber(data.daily.vapour_pressure_deficit_max?.[index]),
     sunrise: data.daily.sunrise?.[index] || '',
     sunset: data.daily.sunset?.[index] || '',
     daylightDuration: toNumber(data.daily.daylight_duration?.[index]),
     sunshineDuration: toNumber(data.daily.sunshine_duration?.[index]),
+    shortwaveRadiationSum: toNumber(data.daily.shortwave_radiation_sum?.[index]),
+    et0Evapotranspiration: toNumber(data.daily.et0_fao_evapotranspiration?.[index]),
+    moonrise: data.daily.moonrise?.[index] || '',
+    moonset: data.daily.moonset?.[index] || '',
+    moonPhase: toNumber(data.daily.moon_phase?.[index]),
   }))
 
   const currentHourIndex = Math.max(0, hourly.findIndex(hour => hour.time >= current.time))
@@ -1071,10 +1187,16 @@ export async function fetchWeatherSnapshot(
     updatedAt: Date.now(),
   }
 
-  try {
-    localStorage.setItem(getWeatherCacheKey(settings), JSON.stringify(snapshot))
-  } catch {
-    // 配额满（10 天 hourly 快照较大）：放弃缓存，本次快照照常返回
+  // 写入前结构校验：残缺快照（上游字段变更/解析异常）不落盘——落了会把上一份好缓存
+  // 覆盖掉，之后 15 分钟内 UI 只能渲染残缺数据（"--"/0 值）。
+  const snapshotValid = Array.isArray(daily) && daily.length > 0 && upcomingHourly.length > 0
+    && Number.isFinite(current.temperature) && current.time
+  if (snapshotValid) {
+    try {
+      localStorage.setItem(getWeatherCacheKey(settings), JSON.stringify(snapshot))
+    } catch {
+      // 配额满（10 天 hourly 快照较大）：放弃缓存，本次快照照常返回
+    }
   }
   return snapshot
 }
@@ -1089,13 +1211,14 @@ export async function ensureWeatherSnapshot(
   }
 
   const cacheKey = getWeatherCacheKey(settings)
-  let request = weatherSnapshotPending.get(cacheKey)
-  if (!request || options.forceRefresh) {
+  // 主预报请求自动重试一次（指数退避 1.2s）：Open-Meteo 偶发抖动/超时不该直接把
+  // 整个天气页打挂——重试仍失败才把错误抛给调用方（调用方还有 stale 缓存兜底）。
+  const requestOnce = (): Promise<WeatherSnapshot> => {
     const controller = new AbortController()
     const timeoutId = window.setTimeout(() => controller.abort(), 20_000)
     const callerAbort = () => controller.abort()
     options.signal?.addEventListener('abort', callerAbort, { once: true })
-    request = fetchWeatherSnapshot(settings, controller.signal).finally(() => {
+    const request = fetchWeatherSnapshot(settings, controller.signal).finally(() => {
       window.clearTimeout(timeoutId)
       options.signal?.removeEventListener('abort', callerAbort)
     })
@@ -1104,6 +1227,28 @@ export async function ensureWeatherSnapshot(
       if (weatherSnapshotPending.get(cacheKey) === request) weatherSnapshotPending.delete(cacheKey)
     }
     void request.then(cleanup, cleanup)
+    return request
+  }
+
+  let request = weatherSnapshotPending.get(cacheKey)
+  if (!request || options.forceRefresh) {
+    request = (async () => {
+      try {
+        return await requestOnce()
+      } catch (firstError) {
+        // 调用方已中止：不重试，原样抛 AbortError
+        if ((firstError as Error).name === 'AbortError') throw firstError
+        await new Promise(resolve => window.setTimeout(resolve, 1200))
+        if (options.signal?.aborted) throw firstError
+        try {
+          return await requestOnce()
+        } catch (retryError) {
+          if ((retryError as Error).name === 'AbortError') throw retryError
+          // 两次都失败：抛首个错误（更有信息量），由调用方降级 stale 缓存
+          throw firstError
+        }
+      }
+    })()
   }
 
   if (!options.signal) return request

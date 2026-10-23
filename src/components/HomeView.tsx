@@ -45,6 +45,7 @@ import { getApiBase } from '../services/apiConfig'
 const loadKugouMinimalSuite = () => import('../features/kugouMinimal/KugouMinimalSuite')
 const LazyKugouMinimalSuite = lazy(loadKugouMinimalSuite)
 const LazyKugouLongaudioQuickButton = lazy(() => loadKugouMinimalSuite().then(module => ({ default: module.KugouLongaudioQuickButton })))
+const LazyKugouMinimalEntries = lazy(() => loadKugouMinimalSuite().then(module => ({ default: module.KugouMinimalEntries })))
 
 interface HomeViewProps {
   onSongSelect: SongSelectHandler
@@ -2938,6 +2939,19 @@ function HomeView({
               </div>
             </div>
             )}
+            {/* 酷狗专区入口（仅酷狗）：从个人信息栏迁入歌单面板尾部——个人信息栏要留给
+                退出登录等账号操作；登录/未登录/空态都在面板底部可见 */}
+            {platform === 'kugou' && (
+              <Suspense fallback={null}>
+                <LazyKugouMinimalEntries
+                  loggedIn={isLoggedIn}
+                  theme={playerTheme}
+                  openTab={kugouCenterTab}
+                  onOpenTab={setKugouCenterTab}
+                  onLoginClick={handlePlatformLoginClick}
+                />
+              </Suspense>
+            )}
           </div>
         </motion.div>
 
@@ -3106,6 +3120,7 @@ function HomeView({
                 }}
                 onAddToFavorites={onAddToFavorites}
                 onRemoveFromFavorites={onRemoveFromFavorites}
+                entriesPlacement="panel"
               />
             </Suspense>
           )}

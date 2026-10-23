@@ -14,7 +14,7 @@ const component = (name: string) => readFileSync(new URL(`../src/components/${na
 const feature = (path: string) => readFileSync(new URL(`../src/features/${path}`, import.meta.url), 'utf8')
 
 describe('酷狗探索页板块的平台隔离', () => {
-  it('kugou 能力表只含一级分区收纳后的官方板块（音乐五板块 + 听书；刷歌已下线）', () => {
+  it('kugou 能力表只含一级分区收纳后的官方板块（音乐五板块 + 听书 + 刷歌）', () => {
     const sections = getPlatformCapabilities('kugou').exploreSections
     expect(sections).toEqual([
       'discover',
@@ -23,6 +23,7 @@ describe('酷狗探索页板块的平台隔离', () => {
       'channels',
       'kugouCategories',
       'kugouLongaudio',
+      'kugouYouth',
     ])
     expect(getPlatformCapabilities('kugou').channels).toBe(true)
     // 通用聚合板块（推荐歌单/排行榜/最新音乐/新碟）由酷狗五板块覆盖，不再出现在能力表里
@@ -69,19 +70,20 @@ describe('酷狗探索页板块的平台隔离', () => {
     expect(source).not.toContain('<KugouDiscoverBoard')
   })
 
-  it('KugouExplorePage 是发现/音乐/听书三区外壳（刷歌已下线），且只引用酷狗专属板块', () => {
+  it('KugouExplorePage 是发现/音乐/听书/刷歌四区外壳，且只引用酷狗专属板块', () => {
     const page = feature('kugouExplore/KugouExplorePage.tsx').replace(/\r\n/g, '\n')
-    expect(page).toContain("export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio'")
-    for (const label of ["label: '发现'", "label: '音乐'", "label: '听书'"]) {
+    expect(page).toContain("export type KugouExploreZoneId = 'discover' | 'music' | 'longaudio' | 'youth'")
+    for (const label of ["label: '发现'", "label: '音乐'", "label: '听书'", "label: '刷歌'"]) {
       expect(page).toContain(label)
     }
-    // 三区内容分别由酷狗专属板块提供（发现 = 概念版「发现」tab 复刻 KugouDiscoverBoard）
+    // 四区内容分别由酷狗专属板块提供（发现 = 概念版「发现」tab 复刻 KugouDiscoverBoard）
     expect(page).toContain('<KugouDiscoverBoard')
     expect(page).toContain('<KugouExploreSections')
     expect(page).toContain('<KugouLongaudioBoard')
-    // 独立听书播放器挂在外壳下；刷歌 Overlay 已随下线移除
+    expect(page).toContain('<KugouYouthFeedBoard')
+    // 独立听书播放器与刷歌全屏竖滑页挂在外壳下（store 共享）
     expect(page).toContain('<KugouLongaudioOverlay />')
-    expect(page).not.toContain('<KugouYouthFeedOverlay')
+    expect(page).toContain('<KugouYouthFeedOverlay')
     // 分区页签用酷狗品牌色（#FF7A00 系 accent 由宿主传入，激活项品牌色胶囊）
     expect(page).toContain('role="tablist"')
     expect(page).toContain("aria-label=\"酷狗探索分区\"")

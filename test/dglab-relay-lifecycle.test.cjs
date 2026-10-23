@@ -72,6 +72,47 @@ test('DG-LAB relay rejects a mismatched V3 target', async t => {
   assert.equal(relay._internal.app.v3, null)
 })
 
+test('DG-LAB V4 wraps app-bound RPCs in the official message envelope', async t => {
+  const relay = createDGLabRelay()
+  const port = await reservePort()
+  relay._internal.settings.port = port
+  relay._internal.settings.version = 'v4'
+  t.after(() => relay.stop())
+  relay.start()
+  await waitFor(() => relay.getStatus().running)
+
+  const tid = new URL(`http://x${relay.getStatus().urlV4}`).searchParams.get('tid')
+  const app = new WebSocket(`ws://127.0.0.1:${port}/dglab/v4?tid=${tid}`)
+  // 先挂收帧监听再等 open：hello/devices.get 在握手完成的同一数据块里到达，晚挂会丢
+  const frames = []
+  app.on('message', raw => frames.push(JSON.parse(raw.toString())))
+  await new Promise((resolve, reject) => { app.once('open', resolve); app.once('error', reject) })
+  // 模拟 App 上报设备（带官方 message 信封，与真实 App 一致）
+  app.send(JSON.stringify({ type: 'message', data: { t: 'ev', ev: 'devices.snapshot', devices: [{ id: 0, slotId: 'SLOT01', name: 'T', type: 'COYOTE_030' }] } }))
+
+  // 触发一次 clear + 强度下发（经渲染端控制通道）
+  const ctrl = new WebSocket(`ws://127.0.0.1:${port}/dglab/ctrl?token=${encodeURIComponent(relay._internal.controlToken)}`)
+  await new Promise((resolve, reject) => { ctrl.once('open', resolve); ctrl.once('error', reject) })
+  ctrl.send(JSON.stringify({ t: 'start' }))
+  ctrl.send(JSON.stringify({ t: 'audio', data: { kick: 0.5, bass: 0.5, mid: 0.5, lead: 0.5, hats: 0.5, high: 0.5, overall: 0.5, beat: 0.6, accent: 0.2, flux: 0, left: { bass: 0.5, mid: 0.5, high: 0.5, overall: 0.5 }, right: { bass: 0.5, mid: 0.5, high: 0.5, overall: 0.5 } } }))
+
+  // 连接帧（hello/devices.get 信封）此刻已在；音频驱动的 device.op 等 30fps 引擎节流后到达
+  await waitFor(() => frames.some(f => f.type === 'message' && f.data?.t === 'req' && f.data?.m === 'device.op'), 5000).catch(() => {})
+  ctrl.close()
+  app.close()
+
+  // 信封断言：所有 t:req 业务帧必须包 type=message + clientId；不允许再出现裸 t:req
+  const reqFrames = frames.filter(f => f.t === 'req')
+  assert.deepEqual(reqFrames, [], 'no bare t:req frames may be sent to the app')
+  // devices.get（连接即发）与 device.op（音频驱动）都必须在信封里
+  assert.ok(frames.some(f => f.type === 'message' && f.data?.t === 'req' && f.data?.m === 'devices.get'), 'devices.get must be enveloped')
+  assert.ok(frames.some(f => f.type === 'message' && f.data?.t === 'req' && f.data?.m === 'device.op'), 'device.op must be enveloped')
+  assert.ok(frames.every(f => f.type === 'message' || f.data === undefined || f.data.t !== 'req'), 'no business frame escapes the envelope')
+  // hello/client_attached/heartbeat 仍是服务器级帧（无信封）
+  assert.ok(frames.some(f => f.type === 'hello'))
+  assert.ok(frames.some(f => f.type === 'heartbeat'))
+})
+
 test('DG-LAB relay ranks real NICs above virtual ones (case-insensitive)', () => {
   const nets = {
     'VMware Network Adapter VMnet1': [{ address: '192.168.174.1', family: 'IPv4', internal: false }],

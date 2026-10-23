@@ -94,6 +94,8 @@ export interface ExploreChartSong {
   name: string
   artist: string
   coverUrl?: string
+  /** 时长（秒）。酷狗 rank/info 带该字段，透传给二级页时长列（缺省 0 → 显示 --:--） */
+  duration?: number
   rank?: number
 }
 
@@ -227,6 +229,8 @@ export interface ExplorePayload {
     source: string
     recommendationSource?: 'qq-guess-you-like' | 'qqmusic-skills-radio' | 'qq-daily' | 'public' | string
     updatedAt: number
+    /** 上游失败原因（如 Spotify 429 限流）：UI 据此显示准确提示而非笼统"暂无内容" */
+    error?: string
   }
 }
 
@@ -439,7 +443,7 @@ export async function fetchExploreHome(
       result.status === 'fulfilled' ? result.value : chartTrackResults[index].status === 'fulfilled' ? [] : []
     )
     const hotTracks = rankSongs[0] || []
-    const toChart = (rank: { rankid: string; rankname: string; img?: string }, tracks: Array<{ hash: string; songName: string; singerName: string; coverUrl?: string }>): ExploreChart => ({
+    const toChart = (rank: { rankid: string; rankname: string; img?: string }, tracks: Array<{ hash: string; songName: string; singerName: string; coverUrl?: string; duration?: number }>): ExploreChart => ({
       id: `kg-${rank.rankid}`,
       name: rank.rankname || '酷狗榜单',
       group: '酷狗音乐',
@@ -453,6 +457,7 @@ export async function fetchExploreHome(
         name: track.songName,
         artist: track.singerName,
         coverUrl: track.coverUrl,
+        duration: track.duration,
         rank: index + 1,
       })),
     })
@@ -588,14 +593,156 @@ export async function fetchExploreHome(
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
     return payload
   }
-  // Spotify：官方 Web API（需登录 token；未登录返回空 payload，区块自动隐藏）
+  // Spotify：优先 api-partner GraphQL 桥（登录后，无 Web API 限流）；未登录或桥失败
+  // 回退官方 Web API（受 client_id 全局限流影响，429 时 meta.error 会带原因）
   if (platform === 'spotify') {
-    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists, fetchSpotifyCharts } = await import('./spotifyService')
+    // ── 主路径：partner 桥（OAuth 登录后自动播种会话）──
+    const { spotifyPartnerStatus, spotifyPartnerQuery } = await import('./spotifyPartnerClient')
+    const partnerStatus = await spotifyPartnerStatus()
+    if (partnerStatus.loggedIn) {
+      try {
+        // home GraphQL：Spotify 桌面客户端首页分区。实测（2026-10-22）该查询对 Web OAuth
+        // token 返回 GenericError（服务端按客户端身份风控；libraryV3/fetchPlaylist 正常）——
+        // 返回空分区时不再硬撑，落到下方 fetchPlaylist 兜底。
+        const home = await spotifyPartnerQuery('home', { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, spid: partnerStatus.user?.id ?? '' })
+        const sections = (home as any)?.home?.sectionList?.sections?.items ?? []
+        const newSongs: Song[] = []
+        const playlists: ExplorePlaylist[] = []
+        const albums: ExploreAlbum[] = []
+        const chartSongs: Array<{ mid: string | number; name: string; artist: string; coverUrl?: string; rank: number }> = []
+        // 分区数据形态多样（内容聚合），抽 first N 个"歌单网格/歌曲行"即可：
+        // section.items[].content.items[].data = { uri: 'spotify:playlist:…'|'spotify:album:…'|'spotify:track:…', data: { name, coverArt…, artists|owners } }
+        for (const section of sections.slice(0, 8)) {
+          const sectionTitle = String(section?.data?.title?.text ?? section?.data?.title ?? '')
+          for (const item of (section?.items ?? []).slice(0, 12)) {
+            const content = item?.content?.data ?? item?.content
+            const uri = String(content?.uri ?? '')
+            const name = String(content?.data?.name ?? content?.data?.title ?? '')
+            if (!name) continue
+            const cover = content?.data?.coverArt?.sources?.[0]?.url ?? content?.data?.coverArt?.preview?.url ?? ''
+            if (uri.startsWith('spotify:track:')) {
+              chartSongs.push({
+                mid: uri.split(':').pop() ?? '',
+                name,
+                artist: (content?.data?.artists?.items ?? []).map((a: any) => a?.profile?.name ?? a?.name ?? '').filter(Boolean).join(' / '),
+                coverUrl: cover,
+                rank: chartSongs.length + 1,
+              })
+            } else if (uri.startsWith('spotify:playlist:')) {
+              playlists.push({ id: uri.split(':').pop() ?? '', name, coverUrl: cover, platform: 'spotify', source: 'spotify-partner', creator: sectionTitle })
+            } else if (uri.startsWith('spotify:album:')) {
+              albums.push({ id: Number(parseInt((uri.split(':').pop() ?? '').slice(0, 12), 36)) || 0, mid: uri.split(':').pop() ?? '', name, artist: (content?.data?.artists?.items ?? []).map((a: any) => a?.profile?.name ?? a?.name ?? '').filter(Boolean).join(' / '), coverUrl: cover, platform: 'spotify' })
+              newSongs.push({ id: Number(parseInt((uri.split(':').pop() ?? '').slice(0, 12), 36)) || 0, mid: uri.split(':').pop() ?? '', name, artists: (content?.data?.artists?.items ?? []).map((a: any) => ({ name: a?.profile?.name ?? a?.name ?? '' })), album: { name: sectionTitle, picUrl: cover }, duration: 0, platform: 'spotify', fee: 0, songType: 1, fusedSources: [] })
+            }
+          }
+          if (newSongs.length >= 20 && playlists.length >= 8) break
+        }
+        // 榜单：始终补拉 Global Top 50（官方 pinned 榜 id 稳定，实测正常返回）
+        const charts: ExploreChart[] = []
+        try {
+          const top50 = await spotifyPartnerQuery('fetchPlaylist', { uri: 'spotify:playlist:37i9dQZF1DX0XUsuxWHRQd', offset: 0, limit: 30, enableWatchFeedEntrypoint: false })
+          const rows: any[] = (top50 as any)?.playlistV2?.content?.items ?? []
+          const top50Songs = rows.map((row: any, index: number) => ({
+            mid: String(row?.itemV2?.data?.uri ?? '').replace('spotify:track:', ''),
+            name: String(row?.itemV2?.data?.name ?? ''),
+            artist: (row?.itemV2?.data?.artists?.items ?? []).map((a: any) => a?.profile?.name ?? a?.name ?? '').filter(Boolean).join(' / '),
+            coverUrl: row?.itemV2?.data?.albumOfTrack?.coverArt?.sources?.[0]?.url ?? '',
+            rank: index + 1,
+          })).filter(s => s.mid && s.name).slice(0, 30)
+          if (top50Songs.length > 0) {
+            charts.push({
+              id: 'sp-global-top-50',
+              name: 'Global Top 50',
+              group: 'Spotify',
+              description: 'Global Top 50 · Spotify 官方榜单',
+              coverUrl: (top50 as any)?.playlistV2?.coverArt?.sources?.[0]?.url ?? '',
+              updateText: '每日更新',
+              platform: 'spotify' as const,
+              source: 'spotify-partner-chart',
+              songs: top50Songs,
+            })
+          }
+        } catch { /* 榜单失败不影响其它区块 */ }
+        // home 不可用（实测 2026-10-22：home 查询对 Web OAuth token 返回 GenericError，
+        // 而 fetchPlaylist/libraryV3 正常）→ 用官方 pinned 歌单拼首页曲库与歌单网格：
+        if (sections.length === 0) {
+          const pinnedPlaylists: Array<{ uri: string; label: string; description: string }> = [
+            { uri: 'spotify:playlist:37i9dQZF1DXcBWIGoYBM5M', label: "Today's Top Hits", description: "Today's Top Hits · Spotify 官方热歌" },
+            { uri: 'spotify:playlist:37i9dQZF1DX4JAvHpjipBk', label: 'New Music Friday', description: 'New Music Friday · Spotify 新歌精选' },
+            { uri: 'spotify:playlist:37i9dQZF1DX10ezKqEUnTX', label: 'Hot Hits USA', description: 'Hot Hits USA · Spotify 美区热歌' },
+          ]
+          const songsFromCharts: Song[] = []
+          for (const pinned of pinnedPlaylists) {
+            if (songsFromCharts.length >= 30) break
+            try {
+              const list = await spotifyPartnerQuery('fetchPlaylist', { uri: pinned.uri, offset: 0, limit: 30, enableWatchFeedEntrypoint: false })
+              const v2 = (list as any)?.playlistV2
+              const rows: any[] = v2?.content?.items ?? []
+              const trackRows = rows.map((row: any, index: number) => ({
+                mid: String(row?.itemV2?.data?.uri ?? '').replace('spotify:track:', ''),
+                name: String(row?.itemV2?.data?.name ?? ''),
+                artist: (row?.itemV2?.data?.artists?.items ?? []).map((a: any) => a?.profile?.name ?? a?.name ?? '').filter(Boolean).join(' / '),
+                coverUrl: row?.itemV2?.data?.albumOfTrack?.coverArt?.sources?.[0]?.url ?? '',
+                rank: index + 1,
+              })).filter(s => s.mid && s.name)
+              if (trackRows.length === 0) continue
+              playlists.push({
+                id: pinned.uri.replace('spotify:playlist:', ''),
+                name: String(v2?.name ?? pinned.label),
+                coverUrl: v2?.coverArt?.sources?.[0]?.url ?? '',
+                platform: 'spotify',
+                source: 'spotify-partner',
+                creator: 'Spotify',
+              })
+              // 首页"新发行"曲库：优先 Today's Top Hits（第一个成功的就是它）
+              if (songsFromCharts.length === 0) {
+                songsFromCharts.push(...trackRows.slice(0, 30).map(s => ({
+                  id: Number(parseInt(String(s.mid).slice(0, 12), 36)) || 0,
+                  mid: String(s.mid),
+                  name: s.name,
+                  artists: s.artist.split(' / ').map((artistName: string) => ({ name: artistName })),
+                  album: { name: String(v2?.name ?? pinned.label), picUrl: s.coverUrl },
+                  duration: 0,
+                  platform: 'spotify' as const,
+                  fee: 0,
+                  songType: 1,
+                  fusedSources: [],
+                })))
+              }
+            } catch { /* 单个歌单失败不影响其它 */ }
+          }
+          newSongs.push(...songsFromCharts)
+        }
+        const payload: ExplorePayload = {
+          code: 0,
+          platform: 'spotify',
+          officialEnhanced: false,
+          personalized: true,
+          dailySongs: [],
+          radioSongs: [],
+          newSongs,
+          playlists,
+          charts,
+          albums,
+          channels: [],
+          meta: { source: 'spotify-partner-graphql', updatedAt: Date.now() },
+        }
+        exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
+        return payload
+      } catch (error) {
+        // partner 桥异常（token 过期等）：回退官方 Web API
+        console.warn('[Explore] Spotify partner 桥失败，回退官方 Web API:', error)
+      }
+    }
+    // ── 回退路径：官方 Web API（需登录 token；未登录返回空 payload，区块自动隐藏）──
+    const { fetchSpotifyNewReleases, fetchSpotifyFeaturedPlaylists, fetchSpotifyCharts, lastSpotifyFailure } = await import('./spotifyService')
     const [releasesRes, playlistsRes, chartsRes] = await Promise.allSettled([
       fetchSpotifyNewReleases(30),
       fetchSpotifyFeaturedPlaylists(24),
       fetchSpotifyCharts(),
     ])
+    // 限流信号提前读取（三个请求各自更新 lastSpotifyFailure，最后一个是 charts）
+    const rateLimited = lastSpotifyFailure === 'rate-limited'
     const releases = releasesRes.status === 'fulfilled' ? releasesRes.value : []
     const albums: ExploreAlbum[] = releases.map(item => ({
       id: Number(parseInt(item.id.slice(0, 12), 36)) || 0,
@@ -655,7 +802,12 @@ export async function fetchExploreHome(
       charts,
       albums,
       channels: [],
-      meta: { source: 'spotify-web-api', updatedAt: Date.now() },
+      meta: {
+        source: 'spotify-web-api',
+        updatedAt: Date.now(),
+        // 限流时把原因带给 UI：空区块配"Spotify 接口限流"提示而非笼统"暂无内容"
+        ...(rateLimited ? { error: 'Spotify API 限流（429）：公共 client_id 配额被占满，可在设置中填入自己的 client_id 换独立配额' } : {}),
+      },
     }
     exploreHomeMemoryCache.set(cacheKey, { payload, expiresAt: Date.now() + EXPLORE_MEMORY_CACHE_TTL })
     return payload
@@ -1042,8 +1194,12 @@ async function fetchExplorePlaylistUncached(playlist: ExplorePlaylist, signal?: 
   }
   // Spotify 歌单：官方 Web API 曲目
   if (playlist.platform === 'spotify') {
-    const { fetchSpotifyPlaylist, spotifyTrackToSong } = await import('./spotifyService')
-    const tracks = await fetchSpotifyPlaylist(playlist.id)
+    const { spotifyTrackToSong } = await import('./spotifyService')
+    const { fetchPartnerPlaylistDetail } = await import('./spotifyPartnerData')
+    const partnerDetail = await fetchPartnerPlaylistDetail(playlist.id).catch(() => null)
+    const tracks = partnerDetail
+      ? partnerDetail.songs
+      : await (async () => { const { fetchSpotifyPlaylist } = await import('./spotifyService'); return fetchSpotifyPlaylist(playlist.id) })()
     const songs = tracks.map(spotifyTrackToSong)
     return {
       playlist: {
@@ -1192,6 +1348,28 @@ async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSign
       duration: 0,
       platform: 'apple',
     }))
+    // Spotify partner 榜单（Global Top 50 等）：songs 客户端已带（home 拉取时内嵌），直接映射
+    if (chart.source === 'spotify-partner-chart' && chart.songs.length > 0) {
+      return {
+        playlist: {
+          id: chart.id,
+          name: chart.name,
+          coverImgUrl: chart.coverUrl || '',
+          description: chart.description || '',
+          trackCount: chart.songs.length,
+          platform: 'spotify',
+        },
+        songs: chart.songs.map(song => ({
+          id: Number(parseInt(String(song.mid).slice(0, 12), 36)) || 0,
+          mid: String(song.mid),
+          name: song.name,
+          artists: song.artist ? [{ name: song.artist }] : [],
+          album: { name: '', picUrl: song.coverUrl || '' },
+          duration: 0,
+          platform: 'spotify',
+        })),
+      }
+    }
     return {
       playlist: {
         id: chart.id,
@@ -1212,7 +1390,7 @@ async function fetchExploreChartUncached(chart: ExploreChart, signal?: AbortSign
       name: song.name,
       artists: song.artist ? [{ name: song.artist }] : [],
       album: { name: '', picUrl: song.coverUrl || '' },
-      duration: 0,
+      duration: song.duration ? song.duration * 1000 : 0,
       platform: 'kugou',
     }))
     return {

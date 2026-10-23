@@ -18,6 +18,7 @@ import { recordLogin, clearLoginExpiry, isLoginExpired } from './loginExpiry'
 import { getSecureToken, removeSecureToken, setSecureToken } from './secureTokenStore'
 import { Converter } from 'opencc-js/t2cn'
 import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } from '../data/bilibiliMvDeclarations'
+import { OP_ED_EXTENSION_UPLOADER_MIDS, OP_ED_EXTENSION_VERSION, getOpEdExtensionDeclaration, findOpEdExtensionByMeta, isOpEdExtensionUploader } from '../data/bilibiliOpEdExtensions'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
 import { getApiBase } from './apiConfig'
 
@@ -452,16 +453,32 @@ export function decodeBiliTitle(input: string): string {
 }
 
 export async function searchBilibiliVideos(keyword: string, page = 1, signal?: AbortSignal): Promise<{ code: number; results: BilibiliVideo[] }> {
-  const data = await fetchJson<{ code: number; results: BilibiliVideo[] }>(
+  const data = await fetchJson<{ code: number; results: BilibiliVideo[]; loginDegraded?: boolean }>(
     `${BILI_API_BASE}/search?keyword=${encodeURIComponent(keyword)}&page=${page}`,
     { signal },
   )
+  // 服务端报告"带登录 cookie 被拒、匿名降级救回"：本机凭据已被 B 站拒绝。
+  // 发**专用提示事件**（不是 bilibili-auth-changed——那个会被 MV 播放器/设置页消费成
+  // setLoginReady(isBilibiliLoggedIn())，而本地 90 天有效期记录与"B 站实际拒绝凭据"是
+  // 两回事；搜索中途把 loginReady 翻 false 会立即把正在播的看歌界面顶成登录墙，比
+  // 静默降级更糟）。会话级节流，提示层自行决定怎么展示。
+  if (data?.loginDegraded) notifyBilibiliLoginDegraded()
   if (Array.isArray(data?.results)) {
     for (const item of data.results) {
       if (item && typeof item.title === 'string') item.title = decodeBiliTitle(item.title)
     }
   }
   return data
+}
+
+/** 过期凭据提示广播：会话级节流（10 分钟一次），只提示不改登录门控状态 */
+let loginDegradedNotifiedAt = 0
+function notifyBilibiliLoginDegraded() {
+  if (Date.now() - loginDegradedNotifiedAt < 10 * 60 * 1000) return
+  loginDegradedNotifiedAt = Date.now()
+  try {
+    window.dispatchEvent(new CustomEvent('bilibili-login-expired'))
+  } catch { /* 非浏览器环境忽略 */ }
 }
 
 export function getBilibiliView(bvid: string, signal?: AbortSignal): Promise<{ code: number; data: BilibiliViewData }> {
@@ -1065,6 +1082,15 @@ const ALTERNATE_VERSION_MARKERS = [
 ]
 // 「加长」不收：加长版是正片信号（POSITIVE_SONG +12、完整正片强规则 +25），再 -55 会自相矛盾
 const DERIVED_EXTENDED_MARKERS = ['延长', 'extended', 'loop', '循环', '完整版自制', '民间完整版']
+/**
+ * 「官方素材加长/延长版」标记（2026-10，OP/ED 延长专项）：标题同时自报"官方 OP/ED/IN/主题曲"
+ * 与"加长/延长/完整版"的投稿，是动画歌曲在"官方只有 TV size（~90s）"时的高质量完整画面来源
+ * （标杆：PCS_Studio 剧本级加长版，见 data/bilibiliOpEdExtensions.ts）。这类视频以官方分镜
+ * 再编 + 完整歌曲时长，音源就是歌曲完整版录音——不是现场/翻唱那种替代录音，应当作正片本体
+ * 加分，而不是被"时长偏离"惩罚。两种标记同时命中才成立（只写"加长版"的也可能是普通 MV）。
+ */
+const EXTENDED_KIND_MARKER = /官方\s*(?:OP|ED|IN|TM|主题曲|主題曲|片头曲|片尾曲|插入曲|挿入歌)|(?:OP|ED)\d?\s*(?:曲|延长|加长)/i
+const EXTENDED_LENGTH_MARKER = /加长|延长|加長|延長|extended|完整版|フル|full[\s._-]*(?:size|ver(?:sion)?)/i
 /** 合集/盘点类标题：包含多首歌，通常不是单曲正片 */
 const COMPILATION_MARKERS = ['合集', '串烧', '盘点', '榜单', '精选歌', '歌单', '经典歌曲', '怀旧金曲', 'top50', 'top10', '100首', '50首']
 const POSITIVE_EXTRA_MARKERS = ['歌词', '字幕', '4k', '1080p', '正式版', '中字', '高清', '超清']
@@ -1363,6 +1389,10 @@ interface UploaderWeightProfile {
   queryScopes?: readonly string[]
   score: number
   queryScore?: number
+  /** 信任范围限定（可选）：标题命中该正则才给 score——账号只在被信任的内容类目内加权。
+   *  背景（Vaundy 回归实测）：百億_光年 的「中日字幕完整版」搬运 +15 会盖过歌手本人官方 MV，
+   *  其被信任的是 OP/ED 完整版（官方映像）这一类目，不是所有内容——限定后官方优先序不受扰动。 */
+  requireTitleMarker?: RegExp
 }
 
 const UPLOADER_WEIGHT_PROFILES: readonly UploaderWeightProfile[] = [
@@ -1388,6 +1418,37 @@ const UPLOADER_WEIGHT_PROFILES: readonly UploaderWeightProfile[] = [
     mid: 675948095,
     score: 15,
   },
+  {
+    // PCS_Studio（mid 8871554，2026-10-21 用户人工审核通过）：动画官方素材「剧本级加长版」
+    // 专精 UP——官方 OP/ED 分镜再编 + 完整歌曲时长，是「OP/ED 延长」类的标杆来源
+    //（见 data/bilibiliOpEdExtensions.ts：129 期投稿已逐一人工标注歌曲）。
+    // +30：官方素材再编加长，稳定压过普通搬运与字幕版；仍低于官方 MV 的官号加成体系
+    // （本人官号 +25/+15、官方标记 +20、本人+认证 +20），有官方投稿在场时不抢位。
+    names: ['PCS_Studio', 'PCS Studio'],
+    mid: 8871554,
+    score: 30,
+  },
+  {
+    // 百億_光年（mid 1592191，2026-10-21 档案抽检）：高更新频率的动画 OP/ED 完整版搬运
+    //（官方映像+完整歌曲+中日字幕，标题形态「【中日字幕/OP完整版】作品 OP「歌名」/ 歌手」）。
+    // 抽检 2026-10 最近 20 期均为官方映像完整版，无现场/翻唱混入；尚未逐曲人工核验，
+    // 加分压过普通搬运但低于 PCS_Studio（用户人工审核过）与官方投稿。
+    // 信任限定在 OP/ED/主题曲完整版类目（requireTitleMarker）：普通歌曲 MV 搬运不加权，
+    // 保证「本人官方 MV vs 该号字幕搬运」的既有优先序不变（Vaundy 回归保护）。
+    names: ['百億_光年'],
+    mid: 1592191,
+    score: 15,
+    requireTitleMarker: /OP完整|ED完整|完整OP|完整ED|(?:OP|ED)\s*完整版|完整版|主題歌|主题曲/i,
+  },
+  {
+    // Aki惊蛰（mid 15319615，2026-10-21 档案抽检）：动画 OP/ED 完整版 + 中日歌词首发搬运
+    //（标题形态「【中日歌词首发/完整OP】作品 OP「歌名」歌手【无损音质】」）。
+    // 抽检 2026-10 最近 10 期均为官方映像完整版；同上百億_光年，未逐曲人工核验，类目限定同理。
+    names: ['Aki惊蛰'],
+    mid: 15319615,
+    score: 15,
+    requireTitleMarker: /OP完整|ED完整|完整OP|完整ED|(?:OP|ED)\s*完整版|完整版|主題歌|主题曲/i,
+  },
 ]
 
 interface ScopedOfficialSource {
@@ -1412,12 +1473,15 @@ const VERIFIED_OFFICIAL_SOURCES: ScopedOfficialSource[] = [
   { mid: 400813602, scopes: ['yoasobi', 'ayase'] },
 ]
 
-function uploaderWeightProfile(video: Pick<BilibiliVideo, 'author' | 'mid'>): UploaderWeightProfile | null {
+function uploaderWeightProfile(video: Pick<BilibiliVideo, 'author' | 'mid' | 'title'>): UploaderWeightProfile | null {
   const authorNorm = normalizeText(video.author)
-  return UPLOADER_WEIGHT_PROFILES.find((profile) => (
-    (profile.mid != null && video.mid === profile.mid)
-      || profile.names.some((name) => authorNorm === normalizeText(name))
+  const profile = UPLOADER_WEIGHT_PROFILES.find((entry) => (
+    (entry.mid != null && video.mid === entry.mid)
+      || entry.names.some((name) => authorNorm === normalizeText(name))
   )) || null
+  // 信任范围限定：账号只在被信任的内容类目内加权（requireTitleMarker 命中标题才生效）
+  if (profile?.requireTitleMarker && !profile.requireTitleMarker.test(String(video.title || ''))) return null
+  return profile
 }
 
 function uploaderQueries(song: MatchContext, artists: ResolvedArtistNames): string[] {
@@ -1754,8 +1818,15 @@ export function scoreCandidate(
   const targetAppearsBeforeQuote = firstQuotedIndex > 0
     && songTitleVariants.some((variant) => normalizeText(rawVideoTitle.slice(0, firstQuotedIndex)).includes(variant))
   const quotedTitleNorms = quotedTitles.map((match) => normalizeText(match[1])).filter(Boolean)
+  // 作品语境判定放宽（2026-10，OP/ED 延长专项）：第一个引号后**任意位置**出现 主题曲/OP/ED/插曲/
+  // 官方/OST 等作品语境词即算——动画 OP 延长类投稿的标题形态是
+  // 「【PCS Anime/官方OP延长/季①】「作品名」【歌名】官方OP1曲 剧本级加长版」，
+  // 歌名在第二个引号里、语境词在更后面；旧规则只认第一个引号的紧邻后缀（^\s*锚定），
+  // 会把这种"作品名+歌名+官方OP"双引号标题误判成"主标题是另一首歌"整条 -85（实测 PCS 全系列命中）。
+  // 单引号形态（「作品名」OP）由 OP/ED 边界正则兜住（防 operation/editor 误伤）。
   const hasWorkContext = firstQuotedIndex >= 0
-    && /^\s*(?:主题曲|主題曲|主题歌|主題歌|插曲|片尾曲|片头曲|片尾歌|片头歌|ed\b|op\b|主题音乐|主題音樂)/i.test(rawVideoTitle.slice(firstQuotedIndex + quotedTitles[0][0].length))
+    && (/(?:主题曲|主題曲|主题歌|主題歌|插曲|片尾曲|片头曲|片尾歌|片头歌|主题音乐|主題音樂|官方|OST)/i.test(rawVideoTitle.slice(firstQuotedIndex + quotedTitles[0][0].length))
+      || /(^|[^a-z0-9])(?:OP|ED)\d*([^a-z0-9]|$)/i.test(rawVideoTitle.slice(firstQuotedIndex + quotedTitles[0][0].length)))
   // 引号里若是"钩子/评价式"文案（如「“竟然是东方曲 难怪这么惊艳”！Thank you for dears.」），
   // 去掉引号段后整条标题基本只剩目标歌名 → 视频主体就是本曲，不是"主标题是另一首歌"。
   // 用户实测：706 万播放的该形态视频曾被这条 -85 规则误杀到第 12 名。
@@ -1961,7 +2032,11 @@ export function scoreCandidate(
   // 【主题曲/完整版/官方MV】』靠堆 官方+MV+完整版+主题曲+OP 五类正向词反超 319 万 Eve_official 真官方）：
   // 无官方账号印证（uploaderMatchesArtist/officialChannel/机构认证）时，这些「自报身份」的正向词
   // 加分减半——真官方标题短而朴素（『廻廻奇譚 - Eve MV』），堆词的几乎都是搬运/饭制。
-  const officialBacked = signals.uploaderMatchesArtist || signals.officialChannel || officialVerifyType === 1
+  // 例外（2026-10 OP/ED 延长专项）：已核验的延长/完整版信任 UP（PCS_Studio 等，mid 档案见
+  // data/bilibiliOpEdExtensions.ts 与 UPLOADER_WEIGHT_PROFILES）的标题自称官方属实（官方素材再编），
+  // 其「官方/OP/ED」正向词不打折——否则官方素材加长版会被低质搬运/真人 MV 稳压（Grand Blue 实测）。
+  const trustedExtensionUploader = isOpEdExtensionUploader(video.mid)
+  const officialBacked = signals.uploaderMatchesArtist || signals.officialChannel || officialVerifyType === 1 || trustedExtensionUploader
   const selfClaimFactor = officialBacked ? 1 : 0.5
   for (const m of OFFICIAL_MARKERS) if (titleNorm.includes(m)) score += 8 * selfClaimFactor
   for (const m of MV_MARKERS) if (titleNorm.includes(m)) score += 15 * selfClaimFactor
@@ -1991,6 +2066,22 @@ export function scoreCandidate(
   // 允许带集数（OP1/ED2），防误伤 "operation"/"editor"/"open" 等单词。
   const isOpEdTitle = /(^|[^a-z0-9])(op|ed)\d*([^a-z0-9]|$)/i.test(video.title)
   if (isOpEdTitle) score += 18 * selfClaimFactor
+  // 「官方素材 OP/ED 加长/延长版」（2026-10 专项，用户口径：大家听的是 3-5 分钟完整版，
+  // 但官方常只放 TV size，B 站的高质量延长版才是完整画面正片）：
+  //   标题同时命中「官方 OP/ED/IN/TM」与「加长/延长/完整版」两类标记 → 音源即歌曲完整录音
+  //   （官方分镜再编，非现场/非翻唱/非变速），是延长类正片本体：
+  //   · +22：与"完整版加长正片"强规则同级，但不受"播放 ≥1万 + 歌手命中"限制（延长类 UP
+  //     标题常不写歌手、中小播放量——PCS_Studio 平均 5-10 万，规则要能吃到）；
+  //   · 时长豁免：完整歌曲时长 > 歌曲时长（前奏/尾奏/循环扩展）是该类目的本质特征，
+  //     比值 ≤1.6 时不吃时长偏离扣分（下方 durationTerm 归 0 下限）——否则 4:30 加长版
+  //     对 4:10 歌曲永远输给 90 秒 TV size 短视频。
+  //   反向防御：变速/降调版（nightcore 等）已在更早的 -70 规则被罚，不会靠这条洗白。
+  const extendedOpEd = EXTENDED_KIND_MARKER.test(video.title) && EXTENDED_LENGTH_MARKER.test(video.title)
+  if (extendedOpEd) {
+    score += 22
+    // 现场标记与该类目互斥（标题自称官方 OP 加长却又是现场的概率极低），防双吃
+    if (hasLiveMarker(video.title)) score -= 10
+  }
   // 高清/高帧率权重：4K/1080P/高清/超清/120帧 命中 → 高质量正片信号，任意偏好下基础加成；
   // 4K/120帧 属 premium 标记额外加成（'hd' 偏好在 preferenceAdjustment 另计 +20）
   if (signals.hdMarker) score += 12
@@ -2080,6 +2171,16 @@ export function scoreCandidate(
   const franchiseNorms = franchiseNamesOf(ctx).map(normalizeText).filter((name) => name.length >= 2)
   const hasFranchise = franchiseNorms.some((name) => titleNorm.includes(name))
   if (hasFranchise) score += 25
+  // 信任延长 UP 的歌手缺位补偿（2026-10）：PCS 类 UP 的标题形态是「作品名 +【歌名】+ 官方OP曲」，
+  // 从不写歌手——与普通"无歌手"候选不同，其歌曲归属已由人工核验库背书。当标题命中歌名变体
+  // 且上下文带作品名（franchise/IP 词）时，补偿 hasArtist 同额 +15：消除「写歌手的普通搬运/真人版
+  // 靠 +15 稳压官方素材延长版」的系统性偏差（Grand Blue 实测：真人版 256 vs PCS 236）。
+  if (trustedExtensionUploader
+    && !signals.hasArtist
+    && songTitleVariants.some((t) => titleNorm.includes(t))
+    && franchiseNorms.some((name) => titleNorm.includes(name))) {
+    score += 15
+  }
   // 短而泛化的英文标题极易撞到问答、预告和其他游戏；可信来源只能证明上传者身份，
   // 不能证明这是当前艺人的同名作品，因此仍需艺人或 IP 证据。
   const genericTitle = /^[a-z0-9 ]+$/i.test(songTitleRaw) && songTitleRaw.trim().split(/\s+/).length <= 3
@@ -2111,6 +2212,12 @@ export function scoreCandidate(
     durationTerm = -15
   } else durationTerm = -35
   if (officialLongerRelief && diffRatio <= 0.5) durationTerm = Math.max(0, durationTerm)
+  // 官方素材加长/延长版豁免：完整歌曲时长比 PV 长是该类目的本质（见 extendedOpEd 注释），
+  // 比值 ≤1.6（加长上限，更长的是合集/串烧）不吃时长偏离扣分——注意 +22 的正片加分已在上方计过，
+  // 这里只取消时长惩罚，让"延长版 vs TV size 短版"由完整的评分体系决出。
+  if (extendedOpEd && compareDuration > songDur && compareDuration <= songDur * 1.6) {
+    durationTerm = Math.max(0, durationTerm)
+  }
   score += durationTerm
 
   // OP/ED 但视频是 TV 版短时长：输入本身要求 TV size 时是精确版本，否则作为完整版的降级候选。
@@ -2126,6 +2233,9 @@ export function scoreCandidate(
   if (signals.officialChannel) score += 25
   const uploaderWeight = uploaderWeightProfile(video)
   if (uploaderWeight) score += uploaderWeight.score
+  // 学习式信任（自动，无人工）：该 UP 此前多次播放成功（正片类内容）→ 递进加权。
+  // 与人工档案（uploaderWeight）可叠加：人工 +30 的 PCS 与学习出的 +10/+20 属不同来源。
+  score += learnedUploaderScore(video.mid)
   if (QUALITY_COMMUNITY_KEYWORDS.some((k) => authorNorm.includes(normalizeText(k)))) score += 15
 
   // 复审增强：B 站原始认证值为 -1 未认证、0 个人、1 机构。
@@ -2199,6 +2309,110 @@ export function shouldAutoPlay(candidate: CandidateScore, strictness: AutoPlaySt
   }
 }
 
+// ===== 学习式 UP 信任（2026-10，OP/ED 延长/完整版专项的自动化延伸）=====
+// 动机：高质量 OP/ED 完整版/延长版 UP 层出不穷（PCS_Studio、百億_光年、Aki惊蛰…），
+// 人工逐个审核不可持续。改为运行时自动学习：某 UP 的候选视频被真实播放且没有立即回退
+// （用户没有换视频/拉黑/播放失败）→ 记一次"成功"；成功次数达到阈值后该 UP 自动获得
+// 递进加权（与人工核验的 UPLOADER_WEIGHT_PROFILES 同一入账通道）。
+// 存储：localStorage（键 oped_learned_uploaders），LRU 上限防无界增长；纯本地、无网络。
+
+const LEARNED_UPLOADERS_KEY = 'oped_learned_uploaders'
+const LEARNED_UPLOADERS_MAX = 120
+/** 分级阈值：≥2 次成功起步信任，≥5 次成熟信任。 */
+export const LEARNED_UPLOADER_TIERS: ReadonlyArray<{ min: number; score: number }> = [
+  { min: 5, score: 20 },
+  { min: 2, score: 10 },
+]
+
+interface LearnedUploaderEntry { mid: number; name: string; successes: number; lastAt: number }
+
+function readLearnedUploaders(): Record<string, LearnedUploaderEntry> {
+  try {
+    const raw = localStorage.getItem(LEARNED_UPLOADERS_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeLearnedUploaders(map: Record<string, LearnedUploaderEntry>): void {
+  try {
+    // FIFO 淘汰最旧（按 lastAt），上限防 localStorage 无界增长
+    const entries = Object.entries(map).sort((a, b) => b[1].lastAt - a[1].lastAt)
+    const trimmed = entries.slice(0, LEARNED_UPLOADERS_MAX)
+    localStorage.setItem(LEARNED_UPLOADERS_KEY, JSON.stringify(Object.fromEntries(trimmed)))
+  } catch {
+    /* 存储失败不影响匹配 */
+  }
+}
+
+/**
+ * 记录一次播放成功（loadVideo 成功落槽、未触发 fallback 时调用；同视频 1h 内去重）。
+ * 正片信号（官方 OP/ED/主题曲/完整版/加长标记）的视频才计入——普通搬运播放成功不产生信任。
+ */
+export function recordUploaderPlaySuccess(mid: number | undefined, author: string, videoTitle: string): void {
+  if (!mid || mid <= 0) return
+  const title = String(videoTitle || '')
+  const isFullVersionContent = EXTENDED_KIND_MARKER.test(title) || EXTENDED_LENGTH_MARKER.test(title)
+    || /完整OP|完整ED|OP完整|ED完整|主題歌|主题曲/.test(title)
+  if (!isFullVersionContent) return
+  const map = readLearnedUploaders()
+  const key = String(mid)
+  const prev = map[key]
+  // 1h 去重：同一 UP 短时间内连播多首只算一次（防循环播放刷信任）
+  if (prev && Date.now() - prev.lastAt < 60 * 60 * 1000) return
+  map[key] = { mid, name: String(author || prev?.name || ''), successes: (prev?.successes || 0) + 1, lastAt: Date.now() }
+  writeLearnedUploaders(map)
+}
+
+/** 学习得到的 UP 加权（分级：≥5 次成功 +20，≥2 次 +10；未学习/未达阈值返回 0）。 */
+export function learnedUploaderScore(mid: number | undefined): number {
+  if (!mid || mid <= 0) return 0
+  const entry = readLearnedUploaders()[String(mid)]
+  if (!entry) return 0
+  for (const tier of LEARNED_UPLOADER_TIERS) {
+    if (entry.successes >= tier.min) return tier.score
+  }
+  return 0
+}
+
+/**
+ * 延长库解析（全平台，2026-10 v3）：先按 songKey（platform:id）精确命中；
+ * 未命中时走平台无关的元数据回退索引（规范化标题+主歌手+时长容差）——
+ * 同一首歌在网易云/酷狗/Apple/汽水的 id 与 QQ 不同，但标题与歌手一致，
+ * 元数据索引让声明注入对**所有平台**生效。导出便于单测。
+ */
+export function resolveOpEdExtensionEntry(song: MatchContext, songKey: string) {
+  const exact = getOpEdExtensionDeclaration(songKey)
+  if (exact) return exact
+  return findOpEdExtensionByMeta(song.songTitle, song.artists || [], song.songDuration)
+}
+
+
+/** 同曲竞争（2026-10 用户口径）：同一首歌命中多个"完整版/延长版"候选（不同信任 UP 都做了）时，
+ *  用播放数取胜——在分数带内（±20）按播放量重排，避免"先到先得"固定押某个 UP。
+ *  纯函数，便于单测；只对携带延长/完整版信号的候选生效。 */
+export function applySameSongPlayCountPreference<T extends {
+  video: { bvid: string; play: number; title: string }
+  score: number
+  type: string
+}>(ordered: T[], options?: { scoreBand?: number }): T[] {
+  const band = options?.scoreBand ?? 20
+  if (ordered.length < 2) return ordered
+  const isFullVersion = (c: T) => EXTENDED_KIND_MARKER.test(c.video.title || '') || EXTENDED_LENGTH_MARKER.test(c.video.title || '')
+    || /完整OP|完整ED|OP完整|ED完整|主題歌|主题曲/.test(c.video.title || '')
+  const fullVersion = ordered.filter(isFullVersion)
+  if (fullVersion.length < 2) return ordered
+  const bestScore = fullVersion[0].score
+  const tier = fullVersion.filter((c) => c.score >= bestScore - band)
+  if (tier.length < 2) return ordered
+  const winner = tier.reduce((a, b) => ((b.video.play || 0) > (a.video.play || 0) ? b : a))
+  if (winner === ordered[0]) return ordered
+  return [winner, ...ordered.filter((c) => c !== winner)]
+}
+
 // ===== 按歌缓存 + 手动选择记忆 + 黑名单 =====
 
 const MATCH_CACHE_TTL = 24 * 60 * 60 * 1000
@@ -2206,7 +2420,9 @@ const MATCH_CACHE_TTL = 24 * 60 * 60 * 1000
 //      · 电视音乐节目演出版标记（我是歌手/音综…按替代录音降权）
 //      · 作品名变体（去季/篇/剧场版、空格前截断）参与 IP 命中
 //      ——评分口径再次变化，24h 匹配缓存必须失效
-const MATCH_SCORE_VERSION = 'v11-tvshow-and-franchise-variants'
+// v12：OP/ED 延长专项（2026-10）——官方素材加长版正片加分 + 时长豁免 + PCS_Studio 信任档案 +
+//      bilibiliOpEdExtensions 声明注入。评分口径变化，24h 匹配缓存整体失效。
+const MATCH_SCORE_VERSION = 'v12-oped-extension'
 /** scoreCandidate 的「歌名-后缀」正则按 songRe 串缓存（scoreCandidate 是每候选调用的热路径） */
 const songReDashFormCache = new Map<string, RegExp>()
 
@@ -2444,9 +2660,11 @@ export function prioritizeExplicitCandidates(
   candidates: CandidateScore[],
   userOverride: CandidateScore | null,
   developerDeclaration: CandidateScore | null,
+  extensionDeclaration: CandidateScore | null = null,
 ): CandidateScore[] {
   let chain = [...candidates]
-  for (const explicit of [developerDeclaration, userOverride]) {
+  // 注入序：用户记忆 > 开发者声明 > 延长库声明（后进链头的在最前，故倒序遍历）
+  for (const explicit of [extensionDeclaration, developerDeclaration, userOverride]) {
     if (!explicit) continue
     chain = [explicit, ...chain.filter(candidate => candidate.video.bvid !== explicit.video.bvid)]
   }
@@ -3014,6 +3232,11 @@ export async function findBestBilibiliMv(
   const sessionPickBvid = peekSessionManualPick(songKey)
   const overrideBvid = sessionPickBvid || (settings.useRememberedOverride ? (getBilibiliOverride(songKey) || '') : '')
   const developerBvid = opts?.useDeveloperDeclarations === false ? '' : (getDeveloperBilibiliMvDeclaration(songKey)?.bvid || '')
+  // 延长库命中也入指纹：库更新（新增/修订延长版）后 24h 匹配缓存必须失效，
+  // 否则旧缓存里的普通候选会盖过新注入的延长版声明。
+  // 全平台（2026-10 v3）：songKey（platform:id）未命中时走元数据回退索引（标题+歌手+时长），
+  // 网易云/酷狗/Apple/汽水等任何平台播放都能命中——声明注入不再绑死 QQ。
+  const extensionBvid = resolveOpEdExtensionEntry(song, songKey)?.bvid || ''
   const settingsFingerprint = [
     MATCH_SCORE_VERSION,
     settings.matchPreference,
@@ -3023,6 +3246,7 @@ export async function findBestBilibiliMv(
     settings.forceAutoPlayHighest ? 'force' : 'gate',
     overrideBvid,
     developerBvid ? `${BILIBILI_MV_DECLARATION_VERSION}:${developerBvid}` : '',
+    extensionBvid ? `${OP_ED_EXTENSION_VERSION}:${extensionBvid}` : '',
     // 黑名单进指纹：拉黑后同歌重进会命中 24h matchCache 返回含已拉黑 BV 的旧结果，
     // 自动播放用户刚拉黑的视频（唯一联动清缓存入口是手动清理）
     getBilibiliBlacklist(songKey).join(','),
@@ -3126,10 +3350,37 @@ async function findBestBilibiliMvUncached(
       // 声明视频失效时继续使用原匹配算法，不修改内置声明。
     }
   }
+  // 「OP/ED 延长」人工核验库（data/bilibiliOpEdExtensions.ts）：歌曲命中时，
+  // 已核验的延长版视频与开发者声明同管道注入——优先级低于用户记忆与开发者声明，
+  // 但高于普通搜索候选（用户人工审核过该 UP 的延长内容为高质量正片）。纯静态表查询，
+  // 无网络请求；声明视频失效（稿件下架）时静默跳过，不影响原匹配算法。
+  // 全平台（2026-10 v3）：先按 songKey（platform:id）精确命中，未命中走元数据回退
+  // （标题+主歌手+时长容差）——网易云/酷狗/Apple/汽水等平台同样生效，不再绑死 QQ。
+  let extensionDeclaration: CandidateScore | null = null
+  const extensionEntry = resolveOpEdExtensionEntry(song, songKey)
+  if (extensionEntry && !blacklist.has(extensionEntry.bvid)) {
+    try {
+      const view = await getBilibiliView(extensionEntry.bvid, signal)
+      if (view.code === 0 && view.data.cid) {
+        const video: BilibiliVideo = {
+          bvid: extensionEntry.bvid,
+          title: view.data.title,
+          duration: view.data.duration,
+          play: view.data.play || 0,
+          author: view.data.owner.name,
+          pic: view.data.pic,
+        }
+        const scored = await reviewCandidates([scoreCandidate(video, song, { officialVerifyType: view.data.owner.officialVerifyType, preference: settings.matchPreference })], song, settings.matchPreference, signal, lyricsText)
+        extensionDeclaration = scored[0] || null
+      }
+    } catch {
+      // 延长库视频失效时继续使用原匹配算法。
+    }
+  }
 
   /** 显式绑定视频在搜索失败/无候选时也能播放。 */
   const explicitOnly = (): BilibiliMatchResult | null => {
-    const chain = prioritizeExplicitCandidates([], rememberedOverride, developerDeclaration)
+    const chain = prioritizeExplicitCandidates([], rememberedOverride, developerDeclaration, extensionDeclaration)
     return chain.length ? finish({ status: 'auto', best: chain[0], candidates: chain, fallbackChain: chain }) : null
   }
 
@@ -3183,11 +3434,18 @@ async function findBestBilibiliMvUncached(
   // 3.5 候选音频同一性复核（可选，best-effort）：取头部若干候选各算一次「与正在播放歌曲的包络相关峰」，
   // 所选与歌曲明显不同源时改选同源档位里评分最高者（档内仍按分数，见 applyIdentityVeto 注释）。
   // 探针覆盖头部 6 条（同源候选可能分数偏低——如 ステラ 的官方 2DMV 在前 6 之外也不会被漏掉太多），
-  // 每条一次低码率取流+解码；任何失败（无 provider / 取流失败 / 解码不可用）都保持原顺序。
+  // 每条一次低码率取流+**全曲解码**——6 次解码在渲染主线程上串行执行（每次 1-3s CPU 密集），
+  // 与视频解码/合成抢主线程：每次切歌后的匹配窗口集中发生，用户实测 MV 背景播放"有时卡卡的"主因。
+  // 代价削减：**头部 2 条分数咬得近（分差 <25）才值得探**——元数据分数已明显拉开时排序可信，
+  // 6 次全曲解码纯属浪费；咬得近时也只探到分差缩小到 25 为止的前缀（通常 2-4 条），不再恒 6 条。
+  // 任何失败（无 provider / 取流失败 / 解码不可用）都保持原顺序。
   let identityPeaks: Map<string, number> | null = null
-  if (identityProbe && candidates.length >= 2) {
+  const topScore = Number.isFinite(candidates[0]?.score) ? candidates[0].score : -Infinity
+  const probePrefixEnd = Math.max(1, candidates.findIndex((c, i) => i > 0 && topScore - c.score >= 25))
+  const scoreGapTight = candidates.length >= 2 && topScore - candidates[1].score < 25
+  if (identityProbe && scoreGapTight) {
     try {
-      const probed = candidates.slice(0, 6)
+      const probed = candidates.slice(0, Math.min(6, Math.max(2, probePrefixEnd + 1)))
       identityPeaks = await identityProbe(probed)
       if (identityPeaks.size >= 2) {
         const vetoed = applyIdentityVeto(candidates, identityPeaks)
@@ -3205,11 +3463,15 @@ async function findBestBilibiliMvUncached(
   // 改选分数带内的等长同版本候选（官方合集/长版 MV/切片 常压过等长正片）。
   candidates = applyDurationConsistencyPreference(candidates, song.songDuration)
 
+  // 3.7 同曲播放数竞争（2026-10 用户口径）：多个信任 UP 都做了同一首歌的完整版/延长版时，
+  // 分数带内（±20）按 B 站播放数取胜——不固定押某个 UP，让"群众选择"决定优先级。
+  candidates = applySameSongPlayCountPreference(candidates)
+
   // 4. 排序取最佳 + 门槛判定（forceAutoPlayHighest 开启时直接播评分最高，跳过确认）
-  let fallbackChain = prioritizeExplicitCandidates(candidates, rememberedOverride, developerDeclaration)
+  let fallbackChain = prioritizeExplicitCandidates(candidates, rememberedOverride, developerDeclaration, extensionDeclaration)
   const best = fallbackChain[0]
   const topCandidates = fallbackChain.slice(0, TOP_CONFIRM_COUNT)
-  if (rememberedOverride || developerDeclaration || !best) {
+  if (rememberedOverride || developerDeclaration || extensionDeclaration || !best) {
     if (!best) return { status: 'none', candidates: [], fallbackChain: [] }
     return finish({ status: 'auto', best, candidates: topCandidates, fallbackChain })
   }

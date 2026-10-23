@@ -249,6 +249,60 @@ const pending = new Map()
 const MAX_CACHE = 50
 const NEGATIVE_RESULT_TTL_MS = 5 * 60 * 1000
 
+/** ── 免登录 Apple 歌词（TTML）──────────────────────────────
+ *  与动态封面同链：music.apple.com 主 bundle 提取 WebPlayKid JWT → amp-api catalog。
+ *  syllable-lyrics 端点只校 Bearer（不需 Media-User-Token / 账号登录），官方 Web 播放器
+ *  未登录试听也显示歌词即同款。歌词按曲/区逐个开放，这里跨区轮询（与 editorialVideo 同款）。
+ *  消费方：其他平台（网易云/QQ 等）播放时检测到 Apple 特殊歌词（agent 对唱 / x-bg 和声）
+ *  即补挂到平台歌词——与"检测到动态封面自动用 AM 封面"同策略。 */
+const lyricsTtmlCache = new Map()
+const LYRICS_TTL_MS = 24 * 60 * 60 * 1000
+const LYRICS_NEGATIVE_TTL_MS = 6 * 60 * 60 * 1000
+
+const fetchSyllableLyricsText = async (songId, storefront) => {
+  // 不传 l[lyrics]：返回**原文主轨**。硬编码 l[lyrics]=zh-CN 会让日文/英文歌拿到
+  // 中文翻译轨而非原文（agent/逐字对齐的原轨才是补挂需要的）。ttmlLocalizations
+  // 仍会带回全部语言版本供渲染端处理。
+  const params = new URLSearchParams({ extend: 'ttmlLocalizations' })
+  const data = await ampFetchJson(
+    `${AMP_API_BASE}/${storefront}/songs/${encodeURIComponent(songId)}/syllable-lyrics?${params.toString()}`
+  )
+  const attributes = data?.data?.[0]?.attributes
+  if (!attributes) return null
+  // 主 TTML + 各语言本地化：原文优先（与渲染端 collectAppleTtml 同口径的简化版——
+  // 服务端只做"拿到一份可解析的 TTML"，多语言合并交给渲染端既有管线）
+  if (typeof attributes.ttml === 'string' && attributes.ttml.includes('<tt')) return attributes.ttml
+  const localizations = attributes.ttmlLocalizations ?? {}
+  for (const value of Object.values(localizations)) {
+    if (typeof value === 'string' && value.includes('<tt')) return value
+  }
+  return null
+}
+
+const getLyricsTtml = async (title, artist, duration) => {
+  const term = [title, artist].filter(Boolean).slice(0, 2).join(' ')
+  // WebPlayKid token 提取失败（apple.com 不可达/页面改版）是**基础设施错误**：
+  // 跨区轮询毫无意义（8 区 × 15s 超时会拖垮渲染端 15s 超时预算），直接重抛给路由层。
+  // 与 auth failed 同等对待——这两类错误不进负缓存（网络恢复后应立即重试）。
+  const token = await getWebToken()
+  const candidates = await searchCandidates(term)
+  const matched =
+    candidates.find((item) => item.resourceType === 'song' && isHighConfidenceMatch(item, { title, artist, duration })) ??
+    candidates.find((item) => isHighConfidenceMatch(item, { title, artist, duration }))
+  if (!matched) return null
+  // 匹配区优先（搜索命中即证明该区有这首歌），其余区兜底（歌词按区逐曲开放）
+  for (const storefront of [matched.storefront, ...STOREFRONTS.filter((s) => s !== matched.storefront)]) {
+    try {
+      const text = await fetchSyllableLyricsText(matched.id, storefront)
+      if (text) return { ttml: text, songId: matched.id, storefront, trackName: matched.name }
+    } catch (error) {
+      if (error?.message?.includes('auth failed')) throw error
+      // 404（该区无逐字）/网络抖动 → 下一区
+    }
+  }
+  return null
+}
+
 export function registerAppleArtworkRoutes(app) {
   app.get('/api/apple/animated-cover', async (req, res) => {
     const title = String(req.query.title || '').trim()
@@ -335,6 +389,64 @@ export function registerAppleArtworkRoutes(app) {
       res.json({ code: 0, ...result })
     } catch (error) {
       res.status(502).json({ code: -1, error: error.message || '获取动态封面失败' })
+    } finally {
+      pending.delete(cacheKey)
+    }
+  })
+
+  // 免登录 Apple 逐字歌词（TTML）：按 标题+歌手 匹配 catalog 曲目 → 跨区拉 syllable-lyrics。
+  // 消费方（渲染层 getAppleMusicLyrics）：检测到 TTML 含特殊结构（agent/x-bg）才采用，
+  // 与"检测到动态封面自动用 AM 封面"同策略；未登录可用（WebPlayKid 公共 token）。
+  app.get('/api/apple/lyrics-ttml', async (req, res) => {
+    const title = String(req.query.title || '').trim()
+    const artist = String(req.query.artist || '').trim()
+    const duration = Number(req.query.duration) || 0
+    if (!title) return res.status(400).json({ code: -1, error: 'title 必填' })
+
+    const cacheKey = `${title}|${artist}|${duration}`
+    if (lyricsTtmlCache.has(cacheKey)) {
+      const hit = lyricsTtmlCache.get(cacheKey)
+      lyricsTtmlCache.delete(cacheKey)
+      lyricsTtmlCache.set(cacheKey, hit)
+      if (!hit?.ttml && Date.now() - (hit?.at ?? 0) > LYRICS_NEGATIVE_TTL_MS) {
+        lyricsTtmlCache.delete(cacheKey)
+      } else {
+        return res.json({ code: 0, ...(hit || { ttml: null }) })
+      }
+    }
+    if (pending.has(cacheKey)) {
+      const result = await pending.get(cacheKey)
+      return res.json({ code: 0, ...result })
+    }
+
+    const task = (async () => {
+      try {
+        const result = await getLyricsTtml(title, artist, duration)
+        return { ...(result ?? { ttml: null }), at: Date.now() }
+      } catch (error) {
+        // 基础设施错误（token 提取失败 / Apple 鉴权失败）：**不进负缓存**——
+        // 网络恢复后应立即重试；负缓存只针对"该曲确实没有"的上游 404。
+        console.warn('[AppleLyrics] syllable-lyrics failed:', error.message)
+        return { ttml: null, at: Date.now(), infraError: true }
+      }
+    })()
+
+    pending.set(cacheKey, task)
+    try {
+      const result = await task
+      // 正结果 24h；"该曲确实没有"（上游 404）负结果 6h；
+      // 基础设施错误（infraError）不缓存——网络/token 恢复后应立即重试。
+      if (result?.ttml) {
+        lyricsTtmlCache.set(cacheKey, result)
+      } else if (!result?.infraError) {
+        lyricsTtmlCache.set(cacheKey, { ...result, at: Date.now() })
+      }
+      if (lyricsTtmlCache.size > MAX_CACHE) {
+        lyricsTtmlCache.delete(lyricsTtmlCache.keys().next().value)
+      }
+      res.json({ code: 0, ...result })
+    } catch (error) {
+      res.status(502).json({ code: -1, error: error.message || '获取歌词失败' })
     } finally {
       pending.delete(cacheKey)
     }

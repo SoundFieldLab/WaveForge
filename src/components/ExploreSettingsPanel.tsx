@@ -99,7 +99,7 @@ export const EXPLORE_SECTION_LABELS: Record<ExploreSectionId, string> = {
   kugouPlaylistTags: '歌单（分类标签）',
   kugouCategories: '分类（专区与标签）',
   kugouLongaudio: '听书（有声小说/评书/助眠）',
-  kugouYouth: '刷歌（已下线）',
+  kugouYouth: '刷歌（竖滑切歌）',
 }
 
 /** 酷狗板块所属的一级分区（音乐 / 听书）：设置面板给酷狗行加分区徽标，
@@ -111,15 +111,16 @@ const KUGOU_ZONE_OF_SECTION: Partial<Record<ExploreSectionId, string>> = {
   channels: '音乐',
   kugouCategories: '音乐',
   kugouLongaudio: '听书',
+  kugouYouth: '刷歌',
 }
 
 const BASE_ORDER: ExploreSectionId[] = ['discover', 'journey', 'playlists', 'charts', 'newSongs', 'channels']
 const APPLE_ORDER: ExploreSectionId[] = ['discover', 'playlists', 'charts', 'newSongs', 'albums']
 const THIRD_PARTY_ORDER: ExploreSectionId[] = ['discover', 'playlists', 'charts', 'newSongs', 'albums']
-// 酷狗按一级分区排版：音乐（推荐 → 乐库 → 歌单 → 频道 → 分类）→ 听书。
+// 酷狗按一级分区排版：音乐（推荐 → 乐库 → 歌单 → 频道 → 分类）→ 听书 → 刷歌。
 // 通用聚合板块（推荐歌单/排行榜/最新音乐/新碟）已由酷狗五板块覆盖，不再出现在酷狗列表里，
 // 旧偏好里的这些 id 会在 normalizeExplorePreferences 时按此表过滤掉。
-// 「刷歌」(kugouYouth) 已按产品决策下线，不进排序表。
+// 「刷歌」(kugouYouth) 2026-10-22 恢复提供（官方一级分区）。
 const KUGOU_ORDER: ExploreSectionId[] = [
   'discover',
   'kugouLibrary',
@@ -127,6 +128,7 @@ const KUGOU_ORDER: ExploreSectionId[] = [
   'channels',
   'kugouCategories',
   'kugouLongaudio',
+  'kugouYouth',
 ]
 const PLATFORM_ORDER: Record<ExplorePlatform, ExploreSectionId[]> = {
   netease: BASE_ORDER,

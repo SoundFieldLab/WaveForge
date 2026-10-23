@@ -168,9 +168,10 @@ describe('Apple 对唱左右分栏', () => {
     const firstRow = rowAt(container, 0)
     const duetRow = rowAt(container, 1)
     expect(duetRow!.style.textAlign).toBe('right')
-    expect(duetRow!.style.paddingLeft).toBe('15%')
-    expect(firstRow!.style.paddingRight).toBe('15%')
-    expect(firstRow!.style.textAlign).toBe('')
+    // 极左/极右（folia 实测）：无缩进，text-align 决定文本贴向哪一缘
+    expect(duetRow!.style.paddingLeft).toBe('')
+    expect(duetRow!.style.paddingRight).toBe('')
+    expect(firstRow!.style.textAlign).toBe('left')
   })
 
   it('显式关闭"左右交替歌词"后，没有对唱标记时不产生左右分栏内缩', () => {
@@ -206,8 +207,10 @@ describe('Apple 对唱左右分栏', () => {
       />,
     )
     // v1（块内第 0 位演唱者）靠左让出右侧；v2（第 1 位）靠右让出左侧
-    expect(rowAt(container, 0)!.style.paddingRight).toBe('15%')
-    expect(rowAt(container, 1)!.style.paddingLeft).toBe('15%')
+    expect(rowAt(container, 0)!.style.textAlign).toBe('left')
+    expect(rowAt(container, 1)!.style.textAlign).toBe('right')
+    expect(rowAt(container, 0)!.style.paddingLeft).toBe('')
+    expect(rowAt(container, 1)!.style.paddingRight).toBe('')
     expect(rowAt(container, 1)!.style.textAlign).toBe('right')
   })
 
@@ -272,9 +275,10 @@ describe('Apple 背景和声', () => {
     const { container } = renderLyrics('modern')
     const duetRow = rowAt(container, 1)
     const vocal = duetRow!.querySelector('[data-testid="background-vocal"]') as HTMLElement
-    // 和声所在行沿用该行左右分栏：靠右对齐 + 让出左侧
+    // 和声所在行沿用该行左右分栏：靠右对齐 + 让出左侧（缩进在左，文本贴右）
     const ownerRow = vocal.closest('[data-index]') as HTMLElement
     expect(ownerRow.style.textAlign).toBe('right')
-    expect(ownerRow.style.paddingLeft).toBe('15%')
+    expect(ownerRow.style.paddingRight).toBe('')
+    expect(ownerRow.style.paddingLeft).toBe('')
   })
 })

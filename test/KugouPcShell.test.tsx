@@ -44,7 +44,21 @@ vi.mock('../src/features/kugouLongaudio/store', () => {
   }
 })
 
-// 「刷歌」入口已随产品决策下线（导航表不再含 shuffle 项），旧 mock 一并移除
+// 刷歌全屏竖滑页同样哑掉（冒烟只验证左栏入口存在）
+vi.mock('../src/features/kugouYouth/KugouYouthFeedOverlay', () => ({ default: () => null }))
+vi.mock('../src/features/kugouYouth/store', () => ({
+  kugouYouthStore: {
+    subscribe: () => () => {},
+    getState: () => ({ open: false, cards: [], index: -1, loading: false, loadingMore: false, error: '', empty: true, isEnd: true, lastCid: '', recentCards: [], recentLoading: false, recentError: '', recentEmpty: true, reported: [] }),
+    open: vi.fn(),
+    close: vi.fn(),
+    refresh: vi.fn(async () => {}),
+    loadMore: vi.fn(async () => {}),
+    loadRecent: vi.fn(async () => {}),
+    select: vi.fn(),
+  },
+  selectYouthSongs: () => [],
+}))
 
 const likedTrack: KugouTrack = {
   hash: 'abc123',
@@ -97,6 +111,8 @@ vi.mock('../src/services/kugouService', () => ({
   fetchKugouPurchasedAlbums: vi.fn(async () => ({ albums: [], total: 0 })),
   hasKugouConceptCredential: vi.fn(() => false),
   createKugouUserPlaylist: vi.fn(async () => ({ result: 200 })),
+  // 首页大卡「场景音乐」的专区目录（公开数据；空 = 卡片隐藏）
+  fetchKugouChannelZones: vi.fn(async () => []),
 }))
 
 import KugouPcShell from '../src/features/traditionalPc/KugouPcShell'
@@ -184,19 +200,17 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe('KugouPcShell 骨架（对齐官方客户端）', () => {
-  it('渲染左导航六项（本地与下载/音乐云盘已下线）、音乐页签五项与推荐页五张大卡', async () => {
+  it('渲染左导航七项（本地与下载已下线，音乐云盘恢复）、音乐页签五项与推荐页五张大卡', async () => {
     renderShell()
 
     // 左导航（官方的直播入口按规范去掉）
-    for (const label of ['音乐', '听书', '我的收藏', '最近播放', '我的听书', '已购音乐']) {
-    // 本地与下载/音乐云盘已按产品决策下线：入口不存在
+    for (const label of ['音乐', '听书', '刷歌', '我的收藏', '最近播放', '我的听书', '音乐云盘', '已购音乐']) {
+    // 本地与下载已按产品决策下线：入口不存在
     expect(screen.queryByText('本地与下载')).toBeNull()
-    expect(screen.queryByText('音乐云盘')).toBeNull()
       expect(screen.getAllByText(label).length).toBeGreaterThan(0)
     }
-    // 「刷歌」已下线：左导航不再有该入口
-    expect(screen.queryByTestId('kugou-youth-nav')).toBeNull()
-    expect(screen.queryByText('刷歌')).toBeNull()
+    // 「刷歌」已恢复：左栏入口存在，点击打开全屏竖滑页（overlay 已 mock 哑掉）
+    expect(screen.getByText('刷歌')).toBeTruthy()
 
     // 官方页签（视频/AI帮唱/赚钱不做）
     for (const tab of ['推荐', '乐库', '歌单', '频道', '分类']) {

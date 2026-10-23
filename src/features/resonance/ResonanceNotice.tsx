@@ -126,10 +126,20 @@ export default function ResonanceNotice({ playerTheme = 'dark', onAccept }: Reso
         </div>
 
         <div className="flex flex-wrap items-center gap-3 border-t px-6 py-4" style={{ borderColor: dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)' }}>
-          <label className="flex cursor-pointer items-center gap-2 text-xs" style={{ color: dark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.55)' }}>
-            <input type="checkbox" checked={remember} onChange={event => setRemember(event.target.checked)} className="h-3.5 w-3.5 accent-[#ff5a70]" />
+          <button
+            type="button"
+            role="switch"
+            aria-checked={remember}
+            aria-label="不再提示"
+            onClick={() => setRemember(value => !value)}
+            className="flex cursor-pointer items-center gap-2 text-xs"
+            style={{ color: dark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.55)' }}
+          >
+            <span className="relative h-5 w-9 rounded-full transition" style={{ background: remember ? 'rgba(255,90,112,0.92)' : dark ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.14)' }}>
+              <span className="absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all" style={{ left: remember ? 18 : 2 }} />
+            </span>
             不再提示
-          </label>
+          </button>
           <span className="flex-1" />
           <button
             type="button"

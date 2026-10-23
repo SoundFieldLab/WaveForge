@@ -225,8 +225,8 @@ function PcArtistDetail({ id, platform, chrome, actions, active }: PcArtistDetai
             title: mv.name,
             subtitle: mvYearOf(mv.publishTime),
             playCount: mv.playCount,
-            // MV 弹窗链路只认 QQ/网易云（酷狗 MV 能力为 false，上游也没有歌手 MV 接口，这里不会有点击）
-            onClick: () => { if (platform === 'qq' || platform === 'netease') actions.onOpenMv?.(mv.id, platform) },
+            // MV 弹窗三平台都通（netease/qq 官方接口；kugou 走 m3ws 逆向通道）
+            onClick: () => { if (platform === 'qq' || platform === 'netease' || platform === 'kugou') actions.onOpenMv?.(mv.id, platform) },
           }))}
           theme={theme}
           accent={accent}

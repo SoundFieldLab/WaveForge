@@ -171,13 +171,12 @@ export function useHazardMapNavigation(bounds: HazardMapBounds | null): HazardMa
   const handleWheel = (event: WheelEvent) => {
     const container = containerRef.current
     if (!viewport || !container) return
-    // 无论滚轮缩放是否启用都要吞掉事件：否则未启用（未点击激活）时滚轮穿透到
-    // 天气页外层滚动容器，地图上滚动、整页跟着上下滚（用户实测）。
-    // 必须走原生非 passive listener：React 对 wheel 的委托 listener 是 passive 的，
-    // onWheel 里 preventDefault 是 no-op。
+    // 未激活（未点击地图）：事件不拦截，让滚轮正常滚动外层天气页面（用户预期）。
+    // 激活后（点击地图）：吞掉事件并缩放地图，必须走原生非 passive listener——
+    // React 对 wheel 的委托 listener 是 passive 的，onWheel 里 preventDefault 是 no-op。
+    if (!wheelZoomEnabled) return
     event.preventDefault()
     event.stopPropagation()
-    if (!wheelZoomEnabled) return
     const rect = container.getBoundingClientRect()
     const screenX = clamp(((event.clientX - rect.left) / rect.width) * HAZARD_MAP_WIDTH, 0, HAZARD_MAP_WIDTH)
     const screenY = clamp(((event.clientY - rect.top) / rect.height) * HAZARD_MAP_HEIGHT, 0, HAZARD_MAP_HEIGHT)

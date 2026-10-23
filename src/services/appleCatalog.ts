@@ -160,7 +160,8 @@ export async function searchAppleCatalog(title: string, artist = '', limit = 25,
 
 // ─────────────────────────── 跨平台匹配播放 ───────────────────────────
 
-const normalizeMatch = (value: string) =>
+/** 标题/艺人归一化（跨平台同名匹配共用；carrierSelection 复用同一实现保证口径一致） */
+export const normalizeMatch = (value: string) =>
   (value || '')
     .toLowerCase()
     // 先剥 feat.：feat. 写进下方字符类会逐字符删 f/e/a/t 四个字母（"Fake"→"k"），两首歌名互相碰撞放大包含式误命中

@@ -12,7 +12,7 @@ fun versionCodeOf(version: String): Int {
     return major * 10000 + minor * 100 + patch
 }
 
-val appVersionName = "0.1.4"
+val appVersionName = "0.1.5"
 
 android {
     namespace = "com.waveforge.android"

@@ -4335,5 +4335,216 @@
   "targetVersion": "full-original",
   "platformSource": "netease",
   "sourceQuery": "少女レイ みきとP"
+ },
+ {
+  "id": "oped-ext-bv1sa411f7yp",
+  "split": "dev",
+  "title": "Grand Blue",
+  "artists": [
+   "湘南乃風"
+  ],
+  "duration": 313,
+  "category": "oped-extension",
+  "locale": "en",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "碧蓝之海",
+  "expectedBvid": "BV1sa411f7Yp"
+ },
+ {
+  "id": "oped-ext-bv1n5411d77g",
+  "split": "dev",
+  "title": "Magia",
+  "artists": [
+   "Kalafina"
+  ],
+  "duration": 312,
+  "category": "oped-extension",
+  "locale": "en",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "魔法少女小圆",
+  "expectedBvid": "BV1n5411D77G"
+ },
+ {
+  "id": "oped-ext-bv17o4y1l74f",
+  "split": "dev",
+  "title": "Brave Shine",
+  "artists": [
+   "Aimer"
+  ],
+  "duration": 233,
+  "category": "oped-extension",
+  "locale": "zh",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "Fate/stay night",
+  "expectedBvid": "BV17o4y1L74F"
+ },
+ {
+  "id": "oped-ext-bv1by4y1m73x",
+  "split": "dev",
+  "title": "ストロボメモリー",
+  "artists": [
+   "内田真礼"
+  ],
+  "duration": 285,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "SSSS.DYNAZENON",
+  "expectedBvid": "BV1BY4y1m73x"
+ },
+ {
+  "id": "oped-ext-bv1ta4y1e7ca",
+  "split": "dev",
+  "title": "春擬き",
+  "artists": [
+   "东山奈央"
+  ],
+  "duration": 290,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "我的青春恋爱物语果然有问题 续",
+  "expectedBvid": "BV1Ta4y1e7CA"
+ },
+ {
+  "id": "oped-ext-bv1hr4y1f7q8",
+  "split": "dev",
+  "title": "sister's noise",
+  "artists": [
+   "fripSide"
+  ],
+  "duration": 262,
+  "category": "oped-extension",
+  "locale": "en",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "某科学的超电磁炮S",
+  "expectedBvid": "BV1Hr4y1F7Q8"
+ },
+ {
+  "id": "oped-ext-bv1t341157uj",
+  "split": "dev",
+  "title": "もってけ！セーラーふく",
+  "artists": [
+   "平野绫",
+   "加藤英美里"
+  ],
+  "duration": 258,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "幸运星",
+  "expectedBvid": "BV1t341157Uj"
+ },
+ {
+  "id": "oped-ext-bv14k411h71l",
+  "split": "dev",
+  "title": "ユキトキ",
+  "artists": [
+   "やなぎなぎ"
+  ],
+  "duration": 269,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "我的青春恋爱物语果然有问题",
+  "expectedBvid": "BV14K411H71L"
+ },
+ {
+  "id": "oped-ext-bv1dv411h7uk",
+  "split": "dev",
+  "title": "鳥の詩",
+  "artists": [
+   "Lia"
+  ],
+  "duration": 369,
+  "category": "oped-extension",
+  "locale": "zh",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "AIR",
+  "expectedBvid": "BV1dv411h7Uk"
+ },
+ {
+  "id": "oped-ext-bv1tp4y1k7w9",
+  "split": "dev",
+  "title": "only my railgun",
+  "artists": [
+   "fripSide"
+  ],
+  "duration": 254,
+  "category": "oped-extension",
+  "locale": "en",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "某科学的超电磁炮",
+  "expectedBvid": "BV1tp4y1k7W9"
+ },
+ {
+  "id": "oped-ext-bv1jr4y1a7sy",
+  "split": "dev",
+  "title": "Bravely You",
+  "artists": [
+   "Lia"
+  ],
+  "duration": 328,
+  "category": "oped-extension",
+  "locale": "zh",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "charlotte",
+  "expectedBvid": "BV1jr4y1A7SY"
+ },
+ {
+  "id": "oped-ext-bv1i541197wk",
+  "split": "dev",
+  "title": "My Dearest",
+  "artists": [
+   "supercell"
+  ],
+  "duration": 338,
+  "category": "oped-extension",
+  "locale": "en",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "罪恶王冠",
+  "expectedBvid": "BV1i541197wk"
+ },
+ {
+  "id": "oped-ext-bv16x4y1k7me",
+  "split": "dev",
+  "title": "カワキヲアメク",
+  "artists": [
+   "やなぎなぎ"
+  ],
+  "duration": 252,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "家有女友",
+  "expectedBvid": "BV16X4y1K7me"
+ },
+ {
+  "id": "oped-ext-bv1g34y1v7hq",
+  "split": "dev",
+  "title": "光るなら",
+  "artists": [
+   "Galileo Galilei"
+  ],
+  "duration": 250,
+  "category": "oped-extension",
+  "locale": "ja",
+  "popularity": "popular",
+  "targetVersion": "full-original",
+  "franchise": "四月是你的谎言",
+  "expectedBvid": "BV1g34y1v7hQ"
  }
 ]

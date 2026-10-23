@@ -1,6 +1,6 @@
 ﻿import { motion } from 'framer-motion'
 
-export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong'
+export type ModeSelectionMode = 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty'
 
 interface ModeSelectionCardsProps {
   currentMode: ModeSelectionMode
@@ -21,6 +21,7 @@ const MODE_OPTIONS: ReadonlyArray<{
   { mode: 'desktop', label: '桌面', description: '沉浸歌词 · 桌面组件' },
   { mode: 'resonance', label: '共振', description: '朋友一起听 · 各自会员音源' },
   { mode: 'singalong', label: '学歌', description: '逐句跟学 · 评分与跟读' },
+  { mode: 'inparty', label: 'In Party', description: 'DG-LAB 多人互控派对' },
 ]
 
 function ExploreMiniature({ accentRgb }: { accentRgb: string }) {
@@ -193,6 +194,29 @@ function SingAlongMiniature() {
       <span className="absolute right-4 top-[52px] h-[1.5px] w-[26px] rounded-full bg-white/20" />
       <span className="absolute right-4 top-[64px] h-[2px] w-[26px] rounded-full bg-emerald-300/80 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
       <span className="absolute right-4 top-[76px] h-[1.5px] w-[26px] rounded-full bg-white/20" />
+    </span>
+  )
+}
+
+/**
+ * In Party：狼头 + 电波 + 派对人群点——DG-LAB 多人互控的意象（沿用插件金黑主题）。
+ */
+function InPartyMiniature() {
+  return (
+    <span
+      aria-hidden="true"
+      className="pointer-events-none absolute inset-0 overflow-hidden bg-[radial-gradient(circle_at_50%_36%,rgba(255,232,156,0.34),transparent_46%),radial-gradient(circle_at_12%_88%,rgba(255,120,90,0.22),transparent_40%),linear-gradient(145deg,#231b08_0%,#151021_56%,#08070f_100%)]"
+    >
+      {/* 电波同心弧 */}
+      <span className="absolute left-1/2 top-[44px] h-[58px] w-[58px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-amber-200/40" />
+      <span className="absolute left-1/2 top-[44px] h-[34px] w-[34px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-amber-200/60" />
+      {/* 中心：狼头（DG-LAB 的意象） */}
+      <span className="absolute left-1/2 top-[44px] -translate-x-1/2 -translate-y-1/2 text-[15px] leading-none">🐺</span>
+      {/* 派对成员点 */}
+      <span className="absolute left-[48px] top-[26px] h-2.5 w-2.5 rounded-full border border-white/40 bg-amber-200/70" />
+      <span className="absolute left-[108px] top-[26px] h-2.5 w-2.5 rounded-full border border-white/40 bg-pink-300/70" />
+      <span className="absolute left-[40px] top-[60px] h-2.5 w-2.5 rounded-full border border-white/40 bg-blue-300/70" />
+      <span className="absolute left-[116px] top-[60px] h-2.5 w-2.5 rounded-full border border-white/40 bg-emerald-300/70" />
     </span>
   )
 }

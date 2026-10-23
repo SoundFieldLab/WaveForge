@@ -114,9 +114,14 @@ async function parseSpotifyResponse(response: Response): Promise<any> {
   return JSON.parse(text)
 }
 
+/** 最近一次 Spotify 请求的失败性质（供 exploreApi 首页给出准确提示而非笼统"暂无内容"）：
+ *  'rate-limited' = 429（借用公共 client_id 的全局限流池被占满）；'expired' = 会话失效；
+ *  'error' = 其它失败；null = 无失败。 */
+export let lastSpotifyFailure: 'rate-limited' | 'expired' | 'error' | null = null
+
 export async function spotifyFetch(path: string, init?: RequestInit): Promise<any | null> {
   const token = getSpotifyToken()
-  if (!token) return null
+  if (!token) { lastSpotifyFailure = null; return null }
   try {
     const headers = new Headers(init?.headers)
     headers.set('Authorization', `Bearer ${token}`)
@@ -128,20 +133,35 @@ export async function spotifyFetch(path: string, init?: RequestInit): Promise<an
         // refresh token 被明确拒绝：会话已死，静默失败会让界面永远空转，
         // 直接清登录态提示重新登录
         clearSpotifySession()
+        lastSpotifyFailure = 'expired'
         return null
       }
       if (refreshed === 'ok') {
         const retryHeaders = new Headers(init?.headers)
         retryHeaders.set('Authorization', `Bearer ${getSpotifyToken()}`)
         const retry = await fetch(`${API}${path}`, { ...init, headers: retryHeaders, signal: AbortSignal.timeout(15_000) })
-        if (retry.ok) return parseSpotifyResponse(retry)
+        if (retry.ok) { lastSpotifyFailure = null; return parseSpotifyResponse(retry) }
+        if (retry.status === 429) { lastSpotifyFailure = 'rate-limited'; return null }
+        lastSpotifyFailure = 'error'
+        return null
       }
+      lastSpotifyFailure = 'error'
       return null
     }
-    if (!resp.ok) return null
+    // 429：限流。借用公共 client_id（Spotify Web Player 的 id）时全局池由所有使用者共享，
+    // 被占满后 browse/search/me 全部 429——首页"暂无加载内容"的真因。
+    // 用自定义 client_id（设置里填自己的 Developer Dashboard id）可换独立配额。
+    if (resp.status === 429) {
+      lastSpotifyFailure = 'rate-limited'
+      console.warn('[Spotify] API 限流（429）：公共 client_id 配额被占满，可在设置中填入自己的 client_id 换独立配额')
+      return null
+    }
+    if (!resp.ok) { lastSpotifyFailure = 'error'; return null }
+    lastSpotifyFailure = null
     return parseSpotifyResponse(resp)
   } catch (e) {
     console.warn('[Spotify] 请求失败:', e)
+    lastSpotifyFailure = 'error'
     return null
   }
 }
@@ -410,6 +430,17 @@ export async function likeSpotifyTracks(trackIds: string[], like: boolean): Prom
   const data = await spotifyFetch(`/me/tracks?ids=${encodeURIComponent(trackIds.join(','))}`, {
     method: like ? 'PUT' : 'DELETE',
     headers: { 'Content-Type': 'application/json' },
+  })
+  return data !== null
+}
+
+/** 添加歌曲到歌单（右键菜单"加入歌单"） */
+export async function addSpotifyTrackToPlaylist(trackId: string, playlistId: string): Promise<boolean> {
+  if (!trackId || !playlistId) return false
+  const data = await spotifyFetch(`/playlists/${encodeURIComponent(playlistId)}/tracks`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uris: [`spotify:track:${trackId}`] }),
   })
   return data !== null
 }

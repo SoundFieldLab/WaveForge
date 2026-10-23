@@ -229,7 +229,8 @@ function QQPcSidebar({
     const features = (entry?.features ?? [])
       .filter(item => isOfficialSonglist(item) || Boolean(SUBTYPE_TAB[item.itemSubType]))
       .map(toTile)
-    return [...features, { key: 'local:radio', title: '刷歌', itemType: 1001, itemSubType: 0, link: '' }]
+    // 官方 2026-10 起 UI 名「AI伴听」（旧「刷歌」）；本机功能位短名跟随
+    return [...features, { key: 'local:radio', title: 'AI伴听', itemType: 1001, itemSubType: 0, link: '' }]
   }, [entry])
 
   // 折叠态：只留图标轨道（账号 / 功能位 / 二级导航 / 底部工具 + 右箭头展开）

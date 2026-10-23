@@ -62,7 +62,7 @@ export interface TrackAnalysisInput {
 }
 
 const ANALYSIS_VERSION = 'fallback-dsp-v1'
-const PYTHON_ANALYSIS_VERSIONS = new Set(['librosa-dsp-v3', 'beat-this-dsp-v1'])
+const PYTHON_ANALYSIS_VERSIONS = new Set(['librosa-dsp-v3', 'beat-this-dsp-v1', 'beat-this-hpss-v2'])
 /** 低于该置信度的 browser-fallback 结果视为节拍网格不可信，不缓存/不复用 */
 const BROWSER_FALLBACK_MIN_PERSIST_CONFIDENCE = 0.4
 const memoryCache = new Map<string, TrackAnalysis>()
@@ -111,9 +111,19 @@ function isWeakBrowserFallback(analysis: TrackAnalysis | null | undefined): bool
   return (analysis.confidence ?? 0) < BROWSER_FALLBACK_MIN_PERSIST_CONFIDENCE
 }
 
-/** 分析结果是否带可用节拍网格（空网格 = 解码失败/元数据兜底，不能用于智能混音规划） */
+/** 分析结果是否带可用节拍网格（空网格 = 解码失败/元数据兜底，不能用于智能混音规划）。
+ *  附带健全性：节拍不得超出分析时长 +1s——越界 = 音频与分析错位（截断/换源时代写入
+ *  的毒缓存，实测 qq:857362 176s 音频带 251s 节拍），任何消费方（AutoMix 规划、MV
+ *  对齐、响度补偿）吃进这种记录都会产出错误时间轴。读到即当无效处理（重新分析）。 */
 function hasUsableBeats(analysis: TrackAnalysis | null | undefined): boolean {
-  return Boolean(analysis && Array.isArray(analysis.beats) && analysis.beats.length >= 8 && Array.isArray(analysis.downbeats) && analysis.downbeats.length >= 2)
+  return Boolean(
+    analysis
+    && Array.isArray(analysis.beats) && analysis.beats.length >= 8
+    && Array.isArray(analysis.downbeats) && analysis.downbeats.length >= 2
+    && !(Number.isFinite(analysis.duration) && analysis.duration > 0
+      && Number.isFinite(analysis.beats[analysis.beats.length - 1])
+      && analysis.beats[analysis.beats.length - 1] > analysis.duration + 1),
+  )
 }
 
 function abortReason(signal?: AbortSignal): Error {
@@ -846,6 +856,22 @@ export function envelopeSegmentAnchors(
     for (let d = -Math.round(0.5 * fps); d <= Math.round(0.5 * fps); d += 1) {
       const r = corrAt(bestDelta + d, clampedStart)
       if (r > bestR) { bestR = r; bestDelta = bestDelta + d }
+    }
+    // 亚帧抛物线插值：10fps 下锚点 offset 被量化到 0.1s（实测真值 0.237s 算出 0.200s，
+    // 误差 0.037s = 用户实测"对齐差一点点"的分段漂移分量）。峰点附近皮尔逊曲线近似
+    // 抛物线，用峰点及左右两帧的相关值估计连续峰位，把锚精修到 ~0.01s 级。
+    // 边界（峰在搜索窗边缘）或曲线非凹（左右任一侧不低于峰）时不插值，保持帧值。
+    {
+      const l = corrAt(bestDelta - 1, clampedStart)
+      const r = corrAt(bestDelta + 1, clampedStart)
+      if (l < bestR && r < bestR) {
+        const denom = l - 2 * bestR + r
+        if (denom < -1e-9) {
+          const shift = 0.5 * (l - r) / denom // ∈ (-0.5, 0.5)：峰点相对中心帧的亚帧位置
+          bestDelta += shift
+          bestR = bestR - 0.25 * (l - r) * shift // 抛物线峰高（仅记录用）
+        }
+      }
     }
     if (bestR < ENVELOPE_ANCHOR_MIN_CORR) continue
     const songTime = (clampedStart + segFrames / 2) / fps

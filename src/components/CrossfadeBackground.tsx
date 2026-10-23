@@ -1,7 +1,8 @@
 import { motion } from 'framer-motion'
-import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
-import { getResolvedArtworkUrl, preloadArtwork } from '../services/artworkLoader'
+import { memo, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react'
+import { getResolvedArtworkUrl, preloadArtwork, getArtworkCacheKey, getArtworkEpoch, subscribeArtworkEpoch } from '../services/artworkLoader'
 import type { ArtworkLoadOptions } from '../services/artworkLoader'
+import { imageCache } from '../utils/imageCache'
 
 interface CrossfadeBackgroundProps {
   coverUrl: string
@@ -20,6 +21,16 @@ interface CrossfadeBackgroundProps {
 function isUsableCover(url?: string): url is string {
   return Boolean(url?.trim() && !url.includes('picsum.photos'))
 }
+
+/**
+ * 播放页封面卡同源的「立即可用」档位（512 桶）：
+ * 封面卡（CachedImage role=player size=512）已显示新歌封面时，这一档必然已在内存缓存——
+ * 背景层直接复用它先换掉上一曲画面，不等全屏大档下载（实测代理不健康时大档挂 6s+，
+ * 期间背景一直停留在上一曲封面，用户感知为"切歌了背景还是上一首"）。
+ */
+const INTERIM_ARTWORK_SIZE = 512
+/** 切歌后新封面（任何档位）多久未就绪就把上一曲画面淡出：宁可短暂露出底色渐变，也不显示别的歌 */
+const STALE_COVER_HIDE_MS = 2500
 
 function CrossfadeBackground({
   coverUrl,
@@ -52,6 +63,31 @@ function CrossfadeBackground({
   useEffect(() => () => {
     if (retryTimerRef.current !== null) window.clearTimeout(retryTimerRef.current)
   }, [])
+  // stale-hide 定时器回调读取的最新展示层（effect 闭包里的 state 可能已过期）
+  const visibleUrlRef = useRef(visibleUrl)
+  visibleUrlRef.current = visibleUrl
+  const incomingUrlRef = useRef(incomingUrl)
+  incomingUrlRef.current = incomingUrl
+  // 新封面迟迟未就绪时隐藏上一曲画面（不隐藏过渡叠加层，那由 isTransitioning 分支渲染）
+  const [staleHidden, setStaleHidden] = useState(false)
+  const staleTimerRef = useRef<number | null>(null)
+  useEffect(() => () => {
+    if (staleTimerRef.current !== null) window.clearTimeout(staleTimerRef.current)
+  }, [])
+
+  // 立即可用的过渡档：目标全屏档大于 512 时才探测（更小档位没有"升级"一说）。
+  // 订阅 artwork epoch：封面卡稍后加载完成时本组件能跟着重查缓存，及时换上。
+  const artworkEpoch = useSyncExternalStore(subscribeArtworkEpoch, getArtworkEpoch, getArtworkEpoch)
+  const canUseInterim = Boolean(artworkSize && artworkSize > INTERIM_ARTWORK_SIZE)
+  const resolvedInterimUrl = canUseInterim && isUsableCover(coverUrl)
+    ? getResolvedArtworkUrl(coverUrl, { size: INTERIM_ARTWORK_SIZE })
+    : ''
+  // artworkEpoch 参与依赖：任何封面加载完成都可能让这里从空变为命中
+  const cachedInterimUrl = useMemo(() => {
+    if (!resolvedInterimUrl || resolvedInterimUrl === resolvedCoverUrl) return ''
+    const key = getArtworkCacheKey(resolvedInterimUrl, { size: INTERIM_ARTWORK_SIZE })
+    return (key && imageCache.get(key)) || ''
+  }, [resolvedInterimUrl, resolvedCoverUrl, artworkEpoch])
 
   useEffect(() => {
     if (!resolvedCoverUrl || isTransitioning) return
@@ -65,14 +101,38 @@ function CrossfadeBackground({
       }
     }
     const serial = ++requestSerialRef.current
-    void preloadArtwork(resolvedCoverUrl, { ...resolveOptions, priority: 'critical', retries: 1 }).then(() => {
-      if (serial === requestSerialRef.current) {
-        setIncomingUrl(resolvedCoverUrl)
-        retryStateRef.current.attempts = 0
+    const clearStaleTimer = () => {
+      if (staleTimerRef.current !== null) {
+        window.clearTimeout(staleTimerRef.current)
+        staleTimerRef.current = null
       }
+    }
+    // 过渡档已就绪：立即淡入换掉上一曲画面（全屏档就绪后再无缝升级）
+    if (cachedInterimUrl && cachedInterimUrl !== visibleUrl && cachedInterimUrl !== incomingUrl) {
+      clearStaleTimer()
+      setStaleHidden(false)
+      setIncomingUrl(cachedInterimUrl)
+    } else if (visibleUrl && visibleUrl !== resolvedCoverUrl && visibleUrl !== cachedInterimUrl) {
+      // 上一曲画面还挂着、新歌任何档位都没就绪：限时后撤下旧画面（见 staleHidden）
+      clearStaleTimer()
+      staleTimerRef.current = window.setTimeout(() => {
+        staleTimerRef.current = null
+        // 触发时再核对：已在新歌任何档位上则不隐藏
+        if (incomingUrlRef.current === resolvedCoverUrl || incomingUrlRef.current === resolvedInterimUrl) return
+        if (visibleUrlRef.current === resolvedCoverUrl || visibleUrlRef.current === resolvedInterimUrl) return
+        setStaleHidden(true)
+      }, STALE_COVER_HIDE_MS)
+    }
+    void preloadArtwork(resolvedCoverUrl, { ...resolveOptions, priority: 'critical', retries: 1 }).then(() => {
+      if (serial !== requestSerialRef.current) return
+      clearStaleTimer()
+      setStaleHidden(false)
+      setIncomingUrl(resolvedCoverUrl)
+      retryStateRef.current.attempts = 0
     }).catch(() => {
       if (serial !== requestSerialRef.current) return
-      setIncomingUrl('')
+      // 只撤"全屏大档"的淡入：过渡档（512）可能正在渐入/已展示，撤掉会把正确的新歌画面也打回
+      setIncomingUrl(current => (current === resolvedCoverUrl ? '' : current))
       const attempts = retryStateRef.current.attempts
       if (attempts >= 3 || retryTimerRef.current !== null) return
       retryStateRef.current = { url: resolvedCoverUrl, attempts: attempts + 1 }
@@ -83,7 +143,20 @@ function CrossfadeBackground({
         setRetryNonce(value => value + 1)
       }, RETRY_DELAYS_MS[attempts])
     })
-  }, [incomingUrl, isTransitioning, resolvedCoverUrl, resolveOptions, visibleUrl, retryNonce])
+  }, [incomingUrl, isTransitioning, resolvedCoverUrl, resolveOptions, visibleUrl, retryNonce, cachedInterimUrl, resolvedInterimUrl])
+
+  // 换歌（coverUrl 变化）即重置隐藏状态：上一轮的 staleHidden 不能压住新歌的首次淡入
+  const prevCoverSourceRef = useRef(coverUrl)
+  useEffect(() => {
+    if (prevCoverSourceRef.current !== coverUrl) {
+      prevCoverSourceRef.current = coverUrl
+      setStaleHidden(false)
+      if (staleTimerRef.current !== null) {
+        window.clearTimeout(staleTimerRef.current)
+        staleTimerRef.current = null
+      }
+    }
+  }, [coverUrl])
 
   // 兜底提升：淡入动画完成回调（onAnimationComplete）在快速连续切歌/动画中断时
   // 可能不触发，incomingUrl 永远不晋升为 visibleUrl → 封面停留在旧歌。这里用定时器
@@ -125,6 +198,7 @@ function CrossfadeBackground({
     ) {
       setVisibleUrl(readyTransitionToUrl)
       setIncomingUrl('')
+      setStaleHidden(false)
     }
   }, [clampedProgress, explicitTransition, readyTransitionToUrl, resolvedCoverUrl])
 
@@ -132,10 +206,12 @@ function CrossfadeBackground({
     ...imageStyle,
     backgroundImage: `url(${url})`,
   })
+  // 只在非过渡态隐藏：过渡叠加层有自己的渲染分支，不受 staleHidden 影响
+  const hideStaleCover = staleHidden && !explicitTransition
 
   return (
     <div className="absolute inset-0 overflow-hidden">
-      {visibleUrl && (
+      {visibleUrl && !hideStaleCover && (
         <div className="absolute inset-0 bg-cover bg-center" style={layerStyle(visibleUrl)} />
       )}
 

@@ -32,10 +32,14 @@ export function transitionOverlayProgress(progress: number, duration: number, an
   const dur = duration > 0 ? duration : 20
   const lead = Number.isFinite(animationLeadSeconds) && animationLeadSeconds > 0 ? animationLeadSeconds : 10
   // 窗口门控：源曲时间轴还没到动画窗口起点时保持 0
-  if (progress < 1 - lead / dur) return 0
-  const span = Math.min(4, dur)
-  const start = 1 - span / dur
+  const windowStart = 1 - lead / dur
+  if (progress < windowStart) return 0
   const end = 0.9
+  // 叠加渐变窗口：从动画窗口起点铺到 90% 视觉切换点。span 取 min(4s, 窗口可用时长)——
+  // 不能直接用 min(4, dur)：AI 长混音（dur=60、lead=20）时 1-4/60=0.933 > 0.9，
+  // start>end 会让渐变区间倒置 → progress 到 0.9 时叠加层从 0 直接跳 1（观感"瞬间变"）。
+  const span = Math.min(4, dur, Math.max(0.1, dur * (end - windowStart)))
+  const start = end - span / dur
   if (progress >= end) return 1
   const linear = Math.max(0, Math.min(1, (progress - start) / Math.max(1e-6, end - start)))
   // smoothstep：两端更缓、中段更快 —— 观感上更像"滑过去"而不是"推过去"

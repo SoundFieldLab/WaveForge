@@ -1,13 +1,15 @@
 // 酷狗音乐 PC 客户端「音乐 → 推荐」页。
 //
-// 对齐官方截图（D:\opencode\.tmp-kg-tab-tuijian.png）：
-//   ① 五张大卡：猜你喜欢 / 每日推荐 / 排行榜 / 歌单广场 / 歌手；
+// 对齐官方截图（D:\opencode\.tmp-kg-tab-tuijian.png / 图6、图7）：
+//   ① 八张大卡横向排布（窄屏折行）：猜你喜欢 / 每日推荐 / 排行榜 / 歌单广场 / 歌手 /
+//      分类 / 频道 / 场景音乐——官方卡片右下角是封面画（人物/3D 立体画），不是平铺照片；
 //   ② 「今日专属推荐」标题 + 「歌单广场 >」链接 + 歌单卡片网格（卡片左上角是歌曲
 //      自带标签，左下角是播放量）。
-// 数据直接吃传统模式已加载的探索 payload（fetchExploreHome('kugou') 的 kugou 扩展块，
-// 内部全部走 kugouService 的概念版薄封装）——不在这里再发一遍请求，避免首屏双倍流量。
-import { memo } from 'react'
-import { Headphones, Mic2, Play, Sparkles, Trophy } from 'lucide-react'
+// 数据直接吃传统模式已加载的探索 payload（fetchExploreHome('kugou') 的 kugou 扩展块）；
+// 分类/频道/场景音乐三卡的落点：分类=分类页签、频道=频道页签、场景音乐=频道页签里的
+// 「放松/睡前/解压」等场景专区（zones 独立拉取，公开数据）。
+import { memo, useEffect, useState } from 'react'
+import { Cuboid, Headphones, Layers, Mic2, Play, Radio, Sparkles, Trophy } from 'lucide-react'
 import type { ExplorePlaylist, ExplorePayload } from '../../services/exploreApi'
 import { PcCover } from './pcKit'
 import { kugouCount, type KugouPcMusicTab, type KugouPcPageContext } from './KugouPcShared'
@@ -15,28 +17,36 @@ import { kugouCount, type KugouPcMusicTab, type KugouPcPageContext } from './Kug
 export interface KugouPcHomeProps {
   ctx: KugouPcPageContext
   payload: ExplorePayload | null
-  /** 大卡「歌单广场 / 歌手」跳到同一「音乐」页下的其它页签 */
+  /** 大卡「歌单广场 / 歌手 / 分类 / 频道」跳到同一「音乐」页下的其它页签 */
   onOpenTab: (tab: KugouPcMusicTab) => void
+  /** 场景音乐卡：打开频道页签并进入对应场景专区（zone 名） */
+  onOpenSceneZone?: (zoneName: string) => void
 }
 
-/** 官方大卡的配色（对照官方截图：青绿/紫/橙的整块渐变底，白色大标题）。 */
+/** 官方大卡的配色（对照官方截图图6/图7：青绿/紫/橙/红/蓝的整块渐变底，白色大标题）。
+ *  场景音乐的红与分类的蓝取自官方截图的纯色块。 */
 const BIG_CARD_GRADIENTS: Record<string, string> = {
   guess: 'linear-gradient(135deg, #2fc9b4 0%, #56d8b0 100%)',
   daily: 'linear-gradient(135deg, #8a7bf7 0%, #a98ffb 100%)',
   chart: 'linear-gradient(135deg, #ff9a52 0%, #ff7a3c 100%)',
   playlist: 'linear-gradient(135deg, #ff8a5c 0%, #ff6348 100%)',
   singer: 'linear-gradient(135deg, #ffa14e 0%, #ff8340 100%)',
+  categories: 'linear-gradient(135deg, #4facfe 0%, #38b2f7 100%)',
+  channels: 'linear-gradient(135deg, #7d6bff 0%, #9a7bff 100%)',
+  scene: 'linear-gradient(135deg, #ff6b6b 0%, #f5576c 100%)',
 }
 
-/** 官方大卡：整块渐变底 + 左上角大标题/副标题 + 右下角封面画（官方没有铺满的封面照片）。 */
+/** 官方大卡：整块渐变底 + 左上角大标题/副标题 + 右下角封面画（官方没有铺满的封面照片）。
+ *  有 cover 用封面画，否则用 children（图标）/Headphones 兜底。 */
 function BigCard({
-  title, subtitle, cover, gradient, onClick,
+  title, subtitle, cover, gradient, onClick, children,
 }: {
   title: string
   subtitle?: string
   cover?: string
   gradient: string
   onClick: () => void
+  children?: React.ReactNode
 }) {
   return (
     <button
@@ -54,6 +64,8 @@ function BigCard({
         <span className="absolute bottom-3 right-3 h-[72px] w-[72px] overflow-hidden rounded-lg shadow-[0_6px_16px_rgba(0,0,0,0.28)] transition group-hover:scale-105">
           <PcCover src={cover} alt={title} className="h-full w-full" rounded="rounded-lg" />
         </span>
+      ) : children ? (
+        children
       ) : (
         <Headphones className="absolute bottom-3 right-3 h-10 w-10 text-white/30" />
       )}
@@ -61,7 +73,7 @@ function BigCard({
   )
 }
 
-function KugouPcHome({ ctx, payload, onOpenTab }: KugouPcHomeProps) {
+function KugouPcHome({ ctx, payload, onOpenTab, onOpenSceneZone }: KugouPcHomeProps) {
   const theme = ctx.theme
   const accent = ctx.accent
   const kugou = payload?.kugou
@@ -70,6 +82,18 @@ function KugouPcHome({ ctx, payload, onOpenTab }: KugouPcHomeProps) {
   const tagPlaylists = kugou?.tagPlaylists || []
   const guessPlaylists = kugou?.yueku?.recommendPlaylists || []
   const singers = kugou?.singers || []
+
+  // 场景音乐卡封面：官方用场景插画（放松/睡前…），这里用场景专区的首个电台/专区图标；
+  // 场景专区目录（zones）独立拉取（公开数据），找不到时整卡隐藏（不摆假入口）。
+  const [sceneZones, setSceneZones] = useState<Array<{ name: string; icon: string }>>([])
+  useEffect(() => {
+    let cancelled = false
+    void import('../../services/kugouService')
+      .then(m => m.fetchKugouChannelZones())
+      .then(list => { if (!cancelled) setSceneZones(list.filter(z => ['放松', '睡前', '解压', '快乐', '咖啡厅'].includes(z.name)).map(z => ({ name: z.name, icon: z.icon }))) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [])
 
   // 今日专属推荐：优先用带标签的分类歌单池（官方卡片左上角的标签就来自这里）
   const dailyGrid = (tagPlaylists.length ? tagPlaylists : guessPlaylists).slice(0, 18)
@@ -92,6 +116,7 @@ function KugouPcHome({ ctx, payload, onOpenTab }: KugouPcHomeProps) {
 
   return (
     <div className="pb-8" data-kugou-pc-page="discover">
+      {/* 官方大卡行：8 张横向排布（xl 5 列折行，与官方「首屏 5 张 + 滚动见后 3 张」的排布一致） */}
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
         <BigCard
           title="猜你喜欢"
@@ -128,6 +153,33 @@ function KugouPcHome({ ctx, payload, onOpenTab }: KugouPcHomeProps) {
           gradient={BIG_CARD_GRADIENTS.singer}
           onClick={() => onOpenTab('library')}
         />
+        <BigCard
+          title="分类"
+          subtitle="精选风格随心听"
+          gradient={BIG_CARD_GRADIENTS.categories}
+          onClick={() => onOpenTab('categories')}
+        >
+          <Cuboid className="absolute bottom-3 right-3 h-10 w-10 text-white/55" />
+        </BigCard>
+        <BigCard
+          title="频道"
+          subtitle="音乐频道，随心畅听"
+          gradient={BIG_CARD_GRADIENTS.channels}
+          onClick={() => onOpenTab('channels')}
+        >
+          <Radio className="absolute bottom-3 right-3 h-10 w-10 text-white/55" />
+        </BigCard>
+        {sceneZones.length > 0 ? (
+          <BigCard
+            title="场景音乐"
+            subtitle="让音乐伴你工作"
+            cover={sceneZones[0]?.icon}
+            gradient={BIG_CARD_GRADIENTS.scene}
+            onClick={() => onOpenSceneZone?.(sceneZones[0]?.name || '放松')}
+          >
+            <Layers className="absolute bottom-3 right-3 h-10 w-10 text-white/35" />
+          </BigCard>
+        ) : null}
       </div>
 
       <div className="mt-8">

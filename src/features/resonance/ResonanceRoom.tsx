@@ -32,11 +32,16 @@ export interface ResonanceRoomProps {
   /** 我还能加几首（Infinity = 不限） */
   remainingQuota: number
   onSendChat: (text: string) => void
+  onToggleReaction: (messageId: string, emoji: string) => void
+  onRecall: (messageId: string) => void
+  onTyping: () => void
   onVoteSkip: (target: string | null) => void
   onForceSkip: () => void
   onNext: () => void
+  onTogglePlay: () => void
   onRemoveTrack: (trackKey: string) => void
   onMoveToNext: (trackKey: string) => void
+  onMoveToIndex: (trackKey: string, toIndex: number) => void
   onGrantControl: (peerId: string) => void
   onRevokeControl: () => void
   onRequestControl: () => void
@@ -60,6 +65,7 @@ export interface ResonanceRoomProps {
   nowPlaying: { title: string; artists: string; coverUrl: string; durationMs: number; positionMs: number } | null
 }
 
+const REACT_EMOJIS = ['👍', '❤️', '😂', '🔥', '😮', '😢']
 const EMOJI = ['🎧', '🔥', '❤️', '😂', '👏', '🥲', '🌙', '🙌']
 
 /** 预排队里「为什么还不能进队列」的说法 */
@@ -76,8 +82,8 @@ function formatClock(ms: number): string {
 
 export default function ResonanceRoom(props: ResonanceRoomProps) {
   const {
-    playerTheme = 'dark', accent, settings, snapshot, selfPeerId, remainingQuota, onSendChat, onVoteSkip,
-    onForceSkip, onNext, onRemoveTrack, onMoveToNext, onGrantControl, onRevokeControl, onRequestControl, onDismissControlRequest,
+    playerTheme = 'dark', accent, settings, snapshot, selfPeerId, remainingQuota, onSendChat, onToggleReaction, onRecall, onTyping, onVoteSkip,
+    onForceSkip, onNext, onTogglePlay, onRemoveTrack, onMoveToNext, onMoveToIndex, onGrantControl, onRevokeControl, onRequestControl, onDismissControlRequest,
     onKick, onToggleAvatars, onPromotePending, onDismissPending, onToggleMemberControl, onLoadMoreQueue, onOpenAdd, onLeave, onDissolve,
     playingLocal, unplayableText, arrivingHint, nowPlaying,
   } = props
@@ -191,6 +197,9 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
                     {controlling && <span className="rounded-full px-1.5 py-0.5" style={{ background: 'rgba(255,200,90,0.2)', color: '#ffd98a' }}>控制中</span>}
                     {member.nicknameConflict && <span className="rounded-full px-1.5 py-0.5" style={{ background: 'rgba(255,150,80,0.22)', color: '#ffcf9a' }} title="和房间里另一个成员重名">重名</span>}
                     {member.unableToPlay && <span className="flex items-center gap-0.5 rounded-full px-1.5 py-0.5" style={{ background: 'rgba(255,150,80,0.2)', color: '#ffcf9a' }}><TriangleAlert className="h-2.5 w-2.5" />这首播不了</span>}
+                    {member.online && room.playback && (room.playback.playing
+                      ? <span className="flex items-center gap-0.5 rounded-full px-1.5 py-0.5" style={{ background: 'rgba(80,220,140,0.16)', color: '#6ee7a0' }}><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />跟播中</span>
+                      : <span className="rounded-full px-1.5 py-0.5" style={{ background: chip, color: sub }}>已暂停</span>)}
                   </span>
                 </span>
                 {isHost && !isSelf && (
@@ -431,6 +440,8 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
                         chip={chip}
                         onRemove={() => onRemoveTrack(item.key)}
                         onMoveNext={() => onMoveToNext(item.key)}
+                        dragEnabled={snapshot.canControl || item.requestedBy === selfPeerId}
+                        onDrop={(draggedKey) => onMoveToIndex(draggedKey, absoluteIndex)}
                       />
                     )
                   })}
@@ -446,21 +457,62 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
         <header className="mb-3 flex items-center gap-2">
           <MessageSquare className="h-4 w-4" style={{ color: '#7cc4ff' }} />
           <h2 className="text-sm font-semibold">房间聊天</h2>
-          <span className="ml-auto text-xs" style={{ color: sub }}>端到端加密</span>
+          {Object.keys(snapshot.typingPeers ?? {}).length > 0 && (
+            <span className="ml-auto animate-pulse text-xs" style={{ color: accent }}>
+              {Object.values(snapshot.typingPeers ?? {}).join('、')} 正在输入…
+            </span>
+          )}
+          {Object.keys(snapshot.typingPeers ?? {}).length === 0 && <span className="ml-auto text-xs" style={{ color: sub }}>端到端加密</span>}
         </header>
         <div className="wf-no-scrollbar min-h-0 flex-1 space-y-2.5 overflow-y-auto pr-1" aria-live="polite">
           {snapshot.chat.length === 0 && <p className="py-8 text-center text-xs" style={{ color: sub }}>还没有人说话</p>}
-          {snapshot.chat.map(message => (
-            <div key={message.id} className="flex items-start gap-2 text-xs">
-              <span className="mt-0.5 h-6 w-6 shrink-0 overflow-hidden rounded-full" style={{ background: chip }}>
-                <span className="flex h-full w-full items-center justify-center text-[11px]" style={{ color: sub }}>{message.nickname.slice(0, 1)}</span>
-              </span>
+          {snapshot.chat.map(message => {
+            // 头像从成员列表就地解析（聊天消息只带 peerId，不带头像——不必改线路协议）
+            const sender = members.find(member => member.peerId === message.peerId)
+            const senderAvatar = settings.showAvatars ? sender?.avatarUrl : ''
+            return (
+              <div key={message.id} className="flex items-start gap-2 text-xs">
+                <span className="mt-0.5 h-6 w-6 shrink-0 overflow-hidden rounded-full" style={{ background: chip }}>
+                  {senderAvatar
+                    ? <CachedImage src={senderAvatar} alt="" className="h-full w-full object-cover" role="compact" />
+                    : <span className="flex h-full w-full items-center justify-center text-[11px]" style={{ color: sub }}>{message.nickname.slice(0, 1)}</span>}
+                </span>
               <span className="min-w-0">
                 <span className="font-medium" style={{ color: message.self ? accent : (dark ? 'rgba(255,255,255,0.78)' : 'rgba(0,0,0,0.72)') }}>{message.nickname}</span>
-                <span className="ml-2 break-words" style={{ color: dark ? 'rgba(255,255,255,0.64)' : 'rgba(0,0,0,0.62)' }}>{message.text}</span>
+                {message.recalled
+                  ? <span className="ml-2 italic break-words" style={{ color: dark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)' }}>{message.text}</span>
+                  : <span className="ml-2 break-words" style={{ color: dark ? 'rgba(255,255,255,0.64)' : 'rgba(0,0,0,0.62)' }}>{message.text}</span>}
+                {REACT_EMOJIS.some(emoji => (snapshot.reactions?.[message.id]?.[emoji] ?? []).length > 0) && (
+                  <span className="mt-1 flex flex-wrap gap-1">
+                    {REACT_EMOJIS.map(emoji => {
+                      const users = snapshot.reactions?.[message.id]?.[emoji] ?? []
+                      if (!users.length) return null
+                      const mine = users.includes(selfPeerId)
+                      return (
+                        <button
+                          key={emoji} type="button" onClick={() => onToggleReaction(message.id, emoji)}
+                          className={'rounded-full px-1.5 text-[10px] transition ' + (mine ? '' : 'opacity-60 hover:opacity-100')}
+                          style={{ background: mine ? accent + '26' : chip, color: mine ? accent : (dark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.55)') }}
+                        >
+                          {emoji} {users.length}
+                        </button>
+                      )
+                    })}
+                  </span>
+                )}
+                {message.self && !message.recalled && Date.now() - message.at <= 120_000 && (
+                  <button
+                    type="button" onClick={() => onRecall(message.id)}
+                    className="mt-0.5 block text-[9px] opacity-40 hover:opacity-90"
+                    style={{ color: dark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.45)' }}
+                  >
+                    撤回（2 分钟内）
+                  </button>
+                )}
               </span>
-            </div>
-          ))}
+              </div>
+            )
+          })}
           <div ref={chatEndRef} />
         </div>
         <div className="mt-2 flex flex-wrap gap-1">
@@ -471,7 +523,7 @@ export default function ResonanceRoom(props: ResonanceRoomProps) {
         <div className="mt-2 flex items-center gap-2">
           <input
             value={chatInput}
-            onChange={event => setChatInput(event.target.value)}
+            onChange={event => { setChatInput(event.target.value); if (event.target.value.trim()) onTyping() }}
             onKeyDown={event => {
               if (event.key !== 'Enter' || event.nativeEvent.isComposing) return
               const text = chatInput.trim()
@@ -613,13 +665,34 @@ function QueueRow(props: {
   chip: string
   onRemove: () => void
   onMoveNext: () => void
+  dragEnabled?: boolean
+  onDrop?: (draggedKey: string) => void
 }) {
-  const { index, track, current, requesterName, canRemove, accent, border, sub, chip, onRemove, onMoveNext } = props
+  const { index, track, current, requesterName, canRemove, accent, border, sub, chip, onRemove, onMoveNext, dragEnabled, onDrop } = props
   return (
     <div
       className="group flex items-center gap-3 border-b px-1"
       style={{ height: ROW_HEIGHT, borderColor: border, background: current ? `${accent}1a` : 'transparent' }}
       data-track-key={track.key}
+      draggable={dragEnabled}
+      onDragStart={event => {
+        if (!dragEnabled) return
+        event.dataTransfer.setData('text/track-key', track.key)
+        event.dataTransfer.effectAllowed = 'move'
+      }}
+      onDragOver={event => {
+        if (!dragEnabled || !event.dataTransfer.types.includes('text/track-key')) return
+        event.preventDefault()
+        event.dataTransfer.dropEffect = 'move'
+      }}
+      onDrop={event => {
+        if (!dragEnabled || !onDrop) return
+        const draggedKey = event.dataTransfer.getData('text/track-key')
+        if (draggedKey && draggedKey !== track.key) {
+          event.preventDefault()
+          onDrop(draggedKey)
+        }
+      }}
     >
       <span className="w-7 shrink-0 text-center text-sm" style={{ color: sub }}>{current ? <Play className="mx-auto h-3.5 w-3.5" style={{ color: accent }} /> : index}</span>
       <span className="min-w-0 flex-1">

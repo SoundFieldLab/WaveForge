@@ -7,8 +7,8 @@
 //
 // 主题：两个官方客户端都有浅色/深色两套皮肤，这里用 tone 参数化（与全软件 playerTheme 同源），
 // 布局尺寸/层级/交互与官方一致，配色跟随当前主题。
-import { memo, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
-import { ChevronRight, Heart, MoreHorizontal, Music2, Pause, Play, Search } from 'lucide-react'
+import { memo, useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { ChevronRight, Heart, LocateFixed, MoreHorizontal, Music2, Pause, Play, Search } from 'lucide-react'
 import CachedImage from '../../components/CachedImage'
 import { getProxiedImageUrl } from '../../services/musicApi'
 import type { Song } from '../../services/musicApi'
@@ -64,6 +64,90 @@ export function pcDateTime(value?: number | null): string {
 export function pcSongKey(song?: Song | null): string {
   if (!song) return ''
   return `${song.platform || ''}:${song.id || song.mid || song.name || ''}`
+}
+
+/**
+ * PcSongTable 的「定位当前歌曲」悬浮按钮。
+ *
+ * 背景：传统模式 PC 页（歌单/榜单/歌手热门/搜索结果）的表格直接铺在 TraditionalView 的
+ * main 滚动容器里，长列表（200+ 行分批渲染）滚远后正在播放的行就找不到了；旧的
+ * ScrollToCurrentSong 只覆盖了简约/探索模式的弹窗面板，PC 页此前没有定位入口。
+ *
+ * 实现：挂在表格容器末尾，点击时从自身向上找最近的**可滚动祖先**（页面的滚动容器，
+ * 不引入跨层 ref），再用 scrollIntoView 把正在播放的行滚到视口内。行在视口内（含
+ * 120px 余量）或列表不可滚时按钮不出现，避免与页面级「返回顶部」（TraditionalView
+ * 已内建）功能重叠。
+ *
+ * 重跑时机：正在播放行是用户点播放后才渲染的，且「点歌 → React 标记行 → 布局稳定」
+ * 与 playingKey prop 的更新不在同一次 commit（队列/过渡状态各自驱动渲染），仅依赖
+ * playingKey 会在部分路径上错过。用 MutationObserver 监听容器子树的属性变化，
+ * 行标记出现/消失/换行时都重算一次，配合 scroll/resize 兜底。
+ */
+function PcLocatePlayingRow({ containerRef }: { containerRef: React.RefObject<HTMLDivElement | null> }) {
+  const [visible, setVisible] = useState(false)
+  // 按钮钉在滚动视口右下角：fixed 定位相对视口，水平位置需按滚动容器右缘动态计算
+  // （传统模式 main 右侧还有 320px 的「正在播放」栏，写死 right 会压到右栏上）。
+  const [pos, setPos] = useState<{ right: number; bottom: number }>({ right: 28, bottom: 96 })
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    // 同步计算：scroll 事件本身已按帧节流，单次 querySelector + getBoundingClientRect
+    // 开销可忽略。不用 rAF 合并——窗口失焦/后台时 rAF 会暂停，按钮会停在过期状态。
+    const update = () => {
+      const row = container.querySelector('[data-pc-playing-row="1"]')
+      if (!row) { setVisible(false); return }
+      const scroller = container.closest<HTMLElement>('[class*="overflow-y-auto"], [class*="overflow-auto"], [class*="overflow-scroll"], [class*="overflow-y-scroll"]')
+      if (!scroller || scroller.scrollHeight <= scroller.clientHeight + 40) { setVisible(false); return }
+      const viewRect = scroller.getBoundingClientRect()
+      const rowRect = row.getBoundingClientRect()
+      const inView = rowRect.bottom >= viewRect.top - 120 && rowRect.top <= viewRect.bottom + 120
+      // right 相对视口：视口宽 - 滚动容器右缘 + 16px 内边距；bottom 预留底部迷你播放条（5rem）。
+      setPos({
+        right: Math.max(16, window.innerWidth - viewRect.right + 16),
+        bottom: Math.max(16, window.innerHeight - viewRect.bottom + 16 + 48),
+      })
+      setVisible(!inView)
+    }
+    // 挂载后先算一次（首屏已有 playing row 的场景）。
+    update()
+    // 行标记出现/消失/换行都发生在本容器子树内（attribute 变化），observer 全覆盖。
+    const observer = new MutationObserver(update)
+    observer.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-pc-playing-row'] })
+    const scroller = container.closest<HTMLElement>('[class*="overflow-y-auto"], [class*="overflow-auto"], [class*="overflow-scroll"], [class*="overflow-y-scroll"]')
+    scroller?.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      observer.disconnect()
+      scroller?.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [containerRef])
+
+  if (!visible) return null
+  return (
+    <button
+      type="button"
+      aria-label="定位当前歌曲"
+      title="定位当前歌曲"
+      onClick={() => {
+        const container = containerRef.current
+        const row = container?.querySelector('[data-pc-playing-row="1"]')
+        row?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }}
+      // fixed 定位（不是 sticky）：表格容器高度=内容高度，sticky bottom 只会钉在容器底
+      // 而不是视口底。位置由 update() 按滚动容器实时计算。
+      className="fixed z-40 flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-white/80 shadow-[0_8px_32px_rgba(0,0,0,0.18)] backdrop-blur-xl transition-all hover:scale-105 hover:bg-white/10 active:scale-95"
+      style={{
+        right: pos.right,
+        bottom: pos.bottom,
+        backdropFilter: 'blur(20px) saturate(180%)',
+        WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+      }}
+    >
+      <LocateFixed className="h-5 w-5" />
+    </button>
+  )
 }
 
 /** QQ 专辑封面兜底：数据缺 picUrl 但有 album.mid 时按官方 CDN 规则拼出（与 artwork.ts 降档候选同源）。 */
@@ -426,8 +510,10 @@ export const PcSongTable = memo(function PcSongTable({
   const showLike = columns.like !== false
   const showDuration = columns.duration !== false
   const showIndex = Boolean(columns.index)
+  const tableRef = useRef<HTMLDivElement>(null)
   return (
-    <div className="w-full">
+    <div className="w-full" ref={tableRef}>
+      <PcLocatePlayingRow containerRef={tableRef} />
       {/* 表头 */}
       <div className={`flex items-center gap-3 border-b pb-2 text-[12px] ${theme.subtle} ${theme.divider}`}>
         {showIndex && <span className="w-8 shrink-0 text-center">#</span>}
@@ -445,6 +531,7 @@ export const PcSongTable = memo(function PcSongTable({
         return (
           <div
             key={`${key}:${index}`}
+            data-pc-playing-row={active ? '1' : undefined}
             onDoubleClick={() => onPlay?.(song, index)}
             onContextMenu={event => onMenu?.(event, song)}
             className={`group flex items-center gap-3 rounded-md py-[6px] text-[13px] transition ${theme.hover}`}

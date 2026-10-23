@@ -990,7 +990,10 @@ function DesktopView({
       name: p.name,
       coverImgUrl: p.coverImgUrl || p.coverUrl || '',
       trackCount: p.trackCount ?? p.tracksTotal ?? 0,
-      platform: currentPlatform,
+      // 保留数据源的真实 platform：平台切换竞态下 currentPlatform 可能与数据源不一致
+      // （旧 QQ 数据还在 state、新 Spotify 数据刚到），强制覆盖会让 Spotify 歌单卡被标成
+      // qq → 点开详情走 QQ 分支 → 空列表（实测卡片名对但详情空的根因）。
+      platform: p.platform || currentPlatform,
       userId: p.userId,
       owner: p.owner,
       ownedByMe: p.ownedByMe,

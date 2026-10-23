@@ -42,10 +42,18 @@ describe('describeTransitionCompatibilityIssue（格式/一致性预检）', () 
     expect(describeTransitionCompatibilityIssue(ok, meta, { ...STREAM_META, trackKey: 'ok' }, { ...STREAM_META, trackKey: 'meta' })).toContain('元数据降级')
   })
 
-  it('分析时长与流时长偏差 >1.5s → 拦截（过期缓存/换源）', () => {
-    const analysis = makeAnalysis('src', { duration: 130 })
+  it('分析时长比流短 >1.5s → 拦截（过期缓存/试听截断）', () => {
+    // 单向拦截（2026-10-19 修复）：只拦「分析比流短」= 真截断；
+    // 「分析比流长」是元数据虚高（QQ 普遍 +10s），双向比较会引发 stale-invalidate 死循环
+    const analysis = makeAnalysis('src', { duration: 110 })
     const issue = describeTransitionCompatibilityIssue(analysis, makeAnalysis('tgt'), { ...STREAM_META, trackKey: 'src' }, { ...STREAM_META, trackKey: 'tgt' })
     expect(issue).toContain('时长不一致')
+  })
+
+  it('分析时长比流长（元数据虚高）→ 放行（不死循环）', () => {
+    const analysis = makeAnalysis('src', { duration: 130 })
+    const issue = describeTransitionCompatibilityIssue(analysis, makeAnalysis('tgt'), { ...STREAM_META, trackKey: 'src' }, { ...STREAM_META, trackKey: 'tgt' })
+    expect(issue).toBeNull()
   })
 
   it('时长偏差 ≤1.5s → 放行（元数据取整误差容忍）', () => {

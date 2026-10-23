@@ -22,7 +22,9 @@ describe('Transition overlay progress source', () => {
 
     // 窗口未开时归零，且从窗口起点重新归一化
     expect(app).toContain('if (!inAnimationWindow) return 0')
-    expect(app).toContain('const start = 1 - span / dur')
+    // 修复后：start 从视觉切换点反推（渐变窗口不倒置），不再固定 1 - span/dur
+    expect(app).toContain('const start = end - span / dur')
+    expect(app).toContain('windowStart')
     // 交叉淡化在 90%（视觉轨道切换点）完成：此后叠加层退休、由 canonical 无缝接替
     expect(app).toContain('const end = 0.9')
     expect(app).toContain('if (transitionProgress >= end) return 1')

@@ -12,6 +12,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { classifyQqLoginFailure } = require('./qqLoginFailure.cjs');
 
 const LOG_PREFIX = '[QQ音乐扫码]';
 
@@ -1046,13 +1047,15 @@ function createQqMusicQrLogin({ statePath, wsImpl } = {}) {
   let expiresInMs = 0;
   let state = 'idle'; // idle | starting | waiting | scanned | exchanging | success | expired | error
   let message = '';
+  let lastFailureHint = null;
   let cookie = null;
   let listener = null;
   let exchangeTask = null;
 
-  function setState(next, detail) {
+  function setState(next, detail, failureHint) {
     state = next;
     if (detail !== undefined) message = detail;
+    if (failureHint !== undefined) lastFailureHint = failureHint;
   }
 
   function closeListener() {
@@ -1093,19 +1096,28 @@ function createQqMusicQrLogin({ statePath, wsImpl } = {}) {
           logStatus('登录成功');
           closeListener();
         } catch (error) {
-          setState('error', `登录凭据交换失败：${error && error.message ? error.message : '未知错误'}`);
+          // 失败分类：把上游真实拒绝原因（20279 设备上限等）归类成界面可解释的 failureHint
+          const failure = classifyQqLoginFailure(error);
+          setState('error', `登录凭据交换失败：${error && error.message ? error.message : '未知错误'}`, failure);
           logWarn('登录失败', error && error.phase ? `${error.phase} 阶段` : '凭据交换');
         }
       })();
       return;
     }
     if (type === 'canceled' || type === 'timeout' || type === 'loginFailed') {
-      setState('expired', EXPIRED_MESSAGES[type] || '二维码已过期，请重新获取');
+      if (type === 'loginFailed') {
+        // 手机端点了「拒绝」：这不是过期，分类成 REFUSED 让界面给出可行动文案
+        const failure = classifyQqLoginFailure({ message: '手机端拒绝了本次登录', phase: 'qr-confirm' });
+        setState('error', EXPIRED_MESSAGES.loginFailed, failure);
+      } else {
+        setState('expired', EXPIRED_MESSAGES[type] || '二维码已过期，请重新获取');
+      }
       logStatus('扫码流程结束');
       return;
     }
     if (type === 'error') {
-      setState('error', event.message || 'MQTT 连接异常');
+      const failure = classifyQqLoginFailure({ message: event.message || '', phase: 'mqtt', code: event.code });
+      setState('error', event.message || 'MQTT 连接异常', failure);
       logWarn('MQTT 连接异常', event.message);
     }
   }
@@ -1175,8 +1187,8 @@ function createQqMusicQrLogin({ statePath, wsImpl } = {}) {
 
   async function poll() {
     if (state === 'success') return { status: 'success', cookie, message: '登录成功' };
-    if (state === 'expired' || state === 'canceled') return { status: 'expired', message: message || '二维码已过期' };
-    if (state === 'error') return { status: 'error', message: message || '扫码登录失败' };
+    if (state === 'expired' || state === 'canceled') return { status: 'expired', message: message || '二维码已过期', ...(lastFailureHint ? { failureHint: lastFailureHint } : {}) };
+    if (state === 'error') return { status: 'error', message: message || '扫码登录失败', ...(lastFailureHint ? { failureHint: lastFailureHint } : {}) };
     if (state === 'scanned' || state === 'exchanging') return { status: 'scanned', message: '二维码已扫描' };
     return { status: 'waiting', message: '等待扫码' };
   }

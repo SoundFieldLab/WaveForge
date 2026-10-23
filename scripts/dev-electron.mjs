@@ -8,7 +8,7 @@ import { homedir } from 'os'
 import net from 'net'
 import dns from 'node:dns'
 import { randomBytes } from 'crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
+import { appendFileSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'fs'
 import { isCompatibleLocalApiHealth } from '../server/local-api-health.mjs'
 
 // 当前 Windows 网络的 IPv6 路由可能不可达；外部音乐 CDN/API 优先走 IPv4。
@@ -65,9 +65,41 @@ if (profilePreparation.status === 'migrated') {
 }
 let pythonCacheRoot = resolve(userDataRoot, 'cache')
 try {
+  // 与主进程 ConfigManager.loadConfig() 同源的两条规则，缺一即劈叉：
+  // ① legacy 默认路径不算「显式自定义」：config.json 里残留的旧默认（userData cache、
+  //    exe 目录 cache、项目根 cache）必须忽略，否则主进程把它当未自定义走便携默认
+  //    （项目根 cache\），本文件却把它当自定义原样传给 beat/loudness 服务的允许根 →
+  //    AudioCache 落在 D:\...\cache\temp，Python 白名单只认 C:\...\澜音工坊\cache →
+  //    渲染层 POST /analyze 必撞 "audioPath must be inside the WaveForge cache" 400。
+  //    （ConfigManager.getLegacyDefaultCachePaths(): userData cache、exe 目录 cache、项目根 cache）
+  // ② 无显式配置时 dev 便携默认是**项目根 cache\**（可写探针通过）。
+  const legacyDefaults = [
+    resolve(userDataRoot, 'cache'),
+    resolve(projectRoot, 'cache'),
+  ].map(value => resolve(value))
   const configured = JSON.parse(readFileSync(resolve(userDataRoot, 'config.json'), 'utf8'))?.cachePath
-  if (typeof configured === 'string' && isAbsolute(configured.trim())) pythonCacheRoot = resolve(configured.trim())
-} catch { /* Missing or invalid config uses the Electron default cache path. */ }
+  if (typeof configured === 'string' && isAbsolute(configured.trim())) {
+    const resolvedConfigured = resolve(configured.trim())
+    if (!legacyDefaults.includes(resolvedConfigured)) {
+      pythonCacheRoot = resolvedConfigured
+    } else {
+      const portableCache = resolve(projectRoot, 'cache')
+      mkdirSync(portableCache, { recursive: true })
+      accessSync(portableCache, constants.W_OK)
+      pythonCacheRoot = portableCache
+    }
+  } else {
+    // 与主进程 ConfigManager.getDefaultCachePath() 同源：无显式配置时 dev 的便携默认
+    // 是**项目根 cache\**（可写探针通过），不再是 <profile>\cache。不一致的话，主进程
+    // AudioCache 把文件落在项目根 cache\temp，而 beat/loudness 服务的允许根还停在
+    // <profile>\cache → "audioPath must be inside the WaveForge cache" 400
+    // （首次启动必撞：config.json 此刻还没被主进程写入 cachePath）。
+    const portableCache = resolve(projectRoot, 'cache')
+    mkdirSync(portableCache, { recursive: true })
+    accessSync(portableCache, constants.W_OK)
+    pythonCacheRoot = portableCache
+  }
+} catch { /* Missing or invalid config / unwritable portable dir falls back to profile cache. */ }
 mkdirSync(pythonCacheRoot, { recursive: true })
 const localServiceEnv = {
   ...process.env,

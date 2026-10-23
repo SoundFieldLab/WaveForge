@@ -6,7 +6,7 @@
 import { memo, useState, type RefObject } from 'react'
 import {
   BookAudio, ChevronDown, Clock, Cloud, Disc3, Download, Heart, Library,
-  Music2, Plus, User,
+  Music2, Plus, Radio, User,
 } from 'lucide-react'
 import { PcCover, pcTheme, type PcTone } from './pcKit'
 
@@ -27,15 +27,19 @@ export interface KugouPcNavItem {
   icon: typeof Music2
 }
 
-/** 一级导航（官方顺序：音乐/听书/直播/刷歌 → 我的收藏/最近播放/本地与下载/我的听书/音乐云盘/已购音乐）。
- *  按产品决策去掉：直播、刷歌（上游动态流恒空）、本地与下载（不做下载功能）、音乐云盘。
- *  保留 'local'/'cloud' 于联合类型仅为兼容既有 switch 分支，导航不再渲染。 */
+/** 一级导航（官方顺序：音乐/听书/刷歌 → 我的收藏/最近播放/本地与下载/我的听书/音乐云盘/已购音乐）。
+ *  按产品决策去掉：直播、本地与下载（不做下载功能）。
+ *  「刷歌」恢复提供（2026-10-22）：点击打开全屏竖滑刷歌页（kugouYouthStore）。
+ *  「音乐云盘」恢复提供（2026-10-22）：页面与 mcloudservice 接口都在，此前被一并下线。
+ *  保留 'local' 于联合类型仅为兼容既有 switch 分支，导航不再渲染。 */
 export const KUGOU_PC_NAV: KugouPcNavItem[] = [
   { key: 'music', label: '音乐', icon: Music2 },
   { key: 'longaudio', label: '听书', icon: BookAudio },
+  { key: 'shuffle', label: '刷歌', icon: Radio },
   { key: 'favorites', label: '我的收藏', icon: Heart },
   { key: 'recent', label: '最近播放', icon: Clock },
   { key: 'mylongaudio', label: '我的听书', icon: Library },
+  { key: 'cloud', label: '音乐云盘', icon: Cloud },
   { key: 'purchased', label: '已购音乐', icon: Disc3 },
 ]
 

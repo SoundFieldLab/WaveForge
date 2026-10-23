@@ -1690,3 +1690,52 @@ input[type='number'].no-spinner {
 @media (prefers-reduced-motion: reduce) {
   .kg-radio-bar { animation: none; }
 }
+
+/* In Party / 共振 共用滑杆：金色轨道 + 圆珠（默认原生控件在深色面板里发灰） */
+.party-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+  cursor: pointer;
+}
+.party-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ffe89c, #d9a13c);
+  border: none;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+  transition: transform 0.15s ease;
+}
+.party-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.18);
+}
+.party-slider::-webkit-slider-thumb:active {
+  transform: scale(1.05);
+}
+.party-slider::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ffe89c, #d9a13c);
+  border: none;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+.party-slider::-moz-range-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+}
+/* 深浅双主题变体：共振浅色主题下轨道加深 */
+.party-slider.on-light {
+  background: rgba(0, 0, 0, 0.14);
+}
+.party-slider.on-light::-moz-range-track {
+  background: rgba(0, 0, 0, 0.14);
+}

@@ -13,6 +13,29 @@ import App from './App'
 import { startMemoryWatchdog } from './utils/memoryWatchdog'
 import { initPlatformUI, setTvModeForced, applyTvScale } from './platform'
 import { installElectronShim } from './electronShim'
+
+// 懒 chunk 加载失败自动恢复：打包版的 hash 文件名在发版后变化，长时间停留的旧页面
+// 切换模式/懒加载面板时会拉到 404（preview server fallback 把 index.html 当 JS 返回，
+// 抛 "SyntaxError: Invalid or unexpected token"）。这里兜底：首次失败 → 清掉 vite 缓存
+// 标记并整页 reload 一次（用 sessionStorage 防循环）；二次失败就让错误正常抛出。
+window.addEventListener('vite:preloadError', event => {
+  const marker = 'waveforge:chunk-reloaded'
+  if (sessionStorage.getItem(marker)) return
+  sessionStorage.setItem(marker, '1')
+  event.preventDefault()
+  window.location.reload()
+})
+
+// React.lazy 用原生 import()，失败不会走 vite:preloadError —— 在 unhandledrejection 兜底
+window.addEventListener('unhandledrejection', event => {
+  const reason = String((event as PromiseRejectionEvent).reason?.message || (event as PromiseRejectionEvent).reason || '')
+  if (!/dynamically imported module|Failed to fetch dynamically|error loading dynamically/i.test(reason)) return
+  const marker = 'waveforge:chunk-reloaded'
+  if (sessionStorage.getItem(marker)) return
+  sessionStorage.setItem(marker, '1')
+  event.preventDefault()
+  window.location.reload()
+})
 import { startTv } from './tv/tvCore'
 import { initPerfMode } from './tv/perfMode'
 import { captureFrontendConsole, initDebugMode } from './tv/debugStore'

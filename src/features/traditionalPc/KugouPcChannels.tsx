@@ -17,9 +17,13 @@ export interface KugouPcChannelsProps {
   /** 频道名 → 传统模式搜索页 */
   onSearch?: (keyword: string) => void
   onRetry?: () => void
+  /** 首页「场景音乐」大卡指定的场景专区名：zones 加载后按名解析 ipId 自动打开详情 */
+  initialZoneName?: string
+  /** 上面的专区名已消费（打开成功或明确找不到）后通知父层清空 */
+  onInitialZoneConsumed?: () => void
 }
 
-function KugouPcChannels({ ctx, payload, onSearch, onRetry }: KugouPcChannelsProps) {
+function KugouPcChannels({ ctx, payload, onSearch, onRetry, initialZoneName = '', onInitialZoneConsumed }: KugouPcChannelsProps) {
   const theme = ctx.theme
   const accent = ctx.accent
   const channels = payload?.kugou?.channels || []
@@ -35,8 +39,17 @@ function KugouPcChannels({ ctx, payload, onSearch, onRetry }: KugouPcChannelsPro
     let cancelled = false
     void import('../../services/kugouService')
       .then(m => m.fetchKugouChannelZones())
-      .then(list => { if (!cancelled) setZones(list) })
-      .catch(() => undefined)
+      .then(list => {
+        if (cancelled) return
+        setZones(list)
+        // 首页「场景音乐」大卡带入的场景专区名：按名解析 ipId 打开频道详情（一次消费）
+        if (initialZoneName && !openedChannel) {
+          const zone = list.find(item => item.name === initialZoneName)
+          if (zone?.ipId || zone?.id) setOpenedChannel(zone.ipId || zone.id)
+          onInitialZoneConsumed?.()
+        }
+      })
+      .catch(() => { if (initialZoneName) onInitialZoneConsumed?.() })
     if (ctx.active) {
       void import('../../services/kugouService')
         .then(m => m.fetchKugouRadioClasses())
@@ -48,6 +61,8 @@ function KugouPcChannels({ ctx, payload, onSearch, onRetry }: KugouPcChannelsPro
         .catch(() => undefined)
     }
     return () => { cancelled = true }
+    // 仅挂载时消费一次 initialZoneName，避免用户返回频道列表后又被强行拉进详情
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ctx.active])
 
   // 点击电台：拉电台曲单并开播（offset=-1 表示从当前流开始）

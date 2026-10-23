@@ -15,6 +15,11 @@ export function buildPlaylistShareUrl(playlist: any, platform: MusicPlatform): s
   if (!id) return ''
   if (platform === 'qq') return `https://y.qq.com/n/ryqq/playlist/${id}`
   if (platform === 'spotify') return `https://open.spotify.com/playlist/${id}`
+  // 酷狗公开歌单页（实测 200 且带歌单名）；id 是 specialid，global_collection_id 需取中段数字
+  if (platform === 'kugou') {
+    const specialId = /^\d+$/.test(id) ? id : (String(id).match(/collection_3_\d+_(\d+)_\d+/)?.[1] || '')
+    return specialId ? `https://www.kugou.com/yy/special/single/${specialId}.html` : ''
+  }
   if (platform === 'apple') {
     let storefront = 'cn'
     try { storefront = localStorage.getItem('appleStorefront') || 'cn' } catch { /* SSR/隐私模式 */ }

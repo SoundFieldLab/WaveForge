@@ -471,6 +471,10 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
   const [subtitles, setSubtitles] = useState<BilibiliSubtitleLine[]>([])
   const [subtitleOn, setSubtitleOn] = useState(false)
   const [currentSubtitle, setCurrentSubtitle] = useState('')
+  // 字幕指针（timeupdate 推进，避免每 tick 全量扫描 + 重复 setState）；
+  // 字幕列表/开关变化时由 effect 复位
+  const subtitleCursorRef = useRef(0)
+  const currentSubtitleRef = useRef('')
   // CC 字幕垂直位置（距底部 px，可拖拽 + 持久记忆）
   const [subtitlePos, setSubtitlePos] = useState<number>(() => {
     const saved = Number(localStorage.getItem('bilibili_subtitle_pos'))
@@ -602,6 +606,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     setVideoDuration(0)
     setSubtitles([])
     setCurrentSubtitle('')
+    subtitleCursorRef.current = 0
+    currentSubtitleRef.current = ''
     alignmentOffsetRef.current = 0
     alignmentVerifiedRef.current = false
     failedBvidsRef.current = new Set()
@@ -738,6 +744,8 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       setSubtitleOn(false)
       setSubtitles([])
       setCurrentSubtitle('')
+      subtitleCursorRef.current = 0
+      currentSubtitleRef.current = ''
       setShowReplay(false)
       setActiveVideo(candidate)
       setVideoUrl(null)
@@ -909,6 +917,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
                     const clean = cleanSubtitleLines(lines)
                     if (clean.length) {
                       setSubtitles(clean)
+                      subtitleCursorRef.current = 0
                       // 已按用户偏好选出字幕（subPref !== 'off'）→ 默认开启；
                       // 用户手动开关过（subtitleUserChoiceRef 非 null）则跨歌保持其选择，不强制开
                       setSubtitleOn(subtitleUserChoiceRef.current ?? true)
@@ -2003,15 +2012,18 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         manualPlaybackLastTimeRef.current = null
       }
       if (subtitles.length && subtitleOn) {
+        // 指针推进（视频时间单调递增为主）：不做全量线性扫描——字幕多时每 tick O(n)
+        // 且 setCurrentSubtitle 每次都走 reconcile。seek 回退时指针重置到 0（罕见路径）。
         const t = video.currentTime
-        let line = ''
-        for (const s of subtitles) {
-          if (t >= s.from && t < s.to) {
-            line = s.content
-            break
-          }
+        let idx = subtitleCursorRef.current
+        if (idx >= subtitles.length || t < subtitles[idx].from) idx = 0
+        while (idx < subtitles.length && subtitles[idx].to <= t) idx += 1
+        subtitleCursorRef.current = idx
+        const hit = idx < subtitles.length && t >= subtitles[idx].from ? subtitles[idx].content : ''
+        if (hit !== currentSubtitleRef.current) {
+          currentSubtitleRef.current = hit
+          setCurrentSubtitle(hit)
         }
-        setCurrentSubtitle(line)
       }
       // 播放中进度上报节流（1s 一次，供迷你播放器/桌面小窗显示视频进度）
       const now = Date.now()
