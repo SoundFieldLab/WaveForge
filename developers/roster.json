@@ -4,5 +4,7 @@
   "branch": "master",
   "path": "developers/roster.json",
   "note": "开发者花名册：由仓库协作者以 GPG/SSH 签名提交维护。desktop/developer-auth.cjs 通过 GitHub API 拉取该文件，验证最新提交的签名与提交者身份，确认其仍是仓库协作者后授予开发者权限。在此登记 GitHub 用户名即声明其为开发者；删除即吊销。",
-  "developers": []
+  "developers": [
+    "YoshinoRinn"
+  ]
 }
