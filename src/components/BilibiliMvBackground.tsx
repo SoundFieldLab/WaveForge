@@ -1883,7 +1883,7 @@ export default memo(function BilibiliMvBackground({
         loop
         muted
         playsInline
-        className="absolute inset-0 h-full w-full object-cover"
+        className="absolute inset-0 h-full w-full object-cover bg-black"
         style={{
           opacity: slotOpacity('A'),
           transition: slotTransition('A'),
@@ -1905,7 +1905,7 @@ export default memo(function BilibiliMvBackground({
         loop
         muted
         playsInline
-        className="absolute inset-0 h-full w-full object-cover"
+        className="absolute inset-0 h-full w-full object-cover bg-black"
         style={{
           opacity: slotOpacity('B'),
           transition: slotTransition('B'),

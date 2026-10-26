@@ -19,6 +19,7 @@ import { getSecureToken, removeSecureToken, setSecureToken } from './secureToken
 import { Converter } from 'opencc-js/t2cn'
 import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } from '../data/bilibiliMvDeclarations'
 import { OP_ED_EXTENSION_UPLOADER_MIDS, OP_ED_EXTENSION_VERSION, getOpEdExtensionDeclaration, findOpEdExtensionByMeta, isOpEdExtensionUploader } from '../data/bilibiliOpEdExtensions'
+import { GLOBAL_CATALOG_VERSION, findGlobalCatalogByMeta } from '../data/bilibiliGlobalCatalog'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
 import { getApiBase } from './apiConfig'
 import { lookupLearnedArtistAlias, lookupLearnedSongVariant, getLearnedSongVariants, getLearnedArtistAliases, getQueryWin, recordQueryWin, recencyFactor } from './mvAdaptive'
@@ -3334,6 +3335,9 @@ export async function findBestBilibiliMv(
   // 全平台（2026-10 v3）：songKey（platform:id）未命中时走元数据回退索引（标题+歌手+时长），
   // 网易云/酷狗/Apple/汽水等任何平台播放都能命中——声明注入不再绑死 QQ。
   const extensionBvid = resolveOpEdExtensionEntry(song, songKey)?.bvid || ''
+  // 全球目录命中也入指纹：目录更新（版本递增/增补条目）后 24h 匹配缓存必须失效，
+  // 否则旧缓存里的普通候选会盖过新注入的正片声明。
+  const globalCatalogBvid = extensionBvid ? '' : (findGlobalCatalogByMeta(song.songTitle, song.artists || [], song.songDuration)?.bvid || '')
   const settingsFingerprint = [
     MATCH_SCORE_VERSION,
     settings.matchPreference,
@@ -3344,6 +3348,7 @@ export async function findBestBilibiliMv(
     overrideBvid,
     developerBvid ? `${BILIBILI_MV_DECLARATION_VERSION}:${developerBvid}` : '',
     extensionBvid ? `${OP_ED_EXTENSION_VERSION}:${extensionBvid}` : '',
+    globalCatalogBvid ? `${GLOBAL_CATALOG_VERSION}:${globalCatalogBvid}` : '',
     // 黑名单进指纹：拉黑后同歌重进会命中 24h matchCache 返回含已拉黑 BV 的旧结果，
     // 自动播放用户刚拉黑的视频（唯一联动清缓存入口是手动清理）
     getBilibiliBlacklist(songKey).join(','),
@@ -3458,14 +3463,35 @@ async function findBestBilibiliMvUncached(
   // 无网络请求；声明视频失效（稿件下架）时静默跳过，不影响原匹配算法。
   // 全平台（2026-10 v3）：先按 songKey（platform:id）精确命中，未命中走元数据回退
   // （标题+主歌手+时长容差）——网易云/酷狗/Apple/汽水等平台同样生效，不再绑死 QQ。
+  // 全球热门 MV 核验库（2026-10-27 v1，1057 首）：延长库未命中时走全球目录元数据回退
+  // （主流艺人代表作正片，人工核验口径），同管道注入——热门欧美/日韩歌手的转录号
+  // （JLRS 三马甲等）播放量碾压官方 MV，靠此库把正片 pinned 到链头。
   let extensionDeclaration: CandidateScore | null = null
   const extensionEntry = resolveOpEdExtensionEntry(song, songKey)
-  if (extensionEntry && !blacklist.has(extensionEntry.bvid)) {
+  const globalCatalogEntry = extensionEntry
+    ? null
+    : findGlobalCatalogByMeta(song.songTitle, song.artists || [], song.songDuration)
+  const injectedEntry = extensionEntry ?? (globalCatalogEntry
+    ? {
+        songKey: '',
+        bvid: globalCatalogEntry.bvid,
+        songTitle: globalCatalogEntry.songTitle,
+        artists: globalCatalogEntry.artists,
+        kind: 'tm' as const,
+        videoTitle: globalCatalogEntry.videoTitle,
+        uploaderMid: globalCatalogEntry.uploaderMid,
+        duration: globalCatalogEntry.duration,
+        videoDuration: globalCatalogEntry.duration,
+        playCount: globalCatalogEntry.playCount,
+        verifiedAt: globalCatalogEntry.verifiedAt,
+      }
+    : null)
+  if (injectedEntry && !blacklist.has(injectedEntry.bvid)) {
     try {
-      const view = await getBilibiliView(extensionEntry.bvid, signal)
+      const view = await getBilibiliView(injectedEntry.bvid, signal)
       if (view.code === 0 && view.data.cid) {
         const video: BilibiliVideo = {
-          bvid: extensionEntry.bvid,
+          bvid: injectedEntry.bvid,
           title: view.data.title,
           duration: view.data.duration,
           play: view.data.play || 0,
@@ -3476,7 +3502,7 @@ async function findBestBilibiliMvUncached(
         extensionDeclaration = scored[0] || null
       }
     } catch {
-      // 延长库视频失效时继续使用原匹配算法。
+      // 延长库/全球目录视频失效时继续使用原匹配算法。
     }
   }
 

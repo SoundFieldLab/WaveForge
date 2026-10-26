@@ -353,6 +353,8 @@ export interface Song {
   /** 播放该曲所需的规范化会员档位；旧数据仅有 vip 时按 vip 处理。 */
   requiredTier?: EntitlementTier
   noCopyright?: boolean // 是否无版权
+  /** MV 标识（网易云 = 数字 mv id；QQ = vid 字符串）：搜索/详情接口透传，动上面板「观看 MV」用。 */
+  mv?: number | string
   /** 播客节目（网易云电台节目等）：没有歌词与 MV 背景，播放页自动使用纯音乐样式 */
   isPodcast?: boolean
   /**
@@ -654,7 +656,8 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
           duration: song.duration || 0,
           platform: 'qq',
           vip: song.vip || false, // VIP标识
-          noCopyright: song.noCopyright || false // 无版权标识
+          noCopyright: song.noCopyright || false, // 无版权标识
+          mv: song.mv || song.vid || '' // MV vid（后端透传，动上面板观看 MV 用）
         }
       })
       
@@ -682,7 +685,8 @@ export async function searchSongs(keywords: string, limit = 30, platform: MusicP
         platform: 'netease',
         vip: song.vip || false, // VIP标识
         noCopyright: song.noCopyright || false, // 无版权标识
-        fee: song.fee // 付费类型
+        fee: song.fee, // 付费类型
+        mv: song.mv || '' // MV id（上游搜索结果自带，动上面板观看 MV 用）
       }))
       
       return {
@@ -2174,7 +2178,7 @@ export async function getLyrics(
       if (!hasWordByWord && songName && currentLyrics.length > 0) {
         try {
           const fills = await fetchCrossPlatformLyricFill(songName, artistName || '', duration)
-          const matched = selectTimingVerifiedLines(currentLyrics, fills.wordByWord)
+          const matched = selectTimingVerifiedLines(currentLyrics, fills.wordByWord, { tolerance: 1.2 })
           if (matched.length > 0) {
             mergeCrossPlatformLyricTexts(currentLyrics, {
               translations: fills.translations,

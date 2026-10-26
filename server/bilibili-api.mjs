@@ -369,14 +369,14 @@ export function registerBilibiliRoutes(app) {
     if (Date.now() < searchRiskCooldownUntil) {
       return res.status(503).json({ code: -352, error: 'B站风控冷却中（约20秒后自动恢复）：当前出口 IP 刚被风控，先不打上游——关掉梯子/换网络可立即解除' })
     }
+    const keyword = String(req.query.keyword || '').trim()
+    const page = Math.max(1, Number(req.query.page) || 1)
     const searchCacheKey = `${keyword}|${page}`
     const cachedSearch = searchCache.get(searchCacheKey)
     if (cachedSearch && Date.now() - cachedSearch.at < SEARCH_CACHE_TTL) {
       cachedSearch.at = Date.now()
       return res.json(cachedSearch.json)
     }
-    const keyword = String(req.query.keyword || '').trim()
-    const page = Math.max(1, Number(req.query.page) || 1)
     if (!keyword) return res.status(400).json({ code: -1, error: 'keyword 必填' })
     await ensureBuvid3()
     try {
