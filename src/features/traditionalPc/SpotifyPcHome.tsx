@@ -14,6 +14,50 @@ import type { PcActions } from './types'
 
 export interface HomeSectionItemPublic extends HomeSectionItem {}
 
+/** 官方同款横排交互：按住鼠标左右拖动滚动（Apple 传统页同款手感）。
+ *  拖动超过 5px 视为拖拽，捕获阶段吞掉后续 click，避免松手误触卡片。 */
+function useDragScroll() {
+  return useCallback((el: HTMLDivElement | null) => {
+    if (!el) return
+    let startX = 0
+    let startLeft = 0
+    let dragging = false
+    let moved = false
+    const down = (e: PointerEvent) => {
+      if (e.pointerType === 'touch' || e.button !== 0) return
+      dragging = true
+      moved = false
+      startX = e.clientX
+      startLeft = el.scrollLeft
+      el.setPointerCapture(e.pointerId)
+    }
+    const move = (e: PointerEvent) => {
+      if (!dragging) return
+      const dx = e.clientX - startX
+      if (!moved && Math.abs(dx) > 5) {
+        moved = true
+        el.style.cursor = 'grabbing'
+      }
+      if (moved) el.scrollLeft = startLeft - dx
+    }
+    const up = (e: PointerEvent) => {
+      if (!dragging) return
+      dragging = false
+      el.style.cursor = ''
+      try { el.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+    }
+    const clickCapture = (e: MouseEvent) => {
+      if (moved) { e.preventDefault(); e.stopPropagation(); moved = false }
+    }
+    el.style.cursor = 'grab'
+    el.addEventListener('pointerdown', down)
+    el.addEventListener('pointermove', move)
+    el.addEventListener('pointerup', up)
+    el.addEventListener('pointercancel', up)
+    el.addEventListener('click', clickCapture, true)
+  }, [])
+}
+
 export interface SpotifyPcHomeProps {
   tone: 'dark' | 'light'
   accent: string
@@ -32,6 +76,8 @@ export interface SpotifyPcHomeProps {
   onOpenAlbum?: (albumId: string) => void
   /** 浏览全部磁贴点击 → 官方分类页 */
   onOpenCategory?: (title: string, bg: string, accent: string) => void
+  /** 分区「显示全部」→ 官方二级分区详情页 */
+  onOpenSection?: (title: string, items: HomeSectionItem[]) => void
 }
 
 /** 官方 home payload（partner 桥 home_snapshot 返回）的本地类型（渲染层只读所需字段） */
@@ -73,6 +119,29 @@ interface HomePayload {
 
 type HomeTab = 'all' | 'music' | 'podcasts'
 
+/** 官方浏览页分类磁贴（官方类目 + 官方配色，取自官方客户端浏览页截图） */
+export const SPOTIFY_BROWSE_CATEGORIES: Array<{ title: string; bg: string; accent: string }> = [
+  { title: '音乐', bg: '#e8115b', accent: '#ff69b4' },
+  { title: '播客', bg: '#006450', accent: '#27b43d' },
+  { title: 'Spotify On Stage 2026', bg: '#0d73ec', accent: '#148a08' },
+  { title: '为你打造', bg: '#1e3264', accent: '#e13300' },
+  { title: '新歌热播', bg: '#e91429', accent: '#8d67ab' },
+  { title: '日文歌曲', bg: '#8d67ab', accent: '#e8115b' },
+  { title: '流行', bg: '#dc148c', accent: '#056952' },
+  { title: '排行榜', bg: '#8d67ab', accent: '#e91429' },
+  { title: '播客排行榜', bg: '#503750', accent: '#b02897' },
+  { title: 'Radio Shows', bg: '#e91429', accent: '#1e3264' },
+  { title: '教育', bg: '#537aa1', accent: '#477d95' },
+  { title: '驾车', bg: '#2828a5', accent: '#0d73ec' },
+  { title: '嘻哈', bg: '#ba5d07', accent: '#e8115b' },
+  { title: 'RADAR', bg: '#af2896', accent: '#dc148c' },
+  { title: '情绪', bg: '#e8115b', accent: '#1e3264' },
+  { title: '发现', bg: '#dc148c', accent: '#7358ff' },
+  { title: 'Fresh Finds', bg: '#0d73ec', accent: '#158a08' },
+  { title: '动漫', bg: '#056952', accent: '#af2896' },
+  { title: '年代', bg: '#7358ff', accent: '#e91429' },
+]
+
 const extractCover = (d: NonNullable<HomeSectionItem['content']>['data']): string => {
   if (!d) return ''
   return (
@@ -85,7 +154,7 @@ const extractCover = (d: NonNullable<HomeSectionItem['content']>['data']): strin
   )
 }
 
-const idOf = (uri?: string, type?: string): string => {
+export const idOf = (uri?: string, type?: string): string => {
   if (!uri) return ''
   const m = /^spotify:([^:]+):(.+)$/.exec(uri)
   return m ? m[2] : ''
@@ -109,6 +178,8 @@ export default function SpotifyPcHome({
   void actions
   void currentSong
   const theme = useMemo(() => spotifyPcTheme(tone), [tone])
+  // 横排拖动滚动：一个 ref 回调可同时挂到每行 carousel（官方/Apple 同款交互）
+  const dragScrollRef = useDragScroll()
   const [payload, setPayload] = useState<HomePayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<HomeTab>('all')
@@ -237,8 +308,8 @@ export default function SpotifyPcHome({
                   显示全部 <ChevronRight className="h-3.5 w-3.5" />
                 </button>
               </div>
-              {/* 官方横向 carousel：单行，横向滚动 */}
-              <div className="flex gap-4 overflow-x-auto pb-2 carousel-row">
+              {/* 官方横向 carousel：单行，按住鼠标左右拖动滚动（官方/Apple 同款，无滚动条） */}
+              <div ref={dragScrollRef} className="drag-scroll-x flex gap-4 overflow-x-auto pb-2 carousel-row">
                 {items.map((item, i) => (
                   <div key={(item.uri ?? '') + i} className="w-[172px] shrink-0">
                     <SectionCard item={item} />

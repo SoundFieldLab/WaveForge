@@ -1,0 +1,58 @@
+{
+ "exportedAt": "2026-10-24T14:36:08.164Z",
+ "profile": {
+  "uri": "spotify:user:kzqphmcv3lbnss2pe19i44e79",
+  "name": "Kirito",
+  "imageUrl": "https://i.scdn.co/image/ab6775700000ee8551ca5a9d5ec67c344e50bb66",
+  "followersCount": 0,
+  "followingCount": 5,
+  "totalPublicPlaylistsCount": 2,
+  "publicPlaylists": [
+   {
+    "uri": "spotify:playlist:5yHCqrgFTswrTfX0luNBQM",
+    "name": "A Cielo Abierto (Viaje V)",
+    "imageUrl": "spotify:image:ab67616d00001e025d8b558bf5be33f52474a6b9",
+    "ownerName": "Kirito"
+   },
+   {
+    "uri": "spotify:playlist:44AGSP5O13RMmIDbgfgZLP",
+    "name": "我喜欢",
+    "imageUrl": "spotify:mosaic:ab67616d00001e02444205d8a01da0499724432c:ab67616d00001e025ca9595a01d8c8334da91956:ab67616d00001e028d5ddf78a7e57d38c5b178cd:ab67616d00001e02a0f7f7d11a5d78d992a5adf5",
+    "ownerName": "Kirito"
+   }
+  ]
+ },
+ "followingArtists": [
+  {
+   "uri": "spotify:artist:41X1TR6hrK8Q2ZCpp2EqCz",
+   "name": "bbno$",
+   "imageUrl": "https://i.scdn.co/image/ab67616100005174e7c585e9ecd65c76b7bf91ac",
+   "followersCount": 3402429
+  },
+  {
+   "uri": "spotify:artist:1RPWglqaw9OSenED4SNK0Z",
+   "name": "Gorilla Attack",
+   "imageUrl": "https://i.scdn.co/image/ab6761610000517460d8d55c9a6fc9c781adc410",
+   "followersCount": 12005
+  },
+  {
+   "uri": "spotify:artist:2IDLDx25HU1nQMKde4n61a",
+   "name": "Rich Brian",
+   "imageUrl": "https://i.scdn.co/image/ab67616100005174c13929d20a265e45fadadbc9",
+   "followersCount": 2168410
+  },
+  {
+   "uri": "spotify:artist:1YLxQZIGsaZq9rvFu8zeRz",
+   "name": "Sayuri",
+   "imageUrl": "https://i.scdn.co/image/ab67616100005174b1f57cab1a62f826a54dc887",
+   "followersCount": 504175
+  },
+  {
+   "uri": "spotify:artist:3vw4wtxW7yv7yJSDqkIuUz",
+   "name": "АДЛИН",
+   "imageUrl": "https://i.scdn.co/image/ab67616100005174acf33b3b6612d858e041ae01",
+   "followersCount": 148433
+  }
+ ],
+ "followers": []
+}

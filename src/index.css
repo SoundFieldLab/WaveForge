@@ -122,6 +122,17 @@ input, textarea, [contenteditable="true"] {
   background-clip: padding-box;
 }
 
+/* Spotify 主页横排（官方/Apple 同款）：按住拖动滚动，隐藏滚动条 */
+.drag-scroll-x {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  user-select: none;
+}
+
+.drag-scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
 @keyframes desktopWeatherDetail {
   from {
     opacity: 0;

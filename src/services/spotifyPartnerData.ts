@@ -240,6 +240,10 @@ export interface PartnerPlaylistRow {
   albumUri?: string
   trackNumber?: number
   playcount?: number
+  /** 单曲是否已收藏（专辑页行内 ⊕/✓） */
+  saved?: boolean
+  /** 官方 explicit 标记（行内 E 徽章） */
+  explicit?: boolean
   uid?: string
 }
 export interface PartnerPlaylistDetailFull {
@@ -358,20 +362,32 @@ export interface PartnerAlbumFull {
   id: string
   name: string
   coverUrl: string
-  artists: Array<{ id: string; name: string }>
+  artists: Array<{ id: string; name: string; avatarUrl?: string }>
   date?: string
   year?: string
   label?: string
   description?: string
+  /** 官方 type：SINGLE/ALBUM/EP → 单曲/专辑/EP 标签 */
+  albumType?: string
+  /** 精确发行日（官方「2021年10月27日」行） */
+  preciseDate?: string
+  /** ©/℗ 版权行 */
+  copyrightItems: Array<{ text: string; type: string }>
   trackCount: number
   durationMs: number
-  /** 是否已收藏（专辑页心形按钮态） */
+  /** 是否已收藏（专辑页 ⊕ 按钮态） */
   saved: boolean
+  /** 官方「更多来自 X 的内容」横排 */
+  moreAlbums: Array<{ id: string; name: string; coverUrl: string; year?: string; type: string }>
   rows: PartnerPlaylistRow[]
 }
 export async function fetchPartnerAlbumFull(albumId: string, maxRows = 200): Promise<PartnerAlbumFull | null> {
   const uri = 'spotify:album:' + albumId
-  let header: { name: string; coverUrl: string; artists: Array<{ id: string; name: string }>; date?: string; year?: string; label?: string; description?: string; saved: boolean } | null = null
+  let header: {
+    name: string; coverUrl: string; artists: Array<{ id: string; name: string; avatarUrl?: string }>; date?: string; year?: string
+    label?: string; description?: string; saved: boolean; albumType?: string; preciseDate?: string
+    copyrightItems: Array<{ text: string; type: string }>; moreAlbums: Array<{ id: string; name: string; coverUrl: string; year?: string; type: string }>
+  } | null = null
   const rows: PartnerPlaylistRow[] = []
   const pageSize = 50
   for (let offset = 0; offset < maxRows; offset += pageSize) {
@@ -382,12 +398,33 @@ export async function fetchPartnerAlbumFull(albumId: string, maxRows = 200): Pro
       header = {
         name: String(a.name ?? ''),
         coverUrl: firstCover(a.coverArt),
-        artists: (a.artists?.items ?? []).map((x: any) => ({ id: idFromUri(x?.uri), name: String(x?.profile?.name ?? '') })).filter((x: { id: string; name: string }) => x.id && x.name),
+        artists: (a.artists?.items ?? []).map((x: any) => ({
+          id: idFromUri(x?.uri),
+          name: String(x?.profile?.name ?? ''),
+          avatarUrl: x?.visuals?.avatarImage?.sources?.[0]?.url ?? '',
+        })).filter((x: { id: string; name: string }) => x.id && x.name),
         date: a.date?.isoString,
         year: a.date?.isoString ? String(a.date.isoString).slice(0, 4) : undefined,
         label: String(a.label ?? '') || undefined,
         description: String(a.courtesyLine ?? '') || undefined,
         saved: Boolean(a.saved),
+        albumType: String(a.type ?? a.albumType ?? ''),
+        preciseDate: a.date?.isoString,
+        copyrightItems: (a.copyright?.items ?? []).map((c: any) => ({ text: String(c?.text ?? ''), type: String(c?.type ?? '') })).filter((c: { text: string }) => c.text),
+        // 官方「更多来自 X 的内容」：moreAlbumsByArtist.items[].discography.popularReleasesAlbums.items[]
+        moreAlbums: (a.moreAlbumsByArtist?.items ?? []).flatMap((grp: any) => {
+          const releases = grp?.discography?.popularReleasesAlbums?.items ?? []
+          return releases.map((rel: any) => {
+            if (!rel?.uri) return null
+            return {
+              id: String(rel.uri).replace('spotify:album:', ''),
+              name: String(rel.name ?? ''),
+              coverUrl: rel?.coverArt?.sources?.[0]?.url ?? '',
+              year: rel?.date?.year ? String(rel.date.year) : '',
+              type: String(rel.__typename ?? '').includes('Single') ? '单曲' : '专辑',
+            }
+          })
+        }).filter((x: any) => x?.id).filter((x: any, i: number, arr: any[]) => arr.findIndex((y: any) => y.id === x.id) === i).slice(0, 20) as Array<{ id: string; name: string; coverUrl: string; year?: string; type: string }>,
       }
     }
     const items = a.tracksV2?.items
@@ -404,6 +441,8 @@ export async function fetchPartnerAlbumFull(albumId: string, maxRows = 200): Pro
         albumUri: albumId,
         trackNumber: Number(data.trackNumber) || undefined,
         playcount: Number(data.playcount) || undefined,
+        saved: Boolean(data.saved),
+        explicit: Boolean(data.contentRating) || Boolean((data as any).isExplicit),
         uid: String(row?.uid ?? '') || undefined,
       })
     }

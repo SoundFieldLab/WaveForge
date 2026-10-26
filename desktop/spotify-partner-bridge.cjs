@@ -59,6 +59,9 @@ const GRAPH_QUERY_HASHES = Object.freeze({
   queryArtistFeaturing: '20842d6d9d2d28ef945984b68cb927bb33edd00eab84a8da1667def21f1f2c54',
   queryArtistAboutModal: '702e29a866e0b4b4fabdf974454512a2c32d93643b1969b7a3a0dd92084f05f6',
   queryArtistRelated: '3d031d6cb22a2aa7c8d203d49b49df731f58b1e2799cc38d9876d58771aa66f3',
+  // 官方「曲目预览」全屏层（艺人页预览按钮）：watch feed 真实数据（canvas/话题标签/音频预览）
+  watchFeedView: 'ce10864fccc53ca77c422143ee027bacf220f9d714e27ec592905334079ad743',
+  watchFeedEntity: 'd1a805f815ee0c20281330317d8c00c8fce9026686a86c38bc700ccaefb9ac5c',
   getAlbumNameAndTracks: '8628ad33de3267d7bef516c76a746979a5f98891a2c9eaff3dfec828abdcd983',
   getArtistNameAndTracks: '0adaf1a1a8a94c7ed095639c4d9456d2b1cfac16ac511d5dd2b01b6dd89f748a',
   browsePage: 'f5c4e6d668f5716464a231c1cc8b22c1cbf6ad68b09929fd7de813a30581298b',
@@ -623,6 +626,16 @@ function createSpotifyPartnerBridge({ store, safeStorage, fetch: fetchImpl = fet
         } catch {
           return null;
         }
+      }
+    },
+
+    // 官方个人资料页 feed：与 home 同因（官方桌面原生层拉取），从官方客户端缓存导出快照
+    // （scripts/export-official-home.cjs 一并导出 desktop/spotify-profile-snapshot.json）。
+    async profile_snapshot() {
+      try {
+        return JSON.parse(await fs.promises.readFile(path.join(__dirname, 'spotify-profile-snapshot.json'), 'utf8'));
+      } catch {
+        return null;
       }
     },
 
