@@ -8,7 +8,7 @@ import { AnimatePresence, animate, motion, useMotionValue } from 'framer-motion'
 import {
   Captions, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Disc3, Headphones, Heart, History, Home, House, Library, ListMusic, LogIn, Music2,
   Pause, Play, Plus, Repeat, Repeat1, Search, Settings, Shuffle, SkipBack, SkipForward, SlidersHorizontal,
-  Sparkles, Volume2, Waves, Check, Bell, Users,
+  Sparkles, Volume2, Waves, Check, Bell, Users, Box,
 } from 'lucide-react'
 import AudioQualitySettingsModal from './AudioQualitySettingsModal'
 import EditPlaylistModal from './EditPlaylistModal'
@@ -50,6 +50,7 @@ const LazyApplePcLibrary = lazy(() => import('../features/traditionalPc/ApplePcL
 const LazyApplePcPlaylists = lazy(() => import('../features/traditionalPc/ApplePcPlaylists'))
 const LazyApplePcSearch = lazy(() => import('../features/traditionalPc/ApplePcSearch'))
 const LazySpotifyPcShell = lazy(() => import('../features/traditionalPc/SpotifyPcShell'))
+const LazySpotifyPcProfile = lazy(() => import('../features/traditionalPc/SpotifyPcProfile'))
 const LazySpotifyPcSearch = lazy(() => import('../features/traditionalPc/SpotifyPcSearch'))
 import ApplePcSidebar, { type ApplePcNavKey } from '../features/traditionalPc/ApplePcSidebar'
 import { applePcTheme } from '../features/traditionalPc/applePcKit'
@@ -86,7 +87,7 @@ import { fetchSpotifyRecentlyPlayed, spotifyTrackToSong } from '../services/spot
 import type { AudioAnalyzerStore } from '../hooks/useAudioAnalyzer'
 import { useTvBack, useTvMode, useRemoteCursorMode } from '../tv/tvCore'
 import { isPerfModeEfficiency, isPerfModeEnhanced } from '../tv/perfMode'
-import { isTvModeActive } from '../platform'
+import { isTvModeActive, isPcTabletActive } from '../platform'
 import ModeSelectionPanel, { MODE_SELECTION_CLOSE_MS } from './ModeSelectionPanel'
 import TraditionalPlaylistDetail from './TraditionalPlaylistDetail'
 import TraditionalSearch from './TraditionalSearch'
@@ -861,9 +862,24 @@ function TraditionalView({
     return entry.pageId
   }, [])
   const goBack = useCallback(() => {
+    // Spotify 外壳页的二级/三级导航在壳内部栈里（不入全局历史）：
+    // 返回先弹壳内栈（监听方按 preventDefault 表示已消费），弹空了再走全局历史
+    const backEv = new CustomEvent('waveforge:spotify-back')
+    window.dispatchEvent(backEv)
+    if (backEv.defaultPrevented) {
+      mainRef.current?.scrollTo({ top: 0 })
+      return
+    }
     if (historyIndexRef.current <= 0) return
     setHistoryIndex(historyIndexRef.current - 1)
     mainRef.current?.scrollTo({ top: 0 })
+  }, [])
+  // Spotify 外壳页的壳内返回栈可用性（外壳二级/三级导航不入全局历史，返回箭头需对它放行）
+  const [shellBackAvail, setShellBackAvail] = useState(false)
+  useEffect(() => {
+    const handler = () => setShellBackAvail(Boolean((window as unknown as { __spotifyShellBackDepth?: number }).__spotifyShellBackDepth))
+    window.addEventListener('waveforge:spotify-back-availability', handler)
+    return () => window.removeEventListener('waveforge:spotify-back-availability', handler)
   }, [])
   const goForward = useCallback(() => {
     if (historyIndexRef.current >= history.length - 1) return
@@ -2063,6 +2079,7 @@ function TraditionalView({
             onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
             onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
             onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+                onPlayNext={onPlayNext}
           />,
           'Spotify 客户端'
         )
@@ -2088,6 +2105,7 @@ function TraditionalView({
             onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
             onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
             onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+                onPlayNext={onPlayNext}
           />,
           'Spotify 客户端'
         )
@@ -2186,12 +2204,65 @@ function TraditionalView({
       return <TraditionalRecent platform={platform} accent={accent} isDark={isDark} active={active} loggedIn={loggedIn} currentSong={currentSong} authRevision={authRevision} onBack={onBack} onSongSelect={onSongSelect} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onCopyInfo={onCopyInfo} onShare={handleShareSong} onLoginClick={() => onLoginClick(platform)} userPlaylists={userPlaylists} />
     }
     if (page.name === 'settings') {
+      // Spotify：设置由外壳承载（官方设置页保留左栏；走全局路由会丢外壳左栏）
+      if (platform === 'spotify') {
+        return (
+          <EmbeddedExploreErrorBoundary label="Spotify 设置">
+            <Suspense fallback={pcPageFallback}>
+              <LazySpotifyPcShell
+                tone={pcChromeApple.tone}
+                accent='#1ed760'
+                loggedIn={spotifyLoggedIn}
+                username={spotifyUsername}
+                avatar={spotifyAvatar}
+                currentSong={currentSong}
+                isPlaying={isPlaying}
+                active={active}
+                onPlaySongs={(song, songs, index) => pcActions.onPlaySongs(song, songs, index)}
+                onPlayPause={onPlayPause}
+                onNext={onNext}
+                onPrevious={onPrevious}
+                onLoginClick={() => onLoginClick('spotify')}
+                onSongMenu={payload => setSongMenu({ ...payload, show: true, songs: [payload.song] })}
+                onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+                onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
+                onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
+                onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+                onPlayNext={onPlayNext}
+                initialSettings
+                renderSettings={() => <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />}
+              />
+            </Suspense>
+          </EmbeddedExploreErrorBoundary>
+        )
+      }
       return <TraditionalSettingsPage preferences={preferences} playerTheme={playerTheme} onChange={savePreferences} onOpenQuality={() => setShowQuality(true)} />
     }
     if (page.name === 'library') {
       return <TraditionalLibrary platform={platform} accent={accent} isDark={isDark} loggedIn={loggedIn} username={username} loading={loading} payload={payload} recommendationSongs={recommendationSongs} onBack={onBack} onSongSelect={onSongSelect} onOpenPlaylist={openPlaylist} onOpenArtist={openArtistDetail} onOpenAlbum={openAlbumDetail} onPlayNext={onPlayNext} onAddToFavorites={onAddToFavorites} onRemoveFromFavorites={onRemoveFromFavorites} onAddToPlaylist={onAddToPlaylist} onViewComments={openCommentsFor} onCopyInfo={onCopyInfo} userPlaylists={userPlaylists} onSongMenu={setSongMenu} />
     }
     if (page.name === 'profile') {
+      // Spotify：官方个人资料页（渐变大头 + 公开歌单 + 关注中艺人）
+      if (platform === 'spotify') {
+        return (
+          <EmbeddedExploreErrorBoundary label="Spotify 个人资料">
+            <Suspense fallback={pcPageFallback}>
+              <LazySpotifyPcProfile
+                tone={pcChromeApple.tone}
+                accent='#1ed760'
+                loggedIn={spotifyLoggedIn}
+                username={spotifyUsername}
+                avatar={spotifyAvatar}
+                active={active}
+                onLoginClick={() => onLoginClick('spotify')}
+                onOpenPlaylist={playlistId => { void openPlaylist({ id: playlistId, platform: 'spotify' }) }}
+                onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
+                onOpenSettings={() => navigate({ name: 'settings' })}
+              />
+            </Suspense>
+          </EmbeddedExploreErrorBoundary>
+        )
+      }
       // QQ 平台：个人中心按客户端排版（大头像 + 粉丝/关注 + 我喜欢/创建的歌单）
       if (platform === 'qq') {
         return (
@@ -2281,6 +2352,7 @@ function TraditionalView({
                 onOpenArtist={artistId => openArtistDetail(artistId, 'spotify')}
                 onOpenAlbum={albumId => openAlbumDetail(albumId, 'spotify')}
                 onSearchSubmit={keyword => navigate({ name: 'search', keyword })}
+                onPlayNext={onPlayNext}
                 initialArtistId={page.id}
               />
             </Suspense>
@@ -2363,7 +2435,7 @@ function TraditionalView({
         </div>
         {/* 后退 / 前进（药丸右边） */}
         <div className="flex shrink-0 items-center gap-1">
-          <button type="button" onClick={goBack} disabled={historyIndex <= 0} aria-label="后退" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronLeft className="h-4 w-4" /></button>
+          <button type="button" onClick={goBack} disabled={historyIndex <= 0 && !shellBackAvail} aria-label="后退" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronLeft className="h-4 w-4" /></button>
           <button type="button" onClick={goForward} disabled={historyIndex >= history.length - 1} aria-label="前进" className="rounded-xl p-2 transition hover:bg-white/10 disabled:opacity-30 disabled:hover:bg-transparent"><ChevronRight className="h-4 w-4" /></button>
         </div>
         <div className="flex items-center gap-1 lg:hidden">
@@ -2410,6 +2482,10 @@ function TraditionalView({
             <button type="button" onClick={() => navigate({ name: 'home' })} aria-label="主页"
               className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: currentPage.name === 'home' ? accent : undefined }}>
               <Home className="h-4 w-4" />
+            </button>
+            <button type="button" onClick={() => window.dispatchEvent(new CustomEvent('waveforge:spotify-browse'))} aria-label="浏览"
+              className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: currentPage.name === 'pc' ? accent : undefined }}>
+              <Box className="h-4 w-4" />
             </button>
             <button type="button" onClick={() => setSpotifySidePanel(previous => previous === 'whats-new' ? null : 'whats-new')}
               aria-label="新增内容" className="rounded-xl p-2 transition hover:bg-white/10" style={{ color: spotifySidePanel === 'whats-new' ? accent : undefined }}>
@@ -2475,7 +2551,7 @@ function TraditionalView({
         </AnimatePresence>
       </div>
 
-      <div className={`traditional-layout relative z-10 grid h-[calc(100%_-_5rem)] min-h-0 grid-cols-1 lg:grid-cols-[clamp(168px,14vw,196px)_minmax(0,1fr)] ${isKugouPc ? 'kugou-pc-layout' : ''} ${isApplePc ? 'apple-pc-layout' : ''} ${platform === 'qq' && qqSidebarCollapsed ? 'qq-sidebar-collapsed' : ''} ${platform === 'netease' && neteaseSidebarCollapsed ? 'netease-sidebar-collapsed' : ''} ${currentSong ? 'pb-16 min-[1180px]:pb-0' : ''}`}>
+      <div className={`traditional-layout relative z-10 grid h-[calc(100%_-_5rem)] min-h-0 grid-cols-1 lg:grid-cols-[clamp(168px,14vw,196px)_minmax(0,1fr)] ${isKugouPc ? 'kugou-pc-layout' : ''} ${isApplePc ? 'apple-pc-layout' : ''} ${isSpotifyPc ? 'lg:grid-rows-[minmax(0,1fr)]' : ''} ${platform === 'qq' && qqSidebarCollapsed ? 'qq-sidebar-collapsed' : ''} ${platform === 'netease' && neteaseSidebarCollapsed ? 'netease-sidebar-collapsed' : ''} ${currentSong ? 'pb-16 min-[1180px]:pb-0' : ''}`}>
         {/* 左栏：QQ/网易云平台用官方 PC 客户端复刻左栏，其余平台沿用本软件导航栏 */}
         {isPcPlatform && (
           <Suspense fallback={<div className={`hidden lg:block ${isDark ? 'bg-white/[0.02]' : 'bg-black/[0.015]'}`} />}>
@@ -2640,9 +2716,13 @@ function TraditionalView({
             Apple 客户端复刻页自带 40px 内边距与内容底色（客户端版式），这里不再叠通用内边距。 */}
         {/* 酷狗：外壳（含自带左栏）占前两列（左栏+内容），统一右栏独占第三列；
             其它平台 main 只占内容列 */}
-        {/* 跨列包装仅用于「外壳占左栏+中栏」的平台（酷狗/Spotify 外壳与搜索页）；其余平台保持原网格，右栏仍在第三列 */}
-        <div className={`relative min-h-0 ${isKugouPc || isSpotifyShellPage || isSpotifyBleedPage ? 'lg:col-span-2' : ''}`}>
-          <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isSpotifyShellPage || isSpotifyBleedPage ? 'min-h-0 overflow-hidden' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
+        {/* 跨列包装仅用于「外壳占左栏+中栏」的平台（酷狗/Spotify 外壳与搜索页）；其余平台保持原网格，右栏仍在第三列。
+            ⚠ 汽水推荐页（isSodaFeedPage）：它的根节点 h-full 参照的是最近的**块级祖先**——
+            这层 wrapper 没有确定高度，会把它的高度链打断（背景塌缩成内容高、整页被顶上去）。
+            contents 让 wrapper 不产生盒子，main 直接回到 grid：h-full 重新吃满行高。
+            其余页面（overflow-y-auto 的滚动页）不依赖祖先高度，保持 wrapper 不变。 */}
+        <div className={`relative min-h-0 ${isSodaFeedPage ? 'contents' : ''} ${isKugouPc || isSpotifyPc ? 'lg:col-span-2' : ''}`}>
+          <main ref={mainRef} className={isKugouPc ? 'min-h-0 overflow-hidden' : isSodaFeedPage ? 'min-h-0 overflow-hidden' : isSpotifyShellPage || isSpotifyBleedPage ? 'h-full min-h-0 overflow-y-auto' : isAppleBleedPage ? 'explore-scrollbar min-h-0 overflow-y-auto' : 'explore-scrollbar min-h-0 overflow-y-auto px-5 py-6 lg:px-8'}>
           {history.map((page, index) => {            const active = index === historyIndex
             // 页面「冻结」：访问过的历史页面保持挂载，切走只隐藏、不卸载（与探索页同款）。
             // display:none 的子树不参与布局与绘制、也拿不到焦点；页面自己的页签/分页/滚动
@@ -2671,7 +2751,7 @@ function TraditionalView({
             QQ/网易云的账号资料卡已在左栏顶部出现，这里不再重复渲染（避免同一屏两处账号区）。
             酷狗同样使用这份右栏（本软件特色）：外壳不再自绘底栏/右栏。 */}
         <aside className={`hidden min-h-0 flex-col overflow-hidden border-l min-[1180px]:flex ${isDark ? 'border-white/10' : 'border-black/10'}`}>
-          <div className={`shrink-0 px-4 pt-4 ${isPcPlatform || isApplePc || isKugouPc ? 'hidden' : ''}`}>
+          <div className={`shrink-0 px-4 pt-4 ${isPcPlatform || isApplePc || isKugouPc || isSpotifyPc ? 'hidden' : ''}`}>
             <button type="button" onClick={() => loggedIn ? navigate({ name: 'profile' }) : onLoginClick(platform)} className={`flex w-full items-center gap-3 rounded-2xl border p-3 text-left transition hover:bg-white/10 ${surface}`}>
               {avatar ? <CachedImage src={avatar} alt={`${loggedIn ? username || '用户' : '游客'}头像`} className="h-10 w-10 rounded-full object-cover" role="compact" priority="visible" fallback={<div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>} /> : <div className="flex h-10 w-10 items-center justify-center rounded-full text-white" style={{ background: accent }}><Music2 className="h-5 w-5" /></div>}
               <span className="min-w-0" title={loggedIn ? username || '我的账户' : '游客模式'}><span className="block truncate text-sm font-medium">{loggedIn ? username || '我的账户' : '游客模式'}</span><span className={`mt-0.5 block text-xs ${muted}`}>{loggedIn ? `${platformLabel(platform)} · 个人音乐库` : '登录后同步收藏与歌单'}</span></span>
@@ -3446,6 +3526,8 @@ function TraditionalSettingsPage({ preferences, playerTheme, onChange, onOpenQua
   // 当前环境下没有可见条目的分组，对应标签隐藏（如 Web / TV 下的「桌面集成」「网络」）
   const visibleTabs = useMemo(() => SETTINGS_TABS.filter(tab => {
     if (tab.id === 'traditional') return true
+    // 「桌面集成」（壁纸/桌面歌词/小组件等）是 PC 专属：平板 PC 布局下隐藏
+    if (tab.id === 'desktop' && isPcTabletActive()) return false
     const group = GLOBAL_SETTINGS_GROUPS.find(item => item.id === tab.id)
     return Boolean(group && group.entries.some(isEntryVisible))
   }), [])

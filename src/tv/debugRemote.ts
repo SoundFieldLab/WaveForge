@@ -167,6 +167,11 @@ function reportFrontendLogs(): void {
   }
 }
 
+/** 当前配对令牌（POST /tv/debug-mode 响应；设置页展示给开发者做局域网直推）。 */
+export function getDebugBridgeToken(): string {
+  return debugBridgeToken
+}
+
 export function installDebugRemote(): () => void {
   // TV 调试（:3008）仅在 Android/TV 端启用（PC 端 3002/3008 是其它服务，禁用避免 404/连接噪音）
   if (!isAndroid()) return () => undefined

@@ -46,6 +46,13 @@ function debugTokenMatches(candidate) {
 }
 
 function requestHasDebugToken(req, url) {
+  // 回环豁免：adb forward（PC ↔ 设备 USB 调试）的连接源是 127.0.0.1 —— 设备主人的
+  // 物理通路（能 adb 就等于能 shell），令牌对其无额外保护意义。豁免后
+  // `push-hot-update.mjs --adb` 免令牌一条命令推热更新；局域网来源仍须配对令牌。
+  try {
+    const addr = String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '')
+    if (addr === '127.0.0.1' || addr === '::1') return true
+  } catch { /* ignore */ }
   const header = req.headers['x-waveforge-debug-token']
   if (typeof header === 'string' && header) return debugTokenMatches(header)
   const queryToken = url.searchParams.get('token')

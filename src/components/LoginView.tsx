@@ -788,7 +788,9 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                         <h3 className="text-xl font-medium text-white mb-2">QQ音乐登录</h3>
                         <p className="text-white/60 text-sm">
                           {(window as any).WaveForgeNative?.openQQLogin
-                            ? '请在电视屏幕上使用手机 QQ 扫码登录，登录成功后自动返回'
+                            ? (document.documentElement.classList.contains('tv-mode')
+                              ? '请在电视屏幕上使用手机 QQ 扫码登录，登录成功后自动返回'
+                              : '用另一台手机 QQ 扫码，或在本页直接用 QQ 账号登录，成功后自动返回')
                             : '用手机 QQ 扫码，或在弹出窗口中登录'}
                         </p>
                       </div>

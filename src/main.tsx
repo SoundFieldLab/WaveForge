@@ -9,9 +9,8 @@ import { createRoot } from 'react-dom/client'
 import './assets/fonts/fonts.css'
 import './index.css'
 import './tv/tv.css'
-import App from './App'
 import { startMemoryWatchdog } from './utils/memoryWatchdog'
-import { initPlatformUI, setTvModeForced, applyTvScale } from './platform'
+import { initPlatformUI, setTvModeForced } from './platform'
 import { installElectronShim } from './electronShim'
 
 // 懒 chunk 加载失败自动恢复：打包版的 hash 文件名在发版后变化，长时间停留的旧页面
@@ -40,17 +39,53 @@ import { startTv } from './tv/tvCore'
 import { initPerfMode } from './tv/perfMode'
 import { captureFrontendConsole, initDebugMode } from './tv/debugStore'
 import { installDebugRemote } from './tv/debugRemote'
-import DebugPanels from './tv/DebugPanels'
 import { installMediaKeyBridge } from './tv/mediaKeyBridge'
 import { installRemoteBridge } from './tv/remoteBridge'
-import TvKeyboard from './tv/TvKeyboard'
-import ErrorBoundary from './components/ErrorBoundary'
+import PlatformRoot from './PlatformRoot'
 import { installNativeTooltipSuppressor } from './utils/suppressNativeTooltips'
 
 // 平台初始化：标记 html[data-platform]/tv-mode（供 CSS 焦点适配），
 // 并给非 Electron 环境（Android WebView / 纯浏览器）注入 window.electron 最小桩。
 initPlatformUI()
 installElectronShim()
+
+// ── 引擎未就绪自动重试（Android 首屏提速配套）──
+// Android 端原生壳服务先出首屏，Node 引擎在后台启动；未就绪期间反代返回
+// 503 + X-WaveForge-Engine-Starting。这里在 fetch 层透明重试（最多 ~24s），
+// 让所有页面/接口在上层无感知地等到引擎可用，而不是直接甩错误态。
+;(() => {
+  const nativeFetch = window.fetch.bind(window)
+  const ENGINE_HEADER = 'X-WaveForge-Engine-Starting'
+  // 首启要解压 ~100MB 核心资产 + Node 冷启，可能 40-60s；重试窗口留足 72s
+  const MAX_RETRIES = 90
+  const RETRY_MS = 800
+  let notifiedStarting = false
+  window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      // Request 对象 body 只能消费一次：每次重试都用 clone
+      const nextInput = input instanceof Request ? input.clone() : input
+      try {
+        const res = await nativeFetch(nextInput as RequestInfo, init)
+        if (res.status === 503 && res.headers.get(ENGINE_HEADER)) {
+          if (!notifiedStarting) {
+            notifiedStarting = true
+            console.info('[BOOT] 引擎启动中，请求自动排队重试…')
+          }
+          try { await res.body?.cancel() } catch { /* ignore */ }
+          await new Promise(resolve => setTimeout(resolve, RETRY_MS))
+          continue
+        }
+        return res
+      } catch (err) {
+        // 壳服务尚未监听（极早期）或网络暂断：同样退避重试
+        if (attempt === MAX_RETRIES) throw err
+        await new Promise(resolve => setTimeout(resolve, RETRY_MS))
+      }
+    }
+    return nativeFetch(input as RequestInfo, init)
+  }
+})()
+
 // 凭据安全存储：启动时把 localStorage 遗留的各平台登录态迁移进主进程 safeStorage
 // （DPAPI 加密落盘），此后凭据读写走 secureTokenStore（内存缓存 + 加密持久化）。
 import('./services/secureTokenStore').then(({ initSecureTokenStore }) => initSecureTokenStore()).catch(() => undefined)
@@ -122,17 +157,12 @@ console.warn = (...args: unknown[]) => {
   } catch { /* ignore */ }
 }
 
-// TV DPI：TV 端布局基准宽由 android 构建产物的 index.html 静态 viewport 决定
-// （build-android-assets.mjs 把 dist/index.html 的 viewport 设为 width=2259，即
-// 1920/0.85，软件 UI 整体缩小 15%；桌面构建不受影响）。JS 动态改 meta 无效
-// （reload 会重置 meta），因此这里不再做运行时缩放。
+// TV DPI：TV 端布局基准宽由 initPlatformUI/applyTvScale 在启动时写入 viewport meta
+// （width=2133/scale；手机/平板端则写 device-width 保持 dp 布局）。
 
 // TV 遥控器交互层（仅 html.tv-mode 生效）：空间导航/焦点环/软键盘。
 // 组件挂载后再调用一次（见 TvKeyboard），确保 React 首帧渲染完就有候选可聚焦。
 startTv()
-
-// TV DPI 缩放：启动时按 localStorage 档位应用（CSS zoom）
-applyTvScale()
 
 // TV 性能模式：按内存自动选默认档，打上 wf-perf-* 类
 initPerfMode()
@@ -174,10 +204,6 @@ startMemoryWatchdog()
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ErrorBoundary>
-      <App />
-      <TvKeyboard />
-      <DebugPanels />
-    </ErrorBoundary>
+    <PlatformRoot />
   </StrictMode>,
 )

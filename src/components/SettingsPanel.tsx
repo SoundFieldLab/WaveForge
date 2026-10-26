@@ -22,7 +22,7 @@ import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { setSecureToken } from '../services/secureTokenStore'
 import { getMeasuredFrameRate, isFrameRateLimited } from '../utils/frameRateLimiter'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic } from 'lucide-react'
+import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic, Tablet, Smartphone, RefreshCw, Download } from 'lucide-react'
 import LoginButton from './LoginButton'
 import type { AppleUserInfo } from '../services/appleAuth'
 import type { StemModelProgress, RenderBackend } from '../electron'
@@ -54,7 +54,7 @@ import { getVersionDisplay } from '../services/versionInfo'
 import { VERSION_HISTORY } from '../services/versionHistory'
 import { getDebugPanelVisible, setDebugPanelVisible } from '../tv/debugStore'
 import { setTvFocus, useTvBack } from '../tv/tvCore'
-import { isTvModeActive, isAndroid, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale } from '../platform'
+import { isTvModeActive, isAndroid, isPcTabletActive, setTabletLayoutStyle, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale, getPcTouchWidth, setPcTouchWidth, PC_TOUCH_WIDTH_OPTIONS } from '../platform'
 import {
   loadPlaybackShortcutSettings,
   savePlaybackShortcutSettings,
@@ -88,6 +88,14 @@ import BilibiliProfileModal from './BilibiliProfileModal'
 import VmpStatusCard from './VmpStatusCard'
 import { DeveloperLicenseManager } from './DeveloperLicenseManager'
 import { getApiBase } from '../services/apiConfig'
+
+/** 平板设置·性能检测的字节数格式化（GB/MB）。 */
+function fmtTabletMem(bytes: unknown): string {
+  const n = Number(bytes)
+  if (!Number.isFinite(n) || n <= 0) return '—'
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}GB`
+  return `${(n / 1024 ** 2).toFixed(0)}MB`
+}
 import {
   isBilibiliLoggedIn,
   getStoredBilibiliUser,
@@ -246,9 +254,9 @@ function SettingsPanel({
   onSodaLogout,
   playerTheme = 'dark',
 }: SettingsPanelProps) {
-  const [activeTab, setActiveTab] = useState<'tv' | 'account' | 'advanced' | 'personalization' | 'about'>('account')
+  const [activeTab, setActiveTab] = useState<'tv' | 'account' | 'advanced' | 'personalization' | 'about' | 'tablet'>('account')
   const contentScrollRef = useRef<HTMLDivElement>(null)
-  const switchTab = (tab: 'tv' | 'account' | 'advanced' | 'personalization' | 'about') => {
+  const switchTab = (tab: 'tv' | 'account' | 'advanced' | 'personalization' | 'about' | 'tablet') => {
     setActiveTab(tab)
     requestAnimationFrame(() => contentScrollRef.current?.scrollTo({ top: 0, behavior: 'auto' }))
   }
@@ -762,6 +770,22 @@ function SettingsPanel({
   const [showDeviceInfo, setShowDeviceInfo] = useState(false)
   const [tvScale, setTvScaleState] = useState<number>(() => getTvScale())
   const [tvInfo, setTvInfo] = useState<Record<string, string | number | boolean> | null>(null)
+  // 平板（PC 布局模式）性能检测：getDeviceInfo 原生桥（型号/内存/存储/CPU/温度/刷新率）
+  const [tabletInfo, setTabletInfo] = useState<Record<string, string | number | boolean> | null>(null)
+  // PC 版界面缩放（基准宽，可调）：手机默认 860 / 平板默认 1280，见 platform.ts
+  const [pcTouchWidth, setPcTouchWidthState] = useState<number>(() => getPcTouchWidth())
+  const loadTabletInfo = useCallback(() => {
+    const native = (window as any).WaveForgeNative
+    if (native?.getDeviceInfo) {
+      try { setTabletInfo(JSON.parse(String(native.getDeviceInfo()))) } catch { setTabletInfo(null) }
+    } else {
+      setTabletInfo(null)
+    }
+  }, [])
+  useEffect(() => {
+    if (!show || !isPcTabletActive()) return
+    loadTabletInfo()
+  }, [show, activeTab, loadTabletInfo])
   const [pendingTvScale, setPendingTvScale] = useState<number | null>(null)
   const [tvScaleCountdown, setTvScaleCountdown] = useState(10)
   const tvScaleCountdownRef = useRef(10)
@@ -2421,6 +2445,31 @@ function SettingsPanel({
                   )}
                 </button>
               )}
+              {isPcTabletActive() && (
+                <button
+                  onClick={() => switchTab('tablet')}
+                  className={`relative flex-1 py-4 px-4 flex items-center justify-center gap-2 transition-colors ${
+                    activeTab === 'tablet'
+                      ? playerTheme === 'dark'
+                        ? 'text-white'
+                        : 'text-black'
+                      : playerTheme === 'dark'
+                      ? 'text-white/60 hover:text-white/80'
+                      : 'text-black/60 hover:text-black/80'
+                  }`}
+                >
+                  <Tablet className="w-5 h-5" />
+                  移动端
+                  {activeTab === 'tablet' && (
+                    <motion.div
+                      layoutId="settings-tab-indicator"
+                      className="absolute bottom-0 left-1/4 right-1/4 h-[3px] rounded-full"
+                      style={{ backgroundColor: accentColor, boxShadow: `0 0 8px ${accentColor}66` }}
+                      transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                    />
+                  )}
+                </button>
+              )}
               <button
                 onClick={() => switchTab('account')}
                 className={`relative flex-1 py-4 px-4 flex items-center justify-center gap-2 transition-colors ${
@@ -2467,6 +2516,9 @@ function SettingsPanel({
                   />
                 )}
               </button>
+              {/* 高级设置含大量桌面专属能力（GPU/桌面歌词/歌词岛/壁纸/AutoMix/游戏模式/头追等），
+                  平板 PC 布局下整体隐藏——移动端口径：PC 独占功能不出现在平板。 */}
+              {!isPcTabletActive() && (
               <button
                 onClick={() => switchTab('advanced')}
                 className={`relative flex-1 py-4 px-4 flex items-center justify-center gap-2 transition-colors ${
@@ -2490,6 +2542,7 @@ function SettingsPanel({
                   />
                 )}
               </button>
+              )}
               <button
                 onClick={() => switchTab('about')}
                 className={`relative flex-1 py-4 px-4 flex items-center justify-center gap-2 transition-colors ${
@@ -2687,6 +2740,121 @@ function SettingsPanel({
                         )}
                       </div>
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 移动端设置（手机/平板 PC 布局下显示；与 TV 设置 tab 同构）：布局切换 + 性能检测 + 更新 */}
+              {activeTab === 'tablet' && (
+                <div className="space-y-6">
+                  {/* 布局风格 */}
+                  <div>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>布局风格</h3>
+                    <div className="grid grid-cols-2 gap-3">
+                      <button
+                        onClick={() => setTabletLayoutStyle('mobile')}
+                        className={`${bgCard} rounded-xl p-4 border ${borderColor} ${hoverBg} transition-all text-left`}
+                      >
+                        <div className="flex items-center gap-3 mb-2">
+                          <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${accentColor}20` }}>
+                            <Smartphone className="w-5 h-5" style={{ color: accentColor }} />
+                          </div>
+                          <div className={`${textPrimary} font-medium`}>移动版布局</div>
+                        </div>
+                        <div className={`${textSecondary} text-sm`}>底部标签导航的触摸界面，适合手持使用</div>
+                      </button>
+                      <div className={`${bgCard} rounded-xl p-4 border`} style={{ borderColor: accentColor }}>
+                        <div className="flex items-center gap-3 mb-2">
+                          <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${accentColor}20` }}>
+                            <Tablet className="w-5 h-5" style={{ color: accentColor }} />
+                          </div>
+                          <div className={`${textPrimary} font-medium`}>PC 版布局（当前）</div>
+                        </div>
+                        <div className={`${textSecondary} text-sm`}>桌面客户端完整移植，沉浸全屏</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* PC 版界面缩放：PC 布局在手机/平板上等比缩放，密度可调（同 TV 的缩放设置思路） */}
+                  <div>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>界面缩放</h3>
+                    <div className={`${bgCard} rounded-xl border ${borderColor} p-4`}>
+                      <div className={`${textSecondary} text-sm mb-3`}>
+                        当前基准宽 {pcTouchWidth}px（数值越大字越小、一屏内容越多；竖屏自动收窄）
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {PC_TOUCH_WIDTH_OPTIONS.map(opt => (
+                          <button
+                            key={opt.value}
+                            onClick={() => { setPcTouchWidth(opt.value); setPcTouchWidthState(opt.value) }}
+                            className={`px-3 py-1.5 rounded-lg border text-sm transition-all ${pcTouchWidth === opt.value ? 'font-medium' : ''} ${borderColor} ${hoverBg}`}
+                            style={pcTouchWidth === opt.value ? { borderColor: accentColor, color: accentColor } : undefined}
+                            title={opt.hint}
+                          >
+                            {opt.label} · {opt.value}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* 性能检测 */}
+                  <div>
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className={`text-lg font-semibold ${textPrimary}`}>性能检测</h3>
+                      <button
+                        onClick={loadTabletInfo}
+                        className={`px-3 py-1.5 rounded-lg border ${borderColor} ${hoverBg} ${textSecondary} text-sm flex items-center gap-1.5 transition-all`}
+                      >
+                        <RefreshCw className="w-4 h-4" /> 刷新
+                      </button>
+                    </div>
+                    <div className={`${bgCard} rounded-xl border ${borderColor} p-4`}>
+                      {tabletInfo ? (
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                          {[
+                            ['设备型号', `${tabletInfo.manufacturer || ''} ${tabletInfo.model || ''}`],
+                            ['系统', `Android ${tabletInfo.androidVersion || '?'}（API ${tabletInfo.apiLevel || '?'}）`],
+                            ['内存', `${fmtTabletMem(tabletInfo.availMem)} 可用 / ${fmtTabletMem(tabletInfo.totalMem)}`],
+                            ['存储', `${fmtTabletMem(tabletInfo.storageFree)} 可用 / ${fmtTabletMem(tabletInfo.storageTotal)}`],
+                            ['CPU', `${tabletInfo.cpuCores || '?'} 核${typeof tabletInfo.cpuTempC === 'number' && tabletInfo.cpuTempC > 0 ? ` · ${tabletInfo.cpuTempC.toFixed(0)}℃` : ''}`],
+                            ['屏幕', `${tabletInfo.screenPx || '?'} · ${tabletInfo.refreshRate || '?'}`],
+                            ['WebView', `Chromium ${tabletInfo.webViewVersion || '?'}`],
+                            ['电池', typeof tabletInfo.batteryPercent === 'number' ? `${tabletInfo.batteryPercent}%${tabletInfo.batteryCharging ? ' 充电中' : ''}` : '—'],
+                          ].map(([k, v]) => (
+                            <div key={String(k)} className="flex justify-between gap-3">
+                              <span className={`${textTertiary}`}>{k}</span>
+                              <span className={`${textPrimary} text-right truncate`}>{String(v)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className={`${textSecondary} text-sm`}>设备信息不可用（原生桥未就绪）</div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 更新 */}
+                  <div>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>更新</h3>
+                    <button
+                      onClick={() => {
+                        const native = (window as any).WaveForgeNative
+                        if (native?.checkForUpdates) native.checkForUpdates()
+                      }}
+                      className={`w-full ${bgCard} rounded-xl p-4 border ${borderColor} ${hoverBg} transition-all flex items-center justify-between group`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0" style={{ backgroundColor: `${accentColor}20` }}>
+                          <Download className="w-5 h-5" style={{ color: accentColor }} />
+                        </div>
+                        <div className="text-left">
+                          <div className={`${textPrimary} font-medium`}>检查更新</div>
+                          <div className={`${textSecondary} text-sm`}>功能随 PC 大版本一起发布</div>
+                        </div>
+                      </div>
+                      <ChevronRight className={`w-5 h-5 ${textTertiary} flex-shrink-0 group-hover:translate-x-1 transition-transform`} />
+                    </button>
                   </div>
                 </div>
               )}

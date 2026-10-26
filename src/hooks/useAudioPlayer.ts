@@ -1,6 +1,6 @@
 ﻿import { debugLog } from '../utils/debugLog'
 import { isGameModeFrozen } from '../services/gameModeRuntime'
-import { isTvModeActive } from '../platform'
+import { isTvModeActive, isAndroidTouchDevice } from '../platform'
 import { PLAYBACK_SPEED_OPTIONS, PLAYBACK_SPEED_SETTINGS_EVENT, PLAYBACK_SPEED_TRANSITION_EVENT, setEffectivePlaybackSpeed } from '../services/playbackSpeedSettings'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
@@ -3573,6 +3573,14 @@ export function useAudioPlayer(
   ])
 
   const preloadNext = useCallback((input: string | PreloadTrack) => {
+    // Android 触摸端（含手机/平板 PC 版布局）：禁用双 deck 预载。
+    // 移动 WebAudio 上 standby deck 偶发满增益出声（见下方复用分支的复位防护注释），
+    // 与主曲混音即用户听到的「爆音/杂音/不受控快进」（UI 进度条仍正常）；且双流并发
+    // 在移动网络下抢带宽导致卡顿。移动端一律单 deck 直切，预载零收益。
+    if (isAndroidTouchDevice()) {
+      debugLog('⏭️ [Preload] Android 触摸端跳过预载（单 deck 直切）')
+      return
+    }
     const track = asPreloadTrack(input)
     debugLog('📥 [Preload] preloadNext 被调用')
     debugLog('   下一首歌曲:', track)
@@ -4469,6 +4477,7 @@ export function useAudioPlayer(
     togglePlay,
     seek,
     setVolume,
+    getVolume: () => volumeRef.current,
     /** WebView2 播放面外部播放源：enable/disable 由 App.loadAndPlaySong 调用 */
     enableExternalPlayback,
     disableExternalPlayback,

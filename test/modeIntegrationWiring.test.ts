@@ -146,6 +146,7 @@ describe('mode integration wiring', () => {
       'components/ImmersiveControls.tsx': 'portal 到层内封面下方锚点（getElementById(anchorId)，墙纸/辉煌模式同层元素），挂起层的 visibility 已覆盖，未逃出模式层',
       'components/QuickSettingsHost.tsx': 'App 顶层全局弹层（与调音室同为全模式共享，见 App.tsx 挂载点注释），不挂在任何模式层内，useModeParked 恒为 false',
       'services/waveforge-engine-v3/ui/components/SpatialWorldView.tsx': 'portal 到自身容器，仍在模式层内',
+      'mobile/MobileActionSheet.tsx': '移动端树与桌面模式层体系完全隔离（main.tsx/PlatformRoot 按 html.mobile-mode 顶层分流，移动端无模式层/挂起概念），动作面板只覆盖移动端自己的页面栈',
     }
     const read = (relative: string) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8')
     const offenders = (readdirSync(new URL('../src', import.meta.url), { recursive: true }) as string[])

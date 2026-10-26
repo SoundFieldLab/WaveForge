@@ -2436,6 +2436,7 @@ function DesktopView({
       {/* 顶部主题切换触发区域 - 面板关闭时的下箭头 */}
       <div 
         className="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-8 z-50"
+        data-wf-top-toggle
         data-desktop-interactive
         onMouseEnter={() => setIsTopHovered(true)}
         onMouseLeave={() => setIsTopHovered(false)}

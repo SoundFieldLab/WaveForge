@@ -2380,6 +2380,7 @@ function HomeView({
       {/* Top hover trigger area */}
       <div 
         className="absolute top-0 left-1/2 -translate-x-1/2 w-32 h-8 z-50"
+        data-wf-top-toggle
         onMouseEnter={() => setIsTopHovered(true)}
         onMouseLeave={() => setIsTopHovered(false)}
         onClick={() => {

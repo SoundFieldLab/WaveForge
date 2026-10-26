@@ -123,3 +123,8 @@ build/webui/
 
 # 根目录临时调试 exe（卸载器 e2e 探针，不入库）
 /release*.exe
+waveforge-local.jks
+
+# 浏览器/真机验证截图与本地构建 APK（探针产物，不入库）
+/.*.png
+/device-*.apk

@@ -1776,3 +1776,91 @@ input[type='number'].no-spinner {
 .party-slider.on-light::-moz-range-track {
   background: rgba(0, 0, 0, 0.14);
 }
+
+/* ── 平板「PC 布局」模式（html.pc-touch，platform.ts 按设置开关）──
+   桌面 App 移植到触摸屏的基础适配：点按无高亮闪块、去掉双击缩放延迟；
+   悬停揭示类控件在触屏上不可用属预期（点击路径全部可用），后续按需细调。 */
+html.pc-touch {
+  -webkit-tap-highlight-color: transparent;
+}
+html.pc-touch body {
+  touch-action: manipulation;
+}
+
+/* ── 平板 PC 布局（html.pc-touch）触屏适配补充 ──
+   桌面 App 大量 hover 揭示控件（group-hover / hover: 前缀），触屏没有 hover →
+   关键操作按钮常显（透明度直接给到），信息层级保留（次要元素半透明但可见可点）。 */
+html.pc-touch [class*='group-hover\:opacity-100'].opacity-0 { opacity: 0.9; }
+html.pc-touch .hover\:opacity-100.opacity-0 { opacity: 0.85; }
+/* 窗口标题栏（拖拽区 + 最小化/最大化/关闭）是桌面窗口专属：触摸端/电视一律隐藏。
+   React 侧 TitleBar 已按 isPcTabletActive()/tvMode 返回 null，这里做样式级兜底
+   （防止启动早期类判定时序导致按钮闪现）。 */
+html.pc-touch [data-wf-titlebar],
+html.mobile-mode [data-wf-titlebar],
+html.tv-mode [data-wf-titlebar] {
+  display: none !important;
+}
+/* 滚动条加粗便于触摸拖动 */
+html.pc-touch ::-webkit-scrollbar { width: 10px; height: 10px; }
+html.pc-touch ::-webkit-scrollbar-thumb { border-radius: 999px; }
+/* 页面层不滚动：滚动全在内容容器内，避免 html/body 预留滚动条槽位（屏幕边缘空条） */
+html.pc-touch,
+html.pc-touch body {
+  overflow: hidden;
+}
+/* 顶部中央「切换歌词/模式」下拉把手：桌面热区 128×32，指头很难命中 →
+   触摸端扩大到全宽中部 46vw × 56px（视觉箭头不变，只放大可点区域）。 */
+html.pc-touch [data-wf-top-toggle] {
+  width: 46vw !important;
+  min-width: 220px;
+  max-width: 560px;
+  height: 56px !important;
+}
+
+/* 官方播放中均衡器（3 根绿条跳动） */
+.wf-eq {
+  --eq-color: #1ed760;
+}
+.wf-eq span {
+  width: 2px;
+  border-radius: 1px;
+  background: var(--eq-color);
+  animation: wf-eq-bounce 0.9s ease-in-out infinite;
+}
+.wf-eq span:nth-child(1) { height: 60%; animation-delay: 0s; }
+.wf-eq span:nth-child(2) { height: 100%; animation-delay: 0.25s; }
+.wf-eq span:nth-child(3) { height: 40%; animation-delay: 0.5s; }
+@keyframes wf-eq-bounce {
+  0%, 100% { transform: scaleY(0.4); }
+  50% { transform: scaleY(1); }
+}
+
+/* 官方预览层频谱（横向条律动） */
+.wf-spec span {
+  height: 4px;
+  min-width: 30px;
+  border-radius: 2px;
+  background: #8f8f8f;
+  transition: width 0.6s ease;
+  animation: wf-spec-pulse 1.1s ease-in-out infinite;
+}
+.wf-spec span:nth-child(2) { animation-delay: 0.15s; }
+.wf-spec span:nth-child(3) { animation-delay: 0.3s; }
+.wf-spec span:nth-child(4) { animation-delay: 0.45s; }
+@keyframes wf-spec-pulse {
+  0%, 100% { transform: scaleX(0.55); opacity: 0.5; }
+  50% { transform: scaleX(1); opacity: 1; }
+}
+
+/* 官方预览层右上角律动小频谱图标 */
+.wf-spec-mini {
+  width: 3px;
+  height: 14px;
+  border-radius: 1.5px;
+  background: #b3b3b3;
+  animation: wf-spec-mini-bounce 0.8s ease-in-out infinite;
+}
+@keyframes wf-spec-mini-bounce {
+  0%, 100% { transform: scaleY(0.35); }
+  50% { transform: scaleY(1); }
+}

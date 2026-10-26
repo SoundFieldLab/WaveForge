@@ -1,6 +1,7 @@
 import { memo, useState, useEffect, useRef } from 'react'
 import { Minus, Square, X, Minimize2, Maximize2 } from 'lucide-react'
 import { useTvMode } from '../tv/tvCore'
+import { isPcTabletActive } from '../platform'
 
 // 无 props 的常驻组件：memo 后父级（App 1Hz 重渲染）不再连带重渲染它，
 // 其状态仅由窗口 IPC/鼠标事件驱动
@@ -13,7 +14,9 @@ export default memo(function TitleBar() {
   const hideTimeoutRef = useRef<number | null>(null)
 
   // TV 遥控器模式没有窗口化概念，整个标题栏无意义，直接隐藏。
-  if (tvMode) return null
+  // 平板 PC 布局同理：拖拽区/最小化/最大化/关闭是桌面窗口专属，触屏无意义
+  // （electronShim 的 no-op 按钮不该出现在手机/平板上）。
+  if (tvMode || isPcTabletActive()) return null
 
   useEffect(() => {
     const unsubscribers: Array<() => void> = []
@@ -103,6 +106,7 @@ export default memo(function TitleBar() {
       {/* 左侧标题栏区域 - 用于拖拽窗口 */}
       <div 
         className="fixed top-0 left-0 h-8 z-[9999]"
+        data-wf-titlebar
         data-desktop-interactive
         style={{ 
           WebkitAppRegion: 'drag',
@@ -117,6 +121,7 @@ export default memo(function TitleBar() {
       {/* 右侧标题栏区域 - 用于拖拽窗口和显示控制按钮 */}
       <div 
         className="fixed top-0 right-0 h-8 z-[9999] flex items-center justify-end"
+        data-wf-titlebar
         data-desktop-interactive
         style={{ 
           WebkitAppRegion: 'drag',

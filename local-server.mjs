@@ -150,7 +150,19 @@ axios.defaults.httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 64 })
 axios.defaults.timeout = 15000
 
 const app = express()
-const PORT = Number(process.env.PORT) || 3001
+// 端口优先级：argv --port= > env PORT > 3001。
+// Android 端由 MainActivity 传 --port=3002：原生壳服务占 3001 提供首屏静态资源并
+// 反代到 Node，前端与 API 仍同源。argv 在进程启动时即完整（静态 import 求值期可用），
+// env 则因 ESM import 提升来不及设置（见下方鉴权注释）。
+function resolveListenPort() {
+  const argv = process.argv.slice(2).find((a) => a.startsWith('--port='))
+  if (argv) {
+    const n = Number(argv.slice('--port='.length))
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return Number(process.env.PORT) || 3001
+}
+const PORT = resolveListenPort()
 // 惰性读取：桌面 main.cjs 在 spawn 前就设好 env，两者等价；Android 端 nodejs-mobile
 // 把 android-server.mjs（argv→env 赋值）与本文件打进同一 bundle，ESM import 提升
 // 使本文件的求值先于 android-server 体内语句——若在此处捕获快照，拿到的恒是空串
@@ -1364,19 +1376,40 @@ app.use(compression({
 
 // CORS 支持
 app.use((req, res, next) => {
-  // TV 遥控桥等 WebSocket 客户端误连本服务的 /ws：明确告知本服务不承载 WebSocket，
+  // 从 Cookie 头提取 wf_local_token（安卓新版 WebView 鉴权通道，见下方 suppliedLocalToken 注释）
+  const readLocalTokenCookie = (cookieHeader) => {
+    if (typeof cookieHeader !== 'string') return undefined
+    for (const part of cookieHeader.split(';')) {
+      const eq = part.indexOf('=')
+      if (eq <= 0) continue
+      if (part.slice(0, eq).trim() === 'wf_local_token') return part.slice(eq + 1).trim()
+    }
+    return undefined
+  }
+  // TV 遥控桥等 WebSocket 客户端误连本服务的 /ws：明确告知本服务不承载 WebSocket
   // 代替 404 噪音（WebSocket 由桌面端 remote-server 在 25566/25567 提供）
   if (req.headers.upgrade?.toLowerCase?.() === 'websocket') {
     return res.status(426).json({ error: 'WebSocket 不在此服务，请连接遥控器服务的 /ws' })
   }
   const origin = req.headers.origin
-  const suppliedLocalToken = req.headers[LOCAL_SERVICE_HEADER]
+  // token 来源：优先请求头（Electron/旧安卓 WebView 的 shouldInterceptRequest 注入）；
+  // 新版 Android WebView 的 requestHeaders 是不可变 map、注入头会静默失败 → MainActivity
+  // 改用 CookieManager 下发 wf_local_token cookie（页面源与 API 同源，fetch/顶层导航都会带）。
+  const suppliedLocalToken = req.headers[LOCAL_SERVICE_HEADER] || readLocalTokenCookie(req.headers.cookie)
   const tokenAuthorized = isAuthorizedLocalRequest({
     configuredToken: currentLocalServiceToken(),
     suppliedToken: suppliedLocalToken,
   })
   if (origin && !ALLOWED_RENDERER_ORIGINS.has(origin)) {
-    return res.status(403).json({ error: 'Origin not allowed' })
+    // 无 token 的 dev:api 实例放行本机/局域网调试源（vite --host、dist 静态托管等任意端口——
+    // 调试服务器端口不固定）。有 token（打包版/桌面 dev-electron）的实例保持白名单严格，
+    // 不因这条放宽。
+    const isDevDebugOrigin = /^https?:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin)
+      || /^http:\/\/(192\.168|10)\.\d{1,3}\.\d{1,3}:\d+$/.test(origin)
+      || /^http:\/\/172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}:\d+$/.test(origin)
+    if (!(isDevDebugOrigin && !currentLocalServiceToken())) {
+      return res.status(403).json({ error: 'Origin not allowed' })
+    }
   }
   if ((origin === 'null' || origin === 'file://') && !tokenAuthorized) {
     return res.status(403).json({ error: 'Origin requires local service authentication' })
@@ -3640,7 +3673,11 @@ function qqNormalizeSongFromTrack(track, mid, fallback = {}) {
     platform: 'qq',
     songType: Number(track?.type ?? track?.songtype ?? track?.songType ?? fallback.songType ?? fallback.type) || 0,
     vip: fallback.vip || fallback.pay?.payplay === 1 || false,
-    noCopyright: fallback.noCopyright || false
+    noCopyright: fallback.noCopyright || false,
+    mv: track?.mv?.vid
+      || (typeof track?.mv === 'string' || typeof track?.mv === 'number' ? track?.mv : '')
+      || fallback.mv
+      || '' // MV vid 透传（观看 MV 用）：详情接口不丢搜索结果里已有的 vid
   }
 }
 
@@ -4273,6 +4310,7 @@ artists,
         platform: 'qq',
         vip: item.pay?.payplay === 1, // payplay=1表示需要VIP才能播放
         noCopyright: false, // QQ音乐搜索结果一般都有版权
+        mv: item.vid || (typeof item.mv === 'string' || typeof item.mv === 'number' ? item.mv : item.mv?.vid) || '', // MV vid（动上面板观看 MV 用）
         needsDetail: !coverUrl // 标记需要获取详情的歌曲
       }
     })
@@ -4359,7 +4397,8 @@ async function qqMusicSearch(keywords, limit = 30, devMode = false) {
           picUrl: qqAlbumCover(albumMid, 500)
         },
         duration: (item.interval || 0) * 1000,
-        platform: 'qq'
+        platform: 'qq',
+        mv: item.mv?.vid || (typeof item.mv === 'string' || typeof item.mv === 'number' ? item.mv : '') || '' // MV vid（观看 MV 用）
       }
     })
   } catch (error) {

@@ -2,8 +2,8 @@
  * 组装安卓应用资产：
  *  1) vite 以 android 配置构建前端（单入口）→ android/app/src/main/assets/nodejs-project/dist/
  *  2) esbuild 把 android-server.mjs + local-server.mjs + 依赖打成单文件 → .../nodejs-project/main.cjs
- *  3) 递增 MainActivity.kt 的 ASSETS_VERSION，触发设备端重新解压资产
- * 用法：node scripts/build-android-assets.mjs
+ *  3) 递增 MainActivity.kt 资产版本（默认仅 DIST；--full 连核心层一起，触发设备全量重解压）
+ * 用法：node scripts/build-android-assets.mjs [--full]
  */
 import { build as viteBuild } from 'vite'
 import { build as esbuildBuild } from 'esbuild'
@@ -287,9 +287,10 @@ function patchCssColorMix() {
 }
 
 /**
- * TV 端布局基准：dist/index.html 的 viewport 静态设为 width=2133（= 1920/0.9，
- * 软件 UI 整体缩小 10%）。桌面构建（vite.config.ts）不受影响。
- * JS 动态改 meta 无效（reload 会重置），必须在静态 HTML 里设置。
+ * 移动优先 viewport：dist/index.html 静态写 device-width（手机/平板按原生 dp 布局，
+ * 600dp 平板判定成立；Fold 开合时 resize 事件驱动前端切换布局）。
+ * TV 端不再静态写 width=2133：initPlatformUI() 启动时按 tv-mode 调 applyTvScale()
+ * 写入 2133/scale（JS 每次启动都会执行，reload 重置后再次写入，等效且两端共存）。
  */
 function patchTvViewport() {
   const indexPath = join(ASSETS_DIR, 'dist', 'index.html')
@@ -300,28 +301,40 @@ function patchTvViewport() {
   const src = readFileSync(indexPath, 'utf8')
   const next = src.replace(
     /<meta name="viewport"[^>]*>/,
-    // width=2133（1920/0.9，UI 缩小 10%）。不能带 initial-scale=1：
-    // 它会强制初始缩放 1，布局以原始大小显示 → 只能看左上角 + 滚动。
-    // 无 initial-scale 时 WebView overview 自动把布局适配到屏幕宽度。
-    '<meta name="viewport" content="width=2133" />'
+    // viewport-fit=cover：配合原生 edge-to-edge insets；不能带会锁死 TV 布局的固定 width。
+    // maximum-scale/user-scalable：禁双击缩放与捏合（App 手感；双击与播放页切歌手势冲突）。
+    '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />'
   )
   if (next !== src) {
     writeFileSync(indexPath, next)
-    console.log('  已 patch dist/index.html viewport → width=2133（TV 布局基准，UI 缩小 10%）')
+    console.log('  已 patch dist/index.html viewport → device-width（TV 由前端运行时写 2133）')
   } else {
-    console.log('  dist/index.html viewport 已是 2133，无需 patch')
+    console.log('  dist/index.html viewport 已是 device-width，无需 patch')
   }
 }
 
+/**
+ * 递增 MainActivity.kt 资产版本（两级拆分，启动提速）：
+ *  - 默认只递增 DIST_ASSETS_VERSION：设备端仅重建 dist/（前端迭代，秒级）；
+ *  - --full 同时递增 CORE_ASSETS_VERSION：main.cjs/node_modules 等核心层变化时
+ *    触发全量重解压（~100MB，重装 APK 后首次冷启动）。
+ */
 function bumpAssetsVersion() {
-  console.log('[3/3] 递增 MainActivity.kt ASSETS_VERSION ...')
+  const full = process.argv.includes('--full')
+  console.log(`[3/3] 递增 MainActivity.kt 资产版本${full ? '（--full：核心层全量）' : '（仅 dist）'} ...`)
   if (!existsSync(MAIN_ACTIVITY)) throw new Error(`找不到 ${MAIN_ACTIVITY}`)
-  const src = readFileSync(MAIN_ACTIVITY, 'utf8')
-  const matched = src.match(/private const val ASSETS_VERSION = (\d+)/)
-  if (!matched) throw new Error('MainActivity.kt 中找不到 ASSETS_VERSION 常量')
-  const next = parseInt(matched[1], 10) + 1
-  writeFileSync(MAIN_ACTIVITY, src.replace(`private const val ASSETS_VERSION = ${matched[1]}`, `private const val ASSETS_VERSION = ${next}`))
-  console.log(`  ASSETS_VERSION ${matched[1]} → ${next}`)
+  let src = readFileSync(MAIN_ACTIVITY, 'utf8')
+  const bump = (key) => {
+    const re = new RegExp(`private const val ${key} = (\\d+)`)
+    const matched = src.match(re)
+    if (!matched) throw new Error(`MainActivity.kt 中找不到 ${key} 常量`)
+    const next = parseInt(matched[1], 10) + 1
+    src = src.replace(`private const val ${key} = ${matched[1]}`, `private const val ${key} = ${next}`)
+    console.log(`  ${key} ${matched[1]} → ${next}`)
+  }
+  if (full) bump('CORE_ASSETS_VERSION')
+  bump('DIST_ASSETS_VERSION')
+  writeFileSync(MAIN_ACTIVITY, src)
 }
 
 async function main() {

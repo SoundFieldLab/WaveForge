@@ -17,7 +17,9 @@ interface SodaLoginPanelProps {
 /**
  * 汽水音乐登录（QQ 音乐同款编号步骤样式）：抖音扫码。
  * 桌面端调 window.electron.openSodaLogin()（主进程开抖音 passport 扫码窗口，抓会话 Cookie）。
- * TV/非 Electron 无扫码窗口：折叠的手动粘贴 Cookie 区为次级通道——粘贴网页版 Cookie
+ * Android 手机/TV 调 window.WaveForgeNative.openSodaLogin()（原生覆盖层内嵌抖音登录页，
+ * 抓到 .douyin.com 登录 cookie 后以 sodaLoginCookieCaptured 事件回传）。
+ * TV/非 Electron 且无原生桥：折叠的手动粘贴 Cookie 区为次级通道——粘贴网页版 Cookie
  * 经 /api/soda/status 验证后落盘四键并走 App 层 handleSodaLogin 广播登录态。
  */
 export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPanelProps) {
@@ -30,8 +32,10 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
   const mountedRef = useRef(false)
 
   const hasNativeLogin = Boolean((window as any).electron?.openSodaLogin)
-  // 桌面端以扫码为主入口，手动输入默认折叠；TV/非 Electron 扫码不可用，默认展开唯一可用通道
-  const [showManual, setShowManual] = useState(() => !hasNativeLogin)
+  // Android 原生扫码桥（覆盖层内嵌抖音登录页，手机/TV 均可用）
+  const hasAndroidScan = Boolean((window as any).WaveForgeNative?.openSodaLogin)
+  // 桌面/Android 以扫码为主入口，手动输入默认折叠；纯 TV WebView 扫码不可用，默认展开唯一可用通道
+  const [showManual, setShowManual] = useState(() => !hasNativeLogin && !hasAndroidScan)
   const [manualCookie, setManualCookie] = useState('')
   const [verifying, setVerifying] = useState(false)
 
@@ -42,34 +46,12 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
     }
   }, [])
 
-  const handleLogin = async () => {
-    if (loading) return
-    setLoading(true)
-    setError('')
-    try {
-      const result = await (window as any).electron.openSodaLogin()
-      if (!mountedRef.current) return
-      if (result?.success && (result.cookie || result.token)) {
-        // 转发完整结果：主进程已抓取昵称/头像/ID，App 层据此落盘显示
-        onLoginSuccess(result.cookie || result.token, result.username, { avatar: result.avatar, userId: result.userId })
-      } else {
-        setError(result?.error || '登录失败，请重试')
-      }
-    } catch (e) {
-      if (mountedRef.current) setError('登录窗口打开失败')
-    } finally {
-      if (mountedRef.current) setLoading(false)
-    }
-  }
-
-  // 手动粘贴 Cookie 登录：用粘贴内容调 /api/soda/status 验证（不先动 localStorage），
-  // 通过后资料用 status 返回的 profile 直接落键；持久化与事件广播交给 App 层
-  // handleSodaLogin（与扫码登录同一条链路，避免双份状态同步逻辑）。
-  const handleManualLogin = async () => {
-    const cookie = manualCookie.trim()
-    if (verifying) return
+  // cookie 落键公共链路（手动粘贴与 Android 扫码回传共用）：
+  // /api/soda/status 验证通过后落四键并广播登录态，与 App.handleSodaLogin 幂等同口径。
+  const applyCookieLogin = async (rawCookie: string) => {
+    const cookie = rawCookie.trim()
     if (!cookie) {
-      setError('请先粘贴汽水音乐网页版 Cookie')
+      setError('未获取到登录信息')
       return
     }
     setVerifying(true)
@@ -95,6 +77,74 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
     } finally {
       if (mountedRef.current) setVerifying(false)
     }
+  }
+  // 事件监听只注册一次：经 ref 调最新实现，避免闭包捕获旧 onLoginSuccess
+  const applyCookieLoginRef = useRef(applyCookieLogin)
+  applyCookieLoginRef.current = applyCookieLogin
+
+  // Android 原生扫码覆盖层：cookie 捕获 / 覆盖层关闭（未取到时复位 loading）事件
+  useEffect(() => {
+    if (!hasAndroidScan) return
+    const onCookieCaptured = (e: Event) => {
+      const detail = (e as CustomEvent).detail || {}
+      if (mountedRef.current && detail.cookie) void applyCookieLoginRef.current(String(detail.cookie))
+    }
+    const onLoginClosed = () => {
+      if (!mountedRef.current) return
+      setLoading(false)
+    }
+    window.addEventListener('sodaLoginCookieCaptured', onCookieCaptured)
+    window.addEventListener('sodaLoginClosed', onLoginClosed)
+    return () => {
+      window.removeEventListener('sodaLoginCookieCaptured', onCookieCaptured)
+      window.removeEventListener('sodaLoginClosed', onLoginClosed)
+    }
+  }, [hasAndroidScan])
+
+  const handleLogin = async () => {
+    if (loading) return
+    setLoading(true)
+    setError('')
+    try {
+      const result = await (window as any).electron.openSodaLogin()
+      if (!mountedRef.current) return
+      if (result?.success && (result.cookie || result.token)) {
+        // 转发完整结果：主进程已抓取昵称/头像/ID，App 层据此落盘显示
+        onLoginSuccess(result.cookie || result.token, result.username, { avatar: result.avatar, userId: result.userId })
+      } else {
+        setError(result?.error || '登录失败，请重试')
+      }
+    } catch (e) {
+      if (mountedRef.current) setError('登录窗口打开失败')
+    } finally {
+      if (mountedRef.current) setLoading(false)
+    }
+  }
+
+  // Android：打开原生覆盖层（loading 由 sodaLoginClosed 事件复位）
+  const handleAndroidScan = () => {
+    if (loading) return
+    setLoading(true)
+    setError('')
+    try {
+      ;(window as any).WaveForgeNative.openSodaLogin()
+    } catch (e) {
+      if (mountedRef.current) {
+        setLoading(false)
+        setError('扫码窗口打开失败')
+      }
+    }
+  }
+
+  // 手动粘贴 Cookie 登录：与扫码回传走同一条验证链路
+  const handleManualLogin = async () => {
+    const cookie = manualCookie.trim()
+    if (verifying) return
+    if (!cookie) {
+      setError('请先粘贴汽水音乐网页版 Cookie')
+      return
+    }
+    await applyCookieLogin(cookie)
   }
 
   const accent = '#38BDF8'
@@ -140,12 +190,14 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
             </button>
           </div>
 
-          {/* 说明：TV（无扫码窗口）与桌面端文案分支，TV 上"弹出窗口"不存在会误导 */}
+          {/* 说明：桌面（Electron 扫码窗口）/ Android（应用内扫码）/ 纯 TV WebView（粘贴 Cookie）三分支 */}
           <div className="bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 mb-6">
             <p className="text-yellow-200 text-sm">
               {hasNativeLogin
                 ? '弹出窗口展示汽水官方二维码，使用「汽水音乐」App 扫码确认后自动完成登录'
-                : '电视端无法弹出登录窗口：请在手机/电脑浏览器登录汽水网页版后复制 Cookie，在下方粘贴登录（连接手机遥控器后可在手机上直接粘贴输入）'}
+                : hasAndroidScan
+                  ? '应用内打开抖音登录页，使用「抖音」App 扫码（或手机号短信验证）后自动完成登录'
+                  : '电视端无法弹出登录窗口：请在手机/电脑浏览器登录汽水网页版后复制 Cookie，在下方粘贴登录（连接手机遥控器后可在手机上直接粘贴输入）'}
             </p>
           </div>
 
@@ -156,7 +208,9 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
                 1
               </div>
               <div className="flex-1">
-                <h3 className="text-white font-medium mb-2">{hasNativeLogin ? '弹出窗口扫码（汽水音乐 App）' : '获取 Cookie（手机/电脑浏览器）'}</h3>
+                <h3 className="text-white font-medium mb-2">
+                  {hasNativeLogin ? '弹出窗口扫码（汽水音乐 App）' : hasAndroidScan ? '应用内扫码（抖音登录页）' : '获取 Cookie（手机/电脑浏览器）'}
+                </h3>
                 {hasNativeLogin && (
                   <button
                     onClick={() => void handleLogin()}
@@ -168,8 +222,19 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
                     {loading ? '正在打开登录窗口…' : '在弹出窗口扫码登录（抖音 App）'}
                   </button>
                 )}
-                {/* TV/纯浏览器：window.open 在 TV WebView 无反应，隐藏死按钮改提示 */}
-                {!hasNativeLogin && (
+                {hasAndroidScan && (
+                  <button
+                    onClick={handleAndroidScan}
+                    disabled={loading}
+                    className="flex items-center gap-2 px-4 py-2 text-white rounded-lg transition-colors disabled:opacity-60"
+                    style={{ backgroundColor: accent }}
+                  >
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
+                    {loading ? '等待扫码登录…' : '打开抖音扫码登录（应用内）'}
+                  </button>
+                )}
+                {/* 纯 TV WebView：window.open 在 TV 无反应，隐藏死按钮改提示 */}
+                {!hasNativeLogin && !hasAndroidScan && (
                   <p className="text-white/50 text-sm">电视端不支持打开网页窗口，请按下方手动 Cookie 步骤操作</p>
                 )}
               </div>
@@ -245,6 +310,16 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
                 style={{ backgroundColor: accent }}
               >
                 {loading ? '正在打开…' : '扫码登录'}
+              </button>
+            )}
+            {!hasNativeLogin && hasAndroidScan && (
+              <button
+                onClick={handleAndroidScan}
+                disabled={loading}
+                className="flex-1 px-6 py-3 text-white rounded-xl font-medium transition-colors disabled:opacity-60"
+                style={{ backgroundColor: accent }}
+              >
+                {loading ? '等待扫码…' : '扫码登录'}
               </button>
             )}
           </div>
