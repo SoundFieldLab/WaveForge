@@ -138,20 +138,37 @@ describe('汽水推荐页歌词面板（滚动 + 逐字）', () => {
       expect(active).toBeTruthy()
       const spans = [...active!.querySelectorAll<HTMLElement>('span[data-ci]')]
       expect(spans.length).toBe(4)
-      // 第 1 字应已 100%，第 2 字在推进中（0~100 之间），第 3/4 字应为 0%
-      const pos = spans.map(s => parseFloat(s.style.backgroundPositionX))
-      expect(pos[0]).toBe(100)
-      expect(pos[1]).toBeGreaterThan(0)
-      expect(pos[1]).toBeLessThan(100)
-      expect(pos[3]).toBe(0)
-      // 推进 0.5s（不发布新快照——纯 rAF 外推），第 2 字继续走
-      const before = pos[1]
+      // 逐字柔边（播放页同款羽化）：每个字的 backgroundImage 是
+      // linear-gradient(90deg, bright from%, dim to%)——from/to 按唱到比例羽化推进。
+      // 第 1 字应已全亮（from=to=100），第 2 字在羽化推进中（from<to 且 to>0），第 3/4 字未唱（纯 dim）。
+      // 终态字（已唱/未唱）的渐变没有 % 数字：`linear-gradient(90deg, C, C)`。
+      // jsdom 不归一化颜色，直接拿「必然唱满的第 1 字」的 backgroundImage 作 bright 形态基准比对。
+      const brightShape = spans[0].style.backgroundImage
+      const isBrightFill = (s: HTMLElement) => s.style.backgroundImage === brightShape
+      const parseGrad = (s: HTMLElement) => {
+        const m = /linear-gradient\(90deg, .*?([\d.]+)%, .*?([\d.]+)%\)/.exec(s.style.backgroundImage)
+        return m ? { from: parseFloat(m[1]), to: parseFloat(m[2]) } : null
+      }
+      // 第 1 字已唱满：终态全亮（无 % 的双 bright 渐变）
+      expect(isBrightFill(spans[0])).toBe(true)
+      const fromOf = (s: HTMLElement) => parseGrad(s)?.from ?? NaN
+      const toOf = (s: HTMLElement) => parseGrad(s)?.to ?? NaN
+      const f1 = fromOf(spans[1])
+      const t1 = toOf(spans[1])
+      // 羽化语义：ratio=0.5、羽化半宽 0.35 时 to 已 clamp 到 100（前缘越过字尾是正常视觉）。
+      // 推进中的可靠特征是 from∈(0,100)：羽化后缘已进入、字还没唱满。
+      expect(f1).toBeGreaterThan(0)
+      expect(f1).toBeLessThan(100)
+      expect(t1).toBeGreaterThanOrEqual(f1)
+      // 未唱字：终态纯 dim
+      expect(isBrightFill(spans[3])).toBe(false)
+      // 推进 0.5s（不发布新快照——纯 rAF 外推）：第 2 字（1000..2000ms，快照时 ratio=0.5）
+      // 应唱满进入终态全亮（羽化前缘越过字尾 → settled，不再逐帧写）。
+      const before = f1
+      expect(before).toBeGreaterThan(0)
       await act(async () => { vi.advanceTimersByTime(500) })
       await flushFrames(3)
-      const after = parseFloat(spans[1].style.backgroundPositionX)
-      expect(after).toBeGreaterThan(before)
-      // 且仍在推进区间内（没有跳满）
-      expect(after).toBeLessThanOrEqual(100)
+      expect(isBrightFill(spans[1])).toBe(true)
     } finally {
       vi.useRealTimers()
     }

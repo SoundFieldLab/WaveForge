@@ -122,27 +122,50 @@ const ActiveLyricLine = memo(function ActiveLyricLine({
       const snap = playbackTimeStore.getSnapshot()
       // 小幅回退（<0.5s，时钟漂移）直接忽略；真 seek 立即对齐（客户端同款保护）
       if (snap.currentTime < baseSeconds && baseSeconds - snap.currentTime < 0.5) return
+      if (snap.currentTime < baseSeconds) resetSettled()
       baseSeconds = snap.currentTime
       baseAt = performance.now()
       playing = snap.isPlaying
+      resetSettled()
       paint()
     })
+    // 性能：backgroundImage 不可 GPU 合成，每帧全量重写会逼浏览器整行重绘。
+    // 只在字的演唱比例处于开区间 (0,1) 时逐帧更新；唱满/未唱的字写一次终值后跳过
+    // （settled 记录该字是否已到达终态，seek 回退时重置）。
+    const BRIGHT_FILL = `linear-gradient(90deg, ${bright}, ${bright})`
+    const DIM_FILL = `linear-gradient(90deg, ${dim}, ${dim})`
+    const settled = new Array<boolean>(timeline.length).fill(false)
+    const applyFill = (index: number, ratio: number) => {
+      const span = spans[index]
+      if (!span) return
+      let next: string
+      if (ratio >= 1) next = BRIGHT_FILL
+      else if (ratio <= 0) next = DIM_FILL
+      else {
+        // 逐字柔边（对齐播放页 LyricsDisplay 的 getFillOverlayStyle 手感）：
+        // 唱到的比例向两侧羽化——正在唱的字"中心亮、边缘柔"。FEATHER 是羽化半宽。
+        const FEATHER = 0.35
+        const from = Math.min(100, Math.max(0, (ratio - FEATHER) / (1 - 2 * FEATHER) * 100))
+        const to = Math.min(100, Math.max(0, (ratio + FEATHER) / (1 - 2 * FEATHER) * 100))
+        next = `linear-gradient(90deg, ${bright} ${from.toFixed(2)}%, ${dim} ${to.toFixed(2)}%)`
+      }
+      if (span.style.backgroundImage !== next) span.style.backgroundImage = next
+    }
     const paint = () => {
       const elapsed = playing ? (performance.now() - baseAt) / 1000 : 0
       const nowSeconds = baseSeconds + elapsed
       const localMs = nowSeconds * 1000 - lineStartMs
       for (let i = 0; i < timeline.length; i += 1) {
-        const span = spans[i]
-        if (!span) continue
+        if (settled[i]) continue
         const char = timeline[i]
         const ratio = char.durationMs > 0
           ? Math.min(1, Math.max(0, (localMs - char.startMs) / char.durationMs))
           : (localMs >= char.startMs ? 1 : 0)
-        // 0% → 渐变前半（dim），100% → 后半（bright）
-        const next = `${(ratio * 100).toFixed(2)}%`
-        if (span.style.backgroundPositionX !== next) span.style.backgroundPositionX = next
+        applyFill(i, ratio)
+        if (ratio >= 1 || ratio <= 0) settled[i] = true
       }
     }
+    const resetSettled = () => { settled.fill(false) }
     const tick = () => {
       paint()
       rafId = requestAnimationFrame(tick)
@@ -167,9 +190,11 @@ const ActiveLyricLine = memo(function ActiveLyricLine({
           data-ci={i}
           style={{
             color: 'transparent',
-            backgroundImage: `linear-gradient(to right, ${dim} 50%, ${bright} 50%)`,
-            backgroundSize: '200% 100%',
-            backgroundPositionX: plainRatio != null ? `${plainRatio}%` : '0%',
+            // 初值=未唱（纯 dim）；paint() 每帧覆盖为柔边双色渐变。
+            // 无逐字时间轴的 LRC 行由 plainRatio 直接定死为已唱亮色。
+            backgroundImage: plainRatio != null
+              ? `linear-gradient(90deg, ${bright}, ${bright})`
+              : `linear-gradient(90deg, ${dim}, ${dim})`,
             WebkitBackgroundClip: 'text',
             backgroundClip: 'text',
           }}
@@ -353,14 +378,51 @@ function SodaPcPlayerFeed({
 
   const effectiveStats = stats !== undefined ? stats : fetchedStats
 
-  // 整页底色：客户端取专辑主色做整屏渐变（这里用主色 + 深色基底，深浅色主题都能压住白字）
+  // 整页底色：客户端取专辑主色做整屏渐变。专辑主色常接近黑（黑白封面、夜景封面），
+  // 直接 color-mix 会整屏死黑——先把主色亮度提到最低 22%（保留色相），再叠加：
+  //   ① 主色径向光晕（左上，画面"有背景"的主体） ② 150° 纵深渐变 ③ 右下暗角。
+  const glowColor = useMemo(() => {
+    const base = dominantColor || accent
+    if (!dark) return base
+    const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(base)
+    if (!m) return base
+    let [r, g, b] = [Number(m[1]) / 255, Number(m[2]) / 255, Number(m[3]) / 255]
+    const max = Math.max(r, g, b), min = Math.min(r, g, b)
+    let h = 0
+    const l = (max + min) / 2
+    const d = max - min
+    const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1))
+    if (d !== 0) {
+      if (max === r) h = ((g - b) / d) % 6
+      else if (max === g) h = (b - r) / d + 2
+      else h = (r - g) / d + 4
+      h /= 6
+    }
+    // 亮度钳到 0.22..0.4、饱和至少 0.35：暗色封面也能衬出主题色的"光"
+    const l2 = Math.min(0.4, Math.max(0.22, l))
+    const s2 = Math.max(0.35, s)
+    const c = (1 - Math.abs(2 * l2 - 1)) * s2
+    const hp = h * 6
+    const x = c * (1 - Math.abs((hp % 2) - 1))
+    const m2 = l2 - c / 2
+    const seg = Math.floor(hp) % 6
+    const rgb: Array<[number, number, number]> = [
+      [c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x],
+    ]
+    const [r2, g2, b2] = rgb[seg]!
+    return `rgb(${Math.round((r2 + m2) * 255)}, ${Math.round((g2 + m2) * 255)}, ${Math.round((b2 + m2) * 255)})`
+  }, [dominantColor, accent, dark])
   const pageBackground = useMemo(() => {
     const base = dominantColor || accent
     if (dark) {
-      return `linear-gradient(150deg, color-mix(in srgb, ${base} 42%, #0b1220) 0%, color-mix(in srgb, ${base} 18%, #070b14) 46%, #05070d 100%)`
+      return [
+        `radial-gradient(1100px 620px at 18% 8%, ${glowColor}55 0%, transparent 62%)`,
+        `radial-gradient(900px 520px at 86% 96%, ${glowColor}22 0%, transparent 60%)`,
+        `linear-gradient(150deg, color-mix(in srgb, ${glowColor} 26%, #0b1220) 0%, color-mix(in srgb, ${base} 14%, #070b14) 46%, #05070d 100%)`,
+      ].join(', ')
     }
     return `linear-gradient(150deg, color-mix(in srgb, ${base} 30%, #f8fafc) 0%, color-mix(in srgb, ${base} 14%, #ffffff) 50%, #ffffff 100%)`
-  }, [dominantColor, accent, dark])
+  }, [dominantColor, accent, dark, glowColor])
 
   const subtle = dark ? 'rgba(255,255,255,.6)' : 'rgba(15,23,42,.6)'
   const faint = dark ? 'rgba(255,255,255,.7)' : 'rgba(15,23,42,.7)'
@@ -400,12 +462,19 @@ function SodaPcPlayerFeed({
         // 两列行必须自身撑满页面高度（父级是 flex，h-full 生效）：歌词列的
         // self-stretch 与内部 overflow 滚动都参照这里的高度——曾因缺 h-full
         // 被内容撑开，歌词容器 scrollHeight==clientHeight，自动滚动完全失效。
-        <div className="flex h-full min-h-0 w-full items-center justify-center" style={{ padding: '0 50px', gap: 50 }}>
-          {/* 左列：封面 + 歌名/演唱者 + 关注 + 喜欢/评论 */}
-          <div className="flex shrink-0 flex-col items-start" style={{ width: 'min(40vh, 30vw)', maxWidth: '40vh' }}>
+        <div className="flex h-full min-h-0 w-full items-center justify-center" style={{ padding: '0 64px', gap: 72 }}>
+          {/* 左列：封面 + 歌名/演唱者 + 关注 + 喜欢/评论。入场：从下方 18px 淡入上浮 480ms */}
+          <div
+            className="flex shrink-0 flex-col items-start"
+            style={{
+              width: 'min(44vh, 32vw)',
+              maxWidth: '44vh',
+              animation: 'sodaFeedEnter 480ms cubic-bezier(0.22, 1, 0.36, 1) both',
+            }}
+          >
             <div
               className="relative w-full overflow-hidden"
-              style={{ aspectRatio: '1 / 1', borderRadius: 8, boxShadow: dark ? '0 32px 64px rgba(0,0,0,.45)' : '0 32px 64px rgba(0,0,0,.1)' }}
+              style={{ aspectRatio: '1 / 1', borderRadius: 12, boxShadow: dark ? '0 36px 80px rgba(0,0,0,.55), 0 12px 28px rgba(0,0,0,.35)' : '0 32px 64px rgba(0,0,0,.1)' }}
             >
               {cover ? (
                 <img
@@ -512,14 +581,30 @@ function SodaPcPlayerFeed({
             </div>
           </div>
 
-          {/* 右列：歌词（客户端 LyricsView 的落位） */}
-          <div className="relative min-w-[300px] max-w-[500px] flex-1 self-stretch" style={{ width: '30vw' }}>
+          {/* 右列：歌词（客户端 LyricsView 的落位）。入场：延迟 80ms 从右侧轻移淡入，与封面错峰 */}
+          <div
+            className="relative min-w-[300px] max-w-[560px] flex-1 self-stretch"
+            style={{
+              width: '32vw',
+              maxWidth: 560,
+              animation: 'sodaFeedEnter 520ms cubic-bezier(0.22, 1, 0.36, 1) 80ms both',
+            }}
+          >
             <SodaPcLyricsPane playbackTimeStore={playbackTimeStore} lyrics={lyrics} accent={accent} tone={tone} onSeek={onSeek} />
           </div>
         </div>
       )}
     </div>
   )
+}
+
+// 入场动画（封面/歌词列共用）：淡入 + 12~18px 位移，cubic-bezier 回弹收尾。
+// 挂在全局 <style> 里会随组件重复注入，这里只输出一次 keyframes 由两个元素引用。
+if (typeof document !== 'undefined' && !document.getElementById('soda-feed-enter-kf')) {
+  const style = document.createElement('style')
+  style.id = 'soda-feed-enter-kf'
+  style.textContent = `@keyframes sodaFeedEnter { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: translateY(0); } }`
+  document.head.appendChild(style)
 }
 
 export default memo(SodaPcPlayerFeed)
