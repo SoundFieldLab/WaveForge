@@ -28,18 +28,22 @@
 ## 三、如何操作（改完代码后推送）
 
 ```bash
-# 一键：构建 android 前端 + 推送到设备（推荐）
-node scripts/push-hot-update.mjs 192.168.88.125 --token=<调试令牌> --rebuild
+# USB 直推（手机/平板/Fold 推荐，免 IP 免令牌）：设备开发者模式开启后一条命令
+node scripts/push-hot-update.mjs --adb --rebuild
+
+# 局域网无线推送（需配对令牌：设备 设置→外观→开发者模式 打开后页面显示）
+node scripts/push-hot-update.mjs <设备IP> --token=<配对令牌> --rebuild
 
 # 只推送（不重新构建，用现有 dist）
-node scripts/push-hot-update.mjs 192.168.88.125 --token=<调试令牌>
+node scripts/push-hot-update.mjs --adb
 ```
 
 推送脚本读取 `android/app/src/main/assets/nodejs-project/dist/`（vite android 构建产物），
 把全部文件 base64 打包上传 → 设备替换 → 页面自动刷新，改动即刻生效。
 
-**前提**：设备已在设置中开启开发者模式（默认关）、设备与电脑同一局域网、能访问 `:3008`、
-持有配对令牌（设备后端日志 / 调试台 URL 中可见）。
+**前提**：设备已开启开发者模式。开关位置——手机/平板：**设置 → 外观 → 开发者模式**
+（开启后同页显示配对令牌供局域网直推）；TV：设置面板。`--adb` 模式自动 `adb forward
+tcp:13008 → 设备 3008`，后端对回环来源豁免配对令牌（能 adb 即设备主人）；局域网来源仍须令牌。
 
 ## 四、边界与注意
 
@@ -51,7 +55,9 @@ node scripts/push-hot-update.mjs 192.168.88.125 --token=<调试令牌>
 
 ## 五、给其他 AI 的协作约定
 
-1. 判断是否 TV/平板/手机端：`html.tv-mode` 类 / `isTvModeActive()`（浏览器 `?tv=1` 可模拟）。
+1. 判断是否 TV/平板/手机端：`html.tv-mode` 类 / `isTvModeActive()`（浏览器 `?tv=1` 可模拟）；
+   触摸移动端看 `html.mobile-mode` / `isMobileModeActive()`（浏览器 `?ui=phone|tablet` 模拟，
+   `data-form` 为 phone/tablet；Fold 真机开合运行时自动切换，无需重载）。
 2. **开发迭代**：改完 TV/平板/手机相关前端代码，用
    `node scripts/push-hot-update.mjs <设备IP> --rebuild` 推送到真机/模拟器快速验证。
 3. **正式发布**：功能随大版本走，通过"设置 → 检查更新"发布，不要因为热更新改变发布流程。

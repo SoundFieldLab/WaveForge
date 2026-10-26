@@ -15,7 +15,7 @@ npm run build            # vite build -> dist/ (multi-entry: every *.html in rep
 npm run build:electron   # build + electron-builder NSIS -> release/
 npm run build:full       # bundle-python + build:electron (完整发布流水线)
 npm run build:electron:dir  # build + electron-builder --win dir (未打包目录, 便于调试)
-npm run build:android    # 生成 Android TV 前端资产 (scripts/build-android-assets.mjs)
+npm run build:android    # 生成安卓前端资产（scripts/build-android-assets.mjs；--full 连核心层。安卓 APK 已内嵌 Python：构建机 PATH 需 Python 3.13（Chaquopy））
 npm run fetch:nodejs-mobile  # 拉取 nodejs-mobile 运行时（Android 用）
 npm run publish:release  # 一键发布脚本 (scripts/publish-release.mjs)
 npm run bundle-python    # Rebuild embedded Python runtime (3.13.15) -> resources/python-embed/
@@ -89,7 +89,7 @@ WaveForge 共 **4 个界面模式**（简约 minimal / 传统 traditional / 探�
 - `desktop/` — Electron main process, **CommonJS** (`main.cjs`, `preload.cjs`, `config-manager.cjs`, `device-license.cjs`). Not covered by `tsc --noEmit`.
 - `src/desktop-lyrics/` + `src/desktop-player/` — standalone renderer entries for `desktop-lyrics.html` / `desktop-player.html`.
 - `local-server.mjs` — single-file Express backend (~10k lines, port 3001). Extra route modules in `server/` are registered here. QQ cookie state must flow through the single `qqMusicCookie` source of truth. **cookie 单事实源规则**：全局 `qqMusicCookie` 只在显式登录/设置接口（`/api/qq/cookie`、`/api/qq/user/setCookie`）更新；播放/读取路由一律用 `resolveRequestCookie(cookie)`（请求 cookie 仅本次使用，绝不回写全局），写操作按请求级 cookie 传递——并发播放/写操作不得互相冲掉登录态。
-- `android/` + `src/tv/` — **Android TV 平台**（Gradle 工程 + TV 键盘/媒体键桥 `src/tv/tvCore.ts`、`mediaKeyBridge.ts`、`TvKeyboard.tsx`），前端资产经 `npm run build:android`（`scripts/build-android-assets.mjs`，`vite.android.config.ts`）。桌面端改动注意保持跨平台兼容（`src/platform.ts`、`src/electronShim.ts`）。
+- `android/` + `src/tv/` + `src/mobile/` — **Android 三形态平台**（Gradle 工程 + TV 键盘/媒体键桥 `src/tv/tvCore.ts`、`mediaKeyBridge.ts`、`TvKeyboard.tsx` + 手机/平板触摸 UI `src/mobile/MobileApp.tsx`，构建脚本 `build:android`）。单一 APK 通用：TV（UA 标记或 `WaveForgeNative.getUiMode()`）走 tv-mode 遥控器 UI；手机/平板（触摸设备按视口 ≥600dp 分流，Fold 展开=平板/折叠=手机、resize 运行时换壳）走 `html.mobile-mode` → MobileApp 触摸 UI（`PlatformRoot.tsx` 顶层分流，与桌面/TV 树完全隔离；PC 模拟 `?ui=phone|tablet`）。桌面端改动注意保持跨平台兼容（`src/platform.ts`、`src/electronShim.ts`）。
 - `src/components/Apple*` — **Apple 歌词/探索分支**：`AppleCoverFx.tsx`（Apple 逐字歌词特效）、`AppleExploreView.tsx`、`AppleLoginPanel.tsx`；配套服务 `src/services/appleAuth.ts` / `appleCatalog.ts` / `appleMusic.ts`。与桌面歌词模式（LyricsDisplay 内 `apple` 模式）严格隔离，改桌面端勿破坏。
 - `src/features/traditionalPc/` — **传统模式「官方 PC 客户端复刻」**（QQ 音乐 / 网易云两个平台）。传统模式的三栏里，**左栏与中栏按官方 PC 客户端 1:1 复刻，右栏保持 WaveForge 自有样式**；其余平台（Apple/Spotify/酷狗/汽水）仍走通用左栏与通用页面。分层：
   - `pcKit.tsx` — 客户端风基件（`pcTheme(tone)` 主题 token、`PcCover`/`PcCountBadge`、`PcSectionTitle`/`PcTabs`/`PcChips`/`PcPrimaryButton`/`PcGhostButton`、`PcSongTable`、`PcCardGrid`、`PcDetailHeader`、`PcEmpty`/`PcNoticeBar`、`pcCount`/`pcDuration`/`pcDateTime`/`pcSongKey`）。两平台页面同构部分一律走这里，避免两套表格样式漂移。**`pcDuration` 入参是毫秒**（全项目 `Song.duration` 均为毫秒，函数内对 <10000 的值兼容当秒）。
