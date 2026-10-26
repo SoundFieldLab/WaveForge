@@ -10,6 +10,7 @@ import {
     type CladdaghTuning,
     type DioramaTuning,
     type FumeTuning,
+    type HanabiTuning,
     type Line,
     type LumiereTuning,
     type MonetPortraitImage,
@@ -28,7 +29,7 @@ import type { VisualizerBackgroundConfig } from './backgrounds/definition';
 
 // src/components/visualizer/definition.ts
 // Shared contracts for discoverable visualizer modes.
-export type VisualizerTuningKind = 'none' | 'classic' | 'cadenza' | 'partita' | 'fume' | 'claddagh' | 'cappella' | 'tilt' | 'monet' | 'diorama' | 'pendolo' | 'sonnet' | 'tempera' | 'lumiere';
+export type VisualizerTuningKind = 'none' | 'classic' | 'cadenza' | 'partita' | 'fume' | 'claddagh' | 'cappella' | 'tilt' | 'monet' | 'diorama' | 'pendolo' | 'sonnet' | 'tempera' | 'lumiere' | 'hanabi';
 
 export interface VisualizerSharedProps {
     currentTime: MotionValue<number>;
@@ -99,6 +100,9 @@ export interface VisualizerSharedProps {
     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
     lumiereTuning?: LumiereTuning;
     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
+    /** 花火（上游 v0.7.22）：tuning 由同目录 tuning.ts 适配器注入。 */
+    hanabiTuning?: HanabiTuning;
+    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
 }
 
 export interface VisualizerSettingsPanelProps {
@@ -146,6 +150,8 @@ export interface VisualizerSettingsPanelProps {
     onTemperaTuningChange?: (patch: Partial<TemperaTuning>) => void;
     lumiereTuning?: LumiereTuning;
     onLumiereTuningChange?: (patch: Partial<LumiereTuning>) => void;
+    hanabiTuning?: HanabiTuning;
+    onHanabiTuningChange?: (patch: Partial<HanabiTuning>) => void;
     /** Mark slider drag start so onChange only updates draft. */
     onSliderPointerDown?: () => void;
     /** Commit draft values to persistent store on slider release. */

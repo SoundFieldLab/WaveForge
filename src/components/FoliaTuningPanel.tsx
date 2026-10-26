@@ -21,6 +21,15 @@ import {
   type SmartBeatSettings,
 } from '../vendor/folia/components/visualizer/smartBeatSettings'
 import { SMART_BEAT_EFFECT_IDS } from '../vendor/folia/components/visualizer/sonnet/smartBeat'
+import { BEAT_EFFECT_IDS as FOLIA_BEAT_EFFECT_IDS } from '../vendor/folia/services/beatFx/beatEffects'
+
+/** 花火的两个智能动感效果：id 与面板显示名（上游 options.beatEffect_hanabiBeat*）。 */
+const HANABI_BEAT_BURSTS_ID = FOLIA_BEAT_EFFECT_IDS.hanabiBeatBursts
+const HANABI_BEAT_PULSE_ID = FOLIA_BEAT_EFFECT_IDS.hanabiBeatPulse
+const HANABI_BEAT_EFFECT_LABELS: Record<string, string> = {
+  [HANABI_BEAT_BURSTS_ID]: '随拍开花',
+  [HANABI_BEAT_PULSE_ID]: '随拍推镜',
+}
 
 export interface FoliaTuningPanelProps {
   /** 当前 folia 模式 id */
@@ -98,7 +107,7 @@ export function FoliaTuningPanel({
           {t('options.lumiereFontSizeAutoNotice')}
         </p>
       )}
-      {(mode === 'sonnet' || mode === 'diorama' || mode === 'pendolo') && (
+      {(mode === 'sonnet' || mode === 'diorama' || mode === 'pendolo' || mode === 'hanabi') && (
         // 智能动感模式（Smart Beat，folia 0.7.21）：节拍驱动的镜头推近/裂光/粒子涟漪。
         // 总开关 + 各效果开关与强度；设置存 localStorage 并经事件通知挂载中的 runtime。
         <SmartBeatSection playerTheme={playerTheme} accentColor={accentColor} mode={mode} />
@@ -124,6 +133,7 @@ export default FoliaTuningPanel
 // 各效果独立开关与强度。存储与事件经 smartBeatSettings.ts；效果 id 与文案随模式。
 
 const SMART_BEAT_EFFECT_LABELS: Record<string, string> = {
+  ...HANABI_BEAT_EFFECT_LABELS,
   'sonnet.beatZoom': '每拍镜头推近',
   'sonnet.downbeatZoom': '重拍额外推近',
   'sonnet.beatRotation': '每拍旋转',
@@ -168,9 +178,12 @@ function SmartBeatSection({ playerTheme, accentColor, mode }: SmartBeatSectionPr
     persist({ ...settings, effects: { ...settings.effects, [id]: { ...current, strength } } })
   }
 
-  // 本模式的效果清单：sonnet 全集；diorama/pendolo 的效果在各自 runtime 接线时加入
-  const effectIds: string[] = (Object.values(SMART_BEAT_EFFECT_IDS) as string[])
-    .filter(id => mode !== 'sonnet' || !/^(diorama|pendolo)\./.test(id))
+  // 本模式的效果清单：sonnet 全集；diorama/pendolo 的效果在各自 runtime 接线时加入；
+  // 花火用自己的两个效果（随拍开花/随拍推镜，离线节拍表驱动）。
+  const effectIds: string[] = mode === 'hanabi'
+    ? [HANABI_BEAT_BURSTS_ID, HANABI_BEAT_PULSE_ID]
+    : (Object.values(SMART_BEAT_EFFECT_IDS) as string[])
+      .filter(id => mode !== 'sonnet' || !/^(diorama|pendolo)\./.test(id))
 
   const card = playerTheme === 'dark' ? 'bg-white/[0.05] border-white/10' : 'bg-black/[0.03] border-black/10'
   const textMain = playerTheme === 'dark' ? 'text-white/85' : 'text-black/80'

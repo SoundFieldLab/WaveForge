@@ -18,10 +18,16 @@ import VisualizerRenderer from '../vendor/folia/components/visualizer/Visualizer
 import { hasVisualizerMode, DEFAULT_VISUALIZER_MODE } from '../vendor/folia/components/visualizer/registry'
 import { SMART_BEAT_SETTINGS_EVENT, readSmartBeatSettings } from '../vendor/folia/components/visualizer/smartBeatSettings'
 import { SMART_BEAT_EFFECT_IDS } from '../vendor/folia/components/visualizer/sonnet/smartBeat'
-import { DEFAULT_TEMPERA_TUNING, DEFAULT_SONNET_TUNING, type Line, type LyricAlternateText as FoliaAlternateText, type LyricBackgroundVocal as FoliaBackgroundVocal, type Theme, type Word, type VisualizerMode } from '../vendor/folia/types'
+import { DEFAULT_TEMPERA_TUNING,
+  DEFAULT_HANABI_TUNING, DEFAULT_SONNET_TUNING, type Line, type LyricAlternateText as FoliaAlternateText, type LyricBackgroundVocal as FoliaBackgroundVocal, type Theme, type Word, type VisualizerMode } from '../vendor/folia/types'
 import type { VisualizerBackgroundConfig } from '../vendor/folia/components/visualizer/backgrounds/definition'
 import type { VisualizerTuningBundle } from '../vendor/folia/components/visualizer/tuningRegistry'
 import { usePerfMode } from '../tv/perfMode'
+import {
+  createFoliaBeatFxFeed,
+  type BeatFxTrackInput,
+} from '../services/foliaBeatFxFeed'
+import { BEAT_EFFECT_IDS, type BeatEffectDef } from '../vendor/folia/services/beatFx/beatEffects'
 import { buildWordSegments, resolveLumiereRenderQuality, resolveLumiereTuning } from './foliaLumiereSupport'
 
 ensureFoliaI18n()
@@ -64,6 +70,8 @@ export interface FoliaLyricsPageProps {
   userTunings?: VisualizerTuningBundle
   /** 模式退出动画期间为 false：保留静态视觉帧，但停止时钟与频谱订阅。 */
   active?: boolean
+  /** 智能动感（花火 beatFx）的节拍表数据源：当前曲目键 + 音频地址 + 时长。 */
+  beatFxTrack?: BeatFxTrackInput
 }
 
 /** LyricLine[]（行秒 + 逐字毫秒）→ folia Line[]（全秒制），完整保留字幕、对唱和背景和声。 */
@@ -159,6 +167,7 @@ export function FoliaLyricsPage({
   mvBackgroundActive,
   userTunings,
   active = true,
+  beatFxTrack,
 }: FoliaLyricsPageProps) {
   const mode: VisualizerMode = hasVisualizerMode(foliaStyle) ? foliaStyle : DEFAULT_VISUALIZER_MODE
   const perfMode = usePerfMode()
@@ -201,6 +210,50 @@ export function FoliaLyricsPage({
     }
   }, [analyzerStore])
   const smartBeatToggles = useMemo(() => smartBeatSettings.effects, [smartBeatSettings])
+
+  // ── 智能动感·节拍表数据源（花火 beatFx）──
+  // 与 sonnet 的实时 onset 路径不同：花火的「随拍开花」要按整张节拍表提前起飞，
+  // 这里用 autoMixAnalysisService 的离线分析（与自动混音共用缓存）装表，
+  // 活跃期间一个 rAF 从 playbackTimeStore 快照步进全局节拍时钟。
+  const beatFxFeedRef = useRef<ReturnType<typeof createFoliaBeatFxFeed> | null>(null)
+  const beatFxEffects = useMemo<BeatEffectDef[]>(() => ([
+    {
+      id: BEAT_EFFECT_IDS.hanabiBeatBursts,
+      label: '随拍开花',
+      description: '每拍在夜空开一朵小烟花，小节第一拍提前升空、正好在拍上开大的。',
+      source: 'beats',
+    },
+    {
+      id: BEAT_EFFECT_IDS.hanabiBeatPulse,
+      label: '随拍推镜',
+      description: '整个画面每拍推近一下、轻轻一摆，小节第一拍推得更深。',
+      source: 'beats',
+    },
+  ]), [])
+  useEffect(() => {
+    if (!beatFxFeedRef.current) beatFxFeedRef.current = createFoliaBeatFxFeed()
+    const feed = beatFxFeedRef.current
+    if (!active) {
+      feed.dispose()
+      return
+    }
+    feed.syncTrack(beatFxTrack ?? null, smartBeatSettings, beatFxEffects)
+  }, [active, beatFxTrack, smartBeatSettings, beatFxEffects])
+  useEffect(() => {
+    if (!active) return
+    let raf = 0
+    let last = 0
+    const tick = (now: number) => {
+      const dtHeard = last === 0 ? null : (now - last) / 1000
+      last = now
+      const snapshot = playbackTimeStore.getSnapshot()
+      beatFxFeedRef.current?.tick(snapshot.isPlaying ? snapshot.currentTime : null)
+      void dtHeard
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [active, playbackTimeStore])
 
   // ── 播放时间 → MotionValue（rAF 外推）──
   // 60fps 门控：claddagh/tilt 等样式订阅 currentTime.on('change') 对整行字符逐个写样式，
@@ -339,6 +392,18 @@ export function FoliaLyricsPage({
       renderQuality: resolveLumiereRenderQuality(perfMode),
       userTuning: userTunings?.lumiere,
     }),
+    // 花火的夜空同 lumiere 的 darkField：MV 背景激活（或关掉 folia 背景）时 shell 背景
+    // 层已透明露出 MV/封面，不透明的夜空会把它整个盖住。把用户设置的 sky 压到 0.3 的
+    // 残影（烟花文字仍有底色衬托，MV 隐约透出），用户显式调 0 时仍为 0。
+    ...(mvBackgroundActive || !foliaBackgroundEnabled
+      ? {
+          hanabi: {
+            ...DEFAULT_HANABI_TUNING,
+            ...userTunings?.hanabi,
+            sky: Math.min(userTunings?.hanabi?.sky ?? DEFAULT_HANABI_TUNING.sky, 0.3),
+          },
+        }
+      : {}),
   }), [mvBackgroundActive, foliaBackgroundEnabled, perfMode, userTunings])
 
   const [rendererReady, setRendererReady] = useState(false)

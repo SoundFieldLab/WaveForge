@@ -1375,3 +1375,12 @@ export interface AudioBands {
     treble: MotionValue<number>;  // 3500Hz+ (Crosses)
     spectrum?: MotionValue<Uint8Array<ArrayBuffer>>; // Raw analyser FFT magnitude bins for full-spectrum visualizers
   }
+
+// ── 花火（hanabi，上游 v0.7.22）：类型收敛到本文件，与其余模式同径。──
+// 完整的镜头/烟花/文字部件类型仍在 components/visualizer/hanabi/types.ts；
+// 这里只引 tuning 相关的（tuningRegistry / 面板 / foliaTunings 消费）。
+export type {
+  HanabiTuning,
+  HanabiRenderQuality,
+} from './components/visualizer/hanabi/types';
+export { DEFAULT_HANABI_TUNING } from './components/visualizer/hanabi/types';

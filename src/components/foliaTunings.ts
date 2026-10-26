@@ -26,6 +26,7 @@ import {
     DEFAULT_TILT_TUNING,
     type Theme,
 } from '../vendor/folia/types'
+import { DEFAULT_HANABI_TUNING } from '../vendor/folia/types'
 
 export const FOLIA_TUNINGS_KEY = 'waveforge_folia_tunings'
 
@@ -93,6 +94,7 @@ export const FOLIA_MODE_DEFAULT_TUNINGS: Record<string, Record<string, unknown>>
   sonnet: { ...DEFAULT_SONNET_TUNING },
   tempera: { ...DEFAULT_TEMPERA_TUNING },
   lumiere: { ...DEFAULT_LUMIERE_TUNING },
+  hanabi: { ...DEFAULT_HANABI_TUNING },
 }
 
 /**

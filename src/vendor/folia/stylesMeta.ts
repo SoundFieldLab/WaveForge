@@ -27,4 +27,6 @@ export const FOLIA_STYLES: FoliaStyleMeta[] = [
   // 上游 v0.7.11 新增（order 25 / 130）。默认排在尾部，用户可在「显示 / 隐藏歌词模式」里拖动调序。
   { id: 'lumiere', zhName: '绘光', gradient: 'linear-gradient(135deg, #14100a 0%, #c8a05a 45%, #6b4e1f 75%, #0a0806 100%)' },
   { id: 'still', zhName: '静止', gradient: 'linear-gradient(135deg, #1a1c22 0%, #4a4f5a 55%, #101216 100%)' },
+  // 上游 v0.7.22 新增（order 26）：花火——日式歌词 PV，色块字 + 烟花 MG + 世界上升旋转。
+  { id: 'hanabi', zhName: '花火', gradient: 'linear-gradient(135deg, #0a0f24 0%, #2a3f8f 40%, #e2585f 70%, #f7b267 100%)' },
 ]

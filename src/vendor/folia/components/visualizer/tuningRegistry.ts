@@ -5,6 +5,7 @@ import type {
     CladdaghTuning,
     DioramaTuning,
     FumeTuning,
+    HanabiTuning,
     LumiereTuning,
     MonetTuning,
     PartitaTuning,
@@ -32,7 +33,16 @@ export interface VisualizerTuningMap {
     sonnet: SonnetTuning;
     tempera: TemperaTuning;
     lumiere: LumiereTuning;
+    /** 花火（上游 v0.7.22）：类型从 hanabi/types 收敛到 folia types（与其余模式同径）。 */
+    hanabi: HanabiTuning;
 }
+
+/** 滑块拖动/存档/导入共用的数值钳制（上游 tuningDefinition.numberWithin）。 */
+export const numberWithin = (value: unknown, fallback: number, min: number, max: number) => (
+    typeof value === 'number' && Number.isFinite(value)
+        ? Math.min(max, Math.max(min, value))
+        : fallback
+);
 
 export type VisualizerTuningMode = keyof VisualizerTuningMap;
 export type VisualizerTuningBundle = Partial<VisualizerTuningMap>;

@@ -45,3 +45,28 @@ export const resolveLucideIconNames = (names: readonly string[] | undefined): st
         .map(name => (typeof name === 'string' ? iconNamesByLowercase().get(name.toLowerCase()) : undefined))
         .filter(Boolean)),
 ] as string[];
+
+// ── WaveForge 补齐（对齐上游 services/lucideIconResolver 的异步接口，供花火 collage 使用）──
+// 上游 lucide 是懒加载分包（loadLucideIcons 拉名字表 + chunk）；WaveForge 静态导入整个
+// lucide-react，"加载"恒为已完成——保留 async 签名，调用方代码与上游一致。
+export const loadLucideIcons = async (_names: readonly unknown[] | undefined): Promise<void> => {
+  void _names
+}
+
+/**
+ * 图标的 SVG 节点数据（lucide 的 IconNode: [tag, attrs, children?][]）。
+ * 取 lucide-react 图标组件里的 IconNode：组件是 forwardRef，它的 render 只是
+ * createElement(Icon, { iconNode, ... })，不跑 hooks，直接调用即可拿到节点数据，
+ * 不必渲染 SVG 再解析。花火的图标贴纸用它把图标画进 canvas/Pixi 纹理。
+ */
+export const resolveLucideIconNode = (name: string | null | undefined): import('lucide-react').IconNode | null => {
+  const icon = resolveLucideIcon(name) as unknown as { render?: (props: object, ref: null) => unknown } | null;
+  if (!icon || typeof icon.render !== 'function') return null;
+  try {
+    const element = icon.render({}, null) as { props?: { iconNode?: unknown; icon?: { node?: unknown } } } | null;
+    const node = element?.props?.iconNode ?? element?.props?.icon?.node;
+    return Array.isArray(node) ? node : null;
+  } catch {
+    return null;
+  }
+};
