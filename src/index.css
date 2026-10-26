@@ -1511,35 +1511,46 @@ input, textarea, [contenteditable="true"] {
 :root[data-wf-theme='light'] .explore-view-root .bg-\[\#080b11\]\/98 { background-color: rgba(244, 243, 239, 0.98); }
 :root[data-wf-theme='light'] .explore-view-root .bg-\[\#090d14\]\/72 { background-color: rgba(248, 247, 243, 0.82); }
 
-/* 文字：白 → 黑（同 alpha） */
-:root[data-wf-theme='light'] .explore-view-root .text-white { color: rgba(0, 0, 0, 0.85); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/86 { color: rgba(0, 0, 0, 0.84); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/84 { color: rgba(0, 0, 0, 0.82); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/82 { color: rgba(0, 0, 0, 0.8); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/80 { color: rgba(0, 0, 0, 0.78); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/75 { color: rgba(0, 0, 0, 0.72); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/72 { color: rgba(0, 0, 0, 0.7); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/70 { color: rgba(0, 0, 0, 0.68); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/68 { color: rgba(0, 0, 0, 0.66); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/66 { color: rgba(0, 0, 0, 0.64); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/65 { color: rgba(0, 0, 0, 0.63); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/60 { color: rgba(0, 0, 0, 0.58); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/58 { color: rgba(0, 0, 0, 0.56); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/55 { color: rgba(0, 0, 0, 0.54); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/52 { color: rgba(0, 0, 0, 0.52); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/50 { color: rgba(0, 0, 0, 0.5); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/48 { color: rgba(0, 0, 0, 0.48); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/45 { color: rgba(0, 0, 0, 0.45); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/44 { color: rgba(0, 0, 0, 0.44); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/42 { color: rgba(0, 0, 0, 0.42); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/40 { color: rgba(0, 0, 0, 0.4); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/38 { color: rgba(0, 0, 0, 0.4); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/36 { color: rgba(0, 0, 0, 0.38); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/35 { color: rgba(0, 0, 0, 0.37); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/30 { color: rgba(0, 0, 0, 0.32); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/28 { color: rgba(0, 0, 0, 0.3); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/25 { color: rgba(0, 0, 0, 0.3); }
-:root[data-wf-theme='light'] .explore-view-root .text-white\/24 { color: rgba(0, 0, 0, 0.28); }
+/* 文字：白 → 黑。注意两点：
+   1) 根容器自带 text-white（继承源头），后代选择器匹配不到它自己——必须用
+      .explore-view-root.text-white 单独翻色，否则 h2/h3/卡片标题等无显式颜色类的
+      文字会继承纯白，在浅底上不可读；
+   2) 不做「同 alpha」直译：同样的 alpha 在浅底上的感知对比远弱于深底
+      （0.35 黑字在 #f2f1ec 上 ≈ 洗白），低档位统一抬到可读下限之上，层级顺序保留。 */
+:root[data-wf-theme='light'] .explore-view-root.text-white { color: rgba(0, 0, 0, 0.88); }
+:root[data-wf-theme='light'] .explore-view-root .text-white { color: rgba(0, 0, 0, 0.88); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/92 { color: rgba(0, 0, 0, 0.88); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/90 { color: rgba(0, 0, 0, 0.87); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/88 { color: rgba(0, 0, 0, 0.86); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/86 { color: rgba(0, 0, 0, 0.85); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/85 { color: rgba(0, 0, 0, 0.84); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/84 { color: rgba(0, 0, 0, 0.83); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/82 { color: rgba(0, 0, 0, 0.82); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/80 { color: rgba(0, 0, 0, 0.8); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/75 { color: rgba(0, 0, 0, 0.78); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/72 { color: rgba(0, 0, 0, 0.76); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/70 { color: rgba(0, 0, 0, 0.74); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/68 { color: rgba(0, 0, 0, 0.72); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/66 { color: rgba(0, 0, 0, 0.7); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/65 { color: rgba(0, 0, 0, 0.7); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/62 { color: rgba(0, 0, 0, 0.68); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/60 { color: rgba(0, 0, 0, 0.66); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/58 { color: rgba(0, 0, 0, 0.64); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/55 { color: rgba(0, 0, 0, 0.62); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/52 { color: rgba(0, 0, 0, 0.6); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/50 { color: rgba(0, 0, 0, 0.58); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/48 { color: rgba(0, 0, 0, 0.56); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/45 { color: rgba(0, 0, 0, 0.54); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/44 { color: rgba(0, 0, 0, 0.53); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/42 { color: rgba(0, 0, 0, 0.52); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/40 { color: rgba(0, 0, 0, 0.5); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/38 { color: rgba(0, 0, 0, 0.49); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/36 { color: rgba(0, 0, 0, 0.48); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/35 { color: rgba(0, 0, 0, 0.47); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/30 { color: rgba(0, 0, 0, 0.45); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/28 { color: rgba(0, 0, 0, 0.44); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/25 { color: rgba(0, 0, 0, 0.43); }
+:root[data-wf-theme='light'] .explore-view-root .text-white\/24 { color: rgba(0, 0, 0, 0.42); }
 
 /* 表面：白 alpha → 黑 alpha */
 :root[data-wf-theme='light'] .explore-view-root .bg-white\/\[0\.035\] { background-color: rgba(0, 0, 0, 0.035); }
@@ -1565,12 +1576,15 @@ input, textarea, [contenteditable="true"] {
 :root[data-wf-theme='light'] .explore-view-root .bg-black\/65 { background-color: rgba(255, 255, 255, 0.82); }
 
 /* 边框：白 → 黑 */
+:root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.05\] { border-color: rgba(0, 0, 0, 0.09); }
+:root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.055\] { border-color: rgba(0, 0, 0, 0.1); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.06\] { border-color: rgba(0, 0, 0, 0.08); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.07\] { border-color: rgba(0, 0, 0, 0.09); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.08\] { border-color: rgba(0, 0, 0, 0.1); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.09\] { border-color: rgba(0, 0, 0, 0.11); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.1\] { border-color: rgba(0, 0, 0, 0.12); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/\[0\.12\] { border-color: rgba(0, 0, 0, 0.14); }
+:root[data-wf-theme='light'] .explore-view-root .border-white\/10 { border-color: rgba(0, 0, 0, 0.12); }
 :root[data-wf-theme='light'] .explore-view-root .border-white\/20 { border-color: rgba(0, 0, 0, 0.18); }
 
 /* hover 状态 */
@@ -1580,6 +1594,18 @@ input, textarea, [contenteditable="true"] {
 :root[data-wf-theme='light'] .explore-view-root .hover\:bg-white\/\[0\.1\]:hover { background-color: rgba(0, 0, 0, 0.13); }
 :root[data-wf-theme='light'] .explore-view-root .hover\:bg-white\/20:hover { background-color: rgba(0, 0, 0, 0.18); }
 :root[data-wf-theme='light'] .explore-view-root .hover\:text-white:hover { color: rgba(0, 0, 0, 0.9); }
+
+/* 进入 AI伴听 按钮：emerald 半透明色系在浅底上几乎隐形，翻成深绿可读版 */
+:root[data-wf-theme='light'] .explore-view-root .text-emerald-100\/80 { color: rgba(6, 95, 70, 0.88); }
+:root[data-wf-theme='light'] .explore-view-root .bg-emerald-300\/\[0\.08\] { background-color: rgba(16, 185, 129, 0.14); }
+:root[data-wf-theme='light'] .explore-view-root .bg-emerald-300\/\[0\.16\] { background-color: rgba(16, 185, 129, 0.24); }
+:root[data-wf-theme='light'] .explore-view-root .border-emerald-300\/20 { border-color: rgba(5, 150, 105, 0.35); }
+:root[data-wf-theme='light'] .explore-view-root .hover\:bg-emerald-300\/\[0\.16\]:hover { background-color: rgba(16, 185, 129, 0.24); }
+
+/* 快捷入口架右缘渐隐遮罩：黑色渐隐在浅底上是一块灰渍，改为向底色渐隐 */
+:root[data-wf-theme='light'] .explore-view-root [data-shelf-edge-fade] {
+  background-image: linear-gradient(to right, rgba(242, 241, 236, 0), rgba(242, 241, 236, 0.9));
+}
 
 /* ================= 插件系统 ================= */
 @keyframes dglabPulse {

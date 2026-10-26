@@ -1710,8 +1710,8 @@ function ExploreView({
                     syncPlatformAcrossViews(item)
                     startTransition(() => setPlatform(item))
                   }}
-                  className="relative rounded-xl px-3.5 py-2 text-sm font-medium transition md:px-5"
-                  style={{ color: item === platform ? '#081017' : 'rgba(255,255,255,0.5)' }}
+                  className={`relative rounded-xl px-3.5 py-2 text-sm font-medium transition md:px-5 ${item === platform ? '' : 'text-white/50'}`}
+                  style={item === platform ? { color: '#081017' } : undefined}
                 >
                   {item === platform && (
                     <motion.span

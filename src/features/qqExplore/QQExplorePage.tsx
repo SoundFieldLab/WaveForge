@@ -153,13 +153,19 @@ function topCardKind(card: QQExploreCard): TopEntryKind | null {
 function topEntryCards(module: QQExploreModule | undefined): Array<{ card: QQExploreCard; kind: TopEntryKind }> {
   if (!module) return []
   const seen = new Set<string>()
+  // 每类入口只保留一张卡：上游会给同一功能（如 AI伴听/雷达）下发多张 subtype 相同的卡，
+  // 仅 feedKey 不同（各带一首推广歌）。快捷入口位是功能门面，重复同类卡只会变成
+  // N 张一模一样的卡面——首张之后的全部丢弃（ENTRY_ORDER 决定保谁）。
+  const seenKinds = new Set<TopEntryKind>()
   return module.cards
     .map(card => ({ card, kind: topCardKind(card) }))
     .filter((item): item is { card: QQExploreCard; kind: TopEntryKind } => Boolean(item.kind))
     .filter(item => {
+      if (seenKinds.has(item.kind)) return false
       const key = item.card.feedKey || `${item.card.type}:${item.card.subtype}:${item.card.style}:${item.card.jumpType}:${item.card.id}`
       if (seen.has(key)) return false
       seen.add(key)
+      seenKinds.add(item.kind)
       return true
     })
     .sort((left, right) => ENTRY_ORDER.indexOf(left.kind) - ENTRY_ORDER.indexOf(right.kind))
@@ -1009,7 +1015,9 @@ export default function QQExplorePage({
                 ? guessSong?.album.picUrl || card.coverUrl
                 : card.coverUrl || entrySong?.album.picUrl || daily?.coverUrl
               const loading = actionLoading === (card.feedKey || card.id) || (kind === 'guess' && guessLoading && !guessSong)
-              const cardTitle = kind === 'guess' ? 'For You' : kind === 'daily' ? 'Daily 30' : ENTRY_LABELS[card.title] || card.layerTitle || card.title
+              // AI伴听卡：上游 title 带宣传后缀（"AI伴听-最懂你的音乐伙伴"），旧卡还叫「刷歌模式」——
+              // 卡面只出官方短名（与 QQPcHome.featureLabel 同口径），不整串透传。
+              const cardTitle = kind === 'guess' ? 'For You' : kind === 'daily' ? 'Daily 30' : kind === 'radar' ? 'AI伴听' : ENTRY_LABELS[card.title] || card.layerTitle || card.title
               const cardLabel = ENTRY_SUBLABELS[kind]
               const cardSubtitle = entrySong
                 ? `${entrySong.name} - ${entrySong.artists.map(artist => artist.name).join('/')}`
