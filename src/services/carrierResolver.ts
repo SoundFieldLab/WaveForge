@@ -115,6 +115,13 @@ export async function resolvePlayableSongSmart(
 
   // 匹配评分函数：与 findPlayableAppleSong 完全同口径（标题/艺人/时长）。
   // normalizeMatch 已从 appleCatalog 惰性取到（模块加载一次后恒命中缓存）。
+  /** 原曲没有这些词但候选有的 → 大概率是翻唱/Live/变速变体，重罚（实测 Sayuri 命中过翻唱版） */
+  const VARIANT_KEYWORDS = ['live', '翻唱', 'cover', 'remix', 'slowed', 'sped up', 'speed up', '伴奏', 'instrumental', 'karaoke', '弹唱', '现场', 'acoustic', 'demo', '钢琴版']
+  const variantPenalty = (originalText: string, candidateText: string): number => {
+    const o = originalText.toLowerCase()
+    const c = candidateText.toLowerCase()
+    return VARIANT_KEYWORDS.some(k => c.includes(k) && !o.includes(k)) ? -80 : 0
+  }
   const matchScore = (candidate: Song): number => {
     const normalizedTitle = normalizeMatch(song.name)
     const normalizedArtist = normalizeMatch(artistName || song.name)
@@ -130,6 +137,8 @@ export async function resolvePlayableSongSmart(
       if (diff < 2000) score += 15
       else if (diff < 6000) score += 6
     }
+    score += variantPenalty(song.name, candidate.name)
+    score += variantPenalty((candidate.artists || []).map(a => a.name).join(' '), artistName)
     return score
   }
 

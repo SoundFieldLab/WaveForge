@@ -20,9 +20,10 @@ export interface TimedLyricLine {
   words?: TimedWord[]
 }
 
-/** 归一化：去掉空白、标点与符号，只比较实际字词（简繁差异不在此处理，交给命中率兜底） */
+/** 归一化：去掉空白、标点与符号，只比较实际字词（大小写折叠——QQ 常全大写、
+ *  Lrclib/Spotify 大小写混合，不折叠会整行判不匹配；简繁差异不在此处理，交给命中率兜底） */
 export const normalizeLyricText = (text?: string): string =>
-  (text || '').replace(/[\s\p{P}\p{S}]/gu, '')
+  (text || '').replace(/[\s\p{P}\p{S}]/gu, '').toLowerCase()
 
 export interface BorrowOptions {
   /** 行时间对齐容差（秒） */

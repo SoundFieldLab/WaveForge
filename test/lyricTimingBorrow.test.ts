@@ -9,9 +9,9 @@ const line = (time: number, text: string, timed = false) => ({
 })
 
 describe('歌词文本归一化', () => {
-  it('忽略空白、标点与符号', () => {
+  it('忽略空白、标点与符号（大小写折叠）', () => {
     expect(normalizeLyricText('予定調和の シナリオ、踏み抜いて！')).toBe('予定調和のシナリオ踏み抜いて')
-    expect(normalizeLyricText('Hello, world!')).toBe('Helloworld')
+    expect(normalizeLyricText('Hello, world!')).toBe('helloworld')
     expect(normalizeLyricText(undefined)).toBe('')
   })
 })
