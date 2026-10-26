@@ -31,6 +31,8 @@ vi.mock('../src/services/bilibiliApi', () => ({
   formatBiliTime: vi.fn(() => '3:00'),
   decodeBiliTitle: vi.fn((title: string) => title),
   recordUploaderPlaySuccess: vi.fn(),
+  // 进化反馈（mvEvolution 在线 SGD）：背景层链耗尽/采纳时回写
+  consumeEvolutionOutcome: vi.fn(),
 }))
 
 vi.mock('../src/services/mvAlignment', () => ({
