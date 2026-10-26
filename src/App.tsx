@@ -1,6 +1,6 @@
 import { debugLog, isTransitionDebugEnabled } from './utils/debugLog'
 import { parseStoredBoolean } from './utils/storage'
-import { isTv, isTvModeActive, isDesktop } from './platform'
+import { isTv, isTvModeActive, isDesktop, isPcTabletActive, isAndroidTouchDevice } from './platform'
 import { dispatchTvBack, useTvBack, useRemoteCursorMode } from './tv/tvCore'
 import { isPerfModeEfficiency, isPerfModeEnhanced } from './tv/perfMode'
 import { lazy, memo, Suspense, startTransition, useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore, type ComponentProps, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
@@ -149,8 +149,8 @@ const MODE_CHUNK_LOADERS: Record<'explore' | 'minimal' | 'traditional' | 'deskto
   inparty: loadInPartyView,
 }
 const PLAYBACK_NEUTRAL_COLOR = '#6b7280'
-// TV 效能档禁入的重 GPU 歌词模式：多维（R3F WebGL 全速渲染）、Folia（WebGL）、PV（Pixi 60fps ticker）、壁纸（桌面壁纸语义）
-const TV_HEAVY_LYRIC_MODES: LyricDisplayMode[] = ['multidimensional', 'folia', 'pv', 'wallpaper']
+// TV 效能档禁入的重 GPU 歌词模式：多维（R3F WebGL 全速渲染）、Folia（WebGL）、壁纸（桌面壁纸语义）
+const TV_HEAVY_LYRIC_MODES: LyricDisplayMode[] = ['multidimensional', 'folia', 'wallpaper']
 // 过渡进度在 App 侧的粗量化节流基准（见 setTransitionProgress 调用处）
 let lastTransitionProgressThrottle = 0
 const LazyHomeView = lazy(loadHomeView)
@@ -206,7 +206,6 @@ const loadWallpaperLyrics = () => import('./components/WallpaperLyrics')
 const loadGloriousLyrics = () => import('./components/GloriousLyrics')
 const loadMultidimensionalLyrics = () => import('./components/MultidimensionalLyrics')
 const loadFoliaLyricsPage = () => import('./components/FoliaLyricsPage')
-const loadPvLyricsPage = () => import('./components/pvLyrics/PvLyricsPage')
 const loadModengPlayer = () => import('./components/ModengPlayerPage')
 const loadAppleRadioNowPlayingPage = () => import('./components/AppleRadioNowPlayingPage')
 const LazyAppleRadioNowPlayingPage = lazy(loadAppleRadioNowPlayingPage)
@@ -224,7 +223,6 @@ const LazyWallpaperLyrics: any = lazy(loadWallpaperLyrics)
 const LazyGloriousLyrics: any = lazy(loadGloriousLyrics)
 const LazyMultidimensionalLyrics = lazy(loadMultidimensionalLyrics)
 const LazyFoliaLyricsPage = lazy(loadFoliaLyricsPage)
-const LazyPvLyricsPage: any = lazy(loadPvLyricsPage)
 const LazyModengPlayer: any = lazy(loadModengPlayer)
 const LazyBilibiliMvPlayer: any = lazy(loadBilibiliMvPlayer)
 const LazyBilibiliMvBackground: any = lazy(loadBilibiliMvBackground)
@@ -237,7 +235,6 @@ const LYRIC_MODE_LOADERS: Partial<Record<string, () => Promise<unknown>>> = {
   folia: loadFoliaLyricsPage,
   modeng: loadModengPlayer,
   video: loadBilibiliMvPlayer,
-  pv: loadPvLyricsPage,
 }
 const loadRemoteControlModal = () => import('./components/RemoteControlModal')
 const LazyRemoteControlModal = lazy(loadRemoteControlModal)
@@ -307,7 +304,7 @@ interface Track {
  * 有词时展开 —— 同一棵树 + layout 动画，使「有词 ↔ 纯音乐」过渡时封面是滑过去的。
  */
 const PURE_MUSIC_OWN_LAYOUT_MODES = new Set<string>([
-  'modeng', 'immersive', 'wallpaper', 'multidimensional', 'folia', 'glorious', 'pv',
+  'modeng', 'immersive', 'wallpaper', 'multidimensional', 'folia', 'glorious',
 ])
 
 type LiveLyricsDisplayProps = Omit<ComponentProps<typeof LyricsDisplay>, 'currentTime'> & {
@@ -502,12 +499,11 @@ const buildDesktopLyricsWithInterludes = (lyrics: LyricLine[]): DesktopLyricLine
 }
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
-type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia' | 'pv'
+type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia'
 
 const LYRIC_MODE_VISIBILITY_KEY = 'waveforge_visible_lyric_modes'
 const LYRIC_MODE_MODENG_MIGRATED_KEY = 'waveforge_modeng_mode_migrated'
 const LYRIC_MODE_VIDEO_MIGRATED_KEY = 'waveforge_video_mode_migrated'
-const LYRIC_MODE_PV_MIGRATED_KEY = 'waveforge_pv_mode_migrated'
 /** Folia 歌词样式（vendored Project Folia 可视化器）的持久化 key 与默认样式 */
 const FOLIA_STYLE_KEY = 'waveforge_folia_style'
 /** Folia 样式选择条的顺序（用户拖动排序）；缺项按默认顺序追加，升级新增样式不会消失 */
@@ -520,7 +516,7 @@ const LYRIC_MODE_ORDER_KEY = 'waveforge_lyric_mode_order'
 const FOLIA_PAGE_SELF_MODE: LyricDisplayMode = 'folia'
 /** 可见数下限：Folia 侧至少留两个，避免选择条被关空 */
 const MIN_VISIBLE_FOLIA_STYLES = 2
-const ALL_LYRIC_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia', 'pv']
+const ALL_LYRIC_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia']
 const LYRIC_MODE_NAMES: Record<LyricDisplayMode, string> = {
   modern: '现代',
   immersive: '沉浸式',
@@ -530,7 +526,6 @@ const LYRIC_MODE_NAMES: Record<LyricDisplayMode, string> = {
   modeng: '摩登',
   video: '看歌',
   folia: 'Folia',
-  pv: 'PV',
 }
 
 function loadVisibleLyricModes(): LyricDisplayMode[] {
@@ -557,13 +552,6 @@ function loadVisibleLyricModes(): LyricDisplayMode[] {
             localStorage.setItem(LYRIC_MODE_VIDEO_MIGRATED_KEY, '1')
             localStorage.setItem(LYRIC_MODE_VISIBILITY_KEY, JSON.stringify(withVideo))
             return withVideo
-          }
-          // PV（pv-tool 移植歌词模式）为新增模式：同样一次性补回
-          if (!withModern.includes('pv') && !localStorage.getItem(LYRIC_MODE_PV_MIGRATED_KEY)) {
-            const withPv = [...withModern, 'pv' as LyricDisplayMode]
-            localStorage.setItem(LYRIC_MODE_PV_MIGRATED_KEY, '1')
-            localStorage.setItem(LYRIC_MODE_VISIBILITY_KEY, JSON.stringify(withPv))
-            return withPv
           }
           return withModern
         }
@@ -1047,7 +1035,9 @@ function App() {
     }
     // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面。
     // isTvModeActive()（html.tv-mode）而非 isTv()：真机与 ?tv=1 模拟口径一致。
-    return isTvModeActive() && isPerfModeEfficiency() && mode === 'desktop' ? 'minimal' : mode
+    // 平板 PC 布局同理：桌面模式（壁纸桌面）是 PC 桌面集成专属，历史值回落简约。
+    if (mode === 'desktop' && ((isTvModeActive() && isPerfModeEfficiency()) || isPcTabletActive())) mode = 'minimal'
+    return mode
   })
   const viewModeChangeRevisionRef = useRef(0)
   // 已访问过的模式：切走只隐藏、不卸载（与「播放页覆盖时不卸载」同一套做法）。
@@ -1607,8 +1597,8 @@ function App() {
   const [isPureMusic, setIsPureMusic] = useState(false)
   const [lyricDisplayMode, setLyricDisplayMode] = useState<LyricDisplayMode>(() => {
     const saved = localStorage.getItem('lyricDisplayMode')
-    const mode = saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'multidimensional' || saved === 'modeng' || saved === 'video' || saved === 'folia' || saved === 'pv' ? saved : 'modern'
-    // TV 效能档：WebGL（多维/Folia）与 Pixi（PV）级歌词不可承受，历史选择直接回落摩登
+    const mode = saved === 'immersive' || saved === 'wallpaper' || saved === 'glorious' || saved === 'multidimensional' || saved === 'modeng' || saved === 'video' || saved === 'folia' ? saved : 'modern'
+    // TV 效能档：WebGL（多维/Folia）级歌词不可承受，历史选择直接回落摩登
     if (isTvModeActive() && isPerfModeEfficiency() && TV_HEAVY_LYRIC_MODES.includes(mode)) return 'modern'
     return mode
   })
@@ -1921,9 +1911,17 @@ function App() {
   const watchModeActive = lyricDisplayMode === 'video'
   // TV：手机遥控器是否处于光标模式（连接后 hover 交互可用，焦点揭示逻辑要相应让位）
   const remoteCursorModeActive = useRemoteCursorMode()
-  const effectiveCrossfadeEnabled = !watchModeActive && crossfadeEnabled
-  const effectiveGaplessEnabled = !watchModeActive && gaplessEnabled
-  const effectiveAutoMixEnabled = !watchModeActive && autoMixEnabled && !gameModeEnabled && !isTvModeActive()
+  // Android 触摸端（含手机/平板 PC 版布局）：双 deck 过渡（交叉淡化/无缝/AutoMix）一律禁用。
+  // 移动 WebAudio 上待机 deck 偶发满增益出声 → 与主曲混音（听感「爆音/杂音/不受控快进」），
+  // 且双流并发抢带宽卡顿；移动端固定单 deck 直切。
+  const androidTouchActive = isAndroidTouchDevice()
+  const effectiveCrossfadeEnabled = !watchModeActive && crossfadeEnabled && !androidTouchActive
+  // 播放态同步原生前台服务（Android：防切后台被 ROM 清进程；其它平台桥不存在即忽略）
+  useEffect(() => {
+    try { (window as any).WaveForgeNative?.setPlaybackActive?.(Boolean(isPlaying)) } catch { /* ignore */ }
+  }, [isPlaying])
+  const effectiveGaplessEnabled = !watchModeActive && gaplessEnabled && !androidTouchActive
+  const effectiveAutoMixEnabled = !watchModeActive && autoMixEnabled && !gameModeEnabled && !isTvModeActive() && !androidTouchActive
   
   // 切歌过渡状态
   const [isTransitioning, setIsTransitioning] = useState(false)
@@ -2270,6 +2268,36 @@ function App() {
       return true
     }
     return false
+  }, [])
+
+  // PC 版布局（手机/平板触屏）的 BACK：播放页/个人中心逐级回退，其余交给原生（退出）。
+  // 移动版走 MobileApp 的 mobileBack 栈；桌面树此前只有 TV 的 useTvBack（仅 tv-mode 注册），
+  // pc-touch 下按返回没有任何处理器 → 安卓直接退到桌面（用户实测）。
+  useEffect(() => {
+    if (!isPcTabletActive()) return
+    const consume = () => {
+      try { (window as any).WaveForgeNative?.reportBackConsumed?.() } catch { /* ignore */ }
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.keyCode !== 4) return
+      const st = backStateRef.current
+      if (st.showProfile) {
+        e.preventDefault(); e.stopPropagation()
+        setShowProfile(false)
+        consume()
+        return
+      }
+      if (st.isPlaybackPage) {
+        e.preventDefault(); e.stopPropagation()
+        setShowSharedPlayer(false)
+        setShowHome(true)
+        consume()
+        return
+      }
+      // 主界面：不消费 → 原生默认退出（返回桌面）
+    }
+    document.addEventListener('keydown', onKey, true)
+    return () => document.removeEventListener('keydown', onKey, true)
   }, [])
 
   // 共振房间「挂起/退出」询问框：BACK 应关掉询问（留在房间），否则未消费的 BACK 会直接退出应用。
@@ -3517,6 +3545,26 @@ function App() {
   // 保持最新 audioPlayer 引用的 ref，供 useCallback 处理器读取，避免处理器身份随渲染变化
   const audioPlayerRef = useRef(audioPlayer)
   audioPlayerRef.current = audioPlayer
+  // 预览层音量按钮（官方=点击静音/恢复）：记忆原音量，0 与恢复切换
+  const previewMuteRef = useRef(false)
+  const previewPrevVolumeRef = useRef<number | null>(null)
+  useEffect(() => {
+    const handler = () => {
+      const player = audioPlayerRef.current
+      if (!player) return
+      const cur = player.getVolume?.() ?? 0
+      if (!previewMuteRef.current) {
+        previewPrevVolumeRef.current = cur > 0 ? cur : (previewPrevVolumeRef.current ?? 0.7)
+        player.setVolume?.(0)
+        previewMuteRef.current = true
+      } else {
+        player.setVolume?.(previewPrevVolumeRef.current ?? 0.7)
+        previewMuteRef.current = false
+      }
+    }
+    window.addEventListener('waveforge:toggle-mute', handler)
+    return () => window.removeEventListener('waveforge:toggle-mute', handler)
+  }, [])
   // 学歌插件的播控桥：handlePlayPause/handleSeek 定义在后面，这里先用空实现占位，
   // 两个 handler 的 useCallback 之后立刻同步 ref（渲染期同步，时序上先于任何插件调用）
   const handlePlayPauseRef = useRef<() => void>(() => undefined)
@@ -4578,7 +4626,7 @@ function App() {
   // 当前所在歌词模式始终保留在可见列表里
   const ensureModernVisible = (modes: LyricDisplayMode[]): LyricDisplayMode[] =>
     modes.includes('modern') ? modes : ['modern', ...modes]
-  // TV 效能档：隐藏 WebGL（多维/Folia）与 Pixi（PV）级歌词模式（全速 GPU 渲染弱机带不动）
+  // TV 效能档：隐藏 WebGL（多维/Folia）级歌词模式（全速 GPU 渲染弱机带不动）
   const tvEfficiencyFilteredVisibleLyricModes = isTvModeActive() && isPerfModeEfficiency()
     ? visibleLyricModes.filter((m) => !TV_HEAVY_LYRIC_MODES.includes(m))
     : visibleLyricModes
@@ -4643,6 +4691,16 @@ function App() {
     lastReadyCoverColorRef.current = { color: coverPalette[0] || extractedColor!, palette: coverPalette }
   }
   const lastReadyCoverColor = lastReadyCoverColorRef.current
+  // 智能动感（花火 beatFx）的节拍表数据源：当前曲目键 + 正在播的音频地址。
+  // URL 取播放引擎的活动元素 src（与自动混音 analyze 同一来源——引擎能播，Python 服务就能抓）；
+  // currentSrc 变化（换曲/换音质档）由 currentSong 触发重算即可，元素 src 晚一帧无碍（feed 会重试分析）。
+  const foliaBeatFxTrack = useMemo(() => {
+    if (!currentSong) return null
+    const el = audioPlayer.getAudioElement?.()
+    const url = el?.currentSrc || el?.src || ''
+    if (!url) return null
+    return { key: getSongKey(currentSong), url, duration: (currentSong.duration || 0) / 1000 }
+  }, [currentSong, audioPlayer])
   const playbackCoverColor = coverColorStatus === 'ready'
     ? (coverPalette[0] || extractedColor || PLAYBACK_NEUTRAL_COLOR)
     : (lastReadyCoverColor.color || PLAYBACK_NEUTRAL_COLOR)
@@ -4660,7 +4718,6 @@ function App() {
     { mode: 'multidimensional' as LyricDisplayMode, label: '多维', background: `linear-gradient(145deg, #05060c 0%, ${playbackCoverColor} 48%, #0b1b2a 72%, #030409 100%)` },
     { mode: 'modeng' as LyricDisplayMode, label: '摩登', background: 'linear-gradient(120deg, #3a3a3c 0%, #232325 45%, #101012 100%)' },
     { mode: 'video' as LyricDisplayMode, label: '看歌', background: 'linear-gradient(120deg, #f8a5c2 0%, #fb7299 45%, #2d1b3d 100%)' },
-    { mode: 'pv' as LyricDisplayMode, label: 'PV', background: 'linear-gradient(135deg, #6d28d9 0%, #3b2f8f 42%, #0f172a 100%)' },
   ]
   const orderedLyricModeTiles = orderedLyricModes
     .map(mode => lyricModeTiles.find(tile => tile.mode === mode))
@@ -5211,8 +5268,6 @@ function App() {
                     ? loadModengPlayer()
 : lyricDisplayMode === 'video'
                     ? loadBilibiliMvPlayer()
-                    : lyricDisplayMode === 'pv'
-                      ? loadPvLyricsPage()
                       : Promise.resolve(),
     ])
     const inferredOrigin: PlaybackOrigin = origin
@@ -11398,7 +11453,7 @@ function App() {
                   现代 = slab（与沉浸同一套"整列收进一块玻璃板"的形态，但保留自己原来的位置：
                   无收起箭头、无弹框避让、容器 right-0 而行 right-6）；
                   墙纸 = compact（相纸下方小横向条）；辉煌 = glorious（竖版封面卡片下方小横向条，锚点由 GloriousLyrics 提供）；
-                  其余（folia / pv / 多维）= default（右上角各自独立的玻璃圆钮，**不要动**）。
+                  其余（folia / 多维）= default（右上角各自独立的玻璃圆钮，**不要动**）。
                   看歌正常播放时由播放器内部控件接管；真正无视频/失败时经 MaybePortal 恢复全局入口；
                   摩登模式改用自身左下角页脚控件，全局入口不渲染。
                   电台/播客各自的播放页是独立设计（自带返回、播放、音量、设置），
@@ -11454,6 +11509,7 @@ function App() {
                     type="button"
                     aria-label="打开歌词显示样式"
                     className="fixed top-0 left-1/2 -translate-x-1/2 w-32 h-8 z-50 appearance-none border-0 bg-transparent p-0"
+        data-wf-top-toggle
                     onClick={() => {
                       setShowLyricModePanel(true)
                       setShowLyricModeCustomize(false)
@@ -12091,6 +12147,7 @@ function App() {
                     foliaStyle={foliaStyle}
                     foliaBackgroundEnabled={foliaBackgroundEnabled}
                     mvBackgroundActive={mvBackgroundActive}
+                    beatFxTrack={foliaBeatFxTrack ?? undefined}
                     userTunings={userFoliaTunings}
                     active
                   />
@@ -12185,40 +12242,6 @@ function App() {
                     transitionToCover={transitionToTrack?.coverUrl ? getResolvedArtworkUrl(transitionToTrack.coverUrl, { size: 512 }) : undefined}
                     // HUD「关闭」= 本曲不做智能混音（完整播放本曲，末尾短交叉）
                     onSkipAutomix={() => audioPlayer.skipAutoMixForCurrentPair()}
-                    transitionToTitle={transitionToTrack?.title}
-                    transitionToArtist={transitionToTrack?.artist}
-                  />
-                </motion.div>
-              ) : lyricDisplayMode === 'pv' ? (
-                <motion.div
-                  key="pv-lyrics-player"
-                  initial={{ opacity: 0, scale: 1.02 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.99 }}
-                  transition={{ duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
-                  className="flex-1 w-full min-h-0 relative"
-                >
-                  <LazyPvLyricsPage
-                    lyrics={lyrics}
-                    currentIndex={currentLyricIndex}
-                    playbackTimeStore={audioPlayer.playbackTimeStore}
-                    timeOffset={lyricOffset - 0.2}
-                    isPlaying={isPlaying}
-                    playerTheme={playerTheme}
-                    accentColor={playbackCoverColor}
-                    songTitle={currentSong.name}
-                    songArtist={currentSongArtistLabel}
-                    songAlbum={currentSong.album?.name}
-                    coverUrl={displayCoverUrl}
-                    trackId={currentSong.id || currentSong.mid}
-                    trackKey={currentSong ? getSongKey(currentSong) : ''}
-                    translationEnabled={translationEnabled}
-                    romanEnabled={romanEnabled}
-                    onSeek={audioPlayer.seek}
-                    mvBackgroundActive={mvBackgroundActive}
-                    dominantColor={dominantColor}
-                    isTransitioning={isVisualTransitioning}
-                    transitionProgress={overlayProgress}
                     transitionToTitle={transitionToTrack?.title}
                     transitionToArtist={transitionToTrack?.artist}
                   />

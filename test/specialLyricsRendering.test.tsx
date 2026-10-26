@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPlaybackTimeStore } from '../src/audio/playbackTimeStore'
 import { convertLyricsToFoliaLines } from '../src/components/FoliaLyricsPage'
 import { convertLyricsToFoliaLines as convertDioramaLines } from '../src/components/foliaDiorama/FoliaDioramaLyrics'
-import { toPvLyrics } from '../src/components/pvLyrics/pvBridge'
 import LyricsDisplay from '../src/components/LyricsDisplay'
 import ModengPlayerPage from '../src/components/ModengPlayerPage'
 import type { LyricLine } from '../src/services/musicApi'
@@ -87,22 +86,13 @@ describe('special lyric rendering', () => {
     expect(line.backgroundVocals?.[0].romanization).toBeUndefined()
   })
 
-  it('preserves special lyric fields in Diorama and PV adapters', () => {
+  it('preserves special lyric fields in the Diorama adapter', () => {
     const [diorama] = convertDioramaLines(specialLyrics)
     expect(diorama).toMatchObject({
       endTime: 14,
       agentId: 'v1',
       backgroundVocals: [{ text: 'Harmony', agentId: 'v2' }],
     })
-    const [pv] = toPvLyrics(specialLyrics)
-    expect(pv).toMatchObject({
-      agentId: 'v1',
-      backgroundVocals: [{ text: 'Harmony', agentId: 'v2' }],
-    })
-    expect(pv.alternateTexts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ role: 'translation', text: '备用翻译' }),
-      expect.objectContaining({ role: 'romanization', text: 'alternate roman' }),
-    ]))
   })
 
   it('shows background vocals as their own line only inside their time window', async () => {

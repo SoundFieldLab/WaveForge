@@ -154,12 +154,12 @@ interface QuickSettingsDialogProps {
 }
 
 type CoverPulseMode = 'dynamic' | 'soft' | 'restless'
-type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia' | 'pv'
+type LyricDisplayMode = 'modern' | 'immersive' | 'wallpaper' | 'glorious' | 'multidimensional' | 'modeng' | 'video' | 'folia'
 type BackgroundEffect = 'transparent' | 'blur' | 'immersive' | 'modern'
 /** 播放过渡方式：关闭 / 渐入渐出 / 无缝衔接 / AutoMix（三者互斥） */
 type TransitionMode = 'none' | 'crossfade' | 'gapless' | 'autoMix'
 
-const LYRIC_DISPLAY_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia', 'pv']
+const LYRIC_DISPLAY_MODES: LyricDisplayMode[] = ['modern', 'immersive', 'wallpaper', 'glorious', 'multidimensional', 'modeng', 'video', 'folia']
 
 const LYRIC_MODE_LABELS: Record<LyricDisplayMode, string> = {
   modern: '现代',
@@ -170,7 +170,6 @@ const LYRIC_MODE_LABELS: Record<LyricDisplayMode, string> = {
   modeng: '摩登',
   video: '看歌',
   folia: 'Folia',
-  pv: 'PV',
 }
 
 const BACKGROUND_EFFECT_LABELS: Record<BackgroundEffect, string> = {
@@ -182,7 +181,7 @@ const BACKGROUND_EFFECT_LABELS: Record<BackgroundEffect, string> = {
 
 /**
  * 弹窗里可直接切换的歌词模式（与 App.tsx 顶部切换器同名）。
- * 只放「播放面歌词渲染」这几个：看歌需要先匹配到 MV、Folia/PV 是独立页面，
+ * 只放「播放面歌词渲染」这几个：看歌需要先匹配到 MV、Folia 是独立页面，
  * 留在 App 顶部切换器里更合适。若当前模式不在这六个里，会在末尾补一枚「当前模式」chip，
  * 避免出现「一个都没选中」的歧义。
  */
@@ -978,7 +977,7 @@ export default memo(function QuickSettingsDialog({
 
   const sectionIndex = Math.max(0, sectionTabs.findIndex(tab => tab.id === activeSection))
 
-  /** 当前模式若不在这六项里（看歌 / Folia / PV），补一枚同名的选中 chip，避免「一个都没选中」。 */
+  /** 当前模式若不在这六项里（看歌 / Folia），补一枚同名的选中 chip，避免「一个都没选中」。 */
   const lyricModeOptions = [
     ...QUICK_LYRIC_MODES.map(mode => ({ value: mode as string, label: LYRIC_MODE_LABELS[mode] })),
     ...(QUICK_LYRIC_MODES.includes(lyricDisplayMode)

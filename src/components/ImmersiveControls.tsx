@@ -33,7 +33,7 @@ interface ImmersiveControlsProps {
    *  容器贴 right-0 而行贴 right-6，纵向也不含箭头那一行；
    *  compact = 墙纸模式专属——右上角一条横向小按钮条（墙纸歌词卡片满屏漂移，纵向大按钮列会大面积遮挡）；
    *  glorious = 辉煌模式专属——同款小尺寸横向按钮条，但挂到竖版封面卡片正下方（GloriousLyrics 提供锚点）；
-   *  不传/default = 传统右上角纵向按钮列（folia / pv / 多维在用，**改这几个别动这个分支**） */
+   *  不传/default = 传统右上角纵向按钮列（folia / 多维在用，**改这几个别动这个分支**） */
   variant?: 'default' | 'left' | 'slab' | 'compact' | 'glorious'
   onHomeClick: () => void
   onOpenMixingStudio?: (anchorRect?: DOMRect) => void

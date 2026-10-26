@@ -774,7 +774,7 @@ export function VideoScene({ ctx }: PreviewSceneProps) {
 }
 
 /**
- * 模式 → 场景。`folia` / `pv` 是独立页面（各自有自己的设置界面），
+ * 模式 → 场景。`folia` 是独立页面（有自己的设置界面），
  * 这里退回现代版式；`video`（看歌）单独一版。
  */
 export const PREVIEW_SCENES = {
@@ -786,7 +786,6 @@ export const PREVIEW_SCENES = {
   modeng: ModengScene,
   video: VideoScene,
   folia: ModernScene,
-  pv: ModernScene,
 } as const
 
 export type PreviewSceneKey = keyof typeof PREVIEW_SCENES
