@@ -785,7 +785,13 @@ namespace WaveForge.SetupUI
                     if (_unItems[i].Key == "ud:settings") { _unItems[i].Base = userData; break; }
                 }
             }
-            AddItem("reg:waveforge", "设备识别码", "HKCU\\Software\\WaveForge", "regkey", true, "保留后重新安装识别码不变");
+            // 设备识别码项 = 注册表整键（DeviceId/DeviceFingerprint/旧 RedeemedCodes）
+            // + userData 里的指纹快照文件。识别码本身由硬件因子派生，删干净后重装仍得到同一个 ID，
+            // 之前兑换的码依旧可用；此项只决定是否残留本机识别数据。
+            string fingerprintSnapshot = Path.Combine(userData, "device-fingerprint.json");
+            AddItem("reg:waveforge", "设备识别码",
+                "HKCU\\Software\\WaveForge" + (File.Exists(fingerprintSnapshot) ? "|" + fingerprintSnapshot : ""),
+                "regkey+file", true, "识别码绑定本机硬件，删除或保留重装后不变");
             string desktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "WaveForge 澜音工坊.lnk");
             AddItem("lnk:desktop", "桌面快捷方式", desktopLink, "file", false, "");
 
@@ -816,6 +822,10 @@ namespace WaveForge.SetupUI
             try
             {
                 if (kind == "regkey") return Microsoft.Win32.Registry.CurrentUser.OpenSubKey(path.Replace("HKCU\\", "")) != null;
+                if (kind == "regkey+file") return path.Split('|').Any(p =>
+                    p.StartsWith("HKCU\\", StringComparison.OrdinalIgnoreCase)
+                        ? Microsoft.Win32.Registry.CurrentUser.OpenSubKey(p.Substring(5)) != null
+                        : File.Exists(p));
                 if (kind == "filegroup") return path.Split('|').Any(p => File.Exists(p));
                 if (kind == "udcache")
                 {
@@ -887,6 +897,19 @@ namespace WaveForge.SetupUI
                         case "regkey":
                             string sub = item.Path.Replace("HKCU\\", "");
                             Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(sub, false);
+                            break;
+                        case "regkey+file":
+                            foreach (string p in item.Path.Split('|'))
+                            {
+                                if (p.StartsWith("HKCU\\", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(p.Substring(5), false);
+                                }
+                                else if (File.Exists(p))
+                                {
+                                    File.Delete(p);
+                                }
+                            }
                             break;
                     }
                     log(item.Key, item.Label, true);

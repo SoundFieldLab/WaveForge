@@ -12,7 +12,7 @@
  *   npm run preview:setup-ui           构建并打开预览（模拟安装，不写任何系统文件）
  */
 import { execFileSync, spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const SRC = join(ROOT, 'installer', 'webui')
 const OUT = join(ROOT, 'build', 'webui')
-const CSC = join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+const CSC_FRAMEWORK = join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+// 系统 in-box csc 只支持 C#5，编不过源码里的空条件运算符（?.）；优先用 dotnet SDK 自带 Roslyn。
+const CSC_ROSLYN = 'C:\\Program Files\\dotnet\\sdk\\Roslyn\\bincore\\csc.dll'
+const DOTNET = 'dotnet'
+
+function findRoslynCsc() {
+  const sdks = 'C:\\Program Files\\dotnet\\sdk'
+  try {
+    const latest = readdirSync(sdks)
+      .filter((name) => /^\d+\.\d+/.test(name))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))[0]
+    const candidate = join(sdks, latest, 'Roslyn', 'bincore', 'csc.dll')
+    if (latest && existsSync(candidate)) return candidate
+  } catch { }
+  return null
+}
 
 // 安装器协议文案：按语言独立文件（installer/webui/legal/agreements/），与主程序 i18n 解耦
 const AGREEMENT_LANGS = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko']
@@ -41,8 +56,10 @@ function main() {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   const previewOnly = process.argv.includes('--preview')
 
-  if (!existsSync(CSC)) {
-    console.error(`未找到系统 C# 编译器：${CSC}`)
+  const roslyn = findRoslynCsc()
+  const useRoslyn = Boolean(roslyn)
+  if (!useRoslyn && !existsSync(CSC_FRAMEWORK)) {
+    console.error(`未找到 C# 编译器：Roslyn（dotnet SDK）与 ${CSC_FRAMEWORK} 均不可用`)
     process.exit(1)
   }
 
@@ -71,8 +88,9 @@ function main() {
   cpSync(join(SRC, 'shell', 'lib', 'WebView2Loader.dll'), join(OUT, 'WebView2Loader.dll'))
   cpSync(join(SRC, 'shell', 'lib', 'Microsoft.Web.WebView2.Core.dll'), join(OUT, 'Microsoft.Web.WebView2.Core.dll'))
 
-  // Git Bash 会把 “/switch” 当路径转换；统一用 “-switch” + 关闭路径转换
-  execFileSync(CSC, [
+  // Git Bash 会把 “/switch” 当路径转换；统一用 “-switch” + 关闭路径转换。
+  // Roslyn 路径下要补 mscorlib/Microsoft.CSharp 引用（旧 csc 隐式自带）。
+  const cscArgs = [
     '-nologo',
     '-codepage:65001',
     '-target:winexe',
@@ -81,14 +99,34 @@ function main() {
     `-out:${join(OUT, 'WaveForgeSetupUI.exe')}`,
     `-win32icon:${join(ROOT, 'build', 'setup-icon.ico')}`,
     `-win32manifest:${join(SRC, 'shell', 'app.manifest')}`,
-    '-r:System.dll',
-    '-r:System.Core.dll',
-    '-r:System.Drawing.dll',
-    '-r:System.Windows.Forms.dll',
-    '-r:System.Web.Extensions.dll',
+    ...(useRoslyn
+      ? (() => {
+          const fw = join(process.env.SystemRoot || 'C:\\Windows', 'Microsoft.NET', 'Framework64', 'v4.0.30319')
+          return [
+            `-r:${join(fw, 'mscorlib.dll')}`,
+            `-r:${join(fw, 'System.dll')}`,
+            `-r:${join(fw, 'System.Core.dll')}`,
+            `-r:${join(fw, 'System.Drawing.dll')}`,
+            `-r:${join(fw, 'System.Windows.Forms.dll')}`,
+            `-r:${join(fw, 'System.Web.Extensions.dll')}`,
+            `-r:${join(fw, 'Microsoft.CSharp.dll')}`,
+          ]
+        })()
+      : [
+          '-r:System.dll',
+          '-r:System.Core.dll',
+          '-r:System.Drawing.dll',
+          '-r:System.Windows.Forms.dll',
+          '-r:System.Web.Extensions.dll',
+        ]),
     `-r:${join(SRC, 'shell', 'lib', 'Microsoft.Web.WebView2.Core.dll')}`,
     join(SRC, 'shell', 'Program.cs'),
-  ], { stdio: 'inherit', cwd: ROOT, env: { ...process.env, MSYS_NO_PATHCONV: '1' } })
+  ]
+  if (useRoslyn) {
+    execFileSync(DOTNET, [roslyn, ...cscArgs], { stdio: 'inherit', cwd: ROOT, env: { ...process.env, MSYS_NO_PATHCONV: '1' } })
+  } else {
+    execFileSync(CSC_FRAMEWORK, cscArgs, { stdio: 'inherit', cwd: ROOT, env: { ...process.env, MSYS_NO_PATHCONV: '1' } })
+  }
 
   const k = (p) => Math.ceil(statSync(p).size / 1024)
   console.log(`\n安装器壳构建完成 → ${OUT}`)

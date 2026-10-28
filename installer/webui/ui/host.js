@@ -129,7 +129,7 @@
             { key: 'ud:logs', label: '运行日志', keepable: false, exists: true, size: '' },
             { key: 'ud:settings', label: '个性化配置', detail: '偏好设置与功能开关', keepable: true, exists: true, size: '', baseDir: 'C:\Users\YoshinoRinne\AppData\Roaming\WaveForge 澜音工坊' },
             { key: 'ud:creds', label: '登录凭据', detail: '各平台登录状态', keepable: true, exists: true, size: '' },
-            { key: 'reg:waveforge', label: '设备识别码', detail: '保留后重新安装识别码不变', keepable: true, exists: true, size: '' },
+            { key: 'reg:waveforge', label: '设备识别码', detail: '识别码绑定本机硬件，删除或保留重装后不变', keepable: true, exists: true, size: '' },
             { key: 'lnk:desktop', label: '桌面快捷方式', keepable: false, exists: true, size: '' },
           ],
         })
