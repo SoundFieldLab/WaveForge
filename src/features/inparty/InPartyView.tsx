@@ -21,9 +21,7 @@ import { compressImage, useCameraBroadcast, useVoiceRoom } from './call'
 import { DICE_SLOTS, GAME_HINT, GAME_LABEL, type GameKind } from './games'
 import { AvatarImagePicker, FancySelect, HotkeyCapture } from './controls'
 import { QRCodeSVG } from 'qrcode.react'
-import { AchievementToastLayer } from './AchievementToast'
 import { readPanicKeys, savePanicKeys } from './settings'
-import { ACHIEVEMENTS, achievementSummary, displayDef, readUnlockedAchievements, type AchievementRecord } from './achievements'
 import {
   ensureLocalProfile, readEntryMode, readFriends, readInPartySettings, readRecentRooms,
   rememberEntryMode, rememberPassword, rememberRecentRoom, removeFriend, removeRecentRoom,
@@ -50,11 +48,11 @@ const MODE_LABEL: Record<string, string> = {
   explore: '探索', minimal: '简约', traditional: '传统', desktop: '桌面',
 }
 
-/** 全屏容器：内容铺满（超宽屏兜底 max-w-[1680px]），与探索/简约模式一致 */
+/** 全屏容器：内容铺满（超宽屏兜底 max-w-[1680px]），与探索/简约模式一致。
+ *  成就弹窗已迁至全局成就系统（App 层 AchievementToastLayer），这里不再挂。 */
 function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-full w-full flex-col overflow-hidden">
-      <AchievementToastLayer />
       {children}
     </div>
   )
@@ -1507,73 +1505,6 @@ function DuelStreaks({ snapshot, selfPeerId }: { snapshot: InPartySessionSnapsho
   )
 }
 
-/** 成就面板：统计 + 已获得/未解锁列表 */
-function AchievementsPanel({ compact = false }: { compact?: boolean }) {
-  const [records, setRecords] = useState(() => readUnlockedAchievements())
-  const [expanded, setExpanded] = useState(!compact)
-  useEffect(() => {
-    const sync = () => setRecords(readUnlockedAchievements())
-    window.addEventListener('waveforge:inparty-achievement', sync)
-    return () => window.removeEventListener('waveforge:inparty-achievement', sync)
-  }, [])
-  const summary = achievementSummary()
-  const unlockedIds = new Set(records.map(record => record.id))
-  const sorted = [...ACHIEVEMENTS].sort((a, b) => {
-    const aUnlocked = unlockedIds.has(a.id) ? 0 : 1
-    const bUnlocked = unlockedIds.has(b.id) ? 0 : 1
-    return aUnlocked - bUnlocked || a.tier.localeCompare(b.tier)
-  })
-
-  return (
-    <div className={compact ? 'space-y-1.5' : 'space-y-2 p-3'}>
-      <div className="rounded-xl border p-3" style={{ borderColor: GOLD + '55', background: 'rgba(255,232,156,0.06)' }}>
-        <div className="flex items-center justify-between text-[11px]">
-          <span className="font-bold" style={{ color: GOLD }}>🏆 成就进度</span>
-          <span className="text-white/60">{summary.unlocked}/{summary.total}（{summary.percent}%）</span>
-        </div>
-        <div className="mt-1.5 h-2 overflow-hidden rounded-full" style={{ background: 'rgba(255,255,255,0.1)' }}>
-          <div className="h-full rounded-full transition-all" style={{ width: summary.percent + '%', background: 'linear-gradient(90deg,' + GOLD + ',' + GOLD_DEEP + ')' }} />
-        </div>
-      </div>
-      <div className="space-y-1.5">
-        {(expanded ? sorted : sorted.slice(0, 5)).map(def => {
-          const unlocked = unlockedIds.has(def.id)
-          const shown = displayDef(def, unlocked)
-          const isEpic = shown.tier === 'epic'
-          return (
-            <div
-              key={def.id}
-              className="flex items-center gap-2.5 rounded-xl border px-2.5 py-2"
-              style={{
-                background: unlocked ? (isEpic ? 'rgba(176,100,224,0.1)' : 'rgba(255,232,156,0.07)') : PANEL_2,
-                borderColor: unlocked ? (isEpic ? 'rgba(176,100,224,0.45)' : GOLD + '55') : BORDER,
-                opacity: unlocked ? 1 : 0.55,
-              }}
-            >
-              <span className={'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-base ' + (unlocked ? '' : 'grayscale')} style={{ background: unlocked ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)' }}>
-                {shown.icon}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="flex items-center gap-1.5">
-                  <span className="truncate text-[11px] font-bold" style={{ color: unlocked ? (isEpic ? '#e8a0ff' : GOLD) : 'rgba(255,255,255,0.45)' }}>{shown.name}</span>
-                  {isEpic && unlocked && <span className="shrink-0 rounded px-1 text-[8px]" style={{ background: 'rgba(176,100,224,0.3)', color: '#e8a0ff' }}>史诗</span>}
-                </span>
-                <span className="block truncate text-[9.5px] text-white/40">{shown.desc}</span>
-              </span>
-              {unlocked && <Check className="h-3.5 w-3.5 shrink-0" style={{ color: GOLD }} />}
-            </div>
-          )
-        })}
-        {compact && sorted.length > 5 && (
-          <button type="button" onClick={() => setExpanded(v => !v)} className="w-full rounded-lg py-1.5 text-[10px] text-white/45 hover:bg-white/[0.05]">
-            {expanded ? '收起' : '查看全部 ' + sorted.length + ' 个成就'}
-          </button>
-        )}
-      </div>
-    </div>
-  )
-}
-
 /** 团队赛 2v2：队伍名单+比分+答题面板 */
 function TeamMatchPanel({ snapshot, selfPeerId, session, onStart, onAnswer }: {
   snapshot: InPartySessionSnapshot
@@ -2419,7 +2350,7 @@ function SessionCleanup({ onLeave, session }: { onLeave: () => void; session: Re
 }
 
 /** 房间视图：公告 + 成员栏（含正在听）+ 聊天（@/撤回）+ 侧栏（互控/轮盘/摄像头/日志/好友 五页签） */
-function Room({ snapshot, selfPeerId, settings, onLeave, onDissolve, onKick, onSetInterControl, onSendOp, onRequestControl, onOpenInvite, onQuickAction, onBindWave, onStartRoulette, onRespondRoulette, onSpinRoulette, onSetAnnouncement, onRecall, onAddFriend, onAcceptFriend, onDeclineFriend, camera, voice, session, sideTab, setSideTab, nowPlaying, onGain, liveLevel, panicKeys, onOpenFriends, onOpenAchievements }: {
+function Room({ snapshot, selfPeerId, settings, onLeave, onDissolve, onKick, onSetInterControl, onSendOp, onRequestControl, onOpenInvite, onQuickAction, onBindWave, onStartRoulette, onRespondRoulette, onSpinRoulette, onSetAnnouncement, onRecall, onAddFriend, onAcceptFriend, onDeclineFriend, camera, voice, session, sideTab, setSideTab, nowPlaying, onGain, liveLevel, panicKeys, onOpenFriends }: {
   snapshot: InPartySessionSnapshot
   selfPeerId: string
   settings: InPartySettings
@@ -2450,7 +2381,6 @@ function Room({ snapshot, selfPeerId, settings, onLeave, onDissolve, onKick, onS
   liveLevel: { left: number; right: number }
   panicKeys: string[]
   onOpenFriends: () => void
-  onOpenAchievements: () => void
 }) {
   const room = snapshot.room
   const [memberCard, setMemberCard] = useState<PartyMember | null>(null)
@@ -2546,16 +2476,13 @@ function Room({ snapshot, selfPeerId, settings, onLeave, onDissolve, onKick, onS
         </span>
         <span className="text-[11px] text-white/40">{snapshot.summary?.online ?? 0}/{room.maxMembers} 在线</span>
         <span className="flex-1" />
-        {/* 好友/成就：与大厅右上角同一对入口（房间内也要可达） */}
+        {/* 好友入口（房间内也要可达）；成就入口已迁至 设置→关于 成就系统 */}
         <button
           type="button" onClick={onOpenFriends}
           className="relative rounded-lg p-1.5 text-white/45 hover:bg-white/10" title="好友"
         >
           <UserPlus className="h-3.5 w-3.5" />
           {snapshot.friendRequests.length > 0 && <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-red-400" />}
-        </button>
-        <button type="button" onClick={onOpenAchievements} className="rounded-lg p-1.5 text-white/45 hover:bg-white/10" title="成就">
-          <Trophy className="h-3.5 w-3.5" />
         </button>
         {/* 公告：显示在同步听条位置，编辑入口收进这里（点击即编辑） */}
         {(room.announcement || isHost) && (
@@ -3045,7 +2972,6 @@ export default function InPartyView(props: {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [friendsOpen, setFriendsOpen] = useState(false)
-  const [achievementsOpen, setAchievementsOpen] = useState(false)
   const [sideTab, setSideTab] = useState('deck')
   const entryMode = useMemo(() => readEntryMode(), [snapshot.room])
   const camera = useCameraBroadcast(session, settings.videoAllowed, settings.cameraAutoStop)
@@ -3222,9 +3148,6 @@ export default function InPartyView(props: {
               <UserPlus className="h-4.5 w-4.5" />
               {snapshot.friendRequests.length > 0 && <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-red-400" />}
             </button>
-            <button type="button" onClick={() => setAchievementsOpen(true)} className="rounded-xl p-2 text-white/55 hover:bg-white/10" title="成就">
-              <Trophy className="h-4.5 w-4.5" />
-            </button>
             <button type="button" onClick={() => setSettingsOpen(true)} className="rounded-xl p-2 text-white/55 hover:bg-white/10" title="设置">
               <Settings2 className="h-4.5 w-4.5" />
             </button>
@@ -3269,7 +3192,6 @@ export default function InPartyView(props: {
                   liveLevel={liveLevel}
                   panicKeys={panicKeys}
                   onOpenFriends={() => setFriendsOpen(true)}
-                  onOpenAchievements={() => setAchievementsOpen(true)}
                 />
               </motion.div>
             ) : (
@@ -3333,28 +3255,7 @@ export default function InPartyView(props: {
             </motion.div>
           </motion.div>
         )}
-        {achievementsOpen && (
-          <motion.div
-            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[96] flex items-center justify-center p-6"
-            style={{ backgroundColor: 'rgba(2,2,4,0.72)', backdropFilter: 'blur(10px)' }} onClick={() => setAchievementsOpen(false)}
-          >
-            <motion.div
-              initial={{ scale: 0.94, y: 14, opacity: 0 }} animate={{ scale: 1, y: 0, opacity: 1 }} exit={{ scale: 0.94, y: 14, opacity: 0 }}
-              onClick={e => e.stopPropagation()}
-              className="max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-3xl border p-5"
-              style={{ background: 'linear-gradient(160deg,#12100a,#0b0b0e)', borderColor: BORDER }}
-            >
-              <div className="flex items-center justify-between">
-                <h2 className="flex items-center gap-2 text-base font-bold text-white"><Trophy className="h-4.5 w-4.5" style={{ color: GOLD }} />成就</h2>
-                <button type="button" onClick={() => setAchievementsOpen(false)} className="rounded-lg p-1.5 text-white/45 hover:bg-white/10"><X className="h-4 w-4" /></button>
-              </div>
-              <div className="mt-3">
-                <AchievementsPanel />
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
+        {/* 成就弹窗已迁至全局成就系统（设置→关于），内部入口与面板删除 */}
         {inviteOpen && (
           <InviteModal snapshot={snapshot} onClose={() => setInviteOpen(false)} />
         )}

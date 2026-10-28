@@ -859,6 +859,7 @@ function ProfileView({
         window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list' } }))
         setShowCreatePlaylist(false)
         showPlaylistToast('Apple 歌单创建成功', 'success')
+        void import('../achievements/triggers').then(m => m.awardPlaylistCreator()).catch(() => { /* ignore */ })
         return
       }
       const result = await createPlaylist(name, platform, {
@@ -890,6 +891,7 @@ function ProfileView({
           : '歌单创建成功',
         'success'
       )
+      void import('../achievements/triggers').then(m => m.awardPlaylistCreator()).catch(() => { /* ignore */ })
     } catch (error) {
       console.error('创建歌单失败:', error)
       showPlaylistToast(error instanceof Error ? error.message : '创建歌单失败，请重试', 'error')

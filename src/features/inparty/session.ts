@@ -50,8 +50,7 @@ import {
   type GameHubState, type GameKind,
 } from './games'
 import { appendFriendMessage, appendRoomHistory, markFriendMessagesDelivered, readFriends, readRoomHistory, touchFriendPresence, type StoredChatMessage } from './settings'
-import { bumpCounter, isAchievementUnlocked, unlockAchievement } from './achievements'
-import { notifyAchievement } from './AchievementToast'
+import { bumpCounter, isAchievementUnlocked, unlockAchievement, notifyAchievement } from './achievements'
 
 export type InPartyStatus = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed' | 'error'
 

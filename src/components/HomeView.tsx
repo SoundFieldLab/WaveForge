@@ -1187,6 +1187,7 @@ function HomeView({
         window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform: 'apple', type: 'playlist-list' } }))
         setShowCreatePlaylist(false)
         showPlaylistToast('Apple 歌单创建成功', 'success')
+        void import('../achievements/triggers').then(m => m.awardPlaylistCreator()).catch(() => { /* ignore */ })
         return
       }
       const result = await createPlaylist(name, platform, {
@@ -1224,6 +1225,7 @@ function HomeView({
             : '歌单创建成功',
         postCreateFailures.length ? 'info' : 'success'
       )
+      void import('../achievements/triggers').then(m => m.awardPlaylistCreator()).catch(() => { /* ignore */ })
     } catch (error) {
       console.error('Create playlist failed:', error)
       showPlaylistToast(error instanceof Error ? error.message : '创建歌单失败，请重试', 'error')

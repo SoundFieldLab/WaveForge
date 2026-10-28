@@ -213,6 +213,13 @@ const loadPodcastNowPlayingPage = () => import('./components/PodcastNowPlayingPa
 const LazyPodcastNowPlayingPage = lazy(loadPodcastNowPlayingPage)
 const loadBilibiliMvPlayer = () => import('./components/BilibiliMvPlayer')
 const loadBilibiliMvBackground = () => import('./components/BilibiliMvBackground')
+// 全局成就系统（弹窗挂顶层 body portal；面板挂在设置→关于）
+import { AchievementToastLayer, notifyAchievement } from './achievements/ToastLayer'
+import { unlock as unlockAchievement, isUnlocked as isAchievementUnlocked } from './achievements/core'
+import {
+  handleListenRecorded, handleLyricModeSwitched, handleOobeComplete,
+  unlockBugHeroIfGranted, awardAutomixFirst, awardSpatialAudio, awardDesktopLyrics, awardPlaylistCreator,
+} from './achievements/triggers'
 const LazyModernAudioVisualizer = lazy(loadModernAudioVisualizer)
 const LazyPlaybackRadialMenu = lazy(loadPlaybackRadialMenu)
 const LazyQQMusicPreferenceDialog = lazy(loadQQMusicPreferenceDialog)
@@ -411,6 +418,30 @@ function MaybePortal({ active, children }: { active: boolean; children: ReactNod
     ? createPortal(<div className="fixed top-0 left-0 z-[60] w-0 h-0">{children}</div>, document.body)
     : <>{children}</>
 }
+
+/**
+ * 全局成就引导件：挂顶层成就弹窗 + 启动时把兑换码里的成就类授权同步成已解锁状态
+ * （重装/清缓存后 deviceHash 不变 → 旧码仍有效，从 grants 恢复成就而不必重新兑换）。
+ */
+function AchievementBoot() {
+  useEffect(() => {
+    let cancelled = false
+    const syncGrantedAchievements = async () => {
+      try {
+        const api = (window as any).electron?.deviceLicense
+        if (!api?.getState) return
+        const result = await api.getState()
+        if (cancelled || !result?.success || !Array.isArray(result.grants)) return
+        const features = result.grants.map((grant: { feature?: string }) => String(grant.feature || ''))
+        unlockBugHeroIfGranted(features)
+      } catch { /* 非桌面环境忽略 */ }
+    }
+    void syncGrantedAchievements()
+    return () => { cancelled = true }
+  }, [])
+  return <AchievementToastLayer />
+}
+
 
 type LiveMiniPlayerProps = Omit<ComponentProps<typeof MiniPlayer>, 'currentTime'> & {
   playbackTimeStore: PlaybackTimeStore
@@ -3865,6 +3896,7 @@ function App() {
         let normalizedSong = normalizeSongCover(song)
       // 本地听歌记录：「听歌报告」数据源（每次实际开播记一条，90 秒内同曲去重）
       recordListen(normalizedSong)
+      window.dispatchEvent(new CustomEvent('waveforge:listen-recorded'))
       // 酷狗：无缝切换同样是一次开播，与普通播放路径一致上报最近播放（失败静默）
       if ((normalizedSong.platform || 'netease') === 'kugou') {
         void import('./services/kugouService')
@@ -3930,9 +3962,11 @@ function App() {
     audioPlayer.setPlayAtCallback(handlePlayAt)
   }, [playlist, audioPlayer, volume, ensureSongLyrics, resolveAppleCover])
 
-  useEffect(() => {
+    useEffect(() => {
     const handleAutoMixChange = () => {
       const enabled = localStorage.getItem('autoMixEnabled')
+      // 全局成就：第一次开启智能混音
+      if (enabled === 'true') awardAutomixFirst()
       const beatMatching = localStorage.getItem('autoMixBeatMatching')
       const skipSilence = localStorage.getItem('autoMixSkipSilence')
       const minDuration = localStorage.getItem('autoMixMinDuration')
@@ -4586,6 +4620,7 @@ function App() {
         setLyricDisplayMode(mode)
         localStorage.setItem('lyricDisplayMode', mode)
         window.dispatchEvent(new CustomEvent('lyricDisplayModeChanged', { detail: mode }))
+        handleLyricModeSwitched(mode)
       })
     }
     if (modeLoader) {
@@ -4621,6 +4656,21 @@ function App() {
     const handleLyricModesVisibilityChanged = () => setVisibleLyricModes(loadVisibleLyricModes())
     window.addEventListener('waveforge-lyric-modes-visibility-changed', handleLyricModesVisibilityChanged)
     return () => window.removeEventListener('waveforge-lyric-modes-visibility-changed', handleLyricModesVisibilityChanged)
+  }, [])
+
+  // ── 全局成就触发器（播放里程碑/时段； lyricDisplayModeChanged 事件里顺带判模式类成就）──
+  useEffect(() => {
+    const onListen = () => handleListenRecorded()
+    const onOobe = (event: Event) => handleOobeComplete(Boolean((event as CustomEvent).detail?.bgmAllowed))
+    const onBugHero = () => unlockBugHeroIfGranted(['achievement.bug-hero'])
+    window.addEventListener('waveforge:listen-recorded', onListen)
+    window.addEventListener('waveforge:oobe-completed', onOobe)
+    window.addEventListener('waveforge:bug-hero-redeemed', onBugHero)
+    return () => {
+      window.removeEventListener('waveforge:listen-recorded', onListen)
+      window.removeEventListener('waveforge:oobe-completed', onOobe)
+      window.removeEventListener('waveforge:bug-hero-redeemed', onBugHero)
+    }
   }, [])
 
   // 当前所在歌词模式始终保留在可见列表里
@@ -6480,6 +6530,7 @@ function App() {
       // 本地听歌记录：普通点歌/切歌同样入账（此前只有 gapless 交接路径记 recordListen，
       // 听歌报告长期接近空）。90 秒同曲去重在 recordListen 内部处理。
       recordListen(normalizedSong)
+      window.dispatchEvent(new CustomEvent('waveforge:listen-recorded'))
       // Apple Music 播放路由（官方支持方向）：
       // ① ECS Browser CDM (L3) + CENC/HLS 原生播放；② WebView2 兼容兜底；③ 网易云/QQ 载体。
       // castLabs 已确认 Windows MF CDM 是已废弃实验路径，默认 Browser CDM L3 才是生产方向。
@@ -8217,6 +8268,8 @@ function App() {
   useEffect(() => {
     const unsubscribe = window.electron?.desktopLyrics?.onEnabledChanged?.(enabled => {
       window.dispatchEvent(new CustomEvent('desktopLyricsEnabledChanged', { detail: enabled === true }))
+      // 全局成就：第一次开启桌面歌词
+      if (enabled === true) awardDesktopLyrics()
     })
     return unsubscribe
   }, [])
@@ -10407,6 +10460,8 @@ function App() {
       <RemoteCursor />
 
       {/* 首次平台登录风险提示（自包含，首次登录后弹出一次） */}
+      {/* 全局成就弹窗（MC 风格，z 最高，portal 到 body）+ 启动时同步兑换码里的成就授权 */}
+      <AchievementBoot />
       <PlatformLoginNotice playerTheme={playerTheme} />
 
       {/* OOBE 1（主题/隐私/免责引导）：默认不自动弹出，仅设置→高级 卡片触发 */}

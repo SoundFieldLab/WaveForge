@@ -22,7 +22,8 @@ import React, { memo, useState, useEffect, useRef, useCallback } from 'react'
 import { setSecureToken } from '../services/secureTokenStore'
 import { getMeasuredFrameRate, isFrameRateLimited } from '../utils/frameRateLimiter'
 import { motion, AnimatePresence, Reorder } from 'framer-motion'
-import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic, Tablet, Smartphone, RefreshCw, Download } from 'lucide-react'
+import { X, Settings as SettingsIcon, User, Palette, Sparkles, Info, ExternalLink, Github, ChevronRight, ChevronLeft, ChevronUp, ChevronDown, Trash2, Heart, Copy, ClipboardPaste, KeyRound, Code2, Users, BadgeCheck, CheckCircle2, Headphones, MonitorSmartphone, Gamepad2, Eye, EyeOff, FileText, Music, FolderHeart, Trash, AlertTriangle, ListMusic, Tablet, Smartphone, RefreshCw, Download, Trophy } from 'lucide-react'
+import { AchievementsModal } from '../achievements/AchievementsModal'
 import LoginButton from './LoginButton'
 import type { AppleUserInfo } from '../services/appleAuth'
 import type { StemModelProgress, RenderBackend } from '../electron'
@@ -846,6 +847,7 @@ function SettingsPanel({
   const [updateDetail, setUpdateDetail] = useState<UpdateDetail | null>(null)
   const [pendingUpdate, setPendingUpdate] = useState<{ version: string; stagedAt?: number } | null>(null)
   const [showVersionHistory, setShowVersionHistory] = useState(false)
+  const [showAchievements, setShowAchievements] = useState(false)
   const [autoCheckUpdate, setAutoCheckUpdate] = useState(() => parseStoredBoolean(localStorage.getItem('autoCheckUpdate'), true))
   const [skippedVersion, setSkippedVersion] = useState<string | null>(() => localStorage.getItem('skippedUpdateVersion'))
 
@@ -1131,6 +1133,11 @@ function SettingsPanel({
             type: 'success',
           },
         }))
+        // 全局成就：BUG英雄（feature=achievement.bug-hero 的兑换码）
+        const redeemedFeatures = (result.grants || []).map((grant: { feature?: string }) => String(grant.feature || ''))
+        if (redeemedFeatures.includes('achievement.bug-hero')) {
+          window.dispatchEvent(new CustomEvent('waveforge:bug-hero-redeemed'))
+        }
       } else {
         setRedeemMessage({ type: 'error', text: result.error })
       }
@@ -5640,6 +5647,21 @@ function SettingsPanel({
                         </button>
                       </div>
 
+                      {/* 成就系统入口卡片 */}
+                      <button
+                        onClick={() => setShowAchievements(true)}
+                        className={`mt-4 w-full rounded-xl border ${borderColor} ${hoverBg} p-4 flex items-center gap-4 transition-all text-left group`}
+                      >
+                        <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0" style={{ background: 'linear-gradient(135deg, rgba(255,216,61,0.18), rgba(199,125,255,0.18))' }}>
+                          <Trophy className="w-5 h-5" style={{ color: '#ffd83d' }} />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className={`font-medium ${textPrimary}`}>成就系统</p>
+                          <p className={`text-sm ${textSecondary} mt-0.5`}>查看全局里程碑与插件玩法成就</p>
+                        </div>
+                        <ChevronRight className={`w-4 h-4 shrink-0 ${textTertiary} transition-transform group-hover:translate-x-0.5`} />
+                      </button>
+
                       <div className={`mt-4 pt-4 border-t ${borderColor}`}>
                         <div>
                           <p className={`font-medium ${textPrimary}`}>查看软件源代码</p>
@@ -6279,6 +6301,9 @@ function SettingsPanel({
       )}
 
       {/* 法律声明弹窗 */}
+      {/* 成就系统弹窗（设置→关于 成就系统卡片） */}
+      <AchievementsModal open={showAchievements} onClose={() => setShowAchievements(false)} />
+
       {showVersionHistory && (
         <motion.div
           initial={{ opacity: 0 }}

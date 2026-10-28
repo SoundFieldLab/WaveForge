@@ -118,6 +118,10 @@ export default function SpatialAudioPage({ bridge, controller, theme, playbackTi
   useStateFeedback(active, compareRef)
   const hrtfFeedbackRef = useRef<HTMLDivElement>(null)
   useStateFeedback(hrtfName, hrtfFeedbackRef)
+  // 全局成就：第一次开启空间音频（音频引擎路径懒触发，避免引擎模块加载时就拉起成就系统）
+  useEffect(() => {
+    if (active) void import('../../../../achievements/triggers').then(m => m.awardSpatialAudio()).catch(() => { /* ignore */ })
+  }, [active])
 
   const patch = (partial: DeepPartial<SpatialSettings>) => controller.patch({ spatial: deepMerge(current(), partial) })
   // 事件内从桥读取最新值，连续的移动/转头/数值操作不会互相写回旧快照。

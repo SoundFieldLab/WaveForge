@@ -71,8 +71,7 @@ import {
   type ResonanceTransport,
 } from './transport'
 import { readResonanceJoinBehavior, readResonancePushLimit, readResonanceSettings } from './settings'
-import { bumpCounter, isAchievementUnlocked, unlockAchievement } from '../inparty/achievements'
-import { notifyAchievement } from '../inparty/AchievementToast'
+import { bumpCounter, isAchievementUnlocked, unlockAchievement, notifyAchievement } from '../inparty/achievements'
 
 export type ResonanceStatus = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed' | 'error'
 

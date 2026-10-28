@@ -307,6 +307,9 @@ export default function OobeGuide({ playerTheme = 'dark', enabled = false, force
     if (bgmAllowed) fadeOutBgm()
     setDone(true)
     onComplete?.()
+    // 全局成就：OOBE 完成 → 「欢迎！！！」（史诗）。允许音乐的等 5s 淡出结束后再弹，
+    // 拒绝音乐的 1s 后弹——时序由成就触发器（achievements/triggers.ts）负责。
+    window.dispatchEvent(new CustomEvent('waveforge:oobe-completed', { detail: { bgmAllowed: Boolean(bgmAllowed) } }))
   }
 
   if (!show || done) return null
