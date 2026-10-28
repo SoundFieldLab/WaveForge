@@ -117,12 +117,128 @@ export const GLOBAL_ACHIEVEMENTS: AchievementDef[] = [
     title: '挑战已完成！', name: 'BUG 英雄',
     desc: '开发者颁发的荣誉：发现并上报了重大 BUG', icon: 'bug',
   },
+  {
+    id: 'volume-tuner',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '调音师之手',
+    desc: '调整过播放音量', icon: 'slider',
+  },
+  {
+    id: 'quality-seeker',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '音质发烧友',
+    desc: '更改过音质偏好设置', icon: 'waves',
+  },
+  {
+    id: 'searcher',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '寻宝猎人',
+    desc: '第一次搜索歌曲', icon: 'search',
+  },
+  {
+    id: 'favorite-10',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '收藏家',
+    desc: '累计收藏 10 首歌曲', icon: 'heart',
+  },
+  {
+    id: 'queue-master',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '排队艺术家',
+    desc: '第一次使用「下一首播放」', icon: 'queue',
+  },
+  {
+    id: 'screenshot-lyric',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '歌词分享官',
+    desc: '第一次分享歌词卡片', icon: 'share',
+  },
+  {
+    id: 'explore-visitor',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '探索者',
+    desc: '第一次打开探索页', icon: 'compass',
+  },
+  {
+    id: 'all-nighter',
+    section: 'app', tier: 'epic',
+    title: '挑战已完成！', name: '通宵电台',
+    desc: '连续播放超过 3 小时不间断', icon: 'clock',
+  },
+  {
+    id: 'equalizer-tinkerer',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '频率雕塑家',
+    desc: '调整过均衡器', icon: 'eq',
+  },
+  {
+    id: 'desktop-mode',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '第二块屏幕',
+    desc: '第一次打开桌面模式', icon: 'monitor',
+  },
+  {
+    id: 'locale-switcher',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '世界公民',
+    desc: '切换过界面语言', icon: 'globe',
+  },
+  {
+    id: 'update-installer',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '与时俱进',
+    desc: '成功安装过一次版本更新', icon: 'download',
+  },
+  {
+    id: 'shortcut-user',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '键盘大师',
+    desc: '第一次使用键盘快捷键', icon: 'keyboard',
+  },
+  {
+    id: 'taskbar-widget',
+    section: 'app', tier: 'normal',
+    title: '进度已达成！', name: '任务栏常驻',
+    desc: '第一次开启任务栏播控', icon: 'pin',
+  },
+  {
+    id: 'karaoke-hour',
+    section: 'app', tier: 'epic',
+    title: '挑战已完成！', name: '家庭 KTV',
+    desc: '累计跟唱逐字歌词满 1 小时', icon: 'mic',
+  },
 ]
 
 /** 插件板块：当前只有 In Party 存量成就（inparty/achievements.ts 内定义）。 */
 export const PLUGIN_SECTION_LABEL: Record<string, string> = {
   inparty: 'In Party',
   resonance: '共振',
+}
+
+/* ── 插件可见性：第一次打开过该插件才在面板显示其成就组 ── */
+
+const PLUGIN_SEEN_KEY = 'waveforge:achievement-plugin-seen'
+
+export type PluginId = 'inparty' | 'dglab'
+
+/** 标记插件被打开过（首次进入 In Party / DGLab 控制台时调用；幂等） */
+export function markPluginOpened(plugin: PluginId): void {
+  try {
+    const seen = new Set<string>(JSON.parse(localStorage.getItem(PLUGIN_SEEN_KEY) || '[]'))
+    if (!seen.has(plugin)) {
+      seen.add(plugin)
+      localStorage.setItem(PLUGIN_SEEN_KEY, JSON.stringify(Array.from(seen)))
+    }
+  } catch { /* ignore */ }
+}
+
+export function isPluginOpened(plugin: string): boolean {
+  try {
+    const seen = new Set<string>(JSON.parse(localStorage.getItem(PLUGIN_SEEN_KEY) || '[]'))
+    return seen.has(plugin)
+  } catch {
+    return false
+  }
 }
 
 /* ── 全部成就（全局 + 运行时注册的插件成就）── */

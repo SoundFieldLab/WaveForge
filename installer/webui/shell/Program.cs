@@ -758,10 +758,34 @@ namespace WaveForge.SetupUI
             _unItems = new System.Collections.Generic.List<UninstallItem>();
             string instdir = Environment.GetEnvironmentVariable("WF_INSTALLDIR");
             if (string.IsNullOrEmpty(instdir)) instdir = Bs("INSTALLDIR", null) ?? Bs("DIR_CURRENT", "");
+            // e2e 探针（WF_SETUP_AUTODEMO）绝不碰真实用户数据：所有用户侧路径整体重定向到临时沙箱。
+            // 之前探针直呼真实路径 + 自动确认，曾把测试机上的真实 userData/缓存/快捷方式全删过——教训。
+            bool probe = Environment.GetEnvironmentVariable("WF_SETUP_AUTODEMO") == "1";
+            string sandboxRoot = null;
             string userData = UserDataDir();
             string localCache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "WaveForge");
             string updaterDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "waveforge-updater");
             string startMenu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Windows", "Start Menu", "Programs", "WaveForge 澜音工坊");
+            string desktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "WaveForge 澜音工坊.lnk");
+            if (probe)
+            {
+                sandboxRoot = Path.Combine(Path.GetTempPath(), "waveforge-uninstall-e2e-sandbox-" + Environment.UserName);
+                Directory.CreateDirectory(Path.Combine(sandboxRoot, "ud"));
+                Directory.CreateDirectory(Path.Combine(sandboxRoot, "cache"));
+                Directory.CreateDirectory(Path.Combine(sandboxRoot, "updater"));
+                Directory.CreateDirectory(startMenu); // 占位即可——下面 startMenu 也指进沙箱
+                string sandboxUd = Path.Combine(sandboxRoot, "ud");
+                string sandboxCache = Path.Combine(sandboxRoot, "cache");
+                string sandboxUpdater = Path.Combine(sandboxRoot, "updater");
+                string sandboxStartMenu = Path.Combine(sandboxRoot, "startmenu");
+                string sandboxDesktopLink = Path.Combine(sandboxRoot, "desktop.lnk");
+                Directory.CreateDirectory(sandboxStartMenu);
+                userData = sandboxUd; localCache = sandboxCache; updaterDir = sandboxUpdater; startMenu = sandboxStartMenu; desktopLink = sandboxDesktopLink;
+                // 探针同时绝不删真实安装目录：instdir 指向沙箱空目录，e2e 只验证 UI 流程
+                string sandboxInstall = Path.Combine(sandboxRoot, "install");
+                Directory.CreateDirectory(sandboxInstall);
+                instdir = sandboxInstall;
+            }
 
             AddItem("dir:install", "程序文件", instdir, "dir", false, "");
             AddItem("dir:cache", "音频分析与响度缓存", localCache, "dir", false, "wf-un-detail-cache");
@@ -789,10 +813,11 @@ namespace WaveForge.SetupUI
             // + userData 里的指纹快照文件。识别码本身由硬件因子派生，删干净后重装仍得到同一个 ID，
             // 之前兑换的码依旧可用；此项只决定是否残留本机识别数据。
             string fingerprintSnapshot = Path.Combine(userData, "device-fingerprint.json");
+            // 探针模式注册表也走沙箱键，绝不碰 HKCU\Software\WaveForge 真实识别码
+            string regKey = probe ? "HKCU\\Software\\WaveForgePreview-E2E" : "HKCU\\Software\\WaveForge";
             AddItem("reg:waveforge", "设备识别码",
-                "HKCU\\Software\\WaveForge" + (File.Exists(fingerprintSnapshot) ? "|" + fingerprintSnapshot : ""),
+                regKey + (File.Exists(fingerprintSnapshot) ? "|" + fingerprintSnapshot : ""),
                 "regkey+file", true, "识别码绑定本机硬件，删除或保留重装后不变");
-            string desktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "WaveForge 澜音工坊.lnk");
             AddItem("lnk:desktop", "桌面快捷方式", desktopLink, "file", false, "");
 
             return new
@@ -921,14 +946,18 @@ namespace WaveForge.SetupUI
                 }
             }
 
-            // 桌面快捷方式：只在 lnk 指向安装目录时删除（绝不误删同名文件）
-            try
+            // 桌面快捷方式：只在 lnk 指向安装目录时删除（绝不误删同名文件）；
+            // e2e 探针绝不碰真实桌面。
+            if (Environment.GetEnvironmentVariable("WF_SETUP_AUTODEMO") != "1")
             {
-                string instdir = Bs("INSTALLDIR", null) ?? Bs("DIR_CURRENT", "");
-                string desktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "WaveForge 澜音工坊.lnk");
-                if (File.Exists(desktopLink) && LnkTargetsIn(instdir, desktopLink)) { File.Delete(desktopLink); }
+                try
+                {
+                    string instdir = Bs("INSTALLDIR", null) ?? Bs("DIR_CURRENT", "");
+                    string desktopLink = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "WaveForge 澜音工坊.lnk");
+                    if (File.Exists(desktopLink) && LnkTargetsIn(instdir, desktopLink)) { File.Delete(desktopLink); }
+                }
+                catch { }
             }
-            catch { }
 
             // 卸载器自身与 NSIS 注册表由 NSIS 段负责；若纯壳调试模式（无 NSIS 父进程），这里清 shell 副本
             return new { logs = logs, };
@@ -961,7 +990,8 @@ namespace WaveForge.SetupUI
         /// <summary>结束正在运行的 WaveForge 主程序（按主程序 exe 精确匹配进程名，不误杀）。</summary>
         private object DoKillApp()
         {
-            if (_preview) return true;
+            // e2e 探针不杀真实进程（测试机上可能正跑着 WaveForge / dev 服务）
+            if (_preview || Environment.GetEnvironmentVariable("WF_SETUP_AUTODEMO") == "1") return true;
             int killed = 0;
             string exeName = Path.GetFileNameWithoutExtension(Bs("APP_EXE", "WaveForge.exe"));
             foreach (System.Diagnostics.Process p in System.Diagnostics.Process.GetProcessesByName(exeName))

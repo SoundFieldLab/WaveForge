@@ -130,8 +130,12 @@ export default function PluginOverlay() {
   // 引导本体由 DGLabConsoleModal 在控制台弹窗内部呈现（同尺寸、不另开全屏页）。
   // 之后可经控制台顶栏「连接引导」按钮随时再次打开。
   useEffect(() => {
-    if (host.dglabConsoleOpen && !isDGLabOobeShown()) {
-      window.dispatchEvent(new CustomEvent('waveforge:dglab-oobe-open'))
+    if (host.dglabConsoleOpen) {
+      // 全局成就：标记 DGLab 插件被打开过（成就面板插件板块可见性）
+      void import('../achievements/core').then(m => m.markPluginOpened('dglab')).catch(() => { /* ignore */ })
+      if (!isDGLabOobeShown()) {
+        window.dispatchEvent(new CustomEvent('waveforge:dglab-oobe-open'))
+      }
     }
   }, [host.dglabConsoleOpen])
 

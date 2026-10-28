@@ -217,3 +217,158 @@ export function AchievementIcon({ icon, unlocked, tier, size = 24, style }: { ic
 }
 
 export const MYSTERY_ICON = 'mystery'
+
+/* ── 扩容批次图标 ── */
+
+function SliderIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M4 7h16M4 17h16" {...stroke(color)} />
+      <circle cx="14" cy="7" r="2.4" fill="#1e1d20" stroke={color} strokeWidth="1.8" />
+      <circle cx="9" cy="17" r="2.4" fill="#1e1d20" stroke={color} strokeWidth="1.8" />
+    </svg>
+  )
+}
+
+function WavesIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M3 8c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2 2.5-2 5-2M3 14c2.5 0 2.5 2 5 2s2.5-2 5-2 2.5 2 5 2 2.5-2 5-2" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function SearchIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <circle cx="10.5" cy="10.5" r="6" {...stroke(color)} />
+      <path d="M15 15l5 5" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function HeartIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M12 19.5S4.5 15 4.5 9.8C4.5 7 6.7 5 9.2 5c1.2 0 2.2.6 2.8 1.5C12.6 5.6 13.6 5 14.8 5c2.5 0 4.7 2 4.7 4.8C19.5 15 12 19.5 12 19.5z" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function QueueIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M4 6h9M4 11h9M4 16h6" {...stroke(color)} />
+      <path d="M15 12.5v6l4.5-3z" fill={color} />
+    </svg>
+  )
+}
+
+function ShareIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M12 3.5v10M12 3.5L8.5 7M12 3.5L15.5 7" {...stroke(color)} />
+      <path d="M5.5 12v7.5h13V12" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function CompassIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <circle cx="12" cy="12" r="8.5" {...stroke(color)} />
+      <path d="M15.5 8.5l-2 5-5 2 2-5z" {...stroke(color)} strokeWidth={1.4} />
+    </svg>
+  )
+}
+
+function ClockIcon({ size = 24, color = '#c77dff', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <circle cx="12" cy="12" r="8.5" {...stroke(color)} />
+      <path d="M12 7v5l3.5 2" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function EqIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M4 13v4M8 9v8M12 5v12M16 8v9M20 11v6" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function MonitorIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <rect x="3" y="4.5" width="18" height="12" rx="1.5" {...stroke(color)} />
+      <path d="M9 20h6M12 16.5V20" {...stroke(color)} />
+      <path d="M6.5 8l3 2.5-3 2.5" {...stroke(color)} strokeWidth={1.3} />
+    </svg>
+  )
+}
+
+function GlobeIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <circle cx="12" cy="12" r="8.5" {...stroke(color)} />
+      <path d="M3.5 12h17M12 3.5c-5 5.5-5 11.5 0 17M12 3.5c5 5.5 5 11.5 0 17" {...stroke(color)} strokeWidth={1.3} />
+    </svg>
+  )
+}
+
+function DownloadIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <path d="M12 4v9M12 13l-3.5-3.5M12 13l3.5-3.5" {...stroke(color)} />
+      <path d="M5 16.5V19h14v-2.5" {...stroke(color)} />
+    </svg>
+  )
+}
+
+function KeyboardIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <rect x="3" y="7" width="18" height="10" rx="1.5" {...stroke(color)} />
+      <path d="M7 11h.01M11 11h.01M15 11h.01M7 14h.01M11 14h6" {...stroke(color)} strokeWidth={1.6} />
+    </svg>
+  )
+}
+
+function PinIcon({ size = 24, color = '#ffd83d', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <rect x="3.5" y="7" width="17" height="7.5" rx="1.5" {...stroke(color)} />
+      <path d="M12 14.5V20M9 20h6" {...stroke(color)} />
+      <path d="M7 10.75h6" {...stroke(color)} strokeWidth={1.3} />
+    </svg>
+  )
+}
+
+function MicIcon({ size = 24, color = '#c77dff', style }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" style={style} aria-hidden>
+      <rect x="9" y="3.5" width="6" height="11" rx="3" {...stroke(color)} />
+      <path d="M6 11.5a6 6 0 0 0 12 0M12 17.5V21M9 21h6" {...stroke(color)} />
+    </svg>
+  )
+}
+
+Object.assign(REGISTRY, {
+  slider: SliderIcon,
+  waves: WavesIcon,
+  search: SearchIcon,
+  heart: HeartIcon,
+  queue: QueueIcon,
+  share: ShareIcon,
+  compass: CompassIcon,
+  clock: ClockIcon,
+  eq: EqIcon,
+  monitor: MonitorIcon,
+  globe: GlobeIcon,
+  download: DownloadIcon,
+  keyboard: KeyboardIcon,
+  pin: PinIcon,
+  mic: MicIcon,
+})

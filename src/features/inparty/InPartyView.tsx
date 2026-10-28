@@ -2962,6 +2962,8 @@ export default function InPartyView(props: {
   onSelectMode: (mode: 'explore' | 'minimal' | 'traditional' | 'desktop' | 'resonance' | 'singalong' | 'inparty') => void
 }) {
   const { onSelectMode } = props
+  // 全局成就：标记插件被打开过（首次进入后，成就面板的插件板块永久可见）
+  void import('../../achievements/core').then(m => m.markPluginOpened('inparty')).catch(() => { /* ignore */ })
   const session = getInPartySession()
   const snapshot = useSessionSnapshot()
   const [settings, setSettings] = useState<InPartySettings>(() => readInPartySettings())
