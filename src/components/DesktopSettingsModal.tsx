@@ -1287,7 +1287,7 @@ export default function DesktopSettingsModal({
                                         ) : (
                                           <Video className="w-3 h-3 text-white/60" />
                                         )}
-                                        <span className="text-white/60">{wallpaper.format.toUpperCase()}</span>
+                                        <span className="text-white/60">{String(wallpaper.format || '未知').toUpperCase()}</span>
                                         <span className="text-white/40">·</span>
                                         <span className="text-white/40">{desktopWallpaperManager.formatSize(wallpaper.size)}</span>
                                       </div>

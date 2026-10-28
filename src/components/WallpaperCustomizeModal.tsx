@@ -312,7 +312,7 @@ export default function WallpaperCustomizeModal({ show, onClose, playerTheme = '
                             ) : (
                               <Video className="w-3 h-3" />
                             )}
-                            {wallpaper.format.toUpperCase()}
+                            {String(wallpaper.format || '未知').toUpperCase()}
                           </div>
                           <div className="px-2 py-1 bg-black/60 backdrop-blur-sm rounded text-xs text-white font-medium">
                             {wallpaperManager.formatSize(wallpaper.size)}

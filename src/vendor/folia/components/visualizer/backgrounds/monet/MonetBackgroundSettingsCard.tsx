@@ -145,7 +145,9 @@ const clampValue = (value: number, min: number, max: number, fallback: number) =
         : fallback
 );
 
-const normalizeHexInput = (value: string) => {
+const normalizeHexInput = (value: unknown) => {
+    // tuning 可能整体缺失（config?.monet?.tuning 为 undefined），入参不是字符串时回落默认色而不是抛错
+    if (typeof value !== 'string') return null;
     const withoutHash = value.trim().replace(/^#/, '');
     if (/^[0-9a-fA-F]{6}$/.test(withoutHash)) {
         return `#${withoutHash.toLowerCase()}`;
