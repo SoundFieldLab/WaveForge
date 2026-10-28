@@ -11503,7 +11503,8 @@ function App() {
                   但挂起（简约层不是当前显示的面）时必须连 portal 一起收起来：portal 挂在 body 上，
                   不受挂起层 visibility:hidden 的约束，留在原地会盖在桌面/探索/传统模式的顶部，
                   表现为「顶部下拉切模式，出来的却是歌词样式」。 */}
-              {!pureMusicPlayback && !isAppleRadioPlayback && !parkedMinimal && createPortal((
+              {/* 纯音乐/播客也保留入口：切歌词模式是版面选择，不依赖当前是否有词 */}
+              {!isAppleRadioPlayback && !parkedMinimal && createPortal((
                 <>
                   <button
                     type="button"
