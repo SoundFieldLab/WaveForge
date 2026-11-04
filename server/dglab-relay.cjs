@@ -341,8 +341,20 @@ function createDGLabRelay() {
       qrGenerated: false,
       deviceName: state.devices[0]?.name || (state.v3AppId ? 'DG-Lab App' : null),
       slotIds: state.devices.map(d => d.slotId),
-      softLimit: state.softLimit,
-      deviceStrength: state.deviceStrength,
+      // V4：devices.get resp 快照（resp 解析处维护 state.devices）映射出设备强度/静音上限；
+      // 之前 V4 恒为 null，控制台「App 实际强度」永远不显示。
+      softLimit: state.softLimit ?? (state.settings.version === 'v4' && state.devices[0]
+        ? {
+            A: clamp(Math.round(Number(state.devices[0].slotState?.channelA?.intensityMax ?? 200)), 0, 200),
+            B: clamp(Math.round(Number(state.devices[0].slotState?.channelB?.intensityMax ?? 200)), 0, 200),
+          }
+        : null),
+      deviceStrength: state.deviceStrength ?? (state.settings.version === 'v4' && state.devices[0]
+        ? {
+            A: clamp(Math.round(Number(state.devices[0].props?.intensityA ?? 0)), 0, 200),
+            B: clamp(Math.round(Number(state.devices[0].props?.intensityB ?? 0)), 0, 200),
+          }
+        : null),
       bound: state.bound,
     }
   }
@@ -575,11 +587,16 @@ const sendV3Pulse = (channel, frames) => {
     const slotId = state.devices[0]?.slotId
     if (!slotId) return
     const hex = frames.map(frameToHex)
-    const data = { c: channelIdx, t: V4_ACTION.Pulse, v: hex, p: 1, ver: 3 }
+    // im:true（立即替换同类任务）是防积压的关键：V4 波形是「持续任务」制，App 每 tick
+    // （100ms）只消费 1 帧；不带 im 的话每个 pulse 都是新任务，生产速率（节拍脉冲 5 帧 +
+    // LiveWave 1 帧交替，~15-21 帧/s）超过消费速率（10 帧/s）时任务在 App 端无限堆积，
+    // 队列堵死后 pulse 全部 cleared、强度指令也被拖死（真机 2026-11-01：1817 cleared / 43
+    // completed，设备只有 21:11 之前的残留单调波形）。替换式下发永远只占 1 个队列槽。
+    const data = { c: channelIdx, t: V4_ACTION.Pulse, v: hex, p: 1, ver: 3, im: true }
     for (const app of state.app.v4.values()) {
       if (!app.isClosed) {
         sendV4ToApp(app, { t: 'req', reqId: uuid(), m: 'device.op', data: { s: slotId, ...data } })
-        verboseLog(`V4 下发脉冲 c=${channelIdx} ${frames.length}帧 hex0=${hex[0]}`)
+        verboseLog(`V4 下发脉冲 c=${channelIdx} ${frames.length}帧 hex0=${hex[0]}（im 替换）`)
         break
       }
     }
@@ -1105,6 +1122,9 @@ const sendV3Pulse = (channel, frames) => {
     // V4 真机限流（2026-10-24）：叠加节拍脉冲后峰值 13 帧/s，App 的 WebSocket 处理扛不住
     // 洪峰（00:09 存活 3s、00:23 存活 ~2min 后 abort code=1006；2026-10-12 亦有帧洪水 abort 先例）。
     // V4 路径把 LiveWave 降到 200ms 一帧（5帧/s），与脉冲错峰；App 实时波形仍连续，只是步进更疏。
+    // V4 队列安全（2026-11-01）：V4 波形是任务制（App 每 100ms tick 只消费 1 帧），
+    // LiveWave 与节拍脉冲共用通道队列，im:true 替换式下发（见 sendV4Pulse）保证
+    // 每通道任一时刻只占 1 个队列槽，从根上杜绝任务积压（积压 = cleared 洪峰 + 强度指令被拖死）。
     const liveWaveInterval = state.settings.version === 'v3' ? 100 : 200
     if (now - engineState.liveWaveAt >= liveWaveInterval) {
       engineState.liveWaveAt = now
@@ -1600,8 +1620,39 @@ const sendV3Pulse = (channel, frames) => {
         }
         broadcastStatus()
       } else if (msg.t === 'resp') {
-        // 命令响应（调试用）
-        verboseLog(`V4 RPC 响应: ${summarizeFrame(raw)}`)
+        // RPC 响应：
+        // 1) devices.get 的 resp 携带全量设备快照（强度/静音/comfortLimit）——强度看门狗
+        //    每 5s 只发 devices.get，App 的周期性 slots.patch 并不总在（真机 2026-11-01：
+        //    slots.patch 只在强度变化时发，稳态下没有任何回报），不解析这里的话
+        //    state.devices/softLimit 校准与 UI 的设备强度就永远拿不到。
+        // 2) device.op 的 resp 是任务终态（completed/cleared/replaced/cancelled），
+        //    用于发现 App 端波形队列积压（cleared 洪峰 = 任务没被消费就被清掉）。
+        if (Array.isArray(msg.result?.devices) && msg.result.devices.length > 0) {
+          const prev = JSON.stringify(state.devices.map(d => [d.slotId, d.props?.intensityA, d.props?.intensityB]))
+          state.devices = msg.result.devices
+          const dev = state.devices[0]
+          if (dev) {
+            if (Number.isFinite(Number(dev.props?.intensityA))) enforceKnownStrength('A', Number(dev.props.intensityA))
+            if (Number.isFinite(Number(dev.props?.intensityB))) enforceKnownStrength('B', Number(dev.props.intensityB))
+            const muteA = dev.slotState?.channelA?.isMuted === true
+            const muteB = dev.slotState?.channelB?.isMuted === true
+            if ((muteA || muteB) && !state._v4MuteWarned) {
+              state._v4MuteWarned = true
+              log(`⚠️ [V4] App 端通道静音中：A=${muteA ? '静音' : '开'} B=${muteB ? '静音' : '开'} —— 设备不会输出，请在 DG-Lab App 的通道设置里解除静音`)
+            } else if (!muteA && !muteB) {
+              state._v4MuteWarned = false
+            }
+          }
+          const next = JSON.stringify(state.devices.map(d => [d.slotId, d.props?.intensityA, d.props?.intensityB]))
+          if (next !== prev) {
+            verboseLog(`V4 devices.get 快照更新: ${next}`)
+            broadcastStatus()
+          }
+        } else if (typeof msg.result?.type === 'number' && typeof msg.result?.reason === 'string') {
+          verboseLog(`V4 任务终态: t=${msg.result.type} ${msg.result.reason} ch=${msg.result.channel}`)
+        } else {
+          verboseLog(`V4 RPC 响应: ${summarizeFrame(raw)}`)
+        }
       } else if (msg.type === 'ping') {
         // 官方 V4 保活（dglab-kit SDK）：App 每 2s 发 {"type":"ping"}，必须回
         // {"type":"pong", ts}——连续 3 次（6s）未回 SDK 即判 ping_timeout 主动断开

@@ -637,8 +637,6 @@ export default function DGLabConsoleModal() {
   }[status.state] ?? { text: status.state, color: '#94a3b8' }
 
   const isBuiltinWave = ['continuous', 'breath', 'tide', 'beat', 'dglab-sweep'].includes(settings.waveId)
-  // 连接设置的三段选择器：3.0 / 4.0 / In Party（In Party 只是入口，不占用 version 字段）
-  const connSegmentValue: 'v3' | 'v4' | 'inparty' = partyOn ? 'inparty' : settings.version
   const stepPresetValue = settings.stepPreset === 'custom' ? settings.stepLimit : ({ strong: 30, medium: 12, weak: 5 }[settings.stepPreset] ?? 5)
 
   const copyAddress = async () => {
@@ -682,35 +680,33 @@ export default function DGLabConsoleModal() {
               <img src={DGLAB_LOGO} alt="DG-LAB" className="w-9 h-9 rounded-xl object-contain bg-white/90 p-0.5" draggable={false} />
               <div>
                 <h2 className="text-lg font-bold text-white tracking-tight">DG-LAB</h2>
-                {/* In Party 开关（原「音乐体感 · 7 种风格 · 左右立体声」小字位置）：
-                    开启后切到 In Party 模式（多人互控派对）；同时模式选择里也会出现 In Party 卡片 */}
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={partyOn}
-                  onClick={() => {
-                    if (partyOn) {
-                      window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: readEntryModeForParty() }))
-                    } else {
-                      window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))
-                    }
-                  }}
-                  className="group mt-0.5 flex items-center gap-1.5 text-[11px] transition-colors"
-                  style={{ color: partyOn ? GOLD : `${GOLD}88` }}
-                  title={partyOn ? 'In Party 已开启：点击返回之前模式' : '开启 In Party：多人互控派对（点击进入）'}
-                >
-                  <span
-                    className={`relative inline-flex h-3.5 w-7 items-center rounded-full transition-colors ${partyOn ? '' : 'bg-white/15'}`}
-                    style={partyOn ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
-                  >
-                    <span className={`absolute left-0.5 h-2.5 w-2.5 rounded-full bg-white shadow transition-transform ${partyOn ? 'translate-x-3.5' : ''}`} />
-                  </span>
-                  In Party
-                  <Users className="h-3 w-3 opacity-70" />
-                </button>
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {/* In Party 开关（原在标题下方小字位置）：开启后切到 In Party 模式（多人互控派对）；模式选择里也会出现 In Party 卡片 */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={partyOn}
+                onClick={() => {
+                  if (partyOn) {
+                    window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: readEntryModeForParty() }))
+                  } else {
+                    window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))
+                  }
+                }}
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium border transition-colors ${
+                  partyOn
+                    ? 'text-black border-transparent'
+                    : 'bg-white/[0.06] border-white/10 text-white/60 hover:bg-white/[0.12]'
+                }`}
+                style={partyOn ? { background: `linear-gradient(135deg,${GOLD},${GOLD_DEEP})` } : undefined}
+                title={partyOn ? 'In Party 已开启：点击返回之前模式' : '开启 In Party：多人互控派对（点击进入）'}
+              >
+                <Users className="w-3.5 h-3.5" />
+                In Party
+                <span className={`w-1.5 h-1.5 rounded-full ${partyOn ? 'bg-black/70' : 'bg-white/35'}`} />
+              </button>
               <button
                 type="button"
                 role="switch"
@@ -865,16 +861,9 @@ export default function DGLabConsoleModal() {
                             options={[
                               { value: 'v3', label: '3.0' },
                               { value: 'v4', label: '4.0' },
-                              { value: 'inparty', label: 'In Party', hint: 'In Party：多人互控派对（P2P 端到端加密）' },
                             ]}
-                            value={connSegmentValue}
-                            onChange={(v) => {
-                              if (v === 'inparty') {
-                                window.dispatchEvent(new CustomEvent('viewModeChanged', { detail: 'inparty' }))
-                                return
-                              }
-                              update({ version: v })
-                            }}
+                            value={settings.version}
+                            onChange={(v) => update({ version: v as 'v3' | 'v4' })}
                           />
                           {status.state === 'bound' && (
                             <button onClick={() => setConnExpanded(false)} className="p-1.5 rounded-lg hover:bg-white/10 text-white/50 transition-colors" title="收起连接设置">
