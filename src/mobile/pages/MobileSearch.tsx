@@ -3,8 +3,8 @@
  */
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import {
-  searchSongs, searchPlaylists, searchArtists, searchAlbums, searchHot,
-  type SearchResult, type PlaylistSearchResult, type Artist, type Album,
+  searchSongs, searchPlaylists, searchArtists, searchAlbums, searchHot, searchSuggest,
+  type SearchResult, type PlaylistSearchResult, type Artist, type Album, type SearchSuggestion,
 } from '../../services/musicApi'
 import type { Song } from '../../services/musicApi'
 import { useMobilePlayer } from '../mobilePlayer'
@@ -68,6 +68,8 @@ export default memo(function MobileSearch() {
     setSubmitted(q)
     pushHistory(q)
     setHistory(readHistory())
+    setSuggestions([])
+    setShowSuggest(false)
     setLoading(true)
     setSongResult(null)
     setPlResult(null)
@@ -82,6 +84,24 @@ export default memo(function MobileSearch() {
     Promise.all(jobs).finally(() => setLoading(false))
     try { inputRef.current?.blur() } catch { /* ignore */ }
   }, [nav.platform])
+
+  // ── 输入联想（searchSuggest，与 PC SearchPanel 同源）：300ms 防抖，选中即搜 ──
+  const [suggestions, setSuggestions] = useState<SearchSuggestion[]>([])
+  const [showSuggest, setShowSuggest] = useState(false)
+  const suggestSeqRef = useRef(0)
+  useEffect(() => {
+    const q = keyword.trim()
+    if (!q || submitted === q) { setShowSuggest(false); setSuggestions([]); return }
+    const seq = ++suggestSeqRef.current
+    const timer = window.setTimeout(() => {
+      searchSuggest(q, nav.platform).then(rows => {
+        if (seq !== suggestSeqRef.current) return
+        setSuggestions(rows.slice(0, 8))
+        setShowSuggest(rows.length > 0)
+      }).catch(() => undefined)
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [keyword, nav.platform, submitted])
 
   const songs = songResult?.songs || []
   const playlists = plResult?.playlists || []
@@ -104,12 +124,30 @@ export default memo(function MobileSearch() {
             onKeyDown={e => { if (e.key === 'Enter') doSearch(keyword) }}
           />
           {keyword && (
-            <button type="button" className="wf-m-search-clear" onClick={() => { setKeyword(''); setSubmitted('') }}>
+            <button type="button" className="wf-m-search-clear" onClick={() => { setKeyword(''); setSubmitted(''); setShowSuggest(false) }}>
               <IconClose size={15} />
             </button>
           )}
           <button type="button" className="wf-m-search-btn" onClick={() => doSearch(keyword)}>搜索</button>
         </div>
+        {/* 输入联想下拉（searchSuggest；点选直接以该词搜索） */}
+        {showSuggest && suggestions.length > 0 && (
+          <ul className="wf-m-suggest">
+            {suggestions.map((s, i) => (
+              <li key={`${s.keyword}-${i}`}>
+                <button
+                  type="button"
+                  className="wf-m-suggest-item"
+                  onClick={() => { setKeyword(s.keyword); doSearch(s.keyword) }}
+                >
+                  <IconSearch size={13} />
+                  <span className="wf-m-suggest-text">{s.keyword}</span>
+                  {s.subtitle && <span className="wf-m-suggest-sub">{s.subtitle}</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </header>
 
       {!submitted && (
