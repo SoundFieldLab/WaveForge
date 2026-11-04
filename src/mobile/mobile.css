@@ -2094,3 +2094,7 @@ html.mobile-mode ::-webkit-scrollbar {
   margin-top: 6px;
 }
 .wf-m-more-similar .wf-m-song-mini { position: relative; }
+
+/* 播放页歌手行可点（视觉不变 + 按压反馈） */
+.wf-m-sheet-artist-link { cursor: pointer; }
+.wf-m-sheet-artist-link:active { opacity: 0.7; }

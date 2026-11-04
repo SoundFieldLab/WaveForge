@@ -343,7 +343,23 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
       <div className="wf-m-sheet-meta">
         <div onClick={() => setDetailOpen(true)} role="button" aria-label="查看歌曲详情" className="wf-m-sheet-meta-text">
           <div className="wf-m-sheet-title">{song.name}</div>
-          <div className="wf-m-sheet-artist">{songArtists(song)} ›</div>
+          {/* 歌手可点直达歌手页（首位有 id 时）；无 id 退化为歌曲详情 */}
+          <div
+            className="wf-m-sheet-artist wf-m-sheet-artist-link"
+            role="button"
+            aria-label={`查看歌手 ${songArtists(song)}`}
+            onClick={e => {
+              e.stopPropagation()
+              const first = song.artists?.[0]
+              if (first?.id != null) {
+                nav.openArtist({ id: String(first.id), name: first.name, platform: (song.platform || 'netease') as import('../services/platforms').MusicPlatform })
+              } else {
+                setDetailOpen(true)
+              }
+            }}
+          >
+            {songArtists(song)} ›
+          </div>
         </div>
         {/* MV 快捷入口：与长按菜单同一条解析链（mv/mvid → getMVPlaybackInfo） */}
         {(song.mv ?? (song as { mvid?: number | string }).mvid) && (
