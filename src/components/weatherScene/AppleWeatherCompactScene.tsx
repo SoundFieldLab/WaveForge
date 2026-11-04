@@ -58,9 +58,20 @@ const drawAtlasFrame = (ctx: CanvasRenderingContext2D, image: HTMLImageElement, 
 
 const drawCover = (ctx: CanvasRenderingContext2D, image: HTMLImageElement, width: number, height: number, targetWidth: number, targetHeight: number, offsetX = 0) => {
   const scale = Math.max(targetWidth / width, targetHeight / height)
-  const drawWidth = width * scale
+  let drawWidth = width * scale
   const drawHeight = height * scale
-  ctx.drawImage(image, (targetWidth - drawWidth) / 2 + offsetX, (targetHeight - drawHeight) / 2, drawWidth, drawHeight)
+  // 小卡片下贴图 cover 后横向同样恰好铺满，漂移偏移会在左/右缘露出背景
+  // 渐变（与全屏场景同款残缺）。按偏移量做过扫描，保证平移后仍覆盖全卡片。
+  if (offsetX !== 0) {
+    const overscan = (drawWidth + Math.abs(offsetX) * 2) / drawWidth
+    drawWidth *= overscan
+    ctx.save()
+    ctx.translate(offsetX, (targetHeight - drawHeight * overscan) / 2)
+    ctx.drawImage(image, 0, 0, drawWidth, drawHeight * overscan)
+    ctx.restore()
+    return
+  }
+  ctx.drawImage(image, (targetWidth - drawWidth) / 2, (targetHeight - drawHeight) / 2, drawWidth, drawHeight)
 }
 
 const sceneAssetNames = (scene: AppleWeatherSceneModel) => {

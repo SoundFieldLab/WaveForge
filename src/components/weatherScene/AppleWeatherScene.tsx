@@ -69,9 +69,22 @@ const loadImages = async (names: string[]) => {
 
 const drawCover = (ctx: CanvasRenderingContext2D, image: CanvasImageSource, sourceWidth: number, sourceHeight: number, width: number, height: number, offsetX = 0) => {
   const scale = Math.max(width / sourceWidth, height / sourceHeight)
-  const drawWidth = sourceWidth * scale
+  let drawWidth = sourceWidth * scale
   const drawHeight = sourceHeight * scale
-  ctx.drawImage(image, (width - drawWidth) / 2 + offsetX, (height - drawHeight) / 2, drawWidth, drawHeight)
+  // 全屏模式下贴图横向恰好铺满（drawWidth == width），任何漂移偏移都会在
+  // 左/右边缘露出底下未覆盖的背景渐变（用户实测：毛毛雨云幕左缘残缺带）。
+  // 按偏移量做过扫描：绘制宽度加上 |offsetX| 的两倍，等比放大高度，保证
+  // 平移到任意位置时水平方向仍覆盖整个视口。
+  if (offsetX !== 0) {
+    const overscan = (drawWidth + Math.abs(offsetX) * 2) / drawWidth
+    drawWidth *= overscan
+    ctx.save()
+    ctx.translate(offsetX, (height - drawHeight * overscan) / 2)
+    ctx.drawImage(image, 0, 0, drawWidth, drawHeight * overscan)
+    ctx.restore()
+    return
+  }
+  ctx.drawImage(image, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight)
 }
 
 const drawAtlasFrame = (ctx: CanvasRenderingContext2D, image: HTMLImageElement, frame: number, columns: number, rows: number, x: number, y: number, width: number, height: number) => {
