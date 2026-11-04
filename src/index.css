@@ -1817,6 +1817,57 @@ html.pc-touch [data-wf-top-toggle] {
   height: 56px !important;
 }
 
+/* ── 触屏 hover 冲突兜底（@media (hover: none)，标准检测、不依赖 html 类）──
+   手机浏览器访问 PC 布局（web 设备类、无 pc-touch 类）也走这套：
+   1) 首次 tap 在触屏上会先派发 mouseenter/mouseover 再 click，opacity-0 的
+      hover 揭示按钮会"点了一次没反应"（点到了透明态）→ 揭示类按钮强制可见；
+   2) hover 变色/缩放类效果在 tap 后会"粘住"（无 mouseleave）→ 一律禁用，
+      由 :active 提供按压反馈（对应移动端规范 mobile.css 的 active 反馈）。
+   注意范围克制：只处理 opacity 揭示与变换，不动布局类 hover。 */
+@media (hover: none) and (pointer: coarse) {
+  [class*='group-hover\:opacity-100'].opacity-0 { opacity: 0.9 !important; }
+  .hover\:opacity-100.opacity-0 { opacity: 0.85 !important; }
+  .hover\:opacity-75:active, .hover\:opacity-80:active { opacity: 0.6 !important; }
+  .hover\:scale-105:active, .hover\:scale-110:active { transform: scale(0.97); }
+  /* inline onMouseEnter 背景切换（Soda/Apple 侧栏等）触屏无副作用但无按压反馈：
+     通用的按下变暗替代 hover 高亮 */
+  button:active { filter: brightness(0.88); }
+  button:active > * { pointer-events: none; }
+}
+
+/* ── 触屏小目标热区扩大（pc-touch + 手机浏览器通吃）──
+   原理：伪元素不可见地铺满按钮外扩范围，命中判定随伪元素扩大，
+   视觉渲染不受影响。优先处理真机审计命中的最小目标。 */
+@media (hover: none) and (pointer: coarse) {
+  /* 轮播圆点（h-1.5 ≈ 6px）：点击判定扩到 24×24 */
+  [class*='rounded-full'][class*='h-1.5'],
+  [class*='rounded-full'][class*='w-1.5'] {
+    position: relative;
+  }
+  [class*='rounded-full'][class*='h-1.5']::before,
+  [class*='rounded-full'][class*='w-1.5']::before {
+    content: '';
+    position: absolute;
+    inset: -9px;
+  }
+  /* 顶栏小图标按钮（p-2 + h-4 w-4 图标 ≈ 32px 总命中）：扩到 ~40px */
+  button .h-4.w-4, button .h-3\.5.w-3\.5 {
+    pointer-events: none;
+  }
+  button:has(> .h-4.w-4)::before,
+  button:has(> .h-4.w-4)::after {
+    content: none;
+  }
+  button > .h-4.w-4, button > .h-3\.5.w-3\.5 { margin: -4px; }
+  /* 进度条触控区（role=slider 的容器）：上下外扩 10px 便于拖动
+     （TraditionalView 播放条 role="slider" 结构，视觉条仅 h-1） */
+  [role='slider'][aria-label='播放进度']::before {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; top: -10px; bottom: -10px;
+  }
+}
+
 /* 官方播放中均衡器（3 根绿条跳动） */
 .wf-eq {
   --eq-color: #1ed760;
