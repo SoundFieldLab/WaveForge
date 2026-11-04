@@ -118,7 +118,128 @@ export class EngineV3Host {
   private disposed = false
   private spatialHrtf: HrtfGrid | null = null
   private headPose: HeadPose | null = null
-  private spatialInputChannels = 2
+
+  // ── 稳态掉帧自动降级 ──
+  // 移动端（vivo 等）CPU 上 15 级 DSP 链可能持续超出 worklet 块预算：稳态 overrun
+  // 比例过高时音频表现为爆音/杂音/速度异常感（渲染线程丢块即丢样本）。此处分级响应：
+  //  - 达到阈值：先降级为 script 模式（主线程同内核，UI 卡一点但音频稳）；
+  //  - script 模式也稳态超时（主线程回调同样丢块）：恢复 masterGain→analyser 直连
+  //    （音效全关，保播放），并派发 waveforge-v3-overrun 事件由 UI 层提示用户。
+  // 只看稳态（overrunSteady），配置类（overrunConfig）属于参数下发瞬时开销，不触发降级。
+  /** 连续 N 个 stats 窗口稳态超预算比例超阈即降级（stats 窗口 ≈ 数秒）。 */
+  private static readonly OVERRUN_RATIO_THRESHOLD = 0.08
+  private static readonly OVERRUN_WINDOW_STRIKES = 3
+  private overrunStrikes = 0
+  private overrunDegraded = false
+  private lastOverrunDegradationAt = 0
+  /** 最近一次降级事件（UI 层读取/测试断言）；null = 无。 */
+  private lastOverrunEvent: { level: 'script' | 'bypass'; ratio: number } | null = null
+
+  /** 稳态超预算监控：在 stats 回传处调用。 */
+  private noteOverrun(timing: { overruns?: number; overrunSteady?: number; overrunConfig?: number; callbacks?: number; blockBudgetMs?: number }): void {
+    const callbacks = timing.callbacks ?? 0
+    const steady = timing.overrunSteady ?? 0
+    if (callbacks <= 0 || callbacks < 16) return // 窗口太短不足以判定
+    const ratio = steady / callbacks
+    if (ratio >= EngineV3Host.OVERRUN_RATIO_THRESHOLD) {
+      this.overrunStrikes++
+    } else if (this.overrunStrikes > 0) {
+      this.overrunStrikes--
+    }
+    if (this.overrunStrikes >= EngineV3Host.OVERRUN_WINDOW_STRIKES) {
+      this.overrunStrikes = 0
+      // 冷却 60s：降级后引擎负载必然骤降，避免残余统计立即再次触发
+      const now = Date.now()
+      if (now - this.lastOverrunDegradationAt < 60_000) return
+      this.lastOverrunDegradationAt = now
+      this.lastOverrunEvent = { level: this.activeMode === 'worklet' ? 'script' : 'bypass', ratio }
+      if (this.activeMode === 'worklet') {
+        // worklet → script：重建处理节点（同 handle 重接）
+        void this.recoverToScript()
+      } else {
+        // script 仍超时 → 直连旁路（音效停用保播放）
+        this.bypassEngine('稳态 DSP 超预算（script 模式仍掉帧），已恢复直连并停用音效')
+      }
+      try {
+        window.dispatchEvent(new CustomEvent('waveforge-v3-overrun', { detail: { ...this.lastOverrunEvent } }))
+        // 用户可见提示：复用全局 toast（App.tsx 监听 showToast）。音效降级是用户可感知
+        // 的听感变化，静默降级会被当成"音效坏了"。
+        const msg = this.lastOverrunEvent?.level === 'bypass'
+          ? '设备性能不足，音效已临时停用以保证播放流畅'
+          : '设备性能不足，音效已切换至低功耗模式'
+        window.dispatchEvent(new CustomEvent('showToast', { detail: { message: msg, type: 'warning' } }))
+      } catch { /* 非浏览器环境 */ }
+    }
+  }
+
+  /** worklet 稳态掉帧 → 降级 script 模式（同一纯 TS 内核跑主线程，缓冲更大不易丢块）。 */
+  private async recoverToScript(): Promise<void> {
+    const handle = this.handle
+    if (!handle || this.disposed) return
+    console.warn('[V3Host] worklet 稳态超预算，降级为 ScriptProcessor 模式（音频稳定优先）')
+    const seq = ++this.attachSeq
+    try { handle.masterGain.disconnect?.() } catch { /* noop */ }
+    try { this.node?.disconnect?.() } catch { /* noop */ }
+    this.node = null
+    this.activeMode = null
+    // 直接走 script 兜底（forceScript 内部不再尝试 worklet）
+    try {
+      const node = this.createScriptNode(handle)
+      if (!node) throw new Error('script unavailable')
+      handle.masterGain.connect?.(node)
+      node.connect?.(handle.analyser)
+      if (handle.channelSplitterNode) node.connect?.(handle.channelSplitterNode)
+      if (seq !== this.attachSeq) {
+        // 期间又被重 attach/dispose：放弃本次接线，恢复直连由新路径负责
+        try { node.disconnect?.() } catch { /* noop */ }
+        return
+      }
+      this.node = node
+      this.activeMode = 'script'
+    } catch {
+      this.bypassEngine('降级 script 失败，已恢复直连并停用音效')
+    }
+  }
+
+  /** 旁路引擎：断开处理节点、恢复 masterGain→analyser 直连（音效停用，播放不断）。 */
+  private bypassEngine(reason: string): void {
+    const handle = this.handle
+    if (!handle) return
+    console.warn('[V3Host]', reason)
+    try { handle.masterGain.disconnect?.() } catch { /* noop */ }
+    try { this.node?.disconnect?.() } catch { /* noop */ }
+    try {
+      handle.masterGain.connect?.(handle.analyser)
+      if (handle.channelSplitterNode) handle.masterGain.connect?.(handle.channelSplitterNode)
+    } catch { /* noop */ }
+    this.node = null
+    this.activeMode = null
+  }
+
+  /** script 兜底节点构造（attach 与降级路径共用）。 */
+  private createScriptNode(handle: V3HostHandle): V3AudioNodeLike | null {
+    const ctx = handle.audioContext
+    if (!ctx.createScriptProcessor) return null
+    const sp = ctx.createScriptProcessor(this.blockSize, 32, 2)
+    sp.channelInterpretation = 'discrete'
+    const scriptInputs: Float32Array[] = new Array(32)
+    const scriptOutputs: Float32Array[] = new Array(2)
+    sp.onaudioprocess = (e) => {
+      const count = this.spatialInputChannels
+      scriptInputs.length = count
+      for (let channel = 0; channel < count; channel++) scriptInputs[channel] = e.inputBuffer.getChannelData(channel)
+      const outL = e.outputBuffer.getChannelData(0)
+      const outR = e.outputBuffer.getChannelData(1)
+      scriptOutputs[0] = outL; scriptOutputs[1] = outR
+      this.engine.process(scriptInputs, scriptOutputs)
+    }
+    return sp
+  }
+
+  /** 最近一次掉帧降级事件（UI 层展示用）；null = 尚未发生。 */
+  getLastOverrunEvent(): { level: 'script' | 'bypass'; ratio: number } | null {
+    return this.lastOverrunEvent
+  }  private spatialInputChannels = 2
 
   constructor(opts?: V3HostOptions) {
     this.defaultMode = opts?.mode ?? 'auto'
@@ -134,7 +255,8 @@ export class EngineV3Host {
 
   /** 引擎实例（惰性创建：attach 时按上下文采样率自建，或返回注入实例） */
   get engine(): EngineV3 {
-    if (!this.engineRef) this.engineRef = new EngineV3(this.hostFs > 0 ? this.hostFs : 48000, 2)
+    // 兜底 44100：vivo 等手机输出 44.1k；attach 时会按 ctx.sampleRate 校准重建
+    if (!this.engineRef) this.engineRef = new EngineV3(this.hostFs > 0 ? this.hostFs : 44100, 2)
     return this.engineRef
   }
 
@@ -212,7 +334,7 @@ export class EngineV3Host {
           const port = node.port
           if (port) {
             port.onmessage = (e: { data: unknown }) => {
-              const d = e.data as { type?: string; stats?: EngineStats; analysis?: EngineAnalysis }
+              const d = e.data as { type?: string; stats?: EngineStats; analysis?: EngineAnalysis; timing?: { overruns?: number; overrunSteady?: number; overrunConfig?: number; callbacks?: number; blockBudgetMs?: number } }
               if (d?.type === 'stats') {
                 if (d.stats) {
                   this.lastStats = d.stats
@@ -220,6 +342,7 @@ export class EngineV3Host {
                   if (observed && observed !== this.spatialInputChannels) this.setSpatialInputChannelCount(observed)
                 }
                 if (d.analysis) this.lastAnalysis = d.analysis
+                if (d.timing) this.noteOverrun(d.timing)
               }
             }
             this.workletIrRef = null
@@ -251,20 +374,7 @@ export class EngineV3Host {
       // 显式遥测：script 兜底意味着 15 级 DSP 链（含 HRTF 卷积）跑在主线程逐样本回调里，
       // 此前是静默回退，用户可能长期跑在降级模式而无感知。mode 本身仍按原样工作（不改变音频行为）。
       console.warn('[V3Host] AudioWorklet 不可用，回退 ScriptProcessor 主线程 DSP 模式（空间音频/卷积将占用主线程；请检查 worklet 资源加载）')
-      const sp = ctx.createScriptProcessor(this.blockSize, 32, 2)
-      sp.channelInterpretation = 'discrete'
-      const scriptInputs: Float32Array[] = new Array(32)
-      const scriptOutputs: Float32Array[] = new Array(2)
-      sp.onaudioprocess = (e) => {
-        const count = this.spatialInputChannels
-        scriptInputs.length = count
-        for (let channel = 0; channel < count; channel++) scriptInputs[channel] = e.inputBuffer.getChannelData(channel)
-        const outL = e.outputBuffer.getChannelData(0)
-        const outR = e.outputBuffer.getChannelData(1)
-        scriptOutputs[0] = outL; scriptOutputs[1] = outR
-        this.engine.process(scriptInputs, scriptOutputs)
-      }
-      node = sp
+      node = this.createScriptNode(handle)
       mode = 'script'
     }
 
@@ -457,7 +567,10 @@ export class EngineV3Host {
   /** 可序列化节点同时进入主线程参照引擎和 Worklet 实际音频链。 */
   registerSerializableProcessingNode(config: HseSerializableNodeConfig): void {
     const copy = structuredClone(config)
-    const fs = this.handle?.audioContext.sampleRate ?? (this.hostFs > 0 ? this.hostFs : 48000)
+    // 采样率兜底：先 hostFs，再活动 handle，最后按设备输出惯例取 44100——
+    // vivo 等手机输出 44.1k，早于 attach 注册节点时用 48k 重建会在首个 attach
+    // 全量重算（且描述节点滤波器系数按错误 fs 设计）。44.1k 兜底偏差更小。
+    const fs = this.handle?.audioContext.sampleRate ?? (this.hostFs > 0 ? this.hostFs : 44100)
     const node = createSerializableProcessingNode(copy, fs)
     this.serializableNodes.set(copy.id, copy)
     this.engine.registerProcessingNode(node)
