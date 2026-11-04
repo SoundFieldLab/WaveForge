@@ -9,6 +9,7 @@ import {
 import type { Song } from '../../services/musicApi'
 import { useMobilePlayer } from '../mobilePlayer'
 import { useMobileNav } from '../nav'
+import type { MusicPlatform } from '../../services/platforms'
 import {
   Cover, IconSearch, IconClose, IconClock, IconSearchDel, Spinner, fmtCount, songArtists, useLazyList,
 } from '../ui'
@@ -321,7 +322,19 @@ const SongResults = memo(function SongResults({
               <span className="wf-m-song-index">{i + 1}</span>
               <span className="wf-m-song-meta">
                 <span className="wf-m-song-name">{song.name}</span>
-                <span className="wf-m-song-sub">{songArtists(song)}</span>
+                {/* 歌手名可点跳歌手页（首位有 id 时）：搜索直达歌手是高频路径 */}
+                <span
+                  className={song.artists?.[0]?.id != null ? 'wf-m-song-sub wf-m-song-sub-link' : 'wf-m-song-sub'}
+                  role={song.artists?.[0]?.id != null ? 'button' : undefined}
+                  onClick={e => {
+                    const first = song.artists?.[0]
+                    if (first?.id == null) return
+                    e.stopPropagation()
+                    nav.openArtist({ id: String(first.id), name: first.name, platform: (song.platform || 'netease') as MusicPlatform })
+                  }}
+                >
+                  {songArtists(song)}
+                </span>
               </span>
               <Cover song={song} size={72} rounded={6} />
             </button>
