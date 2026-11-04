@@ -56,7 +56,7 @@ class MainActivity : Activity() {
         private const val PREF_CORE_KEY = "core_assets_version"
         private const val PREF_DIST_KEY = "dist_assets_version"
         private const val CORE_ASSETS_VERSION = 13
-        private const val DIST_ASSETS_VERSION = 43
+        private const val DIST_ASSETS_VERSION = 44
         private const val SERVER_URL = "http://localhost:3001/"
         private const val HEALTH_URL = "http://localhost:3001/health"
         // Node 启动标记：必须进程级唯一（nodejs-mobile 不支持重启、每次进程只允许一个）。
