@@ -144,6 +144,18 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         return
       }
 
+      // ⚠️ 安卓（含 PC 版布局 pc-touch）必须优先走原生桥：安卓壳会注入兼容性
+      // window.electron 对象（hasElectron=true），若先判 Electron 会调
+      // qq-qr-login-start —— 但安卓没有 Electron 主进程接盘，最终掉进已被腾讯
+      // 风控的 ptlogin 网页二维码（403「二维码失效」）。原生桥 openQQLogin 才是
+      // 安卓上的 QQ 音乐 App 扫码通道（原生面板 + cookie 自动回传）。
+      if (native?.openQQLogin) {
+        setQQError('')
+        setQQManualMode(false)
+        native.openQQLogin()
+        return
+      }
+
       if (electron?.openQQLoginWindow) {
         // 桌面：Electron 登录窗口（登录成功自动抓取 cookie）
         const result = await electron.openQQLoginWindow()
@@ -159,12 +171,6 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         }
         return
       }
-
-      // TV/安卓：应用内扫码登录——原生侧弹出 QQ 登录页（手机扫码），
-      // 抓到 cookie 后通过 qqLoginCookieCaptured 事件回传
-      setQQError('')
-      setQQManualMode(false)
-      native.openQQLogin()
     } catch (err) {
       if (!mountedRef.current) return
       console.error('QQ 自动登录失败:', err)
@@ -215,6 +221,11 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
 
   const startPolling = (key: string, generation: number) => {
     clearPolling()
+    // 自动续码：网易云 unikey 约 3 分钟过期，用户常在弹窗挂几分钟后才扫 →
+    // 扫的是已回收的旧码，手机端显示"登录成功"而网页端一直 800"二维码不存在"，
+    // 用户还找不到原因（实机实测）。800 时自动换新码继续轮询（最多 4 次），
+    // 只有连续 4 次都没人到 802/803 才真的停表提示手动刷新。
+    let autoRefreshCount = 0
     const poll = async () => {
       if (!isCurrent(generation)) return
       const controller = new AbortController()
@@ -226,6 +237,12 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
         if (!isCurrent(generation)) return
 
         if (data.code === 800) {
+          if (autoRefreshCount < 4) {
+            autoRefreshCount += 1
+            finished = true
+            void generateQRCode()
+            return
+          }
           setStatus('expired')
           finished = true
         } else if (data.code === 801) {
@@ -799,6 +816,11 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                     {qqError && (
                       <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
                         <p className="text-red-400 text-sm">{qqError}</p>
+                        <p className="mt-2 text-white/45 text-xs leading-relaxed">
+                          提示：WaveForge 不支持账号密码登录（QQ 官方风控限制）。推荐用「手机 QQ 扫码」或
+                          在浏览器登录 y.qq.com 后<span className="underline">手动粘贴 Cookie</span>；
+                          若在 QQ 官方页面输密码失败，那是官方页的限制，与本应用无关。
+                        </p>
                       </div>
                     )}
 
@@ -909,6 +931,11 @@ export default function LoginView({ platform, onCancel, onLoginSuccess }: LoginV
                     {qqError && (
                       <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4">
                         <p className="text-red-400 text-sm">{qqError}</p>
+                        <p className="mt-2 text-white/45 text-xs leading-relaxed">
+                          提示：WaveForge 不支持账号密码登录（QQ 官方风控限制）。推荐用「手机 QQ 扫码」或
+                          在浏览器登录 y.qq.com 后<span className="underline">手动粘贴 Cookie</span>；
+                          若在 QQ 官方页面输密码失败，那是官方页的限制，与本应用无关。
+                        </p>
                       </div>
                     )}
 
