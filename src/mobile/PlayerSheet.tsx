@@ -15,13 +15,17 @@ import MobileLyricSettingsSheet, { readLyricViewSettings, type LyricViewSettings
 import { useMobileBack } from './mobileBack'
 import {
   Cover, IconArrowDown, IconArrowUp, IconChevronDown, IconClose, IconHeart, IconHeartFilled, IconMore, IconNext, IconPause, IconPlay,
-  IconPrev, IconQueue, IconRepeat, IconRepeatOne, IconSettings2, IconShuffle, IconVolume, Spinner, fmtTime, songArtists, songCoverUrl,
+  IconPlayCircle, IconPrev, IconQueue, IconRepeat, IconRepeatOne, IconSettings2, IconShuffle, IconVolume, Spinner, fmtTime, songArtists, songCoverUrl,
+  mobileToast,
 } from './ui'
+import { useMobileNav } from './nav'
 
 export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const player = useMobilePlayer()
+  const nav = useMobileNav()
   const { currentTime: playTime, isBuffering } = useMobileTime()
   const song = player.currentSong
+  const [mvLoading, setMvLoading] = useState(false)
   const [view, setView] = useState<'cover' | 'lyrics'>('cover')
   const [queueOpen, setQueueOpen] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
@@ -96,14 +100,31 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
   }, [lyrics, playTime])
 
   const lyricsBoxRef = useRef<HTMLDivElement | null>(null)
+  // 用户滚动让位：手动滚动歌词后暂停自动跟随，2.5s 无操作（或点「回到当前行」）
+  // 恢复跟随。没有这个机制，长歌词页手动浏览会被 0.4s 一跳的自动滚动顶回去。
+  const [userScrolling, setUserScrolling] = useState(false)
+  const userScrollTimerRef = useRef<number | null>(null)
+  const lastAutoScrollLineRef = useRef(-1)
+  const markUserScrolling = useCallback(() => {
+    setUserScrolling(true)
+    if (userScrollTimerRef.current !== null) window.clearTimeout(userScrollTimerRef.current)
+    userScrollTimerRef.current = window.setTimeout(() => setUserScrolling(false), 2500)
+  }, [])
+  useEffect(() => () => {
+    if (userScrollTimerRef.current !== null) window.clearTimeout(userScrollTimerRef.current)
+  }, [])
   useEffect(() => {
     if (view !== 'lyrics' || activeLyricIndex < 0) return
+    // 用户滚动期间不自动跟（回到当前行按钮可恢复）；行没变也不重复滚
+    if (userScrolling) return
+    if (lastAutoScrollLineRef.current === activeLyricIndex) return
+    lastAutoScrollLineRef.current = activeLyricIndex
     const box = lyricsBoxRef.current
     const el = box?.querySelector(`[data-line="${activeLyricIndex}"]`) as HTMLElement | null
     if (box && el) {
       box.scrollTo({ top: el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2, behavior: 'smooth' })
     }
-  }, [view, activeLyricIndex])
+  }, [view, activeLyricIndex, userScrolling])
 
   // ── 进度条拖动（受控：拖动态显示本地值，松手 seek）──
   const [seeking, setSeeking] = useState<number | null>(null)
@@ -226,9 +247,12 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
             <p className="wf-m-sheet-hint">左右滑切歌 · 点按看歌词</p>
           </div>
         ) : (
+          <>
           <div
-            className="wf-m-lyrics"
+            className={`wf-m-lyrics ${userScrolling ? 'is-user-scrolling' : ''}`}
             ref={lyricsBoxRef}
+            onScroll={markUserScrolling}
+            onTouchMove={markUserScrolling}
             onClick={e => {
               // 点在歌词行上 = 跳转该行；点在行间空白 = 回封面视图
               // （此前歌词页没有任何返回封面的入口，只能退出整个播放页）
@@ -248,20 +272,66 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
             <LyricsList
               lyrics={lyrics}
               activeIndex={activeLyricIndex}
+              playTime={playTime}
               onSeekLine={onSeekLyricLine}
               showTranslation={lyricView.showTranslation}
               showRoman={lyricView.showRoman}
               fontScale={lyricView.fontScale}
+              karaoke={lyricView.wordByWord}
             />
             {lyricsLoading && <Spinner />}
             {!lyricsLoading && !lyrics.length && <p className="wf-m-sheet-hint">暂无歌词 · 点按空白处返回封面</p>}
           </div>
-        )}
+          {/* 用户滚动让位后的「回到当前行」悬浮按钮 */}
+          {view === 'lyrics' && userScrolling && activeLyricIndex >= 0 && (
+            <button
+              type="button"
+              className="wf-m-lyric-recenter"
+              aria-label="回到当前歌词"
+              onClick={e => {
+                e.stopPropagation()
+                setUserScrolling(false)
+                lastAutoScrollLineRef.current = -1
+                const box = lyricsBoxRef.current
+                const el = box?.querySelector(`[data-line="${activeLyricIndex}"]`) as HTMLElement | null
+                if (box && el) box.scrollTo({ top: el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2, behavior: 'smooth' })
+              }}
+            >
+              <IconChevronDown size={15} />
+              <span>当前行</span>
+            </button>
+          )}
+          </>
+          )}
       </div>
 
-      <div className="wf-m-sheet-meta" onClick={() => setDetailOpen(true)} role="button" aria-label="查看歌曲详情">
-        <div className="wf-m-sheet-title">{song.name}</div>
-        <div className="wf-m-sheet-artist">{songArtists(song)} ›</div>
+      <div className="wf-m-sheet-meta">
+        <div onClick={() => setDetailOpen(true)} role="button" aria-label="查看歌曲详情" className="wf-m-sheet-meta-text">
+          <div className="wf-m-sheet-title">{song.name}</div>
+          <div className="wf-m-sheet-artist">{songArtists(song)} ›</div>
+        </div>
+        {/* MV 快捷入口：与长按菜单同一条解析链（mv/mvid → getMVPlaybackInfo） */}
+        {(song.mv ?? (song as { mvid?: number | string }).mvid) && (
+          <button
+            type="button"
+            className="wf-m-iconbtn wf-m-mvbtn"
+            aria-label="观看 MV"
+            disabled={mvLoading}
+            onClick={async () => {
+              const mvId = song.mv ?? (song as { mvid?: number | string }).mvid
+              if (!mvId || mvLoading) return
+              setMvLoading(true)
+              try {
+                const { getMVPlaybackInfo } = await import('../services/musicApi')
+                const info = await getMVPlaybackInfo(mvId, 1080, (song.platform || 'netease') as import('../../src/services/platforms').MusicPlatform)
+                if (info.url) nav.openMv({ url: info.url, title: song.name, artist: songArtists(song) })
+                else mobileToast(info.error || info.needCookie ? 'MV 需要登录或版权受限' : 'MV 获取失败', 'error')
+              } catch { mobileToast('MV 获取失败', 'error') } finally { setMvLoading(false) }
+            }}
+          >
+            {mvLoading ? <span className="wf-m-spinner wf-m-spinner-sm" /> : <IconPlayCircle size={20} />}
+          </button>
+        )}
       </div>
 
       <div className="wf-m-sheet-seek">
@@ -479,31 +549,101 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
   )
 })
 
-/** 歌词列表：按高亮行号 memo——播放进度每 tick 只需要改一个行的 class，
- *  不再整列表重新 reconcile（几百行歌词时每秒 4 次全量 diff 是白烧的电）。
- *  支持翻译/罗马音开关与字号档（歌词设置面板持久化）。 */
-const LyricsList = memo(function LyricsList({ lyrics, activeIndex, onSeekLine, showTranslation, showRoman, fontScale }: {
+/** 歌词列表（移动播放页专属 karaoke 版）：
+ *  - 行级高亮 + 活跃行逐字填充（LyricWord{start,duration} 相对行内毫秒，
+ *    用 playTime 实时算每个字的填充比例，Apple Music 同款扫字效果）；
+ *  - 无逐字数据的行退化为整行高亮（与旧版一致）；
+ *  - 按「活跃行号 + 逐字开关」memo：播放 tick 只重渲染活跃行附近的 DOM，
+ *    活跃行内部用 CSS 变量 --fill 驱动渐变（行内 span 每帧改一个变量，
+ *    不触发 React 渲染——该 span 由 KaraokeWord 组件内部 rAF 自己管）。 */
+const LyricsList = memo(function LyricsList({ lyrics, activeIndex, playTime, onSeekLine, showTranslation, showRoman, fontScale, karaoke }: {
   lyrics: LyricLine[]
   activeIndex: number
+  playTime: number
   onSeekLine: (time: number) => void
   showTranslation: boolean
   showRoman: boolean
   fontScale: number
+  karaoke: boolean
 }) {
+  const activeLine = activeIndex >= 0 && activeIndex < lyrics.length ? lyrics[activeIndex] : null
+  const activeHasWords = karaoke && Boolean(activeLine?.words?.length)
   return (
     <div style={{ fontSize: `calc(1rem * ${fontScale})` }}>
-      {lyrics.map((line, i) => (
-        <p
-          key={i}
-          data-line={i}
-          className={`wf-m-lyric-line ${i === activeIndex ? 'is-active' : ''}`}
-          onClick={() => onSeekLine(line.time)}
-        >
-          {line.text || '♪'}
-          {showTranslation && line.translation && <span className="wf-m-lyric-trans">{line.translation}</span>}
-          {showRoman && line.roman && <span className="wf-m-lyric-trans">{line.roman}</span>}
-        </p>
-      ))}
+      {lyrics.map((line, i) => {
+        const isActive = i === activeIndex
+        const useWords = isActive && activeHasWords
+        return (
+          <p
+            key={i}
+            data-line={i}
+            className={`wf-m-lyric-line ${isActive ? 'is-active' : ''} ${useWords ? 'is-karaoke' : ''}`}
+            onClick={() => onSeekLine(line.time)}
+          >
+            {useWords && line.words!.length ? (
+              <KaraokeLine
+                key={`k-${activeIndex}-${lyrics.length}`}
+                line={line}
+                lineTime={line.time}
+                playTime={playTime}
+              />
+            ) : (
+              line.text || '♪'
+            )}
+            {showTranslation && line.translation && <span className="wf-m-lyric-trans">{line.translation}</span>}
+            {showRoman && line.roman && <span className="wf-m-lyric-trans">{line.roman}</span>}
+          </p>
+        )
+      })}
     </div>
+  )
+})
+
+/** 活跃行逐字渲染：字间用渐变填充比例动画。rAF 本地驱动每个字的 --fill
+ *  CSS 变量（0→1），React 零重渲染（fill 是 style 直写），切行时整组件重建。 */
+const KaraokeLine = memo(function KaraokeLine({ line, lineTime, playTime }: {
+  line: LyricLine
+  lineTime: number
+  playTime: number
+}) {
+  const spanRefs = useRef<Array<HTMLSpanElement | null>>([])
+  const words = line.words!
+  const rafRef = useRef<number | null>(null)
+  useEffect(() => {
+    let disposed = false
+    const tick = () => {
+      if (disposed) return
+      const elapsed = (playTimeRef.current - lineTime) * 1000
+      for (let i = 0; i < words.length; i += 1) {
+        const span = spanRefs.current[i]
+        if (!span) continue
+        const word = words[i]
+        const start = Number(word.startTime) || 0
+        const duration = Math.max(1, Number(word.duration) || 1)
+        const ratio = Math.max(0, Math.min(1, (elapsed - start) / duration))
+        span.style.setProperty('--fill', String(ratio))
+      }
+      rafRef.current = window.requestAnimationFrame(tick)
+    }
+    rafRef.current = window.requestAnimationFrame(tick)
+    return () => {
+      disposed = true
+      if (rafRef.current !== null) window.cancelAnimationFrame(rafRef.current)
+    }
+  }, [words, lineTime])
+  const playTimeRef = useRef(playTime)
+  playTimeRef.current = playTime
+  return (
+    <>
+      {words.map((word, i) => (
+        <span
+          key={i}
+          ref={el => { spanRefs.current[i] = el }}
+          className="wf-m-karaoke-word"
+        >
+          {word.word}
+        </span>
+      ))}
+    </>
   )
 })

@@ -1873,3 +1873,134 @@ html.mobile-mode ::-webkit-scrollbar {
   from { transform: translateY(-12px); opacity: 0; }
   to { transform: none; opacity: 1; }
 }
+
+/* ── 歌单内搜索（2026-11-05）：大歌单翻不动的痛点 ── */
+.wf-m-pl-searchbar {
+  position: relative;
+  margin: 10px 14px 0;
+}
+.wf-m-pl-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 38px 10px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.08);
+  color: inherit;
+  font-size: 14px;
+  outline: none;
+}
+.wf-m-pl-search::placeholder { color: var(--wf-text-3, rgba(255,255,255,0.4)); }
+.wf-m-pl-search:focus { border-color: var(--wf-accent, #38bdf8); }
+.wf-m-pl-search-clear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 8px;
+  color: var(--wf-text-3, rgba(255,255,255,0.5));
+  background: none;
+  border: none;
+}
+
+/* 迷你条进度轨道：可点按 seek（透明热区，视觉仍是细线填充） */
+.wf-m-mini-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -6px;
+  height: 14px;
+  display: flex;
+  align-items: flex-end;
+  cursor: pointer;
+}
+.wf-m-mini-track .wf-m-mini-progress { position: relative; height: 2px; }
+.wf-m-iconbtn.is-on { color: var(--wf-accent); }
+.wf-m-mvbtn { color: var(--wf-text-2, rgba(255,255,255,0.75)); }
+.wf-m-sheet-meta { display: flex; align-items: center; gap: 6px; }
+.wf-m-sheet-meta-text { flex: 1; min-width: 0; }
+
+/* ── 编辑歌单表单（MobileEditPlaylistSheet）── */
+.wf-m-edit-form {
+  padding: 6px 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.wf-m-edit-label { font-size: 12px; color: var(--wf-text-3, rgba(255,255,255,0.5)); }
+.wf-m-edit-input, .wf-m-edit-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.06);
+  color: inherit;
+  font-size: 14px;
+  outline: none;
+  resize: none;
+  font-family: inherit;
+}
+.wf-m-edit-input:focus, .wf-m-edit-textarea:focus { border-color: var(--wf-accent, #38bdf8); }
+.wf-m-actionsheet-cancel.wf-m-btn-primary {
+  background: var(--wf-accent, #38bdf8);
+  color: #fff;
+  border: none;
+  margin: 0 18px 14px;
+  width: auto;
+}
+.wf-m-actionsheet-cancel.wf-m-btn-primary:disabled { opacity: 0.45; }
+
+/* ── 私人FM 快捷卡（MobileHome）── */
+.wf-m-fm-banner {
+  width: calc(100% - 28px);
+  margin: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 18px;
+  border-radius: 16px;
+  border: none;
+  background: linear-gradient(135deg, rgba(236,72,153,0.22), rgba(56,189,248,0.16));
+  color: inherit;
+  cursor: pointer;
+}
+.wf-m-fm-banner:active { filter: brightness(0.9); }
+.wf-m-fm-banner:disabled { opacity: 0.6; }
+.wf-m-fm-icon { color: #ec4899; display: inline-flex; }
+.wf-m-fm-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.wf-m-fm-title { font-size: 16px; font-weight: 700; }
+.wf-m-fm-sub { font-size: 12px; color: var(--wf-text-3, rgba(255,255,255,0.5)); }
+.wf-m-fm-go { font-size: 13px; color: var(--wf-text-2, rgba(255,255,255,0.7)); }
+
+/* ── 移动播放页 karaoke 逐字歌词 + 用户滚动让位 ── */
+.wf-m-karaoke-word {
+  background: linear-gradient(90deg,
+    var(--wf-accent, #38bdf8) 0%,
+    var(--wf-accent, #38bdf8) calc(var(--fill, 0) * 100%),
+    var(--wf-text, #fff) calc(var(--fill, 0) * 100%),
+    var(--wf-text, #fff) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  /* 左半已唱色 / 右半未唱色的渐变边界由 --fill 驱动（每帧直写，零 React） */
+}
+.wf-m-lyric-line.is-karaoke { color: var(--wf-text); }
+.wf-m-lyrics.is-user-scrolling { scroll-behavior: auto; }
+.wf-m-lyric-recenter {
+  position: absolute;
+  right: 16px;
+  bottom: 108px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(10,14,22,0.72);
+  backdrop-filter: blur(14px);
+  color: rgba(255,255,255,0.85);
+  font-size: 12px;
+}
+.wf-m-lyric-recenter:active { filter: brightness(1.2); }
