@@ -73,6 +73,7 @@ import { useAutoHideCursor } from './hooks/useAutoHideCursor'
 import { Song, getSongUrl, getSodaPlaybackInfo, invalidateSongUrl, getLyrics, getProxiedImageUrl,
   getSimilarSongs, getProxiedAudioUrl, getLocalAlbumIdentifier, resolveSongAlbumIdentifier, isSameSong, LyricLine, qqSongCoverUrl, searchSongs } from './services/musicApi'
 import { recordAppleRecentPlaybackFallback } from './services/appleRecentPlayback'
+import { getApiBase } from './services/apiConfig'
 import type { MusicPlatform } from './services/platforms'
 import { getPlatformCapabilities, isPlatformVisible, platformLabel } from './services/platforms'
 import { getAppleMusicSettings, resolveAppleTrack } from './services/appleMusic'
@@ -108,6 +109,7 @@ import { getDesktopSpectrumConsumerCount, subscribeDesktopSpectrumConsumers } fr
 import { motion, AnimatePresence } from 'framer-motion'
 import { Settings, Sparkles, Check, Image as ImageIcon, Radio, SlidersHorizontal } from 'lucide-react'
 import { getDeterministicNextIndex, getUpcomingIndices } from './audio/PlaybackQueue'
+import { AdaptivePreloadDepth } from './audio/adaptivePreloadDepth'
 import type { PreloadTrack, TrackAnalysis, TransitionCommit, TransitionDebugInfo, TransitionState, TransitionStrategy } from './audio/types'
 import { createPlaybackTimeCommitGate, type PlaybackTimeStore } from './audio/playbackTimeStore'
 import { canonicalTrackKey, isQueuePlaceholder, type ResonancePlatformBadge, type ResonanceTrack } from './features/resonance/model'
@@ -1066,8 +1068,10 @@ function App() {
     }
     // TV 效能档隐藏桌面模式（普通/增强显示）：历史保存值也不会恢复成桌面。
     // isTvModeActive()（html.tv-mode）而非 isTv()：真机与 ?tv=1 模拟口径一致。
-    // 平板 PC 布局同理：桌面模式（壁纸桌面）是 PC 桌面集成专属，历史值回落简约。
-    if (mode === 'desktop' && ((isTvModeActive() && isPerfModeEfficiency()) || isPcTabletActive())) mode = 'minimal'
+    // 触屏 PC 布局（手机/平板「PC 版」）2026-11-05 起放开桌面模式：桌面小组件是
+    // 纯 WebView 渲染（无 Electron 依赖），触屏可直接点按；仅融合穿透等 Electron
+    // 独占能力在设置里已按平台隐藏。历史值不再强制回落。
+    if (mode === 'desktop' && isTvModeActive() && isPerfModeEfficiency()) mode = 'minimal'
     return mode
   })
   const viewModeChangeRevisionRef = useRef(0)
@@ -2342,13 +2346,21 @@ function App() {
   }, [resonanceExitPrompt])
 
   const playlistKeys = useMemo(() => playlist.map(getSongKey), [playlist])
-  // 看歌预加载：即将播放的后 2 首歌（预匹配评分高的 B 站视频）
+  // 自适应预载深度：连切感知（60s 内 ≥2 次手动切歌 → 深度 3；120s 无切歌回落 2）。
+  // ref 单例跨渲染持久；record 由 handleNext/handlePrevious/handleSongSelect 调用。
+  const adaptivePreloadDepthRef = useRef(new AdaptivePreloadDepth())
+  // 看歌/背景 MV 预热：即将播放的后 3 首歌（预匹配 B 站视频 + 对齐预热）。
+  // 索引必须走 getUpcomingIndices（与音频预载同一确定性链条）：此前用线性
+  // currentIndex+offset，随机模式下 MV 预热瞄的歌和实际会播的歌不一致（白预热）。
+  // 深度 3：getMvPreloadPlan 本就 slice(0,3) 且对齐预热支持 3 首，此前只喂 2 首
+  // 导致第 3 首永远拿不到预热。
   const watchUpcomingSongs = useMemo(() => {
     if (!playlist.length || typeof currentIndex !== 'number' || currentIndex < 0) return []
     const upcoming: Array<{ songTitle: string; songArtists: string[]; songDuration: number; platform?: string; id?: string | number; songAlbum?: string }> = []
-    for (let offset = 1; offset <= 2; offset += 1) {
-      const song = playlist[currentIndex + offset]
-      if (!song) break
+    const indices = getUpcomingIndices(playlistKeys, currentIndex, playMode, queueRevision, 3)
+    for (const idx of indices) {
+      const song = playlist[idx]
+      if (!song) continue
       upcoming.push({
         songTitle: song.name,
         songArtists: (song.artists || []).map((artist: any) => artist.name).filter(Boolean),
@@ -2359,11 +2371,15 @@ function App() {
       })
     }
     return upcoming
-  }, [playlist, currentIndex])
+  }, [playlist, playlistKeys, currentIndex, playMode, queueRevision])
   const deterministicNextIndex = useMemo(
     () => getDeterministicNextIndex(playlistKeys, currentIndex, playMode, queueRevision),
     [playlistKeys, currentIndex, playMode, queueRevision]
   )
+  // ref 镜像：后台门控 flush 回调（闭包期跨切歌）据此复验「入队时的下一曲」仍是
+  // 当前的下一曲，防旧 metadata 挂上新 standby deck（见 preloadUpcomingSongs）。
+  const deterministicNextIndexRef = useRef<number | undefined>(undefined)
+  deterministicNextIndexRef.current = deterministicNextIndex
   // 看歌视频播放状态（迷你播放器/桌面小窗按视频进度显示；歌词时间源也依赖它）。
   // 声明位置必须在歌词线性 memo 之前（currentMiniLyric 等引用）。
   const [watchVideoActive, setWatchVideoActive] = useState(false)
@@ -5419,6 +5435,8 @@ function App() {
       playbackOriginRef.current = inferredOrigin
       setShowHome(false)
     }
+    // 点选新歌 = 手动换歌：计入连切自适应（重复点同一首不计，避免单点双击抬深度）
+    if (!currentSong || !isSameSong(currentSong, song)) adaptivePreloadDepthRef.current.recordManualSkip()
     await loadAndPlaySong(nextPlaylist[selectedIndex] || normalizedSong, selectedIndex, nextPlaylist)
   }
   retryAppleRadioRef.current = (song, index) => {
@@ -5847,13 +5865,16 @@ function App() {
     }
     const requestRevision = revisionOverride
     const audioUrlGeneration = audioUrlCacheGenerationRef.current
-    // 计算接下来的 2 首歌曲索引
+    // 预载深度自适应：常规 2 首；用户连切（快速换歌节奏）时提到 3 首——
+    // 第 3 首的歌词/封面/音频 URL 提前就位，连切全程零等待。与 MV 预热链
+    // （getMvPreloadPlan slice(0,3)）对齐：深度 3 时第 3 首 MV/对齐同样有预热。
+    const preloadDepth = adaptivePreloadDepthRef.current.currentDepth()
     const upcomingIndices = getUpcomingIndices(
       actualPlaylist.map(getSongKey),
       currentIdx,
       modeOverride,
       revisionOverride,
-      2
+      preloadDepth
     )
     debugLog('📋 [Preload] 接下来的歌曲索引:', upcomingIndices)
     
@@ -5880,14 +5901,15 @@ function App() {
       // 这里显式传 size:500（而不是 role）以与 displayCoverUrl 完全同一档，
       // 不受 devicePixelRatio 影响——URL 一致才能真正命中 HTTP 缓存。
       const coverSource = song.album?.picUrl || ''
-      const isImmediateNext = position === 0
+      // 优先级按队列位置衰减：0=critical（马上要放）、1=visible、≥2=deferred（连切模式第 3 首）
+      const artworkPriority = position === 0 ? 'critical' : position === 1 ? 'visible' : 'deferred'
       void preloadArtwork(coverSource, {
         role: 'background',
-        priority: isImmediateNext ? 'critical' : 'deferred',
+        priority: artworkPriority,
       }).catch(() => undefined)
       void preloadArtwork(coverSource, {
         size: 500,
-        priority: isImmediateNext ? 'critical' : 'visible',
+        priority: artworkPriority,
       }).catch(() => undefined)
 
       // Apple 原生播放只为第一首确定的 next 预取 CENC stream，限制为 active + standby 两个会话。
@@ -5957,14 +5979,23 @@ function App() {
             return
           }
           debugLog(`🍎 [Preload] Apple CENC standby 就绪: ${song.name}`)
-          audioPlayer.preloadNext(buildDeckMetadata(song, stream.url, idx, {
+          const nativeMetadata = buildDeckMetadata(song, stream.url, idx, {
             appleHls: stream,
             trackKey: cacheKey,
             duration: song.duration / 1000,
             albumId: getLocalAlbumIdentifier(song, platform) || undefined,
             albumCover: song.album?.picUrl || undefined,
             onPreloadSettled: settleNativePreload,
-          }))
+          })
+          // 动态门控：与普通平台同口径——当前曲缓冲健康后才把流挂上 standby deck
+          audioPlayer.backgroundTaskGate.runWhenHealthy(
+            audioPlayer.getAudioElement(),
+            `Apple预载(${song.name.slice(0, 16)})`,
+            () => {
+              if (deterministicNextIndexRef.current !== idx) return
+              audioPlayer.preloadNext(nativeMetadata)
+            },
+          )
         })().catch(error => {
           settleNativePreload(false)
           console.warn(`[Preload] Apple CENC standby 失败: ${song.name}`, error)
@@ -5991,12 +6022,21 @@ function App() {
         if (requestRevision === queueRevisionRef.current && position === 0 && (effectiveCrossfadeEnabled || effectiveGaplessEnabled || effectiveAutoMixEnabled)) {
           debugLog(`📥 [Preload] 调用 audioPlayer.preloadNext (从缓存)`)
           debugLog(`   Position: ${position}`)
-            audioPlayer.preloadNext(buildDeckMetadata(song, getProxiedAudioUrl(cached.url), idx, {
-              trackKey: cacheKey,
-              duration: song.duration / 1000,
-              albumId: getLocalAlbumIdentifier(song, platform) || undefined,
-              albumCover: song.album?.picUrl || undefined,
-            }))
+          const metadata = buildDeckMetadata(song, getProxiedAudioUrl(cached.url), idx, {
+            trackKey: cacheKey,
+            duration: song.duration / 1000,
+            albumId: getLocalAlbumIdentifier(song, platform) || undefined,
+            albumCover: song.album?.picUrl || undefined,
+          })
+          // 动态门控：与"新获取"分支同口径——当前曲缓冲健康后才预载下一曲音频流
+          audioPlayer.backgroundTaskGate.runWhenHealthy(
+            audioPlayer.getAudioElement(),
+            `下一曲预载-缓存(${song.name.slice(0, 16)})`,
+            () => {
+              if (deterministicNextIndexRef.current !== idx) return
+              audioPlayer.preloadNext(metadata)
+            },
+          )
         }
         return
       }
@@ -6007,6 +6047,8 @@ function App() {
         const resolvedPlatform = source.platform
         debugLog(`⏳ [Preload] URL 缓存未命中，开始获取音频地址...`)
         // 传 song：酷狗概念版取流通道用 kugouMixSongId/album.mid 提升 hash 匹配率与播放上报质量
+        // URL 解析是轻 API 请求，立即跑；真正的大流量（standby deck 流式预载整曲）
+        // 在下方经后台门控等当前曲缓冲健康后再开始。
         getSongUrl(resolvedSongId, resolvedPlatform, 2, song).catch(() => null).then(url => {
           if (audioUrlGeneration !== audioUrlCacheGenerationRef.current) return
           if (url && url !== 'SONG_UNAVAILABLE') {
@@ -6021,17 +6063,29 @@ function App() {
               lyricsPromise: latest?.lyricsPromise,
             })
             debugLog(`  ✅ 第 ${position + 1} 首歌曲: ${song.name} (${latest?.lyrics.length || 0}行歌词已就绪)`)
-            
+
             // 只预加载第一首歌到音频元素，其他歌曲只缓存
             if (requestRevision === queueRevisionRef.current && position === 0 && (effectiveCrossfadeEnabled || effectiveGaplessEnabled || effectiveAutoMixEnabled)) {
               debugLog(`📥 [Preload] 调用 audioPlayer.preloadNext (新获取)`)
               debugLog(`   Position: ${position}, URL: ${url.substring(0, 80)}...`)
-              audioPlayer.preloadNext(buildDeckMetadata(song, getProxiedAudioUrl(url), idx, {
+              const metadata = buildDeckMetadata(song, getProxiedAudioUrl(url), idx, {
                 trackKey: cacheKey,
                 duration: song.duration / 1000,
                 albumId: getLocalAlbumIdentifier(song, platform) || undefined,
                 albumCover: song.album?.picUrl || undefined,
-              }))
+              })
+              // 动态门控：当前曲缓冲健康（下载前沿领先播放位置 ≥30s）才预载下一曲音频流；
+              // 冷启动/弱网时让路给首播关键路径，健康后自动开始，兜底超时防饿死。
+              // flush 时复验仍是当前曲的下一曲：防止「入队后用户切歌但 reset 已跑完」
+              // 的缝隙里旧 metadata 挂上新 standby deck。
+              audioPlayer.backgroundTaskGate.runWhenHealthy(
+                audioPlayer.getAudioElement(),
+                `下一曲预载(${song.name.slice(0, 16)})`,
+                () => {
+                  if (deterministicNextIndexRef.current !== idx) return
+                  audioPlayer.preloadNext(metadata)
+                },
+              )
             }
           } else {
             debugLog(`❌ [Preload] 第 ${position + 1} 首歌曲 URL 获取失败，可能是VIP歌曲`)
@@ -6265,7 +6319,10 @@ function App() {
 
       const analyzed: Array<SequencingEntry<{ song: Song; position: number }>> = []
       let cursor = 0
-      const workerCount = Math.min(2, candidates.length)
+      // 并发按 CPU 核数扩展（上限 6）：800+ 首的大歌单里大部分曲目已带持久化
+      // 分析缓存（命中即毫秒级返回），瓶颈只在未分析曲的下载+解码；worker 池
+      // 仍共享游标、AbortController 可随时中止，放大并发不会产生重复分析。
+      const workerCount = Math.min(6, Math.max(2, Math.min(candidates.length, Math.floor((navigator.hardwareConcurrency || 4) / 2))))
       await Promise.all(Array.from({ length: workerCount }, async () => {
         while (!controller.signal.aborted) {
           const position = cursor
@@ -6297,8 +6354,16 @@ function App() {
       }
 
       analyzed.sort((left, right) => left.item.position - right.item.position)
-      const result = sequenceTracksHam2(analyzed, anchorAnalysis || undefined)
-      const analyzedPositions = new Set(analyzed.map(entry => entry.item.position))
+      // 超大队列 O(n²) 保护：HAM-2 距离矩阵是 n² 内存/时间，>1500 首时超出部分
+      // 不参与重排（保持原顺序追加），剩余部分正常重排——800+ 首实测在矩阵可算
+      // 范围内，4000+ 首才真正爆炸。
+      const SMART_REORDER_MATRIX_LIMIT = 1500
+      const overflowEntries = analyzed.length > SMART_REORDER_MATRIX_LIMIT
+        ? analyzed.slice(SMART_REORDER_MATRIX_LIMIT)
+        : []
+      const matrixEntries = overflowEntries.length ? analyzed.slice(0, SMART_REORDER_MATRIX_LIMIT) : analyzed
+      const result = sequenceTracksHam2(matrixEntries, anchorAnalysis || undefined)
+      const analyzedPositions = new Set(matrixEntries.map(entry => entry.item.position))
       const unavailable = candidates.filter((_, position) => !analyzedPositions.has(position))
       const reorderedCandidates = [
         ...result.items.map(item => item.song),
@@ -6323,8 +6388,8 @@ function App() {
         : 0
       addToast(
         reduction > 0
-          ? `已按 HAM-2 重排 ${analyzed.length} 首后续歌曲，相邻差异降低约 ${reduction}%`
-          : `已按 HAM-2 重排 ${analyzed.length} 首后续歌曲`,
+          ? `已按 HAM-2 重排 ${matrixEntries.length} 首后续歌曲${overflowEntries.length ? `（${overflowEntries.length} 首超出规模上限保持原序）` : ''}，相邻差异降低约 ${reduction}%`
+          : `已按 HAM-2 重排 ${matrixEntries.length} 首后续歌曲${overflowEntries.length ? `（${overflowEntries.length} 首超出规模上限保持原序）` : ''}`,
         'success',
         playbackCoverColor,
       )
@@ -7206,6 +7271,7 @@ function App() {
     // 共振房间里没有「上一曲」语义（队列由房主向前推进）：与媒体键/遥控器的处理保持一致。
     // 房间里本机列表被压成单曲，走本机逻辑只会在那一首上回绕。
     if (isResonanceHost()) return
+    adaptivePreloadDepthRef.current.recordManualSkip()
     audioPlayer.cancelTransition('manual previous', false)
     audioPlayer.resetGaplessIntegration() // 清理预加载的音频
     bumpQueueRevision()
@@ -7247,6 +7313,7 @@ function App() {
       getResonanceSession().hostNext()
       return
     }
+    adaptivePreloadDepthRef.current.recordManualSkip()
     const appleAutoplayHold = appleAutoplayEnabled
       && playMode === 'sequential'
       && playlist.length > 0
@@ -8862,7 +8929,26 @@ function App() {
   }, [lyricDisplayMode])
 
   const handleDesktopQueueRemove = useCallback((index: number) => {
-    if (index < 0 || index === currentIndexRef.current || index >= playlist.length) return
+    if (index < 0 || index >= playlist.length) return
+    // 移除当前在放的歌：自动跳到下一首（原实现直接 return，用户只能手动切）
+    if (index === currentIndexRef.current) {
+      const hasUpcoming = index + 1 < playlist.length
+      const nextIndex = hasUpcoming ? index + 1 : 0
+      // 先从队列里删掉当前曲，再加载下一首（handleNext 会读旧队列，直接手动编排）
+      const remaining = playlist.filter((_, itemIndex) => itemIndex !== index)
+      if (remaining.length === 0) return
+      playlistRef.current = remaining
+      setPlaylist(remaining)
+      const nextRevision = bumpQueueRevision()
+      const targetSong = remaining[Math.min(nextIndex, remaining.length - 1)]
+      currentIndexRef.current = Math.min(nextIndex, remaining.length - 1)
+      setCurrentIndex(currentIndexRef.current)
+      // 取消在途过渡（被删歌可能已武装过渡）后加载下一首
+      audioPlayerRef.current?.cancelTransition('current song removed', false)
+      void loadAndPlaySong(targetSong, currentIndexRef.current, remaining)
+      window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, nextRevision, playMode, remaining), 0)
+      return
+    }
     // 删掉的是「后面还没播的」曲目时必须取消在途/已预载的过渡：引擎可能已把被删的那首作为
     // 下一首预载，交叉淡化时仍会切过去，而 UI/歌词停在刚播完的那首（音频与界面永久错位）。
     if (index > currentIndexRef.current) {
@@ -8878,7 +8964,7 @@ function App() {
     const nextRevision = bumpQueueRevision()
     // 取消/顺序变化后按新队列重预载「下一首」，否则当前歌剩余时间里无缝/交叉过渡静默失效
     window.setTimeout(() => preloadUpcomingSongs(currentIndexRef.current, nextRevision, playMode, next), 0)
-  }, [playlist, bumpQueueRevision, playMode, preloadUpcomingSongs])
+  }, [playlist, bumpQueueRevision, playMode, preloadUpcomingSongs, loadAndPlaySong])
 
   const handleDesktopQueueMove = useCallback((from: number, to: number) => {
     if (from === to || from < 0 || to < 0 || from >= playlist.length || to >= playlist.length) return
@@ -9887,6 +9973,9 @@ function App() {
       // 接口异常/网络失败一律按「未知」处理、不动登录态。刻意不做自动登出——误判的代价
       //（正常用户被踢出去）高于收益，所以只提示。
       const warnedCredentialPlatforms = new Set<string>()
+      // 启动期检测到的失效平台不再立即弹 toast（用户可能根本不用那个平台，
+      // 开屏弹两三条报错影响观感）；记入 credentialWarnPendingRef，等用户
+      // 真正进入该平台的 surface（个人中心切平台 / 播放该平台歌曲）时才提示。
       const warnIfCredentialInvalid = async (url: string, isInvalid: (body: any) => boolean, label: string) => {
         try {
           // fetchWithCookieHeader 会剥离 URL 中的 cookie query 转请求头（凭据不进日志 URL）
@@ -9895,7 +9984,8 @@ function App() {
           const body = await response.json().catch(() => null)
           if (!body || !isInvalid(body) || warnedCredentialPlatforms.has(label)) return
           warnedCredentialPlatforms.add(label)
-          addToast(`${label}登录信息可能已失效，请到设置中重新登录`, 'error')
+          credentialWarnPendingRef.current.add(label)
+          credentialWarnReleaseRef.current?.()
         } catch {
           // 网络异常：按未知处理，不改登录态
         }
@@ -9914,7 +10004,7 @@ function App() {
         // 网易云 account/profile 双空、QQ 没有 creator。
         if (neteaseCookie) {
           void warnIfCredentialInvalid(
-            `http://localhost:3001/api/netease/user/account?cookie=${encodeURIComponent(neteaseCookie)}`,
+            `${getApiBase()}/netease/user/account?cookie=${encodeURIComponent(neteaseCookie)}`,
             body => body.account == null && body.profile == null,
             '网易云音乐',
           )
@@ -9922,7 +10012,7 @@ function App() {
         const qqUserId = localStorage.getItem('qq_user_id')
         if (qqCookie && qqUserId) {
           void warnIfCredentialInvalid(
-            `http://localhost:3001/api/qq/user/detail?id=${encodeURIComponent(qqUserId)}`,
+            `${getApiBase()}/qq/user/detail?id=${encodeURIComponent(qqUserId)}`,
             body => !body.creator,
             'QQ 音乐',
           )
@@ -9938,16 +10028,39 @@ function App() {
 
   useEffect(() => {
     if (!loginRestoreComplete) return
-    // 登录有效期提示：已登录但已过期的平台，启动时提醒重新登录（仅启动恢复完成时一次）
+    // 登录有效期提示：启动时**不弹**（开屏报错影响观感，且用户可能不用那个平台），
+    // 记入待提示集合；等用户进入该平台的 surface 时再弹（见 credentialWarnReleaseRef）。
     const expiredPlatforms: string[] = []
     if (neteaseLoggedIn && isLoginExpired('netease')) expiredPlatforms.push('网易云音乐')
     if (qqLoggedIn && isLoginExpired('qq')) expiredPlatforms.push('QQ 音乐')
     if (appleLoggedIn && isLoginExpired('apple')) expiredPlatforms.push('Apple Music')
-    if (expiredPlatforms.length) {
-      addToast(`${expiredPlatforms.join('、')} 登录已过期，请重新登录`, 'info')
-    }
+    for (const name of expiredPlatforms) credentialWarnPendingRef.current.add(name)
+    credentialWarnReleaseRef.current?.()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loginRestoreComplete])
+
+  // 登录失效延迟提示：进入对应平台 surface 时弹一次（个人中心切平台 / 播放该平台歌曲）。
+  // 去重集合防重复；同一平台只提示一次直到下次启动恢复检测再发现失效。
+  const credentialWarnPendingRef = useRef<Set<string>>(new Set())
+  const credentialWarnedRef = useRef<Set<string>>(new Set())
+  const credentialWarnReleaseRef = useRef<(() => void) | null>(null)
+  credentialWarnReleaseRef.current = () => {
+    const currentPlatform = currentSong?.platform
+    const profilePlatform = profileInitialPlatform
+    for (const name of [...credentialWarnPendingRef.current]) {
+      const platformKey = name === '网易云音乐' ? 'netease' : name === 'QQ 音乐' ? 'qq' : 'apple'
+      const entered = currentPlatform === platformKey || profilePlatform === platformKey
+      if (!entered || credentialWarnedRef.current.has(name)) continue
+      credentialWarnedRef.current.add(name)
+      credentialWarnPendingRef.current.delete(name)
+      addToast(`${name}登录已过期，请到设置中重新登录`, 'info')
+    }
+  }
+  // 进入平台 surface 的两个时机都触发检查：切歌（currentSong.platform 变化）与个人中心切平台
+  useEffect(() => {
+    if (!loginRestoreComplete) return
+    credentialWarnReleaseRef.current?.()
+  }, [loginRestoreComplete, currentSong?.platform, profileInitialPlatform])
 
   useEffect(() => {
     if (!loginRestoreComplete) return
@@ -12599,6 +12712,7 @@ function App() {
             smartReorderProgress={smartReorderProgress}
             onSongSelect={stableDialogCallbacks.playlistSongSelect}
             songMenu={panelSongMenu}
+            onRemoveSong={handleDesktopQueueRemove}
             neteaseVip={neteaseVip}
             qqVip={qqVip}
             currentPlatform={currentSong?.platform || 'netease'}
