@@ -24,11 +24,14 @@ interface PlaylistPanelProps {
   currentPlatform?: 'netease' | 'qq' | 'apple' | 'spotify' | 'kugou' | 'soda'
   onSmartReorder?: () => void
   /** 右键菜单回调包（与播放页同一套）。2026-09-27 审计 C1：队列行原本没有右键；
-   *  目前提供 播放/下一首/喜欢/添加到/评论/专辑/歌手/详情/复制 等（本应用暂无"从队列移除"能力）。 */
+   *  目前提供 播放/下一首/喜欢/添加到/评论/专辑/歌手/详情/复制 等。 */
   songMenu?: SongMenuBindings
   isSmartReordering?: boolean
   smartReorderProgress?: { completed: number; total: number }
   playerTheme?: 'light' | 'dark'
+  /** 从播放队列移除该歌曲（行尾 × 按钮）。移除当前曲=自动下一曲；移除后续曲=
+   *  重算过渡/预载——逻辑在 App 层 handleRemoveQueueSong，行内只负责触发。 */
+  onRemoveSong?: (index: number) => void
 }
 
 const PLAYLIST_CARD_HEIGHT = 96
@@ -46,6 +49,7 @@ const PlaylistRow = memo(function PlaylistRow({
   platform,
   onSongSelect,
   onContextMenu,
+  onRemove,
 }: {
   song: Song
   index: number
@@ -55,7 +59,9 @@ const PlaylistRow = memo(function PlaylistRow({
   platform: string
   onSongSelect: (index: number) => void
   onContextMenu: (event: MouseEvent, song: Song, index: number) => void
+  onRemove?: (index: number) => void
 }) {
+  const [removeHover, setRemoveHover] = useState(false)
   return (
     <motion.button
       type="button"
@@ -63,6 +69,8 @@ const PlaylistRow = memo(function PlaylistRow({
       whileTap={{ scale: 0.99 }}
       onClick={() => onSongSelect(index)}
       onContextMenu={event => onContextMenu(event, song, index)}
+      onMouseEnter={() => setRemoveHover(true)}
+      onMouseLeave={() => setRemoveHover(false)}
       className="absolute inset-x-0 flex w-full cursor-pointer items-center gap-4 overflow-hidden rounded-2xl px-4 text-left"
       style={{
         top: 0,
@@ -80,19 +88,21 @@ const PlaylistRow = memo(function PlaylistRow({
         boxShadow: isCurrent ? '0 10px 24px rgba(0,0,0,0.18)' : 'none',
       }}
     >
-      {/* 封面卡片背景：复用缩略图同一 URL（零额外网络），静态模糊层 + 压暗渐变保证文字可读。
-          行是虚拟化的（只渲染可见 ~10 行），模糊层光栅化一次后不再有逐帧开销。 */}
+      {/* 封面卡片背景（性能优化版）：视觉效果与旧版一致，但不再对全尺寸封面做
+          blur(24px) CSS 滤镜光栅化——改为请求 32px 极小缩略图再 scale(8) 拉伸。
+          小图放大天然就是模糊的（双线性插值），GPU 只需光栅化 32×32 源，逐行
+          光栅化成本比 blur-xl 降约两个数量级；打开面板/定位滚动时的掉帧即此。 */}
       {song.album?.picUrl && (
-        <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
           <CachedImage
             src={song.album.picUrl}
             alt=""
-            className="h-full w-full scale-150 object-cover blur-xl"
+            className="h-full w-full scale-[8] object-cover opacity-90"
             draggable={false}
             retainPrevious
           />
           <div
-            className="absolute inset-0"
+            className="absolute inset-0 backdrop-blur-md"
             style={{
               background: isCurrent
                 ? isDark
@@ -148,6 +158,26 @@ const PlaylistRow = memo(function PlaylistRow({
       {(song.fee === 1 || song.fee === 4 || song.vip) && !isVip && (
         <CrownIcon isDark={isDark} />
       )}
+
+      {/* 行尾移除按钮：hover 整行时浮现（触摸端常显）。点击不触发行播放（stopPropagation）。 */}
+      {onRemove && (
+        <span
+          role="button"
+          tabIndex={-1}
+          aria-label={`移除 ${song.name}`}
+          onClick={(event) => {
+            event.stopPropagation()
+            onRemove(index)
+          }}
+          className={`relative grid h-8 w-8 shrink-0 place-items-center rounded-full transition-all duration-150 ${
+            isDark
+              ? 'text-white/45 hover:bg-white/12 hover:text-white/85'
+              : 'text-black/40 hover:bg-black/10 hover:text-black/75'
+          } ${removeHover || isTvModeActive() ? 'opacity-100' : 'opacity-0'}`}
+        >
+          <X className="h-4 w-4" />
+        </span>
+      )}
     </motion.button>
   )
 })
@@ -175,6 +205,7 @@ function PlaylistPanel({
   smartReorderProgress,
   playerTheme = 'dark',
   songMenu,
+  onRemoveSong,
 }: PlaylistPanelProps) {
   const parked = useModeParked()
   const isVip = currentPlatform === 'netease' ? neteaseVip : qqVip
@@ -208,6 +239,9 @@ function PlaylistPanel({
     overscan: PLAYLIST_OVERSCAN,
   })
 
+  // 同槽位让位：回到顶部按钮可见时，定位按钮平滑上移 64px 避开它（隐藏时归位）
+  const [backToTopVisible, setBackToTopVisible] = useState(false)
+
   return (
     <AnimatePresence>
       {show && (
@@ -229,13 +263,17 @@ function PlaylistPanel({
             className="fixed right-0 top-0 z-50 h-full w-full max-w-md shadow-2xl"
             data-tv-scope
             style={{
+              // 底部不再沉成纯黑（旧渐变 0.74 尾色像"没样式的黑框"）：
+              // 顶亮底暗但保持同色相玻璃感 + 顶部一条高光内描边，与行卡片呼应
               background: isDark
-                ? 'linear-gradient(180deg, rgba(10, 10, 16, 0.82) 0%, rgba(4, 5, 10, 0.74) 100%)'
-                : 'linear-gradient(180deg, rgba(252, 252, 250, 0.88) 0%, rgba(246, 246, 244, 0.82) 100%)',
+                ? 'linear-gradient(180deg, rgba(16, 18, 26, 0.86) 0%, rgba(10, 12, 20, 0.8) 62%, rgba(12, 14, 24, 0.86) 100%)'
+                : 'linear-gradient(180deg, rgba(252, 252, 250, 0.9) 0%, rgba(246, 246, 244, 0.84) 62%, rgba(248, 248, 246, 0.9) 100%)',
               backdropFilter: 'blur(26px) saturate(135%)',
               WebkitBackdropFilter: 'blur(26px) saturate(135%)',
               borderLeft: isDark ? '1px solid rgba(255, 255, 255, 0.1)' : '1px solid rgba(0, 0, 0, 0.08)',
-              boxShadow: isDark ? '-18px 0 48px rgba(0, 0, 0, 0.34)' : '-18px 0 48px rgba(0, 0, 0, 0.12)',
+              boxShadow: isDark
+                ? 'inset 1px 1px 0 rgba(255,255,255,0.07), -18px 0 48px rgba(0, 0, 0, 0.34)'
+                : 'inset 1px 1px 0 rgba(255,255,255,0.5), -18px 0 48px rgba(0, 0, 0, 0.12)',
               willChange: 'transform',
             }}
           >
@@ -281,7 +319,7 @@ function PlaylistPanel({
 
             <div
               ref={scrollContainerRef}
-              className="h-[calc(100vh-100px)] overflow-y-auto p-4"
+              className="explore-scrollbar h-[calc(100vh-100px)] overflow-y-auto p-4"
             >
               {playlist.length === 0 ? (
                 <div className={`flex h-full flex-col items-center justify-center ${isDark ? 'text-white/40' : 'text-black/40'}`}>
@@ -311,6 +349,7 @@ function PlaylistPanel({
                           platform={currentPlatform}
                           onSongSelect={onSelect}
                           onContextMenu={openMenu}
+                          onRemove={onRemoveSong}
                         />
                       </div>
                     )
@@ -341,19 +380,22 @@ function PlaylistPanel({
               threshold={160}
               playerTheme={playerTheme}
               position="absolute"
-              offsetLeft={-64}
+              offsetRight={18}
               offsetBottom={88}
+              slotOffsetBottom={backToTopVisible ? 64 : 0}
               cardHeight={PLAYLIST_CARD_HEIGHT}
               cardGapY={PLAYLIST_ROW_GAP}
               contentPaddingTop={16}
+              autoScroll
             />
             <ScrollToTop
               containerRef={scrollContainerRef}
               threshold={160}
               playerTheme={playerTheme}
               position="absolute"
-              offsetLeft={-64}
+              offsetRight={18}
               offsetBottom={24}
+              onVisibilityChange={setBackToTopVisible}
             />
           </motion.div>
         </>
