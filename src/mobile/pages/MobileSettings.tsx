@@ -135,8 +135,9 @@ export default memo(function MobileSettings() {
   const qualityOptions = getQualityOptions(platform)
   const [qualityMap, setQualityMap] = useState(() => loadAudioQualitySettings())
   const currentQuality = qualityMap[platform as keyof typeof qualityMap]
-  const [crossPlatformFallback, setCrossPlatformFallback] = useState<boolean>(
-    () => localStorage.getItem('crossPlatformFallbackEnabled') === 'true')
+  const [crossPlatformFallback, setCrossPlatformFallback] = useState<boolean>(() => {
+    try { return JSON.parse(localStorage.getItem('crossPlatformFallbackEnabled') || 'false') === true } catch { return false }
+  })
   useReactEffect(() => {
     const sync = () => setQualityMap(loadAudioQualitySettings())
     window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, sync)
@@ -359,7 +360,9 @@ export default memo(function MobileSettings() {
                 onClick={() => {
                   const next = !crossPlatformFallback
                   setCrossPlatformFallback(next)
-                  try { localStorage.setItem('crossPlatformFallbackEnabled', String(next)) } catch { /* ignore */ }
+                  // ⚠️ 与 PC 同一 JSON 编码（parseStoredBoolean 只认 JSON 布尔，
+                  // 裸字符串会被 PC 侧读成 fallback=false —— 实测静默失效）
+                  try { localStorage.setItem('crossPlatformFallbackEnabled', JSON.stringify(next)) } catch { /* ignore */ }
                   mobileToast(next ? '平台可用性增强已开启' : '平台可用性增强已关闭')
                 }}
               >
