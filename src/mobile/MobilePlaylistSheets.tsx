@@ -176,7 +176,7 @@ export const MobileAddToPlaylistSheet = memo(function MobileAddToPlaylistSheet({
 export const MobilePlaylistManageSheet = memo(function MobilePlaylistManageSheet({
   playlist, platform, account, owned, onClose, onChanged,
 }: {
-  playlist: { id: string; name: string; subscribed?: boolean } | null
+  playlist: { id: string; name: string; subscribed?: boolean; description?: string } | null
   platform: MusicPlatform
   account: AccountInfo | undefined
   /** 是否本人创建的歌单（可删除）；否则提供收藏/取消收藏 */
@@ -185,6 +185,7 @@ export const MobilePlaylistManageSheet = memo(function MobilePlaylistManageSheet
   onChanged?: () => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [editOpen, setEditOpen] = useState(false)
   if (!playlist) return null
 
   const run = async (fn: () => Promise<unknown>, okMsg: string) => {
@@ -214,6 +215,16 @@ export const MobilePlaylistManageSheet = memo(function MobilePlaylistManageSheet
           <button type="button" className="wf-m-iconbtn" onClick={onClose}><IconClose size={18} /></button>
         </div>
         <div className="wf-m-actionsheet-list">
+          {owned && (
+            <button
+              type="button"
+              className="wf-m-actionsheet-item"
+              disabled={busy}
+              onClick={() => setEditOpen(true)}
+            >
+              ✏️<span>编辑歌单信息</span>
+            </button>
+          )}
           {owned ? (
             <button
               type="button"
@@ -239,6 +250,93 @@ export const MobilePlaylistManageSheet = memo(function MobilePlaylistManageSheet
           )}
         </div>
         <button type="button" className="wf-m-actionsheet-cancel" onClick={onClose}>取消</button>
+      </div>
+      {/* 编辑歌单（改名/描述）：updatePlaylist 服务（QQ 无改单端点会明确报错） */}
+      {editOpen && (
+        <MobileEditPlaylistSheet
+          playlist={playlist}
+          platform={platform}
+          onClose={() => setEditOpen(false)}
+          onChanged={() => { onChanged?.(); onClose() }}
+        />
+      )}
+    </div>,
+    document.body,
+  )
+})
+
+/** 编辑歌单信息（自建歌单）：名称 + 描述，与 PC updatePlaylist 同服务。 */
+export const MobileEditPlaylistSheet = memo(function MobileEditPlaylistSheet({
+  playlist, platform, onClose, onChanged,
+}: {
+  playlist: { id: string; name: string; description?: string }
+  platform: MusicPlatform
+  onClose: () => void
+  onChanged?: () => void
+}) {
+  const [name, setName] = useState(playlist.name)
+  // 预填现有描述：空串初始会把旧描述清掉（kugou 分支 intro:undefined 透传上游）。
+  const [desc, setDesc] = useState(playlist.description || '')
+  const [busy, setBusy] = useState(false)
+  const descChanged = desc.trim() !== (playlist.description || '')
+  const canSave = name.trim().length > 0 && (name.trim() !== playlist.name || descChanged)
+
+  const save = async () => {
+    if (!canSave || busy) return
+    setBusy(true)
+    try {
+      const { updatePlaylist } = await import('../services/playlistService')
+      await updatePlaylist(playlist.id, platform, {
+        name: name.trim(),
+        // 描述只在用户真的改动时下发（否则传 undefined 有被上游当清空处理的风险）
+        desc: descChanged ? desc.trim() : undefined,
+      })
+      mobileToast('歌单信息已更新', 'success')
+      window.dispatchEvent(new CustomEvent('playlist-content-changed', { detail: { platform } }))
+      onChanged?.()
+    } catch (err) {
+      mobileToast(err instanceof Error ? err.message : '保存失败', 'error')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div className="wf-m-sheet-mask" onClick={onClose}>
+      <div className="wf-m-actionsheet" onClick={e => e.stopPropagation()}>
+        <div className="wf-m-actionsheet-head">
+          <div className="wf-m-actionsheet-meta">
+            <div className="wf-m-actionsheet-title">编辑歌单</div>
+          </div>
+          <button type="button" className="wf-m-iconbtn" onClick={onClose}><IconClose size={18} /></button>
+        </div>
+        <div className="wf-m-edit-form">
+          <label className="wf-m-edit-label">名称</label>
+          <input
+            className="wf-m-edit-input"
+            value={name}
+            maxLength={40}
+            onChange={e => setName(e.target.value)}
+            placeholder="歌单名称"
+          />
+          <label className="wf-m-edit-label">描述（可选）</label>
+          <textarea
+            className="wf-m-edit-textarea"
+            value={desc}
+            maxLength={300}
+            rows={4}
+            onChange={e => setDesc(e.target.value)}
+            placeholder="介绍一下这个歌单…"
+          />
+        </div>
+        <button
+          type="button"
+          className="wf-m-actionsheet-cancel wf-m-btn-primary"
+          disabled={!canSave || busy}
+          onClick={() => void save()}
+        >
+          {busy ? '保存中…' : '保存'}
+        </button>
       </div>
     </div>,
     document.body,

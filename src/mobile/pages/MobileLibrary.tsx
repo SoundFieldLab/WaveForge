@@ -25,6 +25,7 @@ interface UserPlaylistItem {
   trackCount?: number
   isLike?: boolean
   creator?: string | { nickname?: string }
+  description?: string
 }
 
 export default memo(function MobileLibrary() {
@@ -36,7 +37,7 @@ export default memo(function MobileLibrary() {
   const [loading, setLoading] = useState(true)
   const [recent, setRecent] = useState<Song[]>(() => readRecent())
   const [createOpen, setCreateOpen] = useState(false)
-  const [manageTarget, setManageTarget] = useState<{ id: string; name: string; subscribed?: boolean; owned: boolean } | null>(null)
+  const [manageTarget, setManageTarget] = useState<{ id: string; name: string; subscribed?: boolean; owned: boolean; description?: string } | null>(null)
 
   function readRecent(): Song[] {
     try {
@@ -141,7 +142,7 @@ export default memo(function MobileLibrary() {
                     <PlaylistRow
                       item={pl}
                       onOpen={() => openPlaylist(pl)}
-                      onManage={() => setManageTarget({ id: String(pl.id), name: pl.name, owned: isOwnedPlaylist(pl) })}
+                      onManage={() => setManageTarget({ id: String(pl.id), name: pl.name, owned: isOwnedPlaylist(pl), description: pl.description })}
                     />
                   </li>
                 ))}
@@ -170,7 +171,7 @@ export default memo(function MobileLibrary() {
       />
       {/* 歌单管理弹窗（长按歌单行） */}
       <MobilePlaylistManageSheet
-        playlist={manageTarget ? { id: manageTarget.id, name: manageTarget.name } : null}
+        playlist={manageTarget ? { id: manageTarget.id, name: manageTarget.name, description: manageTarget.description } : null}
         platform={nav.platform}
         account={account}
         owned={manageTarget?.owned ?? false}

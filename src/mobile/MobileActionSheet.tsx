@@ -193,6 +193,36 @@ export const MobileSongActionSheet = memo(function MobileSongActionSheet({ targe
       label: '加入歌单',
       run: () => setAddPlaylistOpen(true),
     },
+    {
+      icon: <IconMusicNote size={18} />,
+      label: '查看评论',
+      run: () => { nav.openSongComments(song); close() },
+    },
+    {
+      icon: <IconMusicNote size={18} />,
+      label: '歌曲详情',
+      run: () => { nav.openSongDetail(song); close() },
+    },
+    {
+      icon: <IconMusicNote size={18} />,
+      label: '分享',
+      run: async () => {
+        // 官方客户端分享同款链接（网易云/ＱＱ 按平台拼官方歌曲页）
+        const link = platform === 'qq'
+          ? `https://y.qq.com/n/ryqq/songDetail/${song.mid || song.id}`
+          : `https://music.163.com/song?id=${song.id}`
+        const text = `分享 ${songArtists(song)} 的《${song.name}》${link}`
+        try {
+          if (navigator.share) {
+            await navigator.share({ title: song.name, text })
+          } else {
+            await navigator.clipboard.writeText(text)
+            mobileToast('链接已复制，去粘贴给朋友吧', 'success')
+          }
+        } catch { /* 用户取消分享面板不算错误 */ }
+        close()
+      },
+    },
     ...(platform === 'netease' ? [{
       icon: <IconClose size={16} />,
       label: '不感兴趣（改善日推）',

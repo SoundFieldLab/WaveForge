@@ -9,9 +9,15 @@ import type { Song } from '../services/musicApi'
 import { platformLabel, type MusicPlatform } from '../services/platforms'
 import { Cover, IconClose, songArtists } from './ui'
 import { useMobileNav } from './nav'
+import { useMobileBack } from './mobileBack'
 
 export default memo(function MobileSongDetailSheet({ song, onClose }: { song: Song | null; onClose: () => void }) {
   const nav = useMobileNav()
+  // BACK：面板开着时关闭面板而不是退应用（MobileApp 分层返回期望各弹层自消费）
+  useMobileBack(() => {
+    if (song) { onClose(); return true }
+    return false
+  }, [song, onClose])
   if (!song) return null
   const platform = (song.platform || 'netease') as MusicPlatform
 

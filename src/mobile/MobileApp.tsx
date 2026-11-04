@@ -31,6 +31,8 @@ const MobilePlaylistDetail = lazy(() => import('./pages/MobilePlaylistDetail'))
 const MobileArtistPage = lazy(() => import('./pages/MobileArtistPage'))
 const MobileChartDetail = lazy(() => import('./pages/MobileChartDetail'))
 const MobileMvPlayer = lazy(() => import('./MobileMvPlayer'))
+const MobileSongDetailSheet = lazy(() => import('./MobileSongDetailSheet'))
+const MobileCommentsSheet = lazy(() => import('./MobileCommentsSheet'))
 
 const PLATFORM_KEY = 'waveforge:mobile-platform'
 
@@ -57,6 +59,8 @@ export default function MobileApp() {
   const [playerOpen, setPlayerOpen] = useState(false)
   const [mvTarget, setMvTarget] = useState<MobileMvTarget | null>(null)
   const [songActions, setSongActions] = useState<MobileSongActionsTarget | null>(null)
+  const [songDetail, setSongDetail] = useState<import('../services/musicApi').Song | null>(null)
+  const [songComments, setSongComments] = useState<import('../services/musicApi').Song | null>(null)
   const stackSeqRef = useRef(1)
   const { accounts } = useAccounts()
 
@@ -108,21 +112,21 @@ export default function MobileApp() {
   // 跳过「队列抽屉 → 播放页」的中间层级（实测 BACK 关队列却把整个播放页带走了）。
   // 栈底返回 false（原生默认：退出应用）。
   useMobileBack(() => {
-    if (playerOpen || mvTarget || songActions) return false
+    if (playerOpen || mvTarget || songActions || songDetail || songComments) return false
     if (stack.length > 1) { setStack(prev => prev.slice(0, -1)); return true }
     return false
-  }, [playerOpen, mvTarget, songActions, stack.length])
+  }, [playerOpen, mvTarget, songActions, songDetail, songComments, stack.length])
 
   // 覆盖层全部关闭（从播放页/MV/动作面板回到页面）时广播 resume：
   // 「我的」页监听它刷新最近播放（播放页里播过的歌要及时上榜）。
   const overlayWasOpenRef = useRef(false)
   useEffect(() => {
-    const anyOpen = playerOpen || Boolean(mvTarget) || Boolean(songActions)
+    const anyOpen = playerOpen || Boolean(mvTarget) || Boolean(songActions) || Boolean(songDetail) || Boolean(songComments)
     if (overlayWasOpenRef.current && !anyOpen) {
       window.dispatchEvent(new CustomEvent('waveforge-mobile-resume'))
     }
     overlayWasOpenRef.current = anyOpen
-  }, [playerOpen, mvTarget, songActions])
+  }, [playerOpen, mvTarget, songActions, songDetail, songComments])
 
   const currentTab: MobileTabKey = stack[0]?.kind === 'tab' ? stack[0].tab : 'home'
 
@@ -131,6 +135,8 @@ export default function MobileApp() {
     switchTab, openPlaylist, openAlbum, openArtist, openChart,
     openMv: (mv: MobileMvTarget) => setMvTarget(mv),
     openSongActions: (target: MobileSongActionsTarget) => setSongActions(target),
+    openSongDetail: (song: import('../services/musicApi').Song) => setSongDetail(song),
+    openSongComments: (song: import('../services/musicApi').Song) => setSongComments(song),
     openPlayer: () => setPlayerOpen(true),
     platform, setPlatform,
     userId: accounts[platform]?.userId || '',
@@ -151,6 +157,16 @@ export default function MobileApp() {
           {mvTarget && (
             <Suspense fallback={<div className="wf-m-loading"><span className="wf-m-spinner" /></div>}>
               <MobileMvPlayer target={mvTarget} onClose={() => setMvTarget(null)} />
+            </Suspense>
+          )}
+          {songDetail && (
+            <Suspense fallback={null}>
+              <MobileSongDetailSheet song={songDetail} onClose={() => setSongDetail(null)} />
+            </Suspense>
+          )}
+          {songComments && (
+            <Suspense fallback={null}>
+              <MobileCommentsSheet song={songComments} onClose={() => setSongComments(null)} />
             </Suspense>
           )}
           <MobileSongActionSheet target={songActions} onClose={() => setSongActions(null)} nav={nav} />

@@ -13,7 +13,7 @@ import { useMobilePlayer } from '../mobilePlayer'
 import { useLongPress } from '../MobileActionSheet'
 import { subscribePlaylist, removeSongFromPlaylist } from '../../services/playlistService'
 import { useAccounts } from '../mobileLogin'
-import { mobileToast } from '../ui'
+import { mobileToast, IconClose, IconShuffle } from '../ui'
 import {
   Cover, ErrorRetry, IconChevronLeft, IconHeart, IconHeartFilled, IconPlay, IconPause, Spinner, songArtists, useLazyList,
 } from '../ui'
@@ -63,6 +63,18 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
 
   const songs: Song[] = detail?.songs || []
   const { visible, sentinelRef } = useLazyList(songs.length, 50)
+  // 歌单内搜索：歌名/歌手/专辑模糊匹配（原顺序播放仍按全列表索引）
+  const [filterText, setFilterText] = useState('')
+  const filteredSongs = filterText.trim()
+    ? songs.map((song, index) => ({ song, index })).filter(({ song }) => {
+        const kw = filterText.trim().toLowerCase()
+        return song.name?.toLowerCase().includes(kw)
+          || songArtists(song).toLowerCase().includes(kw)
+          || (song.album?.name || '').toLowerCase().includes(kw)
+      })
+    : songs.map((song, index) => ({ song, index }))
+  // 搜索态下重置懒加载窗口（搜索结果通常远小于全量）
+  const displaySongs = filterText.trim() ? filteredSongs : filteredSongs.slice(0, visible)
   const title = detail?.playlist.name || album?.name || playlist?.name || ''
   const cover = detail?.playlist.coverImgUrl || album?.coverUrl || playlist?.coverUrl
   const activeKey = (song: { id?: number; mid?: string; platform?: string }) => `${song.platform || ''}:${song.mid || song.id}`
@@ -150,6 +162,22 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
               : <IconPlay size={16} />}
             播放全部{songs.length ? ` (${songs.length})` : ''}
           </button>
+          {/* 随机播放：从全列表随机起点开播（顺序模式下游走随机） */}
+          <button
+            type="button"
+            className="wf-m-btn wf-m-btn-sub"
+            disabled={!songs.length}
+            aria-label="随机播放"
+            title="随机播放"
+            onClick={() => {
+              if (!songs.length) return
+              const start = Math.floor(Math.random() * songs.length)
+              player.playSongs(songs, start, title)
+              mobileToast(`随机从第 ${start + 1} 首开始播放`)
+            }}
+          >
+            <IconShuffle size={16} />
+          </button>
           {subscribed !== null && (
             <button
               type="button"
@@ -163,6 +191,23 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
             </button>
           )}
         </div>
+        {/* 歌单内搜索（大歌单翻不动的痛点；≥8 首才显示入口） */}
+        {songs.length >= 8 && (
+          <div className="wf-m-pl-searchbar">
+            <input
+              type="search"
+              className="wf-m-pl-search"
+              placeholder={`在 ${title.length > 10 ? '本歌单' : `「${title}」`}内搜索…`}
+              value={filterText}
+              onChange={e => setFilterText(e.target.value)}
+            />
+            {filterText && (
+              <button type="button" className="wf-m-pl-search-clear" aria-label="清除" onClick={() => setFilterText('')}>
+                <IconClose size={14} />
+              </button>
+            )}
+          </div>
+        )}
       </header>
 
       {loading && <Spinner label="加载内容…" />}
@@ -171,13 +216,16 @@ export default memo(function MobilePlaylistDetail({ playlist, album }: {
 
       {!loading && !error && songs.length > 0 && (
         <>
+          {filterText && (
+            <p className="wf-m-hint">匹配 {filteredSongs.length} / {songs.length} 首</p>
+          )}
           <ul className="wf-m-song-list">
-            {songs.slice(0, visible).map((song, i) => (
+            {displaySongs.slice(0, visible).map(({ song, index }) => (
               removedKeys.has(activeKey(song)) ? null : (
                 <DetailSongRow
-                  key={`${song.platform || ''}-${song.id ?? song.mid}-${i}`}
+                  key={`${song.platform || ''}-${song.id ?? song.mid}-${index}`}
                   song={song}
-                  index={i}
+                  index={index}
                   songs={songs}
                   label={title}
                   nav={nav}

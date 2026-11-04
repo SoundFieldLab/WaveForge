@@ -102,10 +102,15 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
   const lyricsBoxRef = useRef<HTMLDivElement | null>(null)
   // 用户滚动让位：手动滚动歌词后暂停自动跟随，2.5s 无操作（或点「回到当前行」）
   // 恢复跟随。没有这个机制，长歌词页手动浏览会被 0.4s 一跳的自动滚动顶回去。
+  // programmatic 标记：自动跟随自己的 smooth scrollTo 也会触发 onScroll ——
+  // 不排除的话自动跟随会自我抑制（跟随刚启动就被关掉 2.5s，「当前行」按钮闪烁）。
   const [userScrolling, setUserScrolling] = useState(false)
   const userScrollTimerRef = useRef<number | null>(null)
+  const programmaticScrollUntilRef = useRef(0)
   const lastAutoScrollLineRef = useRef(-1)
   const markUserScrolling = useCallback(() => {
+    // 程序化滚动窗口内的 scroll 事件不算用户意图
+    if (performance.now() < programmaticScrollUntilRef.current) return
     setUserScrolling(true)
     if (userScrollTimerRef.current !== null) window.clearTimeout(userScrollTimerRef.current)
     userScrollTimerRef.current = window.setTimeout(() => setUserScrolling(false), 2500)
@@ -122,6 +127,8 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
     const box = lyricsBoxRef.current
     const el = box?.querySelector(`[data-line="${activeLyricIndex}"]`) as HTMLElement | null
     if (box && el) {
+      // smooth 滚动期间的 scroll 事件带时间窗豁免（见 markUserScrolling）
+      programmaticScrollUntilRef.current = performance.now() + 900
       box.scrollTo({ top: el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2, behavior: 'smooth' })
     }
   }, [view, activeLyricIndex, userScrolling])
@@ -189,14 +196,18 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
     player.seekTo(Math.max(0, time - 0.2))
   }, [player])
 
-  // BACK：队列抽屉/更多面板 → 播放页 → 关闭
+  // BACK：子弹层（评论/详情/歌词设置）→ 队列抽屉/更多面板 → 歌词回封面 → 关闭
   useMobileBack(() => {
     if (!open) return false
+    if (commentsOpen) { setCommentsOpen(false); return true }
+    if (detailOpen) { setDetailOpen(false); return true }
+    if (lyricSettingsOpen) { setLyricSettingsOpen(false); return true }
     if (queueOpen) { setQueueOpen(false); return true }
     if (moreOpen) { setMoreOpen(false); return true }
+    if (view === 'lyrics') { setView('cover'); return true }
     onClose()
     return true
-  }, [open, queueOpen, moreOpen, onClose])
+  }, [open, queueOpen, moreOpen, commentsOpen, detailOpen, lyricSettingsOpen, view, onClose])
 
   if (!open || !song) return null
 
@@ -251,7 +262,8 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
           <div
             className={`wf-m-lyrics ${userScrolling ? 'is-user-scrolling' : ''}`}
             ref={lyricsBoxRef}
-            onScroll={markUserScrolling}
+            // 用户滚动意图只认 touchmove（程序化 smooth 滚动也发 scroll 事件，
+            // 时间窗豁免是双保险；touchmove 只可能是真实手指）
             onTouchMove={markUserScrolling}
             onClick={e => {
               // 点在歌词行上 = 跳转该行；点在行间空白 = 回封面视图

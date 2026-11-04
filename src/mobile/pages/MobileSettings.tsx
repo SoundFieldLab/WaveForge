@@ -9,6 +9,7 @@
 import { memo, lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { getVisiblePlatforms, platformLabel, type MusicPlatform } from '../../services/platforms'
 import { getTabletLayoutStyle, setTabletLayoutStyle, getPcTouchWidth, setPcTouchWidth, PC_TOUCH_WIDTH_OPTIONS, type TabletLayoutStyle } from '../../platform'
+import { getQualityOptions, loadAudioQualitySettings, saveAudioQualitySettings, AUDIO_QUALITY_SETTINGS_EVENT, type QualityOptionValue } from '../../services/audioQualitySettings'
 import { useMobileNav } from '../nav'
 import { useAccounts, mobileLogout, mobileQQLogin, mobileNeteaseLogin, mobileKugouLogin, mobileSodaLogin } from '../mobileLogin'
 import { isMobilePlayablePlatform, useMobilePlayer } from '../mobilePlayer'
@@ -128,6 +129,24 @@ export default memo(function MobileSettings() {
     try { localStorage.setItem('primaryLyricsSource', key) } catch { /* ignore */ }
     window.dispatchEvent(new Event('waveforge:lyrics-policy-changed'))
   }, [])
+
+  // ── 播放音质（全局档位；与 PC 同键 audioQualitySettings，事件同步双端）──
+  const platform = nav.platform
+  const qualityOptions = getQualityOptions(platform)
+  const [qualityMap, setQualityMap] = useState(() => loadAudioQualitySettings())
+  const currentQuality = qualityMap[platform as keyof typeof qualityMap]
+  const [crossPlatformFallback, setCrossPlatformFallback] = useState<boolean>(
+    () => localStorage.getItem('crossPlatformFallbackEnabled') === 'true')
+  useReactEffect(() => {
+    const sync = () => setQualityMap(loadAudioQualitySettings())
+    window.addEventListener(AUDIO_QUALITY_SETTINGS_EVENT, sync)
+    return () => window.removeEventListener(AUDIO_QUALITY_SETTINGS_EVENT, sync)
+  }, [])
+  const pickQuality = useCallback((value: QualityOptionValue) => {
+    saveAudioQualitySettings({ [platform]: value } as never)
+    setQualityMap(loadAudioQualitySettings())
+    mobileToast('播放音质已更新')
+  }, [platform])
 
   // 开发者模式开启后轮询取配对令牌（debugRemote 异步从后端拿）
   useEffect(() => {
@@ -299,6 +318,53 @@ export default memo(function MobileSettings() {
                   直切模式（移动端固定单流：双流预载在 Android 上会产生爆音/杂音与卡顿）
                 </span>
               </span>
+            </div>
+          </div>
+          {/* 播放音质（全局档位，与 PC audioQualitySettings 同键；当前平台卡片） */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">播放音质（{platformLabel(platform)}）</span>
+                <span className="wf-m-card-sub">
+                  {qualityOptions.find(o => o.value === currentQuality)?.label || currentQuality}
+                  （更高音质更耗流量）
+                </span>
+              </span>
+            </div>
+            <div className="wf-m-scene-picker">
+              {qualityOptions.map(o => (
+                <button
+                  key={o.value}
+                  type="button"
+                  className={`wf-m-btn ${currentQuality === o.value ? 'wf-m-btn-primary' : ''}`}
+                  onClick={() => pickQuality(o.value)}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {/* 平台可用性增强（跨平台补源）：源平台播不了时同名匹配其他平台 */}
+          <div className="wf-m-card">
+            <div className="wf-m-card-row">
+              <span className="wf-m-card-main">
+                <span className="wf-m-card-title">平台可用性增强</span>
+                <span className="wf-m-card-sub">
+                  VIP/版权歌曲在原平台无法播放时，自动尝试同名匹配其它已登录平台播放
+                </span>
+              </span>
+              <button
+                type="button"
+                className={`wf-m-btn ${crossPlatformFallback ? 'wf-m-btn-primary' : ''}`}
+                onClick={() => {
+                  const next = !crossPlatformFallback
+                  setCrossPlatformFallback(next)
+                  try { localStorage.setItem('crossPlatformFallbackEnabled', String(next)) } catch { /* ignore */ }
+                  mobileToast(next ? '平台可用性增强已开启' : '平台可用性增强已关闭')
+                }}
+              >
+                {crossPlatformFallback ? '已开启' : '已关闭'}
+              </button>
             </div>
           </div>
           <div className="wf-m-card">

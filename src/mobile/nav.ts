@@ -61,6 +61,10 @@ export interface MobileNavApi {
   openMv: (mv: MobileMvTarget) => void
   /** 长按歌曲 → 底部动作面板（触屏的右键菜单/轮盘） */
   openSongActions: (target: MobileSongActionsTarget) => void
+  /** 歌曲详情弹层（播放页/动作面板共用） */
+  openSongDetail: (song: Song) => void
+  /** 评论弹层（播放页/动作面板共用） */
+  openSongComments: (song: Song) => void
   /** 打开榜单详情页 */
   openChart: (chart: MobileChartTarget) => void
   /** 打开全屏播放页 */

@@ -3,7 +3,7 @@
  * 问候头部 + 榜单横滑大卡 + 3:4 双列歌单 + 榜单/新歌货架，全骨架屏加载态。
  * 数据层与桌面探索/TV 同源（fetchExploreHome）。
  */
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import { fetchExploreHome, type ExplorePayload, type ExploreChart, type ExplorePlaylist, type ExploreAlbum } from '../../services/exploreApi'
 import { getApiBase } from '../../services/apiConfig'
 import { type Song } from '../../services/musicApi'
@@ -27,20 +27,29 @@ function greeting(): string {
 
 export default memo(function MobileHome() {
   const nav = useMobileNav()
+  const navRef = useRef(nav)
+  navRef.current = nav
   const player = useMobilePlayer()
+  const homeLoadSeqRef = useRef(0)
   const [payload, setPayload] = useState<ExplorePayload | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const platform = nav.platform
 
   const load = useCallback(() => {
+    // 竞态守卫：快速切平台时慢响应回来会覆盖新平台数据（seq 校验丢弃过期帧）
+    const seq = ++homeLoadSeqRef.current
     setLoading(true)
     setError('')
     fetchExploreHome(platform).then(data => {
+      if (seq !== homeLoadSeqRef.current) return
       setPayload(data)
     }).catch(err => {
+      if (seq !== homeLoadSeqRef.current) return
       setError(err instanceof Error ? err.message : '加载失败')
-    }).finally(() => setLoading(false))
+    }).finally(() => {
+      if (seq === homeLoadSeqRef.current) setLoading(false)
+    })
   }, [platform])
 
   useEffect(() => { load() }, [load])
@@ -79,6 +88,8 @@ export default memo(function MobileHome() {
         duration: s.dt || 0,
         platform: 'netease' as const,
       })).filter((s: Song) => s.id)
+      // 响应回来时用户可能已切平台：过期帧直接丢弃（否则网易云 FM 会在别的平台 UI 下开播）
+      if (navRef.current.platform !== 'netease') return
       if (songs.length) playSongs(songs, '私人FM')
       else mobileToast('私人 FM 暂无推荐，请稍后再试', 'error')
     } catch {

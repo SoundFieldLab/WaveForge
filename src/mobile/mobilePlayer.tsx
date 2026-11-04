@@ -317,9 +317,14 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
   audioPlayerRef.current = audioPlayer
 
   // ── 加载并播放指定队列下标 ──
+  // epoch 守卫：快速连点 next/prev 会并发两个 resolveTrackUrl await，慢的旧请求
+  // 后返回会把 UI/音频覆盖回旧歌（实测竞态）。每次进入 +1，await 后序号不一致
+  // = 已被新加载取代，静默放弃。
+  const loadSeqRef = useRef(0)
   const loadAndPlayIndex = useCallback(async (targetIndex: number, restoredSeek?: number) => {
     const q = queueRef.current
     if (targetIndex < 0 || targetIndex >= q.length) return
+    const seq = ++loadSeqRef.current
     const song = q[targetIndex]
     setIndex(targetIndex)
     indexRef.current = targetIndex
@@ -328,6 +333,7 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
     setDuration(Number(song.duration) > 0 ? Number(song.duration) / 1000 : 0)
     try {
       const url = await resolveTrackUrl(song)
+      if (seq !== loadSeqRef.current) return
       const started = await audioPlayerRef.current.loadAndPlay(url, volumeRef.current, {
         trackKey: songKeyOf(song),
         duration: Number(song.duration) > 0 ? Number(song.duration) / 1000 : undefined,
@@ -336,11 +342,13 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
         songId: song.platform === 'qq' ? (song.mid || song.id) : song.id,
         mid: song.mid,
       })
+      if (seq !== loadSeqRef.current) return
       if (started) {
         consecutiveFailuresRef.current = 0
         if (restoredSeek && restoredSeek > 3) restoreSeekRef.current = restoredSeek
       }
     } catch (err) {
+      if (seq !== loadSeqRef.current) return
       setIsBuffering(false)
       const message = err instanceof Error ? err.message : '播放失败'
       mobileToast(message, 'error')
@@ -657,6 +665,19 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
           ? [{ src: songCoverUrl(currentSong, 300), sizes: '300x300' }]
           : [],
       })
+      // Android 原生 MediaSession 桥：WebView 的标准 mediaSession API 在部分
+      // 内核上不会同步到原生层（锁屏无封面/无控制按钮），经 updatePlaybackInfo
+      // 显式上报（PlaybackService.kt 维护 MediaSessionCompat + 富通知）。
+      try {
+        ;(window as any).WaveForgeNative?.updatePlaybackInfo?.(
+          currentSong.name || '未知歌曲',
+          (currentSong.artists || []).map(a => a.name).join(' / '),
+          songCoverUrl(currentSong, 300) || '',
+          Number(currentSong.duration) > 0 ? Number(currentSong.duration) : durationRef.current * 1000,
+          currentTimeRef.current * 1000,
+          isPlaying,
+        )
+      } catch { /* 桥不可用忽略 */ }
     }
     ms.playbackState = isPlaying ? 'playing' : 'paused'
     try {
@@ -669,6 +690,32 @@ export const MobilePlayerProvider = memo(function MobilePlayerProvider({ childre
       })
     } catch { /* 部分内核不支持全部动作 */ }
   }, [currentSong, isPlaying, toggle, advance, previous, seekTo])
+
+  // 原生媒体控制回传（通知按钮/锁屏/耳机线控 → PlaybackService → 此事件）
+  useEffect(() => {
+    const onControl = (e: Event) => {
+      const detail = (e as CustomEvent<{ action: string; position?: number }>).detail || {}
+      switch (detail.action) {
+        case 'play':
+          if (!isPlayingRef.current) toggle()
+          break
+        case 'pause':
+          if (isPlayingRef.current) toggle()
+          break
+        case 'next':
+          advance(false)
+          break
+        case 'prev':
+          previous()
+          break
+        case 'seek':
+          if (typeof detail.position === 'number' && Number.isFinite(detail.position)) seekTo(detail.position)
+          break
+      }
+    }
+    window.addEventListener('wf-media-control', onControl)
+    return () => window.removeEventListener('wf-media-control', onControl)
+  }, [toggle, advance, previous, seekTo])
 
   const setTransitionMode = useCallback((mode: MobileTransitionMode) => {
     // 移动端固定直切（双 deck 预载在 Android 上不稳定，见初始 state 注释）

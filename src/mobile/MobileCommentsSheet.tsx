@@ -7,6 +7,7 @@ import { createPortal } from 'react-dom'
 import { getHotComments } from '../services/musicApi'
 import type { Song } from '../services/musicApi'
 import { Cover, IconClose, Spinner } from './ui'
+import { useMobileBack } from './mobileBack'
 
 interface CommentItem {
   user?: { nickname?: string; avatarUrl?: string }
@@ -16,6 +17,11 @@ interface CommentItem {
 }
 
 export default memo(function MobileCommentsSheet({ song, onClose }: { song: Song | null; onClose: () => void }) {
+  // BACK：面板开着时关闭面板而不是退应用（MobileApp 分层返回期望各弹层自消费）
+  useMobileBack(() => {
+    if (song) { onClose(); return true }
+    return false
+  }, [song, onClose])
   const [comments, setComments] = useState<CommentItem[] | null>(null)
   const [error, setError] = useState('')
 
