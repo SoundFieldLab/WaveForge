@@ -15,6 +15,27 @@ Java_com_waveforge_android_MainActivity_startNodeWithArguments(
     // argc
     jsize argument_count = env->GetArrayLength(arguments);
 
+    // HOME / WAVEFORGE_USERDATA（2026-11-04 实机事故）：nodejs-mobile 进程默认没有
+    // HOME，os.homedir() 回退到空串/根目录 → QQ cookie 持久化（~/.waveforge/qq-cookie.txt）
+    // 写不进或写到不可恢复位置 → 重启后 QQ 全局登录态丢失，最近播放等账号接口 401
+    // （code=1000），用户观感"QQ 登录老是掉"。MainActivity 经 argv 传入可写目录，
+    // 这里在启动 node 前注入两个环境变量：
+    //   HOME=filesDir/nodejs-project（os.homedir() 可用）
+    //   WAVEFORGE_USERDATA=filesDir/waveforge-userdata（cookie/凭据统一落这里）
+    char home_value[512] = {0};
+    char userdata_value[512] = {0};
+    for (int i = 0; i < argument_count; i++) {
+        const char* arg = env->GetStringUTFChars((jstring)env->GetObjectArrayElement(arguments, i), 0);
+        if (strncmp(arg, "--waveforge-home=", 17) == 0) {
+            strncpy(home_value, arg + 17, sizeof(home_value) - 1);
+        } else if (strncmp(arg, "--waveforge-userdata=", 21) == 0) {
+            strncpy(userdata_value, arg + 21, sizeof(userdata_value) - 1);
+        }
+        env->ReleaseStringUTFChars((jstring)env->GetObjectArrayElement(arguments, i), arg);
+    }
+    if (home_value[0] != '\0' && getenv("HOME") == nullptr) setenv("HOME", home_value, 0);
+    if (userdata_value[0] != '\0') setenv("WAVEFORGE_USERDATA", userdata_value, 1);
+
     // 计算所有参数在连续内存中所需的字节数。
     int c_arguments_size = 0;
     for (int i = 0; i < argument_count ; i++) {
@@ -42,7 +63,7 @@ Java_com_waveforge_android_MainActivity_startNodeWithArguments(
         argv[i] = current_args_position;
 
         // 移动到下一个参数的预期位置。
-        current_args_position += strlen(current_args_position) + 1;
+        current_args_position += strlen(current_argument) + 1;
     }
 
     // 用 argc 与 argv 启动 node。

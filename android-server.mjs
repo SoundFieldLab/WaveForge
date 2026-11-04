@@ -61,6 +61,128 @@ const wallpapersDir = join(dirname(serverRoot), 'waveforge-wallpapers')
 
 localApp.use(express.static(distDir))
 
+// ── QQ 音乐 App 扫码登录（移动端专属通道）──
+// 官方网页二维码（ptlogin2/ptqrshow）已被腾讯风控封锁（实测 403 → 跳腾讯网首页），
+// PC 与移动端同因失效。这里把桌面端同源的 App 扫码协议（musicu CreateQRCode + MQTT
+// 推送，desktop/qqMusicQrLogin.cjs）打包进 nodejs-mobile 后端，暴露 3 个路由给
+// MainActivity 原生轮询：start 生成二维码 base64 → poll 等扫码/拿 cookie → cancel 清理。
+// cookie 与 PC 登录同口径（qm_keyst/uin），拿到后走既有 /api/qq/cookie 落库。
+// 注意：必须用静态 import——createRequire 的运行时 require 无法被 esbuild 追踪打包，
+// 设备端 assets 里没有 desktop/ 目录会导致启动时 MODULE_NOT_FOUND。
+import { createQqMusicQrLogin } from './desktop/qqMusicQrLogin.cjs'
+const qqAppLogin = createQqMusicQrLogin({ statePath: join(dirname(serverRoot), 'waveforge-qq-qr-device.json') })
+
+localApp.post('/api/qq/app-qr/start', async (_req, res) => {
+  try {
+    qqAppLogin.cancel() // 幂等清理上一会话
+    const { image, expiresInMs } = await qqAppLogin.start()
+    res.json({ ok: true, image, expiresInMs })
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : '二维码生成失败' })
+  }
+})
+localApp.get('/api/qq/app-qr/poll', async (_req, res) => {
+  try {
+    const result = await qqAppLogin.poll()
+    // 成功即把 cookie 落到既有全局登录态（与手动粘贴同一入口）
+    if (result?.status === 'success' && result.cookie) {
+      try {
+        const cookieResp = await fetch('http://127.0.0.1:3001/api/qq/cookie', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookie: result.cookie }),
+        })
+        console.log('[QQ App 扫码] cookie 已落库:', cookieResp.status)
+      } catch (e) {
+        console.warn('[QQ App 扫码] cookie 落库失败:', e instanceof Error ? e.message : e)
+      }
+    }
+    res.json({ ok: true, ...result })
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err instanceof Error ? err.message : '轮询失败' })
+  }
+})
+localApp.post('/api/qq/app-qr/cancel', (_req, res) => {
+  try { qqAppLogin.cancel() } catch { /* ignore */ }
+  res.json({ ok: true })
+})
+
+// ── 汽水音乐 App 扫码登录（移动端专属通道，2026-11-05）──────────────────────
+// 协议族与桌面端 qishui-auth-v6 相同（官方 Passport QR：get_qrcode → check_qrconnect
+// → .qishui.com 会话 Cookie）。签名执行宿主是 MainActivity 的 1×1 离屏 WebView
+// （加载本模块代理的 security_host.html，bdms SDK 在页面里照常工作）——替代
+// 桌面端的隐藏 BrowserWindow。旧方案（开抖音首页抓 .douyin.com Cookie）已废弃：
+// 抓到的抖音 Cookie 在汽水 luna Web API 一律 403，登录永远不闭环（实机事故）。
+import { createQishuiAuthNode } from './server/qishui-auth-node.cjs'
+const sodaAppLogin = createQishuiAuthNode({
+  configFile: join(dirname(serverRoot), 'waveforge-userdata', 'soda-qr-login.json'),
+  log: (message) => console.log(message),
+})
+
+localApp.post('/api/soda/app-qr/start', async (_req, res) => {
+  try {
+    sodaAppLogin.cancel()
+    const envelope = await sodaAppLogin.getQrCode()
+    const data = envelope.data || {}
+    res.json({ ok: true, image: data.qrcode, token: data.token, expiresInMs: 3 * 60 * 1000 })
+  } catch (err) {
+    res.status(502).json({ ok: false, error: err instanceof Error ? err.message : '二维码生成失败' })
+  }
+})
+
+// 离屏签名 WebView 的入口页：跳转到运行时 assetBase（token 前缀随机，不可硬编码）。
+// getQrCode 前资产服务可能未启动——这里先懒启动保证 assetBase 有效。
+localApp.get('/api/soda/app-qr/sign-page', async (_req, res) => {
+  try {
+    await sodaAppLogin.startAssetServer()
+    res.redirect(sodaAppLogin.assetBase + '/security_host.html')
+  } catch (err) {
+    res.status(502).send('sign page unavailable: ' + (err instanceof Error ? err.message : 'unknown'))
+  }
+})
+
+localApp.get('/api/soda/app-qr/poll', async (req, res) => {
+  try {
+    const token = String(req.query.token || '')
+    if (!token) return res.json({ ok: true, status: 'error', message: '缺少 token' })
+    const envelope = await sodaAppLogin.checkQrConnect(token)
+    const data = envelope.data || {}
+    const errorCode = Number(data.error_code)
+    const statusCode = String(data.status || '')
+    if (errorCode === 0 && (statusCode === '3' || statusCode === 'confirmed' || data.session_cookie)) {
+      const cookie = sodaAppLogin.readSessionCookie()
+      // 与手动粘贴同链路验证 + 回传资料（/api/soda/status 校验 cookie 有效性）
+      let profile = null
+      try {
+        const statusResp = await fetch(`http://127.0.0.1:3001/api/soda/status?cookie=${encodeURIComponent(cookie)}`, {
+          headers: { 'X-WaveForge-Local-Token': String(process.env.WAVEFORGE_LOCAL_TOKEN || '') },
+        })
+        const statusData = await statusResp.json().catch(() => null)
+        if (statusData?.loggedIn) profile = statusData.profile || null
+      } catch { /* 资料获取失败不阻塞登录回传 */ }
+      return res.json({ ok: true, status: 'success', cookie, profile })
+    }
+    if (errorCode === 2046) {
+      return res.json({ ok: true, status: 'scanned', message: '需要二次验证，请在手机上确认' })
+    }
+    // status: 1=已生成待扫 2=已扫描待确认 5=过期
+    if (statusCode === '5') return res.json({ ok: true, status: 'expired' })
+    if (statusCode === '2') return res.json({ ok: true, status: 'scanned' })
+    return res.json({ ok: true, status: 'waiting' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '轮询失败'
+    if (err && err.code === 'QISHUI_MFA_CANCELLED') {
+      return res.json({ ok: true, status: 'scanned', message })
+    }
+    res.status(500).json({ ok: false, error: message })
+  }
+})
+
+localApp.post('/api/soda/app-qr/cancel', (_req, res) => {
+  try { sodaAppLogin.cancel() } catch { /* ignore */ }
+  res.json({ ok: true })
+})
+
 // SPA 回退：非 /api/ 的 GET 请求交给前端路由。
 localApp.use((req, res, next) => {
   if (req.method !== 'GET' || req.path.startsWith('/api/')) {

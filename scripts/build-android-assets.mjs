@@ -8,7 +8,7 @@
 import { build as viteBuild } from 'vite'
 import { build as esbuildBuild } from 'esbuild'
 import { execSync } from 'child_process'
-import { copyFileSync, existsSync, readFileSync, writeFileSync, readdirSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -163,11 +163,38 @@ function patchNeteaseApi() {
       to: "let anonymous_token = ''\ntry { anonymous_token = fs.readFileSync(path.resolve(tmpPath, './anonymous_token'), 'utf-8') } catch (__e) {}",
     },
   ]
+  // generateConfig.js：漏 patch 的第三个 tmpdir 写入点（2026-11-04 实机事故）——
+  // 它负责注册匿名 token + 拉取 xeapi 公钥并落盘，tmpdir 指向只读 /tmp 时写失败
+  // → util/request.js 的 loadXeapiPublicKey 永远读不到公钥 → 所有 xeapi 加密接口
+  // （网易云登录态校验/用户信息/高音质 URL）报 "xeapi public key is missing"，
+  // 用户观感就是"网易云登录老是掉"。generateConfig 在 nodejs-project 层（与 main.js
+  // 同级），上三级到可写层。写失败同样静默容错。
+  files.push(join(ASSETS_DIR, 'node_modules', '@neteasecloudmusicapienhanced', 'api', 'generateConfig.js'))
+  const generateConfigPatch = [
+    {
+      from: "const tmpPath = require('os').tmpdir()",
+      to: "const tmpPath = require('path').join(__dirname, '..', '..', '..')",
+    },
+    {
+      from: "        cookieObj.MUSIC_A,\n        'utf-8',\n      )",
+      to: "        cookieObj.MUSIC_A,\n        'utf-8',\n      )",
+    },
+    {
+      from: "      fs.writeFileSync(\n        path.resolve(tmpPath, 'anonymous_token'),\n        cookieObj.MUSIC_A,\n        'utf-8',\n      )",
+      to: "      try { fs.writeFileSync(\n        path.resolve(tmpPath, 'anonymous_token'),\n        cookieObj.MUSIC_A,\n        'utf-8',\n      ) } catch (__e) {}",
+    },
+    {
+      from: "    fs.writeFileSync(\n      path.resolve(tmpPath, 'xeapi_public_key'),\n      JSON.stringify(publicKey),\n      'utf-8',\n    )",
+      to: "    try { fs.writeFileSync(\n      path.resolve(tmpPath, 'xeapi_public_key'),\n      JSON.stringify(publicKey),\n      'utf-8',\n    ) } catch (__e) {}",
+    },
+  ]
   for (const file of files) {
     if (!existsSync(file)) continue
     let src = readFileSync(file, 'utf8')
     let changed = false
-    const rules = file.endsWith('request.js') ? requestPatch : mainPatch
+    const rules = file.endsWith('request.js') ? requestPatch
+      : file.endsWith('generateConfig.js') ? generateConfigPatch
+      : mainPatch
     for (const p of rules) {
       const next = src.replace(p.from, p.to)
       if (next !== src) {
@@ -177,7 +204,7 @@ function patchNeteaseApi() {
     }
     if (changed) {
       writeFileSync(file, src)
-      console.log(`  已 patch ${file.split('/').pop()} 匿名 token（容错 + 可写路径）`)
+      console.log(`  已 patch ${file.split('/').pop()} 匿名 token/xeapi 公钥（容错 + 可写路径）`)
     }
   }
 }
@@ -188,6 +215,30 @@ function copyRemoteUi() {
   const dest = join(ASSETS_DIR, 'remote-ui.html')
   copyFileSync(src, dest)
   console.log('  已复制 desktop/remote-ui.html → 设备资产')
+}
+
+/**
+ * 汽水扫码签名资产（2026-11-05）：server/qishui-auth-node.cjs 运行时按
+ * __dirname/qishui-auth-assets/<name> 读取 bdms SDK 等签名页资产（与桌面端
+ * desktop/qishui-auth-v6/ 同一份文件）。esbuild 无法打包非 JS 资产，随包复制。
+ */
+function copyQishuiAuthAssets() {
+  const srcDir = join(ROOT, 'desktop', 'qishui-auth-v6')
+  const destDir = join(ASSETS_DIR, 'qishui-auth-assets')
+  mkdirSync(destDir, { recursive: true })
+  const names = ['security_seed.html', 'security_host.html', 'react.js', 'react-dom.js', 'sdk-glue.js', 'bdms.js']
+  let copied = 0
+  for (const name of names) {
+    const src = join(srcDir, name)
+    if (!existsSync(src)) continue
+    copyFileSync(src, join(destDir, name))
+    copied += 1
+  }
+  if (copied === 0) {
+    console.warn('  ⚠️ qishui-auth-v6 资产缺失：Android 汽水扫码签名不可用（登录将退回手动 Cookie）')
+  } else {
+    console.log(`  已复制汽水扫码签名资产 ${copied}/${names.length} → qishui-auth-assets/`)
+  }
 }
 
 /**
@@ -344,6 +395,7 @@ async function main() {
   patchPathToRegexp()
   patchNeteaseApi()
   copyRemoteUi()
+  copyQishuiAuthAssets()
   patchTvViewport()
   patchCssColorMix()
   bumpAssetsVersion()

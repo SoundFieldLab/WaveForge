@@ -337,6 +337,75 @@
         }
       };
     </script>
+    <script>
+      // ── Android/nodejs-mobile 签名执行模式（2026-11-05）────────────────────
+      // 桌面端由 Electron executeJavaScript 驱动 window.__qishuiRequest；Android 端
+      // Node 无浏览器可驱动，改为反向：Node 把待签名请求排队（sign/pending），
+      // 本页面轮询取任务、以 XHR 打同源代理执行（bdms 照常拦截签名）、结果回写
+      // sign/result。桌面端 asset server 没有 sign/pending 路由（404），轮询一次
+      // 即自动停用，桌面行为完全不变。
+      (function () {
+        var signModeActive = false;
+        function report(id, payload) {
+          return fetch('sign/result', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(Object.assign({ id: id }, payload)),
+          }).catch(function () {});
+        }
+        async function runTask(task) {
+          var id = String(task.id || '');
+          try {
+            if (task.payload && task.payload.kind === 'verify') {
+              // 二次验证：页面内建 MFA 组件（与桌面端 executeJavaScript 路径同函数）
+              var verified = await window.__qishuiSecondVerify(task.payload.decision || {}, {
+                generalParams: { device_id: '', install_id: '', did: '', iid: '', device_platform: 'PC', version_code: '3.5.2' },
+              });
+              await report(id, { status: verified && verified.status === true ? 200 : 0, body: JSON.stringify(verified || {}) });
+              return;
+            }
+            var response = await window.__qishuiRequest(task.payload || {});
+            var headers = {};
+            String(response.headers || '').split(/\r?\n/).forEach(function (line) {
+              var idx = line.indexOf(':');
+              if (idx > 0) headers[line.slice(0, idx).trim().toLowerCase()] = line.slice(idx + 1).trim();
+            });
+            await report(id, { status: response.status, body: response.body, headers: headers });
+          } catch (error) {
+            await report(id, { error: String(error && error.message || error) });
+          }
+        }
+        async function poll() {
+          try {
+            var response = await fetch('sign/pending', { cache: 'no-store' });
+            if (response.status === 404) return; // 桌面端：无此路由，停用
+            signModeActive = true;
+            var data = await response.json().catch(function () { return { tasks: [] }; });
+            var tasks = Array.isArray(data && data.tasks) ? data.tasks : [];
+            for (var i = 0; i < tasks.length; i++) runTask(tasks[i]);
+          } catch (_) { /* 网络抖动继续轮询 */ }
+        }
+        function loop() {
+          poll().finally(function () { setTimeout(loop, signModeActive ? 120 : 1500); });
+        }
+        if (typeof window !== 'undefined' && window.fetch && window.__qishuiRequest) {
+          setTimeout(loop, 600);
+        }
+        // browserInfo 上报通道：Android 端 initialize 需要它证明页面就绪。
+        // 借 sign/pending 的 404 探测顺带把 browserInfo POST 给 Node（专用上报名）。
+        setTimeout(function () {
+          try {
+            window.__qishuiBrowserInfo().then(function (info) {
+              fetch('sign/result', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: 'browser-info', body: JSON.stringify(info) }),
+              }).catch(function () {});
+            }).catch(function () {});
+          } catch (_) {}
+        }, 1200);
+      })();
+    </script>
     <style>
       html, body { width: 100%; height: 100%; margin: 0; background: #fff; font-family: sans-serif; }
       #mfa-status { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2147483647; padding: 9px 14px; border-radius: 8px; background: rgba(255,255,255,.96); box-shadow: 0 2px 12px rgba(0,0,0,.15); }

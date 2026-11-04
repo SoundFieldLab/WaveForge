@@ -55,8 +55,8 @@ class MainActivity : Activity() {
         // 前端迭代随版本走 build:android（默认只递增 DIST），核心层由 --full 递增。
         private const val PREF_CORE_KEY = "core_assets_version"
         private const val PREF_DIST_KEY = "dist_assets_version"
-        private const val CORE_ASSETS_VERSION = 6
-        private const val DIST_ASSETS_VERSION = 19
+        private const val CORE_ASSETS_VERSION = 13
+        private const val DIST_ASSETS_VERSION = 38
         private const val SERVER_URL = "http://localhost:3001/"
         private const val HEALTH_URL = "http://localhost:3001/health"
         // Node 启动标记：必须进程级唯一（nodejs-mobile 不支持重启、每次进程只允许一个）。
@@ -78,7 +78,6 @@ class MainActivity : Activity() {
         // 会先重定向到精选页才弹登录（多一跳依赖）；www.douyin.com/login 只返回 JSON。
         // 登录成功后 sessionid/sid_guard 等 cookie 落在 .douyin.com，CookieManager 轮询可捕获；
         // 后端 /api/soda/* 只要求 cookie 含登录键（与手动粘贴同口径），域名无所谓。
-        private const val SODA_LOGIN_URL = "https://www.douyin.com/"
     }
 
     private lateinit var webView: WebView
@@ -86,10 +85,18 @@ class MainActivity : Activity() {
     private var splashView: SplashView? = null
     private var qqLoginWebView: WebView? = null
     private var qqLoginPolling: Thread? = null
-    // 汽水（抖音）登录覆盖层：同 QQ 覆盖层模式，轮询 .douyin.com 登录 cookie
-    private var sodaLoginWebView: WebView? = null
-    private var sodaLoginPolling: Thread? = null
-    private var sodaInitialCookie = ""
+    // QQ 音乐 App 扫码（原生渲染二维码）：优先于网页覆盖层通道
+    private var qqQrNativeView: FrameLayout? = null
+    private var qqQrStatusView: android.widget.TextView? = null
+    private var qqAppQrPolling: Thread? = null
+    // 汽水 App 扫码（官方 Passport QR 协议，原生渲染二维码）：同 QQ 通道模式。
+    // 签名执行宿主：1×1 离屏 WebView（bdms SDK）。旧方案（开抖音首页抓 cookie）
+    // 已废弃：抓到的 .douyin.com Cookie 在汽水 API 一律 403，登录永不闭环。
+    private var sodaQrNativeView: FrameLayout? = null
+    private var sodaQrStatusView: android.widget.TextView? = null
+    private var sodaAppQrPolling: Thread? = null
+    private var sodaSignWebView: WebView? = null
+    private var sodaQrToken: String = ""
     // BACK 键：JS 消费（useTvBack 逐级关闭）后上报，原生不再执行默认返回
     private val backConsumed = java.util.concurrent.atomic.AtomicBoolean(false)
     // WebView 渲染进程崩溃重载计数（防无限重载）
@@ -102,6 +109,10 @@ class MainActivity : Activity() {
     // 焦点在滑块上时由 Web 层开启：音量键转发给页面做 +1/-1 调节，不再调系统音量
     @Volatile
     private var volumeKeyCapture = false
+
+    /** App 内不熄屏（FLAG_KEEP_SCREEN_ON）：前端设置开关驱动（默认开），仅窗口前台生效。 */
+    @Volatile
+    private var keepScreenOnEnabled = true
 
     /** 沉浸全屏重申：安卓端永远全屏形态（TV/移动/PC布局皆然），无条件重申最稳。
      *  保留标志仅供 JS 桥 setImmersiveMode 理论上动态关闭（当前无此场景）。 */
@@ -135,7 +146,9 @@ class MainActivity : Activity() {
         // 屏幕常亮：仅 TV（遥控场景不会碰屏幕）。手机/平板正常超时熄屏省电，
         // 播放时由 WebView 内 <video>/AudioContext 或前台服务策略接管。
         if (isTvDevice()) {
+            // TV：遥控场景不碰屏幕，保持常亮（不走前端开关，TV 设置无此项）。
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            keepScreenOnEnabled = true
         }
 
         // 挖孔屏：内容延伸进摄像头区（配合沉浸 padding 归零，横屏右侧不再留空条）。
@@ -390,6 +403,18 @@ class MainActivity : Activity() {
                     volumeKeyCapture = v
                 }
 
+                // App 内不熄屏开关（手机/平板 PC 布局的设置页可调，默认开）：
+                // FLAG_KEEP_SCREEN_ON 只在窗口前台时生效，锁屏键/后台不受影响。
+                // 用户场景：横屏看歌词/PC 布局浏览时不想每次熄屏解锁。
+                @android.webkit.JavascriptInterface
+                fun setKeepScreenOn(enabled: Boolean) {
+                    runOnUiThread {
+                        keepScreenOnEnabled = enabled
+                        if (enabled) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+
                 // 播放状态同步：播放中起前台服务（进程 adj 提到 FOREGROUND，避免
                 // vivo 等 ROM 在切后台后直接清理进程）；暂停/停止时撤销通知。
                 @android.webkit.JavascriptInterface
@@ -498,8 +523,16 @@ class MainActivity : Activity() {
             Thread {
                 ensureNodeProject()
                 val mainJs = File(filesDir, "$NODE_ASSETS_DIR/main.cjs").absolutePath
-                // --port=3002：3001 已被原生壳占用（壳反代到 3002）
-                startNodeWithArguments(arrayOf("node", mainJs, "--waveforge-local-token=$localServiceToken", "--port=3002"))
+                // --port=3002：3001 已被原生壳占用（壳反代到 3002）。
+                // --waveforge-home/userdata：nodejs-mobile 进程没有 HOME，QQ cookie 等
+                // 凭据持久化（os.homedir()/.waveforge）会写到空路径丢登录态（实机
+                // 事故 2026-11-04）——显式传入可写目录，native-lib.cpp 里 setenv。
+                val homeDir = File(filesDir, NODE_ASSETS_DIR).absolutePath
+                val userdataDir = File(filesDir, "waveforge-userdata").absolutePath
+                File(userdataDir).mkdirs()
+                startNodeWithArguments(arrayOf("node", mainJs,
+                    "--waveforge-local-token=$localServiceToken", "--port=3002",
+                    "--waveforge-home=$homeDir", "--waveforge-userdata=$userdataDir"))
             }.start()
         }
 
@@ -622,8 +655,252 @@ class MainActivity : Activity() {
     // ---------- 应用内 QQ 扫码登录（电视上没有 Electron 登录窗口） ----------
 
     private fun openQQLoginWindow() {
-        if (qqLoginWebView != null) return // 已打开
+        // 先清掉上一次残留的网页覆盖层（它会让守卫短路 return——用户永远只看到
+        // 旧的 403 白页，原生面板/新会话全部不触发）。closeQQLoginWindow 同时
+        // 复位 qqLoginWebView/qqQrNativeView/轮询线程。
+        if (qqLoginWebView != null || qqQrNativeView != null) closeQQLoginWindow()
+        // 优先走「QQ 音乐 App 扫码」协议通道（musicu CreateQRCode + MQTT）：
+        // 官方网页二维码（ptlogin2/ptqrshow）已被腾讯风控封锁（实测 403 → 跳腾讯网），
+        // 该通道与 PC 端 qqMusicQrLogin.cjs 同源协议，后端 /api/qq/app-qr/* 打包在
+        // nodejs-mobile 里。失败（服务未就绪/协议被风控）时回退网页覆盖层。
+        Thread {
+            val started = try {
+                startAppQrSession()
+            } catch (e: Exception) {
+                Log.e("WFLogin", "App 扫码 start 异常: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            if (!started) {
+                Log.w("WFLogin", "App 扫码通道不可用，回退网页登录覆盖层")
+                openQQLoginWebOverlay()
+            }
+        }.start()
+    }
+
+    /** 调后端 /api/qq/app-qr/start：成功 → 原生渲染二维码并开始轮询；失败 → 返回 false。 */
+    private fun startAppQrSession(): Boolean {
+        val conn = URL("http://127.0.0.1:3001/api/qq/app-qr/start").openConnection() as HttpURLConnection
+        conn.requestMethod = "POST"
+        conn.connectTimeout = 8000
+        conn.readTimeout = 30000
+        if (localServiceToken.isNotEmpty()) conn.setRequestProperty("X-WaveForge-Local-Token", localServiceToken)
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.outputStream.use { it.write("{}".toByteArray()) }
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            val errBody = try { conn.errorStream?.bufferedReader()?.readText()?.take(300) } catch (_: Exception) { "" }
+            Log.e("WFLogin", "App 扫码 start 失败: HTTP $code $errBody")
+            conn.disconnect(); return false
+        }
+        val body = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        val json = org.json.JSONObject(body)
+        if (!json.optBoolean("ok")) {
+            Log.e("WFLogin", "App 扫码 start 返回 ok=false: ${body.take(200)}")
+            return false
+        }
+        val imageB64 = json.optString("image")
+        if (imageB64.isEmpty()) {
+            Log.e("WFLogin", "App 扫码 start 返回 image 为空（body ${body.length} 字符）")
+            return false
+        }
+        // 剥离 data URL 前缀（后端返回 "data:image/png;base64,xxx" 与桌面端 <img src> 同格式）
+        val b64Payload = imageB64.substringAfter("base64,", imageB64)
+        val bytes = android.util.Base64.decode(b64Payload, android.util.Base64.DEFAULT)
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        if (bmp == null) {
+            Log.e("WFLogin", "App 扫码 PNG 解码失败（bytes=${bytes.size}，前缀=${imageB64.take(30)}）")
+            return false
+        }
+        runOnUiThread { showAppQrOverlay(bmp) }
+        startAppQrPolling()
+        return true
+    }
+
+    /** 原生二维码覆盖层：对齐应用深色设计语言（圆角卡片 + 平台强调色渐变顶栏 + 白底码容器）。 */
+    private fun showAppQrOverlay(bitmap: android.graphics.Bitmap) {
+        val ctx = this
+        val accent = android.graphics.Color.parseColor("#31c27c") // QQ 平台强调色（与前端 PLATFORM_ACCENT.qq 一致）
+
+        fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+        // 圆角辅助
+        fun rounded(color: Int, radiusDp: Int): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = dp(radiusDp).toFloat()
+            }
+
+        // 遮罩
+        val overlay = FrameLayout(ctx).apply {
+            setBackgroundColor(android.graphics.Color.parseColor("#B3000000"))
+        }
+
+        // 中央卡片
+        val card = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            background = rounded(android.graphics.Color.parseColor("#151c26"), 22)
+            setPadding(dp(28), dp(30), dp(28), dp(26))
+        }
+        val cardParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            gravity = android.view.Gravity.CENTER
+            width = (resources.displayMetrics.widthPixels * 0.82f).toInt()
+        }
+
+        // 标题 + 副标题
+        val title = android.widget.TextView(ctx).apply {
+            text = "扫码登录 QQ 音乐"
+            textSize = 19f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+        }
+        val subtitle = android.widget.TextView(ctx).apply {
+            text = "打开 QQ 音乐 App 或手机 QQ 扫一扫"
+            textSize = 13f
+            setTextColor(android.graphics.Color.parseColor("#8ca0b8"))
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(18))
+        }
+
+        // 白底圆角二维码容器（深色面板上码区必须白底才能扫）
+        val qrWrap = android.widget.FrameLayout(ctx).apply {
+            background = rounded(android.graphics.Color.WHITE, 14)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            val lp = android.widget.LinearLayout.LayoutParams(
+                (resources.displayMetrics.widthPixels * 0.5f).toInt(),
+                (resources.displayMetrics.widthPixels * 0.5f).toInt())
+            layoutParams = lp
+        }
+        // 二维码按容器缩放绘制（原图 ~186px，直接放大会糊/过小）
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            bitmap, (resources.displayMetrics.widthPixels * 0.5f).toInt() - dp(28),
+            (resources.displayMetrics.widthPixels * 0.5f).toInt() - dp(28), true)
+        val qrView = android.widget.ImageView(ctx).apply {
+            setImageBitmap(scaled)
+        }
+        qrWrap.addView(qrView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // 状态行（等待扫码/已扫描/过期/错误）
+        val status = android.widget.TextView(ctx).apply {
+            text = "等待扫码…"
+            textSize = 14f
+            setTextColor(android.graphics.Color.parseColor("#31c27c"))
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(18), 0, dp(4))
+        }
+
+        // 按钮行：主按钮（强调色胶囊）+ 次按钮（描边）
+        val btnRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+        }
+        val btnParams = android.widget.LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(6), 0, dp(6), 0) }
+        val refreshBtn = android.widget.TextView(ctx).apply {
+            text = "刷新二维码"
+            textSize = 14f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            background = rounded(accent, 21)
+            setOnClickListener { refreshAppQr() }
+        }
+        val closeBtn = android.widget.TextView(ctx).apply {
+            text = "关闭"
+            textSize = 14f
+            setTextColor(android.graphics.Color.parseColor("#8ca0b8"))
+            gravity = android.view.Gravity.CENTER
+            background = rounded(android.graphics.Color.parseColor("#232c3a"), 21)
+            setOnClickListener { closeQQLoginWindow() }
+        }
+        btnRow.addView(refreshBtn, btnParams)
+        btnRow.addView(closeBtn, android.widget.LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(6), 0, dp(6), 0) })
+
+        card.addView(title)
+        card.addView(subtitle)
+        card.addView(qrWrap)
+        card.addView(status)
+        card.addView(btnRow)
+        overlay.addView(card, cardParams)
+        rootView.addView(overlay)
+        qqQrNativeView = overlay
+        qqQrStatusView = status
+    }
+
+    private fun refreshAppQr() {
+        qqQrStatusView?.text = "正在刷新二维码…"
+        Thread {
+            val ok = try { startAppQrSession() } catch (_: Exception) { false }
+            if (!ok) runOnUiThread { qqQrStatusView?.text = "刷新失败，请稍后重试" }
+        }.start()
+    }
+
+    /** 轮询 App 扫码状态：waiting → scanned → success(cookie)。成功走既有 cookie 流程。 */
+    private fun startAppQrPolling() {
+        qqAppQrPolling?.interrupt()
+        qqAppQrPolling = Thread {
+            var attempts = 0
+            while (!Thread.currentThread().isInterrupted && attempts < 90) { // ~3 分钟
+                attempts++
+                try {
+                    val conn = URL("http://127.0.0.1:3001/api/qq/app-qr/poll").openConnection() as HttpURLConnection
+                    conn.connectTimeout = 4000
+                    conn.readTimeout = 4000
+                    if (localServiceToken.isNotEmpty()) conn.setRequestProperty("X-WaveForge-Local-Token", localServiceToken)
+                    val code = conn.responseCode
+                    if (code in 200..299) {
+                        val body = conn.inputStream.bufferedReader().readText()
+                        conn.disconnect()
+                        val json = org.json.JSONObject(body)
+                        when (json.optString("status")) {
+                            "success" -> {
+                                // 后端已把 cookie 落库；这里回传主 WebView 让 UI 走既有登录成功路径
+                                val cookie = json.optString("cookie")
+                                runOnUiThread {
+                                    closeQQLoginWindow()
+                                    val payload = org.json.JSONObject().put("cookie", cookie).toString()
+                                    webView.evaluateJavascript(
+                                        "window.dispatchEvent(new CustomEvent('qqLoginCookieCaptured', { detail: $payload }))", null)
+                                }
+                                return@Thread
+                            }
+                            "scanned" -> runOnUiThread { qqQrStatusView?.text = "已扫描，请在手机上确认" }
+                            "expired" -> {
+                                runOnUiThread { qqQrStatusView?.text = "二维码已过期，请点刷新" }
+                                return@Thread
+                            }
+                            "error" -> {
+                                runOnUiThread { qqQrStatusView?.text = json.optString("message", "登录失败") }
+                                return@Thread
+                            }
+                        }
+                    } else {
+                        conn.disconnect()
+                    }
+                } catch (_: Exception) { /* 网络抖动继续轮询 */ }
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { return@Thread }
+            }
+        }.apply { start() }
+    }
+
+    /** fallback：旧网页登录覆盖层（ptlogin2 网页通道，官方风控时不可用）。 */
+    private fun openQQLoginWebOverlay() {
         runOnUiThread {
+            // 打开前清 QQ 登录域 cookie（切账号需求，与汽水覆盖层同逻辑）
+            try {
+                val cm = CookieManager.getInstance()
+                val old = cm.getCookie("https://xui.ptlogin2.qq.com/") ?: ""
+                old.split(";").forEach { part ->
+                    val name = part.trim().substringBefore('=').trim()
+                    if (name.isNotEmpty()) {
+                        cm.setCookie("https://xui.ptlogin2.qq.com/", "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                        cm.setCookie("https://.qq.com/", "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                    }
+                }
+                cm.flush()
+            } catch (_: Exception) { /* ignore */ }
             val overlay = WebView(this).apply {
                 layoutParams = FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -657,6 +934,28 @@ class MainActivity : Activity() {
                             return true
                         }
                         return false
+                    }
+
+                    // 诊断埋点：登录页加载失败此前是静默白屏（用户以为"二维码生成不了"）。
+                    // 错误打到 logcat（WFLogin tag），并在覆盖层顶部显示具体原因。
+                    override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: android.webkit.WebResourceError?) {
+                        super.onReceivedError(view, request, error)
+                        // 主文档失败才提示（子资源 404 等不影响二维码渲染）
+                        if (request?.isForMainFrame != true) return
+                        val desc = error?.description?.toString() ?: "unknown"
+                        Log.e("WFLogin", "QQ登录页加载失败: code=${error?.errorCode} $desc url=${request?.url}")
+                        runOnUiThread {
+                            qqLoginWebView?.evaluateJavascript(
+                                "(function(){var b=document.getElementById('wf-qq-login-bar');" +
+                                "if(b){b.innerHTML='<span>登录页加载失败：$desc（检查网络后点刷新重试）</span>';" +
+                                "b.style.background='rgba(120,20,20,0.95)';}})()", null)
+                        }
+                    }
+
+                    override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: android.webkit.WebResourceResponse?) {
+                        super.onReceivedHttpError(view, request, errorResponse)
+                        if (request?.isForMainFrame != true) return
+                        Log.e("WFLogin", "QQ登录页HTTP错误: ${errorResponse?.statusCode} url=${request?.url}")
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -702,7 +1001,23 @@ class MainActivity : Activity() {
     private fun closeQQLoginWindow() {
         qqLoginPolling?.interrupt()
         qqLoginPolling = null
+        qqAppQrPolling?.interrupt()
+        qqAppQrPolling = null
+        // App 扫码协议会话同步清理（幂等）
+        Thread {
+            try {
+                val conn = URL("http://127.0.0.1:3001/api/qq/app-qr/cancel").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 2000
+                if (localServiceToken.isNotEmpty()) conn.setRequestProperty("X-WaveForge-Local-Token", localServiceToken)
+                conn.responseCode
+                conn.disconnect()
+            } catch (_: Exception) { /* 后端未就绪时忽略 */ }
+        }.start()
         runOnUiThread {
+            qqQrNativeView?.let { rootView.removeView(it) }
+            qqQrNativeView = null
+            qqQrStatusView = null
             qqLoginWebView?.destroy()
             qqLoginWebView?.let { rootView.removeView(it) }
             qqLoginWebView = null
@@ -721,173 +1036,267 @@ class MainActivity : Activity() {
         false
     }
 
-    // ---------- 应用内汽水（抖音）扫码登录 ----------
+    // ---------- 汽水音乐 App 扫码登录（官方 Passport QR 协议，2026-11-05）----------
+    // 与 QQ 同款「协议通道 + 原生二维码 UI」：后端 /api/soda/app-qr/*（nodejs-mobile
+    // 打包的 qishui-auth-node.cjs）生成二维码/轮询确认；签名（bdms a_bogus）由本
+    // Activity 的 1×1 离屏 WebView 完成——Node 排队待签名请求，离屏页轮询执行。
+    // 旧方案（开抖音首页抓 .douyin.com Cookie）已废弃：抖音 Cookie 在汽水 API 403。
 
-    /** 抖音系/字节基建域名白名单：登录页、二维码图、风控验证（zijieapi 验证码）、汽水官方都在里面。 */
-    private fun isSodaDomain(url: String): Boolean = try {
-        val host = Uri.parse(url).host?.lowercase() ?: return false
-        listOf(
-            "douyin.com", "douyinstatic.com", "douyinpic.com", "zjcdn.com", "zijieapi.com",
-            "bytedance.com", "byteimg.com", "ibytedtos.com", "bytetos.com", "snssdk.com",
-            "toutiao.com", "qishui.com", "yhgfb-cn-static.com",
-        ).any { host == it || host.endsWith(".$it") }
-    } catch (_: Exception) {
-        false
-    }
-
-    private fun openSodaLoginWindow() {
-        if (sodaLoginWebView != null) return // 已打开
+    /** 离屏签名 WebView：1×1 像素、不可见但保持活跃（View.GONE 会暂停渲染 JS，
+     *  用 1px + 0 alpha 叠在根布局最底层）。加载 Node 代理的 security_host.html。 */
+    private fun ensureSodaSignWebView() {
+        if (sodaSignWebView != null) return
         runOnUiThread {
-            // 覆盖层打开前的快照：WebView 的 cookie 库是全局持久的，可能残留上次的
-            // 过期登录键。只认「内容发生变化且含登录键」的快照，避免旧 cookie 秒触发。
-            sodaInitialCookie = try {
-                CookieManager.getInstance().getCookie("https://www.douyin.com/") ?: ""
-            } catch (_: Exception) { "" }
-            val overlay = WebView(this).apply {
-                layoutParams = FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
+            val signView = WebView(this).apply {
+                layoutParams = FrameLayout.LayoutParams(1, 1)
+                alpha = 0f
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
-                settings.useWideViewPort = true
-                settings.loadWithOverviewMode = true
-                // 必须桌面 UA：sso.douyin.com 登录页检测到移动 UA 会重定向到
-                // 「下载汽水音乐」营销轮播页（实机已复现），只有桌面 UA 才渲染
-                // 二维码/短信登录表单。桌面页由 useWideViewPort 缩放适配。
-                settings.userAgentString =
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                settings.javaScriptCanOpenWindowsAutomatically = true
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                setBackgroundColor(Color.parseColor("#0a0f14"))
+                setBackgroundColor(Color.TRANSPARENT)
+                // 离屏页只与本机 Node 通信，导航守卫收紧
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                        val url = request?.url?.toString() ?: return false
-                        val scheme = request.url.scheme?.lowercase() ?: ""
-                        // 抖音 App 唤起协议（snssdk1233:// 等）一律丢弃：登录态留在抖音
-                        // App 自己的存储里，CookieManager 抓不到，轮询永远等不到结果
-                        if (scheme != "http" && scheme != "https") return true
-                        if (!isSodaDomain(url)) {
-                            try {
-                                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                            } catch (_: Exception) {}
-                            return true
-                        }
-                        return false
-                    }
-
-                    override fun onPageFinished(view: WebView?, url: String?) {
-                        injectSodaLoginHelper(view)
-                    }
-                }
-                webChromeClient = object : WebChromeClient() {
-                    override fun onCreateWindow(
-                        view: WebView?,
-                        isDialog: Boolean,
-                        isUserGesture: Boolean,
-                        resultMsg: android.os.Message?
-                    ): Boolean {
-                        val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                        transport.webView = view
-                        resultMsg.sendToTarget()
-                        return true
+                        return !isLocalServerUrl(request?.url?.toString() ?: "")
                     }
                 }
             }
-            // 覆盖层自己的最小桥（主 WebView 的桥不在覆盖层作用域里）
-            overlay.addJavascriptInterface(object {
-                @android.webkit.JavascriptInterface
-                fun closeSodaLogin() {
-                    runOnUiThread { closeSodaLoginWindow() }
+            rootView.addView(signView, 0)
+            sodaSignWebView = signView
+            // 等本地服务就绪后加载签名页（Node 端 asset server 随 getQrCode 懒启动，
+            // 这里先加载 security_seed 预热；真实 assetBase 由页面通过同源相对路径访问）
+            Thread {
+                try { Thread.sleep(1500) } catch (_: InterruptedException) {}
+                runOnUiThread {
+                    signView.loadUrl("http://127.0.0.1:3001/api/soda/app-qr/sign-page")
                 }
-                @android.webkit.JavascriptInterface
-                fun reloadLogin() {
-                    runOnUiThread { overlay.loadUrl(SODA_LOGIN_URL) }
-                }
-                @android.webkit.JavascriptInterface
-                fun reportBackConsumed() { }
-            }, "WaveForgeNative")
-            rootView.addView(overlay)
-            sodaLoginWebView = overlay
-            overlay.loadUrl(SODA_LOGIN_URL)
-            startSodaCookiePolling()
+            }.start()
         }
     }
 
+    private fun openSodaLoginWindow() {
+        if (sodaQrNativeView != null) return // 已打开
+        ensureSodaSignWebView()
+        Thread {
+            val started = try {
+                startSodaAppQrSession()
+            } catch (e: Exception) {
+                Log.e("WFLogin", "汽水扫码 start 异常: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+            if (!started) {
+                Log.w("WFLogin", "汽水扫码通道不可用（安全组件未就绪/风控）")
+                runOnUiThread {
+                    showSodaQrStatusError("二维码生成失败，请稍后重试（或到设置用手动 Cookie 登录）")
+                }
+            }
+        }.start()
+    }
+
+    private fun httpGetJson(path: String, method: String = "GET", timeoutMs: Int = 45000): org.json.JSONObject? {
+        val conn = URL("http://127.0.0.1:3001$path").openConnection() as HttpURLConnection
+        conn.requestMethod = method
+        conn.connectTimeout = 8000
+        conn.readTimeout = timeoutMs
+        if (localServiceToken.isNotEmpty()) conn.setRequestProperty("X-WaveForge-Local-Token", localServiceToken)
+        return try {
+            val code = conn.responseCode
+            if (code !in 200..299) { conn.disconnect(); return null }
+            val body = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            org.json.JSONObject(body)
+        } catch (e: Exception) {
+            try { conn.disconnect() } catch (_: Exception) {}
+            null
+        }
+    }
+
+    private fun startSodaAppQrSession(): Boolean {
+        val json = httpGetJson("/api/soda/app-qr/start", method = "POST", timeoutMs = 60000) ?: return false
+        if (!json.optBoolean("ok")) return false
+        val imageBase64 = json.optString("image")
+        sodaQrToken = json.optString("token")
+        if (imageBase64.isEmpty() || sodaQrToken.isEmpty()) return false
+        val decoded = try {
+            android.util.Base64.decode(imageBase64.substringAfter("base64,"), android.util.Base64.DEFAULT)
+        } catch (_: IllegalArgumentException) { return false }
+        val bitmap = android.graphics.BitmapFactory.decodeByteArray(decoded, 0, decoded.size) ?: return false
+        runOnUiThread { showSodaQrOverlay(bitmap) }
+        startSodaAppQrPolling()
+        return true
+    }
+
+    private fun refreshSodaQr() {
+        sodaQrStatusView?.text = "正在刷新二维码…"
+        sodaAppQrPolling?.interrupt()
+        sodaAppQrPolling = null
+        Thread {
+            val started = try {
+                startSodaAppQrSession()
+            } catch (_: Exception) { false }
+            if (!started) runOnUiThread { showSodaQrStatusError("刷新失败，请关闭后重试") }
+        }.start()
+    }
+
+    private fun startSodaAppQrPolling() {
+        sodaAppQrPolling?.interrupt()
+        sodaAppQrPolling = Thread {
+            var attempts = 0
+            while (!Thread.currentThread().isInterrupted && attempts < 90) { // ~3 分钟
+                attempts++
+                try {
+                    val json = httpGetJson("/api/soda/app-qr/poll?token=${java.net.URLEncoder.encode(sodaQrToken, "UTF-8")}", timeoutMs = 45000)
+                    if (json != null && json.optBoolean("ok")) {
+                        when (json.optString("status")) {
+                            "success" -> {
+                                val cookie = json.optString("cookie")
+                                if (cookie.isNotEmpty()) {
+                                    runOnUiThread {
+                                        closeSodaLoginWindow()
+                                        val payload = org.json.JSONObject().put("cookie", cookie).toString()
+                                        webView.evaluateJavascript(
+                                            "window.dispatchEvent(new CustomEvent('sodaLoginCookieCaptured', { detail: $payload }))", null)
+                                    }
+                                    return@Thread
+                                }
+                            }
+                            "scanned" -> runOnUiThread { sodaQrStatusView?.text = "已扫描，请在手机上确认" }
+                            "expired" -> {
+                                runOnUiThread { sodaQrStatusView?.text = "二维码已过期，请点刷新" }
+                                return@Thread
+                            }
+                            "error" -> {
+                                runOnUiThread { sodaQrStatusView?.text = json.optString("message", "登录失败") }
+                                return@Thread
+                            }
+                        }
+                    }
+                } catch (_: Exception) { /* 网络抖动继续轮询 */ }
+                try { Thread.sleep(2000) } catch (_: InterruptedException) { return@Thread }
+            }
+        }.apply { start() }
+    }
+
+    /** 汽水原生二维码覆盖层：复用 QQ 扫码面板设计（天蓝平台强调色）。 */
+    private fun showSodaQrOverlay(bitmap: android.graphics.Bitmap) {
+        val ctx = this
+        val accent = android.graphics.Color.parseColor("#38bdf8") // 汽水平台强调色（与前端 PLATFORM_ACCENT.soda 一致）
+
+        fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+        fun rounded(color: Int, radiusDp: Int): android.graphics.drawable.GradientDrawable =
+            android.graphics.drawable.GradientDrawable().apply {
+                setColor(color)
+                cornerRadius = dp(radiusDp).toFloat()
+            }
+
+        val overlay = FrameLayout(ctx).apply {
+            setBackgroundColor(android.graphics.Color.parseColor("#B3000000"))
+        }
+        val card = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            gravity = android.view.Gravity.CENTER_HORIZONTAL
+            background = rounded(android.graphics.Color.parseColor("#151c26"), 22)
+            setPadding(dp(28), dp(30), dp(28), dp(26))
+        }
+        val cardParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+            gravity = android.view.Gravity.CENTER
+            width = (resources.displayMetrics.widthPixels * 0.82f).toInt()
+        }
+        val title = android.widget.TextView(ctx).apply {
+            text = "扫码登录汽水音乐"
+            textSize = 19f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+        }
+        val subtitle = android.widget.TextView(ctx).apply {
+            text = "打开「汽水音乐」App 扫一扫"
+            textSize = 13f
+            setTextColor(android.graphics.Color.parseColor("#8ca0b8"))
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(8), 0, dp(18))
+        }
+        val qrWrap = android.widget.FrameLayout(ctx).apply {
+            background = rounded(android.graphics.Color.WHITE, 14)
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            val lp = android.widget.LinearLayout.LayoutParams(
+                (resources.displayMetrics.widthPixels * 0.5f).toInt(),
+                (resources.displayMetrics.widthPixels * 0.5f).toInt())
+            layoutParams = lp
+        }
+        val scaled = android.graphics.Bitmap.createScaledBitmap(
+            bitmap, (resources.displayMetrics.widthPixels * 0.5f).toInt() - dp(28),
+            (resources.displayMetrics.widthPixels * 0.5f).toInt() - dp(28), true)
+        val qrView = android.widget.ImageView(ctx).apply {
+            setImageBitmap(scaled)
+        }
+        qrWrap.addView(qrView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        val status = android.widget.TextView(ctx).apply {
+            text = "等待扫码…"
+            textSize = 14f
+            setTextColor(accent)
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(18), 0, dp(4))
+        }
+        val btnRow = android.widget.LinearLayout(ctx).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+        }
+        val btnParams = android.widget.LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(6), 0, dp(6), 0) }
+        val refreshBtn = android.widget.TextView(ctx).apply {
+            text = "刷新二维码"
+            textSize = 14f
+            setTextColor(android.graphics.Color.WHITE)
+            gravity = android.view.Gravity.CENTER
+            background = rounded(accent, 21)
+            setOnClickListener { refreshSodaQr() }
+        }
+        val closeBtn = android.widget.TextView(ctx).apply {
+            text = "关闭"
+            textSize = 14f
+            setTextColor(android.graphics.Color.parseColor("#8ca0b8"))
+            gravity = android.view.Gravity.CENTER
+            background = rounded(android.graphics.Color.parseColor("#232c3a"), 21)
+            setOnClickListener { closeSodaLoginWindow() }
+        }
+        btnRow.addView(refreshBtn, btnParams)
+        btnRow.addView(closeBtn, android.widget.LinearLayout.LayoutParams(0, dp(42), 1f).apply { setMargins(dp(6), 0, dp(6), 0) })
+
+        card.addView(title)
+        card.addView(subtitle)
+        card.addView(qrWrap)
+        card.addView(status)
+        card.addView(btnRow)
+        overlay.addView(card, cardParams)
+        // 关闭点按遮罩
+        overlay.setOnClickListener { closeSodaLoginWindow() }
+        card.setOnClickListener(null)
+        rootView.addView(overlay)
+        sodaQrNativeView = overlay
+        sodaQrStatusView = status
+    }
+
+    private fun showSodaQrStatusError(message: String) {
+        // 无面板时的错误提示：主 WebView 事件通知（前端有 error 显示位）
+        val payload = org.json.JSONObject().put("message", message).toString()
+        webView.evaluateJavascript(
+            "window.dispatchEvent(new CustomEvent('sodaLoginClosed', { detail: { error: $payload } }))", null)
+    }
+
     private fun closeSodaLoginWindow() {
-        sodaLoginPolling?.interrupt()
-        sodaLoginPolling = null
+        sodaAppQrPolling?.interrupt()
+        sodaAppQrPolling = null
         runOnUiThread {
-            sodaLoginWebView?.destroy()
-            sodaLoginWebView?.let { rootView.removeView(it) }
-            sodaLoginWebView = null
+            sodaQrNativeView?.let { rootView.removeView(it) }
+            sodaQrNativeView = null
+            sodaQrStatusView = null
             // 通知 SPA 登录流程已结束（未取到 cookie 时用于复位 loading）
             webView.post {
                 webView.evaluateJavascript(
                     "window.dispatchEvent(new CustomEvent('sodaLoginClosed', { detail: {} }))", null)
             }
         }
-    }
-
-    private fun injectSodaLoginHelper(view: WebView?) {
-        view?.evaluateJavascript(
-            """
-            (function () {
-              if (document.getElementById('wf-soda-login-bar')) return;
-              var bar = document.createElement('div');
-              bar.id = 'wf-soda-login-bar';
-              bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483000;background:rgba(8,12,20,0.94);color:#fff;font-size:15px;padding:14px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;font-family:sans-serif;';
-              bar.innerHTML = '<span>在下方页面完成抖音登录（扫码 / 短信验证均可），成功后自动返回</span>' +
-                '<span style="display:flex;gap:8px;flex:none;">' +
-                '<button id="wf-soda-login-reload" style="background:rgba(255,255,255,0.16);color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:14px;">刷新</button>' +
-                '<button id="wf-soda-login-close" style="background:rgba(255,255,255,0.16);color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:14px;">关闭</button>' +
-                '</span>';
-              document.body.appendChild(bar);
-              document.getElementById('wf-soda-login-close').addEventListener('click', function () {
-                try { window.WaveForgeNative.closeSodaLogin(); } catch (e) {}
-              });
-              document.getElementById('wf-soda-login-reload').addEventListener('click', function () {
-                try { window.WaveForgeNative.reloadLogin(); } catch (e) {}
-              });
-            })();
-            """.trimIndent(),
-            null
-        )
-    }
-
-    private fun startSodaCookiePolling() {
-        sodaLoginPolling?.interrupt()
-        sodaLoginPolling = Thread {
-            var attempts = 0
-            while (!Thread.currentThread().isInterrupted && attempts < 300) { // 最多 10 分钟
-                attempts++
-                val cookie = try {
-                    CookieManager.getInstance().getCookie("https://www.douyin.com/")
-                } catch (_: Exception) { null }
-                if (cookie != null && cookie != sodaInitialCookie && isSodaLoggedInCookie(cookie)) {
-                    runOnUiThread {
-                        val payload = org.json.JSONObject().put("cookie", cookie).toString()
-                        webView.evaluateJavascript(
-                            "window.dispatchEvent(new CustomEvent('sodaLoginCookieCaptured', { detail: $payload }))",
-                            null
-                        )
-                        closeSodaLoginWindow()
-                    }
-                    return@Thread
-                }
-                try {
-                    Thread.sleep(2000)
-                } catch (_: InterruptedException) {
-                    return@Thread
-                }
-            }
-        }.apply { start() }
-    }
-
-    /** 与后端 qishuiCookieHasLogin 同口径：四个抖音登录键任一存在即视为已登录。 */
-    private fun isSodaLoggedInCookie(cookie: String): Boolean {
-        return listOf("sessionid=", "sessionid_ss=", "sid_guard=", "sid_tt=").any { cookie.contains(it) }
     }
 
     /** 主 WebView 导航守卫用：只放行本机 Node 后端（localhost:3001）与 about/data 空地址。 */
@@ -1031,11 +1440,11 @@ class MainActivity : Activity() {
 
         // BACK：QQ/汽水登录覆盖层打开时优先关闭它
         if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_DOWN) {
-            if (qqLoginWebView != null) {
+            if (qqLoginWebView != null || qqQrNativeView != null) {
                 closeQQLoginWindow()
                 return true
             }
-            if (sodaLoginWebView != null) {
+            if (sodaQrNativeView != null || sodaSignWebView != null) {
                 closeSodaLoginWindow()
                 return true
             }
@@ -1101,11 +1510,11 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
         // QQ/汽水登录覆盖层打开时优先关闭
-        if (qqLoginWebView != null) {
+        if (qqLoginWebView != null || qqQrNativeView != null) {
             closeQQLoginWindow()
             return
         }
-        if (sodaLoginWebView != null) {
+        if (sodaQrNativeView != null || sodaSignWebView != null) {
             closeSodaLoginWindow()
             return
         }
@@ -1198,8 +1607,8 @@ class MainActivity : Activity() {
         super.onDestroy()
         qqLoginPolling?.interrupt()
         qqLoginWebView?.destroy()
-        sodaLoginPolling?.interrupt()
-        sodaLoginWebView?.destroy()
+        sodaAppQrPolling?.interrupt()
+        sodaSignWebView?.destroy()
         shellServer?.stop()
         shellServer = null
         webView.destroy()

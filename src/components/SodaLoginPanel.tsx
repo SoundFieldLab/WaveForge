@@ -15,10 +15,13 @@ interface SodaLoginPanelProps {
 }
 
 /**
- * 汽水音乐登录（QQ 音乐同款编号步骤样式）：抖音扫码。
- * 桌面端调 window.electron.openSodaLogin()（主进程开抖音 passport 扫码窗口，抓会话 Cookie）。
- * Android 手机/TV 调 window.WaveForgeNative.openSodaLogin()（原生覆盖层内嵌抖音登录页，
- * 抓到 .douyin.com 登录 cookie 后以 sodaLoginCookieCaptured 事件回传）。
+ * 汽水音乐登录（QQ 音乐同款编号步骤样式）。
+ * 桌面端调 window.electron.openSodaLogin()（主进程 qishui-auth-v6 汽水官方 Passport
+ * 二维码，抓 .qishui.com 会话 Cookie）。
+ * Android 手机/TV 调 window.WaveForgeNative.openSodaLogin()（原生渲染汽水官方二维码 +
+ * 离屏 WebView 签名，与桌面同一协议族；抓到 .qishui.com 会话后以
+ * sodaLoginCookieCaptured 事件回传）。旧「抖音网页登录」方案已废弃（抖音 Cookie
+ * 在汽水 API 一律 403）。
  * TV/非 Electron 且无原生桥：折叠的手动粘贴 Cookie 区为次级通道——粘贴网页版 Cookie
  * 经 /api/soda/status 验证后落盘四键并走 App 层 handleSodaLogin 广播登录态。
  */
@@ -196,7 +199,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
               {hasNativeLogin
                 ? '弹出窗口展示汽水官方二维码，使用「汽水音乐」App 扫码确认后自动完成登录'
                 : hasAndroidScan
-                  ? '应用内打开抖音登录页，使用「抖音」App 扫码（或手机号短信验证）后自动完成登录'
+                  ? '应用内展示汽水官方二维码，使用「汽水音乐」App 扫码确认后自动完成登录'
                   : '电视端无法弹出登录窗口：请在手机/电脑浏览器登录汽水网页版后复制 Cookie，在下方粘贴登录（连接手机遥控器后可在手机上直接粘贴输入）'}
             </p>
           </div>
@@ -209,7 +212,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
               </div>
               <div className="flex-1">
                 <h3 className="text-white font-medium mb-2">
-                  {hasNativeLogin ? '弹出窗口扫码（汽水音乐 App）' : hasAndroidScan ? '应用内扫码（抖音登录页）' : '获取 Cookie（手机/电脑浏览器）'}
+                  {hasNativeLogin ? '弹出窗口扫码（汽水音乐 App）' : hasAndroidScan ? '应用内扫码（汽水音乐 App）' : '获取 Cookie（手机/电脑浏览器）'}
                 </h3>
                 {hasNativeLogin && (
                   <button
@@ -230,7 +233,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
                     style={{ backgroundColor: accent }}
                   >
                     {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <QrCode className="w-4 h-4" />}
-                    {loading ? '等待扫码登录…' : '打开抖音扫码登录（应用内）'}
+                    {loading ? '等待扫码登录…' : '应用内扫码登录（汽水音乐 App）'}
                   </button>
                 )}
                 {/* 纯 TV WebView：window.open 在 TV 无反应，隐藏死按钮改提示 */}
@@ -248,7 +251,7 @@ export default function SodaLoginPanel({ onClose, onLoginSuccess }: SodaLoginPan
               <div className="flex-1">
                 <h3 className="text-white font-medium mb-2">完成登录</h3>
                 <div className="bg-white/5 rounded-lg p-4 space-y-2 text-white/80 text-sm">
-                  <p>1. 使用 <strong>抖音 App</strong> 扫描二维码</p>
+                  <p>1. 使用 <strong>汽水音乐 App</strong> 扫描二维码</p>
                   <p>2. 在手机上确认登录</p>
                   <p>3. 登录窗口自动关闭并完成登录</p>
                 </div>
