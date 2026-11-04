@@ -220,17 +220,21 @@ export default memo(function MobileSearch() {
               专辑{albums.length ? ` ${albums.length}` : ''}
             </button>
           </div>
-          {loading && <Spinner label="搜索中…" />}
+          {/* 分类型就绪渲染：不再等四类全部返回（任一慢接口不拖住整页）。
+              loading 仅对当前 tab 显示Spinner。 */}
+          {loading && tab === 'songs' && !songs.length && <Spinner label="搜索中…" />}
           {!loading && tab === 'songs' && (
             <SongResults songs={songs} submitted={submitted} onPlay={(i) => player.playSongs(songs, i, `搜索：${submitted}`)}
               activeSong={player.currentSong} />
           )}
+          {loading && tab === 'playlists' && !playlists.length && <Spinner label="搜索中…" />}
           {!loading && tab === 'playlists' && (
             <PlaylistResults playlists={playlists} onOpen={pl => nav.openPlaylist({
               id: pl.id, name: pl.name, coverUrl: pl.coverImgUrl || '', platform: nav.platform,
               trackCount: pl.trackCount, creator: pl.creator,
             })} />
           )}
+          {loading && tab === 'artists' && !artists.length && <Spinner label="搜索中…" />}
           {!loading && tab === 'artists' && (
             <ul className="wf-m-pl-list">
               {artists.map(a => (
@@ -247,11 +251,12 @@ export default memo(function MobileSearch() {
               {!artists.length && <p className="wf-m-hint">没有匹配的歌手</p>}
             </ul>
           )}
+          {loading && tab === 'albums' && !albums.length && <Spinner label="搜索中…" />}
           {!loading && tab === 'albums' && (
             <ul className="wf-m-pl-list">
               {albums.map(al => (
                 <li key={`${al.id}`}>
-                  <button type="button" className="wf-m-pl-row" onClick={() => nav.openAlbum({ id: String(al.id), name: al.name, coverUrl: al.picUrl, platform: nav.platform })}>
+                  <button type="button" className="wf-m-pl-row" onClick={() => nav.openAlbum({ id: String(al.id ?? (al as { mid?: string }).mid), name: al.name, coverUrl: al.picUrl, platform: nav.platform })}>
                     <Cover url={al.picUrl} size={180} rounded={10} />
                     <span className="wf-m-pl-row-meta">
                       <span className="wf-m-pl-row-name">{al.name}</span>
