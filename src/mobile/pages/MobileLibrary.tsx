@@ -9,6 +9,7 @@ import { useMobileNav } from '../nav'
 import { useMobilePlayer } from '../mobilePlayer'
 import { useAccounts } from '../mobileLogin'
 import { useLongPress } from '../MobileActionSheet'
+import { mobileToast } from '../ui'
 import {
   MobileCreatePlaylistSheet, MobilePlaylistManageSheet,
 } from '../MobilePlaylistSheets'
@@ -150,7 +151,14 @@ export default memo(function MobileLibrary() {
         )
       ) : null}
 
-      <RecentSection recent={recent} />
+      <RecentSection
+        recent={recent}
+        onClear={() => {
+          try { localStorage.removeItem(RECENT_KEY) } catch { /* ignore */ }
+          setRecent([])
+          mobileToast('最近播放记录已清空', 'success')
+        }}
+      />
 
       {/* 新建歌单弹窗 */}
       <MobileCreatePlaylistSheet
@@ -199,7 +207,7 @@ const PlaylistRow = memo(function PlaylistRow({ item, onOpen, onManage }: {
   )
 })
 
-const RecentSection = memo(function RecentSection({ recent }: { recent: Song[] }) {
+const RecentSection = memo(function RecentSection({ recent, onClear }: { recent: Song[]; onClear: () => void }) {
   const player = useMobilePlayer()
   const nav = useMobileNav()
   const { visible, sentinelRef } = useLazyList(recent.length, 30)
@@ -208,9 +216,20 @@ const RecentSection = memo(function RecentSection({ recent }: { recent: Song[] }
     <section className="wf-m-section">
       <div className="wf-m-section-head">
         <h3 className="wf-m-section-title">最近播放</h3>
-        <button type="button" className="wf-m-playall" onClick={() => player.playSongs(recent, 0, '最近播放')}>
-          播放全部
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button
+            type="button"
+            className="wf-m-playall"
+            onClick={() => {
+              if (window.confirm('清空全部最近播放记录？')) onClear()
+            }}
+          >
+            清空
+          </button>
+          <button type="button" className="wf-m-playall" onClick={() => player.playSongs(recent, 0, '最近播放')}>
+            播放全部
+          </button>
+        </div>
       </div>
       <ul className="wf-m-song-list">
         {recent.slice(0, visible).map((song, i) => (

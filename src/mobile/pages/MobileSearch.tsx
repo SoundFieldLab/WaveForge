@@ -128,9 +128,23 @@ export default memo(function MobileSearch() {
               </div>
               <div className="wf-m-hotwords">
                 {history.map(w => (
-                  <button key={`h-${w}`} type="button" className="wf-m-chip" onClick={() => { setKeyword(w); doSearch(w) }}>
-                    {w}
-                  </button>
+                  <span key={`h-${w}`} className="wf-m-history-chip">
+                    <button type="button" className="wf-m-chip" onClick={() => { setKeyword(w); doSearch(w) }}>
+                      {w}
+                    </button>
+                    <button
+                      type="button"
+                      className="wf-m-history-del"
+                      aria-label={`删除历史 ${w}`}
+                      onClick={() => {
+                        const next = history.filter(x => x !== w)
+                        setHistory(next)
+                        try { localStorage.setItem(HISTORY_KEY, JSON.stringify(next)) } catch { /* ignore */ }
+                      }}
+                    >
+                      <IconClose size={11} />
+                    </button>
+                  </span>
                 ))}
               </div>
             </div>

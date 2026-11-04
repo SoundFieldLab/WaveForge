@@ -216,6 +216,8 @@ export interface ExplorePayload {
   officialEnhanced: boolean
   personalized: boolean
   dailySongs: Song[]
+  /** 日推日期（每日 30 首专属卡显示；kugou 载荷透传，其余平台缺省） */
+  dailyDate?: string
   radioSongs: Song[]
   newSongs: Song[]
   playlists: ExplorePlaylist[]

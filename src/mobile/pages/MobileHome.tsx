@@ -5,8 +5,9 @@
  */
 import { memo, useCallback, useEffect, useState } from 'react'
 import { fetchExploreHome, type ExplorePayload, type ExploreChart, type ExplorePlaylist, type ExploreAlbum } from '../../services/exploreApi'
-import type { Song } from '../../services/musicApi'
-import { getVisiblePlatforms, platformLabel, type MusicPlatform } from '../../services/platforms'
+import { getApiBase } from '../../services/apiConfig'
+import { type Song } from '../../services/musicApi'
+import { getPlatformCookie, getVisiblePlatforms, platformLabel, type MusicPlatform } from '../../services/platforms'
 import { isMobilePlayablePlatform, useMobilePlayer } from '../mobilePlayer'
 import { useMobileNav } from '../nav'
 import {
@@ -52,8 +53,40 @@ export default memo(function MobileHome() {
   const playlists = (payload?.playlists || []).slice(0, 12)
   const albums = (payload?.albums || []).slice(0, 12)
   const dailySongs = payload?.dailySongs || []
+  const dailyDate: string | undefined = payload?.dailyDate
   const newSongs = payload?.newSongs || []
   const radioSongs = payload?.radioSongs || []
+
+  // 私人FM（网易云登录用户）：一次性拉 30 首 FM 池直接开播
+  const [fmLoading, setFmLoading] = useState(false)
+  const startPersonalFm = useCallback(async () => {
+    if (platform !== 'netease') { mobileToast('私人FM 仅网易云提供', 'info'); return }
+    if (fmLoading) return
+    setFmLoading(true)
+    try {
+      const cookie = getPlatformCookie('netease')
+      const resp = await fetch(`${getApiBase()}/netease/personal_fm?cookie=${encodeURIComponent(cookie)}`, {
+        signal: AbortSignal.timeout(12000),
+      })
+      const data = await resp.json()
+      const raw = Array.isArray(data?.data) ? data.data : []
+      // FM 响应字段与网易云歌曲标准形一致（ar/al/dt）
+      const songs: Song[] = raw.map((s: any) => ({
+        id: s.id,
+        name: s.name || '',
+        artists: Array.isArray(s.ar) ? s.ar.map((a: any) => ({ id: a.id, name: a.name })) : [],
+        album: s.al ? { name: s.al.name, picUrl: s.al.picUrl || '' } : { name: '', picUrl: '' },
+        duration: s.dt || 0,
+        platform: 'netease' as const,
+      })).filter((s: Song) => s.id)
+      if (songs.length) playSongs(songs, '私人FM')
+      else mobileToast('私人 FM 暂无推荐，请稍后再试', 'error')
+    } catch {
+      mobileToast('私人 FM 获取失败', 'error')
+    } finally {
+      setFmLoading(false)
+    }
+  }, [platform, fmLoading, playSongs])
 
   return (
     <div className="wf-m-page">
@@ -131,11 +164,35 @@ export default memo(function MobileHome() {
             </section>
           )}
 
-          {/* 每日推荐 / 新歌速递：横滑封面小卡（官方新歌速递样式） */}
+          {/* 私人FM 快捷卡（网易云）：官方电台样式，一键开播 */}
+          {platform === 'netease' && (
+            <section className="wf-m-section">
+              <button type="button" className="wf-m-fm-banner" onClick={() => void startPersonalFm()} disabled={fmLoading}>
+                <span className="wf-m-fm-icon">{fmLoading ? <span className="wf-m-spinner" /> : <IconPlayCircle size={30} />}</span>
+                <span className="wf-m-fm-text">
+                  <span className="wf-m-fm-title">私人 FM</span>
+                  <span className="wf-m-fm-sub">专属电台 · 看不见的歌单，遇得见的歌</span>
+                </span>
+                <span className="wf-m-fm-go">去听 ›</span>
+              </button>
+            </section>
+          )}
+
+          {/* 每日推荐：专属日期卡（官方日推样式：日期封面 + 一键开播）+ 横滑曲目 */}
           {dailySongs.length > 0 && (
             <section className="wf-m-section">
-              <SectionHeader title="每日推荐" onMore={() => playSongs(dailySongs, '每日推荐', 0)} />
-              <div className="wf-m-hscroll">
+              <div className="wf-m-daily-banner" onClick={() => playSongs(dailySongs, '每日推荐', 0)} role="button">
+                <span className="wf-m-daily-cover">
+                  <span className="wf-m-daily-day">{dailyDate ? new Date(dailyDate).getDate() : new Date().getDate()}</span>
+                  <span className="wf-m-daily-month">{dailyDate ? new Date(dailyDate).getMonth() + 1 : new Date().getMonth() + 1}月</span>
+                </span>
+                <span className="wf-m-fm-text">
+                  <span className="wf-m-fm-title">每日 30 首</span>
+                  <span className="wf-m-fm-sub">根据你的口味生成 · 点击播放</span>
+                </span>
+                <span className="wf-m-fm-go"><IconPlayCircle size={26} /></span>
+              </div>
+              <div className="wf-m-hscroll" style={{ marginTop: 10 }}>
                 {dailySongs.slice(0, 12).map((song, i) => (
                   <SongTile key={`${song.id ?? song.mid}-${i}`} song={song} onPlay={() => playSongs(dailySongs, '每日推荐', i)} />
                 ))}

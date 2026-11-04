@@ -78,18 +78,20 @@ export function songArtists(song: Song | null | undefined): string {
 }
 
 // ── 封面卡片 ──
-export const Cover = memo(function Cover({ song, url, size = 300, className, rounded = 12 }: {
+export const Cover = memo(function Cover({ song, url, size = 300, className, rounded = 12, lazy = true }: {
   song?: Song | null
   url?: string
   size?: number
   className?: string
   rounded?: number
+  /** 视口外才加载（CachedImage IntersectionObserver）；首屏大图传 false */
+  lazy?: boolean
 }) {
   const src = url || songCoverUrl(song, size)
   return (
     <div className={`wf-m-cover ${className || ''}`} style={{ borderRadius: rounded }}>
       {src ? (
-        <CachedImage src={src} alt="" size={size} fit="cover" platform={song?.platform} />
+        <CachedImage src={src} alt="" size={size} fit="cover" platform={song?.platform} lazy={lazy} />
       ) : (
         <div className="wf-m-cover-fallback"><IconMusicNote /></div>
       )}

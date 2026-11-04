@@ -2004,3 +2004,48 @@ html.mobile-mode ::-webkit-scrollbar {
   font-size: 12px;
 }
 .wf-m-lyric-recenter:active { filter: brightness(1.2); }
+
+/* ── 搜索历史单条删除 chip ── */
+.wf-m-history-chip { position: relative; display: inline-flex; align-items: center; }
+.wf-m-history-del {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(120,130,150,0.85);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* ── 每日推荐专属日期卡 ── */
+.wf-m-daily-banner {
+  width: calc(100% - 28px);
+  margin: 0 14px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.08);
+  background: linear-gradient(135deg, rgba(99,102,241,0.2), rgba(236,72,153,0.14));
+  color: inherit;
+  cursor: pointer;
+}
+.wf-m-daily-banner:active { filter: brightness(0.9); }
+.wf-m-daily-cover {
+  width: 52px; height: 52px;
+  border-radius: 12px;
+  background: linear-gradient(160deg, #6366f1, #ec4899);
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: #fff; flex-shrink: 0;
+  box-shadow: 0 6px 18px rgba(99,102,241,0.35);
+}
+.wf-m-daily-day { font-size: 22px; font-weight: 800; line-height: 1; }
+.wf-m-daily-month { font-size: 10px; opacity: 0.85; }
