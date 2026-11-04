@@ -8,7 +8,7 @@
  * 生效机制：html 上打 wf-perf-* 类（tv.css 分档控制动画）+ JS 侧（组件读 usePerfMode）。
  */
 import { useSyncExternalStore } from 'react'
-import { isTvModeActive } from '../platform'
+import { isTvModeActive, detectPlatform } from '../platform'
 
 export type PerfMode = 'efficiency' | 'normal' | 'enhanced'
 
@@ -17,6 +17,25 @@ const listeners = new Set<() => void>()
 let mode: PerfMode = readStored()
 
 function autoDefault(): PerfMode {
+  // 安卓触屏端（手机/平板，含 PC 布局）：手机 WebView 渲染压力大（高 DPR 全屏合成），
+  // 与 TV 同级降档。8GB+ 旗舰给 normal，其余效率档；增强需手动开。
+  const platform = detectPlatform()
+  if (platform === 'android-phone' || platform === 'android-tablet') {
+    try {
+      const dm = (navigator as unknown as { deviceMemory?: number }).deviceMemory
+      if (typeof dm === 'number' && dm > 0 && dm < 6) return 'efficiency'
+    } catch {
+      // ignore
+    }
+    // 高 DPR（>2.5，如 vivo 3.25）屏幕全屏合成的像素填充率是桌面 2k 屏的数倍，
+    // 默认效能档，用户可手动升 normal。
+    try {
+      if (typeof window !== 'undefined' && window.devicePixelRatio > 2.5) return 'efficiency'
+    } catch {
+      // ignore
+    }
+    return 'normal'
+  }
   if (!isTvModeActive()) return 'normal'
   try {
     const dm = (navigator as unknown as { deviceMemory?: number }).deviceMemory
@@ -111,6 +130,30 @@ export interface CacheLimits {
 
 export function getCacheLimits(): CacheLimits {
   const MB = 1024 * 1024
+  const platform = detectPlatform()
+  // 安卓触屏端：按性能模式给移动级上限（存储与内存都远小于 PC）。
+  if (platform === 'android-phone' || platform === 'android-tablet') {
+    switch (mode) {
+      case 'efficiency':
+        return {
+          coverCount: 200, coverBytes: 80 * MB, singleImage: 5 * MB,
+          idbCoverBytes: 60 * MB, playlistCount: 60, playlistBytes: 30 * MB,
+          lyricCount: 400, lyricBytes: 30 * MB,
+        }
+      case 'enhanced':
+        return {
+          coverCount: 800, coverBytes: 400 * MB, singleImage: 10 * MB,
+          idbCoverBytes: 256 * MB, playlistCount: 100, playlistBytes: 50 * MB,
+          lyricCount: 1000, lyricBytes: 128 * MB,
+        }
+      default:
+        return {
+          coverCount: 500, coverBytes: 200 * MB, singleImage: 8 * MB,
+          idbCoverBytes: 128 * MB, playlistCount: 80, playlistBytes: 40 * MB,
+          lyricCount: 700, lyricBytes: 64 * MB,
+        }
+    }
+  }
   if (!isTvModeActive()) {
     return {
       // 封面条数要装得下一张大歌单 + 多个页面的常用封面：500 会在两张大歌单之间

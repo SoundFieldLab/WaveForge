@@ -130,7 +130,7 @@ function imageOf(value: any): string {
       if (nested) return nested
     }
   }
-  for (const key of ['image', 'images', 'uiElement', 'resourceUiElement', 'picture', 'artwork', 'cover', 'customView', 'resource', 'resourceInfo', 'resourceExtInfo', 'creativeExtInfoVO', 'crossPlatformConfig']) {
+  for (const key of ['image', 'images', 'uiElement', 'resourceUiElement', 'picture', 'artwork', 'cover', 'customView', 'resource', 'resourceInfo', 'resourceExtInfo', 'creativeExtInfoVO', 'crossPlatformConfig', 'artists']) {
     const nested = imageOf(value[key])
     if (nested) return nested
   }

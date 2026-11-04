@@ -15,7 +15,7 @@ import {
 import { neteaseResourceArtwork, type NeteaseNativeBlock, type NeteaseNativeResource } from '../neteaseExplore/model'
 import {
   PcCardGrid, PcChips, PcCountBadge, PcCover, PcEmpty, PcGhostButton, PcSectionTitle, PcSongBadges,
-  pcSongArtwork, pcSongKey, pcTheme, type PcCardItem, type PcTheme, type PcTone,
+  pcSongArtwork, pcSongKey, pcTheme, hasHoverCapability, type PcCardItem, type PcTheme, type PcTone,
 } from './pcKit'
 import type { PcAccount, PcActions } from './types'
 
@@ -247,8 +247,10 @@ function DiscoveryBannerCarousel({ theme, accent, actions, active }: {
             ))}
           </div>
         )}
-        {/* 左右切换箭头（悬停出现） */}
-        {banners.length > 1 && hover && (
+        {/* 左右切换箭头（桌面悬停出现；触屏无 hover → 常显，靠 @media(hover:none)
+            的 CSS 隐藏桌面同款常显？不：这里用 JS 判定——无 hover 能力的环境
+            （触屏）直接常显箭头，否则永远无法切换（首次 tap 只会触发 hover 态）） */}
+        {banners.length > 1 && (hover || !hasHoverCapability()) && (
           <>
             <button
               type="button"

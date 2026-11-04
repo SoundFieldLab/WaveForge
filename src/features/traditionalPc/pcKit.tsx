@@ -795,3 +795,21 @@ export function pcTint(color: string, alpha: number): CSSProperties {
 }
 
 export type { Song, MusicPlatform }
+
+/**
+ * 当前环境是否有真实 hover 能力（CSS @media (hover: hover) + (pointer: fine)）。
+ * 触屏（手机/平板/PC 布局）返回 false：JS 侧 {hover && <控件>} 渲染的悬停揭示
+ * 控件（轮播箭头等）应改判为常显，否则触屏上永远无法触达。
+ * 模块级缓存一次判定结果，避免渲染热路径反复 matchMedia。
+ */
+let hoverCapabilityCache: boolean | null = null
+export function hasHoverCapability(): boolean {
+  if (hoverCapabilityCache !== null) return hoverCapabilityCache
+  try {
+    hoverCapabilityCache = typeof window !== 'undefined'
+      && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  } catch {
+    hoverCapabilityCache = true // 查询失败按桌面处理（保持原行为）
+  }
+  return hoverCapabilityCache
+}
