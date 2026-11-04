@@ -1939,7 +1939,7 @@ async function initNeteaseAPI() {
   try {
     const module = await import('@neteasecloudmusicapienhanced/api')
     NeteaseAPI = module.default
-    
+
     // 网易云 xeapi 需先注册匿名 token（生成 deviceId）并拉取 xeapi 公钥缓存到系统临时目录，
     // 否则 /api/netease/song/url 会报 "xeapi public key is missing"（公钥随系统重启可能被清空）。
     try {
@@ -1949,13 +1949,82 @@ async function initNeteaseAPI() {
     } catch (initError) {
       console.warn('⚠️ 网易云 API 初始化未完全成功（可能影响网易云高音质播放）:', initError.message)
     }
-    
-    // 配置网易云 API 的默认超时时间
+
+    // ⚠️ 请求超时兜底（安卓 nodejs-mobile 实测必修）：enhanced API 的 axios 请求默认
+    // 【无超时】——Node 进程内 socket 偶发卡死（keepAlive 连接复用挂起）时请求永远
+    // 挂起，路由重试（3×1s）也等不到第一次返回，前端轮询/登录二维码全部无限转圈
+    // （实机 symptom：/api/netease/login/qr/key 挂 10s+，同域 curl 却 0.2s 通）。
+    // 这里给所有 API 函数包两层保护：
+    //  1) 15s 超时 race：超时按错误 reject，走既有重试/报错路径；
+    //  2) 连续超时熔断：连续 3 次超时后重建整个 API 模块（keepAlive agent 随旧模块
+    //     被回收，坏连接池得到清理），并冷却 20s —— 不重建的话 axios 复用同一个坏
+    //     agent，后续每个请求都要白等 15s 超时。
     if (NeteaseAPI && typeof NeteaseAPI === 'object') {
-      // NeteaseCloudMusicApi 使用 axios，可以设置全局超时
+      const NETEASE_TIMEOUT_MS = 15_000
+      let consecutiveTimeouts = 0
+      let circuitUntil = 0
+      const withTimeout = (fn) => function (query, request) {
+        if (Date.now() < circuitUntil) {
+          return Promise.reject(new Error('网易云上游连接熔断中（连续超时），稍后自动恢复'))
+        }
+        return Promise.race([
+          fn.call(this, query, request),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`网易云上游请求超时（${NETEASE_TIMEOUT_MS / 1000}s）`)), NETEASE_TIMEOUT_MS)),
+        ]).then(
+          (v) => { consecutiveTimeouts = 0; return v },
+          (err) => {
+            const isTimeout = String(err?.message || '').includes('超时')
+            if (isTimeout) {
+              consecutiveTimeouts++
+              if (consecutiveTimeouts >= 3) {
+                consecutiveTimeouts = 0
+                circuitUntil = Date.now() + 20_000
+                console.warn('[NeteaseAPI] 连续超时触发熔断，20s 后恢复（建议检查设备网络/上游可用性）')
+                // 异步重建：换掉挂死的 keepAlive agent
+                void rebuildNeteaseAPI()
+              }
+            }
+            throw err
+          },
+        )
+      }
+      applyNeteaseTimeoutPatch(NeteaseAPI, withTimeout)
     }
   } catch (error) {
     console.error('❌ 网易云音乐 API 加载失败:', error)
+  }
+}
+
+function applyNeteaseTimeoutPatch(api, withTimeout) {
+  let patched = 0
+  for (const key of Object.keys(api)) {
+    if (typeof api[key] === 'function' && !api[key].__wfTimeoutPatched) {
+      const wrapped = withTimeout(api[key])
+      wrapped.__wfTimeoutPatched = true
+      api[key] = wrapped
+      patched++
+    }
+  }
+  console.log(`✅ 网易云 API 已加 15s 超时兜底（${patched} 个接口）`)
+}
+
+/** 重建 NeteaseAPI 模块（熔断后调用）：换掉挂死的 keepAlive 连接池。 */
+async function rebuildNeteaseAPI() {
+  try {
+    const mod = await import('@neteasecloudmusicapienhanced/api')
+    const fresh = mod.default
+    const NETEASE_TIMEOUT_MS = 15_000
+    const withTimeout = (fn) => function (query, request) {
+      return Promise.race([
+        fn.call(this, query, request),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`网易云上游请求超时（${NETEASE_TIMEOUT_MS / 1000}s）`)), NETEASE_TIMEOUT_MS)),
+      ])
+    }
+    applyNeteaseTimeoutPatch(fresh, withTimeout)
+    NeteaseAPI = fresh
+    console.log('✅ NeteaseAPI 已重建（keepAlive 连接池已更换）')
+  } catch (e) {
+    console.error('❌ NeteaseAPI 重建失败:', e.message)
   }
 }
 
@@ -2937,6 +3006,17 @@ app.get('/api/netease/login/qr/check', async (req, res) => {
     // 轮询检查不需要重试，直接返回错误让前端继续轮询
     const result = await NeteaseAPI.login_qr_check({ key })
     if (result && result.body) {
+      // ⚠️ cookie 必须随 803 一起回传：enhanced API 的返回形状是 { status, body, cookie: string[] }，
+      // MUSIC_U 在 result.cookie 数组里（body 里没有）。此前只回传 body，扫码成功后前端拿不到
+      // cookie → 登录态没落库，用户看到「登录成功」但歌单/账号数据全空。合并 cookie 再返回。
+      //   cookie 数组形如 ["MUSIC_U=xxx; Path=/; ...", "__csrf=yyy; ..."]，拼成一行交给前端。
+      if (result.body?.code === 803 && Array.isArray(result.cookie) && result.cookie.length) {
+        const merged = result.cookie
+          .map(c => String(c).split(';')[0].trim()) // 只取键值对，去掉 Path/Domain 等属性
+          .filter(Boolean)
+          .join('; ')
+        return res.json({ ...result.body, cookie: merged })
+      }
       res.json(result.body)
     } else {
       // 如果没有返回结果，返回等待扫码状态
@@ -2971,7 +3051,12 @@ app.get('/api/netease/login/status', async (req, res) => {
 // 获取用户账号信息
 app.get('/api/netease/user/account', async (req, res) => {
   try {
-    const cookie = req.headers.cookie || req.query.cookie
+    // ⚠️ cookie 顺序：query.cookie 优先（全局中间件已把 X-WaveForge-Cookie 头回填进来），
+    // headers.cookie 兜底。原来 headers.cookie 在前——安卓 WebView 没有 y.qq.com/163.com
+    // 的历史 Cookie（PC 浏览器有），headers.cookie 只有 wf_local_token → 永远命中空登录态，
+    // 前端传来的真实登录 cookie（X-WaveForge-Cookie 头）被无视 → 扫码成功但账号/歌单全空
+    // （实机 hook 实锤：803 cookie 含 MUSIC_U，account 响应 profile=null）。
+    const cookie = req.query.cookie || req.headers.cookie
     if (!cookie) {
       return res.status(400).json({ error: '请提供Cookie' })
     }
@@ -6592,13 +6677,19 @@ app.post('/api/kugou/playlist/tracks', async (req, res) => {
 
 /** 生成概念版扫码登录二维码（含设备注册，返回值由渲染进程保管） */
 app.post('/api/kugou/qr/create', async (_req, res) => {
+  // ⚠️ 总超时兜底（安卓实测）：create 内部 = 设备注册（最多 3 次重试 × 12s 超时）
+  // + 二维码请求（12s）——上游偶发挂死时整链最长可拖 48s，前端一直转圈形似卡死。
+  // 这里 15s 总闸：超时直接 502 让前端立刻提示重试，不再干等。
   try {
     if (qrRateLimited(_req, 'create')) return res.status(429).json({ success: false, error: '请求过于频繁，请稍后再试' })
-    const result = await createKugouQrLogin()
+    const result = await Promise.race([
+      createKugouQrLogin(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('酷狗二维码生成超时（上游无响应），请点击刷新重试')), 15000)),
+    ])
     if (!result) return res.status(502).json({ success: false, error: '二维码生成失败' })
     res.json({ success: true, key: result.key, image: result.image, url: result.url, device: result.device })
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message })
+    res.status(502).json({ success: false, error: error.message })
   }
 })
 
@@ -14760,23 +14851,41 @@ app.get('/api/netease/record/rank/:type', async (req, res) => {
 })
 
 // ── Apple Music 目录代理（营销工具 RSS 无 CORS 头，浏览器直连会被拦截）──
+// Apple RSS 代理：出站到 rss.marketingtools.apple.com。
+// 实测（2026-11-04）：curl 直连 200（1-4s），但 Node axios 默认 DNS 解析顺序会先试
+// 不通的地址族/节点，15s 超时全军覆没 → 渲染端三层兜底全打满超时（探索页 Apple
+// 榜单永远空白）。修复：family=4 强制 IPv4（Apple CDN 双栈，v4 稳定）+ 一次重试 +
+// 5 分钟 TTL 内存缓存（多 surface 重复请求同一榜单不再重复出站）。
+const APPLE_RSS_CACHE = new Map()
+const APPLE_RSS_CACHE_TTL_MS = 5 * 60 * 1000
 app.get('/api/apple/rss', async (req, res) => {
   const rawPath = String(req.query.path || '')
   const country = String(req.query.country || 'cn').toLowerCase()
   const safePath = rawPath.replace(/[^a-zA-Z0-9/._-]/g, '')
   if (!safePath) return res.status(400).json({ error: '缺少 path 参数' })
-  const url = `https://rss.marketingtools.apple.com/api/v2/${encodeURIComponent(country)}/${safePath}`
-  try {
-    const response = await axios.get(url, {
-      timeout: 15000,
-      headers: { 'User-Agent': 'WaveForge/0.1 (compatible)', Accept: 'application/json' },
-      responseType: 'json',
-    })
-    res.json(response.data)
-  } catch (error) {
-    console.error('[Apple RSS] 代理失败:', error.message || error)
-    res.status(502).json({ error: error.message || 'Apple RSS 获取失败' })
+  const cacheKey = `${country}/${safePath}`
+  const cached = APPLE_RSS_CACHE.get(cacheKey)
+  if (cached && Date.now() - cached.at < APPLE_RSS_CACHE_TTL_MS) {
+    return res.json(cached.data)
   }
+  const url = `https://rss.marketingtools.apple.com/api/v2/${encodeURIComponent(country)}/${safePath}`
+  let lastError = null
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await axios.get(url, {
+        timeout: 8000,
+        family: 4,
+        headers: { 'User-Agent': 'WaveForge/0.1 (compatible)', Accept: 'application/json' },
+        responseType: 'json',
+      })
+      APPLE_RSS_CACHE.set(cacheKey, { at: Date.now(), data: response.data })
+      return res.json(response.data)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  console.error('[Apple RSS] 代理失败:', lastError?.message || lastError)
+  res.status(502).json({ error: lastError?.message || 'Apple RSS 获取失败' })
 })
 
 // ── Apple Music amp-api 通用代理（渲染进程直连 amp-api 被 CORS 拦截时的兜底通道）──
