@@ -56,6 +56,7 @@ import { VERSION_HISTORY } from '../services/versionHistory'
 import { getDebugPanelVisible, setDebugPanelVisible } from '../tv/debugStore'
 import { setTvFocus, useTvBack } from '../tv/tvCore'
 import { isTvModeActive, isAndroid, isPcTabletActive, setTabletLayoutStyle, TV_SCALE_OPTIONS, getTvScale, setTvScale, applyTvScale, getPcTouchWidth, setPcTouchWidth, PC_TOUCH_WIDTH_OPTIONS } from '../platform'
+import { getKeepScreenOn, setKeepScreenOn } from '../services/keepScreenOn'
 import {
   loadPlaybackShortcutSettings,
   savePlaybackShortcutSettings,
@@ -2805,6 +2806,12 @@ function SettingsPanel({
                     </div>
                   </div>
 
+                  {/* App 内不熄屏（手机/平板 PC 布局；原生桥 FLAG_KEEP_SCREEN_ON，默认开） */}
+                  <div>
+                    <h3 className={`text-lg font-semibold ${textPrimary} mb-4`}>屏幕常亮</h3>
+                    <KeepScreenOnCard accentColor={accentColor} />
+                  </div>
+
                   {/* 性能检测 */}
                   <div>
                     <div className="flex items-center justify-between mb-4">
@@ -3771,7 +3778,7 @@ function SettingsPanel({
                         <div>
                           <div className={`${textPrimary} font-medium mb-1`}>启用歌词岛</div>
                           <div className={`${textSecondary} text-sm`}>
-                            桌面上的一枚独立玻璃「药丸」，逐字点亮当前歌词；药丸长度随歌词内容自动伸缩。单击可唤出上一曲/暂停/下一曲，3 秒无操作自动回到歌词。为极致性能设计，游戏模式下也能轻松常驻。
+                            在桌面显示一枚悬浮歌词药丸，逐字点亮当前歌词，宽度随内容自动伸缩。点一下可以切歌或暂停，3 秒后自动回到歌词显示。几乎不占性能，打游戏时也能一直开着。
                           </div>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer shrink-0">
@@ -3842,7 +3849,7 @@ function SettingsPanel({
                         <div>
                           <div className={`${textPrimary} font-medium mb-1`}>AutoMix 过渡提示</div>
                           <div className={`${textSecondary} text-sm`}>
-                            播放页封面下方显示「即将在 xx:xx 开始智能混音」的时间节点（本曲播放满 5 秒提示一次，显示 8 秒后自动收起；计划算得慢时算完立刻提示）；进度条上方显示本次过渡的引擎名，按实际档位分别是 AutoMix / AutoMix Pro / AutoMix Enhanced / Gapless（无缝衔接）。
+                            开启后，快切歌时会提前在封面下方提醒你「即将在 xx:xx 开始智能混音」，每首歌最多提示一次，显示 8 秒后自动收起；进度条上方也会标出这次混音用的引擎（AutoMix / AutoMix Pro / AutoMix Enhanced / 无缝衔接）。
                           </div>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer shrink-0">
@@ -6754,6 +6761,36 @@ function SettingsPanel({
         </motion.div>
       )}
     </AnimatePresence>
+  )
+}
+
+/** App 内不熄屏卡片（手机/平板 PC 布局的「平板」设置 tab 用；默认开）。 */
+function KeepScreenOnCard({ accentColor }: { accentColor: string }) {
+  const [on, setOnState] = useState<boolean>(() => getKeepScreenOn())
+  const toggle = () => {
+    const next = !on
+    setOnState(next)
+    setKeepScreenOn(next)
+  }
+  return (
+    <div className="bg-white/[0.04] rounded-xl p-4 border border-white/10 flex items-center justify-between gap-4">
+      <div>
+        <div className="font-medium text-white">App 内不熄屏</div>
+        <div className="text-sm text-white/50 mt-0.5">
+          浏览/听歌时屏幕保持常亮（锁屏键和切后台不受影响）。默认开启。
+        </div>
+      </div>
+      <button
+        onClick={toggle}
+        className="px-4 py-2 rounded-lg font-medium text-sm transition-all flex-shrink-0"
+        style={{
+          background: on ? accentColor : 'rgba(255,255,255,0.08)',
+          color: on ? '#fff' : 'rgba(255,255,255,0.6)',
+        }}
+      >
+        {on ? '已开启' : '已关闭'}
+      </button>
+    </div>
   )
 }
 
