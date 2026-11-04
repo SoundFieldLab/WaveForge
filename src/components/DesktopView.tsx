@@ -960,6 +960,9 @@ function DesktopView({
 
   // 加载用户歌单
   useEffect(() => {
+    // 冻结态不发请求：桌面模式被切走（suspended）时保持挂载，不加守卫会在
+    // 启动/切回时与其他 surface 重复拉同一份歌单（服务端日志 ×3 的来源之一）
+    if (suspended) return
     const requestId = ++playlistListRequestRef.current
     const isCurrentRequest = () => playlistListRequestRef.current === requestId
     const activeUserId = currentPlatform === 'netease' ? neteaseUserId : currentPlatform === 'qq' ? qqUserId : currentPlatform === 'spotify' ? (spotifyUserId || '') : currentPlatform === 'kugou' ? (kugouUserId || '') : currentPlatform === 'soda' ? (sodaUserId || '') : ''
@@ -1104,7 +1107,7 @@ function DesktopView({
     return () => {
       if (playlistListRequestRef.current === requestId) playlistListRequestRef.current += 1
     }
-  }, [currentPlatform, neteaseLoggedIn, qqLoggedIn, appleLoggedIn, spotifyLoggedIn, kugouLoggedIn, sodaLoggedIn, neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId, neteaseUsername, qqUsername, spotifyUsername, authRevision, playlistContentRevision])
+  }, [currentPlatform, neteaseLoggedIn, qqLoggedIn, appleLoggedIn, spotifyLoggedIn, kugouLoggedIn, sodaLoggedIn, neteaseUserId, qqUserId, spotifyUserId, kugouUserId, sodaUserId, neteaseUsername, qqUsername, spotifyUsername, authRevision, playlistContentRevision, suspended])
   // 加载最近播放歌曲（桌面模式仅显示歌曲，与简约模式同源）
   useEffect(() => {
     const isPlatformLoggedIn = currentPlatform === 'netease'

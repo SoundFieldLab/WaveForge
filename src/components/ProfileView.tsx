@@ -1598,6 +1598,9 @@ function ProfileView({
     return () => recentRequestRef.current.controller?.abort()
   }, [activeTab, recentType, currentPlatform, cookie])
   useEffect(() => {
+    // 冻结态（App 保持挂载但弹窗不可见）不发任何请求：启动时所有模式层都挂着
+    // ProfileView（冻结），不加守卫就是每 surface 一遍用户详情+歌单请求。
+    if (suspended) return
     fetchUserData()
     // 查看他人或切换用户时清空社交/排行数据
     if (viewTarget) {
@@ -1606,7 +1609,7 @@ function ProfileView({
       setRankItems([])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform, activeUserId, viewTarget])
+  }, [platform, activeUserId, viewTarget, suspended])
 
   // 社交（关注/粉丝）数据获取 —— 网易云（查看他人时展示对方关注/粉丝）
   useEffect(() => {
@@ -1969,9 +1972,12 @@ function ProfileView({
       return stillAvailable ? previous : 'created'
     })
     // 平台切换瞬间内部 state currentPlatform 还是旧值，而 userId/cookie 已是新平台——
-    // 直接以 prop 平台拉取，避免用「旧平台 state + 新平台 userId」的错误组合导致歌单为空
+    // 直接以 prop 平台拉取，避免用「旧平台 state + 新平台 userId」的错误组合导致歌单为空。
+    // 冻结态不发请求（解冻后本 effect 随 suspended 依赖重跑补载）。
+    if (suspended) return
     fetchUserData(initialPlatform)
-  }, [initialPlatform])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialPlatform, suspended])
 
   useEffect(() => {
     // 冻结（隐藏）期间不监听歌单内容变化：PROFILE 已不可见，无需跟随刷新。

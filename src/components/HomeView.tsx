@@ -760,7 +760,7 @@ function HomeView({
     }))
   }
 
-  const resolvePlaylistSongsForPlayback = async (playlist: any): Promise<Song[]> => {
+  const resolvePlaylistSongsForPlayback = async (playlist: any, prefetchFirstSongUrl = true): Promise<Song[]> => {
     const playlistPlatform = playlist.platform || platform
     const cacheKey = getPlaylistPlaybackCacheKey(playlist)
     const cached = playlistPlaybackCacheRef.current.get(cacheKey)
@@ -815,7 +815,7 @@ function HomeView({
           setPlaylistPlaybackCache(cacheKey, songs)
         }
         const firstSong = songs[0]
-        if (firstSong) {
+        if (firstSong && prefetchFirstSongUrl) {
           void getSongUrl(firstSong.platform === 'qq' ? (firstSong.mid || firstSong.id) : firstSong.id, firstSong.platform || 'netease').catch(() => null)
         }
         return songs
@@ -829,7 +829,7 @@ function HomeView({
           setPlaylistPlaybackCache(cacheKey, songs)
         }
         const firstSong = songs[0]
-        if (firstSong) {
+        if (firstSong && prefetchFirstSongUrl) {
           void getSongUrl(firstSong.mid || firstSong.id, 'soda').catch(() => null)
         }
         return songs
@@ -844,7 +844,7 @@ function HomeView({
         setPlaylistPlaybackCache(cacheKey, songs)
       }
       const firstSong = songs[0]
-      if (firstSong) {
+      if (firstSong && prefetchFirstSongUrl) {
         void getSongUrl(firstSong.platform === 'qq' ? (firstSong.mid || firstSong.id) : firstSong.id, firstSong.platform || 'qq').catch(() => null)
       }
       return songs
@@ -1521,10 +1521,14 @@ function HomeView({
 
   // 首次进入时加载；重新进入简约模式会命中会话缓存。
   useEffect(() => {
+    // 冻结态（首页被播放页覆盖保活/模式层切走）不发歌单请求：启动时桌面/传统等
+    // 模式层也挂着 HomeView，不加守卫就是每 surface 一遍歌单请求（服务端 ×3 来源之一）。
+    // 解冻（回到简约首页）后本 effect 随 suspended 依赖重跑补载。
+    if (suspended) return
     const shouldForceRefresh = authRevision !== playlistAuthRevisionRef.current
     playlistAuthRevisionRef.current = authRevision
     void loadUserPlaylists(shouldForceRefresh)
-  }, [neteaseLoggedIn, qqLoggedIn, platform, neteaseUserId, qqUserId, neteaseUsername, qqUsername, authRevision])
+  }, [neteaseLoggedIn, qqLoggedIn, platform, neteaseUserId, qqUserId, neteaseUsername, qqUsername, authRevision, suspended])
 
   useEffect(() => {
     const handlePlaylistContentChanged = (event: Event) => {
@@ -1569,14 +1573,25 @@ function HomeView({
     return () => window.removeEventListener('playlist-content-changed', handlePlaylistContentChanged)
   }, [platform])
 
-  // 预加载首页可见歌单的播放队列与首曲，减少点击等待
+  // 预加载首页可见歌单的播放队列与首曲，减少点击等待。
+  // 仅在会话已有播放意图（播放器已有队列/正在播）时预热首曲 URL——冷启动就预取
+  // 会在用户还没点任何歌时白解析一首歌的签名 URL（vkey 5 分钟过期，解析了大概率
+  // 白费），还占启动窗口带宽；歌单曲目列表仍照常预取（轻请求，悬停/点开都有用）。
   useEffect(() => {
     if (!userPlaylists.length) return
+    const hasPlaybackIntent = typeof document !== 'undefined'
+      && Boolean((window as unknown as { __waveforgeQueueStarted?: boolean }).__waveforgeQueueStarted)
 
     // Warm only the first small playlist after idle; full playlists can contain hundreds of tracks.
     const targets = userPlaylists.slice(0, 1).filter(playlist => Number(playlist.trackCount || 0) <= 100)
     const timers = targets.map(playlist => window.setTimeout(() => {
-      prefetchPlaylistPlayback(playlist)
+      // 有播放意图：完整预取（含首曲 URL，点开即播）；无意图：只拉曲目列表
+      // （悬停/点开歌单要用的轻数据），签名 URL 不解析——冷启动预取的 vkey
+      // 5 分钟就过期，用户没点歌就是纯浪费 + 多一次上游请求面。
+      if (hasPlaybackIntent) prefetchPlaylistPlayback(playlist)
+      else resolvePlaylistSongsForPlayback(playlist, false).catch((error) => {
+        console.debug('[playlist playback prefetch] failed:', error)
+      })
     }, 1200))
 
     return () => {
