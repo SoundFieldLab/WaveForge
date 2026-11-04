@@ -653,9 +653,10 @@ describe('In Party 团队赛/骰子/卧底', () => {
 
 describe('In Party 成就系统', () => {
   it('解锁/幂等/弹窗事件 + 计数成就', async () => {
-    const { unlockAchievement, isAchievementUnlocked, readUnlockedAchievements, bumpCounter, ACHIEVEMENT_MAP } =
+    const { unlockAchievement, isAchievementUnlocked, bumpCounter } =
       await import('../src/features/inparty/achievements')
-    const { notifyAchievement } = await import('../src/features/inparty/AchievementToast')
+    const { getAchievementDef, readUnlockedRecords } = await import('../src/achievements/core')
+    const { notifyAchievement } = await import('../src/features/inparty/achievements')
     const id = 'first-room'
     const toastEvents: string[] = []
     const onToast = (e: Event) => { void e }
@@ -674,8 +675,8 @@ describe('In Party 成就系统', () => {
       const n1 = bumpCounter('chat')
       bumpCounter('chat')
       expect(bumpCounter('chat')).toBe(n1 + 2)
-      expect(ACHIEVEMENT_MAP.has('chat-100')).toBe(true)
-      expect(readUnlockedAchievements().length).toBeGreaterThan(0)
+      expect(getAchievementDef('chat-100')).toBeTruthy()
+      expect(readUnlockedRecords().length).toBeGreaterThan(0)
     } finally {
       window.removeEventListener('waveforge:inparty-achievement-toast', onToast)
     }

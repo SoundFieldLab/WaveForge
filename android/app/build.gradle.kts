@@ -125,4 +125,6 @@ android {
 dependencies {
     // FileProvider（APK 安装用，Android 7+ 不允许 file:// 分享安装包）
     implementation("androidx.core:core-ktx:1.13.1")
+    // MediaSessionCompat + MediaStyle 通知（锁屏封面/通知按钮/耳机线控）
+    implementation("androidx.media:media:1.7.0")
 }

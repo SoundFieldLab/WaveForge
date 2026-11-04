@@ -146,6 +146,11 @@ describe('mode integration wiring', () => {
       'components/ImmersiveControls.tsx': 'portal 到层内封面下方锚点（getElementById(anchorId)，墙纸/辉煌模式同层元素），挂起层的 visibility 已覆盖，未逃出模式层',
       'components/QuickSettingsHost.tsx': 'App 顶层全局弹层（与调音室同为全模式共享，见 App.tsx 挂载点注释），不挂在任何模式层内，useModeParked 恒为 false',
       'services/waveforge-engine-v3/ui/components/SpatialWorldView.tsx': 'portal 到自身容器，仍在模式层内',
+      'achievements/ToastLayer.tsx': '全局成就弹层，由 App 顶层 AchievementToastHost 挂载，不属于任何模式层，任意模式都该显示',
+      'mobile/MobileCommentsSheet.tsx': '移动端树与桌面模式层体系完全隔离，评论面板只覆盖移动端自己的页面栈',
+      'mobile/MobileLyricSettingsSheet.tsx': '移动端树与桌面模式层体系完全隔离，歌词设置面板只覆盖移动端自己的页面栈',
+      'mobile/MobilePlaylistSheets.tsx': '移动端树与桌面模式层体系完全隔离，歌单面板只覆盖移动端自己的页面栈',
+      'mobile/MobileSongDetailSheet.tsx': '移动端树与桌面模式层体系完全隔离，歌曲详情面板只覆盖移动端自己的页面栈',
       'mobile/MobileActionSheet.tsx': '移动端树与桌面模式层体系完全隔离（main.tsx/PlatformRoot 按 html.mobile-mode 顶层分流，移动端无模式层/挂起概念），动作面板只覆盖移动端自己的页面栈',
     }
     const read = (relative: string) => readFileSync(new URL(`../src/${relative}`, import.meta.url), 'utf8')

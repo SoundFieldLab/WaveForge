@@ -56,7 +56,7 @@ class MainActivity : Activity() {
         private const val PREF_CORE_KEY = "core_assets_version"
         private const val PREF_DIST_KEY = "dist_assets_version"
         private const val CORE_ASSETS_VERSION = 13
-        private const val DIST_ASSETS_VERSION = 38
+        private const val DIST_ASSETS_VERSION = 43
         private const val SERVER_URL = "http://localhost:3001/"
         private const val HEALTH_URL = "http://localhost:3001/health"
         // Node 启动标记：必须进程级唯一（nodejs-mobile 不支持重启、每次进程只允许一个）。
@@ -420,11 +420,26 @@ class MainActivity : Activity() {
                 @android.webkit.JavascriptInterface
                 fun setPlaybackActive(active: Boolean) {
                     try {
+                        PlaybackService.mainWebViewRef = webView
                         if (active) PlaybackService.start(this@MainActivity)
                         else PlaybackService.stop(this@MainActivity)
                     } catch (_: Exception) {
                         // 前台服务受限不影响播放
                     }
+                }
+
+                // 系统媒体集成（锁屏/通知栏/耳机线控）：曲名/歌手/封面/时长/进度/播放态。
+                // 字段可空 = 保持旧值；封面 URL 由服务后台下载 + 缓存。
+                @android.webkit.JavascriptInterface
+                fun updatePlaybackInfo(title: String?, artist: String?, coverUrl: String?,
+                                       durationMs: Double, positionMs: Double, playing: Boolean?) {
+                    try {
+                        PlaybackService.mainWebViewRef = webView
+                        PlaybackService.update(
+                            this@MainActivity, title, artist, coverUrl,
+                            durationMs.toLong(), positionMs.toLong(), playing,
+                        )
+                    } catch (_: Exception) { /* 媒体集成失败不影响播放 */ }
                 }
 
                 // 设备详情（配置检查面板 + 关于本机用）：内存/存储/CPU/温度/分辨率/电池等
