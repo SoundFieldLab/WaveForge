@@ -108,6 +108,20 @@
     box-shadow: 0 2px 8px rgba(0,0,0,.4);
   }
   .volume-pct { font-size: 10px; color: var(--text-2); }
+  /* 进度条（seek）：拖动/点按双向 */
+  .progress-wrap {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px 2px; touch-action: none;
+  }
+  .progress-time { font-size: 10px; color: var(--text-2); font-variant-numeric: tabular-nums; min-width: 30px; }
+  .progress-track {
+    flex: 1; height: 6px; border-radius: 3px;
+    background: var(--panel-2); position: relative; overflow: visible;
+  }
+  .progress-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0%;
+    border-radius: 3px; background: var(--accent); pointer-events: none;
+  }
 
   /* 触摸板：占满中间竖向空间 */
   .trackpad-zone { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 6px 18px; min-height: 0; }
@@ -217,6 +231,14 @@
     <div class="hint" id="trackpadHint">滑动控制鼠标<br>点按 = 左键 · 长按 = 右键</div>
     <div class="ripple" id="ripple"></div>
   </div>
+</div>
+
+<div class="progress-wrap" id="progressWrap">
+  <span class="progress-time" id="progressCur">0:00</span>
+  <div class="progress-track" id="progressTrack">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+  <span class="progress-time" id="progressDur">0:00</span>
 </div>
 
 <div class="media-row">
@@ -469,7 +491,58 @@
     setIcon(playBtn, state.playing ? 'pause' : 'play');
     setIcon(muteBtn, state.muted ? 'muted' : 'mute');
     renderVolume();
+    renderProgress();
   }
+
+  // ── 进度条（seek）：state.progress/duration 由电视端每 100ms 广播 ──
+  var progressTrack = document.getElementById('progressTrack');
+  var progressFill = document.getElementById('progressFill');
+  var progressCur = document.getElementById('progressCur');
+  var progressDur = document.getElementById('progressDur');
+  var progressDragging = false;
+  var progressDragValue = 0;
+
+  function fmtTimeSec(sec) {
+    sec = Math.max(0, Math.floor(sec || 0));
+    var m = Math.floor(sec / 60); var s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function renderProgress() {
+    var dur = Number(state.duration) || 0;
+    var cur = Number(state.progress) || 0;
+    var pct = dur > 0 ? Math.min(100, (cur / dur) * 100) : 0;
+    progressFill.style.width = pct + '%';
+    progressCur.textContent = fmtTimeSec(progressDragging ? progressDragValue : cur);
+    progressDur.textContent = fmtTimeSec(dur);
+  }
+
+  function seekFromClientX(clientX) {
+    var rect = progressTrack.getBoundingClientRect();
+    if (!rect.width) return;
+    var ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    var dur = Number(state.duration) || 0;
+    progressDragValue = ratio * dur;
+    renderProgress();
+    if (dur > 0) send({ type: 'seek', value: Math.round(progressDragValue) });
+  }
+
+  progressTrack.addEventListener('pointerdown', function (e) {
+    if (!(Number(state.duration) > 0)) return;
+    progressDragging = true;
+    progressTrack.setPointerCapture(e.pointerId);
+    seekFromClientX(e.clientX);
+  });
+  progressTrack.addEventListener('pointermove', function (e) {
+    if (!progressDragging) return;
+    seekFromClientX(e.clientX);
+  });
+  progressTrack.addEventListener('pointerup', function (e) {
+    if (!progressDragging) return;
+    progressDragging = false;
+    seekFromClientX(e.clientX);
+  });
+  progressTrack.addEventListener('pointercancel', function () { progressDragging = false; });
 
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function (c) {
