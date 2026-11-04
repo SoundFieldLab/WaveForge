@@ -13,6 +13,24 @@ export const TABLET_MIN_WIDTH_DP = 600
 
 type DeviceClass = 'desktop' | 'web' | 'android-tv' | 'android-touch'
 
+/**
+ * 标准触屏检测（UA 无关）：
+ *  - `(pointer: coarse)` 主输入为触摸（手机/平板/触屏电视）；
+ *  - `navigator.maxTouchPoints > 1` 兜底（部分 WebView coarse 查询受 ROM 主题影响，
+ *    实测 vivo 系 WebView 在个别内核版本上 matchMedia 查询结果不可靠）。
+ * 两者任一为真即视为触屏。桌面 Chrome 触摸屏笔记本 maxTouchPoints 可为 0~10，
+ * 故只把「Android/触屏」组合起来用，单独不作为桌面排除依据。
+ */
+function isCoarsePointerDevice(): boolean {
+  try {
+    if (typeof window === 'undefined') return false
+    if (window.matchMedia?.('(pointer: coarse)')?.matches) return true
+    return (navigator.maxTouchPoints ?? 0) > 1
+  } catch {
+    return false
+  }
+}
+
 /** 设备类别（UA + 原生 uiMode 决定，进程内不变；不含 phone/tablet 细分）。 */
 let cachedClass: DeviceClass | null = null
 
@@ -24,16 +42,23 @@ function detectDeviceClass(): DeviceClass {
   }
   const ua = navigator.userAgent
   const hasElectron = typeof window !== 'undefined' && Boolean((window as any).electron?.system)
-  if (/Android/i.test(ua)) {
+  const nativeMode = nativeUiMode()
+  if (/Android/i.test(ua) || (nativeMode && !hasElectron)) {
     // Android TV / Google TV / Fire TV 的 UA 通常带 TV/Leanback/AFT/GoogleTV 标记。
     // 部分电视盒子 UA 无标记：原生侧 getUiMode()（UiModeManager TELEVISION）兜底。
-    if (/TV|Leanback|GoogleTV|AFT|BRAVIA|CrKey|SHIELD|NetCast/i.test(ua) || nativeUiMode() === 'television') {
+    if (/TV|Leanback|GoogleTV|AFT|BRAVIA|CrKey|SHIELD|NetCast/i.test(ua) || nativeMode === 'television') {
       cachedClass = 'android-tv'
     } else {
       cachedClass = 'android-touch'
     }
   } else if (hasElectron) {
     cachedClass = 'desktop'
+  } else if (isCoarsePointerDevice() && !/Windows NT|Macintosh|CrOS|X11/i.test(ua)) {
+    // 非 Android 触屏移动设备（iPhone/iPad/部分国产 ROM UA 被改写）：
+    // UA 里既没有 Android 也不是桌面系统标记 → 触摸移动类。
+    // vivo 部分 WebView UA 缺 Android 段（厂商改写），这里靠触屏检测兜底，
+    // 修复「手机上跑 PC 布局 + 音频降级门失效（爆音/变速失控）」。
+    cachedClass = 'android-touch'
   } else {
     cachedClass = 'web'
   }

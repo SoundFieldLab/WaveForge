@@ -131,14 +131,14 @@ export default function ModeSelectionPanel({
 
   // 当前所在模式始终保留在可见列表里；
   // 另外「共振」「学歌」是插件功能——插件没启用时不该出现在模式选择里（与侧栏入口同一条规则）。
-  // 「桌面」模式（壁纸桌面）是 PC 桌面集成专属，平板 PC 布局下不可选。
+  // 桌面模式 2026-11-05 起在触屏 PC 布局（手机/平板「PC 版」）放开：桌面小组件是
+  // 纯 WebView 渲染可触屏点按；仅融合穿透等 Electron 独占设置按平台隐藏。
   const ensureMinimalVisible = (modes: ModeSelectionMode[]): ModeSelectionMode[] =>
     modes.includes('minimal') ? modes : ['minimal', ...modes]
   const gatedModes = (visibleModes.includes(currentMode) ? visibleModes : [...visibleModes, currentMode])
     .filter(mode => mode !== 'resonance' || isPluginEnabled('resonance'))
     .filter(mode => mode !== 'singalong' || isPluginEnabled('sing-along'))
     .filter(mode => mode !== 'inparty' || isPluginEnabled('dglab'))
-    .filter(mode => !isPcTabletActive() || mode !== 'desktop')
   const effectiveVisibleModes = ensureMinimalVisible(
     gatedModes.includes(currentMode)
       ? gatedModes
