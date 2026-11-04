@@ -63,6 +63,16 @@ export default memo(function MobileHome() {
   const albums = (payload?.albums || []).slice(0, 12)
   const dailySongs = payload?.dailySongs || []
   const dailyDate: string | undefined = payload?.dailyDate
+  // 「查看全部」展开态：按 section 记忆（榜单/歌单/新碟），再点收起
+  const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set())
+  const toggleSection = useCallback((key: string) => {
+    setExpandedSections(previous => {
+      const next = new Set(previous)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }, [])
   const newSongs = payload?.newSongs || []
   const radioSongs = payload?.radioSongs || []
 
@@ -142,9 +152,12 @@ export default memo(function MobileHome() {
           {/* 榜单横滑大卡（官方「排行榜」入口位） */}
           {charts.length > 0 && (
             <section className="wf-m-section">
-              <SectionHeader title="排行榜" />
+              <SectionHeader
+                title="排行榜"
+                onMore={charts.length > 8 ? () => toggleSection('charts') : undefined}
+              />
               <div className="wf-m-hscroll wf-m-chart-scroll">
-                {charts.slice(0, 8).map(chart => (
+                {(expandedSections.has('charts') ? charts : charts.slice(0, 8)).map(chart => (
                   <ChartBannerCard key={chart.id} chart={chart} />
                 ))}
               </div>
@@ -154,21 +167,32 @@ export default memo(function MobileHome() {
           {/* 精选歌单：3:4 双列大卡（官方推荐歌单样式） */}
           {playlists.length > 0 && (
             <section className="wf-m-section">
-              <SectionHeader title="精选歌单" />
+              <SectionHeader
+                title="精选歌单"
+                onMore={playlists.length > 12 ? () => toggleSection('playlists') : undefined}
+              />
               <div className="wf-m-grid-playlists">
-                {playlists.map(pl => (
+                {(expandedSections.has('playlists') ? playlists : playlists.slice(0, 12)).map(pl => (
                   <PlaylistCard key={`${pl.platform}-${pl.id}`} playlist={pl} />
                 ))}
               </div>
+              {expandedSections.has('playlists') && (
+                <button type="button" className="wf-m-playall" style={{ margin: '10px auto 0', display: 'block' }} onClick={() => toggleSection('playlists')}>
+                  收起
+                </button>
+              )}
             </section>
           )}
 
           {/* 新碟上架：横滑专辑卡（官方「新碟首发」位），点进专辑详情 */}
           {albums.length > 0 && (
             <section className="wf-m-section">
-              <SectionHeader title="新碟上架" />
+              <SectionHeader
+                title="新碟上架"
+                onMore={albums.length > 12 ? () => toggleSection('albums') : undefined}
+              />
               <div className="wf-m-hscroll">
-                {albums.map(al => (
+                {(expandedSections.has('albums') ? albums : albums.slice(0, 12)).map(al => (
                   <AlbumTile key={`${al.platform}-${al.id ?? al.mid}`} album={al} />
                 ))}
               </div>
