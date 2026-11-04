@@ -19,6 +19,8 @@ vi.mock('../src/services/bilibiliApi', () => ({
   songKeyOf: vi.fn((ctx: { songTitle: string; id?: string | number }) => `${ctx.songTitle}:${ctx.id ?? ''}`),
   setBilibiliOverride: vi.fn(),
   getBilibiliOverride: vi.fn(() => null),
+  getBilibiliOverrideCrossPlatform: vi.fn(() => null),
+  songAnchorKeyOf: vi.fn(() => ''),
   clearBilibiliOverride: vi.fn(),
   // 会话内手动选择（内存，未标记不构成记忆）：背景层选片只写这里，不写 override
   setSessionManualPick: vi.fn(),

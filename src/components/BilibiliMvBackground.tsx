@@ -26,11 +26,12 @@ import {
   pickBestPage,
   flattenLyricLinesForMatch,
   songKeyOf,
+  songAnchorKeyOf,
   setSessionManualPick,
   getSessionManualPick,
   clearSessionManualPick,
   noteCurrentSongForManualPick,
-  getBilibiliOverride,
+  getBilibiliOverrideCrossPlatform,
   clearBilibiliOverride,
   getBilibiliWatchSettings,
   WATCH_SETTINGS_EVENT,
@@ -870,7 +871,12 @@ export default memo(function BilibiliMvBackground({
           }
         } catch (error) {
           if (!isCurrentRequest()) return
-          if (getBilibiliOverride(songKey) === candidate.video.bvid) clearBilibiliOverride(songKey)
+          // 跨平台锚命中时一并清锚，避免残留
+          if (getBilibiliOverrideCrossPlatform(songKey, { songTitle: songRef.current.songTitle, artists: songRef.current.songArtists }) === candidate.video.bvid) {
+            clearBilibiliOverride(songKey)
+            const anchor = songAnchorKeyOf({ songTitle: songRef.current.songTitle, artists: songRef.current.songArtists })
+            if (anchor) clearBilibiliOverride(anchor)
+          }
           if (getSessionManualPick(songKey) === candidate.video.bvid) clearSessionManualPick()
           if (stagedOnly) return // 后台预载失败静默：不影响当前播放，也不弹错误提示
           const message = error instanceof Error ? error.message : 'MV 加载失败'
@@ -1485,6 +1491,7 @@ export default memo(function BilibiliMvBackground({
       // 跟踪键含对齐态：对齐算完/缓存命中时（free→aligned）会补一条"跟踪开始"宣告最终映射
       const diag = mvSyncStateRef.current
       const diagTrackingKey = `${songKey}|${activeBvid}|${aligned ? 'aligned' : 'free'}`
+      const alignmentJustEstablished = diag.trackingKey !== diagTrackingKey && aligned
       if (diag.trackingKey !== diagTrackingKey) {
         diag.trackingKey = diagTrackingKey
         diag.corrections = 0
@@ -1497,6 +1504,20 @@ export default memo(function BilibiliMvBackground({
       }
       const video = slotEl(activeSlotRef.current)
       if (!video || video.readyState < 2) return
+      // 对齐刚建立（free→aligned）且漂移明显时立即 seek 一次：漂移 2-3s 落在平滑追频
+      // 区（<3s 不硬 seek），按 5-8% 微调要 ~30s 才收敛（实测 Cut and Dry 2.67s 漂了
+      // 30s+，用户体感"对齐一直差一截"）。对齐 conf 高、位置可信，值得付一次 seek 的
+      // 重缓冲代价换立即归位。与硬 seek 共用 10s 冷却，不会和循环其他分支连跳。
+      if (alignmentJustEstablished && !video.seeking) {
+        const target0 = computeMvSyncTarget(audioPosition + offset, video.duration)
+        if (target0 !== null && Math.abs(video.currentTime - target0) > 1.2 && now - lastSyncCorrectionRef.current > 10000) {
+          lastSyncCorrectionRef.current = now
+          diag.corrections += 1
+          bgRateTrimRef.current = 1
+          mvSyncLog(`对齐建立即归位：漂移 ${(video.currentTime - target0).toFixed(2)}s → seek ${target0.toFixed(1)}s（原 ${video.currentTime.toFixed(1)}s）`)
+          video.currentTime = target0
+        }
+      }
       // 自愈：视频因网络停顿/缓冲被暂停时恢复播放（否则会冻结在当前帧）
       resumeSlot(activeSlotRef.current)
       // —— 冻结自愈：视频位置连续 ~6s 不动而音频在走 = 流卡死（日志实测 video 卡 130.18s
@@ -1587,30 +1608,34 @@ export default memo(function BilibiliMvBackground({
     return () => document.removeEventListener('visibilitychange', onVisibilityChange)
   }, [resumeSlot])
 
-  // Seek events stay registered while paused. Explicit media seeks use audio.currentTime so a paused
-  // rendered-transition clock cannot mask the user's new position, and never force video playback.
+  // Seek events stay registered while paused. Explicit media seeks use the authoritative playback
+  // clock (playbackTime) so the target matches what the periodic sync loop computes — the two
+  // systems agree on one position instead of dueling seeks. Never force video playback.
   useEffect(() => {
     if (!enabled || hidden) return
     const audio = getAudioRef.current()
     if (!audio) return
     const onSeek = () => {
+      // 只处理 seeked：seeking+seeked 双注册会让一次用户 seek 触发两次跳转
+      //（实测 0.6s 内与 jumpToAlignedPosition 来回 seek 4 次，每次都重缓冲 = 卡顿）。
+      // 过渡渲染期 canonical audio 与权威时钟可能差百余秒（实测 audio=7.4s vs 时钟 138s），
+      // 用 playbackTime 统一时钟后两系统目标一致，天然不再互搏。
       const activeBvid = slotBvidRef.current[activeSlotRef.current]
       const alignment = getMvAlignmentFor(songKey, activeBvid, alignmentOwnerFor(activeBvid))
-      const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(alignment, audio.currentTime) : 0
+      const offset = alignment && alignment.confidence >= MIN_ALIGNMENT_CONFIDENCE ? offsetAt(alignment, playbackTime(audio)) : 0
       const video = slotEl(activeSlotRef.current)
       if (!video || video.readyState < 2) return
-      const target = computeMvSyncTarget(audio.currentTime + offset, video.duration)
-      if (target !== null && Math.abs(video.currentTime - target) > 1.5) {
-        void window.electron?.automixLog?.('MvAlign', `[背景] seek跟随 audio=${audio.currentTime.toFixed(1)}s offset=${offset}s → video ${video.currentTime.toFixed(1)}s→${target.toFixed(1)}s`)?.catch?.(() => undefined)
+      const target = computeMvSyncTarget(playbackTime(audio) + offset, video.duration)
+      if (target !== null && Math.abs(video.currentTime - target) > 1.5 && !video.seeking) {
+        void window.electron?.automixLog?.('MvAlign', `[背景] seek跟随 audio=${playbackTime(audio).toFixed(1)}s offset=${offset}s → video ${video.currentTime.toFixed(1)}s→${target.toFixed(1)}s`)?.catch?.(() => undefined)
         mvSyncStateRef.current.corrections += 1
+        lastSyncCorrectionRef.current = performance.now()
         video.currentTime = target
       }
     }
     audio.addEventListener('seeked', onSeek)
-    audio.addEventListener('seeking', onSeek)
     return () => {
       audio.removeEventListener('seeked', onSeek)
-      audio.removeEventListener('seeking', onSeek)
     }
   }, [enabled, hidden, songKey])
 
@@ -1706,7 +1731,7 @@ export default memo(function BilibiliMvBackground({
   // 记忆来源二选一：会话内手动选择（内存，未标记，切歌即失效）> 已标记 override（持久）。
   useEffect(() => {
     if (hidden || !enabled) return
-    const override = getSessionManualPick(songKey) || getBilibiliOverride(songKey)
+    const override = getSessionManualPick(songKey) || getBilibiliOverrideCrossPlatform(songKey, { songTitle, artists: songArtists })
     const activeBvid = slotBvidRef.current[activeSlotRef.current]
     if (!override || override === activeBvid) return
     const controller = new AbortController()
