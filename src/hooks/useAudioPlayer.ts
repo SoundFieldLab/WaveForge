@@ -19,6 +19,7 @@ import { isHlsUrl, attachAppleHls, detachAppleHls, getActiveAppleStream, getActi
 import { planTransition, planTransitionV2 } from '../audio/transitionPlanner'
 import { TransitionRenderer } from '../audio/TransitionRenderer'
 import { SpatialPlaybackInput, type SpatialPlaybackInputOptions } from '../audio/spatialPlaybackInput'
+import { BufferHealthGate } from '../audio/bufferHealthGate'
 import { TrackStemMixer, TRACK_STEMS, UNITY_RECONSTRUCTION_GAINS, type TrackStemGains, type TrackStemName } from '../audio/trackStemMixer'
 import { createPlaybackTimeStore } from '../audio/playbackTimeStore'
 import type { EnginePlaybackSource } from '../services/audio-engine/types'
@@ -450,6 +451,12 @@ export function useAudioPlayer(
   const retiredDeckCleanupTimerRef = useRef<number | null>(null)
   const preparationAbortRef = useRef<AbortController | null>(null)
   const autoMixPreparationKeyRef = useRef<string | null>(null)
+  // 后台重任务动态门控：下一曲预载/AutoMix 离线分析等在当前曲缓冲健康前让路，
+  // 健康后立即放行（见 audio/bufferHealthGate）。换曲时 reset（见 loadAndPlay）。
+  const backgroundTaskGateRef = useRef<BufferHealthGate | null>(null)
+  if (!backgroundTaskGateRef.current) {
+    backgroundTaskGateRef.current = new BufferHealthGate({ debug: message => debugLog(message) })
+  }
   const acceptanceAutoMixAnalysisStartsRef = useRef(0)
   // REPREPARE 状态：组合级"已就绪"集合 + 失败尝试记录 + 定时重试句柄
   // 会话集合上限：preparationKey 是 12 字段拼的长串，数百曲的长会话只增不减会缓慢积内存
@@ -715,7 +722,9 @@ export function useAudioPlayer(
     try {
       // TV：playback 延迟提示让音频线程用更大缓冲——弱机 SoC 上显著减少唤醒频率与爆音。
       // 代价是输出延迟略增（约几十 ms，歌词/进度观感无差）；桌面端保持默认（低延迟）。
-      context = isTvModeActive()
+      // 移动触屏端（vivo 等手机）同 TV 逻辑：WebView 音频线程缓冲小，高负载时 underrun
+      // 直接表现为爆音，playback hint 换稳定。
+      context = isTvModeActive() || isAndroidTouchDevice()
         ? new AudioContextCtor({ latencyHint: 'playback' })
         : new AudioContextCtor()
       const master = context.createGain()
@@ -2381,6 +2390,23 @@ export function useAudioPlayer(
       debugLog('⏭️ [AutoMix] 相同歌曲组合正在准备，跳过重复分析')
       return
     }
+    // 冷启动/弱网动态门控：整首下载下一曲 FLAC × 2 + spawn 渲染 worker + 云端请求
+    // 是重后台任务，当前曲缓冲还不健康（下载前沿领先播放位置 <30s）时让路——
+    // 首播关键路径（歌曲/MV/歌词/封面）不被抢带宽。缓冲健康后自动重跑本函数
+    // （preparationKey 校验保证语义不变）；兜底超时防 CDN 慢时永久饿死。
+    // 预备到过渡边界通常隔几分钟，最坏 20s 后放行不损失衔接质量。
+    const gateAudio = getActiveAudio()
+    const gate = backgroundTaskGateRef.current
+    if (gateAudio && gate && !gate.runWhenHealthy(gateAudio, `AutoMix预备(${String(next.trackKey).slice(0, 28)})`, () => {
+      // 重跑时元数据可能已变（用户切歌）：重算 preparationKey 一致才继续
+      const nowCurrent = currentMetadataRef.current
+      const nowNext = nextMetadataRef.current
+      if (nowCurrent?.trackKey !== current.trackKey || nowNext?.trackKey !== next.trackKey) return
+      void prepareAutoMix()
+    })) {
+      debugLog('🚦 [AutoMix] 当前曲缓冲未健康，预备排队等缓冲健康后自动重跑')
+      return
+    }
     // 兜底计划（模块级实现；这里绑定当前曲对与活跃 deck 时长）
     const buildFallbackCrossfadePlan = (reason: string): TransitionPlan =>
       buildFallbackCrossfadePlanFor(current, next, getActiveAudio()?.duration || current.duration || 0, reason)
@@ -3639,6 +3665,7 @@ export function useAudioPlayer(
     standby.pause()
     standby.currentTime = 0
     standby.playbackRate = 1 // post-settle 残留防护：新歌一律原速
+    if ('preservePitch' in standby) standby.preservePitch = true // 残留变速关闭变调防护
     setDeckGain(getStandbyGain(), standby, 0)
     debugLog('⏳ [Preload] 开始加载下一首歌曲...')
     setTransitionState('preparing-next', { transitioning: false, transitionStartTime: null })
@@ -3755,6 +3782,9 @@ export function useAudioPlayer(
     if (!active) throw new Error('Audio deck is not initialized')
     isLoadingRef.current = true
     cancelScheduledTransition('new current track loaded', false)
+    // 换曲复位后台任务门控：旧曲的缓冲健康判定作废，排队中的旧任务丢弃
+    //（它们的回调本身带 trackKey 校验，丢弃只是省一轮校验；新任务会重新排队等新曲缓冲）
+    backgroundTaskGateRef.current?.reset()
     setTransitionState('loading-current', { currentTime: 0, duration: 0, ended: false, transitioning: false, transitionStartTime: null })
     volumeRef.current = Math.max(0, Math.min(1, startVolume))
     try {
@@ -3783,6 +3813,7 @@ export function useAudioPlayer(
       // 记录到 ref 供 timeupdate/metadata 输出 live 状态与 0 时长（UI 显示直播态）
       isLiveRef.current = Boolean(appleHls?.live)
       active.playbackRate = 1 // post-settle 残留防护：新歌一律原速
+      if ('preservePitch' in active) active.preservePitch = true // 残留变速关闭变调防护
       currentMetadataRef.current = { url, ...track }
       notifyPlaybackSource(currentMetadataRef.current)
       setAudioElement(active)
@@ -3875,6 +3906,9 @@ export function useAudioPlayer(
         return false
       }
       isLoadingRef.current = false
+      // 会话级「已有播放意图」标记：HomeView 等表面的空闲预取据此判断是否值得
+      // 解析下一首 URL（冷启动无播放意图时预取的 vkey 5 分钟就过期，纯浪费）
+      ;(window as unknown as { __waveforgeQueueStarted?: boolean }).__waveforgeQueueStarted = true
       debugLog('✅ [LoadAndPlay] 播放成功')
       setTransitionState('playing', { isPlaying: true, duration: finiteDuration(active.duration) || track?.duration || 0, ended: false, live: isLiveRef.current })
       // 基础交叉"入"半边（Apple 淡出尾的自然衔接）：上一首 Apple 歌曲带淡出尾结束、
@@ -4484,6 +4518,8 @@ export function useAudioPlayer(
     isExternalPlaybackActive: () => externalActiveRef.current,
     preloadNext,
     cancelTransition: cancelScheduledTransition,
+    /** 后台重任务动态门控：供 App 层把下一曲音频流预载等重任务排在当前曲缓冲健康后 */
+    backgroundTaskGate: backgroundTaskGateRef.current!,
     /** 看歌挂起开关：true=引擎进入"看歌时间线"——取消在途过渡且期间禁止 prepare/启动
      *  自动过渡（看歌中歌曲不被 automix 推进）；false=恢复正常（引擎可重新为当前歌准备） */
     setWatchHold: (hold: boolean) => {
