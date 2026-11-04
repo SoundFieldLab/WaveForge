@@ -17,12 +17,12 @@
 import { recordLogin, clearLoginExpiry, isLoginExpired } from './loginExpiry'
 import { getSecureToken, removeSecureToken, setSecureToken } from './secureTokenStore'
 import { Converter } from 'opencc-js/t2cn'
-import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration } from '../data/bilibiliMvDeclarations'
+import { BILIBILI_MV_DECLARATION_VERSION, getDeveloperBilibiliMvDeclaration, findDeveloperDeclarationByMeta } from '../data/bilibiliMvDeclarations'
 import { OP_ED_EXTENSION_UPLOADER_MIDS, OP_ED_EXTENSION_VERSION, getOpEdExtensionDeclaration, findOpEdExtensionByMeta, isOpEdExtensionUploader } from '../data/bilibiliOpEdExtensions'
 import { GLOBAL_CATALOG_VERSION, findGlobalCatalogByMeta } from '../data/bilibiliGlobalCatalog'
 import { extractFranchiseFromAlbum, franchiseVariants } from './mvFranchise'
 import { getApiBase } from './apiConfig'
-import { lookupLearnedArtistAlias, lookupLearnedSongVariant, getLearnedSongVariants, getLearnedArtistAliases, getQueryWin, recordQueryWin, recencyFactor } from './mvAdaptive'
+import { lookupLearnedArtistAlias, lookupLearnedSongVariant, getLearnedSongVariants, getLearnedArtistAliases, getQueryWinCrossPlatform, recordQueryWin, recordQueryWinCrossPlatform, recencyFactor } from './mvAdaptive'
 import { evolutionScore, extractEvolutionFeatures, consumeEvolutionSample } from './mvEvolution'
 
 export let BILI_API_BASE = `${getApiBase()}/bilibili`
@@ -1532,7 +1532,14 @@ function matchesVerifiedOfficialSource(video: BilibiliVideo, ctx: MatchContext, 
   if (!source) return false
   if (!source.scopes?.length) return true
   const context = normalizeText([ctx.franchise || '', ...artists.raw, ...artists.aliases].join(' '))
-  return source.scopes.some((scope) => context.includes(normalizeText(scope)))
+  if (source.scopes.some((scope) => context.includes(normalizeText(scope)))) return true
+  // ctx.franchise 只收显式声明；专辑「IP名-歌名」推出的 IP 词在此补上——
+  // 双核验：MID 在 VERIFIED_OFFICIAL_SOURCES（实机核验的官号）且 scope IP 来自
+  // 封闭别名表（knownFranchiseFromAlbum），两个静态核验表相互印证，足以认定官号
+  // （实测：绝区零官号投稿《绝区零》卢西娅EP | DAMIDAMI，网易云专辑「绝区零-DAMIDAMI」）。
+  const knownIp = ctx.franchise ? null : knownFranchiseFromAlbum(ctx.album, ctx)
+  return Boolean(knownIp && source.scopes.some((scope) => normalizeText(scope) === normalizeText(knownIp)
+    || (FRANCHISE_ALIASES[normalizeText(knownIp)] || []).some((alias) => normalizeText(scope) === normalizeText(alias))))
 }
 
 export function hasLiveMarker(title: string): boolean {
@@ -1560,6 +1567,32 @@ const FRANCHISE_ALIASES: Record<string, string[]> = {
   'projectsekai': ['世界计划', 'プロジェクトセカイ', 'pjsk'],
 }
 
+/** 所有已知 IP 名/别名（中文/英文/日文）的扁平表，用于「IP名-歌名」型专辑名的直接识别。
+ *  normalize 后比较：专辑名是原始文本，IP 词可能是中/英/日混合。 */
+const KNOWN_FRANCHISE_TOKENS: Array<{ token: string; franchise: string }> = Object.entries(FRANCHISE_ALIASES)
+  .flatMap(([franchise, aliases]) => [[franchise, franchise] as [string, string], ...aliases.map((alias) => [alias, franchise] as [string, string])])
+  .filter(([token]) => token.length >= 2)
+  .map(([token, franchise]) => ({ token: normalizeText(token), franchise }))
+
+/**
+ * 专辑名形如「已知IP名-歌名」（如「绝区零-DAMIDAMI」「崩坏星穹铁道-何者 Nameless Faces」）时，
+ * 直接认出 IP 名。只认封闭别名表内的 IP，普通专辑名不受影响；
+ * 歌名/歌手与 IP 词相同（如艺人就叫"原神"）时不出词，避免自我循环。
+ */
+function knownFranchiseFromAlbum(albumRaw: string | null | undefined, ctx: MatchContext): string | null {
+  const album = String(albumRaw || '').trim()
+  if (!album) return null
+  const albumNorm = normalizeText(album)
+  for (const { token, franchise } of KNOWN_FRANCHISE_TOKENS) {
+    if (!albumNorm.includes(token)) continue
+    const contextNorms = [ctx.songTitle, ...(ctx.artists || [])].map((value) => normalizeText(String(value || ''))).filter(Boolean)
+    // IP 词本身是歌名或歌手名（罕见）：不能作为消歧证据
+    if (contextNorms.some((norm) => norm === token || norm.includes(token))) continue
+    return franchise
+  }
+  return null
+}
+
 /**
  * 匹配上下文可用的「作品名」（IP 词）清单：显式 franchise 优先；没有显式值时从专辑名保守提取
  * （见 mvFranchise.extractFranchiseFromAlbum——只认作品关联专辑，普通专辑不出 IP 词）。
@@ -1570,12 +1603,25 @@ const FRANCHISE_ALIASES: Record<string, string[]> = {
  */
 function franchiseNamesOf(ctx: MatchContext): string[] {
   const explicit = String(ctx.franchise || '').trim()
+  // 游戏原声专辑常用「IP名-歌名」直接命名（实测：绝区零《DAMIDAMI》专辑「绝区零-DAMIDAMI」、
+  // 崩铁《何者》专辑「崩坏星穹铁道-何者」）——不含 OST/主题曲等作品关联标记，
+  // extractFranchiseFromAlbum 的保守提炼（WORK_ALBUM_HINT 门）提取不到。专辑名/上下文
+  // 命中**已知 IP 名**（封闭别名表）时直接认出 IP：误报面=表内 IP 的普通专辑同名，可接受。
+  const knownIp = knownFranchiseFromAlbum(ctx.album, ctx)
   const raw = explicit
+    || knownIp
     || extractFranchiseFromAlbum(ctx.album, { songTitle: ctx.songTitle, artists: ctx.artists })
     || ''
   if (!raw) return []
   const key = normalizeText(raw)
-  // 变体一并参与命中与召回（原名 + 去季/篇/剧场版 + 空格前截断）：
+  // 已知 IP 直接命中别名表：raw 本身就是表内规范名或别名，无需再走变体截断
+  if (knownIp && !explicit) {
+    const expanded: string[] = []
+    for (const name of [raw, ...(FRANCHISE_ALIASES[normalizeText(raw)] || [])]) {
+      if (!expanded.includes(name)) expanded.push(name)
+    }
+    return expanded
+  }
   // 「鬼滅の刃 無限列車編」这类剧场版/分季标注要能命中只写作品名的 OP/ED 投稿标题。
   const expanded: string[] = []
   for (const name of [raw, ...(FRANCHISE_ALIASES[key] || [])]) {
@@ -1584,6 +1630,38 @@ function franchiseNamesOf(ctx: MatchContext): string[] {
     }
   }
   return expanded
+}
+
+/** 专辑名里的「作品关联词」查询候选（召回用，与 franchiseNamesOf 的评分口径分开）：
+ *  剥掉歌名、歌手、作品关联噪声词（片头曲/OST/第一季/Soundtrack…）后，
+ *  剩余部分 ≥2 字且不含歌名 → 是 B 站搜索的有效消歧词（如「鬼灭之刃 第一季 片头曲」
+ *  →「鬼灭之刃」；「Suzume (Original Motion Picture Soundtrack)」→ 无中文作品词不产出）。
+ *  产出最多 2 个，避免查询预算被普通专辑名挤爆。 */
+const ALBUM_NOISE_TOKEN_RE = /(?:片头曲|片尾曲|主题歌|主題歌|主题曲|主題曲|插曲|片头|片尾|片尾歌|OP|ED|TM|IN|ost|original\s*soundtrack|original\s*motion\s*picture\s*soundtrack|soundtrack|オリジナル・?サウンドトラック|サウンドトラック|音楽集|音乐集|原声带|原聲帶|游戏原声|第[一二三四五六七八九十0-9]+[季部期章卷]|season\s*\d+|part\s*\d+|vol(?:ume|\.)?\s*\d+|\bdisc\b|\bcd\b|\bdvd\b|\bblu-?ray\b|\bsingle\b|\bep\b|\balbum\b|\bmini\b|\bfull\b|专辑|單曲|单曲|数字专辑|デジタル|配信限定|通常版|限定版|初回限定| deluxe| deluxeedition|complete edition|music video collection)/gi
+
+function albumWorkHintsOf(ctx: MatchContext): string[] {
+  const album = String(ctx.album || '').trim()
+  if (!album) return []
+  const titleNorm = normalizeText(cleanSongTitle(ctx.songTitle))
+  const artistNorms = (ctx.artists || []).map((a) => normalizeText(expandArtistNames(String(a || ''))[0] || '')).filter(Boolean)
+  // 先剥括号段（(Original Motion Picture Soundtrack) 这类整段是噪声），再去噪声词
+  const stripped = album
+    .replace(/[（(][^（）()]*[）)]/g, ' ')
+    .replace(ALBUM_NOISE_TOKEN_RE, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (stripped.length < 2) return []
+  const hints: string[] = []
+  for (const seg of stripped.split(/[-–—/·,，、|:：]+/).map((s) => s.trim())) {
+    if (seg.length < 2 || seg.length > 30) continue
+    const segNorm = normalizeText(seg)
+    if (!segNorm) continue
+    if (titleNorm && (segNorm.includes(titleNorm) || titleNorm.includes(segNorm))) continue
+    if (artistNorms.some((a) => a && (segNorm.includes(a) || a.includes(segNorm)))) continue
+    if (!hints.includes(seg)) hints.push(seg)
+    if (hints.length >= 2) break
+  }
+  return hints
 }
 
 /** 候选类型识别（标题标记驱动） */
@@ -2526,12 +2604,72 @@ export function songKeyOf(song: MatchContext): string {
   return `t:${title}:${normalizeText((song.artists || []).join(','))}`
 }
 
+/**
+ * 跨平台歌曲锚：同一首歌在任何平台的稳定身份（标题+主歌手，规范化）。
+ * 用于自适应学习（查询胜出）与用户标记/黑名单的**跨平台命中**——
+ * songKeyOf 是 platform:id，QQ 上学到/标记的内容网易云播放同歌时对不上；
+ * anchorOf 让这些以歌曲为单位的经验全平台共享（平台 id 只做精确加速，锚做兜底）。
+ */
+export function songAnchorOf(song: Pick<MatchContext, 'songTitle' | 'artists'>): string {
+  const title = normalizeText(cleanSongTitle(song.songTitle))
+  const artist = normalizeText(expandArtistNames(String(song.artists?.[0] || ''))[0] || '')
+  if (!title) return ''
+  return artist ? `${title}~${artist}` : title
+}
+
 export function getBilibiliOverride(songKey: string): string | null {
   try {
     return localStorage.getItem(`bilibili_override_${songKey}`)
   } catch {
     return null
   }
+}
+
+// ===== 跨平台用户经验命中（2026-11 全平台对齐）=====
+// override/黑名单以 songKey（platform:id）为键：QQ 上"标记过/拉黑过"的视频，网易云播放
+// 同一首歌时键不同全部失效。补「歌曲锚」查找（标题+主歌手，songKeyOf 同级规范化）：
+// 精确键优先，锚兜底——用户手动标记/拉黑的经验全平台共享（标记是最强的人工信号，
+// 跨平台不共享等于同一首歌换个平台就丢掉了用户亲手调教的结果）。
+
+/** 跨平台歌曲锚：同一首歌在任何平台的稳定身份（标题+主歌手，规范化）。 */
+export function songAnchorKeyOf(song: Pick<MatchContext, 'songTitle' | 'artists'>): string {
+  const title = normalizeText(cleanSongTitle(song.songTitle))
+  const artist = normalizeText(expandArtistNames(String(song.artists?.[0] || ''))[0] || '')
+  if (!title) return ''
+  return artist ? `a:${title}~${artist}` : `a:${title}`
+}
+
+function overrideStorageKeys(songKey: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): string[] {
+  const anchor = song ? songAnchorKeyOf(song) : ''
+  return anchor && anchor !== songKey ? [songKey, anchor] : [songKey]
+}
+
+/** override 读取：songKey 精确 → 跨平台锚 → 标记库（旧数据无锚，标记库带歌名可解析） */
+export function getBilibiliOverrideCrossPlatform(songKey: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): string | null {
+  for (const key of overrideStorageKeys(songKey, song)) {
+    const hit = getBilibiliOverride(key)
+    if (hit) return hit
+  }
+  // 旧标记迁移：本次修复前保存的标记只有 platform:id 键、无锚键。标记库条目自带
+  // 歌名/歌手，按锚匹配补上——命中后顺手把锚键补写进 override（惰性迁移，只跑一次）。
+  const anchor = song ? songAnchorKeyOf(song) : ''
+  if (anchor) {
+    const mark = getLocalMvMarks().find((m) => songAnchorKeyOf({ songTitle: m.songTitle, artists: m.artist.split('、') }) === anchor)
+    if (mark) {
+      try { localStorage.setItem(`bilibili_override_${anchor}`, mark.bvid); rememberBilibiliSongKey(anchor) } catch { /* 忽略 */ }
+      return mark.bvid
+    }
+  }
+  return null
+}
+
+/** 黑名单读取：songKey 精确 ∪ 跨平台锚（任何平台拉黑的视频同歌不再出现） */
+export function getBilibiliBlacklistCrossPlatform(songKey: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): string[] {
+  const merged: string[] = []
+  for (const key of overrideStorageKeys(songKey, song)) {
+    for (const bvid of getBilibiliBlacklist(key)) if (!merged.includes(bvid)) merged.push(bvid)
+  }
+  return merged
 }
 
 // 每首歌一对 localStorage 键（override + blacklist）：无索引无淘汰会无限增长。
@@ -2559,10 +2697,14 @@ function rememberBilibiliSongKey(songKey: string): void {
   }
 }
 
-export function setBilibiliOverride(songKey: string, bvid: string): void {
+export function setBilibiliOverride(songKey: string, bvid: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): void {
   try {
     localStorage.setItem(`bilibili_override_${songKey}`, bvid)
+    // 双写跨平台锚：其它平台播放同歌时能命中该标记
+    const anchor = song ? songAnchorKeyOf(song) : ''
+    if (anchor && anchor !== songKey) localStorage.setItem(`bilibili_override_${anchor}`, bvid)
     rememberBilibiliSongKey(songKey)
+    if (anchor && anchor !== songKey) rememberBilibiliSongKey(anchor)
   } catch {
     // 忽略
   }
@@ -2691,7 +2833,7 @@ export function getLocalMvMark(songKey: string): LocalMvMark | null {
 }
 
 /** 保存标记：同时写入 override（下次匹配直接播该视频）。最多保留 200 条（最近优先），防止无界膨胀 */
-export function saveLocalMvMark(mark: Omit<LocalMvMark, 'markedAt'>): void {
+export function saveLocalMvMark(mark: Omit<LocalMvMark, 'markedAt'>, song?: Pick<MatchContext, 'songTitle' | 'artists'>): void {
   const list = getLocalMvMarks().filter((m) => m.songKey !== mark.songKey)
   list.unshift({ ...mark, markedAt: Date.now() })
   try {
@@ -2699,11 +2841,12 @@ export function saveLocalMvMark(mark: Omit<LocalMvMark, 'markedAt'>): void {
   } catch {
     // 忽略
   }
-  setBilibiliOverride(mark.songKey, mark.bvid)
+  // song 上下文用于双写跨平台锚（其它平台播放同歌也命中该标记）
+  setBilibiliOverride(mark.songKey, mark.bvid, song || { songTitle: mark.songTitle, artists: mark.artist.split('、') })
 }
 
 /** 移除标记：仅当 override 指向该 bvid 时一并清除 override */
-export function removeLocalMvMark(songKey: string): void {
+export function removeLocalMvMark(songKey: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): void {
   const mark = getLocalMvMark(songKey)
   const list = getLocalMvMarks().filter((m) => m.songKey !== songKey)
   try {
@@ -2711,7 +2854,12 @@ export function removeLocalMvMark(songKey: string): void {
   } catch {
     // 忽略
   }
-  if (mark && getBilibiliOverride(songKey) === mark.bvid) clearBilibiliOverride(songKey)
+  // 锚键一并清：跨平台命中用的锚 override 不清会残留（标记没了锚还在）
+  const anchor = song ? songAnchorKeyOf(song) : ''
+  if (mark && getBilibiliOverrideCrossPlatform(songKey, song) === mark.bvid) {
+    clearBilibiliOverride(songKey)
+    if (anchor) clearBilibiliOverride(anchor)
+  }
 }
 
 /** 该歌的黑名单 bvid 列表（"不喜欢"记忆，匹配/回退时排除） */
@@ -2725,11 +2873,18 @@ export function getBilibiliBlacklist(songKey: string): string[] {
   }
 }
 
-export function addBilibiliBlacklist(songKey: string, bvid: string): string[] {
+export function addBilibiliBlacklist(songKey: string, bvid: string, song?: Pick<MatchContext, 'songTitle' | 'artists'>): string[] {
   const next = Array.from(new Set([...getBilibiliBlacklist(songKey), bvid]))
   try {
     localStorage.setItem(`bilibili_blacklist_${songKey}`, JSON.stringify(next))
     rememberBilibiliSongKey(songKey)
+    // 双写跨平台锚：其它平台播放同歌时同样排除该视频
+    const anchor = song ? songAnchorKeyOf(song) : ''
+    if (anchor && anchor !== songKey) {
+      const anchorNext = Array.from(new Set([...getBilibiliBlacklist(anchor), bvid]))
+      localStorage.setItem(`bilibili_blacklist_${anchor}`, JSON.stringify(anchorNext))
+      rememberBilibiliSongKey(anchor)
+    }
   } catch {
     // 忽略
   }
@@ -2824,7 +2979,8 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   const queries: string[] = []
   // 自适应层（mvAdaptive，与世俱进）：同首歌上次匹配的「胜出查询」直接置顶——
   // 首轮就命中上次的赢家查询，省掉 1-2 次弯路（alias 型歌名收益最大）；30 天过期。
-  const queryWin = songKeyOf(song) ? getQueryWin(songKeyOf(song)) : null
+  // 跨平台查询胜出：songKey 精确优先，锚（标题+主歌手）兜底——其它平台学到的赢家查询直接复用
+  const queryWin = getQueryWinCrossPlatform(songKeyOf(song), song)
   if (queryWin) queries.push(queryWin.query)
   // 可信上传者查询优先执行，避免基础查询累计到候选上限后漏掉高信誉账号。
   for (const query of uploaderQueries(song, resolvedArtists)) queries.push(query)
@@ -2832,6 +2988,16 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   if (artist) queries.push(`${title} ${artist}`.trim())
   const franchiseNames = franchiseNamesOf(song)
   for (const franchise of franchiseNames) queries.push(`${title} ${franchise}`.trim())
+  // 1.1 专辑名里的作品语境查询（全平台召回补齐，2026-11）：酷狗/网易云的专辑常直接写
+  // 「作品名 + 片头曲/OST/第一季」（如「鬼灭之刃 第一季 片头曲」）、Apple 写
+  // 「X (Original Motion Picture Soundtrack)」——这些信息 extractFranchiseFromAlbum 的
+  // 引号/噪声门提取不出（无引号、作品名带季数标注），但正是 B 站搜索消歧同名歌的关键词
+  // （「紅蓮華」裸搜混入大量翻唱，加「鬼滅の刃」首页就是正片）。从专辑名剥掉歌名/歌手/
+  // 作品关联噪声词后，剩余部分若 ≥2 字且不含歌名，派生「歌名 + 作品词」查询。
+  for (const workHint of albumWorkHintsOf(song)) {
+    const q = `${title} ${workHint}`.trim()
+    if (!queries.includes(q)) queries.push(q)
+  }
   // 1.5 学到的别名/变体（mvAdaptive）：用户手动选择/播放成功学到的歌手别名与歌名变体，
   //     优先级仅次于主查询——静态别名表（ARTIST_ALIASES/SONG_TITLE_VARIANTS）的自动补充。
   for (const alias of getLearnedArtistAliases(resolvedArtists.raw[0] || '')) queries.push(`${title} ${alias}`.trim())
@@ -2872,6 +3038,34 @@ export function buildQueries(song: MatchContext, settings?: Pick<BilibiliWatchSe
   for (const variant of titleVariants.slice(0, 2)) {
     queries.push(artist ? `${variant} ${artist}`.trim() : variant)
     queries.push(`${variant} MV`)
+  }
+
+  // 6. 拉丁转写 ↔ 原名交叉查询（Apple/Spotify 本地化歌名召回补齐，2026-11）：
+  //    Apple Music 对日文/中文歌常下发英文本地化名（すずめ→Suzume、夜に駆ける→Racing Into The Night），
+  //    而 B 站正片标题几乎只用原名——硬淘汰要求歌名变体完整命中，拉丁转写搜到的候选
+  //    全部被淘汰，等于整轮空手。反向交叉：歌名是纯拉丁、但歌手名是 CJK（或专辑名带 CJK
+  //    作品词）→ 这首歌的原名大概率是 CJK；此时追加「歌手原名（若歌手带拉丁变体则用之）
+  //    + 拉丁歌名」与「拉丁歌名 + 作品词」查询已由上面覆盖，这里补「歌名混排查询」：
+  //    把拉丁歌名与上下文里最长的 CJK 词（歌手原名/专辑作品词）拼成一条查询，B 站搜索
+  //    对「原名歌手 + 拉丁歌名」形态（如「ヨルシカ Summer Loading」）召回良好——正片标题
+  //    常写「拉丁副歌 hook」做歌名别名。同时把纯拉丁歌名 + 长度阈值的泛词惩罚靠这条
+  //    查询带来的正确候选对冲。
+  {
+    const songLatin = /^[a-z0-9 '&.\-!?（）()]+$/i.test(song.songTitle.trim())
+    const artistCJK = (ctx0 => (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}/u.test(ctx0)))(`${(song.artists || []).join('')}${song.album || ''}`)
+    if (songLatin && artistCJK) {
+      const cjkWords: string[] = []
+      const candidates = [...(song.artists || []), ...albumWorkHintsOf(song)]
+      for (const raw of candidates) {
+        for (const seg of expandArtistNames(String(raw || ''))) {
+          const cjk = seg.replace(/[^\u4e00-\u9fff\u3040-\u30ff\u3400-\u4dbf]+/g, '')
+          if (cjk.length >= 2 && !cjkWords.includes(cjk)) cjkWords.push(cjk)
+        }
+      }
+      for (const cjk of cjkWords.slice(0, 2)) {
+        queries.push(`${cjk} ${title}`.trim())
+      }
+    }
   }
 
   const preference = settings?.matchPreference ?? 'balanced'
@@ -3328,8 +3522,12 @@ export async function findBestBilibiliMv(
   // 接管逻辑（BilibiliMvBackground 的「看歌/背景手动选择保持一致」effect）同源：两个表面必须一致，
   // 否则「看歌里换成另一个 MV → 切普通歌词（背景对齐）→ 再切回看歌」会跳回自动匹配的第一个。
   const sessionPickBvid = peekSessionManualPick(songKey)
-  const overrideBvid = sessionPickBvid || (settings.useRememberedOverride ? (getBilibiliOverride(songKey) || '') : '')
-  const developerBvid = opts?.useDeveloperDeclarations === false ? '' : (getDeveloperBilibiliMvDeclaration(songKey)?.bvid || '')
+  // 用户 override/黑名单跨平台命中：songKey 精确优先，歌曲锚（标题+主歌手）兜底
+  const overrideBvid = sessionPickBvid || (settings.useRememberedOverride ? (getBilibiliOverrideCrossPlatform(songKey, song) || '') : '')
+  const developerBvid = opts?.useDeveloperDeclarations === false ? '' : (getDeveloperBilibiliMvDeclaration(songKey)?.bvid
+    // 全平台：songKey（platform:id）未命中时走元数据回退（标题+主歌手+时长），
+    // 网易云/酷狗/Apple/汽水播放同歌也能命中人工核验声明——与延长库同口径。
+    || findDeveloperDeclarationByMeta(song.songTitle, song.artists || [], song.songDuration)?.bvid || '')
   // 延长库命中也入指纹：库更新（新增/修订延长版）后 24h 匹配缓存必须失效，
   // 否则旧缓存里的普通候选会盖过新注入的延长版声明。
   // 全平台（2026-10 v3）：songKey（platform:id）未命中时走元数据回退索引（标题+歌手+时长），
@@ -3349,9 +3547,9 @@ export async function findBestBilibiliMv(
     developerBvid ? `${BILIBILI_MV_DECLARATION_VERSION}:${developerBvid}` : '',
     extensionBvid ? `${OP_ED_EXTENSION_VERSION}:${extensionBvid}` : '',
     globalCatalogBvid ? `${GLOBAL_CATALOG_VERSION}:${globalCatalogBvid}` : '',
-    // 黑名单进指纹：拉黑后同歌重进会命中 24h matchCache 返回含已拉黑 BV 的旧结果，
+    // 黑名单进指纹（跨平台锚合并）：拉黑后同歌重进会命中 24h matchCache 返回含已拉黑 BV 的旧结果，
     // 自动播放用户刚拉黑的视频（唯一联动清缓存入口是手动清理）
-    getBilibiliBlacklist(songKey).join(','),
+    getBilibiliBlacklistCrossPlatform(songKey, song).join(','),
   ].join('|')
   const cacheKey = `${songKey}::${settingsFingerprint}`
   const cached = matchCache.get(cacheKey)
@@ -3395,7 +3593,7 @@ async function findBestBilibiliMvUncached(
   // override/黑名单按歌曲存储键读写（与缓存键分离：不含设置指纹）
   const songKey = songKeyOf(song)
   const empty = (error?: string): BilibiliMatchResult => ({ status: 'error', candidates: [], fallbackChain: [], error })
-  const blacklist = new Set(getBilibiliBlacklist(songKey))
+  const blacklist = new Set(getBilibiliBlacklistCrossPlatform(songKey, song))
   // 歌词同步取一次（调用方已加载就用；没有就整轮按 unverified 缩水档，不等待网络）
   const lyricsText = String(lyricsProvider?.() || '').trim()
   /** 匹配轮次收尾：无歌词时有候选拿着 CC 缩水分 → 标记，供拿到歌词后零网络重扫升级 */
@@ -3411,7 +3609,7 @@ async function findBestBilibiliMvUncached(
   //    候选列表保留全部结果（否则列表只剩记忆视频一个，用户无法换回其他 MV）。
   //    两级来源：会话内手动选择（本次会话、未标记）> 已标记 override（持久）。
   let rememberedOverride: CandidateScore | null = null
-  const rememberedBvid = sessionPickBvid || (settings.useRememberedOverride ? (getBilibiliOverride(songKey) || '') : '')
+  const rememberedBvid = sessionPickBvid || (settings.useRememberedOverride ? (getBilibiliOverrideCrossPlatform(songKey, song) || '') : '')
   if (rememberedBvid) {
     try {
       const view = await getBilibiliView(rememberedBvid, signal)
@@ -3437,7 +3635,7 @@ async function findBestBilibiliMvUncached(
     }
   }
   let developerDeclaration: CandidateScore | null = null
-  const developerBvid = useDeveloperDeclarations ? getDeveloperBilibiliMvDeclaration(songKey)?.bvid : undefined
+  const developerBvid = useDeveloperDeclarations ? (getDeveloperBilibiliMvDeclaration(songKey)?.bvid || findDeveloperDeclarationByMeta(song.songTitle, song.artists || [], song.songDuration)?.bvid || '') : undefined
   if (developerBvid && !blacklist.has(developerBvid)) {
     try {
       const view = await getBilibiliView(developerBvid, signal)
@@ -3645,6 +3843,8 @@ async function findBestBilibiliMvUncached(
   // 同首歌下次匹配该查询置顶。声明/记忆视频不记录（它们的查询无关）。
   if (best && bvidSourceQuery.has(best.video.bvid)) {
     recordQueryWin(songKey, bvidSourceQuery.get(best.video.bvid)!, best.video.bvid)
+    // 双写跨平台锚：其它平台（网易云/酷狗/Apple…）播放同歌时直接复用该赢家查询
+    recordQueryWinCrossPlatform(song, bvidSourceQuery.get(best.video.bvid)!, best.video.bvid)
   }
   // 进化引擎特征缓存：结局消费（播放成功/跳过/手动选）时按 bvid 取回特征向量，
   // 喂给在线 SGD（consumeEvolutionOutcome）。重排后的残差已含入 c.score。

@@ -1778,3 +1778,102 @@ export const BILIBILI_MV_DECLARATION_MAP = buildDeclarationMap(BILIBILI_MV_DECLA
 export function getDeveloperBilibiliMvDeclaration(songKey: string): BilibiliMvDeclaration | null {
   return BILIBILI_MV_DECLARATION_MAP.get(songKey) || null
 }
+
+// ===== 全平台元数据回退（与 bilibiliOpEdExtensions.findOpEdExtensionByMeta 同口径）=====
+// 开发者声明的 songKey 绝大多数是 QQ 音乐 id（标注源为 QQ）；网易云/酷狗/Apple/汽水播放
+// 同一首歌时 songKey（platform:id）不命中，此前整层声明注入直接失效——人工核验的精品
+// 正片（HOYO-MiX 系列、官方 MV 等）只有 QQ 用户能享受。补一层「标题+主歌手+时长」
+// 元数据回退，任何平台播放都能命中；与延长库的差异只在条目量级与口径（声明是逐条
+// 人工核验的"唯一正片"，所以每层命中要求更严：主歌手必须一致，不做任意歌手桶兜底）。
+
+function normalizeForDeclarationIndex(value: string): string {
+  return String(value || '')
+    .normalize('NFC')
+    .toLowerCase()
+    .replace(/[（()）\[\]【】《》<>{}"''“”·…!！?？,，.。｡;；:：\-—_／/\|&*^%$#@~`+=～~]/g, '')
+    .replace(/\s+/g, '')
+}
+
+function stripDeclarationVersionSuffix(value: string): string {
+  return String(value || '')
+    .replace(/\s*[（(][^（）()]*[）)]\s*$/, '')
+    .replace(/\s*[-–—]\s*(?:TV|Anime|Full|Short|Movie|剧场版|Sped|Slowed)\s*(?:Size|Ver(?:sion)?|Edit|Up)?.*$/i, '')
+    .replace(/\s*(?:完整版|加长版|加長版|完整版自制|TV版|tv版|アニメサイズ|フルサイズ|电视版|纯音乐|伴奏|Live版|现场版)\s*$/i, '')
+    .trim()
+}
+
+/** normTitle|normArtist → 声明条目（歌名可能多平台重复，按歌手分桶） */
+const DECLARATION_META_INDEX: ReadonlyMap<string, BilibiliMvDeclaration[]> = (() => {
+  const map = new Map<string, BilibiliMvDeclaration[]>()
+  for (const declaration of BILIBILI_MV_DECLARATIONS) {
+    const title = normalizeForDeclarationIndex(stripDeclarationVersionSuffix(declaration.songTitle))
+    if (title.length < 2) continue
+    const artist = declaration.artists[0] ? normalizeForDeclarationIndex(declaration.artists[0]) : ''
+    const key = `${title}|${artist}`
+    const list = map.get(key)
+    if (list) list.push(declaration)
+    else map.set(key, [declaration])
+  }
+  return map
+})()
+
+function isDeclarationDurationClose(a: number | undefined, b: number | undefined): boolean {
+  if (!a || !b) return true // 元数据缺失时不否决（交给评分层）
+  return Math.abs(a - b) <= 10
+}
+
+/** 声明注入的宽时长带：声明是逐条人工核验的"唯一正片"，note 常标注"MV 剪辑口径"
+ *  （音源 146s / MV 177s 这类）；时长差在 35s 内仍注入（宁缺毋滥的上限——更长偏离
+ *  大概率是同名不同版本，走普通搜索更安全）。 */
+function isDeclarationDurationPlausible(a: number | undefined, b: number | undefined): boolean {
+  if (!a || !b) return true
+  return Math.abs(a - b) <= 35
+}
+
+/**
+ * 全平台元数据回退查找：songKey 未命中声明时使用（网易云/酷狗/Apple/汽水…）。
+ * 匹配序：① 歌名+主歌手精确；② 歌名前缀（B 站/平台标题带前缀或库内带全称）。
+ * 时长差 >10s 拒绝命中（宁缺毋滥：错配的声明注入比不注入更糟）；
+ * 主歌手规范化后必须互相包含（同名不同歌手错配防御）。
+ */
+export function findDeveloperDeclarationByMeta(
+  songTitle: string,
+  artists: readonly string[],
+  duration?: number,
+): BilibiliMvDeclaration | null {
+  const title = normalizeForDeclarationIndex(stripDeclarationVersionSuffix(songTitle))
+  if (!title || title.length < 2) return null
+  const firstArtist = artists?.[0] ? normalizeForDeclarationIndex(artists[0]) : ''
+  const artistMatches = (declaration: BilibiliMvDeclaration): boolean => {
+    if (!firstArtist) return false // 声明是人工核验正片，无歌手证据时不命中
+    return declaration.artists.some((a) => {
+      const norm = normalizeForDeclarationIndex(a)
+      return norm && (norm.includes(firstArtist) || firstArtist.includes(norm))
+    })
+  }
+  const pick = (candidates: BilibiliMvDeclaration[]): BilibiliMvDeclaration | null => {
+    if (!candidates.length) return null
+    if (!duration) return candidates[0]
+    // 两级时长带：≤10s 优先（版本精确）；10-35s 是 MV 剪辑口径带，仍注入但让位给精确档；
+    // 全部 >35s 拒绝（大概率同名不同版本，走普通搜索更安全）。
+    const exact = candidates.filter((d) => isDeclarationDurationClose(d.duration, duration))
+    const band = exact.length ? exact : candidates.filter((d) => isDeclarationDurationPlausible(d.duration, duration))
+    if (!band.length) return null
+    // 同歌多声明时按「时长最接近」择优（声明库无播放数字段；时长接近度即版本正确性）
+    return band.reduce((a, b) => (Math.abs((b.duration || 0) - duration) < Math.abs((a.duration || 0) - duration) ? b : a))
+  }
+  // 1) 歌名 + 主歌手
+  const exact = DECLARATION_META_INDEX.get(`${title}|${firstArtist}`)
+  if (exact?.length) return pick(exact.filter(artistMatches)) || (exact.length === 1 ? pick(exact) : null)
+  // 2) 前缀匹配（剥后缀后仍长 ≥4）：要求歌手一致
+  if (title.length >= 4) {
+    const prefixHits: BilibiliMvDeclaration[] = []
+    for (const [key, bucket] of DECLARATION_META_INDEX.entries()) {
+      const keyTitle = key.split('|')[0]
+      if (keyTitle.startsWith(title) || title.startsWith(keyTitle)) prefixHits.push(...bucket)
+    }
+    const filtered = prefixHits.filter(artistMatches)
+    if (filtered.length) return pick(filtered)
+  }
+  return null
+}

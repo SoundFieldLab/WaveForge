@@ -60,8 +60,9 @@ import {
   pickBestPage,
   flattenLyricLinesForMatch,
   songKeyOf,
+  songAnchorKeyOf,
   clearBilibiliOverride,
-  getBilibiliOverride,
+  getBilibiliOverrideCrossPlatform,
   setSessionManualPick,
   getSessionManualPick,
   clearSessionManualPick,
@@ -933,8 +934,11 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         } catch (error) {
           if (isStaleLoad()) return
           // 手动记住的视频若已无法播放（失效/受限），清除记忆避免每次切到这首歌都卡死
-          if (getBilibiliOverride(song.songKey) === candidate.video.bvid) {
+          // （跨平台锚命中时一并清锚，避免残留）
+          if (getBilibiliOverrideCrossPlatform(song.songKey, { songTitle: song.songTitle, artists: song.songArtists }) === candidate.video.bvid) {
             clearBilibiliOverride(song.songKey)
+            const anchor = songAnchorKeyOf({ songTitle: song.songTitle, artists: song.songArtists })
+            if (anchor) clearBilibiliOverride(anchor)
           }
           if (getSessionManualPick(song.songKey) === candidate.video.bvid) clearSessionManualPick()
           // 自动回退：确凿失败（失效/受限）时尝试下一候选
@@ -1157,6 +1161,11 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     const offCtx = offscreen.getContext('2d', { willReadFrequently: true, alpha: false })
     if (!offCtx) return // 离屏上下文不可得（极罕见）：放弃氛围
     let extMinX = 0, extMinY = 0, extMaxX = 1, extMaxY = 1
+    // 首帧/黑帧保护：视频刚开始解码时画面可能是全黑（poster→首帧间隙）或只有中心
+    // 一小块亮区，包围盒抖动会让挖洞层闪现"黑色圆环"（安卓 WebView 视频首帧慢，
+    // 实测明显）。前 N 个采样周期（150ms×12 ≈ 2s）不做挖洞，让光晕整层淡入。
+    let sampleCount = 0
+    const WARMUP_SAMPLES = 12
     const draw = () => {
       timer = window.setTimeout(draw, AMBIENT_FRAME_MS)
       // 兜底捕获视频宽高比：loadedmetadata 事件偶发不可靠，绘制循环里持续检查
@@ -1222,6 +1231,12 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         ctx.globalCompositeOperation = 'destination-out'
         ctx.filter = 'blur(2px)' // 轻柔内缘（缓冲坐标，≈ 屏幕 24px）
         ctx.fillStyle = '#000'
+        sampleCount += 1
+        if (sampleCount <= WARMUP_SAMPLES) {
+          // 预热期：只画光晕、不挖洞（整层模糊光晕垫在视频后面，视频一出画即覆盖）
+          ctx.restore()
+          drawCount += 1
+        } else {
         const cw = containerSize.w || canvas.clientWidth
         const ch = containerSize.h || canvas.clientHeight
         const bufScale = canvas.width / Math.max(1, cw)
@@ -1240,6 +1255,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
         ctx.fillRect(Math.round(rx), Math.round(ry), Math.round(rw), Math.round(rh))
         ctx.restore()
         drawCount += 1
+        }
       } catch {
         // 读像素被禁（跨域/CORS 未就绪）：退回整帧采样，氛围不失效
         drawFails += 1
@@ -1322,7 +1338,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
       videoTitle: target.videoTitle,
       pic: target.pic,
       author: target.author,
-    })
+    }, { songTitle, artists: songArtists })
     setManualPlaybackMarkPrompt(false)
     manualMarkTargetRef.current = null
     showToast('已标记为当前歌曲的 MV（可到设置→高级→看歌本地标记库 管理）')
@@ -1350,7 +1366,7 @@ const BilibiliMvPlayer = forwardRef<BilibiliMvPlayerHandle, BilibiliMvPlayerProp
     const chain = fallbackChainRef.current
     const next = chain.find((c) => !failedBvidsRef.current.has(c.video.bvid) && c.video.bvid !== current.video.bvid)
     if (next) {
-      addBilibiliBlacklist(songKey, current.video.bvid)
+      addBilibiliBlacklist(songKey, current.video.bvid, { songTitle, artists: songArtists })
       void loadVideo(next, chain.indexOf(next))
     } else {
       // 没有下一个评分视频：留在当前视频，弹提示

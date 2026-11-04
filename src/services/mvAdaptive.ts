@@ -258,6 +258,35 @@ export function getQueryWin(songKey: string): { query: string; bvid: string } | 
   return { query: entry.query, bvid: entry.bvid }
 }
 
+// ===== 跨平台查询胜出（2026-11 全平台对齐）=====
+// queryWins 以 songKey（platform:id）为键：QQ 上匹配成功学到的最优查询，网易云播放
+// 同一首歌时对不上（platform:id 不同），要重新从头跑全部查询。补一层「歌曲锚」
+// （标题+主歌手，normalizeAdaptive 规范化，platform 无关）：记录时双写，查询时 songKey
+// 精确优先、锚兜底——同首歌在任何平台的首次匹配都直接复用其它平台学到的赢家查询。
+
+const QUERY_WIN_ANCHOR_PREFIX = 'a:'
+
+/** 跨平台锚键（本侧生成，避免与 bilibiliApi 的 songAnchorOf 循环依赖）：
+ *  标题+主歌手，normalizeAdaptive 级规范化。 */
+function queryWinAnchorKey(songTitle: string, firstArtist: string): string {
+  const title = normalizeAdaptive(String(songTitle || ''))
+  const artist = normalizeAdaptive(String(firstArtist || ''))
+  if (!title) return ''
+  return artist ? `${QUERY_WIN_ANCHOR_PREFIX}${title}~${artist}` : `${QUERY_WIN_ANCHOR_PREFIX}${title}`
+}
+
+export function recordQueryWinCrossPlatform(song: { songTitle: string; artists?: readonly string[] }, query: string, bvid: string): void {
+  const anchor = queryWinAnchorKey(song.songTitle, song.artists?.[0] || '')
+  if (anchor) recordQueryWin(anchor, query, bvid)
+}
+
+export function getQueryWinCrossPlatform(songKey: string, song: { songTitle: string; artists?: readonly string[] }): { query: string; bvid: string } | null {
+  const exact = getQueryWin(songKey)
+  if (exact) return exact
+  const anchor = queryWinAnchorKey(song.songTitle, song.artists?.[0] || '')
+  return anchor ? getQueryWin(anchor) : null
+}
+
 // ==================== 3) 时效先验 ====================
 
 /**
