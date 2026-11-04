@@ -2083,3 +2083,14 @@ html.mobile-mode ::-webkit-scrollbar {
 .wf-m-suggest-item:active { background: rgba(255,255,255,0.08); }
 .wf-m-suggest-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wf-m-suggest-sub { font-size: 11px; color: var(--wf-text-3, rgba(255,255,255,0.45)); flex-shrink: 0; }
+
+/* 更多面板内嵌相似歌曲列表（紧凑行 + 限高滚动） */
+.wf-m-more-similar {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+.wf-m-more-similar .wf-m-song-mini { position: relative; }

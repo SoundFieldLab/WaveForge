@@ -19,6 +19,7 @@ import {
   mobileToast,
 } from './ui'
 import { useMobileNav } from './nav'
+import type { Song } from '../services/musicApi'
 
 export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const player = useMobilePlayer()
@@ -55,6 +56,28 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
   // ── 音效场景状态 ──
   const [effectScene, setEffectScene] = useState<string>(() => getMobileEffectsScene())
   const mobileScenes = useMemo(() => getMobileScenes(), [])
+
+  // ── 相似歌曲（getSimilarSongs 同 PC 服务）：面板内点播 ──
+  const [similarOpen, setSimilarOpen] = useState(false)
+  const [similarLoading, setSimilarLoading] = useState(false)
+  const [similarSongs, setSimilarSongs] = useState<Song[]>([])
+  const loadSimilar = useCallback(async () => {
+    if (!song || similarLoading) return
+    setSimilarLoading(true)
+    try {
+      const { getSimilarSongs } = await import('../services/musicApi')
+      const raw = await getSimilarSongs(String(song.platform === 'qq' ? (song.mid || song.id) : song.id), (song.platform || 'netease') as 'netease' | 'qq')
+      // 上游返回 { songs } 或裸数组（两代接口形状都兼容）
+      const list: Song[] = Array.isArray(raw) ? raw : (raw?.songs || raw?.songlist || [])
+      setSimilarSongs(list.slice(0, 12))
+      setSimilarOpen(list.length > 0)
+      if (!list.length) mobileToast('没有找到相似歌曲', 'info')
+    } catch {
+      mobileToast('相似歌曲获取失败', 'error')
+    } finally {
+      setSimilarLoading(false)
+    }
+  }, [song, similarLoading])
 
   // ── 倍速 ──
   const PLAYBACK_SPEEDS = [0.75, 1, 1.25, 1.5, 2]
@@ -533,7 +556,7 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
                 )}
               </div>
             </div>
-            {/* 评论 / 歌曲详情 */}
+            {/* 评论 / 歌曲详情 / 相似歌曲 */}
             <div className="wf-m-more-group wf-m-more-row">
               <button type="button" className="wf-m-btn wf-m-btn-primary" onClick={() => { setMoreOpen(false); setCommentsOpen(true) }}>
                 查看热门评论
@@ -542,6 +565,32 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
                 歌曲详情
               </button>
             </div>
+            <div className="wf-m-more-group wf-m-more-row">
+              <button type="button" className="wf-m-btn wf-m-btn-ghost" onClick={() => { setMoreOpen(false); void loadSimilar() }} disabled={similarLoading}>
+                {similarLoading ? '匹配中…' : '找相似歌曲'}
+              </button>
+            </div>
+            {similarOpen && similarSongs.length > 0 && (
+              <div className="wf-m-more-group">
+                <div className="wf-m-more-label">相似歌曲（点播）</div>
+                <div className="wf-m-more-similar">
+                  {similarSongs.map((s, i) => (
+                    <button
+                      key={`${s.platform || ''}-${s.id ?? s.mid}-${i}`}
+                      type="button"
+                      className="wf-m-song-mini"
+                      onClick={() => player.playSongs(similarSongs, i, `相似：${song.name}`)}
+                    >
+                      <Cover song={s} size={64} rounded={6} />
+                      <span className="wf-m-song-meta">
+                        <span className="wf-m-song-name">{s.name}</span>
+                        <span className="wf-m-song-sub">{songArtists(s)}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
