@@ -203,6 +203,9 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
     if (e.touches.length === 1) swipeRef.current = { x: e.touches[0].clientX, fired: false }
   }, [])
   const onCoverTouchMove = useCallback((e: React.TouchEvent) => {
+    // 歌词视图禁用横滑切歌：歌词滚动时手指的横向抖动会误触切歌（实测痛点），
+    // 滚动优先。封面视图保持横滑切歌。
+    if (view !== 'cover') return
     const s = swipeRef.current
     if (!s || s.fired || e.touches.length !== 1) return
     const dx = e.touches[0].clientX - s.x
@@ -211,7 +214,7 @@ export default memo(function PlayerSheet({ open, onClose }: { open: boolean; onC
       if (dx < 0) player.next()
       else player.prev()
     }
-  }, [player])
+  }, [player, view])
   const onCoverTouchEnd = useCallback(() => { swipeRef.current = null }, [])
 
   // 歌词行跳转（稳定身份：LyricsList 按 activeIndex memo，不随进度 tick 重挂）
