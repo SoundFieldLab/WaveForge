@@ -1048,13 +1048,31 @@ function setupScopeObserver(): void {
     }
     if (focusedRemoved) {
       // 从聚焦轨迹里找「同域内仍存活且可见」的上一个元素并恢复（弹窗里再弹一层又关闭的场景），
-      // 找不到才退回原来的「只隐藏焦点环」，此时下一次按键会落到域内第一个候选。
+      // 找不到才退回「视口居中最近候选」——旧兜底是 focusFirst()（DOM 第一个 = 页面
+      // 左上角），关掉深层弹窗后焦点跳到页首，遥控器用户要重新按一长串方向键回来。
       const scope = currentScope()
       const restored = focusTrail.find(el => (
         el.isConnected && isRendered(el) && (scope instanceof HTMLElement ? scope.contains(el) : true)
       ))
       if (restored) setTvFocus(restored)
-      else updateRing()
+      else {
+        const list = candidates().filter(isRendered)
+        if (list.length) {
+          const viewportMidY = window.innerHeight / 2
+          let best: HTMLElement | null = null
+          let bestDist = Infinity
+          for (const el of list) {
+            const r = el.getBoundingClientRect()
+            if (r.bottom < 0 || r.top > window.innerHeight) continue
+            const dist = Math.abs(r.top + r.height / 2 - viewportMidY)
+            if (dist < bestDist) { bestDist = dist; best = el }
+          }
+          if (best) setTvFocus(best)
+          else setTvFocus(list[0])
+        } else {
+          updateRing()
+        }
+      }
     }
     if (changed) {
       // 新面板打开：若当前焦点不在新域内，收拢到新域

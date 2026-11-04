@@ -196,3 +196,18 @@ html.tv-mode ::-webkit-scrollbar-thumb {
 html.tv-mode ::-webkit-scrollbar-track {
   background: rgba(255, 255, 255, 0.06);
 }
+
+/* ── 10 尺 UI 歌词可读性（TV 大屏远距离观看）──
+   翻译行 0.68em/0.72 透明度在 2-3m 观距的小面板上难以辨认：
+   TV 上放大翻译/罗马音字号并提升对比度（data-testid 定位和声翻译，
+   通用翻译行走 .wf-lyric-trans 或行内样式——这里用 data-testid 与
+   结构类名兜底，不动桌面）。 */
+html.tv-mode [data-testid='background-vocal'] { font-size: 0.78em !important; }
+html.tv-mode [data-testid='background-vocal'] .block[style*='0.92em'] {
+  font-size: 1em !important;
+  opacity: 0.88 !important;
+}
+html.tv-mode [data-testid='background-vocal'] .block[style*='0.86em'] {
+  font-size: 0.95em !important;
+  opacity: 0.78 !important;
+}
