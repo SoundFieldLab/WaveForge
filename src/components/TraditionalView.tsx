@@ -763,6 +763,9 @@ function TraditionalView({
   const tvMode = useTvMode()
   const remoteCursorMode = useRemoteCursorMode()
   const topBarTvActive = tvMode && !remoteCursorMode
+  // 触屏端（pc-touch）：mouseLeave 后顶部模式入口永久消失（悬停定时器不触发）。
+  // 与工具条同口径 —— 触屏常显。
+  const topBarTouchActive = typeof document !== 'undefined' && document.documentElement.classList.contains('pc-touch')
   const pillTvAdjust = tvMode && !remoteCursorMode
   // 常驻小元素（模式下拉 chevron）的无限浮动：TV 非增强档静态化（JS 动画，tv.css 杀不掉）
   const tvChevronFloat = !tvMode || isPerfModeEnhanced()
@@ -789,6 +792,9 @@ function TraditionalView({
     toolsHideTimerRef.current = null
   }, [])
   const scheduleToolsHide = useCallback(() => {
+    // 触屏端（pc-touch）没有 mouseleave：定时收起后用户无法再唤出（悬停定时器
+    // 永远不会触发）。触屏直接不自动收起，由用户手动点收起按钮关闭。
+    if (typeof document !== 'undefined' && document.documentElement.classList.contains('pc-touch')) return
     clearToolsHideTimer()
     toolsHideTimerRef.current = window.setTimeout(() => setToolsOpen(false), 5000)
   }, [clearToolsHideTimer])
@@ -2533,7 +2539,7 @@ function TraditionalView({
         onClick={() => { if (!showModePanel) setShowModePanel(true) }}
       >
         <AnimatePresence>
-          {(topBarTvActive || topBarActive) && !showModePanel && (
+          {(topBarTvActive || topBarActive || topBarTouchActive) && !showModePanel && (
             <motion.button
               aria-label="打开模式选择"
               initial={{ opacity: 0, y: -10 }}

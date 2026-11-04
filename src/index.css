@@ -1792,6 +1792,14 @@ html.pc-touch body {
    关键操作按钮常显（透明度直接给到），信息层级保留（次要元素半透明但可见可点）。 */
 html.pc-touch [class*='group-hover\:opacity-100'].opacity-0 { opacity: 0.9; }
 html.pc-touch .hover\:opacity-100.opacity-0 { opacity: 0.85; }
+/* display 类切换的 hover 揭示（序号↔播放图标、封面 hover 播放遮罩等）：
+   触屏无 hover，display:none 的目标态永远不出现 → 点击卡片无反应（与 TV
+   同一症状）。触屏端直接常显目标态（点击行为本身由卡片 onClick 承担）。 */
+html.pc-touch [class*='group-hover\:flex'] { display: flex !important; }
+html.pc-touch [class*='group-hover\:block'] { display: block !important; }
+/* scale 类 hover 在触屏粘滞（无 mouseleave），一律禁用由 :active 反馈 */
+html.pc-touch [class*='group-hover\:scale-'],
+html.pc-touch [class*='hover\:scale-'] { transform: none !important; }
 /* 窗口标题栏（拖拽区 + 最小化/最大化/关闭）是桌面窗口专属：触摸端/电视一律隐藏。
    React 侧 TitleBar 已按 isPcTabletActive()/tvMode 返回 null，这里做样式级兜底
    （防止启动早期类判定时序导致按钮闪现）。 */

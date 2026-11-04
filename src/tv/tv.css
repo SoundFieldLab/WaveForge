@@ -168,6 +168,16 @@ html.tv-mode.wf-perf-efficiency * {
   animation-iteration-count: 1 !important;
 }
 
+/* 效能档豁免：加载指示器（Loader2/animate-spin/wf-m-spin）必须继续转——
+   全局 0.01s 冻结会让 spinner 停成一帧，用户以为应用卡死（实机观感）。
+   duration 恢复 1s 且 iteration 恢复 infinite，性能开销可忽略（单元素）。 */
+html.tv-mode.wf-perf-efficiency .animate-spin,
+html.tv-mode.wf-perf-efficiency [class*='animate-spin'],
+html.tv-mode.wf-perf-efficiency .wf-m-spinner {
+  animation-duration: 1s !important;
+  animation-iteration-count: infinite !important;
+}
+
 /* 桌面窗口按钮条（最小化/最大化/关闭）在 TV 上无意义，隐藏。
    TitleBar 组件本身也会在 tv-mode 下返回 null，这里是双保险。 */
 html.tv-mode .tv-hide-desktop-chrome {
