@@ -2305,9 +2305,34 @@ function App() {
     return false
   }, [])
 
-  // PC 版布局（手机/平板触屏）的 BACK：播放页/个人中心逐级回退，其余交给原生（退出）。
-  // 移动版走 MobileApp 的 mobileBack 栈；桌面树此前只有 TV 的 useTvBack（仅 tv-mode 注册），
-  // pc-touch 下按返回没有任何处理器 → 安卓直接退到桌面（用户实测）。
+  // PC 版布局（手机/平板触屏）的 BACK：弹层逐级回退（后开先关），主界面交给原生。
+  // 此前只覆盖播放页/个人中心，任何其它弹层（搜索/设置/歌单/歌手/专辑/评论/歌单面板/
+  // 混音台/歌曲详情）开着按 BACK 都会直接退出应用（原生默认 = 退到桌面）——半修状态。
+  // 用 ref 快照所有可关弹层状态，BACK 时按优先级关最上层。
+  const pcBackLayersRef = useRef({
+    isPlaybackPage,
+    showProfile,
+    showSearch: false,
+    showSettings: false,
+    showPlaylist: false,
+    showArtistDetail: false,
+    showAlbumDetail: false,
+    showCommentModal: false,
+    showSongDetail: false,
+    showMixingStudio: false,
+  })
+  pcBackLayersRef.current = {
+    isPlaybackPage,
+    showProfile,
+    showSearch,
+    showSettings,
+    showPlaylist,
+    showArtistDetail,
+    showAlbumDetail,
+    showCommentModal,
+    showSongDetail,
+    showMixingStudio,
+  }
   useEffect(() => {
     if (!isPcTabletActive()) return
     const consume = () => {
@@ -2315,7 +2340,16 @@ function App() {
     }
     const onKey = (e: KeyboardEvent) => {
       if (e.keyCode !== 4) return
-      const st = backStateRef.current
+      const st = pcBackLayersRef.current
+      // 优先级：后开的弹层先关（与 z-index 大致同序）
+      if (st.showCommentModal) { e.preventDefault(); e.stopPropagation(); setShowCommentModal(false); consume(); return }
+      if (st.showSongDetail) { e.preventDefault(); e.stopPropagation(); setShowSongDetail(false); consume(); return }
+      if (st.showArtistDetail) { e.preventDefault(); e.stopPropagation(); setShowArtistDetail(false); consume(); return }
+      if (st.showAlbumDetail) { e.preventDefault(); e.stopPropagation(); setShowAlbumDetail(false); consume(); return }
+      if (st.showPlaylist) { e.preventDefault(); e.stopPropagation(); setShowPlaylist(false); consume(); return }
+      if (st.showSearch) { e.preventDefault(); e.stopPropagation(); setShowSearch(false); consume(); return }
+      if (st.showMixingStudio) { e.preventDefault(); e.stopPropagation(); setShowMixingStudio(false); consume(); return }
+      if (st.showSettings) { e.preventDefault(); e.stopPropagation(); setShowSettings(false); consume(); return }
       if (st.showProfile) {
         e.preventDefault(); e.stopPropagation()
         setShowProfile(false)

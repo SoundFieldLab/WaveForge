@@ -228,6 +228,96 @@ export default function PlaybackRadialMenu({
     document.addEventListener('mouseup', handleMouseUp, true)
     document.addEventListener('contextmenu', handleContextMenu, true)
     window.addEventListener('blur', resetGesture)
+    // ── 触屏长按手势（pc-touch 手机/平板）：与右键手势同一状态机 ──
+    // Android WebView 长按会补发 contextmenu（ handled by handleContextMenu 的
+    // 抑制窗口），这里 touchstart/touchmove/touchend 直接驱动同一组 ref 状态：
+    // 长按 ≥LONG_PRESS_MS 出轮盘 → 手指滑动选向 → 松手执行。选向阈值在触屏上
+    // 放宽（手指抖动大）。
+    const TOUCH_MOVE_THRESHOLD_SCALE = 1.6
+    const lastTouchRef = { current: null as { x: number; y: number } | null }
+    const handleTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 1) return
+      const touch = event.touches[0]
+      if (!isPlaybackPageTarget(event.target)) return
+      if (event.target instanceof Element && event.target.closest('[data-playback-radial-block="true"]')) return
+      resetGesture()
+      trackingRef.current = true
+      originRef.current = { x: touch.clientX, y: touch.clientY }
+      lastTouchRef.current = { x: touch.clientX, y: touch.clientY }
+      longPressTimerRef.current = window.setTimeout(() => {
+        if (!trackingRef.current) return
+        radialVisibleRef.current = true
+        setRadialCenter({ ...originRef.current })
+        // 触觉反馈（原生桥可用时）：轮盘弹出确认
+        try { (window as any).WaveForgeNative?.vibrate?.(20) } catch { /* ignore */ }
+        longPressTimerRef.current = null
+      }, LONG_PRESS_MS)
+    }
+    const handleTouchMove = (event: TouchEvent) => {
+      if (!trackingRef.current) return
+      const touch = event.touches[0]
+      if (!touch) return
+      // 长按计时期间手指滑动超限 = 用户在滚动页面，取消手势（不阻止滚动）
+      if (!radialVisibleRef.current) {
+        const moved = Math.hypot(touch.clientX - originRef.current.x, touch.clientY - originRef.current.y)
+        if (moved > 14 * TOUCH_MOVE_THRESHOLD_SCALE) resetGesture()
+        return
+      }
+      // 轮盘已显示：锁死页面滚动/选择，驱动选向
+      event.preventDefault()
+      lastTouchRef.current = { x: touch.clientX, y: touch.clientY }
+      const dx = touch.clientX - originRef.current.x
+      const dy = touch.clientY - originRef.current.y
+      if (Math.hypot(dx, dy) < DIRECTION_THRESHOLD * TOUCH_MOVE_THRESHOLD_SCALE) {
+        if (selectedIndexRef.current !== null) {
+          selectedIndexRef.current = null
+          setSelectedIndex(null)
+        }
+        return
+      }
+      const angle = Math.atan2(dy, dx) + Math.PI / 2
+      const normalized = (angle + Math.PI * 2) % (Math.PI * 2)
+      const index = Math.round(normalized / (Math.PI * 2 / actions.length)) % actions.length
+      if (index !== selectedIndexRef.current) {
+        selectedIndexRef.current = index
+        setSelectedIndex(index)
+      }
+    }
+    const handleTouchEnd = (event: TouchEvent) => {
+      if (!trackingRef.current) return
+      event.preventDefault()
+      // 与 mouseup 同一套执行/回退逻辑：轮盘可见执行选中项，否则弹自绘右键菜单
+      contextMenuSuppressUntilRef.current = Date.now() + 600
+      if (radialVisibleRef.current) {
+        const action = selectedIndexRef.current == null ? undefined : actions[selectedIndexRef.current]
+        const currentSong = songRef.current
+        if (action === 'favorite') actionsRef.current.onToggleFavorite(currentSong, likedRef.current)
+        else if (action === 'play-next') actionsRef.current.onPlayNext(currentSong)
+        else if (action === 'comments' && getPlatformCapabilities(currentSong.platform || 'netease').comments) actionsRef.current.onViewComments(currentSong)
+        else if (action === 'album') actionsRef.current.onViewAlbum(currentSong)
+        else if (action === 'artist') actionsRef.current.onViewArtist(currentSong)
+        else if (action === 'copy-info') actionsRef.current.onCopyInfo(currentSong)
+        else if (action === 'details') window.dispatchEvent(new CustomEvent('waveforge:show-song-detail', { detail: currentSong }))
+        else if (action === 'similar') window.dispatchEvent(new CustomEvent(
+          (currentSong.platform || 'netease') === 'kugou' ? 'waveforge:show-similar-songs' : 'waveforge:play-similar-song',
+          { detail: currentSong },
+        ))
+        else if (action === 'add-to-playlist') {
+          contextMenuOpenRef.current?.()
+          setShowPlaylistPicker(true)
+        }
+        resetGesture()
+        return
+      }
+      clearLongPressTimer()
+      trackingRef.current = false
+      setContextMenu({ show: true, x: originRef.current.x, y: originRef.current.y })
+      contextMenuOpenRef.current?.()
+    }
+    document.addEventListener('touchstart', handleTouchStart, { capture: true, passive: true })
+    document.addEventListener('touchmove', handleTouchMove, { capture: true, passive: false })
+    document.addEventListener('touchend', handleTouchEnd, { capture: true, passive: false })
+    document.addEventListener('touchcancel', resetGesture, { capture: true })
     return () => {
       resetGesture()
       document.removeEventListener('mousedown', handleMouseDown, true)
@@ -235,6 +325,10 @@ export default function PlaybackRadialMenu({
       document.removeEventListener('mouseup', handleMouseUp, true)
       document.removeEventListener('contextmenu', handleContextMenu, true)
       window.removeEventListener('blur', resetGesture)
+      document.removeEventListener('touchstart', handleTouchStart, true)
+      document.removeEventListener('touchmove', handleTouchMove, true)
+      document.removeEventListener('touchend', handleTouchEnd, true)
+      document.removeEventListener('touchcancel', resetGesture, true)
     }
   }, [actions.length, actions.join('|')])
 
